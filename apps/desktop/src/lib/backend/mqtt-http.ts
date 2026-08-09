@@ -9,8 +9,16 @@ export async function mqttGetBrokerInfo(_connectionId: string) {
   mqttWebNotAvailable("mqttGetBrokerInfo");
 }
 
-export async function mqttSubscribe(_connectionId: string, _topic: string, _qos?: string | null) {
+export async function mqttSubscribe(_connectionId: string, _topic: string, _qos?: string | null, _noLocal?: boolean) {
   mqttWebNotAvailable("mqttSubscribe");
+}
+
+export async function mqttSaveTopicConfig(_connectionId: string, _topic: string, _qos: string, _noLocal: boolean, _enabled = false) {
+  mqttWebNotAvailable("mqttSaveTopicConfig");
+}
+
+export async function mqttDeleteTopicConfig(_connectionId: string, _topic: string) {
+  mqttWebNotAvailable("mqttDeleteTopicConfig");
 }
 
 export async function mqttUnsubscribe(_connectionId: string, _topic: string) {
@@ -23,6 +31,10 @@ export async function mqttPublish(_connectionId: string, _request: unknown) {
 
 export async function mqttListTopics(_connectionId: string) {
   mqttWebNotAvailable("mqttListTopics");
+}
+
+export async function mqttListSavedTopicConfigs(_connectionId: string) {
+  mqttWebNotAvailable("mqttListSavedTopicConfigs");
 }
 
 export async function mqttGetTopicTree(_connectionId: string) {

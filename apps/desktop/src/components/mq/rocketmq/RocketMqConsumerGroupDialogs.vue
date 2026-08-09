@@ -1,12 +1,22 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
-import type { ConsumerInfo, RocketMqConsumerGroupConfig, SubscriptionInfo, TopicRef } from "@/types/mq";
+import type { ConsumerInfo, PartitionBacklog, RocketMqConsumerGroupConfig, SubscriptionInfo, TopicRef } from "@/types/mq";
 import { mqAlterConsumerGroupConfig, mqGetBacklog, mqGetConsumerGroupConfig, mqListConsumers } from "@/lib/backend/api";
 import { formatError } from "@/lib/backend/errorUtils";
 import { resolveRocketMqConsumerGroupMessageModel, resolveRocketMqConsumerGroupType } from "@/lib/mq/rocketmqConsumerGroupTypes";
+import { useMqMutationGuard } from "@/composables/useMqMutationGuard";
 
 export type RocketMqConsumerGroupDialogKind = "detail" | "config";
+
+interface TopicConsumeDetail {
+  topic: string;
+  /** Undefined when backlog probe failed — do not render as healthy zero. */
+  delay?: number;
+  lastTimestamp?: number;
+  partitions: PartitionBacklog[];
+  error?: string;
+}
 
 interface Props {
   connectionId: string;
@@ -24,11 +34,15 @@ const emit = defineEmits<{
 }>();
 
 const { t } = useI18n();
+const { confirmMqWrite } = useMqMutationGuard(() => props.connectionId);
 
 const loading = ref(false);
 const dialogError = ref<string>();
 const terminals = ref<ConsumerInfo[]>([]);
-const topicBacklogs = ref<Array<{ topic: string; backlog: number }>>([]);
+const topicConsumeDetails = ref<TopicConsumeDetail[]>([]);
+/** Drops stale detail/config responses when enrich reloads the open dialog. */
+let detailLoadSeq = 0;
+let configLoadSeq = 0;
 const configForm = ref<RocketMqConsumerGroupConfig>({
   groupName: "",
   consumeEnable: true,
@@ -67,35 +81,75 @@ function closeDialog() {
   emit("close");
 }
 
+/** Format consume timestamp; treat missing/zero as unavailable (avoid epoch display). */
+function formatConsumeTimestamp(ms?: number | null): string {
+  if (ms == null || ms <= 0) return "-";
+  const date = new Date(ms);
+  return Number.isNaN(date.getTime()) ? "-" : date.toLocaleString();
+}
+
+function partitionRowKey(topic: string, partition: PartitionBacklog, index: number): string {
+  return `${topic}:${partition.brokerName ?? ""}:${partition.partition}:${index}`;
+}
+
 async function loadDetail() {
   if (!props.group || !props.tenant || !props.namespace) return;
+  const seq = ++detailLoadSeq;
   loading.value = true;
   dialogError.value = undefined;
   terminals.value = [];
-  topicBacklogs.value = [];
+  topicConsumeDetails.value = [];
   try {
     const topicRef = buildTopicRef("");
     if (topicRef) {
-      terminals.value = await mqListConsumers(props.connectionId, topicRef, props.group.name);
+      const online = await mqListConsumers(props.connectionId, topicRef, props.group.name);
+      if (seq !== detailLoadSeq) return;
+      terminals.value = online;
     }
     const topics = subscribedTopics.value;
-    const backlogRows = await Promise.all(
+    const detailRows = await Promise.all(
       topics.map(async (topic) => {
         const ref = buildTopicRef(topic);
-        if (!ref) return { topic, backlog: 0 };
+        if (!ref) {
+          return { topic, partitions: [] as PartitionBacklog[], error: t("mqSubscriptions.invalidTopicScope") };
+        }
         try {
           const stats = await mqGetBacklog(props.connectionId, ref, props.group!.name);
-          return { topic, backlog: stats.msgBacklog };
-        } catch {
-          return { topic, backlog: 0 };
+          const partitions = stats.partitions ?? [];
+          // Topic-level last consume time = max of queue lastTimestamp values (> 0).
+          const lastTimestamp = partitions
+            .map((p) => p.lastTimestamp ?? 0)
+            .filter((ts) => ts > 0)
+            .reduce<number | undefined>((max, ts) => (max == null || ts > max ? ts : max), undefined);
+          return {
+            topic,
+            delay: stats.msgBacklog,
+            lastTimestamp,
+            partitions,
+          };
+        } catch (e: unknown) {
+          // Keep offsets empty; omit delay so the row does not look like lag=0.
+          return {
+            topic,
+            partitions: [] as PartitionBacklog[],
+            error: formatError(e) || String(e),
+          };
         }
       }),
     );
-    topicBacklogs.value = backlogRows;
+    if (seq !== detailLoadSeq) return;
+    topicConsumeDetails.value = detailRows;
+    const backlogFailures = detailRows.filter((row) => row.error);
+    if (backlogFailures.length) {
+      dialogError.value = t("mqSubscriptions.backlogPartialFailed", {
+        count: backlogFailures.length,
+        error: backlogFailures[0]?.error ?? "",
+      });
+    }
   } catch (e: unknown) {
-    dialogError.value = formatError(e);
+    if (seq === detailLoadSeq) dialogError.value = formatError(e);
   } finally {
-    loading.value = false;
+    if (seq === detailLoadSeq) loading.value = false;
   }
 }
 
@@ -115,11 +169,13 @@ function resetConfigForm(groupName: string) {
 
 async function loadConfig() {
   if (!props.group) return;
+  const seq = ++configLoadSeq;
   resetConfigForm(props.group.name);
   loading.value = true;
   dialogError.value = undefined;
   try {
     const config = await mqGetConsumerGroupConfig(props.connectionId, props.group.name);
+    if (seq !== configLoadSeq) return;
     configForm.value = {
       groupName: config.groupName || props.group.name,
       consumeEnable: config.consumeEnable ?? true,
@@ -132,14 +188,15 @@ async function loadConfig() {
       whichBrokerWhenConsumeSlowly: config.whichBrokerWhenConsumeSlowly ?? 0,
     };
   } catch (e: unknown) {
-    dialogError.value = formatError(e);
+    if (seq === configLoadSeq) dialogError.value = formatError(e);
   } finally {
-    loading.value = false;
+    if (seq === configLoadSeq) loading.value = false;
   }
 }
 
 async function saveConfig() {
   if (!props.group || props.readOnly) return;
+  if (!(await confirmMqWrite(t("mqSubscriptions.editConfig")))) return;
   loading.value = true;
   dialogError.value = undefined;
   try {
@@ -163,11 +220,20 @@ async function saveConfig() {
 }
 
 watch(
-  () => [props.dialog, props.group?.name],
+  // Detail reloads when enrich fills topics; config must not reset the form on topics-only updates.
+  () => [props.dialog, props.group?.name, (props.group?.topics ?? []).join("\0")] as const,
   () => {
     if (props.dialog === "detail") {
       void loadDetail();
-    } else if (props.dialog === "config") {
+    }
+  },
+  { immediate: true },
+);
+
+watch(
+  () => [props.dialog, props.group?.name] as const,
+  () => {
+    if (props.dialog === "config") {
       void loadConfig();
     }
   },
@@ -193,7 +259,7 @@ watch(
               <span>{{ t("mqSubscriptions.type") }}</span
               ><span>{{ groupTypeLabel }}</span> <span>{{ t("mqSubscriptions.mode") }}</span
               ><span>{{ groupModeLabel }}</span> <span>{{ t("mqSubscriptions.consumers") }}</span
-              ><span>{{ group.onlineMembers ?? 0 }}</span>
+              ><span>{{ group.onlineMembers == null ? "-" : group.onlineMembers }}</span>
               <span>{{ t("mqSubscriptions.subscribedTopics") }}</span>
               <span>{{ subscribedTopics.length ? subscribedTopics.join(", ") : "-" }}</span>
             </div>
@@ -226,21 +292,55 @@ watch(
 
           <section class="detail-section">
             <h4>{{ t("mqSubscriptions.consumerConsumeDetail") }}</h4>
-            <div v-if="!topicBacklogs.length" class="panel-placeholder">{{ t("mqSubscriptions.noConsumeDetail") }}</div>
-            <table v-else class="detail-table">
-              <thead>
-                <tr>
-                  <th>{{ t("mqSubscriptions.operationTopic") }}</th>
-                  <th>{{ t("mqSubscriptions.backlog") }}</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr v-for="row in topicBacklogs" :key="row.topic">
-                  <td>{{ row.topic }}</td>
-                  <td>{{ row.backlog.toLocaleString() }}</td>
-                </tr>
-              </tbody>
-            </table>
+            <div v-if="loading && !topicConsumeDetails.length" class="panel-loading">{{ t("mqSubscriptions.loading") }}</div>
+            <div v-else-if="!topicConsumeDetails.length" class="panel-placeholder">{{ t("mqSubscriptions.noConsumeDetail") }}</div>
+            <div v-else class="consume-detail-list">
+              <div v-for="detail in topicConsumeDetails" :key="detail.topic" class="consume-topic-block">
+                <div class="consume-topic-header">
+                  <span
+                    ><strong>{{ t("mqSubscriptions.operationTopic") }}:</strong> {{ detail.topic }}</span
+                  >
+                  <span
+                    ><strong>{{ t("mqSubscriptions.consumeDelay") }}:</strong> {{ detail.delay == null ? "-" : detail.delay.toLocaleString() }}</span
+                  >
+                  <span
+                    ><strong>{{ t("mqSubscriptions.lastConsumeTime") }}:</strong> {{ formatConsumeTimestamp(detail.lastTimestamp) }}</span
+                  >
+                </div>
+                <div v-if="detail.error" class="panel-placeholder panel-placeholder-compact form-error">
+                  {{ detail.error }}
+                </div>
+                <div v-else-if="!detail.partitions.length" class="panel-placeholder panel-placeholder-compact">
+                  {{ t("mqSubscriptions.noQueueConsumeProgress") }}
+                </div>
+                <div v-else class="detail-table-scroll">
+                  <table class="detail-table detail-table-wide">
+                    <thead>
+                      <tr>
+                        <th>{{ t("mqSubscriptions.broker") }}</th>
+                        <th>{{ t("mqSubscriptions.queue") }}</th>
+                        <th>{{ t("mqSubscriptions.consumerClient") }}</th>
+                        <th>{{ t("mqSubscriptions.brokerOffset") }}</th>
+                        <th>{{ t("mqSubscriptions.consumerOffset") }}</th>
+                        <th>{{ t("mqSubscriptions.diffTotal") }}</th>
+                        <th>{{ t("mqSubscriptions.lastTimestamp") }}</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr v-for="(partition, index) in detail.partitions" :key="partitionRowKey(detail.topic, partition, index)">
+                        <td>{{ partition.brokerName || "-" }}</td>
+                        <td>{{ partition.partition }}</td>
+                        <td>{{ partition.consumerClient || "-" }}</td>
+                        <td>{{ partition.endOffset.toLocaleString() }}</td>
+                        <td>{{ partition.currentOffset.toLocaleString() }}</td>
+                        <td>{{ partition.lag.toLocaleString() }}</td>
+                        <td>{{ formatConsumeTimestamp(partition.lastTimestamp) }}</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
           </section>
         </div>
 
@@ -303,6 +403,8 @@ watch(
 </template>
 
 <style scoped>
+@import "../shared/mqPanel.css";
+
 .dialog-overlay {
   position: fixed;
   inset: 0;
@@ -325,7 +427,7 @@ watch(
 }
 
 .dialog-wide {
-  max-width: 860px;
+  max-width: 1100px;
 }
 
 .dialog-header,
@@ -354,14 +456,6 @@ watch(
   overflow: auto;
 }
 
-.btn-close {
-  border: none;
-  background: none;
-  font-size: 24px;
-  cursor: pointer;
-  color: var(--color-text-secondary);
-}
-
 .detail-sections {
   display: grid;
   gap: 18px;
@@ -388,9 +482,35 @@ watch(
   font-size: 13px;
 }
 
+.consume-detail-list {
+  display: grid;
+  gap: 16px;
+}
+
+.consume-topic-block {
+  display: grid;
+  gap: 8px;
+}
+
+.consume-topic-header {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px 20px;
+  font-size: 13px;
+  color: var(--color-text);
+}
+
+.detail-table-scroll {
+  overflow-x: auto;
+}
+
 .detail-table {
   width: 100%;
   border-collapse: collapse;
+}
+
+.detail-table-wide {
+  min-width: 720px;
 }
 
 .detail-table th,
@@ -399,6 +519,7 @@ watch(
   border-bottom: 1px solid var(--color-border-light);
   text-align: left;
   font-size: 13px;
+  white-space: nowrap;
 }
 
 .detail-table th {
@@ -454,6 +575,10 @@ watch(
   font-size: 13px;
 }
 
+.panel-placeholder-compact {
+  padding: 10px;
+}
+
 .form-error {
   margin-top: 12px;
   padding: 8px 12px;
@@ -463,26 +588,8 @@ watch(
   font-size: 13px;
 }
 
-.btn-primary,
-.btn-secondary,
-.btn-sm {
-  padding: 6px 12px;
-  border: 1px solid var(--color-border);
-  border-radius: var(--dbx-radius-fixed-4);
-  background: var(--color-background);
-  color: var(--color-text);
-  cursor: pointer;
-  font-size: 13px;
-}
-
-.btn-primary {
-  background: var(--color-primary);
-  border-color: var(--color-primary);
-  color: #fff;
-}
-
 button:disabled {
-  opacity: 0.5;
+  opacity: 0.6;
   cursor: not-allowed;
 }
 </style>

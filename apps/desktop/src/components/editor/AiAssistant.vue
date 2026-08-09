@@ -2945,14 +2945,27 @@ async function openExternalUrl(url: string) {
 }
 
 .resize-handle {
-  height: 4px;
-  width: 100%;
+  position: absolute;
+  top: -4px;
+  left: 0;
+  right: 0;
+  z-index: 1;
+  height: 9px;
   cursor: ns-resize;
+}
+
+.resize-handle::before {
+  content: "";
+  position: absolute;
+  top: 3px;
+  left: 0;
+  right: 0;
+  height: 1px;
   background-color: var(--border);
   transition: background-color 0.15s ease;
 }
 
-.resize-handle:hover {
+.resize-handle:hover::before {
   background-color: color-mix(in srgb, var(--foreground) 20%, transparent);
 }
 </style>

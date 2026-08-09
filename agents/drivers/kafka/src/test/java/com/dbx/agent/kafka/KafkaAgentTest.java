@@ -31,6 +31,8 @@ import org.apache.kafka.clients.consumer.ConsumerRecords;
 import org.apache.kafka.clients.admin.AlterConfigOp;
 import org.apache.kafka.clients.admin.Config;
 import org.apache.kafka.clients.admin.ConfigEntry;
+import org.apache.kafka.clients.admin.RaftVoterEndpoint;
+import org.apache.kafka.common.Node;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.zookeeper.CreateMode;
 import org.apache.zookeeper.Watcher;
@@ -245,6 +247,58 @@ class KafkaAgentTest {
 
         assertTrue(KafkaAgent.isAclDisabledError(disabled));
         assertFalse(KafkaAgent.isAclDisabledError(new RuntimeException("Timed out waiting for broker response")));
+    }
+
+    @Test
+    void metadataQuorumControllerUsesMatchingBrokerEndpoint() {
+        Map<String, Object> controller = KafkaAgent.metadataQuorumControllerToMap(
+            1,
+            Arrays.asList(
+                new Node(1, "broker-1", 9092),
+                new Node(2, "broker-2", 9092)
+            ),
+            Collections.emptyMap()
+        );
+
+        assertEquals(1, controller.get("id"));
+        assertEquals("broker-1", controller.get("host"));
+        assertEquals(9092, controller.get("port"));
+    }
+
+    @Test
+    void metadataQuorumControllerUsesIsolatedControllerEndpoint() {
+        Map<String, Object> controller = KafkaAgent.metadataQuorumControllerToMap(
+            9,
+            Collections.singletonList(new Node(1, "broker-1", 9092)),
+            Collections.singletonMap(
+                9,
+                Collections.singletonList(new RaftVoterEndpoint("CONTROLLER", "controller-9", 19093))
+            )
+        );
+
+        assertEquals(9, controller.get("id"));
+        assertEquals("controller-9", controller.get("host"));
+        assertEquals(19093, controller.get("port"));
+    }
+
+    @Test
+    void metadataQuorumControllerKeepsLeaderIdWithoutEndpoint() {
+        Map<String, Object> controller = KafkaAgent.metadataQuorumControllerToMap(
+            9,
+            Collections.singletonList(new Node(1, "broker-1", 9092)),
+            Collections.emptyMap()
+        );
+
+        assertEquals(Collections.singletonMap("id", 9), controller);
+    }
+
+    @Test
+    void metadataQuorumControllerReturnsNullWithoutLeader() {
+        assertNull(KafkaAgent.metadataQuorumControllerToMap(
+            -1,
+            Collections.singletonList(new Node(1, "broker-1", 9092)),
+            Collections.emptyMap()
+        ));
     }
 
     @Test

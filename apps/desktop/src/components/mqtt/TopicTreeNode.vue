@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import type { MqttTopicNode } from "@/types/mqtt";
-import { ChevronRight, ChevronDown, Trash2 } from "@lucide/vue";
+import type { MqttSavedTopic, MqttTopicNode } from "@/types/mqtt";
+import { ChevronRight, ChevronDown, Pencil, Power, Trash2 } from "@lucide/vue";
 import { computed, ref } from "vue";
 import { useI18n } from "vue-i18n";
 
@@ -9,32 +9,28 @@ interface Props {
   depth: number;
   selectedTopic: string;
   subscribedTopics: [string, string][];
+  savedTopics: MqttSavedTopic[];
+  filter?: string;
 }
 
 const props = defineProps<Props>();
 const { t } = useI18n();
 const emit = defineEmits<{
   select: [topic: string];
-  subscribe: [topic: string];
-  unsubscribe: [topics: string[]];
+  toggleEnabled: [config: MqttSavedTopic];
+  edit: [config: MqttSavedTopic];
+  delete: [config: MqttSavedTopic];
 }>();
 
 const expanded = ref(props.depth < 2);
-
-function isSubscribed(topic: string): boolean {
-  return props.subscribedTopics.some(([t]) => t === topic);
-}
-
-function collectSubscribedTopics(node: MqttTopicNode): string[] {
-  const topics = node.isLeaf && isSubscribed(node.fullPath) ? [node.fullPath] : [];
-  for (const child of node.children ?? []) {
-    topics.push(...collectSubscribedTopics(child));
-  }
-  return topics;
-}
-
-const topicsToUnsubscribe = computed(() => collectSubscribedTopics(props.node));
-const unsubscribeLabel = computed(() => (topicsToUnsubscribe.value.length === 1 ? t("connection.mqttUnsubscribeTopic", { topic: topicsToUnsubscribe.value[0] }) : t("connection.mqttUnsubscribeGroup", { count: topicsToUnsubscribe.value.length })));
+const savedConfig = computed(() => props.savedTopics.find((config) => config.topic === props.node.fullPath));
+const active = computed(() => props.subscribedTopics.some(([topic]) => topic === props.node.fullPath));
+const visible = computed(() => {
+  const filter = props.filter?.trim().toLowerCase();
+  if (!filter) return true;
+  const matches = (node: MqttTopicNode): boolean => node.fullPath.toLowerCase().includes(filter) || (node.children ?? []).some(matches);
+  return matches(props.node);
+});
 
 function toggle() {
   expanded.value = !expanded.value;
@@ -42,39 +38,41 @@ function toggle() {
 </script>
 
 <template>
-  <div>
+  <div v-if="visible">
     <div
-      class="flex items-center gap-1 py-0.5 pl-2 pr-1 rounded cursor-pointer text-xs group border-l-2 border-transparent"
-      :class="selectedTopic === node.fullPath ? 'bg-primary/25 text-foreground font-semibold border-l-primary shadow-sm ring-1 ring-primary/20' : 'hover:bg-muted/70 text-muted-foreground'"
-      :style="{ paddingLeft: `${depth * 12 + 4}px` }"
-      @click="node.isLeaf ? emit('select', node.fullPath) : toggle()"
+      class="group flex min-h-8 items-center gap-1 border-b border-border/50 py-1 pr-1 text-[13px] transition-colors"
+      :class="selectedTopic === node.fullPath ? 'border-l-2 border-l-primary bg-primary/10 pl-1 text-primary' : 'border-l-2 border-l-transparent pl-1 text-foreground/90 hover:bg-muted/60'"
+      :style="{ paddingLeft: `${depth * 14 + 4}px` }"
     >
-      <!-- Expand/collapse toggle -->
-      <button v-if="node.children?.length" class="shrink-0 w-4 h-4 flex items-center justify-center text-muted-foreground" @click.stop="toggle">
-        <ChevronRight v-if="!expanded" class="h-3 w-3" />
-        <ChevronDown v-else class="h-3 w-3" />
+      <button v-if="node.children?.length" type="button" class="flex h-5 w-5 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-muted" @click.stop="toggle">
+        <ChevronRight v-if="!expanded" class="h-3.5 w-3.5" />
+        <ChevronDown v-else class="h-3.5 w-3.5" />
       </button>
-      <span v-else class="w-4 shrink-0" />
+      <span v-else class="w-5 shrink-0" />
 
-      <!-- Topic name -->
-      <span class="truncate flex-1 font-mono" :class="selectedTopic === node.fullPath ? 'text-primary' : node.isLeaf ? 'font-medium text-blue-600 dark:text-blue-400' : ''">
-        {{ node.name }}
-      </span>
+      <button type="button" class="min-w-0 flex-1 truncate text-left font-mono font-medium" :title="node.fullPath" @click="node.isLeaf ? emit('select', node.fullPath) : toggle()">{{ node.name }}<span v-if="!node.isLeaf" class="text-muted-foreground/70">/</span></button>
 
-      <!-- 分组节点可一次取消其下全部订阅 -->
-      <button
-        v-if="topicsToUnsubscribe.length"
-        type="button"
-        class="flex h-5 w-5 shrink-0 items-center justify-center rounded text-red-500 opacity-0 transition-opacity hover:bg-accent group-hover:opacity-100 focus:opacity-100"
-        :title="unsubscribeLabel"
-        :aria-label="unsubscribeLabel"
-        @click.stop="emit('unsubscribe', topicsToUnsubscribe)"
-      >
-        <Trash2 class="h-3 w-3" />
-      </button>
+      <template v-if="savedConfig">
+        <span class="shrink-0 rounded border px-1 py-0.5 text-[10px] text-muted-foreground">QoS {{ savedConfig.qos === "atmostonce" ? 0 : savedConfig.qos === "atleastonce" ? 1 : 2 }}</span>
+        <span v-if="savedConfig.noLocal" class="shrink-0 rounded border border-blue-400/40 px-1 py-0.5 text-[10px] text-blue-600 dark:text-blue-400" :title="t('connection.mqttNoLocalMqtt5Only')">NL</span>
+        <span class="hidden shrink-0 text-[10px] text-muted-foreground sm:inline">{{ active ? t("connection.mqttSubscriptionStatusActive") : savedConfig.enabled ? t("connection.mqttSubscriptionStatusPending") : t("connection.mqttSubscriptionStatusDisabled") }}</span>
+        <button
+          type="button"
+          class="flex h-6 w-6 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground"
+          :title="active ? t('connection.mqttSubscriptionDisable') : t('connection.mqttSubscriptionEnable')"
+          @click.stop="emit('toggleEnabled', savedConfig)"
+        >
+          <Power class="h-3.5 w-3.5" :class="active ? 'text-emerald-600 dark:text-emerald-400' : ''" />
+        </button>
+        <button type="button" class="flex h-6 w-6 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground" :title="t('connection.mqttSubscriptionEdit')" @click.stop="emit('edit', savedConfig)">
+          <Pencil class="h-3.5 w-3.5" />
+        </button>
+        <button type="button" class="flex h-6 w-6 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-destructive/10 hover:text-destructive" :title="t('connection.mqttSubscriptionDelete')" @click.stop="emit('delete', savedConfig)">
+          <Trash2 class="h-3.5 w-3.5" />
+        </button>
+      </template>
     </div>
 
-    <!-- Children -->
     <TopicTreeNode
       v-if="expanded"
       v-for="child in node.children"
@@ -83,14 +81,16 @@ function toggle() {
       :depth="depth + 1"
       :selected-topic="selectedTopic"
       :subscribed-topics="subscribedTopics"
+      :saved-topics="savedTopics"
+      :filter="filter"
       @select="emit('select', $event)"
-      @subscribe="emit('subscribe', $event)"
-      @unsubscribe="emit('unsubscribe', $event)"
+      @toggle-enabled="emit('toggleEnabled', $event)"
+      @edit="emit('edit', $event)"
+      @delete="emit('delete', $event)"
     />
   </div>
 </template>
 
 <script lang="ts">
-// Recursive component needs explicit name in non-setup script block
 export default { name: "TopicTreeNode" };
 </script>

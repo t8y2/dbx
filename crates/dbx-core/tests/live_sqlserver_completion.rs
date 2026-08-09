@@ -19,6 +19,7 @@ use tokio_util::sync::CancellationToken;
 
 fn live_sqlserver_config(id: &str, database: &str) -> dbx_core::models::connection::ConnectionConfig {
     dbx_core::models::connection::ConnectionConfig {
+        docs_notes_path: None,
         id: id.to_string(),
         name: id.to_string(),
         note: String::new(),
@@ -1177,6 +1178,7 @@ async fn live_sqlserver_query_result_export_streams_cte_query_to_csv() {
         connection_id: connection_id.to_string(),
         database: database.clone(),
         schema: Some("dbo".to_string()),
+        catalog: None,
         sql: sql.clone(),
         query_base_sql: sql,
         setup_sql: Vec::new(),

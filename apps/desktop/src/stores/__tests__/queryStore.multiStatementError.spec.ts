@@ -622,6 +622,31 @@ describe("queryStore multi-statement errors", () => {
     expect(tab.activeResultRunId).toBeUndefined();
   });
 
+  it("uses the immutable target context instead of the result tab namespace", async () => {
+    mocks.executeMulti.mockResolvedValue([{ columns: ["value"], rows: [[1]], affected_rows: 0, execution_time_ms: 1 }]);
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("mysql-1", "source-db", "Target", "query", "source-schema", "SELECT 1", "source-catalog");
+
+    await store.executeTabSql(tabId, "SELECT 1", {
+      targetContext: { scope: "database", database: "target-db", schema: "target-schema" },
+    });
+
+    expect(mocks.executeMulti).toHaveBeenCalledWith("mysql-1", "target-db", "SELECT 1", "target-schema", expect.any(String), expect.objectContaining({ catalog: undefined }));
+  });
+
+  it("clears the database and schema for a connection-scoped target", async () => {
+    mocks.getConnectionConfig.mockReturnValue({ id: "etcd-1", name: "etcd", db_type: "etcd", database: "stale" });
+    mocks.executeMulti.mockResolvedValue([{ columns: ["value"], rows: [[1]], affected_rows: 0, execution_time_ms: 1 }]);
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("etcd-1", "stale", "Target", "query", "stale-schema", "GET /", "stale-catalog");
+
+    await store.executeTabSql(tabId, "GET /", { targetContext: { scope: "connection" } });
+
+    expect(mocks.executeMulti).toHaveBeenCalledWith("etcd-1", "", "GET /", undefined, expect.any(String), expect.objectContaining({ catalog: undefined }));
+  });
+
   it("restores the retained result when a new-result execution fails before dispatch", async () => {
     mocks.executeMulti.mockResolvedValueOnce([{ columns: ["value"], rows: [[1]], affected_rows: 0, execution_time_ms: 1 }]);
     const { useQueryStore } = await import("@/stores/queryStore");

@@ -485,6 +485,7 @@ pub async fn execute_query(client: &InfluxdbClient, database: &str, sql: &str) -
             session_id: None,
             has_more: false,
             elasticsearch_raw_body: None,
+            messages: Vec::new(),
         }),
         None => Ok(QueryResult {
             columns: vec![],
@@ -499,6 +500,7 @@ pub async fn execute_query(client: &InfluxdbClient, database: &str, sql: &str) -
             session_id: None,
             has_more: false,
             elasticsearch_raw_body: None,
+            messages: Vec::new(),
         }),
     }
 }
@@ -645,6 +647,7 @@ fn parse_flux_csv(text: &str, start: Instant) -> Result<QueryResult, String> {
         session_id: None,
         has_more: false,
         elasticsearch_raw_body: None,
+        messages: Vec::new(),
     })
 }
 

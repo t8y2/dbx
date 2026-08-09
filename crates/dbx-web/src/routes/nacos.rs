@@ -97,6 +97,20 @@ pub(crate) struct ServiceListReq {
 
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct ServiceQueryReq {
+    connection_id: String,
+    query: dbx_core::nacos::NacosServiceQuery,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ServiceUpsertReq {
+    connection_id: String,
+    req: dbx_core::nacos::NacosServiceUpsert,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct InstanceListReq {
     connection_id: String,
     query: dbx_core::nacos::NacosInstanceQuery,
@@ -106,7 +120,21 @@ pub(crate) struct InstanceListReq {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct InstanceUpdateReq {
     connection_id: String,
-    req: dbx_core::nacos::NacosInstanceUpdate,
+    req: dbx_core::nacos::NacosInstanceUpdateRequest,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct InstanceRegistrationReq {
+    connection_id: String,
+    req: dbx_core::nacos::NacosInstanceRegistration,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct InstanceRefReq {
+    connection_id: String,
+    req: dbx_core::nacos::NacosInstanceRef,
 }
 
 #[derive(serde::Deserialize)]
@@ -319,11 +347,71 @@ pub async fn list_instances(
     Ok(Json(result))
 }
 
+pub async fn get_service(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<ServiceQueryReq>,
+) -> Result<Json<dbx_core::nacos::NacosServiceDetail>, AppError> {
+    let result = dbx_core::nacos::service::nacos_get_service_core(&state.app, &req.connection_id, req.query)
+        .await
+        .map_err(AppError::from)?;
+    Ok(Json(result))
+}
+
+pub async fn create_service(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<ServiceUpsertReq>,
+) -> Result<Json<()>, AppError> {
+    dbx_core::nacos::service::nacos_create_service_core(&state.app, &req.connection_id, req.req)
+        .await
+        .map_err(AppError::from)?;
+    Ok(Json(()))
+}
+
+pub async fn update_service(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<ServiceUpsertReq>,
+) -> Result<Json<()>, AppError> {
+    dbx_core::nacos::service::nacos_update_service_core(&state.app, &req.connection_id, req.req)
+        .await
+        .map_err(AppError::from)?;
+    Ok(Json(()))
+}
+
+pub async fn delete_service(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<ServiceQueryReq>,
+) -> Result<Json<()>, AppError> {
+    dbx_core::nacos::service::nacos_delete_service_core(&state.app, &req.connection_id, req.query)
+        .await
+        .map_err(AppError::from)?;
+    Ok(Json(()))
+}
+
 pub async fn update_instance(
     State(state): State<Arc<WebState>>,
     Json(req): Json<InstanceUpdateReq>,
 ) -> Result<Json<()>, AppError> {
     dbx_core::nacos::service::nacos_update_instance_core(&state.app, &req.connection_id, req.req)
+        .await
+        .map_err(AppError::from)?;
+    Ok(Json(()))
+}
+
+pub async fn register_instance(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<InstanceRegistrationReq>,
+) -> Result<Json<()>, AppError> {
+    dbx_core::nacos::service::nacos_register_instance_core(&state.app, &req.connection_id, req.req)
+        .await
+        .map_err(AppError::from)?;
+    Ok(Json(()))
+}
+
+pub async fn deregister_instance(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<InstanceRefReq>,
+) -> Result<Json<()>, AppError> {
+    dbx_core::nacos::service::nacos_deregister_instance_core(&state.app, &req.connection_id, req.req)
         .await
         .map_err(AppError::from)?;
     Ok(Json(()))
@@ -753,5 +841,32 @@ mod batch_tests {
         assert!(validate_nacos_import_context(&context, Some("other-session"), &request).is_err());
         request.connection_id = "connection-b".to_string();
         assert!(validate_nacos_import_context(&context, Some("preview-session"), &request).is_err());
+    }
+
+    #[test]
+    fn instance_update_route_uses_target_and_patch_contract() {
+        let request: InstanceUpdateReq = serde_json::from_value(serde_json::json!({
+            "connectionId": "nacos-v2",
+            "req": {
+                "target": {
+                    "namespace": "public",
+                    "groupName": "DBX_TEST",
+                    "serviceName": "api",
+                    "ip": "127.0.0.1",
+                    "port": 8080,
+                    "clusterName": "blue",
+                    "ephemeral": false
+                },
+                "patch": {
+                    "weight": 2.5,
+                    "metadata": { "role": "api" }
+                }
+            }
+        }))
+        .unwrap();
+        assert_eq!(request.connection_id, "nacos-v2");
+        assert_eq!(request.req.target.ephemeral, Some(false));
+        assert_eq!(request.req.patch.weight, Some(2.5));
+        assert_eq!(request.req.patch.metadata, Some(serde_json::json!({ "role": "api" })));
     }
 }

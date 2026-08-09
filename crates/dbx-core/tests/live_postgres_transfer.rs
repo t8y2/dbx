@@ -10,6 +10,7 @@ use serde_json::json;
 
 fn postgres_test_config(id: &str, database: &str) -> ConnectionConfig {
     ConnectionConfig {
+        docs_notes_path: None,
         id: id.to_string(),
         name: id.to_string(),
         note: String::new(),

@@ -54,3 +54,13 @@ describe("QueryEditor execution routing", () => {
     expect(queryEditorSource).toContain("if (options.bypassPicker || !settingsStore.editorSettings.showExecutionTargetPicker");
   });
 });
+
+describe("ContentArea execution summary errors", () => {
+  it("keeps batch errors selectable and copyable without triggering statement navigation", () => {
+    expect(contentAreaSource).toContain('class="absolute inset-0 z-0 cursor-pointer');
+    expect(contentAreaSource).toContain('data-native-clipboard class="min-w-0 flex-1 cursor-text select-text truncate"');
+    expect(contentAreaSource).toContain("@mousedown.stop @click.stop @dblclick.stop");
+    expect(contentAreaSource).toContain('@click.stop="copyExecutionSummaryError(item.error)"');
+    expect(contentAreaSource).toContain("await copyToClipboard(error)");
+  });
+});

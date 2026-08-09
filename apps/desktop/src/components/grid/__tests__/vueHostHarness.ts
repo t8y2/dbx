@@ -110,7 +110,7 @@ export function createPassthroughStub(name: string, tag = "div") {
     name,
     inheritAttrs: false,
     setup(_props, { attrs, slots }) {
-      return () => h(tag, { ...attrs, "data-stub": name }, [slots.default?.(), slots.content?.()]);
+      return () => h(tag, { ...attrs, "data-stub": name }, [slots.default?.(), slots.content?.(), slots.footer?.()]);
     },
   });
 }

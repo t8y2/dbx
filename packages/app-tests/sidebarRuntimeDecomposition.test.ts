@@ -33,6 +33,18 @@ test("one tree-level runtime serves every row renderer", () => {
   assert.match(dataOpenRuntime, /canApplyDataTabMetadata/);
 });
 
+test("connection detail tooltips expose every known visible-filter count", () => {
+  assert.match(treeItem, /connectionStore\.getSidebarVisibleFilterSummary\(node\.connectionId\)/);
+  assert.match(treeItem, /visibleFilterSummary\?\.selected != null && visibleFilterSummary\.total != null/);
+  assert.doesNotMatch(treeItem, /visibleFilterSummary\?\.isActive/);
+  assert.match(treeItem, /visibleSchemas\.detailLabel/);
+  assert.match(treeItem, /visibleDatabases\.detailLabel/);
+  assert.match(treeItem, /treeRuntime\.openPrimaryVisibleFilter\(node\)/);
+  assert.match(runtimeHost, /function openPrimaryVisibleFilter\(node: TreeNode\)/);
+  assert.match(runtimeHost, /openVisibleDatabasesDialog\(\)/);
+  assert.doesNotMatch(treeItem, /SidebarVisibleFilterControl/);
+});
+
 test("the persistent runtime releases detached tree nodes", () => {
   const actionTarget = readFileSync("apps/desktop/src/lib/sidebar/sidebarActionTarget.ts", "utf8");
   const connectionMutationRuntime = readFileSync("apps/desktop/src/composables/useSidebarConnectionMutationRuntime.ts", "utf8");

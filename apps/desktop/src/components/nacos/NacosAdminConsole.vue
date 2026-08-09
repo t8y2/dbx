@@ -6,6 +6,7 @@ import type { EditorView } from "@codemirror/view";
 import { Archive, ArrowLeftRight, CheckCircle2, ChevronDown, Clipboard, Download, FileClock, FileInput, FileText, Loader2, Network, Plus, RefreshCw, Save, Search, Send, Server, Trash2, X } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import ProductionContextBadge from "@/components/common/ProductionContextBadge.vue";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -40,6 +41,8 @@ import {
   type NacosConfigDeleteSnapshot,
 } from "@/lib/nacos/nacosAdmin";
 import { createNacosNamespaceRequestGuard, subscribeNacosNamespacesChanged, type NacosNamespacesChangedDetail } from "@/lib/nacos/nacosNamespaceCache";
+import { nacosInstanceMatchesPatch, nacosInstanceRefIdentity, nacosIpAddressIsValid, nacosServiceDetailMatches } from "@/lib/nacos/nacosServiceManagement";
+import { nacosNamespaceIdentity, normalizeNacosNamespacesForDisplay } from "@/lib/nacos/nacosNamespaceVisibility";
 import { copyToClipboard, readTextFromClipboard } from "@/lib/common/clipboard";
 import { trimmedSelectionLayer } from "@/lib/editor/codemirrorTrimmedSelectionLayer";
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
@@ -47,6 +50,8 @@ import { editorFontTheme, loadEditorTheme } from "@/lib/editor/editorThemes";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useTheme } from "@/composables/useTheme";
+import { executeWithProductionContextGuard } from "@/lib/database/productionExecutionGuard";
+import { productionContextForDatabase } from "@/lib/database/productionSafety";
 import type {
   NacosBatchPreview,
   NacosBatchReport,
@@ -61,10 +66,15 @@ import type {
   NacosContentSearchResult,
   NacosConflictPolicy,
   NacosInstanceInfo,
+  NacosInstancePatch,
+  NacosInstanceRef,
+  NacosOperationCapability,
   NacosNamespaceInfo,
   NacosNamespaceScope,
   NacosSearchProgress,
   NacosServiceInfo,
+  NacosServiceDetail,
+  NacosServiceUpsert,
 } from "@/types/nacos";
 import { Splitpanes, Pane } from "splitpanes";
 import "splitpanes/dist/splitpanes.css";
@@ -139,7 +149,7 @@ const rnacosConsoleCaptcha = ref("");
 const rnacosConsoleAuthError = ref("");
 const rnacosConsoleAuthLoading = ref(false);
 const rnacosConsoleRetryAction = shallowRef<(() => Promise<void>) | null>(null);
-const rnacosConsoleRetryErrorTarget = ref<"config" | "history">("history");
+const rnacosConsoleRetryErrorTarget = ref<"config" | "history" | "instances">("history");
 const configFormatOptions = ["text", "json", "xml", "yaml", "html", "properties", "toml"];
 const configEditorHost = ref<HTMLDivElement | null>(null);
 const configEditorView = shallowRef<EditorView | null>(null);
@@ -171,6 +181,7 @@ const importSourceName = ref("");
 const configEditorTheme = new Compartment();
 const configEditorFontTheme = new Compartment();
 const configEditorLanguage = new Compartment();
+const configListRequestGuard = createNacosLatestRequestGuard();
 const configDetailRequestGuard = createNacosLatestRequestGuard();
 let configEditorGeneration = 0;
 let configEditorSessionId = 0;
@@ -186,11 +197,38 @@ const servicePageSize = ref(20);
 const services = ref<NacosServiceInfo[]>([]);
 const serviceTotal = ref(0);
 const selectedService = ref<NacosServiceInfo | null>(null);
+const selectedServiceDetail = ref<NacosServiceDetail | null>(null);
+const serviceDetailLoading = ref(false);
+const serviceDetailError = ref("");
+const serviceDetailExpanded = ref(false);
 const instances = ref<NacosInstanceInfo[]>([]);
 const instancesLoading = ref(false);
 const instancesError = ref("");
-const updatingInstanceKey = ref("");
-const pendingInstanceUpdate = ref<{ instance: NacosInstanceInfo; patch: Partial<NacosInstanceInfo> } | null>(null);
+const updatingInstanceKeys = ref<Record<string, number>>({});
+const instanceWeightDrafts = ref<Record<string, string>>({});
+const pendingInstanceUpdate = ref<{ instance: NacosInstanceInfo; patch: NacosInstancePatch } | null>(null);
+const instanceEditorOpen = ref(false);
+const instanceEditorError = ref("");
+const instanceEditorTarget = ref<NacosInstanceInfo | null>(null);
+const instanceEditor = ref({ weight: "1", metadata: "{}" });
+const serviceEditorOpen = ref(false);
+const serviceEditorLoading = ref(false);
+const serviceEditorError = ref("");
+const serviceEditorMode = ref<"create" | "update">("create");
+const serviceEditor = ref({ serviceName: "", groupName: "", metadata: "{}", protectThreshold: "0", selector: "" });
+const pendingServiceDelete = ref<NacosServiceInfo | null>(null);
+const deletingService = ref(false);
+const registeringInstance = ref(false);
+const registerInstanceOpen = ref(false);
+const registerInstanceError = ref("");
+const registerInstance = ref({ ip: "", port: "", clusterName: "DEFAULT", weight: "1", metadata: "{}" });
+const pendingInstanceDeregister = ref<NacosInstanceInfo | null>(null);
+const servicesRequestGuard = createNacosLatestRequestGuard();
+const serviceDetailRequestGuard = createNacosLatestRequestGuard();
+const instancesRequestGuard = createNacosLatestRequestGuard();
+let instanceUpdateSequence = 0;
+let instanceOperationToken = 0;
+let serviceMutationSequence = 0;
 
 const NACOS_SPLIT_SIZE_KEY = "dbx-nacos-admin-split-size";
 const savedNacosSplitSize = Number(safeLocalStorageGet(NACOS_SPLIT_SIZE_KEY));
@@ -202,6 +240,7 @@ let configListResizeObserver: ResizeObserver | null = null;
 const { gridTemplateColumns: configListGridTemplate, minWidth: configListMinWidth, resizingColumnIndex: configListResizingColumnIndex, onResizeStart: onConfigListColumnResizeStart } = useNacosConfigListColumnResize(configListViewportWidth);
 
 const namespace = computed(() => props.namespace ?? connectionInfo.value?.namespace ?? "");
+const nacosProductionContext = computed(() => productionContextForDatabase(connectionStore.getConfig(props.connectionId), namespace.value));
 const batchTargetConnections = computed<NacosConfigTransferTarget[]>(() =>
   connectionStore.connections
     .filter((connection) => connection.db_type === "nacos" && !connection.read_only)
@@ -211,6 +250,66 @@ const batchTargetConnections = computed<NacosConfigTransferTarget[]>(() =>
     }),
 );
 const supportsConfigHistory = computed(() => connectionInfo.value?.capabilities.supportsConfigHistory !== false);
+
+async function confirmNacosMutation(reviewText: string, targetConnectionId = props.connectionId, targetNamespace = namespace.value): Promise<boolean> {
+  const confirmed = await executeWithProductionContextGuard({
+    connection: connectionStore.getConfig(targetConnectionId),
+    database: targetNamespace,
+    reviewText,
+    source: t("production.sourceAdmin"),
+    execute: async () => true,
+  });
+  return confirmed === true;
+}
+function operationCapability(capability: NacosOperationCapability | boolean | undefined, legacySupported = true): NacosOperationCapability {
+  if (typeof capability === "boolean") return { supported: capability, reason: capability ? undefined : "notVerified" };
+  return capability ?? { supported: legacySupported, reason: legacySupported ? undefined : "notVerified" };
+}
+
+const serviceCapabilities = computed(() => connectionInfo.value?.capabilities.serviceManagement);
+const legacyServiceManagementSupported = computed(() => connectionInfo.value != null && connectionInfo.value.capabilities.supportsServiceManagement !== false);
+const legacyInstanceUpdateSupported = computed(() => connectionInfo.value != null && connectionInfo.value.capabilities.supportsInstanceUpdate !== false);
+const listServicesCapability = computed(() => operationCapability(serviceCapabilities.value?.listServices, legacyServiceManagementSupported.value));
+const getServiceCapability = computed(() => operationCapability(serviceCapabilities.value?.getService, listServicesCapability.value.supported));
+const createServiceCapability = computed(() => operationCapability(serviceCapabilities.value?.createService, legacyServiceManagementSupported.value));
+const updateServiceCapability = computed(() => operationCapability(serviceCapabilities.value?.updateService, createServiceCapability.value.supported));
+const deleteServiceCapability = computed(() => operationCapability(serviceCapabilities.value?.deleteService, createServiceCapability.value.supported));
+const listInstancesCapability = computed(() => operationCapability(serviceCapabilities.value?.listInstances, listServicesCapability.value.supported));
+const updateInstanceCapability = computed(() => operationCapability(serviceCapabilities.value?.updateInstance, legacyInstanceUpdateSupported.value));
+const registerInstanceCapability = computed(() => operationCapability(serviceCapabilities.value?.registerInstance, updateInstanceCapability.value.supported));
+const deregisterInstanceCapability = computed(() => operationCapability(serviceCapabilities.value?.deregisterInstance, updateInstanceCapability.value.supported));
+const supportsServiceManagement = computed(() => listServicesCapability.value.supported);
+const supportsInstanceUpdate = computed(() => updateInstanceCapability.value.supported);
+
+function capabilityReason(capability: NacosOperationCapability) {
+  if (props.readOnly) return t("nacos.capabilityReadOnly");
+  switch (capability.reason) {
+    case "implementationReadOnly":
+      return t("nacos.capabilityReadOnlyWrite");
+    case "versionUnsupported":
+      return t("nacos.capabilityVersionUnsupported");
+    case "endpointUnavailable":
+      return t("nacos.capabilityEndpointUnavailable");
+    case "connectionReadOnly":
+      return t("nacos.capabilityReadOnly");
+    default:
+      return t("nacos.capabilityNotVerified");
+  }
+}
+
+const serviceWriteNotice = computed(() => {
+  if (props.readOnly) return t("nacos.capabilityHeaderReadOnly");
+  const unsupported = [createServiceCapability.value, updateServiceCapability.value, deleteServiceCapability.value, updateInstanceCapability.value, registerInstanceCapability.value, deregisterInstanceCapability.value].find((capability) => !capability.supported);
+  return unsupported ? capabilityReason(unsupported) : "";
+});
+const selectedServiceProtectionTriggered = computed(() => {
+  if (selectedService.value?.triggerFlag === "true") return true;
+  const threshold = selectedServiceDetail.value?.protectThreshold;
+  if (threshold == null || threshold <= 0 || serviceCluster.value.trim()) return false;
+  const total = selectedService.value?.ipCount ?? instances.value.length;
+  const healthy = selectedService.value?.healthyInstanceCount ?? instances.value.filter((instance) => instance.healthy === true).length;
+  return total > 0 && healthy / total < threshold;
+});
 const configHistoryUnavailableTitle = computed(() => {
   if (supportsConfigHistory.value) return undefined;
   const reason = connectionInfo.value?.capabilities.historyUnavailableReason;
@@ -249,6 +348,19 @@ const canRequestConfigDelete = computed(() => canStartNacosConfigDelete(configMu
 const pendingDeleteDetails = computed(() => (pendingDeleteConfig.value ? buildNacosConfigDeleteConfirm(pendingDeleteConfig.value.config, pendingDeleteConfig.value.key.namespace || "") : ""));
 const pendingHistoryRollbackDetails = computed(() => (pendingHistoryRollback.value ? buildNacosConfigHistoryRollbackConfirm(pendingHistoryRollback.value, namespace.value) : ""));
 const pendingInstanceDetails = computed(() => (pendingInstanceUpdate.value && selectedService.value ? buildNacosInstanceConfirm(selectedService.value, pendingInstanceUpdate.value.instance, pendingInstanceUpdate.value.patch, serviceGroup.value, namespace.value) : ""));
+const pendingInstanceDeregisterDetails = computed(() => {
+  if (!pendingInstanceDeregister.value || !selectedService.value) return "";
+  const ref = instanceRef(pendingInstanceDeregister.value);
+  const lifetime = ref.ephemeral === true ? t("nacos.instanceEphemeral") : ref.ephemeral === false ? t("nacos.instancePersistent") : t("nacos.instanceUnknown");
+  return t("nacos.instanceConfirmDetails", {
+    namespace: ref.namespace || "public",
+    service: `${ref.groupName || "DEFAULT_GROUP"}@@${ref.serviceName}`,
+    ip: ref.ip,
+    port: ref.port,
+    cluster: ref.clusterName || "DEFAULT",
+    type: lifetime,
+  });
+});
 const selectedConfigCount = computed(() => selectedConfigKeys.value.length);
 const hasSearchSession = computed(() => !!(searchResult.value || searchProgress.value || searchError.value));
 const retainedSearchMatchCount = computed(() => searchResult.value?.matches.length ?? searchProgress.value?.matches.length ?? 0);
@@ -293,6 +405,7 @@ function buildConfigSelector(scope: NacosConfigSelectionScope): NacosConfigSelec
         ? {
             namespace: namespace.value || undefined,
             group: configGroup.value.trim() || undefined,
+            groupContains: true,
             dataId: configDataId.value.trim() || undefined,
             appName: configAppName.value.trim() || undefined,
           }
@@ -560,34 +673,67 @@ async function loadInfo() {
   }
 }
 
-async function loadConfigs(page = configPageNo.value) {
+async function loadConfigs(page = configPageNo.value): Promise<boolean> {
+  const requestId = configListRequestGuard.begin();
+  const connectionId = props.connectionId;
+  const requestNamespace = namespace.value;
+  const requestGroup = configGroup.value.trim();
+  const requestDataId = configDataId.value.trim();
+  const requestAppName = configAppName.value.trim();
+  const requestPageSize = configPageSize.value;
+  const isCurrentRequest = () =>
+    configListRequestGuard.isCurrent(requestId) &&
+    connectionId === props.connectionId &&
+    requestNamespace === namespace.value &&
+    requestGroup === configGroup.value.trim() &&
+    requestDataId === configDataId.value.trim() &&
+    requestAppName === configAppName.value.trim() &&
+    requestPageSize === configPageSize.value;
   configLoading.value = true;
   configError.value = "";
   configPageNo.value = page;
   try {
-    const result = await api.nacosListConfigs(props.connectionId, {
-      namespace: namespace.value || undefined,
-      group: configGroup.value.trim() || undefined,
-      dataId: configDataId.value.trim() || undefined,
-      appName: configAppName.value.trim() || undefined,
-      pageNo: configPageNo.value,
-      pageSize: configPageSize.value,
+    const result = await api.nacosListConfigs(connectionId, {
+      namespace: requestNamespace || undefined,
+      group: requestGroup || undefined,
+      groupContains: true,
+      dataId: requestDataId || undefined,
+      appName: requestAppName || undefined,
+      pageNo: page,
+      pageSize: requestPageSize,
     });
+    if (!isCurrentRequest()) return false;
     configs.value = applyKnownConfigFormats(result.items.map(normalizeConfigItemFormat));
     configTotal.value = result.totalCount;
+    return true;
   } catch (error) {
-    await handleRNacosConsoleError(error, () => loadConfigs(page), "config");
+    if (!isCurrentRequest()) return false;
+    await handleRNacosConsoleError(
+      error,
+      async () => {
+        await loadConfigs(page);
+      },
+      "config",
+    );
+    return true;
   } finally {
-    configLoading.value = false;
+    if (configListRequestGuard.isCurrent(requestId)) configLoading.value = false;
   }
 }
 
 async function loadConfigsWithRetry(page = configPageNo.value) {
   for (let attempt = 0; ; attempt += 1) {
-    await loadConfigs(page);
-    if (!isConnectionNotFoundError(configError.value) || attempt >= CONNECTION_NOT_FOUND_RETRY_DELAYS_MS.length) return;
+    const current = await loadConfigs(page);
+    if (!current || !isConnectionNotFoundError(configError.value) || attempt >= CONNECTION_NOT_FOUND_RETRY_DELAYS_MS.length) return;
     await delay(CONNECTION_NOT_FOUND_RETRY_DELAYS_MS[attempt]);
   }
+}
+
+function clearConfigFilter(filter: "dataId" | "group" | "appName") {
+  if (filter === "dataId") configDataId.value = "";
+  else if (filter === "group") configGroup.value = "";
+  else configAppName.value = "";
+  void loadConfigsWithRetry(1);
 }
 
 function closePendingConfigMutationConfirmations() {
@@ -880,7 +1026,7 @@ async function navigateToContentMatch(match: NacosContentMatch, keyword: string)
     await openTargetConfig(match.dataId, match.group, keyword);
     return;
   }
-  const namespaceInfo = batchNamespaces.value.find((item) => item.namespace === targetNamespace);
+  const namespaceInfo = batchNamespaces.value.find((item) => nacosNamespaceIdentity(item.namespace) === nacosNamespaceIdentity(targetNamespace));
   queryStore.openNacosAdmin(props.connectionId, {
     namespace: targetNamespace,
     namespaceName: namespaceInfo?.namespaceShowName || targetNamespace || "public",
@@ -897,7 +1043,7 @@ async function loadBatchNamespaces(options: { force?: boolean } = {}) {
   try {
     const namespaces = await api.nacosListNamespaces(connectionId);
     if (!batchNamespacesRequestGuard.isCurrent(requestId, props.connectionId)) return;
-    batchNamespaces.value = namespaces;
+    batchNamespaces.value = normalizeNacosNamespacesForDisplay(namespaces);
   } catch (error) {
     if (!batchNamespacesRequestGuard.isCurrent(requestId, props.connectionId)) return;
     batchError.value = error instanceof Error ? error.message : String(error);
@@ -911,7 +1057,7 @@ async function loadBatchTargetNamespaces(connectionId: string, options: { force?
   try {
     const namespaces = await api.nacosListNamespaces(connectionId);
     if (!batchTargetNamespacesRequestGuard.isCurrent(requestId, connectionId) || batchTargetConnectionId.value !== connectionId) return;
-    batchTargetNamespaces.value = namespaces;
+    batchTargetNamespaces.value = normalizeNacosNamespacesForDisplay(namespaces);
   } catch (error) {
     if (!batchTargetNamespacesRequestGuard.isCurrent(requestId, connectionId) || batchTargetConnectionId.value !== connectionId) return;
     batchError.value = error instanceof Error ? error.message : String(error);
@@ -1058,6 +1204,10 @@ async function previewBatch(payload: { scope: NacosConfigSelectionScope; targetC
 async function applyBatch(payload: { scope: NacosConfigSelectionScope; targetConnectionId: string; targetNamespace: string; policy: NacosConflictPolicy }) {
   if (batchLoading.value || batchReport.value || !batchPreview.value) return;
   if (payload.policy === "OVERWRITE" && !window.confirm(t("nacos.overwriteConfirm"))) return;
+  const targetConnectionId = batchMode.value === "import" ? props.connectionId : payload.targetConnectionId;
+  const targetNamespace = batchMode.value === "import" ? namespace.value : payload.targetNamespace;
+  const operation = batchMode.value === "import" ? t("nacos.batchImport") : t("nacos.copyToNamespace");
+  if (!(await confirmNacosMutation(operation, targetConnectionId, targetNamespace))) return;
   batchLoading.value = true;
   batchError.value = "";
   try {
@@ -1122,12 +1272,13 @@ async function loadConfigHistory(page = historyPageNo.value) {
   }
 }
 
-function setRNacosConsoleActionError(target: "config" | "history", message: string) {
+function setRNacosConsoleActionError(target: "config" | "history" | "instances", message: string) {
   if (target === "config") configError.value = message;
-  else historyError.value = message;
+  else if (target === "history") historyError.value = message;
+  else instancesError.value = message;
 }
 
-async function handleRNacosConsoleError(error: unknown, retryAction: () => Promise<void>, target: "config" | "history") {
+async function handleRNacosConsoleError(error: unknown, retryAction: () => Promise<void>, target: "config" | "history" | "instances") {
   const message = error instanceof Error ? error.message : String(error);
   if (!message.includes("[rnacosConsoleCaptchaRequired]")) {
     setRNacosConsoleActionError(target, message);
@@ -1251,6 +1402,7 @@ function requestRollbackHistory(item: NacosConfigHistoryItem) {
 
 async function rollbackConfigHistory() {
   if (!pendingHistoryRollback.value || props.readOnly) return;
+  if (!(await confirmNacosMutation(t("nacos.historyRollback"), props.connectionId, pendingHistoryRollback.value.namespace || namespace.value))) return;
   rollingBackHistory.value = true;
   try {
     await api.nacosRollbackConfig(props.connectionId, historyKeyFor(pendingHistoryRollback.value));
@@ -1309,6 +1461,7 @@ async function saveConfig() {
     return;
   }
   const pageAtRequest = configPageNo.value;
+  if (!(await confirmNacosMutation(t("nacos.publish"), snapshot.connectionId, snapshot.targetKey.namespace || namespace.value))) return;
   savingConfig.value = true;
   configError.value = "";
   configSaveNotice.value = "";
@@ -1382,6 +1535,7 @@ async function deleteConfig() {
     )
   )
     return;
+  if (!(await confirmNacosMutation(t("nacos.delete"), snapshot.connectionId, snapshot.key.namespace || namespace.value))) return;
   const editorSessionId = configEditorSessionId;
   pendingDeleteConfig.value = null;
   deletingConfig.value = true;
@@ -1415,23 +1569,35 @@ async function deleteConfig() {
 }
 
 async function loadServices(page = servicePageNo.value) {
+  const requestId = servicesRequestGuard.begin();
+  const connectionId = props.connectionId;
+  const requestNamespace = namespace.value;
+  const requestGroup = serviceGroup.value.trim();
+  const requestName = serviceName.value.trim();
   servicesLoading.value = true;
   servicesError.value = "";
   servicePageNo.value = page;
   try {
-    const result = await api.nacosListServices(props.connectionId, {
-      namespace: namespace.value || undefined,
-      groupName: serviceGroup.value.trim() || undefined,
-      serviceName: serviceName.value.trim() || undefined,
-      pageNo: servicePageNo.value,
+    const result = await api.nacosListServices(connectionId, {
+      namespace: requestNamespace || undefined,
+      groupName: requestGroup || undefined,
+      serviceName: requestName || undefined,
+      pageNo: page,
       pageSize: servicePageSize.value,
     });
+    if (!servicesRequestGuard.isCurrent(requestId) || connectionId !== props.connectionId || requestNamespace !== namespace.value || requestGroup !== serviceGroup.value.trim() || requestName !== serviceName.value.trim()) return;
     services.value = result.items;
     serviceTotal.value = result.totalCount;
+    const selectedIdentity = serviceIdentity(selectedService.value);
+    if (selectedIdentity) {
+      const refreshedSelection = result.items.find((item) => serviceIdentity(item) === selectedIdentity);
+      if (refreshedSelection) selectedService.value = refreshedSelection;
+    }
   } catch (error) {
+    if (!servicesRequestGuard.isCurrent(requestId)) return;
     servicesError.value = error instanceof Error ? error.message : String(error);
   } finally {
-    servicesLoading.value = false;
+    if (servicesRequestGuard.isCurrent(requestId)) servicesLoading.value = false;
   }
 }
 
@@ -1443,57 +1609,516 @@ async function loadServicesWithRetry(page = servicePageNo.value) {
   }
 }
 
+function clearServiceFilter(filter: "name" | "group") {
+  if (filter === "name") serviceName.value = "";
+  else serviceGroup.value = "";
+  void loadServicesWithRetry(1);
+}
+
 async function selectService(service: NacosServiceInfo) {
+  serviceMutationSequence += 1;
+  instanceUpdateSequence += 1;
   selectedService.value = service;
-  await loadInstances();
+  selectedServiceDetail.value = null;
+  serviceDetailError.value = "";
+  instances.value = [];
+  instancesError.value = "";
+  await Promise.all([loadServiceDetail(), loadInstances()]);
+}
+
+function serviceIdentity(service: NacosServiceInfo | null) {
+  return service ? `${service.groupName || "DEFAULT_GROUP"}\u0000${service.serviceName}` : "";
+}
+
+async function loadServiceDetail() {
+  const service = selectedService.value ? { ...selectedService.value } : null;
+  if (!service || !getServiceCapability.value.supported) return;
+  const requestId = serviceDetailRequestGuard.begin();
+  const connectionId = props.connectionId;
+  const requestNamespace = namespace.value;
+  const identity = serviceIdentity(service);
+  serviceDetailLoading.value = true;
+  serviceDetailError.value = "";
+  try {
+    const detail = await api.nacosGetService(connectionId, {
+      namespace: requestNamespace || undefined,
+      serviceName: service.serviceName,
+      groupName: service.groupName || serviceGroup.value || undefined,
+    });
+    if (!serviceDetailRequestGuard.isCurrent(requestId) || connectionId !== props.connectionId || requestNamespace !== namespace.value || identity !== serviceIdentity(selectedService.value)) return;
+    selectedServiceDetail.value = detail;
+  } catch (error) {
+    if (!serviceDetailRequestGuard.isCurrent(requestId)) return;
+    serviceDetailError.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    if (serviceDetailRequestGuard.isCurrent(requestId)) serviceDetailLoading.value = false;
+  }
+}
+
+async function reconcileServiceMutation(expected: NacosServiceUpsert, mutationId: number) {
+  const expectedIdentity = `${expected.groupName || "DEFAULT_GROUP"}\u0000${expected.serviceName}`;
+  for (const retryDelay of [0, 250, 750]) {
+    if (retryDelay) await delay(retryDelay);
+    if (mutationId !== serviceMutationSequence || expectedIdentity !== serviceIdentity(selectedService.value)) return;
+    try {
+      const detail = await api.nacosGetService(props.connectionId, {
+        namespace: expected.namespace,
+        serviceName: expected.serviceName,
+        groupName: expected.groupName,
+      });
+      if (mutationId !== serviceMutationSequence || expectedIdentity !== serviceIdentity(selectedService.value)) return;
+      if (nacosServiceDetailMatches(detail, expected)) {
+        selectedServiceDetail.value = detail;
+        serviceDetailError.value = "";
+        await loadServicesWithRetry(1);
+        if (expectedIdentity === serviceIdentity(selectedService.value)) await loadInstances();
+        return;
+      }
+    } catch {
+      // The explicit warning below preserves the optimistic detail and gives
+      // the user a deliberate refresh path when Nacos is briefly stale.
+    }
+  }
+  if (mutationId === serviceMutationSequence) serviceDetailError.value = t("nacos.serviceUpdateUnconfirmed");
+}
+
+function instanceRef(instance: NacosInstanceInfo, service = selectedService.value): NacosInstanceRef {
+  return {
+    namespace: namespace.value || undefined,
+    serviceName: service?.serviceName || instance.serviceName || "",
+    groupName: instance.groupName || service?.groupName || serviceGroup.value || undefined,
+    ip: instance.ip,
+    port: instance.port,
+    clusterName: instance.clusterName,
+    ephemeral: instance.ephemeral,
+  };
+}
+
+function instanceIdentity(instance: NacosInstanceInfo, service = selectedService.value) {
+  return instanceRefIdentity(instanceRef(instance, service));
+}
+
+function instanceRefIdentity(ref: NacosInstanceRef) {
+  return nacosInstanceRefIdentity(ref);
+}
+
+function beginInstanceOperation(key: string) {
+  const token = ++instanceOperationToken;
+  updatingInstanceKeys.value = { ...updatingInstanceKeys.value, [key]: token };
+  return token;
+}
+
+function isInstanceUpdating(instance: NacosInstanceInfo) {
+  return Object.prototype.hasOwnProperty.call(updatingInstanceKeys.value, instanceIdentity(instance));
+}
+
+function clearInstanceOperation(key: string, token: number) {
+  if (updatingInstanceKeys.value[key] !== token) return;
+  const next = { ...updatingInstanceKeys.value };
+  delete next[key];
+  updatingInstanceKeys.value = next;
+}
+
+function instanceWeightDraft(instance: NacosInstanceInfo) {
+  return instanceWeightDrafts.value[instanceIdentity(instance)] ?? String(instance.weight ?? 1);
+}
+
+function updateInstanceWeightDraft(instance: NacosInstanceInfo, value: string | number) {
+  instanceWeightDrafts.value[instanceIdentity(instance)] = String(value);
+}
+
+function hasInstanceWeightDraft(instance: NacosInstanceInfo) {
+  const value = instanceWeightDraft(instance).trim();
+  return value !== "" && Number.isFinite(Number(value)) && Number(value) !== (instance.weight ?? 1);
+}
+
+function resetInstanceWeightDraft(instance: NacosInstanceInfo) {
+  delete instanceWeightDrafts.value[instanceIdentity(instance)];
+}
+
+function requestInstanceWeightUpdate(instance: NacosInstanceInfo) {
+  const value = instanceWeightDraft(instance).trim();
+  const weight = Number(value);
+  if (!value || !Number.isFinite(weight) || weight < 0) {
+    instancesError.value = t("nacos.invalidWeight");
+    return;
+  }
+  requestUpdateInstance(instance, { weight });
+}
+
+function openInstanceEditor(instance: NacosInstanceInfo) {
+  instanceEditorTarget.value = instance;
+  instanceEditor.value = {
+    weight: String(instance.weight ?? 1),
+    metadata: JSON.stringify(instance.metadata ?? {}, null, 2),
+  };
+  instanceEditorError.value = "";
+  instanceEditorOpen.value = true;
+}
+
+function submitInstanceEditor() {
+  const instance = instanceEditorTarget.value;
+  const weight = Number(instanceEditor.value.weight);
+  if (!instance || !Number.isFinite(weight) || weight < 0) {
+    instanceEditorError.value = t("nacos.invalidWeightInput");
+    return;
+  }
+  try {
+    const metadata = parseJsonObject(instanceEditor.value.metadata, t("nacos.metadataLabel"));
+    instanceEditorOpen.value = false;
+    requestUpdateInstance(instance, { weight, metadata });
+  } catch (error) {
+    instanceEditorError.value = error instanceof Error ? error.message : String(error);
+  }
+}
+
+function instanceMatchesPatch(instance: NacosInstanceInfo, patch: NacosInstancePatch) {
+  return nacosInstanceMatchesPatch(instance, patch);
 }
 
 async function loadInstances() {
   if (!selectedService.value) return;
+  instanceUpdateSequence += 1;
+  if (!listInstancesCapability.value.supported) {
+    instancesError.value = capabilityReason(listInstancesCapability.value);
+    return;
+  }
+  const requestId = instancesRequestGuard.begin();
+  const connectionId = props.connectionId;
+  const requestNamespace = namespace.value;
+  const service = { ...selectedService.value };
+  const selectedIdentity = serviceIdentity(service);
+  const clusters = serviceCluster.value.trim();
   instancesLoading.value = true;
   instancesError.value = "";
   try {
-    instances.value = await api.nacosListInstances(props.connectionId, {
-      namespace: namespace.value || undefined,
-      serviceName: selectedService.value.serviceName,
-      groupName: selectedService.value.groupName || serviceGroup.value || undefined,
-      clusters: serviceCluster.value.trim() || undefined,
+    const result = await api.nacosListInstances(connectionId, {
+      namespace: requestNamespace || undefined,
+      serviceName: service.serviceName,
+      groupName: service.groupName || serviceGroup.value || undefined,
+      clusters: clusters || undefined,
     });
+    if (!instancesRequestGuard.isCurrent(requestId) || connectionId !== props.connectionId || requestNamespace !== namespace.value || selectedIdentity !== serviceIdentity(selectedService.value) || clusters !== serviceCluster.value.trim()) return;
+    instances.value = result;
   } catch (error) {
-    instancesError.value = error instanceof Error ? error.message : String(error);
+    if (!instancesRequestGuard.isCurrent(requestId)) return;
+    await handleRNacosConsoleError(error, () => loadInstances(), "instances");
   } finally {
-    instancesLoading.value = false;
+    if (instancesRequestGuard.isCurrent(requestId)) instancesLoading.value = false;
   }
 }
 
-function requestUpdateInstance(instance: NacosInstanceInfo, patch: Partial<NacosInstanceInfo>) {
-  if (!selectedService.value || props.readOnly) return;
+async function refreshSelectedService() {
+  if (!selectedService.value) return;
+  await Promise.all([loadServiceDetail(), loadInstances(), loadServices(servicePageNo.value)]);
+}
+
+function requestUpdateInstance(instance: NacosInstanceInfo, patch: NacosInstancePatch) {
+  if (!selectedService.value || props.readOnly || !supportsInstanceUpdate.value) return;
+  if (patch.weight != null && (!Number.isFinite(patch.weight) || patch.weight < 0)) {
+    instancesError.value = t("nacos.invalidWeight");
+    return;
+  }
   pendingInstanceUpdate.value = { instance, patch };
 }
 
-async function updateInstance(instance: NacosInstanceInfo, patch: Partial<NacosInstanceInfo>) {
-  if (!selectedService.value || props.readOnly) return;
-  updatingInstanceKey.value = `${instance.ip}:${instance.port}`;
+async function reconcileInstanceUpdate(ref: NacosInstanceRef, patch: NacosInstancePatch, updateId: number) {
+  const currentService = selectedService.value;
+  if (!currentService || serviceIdentity(currentService) !== `${ref.groupName || "DEFAULT_GROUP"}\u0000${ref.serviceName}`) return;
+  for (const retryDelay of [0, 250, 750]) {
+    if (retryDelay) await delay(retryDelay);
+    if (updateId !== instanceUpdateSequence || serviceIdentity(selectedService.value) !== serviceIdentity(currentService)) return;
+    try {
+      const result = await api.nacosListInstances(props.connectionId, {
+        namespace: ref.namespace,
+        serviceName: ref.serviceName,
+        groupName: ref.groupName,
+        clusters: serviceCluster.value.trim() || undefined,
+      });
+      if (updateId !== instanceUpdateSequence || serviceIdentity(selectedService.value) !== serviceIdentity(currentService)) return;
+      const actual = result.find((candidate) => instanceIdentity(candidate, currentService) === instanceRefIdentity(ref));
+      if (actual && instanceMatchesPatch(actual, patch)) {
+        instances.value = result;
+        void loadServices(servicePageNo.value);
+        return;
+      }
+    } catch {
+      // Keep the optimistic result visible. The final warning gives the user a
+      // deliberate refresh path instead of silently replacing it with stale data.
+    }
+  }
+  if (updateId === instanceUpdateSequence) instancesError.value = t("nacos.instanceUpdateUnconfirmed");
+}
+
+async function reconcileInstancePresence(ref: NacosInstanceRef, shouldExist: boolean, updateId: number) {
+  const currentService = selectedService.value;
+  if (!currentService || serviceIdentity(currentService) !== `${ref.groupName || "DEFAULT_GROUP"}\u0000${ref.serviceName}`) return;
+  for (const retryDelay of [0, 250, 750]) {
+    if (retryDelay) await delay(retryDelay);
+    if (updateId !== instanceUpdateSequence || serviceIdentity(selectedService.value) !== serviceIdentity(currentService)) return;
+    try {
+      const result = await api.nacosListInstances(props.connectionId, {
+        namespace: ref.namespace,
+        serviceName: ref.serviceName,
+        groupName: ref.groupName,
+        clusters: serviceCluster.value.trim() || undefined,
+      });
+      if (updateId !== instanceUpdateSequence || serviceIdentity(selectedService.value) !== serviceIdentity(currentService)) return;
+      const exists = result.some((candidate) => instanceIdentity(candidate, currentService) === instanceRefIdentity(ref));
+      if (exists === shouldExist) {
+        instances.value = result;
+        instancesError.value = "";
+        void loadServices(servicePageNo.value);
+        return;
+      }
+    } catch {
+      // Keep the optimistic list until the final warning offers a refresh.
+    }
+  }
+  if (updateId === instanceUpdateSequence) instancesError.value = shouldExist ? t("nacos.instanceRegisterUnconfirmed") : t("nacos.instanceDeregisterUnconfirmed");
+}
+
+async function updateInstance(instance: NacosInstanceInfo, patch: NacosInstancePatch) {
+  if (!selectedService.value || props.readOnly || !supportsInstanceUpdate.value) return;
+  const ref = instanceRef(instance);
+  if (!(await confirmNacosMutation(t("nacos.confirmInstanceTitle"), props.connectionId, ref.namespace || namespace.value))) return;
+  const key = instanceIdentity(instance);
+  const updateId = ++instanceUpdateSequence;
+  const operationToken = beginInstanceOperation(key);
   try {
-    await api.nacosUpdateInstance(props.connectionId, {
-      namespace: namespace.value || undefined,
-      serviceName: selectedService.value.serviceName,
-      groupName: instance.groupName || selectedService.value.groupName || serviceGroup.value || undefined,
-      clusterName: instance.clusterName,
-      ip: instance.ip,
-      port: instance.port,
-      healthy: patch.healthy ?? instance.healthy,
-      enabled: patch.enabled ?? instance.enabled,
-      ephemeral: patch.ephemeral ?? instance.ephemeral,
-      weight: patch.weight ?? instance.weight,
-      metadata: instance.metadata,
-    });
+    await api.nacosUpdateInstance(props.connectionId, { target: ref, patch });
+    if (updateId !== instanceUpdateSequence) return;
+    instances.value = instances.value.map((candidate) => (instanceIdentity(candidate) === key ? { ...candidate, ...patch } : candidate));
+    if (patch.weight != null) delete instanceWeightDrafts.value[key];
     pendingInstanceUpdate.value = null;
-    await loadInstances();
+    void reconcileInstanceUpdate(ref, patch, updateId);
+  } catch (error) {
+    if (updateId === instanceUpdateSequence) {
+      pendingInstanceUpdate.value = null;
+      instancesError.value = error instanceof Error ? error.message : String(error);
+    }
+  } finally {
+    clearInstanceOperation(key, operationToken);
+  }
+}
+
+function parseJsonObject(value: string, label: string): Record<string, unknown> {
+  const parsed = JSON.parse(value || "{}") as unknown;
+  if (!parsed || Array.isArray(parsed) || typeof parsed !== "object") throw new Error(`${label}${t("nacos.jsonObjectValidation")}`);
+  return parsed as Record<string, unknown>;
+}
+
+function parseOptionalJsonObject(value: string, label: string): Record<string, unknown> | undefined {
+  const trimmed = value.trim();
+  // Nacos rejects an empty selector object because it has no selector type.
+  // Treat an empty editor or `{}` as the absence of a selector instead.
+  if (!trimmed || trimmed === "{}") return undefined;
+  return parseJsonObject(trimmed, label);
+}
+
+function openCreateService() {
+  serviceEditorMode.value = "create";
+  serviceEditor.value = { serviceName: "", groupName: serviceGroup.value || "DEFAULT_GROUP", metadata: "{}", protectThreshold: "0", selector: "" };
+  serviceEditorError.value = "";
+  serviceEditorOpen.value = true;
+}
+
+async function openUpdateService(service: NacosServiceInfo) {
+  serviceEditorLoading.value = true;
+  serviceEditorError.value = "";
+  try {
+    const detail: NacosServiceDetail = await api.nacosGetService(props.connectionId, { namespace: namespace.value || undefined, serviceName: service.serviceName, groupName: service.groupName });
+    serviceEditorMode.value = "update";
+    serviceEditor.value = {
+      serviceName: detail.serviceName,
+      groupName: detail.groupName || service.groupName || "DEFAULT_GROUP",
+      metadata: JSON.stringify(detail.metadata ?? {}, null, 2),
+      protectThreshold: String(detail.protectThreshold ?? 0),
+      selector: detail.selector && typeof detail.selector === "object" && !Array.isArray(detail.selector) && Object.keys(detail.selector).length > 0 ? JSON.stringify(detail.selector, null, 2) : "",
+    };
+    serviceEditorOpen.value = true;
   } catch (error) {
     instancesError.value = error instanceof Error ? error.message : String(error);
   } finally {
-    updatingInstanceKey.value = "";
+    serviceEditorLoading.value = false;
+  }
+}
+
+async function submitServiceEditor() {
+  const threshold = Number(serviceEditor.value.protectThreshold);
+  if (!serviceEditor.value.serviceName.trim() || !serviceEditor.value.groupName.trim() || !Number.isFinite(threshold) || threshold < 0 || threshold > 1) {
+    serviceEditorError.value = t("nacos.serviceValidation");
+    return;
+  }
+  serviceEditorLoading.value = true;
+  serviceEditorError.value = "";
+  try {
+    const isCreating = serviceEditorMode.value === "create";
+    const targetGroup = isCreating ? serviceEditor.value.groupName.trim() : selectedService.value?.groupName || serviceEditor.value.groupName.trim();
+    const req: NacosServiceUpsert = {
+      namespace: namespace.value || undefined,
+      serviceName: serviceEditor.value.serviceName.trim(),
+      groupName: targetGroup,
+      metadata: parseJsonObject(serviceEditor.value.metadata, t("nacos.metadataLabel")),
+      protectThreshold: threshold,
+      selector: parseOptionalJsonObject(serviceEditor.value.selector, t("nacos.selectorLabel")),
+    };
+    const operation = isCreating ? t("nacos.createNacosService") : t("nacos.editNacosService");
+    if (!(await confirmNacosMutation(operation, props.connectionId, req.namespace || namespace.value))) return;
+    const mutationId = ++serviceMutationSequence;
+    if (isCreating) await api.nacosCreateService(props.connectionId, req);
+    else await api.nacosUpdateService(props.connectionId, req);
+    serviceEditorOpen.value = false;
+    if (isCreating && req.groupName) serviceGroup.value = req.groupName;
+    selectedService.value = isCreating ? { serviceName: req.serviceName, groupName: req.groupName } : { ...(selectedService.value ?? {}), serviceName: req.serviceName, groupName: req.groupName };
+    if (isCreating) instances.value = [];
+    selectedServiceDetail.value = {
+      serviceName: req.serviceName,
+      groupName: req.groupName,
+      metadata: req.metadata ?? {},
+      protectThreshold: req.protectThreshold,
+      selector: req.selector,
+      ephemeral: selectedServiceDetail.value?.ephemeral,
+    };
+    serviceDetailError.value = "";
+    await loadServicesWithRetry(1);
+    void reconcileServiceMutation(req, mutationId);
+  } catch (error) {
+    serviceEditorError.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    serviceEditorLoading.value = false;
+  }
+}
+
+async function requestDeleteService(service: NacosServiceInfo) {
+  try {
+    const existing = await api.nacosListInstances(props.connectionId, { namespace: namespace.value || undefined, serviceName: service.serviceName, groupName: service.groupName });
+    if (existing.length) {
+      instancesError.value = t("nacos.serviceHasInstances");
+      return;
+    }
+    pendingServiceDelete.value = service;
+  } catch (error) {
+    instancesError.value = error instanceof Error ? error.message : String(error);
+  }
+}
+
+async function reconcileServiceDeletion(service: NacosServiceInfo, mutationId: number) {
+  const groupName = service.groupName || "DEFAULT_GROUP";
+  for (const retryDelay of [0, 250, 750]) {
+    if (retryDelay) await delay(retryDelay);
+    if (mutationId !== serviceMutationSequence) return;
+    try {
+      const result = await api.nacosListServices(props.connectionId, {
+        namespace: namespace.value || undefined,
+        groupName,
+        serviceName: service.serviceName,
+        pageNo: 1,
+        pageSize: servicePageSize.value,
+      });
+      if (mutationId !== serviceMutationSequence) return;
+      const stillExists = result.items.some((item) => serviceIdentity(item) === `${groupName}\u0000${service.serviceName}`);
+      if (!stillExists) {
+        servicesError.value = "";
+        await loadServicesWithRetry(1);
+        return;
+      }
+    } catch {
+      // A transient read failure is not proof that the service disappeared.
+    }
+  }
+  if (mutationId === serviceMutationSequence) servicesError.value = t("nacos.serviceDeleteUnconfirmed");
+}
+
+async function deleteService(service: NacosServiceInfo) {
+  if (!(await confirmNacosMutation(t("nacos.deleteNacosService"), props.connectionId, namespace.value))) return;
+  deletingService.value = true;
+  try {
+    const mutationId = ++serviceMutationSequence;
+    await api.nacosDeleteService(props.connectionId, { namespace: namespace.value || undefined, serviceName: service.serviceName, groupName: service.groupName });
+    pendingServiceDelete.value = null;
+    services.value = services.value.filter((candidate) => serviceIdentity(candidate) !== serviceIdentity(service));
+    if (serviceIdentity(selectedService.value) === serviceIdentity(service)) {
+      selectedService.value = null;
+      selectedServiceDetail.value = null;
+      instances.value = [];
+    }
+    void reconcileServiceDeletion(service, mutationId);
+  } catch (error) {
+    pendingServiceDelete.value = null;
+    servicesError.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    deletingService.value = false;
+  }
+}
+
+async function submitInstanceRegistration() {
+  if (!selectedService.value) return;
+  const port = Number(registerInstance.value.port);
+  const weight = Number(registerInstance.value.weight);
+  if (!nacosIpAddressIsValid(registerInstance.value.ip) || !Number.isInteger(port) || port < 1 || port > 65535 || !Number.isFinite(weight) || weight < 0) {
+    registerInstanceError.value = t("nacos.instanceValidation");
+    return;
+  }
+  registeringInstance.value = true;
+  registerInstanceError.value = "";
+  try {
+    const registration = {
+      namespace: namespace.value || undefined,
+      serviceName: selectedService.value.serviceName,
+      groupName: selectedService.value.groupName || serviceGroup.value || undefined,
+      ip: registerInstance.value.ip.trim(),
+      port,
+      clusterName: registerInstance.value.clusterName.trim() || undefined,
+      weight,
+      metadata: parseJsonObject(registerInstance.value.metadata, t("nacos.metadataLabel")),
+    };
+    if (!(await confirmNacosMutation(t("nacos.registerInstance"), props.connectionId, registration.namespace || namespace.value))) return;
+    const updateId = ++instanceUpdateSequence;
+    await api.nacosRegisterInstance(props.connectionId, registration);
+    const ref: NacosInstanceRef = { ...registration, ephemeral: false };
+    if (!instances.value.some((candidate) => instanceIdentity(candidate) === instanceRefIdentity(ref))) {
+      instances.value = [
+        ...instances.value,
+        {
+          ip: registration.ip,
+          port: registration.port,
+          serviceName: registration.serviceName,
+          groupName: registration.groupName,
+          clusterName: registration.clusterName,
+          enabled: true,
+          ephemeral: false,
+          weight: registration.weight,
+          metadata: registration.metadata,
+        },
+      ];
+    }
+    registerInstanceOpen.value = false;
+    void reconcileInstancePresence(ref, true, updateId);
+  } catch (error) {
+    registerInstanceError.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    registeringInstance.value = false;
+  }
+}
+
+async function deregisterInstance(instance: NacosInstanceInfo) {
+  if (!selectedService.value) return;
+  const ref = instanceRef(instance);
+  if (!(await confirmNacosMutation(t("nacos.deregisterNacosInstance"), props.connectionId, ref.namespace || namespace.value))) return;
+  const key = instanceIdentity(instance);
+  const operationToken = beginInstanceOperation(key);
+  try {
+    const updateId = ++instanceUpdateSequence;
+    await api.nacosDeregisterInstance(props.connectionId, ref);
+    pendingInstanceDeregister.value = null;
+    instances.value = instances.value.filter((candidate) => instanceIdentity(candidate) !== instanceIdentity(instance));
+    void reconcileInstancePresence(ref, false, updateId);
+  } catch (error) {
+    pendingInstanceDeregister.value = null;
+    instancesError.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    clearInstanceOperation(key, operationToken);
   }
 }
 
@@ -1536,6 +2161,7 @@ watch(
   () => [props.connectionId, props.namespace] as const,
   async () => {
     closePendingConfigMutationConfirmations();
+    configListRequestGuard.invalidate();
     configDetailRequestGuard.invalidate();
     configEditorSessionId += 1;
     latestConfigSaveRequestId += 1;
@@ -1552,6 +2178,15 @@ watch(
     originalConfigContent.value = "";
     destroyConfigEditor();
     selectedService.value = null;
+    selectedServiceDetail.value = null;
+    serviceDetailError.value = "";
+    servicesRequestGuard.invalidate();
+    serviceDetailRequestGuard.invalidate();
+    instancesRequestGuard.invalidate();
+    instanceUpdateSequence += 1;
+    serviceMutationSequence += 1;
+    instances.value = [];
+    instancesError.value = "";
     selectedConfigKeys.value = [];
     try {
       await connectionStore.ensureConnected(props.connectionId);
@@ -1576,7 +2211,13 @@ onMounted(async () => {
 });
 
 onBeforeUnmount(() => {
+  configListRequestGuard.invalidate();
   configDetailRequestGuard.invalidate();
+  servicesRequestGuard.invalidate();
+  serviceDetailRequestGuard.invalidate();
+  instancesRequestGuard.invalidate();
+  instanceUpdateSequence += 1;
+  serviceMutationSequence += 1;
   configEditorSessionId += 1;
   latestConfigSaveRequestId += 1;
   batchNamespacesRequestGuard.invalidate();
@@ -1598,6 +2239,7 @@ onBeforeUnmount(() => {
         <Badge v-if="connectionInfo?.serverVersion" variant="secondary">{{ connectionInfo.serverVersion }}</Badge>
         <Badge variant="outline">{{ namespaceLabel }}</Badge>
         <Badge v-if="namespaceIdLabel" variant="outline" class="max-w-72 truncate font-mono">{{ namespaceIdLabel }}</Badge>
+        <ProductionContextBadge v-if="nacosProductionContext.active" compact />
         <Badge v-if="readOnly" variant="outline">{{ t("nacos.readOnly") }}</Badge>
       </div>
       <div class="flex min-w-0 flex-wrap items-center justify-end gap-2">
@@ -1633,16 +2275,52 @@ onBeforeUnmount(() => {
 
     <div class="flex shrink-0 items-center gap-1 border-b px-3 py-1.5">
       <button class="rounded px-3 py-1.5 text-sm" :class="activeTab === 'configs' ? 'bg-accent font-medium' : 'text-muted-foreground hover:bg-accent/60'" @click="activeTab = 'configs'">{{ t("nacos.configs") }}</button>
-      <button class="rounded px-3 py-1.5 text-sm" :class="activeTab === 'services' ? 'bg-accent font-medium' : 'text-muted-foreground hover:bg-accent/60'" @click="activeTab = 'services'">{{ t("nacos.services") }}</button>
+      <button class="rounded px-3 py-1.5 text-sm" :class="activeTab === 'services' ? 'bg-accent font-medium' : 'text-muted-foreground hover:bg-accent/60'" :disabled="!supportsServiceManagement" @click="activeTab = 'services'">{{ t("nacos.services") }}</button>
     </div>
 
     <Splitpanes v-if="activeTab === 'configs'" class="nacos-admin-splitpanes min-h-0 flex-1" @resized="handleNacosSplitResized">
       <Pane :size="nacosSplitSize" min-size="24">
         <div class="flex h-full min-h-0 flex-col">
           <div class="grid shrink-0 grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(0,1fr)_auto_auto] gap-2 border-b p-2">
-            <Input v-model="configDataId" class="h-8 min-w-0" placeholder="dataId" @keyup.enter="loadConfigsWithRetry(1)" />
-            <Input v-model="configGroup" class="h-8 min-w-0" :placeholder="t('nacos.allGroups')" @keyup.enter="loadConfigsWithRetry(1)" />
-            <Input v-model="configAppName" class="h-8 min-w-0" :placeholder="t('nacos.application')" @keyup.enter="loadConfigsWithRetry(1)" />
+            <div class="relative min-w-0">
+              <Input v-model="configDataId" class="h-8 min-w-0 pr-8" placeholder="dataId" @keyup.enter="loadConfigsWithRetry(1)" />
+              <button
+                v-if="configDataId"
+                type="button"
+                class="absolute right-2 top-1/2 flex h-5 w-5 -translate-y-1/2 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground"
+                :title="t('nacos.clear')"
+                :aria-label="t('nacos.clear')"
+                @click="clearConfigFilter('dataId')"
+              >
+                <X class="h-3.5 w-3.5" />
+              </button>
+            </div>
+            <div class="relative min-w-0">
+              <Input v-model="configGroup" class="h-8 min-w-0 pr-8" :placeholder="t('nacos.allGroups')" @keyup.enter="loadConfigsWithRetry(1)" />
+              <button
+                v-if="configGroup"
+                type="button"
+                class="absolute right-2 top-1/2 flex h-5 w-5 -translate-y-1/2 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground"
+                :title="t('nacos.clear')"
+                :aria-label="t('nacos.clear')"
+                @click="clearConfigFilter('group')"
+              >
+                <X class="h-3.5 w-3.5" />
+              </button>
+            </div>
+            <div class="relative min-w-0">
+              <Input v-model="configAppName" class="h-8 min-w-0 pr-8" :placeholder="t('nacos.application')" @keyup.enter="loadConfigsWithRetry(1)" />
+              <button
+                v-if="configAppName"
+                type="button"
+                class="absolute right-2 top-1/2 flex h-5 w-5 -translate-y-1/2 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground"
+                :title="t('nacos.clear')"
+                :aria-label="t('nacos.clear')"
+                @click="clearConfigFilter('appName')"
+              >
+                <X class="h-3.5 w-3.5" />
+              </button>
+            </div>
             <Button size="sm" variant="outline" class="h-8 w-9 px-0" :title="t('nacos.load')" :disabled="configLoading" @click="loadConfigsWithRetry(1)">
               <Loader2 v-if="configLoading" class="h-3.5 w-3.5 animate-spin" />
               <RefreshCw v-else class="h-3.5 w-3.5" />
@@ -1900,10 +2578,37 @@ onBeforeUnmount(() => {
     <Splitpanes v-else-if="activeTab === 'services'" class="nacos-admin-splitpanes min-h-0 flex-1" @resized="handleNacosSplitResized">
       <Pane :size="nacosSplitSize" min-size="24">
         <div class="flex h-full min-h-0 flex-col">
-          <div class="grid shrink-0 grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(0,1fr)_auto] gap-2 border-b p-2">
-            <Input v-model="serviceName" class="h-8 min-w-0" :placeholder="t('nacos.service')" @keyup.enter="loadServicesWithRetry(1)" />
-            <Input v-model="serviceGroup" class="h-8 min-w-0" :placeholder="t('nacos.allGroups')" @keyup.enter="loadServicesWithRetry(1)" />
-            <Input v-model="serviceCluster" class="h-8 min-w-0" :placeholder="t('nacos.cluster')" @keyup.enter="loadInstances" />
+          <div class="grid shrink-0 grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto_auto] gap-2 border-b p-2">
+            <div class="relative min-w-0">
+              <Input v-model="serviceName" class="h-8 min-w-0 pr-8" :placeholder="t('nacos.service')" @keyup.enter="loadServicesWithRetry(1)" />
+              <button
+                v-if="serviceName"
+                type="button"
+                class="absolute right-2 top-1/2 flex h-5 w-5 -translate-y-1/2 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground"
+                :title="t('nacos.clear')"
+                :aria-label="t('nacos.clear')"
+                @click="clearServiceFilter('name')"
+              >
+                <X class="h-3.5 w-3.5" />
+              </button>
+            </div>
+            <div class="relative min-w-0">
+              <Input v-model="serviceGroup" class="h-8 min-w-0 pr-8" :placeholder="t('nacos.allGroups')" @keyup.enter="loadServicesWithRetry(1)" />
+              <button
+                v-if="serviceGroup"
+                type="button"
+                class="absolute right-2 top-1/2 flex h-5 w-5 -translate-y-1/2 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground"
+                :title="t('nacos.clear')"
+                :aria-label="t('nacos.clear')"
+                @click="clearServiceFilter('group')"
+              >
+                <X class="h-3.5 w-3.5" />
+              </button>
+            </div>
+            <Button size="sm" variant="outline" class="h-8 gap-1.5" :disabled="readOnly || !createServiceCapability.supported" :title="readOnly || !createServiceCapability.supported ? capabilityReason(createServiceCapability) : undefined" @click="openCreateService">
+              <Plus class="h-3.5 w-3.5" />
+              {{ t("nacos.service") }}
+            </Button>
             <Button size="sm" variant="outline" class="h-8 gap-1.5" :disabled="servicesLoading" @click="loadServicesWithRetry(1)">
               <Loader2 v-if="servicesLoading" class="h-3.5 w-3.5 animate-spin" />
               <RefreshCw v-else class="h-3.5 w-3.5" />
@@ -1921,10 +2626,13 @@ onBeforeUnmount(() => {
               @click="selectService(service)"
             >
               <span class="truncate font-medium">{{ service.serviceName }}</span>
-              <span class="flex items-center gap-2 text-xs text-muted-foreground">
+              <span class="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
                 <Server class="h-3.5 w-3.5" />
                 {{ service.groupName || serviceGroup }}
                 <span v-if="service.ipCount != null">· {{ t("nacos.instanceCount", { count: service.ipCount }) }}</span>
+                <span v-if="service.healthyInstanceCount != null">· {{ t("nacos.healthy") }} {{ service.healthyInstanceCount }}</span>
+                <span v-if="service.clusterCount != null">· {{ t("nacos.cluster") }} {{ service.clusterCount }}</span>
+                <Badge v-if="service.triggerFlag === 'true'" variant="outline" class="h-5 border-amber-500 text-amber-700">{{ t("nacos.protectionTriggered") }}</Badge>
               </span>
             </button>
             <div v-if="!servicesLoading && services.length === 0" class="flex h-full items-center justify-center text-sm text-muted-foreground">{{ t("nacos.noServices") }}</div>
@@ -1942,65 +2650,183 @@ onBeforeUnmount(() => {
 
       <Pane :size="100 - nacosSplitSize" min-size="20">
         <div class="flex h-full min-h-0 flex-col">
-          <div class="flex shrink-0 items-center justify-between border-b px-3 py-2">
-            <div class="truncate text-sm font-medium">{{ selectedService?.serviceName || t("nacos.instances") }}</div>
-            <Button size="sm" variant="outline" class="h-8 gap-1.5" :disabled="!selectedService || instancesLoading" @click="loadInstances">
-              <Loader2 v-if="instancesLoading" class="h-3.5 w-3.5 animate-spin" />
-              <RefreshCw v-else class="h-3.5 w-3.5" />
-              {{ t("nacos.refresh") }}
-            </Button>
+          <header class="shrink-0 border-b bg-background">
+            <div class="flex min-h-16 flex-wrap items-center gap-x-3 gap-y-2 px-4 py-3">
+              <div class="min-w-0 flex-1">
+                <div class="truncate text-base font-semibold">{{ selectedService?.serviceName || t("nacos.instances") }}</div>
+                <div v-if="selectedService" class="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
+                  <span>{{ selectedService.groupName || "DEFAULT_GROUP" }}</span>
+                  <span>· {{ t("nacos.loadedInstances", { count: instances.length }) }}</span>
+                  <Badge v-if="selectedServiceProtectionTriggered" variant="outline" class="h-5 border-amber-500 text-amber-700">{{ t("nacos.protectionTriggered") }}</Badge>
+                </div>
+              </div>
+              <Button size="sm" variant="outline" class="h-8 shrink-0 gap-1.5" :disabled="!selectedService || instancesLoading || serviceDetailLoading" @click="refreshSelectedService">
+                <Loader2 v-if="instancesLoading" class="h-3.5 w-3.5 animate-spin" />
+                <RefreshCw v-else class="h-3.5 w-3.5" />
+                {{ t("nacos.refresh") }}
+              </Button>
+            </div>
+            <div v-if="selectedService" class="flex flex-wrap items-center gap-x-4 gap-y-2 border-t bg-muted/30 px-4 py-2">
+              <div class="flex shrink-0 items-center gap-1">
+                <Input v-model="serviceCluster" class="h-8 w-40" :placeholder="t('nacos.filterInstanceCluster')" @keyup.enter="loadInstances" />
+                <Button size="sm" variant="secondary" class="h-8" :disabled="instancesLoading" @click="loadInstances">{{ t("nacos.filter") }}</Button>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  class="h-8 px-2"
+                  :class="{ invisible: !serviceCluster }"
+                  :disabled="instancesLoading || !serviceCluster"
+                  @click="
+                    serviceCluster = '';
+                    loadInstances();
+                  "
+                  >{{ t("nacos.clear") }}</Button
+                >
+              </div>
+              <div class="ml-auto flex flex-wrap items-center gap-2">
+                <div class="flex items-center gap-1 rounded-md border bg-background p-1">
+                  <span class="px-1 text-xs text-muted-foreground">{{ t("nacos.serviceSettings") }}</span>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    class="h-7"
+                    :disabled="readOnly || !updateServiceCapability.supported || serviceEditorLoading"
+                    :title="readOnly || !updateServiceCapability.supported ? capabilityReason(updateServiceCapability) : undefined"
+                    @click="openUpdateService(selectedService)"
+                    >{{ t("nacos.edit") }}</Button
+                  >
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    class="h-7 text-destructive hover:text-destructive"
+                    :disabled="readOnly || !deleteServiceCapability.supported"
+                    :title="readOnly || !deleteServiceCapability.supported ? capabilityReason(deleteServiceCapability) : undefined"
+                    @click="requestDeleteService(selectedService)"
+                    >{{ t("nacos.delete") }}</Button
+                  >
+                </div>
+                <div class="flex items-center gap-1 rounded-md border bg-background p-1">
+                  <span class="px-1 text-xs text-muted-foreground">{{ t("nacos.instances") }}</span>
+                  <Button size="sm" class="h-7" :disabled="readOnly || !registerInstanceCapability.supported" :title="readOnly || !registerInstanceCapability.supported ? capabilityReason(registerInstanceCapability) : undefined" @click="registerInstanceOpen = true">{{
+                    t("nacos.registerInstance")
+                  }}</Button>
+                </div>
+              </div>
+            </div>
+          </header>
+          <div v-if="serviceWriteNotice" class="shrink-0 border-b bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
+            {{ serviceWriteNotice }}
           </div>
+          <div v-if="selectedServiceProtectionTriggered" class="shrink-0 border-b border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900 dark:border-amber-900/60 dark:bg-amber-950/30 dark:text-amber-200">
+            {{ t("nacos.protectionTriggeredDescription") }}
+          </div>
+          <section v-if="selectedService" class="shrink-0 border-b bg-background px-3 py-2">
+            <button type="button" class="flex w-full items-center justify-between gap-3 text-left" @click="serviceDetailExpanded = !serviceDetailExpanded">
+              <span class="text-xs font-medium">{{ t("nacos.serviceDetails") }}</span>
+              <span class="text-xs text-muted-foreground">{{ serviceDetailExpanded ? t("nacos.collapse") : t("nacos.expand") }}</span>
+            </button>
+            <div class="mt-2 grid grid-cols-2 gap-2 text-xs sm:grid-cols-4">
+              <div class="rounded border bg-muted/20 px-2 py-1.5">
+                <div class="text-muted-foreground">{{ t("nacos.instanceStat") }}</div>
+                <div class="mt-0.5 font-medium">{{ selectedService.ipCount ?? instances.length }}</div>
+              </div>
+              <div class="rounded border bg-muted/20 px-2 py-1.5">
+                <div class="text-muted-foreground">{{ t("nacos.healthyInstances") }}</div>
+                <div class="mt-0.5 font-medium">{{ selectedService.healthyInstanceCount ?? instances.filter((instance) => instance.healthy === true).length }}</div>
+              </div>
+              <div class="rounded border bg-muted/20 px-2 py-1.5">
+                <div class="text-muted-foreground">{{ t("nacos.clusterCount") }}</div>
+                <div class="mt-0.5 font-medium">{{ selectedService.clusterCount ?? new Set(instances.map((instance) => instance.clusterName || "DEFAULT")).size }}</div>
+              </div>
+              <div class="rounded border bg-muted/20 px-2 py-1.5">
+                <div class="text-muted-foreground">{{ t("nacos.protectThreshold") }}</div>
+                <div class="mt-0.5 font-medium">{{ selectedServiceDetail?.protectThreshold ?? "-" }}</div>
+              </div>
+            </div>
+            <div v-if="serviceDetailExpanded" class="mt-2 grid gap-2 text-xs lg:grid-cols-2">
+              <div class="min-w-0 rounded border p-2">
+                <div class="mb-1 flex items-center justify-between text-muted-foreground">
+                  <span>{{ t("nacos.metadataLabel") }}</span
+                  ><span>{{ t("nacos.itemCount", { count: selectedServiceDetail?.metadata && typeof selectedServiceDetail.metadata === "object" ? Object.keys(selectedServiceDetail.metadata).length : 0 }) }}</span>
+                </div>
+                <pre class="max-h-28 overflow-auto whitespace-pre-wrap break-all rounded bg-muted p-2 font-mono text-[11px]">{{ JSON.stringify(selectedServiceDetail?.metadata ?? {}, null, 2) }}</pre>
+              </div>
+              <div class="min-w-0 rounded border p-2">
+                <div class="mb-1 flex items-center justify-between text-muted-foreground">
+                  <span>{{ t("nacos.selectorLabel") }}</span
+                  ><span v-if="selectedServiceDetail?.ephemeral != null">{{ selectedServiceDetail.ephemeral ? t("nacos.temporaryService") : t("nacos.persistent") }}</span>
+                </div>
+                <pre class="max-h-28 overflow-auto whitespace-pre-wrap break-all rounded bg-muted p-2 font-mono text-[11px]">{{ JSON.stringify(selectedServiceDetail?.selector ?? {}, null, 2) }}</pre>
+              </div>
+            </div>
+            <div v-if="serviceDetailLoading" class="mt-2 text-xs text-muted-foreground">{{ t("nacos.loadingServiceDetail") }}</div>
+            <div v-if="serviceDetailError" class="mt-2 flex items-center justify-between gap-2 text-xs text-destructive">
+              <span>{{ serviceDetailError }}</span>
+              <Button size="sm" variant="outline" class="h-7 shrink-0" @click="loadServiceDetail">{{ t("nacos.refreshDetail") }}</Button>
+            </div>
+          </section>
           <div v-if="instancesError" class="border-b px-3 py-2 text-xs text-destructive">{{ instancesError }}</div>
-          <div class="min-h-0 flex-1 overflow-auto">
-            <table v-if="instances.length" class="w-full text-left text-sm">
-              <thead class="sticky top-0 bg-muted/80 text-xs text-muted-foreground">
-                <tr>
-                  <th class="px-3 py-2 font-medium">{{ t("nacos.address") }}</th>
-                  <th class="px-3 py-2 font-medium">{{ t("nacos.cluster") }}</th>
-                  <th class="px-3 py-2 font-medium">{{ t("nacos.weight") }}</th>
-                  <th class="px-3 py-2 font-medium">metadata</th>
-                  <th class="px-3 py-2 font-medium">{{ t("nacos.state") }}</th>
-                  <th class="px-3 py-2 text-right font-medium">{{ t("nacos.actions") }}</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr v-for="instance in instances" :key="`${instance.ip}:${instance.port}`" class="border-b">
-                  <td class="px-3 py-2 font-mono text-xs">{{ instance.ip }}:{{ instance.port }}</td>
-                  <td class="px-3 py-2">{{ instance.clusterName || "-" }}</td>
-                  <td class="px-3 py-2">
-                    <Input
-                      :model-value="instance.weight ?? 1"
-                      type="number"
-                      min="0"
-                      step="0.1"
-                      class="h-7 w-20 text-xs"
-                      :disabled="readOnly || updatingInstanceKey === `${instance.ip}:${instance.port}`"
-                      @change="(event: Event) => requestUpdateInstance(instance, { weight: Number((event.target as HTMLInputElement).value) })"
-                    />
-                  </td>
-                  <td class="max-w-56 truncate px-3 py-2 font-mono text-xs" :title="JSON.stringify(instance.metadata ?? null)">{{ JSON.stringify(instance.metadata ?? null) }}</td>
-                  <td class="px-3 py-2">
-                    <div class="flex flex-wrap gap-1">
-                      <Badge :variant="instance.healthy === false ? 'outline' : 'secondary'">{{ instance.healthy === false ? t("nacos.unhealthy") : t("nacos.healthy") }}</Badge>
-                      <Badge :variant="instance.enabled === false ? 'outline' : 'secondary'">{{ instance.enabled === false ? t("nacos.offline") : t("nacos.enabled") }}</Badge>
+          <div class="min-h-0 flex-1 overflow-auto bg-muted/20 p-3">
+            <div v-if="instances.length" class="space-y-2">
+              <article v-for="instance in instances" :key="instanceIdentity(instance)" class="rounded-lg border bg-background p-3 shadow-sm">
+                <div class="flex flex-col gap-3 xl:flex-row xl:items-start xl:justify-between">
+                  <div class="min-w-0 flex-1">
+                    <div class="flex flex-wrap items-center gap-2">
+                      <span class="font-mono text-sm font-medium">{{ instance.ip }}:{{ instance.port }}</span>
+                      <Badge variant="outline">{{ instance.clusterName || "DEFAULT" }}</Badge>
+                      <Badge variant="outline" :class="instance.healthy === false ? 'border-destructive/50 text-destructive' : 'border-emerald-500/50 text-emerald-700 dark:text-emerald-300'">{{ instance.healthy === false ? t("nacos.unhealthy") : t("nacos.healthy") }}</Badge>
+                      <Badge :variant="instance.enabled === false ? 'outline' : 'secondary'" :class="instance.enabled === false ? 'border-muted-foreground/50 text-muted-foreground' : ''">{{ instance.enabled === false ? t("nacos.offline") : t("nacos.enabled") }}</Badge>
                       <Badge v-if="instance.ephemeral != null" variant="outline">{{ instance.ephemeral ? t("nacos.ephemeral") : t("nacos.persistent") }}</Badge>
                     </div>
-                  </td>
-                  <td class="px-3 py-2 text-right">
-                    <div class="inline-flex gap-2">
-                      <Button size="sm" variant="outline" class="h-7 gap-1" :disabled="readOnly || updatingInstanceKey === `${instance.ip}:${instance.port}`" @click="requestUpdateInstance(instance, { enabled: !instance.enabled })">
-                        <Loader2 v-if="updatingInstanceKey === `${instance.ip}:${instance.port}`" class="h-3 w-3 animate-spin" />
-                        {{ instance.enabled === false ? t("nacos.enable") : t("nacos.disable") }}
-                      </Button>
-                      <Button size="sm" variant="outline" class="h-7" :disabled="readOnly || updatingInstanceKey === `${instance.ip}:${instance.port}`" @click="requestUpdateInstance(instance, { healthy: !instance.healthy })">
-                        {{ instance.healthy === false ? t("nacos.markHealthy") : t("nacos.markUnhealthy") }}
-                      </Button>
+                    <div class="mt-3 grid gap-x-5 gap-y-3 text-xs sm:grid-cols-[auto_minmax(0,1fr)]">
+                      <div class="flex items-end gap-1 self-start">
+                        <label class="grid gap-1 text-muted-foreground">
+                          <span>{{ t("nacos.weight") }}</span>
+                          <Input
+                            :model-value="instanceWeightDraft(instance)"
+                            type="number"
+                            min="0"
+                            step="0.1"
+                            class="h-7 w-24 text-xs text-foreground"
+                            :disabled="readOnly || !supportsInstanceUpdate || isInstanceUpdating(instance)"
+                            @update:model-value="(value: string | number) => updateInstanceWeightDraft(instance, value)"
+                          />
+                        </label>
+                        <div v-if="hasInstanceWeightDraft(instance)" class="flex items-end gap-1">
+                          <Button size="sm" class="h-7" :disabled="readOnly || !supportsInstanceUpdate || isInstanceUpdating(instance)" @click="requestInstanceWeightUpdate(instance)">{{ t("nacos.save") }}</Button>
+                          <Button size="sm" variant="ghost" class="h-7 px-2" :disabled="isInstanceUpdating(instance)" @click="resetInstanceWeightDraft(instance)">{{ t("nacos.restore") }}</Button>
+                        </div>
+                      </div>
+                      <details v-if="instance.metadata && Object.keys(instance.metadata).length" class="min-w-0 self-start text-muted-foreground">
+                        <summary class="cursor-pointer select-none hover:text-foreground">{{ t("nacos.metadataLabel") }}（{{ t("nacos.itemCount", { count: Object.keys(instance.metadata).length }) }}）</summary>
+                        <pre class="mt-1 max-h-32 max-w-full overflow-auto rounded bg-muted p-2 font-mono text-[11px] text-foreground">{{ JSON.stringify(instance.metadata, null, 2) }}</pre>
+                      </details>
+                      <span v-else class="self-start text-muted-foreground">{{ t("nacos.noMetadata") }}</span>
                     </div>
-                  </td>
-                </tr>
-              </tbody>
-            </table>
-            <div v-else class="flex h-full items-center justify-center text-sm text-muted-foreground">{{ t("nacos.selectService") }}</div>
+                  </div>
+                  <div class="flex shrink-0 flex-wrap items-center gap-2 xl:justify-end">
+                    <Button size="sm" variant="outline" class="h-7" :disabled="readOnly || !supportsInstanceUpdate || isInstanceUpdating(instance)" @click="openInstanceEditor(instance)">{{ t("nacos.edit") }}</Button>
+                    <Button size="sm" variant="outline" class="h-7 gap-1" :disabled="readOnly || !supportsInstanceUpdate || isInstanceUpdating(instance)" @click="requestUpdateInstance(instance, { enabled: !instance.enabled })">
+                      <Loader2 v-if="isInstanceUpdating(instance)" class="h-3 w-3 animate-spin" />
+                      {{ instance.enabled === false ? t("nacos.enable") : t("nacos.disable") }}
+                    </Button>
+                    <Button size="sm" variant="outline" class="h-7" :disabled="readOnly || !supportsInstanceUpdate || isInstanceUpdating(instance)" @click="requestUpdateInstance(instance, { healthy: !instance.healthy })">
+                      {{ instance.healthy === false ? t("nacos.markHealthy") : t("nacos.markUnhealthy") }}
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      class="h-7 text-destructive"
+                      :disabled="readOnly || !deregisterInstanceCapability.supported || isInstanceUpdating(instance)"
+                      :title="readOnly || !deregisterInstanceCapability.supported ? capabilityReason(deregisterInstanceCapability) : undefined"
+                      @click="pendingInstanceDeregister = instance"
+                      >{{ t("nacos.deregister") }}</Button
+                    >
+                  </div>
+                </div>
+              </article>
+            </div>
+            <div v-else class="flex h-full items-center justify-center text-sm text-muted-foreground">{{ selectedService ? t("nacos.noInstances") : t("nacos.selectService") }}</div>
           </div>
         </div>
       </Pane>
@@ -2104,6 +2930,99 @@ onBeforeUnmount(() => {
       @confirm="requestRollbackComparedHistory"
     />
 
+    <Dialog v-model:open="serviceEditorOpen">
+      <DialogContent class="sm:max-w-xl" @pointer-down-outside.prevent @interact-outside.prevent @escape-key-down.prevent>
+        <DialogHeader>
+          <DialogTitle>{{ serviceEditorMode === "create" ? t("nacos.createNacosService") : t("nacos.editNacosService") }}</DialogTitle>
+          <DialogDescription>{{ t("nacos.manageServiceMetadata") }}</DialogDescription>
+        </DialogHeader>
+        <div class="grid gap-3 sm:grid-cols-2">
+          <div class="space-y-1.5">
+            <Label>{{ t("nacos.serviceName") }}</Label
+            ><Input v-model="serviceEditor.serviceName" :disabled="serviceEditorMode === 'update'" />
+          </div>
+          <div class="space-y-1.5">
+            <Label>{{ t("nacos.groupName") }}</Label
+            ><Input v-model="serviceEditor.groupName" :disabled="serviceEditorMode === 'update'" />
+          </div>
+          <div class="space-y-1.5">
+            <Label>{{ t("nacos.protectThreshold") }}</Label
+            ><Input v-model="serviceEditor.protectThreshold" inputmode="decimal" :placeholder="t('nacos.thresholdExample')" />
+          </div>
+          <div class="space-y-1.5">
+            <Label>{{ t("nacos.metadataLabel") }}（{{ t("nacos.jsonObject") }}）</Label><textarea v-model="serviceEditor.metadata" class="min-h-24 w-full rounded-md border bg-background p-2 font-mono text-xs" />
+          </div>
+          <div class="space-y-1.5 sm:col-span-2">
+            <Label>{{ t("nacos.selectorLabel") }}（{{ t("nacos.optionalJsonObject") }}）</Label><textarea v-model="serviceEditor.selector" class="min-h-20 w-full rounded-md border bg-background p-2 font-mono text-xs" />
+          </div>
+          <p v-if="serviceEditorError" class="text-xs text-destructive sm:col-span-2">{{ serviceEditorError }}</p>
+        </div>
+        <DialogFooter
+          ><Button variant="outline" :disabled="serviceEditorLoading" @click="serviceEditorOpen = false">{{ t("nacos.cancel") }}</Button
+          ><Button :disabled="serviceEditorLoading" @click="submitServiceEditor"><Loader2 v-if="serviceEditorLoading" class="mr-2 h-4 w-4 animate-spin" />{{ t("nacos.save") }}</Button></DialogFooter
+        >
+      </DialogContent>
+    </Dialog>
+
+    <Dialog v-model:open="registerInstanceOpen">
+      <DialogContent class="sm:max-w-lg" @pointer-down-outside.prevent @interact-outside.prevent @escape-key-down.prevent>
+        <DialogHeader
+          ><DialogTitle>{{ t("nacos.registerPersistentInstance") }}</DialogTitle
+          ><DialogDescription>{{ t("nacos.persistentInstanceHint") }}</DialogDescription></DialogHeader
+        >
+        <div class="grid gap-3 sm:grid-cols-2">
+          <div class="space-y-1.5">
+            <Label>{{ t("nacos.ipAddress") }}</Label
+            ><Input v-model="registerInstance.ip" />
+          </div>
+          <div class="space-y-1.5">
+            <Label>{{ t("nacos.port") }}</Label
+            ><Input v-model="registerInstance.port" type="number" min="1" max="65535" />
+          </div>
+          <div class="space-y-1.5">
+            <Label>{{ t("nacos.cluster") }}</Label
+            ><Input v-model="registerInstance.clusterName" />
+          </div>
+          <div class="space-y-1.5">
+            <Label>{{ t("nacos.weight") }}</Label
+            ><Input v-model="registerInstance.weight" type="number" min="0" step="0.1" />
+          </div>
+          <div class="space-y-1.5 sm:col-span-2">
+            <Label>{{ t("nacos.metadataLabel") }}（{{ t("nacos.jsonObject") }}）</Label><textarea v-model="registerInstance.metadata" class="min-h-20 w-full rounded-md border bg-background p-2 font-mono text-xs" />
+          </div>
+          <p v-if="registerInstanceError" class="text-xs text-destructive sm:col-span-2">{{ registerInstanceError }}</p>
+        </div>
+        <DialogFooter
+          ><Button variant="outline" :disabled="registeringInstance" @click="registerInstanceOpen = false">{{ t("nacos.cancel") }}</Button
+          ><Button :disabled="registeringInstance" @click="submitInstanceRegistration"><Loader2 v-if="registeringInstance" class="mr-2 h-4 w-4 animate-spin" />{{ t("nacos.registerInstance") }}</Button></DialogFooter
+        >
+      </DialogContent>
+    </Dialog>
+
+    <Dialog v-model:open="instanceEditorOpen">
+      <DialogContent class="sm:max-w-lg" @pointer-down-outside.prevent @interact-outside.prevent @escape-key-down.prevent>
+        <DialogHeader>
+          <DialogTitle>{{ t("nacos.instanceEditorTitle") }}</DialogTitle>
+          <DialogDescription>{{ instanceEditorTarget ? `${instanceEditorTarget.ip}:${instanceEditorTarget.port} · ${instanceEditorTarget.clusterName || "DEFAULT"}` : "" }}</DialogDescription>
+        </DialogHeader>
+        <div class="grid gap-3">
+          <div class="space-y-1.5">
+            <Label>{{ t("nacos.weight") }}</Label>
+            <Input v-model="instanceEditor.weight" type="number" min="0" step="0.1" />
+          </div>
+          <div class="space-y-1.5">
+            <Label>{{ t("nacos.metadataLabel") }}（{{ t("nacos.jsonObject") }}）</Label>
+            <textarea v-model="instanceEditor.metadata" class="min-h-36 w-full rounded-md border bg-background p-2 font-mono text-xs" />
+          </div>
+          <p v-if="instanceEditorError" class="text-xs text-destructive">{{ instanceEditorError }}</p>
+        </div>
+        <DialogFooter>
+          <Button variant="outline" @click="instanceEditorOpen = false">{{ t("nacos.cancel") }}</Button>
+          <Button @click="submitInstanceEditor">{{ t("nacos.save") }}</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+
     <DangerConfirmDialog
       :open="!!pendingDeleteConfig"
       :title="t('nacos.confirmDeleteTitle')"
@@ -2142,14 +3061,46 @@ onBeforeUnmount(() => {
       :message="t('nacos.confirmInstanceMessage')"
       :details="pendingInstanceDetails"
       :confirm-label="t('dangerDialog.confirm')"
-      :loading="!!updatingInstanceKey"
+      :loading="pendingInstanceUpdate ? isInstanceUpdating(pendingInstanceUpdate.instance) : false"
       :close-on-confirm="false"
       @update:open="
         (value: boolean) => {
-          if (!value && !updatingInstanceKey) pendingInstanceUpdate = null;
+          if (!value && (!pendingInstanceUpdate || !isInstanceUpdating(pendingInstanceUpdate.instance))) pendingInstanceUpdate = null;
         }
       "
       @confirm="pendingInstanceUpdate && updateInstance(pendingInstanceUpdate.instance, pendingInstanceUpdate.patch)"
+    />
+
+    <DangerConfirmDialog
+      :open="!!pendingServiceDelete"
+      :title="t('nacos.deleteNacosService')"
+      :message="t('nacos.confirmEmptyServiceDelete')"
+      :details="pendingServiceDelete ? `${pendingServiceDelete.groupName || 'DEFAULT_GROUP'}@@${pendingServiceDelete.serviceName}` : ''"
+      :confirm-label="t('nacos.delete')"
+      :loading="deletingService"
+      :close-on-confirm="false"
+      @update:open="
+        (value: boolean) => {
+          if (!value && !deletingService) pendingServiceDelete = null;
+        }
+      "
+      @confirm="pendingServiceDelete && deleteService(pendingServiceDelete)"
+    />
+
+    <DangerConfirmDialog
+      :open="!!pendingInstanceDeregister"
+      :title="t('nacos.deregisterNacosInstance')"
+      :message="t('nacos.confirmInstanceDeregister')"
+      :details="pendingInstanceDeregisterDetails"
+      :confirm-label="t('nacos.deregister')"
+      :loading="pendingInstanceDeregister ? isInstanceUpdating(pendingInstanceDeregister) : false"
+      :close-on-confirm="false"
+      @update:open="
+        (value: boolean) => {
+          if (!value && (!pendingInstanceDeregister || !isInstanceUpdating(pendingInstanceDeregister))) pendingInstanceDeregister = null;
+        }
+      "
+      @confirm="pendingInstanceDeregister && deregisterInstance(pendingInstanceDeregister)"
     />
   </div>
 </template>

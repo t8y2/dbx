@@ -95,6 +95,14 @@ fn classify_statement(stmt: &Statement, detect_select_into: bool) -> SqlRisk {
         | Statement::ShowStatus { .. }
         | Statement::ShowProcessList { .. } => SqlRisk::ReadOnly,
 
+        // sqlparser has no dedicated MySQL `SHOW TRIGGERS` node and uses its
+        // loose `ShowVariable` fallback, with TRIGGERS as the first identifier.
+        Statement::ShowVariable { variable }
+            if variable.first().is_some_and(|identifier| identifier.value.eq_ignore_ascii_case("triggers")) =>
+        {
+            SqlRisk::ReadOnly
+        }
+
         // Write operations
         Statement::Insert { .. } | Statement::Update { .. } | Statement::Delete { .. } | Statement::Merge { .. } => {
             SqlRisk::Write
@@ -797,8 +805,15 @@ fn classify_sql_risk_with_database(
     let parser_dialect = resolve_dialect(normalized_dialect);
     let detect_select_into = database_type.is_none();
     let has_locking_clause = sql_contains_top_level_locking_clause(sql, parser_dialect.as_ref());
-    let has_dialect_specific_write = database_type
-        .is_some_and(|database_type| crate::query_execution_sql::has_dialect_specific_write(sql, database_type));
+    let has_dialect_specific_write = match database_type {
+        Some(database_type) => crate::query_execution_sql::has_dialect_specific_write(sql, database_type),
+        // Preserve MySQL executable-comment and file-output detection even
+        // when callers provide a dialect string instead of a database type.
+        None if normalized_dialect == "mysql" => {
+            crate::query_execution_sql::has_dialect_specific_write(sql, DatabaseType::Mysql)
+        }
+        None => false,
+    };
 
     match Parser::parse_sql(parser_dialect.as_ref(), sql) {
         Ok(stmts) if !stmts.is_empty() => {
@@ -872,6 +887,40 @@ mod tests {
         assert_eq!(classify_sql_risk("SHOW TABLES", "mysql").unwrap(), SqlRisk::ReadOnly);
         assert_eq!(classify_sql_risk("DESCRIBE users", "mysql").unwrap(), SqlRisk::ReadOnly);
         assert_eq!(classify_sql_risk("EXPLAIN SELECT * FROM users", "postgres").unwrap(), SqlRisk::ReadOnly);
+    }
+
+    #[test]
+    fn classify_mysql_show_triggers_as_read_only() {
+        for sql in [
+            "SHOW TRIGGERS;",
+            "SHOW TRIGGERS FROM `rs_main` LIKE 'trg_order_items_after_%';",
+            "show triggers in `rs_main` where `Event` = 'INSERT';",
+        ] {
+            assert_eq!(classify_sql_risk(sql, "mysql").unwrap(), SqlRisk::ReadOnly, "expected read-only: {sql}");
+            assert_eq!(
+                classify_sql_risk_for_database(sql, DatabaseType::Mysql).unwrap(),
+                SqlRisk::ReadOnly,
+                "expected read-only: {sql}"
+            );
+            assert!(!is_dangerous_sql_for_database(sql, DatabaseType::Mysql), "expected safe SQL: {sql}");
+        }
+    }
+
+    #[test]
+    fn mysql_show_triggers_preserves_write_detection() {
+        for (sql, expected_risk) in [
+            ("SHOW TRIGGERS; DELETE FROM order_items", SqlRisk::Write),
+            ("SHOW TRIGGERS; DROP TABLE order_items", SqlRisk::Ddl),
+            ("SHOW TRIGGERS; /*!50000 DELETE FROM order_items */", SqlRisk::Write),
+        ] {
+            assert_eq!(classify_sql_risk(sql, "mysql").unwrap(), expected_risk, "expected write detection: {sql}");
+            assert_eq!(
+                classify_sql_risk_for_database(sql, DatabaseType::Mysql).unwrap(),
+                expected_risk,
+                "expected write detection: {sql}"
+            );
+            assert!(is_dangerous_sql_for_database(sql, DatabaseType::Mysql), "expected dangerous SQL: {sql}");
+        }
     }
 
     #[test]

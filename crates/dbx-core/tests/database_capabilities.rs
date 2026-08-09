@@ -174,6 +174,7 @@ fn identifies_single_connection_pool_types() {
     assert!(is_single_connection_pool(&DatabaseType::Firebird));
     assert!(is_single_connection_pool(&DatabaseType::OceanbaseOracle));
     assert!(is_single_connection_pool(&DatabaseType::Jdbc));
+    assert!(is_single_connection_pool(&DatabaseType::VictoriaMetrics));
     assert!(!is_single_connection_pool(&DatabaseType::Trino));
     assert!(!is_single_connection_pool(&DatabaseType::Postgres));
     assert!(!is_single_connection_pool(&DatabaseType::Kwdb));
@@ -207,6 +208,7 @@ fn skips_tcp_probe_for_local_file_plugin_and_agent_types() {
     assert!(skips_tcp_probe(&DatabaseType::Gbase));
     assert!(skips_tcp_probe(&DatabaseType::Databend));
     assert!(skips_tcp_probe(&DatabaseType::InfluxDb));
+    assert!(skips_tcp_probe(&DatabaseType::VictoriaMetrics));
     assert!(skips_tcp_probe(&DatabaseType::MessageQueue));
     assert!(skips_tcp_probe(&DatabaseType::ZooKeeper));
     assert!(!skips_tcp_probe(&DatabaseType::Postgres));
@@ -327,6 +329,15 @@ fn driver_manifest_declares_expected_product_capabilities() {
     assert!(zookeeper.capabilities.query_execution);
     assert!(zookeeper.capabilities.driver_management);
     assert!(!zookeeper.capabilities.metadata_browse);
+
+    let victoriametrics = find_driver(DatabaseType::VictoriaMetrics);
+    assert_eq!(victoriametrics.runtime_mode, "native");
+    assert_eq!(victoriametrics.support_level, "browse");
+    assert!(victoriametrics.capabilities.query_execution);
+    assert!(victoriametrics.capabilities.metadata_browse);
+    assert!(victoriametrics.capabilities.object_browser);
+    assert!(!victoriametrics.capabilities.table_data_edit);
+    assert!(!victoriametrics.capabilities.sql_explain);
 
     let uxdb = find_driver(DatabaseType::Uxdb);
     assert_eq!(uxdb.label, "优炫 UXDB");

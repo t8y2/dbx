@@ -64,12 +64,13 @@ impl RabbitMqAdmin {
         let mut client = AgentDriverClient::spawn(launch).await?;
 
         // Handshake
-        let _: serde_json::Value = client.call("handshake", serde_json::json!({})).await?;
+        let _: serde_json::Value =
+            client.call_with_timeout("handshake", serde_json::json!({}), cfg.rpc_timeout()).await?;
 
         // Build the connection params from MqAdminConfig
         let conn_params = build_connection_params(&cfg)?;
         let connect_params = serde_json::json!({ "connection": conn_params });
-        let _: serde_json::Value = client.call("connect", connect_params).await?;
+        let _: serde_json::Value = client.call_with_timeout("connect", connect_params, cfg.rpc_timeout()).await?;
 
         log::info!("RabbitMQ admin connected via agent (addresses: {})", addresses(&cfg));
 
@@ -83,7 +84,7 @@ impl RabbitMqAdmin {
         params: serde_json::Value,
     ) -> Result<T, String> {
         let mut client = self.client.lock().await;
-        client.call(method, params).await
+        client.call_with_timeout(method, params, self.config.rpc_timeout()).await
     }
 
     /// Send a JSON-RPC call that returns `{ok: true}` on success.
@@ -623,7 +624,7 @@ impl MessageQueueAdmin for RabbitMqAdmin {
         let result: serde_json::Value = self.call("mq_get_topic_stats", params).await?;
 
         let total_messages = result.get("totalMessages").and_then(|v| v.as_i64()).unwrap_or(0);
-        Ok(BacklogStats { msg_backlog: total_messages, backlog_size: total_messages })
+        Ok(BacklogStats { msg_backlog: total_messages, backlog_size: total_messages, partitions: Vec::new() })
     }
 
     async fn get_cluster_info(&self) -> Result<ClusterInfo, String> {
@@ -952,6 +953,7 @@ fn build_connection_params(cfg: &MqAdminConfig) -> Result<serde_json::Value, Str
         "virtual_host": virtual_host,
         "tls_skip_verify": cfg.tls_skip_verify,
         "properties": properties,
+        "request_timeout_ms": cfg.request_timeout_ms(),
     });
     if let Some(username) = username.filter(|value| !value.trim().is_empty()) {
         params["username"] = serde_json::json!(username);
@@ -1027,6 +1029,8 @@ mod tests {
             token_signing: None,
             connect_override: None,
             management_connect_override: None,
+            query_timeout_secs: crate::mq::config::DEFAULT_MQ_QUERY_TIMEOUT_SECS,
+            connect_timeout_secs: crate::mq::config::DEFAULT_MQ_CONNECT_TIMEOUT_SECS,
             extra,
         }
     }

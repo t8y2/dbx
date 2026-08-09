@@ -35,6 +35,7 @@ import {
   Archive,
   Square,
   X,
+  CircleX,
   RefreshCw,
 } from "@lucide/vue";
 import { useConnectionStore } from "@/stores/connectionStore";
@@ -61,6 +62,7 @@ import { shouldMeasureSidebarLabelOverflow } from "@/lib/sidebar/sidebarLabelToo
 import { treeSelectionRangeIdsByIndex, treeSelectionRangeIds } from "@/lib/sidebar/sidebarTreeSelection";
 import { isSidebarDatabaseOpenForVisual } from "@/lib/sidebar/sidebarDatabaseOpenState";
 import { sidebarTreeContextKey } from "@/lib/sidebar/sidebarTreeContext";
+import { connectionCanConfigureSidebarVisibleDatabases } from "@/lib/sidebar/sidebarVisibleFilterMenu";
 import { isWindows } from "@/lib/backend/platform";
 import { flattenTree } from "@/composables/useFlatTree";
 import { productionContextForDatabase } from "@/lib/database/productionSafety";
@@ -361,6 +363,10 @@ type DetailTooltipRow = {
   label: string;
   value: string;
   multiline?: boolean;
+  /** When set, renders each value on its own line (e.g. one host per line) */
+  values?: string[];
+  action?: () => void;
+  actionLabel?: string;
 };
 
 function cleanTooltipValue(value: string | number | null | undefined): string {
@@ -376,7 +382,7 @@ function redactedConnectionString(value: string): string {
 }
 
 function hostForDisplay(host: string): string {
-  if (!host.includes(":") || host.startsWith("[") || host.includes("://")) return host;
+  if (!host.includes(":") || host.startsWith("[") || host.includes("://") || host.includes(",")) return host;
   return `[${host}]`;
 }
 
@@ -410,15 +416,34 @@ const detailTooltip = computed(() => {
     const config = connectionStore.getConfig(node.connectionId);
     if (!config) return null;
     const hostLabel = isLocalFileConnection(config) ? t("connection.filePath") : t("connection.host");
+    const hostValue = cleanTooltipValue(config.host);
+    const hostValues = hostValue.includes(",")
+      ? hostValue
+          .split(",")
+          .map((h) => h.trim())
+          .filter(Boolean)
+      : [];
+    const visibleFilterSummary = connectionCanConfigureSidebarVisibleDatabases(config.db_type) || config.db_type === "nacos" ? connectionStore.getSidebarVisibleFilterSummary(node.connectionId) : null;
+    const visibleFilterRow: DetailTooltipRow | null =
+      visibleFilterSummary?.selected != null && visibleFilterSummary.total != null
+        ? {
+            label: t(visibleFilterSummary.mode === "namespace" ? "nacos.nacosVisibleNamespacesDetailLabel" : visibleFilterSummary.mode === "schema" ? "visibleSchemas.detailLabel" : "visibleDatabases.detailLabel"),
+            value: `${visibleFilterSummary.selected}/${visibleFilterSummary.total}`,
+            action: () => treeRuntime.openPrimaryVisibleFilter(node),
+            actionLabel: t(visibleFilterSummary.mode === "namespace" ? "nacos.nacosVisibleNamespacesDetailActionLabel" : visibleFilterSummary.mode === "schema" ? "visibleSchemas.detailActionLabel" : "visibleDatabases.detailActionLabel", { connection: config.name }),
+          }
+        : null;
     const rows: DetailTooltipRow[] = [
       { label: t("connection.name"), value: cleanTooltipValue(config.name) },
       { label: "URL", value: connectionTooltipUrl(config), multiline: true },
-      { label: hostLabel, value: cleanTooltipValue(config.host), multiline: isLocalFileConnection(config) },
+      ...(hostValues.length > 0 ? [{ label: hostLabel, value: hostValues[0], values: hostValues } as DetailTooltipRow] : [{ label: hostLabel, value: hostValue, multiline: isLocalFileConnection(config) } as DetailTooltipRow]),
       { label: "Port", value: Number(config.port) > 0 ? String(config.port) : "" },
       { label: t("connection.database"), value: cleanTooltipValue(config.database) },
       { label: t("connection.user"), value: cleanTooltipValue(config.username) },
       { label: t("connection.type"), value: config.driver_label || config.driver_profile || config.db_type },
       { label: t("connection.databaseInfo.productVersion"), value: cleanTooltipValue(config.database_info?.productVersion) },
+      ...(visibleFilterRow ? [visibleFilterRow] : []),
+      { label: t("connection.note"), value: cleanTooltipValue(config.note), multiline: true },
     ].filter((row) => row.value);
     return { rows };
   }
@@ -603,7 +628,9 @@ function formattedObjectStorage(): string {
   return formatSidebarObjectStorage(activeNode.value.sizeBytes);
 }
 
-const alignedCommentLabelWidth = computed(() => (settingsStore.editorSettings.sidebarObjectInfoMode === "comment-aligned" ? props.commentLabelWidth : undefined));
+// 连接节点不参与 aligned 对齐：顶层连接各自独立，按同层最大 label 宽对齐只会让短连接名
+// 后留下一大段空白。无论全局是 aligned 还是 inline，连接节点的 comment 都紧跟 label。
+const alignedCommentLabelWidth = computed(() => (settingsStore.editorSettings.sidebarObjectInfoMode === "comment-aligned" && activeNode.value.type !== "connection" ? props.commentLabelWidth : undefined));
 
 function alignedCommentLeadingStyle(): { width: string } | undefined {
   const width = alignedCommentLeadingWidth(alignedCommentLabelWidth.value, canTreeNodePin(activeNode.value.type));
@@ -618,7 +645,13 @@ const usesFullWidthLabel = computed(() => usesFullWidthTreeLabel(activeNode.valu
 
 const rowWidthClass = computed(() => (usesFullWidthLabel.value ? "w-max min-w-full" : "w-full min-w-0"));
 
-const labelWidthClass = computed(() => treeLabelWidthClass({ fullWidth: usesFullWidthLabel.value, hasTrailingComment: hasTrailingMetadata(), hasInlineAction: isPinned.value }));
+const labelWidthClass = computed(() => {
+  // aligned 模式靠 leading 块固定宽度对齐 comment 列，label 需 flex-1 撑满 leading 块；
+  // inline/right 模式 leading 块无固定宽度，label 用 shrink 让 comment 紧跟 label，
+  // 避免 label flex-1 把 leading 块撑到整行、comment 被推到视口最右端。
+  const alignLeading = alignedCommentLabelWidth.value !== undefined;
+  return treeLabelWidthClass({ fullWidth: usesFullWidthLabel.value, hasTrailingComment: hasTrailingMetadata(), hasInlineAction: isPinned.value, alignLeading });
+});
 
 watch(() => [isRightAlignedComment(), visibleLabel(activeNode.value), trailingComment.value, trailingCommentLayoutRef.value, trailingCommentLeadingRef.value], refreshTrailingCommentMeasurement, { flush: "post", immediate: true });
 
@@ -674,7 +707,7 @@ const rowStyle = computed(() => {
     paddingLeft: paddingLeft.value,
     paddingRight: trailingComment.value ? "12px" : undefined,
     "--tree-connection-row-bg": backgroundColor,
-    "--tree-connection-row-hover-bg": hexToRgba(color, isActiveConnectionScope.value ? 0.18 : 0.12),
+    "--tree-connection-row-hover-bg": hexToRgba(color, isActiveConnectionScope.value ? 0.2 : 0.16),
     "--tree-connection-active-bg": hexToRgba(color, 0.18),
     "--tree-connection-active-focus-bg": hexToRgba(color, 0.22),
   };
@@ -1084,10 +1117,10 @@ function onKeydown(event: KeyboardEvent) {
   </div>
 
   <div v-else @contextmenu="onTreeItemContextMenu">
-    <LightTooltip :text="displayLabel(node)" :disabled="isTooltipDisabled()" side="right" :side-offset="8" :delay="0" :close-delay="0" :surface="detailTooltip ? 'popover' : 'foreground'">
+    <LightTooltip :text="visibleLabel(node)" :disabled="isTooltipDisabled()" side="right" :side-offset="8" :delay="0" :close-delay="30" :surface="detailTooltip ? 'popover' : 'foreground'">
       <div
         ref="rowRef"
-        class="group flex items-center gap-2 py-1 px-2 cursor-pointer relative outline-none"
+        class="group flex cursor-default items-center gap-2 py-1 px-2 relative outline-none"
         style="contain: layout style"
         :class="[
           rowWidthClass,
@@ -1097,7 +1130,7 @@ function onKeydown(event: KeyboardEvent) {
             'opacity-50': dragVisual.dragging,
             'tree-item-connection-tint': connectionColor,
             'hover:bg-accent': node.type !== 'connection',
-            'hover:bg-secondary/60': node.type === 'connection',
+            'hover:bg-sidebar-accent': node.type === 'connection',
             rounded: !selectionVisual.rowSelected,
             'tree-item-active': selectionVisual.rowSelected,
             'tree-item-active--selection-set': selectionVisual.usesSelectionSetHighlight && selectionVisual.rowSelected,
@@ -1127,9 +1160,12 @@ function onKeydown(event: KeyboardEvent) {
           </button>
         </template>
         <span v-else class="w-3.5 h-3.5 shrink-0" />
-        <DatabaseIcon v-if="node.type === 'connection'" :db-type="connectionIconType(node.connectionId)" class="h-3.5 w-3.5 shrink-0" />
-        <Loader2 v-else-if="node.type === 'load-more' && node.isLoading" class="w-3.5 h-3.5 shrink-0 animate-spin text-primary" />
-        <component v-else :is="getIconInfo(node)?.icon || Database" class="w-3.5 h-3.5 shrink-0" :class="databaseOpenVisual.iconClass" />
+        <span class="relative flex h-3.5 w-3.5 shrink-0" :class="{ 'overflow-visible': node.valid === false }">
+          <DatabaseIcon v-if="node.type === 'connection'" :db-type="connectionIconType(node.connectionId)" class="h-3.5 w-3.5 shrink-0" />
+          <Loader2 v-else-if="node.type === 'load-more' && node.isLoading" class="h-3.5 w-3.5 shrink-0 animate-spin text-primary" />
+          <component v-else :is="getIconInfo(node)?.icon || Database" class="h-3.5 w-3.5 shrink-0" :class="databaseOpenVisual.iconClass" />
+          <CircleX v-if="node.valid === false" data-invalid-object-indicator="true" class="pointer-events-none absolute -right-1 -bottom-1 h-2.5 w-2.5 rounded-full bg-background text-destructive stroke-[3]" aria-hidden="true" />
+        </span>
         <div ref="trailingCommentLayoutRef" :class="hasTrailingMetadata() ? 'flex flex-1 min-w-0 items-center' : 'contents'">
           <div ref="trailingCommentLeadingRef" :class="trailingComment ? 'flex max-w-full min-w-0 shrink-0 items-center gap-2' : formattedObjectStorage() ? 'flex min-w-0 flex-1 items-center gap-2' : 'contents'" :style="alignedCommentLeadingStyle()">
             <input
@@ -1142,7 +1178,7 @@ function onKeydown(event: KeyboardEvent) {
               @keydown.escape.prevent="isRenamingGroup = false"
               @click.stop
             />
-            <span v-else ref="labelRef" :class="[labelWidthClass, { 'flex-1': node.type === 'connection' }]">{{ visibleLabel(node) }}</span>
+            <span v-else ref="labelRef" :class="[labelWidthClass, { 'flex-1': node.type === 'connection' && !trailingComment }]">{{ visibleLabel(node) }}</span>
             <button
               v-if="canDragPinnedOrder()"
               type="button"
@@ -1177,7 +1213,7 @@ function onKeydown(event: KeyboardEvent) {
               {{ t("editor.defaultDatabase") }}
             </Badge>
           </div>
-          <span v-if="trailingComment && !isRightAlignedComment()" class="sidebar-object-comment ml-2 min-w-0 flex-1 truncate text-left" :class="{ 'sidebar-object-comment--windows': useWindowsSidebarCommentFont }">{{ trailingComment }}</span>
+          <span v-if="trailingComment && !isRightAlignedComment()" class="sidebar-object-comment ml-4 min-w-0 flex-1 truncate text-left" :class="{ 'sidebar-object-comment--windows': useWindowsSidebarCommentFont }">{{ trailingComment }}</span>
           <span v-if="isRightAlignedComment() && trailingCommentMaxWidth > 0" class="min-w-0 flex-1" aria-hidden="true" />
           <span
             v-if="isRightAlignedComment() && trailingCommentMaxWidth > 0"
@@ -1220,8 +1256,23 @@ function onKeydown(event: KeyboardEvent) {
         <div class="w-max min-w-40 max-w-[min(28rem,calc(100vw-24px))] rounded-md border border-border bg-popover p-2 text-popover-foreground shadow-lg">
           <div class="space-y-1">
             <div v-for="row in detailTooltip.rows" :key="row.label" class="grid grid-cols-[max-content_minmax(0,1fr)] gap-2 text-xs leading-5">
-              <span class="text-muted-foreground">{{ row.label }}</span>
-              <span v-if="row.multiline" class="max-h-20 overflow-hidden whitespace-pre-wrap break-words text-foreground/90">
+              <span class="text-muted-foreground shrink-0">{{ row.label }}</span>
+              <template v-if="row.values">
+                <div class="flex flex-col gap-0.5 font-mono text-foreground/90">
+                  <span v-for="(v, vi) in row.values" :key="vi" class="break-all">{{ v }}</span>
+                </div>
+              </template>
+              <button
+                v-else-if="row.action"
+                type="button"
+                class="w-fit rounded bg-primary/10 px-1 font-mono text-primary underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                :aria-label="row.actionLabel"
+                :title="row.actionLabel"
+                @click.stop="row.action()"
+              >
+                {{ row.value }}
+              </button>
+              <span v-else-if="row.multiline" class="max-h-20 overflow-hidden whitespace-pre-wrap break-words text-foreground/90">
                 {{ row.value }}
               </span>
               <span v-else class="truncate font-mono text-foreground/90" :title="row.value">{{ row.value }}</span>

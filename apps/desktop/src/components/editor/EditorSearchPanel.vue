@@ -35,9 +35,25 @@ let searchScopeTo: number | null = null;
 const inSelectionScope = ref(false);
 
 const SEARCH_UPDATE_DELAY_MS = 120;
+// When the panel is opening, push the first match-count pass past the enter
+// transition (150ms) so the O(document) count does not contend with the
+// animation's first frames and cause dropped frames on large documents.
+const SEARCH_OPEN_DELAY_MS = 200;
 const DOCUMENT_SEARCH_UPDATE_DELAY_MS = 500;
 let searchUpdateTimer: ReturnType<typeof setTimeout> | null = null;
 let documentSearchUpdateTimer: ReturnType<typeof setTimeout> | null = null;
+let pendingIdleHandle: number | null = null;
+
+// requestIdleCallback lets the match-count pass yield to the animation frame
+// budget; fall back to setTimeout where the API is unavailable (older webviews).
+const requestIdle = typeof window !== "undefined" && typeof window.requestIdleCallback === "function" ? (cb: () => void) => window.requestIdleCallback(cb, { timeout: 500 }) : (cb: () => void) => window.setTimeout(cb, 0) as unknown as number;
+const cancelIdle = typeof window !== "undefined" && typeof window.cancelIdleCallback === "function" ? (handle: number) => window.cancelIdleCallback(handle) : (handle: number) => window.clearTimeout(handle);
+
+function clearPendingIdle() {
+  if (pendingIdleHandle == null) return;
+  cancelIdle(pendingIdleHandle);
+  pendingIdleHandle = null;
+}
 
 function searchMatchLimit(): number {
   return settingsStore.editorSettings.regexMaxMatchCount;
@@ -213,8 +229,9 @@ function updateMatchInfo(autoSelect = false) {
   }
 }
 
-function scheduleSearchUpdate(autoSelect = false) {
+function scheduleSearchUpdate(autoSelect = false, delay = SEARCH_UPDATE_DELAY_MS) {
   clearDocumentSearchUpdate();
+  clearPendingIdle();
   if (searchUpdateTimer) {
     clearTimeout(searchUpdateTimer);
     searchUpdateTimer = null;
@@ -227,16 +244,25 @@ function scheduleSearchUpdate(autoSelect = false) {
   dispatchSearchQuery();
   searchUpdateTimer = setTimeout(() => {
     searchUpdateTimer = null;
-    updateMatchInfo(autoSelect);
-  }, SEARCH_UPDATE_DELAY_MS);
+    // Run the O(document) match count on an idle tick so it does not block
+    // the enter transition's animation frames or typing responsiveness.
+    pendingIdleHandle = requestIdle(() => {
+      pendingIdleHandle = null;
+      updateMatchInfo(autoSelect);
+    });
+  }, delay);
 }
 
 function scheduleDocumentSearchUpdate() {
   if (!searchVisible.value || !searchText.value) return;
   clearDocumentSearchUpdate();
+  clearPendingIdle();
   documentSearchUpdateTimer = setTimeout(() => {
     documentSearchUpdateTimer = null;
-    updateMatchInfo();
+    pendingIdleHandle = requestIdle(() => {
+      pendingIdleHandle = null;
+      updateMatchInfo();
+    });
   }, DOCUMENT_SEARCH_UPDATE_DELAY_MS);
 }
 
@@ -265,7 +291,7 @@ function openSearch(): boolean {
     searchInputRef.value?.focus();
     searchInputRef.value?.select();
   });
-  if (searchText.value) scheduleSearchUpdate(true);
+  if (searchText.value) scheduleSearchUpdate(true, SEARCH_OPEN_DELAY_MS);
   return true;
 }
 
@@ -284,6 +310,7 @@ function closeSearch() {
   searchVisible.value = false;
   showReplace.value = false;
   clearDocumentSearchUpdate();
+  clearPendingIdle();
   searchScopeFrom = null;
   searchScopeTo = null;
   inSelectionScope.value = false;
@@ -438,6 +465,7 @@ watch(replaceText, () => {
 
 onBeforeUnmount(() => {
   clearDocumentSearchUpdate();
+  clearPendingIdle();
   if (searchUpdateTimer) {
     clearTimeout(searchUpdateTimer);
     searchUpdateTimer = null;
@@ -453,7 +481,7 @@ defineExpose({
 </script>
 
 <template>
-  <Transition enter-active-class="transition-[transform,opacity] duration-150" leave-active-class="transition-[transform,opacity] duration-100" enter-from-class="opacity-0 -translate-y-1" leave-to-class="opacity-0 -translate-y-1">
+  <Transition enter-active-class="transition-[transform,opacity] duration-150 will-change-[transform,opacity]" leave-active-class="transition-[transform,opacity] duration-100 will-change-[transform,opacity]" enter-from-class="opacity-0 -translate-y-1" leave-to-class="opacity-0 -translate-y-1">
     <div v-if="searchVisible" class="editor-search-panel absolute right-4 top-3 z-[9999] isolate flex flex-col gap-1 rounded-lg border border-border bg-popover p-1.5 text-popover-foreground shadow-xl ring-1 ring-border/60" :class="{ 'editor-search-panel--editor': tone === 'editor' }">
       <div class="flex items-center gap-1">
         <button class="flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground" :title="showReplace ? t('editor.search.collapseReplace') : t('editor.search.expandReplace')" @click="showReplace = !showReplace">

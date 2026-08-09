@@ -18,7 +18,7 @@ vi.mock("@/stores/productionSafetyStore", () => ({
   useProductionSafetyStore: () => ({}),
 }));
 
-function createEditor(sourceColumns?: Array<string | undefined>) {
+function createEditor(sourceColumns?: Array<string | undefined>, confirmDangerousRowDeletion = true) {
   let editor: ReturnType<typeof useDataGridEditor>;
   const result = ref<{ columns: string[]; rows: CellValue[][] }>({
     columns: ["first", "hidden", "last"],
@@ -48,6 +48,7 @@ function createEditor(sourceColumns?: Array<string | undefined>) {
     currentWhereInput: computed(() => undefined),
     orderByInput: ref(""),
     rowStatusFilter: ref("all"),
+    confirmDangerousRowDeletion: computed(() => confirmDangerousRowDeletion),
     pageSize: ref(100),
     currentPage: ref(1),
     getRowItem: (rowId) => {
@@ -81,6 +82,29 @@ function createEditor(sourceColumns?: Array<string | undefined>) {
   editor.newRows.value = [[null, null, null]];
   return editor;
 }
+
+describe("useDataGridEditor row deletion confirmation", () => {
+  it("keeps the row pending until confirmation when confirmation is enabled", () => {
+    const editor = createEditor(undefined, true);
+
+    editor.requestDeleteRow(-1);
+
+    expect(editor.showDeleteRowConfirm.value).toBe(true);
+    expect(editor.newRows.value).toHaveLength(1);
+
+    editor.confirmDeleteRow();
+    expect(editor.newRows.value).toHaveLength(0);
+  });
+
+  it("applies row deletion immediately when confirmation is disabled", () => {
+    const editor = createEditor(undefined, false);
+
+    editor.requestDeleteRow(-1);
+
+    expect(editor.showDeleteRowConfirm.value).toBe(false);
+    expect(editor.newRows.value).toHaveLength(0);
+  });
+});
 
 describe("useDataGridEditor appendPastedRowsToNewRow", () => {
   beforeEach(() => {

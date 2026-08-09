@@ -1,6 +1,7 @@
 import { computed, ref, toValue, watch, type MaybeRefOrGetter } from "vue";
 import { filterModeNeedsValue, filterModeUsesRange } from "@/lib/dataGrid/dataGridColumnFilter";
 import type { DataGridContextFilterMode } from "@/lib/dataGrid/dataGridSql";
+import { matchesIdentifierSearch } from "@/lib/sql/identifierSearch";
 
 export type DataGridStructuredFilterRule = {
   id: string;
@@ -34,13 +35,13 @@ export function useDataGridFilterBuilder(options: UseDataGridFilterBuilderOption
   const columnSearch = ref("");
   const appliedWhereInput = ref("");
   const filteredColumns = computed(() => {
-    const query = columnSearch.value.trim().toLowerCase();
-    return query ? toValue(options.columns).filter((column) => column.toLowerCase().includes(query)) : [...toValue(options.columns)];
+    const query = columnSearch.value.trim();
+    return query ? toValue(options.columns).filter((column) => matchesIdentifierSearch(column, query)) : [...toValue(options.columns)];
   });
   const activeCount = computed(() => rules.value.filter((rule) => !rule.disabled && rule.columnName && options.isComplete(rule)).length);
 
   function defaultRule(): DataGridStructuredFilterRule {
-    return { id: options.createId?.() ?? crypto.randomUUID(), columnName: toValue(options.columns)[0] ?? "", mode: "equals", rawValue: "", rawEndValue: "", conjunction: "AND" };
+    return { id: options.createId?.() ?? crypto.randomUUID(), columnName: "", mode: "equals", rawValue: "", rawEndValue: "", conjunction: "AND" };
   }
   function ensureRule() {
     if (!rules.value.length && toValue(options.columns).length) rules.value = [defaultRule()];
@@ -85,7 +86,7 @@ export function useDataGridFilterBuilder(options: UseDataGridFilterBuilderOption
     () => [...toValue(options.columns)],
     (columns) => {
       if (!columns.length) rules.value = [];
-      else rules.value = rules.value.map((rule) => (columns.includes(rule.columnName) ? rule : { ...rule, columnName: columns[0] }));
+      else rules.value = rules.value.map((rule) => (!rule.columnName || columns.includes(rule.columnName) ? rule : { ...rule, columnName: columns[0] }));
     },
   );
 

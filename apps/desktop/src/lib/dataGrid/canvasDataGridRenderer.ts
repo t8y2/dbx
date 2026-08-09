@@ -1,9 +1,19 @@
 import { firstLineCellDisplayValue, type CellValue } from "@/lib/dataGrid/cellValue";
+import { BOOLEAN_CHECKBOX_SIZE, isBooleanCellValue, normalizeBooleanCellValue } from "@/lib/dataGrid/dataGridBooleanColumn";
+import { dataGridFrameCoversRow, dataGridFrameIsMultiCell, dataGridSelectionFrameKindAtCell, dataGridSelectionUsesOuterFrame } from "@/lib/dataGrid/dataGridSelectionFrames";
+import type { CellSelectionRange } from "@/lib/dataGrid/gridSelection";
 import type { RowStatus } from "@/lib/dataGrid/gridRowStatus";
 import { DATA_GRID_DARK_SEARCH_COLORS, resolveDataGridPaintTheme, type DataGridPaintTheme } from "@/lib/dataGrid/dataGridPaintTheme";
-import { BOOLEAN_CHECKBOX_SIZE, isBooleanCheckboxValue, normalizeBooleanCellValue } from "@/lib/dataGrid/dataGridBooleanColumn";
 
 export const CANVAS_DATA_GRID_ROW_HEIGHT = 26;
+export const MAX_CANVAS_DATA_GRID_PIXEL_RATIO = 4;
+
+export interface CanvasDevicePixelSize {
+  cssWidth: number;
+  cssHeight: number;
+  pixelWidth: number;
+  pixelHeight: number;
+}
 
 export interface CanvasDataGridRow {
   id: number;
@@ -49,6 +59,7 @@ export interface DrawCanvasDataGridOptions {
   width: number;
   height: number;
   pixelRatio?: number;
+  devicePixelSize?: CanvasDevicePixelSize | null;
   isDark: boolean;
   styleKey?: string;
   rowCount: number;
@@ -70,12 +81,16 @@ export interface DrawCanvasDataGridOptions {
   isRowActive: (rowIndex: number) => boolean;
   rowCellsUseSelectionVisual: (rowId: number) => boolean;
   cellIsSelected: (rowIndex: number, visibleColIdx: number) => boolean;
+  /** 连续选区矩形（displayRow/visibleCol 坐标）。用于 Navicat 风格的形态区分：
+   * 多格范围浅色填充 + 一圈细外框、内部零描边；1×1 画细边框；离散点选传空数组退回逐格描边 */
+  selectionFrames?: readonly CellSelectionRange[];
   cellCanHover: (row: CanvasDataGridRow, actualColIdx: number) => boolean;
   infiniteScrollEnabled: boolean;
   pageOffset: number;
   frozenColumnCount?: number;
   columnAligns?: readonly ("left" | "right")[];
   rightAlignedActionCell?: CanvasRightAlignedActionCell | null;
+  booleanDisplayMode?: "checkbox" | "dropdown";
 }
 
 type NumericCanvasContext = CanvasRenderingContext2D & {
@@ -92,6 +107,35 @@ interface CanvasRenderState {
   searchFill: string;
   currentSearchFill: string;
   currentSearchBorder: string;
+}
+
+export interface CanvasBackingStoreMetrics {
+  pixelWidth: number;
+  pixelHeight: number;
+  scaleX: number;
+  scaleY: number;
+  measured: boolean;
+}
+
+export function resolveCanvasBackingStoreMetrics(options: { width: number; height: number; pixelRatio: number; devicePixelSize?: CanvasDevicePixelSize | null }): CanvasBackingStoreMetrics {
+  const width = Math.max(1, options.width);
+  const height = Math.max(1, options.height);
+  const fallbackRatio = Math.min(MAX_CANVAS_DATA_GRID_PIXEL_RATIO, Math.max(1, options.pixelRatio));
+  const measured = options.devicePixelSize;
+  const measurementMatches = !!measured && Math.abs(measured.cssWidth - width) <= 0.5 && Math.abs(measured.cssHeight - height) <= 0.5 && measured.pixelWidth > 0 && measured.pixelHeight > 0;
+  const fallbackPixelWidth = Math.max(1, Math.ceil(width * fallbackRatio));
+  const fallbackPixelHeight = Math.max(1, Math.ceil(height * fallbackRatio));
+  const maxPixelWidth = Math.max(1, Math.ceil(width * MAX_CANVAS_DATA_GRID_PIXEL_RATIO));
+  const maxPixelHeight = Math.max(1, Math.ceil(height * MAX_CANVAS_DATA_GRID_PIXEL_RATIO));
+  const pixelWidth = measurementMatches ? Math.min(measured.pixelWidth, maxPixelWidth) : fallbackPixelWidth;
+  const pixelHeight = measurementMatches ? Math.min(measured.pixelHeight, maxPixelHeight) : fallbackPixelHeight;
+  return {
+    pixelWidth,
+    pixelHeight,
+    scaleX: pixelWidth / width,
+    scaleY: pixelHeight / height,
+    measured: measurementMatches,
+  };
 }
 
 export function resolveCanvasDataGridRowFill(theme: Pick<DataGridPaintTheme, "cellActive" | "cellSelected">, rowBase: string, options: { isActive: boolean; isDeleted: boolean; isSelected: boolean }): string {
@@ -193,11 +237,11 @@ function alignCanvasPixel(value: number, dpr: number): number {
   return Math.round(value * dpr) / dpr;
 }
 
-function drawBooleanCheckbox(ctx: CanvasRenderingContext2D, options: { drawX: number; y: number; colWidth: number; dpr: number; theme: DataGridPaintTheme; checked: boolean }): void {
-  const { drawX, y, colWidth, dpr, theme, checked } = options;
+function drawBooleanCheckbox(ctx: CanvasRenderingContext2D, options: { drawX: number; y: number; colWidth: number; scaleX: number; scaleY: number; theme: DataGridPaintTheme; checked: boolean }): void {
+  const { drawX, y, colWidth, scaleX, scaleY, theme, checked } = options;
   const size = BOOLEAN_CHECKBOX_SIZE;
-  const boxX = alignCanvasPixel(drawX + (colWidth - size) / 2, dpr);
-  const boxY = alignCanvasPixel(y + (CANVAS_DATA_GRID_ROW_HEIGHT - size) / 2, dpr);
+  const boxX = alignCanvasPixel(drawX + (colWidth - size) / 2, scaleX);
+  const boxY = alignCanvasPixel(y + (CANVAS_DATA_GRID_ROW_HEIGHT - size) / 2, scaleY);
   ctx.lineWidth = 1;
   if (checked) {
     ctx.fillStyle = theme.primary;
@@ -294,6 +338,7 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
     isRowActive,
     rowCellsUseSelectionVisual,
     cellIsSelected,
+    selectionFrames = [],
     cellCanHover,
     infiniteScrollEnabled,
     pageOffset,
@@ -301,10 +346,19 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
     columnAligns,
     rightAlignedActionCell,
     columnIsBoolean,
+    booleanDisplayMode = "dropdown",
   } = options;
-  const dpr = Math.max(1, options.pixelRatio ?? window.devicePixelRatio ?? 1);
-  const pixelWidth = Math.max(1, Math.ceil(width * dpr));
-  const pixelHeight = Math.max(1, Math.ceil(height * dpr));
+  // 框选热路径：整次绘制只判断一次。常见情况（单矩形 / 多列且每段都是多格）可跳过逐格 kind 查询
+  const paintSelectionOuterFrame = dataGridSelectionUsesOuterFrame(selectionFrames);
+  const suppressAllSelectedCellBorders = selectionFrames.length > 0 && selectionFrames.every(dataGridFrameIsMultiCell);
+  const selectionRowCoverage = selectionFrames.length > 0;
+  const fallbackRatio = Math.max(1, options.pixelRatio ?? window.devicePixelRatio ?? 1);
+  const { pixelWidth, pixelHeight, scaleX, scaleY } = resolveCanvasBackingStoreMetrics({
+    width,
+    height,
+    pixelRatio: fallbackRatio,
+    devicePixelSize: options.devicePixelSize,
+  });
   if (canvas.width !== pixelWidth || canvas.height !== pixelHeight) {
     canvas.width = pixelWidth;
     canvas.height = pixelHeight;
@@ -316,7 +370,7 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
 
   const ctx = canvas.getContext("2d");
   if (!ctx) return;
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.setTransform(scaleX, 0, 0, scaleY, 0, 0);
   ctx.imageSmoothingEnabled = false;
   ctx.clearRect(0, 0, width, height);
 
@@ -343,9 +397,9 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
   const firstCol = firstVisibleColumn(offsets, Math.max(0, contentStart - maxPreviewRightShift));
   const columnOffset = offsets[firstCol] ?? 0;
   const paintSearchMatches = !isScrolling && searchMatchKeys.size > 0;
-  const rowNumberBorderX = crispCanvasLine(rowNumberWidth - 1, dpr);
-  const rowNumberTextX = alignCanvasPixel(Math.max(0, rowNumberWidth - 1) / 2, dpr);
-  const rowTextOffsetY = alignCanvasPixel(CANVAS_DATA_GRID_ROW_HEIGHT / 2, dpr);
+  const rowNumberBorderX = crispCanvasLine(rowNumberWidth - 1, scaleX);
+  const rowNumberTextX = alignCanvasPixel(Math.max(0, rowNumberWidth - 1) / 2, scaleX);
+  const rowTextOffsetY = alignCanvasPixel(CANVAS_DATA_GRID_ROW_HEIGHT / 2, scaleY);
 
   for (let rowIndex = firstRow; rowIndex <= lastRow; rowIndex++) {
     const item = rowAt(rowIndex);
@@ -360,11 +414,14 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
       isDeleted: item.isDeleted,
       isSelected: rowSelectionVisual,
     });
-    const rowBorderY = crispCanvasLine(y + CANVAS_DATA_GRID_ROW_HEIGHT - 1, dpr);
+    const rowBorderY = crispCanvasLine(y + CANVAS_DATA_GRID_ROW_HEIGHT - 1, scaleY);
     ctx.globalAlpha = item.isDeleted ? 0.7 : 1;
     ctx.fillStyle = rowFill;
     ctx.fillRect(0, y, width, CANVAS_DATA_GRID_ROW_HEIGHT);
 
+    // 选区覆盖指示（Navicat 风格）：行落在选区范围内时行号淡色高亮；
+    // 优先级低于行选中/状态色/活动行，与 DOM 的级联顺序一致
+    const rowInSelection = !rowSelectionVisual && selectionRowCoverage && dataGridFrameCoversRow(selectionFrames, item.displayIndex);
     const rowNumberFill = rowSelectionVisual
       ? theme.rowNumberSelected
       : item.status === "draft"
@@ -377,20 +434,28 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
               ? theme.rowNumberDeleted
               : rowIsActive
                 ? theme.rowNumberActive
-                : theme.rowNumberDefault;
+                : rowInSelection
+                  ? theme.cellSelected
+                  : theme.rowNumberDefault;
     ctx.fillStyle = rowNumberFill;
     ctx.fillRect(0, y, rowNumberWidth, CANVAS_DATA_GRID_ROW_HEIGHT);
+    // 与 DOM 的 .data-grid-row-number--selected 对齐：选中行号左侧 3px 蓝色条
+    if (rowSelectionVisual) {
+      ctx.fillStyle = theme.cellSelectedBorder;
+      ctx.fillRect(0, y, 3, CANVAS_DATA_GRID_ROW_HEIGHT);
+    }
     ctx.strokeStyle = theme.border;
     ctx.beginPath();
     ctx.moveTo(rowNumberBorderX, y);
     ctx.lineTo(rowNumberBorderX, y + CANVAS_DATA_GRID_ROW_HEIGHT);
     ctx.stroke();
 
-    const rowNumberText = item.status === "new" ? theme.rowNumberTextNew : item.status === "edited" ? theme.rowNumberTextEdited : item.status === "deleted" ? theme.rowNumberTextDeleted : theme.rowNumberTextClean;
+    // 与 DOM 对齐：选中行号文字用前景色
+    const rowNumberText = item.status === "new" ? theme.rowNumberTextNew : item.status === "edited" ? theme.rowNumberTextEdited : item.status === "deleted" ? theme.rowNumberTextDeleted : rowSelectionVisual ? theme.foreground : theme.rowNumberTextClean;
     ctx.fillStyle = rowNumberText;
     ctx.font = item.status === "new" || item.status === "edited" || item.status === "draft" ? semiboldFont : normalFont;
     ctx.textAlign = "center";
-    const textY = alignCanvasPixel(y + rowTextOffsetY, dpr);
+    const textY = alignCanvasPixel(y + rowTextOffsetY, scaleY);
     ctx.save();
     ctx.beginPath();
     ctx.rect(0, y, rowNumberWidth, CANVAS_DATA_GRID_ROW_HEIGHT);
@@ -420,7 +485,8 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
       const selectedCell = cellIsSelected(item.displayIndex, visibleColIdx);
       const isDirtyCell = item.isDirtyCol[actualColIdx];
       const selectedFillVisual = rowSelectionVisual || selectedCell;
-      const selectedBorderVisual = selectedCell;
+      // Navicat 风格：多格范围内部零描边（末尾统一画外框）；单格 / Ctrl 点选保留细边框
+      const selectedBorderVisual = !selectedCell ? false : suppressAllSelectedCellBorders ? false : paintSelectionOuterFrame ? dataGridSelectionFrameKindAtCell(selectionFrames, item.displayIndex, visibleColIdx) !== "range" : true;
       const isSearchMatch = paintSearchMatches && searchMatchKeys.has(dataGridSearchMatchKey(item.displayIndex, actualColIdx));
       const isCurrentSearchMatch = paintSearchMatches && currentSearchMatch?.displayRow === item.displayIndex && currentSearchMatch.col === actualColIdx;
       const clippedX = Math.max(drawX, rowNumberWidth);
@@ -463,33 +529,34 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
       ctx.rect(clippedX, y, Math.min(cellPaintWidth, width - clippedX), CANVAS_DATA_GRID_ROW_HEIGHT);
       ctx.clip();
       const value = item.data[actualColIdx];
-      const isBooleanCell = columnIsBoolean?.(actualColIdx) === true && isBooleanCheckboxValue(value);
+      const isBooleanCell = columnIsBoolean?.(actualColIdx) === true && isBooleanCellValue(value);
       const isRightAlign = columnAligns?.[visibleColIdx] === "right";
       const isEditingThisCell = editingCell?.rowId === item.id && editingCell.col === actualColIdx;
-      const isBooleanNullCell = isBooleanCell && value === null && !isEditingThisCell;
+      const isBooleanNullCell = booleanDisplayMode === "checkbox" && isBooleanCell && value === null && !isEditingThisCell;
+      const shouldRenderBooleanCheckbox = booleanDisplayMode === "checkbox" && isBooleanCell && value !== null && !isEditingThisCell;
       ctx.textAlign = isBooleanNullCell ? "center" : isRightAlign ? "right" : "left";
       ctx.fillStyle = value === null ? theme.mutedForeground : theme.foreground;
       ctx.font = value === null ? italicFont : tabularFont;
       setCanvasNumericVariant(ctx, value === null ? "normal" : "tabular-nums");
       const reservedWidth = rightAlignedActionCell?.rowIndex === item.displayIndex && rightAlignedActionCell.visibleColIdx === visibleColIdx ? rightAlignedActionCell.reservedWidth : 0;
-      const { textAnchorX, maxWidth: cellMaxWidth } = resolveCanvasCellTextLayout({ drawX, colWidth, dpr, isRightAlign, reservedWidth });
-      if (isBooleanCell && value !== null && !isEditingThisCell) {
-        drawBooleanCheckbox(ctx, { drawX, y, colWidth, dpr, theme, checked: normalizeBooleanCellValue(value) === true });
+      const { textAnchorX, maxWidth: cellMaxWidth } = resolveCanvasCellTextLayout({ drawX, colWidth, dpr: scaleX, isRightAlign, reservedWidth });
+      if (shouldRenderBooleanCheckbox) {
+        drawBooleanCheckbox(ctx, { drawX, y, colWidth, scaleX, scaleY, theme, checked: normalizeBooleanCellValue(value) === true });
         if (item.isDeleted) {
-          const boxX = alignCanvasPixel(drawX + (colWidth - BOOLEAN_CHECKBOX_SIZE) / 2, dpr);
-          const strikeY = alignCanvasPixel(y + CANVAS_DATA_GRID_ROW_HEIGHT / 2, dpr);
+          const boxX = alignCanvasPixel(drawX + (colWidth - BOOLEAN_CHECKBOX_SIZE) / 2, scaleX);
+          const strikeY = alignCanvasPixel(y + CANVAS_DATA_GRID_ROW_HEIGHT / 2, scaleY);
           ctx.strokeStyle = theme.foreground;
           ctx.lineWidth = 1;
           ctx.beginPath();
           ctx.moveTo(boxX - 1, strikeY);
-          ctx.lineTo(alignCanvasPixel(boxX + BOOLEAN_CHECKBOX_SIZE + 1, dpr), strikeY);
+          ctx.lineTo(alignCanvasPixel(boxX + BOOLEAN_CHECKBOX_SIZE + 1, scaleX), strikeY);
           ctx.stroke();
         }
       } else {
         const rawDisplayText = item.isDraft && value === null ? (draftCellPlaceholder ?? "") : formatCell(value, actualColIdx);
         const displayText = isEditingThisCell ? "" : firstLineCellDisplayValue(rawDisplayText);
         const text = isEditingThisCell ? displayText : fitCanvasText(ctx, displayText, cellMaxWidth, isBooleanNullCell ? "left" : isRightAlign ? "right" : "left");
-        const anchorX = isBooleanNullCell ? alignCanvasPixel(drawX + colWidth / 2, dpr) : textAnchorX;
+        const anchorX = isBooleanNullCell ? alignCanvasPixel(drawX + colWidth / 2, scaleX) : textAnchorX;
         ctx.fillText(text, anchorX, textY);
         if (item.isDeleted && text) {
           const textWidth = ctx.measureText(text).width;
@@ -497,7 +564,7 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
           ctx.strokeStyle = theme.foreground;
           ctx.beginPath();
           ctx.moveTo(lineStartX, textY);
-          ctx.lineTo(alignCanvasPixel(lineStartX + textWidth, dpr), textY);
+          ctx.lineTo(alignCanvasPixel(lineStartX + textWidth, scaleX), textY);
           ctx.stroke();
         }
       }
@@ -507,7 +574,7 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
 
       ctx.strokeStyle = theme.border;
       ctx.beginPath();
-      const columnBorderX = crispCanvasLine(drawX + colWidth - 1, dpr);
+      const columnBorderX = crispCanvasLine(drawX + colWidth - 1, scaleX);
       ctx.moveTo(columnBorderX, y);
       ctx.lineTo(columnBorderX, y + CANVAS_DATA_GRID_ROW_HEIGHT);
       ctx.stroke();
@@ -517,7 +584,7 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
         const selectedRightX = clippedX + cellPaintWidth - 1.5;
         const selectedTopY = Math.max(y + 0.5, 1);
         const drawSelectedLeftBorder = selectedLeftX >= rowNumberWidth + 0.5;
-        ctx.strokeStyle = selectedCell && !isDirtyCell ? theme.cellSelectedSingleBorder : theme.cellSelectedBorder;
+        ctx.strokeStyle = theme.cellSelectedSingleBorder;
         ctx.beginPath();
         ctx.moveTo(selectedLeftX, selectedTopY);
         ctx.lineTo(selectedRightX, selectedTopY);
@@ -594,6 +661,33 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
     ctx.moveTo(separatorX, 0);
     ctx.lineTo(separatorX, height);
     ctx.stroke();
+    ctx.restore();
+  }
+
+  // 选区外框：多格范围选区画一圈主题色细外框（1.5px，比单格的 1px 略粗），
+  // 内部零描边（Navicat 风格）；1×1 单格外框已由逐格细边框覆盖，这里跳过
+  if (paintSelectionOuterFrame) {
+    const frozenWidth = frozenColumnCount > 0 && frozenColumnCount <= renderedColumnWidths.length ? (offsets[frozenColumnCount] ?? 0) : 0;
+    const frozenRight = rowNumberWidth + frozenWidth;
+    // 列边缘的屏幕 x：冻结区内的边缘不随水平滚动，其余减去 scrollLeft
+    const columnEdgeX = (edgeCol: number): number => {
+      const offset = offsets[edgeCol] ?? 0;
+      return edgeCol <= frozenColumnCount ? rowNumberWidth + offset : rowNumberWidth + offset - scrollLeft;
+    };
+    ctx.save();
+    ctx.strokeStyle = theme.cellSelectedSingleBorder;
+    ctx.lineWidth = 1.5;
+    for (const frame of selectionFrames) {
+      if (!dataGridFrameIsMultiCell(frame)) continue;
+      const minX = frame.startCol >= frozenColumnCount ? frozenRight : rowNumberWidth;
+      const minRightX = frame.endCol + 1 > frozenColumnCount ? frozenRight : rowNumberWidth;
+      const left = Math.min(Math.max(columnEdgeX(frame.startCol), minX), width);
+      const right = Math.min(Math.max(columnEdgeX(frame.endCol + 1), minRightX), width);
+      const top = Math.min(Math.max(frame.startRow * CANVAS_DATA_GRID_ROW_HEIGHT - scrollTop, 0), height);
+      const bottom = Math.min(Math.max((frame.endRow + 1) * CANVAS_DATA_GRID_ROW_HEIGHT - scrollTop, 0), height);
+      if (right - left < 2 || bottom - top < 2) continue;
+      ctx.strokeRect(left + 1, top + 1, right - left - 2, bottom - top - 2);
+    }
     ctx.restore();
   }
 }

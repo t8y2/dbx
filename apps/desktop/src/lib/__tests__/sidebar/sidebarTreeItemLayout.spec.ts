@@ -7,8 +7,10 @@ describe("sidebar tree item layout", () => {
     expect(usesFullWidthTreeLabel("table", true, true)).toBe(false);
   });
 
-  it("lets a table name consume the available row width before truncating", () => {
-    expect(treeLabelWidthClass({ fullWidth: false, hasTrailingComment: true })).toBe("min-w-0 flex-1 truncate");
+  it("lets a table name consume the available row width before truncating when aligned", () => {
+    expect(treeLabelWidthClass({ fullWidth: false, hasTrailingComment: true, alignLeading: true })).toBe("min-w-0 flex-1 truncate");
+    // inline/right 模式 label 不撑满，让 comment 紧跟
+    expect(treeLabelWidthClass({ fullWidth: false, hasTrailingComment: true, alignLeading: false })).toBe("min-w-0 shrink truncate");
   });
 
   it("keeps a pinned action next to the name while preserving the aligned comment column", () => {

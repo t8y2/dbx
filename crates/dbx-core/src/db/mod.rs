@@ -36,6 +36,7 @@ pub mod starrocks;
 pub mod transport_layer_tunnel;
 pub mod turso_driver;
 pub mod vector_driver;
+pub mod victoriametrics_driver;
 pub mod wkb;
 
 use reqwest::ClientBuilder;

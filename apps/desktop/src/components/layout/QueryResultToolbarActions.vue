@@ -4,7 +4,7 @@ import { useI18n } from "vue-i18n";
 import { Button } from "@/components/ui/button";
 import LightTooltip from "@/components/ui/LightTooltip.vue";
 
-type OutputView = "result" | "summary" | "explain" | "chart";
+type OutputView = "result" | "summary" | "explain" | "chart" | "messages";
 
 withDefaults(
   defineProps<{

@@ -2438,6 +2438,47 @@ impl Storage {
         .await
     }
 
+    /// Update only the persisted MQTT saved-topic metadata for one connection.
+    ///
+    /// Unlike `save_connections`, this is an in-place update and must not replace
+    /// the saved connection list or touch separately stored connection secrets.
+    pub async fn save_connection_mqtt_saved_topics(
+        &self,
+        connection_id: &str,
+        saved_topics: serde_json::Value,
+    ) -> Result<(), String> {
+        let connection_id = connection_id.to_string();
+        self.with_conn(move |conn| {
+            let json = conn
+                .query_row("SELECT config_json FROM connections WHERE id = ?1", [&connection_id], |row| {
+                    row.get::<_, String>(0)
+                })
+                .optional()
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| format!("Connection config not found: {connection_id}"))?;
+            let mut config: ConnectionConfig = serde_json::from_str(&json).map_err(|error| error.to_string())?;
+            let mut external_config = config.external_config.take().unwrap_or_else(|| serde_json::json!({}));
+            let Some(external_object) = external_config.as_object_mut() else {
+                return Err("MQTT external_config 必须是 JSON 对象".to_string());
+            };
+            external_object.insert("savedTopics".to_string(), saved_topics);
+            config.external_config = Some(external_config);
+            let updated_json = serde_json::to_string(&config).map_err(|error| error.to_string())?;
+            conn.execute("UPDATE connections SET config_json = ?1 WHERE id = ?2", params![updated_json, connection_id])
+                .map(
+                    |updated| {
+                        if updated == 0 {
+                            Err(format!("Connection config not found: {connection_id}"))
+                        } else {
+                            Ok(())
+                        }
+                    },
+                )
+                .map_err(|error| error.to_string())?
+        })
+        .await
+    }
+
     /// Update only the persisted driver identity for an existing connection.
     /// This is used after runtime driver fallback and deliberately leaves all
     /// other connection metadata and separately stored secrets untouched.
@@ -4140,6 +4181,7 @@ mod tests {
 
     fn mq_connection(id: &str, token: &str) -> ConnectionConfig {
         ConnectionConfig {
+            docs_notes_path: None,
             id: id.to_string(),
             name: "Pulsar".to_string(),
             note: String::new(),
@@ -4204,6 +4246,7 @@ mod tests {
 
     fn nacos_connection(id: &str, password: &str) -> ConnectionConfig {
         ConnectionConfig {
+            docs_notes_path: None,
             id: id.to_string(),
             name: "Nacos".to_string(),
             note: String::new(),
@@ -4422,6 +4465,46 @@ mod tests {
         let _ = std::fs::remove_file(path);
     }
 
+    #[tokio::test]
+    async fn save_connection_mqtt_saved_topics_updates_only_target_and_preserves_secrets() {
+        let path = temp_db_path("mqtt-saved-topics");
+        let storage = Storage::open(&path).await.unwrap();
+        let target = mq_connection("target", "target-secret");
+        let untouched = mq_connection("untouched", "untouched-secret");
+        storage.save_connections(&[target.clone(), untouched.clone()]).await.unwrap();
+
+        let saved_topics = serde_json::json!([{
+            "topic": "sensors/temperature",
+            "qos": "atleastonce",
+            "noLocal": false,
+        }]);
+        storage.save_connection_mqtt_saved_topics(&target.id, saved_topics.clone()).await.unwrap();
+
+        let loaded = storage.load_connections().await.unwrap();
+        assert_eq!(loaded.len(), 2);
+        let updated = loaded.iter().find(|config| config.id == target.id).unwrap();
+        assert_eq!(updated.external_config.as_ref().unwrap()["savedTopics"], saved_topics);
+        assert_eq!(mq_token(updated), Some("target-secret"));
+        assert_eq!(loaded.iter().find(|config| config.id == untouched.id), Some(&untouched));
+        assert_eq!(mq_token(loaded.iter().find(|config| config.id == untouched.id).unwrap()), Some("untouched-secret"));
+
+        assert!(storage.save_connection_mqtt_saved_topics("missing", serde_json::json!([])).await.is_err());
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn save_connection_mqtt_saved_topics_rejects_non_object_external_config() {
+        let path = temp_db_path("mqtt-saved-topics-invalid");
+        let storage = Storage::open(&path).await.unwrap();
+        let mut target = mq_connection("target", "target-secret");
+        target.external_config = Some(serde_json::json!("invalid"));
+        storage.save_connections(std::slice::from_ref(&target)).await.unwrap();
+
+        let error = storage.save_connection_mqtt_saved_topics(&target.id, serde_json::json!([])).await.unwrap_err();
+        assert!(error.contains("external_config"));
+        assert_eq!(storage.load_connections().await.unwrap(), vec![target]);
+        let _ = std::fs::remove_file(path);
+    }
     #[tokio::test]
     async fn save_connection_driver_profile_updates_only_the_target_metadata() {
         let path = temp_db_path("connection-driver-profile");
@@ -5384,6 +5467,10 @@ mod tests {
                 claude_code_cli_env: std::collections::HashMap::new(),
                 pi_agent_cli_path: None,
                 pi_agent_cli_env: std::collections::HashMap::new(),
+                opencode_cli_path: None,
+                opencode_cli_env: std::collections::HashMap::new(),
+                cursor_cli_path: None,
+                cursor_cli_env: std::collections::HashMap::new(),
             },
         }
     }
@@ -5416,6 +5503,60 @@ mod tests {
         assert_eq!(
             loaded[0].config.models[0].supported_effort_levels,
             vec![AiEffortLevel::Low, AiEffortLevel::High, AiEffortLevel::Xhigh]
+        );
+
+        std::fs::remove_file(&db).ok();
+    }
+
+    #[tokio::test]
+    async fn opencode_cli_ai_config_roundtrip() {
+        let db = temp_db_path("opencode-cli-ai-roundtrip");
+        let storage = Storage::open(&db).await.unwrap();
+
+        let mut cfg = make_ai_config("opencode-cli", true);
+        cfg.config.provider = AiProvider::OpenCodeCli;
+        cfg.config.api_key.clear();
+        cfg.config.endpoint.clear();
+        cfg.config.model = "openai/gpt-5.4-mini".to_string();
+        cfg.config.opencode_cli_path = Some("/opt/homebrew/bin/opencode".to_string());
+        cfg.config.opencode_cli_env.insert("HTTPS_PROXY".to_string(), "http://127.0.0.1:7890".to_string());
+        storage.save_ai_config_item(&cfg).await.unwrap();
+
+        let loaded = storage.load_ai_configs().await.unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert!(matches!(loaded[0].config.provider, AiProvider::OpenCodeCli));
+        assert_eq!(loaded[0].config.model, "openai/gpt-5.4-mini");
+        assert_eq!(loaded[0].config.opencode_cli_path.as_deref(), Some("/opt/homebrew/bin/opencode"));
+        assert_eq!(
+            loaded[0].config.opencode_cli_env.get("HTTPS_PROXY").map(String::as_str),
+            Some("http://127.0.0.1:7890")
+        );
+
+        std::fs::remove_file(&db).ok();
+    }
+
+    #[tokio::test]
+    async fn cursor_cli_ai_config_roundtrip() {
+        let db = temp_db_path("cursor-cli-ai-roundtrip");
+        let storage = Storage::open(&db).await.unwrap();
+
+        let mut cfg = make_ai_config("cursor-cli", true);
+        cfg.config.provider = AiProvider::CursorCli;
+        cfg.config.api_key.clear();
+        cfg.config.endpoint.clear();
+        cfg.config.model = "composer-2.5".to_string();
+        cfg.config.cursor_cli_path = Some("~/.local/bin/agent".to_string());
+        cfg.config.cursor_cli_env.insert("HTTPS_PROXY".to_string(), "http://127.0.0.1:7890".to_string());
+        storage.save_ai_config_item(&cfg).await.unwrap();
+
+        let loaded = storage.load_ai_configs().await.unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert!(matches!(loaded[0].config.provider, AiProvider::CursorCli));
+        assert_eq!(loaded[0].config.model, "composer-2.5");
+        assert_eq!(loaded[0].config.cursor_cli_path.as_deref(), Some("~/.local/bin/agent"));
+        assert_eq!(
+            loaded[0].config.cursor_cli_env.get("HTTPS_PROXY").map(String::as_str),
+            Some("http://127.0.0.1:7890")
         );
 
         std::fs::remove_file(&db).ok();

@@ -4,6 +4,8 @@ use crate::db::mongo_driver::{
     self, MongoCollectionStatsResult, MongoDocumentResult, MongoDropIndexFailure, MongoDropIndexesResult,
 };
 use crate::document_ops::CollectionInfo;
+use crate::mongo_shell::MongoCommand;
+use crate::types::{IndexInfo, QueryResult};
 
 async fn ensure_document_pool(state: &AppState, connection_id: &str) -> Result<(), String> {
     state.get_or_create_pool(connection_id, None).await.map(|_| ())
@@ -155,6 +157,50 @@ pub async fn mongo_find_documents_core(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
+async fn mongo_find_documents_without_total_core(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    collection: &str,
+    skip: u64,
+    limit: i64,
+    filter: Option<&str>,
+    projection: Option<&str>,
+    sort: Option<&str>,
+    collation: Option<&str>,
+) -> Result<MongoDocumentResult, String> {
+    ensure_document_pool(state, connection_id).await?;
+    let connections = state.connections.read().await;
+    match connections.get(connection_id).ok_or("Not found")? {
+        PoolKind::MongoDb(client) => {
+            mongo_driver::find_documents_without_total(
+                client, database, collection, skip, limit, filter, projection, sort, collation,
+            )
+            .await
+        }
+        PoolKind::Agent(client) => {
+            let mut client = client.lock().await;
+            let mut params = serde_json::json!({
+                "database": database,
+                "collection": collection,
+                "skip": skip,
+                "limit": limit,
+                "filter": filter,
+                "sort": sort,
+            });
+            if let Some(projection) = projection {
+                params["projection"] = serde_json::json!(projection);
+            }
+            if let Some(collation) = collation {
+                params["collation"] = serde_json::json!(collation);
+            }
+            client.mongo_find_documents(params).await
+        }
+        _ => Err("Not a MongoDB connection".to_string()),
+    }
+}
+
 pub async fn mongo_find_one_core(
     state: &AppState,
     connection_id: &str,
@@ -179,6 +225,49 @@ pub async fn mongo_find_one_core(
                     "filter": filter,
                     "projection": projection,
                     "options": options,
+                }))
+                .await
+        }
+        _ => Err("Not a MongoDB connection".to_string()),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn mongo_explain_find_core(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    collection: &str,
+    skip: u64,
+    limit: i64,
+    filter: Option<&str>,
+    projection: Option<&str>,
+    sort: Option<&str>,
+    collation: Option<&str>,
+    verbosity: &str,
+) -> Result<serde_json::Value, String> {
+    ensure_document_pool(state, connection_id).await?;
+    let connections = state.connections.read().await;
+    match connections.get(connection_id).ok_or("Not found")? {
+        PoolKind::MongoDb(client) => {
+            mongo_driver::explain_find(
+                client, database, collection, skip, limit, filter, projection, sort, collation, verbosity,
+            )
+            .await
+        }
+        PoolKind::Agent(client) => {
+            let mut client = client.lock().await;
+            client
+                .mongo_explain_find(serde_json::json!({
+                    "database": database,
+                    "collection": collection,
+                    "skip": skip,
+                    "limit": limit,
+                    "filter": filter,
+                    "projection": projection,
+                    "sort": sort,
+                    "collation": collation,
+                    "verbosity": verbosity,
                 }))
                 .await
         }
@@ -297,7 +386,24 @@ pub async fn mongo_aggregate_documents_core(
         PoolKind::MongoDb(client) => {
             mongo_driver::aggregate_documents(client, database, collection, pipeline_json, max_rows, options_json).await
         }
-        PoolKind::Agent(_) => Err("MongoDB legacy agent does not support aggregate".to_string()),
+        PoolKind::Agent(client) => {
+            let mut client = client.lock().await;
+            let params = serde_json::json!({
+                "database": database,
+                "collection": collection,
+                "pipeline": pipeline_json,
+                "limit": max_rows.unwrap_or(100),
+                "options": options_json,
+            });
+            match client.mongo_aggregate_documents(params).await {
+                Ok(result) => Ok(result),
+                Err(error) if is_unknown_agent_method_error(&error, "aggregate_documents") => Err(
+                    "MongoDB Legacy Agent does not support aggregate; upgrade or reinstall the MongoDB Legacy driver"
+                        .to_string(),
+                ),
+                Err(error) => Err(error),
+            }
+        }
         _ => Err("Not a MongoDB connection".to_string()),
     }
 }
@@ -635,9 +741,352 @@ pub async fn mongo_find_one_and_delete_core(
     }
 }
 
+pub async fn execute_mongo_command_core(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    command: &MongoCommand,
+    max_rows: usize,
+) -> Result<QueryResult, String> {
+    use serde_json::Value;
+
+    match command {
+        MongoCommand::Version => mongo_server_version_core(state, connection_id, database)
+            .await
+            .map(|version| scalar_query_result("version", Value::String(version))),
+        MongoCommand::Use { database } => Ok(scalar_query_result("database", Value::String(database.clone()))),
+        MongoCommand::Find { collection, filter, projection, sort, collation, skip, limit } => {
+            let limit = bounded_mongo_find_limit(*limit, max_rows);
+            let result = mongo_find_documents_without_total_core(
+                state,
+                connection_id,
+                database,
+                collection,
+                *skip,
+                limit,
+                Some(filter),
+                projection.as_deref(),
+                sort.as_deref(),
+                collation.as_deref(),
+            )
+            .await?;
+            Ok(mongo_documents_query_result(result.documents))
+        }
+        MongoCommand::FindExplain { collection, filter, projection, sort, collation, skip, limit, verbosity } => {
+            let limit = bounded_mongo_find_limit(*limit, max_rows);
+            let plan = mongo_explain_find_core(
+                state,
+                connection_id,
+                database,
+                collection,
+                *skip,
+                limit,
+                Some(filter),
+                projection.as_deref(),
+                sort.as_deref(),
+                collation.as_deref(),
+                verbosity,
+            )
+            .await?;
+            Ok(mongo_documents_query_result(vec![plan]))
+        }
+        MongoCommand::FindOne { collection, filter, projection, options } => {
+            let result = mongo_find_one_core(
+                state,
+                connection_id,
+                database,
+                collection,
+                Some(filter),
+                projection.as_deref(),
+                options.as_deref(),
+            )
+            .await?;
+            Ok(mongo_documents_query_result(result.documents))
+        }
+        MongoCommand::Count { collection, filter, accurate } => {
+            let mode = if *accurate { "accurate" } else { "legacy" };
+            let total =
+                mongo_count_documents_core(state, connection_id, database, collection, Some(filter), Some(mode))
+                    .await?;
+            Ok(scalar_query_result("count", Value::from(total)))
+        }
+        MongoCommand::Aggregate { collection, pipeline, options } => {
+            let result = mongo_aggregate_documents_core(
+                state,
+                connection_id,
+                database,
+                collection,
+                pipeline,
+                Some(max_rows),
+                options.as_deref(),
+            )
+            .await?;
+            Ok(mongo_documents_query_result(result.documents))
+        }
+        MongoCommand::Distinct { collection, field, filter } => {
+            let result =
+                mongo_distinct_core(state, connection_id, database, collection, field, filter.as_deref()).await?;
+            Ok(mongo_documents_query_result(limit_mongo_documents(result, max_rows).documents))
+        }
+        MongoCommand::GetIndexes { collection } => {
+            let indexes = crate::schema::list_indexes_core(state, connection_id, database, "", collection).await?;
+            Ok(mongo_indexes_query_result(indexes, max_rows))
+        }
+        MongoCommand::CollectionStats { collection, metric, scale } => {
+            let stats = mongo_collection_stats_core(state, connection_id, database, collection, scale.clone()).await?;
+            let value = serde_json::to_value(stats).map_err(|error| error.to_string())?;
+            if metric == "stats" {
+                Ok(mongo_documents_query_result(vec![value]))
+            } else {
+                let key = match metric.as_str() {
+                    "dataSize" => "size",
+                    "storageSize" => "storageSize",
+                    "totalIndexSize" => "totalIndexSize",
+                    _ => metric,
+                };
+                Ok(scalar_query_result(metric, value.get(key).cloned().unwrap_or(Value::Null)))
+            }
+        }
+        MongoCommand::Insert { collection, documents } => {
+            let affected = mongo_insert_documents_core(state, connection_id, database, collection, documents).await?;
+            Ok(affected_query_result(affected))
+        }
+        MongoCommand::Update { collection, filter, update, options, many } => {
+            let affected = mongo_update_documents_core(
+                state,
+                connection_id,
+                database,
+                collection,
+                filter,
+                update,
+                *many,
+                options.as_deref(),
+            )
+            .await?;
+            Ok(affected_query_result(affected))
+        }
+        MongoCommand::Delete { collection, filter, many } => {
+            let affected =
+                mongo_delete_documents_core(state, connection_id, database, collection, filter, *many).await?;
+            Ok(affected_query_result(affected))
+        }
+        MongoCommand::CreateIndex { collection, keys, options } => {
+            let name =
+                mongo_create_index_core(state, connection_id, database, collection, keys, options.as_deref()).await?;
+            Ok(scalar_query_result("name", Value::String(name)))
+        }
+        MongoCommand::DropIndexes { collection, indexes, single } => {
+            let result =
+                mongo_drop_indexes_core(state, connection_id, database, collection, indexes.as_deref(), *single)
+                    .await?;
+            Ok(mongo_drop_indexes_query_result(
+                result.dropped_names,
+                result.failures.into_iter().map(|failure| (failure.name, failure.message)).collect(),
+                result.affected_rows,
+            ))
+        }
+        MongoCommand::DropCollection { collection } => {
+            mongo_drop_collection_core(state, connection_id, database, collection).await?;
+            Ok(affected_query_result(1))
+        }
+        MongoCommand::FindOneAndUpdate { collection, filter, update, options } => {
+            let result = mongo_find_one_and_update_core(
+                state,
+                connection_id,
+                database,
+                collection,
+                filter,
+                update,
+                options.as_deref(),
+            )
+            .await?;
+            Ok(mongo_documents_query_result(result.documents))
+        }
+        MongoCommand::FindOneAndReplace { collection, filter, replacement, options } => {
+            let result = mongo_find_one_and_replace_core(
+                state,
+                connection_id,
+                database,
+                collection,
+                filter,
+                replacement,
+                options.as_deref(),
+            )
+            .await?;
+            Ok(mongo_documents_query_result(result.documents))
+        }
+        MongoCommand::FindOneAndDelete { collection, filter, options } => {
+            let result =
+                mongo_find_one_and_delete_core(state, connection_id, database, collection, filter, options.as_deref())
+                    .await?;
+            Ok(mongo_documents_query_result(result.documents))
+        }
+    }
+}
+
+fn bounded_mongo_find_limit(command_limit: i64, max_rows: usize) -> i64 {
+    let max_rows = max_rows.max(1).min(i64::MAX as usize) as i64;
+    if command_limit == 0 {
+        return max_rows;
+    }
+    command_limit.saturating_abs().min(max_rows).max(1)
+}
+
+fn limit_mongo_documents(mut result: MongoDocumentResult, max_rows: usize) -> MongoDocumentResult {
+    let max_rows = max_rows.max(1);
+    result.documents.truncate(max_rows);
+    if let Some(raw_documents) = result.raw_documents.as_mut() {
+        raw_documents.truncate(max_rows);
+    }
+    if let Some(extended_documents) = result.extended_documents.as_mut() {
+        extended_documents.truncate(max_rows);
+    }
+    result
+}
+
+fn query_result(columns: Vec<String>, rows: Vec<Vec<serde_json::Value>>, affected_rows: u64) -> QueryResult {
+    QueryResult {
+        columns,
+        column_types: Vec::new(),
+        column_sortables: Vec::new(),
+        spatial_columns: Vec::new(),
+        spatial_values: Vec::new(),
+        rows,
+        affected_rows,
+        execution_time_ms: 0,
+        truncated: false,
+        session_id: None,
+        has_more: false,
+        elasticsearch_raw_body: None,
+        messages: Vec::new(),
+    }
+}
+
+fn scalar_query_result(column: impl Into<String>, value: serde_json::Value) -> QueryResult {
+    query_result(vec![column.into()], vec![vec![value]], 0)
+}
+
+fn affected_query_result(affected_rows: u64) -> QueryResult {
+    query_result(Vec::new(), Vec::new(), affected_rows)
+}
+
+pub fn mongo_indexes_query_result(indexes: Vec<IndexInfo>, max_rows: usize) -> QueryResult {
+    use serde_json::Value;
+
+    let rows = indexes
+        .into_iter()
+        .take(max_rows.max(1))
+        .map(|index| {
+            vec![
+                Value::String(index.name),
+                Value::String(index.columns.join(", ")),
+                Value::Bool(index.is_unique),
+                Value::Bool(index.is_primary),
+                index.index_type.map(Value::String).unwrap_or(Value::Null),
+                index.filter.map(Value::String).unwrap_or(Value::Null),
+            ]
+        })
+        .collect::<Vec<_>>();
+    let affected_rows = rows.len() as u64;
+    query_result(
+        vec![
+            "name".to_string(),
+            "columns".to_string(),
+            "unique".to_string(),
+            "primary".to_string(),
+            "type".to_string(),
+            "filter".to_string(),
+        ],
+        rows,
+        affected_rows,
+    )
+}
+
+fn mongo_drop_indexes_query_result(
+    dropped_names: Vec<String>,
+    failures: Vec<(String, String)>,
+    affected_rows: u64,
+) -> QueryResult {
+    use serde_json::Value;
+
+    if failures.is_empty() {
+        let rows = dropped_names.into_iter().map(|name| vec![Value::String(name)]).collect::<Vec<_>>();
+        return query_result(if rows.is_empty() { Vec::new() } else { vec!["name".to_string()] }, rows, affected_rows);
+    }
+
+    let mut rows = dropped_names
+        .into_iter()
+        .map(|name| vec![Value::String(name), Value::String("dropped".to_string()), Value::Null])
+        .collect::<Vec<_>>();
+    rows.extend(
+        failures.into_iter().map(|(name, message)| {
+            vec![Value::String(name), Value::String("failed".to_string()), Value::String(message)]
+        }),
+    );
+    query_result(vec!["name".to_string(), "status".to_string(), "message".to_string()], rows, affected_rows)
+}
+
+fn mongo_documents_query_result(documents: Vec<serde_json::Value>) -> QueryResult {
+    use serde_json::Value;
+
+    if documents.is_empty() {
+        return query_result(Vec::new(), Vec::new(), 0);
+    }
+    let mut columns = std::collections::BTreeSet::new();
+    for document in &documents {
+        if let Some(object) = document.as_object() {
+            columns.extend(object.keys().cloned());
+        } else {
+            columns.insert("value".to_string());
+        }
+    }
+    let columns = columns.into_iter().collect::<Vec<_>>();
+    let rows = documents
+        .into_iter()
+        .map(|document| {
+            columns
+                .iter()
+                .map(|column| {
+                    document
+                        .as_object()
+                        .and_then(|object| object.get(column))
+                        .cloned()
+                        .or_else(|| (column == "value").then(|| document.clone()))
+                        .unwrap_or(Value::Null)
+                })
+                .collect()
+        })
+        .collect();
+    query_result(columns, rows, 0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn agent_find_limit_never_passes_an_unbounded_zero_to_mongodb() {
+        assert_eq!(bounded_mongo_find_limit(0, 50), 50);
+        assert_eq!(bounded_mongo_find_limit(0, 0), 1);
+        assert_eq!(bounded_mongo_find_limit(100, 7), 7);
+        assert_eq!(bounded_mongo_find_limit(-100, 7), 7);
+    }
+
+    #[test]
+    fn agent_document_limit_caps_distinct_values() {
+        let result = MongoDocumentResult {
+            documents: vec![serde_json::json!(1), serde_json::json!(2), serde_json::json!(3)],
+            raw_documents: Some(vec!["1".to_string(), "2".to_string(), "3".to_string()]),
+            extended_documents: Some(vec![serde_json::json!(1), serde_json::json!(2), serde_json::json!(3)]),
+            total: 3,
+            total_is_exact: true,
+        };
+
+        let limited = limit_mongo_documents(result, 2);
+        assert_eq!(limited.documents, vec![serde_json::json!(1), serde_json::json!(2)]);
+        assert_eq!(limited.raw_documents.unwrap(), vec!["1", "2"]);
+        assert_eq!(limited.extended_documents.unwrap(), vec![serde_json::json!(1), serde_json::json!(2)]);
+    }
 
     #[cfg(unix)]
     use crate::db::agent_driver::{AgentDriverClient, AgentLaunchSpec};
@@ -889,6 +1338,49 @@ for line in sys.stdin:
             mongo_create_index_core(&state, "legacy", "app", "users", keys_json, Some(options_json)).await.unwrap();
 
         assert_eq!(name, "email_1");
+    }
+
+    #[test]
+    fn mongo_indexes_query_result_matches_desktop_contract_and_limits_rows() {
+        let result = mongo_indexes_query_result(
+            vec![
+                IndexInfo {
+                    name: "_id_".to_string(),
+                    columns: vec!["_id".to_string()],
+                    is_unique: false,
+                    is_primary: true,
+                    filter: None,
+                    index_type: Some("_id: 1".to_string()),
+                    included_columns: None,
+                    comment: None,
+                },
+                IndexInfo {
+                    name: "email_1".to_string(),
+                    columns: vec!["email".to_string()],
+                    is_unique: true,
+                    is_primary: false,
+                    filter: Some("{\"active\":true}".to_string()),
+                    index_type: Some("email: 1".to_string()),
+                    included_columns: None,
+                    comment: None,
+                },
+            ],
+            1,
+        );
+
+        assert_eq!(result.columns, ["name", "columns", "unique", "primary", "type", "filter"]);
+        assert_eq!(
+            result.rows,
+            [vec![
+                serde_json::json!("_id_"),
+                serde_json::json!("_id"),
+                serde_json::json!(false),
+                serde_json::json!(true),
+                serde_json::json!("_id: 1"),
+                serde_json::Value::Null,
+            ]]
+        );
+        assert_eq!(result.affected_rows, 1);
     }
 
     #[cfg(unix)]

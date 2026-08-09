@@ -15,6 +15,7 @@ CLAUDE.md
 dist/
 coverage/
 /target/
+src-tauri/webview2-fixed-runtime/
 plugins/jdbc/target/
 plugins/jdbc/dependency-reduced-pom.xml
 plugins/jdbc/lib/*.jar

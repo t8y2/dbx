@@ -355,6 +355,7 @@ pub async fn execute_query_with_max_rows(
             session_id: None,
             has_more: false,
             elasticsearch_raw_body: None,
+            messages: Vec::new(),
         });
     }
 
@@ -376,6 +377,7 @@ pub async fn execute_query_with_max_rows(
             session_id: None,
             has_more: false,
             elasticsearch_raw_body: None,
+            messages: Vec::new(),
         })
     } else {
         // Batch multiple statements into a single pipeline for transactional integrity
@@ -394,6 +396,7 @@ pub async fn execute_query_with_max_rows(
             session_id: None,
             has_more: false,
             elasticsearch_raw_body: None,
+            messages: Vec::new(),
         })
     }
 }
@@ -574,6 +577,7 @@ fn query_result_from_turso_result(
         session_id: None,
         has_more: false,
         elasticsearch_raw_body: None,
+        messages: Vec::new(),
     }
 }
 

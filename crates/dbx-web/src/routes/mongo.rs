@@ -103,6 +103,22 @@ pub struct MongoFindRequest {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct MongoFindExplainRequest {
+    pub connection_id: String,
+    pub database: String,
+    pub collection: String,
+    pub skip: Option<u64>,
+    pub limit: Option<i64>,
+    pub filter: Option<String>,
+    pub projection: Option<String>,
+    pub sort: Option<String>,
+    pub collation: Option<String>,
+    pub verbosity: Option<String>,
+    pub execution_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct MongoFindOneRequest {
     pub connection_id: String,
     pub database: String,
@@ -407,6 +423,34 @@ pub async fn find_documents(
     )
     .await?;
     Ok(Json(serde_json::to_value(result).map_err(|e| AppError::from(e.to_string()))?))
+}
+
+pub async fn explain_find(
+    State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
+    Json(req): Json<MongoFindExplainRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    super::mcp_policy::ensure_scope(&state, &headers, &req.connection_id).await?;
+    let verbosity = req.verbosity.as_deref().unwrap_or("queryPlanner");
+    let result = run_cancellable(
+        &state,
+        req.execution_id.clone(),
+        dbx_core::mongo_ops::mongo_explain_find_core(
+            &state.app,
+            &req.connection_id,
+            &req.database,
+            &req.collection,
+            req.skip.unwrap_or(0),
+            req.limit.unwrap_or(100),
+            req.filter.as_deref(),
+            req.projection.as_deref(),
+            req.sort.as_deref(),
+            req.collation.as_deref(),
+            verbosity,
+        ),
+    )
+    .await?;
+    Ok(Json(result))
 }
 
 pub async fn find_one(

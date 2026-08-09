@@ -929,8 +929,7 @@ onUnmounted(() => {
   gap: 16px;
   padding: 14px 20px;
   border-bottom: 1px solid var(--monitor-border);
-  background: color-mix(in srgb, var(--monitor-surface) 92%, transparent);
-  backdrop-filter: blur(10px);
+  background: var(--monitor-surface);
   position: sticky;
   top: 0;
   z-index: 1;
@@ -1044,11 +1043,12 @@ onUnmounted(() => {
   border-color: var(--monitor-border-strong);
   background: var(--monitor-hover);
   box-shadow: var(--monitor-shadow);
-  transform: translateY(-1px);
 }
 
+/* 桌面端不做位移/缩放按压反馈，仅靠颜色变化表达状态，避免按钮"抖动"观感 */
 .btn-sm:active:not(:disabled) {
-  transform: translateY(0) scale(0.98);
+  background: var(--monitor-accent-soft);
+  border-color: var(--monitor-accent);
 }
 
 .btn-sm:focus-visible {

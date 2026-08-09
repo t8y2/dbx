@@ -22,6 +22,8 @@ pub struct TableDataSelectSqlOptions {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub database_type: Option<DatabaseType>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub driver_profile: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub identifier_quote: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schema: Option<String>,

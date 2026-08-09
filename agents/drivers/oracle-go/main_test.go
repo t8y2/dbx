@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"math"
 	"net/url"
 	"os"
 	"reflect"
@@ -242,6 +243,28 @@ func TestNormalizeValueKeepsNonBinaryBytesAsText(t *testing.T) {
 	}
 	if got := normalizeValue([]byte("legacy"), ""); got != "legacy" {
 		t.Fatalf("normalizeValue bytes without metadata = %#v, want %q", got, "legacy")
+	}
+}
+
+func TestQueryResultsMarshalNonFiniteFloatsAsStrings(t *testing.T) {
+	result := queryResult{Rows: [][]any{{math.NaN(), math.Inf(1), math.Inf(-1), 1234.56}}}
+	data, err := json.Marshal(result)
+	if err != nil {
+		t.Fatalf("non-finite Oracle floats must remain JSON-safe: %v", err)
+	}
+	if !strings.Contains(string(data), `[["NaN","+Inf","-Inf",1234.56]]`) {
+		t.Fatalf("unexpected query result JSON: %s", data)
+	}
+	if !math.IsNaN(result.Rows[0][0].(float64)) {
+		t.Fatalf("marshaling must not mutate the original rows: %#v", result.Rows)
+	}
+
+	data, err = json.Marshal(queryPageResult{Rows: [][]any{{math.NaN()}}})
+	if err != nil {
+		t.Fatalf("paged non-finite Oracle floats must remain JSON-safe: %v", err)
+	}
+	if !strings.Contains(string(data), `[["NaN"]]`) {
+		t.Fatalf("unexpected query page JSON: %s", data)
 	}
 }
 
@@ -531,6 +554,154 @@ func TestGetTableDDLFallbackPreservesQuotedColumnNames(t *testing.T) {
 )`
 	if got != want {
 		t.Fatalf("getTableDDL() = %q, want %q", got, want)
+	}
+	if scripted.next != len(scripted.steps) {
+		t.Fatalf("expected %d queries, got %d", len(scripted.steps), scripted.next)
+	}
+}
+
+func TestGetTableDDLAppendsIndexesTriggersAndComments(t *testing.T) {
+	const schema = "HR"
+	const table = "ORDERS"
+	const tableDDL = `CREATE TABLE "HR"."ORDERS" ("ID" NUMBER DEFAULT 42, PRIMARY KEY ("ID"))`
+	db, scripted := openOracleViewSourceTestDB(t, []oracleViewSourceQueryStep{
+		{
+			queryContains: "DBMS_METADATA.GET_DDL(:1, :2, :3)",
+			args:          []driver.Value{"TABLE", table, schema},
+			rows:          [][]driver.Value{{tableDDL}},
+		},
+		{
+			queryContains: "FROM ALL_INDEXES",
+			args:          []driver.Value{schema, table, schema, table},
+			rows:          [][]driver.Value{{`CREATE INDEX "HR"."IDX_ORDERS_STATUS" ON "HR"."ORDERS" ("STATUS")`}},
+		},
+		{
+			queryContains: "FROM ALL_TRIGGERS",
+			args:          []driver.Value{schema, table},
+			rows:          [][]driver.Value{{`CREATE OR REPLACE TRIGGER "HR"."TRG_ORDERS" BEFORE INSERT ON "HR"."ORDERS" BEGIN NULL; END;`}},
+		},
+		{
+			queryContains: "FROM ALL_TAB_COMMENTS",
+			args:          []driver.Value{schema, table},
+			rows:          [][]driver.Value{{"Owner's orders"}},
+		},
+		{
+			queryContains: "FROM ALL_COL_COMMENTS",
+			args:          []driver.Value{schema, table},
+			columns:       []string{"COLUMN_NAME", "COMMENTS"},
+			rows:          [][]driver.Value{{"STATUS", "Order's state"}},
+		},
+	})
+	s := newServer()
+	s.db = db
+
+	got, err := s.getTableDDL(schema, table, "TABLE")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, fragment := range []string{
+		tableDDL,
+		`CREATE INDEX "HR"."IDX_ORDERS_STATUS"`,
+		`CREATE OR REPLACE TRIGGER "HR"."TRG_ORDERS"`,
+		`COMMENT ON TABLE "HR"."ORDERS" IS 'Owner''s orders';`,
+		`COMMENT ON COLUMN "HR"."ORDERS"."STATUS" IS 'Order''s state';`,
+	} {
+		if !strings.Contains(got, fragment) {
+			t.Fatalf("getTableDDL() missing %q:\n%s", fragment, got)
+		}
+	}
+	if !strings.Contains(got, tableDDL+";\n\nCREATE INDEX") {
+		t.Fatalf("base table DDL should be terminated before dependent DDL:\n%s", got)
+	}
+	if scripted.next != len(scripted.steps) {
+		t.Fatalf("expected %d queries, got %d", len(scripted.steps), scripted.next)
+	}
+}
+
+func TestGetTableCommentPreservesQuotedObjectName(t *testing.T) {
+	const schema = "HR"
+	const table = "OrderDetails"
+	const comment = "Quoted table comment"
+	db, scripted := openOracleViewSourceTestDB(t, []oracleViewSourceQueryStep{
+		{
+			queryContains: "FROM ALL_TAB_COMMENTS",
+			args:          []driver.Value{schema, table},
+			rows:          [][]driver.Value{{comment}},
+		},
+	})
+	s := newServer()
+	s.db = db
+
+	got, err := s.getTableComment(schema, table)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == nil || *got != comment {
+		t.Fatalf("getTableComment() = %#v, want %q", got, comment)
+	}
+	if scripted.next != len(scripted.steps) {
+		t.Fatalf("expected %d queries, got %d", len(scripted.steps), scripted.next)
+	}
+}
+
+func TestGetTableCommentFallsBackToUppercase(t *testing.T) {
+	const schema = "HR"
+	const comment = "Orders comment"
+	db, scripted := openOracleViewSourceTestDB(t, []oracleViewSourceQueryStep{
+		{
+			queryContains: "FROM ALL_TAB_COMMENTS",
+			args:          []driver.Value{schema, "orders"},
+			rows:          nil,
+		},
+		{
+			queryContains: "FROM ALL_TAB_COMMENTS",
+			args:          []driver.Value{schema, "ORDERS"},
+			rows:          [][]driver.Value{{comment}},
+		},
+	})
+	s := newServer()
+	s.db = db
+
+	got, err := s.getTableComment(schema, "orders")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == nil || *got != comment {
+		t.Fatalf("getTableComment() = %#v, want %q", got, comment)
+	}
+	if scripted.next != len(scripted.steps) {
+		t.Fatalf("expected %d queries, got %d", len(scripted.steps), scripted.next)
+	}
+}
+
+func TestListForeignKeysIncludesReferencedSchemaAndDeleteRule(t *testing.T) {
+	const schema = "HR"
+	const table = "ORDERS"
+	db, scripted := openOracleViewSourceTestDB(t, []oracleViewSourceQueryStep{
+		{
+			queryContains: "FROM ALL_CONSTRAINTS ac",
+			args:          []driver.Value{schema, table},
+			columns:       []string{"CONSTRAINT_NAME", "COLUMN_NAME", "REF_SCHEMA", "REF_TABLE", "REF_COLUMN", "DELETE_RULE"},
+			rows:          [][]driver.Value{{"FK_ORDERS_CUSTOMER", "CUSTOMER_ID", "CRM", "CUSTOMERS", "ID", "CASCADE"}},
+		},
+	})
+	s := newServer()
+	s.db = db
+
+	got, err := s.listForeignKeys(schema, table)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []foreignKeyInfo{{
+		Name:      "FK_ORDERS_CUSTOMER",
+		Column:    "CUSTOMER_ID",
+		RefSchema: "CRM",
+		RefTable:  "CUSTOMERS",
+		RefColumn: "ID",
+		OnDelete:  "CASCADE",
+	}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("listForeignKeys() = %#v, want %#v", got, want)
 	}
 	if scripted.next != len(scripted.steps) {
 		t.Fatalf("expected %d queries, got %d", len(scripted.steps), scripted.next)
@@ -1759,6 +1930,18 @@ func TestGetObjectSourceRejectsMissingViewSource(t *testing.T) {
 	}
 	if scripted.next != len(scripted.steps) {
 		t.Fatalf("expected %d queries, got %d", len(scripted.steps), scripted.next)
+	}
+}
+
+func TestOracleObjectIdentityNameCandidates(t *testing.T) {
+	if got := oracleObjectIdentityNameCandidates("MIXEDPROC"); len(got) != 1 || got[0] != "MIXEDPROC" {
+		t.Fatalf("uppercase identity should be single candidate, got %#v", got)
+	}
+	if got := oracleObjectIdentityNameCandidates("MiXeDProc"); len(got) != 2 || got[0] != "MiXeDProc" || got[1] != "MIXEDPROC" {
+		t.Fatalf("mixed-case identity should try exact then upper, got %#v", got)
+	}
+	if got := oracleObjectIdentityNameCandidates("  "); got != nil {
+		t.Fatalf("blank name should yield no candidates, got %#v", got)
 	}
 }
 

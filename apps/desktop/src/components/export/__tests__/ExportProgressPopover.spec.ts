@@ -25,8 +25,17 @@ vi.mock("@/components/ui/button", async () => {
   };
 });
 
+vi.mock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => true }));
+
+vi.mock("@/lib/backend/api", async (importOriginal) => {
+  const original = await importOriginal<typeof import("@/lib/backend/api")>();
+  return { ...original, revealPathInFileManager: vi.fn() };
+});
+
 import ExportProgressPopover from "@/components/export/ExportProgressPopover.vue";
 import { useExportTracker } from "@/composables/useExportTracker";
+import { useToast } from "@/composables/useToast";
+import * as api from "@/lib/backend/api";
 
 const mountedApps: App[] = [];
 let now = 0;
@@ -66,8 +75,98 @@ async function mountPopover() {
   await nextTick();
 }
 
-describe("ExportProgressPopover data transfer duration", () => {
-  it("shows frozen transfer elapsed time without adding it to other task kinds", async () => {
+describe("ExportProgressPopover task duration", () => {
+  it("distinguishes manual exports from scheduled backups and uses a compact failure dot", async () => {
+    const tracker = useExportTracker();
+    tracker.addDatabaseExportTask("manual-export", "app", "/tmp/app.sql");
+    tracker.addDatabaseExportTask("scheduled-backup", "Nightly", "/tmp/backups", "scheduled");
+    tracker.updateDatabaseExportTask("manual-export", {
+      exportId: "manual-export",
+      currentObject: "",
+      objectIndex: 0,
+      totalObjects: 0,
+      rowsExported: 0,
+      totalRows: null,
+      status: "Error",
+      error: "export failed",
+    });
+
+    await mountPopover();
+
+    expect(document.body.textContent).toContain("Database export: app");
+    expect(document.body.textContent).toContain("Database backup: Nightly");
+    const failureDot = document.body.querySelector<HTMLSpanElement>("button > span");
+    expect(failureDot?.classList.contains("h-2.5")).toBe(true);
+    expect(failureDot?.classList.contains("w-2.5")).toBe(true);
+    expect(failureDot?.classList.contains("right-0.5")).toBe(true);
+    expect(failureDot?.classList.contains("top-0.5")).toBe(true);
+    expect(failureDot?.textContent?.trim()).toBe("");
+  });
+
+  it("shows the current database export object without replacing the task title", async () => {
+    const tracker = useExportTracker();
+    const task = tracker.addDatabaseExportTask("database-export", "demo_2000_tables", "/tmp/demo.sql");
+    tracker.updateDatabaseExportTask(task.exportId, {
+      exportId: task.exportId,
+      currentObject: "t_0123_with_a_long_descriptive_name",
+      objectIndex: 123,
+      totalObjects: 2000,
+      rowsExported: 456,
+      totalRows: null,
+      status: "Running",
+      error: null,
+      preparing: false,
+    });
+
+    await mountPopover();
+
+    expect(document.body.textContent).toContain("Database export: demo_2000_tables");
+    expect(document.body.textContent).toContain("Current: t_0123_with_a_long_descriptive_name (123/2,000)");
+    expect(document.body.querySelector('[title="t_0123_with_a_long_descriptive_name"]')).not.toBeNull();
+  });
+
+  it("shows the current object while database export metadata is being prepared", async () => {
+    const tracker = useExportTracker();
+    const task = tracker.addDatabaseExportTask("preparing-export", "demo", "/tmp/demo.sql");
+    tracker.updateDatabaseExportTask(task.exportId, {
+      exportId: task.exportId,
+      currentObject: "t_0001",
+      objectIndex: 0,
+      totalObjects: 0,
+      rowsExported: 0,
+      totalRows: null,
+      status: "Running",
+      error: null,
+      preparing: true,
+    });
+
+    await mountPopover();
+
+    expect(document.body.textContent).toContain("Preparing: t_0001");
+  });
+
+  it.each(["Done", "Error", "Cancelled"] as const)("hides stale database object text after the task reaches %s", async (status) => {
+    const tracker = useExportTracker();
+    const task = tracker.addDatabaseExportTask(`terminal-${status}`, "Nightly", "/tmp/backups", "scheduled");
+    tracker.updateDatabaseExportTask(task.exportId, {
+      exportId: task.exportId,
+      currentObject: "Nightly",
+      objectIndex: 2,
+      totalObjects: status === "Error" ? 0 : 2,
+      rowsExported: 0,
+      totalRows: null,
+      status,
+      error: status === "Error" ? "backup failed" : null,
+      preparing: status === "Error",
+    });
+
+    await mountPopover();
+
+    expect(document.body.textContent).not.toContain("Preparing: Nightly");
+    expect(document.body.textContent).not.toContain("Current: Nightly");
+  });
+
+  it("shows frozen transfer elapsed time and live duration for table tasks", async () => {
     const tracker = useExportTracker();
     now = 1_000;
     const transfer = tracker.addDataTransferTask("transfer", "users", 1);
@@ -89,7 +188,7 @@ describe("ExportProgressPopover data transfer duration", () => {
     await mountPopover();
 
     expect(document.body.textContent).toContain("Elapsed: 1m 5s");
-    expect(document.body.textContent?.match(/Elapsed:/g)).toHaveLength(1);
+    expect(document.body.textContent?.match(/Elapsed:/g)).toHaveLength(2);
   });
 
   it("expands complete per-table transfer failure details", async () => {
@@ -158,5 +257,113 @@ describe("ExportProgressPopover data transfer duration", () => {
 
     expect(document.body.textContent).toContain("1 additional failure detail(s) not shown");
     expect(document.body.textContent).not.toContain("failure 100");
+  });
+});
+
+describe("ExportProgressPopover file name and reveal action", () => {
+  it("shows the saved file name instead of the synthetic query-result label", async () => {
+    const tracker = useExportTracker();
+    tracker.addTask("Query Result", "sql", "C:\\exports\\自定义.sql");
+    tracker.addTask("Query Result", "xlsx", "/home/dbx/downloads/report-final.xlsx");
+
+    await mountPopover();
+
+    expect(document.body.textContent).toContain("自定义.sql");
+    expect(document.body.textContent).toContain("report-final.xlsx");
+    expect(document.body.textContent).not.toContain("Query Result.sql");
+    expect(document.body.textContent).not.toContain("Query Result.xlsx");
+  });
+
+  it("falls back to the table label when the task has no file path", async () => {
+    const tracker = useExportTracker();
+    tracker.addTask("audit_log", "csv", "");
+
+    await mountPopover();
+
+    expect(document.body.textContent).toContain("audit_log.csv");
+  });
+
+  it("reveals the containing folder for a finished export from the task row", async () => {
+    const revealMock = vi.mocked(api.revealPathInFileManager);
+    revealMock.mockReset();
+    revealMock.mockResolvedValue(undefined);
+    const tracker = useExportTracker();
+    const task = tracker.addTask("Query Result", "sql", "C:\\exports\\自定义.sql");
+    tracker.updateTableExportTask(task.exportId, {
+      exportId: task.exportId,
+      tableName: "Query Result",
+      rowsExported: 10,
+      totalRows: 10,
+      status: "Done",
+      errorMessage: undefined,
+    });
+
+    await mountPopover();
+
+    const revealButton = document.body.querySelector<HTMLButtonElement>('button[title="Open containing folder"]');
+    expect(revealButton).not.toBeNull();
+    revealButton?.click();
+    await nextTick();
+    await vi.waitFor(() => expect(revealMock).toHaveBeenCalledWith("C:\\exports\\自定义.sql"));
+  });
+
+  it("hides the reveal button for active tasks and tasks without a file path", async () => {
+    const tracker = useExportTracker();
+    tracker.addTask("running_export", "csv", "C:\\exports\\running.csv");
+    const doneTask = tracker.addTask("finished_export", "csv", "");
+    tracker.updateTableExportTask(doneTask.exportId, {
+      exportId: doneTask.exportId,
+      tableName: "finished_export",
+      rowsExported: 1,
+      totalRows: 1,
+      status: "Done",
+      errorMessage: undefined,
+    });
+
+    await mountPopover();
+
+    expect(document.body.querySelector('button[title="Open containing folder"]')).toBeNull();
+  });
+
+  it("hides the reveal button for sql-file tasks whose path is a joined list of input scripts", async () => {
+    const tracker = useExportTracker();
+    const task = tracker.addSqlFileTask("sql-batch", "a.sql (+1)", "C:\\scripts\\a.sql; C:\\scripts\\b.sql");
+    tracker.updateSqlFileTask(task.exportId, {
+      executionId: task.exportId,
+      status: "done",
+      statementIndex: 2,
+      successCount: 2,
+      failureCount: 0,
+      affectedRows: 0,
+      elapsedMs: 10,
+      statementSummary: "",
+    });
+
+    await mountPopover();
+
+    expect(document.body.querySelector('button[title="Open containing folder"]')).toBeNull();
+  });
+
+  it("shows a toast when revealing the folder fails", async () => {
+    const revealMock = vi.mocked(api.revealPathInFileManager);
+    revealMock.mockReset();
+    revealMock.mockRejectedValue(new Error("file does not exist: C:\\exports\\gone.sql"));
+    const tracker = useExportTracker();
+    const task = tracker.addTask("Query Result", "sql", "C:\\exports\\gone.sql");
+    tracker.updateTableExportTask(task.exportId, {
+      exportId: task.exportId,
+      tableName: "Query Result",
+      rowsExported: 10,
+      totalRows: 10,
+      status: "Done",
+      errorMessage: undefined,
+    });
+
+    await mountPopover();
+
+    document.body.querySelector<HTMLButtonElement>('button[title="Open containing folder"]')?.click();
+    await vi.waitFor(() => {
+      expect(useToast().message.value).toContain("Failed to open folder");
+    });
   });
 });

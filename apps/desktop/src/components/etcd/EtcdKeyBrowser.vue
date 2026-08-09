@@ -1,13 +1,14 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
-import { Activity, AlertTriangle, ArrowRightLeft, ChevronDown, ChevronLeft, ChevronRight, Download, Eraser, KeyRound, Loader2, Search, Upload, Wrench } from "@lucide/vue";
+import { Activity, AlertTriangle, ArrowRightLeft, ChevronDown, ChevronLeft, ChevronRight, Download, Eraser, KeyRound, Loader2, Search, Trash2, Upload, Wrench } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
 import KvKeyBrowser from "@/components/kv/KvKeyBrowser.vue";
 import EtcdAdminConsole from "@/components/etcd/EtcdAdminConsole.vue";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
+import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useToast } from "@/composables/useToast";
@@ -64,6 +65,13 @@ interface EtcdWatchPreset {
   scope: "key" | "prefix";
 }
 
+interface EtcdMultiSelection {
+  key: string;
+  keyIdentity?: string | null;
+  keyBytes?: api.KvValue | null;
+  modRevision?: api.KvInt64 | null;
+}
+
 interface TransferRow {
   id: string;
   displayKey: string;
@@ -110,6 +118,9 @@ const watchKeySuggestions = computed(() => {
   return [...keyBytesByDisplay.entries()].flatMap(([key, values]) => [...values.values()].map((keyBytes) => ({ key, keyBytes })));
 });
 const fileInput = ref<HTMLInputElement>();
+const selectedTreeKeys = ref<EtcdMultiSelection[]>([]);
+const batchDeleteOpen = ref(false);
+const batchDeleting = ref(false);
 
 const searchQuery = ref("");
 const searchPrefix = ref("");
@@ -313,6 +324,8 @@ const labels = computed(() => ({
   leasePickerHint: t("etcd.leasePickerHint"),
   noLeasePickerHint: t("etcd.noLeasePickerHint"),
   registryWarning: t("etcd.registryWarning"),
+  selectAll: t("etcd.selectAllLoaded"),
+  deselectAll: t("etcd.deselectAll"),
   valueContent: t("etcd.valueContent"),
   savePreview: t("etcd.savePreview"),
   keyAlreadyExists: t("etcd.keyAlreadyExists"),
@@ -477,6 +490,66 @@ function bundleFromSummaries(entries: api.KvKeySummary[], prefix: string, revisi
       };
     }),
   };
+}
+
+function updateTreeSelection(selection: EtcdMultiSelection[]) {
+  selectedTreeKeys.value = selection;
+}
+
+async function exportTreeSelection(format: EtcdExportFormat) {
+  const selected = [...selectedTreeKeys.value];
+  if (!selected.length) return;
+  try {
+    const entries = await mapWithConcurrency(selected, TARGET_LOOKUP_CONCURRENCY, async (item) => {
+      const result = await api.etcdGet(props.connectionId, item.key, { keyBytes: item.keyBytes ?? undefined });
+      if (!result.found || !result.value) throw new Error(t("etcd.notFound"));
+      return {
+        key: result.key || item.key,
+        keyBytes: result.keyBytes ?? item.keyBytes ?? { encoding: "utf8", data: item.key },
+        value: result.value,
+        ...result.metadata,
+      };
+    });
+    const file = buildEtcdExportFile(entries, "", null, "selection", `dbx-etcd-selection-${Date.now()}`, format);
+    const exported = await downloadExport(file);
+    if (exported) toast(t("etcd.exported", { count: entries.length }), 2500);
+  } catch (error) {
+    toast(error instanceof Error ? error.message : String(error), 4000);
+  }
+}
+
+function selectedTreeKeyDetails(): string {
+  return selectedTreeKeys.value.map((item) => item.key).join("\n");
+}
+
+async function deleteSelectedTreeKeys() {
+  const selected = [...selectedTreeKeys.value];
+  if (!selected.length || readOnly.value) return;
+  batchDeleting.value = true;
+  const completed: EtcdMultiSelection[] = [];
+  let deleted = 0;
+  let failed = false;
+  try {
+    for (const item of selected) {
+      const result = await api.etcdDelete(props.connectionId, item.key, {
+        keyBytes: item.keyBytes ?? undefined,
+        expectedModRevision: item.modRevision ?? undefined,
+      });
+      deleted += result.deleted;
+      completed.push(item);
+    }
+    toast(t("etcd.batchDeleteSuccess", { count: deleted }), 3000);
+  } catch (error) {
+    failed = true;
+    const message = error instanceof Error ? error.message : String(error);
+    toast(t("etcd.batchDeletePartial", { count: deleted, error: message }), 5000);
+  } finally {
+    if (failed) browserRef.value?.clearMultiSelection();
+    else browserRef.value?.removeMultiSelection(completed);
+    batchDeleteOpen.value = false;
+    batchDeleting.value = false;
+    if (completed.length || failed) browserRef.value?.refresh();
+  }
 }
 
 function csvCell(value: string): string {
@@ -970,12 +1043,19 @@ defineExpose({ focusSearch, refresh });
         <DropdownMenuTrigger as-child>
           <Button size="sm" variant="outline" class="h-8 gap-1.5"><Download class="h-3.5 w-3.5" /> {{ t("etcd.export") }} <ChevronDown class="h-3.5 w-3.5" /></Button>
         </DropdownMenuTrigger>
-        <DropdownMenuContent align="end" class="w-40">
-          <DropdownMenuItem @select="void exportAll('json')">JSON（可导入）</DropdownMenuItem>
-          <DropdownMenuItem @select="void exportAll('csv')">表格（CSV）</DropdownMenuItem>
-          <DropdownMenuItem @select="void exportAll('markdown')">Markdown</DropdownMenuItem>
+        <DropdownMenuContent align="end" class="w-auto whitespace-nowrap">
+          <DropdownMenuItem @select="void exportAll('json')">{{ t("etcd.exportAllJson") }}</DropdownMenuItem>
+          <DropdownMenuItem @select="void exportAll('csv')">{{ t("etcd.exportAllCsv") }}</DropdownMenuItem>
+          <DropdownMenuItem @select="void exportAll('markdown')">{{ t("etcd.exportAllMarkdown") }}</DropdownMenuItem>
+          <template v-if="selectedTreeKeys.length">
+            <DropdownMenuSeparator />
+            <DropdownMenuItem @select="void exportTreeSelection('json')">{{ t("etcd.exportSelectionJson") }}</DropdownMenuItem>
+            <DropdownMenuItem @select="void exportTreeSelection('csv')">{{ t("etcd.exportSelectionCsv") }}</DropdownMenuItem>
+            <DropdownMenuItem @select="void exportTreeSelection('markdown')">{{ t("etcd.exportSelectionMarkdown") }}</DropdownMenuItem>
+          </template>
         </DropdownMenuContent>
       </DropdownMenu>
+      <Button size="sm" variant="destructive" class="h-8 gap-1.5" :disabled="readOnly || selectedTreeKeys.length === 0 || batchDeleting" @click="batchDeleteOpen = true"><Trash2 class="h-3.5 w-3.5" />{{ t("etcd.delete") }}</Button>
       <Button size="sm" variant="outline" class="h-8 gap-1.5" :disabled="readOnly" @click="fileInput?.click()"><Upload class="h-3.5 w-3.5" /> {{ t("etcd.import") }}</Button>
       <Button size="sm" variant="outline" class="h-8 gap-1.5" :disabled="etcdConnections.length < 2" @click="openSync"><ArrowRightLeft class="h-3.5 w-3.5" /> {{ t("etcd.sync") }}</Button>
       <input ref="fileInput" type="file" accept="application/json,.json" class="hidden" @change="onImportFile" />
@@ -995,10 +1075,12 @@ defineExpose({ focusSearch, refresh });
       :safe-write="true"
       :allow-binary-edit="true"
       :read-only="readOnly"
+      :enable-multi-select="true"
       :on-watch-key="openWatchForKey"
       :lease-options="leaseOptions"
       :on-lease-options-requested="refreshLeaseOptions"
       @refresh-requested="refreshTtlCapability"
+      @selection-change="updateTreeSelection"
     />
 
     <div v-if="mode === 'search'" class="flex min-h-0 flex-1 flex-col">
@@ -1253,5 +1335,15 @@ defineExpose({ focusSearch, refresh });
         </DialogFooter>
       </DialogContent>
     </Dialog>
+    <DangerConfirmDialog
+      v-model:open="batchDeleteOpen"
+      :title="t('etcd.batchDeleteTitle')"
+      :message="t('etcd.batchDeleteConfirm', { count: selectedTreeKeys.length })"
+      :details="selectedTreeKeyDetails()"
+      :confirm-label="t('etcd.batchDelete')"
+      :loading="batchDeleting"
+      :close-on-confirm="false"
+      @confirm="deleteSelectedTreeKeys"
+    />
   </div>
 </template>

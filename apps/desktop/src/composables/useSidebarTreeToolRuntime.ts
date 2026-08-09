@@ -63,6 +63,18 @@ export function useSidebarTreeToolRuntime(options: SidebarTreeToolRuntimeOptions
     };
   }
 
+  function openDocs() {
+    const node = activeNode.value;
+    if (!node.connectionId || !node.database) return;
+    connectionStore.docsSource = {
+      connectionId: node.connectionId,
+      database: node.database,
+      // A database node has no schema, and an absent schema is what tells the
+      // collector to document every schema in the database.
+      schema: node.schema,
+    };
+  }
+
   function openDatabaseSearch() {
     const node = activeNode.value;
     if (!node.connectionId || !node.database) return;
@@ -135,6 +147,7 @@ export function useSidebarTreeToolRuntime(options: SidebarTreeToolRuntimeOptions
     openDatabaseExport,
     openDatabaseSearch,
     openDiagram,
+    openDocs,
     openFieldLineage,
     openScheduledBackups,
     openSchemaDiff,

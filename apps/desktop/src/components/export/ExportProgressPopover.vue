@@ -1,18 +1,34 @@
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { useI18n } from "vue-i18n";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Button } from "@/components/ui/button";
-import { Loader2, CheckCircle2, XCircle, AlertCircle, X, FileDown, DatabaseBackup, FileCode2, ArrowRightLeft, ChevronRight } from "@lucide/vue";
+import { Loader2, CheckCircle2, XCircle, AlertCircle, X, FileDown, DatabaseBackup, FileCode2, ArrowRightLeft, Layers3, ChevronRight, FolderOpen } from "@lucide/vue";
 import { formatDataTransferDuration, useExportTracker, type ExportTask } from "@/composables/useExportTracker";
 import { translateBackendError } from "@/i18n/backend-errors";
+import { useToast } from "@/composables/useToast";
+import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
+import * as api from "@/lib/backend/api";
 
 const { t } = useI18n();
+const { toast } = useToast();
 const { tasks, activeCount, hasActive, clearFinished, cancelTask, removeTask } = useExportTracker();
 const open = ref(false);
 const showAll = ref(false);
 const expandedFailureTaskIds = ref<string[]>([]);
+const revealingTaskIds = ref<string[]>([]);
+const currentTime = ref(Date.now());
 const MAX_VISIBLE = 5;
+
+let elapsedTimer: ReturnType<typeof setInterval> | undefined;
+onMounted(() => {
+  elapsedTimer = setInterval(() => {
+    currentTime.value = Date.now();
+  }, 1000);
+});
+onBeforeUnmount(() => {
+  if (elapsedTimer) clearInterval(elapsedTimer);
+});
 
 const reversedTasks = computed(() => {
   return [...tasks.value].reverse();
@@ -53,14 +69,36 @@ const progressValue = (task: ExportTask) => {
     if (task.status === "Done") return 100;
     return Math.min(95, Math.round(((task.tableIndex ?? 0) / task.totalTables) * 100));
   }
+  if (task.kind === "multi-db-execution") {
+    if (task.status === "Done" || task.status === "Error" || task.status === "Cancelled") return 100;
+    if (!task.multiDbTotal) return 0;
+    return Math.min(95, Math.round(((task.multiDbCompleted ?? 0) / task.multiDbTotal) * 100));
+  }
   return progressPercent(task.totalRows, task.rowsExported);
 };
 
+// The save dialog path is what the user recognizes the export by, so the real
+// saved file name beats the synthetic "Query Result.xlsx" style label.
+const taskFileName = (task: ExportTask) => {
+  const filePath = task.filePath.trim();
+  if (!filePath) return "";
+  const segments = filePath.split(/[\\/]+/).filter((segment) => segment.length > 0);
+  return segments.length > 0 ? segments[segments.length - 1] : "";
+};
+
 const taskTitle = (task: ExportTask) => {
-  if (task.kind === "database-export") return t("exportProgress.databaseExportTitle", { name: task.tableName });
+  // database-export and sql-file keep their task labels on purpose: the former
+  // names the database (filePath may be a directory), the latter already names
+  // the executed script. Only table-export synthesizes a misleading
+  // "Query Result.xlsx" style name, so it prefers the real saved file name.
+  if (task.kind === "database-export") {
+    const key = task.databaseExportSource === "scheduled" ? "exportProgress.databaseBackupTitle" : "exportProgress.databaseExportTitle";
+    return t(key, { name: task.tableName });
+  }
   if (task.kind === "sql-file") return t("exportProgress.sqlFileTitle", { name: task.tableName });
   if (task.kind === "data-transfer") return t("exportProgress.dataTransferTitle", { name: task.tableName });
-  return `${task.tableName}.${task.format}`;
+  if (task.kind === "multi-db-execution") return t("exportProgress.multiDbExecutionTitle", { name: task.tableName });
+  return taskFileName(task) || `${task.tableName}.${task.format}`;
 };
 
 const rowsText = (task: ExportTask) => {
@@ -92,8 +130,34 @@ const rowsText = (task: ExportTask) => {
     const durationText = t("exportProgress.elapsed", { duration: formatDataTransferDuration(finishedAt - (task.startedAt ?? finishedAt)) });
     return task.currentTable ? `${tableText} · ${task.currentTable} · ${rowText} · ${durationText}` : `${tableText} · ${durationText}`;
   }
+  if (task.kind === "multi-db-execution") {
+    return t("exportProgress.multiDbTargets", {
+      completed: (task.multiDbCompleted ?? 0).toLocaleString(),
+      total: (task.multiDbTotal ?? 0).toLocaleString(),
+      success: (task.multiDbSuccessCount ?? 0).toLocaleString(),
+      failed: (task.multiDbFailureCount ?? 0).toLocaleString(),
+    });
+  }
   if (task.totalRows) return `${task.rowsExported.toLocaleString()} / ${task.totalRows.toLocaleString()}`;
   return `${task.rowsExported.toLocaleString()} ${t("exportProgress.rowsShort")}`;
+};
+
+const elapsedText = (task: ExportTask) => {
+  if (task.startedAt === undefined) return "";
+  const finishedAt = task.finishedAt ?? currentTime.value;
+  return t("exportProgress.elapsed", { duration: formatDataTransferDuration(finishedAt - task.startedAt) });
+};
+
+const databaseObjectText = (task: ExportTask) => {
+  if (task.kind !== "database-export" || !isActive(task.status) || !task.currentObject) return "";
+  if (task.preparing || !task.totalObjects) {
+    return t("databaseExport.preparingObject", { object: task.currentObject });
+  }
+  return t("databaseExport.currentTable", {
+    table: task.currentObject,
+    current: (task.objectIndex ?? 0).toLocaleString(),
+    total: task.totalObjects.toLocaleString(),
+  });
 };
 
 const statusIcon = (task: ExportTask) => {
@@ -101,6 +165,7 @@ const statusIcon = (task: ExportTask) => {
     if (task.kind === "database-export") return DatabaseBackup;
     if (task.kind === "sql-file") return FileCode2;
     if (task.kind === "data-transfer") return ArrowRightLeft;
+    if (task.kind === "multi-db-execution") return Layers3;
   }
   switch (task.status) {
     case "Running":
@@ -137,6 +202,23 @@ function toggleShowAll() {
   showAll.value = !showAll.value;
 }
 
+// Reveal is offered only for tasks that produce one local output file.
+// sql-file filePath can be a "; "-joined list of input scripts (not an
+// output), and data-transfer has no local file at all.
+const canRevealTaskFile = (task: ExportTask) => (task.kind === "table-export" || task.kind === "database-export") && task.status === "Done" && !!task.filePath && isTauriRuntime();
+
+async function revealTaskFile(task: ExportTask) {
+  if (!canRevealTaskFile(task) || revealingTaskIds.value.includes(task.exportId)) return;
+  revealingTaskIds.value = [...revealingTaskIds.value, task.exportId];
+  try {
+    await api.revealPathInFileManager(task.filePath);
+  } catch (error) {
+    toast(t("exportProgress.openFolderFailed", { message: translateBackendError(t, error) }), 5000);
+  } finally {
+    revealingTaskIds.value = revealingTaskIds.value.filter((id) => id !== task.exportId);
+  }
+}
+
 function failureDetailsExpanded(exportId: string) {
   return expandedFailureTaskIds.value.includes(exportId);
 }
@@ -148,6 +230,10 @@ function toggleFailureDetails(exportId: string) {
 function failureDetailCount(task: ExportTask) {
   return (task.transferFailures?.length ?? 0) + (task.transferFailuresOmitted ?? 0);
 }
+
+function openTask(task: ExportTask): void {
+  task.onOpen?.();
+}
 </script>
 
 <template>
@@ -155,7 +241,7 @@ function failureDetailCount(task: ExportTask) {
     <PopoverTrigger as-child>
       <Button variant="ghost" size="icon" class="relative h-8 w-8" :title="triggerTitle" :class="{ 'bg-destructive/10 text-destructive hover:bg-destructive/15': failedCount > 0, 'bg-accent text-primary': failedCount === 0 && hasActive }">
         <FileDown class="h-4 w-4" />
-        <span v-if="failedCount > 0" class="absolute -right-0.5 -top-0.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-destructive px-1 text-[10px] font-bold leading-none text-destructive-foreground"> ! </span>
+        <span v-if="failedCount > 0" class="absolute right-0.5 top-0.5 h-2.5 w-2.5 rounded-full bg-destructive ring-2 ring-background" />
         <span v-else-if="hasActive" class="absolute -right-0.5 -top-0.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-primary px-1 text-[10px] font-medium leading-none text-primary-foreground">
           {{ activeCount > 9 ? "9+" : activeCount }}
         </span>
@@ -172,13 +258,13 @@ function failureDetailCount(task: ExportTask) {
           <div class="flex-1 min-w-0 flex flex-col gap-1.5">
             <div class="flex items-center gap-1.5">
               <component :is="statusIcon(task)" :class="[statusColor(task.status), task.kind === 'table-export' && isActive(task.status) ? 'animate-spin' : '']" class="h-3.5 w-3.5 shrink-0" />
-              <span class="truncate font-medium">{{ taskTitle(task) }}</span>
+              <span class="truncate font-medium" :title="task.filePath || undefined">{{ taskTitle(task) }}</span>
             </div>
 
             <!-- Progress bar -->
             <div v-if="isActive(task.status)" class="w-full bg-muted rounded-full h-1.5 overflow-hidden">
               <div
-                v-if="task.totalRows || (task.kind === 'database-export' && (task.totalObjects || task.overallPercent !== undefined)) || (task.kind === 'data-transfer' && task.totalTables)"
+                v-if="task.totalRows || (task.kind === 'database-export' && (task.totalObjects || task.overallPercent !== undefined)) || (task.kind === 'data-transfer' && task.totalTables) || (task.kind === 'multi-db-execution' && task.multiDbTotal)"
                 class="h-full bg-primary rounded-full transition-[width] duration-300"
                 :style="{ width: `${progressValue(task)}%` }"
               />
@@ -190,8 +276,13 @@ function failureDetailCount(task: ExportTask) {
               <div class="h-full bg-green-500 rounded-full" style="width: 100%" />
             </div>
 
+            <div v-if="databaseObjectText(task)" class="min-w-0 truncate text-muted-foreground" :title="task.currentObject">
+              {{ databaseObjectText(task) }}
+            </div>
+
             <div class="min-w-0 text-muted-foreground">
               <span class="break-words tabular-nums">{{ rowsText(task) }}</span>
+              <span v-if="task.kind !== 'data-transfer' && task.startedAt !== undefined" class="ml-1 tabular-nums">{{ elapsedText(task) }}</span>
               <span v-if="task.status === 'Error' && task.errorMessage" class="mt-1 block whitespace-normal break-words text-destructive" :title="translateBackendError(t, task.errorMessage)">
                 {{ translateBackendError(t, task.errorMessage) }}
               </span>
@@ -212,8 +303,14 @@ function failureDetailCount(task: ExportTask) {
             </div>
           </div>
 
-          <!-- Actions: stop/cancel for active, delete for finished -->
+          <!-- Actions: reveal folder for finished exports, stop/cancel for active, delete for finished -->
           <div class="flex shrink-0 pt-4">
+            <button v-if="task.kind === 'multi-db-execution' && task.onOpen" class="flex h-6 w-6 items-center justify-center rounded hover:bg-muted" :title="t('exportProgress.openTask')" @click.stop="openTask(task)">
+              <ChevronRight class="h-3.5 w-3.5 text-muted-foreground hover:text-foreground" />
+            </button>
+            <button v-if="canRevealTaskFile(task)" class="flex h-6 w-6 items-center justify-center rounded hover:bg-muted disabled:opacity-50" :title="t('exportProgress.openFolder')" :disabled="revealingTaskIds.includes(task.exportId)" @click="revealTaskFile(task)">
+              <FolderOpen class="h-3.5 w-3.5 text-muted-foreground hover:text-foreground" />
+            </button>
             <button v-if="isActive(task.status)" class="flex h-6 w-6 items-center justify-center rounded hover:bg-muted" :title="t('exportProgress.cancel')" @click="cancelTask(task.exportId)">
               <X class="h-3.5 w-3.5 text-muted-foreground hover:text-destructive" />
             </button>

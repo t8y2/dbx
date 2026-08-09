@@ -136,6 +136,135 @@ test("saved SQL summaries load file content on demand", async () => {
   assert.equal(apiMock.loadSavedSqlFile.mock.calls.length, 1);
 });
 
+test("changing a saved SQL execution target persists the latest target", async () => {
+  const file: SavedSqlFile = {
+    id: "sql-target",
+    connectionId: "conn-1",
+    name: "query.sql",
+    database: "db-1",
+    schema: "public",
+    sql: "SELECT 1;",
+    sqlLoaded: true,
+    createdAt: "2026-06-27T00:00:00.000Z",
+    updatedAt: "2026-06-27T00:00:00.000Z",
+  };
+  apiMock.loadSavedSqlLibrary.mockResolvedValue({ folders: [], files: [file] });
+
+  const store = useSavedSqlStore();
+  await store.initFromStorage();
+
+  await store.updateFileExecutionTarget("sql-target", {
+    connectionId: "conn-2",
+    database: "db-2",
+    schema: "app",
+  });
+
+  const saved = apiMock.saveSavedSqlFile.mock.calls.at(-1)?.[0];
+  assert.equal(saved?.connectionId, "conn-2");
+  assert.equal(saved?.database, "db-2");
+  assert.equal(saved?.schema, "app");
+  assert.equal(saved?.sql, file.sql);
+  assert.equal(saved?.name, file.name);
+  assert.deepEqual(
+    {
+      connectionId: store.getFile("sql-target")?.connectionId,
+      database: store.getFile("sql-target")?.database,
+      schema: store.getFile("sql-target")?.schema,
+    },
+    { connectionId: "conn-2", database: "db-2", schema: "app" },
+  );
+});
+
+test("rapid saved SQL target changes persist only the latest target", async () => {
+  const file: SavedSqlFile = {
+    id: "sql-target",
+    connectionId: "conn-1",
+    name: "query.sql",
+    database: "db-1",
+    sql: "SELECT 1;",
+    sqlLoaded: true,
+    createdAt: "2026-06-27T00:00:00.000Z",
+    updatedAt: "2026-06-27T00:00:00.000Z",
+  };
+  apiMock.loadSavedSqlLibrary.mockResolvedValue({ folders: [], files: [file] });
+  apiMock.saveSavedSqlFile.mockImplementation(async (value) => value);
+
+  const store = useSavedSqlStore();
+  await store.initFromStorage();
+  const first = store.updateFileExecutionTarget("sql-target", { connectionId: "conn-2", database: "db-2" });
+  const second = store.updateFileExecutionTarget("sql-target", { connectionId: "conn-3", database: "db-3" });
+
+  await Promise.all([first, second]);
+
+  assert.equal(apiMock.saveSavedSqlFile.mock.calls.length, 1);
+  assert.equal(apiMock.saveSavedSqlFile.mock.calls.at(-1)?.[0].connectionId, "conn-3");
+  assert.equal(apiMock.saveSavedSqlFile.mock.calls.at(-1)?.[0].database, "db-3");
+  assert.equal(store.getFile("sql-target")?.connectionId, "conn-3");
+});
+
+test("saved SQL target changes roll back when persistence fails", async () => {
+  const file: SavedSqlFile = {
+    id: "sql-target",
+    connectionId: "conn-1",
+    name: "query.sql",
+    database: "db-1",
+    schema: "public",
+    sql: "SELECT 1;",
+    sqlLoaded: true,
+    createdAt: "2026-06-27T00:00:00.000Z",
+    updatedAt: "2026-06-27T00:00:00.000Z",
+  };
+  apiMock.loadSavedSqlLibrary.mockResolvedValue({ folders: [], files: [file] });
+  apiMock.saveSavedSqlFile.mockRejectedValueOnce(new Error("disk full"));
+
+  const store = useSavedSqlStore();
+  await store.initFromStorage();
+
+  await assert.rejects(store.updateFileExecutionTarget("sql-target", { connectionId: "conn-2", database: "db-2", schema: "app" }), /disk full/);
+  assert.deepEqual(
+    {
+      connectionId: store.getFile("sql-target")?.connectionId,
+      database: store.getFile("sql-target")?.database,
+      schema: store.getFile("sql-target")?.schema,
+    },
+    { connectionId: "conn-1", database: "db-1", schema: "public" },
+  );
+});
+
+test("empty and deleted-connection SQL files remain in the library", async () => {
+  const files: SavedSqlFile[] = [
+    {
+      id: "unassociated",
+      connectionId: "",
+      name: "unassociated.sql",
+      database: "",
+      sql: "SELECT 1;",
+      sqlLoaded: true,
+      createdAt: "2026-06-27T00:00:00.000Z",
+      updatedAt: "2026-06-27T00:00:00.000Z",
+    },
+    {
+      id: "deleted",
+      connectionId: "deleted-connection",
+      name: "deleted.sql",
+      database: "",
+      sql: "SELECT 2;",
+      sqlLoaded: true,
+      createdAt: "2026-06-27T00:00:00.000Z",
+      updatedAt: "2026-06-27T00:00:00.000Z",
+    },
+  ];
+  apiMock.loadSavedSqlLibrary.mockResolvedValue({ folders: [], files });
+
+  const store = useSavedSqlStore();
+  await store.initFromStorage();
+
+  assert.deepEqual(
+    store.allFiles.map((item) => item.id),
+    ["deleted", "unassociated"],
+  );
+});
+
 test("saving an existing SQL file without folderId keeps its folder", async () => {
   const file: SavedSqlFile = {
     id: "sql-1",

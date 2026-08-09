@@ -415,6 +415,9 @@ pub struct SubscriptionInfo {
     /// RocketMQ: CLUSTERING / BROADCASTING.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message_model: Option<String>,
+    /// When true, backlog probe failed — UI must not treat `msg_backlog` as healthy zero.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backlog_unavailable: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -465,11 +468,76 @@ pub enum SkipCount {
     Count { count: u32 },
 }
 
+/// Per-queue/partition consume progress (RocketMQ Dashboard consume-detail / Kafka lag rows).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PartitionBacklog {
+    pub partition: i32,
+    /// Consumer committed offset (`consumerOffset` / `currentOffset`).
+    pub current_offset: i64,
+    /// Broker max offset (`brokerOffset` / `endOffset`).
+    pub end_offset: i64,
+    pub lag: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub broker_name: Option<String>,
+    /// Last consume message store timestamp (ms). `0` means unavailable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_timestamp: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub consumer_client: Option<String>,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BacklogStats {
     pub msg_backlog: i64,
     pub backlog_size: i64,
+    /// Optional queue-level progress; empty for adapters that only expose totals.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub partitions: Vec<PartitionBacklog>,
+}
+
+/// Parse agent `mq_get_consumer_lag` JSON (`totalLag` + `partitions[]`) into [`BacklogStats`].
+pub fn backlog_stats_from_consumer_lag(value: &serde_json::Value) -> BacklogStats {
+    let msg_backlog = value.get("totalLag").and_then(|v| v.as_i64()).unwrap_or(0);
+    let partitions = value
+        .get("partitions")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|row| {
+                    let partition = row.get("partition").and_then(|v| v.as_i64()).map(|v| v as i32)?;
+                    let current_offset = row.get("currentOffset").and_then(|v| v.as_i64()).unwrap_or(0);
+                    let end_offset = row.get("endOffset").and_then(|v| v.as_i64()).unwrap_or(0);
+                    let lag =
+                        row.get("lag").and_then(|v| v.as_i64()).unwrap_or_else(|| (end_offset - current_offset).max(0));
+                    let broker_name = row
+                        .get("brokerName")
+                        .and_then(|v| v.as_str())
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string);
+                    let last_timestamp = row.get("lastTimestamp").and_then(|v| v.as_i64());
+                    let consumer_client = row
+                        .get("consumerClient")
+                        .and_then(|v| v.as_str())
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string);
+                    Some(PartitionBacklog {
+                        partition,
+                        current_offset,
+                        end_offset,
+                        lag,
+                        broker_name,
+                        last_timestamp,
+                        consumer_client,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    BacklogStats { msg_backlog, backlog_size: 0, partitions }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -1249,5 +1317,53 @@ mod tests {
             serde_json::from_value(serde_json::json!({ "messages": [] })).expect("deserialize legacy peek result");
         assert!(!legacy.incomplete);
         assert!(legacy.messages.is_empty());
+    }
+
+    #[test]
+    fn backlog_stats_from_consumer_lag_maps_dashboard_fields() {
+        let lag = serde_json::json!({
+            "totalLag": 10,
+            "partitions": [
+                {
+                    "partition": 0,
+                    "currentOffset": 90,
+                    "endOffset": 100,
+                    "lag": 10,
+                    "brokerName": "broker-a",
+                    "lastTimestamp": 1725000000000_i64,
+                    "consumerClient": "172.18.2.212@7#1"
+                },
+                {
+                    "partition": 1,
+                    "currentOffset": 50,
+                    "endOffset": 50,
+                    "lag": 0,
+                    "brokerName": "",
+                    "lastTimestamp": 0,
+                    "consumerClient": ""
+                }
+            ]
+        });
+        let stats = super::backlog_stats_from_consumer_lag(&lag);
+        assert_eq!(stats.msg_backlog, 10);
+        assert_eq!(stats.partitions.len(), 2);
+        assert_eq!(stats.partitions[0].broker_name.as_deref(), Some("broker-a"));
+        assert_eq!(stats.partitions[0].consumer_client.as_deref(), Some("172.18.2.212@7#1"));
+        assert_eq!(stats.partitions[0].last_timestamp, Some(1725000000000));
+        // Empty strings are normalized to None so UI can show "-".
+        assert!(stats.partitions[1].broker_name.is_none());
+        assert!(stats.partitions[1].consumer_client.is_none());
+        assert_eq!(stats.partitions[1].last_timestamp, Some(0));
+
+        let json = serde_json::to_value(&stats).expect("serialize backlog stats");
+        assert_eq!(json.get("msgBacklog").and_then(|v| v.as_i64()), Some(10));
+        assert!(json.get("partitions").and_then(|v| v.as_array()).is_some());
+
+        // Legacy callers that only had totals still deserialize with empty partitions.
+        let legacy: super::BacklogStats =
+            serde_json::from_value(serde_json::json!({ "msgBacklog": 3, "backlogSize": 0 }))
+                .expect("legacy backlog stats");
+        assert_eq!(legacy.msg_backlog, 3);
+        assert!(legacy.partitions.is_empty());
     }
 }

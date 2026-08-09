@@ -21,9 +21,10 @@ describe("sidebar export runtime", () => {
   it("freezes the accepted structure selection before export work starts", () => {
     const first: TreeNode = { id: "t1", label: "one", type: "table", connectionId: "c1", database: "db" };
     const second: TreeNode = { id: "t2", label: "two", type: "view", connectionId: "c1", database: "db" };
-    const group: TreeNode = { id: "group", label: "Tables", type: "group-tables", children: [first, second] };
+    const third: TreeNode = { id: "t3", label: "three", type: "materialized_view", connectionId: "c1", database: "db" };
+    const group: TreeNode = { id: "group", label: "Tables", type: "group-tables", children: [first, second, third] };
 
-    expect(sidebarStructureExportTargets(first, [group], [first.id, second.id])).toEqual([first, second]);
+    expect(sidebarStructureExportTargets(first, [group], [third.id, first.id, second.id])).toEqual([first, second, third]);
     expect(sidebarStructureExportTargets(first, [group], [second.id])).toEqual([first]);
   });
 });

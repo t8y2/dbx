@@ -688,6 +688,7 @@ fn execute_change_transaction(
             session_id: None,
             has_more: false,
             elasticsearch_raw_body: None,
+            messages: Vec::new(),
         }),
     }
 }

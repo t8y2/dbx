@@ -1273,6 +1273,8 @@ pub enum MongoAgentMethod {
     ListCollections,
     FindDocuments,
     FindOne,
+    ExplainFind,
+    AggregateDocuments,
     FindDocumentsExtendedJson,
     CountDocuments,
     ServerVersion,
@@ -1288,11 +1290,13 @@ pub enum MongoAgentMethod {
 }
 
 impl MongoAgentMethod {
-    pub const ALL: [Self; 16] = [
+    pub const ALL: [Self; 18] = [
         Self::ListDatabases,
         Self::ListCollections,
         Self::FindDocuments,
         Self::FindOne,
+        Self::ExplainFind,
+        Self::AggregateDocuments,
         Self::FindDocumentsExtendedJson,
         Self::CountDocuments,
         Self::ServerVersion,
@@ -1313,6 +1317,8 @@ impl MongoAgentMethod {
             Self::ListCollections => "list_collections",
             Self::FindDocuments => "find_documents",
             Self::FindOne => "find_one",
+            Self::ExplainFind => "explain_find",
+            Self::AggregateDocuments => "aggregate_documents",
             Self::FindDocumentsExtendedJson => "find_documents_extended_json",
             Self::CountDocuments => "count_documents",
             Self::ServerVersion => "server_version",
@@ -2471,6 +2477,20 @@ impl AgentDriverClient {
         self.call_mongo_method(MongoAgentMethod::FindOne, params).await
     }
 
+    pub async fn mongo_explain_find<T: DeserializeOwned + Send + 'static>(
+        &mut self,
+        params: Value,
+    ) -> Result<T, String> {
+        self.call_mongo_method(MongoAgentMethod::ExplainFind, params).await
+    }
+
+    pub async fn mongo_aggregate_documents<T: DeserializeOwned + Send + 'static>(
+        &mut self,
+        params: Value,
+    ) -> Result<T, String> {
+        self.call_mongo_method(MongoAgentMethod::AggregateDocuments, params).await
+    }
+
     /// Calls the Mongo agent read method that returns MongoDB relaxed Extended JSON.
     pub async fn mongo_find_documents_extended_json<T: DeserializeOwned + Send + 'static>(
         &mut self,
@@ -3090,7 +3110,7 @@ mod tests {
         agent_schema_params, agent_schema_table_params, agent_supports_capability, agent_transaction_params,
         append_legacy_error_context, decode_agent_response, format_agent_process_error, format_agent_startup_error,
         is_agent_rpc_response_error, is_unsupported_handshake_error, legacy_agent_call_error, mongo_collection_params,
-        mongo_database_params, mongo_document_id_params, parse_agent_java_opts, read_agent_line, spawn_agent_process,
+        mongo_database_params, mongo_document_id_params, parse_agent_java_opts, read_agent_line,
         start_stderr_collector, validate_dameng_java_system_properties, AgentCallError, AgentCapability,
         AgentDriverClient, AgentErrorCategory, AgentErrorContext, AgentErrorStage, AgentHandshake, AgentKvMethod,
         AgentLaunchSpec, AgentMethod, AgentOperationOutcome, AgentRuntimeClient, AgentSessionDisposition,
@@ -3117,7 +3137,7 @@ mod tests {
         fs::write(&program, b"#!/bin/sh\nexit 0\n").unwrap();
         fs::set_permissions(&program, fs::Permissions::from_mode(0o600)).unwrap();
 
-        let mut child = spawn_agent_process(&AgentLaunchSpec::new(&program)).unwrap();
+        let mut child = super::spawn_agent_process(&AgentLaunchSpec::new(&program)).unwrap();
         assert!(child.wait().unwrap().success());
         assert_ne!(fs::metadata(&program).unwrap().permissions().mode() & 0o100, 0);
 
@@ -3136,7 +3156,7 @@ mod tests {
         fs::write(&program, b"#!/bin/sh\nexit 0\n").unwrap();
         fs::set_permissions(&program, fs::Permissions::from_mode(0o700)).unwrap();
 
-        let mut child = spawn_agent_process(&AgentLaunchSpec::new(&program)).unwrap();
+        let mut child = super::spawn_agent_process(&AgentLaunchSpec::new(&program)).unwrap();
         assert!(child.wait().unwrap().success());
         assert_eq!(fs::metadata(&program).unwrap().permissions().mode() & 0o777, 0o700);
 
@@ -4322,6 +4342,8 @@ for line in sys.stdin:
         assert_eq!(MongoAgentMethod::ListCollections.as_str(), "list_collections");
         assert_eq!(MongoAgentMethod::FindDocuments.as_str(), "find_documents");
         assert_eq!(MongoAgentMethod::FindOne.as_str(), "find_one");
+        assert_eq!(MongoAgentMethod::ExplainFind.as_str(), "explain_find");
+        assert_eq!(MongoAgentMethod::AggregateDocuments.as_str(), "aggregate_documents");
         assert_eq!(MongoAgentMethod::FindDocumentsExtendedJson.as_str(), "find_documents_extended_json");
         assert_eq!(MongoAgentMethod::CountDocuments.as_str(), "count_documents");
         assert_eq!(MongoAgentMethod::ServerVersion.as_str(), "server_version");

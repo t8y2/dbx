@@ -179,6 +179,13 @@ export const prepareSchemaDiff = forward("prepareSchemaDiff");
 export const generateSchemaSyncSql = forward("generateSchemaSyncSql");
 export const listDialectDataTypes = forward("listDialectDataTypes");
 
+// Docs
+export const collectDocsSnapshot = forward("collectDocsSnapshot");
+export const loadDocsAnnotations = forward("loadDocsAnnotations");
+export const applyDocsAnnotations = forward("applyDocsAnnotations");
+export const saveDocsAnnotations = forward("saveDocsAnnotations");
+export const exportDocsHtml = forward("exportDocsHtml");
+
 // Query
 export const executeQuery = forward("executeQuery");
 export const executeMulti = forward("executeMulti");
@@ -333,6 +340,8 @@ export const pendingOpenSqlFiles = forward("pendingOpenSqlFiles");
 export const pendingOpenDbFiles = forward("pendingOpenDbFiles");
 export const pendingOpenConnectionLinks = forward("pendingOpenConnectionLinks");
 export const readExternalSqlFile = forward("readExternalSqlFile");
+export const readExternalSqlFileSnapshot = forward("readExternalSqlFileSnapshot");
+export const inspectExternalSqlFile = forward("inspectExternalSqlFile");
 export const writeExternalSqlFile = forward("writeExternalSqlFile");
 export const saveExternalSqlFile = forward("saveExternalSqlFile");
 export const listSqlFilesInFolder = forward("listSqlFilesInFolder");
@@ -359,8 +368,14 @@ export const nacosRollbackConfig = forward("nacosRollbackConfig");
 export const nacosGetRNacosConsoleCaptcha = forward("nacosGetRNacosConsoleCaptcha");
 export const nacosLoginRNacosConsole = forward("nacosLoginRNacosConsole");
 export const nacosListServices = forward("nacosListServices");
+export const nacosGetService = forward("nacosGetService");
+export const nacosCreateService = forward("nacosCreateService");
+export const nacosUpdateService = forward("nacosUpdateService");
+export const nacosDeleteService = forward("nacosDeleteService");
 export const nacosListInstances = forward("nacosListInstances");
 export const nacosUpdateInstance = forward("nacosUpdateInstance");
+export const nacosRegisterInstance = forward("nacosRegisterInstance");
+export const nacosDeregisterInstance = forward("nacosDeregisterInstance");
 export const nacosGetDashboard = forward("nacosGetDashboard");
 export const nacosRawRequest = forward("nacosRawRequest");
 
@@ -406,6 +421,8 @@ export const redisSetString = forward("redisSetString");
 export const redisDeleteKey = forward("redisDeleteKey");
 export const redisHashSet = forward("redisHashSet");
 export const redisHashDel = forward("redisHashDel");
+export const redisHashFieldSetTtl = forward("redisHashFieldSetTtl");
+export const redisHashFieldSetExpireAt = forward("redisHashFieldSetExpireAt");
 export const redisListPush = forward("redisListPush");
 export const redisListSet = forward("redisListSet");
 export const redisListRemove = forward("redisListRemove");
@@ -413,6 +430,7 @@ export const redisSetAdd = forward("redisSetAdd");
 export const redisSetRemove = forward("redisSetRemove");
 export const redisZadd = forward("redisZadd");
 export const redisZrem = forward("redisZrem");
+export const redisZsetUpdate = forward("redisZsetUpdate");
 export const redisStreamAdd = forward("redisStreamAdd");
 export const redisJsonSet = forward("redisJsonSet");
 export const redisCheckJsonModule = forward("redisCheckJsonModule");
@@ -488,6 +506,7 @@ export const mqListClientConnections = forward("mqListClientConnections");
 export const mqListClientChannels = forward("mqListClientChannels");
 export const mqCloseClientConnection = forward("mqCloseClientConnection");
 export const mqListSubscriptions = forward("mqListSubscriptions");
+export const mqEnrichSubscriptions = forward("mqEnrichSubscriptions");
 export const mqCreateSubscription = forward("mqCreateSubscription");
 export const mqDeleteSubscription = forward("mqDeleteSubscription");
 export const mqSkipMessages = forward("mqSkipMessages");
@@ -752,9 +771,12 @@ export type {
 // MQTT
 export const mqttGetBrokerInfo = forward("mqttGetBrokerInfo");
 export const mqttSubscribe = forward("mqttSubscribe");
+export const mqttSaveTopicConfig = forward("mqttSaveTopicConfig");
+export const mqttDeleteTopicConfig = forward("mqttDeleteTopicConfig");
 export const mqttUnsubscribe = forward("mqttUnsubscribe");
 export const mqttPublish = forward("mqttPublish");
 export const mqttListTopics = forward("mqttListTopics");
+export const mqttListSavedTopicConfigs = forward("mqttListSavedTopicConfigs");
 export const mqttGetTopicTree = forward("mqttGetTopicTree");
 export const mqttGetMessages = forward("mqttGetMessages");
 export const mqttClearMessages = forward("mqttClearMessages");

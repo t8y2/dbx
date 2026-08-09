@@ -43,7 +43,7 @@ export const SCHEMA_AWARE_TYPES = new Set<DatabaseType>([
 // query another database through a three-part name on the same connection.
 export const DATABASE_SCHEMA_QUALIFIED_TYPES = new Set<DatabaseType>(["sqlserver", "trino", "prestosql"]);
 
-export const SINGLE_DATABASE_TYPES = new Set<DatabaseType>(["oracle", "dameng", "firebird", "oceanbase-oracle", "access", "questdb"]);
+export const SINGLE_DATABASE_TYPES = new Set<DatabaseType>(["oracle", "dameng", "firebird", "oceanbase-oracle", "access", "questdb", "victoriametrics"]);
 
 export const CLEARABLE_QUERY_SCHEMA_TYPES = new Set<DatabaseType>(["oracle", "dameng", "gaussdb", "oceanbase-oracle"]);
 

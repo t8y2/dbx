@@ -10,6 +10,7 @@ import { useConnectionStore } from "@/stores/connectionStore";
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
 import * as api from "@/lib/backend/api";
 import { isSchemaAware } from "@/lib/database/databaseCapabilities";
+import { fetchNamespaceOptionsForConnection } from "@/composables/useDatabaseOptions";
 import { ArrowLeftRight, GitCompareArrows, Save, FolderOpen, Settings, X } from "@lucide/vue";
 import type { SchemaDiffConfig, SchemaDiffCompareOptions, FieldMappingEntry } from "@/types/schemaDiff";
 
@@ -75,8 +76,15 @@ async function loadDatabases(connectionId: string, side: "source" | "target") {
   if (!connectionId) return;
   try {
     await store.ensureConnected(connectionId);
-    const dbs = await api.listDatabases(connectionId);
-    const dbNames = Array.isArray(dbs) ? dbs.map((db: any) => (typeof db === "string" ? db : db.name || db.database)) : [];
+    const config = store.getConfig(connectionId);
+    let dbNames: string[];
+    if (config?.db_type === "dameng") {
+      // 达梦的"数据库"概念对应 schema，使用 fetchNamespaceOptionsForConnection
+      dbNames = await fetchNamespaceOptionsForConnection(connectionId, config);
+    } else {
+      const dbs = await api.listDatabases(connectionId);
+      dbNames = Array.isArray(dbs) ? dbs.map((db: any) => (typeof db === "string" ? db : db.name || db.database)) : [];
+    }
     if (side === "source") {
       sourceDatabases.value = dbNames;
       if (props.sourceDatabase) {

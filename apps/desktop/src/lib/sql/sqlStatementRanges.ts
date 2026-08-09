@@ -22,7 +22,7 @@ export function elasticsearchRestRequestRanges(sql: string, databaseType?: Datab
   return requests.length > 0 && requests.every((request) => ELASTICSEARCH_REST_REQUEST.test(request.sql)) ? requests : [];
 }
 
-const NON_SQL_EXECUTION_TARGET_TYPES: ReadonlySet<DatabaseType> = new Set(["mongodb", "elasticsearch", "easysearch", "qdrant", "milvus", "weaviate", "chromadb", "etcd", "zookeeper", "mq", "neo4j"]);
+const NON_SQL_EXECUTION_TARGET_TYPES: ReadonlySet<DatabaseType> = new Set(["mongodb", "elasticsearch", "easysearch", "qdrant", "milvus", "weaviate", "chromadb", "etcd", "zookeeper", "mq", "neo4j", "victoriametrics"]);
 
 export function supportsExecutionTargetPicker(databaseType?: DatabaseType): boolean {
   return !!databaseType && (databaseType === "redis" || isElasticsearchCompatibleDatabaseType(databaseType) || !NON_SQL_EXECUTION_TARGET_TYPES.has(databaseType));
@@ -444,7 +444,8 @@ export function splitSqlStatementRanges(sql: string, databaseType?: DatabaseType
     }
     // Block comments consume until the closing */.
     if (ch === "/" && next === "*") {
-      if (statementStart === -1 && pendingHintStart === -1 && sql[i + 2] === "+") pendingHintStart = i;
+      const hintMarker = sql[i + 2];
+      if (statementStart === -1 && pendingHintStart === -1 && (hintMarker === "+" || hintMarker === "@" || hintMarker === "&")) pendingHintStart = i;
       const close = sql.indexOf("*/", i + 2);
       i = close === -1 ? len : close + 2;
       continue;
@@ -596,7 +597,7 @@ export function statementRangeAtCursor(sql: string, cursorPos: number, databaseT
     if (pos > statement.to && (!next || pos < next.hitFrom)) {
       const softRange = rangeForCursorInSoftRanges(sql, softRanges, pos);
       if (softRange) return softRange;
-      if (isCursorOnStatementLine(sql, pos, statement)) return rangeFor(statement, sql);
+      if (isCursorOnRangeEndLine(sql, pos, statement)) return rangeFor(statement, sql);
     }
   }
 
@@ -638,7 +639,7 @@ function rangeForCursorInSoftRanges(sql: string, ranges: RawStatement[], pos: nu
     }
 
     const next = ranges[index + 1];
-    if (pos > range.to && (!next || pos < next.hitFrom) && isCursorOnStatementLine(sql, pos, range)) {
+    if (pos > range.to && (!next || pos < next.hitFrom) && isCursorOnRangeEndLine(sql, pos, range)) {
       return rangeFor(range, sql);
     }
   }
@@ -1989,6 +1990,13 @@ function isCursorOnStatementLine(sql: string, pos: number, statement: Pick<RawSt
   let lineEnd = sql.indexOf("\n", pos);
   if (lineEnd === -1) lineEnd = sql.length;
   return statement.from >= lineStart && statement.from <= lineEnd;
+}
+
+function isCursorOnRangeEndLine(sql: string, pos: number, range: Pick<RawStatement, "to">): boolean {
+  const lineStart = sql.lastIndexOf("\n", pos - 1) + 1;
+  let lineEnd = sql.indexOf("\n", pos);
+  if (lineEnd === -1) lineEnd = sql.length;
+  return range.to >= lineStart && range.to <= lineEnd;
 }
 
 /**

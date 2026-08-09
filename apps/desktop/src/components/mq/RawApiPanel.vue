@@ -5,6 +5,7 @@ import { useI18n } from "vue-i18n";
 import type { MqRawResponse, TopicInfo } from "@/types/mq";
 import { mqRawRequest } from "@/lib/backend/api";
 import { safeJsonFormat } from "@/lib/common/safeJsonFormat";
+import { useMqMutationGuard } from "@/composables/useMqMutationGuard";
 
 interface Props {
   connectionId: string;
@@ -16,6 +17,7 @@ interface Props {
 
 const props = defineProps<Props>();
 const { t } = useI18n();
+const { confirmMqWrite } = useMqMutationGuard(() => props.connectionId);
 
 const methods = ["GET", "HEAD", "OPTIONS", "POST", "PUT", "PATCH", "DELETE"];
 type RawApiPreset = {
@@ -184,6 +186,10 @@ async function executeRequest() {
     error.value = readOnlyMessage.value;
     return;
   }
+  // Mutating raw admin calls need the same production confirmation as console writes.
+  if (!isReadMethod.value && !(await confirmMqWrite(t("mqRaw.sendRequest")))) {
+    return;
+  }
   if (!path.value.trim()) {
     error.value = t("mqRaw.pathRequired");
     return;
@@ -277,6 +283,8 @@ async function executeRequest() {
 </template>
 
 <style scoped>
+@import "./shared/mqPanel.css";
+
 .raw-api-panel {
   height: 100%;
   display: flex;
@@ -512,31 +520,6 @@ pre {
 .readonly-hint {
   background: var(--color-warning-alpha);
   color: var(--color-warning);
-}
-
-.btn-primary {
-  padding: 6px 12px;
-  border: 1px solid var(--color-primary);
-  border-radius: var(--dbx-radius-fixed-4);
-  background: var(--color-primary);
-  color: white;
-  cursor: pointer;
-  font-size: 13px;
-}
-
-.btn-secondary {
-  padding: 5px 10px;
-  border: 1px solid var(--color-border);
-  border-radius: var(--dbx-radius-fixed-4);
-  background: var(--color-background);
-  color: var(--color-text);
-  cursor: pointer;
-  font-size: 12px;
-}
-
-.btn-secondary:hover:not(:disabled) {
-  border-color: var(--color-primary);
-  color: var(--color-primary);
 }
 
 .btn-secondary.compact {

@@ -102,7 +102,11 @@ pub fn build_create_table_sql(mut options: TableStructureSqlOptions) -> TableStr
                 }
             } else if matches!(
                 dialect,
-                StructureDialect::Postgres | StructureDialect::Oracle | StructureDialect::Dameng | StructureDialect::H2
+                StructureDialect::Postgres
+                    | StructureDialect::Oracle
+                    | StructureDialect::Dameng
+                    | StructureDialect::Oscar
+                    | StructureDialect::H2
             ) {
                 statements.push(format!("COMMENT ON TABLE {table} IS {};", quote_string(&table_comment)));
             } else if dialect == StructureDialect::ClickHouse {
@@ -121,7 +125,11 @@ pub fn build_create_table_sql(mut options: TableStructureSqlOptions) -> TableStr
     if capabilities.comment
         && matches!(
             dialect,
-            StructureDialect::Postgres | StructureDialect::Oracle | StructureDialect::Dameng | StructureDialect::H2
+            StructureDialect::Postgres
+                | StructureDialect::Oracle
+                | StructureDialect::Dameng
+                | StructureDialect::Oscar
+                | StructureDialect::H2
         )
     {
         for column in &active_columns {

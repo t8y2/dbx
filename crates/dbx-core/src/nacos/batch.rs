@@ -196,6 +196,7 @@ async fn resolve_selector(
             let mut query = selector.query.clone().unwrap_or(crate::nacos::types::NacosConfigQuery {
                 namespace: None,
                 group: None,
+                group_contains: false,
                 data_id: None,
                 app_name: None,
                 search: None,
@@ -397,6 +398,7 @@ async fn existing_config(
         .list_configs(crate::nacos::types::NacosConfigQuery {
             namespace: Some(namespace.clone()),
             group: Some(config.group.clone()),
+            group_contains: false,
             data_id: Some(config.data_id.clone()),
             app_name: None,
             search: None,
@@ -618,11 +620,31 @@ mod tests {
             Err("unused".to_string())
         }
 
+        async fn get_service(&self, _: NacosServiceQuery) -> Result<NacosServiceDetail, String> {
+            Err("unused".to_string())
+        }
+        async fn create_service(&self, _: NacosServiceUpsert) -> Result<(), String> {
+            Err("unused".to_string())
+        }
+        async fn update_service(&self, _: NacosServiceUpsert) -> Result<(), String> {
+            Err("unused".to_string())
+        }
+        async fn delete_service(&self, _: NacosServiceQuery) -> Result<(), String> {
+            Err("unused".to_string())
+        }
+
         async fn list_instances(&self, _: NacosInstanceQuery) -> Result<Vec<NacosInstanceInfo>, String> {
             Err("unused".to_string())
         }
 
-        async fn update_instance(&self, _: NacosInstanceUpdate) -> Result<(), String> {
+        async fn update_instance(&self, _: NacosInstanceUpdateRequest) -> Result<(), String> {
+            Err("unused".to_string())
+        }
+
+        async fn register_instance(&self, _: NacosInstanceRegistration) -> Result<(), String> {
+            Err("unused".to_string())
+        }
+        async fn deregister_instance(&self, _: NacosInstanceRef) -> Result<(), String> {
             Err("unused".to_string())
         }
 

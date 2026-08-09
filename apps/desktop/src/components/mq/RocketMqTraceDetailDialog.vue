@@ -1,9 +1,9 @@
 <script setup lang="ts">
-import { ref, watch } from "vue";
+import { computed, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { mqQueryMessageTrace } from "@/lib/backend/api";
-import { formatRocketMqTraceError } from "@/lib/mq/rocketmqTraceUtils";
-import { formatRocketMqTimestamp, parseRocketMqMessagesFromResult, rocketMqMessagePayload, type RocketMqDisplayMessage } from "@/lib/mq/rocketmqMessageUtils";
+import { formatRocketMqTraceError, isParsedRocketMqTraceRecord, parseRocketMqTracePayload, rocketMqTraceRecordTimeLabel, splitRocketMqTraceKeys, type RocketMqTraceFieldKey, type RocketMqTraceRecord, type RocketMqTraceType } from "@/lib/mq/rocketmqTraceUtils";
+import { parseRocketMqMessagesFromResult, rocketMqMessagePayload, type RocketMqDisplayMessage } from "@/lib/mq/rocketmqMessageUtils";
 import { DEFAULT_ROCKETMQ_TRACE_TOPIC } from "@/lib/mq/rocketmqTopicTypes";
 
 interface Props {
@@ -11,6 +11,15 @@ interface Props {
   connectionId: string;
   msgId: string;
   traceTopic?: string;
+}
+
+interface TraceCardModel {
+  index: number;
+  message: RocketMqDisplayMessage;
+  record: RocketMqTraceRecord;
+  parsed: boolean;
+  rawPayload: string;
+  headerEntries: Array<[string, string]>;
 }
 
 const props = withDefaults(defineProps<Props>(), {
@@ -26,6 +35,71 @@ const { t } = useI18n();
 const loading = ref(false);
 const error = ref<string>();
 const messages = ref<RocketMqDisplayMessage[]>([]);
+let loadSeq = 0;
+
+const FIELD_I18N: Record<RocketMqTraceFieldKey, string> = {
+  regionId: "mqTrace.fieldRegionId",
+  group: "mqTrace.fieldGroup",
+  topic: "mqTrace.fieldTopic",
+  msgId: "mqTrace.fieldMsgId",
+  tags: "mqTrace.fieldTags",
+  keys: "mqTrace.fieldKeys",
+  storeHost: "mqTrace.fieldStoreHost",
+  clientHost: "mqTrace.fieldClientHost",
+  bodyLength: "mqTrace.fieldBodyLength",
+  costTime: "mqTrace.fieldCostTime",
+  msgType: "mqTrace.fieldMsgType",
+  offsetMsgId: "mqTrace.fieldOffsetMsgId",
+  requestId: "mqTrace.fieldRequestId",
+  retryTimes: "mqTrace.fieldRetryTimes",
+  contextCode: "mqTrace.fieldContextCode",
+};
+
+function typeLabel(type: RocketMqTraceType): string {
+  switch (type) {
+    case "Pub":
+      return t("mqTrace.typePub");
+    case "SubBefore":
+      return t("mqTrace.typeSubBefore");
+    case "SubAfter":
+      return t("mqTrace.typeSubAfter");
+    case "EndTransaction":
+      return t("mqTrace.typeEndTransaction");
+    default:
+      return t("mqTrace.typeUnknown");
+  }
+}
+
+function fieldLabel(key: RocketMqTraceFieldKey): string {
+  return t(FIELD_I18N[key]);
+}
+
+function headerEntries(message: RocketMqDisplayMessage): Array<[string, string]> {
+  if (!message.headers) return [];
+  return Object.entries(message.headers);
+}
+
+const cards = computed<TraceCardModel[]>(() => {
+  const result: TraceCardModel[] = [];
+  let index = 0;
+  for (const message of messages.value) {
+    const rawPayload = rocketMqMessagePayload(message);
+    const records = parseRocketMqTracePayload(rawPayload);
+    const units = records.length ? records : [{ type: "Unknown" as const, fields: [], raw: rawPayload }];
+    for (const record of units) {
+      index += 1;
+      result.push({
+        index,
+        message,
+        record,
+        parsed: isParsedRocketMqTraceRecord(record),
+        rawPayload: record.raw || rawPayload,
+        headerEntries: headerEntries(message),
+      });
+    }
+  }
+  return result;
+});
 
 async function loadTrace() {
   const msgId = props.msgId.trim();
@@ -35,17 +109,20 @@ async function loadTrace() {
     return;
   }
 
+  const seq = ++loadSeq;
   loading.value = true;
   error.value = undefined;
   messages.value = [];
   try {
     const traceTopic = props.traceTopic.trim() || DEFAULT_ROCKETMQ_TRACE_TOPIC;
     const result = await mqQueryMessageTrace(props.connectionId, msgId, traceTopic);
+    if (seq !== loadSeq) return;
     messages.value = parseRocketMqMessagesFromResult(result);
   } catch (e: unknown) {
+    if (seq !== loadSeq) return;
     error.value = formatRocketMqTraceError(e, t("mqTrace.traceTopicRouteMissing"));
   } finally {
-    loading.value = false;
+    if (seq === loadSeq) loading.value = false;
   }
 }
 
@@ -55,6 +132,7 @@ watch(
     if (open) {
       void loadTrace();
     } else {
+      loadSeq += 1;
       loading.value = false;
       error.value = undefined;
       messages.value = [];
@@ -80,19 +158,49 @@ watch(
 
         <div v-if="loading" class="panel-placeholder">{{ t("mqTrace.querying") }}</div>
         <div v-else-if="error" class="panel-error">{{ error }}</div>
-        <div v-else-if="!messages.length" class="panel-placeholder">{{ t("mqTrace.noTrace") }}</div>
+        <div v-else-if="!cards.length" class="panel-placeholder">{{ t("mqTrace.noTrace") }}</div>
         <div v-else class="message-list">
-          <article v-for="(message, index) in messages" :key="`${message.messageId ?? index}-${message.timestamp ?? 0}`" class="message-row">
+          <article v-for="card in cards" :key="`${card.index}-${card.record.type}-${card.record.timestamp ?? 0}`" class="message-row">
             <div class="message-meta">
-              <span>#{{ index + 1 }}</span>
-              <span v-if="message.topic">{{ message.topic }}</span>
-              <span v-if="message.partition != null">{{ t("mqMessages.metaPartition", { partition: message.partition }) }}</span>
-              <span>{{ formatRocketMqTimestamp(message.timestamp) }}</span>
+              <span>#{{ card.index }}</span>
+              <span class="type-badge" :data-type="card.record.type">{{ typeLabel(card.record.type) }}</span>
+              <span>{{ rocketMqTraceRecordTimeLabel(card.record, card.message.timestamp) }}</span>
+              <span v-if="card.message.partition != null">{{ t("mqMessages.metaPartition", { partition: card.message.partition }) }}</span>
+              <span v-if="card.record.success != null" class="status-badge" :class="card.record.success ? 'status-success' : 'status-fail'">
+                {{ card.record.success ? t("mqTrace.statusSuccess") : t("mqTrace.statusFail") }}
+              </span>
             </div>
-            <pre class="message-payload">{{ rocketMqMessagePayload(message) }}</pre>
-            <div v-if="message.headers && Object.keys(message.headers).length" class="message-headers">
-              <span v-for="(value, key) in message.headers" :key="key">{{ key }}: {{ value }}</span>
+
+            <div v-if="card.parsed" class="detail-grid trace-fields">
+              <template v-for="field in card.record.fields" :key="field.key">
+                <span>{{ fieldLabel(field.key) }}</span>
+                <span v-if="field.key === 'keys'" class="keys-chips">
+                  <template v-if="splitRocketMqTraceKeys(field.value).length">
+                    <span v-for="key in splitRocketMqTraceKeys(field.value)" :key="key" class="key-chip mono">{{ key }}</span>
+                  </template>
+                  <span v-else class="mono">{{ field.value }}</span>
+                </span>
+                <span v-else class="mono">{{ field.value }}</span>
+              </template>
             </div>
+            <pre v-else class="message-payload">{{ card.rawPayload || "-" }}</pre>
+
+            <div v-if="card.headerEntries.length" class="message-headers">
+              <template v-for="[key, value] in card.headerEntries" :key="key">
+                <div v-if="key === 'KEYS'" class="header-keys">
+                  <span class="header-keys-label">{{ key }}:</span>
+                  <span class="keys-chips">
+                    <span v-for="chip in splitRocketMqTraceKeys(value)" :key="chip" class="key-chip mono">{{ chip }}</span>
+                  </span>
+                </div>
+                <span v-else>{{ key }}: {{ value }}</span>
+              </template>
+            </div>
+
+            <details v-if="card.parsed && card.rawPayload" class="raw-payload">
+              <summary>{{ t("mqTrace.rawPayload") }}</summary>
+              <pre class="message-payload">{{ card.rawPayload }}</pre>
+            </details>
           </article>
         </div>
       </div>
@@ -176,6 +284,10 @@ watch(
   font-weight: 500;
 }
 
+.trace-fields {
+  margin-top: 10px;
+}
+
 .mono {
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   word-break: break-all;
@@ -213,9 +325,52 @@ watch(
 .message-meta {
   display: flex;
   flex-wrap: wrap;
-  gap: 10px;
+  align-items: center;
+  gap: 8px 10px;
   font-size: 12px;
   color: var(--color-text-tertiary);
+}
+
+.type-badge,
+.status-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 8px;
+  border-radius: var(--dbx-radius-fixed-4);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.type-badge {
+  border: 1px solid var(--color-border);
+  background: var(--color-background);
+  color: var(--color-text);
+}
+
+.type-badge[data-type="Pub"] {
+  border-color: color-mix(in srgb, var(--color-primary, #3b82f6) 40%, transparent);
+  background: color-mix(in srgb, var(--color-primary, #3b82f6) 12%, transparent);
+  color: var(--color-primary, #2563eb);
+}
+
+.type-badge[data-type="SubBefore"],
+.type-badge[data-type="SubAfter"] {
+  border-color: color-mix(in srgb, var(--color-info, #0ea5e9) 40%, transparent);
+  background: color-mix(in srgb, var(--color-info, #0ea5e9) 12%, transparent);
+  color: var(--color-info, #0284c7);
+}
+
+.status-success {
+  border: 1px solid color-mix(in srgb, var(--color-success, #22c55e) 40%, transparent);
+  background: color-mix(in srgb, var(--color-success, #22c55e) 12%, transparent);
+  color: var(--color-success, #16a34a);
+}
+
+.status-fail {
+  border: 1px solid color-mix(in srgb, var(--color-error, #ef4444) 40%, transparent);
+  background: color-mix(in srgb, var(--color-error, #ef4444) 12%, transparent);
+  color: var(--color-error, #dc2626);
 }
 
 .message-payload {
@@ -238,12 +393,62 @@ watch(
   margin-top: 8px;
 }
 
-.message-headers span {
+.message-headers > span {
   padding: 2px 6px;
   border: 1px solid var(--color-border);
   border-radius: var(--dbx-radius-fixed-4);
   font-size: 12px;
   color: var(--color-text-secondary);
+  word-break: break-all;
+}
+
+.header-keys {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 6px;
+  width: 100%;
+  padding: 4px 6px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--dbx-radius-fixed-4);
+  font-size: 12px;
+  color: var(--color-text-secondary);
+}
+
+.header-keys-label {
+  flex: 0 0 auto;
+  font-weight: 500;
+}
+
+.keys-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  min-width: 0;
+}
+
+.key-chip {
+  padding: 1px 6px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--dbx-radius-fixed-4);
+  background: var(--color-background);
+  font-size: 11px;
+  color: var(--color-text-secondary);
+}
+
+.raw-payload {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--color-text-secondary);
+}
+
+.raw-payload summary {
+  cursor: pointer;
+  user-select: none;
+}
+
+.raw-payload .message-payload {
+  margin-top: 6px;
 }
 
 .btn-secondary {

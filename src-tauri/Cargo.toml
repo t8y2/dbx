@@ -1,6 +1,6 @@
 [package]
 name = "dbx"
-version = "0.5.75"
+version = "0.5.77"
 description = "Open-source database management tool"
 authors = ["skyler"]
 license = "Apache-2.0"
@@ -14,6 +14,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 
 [features]
 default = ["duckdb-sidecar", "mq-admin", "sqlite-sqlcipher", "system-fonts"]
+custom-protocol = ["tauri/custom-protocol"]
 duckdb-sidecar = ["dbx-core/duckdb-sidecar"]
 mq-admin = ["dbx-core/mq-admin"]
 sqlite-sqlcipher = ["dbx-core/sqlite-sqlcipher"]

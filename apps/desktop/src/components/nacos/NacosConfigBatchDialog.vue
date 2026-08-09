@@ -6,6 +6,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import type { NacosBatchPreview, NacosBatchReport, NacosConfigSelectionScope, NacosConflictPolicy, NacosNamespaceInfo } from "@/types/nacos";
+import { nacosNamespaceIdentity } from "@/lib/nacos/nacosNamespaceVisibility";
 
 export type NacosBatchDialogMode = "export" | "import" | "copy";
 
@@ -48,7 +49,7 @@ const targetNamespace = ref("");
 
 const titleKey = computed(() => `nacos.batch${props.mode[0].toUpperCase()}${props.mode.slice(1)}Title`);
 const descriptionKey = computed(() => `nacos.batch${props.mode[0].toUpperCase()}${props.mode.slice(1)}Description`);
-const targetNamespaces = computed(() => props.namespaces.filter((item) => props.targetConnectionId !== props.sourceConnectionId || item.namespace !== props.currentNamespace));
+const targetNamespaces = computed(() => props.namespaces.filter((item) => props.targetConnectionId !== props.sourceConnectionId || nacosNamespaceIdentity(item.namespace) !== nacosNamespaceIdentity(props.currentNamespace)));
 const selectedTargetNamespace = computed(() => {
   try {
     const namespace = JSON.parse(targetNamespace.value);

@@ -239,6 +239,8 @@ fn resolve_cli_provider_config(mut config: AiConfig) -> AiConfig {
         AiProvider::CodexCli => (&mut config.codex_cli_path, "codex"),
         AiProvider::ClaudeCodeCli => (&mut config.claude_code_cli_path, "claude"),
         AiProvider::PiAgentCli => (&mut config.pi_agent_cli_path, "pi"),
+        AiProvider::OpenCodeCli => (&mut config.opencode_cli_path, "opencode"),
+        AiProvider::CursorCli => (&mut config.cursor_cli_path, "agent"),
         _ => return config,
     };
     let command = path_slot.as_deref().map(str::trim).filter(|path| !path.is_empty()).unwrap_or(default_command);
@@ -324,6 +326,10 @@ mod tests {
             claude_code_cli_env: Default::default(),
             pi_agent_cli_path: None,
             pi_agent_cli_env: Default::default(),
+            opencode_cli_path: None,
+            opencode_cli_env: Default::default(),
+            cursor_cli_path: None,
+            cursor_cli_env: Default::default(),
         }
     }
 

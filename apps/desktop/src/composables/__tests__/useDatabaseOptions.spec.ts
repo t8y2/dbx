@@ -177,16 +177,17 @@ describe("namespace options", () => {
     expect(namespaceOptionsAreSchemas({ db_type: "postgres" })).toBe(false);
   });
 
-  it("does not expand the global database options composable to Dameng schemas", async () => {
+  it("expands Dameng schemas via listSchemas", async () => {
     mocks.getConfig.mockReturnValue({ db_type: "dameng" });
-    mocks.listDatabases.mockResolvedValue([]);
+    mocks.listSchemas.mockResolvedValue(["APP_USER", "REPORTING", "SYS"]);
 
     const { databaseOptions, loadDatabaseOptions } = useDatabaseOptions();
     await loadDatabaseOptions("connection-1");
 
-    expect(databaseOptions.value["connection-1"]).toEqual([]);
-    expect(mocks.listDatabases).toHaveBeenCalledWith("connection-1");
-    expect(mocks.listSchemas).not.toHaveBeenCalled();
+    // 达梦现在通过 listSchemas 获取 schema 列表，SYS 作为系统 schema 被过滤掉
+    expect(databaseOptions.value["connection-1"]).toEqual(["APP_USER", "REPORTING"]);
+    expect(mocks.listSchemas).toHaveBeenCalledWith("connection-1", "", true);
+    expect(mocks.listDatabases).not.toHaveBeenCalled();
   });
 });
 

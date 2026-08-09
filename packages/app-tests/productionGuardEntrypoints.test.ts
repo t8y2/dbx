@@ -127,8 +127,14 @@ test("mongo sidebar mutations share the production-gated runMongoSidebarMutation
   const dropDatabaseBody = functionBody(hostSource, "confirmDropDatabase");
   assert.match(dropDatabaseBody, /confirmDropMongoDatabase/, "host drop-database confirm should delegate mongo to the mutation runtime");
   assert.ok(!dropDatabaseBody.includes("api.mongoDropDatabase"), "host drop-database confirm should not call mongo APIs directly");
-  const mongoCollectionMenuBody = functionBody(hostSource, "buildSpecialSidebarMenu");
-  assert.match(mongoCollectionMenuBody, /action:\s*dropAllMongoIndexes/, "collection context menu must keep the drop-all-indexes entrypoint");
+  const mongoSpecialMenuBody = functionBody(hostSource, "buildSpecialSidebarMenu");
+  const mongoIndexGroupMenuBody = functionBody(hostSource, "buildObjectGroupSidebarMenu");
+  assert.match(mongoSpecialMenuBody, /items\.push\(\{\s*label: t\("contextMenu\.dropDatabase"\),\s*action: dropDatabase/, "MongoDB database deletion must be a top-level menu action");
+  assert.doesNotMatch(mongoSpecialMenuBody, /moreActionsSubmenu\(\[\s*\{\s*label: t\("contextMenu\.dropDatabase"\)/, "MongoDB database deletion must not be nested under More");
+  assert.doesNotMatch(mongoSpecialMenuBody, /action:\s*openCreateMongoIndexDialog/, "collection context menu must not expose index creation");
+  assert.doesNotMatch(mongoSpecialMenuBody, /action:\s*dropAllMongoIndexes/, "collection context menu must not expose the drop-all-indexes entrypoint");
+  assert.match(mongoIndexGroupMenuBody, /action:\s*openCreateMongoIndexDialog/, "Indexes group context menu must expose index creation");
+  assert.match(mongoIndexGroupMenuBody, /action:\s*dropAllMongoIndexes/, "Indexes group context menu must expose the drop-all-indexes entrypoint");
   const batchDropBody = functionBody(hostSource, "confirmBatchDrop");
   assert.match(batchDropBody, /catch\s*\([^)]*\)\s*\{[\s\S]*?failedCount \+= groupTargets\.length/, "cross-collection index deletion must retain earlier successes after a group failure");
   assert.match(batchDropBody, /droppedCount === 0[\s\S]*?throw firstGroupError/, "an entirely failed cross-collection request must preserve its original error");

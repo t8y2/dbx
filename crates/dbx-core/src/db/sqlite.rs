@@ -2530,6 +2530,7 @@ fn execute_query_blocking(pool: &SqliteHandle, sql: &str, max_rows: Option<usize
                 session_id: None,
                 has_more: false,
                 elasticsearch_raw_body: None,
+                messages: Vec::new(),
             })
         } else {
             conn.execute_batch(sql).map_err(|e| e.to_string())?;
@@ -2546,6 +2547,7 @@ fn execute_query_blocking(pool: &SqliteHandle, sql: &str, max_rows: Option<usize
                 session_id: None,
                 has_more: false,
                 elasticsearch_raw_body: None,
+                messages: Vec::new(),
             })
         }
     })

@@ -26,6 +26,7 @@ import java.sql.Types;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Properties;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -520,6 +521,69 @@ final class DbxJdbcPluginTest {
 
         assertEquals("45", properties.getProperty("loginTimeout"));
         assertFalse(properties.containsKey("connectTimeout"));
+    }
+
+    @Test
+    void phoenixConnectionsEnableAutoCommitWhenDriverDefaultsToManualTransactions() throws Exception {
+        Method method = DbxJdbcPlugin.class.getDeclaredMethod(
+            "configurePhoenixAutoCommit",
+            JsonNode.class,
+            String.class,
+            Connection.class
+        );
+        method.setAccessible(true);
+        List<String> calls = new ArrayList<>();
+        JsonNode connection = MAPPER.readTree("""
+            {
+              "connection_string": "jdbc:phoenix:localhost"
+            }
+            """);
+
+        method.invoke(null, connection, "jdbc:phoenix:localhost", pagedQueryConnection(calls, false));
+
+        assertEquals(List.of("getAutoCommit", "setAutoCommit:true"), calls);
+    }
+
+    @Test
+    void phoenixAutoCommitConfigurationSkipsNonPhoenixConnections() throws Exception {
+        Method method = DbxJdbcPlugin.class.getDeclaredMethod(
+            "configurePhoenixAutoCommit",
+            JsonNode.class,
+            String.class,
+            Connection.class
+        );
+        method.setAccessible(true);
+        List<String> calls = new ArrayList<>();
+        JsonNode connection = MAPPER.readTree("""
+            {
+              "connection_string": "jdbc:h2:mem:dbx"
+            }
+            """);
+
+        method.invoke(null, connection, "jdbc:h2:mem:dbx", pagedQueryConnection(calls, false));
+
+        assertEquals(List.of(), calls);
+    }
+
+    @Test
+    void phoenixAutoCommitConfigurationDoesNotResetExistingAutoCommit() throws Exception {
+        Method method = DbxJdbcPlugin.class.getDeclaredMethod(
+            "configurePhoenixAutoCommit",
+            JsonNode.class,
+            String.class,
+            Connection.class
+        );
+        method.setAccessible(true);
+        List<String> calls = new ArrayList<>();
+        JsonNode connection = MAPPER.readTree("""
+            {
+              "jdbc_driver_class": "org.apache.phoenix.jdbc.PhoenixDriver"
+            }
+            """);
+
+        method.invoke(null, connection, "jdbc:custom:phoenix", pagedQueryConnection(calls, true));
+
+        assertEquals(List.of("getAutoCommit"), calls);
     }
 
     @Test
@@ -1190,6 +1254,53 @@ final class DbxJdbcPluginTest {
         assertFalse(response.has("error"), response.toString());
         assertEquals("ID", response.path("result").path(0).path("name").asText());
         assertEquals(true, response.path("result").path(0).path("is_primary_key").asBoolean());
+    }
+
+    @Test
+    void getColumnsUsesReturnedMetadataIdentityForGaussDbPrimaryKeys() throws Exception {
+        List<String> calls = new ArrayList<>();
+        Driver driver = new GaussDbMetadataDriver(calls);
+        DriverManager.registerDriver(driver);
+        try {
+            JsonNode response = request("getColumns", """
+                {
+                  "connection": {
+                    "connection_string": "jdbc:gaussdb://gauss.example.test:8000/appdb",
+                    "connect_timeout_secs": 30
+                  },
+                  "database": "appdb",
+                  "schema": "app",
+                  "table": "orders"
+                }
+                """);
+
+            assertFalse(response.has("error"), response.toString());
+            assertEquals("id", response.path("result").path(0).path("name").asText());
+            assertEquals(true, response.path("result").path(0).path("is_primary_key").asBoolean());
+            assertEquals(
+                List.of(
+                    "columns:appdb:app:orders",
+                    "primaryKeys:<null>:APP:ORDERS"
+                ),
+                calls
+            );
+        } finally {
+            DriverManager.deregisterDriver(driver);
+        }
+    }
+
+    @Test
+    void primaryKeyCaseFallbackDoesNotGuessBetweenCaseDistinctColumns() throws Exception {
+        Method method = DbxJdbcPlugin.class.getDeclaredMethod("markPrimaryKeyColumns", ArrayNode.class, Set.class);
+        method.setAccessible(true);
+        ArrayNode columns = MAPPER.createArrayNode();
+        columns.addObject().put("name", "ID").put("is_primary_key", false);
+        columns.addObject().put("name", "id").put("is_primary_key", false);
+
+        method.invoke(null, columns, Set.of("Id"));
+
+        assertEquals(false, columns.path(0).path("is_primary_key").asBoolean());
+        assertEquals(false, columns.path(1).path("is_primary_key").asBoolean());
     }
 
     @Test
@@ -2168,6 +2279,103 @@ final class DbxJdbcPluginTest {
         public java.util.logging.Logger getParentLogger() {
             return java.util.logging.Logger.getGlobal();
         }
+    }
+
+    private static final class GaussDbMetadataDriver implements Driver {
+        private final List<String> calls;
+
+        private GaussDbMetadataDriver(List<String> calls) {
+            this.calls = calls;
+        }
+
+        @Override
+        public Connection connect(String url, Properties info) {
+            return acceptsURL(url) ? gaussDbMetadataConnection(calls) : null;
+        }
+
+        @Override
+        public boolean acceptsURL(String url) {
+            return url != null && url.startsWith("jdbc:gaussdb:");
+        }
+
+        @Override
+        public DriverPropertyInfo[] getPropertyInfo(String url, Properties info) {
+            return new DriverPropertyInfo[0];
+        }
+
+        @Override
+        public int getMajorVersion() {
+            return 1;
+        }
+
+        @Override
+        public int getMinorVersion() {
+            return 0;
+        }
+
+        @Override
+        public boolean jdbcCompliant() {
+            return false;
+        }
+
+        @Override
+        public java.util.logging.Logger getParentLogger() {
+            return java.util.logging.Logger.getGlobal();
+        }
+    }
+
+    private static Connection gaussDbMetadataConnection(List<String> calls) {
+        DatabaseMetaData metadata = (DatabaseMetaData) Proxy.newProxyInstance(
+            DbxJdbcPluginTest.class.getClassLoader(),
+            new Class<?>[] { DatabaseMetaData.class },
+            (proxy, method, args) -> {
+                if ("getColumns".equals(method.getName())) {
+                    calls.add("columns:" + metadataArgument(args[0]) + ":" + metadataArgument(args[1]) + ":" + metadataArgument(args[2]));
+                    return rowsResultSet(
+                        new String[] {
+                            "TABLE_CAT",
+                            "TABLE_SCHEM",
+                            "TABLE_NAME",
+                            "COLUMN_NAME",
+                            "TYPE_NAME",
+                            "IS_NULLABLE",
+                            "NULLABLE",
+                            "COLUMN_DEF",
+                            "REMARKS",
+                            "COLUMN_SIZE",
+                            "DECIMAL_DIGITS"
+                        },
+                        new Object[][] {
+                            { null, "APP", "ORDERS", "id", "BIGINT", "NO", DatabaseMetaData.columnNoNulls, null, null, 19, 0 }
+                        }
+                    );
+                }
+                if ("getPrimaryKeys".equals(method.getName())) {
+                    calls.add("primaryKeys:" + metadataArgument(args[0]) + ":" + metadataArgument(args[1]) + ":" + metadataArgument(args[2]));
+                    boolean actualIdentity = args[0] == null && "APP".equals(args[1]) && "ORDERS".equals(args[2]);
+                    return rowsResultSet(
+                        new String[] { "COLUMN_NAME" },
+                        actualIdentity ? new Object[][] { { "ID" } } : new Object[0][]
+                    );
+                }
+                return defaultValue(method.getReturnType());
+            }
+        );
+        return (Connection) Proxy.newProxyInstance(
+            DbxJdbcPluginTest.class.getClassLoader(),
+            new Class<?>[] { Connection.class },
+            (proxy, method, args) -> switch (method.getName()) {
+                case "getMetaData" -> metadata;
+                case "isClosed" -> false;
+                case "isValid" -> true;
+                case "close", "setCatalog", "setSchema" -> null;
+                default -> defaultValue(method.getReturnType());
+            }
+        );
+    }
+
+    private static String metadataArgument(Object value) {
+        return value == null ? "<null>" : String.valueOf(value);
     }
 
     private static Connection recordingConnection() {

@@ -762,19 +762,19 @@ export function buildEditorFontThemeRules(opts?: { fixedHeight?: boolean; scroll
     },
     ".cm-lineNumbers .cm-gutterElement": {
       cursor: "pointer",
-      paddingRight: "16px",
+      paddingRight: "8px",
       userSelect: "none",
     },
     ".cm-run-statement-gutter": {
-      minWidth: "34px",
+      minWidth: "28px",
     },
     ".cm-run-statement-gutter .cm-gutterElement": {
       alignItems: "center",
       boxSizing: "border-box",
       display: "flex",
       justifyContent: "center",
-      minWidth: "34px",
-      padding: "0 5px",
+      minWidth: "28px",
+      padding: "0 2px",
     },
     ".cm-run-statement-marker": {
       alignItems: "center",

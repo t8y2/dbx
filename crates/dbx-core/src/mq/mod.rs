@@ -45,10 +45,11 @@ pub use crate::mq::types::*;
 /// Each connection has its own build-lock so concurrent first-use requests for
 /// the same connection block until the first builder finishes, rather than both
 /// racing to construct an adapter.
-#[derive(Default)]
+/// Clone shares the same cache (needed for keepalive tasks that must drop adapters).
+#[derive(Clone, Default)]
 pub struct MqAdminRegistry {
-    instances: RwLock<HashMap<String, CachedMqAdmin>>,
-    build_locks: RwLock<HashMap<String, Arc<Mutex<()>>>>,
+    instances: Arc<RwLock<HashMap<String, CachedMqAdmin>>>,
+    build_locks: Arc<RwLock<HashMap<String, Arc<Mutex<()>>>>>,
 }
 
 struct CachedMqAdmin {
@@ -65,7 +66,7 @@ pub struct MqBuildResult {
 
 impl MqAdminRegistry {
     pub fn new() -> Self {
-        Self { instances: RwLock::new(HashMap::new()), build_locks: RwLock::new(HashMap::new()) }
+        Self { instances: Arc::new(RwLock::new(HashMap::new())), build_locks: Arc::new(RwLock::new(HashMap::new())) }
     }
 
     /// Return the cached adapter for this connection, building it from the
@@ -108,12 +109,23 @@ impl MqAdminRegistry {
         // Config changed — drop the stale adapter so its agent process is released.
         self.instances.write().await.remove(connection_id);
 
-        let adapter = build_adapter(mqc, agent_launch).await?;
+        let adapter = build_adapter_with_connect_timeout(mqc, agent_launch).await?;
         self.instances
             .write()
             .await
             .insert(connection_id.to_string(), CachedMqAdmin { fingerprint, adapter: adapter.clone() });
         Ok(MqBuildResult { adapter, was_cached: false })
+    }
+
+    /// Cached adapter for keepalive / diagnostics. Returns `None` when not built yet.
+    pub async fn get_cached_adapter(&self, connection_id: &str) -> Option<Arc<dyn MessageQueueAdmin>> {
+        self.instances.read().await.get(connection_id).map(|entry| entry.adapter.clone())
+    }
+
+    /// Whether `adapter` is still the live registry entry for this connection (Arc identity).
+    /// Used so a stale keepalive cannot drop a replacement built after reconnect.
+    pub async fn is_current_adapter(&self, connection_id: &str, adapter: &Arc<dyn MessageQueueAdmin>) -> bool {
+        self.instances.read().await.get(connection_id).is_some_and(|entry| Arc::ptr_eq(&entry.adapter, adapter))
     }
 
     /// Drop the cached adapter for a connection (called on disconnect).
@@ -144,7 +156,25 @@ impl MqAdminRegistry {
         mqc: MqAdminConfig,
         agent_launch: Option<AgentLaunchSpec>,
     ) -> Result<Arc<dyn MessageQueueAdmin>, String> {
-        build_adapter(mqc, agent_launch).await
+        build_adapter_with_connect_timeout(mqc, agent_launch).await
+    }
+}
+
+async fn build_adapter_with_connect_timeout(
+    mqc: MqAdminConfig,
+    agent_launch: Option<AgentLaunchSpec>,
+) -> Result<Arc<dyn MessageQueueAdmin>, String> {
+    let budget = mqc.connect_timeout();
+    // RocketMQ: TCP-probe NameServer outside the connect wall so cold JVM spawn
+    // retains the full connect_timeout (probe used to steal up to half of it).
+    if mqc.system_kind == MqSystemKindInternal::RocketMq {
+        // Probe runs outside the connect wall; scale with Advanced connect_timeout (no hard 5s cap).
+        let probe_budget = (budget / 2).max(std::time::Duration::from_millis(500));
+        crate::mq::adapters::rocketmq::probe_namesrv_before_connect(&mqc, probe_budget).await?;
+    }
+    match tokio::time::timeout(budget, build_adapter(mqc, agent_launch)).await {
+        Ok(result) => result,
+        Err(_) => Err(format!("Message queue connect timed out after {}s", budget.as_secs())),
     }
 }
 

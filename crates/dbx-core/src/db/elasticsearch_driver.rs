@@ -1298,6 +1298,7 @@ fn parse_elasticsearch_response_with_sql_parser(
                 session_id: None,
                 has_more: false,
                 elasticsearch_raw_body: None,
+                messages: Vec::new(),
             })
         } else {
             Ok(json_response_result(status, &body, start))
@@ -1323,6 +1324,7 @@ fn parse_elasticsearch_response_with_sql_parser(
             session_id: None,
             has_more: false,
             elasticsearch_raw_body: None,
+            messages: Vec::new(),
         })
     } else {
         Ok(json_response_result(status, &body, start))
@@ -1494,6 +1496,7 @@ fn raw_json_response_result(
         session_id: None,
         has_more: false,
         elasticsearch_raw_body: None,
+        messages: Vec::new(),
     }
 }
 
@@ -1560,6 +1563,7 @@ fn parse_elasticsearch_rest_response_with_sql_parser(
         session_id: None,
         has_more: false,
         elasticsearch_raw_body: None,
+        messages: Vec::new(),
     })
 }
 
@@ -1996,6 +2000,7 @@ pub(crate) fn parse_tabular_sql_response(
         session_id: body.get("cursor").and_then(|cursor| cursor.as_str()).map(str::to_string),
         has_more: body.get("cursor").and_then(|cursor| cursor.as_str()).is_some(),
         elasticsearch_raw_body: None,
+        messages: Vec::new(),
     })
 }
 

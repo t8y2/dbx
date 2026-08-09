@@ -216,7 +216,7 @@ public final class DamengAgent extends AbstractJdbcAgent {
                 return listVisibleSchemas();
             } catch (SQLException catalogError) {
                 try {
-                    return listVisibleUsers();
+                    return listJdbcSchemas();
                 } catch (Exception fallbackError) {
                     catalogError.addSuppressed(fallbackError);
                     throw catalogError;
@@ -236,6 +236,19 @@ public final class DamengAgent extends AbstractJdbcAgent {
             }
         }
         return result;
+    }
+
+    private List<String> listJdbcSchemas() throws Exception {
+        Set<String> schemas = new LinkedHashSet<>();
+        try (ResultSet rs = requireConnected().getMetaData().getSchemas()) {
+            while (rs.next()) {
+                String schema = rs.getString("TABLE_SCHEM");
+                if (schema != null && !schema.isBlank()) {
+                    schemas.add(schema);
+                }
+            }
+        }
+        return schemas.stream().sorted().toList();
     }
 
     private List<String> listVisibleSchemas() throws Exception {
@@ -274,6 +287,9 @@ public final class DamengAgent extends AbstractJdbcAgent {
         try {
             return executeConstrainedTables(buildConstrainedTablesQuery(schema, constraints), constraints);
         } catch (RuntimeException e) {
+            if (isDamengInvalidDatetimeMetadataError(e)) {
+                return executeJdbcMetadataTables(schema, constraints);
+            }
             if (!isDamengMetadataPermissionError(e)) {
                 throw e;
             }
@@ -286,6 +302,9 @@ public final class DamengAgent extends AbstractJdbcAgent {
                     constraints
                 );
             } catch (RuntimeException e) {
+                if (isDamengInvalidDatetimeMetadataError(e)) {
+                    return executeJdbcMetadataTables(schema, constraints);
+                }
                 if (!isDamengMetadataPermissionError(e)) {
                     throw e;
                 }
@@ -299,6 +318,9 @@ public final class DamengAgent extends AbstractJdbcAgent {
                     constraints
                 );
             } catch (RuntimeException e) {
+                if (isDamengInvalidDatetimeMetadataError(e)) {
+                    return executeJdbcMetadataTables(schema, constraints);
+                }
                 if (!isDamengMetadataPermissionError(e)) {
                     throw e;
                 }
@@ -308,6 +330,9 @@ public final class DamengAgent extends AbstractJdbcAgent {
         try {
             return executeRawConstrainedTables(schema, constraints);
         } catch (RuntimeException e) {
+            if (isDamengInvalidDatetimeMetadataError(e)) {
+                return executeJdbcMetadataTables(schema, constraints);
+            }
             if (!isDamengMetadataPermissionError(e)) {
                 throw e;
             }
@@ -357,6 +382,21 @@ public final class DamengAgent extends AbstractJdbcAgent {
             .replace(escape, escape + escape)
             .replace("_", escape + "_")
             .replace("%", escape + "%");
+    }
+
+    private static boolean isDamengInvalidDatetimeMetadataError(Throwable error) {
+        // DM7 ALL_OBJECTS casts SYSOBJINFOS.ALTTIME text to DATETIME and can fail on legacy catalog values.
+        for (Throwable current = error; current != null; current = current.getCause()) {
+            if (!(current instanceof SQLException sqlError)) {
+                continue;
+            }
+            for (SQLException candidate = sqlError; candidate != null; candidate = candidate.getNextException()) {
+                if (candidate.getErrorCode() == -6118) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     private static boolean isDamengMetadataPermissionError(Throwable error) {

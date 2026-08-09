@@ -567,6 +567,7 @@ fn limited_query_result(result: ChJsonResult, execution_time_ms: u128, max_rows:
         session_id: None,
         has_more: false,
         elasticsearch_raw_body: None,
+        messages: Vec::new(),
     }
 }
 
@@ -738,6 +739,7 @@ pub async fn execute_query_with_max_rows(
             session_id: None,
             has_more: false,
             elasticsearch_raw_body: None,
+            messages: Vec::new(),
         })
     }
 }

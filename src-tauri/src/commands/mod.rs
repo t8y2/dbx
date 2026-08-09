@@ -12,6 +12,7 @@ pub mod data_compare;
 pub mod database_export;
 pub mod deep_link;
 pub mod dialect_cmd;
+pub mod docs;
 pub mod document_cmd;
 pub mod etcd_cmd;
 pub mod external_db;

@@ -61,7 +61,7 @@ test("cold-start SQL files wait for restored tabs before opening", () => {
 
   const openPathSource = appSource.slice(openPathStart, openPathEnd);
   const initializationWait = openPathSource.indexOf("await desktopOpenTabsRestorationBarrier?.settled");
-  const fileRead = openPathSource.indexOf("api.readExternalSqlFile(path)");
+  const fileRead = openPathSource.indexOf("api.readExternalSqlFileSnapshot(path)");
   const tabOpen = openPathSource.indexOf("queryStore.openExternalSqlFile");
   assert.ok(initializationWait >= 0);
   assert.ok(initializationWait < fileRead);

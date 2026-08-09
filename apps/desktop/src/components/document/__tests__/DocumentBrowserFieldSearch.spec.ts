@@ -8,6 +8,21 @@ const backend = vi.hoisted(() => ({
   documentFindDocuments: vi.fn(),
   cancelQuery: vi.fn(),
   ensureConnected: vi.fn(),
+  documentDeleteDocument: vi.fn(),
+}));
+
+const settings = vi.hoisted(() => ({
+  editorSettings: {
+    pageSize: 100,
+    mongoViewMode: "table" as "document" | "table",
+    columnWidthDensity: "standard" as "compact" | "standard" | "comfortable",
+    dataGridRenderMode: "canvas" as "canvas" | "dom",
+    tableFontFamily: "system-ui",
+    tableFontSize: 12,
+    numericColumnRightAlign: true,
+    confirmDangerousSqlExecution: true,
+  },
+  updateEditorSettings: vi.fn(),
 }));
 
 vi.mock("vue-i18n", async (importOriginal) => ({
@@ -19,6 +34,7 @@ vi.mock("@/lib/backend/api", () => ({
   getColumns: backend.getColumns,
   documentFindDocuments: backend.documentFindDocuments,
   cancelQuery: backend.cancelQuery,
+  documentDeleteDocument: backend.documentDeleteDocument,
 }));
 
 vi.mock("@/stores/connectionStore", () => ({
@@ -28,13 +44,9 @@ vi.mock("@/stores/connectionStore", () => ({
 }));
 
 vi.mock("@/stores/settingsStore", () => ({
-  useSettingsStore: () => ({
-    editorSettings: {
-      pageSize: 100,
-      mongoViewMode: "table",
-    },
-    updateEditorSettings: vi.fn(),
-  }),
+  TABLE_FONT_SIZE_MIN: 8,
+  TABLE_FONT_SIZE_MAX: 16,
+  useSettingsStore: () => settings,
 }));
 
 vi.mock("@/components/grid/DataGrid.vue", async () => {
@@ -66,6 +78,8 @@ vi.mock("@/components/grid/DataGrid.vue", async () => {
           canToggleAllNullColumns: false,
           allNullColumnCount: 0,
           toggleAllNullColumns: vi.fn(),
+          multiRowTranspose: false,
+          setMultiRowTranspose: vi.fn(),
         });
         return () =>
           h(
@@ -76,6 +90,7 @@ vi.mock("@/components/grid/DataGrid.vue", async () => {
               "data-database": props.database,
               "data-column-layout-scope-key": props.columnLayoutScopeKey,
               "data-result-hidden-column-keys": JSON.stringify((props.result as { local_hidden_column_keys?: string[] }).local_hidden_column_keys ?? []),
+              "data-result-column-types": JSON.stringify((props.result as { column_types?: string[] }).column_types ?? []),
             },
             [
               slots["search-bar"]?.({
@@ -220,6 +235,17 @@ beforeEach(async () => {
   backend.documentFindDocuments.mockReset();
   backend.cancelQuery.mockReset();
   backend.ensureConnected.mockReset();
+  backend.documentDeleteDocument.mockReset();
+  backend.documentDeleteDocument.mockResolvedValue(undefined);
+  settings.editorSettings.mongoViewMode = "table";
+  settings.editorSettings.columnWidthDensity = "standard";
+  settings.editorSettings.dataGridRenderMode = "canvas";
+  settings.editorSettings.tableFontFamily = "system-ui";
+  settings.editorSettings.tableFontSize = 12;
+  settings.editorSettings.numericColumnRightAlign = true;
+  settings.editorSettings.confirmDangerousSqlExecution = true;
+  settings.updateEditorSettings.mockReset();
+  settings.updateEditorSettings.mockImplementation((partial: Partial<typeof settings.editorSettings>) => Object.assign(settings.editorSettings, partial));
   backend.ensureConnected.mockResolvedValue(undefined);
   backend.getColumns.mockResolvedValue([
     { name: "buyers", data_type: "nested" },
@@ -354,5 +380,229 @@ describe("DocumentBrowser Elasticsearch field search", () => {
     fieldTriggers[1].click();
     await flushUi();
     expect(document.body.querySelector<HTMLInputElement>('input[placeholder="grid.filterBuilderSearchColumns"]')?.value).toBe("");
+  });
+});
+
+describe("DocumentBrowser MongoDB filter value types", () => {
+  it("identifies consistently numeric MongoDB columns for shared grid alignment", async () => {
+    app?.unmount();
+    backend.documentFindDocuments.mockReset();
+    backend.documentFindDocuments.mockResolvedValue({
+      documents: [
+        { _id: "001", amount: 12.5, stringId: "123", mixed: 1, counter: { $numberLong: "9007199254740993" }, optional: null },
+        { _id: "002", amount: 8, stringId: "456", mixed: "2", counter: { $numberLong: "9007199254740994" } },
+      ],
+      raw_documents: [],
+      total: 2,
+      total_is_exact: true,
+    });
+    app = createApp(DocumentBrowser, {
+      connectionId: "mongo-1",
+      database: "test",
+      collection: "typed_values",
+      databaseType: "mongodb",
+    });
+    app.mount(root!);
+    await flushUi();
+
+    const dataGrid = root!.querySelector<HTMLElement>('[data-testid="data-grid"]')!;
+    expect(JSON.parse(dataGrid.dataset.resultColumnTypes ?? "[]")).toEqual(["", "number", "", "", "int64", ""]);
+  });
+
+  it("shows the value type selector and preserves a sampled string _id", async () => {
+    app?.unmount();
+    backend.documentFindDocuments.mockReset();
+    backend.documentFindDocuments.mockResolvedValue({
+      documents: [{ _id: "1", title: "String id" }],
+      raw_documents: [],
+      total: 1,
+      total_is_exact: true,
+    });
+    app = createApp(DocumentBrowser, {
+      connectionId: "mongo-1",
+      database: "test",
+      collection: "typed_ids",
+      databaseType: "mongodb",
+    });
+    app.mount(root!);
+    await flushUi();
+
+    root!.querySelector<HTMLButtonElement>('[data-testid="data-grid"] button')!.click();
+    await flushUi();
+    expect(document.body.querySelector('[data-testid="select"][data-model-value="auto"]')).not.toBeNull();
+
+    const clearButton = buttonWithText("grid.clearFilter");
+    const addButton = buttonWithText("grid.filterBuilderAddRule");
+    expect(clearButton.className).toContain("h-7");
+    expect(clearButton.querySelector(".lucide-trash-2")).not.toBeNull();
+    expect(clearButton.parentElement?.firstElementChild?.textContent).toContain("grid.filter");
+    expect(addButton.className).toContain("h-7");
+    expect(addButton.querySelector(".lucide-plus")).not.toBeNull();
+    expect(addButton.parentElement?.firstElementChild).toBe(addButton);
+    expect(clearButton.compareDocumentPosition(addButton) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
+
+    const removeButton = [...document.body.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.disabled && button.querySelector(".lucide-x"));
+    expect(removeButton?.className).toContain("h-7");
+    expect(removeButton?.className).toContain("w-7");
+
+    const valueInput = document.body.querySelector<HTMLInputElement>('input[placeholder="grid.filterBuilderValue"]');
+    expect(valueInput).not.toBeNull();
+    valueInput!.value = "1";
+    valueInput!.dispatchEvent(new Event("input", { bubbles: true }));
+    await flushUi();
+    buttonWithText("grid.applyFilter").click();
+    await flushUi();
+
+    const filter = backend.documentFindDocuments.mock.calls.at(-1)?.[5];
+    expect(JSON.parse(filter)).toEqual({ _id: "1" });
+  });
+
+  it("exposes the applicable shared table view options", async () => {
+    app?.unmount();
+    app = createApp(DocumentBrowser, {
+      connectionId: "mongo-1",
+      database: "test",
+      collection: "typed_ids",
+      databaseType: "mongodb",
+    });
+    app.mount(root!);
+    await flushUi();
+
+    buttonWithTitle("grid.viewOptions").click();
+    await flushUi();
+    expect(document.body.textContent).toContain("grid.renderMode");
+    expect(document.body.textContent).toContain("grid.tableFontFamily");
+    expect(document.body.textContent).toContain("grid.tableFontSize");
+    expect(document.body.textContent).toContain("grid.transposeMultiRowToggle");
+    expect(document.body.textContent).toContain("grid.numericColumnAlign");
+
+    buttonWithText("grid.columnWidthCompact").click();
+    expect(settings.updateEditorSettings).toHaveBeenCalledWith({ columnWidthDensity: "compact" });
+
+    buttonWithText("grid.domRenderMode").click();
+    expect(settings.updateEditorSettings).toHaveBeenCalledWith({ dataGridRenderMode: "dom" });
+
+    buttonWithText("grid.numericColumnAlignLeft").click();
+    expect(settings.updateEditorSettings).toHaveBeenCalledWith({ numericColumnRightAlign: false });
+
+    document.body.querySelector<HTMLButtonElement>('[aria-label="common.increase"]')!.click();
+    expect(settings.updateEditorSettings).toHaveBeenCalledWith({ tableFontSize: 13 });
+  });
+
+  it("matches SQL value keyboard shortcuts and ignores IME confirmation Enter", async () => {
+    app?.unmount();
+    app = createApp(DocumentBrowser, {
+      connectionId: "mongo-1",
+      database: "test",
+      collection: "typed_ids",
+      databaseType: "mongodb",
+    });
+    app.mount(root!);
+    await flushUi();
+
+    root!.querySelector<HTMLButtonElement>('[data-testid="data-grid"] button')!.click();
+    await flushUi();
+    const valueInput = document.body.querySelector<HTMLInputElement>('input[placeholder="grid.filterBuilderValue"]')!;
+    const callsBeforeEnter = backend.documentFindDocuments.mock.calls.length;
+    valueInput.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+    await flushUi();
+    expect(backend.documentFindDocuments.mock.calls.length).toBeGreaterThan(callsBeforeEnter);
+
+    root!.querySelector<HTMLButtonElement>('[data-testid="data-grid"] button')!.click();
+    await flushUi();
+    const reopenedValueInput = document.body.querySelector<HTMLInputElement>('input[placeholder="grid.filterBuilderValue"]')!;
+    reopenedValueInput.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", shiftKey: true, bubbles: true, cancelable: true }));
+    await flushUi();
+    expect(document.body.querySelectorAll('input[placeholder="grid.filterBuilderValue"]')).toHaveLength(2);
+    expect(document.body.querySelector<HTMLInputElement>('input[placeholder="grid.filterBuilderSearchColumns"]')).not.toBeNull();
+
+    const callsBeforeCompositionEnter = backend.documentFindDocuments.mock.calls.length;
+    reopenedValueInput.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+    reopenedValueInput.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+    await flushUi();
+    expect(backend.documentFindDocuments).toHaveBeenCalledTimes(callsBeforeCompositionEnter);
+  });
+
+  it("enters document editing only when double-clicking viewer whitespace", async () => {
+    app?.unmount();
+    settings.editorSettings.mongoViewMode = "document";
+    app = createApp(DocumentBrowser, {
+      connectionId: "mongo-1",
+      database: "test",
+      collection: "typed_ids",
+      databaseType: "mongodb",
+    });
+    app.mount(root!);
+    await flushUi();
+
+    const documentRow = [...root!.querySelectorAll<HTMLElement>(".group")].find((element) => element.textContent?.includes("document-1"))!;
+    documentRow.click();
+    await flushUi();
+
+    const viewer = root!.querySelector<HTMLElement>("[data-document-json-viewer]")!;
+    const jsonText = viewer.querySelector<HTMLElement>(".json-string")!;
+    const documentId = root!.querySelector<HTMLInputElement>('input[aria-label^="_id:"]')!;
+    expect(root!.firstElementChild?.classList.contains("select-none")).toBe(true);
+    expect(documentId.readOnly).toBe(true);
+    expect(documentId.value).toBe("document-1");
+    expect(documentId.classList.contains("select-text")).toBe(true);
+    const documentIdBadge = documentId.closest<HTMLElement>('[data-slot="badge"]');
+    expect(documentIdBadge).not.toBeNull();
+    expect(documentIdBadge?.classList.contains("rounded")).toBe(true);
+    expect(documentIdBadge?.classList.contains("rounded-4xl")).toBe(false);
+    expect(viewer.querySelector(".json-viewer")?.classList.contains("select-text")).toBe(true);
+
+    documentId.setSelectionRange(0, documentId.value.length);
+    expect(documentId.selectionStart).toBe(0);
+    expect(documentId.selectionEnd).toBe(documentId.value.length);
+    expect(window.getSelection()?.toString()).toBe("");
+
+    jsonText.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+    await flushUi();
+    expect(buttonWithText("mongo.edit")).toBeDefined();
+
+    viewer.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+    await flushUi();
+    expect(buttonWithText("grid.save")).toBeDefined();
+  });
+
+  it("deletes a document without opening the danger dialog when confirmation is disabled", async () => {
+    app?.unmount();
+    settings.editorSettings.mongoViewMode = "document";
+    settings.editorSettings.confirmDangerousSqlExecution = false;
+    app = createApp(DocumentBrowser, {
+      connectionId: "mongo-1",
+      database: "test",
+      collection: "typed_ids",
+      databaseType: "mongodb",
+    });
+    app.mount(root!);
+    await flushUi();
+
+    root!.querySelector<HTMLElement>(".lucide-trash-2")!.closest<HTMLButtonElement>("button")!.click();
+    await flushUi();
+
+    expect(backend.documentDeleteDocument).toHaveBeenCalledOnce();
+    expect(backend.documentDeleteDocument).toHaveBeenCalledWith("mongo-1", "test", "typed_ids", '__dbx_mongo_string_id__"document-1"', undefined, undefined);
+  });
+
+  it("waits for danger confirmation before deleting a document when confirmation is enabled", async () => {
+    app?.unmount();
+    settings.editorSettings.mongoViewMode = "document";
+    settings.editorSettings.confirmDangerousSqlExecution = true;
+    app = createApp(DocumentBrowser, {
+      connectionId: "mongo-1",
+      database: "test",
+      collection: "typed_ids",
+      databaseType: "mongodb",
+    });
+    app.mount(root!);
+    await flushUi();
+
+    root!.querySelector<HTMLElement>(".lucide-trash-2")!.closest<HTMLButtonElement>("button")!.click();
+    await flushUi();
+
+    expect(backend.documentDeleteDocument).not.toHaveBeenCalled();
+    expect(document.body.textContent).toContain("dangerDialog.deleteMessage");
   });
 });

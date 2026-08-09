@@ -2,6 +2,7 @@ import { strict as assert } from "node:assert";
 import { test } from "vitest";
 import {
   buildSqlCompletionItems,
+  buildSqlCompletionItemsFromContext,
   getSqlFunctionSignatureHelp,
   getSqlCompletionResultValidFor,
   isSqlCommentContext,
@@ -494,6 +495,40 @@ test("suggests SQL Server tables for unquoted Chinese prefixes", () => {
     ["客户订单"],
   );
   assert.equal(shouldAutoOpenSqlCompletion(sql, sql.length), true);
+});
+
+test("suggests SQL Server columns for an aliased unquoted Chinese table", () => {
+  const sql = "SELECT * FROM 大客户报废物资 AS tb2 WHERE ";
+  const options = { databaseType: "sqlserver" as const, dialect: "sqlserver" as const };
+  const legacy = getSqlCompletionContext(sql, sql.length, options);
+  const semantic = buildSqlSemanticModel(sql, sql.length, options);
+  const context = sqlCompletionContextFromSemantic(semantic, legacy);
+  const items = buildSqlCompletionItemsFromContext(context, {
+    ...options,
+    tables: [{ name: "大客户报废物资", schema: "dbo", type: "table" }],
+    columnsByTable: new Map([
+      [
+        "dbo.大客户报废物资",
+        [
+          { name: "物资编号", table: "大客户报废物资", schema: "dbo" },
+          { name: "客户名称", table: "大客户报废物资", schema: "dbo" },
+        ],
+      ],
+    ]),
+  });
+
+  assert.equal(context.referencedTables.length, 1);
+  assert.equal(context.referencedTables[0]?.name, "大客户报废物资");
+  assert.equal(context.referencedTables[0]?.alias, "tb2");
+  assert.equal(context.suggestColumns, true);
+  assert.equal(shouldAutoOpenSqlCompletion(sql, sql.length, options), true);
+  assert.deepEqual(
+    items
+      .filter((item) => item.type === "column")
+      .map((item) => item.label)
+      .sort(),
+    ["客户名称", "物资编号"],
+  );
 });
 
 test("preserves Unicode prefixes through the semantic completion context", () => {

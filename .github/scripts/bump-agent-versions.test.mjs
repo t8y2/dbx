@@ -96,6 +96,27 @@ test("bumps Neo4j from its native Go source directory", () => {
   assert.deepEqual(result.nativeModules, ["neo4j"]);
 });
 
+test("rebuilds native modules when shared native packaging changes", () => {
+  const existing = new Set([
+    "agents/drivers/access",
+    "agents/drivers/access/build.gradle",
+    "agents/drivers/duckdb",
+    "agents/drivers/neo4j-go",
+  ]);
+  const result = evaluateAgentVersionBump({
+    versions: { access: "0.1.37", duckdb: "0.1.3", neo4j: "0.1.40" },
+    changedFiles: ["agents/scripts/version_agent_artifacts.py"],
+    moduleExists: (path) => existing.has(path),
+    readModuleFile: () => "implementation project(':common')",
+  });
+
+  assert.equal(result.versions.access, "0.1.37");
+  assert.equal(result.versions.duckdb, "0.1.4");
+  assert.equal(result.versions.neo4j, "0.1.41");
+  assert.deepEqual(result.nativeModules, ["duckdb", "neo4j"]);
+  assert.deepEqual(result.reusedModules, ["access"]);
+});
+
 test("builds a manually versioned module even without runtime file changes", () => {
   const result = evaluateAgentVersionBump({
     versions: { duckdb: "0.1.1" },

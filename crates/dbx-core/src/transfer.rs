@@ -14,6 +14,10 @@ use crate::sql_dialect::{qualified_transfer_table, quote_transfer_identifier};
 
 static CANCELLED: std::sync::LazyLock<RwLock<HashSet<String>>> =
     std::sync::LazyLock::new(|| RwLock::new(HashSet::new()));
+static OCEANBASE_MYSQL_TABLE_OPTION_RE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
+    Regex::new(r"(?i)\b(?:AUTO_INCREMENT_MODE|REPLICA_NUM|USE_BLOOM_FILTER|TABLET_SIZE|PCTFREE)\s*=")
+        .expect("valid OceanBase MySQL table option regex")
+});
 
 const MAX_TRANSFER_WRITE_SQL_BYTES: usize = 512 * 1024;
 const MAX_SQLSERVER_INSERT_ROWS: usize = 1000;
@@ -1292,7 +1296,8 @@ pub(crate) fn is_mysql_generated_column_extra(extra: Option<&str>) -> bool {
     })
 }
 
-pub(crate) fn selected_columns_include_identity_extras(columns: &[String], column_extras: &[Option<String>]) -> bool {
+#[cfg(test)]
+fn selected_columns_include_identity_extras(columns: &[String], column_extras: &[Option<String>]) -> bool {
     columns
         .iter()
         .enumerate()
@@ -1339,12 +1344,22 @@ fn writable_transfer_columns(
         .collect()
 }
 
+fn transfer_key_columns(columns: &[db::ColumnInfo], db_type: &DatabaseType) -> Vec<String> {
+    let uses_unique_key_model = matches!(db_type, DatabaseType::Doris | DatabaseType::StarRocks);
+    columns
+        .iter()
+        .filter(|column| column.is_primary_key || (uses_unique_key_model && column.is_unique))
+        .map(|column| column.name.clone())
+        .collect()
+}
+
 fn dameng_identity_insert_statement(table: &str, schema: &str, enabled: bool) -> String {
     let full_table = qualified_table(table, schema, &DatabaseType::Dameng, None);
     format!("SET IDENTITY_INSERT {full_table} {}", if enabled { "ON" } else { "OFF" })
 }
 
-pub(crate) fn wrap_dameng_identity_insert_sql(insert_sql: &str, table: &str, schema: &str) -> String {
+#[cfg(test)]
+fn wrap_dameng_identity_insert_sql(insert_sql: &str, table: &str, schema: &str) -> String {
     let full_table = qualified_table(table, schema, &DatabaseType::Dameng, None);
     wrap_dameng_identity_insert_sql_for_table(insert_sql, &full_table)
 }
@@ -3151,11 +3166,29 @@ fn max_transfer_write_rows(db_type: &DatabaseType, mode: &TransferMode) -> usize
     }
 }
 
+fn is_oceanbase_mysql_profile(db_type: &DatabaseType, driver_profile: Option<&str>) -> bool {
+    matches!(db_type, DatabaseType::Mysql)
+        && driver_profile.is_some_and(|profile| profile.eq_ignore_ascii_case("oceanbase"))
+}
+
+fn contains_oceanbase_mysql_table_options(sql: &str) -> bool {
+    let (sql_without_literals_or_comments, _) = protect_sql_literals(sql, true);
+    OCEANBASE_MYSQL_TABLE_OPTION_RE.is_match(&sql_without_literals_or_comments)
+}
+
 fn can_reuse_source_table_ddl(
     source_db_type: &DatabaseType,
     target_db_type: &DatabaseType,
+    source_driver_profile: Option<&str>,
+    target_driver_profile: Option<&str>,
     preserves_target_table_name: bool,
 ) -> bool {
+    if is_oceanbase_mysql_profile(source_db_type, source_driver_profile)
+        && !is_oceanbase_mysql_profile(target_db_type, target_driver_profile)
+    {
+        return false;
+    }
+
     preserves_target_table_name
         && !matches!(target_db_type, DatabaseType::ClickHouse)
         && (source_db_type == target_db_type
@@ -5585,11 +5618,7 @@ where
             )
             .await?;
             let col_names = columns.iter().map(|column| column.name.clone()).collect::<Vec<_>>();
-            let primary_key_columns = columns
-                .iter()
-                .filter(|column| column.is_primary_key)
-                .map(|column| column.name.clone())
-                .collect::<Vec<_>>();
+            let primary_key_columns = transfer_key_columns(&columns, source_db_type);
             let sql = pagination_sql_with_order(
                 &col_names,
                 table,
@@ -5839,8 +5868,7 @@ where
 
     let col_names: Vec<String> = writable_columns.iter().map(|c| c.name.clone()).collect();
     let col_types: Vec<Option<String>> = writable_columns.iter().map(|c| Some(c.data_type.clone())).collect();
-    let primary_key_columns: Vec<String> =
-        writable_columns.iter().filter(|c| c.is_primary_key).map(|c| c.name.clone()).collect();
+    let primary_key_columns = transfer_key_columns(&writable_columns, source_db_type);
     log::info!("[transfer] {} has {} columns, counting rows...", table, columns.len());
 
     // Fetch source table comment
@@ -5951,8 +5979,20 @@ where
                 target_table_preexisting,
             )
             .await?;
-            let can_reuse_source_ddl =
-                can_reuse_source_table_ddl(source_db_type, target_db_type, preserves_target_table_name);
+            let (source_driver_profile, target_driver_profile) = {
+                let configs = state.configs.read().await;
+                (
+                    configs.get(&request.source_connection_id).and_then(|config| config.driver_profile.clone()),
+                    configs.get(&request.target_connection_id).and_then(|config| config.driver_profile.clone()),
+                )
+            };
+            let can_reuse_source_ddl = can_reuse_source_table_ddl(
+                source_db_type,
+                target_db_type,
+                source_driver_profile.as_deref(),
+                target_driver_profile.as_deref(),
+                preserves_target_table_name,
+            );
             let ddl = if can_reuse_source_ddl {
                 let source_ddl = if let Some(catalog) =
                     resolve_external_transfer_catalog(request.source_catalog.as_deref(), source_db_type)
@@ -6006,13 +6046,28 @@ where
                         )
                     })
                 };
-                rewrite_transfer_source_table_ddl(
-                    &source_ddl,
-                    &request.source_schema,
-                    &request.target_schema,
-                    source_db_type,
-                    target_db_type,
-                )
+                if contains_oceanbase_mysql_table_options(&source_ddl)
+                    && !is_oceanbase_mysql_profile(target_db_type, target_driver_profile.as_deref())
+                {
+                    generate_create_table_ddl(
+                        &columns,
+                        &target_table,
+                        &request.source_schema,
+                        &request.target_schema,
+                        target_db_type,
+                        source_db_type,
+                        table_comment.as_deref(),
+                        request.target_catalog.as_deref(),
+                    )
+                } else {
+                    rewrite_transfer_source_table_ddl(
+                        &source_ddl,
+                        &request.source_schema,
+                        &request.target_schema,
+                        source_db_type,
+                        target_db_type,
+                    )
+                }
             } else {
                 generate_create_table_ddl(
                     &columns,
@@ -6095,10 +6150,9 @@ where
             )
             .await
             .unwrap_or_default();
-            let pks: Vec<String> = target_columns
-                .iter()
-                .filter(|c| c.is_primary_key && col_names.iter().any(|name| name.eq_ignore_ascii_case(&c.name)))
-                .map(|c| c.name.clone())
+            let pks: Vec<String> = transfer_key_columns(&target_columns, target_db_type)
+                .into_iter()
+                .filter(|name| col_names.iter().any(|column_name| column_name.eq_ignore_ascii_case(name)))
                 .collect();
             if pks.is_empty() {
                 log::warn!("[transfer] table {} has no primary key, falling back to append", table);
@@ -6718,6 +6772,7 @@ mod tests {
             session_id: None,
             has_more: false,
             elasticsearch_raw_body: None,
+            messages: Vec::new(),
         }
     }
 
@@ -8184,9 +8239,42 @@ mod tests {
 
     #[test]
     fn transfer_reuses_source_table_ddl_only_when_target_shape_matches() {
-        assert!(!can_reuse_source_table_ddl(&DatabaseType::ClickHouse, &DatabaseType::ClickHouse, true));
-        assert!(can_reuse_source_table_ddl(&DatabaseType::Postgres, &DatabaseType::Postgres, true));
-        assert!(!can_reuse_source_table_ddl(&DatabaseType::Postgres, &DatabaseType::Postgres, false));
+        assert!(!can_reuse_source_table_ddl(&DatabaseType::ClickHouse, &DatabaseType::ClickHouse, None, None, true,));
+        assert!(can_reuse_source_table_ddl(&DatabaseType::Postgres, &DatabaseType::Postgres, None, None, true,));
+        assert!(!can_reuse_source_table_ddl(&DatabaseType::Postgres, &DatabaseType::Postgres, None, None, false,));
+    }
+
+    #[test]
+    fn oceanbase_mysql_transfer_only_reuses_ddl_for_an_oceanbase_target() {
+        assert!(
+            !can_reuse_source_table_ddl(&DatabaseType::Mysql, &DatabaseType::Mysql, Some("oceanbase"), None, true,)
+        );
+        assert!(can_reuse_source_table_ddl(
+            &DatabaseType::Mysql,
+            &DatabaseType::Mysql,
+            Some("OceanBase"),
+            Some("oceanbase"),
+            true,
+        ));
+        assert!(can_reuse_source_table_ddl(&DatabaseType::Mysql, &DatabaseType::Mysql, None, None, true,));
+    }
+
+    #[test]
+    fn detects_oceanbase_mysql_table_options_outside_literals_and_comments() {
+        let ddl = r#"CREATE TABLE `items` (
+  `id` bigint NOT NULL AUTO_INCREMENT,
+  KEY `idx_name` (`name`) BLOCK_SIZE 16384 LOCAL
+) AUTO_INCREMENT = 42 AUTO_INCREMENT_MODE = 'ORDER'
+  DEFAULT CHARSET = utf8mb4 REPLICA_NUM = 1 USE_BLOOM_FILTER = FALSE
+  TABLET_SIZE = 134217728 PCTFREE = 0"#;
+        assert!(contains_oceanbase_mysql_table_options(ddl));
+
+        let portable = r#"CREATE TABLE `items` (
+  `id` bigint NOT NULL AUTO_INCREMENT,
+  `note` varchar(255) COMMENT 'AUTO_INCREMENT_MODE and PCTFREE',
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='USE_BLOOM_FILTER'"#;
+        assert!(!contains_oceanbase_mysql_table_options(portable));
     }
 
     #[test]
@@ -8281,6 +8369,35 @@ mod tests {
         );
 
         assert_eq!(sql, "SELECT \"id\", \"name\" FROM \"public\".\"users\" ORDER BY \"id\" LIMIT 100 OFFSET 200");
+    }
+
+    #[test]
+    fn doris_unique_key_columns_drive_transfer_pagination_order() {
+        let columns =
+            vec![db::ColumnInfo { is_unique: true, ..test_column("id", "int") }, test_column("payload", "varchar(64)")];
+        let key_columns = transfer_key_columns(&columns, &DatabaseType::Doris);
+
+        assert_eq!(key_columns, vec![String::from("id")]);
+        assert_eq!(
+            pagination_sql_with_order(
+                &[String::from("id"), String::from("payload")],
+                "events",
+                "analytics",
+                &DatabaseType::Doris,
+                1000,
+                1000,
+                &key_columns,
+                None,
+            ),
+            "SELECT `id`, `payload` FROM `analytics`.`events` ORDER BY `id` LIMIT 1000 OFFSET 1000"
+        );
+    }
+
+    #[test]
+    fn mysql_unique_columns_do_not_become_transfer_keys() {
+        let columns = vec![db::ColumnInfo { is_unique: true, ..test_column("email", "varchar(255)") }];
+
+        assert!(transfer_key_columns(&columns, &DatabaseType::Mysql).is_empty());
     }
 
     #[test]
@@ -9494,6 +9611,7 @@ SELECT 1 FROM dual"#
     #[test]
     fn resolve_external_transfer_catalog_for_config_accepts_starrocks_driver_profile() {
         let config = crate::models::connection::ConnectionConfig {
+            docs_notes_path: None,
             id: "sr".to_string(),
             name: "sr".to_string(),
             note: String::new(),

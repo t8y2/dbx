@@ -14,11 +14,15 @@ test("schema DDL refreshes the selected database tree", () => {
 
 test("object DDL refreshes the selected database tree", () => {
   assert.equal(sqlMetadataRefreshScope("CREATE TABLE users (id int);"), "database");
-  assert.equal(sqlMetadataRefreshScope("CREATE TEMP TABLE scratch (id int);"), "database");
   assert.equal(sqlMetadataRefreshScope("CREATE MATERIALIZED VIEW daily_users AS SELECT 1;"), "database");
   assert.equal(sqlMetadataRefreshScope("ALTER TABLE users ADD COLUMN name text;"), "database");
   assert.equal(sqlMetadataRefreshScope("DROP VIEW active_users;"), "database");
   assert.equal(sqlMetadataRefreshScope("CREATE OR REPLACE FUNCTION f() RETURNS int AS $$ SELECT 1 $$ LANGUAGE SQL;"), "database");
+});
+
+test("temporary table DDL does not refresh persistent metadata trees", () => {
+  assert.equal(sqlMetadataRefreshScope("CREATE TEMP TABLE scratch (id int);"), "none");
+  assert.deepEqual(sqlMetadataRefreshTarget("CREATE TEMPORARY TABLE scratch (id int);"), { scope: "none" });
 });
 
 test("qualified object DDL refreshes the matching schema node", () => {

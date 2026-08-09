@@ -212,6 +212,45 @@ test("preserves loaded children when the connection itself matches search", () =
   assert.equal(filtered[0]?.children?.[0]?.children?.[0]?.label, "products");
 });
 
+test("temporarily collapses an empty object group within a preserved search subtree", () => {
+  const tablesGroup: TreeNode = {
+    id: "conn:1:inventory:__tables",
+    label: "tree.tables",
+    type: "group-tables",
+    connectionId: "conn:1",
+    database: "inventory",
+    isExpanded: true,
+    children: [],
+  };
+  const nodes: TreeNode[] = [
+    {
+      id: "conn:1",
+      label: "local-mysql",
+      type: "connection",
+      connectionId: "conn:1",
+      isExpanded: true,
+      children: [
+        {
+          id: "conn:1:inventory",
+          label: "inventory",
+          type: "database",
+          connectionId: "conn:1",
+          database: "inventory",
+          isExpanded: true,
+          children: [tablesGroup],
+        },
+      ],
+    },
+  ];
+
+  const filtered = filterSidebarTree(nodes, "local", new Set([tablesGroup.id]));
+  const filteredGroup = filtered[0]?.children?.[0]?.children?.[0];
+
+  assert.equal(filteredGroup?.isExpanded, false);
+  assert.equal(tablesGroup.isExpanded, true);
+  assert.equal(filterSidebarTree(nodes, "local", new Set())[0]?.children?.[0]?.children?.[0]?.isExpanded, true);
+});
+
 test("matches table comments during sidebar search", () => {
   const nodes: TreeNode[] = [
     {

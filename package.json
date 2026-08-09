@@ -1,6 +1,6 @@
 {
   "name": "dbx",
-  "version": "0.5.75",
+  "version": "0.5.77",
   "private": true,
   "license": "Apache-2.0",
   "type": "module",
@@ -25,6 +25,7 @@
     "build:knowledge-base": "node scripts/build-knowledge-base.mjs",
     "typecheck": "vue-tsc --noEmit --project apps/desktop/tsconfig.json",
     "build": "vite build --config apps/desktop/vite.config.ts",
+    "build:docs-export": "vite build --config apps/desktop/vite.docs-export.config.ts",
     "build:checked": "pnpm typecheck && pnpm build",
     "check": "node scripts/run-check.mjs",
     "db:env": "node scripts/database-env.mjs",
@@ -92,6 +93,7 @@
     "marked": "^18.0.4",
     "pako": "^3.0.1",
     "pinia": "^3.0.0",
+    "pinyin-pro": "^3.28.2",
     "proj4": "^2.20.9",
     "reka-ui": "^2.10.1",
     "shadcn-vue": "^2.7.4",

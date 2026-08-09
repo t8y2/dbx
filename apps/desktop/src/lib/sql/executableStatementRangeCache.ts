@@ -62,8 +62,9 @@ export function executableStatementRangeAtCursor(cache: ExecutableStatementRange
     }
 
     const next = cache.ranges[index + 1];
-    if (pos > range.to && (!next || pos < next.from) && cursorBelongsToTrailingStatementDelimiter(cache.doc, range.to, pos)) {
-      return range;
+    if (pos > range.to && (!next || pos < next.from)) {
+      if (cursorBelongsToTrailingStatementDelimiter(cache.doc, range.to, pos)) return range;
+      if (isCursorOnRangeEndLine(cache.doc, pos, range.to)) return range;
     }
   }
 
@@ -80,4 +81,9 @@ function isCursorOnLeadingBlockComment(lineText: string, lineOffset: number): bo
   if (!afterComment.trim()) return true;
 
   return lineOffset <= commentEnd + 2;
+}
+
+function isCursorOnRangeEndLine(doc: Text, pos: number, rangeTo: number): boolean {
+  const line = doc.lineAt(pos);
+  return rangeTo >= line.from && rangeTo <= line.to;
 }

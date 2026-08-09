@@ -130,6 +130,8 @@ export interface UseDataGridExportOptions {
     status: string;
     errorMessage: string | null;
     filePath: string | null;
+    startedAt?: number;
+    finishedAt?: number;
   }>;
   exportCancelHandler?: Ref<(() => Promise<void>) | null>;
   exportCanMinimize?: Ref<boolean>;
@@ -147,7 +149,6 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
   const { toast } = useToast();
   const tracker = useExportTracker();
   const exportGuard: ActionActivationGuard = {};
-  const { addTask, updateTableExportTask, registerTaskCancelHandler, unregisterTaskCancelHandler, removeTask } = useExportTracker();
 
   const {
     columns,
@@ -363,6 +364,9 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     return item && !item.isDraft ? [item] : [];
   }
 
+  const copyRowCount = computed(() => targetedRows().length);
+  const canCopyRow = computed(() => copyRowCount.value > 0);
+
   function selectionInsertData(): CopyInsertData | null {
     const matrix = selectedCellMatrix.value;
     if (!matrix) return null;
@@ -554,7 +558,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     });
   }
 
-  const { copyWithExtractor, previewWithExtractor, canCopyWithExtractor } = useDataGridExtractor({
+  const { copyWithExtractor, copyWithPreference, previewWithExtractor, previewWithPreference, canCopyWithExtractor } = useDataGridExtractor({
     columns,
     displayItems,
     allColumns,
@@ -618,6 +622,8 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
             status: "Running",
             errorMessage: null,
             filePath: null,
+            startedAt: Date.now(),
+            finishedAt: undefined,
           };
           exportProgressDialog.value = true;
         }
@@ -667,6 +673,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
             status: "Done",
             rowsExported: result.rows.length,
             totalRows: result.rows.length,
+            finishedAt: Date.now(),
           };
         }
         toast(t("grid.exported"));
@@ -855,6 +862,8 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
             status: "Running",
             errorMessage: null,
             filePath: outputPath,
+            startedAt: Date.now(),
+            finishedAt: undefined,
           };
           exportProgressDialog.value = true;
         }
@@ -889,6 +898,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
             status: "Done",
             rowsExported: result.rows.length,
             totalRows: result.rows.length,
+            finishedAt: Date.now(),
           };
         }
         toast(t("grid.exported"));
@@ -1025,6 +1035,8 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
         status: "Running",
         errorMessage: null,
         filePath: outputPath,
+        startedAt: Date.now(),
+        finishedAt: undefined,
       };
     }
     if (exportProgressDialog) exportProgressDialog.value = true;
@@ -1071,6 +1083,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
               totalRows: progress.totalRows,
               status: progress.status,
               errorMessage: progress.errorMessage || null,
+              finishedAt: progress.status === "Done" || progress.status === "Error" || progress.status === "Cancelled" ? Date.now() : exportProgressState.value.finishedAt,
             };
           }
           tracker.updateTableExportTask(exportId, progress);
@@ -1087,7 +1100,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     return true;
   }
 
-  async function exportQueryResultViaBackend(format: "csv" | "xlsx" | "txt", rowIds?: number[], includeSqlSheet = false, useCommentHeader = false): Promise<boolean> {
+  async function exportQueryResultViaBackend(format: "csv" | "xlsx" | "txt" | "sql", rowIds?: number[], includeSqlSheet = false, useCommentHeader = false): Promise<boolean> {
     if (rowIds !== undefined || context.value !== "results" || !queryResultExportRequest) {
       return false;
     }
@@ -1111,7 +1124,14 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     }
 
     const exportId = uuid();
-    const baseRequest = await queryResultExportRequest({ exportId, filePath: outputPath, format, includeSqlSheet });
+    const baseRequest = await queryResultExportRequest({
+      exportId,
+      filePath: outputPath,
+      format,
+      includeSqlSheet,
+      exportTableName: format === "sql" ? tableMeta.value?.tableName : undefined,
+      exportColumnTypes: format === "sql" ? allColumnTypes.value?.map((type) => type ?? null) : undefined,
+    });
     const columnComments = useCommentHeader ? buildColumnComments(columns.value) : undefined;
     const request = baseRequest ? { ...baseRequest, dateTimeFormat: useSettingsStore().editorSettings.globalDateTimeExportFormat || undefined, numericColumnRightAlign: useSettingsStore().editorSettings.numericColumnRightAlign ?? true, columnComments } : undefined;
     if (!request) throw new Error("Unable to build query result export request");
@@ -1126,6 +1146,8 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
         status: "Running",
         errorMessage: null,
         filePath: outputPath,
+        startedAt: Date.now(),
+        finishedAt: undefined,
       };
     }
     if (exportProgressDialog) exportProgressDialog.value = true;
@@ -1147,6 +1169,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
             totalRows: adjustedTotal,
             status: progress.status,
             errorMessage: progress.errorMessage || null,
+            finishedAt: progress.status === "Done" || progress.status === "Error" || progress.status === "Cancelled" ? Date.now() : exportProgressState.value.finishedAt,
           };
         }
         tracker.updateTableExportTask(exportId, progress);
@@ -1154,6 +1177,25 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
       if (terminalProgress.status === "Done") {
         toast(t("grid.exported"));
       }
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      if (exportProgressState) {
+        exportProgressState.value = {
+          ...exportProgressState.value,
+          status: "Error",
+          errorMessage,
+          finishedAt: Date.now(),
+        };
+      }
+      tracker.updateTableExportTask(exportId, {
+        exportId,
+        tableName: "Query Result",
+        rowsExported: exportProgressState?.value.rowsExported ?? 0,
+        totalRows: exportProgressState?.value.totalRows ?? null,
+        status: "Error",
+        errorMessage,
+      });
+      throw error;
     } finally {
       if (exportCancelHandler) exportCancelHandler.value = null;
       tracker.unregisterTaskCancelHandler(exportId);
@@ -1163,71 +1205,8 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
   }
 
   async function exportQueryResultSqlViaBackend(rowIds?: number[]): Promise<boolean> {
-    // Guard: only for query-result context without complete local result, desktop only
-    if (rowIds !== undefined || context.value !== "results" || !queryResultExportRequest) return false;
-    if (databaseType.value === "mongodb") return false;
-    if (hasCompleteLocalResult?.value) return false;
-    if (!isTauriRuntime()) return false; // Web → local export fallback
-
-    // 1. Save dialog FIRST (immediate user feedback)
-    let outputPath = exportFileName("query-result", "sql");
-    const { save } = await import("@tauri-apps/plugin-dialog");
-    const path = await save({
-      defaultPath: outputPath,
-      filters: [{ name: "SQL", extensions: ["sql"] }],
-    });
-    if (!path) return true;
-    outputPath = path as string;
-
-    // 2. Register background task FIRST so its exportId drives the request.
-    //    addTask generates its own ID — capture it so progress callbacks match.
-    const task = addTask(tableMeta.value?.tableName || "Query Result", "sql", outputPath);
-    const taskExportId = task.exportId;
-
-    let request: api.QueryResultExportRequest;
-    try {
-      const built = await queryResultExportRequest({
-        exportId: taskExportId,
-        filePath: outputPath,
-        format: "sql",
-        exportTableName: tableMeta.value?.tableName,
-        exportColumnTypes: allColumnTypes.value?.map((t) => t ?? null) as Array<string | null | undefined> | undefined,
-      });
-      if (!built) {
-        // builder declined — clean up the task we just registered
-        removeTask(taskExportId);
-        return false;
-      }
-      request = built;
-    } catch {
-      removeTask(taskExportId);
-      return false;
-    }
-
-    registerTaskCancelHandler(taskExportId, () => api.cancelQueryResultExport(taskExportId, request.executionId));
-
-    try {
-      await api.startQueryResultExport(request, (progress) => {
-        updateTableExportTask(taskExportId, progress);
-        if (progress.status === "Done") {
-          toast(t("grid.exported"));
-        }
-      });
-    } catch (e) {
-      // 4. Startup rejection → mark task Error (fixes stuck-Running bug)
-      updateTableExportTask(taskExportId, {
-        exportId: taskExportId,
-        tableName: tableMeta.value?.tableName || "Query Result",
-        rowsExported: 0,
-        totalRows: null,
-        status: "Error" as const,
-        errorMessage: (e as Error)?.message || String(e),
-      });
-      throw e;
-    } finally {
-      unregisterTaskCancelHandler(taskExportId);
-    }
-    return true;
+    if (!isTauriRuntime()) return false;
+    return exportQueryResultViaBackend("sql", rowIds);
   }
 
   async function exportSql(rowIds?: number[]) {
@@ -1308,9 +1287,13 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     copyText,
     copyCell,
     copyRow,
+    copyRowCount,
+    canCopyRow,
     copyAll,
     copyWithExtractor,
+    copyWithPreference,
     previewWithExtractor,
+    previewWithPreference,
     canCopyWithExtractor,
     exportCsv,
     exportCurrentPageCsv,

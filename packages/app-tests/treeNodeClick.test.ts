@@ -1,6 +1,9 @@
-import { test } from "vitest";
+import { afterAll, beforeAll, test, vi } from "vitest";
 import assert from "node:assert/strict";
 import { copyNameForTreeNode, isDocumentBrowserTreeNode, objectSourceKindForTreeNode, shouldRunTreeNodeRowAction, sidebarSelectionCopyAction, treeNodeRowAction, treeNodeRowDoubleClickAction } from "../../apps/desktop/src/lib/sidebar/treeNodeClick.ts";
+
+beforeAll(() => vi.stubGlobal("navigator", { platform: "Linux x86_64" }));
+afterAll(() => vi.unstubAllGlobals());
 
 test("table and view rows open data without toggling structure groups", () => {
   assert.equal(treeNodeRowAction("table", true), "open-data");
@@ -11,6 +14,12 @@ test("single click navigation mode opens source-capable rows", () => {
   assert.equal(treeNodeRowAction("procedure", false), "open-source");
   assert.equal(treeNodeRowAction("trigger", false), "open-source");
   assert.equal(treeNodeRowAction("sequence", false), "open-source");
+});
+
+test("extension rows open their metadata details", () => {
+  assert.equal(treeNodeRowAction("extension", false, "single"), "open-extension-details");
+  assert.equal(treeNodeRowAction("extension", false, "double"), "none");
+  assert.equal(treeNodeRowDoubleClickAction("extension", false, "double"), "open-extension-details");
 });
 
 test("double click navigation mode selects rows on single click", () => {
@@ -65,10 +74,12 @@ test("document browser helper covers Mongo collections and GridFS buckets", () =
   assert.equal(isDocumentBrowserTreeNode("redis-db"), false);
 });
 
-test("double-click follow-up clicks do not run row actions", () => {
+test("double-click follow-up clicks do not repeat side-effecting row actions", () => {
   assert.equal(shouldRunTreeNodeRowAction("toggle", 1), true);
   assert.equal(shouldRunTreeNodeRowAction("toggle", 2), false);
   assert.equal(shouldRunTreeNodeRowAction("toggle", 3), false);
+  assert.equal(shouldRunTreeNodeRowAction("toggle", 2, true), true);
+  assert.equal(shouldRunTreeNodeRowAction("toggle", 3, true), true);
   assert.equal(shouldRunTreeNodeRowAction("open-data", 1), true);
   assert.equal(shouldRunTreeNodeRowAction("open-data", 2), false);
   assert.equal(shouldRunTreeNodeRowAction("open-source", 1), true);
@@ -119,13 +130,13 @@ test("double click does not open object browser for non-browsable rows", () => {
 });
 
 test("double click navigation mode copies the selected sidebar row name", () => {
-  assert.equal(sidebarSelectionCopyAction({ key: "c", metaKey: true }), "copy-name");
-  assert.equal(sidebarSelectionCopyAction({ key: "C", ctrlKey: true }), "copy-name");
+  assert.equal(sidebarSelectionCopyAction({ key: "c", metaKey: true }, "MacIntel"), "copy-name");
+  assert.equal(sidebarSelectionCopyAction({ key: "C", ctrlKey: true }, "Win32"), "copy-name");
 });
 
 test("single click navigation mode copies the selected sidebar row name", () => {
-  assert.equal(sidebarSelectionCopyAction({ key: "c", metaKey: true }), "copy-name");
-  assert.equal(sidebarSelectionCopyAction({ key: "C", ctrlKey: true }), "copy-name");
+  assert.equal(sidebarSelectionCopyAction({ key: "c", metaKey: true }, "MacIntel"), "copy-name");
+  assert.equal(sidebarSelectionCopyAction({ key: "C", ctrlKey: true }, "Win32"), "copy-name");
 });
 
 test("copying table child group rows uses the parent table name", () => {

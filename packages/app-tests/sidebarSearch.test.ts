@@ -1,6 +1,8 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
 import { matchSidebarLabel } from "../../apps/desktop/src/lib/sidebar/sidebarSearch.ts";
+import { filterSidebarTree } from "../../apps/desktop/src/lib/sidebar/sidebarSearchTree.ts";
+import type { TreeNode } from "../../apps/desktop/src/types/database.ts";
 
 test("matches exact and prefix labels first", () => {
   assert.equal(matchSidebarLabel("orders", "orders")?.kind, "exact");
@@ -15,6 +17,10 @@ test("matches word prefixes in underscored and dotted identifiers", () => {
 test("matches DataGrip-style abbreviations by identifier word boundaries", () => {
   assert.equal(matchSidebarLabel("additional_country", "ac")?.kind, "abbreviation");
   assert.equal(matchSidebarLabel("sales.customer_profile", "scp")?.kind, "abbreviation");
+  // Existing behavior: s/system + e/exception + l/log.
+  const sel = matchSidebarLabel("system_exception_log", "sel");
+  assert.equal(sel?.kind, "abbreviation");
+  assert.equal(sel?.score, 60);
 });
 
 test("keeps one-character fuzzy matches disabled", () => {
@@ -384,4 +390,117 @@ test("matches slash-delimited regular expression queries case-insensitively by d
 
 test("keeps invalid regular expression queries from matching every label", () => {
   assert.equal(matchSidebarLabel("orders", "/["), null);
+});
+
+// Cross-word prefix concatenation (issue #5407)
+
+test("matches cross-word prefix concatenation (issue #5407)", () => {
+  const r1 = matchSidebarLabel("system_exception_log", "exclog");
+  assert.equal(r1?.kind, "abbreviation");
+  assert.equal(r1?.score, 50);
+  const r2 = matchSidebarLabel("system_exception_log", "syslog");
+  assert.equal(r2?.kind, "abbreviation");
+  assert.equal(r2?.score, 50);
+  const r3 = matchSidebarLabel("system_exception_log", "exlog");
+  assert.equal(r3?.kind, "abbreviation");
+  assert.equal(r3?.score, 50);
+  const r4 = matchSidebarLabel("customer_order_detail", "custdet");
+  assert.equal(r4?.kind, "abbreviation");
+  assert.equal(r4?.score, 50);
+  const r5 = matchSidebarLabel("order_payment_record", "payrec");
+  assert.equal(r5?.kind, "abbreviation");
+  assert.equal(r5?.score, 50);
+});
+
+test("rejects loose cross-word queries (issue #5407 negatives)", () => {
+  assert.equal(matchSidebarLabel("system_exception_log", "slog"), null);
+  assert.equal(matchSidebarLabel("system_exception_log", "selog"), null);
+  assert.equal(matchSidebarLabel("sys_role_data_scope", "roles"), null);
+  assert.equal(matchSidebarLabel("user_profile", "urf"), null);
+  assert.equal(matchSidebarLabel("t_json", "tson"), null);
+});
+
+test("tokenizes camelCase identifiers for word-boundary matching", () => {
+  const r1 = matchSidebarLabel("camelCaseTable", "caseTab");
+  assert.equal(r1?.kind, "word-prefix");
+  assert.equal(r1?.score, 80);
+  const r2 = matchSidebarLabel("camelCaseTable", "camTab");
+  assert.equal(r2?.kind, "abbreviation");
+  assert.equal(r2?.score, 50);
+  const r3 = matchSidebarLabel("camelCaseTable", "cct");
+  assert.equal(r3?.kind, "abbreviation");
+  assert.equal(r3?.score, 60);
+  assert.equal(matchSidebarLabel("camelCaseTable", "aseTb"), null);
+});
+
+test("camelCase tokenization survives the real tree-search path (issue #5407)", () => {
+  // filterSidebarTree must preserve the original label. Lowercasing
+  // camelCaseTable first still finds camTab as fuzzy/40, so score ordering
+  // against an existing fuzzy/40 candidate makes the boundary observable.
+  const tree: TreeNode[] = [
+    {
+      id: "conn-1",
+      label: "My Connection",
+      type: "connection",
+      connectionId: "conn-1",
+      isExpanded: true,
+      children: [
+        {
+          id: "db-1",
+          label: "app_db",
+          type: "database",
+          connectionId: "conn-1",
+          database: "app_db",
+          isExpanded: true,
+          children: [
+            {
+              id: "tbl-fuzzy",
+              label: "camxxtab",
+              type: "table",
+              connectionId: "conn-1",
+              database: "app_db",
+              schema: "public",
+            },
+            {
+              id: "tbl-camel",
+              label: "camelCaseTable",
+              type: "table",
+              connectionId: "conn-1",
+              database: "app_db",
+              schema: "public",
+            },
+          ],
+        },
+      ],
+    },
+  ];
+
+  const findTable = (nodes: TreeNode[]): TreeNode | undefined => {
+    for (const node of nodes) {
+      if (node.type === "table") return node;
+      const found = node.children ? findTable(node.children) : undefined;
+      if (found) return found;
+    }
+    return undefined;
+  };
+
+  // camel + Table skips Case, so it scores 50 and outranks camxxtab's fuzzy/40.
+  // If callers lowercase first, both score 40 and the stable sort keeps camxxtab first.
+  const camTabResults = filterSidebarTree(tree, "camTab", new Set());
+  assert.deepEqual(camTabResults[0]?.children?.[0]?.children?.map((node) => node.label), ["camelCaseTable", "camxxtab"]);
+  assert.equal(findTable(filterSidebarTree(tree, "caseTab", new Set()))?.label, "camelCaseTable");
+  assert.equal(findTable(filterSidebarTree(tree, "aseTb", new Set())), undefined);
+
+  const mixedCaseTree: TreeNode[] = [
+    {
+      id: "tbl-2",
+      label: "UserOrderDetail",
+      type: "table",
+      connectionId: "conn-1",
+      database: "app_db",
+      schema: "public",
+    },
+  ];
+  assert.equal(findTable(filterSidebarTree(mixedCaseTree, "userorderdetail", new Set()))?.label, "UserOrderDetail");
+  assert.equal(findTable(filterSidebarTree(mixedCaseTree, "uod", new Set()))?.label, "UserOrderDetail");
 });

@@ -441,6 +441,66 @@ pub async fn redis_hash_del_in_db_core(
     }
 }
 
+pub async fn redis_hash_field_set_ttl_in_db_core(
+    state: &AppState,
+    connection_id: &str,
+    db: u32,
+    key_raw: &str,
+    field: &str,
+    ttl: i64,
+) -> Result<(), String> {
+    ensure_redis_pool(state, connection_id).await?;
+    let connections = state.connections.read().await;
+    match connections.get(connection_id).ok_or("Not found")? {
+        PoolKind::Redis(redis) => {
+            let key = redis_driver::redis_key_raw_to_bytes(key_raw)?;
+            match redis {
+                RedisConnection::Direct(con) => {
+                    let mut con = con.lock().await;
+                    redis_driver::select_db(&mut *con, db).await?;
+                    redis_driver::set_hash_field_ttl(&mut *con, &key, field, ttl).await
+                }
+                RedisConnection::Cluster(cluster) => {
+                    redis_driver::ensure_cluster_db(db)?;
+                    let mut con = redis_driver::cluster_key_connection(cluster, &key).await?;
+                    redis_driver::set_hash_field_ttl(&mut con, &key, field, ttl).await
+                }
+            }
+        }
+        _ => Err("Not a Redis connection".to_string()),
+    }
+}
+
+pub async fn redis_hash_field_set_expire_at_in_db_core(
+    state: &AppState,
+    connection_id: &str,
+    db: u32,
+    key_raw: &str,
+    field: &str,
+    expire_at: i64,
+) -> Result<(), String> {
+    ensure_redis_pool(state, connection_id).await?;
+    let connections = state.connections.read().await;
+    match connections.get(connection_id).ok_or("Not found")? {
+        PoolKind::Redis(redis) => {
+            let key = redis_driver::redis_key_raw_to_bytes(key_raw)?;
+            match redis {
+                RedisConnection::Direct(con) => {
+                    let mut con = con.lock().await;
+                    redis_driver::select_db(&mut *con, db).await?;
+                    redis_driver::set_hash_field_expire_at(&mut *con, &key, field, expire_at).await
+                }
+                RedisConnection::Cluster(cluster) => {
+                    redis_driver::ensure_cluster_db(db)?;
+                    let mut con = redis_driver::cluster_key_connection(cluster, &key).await?;
+                    redis_driver::set_hash_field_expire_at(&mut con, &key, field, expire_at).await
+                }
+            }
+        }
+        _ => Err("Not a Redis connection".to_string()),
+    }
+}
+
 pub async fn redis_list_push_core(
     state: &AppState,
     connection_id: &str,
@@ -680,6 +740,38 @@ pub async fn redis_zrem_in_db_core(
                     redis_driver::ensure_cluster_db(db)?;
                     let mut con = redis_driver::cluster_key_connection(cluster, &key).await?;
                     redis_driver::zrem(&mut con, &key, member).await
+                }
+            }
+        }
+        _ => Err("Not a Redis connection".to_string()),
+    }
+}
+
+pub async fn redis_zset_update_in_db_core(
+    state: &AppState,
+    connection_id: &str,
+    db: u32,
+    key_raw: &str,
+    original_member: &str,
+    expected_score: &str,
+    member: &str,
+    score: &str,
+) -> Result<bool, String> {
+    ensure_redis_pool(state, connection_id).await?;
+    let connections = state.connections.read().await;
+    match connections.get(connection_id).ok_or("Not found")? {
+        PoolKind::Redis(redis) => {
+            let key = redis_driver::redis_key_raw_to_bytes(key_raw)?;
+            match redis {
+                RedisConnection::Direct(con) => {
+                    let mut con = con.lock().await;
+                    redis_driver::select_db(&mut *con, db).await?;
+                    redis_driver::zset_update(&mut *con, &key, original_member, expected_score, member, score).await
+                }
+                RedisConnection::Cluster(cluster) => {
+                    redis_driver::ensure_cluster_db(db)?;
+                    let mut con = redis_driver::cluster_key_connection(cluster, &key).await?;
+                    redis_driver::zset_update(&mut con, &key, original_member, expected_score, member, score).await
                 }
             }
         }
@@ -941,6 +1033,7 @@ pub async fn redis_load_more_in_db_core(
     cursor: u64,
     count: usize,
     filter: Option<&str>,
+    sort_direction: Option<&str>,
 ) -> Result<RedisCollectionPage, String> {
     ensure_redis_pool(state, connection_id).await?;
     let connections = state.connections.read().await;
@@ -951,12 +1044,14 @@ pub async fn redis_load_more_in_db_core(
                 RedisConnection::Direct(con) => {
                     let mut con = con.lock().await;
                     redis_driver::select_db(&mut *con, db).await?;
-                    redis_driver::load_more_collection(&mut *con, &key, key_type, cursor, count, filter).await
+                    redis_driver::load_more_collection(&mut *con, &key, key_type, cursor, count, filter, sort_direction)
+                        .await
                 }
                 RedisConnection::Cluster(cluster) => {
                     redis_driver::ensure_cluster_db(db)?;
                     let mut con = redis_driver::cluster_key_connection(cluster, &key).await?;
-                    redis_driver::load_more_collection(&mut con, &key, key_type, cursor, count, filter).await
+                    redis_driver::load_more_collection(&mut con, &key, key_type, cursor, count, filter, sort_direction)
+                        .await
                 }
             }
         }

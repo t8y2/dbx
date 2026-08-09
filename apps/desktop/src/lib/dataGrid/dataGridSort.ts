@@ -1,3 +1,5 @@
+import { isNumericColumnType } from "@/lib/dataGrid/dataGridColumnType";
+
 export type DataGridSortDirection = "asc" | "desc";
 export type DataGridSortMode = "database" | "local";
 
@@ -60,30 +62,35 @@ type DataGridRow = DataGridCellValue[];
 
 const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
 
-export function sortDataGridRows<T extends DataGridRow>(rows: readonly T[], columnIndex: number, direction: DataGridSortDirection): T[] {
-  return sortDataGridRowIndexes(rows, columnIndex, direction).map((index) => rows[index]!);
+export function sortDataGridRows<T extends DataGridRow>(rows: readonly T[], columnIndex: number, direction: DataGridSortDirection, columnType?: string): T[] {
+  return sortDataGridRowIndexes(rows, columnIndex, direction, columnType).map((index) => rows[index]!);
 }
 
-export function sortDataGridRowIndexes(rows: readonly DataGridRow[], columnIndex: number, direction: DataGridSortDirection): number[] {
+export function sortDataGridRowIndexes(rows: readonly DataGridRow[], columnIndex: number, direction: DataGridSortDirection, columnType?: string): number[] {
   const directionMultiplier = direction === "asc" ? 1 : -1;
   return rows
     .map((row, index) => ({ row, index }))
     .sort((left, right) => {
       const emptyCompared = compareEmptyValues(left.row[columnIndex], right.row[columnIndex]);
       if (emptyCompared !== null) return emptyCompared;
-      const compared = compareDataGridValues(left.row[columnIndex], right.row[columnIndex]);
+      const compared = compareDataGridValues(left.row[columnIndex], right.row[columnIndex], columnType);
       if (compared !== 0) return compared * directionMultiplier;
       return left.index - right.index;
     })
     .map((item) => item.index);
 }
 
-export function compareDataGridValues(left: DataGridCellValue, right: DataGridCellValue): number {
+export function compareDataGridValues(left: DataGridCellValue, right: DataGridCellValue, columnType?: string): number {
   const leftEmpty = left == null;
   const rightEmpty = right == null;
   if (leftEmpty || rightEmpty) {
     if (leftEmpty && rightEmpty) return 0;
     return leftEmpty ? 1 : -1;
+  }
+
+  if (isNumericColumnType(columnType)) {
+    const numericCompared = compareNumericCellValues(left, right);
+    if (numericCompared !== null) return numericCompared;
   }
 
   if (typeof left === "number" && typeof right === "number") {
@@ -100,6 +107,53 @@ export function compareDataGridValues(left: DataGridCellValue, right: DataGridCe
   }
 
   return collator.compare(String(left), String(right));
+}
+
+interface NumericSortValue {
+  sign: -1 | 0 | 1;
+  magnitude: bigint;
+  digits: string;
+}
+
+function compareNumericCellValues(left: DataGridCellValue, right: DataGridCellValue): number | null {
+  const leftNumber = parseNumericSortValue(left);
+  const rightNumber = parseNumericSortValue(right);
+  if (!leftNumber || !rightNumber) return null;
+  if (leftNumber.sign !== rightNumber.sign) return leftNumber.sign - rightNumber.sign;
+  if (leftNumber.sign === 0) return 0;
+
+  let compared = compareBigInts(leftNumber.magnitude, rightNumber.magnitude);
+  if (compared === 0) {
+    const width = Math.max(leftNumber.digits.length, rightNumber.digits.length);
+    compared = leftNumber.digits.padEnd(width, "0").localeCompare(rightNumber.digits.padEnd(width, "0"));
+  }
+  return leftNumber.sign === 1 ? compared : -compared;
+}
+
+function parseNumericSortValue(value: DataGridCellValue): NumericSortValue | null {
+  if (typeof value !== "string" && typeof value !== "number") return null;
+  const text = String(value).trim();
+  const negative = text.startsWith("-");
+  const unsigned = /^[+-]/.test(text) ? text.slice(1) : text;
+  const match = unsigned.match(/^(\d*)(?:\.(\d*))?(?:[eE]([+-]?\d+))?$/);
+  if (!match) return null;
+
+  const integerDigits = match[1] ?? "";
+  const fractionDigits = match[2] ?? "";
+  const allDigits = `${integerDigits}${fractionDigits}`;
+  if (!allDigits) return null;
+  const leadingZeroCount = allDigits.match(/^0*/)?.[0].length ?? 0;
+  const digits = allDigits.slice(leadingZeroCount);
+  if (!digits) return { sign: 0, magnitude: 0n, digits: "0" };
+
+  const exponent = BigInt(match[3] ?? "0");
+  const magnitude = BigInt(integerDigits.length - leadingZeroCount) + exponent;
+  return { sign: negative ? -1 : 1, magnitude, digits };
+}
+
+function compareBigInts(left: bigint, right: bigint): number {
+  if (left === right) return 0;
+  return left < right ? -1 : 1;
 }
 
 function compareEmptyValues(left: DataGridCellValue, right: DataGridCellValue): number | null {

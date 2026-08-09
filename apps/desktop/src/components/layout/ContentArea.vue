@@ -3,10 +3,11 @@ import { computed, ref, defineAsyncComponent, watch, nextTick, onMounted, onUnmo
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
 import { appendDebugLog, isDebugLoggingEnabled } from "@/lib/backend/debugLog";
 import { canReloadUnavailableDataTab } from "@/lib/table/tableDataRefresh";
+import { defaultViewForResult } from "@/lib/query/queryResultDefaultView";
 import { isQueryExecutionErrorResult } from "@/lib/query/queryResultError";
 import type { CSSProperties } from "vue";
 import { useI18n } from "vue-i18n";
-import { Check, Columns3Cog, EyeOff, Loader2, Search, TableProperties, ChevronDown, ChevronUp, Inbox, RefreshCcw, Wrench, Toolbox, Database, Download, Upload, X, Pin, Rows3, SquareDashed, Minus, Plus, ShieldAlert, AlignLeft, AlignRight, PanelsTopLeft } from "@lucide/vue";
+import { Check, CheckSquare2, Columns3Cog, Copy, EyeOff, Loader2, Search, TableProperties, ChevronDown, ChevronUp, Inbox, RefreshCcw, Wrench, Toolbox, Database, Download, Upload, X, Pin, Rows3, SquareDashed, Minus, Plus, ShieldAlert, AlignLeft, AlignRight, PanelsTopLeft } from "@lucide/vue";
 import { Splitpanes, Pane } from "splitpanes";
 import "splitpanes/dist/splitpanes.css";
 import { Button } from "@/components/ui/button";
@@ -18,6 +19,7 @@ import QueryEditor from "@/components/editor/QueryEditor.vue";
 import ColumnInfoPanel from "@/components/editor/ColumnInfoPanel.vue";
 import QueryLoadingState from "@/components/common/QueryLoadingState.vue";
 import QueryErrorActions from "@/components/common/QueryErrorActions.vue";
+import QueryMessagesView from "@/components/layout/QueryMessagesView.vue";
 import QueryResultToolbarActions from "@/components/layout/QueryResultToolbarActions.vue";
 import QueryResultViewSwitcher from "@/components/layout/QueryResultViewSwitcher.vue";
 import DataGridCopyFormatControl from "@/components/grid/DataGridCopyFormatControl.vue";
@@ -94,6 +96,7 @@ import type { DataGridSortMode } from "@/lib/dataGrid/dataGridSort";
 import { isDataGridToolbarCompact, type DataGridReloadIntent } from "@/lib/dataGrid/dataGridToolbar";
 import { useTabScroll } from "@/composables/useTabScroll";
 import { formatElapsedSeconds } from "@/lib/common/elapsedTime";
+import { copyToClipboard } from "@/lib/common/clipboard";
 import type { CustomSaveHandler } from "@/composables/useDataGridEditor";
 import type { QueryTab, ConnectionConfig, TableInfoTab, TreeNode, VectorCollectionMeta, ObjectBrowserViewport } from "@/types/database";
 import type { SqlObjectNavigationTarget } from "@/lib/sql/sqlNavigation";
@@ -108,10 +111,10 @@ type DataGridHandle = DataGridColumnLayoutHandle & {
   allNullColumnCount: number;
   canToggleAllNullColumns: boolean;
   toggleAllNullColumns: () => void;
-  defaultCopyExtractor: string;
-  defaultCopyExtractorLabel: string;
-  copyExtractorMenuItems: Array<{ value: string; label: string; disabled?: boolean; separatorBefore?: boolean }>;
-  setDefaultCopyExtractor: (value: string) => void;
+  defaultCopyPreference: string;
+  defaultCopyPreferenceLabel: string;
+  copyPreferenceMenuItems: Array<{ value: string; label: string; disabled?: boolean; separatorBefore?: boolean }>;
+  setDefaultCopyPreference: (value: string) => void;
   openExtractorConfiguration: () => void;
   showDdl: boolean;
   toggleDdl: (tab?: TableInfoTab) => void;
@@ -130,11 +133,15 @@ type SearchableBrowserHandle = {
   executeCommand?: (command: string) => Promise<boolean>;
 };
 
+type ElasticsearchJsonResponsePanelHandle = {
+  focusSearch: () => boolean;
+};
+
 const props = defineProps<{
   activeTab: QueryTab;
   activeConnection?: ConnectionConfig;
   executableSql: string;
-  activeOutputView: "result" | "summary" | "explain" | "chart";
+  activeOutputView: "result" | "summary" | "explain" | "chart" | "messages";
   formatSqlRequest: { id: number; tabId: string } | null;
   compressSqlRequest: { id: number; tabId: string } | null;
   selectedSql: string;
@@ -143,7 +150,7 @@ const props = defineProps<{
 }>();
 
 const emit = defineEmits<{
-  "update:activeOutputView": [value: "result" | "summary" | "explain" | "chart"];
+  "update:activeOutputView": [value: "result" | "summary" | "explain" | "chart" | "messages"];
   fixWithAi: [errorMessage: string];
   sendSelectionToAi: [sql: string];
   execute: [sqlOverride?: SqlExecutionOverride];
@@ -179,6 +186,8 @@ const { t, locale } = useI18n();
 const queryStore = useQueryStore();
 const connectionStore = useConnectionStore();
 const settingsStore = useSettingsStore();
+const booleanDisplayMode = computed(() => settingsStore.editorSettings.dataGridBooleanDisplayMode);
+const setBooleanDisplayMode = (mode: "checkbox" | "dropdown") => settingsStore.updateEditorSettings({ dataGridBooleanDisplayMode: mode });
 const { toast } = useToast();
 const DEFAULT_QUERY_RESULTS_PANE_SIZE = 68;
 
@@ -210,6 +219,7 @@ const columnInfoLoading = ref(false);
 const columnInfoError = ref<string | undefined>(undefined);
 const dataGridRef = ref<DataGridHandle>();
 const queryEditorRef = ref<InstanceType<typeof QueryEditor>>();
+const elasticsearchJsonResponsePanelRef = ref<ElasticsearchJsonResponsePanelHandle>();
 const tableStructureEditorRef = ref<{ applyChanges: () => Promise<boolean> }>();
 const standaloneResultToolbarRef = ref<HTMLElement | null>(null);
 const standaloneResultToolbarWidth = ref(0);
@@ -235,7 +245,12 @@ const zookeeperKeyBrowserRef = ref<SearchableBrowserHandle>();
 const objectBrowserRef = ref<SearchableBrowserHandle>();
 const activeTableMeta = computed(() => props.activeTab.tableMeta);
 const activeDataTabTableMeta = computed(() => tableMetaForDataTab(props.activeTab));
-const activeEffectiveDatabaseType = computed(() => effectiveDatabaseTypeForConnection(props.activeConnection));
+const activeResultExecutionTarget = computed(() => queryStore.activeResultExecutionTarget(props.activeTab.id));
+const activeResultConnection = computed(() => (activeResultExecutionTarget.value ? connectionStore.getConfig(activeResultExecutionTarget.value.connectionId) : props.activeConnection));
+const activeResultConnectionId = computed(() => activeResultExecutionTarget.value?.connectionId ?? props.activeTab.connectionId);
+const activeResultDatabase = computed(() => activeResultExecutionTarget.value?.database ?? props.activeTab.database);
+const activeResultSchema = computed(() => activeResultExecutionTarget.value?.schema ?? props.activeTab.schema);
+const activeEffectiveDatabaseType = computed(() => effectiveDatabaseTypeForConnection(activeResultConnection.value));
 const activeDataTabExecutionDatabase = computed(() => dataTabExecutionDatabase(props.activeConnection, props.activeTab.database, activeDataTabTableMeta.value?.catalog));
 const activeProductionContext = computed(() => productionContextForDatabase(props.activeConnection, props.activeTab.database));
 const productionWatermarkText = computed(() => (locale.value.startsWith("zh") ? "生产环境" : "PROD"));
@@ -422,6 +437,8 @@ const hasTabularResult = computed(() => {
 });
 const canShowResultOutput = computed(() => hasTabularResult.value || props.activeTab.isExecuting);
 const canShowExplainOutput = computed(() => !!props.activeTab.explainPlan || !!props.activeTab.explainError || !!props.activeTab.explainTableResult || !!props.activeTab.explainTableError || props.activeTab.isExplaining === true);
+const resultMessageCount = computed(() => props.activeTab.result?.messages?.length ?? 0);
+const canShowMessagesOutput = computed(() => resultMessageCount.value > 0);
 const showStandaloneResultToolbar = computed(() => activeElasticsearchJsonResponse.value || props.activeOutputView !== "result" || !props.activeTab.result || !hasTabularResult.value);
 const standaloneResultToolbarCompact = computed(() => isDataGridToolbarCompact(standaloneResultToolbarWidth.value, standaloneResultToolbarViewportWidth.value));
 let standaloneResultToolbarResizeObserver: ResizeObserver | undefined;
@@ -461,7 +478,7 @@ function mongoQueryResultDocumentId(rowIdx: number, fallback: unknown): unknown 
 const mongoQueryResultSaveHandler = computed<CustomSaveHandler | undefined>(() => {
   const tab = props.activeTab;
   const target = tab.mongoEditTarget;
-  if (tab.mode !== "query" || activeEffectiveDatabaseType.value !== "mongodb" || !target || !tab.connectionId || !tab.database || !tab.result) return undefined;
+  if (tab.mode !== "query" || activeEffectiveDatabaseType.value !== "mongodb" || !target || !activeResultConnectionId.value || !activeResultDatabase.value || !tab.result) return undefined;
   if (!tab.result.columns.includes(target.idColumn)) return undefined;
 
   const save: CustomSaveHandler["save"] = async (changes: MongoQueryGridChanges) => {
@@ -476,7 +493,7 @@ const mongoQueryResultSaveHandler = computed<CustomSaveHandler | undefined>(() =
       if (id === null || id === undefined || String(id).trim() === "") continue;
       const updateDoc = buildMongoUpdateDocument(dirtyCols, changes.columns, tab.result?.mongo_documents?.[rowIdx]);
       if (Object.keys(updateDoc).length === 0) continue;
-      await api.mongoUpdateDocument(tab.connectionId, tab.database, target.collection, serializeMongoDocumentId(mongoQueryResultDocumentId(rowIdx, id)), JSON.stringify(updateDoc));
+      await api.mongoUpdateDocument(activeResultConnectionId.value, activeResultDatabase.value, target.collection, serializeMongoDocumentId(mongoQueryResultDocumentId(rowIdx, id)), JSON.stringify(updateDoc));
     }
   };
 
@@ -594,7 +611,8 @@ watch(
   () => {
     if (props.activeTab.isExecuting) return;
     if (hasExecutionSummary.value && !hasTabularResult.value && props.activeOutputView === "result") {
-      emit("update:activeOutputView", "summary");
+      const result = props.activeTab.result;
+      emit("update:activeOutputView", result ? defaultViewForResult(result) : "summary");
     }
   },
   { immediate: true },
@@ -755,6 +773,7 @@ function onHandleCloseColumnPanel() {
 }
 
 function focusSearch(): boolean {
+  if (elasticsearchJsonResponsePanelRef.value?.focusSearch()) return true;
   if (props.activeTab.mode === "mongo") return documentBrowserRef.value?.focusSearch() ?? false;
   if (props.activeTab.mode === "redis") return redisKeyBrowserRef.value?.focusSearch() ?? false;
   if (props.activeTab.mode === "etcd") return etcdKeyBrowserRef.value?.focusSearch() ?? false;
@@ -887,6 +906,15 @@ function focusExecutionSummaryItem(item: ExecutionSummaryItem) {
   queryEditorRef.value?.focusStatementRange(executionSummaryItemRange(item) ?? null);
 }
 
+async function copyExecutionSummaryError(error: string) {
+  try {
+    await copyToClipboard(error);
+    toast(t("grid.copied"));
+  } catch (copyError: any) {
+    toast(t("grid.copyFailed", { message: copyError?.message || String(copyError) }), 5000);
+  }
+}
+
 function handleModRTarget(target: Element): boolean {
   if (target.closest("[data-query-editor-root]")) return queryEditorRef.value?.openReplace() ?? false;
   if (target.closest("[data-cell-detail-editor-root]")) return dataGridRef.value?.openCellDetailSearch() ?? false;
@@ -972,6 +1000,10 @@ defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, hand
               :compress-request-id="compressSqlRequest?.tabId === activeTab.id ? compressSqlRequest.id : undefined"
               :execution-error="activeQueryError"
               :execution-error-sql="activeTab.lastExecutedSql"
+              :result-columns="activeTab.result?.columns"
+              :result-source-statement="activeTab.result?.sourceStatement"
+              :result-source-from="activeTab.result?.sourceFrom"
+              :result-source-to="activeTab.result?.sourceTo"
               :statement-execution-markers="activeStatementExecutionMarkers"
               :initial-viewport="activeTab.editorViewport"
               :initial-selection="activeTab.editorSelection"
@@ -1043,7 +1075,7 @@ defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, hand
                           @click="selectResultRun(run.id)"
                           @keydown="onResultRunTabKeydown($event, runIndex)"
                         >
-                          {{ t("tabs.runN", { n: run.sequence }) }}
+                          {{ run.title || t("tabs.runN", { n: run.sequence }) }}
                         </button>
                         <button
                           type="button"
@@ -1062,7 +1094,7 @@ defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, hand
                   <DropdownMenu>
                     <DropdownMenuTrigger as-child>
                       <Button variant="ghost" size="sm" class="h-6 max-w-48 gap-1 px-2 text-xs">
-                        <span class="min-w-0 truncate">{{ activeResultRunItem ? t("tabs.runN", { n: activeResultRunItem.sequence }) : t("tabs.resultRuns") }}</span>
+                        <span class="min-w-0 truncate">{{ activeResultRunItem ? activeResultRunItem.title || t("tabs.runN", { n: activeResultRunItem.sequence }) : t("tabs.resultRuns") }}</span>
                         <ChevronDown class="h-3.5 w-3.5 shrink-0" />
                       </Button>
                     </DropdownMenuTrigger>
@@ -1070,7 +1102,7 @@ defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, hand
                       <DropdownMenuItem v-for="run in resultRuns" :key="run.id" class="flex items-center gap-2 pr-1" @select="selectResultRun(run.id)">
                         <Check v-if="run.active" class="h-3.5 w-3.5 shrink-0" />
                         <span v-else class="h-3.5 w-3.5 shrink-0" />
-                        <span class="min-w-0 flex-1 truncate">{{ t("tabs.runN", { n: run.sequence }) }}</span>
+                        <span class="min-w-0 flex-1 truncate">{{ run.title || t("tabs.runN", { n: run.sequence }) }}</span>
                         <button
                           type="button"
                           class="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-sm text-muted-foreground hover:bg-accent hover:text-foreground"
@@ -1277,6 +1309,30 @@ defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, hand
                         </button>
                       </div>
                     </div>
+                    <div class="flex items-center justify-between gap-3 px-3 py-1.5 text-xs">
+                      <div class="min-w-0 flex items-center gap-2 font-medium">
+                        <CheckSquare2 class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                        <span>{{ t("grid.booleanDisplayMode") }}</span>
+                      </div>
+                      <div class="grid w-32 grid-cols-2 rounded-md border bg-muted/40 p-0.5">
+                        <button
+                          type="button"
+                          class="h-5 min-w-0 truncate whitespace-nowrap rounded-[5px] px-2 text-xs transition-colors"
+                          :class="booleanDisplayMode === 'dropdown' ? 'bg-background font-semibold text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'"
+                          @click="setBooleanDisplayMode('dropdown')"
+                        >
+                          {{ t("grid.booleanDisplayDropdown") }}
+                        </button>
+                        <button
+                          type="button"
+                          class="h-5 min-w-0 truncate whitespace-nowrap rounded-[5px] px-2 text-xs transition-colors"
+                          :class="booleanDisplayMode === 'checkbox' ? 'bg-background font-semibold text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'"
+                          @click="setBooleanDisplayMode('checkbox')"
+                        >
+                          {{ t("grid.booleanDisplayCheckbox") }}
+                        </button>
+                      </div>
+                    </div>
                     <div class="flex items-center justify-between gap-3 px-3 py-1.5 text-xs" :class="{ 'opacity-60': !dataGridRef?.canToggleAllNullColumns }">
                       <span class="min-w-0 flex items-center gap-2 font-medium">
                         <EyeOff class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
@@ -1286,10 +1342,10 @@ defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, hand
                       <Switch size="sm" :model-value="!!dataGridRef?.nullColumnsHidden" :disabled="!dataGridRef?.canToggleAllNullColumns" :aria-label="t('grid.hideNullColumns')" @update:model-value="dataGridRef?.toggleAllNullColumns()" />
                     </div>
                     <DataGridCopyFormatControl
-                      :current-label="dataGridRef?.defaultCopyExtractorLabel ?? '-'"
-                      :current-value="dataGridRef?.defaultCopyExtractor ?? ''"
-                      :items="dataGridRef?.copyExtractorMenuItems ?? []"
-                      @select="dataGridRef?.setDefaultCopyExtractor($event)"
+                      :current-label="dataGridRef?.defaultCopyPreferenceLabel ?? '-'"
+                      :current-value="dataGridRef?.defaultCopyPreference ?? ''"
+                      :items="dataGridRef?.copyPreferenceMenuItems ?? []"
+                      @select="dataGridRef?.setDefaultCopyPreference($event)"
                       @configure="openDataGridExtractorConfiguration"
                     />
                   </PopoverContent>
@@ -1309,6 +1365,8 @@ defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, hand
                 :can-show-result="canShowResultOutput"
                 :can-show-summary="hasExecutionSummary"
                 :can-show-chart="hasNumericData && !activeElasticsearchJsonResponse"
+                :can-show-messages="canShowMessagesOutput"
+                :message-count="resultMessageCount"
                 :compact="standaloneResultToolbarCompact"
                 @select-view="emit('update:activeOutputView', $event)"
               />
@@ -1360,25 +1418,32 @@ defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, hand
                     <div>{{ t("executionSummary.statement") }}</div>
                     <div>{{ t("executionSummary.sql") }}</div>
                     <div>{{ t("executionSummary.status") }}</div>
-                    <div class="text-right">{{ t("executionSummary.affected") }}</div>
+                    <div class="text-right">{{ t("executionSummary.rows") }}</div>
                     <div class="text-right">{{ t("executionSummary.time") }}</div>
                   </div>
-                  <button
-                    v-for="item in summaryItems"
-                    :key="item.statementIndex"
-                    type="button"
-                    class="grid w-full grid-cols-[4rem_minmax(14rem,1fr)_7rem_7rem_6rem] items-center border-b px-3 py-2 text-left text-xs transition-colors last:border-b-0 hover:bg-muted/35 focus-visible:bg-muted/40 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-primary"
-                    :title="item.error || item.sql"
-                    @click="previewExecutionSummaryItem(item)"
-                    @dblclick="focusExecutionSummaryItem(item)"
-                    @keydown.enter.prevent="focusExecutionSummaryItem(item)"
-                  >
-                    <div class="font-mono text-muted-foreground">#{{ item.statementIndex + 1 }}</div>
-                    <div class="min-w-0">
+                  <div v-for="item in summaryItems" :key="item.statementIndex" class="relative grid w-full grid-cols-[4rem_minmax(14rem,1fr)_7rem_7rem_6rem] items-center border-b px-3 py-2 text-left text-xs last:border-b-0">
+                    <button
+                      type="button"
+                      class="absolute inset-0 z-0 cursor-pointer text-left transition-colors hover:bg-muted/35 focus-visible:bg-muted/40 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-primary"
+                      :title="item.error || item.sql"
+                      :aria-label="item.error || item.sql || t('executionSummary.noSql')"
+                      @click="previewExecutionSummaryItem(item)"
+                      @dblclick="focusExecutionSummaryItem(item)"
+                      @keydown.enter.prevent="focusExecutionSummaryItem(item)"
+                    />
+                    <div class="pointer-events-none relative z-[1] font-mono text-muted-foreground">#{{ item.statementIndex + 1 }}</div>
+                    <div class="relative z-[1] min-w-0 cursor-pointer" @click="previewExecutionSummaryItem(item)" @dblclick="focusExecutionSummaryItem(item)">
                       <div class="truncate font-mono text-[11px] text-foreground">{{ item.sql || t("executionSummary.noSql") }}</div>
-                      <div v-if="item.error" class="mt-0.5 truncate text-[11px] text-destructive">{{ item.error }}</div>
+                      <div v-if="item.error" class="mt-0.5 flex min-w-0 items-center gap-1 text-[11px] text-destructive">
+                        <span data-native-clipboard class="min-w-0 flex-1 cursor-text select-text truncate" :title="item.error" @mousedown.stop @click.stop @dblclick.stop>{{ item.error }}</span>
+                        <LightTooltip :text="t('grid.copy')" side="bottom" :delay="0" :close-delay="0" nowrap>
+                          <button type="button" class="pointer-events-auto flex h-5 w-5 shrink-0 items-center justify-center rounded text-destructive/70 hover:bg-destructive/10 hover:text-destructive" :aria-label="t('grid.copy')" @mousedown.stop @click.stop="copyExecutionSummaryError(item.error)">
+                            <Copy class="h-3 w-3" />
+                          </button>
+                        </LightTooltip>
+                      </div>
                     </div>
-                    <div>
+                    <div class="pointer-events-none relative z-[1]">
                       <span
                         class="inline-flex h-5 items-center gap-1 rounded-full border px-2 text-[10px]"
                         :class="{
@@ -1396,17 +1461,19 @@ defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, hand
                         {{ t(`executionSummary.statuses.${item.status}`) }}
                       </span>
                     </div>
-                    <div class="text-right tabular-nums">{{ item.status === "pending" || item.status === "running" || item.status === "skipped" ? "—" : item.affectedRows.toLocaleString() }}</div>
-                    <div class="text-right tabular-nums">{{ item.executionTimeMs > 0 || item.status === "success" || item.status === "error" ? `${item.executionTimeMs}ms` : "—" }}</div>
-                  </button>
+                    <div class="pointer-events-none relative z-[1] text-right tabular-nums">{{ item.status === "pending" || item.status === "running" || item.status === "skipped" ? "—" : item.rowCount.toLocaleString() }}</div>
+                    <div class="pointer-events-none relative z-[1] text-right tabular-nums">{{ item.executionTimeMs > 0 || item.status === "success" || item.status === "error" ? `${item.executionTimeMs}ms` : "—" }}</div>
+                  </div>
                 </div>
                 <div class="px-3 py-2 text-[11px] text-muted-foreground">{{ t("executionSummary.navigationHint") }}</div>
               </div>
             </div>
 
+            <QueryMessagesView v-else-if="activeOutputView === 'messages'" class="flex-1 min-h-0" :messages="activeTab.result?.messages ?? []" />
+
             <template v-else>
-              <ElasticsearchJsonResponsePanel v-if="activeElasticsearchJsonResponse" class="flex-1 min-h-0" :status="activeElasticsearchJsonResponse.status" :body="activeElasticsearchJsonResponse.body" />
-              <ElasticsearchJsonResponsePanel v-else-if="showElasticsearchRawJson && activeElasticsearchRawBody" class="flex-1 min-h-0" :status="200" :body="activeElasticsearchRawBody" can-show-table @show-table="showElasticsearchRawJson = false" />
+              <ElasticsearchJsonResponsePanel v-if="activeElasticsearchJsonResponse" ref="elasticsearchJsonResponsePanelRef" class="flex-1 min-h-0" :status="activeElasticsearchJsonResponse.status" :body="activeElasticsearchJsonResponse.body" />
+              <ElasticsearchJsonResponsePanel v-else-if="showElasticsearchRawJson && activeElasticsearchRawBody" ref="elasticsearchJsonResponsePanelRef" class="flex-1 min-h-0" :status="200" :body="activeElasticsearchRawBody" can-show-table @show-table="showElasticsearchRawJson = false" />
               <DataGrid
                 v-else-if="activeTab.result && hasTabularResult"
                 ref="dataGridRef"
@@ -1432,9 +1499,9 @@ defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, hand
                 context="results"
                 :auto-transpose-single-row="settingsStore.editorSettings.dataGridAutoTransposeSingleRow"
                 :database-type="activeEffectiveDatabaseType"
-                :connection-id="activeTab.connectionId"
-                :database="activeTab.database"
-                :schema="activeTab.schema"
+                :connection-id="activeResultConnectionId"
+                :database="activeResultDatabase"
+                :schema="activeResultSchema"
                 :table-meta="activeTab.tableMeta"
                 :table-info-tab="activeTab.tableInfoTab"
                 :page-offset="activeTab.resultPageOffset"
@@ -1457,7 +1524,16 @@ defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, hand
                 @sort="(column: string, columnIndex: number, direction: 'asc' | 'desc' | null, whereInput?: string, mode?: DataGridSortMode) => emit('sort', column, columnIndex, direction, whereInput, mode)"
               >
                 <template #result-toolbar-leading="{ compact }">
-                  <QueryResultViewSwitcher :active-view="activeOutputView" :can-show-result="canShowResultOutput" :can-show-summary="hasExecutionSummary" :can-show-chart="hasNumericData && !activeElasticsearchJsonResponse" :compact="compact" @select-view="emit('update:activeOutputView', $event)" />
+                  <QueryResultViewSwitcher
+                    :active-view="activeOutputView"
+                    :can-show-result="canShowResultOutput"
+                    :can-show-summary="hasExecutionSummary"
+                    :can-show-chart="hasNumericData && !activeElasticsearchJsonResponse"
+                    :can-show-messages="canShowMessagesOutput"
+                    :message-count="resultMessageCount"
+                    :compact="compact"
+                    @select-view="emit('update:activeOutputView', $event)"
+                  />
                   <template v-if="activeElasticsearchRawBody">
                     <div class="mx-1 h-4 w-px bg-border" />
                     <button
@@ -1723,6 +1799,30 @@ defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, hand
                   </button>
                 </div>
               </div>
+              <div class="flex items-center justify-between gap-3 px-3 py-1.5 text-xs">
+                <div class="min-w-0 flex items-center gap-2 font-medium">
+                  <CheckSquare2 class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                  <span>{{ t("grid.booleanDisplayMode") }}</span>
+                </div>
+                <div class="grid w-32 grid-cols-2 rounded-md border bg-muted/40 p-0.5">
+                  <button
+                    type="button"
+                    class="h-5 min-w-0 truncate whitespace-nowrap rounded-[5px] px-2 text-xs transition-colors"
+                    :class="booleanDisplayMode === 'dropdown' ? 'bg-background font-semibold text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'"
+                    @click="setBooleanDisplayMode('dropdown')"
+                  >
+                    {{ t("grid.booleanDisplayDropdown") }}
+                  </button>
+                  <button
+                    type="button"
+                    class="h-5 min-w-0 truncate whitespace-nowrap rounded-[5px] px-2 text-xs transition-colors"
+                    :class="booleanDisplayMode === 'checkbox' ? 'bg-background font-semibold text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'"
+                    @click="setBooleanDisplayMode('checkbox')"
+                  >
+                    {{ t("grid.booleanDisplayCheckbox") }}
+                  </button>
+                </div>
+              </div>
               <div class="flex items-center justify-between gap-3 px-3 py-1.5 text-xs" :class="{ 'opacity-60': !dataGridRef?.canToggleAllNullColumns }">
                 <span class="min-w-0 flex items-center gap-2 font-medium">
                   <EyeOff class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
@@ -1732,10 +1832,10 @@ defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, hand
                 <Switch size="sm" :model-value="!!dataGridRef?.nullColumnsHidden" :disabled="!dataGridRef?.canToggleAllNullColumns" :aria-label="t('grid.hideNullColumns')" @update:model-value="dataGridRef?.toggleAllNullColumns()" />
               </div>
               <DataGridCopyFormatControl
-                :current-label="dataGridRef?.defaultCopyExtractorLabel ?? '-'"
-                :current-value="dataGridRef?.defaultCopyExtractor ?? ''"
-                :items="dataGridRef?.copyExtractorMenuItems ?? []"
-                @select="dataGridRef?.setDefaultCopyExtractor($event)"
+                :current-label="dataGridRef?.defaultCopyPreferenceLabel ?? '-'"
+                :current-value="dataGridRef?.defaultCopyPreference ?? ''"
+                :items="dataGridRef?.copyPreferenceMenuItems ?? []"
+                @select="dataGridRef?.setDefaultCopyPreference($event)"
                 @configure="openDataGridExtractorConfiguration"
               />
             </PopoverContent>

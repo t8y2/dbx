@@ -73,3 +73,9 @@ test("data grid paint theme uses the resolved striped row token", () => {
 
   assert.equal(resolveDataGridPaintTheme({ getVar, isDark: false }).rowMuted, "rgb(235, 239, 244)");
 });
+
+test("data grid paint theme resolves cellDirty token", () => {
+  const getVar = (name: string) => (name === "--data-grid-cell-dirty-bg" ? "rgb(166, 210, 255)" : "");
+
+  assert.equal(resolveDataGridPaintTheme({ getVar, isDark: false }).cellDirty, "rgb(166, 210, 255)");
+});

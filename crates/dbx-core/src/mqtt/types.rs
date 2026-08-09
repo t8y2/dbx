@@ -193,6 +193,14 @@ pub struct MqttSavedTopic {
     pub qos: MqttQoS,
     #[serde(default)]
     pub no_local: bool,
+    /// Whether this saved subscription should be restored and subscribed on connect.
+    /// Missing values from older configs are treated as enabled.
+    #[serde(default = "default_saved_topic_enabled")]
+    pub enabled: bool,
+}
+
+fn default_saved_topic_enabled() -> bool {
+    true
 }
 
 /// MQTT 消息服务质量

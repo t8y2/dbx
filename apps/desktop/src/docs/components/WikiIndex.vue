@@ -3,9 +3,11 @@ import type { IndexSection } from "../docsIndex";
 import { qualifiedTableKey } from "../docsKeys";
 import { groupStyle } from "../groupColor";
 import { renderNote } from "../renderNote";
+import type { Translate } from "../docsWarnings";
 
 defineProps<{
   sections: IndexSection[];
+  translate: Translate;
 }>();
 
 const emit = defineEmits<{
@@ -18,7 +20,7 @@ const emit = defineEmits<{
     <section v-for="section in sections" :key="section.key" class="flex flex-col gap-2">
       <div class="flex flex-col gap-1 border-l-2 pl-3" :class="{ 'docs-group': section.hue !== null }" style="border-color: var(--group-c, var(--border))" :style="groupStyle(section.hue)">
         <div class="flex items-baseline gap-2">
-          <h2 class="text-sm font-semibold text-foreground">{{ section.label || "(no schema)" }}</h2>
+          <h2 class="text-sm font-semibold text-foreground">{{ section.label || translate(section.fallbackKey) }}</h2>
           <span class="text-xs text-muted-foreground">{{ section.tables.length }} tables</span>
         </div>
         <div v-if="section.note" class="text-xs text-muted-foreground" v-html="renderNote(section.note)"></div>

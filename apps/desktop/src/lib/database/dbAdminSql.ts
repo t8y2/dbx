@@ -1,5 +1,7 @@
-import type { ColumnInfo, DatabaseObjectType, DatabaseType } from "@/types/database";
+import type { ColumnInfo, DatabaseObjectType, DatabaseType, ForeignKeyInfo, IndexInfo, TriggerInfo } from "@/types/database";
 import * as api from "@/lib/backend/api";
+import { createColumnDrafts, createForeignKeyDrafts, createIndexDrafts, createTriggerDrafts } from "@/lib/table/tableStructureEditorState";
+import type { BuildTableStructureChangeSqlOptions } from "@/lib/table/tableStructureEditorSql";
 
 export interface DropObjectSqlOptions {
   databaseType?: DatabaseType;
@@ -59,11 +61,127 @@ export interface DuplicateTableStructureSqlOptions {
   columnComments?: Array<{ name: string; comment: string }>;
 }
 
+export interface DuplicateTableStructurePlanOptions extends DuplicateTableStructureSqlOptions {
+  connectionId: string;
+  database: string;
+  catalog?: string;
+  sourceColumns?: ColumnInfo[];
+}
+
+export interface DuplicateTableStructurePlan {
+  sql: string;
+  sourceColumns?: ColumnInfo[];
+  executeAsScript: boolean;
+}
+
 export function collectDuplicateTableColumnComments(columns: readonly Pick<ColumnInfo, "name" | "comment">[]): Array<{ name: string; comment: string }> {
   return columns.flatMap((column) => {
     const comment = column.comment;
     return comment?.trim() ? [{ name: column.name, comment }] : [];
   });
+}
+
+const ORACLE_LEGACY_IDENTIFIER_LIMIT = 30;
+
+function oracleCloneObjectName(targetName: string, kind: string, index: number): string {
+  const normalized =
+    targetName
+      .trim()
+      .replace(/[^a-zA-Z0-9_$#]+/g, "_")
+      .replace(/_+/g, "_")
+      .replace(/^_+|_+$/g, "")
+      .toUpperCase() || "TABLE";
+  const suffix = `_${kind}${index + 1}`;
+  return `${normalized.slice(0, Math.max(1, ORACLE_LEGACY_IDENTIFIER_LIMIT - suffix.length))}${suffix}`;
+}
+
+export function oracleDuplicateTableCreateOptions(options: { schema?: string | null; targetName: string; tableComment?: string | null; columns: ColumnInfo[]; indexes: IndexInfo[]; foreignKeys: ForeignKeyInfo[]; triggers: TriggerInfo[] }): BuildTableStructureChangeSqlOptions {
+  return {
+    databaseType: "oracle",
+    schema: options.schema || undefined,
+    tableName: options.targetName,
+    tableComment: options.tableComment || undefined,
+    columns: createColumnDrafts(options.columns, "oracle").map((column, index) => ({
+      ...column,
+      id: `clone:column:${index}`,
+      original: undefined,
+      originalPosition: undefined,
+    })),
+    indexes: createIndexDrafts(options.indexes)
+      .filter((index) => !index.isPrimary)
+      .map((index, position) => ({
+        ...index,
+        id: `clone:index:${position}`,
+        name: oracleCloneObjectName(options.targetName, "IDX", position),
+        nameEdited: true,
+        original: undefined,
+      })),
+    foreignKeys: createForeignKeyDrafts(options.foreignKeys).map((foreignKey, index) => ({
+      ...foreignKey,
+      id: `clone:foreign-key:${index}`,
+      name: oracleCloneObjectName(options.targetName, "FK", index),
+      original: undefined,
+    })),
+    triggers: createTriggerDrafts(options.triggers).map((trigger, index) => ({
+      ...trigger,
+      id: `clone:trigger:${index}`,
+      name: oracleCloneObjectName(options.targetName, "TRG", index),
+      original: undefined,
+    })),
+  };
+}
+
+export async function buildDuplicateTableStructurePlan(options: DuplicateTableStructurePlanOptions): Promise<DuplicateTableStructurePlan> {
+  if (options.databaseType === "oracle") {
+    const columnsPromise = options.sourceColumns ? Promise.resolve(options.sourceColumns) : api.getColumns(options.connectionId, options.database, options.schema || "", options.sourceName, options.catalog);
+    const tableCommentPromise =
+      options.tableComment == null
+        ? api.getTableComment(options.connectionId, options.database, options.schema || "", options.sourceName, options.catalog).catch((error) => {
+            console.warn(`Failed to load Oracle table comment for table clone: ${options.sourceName}`, error);
+            return null;
+          })
+        : Promise.resolve(options.tableComment);
+    const [columns, indexes, foreignKeys, triggers, tableComment] = await Promise.all([
+      columnsPromise,
+      api.listIndexes(options.connectionId, options.database, options.schema || "", options.sourceName, options.catalog),
+      api.listForeignKeys(options.connectionId, options.database, options.schema || "", options.sourceName, options.catalog),
+      api.listTriggers(options.connectionId, options.database, options.schema || "", options.sourceName, options.catalog),
+      tableCommentPromise,
+    ]);
+    const result = await api.buildCreateTableSql(
+      oracleDuplicateTableCreateOptions({
+        schema: options.schema,
+        targetName: options.targetName,
+        tableComment,
+        columns,
+        indexes,
+        foreignKeys,
+        triggers,
+      }),
+    );
+    if (result.warnings.length > 0 || result.statements.length === 0) {
+      throw new Error(result.warnings.join("\n") || "Failed to generate Oracle clone DDL.");
+    }
+    return { sql: result.statements.join("\n"), sourceColumns: columns, executeAsScript: true };
+  }
+
+  let columns = options.sourceColumns;
+  if (options.databaseType === "dameng" && !columns) {
+    try {
+      columns = await api.getColumns(options.connectionId, options.database, options.schema || "", options.sourceName, options.catalog);
+    } catch (error) {
+      console.warn(`Failed to load Dameng column comments for table clone: ${options.sourceName}`, error);
+    }
+  }
+  const sql = await buildDuplicateTableStructureSql({
+    databaseType: options.databaseType,
+    schema: options.schema,
+    sourceName: options.sourceName,
+    targetName: options.targetName,
+    tableComment: options.tableComment,
+    columnComments: options.databaseType === "dameng" ? collectDuplicateTableColumnComments(columns ?? []) : [],
+  });
+  return { sql, sourceColumns: columns, executeAsScript: duplicateTableStructureRequiresScript(sql) };
 }
 
 export interface CopyTableDataSqlOptions {

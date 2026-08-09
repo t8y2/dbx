@@ -311,6 +311,8 @@ pub struct MqttClient {
     granted_subscriptions: RwLock<Vec<(String, MqttQoS)>>,
     /// 需要在无会话重连后恢复的 topic 集合
     desired_subscriptions: RwLock<Vec<(String, MqttQoS)>>,
+    /// All persisted subscription configurations, including disabled entries.
+    saved_topic_configs: RwLock<Vec<MqttSavedTopic>>,
     no_local_topics: RwLock<HashSet<String>>,
     /// 当前连接是否已收到有效 CONNACK
     connected: AtomicBool,
@@ -392,15 +394,24 @@ impl MqttClient {
         backend: MqttBackendClient,
         shutdown_notify: Arc<Notify>,
     ) -> Arc<Self> {
-        let desired_subscriptions = config.saved_topics.iter().map(|saved| (saved.topic.clone(), saved.qos)).collect();
-        let no_local_topics =
-            config.saved_topics.iter().filter(|saved| saved.no_local).map(|saved| saved.topic.clone()).collect();
+        let saved_topic_configs = config.saved_topics.clone();
+        let desired_subscriptions = saved_topic_configs
+            .iter()
+            .filter(|saved| saved.enabled)
+            .map(|saved| (saved.topic.clone(), saved.qos))
+            .collect();
+        let no_local_topics = saved_topic_configs
+            .iter()
+            .filter(|saved| saved.enabled && saved.no_local)
+            .map(|saved| saved.topic.clone())
+            .collect();
         Arc::new(Self {
             backend,
             config,
             subscriptions: RwLock::new(Vec::new()),
             granted_subscriptions: RwLock::new(Vec::new()),
             desired_subscriptions: RwLock::new(desired_subscriptions),
+            saved_topic_configs: RwLock::new(saved_topic_configs),
             no_local_topics: RwLock::new(no_local_topics),
             connected: AtomicBool::new(false),
             subscription_requests: Mutex::new(SubscriptionRequestTracker::default()),
@@ -848,6 +859,19 @@ impl MqttClient {
                         self.no_local_topics.write().await.remove(&pending.topic);
                     }
                     upsert_subscription(&self.desired_subscriptions, &pending.topic, pending.qos).await;
+                    let mut saved = self.saved_topic_configs.write().await;
+                    if let Some(config) = saved.iter_mut().find(|config| config.topic == pending.topic) {
+                        config.qos = pending.qos;
+                        config.no_local = pending.no_local;
+                        config.enabled = true;
+                    } else {
+                        saved.push(MqttSavedTopic {
+                            topic: pending.topic.clone(),
+                            qos: pending.qos,
+                            no_local: pending.no_local,
+                            enabled: true,
+                        });
+                    }
                 }
                 Ok(())
             }
@@ -874,6 +898,11 @@ impl MqttClient {
             remove_subscription(&self.granted_subscriptions, &pending.topic).await;
             remove_subscription(&self.desired_subscriptions, &pending.topic).await;
             self.no_local_topics.write().await.remove(&pending.topic);
+            if let Some(config) =
+                self.saved_topic_configs.write().await.iter_mut().find(|config| config.topic == pending.topic)
+            {
+                config.enabled = false;
+            }
             self.seen_retained.write().await.clear_filter(&pending.topic);
         } else if let Err(error) = &result {
             log::warn!("{error}");
@@ -960,6 +989,9 @@ impl MqttClient {
     /// 订阅 topic
     pub async fn subscribe(&self, topic: &str, qos: MqttQoS, no_local: bool) -> Result<(), String> {
         validate_topic_filter(topic)?;
+        if no_local && !matches!(self.config.protocol_version, super::types::MqttProtocolVersion::V5) {
+            return Err("MQTT 3.x 不支持 No Local 订阅选项".to_string());
+        }
         let has_desired = self
             .desired_subscriptions
             .read()
@@ -993,6 +1025,30 @@ impl MqttClient {
         let (completion, result) = oneshot::channel();
         self.queue_unsubscribe_request(topic.to_string(), Some(completion)).await?;
         result.await.map_err(|_| "取消订阅确认通道已关闭，请检查 MQTT 连接状态".to_string())?
+    }
+
+    /// Save or update a subscription configuration without sending a broker request.
+    pub async fn save_topic_config(&self, mut config: MqttSavedTopic) -> Result<(), String> {
+        config.topic = config.topic.trim().to_string();
+        validate_topic_filter(&config.topic)?;
+        if config.no_local && !matches!(self.config.protocol_version, super::types::MqttProtocolVersion::V5) {
+            return Err("MQTT 3.x 不支持 No Local 订阅选项".to_string());
+        }
+        let mut saved = self.saved_topic_configs.write().await;
+        if let Some(existing) = saved.iter_mut().find(|current| current.topic == config.topic) {
+            *existing = config;
+        } else {
+            saved.push(config);
+        }
+        Ok(())
+    }
+
+    /// Delete a saved subscription configuration. The caller must unsubscribe first
+    /// when the configuration is currently active.
+    pub async fn delete_topic_config(&self, topic: &str) -> Result<(), String> {
+        validate_topic_filter(topic)?;
+        self.saved_topic_configs.write().await.retain(|saved| saved.topic != topic);
+        Ok(())
     }
 
     /// 发布消息；QoS 0 等待写入网络，QoS 1/2 分别等待 PUBACK/PUBCOMP。
@@ -1055,12 +1111,7 @@ impl MqttClient {
     }
 
     pub async fn desired_topic_configs(&self) -> Vec<MqttSavedTopic> {
-        let desired = self.desired_subscriptions.read().await.clone();
-        let no_local = self.no_local_topics.read().await;
-        desired
-            .into_iter()
-            .map(|(topic, qos)| MqttSavedTopic { no_local: no_local.contains(&topic), topic, qos })
-            .collect()
+        self.saved_topic_configs.read().await.clone()
     }
     /// 获取消息缓冲区中的消息
     pub async fn get_messages(&self, topic_filter: Option<&str>, limit: usize) -> Vec<MqttMessage> {

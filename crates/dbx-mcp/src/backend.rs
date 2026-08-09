@@ -7,7 +7,7 @@ use std::{
 use async_trait::async_trait;
 use dbx_core::{
     agent_events::{ToolCall, ToolResult},
-    agent_tools::{self, AgentSqlPermissions},
+    agent_tools::{self, format_query_result_as_text, AgentSqlPermissions, QueryCellWindow},
     connection::AppState,
     db::{redis_driver::RedisCommandResult, ColumnInfo, IndexInfo, TableInfo},
     models::connection::{ConnectionConfig, DatabaseType},
@@ -320,7 +320,13 @@ impl LocalBackend {
         let desktop_settings = storage.load_desktop_settings().await.unwrap_or_default();
         let data_dir = path.parent().unwrap_or_else(|| Path::new(".")).to_path_buf();
         let plugin_dir = local_plugin_dir(&desktop_settings, &data_dir);
-        let state = Arc::new(AppState::new_with_plugin_dir(storage, plugin_dir));
+        let agent_dir = local_agent_dir(&desktop_settings, &data_dir);
+        let state = Arc::new(AppState::new_with_plugin_and_agent_dir_and_app_version(
+            storage,
+            plugin_dir,
+            agent_dir,
+            env!("CARGO_PKG_VERSION"),
+        ));
         let config_map: HashMap<String, ConnectionConfig> =
             configs.into_iter().map(|config| (config.id.clone(), config)).collect();
         *state.configs.write().await = config_map;
@@ -363,6 +369,24 @@ fn local_plugin_dir(settings: &DesktopSettings, data_dir: &Path) -> PathBuf {
         .map(PathBuf::from)
         .or_else(|| legacy_driver_base.map(|base| base.join("plugins")))
         .unwrap_or_else(|| data_dir.join("plugins"))
+}
+
+fn local_agent_dir(settings: &DesktopSettings, data_dir: &Path) -> PathBuf {
+    let legacy_driver_base =
+        settings.driver_store_dir.as_ref().filter(|value| !value.trim().is_empty()).map(PathBuf::from);
+    settings
+        .agent_store_dir
+        .as_ref()
+        .filter(|value| !value.trim().is_empty())
+        .map(PathBuf::from)
+        .or_else(|| legacy_driver_base.map(|base| base.join("agents")))
+        .unwrap_or_else(|| {
+            if std::env::var_os("DBX_DATA_DIR").filter(|value| !value.is_empty()).is_some() {
+                data_dir.join("agents")
+            } else {
+                dbx_core::connection::default_agent_dir()
+            }
+        })
 }
 
 #[async_trait]
@@ -563,6 +587,7 @@ impl DbxBackend for WebBackend {
         arguments: Value,
         permissions: AgentSqlPermissions,
     ) -> ToolResult {
+        let explicit_cell_window = QueryCellWindow::explicit_from_arguments(&arguments);
         let result = async {
             if tool_name != "execute_query" {
                 return Err(format!("Unsupported DBX Web agent tool: {tool_name}"));
@@ -606,7 +631,10 @@ impl DbxBackend for WebBackend {
             let response = self.request(reqwest::Method::POST, "/api/query/execute", Some(body)).await?;
             let query_result: dbx_core::db::QueryResult =
                 response.json().await.map_err(|error| format!("Invalid query response: {error}"))?;
-            Ok(format_query_result(&query_result, max_rows))
+            match explicit_cell_window {
+                Some(window) => format_query_result_as_text(&query_result, max_rows, window),
+                None => Ok(format_query_result(&query_result, max_rows)),
+            }
         }
         .await;
         ToolResult {
@@ -1109,6 +1137,24 @@ impl DbxBackend for WebBackend {
                     "name",
                     Value::String(value.get("name").and_then(Value::as_str).unwrap_or("").to_string()),
                 ))
+            }
+            MongoCommand::CreateUser { user_json, write_concern_json } => {
+                let value: Value = self
+                    .request(
+                        reqwest::Method::POST,
+                        "/api/mongo/create-user",
+                        Some(json!({
+                            "connectionId": connection_id,
+                            "database": database,
+                            "userJson": user_json,
+                            "writeConcernJson": write_concern_json,
+                        })),
+                    )
+                    .await?
+                    .json()
+                    .await
+                    .map_err(|error| format!("Invalid MongoDB create user response: {error}"))?;
+                Ok(affected_query_result(affected_rows_from_value(&value)))
             }
             MongoCommand::DropIndexes { collection, indexes, single } => {
                 let value: Value = self
@@ -1735,6 +1781,26 @@ mod tests {
         assert!(backend.state().plugins.find_driver("jdbc").unwrap().is_some());
     }
 
+    #[tokio::test]
+    async fn local_backend_uses_desktop_agent_directory() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let database_path = data_dir.path().join("dbx.db");
+        let agent_dir = data_dir.path().join("agents-custom");
+        let storage = Storage::open(&database_path).await.unwrap();
+        storage
+            .save_desktop_settings(&DesktopSettings {
+                agent_store_dir: Some(agent_dir.to_string_lossy().to_string()),
+                ..DesktopSettings::default()
+            })
+            .await
+            .unwrap();
+        drop(storage);
+
+        let backend = LocalBackend::open(&database_path).await.unwrap();
+
+        assert_eq!(backend.state().agent_manager.base_dir(), &agent_dir);
+    }
+
     #[test]
     fn local_plugin_directory_honors_desktop_storage_settings() {
         let data_dir = Path::new("C:/Users/user/AppData/Roaming/com.dbx.app");
@@ -1747,6 +1813,17 @@ mod tests {
 
         assert_eq!(local_plugin_dir(&explicit, data_dir), PathBuf::from("D:/DBX/plugins-custom"));
         assert_eq!(local_plugin_dir(&legacy, data_dir), PathBuf::from("D:/DBX/drivers/plugins"));
+    }
+
+    #[test]
+    fn local_agent_directory_honors_desktop_storage_settings() {
+        let data_dir = Path::new("C:/Users/user/AppData/Roaming/com.dbx.app");
+        let explicit =
+            DesktopSettings { agent_store_dir: Some("D:/DBX/agents-custom".to_string()), ..DesktopSettings::default() };
+        let legacy = DesktopSettings { driver_store_dir: Some("D:/DBX/drivers".to_string()), ..Default::default() };
+
+        assert_eq!(local_agent_dir(&explicit, data_dir), PathBuf::from("D:/DBX/agents-custom"));
+        assert_eq!(local_agent_dir(&legacy, data_dir), PathBuf::from("D:/DBX/drivers/agents"));
     }
 
     struct StubBackend;

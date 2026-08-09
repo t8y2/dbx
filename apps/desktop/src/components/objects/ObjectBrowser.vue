@@ -6,7 +6,6 @@ import {
   ArrowDown,
   ArrowRightLeft,
   ArrowUp,
-  BookOpen,
   Braces,
   CheckSquare,
   Clipboard,
@@ -68,12 +67,10 @@ import { buildTableSelectSql } from "@/lib/table/tableSelectSql";
 import {
   buildDropObjectSql,
   buildDropTableSql,
-  buildDuplicateTableStructureSql,
+  buildDuplicateTableStructurePlan as buildSharedDuplicateTableStructurePlan,
   buildCopyTableDataSql,
   buildEmptyTableSql,
   buildTruncateTableSql,
-  collectDuplicateTableColumnComments,
-  duplicateTableStructureRequiresScript,
   supportsDropTableCascade,
   supportsTruncateTableCascade,
   type TableAdminSqlOptions,
@@ -1463,16 +1460,6 @@ function openDiagram(row: ObjectBrowserRow) {
   };
 }
 
-function openDocs(row: ObjectBrowserRow) {
-  // The docs viewer documents the whole schema rather than one object, so the
-  // row only supplies which schema to collect.
-  connectionStore.docsSource = {
-    connectionId: props.connection.id,
-    database: props.database,
-    schema: row.schema || selectedSchema.value,
-  };
-}
-
 function openTableImport(row: ObjectBrowserRow) {
   if (row.type !== "TABLE") return;
   connectionStore.tableImportSource = {
@@ -1944,24 +1931,17 @@ function requestDuplicateStructure(row: ObjectBrowserRow) {
 }
 
 async function buildDuplicateStructurePlan(sourceName: string, targetName: string, schema: string | undefined, tableComment?: string | null, sourceColumns?: ColumnInfo[]) {
-  let columns = sourceColumns;
-  if (effectiveDatabaseType.value === "dameng" && !columns) {
-    try {
-      columns = await api.getColumns(props.connection.id, props.database, schema || "", sourceName, props.catalog);
-    } catch (error) {
-      console.warn(`Failed to load Dameng column comments for table clone: ${sourceName}`, error);
-    }
-  }
-  const columnComments = effectiveDatabaseType.value === "dameng" ? collectDuplicateTableColumnComments(columns ?? []) : [];
-  const sql = await buildDuplicateTableStructureSql({
+  return buildSharedDuplicateTableStructurePlan({
+    connectionId: props.connection.id,
+    database: props.database,
+    catalog: props.catalog,
     databaseType: effectiveDatabaseType.value,
     schema,
     sourceName,
     targetName,
     tableComment,
-    columnComments,
+    sourceColumns,
   });
-  return { sql, sourceColumns: columns, executeAsScript: duplicateTableStructureRequiresScript(sql) };
 }
 
 function executeDuplicateStructurePlan(plan: { sql: string; executeAsScript: boolean }, schema: string | undefined) {
@@ -2663,12 +2643,7 @@ function getTableMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
     ...(canOpenStructureEditor.value ? [{ label: t("contextMenu.editStructure"), action: () => openStructureEditor(item), icon: PencilRuler }] : []),
     ...(canRename(item) ? [{ label: t("contextMenu.renameObject"), action: () => requestRename(item), icon: Pencil }] : []),
     { label: t("contextMenu.newQuery"), action: () => openNewQuery(item), icon: TerminalSquare },
-    ...(canOpenDiagram.value
-      ? [
-          { label: t("diagram.open"), action: () => openDiagram(item), icon: Network },
-          { label: t("docs.title"), action: () => openDocs(item), icon: BookOpen },
-        ]
-      : []),
+    ...(canOpenDiagram.value ? [{ label: t("diagram.open"), action: () => openDiagram(item), icon: Network }] : []),
     ...(canOpenTableImport.value ? [{ label: t("contextMenu.importData"), action: () => openTableImport(item), icon: Download }] : []),
     { label: t("dataCompare.title"), action: () => openDataCompare(item), icon: ArrowRightLeft },
     { label: "", separator: true },
@@ -2718,12 +2693,7 @@ function getViewMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
     },
     ...(canRename(item) ? [{ label: t("contextMenu.renameObject"), action: () => requestRename(item), icon: Pencil }] : []),
     { label: t("contextMenu.newQuery"), action: () => openNewQuery(item), icon: TerminalSquare },
-    ...(canOpenDiagram.value
-      ? [
-          { label: t("diagram.open"), action: () => openDiagram(item), icon: Network },
-          { label: t("docs.title"), action: () => openDocs(item), icon: BookOpen },
-        ]
-      : []),
+    ...(canOpenDiagram.value ? [{ label: t("diagram.open"), action: () => openDiagram(item), icon: Network }] : []),
     { label: "", separator: true },
     exportDataSubmenu(item),
     { label: t("contextMenu.exportDatabase"), action: () => openDatabaseExport(item), icon: Upload },

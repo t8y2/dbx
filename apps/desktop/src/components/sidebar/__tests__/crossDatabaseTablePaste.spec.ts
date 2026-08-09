@@ -32,15 +32,13 @@ describe("cross-database table paste", () => {
     expect(runtimeSource).toMatch(/tableName: node\.label,\s*tableComment: node\.comment/);
     expect(runtimeSource).toMatch(/targetName: `\$\{entry\.tableName\}_copy`,[\s\S]*?tableComment: entry\.tableComment/);
     expect(runtimeSource).toMatch(/targetName,\s*tableComment: entry\.tableComment/);
-    expect(runtimeSource).toContain("executeAsScript: duplicateTableStructureRequiresScript(structureSql)");
+    expect(runtimeSource).toContain("executeAsScript: plan.executeAsScript");
   });
 
-  it("loads Dameng column comments for sidebar duplicate and paste structure clone", () => {
-    expect(runtimeSource).toContain("collectDuplicateTableColumnComments");
-    expect(runtimeSource).toContain("async function loadDamengDuplicateColumnComments(");
-    expect(runtimeSource).toMatch(/databaseType === "dameng"[\s\S]*?loadDamengDuplicateColumnComments\([\s\S]*?node\.connectionId[\s\S]*?columnComments/);
-    expect(runtimeSource).toMatch(/if \(databaseType === "dameng"\) \{[\s\S]*?loadDamengDuplicateColumnComments\([\s\S]*?entry\.connectionId[\s\S]*?columnComments = loaded\.columnComments/);
-    expect(runtimeSource).toMatch(/tableComment: node\.comment,\s*columnComments,/);
-    expect(runtimeSource).toMatch(/tableComment: entry\.tableComment,\s*columnComments,/);
+  it("uses the shared metadata-aware structure plan for duplicate and paste", () => {
+    expect(runtimeSource).toContain("buildDuplicateTableStructurePlan");
+    expect(runtimeSource).toMatch(/buildDuplicateTableStructurePlan\(\{[\s\S]*?connectionId: node\.connectionId[\s\S]*?sourceName: node\.label[\s\S]*?tableComment: node\.comment/);
+    expect(runtimeSource).toMatch(/buildDuplicateTableStructurePlan\(\{[\s\S]*?connectionId: entry\.connectionId[\s\S]*?sourceName: entry\.sourceName[\s\S]*?tableComment: entry\.tableComment/);
+    expect(runtimeSource).toContain("sourceColumns = plan.sourceColumns");
   });
 });

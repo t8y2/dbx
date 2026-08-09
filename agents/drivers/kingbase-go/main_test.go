@@ -962,7 +962,7 @@ func TestKingbaseCatalogFunctionsFollowMetadataMode(t *testing.T) {
 func TestMySQLCompatSchemaQueryKeepsUserSchemasWithSystemLikeNames(t *testing.T) {
 	query := kingbaseMySQLCompatListSchemasSQL
 	for _, prefix := range []string{"SYS", "XLOG"} {
-		expected := "NOT LIKE '" + prefix + `\_%' ESCAPE '\'`
+		expected := "NOT LIKE '" + prefix + `#_%' ESCAPE '#'`
 		if !strings.Contains(query, expected) {
 			t.Fatalf("schema query must only hide the internal %s_ prefix: %s", prefix, query)
 		}
@@ -1139,6 +1139,98 @@ func TestRoutineSourceUsesKingbaseCatalogFunction(t *testing.T) {
 	}
 	if !strings.HasPrefix(source["source"].(string), "CREATE FUNCTION public.format_name()") {
 		t.Fatalf("unexpected routine source: %#v", source)
+	}
+}
+
+func TestObjectSourceFallsBackToPgDefinitionFunctionsAndCachesChoice(t *testing.T) {
+	tests := []struct {
+		name         string
+		objectType   string
+		objectName   string
+		sysFunction  string
+		pgFunction   string
+		catalogTable string
+		source       string
+	}{
+		{
+			name:         "function",
+			objectType:   "FUNCTION",
+			objectName:   "format_name",
+			sysFunction:  "sys_get_functiondef",
+			pgFunction:   "pg_get_functiondef",
+			catalogTable: "sys_catalog.sys_proc",
+			source:       "CREATE FUNCTION public.format_name() RETURNS text AS $$ SELECT 'x'; $$",
+		},
+		{
+			name:         "view",
+			objectType:   "VIEW",
+			objectName:   "active_orders",
+			sysFunction:  "sys_get_viewdef",
+			pgFunction:   "pg_get_viewdef",
+			catalogTable: "sys_catalog.sys_class",
+			source:       "SELECT * FROM public.orders WHERE active",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			state := &metadataDriverState{query: func(query string) (driver.Rows, error) {
+				if !strings.Contains(query, test.catalogTable) {
+					return nil, errors.New("unexpected query: " + query)
+				}
+				if strings.Contains(query, test.sysFunction+"(") {
+					return nil, &gokb.Error{Code: gokb.ErrorCode("42883"), Message: "function " + test.sysFunction + "(oid) does not exist"}
+				}
+				if strings.Contains(query, test.pgFunction+"(") {
+					return &valueRows{columns: []string{"source"}, rows: [][]driver.Value{{test.source}}}, nil
+				}
+				return nil, errors.New("unexpected query: " + query)
+			}}
+			server := newServer()
+			server.db = openMetadataDB(t, state)
+
+			for call := 0; call < 2; call++ {
+				source, err := server.getObjectSource("public", test.objectName, test.objectType)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if source["source"] != test.source {
+					t.Fatalf("unexpected source: %#v", source)
+				}
+			}
+
+			state.mu.Lock()
+			queries := append([]string(nil), state.queries...)
+			state.mu.Unlock()
+			if len(queries) != 3 ||
+				!strings.Contains(queries[0], test.sysFunction+"(") ||
+				!strings.Contains(queries[1], test.pgFunction+"(") ||
+				!strings.Contains(queries[2], test.pgFunction+"(") {
+				t.Fatalf("definition fallback choice was not cached: %v", queries)
+			}
+		})
+	}
+}
+
+func TestObjectSourceDoesNotFallbackOnUnrelatedErrors(t *testing.T) {
+	permissionErr := errors.New("permission denied for sys_proc")
+	state := &metadataDriverState{query: func(query string) (driver.Rows, error) {
+		if strings.Contains(query, "sys_get_functiondef(") {
+			return nil, permissionErr
+		}
+		return nil, errors.New("unexpected fallback query: " + query)
+	}}
+	server := newServer()
+	server.db = openMetadataDB(t, state)
+
+	_, err := server.getObjectSource("public", "format_name", "FUNCTION")
+	if !errors.Is(err, permissionErr) {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if len(state.queries) != 1 || !strings.Contains(state.queries[0], "sys_get_functiondef(") {
+		t.Fatalf("unrelated error triggered a fallback: %v", state.queries)
 	}
 }
 

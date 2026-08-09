@@ -34,7 +34,7 @@ pub const QUERY_CANCELED: &str = "Query canceled";
 /// Fallback when a Mongo connection hits the generic SQL executor instead of the shell path.
 /// Wording must match packages/mongo-shell `MONGO_SHELL_COMMAND_HINT`
 /// (desktop/CLI diagnose first; this is only the Rust SQL-executor backstop).
-const MONGO_SHELL_COMMAND_HINT: &str = "Use MongoDB shell-style commands, for example: db.collection.find({}).limit(100), db.collection.aggregate([]), db.collection.aggregate([], { explain: true }), db.version(), db.collection.countDocuments({}), db.collection.distinct(\"field\"), db.collection.getIndexes(), db.collection.createIndex({...}), or db.collection.insertOne({...}).";
+const MONGO_SHELL_COMMAND_HINT: &str = "Use MongoDB shell-style commands, for example: db.collection.find({}).limit(100), db.collection.aggregate([]), db.collection.aggregate([], { explain: true }), db.version(), db.collection.countDocuments({}), db.collection.distinct(\"field\"), db.collection.getIndexes(), db.collection.createIndex({...}), db.createUser({...}), or db.collection.insertOne({...}).";
 const SQL_OMITTED_ERROR_CONTEXT: &str =
     "SQL text omitted from user-facing error; enable debug SQL diagnostics to inspect the original statement.";
 

@@ -4547,6 +4547,60 @@ test("mongo createIndex execution uses the dedicated create-index endpoint", asy
   }
 });
 
+test("mongo createUser execution follows a preceding use command", async () => {
+  const restoreStorage = installMemoryStorage();
+  setActivePinia(createPinia());
+  const connectionStore = useConnectionStore();
+  const store = useQueryStore();
+  const originalFetch = globalThis.fetch;
+  let createUserBody: any;
+
+  connectionStore.addEphemeralConnection({
+    ...conn("mongo-1"),
+    db_type: "mongodb",
+    port: 27017,
+  });
+
+  globalThis.fetch = withConnectionHealthMock(async (input, init) => {
+    if (String(input) === "/api/mongo/create-user") {
+      createUserBody = JSON.parse(String(init?.body ?? "{}"));
+      return Response.json({ affected_rows: 1 });
+    }
+    return new Response("unexpected request", { status: 500 });
+  });
+
+  try {
+    const tabId = store.createTab("mongo-1", "accounting", "Query", "query", "");
+    await store.executeTabSql(
+      tabId,
+      `use admin
+
+db.createUser({
+  user: "test-db",
+  pwd: "test-password",
+  roles: [{ role: "readWrite", db: "db1" }]
+})`,
+    );
+    const tab = store.tabs.find((item) => item.id === tabId);
+
+    assert.deepEqual(createUserBody, {
+      connectionId: "mongo-1",
+      database: "admin",
+      userJson: '{"user":"test-db","pwd":"test-password","roles":[{"role":"readWrite","db":"db1"}]}',
+    });
+    assert.equal(tab?.database, "admin");
+    assert.equal(tab?.results?.length, 2);
+    assert.deepEqual(tab?.results?.[0]?.rows, [["switched to db admin"]]);
+    assert.deepEqual(tab?.results?.[1]?.columns, []);
+    assert.deepEqual(tab?.results?.[1]?.rows, []);
+    assert.equal(tab?.results?.[1]?.affected_rows, 1);
+    assert.equal(tab?.results?.[1]?.sourceLabel, undefined);
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreStorage();
+  }
+});
+
 test("mongo dropIndex execution uses the dedicated drop-indexes endpoint", async () => {
   const restoreStorage = installMemoryStorage();
   setActivePinia(createPinia());
@@ -7302,9 +7356,26 @@ test("reorderTab with after position places tab correctly", () => {
   const tabC = store.createTab("conn-1", "db", "C", "query");
 
   // Drag A after C
-  store.reorderTab(tabA, tabC, "after");
+  assert.equal(store.reorderTab(tabA, tabC, "after"), true);
   assert.deepEqual(
     store.tabs.map((t) => t.id),
     [tabB, tabC, tabA],
   );
+});
+
+test("reorderTab reports adjacent no-op drops without replacing tab order", () => {
+  setActivePinia(createPinia());
+  const store = useQueryStore();
+
+  const tabA = store.createTab("conn-1", "db", "A", "query");
+  const tabB = store.createTab("conn-1", "db", "B", "query");
+  const tabC = store.createTab("conn-1", "db", "C", "query");
+  const originalTabs = [...store.tabs];
+
+  assert.equal(store.reorderTab(tabA, tabB, "before"), false);
+  assert.deepEqual(store.tabs, originalTabs);
+  assert.equal(store.reorderTab(tabB, tabA, "after"), false);
+  assert.deepEqual(store.tabs, originalTabs);
+  assert.equal(store.reorderTab(tabC, "missing", "before"), false);
+  assert.deepEqual(store.tabs, originalTabs);
 });

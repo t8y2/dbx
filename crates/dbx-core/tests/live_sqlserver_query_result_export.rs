@@ -97,6 +97,7 @@ async fn live_sqlserver_xlsx_export_can_outlive_query_timeout_while_rows_keep_ar
         connection_id: connection_id.to_string(),
         database: database.clone(),
         schema: Some("dbo".to_string()),
+        catalog: None,
         sql: sql.to_string(),
         query_base_sql: sql.to_string(),
         setup_sql: Vec::new(),

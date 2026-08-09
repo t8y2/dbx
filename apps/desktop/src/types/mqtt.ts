@@ -33,6 +33,8 @@ export interface MqttSavedTopic {
   topic: string;
   qos: MqttQoS;
   noLocal?: boolean;
+  /** Whether the topic is restored and subscribed when the connection opens. */
+  enabled?: boolean;
 }
 
 export interface MqttBrokerInfo {

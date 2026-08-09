@@ -1,7 +1,8 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
+import { readCascadeCss } from "./cascadeCss";
 
-const globalsCss = readFileSync(new URL("../globals.css", import.meta.url), "utf8");
+const globalsCss = readCascadeCss();
 const dialogContentSource = readFileSync(new URL("../../components/ui/dialog/DialogContent.vue", import.meta.url), "utf8");
 const dialogScrollContentSource = readFileSync(new URL("../../components/ui/dialog/DialogScrollContent.vue", import.meta.url), "utf8");
 const dialogOverlaySource = readFileSync(new URL("../../components/ui/dialog/DialogOverlay.vue", import.meta.url), "utf8");

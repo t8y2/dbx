@@ -1,6 +1,7 @@
 import type { SqlCompletionColumn, SqlCompletionTable } from "@/lib/sql/sqlCompletion";
 import { getSqlCompletionContext, isOracleSystemValueName } from "@/lib/sql/sqlCompletion";
 import { executableStatementRanges, isOraclePlSqlStatement, type SqlTextRange } from "@/lib/sql/sqlStatementRanges";
+import { DBX_TDENGINE_TBNAME_COLUMN, isTdengineStableTableType } from "@/lib/table/tableEditing";
 import type { DatabaseType, SqlColumnReference, SqlReferenceAnalysis, SqlReferenceScope, SqlTableReference, SqlTextSpan } from "@/types/database";
 
 export interface SqlSemanticDiagnostic {
@@ -45,6 +46,7 @@ export function buildSqlSemanticDiagnostics(analysis: SqlReferenceAnalysis, sche
   const tables = analysis.tables.filter((table) => table.name.trim());
   const knownTables = new Map<string, SqlTableReference>();
   const scopesById = scopesByIdMap(analysis.scopes);
+  let tdengineStableTables: Set<string> | undefined;
 
   for (const table of tables) {
     knownTables.set(normalizeName(table.name), table);
@@ -73,6 +75,10 @@ export function buildSqlSemanticDiagnostics(analysis: SqlReferenceAnalysis, sche
 
     const columnNames = new Set(columns.map((item) => normalizeName(item.name)));
     if (columnNames.has(normalizeName(column.name))) continue;
+    if (schema.databaseType === "tdengine" && normalizeName(column.name) === DBX_TDENGINE_TBNAME_COLUMN) {
+      tdengineStableTables ??= tdengineStableTableKeys(schema.tables);
+      if (tdengineStableTables.has(tableReferenceKey(table))) continue;
+    }
 
     const displayName = column.qualifier ? `${column.qualifier}.${column.name}` : column.name;
     diagnostics.push({
@@ -83,6 +89,20 @@ export function buildSqlSemanticDiagnostics(analysis: SqlReferenceAnalysis, sche
   }
 
   return diagnostics;
+}
+
+function tdengineStableTableKeys(tables: readonly SqlCompletionTable[]): Set<string> {
+  const keys = new Set<string>();
+  for (const table of tables) {
+    if (!isTdengineStableTableType(table.tableType)) continue;
+    keys.add(completionTableReferenceKey(table));
+  }
+  return keys;
+}
+
+function completionTableReferenceKey(table: Pick<SqlCompletionTable, "name" | "database" | "schema">): string {
+  if (table.schema) return normalizeName(`${table.database ? `${table.database}.` : ""}${table.schema}.${table.name}`);
+  return normalizeName(table.name);
 }
 
 function isUnquotedOracleSystemValueReference(column: SqlColumnReference, schema: SqlSemanticDiagnosticSchema): boolean {

@@ -97,6 +97,7 @@ pub(crate) fn model_is_assistant_compatible(provider: &AiProvider, model_id: &st
         | AiProvider::ClaudeCodeCli
         | AiProvider::PiAgentCli
         | AiProvider::OpenCodeCli
+        | AiProvider::CursorCli
         | AiProvider::MiniMax
         | AiProvider::Custom => true,
     }

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { buildSelectStarExpansion, buildSqlCompletionItems, getSqlCompletionContext, selectStarResultColumnsMatch, shouldAutoOpenSqlCompletion } from "@/lib/sql/sqlCompletion";
 import { sqlCompletionContextFromSemantic } from "@/lib/sql/semantic/completion";
 import { buildSqlSemanticModel } from "@/lib/sql/semantic/model";
+import { originForSqlCompletionProvider, originForTypedSqlCompletionStart, shouldAllowSqlCompletionTrigger, type SqlCompletionTriggerFacts } from "@/lib/sql/sqlCompletionTriggerPolicy";
 
 describe("sqlCompletion keyword snippets", () => {
   it("auto-opens and suggests SELECT when typing sel", () => {
@@ -698,5 +699,111 @@ describe("sqlCompletion scoped metadata ranking", () => {
 
     expect(oracleItems.map((item) => item.apply).sort()).toEqual(["ORDERS", "REPORTING.ORDERS"]);
     expect(sqlServerItems).toEqual([expect.objectContaining({ label: "Orders", apply: "Orders" })]);
+  });
+});
+
+describe("shouldAllowSqlCompletionTrigger", () => {
+  const typingFacts = (overrides: Partial<SqlCompletionTriggerFacts> = {}): SqlCompletionTriggerFacts => ({
+    origin: "typing",
+    hasIdentifierPrefix: false,
+    qualifierTriggered: false,
+    useDatabasePrefix: null,
+    ...overrides,
+  });
+
+  const explicitFacts = (overrides: Partial<SqlCompletionTriggerFacts> = {}): SqlCompletionTriggerFacts => ({
+    origin: "explicit",
+    hasIdentifierPrefix: false,
+    qualifierTriggered: false,
+    useDatabasePrefix: null,
+    ...overrides,
+  });
+
+  describe("explicit", () => {
+    it("allows explicit completion in any mode", () => {
+      expect(shouldAllowSqlCompletionTrigger("manual", explicitFacts())).toBe(true);
+      expect(shouldAllowSqlCompletionTrigger("require-prefix", explicitFacts())).toBe(true);
+      expect(shouldAllowSqlCompletionTrigger("positional", explicitFacts())).toBe(true);
+    });
+  });
+
+  describe("manual", () => {
+    it("rejects all typing completions", () => {
+      expect(shouldAllowSqlCompletionTrigger("manual", typingFacts())).toBe(false);
+      expect(shouldAllowSqlCompletionTrigger("manual", typingFacts({ hasIdentifierPrefix: true }))).toBe(false);
+      expect(shouldAllowSqlCompletionTrigger("manual", typingFacts({ qualifierTriggered: true }))).toBe(false);
+      expect(shouldAllowSqlCompletionTrigger("manual", typingFacts({ useDatabasePrefix: "m" }))).toBe(false);
+      expect(shouldAllowSqlCompletionTrigger("manual", typingFacts({ positionalEligible: true }))).toBe(false);
+    });
+  });
+
+  describe("require-prefix", () => {
+    it("allows when identifier prefix is non-empty", () => {
+      expect(shouldAllowSqlCompletionTrigger("require-prefix", typingFacts({ hasIdentifierPrefix: true }))).toBe(true);
+    });
+
+    it("allows when qualifier is triggered (dot with qualifier)", () => {
+      expect(shouldAllowSqlCompletionTrigger("require-prefix", typingFacts({ qualifierTriggered: true }))).toBe(true);
+    });
+
+    it("allows when useDatabasePrefix is non-empty", () => {
+      expect(shouldAllowSqlCompletionTrigger("require-prefix", typingFacts({ useDatabasePrefix: "m" }))).toBe(true);
+      expect(shouldAllowSqlCompletionTrigger("require-prefix", typingFacts({ useDatabasePrefix: "Bar" }))).toBe(true);
+    });
+
+    it("rejects empty prefix, no qualifier, no useDatabasePrefix", () => {
+      expect(shouldAllowSqlCompletionTrigger("require-prefix", typingFacts())).toBe(false);
+    });
+
+    it("rejects empty useDatabasePrefix (USE<space> without prefix)", () => {
+      expect(shouldAllowSqlCompletionTrigger("require-prefix", typingFacts({ useDatabasePrefix: "" }))).toBe(false);
+    });
+
+    it("does not use positionalEligible", () => {
+      // Even if positionalEligible is true, require-prefix ignores it.
+      expect(shouldAllowSqlCompletionTrigger("require-prefix", typingFacts({ positionalEligible: true }))).toBe(false);
+    });
+  });
+
+  describe("positional", () => {
+    it("allows when positionalEligible is true", () => {
+      expect(shouldAllowSqlCompletionTrigger("positional", typingFacts({ positionalEligible: true }))).toBe(true);
+    });
+
+    it("allows when useDatabasePrefix is set (even empty)", () => {
+      expect(shouldAllowSqlCompletionTrigger("positional", typingFacts({ useDatabasePrefix: "" }))).toBe(true);
+      expect(shouldAllowSqlCompletionTrigger("positional", typingFacts({ useDatabasePrefix: "m" }))).toBe(true);
+    });
+
+    it("rejects when positionalEligible is false and no useDatabasePrefix", () => {
+      expect(shouldAllowSqlCompletionTrigger("positional", typingFacts({ positionalEligible: false }))).toBe(false);
+    });
+
+    it("rejects when positionalEligible is undefined and no useDatabasePrefix", () => {
+      expect(shouldAllowSqlCompletionTrigger("positional", typingFacts())).toBe(false);
+    });
+  });
+});
+
+describe("originForTypedSqlCompletionStart", () => {
+  it("starts a new automatic session as typing", () => {
+    expect(originForTypedSqlCompletionStart(null)).toBe("typing");
+  });
+
+  it("preserves the origin of an active completion session", () => {
+    expect(originForTypedSqlCompletionStart("typing")).toBe("typing");
+    expect(originForTypedSqlCompletionStart("explicit")).toBe("explicit");
+  });
+});
+
+describe("originForSqlCompletionProvider", () => {
+  it("classifies an unmarked provider call from CodeMirror", () => {
+    expect(originForSqlCompletionProvider(null, false)).toBe("typing");
+    expect(originForSqlCompletionProvider(null, true)).toBe("explicit");
+  });
+
+  it("preserves the active session independently of the current provider flag", () => {
+    expect(originForSqlCompletionProvider("typing", true)).toBe("typing");
+    expect(originForSqlCompletionProvider("explicit", false)).toBe("explicit");
   });
 });

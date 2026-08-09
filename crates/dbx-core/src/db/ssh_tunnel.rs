@@ -1013,10 +1013,57 @@ impl TunnelManager {
         expose_to_lan: bool,
         allow_exec_channel_proxy: bool,
     ) -> Result<u16, String> {
+        self.start_tunnel_on_local_port(
+            connection_id,
+            connect_host,
+            connect_port,
+            host_key_host,
+            host_key_port,
+            ssh_user,
+            ssh_password,
+            ssh_key_path,
+            ssh_key_passphrase,
+            use_ssh_agent,
+            ssh_agent_sock_path,
+            auth_method,
+            connect_timeout_secs,
+            remote_host,
+            remote_port,
+            expose_to_lan,
+            allow_exec_channel_proxy,
+            None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn start_tunnel_on_local_port(
+        &self,
+        connection_id: &str,
+        connect_host: &str,
+        connect_port: u16,
+        host_key_host: &str,
+        host_key_port: u16,
+        ssh_user: &str,
+        ssh_password: &str,
+        ssh_key_path: &str,
+        ssh_key_passphrase: &str,
+        use_ssh_agent: bool,
+        ssh_agent_sock_path: &str,
+        auth_method: &str,
+        connect_timeout_secs: u64,
+        remote_host: &str,
+        remote_port: u16,
+        expose_to_lan: bool,
+        allow_exec_channel_proxy: bool,
+        requested_local_port: Option<u16>,
+    ) -> Result<u16, String> {
         {
             let mut tunnels = self.tunnels.lock().await;
             if let Some(port) = Self::get_active_port(&mut tunnels, connection_id) {
-                return Ok(port);
+                if requested_local_port.is_none_or(|requested| requested == port) {
+                    return Ok(port);
+                }
             }
         }
 
@@ -1027,7 +1074,14 @@ impl TunnelManager {
         {
             let mut tunnels = self.tunnels.lock().await;
             if let Some(port) = Self::get_active_port(&mut tunnels, connection_id) {
-                return Ok(port);
+                if requested_local_port.is_none_or(|requested| requested == port) {
+                    return Ok(port);
+                }
+                if let Some(entry) = tunnels.remove(connection_id) {
+                    for handle in entry.handles {
+                        handle.abort();
+                    }
+                }
             }
         }
         let (handle, local_port) = spawn_tunnel(
@@ -1048,6 +1102,7 @@ impl TunnelManager {
             remote_port,
             expose_to_lan,
             allow_exec_channel_proxy,
+            requested_local_port,
         )
         .await?;
 
@@ -1123,6 +1178,7 @@ impl TunnelManager {
                 target_port,
                 is_last && hop.expose_lan,
                 hop.allow_exec_channel_proxy,
+                None,
             )
             .await
             .map_err(|err| format!("SSH hop {} failed: {err}", index + 1))?;
@@ -1199,12 +1255,9 @@ async fn spawn_tunnel(
     remote_port: u16,
     expose_to_lan: bool,
     allow_exec_channel_proxy: bool,
+    requested_local_port: Option<u16>,
 ) -> Result<(JoinHandle<()>, u16), String> {
-    let local_port = portpicker::pick_unused_port().ok_or("No available port")?;
-
-    let bind_addr = if expose_to_lan { "0.0.0.0" } else { "127.0.0.1" };
-    let listener =
-        TcpListener::bind((bind_addr, local_port)).await.map_err(|e| format!("Failed to bind local port: {e}"))?;
+    let (listener, local_port) = bind_tunnel_listener(expose_to_lan, requested_local_port).await?;
 
     // Initial connection: fail fast on bad credentials
     let session = connect_and_authenticate(
@@ -1246,6 +1299,26 @@ async fn spawn_tunnel(
     ));
 
     Ok((handle, local_port))
+}
+
+async fn bind_tunnel_listener(
+    expose_to_lan: bool,
+    requested_local_port: Option<u16>,
+) -> Result<(TcpListener, u16), String> {
+    let local_port = match requested_local_port {
+        Some(port) => port,
+        None => portpicker::pick_unused_port().ok_or("No available port")?,
+    };
+
+    let bind_addr = if expose_to_lan { "0.0.0.0" } else { "127.0.0.1" };
+    let listener = TcpListener::bind((bind_addr, local_port)).await.map_err(|error| {
+        if requested_local_port.is_some() {
+            format!("Failed to bind requested local port {local_port}: {error}")
+        } else {
+            format!("Failed to bind local port: {error}")
+        }
+    })?;
+    Ok((listener, local_port))
 }
 
 fn effective_hop_timeout(hop: &SshTunnelConfig) -> u64 {
@@ -1300,9 +1373,10 @@ mod tests {
     use super::SshClient;
     use super::PROMPT_TEST_LOCK;
     use super::{
-        connect_and_authenticate, effective_hop_timeout, netcat_proxy_command, openssh_padding_len, plan_chain,
-        read_ssh_string, sanitize_unencrypted_openssh_comment_bytes, server_offers_keyboard_interactive,
-        server_offers_password, ssh_client_config, HostKeyState, HostKeyVerifier, PlannedTunnel, TunnelManager,
+        bind_tunnel_listener, connect_and_authenticate, effective_hop_timeout, netcat_proxy_command,
+        openssh_padding_len, plan_chain, read_ssh_string, sanitize_unencrypted_openssh_comment_bytes,
+        server_offers_keyboard_interactive, server_offers_password, ssh_client_config, HostKeyState, HostKeyVerifier,
+        PlannedTunnel, TunnelManager,
     };
     use crate::db::ssh_prompt;
     use crate::models::connection::{default_ssh_connect_timeout_secs, SshTunnelConfig};
@@ -1319,7 +1393,7 @@ mod tests {
     use std::sync::Arc;
     use tempfile::tempdir;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::TcpStream;
+    use tokio::net::{TcpListener, TcpStream};
     use tokio::sync::mpsc;
 
     fn push_u32(bytes: &mut Vec<u8>, value: u32) {
@@ -1352,6 +1426,28 @@ mod tests {
         push_ssh_string(&mut bytes, b"fake-public-key");
         push_ssh_string(&mut bytes, private_blob);
         bytes
+    }
+
+    #[tokio::test]
+    async fn requested_local_port_is_bound_exactly() {
+        let probe = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = probe.local_addr().unwrap().port();
+        drop(probe);
+
+        let (listener, local_port) = bind_tunnel_listener(false, Some(port)).await.unwrap();
+
+        assert_eq!(local_port, port);
+        assert_eq!(listener.local_addr().unwrap().port(), port);
+    }
+
+    #[tokio::test]
+    async fn requested_local_port_conflict_is_reported() {
+        let occupied = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = occupied.local_addr().unwrap().port();
+
+        let error = bind_tunnel_listener(false, Some(port)).await.unwrap_err();
+
+        assert!(error.contains(&format!("requested local port {port}")));
     }
 
     fn hop(id: &str, host: &str, port: u16) -> SshTunnelConfig {

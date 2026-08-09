@@ -3,7 +3,7 @@ import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { useI18n } from "vue-i18n";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Button } from "@/components/ui/button";
-import { Loader2, CheckCircle2, XCircle, AlertCircle, X, FileDown, DatabaseBackup, FileCode2, ArrowRightLeft, ChevronRight, FolderOpen } from "@lucide/vue";
+import { Loader2, CheckCircle2, XCircle, AlertCircle, X, FileDown, DatabaseBackup, FileCode2, ArrowRightLeft, Layers3, ChevronRight, FolderOpen } from "@lucide/vue";
 import { formatDataTransferDuration, useExportTracker, type ExportTask } from "@/composables/useExportTracker";
 import { translateBackendError } from "@/i18n/backend-errors";
 import { useToast } from "@/composables/useToast";
@@ -69,6 +69,11 @@ const progressValue = (task: ExportTask) => {
     if (task.status === "Done") return 100;
     return Math.min(95, Math.round(((task.tableIndex ?? 0) / task.totalTables) * 100));
   }
+  if (task.kind === "multi-db-execution") {
+    if (task.status === "Done" || task.status === "Error" || task.status === "Cancelled") return 100;
+    if (!task.multiDbTotal) return 0;
+    return Math.min(95, Math.round(((task.multiDbCompleted ?? 0) / task.multiDbTotal) * 100));
+  }
   return progressPercent(task.totalRows, task.rowsExported);
 };
 
@@ -92,6 +97,7 @@ const taskTitle = (task: ExportTask) => {
   }
   if (task.kind === "sql-file") return t("exportProgress.sqlFileTitle", { name: task.tableName });
   if (task.kind === "data-transfer") return t("exportProgress.dataTransferTitle", { name: task.tableName });
+  if (task.kind === "multi-db-execution") return t("exportProgress.multiDbExecutionTitle", { name: task.tableName });
   return taskFileName(task) || `${task.tableName}.${task.format}`;
 };
 
@@ -124,6 +130,14 @@ const rowsText = (task: ExportTask) => {
     const durationText = t("exportProgress.elapsed", { duration: formatDataTransferDuration(finishedAt - (task.startedAt ?? finishedAt)) });
     return task.currentTable ? `${tableText} · ${task.currentTable} · ${rowText} · ${durationText}` : `${tableText} · ${durationText}`;
   }
+  if (task.kind === "multi-db-execution") {
+    return t("exportProgress.multiDbTargets", {
+      completed: (task.multiDbCompleted ?? 0).toLocaleString(),
+      total: (task.multiDbTotal ?? 0).toLocaleString(),
+      success: (task.multiDbSuccessCount ?? 0).toLocaleString(),
+      failed: (task.multiDbFailureCount ?? 0).toLocaleString(),
+    });
+  }
   if (task.totalRows) return `${task.rowsExported.toLocaleString()} / ${task.totalRows.toLocaleString()}`;
   return `${task.rowsExported.toLocaleString()} ${t("exportProgress.rowsShort")}`;
 };
@@ -151,6 +165,7 @@ const statusIcon = (task: ExportTask) => {
     if (task.kind === "database-export") return DatabaseBackup;
     if (task.kind === "sql-file") return FileCode2;
     if (task.kind === "data-transfer") return ArrowRightLeft;
+    if (task.kind === "multi-db-execution") return Layers3;
   }
   switch (task.status) {
     case "Running":
@@ -215,6 +230,10 @@ function toggleFailureDetails(exportId: string) {
 function failureDetailCount(task: ExportTask) {
   return (task.transferFailures?.length ?? 0) + (task.transferFailuresOmitted ?? 0);
 }
+
+function openTask(task: ExportTask): void {
+  task.onOpen?.();
+}
 </script>
 
 <template>
@@ -245,7 +264,7 @@ function failureDetailCount(task: ExportTask) {
             <!-- Progress bar -->
             <div v-if="isActive(task.status)" class="w-full bg-muted rounded-full h-1.5 overflow-hidden">
               <div
-                v-if="task.totalRows || (task.kind === 'database-export' && (task.totalObjects || task.overallPercent !== undefined)) || (task.kind === 'data-transfer' && task.totalTables)"
+                v-if="task.totalRows || (task.kind === 'database-export' && (task.totalObjects || task.overallPercent !== undefined)) || (task.kind === 'data-transfer' && task.totalTables) || (task.kind === 'multi-db-execution' && task.multiDbTotal)"
                 class="h-full bg-primary rounded-full transition-[width] duration-300"
                 :style="{ width: `${progressValue(task)}%` }"
               />
@@ -286,6 +305,9 @@ function failureDetailCount(task: ExportTask) {
 
           <!-- Actions: reveal folder for finished exports, stop/cancel for active, delete for finished -->
           <div class="flex shrink-0 pt-4">
+            <button v-if="task.kind === 'multi-db-execution' && task.onOpen" class="flex h-6 w-6 items-center justify-center rounded hover:bg-muted" :title="t('exportProgress.openTask')" @click.stop="openTask(task)">
+              <ChevronRight class="h-3.5 w-3.5 text-muted-foreground hover:text-foreground" />
+            </button>
             <button v-if="canRevealTaskFile(task)" class="flex h-6 w-6 items-center justify-center rounded hover:bg-muted disabled:opacity-50" :title="t('exportProgress.openFolder')" :disabled="revealingTaskIds.includes(task.exportId)" @click="revealTaskFile(task)">
               <FolderOpen class="h-3.5 w-3.5 text-muted-foreground hover:text-foreground" />
             </button>

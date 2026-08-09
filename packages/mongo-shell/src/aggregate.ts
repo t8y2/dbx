@@ -25,7 +25,8 @@ export const MONGO_SHELL_COMMAND_HINT =
   "Use MongoDB shell-style commands, for example: db.collection.find({}).limit(100), " +
   "db.collection.aggregate([]), db.collection.aggregate([], { explain: true }), " +
   'db.version(), db.collection.countDocuments({}), db.collection.distinct("field"), ' +
-  "db.collection.getIndexes(), db.collection.createIndex({...}), or db.collection.insertOne({...}).";
+  "db.collection.getIndexes(), db.collection.createIndex({...}), db.createUser({...}), " +
+  "or db.collection.insertOne({...}).";
 
 const PIPELINE_MUST_BE_ARRAY =
   "MongoDB aggregate pipeline must be a JSON array (for example [{ $match: {} }]).";

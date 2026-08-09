@@ -1,4 +1,5 @@
 import type { BackendError } from "@/lib/backend/errorUtils";
+import type { MultiDbResultRunExecution } from "@/types/sqlExecution";
 
 export type DatabaseType =
   | "mysql"
@@ -153,7 +154,9 @@ export interface ConnectionConfig {
   docs_notes_path?: string;
   transport_layers?: TransportLayerConfig[];
   connect_timeout_secs?: number;
+  connect_timeout_inherit?: boolean;
   query_timeout_secs?: number;
+  query_timeout_inherit?: boolean;
   idle_timeout_secs?: number;
   keepalive_interval_secs?: number;
   ssl?: boolean;
@@ -708,6 +711,7 @@ export interface QueryResultRun {
   resultTotalRowCount?: number;
   resultTotalRowCountLoading?: boolean;
   resultSessionId?: string;
+  resultClientSessionId?: string;
   resultAccessedAt?: number;
   resultEstimatedBytes?: number;
   resultCacheKey?: string;
@@ -718,6 +722,7 @@ export interface QueryResultRun {
   queryEditabilityReason?: QueryTab["queryEditabilityReason"];
   mongoEditTarget?: QueryTab["mongoEditTarget"];
   tableMeta?: QueryTab["tableMeta"];
+  multiDbExecution?: MultiDbResultRunExecution;
 }
 
 export interface ParticipantInfo {
@@ -988,6 +993,7 @@ export interface QueryTab {
   resultTotalRowCount?: number;
   resultTotalRowCountLoading?: boolean;
   resultSessionId?: string;
+  resultClientSessionId?: string;
   resultAccessedAt?: number;
   resultEstimatedBytes?: number;
   resultCacheKey?: string;

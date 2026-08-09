@@ -8,7 +8,7 @@ use dbx_core::connection::AppState;
 use dbx_core::docs::annotations::{
     apply_annotations, load_annotations, resolve_notes_path, save_annotations, AnnotationFile,
 };
-use dbx_core::docs::{collect_snapshot, CollectOptions, SchemaSnapshot};
+use dbx_core::docs::{collect_snapshot, to_standalone_html, CollectOptions, SchemaSnapshot};
 use dbx_core::models::connection::ConnectionConfig;
 use tauri::State;
 
@@ -80,4 +80,15 @@ pub async fn docs_save_annotations(
 ) -> Result<(), String> {
     let path = notes_path_of(&state, &connection_id).await?;
     save_annotations(&path, &annotations)
+}
+
+#[tauri::command]
+pub async fn docs_export_html(
+    file_path: String,
+    snapshot: SchemaSnapshot,
+    annotations: AnnotationFile,
+    lang: String,
+) -> Result<(), String> {
+    let html = to_standalone_html(&snapshot, &annotations, &lang)?;
+    std::fs::write(&file_path, html).map_err(|error| format!("Failed to write {file_path}: {error}"))
 }

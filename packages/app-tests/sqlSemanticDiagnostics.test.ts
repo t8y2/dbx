@@ -119,6 +119,81 @@ test("flags missing columns when loaded column metadata is empty", () => {
   );
 });
 
+test.each(["STABLE", "SUPER TABLE", "SUPERTABLE"])("recognizes TDengine tbname for %s metadata", (tableType) => {
+  const analysis: SqlReferenceAnalysis = {
+    tables: [{ name: "test_tb", span: span(53, 59) }],
+    columns: [{ name: "tbname", span: span(8, 13) }],
+  };
+
+  const diagnostics = buildSqlSemanticDiagnostics(analysis, {
+    tables: [{ name: "test_tb", type: "table", tableType }],
+    columnsByTable: new Map([
+      [
+        "test_tb",
+        [
+          { name: "ts", table: "test_tb" },
+          { name: "reading", table: "test_tb" },
+          { name: "device_id", table: "test_tb" },
+        ],
+      ],
+    ]),
+    databaseType: "tdengine",
+  });
+
+  assert.deepEqual(diagnostics, []);
+});
+
+test("still flags tbname for ordinary TDengine tables", () => {
+  const analysis: SqlReferenceAnalysis = {
+    tables: [{ name: "ordinary_table", span: span(20, 33) }],
+    columns: [{ name: "tbname", span: span(8, 13) }],
+  };
+
+  const diagnostics = buildSqlSemanticDiagnostics(analysis, {
+    tables: [{ name: "ordinary_table", type: "table", tableType: "TABLE" }],
+    columnsByTable: new Map([["ordinary_table", [{ name: "ts", table: "ordinary_table" }]]]),
+    databaseType: "tdengine",
+  });
+
+  assert.deepEqual(
+    diagnostics.map((diagnostic) => diagnostic.message),
+    ["Unknown column tbname"],
+  );
+});
+
+test("recognizes qualified TDengine stable tbname references", () => {
+  const analysis: SqlReferenceAnalysis = {
+    tables: [{ name: "test_tb", span: span(27, 33) }],
+    columns: [{ name: "tbname", qualifier: "test_tb", span: span(8, 21) }],
+  };
+
+  const diagnostics = buildSqlSemanticDiagnostics(analysis, {
+    tables: [{ name: "test_tb", type: "table", tableType: "STABLE" }],
+    columnsByTable: new Map([["test_tb", [{ name: "ts", table: "test_tb" }]]]),
+    databaseType: "tdengine",
+  });
+
+  assert.deepEqual(diagnostics, []);
+});
+
+test("does not treat tbname as virtual outside TDengine", () => {
+  const analysis: SqlReferenceAnalysis = {
+    tables: [{ name: "test_tb", span: span(20, 26) }],
+    columns: [{ name: "tbname", span: span(8, 13) }],
+  };
+
+  const diagnostics = buildSqlSemanticDiagnostics(analysis, {
+    tables: [{ name: "test_tb", type: "table", tableType: "STABLE" }],
+    columnsByTable: new Map([["test_tb", [{ name: "ts", table: "test_tb" }]]]),
+    databaseType: "postgres",
+  });
+
+  assert.deepEqual(
+    diagnostics.map((diagnostic) => diagnostic.message),
+    ["Unknown column tbname"],
+  );
+});
+
 test("flags where-clause columns missing from a single referenced table", () => {
   const analysis: SqlReferenceAnalysis = {
     tables: [{ name: "t_0001", span: span(15, 22) }],

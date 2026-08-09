@@ -1976,6 +1976,7 @@ pub fn run() {
             commands::docs::docs_load_annotations,
             commands::docs::docs_apply_annotations,
             commands::docs::docs_save_annotations,
+            commands::docs::docs_export_html,
             commands::document_cmd::document_list_databases,
             commands::document_cmd::document_list_collections,
             commands::document_cmd::document_find_documents,
@@ -1996,6 +1997,7 @@ pub fn run() {
             commands::mongo_cmd::mongo_aggregate_documents,
             commands::mongo_cmd::mongo_distinct,
             commands::mongo_cmd::mongo_create_index,
+            commands::mongo_cmd::mongo_create_user,
             commands::mongo_cmd::mongo_drop_indexes,
             commands::document_cmd::document_insert_document,
             commands::mongo_cmd::mongo_insert_document,
@@ -2165,11 +2167,17 @@ pub fn run() {
             #[cfg(feature = "mq-admin")]
             commands::mqtt_cmd::mqtt_subscribe,
             #[cfg(feature = "mq-admin")]
+            commands::mqtt_cmd::mqtt_save_topic_config,
+            #[cfg(feature = "mq-admin")]
             commands::mqtt_cmd::mqtt_unsubscribe,
+            #[cfg(feature = "mq-admin")]
+            commands::mqtt_cmd::mqtt_delete_topic_config,
             #[cfg(feature = "mq-admin")]
             commands::mqtt_cmd::mqtt_publish,
             #[cfg(feature = "mq-admin")]
             commands::mqtt_cmd::mqtt_list_topics,
+            #[cfg(feature = "mq-admin")]
+            commands::mqtt_cmd::mqtt_list_saved_topic_configs,
             #[cfg(feature = "mq-admin")]
             commands::mqtt_cmd::mqtt_get_topic_tree,
             #[cfg(feature = "mq-admin")]

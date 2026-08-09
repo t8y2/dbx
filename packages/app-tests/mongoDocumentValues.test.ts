@@ -9,10 +9,42 @@ import {
   buildMongoUpdateDocument,
   formatMongoShellLiteral,
   mongoDocumentDisplayValue,
+  mongoDocumentGridColumnTypes,
   mongoDocumentIdForGrid,
   parseMongoDocumentInputValue,
   serializeMongoDocumentId,
 } from "../../apps/desktop/src/lib/mongo/mongoDocumentValues.ts";
+
+test("infers only consistently numeric Mongo grid columns", () => {
+  const documents = [
+    {
+      native: 1,
+      int32: { $numberInt: "1" },
+      int64: { $numberLong: "9007199254740993" },
+      double: { $numberDouble: "1.5" },
+      decimal: { $numberDecimal: "12.50" },
+      mixedNumeric: 1,
+      numericString: "123",
+      mixed: 1,
+      empty: null,
+    },
+    {
+      native: 2.5,
+      int32: { $numberInt: "2" },
+      int64: { $numberLong: "9007199254740994" },
+      double: { $numberDouble: "2.5" },
+      decimal: { $numberDecimal: "13.50" },
+      mixedNumeric: { $numberLong: "2" },
+      numericString: "456",
+      mixed: "2",
+    },
+  ];
+
+  assert.deepEqual(
+    mongoDocumentGridColumnTypes(documents, ["native", "int32", "int64", "double", "decimal", "mixedNumeric", "numericString", "mixed", "empty", "missing"]),
+    ["number", "int32", "int64", "double", "decimal128", "number", "", "", "", ""],
+  );
+});
 
 test("parses Mongo shell ISODate literals as extended JSON dates", () => {
   assert.deepEqual(parseMongoDocumentInputValue('ISODate("2026-06-10T13:59:31.287Z")'), {

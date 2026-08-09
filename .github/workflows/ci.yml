@@ -21,6 +21,12 @@ jobs:
     env:
       # The workspace intentionally contains platform-specific CLI/MCP packages for every release target.
       NPM_CONFIG_LOGLEVEL: error
+      # Same two-layer cache as rust-test/rust-fmt-clippy: sccache cannot
+      # reuse Cargo incremental artifacts, so avoid generating them in CI.
+      CARGO_INCREMENTAL: "0"
+      RUSTC_WRAPPER: sccache
+      # Fork PRs cannot read repository secrets, so retain the GHA backend for them.
+      SCCACHE_GHA_ENABLED: ${{ secrets.SCCACHE_S3_BUCKET == '' && 'true' || 'false' }}
     steps:
       - uses: actions/checkout@v5
 
@@ -38,8 +44,97 @@ jobs:
       - name: Install frontend dependencies
         run: pnpm --filter dbx... install --frozen-lockfile
 
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@1.97.1
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
+        with:
+          version: "v0.10.0"
+
+      - name: Configure S3 sccache
+        if: env.SCCACHE_GHA_ENABLED != 'true'
+        shell: bash
+        env:
+          CACHE_BUCKET: ${{ secrets.SCCACHE_S3_BUCKET }}
+          CACHE_ENDPOINT: ${{ secrets.SCCACHE_S3_ENDPOINT }}
+          CACHE_REGION: ${{ secrets.SCCACHE_S3_REGION }}
+          CACHE_KEY_PREFIX: ${{ secrets.SCCACHE_S3_KEY_PREFIX }}
+          CACHE_ACCESS_KEY_ID: ${{ secrets.SCCACHE_S3_ACCESS_KEY_ID }}
+          CACHE_SECRET_ACCESS_KEY: ${{ secrets.SCCACHE_S3_SECRET_ACCESS_KEY }}
+        run: |
+          {
+            echo "SCCACHE_BUCKET=${CACHE_BUCKET}"
+            echo "SCCACHE_ENDPOINT=${CACHE_ENDPOINT}"
+            echo "SCCACHE_REGION=${CACHE_REGION}"
+            echo "SCCACHE_S3_KEY_PREFIX=${CACHE_KEY_PREFIX}"
+            echo "SCCACHE_S3_USE_SSL=true"
+            echo "AWS_ACCESS_KEY_ID=${CACHE_ACCESS_KEY_ID}"
+            echo "AWS_SECRET_ACCESS_KEY=${CACHE_SECRET_ACCESS_KEY}"
+          } >> "$GITHUB_ENV"
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "./ -> target"
+          # Own key: this job builds one crate with --no-default-features,
+          # a different fingerprint than either Rust job's feature set, so
+          # sharing their key would only ever miss and waste cache space.
+          shared-key: ci-frontend-docs-export-smoke-x86_64-unknown-linux-gnu
+          # Preserve completed dependency builds when a later step fails.
+          cache-on-failure: true
+          # PR caches are large and branch-scoped; restore them from main without saving per-PR copies.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      # exportSmoke.spec.ts shells out to this example to build a real
+      # to_standalone_html fixture. Built here, before `pnpm check`, so the
+      # test's own `cargo run` (same flags — see the spec's comment) is a
+      # cache hit rather than a fresh compile of dbx-core inside a vitest
+      # hook. `--no-default-features`: the docs module needs none of
+      # duckdb-sidecar, mq-admin, sqlite-sqlcipher or system-fonts, so this
+      # avoids requiring any system dev packages this job doesn't already
+      # install.
+      - name: Build the docs export smoke fixture example
+        run: cargo build -p dbx-core --locked --no-default-features --example docs_export_smoke
+
+      # Guards that the committed bundle (crates/dbx-core/assets/docs-export.*)
+      # matches the sources under apps/desktop/ it was built from. This job is
+      # what runs on a frontend-only change, so the guard has to run here too —
+      # rust-test is gated on crates/**/src-tauri/**/Cargo.*, none of which a
+      # frontend-only PR touches. Same `--no-default-features` fingerprint as
+      # the prebuild step above, so this is a cache hit, not a fresh compile.
+      - name: Guard the committed docs export bundle
+        run: cargo test -p dbx-core --locked --no-default-features --lib docs::export
+
+      - name: Show sccache stats
+        if: always()
+        continue-on-error: true
+        run: ${SCCACHE_PATH} --show-stats
+
       - name: Frontend check
         run: pnpm check
+
+      # Advisory, not a guard: the manifest guard above hashes INPUTS, so it
+      # cannot see a hand-edited artefact (no source hash moves) or a
+      # toolchain bump (vite, tailwindcss and @vitejs/plugin-vue are
+      # plugins, not modules — they never enter the graph). Rebuilding and
+      # diffing checks the relationship between inputs and output instead,
+      # closing both gaps. Must run last: it overwrites the committed
+      # bundle, and both the guard above and `pnpm check` above (whose
+      # exportSmoke.spec.ts executes the *committed* bundle) need it
+      # untouched to be testing what is actually checked in.
+      - name: Rebuild the docs export bundle
+        run: pnpm build:docs-export
+
+      # continue-on-error for one cycle: every reproducibility observation
+      # so far was same-platform, and this job is ubuntu-22.04 x86_64 like
+      # every contributor's toolchain is lockfile-pinned to expect. If a
+      # byte ever differs cross-platform, surface it in the job summary
+      # rather than reddening every PR at once on a repo we contribute to,
+      # not maintain.
+      - name: Report any docs export bundle drift
+        run: git diff --exit-code -- crates/dbx-core/assets/
+        continue-on-error: true
 
   github-scripts:
     needs: changes
@@ -476,6 +571,8 @@ jobs:
               - 'package.json'
               - '.oxfmtrc.json'
               - 'scripts/run-check.mjs'
+              - 'crates/dbx-core/src/docs/**'
+              - 'crates/dbx-core/assets/docs-export.*'
               - '.github/workflows/ci.yml'
             packages:
               - 'packages/cli/**'

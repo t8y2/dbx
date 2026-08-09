@@ -47,6 +47,9 @@ export function buildProcedureExecutionSqlFromValues(options: BuildRoutineExecut
   if (options.databaseType === "mysql") {
     return buildMySqlProcedureExecutionSql(routine, sortedParameters);
   }
+  if (options.databaseType === "xugu") {
+    return buildXuguProcedureExecutionSql(routine, sortedParameters);
+  }
   const values = sortedParameters.filter((parameter) => shouldIncludeParameter(parameter));
   const useNamedArguments = shouldUseNamedArguments(options.databaseType, sortedParameters);
   if (options.databaseType === "oracle" || options.databaseType === "dameng" || options.databaseType === "oceanbase-oracle") {
@@ -56,6 +59,30 @@ export function buildProcedureExecutionSqlFromValues(options: BuildRoutineExecut
     return `CALL PROCEDURE ${routine}(${values.map((parameter) => routineArgumentSql(options.databaseType, parameter, useNamedArguments)).join(", ")});`;
   }
   return `CALL ${routine}(${values.map((parameter) => routineArgumentSql(options.databaseType, parameter, useNamedArguments)).join(", ")});`;
+}
+
+function buildXuguProcedureExecutionSql(routine: string, sortedParameters: RoutineParameterValue[]): string {
+  const callableParameters = sortedParameters.filter((parameter) => parameter.mode !== "RETURN");
+  const useNamedArguments = shouldUseXuguNamedArguments(callableParameters);
+  const args = callableParameters.flatMap((parameter) => {
+    if (parameter.useDefault && parameter.hasDefault && acceptsRoutineInput(parameter)) return [];
+    const value = parameter.mode === "OUT" ? "NULL" : routineParameterSqlValue("xugu", parameter);
+    if (!useNamedArguments) return [value];
+    return [`${quoteTableIdentifier("xugu", parameter.name)} => ${value}`];
+  });
+  return `CALL ${routine}(${args.join(", ")});`;
+}
+
+function shouldUseXuguNamedArguments(parameters: RoutineParameterValue[]): boolean {
+  let omittedDefault = false;
+  for (const parameter of parameters) {
+    if (parameter.useDefault && parameter.hasDefault && acceptsRoutineInput(parameter)) {
+      omittedDefault = true;
+      continue;
+    }
+    if (omittedDefault) return parameters.every((item) => !!item.name);
+  }
+  return false;
 }
 
 export function shouldIncludeParameter(parameter: RoutineParameterValue): boolean {

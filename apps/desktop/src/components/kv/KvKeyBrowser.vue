@@ -119,6 +119,8 @@ interface KvKeyBrowserLabels {
   copyFailed?: string;
   valueTooLarge?: string;
   deletePrefix?: string;
+  selectAll?: string;
+  deselectAll?: string;
 }
 
 interface KvCreateModeOption {
@@ -150,6 +152,10 @@ interface KvKeyRoute {
   key: string;
   keyIdentity?: string | null;
   keyBytes?: KvValue | null;
+}
+
+interface KvMultiSelection extends KvKeyRoute {
+  modRevision?: KvInt64 | null;
 }
 
 type BrowserTreeNode = KvKeyTreeNode | LazyKvKeyTreeNode;
@@ -192,6 +198,7 @@ const props = withDefaults(
     exportFormat?: string;
     exportFileExtension?: string;
     exportFallbackName?: string;
+    enableMultiSelect?: boolean;
     onWatchKey?: (route: KvKeyRoute) => void;
     onDeletePrefix?: (prefix: string) => void;
     watchActiveKey?: string | null;
@@ -218,9 +225,14 @@ const props = withDefaults(
     exportFileExtension: ".dbx-kv.json",
     exportFallbackName: "kv-key",
     searchHighlight: null,
+    enableMultiSelect: false,
     leaseOptions: () => [],
   },
 );
+
+const emit = defineEmits<{
+  selectionChange: [selection: KvMultiSelection[]];
+}>();
 
 const { t } = useI18n();
 const { toast } = useToast();
@@ -277,6 +289,7 @@ const selectedCreateMode = ref<KvCreateMode>("persistent");
 const selectedPrettyValue = ref<string | null>(null);
 const selectedValueCopied = ref(false);
 const lazyTreeState = reactive(createLazyKvKeyTreeState(lazyKvRootPath(props.lazyPathStyle), props.lazyPathStyle));
+const multiSelectedKeys = ref<Map<string, KvMultiSelection>>(new Map());
 const pageSize = 200;
 const metadataRefreshIntervalMs = 1000;
 const keyListRefreshBaseIntervalMs = 2000;
@@ -312,6 +325,13 @@ function summaryIdentity(summary: KvKeySummary): string {
 
 function routeIdentity(route: KvKeyRoute): string {
   return route.keyIdentity ?? route.key;
+}
+
+function multiSelectionFromSummary(summary: KvKeySummary): KvMultiSelection {
+  return {
+    ...routeFromSummary(summary),
+    modRevision: summary.modRevision == null ? null : String(summary.modRevision),
+  };
 }
 
 function routeFromKey(input: string | KvKeyRoute): KvKeyRoute {
@@ -489,6 +509,7 @@ function scheduleRemoteKeySuggestions(value: string) {
 
 function onPrefixInput(event: Event) {
   const value = (event.target as HTMLInputElement).value;
+  clearMultiSelection();
   keySuggestionOpen.value = Boolean(value.trim());
   keySuggestionIndex.value = -1;
   scheduleRemoteKeySuggestions(value);
@@ -503,6 +524,7 @@ function moveKeySuggestion(delta: number) {
 function acceptKeySuggestion(index: number) {
   const suggestion = keySuggestions.value[index];
   if (!suggestion) return;
+  clearMultiSelection();
   prefix.value = suggestion.key;
   keySuggestionIndex.value = -1;
   if (props.lazyHierarchy && suggestion.key.endsWith("/")) {
@@ -1025,6 +1047,61 @@ function onRowClick(node: BrowserTreeNode) {
   } else {
     void loadSelectedKey(routeFromNode(node));
   }
+}
+
+function collectNodeMultiSelection(node: BrowserTreeNode): KvMultiSelection[] {
+  if (node.kind === "lazy") return [{ key: node.key }];
+
+  const selected: KvMultiSelection[] = [];
+  const collect = (candidate: KvKeyTreeNode) => {
+    if (candidate.kind === "leaf" || candidate.key) {
+      selected.push({
+        key: kvKeyTreeNodePath(candidate),
+        keyIdentity: candidate.keyIdentity,
+        keyBytes: candidate.keyBytes,
+        modRevision: candidate.modRevision == null ? null : String(candidate.modRevision),
+      });
+    }
+    if (candidate.kind === "group") candidate.children.forEach(collect);
+  };
+  collect(node);
+  return selected;
+}
+
+function emitMultiSelection(next: Map<string, KvMultiSelection>) {
+  multiSelectedKeys.value = next;
+  emit("selectionChange", [...next.values()]);
+}
+
+function setNodeMultiSelection(node: BrowserTreeNode, selected: boolean) {
+  const next = new Map(multiSelectedKeys.value);
+  for (const route of collectNodeMultiSelection(node)) {
+    const identity = routeIdentity(route);
+    if (selected) next.set(identity, route);
+    else next.delete(identity);
+  }
+  emitMultiSelection(next);
+}
+
+function nodeMultiSelectionState(node: BrowserTreeNode): { selected: boolean; indeterminate: boolean } {
+  const candidates = collectNodeMultiSelection(node);
+  if (!candidates.length) return { selected: false, indeterminate: false };
+  const selectedCount = candidates.filter((route) => multiSelectedKeys.value.has(routeIdentity(route))).length;
+  return { selected: selectedCount === candidates.length, indeterminate: selectedCount > 0 && selectedCount < candidates.length };
+}
+
+function selectAllMultiSelection() {
+  emitMultiSelection(new Map(keys.value.map((key) => [summaryIdentity(key), multiSelectionFromSummary(key)])));
+}
+
+function clearMultiSelection() {
+  if (multiSelectedKeys.value.size) emitMultiSelection(new Map());
+}
+
+function removeMultiSelection(selection: KvMultiSelection[]) {
+  const next = new Map(multiSelectedKeys.value);
+  selection.forEach((route) => next.delete(routeIdentity(route)));
+  emitMultiSelection(next);
 }
 
 function onRowDoubleClick(node: BrowserTreeNode) {
@@ -1629,6 +1706,7 @@ watch(
     remoteKeySuggestions.value = [];
     stopKeyListRefresh();
     clearSelectedKey();
+    clearMultiSelection();
     try {
       await connectionStore.ensureConnected(props.connectionId);
     } catch {
@@ -1694,6 +1772,7 @@ onBeforeUnmount(() => {
   if (keySuggestionTimer) clearTimeout(keySuggestionTimer);
   if (selectedValueCopyTimer) clearTimeout(selectedValueCopyTimer);
   clearSelectedKey();
+  clearMultiSelection();
   stopKeyListRefresh();
 });
 defineExpose({
@@ -1702,6 +1781,10 @@ defineExpose({
   selectKey: selectKeyFromNavigation,
   openCreate: (parentPath?: string) => openCreateDialog(parentPath),
   selection: () => ({ key: selectedKey.value, value: selectedValue.value }),
+  multiSelection: () => [...multiSelectedKeys.value.values()],
+  selectAllMultiSelection,
+  clearMultiSelection,
+  removeMultiSelection,
 });
 </script>
 
@@ -1752,7 +1835,11 @@ defineExpose({
           </button>
         </PopoverContent>
       </Popover>
-      <Button size="sm" variant="outline" class="h-9 gap-1.5" :disabled="loading" @click="loadKeys(true, { preserveSelection: true })">
+      <div v-if="enableMultiSelect && multiSelectedKeys.size" class="flex shrink-0 items-center gap-1.5">
+        <Button size="sm" variant="outline" class="h-7 px-2 text-xs" @click="selectAllMultiSelection()">{{ labels.selectAll || "Select all" }}</Button>
+        <Button size="sm" variant="outline" class="h-7 px-2 text-xs" @click="clearMultiSelection()">{{ labels.deselectAll || "Clear" }}</Button>
+      </div>
+      <Button size="sm" variant="outline" class="h-8 gap-1.5" :disabled="loading" @click="loadKeys(true, { preserveSelection: true })">
         <Loader2 v-if="loading" class="h-3.5 w-3.5 animate-spin" />
         <RefreshCw v-else class="h-3.5 w-3.5" />
         {{ t("grid.refresh") }}
@@ -1784,30 +1871,45 @@ defineExpose({
           <div v-else class="h-full overflow-auto py-1 text-sm">
             <template v-for="row in visibleRows" :key="row.type === 'node' ? row.node.id : row.id">
               <CustomContextMenu v-if="row.type === 'node'" :items="nodeContextMenuItems(row.node)" v-slot="{ onContextMenu }">
-                <button
-                  type="button"
-                  class="flex h-8 w-full select-none items-center gap-1.5 px-2 text-left transition-colors hover:bg-accent"
+                <div
+                  class="flex h-8 w-full select-none items-center gap-1.5 pr-2 text-left transition-colors hover:bg-accent"
                   :class="rowIsSelected(row.node) ? 'bg-primary/10 font-medium text-foreground shadow-[inset_3px_0_0_hsl(var(--primary))]' : ''"
                   :style="{ paddingLeft: `${8 + row.depth * 18}px` }"
-                  @click="onRowClick(row.node)"
-                  @dblclick.stop.prevent="onRowDoubleClick(row.node)"
                   @mousedown.right.prevent
                   @contextmenu="(event) => onRowContextMenu(event, row.node, onContextMenu)"
                 >
-                  <template v-if="nodeIsExpandable(row.node)">
-                    <Loader2 v-if="nodeIsLoading(row.node)" class="h-3.5 w-3.5 shrink-0 animate-spin" />
-                    <ChevronDown v-else-if="nodeIsExpanded(row.node)" class="h-3.5 w-3.5 shrink-0" />
-                    <ChevronRight v-else class="h-3.5 w-3.5 shrink-0" />
-                    <FolderOpen v-if="nodeIsExpanded(row.node)" class="h-4 w-4 shrink-0 text-sky-500" />
-                    <FolderClosed v-else class="h-4 w-4 shrink-0 text-sky-500" />
-                    <KeyRound v-if="row.node.kind === 'lazy' && row.node.hasValue === true" class="h-3.5 w-3.5 shrink-0 text-sky-500" />
-                  </template>
-                  <template v-else>
-                    <span class="w-3.5 shrink-0" />
-                    <KeyRound class="h-4 w-4 shrink-0 text-sky-500" />
-                  </template>
-                  <span class="truncate">{{ row.node.label }}</span>
-                </button>
+                  <button
+                    v-if="enableMultiSelect"
+                    type="button"
+                    role="checkbox"
+                    class="flex h-5 w-5 shrink-0 items-center justify-center text-foreground"
+                    :aria-label="`${row.node.label}`"
+                    :aria-checked="nodeMultiSelectionState(row.node).indeterminate ? 'mixed' : nodeMultiSelectionState(row.node).selected"
+                    @click.stop
+                    @click="setNodeMultiSelection(row.node, !nodeMultiSelectionState(row.node).selected)"
+                  >
+                    <span v-if="nodeMultiSelectionState(row.node).selected" class="flex h-3.5 w-3.5 items-center justify-center rounded-[2px] bg-primary text-primary-foreground">
+                      <Check class="h-2.5 w-2.5 stroke-[3]" />
+                    </span>
+                    <span v-else-if="nodeMultiSelectionState(row.node).indeterminate" class="h-3.5 w-3.5 rounded-[2px] bg-primary" />
+                    <span v-else class="h-3.5 w-3.5 rounded-[2px] border border-muted-foreground/50" />
+                  </button>
+                  <button type="button" class="flex min-w-0 flex-1 items-center gap-1.5 text-left" @click="onRowClick(row.node)" @dblclick.stop.prevent="onRowDoubleClick(row.node)">
+                    <template v-if="nodeIsExpandable(row.node)">
+                      <Loader2 v-if="nodeIsLoading(row.node)" class="h-3.5 w-3.5 shrink-0 animate-spin" />
+                      <ChevronDown v-else-if="nodeIsExpanded(row.node)" class="h-3.5 w-3.5 shrink-0" />
+                      <ChevronRight v-else class="h-3.5 w-3.5 shrink-0" />
+                      <FolderOpen v-if="nodeIsExpanded(row.node)" class="h-4 w-4 shrink-0 text-sky-500" />
+                      <FolderClosed v-else class="h-4 w-4 shrink-0 text-sky-500" />
+                      <KeyRound v-if="row.node.kind === 'lazy' && row.node.hasValue === true" class="h-3.5 w-3.5 shrink-0 text-sky-500" />
+                    </template>
+                    <template v-else>
+                      <span class="w-3.5 shrink-0" />
+                      <KeyRound class="h-4 w-4 shrink-0 text-sky-500" />
+                    </template>
+                    <span class="truncate">{{ row.node.label }}</span>
+                  </button>
+                </div>
               </CustomContextMenu>
               <div v-else class="px-2 py-1" :style="{ paddingLeft: `${8 + row.depth * 18}px` }">
                 <Button size="sm" variant="outline" class="h-7 w-full gap-1.5" :disabled="row.loading || loadingMore" @click="loadMoreLazyChildren(row.parentKey)">

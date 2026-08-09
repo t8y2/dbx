@@ -193,6 +193,15 @@ pub struct MongoCreateIndexRequest {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct MongoCreateUserRequest {
+    pub connection_id: String,
+    pub database: String,
+    pub user_json: String,
+    pub write_concern_json: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct MongoDropIndexesRequest {
     pub connection_id: String,
     pub database: String,
@@ -614,6 +623,26 @@ pub async fn create_index(
     .await
     .map_err(AppError::from)?;
     Ok(Json(serde_json::json!({ "name": name })))
+}
+
+pub async fn create_user(
+    State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
+    Json(req): Json<MongoCreateUserRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    super::mcp_policy::ensure_dangerous_write(&state, &headers, &req.connection_id, &req.database, "Create user")
+        .await?;
+    ensure_writable(&state.app, &req.connection_id, "Create user").await?;
+    let affected_rows = dbx_core::mongo_ops::mongo_create_user_core(
+        &state.app,
+        &req.connection_id,
+        &req.database,
+        &req.user_json,
+        req.write_concern_json.as_deref(),
+    )
+    .await
+    .map_err(AppError::from)?;
+    Ok(Json(serde_json::json!({ "affected_rows": affected_rows })))
 }
 
 pub async fn drop_indexes(

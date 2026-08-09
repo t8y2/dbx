@@ -18,10 +18,11 @@ import { DEFAULT_SQL_FORMATTER_SETTINGS, normalizeSqlFormatterSettings, type Sql
 import { normalizeSqlVariableSyntaxOverrides, type SqlVariableSyntaxOverrides } from "@/lib/sql/sqlVariableSyntax";
 import { DEFAULT_TABLE_COLUMN_TEMPLATE_FIELDS, normalizeTableColumnTemplateFields } from "@/lib/table/tableColumnTemplates";
 import { type DataTabReuseMode, DEFAULT_DATA_TAB_REUSE_MODE, normalizeDataTabReuseMode } from "@/lib/tabs/dataTabReuseMode";
+import { normalizeCompletionTriggerMode, type SqlCompletionTriggerMode } from "@/lib/sql/sqlCompletionTriggerPolicy";
 import type { AiApiStyle, AiAuthMethod, AiChatSelectionState, AiConfig, AiConfigItem, AiConfiguredModel, AiEffortLevel, AiEffortSelection, AiModelEffortPreference, AiProvider, AiReasoningLevel, AiTestConnectionResult } from "@/types/ai";
 import type { SqlSnippet, TableInfoTab } from "@/types/database";
 
-export type { AiApiStyle, AiAuthMethod, AiChatSelectionState, AiConfig, AiConfigItem, AiConfiguredModel, AiEffortLevel, AiEffortSelection, AiProvider, AiReasoningLevel, AiTestConnectionResult, DataTabReuseMode, SavedSqlOpenTargetMode };
+export type { AiApiStyle, AiAuthMethod, AiChatSelectionState, AiConfig, AiConfigItem, AiConfiguredModel, AiEffortLevel, AiEffortSelection, AiProvider, AiReasoningLevel, AiTestConnectionResult, DataTabReuseMode, SavedSqlOpenTargetMode, SqlCompletionTriggerMode };
 
 export interface DesktopSettings {
   show_tray_icon: boolean;
@@ -242,6 +243,16 @@ export const AI_PROVIDER_PRESETS: Record<AiProvider, AiProviderPreset> = {
     authMethod: "bearer",
     requiresApiKey: false,
   },
+  "cursor-cli": {
+    label: "Cursor CLI",
+    iconSlug: "cursor",
+    provider: "cursor-cli",
+    endpoint: "",
+    model: "default",
+    apiStyle: "completions",
+    authMethod: "bearer",
+    requiresApiKey: false,
+  },
   "pi-agent-cli": {
     label: "Pi Coding Agent",
     iconSlug: "pi",
@@ -310,6 +321,8 @@ export function normalizeAiConfig(config: Partial<AiConfig> | null | undefined):
     piAgentCliEnv: normalizeAiEnv(config?.piAgentCliEnv),
     opencodeCliPath: config?.opencodeCliPath?.trim() || undefined,
     opencodeCliEnv: normalizeAiEnv(config?.opencodeCliEnv),
+    cursorCliPath: config?.cursorCliPath?.trim() || undefined,
+    cursorCliEnv: normalizeAiEnv(config?.cursorCliEnv),
   };
 }
 
@@ -453,6 +466,11 @@ export interface EditorSettings {
   activeCustomThemeId: string;
   executeMode: "all" | "current";
   executeModeDefaultVersion: number;
+  globalConnectTimeoutSecs: number;
+  connectTimeoutInheritConnectionIds: string[];
+  globalQueryTimeoutSecs: number;
+  queryTimeoutInheritConnectionIds: string[];
+  timeoutInheritanceMigrationVersion: number;
   showExecutionTargetPicker: boolean;
   showStatementRunButtons: boolean;
   showCurrentStatementFrame: boolean;
@@ -538,6 +556,7 @@ export interface EditorSettings {
   sqlVariableSyntaxOverrides: SqlVariableSyntaxOverrides;
   continueOnErrorOnBatch: boolean;
   clickTableNavigationTarget: ClickTableNavigationTarget;
+  completionTriggerMode: SqlCompletionTriggerMode;
 }
 
 export interface ToolbarItems {
@@ -633,6 +652,11 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   activeCustomThemeId: "default",
   executeMode: "current",
   executeModeDefaultVersion: EXECUTE_MODE_CURRENT_DEFAULT_VERSION,
+  globalConnectTimeoutSecs: 10,
+  connectTimeoutInheritConnectionIds: [],
+  globalQueryTimeoutSecs: 30,
+  queryTimeoutInheritConnectionIds: [],
+  timeoutInheritanceMigrationVersion: 2,
   showExecutionTargetPicker: false,
   showStatementRunButtons: true,
   showCurrentStatementFrame: true,
@@ -718,6 +742,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   sqlVariableSyntaxOverrides: {},
   continueOnErrorOnBatch: false,
   clickTableNavigationTarget: "data",
+  completionTriggerMode: "positional",
 };
 
 export const STORAGE_KEY = "dbx-editor-settings";
@@ -726,6 +751,16 @@ const EXPORT_BATCH_SIZE_DEFAULT_MIGRATION_KEY = "dbx-export-batch-size-default-m
 const LEGACY_DEFAULT_EXPORT_BATCH_SIZE = 10000;
 const MIN_UI_SCALE = 0.75;
 const MAX_UI_SCALE = 2;
+
+export function normalizeGlobalQueryTimeoutSecs(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) return DEFAULT_EDITOR_SETTINGS.globalQueryTimeoutSecs;
+  return Math.min(300, Math.max(0, Math.round(value)));
+}
+
+export function normalizeGlobalConnectTimeoutSecs(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) return DEFAULT_EDITOR_SETTINGS.globalConnectTimeoutSecs;
+  return Math.min(300, Math.max(1, Math.round(value)));
+}
 
 function normalizeUiScale(value: unknown): number {
   if (typeof value !== "number" || !Number.isFinite(value)) return DEFAULT_EDITOR_SETTINGS.uiScale;
@@ -899,6 +934,7 @@ function normalizeTableInfoTab(value: unknown): TableInfoTab {
 }
 
 export function normalizeEditorSettings(settings: Partial<EditorSettings>, existing?: EditorSettings): EditorSettings {
+  const legacyTimeoutSettings = settings as Partial<EditorSettings> & { queryTimeoutSecs?: unknown; queryTimeoutInheritanceMigrationVersion?: unknown };
   const sqlSemanticDiagnosticsMode = normalizeSqlSemanticDiagnosticsMode(settings.sqlSemanticDiagnosticsMode, settings.sqlSemanticDiagnosticsEnabled);
   const savedExecuteModeDefaultVersion = settings.executeModeDefaultVersion;
   const executeModeDefaultVersion = typeof savedExecuteModeDefaultVersion === "number" && savedExecuteModeDefaultVersion >= EXECUTE_MODE_CURRENT_DEFAULT_VERSION ? savedExecuteModeDefaultVersion : EXECUTE_MODE_CURRENT_DEFAULT_VERSION;
@@ -944,6 +980,16 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     activeCustomThemeId: settings.activeCustomThemeId ?? "default",
     executeMode: hasCurrentExecuteModeDefault && (settings.executeMode === "all" || settings.executeMode === "current") ? settings.executeMode : DEFAULT_EDITOR_SETTINGS.executeMode,
     executeModeDefaultVersion,
+    globalConnectTimeoutSecs: normalizeGlobalConnectTimeoutSecs(settings.globalConnectTimeoutSecs),
+    connectTimeoutInheritConnectionIds: Array.isArray(settings.connectTimeoutInheritConnectionIds) ? [...new Set(settings.connectTimeoutInheritConnectionIds.filter((id): id is string => typeof id === "string" && id.trim().length > 0).map((id) => id.trim()))] : [],
+    globalQueryTimeoutSecs: normalizeGlobalQueryTimeoutSecs(settings.globalQueryTimeoutSecs ?? legacyTimeoutSettings.queryTimeoutSecs),
+    queryTimeoutInheritConnectionIds: Array.isArray(settings.queryTimeoutInheritConnectionIds) ? [...new Set(settings.queryTimeoutInheritConnectionIds.filter((id): id is string => typeof id === "string" && id.trim().length > 0).map((id) => id.trim()))] : [],
+    timeoutInheritanceMigrationVersion:
+      typeof settings.timeoutInheritanceMigrationVersion === "number" && settings.timeoutInheritanceMigrationVersion >= 1
+        ? Math.floor(settings.timeoutInheritanceMigrationVersion)
+        : typeof legacyTimeoutSettings.queryTimeoutInheritanceMigrationVersion === "number" && legacyTimeoutSettings.queryTimeoutInheritanceMigrationVersion >= 1
+          ? 1
+          : 0,
     showExecutionTargetPicker: settings.showExecutionTargetPicker ?? DEFAULT_EDITOR_SETTINGS.showExecutionTargetPicker,
     showStatementRunButtons: typeof settings.showStatementRunButtons === "boolean" ? settings.showStatementRunButtons : DEFAULT_EDITOR_SETTINGS.showStatementRunButtons,
     showCurrentStatementFrame: typeof settings.showCurrentStatementFrame === "boolean" ? settings.showCurrentStatementFrame : DEFAULT_EDITOR_SETTINGS.showCurrentStatementFrame,
@@ -1067,6 +1113,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     sqlVariableSyntaxOverrides: normalizeSqlVariableSyntaxOverrides(settings.sqlVariableSyntaxOverrides),
     continueOnErrorOnBatch: settings.continueOnErrorOnBatch === true,
     clickTableNavigationTarget: normalizeClickTableNavigationTarget(settings.clickTableNavigationTarget),
+    completionTriggerMode: normalizeCompletionTriggerMode(settings.completionTriggerMode),
   };
 }
 
@@ -1402,7 +1449,7 @@ export const useSettingsStore = defineStore("settings", () => {
     const config = aiConfigs.value.find((c) => c.id === activeModel.value!.configId);
     if (!config) return false;
     const preset = AI_PROVIDER_PRESETS[config.provider];
-    if (config.provider === "codex-cli" || config.provider === "claude-code-cli" || config.provider === "pi-agent-cli" || config.provider === "opencode-cli") return true;
+    if (config.provider === "codex-cli" || config.provider === "claude-code-cli" || config.provider === "pi-agent-cli" || config.provider === "opencode-cli" || config.provider === "cursor-cli") return true;
     return !!config.endpoint && !!activeModel.value!.modelId && (!preset.requiresApiKey || !!config.apiKey);
   });
 
@@ -1433,6 +1480,15 @@ export const useSettingsStore = defineStore("settings", () => {
       }
     }
     if (partial.executeMode !== undefined) editorSettings.value.executeMode = partial.executeMode;
+    if (partial.globalConnectTimeoutSecs !== undefined) editorSettings.value.globalConnectTimeoutSecs = normalizeGlobalConnectTimeoutSecs(partial.globalConnectTimeoutSecs);
+    if (partial.connectTimeoutInheritConnectionIds !== undefined) {
+      editorSettings.value.connectTimeoutInheritConnectionIds = [...new Set(partial.connectTimeoutInheritConnectionIds.filter((id): id is string => typeof id === "string" && id.trim().length > 0).map((id) => id.trim()))];
+    }
+    if (partial.globalQueryTimeoutSecs !== undefined) editorSettings.value.globalQueryTimeoutSecs = normalizeGlobalQueryTimeoutSecs(partial.globalQueryTimeoutSecs);
+    if (partial.queryTimeoutInheritConnectionIds !== undefined) {
+      editorSettings.value.queryTimeoutInheritConnectionIds = [...new Set(partial.queryTimeoutInheritConnectionIds.filter((id): id is string => typeof id === "string" && id.trim().length > 0).map((id) => id.trim()))];
+    }
+    if (partial.timeoutInheritanceMigrationVersion !== undefined) editorSettings.value.timeoutInheritanceMigrationVersion = Math.max(0, Math.floor(partial.timeoutInheritanceMigrationVersion));
     if (partial.showExecutionTargetPicker !== undefined) editorSettings.value.showExecutionTargetPicker = partial.showExecutionTargetPicker;
     if (partial.showStatementRunButtons !== undefined) editorSettings.value.showStatementRunButtons = partial.showStatementRunButtons === true;
     if (partial.showCurrentStatementFrame !== undefined) editorSettings.value.showCurrentStatementFrame = partial.showCurrentStatementFrame === true;
@@ -1524,6 +1580,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.sqlVariableSyntaxOverrides !== undefined) editorSettings.value.sqlVariableSyntaxOverrides = normalizeSqlVariableSyntaxOverrides(partial.sqlVariableSyntaxOverrides);
     if (partial.continueOnErrorOnBatch !== undefined) editorSettings.value.continueOnErrorOnBatch = partial.continueOnErrorOnBatch === true;
     if (partial.clickTableNavigationTarget !== undefined) editorSettings.value.clickTableNavigationTarget = normalizeClickTableNavigationTarget(partial.clickTableNavigationTarget);
+    if (partial.completionTriggerMode !== undefined) editorSettings.value.completionTriggerMode = normalizeCompletionTriggerMode(partial.completionTriggerMode);
     saveEditorSettings(editorSettings.value);
   }
 

@@ -1160,6 +1160,7 @@ export interface SqlCompletionTable {
   database?: string;
   schema?: string;
   type?: SqlObjectNavigationType;
+  tableType?: string;
   detail?: string;
   applyName?: string;
   boost?: number;

@@ -48,6 +48,29 @@ pub async fn start_transport_layers(
     proxy_tunnels: &ProxyTunnelManager,
     http_tunnels: &HttpTunnelManager,
 ) -> Result<u16, String> {
+    start_transport_layers_with_final_ssh_local_port(
+        connection_id,
+        layers,
+        remote_host,
+        remote_port,
+        None,
+        ssh_tunnels,
+        proxy_tunnels,
+        http_tunnels,
+    )
+    .await
+}
+
+pub(crate) async fn start_transport_layers_with_final_ssh_local_port(
+    connection_id: &str,
+    layers: &[TransportLayerConfig],
+    remote_host: &str,
+    remote_port: u16,
+    final_ssh_local_port: Option<u16>,
+    ssh_tunnels: &TunnelManager,
+    proxy_tunnels: &ProxyTunnelManager,
+    http_tunnels: &HttpTunnelManager,
+) -> Result<u16, String> {
     if layers.is_empty() {
         return Err("No transport layers configured".to_string());
     }
@@ -75,7 +98,7 @@ pub async fn start_transport_layers(
 
         let local_port = match layer {
             TransportLayerConfig::Ssh(resolved) => ssh_tunnels
-                .start_tunnel(
+                .start_tunnel_on_local_port(
                     &layer_id,
                     &connect_endpoint.host,
                     connect_endpoint.port,
@@ -93,6 +116,7 @@ pub async fn start_transport_layers(
                     target_endpoint.port,
                     is_last && resolved.expose_lan,
                     resolved.allow_exec_channel_proxy,
+                    if is_last { final_ssh_local_port } else { None },
                 )
                 .await
                 .map_err(|err| format!("SSH layer {} failed: {err}", index + 1))?,

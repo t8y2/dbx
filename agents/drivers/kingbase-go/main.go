@@ -134,6 +134,8 @@ type server struct {
 	params                     connectParams
 	mode                       kingbaseMode
 	usePgDefaultExpression     bool
+	usePgViewDefinition        bool
+	usePgFunctionDefinition    bool
 	catalogIdentityUnsupported bool
 	infoColumnTypeUnsupported  bool
 	infoUdtNameUnsupported     bool
@@ -456,6 +458,8 @@ func (s *server) connect(cp connectParams) error {
 	s.params = cp
 	s.mode = detectKingbaseMode(db, cp.MySQLCompatMode)
 	s.usePgDefaultExpression = false
+	s.usePgViewDefinition = false
+	s.usePgFunctionDefinition = false
 	s.catalogIdentityUnsupported = false
 	s.infoColumnTypeUnsupported = false
 	s.infoUdtNameUnsupported = false
@@ -520,6 +524,8 @@ func (s *server) disconnect() error {
 	s.cancelActiveQuery()
 	s.closeAllQuerySessions()
 	s.usePgDefaultExpression = false
+	s.usePgViewDefinition = false
+	s.usePgFunctionDefinition = false
 	s.catalogIdentityUnsupported = false
 	s.infoColumnTypeUnsupported = false
 	s.infoUdtNameUnsupported = false

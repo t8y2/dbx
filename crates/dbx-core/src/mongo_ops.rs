@@ -386,7 +386,24 @@ pub async fn mongo_aggregate_documents_core(
         PoolKind::MongoDb(client) => {
             mongo_driver::aggregate_documents(client, database, collection, pipeline_json, max_rows, options_json).await
         }
-        PoolKind::Agent(_) => Err("MongoDB legacy agent does not support aggregate".to_string()),
+        PoolKind::Agent(client) => {
+            let mut client = client.lock().await;
+            let params = serde_json::json!({
+                "database": database,
+                "collection": collection,
+                "pipeline": pipeline_json,
+                "limit": max_rows.unwrap_or(100),
+                "options": options_json,
+            });
+            match client.mongo_aggregate_documents(params).await {
+                Ok(result) => Ok(result),
+                Err(error) if is_unknown_agent_method_error(&error, "aggregate_documents") => Err(
+                    "MongoDB Legacy Agent does not support aggregate; upgrade or reinstall the MongoDB Legacy driver"
+                        .to_string(),
+                ),
+                Err(error) => Err(error),
+            }
+        }
         _ => Err("Not a MongoDB connection".to_string()),
     }
 }
@@ -444,6 +461,37 @@ pub async fn mongo_create_index_core(
                 .filter(|name| !name.is_empty())
                 .map(str::to_string)
                 .ok_or_else(|| "MongoDB legacy agent returned no created index name".to_string())
+        }
+        _ => Err("Not a MongoDB connection".to_string()),
+    }
+}
+
+pub async fn mongo_create_user_core(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    user_json: &str,
+    write_concern_json: Option<&str>,
+) -> Result<u64, String> {
+    mongo_driver::validate_mongo_namespace_name(database, "Database")?;
+    mongo_driver::validate_create_user_request(user_json, write_concern_json)?;
+    ensure_document_pool(state, connection_id).await?;
+    let connections = state.connections.read().await;
+    match connections.get(connection_id).ok_or("Not found")? {
+        PoolKind::MongoDb(client) => {
+            mongo_driver::create_user(client, database, user_json, write_concern_json).await?;
+            Ok(1)
+        }
+        PoolKind::Agent(client) => {
+            let mut client = client.lock().await;
+            let result: serde_json::Value = client
+                .mongo_create_user(serde_json::json!({
+                    "database": database,
+                    "user_json": user_json,
+                    "write_concern_json": write_concern_json,
+                }))
+                .await?;
+            Ok(result.get("affected_rows").and_then(serde_json::Value::as_u64).unwrap_or(1))
         }
         _ => Err("Not a MongoDB connection".to_string()),
     }
@@ -857,6 +905,12 @@ pub async fn execute_mongo_command_core(
             let name =
                 mongo_create_index_core(state, connection_id, database, collection, keys, options.as_deref()).await?;
             Ok(scalar_query_result("name", Value::String(name)))
+        }
+        MongoCommand::CreateUser { user_json, write_concern_json } => {
+            let affected =
+                mongo_create_user_core(state, connection_id, database, user_json, write_concern_json.as_deref())
+                    .await?;
+            Ok(affected_query_result(affected))
         }
         MongoCommand::DropIndexes { collection, indexes, single } => {
             let result =

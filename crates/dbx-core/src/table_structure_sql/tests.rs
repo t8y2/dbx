@@ -3527,6 +3527,71 @@ fn builds_mysql_composite_foreign_key() {
 }
 
 #[test]
+fn builds_oracle_foreign_key_with_supported_actions() {
+    let mut customer_id = column("CUSTOMER_ID");
+    customer_id.data_type = "NUMBER(19)".to_string();
+    let mut customer_fk = foreign_key("ORDERS_COPY_FK1", "CUSTOMER_ID", "CUSTOMERS", "ID");
+    customer_fk.ref_schema = "CRM".to_string();
+    customer_fk.on_update = "NO ACTION".to_string();
+    customer_fk.on_delete = "CASCADE".to_string();
+
+    let result = build_create_table_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::Oracle),
+        schema: Some("HR".to_string()),
+        table_name: "ORDERS_COPY".to_string(),
+        columns: vec![customer_id],
+        indexes: Vec::new(),
+        foreign_keys: vec![customer_fk],
+        triggers: Vec::new(),
+        table_comment: None,
+        original_table_comment: None,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements[1],
+        "ALTER TABLE \"HR\".\"ORDERS_COPY\" ADD CONSTRAINT \"ORDERS_COPY_FK1\" FOREIGN KEY (\"CUSTOMER_ID\") REFERENCES \"CRM\".\"CUSTOMERS\" (\"ID\") ON DELETE CASCADE;"
+    );
+}
+
+#[test]
+fn builds_oracle_foreign_key_replacement() {
+    let mut customer_fk = foreign_key("ORDERS_FK1", "CUSTOMER_ID", "CUSTOMERS", "ID");
+    customer_fk.on_delete = "SET NULL".to_string();
+    customer_fk.original = Some(ForeignKeyInfo {
+        name: "ORDERS_FK_OLD".to_string(),
+        column: "CUSTOMER_ID".to_string(),
+        ref_schema: Some("CRM".to_string()),
+        ref_table: "CUSTOMERS".to_string(),
+        ref_column: "ID".to_string(),
+        on_update: None,
+        on_delete: Some("NO ACTION".to_string()),
+    });
+    customer_fk.ref_schema = "CRM".to_string();
+
+    let result = build_table_structure_change_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::Oracle),
+        schema: Some("HR".to_string()),
+        table_name: "ORDERS".to_string(),
+        columns: Vec::new(),
+        indexes: Vec::new(),
+        foreign_keys: vec![customer_fk],
+        triggers: Vec::new(),
+        table_comment: None,
+        original_table_comment: None,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec![
+            "ALTER TABLE \"HR\".\"ORDERS\" DROP CONSTRAINT \"ORDERS_FK_OLD\";",
+            "ALTER TABLE \"HR\".\"ORDERS\" ADD CONSTRAINT \"ORDERS_FK1\" FOREIGN KEY (\"CUSTOMER_ID\") REFERENCES \"CRM\".\"CUSTOMERS\" (\"ID\") ON DELETE SET NULL;",
+        ]
+    );
+}
+
+#[test]
 fn builds_mysql_trigger_changes() {
     let mut existing = trigger("orders_bu", "BEFORE", "UPDATE", "BEGIN\n  SET NEW.updated_at = NOW();\nEND");
     existing.original = Some(TriggerInfo {

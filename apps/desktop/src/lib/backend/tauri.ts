@@ -1681,6 +1681,10 @@ export async function saveDocsAnnotations(connectionId: string, annotations: Ann
   return invoke("docs_save_annotations", { connectionId, annotations });
 }
 
+export async function exportDocsHtml(filePath: string, snapshot: SchemaSnapshot, annotations: AnnotationFile, lang: string): Promise<void> {
+  return invoke("docs_export_html", { filePath, snapshot, annotations, lang });
+}
+
 export async function saveConnections(configs: ConnectionConfig[]): Promise<void> {
   return invoke("save_connections", { configs });
 }
@@ -3482,6 +3486,15 @@ export async function mongoCreateIndex(connectionId: string, database: string, c
   });
 }
 
+export async function mongoCreateUser(connectionId: string, database: string, userJson: string, writeConcernJson?: string): Promise<{ affected_rows: number }> {
+  return invoke("mongo_create_user", {
+    connectionId,
+    database,
+    userJson,
+    writeConcernJson,
+  });
+}
+
 export async function mongoDropIndexes(connectionId: string, database: string, collection: string, indexesJson?: string, single = false): Promise<MongoDropIndexesResult> {
   return invoke("mongo_drop_indexes", {
     connectionId,
@@ -4071,6 +4084,7 @@ export interface QueryResultExportRequest {
   connectionId: string;
   database: string;
   schema?: string;
+  catalog?: string;
   sql: string;
   queryBaseSql: string;
   setupSql?: string[];

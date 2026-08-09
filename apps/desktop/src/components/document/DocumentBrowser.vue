@@ -2,7 +2,7 @@
 import { computed, ref, nextTick, watch, onMounted, onBeforeUnmount } from "vue";
 import { uuid } from "@/lib/common/utils";
 import { useI18n } from "vue-i18n";
-import { RefreshCw, Trash2, Plus, Save, ChevronDown, ChevronUp, ChevronLeft, ChevronRight, Table2, Braces, X, Search, Wrench, Filter } from "@lucide/vue";
+import { RefreshCw, Trash2, Plus, Save, ChevronDown, ChevronUp, ChevronLeft, ChevronRight, Table2, Braces, X, Search, Wrench, Filter, Columns3Cog, SquareDashed, Minus, Rows3, AlignLeft, AlignRight, EyeOff } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
@@ -13,6 +13,9 @@ import ErrorBanner from "@/components/ui/ErrorBanner.vue";
 import DataGrid from "@/components/grid/DataGrid.vue";
 import DataGridColumnLayoutPopover from "@/components/grid/DataGridColumnLayoutPopover.vue";
 import DataGridCopyFormatControl from "@/components/grid/DataGridCopyFormatControl.vue";
+import DataGridFontFamilyControl from "@/components/grid/DataGridFontFamilyControl.vue";
+import LightTooltip from "@/components/ui/LightTooltip.vue";
+import { Switch } from "@/components/ui/switch";
 import QueryLoadingState from "@/components/common/QueryLoadingState.vue";
 import * as api from "@/lib/backend/api";
 import { useConnectionStore } from "@/stores/connectionStore";
@@ -34,6 +37,7 @@ import {
   searchDocumentFieldPathTree,
   documentFilterModeNeedsValue,
   documentFilterModeOptions,
+  documentFilterValueTypeOptions,
   documentStoreProviderFor,
   elasticsearchBoolClauseOptions,
   elasticsearchFieldPathTreeFromFieldNames,
@@ -45,6 +49,7 @@ import {
   type DocumentFieldPathNode,
   type DocumentFilterMode,
   type DocumentFilterRule,
+  type DocumentFilterValueType,
   type DocumentStoreKind,
   type ElasticsearchBoolClause,
   type ElasticsearchQueryType,
@@ -63,12 +68,12 @@ import {
 import { applyDocumentStoreIdentityPlan, insertDocumentStoreDocument as insertDocumentStoreDocumentCore } from "@/lib/app/documentStoreSave";
 import RedisJsonEditor from "@/components/redis/RedisJsonEditor.vue";
 import { isLosslessJsonNumber, parseJsonPreservingLargeNumbers } from "@/lib/common/safeJsonFormat";
-import { buildMongoInsertDocument, buildMongoUpdateDocument, formatMongoShellLiteral, mongoDocumentDisplayValue, mongoDocumentIdForGrid, parseMongoDocumentInputValue, serializeMongoDocumentId, type MongoInputValue } from "@/lib/mongo/mongoDocumentValues";
+import { buildMongoInsertDocument, buildMongoUpdateDocument, formatMongoShellLiteral, mongoDocumentDisplayValue, mongoDocumentGridColumnTypes, mongoDocumentIdForGrid, parseMongoDocumentInputValue, serializeMongoDocumentId, type MongoInputValue } from "@/lib/mongo/mongoDocumentValues";
 import { normalizeResultPageSize } from "@/lib/dataGrid/paginationPageSize";
 import { findDocumentTextMatches, renderDocumentJsonHtml } from "@/lib/document/documentJsonSearch";
 import { documentDataGridColumnLayoutScopeKey } from "@/lib/dataGrid/dataGridColumnLayoutStorage";
 import { documentGridColumnVisibilityScopeKey, migrateDocumentGridColumnVisibilityToLayout } from "@/lib/document/documentGridColumnVisibilityStorage";
-import { useSettingsStore } from "@/stores/settingsStore";
+import { TABLE_FONT_SIZE_MAX, TABLE_FONT_SIZE_MIN, useSettingsStore } from "@/stores/settingsStore";
 import JsonEditNode from "./JsonEditNode.vue";
 import type { EditNode } from "@/types/editor";
 import type { ColumnInfo, DatabaseType, QueryResult, QueryTab } from "@/types/database";
@@ -95,6 +100,7 @@ const documents = ref<JsonRecord[]>([]);
 const copyDocuments = ref<JsonRecord[]>([]);
 const mongoCopyDocumentsAvailable = ref(false);
 const lastGridColumns = ref<string[]>([]);
+const lastGridColumnTypes = ref<string[]>([]);
 const total = ref<number | undefined>(undefined);
 const totalIsExact = ref(true);
 const paginationTotal = ref<number | undefined>(undefined);
@@ -113,6 +119,10 @@ const isSavingDocument = ref(false);
 const error = ref("");
 const editFields = ref<EditNode[]>([]);
 const showDeleteConfirm = ref(false);
+const columnWidthDensity = computed(() => settingsStore.editorSettings.columnWidthDensity);
+const dataGridRenderMode = computed(() => settingsStore.editorSettings.dataGridRenderMode);
+const tableFontSize = computed(() => settingsStore.editorSettings.tableFontSize);
+const numericColumnRightAlign = computed(() => settingsStore.editorSettings.numericColumnRightAlign ?? true);
 const viewMode = computed<ViewMode>({
   get: () => settingsStore.editorSettings.mongoViewMode,
   set: (value) => settingsStore.updateEditorSettings({ mongoViewMode: value }),
@@ -135,6 +145,30 @@ const documentViewerSearchActive = ref(false);
 function openDataGridExtractorConfiguration() {
   viewOptionsOpen.value = false;
   void nextTick(() => dataGridRef.value?.openExtractorConfiguration());
+}
+
+function setColumnWidthDensity(value: "compact" | "standard" | "comfortable") {
+  settingsStore.updateEditorSettings({ columnWidthDensity: value });
+}
+
+function setDataGridRenderMode(value: "canvas" | "dom") {
+  settingsStore.updateEditorSettings({ dataGridRenderMode: value });
+}
+
+function setTableFontSize(value: number) {
+  settingsStore.updateEditorSettings({ tableFontSize: value });
+}
+
+function decreaseTableFontSize() {
+  setTableFontSize(tableFontSize.value - 1);
+}
+
+function increaseTableFontSize() {
+  setTableFontSize(tableFontSize.value + 1);
+}
+
+function setNumericColumnRightAlign(value: boolean) {
+  settingsStore.updateEditorSettings({ numericColumnRightAlign: value });
 }
 const tableSearchSplitContainerRef = ref<HTMLDivElement>();
 const tableFindPaneWidth = ref<number | null>(null);
@@ -223,11 +257,21 @@ const appliedDocumentFilter = ref<Record<string, unknown> | null>(null);
 const elasticsearchMappingFields = ref<ColumnInfo[]>([]);
 
 const pendingDelete = ref<PendingDelete | null>(null);
+const documentFilterComposingEditors = new Set<string>();
+const documentFilterCompositionEndedAt = new Map<string, number>();
+const DOCUMENT_FILTER_IME_COMPOSITION_END_GRACE_MS = 120;
 
 const selectedDoc = computed(() => {
   if (selectedIdx.value === null) return null;
   return documents.value[selectedIdx.value] ?? null;
 });
+const selectedDocumentIdLabel = computed(() => {
+  if (isNew.value) return "New";
+  const id = selectedDoc.value?._id;
+  if (id === undefined || id === null) return "";
+  return typeof id === "object" ? stringifyDocumentStoreValue(id, documentStoreProvider.value.kind) : String(id);
+});
+const selectedDocumentIdWidth = computed(() => `${Math.min(Math.max(Array.from(selectedDocumentIdLabel.value).length + 2, 5), 52)}ch`);
 const documentSearchText = computed(() => editJson.value);
 const documentSearchMatches = computed(() => findDocumentTextMatches(documentSearchText.value, documentSearchQuery.value));
 const documentSearchActiveIndex = computed(() => {
@@ -266,6 +310,7 @@ const gridResult = computed<QueryResult>(() => {
   if (!docs.length) {
     return {
       columns: lastGridColumns.value,
+      column_types: lastGridColumnTypes.value,
       rows: [],
       affected_rows: 0,
       execution_time_ms: 0,
@@ -281,6 +326,7 @@ const gridResult = computed<QueryResult>(() => {
     }
   }
   const columns = [...keySet];
+  const columnTypes = documentStoreProvider.value.kind === "mongodb" ? mongoDocumentGridColumnTypes(docs, columns) : undefined;
 
   const rows = docs.map((doc) =>
     columns.map((col) => {
@@ -293,7 +339,7 @@ const gridResult = computed<QueryResult>(() => {
     }),
   );
 
-  return { columns, rows, mongo_documents: docs, mongo_copy_documents: copyDocuments.value, affected_rows: 0, execution_time_ms: 0, truncated: false };
+  return { columns, column_types: columnTypes, rows, mongo_documents: docs, mongo_copy_documents: copyDocuments.value, affected_rows: 0, execution_time_ms: 0, truncated: false };
 });
 const expandedDocumentFilterFieldPaths = ref<Set<string>>(new Set());
 const elasticsearchFieldTypes = computed(() => new Map(elasticsearchMappingFields.value.map((field) => [field.name, field.data_type])));
@@ -358,9 +404,52 @@ function ensureDocumentFilterRule() {
   }
 }
 
-function addDocumentFilterRule() {
+function appendDocumentFilterRule(openFieldSelect: boolean) {
   ensureDocumentFilterRule();
-  documentFilterRules.value = [...documentFilterRules.value, createDocumentFilterRule()];
+  const rule = createDocumentFilterRule();
+  documentFilterRules.value = [...documentFilterRules.value, rule];
+  if (openFieldSelect) setDocumentFilterFieldPopoverOpen(rule.id, true);
+}
+
+function addDocumentFilterRule() {
+  appendDocumentFilterRule(false);
+}
+
+function addDocumentFilterRuleFromKeyboard() {
+  appendDocumentFilterRule(true);
+}
+
+function startDocumentFilterImeComposition(editorKey: string) {
+  documentFilterComposingEditors.add(editorKey);
+  documentFilterCompositionEndedAt.delete(editorKey);
+}
+
+function endDocumentFilterImeComposition(editorKey: string) {
+  documentFilterComposingEditors.delete(editorKey);
+  documentFilterCompositionEndedAt.set(editorKey, Date.now());
+}
+
+function isDocumentFilterImeCompositionKey(event: KeyboardEvent, editorKey: string) {
+  const endedAt = documentFilterCompositionEndedAt.get(editorKey);
+  const justEnded = event.key === "Enter" && endedAt !== undefined && Date.now() - endedAt <= DOCUMENT_FILTER_IME_COMPOSITION_END_GRACE_MS;
+  if (justEnded || (endedAt !== undefined && event.key !== "Process")) documentFilterCompositionEndedAt.delete(editorKey);
+  return event.isComposing || event.key === "Process" || event.keyCode === 229 || documentFilterComposingEditors.has(editorKey) || justEnded;
+}
+
+function handleDocumentFilterValueKeydown(event: KeyboardEvent, ruleId: string) {
+  const editorKey = `value:${ruleId}`;
+  if (isDocumentFilterImeCompositionKey(event, editorKey)) {
+    event.stopPropagation();
+    return;
+  }
+  if (event.key !== "Enter") return;
+  event.preventDefault();
+  if (!event.shiftKey) {
+    void applyDocumentStructuredFilters();
+    return;
+  }
+  event.stopPropagation();
+  if (!event.repeat) addDocumentFilterRuleFromKeyboard();
 }
 
 function visibleDocumentFilterFieldRows(nodes: readonly DocumentFieldPathNode[], depth = 0): DocumentFilterFieldTreeRow[] {
@@ -445,8 +534,9 @@ function updateDocumentFilterRule(ruleId: string, patch: Partial<DocumentFilterR
         next.elasticsearchQueryType = queryTypes[0];
       }
       if (!elasticsearchQueryTypeNeedsValue(next.elasticsearchQueryType)) next.rawValue = "";
-    } else if (!documentFilterModeNeedsValue(next.mode)) {
-      next.rawValue = "";
+    } else {
+      if (patch.fieldName !== undefined && patch.fieldName !== rule.fieldName) next.valueType = "auto";
+      if (!documentFilterModeNeedsValue(next.mode)) next.rawValue = "";
     }
     return next;
   });
@@ -535,15 +625,22 @@ async function applyDocumentStructuredFilters() {
     applyFilter();
     return;
   }
-  const items = documentFilterRules.value
-    .map((rule) => ({
-      rule,
-      condition: buildDocumentFilterCondition(rule, {
-        kind: documentStoreProvider.value.kind,
-        sampleValue: documentFilterFieldByPath.value.get(rule.fieldName)?.sampleValue,
-      }),
-    }))
-    .filter((item): item is { rule: DocumentFilterRule; condition: Record<string, unknown> } => !!item.condition);
+  let items: Array<{ rule: DocumentFilterRule; condition: Record<string, unknown> }>;
+  try {
+    items = documentFilterRules.value
+      .map((rule) => ({
+        rule,
+        condition: buildDocumentFilterCondition(rule, {
+          kind: documentStoreProvider.value.kind,
+          sampleValue: documentFilterFieldByPath.value.get(rule.fieldName)?.sampleValue,
+        }),
+      }))
+      .filter((item): item is { rule: DocumentFilterRule; condition: Record<string, unknown> } => !!item.condition);
+  } catch (e) {
+    error.value = e instanceof Error ? e.message : String(e);
+    return;
+  }
+  error.value = "";
   const structured = combineDocumentFilterConditions(
     items.map((item) => item.condition),
     items.map((item) => item.rule),
@@ -934,6 +1031,7 @@ async function load(options: { page?: number } = {}) {
         }
       }
       lastGridColumns.value = [...keySet];
+      lastGridColumnTypes.value = storeKind === "mongodb" ? mongoDocumentGridColumnTypes(nextDocuments, lastGridColumns.value) : [];
     }
     if (storeKind === "elasticsearch") {
       applyElasticsearchSearchTotal(result.total, result.total_is_exact !== false, filter);
@@ -1421,6 +1519,10 @@ async function applyDeleteDoc(idx: number) {
 }
 
 function requestDeleteDoc(idx: number) {
+  if (!settingsStore.editorSettings.confirmDangerousSqlExecution) {
+    void applyDeleteDoc(idx);
+    return;
+  }
   pendingDelete.value = { kind: "document", index: idx };
   showDeleteConfirm.value = true;
 }
@@ -1459,6 +1561,16 @@ function docPreview(doc: JsonRecord): string {
 
 function highlightedJson(json: string): string {
   return renderDocumentJsonHtml(json, documentSearchOpen.value ? documentSearchQuery.value : "", documentSearchActiveIndex.value);
+}
+
+function handleDocumentViewerDoubleClick(event: MouseEvent) {
+  const target = event.target;
+  if (!(target instanceof Element)) return;
+  const jsonViewer = target.closest(".json-viewer");
+  if (jsonViewer && target !== jsonViewer) return;
+  const selection = window.getSelection();
+  if (selection && !selection.isCollapsed && selection.toString()) return;
+  startEdit();
 }
 
 function handleDocumentBrowserPointerDown(event: PointerEvent) {
@@ -1590,7 +1702,7 @@ defineExpose({ focusSearch });
 </script>
 
 <template>
-  <div class="h-full flex flex-col overflow-hidden">
+  <div class="h-full flex flex-col overflow-hidden" :class="{ 'select-none': viewMode === 'document' }">
     <!-- Top toolbar: view toggle + document count + pagination + actions -->
     <div class="h-9 flex items-center gap-1 px-3 border-b shrink-0 text-xs text-muted-foreground">
       <div class="flex items-center border rounded-md overflow-hidden mr-2">
@@ -1632,13 +1744,118 @@ defineExpose({ focusSearch });
           <div class="border-b bg-muted/40 px-3 py-2">
             <div class="text-xs font-semibold">{{ t("grid.viewOptions") }}</div>
           </div>
-          <label class="flex cursor-pointer items-center gap-2 px-3 py-2 text-xs hover:bg-accent" :class="{ 'cursor-not-allowed opacity-60': !dataGridRef?.canToggleAllNullColumns }">
-            <input type="checkbox" class="h-3.5 w-3.5 shrink-0 accent-primary" :checked="!!dataGridRef?.nullColumnsHidden" :disabled="!dataGridRef?.canToggleAllNullColumns" @change="dataGridRef?.toggleAllNullColumns()" />
-            <span class="min-w-0 flex items-center gap-1 font-medium">
+          <div class="flex items-center justify-between gap-3 px-3 py-1.5 text-xs">
+            <div class="min-w-0 flex items-center gap-2 font-medium">
+              <SquareDashed class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+              <span>{{ t("grid.renderMode") }}</span>
+            </div>
+            <LightTooltip :text="t('grid.renderModeHint')" side="left" :side-offset="6" :delay="0" :open-on-focus="false">
+              <div class="grid w-32 grid-cols-2 rounded-md border bg-muted/40 p-0.5">
+                <button
+                  v-for="mode in ['canvas', 'dom'] as const"
+                  :key="mode"
+                  type="button"
+                  class="h-5 min-w-0 truncate whitespace-nowrap rounded-[5px] px-2 text-xs transition-colors"
+                  :class="dataGridRenderMode === mode ? 'bg-background font-semibold text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'"
+                  @click="setDataGridRenderMode(mode)"
+                >
+                  {{ t(mode === "canvas" ? "grid.canvasRenderMode" : "grid.domRenderMode") }}
+                </button>
+              </div>
+            </LightTooltip>
+          </div>
+          <div class="flex items-center justify-between gap-3 px-3 py-1.5 text-xs">
+            <div class="min-w-0 flex items-center gap-2 font-medium">
+              <Columns3Cog class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+              <span>{{ t("grid.columnWidth") }}</span>
+            </div>
+            <div class="grid w-48 grid-cols-3 rounded-md border bg-muted/40 p-0.5">
+              <button
+                v-for="density in ['compact', 'standard', 'comfortable'] as const"
+                :key="density"
+                type="button"
+                class="h-5 min-w-0 truncate whitespace-nowrap rounded-[5px] px-1.5 text-xs transition-colors"
+                :class="columnWidthDensity === density ? 'bg-background font-semibold text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'"
+                @click="setColumnWidthDensity(density)"
+              >
+                {{ t(`grid.columnWidth${density.charAt(0).toUpperCase()}${density.slice(1)}`) }}
+              </button>
+            </div>
+          </div>
+          <DataGridFontFamilyControl />
+          <div class="flex items-center justify-between gap-3 px-3 py-1.5 text-xs">
+            <div class="min-w-0 flex items-center gap-2 font-medium">
+              <span class="flex h-3.5 w-3.5 shrink-0 items-center justify-center text-[11px] font-semibold text-muted-foreground">A</span>
+              <span>{{ t("grid.tableFontSize") }}</span>
+            </div>
+            <div class="flex h-6 w-32 items-center rounded-md border bg-muted/40 p-0.5">
+              <button
+                type="button"
+                class="flex h-5 w-8 items-center justify-center rounded-[5px] bg-background text-foreground shadow-sm transition-colors hover:text-foreground disabled:pointer-events-none disabled:bg-muted/40 disabled:text-muted-foreground disabled:opacity-50 disabled:shadow-none"
+                :disabled="tableFontSize <= TABLE_FONT_SIZE_MIN"
+                :aria-label="t('common.decrease')"
+                @click="decreaseTableFontSize"
+              >
+                <Minus class="h-3.5 w-3.5" />
+              </button>
+              <span class="flex-1 text-center text-xs font-semibold tabular-nums">{{ tableFontSize }}</span>
+              <button
+                type="button"
+                class="flex h-5 w-8 items-center justify-center rounded-[5px] bg-background text-foreground shadow-sm transition-colors hover:text-foreground disabled:pointer-events-none disabled:bg-muted/40 disabled:text-muted-foreground disabled:opacity-50 disabled:shadow-none"
+                :disabled="tableFontSize >= TABLE_FONT_SIZE_MAX"
+                :aria-label="t('common.increase')"
+                @click="increaseTableFontSize"
+              >
+                <Plus class="h-3.5 w-3.5" />
+              </button>
+            </div>
+          </div>
+          <div class="flex items-center justify-between gap-3 px-3 py-1.5 text-xs">
+            <div class="min-w-0 flex items-center gap-2 font-medium">
+              <Rows3 class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+              <span>{{ t("grid.transposeMultiRowToggle") }}</span>
+            </div>
+            <LightTooltip :text="t('grid.transposeMultiRowHint')" side="left" :side-offset="6" :delay="0" :open-on-focus="false">
+              <div class="grid w-32 grid-cols-2 rounded-md border bg-muted/40 p-0.5">
+                <button
+                  v-for="multiRow in [false, true]"
+                  :key="String(multiRow)"
+                  type="button"
+                  class="h-5 min-w-0 truncate whitespace-nowrap rounded-[5px] px-2 text-xs transition-colors"
+                  :class="dataGridRef?.multiRowTranspose === multiRow ? 'bg-background font-semibold text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'"
+                  @click="dataGridRef?.setMultiRowTranspose(multiRow)"
+                >
+                  {{ t(multiRow ? "grid.transposeMultiRow" : "grid.transposeSingleRow") }}
+                </button>
+              </div>
+            </LightTooltip>
+          </div>
+          <div class="flex items-center justify-between gap-3 px-3 py-1.5 text-xs">
+            <div class="min-w-0 flex items-center gap-2 font-medium">
+              <component :is="numericColumnRightAlign ? AlignRight : AlignLeft" class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+              <span>{{ t("grid.numericColumnAlign") }}</span>
+            </div>
+            <div class="grid w-32 grid-cols-2 rounded-md border bg-muted/40 p-0.5">
+              <button
+                v-for="rightAlign in [false, true]"
+                :key="String(rightAlign)"
+                type="button"
+                class="h-5 min-w-0 truncate whitespace-nowrap rounded-[5px] px-2 text-xs transition-colors"
+                :class="numericColumnRightAlign === rightAlign ? 'bg-background font-semibold text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'"
+                @click="setNumericColumnRightAlign(rightAlign)"
+              >
+                {{ t(rightAlign ? "grid.numericColumnAlignRight" : "grid.numericColumnAlignLeft") }}
+              </button>
+            </div>
+          </div>
+          <div class="flex items-center justify-between gap-3 px-3 py-1.5 text-xs" :class="{ 'opacity-60': !dataGridRef?.canToggleAllNullColumns }">
+            <span class="min-w-0 flex items-center gap-2 font-medium">
+              <EyeOff class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
               {{ t("grid.hideNullColumns") }}
               <span v-if="(dataGridRef?.allNullColumnCount ?? 0) > 0" class="text-muted-foreground tabular-nums"> ({{ dataGridRef?.allNullColumnCount }}) </span>
             </span>
-          </label>
+            <Switch size="sm" :model-value="!!dataGridRef?.nullColumnsHidden" :disabled="!dataGridRef?.canToggleAllNullColumns" :aria-label="t('grid.hideNullColumns')" @update:model-value="dataGridRef?.toggleAllNullColumns()" />
+          </div>
           <DataGridCopyFormatControl
             :current-label="dataGridRef?.defaultCopyPreferenceLabel ?? '-'"
             :current-value="dataGridRef?.defaultCopyPreference ?? ''"
@@ -1690,7 +1907,7 @@ defineExpose({ focusSearch });
     >
       <template #search-bar="{ localFilterCount, hasLocalColumnFilters, localFilterSummaries, clearLocalFilter }: { localFilterCount: number; hasLocalColumnFilters: boolean; localFilterSummaries: LocalFilterSummary[]; clearLocalFilter: (columnIndex?: number) => void }">
         <div ref="tableSearchSplitContainerRef" class="flex flex-1 min-w-0">
-          <div class="flex flex-1 items-start gap-1 px-2 py-0.5 min-w-0" :style="tableFindPaneStyle">
+          <div class="flex flex-1 items-center gap-1 px-2 py-0.5 min-w-0" :style="tableFindPaneStyle">
             <Popover v-model:open="documentFilterBuilderOpen">
               <PopoverTrigger as-child>
                 <button
@@ -1705,12 +1922,12 @@ defineExpose({ focusSearch });
                   </span>
                 </button>
               </PopoverTrigger>
-              <PopoverContent align="start" class="max-w-[calc(100vw-32px)] gap-3 p-3" :class="documentStoreProvider.kind === 'elasticsearch' ? 'w-[680px]' : 'w-[360px]'">
-                <div class="flex items-center justify-between gap-3">
+              <PopoverContent align="start" class="max-w-[calc(100vw-32px)] gap-3 p-3" :class="documentStoreProvider.kind === 'elasticsearch' ? 'w-[680px]' : 'w-[468px]'">
+                <div class="flex items-center justify-between gap-2">
                   <div class="text-xs font-medium text-foreground">{{ t("grid.filter") }}</div>
-                  <Button variant="ghost" size="sm" class="h-7 px-2 text-xs" @click="addDocumentFilterRule">
-                    <Plus class="mr-1 h-3.5 w-3.5" />
-                    {{ t("grid.filterBuilderAddRule") }}
+                  <Button variant="ghost" size="sm" class="h-7 px-2 text-xs" @click="clearDocumentFilters(clearLocalFilter)">
+                    <Trash2 class="mr-1 h-3.5 w-3.5" />
+                    {{ t("grid.clearFilter") }}
                   </Button>
                 </div>
                 <div v-if="hasLocalColumnFilters" class="space-y-2 rounded-md border border-primary/20 bg-primary/5 px-2.5 py-2">
@@ -1751,7 +1968,7 @@ defineExpose({ focusSearch });
                       <Button
                         variant="ghost"
                         size="sm"
-                        class="h-6 px-2 text-[11px] font-medium text-muted-foreground hover:text-foreground"
+                        class="h-5 px-2 text-[11px] font-medium text-muted-foreground hover:text-foreground"
                         @click="
                           updateDocumentFilterRule(rule.id, {
                             conjunction: rule.conjunction === 'AND' ? 'OR' : 'AND',
@@ -1761,7 +1978,7 @@ defineExpose({ focusSearch });
                         {{ rule.conjunction }}
                       </Button>
                     </div>
-                    <div class="grid items-center gap-1.5" :class="documentStoreProvider.kind === 'elasticsearch' ? 'grid-cols-[minmax(0,0.75fr)_minmax(0,1.2fr)_minmax(0,1fr)_minmax(0,1fr)_auto]' : 'grid-cols-[minmax(0,1fr)_minmax(0,0.95fr)_minmax(0,1fr)_auto]'">
+                    <div class="grid items-center gap-1.5" :class="documentStoreProvider.kind === 'elasticsearch' ? 'grid-cols-[minmax(0,0.75fr)_minmax(0,1.2fr)_minmax(0,1fr)_minmax(0,1fr)_auto]' : 'grid-cols-[minmax(0,1fr)_minmax(0,0.9fr)_88px_minmax(0,1fr)_auto]'">
                       <Select v-if="documentStoreProvider.kind === 'elasticsearch'" :model-value="rule.elasticsearchClause || 'filter'" @update:model-value="(value: any) => updateDocumentFilterRule(rule.id, { elasticsearchClause: value as ElasticsearchBoolClause })">
                         <SelectTrigger class="h-8 w-full min-w-0 overflow-hidden text-xs [&_[data-slot=select-value]]:min-w-0 [&_[data-slot=select-value]]:truncate">
                           <SelectValue />
@@ -1843,20 +2060,33 @@ defineExpose({ focusSearch });
                         </SelectContent>
                       </Select>
 
+                      <Select v-if="documentStoreProvider.kind === 'mongodb'" :model-value="rule.valueType || 'auto'" :disabled="!documentFilterModeNeedsValue(rule.mode)" @update:model-value="(value: any) => updateDocumentFilterRule(rule.id, { valueType: value as DocumentFilterValueType })">
+                        <SelectTrigger class="h-8 w-full min-w-0 overflow-hidden text-xs [&_[data-slot=select-value]]:min-w-0 [&_[data-slot=select-value]]:truncate">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent position="popper">
+                          <SelectItem v-for="option in documentFilterValueTypeOptions" :key="option.value" :value="option.value">
+                            {{ t(option.labelKey) }}
+                          </SelectItem>
+                        </SelectContent>
+                      </Select>
+
                       <Input
                         v-if="documentStoreProvider.kind === 'elasticsearch' ? elasticsearchQueryTypeNeedsValue(rule.elasticsearchQueryType) : documentFilterModeNeedsValue(rule.mode)"
                         :model-value="rule.rawValue"
                         class="h-8 min-w-0 text-xs"
                         :placeholder="t('grid.filterBuilderValue')"
                         @update:model-value="(value) => updateDocumentFilterRule(rule.id, { rawValue: String(value ?? '') })"
-                        @keydown.enter.prevent="applyDocumentStructuredFilters"
+                        @compositionend="endDocumentFilterImeComposition(`value:${rule.id}`)"
+                        @compositionstart="startDocumentFilterImeComposition(`value:${rule.id}`)"
+                        @keydown="handleDocumentFilterValueKeydown($event, rule.id)"
                       />
                       <div v-else class="flex h-8 min-w-0 items-center overflow-hidden rounded-md border border-dashed px-2 text-xs text-muted-foreground">
                         <span class="truncate">{{ t("grid.filterBuilderNoValue") }}</span>
                       </div>
 
-                      <Button variant="ghost" size="icon" class="h-8 w-8 shrink-0 text-muted-foreground hover:text-destructive" :disabled="documentFilterRules.length === 1" @click="removeDocumentFilterRule(rule.id)">
-                        <Trash2 class="h-3.5 w-3.5" />
+                      <Button variant="ghost" size="icon" class="h-7 w-7 shrink-0 text-muted-foreground hover:text-destructive" :disabled="documentFilterRules.length === 1" @click="removeDocumentFilterRule(rule.id)">
+                        <X class="h-3.5 w-3.5" />
                       </Button>
                     </div>
                   </template>
@@ -1865,22 +2095,23 @@ defineExpose({ focusSearch });
                   {{ t("grid.filterBuilderEmpty") }}
                 </div>
 
-                <div class="flex items-center justify-between gap-2 pt-1">
-                  <Button variant="ghost" size="sm" class="h-8 px-2 text-xs" @click="clearDocumentFilters(clearLocalFilter)">
-                    {{ t("grid.clearFilter") }}
+                <div class="flex items-center justify-between gap-2">
+                  <Button variant="ghost" size="sm" class="h-7 px-2 text-xs" @click="addDocumentFilterRule">
+                    <Plus class="mr-1 h-3.5 w-3.5" />
+                    {{ t("grid.filterBuilderAddRule") }}
                   </Button>
-                  <div class="flex items-center gap-2">
-                    <Button variant="ghost" size="sm" class="h-8 px-2 text-xs" @click="resetDocumentFilterBuilder">
+                  <div class="flex items-center gap-1.5">
+                    <Button variant="ghost" size="sm" class="h-7 px-2 text-xs" @click="resetDocumentFilterBuilder">
                       {{ t("grid.resetFilterBuilder") }}
                     </Button>
-                    <Button size="sm" class="h-8 px-3 text-xs" @click="applyDocumentStructuredFilters">
+                    <Button size="sm" class="h-7 px-3 text-xs" @click="applyDocumentStructuredFilters">
                       {{ t("grid.applyFilter") }}
                     </Button>
                   </div>
                 </div>
               </PopoverContent>
             </Popover>
-            <span class="text-blue-600 dark:text-blue-400 text-xs font-medium select-none shrink-0 pt-0.5">{{ documentStoreProvider.filterInputLabel }}</span>
+            <span class="text-blue-600 dark:text-blue-400 text-xs font-medium select-none shrink-0">{{ documentStoreProvider.filterInputLabel }}</span>
             <textarea
               ref="filterInputRef"
               v-model="filterInput"
@@ -1894,13 +2125,13 @@ defineExpose({ focusSearch });
               @keydown.ctrl.enter.prevent="applyFilter"
               @keydown.meta.enter.prevent="applyFilter"
             />
-            <button v-if="filterInput.trim()" type="button" class="text-muted-foreground hover:text-foreground shrink-0 mt-0.5" title="Format JSON" aria-label="Format JSON" @click="formatFilterInput">
+            <button v-if="filterInput.trim()" type="button" class="flex h-5 shrink-0 items-center text-muted-foreground hover:text-foreground" title="Format JSON" aria-label="Format JSON" @click="formatFilterInput">
               <Braces class="w-3 h-3" />
             </button>
             <button
               v-if="filterInput.trim()"
               type="button"
-              class="text-muted-foreground hover:text-foreground shrink-0 mt-0.5"
+              class="flex h-5 shrink-0 items-center text-muted-foreground hover:text-foreground"
               @click="
                 filterInput = '';
                 applyFilter();
@@ -1918,8 +2149,8 @@ defineExpose({ focusSearch });
           >
             <span class="h-5 w-px bg-border group-hover:bg-primary/60" />
           </button>
-          <div class="flex flex-1 items-start gap-1 px-2 py-0.5 min-w-0">
-            <span class="text-orange-600 dark:text-orange-400 text-xs font-medium select-none shrink-0 pt-0.5">{{ documentStoreProvider.sortInputLabel }}</span>
+          <div class="flex flex-1 items-center gap-1 px-2 py-0.5 min-w-0">
+            <span class="text-orange-600 dark:text-orange-400 text-xs font-medium select-none shrink-0">{{ documentStoreProvider.sortInputLabel }}</span>
             <textarea
               ref="sortInputRef"
               v-model="sortInput"
@@ -1933,13 +2164,13 @@ defineExpose({ focusSearch });
               @keydown.ctrl.enter.prevent="applyFilter"
               @keydown.meta.enter.prevent="applyFilter"
             />
-            <button v-if="sortInput.trim()" type="button" class="text-muted-foreground hover:text-foreground shrink-0 mt-0.5" title="Format JSON" aria-label="Format JSON" @click="formatSortInput">
+            <button v-if="sortInput.trim()" type="button" class="flex h-5 shrink-0 items-center text-muted-foreground hover:text-foreground" title="Format JSON" aria-label="Format JSON" @click="formatSortInput">
               <Braces class="w-3 h-3" />
             </button>
             <button
               v-if="sortInput.trim()"
               type="button"
-              class="text-muted-foreground hover:text-foreground shrink-0 mt-0.5"
+              class="flex h-5 shrink-0 items-center text-muted-foreground hover:text-foreground"
               @click="
                 sortInput = '';
                 applyFilter();
@@ -1976,7 +2207,9 @@ defineExpose({ focusSearch });
         <div class="h-full flex flex-col min-w-0 overflow-hidden">
           <template v-if="selectedIdx !== null || isNew">
             <div class="h-9 flex items-center gap-2 px-4 border-b bg-muted/30 shrink-0">
-              <Badge variant="secondary" class="text-xs">{{ isNew ? "New" : selectedDoc?._id }}</Badge>
+              <Badge variant="secondary" class="max-w-[50%] rounded text-xs" :style="{ width: selectedDocumentIdWidth }">
+                <input class="min-w-0 w-full cursor-text select-text appearance-none border-0 bg-transparent p-0 text-inherit outline-none focus:ring-0" :value="selectedDocumentIdLabel" :aria-label="`_id: ${selectedDocumentIdLabel}`" readonly spellcheck="false" />
+              </Badge>
               <span class="flex-1" />
               <Button v-if="!isEditing" variant="ghost" size="sm" class="h-6 text-xs" @click="startEdit">{{ t("mongo.edit") }}</Button>
               <template v-if="isEditing">
@@ -1993,7 +2226,7 @@ defineExpose({ focusSearch });
             <div v-if="documentSearchOpen && (!isEditing || documentEditMode === 'json')" data-document-search class="flex h-9 shrink-0 items-center justify-end gap-1 border-b bg-background px-2">
               <div class="relative w-56 max-w-[45%] min-w-32">
                 <Search class="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
-                <Input ref="documentSearchInputRef" v-model="documentSearchQuery" class="h-7 pl-7 pr-2 text-xs" :placeholder="t('editor.search.find')" @keydown.enter.prevent="activateDocumentSearchMatch($event.shiftKey ? -1 : 1)" @keydown.escape.prevent="closeDocumentSearch" />
+                <Input ref="documentSearchInputRef" v-model="documentSearchQuery" class="h-7 select-text pl-7 pr-2 text-xs" :placeholder="t('editor.search.find')" @keydown.enter.prevent="activateDocumentSearchMatch($event.shiftKey ? -1 : 1)" @keydown.escape.prevent="closeDocumentSearch" />
               </div>
               <span class="w-12 text-center text-[11px] tabular-nums text-muted-foreground">{{ documentSearchStatus }}</span>
               <Button variant="ghost" size="icon" class="h-7 w-7" :title="t('editor.search.prevMatch')" :disabled="documentSearchMatches.length === 0" @click="moveDocumentSearchMatch(-1)">
@@ -2012,11 +2245,11 @@ defineExpose({ focusSearch });
             </div>
 
             <div v-if="isEditing" class="flex-1 min-h-0 overflow-hidden bg-muted/10">
-              <div v-if="documentEditMode === 'json'" class="h-full min-h-0 p-2">
+              <div v-if="documentEditMode === 'json'" class="h-full min-h-0 select-text p-2">
                 <RedisJsonEditor v-model="editJson" class="h-full rounded border bg-background" :save-disabled="isSavingDocument" :read-only="isSavingDocument" @save="saveDoc" />
               </div>
               <div v-else class="h-full overflow-auto">
-                <div class="json-edit min-w-fit p-5" :class="{ 'pointer-events-none opacity-60': isSavingDocument }" :style="{ ...documentFontStyle, '--mongo-key-width': editKeyWidth }" :aria-disabled="isSavingDocument ? 'true' : undefined">
+                <div class="json-edit min-w-fit select-text p-5" :class="{ 'pointer-events-none opacity-60': isSavingDocument }" :style="{ ...documentFontStyle, '--mongo-key-width': editKeyWidth }" :aria-disabled="isSavingDocument ? 'true' : undefined">
                   <div class="json-edit-brace">{</div>
 
                   <JsonEditNode v-for="(field, idx) in editFields" :key="field.key" :node="field" parent-kind="root" :removable="!isSavingDocument && !field.readonlyValue" @remove="requestRemoveField(idx)" />
@@ -2028,8 +2261,8 @@ defineExpose({ focusSearch });
               </div>
             </div>
 
-            <div v-else ref="documentViewerRef" data-document-json-viewer tabindex="-1" class="flex-1 overflow-auto bg-muted/10 outline-none">
-              <pre class="json-viewer min-w-fit p-5" :style="documentFontStyle" v-html="highlightedJson(editJson)" />
+            <div v-else ref="documentViewerRef" data-document-json-viewer tabindex="-1" class="flex-1 overflow-auto bg-muted/10 outline-none" @dblclick="handleDocumentViewerDoubleClick">
+              <pre class="json-viewer min-w-fit select-text p-5" :style="documentFontStyle" v-html="highlightedJson(editJson)" />
             </div>
           </template>
           <div v-else class="h-full flex items-center justify-center text-muted-foreground text-sm">

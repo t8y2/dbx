@@ -26,7 +26,7 @@ import { detachTunnelProfileLayer, tunnelProfileReferenceLayer, tunnelProfileSum
 import { applySshConfigHostAliasPrefill as prefillSshConfigHostAlias } from "@/lib/connection/sshConfigHosts";
 import { canPersistConnectionTestResult, connectionEditDraftSyncAction } from "./connectionEditDraftSync";
 import { REDIS_SCAN_PAGE_SIZE_DEFAULT, REDIS_SCAN_PAGE_SIZE_MIN, REDIS_SCAN_PAGE_SIZE_MAX, REDIS_SCAN_PAGE_SIZE_OPTIONS } from "@/lib/redis/redisKeyPattern";
-import { useSettingsStore } from "@/stores/settingsStore";
+import { normalizeGlobalConnectTimeoutSecs, normalizeGlobalQueryTimeoutSecs, useSettingsStore } from "@/stores/settingsStore";
 import { useToast } from "@/composables/useToast";
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
 import * as api from "@/lib/backend/api";
@@ -66,7 +66,7 @@ import { detectMqUiAuthKind, isMqAuthKindAllowedForSystem, type MqUiAuthKind } f
 import { driverInstallProgressChannel, driverInstallProgressPercent, isDriverInstallProgressForOperation, type DriverInstallProgress } from "@/lib/connection/driverInstallProgressUi";
 import { requiresSqlServerLegacyCompatibilityComponent, setSqlServerLegacyCompatibilityConfig, sqlServerUsesLegacyCompatibility, SQLSERVER_LEGACY_COMPATIBILITY_DRIVER_KEY } from "@/lib/connection/sqlServerLegacyCompatibility";
 import { normalizeNacosEndpoint, normalizeNacosMetricsUrl } from "@/lib/nacos/nacosAdmin";
-import { normalizeNacosNamespaceSelection, normalizeNacosNamespacesForDisplay } from "@/lib/nacos/nacosNamespaceVisibility";
+import { nacosNamespaceIdentity, normalizeNacosNamespaceSelection, normalizeNacosNamespacesForDisplay } from "@/lib/nacos/nacosNamespaceVisibility";
 import {
   ArrowLeft,
   ArrowDown,
@@ -185,6 +185,8 @@ type ConnectionTestState = ConnectionTestResult & { ok: boolean };
 const { t } = useI18n();
 const { toast } = useToast();
 const settingsStore = useSettingsStore();
+const editGlobalConnectTimeoutSecs = ref(settingsStore.editorSettings.globalConnectTimeoutSecs);
+const editGlobalQueryTimeoutSecs = ref(settingsStore.editorSettings.globalQueryTimeoutSecs);
 const open = defineModel<boolean>("open", { default: false });
 const isDesktop = isTauriRuntime();
 
@@ -272,8 +274,10 @@ const defaultForm = (): ConnectionForm => ({
   database: undefined,
   color: "",
   transport_layers: [],
-  connect_timeout_secs: 10,
-  query_timeout_secs: 30,
+  connect_timeout_secs: settingsStore.editorSettings.globalConnectTimeoutSecs,
+  connect_timeout_inherit: true,
+  query_timeout_secs: settingsStore.editorSettings.globalQueryTimeoutSecs,
+  query_timeout_inherit: true,
   idle_timeout_secs: 60,
   keepalive_interval_secs: 30,
   ssl: false,
@@ -642,6 +646,73 @@ const dbPickerView = ref<DbPickerView>(loadConnectionPickerView());
 const dbSearchQuery = ref("");
 const selectedDbCategory = ref<DbCategoryKey>("sql");
 const configTab = ref<ConfigTab>("connection");
+
+// 对话框拖动功能
+const dragOffset = ref({ x: 0, y: 0 });
+const isDraggingDialog = ref(false);
+const dragStartPos = ref({ x: 0, y: 0 });
+const dragStartOffset = ref({ x: 0, y: 0 });
+const activePointerId = ref<number | null>(null);
+
+// 计算对话框的定位样式（通过 transform 实现拖动）
+const dialogContentStyle = computed(() => {
+  if (isDraggingDialog.value || dragOffset.value.x !== 0 || dragOffset.value.y !== 0) {
+    return {
+      transform: `translate(${dragOffset.value.x}px, ${dragOffset.value.y}px)`,
+      transition: isDraggingDialog.value ? "none" : "transform 0.15s ease-out",
+    };
+  }
+  return {};
+});
+
+// 开始拖动（在 DialogHeader 上按下鼠标/触摸）
+function onDialogHeaderPointerDown(e: PointerEvent) {
+  if (e.button !== undefined && e.button !== 0) return;
+  isDraggingDialog.value = true;
+  activePointerId.value = e.pointerId;
+  dragStartPos.value = { x: e.clientX, y: e.clientY };
+  dragStartOffset.value = { ...dragOffset.value };
+  (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+}
+
+// 拖动中
+function onDialogHeaderPointerMove(e: PointerEvent) {
+  if (!isDraggingDialog.value || e.pointerId !== activePointerId.value) return;
+  const dx = e.clientX - dragStartPos.value.x;
+  const dy = e.clientY - dragStartPos.value.y;
+  dragOffset.value = {
+    x: dragStartOffset.value.x + dx,
+    y: dragStartOffset.value.y + dy,
+  };
+}
+
+// 结束拖动
+function onDialogHeaderPointerEnd(e: PointerEvent) {
+  if (!isDraggingDialog.value || e.pointerId !== activePointerId.value) return;
+  isDraggingDialog.value = false;
+  activePointerId.value = null;
+  try {
+    (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId);
+  } catch {
+    // 忽略 release 失败的错误
+  }
+}
+
+// 重置拖动位置
+function resetDialogDragOffset() {
+  dragOffset.value = { x: 0, y: 0 };
+  isDraggingDialog.value = false;
+  activePointerId.value = null;
+}
+
+// 监听对话框 open 状态，重置位置
+watch(open, (isOpen) => {
+  if (isOpen) {
+    nextTick(() => resetDialogDragOffset());
+  } else {
+    resetDialogDragOffset();
+  }
+});
 watch([() => form.value.note, configTab, dialogStep, open], () => {
   void nextTick(resizeNoteTextarea);
 });
@@ -2242,6 +2313,13 @@ function applyProfile(val: string, preserveConnectionFields = false) {
       jdbcManualClasspathOpen.value = true;
       applyPrestoSqlBuiltinDriverPathsIfAvailable();
     }
+    if (profile.type === "bigquery") {
+      form.value.connection_string = undefined;
+      form.value.jdbc_driver_class = "";
+      form.value.jdbc_driver_paths = [];
+      jdbcDriverPathsInput.value = "";
+      jdbcManualClasspathOpen.value = true;
+    }
     if (profile.type === "mq") {
       resetMqFields(defaultMqFieldsForProfile(val));
       syncMqSystemKindFromSelectedType();
@@ -2315,6 +2393,8 @@ watch(
   ([config, isOpen]) => {
     const syncAction = connectionEditDraftSyncAction(config?.id ?? null, isOpen, editingId.value);
     if (syncAction === "preserve") return;
+    editGlobalConnectTimeoutSecs.value = settingsStore.editorSettings.globalConnectTimeoutSecs;
+    editGlobalQueryTimeoutSecs.value = settingsStore.editorSettings.globalQueryTimeoutSecs;
     if (syncAction === "hydrate" && config) {
       clearSavedDatabaseInfo();
       const legacyConfig = config as LegacyConnectionConfig;
@@ -2338,8 +2418,10 @@ watch(
         database: config.database,
         color: config.color || "",
         transport_layers: transportLayersForConfig(legacyConfig),
-        connect_timeout_secs: config.connect_timeout_secs || 10,
-        query_timeout_secs: config.query_timeout_secs ?? 30,
+        connect_timeout_secs: config.connect_timeout_inherit === true ? settingsStore.editorSettings.globalConnectTimeoutSecs : config.connect_timeout_secs || 10,
+        connect_timeout_inherit: config.connect_timeout_inherit === true,
+        query_timeout_secs: config.query_timeout_inherit === true ? settingsStore.editorSettings.globalQueryTimeoutSecs : (config.query_timeout_secs ?? 30),
+        query_timeout_inherit: config.query_timeout_inherit === true,
         idle_timeout_secs: config.idle_timeout_secs ?? 60,
         keepalive_interval_secs: config.keepalive_interval_secs ?? 30,
         ssl: config.ssl || false,
@@ -2426,7 +2508,7 @@ watch(
       resetJdbcProductConnectionFields(jdbcProductProfileForConfig(config), config);
       mongoUseUrl.value = !!config.connection_string;
       jdbcDriverPathsInput.value = (config.jdbc_driver_paths || []).join("\n");
-      jdbcManualClasspathOpen.value = config.db_type === "prestosql" || (config.jdbc_driver_paths || []).length > 0;
+      jdbcManualClasspathOpen.value = supportsNativeAgentJdbcDriverConfigType(config.db_type) || (config.jdbc_driver_paths || []).length > 0;
       customDriverName.value = isCustomCompatibleProfile() ? config.driver_label || "" : "";
       dialogStep.value = "config";
       configTab.value = initialConfigTab();
@@ -2884,7 +2966,11 @@ function dbCategoryForOption(value: string): DbCategoryKey | undefined {
 }
 
 const selectedDbIcon = computed(() => iconTypeMap[selectedType.value] || selectedProfile().icon || selectedType.value);
-const jdbcBackedDatabaseTypes = new Set<DatabaseType>(["jdbc", "prestosql"]);
+function supportsNativeAgentJdbcDriverConfigType(dbType: DatabaseType): boolean {
+  return dbType === "prestosql" || dbType === "bigquery";
+}
+
+const jdbcBackedDatabaseTypes = new Set<DatabaseType>(["jdbc", "prestosql", "bigquery"]);
 const isJdbcConnection = computed(() => form.value.db_type === "jdbc");
 const isJdbcxConnection = computed(() => isJdbcConnection.value && form.value.driver_profile === JDBCX_DRIVER_PROFILE);
 const isJdbcProductConnection = computed(() => Boolean(activeJdbcProductProfile.value));
@@ -2895,7 +2981,7 @@ const jdbcxHighPrivilegeExtensionsAllowed = computed({
     resetTestState();
   },
 });
-const isPrestoSqlConnection = computed(() => form.value.db_type === "prestosql");
+const supportsNativeAgentJdbcDriverConfig = computed(() => supportsNativeAgentJdbcDriverConfigType(form.value.db_type));
 const isH2FileMode = computed(() => form.value.db_type === "h2" && h2ConnectionMode.value === "file");
 const usesLocalFilePathInput = computed(() => isLocalFileTypeDb(form.value.db_type) && (form.value.db_type !== "h2" || isH2FileMode.value));
 
@@ -3100,6 +3186,20 @@ const filteredProductionDatabaseNames = computed(() => {
 });
 const productionDatabaseSelectedCount = computed(() => productionDatabaseSelection.value.size);
 const productionDatabaseCanSave = computed(() => productionDatabaseNames.value.length > 0 && productionDatabaseSelection.value.size > 0);
+const usesNacosProductionNamespaces = computed(() => form.value.db_type === "nacos");
+const productionDisabledDescriptionKey = computed(() => (usesNacosProductionNamespaces.value ? "production.namespaceDisabledDescription" : "production.disabledDescription"));
+const productionConnectionDescriptionKey = computed(() => (usesNacosProductionNamespaces.value ? "production.namespaceConnectionDescription" : "production.connectionDescription"));
+const productionScopeAllLabelKey = computed(() => (usesNacosProductionNamespaces.value ? "production.allNamespaces" : "production.allDatabases"));
+const productionScopeSelectedLabelKey = computed(() => (usesNacosProductionNamespaces.value ? "production.selectedNamespaces" : "production.selectedDatabases"));
+const productionScopeResourceLabelKey = computed(() => (usesNacosProductionNamespaces.value ? "production.namespaces" : "production.databases"));
+const productionScopeDescriptionKey = computed(() => (usesNacosProductionNamespaces.value ? "production.namespaceDescription" : "production.databaseDescription"));
+const productionScopePickerLabelKey = computed(() => (usesNacosProductionNamespaces.value ? "production.selectNamespaces" : "production.selectDatabases"));
+const productionPickerTitleKey = computed(() => (usesNacosProductionNamespaces.value ? "production.namespacePickerTitle" : "production.databasePickerTitle"));
+const productionPickerDescriptionKey = computed(() => (usesNacosProductionNamespaces.value ? "production.namespacePickerDescription" : "production.databasePickerDescription"));
+const productionPickerSearchPlaceholderKey = computed(() => (usesNacosProductionNamespaces.value ? "production.namespaceSearchPlaceholder" : "production.databaseSearchPlaceholder"));
+const productionPickerSelectionRequiredKey = computed(() => (usesNacosProductionNamespaces.value ? "production.namespaceSelectionRequired" : "production.databaseSelectionRequired"));
+const productionPickerLoadFailedKey = computed(() => (usesNacosProductionNamespaces.value ? "production.namespaceLoadFailed" : "production.databaseLoadFailed"));
+const productionPickerEmptyKey = computed(() => (usesNacosProductionNamespaces.value ? "production.noNamespacesAvailable" : "production.noDatabasesAvailable"));
 const productionDatabaseSummary = computed(() => {
   const selected = form.value.production_databases?.length || 0;
   if (!selected) return t("production.noDatabasesSelected");
@@ -3570,9 +3670,9 @@ function connectionConfigForSubmit(id: string, generatedName = ""): ConnectionCo
     config.connection_string = undefined;
   }
   const connectTimeout = Number(config.connect_timeout_secs);
-  config.connect_timeout_secs = Number.isFinite(connectTimeout) && connectTimeout > 0 ? connectTimeout : 10;
+  config.connect_timeout_secs = config.connect_timeout_inherit === true ? normalizeGlobalConnectTimeoutSecs(editGlobalConnectTimeoutSecs.value) : Number.isFinite(connectTimeout) && connectTimeout > 0 ? connectTimeout : 10;
   const queryTimeout = Number(config.query_timeout_secs);
-  config.query_timeout_secs = Number.isFinite(queryTimeout) && queryTimeout >= 0 ? queryTimeout : 30;
+  config.query_timeout_secs = config.query_timeout_inherit === true ? normalizeGlobalQueryTimeoutSecs(editGlobalQueryTimeoutSecs.value) : Number.isFinite(queryTimeout) && queryTimeout >= 0 ? queryTimeout : 30;
   const idleTimeout = Number(config.idle_timeout_secs);
   config.idle_timeout_secs = Number.isFinite(idleTimeout) && idleTimeout >= 0 ? idleTimeout : 60;
   const keepaliveInterval = Number(config.keepalive_interval_secs);
@@ -4289,6 +4389,15 @@ async function loadVisibleDatabaseNames(connectionId: string, config: Connection
 }
 
 function normalizeProductionDatabaseSelection(selectedNames: Iterable<string>, databaseNames: string[]): string[] {
+  if (form.value.db_type === "nacos") {
+    const available = new Map(databaseNames.map((name) => [nacosNamespaceIdentity(name), name]));
+    const selected = new Set<string>();
+    for (const name of selectedNames) {
+      const canonicalName = available.get(nacosNamespaceIdentity(name));
+      if (canonicalName !== undefined) selected.add(canonicalName);
+    }
+    return [...selected];
+  }
   const available = new Map(databaseNames.map((name) => [name.toLowerCase(), name]));
   const selected = new Set<string>();
   for (const name of selectedNames) {
@@ -4305,6 +4414,9 @@ function initialProductionDatabaseSelection(databaseNames: string[]): string[] {
 }
 
 async function loadProductionDatabaseNames(connectionId: string, config: ConnectionConfig): Promise<string[]> {
+  if (config.db_type === "nacos") {
+    return normalizeNacosNamespacesForDisplay(await api.nacosListNamespaces(connectionId)).map((namespace) => namespace.namespace);
+  }
   if (config.db_type === "redis") {
     return (await api.redisListDatabases(connectionId)).map((database) => String(database.db));
   }
@@ -4522,6 +4634,8 @@ function openJdbcDriverManagerFromError() {
 function resetForm() {
   editingId.value = null;
   form.value = defaultForm();
+  editGlobalConnectTimeoutSecs.value = settingsStore.editorSettings.globalConnectTimeoutSecs;
+  editGlobalQueryTimeoutSecs.value = settingsStore.editorSettings.globalQueryTimeoutSecs;
   selectedTransportLayerId.value = null;
   draggedTransportLayerId.value = null;
   selectedType.value = "mysql";
@@ -4836,6 +4950,25 @@ function validateTransportLayers(config: LegacyConnectionConfig) {
   });
 }
 
+async function persistGlobalTimeoutDrafts() {
+  const nextConnect = normalizeGlobalConnectTimeoutSecs(editGlobalConnectTimeoutSecs.value);
+  const nextQuery = normalizeGlobalQueryTimeoutSecs(editGlobalQueryTimeoutSecs.value);
+  editGlobalConnectTimeoutSecs.value = nextConnect;
+  editGlobalQueryTimeoutSecs.value = nextQuery;
+  const connectChanged = nextConnect !== settingsStore.editorSettings.globalConnectTimeoutSecs;
+  const queryChanged = nextQuery !== settingsStore.editorSettings.globalQueryTimeoutSecs;
+  if (!connectChanged && !queryChanged) return;
+  settingsStore.updateEditorSettings({
+    globalConnectTimeoutSecs: nextConnect,
+    globalQueryTimeoutSecs: nextQuery,
+  });
+  await settingsStore.persistEditorSettings();
+  await store.applyGlobalTimeouts({
+    connectTimeoutSecs: connectChanged ? nextConnect : undefined,
+    queryTimeoutSecs: queryChanged ? nextQuery : undefined,
+  });
+}
+
 async function save() {
   if (!ensureConnectionHostResolvedFromUrl()) return;
   if (isSaving.value) return;
@@ -4846,12 +4979,14 @@ async function save() {
       const updated = withSavedDatabaseInfo(connectionConfigForSubmit(editingId.value), databaseInfoForSave);
       await ensureRequiredAgentDriverInstalled(updated);
       await ensureRequiredGaussdbMJdbcRuntime(updated);
+      await persistGlobalTimeoutDrafts();
       await store.updateConnection(updated);
       store.stopEditing();
     } else {
       const config = withSavedDatabaseInfo(connectionConfigForSubmit(draftTestConnectionId.value), databaseInfoForSave);
       await ensureRequiredAgentDriverInstalled(config);
       await ensureRequiredGaussdbMJdbcRuntime(config);
+      await persistGlobalTimeoutDrafts();
       await store.addConnection(config);
       draftTestConnectionId.value = uuid();
       if (config.db_type === "jdbc") {
@@ -5263,8 +5398,8 @@ function openExternalUrl(url: string) {
 
 <template>
   <Dialog v-model:open="open">
-    <DialogContent class="connection-dialog-content" :class="connectionDialogContentClass" :data-wide="shouldUseWideConnectionDialog ? 'true' : undefined" @interact-outside.prevent @escape-key-down="handleDialogEscape" @keydown="preventDialogDocumentSelectAll">
-      <DialogHeader>
+    <DialogContent :style="dialogContentStyle" class="connection-dialog-content" :class="connectionDialogContentClass" :data-wide="shouldUseWideConnectionDialog ? 'true' : undefined" @interact-outside.prevent @escape-key-down="handleDialogEscape" @keydown="preventDialogDocumentSelectAll">
+      <DialogHeader class="cursor-move select-none" @pointerdown="onDialogHeaderPointerDown" @pointermove="onDialogHeaderPointerMove" @pointerup="onDialogHeaderPointerEnd" @pointercancel="onDialogHeaderPointerEnd">
         <DialogTitle>{{ editingId ? t("connection.editTitle") : t("connection.title") }}</DialogTitle>
       </DialogHeader>
 
@@ -6912,7 +7047,7 @@ function openExternalUrl(url: string) {
                     </div>
                   </div>
 
-                  <template v-if="isPrestoSqlConnection">
+                  <template v-if="supportsNativeAgentJdbcDriverConfig">
                     <div class="grid grid-cols-4 items-start gap-4">
                       <Label :class="connectionLabelTopClass">{{ t("connection.jdbcDriverPaths") }}</Label>
                       <div class="col-span-3 space-y-2">
@@ -7497,11 +7632,33 @@ function openExternalUrl(url: string) {
                 </div>
                 <div class="grid grid-cols-4 items-center gap-4">
                   <Label :class="connectionLabelSmallClass">{{ t("connection.connectTimeout") }}</Label>
-                  <Input v-model.number="form.connect_timeout_secs" type="number" min="1" max="300" step="1" class="col-span-3" />
+                  <div class="col-span-3 grid grid-cols-2 gap-2">
+                    <div class="grid min-w-0 grid-cols-[auto_minmax(0,1fr)] items-center gap-x-2 gap-y-1 rounded border px-2 py-1.5 sm:flex" :class="form.connect_timeout_inherit === true ? 'border-primary/60 bg-background' : 'border-border bg-muted/30 text-muted-foreground'">
+                      <input id="connect-timeout-global" v-model="form.connect_timeout_inherit" type="radio" name="connect-timeout-scope" :value="true" class="h-3.5 w-3.5 shrink-0 accent-primary" />
+                      <label for="connect-timeout-global" class="min-w-0 flex-1 cursor-pointer truncate text-xs" :title="t('connection.useGlobalQueryTimeout')">{{ t("connection.useGlobalQueryTimeout") }}</label>
+                      <Input v-model.number="editGlobalConnectTimeoutSecs" type="number" min="1" max="300" step="1" class="col-span-2 h-7 w-full shrink-0 sm:col-span-1 sm:w-20" :disabled="form.connect_timeout_inherit !== true" />
+                    </div>
+                    <div class="grid min-w-0 grid-cols-[auto_minmax(0,1fr)] items-center gap-x-2 gap-y-1 rounded border px-2 py-1.5 sm:flex" :class="form.connect_timeout_inherit !== true ? 'border-primary/60 bg-background' : 'border-border bg-muted/30 text-muted-foreground'">
+                      <input id="connect-timeout-connection" v-model="form.connect_timeout_inherit" type="radio" name="connect-timeout-scope" :value="false" class="h-3.5 w-3.5 shrink-0 accent-primary" />
+                      <label for="connect-timeout-connection" class="min-w-0 flex-1 cursor-pointer truncate text-xs" :title="t('connection.useConnectionQueryTimeout')">{{ t("connection.useConnectionQueryTimeout") }}</label>
+                      <Input v-model.number="form.connect_timeout_secs" type="number" min="1" max="300" step="1" class="col-span-2 h-7 w-full shrink-0 sm:col-span-1 sm:w-20" :disabled="form.connect_timeout_inherit === true" />
+                    </div>
+                  </div>
                 </div>
                 <div class="grid grid-cols-4 items-center gap-4">
                   <Label :class="connectionLabelSmallClass">{{ t("connection.queryTimeout") }}</Label>
-                  <Input v-model.number="form.query_timeout_secs" type="number" min="0" max="300" step="1" class="col-span-3" />
+                  <div class="col-span-3 grid grid-cols-2 gap-2">
+                    <div class="grid min-w-0 grid-cols-[auto_minmax(0,1fr)] items-center gap-x-2 gap-y-1 rounded border px-2 py-1.5 sm:flex" :class="form.query_timeout_inherit === true ? 'border-primary/60 bg-background' : 'border-border bg-muted/30 text-muted-foreground'">
+                      <input id="query-timeout-global" v-model="form.query_timeout_inherit" type="radio" name="query-timeout-scope" :value="true" class="h-3.5 w-3.5 shrink-0 accent-primary" />
+                      <label for="query-timeout-global" class="min-w-0 flex-1 cursor-pointer truncate text-xs" :title="t('connection.useGlobalQueryTimeout')">{{ t("connection.useGlobalQueryTimeout") }}</label>
+                      <Input v-model.number="editGlobalQueryTimeoutSecs" type="number" min="0" max="300" step="1" class="col-span-2 h-7 w-full shrink-0 sm:col-span-1 sm:w-20" :disabled="form.query_timeout_inherit !== true" />
+                    </div>
+                    <div class="grid min-w-0 grid-cols-[auto_minmax(0,1fr)] items-center gap-x-2 gap-y-1 rounded border px-2 py-1.5 sm:flex" :class="form.query_timeout_inherit !== true ? 'border-primary/60 bg-background' : 'border-border bg-muted/30 text-muted-foreground'">
+                      <input id="query-timeout-connection" v-model="form.query_timeout_inherit" type="radio" name="query-timeout-scope" :value="false" class="h-3.5 w-3.5 shrink-0 accent-primary" />
+                      <label for="query-timeout-connection" class="min-w-0 flex-1 cursor-pointer truncate text-xs" :title="t('connection.useConnectionQueryTimeout')">{{ t("connection.useConnectionQueryTimeout") }}</label>
+                      <Input v-model.number="form.query_timeout_secs" type="number" min="0" max="300" step="1" class="col-span-2 h-7 w-full shrink-0 sm:col-span-1 sm:w-20" :disabled="form.query_timeout_inherit === true" />
+                    </div>
+                  </div>
                 </div>
                 <div v-show="form.db_type === 'mongodb'" class="grid grid-cols-4 items-center gap-4">
                   <Label :class="connectionLabelSmallClass">{{ t("connection.idleTimeout") }}</Label>
@@ -7548,25 +7705,25 @@ function openExternalUrl(url: string) {
                       <Label class="text-sm font-medium">{{ t("production.enable") }}</Label>
                       <Switch :model-value="productionProtectionEnabled" @update:model-value="setProductionProtectionEnabled" />
                     </div>
-                    <p v-if="!productionProtectionEnabled" class="text-xs leading-5 text-muted-foreground">{{ t("production.disabledDescription") }}</p>
+                    <p v-if="!productionProtectionEnabled" class="text-xs leading-5 text-muted-foreground">{{ t(productionDisabledDescriptionKey) }}</p>
                     <template v-else>
                       <Label class="text-xs font-medium">{{ t("production.scope") }}</Label>
                       <Tabs v-model="productionScope" class="w-full">
                         <TabsList class="grid h-8 w-full grid-cols-2">
-                          <TabsTrigger value="connection" class="text-xs">{{ t("production.allDatabases") }}</TabsTrigger>
-                          <TabsTrigger value="databases" class="text-xs" :disabled="!canSelectProductionDatabases" :title="canSelectProductionDatabases ? undefined : t('production.singleDatabaseScopeHint')">{{ t("production.selectedDatabases") }}</TabsTrigger>
+                          <TabsTrigger value="connection" class="text-xs">{{ t(productionScopeAllLabelKey) }}</TabsTrigger>
+                          <TabsTrigger value="databases" class="text-xs" :disabled="!canSelectProductionDatabases" :title="canSelectProductionDatabases ? undefined : t('production.singleDatabaseScopeHint')">{{ t(productionScopeSelectedLabelKey) }}</TabsTrigger>
                         </TabsList>
                       </Tabs>
-                      <p class="text-xs leading-5 text-muted-foreground">{{ productionScope === "connection" ? t("production.connectionDescription") : t("production.databaseDescription") }}</p>
+                      <p class="text-xs leading-5 text-muted-foreground">{{ productionScope === "connection" ? t(productionConnectionDescriptionKey) : t(productionScopeDescriptionKey) }}</p>
                       <div v-if="productionScope === 'databases'" class="grid gap-1.5">
                         <div class="flex items-center justify-between gap-3">
-                          <Label class="text-xs font-medium">{{ t("production.databases") }}</Label>
+                          <Label class="text-xs font-medium">{{ t(productionScopeResourceLabelKey) }}</Label>
                           <span class="text-xs text-muted-foreground">{{ productionDatabaseSummary }}</span>
                         </div>
                         <Button type="button" variant="outline" size="sm" class="justify-start" :disabled="isTesting || isSaving || isLoadingProductionDatabases || !hasRequiredConnectionTarget" @click="openProductionDatabasesPicker">
                           <Loader2 v-if="isLoadingProductionDatabases" class="mr-1.5 h-4 w-4 animate-spin" />
                           <ListFilter v-else class="mr-1.5 h-4 w-4" />
-                          {{ t("production.selectDatabases") }}
+                          {{ t(productionScopePickerLabelKey) }}
                         </Button>
                       </div>
                     </template>
@@ -8079,15 +8236,15 @@ function openExternalUrl(url: string) {
   <Dialog v-model:open="showProductionDatabasesDialog">
     <DialogContent class="sm:max-w-[460px]">
       <DialogHeader>
-        <DialogTitle>{{ t("production.databasePickerTitle") }}</DialogTitle>
+        <DialogTitle>{{ t(productionPickerTitleKey) }}</DialogTitle>
         <p class="text-sm text-muted-foreground">
-          {{ t("production.databasePickerDescription", { connection: form.name || selectedProfile().label }) }}
+          {{ t(productionPickerDescriptionKey, { connection: form.name || selectedProfile().label }) }}
         </p>
       </DialogHeader>
 
       <div class="flex items-center gap-2 rounded-md border bg-background px-2">
         <Search class="h-4 w-4 shrink-0 text-muted-foreground" />
-        <Input v-model="productionDatabaseSearchText" :placeholder="t('production.databaseSearchPlaceholder')" class="h-8 border-0 px-0 shadow-none focus-visible:ring-0" :disabled="isLoadingProductionDatabases || !!productionDatabaseError" />
+        <Input v-model="productionDatabaseSearchText" :placeholder="t(productionPickerSearchPlaceholderKey)" class="h-8 border-0 px-0 shadow-none focus-visible:ring-0" :disabled="isLoadingProductionDatabases || !!productionDatabaseError" />
       </div>
 
       <div class="flex items-center justify-between text-xs text-muted-foreground">
@@ -8102,7 +8259,7 @@ function openExternalUrl(url: string) {
         </div>
       </div>
       <p v-if="!isLoadingProductionDatabases && !productionDatabaseError && !productionDatabaseCanSave" class="text-xs text-destructive">
-        {{ t("production.databaseSelectionRequired") }}
+        {{ t(productionPickerSelectionRequiredKey) }}
       </p>
 
       <div class="h-72 overflow-y-auto rounded-md border bg-background/50 p-1">
@@ -8111,14 +8268,14 @@ function openExternalUrl(url: string) {
           {{ t("common.loading") }}
         </div>
         <div v-else-if="productionDatabaseError" class="flex h-full flex-col items-start justify-center gap-3 p-3 text-sm text-destructive">
-          <p>{{ t("production.databaseLoadFailed", { message: productionDatabaseError }) }}</p>
+          <p>{{ t(productionPickerLoadFailedKey, { message: productionDatabaseError }) }}</p>
           <Button type="button" variant="outline" size="sm" @click="reloadProductionDatabases">
             <RefreshCw class="mr-1.5 h-3.5 w-3.5" />
             {{ t("production.retry") }}
           </Button>
         </div>
         <div v-else-if="!filteredProductionDatabaseNames.length" class="p-3 text-sm text-muted-foreground">
-          {{ productionDatabaseNames.length ? t("grid.noSearchResults") : t("production.noDatabasesAvailable") }}
+          {{ productionDatabaseNames.length ? t("grid.noSearchResults") : t(productionPickerEmptyKey) }}
         </div>
         <template v-else>
           <button

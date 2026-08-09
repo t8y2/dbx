@@ -46,6 +46,7 @@ import {
   type CustomThemeColors,
   type CustomTheme,
   type ClickTableNavigationTarget,
+  type SqlCompletionTriggerMode,
 } from "@/stores/settingsStore";
 import { createRunStatementButtonDom, loadEditorTheme, editorFontTheme } from "@/lib/editor/editorThemes";
 import { orderAiConfigsForDisplay } from "@/lib/ai/aiConfigOrdering";
@@ -126,7 +127,7 @@ import { currentLocale, setLocale, type Locale } from "@/i18n";
 import { SETTINGS_SEARCH_DEFINITIONS, TOOLBAR_VISIBILITY_ITEMS, createShortcutSettingsSearchDefinitions, resolveSettingsSearchEntries, searchSettings, toolbarVisibilityItemLabel, type SettingsCategory, type SettingsSearchEntry, type ToolbarVisibilityItem } from "@/lib/settings/settingsSearch";
 import { LOCALE_OPTIONS } from "@/lib/app/localeOptions";
 import { DEFAULT_WEB_DAV_AUTO_UPLOAD_INTERVAL_MINUTES, DEFAULT_WEB_DAV_REMOTE_PATH, normalizedWebDavAutoUploadInterval, writeWebDavAutoUploadFields } from "@/lib/webdav/webdavAutoUploadConfig";
-import { apiUrl } from "@/lib/common/webPath";
+import { apiUrl, webPath } from "@/lib/common/webPath";
 import { DEFAULT_DATA_GRID_FONT_FAMILY, DEFAULT_UI_FONT_FAMILY, normalizeCustomFontFamilyInput, readableFontFamily, SYSTEM_UI_FONT_FAMILY } from "@/lib/app/appFonts";
 import { buildFontFamilyOptions, displayFontFamily, isPresetFontFamily, loadSystemFontNames } from "@/lib/app/fontFamilyOptions";
 import { buildAppSupportInfoRows, formatAppSupportInfoForClipboard, type AppSupportInfoLabels } from "@/lib/app/supportInfo";
@@ -271,12 +272,15 @@ const editCustomThemes = ref<CustomTheme[]>([...settingsStore.editorSettings.cus
 const editActiveCustomThemeId = ref(settingsStore.editorSettings.activeCustomThemeId);
 const showThemeCustomizer = ref(false);
 const editExecuteMode = ref(settingsStore.editorSettings.executeMode);
+const editGlobalConnectTimeoutSecs = ref(settingsStore.editorSettings.globalConnectTimeoutSecs);
+const editGlobalQueryTimeoutSecs = ref(settingsStore.editorSettings.globalQueryTimeoutSecs);
 const editShowExecutionTargetPicker = ref(settingsStore.editorSettings.showExecutionTargetPicker);
 const editShowStatementRunButtons = ref(settingsStore.editorSettings.showStatementRunButtons);
 const editShowCurrentStatementFrame = ref(settingsStore.editorSettings.showCurrentStatementFrame);
 const editShowInsertValueHints = ref(settingsStore.editorSettings.showInsertValueHints);
 const editAutoAliasTables = ref(settingsStore.editorSettings.autoAliasTables);
 const editInsertSpaceAfterCompletion = ref(settingsStore.editorSettings.insertSpaceAfterCompletion);
+const editCompletionTriggerMode = ref<SqlCompletionTriggerMode>(settingsStore.editorSettings.completionTriggerMode);
 const editWordWrap = ref(settingsStore.editorSettings.wordWrap);
 const editVimModeEnabled = ref(settingsStore.editorSettings.vimModeEnabled);
 const editAutoCloseBrackets = ref(settingsStore.editorSettings.autoCloseBrackets);
@@ -439,12 +443,15 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     customThemes: editCustomThemes.value,
     activeCustomThemeId: editActiveCustomThemeId.value,
     executeMode: editExecuteMode.value,
+    globalConnectTimeoutSecs: editGlobalConnectTimeoutSecs.value,
+    globalQueryTimeoutSecs: editGlobalQueryTimeoutSecs.value,
     showExecutionTargetPicker: editShowExecutionTargetPicker.value,
     showStatementRunButtons: editShowStatementRunButtons.value,
     showCurrentStatementFrame: editShowCurrentStatementFrame.value,
     showInsertValueHints: editShowInsertValueHints.value,
     autoAliasTables: editAutoAliasTables.value,
     insertSpaceAfterCompletion: editInsertSpaceAfterCompletion.value,
+    completionTriggerMode: editCompletionTriggerMode.value,
     wordWrap: editWordWrap.value,
     vimModeEnabled: editVimModeEnabled.value,
     autoCloseBrackets: editAutoCloseBrackets.value,
@@ -706,12 +713,15 @@ function syncEditorSettingsDraftFromStore() {
   editCustomThemes.value = [...settingsStore.editorSettings.customThemes];
   editActiveCustomThemeId.value = settingsStore.editorSettings.activeCustomThemeId;
   editExecuteMode.value = settingsStore.editorSettings.executeMode;
+  editGlobalConnectTimeoutSecs.value = settingsStore.editorSettings.globalConnectTimeoutSecs;
+  editGlobalQueryTimeoutSecs.value = settingsStore.editorSettings.globalQueryTimeoutSecs;
   editShowExecutionTargetPicker.value = settingsStore.editorSettings.showExecutionTargetPicker;
   editShowStatementRunButtons.value = settingsStore.editorSettings.showStatementRunButtons;
   editShowCurrentStatementFrame.value = settingsStore.editorSettings.showCurrentStatementFrame;
   editShowInsertValueHints.value = settingsStore.editorSettings.showInsertValueHints;
   editAutoAliasTables.value = settingsStore.editorSettings.autoAliasTables;
   editInsertSpaceAfterCompletion.value = settingsStore.editorSettings.insertSpaceAfterCompletion;
+  editCompletionTriggerMode.value = settingsStore.editorSettings.completionTriggerMode;
   editWordWrap.value = settingsStore.editorSettings.wordWrap;
   editVimModeEnabled.value = settingsStore.editorSettings.vimModeEnabled;
   editAutoCloseBrackets.value = settingsStore.editorSettings.autoCloseBrackets;
@@ -856,12 +866,20 @@ function hasChanges(): boolean {
 async function persistSettings() {
   if (hasApplyBlocker.value) return;
   const editorSettingsPatch = editorSettingsPatchFromDraft(currentEditorSettingsDraft(), editEditorSettingsBase.value);
+  const globalConnectTimeoutChanged = editorSettingsPatch.globalConnectTimeoutSecs !== undefined;
+  const globalQueryTimeoutChanged = editorSettingsPatch.globalQueryTimeoutSecs !== undefined;
   const sidebarObjectDisplayChanged = editorSettingsPatch.sidebarObjectDisplay !== undefined && editorSettingsPatch.sidebarObjectDisplay !== settingsStore.editorSettings.sidebarObjectDisplay;
   const sidebarTablePageSizeChanged = editSidebarTablePageSize.value !== (settingsStore.desktopSettings.sidebar_table_page_size ?? DEFAULT_SIDEBAR_TABLE_PAGE_SIZE);
   if (Object.keys(editorSettingsPatch).length > 0) {
     settingsStore.updateEditorSettings(editorSettingsPatch);
     await settingsStore.persistEditorSettings();
     editEditorSettingsBase.value = editorSettingsDraftFromSettings(settingsStore.editorSettings);
+  }
+  if (globalConnectTimeoutChanged || globalQueryTimeoutChanged) {
+    await connectionStore.applyGlobalTimeouts({
+      connectTimeoutSecs: globalConnectTimeoutChanged ? settingsStore.editorSettings.globalConnectTimeoutSecs : undefined,
+      queryTimeoutSecs: globalQueryTimeoutChanged ? settingsStore.editorSettings.globalQueryTimeoutSecs : undefined,
+    });
   }
   await settingsStore.updateDesktopSettings({
     show_tray_icon: editShowTrayIcon.value,
@@ -909,12 +927,15 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editFontFamily.value = DEFAULT_EDITOR_SETTINGS.fontFamily;
     editFontSize.value = DEFAULT_EDITOR_SETTINGS.fontSize;
     editExecuteMode.value = DEFAULT_EDITOR_SETTINGS.executeMode;
+    editGlobalConnectTimeoutSecs.value = DEFAULT_EDITOR_SETTINGS.globalConnectTimeoutSecs;
+    editGlobalQueryTimeoutSecs.value = DEFAULT_EDITOR_SETTINGS.globalQueryTimeoutSecs;
     editShowExecutionTargetPicker.value = DEFAULT_EDITOR_SETTINGS.showExecutionTargetPicker;
     editShowStatementRunButtons.value = DEFAULT_EDITOR_SETTINGS.showStatementRunButtons;
     editShowCurrentStatementFrame.value = DEFAULT_EDITOR_SETTINGS.showCurrentStatementFrame;
     editShowInsertValueHints.value = DEFAULT_EDITOR_SETTINGS.showInsertValueHints;
     editAutoAliasTables.value = DEFAULT_EDITOR_SETTINGS.autoAliasTables;
     editInsertSpaceAfterCompletion.value = DEFAULT_EDITOR_SETTINGS.insertSpaceAfterCompletion;
+    editCompletionTriggerMode.value = DEFAULT_EDITOR_SETTINGS.completionTriggerMode;
     editWordWrap.value = DEFAULT_EDITOR_SETTINGS.wordWrap;
     editVimModeEnabled.value = DEFAULT_EDITOR_SETTINGS.vimModeEnabled;
     editAutoCloseBrackets.value = DEFAULT_EDITOR_SETTINGS.autoCloseBrackets;
@@ -1001,6 +1022,8 @@ function resetAllDefaults() {
   editCustomThemes.value = [...DEFAULT_EDITOR_SETTINGS.customThemes];
   editActiveCustomThemeId.value = DEFAULT_EDITOR_SETTINGS.activeCustomThemeId;
   editExecuteMode.value = DEFAULT_EDITOR_SETTINGS.executeMode;
+  editGlobalConnectTimeoutSecs.value = DEFAULT_EDITOR_SETTINGS.globalConnectTimeoutSecs;
+  editGlobalQueryTimeoutSecs.value = DEFAULT_EDITOR_SETTINGS.globalQueryTimeoutSecs;
   editShowExecutionTargetPicker.value = DEFAULT_EDITOR_SETTINGS.showExecutionTargetPicker;
   editShowStatementRunButtons.value = DEFAULT_EDITOR_SETTINGS.showStatementRunButtons;
   editShowCurrentStatementFrame.value = DEFAULT_EDITOR_SETTINGS.showCurrentStatementFrame;
@@ -1191,6 +1214,12 @@ function isTableColumnTemplateLengthDisabled(row: TableColumnTemplateGridRow): b
 
 function onExecuteModeChange(v: any) {
   if (v === "all" || v === "current") editExecuteMode.value = v;
+}
+
+function onCompletionTriggerModeChange(v: any) {
+  if (v === "manual" || v === "require-prefix" || v === "positional") {
+    editCompletionTriggerMode.value = v;
+  }
 }
 
 function onSqlSemanticDiagnosticsEnabledChange(value: boolean) {
@@ -2553,7 +2582,7 @@ async function saveMaxAgentTurnsSetting() {
 }
 
 // Max Retries (global). Default 2, range 0–10. Applied to all API-backed
-// AI providers. CLI providers (Claude Code, Codex, OpenCode, Pi) are unaffected
+// AI providers. CLI providers are unaffected
 // because they use their own retry logic.
 const editMaxRetries = ref<number | undefined>(undefined);
 const maxRetriesSaving = ref(false);
@@ -2604,8 +2633,9 @@ function normalizeMaxRetries(value: number | undefined): number {
 const aiDeleteConfirmOpen = ref(false);
 const aiDeleteConfigId = ref<string | null>(null);
 
-const CLI_AI_PROVIDERS = new Set<AiProvider>(["claude-code-cli", "codex-cli", "opencode-cli", "pi-agent-cli"]);
+const CLI_AI_PROVIDERS = new Set<AiProvider>(["claude-code-cli", "codex-cli", "opencode-cli", "pi-agent-cli", "cursor-cli"]);
 const OPENCODE_CONTROL_ENV = new Set(["OPENCODE_CONFIG", "OPENCODE_CONFIG_CONTENT", "OPENCODE_CONFIG_DIR", "OPENCODE_DB", "OPENCODE_PERMISSION", "OPENCODE_DISABLE_PROJECT_CONFIG"]);
+const CURSOR_CONTROL_ENV = new Set(["CURSOR_CONFIG_DIR", "CURSOR_DATA_DIR"]);
 const aiProviderOptions = computed(() => Object.values(AI_PROVIDER_PRESETS).filter((provider) => !isWeb || !CLI_AI_PROVIDERS.has(provider.provider)));
 const selectedAiProviderPreset = computed(() => AI_PROVIDER_PRESETS[aiEditProvider.value]);
 
@@ -2629,6 +2659,8 @@ const aiEditPiAgentCliPath = ref("");
 const aiEditPiAgentCliEnvRows = ref<AiEnvRow[]>([]);
 const aiEditOpenCodeCliPath = ref("");
 const aiEditOpenCodeCliEnvRows = ref<AiEnvRow[]>([]);
+const aiEditCursorCliPath = ref("");
+const aiEditCursorCliEnvRows = ref<AiEnvRow[]>([]);
 
 const aiAnthropicMessagesMode = computed(() => aiEditApiStyle.value === "anthropic-messages");
 
@@ -2660,18 +2692,21 @@ const aiIsCodexCli = computed(() => aiEditProvider.value === "codex-cli");
 const aiIsClaudeCodeCli = computed(() => aiEditProvider.value === "claude-code-cli");
 const aiIsPiAgentCli = computed(() => aiEditProvider.value === "pi-agent-cli");
 const aiIsOpenCodeCli = computed(() => aiEditProvider.value === "opencode-cli");
+const aiIsCursorCli = computed(() => aiEditProvider.value === "cursor-cli");
 const aiIsCliProvider = computed(() => CLI_AI_PROVIDERS.has(aiEditProvider.value));
 const aiCliProviderLabel = computed(() => selectedAiProviderPreset.value.label);
 const aiCliCommandName = computed(() => {
   if (aiIsClaudeCodeCli.value) return "claude";
   if (aiIsPiAgentCli.value) return "pi";
   if (aiIsOpenCodeCli.value) return "opencode";
+  if (aiIsCursorCli.value) return "agent";
   return "codex";
 });
 const aiCliLoginCommand = computed(() => {
   if (aiIsClaudeCodeCli.value) return "claude auth login";
   if (aiIsPiAgentCli.value) return "pi";
   if (aiIsOpenCodeCli.value) return "opencode auth login";
+  if (aiIsCursorCli.value) return "agent login";
   return "codex login";
 });
 const aiEditCliPath = computed({
@@ -2679,6 +2714,7 @@ const aiEditCliPath = computed({
     if (aiIsClaudeCodeCli.value) return aiEditClaudeCodeCliPath.value;
     if (aiIsPiAgentCli.value) return aiEditPiAgentCliPath.value;
     if (aiIsOpenCodeCli.value) return aiEditOpenCodeCliPath.value;
+    if (aiIsCursorCli.value) return aiEditCursorCliPath.value;
     return aiEditCodexCliPath.value;
   },
   set: (value: string) => {
@@ -2688,6 +2724,8 @@ const aiEditCliPath = computed({
       aiEditPiAgentCliPath.value = value;
     } else if (aiIsOpenCodeCli.value) {
       aiEditOpenCodeCliPath.value = value;
+    } else if (aiIsCursorCli.value) {
+      aiEditCursorCliPath.value = value;
     } else {
       aiEditCodexCliPath.value = value;
     }
@@ -2697,6 +2735,7 @@ const aiEditCliEnvRows = computed(() => {
   if (aiIsClaudeCodeCli.value) return aiEditClaudeCodeCliEnvRows.value;
   if (aiIsPiAgentCli.value) return aiEditPiAgentCliEnvRows.value;
   if (aiIsOpenCodeCli.value) return aiEditOpenCodeCliEnvRows.value;
+  if (aiIsCursorCli.value) return aiEditCursorCliEnvRows.value;
   return aiEditCodexCliEnvRows.value;
 });
 watch(aiIsCliProvider, (isCliProvider) => {
@@ -2773,7 +2812,7 @@ function cliEnvValidationError(): string {
     const key = row.key.trim();
     if (key && !/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) return t("ai.cliEnvInvalidName", { name: key });
     const upper = key.toUpperCase();
-    if (upper.startsWith("DBX_MCP_") || (aiIsPiAgentCli.value && upper.startsWith("DBX_PI_")) || (aiIsOpenCodeCli.value && OPENCODE_CONTROL_ENV.has(upper))) {
+    if (upper.startsWith("DBX_MCP_") || (aiIsPiAgentCli.value && upper.startsWith("DBX_PI_")) || (aiIsOpenCodeCli.value && OPENCODE_CONTROL_ENV.has(upper)) || (aiIsCursorCli.value && CURSOR_CONTROL_ENV.has(upper))) {
       return t("ai.cliEnvReservedName", { name: key });
     }
   }
@@ -2791,6 +2830,8 @@ function removeCliEnvRow(id: string) {
     aiEditPiAgentCliEnvRows.value = aiEditPiAgentCliEnvRows.value.filter((row) => row.id !== id);
   } else if (aiIsOpenCodeCli.value) {
     aiEditOpenCodeCliEnvRows.value = aiEditOpenCodeCliEnvRows.value.filter((row) => row.id !== id);
+  } else if (aiIsCursorCli.value) {
+    aiEditCursorCliEnvRows.value = aiEditCursorCliEnvRows.value.filter((row) => row.id !== id);
   } else {
     aiEditCodexCliEnvRows.value = aiEditCodexCliEnvRows.value.filter((row) => row.id !== id);
   }
@@ -2821,6 +2862,8 @@ function currentAiEditConfig() {
     piAgentCliEnv: aiIsPiAgentCli.value ? cliEnvFromRows(aiEditPiAgentCliEnvRows.value) : {},
     opencodeCliPath: aiEditOpenCodeCliPath.value.trim() || undefined,
     opencodeCliEnv: aiIsOpenCodeCli.value ? cliEnvFromRows(aiEditOpenCodeCliEnvRows.value) : {},
+    cursorCliPath: aiEditCursorCliPath.value.trim() || undefined,
+    cursorCliEnv: aiIsCursorCli.value ? cliEnvFromRows(aiEditCursorCliEnvRows.value) : {},
   };
 }
 
@@ -2892,6 +2935,8 @@ function aiEnterEditMode(configId?: string) {
       aiEditPiAgentCliEnvRows.value = aiEnvRowsFromConfig(config.piAgentCliEnv);
       aiEditOpenCodeCliPath.value = config.opencodeCliPath ?? "";
       aiEditOpenCodeCliEnvRows.value = aiEnvRowsFromConfig(config.opencodeCliEnv);
+      aiEditCursorCliPath.value = config.cursorCliPath ?? "";
+      aiEditCursorCliEnvRows.value = aiEnvRowsFromConfig(config.cursorCliEnv);
     }
   } else {
     aiEditConfigName.value = "";
@@ -2915,6 +2960,8 @@ function aiEnterEditMode(configId?: string) {
     aiEditPiAgentCliEnvRows.value = [];
     aiEditOpenCodeCliPath.value = "";
     aiEditOpenCodeCliEnvRows.value = [];
+    aiEditCursorCliPath.value = "";
+    aiEditCursorCliEnvRows.value = [];
   }
 }
 
@@ -3601,6 +3648,26 @@ onUnmounted(() => {
 
                 <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                   <div class="space-y-1">
+                    <Label for="editor-global-connect-timeout">{{ t("settings.globalConnectTimeout") }}</Label>
+                    <p class="text-xs text-muted-foreground">
+                      {{ t("settings.globalConnectTimeoutDescription") }}
+                    </p>
+                  </div>
+                  <Input id="editor-global-connect-timeout" v-model.number="editGlobalConnectTimeoutSecs" type="number" min="1" max="300" step="1" class="w-24" />
+                </div>
+
+                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                  <div class="space-y-1">
+                    <Label for="editor-global-query-timeout">{{ t("settings.globalQueryTimeout") }}</Label>
+                    <p class="text-xs text-muted-foreground">
+                      {{ t("settings.globalQueryTimeoutDescription") }}
+                    </p>
+                  </div>
+                  <Input id="editor-global-query-timeout" v-model.number="editGlobalQueryTimeoutSecs" type="number" min="0" max="300" step="1" class="w-24" />
+                </div>
+
+                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                  <div class="space-y-1">
                     <Label for="editor-show-execution-target-picker">{{ t("settings.showExecutionTargetPicker") }}</Label>
                     <p class="text-xs text-muted-foreground">
                       {{ t("settings.showExecutionTargetPickerDescription") }}
@@ -3703,6 +3770,23 @@ onUnmounted(() => {
                     </p>
                   </div>
                   <Switch id="editor-auto-alias-tables" v-model="editAutoAliasTables" class="mt-0.5" />
+                </div>
+
+                <div class="space-y-2">
+                  <Label>{{ t("settings.completionTriggerMode") }}</Label>
+                  <Select :model-value="editCompletionTriggerMode" @update:model-value="onCompletionTriggerModeChange">
+                    <SelectTrigger>
+                      <SelectValue :placeholder="t('settings.completionTriggerMode')" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="manual">{{ t("settings.completionTriggerModeManual") }}</SelectItem>
+                      <SelectItem value="require-prefix">{{ t("settings.completionTriggerModeRequirePrefix") }}</SelectItem>
+                      <SelectItem value="positional">{{ t("settings.completionTriggerModePositional") }}</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  <p class="text-xs text-muted-foreground">
+                    {{ t("settings.completionTriggerModeDescription") }}
+                  </p>
                 </div>
               </div>
 
@@ -4195,7 +4279,7 @@ onUnmounted(() => {
                 <div class="settings-appearance-choice-grid">
                   <Button type="button" variant="outline" class="settings-choice-card h-auto justify-start border p-3" :class="editIconTheme === 'default' ? 'dbx-choice-selected' : ''" @click="setIconTheme('default')">
                     <div class="flex items-center gap-3 text-left w-full min-w-0">
-                      <img src="/icon-preview-default.png" alt="DBX" class="h-12 w-12 shrink-0" />
+                      <img :src="webPath('/icon-preview-default.png')" alt="DBX" class="h-12 w-12 shrink-0" />
                       <TooltipProvider>
                         <Tooltip>
                           <TooltipTrigger as-child>
@@ -4217,7 +4301,7 @@ onUnmounted(() => {
                   </Button>
                   <Button type="button" variant="outline" class="settings-choice-card h-auto justify-start border p-3" :class="editIconTheme === 'black' ? 'dbx-choice-selected' : ''" @click="setIconTheme('black')">
                     <div class="flex items-center gap-3 text-left w-full min-w-0">
-                      <img src="/icon-preview-black.png" alt="DBX" class="h-12 w-12 shrink-0" />
+                      <img :src="webPath('/icon-preview-black.png')" alt="DBX" class="h-12 w-12 shrink-0" />
                       <TooltipProvider>
                         <Tooltip>
                           <TooltipTrigger as-child>

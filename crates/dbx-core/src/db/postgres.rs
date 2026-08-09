@@ -1016,7 +1016,7 @@ async fn postgres_query_one_cached(
 }
 
 enum PreparedSelectOutcome {
-    Complete(QueryResult),
+    Complete(Box<QueryResult>),
     TextFallback { column_types: Vec<String>, unsupported_type: String },
 }
 
@@ -1129,7 +1129,7 @@ async fn execute_select_prepared(
     );
 
     let (spatial_columns, spatial_values) = spatial_columns.finish_with_values(spatial_values);
-    Ok(PreparedSelectOutcome::Complete(QueryResult {
+    Ok(PreparedSelectOutcome::Complete(Box::new(QueryResult {
         columns,
         column_types,
         column_sortables: Vec::new(),
@@ -1143,7 +1143,7 @@ async fn execute_select_prepared(
         has_more: false,
         elasticsearch_raw_body: None,
         messages: Vec::new(),
-    }))
+    })))
 }
 
 fn matching_pg_text_column_types(columns: &[String], prepared: Option<Vec<String>>) -> Vec<String> {
@@ -1250,7 +1250,7 @@ async fn finish_prepared_select(
     progress_clock: Option<&StreamProgressClock>,
 ) -> Result<QueryResult, String> {
     match outcome {
-        PreparedSelectOutcome::Complete(result) => Ok(result),
+        PreparedSelectOutcome::Complete(result) => Ok(*result),
         PreparedSelectOutcome::TextFallback { column_types, unsupported_type } => {
             log::info!(
                 "[postgres][select:text_fallback] unsupported_type={} switching_to=simple_query",
@@ -1585,8 +1585,10 @@ const POSTGRES_CONNECTION_IDENTITY_SQL: &str = "SELECT pg_backend_pid(), \
 /// Notice buffers for live connections, keyed by connection identity. Entries
 /// are weak so they disappear once the pooled connection (and its driver
 /// task) is dropped.
-fn postgres_notice_buffers() -> &'static Mutex<HashMap<PostgresConnectionKey, Weak<Mutex<Vec<QueryMessage>>>>> {
-    static BUFFERS: OnceLock<Mutex<HashMap<PostgresConnectionKey, Weak<Mutex<Vec<QueryMessage>>>>>> = OnceLock::new();
+type PostgresNoticeBuffers = HashMap<PostgresConnectionKey, Weak<Mutex<Vec<QueryMessage>>>>;
+
+fn postgres_notice_buffers() -> &'static Mutex<PostgresNoticeBuffers> {
+    static BUFFERS: OnceLock<Mutex<PostgresNoticeBuffers>> = OnceLock::new();
     BUFFERS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -1599,11 +1601,10 @@ fn postgres_notice_buffers() -> &'static Mutex<HashMap<PostgresConnectionKey, We
 /// never be retried from `drain_postgres_notices`, which can run inside the
 /// read-only transaction used for EXPLAIN, where a failing query would abort
 /// the user's statement.
-fn postgres_client_keys(
-) -> &'static Mutex<HashMap<usize, (Weak<deadpool_postgres::StatementCache>, Option<PostgresConnectionKey>)>> {
-    static KEYS: OnceLock<
-        Mutex<HashMap<usize, (Weak<deadpool_postgres::StatementCache>, Option<PostgresConnectionKey>)>>,
-    > = OnceLock::new();
+type PostgresClientKeys = HashMap<usize, (Weak<deadpool_postgres::StatementCache>, Option<PostgresConnectionKey>)>;
+
+fn postgres_client_keys() -> &'static Mutex<PostgresClientKeys> {
+    static KEYS: OnceLock<Mutex<PostgresClientKeys>> = OnceLock::new();
     KEYS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -2327,13 +2328,12 @@ pub async fn list_tables_filtered(
     let limit_param = limit.and_then(|value| i64::try_from(value).ok());
     let offset_param = offset.and_then(|value| i64::try_from(value).ok()).unwrap_or(0);
     let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
-    let rows = postgres_query_cached(
-        &client,
-        postgres_tables_sql(),
-        &[&schema, &filter_pattern, &fuzzy_filter_pattern, &limit_param, &offset_param],
-    )
-    .await
-    .map_err(|e| e.to_string())?;
+    let sql = postgres_tables_sql(limit_param, offset_param);
+    let params: &[(&(dyn tokio_postgres::types::ToSql + Sync), Type)] =
+        &[(&schema, Type::VARCHAR), (&filter_pattern, Type::VARCHAR), (&fuzzy_filter_pattern, Type::VARCHAR)];
+    // The pagination literals make this SQL vary by page. Use an unnamed typed
+    // query so each load stays one round trip without growing the statement cache.
+    let rows = client.query_typed(&sql, params).await.map_err(|e| e.to_string())?;
 
     Ok(rows
         .iter()
@@ -2701,12 +2701,18 @@ fn postgres_table_comment_sql() -> &'static str {
      LIMIT 1"
 }
 
-fn postgres_tables_sql() -> &'static str {
-    // PostgreSQL and Redshift can infer different wire types for LIMIT/OFFSET
-    // placeholders. Keep them explicit so the shared i64 parameters serialize reliably.
-    // Root relations must precede partition descendants so a large partition
-    // hierarchy cannot push unrelated schema tables into later sidebar pages.
-    "SELECT c.relname AS table_name, \
+fn postgres_tables_sql(limit: Option<i64>, offset: i64) -> String {
+    // PostgreSQL-compatible servers do not agree on the inferred wire types
+    // or accepted expression grammar for LIMIT/OFFSET parameters. These values
+    // originate as usize and are converted to non-negative i64 literals.
+    // Omitting an explicit ESCAPE keeps compatibility with servers that expose
+    // only two-argument ILIKE; bound patterns use the default backslash escape.
+    let pagination = match limit {
+        Some(limit) => format!("LIMIT {limit} OFFSET {offset}"),
+        None => format!("OFFSET {offset}"),
+    };
+    format!(
+        "SELECT c.relname AS table_name, \
          CASE c.relkind WHEN 'r' THEN 'BASE TABLE' WHEN 'v' THEN 'VIEW' \
            WHEN 'm' THEN 'MATERIALIZED_VIEW' WHEN 'f' THEN 'FOREIGN TABLE' \
            WHEN 'p' THEN 'BASE TABLE' END AS table_type, \
@@ -2719,9 +2725,10 @@ fn postgres_tables_sql() -> &'static str {
          LEFT JOIN pg_catalog.pg_class pc ON pc.oid = i.inhparent \
          LEFT JOIN pg_catalog.pg_namespace pn ON pn.oid = pc.relnamespace \
          WHERE n.nspname = $1 AND c.relkind IN ('r','v','m','f','p') \
-           AND ($2 = '%%' OR c.relname ILIKE $2 ESCAPE '~' OR ($3 <> '' AND c.relname ILIKE $3 ESCAPE '~')) \
+           AND ($2 = '%%' OR c.relname ILIKE $2 OR ($3 <> '' AND c.relname ILIKE $3)) \
          ORDER BY CASE WHEN pc.relkind = 'p' THEN 1 ELSE 0 END, c.relname \
-         LIMIT CAST($4 AS BIGINT) OFFSET CAST($5 AS BIGINT)"
+         {pagination}"
+    )
 }
 
 fn like_contains_pattern(value: &str) -> String {
@@ -2732,8 +2739,8 @@ fn like_contains_pattern(value: &str) -> String {
     let mut pattern = String::with_capacity(value.len() + 2);
     pattern.push('%');
     for ch in value.chars() {
-        if ch == '~' || ch == '%' || ch == '_' {
-            pattern.push('~');
+        if ch == '\\' || ch == '%' || ch == '_' {
+            pattern.push('\\');
         }
         pattern.push(ch);
     }
@@ -2745,8 +2752,8 @@ fn like_fuzzy_pattern(value: &str) -> String {
     crate::sql::fuzzy_like_pattern_with_escape(value, |value| {
         let mut escaped = String::with_capacity(value.len() + 1);
         for ch in value.chars() {
-            if ch == '~' || ch == '%' || ch == '_' {
-                escaped.push('~');
+            if ch == '\\' || ch == '%' || ch == '_' {
+                escaped.push('\\');
             }
             escaped.push(ch);
         }
@@ -6531,7 +6538,7 @@ mod tests {
 
     #[test]
     fn postgres_tables_sql_contains_expected_columns() {
-        let sql = postgres_tables_sql();
+        let sql = postgres_tables_sql(Some(500), 0);
         assert!(sql.contains("table_name"));
         assert!(sql.contains("table_type"));
         assert!(sql.contains("table_comment"));
@@ -7327,31 +7334,117 @@ mod tests {
         assert_eq!(timezone, "UTC");
     }
 
+    #[tokio::test]
+    #[ignore = "requires DBX_TEST_POSTGRES_URL pointing at a writable PostgreSQL-compatible database"]
+    async fn list_tables_filtered_supports_risingwave_pagination_and_filtering() {
+        let url = std::env::var("DBX_TEST_POSTGRES_URL").expect("DBX_TEST_POSTGRES_URL");
+        let pool = connect_with_local_timezone(&url, Duration::from_secs(5), "UTC")
+            .await
+            .expect("connect PostgreSQL-compatible database");
+        let client = pool.get().await.expect("checkout postgres");
+        client
+            .batch_execute(
+                r#"DROP TABLE IF EXISTS public."dbx_issue_5584_live_page_a";
+                   DROP TABLE IF EXISTS public."dbx_issue_5584_live_page_b";
+                   DROP TABLE IF EXISTS public."dbx_issue_5584_live_order_100%";
+                   DROP TABLE IF EXISTS public."dbx_issue_5584_live_back\slash";
+                   DROP TABLE IF EXISTS public."dbx_issue_5584_live_system_users";
+                   CREATE TABLE public."dbx_issue_5584_live_page_a"(id int);
+                   CREATE TABLE public."dbx_issue_5584_live_page_b"(id int);
+                   CREATE TABLE public."dbx_issue_5584_live_order_100%"(id int);
+                   CREATE TABLE public."dbx_issue_5584_live_back\slash"(id int);
+                   CREATE TABLE public."dbx_issue_5584_live_system_users"(id int);"#,
+            )
+            .await
+            .expect("create live table fixtures");
+        drop(client);
+
+        let all_tables = list_tables(&pool, "public").await.expect("expand complete table list");
+        let first_page = list_tables_filtered(&pool, "public", Some("dbx_issue_5584_live_page_"), Some(1), Some(0))
+            .await
+            .expect("list first table page");
+        let second_page = list_tables_filtered(&pool, "public", Some("dbx_issue_5584_live_page_"), Some(1), Some(1))
+            .await
+            .expect("list second table page");
+        let wildcard_match =
+            list_tables_filtered(&pool, "public", Some("dbx_issue_5584_live_order_100%"), Some(10), Some(0))
+                .await
+                .expect("filter table with wildcard characters");
+        let backslash_match =
+            list_tables_filtered(&pool, "public", Some(r"dbx_issue_5584_live_back\slash"), Some(10), Some(0))
+                .await
+                .expect("filter table with backslash");
+        let fuzzy_match = list_tables_filtered(&pool, "public", Some("i5584su"), Some(10), Some(0))
+            .await
+            .expect("fuzzy filter table name");
+
+        assert!(all_tables.iter().any(|table| table.name == "dbx_issue_5584_live_page_a"));
+        assert!(all_tables.iter().any(|table| table.name == "dbx_issue_5584_live_page_b"));
+        assert_eq!(
+            first_page.iter().map(|table| table.name.as_str()).collect::<Vec<_>>(),
+            ["dbx_issue_5584_live_page_a"]
+        );
+        assert_eq!(
+            second_page.iter().map(|table| table.name.as_str()).collect::<Vec<_>>(),
+            ["dbx_issue_5584_live_page_b"]
+        );
+        assert_eq!(
+            wildcard_match.iter().map(|table| table.name.as_str()).collect::<Vec<_>>(),
+            ["dbx_issue_5584_live_order_100%"]
+        );
+        assert_eq!(
+            backslash_match.iter().map(|table| table.name.as_str()).collect::<Vec<_>>(),
+            [r"dbx_issue_5584_live_back\slash"]
+        );
+        assert_eq!(
+            fuzzy_match.iter().map(|table| table.name.as_str()).collect::<Vec<_>>(),
+            ["dbx_issue_5584_live_system_users"]
+        );
+
+        let client = pool.get().await.expect("checkout postgres for cleanup");
+        client
+            .batch_execute(
+                r#"DROP TABLE IF EXISTS public."dbx_issue_5584_live_page_a";
+                   DROP TABLE IF EXISTS public."dbx_issue_5584_live_page_b";
+                   DROP TABLE IF EXISTS public."dbx_issue_5584_live_order_100%";
+                   DROP TABLE IF EXISTS public."dbx_issue_5584_live_back\slash";
+                   DROP TABLE IF EXISTS public."dbx_issue_5584_live_system_users";"#,
+            )
+            .await
+            .expect("drop live table fixtures");
+    }
+
     #[test]
     fn like_contains_pattern_escapes_wildcards() {
         assert_eq!(like_contains_pattern(""), "%%");
-        assert_eq!(like_contains_pattern("order_100%"), "%order~_100~%%");
-        assert_eq!(like_contains_pattern("tilde~name"), "%tilde~~name%");
-        assert_eq!(like_contains_pattern(r"foo\bar"), r"%foo\bar%");
+        assert_eq!(like_contains_pattern("order_100%"), "%order\\_100\\%%");
+        assert_eq!(like_contains_pattern("tilde~name"), "%tilde~name%");
+        assert_eq!(like_contains_pattern(r"foo\bar"), r"%foo\\bar%");
     }
 
     #[test]
     fn like_fuzzy_pattern_escapes_wildcards() {
         assert_eq!(like_fuzzy_pattern(""), "%%");
         assert_eq!(like_fuzzy_pattern("sysu"), "%s%y%s%u%");
-        assert_eq!(like_fuzzy_pattern("user_%"), "%u%s%e%r%~_%~%%");
-        assert_eq!(like_fuzzy_pattern("tilde~name"), "%t%i%l%d%e%~~%n%a%m%e%");
+        assert_eq!(like_fuzzy_pattern("user_%"), "%u%s%e%r%\\_%\\%%");
+        assert_eq!(like_fuzzy_pattern("tilde~name"), "%t%i%l%d%e%~%n%a%m%e%");
     }
 
     #[test]
-    fn postgres_tables_sql_uses_non_backslash_like_escape() {
-        let sql = postgres_tables_sql();
+    fn postgres_tables_sql_uses_literal_pagination_without_escape_clause() {
+        let paged_sql = postgres_tables_sql(Some(500), 200);
+        assert!(paged_sql.contains("ILIKE $2 OR"));
+        assert!(paged_sql.contains("$3 <> ''"));
+        assert!(paged_sql.contains("ILIKE $3"));
+        assert!(!paged_sql.contains("ESCAPE"));
+        assert!(paged_sql.contains("ORDER BY CASE WHEN pc.relkind = 'p' THEN 1 ELSE 0 END, c.relname"));
+        assert!(paged_sql.contains("LIMIT 500 OFFSET 200"));
+        assert!(!paged_sql.contains("$4"));
+        assert!(!paged_sql.contains("$5"));
 
-        assert!(sql.contains("ILIKE $2 ESCAPE '~'"));
-        assert!(sql.contains("$3 <> ''"));
-        assert!(sql.contains("ILIKE $3 ESCAPE '~'"));
-        assert!(sql.contains("ORDER BY CASE WHEN pc.relkind = 'p' THEN 1 ELSE 0 END, c.relname"));
-        assert!(sql.contains("LIMIT CAST($4 AS BIGINT) OFFSET CAST($5 AS BIGINT)"));
+        let unbounded_sql = postgres_tables_sql(None, 0);
+        assert!(unbounded_sql.ends_with("OFFSET 0"));
+        assert!(!unbounded_sql.contains("LIMIT"));
     }
 
     #[test]

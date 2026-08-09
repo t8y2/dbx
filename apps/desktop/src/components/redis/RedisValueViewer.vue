@@ -1700,6 +1700,7 @@ function startEditMember() {
   // Do not demote a retained JSON draft to utf8; save still needs compact normalization.
   if (memberDraftFormat.value !== "json") memberDraftFormat.value = "utf8";
   isEditingMember.value = true;
+  nextTick(() => memberTextareaRef.value?.focus());
 }
 
 function cancelEditMember() {
@@ -3153,7 +3154,7 @@ defineExpose({ focusSearch });
           </DialogTitle>
         </DialogHeader>
         <template v-if="isEditingMember">
-          <textarea ref="memberTextareaRef" v-model="memberEditValue" class="dbx-editor-font-family min-h-0 flex-1 resize-none bg-background p-5 text-[13px] leading-6 outline-none" :readonly="savingMember" spellcheck="false" />
+          <textarea ref="memberTextareaRef" data-redis-member-utf8-editor v-model="memberEditValue" class="dbx-editor-font-family min-h-0 flex-1 resize-none bg-background p-5 text-[13px] leading-6 outline-none" :readonly="savingMember" spellcheck="false" />
         </template>
         <template v-else>
           <div class="flex h-9 items-center gap-2 border-b px-5 text-xs">
@@ -3224,6 +3225,10 @@ defineExpose({ focusSearch });
                 </Button>
               </div>
             </template>
+          </div>
+          <div v-else-if="memberValueView === 'utf8' && canEditCurrentMemberFormat" data-redis-member-utf8-viewer class="dbx-editor-font-family min-h-0 flex-1 overflow-auto bg-background text-[13px] leading-6 cursor-text" @dblclick.self.prevent="startEditMember">
+            <pre v-if="canHighlightMemberSurface" data-redis-member-utf8-text class="inline-block min-w-0 p-5 align-top select-text" :class="[detailTextClass('utf8'), redisJsonWordWrap ? 'max-w-full' : 'min-w-max']" v-html="contentSearchHighlightedHtml" />
+            <pre v-else data-redis-member-utf8-text class="inline-block min-w-0 p-5 align-top select-text" :class="[detailTextClass('utf8'), redisJsonWordWrap ? 'max-w-full' : 'min-w-max']">{{ detailTextForFormat(selectedMemberDetail, "utf8") }}</pre>
           </div>
           <pre v-else-if="canHighlightMemberSurface" class="dbx-editor-font-family min-h-0 w-full min-w-0 max-w-full flex-1 overflow-auto bg-background p-5 text-[13px] leading-6" :class="detailTextClass(memberValueView)" v-html="contentSearchHighlightedHtml" />
           <pre v-else class="dbx-editor-font-family min-h-0 w-full min-w-0 max-w-full flex-1 overflow-auto bg-background p-5 text-[13px] leading-6" :class="detailTextClass(memberValueView)">{{ detailTextForFormat(selectedMemberDetail, memberValueView) }}</pre>

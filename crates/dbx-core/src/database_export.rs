@@ -370,6 +370,7 @@ fn format_export_sql_literal_typed(
     value: &Value,
     database_type: Option<DatabaseType>,
     column_type: Option<&str>,
+    sqlserver_unicode_string: bool,
 ) -> String {
     if is_postgres_json_export_column(database_type, column_type) {
         return format_postgres_json_export_literal(value);
@@ -405,6 +406,11 @@ fn format_export_sql_literal_typed(
     }
     if let Some(literal) = format_export_temporal_literal(value, database_type, column_type) {
         return literal;
+    }
+    if sqlserver_unicode_string {
+        if let Some(text) = value.as_str() {
+            return format!("N{}", quote_export_sql_string(text));
+        }
     }
     format_export_sql_literal_for_database(value, database_type)
 }
@@ -450,6 +456,11 @@ fn format_postgres_vector_export_element(value: &Value) -> String {
 
 fn quote_export_sql_string(text: &str) -> String {
     format!("'{}'", text.replace('\\', "\\\\").replace('\'', "''"))
+}
+
+fn is_sqlserver_unicode_export_type(column_type: &str) -> bool {
+    let base = column_type.trim().split(|ch: char| ch == '(' || ch.is_whitespace()).next().unwrap_or("");
+    ["nchar", "nvarchar", "ntext", "sysname"].iter().any(|candidate| base.eq_ignore_ascii_case(candidate))
 }
 
 fn quote_export_sql_string_for_database(text: &str, database_type: Option<DatabaseType>) -> String {
@@ -913,13 +924,19 @@ pub fn build_export_insert_statements(options: BuildExportInsertStatementsOption
         .columns
         .iter()
         .enumerate()
-        .filter(|(index, column)| {
+        .filter_map(|(index, column)| {
+            let column_type = options.column_types.get(index).and_then(|value| value.as_deref());
             is_export_insert_column(
                 options.database_type,
                 column,
-                options.column_types.get(*index).and_then(|value| value.as_deref()),
-                options.column_extras.get(*index).and_then(|value| value.as_deref()),
+                column_type,
+                options.column_extras.get(index).and_then(|value| value.as_deref()),
             )
+            .then(|| {
+                let sqlserver_unicode_string = options.database_type == Some(DatabaseType::SqlServer)
+                    && column_type.is_some_and(is_sqlserver_unicode_export_type);
+                (index, column, sqlserver_unicode_string)
+            })
         })
         .collect::<Vec<_>>();
     if insert_columns.is_empty() {
@@ -937,12 +954,12 @@ pub fn build_export_insert_statements(options: BuildExportInsertStatementsOption
     };
     let columns = insert_columns
         .iter()
-        .map(|(_, column)| quote_table_identifier(options.database_type, column))
+        .map(|(_, column, _)| quote_table_identifier(options.database_type, column))
         .collect::<Vec<_>>()
         .join(", ");
     let mut statements = Vec::new();
     let needs_dameng_identity_insert = options.database_type == Some(DatabaseType::Dameng)
-        && insert_columns.iter().any(|(index, _)| {
+        && insert_columns.iter().any(|(index, _, _)| {
             is_identity_column_extra(options.column_extras.get(*index).and_then(|value| value.as_deref()))
         });
 
@@ -970,12 +987,13 @@ pub fn build_export_insert_statements(options: BuildExportInsertStatementsOption
     for row in options.rows {
         let row_values = insert_columns
             .iter()
-            .map(|(index, _)| {
+            .map(|(index, _, sqlserver_unicode_string)| {
                 let value = row.get(*index).unwrap_or(&Value::Null);
                 format_export_sql_literal_typed(
                     value,
                     options.database_type,
                     options.column_types.get(*index).and_then(|value| value.as_deref()),
+                    *sqlserver_unicode_string,
                 )
             })
             .collect::<Vec<_>>()
@@ -2905,6 +2923,50 @@ mod tests {
             postgres_statements,
             vec![
                 "INSERT INTO \"public\".\"flags\" (\"enabled\", \"disabled\", \"unknown\") VALUES (TRUE, FALSE, NULL);"
+            ]
+        );
+    }
+
+    #[test]
+    fn sqlserver_export_prefixes_unicode_string_literals() {
+        let statements = build_export_insert_statements(BuildExportInsertStatementsOptions {
+            database_type: Some(DatabaseType::SqlServer),
+            schema: Some("dbo".to_string()),
+            table_name: Some("people".to_string()),
+            qualified_table_name: None,
+            columns: vec![
+                "name".to_string(),
+                "code".to_string(),
+                "legacy_note".to_string(),
+                "alias_name".to_string(),
+                "plain_text".to_string(),
+                "missing".to_string(),
+            ],
+            column_types: vec![
+                Some("NVARCHAR(255)".to_string()),
+                Some(" nchar (10) ".to_string()),
+                Some("ntext".to_string()),
+                Some("sysname".to_string()),
+                Some("varchar(255)".to_string()),
+                Some("nvarchar(20)".to_string()),
+            ],
+            column_extras: Vec::new(),
+            rows: vec![vec![
+                json!("张'三"),
+                json!("中文"),
+                json!("旧文本"),
+                json!("别名"),
+                json!("plain"),
+                Value::Null,
+            ]],
+            batch_size: Some(10),
+        })
+        .unwrap();
+
+        assert_eq!(
+            statements,
+            vec![
+                "INSERT INTO [dbo].[people] ([name], [code], [legacy_note], [alias_name], [plain_text], [missing]) VALUES (N'张''三', N'中文', N'旧文本', N'别名', 'plain', NULL);"
             ]
         );
     }

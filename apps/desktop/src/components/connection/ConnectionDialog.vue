@@ -104,7 +104,7 @@ import { oceanbaseModeConnectionPatch, oceanbaseSubModeFromConfig } from "@/lib/
 import { translateBackendError } from "@/i18n/backend-errors";
 import { applyHiveKerberosSubmitConfig, hiveKerberosFormConfig, type HiveKerberosAuthMode } from "@/lib/database/hiveKerberosOptions";
 import { hasCloudflareD1Credentials, isCloudflareD1Connection, normalizeCloudflareD1Connection } from "@/lib/connection/cloudflareD1";
-import { buildElasticsearchExternalConfig, elasticsearchConnectionModeFromConfig, elasticsearchConnectivityCheckPathFromConfig, elasticsearchKibanaBasePathFromConfig, type ElasticsearchConnectionMode } from "@/lib/connection/elasticsearchKibanaProxy";
+import { buildElasticsearchExternalConfig, elasticsearchConnectionModeFromConfig, elasticsearchConnectivityCheckPathFromConfig, elasticsearchIndexGroupingPatternFromConfig, elasticsearchKibanaBasePathFromConfig, type ElasticsearchConnectionMode } from "@/lib/connection/elasticsearchKibanaProxy";
 import { GAUSSDB_M_JDBC_DRIVER_CLASS, gaussdbConnectionMode, gaussdbIdentifierQuoteStyle, setGaussdbConnectionMode, setGaussdbIdentifierQuoteStyle, supportsGaussdbIdentifierQuoteStyle, type GaussdbConnectionMode, type GaussdbIdentifierQuoteStyle } from "@/lib/database/jdbcDialect";
 import { normalizeStoredConnectionDatabase } from "@/lib/database/sqliteNamespace";
 import {
@@ -317,6 +317,7 @@ const defaultForm = (): ConnectionForm => ({
 const elasticsearchConnectionMode = ref<ElasticsearchConnectionMode>("direct");
 const elasticsearchKibanaBasePath = ref("");
 const elasticsearchConnectivityCheckPath = ref("");
+const elasticsearchIndexGroupingPattern = ref("");
 const elasticsearchConnectionPorts = ref<Record<ElasticsearchConnectionMode, number>>({
   direct: 9200,
   kibana: 5601,
@@ -327,6 +328,7 @@ function resetElasticsearchProxyFields(externalConfig?: unknown) {
   elasticsearchConnectionMode.value = mode;
   elasticsearchKibanaBasePath.value = elasticsearchKibanaBasePathFromConfig(externalConfig);
   elasticsearchConnectivityCheckPath.value = elasticsearchConnectivityCheckPathFromConfig(externalConfig);
+  elasticsearchIndexGroupingPattern.value = elasticsearchIndexGroupingPatternFromConfig(externalConfig);
   elasticsearchConnectionPorts.value = {
     direct: mode === "direct" ? form.value.port : 9200,
     kibana: mode === "kibana" ? form.value.port : 5601,
@@ -3706,7 +3708,7 @@ function connectionConfigForSubmit(id: string, generatedName = ""): ConnectionCo
     config.database = "metrics";
     config.username = config.username.trim();
   } else if (config.db_type === "elasticsearch") {
-    config.external_config = buildElasticsearchExternalConfig(elasticsearchConnectionMode.value, elasticsearchKibanaBasePath.value, elasticsearchConnectivityCheckPath.value);
+    config.external_config = buildElasticsearchExternalConfig(elasticsearchConnectionMode.value, elasticsearchKibanaBasePath.value, elasticsearchConnectivityCheckPath.value, elasticsearchIndexGroupingPattern.value);
   } else if (config.db_type === "sqlserver") {
     config.external_config = sqlServerPortExplicitFromConfig(config) ? { portExplicit: true } : undefined;
   } else if (supportsGaussdbIdentifierQuoteStyle(config)) {
@@ -6664,6 +6666,14 @@ function openExternalUrl(url: string) {
                   <div v-if="form.db_type === 'elasticsearch'" class="grid grid-cols-4 items-center gap-4">
                     <Label :class="connectionLabelSmallClass">{{ t("connection.elasticsearchConnectivityCheckPath") }}</Label>
                     <Input v-model="elasticsearchConnectivityCheckPath" class="col-span-3" :placeholder="t('connection.elasticsearchConnectivityCheckPathPlaceholder')" @input="resetTestState" />
+                  </div>
+
+                  <div v-if="form.db_type === 'elasticsearch'" class="grid grid-cols-4 items-center gap-4">
+                    <Label :class="connectionLabelSmallClass">{{ t("connection.elasticsearchIndexGroupingPattern") }}</Label>
+                    <div class="col-span-3 space-y-1">
+                      <Input v-model="elasticsearchIndexGroupingPattern" :placeholder="t('connection.elasticsearchIndexGroupingPatternPlaceholder')" @input="resetTestState" />
+                      <p class="text-xs text-muted-foreground">{{ t("connection.elasticsearchIndexGroupingPatternHint") }}</p>
+                    </div>
                   </div>
 
                   <div v-if="form.driver_profile === 'gbase8s'" class="grid grid-cols-4 items-center gap-4">

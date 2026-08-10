@@ -61,14 +61,14 @@ const apiProxyPath = publicBasePath ? `${publicBasePath}/api` : "/api";
 const backendUrl = process.env.DBX_BACKEND_URL || "http://localhost:4224";
 
 export default defineConfig(async () => ({
-  root: __dirname,
+  root: import.meta.dirname,
   base: viteBase,
   plugins: [vue(), tailwindcss()],
   resolve: {
     alias: {
-      "@": path.resolve(__dirname, "./src"),
+      "@": path.resolve(import.meta.dirname, "./src"),
       // Prefer package source during app dev so shell parse changes need no rebuild.
-      "@dbx-app/mongo-shell": path.resolve(__dirname, "../../packages/mongo-shell/src/index.ts"),
+      "@dbx-app/mongo-shell": path.resolve(import.meta.dirname, "../../packages/mongo-shell/src/index.ts"),
     },
   },
   clearScreen: false,

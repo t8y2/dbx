@@ -240,6 +240,7 @@ pub async fn list_objects(
                 updated_at: None,
                 parent_schema: table.parent_schema,
                 parent_name: table.parent_name,
+                xugu_type_members_expandable: None,
             })
             .collect());
     }

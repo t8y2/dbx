@@ -6377,10 +6377,10 @@ function openExternalUrl(url: string) {
                   <div class="grid grid-cols-4 items-center gap-4">
                     <Label :class="connectionLabelClass">{{ t("connection.mqttTls") }}</Label>
                     <div class="col-span-3 flex items-center gap-2">
-                      <Switch :checked="mqttTls" @update:checked="mqttTls = $event" />
+                      <Switch v-model="mqttTls" />
                       <Label class="text-sm" :class="mqttTls ? '' : 'text-muted-foreground'">TLS</Label>
                       <template v-if="mqttTls">
-                        <Switch :checked="mqttTlsSkipVerify" @update:checked="mqttTlsSkipVerify = $event" class="ml-4" />
+                        <Switch v-model="mqttTlsSkipVerify" class="ml-4" />
                         <Label class="text-sm" :class="mqttTlsSkipVerify ? '' : 'text-muted-foreground'">{{ t("connection.mqttTlsSkipVerify") }}</Label>
                       </template>
                     </div>

@@ -87,6 +87,7 @@ describe("connectionStore timeout recovery", () => {
     vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
     vi.doMock("@/lib/backend/api", () => ({
       deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+      loadEditorSettings: vi.fn().mockResolvedValue(null),
       loadConnections: vi
         .fn()
         .mockResolvedValue([postgresConnection({ id: "default", connect_timeout_secs: 10, query_timeout_secs: 30 }), postgresConnection({ id: "custom", connect_timeout_secs: 45, query_timeout_secs: 300 }), postgresConnection({ id: "inherited", connect_timeout_secs: 60, query_timeout_secs: 60 })]),
@@ -130,6 +131,7 @@ describe("connectionStore timeout recovery", () => {
     vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
     vi.doMock("@/lib/backend/api", () => ({
       deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+      loadEditorSettings: vi.fn().mockResolvedValue(null),
       loadConnections: vi.fn().mockResolvedValue([postgresConnection({ id: "local", connect_timeout_secs: 10, query_timeout_secs: 30 })]),
       loadPinnedTreeNodeIds: vi.fn().mockResolvedValue([]),
       loadSidebarLayout: vi.fn().mockResolvedValue(null),
@@ -164,6 +166,7 @@ describe("connectionStore timeout recovery", () => {
     vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
     vi.doMock("@/lib/backend/api", () => ({
       deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+      loadEditorSettings: vi.fn().mockResolvedValue(null),
       loadConnections: vi.fn().mockResolvedValue([postgresConnection({ id: "inherited", connect_timeout_secs: 7, query_timeout_secs: 12 })]),
       loadPinnedTreeNodeIds: vi.fn().mockResolvedValue([]),
       loadSidebarLayout: vi.fn().mockResolvedValue(null),
@@ -194,6 +197,7 @@ describe("connectionStore timeout recovery", () => {
     vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
     vi.doMock("@/lib/backend/api", () => ({
       deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+      loadEditorSettings: vi.fn().mockResolvedValue(null),
       loadConnections: vi.fn().mockResolvedValue([postgresConnection({ id: "inherited", connect_timeout_secs: 20, query_timeout_secs: 45 })]),
       loadPinnedTreeNodeIds: vi.fn().mockResolvedValue([]),
       loadSidebarLayout: vi.fn().mockResolvedValue(null),
@@ -235,6 +239,7 @@ describe("connectionStore timeout recovery", () => {
     vi.doMock("@/lib/backend/configCrypto", () => ({ encryptConfig }));
     vi.doMock("@/lib/backend/api", () => ({
       deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+      loadEditorSettings: vi.fn().mockResolvedValue(null),
       loadConnections: vi.fn().mockResolvedValue([postgresConnection({ id: "inherited", connect_timeout_secs: 99, connect_timeout_inherit: true, query_timeout_secs: 99, query_timeout_inherit: true })]),
       loadPinnedTreeNodeIds: vi.fn().mockResolvedValue([]),
       loadSidebarLayout: vi.fn().mockResolvedValue(null),

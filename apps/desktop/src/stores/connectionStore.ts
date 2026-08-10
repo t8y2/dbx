@@ -7018,6 +7018,9 @@ export const useConnectionStore = defineStore("connection", () => {
   }
 
   async function initFromDisk() {
+    // Connection normalization and timeout migration depend on persisted global
+    // settings. Startup helpers may initialize connections before App.initApp().
+    await settingsStore.initEditorSettings();
     if (!initFromDiskPromise) {
       initFromDiskPromise = (async () => {
         const [pinnedOrder, saved] = await Promise.all([loadPinnedTreeNodeOrder(), api.loadConnections(), tunnelProfileStore.init()]);

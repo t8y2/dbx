@@ -4928,7 +4928,7 @@ onUnmounted(() => {
                 <div class="space-y-2">
                   <Label>{{ t("settings.exportBatchSize") }}</Label>
                   <div class="flex items-center gap-3">
-                    <Input type="number" list="export-batch-sizes" min="100" max="100000" step="100" v-model.number="editExportBatchSize" class="settings-export-number-input w-28" />
+                    <Input type="number" list="export-batch-sizes" min="100" max="100000" step="100" v-model.number="editExportBatchSize" class="settings-export-number-input h-9 w-28 [&::-webkit-inner-spin-button]:appearance-none" />
                     <datalist id="export-batch-sizes">
                       <option value="500" />
                       <option value="1000" />
@@ -4951,7 +4951,7 @@ onUnmounted(() => {
                 <div class="space-y-2">
                   <Label for="export-row-limit">{{ t("settings.exportRowLimit") }}</Label>
                   <div class="flex items-center gap-3">
-                    <Input id="export-row-limit" type="number" min="100" max="2147483647" step="100" v-model.number="editExportRowLimit" :disabled="!editExportRowLimitEnabled" class="settings-export-number-input w-32" />
+                    <Input id="export-row-limit" type="number" min="100" max="2147483647" step="100" v-model.number="editExportRowLimit" :disabled="!editExportRowLimitEnabled" class="settings-export-number-input h-9 w-32 [&::-webkit-inner-spin-button]:appearance-none" />
                     <span class="text-xs text-muted-foreground">
                       {{ editExportRowLimitEnabled ? t("settings.exportRowLimitDescription") : t("settings.exportRowLimitUnlimited") }}
                     </span>
@@ -5747,7 +5747,7 @@ onUnmounted(() => {
               <!-- Config Edit View -->
               <div v-else class="space-y-4">
                 <div class="flex items-center justify-between">
-                  <Button type="button" variant="ghost" size="sm" class="-ml-2.5" @click="aiEnterListMode()">
+                  <Button type="button" variant="ghost" size="sm" class="settings-ai-back-button" @click="aiEnterListMode()">
                     <ArrowLeft class="mr-1 h-3.5 w-3.5" />
                     {{ t("common.back") }}
                   </Button>
@@ -6696,16 +6696,8 @@ onUnmounted(() => {
   margin-top: 0.625rem;
 }
 
-.settings-export-number-input {
-  height: 2rem !important;
-  min-height: 2rem !important;
-  padding-top: 0.25rem !important;
-  padding-bottom: 0.25rem !important;
-  font-variant-numeric: tabular-nums;
-}
-
-.settings-shortcut-row:hover .settings-shortcut-action-button,
-.settings-shortcut-row:focus-within .settings-shortcut-action-button {
+html.dbx-legacy-webview .settings-shortcut-row:hover .settings-shortcut-action-button,
+html.dbx-legacy-webview .settings-shortcut-row:focus-within .settings-shortcut-action-button {
   opacity: 1 !important;
 }
 
@@ -6755,13 +6747,22 @@ html.dbx-legacy-webview .settings-layout .settings-shortcut-controls {
 html.dbx-legacy-webview .settings-layout .settings-export-number-input {
   height: 2rem !important;
   min-height: 2rem !important;
+  padding-top: 0.25rem !important;
+  padding-bottom: 0.25rem !important;
   line-height: 1.25rem !important;
+  font-variant-numeric: tabular-nums;
 }
 
 html.dbx-legacy-webview .settings-layout .settings-export-number-input::-webkit-inner-spin-button,
 html.dbx-legacy-webview .settings-layout .settings-export-number-input::-webkit-outer-spin-button {
+  -webkit-appearance: inner-spin-button !important;
+  appearance: auto !important;
   min-height: 1.5rem !important;
   opacity: 1 !important;
+}
+
+html.dbx-legacy-webview .settings-ai-back-button {
+  margin-left: -0.625rem !important;
 }
 
 html.dbx-legacy-webview .settings-about-section-header {

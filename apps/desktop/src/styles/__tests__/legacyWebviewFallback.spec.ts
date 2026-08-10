@@ -185,12 +185,11 @@ describe("legacy WebView CSS fallbacks", () => {
   });
 
   it("keeps tunnel profile selection readable in legacy WebViews", () => {
-    expect(tunnelProfileManagerSource).toContain("profile.id === selectedId ? 'tunnel-profile-option--selected'");
-    expect(tunnelProfileManagerSource).not.toContain("tunnel-profile-option--selected border-primary bg-primary/5");
-    expect(tunnelProfileManagerSource).toContain(".tunnel-profile-option--selected");
+    expect(tunnelProfileManagerSource).toContain("profile.id === selectedId ? 'tunnel-profile-option--selected border-primary bg-primary/5'");
+    expect(tunnelProfileManagerSource).toContain("html.dbx-legacy-webview .tunnel-profile-option--selected");
     expect(tunnelProfileManagerSource).toContain("background-color: var(--muted) !important;");
     expect(tunnelProfileManagerSource).toContain("color: var(--foreground) !important;");
-    expect(tunnelProfileManagerSource).toContain(".tunnel-profile-option--selected .text-muted-foreground");
+    expect(tunnelProfileManagerSource).toContain("html.dbx-legacy-webview .tunnel-profile-option--selected .text-muted-foreground");
   });
 
   it("keeps transport layer selection readable in legacy WebViews", () => {
@@ -218,7 +217,7 @@ describe("legacy WebView CSS fallbacks", () => {
   });
 
   it("keeps native number input steppers scoped to legacy WebViews", () => {
-    expect(globalsCss).toContain('input[type="number"]');
+    expect(globalsCss).toContain('html.dbx-legacy-webview input[type="number"]');
     expect(globalsCss).toContain('html.dbx-legacy-webview input[type="number"]:not([class*="appearance-none"])::-webkit-inner-spin-button');
     expect(globalsCss).not.toContain('input[type="number"]::-webkit-inner-spin-button');
     expect(globalsCss).toContain("-webkit-appearance: inner-spin-button !important;");
@@ -251,19 +250,21 @@ describe("legacy WebView CSS fallbacks", () => {
     expect(fallback).toContain("justify-self: end !important;");
     expect(editorSettingsDialogSource).toContain("settings-shortcut-controls flex items-center justify-end gap-1.5");
     expect(editorSettingsDialogSource).toContain("settings-shortcut-action-button h-7 w-7");
-    expect(editorSettingsDialogSource).toContain(".settings-shortcut-row:hover .settings-shortcut-action-button");
+    expect(editorSettingsDialogSource).toContain("html.dbx-legacy-webview .settings-shortcut-row:hover .settings-shortcut-action-button");
     expect(editorSettingsDialogSource).toContain("opacity: 1 !important;");
     expect(fallback).toContain(".settings-layout .settings-shortcut-controls");
     expect(fallback).toContain("flex-direction: row !important;");
     expect(fallback).toContain("justify-content: flex-end !important;");
-    expect(editorSettingsDialogSource).toContain("settings-export-number-input w-28");
-    expect(editorSettingsDialogSource).toContain("settings-export-number-input w-32");
-    expect(editorSettingsDialogSource).not.toContain("h-9 w-28 [&::-webkit-inner-spin-button]:appearance-none");
-    expect(editorSettingsDialogSource).not.toContain("h-9 w-32 [&::-webkit-inner-spin-button]:appearance-none");
-    expect(editorSettingsDialogSource).toContain(".settings-export-number-input");
+    expect(editorSettingsDialogSource).toContain("settings-export-number-input h-9 w-28 [&::-webkit-inner-spin-button]:appearance-none");
+    expect(editorSettingsDialogSource).toContain("settings-export-number-input h-9 w-32 [&::-webkit-inner-spin-button]:appearance-none");
+    expect(editorSettingsDialogSource).not.toContain("\n.settings-export-number-input {");
     expect(fallback).toContain(".settings-layout .settings-export-number-input");
     expect(fallback).toContain("line-height: 1.25rem !important;");
+    expect(fallback).toContain("-webkit-appearance: inner-spin-button !important;");
     expect(fallback).toContain("::-webkit-inner-spin-button");
+    expect(editorSettingsDialogSource).toContain('class="settings-ai-back-button"');
+    expect(fallback).toContain(".settings-ai-back-button");
+    expect(fallback).toContain("margin-left: -0.625rem !important;");
     expect(editorSettingsDialogSource).toContain("settings-about-section-header flex flex-col gap-3");
     expect(editorSettingsDialogSource).toContain("settings-about-section-actions flex shrink-0 flex-wrap items-center gap-2");
     expect(changelogPanelSource).toContain("settings-about-section-header flex flex-col gap-3");

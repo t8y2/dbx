@@ -72,6 +72,7 @@ import { useDragSort } from "@/composables/useDragSort";
 import { sidebarTreeRuntimeKey } from "@/lib/sidebar/sidebarTreeRuntime";
 import { treeNodePinKey } from "@/lib/app/pinnedItems";
 import { isTreeGroupNodeType } from "@/lib/sidebar/treeNodeGroup";
+import { shouldActivateTreeNodeOnSingleClick } from "@/lib/sidebar/treeNodeClick";
 
 const { t } = useI18n();
 
@@ -265,7 +266,10 @@ function getIconInfo(node: TreeNode): { icon: any; colorClass: string } | null {
     case "etcd-access-control":
       return { icon: ShieldCheck, colorClass: "text-sky-500" };
     case "zookeeper-root":
+    case "consul-root":
       return { icon: Database, colorClass: "text-blue-500" };
+    case "consul-overview":
+      return { icon: Gauge, colorClass: "text-blue-500" };
     case "mongo-db":
       return { icon: Database, colorClass: "text-yellow-500" };
     case "mongo-gridfs":
@@ -1069,7 +1073,7 @@ function onClick(event: MouseEvent) {
   }
   selectSingleTreeNode(props.node);
   rowRef.value?.focus({ preventScroll: true });
-  if (settingsStore.editorSettings.sidebarActivation === "double" && props.node.type !== "load-more") return;
+  if (!shouldActivateTreeNodeOnSingleClick(props.node.type, settingsStore.editorSettings.sidebarActivation) && props.node.type !== "load-more") return;
   treeRuntime.handleRowClick(props.node, event.detail);
 }
 

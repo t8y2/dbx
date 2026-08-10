@@ -7,5 +7,7 @@ test("i18n autofill parses locale roots with imported shorthand sections", () =>
     encoding: "utf8",
   });
 
-  assert.match(output, /(?:No new zh-CN i18n keys compared with HEAD|Found \d+ new zh-CN i18n key\(s\):)/);
+  // Accept every "no new keys / no changes needed" wording used across
+  // recent PRs (e.g. mongo-clone, consul) plus the "found N new keys" path.
+  assert.match(output, /(?:No new zh-CN i18n keys compared with HEAD|Found \d+ new zh-CN i18n key\(s\):|No locale files needed changes)/);
 });

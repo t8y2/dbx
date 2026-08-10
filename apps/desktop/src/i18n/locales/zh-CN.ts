@@ -1,5 +1,6 @@
 import { withEnglishFallback } from "./fallback";
 import docs from "./docs/zh-CN";
+import { consul } from "./consulZhCN";
 
 export default withEnglishFallback({
   app: {
@@ -459,6 +460,34 @@ export default withEnglishFallback({
     etcdClientCertBrowse: "选择客户端证书",
     etcdClientKeyBrowse: "选择客户端私钥",
     etcdClientCertPairRequired: "客户端证书和私钥必须一起填写。",
+    consulAddress: "Consul API 地址",
+    consulAddressInvalid: "请输入不包含凭据、查询参数或片段的 HTTP/HTTPS Consul API 绝对地址。",
+    consulToken: "ACL Token",
+    consulTokenPlaceholder: "可选的 Consul ACL Token",
+    consulDatacenter: "数据中心",
+    consulNamespace: "命名空间",
+    consulPartition: "管理分区",
+    consulAgentTargetNode: "目标 Agent 节点",
+    consulAgentTargetAddress: "Agent 直连地址",
+    consulAgentTargetHint: "Agent 写操作必填。DNS/负载均衡和 Transport Layer 连接保持只读。",
+    consulMeshFeatures: "服务网格",
+    consulMeshVisible: "显示服务网格高级功能",
+    consulMeshVisibleHint: "仅在需要管理 Connect、服务意图或对等连接时开启；关闭后主导航不会显示服务网格。",
+    consulOperatorWrites: "Operator 写入",
+    consulOperatorVisible: "显示实验性 Operator 工作台",
+    consulOperatorSnapshotRestore: "启用 Snapshot 恢复",
+    consulOperatorAutopilot: "启用 Autopilot 修改",
+    consulOperatorRaft: "启用 Raft 修改",
+    consulOperatorKeyring: "启用 Keyring 修改",
+    consulOperatorLicense: "启用 License 修改",
+    consulAgentTargetIncomplete: "目标 Agent 节点和直连地址必须同时配置。",
+    consulAgentTargetAddressMismatch: "Agent 直连地址必须与 Consul 地址的主机一致。",
+    consulConsistency: "读取一致性",
+    consulConsistencyDefault: "默认",
+    consulConsistencyStale: "允许陈旧读取",
+    consulConsistencyConsistent: "强一致读取",
+    consulTlsSkipVerify: "跳过证书校验",
+    consulTlsSkipVerifyHint: "仅用于可信的自签名 Consul 服务端。",
     zookeeperConnectString: "Connect String",
     zookeeperConnectStringHint: "可用逗号或换行分隔 host:port，并可在末尾填写整个集群共用的 /chroot；留空时使用上面的 host 和端口。",
     zookeeperClusterInputHint: "ZooKeeper 集群可在上方 URL 中填写全部节点（例如 zookeeper://zk-1:2181,zk-2:2181/app），也可在下方 Connect String 中填写。",
@@ -1140,6 +1169,7 @@ export default withEnglishFallback({
     etcdDashboard: "etcd 大盘",
     etcdAccessControl: "etcd 访问控制",
     zookeeper: "ZooKeeper",
+    consul: "Consul",
     mongo: "Mongo",
     gridfs: "GridFS",
     vector: "向量",
@@ -3357,7 +3387,7 @@ export default withEnglishFallback({
   },
   etcd: {
     prefixPlaceholder: "搜索 Key 路径，例如 /app/ 或 service",
-    newKey: "新建 Key",
+    newKey: "新建键（Key）",
     loadingKeys: "正在加载 Key...",
     empty: "未找到 Key",
     loadMore: "加载更多",
@@ -3737,6 +3767,7 @@ export default withEnglishFallback({
       },
     },
   },
+  consul,
   zookeeper: {
     prefixPlaceholder: "路径前缀，例如 /app/",
     newKey: "新建 Znode",

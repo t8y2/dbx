@@ -118,6 +118,7 @@ pub enum PoolKind {
     MessageQueue,
     /// Nacos admin connection marker.
     Nacos,
+    Consul(crate::consul::ConsulClient),
     /// MQTT broker connection with an active client.
     #[cfg(feature = "mq-admin")]
     Mqtt(Arc<super::mqtt::client::MqttClient>),
@@ -2039,6 +2040,17 @@ impl AppState {
                 adapter.test_connection().await?;
                 PoolKind::Nacos
             }
+            DatabaseType::Consul => {
+                let mut consul_config = crate::consul::ConsulConfig::from_connection(&db_config)?;
+                let original_host = consul_config.base_url.host_str().unwrap_or_default();
+                let original_port = consul_config.base_url.port_or_known_default().unwrap_or(db_config.port);
+                if host != original_host || port != original_port {
+                    consul_config = consul_config.with_connect_override(&host, port);
+                }
+                let client = crate::consul::ConsulClient::new(consul_config).await?;
+                client.probe().await?;
+                PoolKind::Consul(client)
+            }
             agent_connection_pool_database_type!() => {
                 let connect_params = agent_connect_params_with_role(
                     &db_config,
@@ -3077,7 +3089,8 @@ impl AppState {
                 | PoolKind::DuckDbWorker(_)
                 | PoolKind::ExternalDriver { .. }
                 | PoolKind::MessageQueue
-                | PoolKind::Nacos => false,
+                | PoolKind::Nacos
+                | PoolKind::Consul(_) => false,
                 #[cfg(feature = "mq-admin")]
                 PoolKind::Mqtt(_) => false,
             }
@@ -3969,7 +3982,8 @@ impl AppState {
                 | PoolKind::DuckDbWorker(_)
                 | PoolKind::ExternalDriver { .. }
                 | PoolKind::MessageQueue
-                | PoolKind::Nacos => true,
+                | PoolKind::Nacos
+                | PoolKind::Consul(_) => true,
                 #[cfg(feature = "mq-admin")]
                 PoolKind::Mqtt(_) => true,
                 PoolKind::Redis(_) => unreachable!("Redis handled separately"),
@@ -4396,6 +4410,8 @@ fn connection_remote_endpoint(config: &ConnectionConfig) -> (String, u16) {
         parse_mqtt_broker_host_port(config).unwrap_or_else(|| (config.host.clone(), config.port))
     } else if config.db_type == DatabaseType::Nacos {
         parse_nacos_server_host_port(config).unwrap_or_else(|| (config.host.clone(), config.port))
+    } else if config.db_type == DatabaseType::Consul {
+        parse_consul_server_host_port(config).unwrap_or_else(|| (config.host.clone(), config.port))
     } else {
         (config.host.clone(), config.port)
     }
@@ -4465,6 +4481,21 @@ fn parse_nacos_server_host_port(config: &ConnectionConfig) -> Option<(String, u1
     let host = url.host_str()?.to_string();
     let port = url.port_or_known_default()?;
     Some((host, port))
+}
+
+fn parse_consul_server_host_port(config: &ConnectionConfig) -> Option<(String, u16)> {
+    let value = config
+        .external_config
+        .as_ref()?
+        .get("serverAddr")
+        .or_else(|| config.external_config.as_ref()?.get("server_addr"))?
+        .as_str()?
+        .trim();
+    if value.is_empty() {
+        return None;
+    }
+    let url = reqwest::Url::parse(value).ok()?;
+    Some((url.host_str()?.to_string(), url.port_or_known_default()?))
 }
 
 fn parse_mqtt_broker_host_port(config: &ConnectionConfig) -> Option<(String, u16)> {
@@ -4618,6 +4649,7 @@ fn clone_pool_kind(pool: &PoolKind) -> PoolKind {
         }
         PoolKind::MessageQueue => PoolKind::MessageQueue,
         PoolKind::Nacos => PoolKind::Nacos,
+        PoolKind::Consul(client) => PoolKind::Consul(client.clone()),
         #[cfg(feature = "mq-admin")]
         PoolKind::Mqtt(client) => PoolKind::Mqtt(Arc::clone(client)),
         PoolKind::Redis(_) => panic!("clone_pool_kind not supported for Redis — handled separately"),
@@ -4679,6 +4711,7 @@ async fn close_pool_kind(pool: PoolKind) -> Result<(), String> {
         }
         PoolKind::MessageQueue => {}
         PoolKind::Nacos => {}
+        PoolKind::Consul(_) => {}
         #[cfg(feature = "mq-admin")]
         PoolKind::Mqtt(client) => {
             // 发送 DISCONNECT 并等待事件循环任务结束

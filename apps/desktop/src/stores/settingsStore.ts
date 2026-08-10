@@ -1191,7 +1191,10 @@ export const useSettingsStore = defineStore("settings", () => {
 
   async function initEditorSettings() {
     if (isEditorSettingsLoaded.value) return;
-    const saved = await api.loadEditorSettings().catch(() => null);
+    // A read failure is not the same as an empty settings record. Keeping the
+    // store unloaded prevents startup migrations from persisting defaults over
+    // settings that are temporarily unavailable.
+    const saved = await api.loadEditorSettings();
     if (saved && typeof saved === "object" && !Array.isArray(saved)) {
       const savedSettings = saved as Partial<EditorSettings>;
       const normalized = normalizeEditorSettings(savedSettings);

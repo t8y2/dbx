@@ -527,6 +527,53 @@ describe("settingsStore MCP policy persistence", () => {
   });
 });
 
+describe("settingsStore persisted settings initialization", () => {
+  beforeEach(() => {
+    vi.resetModules();
+    setActivePinia(createPinia());
+  });
+
+  it("does not treat an editor settings read failure as an empty record", async () => {
+    const loadEditorSettings = vi.fn().mockRejectedValue(new Error("storage temporarily unavailable"));
+    const saveEditorSettings = vi.fn().mockResolvedValue(undefined);
+    vi.doMock("@/lib/backend/api", () => ({ loadEditorSettings, saveEditorSettings }));
+
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const store = useSettingsStore();
+
+    await expect(store.initEditorSettings()).rejects.toThrow("storage temporarily unavailable");
+    expect(store.isEditorSettingsLoaded).toBe(false);
+    expect(saveEditorSettings).not.toHaveBeenCalled();
+  });
+
+  it("can retry editor settings initialization without losing saved values", async () => {
+    const loadEditorSettings = vi.fn().mockRejectedValueOnce(new Error("storage temporarily unavailable")).mockResolvedValueOnce({
+      fontSize: 17,
+      theme: "xcode-dark",
+      executeMode: "all",
+      executeModeDefaultVersion: 1,
+      updateNotificationsEnabled: false,
+    });
+    const saveEditorSettings = vi.fn().mockResolvedValue(undefined);
+    vi.doMock("@/lib/backend/api", () => ({ loadEditorSettings, saveEditorSettings }));
+
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const store = useSettingsStore();
+
+    await expect(store.initEditorSettings()).rejects.toThrow("storage temporarily unavailable");
+    await store.initEditorSettings();
+
+    expect(store.isEditorSettingsLoaded).toBe(true);
+    expect(store.editorSettings).toMatchObject({
+      fontSize: 17,
+      theme: "xcode-dark",
+      executeMode: "all",
+      updateNotificationsEnabled: false,
+    });
+    expect(saveEditorSettings).not.toHaveBeenCalled();
+  });
+});
+
 describe("settingsStore sidebar connection sort persistence", () => {
   beforeEach(() => {
     vi.resetModules();

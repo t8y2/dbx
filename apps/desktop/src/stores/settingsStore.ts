@@ -253,6 +253,16 @@ export const AI_PROVIDER_PRESETS: Record<AiProvider, AiProviderPreset> = {
     authMethod: "bearer",
     requiresApiKey: false,
   },
+  "codebuddy-cli": {
+    label: "CodeBuddy Code",
+    iconSlug: "codebuddy",
+    provider: "codebuddy-cli",
+    endpoint: "",
+    model: "default",
+    apiStyle: "completions",
+    authMethod: "bearer",
+    requiresApiKey: false,
+  },
   "grok-cli": {
     label: "Grok CLI",
     iconSlug: "grok",
@@ -335,6 +345,8 @@ export function normalizeAiConfig(config: Partial<AiConfig> | null | undefined):
     cursorCliEnv: normalizeAiEnv(config?.cursorCliEnv),
     grokCliPath: config?.grokCliPath?.trim() || undefined,
     grokCliEnv: normalizeAiEnv(config?.grokCliEnv),
+    codebuddyCliPath: config?.codebuddyCliPath?.trim() || undefined,
+    codebuddyCliEnv: normalizeAiEnv(config?.codebuddyCliEnv),
   };
 }
 
@@ -1494,7 +1506,7 @@ export const useSettingsStore = defineStore("settings", () => {
     const config = aiConfigs.value.find((c) => c.id === activeModel.value!.configId);
     if (!config) return false;
     const preset = AI_PROVIDER_PRESETS[config.provider];
-    if (config.provider === "codex-cli" || config.provider === "claude-code-cli" || config.provider === "pi-agent-cli" || config.provider === "opencode-cli" || config.provider === "cursor-cli" || config.provider === "grok-cli") return true;
+    if (config.provider === "codex-cli" || config.provider === "claude-code-cli" || config.provider === "pi-agent-cli" || config.provider === "opencode-cli" || config.provider === "cursor-cli" || config.provider === "grok-cli" || config.provider === "codebuddy-cli") return true;
     return !!config.endpoint && !!activeModel.value!.modelId && (!preset.requiresApiKey || !!config.apiKey);
   });
 

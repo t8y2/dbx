@@ -41,6 +41,16 @@ const errorCodes = [
   "openCodeTimeout",
   "openCodeProtocolError",
   "openCodeRunFailed",
+  "codeBuddyNotInstalled",
+  "codeBuddyCliPathInvalid",
+  "codeBuddyEnvInvalid",
+  "codeBuddyEnvReserved",
+  "codeBuddyNotAuthenticated",
+  "codeBuddyTimeout",
+  "codeBuddyMcpConfigInvalid",
+  "codeBuddyMcpStartupFailed",
+  "codeBuddyProtocolError",
+  "codeBuddyRunFailed",
 ] as const;
 
 test("Claude Code CLI errors are localized while retaining their stable code and raw diagnostics", () => {

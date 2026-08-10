@@ -34,6 +34,7 @@ pub struct CliAgentCommandSpec {
 pub enum CliAgentJsonlDialect {
     CodexExec,
     ClaudeCodePrint,
+    CodeBuddyPrint,
     OpenCodeRun,
     CursorPrint,
     /// Grok Build headless `--output-format streaming-json` (ACP-derived NDJSON).
@@ -237,7 +238,8 @@ pub fn parse_cli_jsonl_event(line: &str, dialect: CliAgentJsonlDialect) -> Optio
 fn parse_cli_jsonl_line(line: &str, dialect: CliAgentJsonlDialect) -> ParsedCliAgentEvent {
     match dialect {
         CliAgentJsonlDialect::CodexExec => parse_codex_jsonl_line(line),
-        CliAgentJsonlDialect::ClaudeCodePrint => parse_claude_code_jsonl_line(line),
+        CliAgentJsonlDialect::ClaudeCodePrint => parse_claude_compatible_jsonl_line(line, "Claude Code CLI failed"),
+        CliAgentJsonlDialect::CodeBuddyPrint => parse_claude_compatible_jsonl_line(line, "CodeBuddy Code CLI failed"),
         CliAgentJsonlDialect::OpenCodeRun => parse_open_code_jsonl_line(line),
         CliAgentJsonlDialect::CursorPrint => parse_cursor_jsonl_line(line),
         CliAgentJsonlDialect::GrokStreamingJson => parse_grok_streaming_json_line(line),
@@ -402,7 +404,7 @@ fn codex_error_message(value: &Value) -> String {
         .to_string()
 }
 
-fn parse_claude_code_jsonl_line(line: &str) -> ParsedCliAgentEvent {
+fn parse_claude_compatible_jsonl_line(line: &str, fallback_error: &str) -> ParsedCliAgentEvent {
     let Ok(value) = serde_json::from_str::<Value>(line) else {
         return ParsedCliAgentEvent::default();
     };
@@ -410,9 +412,9 @@ fn parse_claude_code_jsonl_line(line: &str) -> ParsedCliAgentEvent {
     match value.get("type").and_then(Value::as_str).unwrap_or_default() {
         "assistant" => parse_claude_code_assistant(&value),
         "user" => parse_claude_code_user(&value),
-        "result" => parse_claude_code_result(&value),
+        "result" => parse_claude_code_result(&value, fallback_error),
         "error" => {
-            let message = claude_code_error_message(&value);
+            let message = claude_code_error_message(&value, fallback_error);
             ParsedCliAgentEvent {
                 error: Some(message.clone()),
                 events: vec![AgentEvent::Error { message }],
@@ -489,10 +491,10 @@ fn parse_claude_code_user(value: &Value) -> ParsedCliAgentEvent {
     ParsedCliAgentEvent { events, ..Default::default() }
 }
 
-fn parse_claude_code_result(value: &Value) -> ParsedCliAgentEvent {
+fn parse_claude_code_result(value: &Value, fallback_error: &str) -> ParsedCliAgentEvent {
     let subtype = value.get("subtype").and_then(Value::as_str).unwrap_or("success");
     if subtype != "success" {
-        let message = claude_code_error_message(value);
+        let message = claude_code_error_message(value, fallback_error);
         return ParsedCliAgentEvent {
             error: Some(message.clone()),
             events: vec![AgentEvent::Error { message }],
@@ -528,14 +530,14 @@ fn claude_content_blocks(content: &Value) -> Vec<Value> {
     }
 }
 
-fn claude_code_error_message(value: &Value) -> String {
+fn claude_code_error_message(value: &Value, fallback_error: &str) -> String {
     value
         .get("error")
         .and_then(Value::as_str)
         .or_else(|| value.get("message").and_then(Value::as_str))
         .or_else(|| value.get("error").and_then(|error| error.get("message")).and_then(Value::as_str))
         .or_else(|| value.get("result").and_then(Value::as_str))
-        .unwrap_or("Claude Code CLI failed")
+        .unwrap_or(fallback_error)
         .to_string()
 }
 

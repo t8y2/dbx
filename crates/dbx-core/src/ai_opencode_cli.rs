@@ -470,6 +470,8 @@ mod tests {
             cursor_cli_env: Default::default(),
             grok_cli_path: None,
             grok_cli_env: Default::default(),
+            codebuddy_cli_path: None,
+            codebuddy_cli_env: Default::default(),
         }
     }
 

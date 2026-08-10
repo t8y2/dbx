@@ -85,6 +85,8 @@ pub enum AiProvider {
     CursorCli,
     #[serde(rename = "grok-cli")]
     GrokCli,
+    #[serde(rename = "codebuddy-cli")]
+    CodeBuddyCli,
     Custom,
 }
 
@@ -105,6 +107,7 @@ impl AiProvider {
             AiProvider::OpenCodeCli => "opencode-cli",
             AiProvider::CursorCli => "cursor-cli",
             AiProvider::GrokCli => "grok-cli",
+            AiProvider::CodeBuddyCli => "codebuddy-cli",
             AiProvider::CodexCli => "codex-cli",
             AiProvider::Custom => "custom",
         }
@@ -408,6 +411,10 @@ pub struct AiConfig {
     pub grok_cli_path: Option<String>,
     #[serde(default)]
     pub grok_cli_env: HashMap<String, String>,
+    #[serde(default)]
+    pub codebuddy_cli_path: Option<String>,
+    #[serde(default)]
+    pub codebuddy_cli_env: HashMap<String, String>,
 }
 
 fn default_enable_thinking() -> bool {
@@ -426,6 +433,7 @@ pub fn is_cli_provider(provider: &AiProvider) -> bool {
             | AiProvider::OpenCodeCli
             | AiProvider::CursorCli
             | AiProvider::GrokCli
+            | AiProvider::CodeBuddyCli
     )
 }
 
@@ -658,6 +666,7 @@ pub fn resolve_endpoint(config: &AiConfig) -> String {
         | AiProvider::OpenCodeCli
         | AiProvider::CursorCli
         | AiProvider::GrokCli
+        | AiProvider::CodeBuddyCli
         | AiProvider::Gemini => unreachable!(),
     }
 }
@@ -1508,6 +1517,7 @@ pub async fn list_models_core(config: &AiConfig) -> Result<Vec<AiModelInfo>, Str
         AiProvider::OpenCodeCli => crate::ai_opencode_cli::list_opencode_models(config).await?,
         AiProvider::CursorCli => crate::ai_cursor_cli::list_cursor_models(config).await?,
         AiProvider::GrokCli => crate::ai_grok_cli::list_grok_models(config).await?,
+        AiProvider::CodeBuddyCli => crate::ai_codebuddy_cli::list_codebuddy_models(config).await?,
         _ => {
             validate_model_list_config(config)?;
             let client = build_ai_http_client(config, 30)?;
@@ -1535,7 +1545,8 @@ pub async fn list_models_core(config: &AiConfig) -> Result<Vec<AiModelInfo>, Str
                 | AiProvider::PiAgentCli
                 | AiProvider::OpenCodeCli
                 | AiProvider::CursorCli
-                | AiProvider::GrokCli => {
+                | AiProvider::GrokCli
+                | AiProvider::CodeBuddyCli => {
                     unreachable!()
                 }
             }
@@ -1558,6 +1569,10 @@ pub async fn resolve_model_effort_core(config: &AiConfig, model_id: &str) -> Res
 
     if matches!(config.provider, AiProvider::OpenCodeCli) {
         return crate::ai_opencode_cli::resolve_opencode_model_effort(config, model_id).await;
+    }
+
+    if matches!(config.provider, AiProvider::CodeBuddyCli) {
+        return crate::ai_codebuddy_cli::resolve_codebuddy_model_effort(config, model_id).await;
     }
 
     if matches!(config.provider, AiProvider::CursorCli) {
@@ -2102,6 +2117,9 @@ pub async fn test_connection_core(config: &AiConfig) -> Result<AiTestConnectionR
     if matches!(config.provider, AiProvider::GrokCli) {
         return crate::ai_grok_cli::test_grok_connection(config).await;
     }
+    if matches!(config.provider, AiProvider::CodeBuddyCli) {
+        return crate::ai_codebuddy_cli::test_codebuddy_connection(config).await;
+    }
     let mut resolved_config = config.clone();
     if resolved_config.model.trim().is_empty() {
         let model = list_models_core(&resolved_config)
@@ -2479,7 +2497,8 @@ pub async fn complete(request: &AiCompletionRequest) -> Result<String, String> {
                 | AiProvider::PiAgentCli
                 | AiProvider::OpenCodeCli
                 | AiProvider::CursorCli
-                | AiProvider::GrokCli => {
+                | AiProvider::GrokCli
+                | AiProvider::CodeBuddyCli => {
                     unreachable!()
                 }
                 AiProvider::Openai
@@ -2538,7 +2557,8 @@ pub async fn stream(
         | AiProvider::PiAgentCli
         | AiProvider::OpenCodeCli
         | AiProvider::CursorCli
-        | AiProvider::GrokCli => {
+        | AiProvider::GrokCli
+        | AiProvider::CodeBuddyCli => {
             unreachable!()
         }
         AiProvider::Openai
@@ -4200,6 +4220,8 @@ mod tests {
                 cursor_cli_env: Default::default(),
                 grok_cli_path: None,
                 grok_cli_env: Default::default(),
+                codebuddy_cli_path: None,
+                codebuddy_cli_env: Default::default(),
             },
             system_prompt: "Be concise.".to_string(),
             messages: vec![AiMessage {
@@ -4785,6 +4807,8 @@ mod tests {
         assert!(config.opencode_cli_env.is_empty());
         assert!(config.cursor_cli_path.is_none());
         assert!(config.cursor_cli_env.is_empty());
+        assert!(config.codebuddy_cli_path.is_none());
+        assert!(config.codebuddy_cli_env.is_empty());
     }
 
     #[test]
@@ -4816,6 +4840,8 @@ mod tests {
             cursor_cli_env: Default::default(),
             grok_cli_path: None,
             grok_cli_env: Default::default(),
+            codebuddy_cli_path: None,
+            codebuddy_cli_env: Default::default(),
         };
 
         let err = build_ai_http_client(&config, 1).unwrap_err();
@@ -4852,6 +4878,8 @@ mod tests {
             cursor_cli_env: Default::default(),
             grok_cli_path: None,
             grok_cli_env: Default::default(),
+            codebuddy_cli_path: None,
+            codebuddy_cli_env: Default::default(),
         };
 
         build_ai_http_client(&config, 1).unwrap();
@@ -4886,6 +4914,8 @@ mod tests {
             cursor_cli_env: Default::default(),
             grok_cli_path: None,
             grok_cli_env: Default::default(),
+            codebuddy_cli_path: None,
+            codebuddy_cli_env: Default::default(),
         };
 
         build_ai_http_client(&config, 1).unwrap();
@@ -4920,6 +4950,8 @@ mod tests {
             cursor_cli_env: Default::default(),
             grok_cli_path: None,
             grok_cli_env: Default::default(),
+            codebuddy_cli_path: None,
+            codebuddy_cli_env: Default::default(),
         };
 
         assert_eq!(
@@ -4958,6 +4990,8 @@ mod tests {
             cursor_cli_env: Default::default(),
             grok_cli_path: None,
             grok_cli_env: Default::default(),
+            codebuddy_cli_path: None,
+            codebuddy_cli_env: Default::default(),
         };
 
         assert_eq!(resolve_endpoint(&ollama), "http://localhost:11434/v1/chat/completions");
@@ -4993,6 +5027,8 @@ mod tests {
             cursor_cli_env: Default::default(),
             grok_cli_path: None,
             grok_cli_env: Default::default(),
+            codebuddy_cli_path: None,
+            codebuddy_cli_env: Default::default(),
         };
 
         for provider in
@@ -5047,6 +5083,8 @@ mod tests {
             cursor_cli_env: Default::default(),
             grok_cli_path: None,
             grok_cli_env: Default::default(),
+            codebuddy_cli_path: None,
+            codebuddy_cli_env: Default::default(),
         };
         assert_eq!(resolve_model_list_endpoint(&openai).unwrap(), "https://api.openai.com/v1/models");
 
@@ -5077,6 +5115,8 @@ mod tests {
             cursor_cli_env: Default::default(),
             grok_cli_path: None,
             grok_cli_env: Default::default(),
+            codebuddy_cli_path: None,
+            codebuddy_cli_env: Default::default(),
         };
         assert_eq!(resolve_model_list_endpoint(&claude).unwrap(), "https://api.anthropic.com/v1/models");
     }
@@ -5110,6 +5150,8 @@ mod tests {
             cursor_cli_env: Default::default(),
             grok_cli_path: None,
             grok_cli_env: Default::default(),
+            codebuddy_cli_path: None,
+            codebuddy_cli_env: Default::default(),
         };
 
         assert!(uses_anthropic_messages_api(&config));
@@ -5195,6 +5237,8 @@ mod tests {
             cursor_cli_env: Default::default(),
             grok_cli_path: None,
             grok_cli_env: Default::default(),
+            codebuddy_cli_path: None,
+            codebuddy_cli_env: Default::default(),
         };
 
         assert!(!uses_anthropic_messages_api(&config));
@@ -5240,6 +5284,8 @@ mod tests {
             cursor_cli_env: Default::default(),
             grok_cli_path: None,
             grok_cli_env: Default::default(),
+            codebuddy_cli_path: None,
+            codebuddy_cli_env: Default::default(),
         };
         assert_eq!(resolve_endpoint(&config), "https://api.example.com/v1/chat/completions");
         assert_eq!(resolve_model_list_endpoint(&config).unwrap(), "https://api.example.com/v1/models");
@@ -5309,6 +5355,8 @@ mod tests {
             cursor_cli_env: Default::default(),
             grok_cli_path: None,
             grok_cli_env: Default::default(),
+            codebuddy_cli_path: None,
+            codebuddy_cli_env: Default::default(),
         };
 
         assert_eq!(resolve_endpoint(&config), "https://api.openai.com/v1/responses");
@@ -5350,6 +5398,8 @@ mod tests {
             cursor_cli_env: Default::default(),
             grok_cli_path: None,
             grok_cli_env: Default::default(),
+            codebuddy_cli_path: None,
+            codebuddy_cli_env: Default::default(),
         };
 
         let api_key_headers = claude_headers(&config).unwrap();
@@ -5471,6 +5521,8 @@ mod tests {
             cursor_cli_env: Default::default(),
             grok_cli_path: None,
             grok_cli_env: Default::default(),
+            codebuddy_cli_path: None,
+            codebuddy_cli_env: Default::default(),
         };
         assert_eq!(resolve_ollama_show_endpoint(&config).unwrap(), "http://localhost:11434/api/show");
 
@@ -5509,6 +5561,8 @@ mod tests {
             cursor_cli_env: Default::default(),
             grok_cli_path: None,
             grok_cli_env: Default::default(),
+            codebuddy_cli_path: None,
+            codebuddy_cli_env: Default::default(),
         };
 
         assert_eq!(ollama_selected_model_tool_support(&config).await.unwrap(), Some(true));
@@ -5596,6 +5650,8 @@ mod tests {
             cursor_cli_env: Default::default(),
             grok_cli_path: None,
             grok_cli_env: Default::default(),
+            codebuddy_cli_path: None,
+            codebuddy_cli_env: Default::default(),
         };
         let models = vec![
             AiModelInfo::new("qwen3:0.6b", None),
@@ -5863,6 +5919,8 @@ mod tests {
             cursor_cli_env: Default::default(),
             grok_cli_path: None,
             grok_cli_env: Default::default(),
+            codebuddy_cli_path: None,
+            codebuddy_cli_env: Default::default(),
         };
 
         let mut body = serde_json::json!({
@@ -6080,6 +6138,8 @@ mod tests {
             cursor_cli_env: Default::default(),
             grok_cli_path: None,
             grok_cli_env: Default::default(),
+            codebuddy_cli_path: None,
+            codebuddy_cli_env: Default::default(),
         };
         let mut body = serde_json::json!({
             "model": &config.model,
@@ -6123,6 +6183,8 @@ mod tests {
             cursor_cli_env: Default::default(),
             grok_cli_path: None,
             grok_cli_env: Default::default(),
+            codebuddy_cli_path: None,
+            codebuddy_cli_env: Default::default(),
         };
         let mut body = serde_json::json!({ "model": &config.model });
 
@@ -6172,6 +6234,8 @@ mod tests {
             cursor_cli_env: Default::default(),
             grok_cli_path: None,
             grok_cli_env: Default::default(),
+            codebuddy_cli_path: None,
+            codebuddy_cli_env: Default::default(),
         };
         let mut body = serde_json::json!({ "model": &config.model });
 
@@ -6215,6 +6279,8 @@ mod tests {
             cursor_cli_env: Default::default(),
             grok_cli_path: None,
             grok_cli_env: Default::default(),
+            codebuddy_cli_path: None,
+            codebuddy_cli_env: Default::default(),
         };
         let mut body = serde_json::json!({ "model": &config.model });
 
@@ -6254,6 +6320,8 @@ mod tests {
             cursor_cli_env: Default::default(),
             grok_cli_path: None,
             grok_cli_env: Default::default(),
+            codebuddy_cli_path: None,
+            codebuddy_cli_env: Default::default(),
         };
         let mut body = serde_json::json!({ "model": &config.model });
 
@@ -6324,6 +6392,8 @@ mod tests {
             cursor_cli_env: Default::default(),
             grok_cli_path: None,
             grok_cli_env: Default::default(),
+            codebuddy_cli_path: None,
+            codebuddy_cli_env: Default::default(),
         };
         let request = AiCompletionRequest {
             config: config.clone(),
@@ -6388,6 +6458,8 @@ mod tests {
             cursor_cli_env: Default::default(),
             grok_cli_path: None,
             grok_cli_env: Default::default(),
+            codebuddy_cli_path: None,
+            codebuddy_cli_env: Default::default(),
         };
         let mut body = serde_json::json!({
             "model": &config.model,
@@ -6921,6 +6993,7 @@ mod tests {
             AiProvider::OpenCodeCli,
             AiProvider::CursorCli,
             AiProvider::GrokCli,
+            AiProvider::CodeBuddyCli,
         ] {
             let mut config = test_config(provider.clone());
             config.max_retries = None;

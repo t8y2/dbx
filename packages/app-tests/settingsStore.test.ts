@@ -544,6 +544,9 @@ test("AI provider presets include common hosted and local providers", () => {
   assert.equal(AI_PROVIDER_PRESETS["cursor-cli"].model, "default");
   assert.equal(AI_PROVIDER_PRESETS["cursor-cli"].iconSlug, "cursor");
   assert.equal(AI_PROVIDER_PRESETS["cursor-cli"].requiresApiKey, false);
+  assert.equal(AI_PROVIDER_PRESETS["codebuddy-cli"].model, "default");
+  assert.equal(AI_PROVIDER_PRESETS["codebuddy-cli"].iconSlug, "codebuddy");
+  assert.equal(AI_PROVIDER_PRESETS["codebuddy-cli"].requiresApiKey, false);
   assert.equal(AI_PROVIDER_PRESETS["grok-cli"].model, "default");
   assert.equal(AI_PROVIDER_PRESETS["grok-cli"].iconSlug, "grok");
   assert.equal(AI_PROVIDER_PRESETS["grok-cli"].requiresApiKey, false);
@@ -559,6 +562,8 @@ test("AI provider presets include common hosted and local providers", () => {
   assert.ok(Object.keys(AI_PROVIDER_PRESETS).indexOf("opencode-cli") < Object.keys(AI_PROVIDER_PRESETS).indexOf("pi-agent-cli"));
   assert.ok(Object.keys(AI_PROVIDER_PRESETS).indexOf("opencode-cli") < Object.keys(AI_PROVIDER_PRESETS).indexOf("cursor-cli"));
   assert.ok(Object.keys(AI_PROVIDER_PRESETS).indexOf("cursor-cli") < Object.keys(AI_PROVIDER_PRESETS).indexOf("pi-agent-cli"));
+  assert.ok(Object.keys(AI_PROVIDER_PRESETS).indexOf("cursor-cli") < Object.keys(AI_PROVIDER_PRESETS).indexOf("codebuddy-cli"));
+  assert.ok(Object.keys(AI_PROVIDER_PRESETS).indexOf("codebuddy-cli") < Object.keys(AI_PROVIDER_PRESETS).indexOf("grok-cli"));
   assert.ok(Object.keys(AI_PROVIDER_PRESETS).indexOf("codex-cli") < Object.keys(AI_PROVIDER_PRESETS).indexOf("grok-cli"));
   assert.ok(Object.keys(AI_PROVIDER_PRESETS).indexOf("codex-cli") < Object.keys(AI_PROVIDER_PRESETS).indexOf("pi-agent-cli"));
 });
@@ -645,6 +650,14 @@ test("normalizes legacy AI config and fills provider defaults", () => {
   assert.equal(grokCli.grokCliPath, "/Users/me/.grok/bin/grok");
   assert.deepEqual(grokCli.grokCliEnv, { HTTPS_PROXY: "http://proxy:9800" });
   assert.equal(grokCli.model, "default");
+  const codeBuddy = normalizeAiConfig({
+    provider: "codebuddy-cli",
+    codebuddyCliPath: " /opt/homebrew/bin/codebuddy ",
+    codebuddyCliEnv: { HTTPS_PROXY: "http://proxy:9800" },
+  });
+  assert.equal(codeBuddy.codebuddyCliPath, "/opt/homebrew/bin/codebuddy");
+  assert.deepEqual(codeBuddy.codebuddyCliEnv, { HTTPS_PROXY: "http://proxy:9800" });
+  assert.equal(codeBuddy.model, "default");
 });
 
 test("infers legacy AI provider from saved endpoint and model", () => {

@@ -59,6 +59,7 @@ function configSignature(config: AiConfigItem): string {
     piAgentCliPath: config.piAgentCliPath ?? null,
     opencodeCliPath: config.opencodeCliPath ?? null,
     cursorCliPath: config.cursorCliPath ?? null,
+    codebuddyCliPath: config.codebuddyCliPath ?? null,
     connectionFingerprint: fingerprint(
       JSON.stringify({
         apiKey: config.apiKey,
@@ -69,6 +70,7 @@ function configSignature(config: AiConfigItem): string {
         piAgentCliEnv: sortedRecord(config.piAgentCliEnv),
         opencodeCliEnv: sortedRecord(config.opencodeCliEnv),
         cursorCliEnv: sortedRecord(config.cursorCliEnv),
+        codebuddyCliEnv: sortedRecord(config.codebuddyCliEnv),
       }),
     ),
   });

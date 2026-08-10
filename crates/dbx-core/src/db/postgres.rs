@@ -3768,7 +3768,7 @@ fn build_custom_type_ddl(
             if let Some(value) = properties.range_multirange_name.as_deref().filter(|v| !v.is_empty()) {
                 args.push(format!("multirange_type_name = {}", pg_quote_catalog_identifier(value)));
             }
-            if properties.range_subtype.as_deref().map_or(true, |value| value.is_empty()) {
+            if properties.range_subtype.as_deref().is_none_or(|value| value.is_empty()) {
                 let mut warnings = warnings.to_vec();
                 warnings.push("range attributes could not be resolved".to_string());
                 CustomTypeDdl {
@@ -3810,23 +3810,18 @@ fn build_custom_type_ddl(
 
 /// Category-independent attribute assembly shared by all kinds.
 fn custom_type_common_properties(info: &CustomTypeGeneralInfo) -> CustomTypeProperties {
-    let mut properties = CustomTypeProperties::default();
-    properties.input_function = info.input_function.clone();
-    properties.output_function = info.output_function.clone();
-    properties.receive_function = info.receive_function.clone();
-    properties.send_function = info.send_function.clone();
-    properties.analyze_function = info.analyze_function.clone();
-    if info.typlen != -1 && info.typlen > 0 {
-        properties.internallength = Some(info.typlen as i32);
+    CustomTypeProperties {
+        input_function: info.input_function.clone(),
+        output_function: info.output_function.clone(),
+        receive_function: info.receive_function.clone(),
+        send_function: info.send_function.clone(),
+        analyze_function: info.analyze_function.clone(),
+        internallength: (info.typlen != -1 && info.typlen > 0).then_some(info.typlen as i32),
+        passed_by_value: Some(info.typbyval),
+        alignment: (!info.typalign.is_empty()).then(|| info.typalign.clone()),
+        storage: (!info.typstorage.is_empty()).then(|| info.typstorage.clone()),
+        ..Default::default()
     }
-    properties.passed_by_value = Some(info.typbyval);
-    if !info.typalign.is_empty() {
-        properties.alignment = Some(info.typalign.clone());
-    }
-    if !info.typstorage.is_empty() {
-        properties.storage = Some(info.typstorage.clone());
-    }
-    properties
 }
 
 /// Fetch the read-only details of a user-defined type.
@@ -8176,15 +8171,17 @@ mod tests {
     #[test]
     fn custom_type_ddl_domain_combines_base_default_notnull_and_constraints() {
         let info = test_custom_type_info("d");
-        let mut properties = CustomTypeProperties::default();
-        properties.base_type = Some("text".to_string());
-        properties.collation = Some("C".to_string());
-        properties.default = Some("''::text".to_string());
-        properties.not_null = Some(true);
-        properties.domain_constraints = vec![CustomTypeDomainConstraint {
-            name: "email_valid".to_string(),
-            definition: "CHECK ((VALUE <> ''::text))".to_string(),
-        }];
+        let properties = CustomTypeProperties {
+            base_type: Some("text".to_string()),
+            collation: Some("C".to_string()),
+            default: Some("''::text".to_string()),
+            not_null: Some(true),
+            domain_constraints: vec![CustomTypeDomainConstraint {
+                name: "email_valid".to_string(),
+                definition: "CHECK ((VALUE <> ''::text))".to_string(),
+            }],
+            ..Default::default()
+        };
         let ddl = build_custom_type_ddl("app", "email", CustomTypeKind::Domain, &info, &[], &properties, &[]);
         assert_eq!(
             ddl.sql,
@@ -8196,8 +8193,10 @@ mod tests {
     #[test]
     fn custom_type_ddl_domain_is_incomplete_when_attributes_failed() {
         let info = test_custom_type_info("d");
-        let mut properties = CustomTypeProperties::default();
-        properties.base_type = Some("text".to_string());
+        let properties = CustomTypeProperties {
+            base_type: Some("text".to_string()),
+            ..Default::default()
+        };
         let ddl = build_custom_type_ddl(
             "app",
             "email",
@@ -8247,10 +8246,12 @@ mod tests {
     #[test]
     fn custom_type_ddl_range_uses_subtype_and_canonical() {
         let info = test_custom_type_info("r");
-        let mut properties = CustomTypeProperties::default();
-        properties.range_subtype = Some("numeric".to_string());
-        properties.range_canonical_function = Some("numeric_range_canonical".to_string());
-        properties.range_subtype_diff_function = Some("numeric_range_subdiff".to_string());
+        let properties = CustomTypeProperties {
+            range_subtype: Some("numeric".to_string()),
+            range_canonical_function: Some("numeric_range_canonical".to_string()),
+            range_subtype_diff_function: Some("numeric_range_subdiff".to_string()),
+            ..Default::default()
+        };
         let ddl = build_custom_type_ddl("app", "price_range", CustomTypeKind::Range, &info, &[], &properties, &[]);
         assert_eq!(
             ddl.sql,
@@ -8262,9 +8263,11 @@ mod tests {
     #[test]
     fn custom_type_ddl_range_without_subtype_is_incomplete() {
         let info = test_custom_type_info("r");
-        let mut properties = CustomTypeProperties::default();
-        properties.range_multirange_name = Some("price_multirange".to_string());
-        properties.range_canonical_function = Some("range_canonical".to_string());
+        let properties = CustomTypeProperties {
+            range_multirange_name: Some("price_multirange".to_string()),
+            range_canonical_function: Some("range_canonical".to_string()),
+            ..Default::default()
+        };
         let ddl = build_custom_type_ddl("app", "price_range", CustomTypeKind::Range, &info, &[], &properties, &[]);
 
         assert!(!ddl.complete, "a range without subtype cannot be reconstructed: {ddl:?}");
@@ -8275,11 +8278,13 @@ mod tests {
     #[test]
     fn custom_type_ddl_range_keeps_catalog_qualified_names() {
         let info = test_custom_type_info("r");
-        let mut properties = CustomTypeProperties::default();
-        properties.range_subtype = Some("numeric".to_string());
-        properties.range_canonical_function = Some("\"extensions\".\"range_canonical\"".to_string());
-        properties.range_subtype_diff_function = Some("\"extensions\".\"range_subdiff\"".to_string());
-        properties.range_subtype_opclass = Some("\"extensions\".\"numeric_ops\"".to_string());
+        let properties = CustomTypeProperties {
+            range_subtype: Some("numeric".to_string()),
+            range_canonical_function: Some("\"extensions\".\"range_canonical\"".to_string()),
+            range_subtype_diff_function: Some("\"extensions\".\"range_subdiff\"".to_string()),
+            range_subtype_opclass: Some("\"extensions\".\"numeric_ops\"".to_string()),
+            ..Default::default()
+        };
         let ddl = build_custom_type_ddl("app", "price_range", CustomTypeKind::Range, &info, &[], &properties, &[]);
 
         assert!(ddl.complete, "{ddl:?}");
@@ -8291,9 +8296,11 @@ mod tests {
     #[test]
     fn custom_type_ddl_range_emits_custom_multirange_name() {
         let info = test_custom_type_info("r");
-        let mut properties = CustomTypeProperties::default();
-        properties.range_subtype = Some("numeric".to_string());
-        properties.range_multirange_name = Some("price_multirange".to_string());
+        let properties = CustomTypeProperties {
+            range_subtype: Some("numeric".to_string()),
+            range_multirange_name: Some("price_multirange".to_string()),
+            ..Default::default()
+        };
         let ddl = build_custom_type_ddl("app", "price_range", CustomTypeKind::Range, &info, &[], &properties, &[]);
         assert!(ddl.complete, "{ddl:?}");
         assert!(

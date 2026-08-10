@@ -449,6 +449,46 @@ jobs:
           name: neo4j-native
           path: "release-native/dbx-agent-neo4j-*"
 
+  build-iotdb-native:
+    needs: [bump-versions]
+    if: ${{ contains(fromJSON(needs.bump-versions.outputs.native_modules), 'iotdb') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.x"
+      - name: Test IoTDB native agent
+        working-directory: agents/drivers/iotdb
+        run: go test ./...
+      - name: Cross-compile IoTDB native agent
+        shell: bash
+        run: |
+          mkdir -p release-native
+          cd agents/drivers/iotdb
+          declare -A TARGETS=(
+            ["macos-aarch64"]="darwin/arm64"
+            ["macos-x64"]="darwin/amd64"
+            ["linux-aarch64"]="linux/arm64"
+            ["linux-x64"]="linux/amd64"
+            ["windows-aarch64"]="windows/arm64"
+            ["windows-x64"]="windows/amd64"
+          )
+          for platform in "${!TARGETS[@]}"; do
+            IFS=/ read -r goos goarch <<< "${TARGETS[$platform]}"
+            output="../../../release-native/dbx-agent-iotdb-${platform}"
+            if [[ "$goos" == "windows" ]]; then
+              output="${output}.exe"
+            fi
+            echo "Building $platform ($goos/$goarch)"
+            CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" go build -trimpath -ldflags="-s -w" -o "$output" .
+          done
+          ls -lh ../../../release-native
+      - uses: actions/upload-artifact@v4
+        with:
+          name: iotdb-native
+          path: "release-native/dbx-agent-iotdb-*"
+
   build-duckdb-native:
     needs: [bump-versions]
     if: ${{ contains(fromJSON(needs.bump-versions.outputs.native_modules), 'duckdb') }}
@@ -788,7 +828,7 @@ jobs:
           retention-days: 1
 
   release:
-    needs: [bump-versions, commit-versions, build-agents, build-oracle-native, build-xugu-native, build-rabbitmq-native, build-cassandra-native, build-kingbase-native, build-vastbase-native, build-neo4j-native, build-duckdb-native, build-tdengine-native, build-jre, reuse-previous-assets]
+    needs: [bump-versions, commit-versions, build-agents, build-oracle-native, build-xugu-native, build-rabbitmq-native, build-cassandra-native, build-kingbase-native, build-vastbase-native, build-neo4j-native, build-iotdb-native, build-duckdb-native, build-tdengine-native, build-jre, reuse-previous-assets]
     if: ${{ always() && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') }}
     runs-on: ubuntu-latest
     steps:
@@ -912,6 +952,7 @@ jobs:
               rabbitmq) echo "RabbitMQ" ;;
               cassandra) echo "Apache Cassandra" ;;
               neo4j) echo "Neo4j" ;;
+              iotdb) echo "Apache IoTDB" ;;
               tdengine) echo "TDengine" ;;
               *) echo "$name" ;;
             esac
@@ -976,7 +1017,7 @@ jobs:
             [ -n "$DRIVERS" ] && DRIVERS="${DRIVERS},"$'\n'
             DRIVERS="${DRIVERS}$(generate_jar_entry "$name" "$label" "$f" "$jre_key" "$version" "$external_driver" "$native_json")"
           done
-          for name in oracle xugu kingbase vastbase neo4j duckdb rabbitmq cassandra tdengine; do
+          for name in oracle xugu kingbase vastbase neo4j iotdb duckdb rabbitmq cassandra tdengine; do
             version=$(get_module_version "$name")
             [ -f "release/dbx-agent-${name}-${version}.jar" ] && continue
             native_json=$(generate_native_platforms "$name" "$version")
@@ -1048,6 +1089,7 @@ jobs:
               rabbitmq) echo "RabbitMQ" ;;
               cassandra) echo "Apache Cassandra" ;;
               neo4j) echo "Neo4j" ;;
+              iotdb) echo "Apache IoTDB" ;;
               tdengine) echo "TDengine" ;;
               *) echo "$name" ;;
             esac
@@ -1077,6 +1119,8 @@ jobs:
               LOG_PATH="agents/drivers/cassandra-go/"
             elif [ "$name" = "neo4j" ]; then
               LOG_PATH="agents/drivers/neo4j-go/"
+            elif [ "$name" = "iotdb" ]; then
+              LOG_PATH="agents/drivers/iotdb/"
             elif [ -d "agents/drivers/$name" ]; then
               LOG_PATH="agents/drivers/$name/"
             else

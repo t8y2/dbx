@@ -36,6 +36,8 @@ pub enum CliAgentJsonlDialect {
     ClaudeCodePrint,
     OpenCodeRun,
     CursorPrint,
+    /// Grok Build headless `--output-format streaming-json` (ACP-derived NDJSON).
+    GrokStreamingJson,
 }
 
 pub struct CliAgentProcessSpec {
@@ -238,6 +240,7 @@ fn parse_cli_jsonl_line(line: &str, dialect: CliAgentJsonlDialect) -> ParsedCliA
         CliAgentJsonlDialect::ClaudeCodePrint => parse_claude_code_jsonl_line(line),
         CliAgentJsonlDialect::OpenCodeRun => parse_open_code_jsonl_line(line),
         CliAgentJsonlDialect::CursorPrint => parse_cursor_jsonl_line(line),
+        CliAgentJsonlDialect::GrokStreamingJson => parse_grok_streaming_json_line(line),
     }
 }
 
@@ -792,6 +795,139 @@ fn cursor_error_message(value: &Value) -> String {
         .to_string()
 }
 
+/// Parse Grok Build `--output-format streaming-json` NDJSON events.
+///
+/// Documented event types: `text`, `thought`, `tool_call`, `tool_call_update`,
+/// `usage`, `plan`, `available_commands`, `end`, `error` (list is non-exhaustive).
+fn parse_grok_streaming_json_line(line: &str) -> ParsedCliAgentEvent {
+    let Ok(value) = serde_json::from_str::<Value>(line) else {
+        return ParsedCliAgentEvent::default();
+    };
+
+    match value.get("type").and_then(Value::as_str).unwrap_or_default() {
+        "text" => {
+            let Some(text) = value.get("data").and_then(Value::as_str).filter(|text| !text.is_empty()) else {
+                return ParsedCliAgentEvent::default();
+            };
+            ParsedCliAgentEvent {
+                final_text: Some(text.to_string()),
+                events: vec![AgentEvent::TextDelta { delta: text.to_string() }],
+                ..Default::default()
+            }
+        }
+        "thought" => {
+            let Some(text) = value.get("data").and_then(Value::as_str).filter(|text| !text.is_empty()) else {
+                return ParsedCliAgentEvent::default();
+            };
+            ParsedCliAgentEvent {
+                events: vec![AgentEvent::ReasoningDelta { delta: text.to_string() }],
+                ..Default::default()
+            }
+        }
+        "tool_call" => {
+            let status = value.get("status").and_then(Value::as_str).unwrap_or("in_progress");
+            if status == "failed" || status == "error" {
+                return parse_grok_tool_call_end(&value, true);
+            }
+            ParsedCliAgentEvent {
+                events: vec![AgentEvent::ToolCallStart {
+                    tool_call_id: grok_tool_call_id(&value),
+                    tool_name: grok_tool_name(&value),
+                    args: value
+                        .get("rawInput")
+                        .or_else(|| value.get("raw_input"))
+                        .or_else(|| value.get("input"))
+                        .cloned()
+                        .unwrap_or_else(|| Value::Object(Default::default())),
+                }],
+                ..Default::default()
+            }
+        }
+        "tool_call_update" => {
+            let status = value.get("status").and_then(Value::as_str).unwrap_or("completed");
+            let is_error = matches!(status, "failed" | "error" | "cancelled" | "rejected");
+            if matches!(status, "in_progress" | "pending" | "running") {
+                return ParsedCliAgentEvent::default();
+            }
+            parse_grok_tool_call_end(&value, is_error)
+        }
+        "end" => {
+            let usage = value.get("usage").and_then(grok_usage_tokens);
+            ParsedCliAgentEvent {
+                events: vec![AgentEvent::AgentEnd {
+                    input_tokens: usage.as_ref().and_then(|u| (u.input_tokens > 0).then_some(u.input_tokens)),
+                    output_tokens: usage.as_ref().and_then(|u| (u.output_tokens > 0).then_some(u.output_tokens)),
+                }],
+                ..Default::default()
+            }
+        }
+        "error" => {
+            let message = value
+                .get("message")
+                .and_then(Value::as_str)
+                .or_else(|| value.get("error").and_then(Value::as_str))
+                .or_else(|| value.get("data").and_then(Value::as_str))
+                .unwrap_or("Grok CLI failed")
+                .to_string();
+            ParsedCliAgentEvent {
+                error: Some(message.clone()),
+                events: vec![AgentEvent::Error { message }],
+                ..Default::default()
+            }
+        }
+        _ => ParsedCliAgentEvent::default(),
+    }
+}
+
+fn parse_grok_tool_call_end(value: &Value, is_error: bool) -> ParsedCliAgentEvent {
+    let result = value
+        .get("rawOutput")
+        .or_else(|| value.get("raw_output"))
+        .or_else(|| value.get("content"))
+        .or_else(|| value.get("error"))
+        .cloned()
+        .unwrap_or(Value::Null);
+    ParsedCliAgentEvent {
+        events: vec![AgentEvent::ToolCallEnd {
+            tool_call_id: grok_tool_call_id(value),
+            tool_name: grok_tool_name(value),
+            result,
+            is_error,
+        }],
+        ..Default::default()
+    }
+}
+
+fn grok_tool_call_id(value: &Value) -> String {
+    value
+        .get("toolCallId")
+        .and_then(Value::as_str)
+        .or_else(|| value.get("tool_call_id").and_then(Value::as_str))
+        .or_else(|| value.get("id").and_then(Value::as_str))
+        .unwrap_or("grok-tool-call")
+        .to_string()
+}
+
+fn grok_tool_name(value: &Value) -> String {
+    value
+        .get("toolName")
+        .and_then(Value::as_str)
+        .or_else(|| value.get("tool_name").and_then(Value::as_str))
+        .or_else(|| value.get("title").and_then(Value::as_str))
+        .or_else(|| value.get("name").and_then(Value::as_str))
+        .unwrap_or("mcp_tool")
+        .to_string()
+}
+
+fn grok_usage_tokens(usage: &Value) -> Option<TokenUsage> {
+    let input =
+        usage.get("input_tokens").or_else(|| usage.get("prompt_tokens")).and_then(Value::as_u64).unwrap_or(0) as u32;
+    let output =
+        usage.get("output_tokens").or_else(|| usage.get("completion_tokens")).and_then(Value::as_u64).unwrap_or(0)
+            as u32;
+    (input > 0 || output > 0).then_some(TokenUsage { input_tokens: input, output_tokens: output })
+}
+
 pub async fn run_cli_jsonl_agent(
     spec: CliAgentProcessSpec,
     cancelled: &Notify,
@@ -893,6 +1029,74 @@ pub async fn run_cli_jsonl_agent(
     }
 
     Ok(final_text)
+}
+
+#[cfg(test)]
+mod grok_streaming_json_tests {
+    use super::*;
+
+    #[test]
+    fn parses_text_thought_and_end_with_usage() {
+        let text = parse_cli_jsonl_event(r#"{"type":"text","data":"hello"}"#, CliAgentJsonlDialect::GrokStreamingJson)
+            .unwrap();
+        assert!(matches!(&text[0], AgentEvent::TextDelta { delta } if delta == "hello"));
+
+        let thought = parse_cli_jsonl_event(
+            r#"{"type":"thought","data":"thinking..."}"#,
+            CliAgentJsonlDialect::GrokStreamingJson,
+        )
+        .unwrap();
+        assert!(matches!(&thought[0], AgentEvent::ReasoningDelta { delta } if delta == "thinking..."));
+
+        let end = parse_cli_jsonl_event(
+            r#"{"type":"end","stopReason":"end_turn","usage":{"input_tokens":10,"output_tokens":4}}"#,
+            CliAgentJsonlDialect::GrokStreamingJson,
+        )
+        .unwrap();
+        assert!(matches!(&end[0], AgentEvent::AgentEnd { input_tokens: Some(10), output_tokens: Some(4) }));
+    }
+
+    #[test]
+    fn parses_tool_call_lifecycle() {
+        let start = parse_cli_jsonl_event(
+            r#"{"type":"tool_call","toolCallId":"call_1","toolName":"dbx__dbx_list_tables","status":"in_progress","rawInput":{"schema":"public"}}"#,
+            CliAgentJsonlDialect::GrokStreamingJson,
+        )
+        .unwrap();
+        assert!(matches!(
+            &start[0],
+            AgentEvent::ToolCallStart { tool_call_id, tool_name, args }
+                if tool_call_id == "call_1"
+                    && tool_name == "dbx__dbx_list_tables"
+                    && args.get("schema").and_then(Value::as_str) == Some("public")
+        ));
+
+        let end = parse_cli_jsonl_event(
+            r#"{"type":"tool_call_update","toolCallId":"call_1","toolName":"dbx__dbx_list_tables","status":"completed","rawOutput":{"tables":["users"]}}"#,
+            CliAgentJsonlDialect::GrokStreamingJson,
+        )
+        .unwrap();
+        assert!(matches!(
+            &end[0],
+            AgentEvent::ToolCallEnd { tool_call_id, is_error: false, .. } if tool_call_id == "call_1"
+        ));
+
+        assert!(parse_cli_jsonl_event(
+            r#"{"type":"tool_call_update","toolCallId":"call_1","status":"in_progress"}"#,
+            CliAgentJsonlDialect::GrokStreamingJson,
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn parses_error_event() {
+        let parsed = parse_cli_jsonl_line(
+            r#"{"type":"error","message":"auth failed"}"#,
+            CliAgentJsonlDialect::GrokStreamingJson,
+        );
+        assert_eq!(parsed.error.as_deref(), Some("auth failed"));
+        assert!(matches!(&parsed.events[0], AgentEvent::Error { message } if message == "auth failed"));
+    }
 }
 
 #[cfg(all(test, unix))]

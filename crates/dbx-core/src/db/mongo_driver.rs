@@ -58,6 +58,13 @@ pub struct MongoCollectionStatsResult {
     pub nindexes: serde_json::Value,
 }
 
+/// Result counts returned after cloning a regular MongoDB collection.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MongoCloneCollectionResult {
+    pub documents_copied: u64,
+    pub indexes_copied: u64,
+}
+
 pub async fn connect(url: &str, timeout: Duration, idle_timeout: Duration) -> Result<Client, String> {
     let url = normalize_mongo_uri_direct_connection(url);
     let is_multi_host = is_multi_host_mongo_uri(&url);
@@ -642,6 +649,122 @@ pub fn rename_collection_command_document(database: &str, old_name: &str, new_na
 pub async fn rename_collection(client: &Client, database: &str, old_name: &str, new_name: &str) -> Result<(), String> {
     let command = rename_collection_command_document(database, old_name, new_name)?;
     client.database("admin").run_command(command).await.map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Clone a regular collection within one database without relying on MongoDB's
+/// deprecated clone commands. The individual commands used here have been
+/// available across the MongoDB versions supported by the native driver.
+pub async fn clone_collection(
+    client: &Client,
+    database: &str,
+    source_name: &str,
+    target_name: &str,
+) -> Result<MongoCloneCollectionResult, String> {
+    validate_clone_collection_names(database, source_name, target_name)?;
+
+    let database = client.database(database);
+    let source_spec = find_collection_specification(&database, source_name).await?;
+    if !matches!(source_spec.collection_type, mongodb::results::CollectionType::Collection) {
+        return Err(
+            "Only regular MongoDB collections can be cloned; views and time-series collections are not supported"
+                .to_string(),
+        );
+    }
+
+    // Create explicitly before copying data so an existing target fails rather
+    // than being silently merged with or overwritten by the source documents.
+    database
+        .create_collection(target_name)
+        .with_options(source_spec.options.clone())
+        .await
+        .map_err(|error| error.to_string())?;
+
+    let source = database.collection::<Document>(source_name);
+    let target = database.collection::<Document>(target_name);
+    let needs_validation_bypass = source_spec.options.validator.is_some()
+        || source_spec.options.validation_level.is_some()
+        || source_spec.options.validation_action.is_some();
+    let mut cursor = source.find(doc! {}).await.map_err(|error| error.to_string())?;
+    let mut batch = Vec::with_capacity(1_000);
+    let mut documents_copied = 0_u64;
+
+    while let Some(document) = cursor.try_next().await.map_err(|error| error.to_string())? {
+        batch.push(document);
+        if batch.len() == 1_000 {
+            documents_copied += insert_clone_batch(&target, &mut batch, needs_validation_bypass).await?;
+        }
+    }
+    if !batch.is_empty() {
+        documents_copied += insert_clone_batch(&target, &mut batch, needs_validation_bypass).await?;
+    }
+
+    // The target gets its _id index during createCollection. Recreating every
+    // other source index after the data copy avoids needless index maintenance.
+    let mut index_cursor = source.list_indexes().await.map_err(|error| error.to_string())?;
+    let mut indexes_copied = 0_u64;
+    while let Some(index) = index_cursor.try_next().await.map_err(|error| error.to_string())? {
+        if is_automatic_id_index(&index) {
+            continue;
+        }
+        target.create_index(index).await.map_err(|error| error.to_string())?;
+        indexes_copied += 1;
+    }
+
+    Ok(MongoCloneCollectionResult { documents_copied, indexes_copied })
+}
+
+async fn find_collection_specification(
+    database: &Database,
+    source_name: &str,
+) -> Result<mongodb::results::CollectionSpecification, String> {
+    let mut cursor = database.list_collections().await.map_err(|error| error.to_string())?;
+    while let Some(specification) = cursor.try_next().await.map_err(|error| error.to_string())? {
+        if specification.name == source_name {
+            return Ok(specification);
+        }
+    }
+    Err(format!("MongoDB collection '{source_name}' was not found"))
+}
+
+async fn insert_clone_batch(
+    target: &mongodb::Collection<Document>,
+    batch: &mut Vec<Document>,
+    bypass_document_validation: bool,
+) -> Result<u64, String> {
+    let documents = std::mem::take(batch);
+    let result = if bypass_document_validation {
+        target.insert_many(documents).bypass_document_validation(true).await
+    } else {
+        target.insert_many(documents).await
+    }
+    .map_err(|error| error.to_string())?;
+    Ok(result.inserted_ids.len() as u64)
+}
+
+/// `createCollection` always creates the `_id` index, but it need not be named
+/// `_id_` (for example, on a clustered collection). Compare the key instead
+/// of the name so cloning never attempts to create it a second time.
+fn is_automatic_id_index(index: &IndexModel) -> bool {
+    index.keys.len() == 1
+        && (matches!(index.keys.get("_id"), Some(Bson::Int32(1) | Bson::Int64(1)))
+            || matches!(index.keys.get("_id"), Some(Bson::Double(value)) if *value == 1.0))
+}
+
+pub(crate) fn validate_clone_collection_names(
+    database: &str,
+    source_name: &str,
+    target_name: &str,
+) -> Result<(), String> {
+    validate_mongo_namespace_name(database, "Database")?;
+    validate_mongo_namespace_name(source_name, "Source collection")?;
+    validate_mongo_namespace_name(target_name, "Target collection")?;
+    if source_name == target_name {
+        return Err("Target collection name must differ from the source collection name".to_string());
+    }
+    if source_name.starts_with("system.") || target_name.starts_with("system.") {
+        return Err("System collections cannot be cloned".to_string());
+    }
     Ok(())
 }
 
@@ -2566,6 +2689,33 @@ mod tests {
         // Existing target names must fail at the server instead of being overwritten.
         let command = rename_collection_command_document("app", "users", "accounts").unwrap();
         assert!(!command.contains_key("dropTarget"));
+    }
+
+    #[test]
+    fn clone_collection_validation_preserves_identifiers_and_rejects_unsafe_targets() {
+        validate_clone_collection_names("app", " users ", " users_backup ").unwrap();
+        assert!(validate_clone_collection_names("app", "users", "users").unwrap_err().contains("differ"));
+        assert!(validate_clone_collection_names("app", "system.users", "users_backup")
+            .unwrap_err()
+            .contains("System collections"));
+        assert!(validate_clone_collection_names("app", "users", "system.users_backup")
+            .unwrap_err()
+            .contains("System collections"));
+    }
+
+    #[test]
+    fn clone_collection_skips_the_automatic_id_index_by_key_not_name() {
+        let automatic_id = IndexModel::builder()
+            .keys(doc! { "_id": 1 })
+            .options(IndexOptions::builder().name("custom_id_name".to_string()).build())
+            .build();
+        let ordinary_index = IndexModel::builder()
+            .keys(doc! { "external_id": 1 })
+            .options(IndexOptions::builder().name("external_id_1".to_string()).build())
+            .build();
+
+        assert!(is_automatic_id_index(&automatic_id));
+        assert!(!is_automatic_id_index(&ordinary_index));
     }
 
     #[test]

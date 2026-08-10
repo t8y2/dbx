@@ -39,6 +39,28 @@ pub struct UpdateDownloadProgress {
     pub total: Option<u64>,
 }
 
+#[derive(Default)]
+struct UpdateDownloadProgressGate {
+    last_visible_percentage: Option<u128>,
+}
+
+impl UpdateDownloadProgressGate {
+    fn should_emit(&mut self, downloaded: u64, total: Option<u64>) -> bool {
+        let visible_percentage = match total {
+            Some(total) if total > 0 => {
+                let total = total as u128;
+                ((downloaded as u128).saturating_mul(100).saturating_add(total / 2)) / total
+            }
+            _ => 0,
+        };
+        if self.last_visible_percentage == Some(visible_percentage) {
+            return false;
+        }
+        self.last_visible_percentage = Some(visible_percentage);
+        true
+    }
+}
+
 enum PendingUpdate {
     Downloading(Arc<DownloadCancellation>),
     Installing,
@@ -414,6 +436,7 @@ async fn download_update_inner(
         let finished_downloaded = Arc::clone(&downloaded);
         let progress_app_chunk = app.clone();
         let progress_app_finish = app.clone();
+        let mut progress_gate = UpdateDownloadProgressGate::default();
 
         let (progress_tx, progress_rx) = tokio::sync::mpsc::channel::<()>(16);
 
@@ -428,8 +451,10 @@ async fn download_update_inner(
                             let downloaded = downloaded
                                 .fetch_add(chunk_len as u64, Ordering::Relaxed)
                                 .saturating_add(chunk_len as u64);
-                            let _ = progress_app_chunk
-                                .emit(UPDATE_DOWNLOAD_PROGRESS_EVENT, UpdateDownloadProgress { downloaded, total });
+                            if progress_gate.should_emit(downloaded, total) {
+                                let _ = progress_app_chunk
+                                    .emit(UPDATE_DOWNLOAD_PROGRESS_EVENT, UpdateDownloadProgress { downloaded, total });
+                            }
                             let _ = progress_tx.try_send(());
                         },
                         move || {
@@ -566,6 +591,8 @@ async fn download_bounded_bytes(
     if let Some(app) = progress_app {
         let _ = app.emit(UPDATE_DOWNLOAD_PROGRESS_EVENT, UpdateDownloadProgress { downloaded: 0, total });
     }
+    let mut progress_gate = UpdateDownloadProgressGate::default();
+    progress_gate.should_emit(0, total);
     let mut bytes = Vec::with_capacity(total.unwrap_or(0).min(max_bytes as u64) as usize);
 
     loop {
@@ -592,9 +619,13 @@ async fn download_bounded_bytes(
             return Err(format!("Update asset exceeds the {max_bytes} byte limit."));
         }
         bytes.extend_from_slice(&chunk);
-        if let Some(app) = progress_app {
-            let _ = app
-                .emit(UPDATE_DOWNLOAD_PROGRESS_EVENT, UpdateDownloadProgress { downloaded: bytes.len() as u64, total });
+        if progress_gate.should_emit(bytes.len() as u64, total) {
+            if let Some(app) = progress_app {
+                let _ = app.emit(
+                    UPDATE_DOWNLOAD_PROGRESS_EVENT,
+                    UpdateDownloadProgress { downloaded: bytes.len() as u64, total },
+                );
+            }
         }
     }
     Ok(bytes)
@@ -679,9 +710,9 @@ fn schedule_portable_update_exit(app: AppHandle) {
 mod tests {
     use super::{
         requires_manual_update, tag_version, wait_for_download_step, wait_for_progressing_download,
-        DownloadCancellation, PendingUpdateState, UpdateDownloadSource, CNB_RELEASE_DOWNLOAD_PREFIX,
-        DOWNLOAD_CANCELED_ERROR, GITHUB_RELEASE_DOWNLOAD_PREFIX, OFFICIAL_UPDATE_ENDPOINTS,
-        R2_LATEST_RELEASE_DOWNLOAD_PREFIX,
+        DownloadCancellation, PendingUpdateState, UpdateDownloadProgressGate, UpdateDownloadSource,
+        CNB_RELEASE_DOWNLOAD_PREFIX, DOWNLOAD_CANCELED_ERROR, GITHUB_RELEASE_DOWNLOAD_PREFIX,
+        OFFICIAL_UPDATE_ENDPOINTS, R2_LATEST_RELEASE_DOWNLOAD_PREFIX,
     };
     use std::{future::pending, sync::Arc, time::Duration};
 
@@ -779,6 +810,51 @@ mod tests {
         assert_eq!(candidates[0], format!("{R2_LATEST_RELEASE_DOWNLOAD_PREFIX}DBX_0.5.64_aarch64.dmg"));
         assert_eq!(candidates[1], "https://github.com/t8y2/dbx/releases/download/v0.5.64/DBX_0.5.64_aarch64.dmg");
         assert!(!candidates.iter().any(|url| url.contains("cnb.cool")));
+    }
+
+    #[test]
+    fn emits_progress_only_when_the_visible_percentage_changes() {
+        let mut gate = UpdateDownloadProgressGate::default();
+
+        assert!(gate.should_emit(0, Some(1_000)));
+        assert!(!gate.should_emit(4, Some(1_000)));
+        assert!(gate.should_emit(5, Some(1_000)));
+        assert!(!gate.should_emit(14, Some(1_000)));
+        assert!(gate.should_emit(15, Some(1_000)));
+        assert!(gate.should_emit(1_000, Some(1_000)));
+    }
+
+    #[test]
+    fn keeps_unknown_length_progress_visually_stable_until_completion() {
+        let mut gate = UpdateDownloadProgressGate::default();
+
+        assert!(gate.should_emit(0, None));
+        assert!(!gate.should_emit(512, None));
+        assert!(!gate.should_emit(1_024, Some(0)));
+        assert!(gate.should_emit(1_024, Some(1_024)));
+    }
+
+    #[test]
+    fn handles_large_progress_values_without_overflow() {
+        let mut gate = UpdateDownloadProgressGate::default();
+
+        assert!(gate.should_emit(u64::MAX / 2, Some(u64::MAX)));
+        assert!(gate.should_emit(u64::MAX, Some(u64::MAX)));
+    }
+
+    #[test]
+    fn limits_chunk_events_to_visible_percentage_updates() {
+        let total = 19_527_892_u64;
+        let mut downloaded = 0_u64;
+        let mut emitted = 0;
+        let mut gate = UpdateDownloadProgressGate::default();
+
+        while downloaded < total {
+            downloaded = downloaded.saturating_add(16_384).min(total);
+            emitted += usize::from(gate.should_emit(downloaded, Some(total)));
+        }
+
+        assert_eq!(emitted, 101);
     }
 
     #[test]

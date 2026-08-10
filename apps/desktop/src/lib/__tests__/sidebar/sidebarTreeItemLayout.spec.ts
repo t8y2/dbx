@@ -24,6 +24,7 @@ describe("sidebar tree item layout", () => {
     expect(canTreeNodeShowExpander({ type: "etcd-root", childCount: 0 })).toBe(false);
     expect(canTreeNodeShowExpander({ type: "etcd-dashboard", childCount: 0 })).toBe(false);
     expect(canTreeNodeShowExpander({ type: "etcd-access-control", childCount: 0 })).toBe(false);
+    expect(canTreeNodeShowExpander({ type: "consul-overview", childCount: 0 })).toBe(false);
   });
 
   it("aligns comments to the longest sibling name without crossing parent groups", () => {

@@ -99,6 +99,25 @@ pub async fn mongo_rename_collection(
 }
 
 #[tauri::command]
+pub async fn mongo_clone_collection(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: String,
+    source_collection: String,
+    target_collection: String,
+) -> Result<dbx_core::db::mongo_driver::MongoCloneCollectionResult, String> {
+    ensure_connection_writable(&state, &connection_id, "Clone collection").await?;
+    dbx_core::mongo_ops::mongo_clone_collection_core(
+        &state,
+        &connection_id,
+        &database,
+        &source_collection,
+        &target_collection,
+    )
+    .await
+}
+
+#[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn mongo_find_documents(
     state: State<'_, Arc<AppState>>,

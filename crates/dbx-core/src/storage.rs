@@ -5476,6 +5476,8 @@ mod tests {
                 opencode_cli_env: std::collections::HashMap::new(),
                 cursor_cli_path: None,
                 cursor_cli_env: std::collections::HashMap::new(),
+                grok_cli_path: None,
+                grok_cli_env: std::collections::HashMap::new(),
             },
         }
     }
@@ -5563,6 +5565,30 @@ mod tests {
             loaded[0].config.cursor_cli_env.get("HTTPS_PROXY").map(String::as_str),
             Some("http://127.0.0.1:7890")
         );
+
+        std::fs::remove_file(&db).ok();
+    }
+
+    #[tokio::test]
+    async fn grok_cli_ai_config_roundtrip() {
+        let db = temp_db_path("grok-cli-ai-roundtrip");
+        let storage = Storage::open(&db).await.unwrap();
+
+        let mut cfg = make_ai_config("grok-cli", true);
+        cfg.config.provider = AiProvider::GrokCli;
+        cfg.config.api_key = String::new();
+        cfg.config.auth_method = AiAuthMethod::Bearer;
+        cfg.config.endpoint = String::new();
+        cfg.config.model = "default".to_string();
+        cfg.config.api_style = AiApiStyle::Completions;
+        cfg.config.grok_cli_path = Some("/Users/me/.grok/bin/grok".to_string());
+        storage.save_ai_config_item(&cfg).await.unwrap();
+
+        let loaded = storage.load_ai_configs().await.unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert!(matches!(loaded[0].config.provider, AiProvider::GrokCli));
+        assert_eq!(loaded[0].config.model, "default");
+        assert_eq!(loaded[0].config.grok_cli_path.as_deref(), Some("/Users/me/.grok/bin/grok"));
 
         std::fs::remove_file(&db).ok();
     }

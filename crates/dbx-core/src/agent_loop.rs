@@ -191,6 +191,11 @@ pub async fn run_agent_loop(
             );
             return crate::ai_cursor_cli::run_cursor_agent(config, &prompt, options, cancelled, on_event).await;
         }
+        if matches!(config.provider, AiProvider::GrokCli) {
+            let prompt =
+                crate::ai_grok_cli::build_grok_prompt(system_prompt, messages, agent_ctx.sql_permissions.allow_writes);
+            return crate::ai_grok_cli::run_grok_agent(config, &prompt, options, cancelled, on_event).await;
+        }
         let prompt =
             crate::ai_codex_cli::build_codex_prompt(system_prompt, messages, agent_ctx.sql_permissions.allow_writes);
         return crate::ai_codex_cli::run_codex_agent(config, &prompt, options, cancelled, on_event).await;

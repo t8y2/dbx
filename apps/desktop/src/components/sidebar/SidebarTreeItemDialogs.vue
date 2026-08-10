@@ -96,6 +96,11 @@ const {
   renameMongoCollectionPreview,
   renameMongoCollectionLoading,
   confirmRenameMongoCollection,
+  showCloneMongoCollectionDialog,
+  cloneMongoCollectionName,
+  cloneMongoCollectionError,
+  cloneMongoCollectionLoading,
+  confirmCloneMongoCollection,
   showCreateMongoIndexDialog,
   mongoCreateIndexForm,
   mongoCreateIndexFieldOptions,
@@ -176,6 +181,7 @@ watch(
     showCreateNacosNamespaceDialog,
     showEditNacosNamespaceDialog,
     showRenameMongoCollectionDialog,
+    showCloneMongoCollectionDialog,
     showCreateMongoIndexDialog,
     showRedisDatabaseAliasDialog,
     showCreateSchemaDialog,
@@ -272,6 +278,23 @@ watch(
         <Button :disabled="renameMongoCollectionLoading || !renameMongoCollectionName || renameMongoCollectionName === node.label" @click="confirmRenameMongoCollection">
           <Loader2 v-if="renameMongoCollectionLoading" class="mr-2 h-4 w-4 animate-spin" />
           {{ t("contextMenu.renameObject") }}
+        </Button>
+      </DialogFooter>
+    </DialogContent>
+  </Dialog>
+
+  <Dialog v-model:open="showCloneMongoCollectionDialog">
+    <DialogContent class="sm:max-w-[400px]">
+      <DialogHeader>
+        <DialogTitle>{{ t("contextMenu.cloneCollectionTitle") }}</DialogTitle>
+      </DialogHeader>
+      <Input v-model="cloneMongoCollectionName" :placeholder="t('contextMenu.cloneCollectionNamePlaceholder')" :disabled="cloneMongoCollectionLoading" @keydown.enter.prevent="confirmCloneMongoCollection" />
+      <p v-if="cloneMongoCollectionError" class="text-sm text-destructive">{{ cloneMongoCollectionError }}</p>
+      <DialogFooter>
+        <Button variant="outline" :disabled="cloneMongoCollectionLoading" @click="showCloneMongoCollectionDialog = false">{{ t("dangerDialog.cancel") }}</Button>
+        <Button :disabled="cloneMongoCollectionLoading || !cloneMongoCollectionName || cloneMongoCollectionName === node.label" @click="confirmCloneMongoCollection">
+          <Loader2 v-if="cloneMongoCollectionLoading" class="mr-2 h-4 w-4 animate-spin" />
+          {{ t("dangerDialog.confirm") }}
         </Button>
       </DialogFooter>
     </DialogContent>

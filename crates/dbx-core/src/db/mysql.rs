@@ -100,6 +100,23 @@ where
     row.get_opt::<T, I>(index).and_then(|result| result.ok())
 }
 
+fn first_column_value<T>(row: &mysql_async::Row) -> Option<T>
+where
+    T: mysql_async::prelude::FromValue,
+{
+    row_get(row, 0)
+}
+
+async fn query_first_column<T>(conn: &mut mysql_async::Conn, sql: &str) -> Result<Option<T>, mysql_async::Error>
+where
+    T: mysql_async::prelude::FromValue,
+{
+    // Some MySQL-compatible servers return extra columns for scalar queries.
+    // Convert only column zero so mysql_async does not panic on the row width.
+    let row = conn.query_first::<mysql_async::Row, _>(sql).await?;
+    Ok(row.as_ref().and_then(first_column_value))
+}
+
 /// 字节转 String：合法 UTF-8（绝大多数场景）时直接复用入参缓冲零拷贝，
 /// 仅在非法序列时退化为 lossy 替换。from_utf8_lossy(&b).to_string() 即使
 /// 对合法输入也会多一次分配+拷贝。
@@ -148,9 +165,8 @@ fn nonblank(value: String) -> Option<String> {
 async fn query_first_nonblank_string(conn: &mut mysql_async::Conn, sql: &str) -> Option<String> {
     // MySQL reports nullable metadata such as TABLE_COLLATION as NULL for views.
     // Reading it as String makes mysql_async panic during row conversion.
-    match conn.query_first::<Option<String>, _>(sql).await {
-        Ok(Some(value)) => value.and_then(nonblank),
-        Ok(None) => None,
+    match query_first_column::<String>(conn, sql).await {
+        Ok(value) => value.and_then(nonblank),
         Err(error) => {
             log::debug!("Failed to read optional MySQL database information with `{sql}`: {error}");
             None
@@ -1286,7 +1302,7 @@ async fn enable_explicit_timestamp_defaults_for_query(conn: &mut mysql_async::Co
         return None;
     }
 
-    let previous = match conn.query_first::<u8, _>("SELECT @@SESSION.explicit_defaults_for_timestamp").await {
+    let previous = match query_first_column::<u8>(conn, "SELECT @@SESSION.explicit_defaults_for_timestamp").await {
         Ok(Some(value)) => value != 0,
         Ok(None) => {
             log::debug!("Skipping MySQL explicit timestamp defaults compatibility setting: variable was empty");
@@ -4187,7 +4203,7 @@ pub async fn execute_query(pool: &MySqlPool, sql: &str, bare: bool) -> Result<Qu
 
 pub async fn max_allowed_packet(pool: &MySqlPool) -> Result<u64, String> {
     let mut conn = get_conn_with_health_check(pool).await?;
-    conn.query_first::<u64, _>("SELECT @@max_allowed_packet")
+    query_first_column::<u64>(&mut conn, "SELECT @@max_allowed_packet")
         .await
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "MySQL did not return @@max_allowed_packet".to_string())
@@ -5188,6 +5204,48 @@ pub async fn list_triggers(pool: &MySqlPool, database: &str, table: &str) -> Res
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mysql_async::{consts::ColumnType, Column, Value};
+    use mysql_common::row::new_row;
+
+    fn mysql_test_row(values: Vec<Value>) -> mysql_async::Row {
+        let columns = values
+            .iter()
+            .enumerate()
+            .map(|(index, _)| {
+                Column::new(ColumnType::MYSQL_TYPE_VAR_STRING).with_name(format!("column_{index}").as_bytes())
+            })
+            .collect::<Vec<_>>()
+            .into();
+        new_row(values, columns)
+    }
+
+    #[test]
+    fn mysql_first_column_value_ignores_extra_result_columns() {
+        let row = mysql_async::from_row::<mysql_async::Row>(mysql_test_row(vec![
+            Value::Bytes(Vec::new()),
+            Value::Bytes(Vec::new()),
+        ]));
+
+        assert_eq!(first_column_value::<String>(&row), Some(String::new()));
+    }
+
+    #[test]
+    fn mysql_first_column_value_handles_null_and_conversion_failures() {
+        let null_row = mysql_test_row(vec![Value::NULL, Value::Bytes(b"ignored".to_vec())]);
+        let invalid_number_row = mysql_test_row(vec![Value::Bytes(b"not-a-number".to_vec())]);
+
+        assert_eq!(first_column_value::<String>(&null_row), None);
+        assert_eq!(first_column_value::<u64>(&invalid_number_row), None);
+    }
+
+    #[test]
+    fn mysql_first_column_value_reads_integer_metadata() {
+        let enabled_row = mysql_test_row(vec![Value::Int(1), Value::Bytes(b"ignored".to_vec())]);
+        let packet_row = mysql_test_row(vec![Value::UInt(67_108_864), Value::Bytes(b"ignored".to_vec())]);
+
+        assert_eq!(first_column_value::<u8>(&enabled_row), Some(1));
+        assert_eq!(first_column_value::<u64>(&packet_row), Some(67_108_864));
+    }
 
     #[test]
     fn mysql_info_message_maps_non_empty_info_strings() {

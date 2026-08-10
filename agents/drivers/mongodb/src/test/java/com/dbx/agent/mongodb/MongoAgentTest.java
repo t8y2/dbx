@@ -15,6 +15,8 @@ import com.google.gson.JsonParser;
 import com.mongodb.MongoClientSettings;
 import com.mongodb.client.AggregateIterable;
 import com.mongodb.client.FindIterable;
+import com.mongodb.client.ListCollectionsIterable;
+import com.mongodb.client.ListIndexesIterable;
 import com.mongodb.client.MongoClient;
 import com.mongodb.client.MongoCollection;
 import com.mongodb.client.MongoCursor;
@@ -22,6 +24,7 @@ import com.mongodb.client.MongoDatabase;
 import com.mongodb.client.model.Collation;
 import com.mongodb.client.model.CollationStrength;
 import com.mongodb.client.model.CountOptions;
+import com.mongodb.client.model.InsertManyOptions;
 import com.mongodb.client.model.UpdateOptions;
 import com.mongodb.client.result.UpdateResult;
 import java.io.FileInputStream;
@@ -122,6 +125,7 @@ class MongoAgentTest {
         assertTrue(containsCapability(result.getAsJsonArray("capabilities"), AgentProtocol.CAPABILITY_QUERY));
         assertTrue(containsCapability(result.getAsJsonArray("capabilities"), AgentProtocol.CAPABILITY_METADATA));
         assertTrue(containsCapability(result.getAsJsonArray("capabilities"), AgentProtocol.CAPABILITY_MONGO_DROP_DATABASE));
+        assertTrue(containsCapability(result.getAsJsonArray("capabilities"), AgentProtocol.CAPABILITY_MONGO_CLONE_COLLECTION));
     }
 
     @Test
@@ -141,6 +145,7 @@ class MongoAgentTest {
         assertEquals(AgentProtocol.MULTI_SESSION_PROTOCOL_VERSION, result.get("protocolVersion").getAsInt());
         assertTrue(containsCapability(result.getAsJsonArray("capabilities"), AgentProtocol.CAPABILITY_MULTI_SESSION));
         assertTrue(containsCapability(result.getAsJsonArray("capabilities"), AgentProtocol.CAPABILITY_MONGO_DROP_DATABASE));
+        assertTrue(containsCapability(result.getAsJsonArray("capabilities"), AgentProtocol.CAPABILITY_MONGO_CLONE_COLLECTION));
     }
 
     @Test
@@ -568,6 +573,127 @@ class MongoAgentTest {
         assertEquals("Not connected", json.getAsJsonObject("error").get("message").getAsString());
         assertFalse(json.getAsJsonObject("error").get("message").getAsString().contains("Unknown method"));
         assertTrue(AgentProtocol.MONGO_LEGACY_METHODS.contains(AgentProtocol.MONGO_METHOD_DROP_INDEXES));
+    }
+
+    @Test
+    void cloneCollectionCopiesOptionsDocumentsAndNonIdIndexes() {
+        List<Document> commands = new ArrayList<>();
+        List<Document> insertedDocuments = new ArrayList<>();
+        List<Boolean> validationBypasses = new ArrayList<>();
+        MongoClient client = recordingCloneMongoClient(commands, insertedDocuments, validationBypasses, false);
+
+        String response = MongoAgent.handleRequest(
+            "{\"jsonrpc\":\"2.0\",\"id\":33,\"method\":\"clone_collection\","
+                + "\"params\":{\"database\":\"app\",\"source_collection\":\"orders\",\"target_collection\":\"orders_copy\"}}",
+            client
+        );
+
+        JsonObject json = JsonParser.parseString(response).getAsJsonObject();
+        assertFalse(json.has("error"), json.toString());
+        assertEquals(2, json.getAsJsonObject("result").get("documents_copied").getAsInt());
+        assertEquals(1, json.getAsJsonObject("result").get("indexes_copied").getAsInt());
+
+        assertEquals(2, commands.size());
+        Document create = commands.get(0);
+        assertEquals("orders_copy", create.getString("create"));
+        assertEquals("strict", create.getString("validationLevel"));
+        assertEquals("string", create.get("validator", Document.class).get("email", Document.class).getString("$type"));
+
+        Document createIndexes = commands.get(1);
+        assertEquals("orders_copy", createIndexes.getString("createIndexes"));
+        Document copiedIndex = createIndexes.getList("indexes", Document.class).get(0);
+        assertEquals("email_1", copiedIndex.getString("name"));
+        assertTrue(copiedIndex.getBoolean("unique"));
+        assertEquals(1, copiedIndex.get("key", Document.class).getInteger("email"));
+        assertFalse(copiedIndex.containsKey("v"));
+        assertFalse(copiedIndex.containsKey("ns"));
+        assertFalse(copiedIndex.containsKey("buildUUID"));
+        assertFalse(copiedIndex.containsKey("ready"));
+
+        assertEquals(List.of(new Document("_id", 1).append("email", "first"), new Document("_id", 2).append("email", "second")), insertedDocuments);
+        assertEquals(List.of(true), validationBypasses);
+        assertTrue(AgentProtocol.MONGO_LEGACY_METHODS.contains(AgentProtocol.MONGO_METHOD_CLONE_COLLECTION));
+    }
+
+    @Test
+    void cloneCollectionHelpersRejectNonRegularSourcesAndSkipAutomaticIdIndexes() {
+        Document specification = new Document("name", "orders")
+            .append("type", "collection")
+            .append("options", new Document("capped", true).append("size", 1024));
+
+        assertTrue(MongoAgent.isRegularCollectionSpecification(specification));
+        assertTrue(MongoAgent.isRegularCollectionSpecification(new Document("name", "legacy_orders")));
+        assertFalse(MongoAgent.isRegularCollectionSpecification(new Document("type", "view")));
+        assertFalse(MongoAgent.isRegularCollectionSpecification(new Document("type", "timeseries")));
+        assertEquals(
+            new Document("create", "orders_copy").append("capped", true).append("size", 1024),
+            MongoAgent.cloneCreateCollectionCommand("orders_copy", specification)
+        );
+
+        Document automaticIdIndex = new Document("key", new Document("_id", 1)).append("name", "custom_id_name");
+        assertTrue(MongoAgent.isAutomaticIdIndex(automaticIdIndex));
+        assertFalse(MongoAgent.isAutomaticIdIndex(new Document("key", new Document("email", 1)).append("name", "email_1")));
+        assertTrue(MongoAgent.isUnsupportedCatalogCommand(
+            new RuntimeException("Command failed with error 59 (CommandNotFound): no such command: listCollections"),
+            "listcollections"
+        ));
+        assertFalse(MongoAgent.isUnsupportedCatalogCommand(new RuntimeException("not authorized"), "listcollections"));
+    }
+
+    @Test
+    void cloneCollectionFallsBackToLegacyCatalogCollections() {
+        List<Document> commands = new ArrayList<>();
+        List<Document> insertedDocuments = new ArrayList<>();
+        List<Boolean> validationBypasses = new ArrayList<>();
+        MongoClient client = recordingCloneMongoClient(commands, insertedDocuments, validationBypasses, true);
+
+        JsonObject json = JsonParser.parseString(MongoAgent.handleRequest(
+            "{\"jsonrpc\":\"2.0\",\"id\":34,\"method\":\"clone_collection\","
+                + "\"params\":{\"database\":\"app\",\"source_collection\":\"orders\",\"target_collection\":\"orders_copy\"}}",
+            client
+        )).getAsJsonObject();
+
+        assertFalse(json.has("error"), json.toString());
+        assertEquals(2, json.getAsJsonObject("result").get("documents_copied").getAsInt());
+        assertEquals(1, json.getAsJsonObject("result").get("indexes_copied").getAsInt());
+        assertEquals(2, commands.size());
+    }
+
+    @Test
+    void legacyCatalogFallbackAlsoKeepsTheCollectionTreeAndIndexesAvailable() {
+        MongoClient collectionClient = recordingCloneMongoClient(new ArrayList<>(), new ArrayList<>(), new ArrayList<>(), true);
+        JsonObject collections = JsonParser.parseString(MongoAgent.handleRequest(
+            "{\"jsonrpc\":\"2.0\",\"id\":35,\"method\":\"list_collections\","
+                + "\"params\":{\"database\":\"app\",\"include_types\":true}}",
+            collectionClient
+        )).getAsJsonObject();
+
+        assertFalse(collections.has("error"), collections.toString());
+        JsonObject collection = collections.getAsJsonArray("result").get(0).getAsJsonObject();
+        assertEquals("orders", collection.get("name").getAsString());
+        assertEquals("collection", collection.get("kind").getAsString());
+
+        // The pre-metadata response remains a string array for older DBX clients.
+        MongoClient namesClient = recordingCloneMongoClient(new ArrayList<>(), new ArrayList<>(), new ArrayList<>(), true);
+        JsonObject names = JsonParser.parseString(MongoAgent.handleRequest(
+            "{\"jsonrpc\":\"2.0\",\"id\":36,\"method\":\"list_collections\","
+                + "\"params\":{\"database\":\"app\"}}",
+            namesClient
+        )).getAsJsonObject();
+
+        assertFalse(names.has("error"), names.toString());
+        assertEquals("orders", names.getAsJsonArray("result").get(0).getAsString());
+
+        MongoClient indexClient = recordingCloneMongoClient(new ArrayList<>(), new ArrayList<>(), new ArrayList<>(), true);
+        JsonObject indexes = JsonParser.parseString(MongoAgent.handleRequest(
+            "{\"jsonrpc\":\"2.0\",\"id\":37,\"method\":\"list_indexes\","
+                + "\"params\":{\"database\":\"app\",\"schema\":\"\",\"table\":\"orders\"}}",
+            indexClient
+        )).getAsJsonObject();
+
+        assertFalse(indexes.has("error"), indexes.toString());
+        assertEquals(2, indexes.getAsJsonArray("result").size());
+        assertEquals("email_1", indexes.getAsJsonArray("result").get(1).getAsJsonObject().get("name").getAsString());
     }
 
     @Test
@@ -1128,6 +1254,186 @@ class MongoAgentTest {
                     return null;
                 }
                 throw new UnsupportedOperationException(method.getName());
+            }
+        );
+    }
+
+    @SuppressWarnings("unchecked")
+    private static MongoClient recordingCloneMongoClient(
+        List<Document> commands,
+        List<Document> insertedDocuments,
+        List<Boolean> validationBypasses,
+        boolean legacyCatalog
+    ) {
+        Document sourceSpecification = new Document("name", "orders")
+            .append("type", "collection")
+            .append("options", new Document("validator", new Document("email", new Document("$type", "string")))
+                .append("validationLevel", "strict"));
+        MongoCursor<Document> collectionCursor = recordingDocumentCursor(List.of(sourceSpecification));
+        ListCollectionsIterable<Document> collections = (ListCollectionsIterable<Document>) Proxy.newProxyInstance(
+            ListCollectionsIterable.class.getClassLoader(),
+            new Class<?>[] {ListCollectionsIterable.class},
+            (proxy, method, args) -> {
+                if ("iterator".equals(method.getName())) {
+                    if (legacyCatalog) {
+                        throw new RuntimeException("no such command: listCollections");
+                    }
+                    return collectionCursor;
+                }
+                throw new UnsupportedOperationException(method.getName());
+            }
+        );
+
+        MongoCursor<Document> documentCursor = recordingDocumentCursor(List.of(
+            new Document("_id", 1).append("email", "first"),
+            new Document("_id", 2).append("email", "second")
+        ));
+        FindIterable<Document> sourceFind = (FindIterable<Document>) Proxy.newProxyInstance(
+            FindIterable.class.getClassLoader(),
+            new Class<?>[] {FindIterable.class},
+            (proxy, method, args) -> {
+                if ("iterator".equals(method.getName())) {
+                    return documentCursor;
+                }
+                throw new UnsupportedOperationException(method.getName());
+            }
+        );
+        MongoCursor<Document> indexCursor = recordingDocumentCursor(List.of(
+            new Document("v", 2).append("key", new Document("_id", 1)).append("name", "custom_id_name"),
+            new Document("v", 2).append("ns", "app.orders").append("key", new Document("email", 1))
+                .append("name", "email_1").append("unique", true).append("buildUUID", "in-progress").append("ready", true)
+        ));
+        ListIndexesIterable<Document> sourceIndexes = (ListIndexesIterable<Document>) Proxy.newProxyInstance(
+            ListIndexesIterable.class.getClassLoader(),
+            new Class<?>[] {ListIndexesIterable.class},
+            (proxy, method, args) -> {
+                if ("iterator".equals(method.getName())) {
+                    if (legacyCatalog) {
+                        throw new RuntimeException("no such command: listIndexes");
+                    }
+                    return indexCursor;
+                }
+                throw new UnsupportedOperationException(method.getName());
+            }
+        );
+        MongoCollection<Document> source = (MongoCollection<Document>) Proxy.newProxyInstance(
+            MongoCollection.class.getClassLoader(),
+            new Class<?>[] {MongoCollection.class},
+            (proxy, method, args) -> {
+                if ("find".equals(method.getName())) {
+                    return sourceFind;
+                }
+                if ("listIndexes".equals(method.getName())) {
+                    return sourceIndexes;
+                }
+                throw new UnsupportedOperationException(method.getName());
+            }
+        );
+        MongoCollection<Document> target = (MongoCollection<Document>) Proxy.newProxyInstance(
+            MongoCollection.class.getClassLoader(),
+            new Class<?>[] {MongoCollection.class},
+            (proxy, method, args) -> {
+                if ("insertMany".equals(method.getName())) {
+                    for (Document document : (List<Document>) args[0]) {
+                        insertedDocuments.add(new Document(document));
+                    }
+                    validationBypasses.add(((InsertManyOptions) args[1]).getBypassDocumentValidation());
+                    return null;
+                }
+                throw new UnsupportedOperationException(method.getName());
+            }
+        );
+        FindIterable<Document> legacyNamespaceFind = recordingFindIterable(List.of(
+            new Document("name", "app.orders").append("options", sourceSpecification.get("options", Document.class))
+        ));
+        FindIterable<Document> legacyIndexFind = recordingFindIterable(List.of(
+            new Document("v", 2).append("ns", "app.orders").append("key", new Document("_id", 1)).append("name", "custom_id_name"),
+            new Document("v", 2).append("ns", "app.orders").append("key", new Document("email", 1))
+                .append("name", "email_1").append("unique", true)
+        ));
+        MongoCollection<Document> legacyNamespaces = recordingFindCollection(legacyNamespaceFind);
+        MongoCollection<Document> legacyIndexes = recordingFindCollection(legacyIndexFind);
+        MongoDatabase database = (MongoDatabase) Proxy.newProxyInstance(
+            MongoDatabase.class.getClassLoader(),
+            new Class<?>[] {MongoDatabase.class},
+            (proxy, method, args) -> {
+                if ("listCollections".equals(method.getName())) {
+                    return collections;
+                }
+                if ("getCollection".equals(method.getName())) {
+                    return switch ((String) args[0]) {
+                        case "orders" -> source;
+                        case "system.namespaces" -> legacyNamespaces;
+                        case "system.indexes" -> legacyIndexes;
+                        default -> target;
+                    };
+                }
+                if ("getName".equals(method.getName())) {
+                    return "app";
+                }
+                if ("runCommand".equals(method.getName())) {
+                    commands.add(new Document((Document) args[0]));
+                    return new Document("ok", 1);
+                }
+                throw new UnsupportedOperationException(method.getName());
+            }
+        );
+        return (MongoClient) Proxy.newProxyInstance(
+            MongoClient.class.getClassLoader(),
+            new Class<?>[] {MongoClient.class},
+            (proxy, method, args) -> {
+                if ("getDatabase".equals(method.getName())) {
+                    return database;
+                }
+                if ("close".equals(method.getName())) {
+                    return null;
+                }
+                throw new UnsupportedOperationException(method.getName());
+            }
+        );
+    }
+
+    @SuppressWarnings("unchecked")
+    private static FindIterable<Document> recordingFindIterable(List<Document> documents) {
+        return (FindIterable<Document>) Proxy.newProxyInstance(
+            FindIterable.class.getClassLoader(),
+            new Class<?>[] {FindIterable.class},
+            (proxy, method, args) -> {
+                if ("iterator".equals(method.getName())) {
+                    return recordingDocumentCursor(documents);
+                }
+                throw new UnsupportedOperationException(method.getName());
+            }
+        );
+    }
+
+    @SuppressWarnings("unchecked")
+    private static MongoCollection<Document> recordingFindCollection(FindIterable<Document> find) {
+        return (MongoCollection<Document>) Proxy.newProxyInstance(
+            MongoCollection.class.getClassLoader(),
+            new Class<?>[] {MongoCollection.class},
+            (proxy, method, args) -> {
+                if ("find".equals(method.getName())) {
+                    return find;
+                }
+                throw new UnsupportedOperationException(method.getName());
+            }
+        );
+    }
+
+    @SuppressWarnings("unchecked")
+    private static MongoCursor<Document> recordingDocumentCursor(List<Document> documents) {
+        int[] position = {0};
+        return (MongoCursor<Document>) Proxy.newProxyInstance(
+            MongoCursor.class.getClassLoader(),
+            new Class<?>[] {MongoCursor.class},
+            (proxy, method, args) -> {
+                return switch (method.getName()) {
+                    case "hasNext" -> position[0] < documents.size();
+                    case "next" -> documents.get(position[0]++);
+                    case "close" -> null;
+                    default -> throw new UnsupportedOperationException(method.getName());
+                };
             }
         );
     }

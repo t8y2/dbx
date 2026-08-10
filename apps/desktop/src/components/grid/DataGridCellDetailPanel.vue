@@ -55,6 +55,18 @@ void geometryCanvas;
 void detailsEditorContainer;
 void sideJsonPreviewContainer;
 
+function startJsonEditFromBlankArea(event: MouseEvent) {
+  const target = event.target as { closest?: (selector: string) => Element | null } | null;
+  const line = target?.closest?.(".cm-line");
+  if (line) {
+    const range = line.ownerDocument.createRange();
+    range.selectNodeContents(line);
+    const textHit = Array.from(range.getClientRects()).some((rect) => event.clientX >= rect.left && event.clientX <= rect.right && event.clientY >= rect.top && event.clientY <= rect.bottom);
+    if (textHit) return;
+  }
+  emit("startEdit");
+}
+
 defineExpose({ openSearch });
 </script>
 
@@ -159,9 +171,10 @@ defineExpose({ openSearch });
           v-else-if="detail.formattedJson"
           ref="sideJsonPreviewContainer"
           data-cell-detail-editor-root
+          data-cell-detail-json-preview
           class="overflow-hidden rounded border bg-muted/20 p-2"
           :class="[{ 'cursor-text': detail.isEditable }, valueFillsHeight ? 'min-h-0 flex-1' : 'h-72 max-h-[42vh]']"
-          @dblclick.capture="emit('startEdit')"
+          @dblclick.capture="startJsonEditFromBlankArea"
         />
         <pre
           v-else

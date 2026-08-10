@@ -17,12 +17,14 @@ import com.mongodb.client.MongoClient;
 import com.mongodb.client.MongoClients;
 import com.mongodb.client.MongoCollection;
 import com.mongodb.client.MongoCursor;
+import com.mongodb.client.MongoDatabase;
 import com.mongodb.client.model.Collation;
 import com.mongodb.client.model.CollationAlternate;
 import com.mongodb.client.model.CollationCaseFirst;
 import com.mongodb.client.model.CollationMaxVariable;
 import com.mongodb.client.model.CollationStrength;
 import com.mongodb.client.model.CountOptions;
+import com.mongodb.client.model.InsertManyOptions;
 import com.mongodb.client.model.UpdateOptions;
 import com.mongodb.client.result.UpdateResult;
 import java.io.BufferedReader;
@@ -79,6 +81,7 @@ public final class MongoAgent {
         .build();
     private static final String LEGACY_SESSION_ID = "__legacy__";
     private static final String DEFAULT_ID_INDEX_NAME = "_id_";
+    private static final int CLONE_INSERT_BATCH_SIZE = 1_000;
     private static final int MAX_SESSIONS = 256;
     private static final ThreadLocal<MongoClient> CURRENT_CLIENT = new ThreadLocal<>();
     private static MongoClient legacyClient;
@@ -334,6 +337,7 @@ public final class MongoAgent {
     private static Object listCollections(JsonObject params) {
         MongoClient c = requireClient();
         String database = params.get("database").getAsString();
+        List<Document> specifications = collectionSpecifications(c.getDatabase(database));
         boolean includeTypes = params.has("include_types")
             && !params.get("include_types").isJsonNull()
             && params.get("include_types").getAsBoolean();
@@ -341,7 +345,7 @@ public final class MongoAgent {
         // metadata so this RPC remains compatible with already-installed agents.
         if (includeTypes) {
             List<Map<String, String>> result = new ArrayList<>();
-            for (Document spec : c.getDatabase(database).listCollections()) {
+            for (Document spec : specifications) {
                 String name = spec.getString("name");
                 // Collection identifiers are passed through verbatim elsewhere;
                 // only an impossible empty listCollections name is discarded.
@@ -354,8 +358,11 @@ public final class MongoAgent {
         }
 
         List<String> result = new ArrayList<>();
-        for (String name : c.getDatabase(database).listCollectionNames()) {
-            result.add(name);
+        for (Document specification : specifications) {
+            String name = specification.getString("name");
+            if (name != null && !name.isEmpty()) {
+                result.add(name);
+            }
         }
         return result;
     }
@@ -382,7 +389,12 @@ public final class MongoAgent {
         String database = params.get("database").getAsString();
         String collection = params.get("table").getAsString();
         List<IndexInfo> result = new ArrayList<>();
-        for (Document index : c.getDatabase(database).getCollection(collection).listIndexes()) {
+        MongoDatabase mongoDatabase = c.getDatabase(database);
+        for (Document index : collectionIndexDefinitions(
+            mongoDatabase,
+            mongoDatabase.getCollection(collection),
+            collection
+        )) {
             result.add(indexInfoFromDocument(index));
         }
         return result;
@@ -1118,6 +1130,214 @@ public final class MongoAgent {
         return Collections.singletonMap("ok", true);
     }
 
+    /**
+     * Clone a regular collection with the commands available to the legacy
+     * driver. This keeps older MongoDB servers on the same full-clone path as
+     * the native driver instead of silently copying documents only.
+     */
+    private static Object cloneCollection(JsonObject params) {
+        MongoClient client = requireClient();
+        String databaseName = params.get("database").getAsString();
+        String sourceName = params.get("source_collection").getAsString();
+        String targetName = params.get("target_collection").getAsString();
+        if (sourceName.equals(targetName)) {
+            throw new IllegalArgumentException("Target collection name must differ from the source collection name");
+        }
+        if (sourceName.startsWith("system.") || targetName.startsWith("system.")) {
+            throw new IllegalArgumentException("System collections cannot be cloned");
+        }
+
+        MongoDatabase database = client.getDatabase(databaseName);
+        Document sourceSpecification = requireCollectionSpecification(database, sourceName);
+        if (!isRegularCollectionSpecification(sourceSpecification)) {
+            throw new IllegalArgumentException(
+                "Only regular MongoDB collections can be cloned; views and time-series collections are not supported"
+            );
+        }
+
+        Document collectionOptions = collectionOptions(sourceSpecification);
+        // Explicit creation ensures the source is never merged into an
+        // existing target collection.
+        database.runCommand(cloneCreateCollectionCommand(targetName, sourceSpecification));
+
+        MongoCollection<Document> source = database.getCollection(sourceName);
+        MongoCollection<Document> target = database.getCollection(targetName);
+        long documentsCopied = cloneCollectionDocuments(source, target, needsValidationBypass(collectionOptions));
+        long indexesCopied = cloneCollectionIndexes(database, source, sourceName, targetName);
+
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("documents_copied", documentsCopied);
+        result.put("indexes_copied", indexesCopied);
+        return result;
+    }
+
+    private static Document requireCollectionSpecification(MongoDatabase database, String sourceName) {
+        for (Document specification : collectionSpecifications(database)) {
+            if (sourceName.equals(specification.getString("name"))) {
+                return specification;
+            }
+        }
+        throw new IllegalArgumentException("MongoDB collection '" + sourceName + "' was not found");
+    }
+
+    private static List<Document> collectionSpecifications(MongoDatabase database) {
+        try {
+            List<Document> specifications = new ArrayList<>();
+            for (Document specification : database.listCollections()) {
+                specifications.add(specification);
+            }
+            return specifications;
+        } catch (RuntimeException error) {
+            if (isUnsupportedCatalogCommand(error, "listcollections")) {
+                return legacyCollectionSpecifications(database);
+            }
+            throw error;
+        }
+    }
+
+    private static List<Document> legacyCollectionSpecifications(MongoDatabase database) {
+        String prefix = database.getName() + ".";
+        List<Document> specifications = new ArrayList<>();
+        for (Document namespaceDocument : database.getCollection("system.namespaces").find()) {
+            String namespace = namespaceDocument.getString("name");
+            if (namespace == null || !namespace.startsWith(prefix) || namespace.length() == prefix.length()) {
+                continue;
+            }
+            Document specification = new Document("name", namespace.substring(prefix.length()));
+            Object options = namespaceDocument.get("options");
+            if (options instanceof Document document) {
+                specification.append("options", document);
+            }
+            specifications.add(specification);
+        }
+        return specifications;
+    }
+
+    static boolean isUnsupportedCatalogCommand(RuntimeException error, String command) {
+        String message = error.getMessage() == null ? "" : error.getMessage().toLowerCase();
+        return message.contains("commandnotfound")
+            || ((message.contains("no such command") || message.contains("no such cmd")) && message.contains(command));
+    }
+
+    static boolean isRegularCollectionSpecification(Document specification) {
+        String type = specification.getString("type");
+        return type == null || type.isBlank() || "collection".equalsIgnoreCase(type);
+    }
+
+    static Document collectionOptions(Document specification) {
+        Object options = specification.get("options");
+        return options instanceof Document document ? new Document(document) : new Document();
+    }
+
+    static Document cloneCreateCollectionCommand(String targetName, Document sourceSpecification) {
+        Document command = new Document("create", targetName);
+        command.putAll(collectionOptions(sourceSpecification));
+        return command;
+    }
+
+    private static boolean needsValidationBypass(Document options) {
+        return options.containsKey("validator")
+            || options.containsKey("validationLevel")
+            || options.containsKey("validationAction");
+    }
+
+    private static long cloneCollectionDocuments(
+        MongoCollection<Document> source,
+        MongoCollection<Document> target,
+        boolean bypassDocumentValidation
+    ) {
+        List<Document> batch = new ArrayList<>(CLONE_INSERT_BATCH_SIZE);
+        long copied = 0;
+        try (MongoCursor<Document> cursor = source.find().iterator()) {
+            while (cursor.hasNext()) {
+                batch.add(cursor.next());
+                if (batch.size() == CLONE_INSERT_BATCH_SIZE) {
+                    copied += insertCloneBatch(target, batch, bypassDocumentValidation);
+                }
+            }
+        }
+        if (!batch.isEmpty()) {
+            copied += insertCloneBatch(target, batch, bypassDocumentValidation);
+        }
+        return copied;
+    }
+
+    private static long insertCloneBatch(
+        MongoCollection<Document> target,
+        List<Document> batch,
+        boolean bypassDocumentValidation
+    ) {
+        InsertManyOptions options = new InsertManyOptions();
+        if (bypassDocumentValidation) {
+            options.bypassDocumentValidation(true);
+        }
+        target.insertMany(batch, options);
+        long copied = batch.size();
+        batch.clear();
+        return copied;
+    }
+
+    private static long cloneCollectionIndexes(
+        MongoDatabase database,
+        MongoCollection<Document> source,
+        String sourceName,
+        String targetName
+    ) {
+        long copied = 0;
+        for (Document index : collectionIndexDefinitions(database, source, sourceName)) {
+            if (isAutomaticIdIndex(index)) {
+                continue;
+            }
+            database.runCommand(
+                new Document("createIndexes", targetName)
+                    .append("indexes", Collections.singletonList(cloneIndexDefinition(index)))
+            );
+            copied++;
+        }
+        return copied;
+    }
+
+    private static List<Document> collectionIndexDefinitions(
+        MongoDatabase database,
+        MongoCollection<Document> source,
+        String sourceName
+    ) {
+        try {
+            List<Document> indexes = new ArrayList<>();
+            for (Document index : source.listIndexes()) {
+                indexes.add(index);
+            }
+            return indexes;
+        } catch (RuntimeException error) {
+            if (!isUnsupportedCatalogCommand(error, "listindexes")) {
+                throw error;
+            }
+        }
+
+        String namespace = database.getName() + "." + sourceName;
+        List<Document> indexes = new ArrayList<>();
+        for (Document index : database.getCollection("system.indexes").find(new Document("ns", namespace))) {
+            indexes.add(index);
+        }
+        return indexes;
+    }
+
+    static boolean isAutomaticIdIndex(Document index) {
+        Object keys = index.get("key");
+        return keys instanceof Document document && isDefaultIdIndexSpecification(document);
+    }
+
+    static Document cloneIndexDefinition(Document sourceIndex) {
+        Document definition = new Document(sourceIndex);
+        // These fields describe the source catalog entry rather than index
+        // options accepted by createIndexes on every supported server.
+        definition.remove("v");
+        definition.remove("ns");
+        definition.remove("buildUUID");
+        definition.remove("ready");
+        return definition;
+    }
+
     private static Object dropDatabase(JsonObject params) {
         MongoClient c = requireClient();
         String database = params.get("database").getAsString();
@@ -1591,6 +1811,7 @@ public final class MongoAgent {
             case AgentProtocol.MONGO_METHOD_CREATE_USER -> createUser(params);
             case AgentProtocol.MONGO_METHOD_DROP_INDEXES -> dropIndexes(params);
             case AgentProtocol.MONGO_METHOD_DROP_COLLECTION -> dropCollection(params);
+            case AgentProtocol.MONGO_METHOD_CLONE_COLLECTION -> cloneCollection(params);
             case AgentProtocol.MONGO_METHOD_DROP_DATABASE -> dropDatabase(params);
             case AgentProtocol.MONGO_METHOD_INSERT_DOCUMENT -> insertDocument(params);
             case AgentProtocol.MONGO_METHOD_UPDATE_DOCUMENT -> updateDocument(params);

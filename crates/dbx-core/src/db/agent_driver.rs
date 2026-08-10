@@ -972,6 +972,7 @@ pub enum AgentCapability {
     EtcdLease,
     EtcdAuth,
     MongoDropDatabase,
+    MongoCloneCollection,
     MultiSession,
     StructuredErrorV1,
 }
@@ -1054,7 +1055,7 @@ fn parse_agent_rpc_error_header(header: &str) -> (Option<i64>, String) {
 }
 
 impl AgentCapability {
-    pub const ALL: [Self; 21] = [
+    pub const ALL: [Self; 22] = [
         Self::Connect,
         Self::TestConnection,
         Self::Metadata,
@@ -1074,6 +1075,7 @@ impl AgentCapability {
         Self::EtcdLease,
         Self::EtcdAuth,
         Self::MongoDropDatabase,
+        Self::MongoCloneCollection,
         Self::MultiSession,
         Self::StructuredErrorV1,
     ];
@@ -1099,6 +1101,7 @@ impl AgentCapability {
             Self::EtcdLease => "etcd_lease",
             Self::EtcdAuth => "etcd_auth",
             Self::MongoDropDatabase => "mongo_drop_database",
+            Self::MongoCloneCollection => "mongo_clone_collection",
             Self::MultiSession => "multi_session",
             Self::StructuredErrorV1 => "structured_error_v1",
         }
@@ -1282,6 +1285,7 @@ pub enum MongoAgentMethod {
     CreateUser,
     DropIndexes,
     DropCollection,
+    CloneCollection,
     DropDatabase,
     InsertDocument,
     UpdateDocument,
@@ -1291,7 +1295,7 @@ pub enum MongoAgentMethod {
 }
 
 impl MongoAgentMethod {
-    pub const ALL: [Self; 19] = [
+    pub const ALL: [Self; 20] = [
         Self::ListDatabases,
         Self::ListCollections,
         Self::FindDocuments,
@@ -1305,6 +1309,7 @@ impl MongoAgentMethod {
         Self::CreateUser,
         Self::DropIndexes,
         Self::DropCollection,
+        Self::CloneCollection,
         Self::DropDatabase,
         Self::InsertDocument,
         Self::UpdateDocument,
@@ -1328,6 +1333,7 @@ impl MongoAgentMethod {
             Self::CreateUser => "create_user",
             Self::DropIndexes => "drop_indexes",
             Self::DropCollection => "drop_collection",
+            Self::CloneCollection => "clone_collection",
             Self::DropDatabase => "drop_database",
             Self::InsertDocument => "insert_document",
             Self::UpdateDocument => "update_document",
@@ -2544,6 +2550,13 @@ impl AgentDriverClient {
         self.call_mongo_method(MongoAgentMethod::DropCollection, params).await
     }
 
+    pub async fn mongo_clone_collection<T: DeserializeOwned + Send + 'static>(
+        &mut self,
+        params: Value,
+    ) -> Result<T, String> {
+        self.call_mongo_method(MongoAgentMethod::CloneCollection, params).await
+    }
+
     pub async fn mongo_drop_database<T: DeserializeOwned + Send + 'static>(
         &mut self,
         params: Value,
@@ -2724,6 +2737,7 @@ pub fn agent_supports_capability(handshake: Option<&AgentHandshake>, capability:
             | AgentCapability::EtcdLease
             | AgentCapability::EtcdAuth
             | AgentCapability::MongoDropDatabase
+            | AgentCapability::MongoCloneCollection
     ) {
         return handshake.map(|value| value.supports(capability)).unwrap_or(false);
     }
@@ -4307,9 +4321,10 @@ for line in sys.stdin:
         assert_eq!(AgentCapability::EtcdLease.as_str(), "etcd_lease");
         assert_eq!(AgentCapability::EtcdAuth.as_str(), "etcd_auth");
         assert_eq!(AgentCapability::MongoDropDatabase.as_str(), "mongo_drop_database");
+        assert_eq!(AgentCapability::MongoCloneCollection.as_str(), "mongo_clone_collection");
         assert_eq!(AgentCapability::MultiSession.as_str(), "multi_session");
         assert_eq!(AgentCapability::StructuredErrorV1.as_str(), "structured_error_v1");
-        assert_eq!(AgentCapability::ALL.len(), 21);
+        assert_eq!(AgentCapability::ALL.len(), 22);
     }
 
     #[test]
@@ -4361,6 +4376,7 @@ for line in sys.stdin:
         assert_eq!(MongoAgentMethod::CreateUser.as_str(), "create_user");
         assert_eq!(MongoAgentMethod::DropIndexes.as_str(), "drop_indexes");
         assert_eq!(MongoAgentMethod::DropCollection.as_str(), "drop_collection");
+        assert_eq!(MongoAgentMethod::CloneCollection.as_str(), "clone_collection");
         assert_eq!(MongoAgentMethod::DropDatabase.as_str(), "drop_database");
         assert_eq!(MongoAgentMethod::InsertDocument.as_str(), "insert_document");
         assert_eq!(MongoAgentMethod::UpdateDocument.as_str(), "update_document");
@@ -4429,6 +4445,7 @@ for line in sys.stdin:
         let _mongo_create_index = AgentDriverClient::mongo_create_index::<serde_json::Value>;
         let _mongo_drop_indexes = AgentDriverClient::mongo_drop_indexes::<serde_json::Value>;
         let _mongo_drop_collection = AgentDriverClient::mongo_drop_collection::<serde_json::Value>;
+        let _mongo_clone_collection = AgentDriverClient::mongo_clone_collection::<serde_json::Value>;
         let _mongo_drop_database = AgentDriverClient::mongo_drop_database::<serde_json::Value>;
         let _mongo_insert_document = AgentDriverClient::mongo_insert_document::<serde_json::Value>;
         let _mongo_update_document = AgentDriverClient::mongo_update_document::<serde_json::Value>;
@@ -4662,10 +4679,18 @@ for line in sys.stdin:
         assert!(!agent_supports_capability(Some(&handshake), AgentCapability::KvHistory));
         assert!(!agent_supports_capability(None, AgentCapability::MongoDropDatabase));
         assert!(!agent_supports_capability(Some(&handshake), AgentCapability::MongoDropDatabase));
+        assert!(!agent_supports_capability(None, AgentCapability::MongoCloneCollection));
+        assert!(!agent_supports_capability(Some(&handshake), AgentCapability::MongoCloneCollection));
 
         let mongo_handshake =
             AgentHandshake { capabilities: vec![AgentCapability::MongoDropDatabase.as_str().to_string()], ..handshake };
         assert!(agent_supports_capability(Some(&mongo_handshake), AgentCapability::MongoDropDatabase));
+
+        let mongo_clone_handshake = AgentHandshake {
+            capabilities: vec![AgentCapability::MongoCloneCollection.as_str().to_string()],
+            ..mongo_handshake
+        };
+        assert!(agent_supports_capability(Some(&mongo_clone_handshake), AgentCapability::MongoCloneCollection));
     }
 
     #[test]

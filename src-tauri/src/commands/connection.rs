@@ -1092,6 +1092,27 @@ async fn test_connection_with_info_inner(
                 adapter.test_connection().await?;
                 Ok("Connection successful".to_string())
             }
+            DatabaseType::Consul => {
+                let mut consul_config = dbx_core::consul::ConsulConfig::from_connection(&config)?;
+                let validate_agent_target = consul_config.agent_target.is_some();
+                let original_host = consul_config.base_url.host_str().unwrap_or_default();
+                let original_port = consul_config.base_url.port_or_known_default().unwrap_or(config.port);
+                if host != original_host || port != original_port {
+                    consul_config = consul_config.with_connect_override(&host, port);
+                }
+                let client = dbx_core::consul::ConsulClient::new(consul_config).await?;
+                client.probe().await?;
+                let identity = if validate_agent_target {
+                    Some(client.validate_configured_agent_target().await?)
+                } else {
+                    client.agent_self().await.ok()
+                };
+                Ok(identity
+                    .map(|identity| format!("Connection successful (Agent: {} at {})", identity.node, identity.address))
+                    .unwrap_or_else(|| {
+                        "Connection successful (Agent identity unavailable; Agent writes disabled)".to_string()
+                    }))
+            }
             #[cfg(feature = "mq-admin")]
             DatabaseType::MessageQueue => {
                 // Probe with a transient adapter so Test Connection never retains/replaces
@@ -1434,6 +1455,17 @@ pub async fn connect_db(
             let adapter = state.nacos_registry.build_transient_config(admin_config).await?;
             adapter.test_connection().await?;
             PoolKind::Nacos
+        }
+        DatabaseType::Consul => {
+            let mut consul_config = dbx_core::consul::ConsulConfig::from_connection(&db_config)?;
+            let original_host = consul_config.base_url.host_str().unwrap_or_default();
+            let original_port = consul_config.base_url.port_or_known_default().unwrap_or(db_config.port);
+            if host != original_host || port != original_port {
+                consul_config = consul_config.with_connect_override(&host, port);
+            }
+            let client = dbx_core::consul::ConsulClient::new(consul_config).await?;
+            client.probe().await?;
+            PoolKind::Consul(client)
         }
         #[cfg(feature = "mq-admin")]
         DatabaseType::MessageQueue => {

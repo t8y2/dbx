@@ -1,9 +1,9 @@
 ---
 title: 专项工作台
-description: 使用 DBX 管理 Redis、MongoDB、搜索与向量数据库、HBase、消息队列、etcd、ZooKeeper 和 Nacos。
+description: 使用 DBX 管理 Redis、MongoDB、搜索与向量数据库、HBase、消息队列、etcd、ZooKeeper、Nacos 和 Consul KV。
 ---
 
-除了 SQL 编辑器和数据表格，DBX 还会根据连接类型打开专项工作台。它们直接使用对应系统的对象模型和管理 API，例如 Redis Key、MongoDB 文档、向量集合、消息队列 Topic、etcd Key、ZooKeeper ZNode 和 Nacos 配置。
+除了 SQL 编辑器和数据表格，DBX 还会根据连接类型打开专项工作台。它们直接使用对应系统的对象模型和管理 API，例如 Redis Key、MongoDB 文档、向量集合、消息队列 Topic、etcd Key、ZooKeeper ZNode、Nacos 配置和 Consul KV。
 
 <Callout type="info">专项能力按数据库类型、服务端版本、驱动和当前账号权限动态开放。界面没有显示某个入口时，先查看 [数据库支持](/cn/docs/databases)、连接测试结果和账号权限。</Callout>
 
@@ -16,7 +16,7 @@ description: 使用 DBX 管理 Redis、MongoDB、搜索与向量数据库、HBas
 | 向量数据库 | Qdrant、Milvus、Weaviate、ChromaDB | Collection 浏览、向量检索、Upsert、删除和请求预览 |
 | 宽表与列族 | HBase | Namespace、表结构、Column Family 和行数据浏览 |
 | 消息队列 | Pulsar、Kafka、RocketMQ、RabbitMQ | Topic、订阅/消费者、消息、监控、权限、策略和管理 API |
-| 注册与配置中心 | etcd、ZooKeeper、Nacos | Key/ZNode、集群状态、访问控制、配置、服务和实例 |
+| 注册与配置中心 | etcd、ZooKeeper、Nacos、Consul | Key/ZNode、集群状态、访问控制、配置、服务和实例 |
 | 运行状态 | MySQL、PostgreSQL、Redis、etcd、Nacos 等 | Dashboard、进程/会话、指标和数据库专属管理视图 |
 
 ## Redis 与 MongoDB
@@ -81,7 +81,7 @@ Pulsar、Kafka、RocketMQ 和 RabbitMQ 共用消息队列控制台框架，但�
 
 <Callout type="info">消息队列面板根据 Agent 返回的 capability 动态显示。服务端版本、管理 API、账号权限或未配置的管理端口都可能让某些标签页不可用。</Callout>
 
-## etcd、ZooKeeper 与 Nacos
+## etcd、ZooKeeper、Nacos 与 Consul
 
 ### etcd
 
@@ -102,6 +102,20 @@ Nacos 工作台覆盖配置和服务两个主要视图，并可管理 Namespace�
 - Dashboard 与 Raw API
 
 Nacos 的配置历史可能依赖额外的控制台地址和凭据。连接成功但历史入口不可用时，检查连接表单中的控制台设置。
+
+### Consul
+
+Consul 工作台按需加载概览、KV、服务、健康检查、Session、ACL、作用域、Service Mesh、工具和 Operator 领域。能力探测会区分 supported、unsupported、forbidden 和 unknown，因此单个领域权限不足不会清空其他已经加载的数据。
+
+连接项支持 HTTP/HTTPS API 地址、ACL Token、Datacenter、Namespace、Admin Partition、读取一致性、CA 证书、mTLS 客户端身份、跳过证书校验、超时和 DBX Transport Layer。Agent Service/Check 写入还必须配置并验证明确的 Agent target；经过负载均衡而目标不明确时，DBX 会硬性拒绝写入。
+
+KV 已支持递归搜索、版本化前缀导出、不可变导入预览、CAS 冲突处理、事务、原子重命名/复制、受限事务前缀删除和可取消的 Blocking Query Watch。Consul 单事务最多 64 个操作；更大的导入和删除会按确定顺序分批，并明确标记跨批次不具备整体原子性。跨连接或跨 Datacenter 迁移是 DBX 客户端读写流程，不是 Consul 原生复制。
+
+Catalog 与 Health 保持只读浏览。Agent Service/Check、Session/Lock、ACL Token/Policy/Role、Enterprise Namespace/Partition 和 Service Mesh 使用各自领域 DTO 与确认流程。ACL Secret 和 Peering Token 作为一次性敏感值处理，不进入 Consul 前端缓存或普通导出格式。
+
+Prepared Query、Event 和 Coordinate 位于工具区。Operator 读取和 Snapshot 下载为实验性能力。Snapshot 恢复、Autopilot 修改、Raft 修改、Keyring 修改和 License 修改分别由默认关闭的独立开关控制，启用一个不会连带启用其他能力。
+
+<Callout type="warn">Consul 不提供单 Key 历史 API，也不提供原生跨 Datacenter KV 复制 API。`ModifyIndex`、Blocking Index 和 Snapshot 都不会被包装成 Key 历史。Enterprise 与 Operator 能力取决于 Consul 版本、Edition、Agent 角色、ACL 权限和显式启用的 DBX 安全设置。</Callout>
 
 ## Dashboard 与管理视图
 

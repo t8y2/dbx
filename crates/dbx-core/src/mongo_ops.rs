@@ -1,7 +1,8 @@
 use crate::connection::{AppState, PoolKind};
 use crate::db::agent_driver::AgentCapability;
 use crate::db::mongo_driver::{
-    self, MongoCollectionStatsResult, MongoDocumentResult, MongoDropIndexFailure, MongoDropIndexesResult,
+    self, MongoCloneCollectionResult, MongoCollectionStatsResult, MongoDocumentResult, MongoDropIndexFailure,
+    MongoDropIndexesResult,
 };
 use crate::document_ops::CollectionInfo;
 use crate::mongo_shell::MongoCommand;
@@ -92,6 +93,40 @@ pub async fn mongo_rename_collection_core(
     match connections.get(connection_id).ok_or("Not found")? {
         PoolKind::MongoDb(client) => mongo_driver::rename_collection(client, database, collection, new_name).await,
         PoolKind::Agent(_) => Err("MongoDB legacy agent does not support rename collection".to_string()),
+        _ => Err("Not a MongoDB connection".to_string()),
+    }
+}
+
+pub async fn mongo_clone_collection_core(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    source_collection: &str,
+    target_collection: &str,
+) -> Result<MongoCloneCollectionResult, String> {
+    mongo_driver::validate_clone_collection_names(database, source_collection, target_collection)?;
+    ensure_document_pool(state, connection_id).await?;
+    let connections = state.connections.read().await;
+    match connections.get(connection_id).ok_or("Not found")? {
+        PoolKind::MongoDb(client) => {
+            mongo_driver::clone_collection(client, database, source_collection, target_collection).await
+        }
+        PoolKind::Agent(client) => {
+            let mut client = client.lock().await;
+            if !client.supports_capability(AgentCapability::MongoCloneCollection) {
+                return Err(
+                    "MongoDB Legacy Agent does not support clone collection; upgrade or reinstall the MongoDB Legacy driver"
+                        .to_string(),
+                );
+            }
+            client
+                .mongo_clone_collection(serde_json::json!({
+                    "database": database,
+                    "source_collection": source_collection,
+                    "target_collection": target_collection,
+                }))
+                .await
+        }
         _ => Err("Not a MongoDB connection".to_string()),
     }
 }
@@ -1326,6 +1361,47 @@ for line in sys.stdin:
         .await;
 
         mongo_drop_collection_core(&state, "legacy", "app", "users").await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn mongo_clone_collection_routes_legacy_connections_to_the_agent() {
+        let (state, _directory) = legacy_mongo_state_with_capabilities(
+            "clone_collection",
+            serde_json::json!({
+                "database": "app",
+                "source_collection": "users",
+                "target_collection": "users_copy",
+            }),
+            serde_json::json!({ "documents_copied": 2, "indexes_copied": 1 }),
+            &[AgentCapability::MongoCloneCollection.as_str()],
+        )
+        .await;
+
+        let result = mongo_clone_collection_core(&state, "legacy", "app", "users", "users_copy").await.unwrap();
+
+        assert_eq!(result, MongoCloneCollectionResult { documents_copied: 2, indexes_copied: 1 });
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn mongo_clone_collection_requires_an_explicit_legacy_agent_capability() {
+        let (state, _directory) = legacy_mongo_state_with_capabilities(
+            "clone_collection",
+            serde_json::json!({
+                "database": "app",
+                "source_collection": "users",
+                "target_collection": "users_copy",
+            }),
+            serde_json::json!({ "documents_copied": 2, "indexes_copied": 1 }),
+            &[],
+        )
+        .await;
+
+        let error = mongo_clone_collection_core(&state, "legacy", "app", "users", "users_copy").await.unwrap_err();
+
+        assert!(error.contains("upgrade or reinstall"), "{error}");
+        assert!(!error.contains("Unknown method"), "{error}");
     }
 
     #[cfg(unix)]

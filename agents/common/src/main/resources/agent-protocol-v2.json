@@ -2,7 +2,7 @@
   "protocolVersion": 2,
   "handshakeMethod": "handshake",
   "handshakeResponseFields": ["protocolVersion", "agentProtocolVersion", "capabilities"],
-  "allCapabilities": ["connect", "test_connection", "metadata", "query", "paged_query", "transaction", "ddl", "kv", "kv_ttl", "kv_cas", "kv_list_values", "kv_status", "kv_history", "etcd_compaction", "etcd_defrag", "etcd_watch", "etcd_lease", "etcd_auth", "mongo_drop_database", "multi_session", "structured_error_v1"],
+  "allCapabilities": ["connect", "test_connection", "metadata", "query", "paged_query", "transaction", "ddl", "kv", "kv_ttl", "kv_cas", "kv_list_values", "kv_status", "kv_history", "etcd_compaction", "etcd_defrag", "etcd_watch", "etcd_lease", "etcd_auth", "mongo_drop_database", "mongo_clone_collection", "multi_session", "structured_error_v1"],
   "capabilities": ["connect", "test_connection", "metadata", "query", "paged_query", "transaction", "ddl", "multi_session"],
   "defaultSqlCapabilities": ["connect", "test_connection", "metadata", "query", "paged_query", "transaction", "ddl", "multi_session", "structured_error_v1"],
   "commonMethods": [
@@ -43,7 +43,7 @@
     "disconnect",
     "shutdown"
   ],
-  "mongoLegacyMethods": ["list_databases", "list_collections", "find_documents", "find_one", "explain_find", "aggregate_documents", "find_documents_extended_json", "count_documents", "server_version", "create_index", "create_user", "drop_indexes", "drop_collection", "drop_database", "insert_document", "update_document", "update_documents", "delete_document", "delete_documents"],
+  "mongoLegacyMethods": ["list_databases", "list_collections", "find_documents", "find_one", "explain_find", "aggregate_documents", "find_documents_extended_json", "count_documents", "server_version", "create_index", "create_user", "drop_indexes", "drop_collection", "clone_collection", "drop_database", "insert_document", "update_document", "update_documents", "delete_document", "delete_documents"],
   "kvMethods": ["kv_list_prefix", "kv_get", "kv_put", "kv_delete", "kv_rename", "kv_history", "kv_status", "etcd_compact", "etcd_defrag", "etcd_watch_start", "etcd_watch_poll", "etcd_watch_stop", "etcd_lease_list", "etcd_lease_get", "etcd_lease_grant", "etcd_lease_keepalive_once", "etcd_lease_revoke", "etcd_auth_user_list", "etcd_auth_user_get", "etcd_auth_user_add", "etcd_auth_user_delete", "etcd_auth_user_change_password", "etcd_auth_user_grant_role", "etcd_auth_user_revoke_role", "etcd_auth_role_list", "etcd_auth_role_get", "etcd_auth_role_add", "etcd_auth_role_delete", "etcd_auth_role_grant_permission", "etcd_auth_role_revoke_permission"],
   "sessionField": "agentSessionId",
   "cursorSessionField": "sessionId"

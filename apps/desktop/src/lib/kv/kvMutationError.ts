@@ -24,13 +24,13 @@ export function classifyKvMutationError(error: unknown, creating: boolean, messa
   const sanitized = sanitizeKvMutationError(error);
   const normalized = sanitized.toLowerCase();
 
-  if (normalized.includes("etcd_key_already_exists") || (creating && normalized.includes("etcd_cas_conflict"))) {
+  if (normalized.includes("etcd_key_already_exists") || normalized.includes("consul_key_already_exists") || (creating && (normalized.includes("etcd_cas_conflict") || normalized.includes("consul_cas_conflict")))) {
     return {
       kind: "keyAlreadyExists",
       message: messages.keyAlreadyExists || "A Key with this name already exists. Choose another name or edit the existing Key.",
     };
   }
-  if (normalized.includes("etcd_cas_conflict")) {
+  if (normalized.includes("etcd_cas_conflict") || normalized.includes("consul_cas_conflict")) {
     return {
       kind: "conflict",
       message: messages.conflict || "The Key changed after it was loaded. Refresh it and try again.",

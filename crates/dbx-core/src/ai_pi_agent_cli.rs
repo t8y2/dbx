@@ -876,6 +876,8 @@ mod tests {
             opencode_cli_env: HashMap::new(),
             cursor_cli_path: None,
             cursor_cli_env: HashMap::new(),
+            grok_cli_path: None,
+            grok_cli_env: HashMap::new(),
         }
     }
 

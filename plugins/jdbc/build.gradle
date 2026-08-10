@@ -20,7 +20,7 @@ def mavenResolverVersion = '2.0.18'
 def mavenCoreVersion = '4.0.0-rc-5'
 
 dependencies {
-    implementation 'com.fasterxml.jackson.core:jackson-databind:2.17.2'
+    implementation 'com.fasterxml.jackson.core:jackson-databind:2.22.1'
     implementation('org.slf4j:slf4j-api') {
         version {
             strictly '1.7.36'

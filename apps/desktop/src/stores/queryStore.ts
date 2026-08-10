@@ -1095,6 +1095,45 @@ export const useQueryStore = defineStore("query", () => {
     return true;
   }
 
+  async function closeQueryResult(id: string) {
+    const tab = tabs.value.find((item) => item.id === id);
+    if (!tab || tab.mode !== "query" || tab.isExecuting) return false;
+
+    if (tab.activeResultRunId) return removeResultRun(id, tab.activeResultRunId);
+    if (!tab.result && !tab.results?.length && !tab.resultEvicted) return false;
+
+    const closeSession = closeResultSession(tab);
+    clearResultPayload(tab);
+    await closeSession;
+    return true;
+  }
+
+  async function clearQueryResults(id: string) {
+    const tab = tabs.value.find((item) => item.id === id);
+    if (!tab || tab.mode !== "query" || tab.isExecuting) return false;
+
+    const resultRuns = tab.resultRuns ?? [];
+    if (!tab.result && !tab.results?.length && !tab.resultEvicted && resultRuns.length === 0) return false;
+
+    const closedSessionIds = new Set<string>();
+    const currentSessionId = tab.resultSessionId ?? tab.result?.session_id;
+    if (currentSessionId) closedSessionIds.add(currentSessionId);
+    const closeOperations = [closeResultSession(tab)];
+
+    for (const run of resultRuns) {
+      if (run.resultCacheKey) void deleteTabResultSnapshot(run.resultCacheKey);
+      if (!run.resultSessionId || closedSessionIds.has(run.resultSessionId)) continue;
+      closedSessionIds.add(run.resultSessionId);
+      closeOperations.push(closeResultRunSession(tab, run));
+    }
+
+    tab.resultRuns = undefined;
+    tab.activeResultRunId = undefined;
+    clearResultPayload(tab);
+    await Promise.all(closeOperations);
+    return true;
+  }
+
   function nextResultRunSequence(tab: QueryTab): number {
     return (tab.resultRuns?.reduce((max, run) => Math.max(max, run.sequence), 0) ?? 0) + 1;
   }
@@ -5697,6 +5736,8 @@ export const useQueryStore = defineStore("query", () => {
     toggleResultAutoSave,
     setActiveResultRun,
     removeResultRun,
+    closeQueryResult,
+    clearQueryResults,
     setActiveResultIndex,
     executeCurrentTab,
     executeCurrentSql,

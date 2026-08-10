@@ -1160,6 +1160,7 @@ export default withEnglishFallback({
     resultRuns: "결과 실행",
     resultSets: "결과 집합",
     removeRun: "실행 {n} 제거",
+    closeResult: "결과 닫기",
     autoKeepResults: "쿼리 결과 자동 보관",
     autoKeepResultsEnabled: "결과 자동 보관 활성화됨",
     autoKeepResultsDisabled: "결과 자동 보관 비활성화됨",

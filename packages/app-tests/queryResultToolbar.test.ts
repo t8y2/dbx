@@ -4,6 +4,7 @@ import { test } from "vitest";
 import { compileScript, compileTemplate, parse } from "vue/compiler-sfc";
 
 const contentAreaPath = "apps/desktop/src/components/layout/ContentArea.vue";
+const appPath = "apps/desktop/src/App.vue";
 const dataGridPath = "apps/desktop/src/components/grid/DataGrid.vue";
 const viewSwitcherPath = "apps/desktop/src/components/layout/QueryResultViewSwitcher.vue";
 const toolbarActionsPath = "apps/desktop/src/components/layout/QueryResultToolbarActions.vue";
@@ -55,6 +56,10 @@ test("ContentArea exposes retained result runs as switchable tabs or a compact l
   assert.match(contentArea, /data-result-run-tab/);
   assert.match(contentArea, /@keydown="onResultRunTabKeydown\(\$event, runIndex\)"/);
   assert.match(contentArea, /@click\.stop\.prevent="removeResultRun\(run\.id\)"/);
+  assert.match(contentArea, /const canCloseQueryResult = computed\([\s\S]*!props\.activeTab\.activeResultRunId/);
+  assert.match(contentArea, /v-if="canCloseQueryResult"[\s\S]*@click="closeCurrentQueryResult"/);
+  assert.match(contentArea, /queryStore\.closeQueryResult\(props\.activeTab\.id\)/);
+  assert.match(contentArea, /t\('tabs\.closeResult'\)/);
   assert.match(contentArea, /<DropdownMenuContent align="start" class="w-48">[\s\S]*v-for="run in resultRuns"/);
   assert.match(contentArea, /setResultRunDisplayMode\('list'\)/);
   assert.match(contentArea, /setResultRunDisplayMode\('tabs'\)/);
@@ -66,6 +71,16 @@ test("ContentArea exposes retained result runs as switchable tabs or a compact l
   assert.doesNotMatch(contentArea, /queryResultAutoRefresh|QUERY_RESULT_AUTO_REFRESH|nextResultToolbarLayout/);
   assert.equal((contentArea.match(/<QueryResultViewSwitcher\b/g) ?? []).length, 2);
   assert.equal((contentArea.match(/<QueryResultToolbarActions\b/g) ?? []).length, 2);
+});
+
+test("the close-tab shortcut clears query results before closing the tab", () => {
+  const app = source(appPath);
+  const closeShortcutStart = app.indexOf("if (isCloseTabShortcut(e, shortcuts))");
+  const closeShortcutEnd = app.indexOf("if (isSaveShortcut", closeShortcutStart);
+  const closeShortcut = app.slice(closeShortcutStart, closeShortcutEnd);
+
+  assert.ok(closeShortcutStart >= 0);
+  assert.ok(closeShortcut.indexOf("await queryStore.clearQueryResults(queryStore.activeTabId)") < closeShortcut.indexOf("queryStore.closeTab(queryStore.activeTabId)"));
 });
 
 test("ContentArea keeps MySQL standard explain results available in the shared toolbar", () => {

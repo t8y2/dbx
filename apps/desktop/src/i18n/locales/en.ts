@@ -1271,6 +1271,7 @@ export default {
     resultRuns: "Result runs",
     resultSets: "Result sets",
     removeRun: "Remove run {n}",
+    closeResult: "Close result",
     autoKeepResults: "Auto-keep query results",
     autoKeepResultsEnabled: "Auto-keep results enabled",
     autoKeepResultsDisabled: "Auto-keep results disabled",

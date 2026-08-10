@@ -1246,6 +1246,7 @@ export default withEnglishFallback({
     resultRuns: "Esecuzioni risultati",
     resultSets: "Set di risultati",
     removeRun: "Rimuovi esecuzione {n}",
+    closeResult: "Chiudi risultato",
     autoKeepResults: "Mantieni automaticamente i risultati",
     autoKeepResultsEnabled: "Mantieni risultati abilitato",
     autoKeepResultsDisabled: "Mantieni risultati disabilitato",

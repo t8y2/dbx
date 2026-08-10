@@ -1247,6 +1247,7 @@ export default withEnglishFallback({
     resultRuns: "執行結果",
     resultSets: "語句結果",
     removeRun: "移除執行 {n}",
+    closeResult: "關閉結果",
     autoKeepResults: "自動保留查詢結果",
     autoKeepResultsEnabled: "自動保留結果已啟用",
     autoKeepResultsDisabled: "自動保留結果已停用",

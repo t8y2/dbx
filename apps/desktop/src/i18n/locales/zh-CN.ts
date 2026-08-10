@@ -1196,6 +1196,7 @@ export default withEnglishFallback({
     resultRuns: "执行结果",
     resultSets: "语句结果",
     removeRun: "删除执行 {n}",
+    closeResult: "关闭结果",
     autoKeepResults: "自动保留查询结果",
     autoKeepResultsEnabled: "已开启自动保留结果",
     autoKeepResultsDisabled: "已关闭自动保留结果",

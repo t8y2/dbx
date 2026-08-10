@@ -1265,6 +1265,7 @@ export default withEnglishFallback({
     resultRuns: "実行履歴",
     resultSets: "結果セット",
     removeRun: "実行 {n} を削除",
+    closeResult: "結果を閉じる",
     autoKeepResults: "クエリ結果を自動保持",
     autoKeepResultsEnabled: "結果の自動保持をオンにしました",
     autoKeepResultsDisabled: "結果の自動保持をオフにしました",

@@ -1,6 +1,17 @@
 import { describe, expect, it } from "vitest";
 import type { InstalledPlugin, PluginConnectionProviderContribution } from "@/types/database";
-import { buildPluginConnectionConfig, createFrontendPluginRegistry, initialPluginFormValues, parsePluginConnectionProviderOptionValue, pluginConnectionActionsForDialog, pluginConnectionFormValues, pluginConnectionProviderIcon, pluginConnectionProviderOptionValue } from "./frontendPlugin";
+import {
+  buildPluginConnectionConfig,
+  createFrontendPluginRegistry,
+  initialPluginFormValues,
+  parsePluginConnectionProviderOptionValue,
+  pluginConnectionActionsForDialog,
+  pluginConnectionFormValues,
+  pluginConnectionProviderIcon,
+  pluginConnectionProviderOptionValue,
+  pluginFormFieldRequired,
+  pluginFormFieldVisible,
+} from "./frontendPlugin";
 
 function installedPlugin(id: string, contributions: InstalledPlugin["manifest"]["contributions"] = []): InstalledPlugin {
   return {
@@ -301,5 +312,61 @@ describe("FrontendPluginRegistry", () => {
       private_key: "secret-key",
       keepalive: false,
     });
+  });
+
+  it("evaluates conditional visibility and required state from current values and defaults", () => {
+    const provider: PluginConnectionProviderContribution = {
+      type: "connection-provider",
+      id: "example.ssh",
+      label: "SSH",
+      database_type: "ssh",
+      fields: [
+        {
+          key: "auth",
+          label: "Authentication",
+          type: "select",
+          default: "password",
+          options: [
+            { label: "Password", value: "password" },
+            { label: "Private key", value: "private-key" },
+          ],
+        },
+        { key: "private_key_path", label: "Private key", type: "path", visible_when: { field: "auth", one_of: ["private-key"] }, required_when: { field: "auth", one_of: ["private-key"] } },
+      ],
+    };
+    const field = provider.fields[1];
+
+    expect(pluginFormFieldVisible(provider, field, {})).toBe(false);
+    expect(pluginFormFieldRequired(provider, field, {})).toBe(false);
+    expect(pluginFormFieldVisible(provider, field, { auth: "private-key" })).toBe(true);
+    expect(pluginFormFieldRequired(provider, field, { auth: "private-key" })).toBe(true);
+  });
+
+  it("removes hidden credentials when authentication mode changes", () => {
+    const provider: PluginConnectionProviderContribution = {
+      type: "connection-provider",
+      id: "example.ssh",
+      label: "SSH",
+      database_type: "ssh",
+      fields: [
+        {
+          key: "auth",
+          label: "Authentication",
+          type: "select",
+          default: "password",
+          options: [
+            { label: "Password", value: "password" },
+            { label: "Private key", value: "private-key" },
+          ],
+        },
+        { key: "password", label: "Password", type: "password", binding: "password", visible_when: { field: "auth", one_of: ["password"] } },
+        { key: "private_key_passphrase", label: "Passphrase", type: "password", visible_when: { field: "auth", one_of: ["private-key"] } },
+      ],
+    };
+    const existing = buildPluginConnectionConfig("example.plugin", provider, { auth: "private-key", private_key_passphrase: "old-passphrase" });
+    const config = buildPluginConnectionConfig("example.plugin", provider, { auth: "password", password: "new-password", private_key_passphrase: "stale" }, existing);
+
+    expect(config.password).toBe("new-password");
+    expect(config.connection_secrets).not.toHaveProperty("private_key_passphrase");
   });
 });

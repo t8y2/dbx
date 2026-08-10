@@ -272,17 +272,27 @@ Connection providers may add ordered custom actions before DBX-owned lifecycle b
 
 A workbench opens in a normal persistent DBX tab. The iframe is loaded with `sandbox="allow-scripts"`, a restrictive CSP, no Tauri object, no parent DOM access, and no direct network access. The host injects `window.dbxPlugin`:
 
-- `ready` / `context` / `locale` — `locale` is the current DBX locale such as `en` or `zh-CN`
+- `ready` / `context` / `locale` — `locale` is the current DBX locale such as `en` or `zh-CN`; the SDK default is `zh-CN` until initialization
+- `onLocaleChange(listener)` — receives live DBX locale changes without reloading the workbench iframe
 - `invoke(method, params, options)`
 - `notify(method, params)`
 - `sendBinary(channel, data)` — requires `host.binary`
 - `readAsset(path)` / `readAssetUrl(path)`
 - `openWorkbench(contributionId, context)` — requires `host.workbench`
 - `openFilesystem(providerId, context)` — requires `host.filesystem`
+- `workbenchState.set(state)` — persists up to 64 KiB for the stable workbench ID; requires `host.workbench`
+- `appearance` / `onAppearanceChange(listener)` — allow-listed theme colors, UI font, and terminal font/size context
+- `clipboard.readText/writeText` — host-mediated clipboard access; requires `host.clipboard`
+- `fileTransfer.pick/read/beginSave/write/finish/release` — opaque user-authorized local file handles; `cancel` remains a compatibility alias for `release`; requires `host.fileTransfer`
+- `fileTransfer.onDragState/onDrop` — host-normalized browser/native drag-and-drop using workbench-scoped opaque handles
 - `onEvent(listener)` — events are forwarded only with `host.events`
 - `onBinary(listener)` — binary frames are forwarded only with `host.binary`
 
 All backend calls are rebound to the owning plugin ID by the host. A plugin UI cannot invoke another plugin.
+
+File-transfer handles are scoped to one plugin and workbench and do not reveal a local path. Reads and writes are limited to 256 KiB per call, writes must be sequential, and a handle is invalid after finish, release/cancel, 15 minutes of inactivity, or workbench disposal. Desktop paths and ownership live in Rust; targets stream into same-directory temporary files and replace atomically. Web targets prefer OPFS streaming before the one-time browser download, while the non-OPFS memory fallback is always capped at 1 GiB even when the plugin omits the expected size.
+
+`clipboard.readText` requires a host confirmation the first time each plugin reads during a DBX process. A refusal returns no clipboard content, and grants are not persisted across application restarts. Clipboard writes still require the declared permission but do not create a read grant.
 
 Plugin-authored names, descriptions, contribution labels, form-field text, and select-option labels can be localized through `manifest.json > localizations`. DBX selects the exact current locale first, then its base language, and finally falls back to the manifest's default text:
 
@@ -410,6 +420,10 @@ sequenceDiagram
 ```
 
 Sidecars are shared per plugin process, not spawned per tab. Plugins own their internal session registries. DBX tears down plugin-owned connection pools before replace, rollback, or uninstall. Uninstall is blocked while saved connections still reference the plugin.
+
+Native sidecars receive `DBX_PLUGIN_DATA_DIR`. The host creates this plugin-ID-scoped directory outside versioned package directories so data survives upgrade and rollback. Use it for state such as `known_hosts`; do not write persistent data into the active package directory.
+
+Connection tests, connection lifecycle calls, and workbench RPCs receive a host-generated `operationId`. They may emit a `connection/challenge` event containing that `operationId`, a `challengeId`, `connectionId`, `kind: "host-key"`, and the endpoint and fingerprint fields. DBX binds the first valid challenge ID to that active operation, displays it through one global host-owned queue, and invokes the fixed `connection/challenge/resolve` method with `{ operationId, challengeId, accept, remember }`. Forged, expired, cross-plugin, or repeated resolutions fail. Notifications cannot challenge, and disconnect receives a distinct operation ID. A plugin must complete host-key verification before sending credentials.
 
 ## Security model
 

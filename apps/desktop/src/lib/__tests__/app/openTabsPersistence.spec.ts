@@ -126,6 +126,8 @@ describe("openTabsPersistence originalSql round-trip", () => {
             providerId: "hello.connection",
             connectionType: "hello",
           },
+          state: { sessionId: "old-session" },
+          restored: false,
         },
       }),
     ]);
@@ -139,7 +141,21 @@ describe("openTabsPersistence originalSql round-trip", () => {
         providerId: "hello.connection",
         connectionType: "hello",
       },
+      state: { sessionId: "old-session" },
+      restored: true,
     });
+    const [saved] = serializeOpenTabs([
+      queryTab({
+        id: "plugin-tab",
+        mode: "plugin-workbench",
+        pluginWorkbench: {
+          pluginId: "dbx.example.hello",
+          contributionId: "dbx.example.hello.main",
+          restored: false,
+        },
+      }),
+    ]);
+    expect(saved.pluginWorkbench).not.toHaveProperty("restored");
   });
 
   it("preserves host-owned plugin filesystem navigation", () => {

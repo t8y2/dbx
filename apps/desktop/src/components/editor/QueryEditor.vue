@@ -80,6 +80,7 @@ import {
   type SqlObjectNavigationTarget,
 } from "@/lib/sql/sqlNavigation";
 import { buildHoverTableSql, ddlForHoverPreview, hoverTableMatchesScope, quoteQualifiedName, reformatHoverDdl, scopeHoverTables, type HoverTableScope } from "@/lib/editor/hoverTableSql";
+import { constrainSqlHoverLayout } from "@/lib/editor/sqlHoverLayout";
 import { lineColumnToOffset, sqlErrorDecorationRange as resolveSqlErrorDecorationRange } from "@/lib/sql/sqlDiagnostics";
 import {
   DBX_TABLE_REFERENCE_MIME,
@@ -2334,7 +2335,8 @@ function createHoverDom(title: string, detail: string, sqlContent?: string, rows
     dom.appendChild(separator);
 
     const sqlContainer = document.createElement("div");
-    sqlContainer.className = "mt-1.5 max-h-64 overflow-y-auto text-[11px] leading-5 whitespace-pre font-mono";
+    sqlContainer.className = "mt-1.5 text-[11px] leading-5 whitespace-pre font-mono";
+    constrainSqlHoverLayout(dom, sqlContainer);
 
     if (hoverSqlHighlighter) {
       sqlContainer.innerHTML = hoverSqlHighlighter(sqlContent, isDark.value ? "dark" : "light");

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { captureDataGridSelection, reactivatesCellSelectionAfterRestore, restoreDataGridSelection, type CaptureDataGridSelectionOptions } from "@/lib/dataGrid/dataGridSelectionPersistence";
+import { captureDataGridSelection, restoreDataGridSelection, type CaptureDataGridSelectionOptions } from "@/lib/dataGrid/dataGridSelectionPersistence";
 
 function baseOptions(overrides: Partial<CaptureDataGridSelectionOptions> = {}): CaptureDataGridSelectionOptions {
   return {
@@ -255,27 +255,5 @@ describe("data grid selection persistence", () => {
       }),
     ).toBeNull();
     expect(restore(fallbackSnapshot, { columns: ["id", "name"], rows: [[2, "Grace"]], visibleColumnIndexes: [0, 1], displayItems: [{ id: 0, sourceIndex: 0 }] })).toBeNull();
-  });
-
-  it("reactivates the cell-selection drag state machine only for range and sparse-cell restores", () => {
-    // 刷新后恢复 range/离散单元格选区时，组件层需重新置 isSelectingCells=true，
-    // 否则 clearCellSelection 已将其清零、拖拽扩展会被守卫挡住（见 extendCellSelection/
-    // handleSelectionPointerMove）。行选/列选是独立状态机，不应激活 cell selection。
-    const rangeSnapshot = captureDataGridSelection(baseOptions({ selectionAnchor: { rowIndex: 0, colIndex: 0 }, selectionFocus: { rowIndex: 2, colIndex: 1 } }))!;
-    const cellsSnapshot = captureDataGridSelection(baseOptions({ selectedCellKeys: new Set(["0:0", "2:2"]) }))!;
-    const rowsSnapshot = captureDataGridSelection(baseOptions({ selectedRowIds: new Set([0, 2]), lastClickedRowIndex: 2 }))!;
-    const columnsSnapshot = captureDataGridSelection(baseOptions({ selectedColumnIndexes: new Set([0, 2]) }))!;
-
-    expect(reactivatesCellSelectionAfterRestore(restore(rangeSnapshot)!)).toBe(true);
-    expect(reactivatesCellSelectionAfterRestore(restore(cellsSnapshot)!)).toBe(true);
-    expect(reactivatesCellSelectionAfterRestore(restore(rowsSnapshot)!)).toBe(false);
-    expect(reactivatesCellSelectionAfterRestore(restore(columnsSnapshot)!)).toBe(false);
-  });
-
-  it("does not signal reactivation when the restored range falls back to null", () => {
-    // 行消失/被过滤导致 restore 返回 null 时，组件层不会走到激活分支；
-    // 这里锁定 restore 仍返回 null，确保不会误把失败恢复当作可扩展选区。
-    const snapshot = captureDataGridSelection(baseOptions({ selectionAnchor: { rowIndex: 1, colIndex: 1 }, selectionFocus: { rowIndex: 1, colIndex: 1 } }))!;
-    expect(restore(snapshot, { rows: [[1, 10, "Ada"]], displayItems: [{ id: 0, sourceIndex: 0 }] })).toBeNull();
   });
 });

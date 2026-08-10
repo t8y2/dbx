@@ -1086,6 +1086,7 @@ export default withEnglishFallback({
       noResults: "Nenhum resultado",
       inSelection: "Na seleção",
     },
+    noExecutableStatementAtCursor: "Não há instrução executável na posição do cursor.",
     executionPicker: {
       title: "Execution Target",
       currentStatement: "Current SQL",
@@ -5159,6 +5160,8 @@ export default withEnglishFallback({
     executeMode: "Modo de execução (Cmd+Enter)",
     executeModeAll: "Executar todo o SQL",
     executeModeCurrent: "Executar instrução no cursor",
+    executeAllOnBlankLine: "Executar todo o SQL em linhas em branco",
+    executeAllOnBlankLineDescription: "No modo de instrução atual, executa todo o SQL quando não há instrução no cursor. Desativado por padrão.",
     showExecutionTargetPicker: "Mostrar seletor de destino",
     showExecutionTargetPickerDescription: "Quando ativado, executar sem seleção permite escolher entre a instrução atual e todo o SQL.",
     showStatementRunButtons: "Mostrar botões de execução laterais",

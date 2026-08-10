@@ -1123,6 +1123,7 @@ export default withEnglishFallback({
       noResults: "无结果",
       inSelection: "选区内",
     },
+    noExecutableStatementAtCursor: "光标所在位置没有可执行语句",
     executionPicker: {
       title: "执行目标",
       currentStatement: "当前 SQL",
@@ -5423,6 +5424,8 @@ export default withEnglishFallback({
     executeMode: "执行模式 (Cmd+Enter)",
     executeModeAll: "执行全部 SQL",
     executeModeCurrent: "执行光标所在语句",
+    executeAllOnBlankLine: "空白位置执行全部 SQL",
+    executeAllOnBlankLineDescription: "在“执行光标所在语句”模式下，光标没有对应语句时执行全部 SQL。默认关闭。",
     showExecutionTargetPicker: "显示执行目标选择器",
     showExecutionTargetPickerDescription: "开启后，无选区执行时可在当前语句和全部 SQL 之间临时选择。",
     showStatementRunButtons: "显示左侧执行按钮",

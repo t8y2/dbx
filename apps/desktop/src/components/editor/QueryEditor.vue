@@ -800,12 +800,21 @@ function requestExecuteFromView(currentView: EditorViewType, cursorPos: number, 
   const doc = currentView.state.doc.toString();
   const parameterOptions = sqlStatementParameterOptions();
   const candidates = buildExecutionCandidates(doc, cursorPos, props.databaseType, parameterOptions);
-  if (candidates.length === 0) return true;
+  const executeMode = settingsStore.editorSettings.executeMode;
+  if (candidates.length === 0) {
+    if (executeMode === "current") toast(t("editor.noExecutableStatementAtCursor"), 3000);
+    return true;
+  }
+  const candidate = executionCandidateForMode(candidates, executeMode, {
+    executeAllOnBlankLine: settingsStore.editorSettings.executeAllOnBlankLine,
+  });
+  if (!candidate) {
+    toast(t("editor.noExecutableStatementAtCursor"), 3000);
+    return true;
+  }
   // The execution shortcut keeps executing the configured target (cursor/all) directly:
   // it stays keyboard-driven and never pops the picker, which is reserved for click entry points.
   if (options.bypassPicker || !settingsStore.editorSettings.showExecutionTargetPicker || !hasMultipleExecutionTargets(doc, props.databaseType, parameterOptions)) {
-    const candidate = executionCandidateForMode(candidates, settingsStore.editorSettings.executeMode);
-    if (!candidate) return true;
     emitExecutionRequest(sqlExecutionSnapshotForRange(currentView, candidate), options.openInNewResultTab);
     return true;
   }

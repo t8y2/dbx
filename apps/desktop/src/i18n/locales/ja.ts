@@ -1105,6 +1105,7 @@ export default withEnglishFallback({
       noResults: "結果なし",
       inSelection: "選択範囲内",
     },
+    noExecutableStatementAtCursor: "カーソル位置に実行可能な文がありません。",
     executionPicker: {
       title: "Execution Target",
       currentStatement: "Current SQL",
@@ -5186,6 +5187,8 @@ export default withEnglishFallback({
     executeMode: "実行モード (Cmd+Enter)",
     executeModeAll: "すべてのSQLを実行",
     executeModeCurrent: "カーソル位置の文を実行",
+    executeAllOnBlankLine: "空行ではすべてのSQLを実行",
+    executeAllOnBlankLineDescription: "現在の文を実行するモードで、カーソル位置に文がない場合はすべてのSQLを実行します。既定では無効です。",
     showExecutionTargetPicker: "実行対象ピッカーを表示",
     showExecutionTargetPickerDescription: "有効にすると、選択なしで実行するときに現在の文とすべてのSQLを一時的に選べます。",
     showStatementRunButtons: "左側の実行ボタンを表示",

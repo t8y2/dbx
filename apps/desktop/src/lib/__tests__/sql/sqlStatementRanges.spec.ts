@@ -1321,6 +1321,7 @@ WHERE t2.product_name = '12345'
     expect(candidateKinds(candidates)).toEqual(["all"]);
     expect(candidates[0].supportedKinds).toEqual(["all"]);
     expect(executionCandidateForMode(candidates, "current")).toBeNull();
+    expect(executionCandidateForMode(candidates, "current", { executeAllOnBlankLine: true })).toBe(candidates[0]);
     expect(executionCandidateForMode(candidates, "all")).toBe(candidates[0]);
   });
 

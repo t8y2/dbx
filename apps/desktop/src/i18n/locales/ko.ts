@@ -1013,6 +1013,7 @@ export default withEnglishFallback({
       noResults: "결과 없음",
       inSelection: "선택 영역 내",
     },
+    noExecutableStatementAtCursor: "커서 위치에 실행 가능한 구문이 없습니다.",
     executionPicker: {
       title: "실행 대상",
       currentStatement: "현재 SQL",
@@ -4925,6 +4926,8 @@ export default withEnglishFallback({
     executeMode: "실행 모드 (Cmd+Enter)",
     executeModeAll: "모든 SQL 실행",
     executeModeCurrent: "커서 위치의 구문 실행",
+    executeAllOnBlankLine: "빈 줄에서 모든 SQL 실행",
+    executeAllOnBlankLineDescription: "현재 구문 실행 모드에서 커서 위치에 구문이 없으면 모든 SQL을 실행합니다. 기본적으로 비활성화됩니다.",
     showExecutionTargetPicker: "실행 대상 선택기 표시",
     showExecutionTargetPickerDescription: "활성화하면 선택 없이 실행할 때 현재 구문과 전체 SQL 중에서 선택할 수 있습니다.",
     showStatementRunButtons: "왼쪽 실행 버튼 표시",

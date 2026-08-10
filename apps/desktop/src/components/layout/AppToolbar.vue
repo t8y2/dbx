@@ -596,15 +596,7 @@ const toolbarStyle = computed(() => {
 
       <Tooltip v-if="toolbarItems.sqlLibrary">
         <TooltipTrigger as-child>
-          <Button
-            v-show="isRightItemVisible('sqlLibrary')"
-            data-sql-library-trigger
-            variant="ghost"
-            size="icon"
-            class="relative h-8 w-8 shrink-0"
-            :class="{ 'bg-accent': showSqlLibrary, 'sql-library-save-feedback': sqlLibrarySaveFeedbackActive }"
-            @click="emit('toggle-sql-library')"
-          >
+          <Button v-show="isRightItemVisible('sqlLibrary')" data-sql-library-trigger variant="ghost" size="icon" class="relative h-8 w-8 shrink-0" :class="{ 'bg-accent': showSqlLibrary, 'sql-library-save-feedback': sqlLibrarySaveFeedbackActive }" @click="emit('toggle-sql-library')">
             <svg
               aria-hidden="true"
               xmlns="http://www.w3.org/2000/svg"
@@ -621,28 +613,8 @@ const toolbarStyle = computed(() => {
             >
               <path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H19a1 1 0 0 1 1 1v18a1 1 0 0 1-1 1H6.5a1 1 0 0 1 0-5H20" />
               <path ref="sqlLibraryIconPathRef" :d="SQL_LIBRARY_BOOKMARK_PATH">
-                <animate
-                  ref="sqlLibraryMorphToCheckRef"
-                  attributeName="d"
-                  :values="`${SQL_LIBRARY_BOOKMARK_PATH};${SQL_LIBRARY_CHECK_PATH}`"
-                  dur="180ms"
-                  begin="indefinite"
-                  fill="freeze"
-                  calcMode="spline"
-                  keyTimes="0;1"
-                  keySplines="0.22 1 0.36 1"
-                />
-                <animate
-                  ref="sqlLibraryMorphToBookmarkRef"
-                  attributeName="d"
-                  :values="`${SQL_LIBRARY_CHECK_PATH};${SQL_LIBRARY_BOOKMARK_PATH}`"
-                  dur="180ms"
-                  begin="indefinite"
-                  fill="freeze"
-                  calcMode="spline"
-                  keyTimes="0;1"
-                  keySplines="0.22 1 0.36 1"
-                />
+                <animate ref="sqlLibraryMorphToCheckRef" attributeName="d" :values="`${SQL_LIBRARY_BOOKMARK_PATH};${SQL_LIBRARY_CHECK_PATH}`" dur="180ms" begin="indefinite" fill="freeze" calcMode="spline" keyTimes="0;1" keySplines="0.22 1 0.36 1" />
+                <animate ref="sqlLibraryMorphToBookmarkRef" attributeName="d" :values="`${SQL_LIBRARY_CHECK_PATH};${SQL_LIBRARY_BOOKMARK_PATH}`" dur="180ms" begin="indefinite" fill="freeze" calcMode="spline" keyTimes="0;1" keySplines="0.22 1 0.36 1" />
               </path>
             </svg>
           </Button>

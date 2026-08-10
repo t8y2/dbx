@@ -63,9 +63,12 @@ describe("dataGridContextMenu", () => {
       labels: { cellDetails: "cell", columnDetails: "column", rowDetails: "row", setNull: "null", bulkEdit: "bulk", transpose: "transpose" },
       icons: { cellDetails: icon, columnDetails: icon, rowDetails: icon, setNull: icon, bulkEdit: icon, transpose: icon },
       actions: { cellDetails: action, columnDetails: action, rowDetails: action, setNull: action, bulkEdit: action, transpose: action },
+      importItem: { label: "import" },
+      downloadItem: { label: "download" },
       copySubmenu: { label: "copy" },
       clearSelectionItem: { label: "clear" },
     });
+    expect(cellItems.slice(0, 4).map((item) => item.label)).toEqual(["cell", "import", "download", "column"]);
     expect(cellItems.find((item) => item.label === "bulk")?.disabled).toBe(true);
 
     const rowItems = createDataGridRowContextMenuItems({

@@ -6720,6 +6720,42 @@ mod tests {
     }
 
     #[test]
+    fn dbx_exported_xlsx_round_trip_preserves_empty_strings_when_configured() {
+        let path =
+            std::env::temp_dir().join(format!("dbx-table-import-empty-round-trip-{}.xlsx", uuid::Uuid::new_v4()));
+        let workbook = build_xlsx_workbook_multi(&[XlsxWorksheetData {
+            sheet_name: Some("Data".to_string()),
+            columns: vec!["empty_text".to_string(), "missing_value".to_string()],
+            column_types: vec!["VARCHAR(255)".to_string(), "VARCHAR(255)".to_string()],
+            column_comments: vec![],
+            rows: vec![vec![serde_json::json!(""), serde_json::Value::Null]],
+            numeric_column_right_align: false,
+        }])
+        .unwrap();
+        std::fs::write(&path, workbook).unwrap();
+        let options =
+            TableImportParseOptions { empty_string_as_null: Some(false), ..TableImportParseOptions::default() };
+
+        let parsed = parse_xlsx_file_with_options(&path.to_string_lossy(), &options, 10).unwrap();
+        let (preview, _) = parse_xlsx_preview_file_with_options(&path.to_string_lossy(), &options, 10).unwrap();
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(16);
+        stream_xlsx_rows_to_channel(&path.to_string_lossy(), &options, 500, None, HashSet::new(), false, sender)
+            .unwrap();
+        let mut streamed_rows = Vec::new();
+        while let Some(message) = receiver.blocking_recv() {
+            if let XlsxStreamMessage::Rows(rows) = message.unwrap() {
+                streamed_rows.extend(rows);
+            }
+        }
+
+        let expected = vec![vec![serde_json::json!(""), serde_json::Value::Null]];
+        assert_eq!(parsed.rows, expected);
+        assert_eq!(preview.rows, parsed.rows);
+        assert_eq!(streamed_rows, parsed.rows);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn retains_only_temporal_and_text_target_xlsx_styles() {
         let styles = vec![
             XlsxCellStyle { temporal_kind: None, number_format: Some(Arc::from("0.00")) },

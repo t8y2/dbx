@@ -531,6 +531,8 @@ mod tests {
             opencode_cli_env: Default::default(),
             cursor_cli_path: None,
             cursor_cli_env: Default::default(),
+            grok_cli_path: None,
+            grok_cli_env: Default::default(),
         }
     }
 
@@ -542,6 +544,7 @@ mod tests {
             AiProvider::PiAgentCli,
             AiProvider::OpenCodeCli,
             AiProvider::CursorCli,
+            AiProvider::GrokCli,
         ] {
             let config = make_config(provider);
             assert!(reject_web_unsupported_ai_provider(&config).is_err());
@@ -628,6 +631,8 @@ mod tests {
             opencode_cli_env: Default::default(),
             cursor_cli_path: None,
             cursor_cli_env: Default::default(),
+            grok_cli_path: None,
+            grok_cli_env: Default::default(),
         };
 
         let body = super::AiTestConnectionRequest { config };

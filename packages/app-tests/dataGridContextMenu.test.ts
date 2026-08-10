@@ -23,6 +23,12 @@ test("set NULL applies a real null value only to editable selections", () => {
   assert.doesNotMatch(handler, /fillSelectionWithValue\(["'](?:NULL)?["']\)/);
 });
 
+test("generated selection values restore grid focus for keyboard shortcuts", () => {
+  const applyHandler = dataGridSource.match(/function applyGeneratedSelectionValue\([^]*?\n\}/)?.[0] ?? "";
+
+  assert.match(applyHandler, /if \(applied\)[^]*nextTick\(\(\) => window\.requestAnimationFrame\(\(\) => gridRef\.value\?\.focus\(\{ preventScroll: true \}\)\)\)/);
+});
+
 test("column-header context menus defer copy statement generation", () => {
   const handler = dataGridSource.match(/function onHeaderContext\([^]*?\n\}/)?.[0] ?? "";
 

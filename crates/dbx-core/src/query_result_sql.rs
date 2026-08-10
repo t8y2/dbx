@@ -224,18 +224,19 @@ pub fn build_count_query_sql(options: CountQuerySqlOptions) -> QuerySqlBuildResu
     if unsupported_pagination_type(options.database_type) {
         return err("unsupported");
     }
+    let (execution_hint, statement) = split_leading_execution_hint(&statement);
     // A locking clause does not affect cardinality and cannot appear inside
     // every dialect's derived-table count query. PostgreSQL permits pagination
     // after the lock clause; decline counting that uncommon order rather than
     // accidentally dropping the user's explicit LIMIT/OFFSET.
-    let tokens = top_level_sql_tokens(&statement);
+    let tokens = top_level_sql_tokens(statement);
     let statement = if let Some(index) = locking_clause_index(&tokens) {
         if has_pagination_clause_after(&tokens, index) {
             return err("locking");
         }
         statement[..index].trim_end().to_string()
     } else {
-        statement
+        statement.to_string()
     };
     // ES SQL can't wrap a SELECT in `SELECT COUNT(*) FROM (...)` — the
     // driver already reports the true match count via affected_rows.
@@ -243,7 +244,9 @@ pub fn build_count_query_sql(options: CountQuerySqlOptions) -> QuerySqlBuildResu
         return err("unsupported");
     }
     if options.database_type == Some(DatabaseType::SqlServer) {
-        return sql_server_count_sql(&statement).map(ok).unwrap_or_else(|| err("unsupported"));
+        return sql_server_count_sql(&statement)
+            .map(|sql| ok(format!("{execution_hint}{sql}")))
+            .unwrap_or_else(|| err("unsupported"));
     }
 
     let alias = quote_table_identifier(options.database_type, "dbx_count");
@@ -251,7 +254,10 @@ pub fn build_count_query_sql(options: CountQuerySqlOptions) -> QuerySqlBuildResu
         Some(DatabaseType::Iris) => iris_statement_for_derived_table(&statement),
         _ => statement,
     };
-    ok(derived_table_sql("SELECT COUNT(*) AS dbx_total_rows FROM", &wrapped_sql, &format!("{alias};")))
+    ok(format!(
+        "{execution_hint}{}",
+        derived_table_sql("SELECT COUNT(*) AS dbx_total_rows FROM", &wrapped_sql, &format!("{alias};"))
+    ))
 }
 
 pub fn build_sorted_query_sql(options: SortedQuerySqlOptions) -> QuerySqlBuildResult {
@@ -354,13 +360,14 @@ fn single_selectable_statement(original_sql: &str) -> Result<String, ()> {
         return Err(());
     }
 
-    let statement = find_statement_at_cursor(base_sql, 0).trim().trim_end_matches(';').trim().to_string();
-    if statement.is_empty() {
+    let extracted = find_statement_at_cursor(base_sql, 0).trim().trim_end_matches(';').trim().to_string();
+    if extracted.is_empty() {
         return Err(());
     }
-    if !single_statement_matches_base_sql(&statement, base_sql) {
+    if !single_statement_matches_base_sql(&extracted, base_sql) {
         return Err(());
     }
+    let statement = restore_leading_execution_hint(base_sql, &extracted);
     let statement_without_leading_comments =
         strip_leading_statement_comments(statement.trim_start_matches(';').trim_start());
     let upper = statement_without_leading_comments.to_ascii_uppercase();
@@ -570,6 +577,56 @@ fn skip_leading_sql_comments(sql: &str, mut index: usize) -> usize {
             continue;
         }
         return index;
+    }
+}
+
+fn restore_leading_execution_hint(original_sql: &str, statement: &str) -> String {
+    if leading_execution_hint_prefix(statement).is_some() {
+        return statement.to_string();
+    }
+    let normalized = original_sql.trim().trim_end_matches(';').trim();
+    match leading_execution_hint_prefix(normalized) {
+        Some(prefix) => format!("{prefix}{statement}"),
+        None => statement.to_string(),
+    }
+}
+
+fn split_leading_execution_hint(sql: &str) -> (&str, &str) {
+    match leading_execution_hint_prefix(sql) {
+        Some(prefix) => (prefix, sql[prefix.len()..].trim_start()),
+        None => ("", sql),
+    }
+}
+
+fn leading_execution_hint_prefix(sql: &str) -> Option<&str> {
+    let mut index = 0;
+    let mut hint_start = None;
+    loop {
+        index = skip_sql_whitespace(sql, index);
+        let rest = &sql[index..];
+        if rest.starts_with("--") {
+            index += 2;
+            while index < sql.len() && next_char(sql, index) != '\n' {
+                index += next_char(sql, index).len_utf8();
+            }
+            continue;
+        }
+        if !rest.starts_with("/*") {
+            return hint_start.map(|start| &sql[start..index]);
+        }
+        if hint_start.is_none() && matches!(next_char_at(sql, index + 2), Some('+' | '@' | '&')) {
+            hint_start = Some(index);
+        }
+        index += 2;
+        while index < sql.len() {
+            let ch = next_char(sql, index);
+            let next = next_char_at(sql, index + ch.len_utf8());
+            index += ch.len_utf8();
+            if ch == '*' && next == Some('/') {
+                index += 1;
+                break;
+            }
+        }
     }
 }
 
@@ -2604,6 +2661,61 @@ WHERE u.id = picked.id;
         });
 
         assert_eq!(result.sql.unwrap(), "SELECT id FROM users WHERE active = 1 LIMIT 50;");
+    }
+
+    #[test]
+    fn mysql_pagination_preserves_leading_ampersand_routing_hint() {
+        let result = build_paginated_query_sql(PaginatedQuerySqlOptions {
+            original_sql: "/*& tenant:'test' */\nSELECT id FROM users".to_string(),
+            database_type: Some(DatabaseType::Mysql),
+            limit: 50,
+            offset: 0,
+        });
+
+        assert_eq!(result.sql.unwrap(), "/*& tenant:'test' */\nSELECT id FROM users LIMIT 50;");
+    }
+
+    #[test]
+    fn mysql_pagination_preserves_supported_leading_execution_hints_only() {
+        for hint in ["/*+ MAX_EXECUTION_TIME(1000) */", "/*@global:true*/", "/*& tenant:'test' */"] {
+            let result = build_paginated_query_sql(PaginatedQuerySqlOptions {
+                original_sql: format!("{hint}\nSELECT id FROM users"),
+                database_type: Some(DatabaseType::Mysql),
+                limit: 50,
+                offset: 0,
+            });
+
+            assert_eq!(result.sql.unwrap(), format!("{hint}\nSELECT id FROM users LIMIT 50;"));
+        }
+
+        let ordinary_comment = build_paginated_query_sql(PaginatedQuerySqlOptions {
+            original_sql: "/* report query */\nSELECT id FROM users".to_string(),
+            database_type: Some(DatabaseType::Mysql),
+            limit: 50,
+            offset: 0,
+        });
+        assert_eq!(ordinary_comment.sql.unwrap(), "SELECT id FROM users LIMIT 50;");
+
+        let ordinary_comment_before_hint = build_paginated_query_sql(PaginatedQuerySqlOptions {
+            original_sql: "-- report query\n/*& tenant:'test' */\nSELECT id FROM users".to_string(),
+            database_type: Some(DatabaseType::Mysql),
+            limit: 50,
+            offset: 0,
+        });
+        assert_eq!(ordinary_comment_before_hint.sql.unwrap(), "/*& tenant:'test' */\nSELECT id FROM users LIMIT 50;");
+    }
+
+    #[test]
+    fn mysql_count_preserves_leading_ampersand_routing_hint() {
+        let result = build_count_query_sql(CountQuerySqlOptions {
+            original_sql: "/*& tenant:'test' */\nSELECT id FROM users".to_string(),
+            database_type: Some(DatabaseType::Mysql),
+        });
+
+        assert_eq!(
+            result.sql.unwrap(),
+            "/*& tenant:'test' */\nSELECT COUNT(*) AS dbx_total_rows FROM (SELECT id FROM users) `dbx_count`;"
+        );
     }
 
     #[test]

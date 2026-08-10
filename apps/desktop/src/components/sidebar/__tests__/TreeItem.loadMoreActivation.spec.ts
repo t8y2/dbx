@@ -15,6 +15,7 @@ const connectionStore = {
   connections: [],
   getConfig: () => ({ id: "connection-1", db_type: "sqlserver" }),
   isDefaultDatabase: () => false,
+  isDefaultSchema: () => false,
   isPinnedTreeNodeReorderTarget: () => false,
   isTreeNodeChildrenLoaded: () => false,
   isTreeNodePinned: () => false,

@@ -1,5 +1,5 @@
 import type { ComponentPublicInstance, InjectionKey } from "vue";
-import type { ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
+import type { ContextMenuItem } from "@/components/ui/customContextMenuRegistry";
 import type { TreeNode } from "@/types/database";
 import { createSidebarActionTarget, type SidebarActionTarget } from "./sidebarActionTarget";
 

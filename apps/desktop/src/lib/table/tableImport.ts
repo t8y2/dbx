@@ -88,6 +88,10 @@ export interface TableImportParseSettings {
   jsonShape: TableImportJsonShape;
 }
 
+export function defaultTableImportEmptyStringAsNull(format: TableImportSourceFormat): boolean {
+  return format !== "excel";
+}
+
 export function buildTableImportParseOptions(settings: TableImportParseSettings): TableImportParseOptions {
   const isDelimited = settings.format === "csv" || settings.format === "tsv" || settings.format === "delimited";
   return {

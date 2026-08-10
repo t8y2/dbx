@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from "vue";
-import { Code2, Copy, Eye, Info, Pencil, Upload } from "@lucide/vue";
+import { Code2, Copy, Download, Eye, FileUp, Info, Pencil } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -25,6 +25,8 @@ const props = defineProps<{
   copyText: (text: string) => void;
   canDownloadBinaryValue: (detail: DataGridCellDetail | null) => boolean;
   downloadBinaryValue: (detail: DataGridCellDetail | null, mode: BinaryCellDownloadMode) => void | Promise<void>;
+  canImportBinaryValue: (detail: DataGridCellDetail | null) => boolean;
+  importBinaryValue: (detail: DataGridCellDetail | null) => void | Promise<void>;
 }>();
 
 const emit = defineEmits<{
@@ -152,10 +154,13 @@ watch(
               <Button variant="ghost" size="icon" class="h-6 w-6" :title="t('grid.copyValue')" @click="copyCurrentValue">
                 <Copy class="h-3 w-3" />
               </Button>
+              <Button v-if="canImportBinaryValue(detail)" variant="ghost" size="icon" class="h-6 w-6" :title="t('grid.importBinaryValue')" @click="importBinaryValue(detail)">
+                <FileUp class="h-3 w-3" />
+              </Button>
               <DropdownMenu v-if="canDownloadBinaryValue(detail)">
                 <DropdownMenuTrigger as-child>
                   <Button variant="ghost" size="icon" class="h-6 w-6" :title="t('grid.downloadBinaryValue')">
-                    <Upload class="h-3 w-3" />
+                    <Download class="h-3 w-3" />
                   </Button>
                 </DropdownMenuTrigger>
                 <DropdownMenuContent align="end" class="w-44">

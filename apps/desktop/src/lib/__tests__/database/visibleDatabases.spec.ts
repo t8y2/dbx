@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { filterSchemaNamesForConnection, filterSchemaNamesForVisiblePicker, isSystemSchemaName } from "@/lib/database/visibleDatabases";
+import { connectionUsesVisibleSchemaFilter, filterSchemaNamesForConnection, filterSchemaNamesForVisiblePicker, isSystemSchemaName } from "@/lib/database/visibleDatabases";
 
 describe("visibleDatabases schema filtering", () => {
   it("hides common Kingbase system schemas by default", () => {
@@ -17,6 +17,17 @@ describe("visibleDatabases schema filtering", () => {
 
   it("keeps Oracle DIP visible while hiding default system schemas", () => {
     expect(filterSchemaNamesForConnection(["DBX_TEST", "DIP", "SYSTEM"], { db_type: "oracle", database: "XE" }, "XE")).toEqual(["DBX_TEST", "DIP"]);
+  });
+
+  it("uses Oracle schema filtering for inferred JDBC connections", () => {
+    const connection = {
+      db_type: "jdbc" as const,
+      connection_string: "jdbc:oracle:thin:@//localhost:1521/XE",
+      username: "DBX_TEST",
+    };
+
+    expect(connectionUsesVisibleSchemaFilter(connection)).toBe(true);
+    expect(filterSchemaNamesForConnection(["ANONYMOUS", "DBX_TEST", "SYS", "SYSTEM"], connection, "")).toEqual(["DBX_TEST"]);
   });
 
   it("keeps the Dameng login schema visible while hiding default system schemas", () => {

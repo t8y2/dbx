@@ -157,6 +157,7 @@ mod tests {
             username: "user".to_string(),
             password: "secret".to_string(),
             database: Some("demo".to_string()),
+            default_schema: None,
             visible_databases: None,
             visible_schemas: None,
             show_system_schemas: false,

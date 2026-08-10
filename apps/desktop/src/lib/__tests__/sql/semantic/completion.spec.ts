@@ -281,6 +281,29 @@ describe("semantic SQL completion candidates", () => {
     expect(columns.find((item) => item.label === "v.id")?.apply).toBe("v.id");
   });
 
+  it("prioritizes matching table aliases over matching columns", () => {
+    const columnsByTable = new Map<string, SqlCompletionColumn[]>([["test_tb", ["title", "type"].map((name) => ({ name, table: "test_tb" }))]]);
+
+    const { items } = semanticCompletion("SELECT * FROM test_tb AS tt WHERE t|", { columnsByTable });
+
+    expect(items[0]).toMatchObject({ label: "tt", type: "text", apply: "tt" });
+    expect(items.filter((item) => item.type === "column").map((item) => item.label)).toEqual(expect.arrayContaining(["title", "type"]));
+  });
+
+  it("qualifies both unique and duplicate columns in multi-table queries", () => {
+    const columnsByTable = new Map<string, SqlCompletionColumn[]>([
+      ["tVillage", ["villageId", "villageName"].map((name) => ({ name, table: "tVillage" }))],
+      ["tland", ["villageId", "landName"].map((name) => ({ name, table: "tland" }))],
+    ]);
+
+    const { items } = semanticCompletion("SELECT vill| FROM tVillage tV INNER JOIN tland tl ON tV.villageId = tl.villageId", { columnsByTable });
+    const columns = items.filter((item) => item.type === "column");
+
+    expect(columns.map((item) => item.label)).toEqual(expect.arrayContaining(["tV.villageId", "tV.villageName", "tl.villageId"]));
+    expect(columns.find((item) => item.label === "tV.villageName")).toMatchObject({ filterText: "villageName", apply: "tV.villageName" });
+    expect(columns.find((item) => item.label === "tl.villageId")).toMatchObject({ filterText: "villageId", apply: "tl.villageId" });
+  });
+
   it("completes columns for aliases in comma-separated table lists", () => {
     const columnsByTable = new Map<string, SqlCompletionColumn[]>([
       ["table_a", ["id", "name"].map((name) => ({ name, table: "table_a" }))],
@@ -417,7 +440,17 @@ WHERE a.id = b.fk_kpi_set_score_id`,
     const { context, items } = semanticCompletion("INSERT INTO users (|", { columnsByTable });
 
     expect(context.insertTable).toBe("users");
-    expect(items.find((item) => item.type === "snippet" && item.label === "users.*")?.apply).toBe("id, name, email");
+    const allColumns = items.find((item) => item.type === "snippet" && item.label === "users.*");
+    expect(allColumns?.apply).toBe("id, name, email) VALUES (${1:value}, ${2:value}, ${3:value})");
+    expect(allColumns?.detail).toBe("3 columns: id, name, email) VALUES (value, value, value)");
+  });
+
+  it("uses the configured keyword case for INSERT all-column snippets", () => {
+    const columnsByTable = new Map<string, SqlCompletionColumn[]>([["users", ["id", "name"].map((name) => ({ name, table: "users" }))]]);
+
+    const { items } = semanticCompletion("insert into users (|", { columnsByTable, keywordCase: "lower" });
+
+    expect(items.find((item) => item.type === "snippet" && item.label === "users.*")?.apply).toBe("id, name) values (${1:value}, ${2:value})");
   });
 
   it("keeps partial INSERT INTO targets in table completion context", () => {

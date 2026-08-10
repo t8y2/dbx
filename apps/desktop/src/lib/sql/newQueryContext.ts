@@ -17,7 +17,7 @@ interface ResolveNewQueryTargetInput {
   activeTab?: Pick<QueryTab, "connectionId" | "database" | "schema" | "catalog" | "objectBrowser" | "tableMeta">;
   selectedTreeNode?: Pick<TreeNode, "connectionId" | "database" | "schema" | "catalog"> | null;
   activeConnectionId?: string | null;
-  connections: Pick<ConnectionConfig, "id" | "host" | "database" | "db_type">[];
+  connections: Pick<ConnectionConfig, "id" | "host" | "database" | "default_schema" | "db_type">[];
   preferredSource?: NewQueryContextSource;
 }
 
@@ -45,6 +45,7 @@ export function resolveNewQueryTarget(input: ResolveNewQueryTargetInput): NewQue
     ? {
         connectionId: fallbackConnection.id,
         database: resolveDefaultDatabase(fallbackConnection, []),
+        schema: fallbackConnection.default_schema,
         shouldRefreshDefaultDatabase: true,
       }
     : null;
@@ -52,7 +53,7 @@ export function resolveNewQueryTarget(input: ResolveNewQueryTargetInput): NewQue
 
 function targetFromContext(
   context: Pick<QueryTab, "connectionId" | "database" | "schema" | "catalog" | "objectBrowser" | "tableMeta"> | Pick<TreeNode, "connectionId" | "database" | "schema" | "catalog"> | undefined,
-  connections: Pick<ConnectionConfig, "id" | "host" | "database" | "db_type">[],
+  connections: Pick<ConnectionConfig, "id" | "host" | "database" | "default_schema" | "db_type">[],
 ): NewQueryTarget | null {
   if (!context?.connectionId) return null;
   const connection = connections.find((item) => item.id === context.connectionId);
@@ -64,7 +65,7 @@ function targetFromContext(
   return {
     connectionId: context.connectionId,
     database,
-    schema: context.schema ?? objectBrowser?.schema ?? tableMeta?.schema,
+    schema: context.schema ?? objectBrowser?.schema ?? tableMeta?.schema ?? connection.default_schema,
     catalog: context.catalog ?? objectBrowser?.catalog ?? tableMeta?.catalog,
     shouldRefreshDefaultDatabase: !context.database,
   };

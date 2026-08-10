@@ -11,9 +11,9 @@ describe("AppTabBar close confirmation layout", () => {
 
   it("keeps all single and bulk close actions while allowing the footer to wrap", () => {
     expect(tabBarSource).toMatch(/<DialogFooter class="[^"]*\bmin-w-0\b[^"]*\bsm:flex-wrap\b">/);
-    expect(tabBarSource).toContain('v-if="showCloseConfirmBulkActions" variant="secondary" @click="handleDiscardAllAndClose"');
+    expect(tabBarSource).toContain('v-if="showCloseConfirmBulkActions" variant="secondary" class="border-border" @click="handleDiscardAllAndClose"');
     expect(tabBarSource).toContain('v-if="showCloseConfirmBulkActions" @click="handleSaveAllAndClose"');
-    expect(tabBarSource).toContain('@click="handleDiscardAndClose"');
+    expect(tabBarSource).toContain('variant="secondary" class="border-border" @click="handleDiscardAndClose"');
     expect(tabBarSource).toContain('@click="handleSaveAndClose"');
     expect(tabBarSource).toContain('@click="handleCancelClose"');
   });

@@ -99,6 +99,7 @@ fn postgres_test_config(id: &str, port: u16) -> ConnectionConfig {
         username: "postgres".to_string(),
         password: "postgres".to_string(),
         database: Some("postgres".to_string()),
+        default_schema: None,
         visible_databases: None,
         visible_schemas: None,
         attached_databases: Vec::new(),

@@ -1,5 +1,6 @@
 import type { SQLDialect } from "@codemirror/lang-sql";
 import type { DatabaseType } from "@/types/database";
+import { doltSqlBuiltinTerms } from "@/lib/database/doltProfile";
 
 export type CodeMirrorSqlDialectName = "mysql" | "postgres" | "sqlserver" | "clickhouse";
 
@@ -175,7 +176,7 @@ function codeMirrorBaseDialect(langSql: CodeMirrorSqlLanguageModule, dialectName
   return dialectName === "postgres" ? langSql.PostgreSQL : dialectName === "sqlserver" ? langSql.MSSQL : langSql.MySQL;
 }
 
-export function createDbxCodeMirrorSqlDialect(langSql: CodeMirrorSqlLanguageModule, dialectName: CodeMirrorSqlDialectName = "mysql", databaseType?: DatabaseType): SQLDialect {
+export function createDbxCodeMirrorSqlDialect(langSql: CodeMirrorSqlLanguageModule, dialectName: CodeMirrorSqlDialectName = "mysql", databaseType?: DatabaseType, driverProfile?: string): SQLDialect {
   const baseDialect = codeMirrorBaseDialect(langSql, dialectName, databaseType);
   const isPostgres = baseDialect === langSql.PostgreSQL;
   const isSqlServer = baseDialect === langSql.MSSQL;
@@ -188,7 +189,7 @@ export function createDbxCodeMirrorSqlDialect(langSql: CodeMirrorSqlLanguageModu
     ...baseDialect.spec,
     keywords: [baseKeywords, commonKeywords, isClickHouse ? CLICKHOUSE_KEYWORDS : "", isPostgres ? POSTGRES_PLPGSQL_KEYWORDS : "", isSqlServer ? SQLSERVER_KEYWORDS : ""].filter(Boolean).join(" "),
     types: [baseTypes, isClickHouse ? CLICKHOUSE_TYPES : "", isPostgres ? POSTGRES_PLPGSQL_TYPES : ""].filter(Boolean).join(" ") || undefined,
-    builtin: [baseDialect.spec.builtin || "", isClickHouse ? CLICKHOUSE_BUILTINS : "", isPostgres ? POSTGRES_PLPGSQL_BUILTIN : ""].filter(Boolean).join(" ") || undefined,
+    builtin: [baseDialect.spec.builtin || "", isClickHouse ? CLICKHOUSE_BUILTINS : "", isPostgres ? POSTGRES_PLPGSQL_BUILTIN : "", doltSqlBuiltinTerms(driverProfile)].filter(Boolean).join(" ") || undefined,
     ...(isClickHouse
       ? {
           identifierQuotes: '"`',

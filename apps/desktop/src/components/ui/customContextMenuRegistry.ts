@@ -1,3 +1,20 @@
+import type { Component } from "vue";
+
+export interface ContextMenuItem {
+  label: string;
+  action?: () => void;
+  disabled?: boolean | (() => boolean);
+  separator?: boolean;
+  icon?: Component;
+  iconClass?: string;
+  checked?: boolean;
+  // Raw shortcut syntax such as `Mod+C` or `Shift+Alt+U`; display formatting stays in this component.
+  shortcut?: string;
+  variant?: "default" | "destructive";
+  visible?: boolean;
+  children?: ContextMenuItem[];
+}
+
 export type ContextMenuClose = () => void;
 
 /** Marker attribute on scrollable context menu / submenu roots. */

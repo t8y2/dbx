@@ -838,6 +838,7 @@ mod tests {
             username: "postgres".to_string(),
             password: password.to_string(),
             database: Some("postgres".to_string()),
+            default_schema: None,
             visible_databases: None,
             visible_schemas: None,
             show_system_schemas: false,

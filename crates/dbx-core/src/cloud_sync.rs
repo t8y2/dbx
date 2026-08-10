@@ -1592,6 +1592,8 @@ mod tests {
                 opencode_cli_env: Default::default(),
                 cursor_cli_path: None,
                 cursor_cli_env: Default::default(),
+                grok_cli_path: None,
+                grok_cli_env: Default::default(),
             },
         }
     }
@@ -1661,6 +1663,7 @@ mod tests {
             username: "app".to_string(),
             password: password.to_string(),
             database: Some("app_db".to_string()),
+            default_schema: None,
             visible_databases: None,
             visible_schemas: None,
             show_system_schemas: false,
@@ -1719,6 +1722,7 @@ mod tests {
             username: "nacos".to_string(),
             password: String::new(),
             database: None,
+            default_schema: None,
             visible_databases: None,
             visible_schemas: None,
             show_system_schemas: false,
@@ -1814,6 +1818,7 @@ mod tests {
             username: "user".to_string(),
             password: "secret".to_string(),
             database: None,
+            default_schema: None,
             visible_databases: None,
             visible_schemas: None,
             show_system_schemas: false,

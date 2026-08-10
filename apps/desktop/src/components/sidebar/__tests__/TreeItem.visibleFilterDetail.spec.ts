@@ -40,6 +40,7 @@ const connectionStore = {
   getSidebarVisibleFilterSummary: () => state.summary,
   clearConnectionError: vi.fn(),
   isDefaultDatabase: () => false,
+  isDefaultSchema: () => false,
   isPinnedTreeNodeReorderTarget: () => false,
   isTreeNodeChildrenLoaded: () => false,
   isTreeNodePinned: () => false,

@@ -59,6 +59,14 @@ function oracleConn(id: string): ConnectionConfig {
   };
 }
 
+function sapHanaConn(id: string): ConnectionConfig {
+  return {
+    ...conn(id),
+    db_type: "saphana",
+    port: 30015,
+  };
+}
+
 function clearableQuerySchemaConn(id: string, dbType: "oracle" | "dameng" | "gaussdb" | "oceanbase-oracle"): ConnectionConfig {
   return {
     ...conn(id),
@@ -1878,6 +1886,109 @@ test("normalizes unquoted Oracle query identifiers before loading editable metad
     assert.equal(tab?.tableMeta?.tableName, "USERS");
     assert.deepEqual(tab?.querySourceColumns, ["ID", "NAME"]);
     assert.equal(tab?.queryEditabilityReason, undefined);
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreStorage();
+  }
+});
+
+test("normalizes only unquoted SAP HANA query identifiers before loading editable metadata", async () => {
+  const restoreStorage = installMemoryStorage();
+  setActivePinia(createPinia());
+  const connectionStore = useConnectionStore();
+  const store = useQueryStore();
+  const originalFetch = globalThis.fetch;
+  const columnRequests: Array<{ schema: string | null; table: string | null }> = [];
+
+  connectionStore.addEphemeralConnection(sapHanaConn("saphana-1"));
+
+  globalThis.fetch = withConnectionHealthMock(async (input, init) => {
+    const url = String(input);
+    if (url === "/api/query/execute-multi") {
+      const body = JSON.parse(String(init?.body ?? "{}"));
+      const quoted = body.sql.includes('"mixedCase"');
+      return new Response(
+        JSON.stringify([
+          {
+            columns: quoted ? ["id"] : ["ID", "NAME"],
+            rows: quoted ? [[1]] : [[1, "Ada"]],
+            affected_rows: 0,
+            execution_time_ms: 1,
+          },
+        ]),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }
+    if (url === "/api/query/analyze-editability") {
+      const body = JSON.parse(String(init?.body ?? "{}"));
+      const quoted = body.sql.includes('"mixedCase"');
+      return new Response(
+        JSON.stringify({
+          editable: true,
+          analysis: {
+            schema: quoted ? "mixedSchema" : "saphanadb",
+            schemaQuoted: quoted,
+            tableName: quoted ? "mixedCase" : "zmmt0003",
+            tableNameQuoted: quoted,
+            tableAlias: undefined,
+            selectStar: false,
+            columns: quoted
+              ? [{ sourceName: "id", sourceNameQuoted: true, resultName: "id", expression: '"id"' }]
+              : [
+                  { sourceName: "id", sourceNameQuoted: false, resultName: "ID", expression: "id" },
+                  { sourceName: "name", sourceNameQuoted: false, resultName: "NAME", expression: "name" },
+                ],
+          },
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }
+    if (url.startsWith("/api/schema/columns?")) {
+      const params = new URL(url, "http://localhost").searchParams;
+      const schema = params.get("schema");
+      const table = params.get("table");
+      columnRequests.push({ schema, table });
+      const columns =
+        schema === "SAPHANADB" && table === "ZMMT0003"
+          ? [
+              { name: "ID", data_type: "INTEGER", is_nullable: false, column_default: null, is_primary_key: true, extra: null, comment: "identifier" },
+              { name: "NAME", data_type: "NVARCHAR", is_nullable: true, column_default: null, is_primary_key: false, extra: null, comment: "display name" },
+            ]
+          : schema === "mixedSchema" && table === "mixedCase"
+            ? [{ name: "id", data_type: "INTEGER", is_nullable: false, column_default: null, is_primary_key: true, extra: null, comment: null }]
+            : [];
+      return new Response(JSON.stringify(columns), { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+    if (url === "/api/query/prepare-pagination-plan") {
+      const body = JSON.parse(String(init?.body ?? "{}"));
+      return new Response(JSON.stringify({ sqlToExecute: body.options.sql, useAgentResultSession: false }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    return new Response("unexpected request", { status: 500 });
+  });
+
+  try {
+    const unquotedTabId = store.createTab("saphana-1", "SYSTEMDB", "Unquoted", "query", "saphanadb");
+    await store.executeTabSql(unquotedTabId, "select id, name from zmmt0003");
+
+    const unquotedTab = store.tabs.find((item) => item.id === unquotedTabId);
+    await waitFor(() => columnRequests.length > 0 && unquotedTab?.tableMeta?.tableName === "ZMMT0003");
+    assert.deepEqual(columnRequests[0], { schema: "SAPHANADB", table: "ZMMT0003" });
+    assert.equal(unquotedTab?.tableMeta?.schema, "SAPHANADB");
+    assert.deepEqual(unquotedTab?.querySourceColumns, ["ID", "NAME"]);
+    assert.equal(unquotedTab?.queryEditabilityReason, undefined);
+
+    const quotedTabId = store.createTab("saphana-1", "SYSTEMDB", "Quoted", "query", "ignored");
+    await store.executeTabSql(quotedTabId, 'select "id" from "mixedSchema"."mixedCase"');
+
+    const quotedTab = store.tabs.find((item) => item.id === quotedTabId);
+    await waitFor(() => columnRequests.length > 1 && quotedTab?.tableMeta?.tableName === "mixedCase");
+    assert.deepEqual(columnRequests[1], { schema: "mixedSchema", table: "mixedCase" });
+    assert.equal(quotedTab?.tableMeta?.schema, "mixedSchema");
+    assert.deepEqual(quotedTab?.querySourceColumns, ["id"]);
+    assert.equal(quotedTab?.queryEditabilityReason, undefined);
   } finally {
     globalThis.fetch = originalFetch;
     restoreStorage();

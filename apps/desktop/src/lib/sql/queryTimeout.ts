@@ -3,6 +3,7 @@ import { tokenizeSqlSemantic } from "@/lib/sql/semantic/tokens";
 import type { ConnectionConfig, DatabaseType } from "@/types/database";
 
 export const DEFAULT_QUERY_TIMEOUT_SECS = 30;
+const MAX_BROWSER_TIMER_DELAY_MS = 2_147_483_647;
 
 const POSTGRES_ROW_STATEMENT_KEYWORDS = new Set(["select", "show", "explain", "table", "with"]);
 const POSTGRES_RETURNING_STATEMENT_KEYWORDS = new Set(["insert", "update", "delete", "merge"]);
@@ -28,6 +29,12 @@ export function frontendQueryTimeoutSecsForSql(sql: string, databaseType: Databa
   const baseTimeoutSecs = Math.max(queryTimeoutSecs * 2, 60);
   const statementCount = Math.max(splitSqlStatementRanges(sql, databaseType).length, 1);
   return baseTimeoutSecs * statementCount;
+}
+
+export function frontendQueryTimeoutDelayMs(timeoutSecs: number): number | undefined {
+  const timeoutMs = timeoutSecs * 1000;
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0 || timeoutMs > MAX_BROWSER_TIMER_DELAY_MS) return undefined;
+  return timeoutMs;
 }
 
 function postgresQueryMayReturnRows(sql: string, databaseType: DatabaseType): boolean {

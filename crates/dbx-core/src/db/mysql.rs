@@ -4203,7 +4203,11 @@ pub async fn execute_query(pool: &MySqlPool, sql: &str, bare: bool) -> Result<Qu
 
 pub async fn max_allowed_packet(pool: &MySqlPool) -> Result<u64, String> {
     let mut conn = get_conn_with_health_check(pool).await?;
-    query_first_column::<u64>(&mut conn, "SELECT @@max_allowed_packet")
+    max_allowed_packet_on_conn(&mut conn).await
+}
+
+pub(crate) async fn max_allowed_packet_on_conn(conn: &mut mysql_async::Conn) -> Result<u64, String> {
+    query_first_column::<u64>(conn, "SELECT @@max_allowed_packet")
         .await
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "MySQL did not return @@max_allowed_packet".to_string())
@@ -4489,6 +4493,103 @@ pub async fn execute_query_results_on_conn_with_max_rows(
     }
 }
 
+#[derive(Debug)]
+pub(crate) struct MySqlNonResultBatchOutcome {
+    pub results: Vec<QueryResult>,
+    pub error: Option<String>,
+}
+
+/// Executes a chunk of statements that are known not to return rows using one
+/// COM_QUERY packet. MySQL still executes every statement in order and exposes
+/// one OK packet per statement, so affected-row counts and failure positions
+/// remain attributable to the original statements without one network round
+/// trip per statement.
+pub(crate) async fn execute_non_result_batch_on_conn(
+    conn: &mut mysql_async::Conn,
+    sql: &str,
+    expected_results: usize,
+) -> Result<MySqlNonResultBatchOutcome, String> {
+    if expected_results == 0 {
+        return Ok(MySqlNonResultBatchOutcome { results: Vec::new(), error: None });
+    }
+
+    let start = Instant::now();
+    let capture_per_set_messages = conn.opts().deprecate_eof();
+    let previous_explicit_timestamp_defaults = enable_explicit_timestamp_defaults_for_query(conn, sql).await;
+    let mut result = match conn.query_iter(sql).await {
+        Ok(result) => result,
+        Err(error) => {
+            restore_explicit_timestamp_defaults_for_query(conn, previous_explicit_timestamp_defaults).await;
+            return Ok(MySqlNonResultBatchOutcome { results: Vec::new(), error: Some(error.to_string()) });
+        }
+    };
+    let mut results = Vec::with_capacity(expected_results);
+    let mut warning_counts = Vec::with_capacity(expected_results);
+    let mut error = None;
+
+    for statement_index in 0..expected_results {
+        if !result.columns_ref().is_empty() {
+            error = Some(format!(
+                "MySQL batch statement {} unexpectedly returned rows; retry the statement separately.",
+                statement_index + 1
+            ));
+            break;
+        }
+
+        let warnings = result.warnings();
+        let info = result.info().into_owned();
+        let messages =
+            if capture_per_set_messages { mysql_info_message(&info).into_iter().collect() } else { Vec::new() };
+        let current_result = QueryResult {
+            columns: vec![],
+            column_types: Vec::new(),
+            column_sortables: vec![],
+            spatial_columns: vec![],
+            spatial_values: vec![],
+            rows: vec![],
+            affected_rows: result.affected_rows(),
+            execution_time_ms: start.elapsed().as_millis(),
+            truncated: false,
+            session_id: None,
+            has_more: false,
+            elasticsearch_raw_body: None,
+            messages,
+        };
+
+        // mysql_async can expose a failed next statement only when the current
+        // result set is consumed. Do not mark the current metadata slot as a
+        // successful statement until that consumption succeeds.
+        if let Err(next_error) = result.collect::<mysql_async::Row>().await {
+            error = Some(next_error.to_string());
+            break;
+        }
+        results.push(current_result);
+        warning_counts.push(warnings);
+    }
+
+    if let Err(drop_error) = result.drop_result().await {
+        if error.is_none() {
+            error = Some(drop_error.to_string());
+        }
+    }
+    if error.is_none() && !results.is_empty() {
+        let last_index = results.len() - 1;
+        for (index, warnings) in warning_counts.into_iter().enumerate() {
+            if warnings == 0 {
+                continue;
+            }
+            if index == last_index {
+                results[index].messages.extend(collect_mysql_server_messages(conn, warnings, "").await);
+            } else if results[index].messages.is_empty() {
+                results[index].messages.push(mysql_warnings_fallback_message(warnings));
+            }
+        }
+    }
+    restore_explicit_timestamp_defaults_for_query(conn, previous_explicit_timestamp_defaults).await;
+
+    Ok(MySqlNonResultBatchOutcome { results, error })
+}
+
 fn prefers_text_protocol_query(sql: &str, dialect: MySqlQueryDialect) -> bool {
     // User-entered result-set queries are not parameterized in DBX. Text protocol
     // avoids binary result decoding bugs in MySQL-compatible servers and proxies.
@@ -4502,6 +4603,15 @@ pub(crate) fn is_result_set_query(sql: &str, dialect: MySqlQueryDialect) -> bool
         DatabaseType::Mysql,
     ) || mysql_statement_returns_rows(sql)
         || dialect.supports_admin_show_results && is_admin_show_query(sql)
+}
+
+pub(crate) fn is_batchable_non_result_query(sql: &str, dialect: MySqlQueryDialect) -> bool {
+    !is_result_set_query(sql, dialect)
+        && starts_with_executable_sql_keyword_for_database(
+            sql,
+            &["INSERT", "REPLACE", "UPDATE", "DELETE"],
+            DatabaseType::Mysql,
+        )
 }
 
 /// MariaDB 10.5+ returns a result set for INSERT/DELETE/REPLACE ... RETURNING.
@@ -5523,6 +5633,17 @@ mod tests {
         assert!(is_result_set_query("INSERT INTO users (id) VALUES (1) RETURNING id", dialect));
         assert!(is_result_set_query("DELETE FROM users WHERE id = 1 RETURNING id", dialect));
         assert!(!is_result_set_query("UPDATE users SET name = 'Ada'", dialect));
+    }
+
+    #[test]
+    fn mysql_multi_statement_pipeline_only_accepts_known_dml() {
+        let dialect = MySqlQueryDialect::default();
+
+        assert!(is_batchable_non_result_query("INSERT INTO users(id) VALUES (1)", dialect));
+        assert!(is_batchable_non_result_query("UPDATE users SET active = 1", dialect));
+        assert!(!is_batchable_non_result_query("SELECT * FROM users", dialect));
+        assert!(!is_batchable_non_result_query("ANALYZE TABLE users", dialect));
+        assert!(!is_batchable_non_result_query("CREATE TABLE users(id INT)", dialect));
     }
 
     #[test]

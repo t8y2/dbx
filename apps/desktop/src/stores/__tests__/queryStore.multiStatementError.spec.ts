@@ -197,6 +197,47 @@ describe("queryStore multi-statement errors", () => {
     });
   });
 
+  it("marks every statement completed by a pipelined progress event", async () => {
+    const pendingExecution = deferred<any[]>();
+    let reportProgress!: (progress: any) => void;
+    mocks.executeMultiWithProgress.mockImplementationOnce((_connectionId, _database, _sql, onProgress) => {
+      reportProgress = onProgress;
+      return pendingExecution.promise;
+    });
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const sql = "SET @n = 0;\nINSERT INTO t VALUES (1);\nINSERT INTO t VALUES (2);\nSELECT COUNT(*) FROM t";
+    const tabId = store.createTab("mysql-1", "app", "Query", "query", undefined, sql);
+
+    const execution = store.executeTabSql(tabId, sql);
+    await vi.waitFor(() => expect(store.tabs.find((item) => item.id === tabId)?.batchSqlExecution?.items[0]?.status).toBe("running"));
+    const executionId = store.tabs.find((item) => item.id === tabId)!.executionId!;
+
+    reportProgress({
+      executionId,
+      statementIndex: 2,
+      completed: 3,
+      total: 4,
+      success: true,
+      executionTimeMs: 8,
+      affectedRows: 1,
+    });
+
+    expect(store.tabs.find((item) => item.id === tabId)?.batchSqlExecution).toMatchObject({
+      completed: 3,
+      total: 4,
+      items: [{ status: "success" }, { status: "success" }, { status: "success" }, { status: "running" }],
+    });
+
+    pendingExecution.resolve([
+      { columns: [], rows: [], affected_rows: 0, execution_time_ms: 2, statement_index: 0 },
+      { columns: [], rows: [], affected_rows: 1, execution_time_ms: 4, statement_index: 1 },
+      { columns: [], rows: [], affected_rows: 1, execution_time_ms: 8, statement_index: 2 },
+      { columns: ["COUNT(*)"], rows: [[2]], affected_rows: 0, execution_time_ms: 2, statement_index: 3 },
+    ]);
+    await execution;
+  });
+
   it("records a top-level batch failure on the current statement", async () => {
     mocks.executeMultiWithProgress.mockRejectedValueOnce(new Error("transport failed"));
     const { useQueryStore } = await import("@/stores/queryStore");

@@ -43,7 +43,7 @@ import { tableOpenPageLimit } from "@/lib/table/tableOpenPageLimit";
 import { getCachedTableMetadata, loadTableIndexes, loadTableMetadata, type TableMetadataRequest } from "@/lib/metadata/tableMetadataCache";
 import { buildTableSelectSql, quoteTableDataIdentifier } from "@/lib/table/tableSelectSql";
 import { connectionObjectTreeNodeSchema, connectionQueryExecutionSchema, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection, metadataSchemaForConnection } from "@/lib/database/jdbcDialect";
-import { frontendQueryTimeoutSecsForSql, queryTimeoutSecsForConnection } from "@/lib/sql/queryTimeout";
+import { frontendQueryTimeoutDelayMs, frontendQueryTimeoutSecsForSql, queryTimeoutSecsForConnection } from "@/lib/sql/queryTimeout";
 import { queryResultNameFromPreamble, queryResultSourceLabel } from "@/lib/sql/queryResultSource";
 import { beginDataGridNativeSelectionBlock, finishDataGridNativeSelectionBlock } from "@/lib/dataGrid/dataGridNativeSelection";
 import { simpleDataGridOrderByReferencesMissingColumn, sortDataGridRowIndexes, type DataGridSortDirection } from "@/lib/dataGrid/dataGridSort";
@@ -295,8 +295,17 @@ function applyBatchSqlProgress(
 ) {
   const batch = batchSqlExecutionFor(tab, progress.executionId);
   if (!batch) return;
+  const previousCompleted = batch.completed;
   const item = batch.items[progress.statementIndex];
   if (!item) return;
+  if (progress.success && progress.completed > previousCompleted + 1) {
+    for (let index = previousCompleted; index < progress.completed - 1; index += 1) {
+      const completedItem = batch.items[index];
+      if (completedItem && (completedItem.status === "pending" || completedItem.status === "running")) {
+        completedItem.status = "success";
+      }
+    }
+  }
   item.status = progress.success ? "success" : "error";
   item.executionTimeMs = progress.executionTimeMs;
   item.affectedRows = progress.affectedRows;
@@ -304,7 +313,7 @@ function applyBatchSqlProgress(
   item.error = progress.error ? translateBackendError(i18n.global.t, progress.error) : undefined;
   batch.completed = Math.max(batch.completed, progress.completed);
   if ((progress.success || continueOnError) && progress.completed < batch.total) {
-    const next = batch.items[progress.statementIndex + 1];
+    const next = batch.items[progress.completed];
     if (next?.status === "pending") next.status = "running";
   }
 }
@@ -430,14 +439,15 @@ function displayedQueryMetadataSql(tab: QueryTab, fallbackSql: string): string {
 }
 
 async function withFrontendQueryTimeout<T>(promise: Promise<T>, timeoutSecs: number, message: string): Promise<T> {
-  if (timeoutSecs === 0) return promise;
+  const timeoutMs = frontendQueryTimeoutDelayMs(timeoutSecs);
+  if (timeoutMs === undefined) return promise;
 
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     return await Promise.race([
       promise,
       new Promise<never>((_, reject) => {
-        timer = setTimeout(() => reject(new Error(message)), timeoutSecs * 1000);
+        timer = setTimeout(() => reject(new Error(message)), timeoutMs);
       }),
     ]);
   } finally {

@@ -561,6 +561,8 @@ describe("settingsStore persisted settings initialization", () => {
     const store = useSettingsStore();
 
     await expect(store.initEditorSettings()).rejects.toThrow("storage temporarily unavailable");
+    store.updateEditorSettings({ appLayout: "separated" });
+    expect(saveEditorSettings).not.toHaveBeenCalled();
     await store.initEditorSettings();
 
     expect(store.isEditorSettingsLoaded).toBe(true);
@@ -569,11 +571,12 @@ describe("settingsStore persisted settings initialization", () => {
       theme: "xcode-dark",
       executeMode: "all",
       updateNotificationsEnabled: false,
+      appLayout: "separated",
     });
-    expect(saveEditorSettings).not.toHaveBeenCalled();
+    expect(saveEditorSettings).toHaveBeenCalledWith(expect.objectContaining({ fontSize: 17, theme: "xcode-dark", appLayout: "separated" }));
   });
 
-  it("shares concurrent initialization and does not persist defaults before saved settings load", async () => {
+  it("shares concurrent initialization and applies startup changes after saved settings load", async () => {
     let resolveLoad!: (value: unknown) => void;
     const loadEditorSettings = vi.fn(
       () =>
@@ -608,13 +611,21 @@ describe("settingsStore persisted settings initialization", () => {
     await Promise.all([firstInitialization, secondInitialization]);
 
     expect(store.editorSettings).toMatchObject({
-      appLayout: "classic",
-      tabLayout: "scroll",
-      uiFontFamily: "persisted font",
+      appLayout: "separated",
+      tabLayout: "wrap",
+      uiFontFamily: "pre-load default snapshot",
       toolbarItems: expect.objectContaining({ history: false }),
       snippets: [expect.objectContaining({ id: "persisted", body: "SELECT 42" })],
     });
-    expect(saveEditorSettings).not.toHaveBeenCalled();
+    expect(saveEditorSettings).toHaveBeenCalledWith(
+      expect.objectContaining({
+        appLayout: "separated",
+        tabLayout: "wrap",
+        uiFontFamily: "pre-load default snapshot",
+        toolbarItems: expect.objectContaining({ history: false }),
+        snippets: [expect.objectContaining({ id: "persisted", body: "SELECT 42" })],
+      }),
+    );
   });
 });
 

@@ -1159,6 +1159,10 @@ function editorSettingsSnapshot(settings: EditorSettings): EditorSettings {
   return JSON.parse(JSON.stringify(settings)) as EditorSettings;
 }
 
+function editorSettingsPatchSnapshot(settings: Partial<EditorSettings>): Partial<EditorSettings> {
+  return JSON.parse(JSON.stringify(settings)) as Partial<EditorSettings>;
+}
+
 function saveEditorSettings(settings: EditorSettings) {
   void api.saveEditorSettings(editorSettingsSnapshot(settings)).catch(() => {});
 }
@@ -1185,6 +1189,7 @@ export const useSettingsStore = defineStore("settings", () => {
   const isMcpGlobalPolicyLoaded = ref(false);
   const isEditorSettingsLoaded = ref(false);
   let initEditorSettingsPromise: Promise<void> | null = null;
+  let pendingEditorSettingsPatches: Partial<EditorSettings>[] = [];
   let pendingAiChatSelection: AiChatSelectionState | null = null;
   let aiChatSelectionSaveRunning = false;
 
@@ -1200,6 +1205,14 @@ export const useSettingsStore = defineStore("settings", () => {
 
   function clearSettingsNavigationRequest(id: number) {
     if (settingsNavigationRequest.value?.id === id) settingsNavigationRequest.value = null;
+  }
+
+  function completeEditorSettingsInitialization() {
+    const pendingPatches = pendingEditorSettingsPatches;
+    pendingEditorSettingsPatches = [];
+    for (const patch of pendingPatches) applyEditorSettingsPatch(patch);
+    isEditorSettingsLoaded.value = true;
+    if (pendingPatches.length) saveEditorSettings(editorSettings.value);
   }
 
   async function initEditorSettings() {
@@ -1220,7 +1233,7 @@ export const useSettingsStore = defineStore("settings", () => {
             // Persist one-time migrations so removed or unsafe defaults cannot reappear.
             await api.saveEditorSettings(normalized).catch(() => {});
           }
-          isEditorSettingsLoaded.value = true;
+          completeEditorSettingsInitialization();
           return;
         }
 
@@ -1236,7 +1249,7 @@ export const useSettingsStore = defineStore("settings", () => {
             /* keep legacy values for a later migration attempt */
           }
         }
-        isEditorSettingsLoaded.value = true;
+        completeEditorSettingsInitialization();
       })().finally(() => {
         initEditorSettingsPromise = null;
       });
@@ -1485,7 +1498,7 @@ export const useSettingsStore = defineStore("settings", () => {
     return !!config.endpoint && !!activeModel.value!.modelId && (!preset.requiresApiKey || !!config.apiKey);
   });
 
-  function updateEditorSettings(partial: Partial<EditorSettings>) {
+  function applyEditorSettingsPatch(partial: Partial<EditorSettings>) {
     if (partial.fontFamily !== undefined) editorSettings.value.fontFamily = normalizeFontFamily(partial.fontFamily, DEFAULT_EDITOR_SETTINGS.fontFamily);
     if (partial.fontSize !== undefined) editorSettings.value.fontSize = partial.fontSize;
     if (partial.uiFontFamily !== undefined) editorSettings.value.uiFontFamily = normalizeFontFamily(partial.uiFontFamily, DEFAULT_EDITOR_SETTINGS.uiFontFamily);
@@ -1613,7 +1626,15 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.continueOnErrorOnBatch !== undefined) editorSettings.value.continueOnErrorOnBatch = partial.continueOnErrorOnBatch === true;
     if (partial.clickTableNavigationTarget !== undefined) editorSettings.value.clickTableNavigationTarget = normalizeClickTableNavigationTarget(partial.clickTableNavigationTarget);
     if (partial.completionTriggerMode !== undefined) editorSettings.value.completionTriggerMode = normalizeCompletionTriggerMode(partial.completionTriggerMode);
-    if (isEditorSettingsLoaded.value) saveEditorSettings(editorSettings.value);
+  }
+
+  function updateEditorSettings(partial: Partial<EditorSettings>) {
+    applyEditorSettingsPatch(partial);
+    if (!isEditorSettingsLoaded.value) {
+      pendingEditorSettingsPatches.push(editorSettingsPatchSnapshot(partial));
+      return;
+    }
+    saveEditorSettings(editorSettings.value);
   }
 
   async function persistEditorSettings(): Promise<void> {

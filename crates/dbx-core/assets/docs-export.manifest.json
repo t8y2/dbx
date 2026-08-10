@@ -38,7 +38,7 @@
     "apps/desktop/src/i18n/locales/docs/zh-TW.ts": "691cf502248dbd09358c6c276990945013b26c52fb682bcd56b26f378daea29c",
     "apps/desktop/src/lib/app/localeOptions.ts": "c269b1ca1d5c71dc27dd2ab5422a902c848722acabf0dbd205275624fc9482e6",
     "apps/desktop/src/lib/diagram/erDiagram.ts": "1b9522b41cd2ee15ef04dc11e0f855459287fca2d5e0f551263dfc6f8de5764e",
-    "apps/desktop/src/styles/tokens.css": "5f050d28e3e278c259929e55ffc7bad63e5c3e8340ab6c04c018cbfd941c2b44",
+    "apps/desktop/src/styles/tokens.css": "b8852ce50865ad98ebc992971f7a06670c5d830ca82efcee956f8d3eb7c2e9a3",
     "apps/desktop/tsconfig.json": "5ad521941835ad8529e9b81ba79c11650e5f020f0e376b7a9f17e22a9306fa76",
     "apps/desktop/vite.docs-export.config.ts": "ba99d16885a572aaccaab46fcd61a5c4ac0c3bea572ea92582fca64118f83d86"
   },

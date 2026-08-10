@@ -2336,7 +2336,6 @@ function createHoverDom(title: string, detail: string, sqlContent?: string, rows
 
     const sqlContainer = document.createElement("div");
     sqlContainer.className = "mt-1.5 text-[11px] leading-5 whitespace-pre font-mono";
-    constrainSqlHoverLayout(dom, sqlContainer);
 
     if (hoverSqlHighlighter) {
       sqlContainer.innerHTML = hoverSqlHighlighter(sqlContent, isDark.value ? "dark" : "light");
@@ -2346,6 +2345,7 @@ function createHoverDom(title: string, detail: string, sqlContent?: string, rows
     }
 
     dom.appendChild(sqlContainer);
+    constrainSqlHoverLayout(dom, sqlContainer);
   }
 
   for (const row of rows) {
@@ -5804,6 +5804,66 @@ defineExpose({
 </style>
 
 <style>
+[data-sql-structure-hover-content="true"] {
+  scrollbar-color: color-mix(in oklab, var(--foreground) 42%, transparent) color-mix(in oklab, var(--muted) 65%, transparent);
+}
+
+[data-sql-structure-hover-content="true"]::-webkit-scrollbar {
+  width: 8px;
+  height: 0;
+}
+
+[data-sql-structure-hover-content="true"]::-webkit-scrollbar:horizontal {
+  display: none;
+  height: 0;
+}
+
+[data-sql-structure-hover-content="true"]::-webkit-scrollbar-track {
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--muted) 65%, transparent);
+}
+
+[data-sql-structure-hover-content="true"]::-webkit-scrollbar-thumb {
+  min-width: 32px;
+  min-height: 32px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--foreground) 42%, transparent);
+  background-clip: padding-box;
+}
+
+[data-sql-structure-hover-content="true"]::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+[data-sql-structure-hover-scrollbar="true"] {
+  position: relative;
+  width: 100%;
+  height: 10px;
+  margin-top: 6px;
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--muted) 72%, var(--border));
+  cursor: pointer;
+  touch-action: none;
+  user-select: none;
+  flex: 0 0 10px;
+}
+
+[data-sql-structure-hover-scrollbar-thumb="true"] {
+  position: absolute;
+  top: 1px;
+  left: 0;
+  height: 8px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--foreground) 52%, transparent);
+  background-clip: padding-box;
+}
+
+[data-sql-structure-hover-scrollbar="true"]:hover [data-sql-structure-hover-scrollbar-thumb="true"] {
+  background: color-mix(in oklab, var(--foreground) 70%, transparent);
+}
+
 .intention-popup-overlay {
   position: fixed;
   inset: 0;

@@ -890,10 +890,12 @@ export interface TreeNode {
   tableName?: string;
   objectName?: string;
   signature?: string;
-  /** Owning package/type for nested routine members. */
+  /** Owning programmable object for a nested metadata member. */
   parentName?: string;
   parentSchema?: string;
   parentType?: TreeNodeType;
+  /** Set only for XuguDB object types whose members can be loaded lazily. */
+  xuguTypeMembersExpandable?: boolean;
   tableType?: string;
   comment?: string | null;
   valid?: boolean | null;

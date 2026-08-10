@@ -92,7 +92,7 @@ export function treeNodeRowAction(type: TreeNodeType, canExpand: boolean, activa
   if (!shouldActivateTreeNodeOnSingleClick(type, activation)) return "none";
   if (type === "extension") return "open-extension-details";
   if (dataNodeTypes.has(type)) return "open-data";
-  if (type === "package" && canExpand) return "toggle";
+  if ((type === "package" || type === "type") && canExpand) return "toggle";
   if (sourceNodeTypes.has(type)) return "open-source";
   if (toggleLeafNodeTypes.has(type)) return "toggle";
   if (canExpand) return "toggle";

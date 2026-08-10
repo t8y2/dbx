@@ -156,7 +156,7 @@ export function canTreeNodeExpand(type: TreeNodeType): boolean {
 }
 
 export function canTreeNodeShowExpander({ type, childCount, explicitContainer = false }: { type: TreeNodeType; childCount?: number; explicitContainer?: boolean }): boolean {
-  if (!canTreeNodeExpand(type) && !(type === "package" && explicitContainer)) return false;
+  if (!canTreeNodeExpand(type) && !((type === "package" || type === "type") && explicitContainer)) return false;
   if (childCount === 0 && emptyContainerTypes.has(type)) return false;
   return true;
 }

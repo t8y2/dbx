@@ -23,6 +23,11 @@ describe("treeNodeClick", () => {
     expect(treeNodeRowAction("package", false)).toBe("open-source");
   });
 
+  it("toggles an expandable type node before opening its source", () => {
+    expect(treeNodeRowAction("type", true)).toBe("toggle");
+    expect(treeNodeRowAction("type", false)).toBe("open-source");
+  });
+
   it("routes package members to their owning package body", () => {
     expect(
       objectSourceTargetForTreeNode({

@@ -34,6 +34,12 @@ describe("sidebar tree item layout", () => {
     expect(canTreeNodeShowExpander({ type: "procedure", childCount: 0, explicitContainer: true })).toBe(false);
   });
 
+  it("allows only an explicitly marked Xugu type specification to expand", () => {
+    expect(canTreeNodeShowExpander({ type: "type", childCount: 0, explicitContainer: true })).toBe(true);
+    expect(canTreeNodeShowExpander({ type: "type", childCount: 0 })).toBe(false);
+    expect(canTreeNodeShowExpander({ type: "type-body", childCount: 0, explicitContainer: true })).toBe(false);
+  });
+
   it("aligns comments to the longest sibling name without crossing parent groups", () => {
     const widths = alignedSidebarCommentLabelWidths([
       { id: "tables", depth: 1, alignable: false, hasComment: false, labelWidth: 0 },

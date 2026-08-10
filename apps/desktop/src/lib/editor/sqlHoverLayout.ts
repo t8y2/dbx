@@ -8,7 +8,14 @@ export function sqlHoverScrollbarMetrics(clientWidth: number, scrollWidth: numbe
   return { maxScroll, maxThumbLeft, thumbLeft, thumbWidth };
 }
 
-function appendSqlHoverHorizontalScrollbar(root: HTMLElement, sqlContent: HTMLElement) {
+export interface SqlHoverLayoutController {
+  /** Called after the tooltip dom is added to the document. */
+  mount(): void;
+  /** Called when the tooltip is removed or the editor is destroyed. */
+  destroy(): void;
+}
+
+function appendSqlHoverHorizontalScrollbar(root: HTMLElement, sqlContent: HTMLElement): SqlHoverLayoutController {
   const track = document.createElement("div");
   track.dataset.sqlStructureHoverScrollbar = "true";
   track.hidden = true;
@@ -20,6 +27,7 @@ function appendSqlHoverHorizontalScrollbar(root: HTMLElement, sqlContent: HTMLEl
 
   let dragOffset = 0;
   let dragging = false;
+  let resizeObserver: ResizeObserver | null = null;
 
   const update = () => {
     const metrics = sqlHoverScrollbarMetrics(sqlContent.clientWidth, sqlContent.scrollWidth, sqlContent.scrollLeft, track.clientWidth);
@@ -74,6 +82,8 @@ function appendSqlHoverHorizontalScrollbar(root: HTMLElement, sqlContent: HTMLEl
     update();
   };
 
+  // 事件监听在构建时绑定即可，元素未挂载也不影响；ResizeObserver 必须等
+  // dom 进入文档后才能拿到正确尺寸，故放到 mount() 里启动。
   sqlContent.addEventListener("scroll", update, { passive: true });
   sqlContent.addEventListener("wheel", handleWheel, { passive: false });
   track.addEventListener("pointerdown", handlePointerDown);
@@ -81,31 +91,28 @@ function appendSqlHoverHorizontalScrollbar(root: HTMLElement, sqlContent: HTMLEl
   track.addEventListener("pointerup", handlePointerUp);
   track.addEventListener("pointercancel", handlePointerUp);
 
-  requestAnimationFrame(() => {
-    update();
-    if (!root.isConnected) return;
-
-    const resizeObserver = new ResizeObserver(update);
-    resizeObserver.observe(sqlContent);
-    resizeObserver.observe(track);
-
-    const removalObserver = new MutationObserver(() => {
-      if (root.isConnected) return;
-      resizeObserver.disconnect();
-      removalObserver.disconnect();
+  return {
+    mount() {
+      update();
+      resizeObserver = new ResizeObserver(update);
+      resizeObserver.observe(sqlContent);
+      resizeObserver.observe(track);
+    },
+    destroy() {
+      resizeObserver?.disconnect();
+      resizeObserver = null;
       sqlContent.removeEventListener("scroll", update);
       sqlContent.removeEventListener("wheel", handleWheel);
       track.removeEventListener("pointerdown", handlePointerDown);
       track.removeEventListener("pointermove", handlePointerMove);
       track.removeEventListener("pointerup", handlePointerUp);
       track.removeEventListener("pointercancel", handlePointerUp);
-    });
-    removalObserver.observe(document.body, { childList: true, subtree: true });
-  });
+    },
+  };
 }
 
 /** Keep table-DDL hovers readable without allowing one long line to size the tooltip. */
-export function constrainSqlHoverLayout(root: HTMLElement, sqlContent: HTMLElement) {
+export function constrainSqlHoverLayout(root: HTMLElement, sqlContent: HTMLElement): SqlHoverLayoutController {
   root.dataset.sqlStructureHover = "true";
   root.style.boxSizing = "border-box";
   root.style.display = "flex";
@@ -125,5 +132,5 @@ export function constrainSqlHoverLayout(root: HTMLElement, sqlContent: HTMLEleme
   sqlContent.style.overscrollBehavior = "contain";
   sqlContent.style.scrollbarGutter = "stable";
 
-  appendSqlHoverHorizontalScrollbar(root, sqlContent);
+  return appendSqlHoverHorizontalScrollbar(root, sqlContent);
 }

@@ -56,4 +56,27 @@ describe("constrainSqlHoverLayout", () => {
     expect(content.scrollLeft).toBe(120);
     expect(wheelEvent.defaultPrevented).toBe(true);
   });
+
+  it("starts the scrollbar on mount and stops responding after destroy", () => {
+    const root = document.createElement("div");
+    const content = document.createElement("div");
+    Object.defineProperty(content, "clientWidth", { configurable: true, value: 600 });
+    Object.defineProperty(content, "scrollWidth", { configurable: true, value: 2400 });
+    const controller = constrainSqlHoverLayout(root, content);
+    const track = root.querySelector<HTMLElement>('[data-sql-structure-hover-scrollbar="true"]')!;
+
+    // 挂载前未跑过 update，轨道仍隐藏
+    expect(track.hidden).toBe(true);
+    controller.mount();
+    expect(track.hidden).toBe(false);
+
+    const before = content.scrollLeft;
+    content.dispatchEvent(new WheelEvent("wheel", { cancelable: true, deltaX: 120 }));
+    expect(content.scrollLeft).toBe(before + 120);
+
+    controller.destroy();
+    const afterDestroy = content.scrollLeft;
+    content.dispatchEvent(new WheelEvent("wheel", { cancelable: true, deltaX: 120 }));
+    expect(content.scrollLeft).toBe(afterDestroy);
+  });
 });

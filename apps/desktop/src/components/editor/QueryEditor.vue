@@ -2315,7 +2315,7 @@ async function ensureForeignKeysForTables(tables: Array<{ name: string; database
   }
 }
 
-function createHoverDom(title: string, detail: string, sqlContent?: string, rows: string[] = []) {
+function createHoverDom(title: string, detail: string, sqlContent?: string, rows: string[] = []): { dom: HTMLElement; mount?: () => void; destroy?: () => void } {
   const dom = document.createElement("div");
   dom.className = "rounded-md border bg-popover px-3 py-2 text-xs text-popover-foreground shadow-md";
 
@@ -2328,6 +2328,8 @@ function createHoverDom(title: string, detail: string, sqlContent?: string, rows
   detailNode.className = "mt-1 text-muted-foreground";
   detailNode.textContent = detail;
   dom.appendChild(detailNode);
+
+  let layoutController: ReturnType<typeof constrainSqlHoverLayout> | null = null;
 
   if (sqlContent) {
     const separator = document.createElement("div");
@@ -2345,7 +2347,9 @@ function createHoverDom(title: string, detail: string, sqlContent?: string, rows
     }
 
     dom.appendChild(sqlContainer);
-    constrainSqlHoverLayout(dom, sqlContainer);
+    // 返回 mount/destroy 给 CodeMirror TooltipView 生命周期钩子，
+    // 避免 MutationObserver 监听 body 全子树来兜底清理。
+    layoutController = constrainSqlHoverLayout(dom, sqlContainer);
   }
 
   for (const row of rows) {
@@ -2355,7 +2359,11 @@ function createHoverDom(title: string, detail: string, sqlContent?: string, rows
     dom.appendChild(rowNode);
   }
 
-  return dom;
+  return {
+    dom,
+    mount: layoutController ? () => layoutController?.mount() : undefined,
+    destroy: layoutController ? () => layoutController?.destroy() : undefined,
+  };
 }
 
 async function resolveSqlHoverTooltip(currentView: EditorViewType, pos: number) {
@@ -2478,9 +2486,7 @@ async function resolveSqlHoverTooltip(currentView: EditorViewType, pos: number) 
       return {
         pos: range.from,
         end: range.to,
-        create: () => ({
-          dom: createHoverDom(table.name, sqlObjectHoverDetail(table), sqlContent, metadataLoadFailed ? ["[DBX] Failed to load table structure — check connection"] : undefined),
-        }),
+        create: () => createHoverDom(table.name, sqlObjectHoverDetail(table), sqlContent, metadataLoadFailed ? ["[DBX] Failed to load table structure — check connection"] : undefined),
       };
     }
 
@@ -2504,9 +2510,7 @@ async function resolveSqlHoverTooltip(currentView: EditorViewType, pos: number) 
       return {
         pos: range.from,
         end: range.to,
-        create: () => ({
-          dom: createHoverDom(column.name, column.dataType || "column", undefined, [column.schema ? `${column.schema}.${column.table}` : column.table, ...(column.comment?.trim() ? [column.comment.trim()] : [])]),
-        }),
+        create: () => createHoverDom(column.name, column.dataType || "column", undefined, [column.schema ? `${column.schema}.${column.table}` : column.table, ...(column.comment?.trim() ? [column.comment.trim()] : [])]),
       };
     }
   } catch {

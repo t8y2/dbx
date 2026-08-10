@@ -2959,6 +2959,7 @@ fn row_to_object(row: &mysql_async::Row, database: &str) -> ObjectInfo {
         updated_at: get_opt_str(row, "updated_at"),
         parent_schema: get_opt_str(row, "parent_schema"),
         parent_name: get_opt_str(row, "parent_name"),
+        xugu_type_members_expandable: None,
     }
 }
 
@@ -3229,6 +3230,7 @@ fn table_infos_to_objects(
                 updated_at: meta.and_then(|meta| meta.updated_at.clone()),
                 parent_schema: table.parent_schema,
                 parent_name: table.parent_name,
+                xugu_type_members_expandable: None,
             }
         })
         .collect()
@@ -5375,6 +5377,7 @@ mod tests {
             updated_at: None,
             parent_schema: None,
             parent_name: None,
+            xugu_type_members_expandable: None,
         }
     }
 

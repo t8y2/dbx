@@ -162,7 +162,8 @@ func TestParseXuguObjectTypeMembersPreservesQuotedNamesAndSignatures(t *testing.
   "line""Code" VARCHAR(40),
   amount NUMERIC(12, 2),
   STATIC FUNCTION normalize(p_value IN VARCHAR(100), p_result OUT VARCHAR(100)) RETURN VARCHAR(100),
-  MEMBER FUNCTION normalize(p_value INTEGER) RETURN INTEGER,
+  MEMBER FUNCTION normalize(p_value INTEGER) RETURN INTEGER PIPELINED,
+  CONSTRUCTOR PROCEDURE "Order Type"(p_id INTEGER) RETURN SELF AS RESULT,
   -- A quoted routine name and IN OUT parameter are both significant.
   MEMBER PROCEDURE "set Label"(p_label IN OUT VARCHAR(80))
 )`)
@@ -176,8 +177,8 @@ func TestParseXuguObjectTypeMembersPreservesQuotedNamesAndSignatures(t *testing.
 	if got := attributes[1]; got.Name != "amount" || got.DataType != "NUMERIC(12, 2)" {
 		t.Fatalf("unexpected numeric attribute: %#v", got)
 	}
-	if len(methods) != 3 {
-		t.Fatalf("method count = %d, want 3: %#v", len(methods), methods)
+	if len(methods) != 4 {
+		t.Fatalf("method count = %d, want 4: %#v", len(methods), methods)
 	}
 	if got := methods[0]; got.Kind != "FUNCTION" || got.Name != "normalize" || got.Signature != "p_value VARCHAR(100), p_result OUT VARCHAR(100)" || got.ReturnType != "VARCHAR(100)" {
 		t.Fatalf("unexpected static function: %#v", got)
@@ -185,7 +186,10 @@ func TestParseXuguObjectTypeMembersPreservesQuotedNamesAndSignatures(t *testing.
 	if got := methods[1]; got.Kind != "FUNCTION" || got.Signature != "p_value INTEGER" || got.ReturnType != "INTEGER" {
 		t.Fatalf("unexpected overloaded function: %#v", got)
 	}
-	if got := methods[2]; got.Kind != "PROCEDURE" || got.Name != "set Label" || got.Signature != "p_label IN OUT VARCHAR(80)" {
+	if got := methods[2]; got.Kind != "PROCEDURE" || got.Name != "Order Type" || got.Signature != "p_id INTEGER" {
+		t.Fatalf("unexpected constructor procedure: %#v", got)
+	}
+	if got := methods[3]; got.Kind != "PROCEDURE" || got.Name != "set Label" || got.Signature != "p_label IN OUT VARCHAR(80)" {
 		t.Fatalf("unexpected quoted procedure: %#v", got)
 	}
 }

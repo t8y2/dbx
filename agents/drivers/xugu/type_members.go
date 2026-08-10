@@ -333,6 +333,14 @@ func parseXuguObjectTypeMethod(declaration string, number int) (xuguTypeMethod, 
 			keywordStart = next
 			continue
 		}
+		if upper == "CONSTRUCTOR" {
+			procedure, afterProcedure, ok := readXuguTypeIdentifier(declaration, next)
+			if !ok || !strings.EqualFold(procedure, "PROCEDURE") {
+				return xuguTypeMethod{}, false
+			}
+			upper = "PROCEDURE"
+			next = afterProcedure
+		}
 		if upper != "FUNCTION" && upper != "PROCEDURE" {
 			return xuguTypeMethod{}, false
 		}
@@ -353,11 +361,21 @@ func parseXuguObjectTypeMethod(declaration string, number int) (xuguTypeMethod, 
 		returnType := ""
 		if upper == "FUNCTION" {
 			if returnIndex := xuguIndexKeywordOutsideSQL(remainder, "RETURN"); returnIndex >= 0 {
-				returnType = compactXuguTypeFragment(remainder[returnIndex+len("RETURN"):])
+				returnType = xuguTypeReturnType(remainder[returnIndex+len("RETURN"):])
 			}
 		}
 		return xuguTypeMethod{Name: name, Number: number, Kind: upper, Signature: signature, ReturnType: returnType}, true
 	}
+}
+
+func xuguTypeReturnType(value string) string {
+	end := len(value)
+	for _, keyword := range []string{"PIPELINED", "DETERMINISTIC", "PARALLEL_ENABLE", "RESULT_CACHE", "AUTHID"} {
+		if index := xuguIndexKeywordOutsideSQL(value, keyword); index >= 0 && index < end {
+			end = index
+		}
+	}
+	return compactXuguTypeFragment(value[:end])
 }
 
 func xuguTypeParameterSignature(value string) string {

@@ -131,6 +131,7 @@ pub async fn list_objects(pool: &mysql_async::Pool, schema: &str) -> Result<Vec<
             updated_at: None,
             parent_schema: None,
             parent_name: None,
+            xugu_type_members_expandable: None,
         })
         .collect())
 }

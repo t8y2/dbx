@@ -434,6 +434,7 @@ export interface ObjectInfo {
   updated_at?: string | null;
   parent_schema?: string | null;
   parent_name?: string | null;
+  xugu_type_members_expandable?: boolean | null;
 }
 
 export interface ObjectStatistics {

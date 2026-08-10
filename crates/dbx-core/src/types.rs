@@ -76,6 +76,8 @@ pub struct ObjectInfo {
     pub updated_at: Option<String>,
     pub parent_schema: Option<String>,
     pub parent_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub xugu_type_members_expandable: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -579,11 +581,14 @@ mod tests {
     #[test]
     fn list_objects_payload_preserves_optional_validity() {
         let objects: Vec<ObjectInfo> =
-            serde_json::from_str(r#"[{"name":"TRG_AUDIT","object_type":"TRIGGER","schema":"APP","valid":false}]"#)
+            serde_json::from_str(
+                r#"[{"name":"TRG_AUDIT","object_type":"TRIGGER","schema":"APP","valid":false},{"name":"ORDER_TYPE","object_type":"TYPE","schema":"APP","xugu_type_members_expandable":true}]"#,
+            )
                 .unwrap();
 
         assert_eq!(objects[0].valid, Some(false));
         assert_eq!(objects[0].object_type, "TRIGGER");
+        assert_eq!(objects[1].xugu_type_members_expandable, Some(true));
     }
 
     #[test]

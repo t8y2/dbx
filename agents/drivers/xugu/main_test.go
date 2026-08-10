@@ -1010,7 +1010,7 @@ func TestXuguListObjectsQueryIncludesProgrammableObjects(t *testing.T) {
 		ObjectTypes: []string{"procedure", "function", "package", "package-body", "trigger", "sequence", "synonym", "type", "type-body"},
 	})
 
-	for _, want := range []string{"ALL_PROCEDURES", "p.VALID", "ALL_PACKAGES", "p.BODY IS NOT NULL", "ALL_TRIGGERS", "ALL_SEQUENCES", "ALL_SYNONYMS", "y.IS_PUBLIC = FALSE", "ALL_TYPES", "u.BODY IS NOT NULL", "OBJECT_NAME, OBJECT_TYPE, COMMENTS, VALID", "OBJECT_TYPE IN (?,?,?,?,?,?,?,?,?)"} {
+	for _, want := range []string{"ALL_PROCEDURES", "p.VALID", "ALL_PACKAGES", "p.BODY IS NOT NULL", "ALL_TRIGGERS", "ALL_SEQUENCES", "ALL_SYNONYMS", "y.IS_PUBLIC = FALSE", "ALL_TYPES", "u.UDT_TYPE = 1001", "XUGU_TYPE_MEMBERS_EXPANDABLE", "u.BODY IS NOT NULL", "OBJECT_NAME, OBJECT_TYPE, COMMENTS, VALID", "OBJECT_TYPE IN (?,?,?,?,?,?,?,?,?)"} {
 		if !strings.Contains(query.SQL, want) {
 			t.Fatalf("expected SQL to contain %q:\n%s", want, query.SQL)
 		}
@@ -2441,8 +2441,8 @@ func (c *xuguPermissionMetadataConn) QueryContext(_ context.Context, query strin
 	}
 	if strings.Contains(upper, "FROM ALL_SYNONYMS") && strings.Contains(upper, "AS OBJECT_TYPE") && !strings.Contains(upper, "FROM ALL_TABLES") {
 		return &xuguStaticRows{
-			columns: []string{"OBJECT_NAME", "OBJECT_TYPE", "COMMENTS", "VALID"},
-			values:  [][]driver.Value{{"PRIVATE_SYNONYM", "SYNONYM", nil, true}},
+			columns: []string{"OBJECT_NAME", "OBJECT_TYPE", "COMMENTS", "VALID", "XUGU_TYPE_MEMBERS_EXPANDABLE"},
+			values:  [][]driver.Value{{"PRIVATE_SYNONYM", "SYNONYM", nil, true, nil}},
 		}, nil
 	}
 	if strings.Contains(upper, "ALL_") || strings.Contains(upper, "SYS_") {

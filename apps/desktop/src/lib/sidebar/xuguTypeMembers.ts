@@ -1,11 +1,7 @@
 import type { CompletionAssistantCandidate, TreeNode } from "@/types/database";
 
 export function isXuguTypeMemberContainer(node: TreeNode, databaseType?: string): boolean {
-  return databaseType === "xugu" && node.type === "type" && !!node.connectionId && !!node.database;
-}
-
-export function markXuguTypeNodesExpandable(nodes: TreeNode[]): TreeNode[] {
-  return nodes.map((node) => (node.type === "type" ? { ...node, children: node.children ?? [], xuguTypeMembersExpandable: true } : node));
+  return databaseType === "xugu" && node.type === "type" && node.xuguTypeMembersExpandable === true && !!node.connectionId && !!node.database;
 }
 
 export function buildXuguTypeMemberNodes(typeNode: TreeNode, candidates: readonly CompletionAssistantCandidate[]): TreeNode[] {

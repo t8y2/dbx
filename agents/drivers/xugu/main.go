@@ -304,11 +304,12 @@ type tableInfo struct {
 }
 
 type objectInfo struct {
-	Name       string  `json:"name"`
-	ObjectType string  `json:"object_type"`
-	Schema     string  `json:"schema"`
-	Comment    *string `json:"comment"`
-	Valid      *bool   `json:"valid,omitempty"`
+	Name                      string  `json:"name"`
+	ObjectType                string  `json:"object_type"`
+	Schema                    string  `json:"schema"`
+	Comment                   *string `json:"comment"`
+	Valid                     *bool   `json:"valid,omitempty"`
+	XuguTypeMembersExpandable *bool   `json:"xugu_type_members_expandable,omitempty"`
 }
 
 type metadataListConstraints struct {
@@ -1940,14 +1941,18 @@ func readXuguObjectRows(rows *sql.Rows, schema string) ([]objectInfo, error) {
 	var result []objectInfo
 	for rows.Next() {
 		var item objectInfo
-		var valid any
+		var valid, xuguTypeMembersExpandable any
 		item.Schema = schema
-		if err := rows.Scan(&item.Name, &item.ObjectType, &item.Comment, &valid); err != nil {
+		if err := rows.Scan(&item.Name, &item.ObjectType, &item.Comment, &valid, &xuguTypeMembersExpandable); err != nil {
 			return nil, err
 		}
 		if valid != nil {
 			value := truthy(valid)
 			item.Valid = &value
+		}
+		if normalizeValue(xuguTypeMembersExpandable) != nil {
+			value := truthy(xuguTypeMembersExpandable)
+			item.XuguTypeMembersExpandable = &value
 		}
 		result = append(result, item)
 	}
@@ -2095,13 +2100,13 @@ func xuguListObjectsQuery(schema string, constraints metadataListConstraints) xu
 	}
 	sources := []objectSource{
 		{objectTypes: []string{"TABLE"}, sql: `
-SELECT t.TABLE_NAME AS OBJECT_NAME, 'TABLE' AS OBJECT_TYPE, t.COMMENTS, NULL AS VALID
+SELECT t.TABLE_NAME AS OBJECT_NAME, 'TABLE' AS OBJECT_TYPE, t.COMMENTS, NULL AS VALID, NULL AS XUGU_TYPE_MEMBERS_EXPANDABLE
 FROM ALL_TABLES t
 JOIN ALL_SCHEMAS s ON s.DB_ID = t.DB_ID AND s.SCHEMA_ID = t.SCHEMA_ID
 WHERE s.DB_ID = CURRENT_DB_ID
   AND UPPER(s.SCHEMA_NAME) = UPPER(?)`},
 		{objectTypes: []string{"VIEW"}, sql: `
-SELECT v.VIEW_NAME AS OBJECT_NAME, 'VIEW' AS OBJECT_TYPE, v.COMMENTS, v.VALID
+SELECT v.VIEW_NAME AS OBJECT_NAME, 'VIEW' AS OBJECT_TYPE, v.COMMENTS, v.VALID, NULL AS XUGU_TYPE_MEMBERS_EXPANDABLE
 FROM ALL_VIEWS v
 JOIN ALL_SCHEMAS s ON s.DB_ID = v.DB_ID AND s.SCHEMA_ID = v.SCHEMA_ID
 WHERE s.DB_ID = CURRENT_DB_ID
@@ -2109,52 +2114,53 @@ WHERE s.DB_ID = CURRENT_DB_ID
 		{objectTypes: []string{"PROCEDURE", "FUNCTION"}, sql: `
 		SELECT p.PROC_NAME AS OBJECT_NAME,
 		       CASE WHEN p.RET_TYPE IS NULL THEN 'PROCEDURE' ELSE 'FUNCTION' END AS OBJECT_TYPE,
-		       p.COMMENTS, p.VALID
+		       p.COMMENTS, p.VALID, NULL AS XUGU_TYPE_MEMBERS_EXPANDABLE
 		FROM ALL_PROCEDURES p
 		JOIN ALL_SCHEMAS s ON s.DB_ID = p.DB_ID AND s.SCHEMA_ID = p.SCHEMA_ID
 		WHERE s.DB_ID = CURRENT_DB_ID
 		  AND UPPER(s.SCHEMA_NAME) = UPPER(?)`},
 		{objectTypes: []string{"PACKAGE"}, sql: `
-SELECT p.PACK_NAME AS OBJECT_NAME, 'PACKAGE' AS OBJECT_TYPE, p.COMMENTS, p.VALID
+SELECT p.PACK_NAME AS OBJECT_NAME, 'PACKAGE' AS OBJECT_TYPE, p.COMMENTS, p.VALID, NULL AS XUGU_TYPE_MEMBERS_EXPANDABLE
 FROM ALL_PACKAGES p
 JOIN ALL_SCHEMAS s ON s.DB_ID = p.DB_ID AND s.SCHEMA_ID = p.SCHEMA_ID
 WHERE s.DB_ID = CURRENT_DB_ID
   AND UPPER(s.SCHEMA_NAME) = UPPER(?)`},
 		{objectTypes: []string{"PACKAGE_BODY"}, sql: `
-SELECT p.PACK_NAME AS OBJECT_NAME, 'PACKAGE_BODY' AS OBJECT_TYPE, p.COMMENTS, p.ALL_OK
+SELECT p.PACK_NAME AS OBJECT_NAME, 'PACKAGE_BODY' AS OBJECT_TYPE, p.COMMENTS, p.ALL_OK, NULL AS XUGU_TYPE_MEMBERS_EXPANDABLE
 FROM ALL_PACKAGES p
 JOIN ALL_SCHEMAS s ON s.DB_ID = p.DB_ID AND s.SCHEMA_ID = p.SCHEMA_ID
 WHERE s.DB_ID = CURRENT_DB_ID
   AND UPPER(s.SCHEMA_NAME) = UPPER(?)
   AND p.BODY IS NOT NULL`},
 		{objectTypes: []string{"TRIGGER"}, sql: `
-SELECT tr.TRIG_NAME AS OBJECT_NAME, 'TRIGGER' AS OBJECT_TYPE, tr.COMMENTS, tr.VALID
+SELECT tr.TRIG_NAME AS OBJECT_NAME, 'TRIGGER' AS OBJECT_TYPE, tr.COMMENTS, tr.VALID, NULL AS XUGU_TYPE_MEMBERS_EXPANDABLE
 FROM ALL_TRIGGERS tr
 JOIN ALL_SCHEMAS s ON s.DB_ID = tr.DB_ID AND s.SCHEMA_ID = tr.SCHEMA_ID
 WHERE s.DB_ID = CURRENT_DB_ID
   AND UPPER(s.SCHEMA_NAME) = UPPER(?)`},
 		{objectTypes: []string{"SEQUENCE"}, sql: `
-		SELECT q.SEQ_NAME AS OBJECT_NAME, 'SEQUENCE' AS OBJECT_TYPE, NULL AS COMMENTS, NULL AS VALID
+		SELECT q.SEQ_NAME AS OBJECT_NAME, 'SEQUENCE' AS OBJECT_TYPE, NULL AS COMMENTS, NULL AS VALID, NULL AS XUGU_TYPE_MEMBERS_EXPANDABLE
 FROM ALL_SEQUENCES q
 JOIN ALL_SCHEMAS s ON s.DB_ID = q.DB_ID AND s.SCHEMA_ID = q.SCHEMA_ID
 WHERE s.DB_ID = CURRENT_DB_ID
   AND UPPER(s.SCHEMA_NAME) = UPPER(?)
   AND q.IS_SYS = FALSE`},
 		{objectTypes: []string{"SYNONYM"}, sql: `
-SELECT y.SYNO_NAME AS OBJECT_NAME, 'SYNONYM' AS OBJECT_TYPE, NULL AS COMMENTS, y.VALID
+SELECT y.SYNO_NAME AS OBJECT_NAME, 'SYNONYM' AS OBJECT_TYPE, NULL AS COMMENTS, y.VALID, NULL AS XUGU_TYPE_MEMBERS_EXPANDABLE
 FROM ALL_SYNONYMS y
 JOIN ALL_SCHEMAS s ON s.DB_ID = y.DB_ID AND s.SCHEMA_ID = y.SCHEMA_ID
 WHERE s.DB_ID = CURRENT_DB_ID
   AND UPPER(s.SCHEMA_NAME) = UPPER(?)
 	AND y.IS_PUBLIC = FALSE`},
 		{objectTypes: []string{"TYPE"}, sql: `
-SELECT u.TYPE_NAME AS OBJECT_NAME, 'TYPE' AS OBJECT_TYPE, u.COMMENTS, u.VALID
+SELECT u.TYPE_NAME AS OBJECT_NAME, 'TYPE' AS OBJECT_TYPE, u.COMMENTS, u.VALID,
+	       CASE WHEN u.UDT_TYPE = 1001 THEN TRUE ELSE FALSE END AS XUGU_TYPE_MEMBERS_EXPANDABLE
 FROM ALL_TYPES u
 JOIN ALL_SCHEMAS s ON s.DB_ID = u.DB_ID AND s.SCHEMA_ID = u.SCHEMA_ID
 WHERE s.DB_ID = CURRENT_DB_ID
   AND UPPER(s.SCHEMA_NAME) = UPPER(?)`},
 		{objectTypes: []string{"TYPE_BODY"}, sql: `
-SELECT u.TYPE_NAME AS OBJECT_NAME, 'TYPE_BODY' AS OBJECT_TYPE, u.COMMENTS, u.VALID
+SELECT u.TYPE_NAME AS OBJECT_NAME, 'TYPE_BODY' AS OBJECT_TYPE, u.COMMENTS, u.VALID, NULL AS XUGU_TYPE_MEMBERS_EXPANDABLE
 FROM ALL_TYPES u
 JOIN ALL_SCHEMAS s ON s.DB_ID = u.DB_ID AND s.SCHEMA_ID = u.SCHEMA_ID
 WHERE s.DB_ID = CURRENT_DB_ID
@@ -2195,7 +2201,7 @@ WHERE s.DB_ID = CURRENT_DB_ID
 	}
 	return xuguConstrainedMetadataListQuery(
 		strings.Join(baseSQLParts, "\nUNION ALL\n"),
-		"OBJECT_NAME, OBJECT_TYPE, COMMENTS, VALID",
+		"OBJECT_NAME, OBJECT_TYPE, COMMENTS, VALID, XUGU_TYPE_MEMBERS_EXPANDABLE",
 		"OBJECT_NAME",
 		"OBJECT_TYPE",
 		baseArgs,

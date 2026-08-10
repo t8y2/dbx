@@ -110,9 +110,9 @@ import { normalizeRedisDatabaseAliases, redisDatabaseAlias, redisDatabaseLabel }
 import { appendAgentDriverUpdateHint, hasAgentDriverUpdate, hasInstalledAgentVersion, type AgentDriverInstallState } from "@/lib/connection/agentDriverInstallHint";
 import { appendConnectionErrorHints } from "@/lib/connection/connectionErrorHints";
 import { appendVisibleDatabaseSelection } from "@/lib/connection/connectionVisibleDatabases";
+import { buildXuguTypeMemberNodes, isXuguTypeMemberContainer } from "@/lib/sidebar/xuguTypeMembers";
 import { filterNacosNamespacesForSidebar, normalizeNacosNamespacesForDisplay } from "@/lib/nacos/nacosNamespaceVisibility";
 import { buildPackageMemberNodes, markPackageNodesExpandable } from "@/lib/sidebar/packageMembers";
-import { buildXuguTypeMemberNodes, isXuguTypeMemberContainer, markXuguTypeNodesExpandable } from "@/lib/sidebar/xuguTypeMembers";
 import { configuredDatabaseProductName, connectionConfigFingerprint, normalizeDatabaseConnectionInfo } from "@/lib/connection/connectionDatabaseInfo";
 import { createMetadataLoadTrace, logMetadataLoadTrace, MetadataLoadCoordinator, type MetadataLoadTraceLogger } from "@/lib/metadata/metadataLoadCoordinator";
 import type { MetadataScopeInput } from "@/lib/metadata/metadataLoadScope";
@@ -1608,8 +1608,7 @@ export const useConnectionStore = defineStore("connection", () => {
     const refreshedGroup = grouped.find((group) => group.type === options.node.type);
     const children = refreshedGroup?.children ?? [];
     const databaseType = options.node.connectionId ? effectiveDatabaseTypeForConnection(getConfig(options.node.connectionId)) : undefined;
-    const packageChildren = supportsPackageMemberExpansion(databaseType) ? markPackageNodesExpandable(children) : children;
-    return databaseType === "xugu" ? markXuguTypeNodesExpandable(packageChildren) : packageChildren;
+    return supportsPackageMemberExpansion(databaseType) ? markPackageNodesExpandable(children) : children;
   }
 
   function tableInfosToCompletionTables(tables: readonly TableInfo[], schema?: string): SqlCompletionTable[] {
@@ -1877,7 +1876,6 @@ export const useConnectionStore = defineStore("connection", () => {
       if (supportsPackageMemberExpansion(databaseType)) {
         supplementalChildren = markPackageNodesExpandable(supplementalChildren);
       }
-      if (databaseType === "xugu") supplementalChildren = markXuguTypeNodesExpandable(supplementalChildren);
       if (supplementalChildren.length === 0) return;
       if (isTreeLoadSearchChanged(searchFilter, options.loadOptions)) return;
       const targetNode = treeNodeLoadTarget(options.load);

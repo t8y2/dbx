@@ -99,14 +99,20 @@ describe("programmable database objects", () => {
   it("keeps Xugu trigger/type nodes distinct and preserves an invalid status", () => {
     const objects: ObjectInfo[] = [
       { name: "TRG_AUDIT", object_type: "TRIGGER", schema: "APP", valid: false },
-      { name: "ADDRESS_T", object_type: "TYPE", schema: "APP", valid: true },
+      { name: "ADDRESS_T", object_type: "TYPE", schema: "APP", valid: true, xugu_type_members_expandable: true },
+      { name: "ADDRESS_LIST", object_type: "TYPE", schema: "APP", valid: true, xugu_type_members_expandable: false },
       { name: "ADDRESS_T", object_type: "TYPE_BODY", schema: "APP", valid: true },
     ];
 
     const nodes = buildSimpleObjectTreeNodes({ ...context, schema: "APP", objects });
 
     expect(nodes).toEqual(
-      expect.arrayContaining([expect.objectContaining({ type: "trigger", objectName: "TRG_AUDIT", valid: false }), expect.objectContaining({ type: "type", objectName: "ADDRESS_T", valid: true }), expect.objectContaining({ type: "type-body", objectName: "ADDRESS_T", valid: true })]),
+      expect.arrayContaining([
+        expect.objectContaining({ type: "trigger", objectName: "TRG_AUDIT", valid: false }),
+        expect.objectContaining({ type: "type", objectName: "ADDRESS_T", valid: true, xuguTypeMembersExpandable: true }),
+        expect.objectContaining({ type: "type", objectName: "ADDRESS_LIST", valid: true, xuguTypeMembersExpandable: false }),
+        expect.objectContaining({ type: "type-body", objectName: "ADDRESS_T", valid: true }),
+      ]),
     );
   });
 

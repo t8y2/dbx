@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildXuguTypeMemberNodes, isXuguTypeMemberContainer, markXuguTypeNodesExpandable } from "@/lib/sidebar/xuguTypeMembers";
+import { buildXuguTypeMemberNodes, isXuguTypeMemberContainer } from "@/lib/sidebar/xuguTypeMembers";
 import type { TreeNode } from "@/types/database";
 
 const typeNode: TreeNode = {
@@ -11,6 +11,7 @@ const typeNode: TreeNode = {
   database: "database",
   schema: "AppSchema",
   isExpanded: false,
+  xuguTypeMembersExpandable: true,
 };
 
 describe("Xugu object type members", () => {
@@ -18,17 +19,8 @@ describe("Xugu object type members", () => {
     expect(isXuguTypeMemberContainer(typeNode, "xugu")).toBe(true);
     expect(isXuguTypeMemberContainer(typeNode, "oracle")).toBe(false);
     expect(isXuguTypeMemberContainer({ ...typeNode, type: "type-body" }, "xugu")).toBe(false);
+    expect(isXuguTypeMemberContainer({ ...typeNode, xuguTypeMembersExpandable: false }, "xugu")).toBe(false);
     expect(isXuguTypeMemberContainer({ ...typeNode, database: undefined }, "xugu")).toBe(false);
-  });
-
-  it("makes only type specification nodes explicit containers", () => {
-    const nodes = markXuguTypeNodesExpandable([typeNode, { ...typeNode, id: "body", type: "type-body" }, { ...typeNode, id: "function", type: "function" }]);
-
-    expect(nodes[0]?.children).toEqual([]);
-    expect(nodes[0]?.xuguTypeMembersExpandable).toBe(true);
-    expect(nodes[1]?.children).toBeUndefined();
-    expect(nodes[1]?.xuguTypeMembersExpandable).toBeUndefined();
-    expect(nodes[2]?.children).toBeUndefined();
   });
 
   it("renders attributes and callable members without treating them as top-level routines", () => {

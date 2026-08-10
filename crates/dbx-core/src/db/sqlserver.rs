@@ -2324,6 +2324,7 @@ pub async fn list_objects(client: &mut SqlServerClient, schema: &str) -> Result<
             updated_at: row.get::<chrono::NaiveDateTime, _>(3).map(|value| value.to_string()),
             parent_schema: None,
             parent_name: None,
+            xugu_type_members_expandable: None,
         })
         .collect())
 }

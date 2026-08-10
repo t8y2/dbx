@@ -46,6 +46,9 @@ import type {
 } from "@/types/database";
 import { normalizeRustMongoCommand, type MongoCommand } from "@/lib/mongo/mongoShellCommand";
 import { BackendErrorException, type BackendError } from "@/lib/backend/errorUtils";
+import type { S3CredentialsStatus, S3DownloadResult, S3SyncConfig, S3SyncSummary } from "@/lib/backend/s3Types";
+
+export type { S3CredentialsStatus, S3DownloadResult, S3SyncConfig, S3SyncSummary } from "@/lib/backend/s3Types";
 import type { CollectionInfo } from "@/types/database";
 import type { SchemaDiffPreparation, SchemaDiffPreparationOptions, TableDiff, FunctionDiff, SequenceDiff, RuleDiff, OwnerDiff } from "@/lib/schema/schemaDiff";
 import type { SidebarObjectKind } from "@/lib/database/databaseObjectCapabilities";
@@ -1750,6 +1753,30 @@ export async function webdavSyncUpload(config: WebDavConfig, editorSettings?: un
 
 export async function webdavSyncDownload(config: WebDavConfig, secretsPassphrase?: string): Promise<WebDavDownloadResult> {
   return post("/api/cloud-sync/webdav/download", { config, secretsPassphrase });
+}
+
+export async function s3SyncTest(config: S3SyncConfig): Promise<void> {
+  await post("/api/cloud-sync/s3/test", { config });
+}
+
+export async function s3CredentialsStatus(config: S3SyncConfig): Promise<S3CredentialsStatus> {
+  return post("/api/cloud-sync/s3/credentials-status", { config });
+}
+
+export async function saveS3SavedCredentials(config: S3SyncConfig, secretAccessKey: string, sessionToken?: string): Promise<void> {
+  await post("/api/cloud-sync/s3/save-credentials", { config, secretAccessKey, sessionToken });
+}
+
+export async function forgetS3SavedCredentials(config: S3SyncConfig): Promise<void> {
+  await post("/api/cloud-sync/s3/forget-credentials", { config });
+}
+
+export async function s3SyncUpload(config: S3SyncConfig, editorSettings?: unknown, secretsPassphrase?: string): Promise<S3SyncSummary> {
+  return post("/api/cloud-sync/s3/upload", { config, editorSettings, secretsPassphrase });
+}
+
+export async function s3SyncDownload(config: S3SyncConfig, secretsPassphrase?: string): Promise<S3DownloadResult> {
+  return post("/api/cloud-sync/s3/download", { config, secretsPassphrase });
 }
 
 export async function snippetSyncTest(config: SnippetSyncConfig): Promise<void> {

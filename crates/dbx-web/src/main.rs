@@ -884,7 +884,13 @@ async fn main() {
         .route("/cloud-sync/snippet/save-id", post(routes::cloud_sync::save_snippet_sync_id))
         .route("/cloud-sync/snippet/retry-legacy-cleanup", post(routes::cloud_sync::retry_snippet_legacy_cleanup))
         .route("/cloud-sync/snippet/upload", post(routes::cloud_sync::snippet_sync_upload))
-        .route("/cloud-sync/snippet/download", post(routes::cloud_sync::snippet_sync_download));
+        .route("/cloud-sync/snippet/download", post(routes::cloud_sync::snippet_sync_download))
+        .route("/cloud-sync/s3/test", post(routes::s3_sync::s3_sync_test))
+        .route("/cloud-sync/s3/credentials-status", post(routes::s3_sync::s3_credentials_status))
+        .route("/cloud-sync/s3/save-credentials", post(routes::s3_sync::save_s3_saved_credentials))
+        .route("/cloud-sync/s3/forget-credentials", post(routes::s3_sync::forget_s3_saved_credentials))
+        .route("/cloud-sync/s3/upload", post(routes::s3_sync::s3_sync_upload))
+        .route("/cloud-sync/s3/download", post(routes::s3_sync::s3_sync_download));
 
     // Do not expose DuckDB-only handlers from builds that omit DuckDB sidecar support.
     #[cfg(feature = "duckdb-sidecar")]

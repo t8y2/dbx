@@ -19,6 +19,9 @@ use crate::models::connection::{ConnectionConfig, DatabaseType, TransportLayerCo
 use crate::saved_sql::SavedSqlLibrary;
 use crate::storage::{DesktopSettings, SnippetPendingCleanup, Storage};
 
+mod s3;
+pub use s3::*;
+
 const SNAPSHOT_SCHEMA_VERSION: u32 = 1;
 const ENCRYPTED_SNIPPET_SNAPSHOT_FORMAT: &str = "dbx-encrypted-sync-snapshot";
 const ENCRYPTED_SNIPPET_SNAPSHOT_VERSION: u32 = 1;

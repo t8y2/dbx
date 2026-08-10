@@ -32,7 +32,7 @@ export interface SettingsSearchEntry {
 }
 
 export interface SettingsSearchRoute {
-  syncMethodTab?: "webdav" | "snippet";
+  syncMethodTab?: "webdav" | "s3" | "snippet";
 }
 
 export type Translate = (key: string) => string;
@@ -205,6 +205,12 @@ export const SETTINGS_SEARCH_DEFINITIONS: readonly SettingsSearchDefinition[] = 
   { id: "sync-webdav-password", category: "sync", titleKey: "settings.syncPassword", targetId: "sync-webdav", route: { syncMethodTab: "webdav" }, visible: desktopOnly },
   { id: "sync-webdav-remote-path", category: "sync", titleKey: "settings.syncRemotePath", targetId: "sync-webdav", route: { syncMethodTab: "webdav" }, visible: desktopOnly },
   { id: "sync-webdav-auto-upload", category: "sync", titleKey: "settings.syncAutoUploadInterval", targetId: "sync-webdav", route: { syncMethodTab: "webdav" }, visible: desktopOnly },
+  { id: "sync-s3", category: "sync", titleKey: "settings.syncS3Title", descriptionKey: "settings.syncS3Description", targetId: "sync-s3", route: { syncMethodTab: "s3" }, visible: desktopOnly },
+  { id: "sync-s3-endpoint", category: "sync", titleKey: "settings.syncS3Endpoint", targetId: "sync-s3", route: { syncMethodTab: "s3" }, visible: desktopOnly },
+  { id: "sync-s3-bucket", category: "sync", titleKey: "settings.syncS3Bucket", targetId: "sync-s3", route: { syncMethodTab: "s3" }, visible: desktopOnly },
+  { id: "sync-s3-credentials", category: "sync", titleKey: "settings.syncS3AccessKeyId", targetId: "sync-s3", route: { syncMethodTab: "s3" }, visible: desktopOnly },
+  { id: "sync-s3-object-key", category: "sync", titleKey: "settings.syncS3ObjectKey", targetId: "sync-s3", route: { syncMethodTab: "s3" }, visible: desktopOnly },
+  { id: "sync-s3-auto-upload", category: "sync", titleKey: "settings.syncAutoUploadInterval", targetId: "sync-s3", route: { syncMethodTab: "s3" }, visible: desktopOnly },
   { id: "sync-snippet", category: "sync", titleKey: "settings.syncSnippetTitle", descriptionKey: "settings.syncSnippetDescription", targetId: "sync-snippet", route: { syncMethodTab: "snippet" }, visible: desktopOnly },
   { id: "sync-snippet-provider", category: "sync", titleKey: "settings.syncSnippetProvider", targetId: "sync-snippet", route: { syncMethodTab: "snippet" }, visible: desktopOnly },
   { id: "sync-snippet-id", category: "sync", titleKey: "settings.syncSnippetId", targetId: "sync-snippet", route: { syncMethodTab: "snippet" }, visible: desktopOnly },

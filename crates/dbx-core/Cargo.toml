@@ -47,6 +47,8 @@ rustls = { version = "0.23", features = ["aws-lc-rs"] }
 rustls-pemfile = "2.2"
 tiberius = { version = "0.12.3", default-features = false, features = ["tds73", "chrono", "rust_decimal", "rustls", "sql-browser-tokio"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls", "socks"] }
+reqsign = { version = "0.20.5", default-features = false, features = ["aws"] }
+http = "1"
 prometheus-parse = "=0.2.5"
 futures = "0.3"
 mongodb = "3.2.5"

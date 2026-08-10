@@ -1,5 +1,8 @@
 import { invoke } from "@tauri-apps/api/core";
 import { BackendErrorException, type BackendError } from "@/lib/backend/errorUtils";
+import type { S3CredentialsStatus, S3DownloadResult, S3SyncConfig, S3SyncSummary } from "@/lib/backend/s3Types";
+
+export type { S3CredentialsStatus, S3DownloadResult, S3SyncConfig, S3SyncSummary } from "@/lib/backend/s3Types";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { normalizeRustMongoCommand, type MongoCommand } from "@/lib/mongo/mongoShellCommand";
 import { ExternalSqlFileTooLargeError } from "@/lib/sql/sqlFileOpen";
@@ -684,6 +687,30 @@ export async function webdavSyncUpload(config: WebDavConfig, editorSettings?: un
 
 export async function webdavSyncDownload(config: WebDavConfig, secretsPassphrase?: string): Promise<WebDavDownloadResult> {
   return invoke("webdav_sync_download", { config, secretsPassphrase });
+}
+
+export async function s3SyncTest(config: S3SyncConfig): Promise<void> {
+  return invoke("s3_sync_test", { config });
+}
+
+export async function s3CredentialsStatus(config: S3SyncConfig): Promise<S3CredentialsStatus> {
+  return invoke("s3_credentials_status", { config });
+}
+
+export async function saveS3SavedCredentials(config: S3SyncConfig, secretAccessKey: string, sessionToken?: string): Promise<void> {
+  return invoke("save_s3_saved_credentials", { config, secretAccessKey, sessionToken });
+}
+
+export async function forgetS3SavedCredentials(config: S3SyncConfig): Promise<void> {
+  return invoke("forget_s3_saved_credentials", { config });
+}
+
+export async function s3SyncUpload(config: S3SyncConfig, editorSettings?: unknown, secretsPassphrase?: string): Promise<S3SyncSummary> {
+  return invoke("s3_sync_upload", { config, editorSettings, secretsPassphrase });
+}
+
+export async function s3SyncDownload(config: S3SyncConfig, secretsPassphrase?: string): Promise<S3DownloadResult> {
+  return invoke("s3_sync_download", { config, secretsPassphrase });
 }
 
 export async function snippetSyncTest(config: SnippetSyncConfig): Promise<void> {

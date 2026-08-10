@@ -117,6 +117,8 @@ import AppLogo from "@/components/icons/AppLogo.vue";
 import ChangelogPanel from "@/components/settings/ChangelogPanel.vue";
 import McpConnectionScopePicker from "@/components/settings/McpConnectionScopePicker.vue";
 import ScheduledDatabaseBackupSettings from "@/components/backup/ScheduledDatabaseBackupSettings.vue";
+import S3SyncSettings from "@/components/settings/S3SyncSettings.vue";
+import SyncDownloadConfirmDialog from "@/components/settings/SyncDownloadConfirmDialog.vue";
 import SqlFormatterSettingsPanel from "./SqlFormatterSettingsPanel.vue";
 import { APP_THEME_PALETTES, type AppCornerStyle, type AppThemeAppearance, type AppThemeMode, type AppThemePalette } from "@/lib/app/appTheme";
 import { editorSettingsDraftChanged, editorSettingsDraftFromSettings, editorSettingsPatchFromDraft, normalizeTableOpenPageSizeDraft, type EditorSettingsDraft } from "@/lib/settings/editorSettingsDraft";
@@ -1862,7 +1864,8 @@ const webdavAutoUploadIntervalMinutes = ref(Number(localStorage.getItem("dbx-web
 const webdavBusy = ref<"" | "test" | "upload" | "download">("");
 const webdavMessage = ref("");
 const webdavError = ref(false);
-const syncMethodTab = ref<"webdav" | "snippet">("webdav");
+const webdavDownloadConfirmOpen = ref(false);
+const syncMethodTab = ref<"webdav" | "s3" | "snippet">("webdav");
 
 const snippetProvider = ref<SnippetProvider>((localStorage.getItem("dbx-snippet-provider") as SnippetProvider) || "github");
 const snippetId = ref("");
@@ -1876,6 +1879,7 @@ const snippetRestoreSecrets = ref(false);
 const snippetBusy = ref<"" | "test" | "upload" | "download" | "migrate" | "cleanup">("");
 const snippetMessage = ref("");
 const snippetError = ref(false);
+const snippetDownloadConfirmOpen = ref(false);
 const legacySnippetId = ref("");
 const pendingLegacyCleanupId = ref("");
 const snippetSyncSettingsLoading = ref(true);
@@ -2035,8 +2039,11 @@ async function retryLegacySnippetCleanup() {
   });
 }
 
+function requestSnippetDownload() {
+  if (snippetId.value.trim()) snippetDownloadConfirmOpen.value = true;
+}
+
 async function downloadSnippetSnapshot() {
-  if (!snippetId.value.trim() || !window.confirm(t("settings.syncDownloadConfirm"))) return;
   await runSnippetAction("download", async () => {
     const result = await snippetSyncDownload(currentSnippetConfig(), snippetPassphrase.value, snippetRestoreSecrets.value, snippetRestoreSecrets.value ? snippetSecretsPassphrase.value : undefined);
     if (result.editorSettings && typeof result.editorSettings === "object") settingsStore.updateEditorSettings(result.editorSettings as any);
@@ -2179,8 +2186,11 @@ async function uploadWebDavSnapshot() {
   });
 }
 
+function requestWebDavDownload() {
+  webdavDownloadConfirmOpen.value = true;
+}
+
 async function downloadWebDavSnapshot() {
-  if (!window.confirm(t("settings.syncDownloadConfirm"))) return;
   await runWebDavAction("download", async () => {
     const result = await webdavSyncDownload(currentWebDavConfig(), webdavSyncSecrets.value ? webdavSecretsPassphrase.value : undefined);
     if (result.editorSettings && typeof result.editorSettings === "object") {
@@ -5260,8 +5270,9 @@ onUnmounted(() => {
 
             <section v-else-if="activeSettingsTab === 'sync'" data-settings-search-id="sync" :class="['py-2', settingsSearchTargetClass('sync')]">
               <Tabs v-model="syncMethodTab" class="w-full">
-                <TabsList class="grid w-full grid-cols-2">
+                <TabsList class="grid w-full grid-cols-3">
                   <TabsTrigger value="webdav">WebDAV</TabsTrigger>
+                  <TabsTrigger value="s3">S3</TabsTrigger>
                   <TabsTrigger value="snippet">GitHub / Gitee</TabsTrigger>
                 </TabsList>
 
@@ -5348,7 +5359,7 @@ onUnmounted(() => {
                       <Loader2 v-if="webdavBusy === 'test'" class="mr-1 h-3 w-3 animate-spin" />
                       {{ t("settings.syncTest") }}
                     </Button>
-                    <Button variant="outline" size="sm" :disabled="!webdavReady" @click="downloadWebDavSnapshot">
+                    <Button variant="outline" size="sm" :disabled="!webdavReady" @click="requestWebDavDownload">
                       <Loader2 v-if="webdavBusy === 'download'" class="mr-1 h-3 w-3 animate-spin" />
                       <Download v-else class="mr-1 h-3 w-3" />
                       {{ t("settings.syncDownload") }}
@@ -5359,6 +5370,10 @@ onUnmounted(() => {
                       {{ t("settings.syncUpload") }}
                     </Button>
                   </div>
+                </TabsContent>
+
+                <TabsContent value="s3" data-settings-search-id="sync-s3" :class="['mt-5', settingsSearchTargetClass('sync-s3')]">
+                  <S3SyncSettings :sync-secrets-enabled="webdavSyncSecrets" :secrets-passphrase="webdavSecretsPassphrase" :prepare-sync-secrets="applyWebDavSyncSecretsPreference" />
                 </TabsContent>
 
                 <TabsContent value="snippet" data-settings-search-id="sync-snippet" :class="['mt-5 space-y-5', settingsSearchTargetClass('sync-snippet')]">
@@ -5461,7 +5476,7 @@ onUnmounted(() => {
                           <Loader2 v-if="snippetBusy === 'test'" class="mr-1 h-3 w-3 animate-spin" />
                           {{ t("settings.syncTest") }}
                         </Button>
-                        <Button variant="outline" size="sm" :disabled="!snippetDownloadReady || !snippetId.trim()" @click="downloadSnippetSnapshot">
+                        <Button variant="outline" size="sm" :disabled="!snippetDownloadReady || !snippetId.trim()" @click="requestSnippetDownload">
                           <Loader2 v-if="snippetBusy === 'download'" class="mr-1 h-3 w-3 animate-spin" />
                           <Download v-else class="mr-1 h-3 w-3" />
                           {{ t("settings.syncDownload") }}
@@ -6665,6 +6680,8 @@ onUnmounted(() => {
       :confirm-label="t('common.delete')"
       @confirm="templateDeleteConfirm && confirmDeleteTemplate(templateDeleteConfirm)"
     />
+    <SyncDownloadConfirmDialog v-model:open="webdavDownloadConfirmOpen" @confirm="downloadWebDavSnapshot" />
+    <SyncDownloadConfirmDialog v-model:open="snippetDownloadConfirmOpen" @confirm="downloadSnippetSnapshot" />
   </component>
 </template>
 

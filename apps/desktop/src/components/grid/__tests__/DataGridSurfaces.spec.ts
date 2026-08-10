@@ -387,7 +387,7 @@ describe("DataGridColumnHeader", () => {
     expect(findAll(mounted.root, (node) => node.props["data-grid-header-comment-line"] === "")).toHaveLength(0);
   });
 
-  it("marks nullable columns without marking required columns", () => {
+  it("shows column nullability in the header tooltip without an inline badge", () => {
     const baseProps = {
       name: "nickname",
       actualColumnIndex: 1,
@@ -406,12 +406,10 @@ describe("DataGridColumnHeader", () => {
     };
     const nullable = mountComponent(DataGridColumnHeader, { ...baseProps, columnNullability: "nullable" });
     const required = mountComponent(DataGridColumnHeader, { ...baseProps, columnNullability: "required" });
-    const badge = findOne(nullable.root, (node) => node.props["data-grid-header-nullable"] === "");
 
-    expect(hostText(badge).trim()).toBe("NULL");
-    expect(badge.props.title).toBe("nullable");
-    expect(hostText(nullable.root)).toContain("nullableyes");
+    expect(findAll(nullable.root, (node) => node.props["data-grid-header-nullable"] === "")).toHaveLength(0);
     expect(findAll(required.root, (node) => node.props["data-grid-header-nullable"] === "")).toHaveLength(0);
+    expect(hostText(nullable.root)).toContain("nullableyes");
     expect(hostText(required.root)).toContain("nullableno");
   });
 });

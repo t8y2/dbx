@@ -105,6 +105,7 @@ export interface CompletionAssistantRequest {
   search_in_definitions?: boolean;
   parent_schema?: string | null;
   parent_name?: string | null;
+  parent_type?: "package" | "type" | null;
   match_mode?: CompletionAssistantMatchMode | null;
 }
 
@@ -829,6 +830,8 @@ export type TreeNodeType =
   | "table-search-control"
   | "load-more"
   | "column"
+  | "type-attribute"
+  | "type-method"
   | "index"
   | "fkey"
   | "trigger"

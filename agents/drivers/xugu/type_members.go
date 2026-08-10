@@ -107,6 +107,7 @@ type completionAssistantRequest struct {
 	MaxResults    int      `json:"max_results"`
 	ParentSchema  string   `json:"parent_schema"`
 	ParentName    string   `json:"parent_name"`
+	ParentType    string   `json:"parent_type"`
 	MatchMode     string   `json:"match_mode"`
 }
 
@@ -148,6 +149,18 @@ type xuguTypeDefinition struct {
 }
 
 func (s *server) completionAssistantSearch(request completionAssistantRequest) (completionAssistantResponse, error) {
+	switch strings.ToLower(strings.TrimSpace(request.ParentType)) {
+	case "type":
+		return s.completionAssistantSearchTypeMembers(request)
+	case "package":
+		return s.completionAssistantSearchPackageMembers(request)
+	}
+	// Package members shipped before type members. Keep that request shape
+	// working for already-running desktop clients that do not send parent_type.
+	return s.completionAssistantSearchPackageMembers(request)
+}
+
+func (s *server) completionAssistantSearchTypeMembers(request completionAssistantRequest) (completionAssistantResponse, error) {
 	parentName := strings.TrimSpace(request.ParentName)
 	if parentName == "" || !xuguCompletionRequestsTypeMembers(request.ObjectKinds) {
 		return completionAssistantResponse{}, errors.New("completion assistant search is not supported for this request")
@@ -666,22 +679,6 @@ func xuguCompletionMethodKindRequested(methodKind string, kinds []string) bool {
 		}
 	}
 	return false
-}
-
-func xuguCompletionNameMatches(name string, request completionAssistantRequest) bool {
-	mask := strings.TrimSpace(request.Mask)
-	if mask == "" {
-		return true
-	}
-	value := name
-	if !request.CaseSensitive {
-		value = strings.ToUpper(value)
-		mask = strings.ToUpper(mask)
-	}
-	if strings.EqualFold(strings.TrimSpace(request.MatchMode), "contains") {
-		return strings.Contains(value, mask)
-	}
-	return strings.HasPrefix(value, mask)
 }
 
 func xuguQualifiedTypeName(owner, name, modifier string) string {

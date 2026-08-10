@@ -193,6 +193,7 @@ describe("connectionStore metadata loading", () => {
       search_in_definitions: false,
       parent_schema: "app_schema",
       parent_name: "business_api",
+      parent_type: "package",
       match_mode: "prefix",
     });
     expect(packageNode.isExpanded).toBe(true);

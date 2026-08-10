@@ -5612,6 +5612,7 @@ export const useConnectionStore = defineStore("connection", () => {
       search_in_definitions: !!request.search_in_definitions,
       parent_schema: request.parent_schema ?? "",
       parent_name: request.parent_name ?? "",
+      parent_type: request.parent_type ?? "",
       match_mode: request.match_mode ?? "prefix",
     });
   }
@@ -5625,7 +5626,8 @@ export const useConnectionStore = defineStore("connection", () => {
 
   async function loadPackageMembers(node: TreeNode, options?: LoadTreeOptions): Promise<void> {
     if (node.type !== "package" || !node.connectionId || !node.database) return;
-    if (!supportsPackageMemberExpansion(effectiveDatabaseTypeForConnection(getConfig(node.connectionId)))) return;
+    const databaseType = effectiveDatabaseTypeForConnection(getConfig(node.connectionId));
+    if (!supportsPackageMemberExpansion(databaseType)) return;
     const connectionId = node.connectionId;
     const database = node.database;
     const schema = node.schema;
@@ -5658,6 +5660,7 @@ export const useConnectionStore = defineStore("connection", () => {
             search_in_definitions: false,
             parent_schema: schema ?? null,
             parent_name: packageName,
+            ...(databaseType === "xugu" ? { parent_type: "package" as const } : {}),
             match_mode: "prefix",
           });
           const targetNode = treeNodeLoadTarget(load);
@@ -5705,6 +5708,7 @@ export const useConnectionStore = defineStore("connection", () => {
           global_search: false,
           parent_schema: schema,
           parent_name: parentName,
+          parent_type: "type",
           match_mode: "prefix",
         }),
         completionAssistantSearch({
@@ -5717,6 +5721,7 @@ export const useConnectionStore = defineStore("connection", () => {
           global_search: false,
           parent_schema: schema,
           parent_name: parentName,
+          parent_type: "type",
           match_mode: "prefix",
         }),
       ]);

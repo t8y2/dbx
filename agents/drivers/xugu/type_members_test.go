@@ -46,7 +46,7 @@ func TestXuguCompletionAssistantListsTypeAttributesAndMethods(t *testing.T) {
 	s.params.Database = "TEST_DB"
 	s.currentDatabase = "TEST_DB"
 
-	response, shutdown := s.handleLine(`{"jsonrpc":"2.0","id":1,"method":"completion_assistant_search_v1","params":{"database":"TEST_DB","schema":"AppSchema","parent_schema":"AppSchema","parent_name":"OrderType","object_kinds":["column","routine"],"max_results":20}}`)
+	response, shutdown := s.handleLine(`{"jsonrpc":"2.0","id":1,"method":"completion_assistant_search_v1","params":{"database":"TEST_DB","schema":"AppSchema","parent_schema":"AppSchema","parent_name":"OrderType","parent_type":"type","object_kinds":["column","routine"],"max_results":20}}`)
 	if shutdown || response.Error != nil {
 		t.Fatalf("type member request failed: shutdown=%v error=%v", shutdown, response.Error)
 	}
@@ -90,6 +90,7 @@ func TestXuguCompletionAssistantLeavesCollectionTypesWithoutMembers(t *testing.T
 		Schema:       "AppSchema",
 		ParentSchema: "AppSchema",
 		ParentName:   "OrderList",
+		ParentType:   "type",
 		ObjectKinds:  []string{"column", "routine"},
 	})
 	if err != nil {
@@ -113,6 +114,7 @@ func TestXuguCompletionAssistantFiltersAndLimitsTypeMembers(t *testing.T) {
 		Schema:        "AppSchema",
 		ParentSchema:  "AppSchema",
 		ParentName:    "OrderType",
+		ParentType:    "type",
 		ObjectKinds:   []string{"routine"},
 		Mask:          "re",
 		MatchMode:     "prefix",
@@ -124,6 +126,33 @@ func TestXuguCompletionAssistantFiltersAndLimitsTypeMembers(t *testing.T) {
 	}
 	if len(result.Candidates) != 1 || result.Candidates[0].Name != "Rename" || result.Incomplete {
 		t.Fatalf("unexpected filtered members: %#v", result)
+	}
+}
+
+func TestXuguCompletionAssistantDispatchesPackageAndTypeMembersSeparately(t *testing.T) {
+	db, err := sql.Open("xugu-test-type-members", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	s := newServer()
+	s.db = db
+
+	packageResult, err := s.completionAssistantSearch(completionAssistantRequest{
+		Database: "TEST_DB", Schema: "AppSchema", ParentSchema: "AppSchema", ParentName: "OrderAPI", ParentType: "package", ObjectKinds: []string{"routine"},
+	})
+	if err != nil {
+		t.Fatalf("package member request failed: %v", err)
+	}
+	if len(packageResult.Candidates) != 2 || packageResult.Candidates[0].Name != "create_order" || packageResult.Candidates[1].Name != "order_total" {
+		t.Fatalf("unexpected package members: %#v", packageResult.Candidates)
+	}
+
+	legacyPackageResult, err := s.completionAssistantSearch(completionAssistantRequest{
+		Database: "TEST_DB", Schema: "AppSchema", ParentSchema: "AppSchema", ParentName: "OrderAPI", ObjectKinds: []string{"routine"},
+	})
+	if err != nil || len(legacyPackageResult.Candidates) != 2 {
+		t.Fatalf("legacy package request must remain supported, result=%#v err=%v", legacyPackageResult, err)
 	}
 }
 
@@ -180,6 +209,11 @@ func (c *xuguTypeMembersConn) Begin() (driver.Tx, error) { return nil, errors.Ne
 func (c *xuguTypeMembersConn) QueryContext(_ context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
 	upper := strings.ToUpper(query)
 	switch {
+	case strings.Contains(upper, "FROM ALL_PACKAGES"):
+		return &xuguStaticRows{columns: []string{"SPEC"}, values: [][]driver.Value{{`CREATE PACKAGE OrderAPI AS
+  PROCEDURE create_order(p_id IN INTEGER);
+  FUNCTION order_total(p_id IN INTEGER) RETURN NUMERIC;
+END;`}}}, nil
 	case strings.Contains(upper, "FROM ALL_TYPES"):
 		kind := int64(xuguObjectTypeKind)
 		if c.collection {

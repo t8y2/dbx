@@ -54,7 +54,7 @@ END;`)
 	s.params = params
 	s.currentDatabase = params.Database
 	result, err := s.completionAssistantSearch(completionAssistantRequest{
-		Database: params.Database, Schema: params.Username, ParentSchema: params.Username, ParentName: typeName,
+		Database: params.Database, Schema: params.Username, ParentSchema: params.Username, ParentName: typeName, ParentType: "type",
 		ObjectKinds: []string{"column", "routine"}, MaxResults: 50,
 	})
 	if err != nil {
@@ -86,7 +86,7 @@ END;`)
 		t.Fatalf("create live collection type: %v", err)
 	}
 	result, err = s.completionAssistantSearch(completionAssistantRequest{
-		Database: params.Database, Schema: params.Username, ParentSchema: params.Username, ParentName: typeName,
+		Database: params.Database, Schema: params.Username, ParentSchema: params.Username, ParentName: typeName, ParentType: "type",
 		ObjectKinds: []string{"column", "routine"}, MaxResults: 50,
 	})
 	if err != nil {

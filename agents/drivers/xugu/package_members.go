@@ -27,38 +27,6 @@ WHERE s.DB_ID = CURRENT_DB_ID
 ORDER BY CASE WHEN s.SCHEMA_NAME = ? THEN 0 ELSE 1 END,
          CASE WHEN p.PACK_NAME = ? THEN 0 ELSE 1 END`
 
-type completionAssistantRequest struct {
-	ConnectionID  string   `json:"connection_id"`
-	Database      string   `json:"database"`
-	Schema        string   `json:"schema"`
-	ObjectKinds   []string `json:"object_kinds"`
-	Mask          string   `json:"mask"`
-	CaseSensitive bool     `json:"case_sensitive"`
-	GlobalSearch  bool     `json:"global_search"`
-	MaxResults    int      `json:"max_results"`
-	ParentSchema  string   `json:"parent_schema"`
-	ParentName    string   `json:"parent_name"`
-	MatchMode     string   `json:"match_mode"`
-}
-
-type completionAssistantCandidate struct {
-	Name         string  `json:"name"`
-	Kind         string  `json:"kind"`
-	Database     *string `json:"database"`
-	Schema       *string `json:"schema"`
-	ParentSchema *string `json:"parent_schema"`
-	ParentName   *string `json:"parent_name"`
-	Comment      *string `json:"comment"`
-	DataType     *string `json:"data_type"`
-	Signature    *string `json:"signature"`
-}
-
-type completionAssistantResponse struct {
-	Candidates   []completionAssistantCandidate `json:"candidates"`
-	Incomplete   bool                           `json:"incomplete"`
-	FallbackUsed bool                           `json:"fallback_used"`
-}
-
 type xuguPackageMember struct {
 	Name       string
 	Kind       string
@@ -66,7 +34,7 @@ type xuguPackageMember struct {
 	ReturnType string
 }
 
-func (s *server) completionAssistantSearch(request completionAssistantRequest) (completionAssistantResponse, error) {
+func (s *server) completionAssistantSearchPackageMembers(request completionAssistantRequest) (completionAssistantResponse, error) {
 	parentName := strings.TrimSpace(request.ParentName)
 	if parentName == "" || !xuguCompletionRequestsRoutines(request.ObjectKinds) {
 		return completionAssistantResponse{}, errors.New("completion assistant search is not supported for this request")

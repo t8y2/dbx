@@ -259,26 +259,21 @@ fn grok_mcp_config_toml(options: &GrokRunOptions) -> String {
         "[cli]".to_string(),
         "auto_update = false".to_string(),
         String::new(),
-        // Headless automation: auto-approve tools; deny/allow rules still apply.
-        "[ui]".to_string(),
-        "permission_mode = \"always-approve\"".to_string(),
-        String::new(),
+        // Tool auto-approval is driven by the `--always-approve` CLI flag, not a
+        // config key: grok's permission_mode enum has no "always-approve" value
+        // (valid values: default/acceptEdits/auto/dontAsk/bypassPermissions/plan).
         "[permission]".to_string(),
         format!("allow = {}", toml_string_array(&permission_rule_refs)),
         String::new(),
+        // Only command/args/env are part of the documented mcp_servers schema
+        // (per `grok mcp add`); startup_timeout_sec/tool_timeout_sec/enabled_tools
+        // are not recognized fields and would be silently ignored.
         "[mcp_servers.dbx]".to_string(),
         format!("command = {}", toml_string(mcp_command)),
-        "enabled = true".to_string(),
-        "startup_timeout_sec = 20".to_string(),
-        "tool_timeout_sec = 120".to_string(),
     ];
     if let Some(command) = options.mcp_server_command.as_ref().filter(|command| !command.args.is_empty()) {
         let args = command.args.iter().map(String::as_str).collect::<Vec<_>>();
         lines.push(format!("args = {}", toml_string_array(&args)));
-    }
-    let enabled_tools = dbx_mcp_enabled_tools(options.agent_mode);
-    if !enabled_tools.is_empty() {
-        lines.push(format!("enabled_tools = {}", toml_string_array(&enabled_tools)));
     }
     lines.push(String::new());
     lines.push("[mcp_servers.dbx.env]".to_string());
@@ -441,8 +436,12 @@ pub async fn test_grok_connection(config: &AiConfig) -> Result<AiTestConnectionR
         [stdout.trim(), stderr.trim()].into_iter().filter(|part| !part.is_empty()).collect::<Vec<_>>().join("\n");
 
     if output.status.success() {
-        if combined.to_ascii_lowercase().contains("not logged")
-            || combined.to_ascii_lowercase().contains("not authenticated")
+        // `grok models` can exit 0 yet print an auth warning; catch the same
+        // "Not signed in" wording the headless run emits (see classify_grok_run_error).
+        let combined_lower = combined.to_ascii_lowercase();
+        if combined_lower.contains("not signed in")
+            || combined_lower.contains("not logged")
+            || combined_lower.contains("not authenticated")
         {
             return Err(classify_grok_run_error(&combined));
         }
@@ -480,7 +479,11 @@ fn is_command_line_too_long_error(message: &str) -> bool {
 
 fn classify_grok_run_error(stderr: &str) -> String {
     let lower = stderr.to_ascii_lowercase();
-    if lower.contains("not authenticated")
+    // Grok's real headless auth error is "Not signed in. ... run `grok login` ..."
+    // (verified against @xai-official/grok 1.0.0). Older wording used
+    // "not authenticated"/"not logged", so cover both for robustness.
+    if lower.contains("not signed in")
+        || lower.contains("not authenticated")
         || lower.contains("not logged")
         || lower.contains("please login")
         || lower.contains("login required")
@@ -657,8 +660,15 @@ mod tests {
         assert!(toml.contains("args = [\"--stdio\"]"));
         assert!(toml.contains("DBX_MCP_SCOPE_CONNECTION_ID = \"conn-1\""));
         assert!(toml.contains("DBX_MCP_ALLOW_WRITES = \"0\""));
-        assert!(toml.contains("permission_mode = \"always-approve\""));
+        assert!(toml.contains("[permission]"));
         assert!(toml.contains("MCPTool(dbx__*)"));
+        // Invalid fields removed: grok has no "always-approve" permission_mode,
+        // and startup_timeout_sec/tool_timeout_sec/enabled_tools are not mcp_servers keys.
+        assert!(!toml.contains("permission_mode"));
+        assert!(!toml.contains("always-approve"));
+        assert!(!toml.contains("startup_timeout_sec"));
+        assert!(!toml.contains("tool_timeout_sec"));
+        assert!(!toml.contains("enabled_tools"));
     }
 
     #[test]
@@ -675,5 +685,11 @@ mod tests {
     fn classifies_auth_errors() {
         let err = classify_grok_run_error("not authenticated; please login");
         assert!(err.contains("[grokCliNotAuthenticated]"));
+
+        // Real @xai-official/grok 1.0.0 headless auth failure emits this exact wording.
+        let real = classify_grok_run_error(
+            "Not signed in. To authenticate without a browser, run:\n  grok login --device-code",
+        );
+        assert!(real.contains("[grokCliNotAuthenticated]"));
     }
 }

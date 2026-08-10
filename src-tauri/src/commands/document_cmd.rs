@@ -105,17 +105,30 @@ pub async fn document_insert_document(
     collection: String,
     doc_json: String,
     routing: Option<String>,
+    preserve_bson_types: Option<bool>,
 ) -> Result<String, String> {
     ensure_connection_writable(&state, &connection_id, "Insert").await?;
-    dbx_core::document_ops::insert_document_core(
-        &state,
-        &connection_id,
-        &database,
-        &collection,
-        &doc_json,
-        routing.as_deref(),
-    )
-    .await
+    if preserve_bson_types.unwrap_or(false) {
+        dbx_core::document_ops::insert_document_preserving_bson_types_core(
+            &state,
+            &connection_id,
+            &database,
+            &collection,
+            &doc_json,
+            routing.as_deref(),
+        )
+        .await
+    } else {
+        dbx_core::document_ops::insert_document_core(
+            &state,
+            &connection_id,
+            &database,
+            &collection,
+            &doc_json,
+            routing.as_deref(),
+        )
+        .await
+    }
 }
 
 #[tauri::command]

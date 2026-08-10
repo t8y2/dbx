@@ -3584,13 +3584,14 @@ export async function mongoInsertDocument(connectionId: string, database: string
   return documentInsertDocument(connectionId, database, collection, docJson, routing);
 }
 
-export async function documentInsertDocument(connectionId: string, database: string, collection: string, docJson: string, routing?: string): Promise<string> {
+export async function documentInsertDocument(connectionId: string, database: string, collection: string, docJson: string, routing?: string, preserveBsonTypes?: boolean): Promise<string> {
   return post("/api/document-store/insert-document", {
     connectionId,
     database,
     collection,
     docJson,
     routing,
+    preserveBsonTypes,
   });
 }
 

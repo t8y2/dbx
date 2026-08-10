@@ -109,7 +109,7 @@ function createQuickEntryEditor(options: {
   rowStatusFilter?: ReturnType<typeof ref<RowStatusFilter>>;
   filterRowsInGetRowItem?: boolean;
   supportsInsert?: boolean;
-  save?: (changes: { dirtyRows: Map<number, Map<number, CellValue>>; newRows: CellValue[][] }) => Promise<void>;
+  save?: (changes: { dirtyRows: Map<number, Map<number, CellValue>>; newRows: CellValue[][]; newRowMeta: Array<{ sourceIndex?: number; editedColumns?: number[] }> }) => Promise<void>;
 }) {
   const result = computed(() => ({
     columns: ["id", "name"],
@@ -374,6 +374,48 @@ test("cloning a row copies non-generated primary key values without executing sa
 
   assert.equal(saveCalls, 1);
   assert.deepEqual(editor.newRows.value, []);
+});
+
+test("cloning a row preserves its source and edited columns for custom saves", async () => {
+  setActivePinia(createPinia());
+  installBrowserTestGlobals();
+
+  let savedMeta: Array<{ sourceIndex?: number; editedColumns?: number[] }> | undefined;
+  const editor = createQuickEntryEditor({
+    quickEntryEnabled: false,
+    save: async (changes) => {
+      savedMeta = changes.newRowMeta;
+    },
+  });
+
+  editor.cloneRow(0);
+  assert.equal(editor.newRowMeta.value[0]?.sourceIndex, 0);
+  assert.deepEqual(editor.newRowMeta.value[0]?.editedColumns, undefined);
+
+  editor.applyCellValue(-1, 1, "Grace");
+  assert.deepEqual(editor.newRowMeta.value[0]?.editedColumns, [1]);
+
+  await editor.saveChanges();
+  assert.deepEqual(savedMeta, [
+    {
+      token: 1,
+      placement: null,
+      sourceIndex: 0,
+      editedColumns: [1],
+    },
+  ]);
+});
+
+test("cloning an edited source row marks its pending changes as explicit", () => {
+  setActivePinia(createPinia());
+  installBrowserTestGlobals();
+
+  const editor = createQuickEntryEditor({ quickEntryEnabled: false });
+  editor.applyCellValue(0, 1, "Lin");
+  editor.cloneRow(0);
+
+  assert.deepEqual(editor.newRows.value, [[1, "Lin"]]);
+  assert.deepEqual(editor.newRowMeta.value[0]?.editedColumns, [1]);
 });
 
 test("cloning a row clears auto-generated key columns", async () => {

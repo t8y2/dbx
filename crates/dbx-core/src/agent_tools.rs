@@ -1255,6 +1255,7 @@ for line in sys.stdin:
             username: "APP_USER".to_string(),
             password: String::new(),
             database: Some(database.to_string()),
+            default_schema: None,
             visible_databases: None,
             visible_schemas: None,
             show_system_schemas: false,

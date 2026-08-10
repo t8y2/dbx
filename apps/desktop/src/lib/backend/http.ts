@@ -3202,6 +3202,15 @@ export async function mongoCreateIndex(connectionId: string, database: string, c
   });
 }
 
+export async function mongoCreateUser(connectionId: string, database: string, userJson: string, writeConcernJson?: string): Promise<{ affected_rows: number }> {
+  return post("/api/mongo/create-user", {
+    connectionId,
+    database,
+    userJson,
+    writeConcernJson,
+  });
+}
+
 export async function mongoDropIndexes(connectionId: string, database: string, collection: string, indexesJson?: string, single = false): Promise<MongoDropIndexesResult> {
   return post("/api/mongo/drop-indexes", {
     connectionId,

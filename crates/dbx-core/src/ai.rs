@@ -284,6 +284,13 @@ pub struct AiModelEffortPreference {
     pub selection: AiEffortSelection,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AiAssistantMode {
+    Ask,
+    Agent,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct AiChatSelectionState {
@@ -293,11 +300,18 @@ pub struct AiChatSelectionState {
     pub active: Option<AiActiveModelSelection>,
     #[serde(default)]
     pub effort_preferences: Vec<AiModelEffortPreference>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_mode: Option<AiAssistantMode>,
 }
 
 impl Default for AiChatSelectionState {
     fn default() -> Self {
-        Self { version: default_ai_chat_selection_version(), active: None, effort_preferences: Vec::new() }
+        Self {
+            version: default_ai_chat_selection_version(),
+            active: None,
+            effort_preferences: Vec::new(),
+            default_mode: None,
+        }
     }
 }
 
@@ -3910,11 +3924,29 @@ mod tests {
         responses_text, responses_token_usage, retain_ollama_completion_models, retry_after_secs,
         set_chat_completion_token_limit, stream, stream_claude, stream_claude_with_tools, stream_data_payload,
         stream_error, stream_openai_with_tools, stream_with_tools, test_connection_core, uses_anthropic_messages_api,
-        validate_config, validate_model_list_config, with_retry, with_stream_retry, AiApiStyle, AiAuthMethod,
-        AiCapabilitySource, AiCompletionRequest, AiConfig, AiEffortCapability, AiEffortOption, AiEffortSelection,
-        AiMessage, AiModelInfo, AiProvider, AiReasoningLevel, StreamToolEvent, StreamingToolCallAccumulator,
-        ToolCallRef, AUTHORIZATION, CLAUDE_DEFAULT_SYSTEM, TEST_PROMPT,
+        validate_config, validate_model_list_config, with_retry, with_stream_retry, AiApiStyle, AiAssistantMode,
+        AiAuthMethod, AiCapabilitySource, AiChatSelectionState, AiCompletionRequest, AiConfig, AiEffortCapability,
+        AiEffortOption, AiEffortSelection, AiMessage, AiModelInfo, AiProvider, AiReasoningLevel, StreamToolEvent,
+        StreamingToolCallAccumulator, ToolCallRef, AUTHORIZATION, CLAUDE_DEFAULT_SYSTEM, TEST_PROMPT,
     };
+
+    #[test]
+    fn ai_chat_selection_default_mode_serde() {
+        // Old blobs without a defaultMode field load as None (no migration needed).
+        let legacy: AiChatSelectionState =
+            serde_json::from_str(r#"{"version":1,"active":null,"effortPreferences":[]}"#).unwrap();
+        assert_eq!(legacy.default_mode, None);
+
+        let agent: AiChatSelectionState = serde_json::from_str(r#"{"version":1,"defaultMode":"agent"}"#).unwrap();
+        assert_eq!(agent.default_mode, Some(AiAssistantMode::Agent));
+
+        let ask: AiChatSelectionState = serde_json::from_str(r#"{"version":1,"defaultMode":"ask"}"#).unwrap();
+        assert_eq!(ask.default_mode, Some(AiAssistantMode::Ask));
+
+        // camelCase key + lowercase value round-trip.
+        let serialized = serde_json::to_value(agent).unwrap();
+        assert_eq!(serialized["defaultMode"], serde_json::json!("agent"));
+    }
 
     struct CapturedJsonRequest {
         headers: String,

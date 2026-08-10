@@ -770,6 +770,7 @@ describe("settingsStore activeModel lifecycle", () => {
         version: 1,
         active: undefined,
         effortPreferences: [],
+        defaultMode: "ask",
       }),
     );
 
@@ -838,6 +839,7 @@ describe("settingsStore activeModel lifecycle", () => {
           selection: { kind: "enum", value: "high" },
         },
       ],
+      defaultMode: "ask",
     });
   });
 
@@ -860,5 +862,69 @@ describe("settingsStore activeModel lifecycle", () => {
 
     expect(store.aiConfigs).toEqual([]);
     expect(store.activeModel).toBeNull();
+  });
+});
+
+// --- defaultAiMode lifecycle tests ---
+
+describe("settingsStore defaultAiMode lifecycle", () => {
+  beforeEach(() => {
+    vi.resetModules();
+    setActivePinia(createPinia());
+  });
+
+  it("falls back to Ask when the saved chat selection has no defaultMode", async () => {
+    vi.doMock("@/lib/backend/api", () => ({
+      loadAiConfigs: vi.fn().mockResolvedValue([]),
+      loadAiConfig: vi.fn().mockResolvedValue(null),
+      loadAiProviderConfigs: vi.fn().mockResolvedValue(null),
+      loadAiChatSelection: vi.fn().mockResolvedValue(null),
+      saveAiChatSelection: vi.fn().mockResolvedValue(undefined),
+    }));
+
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const store = useSettingsStore();
+
+    await store.initAiConfigs();
+
+    expect(store.defaultAiMode).toBe("ask");
+  });
+
+  it("restores Agent from the saved chat selection", async () => {
+    vi.doMock("@/lib/backend/api", () => ({
+      loadAiConfigs: vi.fn().mockResolvedValue([]),
+      loadAiConfig: vi.fn().mockResolvedValue(null),
+      loadAiProviderConfigs: vi.fn().mockResolvedValue(null),
+      loadAiChatSelection: vi.fn().mockResolvedValue({ version: 1, effortPreferences: [], defaultMode: "agent" }),
+      saveAiChatSelection: vi.fn().mockResolvedValue(undefined),
+    }));
+
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const store = useSettingsStore();
+
+    await store.initAiConfigs();
+
+    expect(store.defaultAiMode).toBe("agent");
+  });
+
+  it("setDefaultAiMode updates state and persists the mode", async () => {
+    const saveAiChatSelection = vi.fn().mockResolvedValue(undefined);
+    vi.doMock("@/lib/backend/api", () => ({
+      loadAiConfigs: vi.fn().mockResolvedValue([]),
+      loadAiConfig: vi.fn().mockResolvedValue(null),
+      loadAiProviderConfigs: vi.fn().mockResolvedValue(null),
+      loadAiChatSelection: vi.fn().mockResolvedValue(null),
+      saveAiChatSelection,
+    }));
+
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const store = useSettingsStore();
+    store.isAiConfigLoaded = true;
+
+    store.setDefaultAiMode("agent");
+    expect(store.defaultAiMode).toBe("agent");
+
+    await vi.waitFor(() => expect(saveAiChatSelection).toHaveBeenCalled());
+    expect(saveAiChatSelection.mock.calls[0][0]).toMatchObject({ defaultMode: "agent" });
   });
 });

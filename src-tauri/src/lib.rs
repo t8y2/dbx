@@ -1894,6 +1894,7 @@ pub fn run() {
             commands::mongo_cmd::mongo_aggregate_documents,
             commands::mongo_cmd::mongo_distinct,
             commands::mongo_cmd::mongo_create_index,
+            commands::mongo_cmd::mongo_create_user,
             commands::mongo_cmd::mongo_drop_indexes,
             commands::document_cmd::document_insert_document,
             commands::mongo_cmd::mongo_insert_document,

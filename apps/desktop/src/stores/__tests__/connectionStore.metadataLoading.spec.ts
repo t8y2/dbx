@@ -75,6 +75,18 @@ function genericJdbcConnection(): ConnectionConfig {
   } as ConnectionConfig;
 }
 
+function oracleJdbcConnection(): ConnectionConfig {
+  return {
+    ...genericJdbcConnection(),
+    id: "jdbc-oracle-1",
+    name: "Oracle JDBC",
+    username: "DBX_TEST",
+    database: undefined,
+    connection_string: "jdbc:oracle:thin:@//127.0.0.1:1521/XE",
+    jdbc_driver_class: "oracle.jdbc.OracleDriver",
+  } as ConnectionConfig;
+}
+
 function informixConnection(): ConnectionConfig {
   return {
     id: "informix-1",
@@ -245,6 +257,49 @@ describe("connectionStore metadata loading", () => {
       ["schema", "app", "app"],
       ["schema", "reporting", "reporting"],
     ]);
+  });
+
+  it("loads inferred Oracle JDBC schemas without requesting empty catalogs", async () => {
+    const listDatabases = vi.fn().mockResolvedValue([]);
+    const listSchemas = vi.fn().mockResolvedValue(["ANONYMOUS", "DBX_TEST", "SYS", "SYSTEM"]);
+    const listTables = vi.fn().mockResolvedValue([{ name: "sheet", table_type: "TABLE", comment: null }]);
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+      listDatabases,
+      listObjects: vi.fn().mockResolvedValue([]),
+      listSchemas,
+      listTables,
+      loadSchemaCache: vi.fn().mockResolvedValue(null),
+      saveSchemaCache: vi.fn().mockResolvedValue(undefined),
+      saveConnections: vi.fn().mockResolvedValue(undefined),
+      saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const store = useConnectionStore();
+    useSettingsStore().editorSettings.sidebarObjectDisplay = "simple";
+    const connection = oracleJdbcConnection();
+    const connectionNode: TreeNode = { id: connection.id, label: connection.name, type: "connection", connectionId: connection.id, isExpanded: false, children: [] };
+    store.connections = [connection];
+    store.connectedIds.add(connection.id);
+    store.treeNodes = [connectionNode];
+
+    await store.loadDatabases(connection.id, { force: true });
+
+    expect(listDatabases).not.toHaveBeenCalled();
+    expect(listSchemas).toHaveBeenCalledWith(connection.id, "");
+    expect(connectionNode.children?.map((node) => [node.type, node.label, node.database, node.schema])).toEqual([["schema", "DBX_TEST", "DBX_TEST", "DBX_TEST"]]);
+
+    const schemaNode = connectionNode.children?.[0];
+    expect(schemaNode).toBeDefined();
+    await store.loadTreeNodeChildren(schemaNode!, { force: true });
+
+    expect(listTables.mock.calls[0]?.slice(0, 3)).toEqual([connection.id, "DBX_TEST", "DBX_TEST"]);
+    expect(schemaNode?.children?.map((node) => [node.type, node.label, node.schema])).toEqual([["table", "sheet", "DBX_TEST"]]);
   });
 
   it("keeps the flat object tree for unknown generic JDBC databases without schemas", async () => {

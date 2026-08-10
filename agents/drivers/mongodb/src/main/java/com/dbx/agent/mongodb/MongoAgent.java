@@ -1003,6 +1003,32 @@ public final class MongoAgent {
         return Collections.singletonMap("name", name);
     }
 
+    private static Object createUser(JsonObject params) {
+        MongoClient client = requireClient();
+        String database = params.get("database").getAsString();
+        client.getDatabase(database).runCommand(buildCreateUserCommand(params));
+        return Collections.singletonMap("affected_rows", 1);
+    }
+
+    static Document buildCreateUserCommand(JsonObject params) {
+        Document user = requiredDocument(params, "user_json", "User document");
+        Object username = user.remove("user");
+        if (!(username instanceof String) || ((String) username).isBlank()) {
+            throw new IllegalArgumentException("MongoDB createUser requires a non-empty user name");
+        }
+        if (user.containsKey("createUser") || user.containsKey("writeConcern")) {
+            throw new IllegalArgumentException("MongoDB createUser user document contains reserved command fields");
+        }
+
+        Document command = new Document("createUser", username);
+        command.putAll(user);
+        Document writeConcern = documentOrNull(params, "write_concern_json");
+        if (writeConcern != null) {
+            command.put("writeConcern", writeConcern);
+        }
+        return command;
+    }
+
     private static Document requiredDocument(JsonObject params, String key, String label) {
         Document document = documentOrNull(params, key);
         if (document == null) {
@@ -1562,6 +1588,7 @@ public final class MongoAgent {
             case AgentProtocol.MONGO_METHOD_COUNT_DOCUMENTS -> countDocuments(params);
             case AgentProtocol.MONGO_METHOD_SERVER_VERSION -> serverVersion(params);
             case AgentProtocol.MONGO_METHOD_CREATE_INDEX -> createIndex(params);
+            case AgentProtocol.MONGO_METHOD_CREATE_USER -> createUser(params);
             case AgentProtocol.MONGO_METHOD_DROP_INDEXES -> dropIndexes(params);
             case AgentProtocol.MONGO_METHOD_DROP_COLLECTION -> dropCollection(params);
             case AgentProtocol.MONGO_METHOD_DROP_DATABASE -> dropDatabase(params);

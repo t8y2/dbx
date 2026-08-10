@@ -1279,6 +1279,7 @@ pub enum MongoAgentMethod {
     CountDocuments,
     ServerVersion,
     CreateIndex,
+    CreateUser,
     DropIndexes,
     DropCollection,
     DropDatabase,
@@ -1290,7 +1291,7 @@ pub enum MongoAgentMethod {
 }
 
 impl MongoAgentMethod {
-    pub const ALL: [Self; 18] = [
+    pub const ALL: [Self; 19] = [
         Self::ListDatabases,
         Self::ListCollections,
         Self::FindDocuments,
@@ -1301,6 +1302,7 @@ impl MongoAgentMethod {
         Self::CountDocuments,
         Self::ServerVersion,
         Self::CreateIndex,
+        Self::CreateUser,
         Self::DropIndexes,
         Self::DropCollection,
         Self::DropDatabase,
@@ -1323,6 +1325,7 @@ impl MongoAgentMethod {
             Self::CountDocuments => "count_documents",
             Self::ServerVersion => "server_version",
             Self::CreateIndex => "create_index",
+            Self::CreateUser => "create_user",
             Self::DropIndexes => "drop_indexes",
             Self::DropCollection => "drop_collection",
             Self::DropDatabase => "drop_database",
@@ -2518,6 +2521,13 @@ impl AgentDriverClient {
         params: Value,
     ) -> Result<T, String> {
         self.call_mongo_method(MongoAgentMethod::CreateIndex, params).await
+    }
+
+    pub async fn mongo_create_user<T: DeserializeOwned + Send + 'static>(
+        &mut self,
+        params: Value,
+    ) -> Result<T, String> {
+        self.call_mongo_method(MongoAgentMethod::CreateUser, params).await
     }
 
     pub async fn mongo_drop_indexes<T: DeserializeOwned + Send + 'static>(
@@ -4348,6 +4358,7 @@ for line in sys.stdin:
         assert_eq!(MongoAgentMethod::CountDocuments.as_str(), "count_documents");
         assert_eq!(MongoAgentMethod::ServerVersion.as_str(), "server_version");
         assert_eq!(MongoAgentMethod::CreateIndex.as_str(), "create_index");
+        assert_eq!(MongoAgentMethod::CreateUser.as_str(), "create_user");
         assert_eq!(MongoAgentMethod::DropIndexes.as_str(), "drop_indexes");
         assert_eq!(MongoAgentMethod::DropCollection.as_str(), "drop_collection");
         assert_eq!(MongoAgentMethod::DropDatabase.as_str(), "drop_database");

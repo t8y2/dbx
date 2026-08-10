@@ -1138,6 +1138,24 @@ impl DbxBackend for WebBackend {
                     Value::String(value.get("name").and_then(Value::as_str).unwrap_or("").to_string()),
                 ))
             }
+            MongoCommand::CreateUser { user_json, write_concern_json } => {
+                let value: Value = self
+                    .request(
+                        reqwest::Method::POST,
+                        "/api/mongo/create-user",
+                        Some(json!({
+                            "connectionId": connection_id,
+                            "database": database,
+                            "userJson": user_json,
+                            "writeConcernJson": write_concern_json,
+                        })),
+                    )
+                    .await?
+                    .json()
+                    .await
+                    .map_err(|error| format!("Invalid MongoDB create user response: {error}"))?;
+                Ok(affected_query_result(affected_rows_from_value(&value)))
+            }
             MongoCommand::DropIndexes { collection, indexes, single } => {
                 let value: Value = self
                     .request(

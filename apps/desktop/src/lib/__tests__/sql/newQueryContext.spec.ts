@@ -87,6 +87,25 @@ describe("resolveNewQueryTarget", () => {
       })?.database,
     ).toBe("analytics.db");
   });
+
+  it("uses the configured default schema when no explicit schema context exists", () => {
+    expect(
+      resolveNewQueryTarget({
+        activeConnectionId: "conn-1",
+        connections: [{ id: "conn-1", host: "localhost", database: "app", default_schema: "archive", db_type: "postgres" }],
+      }),
+    ).toMatchObject({ connectionId: "conn-1", database: "app", schema: "archive" });
+  });
+
+  it("keeps an explicitly selected schema ahead of the configured default", () => {
+    expect(
+      resolveNewQueryTarget({
+        selectedTreeNode: { connectionId: "conn-1", database: "app", schema: "reporting" },
+        connections: [{ id: "conn-1", host: "localhost", database: "app", default_schema: "archive", db_type: "postgres" }],
+        preferredSource: "sidebar",
+      })?.schema,
+    ).toBe("reporting");
+  });
 });
 
 describe("resolveNewQueryTable", () => {

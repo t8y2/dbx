@@ -39,6 +39,62 @@ describe("SELECT star expansion", () => {
     ).toBe("id, created_at, method");
   });
 
+  it("expands a multi-table star with aliases and preserves duplicate column names", () => {
+    const sql = "SELECT * FROM tVillage tV INNER JOIN tland tl ON tV.villageId = tl.villageId";
+    const cursor = "SELECT *".length;
+    const context = sqlCompletionContextFromSemantic(buildSqlSemanticModel(sql, cursor), getSqlCompletionContext(sql, cursor));
+
+    expect(
+      buildSelectStarExpansion(
+        context,
+        new Map([
+          [
+            "tVillage",
+            [
+              { name: "villageId", table: "tVillage" },
+              { name: "villageName", table: "tVillage" },
+            ],
+          ],
+          [
+            "tland",
+            [
+              { name: "villageId", table: "tland" },
+              { name: "landName", table: "tland" },
+            ],
+          ],
+        ]),
+      ),
+    ).toBe("tV.villageId, tV.villageName, tl.villageId, tl.landName");
+  });
+
+  it("uses FROM/JOIN order even when the metadata map arrives in another order", () => {
+    const sql = "SELECT * FROM tVillage tv INNER JOIN tland tl ON tv.villageId = tl.villageId";
+    const cursor = "SELECT *".length;
+    const context = sqlCompletionContextFromSemantic(buildSqlSemanticModel(sql, cursor), getSqlCompletionContext(sql, cursor));
+
+    expect(
+      buildSelectStarExpansion(
+        context,
+        new Map([
+          [
+            "tland",
+            [
+              { name: "landName", table: "tland" },
+              { name: "villageId", table: "tland" },
+            ],
+          ],
+          [
+            "tVillage",
+            [
+              { name: "villageName", table: "tVillage" },
+              { name: "villageId", table: "tVillage" },
+            ],
+          ],
+        ]),
+      ),
+    ).toBe("tv.villageName, tv.villageId, tl.landName, tl.villageId");
+  });
+
   it("preserves an alias while replacing only the star", () => {
     const sql = "SELECT ap.* FROM apis AS ap";
     const cursor = "SELECT ap.*".length;

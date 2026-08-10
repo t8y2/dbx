@@ -3136,6 +3136,15 @@ export async function mongoCreateIndex(connectionId: string, database: string, c
   });
 }
 
+export async function mongoCreateUser(connectionId: string, database: string, userJson: string, writeConcernJson?: string): Promise<{ affected_rows: number }> {
+  return invoke("mongo_create_user", {
+    connectionId,
+    database,
+    userJson,
+    writeConcernJson,
+  });
+}
+
 export async function mongoDropIndexes(connectionId: string, database: string, collection: string, indexesJson?: string, single = false): Promise<MongoDropIndexesResult> {
   return invoke("mongo_drop_indexes", {
     connectionId,

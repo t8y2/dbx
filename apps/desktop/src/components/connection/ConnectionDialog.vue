@@ -153,6 +153,10 @@ const DREMIO_ARROW_FLIGHT_SQL_JDBC_DRIVER_CLASS = "org.apache.arrow.driver.jdbc.
 const DREMIO_LEGACY_JDBC_URL = "jdbc:dremio:direct=127.0.0.1:31010";
 const DREMIO_LEGACY_JDBC_DRIVER_CLASS = "com.dremio.jdbc.Driver";
 const DEFAULT_SSH_USER = "root";
+const ETCD_GRPC_MAX_INBOUND_DEFAULT_MIB = 32;
+const ETCD_GRPC_MAX_INBOUND_MIN_MIB = 1;
+const ETCD_GRPC_MAX_INBOUND_MAX_MIB = 256;
+const ETCD_GRPC_MAX_INBOUND_PARAM = "grpc_max_inbound_message_size";
 const NACOS_CONNECTION_PROFILES: ReadonlyArray<{ value: NacosConnectionProfile; title: string }> = [
   { value: "v2", title: "Nacos 2.x" },
   { value: "v3", title: "Nacos 3.x" },
@@ -1139,6 +1143,7 @@ const driverProfiles: Record<
     icon: "mysql",
     urlParams: "",
   },
+  dolt: { type: "mysql", port: 3306, user: "root", label: "Dolt", icon: "dolt", urlParams: "" },
   custom_postgres: {
     type: "postgres",
     port: 5432,
@@ -2230,6 +2235,13 @@ function applyProfile(val: string, preserveConnectionFields = false) {
       jdbcManualClasspathOpen.value = true;
       applyPrestoSqlBuiltinDriverPathsIfAvailable();
     }
+    if (profile.type === "bigquery") {
+      form.value.connection_string = undefined;
+      form.value.jdbc_driver_class = "";
+      form.value.jdbc_driver_paths = [];
+      jdbcDriverPathsInput.value = "";
+      jdbcManualClasspathOpen.value = true;
+    }
     if (profile.type === "mq") {
       resetMqFields(defaultMqFieldsForProfile(val));
       syncMqSystemKindFromSelectedType();
@@ -2405,7 +2417,7 @@ watch(
       resetJdbcProductConnectionFields(jdbcProductProfileForConfig(config), config);
       mongoUseUrl.value = !!config.connection_string;
       jdbcDriverPathsInput.value = (config.jdbc_driver_paths || []).join("\n");
-      jdbcManualClasspathOpen.value = config.db_type === "prestosql" || (config.jdbc_driver_paths || []).length > 0;
+      jdbcManualClasspathOpen.value = supportsNativeAgentJdbcDriverConfigType(config.db_type) || (config.jdbc_driver_paths || []).length > 0;
       customDriverName.value = isCustomCompatibleProfile() ? config.driver_label || "" : "";
       dialogStep.value = "config";
       configTab.value = initialConfigTab();
@@ -2651,6 +2663,7 @@ const iconTypeMap: Record<string, string> = {
   victoriametrics: "victoriametrics",
   jdbc: "jdbc",
   custom_mysql: "mysql",
+  dolt: "dolt",
   custom_postgres: "postgres",
   ...jdbcProductIconTypes(),
 };
@@ -2738,6 +2751,7 @@ const dbOptions: DbOption[] = [
   { value: "jdbcx", label: "JDBCX" },
   { value: "manticoresearch", label: "Manticore Search" },
   { value: "custom_mysql", label: "Custom (MySQL)" },
+  { value: "dolt", label: "Dolt" },
   { value: "custom_postgres", label: "Custom (PostgreSQL)" },
   { value: "dremio", label: "Dremio" },
   ...jdbcProductPickerOptions(),
@@ -2751,7 +2765,7 @@ const dbCategoryDefinitions: Array<{
   {
     key: "sql",
     titleKey: "connection.databaseCategorySql",
-    optionValues: ["postgres", "mysql", "oracle", "sqlserver", "mariadb", "cockroachdb", "db2", "informix", "firebird", "iris", "jdbcx", "custom_mysql", "custom_postgres"],
+    optionValues: ["postgres", "mysql", "oracle", "sqlserver", "mariadb", "cockroachdb", "db2", "informix", "firebird", "iris", "jdbcx", "custom_mysql", "custom_postgres", "dolt"],
   },
   {
     key: "analytics",
@@ -2861,7 +2875,11 @@ function dbCategoryForOption(value: string): DbCategoryKey | undefined {
 }
 
 const selectedDbIcon = computed(() => iconTypeMap[selectedType.value] || selectedProfile().icon || selectedType.value);
-const jdbcBackedDatabaseTypes = new Set<DatabaseType>(["jdbc", "prestosql"]);
+function supportsNativeAgentJdbcDriverConfigType(dbType: DatabaseType): boolean {
+  return dbType === "prestosql" || dbType === "bigquery";
+}
+
+const jdbcBackedDatabaseTypes = new Set<DatabaseType>(["jdbc", "prestosql", "bigquery"]);
 const isJdbcConnection = computed(() => form.value.db_type === "jdbc");
 const isJdbcxConnection = computed(() => isJdbcConnection.value && form.value.driver_profile === JDBCX_DRIVER_PROFILE);
 const isJdbcProductConnection = computed(() => Boolean(activeJdbcProductProfile.value));
@@ -2872,7 +2890,7 @@ const jdbcxHighPrivilegeExtensionsAllowed = computed({
     resetTestState();
   },
 });
-const isPrestoSqlConnection = computed(() => form.value.db_type === "prestosql");
+const supportsNativeAgentJdbcDriverConfig = computed(() => supportsNativeAgentJdbcDriverConfigType(form.value.db_type));
 const isH2FileMode = computed(() => form.value.db_type === "h2" && h2ConnectionMode.value === "file");
 const usesLocalFilePathInput = computed(() => isLocalFileTypeDb(form.value.db_type) && (form.value.db_type !== "h2" || isH2FileMode.value));
 
@@ -3016,6 +3034,18 @@ const etcdEndpointsLines = computed({
   get: () => form.value.etcd_endpoints || "",
   set: (value: string) => {
     form.value.etcd_endpoints = normalizeEndpointLines(value);
+  },
+});
+const etcdGrpcMaxInboundMessageSizeMiB = computed({
+  get: () => {
+    const configuredBytes = Number(getUrlParam(form.value.url_params, ETCD_GRPC_MAX_INBOUND_PARAM));
+    if (!Number.isFinite(configuredBytes) || configuredBytes <= 0) return ETCD_GRPC_MAX_INBOUND_DEFAULT_MIB;
+    return Math.min(ETCD_GRPC_MAX_INBOUND_MAX_MIB, Math.max(ETCD_GRPC_MAX_INBOUND_MIN_MIB, Math.round(configuredBytes / (1024 * 1024))));
+  },
+  set: (value: number) => {
+    const configuredMiB = Number(value);
+    const normalizedMiB = Number.isFinite(configuredMiB) ? Math.min(ETCD_GRPC_MAX_INBOUND_MAX_MIB, Math.max(ETCD_GRPC_MAX_INBOUND_MIN_MIB, Math.round(configuredMiB))) : ETCD_GRPC_MAX_INBOUND_DEFAULT_MIB;
+    form.value.url_params = setUrlParam(form.value.url_params, ETCD_GRPC_MAX_INBOUND_PARAM, String(normalizedMiB * 1024 * 1024));
   },
 });
 const zookeeperConnectString = computed({
@@ -6849,7 +6879,7 @@ function openExternalUrl(url: string) {
                     </div>
                   </div>
 
-                  <template v-if="isPrestoSqlConnection">
+                  <template v-if="supportsNativeAgentJdbcDriverConfig">
                     <div class="grid grid-cols-4 items-start gap-4">
                       <Label :class="connectionLabelTopClass">{{ t("connection.jdbcDriverPaths") }}</Label>
                       <div class="col-span-3 space-y-2">
@@ -7445,6 +7475,13 @@ function openExternalUrl(url: string) {
                       <label for="connect-timeout-connection" class="min-w-0 flex-1 cursor-pointer truncate text-xs" :title="t('connection.useConnectionQueryTimeout')">{{ t("connection.useConnectionQueryTimeout") }}</label>
                       <Input v-model.number="form.connect_timeout_secs" type="number" min="1" max="300" step="1" class="col-span-2 h-7 w-full shrink-0 sm:col-span-1 sm:w-20" :disabled="form.connect_timeout_inherit === true" />
                     </div>
+                  </div>
+                </div>
+                <div v-if="form.db_type === 'etcd'" class="grid grid-cols-4 items-start gap-4">
+                  <Label :class="connectionLabelSmallPaddedClass">{{ t("connection.etcdGrpcMaxInbound") }}</Label>
+                  <div class="col-span-3 space-y-1">
+                    <Input v-model.number="etcdGrpcMaxInboundMessageSizeMiB" type="number" :min="ETCD_GRPC_MAX_INBOUND_MIN_MIB" :max="ETCD_GRPC_MAX_INBOUND_MAX_MIB" step="1" />
+                    <p class="text-xs leading-5 text-muted-foreground">{{ t("connection.etcdGrpcMaxInboundHint") }}</p>
                   </div>
                 </div>
                 <div class="grid grid-cols-4 items-center gap-4">

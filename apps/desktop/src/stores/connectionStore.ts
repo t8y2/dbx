@@ -1144,6 +1144,9 @@ export const useConnectionStore = defineStore("connection", () => {
   }
 
   function isFixedPriorityTreeNode(node: TreeNode): boolean {
+    if (node.type === "schema") {
+      return !!node.connectionId && !!node.schema && isDefaultSchema(node.connectionId, node.schema);
+    }
     if (node.type !== "database" && node.type !== "redis-db" && node.type !== "mongo-db") return false;
     return !!node.connectionId && typeof node.database === "string" && isDefaultDatabase(node.connectionId, node.database);
   }
@@ -2555,6 +2558,29 @@ export const useConnectionStore = defineStore("connection", () => {
     const config = getConfig(connectionId);
     if (config?.db_type === "cloudflare-d1") return database === "main";
     return config?.database === database && database !== "";
+  }
+
+  async function setDefaultSchema(connectionId: string, schema: string) {
+    const config = getConfig(connectionId);
+    const defaultSchema = schema.trim();
+    if (!config || !defaultSchema || config.default_schema === defaultSchema) return;
+    await updateConnection({
+      ...config,
+      default_schema: defaultSchema,
+    });
+  }
+
+  async function clearDefaultSchema(connectionId: string) {
+    const config = getConfig(connectionId);
+    if (!config?.default_schema) return;
+    await updateConnection({
+      ...config,
+      default_schema: undefined,
+    });
+  }
+
+  function isDefaultSchema(connectionId: string, schema: string): boolean {
+    return getConfig(connectionId)?.default_schema === schema && schema !== "";
   }
 
   function getRedisDatabaseAlias(connectionId: string, database: string | number): string | undefined {
@@ -7084,6 +7110,9 @@ export const useConnectionStore = defineStore("connection", () => {
     setDefaultDatabase,
     clearDefaultDatabase,
     isDefaultDatabase,
+    setDefaultSchema,
+    clearDefaultSchema,
+    isDefaultSchema,
     getRedisDatabaseAlias,
     setRedisDatabaseAlias,
     setVisibleDatabases,

@@ -16,6 +16,7 @@ import {
   parseMongoAggregateCommand,
   parseMongoCollectionStatsCommand,
   parseMongoCommand,
+  parseMongoCreateUserCommand,
   parseMongoCountDocumentsCommand,
   parseMongoDistinctCommand,
   parseMongoFindCommand,
@@ -47,6 +48,41 @@ test("normalizeRustMongoCommand preserves the desktop command contract", () => {
   assert.deepEqual(normalizeRustMongoCommand({ kind: "countDocuments", collection: "users", filter: "{}", accurate: false }), { kind: "countDocuments", collection: "users", filter: "{}", mode: "legacy" });
   assert.deepEqual(normalizeRustMongoCommand({ kind: "dropIndexes", collection: "users", indexes: '"email_1"', single: true }), { kind: "dropIndex", collection: "users", index: '"email_1"' });
   assert.deepEqual(normalizeRustMongoCommand({ kind: "findOne", collection: "users", filter: "{}", projection: null, options: null }), { kind: "findOne", collection: "users", filter: "{}" });
+});
+
+test("parseMongoCreateUserCommand normalizes user and write concern documents", () => {
+  assert.deepEqual(
+    parseMongoCreateUserCommand(`db.createUser({
+      user: "test-db",
+      pwd: "test-password",
+      roles: [{ role: "readWrite", db: "db1" }]
+    }, { w: "majority", wtimeout: 5000 })`),
+    {
+      userJson: '{"user":"test-db","pwd":"test-password","roles":[{"role":"readWrite","db":"db1"}]}',
+      writeConcernJson: '{"w":"majority","wtimeout":5000}',
+    },
+  );
+  assert.equal(parseMongoCreateUserCommand('db.createUser({pwd: "missing-user", roles: []})'), null);
+  assert.equal(parseMongoCreateUserCommand('db.createUser({user: "test"}, "majority")'), null);
+});
+
+test("splitMongoCommands executes use before createUser", () => {
+  const commands = splitMongoCommands(`use admin
+
+db.createUser({
+  user: "test-db",
+  pwd: "test-password",
+  roles: [{ role: "readWrite", db: "db1" }]
+})`);
+
+  assert.deepEqual(commands.map(({ command }) => command.kind), ["use", "createUser"]);
+  const createUser = commands[1]?.command;
+  assert.equal(createUser?.kind, "createUser");
+  if (createUser?.kind === "createUser") {
+    assert.equal(JSON.parse(createUser.userJson).user, "test-db");
+    assert.match(evaluateMongoWriteSafety(createUser, { allowWrites: true }).reason || "", /high-risk operations/i);
+    assert.equal(evaluateMongoWriteSafety(createUser, { allowWrites: true, allowDangerous: true }).allowed, true);
+  }
 });
 
 test("parseMongoFindCommand parses getCollection find with chained sort skip and limit", () => {

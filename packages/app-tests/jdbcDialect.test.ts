@@ -4,6 +4,7 @@ import {
   codeMirrorSqlDialectForConnection,
   connectionShouldDiscoverJdbcSchemas,
   connectionShouldLoadIdentifierQuote,
+  connectionUsesConnectionRootSchemaMode,
   connectionUsesDatabaseObjectTreeMode,
   effectiveDatabaseTypeForConnection,
   gaussdbIdentifierQuoteOverride,
@@ -39,6 +40,16 @@ test("infers JDBC dialect from driver profile", () => {
     }),
     "sqlserver",
   );
+});
+
+test("Oracle JDBC uses connection-root schema navigation", () => {
+  const connection = {
+    db_type: "jdbc" as const,
+    connection_string: "jdbc:oracle:thin:@//127.0.0.1:1521/XE",
+  };
+
+  assert.equal(connectionUsesConnectionRootSchemaMode(connection), true);
+  assert.equal(connectionUsesDatabaseObjectTreeMode(connection), false);
 });
 
 test("uses dedicated ClickHouse editor syntax for inferred JDBC connections", () => {

@@ -53,6 +53,13 @@ describe("QueryEditor execution routing", () => {
     // The picker guard must also honor the shortcut's bypass flag, otherwise Ctrl+Enter would keep popping the dialog.
     expect(queryEditorSource).toContain("if (options.bypassPicker || !settingsStore.editorSettings.showExecutionTargetPicker");
   });
+
+  it("inserts a complete indented line below the current line", () => {
+    expect(queryEditorSource).toContain('userEvent: "input.insertLineBelow"');
+    expect(queryEditorSource).toContain("changes: { from: line.to, to: line.to, insert: insertion }");
+    expect(queryEditorSource).toContain("const cursor = line.to + insertion.length");
+    expect(queryEditorSource).not.toMatch(/key:\s*"Enter"[\s\S]{0,180}shift:\s*codeMirrorInsertNewlineKeepIndent/);
+  });
 });
 
 describe("ContentArea execution summary errors", () => {

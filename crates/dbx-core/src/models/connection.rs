@@ -89,6 +89,8 @@ pub struct ConnectionConfig {
     pub password: String,
     pub database: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_schema: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub visible_databases: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub visible_schemas: Option<HashMap<String, Vec<String>>>,
@@ -578,6 +580,8 @@ struct ConnectionConfigData {
     pub password: String,
     pub database: Option<String>,
     #[serde(default)]
+    pub default_schema: Option<String>,
+    #[serde(default)]
     pub visible_databases: Option<Vec<String>>,
     #[serde(default)]
     pub visible_schemas: Option<HashMap<String, Vec<String>>>,
@@ -675,6 +679,7 @@ impl From<ConnectionConfigData> for ConnectionConfig {
             username: data.username,
             password: data.password,
             database: data.database,
+            default_schema: data.default_schema,
             visible_databases: data.visible_databases,
             visible_schemas: data.visible_schemas,
             show_system_schemas: data.show_system_schemas,
@@ -2282,6 +2287,28 @@ mod tests {
         assert_eq!(database_info_from_protocol_value(&serde_json::json!({ "ok": true })), None);
     }
 
+    #[test]
+    fn default_schema_is_optional_and_round_trips() {
+        let base = serde_json::json!({
+            "id": "id",
+            "name": "PostgreSQL",
+            "db_type": "postgres",
+            "host": "localhost",
+            "port": 5432,
+            "username": "postgres",
+            "password": "",
+            "database": "app"
+        });
+        let legacy: ConnectionConfig = serde_json::from_value(base.clone()).unwrap();
+        assert_eq!(legacy.default_schema, None);
+
+        let mut configured = base;
+        configured["default_schema"] = serde_json::json!("archive");
+        let parsed: ConnectionConfig = serde_json::from_value(configured).unwrap();
+        assert_eq!(parsed.default_schema.as_deref(), Some("archive"));
+        assert_eq!(serde_json::to_value(parsed).unwrap()["default_schema"], "archive");
+    }
+
     fn mysql_config(username: &str, password: &str, database: Option<&str>) -> ConnectionConfig {
         ConnectionConfig {
             docs_notes_path: None,
@@ -2298,6 +2325,7 @@ mod tests {
             username: username.to_string(),
             password: password.to_string(),
             database: database.map(str::to_string),
+            default_schema: None,
             visible_databases: None,
             visible_schemas: None,
             show_system_schemas: false,

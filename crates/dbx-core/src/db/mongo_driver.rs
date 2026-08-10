@@ -1231,6 +1231,48 @@ pub async fn create_index(
     Ok(name)
 }
 
+pub async fn create_user(
+    client: &Client,
+    database: &str,
+    user_json: &str,
+    write_concern_json: Option<&str>,
+) -> Result<(), String> {
+    let database = validate_mongo_namespace_name(database, "Database")?;
+    let command = create_user_command(user_json, write_concern_json)?;
+    client.database(database).run_command(command).await.map_err(|error| error.kind.to_string())?;
+    Ok(())
+}
+
+pub fn validate_create_user_request(user_json: &str, write_concern_json: Option<&str>) -> Result<(), String> {
+    create_user_command(user_json, write_concern_json).map(|_| ())
+}
+
+fn create_user_command(user_json: &str, write_concern_json: Option<&str>) -> Result<Document, String> {
+    let user_value: serde_json::Value =
+        serde_json::from_str(user_json).map_err(|error| format!("Invalid MongoDB user JSON: {error}"))?;
+    let mut user = json_object_to_document_extended_json(&user_value)
+        .map_err(|error| format!("Invalid MongoDB user document: {error}"))?;
+    let username = user
+        .remove("user")
+        .and_then(|value| value.as_str().map(str::to_string))
+        .filter(|value| !value.trim().is_empty())
+        .ok_or("MongoDB createUser requires a non-empty user name")?;
+    if user.contains_key("createUser") || user.contains_key("writeConcern") {
+        return Err("MongoDB createUser user document contains reserved command fields".to_string());
+    }
+
+    let mut command = doc! { "createUser": username };
+    command.extend(user);
+    if let Some(write_concern_json) = write_concern_json.filter(|value| !value.trim().is_empty()) {
+        let write_concern_value: serde_json::Value = serde_json::from_str(write_concern_json)
+            .map_err(|error| format!("Invalid MongoDB write concern JSON: {error}"))?;
+        let write_concern = json_object_to_document_extended_json(&write_concern_value)
+            .map_err(|error| format!("Invalid MongoDB write concern: {error}"))?;
+        command.insert("writeConcern", write_concern);
+    }
+    Ok(command)
+}
+
 /// Validate an index request before it reaches either the native driver or the
 /// Legacy Agent. In particular, `key` belongs to the createIndexes command
 /// itself and must not be smuggled through the options document.
@@ -3011,6 +3053,35 @@ mod tests {
 
         let error = validate_mongo_namespace_name("", "Collection").unwrap_err();
         assert_eq!(error, "Collection name is required");
+    }
+
+    #[test]
+    fn create_user_command_preserves_roles_and_write_concern() {
+        let command = create_user_command(
+            r#"{"user":"test-db","pwd":"test-password","roles":[{"role":"readWrite","db":"db1"}]}"#,
+            Some(r#"{"w":"majority","wtimeout":5000}"#),
+        )
+        .unwrap();
+
+        assert_eq!(command.keys().next().map(String::as_str), Some("createUser"));
+        assert_eq!(command.get_str("createUser").unwrap(), "test-db");
+        assert_eq!(command.get_str("pwd").unwrap(), "test-password");
+        let roles = command.get_array("roles").unwrap();
+        assert_eq!(roles[0].as_document().unwrap(), &doc! { "role": "readWrite", "db": "db1" });
+        assert_eq!(command.get_document("writeConcern").unwrap(), &doc! { "w": "majority", "wtimeout": 5000_i32 });
+    }
+
+    #[test]
+    fn create_user_command_rejects_missing_names_and_reserved_fields() {
+        for user in [
+            r#"{"pwd":"secret","roles":[]}"#,
+            r#"{"user":"","pwd":"secret","roles":[]}"#,
+            r#"{"user":"app","createUser":"other","pwd":"secret","roles":[]}"#,
+            r#"{"user":"app","writeConcern":{"w":1},"pwd":"secret","roles":[]}"#,
+        ] {
+            assert!(create_user_command(user, None).is_err(), "{user}");
+        }
+        assert!(create_user_command(r#"{"user":"app","pwd":"secret","roles":[]}"#, Some("true")).is_err());
     }
 
     #[test]

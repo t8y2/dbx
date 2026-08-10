@@ -151,6 +151,44 @@ impl<'a> FromSql<'a> for PgRawBytes {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct PgPoint {
+    x: f64,
+    y: f64,
+}
+
+impl<'a> FromSql<'a> for PgPoint {
+    fn from_sql(_: &Type, raw: &'a [u8]) -> Result<Self, Box<dyn std::error::Error + Sync + Send>> {
+        decode_pg_point_bytes(raw).ok_or_else(|| "expected 16 bytes for PostgreSQL point".into())
+    }
+
+    fn accepts(ty: &Type) -> bool {
+        *ty == Type::POINT
+    }
+}
+
+fn decode_pg_point_bytes(raw: &[u8]) -> Option<PgPoint> {
+    let raw: [u8; 16] = raw.try_into().ok()?;
+    Some(PgPoint {
+        x: f64::from_be_bytes(raw[0..8].try_into().ok()?),
+        y: f64::from_be_bytes(raw[8..16].try_into().ok()?),
+    })
+}
+
+fn format_pg_float(value: f64) -> String {
+    if value == f64::INFINITY {
+        "Infinity".to_string()
+    } else if value == f64::NEG_INFINITY {
+        "-Infinity".to_string()
+    } else {
+        value.to_string()
+    }
+}
+
+fn format_pg_point(point: PgPoint) -> String {
+    format!("({},{})", format_pg_float(point.x), format_pg_float(point.y))
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct PgInterval {
     microseconds: i64,
@@ -524,6 +562,7 @@ pub(crate) enum PgColType {
     Bytea,
     Json,
     Bool,
+    Point,
     Interval,
     DateRange,
     Temporal { fallback: PgTemporalFallback },
@@ -571,6 +610,9 @@ pub(crate) fn classify_pg_type(type_name: &str) -> PgColType {
     }
     if upper == "BOOL" {
         return PgColType::Bool;
+    }
+    if upper == "POINT" {
+        return PgColType::Point;
     }
     if upper == "INTERVAL" {
         return PgColType::Interval;
@@ -655,6 +697,10 @@ pub(crate) fn pg_value_to_json_classified(row: &Row, idx: usize, col_type: PgCol
             serde_json::Value::Null
         }
         PgColType::Bool => pg_bool_value_to_json(row, idx),
+        PgColType::Point => row
+            .try_get::<_, PgPoint>(idx)
+            .map(|point| serde_json::Value::String(format_pg_point(point)))
+            .unwrap_or(serde_json::Value::Null),
         PgColType::Interval => row
             .try_get::<_, PgInterval>(idx)
             .map(|interval| serde_json::Value::String(format_pg_interval(interval)))
@@ -1015,6 +1061,7 @@ async fn postgres_query_one_cached(
     }
 }
 
+#[allow(clippy::large_enum_variant)]
 enum PreparedSelectOutcome {
     Complete(Box<QueryResult>),
     TextFallback { column_types: Vec<String>, unsupported_type: String },
@@ -5516,6 +5563,7 @@ mod tests {
         assert_eq!(classify_pg_type("json"), PgColType::Json);
         assert_eq!(classify_pg_type("JSONB"), PgColType::Json);
         assert_eq!(classify_pg_type("bool"), PgColType::Bool);
+        assert_eq!(classify_pg_type("point"), PgColType::Point);
         assert_eq!(classify_pg_type("timestamp"), PgColType::Temporal { fallback: PgTemporalFallback::Probe });
         assert_eq!(classify_pg_type("timestamptz"), PgColType::Temporal { fallback: PgTemporalFallback::Probe });
         assert_eq!(classify_pg_type("date"), PgColType::Temporal { fallback: PgTemporalFallback::Probe });
@@ -5952,6 +6000,22 @@ mod tests {
         assert!(PgSystemU32::accepts(&Type::CID));
         assert!(!PgSystemU32::accepts(&Type::OID));
         assert!(!PgSystemU32::accepts(&Type::INT4));
+    }
+
+    #[test]
+    fn pg_point_decodes_binary_coordinates_as_text() {
+        let mut raw = Vec::new();
+        raw.extend_from_slice(&(-194.0_f64).to_be_bytes());
+        raw.extend_from_slice(&53.0_f64.to_be_bytes());
+
+        let point = PgPoint::from_sql(&Type::POINT, &raw).unwrap();
+
+        assert_eq!(point, PgPoint { x: -194.0, y: 53.0 });
+        assert_eq!(format_pg_point(point), "(-194,53)");
+        assert_eq!(format_pg_point(PgPoint { x: f64::NEG_INFINITY, y: f64::INFINITY }), "(-Infinity,Infinity)");
+        assert!(PgPoint::from_sql(&Type::POINT, &[0; 15]).is_err());
+        assert!(PgPoint::accepts(&Type::POINT));
+        assert!(!PgPoint::accepts(&Type::BYTEA));
     }
 
     #[test]

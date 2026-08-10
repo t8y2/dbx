@@ -18,6 +18,7 @@ const props = defineProps<{
   columnComment?: string;
   tooltipColumnType?: string;
   tooltipColumnComment?: string;
+  columnNullability?: "nullable" | "required";
   showTypeLine?: boolean;
   showCommentLine?: boolean;
   typeClass?: HTMLAttributes["class"];
@@ -27,6 +28,9 @@ const props = defineProps<{
   columnNameLabel: string;
   columnTypeLabel: string;
   columnCommentLabel: string;
+  nullableLabel?: string;
+  yesLabel?: string;
+  noLabel?: string;
   columnIndexLabel: string;
   columnPrimaryIndexLabel: string;
   columnUniqueIndexLabel: string;
@@ -71,7 +75,10 @@ const emit = defineEmits<{
         <KeyRound v-if="columnIndexKind === 'primary'" class="h-3 w-3 shrink-0" :class="columnIndexColorClass(columnIndexKind)" :title="columnIndexText(columnIndexKind)" />
         <Hash v-else-if="columnIndexKind && columnIndexKind !== 'none'" class="h-3 w-3 shrink-0" :class="columnIndexColorClass(columnIndexKind)" :title="columnIndexText(columnIndexKind)" />
         <span class="flex min-w-0 flex-1 flex-col overflow-hidden">
-          <span class="min-w-0 truncate leading-4">{{ name }}</span>
+          <span class="flex min-w-0 items-center gap-1 leading-4">
+            <span class="min-w-0 truncate">{{ name }}</span>
+            <span v-if="columnNullability === 'nullable'" data-grid-header-nullable class="shrink-0 rounded-sm border border-muted-foreground/40 px-0.5 text-[8px] font-semibold leading-3 text-muted-foreground" :title="nullableLabel" :aria-label="nullableLabel"> NULL </span>
+          </span>
           <span v-if="showTypeLine" data-grid-header-type-line class="h-3 min-w-0 truncate text-[10px] font-normal leading-3" :class="[typeClass, { invisible: !columnType }]" :title="columnType || undefined" :aria-hidden="columnType ? undefined : true">{{ columnType }}</span>
           <span v-if="showCommentLine" data-grid-header-comment-line class="h-3 min-w-0 truncate text-[10px] font-normal leading-3 text-muted-foreground" :class="{ invisible: !columnComment }" :title="columnComment || undefined" :aria-hidden="columnComment ? undefined : true">{{
             columnComment
@@ -97,6 +104,10 @@ const emit = defineEmits<{
         <template v-if="tooltipColumnComment ?? columnComment">
           <span class="text-background/70">{{ columnCommentLabel }}</span>
           <span>{{ tooltipColumnComment ?? columnComment }}</span>
+        </template>
+        <template v-if="columnNullability">
+          <span class="text-background/70">{{ nullableLabel }}</span>
+          <span>{{ columnNullability === "nullable" ? yesLabel : noLabel }}</span>
         </template>
         <template v-if="columnIndexKind && columnIndexKind !== 'none'">
           <span class="text-background/70">{{ columnIndexLabel }}</span>

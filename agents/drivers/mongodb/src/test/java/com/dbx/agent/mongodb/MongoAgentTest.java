@@ -522,6 +522,33 @@ class MongoAgentTest {
     }
 
     @Test
+    void createUserMethodIsRecognizedAndBuildsTheExpectedCommand() {
+        String response = MongoAgent.handleRequest(
+            "{\"jsonrpc\":\"2.0\",\"id\":121,\"method\":\"create_user\","
+                + "\"params\":{\"database\":\"admin\","
+                + "\"user_json\":\"{\\\"user\\\":\\\"test-db\\\",\\\"pwd\\\":\\\"test-password\\\",\\\"roles\\\":[{\\\"role\\\":\\\"readWrite\\\",\\\"db\\\":\\\"db1\\\"}]}\"}}"
+        );
+
+        JsonObject json = JsonParser.parseString(response).getAsJsonObject();
+        assertEquals(121, json.get("id").getAsInt());
+        assertEquals("Not connected", json.getAsJsonObject("error").get("message").getAsString());
+        assertFalse(json.getAsJsonObject("error").get("message").getAsString().contains("Unknown method"));
+        assertTrue(AgentProtocol.MONGO_LEGACY_METHODS.contains(AgentProtocol.MONGO_METHOD_CREATE_USER));
+
+        JsonObject params = JsonParser.parseString(
+            "{\"database\":\"admin\","
+                + "\"user_json\":\"{\\\"user\\\":\\\"test-db\\\",\\\"pwd\\\":\\\"test-password\\\",\\\"roles\\\":[{\\\"role\\\":\\\"readWrite\\\",\\\"db\\\":\\\"db1\\\"}]}\","
+                + "\"write_concern_json\":\"{\\\"w\\\":\\\"majority\\\"}\"}"
+        ).getAsJsonObject();
+        Document command = MongoAgent.buildCreateUserCommand(params);
+        assertEquals("createUser", command.keySet().iterator().next());
+        assertEquals("test-db", command.getString("createUser"));
+        assertEquals("test-password", command.getString("pwd"));
+        assertEquals("readWrite", command.getList("roles", Document.class).get(0).getString("role"));
+        assertEquals("majority", command.get("writeConcern", Document.class).getString("w"));
+    }
+
+    @Test
     void defaultIndexNameMatchesNativeDriverForWholeDoubles() {
         assertEquals(
             "email_1_createdAt_-1",

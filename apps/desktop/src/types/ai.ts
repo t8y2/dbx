@@ -4,6 +4,7 @@ export type AiAuthMethod = "api-key" | "bearer";
 export type AiEffortLevel = "low" | "medium" | "high" | "xhigh" | "max";
 export type AiReasoningLevel = "default" | "minimal" | AiEffortLevel;
 export type AiCapabilitySource = "providerApi" | "localCli" | "officialRegistry" | "custom";
+export type AiAssistantMode = "ask" | "agent";
 
 export type AiEffortSelection = { kind: "providerDefault" } | { kind: "disabled" } | { kind: "enum"; value: string } | { kind: "integer"; value: number } | { kind: "boolean"; value: boolean } | { kind: "text"; value: string };
 
@@ -82,4 +83,5 @@ export interface AiChatSelectionState {
   version: number;
   active?: AiActiveModelSelection;
   effortPreferences: AiModelEffortPreference[];
+  defaultMode?: AiAssistantMode;
 }

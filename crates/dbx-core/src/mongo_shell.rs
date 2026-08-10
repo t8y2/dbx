@@ -8,6 +8,13 @@ pub enum MongoCommand {
     Version,
     #[serde(rename = "use")]
     Use { database: String },
+    #[serde(rename = "createUser")]
+    CreateUser {
+        #[serde(rename = "userJson")]
+        user_json: String,
+        #[serde(rename = "writeConcernJson")]
+        write_concern_json: Option<String>,
+    },
     #[serde(rename = "find")]
     Find {
         collection: String,
@@ -77,7 +84,8 @@ impl MongoCommand {
     pub fn is_mutating(&self) -> bool {
         matches!(
             self,
-            Self::Insert { .. }
+            Self::CreateUser { .. }
+                | Self::Insert { .. }
                 | Self::Update { .. }
                 | Self::Delete { .. }
                 | Self::CreateIndex { .. }
@@ -90,7 +98,7 @@ impl MongoCommand {
     }
 
     pub fn is_dangerous(&self) -> bool {
-        matches!(self, Self::DropCollection { .. })
+        matches!(self, Self::CreateUser { .. } | Self::DropCollection { .. })
             || matches!(self, Self::DropIndexes { indexes: None, single: false, .. })
             || matches!(self, Self::Aggregate { pipeline, .. } if aggregate_writes(pipeline))
     }
@@ -347,6 +355,23 @@ pub fn parse(input: &str) -> Result<MongoCommand, String> {
     }
     if let Some(database) = parse_use_database(source) {
         return Ok(MongoCommand::Use { database });
+    }
+    if let Some((args, tail)) = database_method_call(source, "createUser") {
+        if !tail.is_empty() || !(1..=2).contains(&args.len()) {
+            return Err("MongoDB createUser() requires a user document and optional write concern.".to_string());
+        }
+        let user_json = normalized_json(&args[0])?;
+        let user = parse_json_value(&user_json)
+            .and_then(|value| value.as_object().cloned())
+            .ok_or("MongoDB createUser() requires a user document.")?;
+        if user.get("user").and_then(Value::as_str).is_none_or(|user| user.trim().is_empty()) {
+            return Err("MongoDB createUser() requires a non-empty user name.".to_string());
+        }
+        let write_concern_json = optional_json_argument(args.get(1))?;
+        if write_concern_json.as_deref().and_then(parse_json_value).is_some_and(|value| !value.is_object()) {
+            return Err("MongoDB createUser() write concern must be a document.".to_string());
+        }
+        return Ok(MongoCommand::CreateUser { user_json, write_concern_json });
     }
     let (collection, prefix_end) = parse_collection_prefix(source)?;
 
@@ -647,6 +672,24 @@ fn method_call(source: &str, prefix_end: usize, method: &str) -> Option<(Vec<Str
         return None;
     }
     let open = prefix_end + whitespace + expected.len();
+    let close = matching_paren(source, open)?;
+    Some((split_top_level(&source[open + 1..close]), source[close + 1..].trim().to_string()))
+}
+
+fn database_method_call(source: &str, method: &str) -> Option<(Vec<String>, String)> {
+    if !source.get(..2).is_some_and(|prefix| prefix.eq_ignore_ascii_case("db")) {
+        return None;
+    }
+    let after_db = source.get(2..)?.trim_start();
+    let after_dot = after_db.strip_prefix('.')?.trim_start();
+    if !after_dot.get(..method.len()).is_some_and(|name| name.eq_ignore_ascii_case(method)) {
+        return None;
+    }
+    let after_method = after_dot.get(method.len()..)?.trim_start();
+    if !after_method.starts_with('(') {
+        return None;
+    }
+    let open = source.len() - after_method.len();
     let close = matching_paren(source, open)?;
     Some((split_top_level(&source[open + 1..close]), source[close + 1..].trim().to_string()))
 }
@@ -958,6 +1001,28 @@ mod tests {
     }
 
     #[test]
+    fn parses_create_user_as_a_dangerous_write() {
+        let command = parse(
+            r#"db . createUser({user: "test-db", pwd: "test-password", roles: [{role: "readWrite", db: "db1"}]}, {w: "majority"})"#,
+        )
+        .unwrap();
+        assert_eq!(
+            command,
+            MongoCommand::CreateUser {
+                user_json: r#"{"user":"test-db","pwd":"test-password","roles":[{"role":"readWrite","db":"db1"}]}"#
+                    .to_string(),
+                write_concern_json: Some(r#"{"w":"majority"}"#.to_string()),
+            }
+        );
+        assert!(command.is_mutating());
+        assert!(command.is_dangerous());
+        assert_eq!(validate_safety(&command, true, false, false), Err(MongoSafetyError::Dangerous));
+        assert_eq!(validate_safety(&command, true, true, false), Ok(()));
+        assert!(parse(r#"db.createUser({pwd: "missing-user", roles: []})"#).is_err());
+        assert!(parse(r#"db.createUser({user: "test"}, "majority")"#).is_err());
+    }
+
+    #[test]
     fn treats_effectively_unbounded_write_filters_as_dangerous() {
         for command in [
             r#"db.items.deleteMany({_id: {$exists: true}})"#,
@@ -1102,6 +1167,10 @@ mod tests {
         let count = serde_json::to_value(parse("db.items.count({})").unwrap()).unwrap();
         assert_eq!(count["kind"], "countDocuments");
         assert_eq!(count["accurate"], false);
+        let create_user =
+            serde_json::to_value(parse(r#"db.createUser({user: "app", pwd: "secret", roles: []})"#).unwrap()).unwrap();
+        assert_eq!(create_user["kind"], "createUser");
+        assert_eq!(create_user["userJson"], r#"{"user":"app","pwd":"secret","roles":[]}"#);
     }
 
     #[test]

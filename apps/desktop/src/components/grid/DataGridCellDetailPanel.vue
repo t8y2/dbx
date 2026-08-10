@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { toRef } from "vue";
-import { Code2, Copy, Eye, Pencil, Upload, X } from "@lucide/vue";
+import { Code2, Copy, Download, Eye, FileUp, Pencil, X } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
 import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
@@ -30,6 +30,8 @@ const props = defineProps<{
   typeColorClass: (type: string) => string;
   canDownloadBinaryValue: (detail: DataGridCellDetail | null) => boolean;
   downloadBinaryValue: (detail: DataGridCellDetail | null, mode: BinaryCellDownloadMode) => void | Promise<void>;
+  canImportBinaryValue: (detail: DataGridCellDetail | null) => boolean;
+  importBinaryValue: (detail: DataGridCellDetail | null) => void | Promise<void>;
   openImagePreview: (src: string, title: string) => void;
   canCopySqlCondition: () => boolean;
 }>();
@@ -122,9 +124,10 @@ defineExpose({ openSearch });
             <Button v-if="!editing && detail.formattedJson" :variant="sideJsonView ? 'secondary' : 'ghost'" size="sm" class="h-5 gap-1 px-1.5 text-xs" :title="t('grid.formattedJson')" @click="emit('toggleFormatted')"><Code2 class="h-3 w-3" />{{ t("grid.formattedJson") }}</Button>
             <Button v-if="!editing && detail.isEditable" variant="ghost" size="icon" class="h-5 w-5" :title="t('grid.editValue')" @click="emit('startEdit')"><Pencil class="h-3 w-3" /></Button>
             <Button v-if="!editing" variant="ghost" size="icon" class="h-5 w-5" :title="t('grid.copyValue')" @click="emit('copyValue')"><Copy class="h-3 w-3" /></Button>
+            <Button v-if="canImportBinaryValue(detail)" variant="ghost" size="icon" class="h-5 w-5" :title="t('grid.importBinaryValue')" @click="importBinaryValue(detail)"><FileUp class="h-3 w-3" /></Button>
             <DropdownMenu v-if="!editing && canDownloadBinaryValue(detail)"
               ><DropdownMenuTrigger as-child
-                ><Button variant="ghost" size="icon" class="h-5 w-5" :title="t('grid.downloadBinaryValue')"><Upload class="h-3 w-3" /></Button></DropdownMenuTrigger
+                ><Button variant="ghost" size="icon" class="h-5 w-5" :title="t('grid.downloadBinaryValue')"><Download class="h-3 w-3" /></Button></DropdownMenuTrigger
               ><DropdownMenuContent align="end" class="w-44"
                 ><DropdownMenuItem v-for="mode in BINARY_CELL_DOWNLOAD_MODES" :key="mode" @click="downloadBinaryValue(detail, mode)">{{ t(`grid.binaryDownload.${mode}`) }}</DropdownMenuItem></DropdownMenuContent
               ></DropdownMenu

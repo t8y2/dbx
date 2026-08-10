@@ -100,6 +100,18 @@ test("OceanBase Oracle uses schema filtering for visible object selection", () =
   assert.equal(connectionUsesVisibleSchemaFilter(config({ db_type: "mysql", driver_profile: "oceanbase" })), false);
 });
 
+test("Oracle JDBC uses schema filtering for visible object selection", () => {
+  const connection = config({
+    db_type: "jdbc",
+    driver_profile: "jdbc",
+    connection_string: "jdbc:oracle:thin:@//127.0.0.1:1521/XE",
+    username: "DBX_TEST",
+  });
+
+  assert.equal(connectionUsesVisibleSchemaFilter(connection), true);
+  assert.deepEqual(filterSchemaNamesForConnection(["ANONYMOUS", "DBX_TEST", "SYS", "SYSTEM"], connection, ""), ["DBX_TEST"]);
+});
+
 test("Vastbase schema filters preserve ordinary schemas and explicit empty selections", () => {
   const schemas = ["public", "app"];
   assert.deepEqual(filterSchemaNamesForConnection(schemas, config({ db_type: "vastbase", database: "vastbase" }), "vastbase"), schemas);

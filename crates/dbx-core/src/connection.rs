@@ -3995,8 +3995,11 @@ impl AppState {
             }
         }
 
+        let mut detached_pool_keys = Vec::new();
         for (key, client, replace_runtime) in failed_agent_checks {
-            self.detach_agent_pool_if_current(&key, &client, replace_runtime).await;
+            if self.detach_agent_pool_if_current(&key, &client, replace_runtime).await {
+                detached_pool_keys.push(key);
+            }
         }
 
         // Remove dead pools
@@ -4020,13 +4023,20 @@ impl AppState {
                 }
             }
             drop(conns);
+            detached_pool_keys.extend(removed.iter().map(|(key, _)| key.clone()));
             self.pool_routing_control().finish_detach(removed).await;
         }
 
-        // Re-establish SSH tunnels that have died
-        let tunnel_connection_ids: Vec<String> = {
+        // Only failed pools may require a fresh transport. Healthy tunnel listeners must keep
+        // their local ports stable across app resume and visibility-triggered health checks.
+        let tunnel_connection_ids: HashSet<String> = {
             let configs = self.configs.read().await;
-            configs.iter().filter(|(_, c)| c.has_effective_transport_layers()).map(|(id, _)| id.clone()).collect()
+            detached_pool_keys
+                .iter()
+                .filter_map(|pool_key| config_for_pool_key(pool_key, &configs))
+                .filter(|config| config.has_effective_transport_layers())
+                .map(|config| config.id.clone())
+                .collect()
         };
         for connection_id in tunnel_connection_ids {
             self.reset_connection_transport(&connection_id).await;
@@ -5045,6 +5055,7 @@ mod tests {
             username: "root".to_string(),
             password: "secret".to_string(),
             database: database.map(str::to_string),
+            default_schema: None,
             visible_databases: None,
             visible_schemas: None,
             show_system_schemas: false,
@@ -7217,6 +7228,21 @@ for line in sys.stdin:
         let (state, dir) = test_app_state().await;
         let (runtime, target_client, sibling_client) =
             replace_runtime_on_error_clients(&dir, "validate_connection").await;
+        let mut config = mysql_config(None);
+        config.transport_layers = vec![TransportLayerConfig::Proxy(ProxyTunnelConfig {
+            profile_id: String::new(),
+            id: "proxy".to_string(),
+            name: String::new(),
+            enabled: true,
+            proxy_type: ProxyType::Socks5,
+            host: "127.0.0.1".to_string(),
+            port: 65000,
+            username: String::new(),
+            password: String::new(),
+            test_target: None,
+        })];
+        state.configs.write().await.insert(config.id.clone(), config.clone());
+        state.connection_host_port(&config.id, &config).await.unwrap();
         {
             let mut connections = state.connections.write().await;
             connections.insert("conn:analytics".to_string(), PoolKind::Agent(target_client));
@@ -7226,7 +7252,35 @@ for line in sys.stdin:
         state.refresh_connections().await;
 
         assert!(state.connections.read().await.is_empty());
+        assert!(state.proxy_tunnels.local_port("conn:transport:0").await.is_none());
         assert!(runtime.is_failed());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn global_health_preserves_transport_for_connections_without_failed_pools() {
+        let (state, dir) = test_app_state().await;
+        let mut config = mysql_config(None);
+        config.id = "proxied-connection".to_string();
+        config.transport_layers = vec![TransportLayerConfig::Proxy(ProxyTunnelConfig {
+            profile_id: String::new(),
+            id: "proxy".to_string(),
+            name: String::new(),
+            enabled: true,
+            proxy_type: ProxyType::Socks5,
+            host: "127.0.0.1".to_string(),
+            port: 65000,
+            username: String::new(),
+            password: String::new(),
+            test_target: None,
+        })];
+        state.configs.write().await.insert(config.id.clone(), config.clone());
+        let (_, local_port) = state.connection_host_port(&config.id, &config).await.unwrap();
+
+        state.refresh_connections().await;
+
+        assert_eq!(state.proxy_tunnels.local_port("proxied-connection:transport:0").await, Some(local_port));
+        state.reset_connection_transport(&config.id).await;
         let _ = std::fs::remove_dir_all(dir);
     }
 

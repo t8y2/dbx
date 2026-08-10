@@ -23,6 +23,8 @@ const PI_BRIDGE_STARTUP_TIMEOUT: Duration = Duration::from_secs(15);
 const PI_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
 const PI_MCP_BRIDGE: &str = include_str!("../assets/pi-mcp-bridge.mjs");
 const PI_PRIVATE_ENV_PREFIX: &str = "DBX_PI_";
+#[cfg(not(windows))]
+const PI_SHELL_PATH_MARKER: &str = "__DBX_PI_SHELL_PATH__";
 
 pub type PiAgentRunOptions = CliAgentRunOptions;
 
@@ -71,7 +73,7 @@ impl PiRpcProcess {
             .args(command.args.iter().map(String::as_str))
             .args(pi_rpc_args(runtime))
             .args(if apply_selection { pi_selection_args(config)? } else { Vec::new() })
-            .envs(pi_agent_process_env(config, &command)?)
+            .envs(pi_agent_process_env(config, &command).await?)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -258,7 +260,27 @@ fn windows_npm_pi_shim_command(program: &str) -> Option<CliAgentCommandSpec> {
     Some(CliAgentCommandSpec { program: node, args: vec![cli.to_string_lossy().to_string()] })
 }
 
-fn pi_agent_process_env(config: &AiConfig, command: &CliAgentCommandSpec) -> Result<Vec<(String, String)>, String> {
+async fn pi_agent_process_env(
+    config: &AiConfig,
+    command: &CliAgentCommandSpec,
+) -> Result<Vec<(String, String)>, String> {
+    let inherited_path = env::var("PATH").ok();
+    let values = pi_agent_process_env_with_paths(config, command, None, inherited_path.as_deref())?;
+    #[cfg(not(windows))]
+    if pi_environment_needs_shell_path(command, &values) {
+        if let Some(shell_path) = user_shell_path().await {
+            return pi_agent_process_env_with_paths(config, command, Some(&shell_path), inherited_path.as_deref());
+        }
+    }
+    Ok(values)
+}
+
+fn pi_agent_process_env_with_paths(
+    config: &AiConfig,
+    command: &CliAgentCommandSpec,
+    shell_path: Option<&str>,
+    inherited_path: Option<&str>,
+) -> Result<Vec<(String, String)>, String> {
     let mut values = BTreeMap::new();
     for (key, value) in &config.pi_agent_cli_env {
         let key = key.trim();
@@ -278,26 +300,119 @@ fn pi_agent_process_env(config: &AiConfig, command: &CliAgentCommandSpec) -> Res
         }
         values.insert(key.to_string(), value.clone());
     }
-    if let Some(parent) = Path::new(&command.program).parent().filter(|parent| !parent.as_os_str().is_empty()) {
-        let user_path = values.get("PATH").map(String::as_str);
-        values.insert("PATH".to_string(), merged_path_with_dir(parent, user_path));
+    let command_dir = Path::new(&command.program).parent().filter(|parent| !parent.as_os_str().is_empty());
+    let user_path = values.get("PATH").map(String::as_str);
+    let path = merged_pi_path(command_dir, user_path, shell_path, inherited_path);
+    if !path.is_empty() {
+        values.insert("PATH".to_string(), path);
     }
     Ok(values.into_iter().collect())
 }
 
-fn merged_path_with_dir(dir: &Path, user_path: Option<&str>) -> String {
+fn merged_pi_path(
+    command_dir: Option<&Path>,
+    user_path: Option<&str>,
+    shell_path: Option<&str>,
+    inherited_path: Option<&str>,
+) -> String {
     let mut seen = BTreeSet::new();
-    let mut paths = vec![dir.to_path_buf()];
+    let mut paths = command_dir.into_iter().map(Path::to_path_buf).collect::<Vec<_>>();
     if let Some(path) = user_path {
         paths.extend(env::split_paths(path));
     }
-    if let Ok(path) = env::var("PATH") {
-        paths.extend(env::split_paths(&path));
+    if let Some(path) = shell_path {
+        paths.extend(env::split_paths(path));
+    }
+    if let Some(path) = inherited_path {
+        paths.extend(env::split_paths(path));
     }
     env::join_paths(paths.into_iter().filter(|path| seen.insert(path.clone())))
         .unwrap_or_default()
         .to_string_lossy()
         .to_string()
+}
+
+#[cfg(not(windows))]
+fn pi_environment_needs_shell_path(command: &CliAgentCommandSpec, values: &[(String, String)]) -> bool {
+    let path = values.iter().find(|(key, _)| key == "PATH").map(|(_, value)| value.as_str()).unwrap_or_default();
+    !program_available_on_path(&command.program, path) || !program_available_on_path("node", path)
+}
+
+#[cfg(not(windows))]
+fn program_available_on_path(program: &str, path: &str) -> bool {
+    if is_path_like_program(program) {
+        return Path::new(program).is_file();
+    }
+    env::split_paths(path).any(|dir| dir.join(program).is_file())
+}
+
+#[cfg(not(windows))]
+async fn user_shell_path() -> Option<String> {
+    let script = format!("printf '%s\\n' {} \"$PATH\"", shell_quote(PI_SHELL_PATH_MARKER));
+    let mut command = cli_command(user_shell());
+    command.args(user_shell_args(&script));
+    command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
+    let output = command.output().await.ok()?;
+    output.status.success().then_some(())?;
+    parse_shell_path(&String::from_utf8_lossy(&output.stdout))
+}
+
+#[cfg(not(windows))]
+fn parse_shell_path(stdout: &str) -> Option<String> {
+    let mut lines = stdout.lines();
+    while let Some(line) = lines.next() {
+        if line.trim() == PI_SHELL_PATH_MARKER {
+            return lines.next().map(str::trim).filter(|path| !path.is_empty()).map(ToString::to_string);
+        }
+    }
+    None
+}
+
+#[cfg(not(windows))]
+fn user_shell() -> String {
+    env::var("SHELL").ok().filter(|value| !value.trim().is_empty()).unwrap_or_else(|| {
+        if Path::new("/bin/zsh").exists() {
+            "/bin/zsh".to_string()
+        } else {
+            "/bin/sh".to_string()
+        }
+    })
+}
+
+#[cfg(not(windows))]
+fn user_shell_args(script: &str) -> Vec<String> {
+    let shell = user_shell();
+    let shell_name = Path::new(&shell).file_name().and_then(|value| value.to_str()).unwrap_or_default();
+    match shell_name {
+        "fish" => vec!["-l".to_string(), "-i".to_string(), "-c".to_string(), script.to_string()],
+        "bash" => vec![
+            "--noprofile".to_string(),
+            "--norc".to_string(),
+            "-i".to_string(),
+            "-c".to_string(),
+            bash_login_script(script),
+        ],
+        "sh" | "dash" => vec!["-ic".to_string(), script.to_string()],
+        "zsh" => vec!["-ilc".to_string(), script.to_string()],
+        _ => vec!["-lc".to_string(), script.to_string()],
+    }
+}
+
+#[cfg(not(windows))]
+fn bash_login_script(script: &str) -> String {
+    format!(
+        "for dbx_profile in ~/.bash_profile ~/.bash_login ~/.profile ~/.bashrc; do \
+         [ -r \"$dbx_profile\" ] && . \"$dbx_profile\"; \
+         done; unset dbx_profile; {script}"
+    )
+}
+
+#[cfg(not(windows))]
+fn shell_quote(value: &str) -> String {
+    if value.is_empty() {
+        return "''".to_string();
+    }
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
 fn is_path_like_program(program: &str) -> bool {
@@ -710,7 +825,7 @@ async fn spawn_pi_with_bridge(
         .args(command.args.iter().map(String::as_str))
         .args(pi_rpc_args(Some(runtime)))
         .args(pi_selection_args(config)?)
-        .envs(pi_agent_process_env(config, &command)?)
+        .envs(pi_agent_process_env(config, &command).await?)
         .current_dir(&runtime.path)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -724,8 +839,10 @@ async fn spawn_pi_with_bridge(
 mod tests {
     use super::{
         build_pi_agent_prompt, classify_pi_run_error, configure_pi_bridge, emit_pi_event, parse_thinking_levels,
-        pi_agent_process_env, pi_rpc_args, pi_selection_args, split_pi_model_key, PiIsolatedRuntime,
+        pi_agent_process_env_with_paths, pi_rpc_args, pi_selection_args, split_pi_model_key, PiIsolatedRuntime,
     };
+    #[cfg(not(windows))]
+    use super::{parse_shell_path, pi_environment_needs_shell_path};
     use crate::agent_events::AgentEvent;
     use crate::ai::{AiApiStyle, AiAuthMethod, AiConfig, AiEffortSelection, AiProvider, AiReasoningLevel};
     use crate::ai_cli_agent::{CliAgentCommandSpec, CliAgentRunOptions};
@@ -818,8 +935,70 @@ mod tests {
         config.pi_agent_cli_env.insert("DBX_PI_ENABLED_TOOLS".to_string(), "[]".to_string());
         let command = CliAgentCommandSpec { program: "pi".to_string(), args: Vec::new() };
 
-        let error = pi_agent_process_env(&config, &command).unwrap_err();
+        let error = pi_agent_process_env_with_paths(&config, &command, None, None).unwrap_err();
         assert!(error.contains("[piAgentEnvReserved]"));
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn restores_login_shell_path_for_pnpm_pi_shim() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let pi_dir = temp.path().join("Library/pnpm/bin");
+        let custom_dir = temp.path().join("custom/bin");
+        let node_dir = temp.path().join(".local/state/fnm_multishells/978/bin");
+        std::fs::create_dir_all(&pi_dir).unwrap();
+        std::fs::create_dir_all(&custom_dir).unwrap();
+        std::fs::create_dir_all(&node_dir).unwrap();
+
+        let pi = pi_dir.join("pi");
+        let mut shim = "#!/bin/sh\n".to_string();
+        for _ in 0..34 {
+            shim.push_str("# pnpm shim\n");
+        }
+        shim.push_str("exec node \"$@\"\n");
+        std::fs::write(&pi, shim).unwrap();
+        std::fs::set_permissions(&pi, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let node = node_dir.join("node");
+        std::fs::write(&node, "#!/bin/sh\nprintf 'node-from-fnm:%s\\n' \"$*\"\n").unwrap();
+        std::fs::set_permissions(&node, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let mut config = config();
+        config.pi_agent_cli_env.insert("PATH".to_string(), custom_dir.to_string_lossy().to_string());
+        let command = CliAgentCommandSpec { program: pi.to_string_lossy().to_string(), args: Vec::new() };
+
+        let env_without_shell = pi_agent_process_env_with_paths(&config, &command, None, None).unwrap();
+        assert!(pi_environment_needs_shell_path(&command, &env_without_shell));
+        let failed = std::process::Command::new(&command.program)
+            .arg("--mode=rpc")
+            .env_clear()
+            .envs(env_without_shell)
+            .output()
+            .unwrap();
+        assert!(!failed.status.success());
+        assert!(String::from_utf8_lossy(&failed.stderr).contains("node"));
+
+        let shell_path = std::env::join_paths([&node_dir, &pi_dir]).unwrap().to_string_lossy().to_string();
+        let inherited_path = pi_dir.to_string_lossy().to_string();
+        let env = pi_agent_process_env_with_paths(&config, &command, Some(&shell_path), Some(&inherited_path)).unwrap();
+        let path = env.iter().find(|(key, _)| key == "PATH").map(|(_, value)| value).unwrap();
+        let dirs = std::env::split_paths(path).collect::<Vec<_>>();
+        assert_eq!(dirs, [pi_dir.clone(), custom_dir, node_dir]);
+        assert!(!pi_environment_needs_shell_path(&command, &env));
+
+        let output =
+            std::process::Command::new(&command.program).arg("--mode=rpc").env_clear().envs(env).output().unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "node-from-fnm:--mode=rpc");
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn parses_shell_path_after_startup_output() {
+        let stdout = "fnm startup notice\n__DBX_PI_SHELL_PATH__\n/fnm/bin:/usr/bin\n";
+        assert_eq!(parse_shell_path(stdout).as_deref(), Some("/fnm/bin:/usr/bin"));
     }
 
     #[test]

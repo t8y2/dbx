@@ -5,6 +5,9 @@ import * as api from "@/lib/backend/api";
 import { PluginHostBridge, pluginSandboxDocument, type PluginWorkbenchContext } from "@/lib/plugins/pluginHostBridge";
 import type { InstalledPlugin, PluginWorkbenchContribution } from "@/types/database";
 import { useI18n } from "vue-i18n";
+import { useSettingsStore } from "@/stores/settingsStore";
+import { useTheme } from "@/composables/useTheme";
+import { registerPluginWorkbenchNativeFileTarget } from "@/lib/plugins/pluginWorkbenchBridgeRegistry";
 
 const props = withDefaults(
   defineProps<{
@@ -20,21 +23,51 @@ const emit = defineEmits<{
   error: [message: string];
   openWorkbench: [pluginId: string, contributionId: string, context?: PluginWorkbenchContext];
   openFilesystem: [pluginId: string, providerId: string, context?: PluginWorkbenchContext];
+  workbenchState: [state: Record<string, unknown>];
+  acknowledgeRestore: [];
 }>();
 
 const { t, locale: appLocale } = useI18n();
+const settingsStore = useSettingsStore();
+const { isDark, themePalette } = useTheme();
 const iframe = ref<HTMLIFrameElement>();
 const source = ref("");
 const loading = ref(true);
 const error = ref("");
 let bridge: PluginHostBridge | undefined;
 let unsubscribeEvents: (() => void) | undefined;
+let unregisterNativeFileTarget: (() => void) | undefined;
 let disposed = false;
 let loadGeneration = 0;
 
 const title = computed(() => `${props.plugin.manifest.name} · ${props.contribution.label}`);
 
-function createBridge() {
+function currentAppearance() {
+  const styles = getComputedStyle(document.documentElement);
+  const color = (name: string) => styles.getPropertyValue(name).trim();
+  return {
+    colorScheme: isDark.value ? ("dark" as const) : ("light" as const),
+    colors: {
+      background: color("--background"),
+      foreground: color("--foreground"),
+      muted: color("--muted"),
+      mutedForeground: color("--muted-foreground"),
+      accent: color("--accent"),
+      accentForeground: color("--accent-foreground"),
+      border: color("--border"),
+      destructive: color("--destructive"),
+    },
+    terminal: {
+      fontFamily: settingsStore.editorSettings.fontFamily,
+      fontSize: settingsStore.editorSettings.fontSize,
+    },
+    ui: {
+      fontFamily: settingsStore.editorSettings.uiFontFamily,
+    },
+  };
+}
+
+function createBridge(bridgeToken: string) {
   bridge = new PluginHostBridge(
     props.plugin,
     props.contribution,
@@ -47,8 +80,12 @@ function createBridge() {
       readAsset: api.readPluginUiAsset,
       openWorkbench: async (pluginId, contributionId, context) => emit("openWorkbench", pluginId, contributionId, context),
       openFilesystem: async (pluginId, providerId, context) => emit("openFilesystem", pluginId, providerId, context),
+      setWorkbenchState: async (state) => emit("workbenchState", state),
+      acknowledgeWorkbenchRestore: async () => emit("acknowledgeRestore"),
     },
     appLocale.value,
+    bridgeToken,
+    currentAppearance(),
   );
 }
 
@@ -62,10 +99,11 @@ async function loadWorkbench() {
     const asset = await api.readPluginUiEntry(props.plugin.manifest.id);
     if (disposed || generation !== loadGeneration) return;
     const bytes = Uint8Array.from(atob(asset.dataBase64), (character) => character.charCodeAt(0));
-    source.value = pluginSandboxDocument(new TextDecoder().decode(bytes));
+    const bridgeToken = crypto.randomUUID();
+    source.value = pluginSandboxDocument(new TextDecoder().decode(bytes), bridgeToken);
     await nextTick();
     if (disposed || generation !== loadGeneration) return;
-    createBridge();
+    createBridge(bridgeToken);
   } catch (cause) {
     if (disposed || generation !== loadGeneration) return;
     error.value = cause instanceof Error ? cause.message : String(cause);
@@ -86,6 +124,13 @@ function onFrameLoad() {
 
 onMounted(async () => {
   window.addEventListener("message", onMessage);
+  const workbenchId = typeof props.context.workbenchId === "string" ? props.context.workbenchId : "";
+  if (workbenchId) {
+    unregisterNativeFileTarget = registerPluginWorkbenchNativeFileTarget(workbenchId, {
+      acceptsNativeFileDrag: () => bridge?.acceptsNativeFileDrag() === true,
+      forwardNativeFileDrag: (type, paths) => bridge?.forwardNativeFileDrag(type, paths) ?? Promise.resolve(),
+    });
+  }
   const unsubscribe = await api.subscribePluginEvents(
     (event) => bridge?.forwardEvent(event),
     (event) => bridge?.forwardBinary(event),
@@ -99,17 +144,35 @@ onMounted(async () => {
 });
 
 watch(
-  () => [props.plugin.manifest.id, props.plugin.manifest.version, props.contribution.id, props.context, appLocale.value] as const,
+  () => [props.plugin.manifest.id, props.plugin.manifest.version, props.contribution.id] as const,
   () => void loadWorkbench(),
+);
+
+watch(appLocale, (locale) => bridge?.updateLocale(locale || "zh-CN"));
+
+watch(
+  () => props.context,
+  (context) => bridge?.updateContext(context),
+  { deep: true },
+);
+
+watch(
+  () => [isDark.value, themePalette.value, settingsStore.editorSettings.fontFamily, settingsStore.editorSettings.fontSize, settingsStore.editorSettings.uiFontFamily, settingsStore.editorSettings.customThemeColors] as const,
+  async () => {
+    await nextTick();
+    bridge?.updateAppearance(currentAppearance());
+  },
   { deep: true },
 );
 
 onBeforeUnmount(() => {
   disposed = true;
   loadGeneration += 1;
+  bridge?.dispose();
   bridge = undefined;
   window.removeEventListener("message", onMessage);
   unsubscribeEvents?.();
+  unregisterNativeFileTarget?.();
 });
 </script>
 

@@ -2267,6 +2267,7 @@ export default withEnglishFallback({
   },
   contextMenu: {
     openConnection: "接続を開く",
+    openNewConnection: "新しい接続",
     closeConnection: "接続を閉じる",
     closeDatabaseConnection: "データベース接続を閉じる",
     deleteConnection: "接続を削除",

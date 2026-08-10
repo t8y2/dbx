@@ -2310,6 +2310,7 @@ export default {
   },
   contextMenu: {
     openConnection: "Open Connection",
+    openNewConnection: "New Connection",
     closeConnection: "Close Connection",
     closeDatabaseConnection: "Close Database Connection",
     deleteConnection: "Delete Connection",

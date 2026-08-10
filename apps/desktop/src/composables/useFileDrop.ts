@@ -8,6 +8,7 @@ import * as api from "@/lib/backend/api";
 import type { ConnectionConfig, ExternalSqlFileVersion } from "@/types/database";
 import { detectDatabaseFileType } from "@/lib/database/databaseFileDetection";
 import { externalSqlFileOpenErrorMessage, readBrowserSqlFile } from "@/lib/sql/sqlFileOpen";
+import { forwardActivePluginNativeFileDrag } from "@/lib/plugins/pluginWorkbenchBridgeRegistry";
 
 function isSqlFilePath(path: string): boolean {
   return /\.sql$/i.test(path);
@@ -41,8 +42,12 @@ export function useFileDrop() {
       const { getCurrentWebview } = await import("@tauri-apps/api/webview");
       const webview = getCurrentWebview();
       await webview.onDragDropEvent(async (event) => {
-        if (event.payload.type !== "drop") return;
-        for (const path of event.payload.paths) {
+        const payload = event.payload;
+        const dragType = payload.type === "enter" ? "enter" : payload.type === "over" ? "over" : payload.type === "leave" ? "leave" : "drop";
+        const paths = payload.type === "drop" ? payload.paths : [];
+        if (await forwardActivePluginNativeFileDrag(queryStore.activeTabId, dragType, paths)) return;
+        if (payload.type !== "drop") return;
+        for (const path of payload.paths) {
           const name = path.split("/").pop()?.split("\\").pop() || path;
 
           const dataQuery = await getDataFileQuery(path);

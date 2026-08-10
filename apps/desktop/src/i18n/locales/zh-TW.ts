@@ -2241,6 +2241,7 @@ export default withEnglishFallback({
   },
   contextMenu: {
     openConnection: "開啟連線",
+    openNewConnection: "新增連線",
     closeConnection: "關閉連線",
     closeDatabaseConnection: "關閉資料庫連線",
     deleteConnection: "刪除連線",

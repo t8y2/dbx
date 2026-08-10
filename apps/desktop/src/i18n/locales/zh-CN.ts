@@ -2301,6 +2301,7 @@ export default withEnglishFallback({
   },
   contextMenu: {
     openConnection: "打开连接",
+    openNewConnection: "新建连接",
     closeConnection: "关闭连接",
     closeDatabaseConnection: "关闭数据库连接",
     deleteConnection: "删除连接",

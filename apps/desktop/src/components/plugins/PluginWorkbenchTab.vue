@@ -10,9 +10,12 @@ import { useQueryStore } from "@/stores/queryStore";
 import { useI18n } from "vue-i18n";
 
 const props = defineProps<{
+  tabId: string;
   pluginId: string;
   contributionId: string;
   context?: PluginWorkbenchContext;
+  state?: Record<string, unknown>;
+  restored?: boolean;
 }>();
 
 const { t, locale: appLocale } = useI18n();
@@ -22,6 +25,12 @@ const loading = ref(true);
 const error = ref("");
 let loadGeneration = 0;
 const entry = computed(() => createFrontendPluginRegistry(plugins.value, appLocale.value).findWorkbench(props.pluginId, props.contributionId));
+const workbenchContext = computed<PluginWorkbenchContext>(() => ({
+  ...(props.context || {}),
+  workbenchId: props.tabId,
+  restored: props.restored === true,
+  workbenchState: props.state ? JSON.parse(JSON.stringify(props.state)) : {},
+}));
 
 async function load() {
   const generation = ++loadGeneration;
@@ -58,6 +67,14 @@ function openFilesystem(pluginId: string, providerId: string, context?: PluginWo
   });
 }
 
+function updateWorkbenchState(state: Record<string, unknown>) {
+  queryStore.updatePluginWorkbenchState(props.tabId, state);
+}
+
+function acknowledgeRestore() {
+  queryStore.acknowledgePluginWorkbenchRestore(props.tabId);
+}
+
 onMounted(() => void load());
 watch(
   () => [props.pluginId, props.contributionId],
@@ -72,6 +89,6 @@ watch(
       <AlertTriangle class="mt-0.5 size-4 shrink-0" />
       <span>{{ error || t("pluginPlatform.workbenchUnavailableFallback") }}</span>
     </div>
-    <PluginWorkbenchHost v-else class="min-h-0 flex-1" :plugin="entry.plugin" :contribution="entry.contribution" :context="context" @open-workbench="openWorkbench" @open-filesystem="openFilesystem" />
+    <PluginWorkbenchHost v-else class="min-h-0 flex-1" :plugin="entry.plugin" :contribution="entry.contribution" :context="workbenchContext" @open-workbench="openWorkbench" @open-filesystem="openFilesystem" @workbench-state="updateWorkbenchState" @acknowledge-restore="acknowledgeRestore" />
   </div>
 </template>

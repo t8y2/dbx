@@ -146,7 +146,16 @@ export function serializeOpenTabs(tabs: QueryTab[]): SavedOpenTab[] {
       : {}),
     ...(tab.mode === "query" && tab.activeResultRunId !== undefined ? { activeResultRunId: tab.activeResultRunId } : {}),
     ...(tab.mode === "query" && tab.resultAutoSave ? { resultAutoSave: true } : {}),
-    ...(tab.pluginWorkbench ? { pluginWorkbench: tab.pluginWorkbench } : {}),
+    ...(tab.pluginWorkbench
+      ? {
+          pluginWorkbench: {
+            pluginId: tab.pluginWorkbench.pluginId,
+            contributionId: tab.pluginWorkbench.contributionId,
+            context: tab.pluginWorkbench.context,
+            state: tab.pluginWorkbench.state,
+          },
+        }
+      : {}),
     ...(tab.pluginFilesystem ? { pluginFilesystem: tab.pluginFilesystem } : {}),
   }));
 }
@@ -183,6 +192,7 @@ function restoreOpenTabsArray(parsed: unknown, rawActiveTabId: string | null, op
           : undefined;
       return {
         ...tab,
+        ...(tab.pluginWorkbench ? { pluginWorkbench: { ...tab.pluginWorkbench, restored: true } } : {}),
         mode,
         sql: typeof tab.sql === "string" ? tab.sql : "",
         isExecuting: false,

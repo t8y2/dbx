@@ -308,7 +308,7 @@ export interface PluginDriverManifest {
   database_type?: string;
 }
 
-export type PluginFormFieldType = "text" | "password" | "number" | "boolean" | "select" | "textarea";
+export type PluginFormFieldType = "text" | "path" | "password" | "number" | "boolean" | "select" | "textarea";
 export type PluginFormFieldBinding = "config" | "secret" | "name" | "host" | "port" | "username" | "password" | "database";
 
 export type PluginFormFieldValue = string | number | boolean | undefined;
@@ -316,6 +316,11 @@ export type PluginFormFieldValue = string | number | boolean | undefined;
 export interface PluginFormFieldOption {
   label: string;
   value: string;
+}
+
+export interface PluginFormFieldCondition {
+  field: string;
+  one_of: PluginFormFieldValue[];
 }
 
 export interface PluginFormField {
@@ -328,9 +333,11 @@ export interface PluginFormField {
   default?: PluginFormFieldValue;
   options?: PluginFormFieldOption[];
   binding?: PluginFormFieldBinding;
+  visible_when?: PluginFormFieldCondition;
+  required_when?: PluginFormFieldCondition;
 }
 
-export type PluginConnectionCapability = "test" | "connect" | "disconnect";
+export type PluginConnectionCapability = "test" | "connect" | "disconnect" | "multiple-workbenches";
 export type PluginConnectionActionKind = "test" | "save" | "save-and-connect" | "custom";
 export type PluginConnectionActionVariant = "default" | "outline" | "secondary" | "destructive" | "ghost";
 export type PluginConnectionActionWhen = "always" | "create" | "edit";
@@ -1349,6 +1356,8 @@ export interface QueryTab {
     pluginId: string;
     contributionId: string;
     context?: Record<string, unknown>;
+    state?: Record<string, unknown>;
+    restored?: boolean;
   };
   pluginFilesystem?: {
     pluginId: string;

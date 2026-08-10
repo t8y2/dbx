@@ -2242,6 +2242,7 @@ export default withEnglishFallback({
   },
   contextMenu: {
     openConnection: "Abrir conexión",
+    openNewConnection: "Nueva conexión",
     closeConnection: "Cerrar conexión",
     closeDatabaseConnection: "Cerrar conexión de base de datos",
     deleteConnection: "Eliminar conexión",

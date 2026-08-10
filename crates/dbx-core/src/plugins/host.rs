@@ -11,9 +11,19 @@ use super::{
     InstalledPlugin, PluginBinaryMessage, PluginConnectionActionContribution, PluginConnectionCapability,
     PluginConnectionProviderContribution, PluginEvent, PluginFormFieldBinding, PluginFormFieldDefinition,
     PluginFormFieldType, PluginRegistry, PluginRuntimeEnv, PluginSessionState, PluginSidecarSession,
-    PLUGIN_CONNECTION_ACTION_METHOD, PLUGIN_CONNECTION_CONNECT_METHOD, PLUGIN_CONNECTION_DISCONNECT_METHOD,
+    PLUGIN_CONNECTION_ACTION_METHOD, PLUGIN_CONNECTION_CHALLENGE_EVENT_METHOD,
+    PLUGIN_CONNECTION_CHALLENGE_RESOLVE_METHOD, PLUGIN_CONNECTION_CONNECT_METHOD, PLUGIN_CONNECTION_DISCONNECT_METHOD,
     PLUGIN_CONNECTION_TEST_METHOD,
 };
+
+#[derive(Clone)]
+struct ActivePluginOperation {
+    plugin_id: String,
+    connection_id: Option<String>,
+    challenge_id: Option<String>,
+    challenge_resolving: bool,
+    challenge_resolved: bool,
+}
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -45,6 +55,7 @@ pub struct PluginConnectionHandle {
     session: Option<Arc<PluginSidecarSession>>,
     disconnect: bool,
     params: serde_json::Value,
+    host: PluginHost,
 }
 
 impl PluginConnectionHandle {
@@ -59,14 +70,15 @@ impl PluginConnectionHandle {
         if !self.disconnect || session.status().state != PluginSessionState::Running {
             return Ok(());
         }
-        let result: serde_json::Value = session
-            .invoke_with_timeout(
-                PLUGIN_CONNECTION_DISCONNECT_METHOD,
-                self.params.clone(),
-                None,
-                Some(super::PLUGIN_REQUEST_TIMEOUT),
-            )
-            .await?;
+        let mut params = self.params.clone();
+        let operation_id = self.host.begin_operation(&self.plugin_id, &mut params).await?;
+        let result = session
+            .invoke_with_timeout(PLUGIN_CONNECTION_DISCONNECT_METHOD, params, None, Some(super::PLUGIN_REQUEST_TIMEOUT))
+            .await;
+        if let Some(operation_id) = operation_id {
+            self.host.inner.active_operations.write().await.remove(&operation_id);
+        }
+        let result: serde_json::Value = result?;
         ensure_plugin_operation_succeeded(result)
     }
 }
@@ -77,6 +89,7 @@ struct PluginHostInner {
     activation_lock: Mutex<()>,
     events: broadcast::Sender<PluginEvent>,
     binary_messages: broadcast::Sender<PluginBinaryMessage>,
+    active_operations: RwLock<HashMap<String, ActivePluginOperation>>,
 }
 
 impl PluginHost {
@@ -90,6 +103,7 @@ impl PluginHost {
                 activation_lock: Mutex::new(()),
                 events,
                 binary_messages,
+                active_operations: RwLock::new(HashMap::new()),
             }),
         }
     }
@@ -143,7 +157,7 @@ impl PluginHost {
         &self,
         plugin_id: &str,
         method: &str,
-        params: serde_json::Value,
+        mut params: serde_json::Value,
         required_permission: Option<&str>,
         timeout: Option<Duration>,
     ) -> Result<T, String>
@@ -152,7 +166,24 @@ impl PluginHost {
     {
         let session = self.activate(plugin_id).await?;
         ensure_permission(session.plugin(), required_permission)?;
-        session.invoke_with_timeout(method, params, None, timeout).await
+        let challenge_operation_id = if method == PLUGIN_CONNECTION_CHALLENGE_RESOLVE_METHOD {
+            Some(self.begin_challenge_resolution(plugin_id, &params).await?)
+        } else {
+            None
+        };
+        let operation_id = if method == PLUGIN_CONNECTION_CHALLENGE_RESOLVE_METHOD {
+            None
+        } else {
+            self.begin_operation(plugin_id, &mut params).await?
+        };
+        let result = session.invoke_with_timeout(method, params, None, timeout).await;
+        if let Some(operation_id) = challenge_operation_id {
+            self.complete_challenge_resolution(&operation_id, result.is_ok()).await;
+        }
+        if let Some(operation_id) = operation_id {
+            self.inner.active_operations.write().await.remove(&operation_id);
+        }
+        result
     }
 
     pub async fn notify(
@@ -192,14 +223,21 @@ impl PluginHost {
             return Ok(ConnectionTestResult::success(format!("{provider_label} is available")));
         }
         let session = self.activate(config.plugin_id.as_deref().unwrap_or_default()).await?;
-        let result: serde_json::Value = session
+        let plugin_id = config.plugin_id.as_deref().unwrap_or_default();
+        let mut params = plugin_connection_params(config, &provider, runtime_host, runtime_port)?;
+        let operation_id = self.begin_operation(plugin_id, &mut params).await?;
+        let result = session
             .invoke_with_timeout(
                 PLUGIN_CONNECTION_TEST_METHOD,
-                plugin_connection_params(config, &provider, runtime_host, runtime_port)?,
+                params,
                 None,
                 Some(Duration::from_secs(config.effective_connect_timeout_secs())),
             )
-            .await?;
+            .await;
+        if let Some(operation_id) = operation_id {
+            self.inner.active_operations.write().await.remove(&operation_id);
+        }
+        let result: serde_json::Value = result?;
         plugin_connection_test_result(result, provider_label)
     }
 
@@ -211,7 +249,8 @@ impl PluginHost {
     ) -> Result<PluginConnectionHandle, String> {
         let (_, provider) = self.resolve_connection_provider(config)?;
         validate_plugin_connection_values(config, &provider)?;
-        let params = plugin_connection_params(config, &provider, runtime_host, runtime_port)?;
+        let plugin_id = config.plugin_id.as_deref().unwrap_or_default();
+        let mut params = plugin_connection_params(config, &provider, runtime_host, runtime_port)?;
         let needs_session = provider.has_capability(PluginConnectionCapability::Connect)
             || provider.has_capability(PluginConnectionCapability::Disconnect);
         let session = if needs_session {
@@ -221,14 +260,19 @@ impl PluginHost {
         };
         if provider.has_capability(PluginConnectionCapability::Connect) {
             if let Some(session) = &session {
-                let result: serde_json::Value = session
+                let operation_id = self.begin_operation(plugin_id, &mut params).await?;
+                let result = session
                     .invoke_with_timeout(
                         PLUGIN_CONNECTION_CONNECT_METHOD,
                         params.clone(),
                         None,
                         Some(Duration::from_secs(config.effective_connect_timeout_secs())),
                     )
-                    .await?;
+                    .await;
+                if let Some(operation_id) = operation_id {
+                    self.inner.active_operations.write().await.remove(&operation_id);
+                }
+                let result: serde_json::Value = result?;
                 ensure_plugin_operation_succeeded(result)?;
             }
         }
@@ -240,6 +284,7 @@ impl PluginHost {
             session,
             disconnect,
             params,
+            host: self.clone(),
         })
     }
 
@@ -253,20 +298,26 @@ impl PluginHost {
         let (_, provider) = self.resolve_connection_provider(config)?;
         let action = plugin_invoke_connection_action(&provider, action_id)?;
         validate_plugin_connection_values_for_action(config, &provider, action.requires_valid_form)?;
-        let session = self.activate(config.plugin_id.as_deref().unwrap_or_default()).await?;
+        let plugin_id = config.plugin_id.as_deref().unwrap_or_default();
+        let session = self.activate(plugin_id).await?;
         let mut params = plugin_connection_params(config, &provider, runtime_host, runtime_port)?;
         params
             .as_object_mut()
             .ok_or("Plugin connection action params must be an object")?
             .insert("action".to_string(), serde_json::json!({ "id": action.id }));
-        let result: serde_json::Value = session
+        let operation_id = self.begin_operation(plugin_id, &mut params).await?;
+        let result = session
             .invoke_with_timeout(
                 PLUGIN_CONNECTION_ACTION_METHOD,
                 params,
                 None,
                 action.timeout_ms.map(Duration::from_millis).or(Some(super::PLUGIN_REQUEST_TIMEOUT)),
             )
-            .await?;
+            .await;
+        if let Some(operation_id) = operation_id {
+            self.inner.active_operations.write().await.remove(&operation_id);
+        }
+        let result: serde_json::Value = result?;
         plugin_connection_action_result(result, &provider)
     }
 
@@ -333,13 +384,100 @@ impl PluginHost {
         Ok((plugin, provider))
     }
 
+    async fn begin_operation(&self, plugin_id: &str, params: &mut serde_json::Value) -> Result<Option<String>, String> {
+        let Some(object) = params.as_object_mut() else {
+            return Ok(None);
+        };
+        let operation_id = uuid::Uuid::new_v4().to_string();
+        let connection_id = object
+            .get("connectionId")
+            .and_then(serde_json::Value::as_str)
+            .or_else(|| {
+                object.get("connection").and_then(|connection| connection.get("id")).and_then(serde_json::Value::as_str)
+            })
+            .map(str::to_string);
+        object.insert("operationId".to_string(), serde_json::Value::String(operation_id.clone()));
+        self.inner.active_operations.write().await.insert(
+            operation_id.clone(),
+            ActivePluginOperation {
+                plugin_id: plugin_id.to_string(),
+                connection_id,
+                challenge_id: None,
+                challenge_resolving: false,
+                challenge_resolved: false,
+            },
+        );
+        Ok(Some(operation_id))
+    }
+
+    async fn begin_challenge_resolution(&self, plugin_id: &str, params: &serde_json::Value) -> Result<String, String> {
+        let operation_id = params
+            .get("operationId")
+            .and_then(serde_json::Value::as_str)
+            .ok_or("Plugin challenge resolution is missing operationId")?;
+        let challenge_id = params
+            .get("challengeId")
+            .and_then(serde_json::Value::as_str)
+            .ok_or("Plugin challenge resolution is missing challengeId")?;
+        let mut operations = self.inner.active_operations.write().await;
+        let operation = operations
+            .get_mut(operation_id)
+            .filter(|operation| operation.plugin_id == plugin_id)
+            .ok_or("Plugin challenge operation is invalid or expired")?;
+        if operation.challenge_id.as_deref() != Some(challenge_id) {
+            return Err("Plugin challenge does not match the active operation".to_string());
+        }
+        if operation.challenge_resolving || operation.challenge_resolved {
+            return Err("Plugin challenge is already resolving or resolved".to_string());
+        }
+        operation.challenge_resolving = true;
+        Ok(operation_id.to_string())
+    }
+
+    async fn complete_challenge_resolution(&self, operation_id: &str, succeeded: bool) {
+        if let Some(operation) = self.inner.active_operations.write().await.get_mut(operation_id) {
+            operation.challenge_resolving = false;
+            operation.challenge_resolved = succeeded;
+        }
+    }
+
+    async fn bind_connection_challenge(inner: &PluginHostInner, event: &PluginEvent) -> bool {
+        let operation_id = event.params.get("operationId").and_then(serde_json::Value::as_str);
+        let connection_id = event.params.get("connectionId").and_then(serde_json::Value::as_str);
+        let challenge_id = event.params.get("challengeId").and_then(serde_json::Value::as_str);
+        let (Some(operation_id), Some(challenge_id)) = (operation_id, challenge_id) else {
+            return false;
+        };
+        let mut operations = inner.active_operations.write().await;
+        operations.get_mut(operation_id).is_some_and(|operation| {
+            let scoped = operation.plugin_id == event.plugin_id
+                && connection_id.is_none_or(|connection_id| operation.connection_id.as_deref() == Some(connection_id));
+            if scoped
+                && !operation.challenge_resolved
+                && operation.challenge_id.as_deref().is_none_or(|bound| bound == challenge_id)
+            {
+                operation.challenge_id = Some(challenge_id.to_string());
+                true
+            } else {
+                false
+            }
+        })
+    }
+
     fn forward_session_events(&self, session: &Arc<PluginSidecarSession>) {
         let mut events = session.subscribe_events();
         let host_events = self.inner.events.clone();
+        let inner = self.inner.clone();
         tokio::spawn(async move {
             loop {
                 match events.recv().await {
                     Ok(event) => {
+                        if event.method == PLUGIN_CONNECTION_CHALLENGE_EVENT_METHOD {
+                            if !Self::bind_connection_challenge(&inner, &event).await {
+                                log::warn!("Ignored unscoped plugin connection challenge from '{}'", event.plugin_id);
+                                continue;
+                            }
+                        }
                         let _ = host_events.send(event);
                     }
                     Err(broadcast::error::RecvError::Lagged(skipped)) => {
@@ -417,6 +555,15 @@ fn validate_plugin_connection_values_for_action(
     provider: &PluginConnectionProviderContribution,
     require_required_fields: bool,
 ) -> Result<(), String> {
+    let values = provider
+        .fields
+        .iter()
+        .filter_map(|field| {
+            plugin_connection_field_value(config, field)
+                .or_else(|| field.default.clone())
+                .map(|value| (field.key.clone(), value))
+        })
+        .collect::<BTreeMap<_, _>>();
     let allowed_secrets = provider
         .fields
         .iter()
@@ -429,8 +576,11 @@ fn validate_plugin_connection_values_for_action(
         }
     }
     for field in &provider.fields {
-        let value = plugin_connection_field_value(config, field);
-        if require_required_fields && field.required && plugin_field_value_is_empty(value.as_ref()) {
+        let value = values.get(&field.key).cloned();
+        if !field.is_visible(&values) {
+            continue;
+        }
+        if require_required_fields && field.is_required(&values) && plugin_field_value_is_empty(value.as_ref()) {
             return Err(format!("Plugin connection field '{}' is required", field.label));
         }
         if let Some(value) = value {
@@ -526,6 +676,7 @@ fn plugin_field_value_is_empty(value: Option<&serde_json::Value>) -> bool {
 fn validate_plugin_field_type(field: &PluginFormFieldDefinition, value: &serde_json::Value) -> Result<(), String> {
     let valid = match field.field_type {
         PluginFormFieldType::Text
+        | PluginFormFieldType::Path
         | PluginFormFieldType::Password
         | PluginFormFieldType::Select
         | PluginFormFieldType::Textarea => value.is_string(),
@@ -589,10 +740,45 @@ fn ensure_permission(plugin: &super::InstalledPlugin, required_permission: Optio
 mod tests {
     use super::{
         plugin_connection_action_result, plugin_invoke_connection_action, validate_plugin_connection_values,
-        validate_plugin_connection_values_for_action,
+        validate_plugin_connection_values_for_action, PluginHost,
     };
     use crate::models::connection::ConnectionConfig;
-    use crate::plugins::PluginConnectionProviderContribution;
+    use crate::plugins::{
+        PluginConnectionProviderContribution, PluginEvent, PluginRegistry, PLUGIN_CONNECTION_CHALLENGE_EVENT_METHOD,
+    };
+
+    #[tokio::test]
+    async fn binds_and_consumes_only_the_first_scoped_challenge() {
+        let root = tempfile::tempdir().unwrap();
+        let host = PluginHost::new(PluginRegistry::new(root.path().to_path_buf()));
+        let mut params = serde_json::json!({ "connectionId": "connection-1" });
+        let operation_id = host.begin_operation("sample.ssh", &mut params).await.unwrap().unwrap();
+        let event = PluginEvent {
+            plugin_id: "sample.ssh".to_string(),
+            method: PLUGIN_CONNECTION_CHALLENGE_EVENT_METHOD.to_string(),
+            params: serde_json::json!({
+                "operationId": operation_id,
+                "connectionId": "connection-1",
+                "challengeId": "challenge-1"
+            }),
+        };
+        assert!(PluginHost::bind_connection_challenge(&host.inner, &event).await);
+
+        let forged = PluginEvent {
+            params: serde_json::json!({
+                "operationId": operation_id,
+                "connectionId": "connection-1",
+                "challengeId": "challenge-2"
+            }),
+            ..event.clone()
+        };
+        assert!(!PluginHost::bind_connection_challenge(&host.inner, &forged).await);
+        let resolution = serde_json::json!({ "operationId": operation_id, "challengeId": "challenge-1" });
+        assert!(host.begin_challenge_resolution("sample.ssh", &resolution).await.is_ok());
+        assert!(host.begin_challenge_resolution("sample.ssh", &resolution).await.is_err());
+        host.complete_challenge_resolution(&operation_id, true).await;
+        assert!(!PluginHost::bind_connection_challenge(&host.inner, &event).await);
+    }
 
     #[test]
     fn rejects_zero_port_for_port_bound_connection_field() {
@@ -651,6 +837,70 @@ mod tests {
         assert!(validate_plugin_connection_values_for_action(&config, &provider, true)
             .unwrap_err()
             .contains("is required"));
+    }
+
+    #[test]
+    fn validates_only_visible_conditionally_required_fields() {
+        let provider: PluginConnectionProviderContribution = serde_json::from_value(serde_json::json!({
+            "id": "sample.connection",
+            "label": "Sample",
+            "database_type": "sample",
+            "fields": [
+                {
+                    "key": "authentication",
+                    "label": "Authentication",
+                    "type": "select",
+                    "default": "password",
+                    "options": [
+                        { "label": "Password", "value": "password" },
+                        { "label": "None", "value": "none" }
+                    ]
+                },
+                {
+                    "key": "password",
+                    "label": "Password",
+                    "type": "password",
+                    "binding": "password",
+                    "visible_when": { "field": "authentication", "one_of": ["password"] },
+                    "required_when": { "field": "authentication", "one_of": ["password"] }
+                }
+            ]
+        }))
+        .unwrap();
+        let password_config: ConnectionConfig = serde_json::from_value(serde_json::json!({
+            "id": "plugin-password",
+            "name": "Password",
+            "db_type": "plugin",
+            "host": "localhost",
+            "port": 22,
+            "username": "user",
+            "password": "",
+            "database": null,
+            "plugin_id": "sample",
+            "plugin_connection_provider": "sample.connection",
+            "plugin_connection_type": "sample"
+        }))
+        .unwrap();
+        let none_config: ConnectionConfig = serde_json::from_value(serde_json::json!({
+            "id": "plugin-none",
+            "name": "None",
+            "db_type": "plugin",
+            "host": "localhost",
+            "port": 22,
+            "username": "user",
+            "password": "",
+            "database": null,
+            "external_config": { "authentication": "none" },
+            "plugin_id": "sample",
+            "plugin_connection_provider": "sample.connection",
+            "plugin_connection_type": "sample"
+        }))
+        .unwrap();
+
+        assert!(validate_plugin_connection_values(&password_config, &provider)
+            .unwrap_err()
+            .contains("Password' is required"));
+        assert!(validate_plugin_connection_values(&none_config, &provider).is_ok());
     }
 
     #[test]

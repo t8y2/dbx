@@ -1809,11 +1809,26 @@ export const useQueryStore = defineStore("query", () => {
         pluginId,
         contributionId,
         context: options.context ? structuredClone(options.context) : undefined,
+        restored: false,
       },
     };
     tabs.value.push(tab);
     activeTabId.value = id;
     return id;
+  }
+
+  function updatePluginWorkbenchState(tabId: string, state: Record<string, unknown>) {
+    const tab = tabs.value.find((candidate) => candidate.id === tabId && candidate.mode === "plugin-workbench");
+    if (!tab?.pluginWorkbench) return;
+    const serialized = JSON.stringify(state);
+    if (new TextEncoder().encode(serialized).byteLength > 64 * 1024) throw new Error("Plugin workbench state exceeds the 64 KiB limit");
+    tab.pluginWorkbench.state = structuredClone(state);
+  }
+
+  function acknowledgePluginWorkbenchRestore(tabId: string) {
+    const tab = tabs.value.find((candidate) => candidate.id === tabId && candidate.mode === "plugin-workbench");
+    if (!tab?.pluginWorkbench) return;
+    tab.pluginWorkbench.restored = false;
   }
 
   function openPluginFilesystem(pluginId: string, providerId: string, options: { title?: string; connectionId?: string; rootUri?: string; currentUri?: string; forceNew?: boolean } = {}) {
@@ -1849,7 +1864,7 @@ export const useQueryStore = defineStore("query", () => {
     return id;
   }
 
-  async function openPluginConnection(connectionId: string) {
+  async function openPluginConnection(connectionId: string, options: { forceNew?: boolean } = {}) {
     const connectionStore = useConnectionStore();
     const connection = connectionStore.getConfig(connectionId);
     if (!connection || connection.db_type !== "plugin") throw new Error("Plugin connection config not found");
@@ -1865,10 +1880,19 @@ export const useQueryStore = defineStore("query", () => {
       return openPluginWorkbench(pluginId, workbench.contribution.id, {
         title: `${connection.name} · ${workbench.contribution.label}`,
         connectionId,
+        forceNew: options.forceNew,
         context: {
           connectionId,
           providerId,
           connectionType: connection.plugin_connection_type,
+          connection: {
+            name: connection.name,
+            host: connection.host,
+            port: connection.port,
+            username: connection.username,
+            color: connection.color,
+            readOnly: connection.read_only,
+          },
         },
       });
     }
@@ -1878,6 +1902,7 @@ export const useQueryStore = defineStore("query", () => {
     return openPluginFilesystem(pluginId, filesystem.contribution.id, {
       title: `${connection.name} · ${filesystem.contribution.label}`,
       connectionId,
+      forceNew: options.forceNew,
       rootUri: filesystem.contribution.root_uri,
     });
   }
@@ -2116,6 +2141,15 @@ export const useQueryStore = defineStore("query", () => {
     }
     const idx = tabs.value.findIndex((t) => t.id === id);
     if (idx < 0) return;
+    const closingTab = tabs.value[idx];
+    if (closingTab.mode === "plugin-workbench" && closingTab.pluginWorkbench) {
+      void api
+        .notifyPlugin(closingTab.pluginWorkbench.pluginId, "workbench/close", {
+          connectionId: closingTab.connectionId || undefined,
+          workbenchId: closingTab.id,
+        })
+        .catch(() => undefined);
+    }
     persistSavedSqlEditorPosition(tabs.value[idx]);
     clearDataGridPendingSnapshotsForTab(id);
     if (tabs.value[idx].txnSessionId) void rollbackTransaction(id);
@@ -5556,6 +5590,8 @@ export const useQueryStore = defineStore("query", () => {
     openMqttAdmin,
     openNacosAdmin,
     openPluginWorkbench,
+    updatePluginWorkbenchState,
+    acknowledgePluginWorkbenchRestore,
     openPluginFilesystem,
     openPluginConnection,
     clearNacosNavigationTarget,

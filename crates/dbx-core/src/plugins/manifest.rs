@@ -5,13 +5,16 @@ use semver::{Version, VersionReq};
 use serde::{Deserialize, Serialize};
 
 pub const SUPPORTED_PLUGIN_MANIFEST_VERSION: u32 = 1;
-pub const SUPPORTED_PLUGIN_HOST_API_VERSION: &str = "1.0.0";
+pub const SUPPORTED_PLUGIN_HOST_API_VERSION: &str = "1.1.0";
 pub const SUPPORTED_PLUGIN_PROTOCOL_VERSION: u32 = 1;
 pub const PLUGIN_CONNECTION_TEST_METHOD: &str = "connection/test";
 pub const PLUGIN_CONNECTION_CONNECT_METHOD: &str = "connection/connect";
 pub const PLUGIN_CONNECTION_DISCONNECT_METHOD: &str = "connection/disconnect";
 pub const PLUGIN_CONNECTION_ACTION_METHOD: &str = "connection/action";
-pub const SUPPORTED_PLUGIN_PERMISSIONS: &[&str] = &["host.events", "host.binary", "host.workbench", "host.filesystem"];
+pub const SUPPORTED_PLUGIN_PERMISSIONS: &[&str] =
+    &["host.events", "host.binary", "host.workbench", "host.filesystem", "host.fileTransfer", "host.clipboard"];
+pub const PLUGIN_CONNECTION_CHALLENGE_EVENT_METHOD: &str = "connection/challenge";
+pub const PLUGIN_CONNECTION_CHALLENGE_RESOLVE_METHOD: &str = "connection/challenge/resolve";
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PluginManifest {
@@ -212,6 +215,10 @@ pub struct PluginFormFieldDefinition {
     pub options: Vec<PluginFormFieldOption>,
     #[serde(default)]
     pub binding: Option<PluginFormFieldBinding>,
+    #[serde(default)]
+    pub visible_when: Option<PluginFormFieldCondition>,
+    #[serde(default)]
+    pub required_when: Option<PluginFormFieldCondition>,
 }
 
 impl PluginFormFieldDefinition {
@@ -222,12 +229,34 @@ impl PluginFormFieldDefinition {
             PluginFormFieldBinding::Config
         })
     }
+
+    pub fn is_visible(&self, values: &BTreeMap<String, serde_json::Value>) -> bool {
+        self.visible_when.as_ref().is_none_or(|condition| condition.matches(values))
+    }
+
+    pub fn is_required(&self, values: &BTreeMap<String, serde_json::Value>) -> bool {
+        self.required || self.required_when.as_ref().is_some_and(|condition| condition.matches(values))
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginFormFieldCondition {
+    pub field: String,
+    pub one_of: Vec<serde_json::Value>,
+}
+
+impl PluginFormFieldCondition {
+    pub fn matches(&self, values: &BTreeMap<String, serde_json::Value>) -> bool {
+        values.get(&self.field).is_some_and(|value| self.one_of.contains(value))
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum PluginFormFieldType {
     Text,
+    Path,
     Password,
     Number,
     Boolean,
@@ -290,6 +319,7 @@ pub enum PluginConnectionCapability {
     Test,
     Connect,
     Disconnect,
+    MultipleWorkbenches,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -845,6 +875,7 @@ fn validate_connection_actions(
 
 fn validate_form_fields(fields: &[PluginFormFieldDefinition], contribution_index: usize, errors: &mut Vec<String>) {
     let mut seen_keys = HashSet::new();
+    let declared_keys = fields.iter().map(|field| field.key.as_str()).collect::<HashSet<_>>();
     for (field_index, field) in fields.iter().enumerate() {
         if !valid_identifier(&field.key) || !seen_keys.insert(&field.key) {
             errors.push(format!(
@@ -895,6 +926,7 @@ fn validate_form_fields(fields: &[PluginFormFieldDefinition], contribution_index
         ) && !matches!(
             field.field_type,
             PluginFormFieldType::Text
+                | PluginFormFieldType::Path
                 | PluginFormFieldType::Password
                 | PluginFormFieldType::Select
                 | PluginFormFieldType::Textarea
@@ -907,6 +939,7 @@ fn validate_form_fields(fields: &[PluginFormFieldDefinition], contribution_index
         if let Some(default) = &field.default {
             let valid = match field.field_type {
                 PluginFormFieldType::Text
+                | PluginFormFieldType::Path
                 | PluginFormFieldType::Password
                 | PluginFormFieldType::Select
                 | PluginFormFieldType::Textarea => default.is_string(),
@@ -926,6 +959,47 @@ fn validate_form_fields(fields: &[PluginFormFieldDefinition], contribution_index
                 ));
             }
         }
+        validate_form_field_condition(
+            field.visible_when.as_ref(),
+            "visible_when",
+            &declared_keys,
+            contribution_index,
+            field_index,
+            errors,
+        );
+        validate_form_field_condition(
+            field.required_when.as_ref(),
+            "required_when",
+            &declared_keys,
+            contribution_index,
+            field_index,
+            errors,
+        );
+    }
+}
+
+fn validate_form_field_condition(
+    condition: Option<&PluginFormFieldCondition>,
+    label: &str,
+    declared_keys: &HashSet<&str>,
+    contribution_index: usize,
+    field_index: usize,
+    errors: &mut Vec<String>,
+) {
+    let Some(condition) = condition else {
+        return;
+    };
+    if !declared_keys.contains(condition.field.as_str()) {
+        errors.push(format!(
+            "Contribution at index {contribution_index} field {field_index} {label} references an unknown field"
+        ));
+    }
+    if condition.one_of.is_empty()
+        || condition.one_of.iter().any(|value| !(value.is_string() || value.is_number() || value.is_boolean()))
+    {
+        errors.push(format!(
+            "Contribution at index {contribution_index} field {field_index} {label} must contain scalar one_of values"
+        ));
     }
 }
 
@@ -1025,7 +1099,7 @@ mod tests {
             "entrypoints": {
                 "backend": { "executable": "bin/example" }
             },
-            "permissions": ["host.events"]
+            "permissions": ["host.events", "host.fileTransfer"]
         }))
         .unwrap();
 
@@ -1286,6 +1360,82 @@ mod tests {
         assert!(compatibility.compatible, "{:?}", compatibility.errors);
         let provider = manifest.connection_provider("bindings.connection").unwrap().unwrap();
         assert_eq!(provider.fields.last().unwrap().effective_binding(), PluginFormFieldBinding::Secret);
+    }
+
+    #[test]
+    fn accepts_path_fields_conditions_and_multiple_workbenches() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest: PluginManifest = serde_json::from_value(serde_json::json!({
+            "manifest_version": 1,
+            "id": "io.dbx.ssh",
+            "name": "SSH",
+            "version": "0.2.0",
+            "publisher": "example",
+            "engines": { "dbx": ">=0.1.0", "host_api": "^1.1" },
+            "permissions": ["host.clipboard"],
+            "contributions": [{
+                "type": "connection-provider",
+                "id": "ssh.connection",
+                "label": "SSH",
+                "database_type": "ssh",
+                "capabilities": ["multiple-workbenches"],
+                "fields": [
+                    {
+                        "key": "authentication",
+                        "label": "Authentication",
+                        "type": "select",
+                        "default": "password",
+                        "options": [
+                            { "label": "Password", "value": "password" },
+                            { "label": "Private key", "value": "private-key" }
+                        ]
+                    },
+                    {
+                        "key": "private_key_path",
+                        "label": "Private key",
+                        "type": "path",
+                        "visible_when": { "field": "authentication", "one_of": ["private-key"] },
+                        "required_when": { "field": "authentication", "one_of": ["private-key"] }
+                    }
+                ]
+            }]
+        }))
+        .unwrap();
+
+        let compatibility = manifest.compatibility(dir.path(), "0.5.77");
+
+        assert!(compatibility.compatible, "{:?}", compatibility.errors);
+    }
+
+    #[test]
+    fn rejects_invalid_connection_field_conditions() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest: PluginManifest = serde_json::from_value(serde_json::json!({
+            "manifest_version": 1,
+            "id": "io.dbx.invalid-conditions",
+            "name": "Invalid conditions",
+            "version": "1.0.0",
+            "publisher": "example",
+            "engines": { "dbx": ">=0.1.0", "host_api": "^1.1" },
+            "contributions": [{
+                "type": "connection-provider",
+                "id": "invalid.connection",
+                "label": "Invalid",
+                "database_type": "invalid",
+                "fields": [{
+                    "key": "private_key_path",
+                    "label": "Private key",
+                    "type": "path",
+                    "visible_when": { "field": "missing", "one_of": [] }
+                }]
+            }]
+        }))
+        .unwrap();
+
+        let compatibility = manifest.compatibility(dir.path(), "0.5.77");
+
+        assert!(compatibility.errors.iter().any(|error| error.contains("references an unknown field")));
+        assert!(compatibility.errors.iter().any(|error| error.contains("must contain scalar one_of values")));
     }
 
     #[test]

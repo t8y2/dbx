@@ -6,6 +6,7 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import type { PluginConnectionProviderContribution, PluginFormField, PluginFormFieldBinding, PluginFormFieldValue } from "@/types/database";
+import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 
 const props = defineProps<{
   contribution: PluginConnectionProviderContribution;
@@ -19,7 +20,15 @@ const emit = defineEmits<{
 }>();
 
 const formValues = computed(() => props.modelValue);
-const visibleFields = computed(() => props.contribution.fields.filter((field) => !field.binding || !props.hiddenBindings?.includes(field.binding)));
+const visibleFields = computed(() =>
+  props.contribution.fields.filter((field) => {
+    if (field.binding && props.hiddenBindings?.includes(field.binding)) return false;
+    if (!field.visible_when) return true;
+    const source = props.contribution.fields.find((candidate) => candidate.key === field.visible_when?.field);
+    const value = formValues.value[field.visible_when.field] ?? source?.default;
+    return field.visible_when.one_of.some((candidate) => candidate === value);
+  }),
+);
 const isConnectionDialogLayout = computed(() => props.layout === "connection-dialog");
 
 function fieldValue(field: PluginFormField): PluginFormFieldValue {
@@ -59,6 +68,21 @@ function defaultValueFor(field: PluginFormField): PluginFormFieldValue {
   if (field.type === "number") return undefined;
   return "";
 }
+
+function fieldRequired(field: PluginFormField): boolean {
+  if (field.required) return true;
+  if (!field.required_when) return false;
+  const source = props.contribution.fields.find((candidate) => candidate.key === field.required_when?.field);
+  const value = formValues.value[field.required_when.field] ?? source?.default;
+  return field.required_when.one_of.some((candidate) => candidate === value);
+}
+
+async function browsePath(field: PluginFormField) {
+  if (!isTauriRuntime()) return;
+  const { open } = await import("@tauri-apps/plugin-dialog");
+  const selected = await open({ multiple: false });
+  if (typeof selected === "string") updateField(field, selected);
+}
 </script>
 
 <template>
@@ -75,10 +99,14 @@ function defaultValueFor(field: PluginFormField): PluginFormFieldValue {
     <div v-for="field in visibleFields" :key="field.key" :class="isConnectionDialogLayout ? 'col-span-full grid grid-cols-4 items-start gap-4' : 'space-y-1.5'">
       <Label :for="fieldId(field)" :class="isConnectionDialogLayout ? 'justify-self-start pt-2 text-left' : 'text-xs'">
         {{ field.label }}
-        <span v-if="field.required" class="text-destructive">*</span>
+        <span v-if="fieldRequired(field)" class="text-destructive">*</span>
       </Label>
       <div :class="isConnectionDialogLayout ? 'col-span-3 min-w-0 space-y-1.5' : ''">
         <Input v-if="field.type === 'text' || field.type === 'number'" :id="fieldId(field)" :type="field.type === 'number' ? 'number' : 'text'" :model-value="fieldValue(field) as string | number | undefined" :placeholder="field.placeholder" @update:model-value="updateTextField(field, $event)" />
+        <div v-else-if="field.type === 'path'" class="flex items-center gap-1">
+          <Input :id="fieldId(field)" class="min-w-0 flex-1" :model-value="String(fieldValue(field) ?? '')" :placeholder="field.placeholder" @update:model-value="updateField(field, String($event))" />
+          <button v-if="isTauriRuntime()" type="button" class="inline-flex h-9 shrink-0 items-center rounded-md border border-input bg-background px-3 text-xs hover:bg-accent" @click="browsePath(field)">…</button>
+        </div>
         <PasswordInput v-else-if="field.type === 'password'" :id="fieldId(field)" :model-value="String(fieldValue(field) ?? '')" :placeholder="field.placeholder" @update:model-value="updateField(field, $event)" />
         <textarea
           v-else-if="field.type === 'textarea'"

@@ -105,6 +105,14 @@ export function initialPluginFormValues(contribution: PluginConnectionProviderCo
   return Object.fromEntries(contribution.fields.filter((field) => field.default !== undefined).map((field) => [field.key, field.default])) as Record<string, PluginFormFieldValue>;
 }
 
+export function pluginFormFieldVisible(contribution: PluginConnectionProviderContribution, field: PluginFormField, values: Record<string, PluginFormFieldValue>): boolean {
+  return pluginFormFieldConditionMatches(contribution, field.visible_when, values);
+}
+
+export function pluginFormFieldRequired(contribution: PluginConnectionProviderContribution, field: PluginFormField, values: Record<string, PluginFormFieldValue>): boolean {
+  return pluginFormFieldVisible(contribution, field, values) && (field.required === true || (field.required_when !== undefined && pluginFormFieldConditionMatches(contribution, field.required_when, values)));
+}
+
 export function pluginConnectionFormValues(contribution: PluginConnectionProviderContribution, config?: ConnectionConfig): Record<string, PluginFormFieldValue> {
   const values = initialPluginFormValues(contribution);
   if (!config) return values;
@@ -163,7 +171,7 @@ export function buildPluginConnectionConfig(pluginId: string, contribution: Plug
     production_databases: existing?.production_databases || [],
   };
   for (const field of contribution.fields) {
-    const value = values[field.key] ?? field.default;
+    const value = pluginFormFieldVisible(contribution, field, values) ? (values[field.key] ?? field.default) : undefined;
     const binding = effectiveFieldBinding(field);
     if (binding === "config") {
       if (value === undefined) delete externalConfig[field.key];
@@ -190,6 +198,13 @@ export function buildPluginConnectionConfig(pluginId: string, contribution: Plug
 
 function effectiveFieldBinding(field: PluginFormField): NonNullable<PluginFormField["binding"]> {
   return field.binding || (field.type === "password" ? "secret" : "config");
+}
+
+function pluginFormFieldConditionMatches(contribution: PluginConnectionProviderContribution, condition: PluginFormField["visible_when"], values: Record<string, PluginFormFieldValue>): boolean {
+  if (!condition) return true;
+  const referencedField = contribution.fields.find((field) => field.key === condition.field);
+  const value = values[condition.field] ?? referencedField?.default;
+  return condition.one_of.some((candidate) => Object.is(candidate, value));
 }
 
 function normalizeFrontendPlugin(plugin: InstalledPlugin, locale: string): FrontendPluginDefinition {

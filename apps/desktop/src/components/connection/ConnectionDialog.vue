@@ -120,7 +120,17 @@ import VisibleSchemasDialog from "@/components/sidebar/VisibleSchemasDialog.vue"
 import CloudflareD1ConnectionFields from "@/components/connection/CloudflareD1ConnectionFields.vue";
 import PluginConnectionFields from "@/components/plugins/PluginConnectionFields.vue";
 import PluginIcon from "@/components/plugins/PluginIcon.vue";
-import { buildPluginConnectionConfig, createFrontendPluginRegistry, parsePluginConnectionProviderOptionValue, pluginConnectionActionsForDialog, pluginConnectionFormValues, pluginConnectionProviderIcon, pluginConnectionProviderOptionValue } from "@/lib/plugins/frontendPlugin";
+import {
+  buildPluginConnectionConfig,
+  createFrontendPluginRegistry,
+  parsePluginConnectionProviderOptionValue,
+  pluginConnectionActionsForDialog,
+  pluginConnectionFormValues,
+  pluginConnectionProviderIcon,
+  pluginConnectionProviderOptionValue,
+  pluginFormFieldRequired,
+  pluginFormFieldVisible,
+} from "@/lib/plugins/frontendPlugin";
 import type { PluginCenterFocus } from "@/lib/plugins/pluginCenterNavigation";
 import { oceanbaseModeConnectionPatch, oceanbaseSubModeFromConfig } from "@/lib/database/oceanbaseConnectionMode";
 import { translateBackendError } from "@/i18n/backend-errors";
@@ -3308,6 +3318,16 @@ function pluginFieldHasValue(field: PluginFormField): boolean {
   return typeof value === "string" ? value.trim().length > 0 : value !== undefined;
 }
 
+function currentPluginFormValues(): Record<string, PluginFormFieldValue> {
+  const values = { ...pluginFormValues.value };
+  const provider = selectedPluginProvider.value?.contribution;
+  if (!provider) return values;
+  for (const field of provider.fields) {
+    if (field.binding === "name") values[field.key] = form.value.name;
+  }
+  return values;
+}
+
 function pluginActionLabel(action: PluginConnectionAction): string {
   if (action.label) return action.label;
   if (action.kind === "test") return t("connection.test");
@@ -3361,7 +3381,9 @@ function applyPluginActionFieldValues(values: Record<string, PluginFormFieldValu
 const hasRequiredConnectionTarget = computed(() => {
   if (isPluginConnection.value) {
     const entry = selectedPluginProvider.value;
-    return !!entry && entry.contribution.fields.every((field) => !field.required || pluginFieldHasValue(field));
+    if (!entry) return false;
+    const values = currentPluginFormValues();
+    return entry.contribution.fields.every((field) => !pluginFormFieldRequired(entry.contribution, field, values) || pluginFieldHasValue(field));
   }
   if (form.value.db_type === "mq") {
     if (mqSystemKind.value === "kafka") return mqKafkaConnectionSource.value === "zookeeper" ? !!mqKafkaZooKeeperServers.value.trim() : !!mqKafkaBootstrapServers.value.trim();
@@ -3672,7 +3694,8 @@ function connectionConfigForSubmit(id: string, generatedName = "", validatePlugi
     const entry = selectedPluginProvider.value;
     if (!entry) throw new Error(pluginLoadError.value || t("connection.pluginProviderUnavailable"));
     if (validatePluginRequired) {
-      const missingField = entry.contribution.fields.find((field) => field.required && !pluginFieldHasValue(field));
+      const values = currentPluginFormValues();
+      const missingField = entry.contribution.fields.find((field) => pluginFormFieldVisible(entry.contribution, field, values) && pluginFormFieldRequired(entry.contribution, field, values) && !pluginFieldHasValue(field));
       if (missingField) throw new Error(t("connection.pluginRequiredField", { field: missingField.label }));
     }
     const values = { ...pluginFormValues.value };

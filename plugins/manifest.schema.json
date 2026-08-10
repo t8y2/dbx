@@ -26,7 +26,7 @@
     "permissions": {
       "type": "array",
       "uniqueItems": true,
-      "items": { "enum": ["host.events", "host.binary", "host.workbench", "host.filesystem"] }
+      "items": { "enum": ["host.events", "host.binary", "host.workbench", "host.filesystem", "host.fileTransfer", "host.clipboard"] }
     },
     "entrypoints": {
       "type": "object",
@@ -134,6 +134,19 @@
         "contributions": { "type": "object", "propertyNames": { "$ref": "#/$defs/identifier" }, "additionalProperties": { "$ref": "#/$defs/contributionLocalization" } }
       }
     },
+    "formFieldCondition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["field", "one_of"],
+      "properties": {
+        "field": { "$ref": "#/$defs/identifier" },
+        "one_of": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": ["string", "number", "boolean"] }
+        }
+      }
+    },
     "formField": {
       "type": "object",
       "additionalProperties": false,
@@ -141,13 +154,15 @@
       "properties": {
         "key": { "$ref": "#/$defs/identifier" },
         "label": { "type": "string", "minLength": 1 },
-        "type": { "enum": ["text", "password", "number", "boolean", "select", "textarea"] },
+        "type": { "enum": ["text", "path", "password", "number", "boolean", "select", "textarea"] },
         "description": { "type": ["string", "null"] },
         "placeholder": { "type": ["string", "null"] },
         "required": { "type": "boolean" },
         "default": { "type": ["string", "number", "boolean", "null"] },
         "options": { "type": "array", "items": { "$ref": "#/$defs/selectOption" } },
-        "binding": { "enum": ["config", "secret", "name", "host", "port", "username", "password", "database"] }
+        "binding": { "enum": ["config", "secret", "name", "host", "port", "username", "password", "database"] },
+        "visible_when": { "$ref": "#/$defs/formFieldCondition" },
+        "required_when": { "$ref": "#/$defs/formFieldCondition" }
       },
       "allOf": [
         {
@@ -164,7 +179,7 @@
             "properties": { "binding": { "enum": ["secret", "name", "host", "username", "password", "database"] } },
             "required": ["binding"]
           },
-          "then": { "properties": { "type": { "enum": ["text", "password", "select", "textarea"] } } }
+          "then": { "properties": { "type": { "enum": ["text", "path", "password", "select", "textarea"] } } }
         }
       ]
     },
@@ -185,7 +200,7 @@
         "capabilities": {
           "type": "array",
           "uniqueItems": true,
-          "items": { "enum": ["test", "connect", "disconnect"] }
+          "items": { "enum": ["test", "connect", "disconnect", "multiple-workbenches"] }
         },
         "actions": { "type": "array", "items": { "$ref": "#/$defs/connectionAction" } }
       }

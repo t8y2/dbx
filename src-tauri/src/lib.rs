@@ -1499,6 +1499,9 @@ pub fn run() {
             app.manage(commands::deep_link::DeepLinkOpenState::default());
             app.manage(commands::update::PendingUpdateState::default());
             app.manage(commands::ssh_prompt::SshPromptState::new());
+            let plugin_file_transfer_state = commands::plugin_file_transfer::PluginFileTransferState::default();
+            commands::plugin_file_transfer::start_plugin_file_transfer_sweeper(plugin_file_transfer_state.clone());
+            app.manage(plugin_file_transfer_state);
             commands::ssh_prompt::install_ssh_prompt_bridge(app.handle());
             commands::ssh_prompt::install_ssh_notice_bridge(app.handle());
             #[cfg(target_os = "macos")]
@@ -1669,6 +1672,14 @@ pub fn run() {
             commands::plugins::read_plugin_asset,
             commands::plugins::read_plugin_ui_entry,
             commands::plugins::read_plugin_ui_asset,
+            commands::plugin_file_transfer::pick_plugin_file_transfer_sources,
+            commands::plugin_file_transfer::register_dropped_plugin_file_transfer_sources,
+            commands::plugin_file_transfer::read_plugin_file_transfer_source,
+            commands::plugin_file_transfer::begin_plugin_file_transfer_target,
+            commands::plugin_file_transfer::write_plugin_file_transfer_target,
+            commands::plugin_file_transfer::finish_plugin_file_transfer_target,
+            commands::plugin_file_transfer::release_plugin_file_transfer_handle,
+            commands::plugin_file_transfer::dispose_plugin_file_transfer_workbench,
             commands::plugins::list_jdbc_drivers,
             commands::plugins::list_jdbc_maven_bundles,
             commands::plugins::list_jdbc_local_bundles,
@@ -2210,6 +2221,11 @@ pub fn run() {
                     api.prevent_exit();
                     request_app_close(app_handle, "quit");
                 } else {
+                    if let Some(state) =
+                        app_handle.try_state::<commands::plugin_file_transfer::PluginFileTransferState>()
+                    {
+                        state.cleanup_all();
+                    }
                     tauri::async_runtime::block_on(async {
                         if let Some(server) = app_handle.try_state::<commands::redis_pubsub_server::PubSubServerState>()
                         {

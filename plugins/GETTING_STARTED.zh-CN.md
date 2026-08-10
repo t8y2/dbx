@@ -138,18 +138,51 @@ dbx-plugin-demo/
 
 - `window.dbxPlugin.ready`：等待 DBX 完成宿主桥接初始化。
 - `window.dbxPlugin.locale`：读取当前 DBX 界面语言。
+- `window.dbxPlugin.onLocaleChange(listener)`：界面语言变化时实时通知，不会重载工作台 iframe；宿主无法提供语言时默认为 `zh-CN`。
 - `window.dbxPlugin.context`：读取当前工作台允许访问的上下文。
+- `window.dbxPlugin.appearance`：读取明暗模式、允许列表内的颜色令牌、界面字体以及终端字体/字号；使用 `onAppearanceChange(listener)` 响应实时变更。
 - `window.dbxPlugin.request(...)`：调用宿主提供的方法。
 - `window.dbxPlugin.invoke(...)`：调用插件自己的原生 Sidecar 方法。
 
 插件前端运行在沙箱中，不能直接导入 DBX 内部 Vue 组件，也不能直接访问 Tauri、Node.js 或任意本地文件。需要的能力必须通过 Manifest 权限和 Host API 明确暴露。
+
+### 原生 Sidecar 数据目录
+
+DBX 启动原生 Sidecar 时会注入 `DBX_PLUGIN_DATA_DIR`。该目录按插件 ID 隔离，并在插件升级或回滚时保留；适合保存 `known_hosts`、索引和可安全重建的插件状态。不要把持久数据写入插件安装目录，也不要在日志中输出该目录下的敏感内容。
+
+### 用户授权文件句柄
+
+声明 `host.fileTransfer` 权限后，沙箱前端可以使用 `window.dbxPlugin.fileTransfer`：
+
+```js
+const { files } = await window.dbxPlugin.fileTransfer.pick({ multiple: false });
+const file = files[0];
+const chunk = await window.dbxPlugin.fileTransfer.read(file.handleId, 0, 256 * 1024);
+await window.dbxPlugin.fileTransfer.release(file.handleId);
+
+const target = await window.dbxPlugin.fileTransfer.beginSave({ name: "result.bin", size: 1024 });
+await window.dbxPlugin.fileTransfer.write(target.handleId, 0, bytes);
+await window.dbxPlugin.fileTransfer.finish(target.handleId);
+```
+
+`fileTransfer.onDragState(listener)` 与 `fileTransfer.onDrop(listener)` 可接收由宿主全局拖放入口转换的状态和不透明文件句柄，并且只投递给当前活动工作台。单块上限 256 KiB、流式目标单文件上限 16 GiB、每个工作台最多 32 个句柄；完成、`release`/`cancel`、闲置 15 分钟或工作台销毁后句柄立即失效。桌面端的本地路径只保存在 Rust Host 中，文件命令按插件与工作台重复校验所有权，并流式写入同目录临时文件后原子替换；Web 端优先使用浏览器私有文件系统流式暂存后触发下载，不支持私有文件系统时无论是否预先声明大小都强制限制为 1 GiB。
+
+声明 `host.clipboard` 后可调用 `clipboard.readText/writeText`。首次读取时由宿主询问用户，授权仅在当前 DBX 进程内按插件保存；拒绝时不会读取剪贴板，重启 DBX 后必须重新授权。写入仍受 Manifest 权限检查。
+
+插件只能访问用户本次授权的不透明句柄，不能取得任意本地路径。每块最多 256 KiB；写入必须使用宿主返回的连续偏移。句柄在完成、取消或工作台销毁后失效，不能跨标签或跨插件使用。
+
+### 连接交互挑战
+
+需要在连接测试、连接生命周期或工作台 RPC 中确认服务器身份时，Host 会注入不可伪造的 `operationId`。Sidecar 发送的 `connection/challenge` 事件必须包含同一 `operationId`、`challengeId`、`connectionId`、`kind: "host-key"`、主机、端口、密钥类型和指纹。全局宿主对话框对挑战排队，Host 将操作与首个合法 `challengeId` 绑定，并调用固定方法 `connection/challenge/resolve` 返回 `{ operationId, challengeId, accept, remember }`；过期、伪造、跨插件和重复 resolve 均被拒绝。`notify` 不创建操作作用域，`disconnect` 使用独立的新 `operationId`。
+
+未知主机必须在发送密码或私钥前完成挑战；主机密钥变化应直接拒绝。尚未实现连接挑战的插件不要声明 `test` 能力，也不要把 TCP 探测描述为认证成功。
 
 ### 国际化
 
 国际化分为两层：
 
 1. `manifest.json` 的 `localizations`：翻译插件名称、说明、连接字段、按钮和贡献点名称。
-2. 插件自己的 UI：根据 `window.dbxPlugin.locale` 选择文案或接入自己的 i18n 库。
+2. 插件自己的 UI：在 `await window.dbxPlugin.ready` 后根据 `window.dbxPlugin.locale` 选择文案，并使用 `onLocaleChange(listener)` 响应运行时切换。读取不到语言时应提供明确兜底文案。
 
 生成模板已经包含中文和英文切换示例，可以直接扩展其他语言。
 

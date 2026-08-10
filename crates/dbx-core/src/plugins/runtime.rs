@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -670,6 +670,12 @@ fn spawn_plugin_child(plugin: &InstalledPlugin, app_version: &str, env: &PluginR
             format!("Plugin '{}' does not provide a compatible backend executable", plugin.manifest.id)
         })?;
     ensure_executable_permission(executable_path)?;
+    let data_dir = plugin_data_dir(plugin);
+    std::fs::create_dir_all(&data_dir)
+        .map_err(|error| format!("Failed to create data directory for plugin '{}': {error}", plugin.manifest.id))?;
+    let data_dir = data_dir
+        .canonicalize()
+        .map_err(|error| format!("Failed to resolve data directory for plugin '{}': {error}", plugin.manifest.id))?;
     let mut command = crate::process::new_tokio_command(executable_path);
     command
         .current_dir(&plugin.path)
@@ -683,7 +689,22 @@ fn spawn_plugin_child(plugin: &InstalledPlugin, app_version: &str, env: &PluginR
         .env("DBX_HOST_API_VERSION", SUPPORTED_PLUGIN_HOST_API_VERSION)
         .env("DBX_PLUGIN_PROTOCOL_VERSION", SUPPORTED_PLUGIN_PROTOCOL_VERSION.to_string());
     env.apply_to(&mut command);
+    // Host-owned paths are applied after caller-provided runtime variables so a
+    // plugin can never redirect another plugin's persistent data directory.
+    command.env("DBX_PLUGIN_DATA_DIR", data_dir);
     command.spawn().map_err(|error| format!("Failed to start plugin '{}': {error}", plugin.manifest.id))
+}
+
+fn plugin_data_dir(plugin: &InstalledPlugin) -> PathBuf {
+    let parent = plugin.path.parent();
+    let is_versioned_install =
+        parent.and_then(Path::file_name).and_then(|name| name.to_str()).is_some_and(|name| name == "versions");
+    if is_versioned_install {
+        parent.and_then(Path::parent).unwrap_or(&plugin.path).join("data")
+    } else {
+        // Legacy and unpacked development installs have no version container.
+        plugin.path.join(".dbx-data")
+    }
 }
 
 fn ensure_executable_permission(path: &Path) -> Result<(), String> {
@@ -704,7 +725,8 @@ mod tests {
     use std::time::Duration;
 
     use super::{
-        decode_response_value, read_limited_line, trim_ascii_whitespace, PluginSessionState, PluginSidecarSession,
+        decode_response_value, plugin_data_dir, read_limited_line, trim_ascii_whitespace, PluginSessionState,
+        PluginSidecarSession,
     };
     use crate::plugins::{InstalledPlugin, PluginManifest, PluginRuntimeEnv};
     use tokio::io::BufReader;
@@ -732,6 +754,27 @@ mod tests {
     #[test]
     fn trims_protocol_whitespace() {
         assert_eq!(trim_ascii_whitespace(b" \n{}\r\n"), b"{}");
+    }
+
+    #[test]
+    fn keeps_plugin_data_outside_versioned_package_directories() {
+        let root = tempfile::tempdir().unwrap();
+        let version = root.path().join("io.dbx.sample").join("versions").join("1.2.3");
+        let manifest =
+            PluginManifest { id: "io.dbx.sample".to_string(), version: "1.2.3".to_string(), ..Default::default() };
+        let plugin = InstalledPlugin::new(manifest, version, "0.5.67");
+
+        assert_eq!(plugin_data_dir(&plugin), root.path().join("io.dbx.sample").join("data"));
+    }
+
+    #[test]
+    fn gives_unpacked_plugins_an_isolated_development_data_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let manifest =
+            PluginManifest { id: "io.dbx.sample".to_string(), version: "1.2.3".to_string(), ..Default::default() };
+        let plugin = InstalledPlugin::new(manifest, root.path().to_path_buf(), "0.5.67");
+
+        assert_eq!(plugin_data_dir(&plugin), root.path().join(".dbx-data"));
     }
 
     #[cfg(unix)]

@@ -1983,7 +1983,15 @@ defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, hand
 
     <template v-else-if="activeTab.mode === 'plugin-workbench' && activeTab.pluginWorkbench">
       <div class="flex-1 min-h-0">
-        <PluginWorkbenchTab :key="activeTab.id" :plugin-id="activeTab.pluginWorkbench.pluginId" :contribution-id="activeTab.pluginWorkbench.contributionId" :context="activeTab.pluginWorkbench.context" />
+        <PluginWorkbenchTab
+          :key="activeTab.id"
+          :tab-id="activeTab.id"
+          :plugin-id="activeTab.pluginWorkbench.pluginId"
+          :contribution-id="activeTab.pluginWorkbench.contributionId"
+          :context="activeTab.pluginWorkbench.context"
+          :state="activeTab.pluginWorkbench.state"
+          :restored="activeTab.pluginWorkbench.restored"
+        />
       </div>
     </template>
     <template v-else-if="activeTab.mode === 'plugin-filesystem' && activeTab.pluginFilesystem">

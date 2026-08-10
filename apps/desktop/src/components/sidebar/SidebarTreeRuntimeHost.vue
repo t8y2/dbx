@@ -62,7 +62,7 @@ import { useSettingsStore } from "@/stores/settingsStore";
 import { useSavedSqlStore } from "@/stores/savedSqlStore";
 import { useToast } from "@/composables/useToast";
 import { useDatabaseOptions } from "@/composables/useDatabaseOptions";
-import type { ColumnInfo, DatabaseType, TreeNode, TreeNodeType } from "@/types/database";
+import type { ColumnInfo, DatabaseType, InstalledPlugin, TreeNode, TreeNodeType } from "@/types/database";
 import * as api from "@/lib/backend/api";
 import { resolveDefaultDatabase } from "@/lib/database/defaultDatabase";
 import { connectionUsesVisibleSchemaFilter } from "@/lib/database/visibleDatabases";
@@ -275,6 +275,14 @@ const queryStore = useQueryStore();
 const settingsStore = useSettingsStore();
 
 const savedSqlStore = useSavedSqlStore();
+
+const installedPlugins = shallowRef<InstalledPlugin[]>([]);
+void api
+  .listPlugins()
+  .then((plugins) => {
+    installedPlugins.value = plugins;
+  })
+  .catch(() => undefined);
 
 const { toast } = useToast();
 
@@ -1164,6 +1172,25 @@ async function openObjectBrowser() {
   } catch (e: any) {
     toast(t("connection.connectFailed", { message: translateBackendError(t, e) }), 5000);
     openDriverStoreForInstallError(e?.message || String(e));
+  }
+}
+
+function pluginSupportsMultipleWorkbenches(connectionId: string | undefined): boolean {
+  if (!connectionId) return false;
+  const connection = connectionStore.getConfig(connectionId);
+  if (connection?.db_type !== "plugin" || !connection.plugin_id || !connection.plugin_connection_provider) return false;
+  const plugin = installedPlugins.value.find((candidate) => candidate.manifest.id === connection.plugin_id);
+  const provider = plugin?.manifest.contributions?.find((contribution) => contribution.type === "connection-provider" && contribution.id === connection.plugin_connection_provider);
+  return provider?.type === "connection-provider" && (provider.capabilities || []).includes("multiple-workbenches");
+}
+
+async function openPluginWorkbench(forceNew: boolean) {
+  const connectionId = activeNode.value.connectionId;
+  if (!connectionId) return;
+  try {
+    await queryStore.openPluginConnection(connectionId, { forceNew });
+  } catch (error: any) {
+    toast(t("connection.connectFailed", { message: translateBackendError(t, error) }), 5000);
   }
 }
 
@@ -4005,6 +4032,16 @@ function buildConnectionSidebarMenu(context: SidebarMenuFactoryContext): boolean
   if (node.type === "connection") {
     if (isConnecting.value) {
       items.push({ label: t("connection.cancelConnecting"), action: cancelConnectionAttempt, icon: X });
+    } else if (pluginSupportsMultipleWorkbenches(node.connectionId)) {
+      items.push({
+        label: t("contextMenu.openConnection"),
+        icon: Plug,
+        children: [
+          { label: t("contextMenu.openConnection"), action: () => openPluginWorkbench(false), icon: Plug },
+          { label: t("contextMenu.openNewConnection"), action: () => openPluginWorkbench(true), icon: CopyPlus },
+        ],
+      });
+      if (isConnected.value) items.push({ label: t("contextMenu.closeConnection"), action: disconnectConnection, icon: Unplug });
     } else if (!isConnected.value) {
       items.push({ label: t("contextMenu.openConnection"), action: toggle, icon: Plug });
     } else {

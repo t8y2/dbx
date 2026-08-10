@@ -2186,6 +2186,7 @@ export default withEnglishFallback({
   },
   contextMenu: {
     openConnection: "연결 열기",
+    openNewConnection: "새 연결",
     closeConnection: "연결 닫기",
     closeDatabaseConnection: "데이터베이스 연결 닫기",
     deleteConnection: "연결 삭제",

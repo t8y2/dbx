@@ -30,6 +30,7 @@ import {
   SquareDashed,
   Check,
   CopyPlus,
+  Hash,
   KeyRound,
   Link2,
   ListTree,
@@ -245,7 +246,7 @@ import { getTableStructureCapabilities } from "@/lib/table/tableStructureCapabil
 import { filterObjectBrowserTableColumns } from "@/lib/table/objectBrowserTableInfo";
 import { gaussdbMTypeDisplayName } from "@/lib/table/postgresDataTypeHelp";
 import { reserveDataGridHeaderLine } from "@/lib/dataGrid/dataGridHeaderLayout";
-import { buildColumnIndexMap, columnIndexMetadataRequestCurrent, columnIndexNameKey, columnIndexTableIdentity } from "@/lib/dataGrid/dataGridColumnIndexIcon";
+import { buildColumnIndexMap, columnIndexColorClass, columnIndexMetadataRequestCurrent, columnIndexNameKey, columnIndexTableIdentity, type ColumnIndexKind } from "@/lib/dataGrid/dataGridColumnIndexIcon";
 import { supportsTableStructureEditing } from "@/lib/database/databaseCapabilities";
 import { rememberDataGridConditionHistory } from "@/lib/dataGrid/dataGridConditionHistory";
 import { restoreDataGridLocalColumnFilters, serializeDataGridLocalColumnFilters } from "@/lib/dataGrid/dataGridLocalColumnFilterState";
@@ -7911,6 +7912,9 @@ const transposeRows = computed(() => {
     displayValue: (value, _column, index) => formatCellCached(value, visibleColumnIndexes.value[index]),
   });
 });
+const transposeReserveTypeLine = computed(() => showColumnTypesInHeader.value && transposeRows.value.some((row) => row.type));
+const transposeReserveCommentLine = computed(() => showColumnCommentsInHeader.value && transposeRows.value.some((row) => row.comment));
+const transposeRowHeight = computed(() => 30 + (transposeReserveTypeLine.value ? 14 : 0) + (transposeReserveCommentLine.value ? 14 : 0));
 const isTransposeMode = computed(() => showTranspose.value && transposeRows.value.length > 0);
 const transposeTotalWidth = computed(() => {
   const recordIndexes = multiRowTranspose.value ? Array.from({ length: displayRowCount.value }, (_, i) => i) : activeTransposeRecordIndexes.value;
@@ -7928,6 +7932,19 @@ function transposeFieldTitle(item: { column: string; type: string; comment?: str
   if (showColumnTypesInHeader.value && item.type) details.push(`${t("grid.columnType")}: ${item.type}`);
   if (showColumnCommentsInHeader.value && item.comment) details.push(`${t("grid.columnComment")}: ${item.comment}`);
   return details.join("\n");
+}
+
+function transposeColumnIndexKind(column: string): ColumnIndexKind | undefined {
+  if (!showIndexIndicatorsInHeader.value) return undefined;
+  const kind = columnIndexMap.value.get(columnIndexNameKey(column));
+  return kind && kind !== "none" ? kind : undefined;
+}
+
+function transposeColumnIndexText(kind: ColumnIndexKind): string {
+  if (kind === "primary") return t("grid.columnPrimaryIndex");
+  if (kind === "unique") return t("grid.columnUniqueIndex");
+  if (kind === "index") return t("grid.columnRegularIndex");
+  return "";
 }
 
 function updateTransposeViewport() {
@@ -10055,7 +10072,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                   '--transpose-field-w': `${transposePinnedWidth}px`,
                 }"
                 :items="transposeRows"
-                :item-size="30"
+                :item-size="transposeRowHeight"
                 :buffer="400"
                 key-field="id"
                 @scroll="onTransposeScroll"
@@ -10093,21 +10110,35 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                   <div
                     class="data-grid-transpose-row flex border-b border-border/60"
                     :style="{
-                      height: '30px',
+                      height: `${transposeRowHeight}px`,
                       width: `${transposeTotalWidth}px`,
                     }"
                   >
                     <LightTooltip :text="transposeFieldTitle(item)" side="right" :side-offset="6" :delay="250" :open-on-focus="false" surface="popover">
                       <div
                         data-native-clipboard
-                        class="sticky left-0 z-10 flex shrink-0 items-center gap-1.5 overflow-hidden border-r border-border bg-background px-3 py-0"
+                        class="sticky left-0 z-10 flex shrink-0 flex-col items-start justify-center overflow-hidden border-r border-border bg-background px-3 py-0"
                         :class="{
                           'bg-yellow-200/60 dark:bg-yellow-500/20': transposeHeaderIsSearchMatch(visibleColumnIndexes[index]),
                           'ring-2 ring-inset ring-yellow-500 bg-yellow-300/60 dark:bg-yellow-500/40': transposeHeaderIsCurrentMatch(visibleColumnIndexes[index]),
                         }"
                         :style="{ width: `${transposePinnedWidth}px` }"
                       >
-                        <span class="min-w-0 flex-1 truncate font-medium">{{ item.column }}</span>
+                        <span class="flex min-w-0 items-center gap-1 overflow-hidden">
+                          <KeyRound v-if="transposeColumnIndexKind(item.column) === 'primary'" data-grid-transpose-index-indicator class="h-3 w-3 shrink-0" :class="columnIndexColorClass('primary')" :title="transposeColumnIndexText('primary')" />
+                          <Hash v-else-if="transposeColumnIndexKind(item.column)" data-grid-transpose-index-indicator class="h-3 w-3 shrink-0" :class="columnIndexColorClass(transposeColumnIndexKind(item.column)!)" :title="transposeColumnIndexText(transposeColumnIndexKind(item.column)!)" />
+                          <span class="min-w-0 flex-1 truncate font-medium leading-4">{{ item.column }}</span>
+                        </span>
+                        <template v-if="showColumnTypesInHeader && item.type">
+                          <span data-grid-transpose-type-line class="h-3 min-w-0 truncate text-[10px] font-normal leading-3 select-none" :class="typeColorClass(item.type)" :title="item.type">
+                            {{ item.type }}
+                          </span>
+                        </template>
+                        <template v-if="showColumnCommentsInHeader && item.comment">
+                          <span data-grid-transpose-comment-line class="h-3 min-w-0 truncate text-[10px] font-normal leading-3 text-muted-foreground select-none" :title="item.comment">
+                            {{ item.comment }}
+                          </span>
+                        </template>
                       </div>
                       <template #content>
                         <div

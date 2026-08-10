@@ -5677,6 +5677,9 @@ export const useConnectionStore = defineStore("connection", () => {
 
   async function loadXuguTypeMembers(node: TreeNode): Promise<void> {
     if (!isXuguTypeMemberContainer(node, getConfig(node.connectionId || "")?.db_type)) return;
+    const connectionId = node.connectionId;
+    const database = node.database;
+    if (!connectionId || !database) return;
     if (node.isExpanded) {
       node.isExpanded = false;
       if (!sidebarSearchQuery.value) releaseCollapsedTreeNodeChildren(node.id);
@@ -5693,8 +5696,8 @@ export const useConnectionStore = defineStore("connection", () => {
     try {
       const [attributes, methods] = await Promise.all([
         completionAssistantSearch({
-          connection_id: node.connectionId,
-          database: node.database,
+          connection_id: connectionId,
+          database,
           schema,
           object_kinds: ["column"],
           mask: "",
@@ -5705,8 +5708,8 @@ export const useConnectionStore = defineStore("connection", () => {
           match_mode: "prefix",
         }),
         completionAssistantSearch({
-          connection_id: node.connectionId,
-          database: node.database,
+          connection_id: connectionId,
+          database,
           schema,
           object_kinds: ["routine"],
           mask: "",

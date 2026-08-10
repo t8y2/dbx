@@ -22,11 +22,7 @@ describe("Xugu object type members", () => {
   });
 
   it("makes only type specification nodes explicit containers", () => {
-    const nodes = markXuguTypeNodesExpandable([
-      typeNode,
-      { ...typeNode, id: "body", type: "type-body" },
-      { ...typeNode, id: "function", type: "function" },
-    ]);
+    const nodes = markXuguTypeNodesExpandable([typeNode, { ...typeNode, id: "body", type: "type-body" }, { ...typeNode, id: "function", type: "function" }]);
 
     expect(nodes[0]?.children).toEqual([]);
     expect(nodes[0]?.xuguTypeMembersExpandable).toBe(true);

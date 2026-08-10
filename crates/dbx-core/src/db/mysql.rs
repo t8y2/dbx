@@ -6628,7 +6628,7 @@ mod tests {
     fn mysql_result_preview_budget_scales_with_page_and_column_count() {
         let text_column = mysql_test_column(ColumnType::MYSQL_TYPE_LONG_BLOB, 45, ColumnFlags::empty(), u32::MAX);
         let binary_column = mysql_test_column(ColumnType::MYSQL_TYPE_LONG_BLOB, 63, ColumnFlags::BLOB_FLAG, u32::MAX);
-        assert_eq!(mysql_result_cell_preview_bytes(32 * 1024 * 1024, 1, &[text_column.clone()]), 8 * 1024);
+        assert_eq!(mysql_result_cell_preview_bytes(32 * 1024 * 1024, 1, std::slice::from_ref(&text_column)), 8 * 1024);
         assert_eq!(mysql_result_cell_preview_bytes(32 * 1024 * 1024, 1000, &vec![text_column.clone(); 4]), 8 * 1024);
         assert_eq!(mysql_result_cell_preview_bytes(32 * 1024 * 1024, 1000, &vec![text_column.clone(); 16]), 2097);
         assert_eq!(mysql_result_cell_preview_bytes(1, 1000, &vec![text_column; 100]), 256);

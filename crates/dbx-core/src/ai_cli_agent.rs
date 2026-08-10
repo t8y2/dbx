@@ -795,7 +795,6 @@ fn cursor_error_message(value: &Value) -> String {
         .to_string()
 }
 
-
 /// Parse Grok Build `--output-format streaming-json` NDJSON events.
 ///
 /// Documented event types: `text`, `thought`, `tool_call`, `tool_call_update`,

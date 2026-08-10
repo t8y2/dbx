@@ -5588,7 +5588,6 @@ mod tests {
         std::fs::remove_file(&db).ok();
     }
 
-
     #[tokio::test]
     async fn anthropic_compatible_ai_config_roundtrip() {
         let db = temp_db_path("anthropic-compatible-ai-roundtrip");

@@ -396,7 +396,6 @@ pub struct AiConfig {
     pub grok_cli_env: HashMap<String, String>,
 }
 
-
 fn default_enable_thinking() -> bool {
     true
 }

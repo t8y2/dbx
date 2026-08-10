@@ -216,7 +216,7 @@ pub fn validate_runtime_effort(config: &AiConfig) -> Result<(), String> {
             | AiProvider::PiAgentCli
             | AiProvider::OpenCodeCli
             | AiProvider::CursorCli
-        | AiProvider::GrokCli
+            | AiProvider::GrokCli
     ) {
         return match selection {
             AiEffortSelection::Enum(value) if !value.trim().is_empty() => Ok(()),

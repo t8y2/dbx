@@ -362,6 +362,36 @@ describe("TableStructureEditor primary key editing", () => {
       }),
     );
   });
+
+  it("keeps the current SQL preview visible while a newer preview is loading", async () => {
+    const root = await mountEditor("dameng", true);
+    const primaryKey = columnCheckbox(root, "structureEditor.primaryKey");
+    const nullable = columnCheckbox(root, "structureEditor.nullable");
+    const firstSql = "ALTER TABLE users DROP CONSTRAINT users_pkey;";
+
+    mocks.buildTableStructureChangeSql.mockResolvedValueOnce({ statements: [firstSql], warnings: [] });
+    primaryKey.checked = false;
+    primaryKey.dispatchEvent(new Event("change", { bubbles: true }));
+
+    await vi.waitFor(() => expect(root.textContent).toContain(firstSql));
+
+    let resolveLatestPreview!: (value: { statements: string[]; warnings: string[] }) => void;
+    mocks.buildTableStructureChangeSql.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveLatestPreview = resolve;
+        }),
+    );
+    nullable.checked = true;
+    nullable.dispatchEvent(new Event("change", { bubbles: true }));
+
+    await vi.waitFor(() => expect(mocks.buildTableStructureChangeSql).toHaveBeenCalledTimes(2));
+    expect(root.textContent).toContain(firstSql);
+    expect(root.textContent).not.toContain("structureEditor.noChanges");
+
+    resolveLatestPreview({ statements: ["ALTER TABLE users ALTER COLUMN id DROP NOT NULL;"], warnings: [] });
+    await vi.waitFor(() => expect(root.textContent).toContain("ALTER TABLE users ALTER COLUMN id DROP NOT NULL;"));
+  });
 });
 
 describe("TableStructureEditor local column order notice", () => {

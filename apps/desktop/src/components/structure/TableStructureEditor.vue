@@ -1119,10 +1119,10 @@ function scheduleSqlPreviewRefresh() {
   }
   sqlPreviewRequestId++;
   deferredSqlPreviewRefresh = false;
-  pendingStatements.value = [];
-  warnings.value = [];
-  sqliteSchemaRevision.value = undefined;
   if (!hasPendingStructureChanges()) {
+    pendingStatements.value = [];
+    warnings.value = [];
+    sqliteSchemaRevision.value = undefined;
     sqlPreviewLoading.value = false;
     return;
   }

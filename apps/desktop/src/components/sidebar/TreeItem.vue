@@ -595,7 +595,7 @@ function isNodeDefaultSchema(): boolean {
 
 const trailingComment = computed(() => {
   if (!settingsStore.editorSettings.sidebarObjectInfoMode.startsWith("comment-")) return null;
-  return sidebarTreeNodeComment(activeNode.value);
+  return sidebarTreeNodeComment(activeNode.value, settingsStore.editorSettings.sidebarShowConnectionNotes);
 });
 
 function isRightAlignedComment(): boolean {

@@ -366,6 +366,8 @@ export default {
     name: "Name",
     namePlaceholder: "Connection name, auto-generated if empty",
     note: "Notes",
+    noteShow: "Show",
+    noteShowInSidebar: "Show the note in the connection list",
     notePlaceholder: "Do not store passwords in plaintext in notes",
     type: "Type",
     host: "Host",

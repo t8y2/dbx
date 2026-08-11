@@ -367,6 +367,8 @@ export default withEnglishFallback({
     name: "名稱",
     namePlaceholder: "連線名稱，留空則自動產生",
     note: "備註",
+    noteShow: "顯示",
+    noteShowInSidebar: "在連線清單中顯示備註",
     notePlaceholder: "請勿在備註中以明文儲存密碼",
     type: "類型",
     host: "主機",

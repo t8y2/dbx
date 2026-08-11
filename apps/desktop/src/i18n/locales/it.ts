@@ -366,6 +366,8 @@ export default withEnglishFallback({
     name: "Nome",
     namePlaceholder: "Nome connessione, generato automaticamente se vuoto",
     note: "Note",
+    noteShow: "Mostra",
+    noteShowInSidebar: "Mostra la nota nell'elenco delle connessioni",
     notePlaceholder: "Non salvare password in chiaro nelle note",
     type: "Tipo",
     host: "Host",

@@ -118,12 +118,18 @@ describe("connectionStore database info", () => {
     const store = useConnectionStore();
     await store.addConnection(config);
     await store.connect(config);
+    const connectionNode = store.treeNodes[0];
+    connectionNode.isExpanded = true;
+    const existingChildIds = connectionNode.children?.map((child) => child.id);
 
     await store.updateConnection({ ...config, note: "Production reporting" });
 
     expect(saveConnections).toHaveBeenLastCalledWith([expect.objectContaining({ id: config.id, note: "Production reporting" })]);
     expect(store.getConfig(config.id)?.note).toBe("Production reporting");
     expect(store.connectedIds.has(config.id)).toBe(true);
+    expect(store.treeNodes[0].comment).toBe("Production reporting");
+    expect(store.treeNodes[0].isExpanded).toBe(true);
+    expect(store.treeNodes[0].children?.map((child) => child.id)).toEqual(existingChildIds);
   });
 
   it("does not delay connection success while optional metadata is loading", async () => {

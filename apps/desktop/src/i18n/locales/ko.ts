@@ -360,6 +360,8 @@ export default withEnglishFallback({
     name: "이름",
     namePlaceholder: "연결 이름, 비워두면 자동 생성",
     note: "메모",
+    noteShow: "표시",
+    noteShowInSidebar: "연결 목록에 메모 표시",
     notePlaceholder: "메모에 비밀번호를 평문으로 저장하지 마세요",
     type: "유형",
     host: "호스트",

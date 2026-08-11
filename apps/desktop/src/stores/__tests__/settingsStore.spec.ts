@@ -41,6 +41,12 @@ describe("normalizeEditorSettings", () => {
     expect(normalizeEditorSettings({ sidebarObjectInfoMode: "invalid" } as any).sidebarObjectInfoMode).toBe("comment-inline");
   });
 
+  it("hides connection notes by default and preserves an explicit opt-in", () => {
+    expect(normalizeEditorSettings({}).sidebarShowConnectionNotes).toBe(false);
+    expect(normalizeEditorSettings({ sidebarShowConnectionNotes: true }).sidebarShowConnectionNotes).toBe(true);
+    expect(normalizeEditorSettings({ sidebarShowConnectionNotes: false }).sidebarShowConnectionNotes).toBe(false);
+  });
+
   it("defaults SQL execution to the current statement and migrates legacy execute-all settings", () => {
     expect(normalizeEditorSettings({}).executeMode).toBe("current");
     expect(normalizeEditorSettings({ executeMode: "all" }).executeMode).toBe("current");

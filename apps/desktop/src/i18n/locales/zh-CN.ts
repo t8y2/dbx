@@ -292,6 +292,8 @@ export default withEnglishFallback({
     name: "名称",
     namePlaceholder: "连接名称，留空则自动生成",
     note: "备注",
+    noteShow: "显示",
+    noteShowInSidebar: "在连接列表中显示备注",
     notePlaceholder: "请勿在备注中明文保存密码",
     type: "类型",
     host: "主机",

@@ -566,6 +566,7 @@ export interface EditorSettings {
   updateNotificationsEnabled: boolean;
   sidebarHiddenTablePrefixes: string[];
   sidebarObjectInfoMode: SidebarObjectInfoMode;
+  sidebarShowConnectionNotes: boolean;
   sidebarAllowHorizontalScroll: boolean;
   columnFormatters: Record<string, ColumnFormatterConfig>;
   customColumnFormatters: Record<string, CustomColumnFormatterConfig>;
@@ -755,6 +756,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   updateNotificationsEnabled: true,
   sidebarHiddenTablePrefixes: [],
   sidebarObjectInfoMode: "comment-inline",
+  sidebarShowConnectionNotes: false,
   sidebarAllowHorizontalScroll: false,
   columnFormatters: {},
   customColumnFormatters: {},
@@ -1129,6 +1131,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
         }
       ).sidebarShowDatabaseSizes,
     ),
+    sidebarShowConnectionNotes: settings.sidebarShowConnectionNotes === true,
     sidebarAllowHorizontalScroll: settings.sidebarAllowHorizontalScroll ?? DEFAULT_EDITOR_SETTINGS.sidebarAllowHorizontalScroll,
     columnFormatters: normalizeColumnFormatters(settings.columnFormatters),
     customColumnFormatters: normalizeCustomColumnFormatters(settings.customColumnFormatters),
@@ -1632,6 +1635,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.updateNotificationsEnabled !== undefined) editorSettings.value.updateNotificationsEnabled = partial.updateNotificationsEnabled;
     if (partial.sidebarHiddenTablePrefixes !== undefined) editorSettings.value.sidebarHiddenTablePrefixes = normalizeSidebarHiddenTablePrefixes(partial.sidebarHiddenTablePrefixes);
     if (partial.sidebarObjectInfoMode !== undefined) editorSettings.value.sidebarObjectInfoMode = normalizeSidebarObjectInfoMode(partial.sidebarObjectInfoMode);
+    if (partial.sidebarShowConnectionNotes !== undefined) editorSettings.value.sidebarShowConnectionNotes = partial.sidebarShowConnectionNotes === true;
     if (partial.sidebarAllowHorizontalScroll !== undefined) editorSettings.value.sidebarAllowHorizontalScroll = partial.sidebarAllowHorizontalScroll;
     if (partial.columnFormatters !== undefined) editorSettings.value.columnFormatters = partial.columnFormatters;
     if (partial.customColumnFormatters !== undefined) editorSettings.value.customColumnFormatters = partial.customColumnFormatters;

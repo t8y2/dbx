@@ -189,6 +189,7 @@ type ConnectionTestState = ConnectionTestResult & { ok: boolean };
 const { t } = useI18n();
 const { toast } = useToast();
 const settingsStore = useSettingsStore();
+const showConnectionNotesInSidebar = ref(settingsStore.editorSettings.sidebarShowConnectionNotes);
 const editGlobalConnectTimeoutSecs = ref(settingsStore.editorSettings.globalConnectTimeoutSecs);
 const editGlobalQueryTimeoutSecs = ref(settingsStore.editorSettings.globalQueryTimeoutSecs);
 const open = defineModel<boolean>("open", { default: false });
@@ -2400,6 +2401,7 @@ watch(
   ([config, isOpen]) => {
     const syncAction = connectionEditDraftSyncAction(config?.id ?? null, isOpen, editingId.value);
     if (syncAction === "preserve") return;
+    showConnectionNotesInSidebar.value = settingsStore.editorSettings.sidebarShowConnectionNotes;
     editGlobalConnectTimeoutSecs.value = settingsStore.editorSettings.globalConnectTimeoutSecs;
     editGlobalQueryTimeoutSecs.value = settingsStore.editorSettings.globalQueryTimeoutSecs;
     if (syncAction === "hydrate" && config) {
@@ -4656,6 +4658,7 @@ function openJdbcDriverManagerFromError() {
 function resetForm() {
   editingId.value = null;
   form.value = defaultForm();
+  showConnectionNotesInSidebar.value = settingsStore.editorSettings.sidebarShowConnectionNotes;
   editGlobalConnectTimeoutSecs.value = settingsStore.editorSettings.globalConnectTimeoutSecs;
   editGlobalQueryTimeoutSecs.value = settingsStore.editorSettings.globalQueryTimeoutSecs;
   selectedTransportLayerId.value = null;
@@ -5013,6 +5016,12 @@ async function persistGlobalTimeoutDrafts() {
   });
 }
 
+async function persistConnectionNoteVisibilityDraft() {
+  if (showConnectionNotesInSidebar.value === settingsStore.editorSettings.sidebarShowConnectionNotes) return;
+  settingsStore.updateEditorSettings({ sidebarShowConnectionNotes: showConnectionNotesInSidebar.value });
+  await settingsStore.persistEditorSettings();
+}
+
 async function save() {
   if (!ensureConnectionHostResolvedFromUrl()) return;
   if (isSaving.value) return;
@@ -5025,6 +5034,7 @@ async function save() {
       await ensureRequiredGaussdbMJdbcRuntime(updated);
       await persistGlobalTimeoutDrafts();
       await store.updateConnection(updated);
+      await persistConnectionNoteVisibilityDraft();
       store.stopEditing();
     } else {
       const config = withSavedDatabaseInfo(connectionConfigForSubmit(draftTestConnectionId.value), databaseInfoForSave);
@@ -5032,6 +5042,7 @@ async function save() {
       await ensureRequiredGaussdbMJdbcRuntime(config);
       await persistGlobalTimeoutDrafts();
       await store.addConnection(config);
+      await persistConnectionNoteVisibilityDraft();
       draftTestConnectionId.value = uuid();
       if (config.db_type === "jdbc") {
         open.value = false;
@@ -7204,14 +7215,32 @@ function openExternalUrl(url: string) {
 
                 <div class="grid grid-cols-4 items-start gap-4">
                   <Label :class="connectionLabelTopClass">{{ t("connection.note") }}</Label>
-                  <textarea
-                    ref="noteTextareaRef"
-                    v-model="form.note"
-                    rows="1"
-                    class="col-span-3 min-h-8 w-full min-w-0 resize-none overflow-y-hidden rounded-md border border-input bg-transparent px-2.5 py-1 text-base leading-5 transition-colors outline-none placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 dark:bg-input/30 md:text-sm"
-                    :placeholder="t('connection.notePlaceholder')"
-                    @input="resizeNoteTextarea"
-                  />
+                  <div class="col-span-3 flex min-w-0 items-start gap-3">
+                    <textarea
+                      ref="noteTextareaRef"
+                      v-model="form.note"
+                      rows="1"
+                      class="min-h-8 min-w-0 flex-1 resize-none overflow-y-hidden rounded-md border border-input bg-transparent px-2.5 py-1 text-base leading-5 transition-colors outline-none placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 dark:bg-input/30 md:text-sm"
+                      :placeholder="t('connection.notePlaceholder')"
+                      @input="resizeNoteTextarea"
+                    />
+                    <div class="mt-1.5 flex shrink-0 items-center gap-2">
+                      <div class="flex items-center gap-1">
+                        <Label for="connection-note-sidebar-visibility" class="text-xs font-normal text-muted-foreground">
+                          {{ t("connection.noteShow") }}
+                        </Label>
+                        <Tooltip>
+                          <TooltipTrigger as-child>
+                            <CircleHelp class="h-3.5 w-3.5 cursor-help text-muted-foreground hover:text-foreground" />
+                          </TooltipTrigger>
+                          <TooltipContent side="top" align="center" class="max-w-[280px] text-xs leading-relaxed">
+                            {{ t("connection.noteShowInSidebar") }}
+                          </TooltipContent>
+                        </Tooltip>
+                      </div>
+                      <Switch id="connection-note-sidebar-visibility" v-model="showConnectionNotesInSidebar" :aria-label="t('connection.noteShowInSidebar')" />
+                    </div>
+                  </div>
                 </div>
               </div>
             </TabsContent>

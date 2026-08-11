@@ -6710,6 +6710,7 @@ export const useConnectionStore = defineStore("connection", () => {
           return inheritNaturalTreeNodeOrder(node, {
             ...existing,
             label: node.label,
+            comment: node.comment,
             pinned: node.pinned,
             children: withSavedSqlRoot(node.connectionId!, existing.children || [], existing),
           });

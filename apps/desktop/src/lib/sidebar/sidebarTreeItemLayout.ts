@@ -125,8 +125,9 @@ export function alignedSidebarCommentLabelWidths(items: readonly SidebarCommentA
   return widths;
 }
 
-export function sidebarTreeNodeComment(node: TreeNode): string | null {
+export function sidebarTreeNodeComment(node: TreeNode, showConnectionNotes: boolean): string | null {
   if (!commentTypes.has(node.type)) return null;
+  if (node.type === "connection" && !showConnectionNotes) return null;
   if (node.type === "column" && node.meta && "comment" in node.meta) {
     const comment = node.meta.comment;
     return typeof comment === "string" && comment ? comment : null;

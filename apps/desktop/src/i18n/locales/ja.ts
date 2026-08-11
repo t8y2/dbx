@@ -366,6 +366,8 @@ export default withEnglishFallback({
     name: "名前",
     namePlaceholder: "接続名（空の場合は自動生成）",
     note: "メモ",
+    noteShow: "表示",
+    noteShowInSidebar: "接続一覧にメモを表示",
     notePlaceholder: "メモにパスワードを平文で保存しないでください",
     type: "タイプ",
     host: "ホスト",

@@ -250,6 +250,7 @@ export default withEnglishFallback({
     openRelease: "Abrir Lançamento",
     ignoreVersion: "Ignorar esta versão",
     versionIgnored: "Versão {version} ignorada. Você será lembrado quando a próxima versão for lançada.",
+    ignoreVersionFailed: "Não foi possível salvar a versão ignorada: {error}",
     downloadAndInstall: "Baixar e Instalar",
     activeTasksBlockUpdate: "Há {count} tarefa(s) em execução. Aguarde a conclusão antes de atualizar o DBX.",
     portableAutomaticUpdate: "O DBX baixará o ZIP portátil assinado, substituirá apenas o DBX.exe após sair e reiniciará automaticamente. O portable.dbx e os dados serão mantidos.",

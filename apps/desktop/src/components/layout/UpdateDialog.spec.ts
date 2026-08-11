@@ -20,6 +20,7 @@ interface DialogState {
   updateDownloaded: boolean;
   isInstallingUpdate: boolean;
   updateReady: boolean;
+  isIgnoringUpdate: boolean;
 }
 
 async function flushDialog() {
@@ -37,6 +38,7 @@ async function mountDialog(activeTaskCount: number, initialState: Partial<Dialog
     updateDownloaded: false,
     isInstallingUpdate: false,
     updateReady: false,
+    isIgnoringUpdate: false,
     ...initialState,
   });
   const downloadAndInstall = vi.fn();
@@ -82,6 +84,7 @@ async function mountDialog(activeTaskCount: number, initialState: Partial<Dialog
             updateDownloaded: state.updateDownloaded,
             isInstallingUpdate: state.isInstallingUpdate,
             updateReady: state.updateReady,
+            isIgnoringUpdate: state.isIgnoringUpdate,
             activeTaskCount,
             "onDownload-and-install": downloadAndInstall,
             "onCancel-download": cancelDownload,
@@ -294,5 +297,11 @@ describe("UpdateDialog ignore version", () => {
     await mountDialog(0, { updateDownloaded: true, downloadProgress: 100 });
 
     expect(buttonWithText("Ignore this version")).toBeUndefined();
+  });
+
+  it("disables the ignore button while the setting is being persisted", async () => {
+    await mountDialog(0, { isIgnoringUpdate: true });
+
+    expect(buttonWithText("Ignore this version")?.disabled).toBe(true);
   });
 });

@@ -249,6 +249,7 @@ export default withEnglishFallback({
     openRelease: "릴리스 열기",
     ignoreVersion: "이 버전 무시",
     versionIgnored: "{version} 버전을 무시했습니다. 다음 버전이 출시되면 다시 알려드립니다.",
+    ignoreVersionFailed: "무시할 버전을 저장하지 못했습니다: {error}",
     downloadAndInstall: "다운로드 및 설치",
     activeTasksBlockUpdate: "{count}개의 작업이 아직 실행 중입니다. DBX를 업데이트하려면 작업이 완료될 때까지 기다려 주세요.",
     portableAutomaticUpdate: "DBX가 서명된 휴대용 ZIP을 다운로드하여 종료 후 DBX.exe만 교체하고 자동으로 다시 시작합니다. portable.dbx와 데이터는 보존됩니다.",

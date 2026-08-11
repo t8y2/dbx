@@ -1181,10 +1181,6 @@ function editorSettingsPatchSnapshot(settings: Partial<EditorSettings>): Partial
   return JSON.parse(JSON.stringify(settings)) as Partial<EditorSettings>;
 }
 
-function saveEditorSettings(settings: EditorSettings) {
-  void api.saveEditorSettings(editorSettingsSnapshot(settings)).catch(() => {});
-}
-
 export interface SettingsNavigationRequest {
   id: number;
   tab: string;
@@ -1208,10 +1204,36 @@ export const useSettingsStore = defineStore("settings", () => {
   const isEditorSettingsLoaded = ref(false);
   let initEditorSettingsPromise: Promise<void> | null = null;
   let pendingEditorSettingsPatches: Partial<EditorSettings>[] = [];
+  let editorSettingsSaveQueue: Promise<void> | null = null;
+  let editorSettingsAtomicUpdateQueue: Promise<void> = Promise.resolve();
+  let editorSettingsPatchRevision = 0;
+  const editorSettingsFieldRevisions = new Map<keyof EditorSettings, number>();
   let pendingAiChatSelection: AiChatSelectionState | null = null;
   let aiChatSelectionSaveRunning = false;
 
   const editorSettings = ref<EditorSettings>(normalizeEditorSettings({}));
+
+  function enqueueEditorSettingsSave(): Promise<void> {
+    const saveCurrentSettings = () => api.saveEditorSettings(editorSettingsSnapshot(editorSettings.value));
+    const save = editorSettingsSaveQueue ? editorSettingsSaveQueue.catch(() => {}).then(saveCurrentSettings) : saveCurrentSettings();
+    const trackedSave = save.finally(() => {
+      if (editorSettingsSaveQueue === trackedSave) editorSettingsSaveQueue = null;
+    });
+    editorSettingsSaveQueue = trackedSave;
+    return trackedSave;
+  }
+
+  function saveEditorSettings() {
+    void enqueueEditorSettingsSave().catch(() => {});
+  }
+
+  function markEditorSettingsPatch(partial: Partial<EditorSettings>): number {
+    const revision = ++editorSettingsPatchRevision;
+    for (const key of Object.keys(partial) as (keyof EditorSettings)[]) {
+      if (partial[key] !== undefined) editorSettingsFieldRevisions.set(key, revision);
+    }
+    return revision;
+  }
 
   function requestSettingsNavigation(tab: string, section?: string) {
     settingsNavigationRequest.value = {
@@ -1230,7 +1252,7 @@ export const useSettingsStore = defineStore("settings", () => {
     pendingEditorSettingsPatches = [];
     for (const patch of pendingPatches) applyEditorSettingsPatch(patch);
     isEditorSettingsLoaded.value = true;
-    if (pendingPatches.length) saveEditorSettings(editorSettings.value);
+    if (pendingPatches.length) saveEditorSettings();
   }
 
   async function initEditorSettings() {
@@ -1249,7 +1271,7 @@ export const useSettingsStore = defineStore("settings", () => {
           const savedUpdateDownloadSource = (saved as { updateDownloadSource?: unknown }).updateDownloadSource;
           if (savedUpdateDownloadSource === "atomgit" || needsExecuteModeDefaultMigration) {
             // Persist one-time migrations so removed or unsafe defaults cannot reappear.
-            await api.saveEditorSettings(normalized).catch(() => {});
+            await enqueueEditorSettingsSave().catch(() => {});
           }
           completeEditorSettingsInitialization();
           return;
@@ -1259,7 +1281,7 @@ export const useSettingsStore = defineStore("settings", () => {
         if (legacy) {
           editorSettings.value = legacy;
           try {
-            await api.saveEditorSettings(legacy);
+            await enqueueEditorSettingsSave();
             // Existing desktop users keep settings in localStorage; remove them only
             // after the async store has accepted the migrated value.
             clearLegacyEditorSettings();
@@ -1650,16 +1672,45 @@ export const useSettingsStore = defineStore("settings", () => {
 
   function updateEditorSettings(partial: Partial<EditorSettings>) {
     applyEditorSettingsPatch(partial);
+    markEditorSettingsPatch(partial);
     if (!isEditorSettingsLoaded.value) {
       pendingEditorSettingsPatches.push(editorSettingsPatchSnapshot(partial));
       return;
     }
-    saveEditorSettings(editorSettings.value);
+    saveEditorSettings();
   }
 
   async function persistEditorSettings(): Promise<void> {
     await initEditorSettings();
-    await api.saveEditorSettings(editorSettingsSnapshot(editorSettings.value));
+    await enqueueEditorSettingsSave();
+  }
+
+  function updateEditorSettingsAndPersist(partial: Partial<EditorSettings>): Promise<void> {
+    const update = editorSettingsAtomicUpdateQueue
+      .catch(() => {})
+      .then(async () => {
+        await initEditorSettings();
+        const previous = editorSettingsSnapshot(editorSettings.value);
+        applyEditorSettingsPatch(partial);
+        const revision = markEditorSettingsPatch(partial);
+        try {
+          await enqueueEditorSettingsSave();
+        } catch (error) {
+          const restored = editorSettingsSnapshot(editorSettings.value) as unknown as Record<string, unknown>;
+          const previousSettings = previous as unknown as Record<string, unknown>;
+          let changed = false;
+          for (const key of Object.keys(partial) as (keyof EditorSettings)[]) {
+            if (partial[key] === undefined || editorSettingsFieldRevisions.get(key) !== revision) continue;
+            restored[key] = previousSettings[key];
+            editorSettingsFieldRevisions.set(key, ++editorSettingsPatchRevision);
+            changed = true;
+          }
+          if (changed) editorSettings.value = normalizeEditorSettings(restored);
+          throw error;
+        }
+      });
+    editorSettingsAtomicUpdateQueue = update.catch(() => {});
+    return update;
   }
 
   function updateColumnFormatter(key: string, formatter: ColumnFormatterConfig | undefined) {
@@ -1725,6 +1776,7 @@ export const useSettingsStore = defineStore("settings", () => {
     mcpGlobalPolicy,
     initEditorSettings,
     updateEditorSettings,
+    updateEditorSettingsAndPersist,
     persistEditorSettings,
     initDesktopSettings,
     updateDesktopSettings,

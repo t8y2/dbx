@@ -249,6 +249,7 @@ export default {
     openRelease: "Open Release",
     ignoreVersion: "Ignore this version",
     versionIgnored: "Version {version} ignored. You'll be reminded when the next version releases.",
+    ignoreVersionFailed: "Failed to save the ignored version: {error}",
     downloadAndInstall: "Download & Install",
     activeTasksBlockUpdate: "{count} task(s) are still running. Wait for them to finish before updating DBX.",
     portableAutomaticUpdate: "DBX will download the signed portable ZIP, replace only DBX.exe after exit, and restart automatically. portable.dbx and data will be kept.",

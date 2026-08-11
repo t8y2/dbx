@@ -18,6 +18,7 @@ const props = defineProps<{
   updateDownloaded: boolean;
   isInstallingUpdate: boolean;
   updateReady: boolean;
+  isIgnoringUpdate: boolean;
   activeTaskCount: number;
 }>();
 
@@ -138,7 +139,10 @@ watch(
       </div>
       <DialogFooter>
         <Button v-if="!isCloseBlocked" variant="outline" @click="handleCancel">{{ t("dangerDialog.cancel") }}</Button>
-        <Button v-if="canIgnoreVersion" variant="ghost" @click="emit('ignore-version')">{{ t("updates.ignoreVersion") }}</Button>
+        <Button v-if="canIgnoreVersion" variant="ghost" :disabled="isIgnoringUpdate" @click="emit('ignore-version')">
+          <Loader2 v-if="isIgnoringUpdate" class="h-4 w-4 animate-spin" />
+          {{ t("updates.ignoreVersion") }}
+        </Button>
         <template v-if="updateInfo?.update_available">
           <Button variant="outline" @click="emit('open-latest-release')">{{ t("updates.openRelease") }}</Button>
           <template v-if="canDownloadAndInstallUpdate(updateInfo, isDesktop)">

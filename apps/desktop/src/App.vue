@@ -172,6 +172,7 @@ const {
   updateDownloaded,
   isInstallingUpdate,
   updateReady,
+  isIgnoringUpdate,
   activeTaskCount: activeUpdateTaskCount,
   hasUpdateAvailable,
   openUrl,
@@ -2858,6 +2859,7 @@ onUnmounted(() => {
           :update-downloaded="updateDownloaded"
           :is-installing-update="isInstallingUpdate"
           :update-ready="updateReady"
+          :is-ignoring-update="isIgnoringUpdate"
           :active-task-count="activeUpdateTaskCount"
           @open-latest-release="openLatestRelease"
           @download-and-install="downloadAndInstallUpdate"

@@ -34,12 +34,17 @@ test("blocks in-app update installation outside desktop runtime or without an up
   assert.equal(canDownloadAndInstallUpdate(null, true), false);
 });
 
-test("treats the latest version as ignored when it matches the stored value", () => {
+test("keeps the ignored state for the same or an older stable version", () => {
   assert.equal(isUpdateIgnored(updateInfo({ latest_version: "0.5.26" }), "0.5.26"), true);
+  assert.equal(isUpdateIgnored(updateInfo({ latest_version: "0.5.25" }), "0.5.26"), true);
+  assert.equal(isUpdateIgnored(updateInfo({ latest_version: "0.5.27" }), "0.5.26"), false);
 });
 
-test("does not ignore the latest version when versions differ or are absent", () => {
-  assert.equal(isUpdateIgnored(updateInfo({ latest_version: "0.5.26" }), "0.5.27"), false);
+test("keeps the ignored state when an update source lags behind", () => {
+  assert.equal(isUpdateIgnored(updateInfo({ latest_version: "0.5.69" }), "0.5.70"), true);
+});
+
+test("does not ignore updates when the stored version is absent", () => {
   assert.equal(isUpdateIgnored(updateInfo({ latest_version: "0.5.26" }), ""), false);
   assert.equal(isUpdateIgnored(updateInfo({ latest_version: "0.5.26" }), undefined), false);
   assert.equal(isUpdateIgnored(null, "0.5.26"), false);
@@ -47,7 +52,19 @@ test("does not ignore the latest version when versions differ or are absent", ()
 
 test("normalizes v-prefixed ignored versions before comparing", () => {
   assert.equal(isUpdateIgnored(updateInfo({ latest_version: "0.5.26" }), "v0.5.26"), true);
-  assert.equal(isUpdateIgnored(updateInfo({ latest_version: "v0.5.26" }), "0.5.26"), true);
+  assert.equal(isUpdateIgnored(updateInfo({ latest_version: " v0.5.26 " }), " 0.5.26 "), true);
+});
+
+test("uses SemVer precedence for prereleases and ignores build metadata", () => {
+  assert.equal(isUpdateIgnored(updateInfo({ latest_version: "1.0.0-beta.1" }), "1.0.0-beta.2"), true);
+  assert.equal(isUpdateIgnored(updateInfo({ latest_version: "1.0.0-beta.11" }), "1.0.0-beta.2"), false);
+  assert.equal(isUpdateIgnored(updateInfo({ latest_version: "1.0.0" }), "1.0.0-rc.1"), false);
+  assert.equal(isUpdateIgnored(updateInfo({ latest_version: "1.0.0+mirror.2" }), "1.0.0+github.1"), true);
+});
+
+test("falls back conservatively when either version is not valid SemVer", () => {
+  assert.equal(isUpdateIgnored(updateInfo({ latest_version: "release-next" }), "vrelease-next"), true);
+  assert.equal(isUpdateIgnored(updateInfo({ latest_version: "release-next" }), "release-later"), false);
 });
 
 test("normalizes update download source", () => {

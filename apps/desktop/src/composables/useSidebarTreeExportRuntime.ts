@@ -9,6 +9,7 @@ import * as api from "@/lib/backend/api";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
+import { gaussdbMTypeDisplayName } from "@/lib/table/postgresDataTypeHelp";
 import { joinExportedDdls } from "@/lib/export/ddlExport";
 import { translateBackendError } from "@/i18n/backend-errors";
 import { sidebarStructureExportTargets } from "@/lib/sidebar/sidebarExportRuntime";
@@ -108,7 +109,10 @@ export function useSidebarTreeExportRuntime(options: SidebarTreeExportRuntimeOpt
   }
 
   function columnDocCells(target: TreeNode, column: ColumnInfo, includeTable: boolean): unknown[] {
-    const cells = [column.name, column.data_type, column.is_primary_key ? t("contextMenu.structureDocYes") : t("contextMenu.structureDocNo"), column.is_nullable ? t("contextMenu.structureDocYes") : t("contextMenu.structureDocNo"), column.column_default, column.comment];
+    const config = connectionStore.getConfig(target.connectionId);
+    const isGaussdbM = effectiveDatabaseTypeForConnection(config) === "gaussdb" && config?.driver_profile?.toLowerCase() === "gaussdb-m";
+    const dataType = isGaussdbM ? gaussdbMTypeDisplayName(column.data_type) : column.data_type;
+    const cells = [column.name, dataType, column.is_primary_key ? t("contextMenu.structureDocYes") : t("contextMenu.structureDocNo"), column.is_nullable ? t("contextMenu.structureDocYes") : t("contextMenu.structureDocNo"), column.column_default, column.comment];
     return includeTable ? [structureTargetName(target), ...cells] : cells;
   }
 

@@ -1040,7 +1040,15 @@ defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, hand
               @click-column="onHandleClickColumn"
               @close-column-panel="onHandleCloseColumnPanel"
             />
-            <ColumnInfoPanel v-if="showColumnInfo" :columns="columnInfoColumns" :loading="columnInfoLoading" :error="columnInfoError" @close="closeColumnInfo" />
+            <ColumnInfoPanel
+              v-if="showColumnInfo"
+              :columns="columnInfoColumns"
+              :loading="columnInfoLoading"
+              :error="columnInfoError"
+              :database-type="activeEffectiveDatabaseType"
+              :is-gaussdb-m="activeEffectiveDatabaseType === 'gaussdb' && activeResultConnection?.driver_profile?.toLowerCase() === 'gaussdb-m'"
+              @close="closeColumnInfo"
+            />
             <Button v-if="hasQueryOutput && !resultsPaneOpen" variant="secondary" size="sm" class="absolute bottom-3 right-3 z-20 h-7 gap-1.5 rounded-full border bg-background/95 px-3 text-xs shadow-lg hover:bg-accent" @click="resultsPaneOpen = true">
               <ChevronUp class="h-3.5 w-3.5" />
               {{ t("editor.showResultsPane") }}

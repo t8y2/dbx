@@ -419,7 +419,7 @@ class StandardJdbcMetadataTest {
             rows()
         );
 
-        List<IndexInfo> indexes = StandardJdbcMetadata.INSTANCE.listIndexes(conn, "APP", "ORDERS");
+        List<IndexInfo> indexes = StandardJdbcMetadata.INSTANCE.listIndexes(conn, null, "APP", "ORDERS");
 
         assertEquals(1, indexes.size());
         assertEquals(Arrays.asList("A", "B"), indexes.get(0).getColumns());

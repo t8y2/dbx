@@ -103,6 +103,7 @@ const POSTGRES_TYPE_ALIASES: Readonly<Record<string, string>> = {
   float4: "real",
   float8: "double precision",
   bool: "boolean",
+  bpchar: "char",
   character: "char",
   "character varying": "varchar",
   "time without time zone": "time",
@@ -110,6 +111,7 @@ const POSTGRES_TYPE_ALIASES: Readonly<Record<string, string>> = {
   "timestamp without time zone": "timestamp",
   "timestamp with time zone": "timestamptz",
   varbit: "bit varying",
+  int1: "tinyint",
 };
 
 const POSTGRES_MULTIRANGE_TYPES = new Set(["int4multirange", "int8multirange", "nummultirange", "tsmultirange", "tstzmultirange", "datemultirange"]);
@@ -152,4 +154,27 @@ function floatHelpKey(normalizedType: string): "real" | "double" | undefined {
   const value = Number(precision);
   if (value >= 1 && value <= 24) return "real";
   return value >= 25 && value <= 53 ? "double" : undefined;
+}
+
+/**
+ * Converts a GaussDB M-mode PostgreSQL internal type name to its MySQL-style
+ * display name. Returns the original name if no conversion applies.
+ *
+ * GaussDB M mode returns PostgreSQL internal type names (e.g. bpchar, int4,
+ * numeric, int1) but should display MySQL-compatible names.
+ */
+export function gaussdbMTypeDisplayName(typeName: string): string {
+  const s = typeName.trim().toLowerCase();
+  if (s === "bpchar") return "char";
+  if (s === "int4" || s === "integer") return "int";
+  if (s === "int2" || s === "smallint") return "smallint";
+  if (s === "int8" || s === "bigint") return "bigint";
+  if (s === "int1") return "tinyint";
+  if (s === "numeric") return "decimal";
+  if (s === "float4" || s === "real") return "float";
+  if (s === "float8" || s === "double precision") return "double";
+  if (s === "bool" || s === "boolean") return "boolean";
+  if (s === "character varying") return "varchar";
+  if (s === "character") return "char";
+  return typeName;
 }

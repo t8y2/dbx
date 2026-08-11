@@ -38,6 +38,12 @@ const SCHEME_PROFILES: Record<string, ConnectionProfile> = {
   redis: { type: "redis", profile: "redis", label: "Redis", defaultPort: 6379 },
   rediss: { type: "redis", profile: "redis", label: "Redis", defaultPort: 6379 },
   etcd: { type: "etcd", profile: "etcd", label: "etcd", defaultPort: 2379 },
+  consul: { type: "consul", profile: "consul", label: "Consul", defaultPort: 8500 },
+  "nacos-v2": { type: "nacos", profile: "nacos", label: "Nacos", defaultPort: 8848 },
+  "nacos-v3": { type: "nacos", profile: "nacos", label: "Nacos", defaultPort: 8848 },
+  "r-nacos": { type: "nacos", profile: "nacos", label: "r-nacos", defaultPort: 8848 },
+  nacos: { type: "nacos", profile: "nacos", label: "Nacos", defaultPort: 8848 },
+  rnacos: { type: "nacos", profile: "nacos", label: "r-nacos", defaultPort: 8848 },
   zookeeper: { type: "zookeeper", profile: "zookeeper", label: "Apache ZooKeeper", defaultPort: 2181 },
   mongodb: { type: "mongodb", profile: "mongodb", label: "MongoDB", defaultPort: 27017 },
   "mongodb+srv": { type: "mongodb", profile: "mongodb", label: "MongoDB", defaultPort: 27017 },
@@ -81,6 +87,12 @@ const HTTP_SELECTED_PROFILES: Record<string, ConnectionProfile> = {
   weaviate: SCHEME_PROFILES.weaviate,
   chromadb: SCHEME_PROFILES.chromadb,
   victoriametrics: SCHEME_PROFILES.victoriametrics,
+  consul: SCHEME_PROFILES.consul,
+  "nacos-v2": SCHEME_PROFILES["nacos-v2"],
+  "nacos-v3": SCHEME_PROFILES["nacos-v3"],
+  "r-nacos": SCHEME_PROFILES["r-nacos"],
+  nacos: SCHEME_PROFILES.nacos,
+  rnacos: SCHEME_PROFILES.rnacos,
 };
 
 function decodeUrlPart(value: string): string {
@@ -306,14 +318,16 @@ function isTidbCloudHost(host: string): boolean {
 }
 
 export function connectionProfileForScheme(scheme: string, preferredProfile?: string): ConnectionProfile | undefined {
-  if ((scheme === "http" || scheme === "https") && preferredProfile) {
-    return HTTP_SELECTED_PROFILES[preferredProfile];
+  const normalizedScheme = scheme.trim().toLowerCase();
+  const normalizedPreferredProfile = preferredProfile?.trim().toLowerCase();
+  if ((normalizedScheme === "http" || normalizedScheme === "https") && normalizedPreferredProfile) {
+    return HTTP_SELECTED_PROFILES[normalizedPreferredProfile];
   }
   // Cloudberry uses PostgreSQL URLs, so keep the selected product profile when parsing a pasted URL.
-  if ((scheme === "postgres" || scheme === "postgresql") && preferredProfile === "cloudberry") {
+  if ((normalizedScheme === "postgres" || normalizedScheme === "postgresql") && normalizedPreferredProfile === "cloudberry") {
     return SCHEME_PROFILES.cloudberry;
   }
-  return SCHEME_PROFILES[scheme];
+  return SCHEME_PROFILES[normalizedScheme];
 }
 
 function parseJdbcSqlServerUrl(source: string): ParsedConnectionUrl | null {

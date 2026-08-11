@@ -29,6 +29,7 @@ const DEFAULT_HOST_PORT_RANGES = {
 };
 const DBX_DEEP_LINK_TYPES = {
   clickhouse: 'clickhouse',
+  consul: 'consul',
   elasticsearch: 'elasticsearch',
   etcd: 'etcd',
   mariadb: 'mariadb',
@@ -37,6 +38,7 @@ const DBX_DEEP_LINK_TYPES = {
   postgresql: 'postgres',
   qdrant: 'qdrant',
   redis: 'redis',
+  rnacos: 'r-nacos',
   zookeeper: 'zookeeper',
 };
 
@@ -422,7 +424,7 @@ export function expandSmokeCommand(command, recipe, environment = process.env) {
 }
 
 export function dbxConnectionDeepLink(recipe, environment = process.env) {
-  const type = DBX_DEEP_LINK_TYPES[recipe.database];
+  const type = recipe.deepLinkType || DBX_DEEP_LINK_TYPES[recipe.database];
   if (!type) return null;
 
   const { connection } = recipe;

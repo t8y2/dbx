@@ -24,12 +24,13 @@ describe("orderAiConfigsForDisplay", () => {
       { id: "opencode", provider: "opencode-cli" },
       { id: "cursor", provider: "cursor-cli" },
       { id: "codebuddy", provider: "codebuddy-cli" },
+      { id: "qoder", provider: "qoder-cli" },
       { id: "grok", provider: "grok-cli" },
       { id: "pi", provider: "pi-agent-cli" },
       { id: "custom", provider: "custom" },
     ];
 
-    expect(orderAiConfigsForDisplay(configs).map((config) => config.id)).toEqual(["claude", "openai", "gemini", "deepseek", "qwen", "minimax", "ollama", "anthropic-compatible", "openai-compatible", "claude-code-1", "codex", "opencode", "cursor", "codebuddy", "grok", "pi", "custom"]);
+    expect(orderAiConfigsForDisplay(configs).map((config) => config.id)).toEqual(["claude", "openai", "gemini", "deepseek", "qwen", "minimax", "ollama", "anthropic-compatible", "openai-compatible", "claude-code-1", "codex", "opencode", "cursor", "codebuddy", "qoder", "grok", "pi", "custom"]);
   });
 
   it("preserves creation order for configs from the same provider", () => {

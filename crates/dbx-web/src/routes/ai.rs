@@ -535,6 +535,8 @@ mod tests {
             grok_cli_env: Default::default(),
             codebuddy_cli_path: None,
             codebuddy_cli_env: Default::default(),
+            qoder_cli_path: None,
+            qoder_cli_env: Default::default(),
         }
     }
 
@@ -548,6 +550,7 @@ mod tests {
             AiProvider::CursorCli,
             AiProvider::GrokCli,
             AiProvider::CodeBuddyCli,
+            AiProvider::QoderCli,
         ] {
             let config = make_config(provider);
             assert!(reject_web_unsupported_ai_provider(&config).is_err());
@@ -638,6 +641,8 @@ mod tests {
             grok_cli_env: Default::default(),
             codebuddy_cli_path: None,
             codebuddy_cli_env: Default::default(),
+            qoder_cli_path: None,
+            qoder_cli_env: Default::default(),
         };
 
         let body = super::AiTestConnectionRequest { config };

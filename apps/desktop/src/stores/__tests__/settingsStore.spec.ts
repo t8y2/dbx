@@ -504,6 +504,22 @@ describe("settingsStore AI API key normalization", () => {
       codebuddyCliEnv: { HTTPS_PROXY: "http://127.0.0.1:7890", EMPTY: "" },
     });
   });
+
+  it("normalizes Qoder CLI path and environment settings", () => {
+    expect(
+      normalizeAiConfig({
+        provider: "qoder-cli",
+        qoderCliPath: "  ~/.local/bin/qodercli  ",
+        qoderCliEnv: { QODER_PERSONAL_ACCESS_TOKEN: "token", EMPTY: null as unknown as string },
+      }),
+    ).toMatchObject({
+      provider: "qoder-cli",
+      endpoint: "",
+      model: "default",
+      qoderCliPath: "~/.local/bin/qodercli",
+      qoderCliEnv: { QODER_PERSONAL_ACCESS_TOKEN: "token", EMPTY: "" },
+    });
+  });
 });
 
 describe("settingsStore MCP policy persistence", () => {

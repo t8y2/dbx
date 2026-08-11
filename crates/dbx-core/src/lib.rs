@@ -20,6 +20,7 @@ pub mod ai_grok_cli;
 mod ai_model_filter;
 pub mod ai_opencode_cli;
 pub mod ai_pi_agent_cli;
+pub mod ai_qoder_cli;
 pub mod backend_error;
 pub mod changelog;
 pub mod cloud_sync;

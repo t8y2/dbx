@@ -2843,6 +2843,8 @@ export default {
     linkedServers: "Linked Servers",
     defaultDatabase: "Default DB",
     columns: "Columns",
+    attributes: "Attributes",
+    methods: "Methods",
     indexes: "Indexes",
     foreignKeys: "Foreign Keys",
     triggers: "Triggers",

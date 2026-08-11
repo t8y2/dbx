@@ -12,6 +12,8 @@ const leafTypes: Set<TreeNodeType> = new Set([
   "package-body",
   "type-body",
   "type-member",
+  "type-attribute",
+  "type-method",
   "object-browser",
   "redis-db",
   "mq-tenant",

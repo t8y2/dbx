@@ -229,6 +229,14 @@ function getIconInfo(node: TreeNode): { icon: any; colorClass: string } | null {
       } else {
         return { icon: Columns3, colorClass: "text-muted-foreground" };
       }
+    case "type-attribute":
+      return { icon: Columns3, colorClass: "text-muted-foreground" };
+    case "type-method":
+      return { icon: Braces, colorClass: "text-amber-500" };
+    case "type-attributes":
+      return { icon: ListTree, colorClass: "text-green-400" };
+    case "type-methods":
+      return { icon: Braces, colorClass: "text-amber-500" };
     case "group-columns":
       return { icon: ListTree, colorClass: "text-green-400" };
     case "group-indexes":
@@ -1247,7 +1255,9 @@ function onKeydown(event: KeyboardEvent) {
                   node.type === 'group-synonyms' ||
                   node.type === 'group-packages' ||
                   node.type === 'group-types' ||
-                  node.type === 'group-partitions') &&
+                  node.type === 'group-partitions' ||
+                  node.type === 'type-attributes' ||
+                  node.type === 'type-methods') &&
                 node.objectCount != null
               "
               class="text-muted-foreground text-[10px] shrink-0"

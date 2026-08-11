@@ -899,6 +899,8 @@ export type TreeNodeType =
   | "column"
   | "type-attribute"
   | "type-method"
+  | "type-attributes"
+  | "type-methods"
   | "index"
   | "fkey"
   | "trigger"

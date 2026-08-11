@@ -2784,6 +2784,8 @@ export default withEnglishFallback({
     materializedViews: "具體化檢視",
     defaultDatabase: "預設庫",
     columns: "欄位",
+    attributes: "屬性",
+    methods: "方法",
     indexes: "索引",
     foreignKeys: "外鍵",
     triggers: "觸發器",

@@ -5728,40 +5728,64 @@ export const useConnectionStore = defineStore("connection", () => {
 
     const schema = node.schema || "";
     const parentName = node.objectName || node.label;
-    node.isLoading = true;
+    let load = beginTreeNodeLoad(node);
     try {
-      const [attributes, methods] = await Promise.all([
-        completionAssistantSearch({
-          connection_id: connectionId,
+      await runTreeMetadataLoad(
+        {
+          kind: "xugu-type-members",
+          connectionId,
           database,
           schema,
-          object_kinds: ["column"],
-          mask: "",
-          max_results: 500,
-          global_search: false,
-          parent_schema: schema,
-          parent_name: parentName,
-          parent_type: "type",
-          match_mode: "prefix",
-        }),
-        completionAssistantSearch({
-          connection_id: connectionId,
-          database,
-          schema,
-          object_kinds: ["routine"],
-          mask: "",
-          max_results: 500,
-          global_search: false,
-          parent_schema: schema,
-          parent_name: parentName,
-          parent_type: "type",
-          match_mode: "prefix",
-        }),
-      ]);
-      node.children = buildXuguTypeMemberNodes(node, [...attributes.candidates, ...methods.candidates]);
-      node.isExpanded = true;
+          nodeKind: node.type,
+          extra: { typeName: parentName },
+        },
+        async () => {
+          await ensureConnected(connectionId);
+          load = reclaimTreeNodeLoad(load, node);
+          const [attributes, methods] = await Promise.all([
+            completionAssistantSearch({
+              connection_id: connectionId,
+              database,
+              schema,
+              object_kinds: ["column"],
+              mask: "",
+              max_results: 500,
+              global_search: false,
+              parent_schema: schema,
+              parent_name: parentName,
+              parent_type: "type",
+              match_mode: "prefix",
+            }),
+            completionAssistantSearch({
+              connection_id: connectionId,
+              database,
+              schema,
+              object_kinds: ["routine"],
+              mask: "",
+              max_results: 500,
+              global_search: false,
+              parent_schema: schema,
+              parent_name: parentName,
+              parent_type: "type",
+              match_mode: "prefix",
+            }),
+          ]);
+          const targetNode = treeNodeLoadTarget(load);
+          if (!targetNode) return;
+          const children = buildXuguTypeMemberNodes(targetNode, [...attributes.candidates, ...methods.candidates], {
+            attributes: "tree.attributes",
+            methods: "tree.methods",
+          });
+          setChildren(targetNode, children);
+          targetNode.isExpanded = children.length > 0;
+          if (children.length === 0) targetNode.xuguTypeMembersExpandable = false;
+        },
+      );
+    } catch (error) {
+      recordMetadataLoadError(connectionId, error, load);
+      throw error;
     } finally {
-      node.isLoading = false;
+      finishTreeNodeLoad(load);
     }
   }
 

@@ -2768,6 +2768,8 @@ export default withEnglishFallback({
     linkedServers: "链接服务器",
     defaultDatabase: "默认库",
     columns: "字段",
+    attributes: "属性",
+    methods: "方法",
     indexes: "索引",
     foreignKeys: "外键",
     triggers: "触发器",

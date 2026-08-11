@@ -2694,6 +2694,8 @@ export default withEnglishFallback({
     linkedServers: "연결된 서버",
     defaultDatabase: "기본 DB",
     columns: "컬럼",
+    attributes: "속성",
+    methods: "메서드",
     indexes: "인덱스",
     foreignKeys: "외래 키",
     triggers: "트리거",

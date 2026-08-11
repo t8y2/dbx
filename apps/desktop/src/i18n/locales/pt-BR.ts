@@ -2785,6 +2785,8 @@ export default withEnglishFallback({
     materializedViews: "Visualizações Materializadas",
     defaultDatabase: "Banco padrão",
     columns: "Colunas",
+    attributes: "Atributos",
+    methods: "Métodos",
     indexes: "Índices",
     foreignKeys: "Chaves estrangeiras",
     triggers: "Triggers",

@@ -2782,6 +2782,8 @@ export default withEnglishFallback({
     linkedServers: "Server Collegati",
     defaultDatabase: "DB Predefinito",
     columns: "Colonne",
+    attributes: "Attributi",
+    methods: "Metodi",
     indexes: "Indici",
     foreignKeys: "Chiavi Esterne",
     triggers: "Trigger",

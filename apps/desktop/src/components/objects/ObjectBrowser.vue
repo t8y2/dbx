@@ -931,8 +931,8 @@ async function openTableInfo(row: ObjectBrowserRow, initialTab?: TableInfoTab) {
   tableForeignKeys.value = [];
   tableTriggers.value = [];
   tableInfoSearchQuery.value = "";
-  // Determine initial tab: explicit request > first available > ddl
-  const firstTab = initialTab ?? tableInfoTabs.value[0]?.id ?? "ddl";
+  // Determine initial tab: explicit request > previously activated
+  const firstTab = initialTab ?? tableInfoTab.value;
   await selectTableInfoTab(firstTab);
 }
 

@@ -38,4 +38,19 @@ describe("isAiConfigModelCandidate", () => {
       ),
     ).toBe(true);
   });
+
+  it.each(["codex-cli", "claude-code-cli", "opencode-cli", "pi-agent-cli", "cursor-cli", "grok-cli", "codebuddy-cli", "qoder-cli"] as const)("filters existing %s configs when local CLI providers are unavailable", (provider) => {
+    expect(
+      isAiConfigModelCandidate(
+        config({
+          provider,
+          endpoint: "",
+          apiKey: "",
+          model: "default",
+        }),
+        false,
+        false,
+      ),
+    ).toBe(false);
+  });
 });

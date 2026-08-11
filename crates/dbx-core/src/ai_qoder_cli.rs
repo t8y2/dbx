@@ -147,35 +147,45 @@ pub fn qoder_cli_env(config: &AiConfig) -> Result<Vec<(String, String)>, String>
 }
 
 fn qoder_process_env(config: &AiConfig, command: &QoderCommandSpec) -> Result<Vec<(String, String)>, String> {
+    let current_path = env::var("PATH").ok();
+    qoder_process_env_with_path(config, command, current_path.as_deref())
+}
+
+fn qoder_process_env_with_path(
+    config: &AiConfig,
+    command: &QoderCommandSpec,
+    current_path: Option<&str>,
+) -> Result<Vec<(String, String)>, String> {
     let mut process_env = BTreeMap::from_iter(qoder_cli_env(config)?);
+    let mut paths = Vec::new();
     if let Some(dir) =
         Path::new(&command.program).parent().filter(|parent| !parent.as_os_str().is_empty()).map(Path::to_path_buf)
     {
-        let mut paths = vec![dir];
-        if let Some(path) = process_env.get("PATH") {
-            paths.extend(env::split_paths(path));
-        }
-        if let Ok(path) = env::var("PATH") {
-            paths.extend(env::split_paths(&path));
-        }
-        #[cfg(windows)]
-        if let Ok(app_data) = env::var("APPDATA") {
-            paths.push(PathBuf::from(app_data).join("npm"));
-        }
-        #[cfg(not(windows))]
-        paths.extend([
-            PathBuf::from("/opt/homebrew/bin"),
-            PathBuf::from("/usr/local/bin"),
-            PathBuf::from("/usr/bin"),
-            PathBuf::from("/bin"),
-            PathBuf::from("/usr/sbin"),
-            PathBuf::from("/sbin"),
-        ]);
-        let mut seen = BTreeSet::new();
-        paths.retain(|path| seen.insert(path.clone()));
-        if let Ok(path) = env::join_paths(paths) {
-            process_env.insert("PATH".to_string(), path.to_string_lossy().to_string());
-        }
+        paths.push(dir);
+    }
+    if let Some(path) = process_env.get("PATH") {
+        paths.extend(env::split_paths(path));
+    }
+    if let Some(path) = current_path {
+        paths.extend(env::split_paths(path));
+    }
+    #[cfg(windows)]
+    if let Ok(app_data) = env::var("APPDATA") {
+        paths.push(PathBuf::from(app_data).join("npm"));
+    }
+    #[cfg(not(windows))]
+    paths.extend([
+        PathBuf::from("/opt/homebrew/bin"),
+        PathBuf::from("/usr/local/bin"),
+        PathBuf::from("/usr/bin"),
+        PathBuf::from("/bin"),
+        PathBuf::from("/usr/sbin"),
+        PathBuf::from("/sbin"),
+    ]);
+    let mut seen = BTreeSet::new();
+    paths.retain(|path| seen.insert(path.clone()));
+    if let Ok(path) = env::join_paths(paths) {
+        process_env.insert("PATH".to_string(), path.to_string_lossy().to_string());
     }
     Ok(process_env.into_iter().collect())
 }
@@ -501,7 +511,7 @@ pub async fn run_qoder_agent(
 mod tests {
     use super::{
         build_qoder_command, classify_qoder_run_error, parse_qoder_jsonl_event, parse_qoder_models, qoder_cli_env,
-        QoderRunOptions,
+        qoder_process_env_with_path, QoderCommandSpec, QoderRunOptions,
     };
     use crate::agent_events::AgentEvent;
     use crate::ai::{AiApiStyle, AiAuthMethod, AiConfig, AiEffortSelection, AiProvider, AiReasoningLevel};
@@ -573,6 +583,23 @@ mod tests {
         let tools = command.args[command.args.iter().position(|arg| arg == "--tools").unwrap() + 1].clone();
         assert!(tools.contains("mcp__dbx__dbx_execute_query"));
         assert!(!tools.contains("Bash"));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn bare_qoder_command_uses_configured_gui_and_common_paths() {
+        let mut config = config("default");
+        config.qoder_cli_env.insert("PATH".to_string(), "/configured/bin".to_string());
+        let command = QoderCommandSpec { program: "qodercli".to_string(), args: Vec::new() };
+
+        let process_env = qoder_process_env_with_path(&config, &command, Some("/restricted/gui/bin")).unwrap();
+        let path = process_env.iter().find(|(key, _)| key == "PATH").map(|(_, value)| value).unwrap();
+        let paths = std::env::split_paths(path).collect::<Vec<_>>();
+
+        assert!(paths.contains(&std::path::PathBuf::from("/configured/bin")));
+        assert!(paths.contains(&std::path::PathBuf::from("/restricted/gui/bin")));
+        assert!(paths.contains(&std::path::PathBuf::from("/opt/homebrew/bin")));
+        assert!(paths.contains(&std::path::PathBuf::from("/usr/local/bin")));
     }
 
     #[test]

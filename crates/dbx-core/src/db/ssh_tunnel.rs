@@ -15,6 +15,7 @@ use russh::keys::{decode_secret_key, key::PrivateKeyWithHashAlg, PrivateKey};
 use russh::MethodKind;
 use russh::MethodSet;
 use russh::{kex, mac, ChannelOpenFailure, Preferred};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
@@ -754,13 +755,90 @@ fn netcat_proxy_command(remote_host: &str, remote_port: u16) -> Result<String, S
     Ok(format!("exec nc '{quoted_host}' {remote_port}"))
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TunnelTarget {
+    Fixed { host: String, port: u16 },
+    Socks5,
+}
+
+impl TunnelTarget {
+    fn description(&self) -> String {
+        match self {
+            Self::Fixed { host, port } => format!("{host}:{port}"),
+            Self::Socks5 => "dynamic SOCKS5 targets".to_string(),
+        }
+    }
+}
+
+async fn read_socks5_target(stream: &mut tokio::net::TcpStream) -> Result<(String, u16), String> {
+    let mut greeting = [0_u8; 2];
+    stream.read_exact(&mut greeting).await.map_err(|e| format!("SOCKS5 greeting failed: {e}"))?;
+    if greeting[0] != 0x05 || greeting[1] == 0 {
+        return Err("Invalid SOCKS5 greeting".to_string());
+    }
+    let mut methods = vec![0_u8; greeting[1] as usize];
+    stream.read_exact(&mut methods).await.map_err(|e| format!("SOCKS5 methods failed: {e}"))?;
+    if !methods.contains(&0x00) {
+        let _ = stream.write_all(&[0x05, 0xff]).await;
+        return Err("SOCKS5 client does not support no-auth mode".to_string());
+    }
+    stream.write_all(&[0x05, 0x00]).await.map_err(|e| format!("SOCKS5 method reply failed: {e}"))?;
+
+    let mut request = [0_u8; 4];
+    stream.read_exact(&mut request).await.map_err(|e| format!("SOCKS5 request failed: {e}"))?;
+    if request[0] != 0x05 {
+        return Err("Invalid SOCKS5 request version".to_string());
+    }
+    if request[1] != 0x01 {
+        let _ = write_socks5_reply(stream, 0x07).await;
+        return Err("SOCKS5 command is not CONNECT".to_string());
+    }
+
+    let host = match request[3] {
+        0x01 => {
+            let mut addr = [0_u8; 4];
+            stream.read_exact(&mut addr).await.map_err(|e| format!("SOCKS5 IPv4 target failed: {e}"))?;
+            std::net::Ipv4Addr::from(addr).to_string()
+        }
+        0x03 => {
+            let mut len = [0_u8; 1];
+            stream.read_exact(&mut len).await.map_err(|e| format!("SOCKS5 domain length failed: {e}"))?;
+            if len[0] == 0 {
+                let _ = write_socks5_reply(stream, 0x08).await;
+                return Err("SOCKS5 target host is empty".to_string());
+            }
+            let mut host = vec![0_u8; len[0] as usize];
+            stream.read_exact(&mut host).await.map_err(|e| format!("SOCKS5 domain target failed: {e}"))?;
+            String::from_utf8(host).map_err(|_| "SOCKS5 target host is not UTF-8".to_string())?
+        }
+        0x04 => {
+            let mut addr = [0_u8; 16];
+            stream.read_exact(&mut addr).await.map_err(|e| format!("SOCKS5 IPv6 target failed: {e}"))?;
+            std::net::Ipv6Addr::from(addr).to_string()
+        }
+        _ => {
+            let _ = write_socks5_reply(stream, 0x08).await;
+            return Err("Unsupported SOCKS5 address type".to_string());
+        }
+    };
+    let mut port = [0_u8; 2];
+    stream.read_exact(&mut port).await.map_err(|e| format!("SOCKS5 target port failed: {e}"))?;
+    Ok((host, u16::from_be_bytes(port)))
+}
+
+async fn write_socks5_reply(stream: &mut tokio::net::TcpStream, status: u8) -> Result<(), String> {
+    stream
+        .write_all(&[0x05, status, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
+        .await
+        .map_err(|e| format!("SOCKS5 reply failed: {e}"))
+}
+
 /// Accept connections on the local listener and forward them through the SSH session.
 /// Returns when the SSH session dies (listener error or session.is_closed()).
 async fn forward_loop(
     session: &Handle<SshClient>,
     listener: &TcpListener,
-    remote_host: &str,
-    remote_port: u16,
+    target: &TunnelTarget,
     allow_exec_channel_proxy: bool,
 ) {
     let mut idle_check = tokio::time::interval(IDLE_SESSION_CHECK_INTERVAL);
@@ -802,9 +880,20 @@ async fn forward_loop(
             break;
         }
 
+        let (remote_host, remote_port) = match target {
+            TunnelTarget::Fixed { host, port } => (host.clone(), *port),
+            TunnelTarget::Socks5 => match read_socks5_target(&mut stream).await {
+                Ok(target) => target,
+                Err(e) => {
+                    log::debug!("SSH SOCKS5 request rejected: {e}");
+                    continue;
+                }
+            },
+        };
+
         let channel = match session
             .channel_open_direct_tcpip(
-                remote_host,
+                &remote_host,
                 remote_port.into(),
                 peer_addr.ip().to_string(),
                 peer_addr.port().into(),
@@ -818,36 +907,62 @@ async fn forward_loop(
                 // JumpServer/Koko deliberately disables SSH direct-tcpip even
                 // for a directly selected asset. An exec channel is still
                 // proxied to that asset, so use netcat there as a byte stream.
-                let command = match netcat_proxy_command(remote_host, remote_port) {
+                let command = match netcat_proxy_command(&remote_host, remote_port) {
                     Ok(command) => command,
                     Err(e) => {
                         log::error!("SSH netcat fallback rejected the target: {e}");
-                        continue;
+                        if matches!(target, TunnelTarget::Socks5) {
+                            let _ = write_socks5_reply(&mut stream, 0x01).await;
+                            continue;
+                        }
+                        break;
                     }
                 };
                 let channel = match session.channel_open_session().await {
                     Ok(channel) => channel,
                     Err(e) => {
                         log::error!("SSH netcat fallback could not open a session channel: {e}");
+                        if matches!(target, TunnelTarget::Socks5) {
+                            let _ = write_socks5_reply(&mut stream, 0x01).await;
+                        }
                         continue;
                     }
                 };
                 if let Err(e) = channel.exec(true, command).await {
                     log::error!("SSH netcat fallback could not start nc: {e}");
-                    continue;
+                    if matches!(target, TunnelTarget::Socks5) {
+                        let _ = write_socks5_reply(&mut stream, 0x01).await;
+                        continue;
+                    }
+                    break;
                 }
                 log::info!("SSH direct-tcpip is disabled; forwarding through a remote nc session");
                 channel
             }
             Err(russh::Error::ChannelOpenFailure(ChannelOpenFailure::AdministrativelyProhibited)) => {
                 log::warn!("SSH direct-tcpip was administratively prohibited; exec-channel proxy fallback is disabled");
+                if matches!(target, TunnelTarget::Socks5) {
+                    let _ = write_socks5_reply(&mut stream, 0x02).await;
+                    continue;
+                }
                 break;
             }
             Err(e) => {
                 log::error!("SSH direct-tcpip failed: {e}");
+                if matches!(target, TunnelTarget::Socks5) {
+                    let _ = write_socks5_reply(&mut stream, 0x01).await;
+                    continue;
+                }
                 break;
             }
         };
+
+        if matches!(target, TunnelTarget::Socks5) {
+            if let Err(e) = write_socks5_reply(&mut stream, 0x00).await {
+                log::debug!("SSH SOCKS5 success reply failed: {e}");
+                continue;
+            }
+        }
 
         tokio::spawn(async move {
             let mut channel_stream = channel.into_stream();
@@ -880,14 +995,13 @@ async fn tunnel_reconnect_loop(
     connect_timeout_secs: u64,
     known_hosts_path: PathBuf,
     listener: TcpListener,
-    remote_host: String,
-    remote_port: u16,
+    target: TunnelTarget,
     allow_exec_channel_proxy: bool,
 ) {
     loop {
-        log::info!("SSH tunnel active: {}:{} -> {}:{}", connect_host, connect_port, remote_host, remote_port);
+        log::info!("SSH tunnel active: {}:{} -> {}", connect_host, connect_port, target.description());
 
-        forward_loop(&session, &listener, &remote_host, remote_port, allow_exec_channel_proxy).await;
+        forward_loop(&session, &listener, &target, allow_exec_channel_proxy).await;
 
         log::warn!("SSH tunnel connection lost ({}:{}), reconnecting...", connect_host, connect_port);
 
@@ -947,9 +1061,16 @@ async fn tunnel_reconnect_loop(
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TunnelKind {
+    Fixed,
+    Socks5,
+}
+
 struct TunnelEntry {
     handles: Vec<JoinHandle<()>>,
     local_port: u16,
+    kind: TunnelKind,
 }
 
 #[cfg(test)]
@@ -1060,7 +1181,7 @@ impl TunnelManager {
     ) -> Result<u16, String> {
         {
             let mut tunnels = self.tunnels.lock().await;
-            if let Some(port) = Self::get_active_port(&mut tunnels, connection_id) {
+            if let Some(port) = Self::get_active_port(&mut tunnels, connection_id, TunnelKind::Fixed) {
                 if requested_local_port.is_none_or(|requested| requested == port) {
                     return Ok(port);
                 }
@@ -1073,7 +1194,7 @@ impl TunnelManager {
         // A concurrent caller may have completed while this task waited.
         {
             let mut tunnels = self.tunnels.lock().await;
-            if let Some(port) = Self::get_active_port(&mut tunnels, connection_id) {
+            if let Some(port) = Self::get_active_port(&mut tunnels, connection_id, TunnelKind::Fixed) {
                 if requested_local_port.is_none_or(|requested| requested == port) {
                     return Ok(port);
                 }
@@ -1106,16 +1227,91 @@ impl TunnelManager {
         )
         .await?;
 
-        self.tunnels.lock().await.insert(connection_id.to_string(), TunnelEntry { handles: vec![handle], local_port });
+        self.tunnels.lock().await.insert(
+            connection_id.to_string(),
+            TunnelEntry { handles: vec![handle], local_port, kind: TunnelKind::Fixed },
+        );
+        Ok(local_port)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn start_socks5_proxy(
+        &self,
+        connection_id: &str,
+        connect_host: &str,
+        connect_port: u16,
+        host_key_host: &str,
+        host_key_port: u16,
+        ssh_user: &str,
+        ssh_password: &str,
+        ssh_key_path: &str,
+        ssh_key_passphrase: &str,
+        use_ssh_agent: bool,
+        ssh_agent_sock_path: &str,
+        auth_method: &str,
+        connect_timeout_secs: u64,
+        allow_exec_channel_proxy: bool,
+    ) -> Result<u16, String> {
+        {
+            let mut tunnels = self.tunnels.lock().await;
+            if let Some(port) = Self::get_active_port(&mut tunnels, connection_id, TunnelKind::Socks5) {
+                return Ok(port);
+            }
+        }
+
+        let start_lock = self.start_lock(connection_id).await;
+        let _start_guard = start_lock.lock().await;
+        {
+            let mut tunnels = self.tunnels.lock().await;
+            if let Some(port) = Self::get_active_port(&mut tunnels, connection_id, TunnelKind::Socks5) {
+                return Ok(port);
+            }
+            if let Some(entry) = tunnels.remove(connection_id) {
+                for handle in entry.handles {
+                    handle.abort();
+                }
+            }
+        }
+
+        let (handle, local_port) = spawn_socks5_proxy(
+            connect_host,
+            connect_port,
+            host_key_host,
+            host_key_port,
+            ssh_user,
+            ssh_password,
+            ssh_key_path,
+            ssh_key_passphrase,
+            use_ssh_agent,
+            ssh_agent_sock_path,
+            auth_method,
+            connect_timeout_secs,
+            &self.known_hosts_path,
+            allow_exec_channel_proxy,
+        )
+        .await?;
+
+        self.tunnels.lock().await.insert(
+            connection_id.to_string(),
+            TunnelEntry { handles: vec![handle], local_port, kind: TunnelKind::Socks5 },
+        );
         Ok(local_port)
     }
 
     /// Returns the local port for a cached tunnel entry, or `None` if the entry
     /// is stale (all background handles have exited).
-    fn get_active_port(tunnels: &mut HashMap<String, TunnelEntry>, connection_id: &str) -> Option<u16> {
+    fn get_active_port(
+        tunnels: &mut HashMap<String, TunnelEntry>,
+        connection_id: &str,
+        expected_kind: TunnelKind,
+    ) -> Option<u16> {
         let entry = tunnels.get(connection_id)?;
-        if entry.handles.iter().all(|h| h.is_finished()) {
-            tunnels.remove(connection_id);
+        if entry.kind != expected_kind || entry.handles.iter().all(|h| h.is_finished()) {
+            if let Some(entry) = tunnels.remove(connection_id) {
+                for handle in entry.handles {
+                    handle.abort();
+                }
+            }
             return None;
         }
         Some(entry.local_port)
@@ -1133,7 +1329,7 @@ impl TunnelManager {
         }
         {
             let mut tunnels = self.tunnels.lock().await;
-            if let Some(port) = Self::get_active_port(&mut tunnels, connection_id) {
+            if let Some(port) = Self::get_active_port(&mut tunnels, connection_id, TunnelKind::Fixed) {
                 return Ok(port);
             }
         }
@@ -1142,7 +1338,7 @@ impl TunnelManager {
         let _start_guard = start_lock.lock().await;
         {
             let mut tunnels = self.tunnels.lock().await;
-            if let Some(port) = Self::get_active_port(&mut tunnels, connection_id) {
+            if let Some(port) = Self::get_active_port(&mut tunnels, connection_id, TunnelKind::Fixed) {
                 return Ok(port);
             }
         }
@@ -1188,10 +1384,10 @@ impl TunnelManager {
             next_connect_endpoint = Some(("127.0.0.1".to_string(), local_port));
         }
 
-        self.tunnels
-            .lock()
-            .await
-            .insert(connection_id.to_string(), TunnelEntry { handles, local_port: final_local_port });
+        self.tunnels.lock().await.insert(
+            connection_id.to_string(),
+            TunnelEntry { handles, local_port: final_local_port, kind: TunnelKind::Fixed },
+        );
         Ok(final_local_port)
     }
 
@@ -1257,6 +1453,87 @@ async fn spawn_tunnel(
     allow_exec_channel_proxy: bool,
     requested_local_port: Option<u16>,
 ) -> Result<(JoinHandle<()>, u16), String> {
+    spawn_tunnel_target(
+        connect_host,
+        connect_port,
+        host_key_host,
+        host_key_port,
+        ssh_user,
+        ssh_password,
+        ssh_key_path,
+        ssh_key_passphrase,
+        use_ssh_agent,
+        ssh_agent_sock_path,
+        auth_method,
+        connect_timeout_secs,
+        known_hosts_path,
+        TunnelTarget::Fixed { host: remote_host.to_string(), port: remote_port },
+        expose_to_lan,
+        allow_exec_channel_proxy,
+        requested_local_port,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn spawn_socks5_proxy(
+    connect_host: &str,
+    connect_port: u16,
+    host_key_host: &str,
+    host_key_port: u16,
+    ssh_user: &str,
+    ssh_password: &str,
+    ssh_key_path: &str,
+    ssh_key_passphrase: &str,
+    use_ssh_agent: bool,
+    ssh_agent_sock_path: &str,
+    auth_method: &str,
+    connect_timeout_secs: u64,
+    known_hosts_path: &Path,
+    allow_exec_channel_proxy: bool,
+) -> Result<(JoinHandle<()>, u16), String> {
+    spawn_tunnel_target(
+        connect_host,
+        connect_port,
+        host_key_host,
+        host_key_port,
+        ssh_user,
+        ssh_password,
+        ssh_key_path,
+        ssh_key_passphrase,
+        use_ssh_agent,
+        ssh_agent_sock_path,
+        auth_method,
+        connect_timeout_secs,
+        known_hosts_path,
+        TunnelTarget::Socks5,
+        false,
+        allow_exec_channel_proxy,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn spawn_tunnel_target(
+    connect_host: &str,
+    connect_port: u16,
+    host_key_host: &str,
+    host_key_port: u16,
+    ssh_user: &str,
+    ssh_password: &str,
+    ssh_key_path: &str,
+    ssh_key_passphrase: &str,
+    use_ssh_agent: bool,
+    ssh_agent_sock_path: &str,
+    auth_method: &str,
+    connect_timeout_secs: u64,
+    known_hosts_path: &Path,
+    target: TunnelTarget,
+    expose_to_lan: bool,
+    allow_exec_channel_proxy: bool,
+    requested_local_port: Option<u16>,
+) -> Result<(JoinHandle<()>, u16), String> {
     let (listener, local_port) = bind_tunnel_listener(expose_to_lan, requested_local_port).await?;
 
     // Initial connection: fail fast on bad credentials
@@ -1293,8 +1570,7 @@ async fn spawn_tunnel(
         connect_timeout_secs,
         known_hosts_path.to_path_buf(),
         listener,
-        remote_host.to_string(),
-        remote_port,
+        target,
         allow_exec_channel_proxy,
     ));
 
@@ -1980,6 +2256,139 @@ uveF/dLmnVN1IriEyEvHAAAACGRieC10ZXN0AQIDBAU=
         });
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         (port, task)
+    }
+
+    struct DirectEchoServer {
+        target: Arc<std::sync::Mutex<Option<(String, u32)>>>,
+    }
+
+    impl server::Server for DirectEchoServer {
+        type Handler = DirectEchoHandler;
+
+        fn new_client(&mut self, _peer: Option<std::net::SocketAddr>) -> DirectEchoHandler {
+            DirectEchoHandler { target: self.target.clone() }
+        }
+    }
+
+    struct DirectEchoHandler {
+        target: Arc<std::sync::Mutex<Option<(String, u32)>>>,
+    }
+
+    impl server::Handler for DirectEchoHandler {
+        type Error = russh::Error;
+
+        async fn auth_none(&mut self, _user: &str) -> Result<Auth, Self::Error> {
+            Ok(Auth::Accept)
+        }
+
+        async fn channel_open_direct_tcpip(
+            &mut self,
+            _channel: Channel<server::Msg>,
+            host_to_connect: &str,
+            port_to_connect: u32,
+            _originator_address: &str,
+            _originator_port: u32,
+            _session: &mut server::Session,
+        ) -> Result<bool, Self::Error> {
+            *self.target.lock().unwrap() = Some((host_to_connect.to_string(), port_to_connect));
+            Ok(true)
+        }
+
+        async fn data(
+            &mut self,
+            channel: ChannelId,
+            data: &[u8],
+            session: &mut server::Session,
+        ) -> Result<(), Self::Error> {
+            session.data(channel, data.to_vec())?;
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn socks5_proxy_forwards_requested_target_over_ssh() {
+        let _guard = PROMPT_TEST_LOCK.lock().await;
+        ssh_prompt::clear_ssh_prompt_gateway();
+        let server_key = decode_secret_key(TEST_SERVER_KEY_PEM, None).expect("decode test server key");
+        let server_config = server::Config { keys: vec![server_key], ..Default::default() };
+        let ssh_port = portpicker::pick_unused_port().expect("no free port");
+        let target = Arc::new(std::sync::Mutex::new(None));
+        let mut server = DirectEchoServer { target: target.clone() };
+        let server_task = tokio::spawn(async move {
+            let _ = server.run_on_address(Arc::new(server_config), ("127.0.0.1", ssh_port)).await;
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let dir = tempdir().unwrap();
+        let known_hosts_path = dir.path().join("known_hosts");
+        HostKeyVerifier::new(known_hosts_path).learn("127.0.0.1", ssh_port, &test_server_public_key()).unwrap();
+        let manager = TunnelManager::new(dir.path().to_path_buf());
+        let local_port = manager
+            .start_socks5_proxy(
+                "rocketmq-socks",
+                "127.0.0.1",
+                ssh_port,
+                "127.0.0.1",
+                ssh_port,
+                "user",
+                "",
+                "",
+                "",
+                false,
+                "",
+                "none",
+                5,
+                false,
+            )
+            .await
+            .unwrap();
+        let reused_port = manager
+            .start_socks5_proxy(
+                "rocketmq-socks",
+                "127.0.0.1",
+                ssh_port,
+                "127.0.0.1",
+                ssh_port,
+                "user",
+                "",
+                "",
+                "",
+                false,
+                "",
+                "none",
+                5,
+                false,
+            )
+            .await
+            .unwrap();
+        assert_eq!(reused_port, local_port);
+
+        let mut client = TcpStream::connect(("127.0.0.1", local_port)).await.unwrap();
+        client.write_all(&[0x05, 0x01, 0x00]).await.unwrap();
+        let mut greeting = [0_u8; 2];
+        client.read_exact(&mut greeting).await.unwrap();
+        assert_eq!(greeting, [0x05, 0x00]);
+
+        let host = b"broker.internal";
+        let mut request = vec![0x05, 0x01, 0x00, 0x03, host.len() as u8];
+        request.extend_from_slice(host);
+        request.extend_from_slice(&10911_u16.to_be_bytes());
+        client.write_all(&request).await.unwrap();
+        let mut reply = [0_u8; 10];
+        client.read_exact(&mut reply).await.unwrap();
+        assert_eq!(reply[1], 0x00);
+
+        client.write_all(b"ping").await.unwrap();
+        let mut echoed = [0_u8; 4];
+        tokio::time::timeout(std::time::Duration::from_secs(5), client.read_exact(&mut echoed))
+            .await
+            .expect("SOCKS5 echo timeout")
+            .expect("SOCKS5 echo read");
+        assert_eq!(&echoed, b"ping");
+        assert_eq!(*target.lock().unwrap(), Some(("broker.internal".to_string(), 10911)));
+
+        manager.stop_tunnel("rocketmq-socks").await;
+        server_task.abort();
     }
 
     struct NetcatFallbackServer {

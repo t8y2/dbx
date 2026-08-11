@@ -40,6 +40,13 @@ describe("sidebar tree item layout", () => {
     expect(canTreeNodeShowExpander({ type: "type-body", childCount: 0, explicitContainer: true })).toBe(false);
   });
 
+  it("shows an expander only while a custom type may still load children", () => {
+    expect(canTreeNodeShowExpander({ type: "type", childCount: undefined })).toBe(true);
+    expect(canTreeNodeShowExpander({ type: "type", childCount: 2 })).toBe(true);
+    expect(canTreeNodeShowExpander({ type: "type", childCount: 0 })).toBe(false);
+    expect(canTreeNodeShowExpander({ type: "type-member", childCount: undefined })).toBe(false);
+  });
+
   it("aligns comments to the longest sibling name without crossing parent groups", () => {
     const widths = alignedSidebarCommentLabelWidths([
       { id: "tables", depth: 1, alignable: false, hasComment: false, labelWidth: 0 },

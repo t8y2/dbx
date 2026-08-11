@@ -97,7 +97,7 @@ make db DB=consul@2.0.2
 make db DB=elasticsearch@6.8
 ```
 
-不带参数执行 `make db` 会输出当前全部支持的、可直接复制启动的命令，以及可选参数。传入 `DB=product@version` 后，`db` 会等待 Compose 健康检查通过并输出 DBX 连接字段；对于 DBX 已支持的连接类型，还会输出预填完成的 `dbx://connection/new` 深链。复制该链接到浏览器或终端执行 `open '<链接>'`，即可打开桌面端的新建连接窗口。使用前请先安装并启动一次 DBX 桌面端以注册 `dbx://` 协议。深链可能包含密码，因此不要将其写入共享终端历史、日志或工单。尚未具备 DBX 连接类型的配方会明确显示深链不可用，例如 Consul、Nacos、Kafka、Pulsar 和 r-nacos。`db-verify` 还会在数据库容器中执行配方中的冒烟命令，并校验预期输出；提交数据库相关修复前推荐执行此命令。
+不带参数执行 `make db` 会输出当前全部支持的、可直接复制启动的命令，以及可选参数。传入 `DB=product@version` 后，`db` 会等待 Compose 健康检查通过并输出 DBX 连接字段；对于 DBX 已支持的连接类型，还会输出预填完成的 `dbx://connection/new` 深链。etcd、Consul、Nacos 2、Nacos 3 和 r-nacos 均已支持，其中 Nacos 配方会自动选择正确分流，Nacos 3 使用 API 端口而非独立控制台端口。复制该链接到浏览器或终端执行 `open '<链接>'`，即可打开桌面端的新建连接窗口。使用前请先安装并启动一次 DBX 桌面端以注册 `dbx://` 协议。深链可能包含数据库密码或 Consul ACL token，因此不要将其写入共享终端历史、日志或工单。Kafka、Pulsar 等尚未具备 DBX 连接类型的配方会明确显示深链不可用。`db-verify` 还会在数据库容器中执行配方中的冒烟命令，并校验预期输出；提交数据库相关修复前推荐执行此命令。
 
 ## 命令和变量
 

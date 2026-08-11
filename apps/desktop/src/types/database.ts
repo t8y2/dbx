@@ -429,11 +429,14 @@ export interface ObjectInfo {
   schema?: string | null;
   valid?: boolean | null;
   signature?: string | null;
+  custom_type_kind?: CustomTypeKind | null;
+  has_members?: boolean | null;
   comment?: string | null;
   created_at?: string | null;
   updated_at?: string | null;
   parent_schema?: string | null;
   parent_name?: string | null;
+  trigger?: TriggerInfo | null;
   xugu_type_members_expandable?: boolean | null;
 }
 
@@ -452,6 +455,61 @@ export interface ObjectSource {
   schema?: string | null;
   source: string;
   editable?: boolean;
+}
+
+export type CustomTypeKind = "base" | "composite" | "domain" | "enum" | "range" | "multirange";
+
+export interface CustomTypeMember {
+  name: string;
+  dataType: string;
+  ordinal: number;
+  nullable?: boolean | null;
+  default?: string | null;
+  comment?: string | null;
+  enumValue?: string | null;
+}
+
+export interface CustomTypeDomainConstraint {
+  name: string;
+  definition: string;
+}
+
+export interface CustomTypeProperties {
+  baseType?: string | null;
+  notNull?: boolean | null;
+  default?: string | null;
+  collation?: string | null;
+  domainConstraints: CustomTypeDomainConstraint[];
+  rangeSubtype?: string | null;
+  rangeMultirangeName?: string | null;
+  rangeCanonicalFunction?: string | null;
+  rangeSubtypeDiffFunction?: string | null;
+  rangeSubtypeOpclass?: string | null;
+  inputFunction?: string | null;
+  outputFunction?: string | null;
+  receiveFunction?: string | null;
+  sendFunction?: string | null;
+  analyzeFunction?: string | null;
+  internallength?: number | null;
+  passedByValue?: boolean | null;
+  alignment?: string | null;
+  storage?: string | null;
+}
+
+export interface CustomTypeDdl {
+  sql: string;
+  complete: boolean;
+  warnings?: string[];
+}
+
+export interface CustomTypeDetails {
+  name: string;
+  schema: string;
+  kind: CustomTypeKind;
+  comment?: string | null;
+  members: CustomTypeMember[];
+  properties: CustomTypeProperties;
+  ddl?: CustomTypeDdl | null;
 }
 
 export interface ColumnInfo {
@@ -503,6 +561,13 @@ export interface TriggerInfo {
   name: string;
   event: string;
   timing: string;
+  level?: string | null;
+  condition?: string | null;
+  language?: string | null;
+  enabled?: boolean | null;
+  valid?: boolean | null;
+  comment?: string | null;
+  created_at?: string | null;
   statement?: string | null;
 }
 
@@ -802,6 +867,7 @@ export type TreeNodeType =
   | "function"
   | "type"
   | "type-body"
+  | "type-member"
   | "sequence"
   | "synonym"
   | "package"
@@ -897,6 +963,8 @@ export interface TreeNode {
   tableName?: string;
   objectName?: string;
   signature?: string;
+  customTypeKind?: CustomTypeKind;
+  hasMembers?: boolean;
   /** Owning programmable object for a nested metadata member. */
   parentName?: string;
   parentSchema?: string;
@@ -916,12 +984,18 @@ export interface TreeNode {
   tableSearchParentId?: string;
   savedSqlId?: string;
   savedSqlFolderId?: string;
-  meta?: ColumnInfo | IndexInfo | ForeignKeyInfo | TriggerInfo | ConstraintInfo | PartitionInfo | SubpartitionInfo | ExtensionInfo | VectorCollectionMeta | MongoCollectionMeta;
+  meta?: ColumnInfo | IndexInfo | ForeignKeyInfo | TriggerInfo | ConstraintInfo | PartitionInfo | SubpartitionInfo | ExtensionInfo | VectorCollectionMeta | MongoCollectionMeta | CustomTypeTreeMemberMeta;
   loadMore?: {
     parentId: string;
     offset: number;
     pageSize: number;
   };
+}
+
+export interface CustomTypeTreeMemberMeta {
+  kind: "field" | "enum-value";
+  displayValue?: string;
+  ordinal?: number;
 }
 
 export interface TableNameFilter {

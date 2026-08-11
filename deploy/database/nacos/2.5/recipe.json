@@ -3,6 +3,7 @@
   "name": "Nacos",
   "version": "2.5.2",
   "displayVersion": "2.5",
+  "deepLinkType": "nacos-v2",
   "image": "docker.cnb.cool/znb/images/nacos-server:v2.5.2",
   "platforms": ["linux/amd64", "linux/arm64"],
   "service": "database",

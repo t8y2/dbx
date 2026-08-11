@@ -16,7 +16,8 @@ const mocks = vi.hoisted(() => ({
   ensureConnected: vi.fn(),
   tableOpenPageSize: 100,
   infiniteScroll: true,
-  infiniteScrollMaxRows: 10_000,
+  queryResultMaxRowsEnabled: true,
+  queryResultMaxRows: 10_000,
   tabs: [] as QueryTab[],
   setTableMeta: vi.fn(),
   clearInvalidDataTabSort: vi.fn(),
@@ -86,7 +87,8 @@ vi.mock("@/stores/settingsStore", () => ({
     editorSettings: {
       tableOpenPageSize: mocks.tableOpenPageSize,
       infiniteScroll: mocks.infiniteScroll,
-      infiniteScrollMaxRows: mocks.infiniteScrollMaxRows,
+      queryResultMaxRowsEnabled: mocks.queryResultMaxRowsEnabled,
+      queryResultMaxRows: mocks.queryResultMaxRows,
     },
   }),
 }));
@@ -127,7 +129,8 @@ describe("useDataGridActions", () => {
     mocks.tabs.length = 0;
     mocks.tableOpenPageSize = 100;
     mocks.infiniteScroll = true;
-    mocks.infiniteScrollMaxRows = 10_000;
+    mocks.queryResultMaxRowsEnabled = true;
+    mocks.queryResultMaxRows = 10_000;
     mocks.getConfig.mockReturnValue({ id: "postgres-1", db_type: "postgres" });
     mocks.buildTableSelectSql.mockResolvedValue("SELECT * FROM public.users LIMIT 100 OFFSET 0");
     mocks.buildSortedQuerySql.mockResolvedValue({ ok: true, sql: "SELECT sorted" });

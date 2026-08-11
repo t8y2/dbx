@@ -186,7 +186,7 @@ open 'dbx://connection/new?type=mysql&host=127.0.0.1&port=3306&user=root&passwor
 
 | 字段         | 含义                                                           |
 | ------------ | -------------------------------------------------------------- |
-| `type`       | 数据库类型，例如 `mysql`、`postgres`、`redis`、`mongodb`       |
+| `type`       | 数据库类型；服务类连接包括 `etcd`、`consul`、`nacos-v2`、`nacos-v3`、`r-nacos` |
 | `url`        | 数据库 DSN，建议 URL encode                                    |
 | `name`       | DBX 中显示的连接名；未传时优先使用 `database`，其次使用 `host` |
 | `host`       | 主机地址                                                       |
@@ -204,7 +204,19 @@ open 'dbx://connection/new?type=mysql&host=127.0.0.1&port=3306&user=root&passwor
 open 'dbx://connection/new?type=redis&host=127.0.0.1&port=6379&user=default&password=secret&database=0&one_time=true'
 ```
 
+Nacos 与服务注册中心示例：
+
+```bash
+open 'dbx://connection/new?type=consul&host=127.0.0.1&port=8500&password=acl-token'
+open 'dbx://connection/new?type=nacos-v3&host=127.0.0.1&port=8848&user=nacos&password=secret'
+open 'dbx://connection/new?type=r-nacos&url=http%3A%2F%2F127.0.0.1%3A8848%2Fnacos&user=admin&password=secret'
+```
+
+`nacos` 是 `nacos-v2` 的别名，`rnacos` 是 `r-nacos` 的别名。URL 模式会保留服务端点路径，顶层 `host`、`port`、`user`、`password`、`ssl` 会覆盖 `url` 中的对应值。Consul 的 `password` 表示 ACL token；Nacos 传入 `password` 时必须同时传入 `user`。省略 `v` 或使用 `v=1` 表示当前深链协议，其他版本会被拒绝。
+
 <Callout type="info">测试系统级 `dbx://` 唤起前，请先安装并启动一次 DBX 桌面端，让系统注册 URL 协议。macOS 可使用 `open 'dbx://connection/new?...'` 测试。</Callout>
+
+<Callout type="warning">深链可能在浏览器或终端历史中暴露数据库密码或 Consul ACL token。不要将携带凭据的链接写入共享日志、Shell 历史、工单或聊天消息。</Callout>
 
 ## Codex
 

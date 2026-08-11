@@ -25,8 +25,11 @@ const DEFAULT_CODEX_MODELS: &[&str] = &["default", "gpt-5.5", "gpt-5.4-mini"];
 const CODEX_MODEL_SUCCESS_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
 const CODEX_MODEL_COMPATIBILITY_CACHE_TTL: Duration = Duration::from_secs(30);
 const CODEX_MODEL_NEGATIVE_CACHE_TTL: Duration = Duration::from_secs(10);
-const CODEX_MODEL_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(3);
-const CODEX_MODEL_COMPATIBILITY_TIMEOUT: Duration = Duration::from_secs(2);
+// Codex app-server and npm-installed CLI can take several seconds to cold-start,
+// especially on Windows. Keep discovery bounded while allowing capability metadata
+// to be returned before falling back to the static catalog.
+const CODEX_MODEL_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(15);
+const CODEX_MODEL_COMPATIBILITY_TIMEOUT: Duration = Duration::from_secs(10);
 #[cfg(not(windows))]
 const CODEX_PATH_MARKER: &str = "__DBX_CODEX_PATH__";
 
@@ -1514,8 +1517,8 @@ mod tests {
 
     #[test]
     fn model_cache_uses_bounded_success_fallback_and_negative_ttls() {
-        assert_eq!(CODEX_MODEL_DISCOVERY_TIMEOUT, Duration::from_secs(3));
-        assert_eq!(CODEX_MODEL_COMPATIBILITY_TIMEOUT, Duration::from_secs(2));
+        assert_eq!(CODEX_MODEL_DISCOVERY_TIMEOUT, Duration::from_secs(15));
+        assert_eq!(CODEX_MODEL_COMPATIBILITY_TIMEOUT, Duration::from_secs(10));
         assert_eq!(CODEX_MODEL_SUCCESS_CACHE_TTL, Duration::from_secs(5 * 60));
         assert_eq!(CODEX_MODEL_COMPATIBILITY_CACHE_TTL, Duration::from_secs(30));
         assert_eq!(CODEX_MODEL_NEGATIVE_CACHE_TTL, Duration::from_secs(10));

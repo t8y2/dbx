@@ -368,8 +368,12 @@ export interface ExecutionSummaryItem {
 export function executionSummaryItems(tab: Pick<QueryTab, "result" | "results" | "batchSqlExecution">): ExecutionSummaryItem[] {
   const results = tab.results?.length ? tab.results : tab.result ? [tab.result] : [];
   if (tab.batchSqlExecution?.items.length) {
+    const resultsByStatementIndex = new Map<number, QueryResult>();
+    results.forEach((result, resultIndex) => {
+      resultsByStatementIndex.set(result.statement_index ?? resultIndex, result);
+    });
     return tab.batchSqlExecution.items.map((item, index) => {
-      const result = results.find((candidate, resultIndex) => (candidate.statement_index ?? resultIndex) === item.statementIndex);
+      const result = resultsByStatementIndex.get(item.statementIndex);
       const returnedRows = result?.rows.length ?? 0;
       const affectedRows = item.affectedRows ?? result?.affected_rows ?? 0;
       const hasTabularResult = (result?.columns.length ?? 0) > 0;

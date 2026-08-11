@@ -3,6 +3,7 @@ package com.dbx.agent.mongodb;
 import com.dbx.agent.AgentProtocol;
 import com.dbx.agent.IndexInfo;
 import com.google.gson.Gson;
+import com.google.gson.GsonBuilder;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonNull;
@@ -73,7 +74,7 @@ import org.bson.types.Decimal128;
 import org.bson.types.ObjectId;
 
 public final class MongoAgent {
-    private static final Gson GSON = new Gson();
+    private static final Gson GSON = new GsonBuilder().serializeNulls().create();
     private static final DateTimeFormatter DATE_FORMAT = DateTimeFormatter.ISO_INSTANT.withZone(ZoneOffset.UTC);
     private static final long JS_MAX_SAFE_INTEGER = 9_007_199_254_740_991L;
     private static final JsonWriterSettings EXTENDED_JSON_SETTINGS = JsonWriterSettings.builder()

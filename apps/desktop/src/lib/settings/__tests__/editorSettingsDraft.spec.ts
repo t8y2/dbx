@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { EDITOR_SETTINGS_DRAFT_KEYS, editorSettingsDraftFromSettings, editorSettingsDraftChanged, editorSettingsPatchFromDraft, normalizeTableOpenPageSizeDraft } from "../editorSettingsDraft";
+import { EDITOR_SETTINGS_DRAFT_KEYS, editorSettingsDraftFromSettings, editorSettingsDraftChanged, editorSettingsPatchFromDraft, normalizeQueryResultMaxRowsDraft, normalizeTableOpenPageSizeDraft } from "../editorSettingsDraft";
 import type { EditorSettings } from "@/stores/settingsStore";
 
 function makeSettings(overrides: Partial<EditorSettings> = {}): EditorSettings {
@@ -7,6 +7,8 @@ function makeSettings(overrides: Partial<EditorSettings> = {}): EditorSettings {
     autoCalculateTotalRows: false,
     pageSize: 100,
     tableOpenPageSize: 100,
+    queryResultMaxRowsEnabled: true,
+    queryResultMaxRows: 100000,
     sqlEngine: "desktop",
     tabSize: 2,
     keywordCase: "upper",
@@ -35,7 +37,10 @@ describe("EDITOR_SETTINGS_DRAFT_KEYS", () => {
   });
 
   it("includes the table-open page size", () => {
+    expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("pageSize");
     expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("tableOpenPageSize");
+    expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("queryResultMaxRowsEnabled");
+    expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("queryResultMaxRows");
   });
 
   it("includes the saved SQL open target mode", () => {
@@ -89,7 +94,8 @@ describe("editorSettingsDraftFromSettings", () => {
 
 describe("normalizeTableOpenPageSizeDraft", () => {
   it.each([
-    [200000, 100000],
+    [200000, 200000],
+    [2000000, 1000000],
     [0, 100],
     [-1, 100],
     ["123.9", 123],
@@ -99,6 +105,17 @@ describe("normalizeTableOpenPageSizeDraft", () => {
     [500, 500],
   ])("normalizes %s to %s", (value, expected) => {
     expect(normalizeTableOpenPageSizeDraft(value)).toBe(expected);
+  });
+});
+
+describe("normalizeQueryResultMaxRowsDraft", () => {
+  it.each([
+    [250000, 250000],
+    [0, 1],
+    [2147483648, 2147483647],
+    [Number.NaN, 100000],
+  ])("normalizes %s to %s", (value, expected) => {
+    expect(normalizeQueryResultMaxRowsDraft(value)).toBe(expected);
   });
 });
 
@@ -181,7 +198,7 @@ describe("editorSettingsPatchFromDraft", () => {
     const draft = editorSettingsDraftFromSettings(settings);
     const base = editorSettingsDraftFromSettings(settings);
     draft.tableOpenPageSize = 200000.9;
-    expect(editorSettingsPatchFromDraft(draft, base).tableOpenPageSize).toBe(100000);
+    expect(editorSettingsPatchFromDraft(draft, base).tableOpenPageSize).toBe(200000);
   });
 
   it("includes the saved SQL open target when changed", () => {

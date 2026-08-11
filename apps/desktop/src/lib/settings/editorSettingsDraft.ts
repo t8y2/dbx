@@ -1,5 +1,6 @@
 import type { EditorSettings } from "@/stores/settingsStore";
 import { normalizeResultPageSize } from "@/lib/dataGrid/paginationPageSize";
+import { normalizeQueryResultMaxRows } from "@/lib/dataGrid/queryResultRowLimit";
 import { normalizeCompletionTriggerMode } from "@/lib/sql/sqlCompletionTriggerPolicy";
 
 export const EDITOR_SETTINGS_DRAFT_KEYS = [
@@ -36,9 +37,11 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "compactColumnHeaderActions",
   "dataGridQuickEntry",
   "dataGridAutoTransposeSingleRow",
+  "pageSize",
   "tableOpenPageSize",
+  "queryResultMaxRowsEnabled",
+  "queryResultMaxRows",
   "infiniteScroll",
-  "infiniteScrollMaxRows",
   "regexMaxMatchCount",
   "autoCalculateTotalRows",
   "tableColumnTemplateFields",
@@ -86,8 +89,13 @@ export function normalizeTableOpenPageSizeDraft(value: unknown): number {
   return normalizeResultPageSize(value);
 }
 
+export function normalizeQueryResultMaxRowsDraft(value: unknown): number {
+  return normalizeQueryResultMaxRows(value);
+}
+
 function normalizedDraftValue(key: EditorSettingsDraftKey, value: unknown): unknown {
-  if (key === "tableOpenPageSize") return normalizeTableOpenPageSizeDraft(value);
+  if (key === "pageSize" || key === "tableOpenPageSize") return normalizeTableOpenPageSizeDraft(value);
+  if (key === "queryResultMaxRows") return normalizeQueryResultMaxRowsDraft(value);
   if (key === "completionTriggerMode") return normalizeCompletionTriggerMode(value);
   return value;
 }

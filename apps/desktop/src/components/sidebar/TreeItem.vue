@@ -49,7 +49,7 @@ import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import LightTooltip from "@/components/ui/LightTooltip.vue";
-import type { ColumnInfo, ConnectionConfig, DatabaseType, TreeNode } from "@/types/database";
+import type { ColumnInfo, ConnectionConfig, CustomTypeTreeMemberMeta, DatabaseType, TreeNode, TriggerInfo } from "@/types/database";
 import { alignedCommentLeadingWidth, canTreeNodePin, canTreeNodeShowExpander, sidebarTreeNodeComment, trailingCommentAvailableWidth, trailingCommentGapPx, treeItemPaddingLeft, treeLabelWidthClass, usesFullWidthTreeLabel } from "@/lib/sidebar/sidebarTreeItemLayout";
 import { clearActiveTableReferencePayload, createTableReferencePayload, createTableReferenceDropEvent, setActiveTableReferencePayload, type QueryEditorTableReferencePayload } from "@/lib/editor/queryEditorTableDrop";
 import { formatSidebarObjectStorage } from "@/lib/sidebar/sidebarDatabaseStorage";
@@ -72,6 +72,7 @@ import { useDragSort } from "@/composables/useDragSort";
 import { sidebarTreeRuntimeKey } from "@/lib/sidebar/sidebarTreeRuntime";
 import { treeNodePinKey } from "@/lib/app/pinnedItems";
 import { isTreeGroupNodeType } from "@/lib/sidebar/treeNodeGroup";
+import { customTypeCapabilities } from "@/lib/database/databaseObjectCapabilities";
 import { shouldActivateTreeNodeOnSingleClick } from "@/lib/sidebar/treeNodeClick";
 
 const { t } = useI18n();
@@ -299,6 +300,8 @@ function getIconInfo(node: TreeNode): { icon: any; colorClass: string } | null {
       return { icon: Braces, colorClass: "text-violet-500" };
     case "type-body":
       return { icon: FileCode, colorClass: "text-violet-400" };
+    case "type-member":
+      return { icon: Columns3, colorClass: "text-muted-foreground" };
     case "group-tables":
       return { icon: Table, colorClass: "text-green-500" };
     case "group-views":
@@ -341,6 +344,12 @@ function displayLabel(node: TreeNode): string {
   if (node.type === "linked-server-root") return t(node.label);
   if (node.label === "tree.defaultDatabase") return t(node.label);
   return isGroupLabel(node) ? t(node.label) : node.label;
+}
+
+function treeNodeSecondaryValue(node: TreeNode): string | undefined {
+  if (node.type === "type" && node.customTypeKind) return t(`customType.kinds.${node.customTypeKind}`);
+  if (node.type === "type-member") return (node.meta as CustomTypeTreeMemberMeta | undefined)?.displayValue;
+  return undefined;
 }
 
 function visibleLabel(node: TreeNode): string {
@@ -451,6 +460,24 @@ const detailTooltip = computed(() => {
     ].filter((row) => row.value);
     return { rows };
   }
+  if (node.type === "trigger" && node.meta && node.connectionId && effectiveDatabaseTypeForConnection(connectionStore.getConfig(node.connectionId)) === "xugu") {
+    const trigger = node.meta as TriggerInfo;
+    const hasXuguDetails = trigger.level != null || trigger.condition != null || trigger.language != null || trigger.enabled != null || trigger.valid != null || trigger.created_at != null || trigger.comment != null;
+    if (!hasXuguDetails) return null;
+    const rows: DetailTooltipRow[] = [
+      { label: t("objects.name"), value: visibleLabel(node) },
+      { label: t("objects.triggerTiming"), value: cleanTooltipValue(trigger.timing) },
+      { label: t("objects.triggerEvent"), value: cleanTooltipValue(trigger.event) },
+      { label: t("objects.triggerLevel"), value: cleanTooltipValue(trigger.level) },
+      { label: t("objects.triggerStatus"), value: trigger.enabled == null ? "" : t(trigger.enabled ? "objects.enabled" : "objects.disabled") },
+      { label: t("objects.validity"), value: trigger.valid == null ? "" : t(trigger.valid ? "objects.valid" : "objects.invalid") },
+      { label: t("objects.triggerCondition"), value: cleanTooltipValue(trigger.condition), multiline: true },
+      { label: t("objects.triggerLanguage"), value: cleanTooltipValue(trigger.language) },
+      { label: t("objects.createdAt"), value: cleanTooltipValue(trigger.created_at) },
+      { label: t("objects.comment"), value: cleanTooltipValue(trigger.comment), multiline: true },
+    ].filter((row) => row.value);
+    return rows.length ? { rows } : null;
+  }
   const comment = node.type === "column" && node.meta && "comment" in node.meta ? (node.meta as ColumnInfo).comment : node.comment;
   if (!comment || (node.type !== "schema" && node.type !== "table" && node.type !== "view" && node.type !== "column")) return null;
   const rows: DetailTooltipRow[] = [
@@ -554,13 +581,19 @@ async function cancelConnectionAttempt() {
   }
 }
 
-const canExpand = computed(() =>
-  canTreeNodeShowExpander({
+const canExpand = computed(() => {
+  // PostgreSQL-family custom types: only show the expander when the type has
+  // loadable members; types without members (enum/domain/range/base) do not
+  // expand even if the catalog row lists child metadata.
+  if (activeNode.value.type === "type" && customTypeCapabilities(currentDatabaseType()).details) {
+    return activeNode.value.hasMembers === true;
+  }
+  return canTreeNodeShowExpander({
     type: activeNode.value.type,
     childCount: activeNode.value.children?.length ?? 0,
     explicitContainer: (activeNode.value.type === "package" && activeNode.value.children !== undefined) || activeNode.value.xuguTypeMembersExpandable === true,
-  }),
-);
+  });
+});
 
 const isPinned = computed(() => activeNode.value.pinned || connectionStore.isTreeNodePinned(activeNode.value));
 
@@ -1187,6 +1220,7 @@ function onKeydown(event: KeyboardEvent) {
               @click.stop
             />
             <span v-else ref="labelRef" :class="[labelWidthClass, { 'flex-1': node.type === 'connection' && !trailingComment }]">{{ visibleLabel(node) }}</span>
+            <span v-if="treeNodeSecondaryValue(node)" class="min-w-0 max-w-[55%] shrink truncate text-xs text-muted-foreground" :title="treeNodeSecondaryValue(node)">{{ treeNodeSecondaryValue(node) }}</span>
             <button
               v-if="canDragPinnedOrder()"
               type="button"
@@ -1208,9 +1242,11 @@ function onKeydown(event: KeyboardEvent) {
                   node.type === 'group-materialized-views' ||
                   node.type === 'group-procedures' ||
                   node.type === 'group-functions' ||
+                  node.type === 'group-triggers' ||
                   node.type === 'group-sequences' ||
                   node.type === 'group-synonyms' ||
                   node.type === 'group-packages' ||
+                  node.type === 'group-types' ||
                   node.type === 'group-partitions') &&
                 node.objectCount != null
               "

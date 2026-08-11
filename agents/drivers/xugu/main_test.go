@@ -903,6 +903,58 @@ func TestTableChildMetadataPresentationHelpers(t *testing.T) {
 	if got := xuguAutoPartitionUnit(2); got != "MONTH" {
 		t.Fatalf("auto partition unit = %q", got)
 	}
+	if got := triggerLevelName(int64(1)); got != "FOR EACH ROW" {
+		t.Fatalf("row trigger level = %q", got)
+	}
+	if got := triggerLevelName(int64(2)); got != "FOR STATEMENT" {
+		t.Fatalf("statement trigger level = %q", got)
+	}
+}
+
+func TestListTriggersReturnsXuguTriggerDetails(t *testing.T) {
+	db, err := sql.Open("xugu-test-trigger-details", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	s := newServer()
+	s.db = db
+	s.params.Database = "TEST_DB"
+
+	triggers, err := s.listTriggers("APP", "EVENTS")
+	if err != nil {
+		t.Fatalf("listTriggers: %v", err)
+	}
+	if len(triggers) != 2 {
+		t.Fatalf("trigger count = %d, want 2", len(triggers))
+	}
+	row := triggers[0]
+	if row.Name != "TR_EVENTS_ROW" || row.Timing != "BEFORE" || row.Event != "INSERT OR UPDATE" || row.Level != "FOR EACH ROW" {
+		t.Fatalf("unexpected row trigger identity: %#v", row)
+	}
+	if row.Condition == nil || *row.Condition != "NEW_VALUE >= 0" || row.Language == nil || *row.Language != "PL/SQL" {
+		t.Fatalf("unexpected row trigger metadata: %#v", row)
+	}
+	if row.Enabled == nil || !*row.Enabled || row.Valid == nil || !*row.Valid {
+		t.Fatalf("expected enabled valid row trigger: %#v", row)
+	}
+	if row.Comment == nil || *row.Comment != "row audit trigger" || row.CreatedAt == nil || *row.CreatedAt != "2026-08-10 09:30:00" {
+		t.Fatalf("unexpected row trigger annotation metadata: %#v", row)
+	}
+
+	statement := triggers[1]
+	if statement.Level != "FOR STATEMENT" || statement.Enabled == nil || *statement.Enabled || statement.Valid == nil || *statement.Valid {
+		t.Fatalf("expected disabled invalid statement trigger: %#v", statement)
+	}
+
+	objects, err := s.listObjects("APP", metadataListConstraints{ObjectTypes: []string{"TRIGGER"}})
+	if err != nil {
+		t.Fatalf("listObjects triggers: %v", err)
+	}
+	if len(objects) != 2 || objects[0].Trigger == nil || objects[0].Trigger.Level != "FOR EACH ROW" || objects[0].Valid == nil || !*objects[0].Valid {
+		t.Fatalf("unexpected schema trigger objects: %#v", objects)
+	}
 }
 
 func TestTableChildMetadataRPCsReturnCatalogObjects(t *testing.T) {
@@ -2155,6 +2207,7 @@ func init() {
 	sql.Register("xugu-test-permission-metadata", &xuguPermissionMetadataDriver{})
 	sql.Register("xugu-test-fallback-errors", &xuguFallbackErrorDriver{})
 	sql.Register("xugu-test-eof", &xuguEOFDriver{})
+	sql.Register("xugu-test-trigger-details", &xuguTriggerDetailsDriver{})
 }
 
 type xuguEOFDriver struct{}
@@ -2737,6 +2790,47 @@ func (c *xuguTableObjectsConn) QueryContext(_ context.Context, query string, _ [
 	default:
 		return nil, fmt.Errorf("unexpected query: %s", query)
 	}
+}
+
+type xuguTriggerDetailsDriver struct{}
+
+func (d *xuguTriggerDetailsDriver) Open(name string) (driver.Conn, error) {
+	return &xuguTriggerDetailsConn{}, nil
+}
+
+type xuguTriggerDetailsConn struct{}
+
+func (c *xuguTriggerDetailsConn) Prepare(query string) (driver.Stmt, error) {
+	return nil, errors.New("not supported")
+}
+func (c *xuguTriggerDetailsConn) Close() error              { return nil }
+func (c *xuguTriggerDetailsConn) Begin() (driver.Tx, error) { return nil, errors.New("not supported") }
+func (c *xuguTriggerDetailsConn) QueryContext(_ context.Context, query string, _ []driver.NamedValue) (driver.Rows, error) {
+	upper := strings.ToUpper(query)
+	if !strings.Contains(upper, "FROM ALL_TRIGGERS") || !strings.Contains(upper, "CURRENT_DB_ID") {
+		return nil, fmt.Errorf("unexpected trigger details query: %s", query)
+	}
+	for _, column := range []string{"TRIG_TYPE", "TRIG_COND", "LANGUAGE", "ENABLE", "VALID", "COMMENTS", "CREATE_TIME"} {
+		if !strings.Contains(upper, column) {
+			return nil, fmt.Errorf("trigger details query omits %s: %s", column, query)
+		}
+	}
+	if strings.Contains(upper, "JOIN ALL_TABLES") {
+		return &xuguStaticRows{
+			columns: []string{"TRIG_NAME", "TRIG_EVENT", "TRIG_TIME", "TRIG_TYPE", "TRIG_COND", "LANGUAGE", "ENABLE", "VALID", "COMMENTS", "CREATE_TIME"},
+			values: [][]driver.Value{
+				{"TR_EVENTS_ROW", int64(3), int64(1), int64(1), "NEW_VALUE >= 0", "PL/SQL", true, true, "row audit trigger", "2026-08-10 09:30:00"},
+				{"TR_EVENTS_STATEMENT", int64(4), int64(4), int64(2), nil, "PL/SQL", false, false, nil, nil},
+			},
+		}, nil
+	}
+	return &xuguStaticRows{
+		columns: []string{"OBJECT_NAME", "OBJECT_TYPE", "COMMENTS", "VALID", "TRIG_EVENT", "TRIG_TIME", "TRIG_TYPE", "TRIG_COND", "LANGUAGE", "ENABLE", "CREATE_TIME"},
+		values: [][]driver.Value{
+			{"TR_EVENTS_ROW", "TRIGGER", "row audit trigger", true, int64(3), int64(1), int64(1), "NEW_VALUE >= 0", "PL/SQL", true, "2026-08-10 09:30:00"},
+			{"TR_EVENTS_STATEMENT", "TRIGGER", nil, false, int64(4), int64(4), int64(2), nil, "PL/SQL", false, nil},
+		},
+	}, nil
 }
 
 type xuguLegacyColumnsDriver struct{}

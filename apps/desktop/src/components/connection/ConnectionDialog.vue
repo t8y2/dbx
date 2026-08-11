@@ -33,7 +33,7 @@ import * as api from "@/lib/backend/api";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { applyParsedConnectionUrl, normalizeMongoConnectionString, parseConnectionUrl } from "@/lib/connection/connectionUrl";
 import { buildOracleTnsConnectionString, normalizeOracleTnsAdminPath, parseOracleTnsConnectionString } from "@/lib/connection/oracleTnsConnection";
-import { parseConnectionDeepLink, type ConnectionDeepLinkDraft } from "@/lib/connection/connectionDeepLink";
+import { connectionDeepLinkServiceHydrationValue, parseConnectionDeepLink, parseServiceConnectionUrl, type ConnectionDeepLinkDraft } from "@/lib/connection/connectionDeepLink";
 import { connectionUrlPlaceholder as getUrlPlaceholder } from "@/lib/connection/connectionPresentation";
 import { parseGaussdbHosts, serializeGaussdbHosts, type GaussdbHostEntry } from "@/lib/connection/gaussdbHosts";
 import { h2ConnectionModeForConfig, h2FileJdbcUrlWithPath, h2FilePathFromJdbcUrl, isH2SplitJdbcUrl, type H2ConnectionMode } from "@/lib/database/h2Connection";
@@ -3502,7 +3502,7 @@ function clearEditedConnectionErrorAfterSuccessfulTest() {
 
 function applyConnectionUrlToForm(input: string): boolean {
   try {
-    const draft = parseConnectionDeepLink(input);
+    const draft = parseConnectionDeepLink(input) ?? parseServiceConnectionUrl(input);
     if (draft) {
       applyConnectionDraftToForm({ ...draft, oneTime: undefined });
       resetTestState();
@@ -4687,7 +4687,24 @@ function resetForm() {
 const submittedOneTimePrefillKey = ref<string | null>(null);
 
 function oneTimePrefillKey(draft: ConnectionDeepLinkDraft) {
-  return JSON.stringify([draft.name, draft.dbType, draft.driverProfile, draft.driverLabel, draft.host, draft.port, draft.portExplicit, draft.username, draft.password, draft.database, draft.urlParams, draft.ssl, draft.connectionString, draft.oracleConnectionType, draft.useMongoUrl]);
+  return JSON.stringify([
+    draft.name,
+    draft.dbType,
+    draft.driverProfile,
+    draft.driverLabel,
+    draft.host,
+    draft.port,
+    draft.portExplicit,
+    draft.username,
+    draft.password,
+    draft.database,
+    draft.urlParams,
+    draft.ssl,
+    draft.connectionString,
+    draft.oracleConnectionType,
+    draft.useMongoUrl,
+    draft.serviceConfig,
+  ]);
 }
 
 function submitOneTimePrefill(draft: ConnectionDeepLinkDraft) {
@@ -4722,6 +4739,11 @@ function applyConnectionDraftToConfig(config: Omit<ConnectionConfig, "id">, draf
 function applyConnectionDraftToForm(draft: ConnectionDeepLinkDraft) {
   applyProfile(draft.driverProfile);
   form.value = applyConnectionDraftToConfig(form.value, draft);
+  if (draft.serviceConfig?.kind === "consul") {
+    hydrateConsulFields(connectionDeepLinkServiceHydrationValue(draft.serviceConfig));
+  } else if (draft.serviceConfig?.kind === "nacos") {
+    hydrateNacosFields(connectionDeepLinkServiceHydrationValue(draft.serviceConfig));
+  }
   oracleTnsAdminPath.value = parseOracleTnsConnectionString(form.value.connection_string)?.tnsAdmin || "";
   selectedType.value = draft.driverProfile;
   if (form.value.db_type === "h2") {

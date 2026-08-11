@@ -42,11 +42,14 @@ pub async fn list_objects(pool: &MySqlPool, database: &str) -> Result<Vec<Object
             schema: Some(database.to_string()),
             valid: None,
             signature: None,
+            custom_type_kind: None,
+            has_members: None,
             comment: table.comment,
             created_at: None,
             updated_at: None,
             parent_schema: table.parent_schema,
             parent_name: table.parent_name,
+            trigger: None,
             xugu_type_members_expandable: None,
         })
         .collect();
@@ -104,11 +107,14 @@ fn plugin_object(
         schema: Some(database.to_string()),
         valid: None,
         signature: None,
+        custom_type_kind: None,
+        has_members: None,
         comment: if comment_parts.is_empty() { None } else { Some(comment_parts.join(", ")) },
         created_at: None,
         updated_at: None,
         parent_schema: None,
         parent_name: None,
+        trigger: None,
         xugu_type_members_expandable: None,
     })
 }

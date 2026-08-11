@@ -47,6 +47,88 @@ const PARAMETER_NAME_RE = /^[\p{L}_][\p{L}\p{N}_]*$/u;
 const PARAMETER_NAME_START_RE = /[\p{L}_]/u;
 const PARAMETER_NAME_CHAR_RE = /[\p{L}\p{N}_]/u;
 const SQL_SERVER_TEMP_TABLE_CONTEXT_KEYWORDS = new Set(["table", "from", "join", "into", "update", "truncate"]);
+const POSTGRES_QUESTION_PARAMETER_PREFIX_KEYWORDS = new Set([
+  "all",
+  "and",
+  "any",
+  "as",
+  "between",
+  "by",
+  "case",
+  "collate",
+  "distinct",
+  "else",
+  "fetch",
+  "filter",
+  "first",
+  "for",
+  "from",
+  "group",
+  "groups",
+  "having",
+  "ilike",
+  "in",
+  "interval",
+  "into",
+  "is",
+  "like",
+  "limit",
+  "next",
+  "not",
+  "offset",
+  "on",
+  "or",
+  "order",
+  "over",
+  "partition",
+  "placing",
+  "range",
+  "returning",
+  "rows",
+  "select",
+  "set",
+  "similar",
+  "some",
+  "then",
+  "to",
+  "using",
+  "values",
+  "when",
+  "where",
+  "window",
+  "zone",
+]);
+const POSTGRES_QUESTION_OPERATOR_TRAILING_KEYWORDS = new Set([
+  "and",
+  "as",
+  "between",
+  "else",
+  "end",
+  "except",
+  "fetch",
+  "filter",
+  "from",
+  "group",
+  "having",
+  "ilike",
+  "in",
+  "intersect",
+  "is",
+  "join",
+  "like",
+  "limit",
+  "offset",
+  "on",
+  "or",
+  "order",
+  "over",
+  "returning",
+  "then",
+  "union",
+  "when",
+  "where",
+  "window",
+]);
 
 export function readSqlBracedParameterAt(sql: string, start: number, options?: SqlParameterOptions): SqlBracedParameter | null {
   const open = sql.slice(start, start + 2);
@@ -168,6 +250,10 @@ function findSqlParameterOccurrences(sql: string, options?: SqlParameterOptions)
       continue;
     }
     if (ch === "?" && isSyntaxEnabled("positional")) {
+      if (isPostgresQuestionMarkOperator(sql, i, options?.databaseType)) {
+        i += 1;
+        continue;
+      }
       positionalIndex += 1;
       const key = `?${positionalIndex}`;
       occurrences.push({ key, name: key, syntax: "positional", token: "?", start: i, end: i + 1 });
@@ -240,6 +326,50 @@ function isOracleDatabaseLinkMarker(sql: string, index: number, databaseType: Da
   if (databaseType !== "oracle" || index === 0) return false;
   const previous = sql[index - 1];
   return PARAMETER_NAME_CHAR_RE.test(previous) || previous === "$" || previous === "#" || previous === '"';
+}
+
+function isPostgresQuestionMarkOperator(sql: string, index: number, databaseType: DatabaseType | undefined): boolean {
+  if (databaseType !== "postgres") return false;
+  if (sql[index - 1] === "@" || sql[index + 1] === "|" || sql[index + 1] === "&") return true;
+
+  const previousIndex = previousSqlSignificantIndex(sql, index);
+  if (previousIndex < 0 || !canEndPostgresExpression(sql, previousIndex)) return false;
+
+  const nextIndex = skipSqlWhitespaceAndComments(sql, index + 1);
+  if (nextIndex >= sql.length) return false;
+  const next = sql[nextIndex];
+  if (next === "'" || next === '"' || next === "`" || next === "[" || next === "(" || next === "$" || next === ":" || next === "#" || next === "@" || next === "?" || next === "+" || next === "-") return true;
+  if (!PARAMETER_NAME_CHAR_RE.test(next)) return false;
+
+  let end = nextIndex + 1;
+  while (end < sql.length && PARAMETER_NAME_CHAR_RE.test(sql[end])) end += 1;
+  return !POSTGRES_QUESTION_OPERATOR_TRAILING_KEYWORDS.has(sql.slice(nextIndex, end).toLowerCase());
+}
+
+function previousSqlSignificantIndex(sql: string, start: number): number {
+  let index = start - 1;
+  while (index >= 0) {
+    while (index >= 0 && /\s/.test(sql[index])) index -= 1;
+    if (index >= 1 && sql[index - 1] === "*" && sql[index] === "/") {
+      const commentStart = sql.lastIndexOf("/*", index - 1);
+      if (commentStart >= 0) {
+        index = commentStart - 1;
+        continue;
+      }
+    }
+    return index;
+  }
+  return -1;
+}
+
+function canEndPostgresExpression(sql: string, end: number): boolean {
+  const previous = sql[end];
+  if (previous === ")" || previous === "]" || previous === "}" || previous === "'" || previous === '"' || previous === "`" || previous === "$") return true;
+  if (!PARAMETER_NAME_CHAR_RE.test(previous)) return false;
+
+  let start = end;
+  while (start > 0 && PARAMETER_NAME_CHAR_RE.test(sql[start - 1])) start -= 1;
+  return !POSTGRES_QUESTION_PARAMETER_PREFIX_KEYWORDS.has(sql.slice(start, end + 1).toLowerCase());
 }
 
 function collectDuckDbStructFieldSeparators(sql: string): Set<number> {

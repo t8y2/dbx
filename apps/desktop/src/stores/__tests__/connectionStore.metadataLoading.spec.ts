@@ -583,7 +583,7 @@ describe("connectionStore metadata loading", () => {
   });
 
   it("keeps concurrent table-tree and local-index refreshes in separate cache entries", async () => {
-    const treeCacheKey = "pg-1:app:public:group-tables:objects-v6";
+    const treeCacheKey = "pg-1:app:public:group-tables:objects-v8";
     const indexCacheKey = `${treeCacheKey}:table-search-index-v1`;
     const cachedPayloads = new Map<string, unknown>([
       [
@@ -2565,7 +2565,7 @@ describe("connectionStore metadata loading", () => {
 
     const loadPromise = store.loadTables(connection.id, "prulife", "xtdpcky", { force: true });
     await vi.waitFor(() => expect(saveSchemaCache).toHaveBeenCalledTimes(1));
-    expect(saveSchemaCache.mock.calls[0]?.[0]).toBe(`${connection.id}:prulife:xtdpcky:objects-grouped-v7-informix-owner-v2`);
+    expect(saveSchemaCache.mock.calls[0]?.[0]).toBe(`${connection.id}:prulife:xtdpcky:objects-grouped-v8-informix-owner-v2`);
     expect(schemaNode.isLoading).toBe(true);
 
     schemaNode.isExpanded = false;
@@ -2987,5 +2987,76 @@ describe("connectionStore metadata loading", () => {
     expect(staleDbNode.children?.length ?? 0).toBe(0);
     expect(replacementDb.children?.length ?? 0).toBeGreaterThan(0);
     expect(store.isTreeNodeChildrenLoaded(dbId)).toBe(true);
+  });
+
+  it("loads custom type members into the current tree node and ignores stale responses", async () => {
+    let resolveFirst!: (value: any) => void;
+    const first = new Promise((resolve) => {
+      resolveFirst = resolve;
+    });
+    const getCustomTypeDetails = vi
+      .fn()
+      .mockReturnValueOnce(first)
+      .mockResolvedValueOnce({
+        name: "status",
+        schema: "app",
+        kind: "enum",
+        members: [{ name: "", dataType: "", ordinal: 1, enumValue: "published" }],
+        properties: { domainConstraints: [] },
+      });
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+      getCustomTypeDetails,
+      loadSchemaCache: vi.fn().mockResolvedValue(null),
+      saveSchemaCache: vi.fn().mockResolvedValue(undefined),
+      saveConnections: vi.fn().mockResolvedValue(undefined),
+      saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    const connection = postgresConnection();
+    const typeNode: TreeNode = {
+      id: `${connection.id}:app:types:status`,
+      label: "status",
+      objectName: "status",
+      type: "type",
+      connectionId: connection.id,
+      database: "app",
+      schema: "app",
+      children: undefined,
+    };
+    store.connections = [connection];
+    store.connectedIds.add(connection.id);
+    store.treeNodes = [
+      {
+        id: connection.id,
+        label: connection.name,
+        type: "connection",
+        connectionId: connection.id,
+        children: [typeNode],
+      },
+    ];
+
+    const staleLoad = store.loadCustomTypeChildren(typeNode, { force: true });
+    await vi.waitFor(() => expect(getCustomTypeDetails).toHaveBeenCalledTimes(1));
+    await store.loadCustomTypeChildren(typeNode, { force: true });
+    resolveFirst({
+      name: "status",
+      schema: "app",
+      kind: "enum",
+      members: [{ name: "", dataType: "", ordinal: 1, enumValue: "draft" }],
+      properties: { domainConstraints: [] },
+    });
+    await staleLoad;
+
+    expect(typeNode.isExpanded).toBe(true);
+    expect(typeNode.customTypeKind).toBe("enum");
+    expect(typeNode.hasMembers).toBe(true);
+    expect(typeNode.children?.map((child) => child.label)).toEqual(["published"]);
+    expect(store.isTreeNodeChildrenLoaded(typeNode.id)).toBe(true);
   });
 });

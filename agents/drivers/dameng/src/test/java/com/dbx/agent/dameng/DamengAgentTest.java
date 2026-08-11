@@ -18,6 +18,7 @@ import java.lang.reflect.Proxy;
 import java.sql.Connection;
 import java.sql.SQLException;
 import java.sql.SQLFeatureNotSupportedException;
+import java.sql.SQLTimeoutException;
 import java.sql.SQLTransientConnectionException;
 import java.sql.Statement;
 import java.util.ArrayList;
@@ -61,10 +62,12 @@ class DamengAgentTest extends JdbcFakeExecutionBehaviorTest {
     @Test
     void physicalConnectionsEnableDbmsOutputWithoutChangingUserSql() throws Exception {
         List<String> executedSql = new ArrayList<>();
+        List<Integer> queryTimeouts = new ArrayList<>();
         DamengAgent agent = new DamengAgent();
 
-        agent.afterPhysicalConnect(null, printMessageConnection(null, executedSql));
+        agent.afterPhysicalConnect(null, printMessageConnection(null, executedSql, queryTimeouts));
 
+        assertEquals(List.of(5), queryTimeouts);
         assertEquals(List.of("BEGIN DBMS_OUTPUT.ENABLE(1000000); END;"), executedSql);
     }
 
@@ -79,6 +82,16 @@ class DamengAgentTest extends JdbcFakeExecutionBehaviorTest {
         assertDoesNotThrow(() -> agent.afterPhysicalConnect(
             null,
             failingDbmsOutputConnection(new SQLException("permission denied", "42000"))
+        ));
+    }
+
+    @Test
+    void physicalConnectionsIgnoreTimedOutDbmsOutputInitialization() {
+        DamengAgent agent = new DamengAgent();
+
+        assertDoesNotThrow(() -> agent.afterPhysicalConnect(
+            null,
+            failingDbmsOutputConnection(new SQLTimeoutException("DBMS_OUTPUT enable timed out"))
         ));
     }
 
@@ -361,16 +374,25 @@ class DamengAgentTest extends JdbcFakeExecutionBehaviorTest {
     }
 
     private static Connection printMessageConnection(String printMessage, List<String> executedSql) {
-        return statementConnection(printMessage, executedSql, null);
+        return printMessageConnection(printMessage, executedSql, new ArrayList<>());
+    }
+
+    private static Connection printMessageConnection(
+        String printMessage,
+        List<String> executedSql,
+        List<Integer> queryTimeouts
+    ) {
+        return statementConnection(printMessage, executedSql, queryTimeouts, null);
     }
 
     private static Connection failingDbmsOutputConnection(SQLException failure) {
-        return statementConnection(null, new ArrayList<>(), failure);
+        return statementConnection(null, new ArrayList<>(), new ArrayList<>(), failure);
     }
 
     private static Connection statementConnection(
         String printMessage,
         List<String> executedSql,
+        List<Integer> queryTimeouts,
         SQLException executeFailure
     ) {
         InvocationHandler statementHandler = (Object unused, Method method, Object[] args) -> {
@@ -381,6 +403,9 @@ class DamengAgentTest extends JdbcFakeExecutionBehaviorTest {
                     }
                     executedSql.add((String) args[0]);
                     return false;
+                case "setQueryTimeout":
+                    queryTimeouts.add((Integer) args[0]);
+                    return null;
                 case "getPrintMsg":
                     return printMessage;
                 case "getUpdateCount":

@@ -3,6 +3,7 @@ package com.dbx.agent.rocketmq;
 import com.google.gson.*;
 import org.apache.rocketmq.acl.common.AclClientRPCHook;
 import org.apache.rocketmq.acl.common.SessionCredentials;
+import org.apache.rocketmq.client.ClientConfig;
 import org.apache.rocketmq.client.QueryResult;
 import org.apache.rocketmq.client.exception.MQBrokerException;
 import org.apache.rocketmq.client.exception.MQClientException;
@@ -2623,6 +2624,7 @@ public final class RocketMqAgent {
             ? new DefaultMQAdminExt(rpcHook, timeoutMs)
             : new DefaultMQAdminExt(timeoutMs);
         admin.setNamesrvAddr(namesrvAddr(conn));
+        applySocksProxy(admin, conn);
         admin.setAdminExtGroup("_DBX_ROCKETMQ_ADMIN_" + UUID.randomUUID());
         admin.setInstanceName("DBX_" + UUID.randomUUID());
         admin.start();
@@ -2635,6 +2637,7 @@ public final class RocketMqAgent {
             ? new DefaultMQProducer("_DBX_ROCKETMQ_PRODUCER", rpcHook)
             : new DefaultMQProducer("_DBX_ROCKETMQ_PRODUCER");
         nextProducer.setNamesrvAddr(namesrvAddr(conn));
+        applySocksProxy(nextProducer, conn);
         nextProducer.setInstanceName("DBX_" + UUID.randomUUID());
         // Follow Advanced query timeout — SDK default sendMsgTimeout is only 3s.
         nextProducer.setSendMsgTimeout(operationBudgetMsAsInt(conn));
@@ -2648,6 +2651,7 @@ public final class RocketMqAgent {
             ? new DefaultLitePullConsumer(rpcHook)
             : new DefaultLitePullConsumer();
         consumer.setNamesrvAddr(namesrvAddr(conn));
+        applySocksProxy(consumer, conn);
         consumer.setConsumerGroup("_DBX_PEEK_" + UUID.randomUUID());
         consumer.setInstanceName("DBX_" + UUID.randomUUID());
         consumer.setAutoCommit(false);
@@ -2660,6 +2664,7 @@ public final class RocketMqAgent {
             ? new DefaultMQPullConsumer(MixAll.TOOLS_CONSUMER_GROUP, rpcHook)
             : new DefaultMQPullConsumer(MixAll.TOOLS_CONSUMER_GROUP);
         consumer.setNamesrvAddr(namesrvAddr(conn));
+        applySocksProxy(consumer, conn);
         consumer.setInstanceName("DBX_" + UUID.randomUUID());
         return consumer;
     }
@@ -2682,6 +2687,33 @@ public final class RocketMqAgent {
             throw new IllegalArgumentException("namesrv_addr is required");
         }
         return addr;
+    }
+
+    static boolean applySocksProxy(ClientConfig client, JsonObject conn) {
+        if (!conn.has("socks_proxy") || !conn.get("socks_proxy").isJsonObject()) {
+            return false;
+        }
+        JsonObject proxy = conn.getAsJsonObject("socks_proxy");
+        String host = stringOrEmpty(proxy, "host");
+        int port = intOrDefault(proxy, "port", 0);
+        if (host.isBlank() || port <= 0 || port > 65_535) {
+            throw new IllegalArgumentException("socks_proxy host and port are required");
+        }
+
+        JsonObject route = new JsonObject();
+        route.addProperty("addr", formatSocketAddress(host, Integer.toString(port)));
+        String username = stringOrEmpty(proxy, "username");
+        String password = stringOrEmpty(proxy, "password");
+        if (!username.isBlank()) {
+            route.addProperty("username", username);
+        }
+        if (!password.isBlank()) {
+            route.addProperty("password", password);
+        }
+        JsonObject routes = new JsonObject();
+        routes.add("0.0.0.0/0", route);
+        client.setSocksProxyConfig(GSON.toJson(routes));
+        return true;
     }
 
     private static TopicList fetchTopicList(DefaultMQAdminExt admin, String cluster) throws Exception {
@@ -3145,6 +3177,9 @@ public final class RocketMqAgent {
         String explicit = brokerAddress(conn);
         if (!explicit.isBlank()) {
             return explicit;
+        }
+        if (conn.has("socks_proxy") && conn.get("socks_proxy").isJsonObject()) {
+            return brokerAddr;
         }
         String brokerHost = parseHostFromSocketAddress(brokerAddr);
         String brokerPort = parsePortFromSocketAddress(brokerAddr);

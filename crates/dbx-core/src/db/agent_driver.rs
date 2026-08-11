@@ -1127,6 +1127,7 @@ pub enum AgentMethod {
     CompletionAssistantSearchV1,
     GetObjectSource,
     GetColumns,
+    GetCustomTypeDetails,
     ListIndexes,
     ListForeignKeys,
     ListTriggers,
@@ -1208,6 +1209,7 @@ impl AgentMethod {
             Self::GetObjectSource => "get_object_source",
             Self::GetTableDdl => "get_table_ddl",
             Self::GetColumns => "get_columns",
+            Self::GetCustomTypeDetails => "get_type_details",
             Self::ListIndexes => "list_indexes",
             Self::ListForeignKeys => "list_foreign_keys",
             Self::ListTriggers => "list_triggers",
@@ -2060,6 +2062,21 @@ impl AgentDriverClient {
         .await
     }
 
+    pub async fn get_custom_type_details<T: DeserializeOwned + Send + 'static>(
+        &mut self,
+        database: &str,
+        schema: &str,
+        name: &str,
+        timeout_duration: Option<Duration>,
+    ) -> Result<T, String> {
+        self.call_method_with_timeout(
+            AgentMethod::GetCustomTypeDetails,
+            agent_type_details_params(database, schema, name),
+            timeout_duration,
+        )
+        .await
+    }
+
     pub async fn get_table_comment<T: DeserializeOwned + Send + 'static>(
         &mut self,
         database: &str,
@@ -2754,6 +2771,10 @@ pub fn agent_schema_table_params(database: &str, schema: &str, table: &str) -> V
 
 pub fn agent_object_source_params<K: Serialize>(database: &str, schema: &str, name: &str, object_type: &K) -> Value {
     serde_json::json!({ "database": database, "schema": schema, "name": name, "object_type": object_type })
+}
+
+pub fn agent_type_details_params(database: &str, schema: &str, name: &str) -> Value {
+    serde_json::json!({ "database": database, "schema": schema, "name": name })
 }
 
 pub fn agent_close_query_session_params(session_id: &str) -> Value {

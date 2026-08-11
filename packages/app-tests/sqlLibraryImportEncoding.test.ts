@@ -22,6 +22,16 @@ test("SQL library directory imports use the native pruned folder scanner", () =>
   assert.doesNotMatch(scanner, /@tauri-apps\/plugin-fs|readDir/);
 });
 
+test("SQL library directory imports preserve nested folder paths", () => {
+  const start = source.indexOf("async function importDirectoryIntoLibrary");
+  const end = source.indexOf("async function chooseSyncDirectory", start);
+  const handler = start >= 0 && end > start ? source.slice(start, end) : "";
+
+  assert.match(handler, /resolveImportedFolder\(connectionId, targetFolder\?\.id, file\.folderNames, folderCache\)/);
+  assert.match(handler, /uniqueImportedName\(file\.name, takenNames\)/);
+  assert.doesNotMatch(handler, /relativeImportName/);
+});
+
 test("SQL library file menu can open a file with the current tab target", () => {
   assert.match(source, /label: t\("sqlLibrary\.openInCurrentDatabase"\)/);
   assert.match(source, /action: \(\) => openFile\(target, "current"\)/);

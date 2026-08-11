@@ -304,12 +304,13 @@ type tableInfo struct {
 }
 
 type objectInfo struct {
-	Name                      string  `json:"name"`
-	ObjectType                string  `json:"object_type"`
-	Schema                    string  `json:"schema"`
-	Comment                   *string `json:"comment"`
-	Valid                     *bool   `json:"valid,omitempty"`
-	XuguTypeMembersExpandable *bool   `json:"xugu_type_members_expandable,omitempty"`
+	Name                      string       `json:"name"`
+	ObjectType                string       `json:"object_type"`
+	Schema                    string       `json:"schema"`
+	Comment                   *string      `json:"comment"`
+	Valid                     *bool        `json:"valid,omitempty"`
+	Trigger                   *triggerInfo `json:"trigger,omitempty"`
+	XuguTypeMembersExpandable *bool        `json:"xugu_type_members_expandable,omitempty"`
 }
 
 type metadataListConstraints struct {
@@ -491,9 +492,16 @@ type xuguPartitionInfo struct {
 }
 
 type triggerInfo struct {
-	Name   string `json:"name"`
-	Event  string `json:"event"`
-	Timing string `json:"timing"`
+	Name      string  `json:"name"`
+	Event     string  `json:"event"`
+	Timing    string  `json:"timing"`
+	Level     string  `json:"level"`
+	Condition *string `json:"condition,omitempty"`
+	Language  *string `json:"language,omitempty"`
+	Enabled   *bool   `json:"enabled,omitempty"`
+	Valid     *bool   `json:"valid,omitempty"`
+	Comment   *string `json:"comment,omitempty"`
+	CreatedAt *string `json:"created_at,omitempty"`
 }
 
 type server struct {
@@ -1867,6 +1875,9 @@ func (s *server) listObjects(schema string, constraints metadataListConstraints)
 	if err != nil {
 		return nil, err
 	}
+	if isOnlyXuguObjectType(constraints, "TRIGGER") {
+		return s.listSchemaTriggers(schema, constraints)
+	}
 	query := xuguListObjectsQuery(schema, constraints)
 	rows, err := s.queryRows(query.SQL, query.Args)
 	if err != nil {
@@ -1935,6 +1946,61 @@ func (s *server) listObjects(schema string, constraints metadataListConstraints)
 	}
 	defer s.closeRows(rows)
 	return readXuguObjectRows(rows, schema)
+}
+
+func isOnlyXuguObjectType(constraints metadataListConstraints, objectType string) bool {
+	objectTypes := normalizedXuguObjectTypes(constraints.ObjectTypes)
+	return len(objectTypes) == 1 && objectTypes[0] == objectType
+}
+
+func (s *server) listSchemaTriggers(schema string, constraints metadataListConstraints) ([]objectInfo, error) {
+	query := xuguSchemaTriggersQuery(schema, constraints)
+	rows, err := s.queryRows(query.SQL, query.Args)
+	if err != nil {
+		if isXuguMetadataUnavailableError(err) {
+			return []objectInfo{}, nil
+		}
+		return nil, err
+	}
+	defer s.closeRows(rows)
+
+	var result []objectInfo
+	for rows.Next() {
+		var item objectInfo
+		var event, timing, level, condition, language, enabled, valid, comment, createdAt any
+		if err := rows.Scan(&item.Name, &item.ObjectType, &comment, &valid, &event, &timing, &level, &condition, &language, &enabled, &createdAt); err != nil {
+			return nil, err
+		}
+		item.Schema = schema
+		item.Comment = optionalString(xuguString(comment))
+		item.Valid = optionalBool(valid)
+		item.Trigger = &triggerInfo{
+			Name:      item.Name,
+			Event:     triggerEventName(event),
+			Timing:    triggerTimingName(timing),
+			Level:     triggerLevelName(level),
+			Condition: optionalString(xuguString(condition)),
+			Language:  optionalString(xuguString(language)),
+			Enabled:   optionalBool(enabled),
+			Valid:     item.Valid,
+			Comment:   item.Comment,
+			CreatedAt: optionalString(xuguString(createdAt)),
+		}
+		result = append(result, item)
+	}
+	return emptyIfNil(result), rows.Err()
+}
+
+func xuguSchemaTriggersQuery(schema string, constraints metadataListConstraints) xuguMetadataListQuery {
+	return xuguConstrainedMetadataListQuery(`
+SELECT tr.TRIG_NAME AS OBJECT_NAME, 'TRIGGER' AS OBJECT_TYPE, tr.COMMENTS, tr.VALID,
+       tr.TRIG_EVENT, tr.TRIG_TIME, tr.TRIG_TYPE, tr.TRIG_COND, tr.LANGUAGE, tr.ENABLE, tr.CREATE_TIME
+FROM ALL_TRIGGERS tr
+JOIN ALL_SCHEMAS s ON s.DB_ID = tr.DB_ID AND s.SCHEMA_ID = tr.SCHEMA_ID
+WHERE s.DB_ID = CURRENT_DB_ID
+  AND UPPER(s.SCHEMA_NAME) = UPPER(?)`,
+		"OBJECT_NAME, OBJECT_TYPE, COMMENTS, VALID, TRIG_EVENT, TRIG_TIME, TRIG_TYPE, TRIG_COND, LANGUAGE, ENABLE, CREATE_TIME",
+		"OBJECT_NAME", "OBJECT_TYPE", []any{schema}, constraints)
 }
 
 func readXuguObjectRows(rows *sql.Rows, schema string) ([]objectInfo, error) {
@@ -2531,7 +2597,8 @@ func (s *server) listTriggers(schema, table string) ([]triggerInfo, error) {
 	}
 	table = strings.ToUpper(strings.TrimSpace(table))
 	rows, err := s.queryRows(`
-SELECT tr.TRIG_NAME, tr.TRIG_EVENT, tr.TRIG_TIME
+SELECT tr.TRIG_NAME, tr.TRIG_EVENT, tr.TRIG_TIME, tr.TRIG_TYPE,
+       tr.TRIG_COND, tr.LANGUAGE, tr.ENABLE, tr.VALID, tr.COMMENTS, tr.CREATE_TIME
 FROM ALL_TRIGGERS tr
 JOIN ALL_TABLES t ON t.DB_ID = tr.DB_ID AND t.TABLE_ID = tr.OBJ_ID
 JOIN ALL_SCHEMAS s ON s.DB_ID = t.DB_ID AND s.SCHEMA_ID = t.SCHEMA_ID
@@ -2549,12 +2616,19 @@ ORDER BY tr.TRIG_NAME`, []any{schema, table})
 	var result []triggerInfo
 	for rows.Next() {
 		var item triggerInfo
-		var event, timing any
-		if err := rows.Scan(&item.Name, &event, &timing); err != nil {
+		var event, timing, level, condition, language, enabled, valid, comment, createdAt any
+		if err := rows.Scan(&item.Name, &event, &timing, &level, &condition, &language, &enabled, &valid, &comment, &createdAt); err != nil {
 			return nil, err
 		}
 		item.Event = triggerEventName(event)
 		item.Timing = triggerTimingName(timing)
+		item.Level = triggerLevelName(level)
+		item.Condition = optionalString(xuguString(condition))
+		item.Language = optionalString(xuguString(language))
+		item.Enabled = optionalBool(enabled)
+		item.Valid = optionalBool(valid)
+		item.Comment = optionalString(xuguString(comment))
+		item.CreatedAt = optionalString(xuguString(createdAt))
 		result = append(result, item)
 	}
 	return emptyIfNil(result), rows.Err()
@@ -4265,6 +4339,14 @@ func optionalString(value string) *string {
 	return &value
 }
 
+func optionalBool(value any) *bool {
+	if normalizeValue(value) == nil {
+		return nil
+	}
+	result := truthy(value)
+	return &result
+}
+
 func xuguPartitionType(value int) string {
 	switch value {
 	case 1:
@@ -4864,6 +4946,17 @@ func triggerTimingName(value any) string {
 		return "INSTEAD"
 	case "4":
 		return "AFTER"
+	default:
+		return fmt.Sprint(normalizeValue(value))
+	}
+}
+
+func triggerLevelName(value any) string {
+	switch fmt.Sprint(normalizeValue(value)) {
+	case "1":
+		return "FOR EACH ROW"
+	case "2":
+		return "FOR STATEMENT"
 	default:
 		return fmt.Sprint(normalizeValue(value))
 	}

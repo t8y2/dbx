@@ -188,7 +188,7 @@ Supported fields:
 
 | Field        | Meaning                                                                                  |
 | ------------ | ---------------------------------------------------------------------------------------- |
-| `type`       | Database type, such as `mysql`, `postgres`, `redis`, or `mongodb`                        |
+| `type`       | Database type; service types include `etcd`, `consul`, `nacos-v2`, `nacos-v3`, `r-nacos` |
 | `url`        | Database DSN; URL encoding is recommended                                                |
 | `name`       | Display name in DBX; when omitted, DBX uses `database`, then `host`                      |
 | `host`       | Hostname or IP address                                                                   |
@@ -206,7 +206,19 @@ One-time connection example:
 open 'dbx://connection/new?type=redis&host=127.0.0.1&port=6379&user=default&password=secret&database=0&one_time=true'
 ```
 
+Nacos and service-registry examples:
+
+```bash
+open 'dbx://connection/new?type=consul&host=127.0.0.1&port=8500&password=acl-token'
+open 'dbx://connection/new?type=nacos-v3&host=127.0.0.1&port=8848&user=nacos&password=secret'
+open 'dbx://connection/new?type=r-nacos&url=http%3A%2F%2F127.0.0.1%3A8848%2Fnacos&user=admin&password=secret'
+```
+
+`nacos` is an alias for `nacos-v2`, and `rnacos` is an alias for `r-nacos`. In URL mode, service endpoint paths are preserved; top-level `host`, `port`, `user`, `password`, and `ssl` fields override values from `url`. For Consul, `password` is the ACL token. Nacos requires `user` when `password` is present. Omitting `v` or using `v=1` selects the current deep-link protocol; other versions are rejected.
+
 <Callout type="info">Before testing system-level `dbx://` launches, install and open DBX Desktop once so the operating system can register the URL scheme. On macOS, use `open 'dbx://connection/new?...'` to test it.</Callout>
+
+<Callout type="warning">A deep link may expose a database password or Consul ACL token in browser and terminal history. Do not put credential-bearing links in shared logs, shell history, tickets, or chat messages.</Callout>
 
 ## Codex
 

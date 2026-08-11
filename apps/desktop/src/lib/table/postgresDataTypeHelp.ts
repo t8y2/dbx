@@ -103,7 +103,6 @@ const POSTGRES_TYPE_ALIASES: Readonly<Record<string, string>> = {
   float4: "real",
   float8: "double precision",
   bool: "boolean",
-  bpchar: "char",
   character: "char",
   "character varying": "varchar",
   "time without time zone": "time",
@@ -111,7 +110,6 @@ const POSTGRES_TYPE_ALIASES: Readonly<Record<string, string>> = {
   "timestamp without time zone": "timestamp",
   "timestamp with time zone": "timestamptz",
   varbit: "bit varying",
-  int1: "tinyint",
 };
 
 const POSTGRES_MULTIRANGE_TYPES = new Set(["int4multirange", "int8multirange", "nummultirange", "tsmultirange", "tstzmultirange", "datemultirange"]);

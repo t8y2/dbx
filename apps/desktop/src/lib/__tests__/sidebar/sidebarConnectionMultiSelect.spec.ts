@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { applyConnectionMultiSelection, connectionMultiSelectionAfterToggle, emptyConnectionMultiSelection } from "@/lib/sidebar/sidebarConnectionMultiSelect";
+import { applyConnectionMultiSelection, connectionMultiSelectionAfterToggle, emptyConnectionMultiSelection, releaseConnectionFromMultiSelection } from "@/lib/sidebar/sidebarConnectionMultiSelect";
 import type { ConnectionMultiSelection, ConnectionMultiSelectionTarget } from "@/lib/sidebar/sidebarConnectionMultiSelect";
 
 function tick(selection: ConnectionMultiSelection, ...connectionIds: string[]): ConnectionMultiSelection {
@@ -36,17 +36,6 @@ describe("connection multi-selection", () => {
     expect(selection.active).toBe(false);
   });
 
-  it("does not carry a moved batch into the next group (issue #5758)", () => {
-    const moved = tick(emptyConnectionMultiSelection(), "conn-1", "conn-2", "conn-3");
-    expect(moved.connectionIds).toEqual(["conn-1", "conn-2", "conn-3"]);
-
-    // Moving the batch into a group releases the selection, so the next batch
-    // starts from nothing instead of dragging conn-1..3 along with it.
-    const next = tick(emptyConnectionMultiSelection(), "conn-4", "conn-5", "conn-6");
-
-    expect(next.connectionIds).toEqual(["conn-4", "conn-5", "conn-6"]);
-  });
-
   it("writes the selection back to the tree selection fields", () => {
     const store = target();
 
@@ -72,5 +61,29 @@ describe("connection multi-selection", () => {
       treeSelectionAnchorId: null,
       connectionMultiSelectActive: false,
     });
+  });
+
+  it("releases only the connection that was moved from a multi-selection", () => {
+    const store = target();
+    applyConnectionMultiSelection(store, tick(emptyConnectionMultiSelection(), "conn-1", "conn-2", "conn-3"));
+
+    releaseConnectionFromMultiSelection(store, "conn-3");
+
+    expect(store).toEqual({
+      selectedTreeNodeIds: ["conn-1", "conn-2"],
+      selectedTreeNodeId: "conn-1",
+      treeSelectionAnchorId: "conn-1",
+      connectionMultiSelectActive: true,
+    });
+  });
+
+  it("leaves an unrelated multi-selection unchanged", () => {
+    const store = target();
+    applyConnectionMultiSelection(store, tick(emptyConnectionMultiSelection(), "conn-1", "conn-2"));
+
+    releaseConnectionFromMultiSelection(store, "conn-3");
+
+    expect(store.selectedTreeNodeIds).toEqual(["conn-1", "conn-2"]);
+    expect(store.connectionMultiSelectActive).toBe(true);
   });
 });

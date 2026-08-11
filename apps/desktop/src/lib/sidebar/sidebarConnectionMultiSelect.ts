@@ -50,3 +50,17 @@ export function applyConnectionMultiSelection(target: ConnectionMultiSelectionTa
   target.treeSelectionAnchorId = selection.anchorConnectionId;
   target.connectionMultiSelectActive = selection.active;
 }
+
+export function releaseConnectionFromMultiSelection(target: ConnectionMultiSelectionTarget, connectionId: string): void {
+  if (!target.connectionMultiSelectActive || !target.selectedTreeNodeIds.includes(connectionId)) return;
+
+  const connectionIds = target.selectedTreeNodeIds.filter((id) => id !== connectionId);
+  const activeConnectionId = target.selectedTreeNodeId && connectionIds.includes(target.selectedTreeNodeId) ? target.selectedTreeNodeId : (connectionIds[0] ?? null);
+  const anchorConnectionId = target.treeSelectionAnchorId && connectionIds.includes(target.treeSelectionAnchorId) ? target.treeSelectionAnchorId : activeConnectionId;
+  applyConnectionMultiSelection(target, {
+    connectionIds,
+    activeConnectionId,
+    anchorConnectionId,
+    active: connectionIds.length > 0,
+  });
+}

@@ -28,7 +28,7 @@ function mqttConnection(): ConnectionConfig {
   } as ConnectionConfig;
 }
 
-function mockApi(overrides: Record<string, unknown> = {}) {
+function mockApi() {
   vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
   vi.doMock("@/lib/backend/api", () => ({
     checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
@@ -36,7 +36,6 @@ function mockApi(overrides: Record<string, unknown> = {}) {
     listDatabases: vi.fn().mockResolvedValue([]),
     loadSchemaCache: vi.fn().mockResolvedValue(null),
     saveSchemaCache: vi.fn().mockResolvedValue(undefined),
-    ...overrides,
   }));
 }
 
@@ -112,5 +111,23 @@ describe("connectionStore MQTT sidebar tree", () => {
 
     expect(node.children?.[0]?.label).toBe(i18n.global.t("connection.mqttConsoleTitle"));
     expect(node.children?.[0]?.label).toBe("MQTT 控制台");
+  });
+
+  it("localizes the MQTT admin tab title via i18n", async () => {
+    mockApi();
+
+    const { default: i18n } = await import("@/i18n");
+    i18n.global.locale.value = "en";
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const connectionStore = useConnectionStore();
+    const queryStore = useQueryStore();
+    connectionStore.connections = [mqttConnection()];
+
+    const tabId = queryStore.openMqttAdmin("mqtt-1");
+    const tab = queryStore.tabs.find((candidate) => candidate.id === tabId);
+
+    expect(tab?.title).toBe("test-mqtt - MQTT Console");
+    expect(tab?.title).not.toContain("控制台");
   });
 });

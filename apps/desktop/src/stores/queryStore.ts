@@ -1991,7 +1991,7 @@ export const useQueryStore = defineStore("query", () => {
     const id = uuid();
     const tab: QueryTab = {
       id,
-      title: `${conn?.name || "MQTT"} Console`,
+      title: conn?.name ? `${conn.name} - ${i18n.global.t("connection.mqttConsoleTitle")}` : i18n.global.t("connection.mqttConsoleTitle"),
       connectionId,
       database: conn?.database || "",
       sql: "",

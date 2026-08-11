@@ -1702,6 +1702,29 @@ export const useQueryStore = defineStore("query", () => {
     return id;
   }
 
+  function openDatabaseBrowser(connectionId: string) {
+    const existing = tabs.value.find((tab) => tab.mode === "databases" && tab.connectionId === connectionId);
+    if (existing) {
+      switchTab(existing.id);
+      return existing.id;
+    }
+
+    const id = uuid();
+    tabs.value.push({
+      id,
+      title: "Databases",
+      connectionId,
+      database: "",
+      sql: "",
+      isExecuting: false,
+      isCancelling: false,
+      isExplaining: false,
+      mode: "databases",
+    });
+    activeTabId.value = id;
+    return id;
+  }
+
   function switchTab(tabId: string) {
     activeTabId.value = tabId;
     settingsStore.settingsPageActive = false;
@@ -5736,6 +5759,7 @@ export const useQueryStore = defineStore("query", () => {
     commitTransaction,
     rollbackTransaction,
     renameTab,
+    openDatabaseBrowser,
     openObjectBrowser,
     openMongoGridFs,
     openMongoBucket,

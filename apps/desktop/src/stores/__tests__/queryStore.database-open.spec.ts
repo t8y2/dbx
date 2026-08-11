@@ -40,6 +40,20 @@ describe("queryStore database open state", () => {
     expect(store.isDatabaseOpen("pg-1", "analytics")).toBe(false);
   }, 10_000);
 
+  it("reuses one database browser tab per connection", async () => {
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+
+    const firstId = store.openDatabaseBrowser("pg-1");
+    const secondId = store.openDatabaseBrowser("pg-1");
+    const otherConnectionId = store.openDatabaseBrowser("pg-2");
+
+    expect(secondId).toBe(firstId);
+    expect(otherConnectionId).not.toBe(firstId);
+    expect(store.tabs.filter((tab) => tab.mode === "databases")).toHaveLength(2);
+    expect(store.tabs.find((tab) => tab.id === firstId)).toMatchObject({ connectionId: "pg-1", database: "", mode: "databases" });
+  });
+
   it("keeps object browser viewport per tab and clears it on schema change", async () => {
     const { useQueryStore } = await import("@/stores/queryStore");
     const store = useQueryStore();

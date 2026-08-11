@@ -44,6 +44,11 @@ describe("treeNodeClick", () => {
     expect(treeNodeRowAction("consul-overview", false, "double")).toBe("toggle");
   });
 
+  it("opens the connection database browser only when the capability is enabled", () => {
+    expect(treeNodeRowDoubleClickAction("connection", false, "single", true, "postgres", true)).toBe("open-database-browser");
+    expect(treeNodeRowDoubleClickAction("connection", false, "double", true, "postgres", false)).toBe("toggle");
+  });
+
   it("expands package containers while preserving source behavior for leaf packages", () => {
     expect(treeNodeRowAction("package", true)).toBe("toggle");
     expect(treeNodeRowAction("package", false)).toBe("open-source");

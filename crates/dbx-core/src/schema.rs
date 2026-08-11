@@ -174,6 +174,16 @@ pub async fn list_databases_core(state: &AppState, connection_id: &str) -> Resul
     retry_metadata_connection(state, connection_id, None, || list_databases_once(state, connection_id)).await
 }
 
+/// Loads the more expensive database-level properties needed only by the
+/// connection resource browser. General metadata paths keep using
+/// `list_databases_core`, which only enumerates names.
+pub async fn list_database_metadata_core(
+    state: &AppState,
+    connection_id: &str,
+) -> Result<Vec<db::DatabaseInfo>, String> {
+    retry_metadata_connection(state, connection_id, None, || list_database_metadata_once(state, connection_id)).await
+}
+
 pub async fn list_database_storage_core(
     state: &AppState,
     connection_id: &str,
@@ -592,7 +602,7 @@ async fn list_databases_once(state: &AppState, connection_id: &str) -> Result<Ve
             if is_mongo {
                 drop(connections);
                 let dbs = crate::mongo_ops::mongo_list_databases_core(state, connection_id).await?;
-                return Ok(dbs.into_iter().map(|name| db::DatabaseInfo { name }).collect());
+                return Ok(dbs.into_iter().map(|name| db::DatabaseInfo { name, ..Default::default() }).collect());
             }
             drop(connections);
             let mut client = client.lock().await;
@@ -630,6 +640,35 @@ async fn list_databases_once(state: &AppState, connection_id: &str) -> Result<Ve
         PoolKind::CloudflareD1(client) => db::cloudflare_d1_driver::list_databases(client).await,
         _ => Ok(vec![]),
     }
+}
+
+async fn list_database_metadata_once(state: &AppState, connection_id: &str) -> Result<Vec<db::DatabaseInfo>, String> {
+    let config = connection_config(state, connection_id).await;
+    if config.as_ref().is_some_and(|config| db::dolt::is_config(config) || is_doris_family_config(config)) {
+        return list_databases_once(state, connection_id).await;
+    }
+    let connections = state.connections.read().await;
+    if let Some(client) = extract_pool!(&connections, connection_id, SqlServer) {
+        drop(connections);
+        let mut client = client.lock().await;
+        return db::sqlserver::list_database_metadata(&mut client).await;
+    }
+    if let Some(PoolKind::Mysql(pool, mode)) = connections.get(connection_id) {
+        let pool = pool.clone();
+        let mode = *mode;
+        drop(connections);
+        return if mode == MysqlMode::OceanBaseOracle {
+            db::ob_oracle::list_databases(&pool).await
+        } else {
+            db::mysql::list_database_metadata(&pool).await
+        };
+    }
+    if let Some(pool) = extract_pool!(&connections, connection_id, Postgres) {
+        drop(connections);
+        return db::postgres::list_database_metadata(&pool).await;
+    }
+    drop(connections);
+    list_databases_once(state, connection_id).await
 }
 
 pub async fn list_schemas_core(state: &AppState, connection_id: &str, database: &str) -> Result<Vec<String>, String> {
@@ -3347,7 +3386,7 @@ for line in sys.stdin:
     }
 
     fn test_database_info(name: &str) -> super::db::DatabaseInfo {
-        super::db::DatabaseInfo { name: name.to_string() }
+        super::db::DatabaseInfo { name: name.to_string(), ..Default::default() }
     }
 
     #[test]

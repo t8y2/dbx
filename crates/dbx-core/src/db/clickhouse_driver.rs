@@ -607,7 +607,11 @@ pub async fn test_connection(client: &ChClient, timeout: Duration) -> Result<(),
 
 pub async fn list_databases(client: &ChClient) -> Result<Vec<DatabaseInfo>, String> {
     let result = ch_query(client, "SELECT name FROM system.databases ORDER BY name", None).await?;
-    Ok(result.data.iter().map(|row| DatabaseInfo { name: row[0].as_str().unwrap_or("").to_string() }).collect())
+    Ok(result
+        .data
+        .iter()
+        .map(|row| DatabaseInfo { name: row[0].as_str().unwrap_or("").to_string(), ..Default::default() })
+        .collect())
 }
 
 pub async fn list_tables(client: &ChClient, database: &str) -> Result<Vec<TableInfo>, String> {

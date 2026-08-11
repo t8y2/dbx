@@ -79,7 +79,7 @@ fn database_infos(names: Vec<String>) -> Vec<DatabaseInfo> {
         .into_iter()
         .map(|name| name.trim().to_string())
         .filter(|name| !name.is_empty())
-        .map(|name| DatabaseInfo { name })
+        .map(|name| DatabaseInfo { name, ..Default::default() })
         .collect()
 }
 

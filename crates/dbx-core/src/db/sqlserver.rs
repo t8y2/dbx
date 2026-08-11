@@ -1722,7 +1722,47 @@ pub async fn list_databases(client: &mut SqlServerClient) -> Result<Vec<Database
         .await
         .map_err(|e| e.to_string())?;
     let rows = stream.into_first_result().await.map_err(|e| e.to_string())?;
-    Ok(rows.iter().map(|row| DatabaseInfo { name: row.get::<&str, _>(0).unwrap_or("").to_string() }).collect())
+    Ok(rows
+        .iter()
+        .map(|row| DatabaseInfo { name: row.get::<&str, _>(0).unwrap_or("").to_string(), ..Default::default() })
+        .collect())
+}
+
+pub async fn list_database_metadata(client: &mut SqlServerClient) -> Result<Vec<DatabaseInfo>, String> {
+    let rows = match list_database_metadata_rows(client).await {
+        Ok(rows) => rows,
+        Err(error) => {
+            log::debug!("Falling back to database names after metadata query failed: {error}");
+            return list_databases(client).await;
+        }
+    };
+    Ok(rows
+        .iter()
+        .map(|row| DatabaseInfo {
+            name: row.get::<&str, _>(0).unwrap_or("").to_string(),
+            created_at: row.get::<chrono::NaiveDateTime, _>(1).map(|value| value.to_string()),
+            default_collation: row.get::<&str, _>(2).map(str::to_string).filter(|value| !value.trim().is_empty()),
+            size_bytes: row.get::<i64, _>(3),
+            ..Default::default()
+        })
+        .collect())
+}
+
+async fn list_database_metadata_rows(client: &mut SqlServerClient) -> Result<Vec<Row>, String> {
+    let stream = client
+        .query(
+            "SELECT d.name, d.create_date, d.collation_name, \
+                    SUM(COALESCE(CONVERT(bigint, f.size), 0)) * 8192 AS size_bytes \
+             FROM sys.databases d \
+             LEFT JOIN sys.master_files f ON f.database_id = d.database_id \
+             WHERE d.state = 0 \
+             GROUP BY d.name, d.create_date, d.collation_name \
+             ORDER BY d.name",
+            &[],
+        )
+        .await;
+    let stream = stream.map_err(|error| error.to_string())?;
+    stream.into_first_result().await.map_err(|error| error.to_string())
 }
 
 pub async fn get_completion_context(client: &mut SqlServerClient) -> Result<SqlServerCompletionContext, String> {
@@ -1776,7 +1816,7 @@ pub async fn list_linked_server_catalogs(
     Ok(rows
         .iter()
         .filter_map(|row| row.get::<&str, _>(0).map(str::trim).filter(|name| !name.is_empty()))
-        .map(|name| DatabaseInfo { name: name.to_string() })
+        .map(|name| DatabaseInfo { name: name.to_string(), ..Default::default() })
         .collect())
 }
 

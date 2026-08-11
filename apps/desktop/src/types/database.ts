@@ -381,6 +381,12 @@ export interface JdbcPluginStatus {
 
 export interface DatabaseInfo {
   name: string;
+  size_bytes?: number | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+  comment?: string | null;
+  default_charset?: string | null;
+  default_collation?: string | null;
 }
 
 export interface DatabaseStorageInfo {
@@ -1140,6 +1146,7 @@ export interface QueryTab {
     | "mqtt"
     | "nacos"
     | "nacos-dashboard"
+    | "databases"
     | "objects"
     | "structure"
     | "users"

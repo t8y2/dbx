@@ -42,6 +42,15 @@ pub async fn list_databases(
     Ok(Json(serde_json::to_value(result).map_err(|e| AppError::from(e.to_string()))?))
 }
 
+pub async fn list_database_metadata(
+    State(state): State<Arc<WebState>>,
+    Query(q): Query<SchemaQuery>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let result =
+        dbx_core::schema::list_database_metadata_core(&state.app, &q.connection_id).await.map_err(AppError::from)?;
+    Ok(Json(serde_json::to_value(result).map_err(|e| AppError::from(e.to_string()))?))
+}
+
 pub async fn list_database_storage(
     State(state): State<Arc<WebState>>,
     Json(request): Json<DatabaseStorageRequest>,

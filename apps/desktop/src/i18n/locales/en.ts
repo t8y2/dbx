@@ -903,6 +903,7 @@ export default {
     errorIndicatorHint: "Connection error. Click to view details",
     clearError: "Clear connection error",
     saveFailed: "Failed to save connection: {message}",
+    savedSettingsFailed: "The connection was saved, but the display setting could not be saved: {message}. Retry to save the setting.",
     deleted: "Connection deleted",
     deletedSelected: "{count} connections deleted",
     copied: "Copied",

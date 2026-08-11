@@ -703,6 +703,7 @@ export default withEnglishFallback({
     errorIndicatorHint: "Error de conexión. Haz clic para ver los detalles",
     clearError: "Limpiar error de conexión",
     saveFailed: "Error al guardar la conexión: {message}",
+    savedSettingsFailed: "La conexión se guardó, pero no se pudo guardar la configuración de visualización: {message}. Vuelve a intentarlo para guardar la configuración.",
     deleted: "Conexión eliminada",
     deletedSelected: "{count} conexiones eliminadas",
     copied: "Copiado",

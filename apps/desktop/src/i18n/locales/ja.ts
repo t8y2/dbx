@@ -667,6 +667,7 @@ export default withEnglishFallback({
     errorIndicatorHint: "接続エラー。クリックして詳細を表示",
     clearError: "接続エラーをクリア",
     saveFailed: "接続の保存に失敗しました: {message}",
+    savedSettingsFailed: "接続は保存されましたが、表示設定を保存できませんでした: {message}。設定を保存するには再試行してください。",
     deleted: "接続を削除しました",
     deletedSelected: "{count}件の接続を削除しました",
     copied: "コピーしました",

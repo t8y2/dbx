@@ -701,6 +701,7 @@ export default withEnglishFallback({
     errorIndicatorHint: "連線錯誤，點擊檢視詳情",
     clearError: "清除連線錯誤",
     saveFailed: "儲存連線失敗：{message}",
+    savedSettingsFailed: "連線已儲存，但顯示設定儲存失敗：{message}。請重試以儲存該設定。",
     deleted: "連線已刪除",
     deletedSelected: "已刪除 {count} 個連線",
     copied: "已複製",

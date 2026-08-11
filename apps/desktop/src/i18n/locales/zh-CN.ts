@@ -831,6 +831,7 @@ export default withEnglishFallback({
     errorIndicatorHint: "连接错误，点击查看详情",
     clearError: "清除连接错误",
     saveFailed: "保存连接失败：{message}",
+    savedSettingsFailed: "连接已保存，但显示设置保存失败：{message}。请重试以保存该设置。",
     deleted: "连接已删除",
     deletedSelected: "已删除 {count} 个连接",
     copied: "已复制",

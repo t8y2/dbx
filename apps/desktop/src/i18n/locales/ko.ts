@@ -800,6 +800,7 @@ export default withEnglishFallback({
     errorIndicatorHint: "연결 오류. 클릭하여 상세 보기",
     clearError: "연결 오류 지우기",
     saveFailed: "연결 저장 실패: {message}",
+    savedSettingsFailed: "연결은 저장되었지만 표시 설정을 저장하지 못했습니다: {message}. 설정을 저장하려면 다시 시도하세요.",
     deleted: "연결을 삭제했습니다",
     deletedSelected: "연결 {count}개 삭제",
     copied: "복사했습니다",

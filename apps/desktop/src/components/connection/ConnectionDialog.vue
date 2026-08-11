@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import type { ObjectDirective } from "vue";
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
+import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from "vue";
 import { uuid } from "@/lib/common/utils";
 import { useI18n } from "vue-i18n";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
@@ -25,6 +25,7 @@ import { useTunnelProfileStore } from "@/stores/tunnelProfileStore";
 import { detachTunnelProfileLayer, tunnelProfileReferenceLayer, tunnelProfileSummary } from "@/lib/connection/tunnelProfiles";
 import { applySshConfigHostAliasPrefill as prefillSshConfigHostAlias } from "@/lib/connection/sshConfigHosts";
 import { canPersistConnectionTestResult, connectionEditDraftSyncAction } from "./connectionEditDraftSync";
+import { createConnectionNoteVisibilityDraft, persistConnectionNoteVisibilityDraft as persistConnectionNoteVisibilityDraftState, resetConnectionNoteVisibilityDraft, setConnectionNoteVisibilityDraft, syncConnectionNoteVisibilityDraft } from "./connectionNoteVisibilityDraft";
 import { REDIS_SCAN_PAGE_SIZE_DEFAULT, REDIS_SCAN_PAGE_SIZE_MIN, REDIS_SCAN_PAGE_SIZE_MAX, REDIS_SCAN_PAGE_SIZE_OPTIONS } from "@/lib/redis/redisKeyPattern";
 import { normalizeGlobalConnectTimeoutSecs, normalizeGlobalQueryTimeoutSecs, useSettingsStore } from "@/stores/settingsStore";
 import { useToast } from "@/composables/useToast";
@@ -189,7 +190,11 @@ type ConnectionTestState = ConnectionTestResult & { ok: boolean };
 const { t } = useI18n();
 const { toast } = useToast();
 const settingsStore = useSettingsStore();
-const showConnectionNotesInSidebar = ref(settingsStore.editorSettings.sidebarShowConnectionNotes);
+const connectionNoteVisibilityDraft = reactive(createConnectionNoteVisibilityDraft(settingsStore.editorSettings.sidebarShowConnectionNotes));
+const showConnectionNotesInSidebar = computed({
+  get: () => connectionNoteVisibilityDraft.value,
+  set: (value: boolean) => setConnectionNoteVisibilityDraft(connectionNoteVisibilityDraft, value),
+});
 const editGlobalConnectTimeoutSecs = ref(settingsStore.editorSettings.globalConnectTimeoutSecs);
 const editGlobalQueryTimeoutSecs = ref(settingsStore.editorSettings.globalQueryTimeoutSecs);
 const open = defineModel<boolean>("open", { default: false });
@@ -2401,7 +2406,7 @@ watch(
   ([config, isOpen]) => {
     const syncAction = connectionEditDraftSyncAction(config?.id ?? null, isOpen, editingId.value);
     if (syncAction === "preserve") return;
-    showConnectionNotesInSidebar.value = settingsStore.editorSettings.sidebarShowConnectionNotes;
+    resetConnectionNoteVisibilityDraft(connectionNoteVisibilityDraft, settingsStore.editorSettings.sidebarShowConnectionNotes);
     editGlobalConnectTimeoutSecs.value = settingsStore.editorSettings.globalConnectTimeoutSecs;
     editGlobalQueryTimeoutSecs.value = settingsStore.editorSettings.globalQueryTimeoutSecs;
     if (syncAction === "hydrate" && config) {
@@ -2552,6 +2557,11 @@ watch(
     resetTestState();
   },
   { immediate: true },
+);
+
+watch(
+  () => settingsStore.editorSettings.sidebarShowConnectionNotes,
+  (value) => syncConnectionNoteVisibilityDraft(connectionNoteVisibilityDraft, value),
 );
 
 const isEditing = ref(false);
@@ -4658,7 +4668,7 @@ function openJdbcDriverManagerFromError() {
 function resetForm() {
   editingId.value = null;
   form.value = defaultForm();
-  showConnectionNotesInSidebar.value = settingsStore.editorSettings.sidebarShowConnectionNotes;
+  resetConnectionNoteVisibilityDraft(connectionNoteVisibilityDraft, settingsStore.editorSettings.sidebarShowConnectionNotes);
   editGlobalConnectTimeoutSecs.value = settingsStore.editorSettings.globalConnectTimeoutSecs;
   editGlobalQueryTimeoutSecs.value = settingsStore.editorSettings.globalQueryTimeoutSecs;
   selectedTransportLayerId.value = null;
@@ -5017,9 +5027,7 @@ async function persistGlobalTimeoutDrafts() {
 }
 
 async function persistConnectionNoteVisibilityDraft() {
-  if (showConnectionNotesInSidebar.value === settingsStore.editorSettings.sidebarShowConnectionNotes) return;
-  settingsStore.updateEditorSettings({ sidebarShowConnectionNotes: showConnectionNotesInSidebar.value });
-  await settingsStore.persistEditorSettings();
+  await persistConnectionNoteVisibilityDraftState(connectionNoteVisibilityDraft, settingsStore.editorSettings.sidebarShowConnectionNotes, (value) => settingsStore.persistSidebarShowConnectionNotes(value));
 }
 
 async function save() {
@@ -5027,6 +5035,7 @@ async function save() {
   if (isSaving.value) return;
   const databaseInfoForSave = visibleTestDatabaseInfo.value ?? visibleSavedDatabaseInfo.value;
   isSaving.value = true;
+  let connectionSaved = false;
   try {
     if (editingId.value) {
       const updated = withSavedDatabaseInfo(connectionConfigForSubmit(editingId.value), databaseInfoForSave);
@@ -5034,6 +5043,7 @@ async function save() {
       await ensureRequiredGaussdbMJdbcRuntime(updated);
       await persistGlobalTimeoutDrafts();
       await store.updateConnection(updated);
+      connectionSaved = true;
       await persistConnectionNoteVisibilityDraft();
       store.stopEditing();
     } else {
@@ -5042,6 +5052,7 @@ async function save() {
       await ensureRequiredGaussdbMJdbcRuntime(config);
       await persistGlobalTimeoutDrafts();
       await store.addConnection(config);
+      connectionSaved = true;
       await persistConnectionNoteVisibilityDraft();
       draftTestConnectionId.value = uuid();
       if (config.db_type === "jdbc") {
@@ -5066,7 +5077,8 @@ async function save() {
     }
     open.value = false;
   } catch (e: any) {
-    const message = mongodbAuthFailureHint(String(e?.message || e));
+    const cause = mongodbAuthFailureHint(String(e?.message || e));
+    const message = connectionSaved ? t("connection.savedSettingsFailed", { message: cause }) : cause;
     testResult.value = { ok: false, message };
     showConnectionError(message);
   } finally {

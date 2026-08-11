@@ -702,6 +702,7 @@ export default withEnglishFallback({
     errorIndicatorHint: "Erro de conexão. Clique para ver os detalhes",
     clearError: "Limpar erro de conexão",
     saveFailed: "Falha ao salvar a conexão: {message}",
+    savedSettingsFailed: "A conexão foi salva, mas não foi possível salvar a configuração de exibição: {message}. Tente novamente para salvar a configuração.",
     deleted: "Conexão excluída",
     deletedSelected: "{count} conexões excluídas",
     copied: "Copiado",

@@ -53,6 +53,8 @@ const EtcdKeyBrowser = defineAsyncComponent(() => import("@/components/etcd/Etcd
 const EtcdDashboard = defineAsyncComponent(() => import("@/components/etcd/EtcdDashboard.vue"));
 const EtcdAccessControl = defineAsyncComponent(() => import("@/components/etcd/EtcdAccessControl.vue"));
 const ZooKeeperKeyBrowser = defineAsyncComponent(() => import("@/components/zookeeper/ZooKeeperKeyBrowser.vue"));
+const ConsulOverview = defineAsyncComponent(() => import("@/components/consul/ConsulOverview.vue"));
+const ConsulWorkspace = defineAsyncComponent(() => import("@/components/consul/ConsulWorkspace.vue"));
 const DocumentBrowser = defineAsyncComponent(() => import("@/components/document/DocumentBrowser.vue"));
 const MongoGridFsBrowser = defineAsyncComponent(() => import("@/components/document/MongoGridFsBrowser.vue"));
 const MongoBucketBrowser = defineAsyncComponent(() => import("@/components/document/MongoBucketBrowser.vue"));
@@ -242,10 +244,17 @@ function openDataGridExtractorConfiguration() {
 const etcdKeyBrowserRef = ref<SearchableBrowserHandle>();
 const etcdDashboardRef = ref<{ refresh?: () => boolean }>();
 const zookeeperKeyBrowserRef = ref<SearchableBrowserHandle>();
+const consulOverviewRef = ref<{ refresh?: () => boolean }>();
+const consulWorkspaceRef = ref<SearchableBrowserHandle>();
 const objectBrowserRef = ref<SearchableBrowserHandle>();
 const activeTableMeta = computed(() => props.activeTab.tableMeta);
 const activeDataTabTableMeta = computed(() => tableMetaForDataTab(props.activeTab));
-const activeEffectiveDatabaseType = computed(() => effectiveDatabaseTypeForConnection(props.activeConnection));
+const activeResultExecutionTarget = computed(() => queryStore.activeResultExecutionTarget(props.activeTab.id));
+const activeResultConnection = computed(() => (activeResultExecutionTarget.value ? connectionStore.getConfig(activeResultExecutionTarget.value.connectionId) : props.activeConnection));
+const activeResultConnectionId = computed(() => activeResultExecutionTarget.value?.connectionId ?? props.activeTab.connectionId);
+const activeResultDatabase = computed(() => activeResultExecutionTarget.value?.database ?? props.activeTab.database);
+const activeResultSchema = computed(() => activeResultExecutionTarget.value?.schema ?? props.activeTab.schema);
+const activeEffectiveDatabaseType = computed(() => effectiveDatabaseTypeForConnection(activeResultConnection.value));
 const activeDataTabExecutionDatabase = computed(() => dataTabExecutionDatabase(props.activeConnection, props.activeTab.database, activeDataTabTableMeta.value?.catalog));
 const activeProductionContext = computed(() => productionContextForDatabase(props.activeConnection, props.activeTab.database));
 const productionWatermarkText = computed(() => (locale.value.startsWith("zh") ? "生产环境" : "PROD"));
@@ -410,6 +419,7 @@ const resultAutoSave = computed(() => props.activeTab.resultAutoSave === true);
 const activeResultRunItem = computed(() => resultRuns.value.find((run) => run.active));
 const showResultRunTabs = computed(() => resultRuns.value.length > 0 && resultRunDisplayMode.value === "tabs");
 const showResultRunSelector = computed(() => resultRuns.value.length > 0 && resultRunDisplayMode.value === "list");
+const canCloseQueryResult = computed(() => props.activeTab.mode === "query" && !props.activeTab.isExecuting && !props.activeTab.activeResultRunId && (!!props.activeTab.result || !!props.activeTab.results?.length || props.activeTab.resultEvicted === true));
 watch(
   () => `${resultRunDisplayMode.value}:${resultRuns.value.map((run) => run.id).join(",")}:${props.activeTab.activeResultRunId ?? ""}`,
   () => {
@@ -473,7 +483,7 @@ function mongoQueryResultDocumentId(rowIdx: number, fallback: unknown): unknown 
 const mongoQueryResultSaveHandler = computed<CustomSaveHandler | undefined>(() => {
   const tab = props.activeTab;
   const target = tab.mongoEditTarget;
-  if (tab.mode !== "query" || activeEffectiveDatabaseType.value !== "mongodb" || !target || !tab.connectionId || !tab.database || !tab.result) return undefined;
+  if (tab.mode !== "query" || activeEffectiveDatabaseType.value !== "mongodb" || !target || !activeResultConnectionId.value || !activeResultDatabase.value || !tab.result) return undefined;
   if (!tab.result.columns.includes(target.idColumn)) return undefined;
 
   const save: CustomSaveHandler["save"] = async (changes: MongoQueryGridChanges) => {
@@ -488,7 +498,7 @@ const mongoQueryResultSaveHandler = computed<CustomSaveHandler | undefined>(() =
       if (id === null || id === undefined || String(id).trim() === "") continue;
       const updateDoc = buildMongoUpdateDocument(dirtyCols, changes.columns, tab.result?.mongo_documents?.[rowIdx]);
       if (Object.keys(updateDoc).length === 0) continue;
-      await api.mongoUpdateDocument(tab.connectionId, tab.database, target.collection, serializeMongoDocumentId(mongoQueryResultDocumentId(rowIdx, id)), JSON.stringify(updateDoc));
+      await api.mongoUpdateDocument(activeResultConnectionId.value, activeResultDatabase.value, target.collection, serializeMongoDocumentId(mongoQueryResultDocumentId(rowIdx, id)), JSON.stringify(updateDoc));
     }
   };
 
@@ -773,6 +783,7 @@ function focusSearch(): boolean {
   if (props.activeTab.mode === "redis") return redisKeyBrowserRef.value?.focusSearch() ?? false;
   if (props.activeTab.mode === "etcd") return etcdKeyBrowserRef.value?.focusSearch() ?? false;
   if (props.activeTab.mode === "zookeeper") return zookeeperKeyBrowserRef.value?.focusSearch() ?? false;
+  if (props.activeTab.mode === "consul") return consulWorkspaceRef.value?.focusSearch() ?? false;
   if (props.activeTab.mode === "objects") return objectBrowserRef.value?.focusSearch() ?? false;
   if (props.activeTab.mode === "query") return queryEditorRef.value?.openSearch() ?? false;
   return dataGridRef.value?.focusSearch() ?? false;
@@ -790,6 +801,8 @@ function refreshData(): boolean {
   if (props.activeTab.mode === "etcd") return etcdKeyBrowserRef.value?.refresh?.() ?? false;
   if (props.activeTab.mode === "etcd-dashboard") return etcdDashboardRef.value?.refresh?.() ?? false;
   if (props.activeTab.mode === "zookeeper") return zookeeperKeyBrowserRef.value?.refresh?.() ?? false;
+  if (props.activeTab.mode === "consul-overview") return consulOverviewRef.value?.refresh?.() ?? false;
+  if (props.activeTab.mode === "consul") return consulWorkspaceRef.value?.refresh?.() ?? false;
   // Restored data tabs intentionally omit row data, so refresh must work before DataGrid mounts.
   if (canReloadUnavailableDataTab(props.activeTab)) {
     emit("reload");
@@ -839,6 +852,11 @@ async function removeResultRun(runId: string) {
   const activeRunTab = resultTabsScrollerRef.value?.querySelector<HTMLElement>('[data-active-result-run="true"]');
   activeRunTab?.focus({ preventScroll: true });
   activeRunTab?.scrollIntoView({ block: "nearest", inline: "nearest" });
+}
+
+async function closeCurrentQueryResult() {
+  if (!(await queryStore.closeQueryResult(props.activeTab.id))) return;
+  emit("update:activeOutputView", "result");
 }
 
 async function selectResultRun(runId: string) {
@@ -1044,6 +1062,9 @@ defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, hand
               >
                 <Pin class="h-3.5 w-3.5" :class="{ 'fill-current': resultAutoSave }" />
               </Button>
+              <Button v-if="canCloseQueryResult" variant="ghost" size="icon" class="h-6 w-7 shrink-0 text-muted-foreground hover:bg-accent hover:text-foreground" :title="t('tabs.closeResult')" :aria-label="t('tabs.closeResult')" @click="closeCurrentQueryResult">
+                <X class="h-3.5 w-3.5" />
+              </Button>
               <template v-if="resultRuns.length > 0 || visibleResultItems.length > 0">
                 <span class="mx-1 h-4 w-px shrink-0 bg-border" />
                 <div v-if="showResultRunTabs" data-result-run-tabs-region class="relative min-w-0 flex-1 self-stretch">
@@ -1070,7 +1091,7 @@ defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, hand
                           @click="selectResultRun(run.id)"
                           @keydown="onResultRunTabKeydown($event, runIndex)"
                         >
-                          {{ t("tabs.runN", { n: run.sequence }) }}
+                          {{ run.title || t("tabs.runN", { n: run.sequence }) }}
                         </button>
                         <button
                           type="button"
@@ -1089,7 +1110,7 @@ defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, hand
                   <DropdownMenu>
                     <DropdownMenuTrigger as-child>
                       <Button variant="ghost" size="sm" class="h-6 max-w-48 gap-1 px-2 text-xs">
-                        <span class="min-w-0 truncate">{{ activeResultRunItem ? t("tabs.runN", { n: activeResultRunItem.sequence }) : t("tabs.resultRuns") }}</span>
+                        <span class="min-w-0 truncate">{{ activeResultRunItem ? activeResultRunItem.title || t("tabs.runN", { n: activeResultRunItem.sequence }) : t("tabs.resultRuns") }}</span>
                         <ChevronDown class="h-3.5 w-3.5 shrink-0" />
                       </Button>
                     </DropdownMenuTrigger>
@@ -1097,7 +1118,7 @@ defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, hand
                       <DropdownMenuItem v-for="run in resultRuns" :key="run.id" class="flex items-center gap-2 pr-1" @select="selectResultRun(run.id)">
                         <Check v-if="run.active" class="h-3.5 w-3.5 shrink-0" />
                         <span v-else class="h-3.5 w-3.5 shrink-0" />
-                        <span class="min-w-0 flex-1 truncate">{{ t("tabs.runN", { n: run.sequence }) }}</span>
+                        <span class="min-w-0 flex-1 truncate">{{ run.title || t("tabs.runN", { n: run.sequence }) }}</span>
                         <button
                           type="button"
                           class="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-sm text-muted-foreground hover:bg-accent hover:text-foreground"
@@ -1413,7 +1434,7 @@ defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, hand
                     <div>{{ t("executionSummary.statement") }}</div>
                     <div>{{ t("executionSummary.sql") }}</div>
                     <div>{{ t("executionSummary.status") }}</div>
-                    <div class="text-right">{{ t("executionSummary.affected") }}</div>
+                    <div class="text-right">{{ t("executionSummary.rows") }}</div>
                     <div class="text-right">{{ t("executionSummary.time") }}</div>
                   </div>
                   <div v-for="item in summaryItems" :key="item.statementIndex" class="relative grid w-full grid-cols-[4rem_minmax(14rem,1fr)_7rem_7rem_6rem] items-center border-b px-3 py-2 text-left text-xs last:border-b-0">
@@ -1456,7 +1477,7 @@ defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, hand
                         {{ t(`executionSummary.statuses.${item.status}`) }}
                       </span>
                     </div>
-                    <div class="pointer-events-none relative z-[1] text-right tabular-nums">{{ item.status === "pending" || item.status === "running" || item.status === "skipped" ? "—" : item.affectedRows.toLocaleString() }}</div>
+                    <div class="pointer-events-none relative z-[1] text-right tabular-nums">{{ item.status === "pending" || item.status === "running" || item.status === "skipped" ? "—" : item.rowCount.toLocaleString() }}</div>
                     <div class="pointer-events-none relative z-[1] text-right tabular-nums">{{ item.executionTimeMs > 0 || item.status === "success" || item.status === "error" ? `${item.executionTimeMs}ms` : "—" }}</div>
                   </div>
                 </div>
@@ -1494,9 +1515,9 @@ defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, hand
                 context="results"
                 :auto-transpose-single-row="settingsStore.editorSettings.dataGridAutoTransposeSingleRow"
                 :database-type="activeEffectiveDatabaseType"
-                :connection-id="activeTab.connectionId"
-                :database="activeTab.database"
-                :schema="activeTab.schema"
+                :connection-id="activeResultConnectionId"
+                :database="activeResultDatabase"
+                :schema="activeResultSchema"
                 :table-meta="activeTab.tableMeta"
                 :table-info-tab="activeTab.tableInfoTab"
                 :page-offset="activeTab.resultPageOffset"
@@ -1933,6 +1954,19 @@ defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, hand
     <template v-else-if="activeTab.mode === 'zookeeper'">
       <div class="flex-1 min-h-0">
         <ZooKeeperKeyBrowser ref="zookeeperKeyBrowserRef" :key="activeTab.id" :connection-id="activeTab.connectionId" />
+      </div>
+    </template>
+
+    <template v-else-if="activeTab.mode === 'consul-overview'">
+      <div class="flex-1 min-h-0">
+        <ConsulOverview ref="consulOverviewRef" :key="activeTab.id" :connection-id="activeTab.connectionId" />
+      </div>
+    </template>
+
+    <!-- Consul management workspace -->
+    <template v-else-if="activeTab.mode === 'consul'">
+      <div class="flex-1 min-h-0">
+        <ConsulWorkspace ref="consulWorkspaceRef" :key="activeTab.id" :connection-id="activeTab.connectionId" />
       </div>
     </template>
 

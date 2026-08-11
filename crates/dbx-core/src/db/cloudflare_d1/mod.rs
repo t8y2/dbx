@@ -248,6 +248,13 @@ pub async fn list_triggers(
                 name: value_as_string(row.first()).unwrap_or_default(),
                 event: metadata.event.to_string(),
                 timing: metadata.timing.to_string(),
+                level: None,
+                condition: None,
+                language: None,
+                enabled: None,
+                valid: None,
+                comment: None,
+                created_at: None,
                 statement,
             }
         })

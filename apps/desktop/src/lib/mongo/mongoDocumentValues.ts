@@ -74,6 +74,7 @@ export function parseMongoDocumentInputValue(raw: MongoInputValue): unknown {
 }
 
 export function mongoDocumentDisplayValue(value: unknown): unknown {
+  if (value === null) return "NULL";
   if (value && typeof value === "object" && !Array.isArray(value)) {
     const object = value as Record<string, unknown>;
     if (Object.keys(object).length === 1 && typeof object.$numberLong === "string") return `NumberLong(${JSON.stringify(object.$numberLong)})`;

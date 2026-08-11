@@ -20,4 +20,12 @@ describe("KvKeyBrowser edit dialog layout", () => {
     expect(browserSource).toContain('<DialogFooter class="mx-0 mb-0 shrink-0 border-t px-6 py-5">');
     expect(browserSource).toContain('class="h-10 min-w-20" @click="showHistoryDialog = false"');
   });
+
+  it("keeps an accessible copy action in the upper-right corner of the value panel", () => {
+    expect(browserSource).toContain('class="absolute right-2 top-2 z-10 h-8 w-8');
+    expect(browserSource).toContain('@click="copySelectedValue"');
+    expect(browserSource).toContain('<Check v-if="selectedValueCopied"');
+    expect(browserSource).toContain('<Copy v-else class="h-4 w-4" />');
+    expect(browserSource).toMatch(/<pre\s+data-native-clipboard/);
+  });
 });

@@ -2063,6 +2063,8 @@ fn sqlserver_completion_assistant_sql(request: &crate::types::CompletionAssistan
         .filter(|schema| !schema.trim().is_empty())
         .map(|schema| format!(" AND s.name = '{}' ", schema.replace('\'', "''")))
         .unwrap_or_default();
+    let columns_only = object_kinds.len() == 1
+        && matches!(object_kinds.first(), Some(crate::types::CompletionAssistantObjectKind::Column));
 
     let mut queries = Vec::new();
     if (mask.starts_with('#') || mask.starts_with("%#"))
@@ -2145,12 +2147,15 @@ fn sqlserver_completion_assistant_sql(request: &crate::types::CompletionAssistan
              FROM sys.columns c \
              JOIN sys.objects o ON o.object_id = c.object_id \
              JOIN sys.schemas s ON s.schema_id = o.schema_id \
-             WHERE o.type IN ('U','V') AND {object_visibility} {schema_filter} {parent_table_filter} {column_like}"
+             WHERE o.type IN ('U','V') AND {object_visibility} {schema_filter} {parent_table_filter} {column_like} ORDER BY c.column_id"
         ));
     }
 
     if queries.is_empty() {
         "SELECT TOP (0) CAST('' AS NVARCHAR(128)) AS name, CAST('' AS NVARCHAR(128)) AS schema_name, CAST('' AS NVARCHAR(60)) AS object_type, CAST(NULL AS NVARCHAR(128)) AS parent_schema, CAST(NULL AS NVARCHAR(128)) AS parent_name, CAST(NULL AS NVARCHAR(MAX)) AS object_comment, CAST(NULL AS NVARCHAR(128)) AS data_type".to_string()
+    } else if columns_only && queries.len() == 1 {
+        // Preserve sys.columns.column_id order for SELECT * expansion.
+        queries.remove(0)
     } else if queries.len() == 1 {
         format!("SELECT * FROM ({}) AS dbx_completion ORDER BY name", queries.remove(0))
     } else {
@@ -2319,6 +2324,8 @@ pub async fn list_objects(client: &mut SqlServerClient, schema: &str) -> Result<
             updated_at: row.get::<chrono::NaiveDateTime, _>(3).map(|value| value.to_string()),
             parent_schema: None,
             parent_name: None,
+            trigger: None,
+            xugu_type_members_expandable: None,
         })
         .collect())
 }
@@ -2691,6 +2698,13 @@ pub async fn list_triggers(
             name: row.get::<&str, _>(0).unwrap_or("").to_string(),
             event: row.get::<&str, _>(1).unwrap_or("").to_string(),
             timing: row.get::<&str, _>(2).unwrap_or("AFTER").to_string(),
+            level: None,
+            condition: None,
+            language: None,
+            enabled: None,
+            valid: None,
+            comment: None,
+            created_at: None,
             statement: row.get::<&str, _>(3).map(str::to_string),
         })
         .collect())
@@ -4148,6 +4162,8 @@ mod tests {
         assert!(sql.contains("o.name = 'Users'"));
         assert!(sql.contains("LOWER(c.name) LIKE LOWER('%id%') ESCAPE '\\'"));
         assert!(sql.contains("CAST(NULL AS NVARCHAR(MAX)) AS object_comment"));
+        assert!(sql.contains("ORDER BY c.column_id"));
+        assert!(!sql.contains("AS dbx_completion ORDER BY name"));
     }
 
     #[test]

@@ -73,3 +73,28 @@
     grid-template-columns: repeat(5, minmax(0, 1fr)) !important;
   }
 }
+
+@media (min-width: 640px) {
+  html.dbx-legacy-webview .connection-db-picker-grid {
+    grid-template-columns: repeat(auto-fit, minmax(112px, 1fr)) !important;
+  }
+
+  html.dbx-legacy-webview [data-slot="dialog-content"].connection-dialog-content--config {
+    width: calc(100vw - 2rem) !important;
+    min-width: 38rem !important;
+    height: 720px !important;
+    max-width: 880px !important;
+  }
+
+  html.dbx-legacy-webview [data-slot="dialog-content"].connection-dialog-content--config .connection-form-body {
+    align-content: start !important;
+  }
+
+  html.dbx-legacy-webview [data-slot="dialog-content"].connection-dialog-content--config .connection-url-params-row--compact {
+    align-items: center !important;
+  }
+
+  html.dbx-legacy-webview [data-slot="dialog-content"].connection-dialog-content--config .connection-url-params-row--with-hint .connection-url-params-label {
+    margin-top: 0.5rem !important;
+  }
+}

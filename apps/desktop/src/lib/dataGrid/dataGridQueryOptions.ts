@@ -1,7 +1,10 @@
 import { queryTimeoutSecsForConnection } from "@/lib/sql/queryTimeout";
 import type { ConnectionConfig } from "@/types/database";
 
-export function dataGridCountQueryOptions(connection?: Pick<ConnectionConfig, "query_timeout_secs"> | null): {
+export function dataGridCountQueryOptions(
+  connection?: Pick<ConnectionConfig, "query_timeout_secs" | "query_timeout_inherit"> | null,
+  globalQueryTimeoutSecs?: number,
+): {
   maxRows: number;
   timeoutSecs: number;
 } {
@@ -9,6 +12,6 @@ export function dataGridCountQueryOptions(connection?: Pick<ConnectionConfig, "q
   // inherit the connection setting instead of falling back to the backend's shorter legacy default.
   return {
     maxRows: 1,
-    timeoutSecs: queryTimeoutSecsForConnection(connection),
+    timeoutSecs: queryTimeoutSecsForConnection(connection, globalQueryTimeoutSecs),
   };
 }

@@ -47,7 +47,7 @@ const queryStore = useQueryStore();
 const settingsStore = useSettingsStore();
 const { toast } = useToast();
 const tabDrag = useTabDrag((draggedId, targetId, position) => {
-  queryStore.reorderTab(draggedId, targetId, position);
+  return queryStore.reorderTab(draggedId, targetId, position);
 });
 const editingTabId = ref<string | null>(null);
 const editingTitle = ref("");
@@ -525,7 +525,8 @@ function tabMenuIcon(tab: QueryTab) {
   if (tab.externalSqlFileMissing) return AlertTriangle;
   if (tab.mode === "data" || tab.mode === "mongo" || tab.mode === "redis" || tab.mode === "hbase") return Table2;
   if (tab.mode === "vector") return TableProperties;
-  if (tab.mode === "etcd" || tab.mode === "zookeeper") return KeyRound;
+  if (tab.mode === "etcd" || tab.mode === "zookeeper" || tab.mode === "consul") return KeyRound;
+  if (tab.mode === "consul-overview") return Gauge;
   if (tab.mode === "etcd-dashboard") return Gauge;
   if (tab.mode === "etcd-access-control") return ShieldCheck;
   if (tab.mode === "nacos") return Network;
@@ -538,7 +539,7 @@ function tabMenuIcon(tab: QueryTab) {
 }
 
 function handleTabClick(tab: QueryTab) {
-  if (tabDrag.state.wasDragged) return;
+  if (tabDrag.state.suppressClick) return;
   activateTab(tab.id);
 }
 
@@ -671,7 +672,8 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
                       <Table2 v-else-if="tab.mode === 'data' || tab.mode === 'mongo' || tab.mode === 'redis' || tab.mode === 'hbase'" class="h-3.5 w-3.5" />
                       <DatabaseIcon v-else-if="tab.mode === 'mq'" :db-type="tabDatabaseIconType(tab)" class="h-3.5 w-3.5" />
                       <TableProperties v-else-if="tab.mode === 'vector'" class="h-3.5 w-3.5" />
-                      <KeyRound v-else-if="tab.mode === 'etcd' || tab.mode === 'zookeeper'" class="h-3.5 w-3.5" />
+                      <KeyRound v-else-if="tab.mode === 'etcd' || tab.mode === 'zookeeper' || tab.mode === 'consul'" class="h-3.5 w-3.5" />
+                      <Gauge v-else-if="tab.mode === 'consul-overview'" class="h-3.5 w-3.5" />
                       <Gauge v-else-if="tab.mode === 'etcd-dashboard'" class="h-3.5 w-3.5" />
                       <ShieldCheck v-else-if="tab.mode === 'etcd-access-control'" class="h-3.5 w-3.5" />
                       <Network v-else-if="tab.mode === 'nacos'" class="h-3.5 w-3.5" />
@@ -867,7 +869,8 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
                       <Table2 v-else-if="tab.mode === 'data' || tab.mode === 'mongo' || tab.mode === 'redis' || tab.mode === 'hbase'" class="h-3.5 w-3.5" />
                       <DatabaseIcon v-else-if="tab.mode === 'mq'" :db-type="tabDatabaseIconType(tab)" class="h-3.5 w-3.5" />
                       <TableProperties v-else-if="tab.mode === 'vector'" class="h-3.5 w-3.5" />
-                      <KeyRound v-else-if="tab.mode === 'etcd' || tab.mode === 'zookeeper'" class="h-3.5 w-3.5" />
+                      <KeyRound v-else-if="tab.mode === 'etcd' || tab.mode === 'zookeeper' || tab.mode === 'consul'" class="h-3.5 w-3.5" />
+                      <Gauge v-else-if="tab.mode === 'consul-overview'" class="h-3.5 w-3.5" />
                       <Gauge v-else-if="tab.mode === 'etcd-dashboard'" class="h-3.5 w-3.5" />
                       <ShieldCheck v-else-if="tab.mode === 'etcd-access-control'" class="h-3.5 w-3.5" />
                       <Network v-else-if="tab.mode === 'nacos'" class="h-3.5 w-3.5" />
@@ -1011,9 +1014,9 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
       </div>
       <DialogFooter class="min-w-0 sm:flex-wrap">
         <Button variant="outline" @click="handleCancelClose">{{ t("common.cancel") }}</Button>
-        <Button v-if="showCloseConfirmBulkActions" variant="secondary" @click="handleDiscardAllAndClose">{{ t("editor.discardAllChanges") }}</Button>
+        <Button v-if="showCloseConfirmBulkActions" variant="secondary" class="border-border" @click="handleDiscardAllAndClose">{{ t("editor.discardAllChanges") }}</Button>
         <Button v-if="showCloseConfirmBulkActions" @click="handleSaveAllAndClose">{{ t("editor.saveAllChanges") }}</Button>
-        <Button variant="secondary" @click="handleDiscardAndClose">{{ t("editor.discardChanges") }}</Button>
+        <Button variant="secondary" class="border-border" @click="handleDiscardAndClose">{{ t("editor.discardChanges") }}</Button>
         <Button @click="handleSaveAndClose">{{ t("savedSql.save") }}</Button>
       </DialogFooter>
     </DialogContent>

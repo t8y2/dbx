@@ -18,6 +18,7 @@ const POSTGRES_LIKE_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "MATERIALIZ
 const ORACLE_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION", "PACKAGE", "PACKAGE_BODY"];
 const DAMENG_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION", "SEQUENCE", "PACKAGE", "PACKAGE_BODY"];
 const XUGU_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "PROCEDURE", "FUNCTION", "TRIGGER", "SEQUENCE", "SYNONYM", "PACKAGE", "PACKAGE_BODY", "TYPE", "TYPE_BODY"];
+const PACKAGE_MEMBER_EXPANSION_DATABASES = new Set<DatabaseType>(["oracle", "xugu"]);
 
 const DATABASE_TYPE_OBJECTS = new Map<DatabaseType, SidebarObjectKind[]>([
   // postgres
@@ -80,6 +81,10 @@ export function databaseObjectCapabilities(dbType?: DatabaseType): DatabaseObjec
 export function sidebarObjectKindsForDatabase(dbType?: DatabaseType): SidebarObjectKind[] {
   if (!dbType) return [...TABLE_VIEW_OBJECTS];
   return DATABASE_TYPE_OBJECTS.get(dbType) ?? [...ROUTINE_OBJECTS];
+}
+
+export function supportsPackageMemberExpansion(dbType?: DatabaseType): boolean {
+  return !!dbType && PACKAGE_MEMBER_EXPANSION_DATABASES.has(dbType);
 }
 
 export function normalizeSidebarObjectKind(type: string): SidebarObjectKind {

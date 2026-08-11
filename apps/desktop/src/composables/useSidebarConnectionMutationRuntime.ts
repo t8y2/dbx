@@ -55,6 +55,26 @@ export function useSidebarConnectionMutationRuntime(options: SidebarConnectionMu
     }
   }
 
+  async function setNodeAsDefaultSchema() {
+    const node = activeNode.value;
+    if (!node.connectionId || !node.schema) return;
+    try {
+      await connectionStore.setDefaultSchema(node.connectionId, node.schema);
+    } catch (error: any) {
+      toast(t("connection.saveFailed", { message: error?.message || String(error) }), 5000);
+    }
+  }
+
+  async function clearNodeDefaultSchema() {
+    const node = activeNode.value;
+    if (!node.connectionId) return;
+    try {
+      await connectionStore.clearDefaultSchema(node.connectionId);
+    } catch (error: any) {
+      toast(t("connection.saveFailed", { message: error?.message || String(error) }), 5000);
+    }
+  }
+
   function connectionDeleteTargets() {
     if (showDeleteConfirm.value && connectionDeleteTargetSnapshot.value.length) return connectionDeleteTargetSnapshot.value;
     return selectedConnectionDeleteTargets(activeNode.value, selectedTreeNodesInVisibleOrder());
@@ -229,6 +249,7 @@ export function useSidebarConnectionMutationRuntime(options: SidebarConnectionMu
   const isNodeDefaultDatabase = computed(
     () => (activeNode.value.type === "database" || activeNode.value.type === "redis-db" || activeNode.value.type === "mongo-db") && !!activeNode.value.connectionId && !!activeNode.value.database && connectionStore.isDefaultDatabase(activeNode.value.connectionId, activeNode.value.database),
   );
+  const isNodeDefaultSchema = computed(() => activeNode.value.type === "schema" && !!activeNode.value.connectionId && !!activeNode.value.schema && connectionStore.isDefaultSchema(activeNode.value.connectionId, activeNode.value.schema));
   const isConnected = computed(() => activeNode.value.type === "connection" && !!activeNode.value.connectionId && connectionStore.connectedIds.has(activeNode.value.connectionId));
   const isConnecting = computed(() => activeNode.value.type === "connection" && !!activeNode.value.connectionId && connectionStore.connectingIds.has(activeNode.value.connectionId));
   const canCloseDatabaseConnection = computed(() => canCloseSidebarDatabaseConnection(activeNode.value, connectionStore.isTreeNodeChildrenLoaded, (connectionId, database) => queryStore.openDatabaseKeys.has(`${connectionId}\x00${database}`)));
@@ -290,6 +311,8 @@ export function useSidebarConnectionMutationRuntime(options: SidebarConnectionMu
   return {
     setNodeAsDefaultDatabase,
     clearNodeDefaultDatabase,
+    setNodeAsDefaultSchema,
+    clearNodeDefaultSchema,
     connectionDeleteTargets,
     connectionDeleteMenuLabel,
     connectionDuplicateTargets,
@@ -310,6 +333,7 @@ export function useSidebarConnectionMutationRuntime(options: SidebarConnectionMu
     closeDatabaseConnection,
     isPinned,
     isNodeDefaultDatabase,
+    isNodeDefaultSchema,
     isConnected,
     isConnecting,
     canCloseDatabaseConnection,

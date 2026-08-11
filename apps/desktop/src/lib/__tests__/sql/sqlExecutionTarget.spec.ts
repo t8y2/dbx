@@ -23,6 +23,13 @@ describe("executionCandidateForMode", () => {
     expect(executionCandidateForMode([all], "all")).toBe(all);
   });
 
+  it("falls back to all SQL only when blank-line execution is enabled", () => {
+    const all = candidate("all", ["all"]);
+
+    expect(executionCandidateForMode([all], "current", { executeAllOnBlankLine: false })).toBeNull();
+    expect(executionCandidateForMode([all], "current", { executeAllOnBlankLine: true })).toBe(all);
+  });
+
   it("uses the deduplicated candidate when one statement is both current and all", () => {
     const currentAndAll = candidate("all", ["cursor", "all"]);
 

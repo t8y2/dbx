@@ -167,6 +167,10 @@ pub fn build_executable_object_source_statements(input: EditableObjectSourceSqlI
         return Ok(executable_informix_view_statements(input.schema.as_deref(), &input.name, source));
     }
 
+    if input.database_type == DatabaseType::Mysql && input.object_type == ObjectSourceKind::View {
+        return Ok(vec![executable_mysql_view_ddl(source)]);
+    }
+
     if is_mysql_like(input.database_type)
         && matches!(input.object_type, ObjectSourceKind::Function | ObjectSourceKind::Procedure)
     {
@@ -452,6 +456,23 @@ fn executable_oracle_routine_ddl(source: &str) -> String {
     if Regex::new(r"(?i)^(?:PROCEDURE|FUNCTION)\b").unwrap().is_match(trimmed) {
         return ensure_semicolon(&format!("CREATE OR REPLACE {trimmed}"));
     }
+    ensure_semicolon(trimmed)
+}
+
+fn executable_mysql_view_ddl(source: &str) -> String {
+    let trimmed = source.trim();
+    let statement_start = leading_sql_statement_start(trimmed);
+    let executable = &trimmed[statement_start..];
+    let create_view = Regex::new(
+        r"(?is)^CREATE\s+(?:OR\s+REPLACE\s+)?(?:ALGORITHM\s*=\s*(?:UNDEFINED|MERGE|TEMPTABLE)\s+)?(?:DEFINER\s*=\s*(?:(?:`(?:``|[^`])+`|'(?:''|[^'])+'|[^\s]+)\s*@\s*(?:`(?:``|[^`])+`|'(?:''|[^'])+'|[^\s]+)|CURRENT_USER(?:\(\))?)\s+)?(?:SQL\s+SECURITY\s+(?:DEFINER|INVOKER)\s+)?VIEW\s+",
+    )
+    .unwrap();
+    if create_view.is_match(executable) {
+        let create = Regex::new(r"(?i)^CREATE\s+(?:OR\s+REPLACE\s+)?").unwrap();
+        let replaced = create.replace(executable, "ALTER ");
+        return ensure_semicolon(&format!("{}{}", &trimmed[..statement_start], replaced));
+    }
+
     ensure_semicolon(trimmed)
 }
 
@@ -1783,6 +1804,53 @@ mod tests {
         });
 
         assert_eq!(sql, "CREATE PROCEDURE `refresh_cache`() BEGIN SELECT 1; END;");
+    }
+
+    #[test]
+    fn mysql_view_source_opened_for_editing_uses_alter_view() {
+        let source = "CREATE ALGORITHM=UNDEFINED DEFINER=`root`@`%` SQL SECURITY DEFINER VIEW `new_view` AS select `base_plugins`.`id` AS `id` from `base_plugins`";
+        let expected = "ALTER ALGORITHM=UNDEFINED DEFINER=`root`@`%` SQL SECURITY DEFINER VIEW `new_view` AS select `base_plugins`.`id` AS `id` from `base_plugins`;";
+        let input = EditableObjectSourceSqlInput {
+            database_type: DatabaseType::Mysql,
+            object_type: ObjectSourceKind::View,
+            schema: Some("dol_test".to_string()),
+            name: "new_view".to_string(),
+            source: source.to_string(),
+        };
+
+        assert_eq!(build_editable_object_source(input.clone()), expected);
+        assert_eq!(build_executable_object_source_sql(input).unwrap(), expected);
+    }
+
+    #[test]
+    fn mysql_view_create_source_preserves_leading_comments() {
+        let source =
+            "-- keep this view note\n/* and this block */\nCREATE OR REPLACE VIEW `new_view` AS SELECT 1 AS `id`";
+        let sql = build_executable_object_source_sql(EditableObjectSourceSqlInput {
+            database_type: DatabaseType::Mysql,
+            object_type: ObjectSourceKind::View,
+            schema: Some("dol_test".to_string()),
+            name: "new_view".to_string(),
+            source: source.to_string(),
+        })
+        .unwrap();
+
+        assert_eq!(sql, "-- keep this view note\n/* and this block */\nALTER VIEW `new_view` AS SELECT 1 AS `id`;");
+    }
+
+    #[test]
+    fn mysql_view_alter_source_remains_unchanged() {
+        let source = "ALTER ALGORITHM=MERGE VIEW `new_view` AS SELECT 2 AS `id`;";
+        let sql = build_executable_object_source_sql(EditableObjectSourceSqlInput {
+            database_type: DatabaseType::Mysql,
+            object_type: ObjectSourceKind::View,
+            schema: Some("dol_test".to_string()),
+            name: "new_view".to_string(),
+            source: source.to_string(),
+        })
+        .unwrap();
+
+        assert_eq!(sql, source);
     }
 
     #[test]

@@ -90,7 +90,7 @@
 
 ### 70+ 种数据库，一个工具搞定
 
-MySQL、PostgreSQL、SQLite、Cloudflare D1、Redis、MongoDB、DuckDB、ClickHouse、SQL Server、Oracle、Elasticsearch、Easysearch、MariaDB、TiDB、OceanBase、openGauss、GaussDB、KWDB、KingBase、Vastbase、GoldenDB、Doris、SelectDB、StarRocks、Manticore Search、Redshift、DM、TDengine、虚谷 XuguDB、CockroachDB、Access、HighGo、UXDB 等数据库都能直接连接。Agent/JDBC 方向的配置还可扩展到 H2、Snowflake、Trino、Hive、DB2、Informix、Neo4j、Cassandra、BigQuery、Kylin、SunDB、JDBCX 和自定义 JDBC。新增的原生与 Agent 驱动还覆盖了 Databricks、SAP HANA、Teradata、Vertica、Firebird、Exasol、崖山 YashanDB、GBase、Databend、RQLite、Turso、InfluxDB、QuestDB、IoTDB、etcd、IRIS 等。全部装进约 20 MB 的应用里，不内嵌 Chromium。
+MySQL、PostgreSQL、SQLite、Cloudflare D1、Redis、MongoDB、DuckDB、ClickHouse、SQL Server、Oracle、Elasticsearch、Easysearch、MariaDB、TiDB、OceanBase、openGauss、GaussDB、KWDB、KingBase、Vastbase、GoldenDB、Doris、SelectDB、StarRocks、Manticore Search、Redshift、DM、TDengine、虚谷 XuguDB、CockroachDB、Access、HighGo、UXDB、Dolt 等数据库都能直接连接。Agent 配置还可扩展到 H2、Snowflake、Trino、Hive、DB2、Informix、Neo4j、Cassandra、BigQuery、Kylin、SunDB、JDBCX 和自定义 JDBC。新增的原生与 Agent 驱动还覆盖了 Databricks、SAP HANA、Teradata、Vertica、Firebird、Exasol、崖山 YashanDB、GBase、Databend、RQLite、Turso、InfluxDB、QuestDB、IoTDB、etcd、ZooKeeper、Nacos、Consul KV、IRIS 等。全部装进约 20 MB 的应用里，不内嵌 Chromium。
 
 ### 查询编辑器
 
@@ -186,7 +186,7 @@ DBX 也提供独立 CLI 包，适合终端、脚本和 Codex 工作流：
 ```bash
 npm install -g @dbx-app/cli
 # 或通过 Homebrew
-brew tap t8y2/dbx && brew install dbx-cli
+brew tap t8y2/tap && brew install dbx-cli
 dbx connections list --json
 dbx query local "select 1" --json
 ```
@@ -225,11 +225,15 @@ flatpak install flatpark com.dbxio.dbx
 
 之后通过常规的 `flatpak update` 即可获取更新。详见 [FlatPark 上的 DBX 页面](https://flatpark.org/apps/com.dbxio.dbx/)。
 
-**星火应用商店 / AmberPM (Linux)：**
+**Spark Store 星火应用商店(Linux)：**
 
 通过[星火应用商店](https://spk-resolv.spark-app.store/?spk=spk://store/development/dbx)一键安装，后续可直接在商店客户端中获取更新。
 
-银河麒麟 V10、统信 UOS 等系统推荐选择 **APM 版本**，以减少发行版依赖差异导致的安装或启动问题。APM 在兼容环境中运行 DBX；如果为 Agent/JDBC 驱动选择宿主机 Java，需要在路径前添加 `/host`，例如将 `/usr/bin/java` 填写为 `/host/usr/bin/java`。
+  <a href="https://spk-resolv.spark-app.store/?spk=spk://store/development/dbx" target="_blank"  rel="noopener noreferrer">
+  <img src="https://spk-json.spark-app.store/install-from-spark-store.png" width="200"/>
+  </a>
+
+银河麒麟 V10、统信 UOS 等系统推荐选择 **APM（AmberPM）版本**，以减少发行版依赖差异导致的安装或启动问题。APM 在兼容环境中运行 DBX；如果为 Agent/JDBC 驱动选择宿主机 Java，需要在路径前添加 `/host`，例如将 `/usr/bin/java` 填写为 `/host/usr/bin/java`。
 
 ## 自托管 (Docker)
 
@@ -482,7 +486,7 @@ DBX 仅 20 MB，无需运行时依赖（无需 Java、无需 Python）。AI 和 
 
 <details>
 <summary><strong>支持哪些数据库？</strong></summary>
-MySQL、PostgreSQL、SQLite、Cloudflare D1、Redis、MongoDB、DuckDB、ClickHouse、SQL Server、Oracle、Elasticsearch、Easysearch、Qdrant、Milvus、Weaviate、MariaDB、TiDB、OceanBase、openGauss、GaussDB、KWDB、KingBase、Vastbase、GoldenDB、Doris、SelectDB、StarRocks、Manticore Search、Redshift、DM、TDengine、虚谷 XuguDB、CockroachDB、Access、HighGo、UXDB 等。JDBC 方向配置可扩展到 H2、Snowflake、Trino、PrestoSQL、Hive、DB2、Informix、Neo4j、Cassandra、BigQuery、Kylin、SunDB、JDBCX、Databricks、SAP HANA、Teradata、Vertica、Firebird、Exasol、崖山 YashanDB、GBase 8a/8s、Databend、RQLite、Turso、InfluxDB、QuestDB、IoTDB、etcd、ZooKeeper、Nacos、IRIS 及自定义 JDBC 连接，并支持消息队列管理（Pulsar、Kafka、RocketMQ）。
+MySQL、PostgreSQL、SQLite、Cloudflare D1、Redis、MongoDB、DuckDB、ClickHouse、SQL Server、Oracle、Elasticsearch、Easysearch、Qdrant、Milvus、Weaviate、MariaDB、TiDB、OceanBase、openGauss、GaussDB、KWDB、KingBase、Vastbase、GoldenDB、Doris、SelectDB、StarRocks、Manticore Search、Redshift、DM、TDengine、虚谷 XuguDB、CockroachDB、Access、HighGo、UXDB 等。Agent 配置可扩展到 H2、Snowflake、Trino、PrestoSQL、Hive、DB2、Informix、Neo4j、Cassandra、BigQuery、Kylin、SunDB、JDBCX、Databricks、SAP HANA、Teradata、Vertica、Firebird、Exasol、崖山 YashanDB、GBase 8a/8s、Databend、RQLite、Turso、InfluxDB、QuestDB、IoTDB、etcd、ZooKeeper、Nacos、Consul KV、IRIS 及自定义 JDBC 连接，并支持消息队列管理（Pulsar、Kafka、RocketMQ）。
 </details>
 
 <details>

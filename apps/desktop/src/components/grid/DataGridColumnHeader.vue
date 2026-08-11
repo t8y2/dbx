@@ -18,6 +18,7 @@ const props = defineProps<{
   columnComment?: string;
   tooltipColumnType?: string;
   tooltipColumnComment?: string;
+  columnNullability?: "nullable" | "required";
   showTypeLine?: boolean;
   showCommentLine?: boolean;
   typeClass?: HTMLAttributes["class"];
@@ -27,6 +28,9 @@ const props = defineProps<{
   columnNameLabel: string;
   columnTypeLabel: string;
   columnCommentLabel: string;
+  nullableLabel?: string;
+  yesLabel?: string;
+  noLabel?: string;
   columnIndexLabel: string;
   columnPrimaryIndexLabel: string;
   columnUniqueIndexLabel: string;
@@ -97,6 +101,10 @@ const emit = defineEmits<{
         <template v-if="tooltipColumnComment ?? columnComment">
           <span class="text-background/70">{{ columnCommentLabel }}</span>
           <span>{{ tooltipColumnComment ?? columnComment }}</span>
+        </template>
+        <template v-if="columnNullability">
+          <span class="text-background/70">{{ nullableLabel }}</span>
+          <span>{{ columnNullability === "nullable" ? yesLabel : noLabel }}</span>
         </template>
         <template v-if="columnIndexKind && columnIndexKind !== 'none'">
           <span class="text-background/70">{{ columnIndexLabel }}</span>

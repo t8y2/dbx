@@ -239,6 +239,29 @@ async function setStringDraft(value: string) {
 }
 
 describe("RedisValueViewer expiry saving", () => {
+  it("opens member UTF-8 editing from blank space without hijacking text double-clicks", async () => {
+    mocks.redisGetValue.mockResolvedValueOnce(listValue());
+
+    mountViewer(vi.fn());
+    await settle();
+    Array.from(document.querySelectorAll<HTMLElement>("[data-redis-value-row]"))
+      .find((row) => row.textContent?.includes("second"))!
+      .click();
+    await settle();
+
+    const viewer = document.querySelector<HTMLElement>("[data-redis-member-utf8-viewer]")!;
+    const text = document.querySelector<HTMLElement>("[data-redis-member-utf8-text]")!;
+    text.dispatchEvent(new MouseEvent("dblclick", { bubbles: true, cancelable: true }));
+    await settle();
+    expect(document.querySelector("[data-redis-member-utf8-editor]")).toBeNull();
+
+    viewer.dispatchEvent(new MouseEvent("dblclick", { bubbles: true, cancelable: true }));
+    await settle();
+    const editor = document.querySelector<HTMLTextAreaElement>("[data-redis-member-utf8-editor]")!;
+    expect(editor.value).toBe("second");
+    expect(document.activeElement).toBe(editor);
+  });
+
   it("defaults to manual refresh without automatic value polling", async () => {
     vi.useFakeTimers();
     mocks.redisGetValue.mockResolvedValueOnce(stringValue("dmFsdWU=", 60));

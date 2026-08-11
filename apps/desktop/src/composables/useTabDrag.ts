@@ -7,19 +7,19 @@ interface TabDragState {
   draggedId: string | null;
   targetId: string | null;
   dropPosition: TabDropPosition | null;
-  wasDragged: boolean;
+  suppressClick: boolean;
   startX: number;
   startY: number;
 }
 
-const DRAG_THRESHOLD = 5;
+export const TAB_DRAG_HORIZONTAL_THRESHOLD = 12;
 
 const state = reactive<TabDragState>({
   active: false,
   draggedId: null,
   targetId: null,
   dropPosition: null,
-  wasDragged: false,
+  suppressClick: false,
   startX: 0,
   startY: 0,
 });
@@ -30,7 +30,7 @@ let pending: {
   y: number;
   sourceEl: HTMLElement | null;
 } | null = null;
-let onDropCallback: ((draggedId: string, targetId: string, position: TabDropPosition) => void) | null = null;
+let onDropCallback: ((draggedId: string, targetId: string, position: TabDropPosition) => boolean) | null = null;
 let ghostEl: HTMLElement | null = null;
 
 function createGhost(sourceEl: HTMLElement, x: number, y: number) {
@@ -79,10 +79,8 @@ function onMouseMove(event: MouseEvent) {
 
   if (pending && !state.active) {
     const dx = event.clientX - pending.x;
-    const dy = event.clientY - pending.y;
-    if (Math.abs(dx) < DRAG_THRESHOLD && Math.abs(dy) < DRAG_THRESHOLD) return;
+    if (Math.abs(dx) < TAB_DRAG_HORIZONTAL_THRESHOLD) return;
     state.active = true;
-    state.wasDragged = true;
     state.draggedId = pending.id;
     state.startX = pending.x;
     state.startY = pending.y;
@@ -100,8 +98,9 @@ function onMouseMove(event: MouseEvent) {
 }
 
 function onMouseUp() {
+  state.suppressClick = false;
   if (state.active && state.draggedId && state.targetId && state.dropPosition && onDropCallback) {
-    onDropCallback(state.draggedId, state.targetId, state.dropPosition);
+    state.suppressClick = onDropCallback(state.draggedId, state.targetId, state.dropPosition);
   }
   reset();
 }
@@ -128,7 +127,7 @@ function ensureListeners() {
   listenersAttached = true;
 }
 
-export function useTabDrag(onDrop: (draggedId: string, targetId: string, position: TabDropPosition) => void) {
+export function useTabDrag(onDrop: (draggedId: string, targetId: string, position: TabDropPosition) => boolean) {
   ensureListeners();
   onDropCallback = onDrop;
 
@@ -136,7 +135,7 @@ export function useTabDrag(onDrop: (draggedId: string, targetId: string, positio
     if (event.button !== 0) return;
     const target = event.target as HTMLElement;
     if (target.closest("button, input, [data-tab-title-input]")) return;
-    state.wasDragged = false;
+    state.suppressClick = false;
     const el = (event.currentTarget as HTMLElement) || null;
     pending = { id: tabId, x: event.clientX, y: event.clientY, sourceEl: el };
   }

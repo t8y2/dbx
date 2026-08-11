@@ -24,6 +24,20 @@ describe("sidebar tree item layout", () => {
     expect(canTreeNodeShowExpander({ type: "etcd-root", childCount: 0 })).toBe(false);
     expect(canTreeNodeShowExpander({ type: "etcd-dashboard", childCount: 0 })).toBe(false);
     expect(canTreeNodeShowExpander({ type: "etcd-access-control", childCount: 0 })).toBe(false);
+    expect(canTreeNodeShowExpander({ type: "consul-overview", childCount: 0 })).toBe(false);
+  });
+
+  it("shows an expander only for package nodes explicitly marked as containers", () => {
+    expect(canTreeNodeShowExpander({ type: "package", childCount: 0 })).toBe(false);
+    expect(canTreeNodeShowExpander({ type: "package", childCount: 0, explicitContainer: true })).toBe(true);
+    expect(canTreeNodeShowExpander({ type: "package-body", childCount: 0, explicitContainer: true })).toBe(false);
+    expect(canTreeNodeShowExpander({ type: "procedure", childCount: 0, explicitContainer: true })).toBe(false);
+  });
+
+  it("allows only an explicitly marked Xugu type specification to expand", () => {
+    expect(canTreeNodeShowExpander({ type: "type", childCount: 0, explicitContainer: true })).toBe(true);
+    expect(canTreeNodeShowExpander({ type: "type", childCount: 0 })).toBe(false);
+    expect(canTreeNodeShowExpander({ type: "type-body", childCount: 0, explicitContainer: true })).toBe(false);
   });
 
   it("aligns comments to the longest sibling name without crossing parent groups", () => {

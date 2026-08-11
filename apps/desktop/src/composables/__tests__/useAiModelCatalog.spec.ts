@@ -142,6 +142,30 @@ describe("useAiModelCatalog", () => {
     expect(apiMock.aiListModels).toHaveBeenCalledTimes(2);
   });
 
+  it("tracks CodeBuddy executable and environment changes without depending on environment key order", async () => {
+    const initial: AiConfigItem = {
+      ...config(),
+      provider: "codebuddy-cli",
+      endpoint: "",
+      apiKey: "",
+      model: "default",
+      codebuddyCliPath: "/opt/homebrew/bin/codebuddy",
+      codebuddyCliEnv: { HTTPS_PROXY: "http://127.0.0.1:7890", NO_PROXY: "localhost" },
+    };
+    apiMock.aiListModels.mockResolvedValueOnce([{ id: "first" }]).mockResolvedValueOnce([{ id: "second" }]);
+
+    await expect(catalog.loadModels(initial)).resolves.toEqual([{ id: "first" }]);
+    await expect(
+      catalog.loadModels({
+        ...initial,
+        codebuddyCliEnv: { NO_PROXY: "localhost", HTTPS_PROXY: "http://127.0.0.1:7890" },
+      }),
+    ).resolves.toEqual([{ id: "first" }]);
+    await expect(catalog.loadModels({ ...initial, codebuddyCliPath: "/usr/local/bin/codebuddy" })).resolves.toEqual([{ id: "second" }]);
+
+    expect(apiMock.aiListModels).toHaveBeenCalledTimes(2);
+  });
+
   it("does not let a stale request overwrite a newer provider catalog", async () => {
     let resolveInitial: ((models: { id: string }[]) => void) | undefined;
     apiMock.aiListModels

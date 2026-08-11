@@ -5,6 +5,7 @@ import "vue-virtual-scroller/dist/vue-virtual-scroller.css";
 import "./styles/globals.css";
 import { installDebugLogCapture } from "@/lib/backend/debugLog";
 import { clearStartupPreloadRetry, retryStartupAfterPreloadFailure } from "@/lib/startup/startupPreloadRecovery";
+import { applyLegacyWebViewClass } from "@/lib/ui/legacyWebView";
 
 function startupErrorMessage(error: unknown): string {
   if (error instanceof Error) {
@@ -95,4 +96,5 @@ async function bootstrap() {
 
 installDebugLogCapture();
 installStartupErrorHandlers();
+applyLegacyWebViewClass();
 void bootstrap().catch(renderStartupError);

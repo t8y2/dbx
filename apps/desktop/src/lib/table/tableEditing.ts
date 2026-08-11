@@ -9,7 +9,7 @@ function isViewTableType(tableType?: string): boolean {
   return tableType?.toUpperCase().includes("VIEW") === true;
 }
 
-function isTdengineStableTableType(tableType?: string): boolean {
+export function isTdengineStableTableType(tableType?: string): boolean {
   const normalized = tableType?.trim().toUpperCase();
   return normalized === "STABLE" || normalized === "SUPER TABLE" || normalized === "SUPERTABLE";
 }

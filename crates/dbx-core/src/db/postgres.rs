@@ -151,6 +151,44 @@ impl<'a> FromSql<'a> for PgRawBytes {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct PgPoint {
+    x: f64,
+    y: f64,
+}
+
+impl<'a> FromSql<'a> for PgPoint {
+    fn from_sql(_: &Type, raw: &'a [u8]) -> Result<Self, Box<dyn std::error::Error + Sync + Send>> {
+        decode_pg_point_bytes(raw).ok_or_else(|| "expected 16 bytes for PostgreSQL point".into())
+    }
+
+    fn accepts(ty: &Type) -> bool {
+        *ty == Type::POINT
+    }
+}
+
+fn decode_pg_point_bytes(raw: &[u8]) -> Option<PgPoint> {
+    let raw: [u8; 16] = raw.try_into().ok()?;
+    Some(PgPoint {
+        x: f64::from_be_bytes(raw[0..8].try_into().ok()?),
+        y: f64::from_be_bytes(raw[8..16].try_into().ok()?),
+    })
+}
+
+fn format_pg_float(value: f64) -> String {
+    if value == f64::INFINITY {
+        "Infinity".to_string()
+    } else if value == f64::NEG_INFINITY {
+        "-Infinity".to_string()
+    } else {
+        value.to_string()
+    }
+}
+
+fn format_pg_point(point: PgPoint) -> String {
+    format!("({},{})", format_pg_float(point.x), format_pg_float(point.y))
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct PgInterval {
     microseconds: i64,
@@ -524,6 +562,7 @@ pub(crate) enum PgColType {
     Bytea,
     Json,
     Bool,
+    Point,
     Interval,
     DateRange,
     Temporal { fallback: PgTemporalFallback },
@@ -571,6 +610,9 @@ pub(crate) fn classify_pg_type(type_name: &str) -> PgColType {
     }
     if upper == "BOOL" {
         return PgColType::Bool;
+    }
+    if upper == "POINT" {
+        return PgColType::Point;
     }
     if upper == "INTERVAL" {
         return PgColType::Interval;
@@ -655,6 +697,10 @@ pub(crate) fn pg_value_to_json_classified(row: &Row, idx: usize, col_type: PgCol
             serde_json::Value::Null
         }
         PgColType::Bool => pg_bool_value_to_json(row, idx),
+        PgColType::Point => row
+            .try_get::<_, PgPoint>(idx)
+            .map(|point| serde_json::Value::String(format_pg_point(point)))
+            .unwrap_or(serde_json::Value::Null),
         PgColType::Interval => row
             .try_get::<_, PgInterval>(idx)
             .map(|interval| serde_json::Value::String(format_pg_interval(interval)))
@@ -1015,6 +1061,7 @@ async fn postgres_query_one_cached(
     }
 }
 
+#[allow(clippy::large_enum_variant)]
 enum PreparedSelectOutcome {
     Complete(Box<QueryResult>),
     TextFallback { column_types: Vec<String>, unsupported_type: String },
@@ -1576,11 +1623,15 @@ async fn connect_with_local_timezone(url: &str, fallback_timeout: Duration, time
 /// (server address, server port, backend PID). The PID alone is not unique
 /// across different servers, so the server's own address/port disambiguate
 /// (`inet_server_addr()` is NULL for Unix sockets, hence the fallback).
-type PostgresConnectionKey = (String, i32, i32);
+type PostgresConnectionKey = (String, String, String);
 
-const POSTGRES_CONNECTION_IDENTITY_SQL: &str = "SELECT pg_backend_pid(), \
+const POSTGRES_CONNECTION_IDENTITY_SQL: &str = "SELECT pg_backend_pid()::text, \
      COALESCE(host(inet_server_addr()), 'unix'), \
-     COALESCE(inet_server_port(), current_setting('port')::integer)";
+     COALESCE(inet_server_port()::text, current_setting('port'))";
+
+fn postgres_connection_key_from_row(row: &Row) -> Option<PostgresConnectionKey> {
+    Some((row.try_get::<_, String>(1).ok()?, row.try_get::<_, String>(2).ok()?, row.try_get::<_, String>(0).ok()?))
+}
 
 /// Notice buffers for live connections, keyed by connection identity. Entries
 /// are weak so they disappear once the pooled connection (and its driver
@@ -1681,13 +1732,14 @@ where
             // attributed to query results on this connection and are logged
             // by the driver task instead. Never fail the connection over this.
             if let Ok(row) = client.query_one(POSTGRES_CONNECTION_IDENTITY_SQL, &[]).await {
-                let key: PostgresConnectionKey = (row.get(1), row.get(2), row.get(0));
-                let buffer = Arc::new(Mutex::new(Vec::new()));
-                let mut buffers = postgres_notice_buffers().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-                buffers.retain(|_, weak| weak.strong_count() > 0);
-                buffers.insert(key, Arc::downgrade(&buffer));
-                drop(buffers);
-                *notice_buffer.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(buffer);
+                if let Some(key) = postgres_connection_key_from_row(&row) {
+                    let buffer = Arc::new(Mutex::new(Vec::new()));
+                    let mut buffers = postgres_notice_buffers().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                    buffers.retain(|_, weak| weak.strong_count() > 0);
+                    buffers.insert(key, Arc::downgrade(&buffer));
+                    drop(buffers);
+                    *notice_buffer.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(buffer);
+                }
             }
 
             Ok((client, conn_task))
@@ -1723,7 +1775,7 @@ async fn resolve_postgres_client_key(client: &deadpool_postgres::Client) -> Opti
         .query_one(POSTGRES_CONNECTION_IDENTITY_SQL, &[])
         .await
         .ok()
-        .map(|row| (row.get(1), row.get(2), row.get(0)));
+        .and_then(|row| postgres_connection_key_from_row(&row));
     let mut keys = postgres_client_keys().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     keys.retain(|_, (cached, _)| cached.strong_count() > 0);
     let cache_key = Arc::as_ptr(&client.statement_cache) as usize;
@@ -2328,13 +2380,12 @@ pub async fn list_tables_filtered(
     let limit_param = limit.and_then(|value| i64::try_from(value).ok());
     let offset_param = offset.and_then(|value| i64::try_from(value).ok()).unwrap_or(0);
     let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
-    let rows = postgres_query_cached(
-        &client,
-        postgres_tables_sql(),
-        &[&schema, &filter_pattern, &fuzzy_filter_pattern, &limit_param, &offset_param],
-    )
-    .await
-    .map_err(|e| e.to_string())?;
+    let sql = postgres_tables_sql(limit_param, offset_param);
+    let params: &[(&(dyn tokio_postgres::types::ToSql + Sync), Type)] =
+        &[(&schema, Type::VARCHAR), (&filter_pattern, Type::VARCHAR), (&fuzzy_filter_pattern, Type::VARCHAR)];
+    // The pagination literals make this SQL vary by page. Use an unnamed typed
+    // query so each load stays one round trip without growing the statement cache.
+    let rows = client.query_typed(&sql, params).await.map_err(|e| e.to_string())?;
 
     Ok(rows
         .iter()
@@ -2702,12 +2753,18 @@ fn postgres_table_comment_sql() -> &'static str {
      LIMIT 1"
 }
 
-fn postgres_tables_sql() -> &'static str {
-    // PostgreSQL and Redshift can infer different wire types for LIMIT/OFFSET
-    // placeholders. Keep them explicit so the shared i64 parameters serialize reliably.
-    // Root relations must precede partition descendants so a large partition
-    // hierarchy cannot push unrelated schema tables into later sidebar pages.
-    "SELECT c.relname AS table_name, \
+fn postgres_tables_sql(limit: Option<i64>, offset: i64) -> String {
+    // PostgreSQL-compatible servers do not agree on the inferred wire types
+    // or accepted expression grammar for LIMIT/OFFSET parameters. These values
+    // originate as usize and are converted to non-negative i64 literals.
+    // Omitting an explicit ESCAPE keeps compatibility with servers that expose
+    // only two-argument ILIKE; bound patterns use the default backslash escape.
+    let pagination = match limit {
+        Some(limit) => format!("LIMIT {limit} OFFSET {offset}"),
+        None => format!("OFFSET {offset}"),
+    };
+    format!(
+        "SELECT c.relname AS table_name, \
          CASE c.relkind WHEN 'r' THEN 'BASE TABLE' WHEN 'v' THEN 'VIEW' \
            WHEN 'm' THEN 'MATERIALIZED_VIEW' WHEN 'f' THEN 'FOREIGN TABLE' \
            WHEN 'p' THEN 'BASE TABLE' END AS table_type, \
@@ -2720,9 +2777,10 @@ fn postgres_tables_sql() -> &'static str {
          LEFT JOIN pg_catalog.pg_class pc ON pc.oid = i.inhparent \
          LEFT JOIN pg_catalog.pg_namespace pn ON pn.oid = pc.relnamespace \
          WHERE n.nspname = $1 AND c.relkind IN ('r','v','m','f','p') \
-           AND ($2 = '%%' OR c.relname ILIKE $2 ESCAPE '~' OR ($3 <> '' AND c.relname ILIKE $3 ESCAPE '~')) \
+           AND ($2 = '%%' OR c.relname ILIKE $2 OR ($3 <> '' AND c.relname ILIKE $3)) \
          ORDER BY CASE WHEN pc.relkind = 'p' THEN 1 ELSE 0 END, c.relname \
-         LIMIT CAST($4 AS BIGINT) OFFSET CAST($5 AS BIGINT)"
+         {pagination}"
+    )
 }
 
 fn like_contains_pattern(value: &str) -> String {
@@ -2733,8 +2791,8 @@ fn like_contains_pattern(value: &str) -> String {
     let mut pattern = String::with_capacity(value.len() + 2);
     pattern.push('%');
     for ch in value.chars() {
-        if ch == '~' || ch == '%' || ch == '_' {
-            pattern.push('~');
+        if ch == '\\' || ch == '%' || ch == '_' {
+            pattern.push('\\');
         }
         pattern.push(ch);
     }
@@ -2746,8 +2804,8 @@ fn like_fuzzy_pattern(value: &str) -> String {
     crate::sql::fuzzy_like_pattern_with_escape(value, |value| {
         let mut escaped = String::with_capacity(value.len() + 1);
         for ch in value.chars() {
-            if ch == '~' || ch == '%' || ch == '_' {
-                escaped.push('~');
+            if ch == '\\' || ch == '%' || ch == '_' {
+                escaped.push('\\');
             }
             escaped.push(ch);
         }
@@ -3064,6 +3122,8 @@ pub async fn list_objects(pool: &Pool, schema: &str) -> Result<Vec<ObjectInfo>, 
             parent_schema: row.try_get::<_, Option<String>>(5).ok().flatten().filter(|s| !s.is_empty()),
             parent_name: row.try_get::<_, Option<String>>(6).ok().flatten().filter(|s| !s.is_empty()),
             signature: row.try_get::<_, Option<String>>(7).ok().flatten(),
+            trigger: None,
+            xugu_type_members_expandable: None,
         })
         .collect())
 }
@@ -4521,6 +4581,13 @@ pub async fn list_triggers(pool: &Pool, schema: &str, table: &str) -> Result<Vec
             name: pg_row_try_string(row, 0),
             event: pg_row_try_string(row, 1),
             timing: pg_row_try_string(row, 2),
+            level: None,
+            condition: None,
+            language: None,
+            enabled: None,
+            valid: None,
+            comment: None,
+            created_at: None,
             statement: None,
         })
         .collect())
@@ -5040,8 +5107,51 @@ mod tests {
     }
 
     #[test]
+    fn postgres_connection_identity_normalizes_vendor_numeric_types_to_text() {
+        assert!(POSTGRES_CONNECTION_IDENTITY_SQL.contains("pg_backend_pid()::text"));
+        assert!(POSTGRES_CONNECTION_IDENTITY_SQL.contains("inet_server_port()::text"));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DBX_TEST_POSTGRES_URL pointing at a PostgreSQL-compatible database"]
+    async fn postgres_connection_identity_supports_compatible_servers() {
+        let url = std::env::var("DBX_TEST_POSTGRES_URL").expect("DBX_TEST_POSTGRES_URL");
+        let pool = connect_with_local_timezone(&url, Duration::from_secs(10), "UTC")
+            .await
+            .expect("connect PostgreSQL-compatible database");
+        let client = pool.get().await.expect("checkout PostgreSQL-compatible database");
+        let key = postgres_client_key(&client).await.expect("resolve text connection identity");
+
+        assert!(!key.0.is_empty());
+        assert!(!key.1.is_empty());
+        assert!(!key.2.is_empty());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DBX_TEST_POSTGRES_URL pointing at a PostgreSQL database"]
+    async fn postgres_connection_identity_preserves_notice_capture() {
+        let url = std::env::var("DBX_TEST_POSTGRES_URL").expect("DBX_TEST_POSTGRES_URL");
+        let pool = connect_with_local_timezone(&url, Duration::from_secs(10), "UTC")
+            .await
+            .expect("connect PostgreSQL database");
+        let client = pool.get().await.expect("checkout PostgreSQL database");
+
+        let result = execute_query_with_max_rows_inner(
+            &client,
+            "DO $$ BEGIN RAISE NOTICE 'dbx notice identity regression'; END $$",
+            None,
+            false,
+            None,
+        )
+        .await
+        .expect("execute statement with notice");
+
+        assert!(result.messages.iter().any(|message| message.message == "dbx notice identity regression"));
+    }
+
+    #[test]
     fn take_notices_for_key_returns_buffered_notices_and_empties_buffer() {
-        let key = ("test-host".to_string(), 9_000_001, 9_000_001);
+        let key = ("test-host".to_string(), "9000001".to_string(), "9000001".to_string());
         let buffer = Arc::new(Mutex::new(vec![test_query_message("first"), test_query_message("second")]));
         postgres_notice_buffers()
             .lock()
@@ -5065,8 +5175,8 @@ mod tests {
 
     #[test]
     fn take_notices_for_key_prunes_dead_buffers_and_misses_return_empty() {
-        let live_key = ("test-host".to_string(), 9_000_002, 9_000_002);
-        let dead_key = ("test-host".to_string(), 9_000_003, 9_000_003);
+        let live_key = ("test-host".to_string(), "9000002".to_string(), "9000002".to_string());
+        let dead_key = ("test-host".to_string(), "9000003".to_string(), "9000003".to_string());
         let live = Arc::new(Mutex::new(vec![test_query_message("live")]));
         let dead = Arc::new(Mutex::new(vec![test_query_message("dead")]));
         {
@@ -5076,7 +5186,9 @@ mod tests {
         }
         drop(dead);
 
-        assert!(take_notices_for_key(&("test-host".to_string(), 9_000_004, 9_000_004)).is_empty());
+        assert!(
+            take_notices_for_key(&("test-host".to_string(), "9000004".to_string(), "9000004".to_string())).is_empty()
+        );
         assert!(take_notices_for_key(&dead_key).is_empty());
         let buffers = postgres_notice_buffers().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         assert!(!buffers.contains_key(&dead_key));
@@ -5092,8 +5204,8 @@ mod tests {
     fn take_notices_for_key_distinguishes_same_pid_on_different_servers() {
         // Backend PIDs collide across servers; the (address, port, pid) key
         // keeps notice attribution separate.
-        let key_a = ("server-a".to_string(), 5432, 42);
-        let key_b = ("server-b".to_string(), 5432, 42);
+        let key_a = ("server-a".to_string(), "5432".to_string(), "42".to_string());
+        let key_b = ("server-b".to_string(), "5432".to_string(), "42".to_string());
         let buffer_a = Arc::new(Mutex::new(vec![test_query_message("from-a")]));
         let buffer_b = Arc::new(Mutex::new(vec![test_query_message("from-b")]));
         {
@@ -5510,6 +5622,7 @@ mod tests {
         assert_eq!(classify_pg_type("json"), PgColType::Json);
         assert_eq!(classify_pg_type("JSONB"), PgColType::Json);
         assert_eq!(classify_pg_type("bool"), PgColType::Bool);
+        assert_eq!(classify_pg_type("point"), PgColType::Point);
         assert_eq!(classify_pg_type("timestamp"), PgColType::Temporal { fallback: PgTemporalFallback::Probe });
         assert_eq!(classify_pg_type("timestamptz"), PgColType::Temporal { fallback: PgTemporalFallback::Probe });
         assert_eq!(classify_pg_type("date"), PgColType::Temporal { fallback: PgTemporalFallback::Probe });
@@ -5946,6 +6059,22 @@ mod tests {
         assert!(PgSystemU32::accepts(&Type::CID));
         assert!(!PgSystemU32::accepts(&Type::OID));
         assert!(!PgSystemU32::accepts(&Type::INT4));
+    }
+
+    #[test]
+    fn pg_point_decodes_binary_coordinates_as_text() {
+        let mut raw = Vec::new();
+        raw.extend_from_slice(&(-194.0_f64).to_be_bytes());
+        raw.extend_from_slice(&53.0_f64.to_be_bytes());
+
+        let point = PgPoint::from_sql(&Type::POINT, &raw).unwrap();
+
+        assert_eq!(point, PgPoint { x: -194.0, y: 53.0 });
+        assert_eq!(format_pg_point(point), "(-194,53)");
+        assert_eq!(format_pg_point(PgPoint { x: f64::NEG_INFINITY, y: f64::INFINITY }), "(-Infinity,Infinity)");
+        assert!(PgPoint::from_sql(&Type::POINT, &[0; 15]).is_err());
+        assert!(PgPoint::accepts(&Type::POINT));
+        assert!(!PgPoint::accepts(&Type::BYTEA));
     }
 
     #[test]
@@ -6532,7 +6661,7 @@ mod tests {
 
     #[test]
     fn postgres_tables_sql_contains_expected_columns() {
-        let sql = postgres_tables_sql();
+        let sql = postgres_tables_sql(Some(500), 0);
         assert!(sql.contains("table_name"));
         assert!(sql.contains("table_type"));
         assert!(sql.contains("table_comment"));
@@ -7328,31 +7457,117 @@ mod tests {
         assert_eq!(timezone, "UTC");
     }
 
+    #[tokio::test]
+    #[ignore = "requires DBX_TEST_POSTGRES_URL pointing at a writable PostgreSQL-compatible database"]
+    async fn list_tables_filtered_supports_risingwave_pagination_and_filtering() {
+        let url = std::env::var("DBX_TEST_POSTGRES_URL").expect("DBX_TEST_POSTGRES_URL");
+        let pool = connect_with_local_timezone(&url, Duration::from_secs(5), "UTC")
+            .await
+            .expect("connect PostgreSQL-compatible database");
+        let client = pool.get().await.expect("checkout postgres");
+        client
+            .batch_execute(
+                r#"DROP TABLE IF EXISTS public."dbx_issue_5584_live_page_a";
+                   DROP TABLE IF EXISTS public."dbx_issue_5584_live_page_b";
+                   DROP TABLE IF EXISTS public."dbx_issue_5584_live_order_100%";
+                   DROP TABLE IF EXISTS public."dbx_issue_5584_live_back\slash";
+                   DROP TABLE IF EXISTS public."dbx_issue_5584_live_system_users";
+                   CREATE TABLE public."dbx_issue_5584_live_page_a"(id int);
+                   CREATE TABLE public."dbx_issue_5584_live_page_b"(id int);
+                   CREATE TABLE public."dbx_issue_5584_live_order_100%"(id int);
+                   CREATE TABLE public."dbx_issue_5584_live_back\slash"(id int);
+                   CREATE TABLE public."dbx_issue_5584_live_system_users"(id int);"#,
+            )
+            .await
+            .expect("create live table fixtures");
+        drop(client);
+
+        let all_tables = list_tables(&pool, "public").await.expect("expand complete table list");
+        let first_page = list_tables_filtered(&pool, "public", Some("dbx_issue_5584_live_page_"), Some(1), Some(0))
+            .await
+            .expect("list first table page");
+        let second_page = list_tables_filtered(&pool, "public", Some("dbx_issue_5584_live_page_"), Some(1), Some(1))
+            .await
+            .expect("list second table page");
+        let wildcard_match =
+            list_tables_filtered(&pool, "public", Some("dbx_issue_5584_live_order_100%"), Some(10), Some(0))
+                .await
+                .expect("filter table with wildcard characters");
+        let backslash_match =
+            list_tables_filtered(&pool, "public", Some(r"dbx_issue_5584_live_back\slash"), Some(10), Some(0))
+                .await
+                .expect("filter table with backslash");
+        let fuzzy_match = list_tables_filtered(&pool, "public", Some("i5584su"), Some(10), Some(0))
+            .await
+            .expect("fuzzy filter table name");
+
+        assert!(all_tables.iter().any(|table| table.name == "dbx_issue_5584_live_page_a"));
+        assert!(all_tables.iter().any(|table| table.name == "dbx_issue_5584_live_page_b"));
+        assert_eq!(
+            first_page.iter().map(|table| table.name.as_str()).collect::<Vec<_>>(),
+            ["dbx_issue_5584_live_page_a"]
+        );
+        assert_eq!(
+            second_page.iter().map(|table| table.name.as_str()).collect::<Vec<_>>(),
+            ["dbx_issue_5584_live_page_b"]
+        );
+        assert_eq!(
+            wildcard_match.iter().map(|table| table.name.as_str()).collect::<Vec<_>>(),
+            ["dbx_issue_5584_live_order_100%"]
+        );
+        assert_eq!(
+            backslash_match.iter().map(|table| table.name.as_str()).collect::<Vec<_>>(),
+            [r"dbx_issue_5584_live_back\slash"]
+        );
+        assert_eq!(
+            fuzzy_match.iter().map(|table| table.name.as_str()).collect::<Vec<_>>(),
+            ["dbx_issue_5584_live_system_users"]
+        );
+
+        let client = pool.get().await.expect("checkout postgres for cleanup");
+        client
+            .batch_execute(
+                r#"DROP TABLE IF EXISTS public."dbx_issue_5584_live_page_a";
+                   DROP TABLE IF EXISTS public."dbx_issue_5584_live_page_b";
+                   DROP TABLE IF EXISTS public."dbx_issue_5584_live_order_100%";
+                   DROP TABLE IF EXISTS public."dbx_issue_5584_live_back\slash";
+                   DROP TABLE IF EXISTS public."dbx_issue_5584_live_system_users";"#,
+            )
+            .await
+            .expect("drop live table fixtures");
+    }
+
     #[test]
     fn like_contains_pattern_escapes_wildcards() {
         assert_eq!(like_contains_pattern(""), "%%");
-        assert_eq!(like_contains_pattern("order_100%"), "%order~_100~%%");
-        assert_eq!(like_contains_pattern("tilde~name"), "%tilde~~name%");
-        assert_eq!(like_contains_pattern(r"foo\bar"), r"%foo\bar%");
+        assert_eq!(like_contains_pattern("order_100%"), "%order\\_100\\%%");
+        assert_eq!(like_contains_pattern("tilde~name"), "%tilde~name%");
+        assert_eq!(like_contains_pattern(r"foo\bar"), r"%foo\\bar%");
     }
 
     #[test]
     fn like_fuzzy_pattern_escapes_wildcards() {
         assert_eq!(like_fuzzy_pattern(""), "%%");
         assert_eq!(like_fuzzy_pattern("sysu"), "%s%y%s%u%");
-        assert_eq!(like_fuzzy_pattern("user_%"), "%u%s%e%r%~_%~%%");
-        assert_eq!(like_fuzzy_pattern("tilde~name"), "%t%i%l%d%e%~~%n%a%m%e%");
+        assert_eq!(like_fuzzy_pattern("user_%"), "%u%s%e%r%\\_%\\%%");
+        assert_eq!(like_fuzzy_pattern("tilde~name"), "%t%i%l%d%e%~%n%a%m%e%");
     }
 
     #[test]
-    fn postgres_tables_sql_uses_non_backslash_like_escape() {
-        let sql = postgres_tables_sql();
+    fn postgres_tables_sql_uses_literal_pagination_without_escape_clause() {
+        let paged_sql = postgres_tables_sql(Some(500), 200);
+        assert!(paged_sql.contains("ILIKE $2 OR"));
+        assert!(paged_sql.contains("$3 <> ''"));
+        assert!(paged_sql.contains("ILIKE $3"));
+        assert!(!paged_sql.contains("ESCAPE"));
+        assert!(paged_sql.contains("ORDER BY CASE WHEN pc.relkind = 'p' THEN 1 ELSE 0 END, c.relname"));
+        assert!(paged_sql.contains("LIMIT 500 OFFSET 200"));
+        assert!(!paged_sql.contains("$4"));
+        assert!(!paged_sql.contains("$5"));
 
-        assert!(sql.contains("ILIKE $2 ESCAPE '~'"));
-        assert!(sql.contains("$3 <> ''"));
-        assert!(sql.contains("ILIKE $3 ESCAPE '~'"));
-        assert!(sql.contains("ORDER BY CASE WHEN pc.relkind = 'p' THEN 1 ELSE 0 END, c.relname"));
-        assert!(sql.contains("LIMIT CAST($4 AS BIGINT) OFFSET CAST($5 AS BIGINT)"));
+        let unbounded_sql = postgres_tables_sql(None, 0);
+        assert!(unbounded_sql.ends_with("OFFSET 0"));
+        assert!(!unbounded_sql.contains("LIMIT"));
     }
 
     #[test]

@@ -6,7 +6,8 @@ import {
   ArrowDown,
   ArrowUpDown,
   ArrowUpRight,
-  Upload,
+  Download,
+  FileUp,
   Trash2,
   ChevronDown,
   ChevronUp,
@@ -110,9 +111,11 @@ import {
   shouldAutoTransposeSingleRow,
   transposeRecordIndexesForMode,
   transposeRecordWidthsForDensity,
+  transposeEndAlignmentSpacerWidth,
   transposeFieldWidth,
   transposeScrollLeftForRecord,
   visibleTransposeRecordWindow,
+  type TransposeScrollAlignment,
 } from "@/lib/dataGrid/dataGridTranspose";
 import { canApplyGridSelectionValue, canDeleteGridRowItem, canEditGridCellDetail, matchesRowStatusFilter, shouldShowQuickEntryDraftRow, type RowStatus, type RowStatusFilter } from "@/lib/dataGrid/gridRowStatus";
 import { displayCellValue, firstLineCellDisplayValue, limitDataGridCellDisplay, SQLSERVER_DATA_GRID_CELL_DISPLAY_MAX_LENGTH, type CellValue } from "@/lib/dataGrid/cellValue";
@@ -120,12 +123,17 @@ import { getApplicablePreviewActions } from "@/lib/dataGrid/resultPreviewRegistr
 import "@/lib/dataGrid/geometryMapPreview";
 import {
   BINARY_CELL_DOWNLOAD_MODES,
+  BinaryCellImportTooLargeError,
+  binaryCellBytesToHexValue,
   binaryCellDisplayText,
   binaryCellDownloadFileName,
   binaryCellDownloadPayload,
+  canImportBinaryCellFile,
   canDownloadBinaryCellValue,
   downloadBinaryCellPayload,
+  formatBinaryCellByteSize,
   isBinaryCellColumnType,
+  openBinaryCellFile,
   parseBinaryCellBytes,
   retainBinaryCellDownloadMenuForHover,
   type BinaryCellDownloadMode,
@@ -136,7 +144,7 @@ import { buildDataGridCellDetail, buildDataGridColumnDetail, buildDataGridRowDet
 import { applyColumnFormatter, buildColumnFormatterKey, getSupportedTimeZoneOptions, normalizeColumnFormatter, resolveColumnFormatter, type ColumnFormatterConfig, type DateTimeFormatterUnit, DateTimePatterns } from "@/lib/dataGrid/columnFormatter";
 import { temporalCellEditorConfig, type TemporalCellEditorConfig } from "@/lib/dataGrid/dataGridTemporalEditor";
 import { BOOLEAN_CELL_EDITOR_VALUES, booleanCellEditorValue, isBooleanCellValue, isBooleanColumnType, isPointInBooleanCheckbox, nextBooleanCellValue, normalizeBooleanCellValue, parseBooleanCellEditorValue } from "@/lib/dataGrid/dataGridBooleanColumn";
-import { resolveDataGridColumnsByResultIndex } from "@/lib/dataGrid/dataGridColumnMetadata";
+import { resolveDataGridColumnNullability, resolveDataGridColumnsByResultIndex } from "@/lib/dataGrid/dataGridColumnMetadata";
 import { isCancelSearchShortcut, isCopyCurrentRowShortcut, isDeleteCurrentRowShortcut, isFocusSearchShortcut, isModRShortcut, isSaveShortcut, isToggleTransposeShortcut } from "@/lib/editor/keyboardShortcuts";
 import { dataGridHeaderContentWidth, scrollbarGutterWidth } from "@/lib/dataGrid/dataGridScrollGutter";
 import { canFetchNextDataGridSegment, canGoNextDataGridPage, dataGridTotalRowCountLabelKey, dataGridTruncationHintKey, hasCompleteLocalDataGridResult, resolveDataGridPaginationTotal, type DataGridInexactTotalRowCountMode } from "@/lib/dataGrid/dataGridPagination";
@@ -170,6 +178,7 @@ import { buildDataGridColumnLookupItems, dataGridColumnCommentFor, filterDataGri
 import { uniqueDataGridColumnOrderKeys } from "@/lib/dataGrid/dataGridColumnOrder";
 import { dataGridColumnLayoutScopeKey, TABLE_DATA_GRID_COLUMN_ORDER_CHANGED_EVENT, tableDataGridColumnOrderScopeKey } from "@/lib/dataGrid/dataGridColumnLayoutStorage";
 import { summarizeSelection } from "@/lib/dataGrid/gridSelection";
+import { captureDataGridSelection, restoreDataGridSelection, type PersistedDataGridSelection } from "@/lib/dataGrid/dataGridSelectionPersistence";
 import { dataGridFrameCoversRow, dataGridSelectionEdgeMask, dataGridSelectionFrameKindAtCell, dataGridSelectionUsesOuterFrame, resolveDataGridSelectionFrames } from "@/lib/dataGrid/dataGridSelectionFrames";
 import {
   createDataGridCellContextMenuItems,
@@ -412,6 +421,7 @@ if (isDebugLoggingEnabled()) {
 const transposeRowIndex = ref<number | null>(null);
 const showTranspose = ref(false);
 const preserveTransposeOnNextResult = ref(false);
+let preservedSelectionOnNextResult: { selection: PersistedDataGridSelection; sourceResult: QueryResult } | null = null;
 
 watch(
   () => props.result,
@@ -454,7 +464,7 @@ watch(
     if (!shouldAutoTransposeSingleRow({ enabled: !!props.autoTransposeSingleRow, preserveTranspose: preserveTransposeOnNextResult.value, rowCount: result.rows.length, columnCount: result.columns.length })) return;
     nextTick(() => {
       if (props.result !== result || !props.autoTransposeSingleRow || result.rows.length !== 1 || result.columns.length <= 1) return;
-      applyTransposeState({ showTranspose: true, transposeRowIndex: 0 });
+      applyTransposeState({ showTranspose: true, transposeRowIndex: 0 }, "start");
     });
   },
   { immediate: true },
@@ -534,6 +544,10 @@ function headerColumnType(column: string, actualColIdx: number): string {
     actualColIdx,
   });
   return resolved ? shortTypeName(compactHeaderColumnType(resolved)) : "";
+}
+
+function headerColumnNullability(actualColIdx: number): "nullable" | "required" | undefined {
+  return resolveDataGridColumnNullability(props.context, tableColumnForGridColumn(actualColIdx));
 }
 
 const reserveColumnTypeLine = computed(() => reserveDataGridHeaderLine(showColumnTypesInHeader.value, props.result.columns, (column, index) => headerColumnType(column, index)));
@@ -1728,6 +1742,11 @@ let gridVerticalScrollbarThumbHeightPercent = 100;
 let gridScrollbarsRuntime: DataGridScrollbarsRuntime;
 let dataGridTopbarResizeObserver: ResizeObserver | null = null;
 let cellEditResizeObserver: ResizeObserver | null = null;
+// vue-virtual-scroller's @resize only fires in pageMode (it observes window),
+// so in container-scroll mode (transpose uses RecycleScroller without pageMode)
+// container size changes from window resize / sidebar drag never reach
+// updateTransposeViewport. Observe the scroller element directly instead.
+let transposeViewportResizeObserver: ResizeObserver | null = null;
 let resetCellEditTextareaScrollOnResize = false;
 let gridHorizontalScrollbarDragState: {
   scroller: HTMLElement;
@@ -2635,6 +2654,7 @@ watch(
     // and the completion was triggered by a refresh/rollback.
     if (!loading && prevLoading && isRefreshingData.value) {
       isRefreshingData.value = false;
+      if (preservedSelectionOnNextResult?.sourceResult === props.result) preservedSelectionOnNextResult = null;
       const total = paginationTotalRowCount.value;
       if (!total || total <= 0) return;
       const lastPageNum = Math.max(1, Math.ceil(total / pageSize.value));
@@ -2867,7 +2887,7 @@ async function lastPage() {
       const countTarget = await buildCurrentCountTarget();
       const sql = countTarget?.sql;
       if (!sql) return;
-      const result = await api.executeQuery(props.connectionId, props.executionDatabase ?? props.database ?? "", sql, countTarget.schema, undefined, dataGridCountQueryOptions(connectionStore.getConfig(props.connectionId)));
+      const result = await api.executeQuery(props.connectionId, props.executionDatabase ?? props.database ?? "", sql, countTarget.schema, undefined, dataGridCountQueryOptions(connectionStore.getConfig(props.connectionId), settingsStore.editorSettings.globalQueryTimeoutSecs));
       const total = Number(result.rows?.[0]?.[0] ?? 0);
       if (!Number.isFinite(total) || total < 0) return;
       manualTotalRowCount.value = total;
@@ -2915,7 +2935,7 @@ async function calculateTotalRowCount() {
     if (!props.connectionId) return;
     const countTarget = await buildCurrentCountTarget();
     if (!countTarget?.sql) return;
-    const result = await api.executeQuery(props.connectionId, props.executionDatabase ?? props.database ?? "", countTarget.sql, countTarget.schema, undefined, dataGridCountQueryOptions(connectionStore.getConfig(props.connectionId)));
+    const result = await api.executeQuery(props.connectionId, props.executionDatabase ?? props.database ?? "", countTarget.sql, countTarget.schema, undefined, dataGridCountQueryOptions(connectionStore.getConfig(props.connectionId), settingsStore.editorSettings.globalQueryTimeoutSecs));
     const total = Number(result.rows?.[0]?.[0] ?? 0);
     if (Number.isFinite(total) && total >= 0) {
       manualTotalRowCount.value = total;
@@ -3375,6 +3395,8 @@ async function onToolbarRefresh() {
   if (infiniteScrollEnabled.value) {
     resetInfiniteScrollState();
   }
+  const selection = captureCurrentSelectionForRefresh();
+  preservedSelectionOnNextResult = selection ? { selection, sourceResult: props.result } : null;
   preserveTransposeOnNextResult.value = showTranspose.value;
   isRefreshingData.value = true;
   beginDataGridNativeSelectionBlock(dataGridNativeSelectionBlockOwner);
@@ -3837,6 +3859,7 @@ const {
   isSelectingAll,
   isSelectingCells,
   selectedRange,
+  selectionAnchor,
   selectedCells,
   selectedCellKeys,
   selectedCellMatrix,
@@ -3851,6 +3874,7 @@ const {
   selectionFocus,
   finishCellSelection,
   extendCellSelection,
+  restoreCellSelectionState,
   cellIsSelected,
   columnIsSelected,
   selectedRangeStart,
@@ -3865,6 +3889,53 @@ const {
   handleDataCellMousedown,
   isRowSelected,
 } = selection;
+
+function captureCurrentSelectionForRefresh(): PersistedDataGridSelection | null {
+  return captureDataGridSelection({
+    columns: props.result.columns,
+    sourceColumns: props.sourceColumns,
+    rows: props.result.rows,
+    primaryKeys: props.tableMeta?.primaryKeys ?? [],
+    visibleColumnIndexes: visibleColumnIndexes.value,
+    displayItems: displayItems.value,
+    selectedRowIds: selectedRowIds.value,
+    selectedColumnIndexes: selectedColumnIndexes.value,
+    selectedCellKeys: selectedCellKeys.value,
+    selectionAnchor: selectionAnchor.value,
+    selectionFocus: selectionFocus.value,
+    selectingAll: isSelectingAll.value,
+    lastClickedRowIndex: selection.lastClickedRowIndex.value,
+  });
+}
+
+function restoreSelectionAfterRefresh(snapshot: PersistedDataGridSelection) {
+  const restored = restoreDataGridSelection({
+    snapshot,
+    columns: props.result.columns,
+    sourceColumns: props.sourceColumns,
+    rows: props.result.rows,
+    visibleColumnIndexes: visibleColumnIndexes.value,
+    displayItems: displayItems.value,
+  });
+  if (!restored) return;
+
+  if (restored.kind === "rows") {
+    selectedRowIds.value = new Set(restored.rowIds);
+    selection.lastClickedRowIndex.value = restored.anchorRowIndex;
+  } else if (restored.kind === "columns") {
+    selectedColumnIndexes.value = new Set(restored.columnIndexes);
+  } else if (restored.kind === "range") {
+    restoreCellSelectionState({ anchor: restored.anchor, focus: restored.focus, selectingAll: restored.selectingAll });
+  } else {
+    restoreCellSelectionState({ cellKeys: restored.cellKeys });
+  }
+
+  if (restored.kind === "columns") return;
+  nextTick(() => {
+    if (restored.kind === "range") scrollCellIntoView(restored.scrollRowIndex, restored.focus.colIndex);
+    else scrollGridRowIntoView(restored.scrollRowIndex);
+  });
+}
 
 const multiRowCount = computed(() => {
   if (hasRowSelection.value) return selectedRowCount.value;
@@ -5637,6 +5708,7 @@ function pauseCanvasGridWork() {
   disconnectCellEditResizeObserver();
   dataGridTopbarResizeObserver?.disconnect();
   dataGridTopbarResizeObserver = null;
+  disconnectTransposeViewportObserver();
   canvasPixelRatioMediaQueryCleanup?.();
   canvasPixelRatioMediaQueryCleanup = null;
   canvasPixelRatioMediaQuery = null;
@@ -5652,6 +5724,7 @@ function resumeCanvasGridWork() {
   nextTick(() => {
     attachCanvasResizeObserver();
     observeDataGridTopbarWidth();
+    observeTransposeViewport();
     refreshGridScrollerMetrics();
     observeGridHorizontalScrollbarScroller();
   });
@@ -5704,6 +5777,7 @@ onUnmounted(() => {
   gridScrollbarsRuntime.dispose();
   dataGridTopbarResizeObserver?.disconnect();
   disconnectCellEditResizeObserver();
+  disconnectTransposeViewportObserver();
   stopGridHorizontalScrollbarDrag();
   stopGridVerticalScrollbarDrag();
   if (columnLayoutRefreshFrame) cancelAnimationFrame(columnLayoutRefreshFrame);
@@ -6380,7 +6454,10 @@ function applyGeneratedSelectionValue(kind: CellValueGenerationKind, startValue 
   } finally {
     commitBatch();
   }
-  if (applied) toast(t("grid.generatedValuesApplied", { count: cells.length }));
+  if (applied) {
+    toast(t("grid.generatedValuesApplied", { count: cells.length }));
+    void nextTick(() => window.requestAnimationFrame(() => gridRef.value?.focus({ preventScroll: true })));
+  }
   return applied;
 }
 
@@ -6613,7 +6690,7 @@ function toggleKeyboardTranspose(): boolean {
   if (next.showTranspose) {
     closeCellDetails();
     nextTick(updateTransposeViewport);
-    if (next.transposeRowIndex !== null) scrollTransposeRecordIntoView(next.transposeRowIndex);
+    if (next.transposeRowIndex !== null) scrollTransposeRecordIntoView(next.transposeRowIndex, "start");
   } else if (!restoreGridScrollTopAfterTranspose) {
     scrollGridRowIntoView(requestedRowIndex);
   }
@@ -6985,6 +7062,39 @@ function canDownloadDetailBinaryValue(detail: DataGridCellDetail | null): boolea
   return !!detail && canDownloadBinaryCellValue(detail.value, detail.type);
 }
 
+function canImportDetailBinaryValue(detail: DataGridCellDetail | null): boolean {
+  return !!detail?.isEditable && canImportBinaryCellFile(resolvedDatabaseType.value, detail.type);
+}
+
+async function importDetailBinaryValue(detail: DataGridCellDetail | null) {
+  if (!detail || !canImportDetailBinaryValue(detail)) return;
+  try {
+    const bytes = await openBinaryCellFile();
+    if (!bytes) return;
+    const value = binaryCellBytesToHexValue(bytes);
+    applyCellValue(detail.rowId, detail.colIndex, value);
+    if (activeCellDetail.value?.rowId === detail.rowId && activeCellDetail.value.colIndex === detail.colIndex) {
+      detailEditValue.value = value;
+      detailEditOriginalValue.value = value;
+      syncEditorFromDetailEdit();
+      detailCell.value = detailCell.value ? { ...detailCell.value } : null;
+    }
+    toast(t("grid.binaryImportApplied", { count: bytes.length }));
+  } catch (e: any) {
+    if (e instanceof BinaryCellImportTooLargeError) {
+      toast(
+        t("grid.binaryImportTooLarge", {
+          size: formatBinaryCellByteSize(e.bytes),
+          limit: formatBinaryCellByteSize(e.limit),
+        }),
+        5000,
+      );
+      return;
+    }
+    toast(t("grid.binaryImportFailed", { message: e?.message || String(e) }), 5000);
+  }
+}
+
 function canQuickDownloadCellValue(rowIndex: number, columnIndex: number): boolean {
   return canDownloadDetailBinaryValue(cellDetailFor(rowIndex, columnIndex));
 }
@@ -7018,13 +7128,24 @@ function binaryDownloadSubmenu(detail: DataGridCellDetail | null): ContextMenuIt
   if (!canDownloadDetailBinaryValue(detail)) return null;
   return {
     label: t("grid.downloadBinaryValue"),
-    icon: Upload,
+    icon: Download,
     children: BINARY_CELL_DOWNLOAD_MODES.map((mode) => ({
       label: t(`grid.binaryDownload.${mode}`),
       action: () => {
         void downloadDetailBinaryValue(detail, mode);
       },
     })),
+  };
+}
+
+function binaryImportItem(detail: DataGridCellDetail | null): ContextMenuItem | null {
+  if (!canImportDetailBinaryValue(detail)) return null;
+  return {
+    label: t("grid.importBinaryValue"),
+    icon: FileUp,
+    action: () => {
+      void importDetailBinaryValue(detail);
+    },
   };
 }
 
@@ -7131,6 +7252,14 @@ watch(columnWidthDensity, () => {
 });
 const transposePinnedWidthOverride = ref<number | null>(null);
 const transposePinnedWidth = computed(() => transposePinnedWidthOverride.value ?? transposeFieldWidth(visibleColumns.value, { density: columnWidthDensity.value }));
+const transposeEndSpacerWidth = computed(() => {
+  if (!multiRowTranspose.value || displayRowCount.value <= 0) return 0;
+  return transposeEndAlignmentSpacerWidth({
+    viewportWidth: transposeViewportWidth.value,
+    pinnedWidth: transposePinnedWidth.value,
+    lastRecordWidth: getTransposeRecordWidth(displayRowCount.value - 1),
+  });
+});
 
 const transposeRecordWindow = computed(() =>
   visibleTransposeRecordWindow({
@@ -7156,7 +7285,7 @@ const activeTransposeRecordIndexes = computed(() =>
   }),
 );
 const transposeBeforeSpacerWidth = computed(() => (multiRowTranspose.value ? transposeRecordWindow.value.beforeWidth : 0));
-const transposeAfterSpacerWidth = computed(() => (multiRowTranspose.value ? transposeRecordWindow.value.afterWidth : 0));
+const transposeAfterSpacerWidth = computed(() => (multiRowTranspose.value ? transposeRecordWindow.value.afterWidth + transposeEndSpacerWidth.value : 0));
 const transposeRows = computed(() => {
   return buildVisibleTransposeRows({
     columns: visibleColumns.value,
@@ -7171,7 +7300,7 @@ const transposeRows = computed(() => {
 const isTransposeMode = computed(() => showTranspose.value && transposeRows.value.length > 0);
 const transposeTotalWidth = computed(() => {
   const recordIndexes = multiRowTranspose.value ? Array.from({ length: displayRowCount.value }, (_, i) => i) : activeTransposeRecordIndexes.value;
-  return transposePinnedWidth.value + recordIndexes.reduce((sum, i) => sum + getTransposeRecordWidth(i), 0);
+  return transposePinnedWidth.value + recordIndexes.reduce((sum, i) => sum + getTransposeRecordWidth(i), 0) + (multiRowTranspose.value ? transposeEndSpacerWidth.value : 0);
 });
 
 function transposeScrollElement(): HTMLElement | undefined {
@@ -7194,6 +7323,24 @@ function updateTransposeViewport() {
   transposeViewportWidth.value = el.clientWidth;
 }
 
+function disconnectTransposeViewportObserver() {
+  transposeViewportResizeObserver?.disconnect();
+  transposeViewportResizeObserver = null;
+}
+
+// Attach a ResizeObserver on the transpose scroller so clientWidth is re-measured
+// when the container resizes (window resize, sidebar drag). RecycleScroller's own
+// @resize event does not fire outside pageMode, so this is the only reliable hook.
+function observeTransposeViewport() {
+  disconnectTransposeViewportObserver();
+  if (typeof ResizeObserver === "undefined") return;
+  const el = transposeScrollElement();
+  if (!el) return;
+  updateTransposeViewport();
+  transposeViewportResizeObserver = new ResizeObserver(updateTransposeViewport);
+  transposeViewportResizeObserver.observe(el);
+}
+
 function onTransposeScroll() {
   updateTransposeViewport();
   const el = transposeScrollElement();
@@ -7201,20 +7348,38 @@ function onTransposeScroll() {
   markGridScrolling();
 }
 
-function scrollTransposeRecordIntoView(rowIndex: number) {
+function scrollTransposeRecordIntoView(rowIndex: number, alignment: TransposeScrollAlignment = "nearest") {
   nextTick(() => {
     const el = transposeScrollElement();
     if (!el) return;
-    el.scrollLeft = transposeScrollLeftForRecord({
-      recordIndex: rowIndex,
-      totalRecords: displayRowCount.value,
-      viewportWidth: el.clientWidth,
-      pinnedWidth: transposePinnedWidth.value,
-      recordWidth: estimatedTransposeRecordWidth(),
-      recordOffsets: transposeRecordOffsets.value,
-      currentScrollLeft: el.scrollLeft,
-    });
     updateTransposeViewport();
+    // The measured viewport determines the end spacer. Wait for that width to
+    // render before assigning scrollLeft, otherwise the browser clamps against
+    // the pre-spacer scrollWidth and the final record cannot align at the start.
+    nextTick(() => {
+      const measuredEl = transposeScrollElement();
+      if (!measuredEl || displayRowCount.value <= 0) return;
+      if (alignment === "start" && !multiRowTranspose.value) {
+        measuredEl.scrollLeft = 0;
+        updateTransposeViewport();
+        return;
+      }
+      const activeRecordIndex = Math.max(0, Math.min(displayRowCount.value - 1, rowIndex));
+      const multiRow = multiRowTranspose.value;
+      const recordOffsets = multiRow ? transposeRecordOffsets.value : [0, getTransposeRecordWidth(activeRecordIndex)];
+      measuredEl.scrollLeft = transposeScrollLeftForRecord({
+        recordIndex: multiRow ? activeRecordIndex : 0,
+        totalRecords: multiRow ? displayRowCount.value : 1,
+        viewportWidth: measuredEl.clientWidth,
+        pinnedWidth: transposePinnedWidth.value,
+        recordWidth: multiRow ? estimatedTransposeRecordWidth() : getTransposeRecordWidth(activeRecordIndex),
+        recordOffsets,
+        currentScrollLeft: measuredEl.scrollLeft,
+        alignment,
+        endSpacerWidth: multiRow ? transposeEndSpacerWidth.value : 0,
+      });
+      updateTransposeViewport();
+    });
   });
 }
 
@@ -7224,7 +7389,7 @@ function setMultiRowTranspose(value: boolean) {
   if (!showTranspose.value) return;
   nextTick(updateTransposeViewport);
   if (value && transposeRowIndex.value !== null) {
-    scrollTransposeRecordIntoView(transposeRowIndex.value);
+    scrollTransposeRecordIntoView(transposeRowIndex.value, "start");
   } else {
     nextTick(() => {
       const el = transposeScrollElement();
@@ -7239,12 +7404,12 @@ function toggleMultiRowTranspose() {
   setMultiRowTranspose(!multiRowTranspose.value);
 }
 
-function applyTransposeState(next: { showTranspose: boolean; transposeRowIndex: number | null }) {
+function applyTransposeState(next: { showTranspose: boolean; transposeRowIndex: number | null }, alignment: TransposeScrollAlignment = "nearest") {
   showTranspose.value = next.showTranspose;
   transposeRowIndex.value = next.transposeRowIndex;
   if (next.showTranspose) {
     nextTick(updateTransposeViewport);
-    if (next.transposeRowIndex !== null) scrollTransposeRecordIntoView(next.transposeRowIndex);
+    if (next.transposeRowIndex !== null) scrollTransposeRecordIntoView(next.transposeRowIndex, alignment);
   }
 }
 
@@ -7338,18 +7503,19 @@ function openContextTranspose() {
   if (next.showTranspose) {
     closeCellDetails();
     nextTick(updateTransposeViewport);
-    if (next.transposeRowIndex !== null) scrollTransposeRecordIntoView(next.transposeRowIndex);
+    if (next.transposeRowIndex !== null) scrollTransposeRecordIntoView(next.transposeRowIndex, "start");
   }
 }
 
 function toggleTranspose(rowIndex: number) {
+  const wasTransposeOpen = showTranspose.value;
   const next = nextTransposeState(showTranspose.value, transposeRowIndex.value, rowIndex);
   transposeRowIndex.value = next.transposeRowIndex;
   showTranspose.value = next.showTranspose;
   if (next.showTranspose) {
     closeCellDetails();
     nextTick(updateTransposeViewport);
-    if (next.transposeRowIndex !== null) scrollTransposeRecordIntoView(next.transposeRowIndex);
+    if (next.transposeRowIndex !== null) scrollTransposeRecordIntoView(next.transposeRowIndex, wasTransposeOpen ? "nearest" : "start");
   } else {
     scrollGridRowIntoView(rowIndex);
   }
@@ -7408,10 +7574,16 @@ function transposeNav(delta: number) {
 watch(isTransposeMode, (active) => {
   if (active) {
     gridScrollLeftBeforeTranspose = gridScrollerElement()?.scrollLeft ?? gridHorizontalScrollLeft.value;
-    nextTick(updateTransposeViewport);
+    nextTick(() => {
+      updateTransposeViewport();
+      observeTransposeViewport();
+    });
     return;
   }
 
+  // The transpose scroller is v-if-removed by isTransposeMode; drop the observer
+  // before the element unmounts so it never observes a detached node.
+  disconnectTransposeViewportObserver();
   const scrollTopBeforeTranspose = restoreGridScrollTopAfterTranspose ? (gridScrollTopBeforeKeyboardTranspose ?? undefined) : undefined;
   restoreGridScrollTopAfterTranspose = false;
   gridScrollTopBeforeKeyboardTranspose = null;
@@ -7429,6 +7601,8 @@ watch(isTransposeMode, (active) => {
 watch(
   () => props.result,
   (result, previousResult) => {
+    const selectionSnapshot = preservedSelectionOnNextResult?.selection;
+    preservedSelectionOnNextResult = null;
     const shouldPreserveTranspose = preserveTransposeOnNextResult.value;
     preserveTransposeOnNextResult.value = false;
     if (isDataGridPrefixAppend(previousResult, result)) return;
@@ -7447,6 +7621,7 @@ watch(
       closeTranspose(false);
     }
     exitTransaction();
+    if (selectionSnapshot) restoreSelectionAfterRefresh(selectionSnapshot);
   },
 );
 
@@ -8714,7 +8889,7 @@ function exportSubmenu(): ContextMenuItem {
       { label: t("grid.exportSelectedRowsTxt"), action: exportSelectedRowsTxt },
     );
   }
-  return { label: t("grid.export"), icon: Upload, children: items };
+  return { label: t("grid.export"), icon: Download, children: items };
 }
 
 const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
@@ -8807,6 +8982,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
       },
       icons: { cellDetails: Maximize2, columnDetails: TableProperties, rowDetails: ListTree, setNull: X, bulkEdit: Pencil, transpose: Rows3 },
       actions: { cellDetails: openContextCellDetailDialog, columnDetails: openContextColumnDetailDialog, rowDetails: openContextRowDetailDialog, setNull: setSelectionNull, bulkEdit: openBulkEditDialog, transpose: openContextTranspose },
+      importItem: binaryImportItem(contextCellDetail.value),
       downloadItem: binaryDownloadSubmenu(contextCellDetail.value),
       foreignKeyItem: contextForeignKeyMenuItem(),
       copySubmenu: copySubmenu(),
@@ -9074,6 +9250,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                 :buffer="400"
                 key-field="id"
                 @scroll="onTransposeScroll"
+                @resize="updateTransposeViewport"
               >
                 <template #before>
                   <div class="data-grid-transpose-header data-grid-header-shell sticky top-0 z-20 flex h-7 border-b border-border font-semibold text-muted-foreground" :style="{ width: `${transposeTotalWidth}px` }">
@@ -9243,7 +9420,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                           >
                             <template #trigger="{ open, toggle }">
                               <button class="flex h-5 w-5 items-center justify-center rounded bg-background/90 text-muted-foreground shadow-sm ring-1 ring-border hover:text-foreground" :title="t('grid.downloadBinaryValue')" :aria-expanded="open" @mousedown.stop @click.stop="toggle">
-                                <Upload class="h-3 w-3" />
+                                <Download class="h-3 w-3" />
                               </button>
                             </template>
                           </LightDropdownMenu>
@@ -9293,6 +9470,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                     :show-comment-line="reserveColumnCommentLine"
                     :tooltip-column-type="columnTypeMap.get(col.name)"
                     :tooltip-column-comment="columnCommentMap.get(col.name)"
+                    :column-nullability="headerColumnNullability(col.actualColIdx)"
                     :type-class="typeColorClass(headerColumnType(col.name, col.actualColIdx))"
                     :drag-class="columnHeaderDragClass(col.visibleColIdx)"
                     :column-style="columnHeaderStyle(col.visibleColIdx)"
@@ -9300,6 +9478,9 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                     :column-name-label="t('grid.columnName')"
                     :column-type-label="t('grid.columnType')"
                     :column-comment-label="t('grid.columnComment')"
+                    :nullable-label="t('structureEditor.nullable')"
+                    :yes-label="t('structureEditor.yes')"
+                    :no-label="t('structureEditor.no')"
                     :column-index-label="t('grid.tableInfoIndexes')"
                     :column-primary-index-label="t('grid.columnPrimaryIndex')"
                     :column-unique-index-label="t('grid.columnUniqueIndex')"
@@ -9753,7 +9934,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                       >
                         <template #trigger="{ open, toggle }">
                           <button class="flex h-5 w-5 items-center justify-center rounded bg-background/90 text-muted-foreground shadow-sm ring-1 ring-border hover:text-foreground" :title="t('grid.downloadBinaryValue')" :aria-expanded="open" @mousedown.stop @click.stop="toggle">
-                            <Upload class="h-3 w-3" />
+                            <Download class="h-3 w-3" />
                           </button>
                         </template>
                       </LightDropdownMenu>
@@ -9956,7 +10137,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                             >
                               <template #trigger="{ open, toggle }">
                                 <button class="flex h-5 w-5 items-center justify-center rounded bg-background/90 text-muted-foreground shadow-sm ring-1 ring-border hover:text-foreground" :title="t('grid.downloadBinaryValue')" :aria-expanded="open" @mousedown.stop @click.stop="toggle">
-                                  <Upload class="h-3 w-3" />
+                                  <Download class="h-3 w-3" />
                                 </button>
                               </template>
                             </LightDropdownMenu>
@@ -10271,6 +10452,8 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                 :type-color-class="typeColorClass"
                 :can-download-binary-value="canDownloadDetailBinaryValue"
                 :download-binary-value="downloadDetailBinaryValue"
+                :can-import-binary-value="canImportDetailBinaryValue"
+                :import-binary-value="importDetailBinaryValue"
                 :open-image-preview="openImagePreview"
                 :can-copy-sql-condition="canCopyPreparedDetailSqlCondition"
                 @start-edit="startDetailEdit"
@@ -10445,6 +10628,8 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
       :copy-text="copyText"
       :can-download-binary-value="canDownloadDetailBinaryValue"
       :download-binary-value="downloadDetailBinaryValue"
+      :can-import-binary-value="canImportDetailBinaryValue"
+      :import-binary-value="importDetailBinaryValue"
       @edit="openDialogCellInSidePanel"
     />
 

@@ -174,6 +174,78 @@
   background-color: color-mix(in srgb, var(--primary) 14%, transparent) !important;
 }
 
+html.dbx-legacy-webview input[type="number"] {
+  font-variant-numeric: tabular-nums;
+}
+
+html.dbx-legacy-webview input[type="number"]:not([class*="appearance-none"])::-webkit-inner-spin-button,
+html.dbx-legacy-webview input[type="number"]:not([class*="appearance-none"])::-webkit-outer-spin-button {
+  -webkit-appearance: inner-spin-button !important;
+  appearance: auto !important;
+  opacity: 1 !important;
+  cursor: pointer;
+}
+
+html.dbx-legacy-webview input[type="number"]:not([class*="appearance-none"]):disabled::-webkit-inner-spin-button,
+html.dbx-legacy-webview input[type="number"]:not([class*="appearance-none"]):disabled::-webkit-outer-spin-button {
+  cursor: not-allowed;
+  opacity: 0.5 !important;
+}
+
+@supports not (background-color: color-mix(in srgb, black 10%, transparent)) {
+  .dbx-choice-selected {
+    border-color: rgb(23, 23, 23) !important;
+    background-color: rgba(23, 23, 23, 0.08) !important;
+    color: rgb(23, 23, 23) !important;
+    box-shadow: 0 0 0 1px rgba(23, 23, 23, 0.28) !important;
+  }
+
+  .dbx-choice-selected:hover {
+    background-color: rgba(23, 23, 23, 0.12) !important;
+  }
+
+  .dbx-choice-selected .text-muted-foreground {
+    color: rgb(82, 82, 82) !important;
+  }
+
+  .dark .dbx-choice-selected {
+    border-color: rgb(244, 244, 245) !important;
+    background-color: rgba(255, 255, 255, 0.1) !important;
+    color: rgb(244, 244, 245) !important;
+    box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.28) !important;
+  }
+
+  .dark .dbx-choice-selected:hover {
+    background-color: rgba(255, 255, 255, 0.14) !important;
+  }
+
+  .dark .dbx-choice-selected .text-muted-foreground {
+    color: rgb(212, 212, 216) !important;
+  }
+
+  .dbx-tile-selected {
+    border-color: rgb(23, 23, 23) !important;
+    background-color: rgba(23, 23, 23, 0.08) !important;
+    color: rgb(23, 23, 23) !important;
+    box-shadow: 0 0 0 1px rgba(23, 23, 23, 0.28);
+  }
+
+  .dbx-tile-selected:hover {
+    background-color: rgba(23, 23, 23, 0.12) !important;
+  }
+
+  .dark .dbx-tile-selected {
+    border-color: rgb(244, 244, 245) !important;
+    background-color: rgba(255, 255, 255, 0.1) !important;
+    color: rgb(244, 244, 245) !important;
+    box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.28);
+  }
+
+  .dark .dbx-tile-selected:hover {
+    background-color: rgba(255, 255, 255, 0.14) !important;
+  }
+}
+
 @supports (height: 100dvh) {
   :root {
     --dbx-viewport-height: min(100vh, 100dvh);
@@ -188,6 +260,7 @@ html.theme-soft {
   --popover: rgb(255 255 255);
   --popover-foreground: rgb(36 40 48);
   --primary: rgb(46 95 166);
+  --dbx-primary-rgb: 46, 95, 166;
   --primary-foreground: rgb(247 250 255);
   --secondary: rgb(237 241 246);
   --secondary-foreground: rgb(47 53 63);
@@ -228,6 +301,7 @@ html.theme-soft.dark {
   --popover: rgb(42 45 51);
   --popover-foreground: rgb(207 211 218);
   --primary: rgb(157 177 205);
+  --dbx-primary-rgb: 157, 177, 205;
   --primary-foreground: rgb(27 30 34);
   --secondary: rgb(47 51 58);
   --secondary-foreground: rgb(201 205 213);
@@ -268,6 +342,7 @@ html.theme-graphite {
   --popover: rgb(255 255 255);
   --popover-foreground: rgb(39 42 48);
   --primary: rgb(72 80 93);
+  --dbx-primary-rgb: 72, 80, 93;
   --primary-foreground: rgb(248 250 252);
   --secondary: rgb(238 240 244);
   --secondary-foreground: rgb(49 53 61);
@@ -308,6 +383,7 @@ html.theme-graphite.dark {
   --popover: rgb(42 44 50);
   --popover-foreground: rgb(205 208 214);
   --primary: rgb(174 181 192);
+  --dbx-primary-rgb: 174, 181, 192;
   --primary-foreground: rgb(27 29 33);
   --secondary: rgb(47 50 57);
   --secondary-foreground: rgb(199 202 208);
@@ -348,6 +424,7 @@ html.theme-cobalt {
   --popover: rgb(255 255 255);
   --popover-foreground: rgb(30 41 56);
   --primary: rgb(43 99 183);
+  --dbx-primary-rgb: 43, 99, 183;
   --primary-foreground: rgb(247 250 255);
   --secondary: rgb(232 240 250);
   --secondary-foreground: rgb(38 52 70);
@@ -388,6 +465,7 @@ html.theme-cobalt.dark {
   --popover: rgb(35 43 58);
   --popover-foreground: rgb(206 214 225);
   --primary: rgb(137 173 223);
+  --dbx-primary-rgb: 137, 173, 223;
   --primary-foreground: rgb(20 28 39);
   --secondary: rgb(43 53 70);
   --secondary-foreground: rgb(200 209 221);
@@ -428,6 +506,7 @@ html.theme-sage {
   --popover: rgb(255 255 255);
   --popover-foreground: rgb(34 46 41);
   --primary: rgb(58 123 106);
+  --dbx-primary-rgb: 58, 123, 106;
   --primary-foreground: rgb(246 252 249);
   --secondary: rgb(233 241 237);
   --secondary-foreground: rgb(42 58 52);
@@ -468,6 +547,7 @@ html.theme-sage.dark {
   --popover: rgb(38 48 45);
   --popover-foreground: rgb(206 216 212);
   --primary: rgb(138 184 169);
+  --dbx-primary-rgb: 138, 184, 169;
   --primary-foreground: rgb(22 32 29);
   --secondary: rgb(44 57 53);
   --secondary-foreground: rgb(200 210 206);
@@ -508,6 +588,7 @@ html.theme-amber {
   --popover: rgb(255 255 250);
   --popover-foreground: rgb(51 44 30);
   --primary: rgb(149 95 28);
+  --dbx-primary-rgb: 149, 95, 28;
   --primary-foreground: rgb(255 250 236);
   --secondary: rgb(247 238 213);
   --secondary-foreground: rgb(68 56 36);
@@ -548,6 +629,7 @@ html.theme-amber.dark {
   --popover: rgb(50 46 36);
   --popover-foreground: rgb(225 216 197);
   --primary: rgb(213 169 75);
+  --dbx-primary-rgb: 213, 169, 75;
   --primary-foreground: rgb(34 29 21);
   --secondary: rgb(59 53 40);
   --secondary-foreground: rgb(218 209 190);
@@ -588,6 +670,7 @@ html.theme-blush {
   --popover: rgb(255 255 255);
   --popover-foreground: rgb(57 45 53);
   --primary: rgb(184 86 123);
+  --dbx-primary-rgb: 184, 86, 123;
   --primary-foreground: rgb(255 248 251);
   --secondary: rgb(246 232 239);
   --secondary-foreground: rgb(74 55 67);
@@ -628,6 +711,7 @@ html.theme-blush.dark {
   --popover: rgb(58 47 55);
   --popover-foreground: rgb(230 214 222);
   --primary: rgb(226 160 184);
+  --dbx-primary-rgb: 226, 160, 184;
   --primary-foreground: rgb(39 29 35);
   --secondary: rgb(67 52 62);
   --secondary-foreground: rgb(222 206 215);
@@ -668,6 +752,7 @@ html.theme-vscode {
   --popover: rgb(255 255 255);
   --popover-foreground: rgb(45 45 45);
   --primary: rgb(0 122 204);
+  --dbx-primary-rgb: 0, 122, 204;
   --primary-foreground: rgb(255 255 255);
   --secondary: rgb(243 243 243);
   --secondary-foreground: rgb(51 51 51);
@@ -709,6 +794,7 @@ html.theme-vscode.dark {
   --popover: rgb(45 45 48);
   --popover-foreground: rgb(212 212 212);
   --primary: rgb(0 122 204);
+  --dbx-primary-rgb: 0, 122, 204;
   --primary-foreground: rgb(255 255 255);
   --secondary: rgb(45 45 48);
   --secondary-foreground: rgb(204 204 204);
@@ -750,6 +836,7 @@ html.theme-idea {
   --popover: rgb(255 255 255);
   --popover-foreground: rgb(40 40 40);
   --primary: rgb(75 110 175);
+  --dbx-primary-rgb: 75, 110, 175;
   --primary-foreground: rgb(255 255 255);
   --secondary: rgb(239 240 242);
   --secondary-foreground: rgb(47 49 52);
@@ -790,6 +877,7 @@ html.theme-idea.dark {
   --popover: rgb(67 70 72);
   --popover-foreground: rgb(200 200 200);
   --primary: rgb(106 135 197);
+  --dbx-primary-rgb: 106, 135, 197;
   --primary-foreground: rgb(30 32 34);
   --secondary: rgb(60 63 65);
   --secondary-foreground: rgb(187 187 187);
@@ -830,6 +918,7 @@ html.theme-xcode {
   --popover: rgb(255 255 255);
   --popover-foreground: rgb(29 39 53);
   --primary: rgb(10 132 255);
+  --dbx-primary-rgb: 10, 132, 255;
   --primary-foreground: rgb(255 255 255);
   --secondary: rgb(235 239 245);
   --secondary-foreground: rgb(43 55 72);
@@ -870,6 +959,7 @@ html.theme-xcode.dark {
   --popover: rgb(45 51 59);
   --popover-foreground: rgb(224 229 237);
   --primary: rgb(10 132 255);
+  --dbx-primary-rgb: 10, 132, 255;
   --primary-foreground: rgb(255 255 255);
   --secondary: rgb(45 51 59);
   --secondary-foreground: rgb(216 222 232);
@@ -910,6 +1000,7 @@ html.theme-jetbrains {
   --popover: rgb(255 255 255);
   --popover-foreground: rgb(28 32 37);
   --primary: rgb(108 93 211);
+  --dbx-primary-rgb: 108, 93, 211;
   --primary-foreground: rgb(255 255 255);
   --secondary: rgb(235 237 241);
   --secondary-foreground: rgb(43 48 56);
@@ -950,6 +1041,7 @@ html.theme-jetbrains.dark {
   --popover: rgb(49 51 56);
   --popover-foreground: rgb(231 233 237);
   --primary: rgb(123 97 255);
+  --dbx-primary-rgb: 123, 97, 255;
   --primary-foreground: rgb(255 255 255);
   --secondary: rgb(43 45 48);
   --secondary-foreground: rgb(223 225 229);
@@ -990,6 +1082,7 @@ html.theme-cursor {
   --popover: rgb(255 255 255);
   --popover-foreground: rgb(28 33 42);
   --primary: rgb(59 130 246);
+  --dbx-primary-rgb: 59, 130, 246;
   --primary-foreground: rgb(255 255 255);
   --secondary: rgb(239 241 245);
   --secondary-foreground: rgb(42 49 60);
@@ -1030,6 +1123,7 @@ html.theme-cursor.dark {
   --popover: rgb(27 30 39);
   --popover-foreground: rgb(223 225 232);
   --primary: rgb(107 164 255);
+  --dbx-primary-rgb: 107, 164, 255;
   --primary-foreground: rgb(8 12 20);
   --secondary: rgb(27 30 39);
   --secondary-foreground: rgb(214 216 223);
@@ -1070,6 +1164,7 @@ html.theme-claude {
   --popover: rgb(255 253 248);
   --popover-foreground: rgb(48 40 32);
   --primary: rgb(184 107 60);
+  --dbx-primary-rgb: 184, 107, 60;
   --primary-foreground: rgb(255 250 243);
   --secondary: rgb(242 231 219);
   --secondary-foreground: rgb(65 53 43);
@@ -1110,6 +1205,7 @@ html.theme-claude.dark {
   --popover: rgb(49 45 40);
   --popover-foreground: rgb(226 218 206);
   --primary: rgb(210 138 95);
+  --dbx-primary-rgb: 210, 138, 95;
   --primary-foreground: rgb(35 27 21);
   --secondary: rgb(55 49 43);
   --secondary-foreground: rgb(219 211 199);
@@ -1421,472 +1517,773 @@ html.dbx-data-grid-native-selection-blocked [role="textbox"] * {
   font-family: var(--dbx-data-grid-font-family);
 }
 
-/* Tailwind CSS v4 targets Safari 16.4+. Keep these legacy WebKit fallbacks
- * isolated so supported WebViews continue using the generated component CSS. */
-@supports not (color: oklch(0.5 0.1 180)) {
-  @media (min-width: 640px) {
-    .sm\:flex-row {
-      flex-direction: row !important;
-    }
-
-    .sm\:justify-end {
-      justify-content: flex-end !important;
-    }
-
-    .sm\:grid-cols-3 {
-      grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
-    }
+/* Tailwind CSS v4 targets Safari 16.4+. The startup capability check marks
+ * older WebViews with .dbx-legacy-webview before the app mounts. */
+@media (min-width: 640px) {
+  html.dbx-legacy-webview .sm\:block {
+    display: block !important;
   }
 
-  @media (min-width: 768px) {
-    .md\:w-full {
-      width: 100% !important;
-    }
-
-    .md\:grid-cols-2 {
-      grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
-    }
-
-    .md\:grid-cols-\[1fr_auto\] {
-      grid-template-columns: 1fr auto !important;
-    }
-
-    .md\:grid-cols-\[minmax\(0\,1fr\)_180px_auto\] {
-      grid-template-columns: minmax(0, 1fr) 180px auto !important;
-    }
+  html.dbx-legacy-webview .sm\:hidden {
+    display: none !important;
   }
 
-  @media (min-width: 1024px) {
-    .lg\:block {
-      display: block !important;
-    }
-
-    .lg\:hidden {
-      display: none !important;
-    }
-
-    .lg\:grid {
-      display: grid !important;
-    }
-
-    .lg\:flex-row {
-      flex-direction: row !important;
-    }
-
-    .lg\:flex-col {
-      flex-direction: column !important;
-    }
-
-    .lg\:items-center {
-      align-items: center !important;
-    }
-
-    .lg\:justify-between {
-      justify-content: space-between !important;
-    }
-
-    .lg\:justify-end {
-      justify-content: flex-end !important;
-    }
-
-    .lg\:w-40 {
-      width: 10rem !important;
-    }
-
-    .lg\:overflow-x-hidden {
-      overflow-x: hidden !important;
-    }
-
-    .lg\:overflow-y-auto {
-      overflow-y: auto !important;
-    }
-
-    .lg\:border-b-0 {
-      border-bottom-width: 0 !important;
-    }
-
-    .lg\:border-r {
-      border-right-width: 1px !important;
-    }
-
-    .lg\:pb-0 {
-      padding-bottom: 0 !important;
-    }
-
-    .lg\:pr-3 {
-      padding-right: 0.75rem !important;
-    }
-
-    .lg\:text-right {
-      text-align: right !important;
-    }
-
-    .lg\:grid-cols-6 {
-      grid-template-columns: repeat(6, minmax(0, 1fr)) !important;
-    }
-
-    .lg\:grid-cols-\[1\.2fr_0\.8fr\] {
-      grid-template-columns: minmax(0, 1.2fr) minmax(0, 0.8fr) !important;
-    }
-
-    .lg\:grid-cols-\[minmax\(0\,1\.6fr\)_72px_56px_76px_58px_76px_72px\] {
-      grid-template-columns: minmax(0, 1.6fr) 72px 56px 76px 58px 76px 72px !important;
-    }
+  html.dbx-legacy-webview .sm\:inline {
+    display: inline !important;
   }
 
-  [data-slot="dialog-content"] {
-    width: calc(100vw - 2rem);
-    max-width: 24rem;
-    border: 1px solid rgb(229, 229, 229);
-    border-color: rgb(229, 229, 229) !important;
-    box-shadow: 0 18px 50px rgba(0, 0, 0, 0.16);
-  }
-
-  .dark [data-slot="dialog-content"] {
-    border-color: rgba(110, 110, 114, 0.28) !important;
-    box-shadow: 0 18px 50px rgba(0, 0, 0, 0.45);
-  }
-
-  [data-slot="dialog-content"][class~="max-w-sm"] {
-    max-width: 24rem !important;
-  }
-
-  [data-slot="dialog-content"][class~="max-w-md"] {
-    max-width: 28rem !important;
-  }
-
-  [data-slot="dialog-content"][class~="max-w-lg"] {
-    max-width: 32rem !important;
-  }
-
-  [data-slot="dialog-content"][class~="max-w-xl"] {
-    max-width: 36rem !important;
-  }
-
-  [data-slot="dialog-content"][class~="max-w-2xl"] {
-    max-width: 42rem !important;
-  }
-
-  [data-slot="dialog-content"][class~="max-w-4xl"] {
-    max-width: 56rem !important;
-  }
-
-  [data-slot="dialog-content"][class~="max-w-5xl"] {
-    max-width: 64rem !important;
-  }
-
-  [data-slot="dialog-content"][class~="max-w-190"] {
-    max-width: 47.5rem !important;
-  }
-
-  [data-slot="dialog-content"][class*="max-w-[92vw]"] {
-    max-width: 92vw !important;
-  }
-
-  [data-slot="dialog-content"][class*="max-w-[94vw]"] {
-    max-width: 94vw !important;
-  }
-
-  [data-slot="dialog-content"][class*="max-w-[1100px]"] {
-    max-width: 1100px !important;
-  }
-
-  [data-slot="tabs"][data-orientation="horizontal"] {
-    flex-direction: column !important;
-  }
-
-  [data-slot="tabs"][data-orientation="vertical"] {
+  html.dbx-legacy-webview .sm\:flex-row {
     flex-direction: row !important;
   }
 
-  [data-slot="tabs-list"] {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    width: fit-content;
-    border-radius: var(--dbx-radius-fixed-6);
-    color: var(--muted-foreground);
+  html.dbx-legacy-webview .sm\:flex-wrap {
+    flex-wrap: wrap !important;
   }
 
-  [data-slot="tabs-list"][data-variant="default"] {
-    min-height: 2rem;
-    padding: 3px;
-    background: var(--muted);
+  html.dbx-legacy-webview .sm\:items-start {
+    align-items: flex-start !important;
   }
 
-  [data-slot="tabs-list"][data-variant="line"] {
-    gap: 0.25rem;
-    padding: 3px;
-    background: transparent;
-    border-radius: 0;
+  html.dbx-legacy-webview .sm\:items-center {
+    align-items: center !important;
   }
 
-  [data-slot="tabs"][data-orientation="vertical"] > [data-slot="tabs-list"] {
+  html.dbx-legacy-webview .sm\:justify-between {
+    justify-content: space-between !important;
+  }
+
+  html.dbx-legacy-webview .sm\:justify-end {
+    justify-content: flex-end !important;
+  }
+
+  html.dbx-legacy-webview .sm\:gap-2 {
+    gap: 0.5rem !important;
+  }
+
+  html.dbx-legacy-webview .sm\:grid-cols-2 {
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+  }
+
+  html.dbx-legacy-webview .sm\:grid-cols-3 {
+    grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
+  }
+
+  html.dbx-legacy-webview .sm\:grid-cols-4 {
+    grid-template-columns: repeat(4, minmax(0, 1fr)) !important;
+  }
+
+  html.dbx-legacy-webview .sm\:grid-cols-\[minmax\(0\,1fr\)_auto\] {
+    grid-template-columns: minmax(0, 1fr) auto !important;
+  }
+
+  html.dbx-legacy-webview .sm\:grid-cols-\[minmax\(0\,200px\)_minmax\(0\,1fr\)\] {
+    grid-template-columns: minmax(0, 200px) minmax(0, 1fr) !important;
+  }
+
+  html.dbx-legacy-webview .sm\:grid-cols-\[minmax\(0\,1fr\)_minmax\(220px\,0\.8fr\)\] {
+    grid-template-columns: minmax(0, 1fr) minmax(220px, 0.8fr) !important;
+  }
+
+  html.dbx-legacy-webview .sm\:col-span-3 {
+    grid-column: span 3 / span 3 !important;
+  }
+
+  html.dbx-legacy-webview .sm\:w-full {
+    width: 100% !important;
+  }
+
+  html.dbx-legacy-webview .sm\:w-40 {
+    width: 10rem !important;
+  }
+
+  html.dbx-legacy-webview .sm\:w-64 {
+    width: 16rem !important;
+  }
+
+  html.dbx-legacy-webview .sm\:w-auto {
+    width: auto !important;
+  }
+
+  html.dbx-legacy-webview .sm\:flex-none {
+    flex: none !important;
+  }
+
+  html.dbx-legacy-webview .sm\:ml-auto {
+    margin-left: auto !important;
+  }
+}
+
+@media (min-width: 768px) {
+  html.dbx-legacy-webview .md\:w-full {
+    width: 100% !important;
+  }
+
+  html.dbx-legacy-webview .md\:grid-cols-2 {
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+  }
+
+  html.dbx-legacy-webview .md\:grid-cols-\[1fr_auto\] {
+    grid-template-columns: 1fr auto !important;
+  }
+
+  html.dbx-legacy-webview .md\:grid-cols-\[minmax\(0\,1fr\)_180px_auto\] {
+    grid-template-columns: minmax(0, 1fr) 180px auto !important;
+  }
+}
+
+@media (min-width: 1024px) {
+  html.dbx-legacy-webview .lg\:block {
+    display: block !important;
+  }
+
+  html.dbx-legacy-webview .lg\:hidden {
+    display: none !important;
+  }
+
+  html.dbx-legacy-webview .lg\:grid {
+    display: grid !important;
+  }
+
+  html.dbx-legacy-webview .lg\:flex-row {
+    flex-direction: row !important;
+  }
+
+  html.dbx-legacy-webview .lg\:flex-col {
     flex-direction: column !important;
-    height: fit-content;
   }
 
-  [data-slot="tabs-trigger"] {
-    position: relative;
-    display: inline-flex;
-    flex: 1 1 0%;
-    align-items: center;
-    justify-content: center;
-    min-width: 0;
-    height: calc(100% - 1px);
-    padding: 0.125rem 0.375rem;
-    gap: 0.375rem;
-    border: 1px solid transparent;
-    border-radius: var(--dbx-radius-fixed-6);
-    color: rgba(10, 10, 10, 0.6);
-    font-size: 0.875rem;
-    font-weight: 500;
-    line-height: 1.25rem;
-    white-space: nowrap;
-    transition:
-      color 150ms ease,
-      background-color 150ms ease,
-      border-color 150ms ease,
-      box-shadow 150ms ease;
+  html.dbx-legacy-webview .lg\:items-center {
+    align-items: center !important;
   }
 
-  [data-slot="tabs"][data-orientation="vertical"] [data-slot="tabs-trigger"] {
-    width: 100%;
-    justify-content: flex-start;
+  html.dbx-legacy-webview .lg\:justify-between {
+    justify-content: space-between !important;
   }
 
-  [data-slot="tabs-trigger"]:hover {
-    color: var(--foreground);
+  html.dbx-legacy-webview .lg\:justify-end {
+    justify-content: flex-end !important;
   }
 
-  [data-slot="tabs-trigger"]:focus-visible {
-    border-color: var(--ring);
-    outline: 1px solid var(--ring);
-    box-shadow: 0 0 0 3px rgba(161, 161, 161, 0.5);
+  html.dbx-legacy-webview .lg\:w-40 {
+    width: 10rem !important;
   }
 
-  [data-slot="tabs-list"][data-variant="default"] > [data-slot="tabs-trigger"][aria-selected="true"],
-  [data-slot="tabs-list"][data-variant="default"] > [data-slot="tabs-trigger"][data-state="active"],
-  [data-slot="tabs-list"][data-variant="default"] > [data-slot="tabs-trigger"][data-active] {
-    color: var(--foreground);
-    background: var(--background);
-    border-color: transparent;
-    box-shadow:
-      0 1px 2px rgba(0, 0, 0, 0.08),
-      0 1px 1px rgba(0, 0, 0, 0.04);
+  html.dbx-legacy-webview .lg\:overflow-x-hidden {
+    overflow-x: hidden !important;
   }
 
-  [data-slot="tabs-list"][data-variant="line"] > [data-slot="tabs-trigger"] {
-    background: transparent;
-    box-shadow: none;
+  html.dbx-legacy-webview .lg\:overflow-y-auto {
+    overflow-y: auto !important;
   }
 
-  [data-slot="tabs-list"][data-variant="line"] > [data-slot="tabs-trigger"][aria-selected="true"],
-  [data-slot="tabs-list"][data-variant="line"] > [data-slot="tabs-trigger"][data-state="active"],
-  [data-slot="tabs-list"][data-variant="line"] > [data-slot="tabs-trigger"][data-active] {
-    color: var(--foreground);
-    background: transparent;
-    border-color: transparent;
-    box-shadow: none;
+  html.dbx-legacy-webview .lg\:border-b-0 {
+    border-bottom-width: 0 !important;
   }
 
-  [data-slot="tabs-list"][data-variant="line"] > [data-slot="tabs-trigger"]::after {
-    content: "";
-    position: absolute;
-    background: var(--foreground);
-    opacity: 0;
-    transition: opacity 150ms ease;
+  html.dbx-legacy-webview .lg\:border-r {
+    border-right-width: 1px !important;
   }
 
-  [data-slot="tabs"][data-orientation="horizontal"] [data-slot="tabs-list"][data-variant="line"] > [data-slot="tabs-trigger"]::after {
-    left: 0;
-    right: 0;
-    bottom: -5px;
-    height: 2px;
+  html.dbx-legacy-webview .lg\:pb-0 {
+    padding-bottom: 0 !important;
   }
 
-  [data-slot="tabs"][data-orientation="vertical"] [data-slot="tabs-list"][data-variant="line"] > [data-slot="tabs-trigger"]::after {
-    top: 0;
-    right: -4px;
-    bottom: 0;
-    width: 2px;
+  html.dbx-legacy-webview .lg\:pr-3 {
+    padding-right: 0.75rem !important;
   }
 
-  [data-slot="tabs-list"][data-variant="line"] > [data-slot="tabs-trigger"][aria-selected="true"]::after,
-  [data-slot="tabs-list"][data-variant="line"] > [data-slot="tabs-trigger"][data-state="active"]::after,
-  [data-slot="tabs-list"][data-variant="line"] > [data-slot="tabs-trigger"][data-active]::after {
-    opacity: 1;
+  html.dbx-legacy-webview .lg\:text-right {
+    text-align: right !important;
   }
 
-  .dark [data-slot="tabs-trigger"] {
-    color: var(--muted-foreground);
+  html.dbx-legacy-webview .lg\:grid-cols-6 {
+    grid-template-columns: repeat(6, minmax(0, 1fr)) !important;
   }
 
-  .dark [data-slot="tabs-trigger"]:hover {
-    color: var(--foreground);
+  html.dbx-legacy-webview .lg\:grid-cols-\[1\.2fr_0\.8fr\] {
+    grid-template-columns: minmax(0, 1.2fr) minmax(0, 0.8fr) !important;
   }
 
-  .dark [data-slot="tabs-list"][data-variant="default"] > [data-slot="tabs-trigger"][aria-selected="true"],
-  .dark [data-slot="tabs-list"][data-variant="default"] > [data-slot="tabs-trigger"][data-state="active"],
-  .dark [data-slot="tabs-list"][data-variant="default"] > [data-slot="tabs-trigger"][data-active] {
-    color: var(--foreground);
-    background: rgba(110, 110, 114, 0.3);
-    border-color: var(--input);
-    box-shadow:
-      0 1px 2px rgba(0, 0, 0, 0.22),
-      0 1px 1px rgba(0, 0, 0, 0.16);
+  html.dbx-legacy-webview .lg\:grid-cols-\[minmax\(0\,1\.6fr\)_72px_56px_76px_58px_76px_72px\] {
+    grid-template-columns: minmax(0, 1.6fr) 72px 56px 76px 58px 76px 72px !important;
+  }
+}
+
+html.dbx-legacy-webview [data-slot="dialog-positioner"] {
+  position: fixed !important;
+  inset: 0 !important;
+  top: 0 !important;
+  right: 0 !important;
+  bottom: 0 !important;
+  left: 0 !important;
+  z-index: 50 !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  width: 100vw !important;
+  height: var(--dbx-viewport-height) !important;
+  padding: 1rem !important;
+  box-sizing: border-box !important;
+  pointer-events: none !important;
+}
+
+html.dbx-legacy-webview [data-slot="dialog-content"] {
+  width: calc(100vw - 2rem);
+  max-width: 24rem;
+  max-height: calc(var(--dbx-viewport-height) - 2rem);
+  border: 1px solid rgb(229, 229, 229);
+  border-color: rgb(229, 229, 229) !important;
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.16);
+}
+
+html.dbx-legacy-webview.dark [data-slot="dialog-content"] {
+  border-color: rgba(110, 110, 114, 0.28) !important;
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.45);
+}
+
+html.dbx-legacy-webview [data-slot="dialog-content"][class~="max-w-sm"] {
+  max-width: 24rem !important;
+}
+
+html.dbx-legacy-webview [data-slot="dialog-content"][class~="max-w-md"] {
+  max-width: 28rem !important;
+}
+
+html.dbx-legacy-webview [data-slot="dialog-content"][class~="max-w-lg"] {
+  max-width: 32rem !important;
+}
+
+html.dbx-legacy-webview [data-slot="dialog-content"][class~="max-w-xl"] {
+  max-width: 36rem !important;
+}
+
+html.dbx-legacy-webview [data-slot="dialog-content"][class~="max-w-2xl"] {
+  max-width: 42rem !important;
+}
+
+html.dbx-legacy-webview [data-slot="dialog-content"][class~="max-w-3xl"] {
+  max-width: 48rem !important;
+}
+
+html.dbx-legacy-webview [data-slot="dialog-content"][class~="max-w-4xl"] {
+  max-width: 56rem !important;
+}
+
+html.dbx-legacy-webview [data-slot="dialog-content"][class~="max-w-5xl"] {
+  max-width: 64rem !important;
+}
+
+html.dbx-legacy-webview [data-slot="dialog-content"][class~="max-w-190"] {
+  max-width: 47.5rem !important;
+}
+
+html.dbx-legacy-webview [data-slot="dialog-content"][class*="max-w-[92vw]"] {
+  max-width: 92vw !important;
+}
+
+html.dbx-legacy-webview [data-slot="dialog-content"][class*="max-w-[94vw]"] {
+  max-width: 94vw !important;
+}
+
+html.dbx-legacy-webview [data-slot="dialog-content"][class*="max-w-[1100px]"] {
+  max-width: 1100px !important;
+}
+
+html.dbx-legacy-webview [data-slot="dialog-content"][class*="max-w-[min(720px"] {
+  max-width: 720px !important;
+}
+
+html.dbx-legacy-webview [data-slot="dialog-content"].dbx-form-dialog {
+  display: flex !important;
+  flex-direction: column !important;
+  width: calc(100vw - 2rem) !important;
+  height: auto !important;
+  max-height: calc(var(--dbx-viewport-height) - 2rem) !important;
+  overflow-y: auto !important;
+  gap: 1rem !important;
+}
+
+html.dbx-legacy-webview [data-slot="dialog-content"].dbx-form-dialog--md {
+  max-width: 40rem !important;
+}
+
+html.dbx-legacy-webview [data-slot="dialog-content"].dbx-form-dialog--lg {
+  max-width: 45rem !important;
+}
+
+html.dbx-legacy-webview [data-slot="dialog-content"].dbx-form-dialog [data-slot="select-trigger"] {
+  height: 2rem !important;
+  min-height: 2rem !important;
+  box-sizing: border-box !important;
+}
+
+html.dbx-legacy-webview [data-slot="dialog-content"][class*="max-w-[min(94vw,920px)]"] {
+  max-width: 920px !important;
+}
+
+html.dbx-legacy-webview [data-slot="dialog-content"][class*="max-w-[min(94vw,1050px)]"] {
+  max-width: 1050px !important;
+}
+
+html.dbx-legacy-webview [data-slot="dialog-content"][class*="max-w-[min(96vw,1180px)]"] {
+  max-width: 1180px !important;
+}
+
+html.dbx-legacy-webview [data-slot="dialog-content"][class*="max-h-[min(760px"] {
+  max-height: calc(var(--dbx-viewport-height) - 2rem) !important;
+}
+
+html.dbx-legacy-webview [data-slot="dialog-content"][class*="h-[min(760px"]:not(.dbx-form-dialog) {
+  height: calc(var(--dbx-viewport-height) - 2rem) !important;
+}
+
+html.dbx-legacy-webview [data-slot="dialog-content"][class*="h-[min(82vh,760px)]"] {
+  height: 82vh !important;
+}
+
+html.dbx-legacy-webview [data-slot="dialog-content"][class*="h-[min(86vh,820px)]"] {
+  height: 86vh !important;
+}
+
+html.dbx-legacy-webview [data-slot="dialog-content"][class*="max-h-[min(90vh,860px)]"] {
+  max-height: 90vh !important;
+}
+
+html.dbx-legacy-webview .space-y-0\.5 > * + * {
+  margin-top: 0.125rem !important;
+}
+
+html.dbx-legacy-webview .space-y-1 > * + * {
+  margin-top: 0.25rem !important;
+}
+
+html.dbx-legacy-webview .space-y-1\.5 > * + * {
+  margin-top: 0.375rem !important;
+}
+
+html.dbx-legacy-webview .space-y-2 > * + * {
+  margin-top: 0.5rem !important;
+}
+
+html.dbx-legacy-webview .space-y-2\.5 > * + * {
+  margin-top: 0.625rem !important;
+}
+
+html.dbx-legacy-webview .space-y-3 > * + * {
+  margin-top: 0.75rem !important;
+}
+
+html.dbx-legacy-webview .space-y-4 > * + * {
+  margin-top: 1rem !important;
+}
+
+html.dbx-legacy-webview .space-y-5 > * + * {
+  margin-top: 1.25rem !important;
+}
+
+html.dbx-legacy-webview .space-y-6 > * + * {
+  margin-top: 1.5rem !important;
+}
+
+html.dbx-legacy-webview .bg-primary\/5 {
+  background-color: rgba(var(--dbx-primary-rgb), 0.05) !important;
+}
+
+html.dbx-legacy-webview .bg-primary\/8 {
+  background-color: rgba(var(--dbx-primary-rgb), 0.08) !important;
+}
+
+html.dbx-legacy-webview .bg-primary\/10 {
+  background-color: rgba(var(--dbx-primary-rgb), 0.1) !important;
+}
+
+html.dbx-legacy-webview .bg-primary\/12 {
+  background-color: rgba(var(--dbx-primary-rgb), 0.12) !important;
+}
+
+html.dbx-legacy-webview .bg-primary\/15 {
+  background-color: rgba(var(--dbx-primary-rgb), 0.15) !important;
+}
+
+html.dbx-legacy-webview .bg-primary\/20 {
+  background-color: rgba(var(--dbx-primary-rgb), 0.2) !important;
+}
+
+html.dbx-legacy-webview .bg-primary\/30 {
+  background-color: rgba(var(--dbx-primary-rgb), 0.3) !important;
+}
+
+html.dbx-legacy-webview .bg-primary\/60 {
+  background-color: rgba(var(--dbx-primary-rgb), 0.6) !important;
+}
+
+html.dbx-legacy-webview .bg-primary\/80 {
+  background-color: rgba(var(--dbx-primary-rgb), 0.8) !important;
+}
+
+html.dbx-legacy-webview .bg-primary\/90 {
+  background-color: rgba(var(--dbx-primary-rgb), 0.9) !important;
+}
+
+html.dbx-legacy-webview .border-primary\/10 {
+  border-color: rgba(var(--dbx-primary-rgb), 0.1) !important;
+}
+
+html.dbx-legacy-webview .border-primary\/20 {
+  border-color: rgba(var(--dbx-primary-rgb), 0.2) !important;
+}
+
+html.dbx-legacy-webview .border-primary\/30 {
+  border-color: rgba(var(--dbx-primary-rgb), 0.3) !important;
+}
+
+html.dbx-legacy-webview .border-primary\/35 {
+  border-color: rgba(var(--dbx-primary-rgb), 0.35) !important;
+}
+
+html.dbx-legacy-webview .border-primary\/40 {
+  border-color: rgba(var(--dbx-primary-rgb), 0.4) !important;
+}
+
+html.dbx-legacy-webview .border-primary\/50 {
+  border-color: rgba(var(--dbx-primary-rgb), 0.5) !important;
+}
+
+html.dbx-legacy-webview .border-primary\/60 {
+  border-color: rgba(var(--dbx-primary-rgb), 0.6) !important;
+}
+
+html.dbx-legacy-webview .border-primary\/70 {
+  border-color: rgba(var(--dbx-primary-rgb), 0.7) !important;
+}
+
+html.dbx-legacy-webview .text-primary\/80 {
+  color: rgba(var(--dbx-primary-rgb), 0.8) !important;
+}
+
+html.dbx-legacy-webview .hover\:bg-primary\/10:hover {
+  background-color: rgba(var(--dbx-primary-rgb), 0.1) !important;
+}
+
+html.dbx-legacy-webview .hover\:bg-primary\/15:hover {
+  background-color: rgba(var(--dbx-primary-rgb), 0.15) !important;
+}
+
+html.dbx-legacy-webview .hover\:bg-primary\/20:hover {
+  background-color: rgba(var(--dbx-primary-rgb), 0.2) !important;
+}
+
+html.dbx-legacy-webview .hover\:bg-primary\/30:hover {
+  background-color: rgba(var(--dbx-primary-rgb), 0.3) !important;
+}
+
+html.dbx-legacy-webview .hover\:bg-primary\/60:hover {
+  background-color: rgba(var(--dbx-primary-rgb), 0.6) !important;
+}
+
+html.dbx-legacy-webview .hover\:bg-primary\/80:hover {
+  background-color: rgba(var(--dbx-primary-rgb), 0.8) !important;
+}
+
+html.dbx-legacy-webview .hover\:bg-primary\/90:hover {
+  background-color: rgba(var(--dbx-primary-rgb), 0.9) !important;
+}
+
+html.dbx-legacy-webview [data-slot="tabs"][data-orientation="horizontal"] {
+  flex-direction: column !important;
+}
+
+html.dbx-legacy-webview [data-slot="tabs"][data-orientation="vertical"] {
+  flex-direction: row !important;
+}
+
+html.dbx-legacy-webview [data-slot="tabs-list"] {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: fit-content;
+  border-radius: var(--dbx-radius-fixed-6);
+  color: var(--muted-foreground);
+}
+
+html.dbx-legacy-webview [data-slot="tabs-list"][data-variant="default"] {
+  min-height: 2rem;
+  padding: 3px;
+  background: var(--muted);
+}
+
+html.dbx-legacy-webview [data-slot="tabs-list"][data-variant="line"] {
+  gap: 0.25rem;
+  padding: 3px;
+  background: transparent;
+  border-radius: 0;
+}
+
+html.dbx-legacy-webview [data-slot="tabs"][data-orientation="vertical"] > [data-slot="tabs-list"] {
+  flex-direction: column !important;
+  height: fit-content;
+}
+
+html.dbx-legacy-webview [data-slot="tabs-trigger"] {
+  position: relative;
+  display: inline-flex;
+  flex: 1 1 0%;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+  height: calc(100% - 1px);
+  padding: 0.125rem 0.375rem;
+  gap: 0.375rem;
+  border: 1px solid transparent;
+  border-radius: var(--dbx-radius-fixed-6);
+  color: rgba(10, 10, 10, 0.6);
+  font-size: 0.875rem;
+  font-weight: 500;
+  line-height: 1.25rem;
+  white-space: nowrap;
+  transition:
+    color 150ms ease,
+    background-color 150ms ease,
+    border-color 150ms ease,
+    box-shadow 150ms ease;
+}
+
+html.dbx-legacy-webview [data-slot="tabs"][data-orientation="vertical"] [data-slot="tabs-trigger"] {
+  width: 100%;
+  justify-content: flex-start;
+}
+
+html.dbx-legacy-webview [data-slot="tabs-trigger"]:hover {
+  color: var(--foreground);
+}
+
+html.dbx-legacy-webview [data-slot="tabs-trigger"]:focus-visible {
+  border-color: var(--ring);
+  outline: 1px solid var(--ring);
+  box-shadow: 0 0 0 3px rgba(161, 161, 161, 0.5);
+}
+
+html.dbx-legacy-webview [data-slot="tabs-list"][data-variant="default"] > [data-slot="tabs-trigger"][aria-selected="true"],
+html.dbx-legacy-webview [data-slot="tabs-list"][data-variant="default"] > [data-slot="tabs-trigger"][data-state="active"],
+html.dbx-legacy-webview [data-slot="tabs-list"][data-variant="default"] > [data-slot="tabs-trigger"][data-active] {
+  color: var(--foreground);
+  background: var(--background);
+  border-color: transparent;
+  box-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.08),
+    0 1px 1px rgba(0, 0, 0, 0.04);
+}
+
+html.dbx-legacy-webview [data-slot="tabs-list"][data-variant="line"] > [data-slot="tabs-trigger"] {
+  background: transparent;
+  box-shadow: none;
+}
+
+html.dbx-legacy-webview [data-slot="tabs-list"][data-variant="line"] > [data-slot="tabs-trigger"][aria-selected="true"],
+html.dbx-legacy-webview [data-slot="tabs-list"][data-variant="line"] > [data-slot="tabs-trigger"][data-state="active"],
+html.dbx-legacy-webview [data-slot="tabs-list"][data-variant="line"] > [data-slot="tabs-trigger"][data-active] {
+  color: var(--foreground);
+  background: transparent;
+  border-color: transparent;
+  box-shadow: none;
+}
+
+html.dbx-legacy-webview [data-slot="tabs-list"][data-variant="line"] > [data-slot="tabs-trigger"]::after {
+  content: "";
+  position: absolute;
+  background: var(--foreground);
+  opacity: 0;
+  transition: opacity 150ms ease;
+}
+
+html.dbx-legacy-webview [data-slot="tabs"][data-orientation="horizontal"] [data-slot="tabs-list"][data-variant="line"] > [data-slot="tabs-trigger"]::after {
+  left: 0;
+  right: 0;
+  bottom: -5px;
+  height: 2px;
+}
+
+html.dbx-legacy-webview [data-slot="tabs"][data-orientation="vertical"] [data-slot="tabs-list"][data-variant="line"] > [data-slot="tabs-trigger"]::after {
+  top: 0;
+  right: -4px;
+  bottom: 0;
+  width: 2px;
+}
+
+html.dbx-legacy-webview [data-slot="tabs-list"][data-variant="line"] > [data-slot="tabs-trigger"][aria-selected="true"]::after,
+html.dbx-legacy-webview [data-slot="tabs-list"][data-variant="line"] > [data-slot="tabs-trigger"][data-state="active"]::after,
+html.dbx-legacy-webview [data-slot="tabs-list"][data-variant="line"] > [data-slot="tabs-trigger"][data-active]::after {
+  opacity: 1;
+}
+
+html.dbx-legacy-webview.dark [data-slot="tabs-trigger"] {
+  color: var(--muted-foreground);
+}
+
+html.dbx-legacy-webview.dark [data-slot="tabs-trigger"]:hover {
+  color: var(--foreground);
+}
+
+html.dbx-legacy-webview.dark [data-slot="tabs-list"][data-variant="default"] > [data-slot="tabs-trigger"][aria-selected="true"],
+html.dbx-legacy-webview.dark [data-slot="tabs-list"][data-variant="default"] > [data-slot="tabs-trigger"][data-state="active"],
+html.dbx-legacy-webview.dark [data-slot="tabs-list"][data-variant="default"] > [data-slot="tabs-trigger"][data-active] {
+  color: var(--foreground);
+  background: rgba(110, 110, 114, 0.3);
+  border-color: var(--input);
+  box-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.22),
+    0 1px 1px rgba(0, 0, 0, 0.16);
+}
+
+html.dbx-legacy-webview [data-slot="tabs-content"] {
+  min-width: 0;
+}
+
+html.dbx-legacy-webview.dark [data-grid-root] .data-grid-header-shell,
+html.dbx-legacy-webview.dark [data-grid-root] .data-grid-header-cell,
+html.dbx-legacy-webview.dark [data-grid-root] .data-grid-transpose-header,
+html.dbx-legacy-webview.dark [data-grid-root] [data-grid-column-index] {
+  background-color: rgb(24, 25, 27) !important;
+}
+
+html.dbx-legacy-webview.dark [data-grid-root] .data-grid-header-row,
+html.dbx-legacy-webview.dark [data-grid-root] .data-grid-transpose-header {
+  color: rgb(215, 215, 219) !important;
+}
+
+html.dbx-legacy-webview.dark [data-grid-root] .data-grid-header-cell:hover,
+html.dbx-legacy-webview.dark [data-grid-root] [data-grid-column-index]:hover {
+  background-color: rgb(38, 39, 42) !important;
+}
+
+@media (min-width: 640px) {
+  html.dbx-legacy-webview [data-slot="dialog-footer"] {
+    flex-direction: row !important;
+    justify-content: flex-end !important;
   }
 
-  [data-slot="tabs-content"] {
-    min-width: 0;
+  html.dbx-legacy-webview [data-slot="dialog-content"][class~="sm:max-w-sm"] {
+    max-width: 24rem !important;
   }
 
-  .dark [data-grid-root] .data-grid-header-shell,
-  .dark [data-grid-root] .data-grid-header-cell,
-  .dark [data-grid-root] .data-grid-transpose-header,
-  .dark [data-grid-root] [data-grid-column-index] {
-    background-color: rgb(24, 25, 27) !important;
+  html.dbx-legacy-webview [data-slot="dialog-content"][class~="sm:max-w-md"] {
+    max-width: 28rem !important;
   }
 
-  .dark [data-grid-root] .data-grid-header-row,
-  .dark [data-grid-root] .data-grid-transpose-header {
-    color: rgb(215, 215, 219) !important;
+  html.dbx-legacy-webview [data-slot="dialog-content"][class~="sm:max-w-lg"] {
+    max-width: 32rem !important;
   }
 
-  .dark [data-grid-root] .data-grid-header-cell:hover,
-  .dark [data-grid-root] [data-grid-column-index]:hover {
-    background-color: rgb(38, 39, 42) !important;
+  html.dbx-legacy-webview [data-slot="dialog-content"][class~="sm:max-w-xl"] {
+    max-width: 36rem !important;
   }
 
-  @media (min-width: 640px) {
-    [data-slot="dialog-footer"] {
-      flex-direction: row !important;
-      justify-content: flex-end !important;
-    }
+  html.dbx-legacy-webview [data-slot="dialog-content"][class~="sm:max-w-2xl"] {
+    max-width: 42rem !important;
+  }
 
-    [data-slot="dialog-content"][class~="sm:max-w-sm"] {
-      max-width: 24rem !important;
-    }
+  html.dbx-legacy-webview [data-slot="dialog-content"][class~="sm:max-w-3xl"] {
+    max-width: 48rem !important;
+  }
 
-    [data-slot="dialog-content"][class~="sm:max-w-md"] {
-      max-width: 28rem !important;
-    }
+  html.dbx-legacy-webview [data-slot="dialog-content"][class~="sm:max-w-4xl"] {
+    max-width: 56rem !important;
+  }
 
-    [data-slot="dialog-content"][class~="sm:max-w-lg"] {
-      max-width: 32rem !important;
-    }
+  html.dbx-legacy-webview [data-slot="dialog-content"][class~="sm:max-w-5xl"] {
+    max-width: 64rem !important;
+  }
 
-    [data-slot="dialog-content"][class~="sm:max-w-xl"] {
-      max-width: 36rem !important;
-    }
+  html.dbx-legacy-webview [data-slot="dialog-content"][class~="sm:max-w-190"] {
+    max-width: 47.5rem !important;
+  }
 
-    [data-slot="dialog-content"][class~="sm:max-w-2xl"] {
-      max-width: 42rem !important;
-    }
+  html.dbx-legacy-webview [data-slot="dialog-content"][class*="sm:max-w-[360px]"] {
+    max-width: 360px !important;
+  }
 
-    [data-slot="dialog-content"][class~="sm:max-w-3xl"] {
-      max-width: 48rem !important;
-    }
+  html.dbx-legacy-webview [data-slot="dialog-content"][class*="sm:max-w-[380px]"] {
+    max-width: 380px !important;
+  }
 
-    [data-slot="dialog-content"][class~="sm:max-w-4xl"] {
-      max-width: 56rem !important;
-    }
+  html.dbx-legacy-webview [data-slot="dialog-content"][class*="sm:max-w-[400px]"] {
+    max-width: 400px !important;
+  }
 
-    [data-slot="dialog-content"][class~="sm:max-w-5xl"] {
-      max-width: 64rem !important;
-    }
+  html.dbx-legacy-webview [data-slot="dialog-content"][class*="sm:max-w-[420px]"] {
+    max-width: 420px !important;
+  }
 
-    [data-slot="dialog-content"][class~="sm:max-w-190"] {
-      max-width: 47.5rem !important;
-    }
+  html.dbx-legacy-webview [data-slot="dialog-content"][class*="sm:max-w-[440px]"] {
+    max-width: 440px !important;
+  }
 
-    [data-slot="dialog-content"][class*="sm:max-w-[360px]"] {
-      max-width: 360px !important;
-    }
+  html.dbx-legacy-webview [data-slot="dialog-content"][class*="sm:max-w-[460px]"] {
+    max-width: 460px !important;
+  }
 
-    [data-slot="dialog-content"][class*="sm:max-w-[380px]"] {
-      max-width: 380px !important;
-    }
+  html.dbx-legacy-webview [data-slot="dialog-content"][class*="sm:max-w-[480px]"] {
+    max-width: 480px !important;
+  }
 
-    [data-slot="dialog-content"][class*="sm:max-w-[400px]"] {
-      max-width: 400px !important;
-    }
+  html.dbx-legacy-webview [data-slot="dialog-content"][class*="sm:max-w-[500px]"] {
+    max-width: 500px !important;
+  }
 
-    [data-slot="dialog-content"][class*="sm:max-w-[420px]"] {
-      max-width: 420px !important;
-    }
+  html.dbx-legacy-webview [data-slot="dialog-content"][class*="sm:max-w-[520px]"] {
+    max-width: 520px !important;
+  }
 
-    [data-slot="dialog-content"][class*="sm:max-w-[440px]"] {
-      max-width: 440px !important;
-    }
+  html.dbx-legacy-webview [data-slot="dialog-content"][class*="sm:max-w-[560px]"] {
+    max-width: 560px !important;
+  }
 
-    [data-slot="dialog-content"][class*="sm:max-w-[460px]"] {
-      max-width: 460px !important;
-    }
+  html.dbx-legacy-webview [data-slot="dialog-content"][class*="sm:max-w-[660px]"] {
+    max-width: 660px !important;
+  }
 
-    [data-slot="dialog-content"][class*="sm:max-w-[480px]"] {
-      max-width: 480px !important;
-    }
+  html.dbx-legacy-webview [data-slot="dialog-content"][class*="sm:max-w-[720px]"] {
+    max-width: 720px !important;
+  }
 
-    [data-slot="dialog-content"][class*="sm:max-w-[500px]"] {
-      max-width: 500px !important;
-    }
+  html.dbx-legacy-webview [data-slot="dialog-content"][class*="sm:max-w-[760px]"] {
+    max-width: 760px !important;
+  }
 
-    [data-slot="dialog-content"][class*="sm:max-w-[520px]"] {
-      max-width: 520px !important;
-    }
+  html.dbx-legacy-webview [data-slot="dialog-content"][class*="sm:max-w-[780px]"] {
+    max-width: 780px !important;
+  }
 
-    [data-slot="dialog-content"][class*="sm:max-w-[560px]"] {
-      max-width: 560px !important;
-    }
+  html.dbx-legacy-webview [data-slot="dialog-content"][class*="sm:max-w-[840px]"] {
+    max-width: 840px !important;
+  }
 
-    [data-slot="dialog-content"][class*="sm:max-w-[660px]"] {
-      max-width: 660px !important;
-    }
+  html.dbx-legacy-webview [data-slot="dialog-content"][class*="sm:max-w-[860px]"] {
+    max-width: 860px !important;
+  }
 
-    [data-slot="dialog-content"][class*="sm:max-w-[720px]"] {
-      max-width: 720px !important;
-    }
+  html.dbx-legacy-webview [data-slot="dialog-content"][class*="sm:max-w-[900px]"] {
+    max-width: 900px !important;
+  }
 
-    [data-slot="dialog-content"][class*="sm:max-w-[760px]"] {
-      max-width: 760px !important;
-    }
+  html.dbx-legacy-webview [data-slot="dialog-content"][class*="sm:max-w-[960px]"] {
+    max-width: 960px !important;
+  }
 
-    [data-slot="dialog-content"][class*="sm:max-w-[780px]"] {
-      max-width: 780px !important;
-    }
+  html.dbx-legacy-webview [data-slot="dialog-content"][class*="sm:max-w-[980px]"] {
+    max-width: 980px !important;
+  }
 
-    [data-slot="dialog-content"][class*="sm:max-w-[840px]"] {
-      max-width: 840px !important;
-    }
+  html.dbx-legacy-webview [data-slot="dialog-content"][class*="sm:max-w-[calc(100vw-2rem)]"] {
+    max-width: calc(100vw - 2rem) !important;
+  }
 
-    [data-slot="dialog-content"][class*="sm:max-w-[860px]"] {
-      max-width: 860px !important;
-    }
+  html.dbx-legacy-webview [data-slot="dialog-content"][class*="sm:!max-w-[92vw]"] {
+    max-width: 92vw !important;
+  }
 
-    [data-slot="dialog-content"][class*="sm:max-w-[900px]"] {
-      max-width: 900px !important;
-    }
-
-    [data-slot="dialog-content"][class*="sm:max-w-[960px]"] {
-      max-width: 960px !important;
-    }
-
-    [data-slot="dialog-content"][class*="sm:max-w-[980px]"] {
-      max-width: 980px !important;
-    }
-
-    [data-slot="dialog-content"][class*="sm:max-w-[calc(100vw-2rem)]"] {
-      max-width: calc(100vw - 2rem) !important;
-    }
-
-    [data-slot="dialog-content"][class*="sm:!max-w-[92vw]"] {
-      max-width: 92vw !important;
-    }
-
-    [data-slot="dialog-content"][class*="sm:!max-w-[min(920px,calc(100vw-48px))]"] {
-      max-width: min(920px, calc(100vw - 48px)) !important;
-    }
+  html.dbx-legacy-webview [data-slot="dialog-content"][class*="sm:!max-w-[min(920px,calc(100vw-48px))]"] {
+    max-width: min(920px, calc(100vw - 48px)) !important;
   }
 }
 

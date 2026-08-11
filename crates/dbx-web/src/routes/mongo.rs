@@ -88,6 +88,15 @@ pub struct MongoRenameCollectionRequest {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct MongoCloneCollectionRequest {
+    pub connection_id: String,
+    pub database: String,
+    pub source_collection: String,
+    pub target_collection: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct MongoFindRequest {
     pub connection_id: String,
     pub database: String,
@@ -189,6 +198,15 @@ pub struct MongoCreateIndexRequest {
     pub collection: String,
     pub keys_json: String,
     pub options_json: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MongoCreateUserRequest {
+    pub connection_id: String,
+    pub database: String,
+    pub user_json: String,
+    pub write_concern_json: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -397,6 +415,26 @@ pub async fn rename_collection(
     .await
     .map_err(AppError::from)?;
     Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+pub async fn clone_collection(
+    State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
+    Json(req): Json<MongoCloneCollectionRequest>,
+) -> Result<Json<dbx_core::db::mongo_driver::MongoCloneCollectionResult>, AppError> {
+    super::mcp_policy::ensure_dangerous_write(&state, &headers, &req.connection_id, &req.database, "Clone collection")
+        .await?;
+    ensure_writable(&state.app, &req.connection_id, "Clone collection").await?;
+    let result = dbx_core::mongo_ops::mongo_clone_collection_core(
+        &state.app,
+        &req.connection_id,
+        &req.database,
+        &req.source_collection,
+        &req.target_collection,
+    )
+    .await
+    .map_err(AppError::from)?;
+    Ok(Json(result))
 }
 
 pub async fn find_documents(
@@ -614,6 +652,26 @@ pub async fn create_index(
     .await
     .map_err(AppError::from)?;
     Ok(Json(serde_json::json!({ "name": name })))
+}
+
+pub async fn create_user(
+    State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
+    Json(req): Json<MongoCreateUserRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    super::mcp_policy::ensure_dangerous_write(&state, &headers, &req.connection_id, &req.database, "Create user")
+        .await?;
+    ensure_writable(&state.app, &req.connection_id, "Create user").await?;
+    let affected_rows = dbx_core::mongo_ops::mongo_create_user_core(
+        &state.app,
+        &req.connection_id,
+        &req.database,
+        &req.user_json,
+        req.write_concern_json.as_deref(),
+    )
+    .await
+    .map_err(AppError::from)?;
+    Ok(Json(serde_json::json!({ "affected_rows": affected_rows })))
 }
 
 pub async fn drop_indexes(
@@ -845,7 +903,10 @@ async fn ensure_find_one_write_policy(
 
 #[cfg(test)]
 mod tests {
-    use super::{drop_database, ensure_find_one_write_policy, MongoCollectionRequest};
+    use super::{
+        clone_collection, drop_database, ensure_find_one_write_policy, MongoCloneCollectionRequest,
+        MongoCollectionRequest,
+    };
     use crate::state::WebState;
     use axum::{
         extract::State,
@@ -975,6 +1036,40 @@ mod tests {
             State(state.clone()),
             mcp_headers(),
             Json(MongoCollectionRequest { connection_id: connection.id, database: "app".to_string() }),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.message.starts_with("SQL_BLOCKED:"), "{}", error.message);
+
+        drop(state);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn clone_collection_requires_mcp_dangerous_write_approval() {
+        let (state, dir) = test_web_state().await;
+        let connection = mongo_config(false);
+        state.app.storage.save_connections(std::slice::from_ref(&connection)).await.unwrap();
+        state
+            .app
+            .storage
+            .save_mcp_global_policy(&McpGlobalPolicy {
+                read_only: false,
+                allow_dangerous_sql: false,
+                allowed_connection_ids: Some(vec![connection.id.clone()]),
+            })
+            .await
+            .unwrap();
+
+        let error = clone_collection(
+            State(state.clone()),
+            mcp_headers(),
+            Json(MongoCloneCollectionRequest {
+                connection_id: connection.id,
+                database: "app".to_string(),
+                source_collection: "users".to_string(),
+                target_collection: "users_copy".to_string(),
+            }),
         )
         .await
         .unwrap_err();

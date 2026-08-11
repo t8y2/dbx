@@ -1,7 +1,8 @@
 use crate::connection::{AppState, PoolKind};
 use crate::db::agent_driver::AgentCapability;
 use crate::db::mongo_driver::{
-    self, MongoCollectionStatsResult, MongoDocumentResult, MongoDropIndexFailure, MongoDropIndexesResult,
+    self, MongoCloneCollectionResult, MongoCollectionStatsResult, MongoDocumentResult, MongoDropIndexFailure,
+    MongoDropIndexesResult,
 };
 use crate::document_ops::CollectionInfo;
 use crate::mongo_shell::MongoCommand;
@@ -92,6 +93,40 @@ pub async fn mongo_rename_collection_core(
     match connections.get(connection_id).ok_or("Not found")? {
         PoolKind::MongoDb(client) => mongo_driver::rename_collection(client, database, collection, new_name).await,
         PoolKind::Agent(_) => Err("MongoDB legacy agent does not support rename collection".to_string()),
+        _ => Err("Not a MongoDB connection".to_string()),
+    }
+}
+
+pub async fn mongo_clone_collection_core(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    source_collection: &str,
+    target_collection: &str,
+) -> Result<MongoCloneCollectionResult, String> {
+    mongo_driver::validate_clone_collection_names(database, source_collection, target_collection)?;
+    ensure_document_pool(state, connection_id).await?;
+    let connections = state.connections.read().await;
+    match connections.get(connection_id).ok_or("Not found")? {
+        PoolKind::MongoDb(client) => {
+            mongo_driver::clone_collection(client, database, source_collection, target_collection).await
+        }
+        PoolKind::Agent(client) => {
+            let mut client = client.lock().await;
+            if !client.supports_capability(AgentCapability::MongoCloneCollection) {
+                return Err(
+                    "MongoDB Legacy Agent does not support clone collection; upgrade or reinstall the MongoDB Legacy driver"
+                        .to_string(),
+                );
+            }
+            client
+                .mongo_clone_collection(serde_json::json!({
+                    "database": database,
+                    "source_collection": source_collection,
+                    "target_collection": target_collection,
+                }))
+                .await
+        }
         _ => Err("Not a MongoDB connection".to_string()),
     }
 }
@@ -386,7 +421,24 @@ pub async fn mongo_aggregate_documents_core(
         PoolKind::MongoDb(client) => {
             mongo_driver::aggregate_documents(client, database, collection, pipeline_json, max_rows, options_json).await
         }
-        PoolKind::Agent(_) => Err("MongoDB legacy agent does not support aggregate".to_string()),
+        PoolKind::Agent(client) => {
+            let mut client = client.lock().await;
+            let params = serde_json::json!({
+                "database": database,
+                "collection": collection,
+                "pipeline": pipeline_json,
+                "limit": max_rows.unwrap_or(100),
+                "options": options_json,
+            });
+            match client.mongo_aggregate_documents(params).await {
+                Ok(result) => Ok(result),
+                Err(error) if is_unknown_agent_method_error(&error, "aggregate_documents") => Err(
+                    "MongoDB Legacy Agent does not support aggregate; upgrade or reinstall the MongoDB Legacy driver"
+                        .to_string(),
+                ),
+                Err(error) => Err(error),
+            }
+        }
         _ => Err("Not a MongoDB connection".to_string()),
     }
 }
@@ -444,6 +496,37 @@ pub async fn mongo_create_index_core(
                 .filter(|name| !name.is_empty())
                 .map(str::to_string)
                 .ok_or_else(|| "MongoDB legacy agent returned no created index name".to_string())
+        }
+        _ => Err("Not a MongoDB connection".to_string()),
+    }
+}
+
+pub async fn mongo_create_user_core(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    user_json: &str,
+    write_concern_json: Option<&str>,
+) -> Result<u64, String> {
+    mongo_driver::validate_mongo_namespace_name(database, "Database")?;
+    mongo_driver::validate_create_user_request(user_json, write_concern_json)?;
+    ensure_document_pool(state, connection_id).await?;
+    let connections = state.connections.read().await;
+    match connections.get(connection_id).ok_or("Not found")? {
+        PoolKind::MongoDb(client) => {
+            mongo_driver::create_user(client, database, user_json, write_concern_json).await?;
+            Ok(1)
+        }
+        PoolKind::Agent(client) => {
+            let mut client = client.lock().await;
+            let result: serde_json::Value = client
+                .mongo_create_user(serde_json::json!({
+                    "database": database,
+                    "user_json": user_json,
+                    "write_concern_json": write_concern_json,
+                }))
+                .await?;
+            Ok(result.get("affected_rows").and_then(serde_json::Value::as_u64).unwrap_or(1))
         }
         _ => Err("Not a MongoDB connection".to_string()),
     }
@@ -857,6 +940,12 @@ pub async fn execute_mongo_command_core(
             let name =
                 mongo_create_index_core(state, connection_id, database, collection, keys, options.as_deref()).await?;
             Ok(scalar_query_result("name", Value::String(name)))
+        }
+        MongoCommand::CreateUser { user_json, write_concern_json } => {
+            let affected =
+                mongo_create_user_core(state, connection_id, database, user_json, write_concern_json.as_deref())
+                    .await?;
+            Ok(affected_query_result(affected))
         }
         MongoCommand::DropIndexes { collection, indexes, single } => {
             let result =
@@ -1272,6 +1361,47 @@ for line in sys.stdin:
         .await;
 
         mongo_drop_collection_core(&state, "legacy", "app", "users").await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn mongo_clone_collection_routes_legacy_connections_to_the_agent() {
+        let (state, _directory) = legacy_mongo_state_with_capabilities(
+            "clone_collection",
+            serde_json::json!({
+                "database": "app",
+                "source_collection": "users",
+                "target_collection": "users_copy",
+            }),
+            serde_json::json!({ "documents_copied": 2, "indexes_copied": 1 }),
+            &[AgentCapability::MongoCloneCollection.as_str()],
+        )
+        .await;
+
+        let result = mongo_clone_collection_core(&state, "legacy", "app", "users", "users_copy").await.unwrap();
+
+        assert_eq!(result, MongoCloneCollectionResult { documents_copied: 2, indexes_copied: 1 });
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn mongo_clone_collection_requires_an_explicit_legacy_agent_capability() {
+        let (state, _directory) = legacy_mongo_state_with_capabilities(
+            "clone_collection",
+            serde_json::json!({
+                "database": "app",
+                "source_collection": "users",
+                "target_collection": "users_copy",
+            }),
+            serde_json::json!({ "documents_copied": 2, "indexes_copied": 1 }),
+            &[],
+        )
+        .await;
+
+        let error = mongo_clone_collection_core(&state, "legacy", "app", "users", "users_copy").await.unwrap_err();
+
+        assert!(error.contains("upgrade or reinstall"), "{error}");
+        assert!(!error.contains("Unknown method"), "{error}");
     }
 
     #[cfg(unix)]

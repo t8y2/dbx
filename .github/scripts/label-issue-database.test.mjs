@@ -46,6 +46,7 @@ test("labels native and compatibility database products with their families", ()
     ["Turso", ["db/turso"]],
     ["Nacos 2.0.1", ["db/nacos"]],
     ["r-nacos", ["db/nacos"]],
+    ["HashiCorp Consul", ["db/consul"]],
     ["Apache Cloudberry", ["db/cloudberry", "db/postgres"]],
     ["TiDB v8.5", ["db/mysql", "db/tidb"]],
     ["OceanBase", ["db/oceanbase"]],

@@ -34,7 +34,7 @@ pub const QUERY_CANCELED: &str = "Query canceled";
 /// Fallback when a Mongo connection hits the generic SQL executor instead of the shell path.
 /// Wording must match packages/mongo-shell `MONGO_SHELL_COMMAND_HINT`
 /// (desktop/CLI diagnose first; this is only the Rust SQL-executor backstop).
-const MONGO_SHELL_COMMAND_HINT: &str = "Use MongoDB shell-style commands, for example: db.collection.find({}).limit(100), db.collection.aggregate([]), db.collection.aggregate([], { explain: true }), db.version(), db.collection.countDocuments({}), db.collection.distinct(\"field\"), db.collection.getIndexes(), db.collection.createIndex({...}), or db.collection.insertOne({...}).";
+const MONGO_SHELL_COMMAND_HINT: &str = "Use MongoDB shell-style commands, for example: db.collection.find({}).limit(100), db.collection.aggregate([]), db.collection.aggregate([], { explain: true }), db.version(), db.collection.countDocuments({}), db.collection.distinct(\"field\"), db.collection.getIndexes(), db.collection.createIndex({...}), db.createUser({...}), or db.collection.insertOne({...}).";
 const SQL_OMITTED_ERROR_CONTEXT: &str =
     "SQL text omitted from user-facing error; enable debug SQL diagnostics to inspect the original statement.";
 
@@ -1669,6 +1669,7 @@ async fn do_execute_typed(
             .map(|result| truncate_result_with_max_rows(result, max_rows))
         }
         PoolKind::HBase(_) => Err("SQL execution is not supported for HBase connections".to_string()),
+        PoolKind::Consul(_) => Err("SQL execution is not supported for Consul connections".to_string()),
     };
     result
         .map(normalize_query_result_for_js)
@@ -2852,6 +2853,7 @@ fn pool_kind_has_transactional_path(pool: &PoolKind) -> bool {
         | PoolKind::Agent(_) => true,
         PoolKind::MessageQueue
         | PoolKind::Nacos
+        | PoolKind::Consul(_)
         | PoolKind::HBase(_)
         | PoolKind::DuckDbWorker(_)
         | PoolKind::Redis(_)
@@ -3095,7 +3097,7 @@ pub async fn execute_statements_in_transaction_on_pool_typed(
                 TxPath::Explicit
             }
             PoolKind::Agent(client) => TxPath::Agent(client.clone()),
-            PoolKind::MessageQueue | PoolKind::Nacos | PoolKind::HBase(_) => TxPath::None,
+            PoolKind::MessageQueue | PoolKind::Nacos | PoolKind::Consul(_) | PoolKind::HBase(_) => TxPath::None,
             #[cfg(feature = "mq-admin")]
             PoolKind::Mqtt(_) => TxPath::None,
             PoolKind::DuckDbWorker(_)
@@ -4505,6 +4507,7 @@ for line in sys.stdin:
             username: String::new(),
             password: String::new(),
             database: None,
+            default_schema: None,
             visible_databases: None,
             visible_schemas: None,
             show_system_schemas: false,
@@ -5837,6 +5840,7 @@ for line in sys.stdin:
             username: String::new(),
             password: String::new(),
             database: None,
+            default_schema: None,
             visible_databases: None,
             visible_schemas: None,
             show_system_schemas: false,

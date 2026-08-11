@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { normalizeSidebarObjectKind, sidebarObjectKindsForDatabase } from "@/lib/database/databaseObjectCapabilities";
+import { normalizeSidebarObjectKind, sidebarObjectKindsForDatabase, supportsPackageMemberExpansion } from "@/lib/database/databaseObjectCapabilities";
 
 describe("databaseObjectCapabilities", () => {
   it("exposes supported programmable objects for Dameng", () => {
@@ -9,6 +9,13 @@ describe("databaseObjectCapabilities", () => {
   it("exposes synonyms for Xugu only", () => {
     expect(sidebarObjectKindsForDatabase("xugu")).toContain("SYNONYM");
     expect(sidebarObjectKindsForDatabase("postgres")).not.toContain("SYNONYM");
+  });
+
+  it("expands package members only for implemented database paths", () => {
+    expect(supportsPackageMemberExpansion("oracle")).toBe(true);
+    expect(supportsPackageMemberExpansion("xugu")).toBe(true);
+    expect(supportsPackageMemberExpansion("dameng")).toBe(false);
+    expect(supportsPackageMemberExpansion("opengauss")).toBe(false);
   });
 
   it("exposes only tables for HBase namespaces", () => {

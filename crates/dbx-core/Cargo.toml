@@ -82,3 +82,6 @@ tempfile = "3"
 
 [target.'cfg(not(all(windows, target_vendor = "win7")))'.dependencies]
 iana-time-zone = "0.1"
+
+[dev-dependencies]
+mysql_common = { git = "https://github.com/t8y2/rust_mysql_common.git", rev = "47740d85a8277167a5717afac785d37b46a36296", default-features = false }

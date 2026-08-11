@@ -1,5 +1,6 @@
 import type { TreeNode } from "@/types/database";
 import type { SqlCompletionTable } from "@/lib/sql/sqlCompletion";
+import { isTdengineStableTableType } from "@/lib/table/tableEditing";
 
 const TABLE_NODE_TYPES = new Set(["table", "view", "materialized_view"]);
 
@@ -31,6 +32,7 @@ export function completionTablesFromTree(nodes: readonly TreeNode[], connectionI
       catalog: node.catalog,
       schema: node.schema,
       type: node.type === "materialized_view" ? "materialized_view" : node.type === "view" ? "view" : "table",
+      ...(isTdengineStableTableType(node.tableType) ? { tableType: node.tableType } : {}),
     });
   });
   return dedupeCompletionTables(tables);

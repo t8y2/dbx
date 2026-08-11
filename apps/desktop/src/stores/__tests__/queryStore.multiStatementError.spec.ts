@@ -622,6 +622,31 @@ describe("queryStore multi-statement errors", () => {
     expect(tab.activeResultRunId).toBeUndefined();
   });
 
+  it("uses the immutable target context instead of the result tab namespace", async () => {
+    mocks.executeMulti.mockResolvedValue([{ columns: ["value"], rows: [[1]], affected_rows: 0, execution_time_ms: 1 }]);
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("mysql-1", "source-db", "Target", "query", "source-schema", "SELECT 1", "source-catalog");
+
+    await store.executeTabSql(tabId, "SELECT 1", {
+      targetContext: { scope: "database", database: "target-db", schema: "target-schema" },
+    });
+
+    expect(mocks.executeMulti).toHaveBeenCalledWith("mysql-1", "target-db", "SELECT 1", "target-schema", expect.any(String), expect.objectContaining({ catalog: undefined }));
+  });
+
+  it("clears the database and schema for a connection-scoped target", async () => {
+    mocks.getConnectionConfig.mockReturnValue({ id: "etcd-1", name: "etcd", db_type: "etcd", database: "stale" });
+    mocks.executeMulti.mockResolvedValue([{ columns: ["value"], rows: [[1]], affected_rows: 0, execution_time_ms: 1 }]);
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("etcd-1", "stale", "Target", "query", "stale-schema", "GET /", "stale-catalog");
+
+    await store.executeTabSql(tabId, "GET /", { targetContext: { scope: "connection" } });
+
+    expect(mocks.executeMulti).toHaveBeenCalledWith("etcd-1", "", "GET /", undefined, expect.any(String), expect.objectContaining({ catalog: undefined }));
+  });
+
   it("restores the retained result when a new-result execution fails before dispatch", async () => {
     mocks.executeMulti.mockResolvedValueOnce([{ columns: ["value"], rows: [[1]], affected_rows: 0, execution_time_ms: 1 }]);
     const { useQueryStore } = await import("@/stores/queryStore");
@@ -784,5 +809,75 @@ describe("queryStore multi-statement errors", () => {
     expect(tab.resultRuns).toHaveLength(1);
     expect(tab.activeResultRunId).toBe(tab.resultRuns?.[0]?.id);
     expect(tab.result?.rows).toEqual([[1]]);
+  });
+
+  it("does not clear a newer result while closing the previous result session", async () => {
+    const pendingClose = deferred<void>();
+    mocks.closeQuerySession.mockReturnValue(pendingClose.promise);
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("mysql-1", "app", "Query");
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    tab.result = { columns: ["value"], rows: [[1]], affected_rows: 0, execution_time_ms: 1, session_id: "result-session-1" };
+    tab.resultSessionId = "result-session-1";
+    tab.resultClientSessionId = "result-client-1";
+
+    const closing = store.closeQueryResult(tabId);
+    expect(tab.result).toBeUndefined();
+
+    tab.result = { columns: ["value"], rows: [[2]], affected_rows: 0, execution_time_ms: 1, session_id: "result-session-2" };
+    tab.resultSessionId = "result-session-2";
+    tab.resultClientSessionId = "result-client-2";
+    pendingClose.resolve();
+
+    await expect(closing).resolves.toBe(true);
+    expect(tab.result?.rows).toEqual([[2]]);
+    expect(tab.resultSessionId).toBe("result-session-2");
+    expect(tab.resultClientSessionId).toBe("result-client-2");
+  });
+
+  it("clears every retained result run while preserving the query tab", async () => {
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("mysql-1", "app", "Query");
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    tab.sql = "select draft";
+    tab.result = { columns: ["value"], rows: [[1]], affected_rows: 0, execution_time_ms: 1, session_id: "result-session-1" };
+    tab.resultSessionId = "result-session-1";
+    tab.resultClientSessionId = "result-client-1";
+    tab.resultAutoSave = true;
+    tab.resultRuns = [
+      {
+        id: "run-1",
+        title: "Run 1",
+        sequence: 1,
+        sql: "select 1",
+        createdAt: 1,
+        result: tab.result,
+        resultSessionId: "result-session-1",
+        resultClientSessionId: "result-client-1",
+      },
+      {
+        id: "run-2",
+        title: "Run 2",
+        sequence: 2,
+        sql: "select 2",
+        createdAt: 2,
+        result: { columns: ["value"], rows: [[2]], affected_rows: 0, execution_time_ms: 1, session_id: "result-session-2" },
+        resultSessionId: "result-session-2",
+        resultClientSessionId: "result-client-2",
+      },
+    ];
+    tab.activeResultRunId = "run-1";
+
+    await expect(store.clearQueryResults(tabId)).resolves.toBe(true);
+
+    expect(mocks.closeQuerySession).toHaveBeenCalledTimes(2);
+    expect(tab.sql).toBe("select draft");
+    expect(tab.resultAutoSave).toBe(true);
+    expect(tab.result).toBeUndefined();
+    expect(tab.results).toBeUndefined();
+    expect(tab.resultRuns).toBeUndefined();
+    expect(tab.activeResultRunId).toBeUndefined();
   });
 });

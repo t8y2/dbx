@@ -5,6 +5,8 @@ export interface ElasticsearchExternalConfig {
   kibanaBasePath?: string;
   /** GET path for connect/test/health. Empty means GET /. */
   connectivityCheckPath?: string;
+  /** Regex collapsing rolling/time-series index suffixes into a `*` pattern. Empty → default; "off" → no grouping. */
+  indexGroupingPattern?: string;
 }
 
 function externalConfigRecord(value: unknown): Record<string, unknown> {
@@ -44,14 +46,26 @@ export function elasticsearchConnectivityCheckPathFromConfig(value: unknown): st
   return typeof path === "string" ? normalizeElasticsearchConnectivityCheckPath(path) : "";
 }
 
-export function buildElasticsearchExternalConfig(mode: ElasticsearchConnectionMode, kibanaBasePath: string, connectivityCheckPath = ""): ElasticsearchExternalConfig | undefined {
+export function elasticsearchIndexGroupingPatternFromConfig(value: unknown): string {
+  const config = externalConfigRecord(value);
+  const pattern = config.indexGroupingPattern;
+  return typeof pattern === "string" ? pattern.trim() : "";
+}
+
+export function buildElasticsearchExternalConfig(mode: ElasticsearchConnectionMode, kibanaBasePath: string, connectivityCheckPath = "", indexGroupingPattern = ""): ElasticsearchExternalConfig | undefined {
   const checkPath = normalizeElasticsearchConnectivityCheckPath(connectivityCheckPath);
+  const grouping = indexGroupingPattern.trim();
   if (mode !== "kibana") {
-    return checkPath ? { connectivityCheckPath: checkPath } : undefined;
+    if (!checkPath && !grouping) return undefined;
+    const config: ElasticsearchExternalConfig = {};
+    if (checkPath) config.connectivityCheckPath = checkPath;
+    if (grouping) config.indexGroupingPattern = grouping;
+    return config;
   }
   const normalizedPath = normalizeKibanaBasePath(kibanaBasePath);
   const config: ElasticsearchExternalConfig = { mode: "kibana" };
   if (normalizedPath) config.kibanaBasePath = normalizedPath;
   if (checkPath) config.connectivityCheckPath = checkPath;
+  if (grouping) config.indexGroupingPattern = grouping;
   return config;
 }

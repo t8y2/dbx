@@ -49,7 +49,7 @@ import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import LightTooltip from "@/components/ui/LightTooltip.vue";
-import type { ColumnInfo, ConnectionConfig, DatabaseType, TreeNode } from "@/types/database";
+import type { ColumnInfo, ConnectionConfig, DatabaseType, TreeNode, TriggerInfo } from "@/types/database";
 import { alignedCommentLeadingWidth, canTreeNodePin, canTreeNodeShowExpander, sidebarTreeNodeComment, trailingCommentAvailableWidth, trailingCommentGapPx, treeItemPaddingLeft, treeLabelWidthClass, usesFullWidthTreeLabel } from "@/lib/sidebar/sidebarTreeItemLayout";
 import { clearActiveTableReferencePayload, createTableReferencePayload, createTableReferenceDropEvent, setActiveTableReferencePayload, type QueryEditorTableReferencePayload } from "@/lib/editor/queryEditorTableDrop";
 import { formatSidebarObjectStorage } from "@/lib/sidebar/sidebarDatabaseStorage";
@@ -72,6 +72,7 @@ import { useDragSort } from "@/composables/useDragSort";
 import { sidebarTreeRuntimeKey } from "@/lib/sidebar/sidebarTreeRuntime";
 import { treeNodePinKey } from "@/lib/app/pinnedItems";
 import { isTreeGroupNodeType } from "@/lib/sidebar/treeNodeGroup";
+import { shouldActivateTreeNodeOnSingleClick } from "@/lib/sidebar/treeNodeClick";
 
 const { t } = useI18n();
 
@@ -265,7 +266,10 @@ function getIconInfo(node: TreeNode): { icon: any; colorClass: string } | null {
     case "etcd-access-control":
       return { icon: ShieldCheck, colorClass: "text-sky-500" };
     case "zookeeper-root":
+    case "consul-root":
       return { icon: Database, colorClass: "text-blue-500" };
+    case "consul-overview":
+      return { icon: Gauge, colorClass: "text-blue-500" };
     case "mongo-db":
       return { icon: Database, colorClass: "text-yellow-500" };
     case "mongo-gridfs":
@@ -447,6 +451,24 @@ const detailTooltip = computed(() => {
     ].filter((row) => row.value);
     return { rows };
   }
+  if (node.type === "trigger" && node.meta && node.connectionId && effectiveDatabaseTypeForConnection(connectionStore.getConfig(node.connectionId)) === "xugu") {
+    const trigger = node.meta as TriggerInfo;
+    const hasXuguDetails = trigger.level != null || trigger.condition != null || trigger.language != null || trigger.enabled != null || trigger.valid != null || trigger.created_at != null || trigger.comment != null;
+    if (!hasXuguDetails) return null;
+    const rows: DetailTooltipRow[] = [
+      { label: t("objects.name"), value: visibleLabel(node) },
+      { label: t("objects.triggerTiming"), value: cleanTooltipValue(trigger.timing) },
+      { label: t("objects.triggerEvent"), value: cleanTooltipValue(trigger.event) },
+      { label: t("objects.triggerLevel"), value: cleanTooltipValue(trigger.level) },
+      { label: t("objects.triggerStatus"), value: trigger.enabled == null ? "" : t(trigger.enabled ? "objects.enabled" : "objects.disabled") },
+      { label: t("objects.validity"), value: trigger.valid == null ? "" : t(trigger.valid ? "objects.valid" : "objects.invalid") },
+      { label: t("objects.triggerCondition"), value: cleanTooltipValue(trigger.condition), multiline: true },
+      { label: t("objects.triggerLanguage"), value: cleanTooltipValue(trigger.language) },
+      { label: t("objects.createdAt"), value: cleanTooltipValue(trigger.created_at) },
+      { label: t("objects.comment"), value: cleanTooltipValue(trigger.comment), multiline: true },
+    ].filter((row) => row.value);
+    return rows.length ? { rows } : null;
+  }
   const comment = node.type === "column" && node.meta && "comment" in node.meta ? (node.meta as ColumnInfo).comment : node.comment;
   if (!comment || (node.type !== "schema" && node.type !== "table" && node.type !== "view" && node.type !== "column")) return null;
   const rows: DetailTooltipRow[] = [
@@ -554,6 +576,7 @@ const canExpand = computed(() =>
   canTreeNodeShowExpander({
     type: activeNode.value.type,
     childCount: activeNode.value.children?.length ?? 0,
+    explicitContainer: (activeNode.value.type === "package" && activeNode.value.children !== undefined) || activeNode.value.xuguTypeMembersExpandable === true,
   }),
 );
 
@@ -566,6 +589,9 @@ const isNodeDefaultDatabase = computed(
     typeof activeNode.value.database === "string" &&
     connectionStore.isDefaultDatabase(activeNode.value.connectionId, activeNode.value.database),
 );
+function isNodeDefaultSchema(): boolean {
+  return activeNode.value.type === "schema" && !!activeNode.value.connectionId && !!activeNode.value.schema && connectionStore.isDefaultSchema(activeNode.value.connectionId, activeNode.value.schema);
+}
 
 const trailingComment = computed(() => {
   if (!settingsStore.editorSettings.sidebarObjectInfoMode.startsWith("comment-")) return null;
@@ -1066,7 +1092,7 @@ function onClick(event: MouseEvent) {
   }
   selectSingleTreeNode(props.node);
   rowRef.value?.focus({ preventScroll: true });
-  if (settingsStore.editorSettings.sidebarActivation === "double" && props.node.type !== "load-more") return;
+  if (!shouldActivateTreeNodeOnSingleClick(props.node.type, settingsStore.editorSettings.sidebarActivation) && props.node.type !== "load-more") return;
   treeRuntime.handleRowClick(props.node, event.detail);
 }
 
@@ -1211,6 +1237,9 @@ function onKeydown(event: KeyboardEvent) {
             >
             <Badge v-if="isNodeDefaultDatabase" variant="secondary" class="h-4 px-1.5 text-[10px]">
               {{ t("editor.defaultDatabase") }}
+            </Badge>
+            <Badge v-if="isNodeDefaultSchema()" variant="secondary" class="h-4 px-1.5 text-[10px]">
+              {{ t("editor.defaultSchema") }}
             </Badge>
           </div>
           <span v-if="trailingComment && !isRightAlignedComment()" class="sidebar-object-comment ml-4 min-w-0 flex-1 truncate text-left" :class="{ 'sidebar-object-comment--windows': useWindowsSidebarCommentFont }">{{ trailingComment }}</span>

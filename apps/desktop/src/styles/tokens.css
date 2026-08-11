@@ -105,6 +105,7 @@
   --popover: rgb(255 255 255);
   --popover-foreground: rgb(10 10 10);
   --primary: rgb(23 23 23);
+  --dbx-primary-rgb: 23, 23, 23;
   --primary-foreground: rgb(250 250 250);
   --secondary: rgb(245 245 245);
   --secondary-foreground: rgb(23 23 23);
@@ -166,6 +167,7 @@
   --popover: rgb(30 30 32);
   --popover-foreground: rgb(221 221 226);
   --primary: rgb(208 208 214);
+  --dbx-primary-rgb: 208, 208, 214;
   --primary-foreground: rgb(19 20 22);
   --secondary: rgb(42 42 45);
   --secondary-foreground: rgb(215 215 219);

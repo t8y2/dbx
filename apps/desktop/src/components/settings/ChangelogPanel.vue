@@ -117,12 +117,12 @@ watch(changelogLang, (lang) => {
 
 <template>
   <div class="rounded-lg border p-4">
-    <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+    <div class="settings-about-section-header flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
       <div class="min-w-0 space-y-1">
         <Label>{{ t("settings.changelogTitle") }}</Label>
         <p class="text-sm text-muted-foreground">{{ t("settings.changelogDescription") }}</p>
       </div>
-      <div class="flex shrink-0 flex-wrap items-center gap-2">
+      <div class="settings-about-section-actions flex shrink-0 flex-wrap items-center gap-2">
         <Button type="button" variant="outline" size="sm" :disabled="loading" @click="openExternalUrl(changelogWebsiteUrl(changelogLang))">
           <ExternalLink class="mr-1 h-3.5 w-3.5" />
           {{ t("settings.changelogOpenWebsite") }}

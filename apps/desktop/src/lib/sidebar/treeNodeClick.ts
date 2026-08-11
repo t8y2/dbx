@@ -8,7 +8,35 @@ export type SidebarActivation = "single" | "double";
 
 const dataNodeTypes = new Set<TreeNodeType>(["table", "view", "materialized_view"]);
 const documentBrowserNodeTypes = new Set<TreeNodeType>(["mongo-collection", "mongo-bucket"]);
-const toggleLeafNodeTypes = new Set<TreeNodeType>(["redis-db", "mq-tenant", "mqtt-topic", "etcd-root", "etcd-dashboard", "etcd-access-control", "zookeeper-root", "mongo-gridfs", "mongo-collection", "mongo-bucket", "vector-collection", "elasticsearch-index", "user-admin"]);
+const toggleLeafNodeTypes = new Set<TreeNodeType>([
+  "redis-db",
+  "mq-tenant",
+  "mqtt-topic",
+  "etcd-root",
+  "etcd-dashboard",
+  "etcd-access-control",
+  "zookeeper-root",
+  "consul-root",
+  "consul-overview",
+  "mongo-gridfs",
+  "mongo-collection",
+  "mongo-bucket",
+  "vector-collection",
+  "elasticsearch-index",
+  "user-admin",
+]);
+// These are application entry points rather than database objects. They should
+// always navigate on a single click, even when the user prefers double-click
+// activation for ordinary tree objects.
+const directNavigationTreeNodeTypes = new Set<TreeNodeType>(["consul-root", "consul-overview"]);
+
+export function isDirectNavigationTreeNode(type: TreeNodeType): boolean {
+  return directNavigationTreeNodeTypes.has(type);
+}
+
+export function shouldActivateTreeNodeOnSingleClick(type: TreeNodeType, activation: SidebarActivation = "single"): boolean {
+  return activation !== "double" || isDirectNavigationTreeNode(type);
+}
 const objectBrowserNodeTypes = new Set<TreeNodeType>(["database", "schema", "object-browser"]);
 const sourceNodeTypes = new Set<TreeNodeType>(["materialized_view", "procedure", "function", "trigger", "sequence", "synonym", "package", "package-body", "type", "type-body"]);
 const savedSqlNodeTypes = new Set<TreeNodeType>(["saved-sql-file"]);
@@ -30,14 +58,41 @@ export function objectSourceKindForTreeNode(type: TreeNodeType): ObjectSourceKin
   return null;
 }
 
+export interface TreeNodeObjectSourceTarget {
+  name: string;
+  schema?: string;
+  objectType: ObjectSourceKind;
+  signature?: string;
+}
+
+export function objectSourceTargetForTreeNode(node: TreeNode): TreeNodeObjectSourceTarget | null {
+  if ((node.type === "procedure" || node.type === "function") && node.parentType === "package" && node.parentName) {
+    return {
+      name: node.parentName,
+      schema: node.parentSchema || node.schema,
+      objectType: "PACKAGE",
+      signature: node.signature,
+    };
+  }
+  const objectType = objectSourceKindForTreeNode(node.type);
+  if (!objectType) return null;
+  return {
+    name: node.objectName || node.label,
+    schema: node.schema,
+    objectType,
+    signature: node.signature,
+  };
+}
+
 export function isDocumentBrowserTreeNode(type: TreeNodeType): boolean {
   return documentBrowserNodeTypes.has(type);
 }
 
 export function treeNodeRowAction(type: TreeNodeType, canExpand: boolean, activation: SidebarActivation = "single"): TreeNodeRowAction {
-  if (activation === "double") return "none";
+  if (!shouldActivateTreeNodeOnSingleClick(type, activation)) return "none";
   if (type === "extension") return "open-extension-details";
   if (dataNodeTypes.has(type)) return "open-data";
+  if ((type === "package" || type === "type") && canExpand) return "toggle";
   if (sourceNodeTypes.has(type)) return "open-source";
   if (toggleLeafNodeTypes.has(type)) return "toggle";
   if (canExpand) return "toggle";

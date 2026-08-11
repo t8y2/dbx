@@ -71,6 +71,7 @@ import { canTreeNodePin, canTreeNodeShowExpander } from "@/lib/sidebar/sidebarTr
 import { sidebarConnectionVisibleFilterMenu } from "@/lib/sidebar/sidebarVisibleFilterMenu";
 import { objectTypesForGroupNode } from "@/lib/table/tableTree";
 import { loadSidebarObjectGroup } from "@/lib/sidebar/sidebarObjectGroupRouting";
+import { isXuguTypeMemberContainer } from "@/lib/sidebar/xuguTypeMembers";
 import { mysqlObjectTemplateForGroup } from "@/lib/sidebar/mysqlObjectTemplates";
 import { buildTableDeleteTemplate, buildTableInsertTemplate, buildTableSelectTemplate, buildTableUpdateTemplate } from "@/lib/table/tableSqlTemplates";
 import { driverStoreFocusForInstallError } from "@/lib/connection/agentDriverInstallHint";
@@ -91,10 +92,11 @@ import {
   supportsTableTruncate,
   supportsTableStructureEditing,
   supportsTransfer,
+  supportsPackageMemberExpansion,
   usesTreeSchemaMode,
   isSingleDatabase,
 } from "@/lib/database/databaseCapabilities";
-import { copyNameForTreeNode, isDocumentBrowserTreeNode, objectSourceKindForTreeNode, shouldRunTreeNodeRowAction, treeNodeRowAction, treeNodeRowDoubleClickAction } from "@/lib/sidebar/treeNodeClick";
+import { copyNameForTreeNode, isDirectNavigationTreeNode, isDocumentBrowserTreeNode, objectSourceTargetForTreeNode, shouldRunTreeNodeRowAction, treeNodeRowAction, treeNodeRowDoubleClickAction } from "@/lib/sidebar/treeNodeClick";
 import { mongoCollectionTableTypeFromNode, mongoDropIndexFailureCount } from "@/lib/sidebar/mongoCollectionMutation";
 import { dataTabOpenModeFromTreeClick, type DataTabOpenMode } from "@/lib/sidebar/dataTabOpenPolicy";
 import { isCopySidebarSelectionShortcut, isEditSidebarConnectionShortcut, isPasteSidebarSelectionShortcut } from "@/lib/editor/keyboardShortcuts";
@@ -347,6 +349,8 @@ const emit = defineEmits<{
 const {
   setNodeAsDefaultDatabase,
   clearNodeDefaultDatabase,
+  setNodeAsDefaultSchema,
+  clearNodeDefaultSchema,
   connectionDeleteMenuLabel,
   connectionDuplicateMenuLabel,
   connectionDeleteConfirmMessage,
@@ -364,6 +368,7 @@ const {
   closeDatabaseConnection,
   isPinned,
   isNodeDefaultDatabase,
+  isNodeDefaultSchema,
   isConnected,
   isConnecting,
   canCloseDatabaseConnection,
@@ -395,6 +400,7 @@ const {
   canDropMongoDatabase,
   canDropMongoCollection,
   canRenameMongoCollection,
+  canCloneMongoCollection,
   prepareRenameMongoCollectionDialog,
   confirmRenameMongoCollection,
   showRenameMongoCollectionDialog,
@@ -402,6 +408,12 @@ const {
   renameMongoCollectionError,
   renameMongoCollectionPreview,
   renameMongoCollectionLoading,
+  prepareCloneMongoCollectionDialog,
+  confirmCloneMongoCollection,
+  showCloneMongoCollectionDialog,
+  cloneMongoCollectionName,
+  cloneMongoCollectionError,
+  cloneMongoCollectionLoading,
   mongoIndexNameForNode,
   canDropMongoIndexNode,
   canDropMongoIndex,
@@ -528,8 +540,31 @@ function isGroupLabel(node: TreeNode): boolean {
   return groupTypes.has(node.type);
 }
 
+async function openDirectNavigationNode(node: TreeNode) {
+  if (!node.connectionId) return;
+  await connectionStore.ensureConnected(node.connectionId);
+  const connectionName = connectionStore.getConfig(node.connectionId)?.name || "Consul";
+  if (node.type === "consul-root") {
+    queryStore.createTab(node.connectionId, "", `${connectionName}:keys`, "consul");
+    refreshActiveKvBrowserAfterOpen("consul", node.connectionId);
+  } else if (node.type === "consul-overview") {
+    queryStore.createTab(node.connectionId, "", `${connectionName}:${t("consul.ui.overview")}`, "consul-overview");
+  }
+}
+
 async function toggle() {
   const node = activeNode.value;
+  if (isDirectNavigationTreeNode(node.type)) {
+    try {
+      await openDirectNavigationNode(node);
+    } catch (e: any) {
+      const errMsg = e?.message || String(e);
+      if (errMsg.includes(CONNECTION_ATTEMPT_CANCELLED_MESSAGE)) return;
+      toast(t("connection.connectFailed", { message: translateBackendError(t, e) }), 5000);
+      openDriverStoreForInstallError(errMsg, node);
+    }
+    return;
+  }
   if (node.isLoading) {
     if (node.isExpanded) {
       node.isExpanded = false;
@@ -576,6 +611,12 @@ async function toggle() {
     return;
   }
 
+  if (isXuguTypeMemberContainer(node, connectionStore.getConfig(node.connectionId || "")?.db_type)) {
+    await connectionStore.loadXuguTypeMembers(node);
+    emitNodeToggled(node, wasExpanded);
+    return;
+  }
+
   if (node.isExpanded) {
     node.isExpanded = false;
     if (!connectionStore.sidebarSearchQuery) connectionStore.releaseCollapsedTreeNodeChildren(node.id);
@@ -589,6 +630,12 @@ async function toggle() {
       return;
     }
 
+    if (node.type === "package" && node.connectionId && supportsPackageMemberExpansion(currentDatabaseType())) {
+      await connectionStore.loadPackageMembers(node);
+      emitNodeToggled(node, wasExpanded);
+      return;
+    }
+
     if (node.type === "connection" && node.connectionId) {
       const config = connectionStore.getConfig(node.connectionId);
       if (config?.db_type === "redis") {
@@ -597,6 +644,8 @@ async function toggle() {
         await connectionStore.loadEtcdRoot(node.connectionId);
       } else if (config?.db_type === "zookeeper") {
         await connectionStore.loadZooKeeperRoot(node.connectionId);
+      } else if (config?.db_type === "consul") {
+        await connectionStore.loadConsulRoot(node.connectionId);
       } else if (config?.db_type === "mongodb") {
         await connectionStore.loadMongoDatabases(node.connectionId);
       } else if (config?.db_type === "elasticsearch" || config?.db_type === "easysearch") {
@@ -769,7 +818,7 @@ function runRowClickAction(clickDetail: number) {
   }
 }
 
-function refreshActiveKvBrowserAfterOpen(mode: "etcd" | "zookeeper", connectionId: string) {
+function refreshActiveKvBrowserAfterOpen(mode: "etcd" | "zookeeper" | "consul", connectionId: string) {
   void nextTick(() => {
     window.dispatchEvent(new CustomEvent("dbx-refresh-active-kv-browser", { detail: { mode, connectionId } }));
   });
@@ -1002,6 +1051,12 @@ function openRenameMongoCollectionDialog() {
   claimTreeItemDialogOwnership();
   routeTreeItemDialogController();
   prepareRenameMongoCollectionDialog();
+}
+
+function openCloneMongoCollectionDialog() {
+  claimTreeItemDialogOwnership();
+  routeTreeItemDialogController();
+  prepareCloneMongoCollectionDialog();
 }
 
 function openCreateMongoIndexDialog() {
@@ -1248,7 +1303,7 @@ async function newQuery() {
     const connection = connectionStore.getConfig(node.connectionId);
     if (!connection) return;
     const options = await getDatabaseOptions(node.connectionId);
-    queryStore.createTab(node.connectionId, resolveDefaultDatabase(connection, options), undefined, "query");
+    queryStore.createTab(node.connectionId, resolveDefaultDatabase(connection, options), undefined, "query", connection.default_schema);
   } catch (e: any) {
     toast(t("connection.connectFailed", { message: translateBackendError(t, e) }), 5000);
     openDriverStoreForInstallError(e?.message || String(e));
@@ -1633,18 +1688,18 @@ function openObjectSourceDialog(initialEditing: boolean) {
   if (!node.connectionId || !node.database) return;
   const connectionId = node.connectionId;
   const database = node.database;
-  const objectType = objectSourceKindForTreeNode(node.type);
-  if (!objectType) return;
+  const sourceTarget = objectSourceTargetForTreeNode(node);
+  if (!sourceTarget) return;
   const openMode = settingsStore.editorSettings.routineSourceOpenMode;
   if (openMode === "query-tab") {
     void connectionStore
       .ensureConnected(connectionId)
       .then(async () => {
         connectionStore.activeConnectionId = connectionId;
-        const schema = node.schema || database;
+        const schema = sourceTarget.schema || database;
         const databaseType = effectiveDatabaseTypeForConnection(connectionStore.getConfig(connectionId));
         if (!databaseType) throw new Error("Connection type is unavailable.");
-        const objectName = node.objectName || node.label;
+        const objectName = sourceTarget.name;
         const {
           raw,
           editableSource,
@@ -1654,7 +1709,7 @@ function openObjectSourceDialog(initialEditing: boolean) {
           database,
           schema,
           name: objectName,
-          objectType: objectType as any,
+          objectType: sourceTarget.objectType as any,
           databaseType,
           signature: node.signature,
         });
@@ -3357,6 +3412,7 @@ const canExpand = computed(() =>
   canTreeNodeShowExpander({
     type: activeNode.value.type,
     childCount: activeNode.value.children?.length ?? 0,
+    explicitContainer: activeNode.value.xuguTypeMembersExpandable === true,
   }),
 );
 
@@ -3369,7 +3425,7 @@ const canOpenSqlFileExecution = computed(() => {
 const canExportAllDatabases = computed(() => {
   if (activeNode.value.type !== "connection" || !activeNode.value.connectionId) return false;
   const dbType = connectionStore.getConfig(activeNode.value.connectionId)?.db_type;
-  return !["redis", "mongodb", "elasticsearch", "easysearch", "qdrant", "milvus", "weaviate", "chromadb", "etcd", "zookeeper", "mq", "nacos"].includes(dbType || "");
+  return !["redis", "mongodb", "elasticsearch", "easysearch", "qdrant", "milvus", "weaviate", "chromadb", "etcd", "zookeeper", "consul", "mq", "nacos"].includes(dbType || "");
 });
 
 const canOpenDiagram = computed(() => {
@@ -3807,6 +3863,11 @@ function databaseSpecificDialogCapabilities() {
     renameMongoCollectionPreview,
     renameMongoCollectionLoading,
     confirmRenameMongoCollection,
+    showCloneMongoCollectionDialog,
+    cloneMongoCollectionName,
+    cloneMongoCollectionError,
+    cloneMongoCollectionLoading,
+    confirmCloneMongoCollection,
     showCreateMongoIndexDialog,
     mongoCreateIndexForm,
     mongoCreateIndexFieldOptions,
@@ -4179,6 +4240,13 @@ function buildDatabaseSidebarMenu(context: SidebarMenuFactoryContext): boolean {
         items.push({ label: t("contextMenu.clearDefaultDatabase"), action: clearNodeDefaultDatabase, icon: Database });
       }
     }
+    if (node.type === "schema") {
+      if (!isNodeDefaultSchema.value) {
+        items.push({ label: t("contextMenu.setDefaultSchema"), action: setNodeAsDefaultSchema, icon: Database });
+      } else {
+        items.push({ label: t("contextMenu.clearDefaultSchema"), action: clearNodeDefaultSchema, icon: Database });
+      }
+    }
     if (canEditDatabaseProperties.value) {
       items.push({ label: t("contextMenu.editDatabaseProperties"), action: openEditDatabasePropertiesDialog, icon: SquarePen });
     }
@@ -4300,7 +4368,7 @@ function buildSpecialSidebarMenu(context: SidebarMenuFactoryContext): boolean {
     return true;
   }
 
-  if (node.type === "etcd-root" || node.type === "etcd-dashboard" || node.type === "etcd-access-control" || node.type === "zookeeper-root") {
+  if (node.type === "etcd-root" || node.type === "etcd-dashboard" || node.type === "etcd-access-control" || node.type === "zookeeper-root" || node.type === "consul-root" || node.type === "consul-overview") {
     items.push({ label: t("contextMenu.openConnection"), action: toggle, icon: Database });
     return true;
   }
@@ -4372,6 +4440,9 @@ function buildSpecialSidebarMenu(context: SidebarMenuFactoryContext): boolean {
         icon: Pencil,
         shortcut: shortcutRename,
       });
+    }
+    if (canCloneMongoCollection.value) {
+      items.push({ label: t("contextMenu.cloneCollection"), action: openCloneMongoCollectionDialog, icon: CopyPlus });
     }
     if (canDropMongoCollection.value) {
       items.push({ label: "", separator: true });
@@ -4593,14 +4664,15 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
 
   // 8. Procedure / Function / Package
   if (node.type === "procedure" || node.type === "function") {
-    if (node.type === "procedure") {
+    const isPackageMember = node.parentType === "package" && !!node.parentName;
+    if (node.type === "procedure" && !isPackageMember) {
       items.push({ label: t("contextMenu.executeProcedure"), action: openProcedureExecution, icon: Play });
     }
-    if (currentDatabaseType() === "xugu" && buildXuguCompileSql({ objectType: node.type, schema: node.schema, name: node.objectName || node.label })) {
+    if (!isPackageMember && currentDatabaseType() === "xugu" && buildXuguCompileSql({ objectType: node.type, schema: node.schema, name: node.objectName || node.label })) {
       items.push({ label: t("contextMenu.compileObject"), action: compileXuguObject, icon: Wrench });
     }
     items.push({ label: t("contextMenu.viewSource"), action: () => openObjectSourceDialog(false), icon: Code2 });
-    if (canRenameObject.value) {
+    if (!isPackageMember && canRenameObject.value) {
       items.push({
         label: t("contextMenu.renameObject"),
         action: openRenameObjectDialog,
@@ -4610,14 +4682,16 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
     }
     items.push({ label: "", separator: true });
     items.push({ label: t("contextMenu.changeOpenMode"), action: () => emit("open-settings", "navigation"), icon: Settings2 });
-    items.push({ label: "", separator: true });
-    items.push({
-      label: deleteMenuLabel(node.type === "procedure" ? t("contextMenu.dropProcedure") : t("contextMenu.dropFunction")),
-      action: deleteMenuAction(requestDropObject),
-      icon: Trash2,
-      shortcut: shortcutDelete,
-      variant: "destructive" as const,
-    });
+    if (!isPackageMember) {
+      items.push({ label: "", separator: true });
+      items.push({
+        label: deleteMenuLabel(node.type === "procedure" ? t("contextMenu.dropProcedure") : t("contextMenu.dropFunction")),
+        action: deleteMenuAction(requestDropObject),
+        icon: Trash2,
+        shortcut: shortcutDelete,
+        variant: "destructive" as const,
+      });
+    }
     return true;
   }
 

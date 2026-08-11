@@ -2,7 +2,7 @@ import { strict as assert } from "node:assert";
 import { readFileSync } from "node:fs";
 import { test } from "vitest";
 import { BOOLEAN_CELL_EDITOR_VALUES, booleanCellEditorValue, isBooleanCellValue, isBooleanColumnType, normalizeBooleanCellValue, parseBooleanCellEditorValue } from "../../apps/desktop/src/lib/dataGrid/dataGridBooleanColumn.ts";
-import { resolveDataGridColumnsByResultIndex } from "../../apps/desktop/src/lib/dataGrid/dataGridColumnMetadata.ts";
+import { resolveDataGridColumnNullability, resolveDataGridColumnsByResultIndex } from "../../apps/desktop/src/lib/dataGrid/dataGridColumnMetadata.ts";
 import type { ColumnInfo } from "../../apps/desktop/src/types/database.ts";
 
 function column(name: string, dataType: string): ColumnInfo {
@@ -91,6 +91,17 @@ test("indexes table metadata once and resolves source-column aliases", () => {
   assert.equal(resolved[0], enabled);
   assert.equal(resolved[1], displayName);
   assert.equal(resolved[2], undefined);
+});
+
+test("shows nullability only for query results with resolved column metadata", () => {
+  const nullable = column("nickname", "varchar");
+  const required = { ...column("code", "varchar"), is_nullable: false };
+
+  assert.equal(resolveDataGridColumnNullability("results", nullable), "nullable");
+  assert.equal(resolveDataGridColumnNullability("results", required), "required");
+  assert.equal(resolveDataGridColumnNullability("results", undefined), undefined);
+  assert.equal(resolveDataGridColumnNullability("table-data", nullable), undefined);
+  assert.equal(resolveDataGridColumnNullability(undefined, nullable), undefined);
 });
 
 test("keeps the enum editor as the default boolean edit path and gates checkbox interaction behind the checkbox display mode", () => {

@@ -5,7 +5,7 @@ const DRAFT_VISIBLE_DATABASES_PREFIX = "__visible_draft_";
 
 // Turso and Cloudflare D1 target one fixed SQLite-compatible `main` namespace;
 // non-database services expose their own root objects rather than database namespaces.
-const UNSUPPORTED_VISIBLE_DATABASE_TYPES = new Set<DatabaseType>(["turso", "cloudflare-d1", "elasticsearch", "easysearch", "qdrant", "milvus", "weaviate", "chromadb", "etcd", "zookeeper", "mq", "nacos"]);
+const UNSUPPORTED_VISIBLE_DATABASE_TYPES = new Set<DatabaseType>(["turso", "cloudflare-d1", "elasticsearch", "easysearch", "qdrant", "milvus", "weaviate", "chromadb", "etcd", "zookeeper", "mq", "nacos", "consul"]);
 
 type VisibleDatabaseConnectionFields = Pick<
   ConnectionConfig,

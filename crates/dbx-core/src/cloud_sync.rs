@@ -9,6 +9,7 @@ use reqwest::{header, Client, Method, StatusCode, Url};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
+use std::net::{IpAddr, Ipv4Addr};
 
 use crate::ai::AiConfigItem;
 use crate::connection_secrets::{
@@ -521,7 +522,11 @@ pub async fn resolve_webdav_sync_secrets_passphrase(storage: &Storage) -> Result
 
 impl WebDavClient {
     pub fn new(config: WebDavConfig) -> Self {
-        Self { http: Client::new(), config }
+        let builder = Client::builder();
+        let builder =
+            if webdav_endpoint_uses_direct_connection(&config.endpoint) { builder.no_proxy() } else { builder };
+        let http = builder.build().expect("failed to build WebDAV HTTP client");
+        Self { http, config }
     }
 
     pub fn remote_path(&self) -> String {
@@ -1529,6 +1534,42 @@ fn normalized_remote_path(value: Option<&str>) -> String {
     }
 }
 
+fn webdav_endpoint_uses_direct_connection(endpoint: &str) -> bool {
+    let Ok(url) = Url::parse(endpoint.trim()) else {
+        return false;
+    };
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    let host = host.strip_prefix('[').and_then(|host| host.strip_suffix(']')).unwrap_or(host);
+    if host.rsplit('.').next().is_some_and(|label| label.eq_ignore_ascii_case("localhost")) {
+        return true;
+    }
+    host.parse::<IpAddr>().is_ok_and(webdav_ip_uses_direct_connection)
+}
+
+fn webdav_ip_uses_direct_connection(address: IpAddr) -> bool {
+    match address {
+        IpAddr::V4(address) => webdav_ipv4_uses_direct_connection(address),
+        IpAddr::V6(address) => {
+            address.is_loopback()
+                || address.is_unspecified()
+                || address.is_unique_local()
+                || address.is_unicast_link_local()
+                || address.to_ipv4_mapped().is_some_and(webdav_ipv4_uses_direct_connection)
+        }
+    }
+}
+
+fn webdav_ipv4_uses_direct_connection(address: Ipv4Addr) -> bool {
+    let [first, second, _, _] = address.octets();
+    address.is_private()
+        || address.is_loopback()
+        || address.is_link_local()
+        || address.is_unspecified()
+        || (first == 100 && (64..=127).contains(&second))
+}
+
 fn parent_collection_paths(remote_path: &str) -> Vec<String> {
     let parts = remote_path.trim_matches('/').split('/').filter(|part| !part.is_empty()).collect::<Vec<_>>();
     if parts.len() <= 1 {
@@ -1551,9 +1592,9 @@ mod tests {
         parent_collection_paths, parse_legacy_dbx_snapshot, parse_snippet_snapshot, prepare_legacy_snippet_snapshot,
         resolve_webdav_sync_secrets_passphrase, retry_pending_snippet_cleanup, save_snippet_sync_id,
         save_webdav_sync_secrets_preference, scrub_connection_secrets, snapshot_for_snippet_upload,
-        snippet_file_content, snippet_response_id, snippet_sync_settings, webdav_sync_secrets_status,
-        ApplySnapshotOptions, ConnectionSecretSnapshot, SensitiveSyncPayload, SnippetProvider, SnippetSyncClient,
-        SnippetSyncConfig, DEFAULT_SNIPPET_FILE_NAME,
+        snippet_file_content, snippet_response_id, snippet_sync_settings, webdav_endpoint_uses_direct_connection,
+        webdav_sync_secrets_status, ApplySnapshotOptions, ConnectionSecretSnapshot, SensitiveSyncPayload,
+        SnippetProvider, SnippetSyncClient, SnippetSyncConfig, DEFAULT_SNIPPET_FILE_NAME,
     };
     use crate::ai::{AiApiStyle, AiAuthMethod, AiConfig, AiConfigItem};
     use crate::connection_secrets::NACOS_AUTH_PASSWORD_KEY;
@@ -1592,6 +1633,10 @@ mod tests {
                 opencode_cli_env: Default::default(),
                 cursor_cli_path: None,
                 cursor_cli_env: Default::default(),
+                grok_cli_path: None,
+                grok_cli_env: Default::default(),
+                codebuddy_cli_path: None,
+                codebuddy_cli_env: Default::default(),
             },
         }
     }
@@ -1661,6 +1706,7 @@ mod tests {
             username: "app".to_string(),
             password: password.to_string(),
             database: Some("app_db".to_string()),
+            default_schema: None,
             visible_databases: None,
             visible_schemas: None,
             show_system_schemas: false,
@@ -1719,6 +1765,7 @@ mod tests {
             username: "nacos".to_string(),
             password: String::new(),
             database: None,
+            default_schema: None,
             visible_databases: None,
             visible_schemas: None,
             show_system_schemas: false,
@@ -1789,6 +1836,41 @@ mod tests {
     }
 
     #[test]
+    fn bypasses_proxy_for_local_webdav_endpoints() {
+        for endpoint in [
+            "http://172.27.31.29:8088/dbx/",
+            "https://10.0.0.8/webdav",
+            "http://192.168.1.9/",
+            "http://100.64.0.1/",
+            "http://127.0.0.1:8080/",
+            "http://169.254.1.2/",
+            "http://localhost:8080/",
+            "http://dbx.localhost/",
+            "http://[::1]/",
+            "http://[fd00::1]/",
+            "http://[fe80::1]/",
+            "http://[::ffff:172.27.31.29]/",
+        ] {
+            assert!(webdav_endpoint_uses_direct_connection(endpoint), "expected direct WebDAV connection: {endpoint}");
+        }
+    }
+
+    #[test]
+    fn preserves_proxy_for_public_webdav_endpoints() {
+        for endpoint in [
+            "https://dav.example.com/remote.php/dav/files/user/",
+            "http://8.8.8.8/webdav/",
+            "http://[2606:4700:4700::1111]/webdav/",
+            "not a URL",
+        ] {
+            assert!(
+                !webdav_endpoint_uses_direct_connection(endpoint),
+                "expected configured proxy behavior: {endpoint}"
+            );
+        }
+    }
+
+    #[test]
     fn returns_parent_collection_paths_from_leaf() {
         assert_eq!(parent_collection_paths("dbx/sync/snapshot.json"), vec!["dbx".to_string(), "dbx/sync".to_string()]);
         assert_eq!(
@@ -1814,6 +1896,7 @@ mod tests {
             username: "user".to_string(),
             password: "secret".to_string(),
             database: None,
+            default_schema: None,
             visible_databases: None,
             visible_schemas: None,
             show_system_schemas: false,

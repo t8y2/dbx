@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::File;
 use std::io::BufReader;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Weak};
+use std::sync::{Arc, LazyLock, Weak};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rumqttc::tokio_rustls::rustls::{
@@ -1279,13 +1279,15 @@ fn build_transport(
 
     Ok(match (transport, tls_verification_mode) {
         (MqttTransport::Tcp, None) => Transport::Tcp,
-        (MqttTransport::Tcp, Some(MqttTlsVerificationMode::VerifyServerCert)) => Transport::tls_with_default_config(),
+        (MqttTransport::Tcp, Some(MqttTlsVerificationMode::VerifyServerCert)) => {
+            Transport::tls_with_config(verified_tls_configuration())
+        }
         (MqttTransport::Tcp, Some(MqttTlsVerificationMode::SkipServerCertVerification)) => {
             Transport::tls_with_config(insecure_tls_configuration())
         }
         (MqttTransport::WebSocket, None) => Transport::ws(),
         (MqttTransport::WebSocket, Some(MqttTlsVerificationMode::VerifyServerCert)) => {
-            Transport::wss_with_default_config()
+            Transport::wss_with_config(verified_tls_configuration())
         }
         (MqttTransport::WebSocket, Some(MqttTlsVerificationMode::SkipServerCertVerification)) => {
             Transport::wss_with_config(insecure_tls_configuration())
@@ -1297,8 +1299,8 @@ fn certificate_tls_configuration(auth: &MqttAuth, mode: MqttTlsVerificationMode)
     let MqttAuth::Certificate { ca_cert_path, client_cert_path, client_key_path } = auth else {
         return Err("MQTT 证书认证配置无效".to_string());
     };
-    let client_cert_path = client_cert_path.as_deref().ok_or("MQTT 证书认证缺少客户端证书路径")?;
-    let client_key_path = client_key_path.as_deref().ok_or("MQTT 证书认证缺少客户端私钥路径")?;
+    let client_cert_path = client_cert_path.as_deref().filter(|path| !path.trim().is_empty());
+    let client_key_path = client_key_path.as_deref().filter(|path| !path.trim().is_empty());
 
     let mut root_cert_store = rustls::RootCertStore::empty();
     if let Some(ca_cert_path) = ca_cert_path.as_deref().filter(|path| !path.trim().is_empty()) {
@@ -1325,22 +1327,39 @@ fn certificate_tls_configuration(auth: &MqttAuth, mode: MqttTlsVerificationMode)
                 .with_custom_certificate_verifier(Arc::new(NoCertificateVerification { provider }))
         }
     };
-    let cert_file = File::open(client_cert_path).map_err(|e| format!("读取 MQTT 客户端证书失败: {e}"))?;
-    let certs = rustls_pemfile::certs(&mut BufReader::new(cert_file))
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| format!("解析 MQTT 客户端证书失败: {e}"))?;
-    if certs.is_empty() {
-        return Err("MQTT 客户端证书文件不包含有效证书".to_string());
-    }
-    let key_file = File::open(client_key_path).map_err(|e| format!("读取 MQTT 客户端私钥失败: {e}"))?;
-    let mut key_reader = BufReader::new(key_file);
-    let key = rustls_pemfile::private_key(&mut key_reader)
-        .map_err(|e| format!("解析 MQTT 客户端私钥失败: {e}"))?
-        .ok_or("MQTT 客户端私钥文件不包含有效私钥")?;
-    let config =
-        builder.with_client_auth_cert(certs, key).map_err(|e| format!("构建 MQTT 客户端 TLS 配置失败: {e}"))?;
+    let config = match (client_cert_path, client_key_path) {
+        (None, None) => builder.with_no_client_auth(),
+        (None, Some(_)) => return Err("MQTT 证书认证缺少客户端证书路径".to_string()),
+        (Some(_), None) => return Err("MQTT 证书认证缺少客户端私钥路径".to_string()),
+        (Some(client_cert_path), Some(client_key_path)) => {
+            let cert_file = File::open(client_cert_path).map_err(|e| format!("读取 MQTT 客户端证书失败: {e}"))?;
+            let certs = rustls_pemfile::certs(&mut BufReader::new(cert_file))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| format!("解析 MQTT 客户端证书失败: {e}"))?;
+            if certs.is_empty() {
+                return Err("MQTT 客户端证书文件不包含有效证书".to_string());
+            }
+            let key_file = File::open(client_key_path).map_err(|e| format!("读取 MQTT 客户端私钥失败: {e}"))?;
+            let mut key_reader = BufReader::new(key_file);
+            let key = rustls_pemfile::private_key(&mut key_reader)
+                .map_err(|e| format!("解析 MQTT 客户端私钥失败: {e}"))?
+                .ok_or("MQTT 客户端私钥文件不包含有效私钥")?;
+            builder.with_client_auth_cert(certs, key).map_err(|e| format!("构建 MQTT 客户端 TLS 配置失败: {e}"))?
+        }
+    };
     Ok(TlsConfiguration::from(config))
 }
+
+fn verified_tls_configuration() -> TlsConfiguration {
+    static CONFIG: LazyLock<TlsConfiguration> = LazyLock::new(|| {
+        let mut root_cert_store = rustls::RootCertStore::empty();
+        root_cert_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        let config = rustls::ClientConfig::builder().with_root_certificates(root_cert_store).with_no_client_auth();
+        TlsConfiguration::from(config)
+    });
+    CONFIG.clone()
+}
+
 fn insecure_tls_configuration() -> TlsConfiguration {
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let config = rustls::ClientConfig::builder()
@@ -1672,6 +1691,90 @@ mod tests {
         }
 
         Ok(())
+    }
+
+    #[test]
+    fn verified_tls_does_not_depend_on_platform_certificate_store() {
+        let missing_cert_file = std::env::temp_dir().join(format!("dbx-mqtt-missing-ca-{}.pem", uuid::Uuid::new_v4()));
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("verified_tls_platform_store_child")
+            .arg("--ignored")
+            .arg("--nocapture")
+            .env("SSL_CERT_FILE", missing_cert_file)
+            .env_remove("SSL_CERT_DIR")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        assert!(output.status.success(), "verified TLS child failed:\nstdout:\n{stdout}\nstderr:\n{stderr}");
+        assert!(
+            stdout.contains("verified_tls_platform_store_child") && stdout.contains("1 passed"),
+            "verified TLS child did not run the regression test:\n{stdout}"
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn verified_tls_platform_store_child() {
+        let config = MqttConnectionConfig {
+            host: "broker.example.com".to_string(),
+            port: 8883,
+            tls: true,
+            tls_skip_verify: false,
+            ..Default::default()
+        };
+
+        let plan = build_connect_plan(&config).unwrap();
+        assert!(matches!(plan.transport, Transport::Tls(TlsConfiguration::Rustls(_))));
+    }
+
+    #[test]
+    fn verified_tls_reuses_the_client_config() {
+        let first = verified_tls_configuration();
+        let second = verified_tls_configuration();
+
+        match (first, second) {
+            (TlsConfiguration::Rustls(first), TlsConfiguration::Rustls(second)) => {
+                assert!(Arc::ptr_eq(&first, &second));
+            }
+            _ => panic!("verified TLS 应复用显式 Rustls 配置"),
+        }
+    }
+
+    #[test]
+    fn certificate_auth_allows_server_only_tls() {
+        let auth = MqttAuth::Certificate { ca_cert_path: None, client_cert_path: None, client_key_path: None };
+
+        let transport =
+            build_transport(MqttTransport::Tcp, Some(MqttTlsVerificationMode::VerifyServerCert), &auth).unwrap();
+
+        assert!(matches!(transport, Transport::Tls(TlsConfiguration::Rustls(_))));
+    }
+
+    #[test]
+    fn certificate_auth_requires_client_certificate_and_key_as_a_pair() {
+        let missing_cert = MqttAuth::Certificate {
+            ca_cert_path: None,
+            client_cert_path: None,
+            client_key_path: Some("client.key".to_string()),
+        };
+        let missing_key = MqttAuth::Certificate {
+            ca_cert_path: None,
+            client_cert_path: Some("client.crt".to_string()),
+            client_key_path: None,
+        };
+        let missing_cert_error =
+            build_transport(MqttTransport::Tcp, Some(MqttTlsVerificationMode::VerifyServerCert), &missing_cert)
+                .err()
+                .unwrap();
+        let missing_key_error =
+            build_transport(MqttTransport::Tcp, Some(MqttTlsVerificationMode::VerifyServerCert), &missing_key)
+                .err()
+                .unwrap();
+
+        assert_eq!(missing_cert_error, "MQTT 证书认证缺少客户端证书路径");
+        assert_eq!(missing_key_error, "MQTT 证书认证缺少客户端私钥路径");
     }
 
     #[tokio::test]

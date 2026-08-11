@@ -2,12 +2,16 @@ import { splitSqlStatementRanges } from "@/lib/sql/sqlStatementRanges";
 import { tokenizeSqlSemantic } from "@/lib/sql/semantic/tokens";
 import type { ConnectionConfig, DatabaseType } from "@/types/database";
 
-export const DEFAULT_QUERY_TIMEOUT_SECS = 60;
+export const DEFAULT_QUERY_TIMEOUT_SECS = 30;
 
 const POSTGRES_ROW_STATEMENT_KEYWORDS = new Set(["select", "show", "explain", "table", "with"]);
 const POSTGRES_RETURNING_STATEMENT_KEYWORDS = new Set(["insert", "update", "delete", "merge"]);
 
-export function queryTimeoutSecsForConnection(connection?: Pick<ConnectionConfig, "query_timeout_secs"> | null): number {
+export function queryTimeoutSecsForConnection(connection?: Pick<ConnectionConfig, "query_timeout_secs" | "query_timeout_inherit"> | null, globalQueryTimeoutSecs = DEFAULT_QUERY_TIMEOUT_SECS): number {
+  if (connection?.query_timeout_inherit === true) {
+    const globalValue = Number(globalQueryTimeoutSecs);
+    return Number.isFinite(globalValue) && globalValue >= 0 ? globalValue : DEFAULT_QUERY_TIMEOUT_SECS;
+  }
   const value = Number(connection?.query_timeout_secs);
   return Number.isFinite(value) && value >= 0 ? value : DEFAULT_QUERY_TIMEOUT_SECS;
 }

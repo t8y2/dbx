@@ -54,7 +54,7 @@ pub fn build_explain_sql(options: ExplainSqlOptions) -> ExplainSqlBuildResult {
     if source.is_empty() {
         return explain_err("empty");
     }
-    if !is_safe_explain_sql(&source) {
+    if !is_safe_explain_sql_for_database(&source, options.database_type) {
         return explain_err("unsafe");
     }
     if options.analyze == Some(true)
@@ -133,11 +133,18 @@ pub fn supports_explain_plan(database_type: Option<DatabaseType>) -> bool {
 }
 
 pub fn is_safe_explain_sql(sql: &str) -> bool {
+    is_safe_explain_sql_for_database(sql, None)
+}
+
+pub fn is_safe_explain_sql_for_database(sql: &str, database_type: Option<DatabaseType>) -> bool {
     let source = strip_trailing_semicolons(sql.trim());
-    !source.is_empty()
-        && !has_extra_statement_after_semicolon(&source)
-        && is_safe_explain_source(&source)
-        && !contains_dangerous_sql_keyword(&source)
+    if source.is_empty() || has_extra_statement_after_semicolon(&source) {
+        return false;
+    }
+    if database_type == Some(DatabaseType::Oracle) && is_safe_oracle_explain_dml_source(&source) {
+        return true;
+    }
+    is_safe_explain_source(&source) && !contains_dangerous_sql_keyword(&source)
 }
 
 /// Returns true for databases that support SQL query execution (execute_query / get_sample_data).
@@ -181,6 +188,12 @@ fn is_safe_explain_source(sql: &str) -> bool {
     ["select", "with", "table", "values"].iter().any(|keyword| {
         source == *keyword || source.starts_with(&format!("{keyword} ")) || source.starts_with(&format!("{keyword}\n"))
     })
+}
+
+fn is_safe_oracle_explain_dml_source(sql: &str) -> bool {
+    let source = strip_sql_comments_and_literals(sql);
+    let source = source.trim_start().to_ascii_uppercase();
+    ["INSERT", "UPDATE", "DELETE", "MERGE"].iter().any(|keyword| starts_with_keyword(&source, keyword))
 }
 
 pub fn contains_dangerous_sql_keyword(sql: &str) -> bool {
@@ -982,6 +995,67 @@ mod tests {
                 reason: None,
             }
         );
+    }
+
+    #[test]
+    fn builds_oracle_explain_plan_for_update() {
+        let result = build_explain_sql(ExplainSqlOptions {
+            database_type: Some(DatabaseType::Oracle),
+            format: None,
+            analyze: None,
+            sql: "UPDATE AA_PAY_VOUCHER_TEMP t SET t.AGENCY_ID = '1';".to_string(),
+        });
+
+        assert_eq!(
+            result,
+            ExplainSqlBuildResult {
+                ok: true,
+                sql: Some("EXPLAIN PLAN FOR UPDATE AA_PAY_VOUCHER_TEMP t SET t.AGENCY_ID = '1'".to_string()),
+                reason: None,
+            }
+        );
+    }
+
+    #[test]
+    fn allows_oracle_explain_plan_for_dml_only() {
+        for (sql, expected) in [
+            ("INSERT INTO audit_log (id) VALUES (1)", "EXPLAIN PLAN FOR INSERT INTO audit_log (id) VALUES (1)"),
+            ("DELETE FROM audit_log WHERE id = 1", "EXPLAIN PLAN FOR DELETE FROM audit_log WHERE id = 1"),
+            (
+                "MERGE INTO target t USING source s ON (t.id = s.id) WHEN MATCHED THEN UPDATE SET t.name = s.name",
+                "EXPLAIN PLAN FOR MERGE INTO target t USING source s ON (t.id = s.id) WHEN MATCHED THEN UPDATE SET t.name = s.name",
+            ),
+        ] {
+            assert_eq!(
+                build_explain_sql(ExplainSqlOptions {
+                    database_type: Some(DatabaseType::Oracle),
+                    format: None,
+                    analyze: None,
+                    sql: sql.to_string(),
+                })
+                .sql,
+                Some(expected.to_string()),
+                "{sql}"
+            );
+        }
+
+        for sql in [
+            "DROP TABLE audit_log",
+            "ALTER TABLE audit_log ADD created_at DATE",
+            "BEGIN DELETE FROM audit_log; END;",
+            "UPDATE audit_log SET id = 2; DROP TABLE audit_log",
+        ] {
+            assert_eq!(
+                build_explain_sql(ExplainSqlOptions {
+                    database_type: Some(DatabaseType::Oracle),
+                    format: None,
+                    analyze: None,
+                    sql: sql.to_string(),
+                }),
+                ExplainSqlBuildResult { ok: false, sql: None, reason: Some("unsafe".to_string()) },
+                "{sql}"
+            );
+        }
     }
 
     #[test]

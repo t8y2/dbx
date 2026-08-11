@@ -160,6 +160,19 @@ const isGenerating = ref(false);
 const scrollRef = ref<InstanceType<typeof ScrollArea> | null>(null);
 const activeAction = ref<AiAction>("general");
 const assistantMode = ref<AiAssistantMode>("ask");
+// The selection is loaded asynchronously. Apply it once when this panel mounts,
+// but do not let later setting changes alter an active conversation.
+let defaultModeInitialized = false;
+watch(
+  () => settings.isAiConfigLoaded,
+  (loaded) => {
+    if (loaded && !defaultModeInitialized) {
+      assistantMode.value = settings.defaultAiMode;
+      defaultModeInitialized = true;
+    }
+  },
+  { immediate: true },
+);
 const currentSessionId = ref("");
 const conversationId = ref("");
 const conversations = ref<AiConversation[]>([]);
@@ -2030,9 +2043,10 @@ async function deleteConversation(id: string) {
 function startNewChat() {
   clearMessages();
   showConversationList.value = false;
-  // A fresh conversation always starts from the safe, non-executing default.
-  assistantMode.value = "ask";
-  activeAction.value = resolveDefaultAction("ask");
+  // A fresh conversation starts from the configured default mode.
+  const mode = settings.defaultAiMode;
+  assistantMode.value = mode;
+  activeAction.value = resolveDefaultAction(mode);
 }
 
 onMounted(async () => {

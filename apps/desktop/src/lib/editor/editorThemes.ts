@@ -973,6 +973,12 @@ export function buildSqlCompletionThemeRules(): CodeMirrorStyleSpec {
       color: colorMixValue("var(--amber-500, #f59e0b)", "color-mix(in oklch, var(--amber-500, #f59e0b) 92%, var(--popover-foreground))"),
       ...lucideCompletionIconMask(SCHEMA_ICON),
     },
+    // Reuse the table glyph for aliases instead of CodeMirror's default text
+    // icon, which is rendered as a solid black square in some themes.
+    ".cm-completionIcon-text": {
+      color: colorMixValue("var(--violet-500, #8b5cf6)", "color-mix(in oklch, var(--violet-500, #8b5cf6) 92%, var(--popover-foreground))"),
+      ...lucideCompletionIconMask(TABLE_ICON),
+    },
     ".cm-completionLabel": {
       color: "inherit",
       flex: "0 1 auto",

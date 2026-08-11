@@ -62,7 +62,7 @@ import { mergeSqlObjectNavigationType, sqlObjectNavigationTypeFromTableType } fr
 import * as api from "@/lib/backend/api";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { useTunnelProfileStore } from "@/stores/tunnelProfileStore";
-import { connectionIsDorisFamilyCatalogCapable, isInternalDorisCatalog, isSchemaAware, normalizeSidebarObjectKind, sidebarObjectKindsForDatabase, usesTreeSchemaMode } from "@/lib/database/databaseCapabilities";
+import { connectionIsDorisFamilyCatalogCapable, isInternalDorisCatalog, isSchemaAware, normalizeSidebarObjectKind, sidebarObjectKindsForDatabase, supportsPackageMemberExpansion, usesTreeSchemaMode } from "@/lib/database/databaseCapabilities";
 import { connectionObjectTreeNodeSchema, connectionObjectTreeQuerySchema, connectionShouldDiscoverJdbcSchemas, connectionShouldLoadIdentifierQuote, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection, gaussdbIdentifierQuoteOverride } from "@/lib/database/jdbcDialect";
 import { buildDatabaseTreeNodes, buildDuckDbConnectionTreeNodes, compareSidebarNames, sortSidebarDatabases, sortSidebarNames, shouldIncludeDefaultDatabaseNode } from "@/lib/database/databaseTree";
 import { buildSqlServerDatabaseTreeNodes } from "@/lib/database/sqlServerTree";
@@ -71,6 +71,7 @@ import { findDatabaseTreeNode } from "@/lib/sidebar/treeRefreshTarget";
 import { simpleModeEmptyShellNeedsConfirmedLoad, treeNodeLoadedChildrenContentPresent } from "@/lib/sidebar/treeLoadedChildrenMarker";
 import { shouldMarkDisconnected } from "@/lib/connection/connectionHealth";
 import { connectionAttemptOriginalErrorMessage, connectionAttemptTimeoutMessage, connectionAttemptTimeoutMs } from "@/lib/connection/connectionAttemptTimeout";
+import { loadTimeoutInheritanceBackup, saveTimeoutInheritanceBackup } from "@/lib/connection/timeoutInheritanceBackup";
 import { migrateSqlServerLegacyCompatibilityConfig, requiresSqlServerLegacyCompatibilityComponent, SQLSERVER_LEGACY_COMPATIBILITY_DRIVER_KEY } from "@/lib/connection/sqlServerLegacyCompatibility";
 import { deleteTabResultSnapshotsForOwner } from "@/lib/tabs/tabResultCache";
 import { connectionUsesVisibleSchemaFilter, filterDatabaseNamesForConnection, filterSchemaNamesForConnection, filterVisibleDatabaseNames, normalizeVisibleDatabaseSelection } from "@/lib/database/visibleDatabases";
@@ -109,7 +110,9 @@ import { normalizeRedisDatabaseAliases, redisDatabaseAlias, redisDatabaseLabel }
 import { appendAgentDriverUpdateHint, hasAgentDriverUpdate, hasInstalledAgentVersion, type AgentDriverInstallState } from "@/lib/connection/agentDriverInstallHint";
 import { appendConnectionErrorHints } from "@/lib/connection/connectionErrorHints";
 import { appendVisibleDatabaseSelection } from "@/lib/connection/connectionVisibleDatabases";
+import { buildXuguTypeMemberNodes, isXuguTypeMemberContainer } from "@/lib/sidebar/xuguTypeMembers";
 import { filterNacosNamespacesForSidebar, normalizeNacosNamespacesForDisplay } from "@/lib/nacos/nacosNamespaceVisibility";
+import { buildPackageMemberNodes, markPackageNodesExpandable } from "@/lib/sidebar/packageMembers";
 import { configuredDatabaseProductName, connectionConfigFingerprint, normalizeDatabaseConnectionInfo } from "@/lib/connection/connectionDatabaseInfo";
 import { createMetadataLoadTrace, logMetadataLoadTrace, MetadataLoadCoordinator, type MetadataLoadTraceLogger } from "@/lib/metadata/metadataLoadCoordinator";
 import type { MetadataScopeInput } from "@/lib/metadata/metadataLoadScope";
@@ -125,6 +128,7 @@ import { RABBITMQ_MQ_TENANT, resolveMqSystemKindFromConnection } from "@/lib/mq/
 import { applySidebarDatabaseStorage, applySidebarTableStorage, sidebarDatabaseNames, supportsSidebarDatabaseStorage, supportsSidebarTableStorage, type SidebarTableStorageScope } from "@/lib/sidebar/sidebarDatabaseStorage";
 import { connectionHasConfiguredSidebarVisibleFilter, nacosVisibleNamespaceSummary, sidebarVisibleFilterSummary } from "@/lib/sidebar/sidebarVisibleFilterSummary";
 import { connectionCanConfigureSidebarVisibleDatabases } from "@/lib/sidebar/sidebarVisibleFilterMenu";
+import { isTdengineStableTableType } from "@/lib/table/tableEditing";
 
 const PINNED_TREE_NODES_STORAGE_KEY = "dbx-pinned-tree-nodes";
 const ACTIVE_CONNECTION_STORAGE_KEY = "dbx-active-connection";
@@ -974,6 +978,8 @@ export const useConnectionStore = defineStore("connection", () => {
   function normalizeConnection(config: ConnectionConfig): ConnectionConfig {
     config = { ...config };
     migrateSqlServerLegacyCompatibilityConfig(config);
+    const connectTimeoutInherit = config.connect_timeout_inherit ?? settingsStore.editorSettings.connectTimeoutInheritConnectionIds.includes(config.id);
+    const queryTimeoutInherit = config.query_timeout_inherit ?? settingsStore.editorSettings.queryTimeoutInheritConnectionIds.includes(config.id);
     const labelMap: Record<string, string> = {
       mysql: "MySQL",
       postgres: "PostgreSQL",
@@ -981,6 +987,7 @@ export const useConnectionStore = defineStore("connection", () => {
       redis: "Redis",
       etcd: "etcd",
       zookeeper: "Apache ZooKeeper",
+      consul: "Consul",
       duckdb: "DuckDB",
       clickhouse: "ClickHouse",
       sqlserver: "SQL Server",
@@ -1064,8 +1071,10 @@ export const useConnectionStore = defineStore("connection", () => {
       docs_notes_path: config.docs_notes_path?.trim() ? config.docs_notes_path.trim() : undefined,
       transport_layers: Array.isArray(config.transport_layers) ? config.transport_layers : [],
       show_system_schemas: config.show_system_schemas === true,
-      connect_timeout_secs: config.connect_timeout_secs || 10,
-      query_timeout_secs: config.query_timeout_secs ?? 30,
+      connect_timeout_secs: connectTimeoutInherit ? settingsStore.editorSettings.globalConnectTimeoutSecs : config.connect_timeout_secs || 10,
+      connect_timeout_inherit: connectTimeoutInherit,
+      query_timeout_secs: queryTimeoutInherit ? settingsStore.editorSettings.globalQueryTimeoutSecs : (config.query_timeout_secs ?? 30),
+      query_timeout_inherit: queryTimeoutInherit,
       idle_timeout_secs: config.idle_timeout_secs ?? 60,
       keepalive_interval_secs: config.keepalive_interval_secs ?? DEFAULT_KEEPALIVE_INTERVAL_SECS,
       redis_database_aliases: normalizeRedisDatabaseAliases(config.redis_database_aliases),
@@ -1138,6 +1147,9 @@ export const useConnectionStore = defineStore("connection", () => {
   }
 
   function isFixedPriorityTreeNode(node: TreeNode): boolean {
+    if (node.type === "schema") {
+      return !!node.connectionId && !!node.schema && isDefaultSchema(node.connectionId, node.schema);
+    }
     if (node.type !== "database" && node.type !== "redis-db" && node.type !== "mongo-db") return false;
     return !!node.connectionId && typeof node.database === "string" && isDefaultDatabase(node.connectionId, node.database);
   }
@@ -1594,7 +1606,9 @@ export const useConnectionStore = defineStore("connection", () => {
       objects: options.objects.filter((object) => options.objectTypes.includes(normalizedObjectTreeKind(object.object_type))),
     });
     const refreshedGroup = grouped.find((group) => group.type === options.node.type);
-    return refreshedGroup?.children ?? [];
+    const children = refreshedGroup?.children ?? [];
+    const databaseType = options.node.connectionId ? effectiveDatabaseTypeForConnection(getConfig(options.node.connectionId)) : undefined;
+    return supportsPackageMemberExpansion(databaseType) ? markPackageNodesExpandable(children) : children;
   }
 
   function tableInfosToCompletionTables(tables: readonly TableInfo[], schema?: string): SqlCompletionTable[] {
@@ -1602,7 +1616,13 @@ export const useConnectionStore = defineStore("connection", () => {
       name: table.name,
       schema,
       type: sqlObjectNavigationTypeFromTableType(table.table_type),
+      ...completionStableTableType(table.table_type),
     }));
+  }
+
+  function completionStableTableType(tableType: string | null | undefined): Partial<Pick<SqlCompletionTable, "tableType">> {
+    if (!tableType || !isTdengineStableTableType(tableType)) return {};
+    return { tableType: tableType.trim() };
   }
 
   function sameSidebarObjectName(left: string | undefined, right: string | undefined): boolean {
@@ -1845,13 +1865,17 @@ export const useConnectionStore = defineStore("connection", () => {
       );
       const supplementalObjects = filterSimpleSidebarSupplementalObjects(objects);
       if (supplementalObjects.length === 0) return;
-      const supplementalChildren = buildSimpleObjectTreeNodes({
+      let supplementalChildren = buildSimpleObjectTreeNodes({
         nodeId: options.nodeId,
         connectionId: options.connectionId,
         database: options.database,
         schema: options.effectiveSchema,
         objects: supplementalObjects,
       });
+      const databaseType = effectiveDatabaseTypeForConnection(getConfig(options.connectionId));
+      if (supportsPackageMemberExpansion(databaseType)) {
+        supplementalChildren = markPackageNodesExpandable(supplementalChildren);
+      }
       if (supplementalChildren.length === 0) return;
       if (isTreeLoadSearchChanged(searchFilter, options.loadOptions)) return;
       const targetNode = treeNodeLoadTarget(options.load);
@@ -2267,6 +2291,7 @@ export const useConnectionStore = defineStore("connection", () => {
 
   async function addConnection(config: ConnectionConfig, targetGroupId?: string | null) {
     const normalized = normalizeConnection(config);
+    await persistTimeoutInheritance(normalized.id, normalized.connect_timeout_inherit === true, normalized.query_timeout_inherit === true);
     const existing = connections.value.findIndex((c) => c.id === normalized.id);
     const nextConnections = [...connections.value];
     if (existing >= 0) {
@@ -2278,6 +2303,7 @@ export const useConnectionStore = defineStore("connection", () => {
     }
     await persistConnections(nextConnections);
     connections.value = nextConnections;
+    syncTimeoutInheritanceBackup();
     rebuildTreeNodes();
     persistSidebarLayoutDebounced();
     stopCreatingConnectionInGroup();
@@ -2379,7 +2405,12 @@ export const useConnectionStore = defineStore("connection", () => {
     const removedIds = new Set(connectionIds);
     const nextConnections = connections.value.filter((c) => !removedIds.has(c.id));
     await persistConnections(nextConnections);
+    await persistTimeoutInheritanceIds(
+      settingsStore.editorSettings.connectTimeoutInheritConnectionIds.filter((id) => !removedIds.has(id)),
+      settingsStore.editorSettings.queryTimeoutInheritConnectionIds.filter((id) => !removedIds.has(id)),
+    );
     connections.value = nextConnections;
+    syncTimeoutInheritanceBackup();
     let nextPinnedOrder = pinnedTreeNodeOrder.value;
     for (const id of removedIds) {
       const prefix = `${id}:`;
@@ -2424,8 +2455,10 @@ export const useConnectionStore = defineStore("connection", () => {
     const runtimeConfigChanged = connectionConfigFingerprint(connections.value[idx]) !== connectionConfigFingerprint(config);
     const nextConnections = [...connections.value];
     nextConnections[idx] = config;
+    await persistTimeoutInheritance(config.id, config.connect_timeout_inherit === true, config.query_timeout_inherit === true);
     await persistConnections(nextConnections);
     connections.value = nextConnections;
+    syncTimeoutInheritanceBackup();
     rebuildTreeNodes();
     if (!runtimeConfigChanged) return;
     clearPrimaryVisibleObjectNames(config.id);
@@ -2534,6 +2567,29 @@ export const useConnectionStore = defineStore("connection", () => {
     const config = getConfig(connectionId);
     if (config?.db_type === "cloudflare-d1") return database === "main";
     return config?.database === database && database !== "";
+  }
+
+  async function setDefaultSchema(connectionId: string, schema: string) {
+    const config = getConfig(connectionId);
+    const defaultSchema = schema.trim();
+    if (!config || !defaultSchema || config.default_schema === defaultSchema) return;
+    await updateConnection({
+      ...config,
+      default_schema: defaultSchema,
+    });
+  }
+
+  async function clearDefaultSchema(connectionId: string) {
+    const config = getConfig(connectionId);
+    if (!config?.default_schema) return;
+    await updateConnection({
+      ...config,
+      default_schema: undefined,
+    });
+  }
+
+  function isDefaultSchema(connectionId: string, schema: string): boolean {
+    return getConfig(connectionId)?.default_schema === schema && schema !== "";
   }
 
   function getRedisDatabaseAlias(connectionId: string, database: string | number): string | undefined {
@@ -2697,6 +2753,8 @@ export const useConnectionStore = defineStore("connection", () => {
       await loadEtcdRoot(connectionId);
     } else if (config.db_type === "zookeeper") {
       await loadZooKeeperRoot(connectionId);
+    } else if (config.db_type === "consul") {
+      await loadConsulRoot(connectionId);
     } else if (config.db_type === "mongodb") {
       await loadMongoDatabases(connectionId);
     } else if (config.db_type === "elasticsearch" || config.db_type === "easysearch") {
@@ -3244,7 +3302,7 @@ export const useConnectionStore = defineStore("connection", () => {
   async function loadConnectedConnectionRootForSidebarSearch(connectionId: string) {
     if (!connectedIds.value.has(connectionId)) return;
     const config = getConfig(connectionId);
-    if (!config || ["redis", "etcd", "zookeeper", "mongodb", "elasticsearch", "easysearch", "milvus", "qdrant", "weaviate", "chromadb", "mq", "nacos"].includes(config.db_type)) return;
+    if (!config || ["redis", "etcd", "zookeeper", "consul", "mongodb", "elasticsearch", "easysearch", "milvus", "qdrant", "weaviate", "chromadb", "mq", "nacos"].includes(config.db_type)) return;
     const node = findConnectionNode(connectionId);
     if (!node || node.type !== "connection" || node.isLoading || hasConnectionMetadataChildren(node.children)) return;
     const scope = { kind: "connection-databases" as const, connectionId, driverProfile: metadataDriverProfile(config) };
@@ -3385,6 +3443,52 @@ export const useConnectionStore = defineStore("connection", () => {
               id: `${connectionId}:zookeeper`,
               label: kvRootNodeLabel("zookeeper"),
               type: "zookeeper-root" as const,
+              connectionId,
+              database: "",
+              isExpanded: false,
+              children: [],
+            },
+          ],
+          targetNode,
+        ),
+      );
+      targetNode.isExpanded = true;
+    } catch (e) {
+      recordMetadataLoadError(connectionId, e, load);
+      throw e;
+    } finally {
+      finishTreeNodeLoad(load);
+    }
+  }
+
+  async function loadConsulRoot(connectionId: string) {
+    const node = findConnectionNode(connectionId);
+    if (!node) return;
+
+    let load = beginTreeNodeLoad(node);
+    try {
+      await ensureConnected(connectionId);
+      load = reclaimTreeNodeLoad(load, node);
+      const targetNode = treeNodeLoadTarget(load);
+      if (!targetNode) return;
+      setChildren(
+        targetNode,
+        withSavedSqlRoot(
+          connectionId,
+          [
+            {
+              id: `${connectionId}:consul`,
+              label: kvRootNodeLabel("consul"),
+              type: "consul-root" as const,
+              connectionId,
+              database: "",
+              isExpanded: false,
+              children: [],
+            },
+            {
+              id: `${connectionId}:consul-overview`,
+              label: i18n.global.t("consul.ui.overview"),
+              type: "consul-overview" as const,
               connectionId,
               database: "",
               isExpanded: false,
@@ -5058,19 +5162,25 @@ export const useConnectionStore = defineStore("connection", () => {
       const triggers = await api.listTriggers(connectionId, database, querySchema, table, catalog);
       const targetNode = treeNodeLoadTarget(load);
       if (!targetNode) return;
+      const isXugu = effectiveDatabaseTypeForConnection(getConfig(connectionId)) === "xugu";
       setChildren(
         targetNode,
-        triggers.map((tr) => ({
-          id: `${parentId}:${tr.name}`,
-          label: `${tr.name} (${tr.timing} ${tr.event})`,
-          objectName: tr.name,
-          type: "trigger" as const,
-          connectionId,
-          database,
-          schema,
-          tableName: table,
-          meta: tr,
-        })),
+        triggers.map((tr) => {
+          const xuguDetails = isXugu ? [tr.timing, tr.event, tr.level, tr.enabled === false ? i18n.global.t("objects.disabled") : null, tr.valid === false ? i18n.global.t("objects.invalid") : null].filter(Boolean).join(" · ") : `${tr.timing} ${tr.event}`;
+          return {
+            id: `${parentId}:${tr.name}`,
+            label: `${tr.name} (${xuguDetails})`,
+            objectName: tr.name,
+            type: "trigger" as const,
+            connectionId,
+            database,
+            schema,
+            tableName: table,
+            comment: isXugu ? tr.comment : undefined,
+            valid: isXugu ? tr.valid : undefined,
+            meta: tr,
+          };
+        }),
       );
       targetNode.isExpanded = true;
     } catch (e) {
@@ -5191,6 +5301,8 @@ export const useConnectionStore = defineStore("connection", () => {
         await loadEtcdRoot(node.connectionId);
       } else if (config?.db_type === "zookeeper") {
         await loadZooKeeperRoot(node.connectionId);
+      } else if (config?.db_type === "consul") {
+        await loadConsulRoot(node.connectionId);
       } else if (config?.db_type === "mongodb") {
         await loadMongoDatabases(node.connectionId);
       } else if (config?.db_type === "elasticsearch" || config?.db_type === "easysearch") {
@@ -5504,6 +5616,7 @@ export const useConnectionStore = defineStore("connection", () => {
       search_in_definitions: !!request.search_in_definitions,
       parent_schema: request.parent_schema ?? "",
       parent_name: request.parent_name ?? "",
+      parent_type: request.parent_type ?? "",
       match_mode: request.match_mode ?? "prefix",
     });
   }
@@ -5513,6 +5626,114 @@ export const useConnectionStore = defineStore("connection", () => {
       await ensureConnected(request.connection_id);
       return api.completionAssistantSearch(request);
     });
+  }
+
+  async function loadPackageMembers(node: TreeNode, options?: LoadTreeOptions): Promise<void> {
+    if (node.type !== "package" || !node.connectionId || !node.database) return;
+    const databaseType = effectiveDatabaseTypeForConnection(getConfig(node.connectionId));
+    if (!supportsPackageMemberExpansion(databaseType)) return;
+    const connectionId = node.connectionId;
+    const database = node.database;
+    const schema = node.schema;
+    const packageName = node.objectName || node.label;
+    let load = beginTreeNodeLoad(node);
+
+    try {
+      await runTreeMetadataLoad(
+        {
+          kind: "package-members",
+          connectionId,
+          database,
+          schema,
+          nodeKind: node.type,
+          extra: { packageName },
+        },
+        async () => {
+          await ensureConnected(connectionId);
+          load = reclaimTreeNodeLoad(load, node);
+          const response = await completionAssistantSearch({
+            connection_id: connectionId,
+            database,
+            schema: schema ?? null,
+            object_kinds: ["routine"],
+            mask: "",
+            case_sensitive: true,
+            global_search: false,
+            max_results: 1000,
+            search_in_comments: false,
+            search_in_definitions: false,
+            parent_schema: schema ?? null,
+            parent_name: packageName,
+            ...(databaseType === "xugu" ? { parent_type: "package" as const } : {}),
+            match_mode: "prefix",
+          });
+          const targetNode = treeNodeLoadTarget(load);
+          if (!targetNode) return;
+          setChildren(targetNode, buildPackageMemberNodes(targetNode, response.candidates));
+          targetNode.isExpanded = true;
+        },
+        options,
+      );
+    } catch (error) {
+      recordMetadataLoadError(connectionId, error, load);
+      throw error;
+    } finally {
+      finishTreeNodeLoad(load);
+    }
+  }
+
+  async function loadXuguTypeMembers(node: TreeNode): Promise<void> {
+    if (!isXuguTypeMemberContainer(node, getConfig(node.connectionId || "")?.db_type)) return;
+    const connectionId = node.connectionId;
+    const database = node.database;
+    if (!connectionId || !database) return;
+    if (node.isExpanded) {
+      node.isExpanded = false;
+      if (!sidebarSearchQuery.value) releaseCollapsedTreeNodeChildren(node.id);
+      return;
+    }
+    if (node.children && node.children.length > 0) {
+      node.isExpanded = true;
+      return;
+    }
+
+    const schema = node.schema || "";
+    const parentName = node.objectName || node.label;
+    node.isLoading = true;
+    try {
+      const [attributes, methods] = await Promise.all([
+        completionAssistantSearch({
+          connection_id: connectionId,
+          database,
+          schema,
+          object_kinds: ["column"],
+          mask: "",
+          max_results: 500,
+          global_search: false,
+          parent_schema: schema,
+          parent_name: parentName,
+          parent_type: "type",
+          match_mode: "prefix",
+        }),
+        completionAssistantSearch({
+          connection_id: connectionId,
+          database,
+          schema,
+          object_kinds: ["routine"],
+          mask: "",
+          max_results: 500,
+          global_search: false,
+          parent_schema: schema,
+          parent_name: parentName,
+          parent_type: "type",
+          match_mode: "prefix",
+        }),
+      ]);
+      node.children = buildXuguTypeMemberNodes(node, [...attributes.candidates, ...methods.candidates]);
+      node.isExpanded = true;
+    } finally {
+      node.isLoading = false;
+    }
   }
 
   const ORACLE_SYSTEM_COMPLETION_SCHEMAS = new Set(["SYS", "SYSTEM", "SYSMAN", "DBSNMP", "OUTLN", "XDB", "MDSYS", "CTXSYS", "WMSYS"]);
@@ -5542,6 +5763,7 @@ export const useConnectionStore = defineStore("connection", () => {
           name: candidate.name,
           schema: candidate.schema ?? undefined,
           type: sqlObjectNavigationTypeFromTableType(candidate.data_type || candidate.kind),
+          ...completionStableTableType(candidate.data_type),
         };
         if (!withOracleMetadata) return table;
         return {
@@ -6022,6 +6244,7 @@ export const useConnectionStore = defineStore("connection", () => {
                   catalog,
                   schema,
                   type: sqlObjectNavigationTypeFromTableType(table.table_type),
+                  ...completionStableTableType(table.table_type),
                 }));
               } else {
                 results = lookupLocalCompletionTables(connectionId, database, normalizedFilter, limit, undefined, catalog);
@@ -6042,6 +6265,7 @@ export const useConnectionStore = defineStore("connection", () => {
                     catalog,
                     schema,
                     type: sqlObjectNavigationTypeFromTableType(table.table_type),
+                    ...completionStableTableType(table.table_type),
                   }));
                 } catch {
                   results = [];
@@ -6064,6 +6288,7 @@ export const useConnectionStore = defineStore("connection", () => {
               catalog,
               schema,
               type: sqlObjectNavigationTypeFromTableType(table.table_type),
+              ...completionStableTableType(table.table_type),
             }));
           } else {
             completionTablesCache.value[cacheKey] = lookupLocalCompletionTables(connectionId, database, normalizedFilter, limit, undefined, catalog);
@@ -6082,6 +6307,7 @@ export const useConnectionStore = defineStore("connection", () => {
           name: table.name,
           catalog,
           type: sqlObjectNavigationTypeFromTableType(table.table_type),
+          ...completionStableTableType(table.table_type),
         }));
         completionTablesCache.value[cacheKey] = limit ? completionTablesCache.value[cacheKey].slice(0, limit) : completionTablesCache.value[cacheKey];
         indexCompletionTables(connectionId, database, schema, completionTablesCache.value[cacheKey], catalog);
@@ -6366,6 +6592,95 @@ export const useConnectionStore = defineStore("connection", () => {
     await api.saveConnections(nextConnections.filter((connection) => connection.one_time !== true));
   }
 
+  function sameIds(left: string[], right: string[]) {
+    return left.length === right.length && left.every((id, index) => id === right[index]);
+  }
+
+  async function persistTimeoutInheritanceIds(connectIds: string[], queryIds: string[]) {
+    if (sameIds(connectIds, settingsStore.editorSettings.connectTimeoutInheritConnectionIds) && sameIds(queryIds, settingsStore.editorSettings.queryTimeoutInheritConnectionIds)) return;
+    settingsStore.updateEditorSettings({
+      connectTimeoutInheritConnectionIds: connectIds,
+      queryTimeoutInheritConnectionIds: queryIds,
+    });
+    await settingsStore.persistEditorSettings();
+  }
+
+  async function persistTimeoutInheritance(connectionId: string, connectInherit: boolean, queryInherit: boolean) {
+    const connectIds = new Set(settingsStore.editorSettings.connectTimeoutInheritConnectionIds);
+    const queryIds = new Set(settingsStore.editorSettings.queryTimeoutInheritConnectionIds);
+    if (connectInherit) connectIds.add(connectionId);
+    else connectIds.delete(connectionId);
+    if (queryInherit) queryIds.add(connectionId);
+    else queryIds.delete(connectionId);
+    await persistTimeoutInheritanceIds([...connectIds], [...queryIds]);
+  }
+
+  function syncTimeoutInheritanceBackup(source: ConnectionConfig[] = connections.value) {
+    const connectSnapshots: Record<string, number> = {};
+    const querySnapshots: Record<string, number> = {};
+    for (const connection of source) {
+      if (connection.connect_timeout_inherit === true) connectSnapshots[connection.id] = connection.connect_timeout_secs || settingsStore.editorSettings.globalConnectTimeoutSecs;
+      if (connection.query_timeout_inherit === true) querySnapshots[connection.id] = connection.query_timeout_secs ?? settingsStore.editorSettings.globalQueryTimeoutSecs;
+    }
+    saveTimeoutInheritanceBackup({
+      version: 1,
+      globalConnectTimeoutSecs: settingsStore.editorSettings.globalConnectTimeoutSecs,
+      globalQueryTimeoutSecs: settingsStore.editorSettings.globalQueryTimeoutSecs,
+      connectSnapshots,
+      querySnapshots,
+    });
+  }
+
+  async function applyGlobalTimeouts({ connectTimeoutSecs, queryTimeoutSecs }: { connectTimeoutSecs?: number; queryTimeoutSecs?: number }) {
+    const nextConnections = connections.value.map((connection) => {
+      const nextConnectTimeout = connectTimeoutSecs !== undefined && connection.connect_timeout_inherit === true ? connectTimeoutSecs : connection.connect_timeout_secs;
+      const nextQueryTimeout = queryTimeoutSecs !== undefined && connection.query_timeout_inherit === true ? queryTimeoutSecs : connection.query_timeout_secs;
+      if (nextConnectTimeout === connection.connect_timeout_secs && nextQueryTimeout === connection.query_timeout_secs) return connection;
+      return { ...connection, connect_timeout_secs: nextConnectTimeout, query_timeout_secs: nextQueryTimeout };
+    });
+    if (nextConnections.some((connection, index) => connection !== connections.value[index])) {
+      await persistConnections(nextConnections);
+      connections.value = nextConnections;
+    }
+    syncTimeoutInheritanceBackup();
+  }
+
+  async function migrateTimeoutInheritance(saved: ConnectionConfig[]) {
+    const migrationVersion = settingsStore.editorSettings.timeoutInheritanceMigrationVersion;
+    const backup = loadTimeoutInheritanceBackup();
+    const connectIdsBefore = new Set(settingsStore.editorSettings.connectTimeoutInheritConnectionIds);
+    const queryIdsBefore = new Set(settingsStore.editorSettings.queryTimeoutInheritConnectionIds);
+    const globalConnectTimeoutSecs = migrationVersion < 2 && backup ? backup.globalConnectTimeoutSecs : settingsStore.editorSettings.globalConnectTimeoutSecs;
+    const globalQueryTimeoutSecs = migrationVersion < 2 && backup ? backup.globalQueryTimeoutSecs : settingsStore.editorSettings.globalQueryTimeoutSecs;
+
+    const resolveInheritance = (connection: ConnectionConfig, scope: "connect" | "query") => {
+      const explicit = scope === "connect" ? connection.connect_timeout_inherit : connection.query_timeout_inherit;
+      if (explicit === true || explicit === false) return explicit;
+      const ids = scope === "connect" ? connectIdsBefore : queryIdsBefore;
+      const snapshots = scope === "connect" ? backup?.connectSnapshots : backup?.querySnapshots;
+      const value = Number(scope === "connect" ? (connection.connect_timeout_secs ?? 10) : (connection.query_timeout_secs ?? 30));
+      const snapshot = snapshots?.[connection.id];
+      if (snapshot !== undefined && (ids.has(connection.id) || migrationVersion < 2)) return value === snapshot;
+      if (ids.has(connection.id)) return true;
+      if (scope === "connect" && migrationVersion < 2) return value === 10;
+      if (scope === "query" && migrationVersion < 1) return value === 30;
+      return false;
+    };
+
+    const connectIds = saved.filter((connection) => resolveInheritance(connection, "connect")).map((connection) => connection.id);
+    const queryIds = saved.filter((connection) => resolveInheritance(connection, "query")).map((connection) => connection.id);
+    settingsStore.updateEditorSettings({
+      globalConnectTimeoutSecs,
+      connectTimeoutInheritConnectionIds: connectIds,
+      globalQueryTimeoutSecs,
+      queryTimeoutInheritConnectionIds: queryIds,
+      timeoutInheritanceMigrationVersion: 2,
+    });
+    if (migrationVersion !== 2 || !sameIds(connectIds, [...connectIdsBefore]) || !sameIds(queryIds, [...queryIdsBefore])) {
+      await settingsStore.persistEditorSettings();
+    }
+  }
+
   function persistSidebarLayoutDebounced() {
     if (layoutPersistTimer) clearTimeout(layoutPersistTimer);
     layoutPersistTimer = setTimeout(() => {
@@ -6494,7 +6809,14 @@ export const useConnectionStore = defineStore("connection", () => {
     const { encryptConfig } = await import("@/lib/backend/configCrypto");
     const tunnelProfileStore = useTunnelProfileStore();
     await tunnelProfileStore.init();
-    const exportData = { connections: connections.value, layout: sidebarLayout.value, tunnelProfiles: tunnelProfileStore.profiles };
+    // Older DBX versions ignore inheritance flags, so always include the
+    // effective numeric values as a backward-compatible snapshot.
+    const exportedConnections = connections.value.map((connection) => ({
+      ...connection,
+      connect_timeout_secs: connection.connect_timeout_inherit === true ? settingsStore.editorSettings.globalConnectTimeoutSecs : connection.connect_timeout_secs,
+      query_timeout_secs: connection.query_timeout_inherit === true ? settingsStore.editorSettings.globalQueryTimeoutSecs : connection.query_timeout_secs,
+    }));
+    const exportData = { connections: exportedConnections, layout: sidebarLayout.value, tunnelProfiles: tunnelProfileStore.profiles };
     const json = JSON.stringify(exportData);
     const payload = await encryptConfig(json, passphrase);
     const content = JSON.stringify(payload, null, 2);
@@ -6870,11 +7192,19 @@ export const useConnectionStore = defineStore("connection", () => {
   }
 
   async function initFromDisk() {
+    // Connection normalization and timeout migration depend on persisted global
+    // settings. Startup helpers may initialize connections before App.initApp().
+    await settingsStore.initEditorSettings();
     if (!initFromDiskPromise) {
       initFromDiskPromise = (async () => {
         const [pinnedOrder, saved] = await Promise.all([loadPinnedTreeNodeOrder(), api.loadConnections(), tunnelProfileStore.init()]);
         setPinnedTreeNodeOrder(pinnedOrder);
+        await migrateTimeoutInheritance(saved);
         connections.value = saved.map(normalizeConnection);
+        if (connections.value.some((connection, index) => (connection.connect_timeout_inherit === true && connection.connect_timeout_secs !== saved[index]?.connect_timeout_secs) || (connection.query_timeout_inherit === true && connection.query_timeout_secs !== saved[index]?.query_timeout_secs))) {
+          await persistConnections();
+        }
+        syncTimeoutInheritanceBackup();
         const savedLayout = await api.loadSidebarLayout();
         const currentLayout = sidebarLayout.value.groups.length || sidebarLayout.value.order.length ? sidebarLayout.value : null;
         sidebarLayout.value = reconcileLayout(
@@ -6952,10 +7282,14 @@ export const useConnectionStore = defineStore("connection", () => {
     pasteConnectionClipboard,
     addEphemeralConnection,
     updateConnection,
+    applyGlobalTimeouts,
     updateConnectionDatabaseInfo,
     setDefaultDatabase,
     clearDefaultDatabase,
     isDefaultDatabase,
+    setDefaultSchema,
+    clearDefaultSchema,
+    isDefaultSchema,
     getRedisDatabaseAlias,
     setRedisDatabaseAlias,
     setVisibleDatabases,
@@ -6992,6 +7326,7 @@ export const useConnectionStore = defineStore("connection", () => {
     refreshRedisDbKeyCounts,
     loadEtcdRoot,
     loadZooKeeperRoot,
+    loadConsulRoot,
     loadMqTenants,
     loadMqttTopics,
     loadNacosNamespaces,
@@ -7012,6 +7347,8 @@ export const useConnectionStore = defineStore("connection", () => {
     loadTables,
     loadTableForLocate,
     loadObjectGroupChildren,
+    loadPackageMembers,
+    loadXuguTypeMembers,
     loadMoreObjectGroupChildren,
     loadAllObjectGroupChildren,
     loadTableGroups,

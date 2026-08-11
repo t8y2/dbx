@@ -13,6 +13,9 @@ const connectionStore = {
   canUseLoadedTreeNodeToggle: vi.fn(() => true),
   releaseCollapsedTreeNodeChildren: vi.fn(),
   getConfig: vi.fn(() => ({ db_type: "mysql" })),
+  loadPackageMembers: vi.fn(async (node: TreeNode) => {
+    node.isExpanded = true;
+  }),
 };
 
 vi.mock("@/stores/connectionStore", () => ({
@@ -41,6 +44,7 @@ afterEach(() => {
   connectionStore.treeNodes = [];
   connectionStore.sidebarSearchQuery = "";
   vi.clearAllMocks();
+  connectionStore.getConfig.mockReturnValue({ db_type: "mysql" });
 });
 
 describe("SidebarTreeRuntimeHost expansion", () => {
@@ -77,5 +81,39 @@ describe("SidebarTreeRuntimeHost expansion", () => {
 
     expect(toggled).toHaveBeenCalledWith(renderedGroup, false);
     expect(liveGroup.isExpanded).toBe(false);
+  });
+
+  it("loads Oracle package members through the shared expansion path", async () => {
+    const packageNode: TreeNode = {
+      id: "oracle:XE:APP:package:BUSINESS_API",
+      label: "BUSINESS_API",
+      type: "package",
+      connectionId: "oracle",
+      database: "XE",
+      schema: "APP",
+      isExpanded: false,
+      children: [],
+    };
+    connectionStore.treeNodes = [packageNode];
+    connectionStore.getConfig.mockReturnValue({ db_type: "oracle" });
+
+    const host = ref<InstanceType<typeof SidebarTreeRuntimeHost> | null>(null);
+    const toggled = vi.fn();
+    const app = createApp(
+      defineComponent({
+        setup: () => () => h(SidebarTreeRuntimeHost, { ref: host, node: packageNode, depth: 0, onNodeToggled: toggled }),
+      }),
+    );
+    mountedApps.push(app);
+    const container = document.createElement("div");
+    document.body.append(container);
+    app.use(i18n);
+    app.mount(container);
+
+    host.value?.toggleNode(packageNode);
+    await vi.waitFor(() => expect(connectionStore.loadPackageMembers).toHaveBeenCalledWith(packageNode));
+
+    expect(packageNode.isExpanded).toBe(true);
+    expect(toggled).toHaveBeenCalledWith(packageNode, true);
   });
 });

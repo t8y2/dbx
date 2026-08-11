@@ -19,7 +19,7 @@ import { normalizeSqlVariableSyntaxOverrides, type SqlVariableSyntaxOverrides } 
 import { DEFAULT_TABLE_COLUMN_TEMPLATE_FIELDS, normalizeTableColumnTemplateFields } from "@/lib/table/tableColumnTemplates";
 import { type DataTabReuseMode, DEFAULT_DATA_TAB_REUSE_MODE, normalizeDataTabReuseMode } from "@/lib/tabs/dataTabReuseMode";
 import { normalizeCompletionTriggerMode, type SqlCompletionTriggerMode } from "@/lib/sql/sqlCompletionTriggerPolicy";
-import type { AiApiStyle, AiAuthMethod, AiChatSelectionState, AiConfig, AiConfigItem, AiConfiguredModel, AiEffortLevel, AiEffortSelection, AiModelEffortPreference, AiProvider, AiReasoningLevel, AiTestConnectionResult } from "@/types/ai";
+import type { AiApiStyle, AiAssistantMode, AiAuthMethod, AiChatSelectionState, AiConfig, AiConfigItem, AiConfiguredModel, AiEffortLevel, AiEffortSelection, AiModelEffortPreference, AiProvider, AiReasoningLevel, AiTestConnectionResult } from "@/types/ai";
 import type { SqlSnippet, TableInfoTab } from "@/types/database";
 
 export type { AiApiStyle, AiAuthMethod, AiChatSelectionState, AiConfig, AiConfigItem, AiConfiguredModel, AiEffortLevel, AiEffortSelection, AiProvider, AiReasoningLevel, AiTestConnectionResult, DataTabReuseMode, SavedSqlOpenTargetMode, SqlCompletionTriggerMode };
@@ -253,6 +253,26 @@ export const AI_PROVIDER_PRESETS: Record<AiProvider, AiProviderPreset> = {
     authMethod: "bearer",
     requiresApiKey: false,
   },
+  "codebuddy-cli": {
+    label: "CodeBuddy Code",
+    iconSlug: "codebuddy",
+    provider: "codebuddy-cli",
+    endpoint: "",
+    model: "default",
+    apiStyle: "completions",
+    authMethod: "bearer",
+    requiresApiKey: false,
+  },
+  "grok-cli": {
+    label: "Grok CLI",
+    iconSlug: "grok",
+    provider: "grok-cli",
+    endpoint: "",
+    model: "default",
+    apiStyle: "completions",
+    authMethod: "bearer",
+    requiresApiKey: false,
+  },
   "pi-agent-cli": {
     label: "Pi Coding Agent",
     iconSlug: "pi",
@@ -323,6 +343,10 @@ export function normalizeAiConfig(config: Partial<AiConfig> | null | undefined):
     opencodeCliEnv: normalizeAiEnv(config?.opencodeCliEnv),
     cursorCliPath: config?.cursorCliPath?.trim() || undefined,
     cursorCliEnv: normalizeAiEnv(config?.cursorCliEnv),
+    grokCliPath: config?.grokCliPath?.trim() || undefined,
+    grokCliEnv: normalizeAiEnv(config?.grokCliEnv),
+    codebuddyCliPath: config?.codebuddyCliPath?.trim() || undefined,
+    codebuddyCliEnv: normalizeAiEnv(config?.codebuddyCliEnv),
   };
 }
 
@@ -466,6 +490,12 @@ export interface EditorSettings {
   activeCustomThemeId: string;
   executeMode: "all" | "current";
   executeModeDefaultVersion: number;
+  executeAllOnBlankLine: boolean;
+  globalConnectTimeoutSecs: number;
+  connectTimeoutInheritConnectionIds: string[];
+  globalQueryTimeoutSecs: number;
+  queryTimeoutInheritConnectionIds: string[];
+  timeoutInheritanceMigrationVersion: number;
   showExecutionTargetPicker: boolean;
   showStatementRunButtons: boolean;
   showCurrentStatementFrame: boolean;
@@ -647,6 +677,12 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   activeCustomThemeId: "default",
   executeMode: "current",
   executeModeDefaultVersion: EXECUTE_MODE_CURRENT_DEFAULT_VERSION,
+  executeAllOnBlankLine: false,
+  globalConnectTimeoutSecs: 10,
+  connectTimeoutInheritConnectionIds: [],
+  globalQueryTimeoutSecs: 30,
+  queryTimeoutInheritConnectionIds: [],
+  timeoutInheritanceMigrationVersion: 2,
   showExecutionTargetPicker: false,
   showStatementRunButtons: true,
   showCurrentStatementFrame: true,
@@ -741,6 +777,16 @@ const EXPORT_BATCH_SIZE_DEFAULT_MIGRATION_KEY = "dbx-export-batch-size-default-m
 const LEGACY_DEFAULT_EXPORT_BATCH_SIZE = 10000;
 const MIN_UI_SCALE = 0.75;
 const MAX_UI_SCALE = 2;
+
+export function normalizeGlobalQueryTimeoutSecs(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) return DEFAULT_EDITOR_SETTINGS.globalQueryTimeoutSecs;
+  return Math.min(300, Math.max(0, Math.round(value)));
+}
+
+export function normalizeGlobalConnectTimeoutSecs(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) return DEFAULT_EDITOR_SETTINGS.globalConnectTimeoutSecs;
+  return Math.min(300, Math.max(1, Math.round(value)));
+}
 
 function normalizeUiScale(value: unknown): number {
   if (typeof value !== "number" || !Number.isFinite(value)) return DEFAULT_EDITOR_SETTINGS.uiScale;
@@ -914,6 +960,7 @@ function normalizeTableInfoTab(value: unknown): TableInfoTab {
 }
 
 export function normalizeEditorSettings(settings: Partial<EditorSettings>, existing?: EditorSettings): EditorSettings {
+  const legacyTimeoutSettings = settings as Partial<EditorSettings> & { queryTimeoutSecs?: unknown; queryTimeoutInheritanceMigrationVersion?: unknown };
   const sqlSemanticDiagnosticsMode = normalizeSqlSemanticDiagnosticsMode(settings.sqlSemanticDiagnosticsMode, settings.sqlSemanticDiagnosticsEnabled);
   const savedExecuteModeDefaultVersion = settings.executeModeDefaultVersion;
   const executeModeDefaultVersion = typeof savedExecuteModeDefaultVersion === "number" && savedExecuteModeDefaultVersion >= EXECUTE_MODE_CURRENT_DEFAULT_VERSION ? savedExecuteModeDefaultVersion : EXECUTE_MODE_CURRENT_DEFAULT_VERSION;
@@ -959,6 +1006,17 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     activeCustomThemeId: settings.activeCustomThemeId ?? "default",
     executeMode: hasCurrentExecuteModeDefault && (settings.executeMode === "all" || settings.executeMode === "current") ? settings.executeMode : DEFAULT_EDITOR_SETTINGS.executeMode,
     executeModeDefaultVersion,
+    executeAllOnBlankLine: settings.executeAllOnBlankLine === true,
+    globalConnectTimeoutSecs: normalizeGlobalConnectTimeoutSecs(settings.globalConnectTimeoutSecs),
+    connectTimeoutInheritConnectionIds: Array.isArray(settings.connectTimeoutInheritConnectionIds) ? [...new Set(settings.connectTimeoutInheritConnectionIds.filter((id): id is string => typeof id === "string" && id.trim().length > 0).map((id) => id.trim()))] : [],
+    globalQueryTimeoutSecs: normalizeGlobalQueryTimeoutSecs(settings.globalQueryTimeoutSecs ?? legacyTimeoutSettings.queryTimeoutSecs),
+    queryTimeoutInheritConnectionIds: Array.isArray(settings.queryTimeoutInheritConnectionIds) ? [...new Set(settings.queryTimeoutInheritConnectionIds.filter((id): id is string => typeof id === "string" && id.trim().length > 0).map((id) => id.trim()))] : [],
+    timeoutInheritanceMigrationVersion:
+      typeof settings.timeoutInheritanceMigrationVersion === "number" && settings.timeoutInheritanceMigrationVersion >= 1
+        ? Math.floor(settings.timeoutInheritanceMigrationVersion)
+        : typeof legacyTimeoutSettings.queryTimeoutInheritanceMigrationVersion === "number" && legacyTimeoutSettings.queryTimeoutInheritanceMigrationVersion >= 1
+          ? 1
+          : 0,
     showExecutionTargetPicker: settings.showExecutionTargetPicker ?? DEFAULT_EDITOR_SETTINGS.showExecutionTargetPicker,
     showStatementRunButtons: typeof settings.showStatementRunButtons === "boolean" ? settings.showStatementRunButtons : DEFAULT_EDITOR_SETTINGS.showStatementRunButtons,
     showCurrentStatementFrame: typeof settings.showCurrentStatementFrame === "boolean" ? settings.showCurrentStatementFrame : DEFAULT_EDITOR_SETTINGS.showCurrentStatementFrame,
@@ -1116,6 +1174,10 @@ function editorSettingsSnapshot(settings: EditorSettings): EditorSettings {
   return JSON.parse(JSON.stringify(settings)) as EditorSettings;
 }
 
+function editorSettingsPatchSnapshot(settings: Partial<EditorSettings>): Partial<EditorSettings> {
+  return JSON.parse(JSON.stringify(settings)) as Partial<EditorSettings>;
+}
+
 function saveEditorSettings(settings: EditorSettings) {
   void api.saveEditorSettings(editorSettingsSnapshot(settings)).catch(() => {});
 }
@@ -1131,6 +1193,7 @@ export const useSettingsStore = defineStore("settings", () => {
   const settingsNavigationRequest = ref<SettingsNavigationRequest | null>(null);
   const activeModel = ref<{ configId: string; modelId: string } | null>(null);
   const effortPreferences = ref<AiModelEffortPreference[]>([]);
+  const defaultAiMode = ref<AiAssistantMode>("ask");
   const isAiConfigLoaded = ref(false);
   const aiConfigs = ref<AiConfigItem[]>([]);
   const desktopSettings = ref<DesktopSettings>({ ...DEFAULT_DESKTOP_SETTINGS });
@@ -1140,6 +1203,8 @@ export const useSettingsStore = defineStore("settings", () => {
   const isDesktopSettingsLoaded = ref(false);
   const isMcpGlobalPolicyLoaded = ref(false);
   const isEditorSettingsLoaded = ref(false);
+  let initEditorSettingsPromise: Promise<void> | null = null;
+  let pendingEditorSettingsPatches: Partial<EditorSettings>[] = [];
   let pendingAiChatSelection: AiChatSelectionState | null = null;
   let aiChatSelectionSaveRunning = false;
 
@@ -1157,36 +1222,54 @@ export const useSettingsStore = defineStore("settings", () => {
     if (settingsNavigationRequest.value?.id === id) settingsNavigationRequest.value = null;
   }
 
+  function completeEditorSettingsInitialization() {
+    const pendingPatches = pendingEditorSettingsPatches;
+    pendingEditorSettingsPatches = [];
+    for (const patch of pendingPatches) applyEditorSettingsPatch(patch);
+    isEditorSettingsLoaded.value = true;
+    if (pendingPatches.length) saveEditorSettings(editorSettings.value);
+  }
+
   async function initEditorSettings() {
     if (isEditorSettingsLoaded.value) return;
-    const saved = await api.loadEditorSettings().catch(() => null);
-    if (saved && typeof saved === "object" && !Array.isArray(saved)) {
-      const savedSettings = saved as Partial<EditorSettings>;
-      const normalized = normalizeEditorSettings(savedSettings);
-      editorSettings.value = normalized;
-      const needsExecuteModeDefaultMigration = typeof savedSettings.executeModeDefaultVersion !== "number" || savedSettings.executeModeDefaultVersion < EXECUTE_MODE_CURRENT_DEFAULT_VERSION;
-      const savedUpdateDownloadSource = (saved as { updateDownloadSource?: unknown }).updateDownloadSource;
-      if (savedUpdateDownloadSource === "atomgit" || needsExecuteModeDefaultMigration) {
-        // Persist one-time migrations so removed or unsafe defaults cannot reappear.
-        await api.saveEditorSettings(normalized).catch(() => {});
-      }
-      isEditorSettingsLoaded.value = true;
-      return;
-    }
+    if (!initEditorSettingsPromise) {
+      initEditorSettingsPromise = (async () => {
+        // A read failure is not the same as an empty settings record. Keeping the
+        // store unloaded prevents startup migrations from persisting defaults over
+        // settings that are temporarily unavailable.
+        const saved = await api.loadEditorSettings();
+        if (saved && typeof saved === "object" && !Array.isArray(saved)) {
+          const savedSettings = saved as Partial<EditorSettings>;
+          const normalized = normalizeEditorSettings(savedSettings);
+          editorSettings.value = normalized;
+          const needsExecuteModeDefaultMigration = typeof savedSettings.executeModeDefaultVersion !== "number" || savedSettings.executeModeDefaultVersion < EXECUTE_MODE_CURRENT_DEFAULT_VERSION;
+          const savedUpdateDownloadSource = (saved as { updateDownloadSource?: unknown }).updateDownloadSource;
+          if (savedUpdateDownloadSource === "atomgit" || needsExecuteModeDefaultMigration) {
+            // Persist one-time migrations so removed or unsafe defaults cannot reappear.
+            await api.saveEditorSettings(normalized).catch(() => {});
+          }
+          completeEditorSettingsInitialization();
+          return;
+        }
 
-    const legacy = loadLegacyEditorSettings();
-    if (legacy) {
-      editorSettings.value = legacy;
-      try {
-        await api.saveEditorSettings(legacy);
-        // Existing desktop users keep settings in localStorage; remove them only
-        // after the async store has accepted the migrated value.
-        clearLegacyEditorSettings();
-      } catch {
-        /* keep legacy values for a later migration attempt */
-      }
+        const legacy = loadLegacyEditorSettings();
+        if (legacy) {
+          editorSettings.value = legacy;
+          try {
+            await api.saveEditorSettings(legacy);
+            // Existing desktop users keep settings in localStorage; remove them only
+            // after the async store has accepted the migrated value.
+            clearLegacyEditorSettings();
+          } catch {
+            /* keep legacy values for a later migration attempt */
+          }
+        }
+        completeEditorSettingsInitialization();
+      })().finally(() => {
+        initEditorSettingsPromise = null;
+      });
     }
-    isEditorSettingsLoaded.value = true;
+    await initEditorSettingsPromise;
   }
 
   async function initDesktopSettings() {
@@ -1255,6 +1338,7 @@ export const useSettingsStore = defineStore("settings", () => {
 
     const savedSelection = await api.loadAiChatSelection().catch(() => null);
     effortPreferences.value = (savedSelection?.effortPreferences ?? []).filter((preference) => aiConfigs.value.some((config) => config.id === preference.configId));
+    defaultAiMode.value = savedSelection?.defaultMode ?? "ask";
 
     const savedActive = savedSelection?.active;
     const savedConfig = savedActive ? aiConfigs.value.find((config) => config.id === savedActive.configId) : undefined;
@@ -1387,6 +1471,12 @@ export const useSettingsStore = defineStore("settings", () => {
     persistAiChatSelection();
   }
 
+  function setDefaultAiMode(mode: AiAssistantMode) {
+    if (mode === defaultAiMode.value) return;
+    defaultAiMode.value = mode;
+    persistAiChatSelection();
+  }
+
   function persistAiChatSelection() {
     pendingAiChatSelection = {
       version: 1,
@@ -1395,6 +1485,7 @@ export const useSettingsStore = defineStore("settings", () => {
         ...preference,
         selection: { ...preference.selection },
       })),
+      defaultMode: defaultAiMode.value,
     };
     if (!aiChatSelectionSaveRunning) void flushAiChatSelection();
   }
@@ -1418,11 +1509,11 @@ export const useSettingsStore = defineStore("settings", () => {
     const config = aiConfigs.value.find((c) => c.id === activeModel.value!.configId);
     if (!config) return false;
     const preset = AI_PROVIDER_PRESETS[config.provider];
-    if (config.provider === "codex-cli" || config.provider === "claude-code-cli" || config.provider === "pi-agent-cli" || config.provider === "opencode-cli" || config.provider === "cursor-cli") return true;
+    if (config.provider === "codex-cli" || config.provider === "claude-code-cli" || config.provider === "pi-agent-cli" || config.provider === "opencode-cli" || config.provider === "cursor-cli" || config.provider === "grok-cli" || config.provider === "codebuddy-cli") return true;
     return !!config.endpoint && !!activeModel.value!.modelId && (!preset.requiresApiKey || !!config.apiKey);
   });
 
-  function updateEditorSettings(partial: Partial<EditorSettings>) {
+  function applyEditorSettingsPatch(partial: Partial<EditorSettings>) {
     if (partial.fontFamily !== undefined) editorSettings.value.fontFamily = normalizeFontFamily(partial.fontFamily, DEFAULT_EDITOR_SETTINGS.fontFamily);
     if (partial.fontSize !== undefined) editorSettings.value.fontSize = partial.fontSize;
     if (partial.uiFontFamily !== undefined) editorSettings.value.uiFontFamily = normalizeFontFamily(partial.uiFontFamily, DEFAULT_EDITOR_SETTINGS.uiFontFamily);
@@ -1449,6 +1540,16 @@ export const useSettingsStore = defineStore("settings", () => {
       }
     }
     if (partial.executeMode !== undefined) editorSettings.value.executeMode = partial.executeMode;
+    if (partial.executeAllOnBlankLine !== undefined) editorSettings.value.executeAllOnBlankLine = partial.executeAllOnBlankLine === true;
+    if (partial.globalConnectTimeoutSecs !== undefined) editorSettings.value.globalConnectTimeoutSecs = normalizeGlobalConnectTimeoutSecs(partial.globalConnectTimeoutSecs);
+    if (partial.connectTimeoutInheritConnectionIds !== undefined) {
+      editorSettings.value.connectTimeoutInheritConnectionIds = [...new Set(partial.connectTimeoutInheritConnectionIds.filter((id): id is string => typeof id === "string" && id.trim().length > 0).map((id) => id.trim()))];
+    }
+    if (partial.globalQueryTimeoutSecs !== undefined) editorSettings.value.globalQueryTimeoutSecs = normalizeGlobalQueryTimeoutSecs(partial.globalQueryTimeoutSecs);
+    if (partial.queryTimeoutInheritConnectionIds !== undefined) {
+      editorSettings.value.queryTimeoutInheritConnectionIds = [...new Set(partial.queryTimeoutInheritConnectionIds.filter((id): id is string => typeof id === "string" && id.trim().length > 0).map((id) => id.trim()))];
+    }
+    if (partial.timeoutInheritanceMigrationVersion !== undefined) editorSettings.value.timeoutInheritanceMigrationVersion = Math.max(0, Math.floor(partial.timeoutInheritanceMigrationVersion));
     if (partial.showExecutionTargetPicker !== undefined) editorSettings.value.showExecutionTargetPicker = partial.showExecutionTargetPicker;
     if (partial.showStatementRunButtons !== undefined) editorSettings.value.showStatementRunButtons = partial.showStatementRunButtons === true;
     if (partial.showCurrentStatementFrame !== undefined) editorSettings.value.showCurrentStatementFrame = partial.showCurrentStatementFrame === true;
@@ -1541,10 +1642,19 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.continueOnErrorOnBatch !== undefined) editorSettings.value.continueOnErrorOnBatch = partial.continueOnErrorOnBatch === true;
     if (partial.clickTableNavigationTarget !== undefined) editorSettings.value.clickTableNavigationTarget = normalizeClickTableNavigationTarget(partial.clickTableNavigationTarget);
     if (partial.completionTriggerMode !== undefined) editorSettings.value.completionTriggerMode = normalizeCompletionTriggerMode(partial.completionTriggerMode);
+  }
+
+  function updateEditorSettings(partial: Partial<EditorSettings>) {
+    applyEditorSettingsPatch(partial);
+    if (!isEditorSettingsLoaded.value) {
+      pendingEditorSettingsPatches.push(editorSettingsPatchSnapshot(partial));
+      return;
+    }
     saveEditorSettings(editorSettings.value);
   }
 
   async function persistEditorSettings(): Promise<void> {
+    await initEditorSettings();
     await api.saveEditorSettings(editorSettingsSnapshot(editorSettings.value));
   }
 
@@ -1591,6 +1701,8 @@ export const useSettingsStore = defineStore("settings", () => {
     clearSettingsNavigationRequest,
     activeModel,
     activeEffort,
+    defaultAiMode,
+    setDefaultAiMode,
     isAiConfigLoaded,
     aiConfigs,
     initAiConfigs,

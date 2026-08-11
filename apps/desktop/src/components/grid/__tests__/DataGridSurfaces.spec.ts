@@ -25,8 +25,10 @@ vi.mock("@lucide/vue", async () => {
     ChevronRight: icon,
     ChevronsLeft: icon,
     ChevronsRight: icon,
+    Download: icon,
     Filter: icon,
     Loader2: icon,
+    FileUp: icon,
     Upload: icon,
     Search: icon,
     X: icon,
@@ -383,6 +385,32 @@ describe("DataGridColumnHeader", () => {
 
     expect(findAll(mounted.root, (node) => node.props["data-grid-header-type-line"] === "")).toHaveLength(0);
     expect(findAll(mounted.root, (node) => node.props["data-grid-header-comment-line"] === "")).toHaveLength(0);
+  });
+
+  it("shows column nullability in the header tooltip without an inline badge", () => {
+    const baseProps = {
+      name: "nickname",
+      actualColumnIndex: 1,
+      visibleColumnIndex: 1,
+      copyColumnNameLabel: "copy",
+      columnNameLabel: "name",
+      columnTypeLabel: "type",
+      columnCommentLabel: "comment",
+      nullableLabel: "nullable",
+      yesLabel: "yes",
+      noLabel: "no",
+      columnIndexLabel: "index",
+      columnPrimaryIndexLabel: "primary",
+      columnUniqueIndexLabel: "unique",
+      columnRegularIndexLabel: "regular",
+    };
+    const nullable = mountComponent(DataGridColumnHeader, { ...baseProps, columnNullability: "nullable" });
+    const required = mountComponent(DataGridColumnHeader, { ...baseProps, columnNullability: "required" });
+
+    expect(findAll(nullable.root, (node) => node.props["data-grid-header-nullable"] === "")).toHaveLength(0);
+    expect(findAll(required.root, (node) => node.props["data-grid-header-nullable"] === "")).toHaveLength(0);
+    expect(hostText(nullable.root)).toContain("nullableyes");
+    expect(hostText(required.root)).toContain("nullableno");
   });
 });
 
@@ -845,7 +873,20 @@ describe("cell detail surfaces", () => {
     const copyText = vi.fn();
     const edit = vi.fn();
     const updateOpen = vi.fn();
-    const mounted = mountComponent(DataGridCellDetailDialog, { open: true, detail: detail(), typeColorClass: () => "", openImagePreview: vi.fn(), copyText, canDownloadBinaryValue: () => false, downloadBinaryValue: vi.fn(), onEdit: edit, "onUpdate:open": updateOpen });
+    const importBinaryValue = vi.fn();
+    const mounted = mountComponent(DataGridCellDetailDialog, {
+      open: true,
+      detail: detail({ type: "BYTEA", isEditable: true }),
+      typeColorClass: () => "",
+      openImagePreview: vi.fn(),
+      copyText,
+      canDownloadBinaryValue: () => false,
+      downloadBinaryValue: vi.fn(),
+      canImportBinaryValue: () => true,
+      importBinaryValue,
+      onEdit: edit,
+      "onUpdate:open": updateOpen,
+    });
     await nextTick();
     await nextTick();
 
@@ -857,6 +898,11 @@ describe("cell detail surfaces", () => {
       "click",
     );
     expect(edit).toHaveBeenCalledOnce();
+    dispatch(
+      findOne(mounted.root, (node) => node.props.title === "grid.importBinaryValue"),
+      "click",
+    );
+    expect(importBinaryValue).toHaveBeenCalledOnce();
 
     await mounted.setProps({ detail: detail({ rawValue: '{"b":2}', formattedJson: '{\n  "b": 2\n}' }) });
     expect(mocks.editor.setValue).toHaveBeenCalledWith('{\n  "b": 2\n}', "json");
@@ -868,7 +914,7 @@ describe("cell detail surfaces", () => {
     expect(updateOpen).toHaveBeenCalledWith(false);
   });
 
-  it("forwards panel edit/copy/cancel actions and exposes search", () => {
+  it("forwards panel actions and only starts JSON editing from preview whitespace", async () => {
     const startEdit = vi.fn();
     const copyValue = vi.fn();
     const cancel = vi.fn();
@@ -884,6 +930,8 @@ describe("cell detail surfaces", () => {
       typeColorClass: () => "",
       canDownloadBinaryValue: () => false,
       downloadBinaryValue: vi.fn(),
+      canImportBinaryValue: () => false,
+      importBinaryValue: vi.fn(),
       openImagePreview: vi.fn(),
       canCopySqlCondition: () => true,
       onStartEdit: startEdit,
@@ -909,6 +957,26 @@ describe("cell detail surfaces", () => {
     expect(cancel).toHaveBeenCalledOnce();
     mounted.exposed.value.openSearch();
     expect(mocks.panelOpenSearch).toHaveBeenCalledOnce();
+
+    await mounted.setProps({ detail: detail() });
+    const jsonPreview = findOne(mounted.root, (node) => node.props["data-cell-detail-json-preview"] === "");
+    const doubleClickCapture = jsonPreview.props.onDblclickCapture;
+    const textLine = {
+      ownerDocument: {
+        createRange: () => ({
+          selectNodeContents: vi.fn(),
+          getClientRects: () => [{ left: 10, right: 110, top: 20, bottom: 40 }],
+        }),
+      },
+    };
+    const lineTarget = { closest: (selector: string) => (selector === ".cm-line" ? textLine : null) };
+
+    doubleClickCapture({ target: lineTarget, clientX: 60, clientY: 30 });
+    expect(startEdit).toHaveBeenCalledTimes(2);
+
+    doubleClickCapture({ target: lineTarget, clientX: 160, clientY: 30 });
+    doubleClickCapture({ target: { closest: () => null }, clientX: 60, clientY: 80 });
+    expect(startEdit).toHaveBeenCalledTimes(4);
   });
 });
 

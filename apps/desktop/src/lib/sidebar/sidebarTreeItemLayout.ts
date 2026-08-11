@@ -19,6 +19,8 @@ const leafTypes: Set<TreeNodeType> = new Set([
   "etcd-dashboard",
   "etcd-access-control",
   "zookeeper-root",
+  "consul-root",
+  "consul-overview",
   "mongo-gridfs",
   "mongo-bucket",
   "vector-collection",
@@ -153,8 +155,8 @@ export function canTreeNodeExpand(type: TreeNodeType): boolean {
   return !leafTypes.has(type);
 }
 
-export function canTreeNodeShowExpander({ type, childCount }: { type: TreeNodeType; childCount?: number }): boolean {
-  if (!canTreeNodeExpand(type)) return false;
+export function canTreeNodeShowExpander({ type, childCount, explicitContainer = false }: { type: TreeNodeType; childCount?: number; explicitContainer?: boolean }): boolean {
+  if (!canTreeNodeExpand(type) && !((type === "package" || type === "type") && explicitContainer)) return false;
   if (childCount === 0 && emptyContainerTypes.has(type)) return false;
   return true;
 }

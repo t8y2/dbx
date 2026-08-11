@@ -1,9 +1,10 @@
-export type AiProvider = "claude" | "openai" | "gemini" | "deepseek" | "qwen" | "minimax" | "ollama" | "anthropic-compatible" | "openai-compatible" | "claude-code-cli" | "pi-agent-cli" | "codex-cli" | "opencode-cli" | "cursor-cli" | "custom";
+export type AiProvider = "claude" | "openai" | "gemini" | "deepseek" | "qwen" | "minimax" | "ollama" | "anthropic-compatible" | "openai-compatible" | "claude-code-cli" | "pi-agent-cli" | "codex-cli" | "opencode-cli" | "cursor-cli" | "grok-cli" | "codebuddy-cli" | "custom";
 export type AiApiStyle = "completions" | "responses" | "anthropic-messages";
 export type AiAuthMethod = "api-key" | "bearer";
 export type AiEffortLevel = "low" | "medium" | "high" | "xhigh" | "max";
 export type AiReasoningLevel = "default" | "minimal" | AiEffortLevel;
 export type AiCapabilitySource = "providerApi" | "localCli" | "officialRegistry" | "custom";
+export type AiAssistantMode = "ask" | "agent";
 
 export type AiEffortSelection = { kind: "providerDefault" } | { kind: "disabled" } | { kind: "enum"; value: string } | { kind: "integer"; value: number } | { kind: "boolean"; value: boolean } | { kind: "text"; value: string };
 
@@ -50,6 +51,10 @@ export interface AiConfig {
   opencodeCliEnv?: Record<string, string>;
   cursorCliPath?: string | null;
   cursorCliEnv?: Record<string, string>;
+  grokCliPath?: string | null;
+  grokCliEnv?: Record<string, string>;
+  codebuddyCliPath?: string | null;
+  codebuddyCliEnv?: Record<string, string>;
   runtimeEffort?: AiEffortSelection | null;
 }
 
@@ -82,4 +87,5 @@ export interface AiChatSelectionState {
   version: number;
   active?: AiActiveModelSelection;
   effortPreferences: AiModelEffortPreference[];
+  defaultMode?: AiAssistantMode;
 }

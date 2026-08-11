@@ -605,6 +605,11 @@ async fn list_databases_once(state: &AppState, connection_id: &str) -> Result<Ve
     let pool = connections.get(connection_id).ok_or("Connection not found")?;
 
     match pool {
+        PoolKind::Mysql(p, mode)
+            if *mode != MysqlMode::OceanBaseOracle && db_config.as_ref().is_some_and(db::dolt::is_config) =>
+        {
+            db::dolt::list_databases(p).await
+        }
         PoolKind::Mysql(p, _) if db_config.as_ref().is_some_and(is_doris_family_config) => {
             db::mysql::list_databases_show(p)
                 .await
@@ -2383,6 +2388,8 @@ async fn external_driver_presto_like_objects(
             updated_at: None,
             parent_schema: table.parent_schema,
             parent_name: table.parent_name,
+            trigger: None,
+            xugu_type_members_expandable: None,
         })
         .collect())
 }
@@ -2704,6 +2711,7 @@ mod tests {
             username: "user".to_string(),
             password: "secret".to_string(),
             database: Some("demo".to_string()),
+            default_schema: None,
             visible_databases: None,
             visible_schemas: None,
             show_system_schemas: false,
@@ -3235,6 +3243,8 @@ for line in sys.stdin:
             updated_at: None,
             parent_schema: None,
             parent_name: None,
+            trigger: None,
+            xugu_type_members_expandable: None,
         }
     }
 
@@ -4133,6 +4143,8 @@ for line in sys.stdin:
                 updated_at: None,
                 parent_schema: None,
                 parent_name: None,
+                trigger: None,
+                xugu_type_members_expandable: None,
             },
             super::db::ObjectInfo {
                 name: "ORDERS_VIEW".to_string(),
@@ -4145,6 +4157,8 @@ for line in sys.stdin:
                 updated_at: None,
                 parent_schema: None,
                 parent_name: None,
+                trigger: None,
+                xugu_type_members_expandable: None,
             },
             super::db::ObjectInfo {
                 name: "REFRESH_ORDERS".to_string(),
@@ -4157,6 +4171,8 @@ for line in sys.stdin:
                 updated_at: None,
                 parent_schema: None,
                 parent_name: None,
+                trigger: None,
+                xugu_type_members_expandable: None,
             },
         ];
 
@@ -4838,6 +4854,8 @@ async fn list_objects_once(
                         updated_at: None,
                         parent_schema: table.parent_schema,
                         parent_name: table.parent_name,
+                        trigger: None,
+                        xugu_type_members_expandable: None,
                     })
                     .collect(),
             ))
@@ -7096,6 +7114,8 @@ async fn oracle_agent_list_objects(
                 updated_at: None,
                 parent_schema: None,
                 parent_name: None,
+                trigger: None,
+                xugu_type_members_expandable: None,
             })
         })
         .collect();

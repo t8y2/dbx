@@ -320,7 +320,7 @@ test("result grid cache key includes result run id and statement result index", 
 
 test("execution summary items include table and non-table statement results", () => {
   const items = executionSummaryItems({
-    results: [result([]), result(["id"]), { ...result(["Error"]), rows: [["boom"]], execution_error: true }],
+    results: [result([], { affected_rows: 4 }), result(["id"], { rows: [[1], [2], [3]] }), { ...result(["Error"]), rows: [["boom"]], execution_error: true }],
   });
 
   assert.deepEqual(
@@ -329,12 +329,13 @@ test("execution summary items include table and non-table statement results", ()
       hasTabularResult: item.hasTabularResult,
       returnedColumns: item.returnedColumns,
       returnedRows: item.returnedRows,
+      rowCount: item.rowCount,
       isError: item.isError,
     })),
     [
-      { index: 0, hasTabularResult: false, returnedColumns: 0, returnedRows: 0, isError: false },
-      { index: 1, hasTabularResult: true, returnedColumns: 1, returnedRows: 0, isError: false },
-      { index: 2, hasTabularResult: true, returnedColumns: 1, returnedRows: 1, isError: true },
+      { index: 0, hasTabularResult: false, returnedColumns: 0, returnedRows: 0, rowCount: 4, isError: false },
+      { index: 1, hasTabularResult: true, returnedColumns: 1, returnedRows: 3, rowCount: 3, isError: false },
+      { index: 2, hasTabularResult: true, returnedColumns: 1, returnedRows: 1, rowCount: 1, isError: true },
     ],
   );
 });

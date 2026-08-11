@@ -25,6 +25,7 @@ import * as api from "@/lib/backend/api";
 import type { RedisKeyInfo, RedisScanResult, RedisValue, HistoryEntry } from "@/lib/backend/api";
 import { uuid } from "@/lib/common/utils";
 import { useConnectionStore } from "@/stores/connectionStore";
+import { useSettingsStore } from "@/stores/settingsStore";
 import {
   appendRedisKeysToTreeIndex,
   canBuildRedisFuzzyTree,
@@ -52,10 +53,12 @@ import { chunkRedisKeyRaws, collectUniqueRedisKeys } from "@/lib/redis/redisKeyB
 import { getRedisCreateKeyTypeHelp, redisCreateKeyTypeHelpOptionOnOpen, shouldActivateRedisCreateKeyTypeHelpOnFocus } from "@/lib/redis/redisCreateKeyTypeHelp";
 import { optionHelpPanelOffsetTop } from "@/lib/common/optionHelpPanelOffset";
 import { applyRedisExpiryPolicy, type RedisExpiryMode, validateRedisExpiry } from "@/lib/redis/redisExpiry";
+import { shouldLoadMoreRedisKeys } from "@/lib/redis/redisKeyInfiniteScroll";
 
 const { t, locale } = useI18n();
 const { toast } = useToast();
 const connectionStore = useConnectionStore();
+const settingsStore = useSettingsStore();
 const editorFontFamilyStyle = useEditorFontFamilyStyle();
 
 type RedisSearchMode = "key" | "value" | "all";
@@ -145,6 +148,7 @@ let loadMoreOperationId = 0;
 let redisBrowserIsActive = true;
 let reloadKeysOnActivation = false;
 let redisDbFlushedListenerRegistered = false;
+let redisInfiniteScrollFrame = 0;
 const loadedKeyRaws = new Set<string>();
 let treeIndex: RedisKeyTreeIndex | null = null;
 
@@ -166,6 +170,8 @@ const searchPlaceholder = computed(() => {
 const loadingEmptyText = computed(() => (isValueSearchMode.value && valueQuery.value ? t(searchMode.value === "all" ? "redis.searchingAll" : "redis.searchingValues") : t("redis.loadingKeys")));
 const redisKeySeparator = computed(() => connectionStore.getConfig(props.connectionId)?.redis_key_separator ?? ":");
 const redisScanPageSize = computed(() => connectionStore.getConfig(props.connectionId)?.redis_scan_page_size ?? REDIS_SCAN_PAGE_SIZE_DEFAULT);
+const redisInfiniteScrollEnabled = computed(() => settingsStore.editorSettings.infiniteScroll);
+const redisInfiniteScrollMaxKeys = computed(() => settingsStore.editorSettings.infiniteScrollMaxRows);
 watch(redisKeySeparator, () => {
   if (flatKeys.value.length === 0) return;
   if (useFlatKeySearchRows.value) {
@@ -543,6 +549,9 @@ async function loadKeys() {
 }
 
 async function loadMore() {
+  // 与 loadKeys 对称：组件被 keep-alive 包裹且停用后，挂起的 rAF 仍可能触发本函数，
+  // 守卫掉停用态避免对隐藏组件跑一次冗余 SCAN。
+  if (!redisBrowserIsActive) return;
   if (!hasMore.value || loadingMore.value) return;
   const requestId = searchRequestId;
   const operationId = ++loadMoreOperationId;
@@ -554,6 +563,27 @@ async function loadMore() {
       loadingMore.value = false;
     }
   }
+}
+
+function onRedisKeyScroll(event: Event) {
+  const scroller = event.target;
+  if (!(scroller instanceof HTMLElement) || redisInfiniteScrollFrame) return;
+  redisInfiniteScrollFrame = requestAnimationFrame(() => {
+    redisInfiniteScrollFrame = 0;
+    const shouldLoad = shouldLoadMoreRedisKeys({
+      enabled: redisInfiniteScrollEnabled.value,
+      hasMore: hasMore.value,
+      busy: loading.value || loadingMore.value || searchPending.value || deletingKeys.value || isFetchingAll.value,
+      loadedKeys: flatKeys.value.length,
+      maxKeys: redisInfiniteScrollMaxKeys.value,
+      scrollTop: scroller.scrollTop,
+      clientHeight: scroller.clientHeight,
+      scrollHeight: scroller.scrollHeight,
+    });
+    if (shouldLoad) {
+      void loadMore().catch((error) => toast(errorMessage(error), 5000));
+    }
+  });
 }
 
 // Fetch-all uses large key-only SCAN pages and rebuilds the tree once at the
@@ -1360,6 +1390,10 @@ function pauseRedisBrowserBackgroundWork() {
   // keys that were never rendered.
   const discardIncompleteFetchAll = isFetchingAll.value;
   redisBrowserIsActive = false;
+  // 与 onUnmounted 对称：组件被 keep-alive 包裹，停用时（onDeactivated）若不取消挂起的 rAF，
+  // 帧回调仍会在隐藏组件上触发并调用 loadMore() 跑一次冗余 SCAN，故在此一并取消并置 0。
+  if (redisInfiniteScrollFrame) cancelAnimationFrame(redisInfiniteScrollFrame);
+  redisInfiniteScrollFrame = 0;
   invalidateScanRequests();
   isFetchingAll.value = false;
   fetchAllStopRequested.value = false;
@@ -1452,7 +1486,11 @@ onActivated(async () => {
 
 onDeactivated(pauseRedisBrowserBackgroundWork);
 
-onUnmounted(pauseRedisBrowserBackgroundWork);
+onUnmounted(() => {
+  pauseRedisBrowserBackgroundWork();
+  if (redisInfiniteScrollFrame) cancelAnimationFrame(redisInfiniteScrollFrame);
+  redisInfiniteScrollFrame = 0;
+});
 
 watch(
   () => [props.connectionId, props.db] as const,
@@ -1497,23 +1535,23 @@ defineExpose({ focusSearch, insertCommand, executeCommand: executeAiCommand });
     <Splitpanes class="redis-workspace-splitpanes h-full">
       <!-- Key tree (left) -->
       <Pane :size="36" :min-size="24">
-        <div class="relative h-full flex flex-col overflow-hidden">
+        <div class="redis-key-pane relative h-full flex flex-col overflow-hidden">
           <!-- Toolbar -->
           <div class="border-b px-2 py-2 shrink-0">
-            <div class="flex flex-wrap items-start gap-1.5">
-              <div class="flex min-w-0 flex-1 flex-wrap rounded-md border bg-muted/30 p-0.5" role="group">
-                <button type="button" class="h-5 px-2 text-xs rounded-sm transition-colors" :class="searchMode === 'key' ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'" @click="setSearchMode('key')">
+            <div class="redis-key-toolbar-header">
+              <div class="redis-search-mode-group flex rounded-md border bg-muted/30 p-0.5" role="group">
+                <button type="button" class="redis-search-mode-button h-5 px-2 text-xs rounded-sm transition-colors" :class="searchMode === 'key' ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'" @click="setSearchMode('key')">
                   {{ t("redis.searchByKey") }}
                 </button>
-                <button type="button" class="h-5 px-2 text-xs rounded-sm transition-colors" :class="searchMode === 'value' ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'" @click="setSearchMode('value')">
+                <button type="button" class="redis-search-mode-button h-5 px-2 text-xs rounded-sm transition-colors" :class="searchMode === 'value' ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'" @click="setSearchMode('value')">
                   {{ t("redis.searchByValue") }}
                 </button>
-                <button type="button" class="h-5 px-2 text-xs rounded-sm transition-colors" :class="searchMode === 'all' ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'" @click="setSearchMode('all')">
+                <button type="button" class="redis-search-mode-button h-5 px-2 text-xs rounded-sm transition-colors" :class="searchMode === 'all' ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'" @click="setSearchMode('all')">
                   {{ t("redis.searchByAll") }}
                 </button>
               </div>
-              <div class="ml-auto flex min-w-0 flex-wrap items-center justify-end gap-1">
-                <span class="min-w-0 max-w-full truncate text-xs text-muted-foreground" :title="keyCountText">{{ keyCountText }}</span>
+              <span class="redis-key-count truncate text-xs text-muted-foreground" :title="keyCountText">{{ keyCountText }}</span>
+              <div class="redis-key-toolbar-actions flex items-center justify-end gap-1">
                 <Button v-if="checkedKeys.size > 0" variant="ghost" size="sm" class="h-6 shrink-0 text-xs text-destructive" :disabled="selectionBusy" @click="requestBatchDelete"> <Trash2 class="w-3 h-3 mr-1" />{{ checkedKeys.size }} </Button>
                 <Button variant="ghost" size="icon" class="h-6 w-6 shrink-0" :disabled="deletingKeys" @click="loadKeys">
                   <Loader2 v-if="loading" class="h-3 w-3 animate-spin" />
@@ -1524,8 +1562,8 @@ defineExpose({ focusSearch, insertCommand, executeCommand: executeAiCommand });
                 </Button>
               </div>
             </div>
-            <div class="mt-2 flex min-w-0 flex-wrap items-center gap-1.5">
-              <div class="relative min-w-[120px] flex-1 basis-[180px]">
+            <div class="redis-key-search-row mt-2">
+              <div class="relative min-w-0">
                 <Search class="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground/80" />
                 <Input
                   v-model="searchPattern"
@@ -1540,14 +1578,14 @@ defineExpose({ focusSearch, insertCommand, executeCommand: executeAiCommand });
                 v-if="searchMode === 'key'"
                 variant="ghost"
                 size="sm"
-                class="h-8 max-w-full shrink-0 px-2 text-xs"
+                class="h-8 max-w-full shrink-0 whitespace-nowrap px-2 text-xs"
                 :class="fuzzyKeySearch ? 'bg-accent text-accent-foreground' : 'border border-dashed border-border/70 text-muted-foreground hover:text-foreground'"
                 :title="t('redis.fuzzyMatchTitle')"
                 :aria-pressed="fuzzyKeySearch"
                 @click="toggleFuzzyKeySearch"
               >
-                <Asterisk class="h-3 w-3 mr-1" />
-                {{ t("redis.fuzzyMatch") }}
+                <Asterisk class="redis-fuzzy-icon h-3 w-3 mr-1" />
+                <span class="redis-fuzzy-label">{{ t("redis.fuzzyMatch") }}</span>
               </Button>
             </div>
           </div>
@@ -1568,7 +1606,7 @@ defineExpose({ focusSearch, insertCommand, executeCommand: executeAiCommand });
             <Loader2 class="w-3.5 h-3.5 animate-spin" />
             <span>{{ loadingEmptyText }}</span>
           </div>
-          <RecycleScroller v-else class="redis-key-scroller flex-1" :items="visibleRows" :item-size="30" :buffer="600" :skip-hover="true" key-field="id">
+          <RecycleScroller v-else class="redis-key-scroller flex-1" :items="visibleRows" :item-size="30" :buffer="600" :skip-hover="true" key-field="id" @scroll="onRedisKeyScroll">
             <template #default="{ item: row }">
               <CustomContextMenu :items="redisKeyContextMenuItems(row.node)" v-slot="{ onContextMenu }">
                 <div
@@ -1862,6 +1900,87 @@ defineExpose({ focusSearch, insertCommand, executeCommand: executeAiCommand });
 </template>
 
 <style scoped>
+.redis-key-pane {
+  container-type: inline-size;
+}
+
+.redis-key-toolbar-header {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.375rem;
+}
+
+.redis-search-mode-group,
+.redis-key-toolbar-actions {
+  flex-wrap: nowrap;
+  min-width: 0;
+}
+
+.redis-search-mode-group {
+  justify-self: start;
+}
+
+.redis-search-mode-button {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+.redis-key-count {
+  min-width: 0;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.redis-key-search-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.375rem;
+}
+
+@container (max-width: 320px) {
+  .redis-key-toolbar-header {
+    grid-template-columns: auto auto minmax(0, 1fr);
+  }
+
+  .redis-key-count {
+    grid-column: 1 / -1;
+    grid-row: 2;
+    text-align: left;
+  }
+
+  .redis-key-toolbar-actions {
+    grid-column: 2;
+    grid-row: 1;
+  }
+}
+
+@container (max-width: 240px) {
+  .redis-search-mode-group {
+    grid-column: 1 / -1;
+    grid-row: 1;
+  }
+
+  .redis-key-count {
+    grid-column: 1;
+    grid-row: 2;
+  }
+
+  .redis-key-toolbar-actions {
+    grid-column: 2;
+    grid-row: 2;
+  }
+
+  .redis-fuzzy-label {
+    display: none;
+  }
+
+  .redis-fuzzy-icon {
+    margin-right: 0;
+  }
+}
+
 .redis-key-scroller {
   will-change: scroll-position;
   contain: content;
@@ -1869,6 +1988,10 @@ defineExpose({ focusSearch, insertCommand, executeCommand: executeAiCommand });
 
 .redis-key-scroller :deep(.vue-recycle-scroller__item-view) {
   contain: layout style paint;
+}
+
+.redis-workspace-splitpanes > :deep(.splitpanes__pane:first-child) {
+  min-width: min(256px, 64%);
 }
 
 .redis-workspace-splitpanes :deep(.splitpanes--vertical > .splitpanes__splitter) {

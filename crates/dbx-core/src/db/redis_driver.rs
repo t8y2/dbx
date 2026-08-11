@@ -5347,6 +5347,7 @@ mod tests {
             username: String::new(),
             password: String::new(),
             database: None,
+            default_schema: None,
             visible_databases: None,
             visible_schemas: None,
             show_system_schemas: false,

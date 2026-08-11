@@ -2,7 +2,7 @@ import { reactive, computed } from "vue";
 import * as api from "@/lib/backend/api";
 import { isTerminalTransferProgress } from "@/lib/backend/transferProgress";
 
-export type BackgroundTaskKind = "table-export" | "database-export" | "sql-file" | "data-transfer";
+export type BackgroundTaskKind = "table-export" | "database-export" | "sql-file" | "data-transfer" | "multi-db-execution";
 export type BackgroundTaskStatus = "Running" | "Writing" | "Done" | "Error" | "Cancelled";
 export type DatabaseExportSource = "manual" | "scheduled";
 
@@ -46,6 +46,31 @@ export interface ExportTask {
   targetTables?: string[];
   transferFailures?: DataTransferFailure[];
   transferFailuresOmitted?: number;
+  multiDbSourceTabId?: string;
+  multiDbTotal?: number;
+  multiDbCompleted?: number;
+  multiDbSuccessCount?: number;
+  multiDbFailureCount?: number;
+  multiDbSkippedCount?: number;
+  multiDbNotExecutedCount?: number;
+  currentTarget?: { connectionId: string; catalog?: string; database: string; schema?: string };
+  onOpen?: () => void;
+}
+
+export interface MultiDbExecutionTaskProgress {
+  sourceTabId: string;
+  total: number;
+  completed: number;
+  successCount: number;
+  failureCount: number;
+  skippedCount: number;
+  notExecutedCount: number;
+  status: "running" | "completed" | "cancelled";
+  startedAt: number;
+  finishedAt?: number;
+  elapsedMs?: number;
+  currentTarget?: { connectionId: string; catalog?: string; database: string; schema?: string };
+  errorMessage?: string;
 }
 
 export const MAX_TRANSFER_FAILURE_DETAILS = 100;
@@ -325,6 +350,48 @@ export function useExportTracker() {
     return task;
   }
 
+  function addMultiDbExecutionTask(batchId: string, label: string, sourceTabId: string, onOpen?: () => void): ExportTask {
+    const task = reactive<ExportTask>({
+      exportId: batchId,
+      kind: "multi-db-execution",
+      tableName: label,
+      format: "sql",
+      filePath: "",
+      rowsExported: 0,
+      totalRows: null,
+      status: "Running",
+      errorMessage: null,
+      multiDbSourceTabId: sourceTabId,
+      onOpen,
+      startedAt: Date.now(),
+    });
+    taskMap.set(batchId, task);
+    return task;
+  }
+
+  function updateMultiDbExecutionTask(batchId: string, progress: MultiDbExecutionTaskProgress): void {
+    const task = taskMap.get(batchId);
+    if (!task) return;
+    task.multiDbSourceTabId = progress.sourceTabId;
+    task.multiDbTotal = progress.total;
+    task.multiDbCompleted = progress.completed;
+    task.multiDbSuccessCount = progress.successCount;
+    task.multiDbFailureCount = progress.failureCount;
+    task.multiDbSkippedCount = progress.skippedCount;
+    task.multiDbNotExecutedCount = progress.notExecutedCount;
+    task.rowsExported = progress.completed;
+    task.totalRows = progress.total;
+    task.currentTarget = progress.currentTarget;
+    task.errorMessage = progress.errorMessage ?? null;
+    task.startedAt = progress.startedAt;
+    task.finishedAt = progress.finishedAt;
+    task.elapsedMs = progress.elapsedMs;
+    if (progress.status === "running") task.status = "Running";
+    else if (progress.status === "cancelled") task.status = "Cancelled";
+    else task.status = progress.failureCount > 0 ? "Error" : "Done";
+    if (task.status === "Done" || task.status === "Error" || task.status === "Cancelled") finishExportTask(task);
+  }
+
   function startDataTransferTask(
     request: api.TransferRequest,
     label: string,
@@ -505,6 +572,8 @@ export function useExportTracker() {
     addDatabaseExportTask,
     addSqlFileTask,
     addDataTransferTask,
+    addMultiDbExecutionTask,
+    updateMultiDbExecutionTask,
     startDataTransferTask,
     updateTableExportTask,
     updateDatabaseExportTask,

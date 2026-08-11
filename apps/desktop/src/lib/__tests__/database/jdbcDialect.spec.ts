@@ -7,6 +7,7 @@ import {
   connectionQueryExecutionSchema,
   connectionShouldDiscoverJdbcSchemas,
   connectionShouldLoadIdentifierQuote,
+  connectionUsesConnectionRootSchemaMode,
   connectionUsesDatabaseObjectTreeMode,
   effectiveDatabaseTypeForConnection,
   gaussdbConnectionMode,
@@ -62,6 +63,22 @@ describe("jdbc dialect inference", () => {
         driver_profile: "sqlserver",
       }),
     ).toBe("sqlserver");
+  });
+
+  it.each([
+    ["jdbc:oracle:thin:@//localhost:1521/XE", "oracle"],
+    ["jdbc:dm://localhost:5236/DAMENG", "dameng"],
+  ] as const)("uses connection-root schemas for %s", (connectionString, dialect) => {
+    const connection = {
+      db_type: "jdbc" as const,
+      connection_string: connectionString,
+    };
+
+    expect(inferJdbcDialect(connection)).toBe(dialect);
+    expect(connectionUsesConnectionRootSchemaMode(connection)).toBe(true);
+    expect(connectionUsesDatabaseObjectTreeMode(connection)).toBe(false);
+    expect(connectionObjectTreeQuerySchema(connection, "DBX_TEST", "DBX_TEST")).toBe("DBX_TEST");
+    expect(connectionObjectTreeNodeSchema(connection, "DBX_TEST", "DBX_TEST")).toBe("DBX_TEST");
   });
 
   it("detects GaussDB-compatible JDBC connections as schema-aware", () => {

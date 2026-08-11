@@ -68,7 +68,19 @@ import {
 import { applyDocumentStoreIdentityPlan, insertDocumentStoreDocument as insertDocumentStoreDocumentCore } from "@/lib/app/documentStoreSave";
 import RedisJsonEditor from "@/components/redis/RedisJsonEditor.vue";
 import { isLosslessJsonNumber, parseJsonPreservingLargeNumbers } from "@/lib/common/safeJsonFormat";
-import { buildMongoInsertDocument, buildMongoUpdateDocument, formatMongoShellLiteral, mongoDocumentDisplayValue, mongoDocumentGridColumnTypes, mongoDocumentIdForGrid, parseMongoDocumentInputValue, serializeMongoDocumentId, type MongoInputValue } from "@/lib/mongo/mongoDocumentValues";
+import {
+  buildMongoCopyDocumentFromOriginal,
+  buildMongoInsertDocument,
+  buildMongoUpdateDocument,
+  formatMongoShellLiteral,
+  mongoDocumentDisplayValue,
+  mongoDocumentGridColumnTypes,
+  mongoDocumentIdForGrid,
+  parseMongoDocumentInputValue,
+  serializeMongoDocumentId,
+  type MongoInputValue,
+} from "@/lib/mongo/mongoDocumentValues";
+import type { GridNewRowMeta } from "@/lib/dataGrid/gridNewRowPlacement";
 import { normalizeResultPageSize } from "@/lib/dataGrid/paginationPageSize";
 import { findDocumentTextMatches, renderDocumentJsonHtml } from "@/lib/document/documentJsonSearch";
 import { documentDataGridColumnLayoutScopeKey } from "@/lib/dataGrid/dataGridColumnLayoutStorage";
@@ -246,6 +258,7 @@ type DocumentGridChanges = {
   dirtyRows: Map<number, Map<number, MongoInputValue>>;
   deletedRows: Set<number>;
   newRows: MongoInputValue[][];
+  newRowMeta: GridNewRowMeta[];
   columns: string[];
   rows: MongoInputValue[][];
 };
@@ -756,8 +769,9 @@ async function gridSave(changes: DocumentGridChanges) {
     await api.documentDeleteDocument(props.connectionId, props.database, props.collection, isEs ? String(documentId) : serializeMongoDocumentId(documentId), routing, documentType);
   }
 
-  for (const newRow of changes.newRows) {
-    const doc = isEs ? buildElasticsearchInsertDocument(newRow, cols) : buildMongoInsertDocument(newRow, cols);
+  for (const [newRowIndex, newRow] of changes.newRows.entries()) {
+    const newRowMeta = changes.newRowMeta[newRowIndex];
+    const doc = isEs ? buildElasticsearchInsertDocument(newRow, cols) : buildMongoGridInsertDocument(newRow, cols, newRowMeta);
     if (isEs) {
       const id = documentIdFromGridValue(newRow[idColIdx]);
       const routing = documentRoutingFromGridRow(newRow, cols);
@@ -768,7 +782,9 @@ async function gridSave(changes: DocumentGridChanges) {
       }
       continue;
     }
-    await api.documentInsertDocument(props.connectionId, props.database, props.collection, JSON.stringify(doc));
+    const sourceIndex = newRowMeta?.sourceIndex;
+    const preserveBsonTypes = sourceIndex !== undefined && copyDocuments.value[sourceIndex] !== undefined;
+    await api.documentInsertDocument(props.connectionId, props.database, props.collection, JSON.stringify(doc), undefined, preserveBsonTypes);
   }
 
   if (isEs) resetElasticsearchTotals({ preservePaginationTotal: true });
@@ -784,6 +800,22 @@ function buildElasticsearchInsertDocument(row: MongoInputValue[], columns: strin
     if (value !== null) doc[column] = parseDocumentStoreInputValue(value, "elasticsearch");
   }
   return doc;
+}
+
+function buildMongoGridInsertDocument(row: MongoInputValue[], columns: string[], meta?: GridNewRowMeta): Record<string, unknown> {
+  const sourceIndex = meta?.sourceIndex;
+  const sourceDocument = sourceIndex === undefined ? undefined : copyDocuments.value[sourceIndex];
+  if (!sourceDocument) return buildMongoInsertDocument(row, columns);
+  const editedColumns = new Set(meta?.editedColumns);
+  return (
+    buildMongoCopyDocumentFromOriginal(
+      sourceDocument,
+      row,
+      columns,
+      columns.map((_, index) => editedColumns.has(index)),
+      { excludePrimaryKeys: true },
+    ) ?? buildMongoInsertDocument(row, columns)
+  );
 }
 
 function elasticsearchPathIdPreview(id: string): string {
@@ -805,7 +837,7 @@ function buildElasticsearchPartialUpdateDocument(changes: Map<number, MongoInput
 }
 
 async function previewDocumentChanges(changes: DocumentGridChanges): Promise<string[]> {
-  const { dirtyRows, deletedRows, newRows, columns, rows } = changes;
+  const { dirtyRows, deletedRows, newRows, newRowMeta, columns, rows } = changes;
   const idColIdx = columns.indexOf("_id");
   const stmts: string[] = [];
   const coll = props.collection;
@@ -837,8 +869,8 @@ async function previewDocumentChanges(changes: DocumentGridChanges): Promise<str
     }
   }
 
-  for (const newRow of newRows) {
-    const doc = isEs ? buildElasticsearchInsertDocument(newRow, columns) : buildMongoInsertDocument(newRow, columns);
+  for (const [newRowIndex, newRow] of newRows.entries()) {
+    const doc = isEs ? buildElasticsearchInsertDocument(newRow, columns) : buildMongoGridInsertDocument(newRow, columns, newRowMeta[newRowIndex]);
     if (isEs) {
       const id = idColIdx >= 0 ? documentIdFromGridValue(newRow[idColIdx]) : null;
       if (id) {

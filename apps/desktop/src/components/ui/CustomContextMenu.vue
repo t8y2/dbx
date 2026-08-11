@@ -1,23 +1,10 @@
 <script setup lang="ts">
-import { ref, watch, onBeforeUnmount, onMounted, nextTick, type Component } from "vue";
+import { ref, watch, onBeforeUnmount, onMounted, nextTick } from "vue";
 import { Check, ChevronRight } from "@lucide/vue";
 import { shortcutDisplayKeys } from "@/lib/editor/shortcutDisplay";
-import { registerGlobalContextMenu, type ContextMenuRegistration } from "@/components/ui/customContextMenuRegistry";
+import { registerGlobalContextMenu, type ContextMenuRegistration, type ContextMenuItem } from "@/components/ui/customContextMenuRegistry";
 
-export interface ContextMenuItem {
-  label: string;
-  action?: () => void;
-  disabled?: boolean | (() => boolean);
-  separator?: boolean;
-  icon?: Component;
-  iconClass?: string;
-  checked?: boolean;
-  // Raw shortcut syntax such as `Mod+C` or `Shift+Alt+U`; display formatting stays in this component.
-  shortcut?: string;
-  variant?: "default" | "destructive";
-  visible?: boolean;
-  children?: ContextMenuItem[];
-}
+export type { ContextMenuItem };
 
 type ContextMenuItemsSource = ContextMenuItem[] | (() => ContextMenuItem[]);
 

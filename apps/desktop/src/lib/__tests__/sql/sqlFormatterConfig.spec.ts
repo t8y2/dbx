@@ -39,4 +39,20 @@ describe("sqlFormatterConfig shortcut storage", () => {
       custom: [{ regex: String.raw`\{\{[^}]+\}\}` }, { regex: String.raw`\$\{[^}]+\}` }, { regex: String.raw`#\{[^}]+\}` }],
     });
   });
+
+  it("accepts the same-line logical operator mode", () => {
+    const result = parseSqlFormatterConfig(JSON.stringify({ version: 1, formatter: "sql-formatter", options: { logicalOperatorNewline: "none" } }));
+
+    expect(result).toEqual(expect.objectContaining({ ok: true }));
+    if (result.ok) expect(result.settings.logicalOperatorNewline).toBe("none");
+    expect(sqlFormatterOptions({ logicalOperatorNewline: "none" }).logicalOperatorNewline).toBe("before");
+  });
+
+  it("accepts and serializes the FROM clause layout", () => {
+    const result = parseSqlFormatterConfig(JSON.stringify({ version: 1, formatter: "sql-formatter", options: { fromClauseLayout: "sameLine" } }));
+
+    expect(result).toEqual(expect.objectContaining({ ok: true }));
+    if (result.ok) expect(result.settings.fromClauseLayout).toBe("sameLine");
+    expect(JSON.parse(serializeSqlFormatterConfig({ fromClauseLayout: "sameLine" })).options.fromClauseLayout).toBe("sameLine");
+  });
 });

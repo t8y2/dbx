@@ -131,6 +131,8 @@ pub async fn list_objects(pool: &mysql_async::Pool, schema: &str) -> Result<Vec<
             updated_at: None,
             parent_schema: None,
             parent_name: None,
+            trigger: None,
+            xugu_type_members_expandable: None,
         })
         .collect())
 }
@@ -310,7 +312,19 @@ pub async fn list_triggers(pool: &mysql_async::Pool, schema: &str, table: &str) 
             } else {
                 "INSTEAD OF"
             };
-            TriggerInfo { name: get_str(row, 0), event: get_str(row, 1), timing: timing.to_string(), statement: None }
+            TriggerInfo {
+                name: get_str(row, 0),
+                event: get_str(row, 1),
+                timing: timing.to_string(),
+                level: None,
+                condition: None,
+                language: None,
+                enabled: None,
+                valid: None,
+                comment: None,
+                created_at: None,
+                statement: None,
+            }
         })
         .collect())
 }

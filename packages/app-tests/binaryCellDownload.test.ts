@@ -2,7 +2,19 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "vitest";
 
-import { binaryCellDisplayText, binaryCellDownloadFileName, binaryCellDownloadPayload, canDownloadBinaryCellValue, isBinaryCellColumnType, parseBinaryCellBytes, parseBinaryCellHexValue, retainBinaryCellDownloadMenuForHover } from "../../apps/desktop/src/lib/dataGrid/binaryCellDownload.ts";
+import {
+  BinaryCellImportTooLargeError,
+  binaryCellDisplayText,
+  binaryCellDownloadFileName,
+  binaryCellDownloadPayload,
+  canDownloadBinaryCellValue,
+  formatBinaryCellByteSize,
+  isBinaryCellColumnType,
+  MAX_BINARY_CELL_IMPORT_BYTES,
+  parseBinaryCellBytes,
+  parseBinaryCellHexValue,
+  retainBinaryCellDownloadMenuForHover,
+} from "../../apps/desktop/src/lib/dataGrid/binaryCellDownload.ts";
 
 test("parseBinaryCellHexValue accepts 0x and \\x prefixed hex values", () => {
   assert.deepEqual(Array.from(parseBinaryCellHexValue("0X48656c6c6f") ?? []), [72, 101, 108, 108, 111]);
@@ -76,4 +88,35 @@ test("binaryCellDownloadPayload decodes GBK text bytes", () => {
 
 test("binaryCellDownloadFileName sanitizes column names", () => {
   assert.equal(binaryCellDownloadFileName({ column: "avatar/blob", rowNumber: 7, mode: "gbk", extension: "txt" }), "avatar-blob-row-7-gbk.txt");
+});
+
+test("MAX_BINARY_CELL_IMPORT_BYTES is a sane upper bound for single-cell imports", () => {
+  // 16 MB: 单个 BLOB 单元格导入的保守上限，避免 readFile 全量读 + 2× hex 常驻导致 OOM。
+  assert.equal(MAX_BINARY_CELL_IMPORT_BYTES, 16 * 1024 * 1024);
+});
+
+test("BinaryCellImportTooLargeError carries code and byte/limit for toast formatting", () => {
+  const err = new BinaryCellImportTooLargeError(20 * 1024 * 1024, MAX_BINARY_CELL_IMPORT_BYTES);
+  assert.equal(err.code, "binary-import-too-large");
+  assert.equal(err.bytes, 20 * 1024 * 1024);
+  assert.equal(err.limit, MAX_BINARY_CELL_IMPORT_BYTES);
+  assert.ok(err instanceof Error);
+});
+
+test("formatBinaryCellByteSize formats human-readable sizes for the import toast", () => {
+  assert.equal(formatBinaryCellByteSize(512), "512 bytes");
+  assert.equal(formatBinaryCellByteSize(2048), "2.0 KB");
+  // bytes >= 10 MB 时按整数 MB 显示（对齐 binaryCellDisplayText 既有格式）。
+  assert.equal(formatBinaryCellByteSize(20 * 1024 * 1024), "20 MB");
+});
+
+test("DataGrid import handler surfaces a dedicated too-large toast instead of the generic failure", () => {
+  const source = readFileSync("apps/desktop/src/components/grid/DataGrid.vue", "utf8");
+  const handler = source.match(/async function importDetailBinaryValue\([^]*?\n\}/)?.[0] ?? "";
+
+  // 闸门错误必须走专门的文案，而非通用 binaryImportFailed。
+  assert.match(handler, /e instanceof BinaryCellImportTooLargeError/);
+  assert.match(handler, /grid\.binaryImportTooLarge/);
+  assert.match(handler, /formatBinaryCellByteSize\(e\.bytes\)/);
+  assert.match(handler, /formatBinaryCellByteSize\(e\.limit\)/);
 });

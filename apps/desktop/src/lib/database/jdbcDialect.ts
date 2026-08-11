@@ -2,7 +2,7 @@ import type { ConnectionConfig, DatabaseType } from "@/types/database";
 import { isSchemaAware, usesDatabaseObjectTreeMode, usesTreeSchemaMode } from "@/lib/database/databaseFeatureSupport";
 import type { CodeMirrorSqlDialectName } from "@/lib/editor/codemirrorSqlDialect";
 
-type JdbcDialectConnection = Pick<ConnectionConfig, "db_type"> & Partial<Pick<ConnectionConfig, "driver_profile" | "driver_label" | "connection_string" | "jdbc_driver_class" | "jdbc_driver_paths" | "database_info" | "external_config">>;
+type JdbcDialectConnection = Partial<Pick<ConnectionConfig, "db_type" | "driver_profile" | "driver_label" | "connection_string" | "jdbc_driver_class" | "jdbc_driver_paths" | "database_info" | "external_config">>;
 
 export type GaussdbIdentifierQuoteStyle = "auto" | "double" | "backtick";
 export type GaussdbConnectionMode = "native" | "m-jdbc";
@@ -12,6 +12,7 @@ export const GAUSSDB_M_JDBC_DRIVER_PROFILE = "gaussdb-m";
 export const GAUSSDB_M_JDBC_DRIVER_CLASS = "com.huawei.gaussdb.jdbc.Driver";
 
 const DATABASE_AS_EXECUTION_SCHEMA_TYPES = new Set<DatabaseType>(["hive", "spark"]);
+const CONNECTION_ROOT_SCHEMA_TYPES = new Set<DatabaseType>(["oracle", "dameng", "oceanbase-oracle"]);
 
 const JDBC_DIALECT_MATCHERS: Array<{ type: DatabaseType; patterns: RegExp[] }> = [
   { type: "databend", patterns: [/jdbc:databend:/i, /com\.databend\.jdbc\.DatabendDriver/i, /databend-jdbc/i] },
@@ -65,6 +66,11 @@ export function effectiveDatabaseTypeForConnection(connection?: JdbcDialectConne
   }
   if (connection.db_type !== "jdbc") return connection.db_type;
   return inferJdbcDialect(connection) ?? "jdbc";
+}
+
+export function connectionUsesConnectionRootSchemaMode(connection?: JdbcDialectConnection): boolean {
+  const type = effectiveDatabaseTypeForConnection(connection);
+  return !!type && CONNECTION_ROOT_SCHEMA_TYPES.has(type);
 }
 
 export function connectionShouldLoadIdentifierQuote(connection: JdbcDialectConnection | undefined): boolean {
@@ -135,6 +141,7 @@ export function tableStructureDatabaseTypeForConnection(connection?: JdbcDialect
 export function connectionUsesDatabaseObjectTreeMode(connection?: JdbcDialectConnection): boolean {
   if (!connection) return false;
   if (connection.db_type !== "jdbc") return usesDatabaseObjectTreeMode(effectiveDatabaseTypeForConnection(connection));
+  if (connectionUsesConnectionRootSchemaMode(connection)) return false;
   const dialect = inferJdbcDialect(connection);
   if (!dialect) return true;
   if (dialect === "hive" || dialect === "trino") return false;
@@ -149,7 +156,7 @@ export function connectionShouldDiscoverJdbcSchemas(connection?: JdbcDialectConn
   return connection?.db_type === "jdbc" && !inferJdbcDialect(connection);
 }
 
-export function connectionUsesSchemaExecutionContext(connection?: Pick<ConnectionConfig, "db_type" | "connection_string" | "jdbc_driver_class" | "jdbc_driver_paths">): boolean {
+export function connectionUsesSchemaExecutionContext(connection?: JdbcDialectConnection): boolean {
   return connection?.db_type === "jdbc" && inferJdbcDialect(connection) === "databend";
 }
 

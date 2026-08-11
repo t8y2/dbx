@@ -371,17 +371,7 @@ impl MessageQueueAdmin for KafkaAdmin {
             self.call("mq_describe_consumer_group", serde_json::json!({ "groupId": sub })).await?;
 
         let members = result.get("members").and_then(|v| v.as_array()).cloned().unwrap_or_default();
-        Ok(members
-            .into_iter()
-            .map(|m| ConsumerInfo {
-                consumer_name: m.get("memberId").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
-                msg_rate_out: 0.0,
-                msg_throughput_out: 0.0,
-                available_permits: 0,
-                address: m.get("host").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
-                client_version: String::new(),
-            })
-            .collect())
+        Ok(members.iter().map(kafka_consumer_from_member).collect())
     }
 
     async fn unload_topic(&self, _topic: &TopicRef) -> Result<(), String> {
@@ -751,21 +741,15 @@ fn kafka_subscription_for_topic(
     desc: &serde_json::Value,
     lag: Option<&serde_json::Value>,
 ) -> Option<SubscriptionInfo> {
-    let has_active_assignment = desc
+    let consumers = desc
         .get("members")
         .and_then(|v| v.as_array())
-        .map(|members| {
-            members.iter().any(|member| {
-                member
-                    .get("assignments")
-                    .and_then(|v| v.as_array())
-                    .map(|assignments| {
-                        assignments.iter().any(|a| a.get("topic").and_then(|v| v.as_str()) == Some(topic))
-                    })
-                    .unwrap_or(false)
-            })
-        })
-        .unwrap_or(false);
+        .into_iter()
+        .flatten()
+        .filter(|member| kafka_member_is_assigned_to_topic(member, topic))
+        .map(kafka_consumer_from_member)
+        .collect::<Vec<_>>();
+    let has_active_assignment = !consumers.is_empty();
     let has_committed_offsets = lag
         .and_then(|v| v.get("partitions"))
         .and_then(|v| v.as_array())
@@ -782,9 +766,28 @@ fn kafka_subscription_for_topic(
         msg_backlog: lag.and_then(|v| v.get("totalLag")).and_then(|v| v.as_i64()).unwrap_or(0),
         msg_rate_out: 0.0,
         msg_throughput_out: 0.0,
-        consumers: Vec::new(),
+        consumers,
         ..Default::default()
     })
+}
+
+fn kafka_member_is_assigned_to_topic(member: &serde_json::Value, topic: &str) -> bool {
+    member
+        .get("assignments")
+        .and_then(|v| v.as_array())
+        .map(|assignments| assignments.iter().any(|a| a.get("topic").and_then(|v| v.as_str()) == Some(topic)))
+        .unwrap_or(false)
+}
+
+fn kafka_consumer_from_member(member: &serde_json::Value) -> ConsumerInfo {
+    ConsumerInfo {
+        consumer_name: member.get("memberId").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+        msg_rate_out: 0.0,
+        msg_throughput_out: 0.0,
+        available_permits: 0,
+        address: member.get("host").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+        client_version: String::new(),
+    }
 }
 
 #[cfg(test)]
@@ -803,6 +806,7 @@ mod tests {
             token_signing: None,
             connect_override: None,
             management_connect_override: None,
+            socks_proxy: None,
             query_timeout_secs: crate::mq::config::DEFAULT_MQ_QUERY_TIMEOUT_SECS,
             connect_timeout_secs: crate::mq::config::DEFAULT_MQ_CONNECT_TIMEOUT_SECS,
             extra,
@@ -1083,17 +1087,29 @@ mod tests {
         assert_eq!(sub.name, "orders-service");
         assert_eq!(sub.sub_type, "consumer-group");
         assert_eq!(sub.msg_backlog, 7);
+        assert!(sub.consumers.is_empty());
     }
 
     #[test]
     fn kafka_subscription_for_topic_includes_active_assignment_without_committed_offsets() {
         let desc = serde_json::json!({
             "groupId": "live-service",
-            "members": [{
-                "assignments": [
-                    { "topic": "events", "partition": 0 }
-                ]
-            }]
+            "members": [
+                {
+                    "memberId": "consumer-events",
+                    "host": "/10.0.0.10",
+                    "assignments": [
+                        { "topic": "events", "partition": 0 }
+                    ]
+                },
+                {
+                    "memberId": "consumer-audit",
+                    "host": "/10.0.0.11",
+                    "assignments": [
+                        { "topic": "audit", "partition": 0 }
+                    ]
+                }
+            ]
         });
         let lag = serde_json::json!({
             "totalLag": 0,
@@ -1105,6 +1121,9 @@ mod tests {
 
         assert_eq!(sub.name, "live-service");
         assert_eq!(sub.msg_backlog, 0);
+        assert_eq!(sub.consumers.len(), 1);
+        assert_eq!(sub.consumers[0].consumer_name, "consumer-events");
+        assert_eq!(sub.consumers[0].address, "/10.0.0.10");
     }
 
     #[test]

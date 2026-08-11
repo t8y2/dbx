@@ -32,6 +32,7 @@ fn live_postgres_config(
         username: user.to_string(),
         password: password.to_string(),
         database: Some(database.to_string()),
+        default_schema: None,
         visible_databases: None,
         visible_schemas: None,
         attached_databases: Vec::new(),

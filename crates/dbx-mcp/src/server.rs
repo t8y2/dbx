@@ -13,6 +13,7 @@ use crate::backend::{format_query_result, new_connection_config, parse_database_
 use crate::mongo::{self, MongoCommand, MongoSafetyError};
 use crate::session::{McpSession, McpSessionStore};
 use dbx_core::{
+    agent_tools::{format_query_result_as_text, QueryCellWindow},
     db::redis_driver::{classify_command, parse_command_argv, RedisCommandResult, RedisCommandSafety},
     models::connection::DatabaseType,
     production_safety::{
@@ -70,6 +71,14 @@ pub struct ExecuteQueryRequest {
         description = "Session ID from dbx_open_session. When set, the query runs on the session's pinned connection, preserving USE/SET and other session state across calls."
     )]
     pub session_id: Option<String>,
+    #[schemars(
+        description = "Start character offset for every string cell (default 0, max 1000000). Use the next offset reported by a truncated result to slide through a long value; narrow the query to the target row and column first."
+    )]
+    pub cell_char_offset: Option<u64>,
+    #[schemars(
+        description = "Maximum characters returned per string cell (default 200, max 4000). Increase only for an explicit long-value expansion."
+    )]
+    pub cell_char_limit: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -309,6 +318,8 @@ impl DbxMcpServer {
         description = "Execute a SQL query on a database connection (max 100 rows returned)"
     )]
     async fn execute_query(&self, Parameters(request): Parameters<ExecuteQueryRequest>) -> CallToolResult {
+        let explicit_cell_window = (request.cell_char_offset.is_some() || request.cell_char_limit.is_some())
+            .then(|| QueryCellWindow::from_options(request.cell_char_offset, request.cell_char_limit));
         let resolved = match self.resolve_connection(&request.selector).await {
             Ok(resolved) => resolved,
             Err(error) => return error,
@@ -367,7 +378,13 @@ impl DbxMcpServer {
                 Err(error) => return error,
             };
             return match self.backend.execute_mongo_command(connection, &database, &command).await {
-                Ok(result) => text(format_query_result(&result, 100)),
+                Ok(result) => match explicit_cell_window {
+                    Some(window) => match format_query_result_as_text(&result, 100, window) {
+                        Ok(output) => text(output),
+                        Err(error) => backend_tool_error("QUERY_FORMAT_ERROR", error),
+                    },
+                    None => text(format_query_result(&result, 100)),
+                },
                 Err(error) => backend_tool_error("QUERY_ERROR", error),
             };
         }
@@ -386,6 +403,12 @@ impl DbxMcpServer {
         }
         if let Some(session) = &session {
             arguments["client_session_id"] = json!(session.client_session_id);
+        }
+        if let Some(offset) = request.cell_char_offset {
+            arguments["cell_char_offset"] = json!(offset);
+        }
+        if let Some(limit) = request.cell_char_limit {
+            arguments["cell_char_limit"] = json!(limit);
         }
         let result =
             self.backend.execute_agent_tool(connection, &database, "execute_query", arguments, permissions).await;
@@ -1610,6 +1633,8 @@ mod tests {
                 database: None,
                 sql: "USE analytics".to_string(),
                 session_id: Some(session_id.clone()),
+                cell_char_offset: None,
+                cell_char_limit: None,
             }))
             .await;
         assert_eq!(result_text(&result), "ok");
@@ -1627,6 +1652,8 @@ mod tests {
                 database: Some("other".to_string()),
                 sql: "SELECT 1".to_string(),
                 session_id: Some(session_id.clone()),
+                cell_char_offset: None,
+                cell_char_limit: None,
             }))
             .await;
         assert!(result_text(&mismatch).contains("SESSION_DATABASE_MISMATCH"));
@@ -1643,12 +1670,38 @@ mod tests {
                 database: None,
                 sql: "SELECT 1".to_string(),
                 session_id: Some(session_id.clone()),
+                cell_char_offset: None,
+                cell_char_limit: None,
             }))
             .await;
         assert!(result_text(&missing).contains("SESSION_NOT_FOUND"));
 
         let second_close = server.close_session(Parameters(CloseSessionRequest { session_id })).await;
         assert!(result_text(&second_close).contains("SESSION_NOT_FOUND"));
+    }
+
+    #[tokio::test]
+    async fn execute_query_forwards_character_window_options() {
+        let elasticsearch = connection("es", "es", "elasticsearch", "");
+        let backend = Arc::new(FakeBackend { connections: vec![elasticsearch], ..Default::default() });
+        let server = DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false);
+
+        let result = server
+            .execute_query(Parameters(ExecuteQueryRequest {
+                selector: selector("es"),
+                database: None,
+                sql: "GET /logs/_search".to_string(),
+                session_id: None,
+                cell_char_offset: Some(200),
+                cell_char_limit: Some(800),
+            }))
+            .await;
+
+        assert_eq!(result_text(&result), "ok");
+        let recorded = backend.recorded_arguments.lock().unwrap();
+        let (_, arguments) = recorded.iter().find(|(name, _)| name == "execute_query").unwrap();
+        assert_eq!(arguments["cell_char_offset"], 200);
+        assert_eq!(arguments["cell_char_limit"], 800);
     }
 
     #[tokio::test]
@@ -1668,6 +1721,8 @@ mod tests {
                     database: None,
                     sql: "SELECT 1".to_string(),
                     session_id: Some(session_id.clone()),
+                    cell_char_offset: None,
+                    cell_char_limit: None,
                 }))
                 .await;
             assert_eq!(result_text(&result), "ok");
@@ -1703,6 +1758,8 @@ mod tests {
                 database: None,
                 sql: "SELECT 1".to_string(),
                 session_id: Some(session_id.clone()),
+                cell_char_offset: None,
+                cell_char_limit: None,
             }))
             .await;
         assert_eq!(result_text(&query), "ok");
@@ -1717,6 +1774,8 @@ mod tests {
                 database: None,
                 sql: "SELECT 1".to_string(),
                 session_id: Some(session_id.clone()),
+                cell_char_offset: None,
+                cell_char_limit: None,
             }))
             .await;
         assert_eq!(result_text(&retry_query), "ok");
@@ -1746,6 +1805,8 @@ mod tests {
                 database: None,
                 sql: "SELECT 1".to_string(),
                 session_id: Some("mcp-session-nope".to_string()),
+                cell_char_offset: None,
+                cell_char_limit: None,
             }))
             .await;
         assert!(result_text(&missing).contains("SESSION_NOT_FOUND"));

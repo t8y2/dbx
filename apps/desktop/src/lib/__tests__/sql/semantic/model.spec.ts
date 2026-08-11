@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { sqlSemanticCompletionScope, sqlSemanticLocalColumnsByTable, sqlSemanticProjectionAliasColumns, sqlSemanticSelectStarIsOnlyProjection, sqlSemanticSelectStarQualifierSql, sqlSemanticSelectStarTableSource } from "@/lib/sql/semantic/completion";
+import { sqlSemanticCompletionScope, sqlSemanticLocalColumnsByTable, sqlSemanticProjectionAliasColumns, sqlSemanticSelectStarIsOnlyProjection, sqlSemanticSelectStarQualifierSql, sqlSemanticSelectStarTableSource, sqlSemanticSelectStarTableSources } from "@/lib/sql/semantic/completion";
 import { SQL_SEMANTIC_BASELINE_FIXTURES, sqlFixtureCursor } from "@/lib/sql/semantic/fixtures";
 import { buildSqlSemanticModel, sqlSemanticTableNameSpans } from "@/lib/sql/semantic/model";
 
@@ -49,6 +49,13 @@ describe("sqlSemanticModel baseline fixtures", () => {
 
     expect(model.rowSources.map((source) => source.kind)).toEqual(["table", "subquery"]);
     expect(sqlSemanticSelectStarTableSource(model)).toBeUndefined();
+  });
+
+  it("returns every table source for an unqualified multi-table star", () => {
+    const { sql, cursor } = sqlFixtureCursor("select *| from tVillage tV inner join tland tl on tV.villageId = tl.villageId");
+    const model = buildSqlSemanticModel(sql, cursor);
+
+    expect(sqlSemanticSelectStarTableSources(model).map((source) => source.alias)).toEqual(["tV", "tl"]);
   });
 
   it.each([

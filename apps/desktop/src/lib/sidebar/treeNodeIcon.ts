@@ -36,6 +36,7 @@ export function getTreeNodeIconInfo(node: TreeNode): TreeNodeIconInfo | null {
     case "etcd-access-control":
       return { icon: ShieldCheck, colorClass: "text-sky-500" };
     case "zookeeper-root":
+    case "consul-root":
       return { icon: Database, colorClass: "text-blue-500" };
     case "table":
       return { icon: Table, colorClass: "text-green-500" };

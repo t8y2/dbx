@@ -4,6 +4,7 @@ pub mod cloudberry;
 pub mod cloudflare_d1;
 pub use cloudflare_d1 as cloudflare_d1_driver;
 pub mod document_result;
+pub mod dolt;
 pub mod doris;
 pub mod duckdb_sql;
 #[cfg(feature = "duckdb-sidecar")]

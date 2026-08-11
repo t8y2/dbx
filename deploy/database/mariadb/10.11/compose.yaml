@@ -4,7 +4,7 @@ services:
     container_name: dbx-mariadb-10.11
     restart: always
     ports:
-      - "${DB_BIND_ADDRESS:-127.0.0.1}:${DB_PORT:-3307}:3306"
+      - "${DB_BIND_ADDRESS:-127.0.0.1}:${DB_PORT:-10200}:3306"
     environment:
       MARIADB_ROOT_PASSWORD: "${DB_PASSWORD:-123456}"
       MARIADB_DATABASE: dbx

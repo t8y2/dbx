@@ -1,0 +1,4 @@
+github.com/apache/iotdb-client-go/v2 v2.0.9-0.20260807074554-e59fc7f55df1 h1:UAfvet8VA2ZUCsIBusSqNDDecFGot8uDshegeDdLBRo=
+github.com/apache/iotdb-client-go/v2 v2.0.9-0.20260807074554-e59fc7f55df1/go.mod h1:Ef61z8w2tRnuAcQKESFfiH03kDvfQniVPUgOXCxWnNw=
+github.com/apache/thrift v0.24.0 h1:zy31L1a49QTNB2bG1BBfMXol3yJrTH975G3pPubQVLQ=
+github.com/apache/thrift v0.24.0/go.mod h1:zPt6WxgvTOM6hF92y8C+MkEM5LMxZuk4JcQOiU4Esvs=

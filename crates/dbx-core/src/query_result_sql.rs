@@ -212,6 +212,13 @@ pub fn build_paginated_query_sql(options: PaginatedQuerySqlOptions) -> QuerySqlB
         TablePaginationStrategy::AgentMaxRows | TablePaginationStrategy::Unbounded => ok(format!("{statement};")),
         TablePaginationStrategy::IrisTop => ok(add_iris_top_limit(&statement, safe_limit)),
         TablePaginationStrategy::LimitOffset => {
+            // Kingbase SQL Server compatibility mode accepts TOP as a real clause.
+            // Appending LIMIT/OFFSET alongside a top-level TOP would be rejected by
+            // the server ("multiple TOP/LIMIT clauses not allowed"), so fall back to
+            // the Agent cursor / client-side row cap for such statements.
+            if options.database_type == Some(DatabaseType::Kingbase) && has_top_level_top(&statement) {
+                return err("unsupported");
+            }
             let dedup_count = dedup_projection_count_without_order_by(&options.original_sql);
             ok(add_standard_limit(&statement, options.database_type, safe_limit, safe_offset, dedup_count))
         }
@@ -1079,6 +1086,13 @@ fn add_questdb_limit(statement: &str, limit: usize, offset: usize) -> String {
 
 fn has_top_level_limit(sql: &str) -> bool {
     top_level_sql_tokens(sql).iter().any(|token| token.text == "LIMIT")
+}
+
+/// True when the statement has a top-level `TOP` clause (SQL Server dialect).
+/// Kingbase's SQL Server compatibility mode treats TOP as a real clause, so a
+/// statement that already bounds rows with TOP must not receive a sibling LIMIT.
+fn has_top_level_top(sql: &str) -> bool {
+    top_level_sql_tokens(sql).iter().any(|token| token.text == "TOP")
 }
 
 fn top_level_limit_row_count(sql: &str) -> Option<usize> {
@@ -3104,6 +3118,74 @@ WHERE u.id = picked.id;
         assert_eq!(plan.page_limit, Some(500));
         assert_eq!(plan.page_offset, Some(0));
         assert!(plan.use_agent_result_session);
+    }
+
+    #[test]
+    fn kingbase_top_clause_falls_back_to_agent_cursor() {
+        for sql in [
+            "SELECT TOP 100 * FROM events",
+            "SELECT TOP(100) * FROM events",
+            "SELECT TOP (100) * FROM events",
+            "SELECT TOP 10 PERCENT * FROM events",
+            "SELECT TOP (2) WITH TIES * FROM events",
+            "SELECT TOP 100 events.name FROM events ORDER BY events.name",
+        ] {
+            let plan = build_query_pagination_execution_plan(QueryPaginationExecutionPlanOptions {
+                sql: sql.to_string(),
+                query_base_sql: sql.to_string(),
+                database_type: Some(DatabaseType::Kingbase),
+                pagination: QueryPagination { limit: 500, offset: 0, session_id: None },
+                use_agent_cursor: true,
+                first_page_uses_actual_sql: false,
+            });
+
+            assert_eq!(plan.sql_to_execute, sql, "sql_to_execute should stay untouched for {sql}");
+            assert!(plan.page_sql.is_none(), "no LIMIT rewrite for {sql}");
+            assert_eq!(plan.page_limit, Some(500));
+            assert_eq!(plan.page_offset, Some(0));
+            assert!(plan.use_agent_result_session, "Agent cursor fallback for {sql}");
+        }
+    }
+
+    #[test]
+    fn kingbase_subquery_top_still_uses_server_pagination() {
+        // A TOP inside a derived table is not a top-level clause, so the outer
+        // statement can still be paginated with LIMIT/OFFSET.
+        let plan = build_query_pagination_execution_plan(QueryPaginationExecutionPlanOptions {
+            sql: "SELECT * FROM (SELECT TOP 100 * FROM events) t".to_string(),
+            query_base_sql: "SELECT * FROM (SELECT TOP 100 * FROM events) t".to_string(),
+            database_type: Some(DatabaseType::Kingbase),
+            pagination: QueryPagination { limit: 500, offset: 0, session_id: None },
+            use_agent_cursor: true,
+            first_page_uses_actual_sql: false,
+        });
+
+        assert_eq!(plan.sql_to_execute, "SELECT * FROM (SELECT TOP 100 * FROM events) t LIMIT 500;");
+        assert_eq!(plan.page_sql, Some(plan.sql_to_execute.clone()));
+        assert_eq!(plan.page_limit, Some(500));
+        assert_eq!(plan.page_offset, Some(0));
+        assert!(!plan.use_agent_result_session);
+    }
+
+    #[test]
+    fn non_kingbase_limit_offset_is_unaffected_by_top_keyword() {
+        // A column literally named `top` must not be mistaken for a TOP clause
+        // on dialects where TOP is not a clause keyword. Force the server-side
+        // LimitOffset path (no Agent cursor) to exercise the rewrite.
+        let plan = build_query_pagination_execution_plan(QueryPaginationExecutionPlanOptions {
+            sql: "SELECT top, name FROM users".to_string(),
+            query_base_sql: "SELECT top, name FROM users".to_string(),
+            database_type: Some(DatabaseType::Postgres),
+            pagination: QueryPagination { limit: 500, offset: 0, session_id: None },
+            use_agent_cursor: false,
+            first_page_uses_actual_sql: false,
+        });
+
+        assert_eq!(plan.sql_to_execute, "SELECT top, name FROM users LIMIT 500;");
+        assert_eq!(plan.page_sql, Some(plan.sql_to_execute.clone()));
+        assert_eq!(plan.page_limit, Some(500));
+        assert_eq!(plan.page_offset, Some(0));
+        assert!(!plan.use_agent_result_session);
     }
 
     #[test]

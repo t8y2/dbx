@@ -82,11 +82,75 @@ describe("connectionStore timeout recovery", () => {
     expect(store.connections[0]?.keepalive_interval_secs).toBe(30);
   });
 
+  it("loads persisted editor settings before startup timeout migration", async () => {
+    const callOrder: string[] = [];
+    const loadEditorSettings = vi.fn(async () => {
+      callOrder.push("settings");
+      return {
+        appLayout: "separated",
+        uiFontFamily: "persisted-font",
+        snippets: [{ id: "persisted", label: "Persisted", prefix: "persisted", body: "SELECT 42", enabled: true }],
+        globalConnectTimeoutSecs: 7,
+        connectTimeoutInheritConnectionIds: ["persisted"],
+        globalQueryTimeoutSecs: 12,
+        queryTimeoutInheritConnectionIds: ["persisted"],
+        timeoutInheritanceMigrationVersion: 2,
+        executeModeDefaultVersion: 1,
+      };
+    });
+    const loadConnections = vi.fn(async () => {
+      callOrder.push("connections");
+      return [postgresConnection({ id: "persisted", connect_timeout_secs: 7, query_timeout_secs: 12 })];
+    });
+    const saveEditorSettings = vi.fn().mockResolvedValue(undefined);
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+      loadEditorSettings,
+      loadConnections,
+      loadPinnedTreeNodeIds: vi.fn().mockResolvedValue([]),
+      loadSidebarLayout: vi.fn().mockResolvedValue(null),
+      loadTunnelProfiles: vi.fn().mockResolvedValue([]),
+      saveConnections: vi.fn().mockResolvedValue(undefined),
+      saveEditorSettings,
+      saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    await useConnectionStore().initFromDisk();
+
+    expect(callOrder).toEqual(["settings", "connections"]);
+    expect(saveEditorSettings).toHaveBeenCalledWith(
+      expect.objectContaining({
+        appLayout: "separated",
+        uiFontFamily: "persisted-font",
+        snippets: [expect.objectContaining({ id: "persisted", body: "SELECT 42" })],
+      }),
+    );
+  });
+
+  it("does not load connections when persisted editor settings cannot be read", async () => {
+    const loadConnections = vi.fn().mockResolvedValue([postgresConnection()]);
+    const saveEditorSettings = vi.fn().mockResolvedValue(undefined);
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      loadEditorSettings: vi.fn().mockRejectedValue(new Error("settings unavailable")),
+      loadConnections,
+      saveEditorSettings,
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    await expect(useConnectionStore().initFromDisk()).rejects.toThrow("settings unavailable");
+    expect(loadConnections).not.toHaveBeenCalled();
+    expect(saveEditorSettings).not.toHaveBeenCalled();
+  });
+
   it("migrates legacy timeout defaults to global inheritance and preserves custom overrides", async () => {
     const saveConnections = vi.fn().mockResolvedValue(undefined);
     vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
     vi.doMock("@/lib/backend/api", () => ({
       deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+      loadEditorSettings: vi.fn().mockResolvedValue(null),
       loadConnections: vi
         .fn()
         .mockResolvedValue([postgresConnection({ id: "default", connect_timeout_secs: 10, query_timeout_secs: 30 }), postgresConnection({ id: "custom", connect_timeout_secs: 45, query_timeout_secs: 300 }), postgresConnection({ id: "inherited", connect_timeout_secs: 60, query_timeout_secs: 60 })]),
@@ -130,6 +194,7 @@ describe("connectionStore timeout recovery", () => {
     vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
     vi.doMock("@/lib/backend/api", () => ({
       deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+      loadEditorSettings: vi.fn().mockResolvedValue(null),
       loadConnections: vi.fn().mockResolvedValue([postgresConnection({ id: "local", connect_timeout_secs: 10, query_timeout_secs: 30 })]),
       loadPinnedTreeNodeIds: vi.fn().mockResolvedValue([]),
       loadSidebarLayout: vi.fn().mockResolvedValue(null),
@@ -164,6 +229,7 @@ describe("connectionStore timeout recovery", () => {
     vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
     vi.doMock("@/lib/backend/api", () => ({
       deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+      loadEditorSettings: vi.fn().mockResolvedValue(null),
       loadConnections: vi.fn().mockResolvedValue([postgresConnection({ id: "inherited", connect_timeout_secs: 7, query_timeout_secs: 12 })]),
       loadPinnedTreeNodeIds: vi.fn().mockResolvedValue([]),
       loadSidebarLayout: vi.fn().mockResolvedValue(null),
@@ -194,6 +260,7 @@ describe("connectionStore timeout recovery", () => {
     vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
     vi.doMock("@/lib/backend/api", () => ({
       deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+      loadEditorSettings: vi.fn().mockResolvedValue(null),
       loadConnections: vi.fn().mockResolvedValue([postgresConnection({ id: "inherited", connect_timeout_secs: 20, query_timeout_secs: 45 })]),
       loadPinnedTreeNodeIds: vi.fn().mockResolvedValue([]),
       loadSidebarLayout: vi.fn().mockResolvedValue(null),
@@ -235,6 +302,7 @@ describe("connectionStore timeout recovery", () => {
     vi.doMock("@/lib/backend/configCrypto", () => ({ encryptConfig }));
     vi.doMock("@/lib/backend/api", () => ({
       deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+      loadEditorSettings: vi.fn().mockResolvedValue(null),
       loadConnections: vi.fn().mockResolvedValue([postgresConnection({ id: "inherited", connect_timeout_secs: 99, connect_timeout_inherit: true, query_timeout_secs: 99, query_timeout_inherit: true })]),
       loadPinnedTreeNodeIds: vi.fn().mockResolvedValue([]),
       loadSidebarLayout: vi.fn().mockResolvedValue(null),

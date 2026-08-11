@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createLazyKvKeyTreeState, createZooKeeperChildPathDraft, flattenLazyKvKeyTree, replaceLazyKvChildren, resetLazyKvKeyTree } from "@/lib/zookeeper/zookeeperLazyKeyTree";
+import { createLazyKvKeyTreeState, createZooKeeperChildPathDraft, flattenLazyKvKeyTree, replaceLazyKvChildren, replaceLazyKvFocusedRoot, resetLazyKvKeyTree } from "@/lib/zookeeper/zookeeperLazyKeyTree";
 
 describe("zookeeper lazy key tree", () => {
   it("stores only the current path direct children on reset", () => {
@@ -48,5 +48,42 @@ describe("zookeeper lazy key tree", () => {
     expect(createZooKeeperChildPathDraft("/")).toBe("");
     expect(createZooKeeperChildPathDraft("/app")).toBe("/app/");
     expect(createZooKeeperChildPathDraft("app/")).toBe("/app/");
+  });
+
+  it("keeps an exact focused Key without children as a leaf", () => {
+    const state = createLazyKvKeyTreeState("", "relative");
+
+    replaceLazyKvFocusedRoot(state, { key: "dbx-demo/locks/persistent", numChildren: 0, valueSize: 12, hasValue: true }, [], null);
+
+    const leaf = state.nodeByKey.get("dbx-demo/locks/persistent");
+    expect(leaf?.hasChildren).toBe(false);
+    expect(leaf?.hasValue).toBe(true);
+    expect(leaf?.label).toBe("persistent");
+  });
+
+  it("keeps a real Consul Key and its child prefix as one dual-purpose node", () => {
+    const state = createLazyKvKeyTreeState("", "relative");
+
+    replaceLazyKvFocusedRoot(state, { key: "applications", numChildren: 1, valueSize: 7, hasValue: true }, [{ key: "applications/api", numChildren: 0, valueSize: 3 }], null);
+
+    const root = state.nodeByKey.get("applications");
+    expect(root?.hasValue).toBe(true);
+    expect(root?.hasChildren).toBe(true);
+    expect(root?.children.map((child) => child.key)).toEqual(["applications/api"]);
+  });
+
+  it("requires an exact GET before treating a trailing-slash Consul path as a Key", () => {
+    const state = createLazyKvKeyTreeState("", "relative");
+
+    replaceLazyKvChildren(state, null, [{ key: "applications/", numChildren: 2 }], null);
+
+    const prefix = state.nodeByKey.get("applications/");
+    expect(prefix?.hasChildren).toBe(true);
+    expect(prefix?.hasValue).toBeNull();
+
+    replaceLazyKvFocusedRoot(state, { key: "applications/", numChildren: 0, hasValue: true }, [], null);
+    const exactTrailingSlashKey = state.nodeByKey.get("applications/");
+    expect(exactTrailingSlashKey?.hasChildren).toBe(false);
+    expect(exactTrailingSlashKey?.hasValue).toBe(true);
   });
 });

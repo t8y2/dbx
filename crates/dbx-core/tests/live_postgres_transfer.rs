@@ -4,7 +4,7 @@ use dbx_core::models::connection::{ConnectionConfig, DatabaseType};
 use dbx_core::storage::Storage;
 use dbx_core::transfer::{
     get_db_type, transfer_postgres_schema_dependencies, transfer_postgres_schema_objects, transfer_table, TransferMode,
-    TransferOwnershipPolicy, TransferRequest, TransferTableNameCase,
+    TransferObjectKind, TransferObjectSelection, TransferOwnershipPolicy, TransferRequest, TransferTableNameCase,
 };
 use serde_json::json;
 
@@ -534,6 +534,192 @@ async fn live_postgres_transfer_skips_create_ddl_for_existing_target_table() {
         query_scalar(&target_pool, &format!("SELECT \"name\" FROM \"{}\".\"items\" WHERE \"id\" = 1", target_schema))
             .await,
         json!("existing-target-transfer")
+    );
+
+    let _ = postgres::execute_batch(&source_pool, &[cleanup_sql[0].clone()]).await;
+    let _ = postgres::execute_batch(&target_pool, &[cleanup_sql[1].clone()]).await;
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL URLs via DBX_LIVE_PG_TRANSFER_SOURCE_URL and DBX_LIVE_PG_TRANSFER_TARGET_URL"]
+async fn live_postgres_transfer_creates_selected_sequence_before_referencing_table() {
+    let source_url = std::env::var("DBX_LIVE_PG_TRANSFER_SOURCE_URL").expect("DBX_LIVE_PG_TRANSFER_SOURCE_URL");
+    let target_url = std::env::var("DBX_LIVE_PG_TRANSFER_TARGET_URL").unwrap_or_else(|_| source_url.clone());
+
+    let source_pool = postgres::connect(&source_url, std::time::Duration::from_secs(5)).await.unwrap();
+    let target_pool = postgres::connect(&target_url, std::time::Duration::from_secs(5)).await.unwrap();
+    let source_database = query_scalar(&source_pool, "SELECT current_database()").await.as_str().unwrap().to_string();
+    let target_database = query_scalar(&target_pool, "SELECT current_database()").await.as_str().unwrap().to_string();
+
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let source_schema = format!("dbx_src_sequence_{}", &suffix[..8]);
+    let target_schema = format!("dbx_dst_sequence_{}", &suffix[..8]);
+    let cleanup_sql = [
+        format!("DROP SCHEMA IF EXISTS \"{}\" CASCADE", source_schema),
+        format!("DROP SCHEMA IF EXISTS \"{}\" CASCADE", target_schema),
+    ];
+    let _ = postgres::execute_batch(&source_pool, &[cleanup_sql[0].clone()]).await;
+    let _ = postgres::execute_batch(&target_pool, &[cleanup_sql[1].clone()]).await;
+
+    postgres::execute_batch(
+        &source_pool,
+        &[
+            format!("CREATE SCHEMA \"{}\"", source_schema),
+            format!(
+                "CREATE SEQUENCE \"{}\".\"biz_banner_id_seq\" AS bigint START WITH 5 INCREMENT BY 2 MINVALUE 1 MAXVALUE 999 CACHE 1 CYCLE",
+                source_schema
+            ),
+            format!(
+                "CREATE TABLE \"{}\".\"biz_banner\" (\
+                    \"id\" bigint DEFAULT nextval('\"{}\".\"biz_banner_id_seq\"'::regclass) PRIMARY KEY,\
+                    \"name\" text NOT NULL\
+                )",
+                source_schema, source_schema
+            ),
+            format!("INSERT INTO \"{}\".\"biz_banner\" (\"name\") VALUES ('first')", source_schema),
+            format!("SELECT setval('\"{}\".\"biz_banner_id_seq\"', 41, true)", source_schema),
+            format!("INSERT INTO \"{}\".\"biz_banner\" (\"name\") VALUES ('second')", source_schema),
+            format!("GRANT USAGE ON SEQUENCE \"{}\".\"biz_banner_id_seq\" TO PUBLIC", source_schema),
+        ],
+    )
+    .await
+    .unwrap();
+
+    let dir = std::env::temp_dir().join(format!("dbx-live-sequence-transfer-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+    let state = AppState::new(storage);
+    let source_connection_id = "live-sequence-source";
+    let target_connection_id = "live-sequence-target";
+    let source_pool_key = format!("{source_connection_id}:{source_database}");
+    let target_pool_key = format!("{target_connection_id}:{target_database}");
+    state.connections.write().await.insert(source_pool_key.clone(), PoolKind::Postgres(source_pool.clone()));
+    state.connections.write().await.insert(target_pool_key.clone(), PoolKind::Postgres(target_pool.clone()));
+    state
+        .configs
+        .write()
+        .await
+        .insert(source_connection_id.to_string(), postgres_test_config(source_connection_id, &source_database));
+    state
+        .configs
+        .write()
+        .await
+        .insert(target_connection_id.to_string(), postgres_test_config(target_connection_id, &target_database));
+
+    let request = TransferRequest {
+        transfer_id: format!("live-sequence-transfer-{suffix}"),
+        source_connection_id: source_connection_id.to_string(),
+        source_database: source_database.clone(),
+        source_schema: source_schema.clone(),
+        source_catalog: None,
+        target_connection_id: target_connection_id.to_string(),
+        target_database: target_database.clone(),
+        target_schema: target_schema.clone(),
+        target_catalog: None,
+        tables: vec!["biz_banner".to_string()],
+        create_table: true,
+        content: dbx_core::transfer::TransferContent::default(),
+        objects: vec![
+            TransferObjectSelection { object_type: TransferObjectKind::Table, names: vec!["biz_banner".to_string()] },
+            TransferObjectSelection {
+                object_type: TransferObjectKind::Sequence,
+                names: vec!["biz_banner_id_seq".to_string()],
+            },
+        ],
+        mode: TransferMode::Append,
+        target_table_name_case: TransferTableNameCase::Preserve,
+        ownership_policy: TransferOwnershipPolicy::Preserve,
+        batch_size: 100,
+    };
+    let source_db_type = get_db_type(&state, source_connection_id).await.unwrap();
+    let target_db_type = get_db_type(&state, target_connection_id).await.unwrap();
+
+    transfer_postgres_schema_dependencies(&state, &request, &source_pool_key, &target_pool_key, |_| {}).await.unwrap();
+    let transferred = transfer_table(
+        &state,
+        &request,
+        "biz_banner",
+        0,
+        &source_db_type,
+        &target_db_type,
+        &source_pool_key,
+        &target_pool_key,
+        |_| {},
+    )
+    .await
+    .unwrap();
+    let outcome =
+        transfer_postgres_schema_objects(&state, &request, &source_pool_key, &target_pool_key, |_| {}).await.unwrap();
+
+    assert_eq!(transferred, 2);
+    assert!(outcome.failed.is_empty());
+    assert_eq!(
+        query_scalar(&target_pool, &format!("SELECT count(*) FROM \"{}\".\"biz_banner\"", target_schema)).await,
+        json!(2)
+    );
+    assert_eq!(
+        query_scalar(
+            &target_pool,
+            &format!(
+                "SELECT format_type(s.seqtypid, NULL) || ':' || s.seqstart || ':' || s.seqincrement || ':' || s.seqmin || ':' || s.seqmax || ':' || s.seqcache || ':' || s.seqcycle \
+                 FROM pg_catalog.pg_sequence s \
+                 JOIN pg_catalog.pg_class c ON c.oid = s.seqrelid \
+                 JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+                 WHERE n.nspname = '{}' AND c.relname = 'biz_banner_id_seq'",
+                target_schema
+            )
+        )
+        .await,
+        json!("bigint:5:2:1:999:1:true")
+    );
+    assert_eq!(
+        query_scalar(&target_pool, &format!("SELECT nextval('\"{}\".\"biz_banner_id_seq\"'::regclass)", target_schema))
+            .await,
+        json!(45)
+    );
+    assert_eq!(
+        query_scalar(
+            &target_pool,
+            &format!(
+                "SELECT column_default LIKE '%{}%' AND column_default NOT LIKE '%{}%' \
+                 FROM information_schema.columns \
+                 WHERE table_schema = '{}' AND table_name = 'biz_banner' AND column_name = 'id'",
+                target_schema, source_schema, target_schema
+            )
+        )
+        .await,
+        json!(true)
+    );
+    assert_eq!(
+        query_scalar(
+            &target_pool,
+            &format!(
+                "SELECT count(*) FROM pg_catalog.pg_depend d \
+                 JOIN pg_catalog.pg_class c ON c.oid = d.objid \
+                 JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+                 WHERE n.nspname = '{}' AND c.relname = 'biz_banner_id_seq' AND d.deptype IN ('a', 'i')",
+                target_schema
+            )
+        )
+        .await,
+        json!(0)
+    );
+    assert_eq!(
+        query_scalar(
+            &target_pool,
+            &format!(
+                "SELECT count(*) \
+                 FROM pg_catalog.pg_class c \
+                 JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+                 JOIN LATERAL aclexplode(c.relacl) a ON true \
+                 WHERE n.nspname = '{}' AND c.relname = 'biz_banner_id_seq' \
+                   AND c.relkind = 'S' AND a.grantee = 0 AND a.privilege_type = 'USAGE'",
+                target_schema
+            )
+        )
+        .await,
+        json!(1)
     );
 
     let _ = postgres::execute_batch(&source_pool, &[cleanup_sql[0].clone()]).await;

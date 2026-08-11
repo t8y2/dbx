@@ -103,6 +103,12 @@ pub struct KvKeyMetadata {
     pub ephemeral_owner: Option<i64>,
     pub data_length: Option<u64>,
     pub num_children: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flags: Option<KvInt64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lock_index: Option<KvInt64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -138,6 +144,8 @@ pub struct KvListPrefixResponse {
     pub keys: Vec<KvKeySummary>,
     pub continuation: Option<String>,
     pub revision: Option<KvInt64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filtered_by_acls: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -205,6 +213,8 @@ pub struct KvPutOptions {
     pub expected_mod_revision: Option<KvInt64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expected_create_revision: Option<KvInt64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub flags: Option<KvInt64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

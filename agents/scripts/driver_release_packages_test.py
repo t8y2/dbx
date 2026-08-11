@@ -35,6 +35,7 @@ class DriverReleasePackagesTest(unittest.TestCase):
                 "oracle": "0.1.10",
                 "xugu": "0.1.20",
                 "kingbase": "0.1.34",
+                "iotdb": "0.1.30",
                 "neo4j": "0.1.40",
                 "vastbase": "0.1.37",
                 "duckdb": "0.1.0",
@@ -244,6 +245,21 @@ class DriverReleasePackagesTest(unittest.TestCase):
             self.assertEqual(renamed, [versioned])
             self.assertFalse(source.exists())
             self.assertEqual(versioned.read_bytes(), b"\xcf\xfa\xed\xfetest-neo4j-agent")
+
+    def test_versions_iotdb_native_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            release_dir = Path(temp_dir)
+            source = release_dir / "dbx-agent-iotdb-linux-x64"
+            source.write_bytes(b"\x7fELFtest-iotdb-agent")
+            versions = {driver: "0.1.0" for driver in NATIVE_DRIVERS}
+            versions["iotdb"] = "0.1.30"
+
+            renamed = version_agent_artifacts(release_dir, versions)
+            versioned = release_dir / "dbx-agent-iotdb-0.1.30-linux-x64"
+
+            self.assertEqual(renamed, [versioned])
+            self.assertFalse(source.exists())
+            self.assertEqual(versioned.read_bytes(), b"\x7fELFtest-iotdb-agent")
 
     def test_full_offline_bundle_includes_supported_windows_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

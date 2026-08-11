@@ -180,6 +180,41 @@ async fn run_temporary_connection_test(
         None
     };
 
+    // Keep all fallible post-connect checks inside this block so cleanup below
+    // runs before either a successful result or an error is returned.
+    let result: Result<ConnectionTestResult, String> = async {
+        let success_message = if pool_result.is_ok() && config.db_type == DatabaseType::Consul {
+            let client = {
+                let connections = app.connections.read().await;
+                match connections.get(&temp_id) {
+                    Some(PoolKind::Consul(client)) => Some(client.clone()),
+                    _ => None,
+                }
+            };
+            if let Some(client) = client {
+                let configured_target =
+                    dbx_core::consul::ConsulConfig::from_connection(&config)?.agent_target.is_some();
+                let identity = if configured_target {
+                    Some(client.validate_configured_agent_target().await?)
+                } else {
+                    client.agent_self().await.ok()
+                };
+                identity
+                    .map(|identity| format!("Connection successful (Agent: {} at {})", identity.node, identity.address))
+                    .unwrap_or_else(|| {
+                        "Connection successful (Agent identity unavailable; Agent writes disabled)".to_string()
+                    })
+            } else {
+                "Connection successful (Agent identity unavailable; Agent writes disabled)".to_string()
+            }
+        } else {
+            "Connection successful".to_string()
+        };
+
+        pool_result.map(|_| ConnectionTestResult::success(success_message).with_database_info(database_info))
+    }
+    .await;
+
     app.remove_connection_pools(&temp_id).await;
     // Pool drain intentionally keeps durable MQ adapters for reconnect reuse; temporary
     // probes must still release any registry entry if a cached path was used.
@@ -188,7 +223,7 @@ async fn run_temporary_connection_test(
     app.reset_connection_transport_for_config(&temp_id, &config).await;
     app.configs.write().await.remove(&temp_id);
 
-    pool_result.map(|_| ConnectionTestResult::success("Connection successful").with_database_info(database_info))
+    result
 }
 
 pub async fn test_connection(
@@ -484,9 +519,10 @@ async fn remove_connection_pools_for_connection_ids(state: &WebState, connection
 mod tests {
     use super::{
         apply_mongo_legacy_driver_profile, connect_db, connection_final_proxy_port, disconnect_db, load_connections,
-        mark_mongo_legacy_driver, mcp_add_connection, mcp_remove_connection, save_connection_database_info,
-        save_connections, test_connection, test_connection_with_info, ConnectRequest, DisconnectRequest,
-        McpAddConnectionRequest, McpRemoveConnectionRequest, SaveConnectionDatabaseInfoRequest, SaveConnectionsRequest,
+        mark_mongo_legacy_driver, mcp_add_connection, mcp_remove_connection, run_temporary_connection_test,
+        save_connection_database_info, save_connections, test_connection, test_connection_with_info, ConnectRequest,
+        DisconnectRequest, McpAddConnectionRequest, McpRemoveConnectionRequest, SaveConnectionDatabaseInfoRequest,
+        SaveConnectionsRequest,
     };
     use crate::state::WebState;
     use axum::extract::State;
@@ -498,9 +534,7 @@ mod tests {
     };
     use dbx_core::storage::{McpGlobalPolicy, Storage};
     use std::sync::Arc;
-    #[cfg(feature = "mq-admin")]
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    #[cfg(feature = "mq-admin")]
     use tokio::net::TcpListener;
 
     fn sqlite_config(id: &str, path: &str) -> ConnectionConfig {
@@ -571,6 +605,23 @@ mod tests {
             "adminUrl": admin_url,
             "auth": { "kind": "none" },
             "pinnedVersion": "3.1"
+        }));
+        config
+    }
+
+    fn consul_config(id: &str, server_addr: &str) -> ConnectionConfig {
+        let parsed = reqwest::Url::parse(server_addr).unwrap();
+        let mut config = sqlite_config(id, "");
+        config.name = "Consul".to_string();
+        config.db_type = DatabaseType::Consul;
+        config.host = parsed.host_str().unwrap().to_string();
+        config.port = parsed.port().unwrap();
+        config.external_config = Some(serde_json::json!({
+            "serverAddr": server_addr,
+            "agentTarget": {
+                "node": "expected-agent",
+                "address": "127.0.0.1"
+            }
         }));
         config
     }
@@ -673,6 +724,51 @@ mod tests {
         assert!(state.app.connections.read().await.keys().all(|key| !key.starts_with("__test_")));
 
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn failed_consul_agent_target_validation_cleans_up_temporary_state() {
+        let (state, dir) = test_web_state().await;
+        let server_addr = spawn_consul_agent_server().await;
+        let config = consul_config("consul-test", &server_addr);
+
+        let error = run_temporary_connection_test(&state.app, config, false).await.unwrap_err();
+
+        assert!(error.contains("CONSUL_AGENT_TARGET_MISMATCH"), "unexpected error: {error}");
+        assert!(state.app.configs.read().await.keys().all(|key| !key.starts_with("__test_")));
+        assert!(state.app.connections.read().await.keys().all(|key| !key.starts_with("__test_")));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    async fn spawn_consul_agent_server() -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    break;
+                };
+                tokio::spawn(async move {
+                    let mut buf = [0_u8; 2048];
+                    let Ok(n) = stream.read(&mut buf).await else {
+                        return;
+                    };
+                    let request = String::from_utf8_lossy(&buf[..n]);
+                    let body = if request.starts_with("GET /v1/agent/self ") {
+                        r#"{"Config":{"NodeName":"actual-agent","Datacenter":"dc1"},"Member":{"Addr":"127.0.0.1","Tags":{}}}"#
+                    } else {
+                        "[]"
+                    };
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = stream.write_all(response.as_bytes()).await;
+                });
+            }
+        });
+        format!("http://{addr}")
     }
 
     #[cfg(feature = "mq-admin")]

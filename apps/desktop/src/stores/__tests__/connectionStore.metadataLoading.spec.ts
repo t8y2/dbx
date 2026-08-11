@@ -60,6 +60,19 @@ function oracleConnection(): ConnectionConfig {
   } as ConnectionConfig;
 }
 
+function xuguConnection(): ConnectionConfig {
+  return {
+    id: "xugu-1",
+    name: "XuguDB",
+    db_type: "xugu",
+    host: "127.0.0.1",
+    port: 5138,
+    username: "app_user",
+    password: "",
+    database: "app_db",
+  } as ConnectionConfig;
+}
+
 function genericJdbcConnection(): ConnectionConfig {
   return {
     id: "jdbc-1",
@@ -131,6 +144,140 @@ describe("connectionStore metadata loading", () => {
     installLocalStorage();
     setActivePinia(createPinia());
   });
+
+  // Dynamic import of the merged connectionStore plus the scoped metadata
+  // load can exceed Vitest's 5s default on slower CI runners; the assertion
+  // is deterministic, so allow a wider timeout.
+  it("loads Xugu package members through the scoped completion endpoint", async () => {
+    const completionAssistantSearch = vi.fn().mockResolvedValue({
+      candidates: [
+        { name: "process_item", kind: "procedure", signature: "p_id IN INT" },
+        { name: "process_item", kind: "procedure", signature: "p_code IN VARCHAR" },
+        { name: "item_count", kind: "function", data_type: "INT" },
+      ],
+      incomplete: false,
+      fallback_used: false,
+    });
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({ checkConnectionHealth: vi.fn().mockResolvedValue(undefined), completionAssistantSearch }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    const connection = xuguConnection();
+    const packageNode: TreeNode = {
+      id: "xugu-1:app_db:app_schema:package:business_api",
+      label: "business_api",
+      type: "package",
+      connectionId: connection.id,
+      database: "app_db",
+      schema: "app_schema",
+      children: [],
+      isExpanded: false,
+    };
+    store.connections = [connection];
+    store.connectedIds = new Set([connection.id]);
+    store.treeNodes = [packageNode];
+
+    await store.loadPackageMembers(packageNode);
+
+    expect(completionAssistantSearch).toHaveBeenCalledWith({
+      connection_id: connection.id,
+      database: "app_db",
+      schema: "app_schema",
+      object_kinds: ["routine"],
+      mask: "",
+      case_sensitive: true,
+      global_search: false,
+      max_results: 1000,
+      search_in_comments: false,
+      search_in_definitions: false,
+      parent_schema: "app_schema",
+      parent_name: "business_api",
+      parent_type: "package",
+      match_mode: "prefix",
+    });
+    expect(packageNode.isExpanded).toBe(true);
+    expect(packageNode.children?.map((child) => child.label)).toEqual(["process_item(p_id IN INT)", "process_item(p_code IN VARCHAR)", "item_count"]);
+    expect(packageNode.children?.every((child) => child.parentName === "business_api")).toBe(true);
+  }, 15000);
+
+  it("loads Oracle package overloads through the shared package member path", async () => {
+    const completionAssistantSearch = vi.fn().mockResolvedValue({
+      candidates: [
+        { name: "CALCULATE", kind: "procedure", signature: "P_VALUE IN NUMBER" },
+        { name: "CALCULATE", kind: "procedure", signature: "P_VALUE IN VARCHAR2" },
+        { name: "ITEM_COUNT", kind: "function", data_type: "NUMBER" },
+      ],
+      incomplete: false,
+      fallback_used: false,
+    });
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({ checkConnectionHealth: vi.fn().mockResolvedValue(undefined), completionAssistantSearch }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    const connection = oracleConnection();
+    const packageNode: TreeNode = {
+      id: "oracle-1:XE:APP:package:BUSINESS_API",
+      label: "BUSINESS_API",
+      type: "package",
+      connectionId: connection.id,
+      database: "XE",
+      schema: "APP",
+      children: [],
+      isExpanded: false,
+    };
+    store.connections = [connection];
+    store.connectedIds = new Set([connection.id]);
+    store.treeNodes = [packageNode];
+
+    await store.loadPackageMembers(packageNode);
+
+    expect(completionAssistantSearch).toHaveBeenCalledWith({
+      connection_id: connection.id,
+      database: "XE",
+      schema: "APP",
+      object_kinds: ["routine"],
+      mask: "",
+      case_sensitive: true,
+      global_search: false,
+      max_results: 1000,
+      search_in_comments: false,
+      search_in_definitions: false,
+      parent_schema: "APP",
+      parent_name: "BUSINESS_API",
+      match_mode: "prefix",
+    });
+    expect(packageNode.isExpanded).toBe(true);
+    expect(packageNode.children?.map((child) => child.label)).toEqual(["CALCULATE(P_VALUE IN NUMBER)", "CALCULATE(P_VALUE IN VARCHAR2)", "ITEM_COUNT"]);
+  }, 15000);
+
+  it("does not query package members for unsupported databases", async () => {
+    const completionAssistantSearch = vi.fn();
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({ checkConnectionHealth: vi.fn().mockResolvedValue(undefined), completionAssistantSearch }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    const connection = { ...xuguConnection(), id: "dameng-1", db_type: "dameng" } as ConnectionConfig;
+    const packageNode: TreeNode = {
+      id: "dameng-1:APP:package:BUSINESS_API",
+      label: "BUSINESS_API",
+      type: "package",
+      connectionId: connection.id,
+      database: "APP",
+      schema: "APP",
+      children: [],
+      isExpanded: false,
+    };
+    store.connections = [connection];
+    store.connectedIds = new Set([connection.id]);
+
+    await store.loadPackageMembers(packageNode);
+
+    expect(completionAssistantSearch).not.toHaveBeenCalled();
+    expect(packageNode.isExpanded).toBe(false);
+  }, 15000);
 
   it("loads missing database roots only for connected sidebar search targets", async () => {
     const checkConnectionHealth = vi.fn().mockResolvedValue(undefined);

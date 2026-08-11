@@ -53,14 +53,6 @@ export type RestoredDataGridSelection =
   | { kind: "range"; anchor: CellPosition; focus: CellPosition; selectingAll: boolean; scrollRowIndex: number }
   | { kind: "cells"; cellKeys: Set<string>; scrollRowIndex: number };
 
-// 刷新后恢复 range/离散单元格选区时，需要重新激活 cell-selection 拖拽状态机
-// （isSelectingCells）。否则 restore 前调用的 clearCellSelection 已将其置 false，
-// 而 beginCellSelection 才会重新置 true，导致用户必须重新点一次单元格才能拖拽扩展
-// 刚恢复的选区。行选/列选是独立状态机，不应激活 cell selection。
-export function reactivatesCellSelectionAfterRestore(restored: RestoredDataGridSelection): boolean {
-  return restored.kind === "range" || restored.kind === "cells";
-}
-
 export interface RestoreDataGridSelectionOptions {
   snapshot: PersistedDataGridSelection;
   columns: readonly string[];

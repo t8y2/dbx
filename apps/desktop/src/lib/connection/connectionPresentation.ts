@@ -136,6 +136,7 @@ export function connectionDisplayUrlScheme(connection: Pick<ConnectionConfig, "d
     case "rqlite":
     case "turso":
     case "mq":
+    case "consul":
       return connection.ssl ? "https" : "http";
     case "cloudflare-d1":
       return "https";
@@ -170,6 +171,9 @@ export function connectionUrlPlaceholder(dbType: DatabaseType): string {
 
     case "zookeeper":
       return "zookeeper://host:2181";
+
+    case "consul":
+      return "http://host:8500";
 
     case "sqlite":
       return "sqlite:///absolute/path/to/database.db";

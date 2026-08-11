@@ -7,6 +7,7 @@ pub mod config_cmd;
 pub mod connection;
 #[allow(dead_code, unused_imports)]
 mod connection_secrets;
+pub mod consul_cmd;
 pub mod csv_export;
 pub mod data_compare;
 pub mod database_export;

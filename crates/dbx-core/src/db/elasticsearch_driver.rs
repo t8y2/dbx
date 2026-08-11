@@ -1,8 +1,9 @@
 use percent_encoding::{percent_decode_str, utf8_percent_encode, AsciiSet, CONTROLS};
+use regex::Regex;
 use reqwest::{Client as HttpClient, Method, StatusCode};
 use serde::Deserialize;
 use serde_json::Value;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::error::Error;
 use std::time::Duration;
 
@@ -50,6 +51,9 @@ pub struct EsClient {
     transport_mode: ElasticsearchTransportMode,
     /// GET path used for connect / health / test (default "/").
     connectivity_check_path: String,
+    /// 正则:把易变的时间/滚动后缀折叠成 `*`，将同一前缀的滚动索引聚合成一个
+    /// pattern 节点。`None` 表示关闭聚合，展示原始索引名。
+    index_grouping: Option<Regex>,
 }
 
 impl EsClient {
@@ -68,6 +72,7 @@ impl EsClient {
             timeout,
             ElasticsearchTransportMode::Direct,
             "/".to_string(),
+            None,
         )
     }
 
@@ -79,6 +84,7 @@ impl EsClient {
         timeout: Duration,
         transport_mode: ElasticsearchTransportMode,
         connectivity_check_path: String,
+        index_grouping: Option<Regex>,
     ) -> Self {
         let base_url = url.trim_end_matches('/').to_string();
         let auth = match (username, password) {
@@ -88,7 +94,7 @@ impl EsClient {
         let builder = http_client_builder(timeout).danger_accept_invalid_certs(accept_invalid_certs);
         let http = builder.build().unwrap_or_else(|_| HttpClient::new());
         let fallback_base_urls = elasticsearch_base_url_fallbacks(&base_url);
-        Self { http, base_url, fallback_base_urls, auth, transport_mode, connectivity_check_path }
+        Self { http, base_url, fallback_base_urls, auth, transport_mode, connectivity_check_path, index_grouping }
     }
 
     pub fn from_config(
@@ -108,6 +114,7 @@ impl EsClient {
         };
         let base_url = format!("{}{}", url.trim_end_matches('/'), kibana_base_path.as_deref().unwrap_or(""));
         let connectivity_check_path = elasticsearch_connectivity_check_path(external_config);
+        let index_grouping = elasticsearch_index_grouping(external_config);
         Self::new_with_mode(
             &base_url,
             username,
@@ -116,6 +123,7 @@ impl EsClient {
             timeout,
             transport_mode,
             connectivity_check_path,
+            index_grouping,
         )
     }
 
@@ -180,6 +188,7 @@ impl Clone for EsClient {
             auth: self.auth.clone(),
             transport_mode: self.transport_mode,
             connectivity_check_path: self.connectivity_check_path.clone(),
+            index_grouping: self.index_grouping.clone(),
         }
     }
 }
@@ -225,6 +234,46 @@ pub fn elasticsearch_connectivity_check_path(external_config: Option<&Value>) ->
     } else {
         format!("/{without_method}")
     }
+}
+
+/// 解析连接配置里的索引聚合正则。**默认关闭**（命名格式因环境而异，不做全局假设）。
+/// - 缺省/空/`off`/`none`/`false` → 关闭聚合，展示原始索引名。
+/// - 其它 → 作为自定义正则；编译失败同样视为关闭，避免意外折叠。
+///
+/// 语义：用 `${1}*` 模板替换匹配区间——正则带捕获组 1 时保留其内容做前缀，
+/// 不带捕获组时即把匹配到的“易变尾巴”替换成 `*`。
+pub fn elasticsearch_index_grouping(external_config: Option<&Value>) -> Option<Regex> {
+    let raw = external_config
+        .and_then(Value::as_object)
+        .and_then(|config| config.get("indexGroupingPattern"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim();
+    if raw.is_empty()
+        || raw.eq_ignore_ascii_case("off")
+        || raw.eq_ignore_ascii_case("none")
+        || raw.eq_ignore_ascii_case("false")
+    {
+        return None;
+    }
+    Regex::new(raw).ok()
+}
+
+/// 用分组正则把索引名聚合成 pattern。`None` 表示关闭聚合，原样返回。
+fn group_index_names(names: Vec<String>, pattern: Option<&Regex>) -> Vec<String> {
+    let Some(re) = pattern else {
+        return names;
+    };
+    let mut buckets: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for name in names {
+        // `${1}*`：有捕获组则保留组1做前缀，无组则把匹配尾巴替换成 `*`。
+        let key = re.replace(&name, "${1}*").into_owned();
+        buckets.entry(key).or_default().push(name);
+    }
+    let mut out: Vec<String> = buckets.into_keys().collect();
+    out.sort();
+    out.dedup();
+    out
 }
 
 pub async fn test_connection(client: &mut EsClient, timeout: Duration) -> Result<(), String> {
@@ -375,20 +424,92 @@ struct CatIndex {
     index: String,
 }
 
+#[derive(Deserialize)]
+struct ResolveIndexResponse {
+    #[serde(default)]
+    indices: Vec<ResolveNamed>,
+    #[serde(default)]
+    data_streams: Vec<ResolveNamed>,
+}
+
+#[derive(Deserialize)]
+struct ResolveNamed {
+    name: String,
+}
+
+/// 去掉 ES 内部索引（以 `.` 开头），排序并去重后返回可见索引名。
+fn normalize_index_names(names: impl Iterator<Item = String>) -> Vec<String> {
+    let mut names: Vec<String> = names.filter(|name| !name.starts_with('.')).collect();
+    names.sort();
+    names.dedup();
+    names
+}
+
 pub async fn list_indices(client: &EsClient) -> Result<Vec<String>, String> {
+    let names = list_raw_index_names(client).await?;
+    Ok(group_index_names(names, client.index_grouping.as_ref()))
+}
+
+async fn list_raw_index_names(client: &EsClient) -> Result<Vec<String>, String> {
+    // 主路径 `_cat/indices` 需要集群级 `monitor` 权限。仅有索引级权限的账号
+    // （例如日志采集用户）会在这里拿到 401/403，此时降级到索引级元数据端点。
     let resp = client
         .get("/_cat/indices?format=json&h=index")
         .send()
         .await
         .map_err(|e| format!("Elasticsearch request failed: {e}"))?;
+    let status = client.response_status(&resp);
+    if status.is_success() {
+        let indices: Vec<CatIndex> = resp.json().await.map_err(|e| format!("Elasticsearch parse error: {e}"))?;
+        return Ok(normalize_index_names(indices.into_iter().map(|i| i.index)));
+    }
+    if status == StatusCode::FORBIDDEN || status == StatusCode::UNAUTHORIZED {
+        return list_indices_via_metadata(client).await;
+    }
+    let body = resp.text().await.unwrap_or_default();
+    Err(format!("Elasticsearch error: {body}"))
+}
+
+/// 集群 `monitor` 不可用时的降级：`_resolve/index` 与 `_alias` 属于
+/// `indices:admin/*` 动作，`view_index_metadata`/`read` 索引权限即可访问，
+/// 且 ES 安全层会把结果过滤为当前账号可见的索引。
+async fn list_indices_via_metadata(client: &EsClient) -> Result<Vec<String>, String> {
+    // 优先 `_resolve/index`：同时覆盖普通索引与数据流（data stream）。
+    if let Some(names) = resolve_index_names(client).await? {
+        return Ok(names);
+    }
+    // 再退回 `_alias`：以对象 key 形式返回具体索引名。
+    alias_index_names(client).await
+}
+
+/// 通过 `GET /_resolve/index/*` 列举索引。该端点缺权限时返回 `Ok(None)`，
+/// 以便继续尝试 `_alias`；其它错误如实上抛。
+async fn resolve_index_names(client: &EsClient) -> Result<Option<Vec<String>>, String> {
+    let resp =
+        client.get("/_resolve/index/*").send().await.map_err(|e| format!("Elasticsearch request failed: {e}"))?;
+    let status = client.response_status(&resp);
+    if status == StatusCode::FORBIDDEN || status == StatusCode::UNAUTHORIZED {
+        return Ok(None);
+    }
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("Elasticsearch error: {body}"));
+    }
+    let body: ResolveIndexResponse = resp.json().await.map_err(|e| format!("Elasticsearch parse error: {e}"))?;
+    let names = body.indices.into_iter().chain(body.data_streams).map(|item| item.name);
+    Ok(Some(normalize_index_names(names)))
+}
+
+/// 通过 `GET /_alias` 列举索引（对象 key 即索引名）。
+async fn alias_index_names(client: &EsClient) -> Result<Vec<String>, String> {
+    let resp = client.get("/_alias").send().await.map_err(|e| format!("Elasticsearch request failed: {e}"))?;
     if !client.response_status(&resp).is_success() {
         let body = resp.text().await.unwrap_or_default();
         return Err(format!("Elasticsearch error: {body}"));
     }
-    let indices: Vec<CatIndex> = resp.json().await.map_err(|e| format!("Elasticsearch parse error: {e}"))?;
-    let mut names: Vec<String> = indices.into_iter().filter(|i| !i.index.starts_with('.')).map(|i| i.index).collect();
-    names.sort();
-    Ok(names)
+    let body: serde_json::Map<String, Value> =
+        resp.json().await.map_err(|e| format!("Elasticsearch parse error: {e}"))?;
+    Ok(normalize_index_names(body.into_iter().map(|(name, _)| name)))
 }
 
 pub async fn get_columns(client: &EsClient, index: &str) -> Result<Vec<crate::db::ColumnInfo>, String> {
@@ -2095,7 +2216,8 @@ fn parse_aggregations(aggs: &serde_json::Map<String, serde_json::Value>) -> (Vec
 mod tests {
     use super::{
         build_count_documents_body, build_find_documents_body, elasticsearch_accept_invalid_certs,
-        elasticsearch_base_url_fallbacks, redact_elasticsearch_url, EsClient, SearchResponse,
+        elasticsearch_base_url_fallbacks, elasticsearch_index_grouping, group_index_names, normalize_index_names,
+        redact_elasticsearch_url, EsClient, SearchResponse,
     };
     use serde_json::json;
     use std::time::Duration;
@@ -2140,6 +2262,77 @@ mod tests {
         assert_eq!(request.path, "/_nodes/stats/jvm?pretty");
         assert_eq!(request.body, None);
         assert_eq!(request.body_kind, super::ElasticsearchRestBodyKind::Json);
+    }
+
+    #[test]
+    fn normalize_index_names_filters_sorts_and_dedups() {
+        let names = normalize_index_names(
+            [".kibana", "ngx-log-2", "ngx-log-1", "ngx-log-1", ".security-7"].into_iter().map(String::from),
+        );
+        // 去掉点前缀内部索引、排序、去重。
+        assert_eq!(names, vec!["ngx-log-1".to_string(), "ngx-log-2".to_string()]);
+    }
+
+    #[test]
+    fn group_index_names_off_by_default() {
+        // 缺省配置 → 关闭聚合，原样返回。
+        assert!(elasticsearch_index_grouping(None).is_none());
+        let raw = vec!["a-2026.08.04".to_string(), "a-2026.08.05".to_string()];
+        assert_eq!(group_index_names(raw.clone(), None), raw);
+    }
+
+    #[test]
+    fn group_index_names_tenant_level_with_capture_group() {
+        // 保留 `@<第一段>`（到第一个下划线），其后全部折叠成 `*`。用中性占位名。
+        let cfg = serde_json::json!({ "indexGroupingPattern": r"^([^@]*@[^_]+)_.*$" });
+        let re = elasticsearch_index_grouping(Some(&cfg));
+        let out = group_index_names(
+            vec![
+                "svc@alpha_r1-2026.08.06@0-000001".to_string(),
+                "svc@alpha_r1-2026.08.07@0-000001".to_string(),
+                "svc@beta_r1-2026.08.06@0-000001".to_string(),
+                "svc_err-2026.08.06@0-000001".to_string(), // 无 @ → 不匹配 → 原样
+            ],
+            re.as_ref(),
+        );
+        assert_eq!(
+            out,
+            vec!["svc@alpha*".to_string(), "svc@beta*".to_string(), "svc_err-2026.08.06@0-000001".to_string(),]
+        );
+    }
+
+    #[test]
+    fn group_index_names_tail_strip_without_capture_group() {
+        // 无捕获组：按 ES 惯例剥掉“日期+滚动号”尾巴，`${1}` 为空即替换成 `*`。
+        let cfg = serde_json::json!({ "indexGroupingPattern": r"[-_.@]\d{4}[-_.]?\d{2}[-_.]?\d{2}.*$" });
+        let re = elasticsearch_index_grouping(Some(&cfg));
+        let out = group_index_names(
+            vec!["logs-2026.08.06".to_string(), "logs-2026.08.07".to_string(), "orders-2026.08.01".to_string()],
+            re.as_ref(),
+        );
+        assert_eq!(out, vec!["logs*".to_string(), "orders*".to_string()]);
+    }
+
+    #[test]
+    fn group_index_names_mixed_tenant_and_plain_scheme() {
+        // 同一条正则同时处理：真租户（@后跟字母）折到 @租户；无租户的按名字剥日期尾巴；
+        // 普通非时间序列索引保持原样。区分点：真租户 @ 后是字母，滚动号 @ 后是数字。用中性名。
+        let cfg = serde_json::json!({ "indexGroupingPattern": r"^([^@]*@[a-zA-Z][a-zA-Z0-9]*|[^-@]*)[-_.@].*$" });
+        let re = elasticsearch_index_grouping(Some(&cfg));
+        let out = group_index_names(
+            vec![
+                "svc_err-2026.08.10@0-000001".to_string(), // 无租户 → svc_err*
+                "svc_err-2026.08.11@0-000001".to_string(),
+                "svc@alpha_r1-2026.08.10@0-000001".to_string(), // 带区域租户 → svc@alpha*
+                "svc@beta-2026.08.10@0-000001".to_string(),     // 无区域租户 → svc@beta*
+                "catalog".to_string(),                          // 普通索引无尾巴 → 原样
+            ],
+            re.as_ref(),
+        );
+        assert_eq!(
+            out,
+            vec!["catalog".to_string(), "svc@alpha*".to_string(), "svc@beta*".to_string(), "svc_err*".to_string(),]
+        );
     }
 
     #[test]

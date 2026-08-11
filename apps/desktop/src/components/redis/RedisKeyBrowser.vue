@@ -26,6 +26,7 @@ import type { RedisKeyInfo, RedisScanResult, RedisValue, HistoryEntry } from "@/
 import { uuid } from "@/lib/common/utils";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useSettingsStore } from "@/stores/settingsStore";
+import { continuousQueryResultMaxRows } from "@/lib/dataGrid/queryResultRowLimit";
 import {
   appendRedisKeysToTreeIndex,
   canBuildRedisFuzzyTree,
@@ -171,7 +172,7 @@ const loadingEmptyText = computed(() => (isValueSearchMode.value && valueQuery.v
 const redisKeySeparator = computed(() => connectionStore.getConfig(props.connectionId)?.redis_key_separator ?? ":");
 const redisScanPageSize = computed(() => connectionStore.getConfig(props.connectionId)?.redis_scan_page_size ?? REDIS_SCAN_PAGE_SIZE_DEFAULT);
 const redisInfiniteScrollEnabled = computed(() => settingsStore.editorSettings.infiniteScroll);
-const redisInfiniteScrollMaxKeys = computed(() => settingsStore.editorSettings.infiniteScrollMaxRows);
+const redisInfiniteScrollMaxKeys = computed(() => continuousQueryResultMaxRows(settingsStore.editorSettings.queryResultMaxRowsEnabled, settingsStore.editorSettings.queryResultMaxRows));
 watch(redisKeySeparator, () => {
   if (flatKeys.value.length === 0) return;
   if (useFlatKeySearchRows.value) {

@@ -71,7 +71,8 @@ export type DatabaseType =
   | "jdbc"
   | "mq"
   | "mqtt"
-  | "nacos";
+  | "nacos"
+  | "consul";
 
 export function isElasticsearchCompatibleDatabaseType(dbType?: DatabaseType): boolean {
   return dbType === "elasticsearch" || dbType === "easysearch";
@@ -104,6 +105,7 @@ export interface CompletionAssistantRequest {
   search_in_definitions?: boolean;
   parent_schema?: string | null;
   parent_name?: string | null;
+  parent_type?: "package" | "type" | null;
   match_mode?: CompletionAssistantMatchMode | null;
 }
 
@@ -434,6 +436,8 @@ export interface ObjectInfo {
   updated_at?: string | null;
   parent_schema?: string | null;
   parent_name?: string | null;
+  trigger?: TriggerInfo | null;
+  xugu_type_members_expandable?: boolean | null;
 }
 
 export interface ObjectStatistics {
@@ -557,6 +561,13 @@ export interface TriggerInfo {
   name: string;
   event: string;
   timing: string;
+  level?: string | null;
+  condition?: string | null;
+  language?: string | null;
+  enabled?: boolean | null;
+  valid?: boolean | null;
+  comment?: string | null;
+  created_at?: string | null;
   statement?: string | null;
 }
 
@@ -886,6 +897,8 @@ export type TreeNodeType =
   | "table-search-control"
   | "load-more"
   | "column"
+  | "type-attribute"
+  | "type-method"
   | "index"
   | "fkey"
   | "trigger"
@@ -899,6 +912,8 @@ export type TreeNodeType =
   | "etcd-dashboard"
   | "etcd-access-control"
   | "zookeeper-root"
+  | "consul-root"
+  | "consul-overview"
   | "mongo-db"
   | "mongo-gridfs"
   | "mongo-buckets"
@@ -947,6 +962,12 @@ export interface TreeNode {
   signature?: string;
   customTypeKind?: CustomTypeKind;
   hasMembers?: boolean;
+  /** Owning programmable object for a nested metadata member. */
+  parentName?: string;
+  parentSchema?: string;
+  parentType?: TreeNodeType;
+  /** Set only for XuguDB object types whose members can be loaded lazily. */
+  xuguTypeMembersExpandable?: boolean;
   tableType?: string;
   comment?: string | null;
   valid?: boolean | null;
@@ -1111,6 +1132,8 @@ export interface QueryTab {
     | "etcd-dashboard"
     | "etcd-access-control"
     | "zookeeper"
+    | "consul"
+    | "consul-overview"
     | "mq"
     | "mqtt"
     | "nacos"

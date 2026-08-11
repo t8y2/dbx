@@ -173,12 +173,13 @@ import {
   replaceColumnValueFilterCondition,
 } from "@/lib/dataGrid/dataGridColumnFilter";
 import { normalizeResultPageSize, resultPageSizeMenuOptions } from "@/lib/dataGrid/paginationPageSize";
+import { continuousQueryResultMaxRows } from "@/lib/dataGrid/queryResultRowLimit";
 import { allNullColumnIndexes } from "@/lib/dataGrid/dataGridColumnVisibility";
 import { buildDataGridColumnLookupItems, dataGridColumnCommentFor, filterDataGridColumnLookupItems } from "@/lib/dataGrid/dataGridColumnLookup";
 import { uniqueDataGridColumnOrderKeys } from "@/lib/dataGrid/dataGridColumnOrder";
 import { dataGridColumnLayoutScopeKey, TABLE_DATA_GRID_COLUMN_ORDER_CHANGED_EVENT, tableDataGridColumnOrderScopeKey } from "@/lib/dataGrid/dataGridColumnLayoutStorage";
 import { summarizeSelection } from "@/lib/dataGrid/gridSelection";
-import { captureDataGridSelection, reactivatesCellSelectionAfterRestore, restoreDataGridSelection, type PersistedDataGridSelection } from "@/lib/dataGrid/dataGridSelectionPersistence";
+import { captureDataGridSelection, restoreDataGridSelection, type PersistedDataGridSelection } from "@/lib/dataGrid/dataGridSelectionPersistence";
 import { dataGridFrameCoversRow, dataGridSelectionEdgeMask, dataGridSelectionFrameKindAtCell, dataGridSelectionUsesOuterFrame, resolveDataGridSelectionFrames } from "@/lib/dataGrid/dataGridSelectionFrames";
 import {
   createDataGridCellContextMenuItems,
@@ -528,7 +529,7 @@ const dataGridRenderMode = computed(() => settingsStore.editorSettings.dataGridR
 const dataGridSearchMode = computed(() => settingsStore.editorSettings.dataGridSearchMode);
 const compactDataGridToolbar = computed(() => isDataGridToolbarCompact(dataGridTopbarWidth.value, dataGridViewportWidth.value, DATA_GRID_CONDITION_TOOLBAR_MIN_WIDTH));
 const infiniteScrollEnabled = computed(() => props.paginationEnabled && settingsStore.editorSettings.infiniteScroll);
-const infiniteScrollMaxRows = computed(() => settingsStore.editorSettings.infiniteScrollMaxRows);
+const infiniteScrollMaxRows = computed(() => continuousQueryResultMaxRows(settingsStore.editorSettings.queryResultMaxRowsEnabled, settingsStore.editorSettings.queryResultMaxRows));
 const expandedCellEditor = ref<{ rowId: number; col: number } | null>(null);
 
 function headerColumnComment(column: string): string {
@@ -3874,6 +3875,7 @@ const {
   selectionFocus,
   finishCellSelection,
   extendCellSelection,
+  restoreCellSelectionState,
   cellIsSelected,
   columnIsSelected,
   selectedRangeStart,
@@ -3924,20 +3926,9 @@ function restoreSelectionAfterRefresh(snapshot: PersistedDataGridSelection) {
   } else if (restored.kind === "columns") {
     selectedColumnIndexes.value = new Set(restored.columnIndexes);
   } else if (restored.kind === "range") {
-    selectionAnchor.value = restored.anchor;
-    selectionFocus.value = restored.focus;
-    isSelectingAll.value = restored.selectingAll;
+    restoreCellSelectionState({ anchor: restored.anchor, focus: restored.focus, selectingAll: restored.selectingAll });
   } else {
-    selectedCellKeys.value = restored.cellKeys;
-  }
-
-  // 恢复 range/离散单元格选区后重新激活 cell-selection 拖拽状态机：refresh watcher
-  // 在 restore 前调的 clearCellSelection 已把 isSelectingCells 置 false，而它仅在
-  // beginCellSelection（鼠标按下）时才重新置 true。不在此补偿，则恢复的高亮虽能显示，
-  // 但 extendCellSelection/handleSelectionPointerMove 的 isSelectingCells 守卫会挡住
-  // 拖拽扩展，用户必须重新点一次单元格。行选/列选是独立状态机，不应激活。
-  if (reactivatesCellSelectionAfterRestore(restored)) {
-    isSelectingCells.value = true;
+    restoreCellSelectionState({ cellKeys: restored.cellKeys });
   }
 
   if (restored.kind === "columns") return;
@@ -6464,7 +6455,10 @@ function applyGeneratedSelectionValue(kind: CellValueGenerationKind, startValue 
   } finally {
     commitBatch();
   }
-  if (applied) toast(t("grid.generatedValuesApplied", { count: cells.length }));
+  if (applied) {
+    toast(t("grid.generatedValuesApplied", { count: cells.length }));
+    void nextTick(() => window.requestAnimationFrame(() => gridRef.value?.focus({ preventScroll: true })));
+  }
   return applied;
 }
 

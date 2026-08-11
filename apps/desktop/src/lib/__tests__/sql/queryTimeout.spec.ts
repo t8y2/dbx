@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { frontendQueryTimeoutSecsForSql, queryTimeoutSecsForConnection } from "@/lib/sql/queryTimeout";
+import { frontendQueryTimeoutDelayMs, frontendQueryTimeoutSecsForSql, queryTimeoutSecsForConnection } from "@/lib/sql/queryTimeout";
 
 describe("queryTimeout", () => {
   it("lets PostgreSQL row queries use the backend inactivity timeout", () => {
@@ -17,6 +17,12 @@ describe("queryTimeout", () => {
   it("keeps the existing frontend guard for other database types", () => {
     expect(frontendQueryTimeoutSecsForSql("SELECT * FROM sample_records LIMIT 2000", "mysql", 30)).toBe(60);
     expect(queryTimeoutSecsForConnection({ query_timeout_secs: undefined })).toBe(30);
+  });
+
+  it("does not schedule frontend timeouts beyond the browser timer limit", () => {
+    expect(frontendQueryTimeoutDelayMs(60)).toBe(60_000);
+    expect(frontendQueryTimeoutDelayMs(11_401_200)).toBeUndefined();
+    expect(frontendQueryTimeoutDelayMs(0)).toBeUndefined();
   });
 
   it("uses the global timeout only for inheriting connections", () => {

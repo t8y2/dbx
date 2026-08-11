@@ -524,6 +524,27 @@ pub async fn insert_document_core(
     }
 }
 
+pub async fn insert_document_preserving_bson_types_core(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    collection: &str,
+    doc_json: &str,
+    routing: Option<&str>,
+) -> Result<String, String> {
+    ensure_document_pool(state, connection_id).await?;
+    let connections = state.connections.read().await;
+    match connections.get(connection_id).ok_or("Not found")? {
+        PoolKind::MongoDb(client) => {
+            mongo_driver::insert_document_extended_json(client, database, collection, doc_json).await
+        }
+        _ => {
+            drop(connections);
+            insert_document_core(state, connection_id, database, collection, doc_json, routing).await
+        }
+    }
+}
+
 pub async fn update_document_core(
     state: &AppState,
     connection_id: &str,

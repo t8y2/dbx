@@ -38,6 +38,11 @@ export function isRenamableMongoCollection(name: string, kind: MongoCollectionKi
   return kind === "collection" && !name.startsWith("system.");
 }
 
+/** Only ordinary collections have transferable options, documents, and indexes. */
+export function isCloneableMongoCollection(name: string, kind: MongoCollectionKind = "collection"): boolean {
+  return kind === "collection" && !name.startsWith("system.");
+}
+
 export function mongoCollectionKindFromNode(node: Pick<TreeNode, "meta">): MongoCollectionKind {
   const meta = node.meta;
   if (meta && "collectionKind" in meta && meta.collectionKind) {
@@ -60,6 +65,22 @@ export function toMongoCollectionKind(kind?: string | null): MongoCollectionKind
 
 export function mongoRenameCollectionPreview(database: string, oldName: string, newName: string): string {
   return `db.getSiblingDB(${JSON.stringify(database)}).getCollection(${JSON.stringify(oldName)}).renameCollection(${JSON.stringify(newName)})`;
+}
+
+/**
+ * DBX executes these stable primitives in the backend instead of MongoDB's
+ * deprecated clone commands, which vary across server generations.
+ */
+export function mongoCloneCollectionPreview(database: string, sourceName: string, targetName: string): string {
+  const db = `db.getSiblingDB(${JSON.stringify(database)})`;
+  const source = `${db}.getCollection(${JSON.stringify(sourceName)})`;
+  const target = `${db}.getCollection(${JSON.stringify(targetName)})`;
+  return [
+    `// DBX copies collection options, documents, and non-_id indexes.`,
+    `${db}.createCollection(${JSON.stringify(targetName)}, /* source options */);`,
+    `${source}.find({}).forEach(function (document) { ${target}.insertOne(document); });`,
+    `// Recreate source indexes except the target's automatic _id index.`,
+  ].join("\n");
 }
 
 export function mongoDropCollectionPreview(database: string, collection: string): string {

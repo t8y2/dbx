@@ -16,6 +16,7 @@ import { applyMongoFindSort } from "@/lib/mongo/mongoShellCommand";
 import { uuid } from "@/lib/common/utils";
 import { simpleDataGridOrderByReferencesMissingColumn, type DataGridSortMode } from "@/lib/dataGrid/dataGridSort";
 import type { DataGridReloadIntent } from "@/lib/dataGrid/dataGridToolbar";
+import { continuousQueryResultMaxRows } from "@/lib/dataGrid/queryResultRowLimit";
 import { queryResultBaseSql, queryResultExecutionSql } from "@/lib/tabs/tabPresentation";
 import { sqlExecutionTargetCapabilities } from "@/lib/database/sqlExecutionTargetCapabilities";
 
@@ -265,7 +266,13 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
     const tab = activeTab.value;
     if (!tab) return;
     const appendResult = settingsStore.editorSettings.infiniteScroll && offset > 0 && offset === tab.result?.rows.length;
-    const appendOptions = appendResult ? { appendResult: { maxRows: settingsStore.editorSettings.infiniteScrollMaxRows } } : {};
+    const appendOptions = appendResult
+      ? {
+          appendResult: {
+            maxRows: continuousQueryResultMaxRows(settingsStore.editorSettings.queryResultMaxRowsEnabled, settingsStore.editorSettings.queryResultMaxRows),
+          },
+        }
+      : {};
     if (tab.mode !== "data") {
       const sortColumns = visibleQuerySortColumns(tab.result?.columns ?? [], tab.result?.hidden_column_indexes, tab.resultSortColumnIndex ?? -1);
       const hasDatabaseSort = !!tab.result?.hidden_column_indexes?.length && tab.resultSortMode === "database" && !!tab.resultSortDirection && !!tab.resultSortColumn && !!sortColumns;

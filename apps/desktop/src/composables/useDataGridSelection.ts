@@ -30,6 +30,13 @@ export interface UseDataGridSelectionOptions {
   runtimeScope?: DataGridRuntimeScope;
 }
 
+interface RestoredCellSelectionState {
+  anchor?: CellPosition;
+  focus?: CellPosition;
+  cellKeys?: ReadonlySet<string>;
+  selectingAll?: boolean;
+}
+
 const AUTO_SCROLL_EDGE_SIZE = 40;
 const AUTO_SCROLL_MAX_SPEED = 28;
 type RowSelectionOperation = "replace" | "add" | "remove";
@@ -406,6 +413,15 @@ export function useDataGridSelection(options: UseDataGridSelectionOptions) {
     stopSelectionAutoScroll();
   }
 
+  function restoreCellSelectionState(state: RestoredCellSelectionState) {
+    finishCellSelection();
+    selectedColumnIndexes.value = new Set();
+    selectedCellKeys.value = new Set(state.cellKeys ?? []);
+    selectionAnchor.value = state.anchor ?? null;
+    selectionFocus.value = state.focus ?? null;
+    isSelectingAll.value = state.selectingAll ?? false;
+  }
+
   function stopSelectionAutoScroll() {
     if (!selectionAutoScrollFrame) return;
     cancelAnimationFrame(selectionAutoScrollFrame);
@@ -566,6 +582,7 @@ export function useDataGridSelection(options: UseDataGridSelectionOptions) {
     selectAllCells,
     extendCellSelectionTo,
     finishCellSelection,
+    restoreCellSelectionState,
     beginCellSelection,
     extendCellSelection,
     cellIsSelected,

@@ -33,7 +33,7 @@ import * as api from "@/lib/backend/api";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { applyParsedConnectionUrl, normalizeMongoConnectionString, parseConnectionUrl } from "@/lib/connection/connectionUrl";
 import { buildOracleTnsConnectionString, normalizeOracleTnsAdminPath, parseOracleTnsConnectionString } from "@/lib/connection/oracleTnsConnection";
-import { parseConnectionDeepLink, type ConnectionDeepLinkDraft } from "@/lib/connection/connectionDeepLink";
+import { connectionDeepLinkServiceHydrationValue, parseConnectionDeepLink, parseServiceConnectionUrl, type ConnectionDeepLinkDraft } from "@/lib/connection/connectionDeepLink";
 import { connectionUrlPlaceholder as getUrlPlaceholder } from "@/lib/connection/connectionPresentation";
 import { parseGaussdbHosts, serializeGaussdbHosts, type GaussdbHostEntry } from "@/lib/connection/gaussdbHosts";
 import { h2ConnectionModeForConfig, h2FileJdbcUrlWithPath, h2FilePathFromJdbcUrl, isH2SplitJdbcUrl, type H2ConnectionMode } from "@/lib/database/h2Connection";
@@ -53,6 +53,7 @@ import { prestoSqlBuiltinDriverPaths } from "@/lib/database/prestoSqlBuiltinDriv
 import { JDBCX_DEFAULT_URL, JDBCX_DRIVER_PROFILE, JDBCX_JDBC_DRIVER_CLASS, ensureJdbcxRuntimeDrivers, isJdbcxRuntimeBundle, isJdbcxRuntimePath, jdbcxHighPrivilegeExtensionsEnabled, setJdbcxHighPrivilegeExtensionsEnabled } from "@/lib/database/jdbcxBuiltinDriver";
 import { SQLITE_DATABASE_FILE_EXTENSIONS } from "@/lib/database/databaseFileDetection";
 import { connectionAttemptOriginalErrorMessage, connectionAttemptTimeoutMessage, connectionAttemptTimeoutMs } from "@/lib/connection/connectionAttemptTimeout";
+import { consulAgentAddressesMatch } from "@/lib/consul/agentTarget";
 import { appendConnectionErrorHints, isJdbcMissingRuntimeDependencyError } from "@/lib/connection/connectionErrorHints";
 import { preventDialogDocumentSelectAll } from "@/lib/connection/dialogTextSelection";
 import { postgresTlsModeForForm } from "@/lib/connection/postgresTlsMode";
@@ -104,7 +105,7 @@ import { oceanbaseModeConnectionPatch, oceanbaseSubModeFromConfig } from "@/lib/
 import { translateBackendError } from "@/i18n/backend-errors";
 import { applyHiveKerberosSubmitConfig, hiveKerberosFormConfig, type HiveKerberosAuthMode } from "@/lib/database/hiveKerberosOptions";
 import { hasCloudflareD1Credentials, isCloudflareD1Connection, normalizeCloudflareD1Connection } from "@/lib/connection/cloudflareD1";
-import { buildElasticsearchExternalConfig, elasticsearchConnectionModeFromConfig, elasticsearchConnectivityCheckPathFromConfig, elasticsearchKibanaBasePathFromConfig, type ElasticsearchConnectionMode } from "@/lib/connection/elasticsearchKibanaProxy";
+import { buildElasticsearchExternalConfig, elasticsearchConnectionModeFromConfig, elasticsearchConnectivityCheckPathFromConfig, elasticsearchIndexGroupingPatternFromConfig, elasticsearchKibanaBasePathFromConfig, type ElasticsearchConnectionMode } from "@/lib/connection/elasticsearchKibanaProxy";
 import { GAUSSDB_M_JDBC_DRIVER_CLASS, gaussdbConnectionMode, gaussdbIdentifierQuoteStyle, setGaussdbConnectionMode, setGaussdbIdentifierQuoteStyle, supportsGaussdbIdentifierQuoteStyle, type GaussdbConnectionMode, type GaussdbIdentifierQuoteStyle } from "@/lib/database/jdbcDialect";
 import { normalizeStoredConnectionDatabase } from "@/lib/database/sqliteNamespace";
 import {
@@ -317,6 +318,7 @@ const defaultForm = (): ConnectionForm => ({
 const elasticsearchConnectionMode = ref<ElasticsearchConnectionMode>("direct");
 const elasticsearchKibanaBasePath = ref("");
 const elasticsearchConnectivityCheckPath = ref("");
+const elasticsearchIndexGroupingPattern = ref("");
 const elasticsearchConnectionPorts = ref<Record<ElasticsearchConnectionMode, number>>({
   direct: 9200,
   kibana: 5601,
@@ -327,6 +329,7 @@ function resetElasticsearchProxyFields(externalConfig?: unknown) {
   elasticsearchConnectionMode.value = mode;
   elasticsearchKibanaBasePath.value = elasticsearchKibanaBasePathFromConfig(externalConfig);
   elasticsearchConnectivityCheckPath.value = elasticsearchConnectivityCheckPathFromConfig(externalConfig);
+  elasticsearchIndexGroupingPattern.value = elasticsearchIndexGroupingPatternFromConfig(externalConfig);
   elasticsearchConnectionPorts.value = {
     direct: mode === "direct" ? form.value.port : 9200,
     kibana: mode === "kibana" ? form.value.port : 5601,
@@ -809,6 +812,22 @@ const nacosTlsSkipVerify = ref(false);
 const nacosMetricsMode = ref<NacosMetricsMode>("auto");
 const nacosMetricsUrl = ref("");
 const nacosPageSize = ref(20);
+type ConsulConsistency = "default" | "stale" | "consistent";
+const consulServerAddr = ref("http://127.0.0.1:8500");
+const consulDatacenter = ref("");
+const consulNamespace = ref("");
+const consulPartition = ref("");
+const consulConsistency = ref<ConsulConsistency>("default");
+const consulTlsSkipVerify = ref(false);
+const consulAgentTargetNode = ref("");
+const consulAgentTargetAddress = ref("");
+const consulMeshVisible = ref(false);
+const consulOperatorVisible = ref(false);
+const consulOperatorSnapshotRestoreEnabled = ref(false);
+const consulOperatorAutopilotWriteEnabled = ref(false);
+const consulOperatorRaftWriteEnabled = ref(false);
+const consulOperatorKeyringWriteEnabled = ref(false);
+const consulOperatorLicenseWriteEnabled = ref(false);
 
 // --- MQTT-specific form fields ---
 const mqttHost = ref("127.0.0.1");
@@ -1131,6 +1150,7 @@ const driverProfiles: Record<
   rocketmq: { type: "mq", port: 9876, user: "", label: "Apache RocketMQ", icon: "rocketmq", host: "127.0.0.1" },
   rabbitmq: { type: "mq", port: 5672, user: "", label: "RabbitMQ", icon: "rabbitmq", host: "127.0.0.1" },
   nacos: { type: "nacos", port: 8848, user: "nacos", label: "Nacos", icon: "nacos", host: "127.0.0.1" },
+  consul: { type: "consul", port: 8500, user: "", label: "Consul", icon: "consul", host: "127.0.0.1" },
   mqtt: { type: "mqtt", port: 1883, user: "", label: "MQTT", icon: "mqtt", host: "127.0.0.1" },
   iris: { type: "iris", port: 1972, user: "_SYSTEM", label: "IRIS", icon: "iris" },
   influxdb: { type: "influxdb", port: 8086, user: "", label: "InfluxDB", icon: "InfluxDB" },
@@ -1349,6 +1369,31 @@ function hydrateNacosFields(value: unknown) {
     return;
   }
   resetNacosFields(value as Partial<NacosAdminConfig>);
+}
+
+function resetConsulFields(value?: Record<string, unknown>) {
+  consulServerAddr.value = String(value?.serverAddr || value?.server_addr || "http://127.0.0.1:8500");
+  consulDatacenter.value = String(value?.datacenter || value?.consulDatacenter || value?.consul_datacenter || "");
+  consulNamespace.value = String(value?.namespace || value?.consulNamespace || value?.consul_namespace || "");
+  consulPartition.value = String(value?.partition || value?.consulPartition || value?.consul_partition || "");
+  const consistency = String(value?.consistency || value?.consulConsistency || value?.consul_consistency || "default");
+  consulConsistency.value = (["default", "stale", "consistent"].includes(consistency) ? consistency : "default") as ConsulConsistency;
+  consulTlsSkipVerify.value = Boolean(value?.tlsSkipVerify || value?.tls_skip_verify || value?.consulTlsSkipVerify || value?.consul_tls_skip_verify);
+  const agentTarget = value?.agentTarget || value?.agent_target;
+  const target = agentTarget && typeof agentTarget === "object" ? (agentTarget as Record<string, unknown>) : undefined;
+  consulAgentTargetNode.value = String(target?.node || "");
+  consulAgentTargetAddress.value = String(target?.address || "");
+  consulMeshVisible.value = Boolean(value?.consulMeshVisible);
+  consulOperatorVisible.value = Boolean(value?.consulOperatorVisible);
+  consulOperatorSnapshotRestoreEnabled.value = Boolean(value?.consulOperatorSnapshotRestoreEnabled);
+  consulOperatorAutopilotWriteEnabled.value = Boolean(value?.consulOperatorAutopilotWriteEnabled);
+  consulOperatorRaftWriteEnabled.value = Boolean(value?.consulOperatorRaftWriteEnabled);
+  consulOperatorKeyringWriteEnabled.value = Boolean(value?.consulOperatorKeyringWriteEnabled);
+  consulOperatorLicenseWriteEnabled.value = Boolean(value?.consulOperatorLicenseWriteEnabled);
+}
+
+function hydrateConsulFields(value: unknown) {
+  resetConsulFields(value && typeof value === "object" ? (value as Record<string, unknown>) : undefined);
 }
 
 function resetMqttFields(config?: Partial<MqttConnectionConfig>) {
@@ -1683,6 +1728,46 @@ function buildNacosAdminConfig(): NacosAdminConfig {
     metricsUrl,
     pageSize: Number(nacosPageSize.value) > 0 ? Number(nacosPageSize.value) : 20,
   };
+}
+
+function buildConsulExternalConfig(): Record<string, unknown> {
+  let parsed: URL;
+  try {
+    parsed = new URL(consulServerAddr.value.trim());
+  } catch {
+    throw new Error(t("connection.consulAddressInvalid"));
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") throw new Error(t("connection.consulAddressInvalid"));
+  if (parsed.username || parsed.password || parsed.search || parsed.hash) throw new Error(t("connection.consulAddressInvalid"));
+  const targetNode = consulAgentTargetNode.value.trim();
+  const targetAddress = consulAgentTargetAddress.value.trim();
+  if (!!targetNode !== !!targetAddress) throw new Error(t("connection.consulAgentTargetIncomplete"));
+  if (targetAddress && !consulAgentAddressesMatch(targetAddress, parsed.hostname)) {
+    throw new Error(t("connection.consulAgentTargetAddressMismatch"));
+  }
+  return {
+    serverAddr: parsed.toString().replace(/\/$/, ""),
+    datacenter: consulDatacenter.value.trim() || undefined,
+    namespace: consulNamespace.value.trim() || undefined,
+    partition: consulPartition.value.trim() || undefined,
+    consistency: consulConsistency.value,
+    tlsSkipVerify: consulTlsSkipVerify.value || undefined,
+    agentTarget: targetNode ? { node: targetNode, address: targetAddress } : undefined,
+    consulMeshVisible: consulMeshVisible.value || undefined,
+    consulOperatorVisible: consulOperatorVisible.value || undefined,
+    consulOperatorSnapshotRestoreEnabled: consulOperatorSnapshotRestoreEnabled.value || undefined,
+    consulOperatorAutopilotWriteEnabled: consulOperatorAutopilotWriteEnabled.value || undefined,
+    consulOperatorRaftWriteEnabled: consulOperatorRaftWriteEnabled.value || undefined,
+    consulOperatorKeyringWriteEnabled: consulOperatorKeyringWriteEnabled.value || undefined,
+    consulOperatorLicenseWriteEnabled: consulOperatorLicenseWriteEnabled.value || undefined,
+  };
+}
+
+function applyConsulServerAddr(config: LegacyConnectionConfig, serverAddr: string) {
+  const parsed = new URL(serverAddr);
+  config.host = parsed.hostname;
+  config.port = Number(parsed.port) || (parsed.protocol === "https:" ? 443 : 8500);
+  config.ssl = parsed.protocol === "https:";
 }
 
 function errorMessage(error: unknown): string {
@@ -2262,6 +2347,14 @@ function applyProfile(val: string, preserveConnectionFields = false) {
       form.value.connection_string = undefined;
       form.value.url_params = "";
     }
+    if (profile.type === "consul") {
+      resetConsulFields();
+      form.value.database = undefined;
+      form.value.connection_string = undefined;
+      form.value.username = "";
+      form.value.password = "";
+      form.value.url_params = "";
+    }
     if (profile.type === "mqtt") {
       resetMqttFields();
       form.value.database = undefined;
@@ -2383,6 +2476,11 @@ watch(
         hydrateNacosFields(config.external_config);
       } else {
         resetNacosFields();
+      }
+      if (config.db_type === "consul") {
+        hydrateConsulFields(config.external_config);
+      } else {
+        resetConsulFields();
       }
       if (config.db_type === "mqtt") {
         hydrateMqttFields(config.external_config);
@@ -2640,6 +2738,7 @@ const iconTypeMap: Record<string, string> = {
   rocketmq: "rocketmq",
   rabbitmq: "rabbitmq",
   nacos: "nacos",
+  consul: "consul",
   mqtt: "mqtt",
   dm: "dm",
   h2: "h2",
@@ -2745,6 +2844,7 @@ const dbOptions: DbOption[] = [
   { value: "rabbitmq", label: "RabbitMQ" },
   { value: "mqtt", label: "MQTT" },
   { value: "nacos", label: "Nacos" },
+  { value: "consul", label: "Consul" },
   { value: "influxdb", label: "InfluxDB" },
   { value: "victoriametrics", label: "VictoriaMetrics" },
   { value: "iris", label: "IRIS" },
@@ -2805,7 +2905,7 @@ const dbCategoryDefinitions: Array<{
   {
     key: "registry_config",
     titleKey: "connection.databaseCategoryRegistryConfig",
-    optionValues: ["etcd", "zookeeper", "nacos"],
+    optionValues: ["etcd", "zookeeper", "nacos", "consul"],
   },
 ];
 
@@ -2921,6 +3021,7 @@ const tlsCapableDatabaseTypes = new Set<DatabaseType>([
   "dameng",
   "redis",
   "etcd",
+  "consul",
   "clickhouse",
   "elasticsearch",
   "easysearch",
@@ -2935,6 +3036,7 @@ const tlsCapableDatabaseTypes = new Set<DatabaseType>([
 const supportsTlsToggle = computed(() => tlsCapableDatabaseTypes.has(form.value.db_type));
 const supportsCaCertificatePath = computed(() => form.value.db_type === "clickhouse" || form.value.db_type === "victoriametrics");
 const supportsGenericUrlParams = computed(() => form.value.db_type !== "manticoresearch" && form.value.db_type !== "hbase");
+const showGenericUrlParamsHint = computed(() => form.value.db_type === "mysql" || form.value.db_type === "doris" || form.value.db_type === "starrocks");
 const bareMysqlProfiles = new Set(["doris", "selectdb", "oceanbase"]);
 const supportsMysqlTlsOptions = computed(() => form.value.db_type === "starrocks" || (form.value.db_type === "mysql" && !bareMysqlProfiles.has(selectedType.value)));
 const supportsMysqlCleartextPasswordAuth = computed(() => form.value.db_type === "mysql" && !bareMysqlProfiles.has(selectedType.value));
@@ -3279,6 +3381,7 @@ const hasRequiredConnectionTarget = computed(() => {
   if (form.value.db_type === "zookeeper") return !!(form.value.host || form.value.connection_string || connectionUrlInput.value.trim());
   if (form.value.db_type === "mqtt") return !!mqttHost.value.trim() && mqttPort.value > 0;
   if (form.value.db_type === "nacos") return !!nacosServerAddr.value.trim();
+  if (form.value.db_type === "consul") return !!consulServerAddr.value.trim();
   if (isCloudflareD1Connection(form.value)) return hasCloudflareD1Credentials(form.value);
   if (isH2FileMode.value) return !!(form.value.host.trim() || h2FilePathFromJdbcUrl(form.value.connection_string));
   return !!(form.value.host || (mongoUseUrl.value && form.value.connection_string) || (form.value.db_type === "jdbc" && form.value.connection_string) || connectionUrlInput.value.trim());
@@ -3399,7 +3502,7 @@ function clearEditedConnectionErrorAfterSuccessfulTest() {
 
 function applyConnectionUrlToForm(input: string): boolean {
   try {
-    const draft = parseConnectionDeepLink(input);
+    const draft = parseConnectionDeepLink(input) ?? parseServiceConnectionUrl(input);
     if (draft) {
       applyConnectionDraftToForm({ ...draft, oneTime: undefined });
       resetTestState();
@@ -3679,6 +3782,20 @@ function connectionConfigForSubmit(id: string, generatedName = ""): ConnectionCo
     config.database = undefined;
     config.connection_string = undefined;
     config.url_params = "";
+  } else if (config.db_type === "consul") {
+    const consulConfig = buildConsulExternalConfig();
+    config.external_config = consulConfig;
+    applyConsulServerAddr(config, String(consulConfig.serverAddr));
+    config.client_cert_path = config.client_cert_path?.trim() || "";
+    config.client_key_path = config.client_key_path?.trim() || "";
+    if ((config.client_cert_path && !config.client_key_path) || (!config.client_cert_path && config.client_key_path)) {
+      throw new Error(t("connection.etcdClientCertPairRequired"));
+    }
+    config.username = "";
+    config.password = config.password.trim();
+    config.database = undefined;
+    config.connection_string = undefined;
+    config.url_params = "";
   } else if (config.db_type === "mqtt") {
     const mqttConfig = buildMqttExternalConfig();
     config.external_config = mqttConfig;
@@ -3706,7 +3823,7 @@ function connectionConfigForSubmit(id: string, generatedName = ""): ConnectionCo
     config.database = "metrics";
     config.username = config.username.trim();
   } else if (config.db_type === "elasticsearch") {
-    config.external_config = buildElasticsearchExternalConfig(elasticsearchConnectionMode.value, elasticsearchKibanaBasePath.value, elasticsearchConnectivityCheckPath.value);
+    config.external_config = buildElasticsearchExternalConfig(elasticsearchConnectionMode.value, elasticsearchKibanaBasePath.value, elasticsearchConnectivityCheckPath.value, elasticsearchIndexGroupingPattern.value);
   } else if (config.db_type === "sqlserver") {
     config.external_config = sqlServerPortExplicitFromConfig(config) ? { portExplicit: true } : undefined;
   } else if (supportsGaussdbIdentifierQuoteStyle(config)) {
@@ -3813,12 +3930,12 @@ function connectionConfigForSubmit(id: string, generatedName = ""): ConnectionCo
     if ((config.client_cert_path && !config.client_key_path) || (!config.client_cert_path && config.client_key_path)) {
       throw new Error(t("connection.etcdClientCertPairRequired"));
     }
-  } else {
+  } else if (form.value.db_type !== "consul") {
     config.etcd_endpoints = undefined;
     config.client_cert_path = undefined;
     config.client_key_path = undefined;
   }
-  if (config.db_type !== "mysql" && config.db_type !== "clickhouse" && config.db_type !== "etcd" && config.db_type !== "starrocks" && config.db_type !== "mongodb" && config.db_type !== "victoriametrics") {
+  if (config.db_type !== "mysql" && config.db_type !== "clickhouse" && config.db_type !== "etcd" && config.db_type !== "consul" && config.db_type !== "starrocks" && config.db_type !== "mongodb" && config.db_type !== "victoriametrics") {
     config.ca_cert_path = undefined;
   } else {
     config.ca_cert_path = config.ca_cert_path?.trim() || "";
@@ -4570,7 +4687,24 @@ function resetForm() {
 const submittedOneTimePrefillKey = ref<string | null>(null);
 
 function oneTimePrefillKey(draft: ConnectionDeepLinkDraft) {
-  return JSON.stringify([draft.name, draft.dbType, draft.driverProfile, draft.driverLabel, draft.host, draft.port, draft.portExplicit, draft.username, draft.password, draft.database, draft.urlParams, draft.ssl, draft.connectionString, draft.oracleConnectionType, draft.useMongoUrl]);
+  return JSON.stringify([
+    draft.name,
+    draft.dbType,
+    draft.driverProfile,
+    draft.driverLabel,
+    draft.host,
+    draft.port,
+    draft.portExplicit,
+    draft.username,
+    draft.password,
+    draft.database,
+    draft.urlParams,
+    draft.ssl,
+    draft.connectionString,
+    draft.oracleConnectionType,
+    draft.useMongoUrl,
+    draft.serviceConfig,
+  ]);
 }
 
 function submitOneTimePrefill(draft: ConnectionDeepLinkDraft) {
@@ -4605,6 +4739,11 @@ function applyConnectionDraftToConfig(config: Omit<ConnectionConfig, "id">, draf
 function applyConnectionDraftToForm(draft: ConnectionDeepLinkDraft) {
   applyProfile(draft.driverProfile);
   form.value = applyConnectionDraftToConfig(form.value, draft);
+  if (draft.serviceConfig?.kind === "consul") {
+    hydrateConsulFields(connectionDeepLinkServiceHydrationValue(draft.serviceConfig));
+  } else if (draft.serviceConfig?.kind === "nacos") {
+    hydrateNacosFields(connectionDeepLinkServiceHydrationValue(draft.serviceConfig));
+  }
   oracleTnsAdminPath.value = parseOracleTnsConnectionString(form.value.connection_string)?.tnsAdmin || "";
   selectedType.value = draft.driverProfile;
   if (form.value.db_type === "h2") {
@@ -5442,7 +5581,7 @@ function openExternalUrl(url: string) {
 
             <TabsContent value="connection" class="m-0 flex min-h-0 flex-1 flex-col overflow-hidden">
               <div class="connection-form-body grid min-h-0 flex-1 scroll-pb-6 gap-4 overflow-y-auto pt-4 pr-2 pb-6" :class="{ 'connection-form-body--nacos': form.db_type === 'nacos' }">
-                <div v-if="!isJdbcConnection && form.db_type !== 'nacos'" class="grid grid-cols-4 items-center gap-4">
+                <div v-if="!isJdbcConnection && form.db_type !== 'nacos' && form.db_type !== 'consul'" class="grid grid-cols-4 items-center gap-4">
                   <Label :class="connectionLabelClass">{{ t("connection.connectionUrlOptional") }}</Label>
                   <div class="col-span-3 flex items-center gap-1">
                     <Input v-model="connectionUrlInput" class="flex-1" :placeholder="connectionUrlPlaceholder" @keydown.enter.prevent="applyConnectionUrl" />
@@ -6174,6 +6313,80 @@ function openExternalUrl(url: string) {
                   </div>
                 </template>
 
+                <!-- Consul KV: HTTP endpoint, ACL token and scope -->
+                <template v-else-if="form.db_type === 'consul'">
+                  <div class="grid grid-cols-4 items-center gap-4">
+                    <Label :class="connectionLabelClass">{{ t("connection.consulAddress") }}</Label>
+                    <Input v-model="consulServerAddr" class="col-span-3" placeholder="http://127.0.0.1:8500" />
+                  </div>
+                  <div class="grid grid-cols-4 items-center gap-4">
+                    <Label :class="connectionLabelClass">{{ t("connection.consulToken") }}</Label>
+                    <PasswordInput v-model="form.password" class="col-span-3" :placeholder="t('connection.consulTokenPlaceholder')" />
+                  </div>
+                  <div class="grid grid-cols-4 items-center gap-4">
+                    <Label :class="connectionLabelClass">{{ t("connection.consulDatacenter") }}</Label>
+                    <Input v-model="consulDatacenter" class="col-span-3" placeholder="dc1" />
+                  </div>
+                  <div class="grid grid-cols-4 items-center gap-4">
+                    <Label :class="connectionLabelClass">{{ t("connection.consulNamespace") }}</Label>
+                    <Input v-model="consulNamespace" class="col-span-3" placeholder="default" />
+                  </div>
+                  <div class="grid grid-cols-4 items-center gap-4">
+                    <Label :class="connectionLabelClass">{{ t("connection.consulPartition") }}</Label>
+                    <Input v-model="consulPartition" class="col-span-3" placeholder="default" />
+                  </div>
+                  <div class="grid grid-cols-4 items-center gap-4">
+                    <Label :class="connectionLabelSmallClass">{{ t("connection.consulAgentTargetNode") }}</Label>
+                    <Input v-model="consulAgentTargetNode" class="col-span-3" placeholder="consul-client-1" />
+                  </div>
+                  <div class="grid grid-cols-4 items-start gap-4">
+                    <Label :class="connectionLabelTopClass">{{ t("connection.consulAgentTargetAddress") }}</Label>
+                    <div class="col-span-3 space-y-1">
+                      <Input v-model="consulAgentTargetAddress" placeholder="127.0.0.1" />
+                      <p class="text-xs text-muted-foreground">{{ t("connection.consulAgentTargetHint") }}</p>
+                    </div>
+                  </div>
+                  <div class="grid grid-cols-4 items-center gap-4">
+                    <Label :class="connectionLabelClass">{{ t("connection.consulConsistency") }}</Label>
+                    <Select v-model="consulConsistency">
+                      <SelectTrigger class="col-span-3 h-9"><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="default">{{ t("connection.consulConsistencyDefault") }}</SelectItem>
+                        <SelectItem value="stale">{{ t("connection.consulConsistencyStale") }}</SelectItem>
+                        <SelectItem value="consistent">{{ t("connection.consulConsistencyConsistent") }}</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div class="grid grid-cols-4 items-center gap-4">
+                    <Label :class="connectionLabelClass">{{ t("connection.consulTlsSkipVerify") }}</Label>
+                    <div class="col-span-3 flex items-center gap-2">
+                      <Switch v-model="consulTlsSkipVerify" />
+                      <span class="text-xs text-muted-foreground">{{ t("connection.consulTlsSkipVerifyHint") }}</span>
+                    </div>
+                  </div>
+                  <div class="grid grid-cols-4 items-start gap-4">
+                    <Label :class="connectionLabelTopClass">{{ t("connection.consulMeshFeatures") }}</Label>
+                    <div class="col-span-3 flex items-start justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                      <div class="space-y-1">
+                        <div class="text-sm font-medium">{{ t("connection.consulMeshVisible") }}</div>
+                        <p class="text-xs text-muted-foreground">{{ t("connection.consulMeshVisibleHint") }}</p>
+                      </div>
+                      <Switch v-model="consulMeshVisible" class="mt-0.5 shrink-0" />
+                    </div>
+                  </div>
+                  <div class="grid grid-cols-4 items-start gap-4">
+                    <Label :class="connectionLabelTopClass">{{ t("connection.consulOperatorWrites") }}</Label>
+                    <div class="col-span-3 grid gap-2 rounded-md border bg-muted/20 px-3 py-2 text-xs">
+                      <label class="flex items-center gap-2"><input v-model="consulOperatorVisible" type="checkbox" />{{ t("connection.consulOperatorVisible") }}</label>
+                      <label class="flex items-center gap-2"><input v-model="consulOperatorSnapshotRestoreEnabled" type="checkbox" />{{ t("connection.consulOperatorSnapshotRestore") }}</label>
+                      <label class="flex items-center gap-2"><input v-model="consulOperatorAutopilotWriteEnabled" type="checkbox" />{{ t("connection.consulOperatorAutopilot") }}</label>
+                      <label class="flex items-center gap-2"><input v-model="consulOperatorRaftWriteEnabled" type="checkbox" />{{ t("connection.consulOperatorRaft") }}</label>
+                      <label class="flex items-center gap-2"><input v-model="consulOperatorKeyringWriteEnabled" type="checkbox" />{{ t("connection.consulOperatorKeyring") }}</label>
+                      <label class="flex items-center gap-2"><input v-model="consulOperatorLicenseWriteEnabled" type="checkbox" />{{ t("connection.consulOperatorLicense") }}</label>
+                    </div>
+                  </div>
+                </template>
+
                 <!-- etcd: endpoints, user, password, TLS -->
                 <template v-else-if="form.db_type === 'etcd'">
                   <div class="grid grid-cols-4 items-center gap-4">
@@ -6438,10 +6651,10 @@ function openExternalUrl(url: string) {
                   <div class="grid grid-cols-4 items-center gap-4">
                     <Label :class="connectionLabelClass">{{ t("connection.mqttTls") }}</Label>
                     <div class="col-span-3 flex items-center gap-2">
-                      <Switch :checked="mqttTls" @update:checked="mqttTls = $event" />
+                      <Switch v-model="mqttTls" />
                       <Label class="text-sm" :class="mqttTls ? '' : 'text-muted-foreground'">TLS</Label>
                       <template v-if="mqttTls">
-                        <Switch :checked="mqttTlsSkipVerify" @update:checked="mqttTlsSkipVerify = $event" class="ml-4" />
+                        <Switch v-model="mqttTlsSkipVerify" class="ml-4" />
                         <Label class="text-sm" :class="mqttTlsSkipVerify ? '' : 'text-muted-foreground'">{{ t("connection.mqttTlsSkipVerify") }}</Label>
                       </template>
                     </div>
@@ -6666,6 +6879,14 @@ function openExternalUrl(url: string) {
                     <Input v-model="elasticsearchConnectivityCheckPath" class="col-span-3" :placeholder="t('connection.elasticsearchConnectivityCheckPathPlaceholder')" @input="resetTestState" />
                   </div>
 
+                  <div v-if="form.db_type === 'elasticsearch'" class="grid grid-cols-4 items-center gap-4">
+                    <Label :class="connectionLabelSmallClass">{{ t("connection.elasticsearchIndexGroupingPattern") }}</Label>
+                    <div class="col-span-3 space-y-1">
+                      <Input v-model="elasticsearchIndexGroupingPattern" :placeholder="t('connection.elasticsearchIndexGroupingPatternPlaceholder')" @input="resetTestState" />
+                      <p class="text-xs text-muted-foreground">{{ t("connection.elasticsearchIndexGroupingPatternHint") }}</p>
+                    </div>
+                  </div>
+
                   <div v-if="form.driver_profile === 'gbase8s'" class="grid grid-cols-4 items-center gap-4">
                     <Label :class="connectionLabelSmallClass">{{ t("connection.gbaseServer") }}</Label>
                     <div class="col-span-3 space-y-1">
@@ -6833,8 +7054,8 @@ function openExternalUrl(url: string) {
                     </label>
                   </div>
 
-                  <div v-if="supportsGenericUrlParams" class="grid grid-cols-4 items-start gap-4">
-                    <Label :class="connectionLabelClass">{{ t("connection.urlParams") }}</Label>
+                  <div v-if="supportsGenericUrlParams" class="connection-url-params-row grid grid-cols-4 items-start gap-4" :class="{ 'connection-url-params-row--compact': !showGenericUrlParamsHint, 'connection-url-params-row--with-hint': showGenericUrlParamsHint }">
+                    <Label :class="[connectionLabelClass, 'connection-url-params-label']">{{ t("connection.urlParams") }}</Label>
                     <div class="col-span-3 space-y-1.5">
                       <Input
                         v-model="form.url_params"
@@ -6858,7 +7079,7 @@ function openExternalUrl(url: string) {
                                           : 'sslmode=prefer'
                         "
                       />
-                      <p v-if="form.db_type === 'mysql' || form.db_type === 'doris' || form.db_type === 'starrocks'" class="text-xs leading-5 text-muted-foreground">
+                      <p v-if="showGenericUrlParamsHint" class="text-xs leading-5 text-muted-foreground">
                         {{ t("connection.localInfilePathHint") }}
                       </p>
                     </div>
@@ -6997,7 +7218,7 @@ function openExternalUrl(url: string) {
 
             <TabsContent v-if="supportsTlsToggle" value="tls" class="m-0 flex min-h-0 flex-1 flex-col overflow-hidden">
               <div class="connection-form-body grid min-h-0 flex-1 scroll-pb-6 gap-4 overflow-y-auto overflow-x-hidden pt-4 pr-2 pb-6">
-                <div v-if="!supportsPostgresTlsOptions && !supportsMysqlTlsOptions" class="grid grid-cols-4 items-center gap-4">
+                <div v-if="!supportsPostgresTlsOptions && !supportsMysqlTlsOptions && form.db_type !== 'consul'" class="grid grid-cols-4 items-center gap-4">
                   <Label :class="connectionLabelSmallClass">SSL/TLS</Label>
                   <label class="col-span-3 flex items-center gap-2 cursor-pointer">
                     <input type="checkbox" v-model="tlsEnabled" class="mr-0" />
@@ -7050,7 +7271,7 @@ function openExternalUrl(url: string) {
                   </label>
                 </div>
 
-                <template v-if="form.db_type === 'etcd'">
+                <template v-if="form.db_type === 'etcd' || form.db_type === 'consul'">
                   <div class="grid grid-cols-4 items-start gap-4">
                     <Label :class="connectionLabelSmallPaddedClass">
                       <span class="inline-flex items-center justify-end gap-1">
@@ -7603,8 +7824,8 @@ function openExternalUrl(url: string) {
                         :key="hop.id"
                         type="button"
                         draggable="true"
-                        class="flex min-h-10 items-center gap-2 rounded-md border px-2 text-left text-xs transition-colors"
-                        :class="hop.id === selectedTransportLayer?.id ? 'border-primary bg-primary/5' : 'hover:bg-muted/50'"
+                        class="connection-transport-layer-option flex min-h-10 items-center gap-2 rounded-md border px-2 text-left text-xs transition-colors"
+                        :class="hop.id === selectedTransportLayer?.id ? 'connection-transport-layer-option--selected border-primary bg-primary/5' : 'hover:bg-muted/50'"
                         @click="selectedTransportLayerId = hop.id"
                         @dragstart="draggedTransportLayerId = hop.id"
                         @dragover.prevent
@@ -8188,26 +8409,44 @@ function openExternalUrl(url: string) {
 
 /* Legacy responsive layout rules live in public/connection-dialog-legacy.css
  * so the production build cannot rewrite their classic media queries. */
-@supports not (color: oklch(0.5 0.1 180)) {
-  .connection-db-category-option--selected {
-    color: rgb(23, 23, 23) !important;
-    background-color: rgba(23, 23, 23, 0.08) !important;
-  }
+html.dbx-legacy-webview .connection-db-category-option--selected {
+  color: rgb(23, 23, 23) !important;
+  background-color: rgba(23, 23, 23, 0.08) !important;
+}
 
-  .connection-db-category-option--selected:hover {
-    color: rgb(23, 23, 23) !important;
-    background-color: rgba(23, 23, 23, 0.12) !important;
-  }
+html.dbx-legacy-webview .connection-db-category-option--selected:hover {
+  color: rgb(23, 23, 23) !important;
+  background-color: rgba(23, 23, 23, 0.12) !important;
+}
 
-  .dark .connection-db-category-option--selected {
-    color: rgb(244, 244, 245) !important;
-    background-color: rgba(255, 255, 255, 0.1) !important;
-  }
+html.dbx-legacy-webview .connection-transport-layer-option--selected {
+  color: rgb(23, 23, 23) !important;
+  border-color: rgb(23, 23, 23) !important;
+  background-color: rgba(23, 23, 23, 0.08) !important;
+}
 
-  .dark .connection-db-category-option--selected:hover {
-    color: rgb(244, 244, 245) !important;
-    background-color: rgba(255, 255, 255, 0.14) !important;
-  }
+html.dbx-legacy-webview .connection-transport-layer-option--selected:hover {
+  background-color: rgba(23, 23, 23, 0.12) !important;
+}
+
+html.dbx-legacy-webview.dark .connection-db-category-option--selected {
+  color: rgb(244, 244, 245) !important;
+  background-color: rgba(255, 255, 255, 0.1) !important;
+}
+
+html.dbx-legacy-webview.dark .connection-db-category-option--selected:hover {
+  color: rgb(244, 244, 245) !important;
+  background-color: rgba(255, 255, 255, 0.14) !important;
+}
+
+html.dbx-legacy-webview.dark .connection-transport-layer-option--selected {
+  color: rgb(244, 244, 245) !important;
+  border-color: rgb(244, 244, 245) !important;
+  background-color: rgba(255, 255, 255, 0.1) !important;
+}
+
+html.dbx-legacy-webview.dark .connection-transport-layer-option--selected:hover {
+  background-color: rgba(255, 255, 255, 0.14) !important;
 }
 
 .connection-db-picker-option {

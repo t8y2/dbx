@@ -1,10 +1,26 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useSyncExternalStore } from "react";
 import type { ChangelogRelease } from "@/lib/changelog";
 import { ChevronDown, Tag } from "lucide-react";
 
 const PAGE_SIZE = 5;
+
+const DESKTOP_MEDIA = "(min-width: 761px)";
+
+function subscribeToDesktop(onChange: () => void) {
+  const mql = window.matchMedia(DESKTOP_MEDIA);
+  mql.addEventListener("change", onChange);
+  return () => mql.removeEventListener("change", onChange);
+}
+
+function getDesktopSnapshot() {
+  return window.matchMedia(DESKTOP_MEDIA).matches;
+}
+
+function getDesktopServerSnapshot() {
+  return false;
+}
 
 const sectionLabels: Record<string, Record<string, string>> = {
   added: { en: "New Features", cn: "新功能" },
@@ -22,11 +38,11 @@ function formatDate(dateStr: string, lang: string) {
   return d.toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" });
 }
 
-function ReleaseCard({ release, lang, featured }: { release: ChangelogRelease; lang: string; featured: boolean }) {
+function ReleaseCard({ release, lang, featured, expanded }: { release: ChangelogRelease; lang: string; featured: boolean; expanded: boolean }) {
   const t = lang === "cn" ? { publishedOn: "发布于", download: "下载", seeGitHub: "查看 GitHub Release 获取详情" } : { publishedOn: "Published on", download: "Download", seeGitHub: "See GitHub Release for details" };
 
   return (
-    <details className="changelog-release border-t border-[rgba(155,176,205,0.18)]" open={featured || undefined}>
+    <details className="changelog-release border-t border-[rgba(155,176,205,0.18)]" open={featured || expanded || undefined}>
       <summary className="changelog-release-summary min-h-[72px] cursor-pointer list-none items-center justify-between gap-4 py-4 text-[#e2e8f0]">
         <span className="min-w-0">
           <strong className="block truncate text-[17px] font-[720]">Release {release.tag}</strong>
@@ -84,10 +100,13 @@ function ReleaseCard({ release, lang, featured }: { release: ChangelogRelease; l
 export function ChangelogList({ releases, lang }: { releases: ChangelogRelease[]; lang: string }) {
   const [count, setCount] = useState(PAGE_SIZE);
   const sentinelRef = useRef<HTMLDivElement>(null);
+  const isDesktop = useSyncExternalStore(subscribeToDesktop, getDesktopSnapshot, getDesktopServerSnapshot);
+  const visible = releases.slice(0, count);
+  const hasMore = count < releases.length;
 
   useEffect(() => {
     const node = sentinelRef.current;
-    if (!node) return;
+    if (!node || !hasMore) return;
 
     const observer = new IntersectionObserver(
       ([entry]) => {
@@ -100,15 +119,12 @@ export function ChangelogList({ releases, lang }: { releases: ChangelogRelease[]
 
     observer.observe(node);
     return () => observer.disconnect();
-  }, [releases.length]);
-
-  const visible = releases.slice(0, count);
-  const hasMore = count < releases.length;
+  }, [count, hasMore, releases.length]);
 
   return (
     <>
       {visible.map((release, index) => (
-        <ReleaseCard key={release.tag} release={release} lang={lang} featured={index === 0} />
+        <ReleaseCard key={release.tag} release={release} lang={lang} featured={index === 0} expanded={isDesktop} />
       ))}
       {hasMore && (
         <div ref={sentinelRef} className="flex justify-center py-12 text-[#64748b] text-sm">

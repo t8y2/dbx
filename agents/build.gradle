@@ -7,7 +7,7 @@ def legacyStandaloneProjects = ['mongodb', 'kafka', 'rocketmq'] as Set
 def pooledJdbcProjects = [
     'access', 'bigquery', 'dameng', 'databend', 'databricks', 'db2', 'exasol',
     'firebird', 'gbase8a', 'gbase8s', 'goldendb', 'h2', 'h2-legacy', 'highgo', 'hive',
-    'informix', 'iotdb', 'iris', 'kylin', 'oceanbase-oracle', 'oscar', 'saphana',
+    'informix', 'iris', 'kylin', 'oceanbase-oracle', 'oscar', 'saphana',
     'snowflake', 'spark', 'sqlserver-legacy', 'sundb', 'teradata', 'trino', 'uxdb',
     'vertica', 'yashandb'
 ] as Set

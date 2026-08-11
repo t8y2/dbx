@@ -23,6 +23,7 @@ import org.apache.rocketmq.remoting.protocol.body.ConsumerConnection;
 import org.apache.rocketmq.remoting.protocol.route.QueueData;
 import org.apache.rocketmq.remoting.protocol.route.TopicRouteData;
 import org.apache.rocketmq.common.message.MessageQueue;
+import org.apache.rocketmq.tools.admin.DefaultMQAdminExt;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import java.util.ArrayList;
@@ -69,6 +70,28 @@ class RocketMqAgentTest {
             IllegalArgumentException.class,
             () -> RocketMqAgent.namesrvAddr(JsonParser.parseString("{}").getAsJsonObject())
         );
+    }
+
+    @Test
+    void applySocksProxyConfiguresAllRocketMqDestinations() {
+        JsonObject conn = JsonParser.parseString("""
+            {
+              "socks_proxy": {
+                "host": "127.0.0.1",
+                "port": 41080,
+                "username": "proxy-user",
+                "password": "proxy-secret"
+              }
+            }
+            """).getAsJsonObject();
+        DefaultMQAdminExt admin = new DefaultMQAdminExt();
+
+        assertTrue(RocketMqAgent.applySocksProxy(admin, conn));
+
+        JsonObject routes = JsonParser.parseString(admin.getSocksProxyConfig()).getAsJsonObject();
+        assertEquals("127.0.0.1:41080", routes.getAsJsonObject("0.0.0.0/0").get("addr").getAsString());
+        assertEquals("proxy-user", routes.getAsJsonObject("0.0.0.0/0").get("username").getAsString());
+        assertEquals("proxy-secret", routes.getAsJsonObject("0.0.0.0/0").get("password").getAsString());
     }
 
     @Test
@@ -137,6 +160,18 @@ class RocketMqAgentTest {
         // 172.15/172.32 are not RFC1918 — leave reachable public/non-private hosts alone.
         assertEquals("172.15.0.1:10911", RocketMqAgent.remapBrokerAddrForClient("172.15.0.1:10911", conn));
         assertEquals("172.32.0.1:10911", RocketMqAgent.remapBrokerAddrForClient("172.32.0.1:10911", conn));
+    }
+
+    @Test
+    void remapBrokerAddrPreservesAdvertisedAddressWhenSocksProxyIsActive() {
+        JsonObject conn = JsonParser.parseString("""
+            {
+              "namesrv_addr": "172.19.191.166:9876",
+              "socks_proxy": {"host":"127.0.0.1","port":41080}
+            }
+            """).getAsJsonObject();
+
+        assertEquals("172.18.0.3:10911", RocketMqAgent.remapBrokerAddrForClient("172.18.0.3:10911", conn));
     }
 
     @Test

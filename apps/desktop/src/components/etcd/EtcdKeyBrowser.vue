@@ -295,6 +295,7 @@ const labels = computed(() => ({
   editKey: t("etcd.editKey"),
   delete: t("etcd.delete"),
   deleteTitle: t("etcd.deleteTitle"),
+  keyLabel: t("etcd.key"),
   keyPlaceholder: t("etcd.keyPlaceholder"),
   keyRequired: t("etcd.keyRequired"),
   saved: t("etcd.saved"),
@@ -303,6 +304,9 @@ const labels = computed(() => ({
   rename: t("etcd.rename"),
   clone: t("etcd.clone"),
   copyKey: t("etcd.copyKey"),
+  copy: t("grid.copy"),
+  copied: t("grid.copied"),
+  copyFailed: t("grid.copyFailed"),
   export: t("etcd.export"),
   history: t("etcd.history"),
   restore: t("etcd.restore"),
@@ -1077,6 +1081,9 @@ defineExpose({ focusSearch, refresh });
       :read-only="readOnly"
       :enable-multi-select="true"
       :on-watch-key="openWatchForKey"
+      export-format="dbx-etcd-bundle"
+      export-file-extension=".dbx-etcd.json"
+      export-fallback-name="etcd-key"
       :lease-options="leaseOptions"
       :on-lease-options-requested="refreshLeaseOptions"
       @refresh-requested="refreshTtlCapability"

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   autoMapImportColumns,
   buildTableImportParseOptions,
+  defaultTableImportEmptyStringAsNull,
   formatTableImportElapsed,
   nextTableImportWizardStep,
   previousTableImportWizardStep,
@@ -13,6 +14,14 @@ import {
 } from "@/lib/table/tableImport";
 
 describe("tableImport", () => {
+  it("preserves explicit empty strings by default for Excel only", () => {
+    expect(defaultTableImportEmptyStringAsNull("excel")).toBe(false);
+    expect(defaultTableImportEmptyStringAsNull("csv")).toBe(true);
+    expect(defaultTableImportEmptyStringAsNull("tsv")).toBe(true);
+    expect(defaultTableImportEmptyStringAsNull("delimited")).toBe(true);
+    expect(defaultTableImportEmptyStringAsNull("json")).toBe(true);
+  });
+
   it("formats import elapsed time for progress and terminal summaries", () => {
     expect(formatTableImportElapsed(0)).toBe("0 ms");
     expect(formatTableImportElapsed(999)).toBe("999 ms");

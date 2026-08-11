@@ -322,6 +322,8 @@ test("formats other extended JSON values through EJSON.deserialize", () => {
 });
 
 test("keeps normal Mongo values readable and unsafe Int64 editable", () => {
+  assert.equal(mongoDocumentDisplayValue(null), "NULL");
+  assert.equal(mongoDocumentDisplayValue(undefined), undefined);
   assert.equal(mongoDocumentDisplayValue(42), 42);
   assert.equal(mongoDocumentDisplayValue(3.5), 3.5);
   assert.equal(mongoDocumentDisplayValue('ISODate("2026-07-14T00:00:00Z")'), 'ISODate("2026-07-14T00:00:00Z")');
@@ -338,5 +340,23 @@ test("builds edits for Int32, Double, Date, and unsafe Int64", () => {
   ]);
   assert.deepEqual(buildMongoUpdateDocument(changes, ["_id", "int32", "double", "createdAt", "unsafe"]), {
     $set: { int32: 42, double: 3.5, createdAt: { $date: "2026-07-14T00:00:00Z" }, unsafe: { $numberLong: "9007199254740993" } },
+  });
+});
+
+test("keeps explicit Mongo null fields distinct from missing fields during grid edits", () => {
+  const columns = ["_id", "nullable", "missing"];
+
+  assert.deepEqual(buildMongoUpdateDocument(new Map([[1, "NULL"]]), columns, { _id: "1", nullable: null }), {
+    $set: { nullable: null },
+  });
+  assert.deepEqual(buildMongoUpdateDocument(new Map([[1, "NULL"]]), columns, { _id: "1", nullable: "NULL" }), {
+    $set: { nullable: "NULL" },
+  });
+  assert.deepEqual(buildMongoUpdateDocument(new Map([[2, null]]), columns, { _id: "1", nullable: null }), {
+    $unset: { missing: "" },
+  });
+  assert.deepEqual(applyMongoGridChangesToDocument({ _id: "1", nullable: null }, new Map([[1, "NULL"]]), columns), {
+    _id: "1",
+    nullable: null,
   });
 });

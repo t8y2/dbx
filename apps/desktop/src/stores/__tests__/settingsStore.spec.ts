@@ -1,7 +1,7 @@
 import { createPinia, setActivePinia } from "pinia";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { isProxy } from "vue";
-import { EXECUTE_MODE_CURRENT_DEFAULT_VERSION, enforceRightSidebarPanelExclusivity, normalizeAiConfig, normalizeDesktopSettings, normalizeEditorSettings, normalizeMcpGlobalPolicy, type RightSidebarPanelState, transitionRightSidebarPanels } from "@/stores/settingsStore";
+import { DEFAULT_EDITOR_SETTINGS, EXECUTE_MODE_CURRENT_DEFAULT_VERSION, enforceRightSidebarPanelExclusivity, normalizeAiConfig, normalizeDesktopSettings, normalizeEditorSettings, normalizeMcpGlobalPolicy, type RightSidebarPanelState, transitionRightSidebarPanels } from "@/stores/settingsStore";
 import type { AiConfigItem } from "@/types/ai";
 
 describe("normalizeEditorSettings", () => {
@@ -50,6 +50,12 @@ describe("normalizeEditorSettings", () => {
         executeModeDefaultVersion: EXECUTE_MODE_CURRENT_DEFAULT_VERSION,
       }).executeMode,
     ).toBe("all");
+  });
+
+  it("keeps blank-line execute-all disabled by default and preserves an explicit opt-in", () => {
+    expect(normalizeEditorSettings({}).executeAllOnBlankLine).toBe(false);
+    expect(normalizeEditorSettings({ executeAllOnBlankLine: false }).executeAllOnBlankLine).toBe(false);
+    expect(normalizeEditorSettings({ executeAllOnBlankLine: true }).executeAllOnBlankLine).toBe(true);
   });
 
   it("enables automatic table aliases by default", () => {
@@ -482,6 +488,22 @@ describe("settingsStore AI API key normalization", () => {
       cursorCliEnv: { HTTPS_PROXY: "http://127.0.0.1:7890", EMPTY: "" },
     });
   });
+
+  it("normalizes CodeBuddy CLI path and environment settings", () => {
+    expect(
+      normalizeAiConfig({
+        provider: "codebuddy-cli",
+        codebuddyCliPath: "  ~/.local/bin/codebuddy  ",
+        codebuddyCliEnv: { HTTPS_PROXY: "http://127.0.0.1:7890", EMPTY: null as unknown as string },
+      }),
+    ).toMatchObject({
+      provider: "codebuddy-cli",
+      endpoint: "",
+      model: "default",
+      codebuddyCliPath: "~/.local/bin/codebuddy",
+      codebuddyCliEnv: { HTTPS_PROXY: "http://127.0.0.1:7890", EMPTY: "" },
+    });
+  });
 });
 
 describe("settingsStore MCP policy persistence", () => {
@@ -527,6 +549,108 @@ describe("settingsStore MCP policy persistence", () => {
   });
 });
 
+describe("settingsStore persisted settings initialization", () => {
+  beforeEach(() => {
+    vi.resetModules();
+    setActivePinia(createPinia());
+  });
+
+  it("does not treat an editor settings read failure as an empty record", async () => {
+    const loadEditorSettings = vi.fn().mockRejectedValue(new Error("storage temporarily unavailable"));
+    const saveEditorSettings = vi.fn().mockResolvedValue(undefined);
+    vi.doMock("@/lib/backend/api", () => ({ loadEditorSettings, saveEditorSettings }));
+
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const store = useSettingsStore();
+
+    await expect(store.initEditorSettings()).rejects.toThrow("storage temporarily unavailable");
+    expect(store.isEditorSettingsLoaded).toBe(false);
+    expect(saveEditorSettings).not.toHaveBeenCalled();
+  });
+
+  it("can retry editor settings initialization without losing saved values", async () => {
+    const loadEditorSettings = vi.fn().mockRejectedValueOnce(new Error("storage temporarily unavailable")).mockResolvedValueOnce({
+      fontSize: 17,
+      theme: "xcode-dark",
+      executeMode: "all",
+      executeModeDefaultVersion: 1,
+      updateNotificationsEnabled: false,
+    });
+    const saveEditorSettings = vi.fn().mockResolvedValue(undefined);
+    vi.doMock("@/lib/backend/api", () => ({ loadEditorSettings, saveEditorSettings }));
+
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const store = useSettingsStore();
+
+    await expect(store.initEditorSettings()).rejects.toThrow("storage temporarily unavailable");
+    store.updateEditorSettings({ appLayout: "separated" });
+    expect(saveEditorSettings).not.toHaveBeenCalled();
+    await store.initEditorSettings();
+
+    expect(store.isEditorSettingsLoaded).toBe(true);
+    expect(store.editorSettings).toMatchObject({
+      fontSize: 17,
+      theme: "xcode-dark",
+      executeMode: "all",
+      updateNotificationsEnabled: false,
+      appLayout: "separated",
+    });
+    expect(saveEditorSettings).toHaveBeenCalledWith(expect.objectContaining({ fontSize: 17, theme: "xcode-dark", appLayout: "separated" }));
+  });
+
+  it("shares concurrent initialization and applies startup changes after saved settings load", async () => {
+    let resolveLoad!: (value: unknown) => void;
+    const loadEditorSettings = vi.fn(
+      () =>
+        new Promise((resolve) => {
+          resolveLoad = resolve;
+        }),
+    );
+    const saveEditorSettings = vi.fn().mockResolvedValue(undefined);
+    vi.doMock("@/lib/backend/api", () => ({ loadEditorSettings, saveEditorSettings }));
+
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const store = useSettingsStore();
+    const firstInitialization = store.initEditorSettings();
+    const secondInitialization = store.initEditorSettings();
+
+    store.updateEditorSettings({
+      appLayout: "separated",
+      tabLayout: "wrap",
+      uiFontFamily: "pre-load default snapshot",
+    });
+    expect(saveEditorSettings).not.toHaveBeenCalled();
+    expect(loadEditorSettings).toHaveBeenCalledOnce();
+
+    resolveLoad({
+      appLayout: "classic",
+      tabLayout: "scroll",
+      uiFontFamily: "persisted font",
+      toolbarItems: { ...DEFAULT_EDITOR_SETTINGS.toolbarItems, history: false },
+      snippets: [{ id: "persisted", label: "Persisted", prefix: "persisted", body: "SELECT 42", enabled: true }],
+      executeModeDefaultVersion: EXECUTE_MODE_CURRENT_DEFAULT_VERSION,
+    });
+    await Promise.all([firstInitialization, secondInitialization]);
+
+    expect(store.editorSettings).toMatchObject({
+      appLayout: "separated",
+      tabLayout: "wrap",
+      uiFontFamily: "pre-load default snapshot",
+      toolbarItems: expect.objectContaining({ history: false }),
+      snippets: [expect.objectContaining({ id: "persisted", body: "SELECT 42" })],
+    });
+    expect(saveEditorSettings).toHaveBeenCalledWith(
+      expect.objectContaining({
+        appLayout: "separated",
+        tabLayout: "wrap",
+        uiFontFamily: "pre-load default snapshot",
+        toolbarItems: expect.objectContaining({ history: false }),
+        snippets: [expect.objectContaining({ id: "persisted", body: "SELECT 42" })],
+      }),
+    );
+  });
+});
+
 describe("settingsStore sidebar connection sort persistence", () => {
   beforeEach(() => {
     vi.resetModules();
@@ -534,11 +658,13 @@ describe("settingsStore sidebar connection sort persistence", () => {
   });
 
   it("persists the selected alphabetical sort mode", async () => {
+    const loadEditorSettings = vi.fn().mockResolvedValue(null);
     const saveEditorSettings = vi.fn().mockResolvedValue(undefined);
-    vi.doMock("@/lib/backend/api", () => ({ saveEditorSettings }));
+    vi.doMock("@/lib/backend/api", () => ({ loadEditorSettings, saveEditorSettings }));
 
     const { useSettingsStore } = await import("@/stores/settingsStore");
     const store = useSettingsStore();
+    await store.initEditorSettings();
     store.updateEditorSettings({ sidebarConnectionSortMode: "desc" });
 
     expect(store.editorSettings.sidebarConnectionSortMode).toBe("desc");
@@ -550,11 +676,13 @@ describe("settingsStore sidebar connection sort persistence", () => {
   });
 
   it("persists the retained result run display mode", async () => {
+    const loadEditorSettings = vi.fn().mockResolvedValue(null);
     const saveEditorSettings = vi.fn().mockResolvedValue(undefined);
-    vi.doMock("@/lib/backend/api", () => ({ saveEditorSettings }));
+    vi.doMock("@/lib/backend/api", () => ({ loadEditorSettings, saveEditorSettings }));
 
     const { useSettingsStore } = await import("@/stores/settingsStore");
     const store = useSettingsStore();
+    await store.initEditorSettings();
     store.updateEditorSettings({ resultRunDisplayMode: "list" });
 
     expect(store.editorSettings.resultRunDisplayMode).toBe("list");
@@ -570,11 +698,13 @@ describe("settingsStore regular expression match limit persistence", () => {
   });
 
   it("normalizes and persists the configured match limit", async () => {
+    const loadEditorSettings = vi.fn().mockResolvedValue(null);
     const saveEditorSettings = vi.fn().mockResolvedValue(undefined);
-    vi.doMock("@/lib/backend/api", () => ({ saveEditorSettings }));
+    vi.doMock("@/lib/backend/api", () => ({ loadEditorSettings, saveEditorSettings }));
 
     const { useSettingsStore } = await import("@/stores/settingsStore");
     const store = useSettingsStore();
+    await store.initEditorSettings();
     store.updateEditorSettings({ regexMaxMatchCount: 2500.4 });
 
     expect(store.editorSettings.regexMaxMatchCount).toBe(2500);

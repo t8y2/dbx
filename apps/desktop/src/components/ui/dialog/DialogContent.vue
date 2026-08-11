@@ -36,7 +36,7 @@ const forwarded = useForwardPropsEmits(delegatedProps, emits);
 <template>
   <DialogPortal>
     <DialogOverlay :class="props.overlayClass" />
-    <div :class="cn('fixed inset-0 z-50 grid place-items-center p-4 pointer-events-none', props.portalClass)">
+    <div data-slot="dialog-positioner" :class="cn('fixed inset-0 z-50 grid place-items-center p-4 pointer-events-none', props.portalClass)">
       <DialogContent
         data-slot="dialog-content"
         v-bind="{ ...$attrs, ...forwarded }"

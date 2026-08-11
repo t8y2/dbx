@@ -80,6 +80,10 @@ pub struct ObjectInfo {
     pub updated_at: Option<String>,
     pub parent_schema: Option<String>,
     pub parent_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger: Option<TriggerInfo>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub xugu_type_members_expandable: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -400,6 +404,20 @@ pub struct TriggerInfo {
     pub event: String,
     pub timing: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub level: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub condition: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub valid: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comment: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub statement: Option<String>,
 }
 
@@ -695,11 +713,18 @@ mod tests {
     #[test]
     fn list_objects_payload_preserves_optional_validity() {
         let objects: Vec<ObjectInfo> =
-            serde_json::from_str(r#"[{"name":"TRG_AUDIT","object_type":"TRIGGER","schema":"APP","valid":false}]"#)
+            serde_json::from_str(
+                r#"[{"name":"TRG_AUDIT","object_type":"TRIGGER","schema":"APP","valid":false,"trigger":{"name":"TRG_AUDIT","event":"INSERT","timing":"BEFORE","level":"FOR EACH ROW","enabled":false,"valid":false,"comment":"audit","created_at":"2026-08-10 09:30:00"}},{"name":"ORDER_TYPE","object_type":"TYPE","schema":"APP","xugu_type_members_expandable":true}]"#,
+            )
                 .unwrap();
 
         assert_eq!(objects[0].valid, Some(false));
         assert_eq!(objects[0].object_type, "TRIGGER");
+        let trigger = objects[0].trigger.as_ref().unwrap();
+        assert_eq!(trigger.level.as_deref(), Some("FOR EACH ROW"));
+        assert_eq!(trigger.enabled, Some(false));
+        assert_eq!(trigger.comment.as_deref(), Some("audit"));
+        assert_eq!(objects[1].xugu_type_members_expandable, Some(true));
     }
 
     #[test]

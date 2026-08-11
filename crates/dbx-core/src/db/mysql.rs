@@ -100,6 +100,23 @@ where
     row.get_opt::<T, I>(index).and_then(|result| result.ok())
 }
 
+fn first_column_value<T>(row: &mysql_async::Row) -> Option<T>
+where
+    T: mysql_async::prelude::FromValue,
+{
+    row_get(row, 0)
+}
+
+async fn query_first_column<T>(conn: &mut mysql_async::Conn, sql: &str) -> Result<Option<T>, mysql_async::Error>
+where
+    T: mysql_async::prelude::FromValue,
+{
+    // Some MySQL-compatible servers return extra columns for scalar queries.
+    // Convert only column zero so mysql_async does not panic on the row width.
+    let row = conn.query_first::<mysql_async::Row, _>(sql).await?;
+    Ok(row.as_ref().and_then(first_column_value))
+}
+
 /// 字节转 String：合法 UTF-8（绝大多数场景）时直接复用入参缓冲零拷贝，
 /// 仅在非法序列时退化为 lossy 替换。from_utf8_lossy(&b).to_string() 即使
 /// 对合法输入也会多一次分配+拷贝。
@@ -148,9 +165,8 @@ fn nonblank(value: String) -> Option<String> {
 async fn query_first_nonblank_string(conn: &mut mysql_async::Conn, sql: &str) -> Option<String> {
     // MySQL reports nullable metadata such as TABLE_COLLATION as NULL for views.
     // Reading it as String makes mysql_async panic during row conversion.
-    match conn.query_first::<Option<String>, _>(sql).await {
-        Ok(Some(value)) => value.and_then(nonblank),
-        Ok(None) => None,
+    match query_first_column::<String>(conn, sql).await {
+        Ok(value) => value.and_then(nonblank),
         Err(error) => {
             log::debug!("Failed to read optional MySQL database information with `{sql}`: {error}");
             None
@@ -1286,7 +1302,7 @@ async fn enable_explicit_timestamp_defaults_for_query(conn: &mut mysql_async::Co
         return None;
     }
 
-    let previous = match conn.query_first::<u8, _>("SELECT @@SESSION.explicit_defaults_for_timestamp").await {
+    let previous = match query_first_column::<u8>(conn, "SELECT @@SESSION.explicit_defaults_for_timestamp").await {
         Ok(Some(value)) => value != 0,
         Ok(None) => {
             log::debug!("Skipping MySQL explicit timestamp defaults compatibility setting: variable was empty");
@@ -2945,6 +2961,8 @@ fn row_to_object(row: &mysql_async::Row, database: &str) -> ObjectInfo {
         updated_at: get_opt_str(row, "updated_at"),
         parent_schema: get_opt_str(row, "parent_schema"),
         parent_name: get_opt_str(row, "parent_name"),
+        trigger: None,
+        xugu_type_members_expandable: None,
     }
 }
 
@@ -3217,6 +3235,8 @@ fn table_infos_to_objects(
                 updated_at: meta.and_then(|meta| meta.updated_at.clone()),
                 parent_schema: table.parent_schema,
                 parent_name: table.parent_name,
+                trigger: None,
+                xugu_type_members_expandable: None,
             }
         })
         .collect()
@@ -4191,7 +4211,11 @@ pub async fn execute_query(pool: &MySqlPool, sql: &str, bare: bool) -> Result<Qu
 
 pub async fn max_allowed_packet(pool: &MySqlPool) -> Result<u64, String> {
     let mut conn = get_conn_with_health_check(pool).await?;
-    conn.query_first::<u64, _>("SELECT @@max_allowed_packet")
+    max_allowed_packet_on_conn(&mut conn).await
+}
+
+pub(crate) async fn max_allowed_packet_on_conn(conn: &mut mysql_async::Conn) -> Result<u64, String> {
+    query_first_column::<u64>(conn, "SELECT @@max_allowed_packet")
         .await
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "MySQL did not return @@max_allowed_packet".to_string())
@@ -4477,6 +4501,103 @@ pub async fn execute_query_results_on_conn_with_max_rows(
     }
 }
 
+#[derive(Debug)]
+pub(crate) struct MySqlNonResultBatchOutcome {
+    pub results: Vec<QueryResult>,
+    pub error: Option<String>,
+}
+
+/// Executes a chunk of statements that are known not to return rows using one
+/// COM_QUERY packet. MySQL still executes every statement in order and exposes
+/// one OK packet per statement, so affected-row counts and failure positions
+/// remain attributable to the original statements without one network round
+/// trip per statement.
+pub(crate) async fn execute_non_result_batch_on_conn(
+    conn: &mut mysql_async::Conn,
+    sql: &str,
+    expected_results: usize,
+) -> Result<MySqlNonResultBatchOutcome, String> {
+    if expected_results == 0 {
+        return Ok(MySqlNonResultBatchOutcome { results: Vec::new(), error: None });
+    }
+
+    let start = Instant::now();
+    let capture_per_set_messages = conn.opts().deprecate_eof();
+    let previous_explicit_timestamp_defaults = enable_explicit_timestamp_defaults_for_query(conn, sql).await;
+    let mut result = match conn.query_iter(sql).await {
+        Ok(result) => result,
+        Err(error) => {
+            restore_explicit_timestamp_defaults_for_query(conn, previous_explicit_timestamp_defaults).await;
+            return Ok(MySqlNonResultBatchOutcome { results: Vec::new(), error: Some(error.to_string()) });
+        }
+    };
+    let mut results = Vec::with_capacity(expected_results);
+    let mut warning_counts = Vec::with_capacity(expected_results);
+    let mut error = None;
+
+    for statement_index in 0..expected_results {
+        if !result.columns_ref().is_empty() {
+            error = Some(format!(
+                "MySQL batch statement {} unexpectedly returned rows; retry the statement separately.",
+                statement_index + 1
+            ));
+            break;
+        }
+
+        let warnings = result.warnings();
+        let info = result.info().into_owned();
+        let messages =
+            if capture_per_set_messages { mysql_info_message(&info).into_iter().collect() } else { Vec::new() };
+        let current_result = QueryResult {
+            columns: vec![],
+            column_types: Vec::new(),
+            column_sortables: vec![],
+            spatial_columns: vec![],
+            spatial_values: vec![],
+            rows: vec![],
+            affected_rows: result.affected_rows(),
+            execution_time_ms: start.elapsed().as_millis(),
+            truncated: false,
+            session_id: None,
+            has_more: false,
+            elasticsearch_raw_body: None,
+            messages,
+        };
+
+        // mysql_async can expose a failed next statement only when the current
+        // result set is consumed. Do not mark the current metadata slot as a
+        // successful statement until that consumption succeeds.
+        if let Err(next_error) = result.collect::<mysql_async::Row>().await {
+            error = Some(next_error.to_string());
+            break;
+        }
+        results.push(current_result);
+        warning_counts.push(warnings);
+    }
+
+    if let Err(drop_error) = result.drop_result().await {
+        if error.is_none() {
+            error = Some(drop_error.to_string());
+        }
+    }
+    if error.is_none() && !results.is_empty() {
+        let last_index = results.len() - 1;
+        for (index, warnings) in warning_counts.into_iter().enumerate() {
+            if warnings == 0 {
+                continue;
+            }
+            if index == last_index {
+                results[index].messages.extend(collect_mysql_server_messages(conn, warnings, "").await);
+            } else if results[index].messages.is_empty() {
+                results[index].messages.push(mysql_warnings_fallback_message(warnings));
+            }
+        }
+    }
+    restore_explicit_timestamp_defaults_for_query(conn, previous_explicit_timestamp_defaults).await;
+
+    Ok(MySqlNonResultBatchOutcome { results, error })
+}
+
 fn prefers_text_protocol_query(sql: &str, dialect: MySqlQueryDialect) -> bool {
     // User-entered result-set queries are not parameterized in DBX. Text protocol
     // avoids binary result decoding bugs in MySQL-compatible servers and proxies.
@@ -4490,6 +4611,15 @@ pub(crate) fn is_result_set_query(sql: &str, dialect: MySqlQueryDialect) -> bool
         DatabaseType::Mysql,
     ) || mysql_statement_returns_rows(sql)
         || dialect.supports_admin_show_results && is_admin_show_query(sql)
+}
+
+pub(crate) fn is_batchable_non_result_query(sql: &str, dialect: MySqlQueryDialect) -> bool {
+    !is_result_set_query(sql, dialect)
+        && starts_with_executable_sql_keyword_for_database(
+            sql,
+            &["INSERT", "REPLACE", "UPDATE", "DELETE"],
+            DatabaseType::Mysql,
+        )
 }
 
 /// MariaDB 10.5+ returns a result set for INSERT/DELETE/REPLACE ... RETURNING.
@@ -5184,6 +5314,13 @@ pub async fn list_triggers(pool: &MySqlPool, database: &str, table: &str) -> Res
             name: get_str_by_name(row, "TRIGGER_NAME"),
             event: get_str_by_name(row, "EVENT_MANIPULATION"),
             timing: get_str_by_name(row, "ACTION_TIMING"),
+            level: None,
+            condition: None,
+            language: None,
+            enabled: None,
+            valid: None,
+            comment: None,
+            created_at: None,
             statement: Some(get_str_by_name(row, "ACTION_STATEMENT")).filter(|value| !value.is_empty()),
         })
         .collect())
@@ -5192,6 +5329,48 @@ pub async fn list_triggers(pool: &MySqlPool, database: &str, table: &str) -> Res
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mysql_async::{consts::ColumnType, Column, Value};
+    use mysql_common::row::new_row;
+
+    fn mysql_test_row(values: Vec<Value>) -> mysql_async::Row {
+        let columns = values
+            .iter()
+            .enumerate()
+            .map(|(index, _)| {
+                Column::new(ColumnType::MYSQL_TYPE_VAR_STRING).with_name(format!("column_{index}").as_bytes())
+            })
+            .collect::<Vec<_>>()
+            .into();
+        new_row(values, columns)
+    }
+
+    #[test]
+    fn mysql_first_column_value_ignores_extra_result_columns() {
+        let row = mysql_async::from_row::<mysql_async::Row>(mysql_test_row(vec![
+            Value::Bytes(Vec::new()),
+            Value::Bytes(Vec::new()),
+        ]));
+
+        assert_eq!(first_column_value::<String>(&row), Some(String::new()));
+    }
+
+    #[test]
+    fn mysql_first_column_value_handles_null_and_conversion_failures() {
+        let null_row = mysql_test_row(vec![Value::NULL, Value::Bytes(b"ignored".to_vec())]);
+        let invalid_number_row = mysql_test_row(vec![Value::Bytes(b"not-a-number".to_vec())]);
+
+        assert_eq!(first_column_value::<String>(&null_row), None);
+        assert_eq!(first_column_value::<u64>(&invalid_number_row), None);
+    }
+
+    #[test]
+    fn mysql_first_column_value_reads_integer_metadata() {
+        let enabled_row = mysql_test_row(vec![Value::Int(1), Value::Bytes(b"ignored".to_vec())]);
+        let packet_row = mysql_test_row(vec![Value::UInt(67_108_864), Value::Bytes(b"ignored".to_vec())]);
+
+        assert_eq!(first_column_value::<u8>(&enabled_row), Some(1));
+        assert_eq!(first_column_value::<u64>(&packet_row), Some(67_108_864));
+    }
 
     #[test]
     fn mysql_info_message_maps_non_empty_info_strings() {
@@ -5323,6 +5502,8 @@ mod tests {
             updated_at: None,
             parent_schema: None,
             parent_name: None,
+            trigger: None,
+            xugu_type_members_expandable: None,
         }
     }
 
@@ -5471,6 +5652,17 @@ mod tests {
         assert!(is_result_set_query("INSERT INTO users (id) VALUES (1) RETURNING id", dialect));
         assert!(is_result_set_query("DELETE FROM users WHERE id = 1 RETURNING id", dialect));
         assert!(!is_result_set_query("UPDATE users SET name = 'Ada'", dialect));
+    }
+
+    #[test]
+    fn mysql_multi_statement_pipeline_only_accepts_known_dml() {
+        let dialect = MySqlQueryDialect::default();
+
+        assert!(is_batchable_non_result_query("INSERT INTO users(id) VALUES (1)", dialect));
+        assert!(is_batchable_non_result_query("UPDATE users SET active = 1", dialect));
+        assert!(!is_batchable_non_result_query("SELECT * FROM users", dialect));
+        assert!(!is_batchable_non_result_query("ANALYZE TABLE users", dialect));
+        assert!(!is_batchable_non_result_query("CREATE TABLE users(id INT)", dialect));
     }
 
     #[test]

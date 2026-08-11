@@ -2345,6 +2345,13 @@ pub async fn list_triggers(pool: &SqliteHandle, schema: &str, table: &str) -> Re
                         name: row.get("name")?,
                         event: event.to_string(),
                         timing: timing.to_string(),
+                        level: None,
+                        condition: None,
+                        language: None,
+                        enabled: None,
+                        valid: None,
+                        comment: None,
+                        created_at: None,
                         statement: sql_text,
                     })
                 })

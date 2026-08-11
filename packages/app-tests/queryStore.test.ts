@@ -1304,6 +1304,27 @@ test("removing the active result run selects an adjacent run", async () => {
   assert.deepEqual(tab.result?.columns, ["one"]);
 });
 
+test("closing an ordinary query result preserves the query tab", async () => {
+  setActivePinia(createPinia());
+  const store = useQueryStore();
+  const tabId = store.createTab("conn-1", "db");
+  const tab = store.tabs.find((item) => item.id === tabId);
+  assert.ok(tab);
+
+  tab.sql = "select draft";
+  tab.result = { columns: ["one"], rows: [[1]], affected_rows: 0, execution_time_ms: 1 };
+  tab.lastExecutedSql = "select 1";
+
+  assert.equal(await store.closeQueryResult(tabId), true);
+
+  assert.equal(tab.sql, "select draft");
+  assert.equal(tab.connectionId, "conn-1");
+  assert.equal(tab.database, "db");
+  assert.equal(tab.result, undefined);
+  assert.equal(tab.results, undefined);
+  assert.equal(tab.activeResultRunId, undefined);
+});
+
 test("removing the active result run clears output when remaining caches are unavailable", async () => {
   setActivePinia(createPinia());
   const store = useQueryStore();
@@ -3929,14 +3950,17 @@ test("MongoDB query result export rejects pagination-plan failures without repla
   }
 });
 
-test("jdbc query pagination uses result sessions without capping max rows to one page", async () => {
+test("jdbc query pagination sends the Agent-safe unlimited row boundary when the global limit is disabled", async () => {
   const restoreStorage = installMemoryStorage();
   setActivePinia(createPinia());
   const connectionStore = useConnectionStore();
+  const settingsStore = useSettingsStore();
   const store = useQueryStore();
   const originalFetch = globalThis.fetch;
   let prepareBody: any;
   let executeBody: any;
+
+  settingsStore.updateEditorSettings({ queryResultMaxRowsEnabled: false });
 
   connectionStore.addEphemeralConnection({
     ...conn("jdbc-1"),
@@ -3993,7 +4017,7 @@ test("jdbc query pagination uses result sessions without capping max rows to one
     assert.equal(prepareBody.options.useAgentCursor, true);
     assert.equal(executeBody.pageSize, 100);
     assert.equal(executeBody.fetchSize, 100);
-    assert.equal(executeBody.maxRows, 100000);
+    assert.equal(executeBody.maxRows, 2147483647);
     assert.equal(executeBody.clientSessionId, tabId);
     assert.equal(tab.resultSessionId, "session-1");
     assert.equal(tab.result?.has_more, true);
@@ -6417,7 +6441,7 @@ for (const resultState of [
   { label: "truncated", result: { truncated: true, has_more: false } },
   { label: "ambiguous exhaustion", result: {} },
 ]) {
-  test(`oracle agent ${resultState.label} short page uses COUNT instead of inferring 10000`, async () => {
+  test(`oracle agent ${resultState.label} short page uses COUNT and caps the configured result total`, async () => {
     const restoreStorage = installMemoryStorage();
     setActivePinia(createPinia());
     const connectionStore = useConnectionStore();
@@ -6475,11 +6499,11 @@ for (const resultState of [
 
     try {
       await store.executeTabSql(tabId, "SELECT ID FROM LARGE_TABLE");
-      await waitFor(() => tab.resultTotalRowCount === 3_357_833);
+      await waitFor(() => tab.resultTotalRowCount === 100_000);
 
       assert.equal(countRequests, 1);
       assert.equal(tab.result?.rows.length, 10_000);
-      assert.notEqual(tab.resultTotalRowCount, 10_000);
+      assert.equal(tab.resultTotalRowCount, 100_000);
     } finally {
       globalThis.fetch = originalFetch;
       restoreStorage();

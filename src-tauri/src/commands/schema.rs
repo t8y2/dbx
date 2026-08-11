@@ -242,6 +242,8 @@ pub async fn list_objects(
                 parent_name: table.parent_name,
                 custom_type_kind: None,
                 has_members: None,
+                trigger: None,
+                xugu_type_members_expandable: None,
             })
             .collect());
     }

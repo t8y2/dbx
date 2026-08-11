@@ -15,6 +15,7 @@ import { useToast } from "@/composables/useToast";
 import {
   autoMapImportColumns,
   buildTableImportParseOptions,
+  defaultTableImportEmptyStringAsNull,
   formatTableImportElapsed,
   nextTableImportWizardStep,
   previousTableImportWizardStep,
@@ -90,7 +91,7 @@ const titleRow = ref(1);
 const dataStartRow = ref(2);
 const lastDataRow = ref(0);
 const trimValues = ref(false);
-const emptyStringAsNull = ref(true);
+const emptyStringAsNull = ref(defaultTableImportEmptyStringAsNull(sourceFormat.value));
 const selectedSheet = ref("");
 const jsonShape = ref<api.TableImportJsonShape>("auto");
 const previewLimit = ref(50);
@@ -250,7 +251,7 @@ function resetState() {
   dataStartRow.value = 2;
   lastDataRow.value = 0;
   trimValues.value = false;
-  emptyStringAsNull.value = true;
+  emptyStringAsNull.value = defaultTableImportEmptyStringAsNull(sourceFormat.value);
   selectedSheet.value = "";
   jsonShape.value = "auto";
   previewLimit.value = 50;
@@ -519,6 +520,7 @@ function assignSelectedSource(source: string | File) {
   errorMessage.value = "";
   const name = typeof source === "string" ? source : source.name;
   sourceFormat.value = detectFormat(name);
+  emptyStringAsNull.value = defaultTableImportEmptyStringAsNull(sourceFormat.value);
   if (!newTableName.value.trim()) {
     newTableName.value = suggestedTableName(name);
   }
@@ -554,9 +556,11 @@ async function prepareBatchSources(sources: ImportSource[]) {
   errorMessage.value = "";
   const tasks: BatchImportTask[] = [];
   const usedNames = new Set<string>();
+  const formats = sources.map((source) => detectFormat(sourceName(source)));
+  emptyStringAsNull.value = formats.length && formats.every((format) => format === formats[0]) ? defaultTableImportEmptyStringAsNull(formats[0]!) : true;
   try {
-    for (const source of sources) {
-      const format = detectFormat(sourceName(source));
+    for (const [index, source] of sources.entries()) {
+      const format = formats[index]!;
       const initialPreview = await api.previewTableImportFile(source, {
         sourceFormat: format,
         parseOptions: taskParseOptions(format),

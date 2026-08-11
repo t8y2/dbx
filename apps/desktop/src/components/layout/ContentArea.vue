@@ -9,6 +9,7 @@ import type { CSSProperties } from "vue";
 import { useI18n } from "vue-i18n";
 import { Check, CheckSquare2, Columns3Cog, Copy, EyeOff, Loader2, Search, TableProperties, ChevronDown, ChevronUp, Inbox, RefreshCcw, Wrench, Toolbox, Database, Download, Upload, X, Pin, Rows3, SquareDashed, Minus, Plus, ShieldAlert, AlignLeft, AlignRight, PanelsTopLeft } from "@lucide/vue";
 import { Splitpanes, Pane } from "splitpanes";
+import { DynamicScroller, DynamicScrollerItem } from "vue-virtual-scroller";
 import "splitpanes/dist/splitpanes.css";
 import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
@@ -53,6 +54,8 @@ const EtcdKeyBrowser = defineAsyncComponent(() => import("@/components/etcd/Etcd
 const EtcdDashboard = defineAsyncComponent(() => import("@/components/etcd/EtcdDashboard.vue"));
 const EtcdAccessControl = defineAsyncComponent(() => import("@/components/etcd/EtcdAccessControl.vue"));
 const ZooKeeperKeyBrowser = defineAsyncComponent(() => import("@/components/zookeeper/ZooKeeperKeyBrowser.vue"));
+const ConsulOverview = defineAsyncComponent(() => import("@/components/consul/ConsulOverview.vue"));
+const ConsulWorkspace = defineAsyncComponent(() => import("@/components/consul/ConsulWorkspace.vue"));
 const DocumentBrowser = defineAsyncComponent(() => import("@/components/document/DocumentBrowser.vue"));
 const MongoGridFsBrowser = defineAsyncComponent(() => import("@/components/document/MongoGridFsBrowser.vue"));
 const MongoBucketBrowser = defineAsyncComponent(() => import("@/components/document/MongoBucketBrowser.vue"));
@@ -242,6 +245,8 @@ function openDataGridExtractorConfiguration() {
 const etcdKeyBrowserRef = ref<SearchableBrowserHandle>();
 const etcdDashboardRef = ref<{ refresh?: () => boolean }>();
 const zookeeperKeyBrowserRef = ref<SearchableBrowserHandle>();
+const consulOverviewRef = ref<{ refresh?: () => boolean }>();
+const consulWorkspaceRef = ref<SearchableBrowserHandle>();
 const objectBrowserRef = ref<SearchableBrowserHandle>();
 const activeTableMeta = computed(() => props.activeTab.tableMeta);
 const activeDataTabTableMeta = computed(() => tableMetaForDataTab(props.activeTab));
@@ -415,6 +420,7 @@ const resultAutoSave = computed(() => props.activeTab.resultAutoSave === true);
 const activeResultRunItem = computed(() => resultRuns.value.find((run) => run.active));
 const showResultRunTabs = computed(() => resultRuns.value.length > 0 && resultRunDisplayMode.value === "tabs");
 const showResultRunSelector = computed(() => resultRuns.value.length > 0 && resultRunDisplayMode.value === "list");
+const canCloseQueryResult = computed(() => props.activeTab.mode === "query" && !props.activeTab.isExecuting && !props.activeTab.activeResultRunId && (!!props.activeTab.result || !!props.activeTab.results?.length || props.activeTab.resultEvicted === true));
 watch(
   () => `${resultRunDisplayMode.value}:${resultRuns.value.map((run) => run.id).join(",")}:${props.activeTab.activeResultRunId ?? ""}`,
   () => {
@@ -778,6 +784,7 @@ function focusSearch(): boolean {
   if (props.activeTab.mode === "redis") return redisKeyBrowserRef.value?.focusSearch() ?? false;
   if (props.activeTab.mode === "etcd") return etcdKeyBrowserRef.value?.focusSearch() ?? false;
   if (props.activeTab.mode === "zookeeper") return zookeeperKeyBrowserRef.value?.focusSearch() ?? false;
+  if (props.activeTab.mode === "consul") return consulWorkspaceRef.value?.focusSearch() ?? false;
   if (props.activeTab.mode === "objects") return objectBrowserRef.value?.focusSearch() ?? false;
   if (props.activeTab.mode === "query") return queryEditorRef.value?.openSearch() ?? false;
   return dataGridRef.value?.focusSearch() ?? false;
@@ -795,6 +802,8 @@ function refreshData(): boolean {
   if (props.activeTab.mode === "etcd") return etcdKeyBrowserRef.value?.refresh?.() ?? false;
   if (props.activeTab.mode === "etcd-dashboard") return etcdDashboardRef.value?.refresh?.() ?? false;
   if (props.activeTab.mode === "zookeeper") return zookeeperKeyBrowserRef.value?.refresh?.() ?? false;
+  if (props.activeTab.mode === "consul-overview") return consulOverviewRef.value?.refresh?.() ?? false;
+  if (props.activeTab.mode === "consul") return consulWorkspaceRef.value?.refresh?.() ?? false;
   // Restored data tabs intentionally omit row data, so refresh must work before DataGrid mounts.
   if (canReloadUnavailableDataTab(props.activeTab)) {
     emit("reload");
@@ -844,6 +853,11 @@ async function removeResultRun(runId: string) {
   const activeRunTab = resultTabsScrollerRef.value?.querySelector<HTMLElement>('[data-active-result-run="true"]');
   activeRunTab?.focus({ preventScroll: true });
   activeRunTab?.scrollIntoView({ block: "nearest", inline: "nearest" });
+}
+
+async function closeCurrentQueryResult() {
+  if (!(await queryStore.closeQueryResult(props.activeTab.id))) return;
+  emit("update:activeOutputView", "result");
 }
 
 async function selectResultRun(runId: string) {
@@ -1048,6 +1062,9 @@ defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, hand
                 @click="toggleResultAutoSave"
               >
                 <Pin class="h-3.5 w-3.5" :class="{ 'fill-current': resultAutoSave }" />
+              </Button>
+              <Button v-if="canCloseQueryResult" variant="ghost" size="icon" class="h-6 w-7 shrink-0 text-muted-foreground hover:bg-accent hover:text-foreground" :title="t('tabs.closeResult')" :aria-label="t('tabs.closeResult')" @click="closeCurrentQueryResult">
+                <X class="h-3.5 w-3.5" />
               </Button>
               <template v-if="resultRuns.length > 0 || visibleResultItems.length > 0">
                 <span class="mx-1 h-4 w-px shrink-0 bg-border" />
@@ -1396,14 +1413,14 @@ defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, hand
 
             <QueryChart v-else-if="activeOutputView === 'chart' && activeTab.result && !activeElasticsearchJsonResponse" class="flex-1 min-h-0" :result="activeTab.result" />
 
-            <div v-else-if="activeOutputView === 'summary'" class="flex-1 min-h-0 overflow-auto bg-background">
+            <div v-else-if="activeOutputView === 'summary'" class="flex flex-1 min-h-0 flex-col bg-background">
               <div v-if="summaryItems.length === 0" class="flex h-full items-center justify-center text-sm text-muted-foreground">
                 <Loader2 v-if="activeTab.isExecuting" class="mr-2 h-4 w-4 animate-spin" />
                 <template v-if="activeTab.isExecuting">{{ t("executionSummary.executing") }}</template>
                 <template v-else>{{ t("executionSummary.empty") }}</template>
               </div>
-              <div v-else class="min-w-[46rem]">
-                <div v-if="batchExecutionProgress" class="sticky top-0 z-10 border-b bg-background/95 px-3 py-2 backdrop-blur">
+              <div v-else class="flex h-full min-h-0 min-w-[46rem] flex-col">
+                <div v-if="batchExecutionProgress" class="z-10 shrink-0 border-b bg-background/95 px-3 py-2 backdrop-blur">
                   <div class="mb-1.5 flex items-center gap-3 text-xs">
                     <span class="font-medium">{{ activeTab.isExecuting ? t("executionSummary.executing") : t("executionSummary.finished") }}</span>
                     <span class="tabular-nums text-muted-foreground">{{ batchExecutionProgress.completed }} / {{ batchExecutionProgress.total }}</span>
@@ -1413,59 +1430,61 @@ defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, hand
                     <div class="h-full rounded-full bg-primary transition-[width] duration-200" :style="{ width: `${batchExecutionPercent}%` }" />
                   </div>
                 </div>
-                <div class="overflow-hidden border-b">
-                  <div class="grid grid-cols-[4rem_minmax(14rem,1fr)_7rem_7rem_6rem] border-b bg-muted/30 px-3 py-2 text-xs font-medium text-muted-foreground">
-                    <div>{{ t("executionSummary.statement") }}</div>
-                    <div>{{ t("executionSummary.sql") }}</div>
-                    <div>{{ t("executionSummary.status") }}</div>
-                    <div class="text-right">{{ t("executionSummary.rows") }}</div>
-                    <div class="text-right">{{ t("executionSummary.time") }}</div>
-                  </div>
-                  <div v-for="item in summaryItems" :key="item.statementIndex" class="relative grid w-full grid-cols-[4rem_minmax(14rem,1fr)_7rem_7rem_6rem] items-center border-b px-3 py-2 text-left text-xs last:border-b-0">
-                    <button
-                      type="button"
-                      class="absolute inset-0 z-0 cursor-pointer text-left transition-colors hover:bg-muted/35 focus-visible:bg-muted/40 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-primary"
-                      :title="item.error || item.sql"
-                      :aria-label="item.error || item.sql || t('executionSummary.noSql')"
-                      @click="previewExecutionSummaryItem(item)"
-                      @dblclick="focusExecutionSummaryItem(item)"
-                      @keydown.enter.prevent="focusExecutionSummaryItem(item)"
-                    />
-                    <div class="pointer-events-none relative z-[1] font-mono text-muted-foreground">#{{ item.statementIndex + 1 }}</div>
-                    <div class="relative z-[1] min-w-0 cursor-pointer" @click="previewExecutionSummaryItem(item)" @dblclick="focusExecutionSummaryItem(item)">
-                      <div class="truncate font-mono text-[11px] text-foreground">{{ item.sql || t("executionSummary.noSql") }}</div>
-                      <div v-if="item.error" class="mt-0.5 flex min-w-0 items-center gap-1 text-[11px] text-destructive">
-                        <span data-native-clipboard class="min-w-0 flex-1 cursor-text select-text truncate" :title="item.error" @mousedown.stop @click.stop @dblclick.stop>{{ item.error }}</span>
-                        <LightTooltip :text="t('grid.copy')" side="bottom" :delay="0" :close-delay="0" nowrap>
-                          <button type="button" class="pointer-events-auto flex h-5 w-5 shrink-0 items-center justify-center rounded text-destructive/70 hover:bg-destructive/10 hover:text-destructive" :aria-label="t('grid.copy')" @mousedown.stop @click.stop="copyExecutionSummaryError(item.error)">
-                            <Copy class="h-3 w-3" />
-                          </button>
-                        </LightTooltip>
-                      </div>
-                    </div>
-                    <div class="pointer-events-none relative z-[1]">
-                      <span
-                        class="inline-flex h-5 items-center gap-1 rounded-full border px-2 text-[10px]"
-                        :class="{
-                          'border-primary/35 bg-primary/10 text-primary': item.status === 'running',
-                          'border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300': item.status === 'success',
-                          'border-destructive/40 bg-destructive/10 text-destructive': item.status === 'error',
-                          'border-border bg-muted/40 text-muted-foreground': item.status === 'pending' || item.status === 'skipped',
-                          'border-amber-500/35 bg-amber-500/10 text-amber-700 dark:text-amber-300': item.status === 'cancelled',
-                        }"
-                      >
-                        <Loader2 v-if="item.status === 'running'" class="h-3 w-3 animate-spin" />
-                        <Check v-else-if="item.status === 'success'" class="h-3 w-3" />
-                        <X v-else-if="item.status === 'error'" class="h-3 w-3" />
-                        <SquareDashed v-else class="h-3 w-3" />
-                        {{ t(`executionSummary.statuses.${item.status}`) }}
-                      </span>
-                    </div>
-                    <div class="pointer-events-none relative z-[1] text-right tabular-nums">{{ item.status === "pending" || item.status === "running" || item.status === "skipped" ? "—" : item.rowCount.toLocaleString() }}</div>
-                    <div class="pointer-events-none relative z-[1] text-right tabular-nums">{{ item.executionTimeMs > 0 || item.status === "success" || item.status === "error" ? `${item.executionTimeMs}ms` : "—" }}</div>
-                  </div>
+                <div class="grid shrink-0 grid-cols-[4rem_minmax(14rem,1fr)_7rem_7rem_6rem] border-b bg-muted/30 px-3 py-2 text-xs font-medium text-muted-foreground">
+                  <div>{{ t("executionSummary.statement") }}</div>
+                  <div>{{ t("executionSummary.sql") }}</div>
+                  <div>{{ t("executionSummary.status") }}</div>
+                  <div class="text-right">{{ t("executionSummary.rows") }}</div>
+                  <div class="text-right">{{ t("executionSummary.time") }}</div>
                 </div>
-                <div class="px-3 py-2 text-[11px] text-muted-foreground">{{ t("executionSummary.navigationHint") }}</div>
+                <DynamicScroller v-slot="{ item, index, active }" class="min-h-0 flex-1 border-b" :items="summaryItems" :min-item-size="37" :buffer="600" :skip-hover="true" key-field="statementIndex">
+                  <DynamicScrollerItem :item="item" :active="active" :data-index="index" :size-dependencies="[item.error]">
+                    <div class="relative grid w-full grid-cols-[4rem_minmax(14rem,1fr)_7rem_7rem_6rem] items-center border-b px-3 py-2 text-left text-xs last:border-b-0">
+                      <button
+                        type="button"
+                        class="absolute inset-0 z-0 cursor-pointer text-left transition-colors hover:bg-muted/35 focus-visible:bg-muted/40 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-primary"
+                        :title="item.error || item.sql"
+                        :aria-label="item.error || item.sql || t('executionSummary.noSql')"
+                        @click="previewExecutionSummaryItem(item)"
+                        @dblclick="focusExecutionSummaryItem(item)"
+                        @keydown.enter.prevent="focusExecutionSummaryItem(item)"
+                      />
+                      <div class="pointer-events-none relative z-[1] font-mono text-muted-foreground">#{{ item.statementIndex + 1 }}</div>
+                      <div class="relative z-[1] min-w-0 cursor-pointer" @click="previewExecutionSummaryItem(item)" @dblclick="focusExecutionSummaryItem(item)">
+                        <div class="truncate font-mono text-[11px] text-foreground">{{ item.sql || t("executionSummary.noSql") }}</div>
+                        <div v-if="item.error" class="mt-0.5 flex min-w-0 items-center gap-1 text-[11px] text-destructive">
+                          <span data-native-clipboard class="min-w-0 flex-1 cursor-text select-text truncate" :title="item.error" @mousedown.stop @click.stop @dblclick.stop>{{ item.error }}</span>
+                          <LightTooltip :text="t('grid.copy')" side="bottom" :delay="0" :close-delay="0" nowrap>
+                            <button type="button" class="pointer-events-auto flex h-5 w-5 shrink-0 items-center justify-center rounded text-destructive/70 hover:bg-destructive/10 hover:text-destructive" :aria-label="t('grid.copy')" @mousedown.stop @click.stop="copyExecutionSummaryError(item.error)">
+                              <Copy class="h-3 w-3" />
+                            </button>
+                          </LightTooltip>
+                        </div>
+                      </div>
+                      <div class="pointer-events-none relative z-[1]">
+                        <span
+                          class="inline-flex h-5 items-center gap-1 rounded-full border px-2 text-[10px]"
+                          :class="{
+                            'border-primary/35 bg-primary/10 text-primary': item.status === 'running',
+                            'border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300': item.status === 'success',
+                            'border-destructive/40 bg-destructive/10 text-destructive': item.status === 'error',
+                            'border-border bg-muted/40 text-muted-foreground': item.status === 'pending' || item.status === 'skipped',
+                            'border-amber-500/35 bg-amber-500/10 text-amber-700 dark:text-amber-300': item.status === 'cancelled',
+                          }"
+                        >
+                          <Loader2 v-if="item.status === 'running'" class="h-3 w-3 animate-spin" />
+                          <Check v-else-if="item.status === 'success'" class="h-3 w-3" />
+                          <X v-else-if="item.status === 'error'" class="h-3 w-3" />
+                          <SquareDashed v-else class="h-3 w-3" />
+                          {{ t(`executionSummary.statuses.${item.status}`) }}
+                        </span>
+                      </div>
+                      <div class="pointer-events-none relative z-[1] text-right tabular-nums">{{ item.status === "pending" || item.status === "running" || item.status === "skipped" ? "—" : item.rowCount.toLocaleString() }}</div>
+                      <div class="pointer-events-none relative z-[1] text-right tabular-nums">{{ item.executionTimeMs > 0 || item.status === "success" || item.status === "error" ? `${item.executionTimeMs}ms` : "—" }}</div>
+                    </div>
+                  </DynamicScrollerItem>
+                </DynamicScroller>
+                <div class="shrink-0 px-3 py-2 text-[11px] text-muted-foreground">{{ t("executionSummary.navigationHint") }}</div>
               </div>
             </div>
 
@@ -1938,6 +1957,19 @@ defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, hand
     <template v-else-if="activeTab.mode === 'zookeeper'">
       <div class="flex-1 min-h-0">
         <ZooKeeperKeyBrowser ref="zookeeperKeyBrowserRef" :key="activeTab.id" :connection-id="activeTab.connectionId" />
+      </div>
+    </template>
+
+    <template v-else-if="activeTab.mode === 'consul-overview'">
+      <div class="flex-1 min-h-0">
+        <ConsulOverview ref="consulOverviewRef" :key="activeTab.id" :connection-id="activeTab.connectionId" />
+      </div>
+    </template>
+
+    <!-- Consul management workspace -->
+    <template v-else-if="activeTab.mode === 'consul'">
+      <div class="flex-1 min-h-0">
+        <ConsulWorkspace ref="consulWorkspaceRef" :key="activeTab.id" :connection-id="activeTab.connectionId" />
       </div>
     </template>
 

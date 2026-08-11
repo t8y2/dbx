@@ -118,7 +118,7 @@ const showModified = ref(true);
 
 let syncPlanRequestId = 0;
 
-const sqlConnections = computed(() => store.connections.filter((connection) => !["redis", "mongodb", "elasticsearch", "easysearch", "qdrant", "milvus", "weaviate", "chromadb", "etcd", "zookeeper", "mq", "nacos"].includes(connection.db_type)));
+const sqlConnections = computed(() => store.connections.filter((connection) => !["redis", "mongodb", "elasticsearch", "easysearch", "qdrant", "milvus", "weaviate", "chromadb", "etcd", "zookeeper", "consul", "mq", "nacos"].includes(connection.db_type)));
 const selectedSourceTableNames = computed(() => sourceTables.value.filter((table) => selectedSourceTables.value.has(table)));
 const isBatchCompare = computed(() => selectedSourceTableNames.value.length > 1);
 const filteredSourceTables = computed(() => {

@@ -234,6 +234,35 @@ describe("execution summary", () => {
       { status: "error", isError: true },
     ]);
   });
+
+  it("maps out-of-order results to their explicit statement indexes", () => {
+    const items = executionSummaryItems({
+      results: [
+        { columns: ["value"], rows: [["third"]], affected_rows: 0, execution_time_ms: 3, statement_index: 2 },
+        { columns: ["value"], rows: [["first"]], affected_rows: 0, execution_time_ms: 1, statement_index: 0 },
+      ],
+      batchSqlExecution: {
+        executionId: "run-out-of-order",
+        submittedSql: "SELECT 'first'; SELECT 'second'; SELECT 'third'",
+        editorFingerprint: "fingerprint",
+        sourceOffset: 0,
+        completed: 2,
+        total: 3,
+        startedAt: 1,
+        items: [
+          { statementIndex: 0, sql: "SELECT 'first'", from: 0, to: 14, status: "success" },
+          { statementIndex: 1, sql: "SELECT 'second'", from: 16, to: 31, status: "skipped" },
+          { statementIndex: 2, sql: "SELECT 'third'", from: 33, to: 47, status: "success" },
+        ],
+      },
+    });
+
+    expect(items.map((item) => [item.statementIndex, item.result?.rows[0]?.[0]])).toEqual([
+      [0, "first"],
+      [1, undefined],
+      [2, "third"],
+    ]);
+  });
 });
 
 describe("statement execution markers", () => {

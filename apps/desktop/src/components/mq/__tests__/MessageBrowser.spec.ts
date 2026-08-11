@@ -8,12 +8,28 @@ const backend = vi.hoisted(() => ({
   mqPeekMessages: vi.fn(),
 }));
 
+const clipboard = vi.hoisted(() => ({
+  copyToClipboard: vi.fn(),
+}));
+
+const toast = vi.hoisted(() => ({
+  toast: vi.fn(),
+}));
+
 vi.mock("vue-i18n", () => ({
-  useI18n: () => ({ t: (key: string) => key }),
+  useI18n: () => ({ t: (key: string, params?: Record<string, unknown>) => (params ? `${key}:${JSON.stringify(params)}` : key) }),
 }));
 
 vi.mock("@/lib/backend/api", () => ({
   mqPeekMessages: backend.mqPeekMessages,
+}));
+
+vi.mock("@/lib/common/clipboard", () => ({
+  copyToClipboard: clipboard.copyToClipboard,
+}));
+
+vi.mock("@/composables/useToast", () => ({
+  useToast: () => toast,
 }));
 
 vi.mock("@/components/ui/select", async () => (await import("./selectStub")).createSelectStub());
@@ -107,6 +123,9 @@ async function loadMessages(container: ParentNode) {
 
 beforeEach(() => {
   backend.mqPeekMessages.mockReset();
+  clipboard.copyToClipboard.mockReset();
+  clipboard.copyToClipboard.mockResolvedValue(undefined);
+  toast.toast.mockReset();
   backend.mqPeekMessages.mockResolvedValue([
     {
       position: 1,
@@ -127,6 +146,81 @@ afterEach(() => {
 });
 
 describe("MessageBrowser", () => {
+  it("copies a message's displayed payload", async () => {
+    const browser = await mountBrowser();
+
+    await loadMessages(browser);
+    const copyButton = browser.querySelector<HTMLButtonElement>('[data-testid="copy-message-payload"]');
+    if (!copyButton) throw new Error("Message payload copy button not found");
+    copyButton.click();
+    await flushUi();
+
+    expect(clipboard.copyToClipboard).toHaveBeenCalledWith("existing message");
+    expect(copyButton.dataset.variant).toBe("outline");
+    expect(copyButton.dataset.size).toBe("sm");
+    expect(copyButton.getAttribute("aria-label")).toBe("grid.copy mqMessages.messageContent");
+    expect(toast.toast).toHaveBeenCalledWith("grid.copied");
+    expect(browser.querySelector('[data-testid="copy-message-headers"]')).toBeNull();
+  });
+
+  it("copies the base64 payload when no text payload is available", async () => {
+    backend.mqPeekMessages.mockResolvedValueOnce([
+      {
+        position: 1,
+        messageId: "binary",
+        payloadBase64: "AAE=",
+        properties: { partition: "0" },
+        headers: {},
+      },
+    ]);
+    const browser = await mountBrowser();
+
+    await loadMessages(browser);
+    const copyButton = browser.querySelector<HTMLButtonElement>('[data-testid="copy-message-payload"]');
+    if (!copyButton) throw new Error("Message payload copy button not found");
+    copyButton.click();
+    await flushUi();
+
+    expect(clipboard.copyToClipboard).toHaveBeenCalledWith("AAE=");
+  });
+
+  it("copies message headers as formatted JSON", async () => {
+    backend.mqPeekMessages.mockResolvedValueOnce([
+      {
+        position: 1,
+        messageId: "17",
+        payloadBase64: "",
+        payloadText: "existing message",
+        properties: { partition: "0" },
+        headers: { source: "billing", traceId: "abc-123" },
+      },
+    ]);
+    const browser = await mountBrowser();
+
+    await loadMessages(browser);
+    const copyButton = browser.querySelector<HTMLButtonElement>('[data-testid="copy-message-headers"]');
+    if (!copyButton) throw new Error("Message headers copy button not found");
+    copyButton.click();
+    await flushUi();
+
+    expect(clipboard.copyToClipboard).toHaveBeenCalledWith('{\n  "source": "billing",\n  "traceId": "abc-123"\n}');
+    expect(copyButton.getAttribute("aria-label")).toBe("grid.copy mqMessages.messageHeaders");
+  });
+
+  it("shows a copy failure toast without breaking the message browser", async () => {
+    clipboard.copyToClipboard.mockRejectedValueOnce(new Error("Clipboard unavailable"));
+    const browser = await mountBrowser();
+
+    await loadMessages(browser);
+    const copyButton = browser.querySelector<HTMLButtonElement>('[data-testid="copy-message-payload"]');
+    if (!copyButton) throw new Error("Message payload copy button not found");
+    copyButton.click();
+    await flushUi();
+
+    expect(toast.toast).toHaveBeenCalledWith('grid.copyFailed:{"message":"Clipboard unavailable"}', 5000);
+    expect(browser.textContent).toContain("existing message");
+  });
+
   it("loads Kafka's latest messages by default", async () => {
     const browser = await mountBrowser();
 

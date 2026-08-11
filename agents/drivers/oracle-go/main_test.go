@@ -618,6 +618,44 @@ func TestGetTableDDLAppendsIndexesTriggersAndComments(t *testing.T) {
 	}
 }
 
+func TestListIndexesSeparatesQuotedCloneTableNamesByCase(t *testing.T) {
+	const schema = "HR"
+	db, scripted := openOracleViewSourceTestDB(t, []oracleViewSourceQueryStep{
+		{
+			queryContains: "FROM ALL_INDEXES",
+			args:          []driver.Value{schema, "ORDERS_COPY"},
+			columns:       []string{"INDEX_NAME", "COLUMN_NAME", "UNIQUENESS", "IS_PRIMARY", "INDEX_TYPE", "COLUMN_POSITION"},
+			rows:          [][]driver.Value{{"ORDERS_COPY_IDX1", "STATUS", "NONUNIQUE", int64(0), "NORMAL", int64(1)}},
+		},
+		{
+			queryContains: "FROM ALL_INDEXES",
+			args:          []driver.Value{schema, "ORDERS_copy"},
+			columns:       []string{"INDEX_NAME", "COLUMN_NAME", "UNIQUENESS", "IS_PRIMARY", "INDEX_TYPE", "COLUMN_POSITION"},
+			rows:          [][]driver.Value{{"ORDERS_copy_IDX1", "STATUS", "NONUNIQUE", int64(0), "NORMAL", int64(1)}},
+		},
+	})
+	s := newServer()
+	s.db = db
+
+	uppercaseIndexes, err := s.listIndexes(schema, "ORDERS_COPY")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mixedCaseIndexes, err := s.listIndexes(schema, "ORDERS_copy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(uppercaseIndexes) != 1 || uppercaseIndexes[0].Name != "ORDERS_COPY_IDX1" {
+		t.Fatalf("listIndexes(ORDERS_COPY) = %#v, want uppercase table index", uppercaseIndexes)
+	}
+	if len(mixedCaseIndexes) != 1 || mixedCaseIndexes[0].Name != "ORDERS_copy_IDX1" || !reflect.DeepEqual(mixedCaseIndexes[0].Columns, []string{"STATUS"}) {
+		t.Fatalf("listIndexes(ORDERS_copy) = %#v, want quoted clone index", mixedCaseIndexes)
+	}
+	if scripted.next != len(scripted.steps) {
+		t.Fatalf("expected %d queries, got %d", len(scripted.steps), scripted.next)
+	}
+}
+
 func TestGetTableCommentPreservesQuotedObjectName(t *testing.T) {
 	const schema = "HR"
 	const table = "OrderDetails"
@@ -702,6 +740,45 @@ func TestListForeignKeysIncludesReferencedSchemaAndDeleteRule(t *testing.T) {
 	}}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("listForeignKeys() = %#v, want %#v", got, want)
+	}
+	if scripted.next != len(scripted.steps) {
+		t.Fatalf("expected %d queries, got %d", len(scripted.steps), scripted.next)
+	}
+}
+
+func TestListForeignKeysAndTriggersPreserveQuotedCloneTableName(t *testing.T) {
+	const schema = "HR"
+	const table = "ORDERS_copy"
+	db, scripted := openOracleViewSourceTestDB(t, []oracleViewSourceQueryStep{
+		{
+			queryContains: "FROM ALL_CONSTRAINTS ac",
+			args:          []driver.Value{schema, table},
+			columns:       []string{"CONSTRAINT_NAME", "COLUMN_NAME", "REF_SCHEMA", "REF_TABLE", "REF_COLUMN", "DELETE_RULE"},
+			rows:          [][]driver.Value{{"ORDERS_copy_FK1", "CUSTOMER_ID", "CRM", "CUSTOMERS", "ID", "CASCADE"}},
+		},
+		{
+			queryContains: "FROM ALL_TRIGGERS",
+			args:          []driver.Value{schema, table},
+			columns:       []string{"TRIGGER_NAME", "TRIGGERING_EVENT", "TRIGGER_TYPE", "DESCRIPTION", "LINE", "TEXT"},
+			rows:          [][]driver.Value{{"ORDERS_copy_TRG1", "INSERT", "BEFORE EACH ROW", nil, nil, nil}},
+		},
+	})
+	s := newServer()
+	s.db = db
+
+	foreignKeys, err := s.listForeignKeys(schema, table)
+	if err != nil {
+		t.Fatal(err)
+	}
+	triggers, err := s.listTriggers(schema, table)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(foreignKeys) != 1 || foreignKeys[0].Name != "ORDERS_copy_FK1" {
+		t.Fatalf("listForeignKeys(%q) = %#v, want quoted clone foreign key", table, foreignKeys)
+	}
+	if len(triggers) != 1 || triggers[0].Name != "ORDERS_copy_TRG1" {
+		t.Fatalf("listTriggers(%q) = %#v, want quoted clone trigger", table, triggers)
 	}
 	if scripted.next != len(scripted.steps) {
 		t.Fatalf("expected %d queries, got %d", len(scripted.steps), scripted.next)
@@ -1706,13 +1783,13 @@ func TestOracleCompletionTablesQueryScopesExplicitSchema(t *testing.T) {
 }
 
 func TestOracleCompletionRoutinesQueryUsesPublicPackageMetadata(t *testing.T) {
-	query := oracleCompletionRoutinesQuery(completionAssistantRequest{
+	query := oracleCompletionPackageRoutinesQuery(completionAssistantRequest{
 		Schema:       "HR",
 		ParentSchema: "HR",
 		ParentName:   "PAYROLL",
 		ObjectKinds:  []string{"routine"},
 		Mask:         "CALC",
-	}, "HR", 200)
+	}, "HR")
 	sqlText := strings.ToUpper(query.SQL)
 
 	if !strings.Contains(sqlText, "ALL_PROCEDURES") || !strings.Contains(sqlText, "ALL_ARGUMENTS") {
@@ -1721,11 +1798,81 @@ func TestOracleCompletionRoutinesQueryUsesPublicPackageMetadata(t *testing.T) {
 	if strings.Contains(sqlText, "ALL_SOURCE") || strings.Contains(sqlText, "PACKAGE BODY") {
 		t.Fatalf("package completion must not expose private package body source: %s", query.SQL)
 	}
-	if !strings.Contains(sqlText, "P.OBJECT_NAME = :1") || !strings.Contains(sqlText, "UPPER(OBJECT_NAME) LIKE UPPER(:2)") || !strings.Contains(sqlText, "AND OWNER = :3") {
+	if !strings.Contains(sqlText, "P.OWNER = :1") || !strings.Contains(sqlText, "P.OBJECT_NAME = :2") || !strings.Contains(sqlText, "UPPER(P.PROCEDURE_NAME) LIKE UPPER(:3)") {
 		t.Fatalf("package completion should scope package and owner: %s", query.SQL)
 	}
-	if len(query.Args) != 6 || query.Args[0] != "PAYROLL" || query.Args[1] != "CALC%" || query.Args[2] != "HR" {
+	if !strings.Contains(sqlText, "A.OBJECT_ID = P.OBJECT_ID") || !strings.Contains(sqlText, "A.SUBPROGRAM_ID = P.SUBPROGRAM_ID") || !strings.Contains(sqlText, "A.DATA_LEVEL = 0") {
+		t.Fatalf("package completion should join complete top-level argument metadata: %s", query.SQL)
+	}
+	if strings.Contains(sqlText, "ROWNUM") {
+		t.Fatalf("package completion must not truncate argument rows before overload grouping: %s", query.SQL)
+	}
+	wantArgs := []any{"HR", "PAYROLL", "CALC%"}
+	if !reflect.DeepEqual(query.Args, wantArgs) {
 		t.Fatalf("unexpected package completion args: %#v", query.Args)
+	}
+}
+
+func TestOracleCompletionPackageCandidatesPreserveOverloadsAndReturnTypes(t *testing.T) {
+	rows := []oraclePackageRoutineRow{
+		{
+			owner: "HR", parentName: "PAYROLL", name: "CALCULATE", objectID: 42, subprogramID: 1,
+			position: sql.NullInt64{Int64: 1, Valid: true}, sequence: sql.NullInt64{Int64: 1, Valid: true},
+			argumentName: sql.NullString{String: "P_VALUE", Valid: true}, inOut: sql.NullString{String: "IN", Valid: true}, dataType: sql.NullString{String: "NUMBER", Valid: true},
+		},
+		{
+			owner: "HR", parentName: "PAYROLL", name: "CALCULATE", objectID: 42, subprogramID: 2,
+			position: sql.NullInt64{Int64: 1, Valid: true}, sequence: sql.NullInt64{Int64: 1, Valid: true},
+			argumentName: sql.NullString{String: "P_VALUE", Valid: true}, inOut: sql.NullString{String: "IN", Valid: true}, dataType: sql.NullString{String: "VARCHAR2", Valid: true},
+		},
+		{
+			owner: "HR", parentName: "PAYROLL", name: "ITEM_COUNT", objectID: 42, subprogramID: 3,
+			position: sql.NullInt64{Int64: 0, Valid: true}, sequence: sql.NullInt64{Int64: 1, Valid: true}, dataType: sql.NullString{String: "NUMBER", Valid: true},
+		},
+		{
+			owner: "HR", parentName: "PAYROLL", name: "ITEM_COUNT", objectID: 42, subprogramID: 3,
+			position: sql.NullInt64{Int64: 1, Valid: true}, sequence: sql.NullInt64{Int64: 2, Valid: true},
+			argumentName: sql.NullString{String: "P_ACTIVE", Valid: true}, inOut: sql.NullString{String: "IN/OUT", Valid: true}, dataType: sql.NullString{String: "NUMBER", Valid: true},
+		},
+	}
+
+	response := oracleCompletionPackageCandidates(rows, "XE", 10)
+	if response.Incomplete {
+		t.Fatal("complete package metadata should not be marked incomplete")
+	}
+	if len(response.Candidates) != 3 {
+		t.Fatalf("overloads should remain distinct candidates: %#v", response.Candidates)
+	}
+	want := []struct {
+		name       string
+		kind       string
+		signature  string
+		returnType string
+	}{
+		{name: "CALCULATE", kind: "procedure", signature: "P_VALUE IN NUMBER"},
+		{name: "CALCULATE", kind: "procedure", signature: "P_VALUE IN VARCHAR2"},
+		{name: "ITEM_COUNT", kind: "function", signature: "P_ACTIVE IN OUT NUMBER", returnType: "NUMBER"},
+	}
+	for index, expected := range want {
+		candidate := response.Candidates[index]
+		if candidate.Name != expected.name || candidate.Kind != expected.kind || candidate.Signature == nil || *candidate.Signature != expected.signature {
+			t.Fatalf("candidate %d = %#v, want name=%q kind=%q signature=%q", index, candidate, expected.name, expected.kind, expected.signature)
+		}
+		if expected.returnType == "" {
+			if candidate.DataType != nil {
+				t.Fatalf("candidate %d return type = %#v, want nil", index, candidate.DataType)
+			}
+		} else if candidate.DataType == nil || *candidate.DataType != expected.returnType {
+			t.Fatalf("candidate %d return type = %#v, want %q", index, candidate.DataType, expected.returnType)
+		}
+		if candidate.ParentSchema == nil || *candidate.ParentSchema != "HR" || candidate.ParentName == nil || *candidate.ParentName != "PAYROLL" {
+			t.Fatalf("candidate %d lost package identity: %#v", index, candidate)
+		}
+	}
+
+	limited := oracleCompletionPackageCandidates(rows, "XE", 2)
+	if !limited.Incomplete || len(limited.Candidates) != 2 {
+		t.Fatalf("member limit should apply after overload grouping: %#v", limited)
 	}
 }
 

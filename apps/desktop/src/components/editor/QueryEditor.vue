@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, onMounted, onBeforeUnmount, onActivated, onDeactivated, watch, shallowRef, computed, nextTick } from "vue";
-import { CaseLower, CaseUpper, Code2, Download, FileCode, Pencil, PencilRuler, Play, Copy, List, Search, Sparkles, Table2, TextSelect, Trash2 } from "@lucide/vue";
+import { CaseLower, CaseUpper, ClipboardPaste, Code2, Download, FileCode, Pencil, PencilRuler, Play, Copy, List, Scissors, Search, Sparkles, Table2, TextSelect, Trash2 } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
 import type { CompletionContext } from "@codemirror/autocomplete";
 import { Transaction, StateEffect } from "@codemirror/state";
@@ -80,6 +80,7 @@ import {
   type SqlObjectNavigationTarget,
 } from "@/lib/sql/sqlNavigation";
 import { buildHoverTableSql, ddlForHoverPreview, hoverTableMatchesScope, quoteQualifiedName, reformatHoverDdl, scopeHoverTables, type HoverTableScope } from "@/lib/editor/hoverTableSql";
+import { constrainSqlHoverLayout } from "@/lib/editor/sqlHoverLayout";
 import { lineColumnToOffset, sqlErrorDecorationRange as resolveSqlErrorDecorationRange } from "@/lib/sql/sqlDiagnostics";
 import {
   DBX_TABLE_REFERENCE_MIME,
@@ -800,12 +801,21 @@ function requestExecuteFromView(currentView: EditorViewType, cursorPos: number, 
   const doc = currentView.state.doc.toString();
   const parameterOptions = sqlStatementParameterOptions();
   const candidates = buildExecutionCandidates(doc, cursorPos, props.databaseType, parameterOptions);
-  if (candidates.length === 0) return true;
+  const executeMode = settingsStore.editorSettings.executeMode;
+  if (candidates.length === 0) {
+    if (executeMode === "current") toast(t("editor.noExecutableStatementAtCursor"), 3000);
+    return true;
+  }
+  const candidate = executionCandidateForMode(candidates, executeMode, {
+    executeAllOnBlankLine: settingsStore.editorSettings.executeAllOnBlankLine,
+  });
+  if (!candidate) {
+    toast(t("editor.noExecutableStatementAtCursor"), 3000);
+    return true;
+  }
   // The execution shortcut keeps executing the configured target (cursor/all) directly:
   // it stays keyboard-driven and never pops the picker, which is reserved for click entry points.
   if (options.bypassPicker || !settingsStore.editorSettings.showExecutionTargetPicker || !hasMultipleExecutionTargets(doc, props.databaseType, parameterOptions)) {
-    const candidate = executionCandidateForMode(candidates, settingsStore.editorSettings.executeMode);
-    if (!candidate) return true;
     emitExecutionRequest(sqlExecutionSnapshotForRange(currentView, candidate), options.openInNewResultTab);
     return true;
   }
@@ -1315,6 +1325,50 @@ async function copySelectedSqlFromContextMenu() {
   }
 }
 
+async function cutSelectedSqlFromContextMenu() {
+  if (!canCopySelectedSql.value) return;
+  const currentView = view.value;
+  if (!currentView) return;
+  try {
+    await copyToClipboard(selectedSql.value);
+    // 剪切：复制后删除选中内容
+    const selection = currentView.state.selection.main;
+    if (!selection.empty) {
+      currentView.dispatch({
+        changes: { from: selection.from, to: selection.to },
+        selection: { anchor: selection.from, head: selection.from },
+        scrollIntoView: true,
+        userEvent: "input.cut",
+      });
+    }
+    toast(t("grid.cut"));
+    focusEditor();
+  } catch (e: any) {
+    toast(t("grid.copyFailed", { message: e?.message || String(e) }), 5000);
+  }
+}
+
+async function pasteClipboardSqlFromContextMenu() {
+  if (props.readOnly) return;
+  const currentView = view.value;
+  if (!currentView) return;
+  try {
+    const text = await readTextFromClipboard();
+    if (!text) return;
+    const selection = currentView.state.selection.main;
+    // 粘贴：替换选中内容或在光标处插入
+    currentView.dispatch({
+      changes: { from: selection.from, to: selection.to, insert: text },
+      selection: { anchor: selection.from + text.length, head: selection.from + text.length },
+      scrollIntoView: true,
+      userEvent: "input.paste",
+    });
+    focusEditor();
+  } catch (e: any) {
+    toast(t("editor.contextMenu.pasteClipboardReadFailed", { message: e?.message || String(e) }), 5000);
+  }
+}
+
 function selectAllSqlFromContextMenu() {
   const currentView = view.value;
   if (!currentView) return;
@@ -1607,6 +1661,20 @@ const contextMenuItems = computed<ContextMenuItem[]>(() => {
       disabled: !canCopySelectedSql.value,
       icon: Copy,
       shortcut: "Mod+C",
+    },
+    {
+      label: t("editor.contextMenu.cutSelection"),
+      action: cutSelectedSqlFromContextMenu,
+      disabled: !canCopySelectedSql.value || props.readOnly,
+      icon: Scissors,
+      shortcut: "Mod+X",
+    },
+    {
+      label: t("editor.contextMenu.pasteFromClipboard"),
+      action: pasteClipboardSqlFromContextMenu,
+      disabled: props.readOnly,
+      icon: ClipboardPaste,
+      shortcut: "Mod+V",
     },
     {
       label: t("editor.contextMenu.sendToAi"),
@@ -2247,7 +2315,7 @@ async function ensureForeignKeysForTables(tables: Array<{ name: string; database
   }
 }
 
-function createHoverDom(title: string, detail: string, sqlContent?: string, rows: string[] = []) {
+function createHoverDom(title: string, detail: string, sqlContent?: string, rows: string[] = []): { dom: HTMLElement; mount?: () => void; destroy?: () => void } {
   const dom = document.createElement("div");
   dom.className = "rounded-md border bg-popover px-3 py-2 text-xs text-popover-foreground shadow-md";
 
@@ -2261,13 +2329,15 @@ function createHoverDom(title: string, detail: string, sqlContent?: string, rows
   detailNode.textContent = detail;
   dom.appendChild(detailNode);
 
+  let layoutController: ReturnType<typeof constrainSqlHoverLayout> | null = null;
+
   if (sqlContent) {
     const separator = document.createElement("div");
     separator.className = "mt-2 border-t border-border/60";
     dom.appendChild(separator);
 
     const sqlContainer = document.createElement("div");
-    sqlContainer.className = "mt-1.5 max-h-64 overflow-y-auto text-[11px] leading-5 whitespace-pre font-mono";
+    sqlContainer.className = "mt-1.5 text-[11px] leading-5 whitespace-pre font-mono";
 
     if (hoverSqlHighlighter) {
       sqlContainer.innerHTML = hoverSqlHighlighter(sqlContent, isDark.value ? "dark" : "light");
@@ -2277,6 +2347,9 @@ function createHoverDom(title: string, detail: string, sqlContent?: string, rows
     }
 
     dom.appendChild(sqlContainer);
+    // 返回 mount/destroy 给 CodeMirror TooltipView 生命周期钩子，
+    // 避免 MutationObserver 监听 body 全子树来兜底清理。
+    layoutController = constrainSqlHoverLayout(dom, sqlContainer);
   }
 
   for (const row of rows) {
@@ -2286,7 +2359,11 @@ function createHoverDom(title: string, detail: string, sqlContent?: string, rows
     dom.appendChild(rowNode);
   }
 
-  return dom;
+  return {
+    dom,
+    mount: layoutController ? () => layoutController?.mount() : undefined,
+    destroy: layoutController ? () => layoutController?.destroy() : undefined,
+  };
 }
 
 async function resolveSqlHoverTooltip(currentView: EditorViewType, pos: number) {
@@ -2409,9 +2486,7 @@ async function resolveSqlHoverTooltip(currentView: EditorViewType, pos: number) 
       return {
         pos: range.from,
         end: range.to,
-        create: () => ({
-          dom: createHoverDom(table.name, sqlObjectHoverDetail(table), sqlContent, metadataLoadFailed ? ["[DBX] Failed to load table structure — check connection"] : undefined),
-        }),
+        create: () => createHoverDom(table.name, sqlObjectHoverDetail(table), sqlContent, metadataLoadFailed ? ["[DBX] Failed to load table structure — check connection"] : undefined),
       };
     }
 
@@ -2435,9 +2510,7 @@ async function resolveSqlHoverTooltip(currentView: EditorViewType, pos: number) 
       return {
         pos: range.from,
         end: range.to,
-        create: () => ({
-          dom: createHoverDom(column.name, column.dataType || "column", undefined, [column.schema ? `${column.schema}.${column.table}` : column.table, ...(column.comment?.trim() ? [column.comment.trim()] : [])]),
-        }),
+        create: () => createHoverDom(column.name, column.dataType || "column", undefined, [column.schema ? `${column.schema}.${column.table}` : column.table, ...(column.comment?.trim() ? [column.comment.trim()] : [])]),
       };
     }
   } catch {
@@ -5735,6 +5808,66 @@ defineExpose({
 </style>
 
 <style>
+[data-sql-structure-hover-content="true"] {
+  scrollbar-color: color-mix(in oklab, var(--foreground) 42%, transparent) color-mix(in oklab, var(--muted) 65%, transparent);
+}
+
+[data-sql-structure-hover-content="true"]::-webkit-scrollbar {
+  width: 8px;
+  height: 0;
+}
+
+[data-sql-structure-hover-content="true"]::-webkit-scrollbar:horizontal {
+  display: none;
+  height: 0;
+}
+
+[data-sql-structure-hover-content="true"]::-webkit-scrollbar-track {
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--muted) 65%, transparent);
+}
+
+[data-sql-structure-hover-content="true"]::-webkit-scrollbar-thumb {
+  min-width: 32px;
+  min-height: 32px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--foreground) 42%, transparent);
+  background-clip: padding-box;
+}
+
+[data-sql-structure-hover-content="true"]::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+[data-sql-structure-hover-scrollbar="true"] {
+  position: relative;
+  width: 100%;
+  height: 10px;
+  margin-top: 6px;
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--muted) 72%, var(--border));
+  cursor: pointer;
+  touch-action: none;
+  user-select: none;
+  flex: 0 0 10px;
+}
+
+[data-sql-structure-hover-scrollbar-thumb="true"] {
+  position: absolute;
+  top: 1px;
+  left: 0;
+  height: 8px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--foreground) 52%, transparent);
+  background-clip: padding-box;
+}
+
+[data-sql-structure-hover-scrollbar="true"]:hover [data-sql-structure-hover-scrollbar-thumb="true"] {
+  background: color-mix(in oklab, var(--foreground) 70%, transparent);
+}
+
 .intention-popup-overlay {
   position: fixed;
   inset: 0;

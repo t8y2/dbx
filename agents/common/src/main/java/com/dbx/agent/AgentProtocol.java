@@ -61,6 +61,7 @@ public final class AgentProtocol {
     public static final String MONGO_METHOD_CREATE_USER = "create_user";
     public static final String MONGO_METHOD_DROP_INDEXES = "drop_indexes";
     public static final String MONGO_METHOD_DROP_COLLECTION = "drop_collection";
+    public static final String MONGO_METHOD_CLONE_COLLECTION = "clone_collection";
     public static final String MONGO_METHOD_DROP_DATABASE = "drop_database";
     public static final String MONGO_METHOD_INSERT_DOCUMENT = "insert_document";
     public static final String MONGO_METHOD_UPDATE_DOCUMENT = "update_document";
@@ -118,6 +119,7 @@ public final class AgentProtocol {
     public static final String CAPABILITY_ETCD_LEASE = "etcd_lease";
     public static final String CAPABILITY_ETCD_AUTH = "etcd_auth";
     public static final String CAPABILITY_MONGO_DROP_DATABASE = "mongo_drop_database";
+    public static final String CAPABILITY_MONGO_CLONE_COLLECTION = "mongo_clone_collection";
     public static final String CAPABILITY_MULTI_SESSION = "multi_session";
     public static final String CAPABILITY_STRUCTURED_ERROR_V1 = "structured_error_v1";
 
@@ -150,7 +152,8 @@ public final class AgentProtocol {
         CAPABILITY_ETCD_WATCH,
         CAPABILITY_ETCD_LEASE,
         CAPABILITY_ETCD_AUTH,
-        CAPABILITY_MONGO_DROP_DATABASE
+        CAPABILITY_MONGO_DROP_DATABASE,
+        CAPABILITY_MONGO_CLONE_COLLECTION
     ));
 
     public static final List<String> MULTI_SESSION_CAPABILITIES;
@@ -208,10 +211,12 @@ public final class AgentProtocol {
 
         List<String> mongoCapabilities = new java.util.ArrayList<>(CAPABILITIES);
         mongoCapabilities.add(CAPABILITY_MONGO_DROP_DATABASE);
+        mongoCapabilities.add(CAPABILITY_MONGO_CLONE_COLLECTION);
         MONGO_LEGACY_CAPABILITIES = Collections.unmodifiableList(mongoCapabilities);
 
         List<String> mongoMultiSessionCapabilities = new java.util.ArrayList<>(MULTI_SESSION_CAPABILITIES);
         mongoMultiSessionCapabilities.add(CAPABILITY_MONGO_DROP_DATABASE);
+        mongoMultiSessionCapabilities.add(CAPABILITY_MONGO_CLONE_COLLECTION);
         MONGO_LEGACY_MULTI_SESSION_CAPABILITIES = Collections.unmodifiableList(mongoMultiSessionCapabilities);
 
         List<String> jdbcCapabilities = new java.util.ArrayList<>(MULTI_SESSION_CAPABILITIES);
@@ -247,6 +252,7 @@ public final class AgentProtocol {
         MONGO_METHOD_CREATE_USER,
         MONGO_METHOD_DROP_INDEXES,
         MONGO_METHOD_DROP_COLLECTION,
+        MONGO_METHOD_CLONE_COLLECTION,
         MONGO_METHOD_DROP_DATABASE,
         MONGO_METHOD_INSERT_DOCUMENT,
         MONGO_METHOD_UPDATE_DOCUMENT,

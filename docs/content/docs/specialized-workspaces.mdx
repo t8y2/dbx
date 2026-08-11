@@ -1,9 +1,9 @@
 ---
 title: Specialized Workspaces
-description: Manage Redis, MongoDB, search and vector databases, HBase, message queues, etcd, ZooKeeper, and Nacos in DBX.
+description: Manage Redis, MongoDB, search and vector databases, HBase, message queues, etcd, ZooKeeper, Nacos, and Consul KV in DBX.
 ---
 
-In addition to the SQL editor and data grid, DBX opens specialized workspaces for specific connection types. These interfaces use each system's native object model and management APIs, including Redis keys, MongoDB documents, vector collections, message queue topics, etcd keys, ZooKeeper ZNodes, and Nacos configurations.
+In addition to the SQL editor and data grid, DBX opens specialized workspaces for specific connection types. These interfaces use each system's native object model and management APIs, including Redis keys, MongoDB documents, vector collections, message queue topics, etcd keys, ZooKeeper ZNodes, Nacos configurations, and Consul KV entries.
 
 <Callout type="info">Specialized capabilities are enabled dynamically based on database type, server version, driver, and account privileges. If an entry point is missing, check [Database Support](/en/docs/databases), the connection test result, and server permissions.</Callout>
 
@@ -16,7 +16,7 @@ In addition to the SQL editor and data grid, DBX opens specialized workspaces fo
 | Vector databases | Qdrant, Milvus, Weaviate, ChromaDB | Collection browsing, vector search, upsert, delete, and request preview |
 | Wide-column and column family | HBase | Namespaces, table structure, column families, and row data |
 | Message queues | Pulsar, Kafka, RocketMQ, RabbitMQ | Topics, subscriptions or consumers, messages, monitoring, permissions, policies, and admin APIs |
-| Registry and configuration | etcd, ZooKeeper, Nacos | Keys/ZNodes, cluster status, access control, configuration, services, and instances |
+| Registry and configuration | etcd, ZooKeeper, Nacos, Consul | Keys/ZNodes, cluster status, access control, configuration, services, and instances |
 | Runtime status | MySQL, PostgreSQL, Redis, etcd, Nacos, and others | Dashboards, processes or sessions, metrics, and database-specific administration views |
 
 ## Redis and MongoDB
@@ -81,7 +81,7 @@ Pulsar emphasizes tenants, namespaces, and subscriptions; Kafka uses topics, con
 
 <Callout type="info">Message queue panels are capability-driven. Server versions, management APIs, account privileges, or a missing management port can make individual tabs unavailable.</Callout>
 
-## etcd, ZooKeeper, and Nacos
+## etcd, ZooKeeper, Nacos, and Consul
 
 ### etcd
 
@@ -102,6 +102,20 @@ The Nacos workspace covers configuration and services and can also manage namesp
 - Dashboard and Raw API access
 
 Configuration history can require an additional console URL and credentials. If the connection works but history is unavailable, check the console settings in the connection form.
+
+### Consul
+
+The Consul workspace is split into independently loaded Overview, KV, Services, Health, Sessions, ACL, Scope, Service Mesh, Tools, and Operator domains. Capability probes distinguish supported, unsupported, forbidden, and unknown endpoints, so a permission failure in one domain does not clear data loaded by another.
+
+Connections accept an HTTP or HTTPS API address, ACL Token, Datacenter, Namespace, Admin Partition, read consistency, CA certificate, mTLS identity, certificate-verification override, timeout, and DBX Transport Layer. Agent Service and Check writes additionally require a verified, explicit Agent target; DBX refuses those writes when a load balancer makes the target ambiguous.
+
+KV supports recursive search, versioned prefix export, immutable import preview, CAS conflict handling, transactions, atomic rename/copy, bounded transactional prefix deletion, and cancellable blocking-query Watch. Consul transactions are limited to 64 operations; larger imports and deletes are deterministically split and explicitly reported as non-atomic across batches. Cross-connection or cross-Datacenter migration is a DBX client read/write workflow, not native Consul replication.
+
+Catalog and Health remain read-only discovery views. Agent Service/Check, Session/Lock, ACL Token/Policy/Role, Enterprise Namespace/Partition, and Service Mesh resources use domain-specific DTOs and confirmations. ACL secrets and peering tokens are treated as one-time sensitive values and are not stored in the Consul frontend cache or normal export formats.
+
+Prepared Query, Event, and Coordinate are available under Tools. Operator reads and snapshot download are experimental. Snapshot restore, Autopilot updates, Raft changes, Keyring changes, and License updates are disabled by default with separate feature switches; enabling one does not enable another.
+
+<Callout type="warn">Consul has no per-Key history API and no native cross-Datacenter KV replication API. `ModifyIndex`, blocking indexes, and snapshots are not presented as Key history. Enterprise and Operator availability depends on Consul edition, version, Agent role, ACL policy, and explicitly enabled DBX safety settings.</Callout>
 
 ## Dashboards and Administration Views
 

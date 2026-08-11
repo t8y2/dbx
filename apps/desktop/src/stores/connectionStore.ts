@@ -62,7 +62,7 @@ import { mergeSqlObjectNavigationType, sqlObjectNavigationTypeFromTableType } fr
 import * as api from "@/lib/backend/api";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { useTunnelProfileStore } from "@/stores/tunnelProfileStore";
-import { connectionIsDorisFamilyCatalogCapable, isInternalDorisCatalog, isSchemaAware, normalizeSidebarObjectKind, sidebarObjectKindsForDatabase, usesTreeSchemaMode } from "@/lib/database/databaseCapabilities";
+import { connectionIsDorisFamilyCatalogCapable, isInternalDorisCatalog, isSchemaAware, normalizeSidebarObjectKind, sidebarObjectKindsForDatabase, supportsPackageMemberExpansion, usesTreeSchemaMode } from "@/lib/database/databaseCapabilities";
 import { connectionObjectTreeNodeSchema, connectionObjectTreeQuerySchema, connectionShouldDiscoverJdbcSchemas, connectionShouldLoadIdentifierQuote, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection, gaussdbIdentifierQuoteOverride } from "@/lib/database/jdbcDialect";
 import { buildDatabaseTreeNodes, buildDuckDbConnectionTreeNodes, compareSidebarNames, sortSidebarDatabases, sortSidebarNames, shouldIncludeDefaultDatabaseNode } from "@/lib/database/databaseTree";
 import { buildSqlServerDatabaseTreeNodes } from "@/lib/database/sqlServerTree";
@@ -110,7 +110,9 @@ import { normalizeRedisDatabaseAliases, redisDatabaseAlias, redisDatabaseLabel }
 import { appendAgentDriverUpdateHint, hasAgentDriverUpdate, hasInstalledAgentVersion, type AgentDriverInstallState } from "@/lib/connection/agentDriverInstallHint";
 import { appendConnectionErrorHints } from "@/lib/connection/connectionErrorHints";
 import { appendVisibleDatabaseSelection } from "@/lib/connection/connectionVisibleDatabases";
+import { buildXuguTypeMemberNodes, isXuguTypeMemberContainer } from "@/lib/sidebar/xuguTypeMembers";
 import { filterNacosNamespacesForSidebar, normalizeNacosNamespacesForDisplay } from "@/lib/nacos/nacosNamespaceVisibility";
+import { buildPackageMemberNodes, markPackageNodesExpandable } from "@/lib/sidebar/packageMembers";
 import { configuredDatabaseProductName, connectionConfigFingerprint, normalizeDatabaseConnectionInfo } from "@/lib/connection/connectionDatabaseInfo";
 import { createMetadataLoadTrace, logMetadataLoadTrace, MetadataLoadCoordinator, type MetadataLoadTraceLogger } from "@/lib/metadata/metadataLoadCoordinator";
 import type { MetadataScopeInput } from "@/lib/metadata/metadataLoadScope";
@@ -986,6 +988,7 @@ export const useConnectionStore = defineStore("connection", () => {
       redis: "Redis",
       etcd: "etcd",
       zookeeper: "Apache ZooKeeper",
+      consul: "Consul",
       duckdb: "DuckDB",
       clickhouse: "ClickHouse",
       sqlserver: "SQL Server",
@@ -1606,7 +1609,9 @@ export const useConnectionStore = defineStore("connection", () => {
       objects: options.objects.filter((object) => options.objectTypes.includes(normalizedObjectTreeKind(object.object_type))),
     });
     const refreshedGroup = grouped.find((group) => group.type === options.node.type);
-    return refreshedGroup?.children ?? [];
+    const children = refreshedGroup?.children ?? [];
+    const databaseType = options.node.connectionId ? effectiveDatabaseTypeForConnection(getConfig(options.node.connectionId)) : undefined;
+    return supportsPackageMemberExpansion(databaseType) ? markPackageNodesExpandable(children) : children;
   }
 
   function tableInfosToCompletionTables(tables: readonly TableInfo[], schema?: string): SqlCompletionTable[] {
@@ -1863,13 +1868,17 @@ export const useConnectionStore = defineStore("connection", () => {
       );
       const supplementalObjects = filterSimpleSidebarSupplementalObjects(objects);
       if (supplementalObjects.length === 0) return;
-      const supplementalChildren = buildSimpleObjectTreeNodes({
+      let supplementalChildren = buildSimpleObjectTreeNodes({
         nodeId: options.nodeId,
         connectionId: options.connectionId,
         database: options.database,
         schema: options.effectiveSchema,
         objects: supplementalObjects,
       });
+      const databaseType = effectiveDatabaseTypeForConnection(getConfig(options.connectionId));
+      if (supportsPackageMemberExpansion(databaseType)) {
+        supplementalChildren = markPackageNodesExpandable(supplementalChildren);
+      }
       if (supplementalChildren.length === 0) return;
       if (isTreeLoadSearchChanged(searchFilter, options.loadOptions)) return;
       const targetNode = treeNodeLoadTarget(options.load);
@@ -2747,6 +2756,8 @@ export const useConnectionStore = defineStore("connection", () => {
       await loadEtcdRoot(connectionId);
     } else if (config.db_type === "zookeeper") {
       await loadZooKeeperRoot(connectionId);
+    } else if (config.db_type === "consul") {
+      await loadConsulRoot(connectionId);
     } else if (config.db_type === "mongodb") {
       await loadMongoDatabases(connectionId);
     } else if (config.db_type === "elasticsearch" || config.db_type === "easysearch") {
@@ -3294,7 +3305,7 @@ export const useConnectionStore = defineStore("connection", () => {
   async function loadConnectedConnectionRootForSidebarSearch(connectionId: string) {
     if (!connectedIds.value.has(connectionId)) return;
     const config = getConfig(connectionId);
-    if (!config || ["redis", "etcd", "zookeeper", "mongodb", "elasticsearch", "easysearch", "milvus", "qdrant", "weaviate", "chromadb", "mq", "nacos"].includes(config.db_type)) return;
+    if (!config || ["redis", "etcd", "zookeeper", "consul", "mongodb", "elasticsearch", "easysearch", "milvus", "qdrant", "weaviate", "chromadb", "mq", "nacos"].includes(config.db_type)) return;
     const node = findConnectionNode(connectionId);
     if (!node || node.type !== "connection" || node.isLoading || hasConnectionMetadataChildren(node.children)) return;
     const scope = { kind: "connection-databases" as const, connectionId, driverProfile: metadataDriverProfile(config) };
@@ -3435,6 +3446,52 @@ export const useConnectionStore = defineStore("connection", () => {
               id: `${connectionId}:zookeeper`,
               label: kvRootNodeLabel("zookeeper"),
               type: "zookeeper-root" as const,
+              connectionId,
+              database: "",
+              isExpanded: false,
+              children: [],
+            },
+          ],
+          targetNode,
+        ),
+      );
+      targetNode.isExpanded = true;
+    } catch (e) {
+      recordMetadataLoadError(connectionId, e, load);
+      throw e;
+    } finally {
+      finishTreeNodeLoad(load);
+    }
+  }
+
+  async function loadConsulRoot(connectionId: string) {
+    const node = findConnectionNode(connectionId);
+    if (!node) return;
+
+    let load = beginTreeNodeLoad(node);
+    try {
+      await ensureConnected(connectionId);
+      load = reclaimTreeNodeLoad(load, node);
+      const targetNode = treeNodeLoadTarget(load);
+      if (!targetNode) return;
+      setChildren(
+        targetNode,
+        withSavedSqlRoot(
+          connectionId,
+          [
+            {
+              id: `${connectionId}:consul`,
+              label: kvRootNodeLabel("consul"),
+              type: "consul-root" as const,
+              connectionId,
+              database: "",
+              isExpanded: false,
+              children: [],
+            },
+            {
+              id: `${connectionId}:consul-overview`,
+              label: i18n.global.t("consul.ui.overview"),
+              type: "consul-overview" as const,
               connectionId,
               database: "",
               isExpanded: false,
@@ -5132,19 +5189,25 @@ export const useConnectionStore = defineStore("connection", () => {
       const triggers = await api.listTriggers(connectionId, database, querySchema, table, catalog);
       const targetNode = treeNodeLoadTarget(load);
       if (!targetNode) return;
+      const isXugu = effectiveDatabaseTypeForConnection(getConfig(connectionId)) === "xugu";
       setChildren(
         targetNode,
-        triggers.map((tr) => ({
-          id: `${parentId}:${tr.name}`,
-          label: `${tr.name} (${tr.timing} ${tr.event})`,
-          objectName: tr.name,
-          type: "trigger" as const,
-          connectionId,
-          database,
-          schema,
-          tableName: table,
-          meta: tr,
-        })),
+        triggers.map((tr) => {
+          const xuguDetails = isXugu ? [tr.timing, tr.event, tr.level, tr.enabled === false ? i18n.global.t("objects.disabled") : null, tr.valid === false ? i18n.global.t("objects.invalid") : null].filter(Boolean).join(" · ") : `${tr.timing} ${tr.event}`;
+          return {
+            id: `${parentId}:${tr.name}`,
+            label: `${tr.name} (${xuguDetails})`,
+            objectName: tr.name,
+            type: "trigger" as const,
+            connectionId,
+            database,
+            schema,
+            tableName: table,
+            comment: isXugu ? tr.comment : undefined,
+            valid: isXugu ? tr.valid : undefined,
+            meta: tr,
+          };
+        }),
       );
       targetNode.isExpanded = true;
     } catch (e) {
@@ -5265,6 +5328,8 @@ export const useConnectionStore = defineStore("connection", () => {
         await loadEtcdRoot(node.connectionId);
       } else if (config?.db_type === "zookeeper") {
         await loadZooKeeperRoot(node.connectionId);
+      } else if (config?.db_type === "consul") {
+        await loadConsulRoot(node.connectionId);
       } else if (config?.db_type === "mongodb") {
         await loadMongoDatabases(node.connectionId);
       } else if (config?.db_type === "elasticsearch" || config?.db_type === "easysearch") {
@@ -5580,6 +5645,7 @@ export const useConnectionStore = defineStore("connection", () => {
       search_in_definitions: !!request.search_in_definitions,
       parent_schema: request.parent_schema ?? "",
       parent_name: request.parent_name ?? "",
+      parent_type: request.parent_type ?? "",
       match_mode: request.match_mode ?? "prefix",
     });
   }
@@ -5589,6 +5655,114 @@ export const useConnectionStore = defineStore("connection", () => {
       await ensureConnected(request.connection_id);
       return api.completionAssistantSearch(request);
     });
+  }
+
+  async function loadPackageMembers(node: TreeNode, options?: LoadTreeOptions): Promise<void> {
+    if (node.type !== "package" || !node.connectionId || !node.database) return;
+    const databaseType = effectiveDatabaseTypeForConnection(getConfig(node.connectionId));
+    if (!supportsPackageMemberExpansion(databaseType)) return;
+    const connectionId = node.connectionId;
+    const database = node.database;
+    const schema = node.schema;
+    const packageName = node.objectName || node.label;
+    let load = beginTreeNodeLoad(node);
+
+    try {
+      await runTreeMetadataLoad(
+        {
+          kind: "package-members",
+          connectionId,
+          database,
+          schema,
+          nodeKind: node.type,
+          extra: { packageName },
+        },
+        async () => {
+          await ensureConnected(connectionId);
+          load = reclaimTreeNodeLoad(load, node);
+          const response = await completionAssistantSearch({
+            connection_id: connectionId,
+            database,
+            schema: schema ?? null,
+            object_kinds: ["routine"],
+            mask: "",
+            case_sensitive: true,
+            global_search: false,
+            max_results: 1000,
+            search_in_comments: false,
+            search_in_definitions: false,
+            parent_schema: schema ?? null,
+            parent_name: packageName,
+            ...(databaseType === "xugu" ? { parent_type: "package" as const } : {}),
+            match_mode: "prefix",
+          });
+          const targetNode = treeNodeLoadTarget(load);
+          if (!targetNode) return;
+          setChildren(targetNode, buildPackageMemberNodes(targetNode, response.candidates));
+          targetNode.isExpanded = true;
+        },
+        options,
+      );
+    } catch (error) {
+      recordMetadataLoadError(connectionId, error, load);
+      throw error;
+    } finally {
+      finishTreeNodeLoad(load);
+    }
+  }
+
+  async function loadXuguTypeMembers(node: TreeNode): Promise<void> {
+    if (!isXuguTypeMemberContainer(node, getConfig(node.connectionId || "")?.db_type)) return;
+    const connectionId = node.connectionId;
+    const database = node.database;
+    if (!connectionId || !database) return;
+    if (node.isExpanded) {
+      node.isExpanded = false;
+      if (!sidebarSearchQuery.value) releaseCollapsedTreeNodeChildren(node.id);
+      return;
+    }
+    if (node.children && node.children.length > 0) {
+      node.isExpanded = true;
+      return;
+    }
+
+    const schema = node.schema || "";
+    const parentName = node.objectName || node.label;
+    node.isLoading = true;
+    try {
+      const [attributes, methods] = await Promise.all([
+        completionAssistantSearch({
+          connection_id: connectionId,
+          database,
+          schema,
+          object_kinds: ["column"],
+          mask: "",
+          max_results: 500,
+          global_search: false,
+          parent_schema: schema,
+          parent_name: parentName,
+          parent_type: "type",
+          match_mode: "prefix",
+        }),
+        completionAssistantSearch({
+          connection_id: connectionId,
+          database,
+          schema,
+          object_kinds: ["routine"],
+          mask: "",
+          max_results: 500,
+          global_search: false,
+          parent_schema: schema,
+          parent_name: parentName,
+          parent_type: "type",
+          match_mode: "prefix",
+        }),
+      ]);
+      node.children = buildXuguTypeMemberNodes(node, [...attributes.candidates, ...methods.candidates]);
+      node.isExpanded = true;
+    } finally {
+      node.isLoading = false;
+    }
   }
 
   const ORACLE_SYSTEM_COMPLETION_SCHEMAS = new Set(["SYS", "SYSTEM", "SYSMAN", "DBSNMP", "OUTLN", "XDB", "MDSYS", "CTXSYS", "WMSYS"]);
@@ -7047,6 +7221,9 @@ export const useConnectionStore = defineStore("connection", () => {
   }
 
   async function initFromDisk() {
+    // Connection normalization and timeout migration depend on persisted global
+    // settings. Startup helpers may initialize connections before App.initApp().
+    await settingsStore.initEditorSettings();
     if (!initFromDiskPromise) {
       initFromDiskPromise = (async () => {
         const [pinnedOrder, saved] = await Promise.all([loadPinnedTreeNodeOrder(), api.loadConnections(), tunnelProfileStore.init()]);
@@ -7178,6 +7355,7 @@ export const useConnectionStore = defineStore("connection", () => {
     refreshRedisDbKeyCounts,
     loadEtcdRoot,
     loadZooKeeperRoot,
+    loadConsulRoot,
     loadMqTenants,
     loadMqttTopics,
     loadNacosNamespaces,
@@ -7199,6 +7377,8 @@ export const useConnectionStore = defineStore("connection", () => {
     loadTableForLocate,
     loadObjectGroupChildren,
     loadCustomTypeChildren,
+    loadPackageMembers,
+    loadXuguTypeMembers,
     loadMoreObjectGroupChildren,
     loadAllObjectGroupChildren,
     loadTableGroups,

@@ -96,6 +96,19 @@ test("bumps Neo4j from its native Go source directory", () => {
   assert.deepEqual(result.nativeModules, ["neo4j"]);
 });
 
+test("bumps IoTDB from its native Go source directory", () => {
+  const result = evaluateAgentVersionBump({
+    versions: { iotdb: "0.1.30" },
+    changedFiles: ["agents/drivers/iotdb/main.go"],
+    moduleExists: (path) => path === "agents/drivers/iotdb",
+    readModuleFile: () => "",
+  });
+
+  assert.equal(result.versions.iotdb, "0.1.31");
+  assert.deepEqual(result.javaModules, []);
+  assert.deepEqual(result.nativeModules, ["iotdb"]);
+});
+
 test("rebuilds native modules when shared native packaging changes", () => {
   const existing = new Set([
     "agents/drivers/access",

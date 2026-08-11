@@ -53,7 +53,7 @@ function readEntries(): DebugLogEntry[] {
 }
 
 function redactSensitiveText(value: string): string {
-  return value.replace(/("(?:password|passphrase|apiKey|api_key|token|secret|connectionString|connection_string)"\s*:\s*")([^"]*)(")/gi, "$1[redacted]$3").replace(/\b(password|passphrase|apiKey|api_key|token|secret)=([^&\s]+)/gi, "$1=[redacted]");
+  return value.replace(/("[^"]*(?:password|passphrase|api[_-]?key|token|secret|jwt|connection[_-]?string)[^"]*"\s*:\s*")([^"]*)(")/gi, "$1[redacted]$3").replace(/\b([^=&\s]*(?:password|passphrase|api[_-]?key|token|secret|jwt)[^=&\s]*)=([^&\s]+)/gi, "$1=[redacted]");
 }
 
 function formatValue(value: unknown, seen = new WeakSet<object>()): string {

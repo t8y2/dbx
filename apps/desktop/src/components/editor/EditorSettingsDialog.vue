@@ -119,7 +119,7 @@ import McpConnectionScopePicker from "@/components/settings/McpConnectionScopePi
 import ScheduledDatabaseBackupSettings from "@/components/backup/ScheduledDatabaseBackupSettings.vue";
 import SqlFormatterSettingsPanel from "./SqlFormatterSettingsPanel.vue";
 import { APP_THEME_PALETTES, type AppCornerStyle, type AppThemeAppearance, type AppThemeMode, type AppThemePalette } from "@/lib/app/appTheme";
-import { editorSettingsDraftChanged, editorSettingsDraftFromSettings, editorSettingsPatchFromDraft, normalizeTableOpenPageSizeDraft, type EditorSettingsDraft } from "@/lib/settings/editorSettingsDraft";
+import { editorSettingsDraftChanged, editorSettingsDraftFromSettings, editorSettingsPatchFromDraft, normalizeQueryResultMaxRowsDraft, normalizeTableOpenPageSizeDraft, type EditorSettingsDraft } from "@/lib/settings/editorSettingsDraft";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useSavedSqlStore } from "@/stores/savedSqlStore";
 import { usePromptTemplateStore } from "@/stores/promptTemplateStore";
@@ -134,6 +134,7 @@ import { buildFontFamilyOptions, displayFontFamily, isPresetFontFamily, loadSyst
 import { buildAppSupportInfoRows, formatAppSupportInfoForClipboard, type AppSupportInfoLabels } from "@/lib/app/supportInfo";
 import { DateTimePatterns, normalizeSupportedDateTimePattern } from "@/lib/dataGrid/columnFormatter";
 import { MAX_RESULT_PAGE_SIZE, MIN_RESULT_PAGE_SIZE } from "@/lib/dataGrid/paginationPageSize";
+import { MAX_QUERY_RESULT_MAX_ROWS } from "@/lib/dataGrid/queryResultRowLimit";
 import type { PromptTemplate } from "@/types/promptTemplate";
 import { GLOBAL_INSTRUCTIONS_MAX, PROMPT_TEMPLATE_CONTENT_MAX, PROMPT_TEMPLATE_NAME_MAX, promptTemplateCharacterCount } from "@/types/promptTemplate";
 
@@ -273,6 +274,7 @@ const editCustomThemes = ref<CustomTheme[]>([...settingsStore.editorSettings.cus
 const editActiveCustomThemeId = ref(settingsStore.editorSettings.activeCustomThemeId);
 const showThemeCustomizer = ref(false);
 const editExecuteMode = ref(settingsStore.editorSettings.executeMode);
+const editExecuteAllOnBlankLine = ref(settingsStore.editorSettings.executeAllOnBlankLine);
 const editGlobalConnectTimeoutSecs = ref(settingsStore.editorSettings.globalConnectTimeoutSecs);
 const editGlobalQueryTimeoutSecs = ref(settingsStore.editorSettings.globalQueryTimeoutSecs);
 const editShowExecutionTargetPicker = ref(settingsStore.editorSettings.showExecutionTargetPicker);
@@ -313,9 +315,11 @@ const editShowIndexIndicatorsInHeader = ref(settingsStore.editorSettings.showInd
 const editCompactColumnHeaderActions = ref(settingsStore.editorSettings.compactColumnHeaderActions);
 const editDataGridQuickEntry = ref(settingsStore.editorSettings.dataGridQuickEntry);
 const editDataGridAutoTransposeSingleRow = ref(settingsStore.editorSettings.dataGridAutoTransposeSingleRow);
+const editPageSize = ref(settingsStore.editorSettings.pageSize);
 const editTableOpenPageSize = ref(settingsStore.editorSettings.tableOpenPageSize);
+const editQueryResultMaxRowsEnabled = ref(settingsStore.editorSettings.queryResultMaxRowsEnabled);
+const editQueryResultMaxRows = ref(settingsStore.editorSettings.queryResultMaxRows);
 const editInfiniteScroll = ref(settingsStore.editorSettings.infiniteScroll);
-const editInfiniteScrollMaxRows = ref(settingsStore.editorSettings.infiniteScrollMaxRows);
 const editRegexMaxMatchCount = ref(settingsStore.editorSettings.regexMaxMatchCount);
 const editAutoCalculateTotalRows = ref(settingsStore.editorSettings.autoCalculateTotalRows);
 const editTableColumnTemplateRows = ref<TableColumnTemplateGridRow[]>(tableColumnTemplateRowsFromSettings(settingsStore.editorSettings.tableColumnTemplateFields));
@@ -325,6 +329,22 @@ const editSqlVariableSyntaxDatabaseType = ref<DatabaseType>(SQL_VARIABLE_SYNTAX_
 
 function updateTableOpenPageSizeDraft(value: string | number) {
   editTableOpenPageSize.value = normalizeTableOpenPageSizeDraft(value);
+}
+
+function updatePageSizeDraft(value: string | number) {
+  editPageSize.value = normalizeTableOpenPageSizeDraft(value);
+}
+
+function updateQueryResultMaxRowsInput(event: Event) {
+  const input = event.currentTarget as HTMLInputElement;
+  const parsed = Number(input.value);
+  if (!Number.isFinite(parsed) || parsed > MAX_QUERY_RESULT_MAX_ROWS) {
+    input.value = String(editQueryResultMaxRows.value);
+    return;
+  }
+  const normalized = normalizeQueryResultMaxRowsDraft(input.value);
+  if (input.value !== String(normalized)) input.value = String(normalized);
+  editQueryResultMaxRows.value = normalized;
 }
 
 function sqlVariableSyntaxToggle(key: keyof SqlVariableSyntaxToggles): boolean {
@@ -444,6 +464,7 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     customThemes: editCustomThemes.value,
     activeCustomThemeId: editActiveCustomThemeId.value,
     executeMode: editExecuteMode.value,
+    executeAllOnBlankLine: editExecuteAllOnBlankLine.value,
     globalConnectTimeoutSecs: editGlobalConnectTimeoutSecs.value,
     globalQueryTimeoutSecs: editGlobalQueryTimeoutSecs.value,
     showExecutionTargetPicker: editShowExecutionTargetPicker.value,
@@ -469,9 +490,11 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     compactColumnHeaderActions: editCompactColumnHeaderActions.value,
     dataGridQuickEntry: editDataGridQuickEntry.value,
     dataGridAutoTransposeSingleRow: editDataGridAutoTransposeSingleRow.value,
+    pageSize: editPageSize.value,
     tableOpenPageSize: editTableOpenPageSize.value,
+    queryResultMaxRowsEnabled: editQueryResultMaxRowsEnabled.value,
+    queryResultMaxRows: editQueryResultMaxRows.value,
     infiniteScroll: editInfiniteScroll.value,
-    infiniteScrollMaxRows: editInfiniteScrollMaxRows.value,
     regexMaxMatchCount: editRegexMaxMatchCount.value,
     autoCalculateTotalRows: editAutoCalculateTotalRows.value,
     tableColumnTemplateFields: normalizedEditTableColumnTemplateFields.value,
@@ -714,6 +737,7 @@ function syncEditorSettingsDraftFromStore() {
   editCustomThemes.value = [...settingsStore.editorSettings.customThemes];
   editActiveCustomThemeId.value = settingsStore.editorSettings.activeCustomThemeId;
   editExecuteMode.value = settingsStore.editorSettings.executeMode;
+  editExecuteAllOnBlankLine.value = settingsStore.editorSettings.executeAllOnBlankLine;
   editGlobalConnectTimeoutSecs.value = settingsStore.editorSettings.globalConnectTimeoutSecs;
   editGlobalQueryTimeoutSecs.value = settingsStore.editorSettings.globalQueryTimeoutSecs;
   editShowExecutionTargetPicker.value = settingsStore.editorSettings.showExecutionTargetPicker;
@@ -740,9 +764,11 @@ function syncEditorSettingsDraftFromStore() {
   editCompactColumnHeaderActions.value = settingsStore.editorSettings.compactColumnHeaderActions;
   editDataGridQuickEntry.value = settingsStore.editorSettings.dataGridQuickEntry;
   editDataGridAutoTransposeSingleRow.value = settingsStore.editorSettings.dataGridAutoTransposeSingleRow;
+  editPageSize.value = settingsStore.editorSettings.pageSize;
   editTableOpenPageSize.value = settingsStore.editorSettings.tableOpenPageSize;
+  editQueryResultMaxRowsEnabled.value = settingsStore.editorSettings.queryResultMaxRowsEnabled;
+  editQueryResultMaxRows.value = settingsStore.editorSettings.queryResultMaxRows;
   editInfiniteScroll.value = settingsStore.editorSettings.infiniteScroll;
-  editInfiniteScrollMaxRows.value = settingsStore.editorSettings.infiniteScrollMaxRows;
   editRegexMaxMatchCount.value = settingsStore.editorSettings.regexMaxMatchCount;
   editAutoCalculateTotalRows.value = settingsStore.editorSettings.autoCalculateTotalRows;
   editTableColumnTemplateRows.value = tableColumnTemplateRowsFromSettings(settingsStore.editorSettings.tableColumnTemplateFields);
@@ -850,7 +876,8 @@ const shortcutsChanged = computed(() => JSON.stringify(editShortcuts.value) !== 
 const duckDbWorkerSettingsRequireRestart = computed(() => editDuckDbWorkerProcessIsolation.value !== startupDuckDbWorkerProcessIsolation.value || normalizeDuckDbWorkerMaxProcesses(editDuckDbWorkerMaxProcesses.value) !== startupDuckDbWorkerMaxProcesses.value);
 const hasBlockingShortcutConflicts = computed(() => shortcutsChanged.value && hasShortcutConflicts.value);
 const hasBlockingFormatterConfig = computed(() => activeSettingsTab.value === "formatter" && !sqlFormatterConfigValid.value);
-const hasApplyBlocker = computed(() => hasBlockingShortcutConflicts.value || hasBlockingFormatterConfig.value);
+const hasBlockingQueryResultRowLimit = computed(() => editQueryResultMaxRowsEnabled.value && editQueryResultMaxRows.value < editPageSize.value);
+const hasApplyBlocker = computed(() => hasBlockingShortcutConflicts.value || hasBlockingFormatterConfig.value || hasBlockingQueryResultRowLimit.value);
 
 function hasChanges(): boolean {
   return (
@@ -929,6 +956,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editFontFamily.value = DEFAULT_EDITOR_SETTINGS.fontFamily;
     editFontSize.value = DEFAULT_EDITOR_SETTINGS.fontSize;
     editExecuteMode.value = DEFAULT_EDITOR_SETTINGS.executeMode;
+    editExecuteAllOnBlankLine.value = DEFAULT_EDITOR_SETTINGS.executeAllOnBlankLine;
     editGlobalConnectTimeoutSecs.value = DEFAULT_EDITOR_SETTINGS.globalConnectTimeoutSecs;
     editGlobalQueryTimeoutSecs.value = DEFAULT_EDITOR_SETTINGS.globalQueryTimeoutSecs;
     editShowExecutionTargetPicker.value = DEFAULT_EDITOR_SETTINGS.showExecutionTargetPicker;
@@ -990,9 +1018,11 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editCompactColumnHeaderActions.value = DEFAULT_EDITOR_SETTINGS.compactColumnHeaderActions;
     editDataGridQuickEntry.value = DEFAULT_EDITOR_SETTINGS.dataGridQuickEntry;
     editDataGridAutoTransposeSingleRow.value = DEFAULT_EDITOR_SETTINGS.dataGridAutoTransposeSingleRow;
+    editPageSize.value = DEFAULT_EDITOR_SETTINGS.pageSize;
     editTableOpenPageSize.value = DEFAULT_EDITOR_SETTINGS.tableOpenPageSize;
+    editQueryResultMaxRowsEnabled.value = DEFAULT_EDITOR_SETTINGS.queryResultMaxRowsEnabled;
+    editQueryResultMaxRows.value = DEFAULT_EDITOR_SETTINGS.queryResultMaxRows;
     editInfiniteScroll.value = DEFAULT_EDITOR_SETTINGS.infiniteScroll;
-    editInfiniteScrollMaxRows.value = DEFAULT_EDITOR_SETTINGS.infiniteScrollMaxRows;
     editRegexMaxMatchCount.value = DEFAULT_EDITOR_SETTINGS.regexMaxMatchCount;
     editAutoCalculateTotalRows.value = DEFAULT_EDITOR_SETTINGS.autoCalculateTotalRows;
     editDuckDbWorkerProcessIsolation.value = DEFAULT_DESKTOP_SETTINGS.duckdb_worker_process_isolation;
@@ -1024,6 +1054,7 @@ function resetAllDefaults() {
   editCustomThemes.value = [...DEFAULT_EDITOR_SETTINGS.customThemes];
   editActiveCustomThemeId.value = DEFAULT_EDITOR_SETTINGS.activeCustomThemeId;
   editExecuteMode.value = DEFAULT_EDITOR_SETTINGS.executeMode;
+  editExecuteAllOnBlankLine.value = DEFAULT_EDITOR_SETTINGS.executeAllOnBlankLine;
   editGlobalConnectTimeoutSecs.value = DEFAULT_EDITOR_SETTINGS.globalConnectTimeoutSecs;
   editGlobalQueryTimeoutSecs.value = DEFAULT_EDITOR_SETTINGS.globalQueryTimeoutSecs;
   editShowExecutionTargetPicker.value = DEFAULT_EDITOR_SETTINGS.showExecutionTargetPicker;
@@ -1056,9 +1087,11 @@ function resetAllDefaults() {
   editCompactColumnHeaderActions.value = DEFAULT_EDITOR_SETTINGS.compactColumnHeaderActions;
   editDataGridQuickEntry.value = DEFAULT_EDITOR_SETTINGS.dataGridQuickEntry;
   editDataGridAutoTransposeSingleRow.value = DEFAULT_EDITOR_SETTINGS.dataGridAutoTransposeSingleRow;
+  editPageSize.value = DEFAULT_EDITOR_SETTINGS.pageSize;
   editTableOpenPageSize.value = DEFAULT_EDITOR_SETTINGS.tableOpenPageSize;
+  editQueryResultMaxRowsEnabled.value = DEFAULT_EDITOR_SETTINGS.queryResultMaxRowsEnabled;
+  editQueryResultMaxRows.value = DEFAULT_EDITOR_SETTINGS.queryResultMaxRows;
   editInfiniteScroll.value = DEFAULT_EDITOR_SETTINGS.infiniteScroll;
-  editInfiniteScrollMaxRows.value = DEFAULT_EDITOR_SETTINGS.infiniteScrollMaxRows;
   editRegexMaxMatchCount.value = DEFAULT_EDITOR_SETTINGS.regexMaxMatchCount;
   editAutoCalculateTotalRows.value = DEFAULT_EDITOR_SETTINGS.autoCalculateTotalRows;
   editTableColumnTemplateRows.value = tableColumnTemplateRowsFromSettings(DEFAULT_EDITOR_SETTINGS.tableColumnTemplateFields);
@@ -2635,7 +2668,7 @@ function normalizeMaxRetries(value: number | undefined): number {
 const aiDeleteConfirmOpen = ref(false);
 const aiDeleteConfigId = ref<string | null>(null);
 
-const CLI_AI_PROVIDERS = new Set<AiProvider>(["claude-code-cli", "codex-cli", "opencode-cli", "pi-agent-cli", "cursor-cli"]);
+const CLI_AI_PROVIDERS = new Set<AiProvider>(["claude-code-cli", "codex-cli", "opencode-cli", "pi-agent-cli", "cursor-cli", "grok-cli", "codebuddy-cli"]);
 const OPENCODE_CONTROL_ENV = new Set(["OPENCODE_CONFIG", "OPENCODE_CONFIG_CONTENT", "OPENCODE_CONFIG_DIR", "OPENCODE_DB", "OPENCODE_PERMISSION", "OPENCODE_DISABLE_PROJECT_CONFIG"]);
 const CURSOR_CONTROL_ENV = new Set(["CURSOR_CONFIG_DIR", "CURSOR_DATA_DIR"]);
 const aiProviderOptions = computed(() => Object.values(AI_PROVIDER_PRESETS).filter((provider) => !isWeb || !CLI_AI_PROVIDERS.has(provider.provider)));
@@ -2663,6 +2696,10 @@ const aiEditOpenCodeCliPath = ref("");
 const aiEditOpenCodeCliEnvRows = ref<AiEnvRow[]>([]);
 const aiEditCursorCliPath = ref("");
 const aiEditCursorCliEnvRows = ref<AiEnvRow[]>([]);
+const aiEditGrokCliPath = ref("");
+const aiEditGrokCliEnvRows = ref<AiEnvRow[]>([]);
+const aiEditCodeBuddyCliPath = ref("");
+const aiEditCodeBuddyCliEnvRows = ref<AiEnvRow[]>([]);
 
 const aiAnthropicMessagesMode = computed(() => aiEditApiStyle.value === "anthropic-messages");
 
@@ -2695,6 +2732,8 @@ const aiIsClaudeCodeCli = computed(() => aiEditProvider.value === "claude-code-c
 const aiIsPiAgentCli = computed(() => aiEditProvider.value === "pi-agent-cli");
 const aiIsOpenCodeCli = computed(() => aiEditProvider.value === "opencode-cli");
 const aiIsCursorCli = computed(() => aiEditProvider.value === "cursor-cli");
+const aiIsGrokCli = computed(() => aiEditProvider.value === "grok-cli");
+const aiIsCodeBuddyCli = computed(() => aiEditProvider.value === "codebuddy-cli");
 const aiIsCliProvider = computed(() => CLI_AI_PROVIDERS.has(aiEditProvider.value));
 const aiCliProviderLabel = computed(() => selectedAiProviderPreset.value.label);
 const aiCliCommandName = computed(() => {
@@ -2702,6 +2741,8 @@ const aiCliCommandName = computed(() => {
   if (aiIsPiAgentCli.value) return "pi";
   if (aiIsOpenCodeCli.value) return "opencode";
   if (aiIsCursorCli.value) return "agent";
+  if (aiIsGrokCli.value) return "grok";
+  if (aiIsCodeBuddyCli.value) return "codebuddy";
   return "codex";
 });
 const aiCliLoginCommand = computed(() => {
@@ -2709,6 +2750,8 @@ const aiCliLoginCommand = computed(() => {
   if (aiIsPiAgentCli.value) return "pi";
   if (aiIsOpenCodeCli.value) return "opencode auth login";
   if (aiIsCursorCli.value) return "agent login";
+  if (aiIsGrokCli.value) return "grok login";
+  if (aiIsCodeBuddyCli.value) return "codebuddy";
   return "codex login";
 });
 const aiEditCliPath = computed({
@@ -2717,6 +2760,8 @@ const aiEditCliPath = computed({
     if (aiIsPiAgentCli.value) return aiEditPiAgentCliPath.value;
     if (aiIsOpenCodeCli.value) return aiEditOpenCodeCliPath.value;
     if (aiIsCursorCli.value) return aiEditCursorCliPath.value;
+    if (aiIsGrokCli.value) return aiEditGrokCliPath.value;
+    if (aiIsCodeBuddyCli.value) return aiEditCodeBuddyCliPath.value;
     return aiEditCodexCliPath.value;
   },
   set: (value: string) => {
@@ -2728,6 +2773,10 @@ const aiEditCliPath = computed({
       aiEditOpenCodeCliPath.value = value;
     } else if (aiIsCursorCli.value) {
       aiEditCursorCliPath.value = value;
+    } else if (aiIsGrokCli.value) {
+      aiEditGrokCliPath.value = value;
+    } else if (aiIsCodeBuddyCli.value) {
+      aiEditCodeBuddyCliPath.value = value;
     } else {
       aiEditCodexCliPath.value = value;
     }
@@ -2738,6 +2787,8 @@ const aiEditCliEnvRows = computed(() => {
   if (aiIsPiAgentCli.value) return aiEditPiAgentCliEnvRows.value;
   if (aiIsOpenCodeCli.value) return aiEditOpenCodeCliEnvRows.value;
   if (aiIsCursorCli.value) return aiEditCursorCliEnvRows.value;
+  if (aiIsGrokCli.value) return aiEditGrokCliEnvRows.value;
+  if (aiIsCodeBuddyCli.value) return aiEditCodeBuddyCliEnvRows.value;
   return aiEditCodexCliEnvRows.value;
 });
 watch(aiIsCliProvider, (isCliProvider) => {
@@ -2834,6 +2885,10 @@ function removeCliEnvRow(id: string) {
     aiEditOpenCodeCliEnvRows.value = aiEditOpenCodeCliEnvRows.value.filter((row) => row.id !== id);
   } else if (aiIsCursorCli.value) {
     aiEditCursorCliEnvRows.value = aiEditCursorCliEnvRows.value.filter((row) => row.id !== id);
+  } else if (aiIsGrokCli.value) {
+    aiEditGrokCliEnvRows.value = aiEditGrokCliEnvRows.value.filter((row) => row.id !== id);
+  } else if (aiIsCodeBuddyCli.value) {
+    aiEditCodeBuddyCliEnvRows.value = aiEditCodeBuddyCliEnvRows.value.filter((row) => row.id !== id);
   } else {
     aiEditCodexCliEnvRows.value = aiEditCodexCliEnvRows.value.filter((row) => row.id !== id);
   }
@@ -2866,6 +2921,10 @@ function currentAiEditConfig() {
     opencodeCliEnv: aiIsOpenCodeCli.value ? cliEnvFromRows(aiEditOpenCodeCliEnvRows.value) : {},
     cursorCliPath: aiEditCursorCliPath.value.trim() || undefined,
     cursorCliEnv: aiIsCursorCli.value ? cliEnvFromRows(aiEditCursorCliEnvRows.value) : {},
+    grokCliPath: aiEditGrokCliPath.value.trim() || undefined,
+    grokCliEnv: aiIsGrokCli.value ? cliEnvFromRows(aiEditGrokCliEnvRows.value) : {},
+    codebuddyCliPath: aiEditCodeBuddyCliPath.value.trim() || undefined,
+    codebuddyCliEnv: aiIsCodeBuddyCli.value ? cliEnvFromRows(aiEditCodeBuddyCliEnvRows.value) : {},
   };
 }
 
@@ -2939,6 +2998,10 @@ function aiEnterEditMode(configId?: string) {
       aiEditOpenCodeCliEnvRows.value = aiEnvRowsFromConfig(config.opencodeCliEnv);
       aiEditCursorCliPath.value = config.cursorCliPath ?? "";
       aiEditCursorCliEnvRows.value = aiEnvRowsFromConfig(config.cursorCliEnv);
+      aiEditGrokCliPath.value = config.grokCliPath ?? "";
+      aiEditGrokCliEnvRows.value = aiEnvRowsFromConfig(config.grokCliEnv);
+      aiEditCodeBuddyCliPath.value = config.codebuddyCliPath ?? "";
+      aiEditCodeBuddyCliEnvRows.value = aiEnvRowsFromConfig(config.codebuddyCliEnv);
     }
   } else {
     aiEditConfigName.value = "";
@@ -2964,6 +3027,10 @@ function aiEnterEditMode(configId?: string) {
     aiEditOpenCodeCliEnvRows.value = [];
     aiEditCursorCliPath.value = "";
     aiEditCursorCliEnvRows.value = [];
+    aiEditGrokCliPath.value = "";
+    aiEditGrokCliEnvRows.value = [];
+    aiEditCodeBuddyCliPath.value = "";
+    aiEditCodeBuddyCliEnvRows.value = [];
   }
 }
 
@@ -3604,6 +3671,16 @@ onUnmounted(() => {
                   </Select>
                 </div>
 
+                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2" :class="{ 'opacity-50': editExecuteMode !== 'current' }">
+                  <div class="space-y-1">
+                    <Label for="editor-execute-all-on-blank-line">{{ t("settings.executeAllOnBlankLine") }}</Label>
+                    <p class="text-xs text-muted-foreground">
+                      {{ t("settings.executeAllOnBlankLineDescription") }}
+                    </p>
+                  </div>
+                  <Switch id="editor-execute-all-on-blank-line" v-model="editExecuteAllOnBlankLine" :disabled="editExecuteMode !== 'current'" class="mt-0.5" />
+                </div>
+
                 <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                   <div class="space-y-1">
                     <Label for="editor-global-connect-timeout">{{ t("settings.globalConnectTimeout") }}</Label>
@@ -3884,12 +3961,16 @@ onUnmounted(() => {
                   {{ t("settings.sqlFormatterEditorShortcuts") }}
                 </div>
                 <div class="overflow-hidden rounded-md border border-border/70 bg-background">
-                  <div v-for="definition in formatterEditorShortcutDefinitions" :key="definition.id" class="group -mt-px grid gap-2 border-t border-border/70 px-3 py-2 transition-colors first:mt-0 first:border-t-0 hover:bg-muted/40 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
-                    <div class="min-w-0">
+                  <div
+                    v-for="definition in formatterEditorShortcutDefinitions"
+                    :key="definition.id"
+                    class="settings-shortcut-row group -mt-px grid gap-2 border-t border-border/70 px-3 py-2 transition-colors first:mt-0 first:border-t-0 hover:bg-muted/40 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center"
+                  >
+                    <div class="settings-shortcut-label min-w-0">
                       <Label class="min-w-0 truncate leading-none">{{ t(definition.labelKey) }}</Label>
                     </div>
-                    <div class="min-w-0 space-y-1">
-                      <div class="flex items-center justify-end gap-1.5">
+                    <div class="settings-shortcut-actions min-w-0 space-y-1 text-right">
+                      <div class="settings-shortcut-controls flex items-center justify-end gap-1.5">
                         <input
                           :data-shortcut-input="definition.id"
                           :value="editingShortcutId === definition.id ? '' : formatShortcutPill(editShortcuts[definition.id])"
@@ -3908,7 +3989,7 @@ onUnmounted(() => {
                           type="button"
                           variant="ghost"
                           size="icon"
-                          class="h-7 w-7 shrink-0 text-muted-foreground opacity-0 transition-opacity hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100"
+                          class="settings-shortcut-action-button h-7 w-7 shrink-0 text-muted-foreground opacity-0 transition-opacity hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100"
                           :aria-label="t('settings.shortcutPressShortcut')"
                           @click="focusShortcutInput(definition.id)"
                         >
@@ -3922,7 +4003,7 @@ onUnmounted(() => {
                           type="button"
                           variant="ghost"
                           size="icon"
-                          class="h-7 w-7 shrink-0 text-muted-foreground opacity-0 transition-opacity hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100"
+                          class="settings-shortcut-action-button h-7 w-7 shrink-0 text-muted-foreground opacity-0 transition-opacity hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100"
                           :aria-label="t('settings.reset')"
                           @click="resetShortcut(definition.id)"
                         >
@@ -3933,7 +4014,7 @@ onUnmounted(() => {
                           type="button"
                           variant="ghost"
                           size="icon"
-                          class="h-7 w-7 shrink-0 text-muted-foreground opacity-0 transition-opacity hover:text-destructive focus-visible:opacity-100 group-hover:opacity-100"
+                          class="settings-shortcut-action-button h-7 w-7 shrink-0 text-muted-foreground opacity-0 transition-opacity hover:text-destructive focus-visible:opacity-100 group-hover:opacity-100"
                           :aria-label="t('settings.shortcutClear')"
                           @click="clearShortcut(definition.id)"
                         >
@@ -4337,119 +4418,6 @@ onUnmounted(() => {
 
               <Separator />
 
-              <div class="settings-appearance-group settings-option-stack">
-                <Label>{{ t("settings.dataGridDisplay") }}</Label>
-                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
-                  <div class="space-y-1">
-                    <Label for="show-column-comments-in-header">
-                      {{ t("settings.showColumnCommentsInHeader") }}
-                    </Label>
-                    <p class="text-xs text-muted-foreground">
-                      {{ t("settings.showColumnCommentsInHeaderDescription") }}
-                    </p>
-                  </div>
-                  <Switch id="show-column-comments-in-header" v-model="editShowColumnCommentsInHeader" />
-                </div>
-                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
-                  <div class="space-y-1">
-                    <Label for="show-column-types-in-header">
-                      {{ t("settings.showColumnTypesInHeader") }}
-                    </Label>
-                    <p class="text-xs text-muted-foreground">
-                      {{ t("settings.showColumnTypesInHeaderDescription") }}
-                    </p>
-                  </div>
-                  <Switch id="show-column-types-in-header" v-model="editShowColumnTypesInHeader" />
-                </div>
-                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
-                  <div class="space-y-1">
-                    <Label for="show-index-indicators-in-header">
-                      {{ t("settings.showIndexIndicatorsInHeader") }}
-                    </Label>
-                    <p class="text-xs text-muted-foreground">
-                      {{ t("settings.showIndexIndicatorsInHeaderDescription") }}
-                    </p>
-                  </div>
-                  <Switch id="show-index-indicators-in-header" v-model="editShowIndexIndicatorsInHeader" />
-                </div>
-                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
-                  <div class="space-y-1">
-                    <Label for="compact-column-header-actions">
-                      {{ t("settings.compactColumnHeaderActions") }}
-                    </Label>
-                    <p class="text-xs text-muted-foreground">
-                      {{ t("settings.compactColumnHeaderActionsDescription") }}
-                    </p>
-                  </div>
-                  <Switch id="compact-column-header-actions" v-model="editCompactColumnHeaderActions" />
-                </div>
-                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
-                  <div class="space-y-1">
-                    <Label for="data-grid-quick-entry">
-                      {{ t("settings.dataGridQuickEntry") }}
-                    </Label>
-                    <p class="text-xs text-muted-foreground">
-                      {{ t("settings.dataGridQuickEntryDescription") }}
-                    </p>
-                  </div>
-                  <Switch id="data-grid-quick-entry" v-model="editDataGridQuickEntry" />
-                </div>
-                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
-                  <div class="space-y-1">
-                    <Label for="data-grid-auto-transpose-single-row">
-                      {{ t("settings.dataGridAutoTransposeSingleRow") }}
-                    </Label>
-                    <p class="text-xs text-muted-foreground">
-                      {{ t("settings.dataGridAutoTransposeSingleRowDescription") }}
-                    </p>
-                  </div>
-                  <Switch id="data-grid-auto-transpose-single-row" v-model="editDataGridAutoTransposeSingleRow" />
-                </div>
-                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
-                  <div class="space-y-1">
-                    <Label for="infinite-scroll">
-                      {{ t("settings.infiniteScroll") }}
-                    </Label>
-                    <p class="text-xs text-muted-foreground">
-                      {{ t("settings.infiniteScrollDescription") }}
-                    </p>
-                  </div>
-                  <Switch id="infinite-scroll" v-model="editInfiniteScroll" />
-                </div>
-                <div v-if="editInfiniteScroll" class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
-                  <div class="space-y-1">
-                    <Label for="infinite-scroll-max-rows">
-                      {{ t("settings.infiniteScrollMaxRows") }}
-                    </Label>
-                    <p class="text-xs text-muted-foreground">
-                      {{ t("settings.infiniteScrollMaxRowsDescription") }}
-                    </p>
-                  </div>
-                  <Input
-                    id="infinite-scroll-max-rows"
-                    v-model="editInfiniteScrollMaxRows"
-                    type="number"
-                    inputmode="numeric"
-                    :min="1000"
-                    :max="50000"
-                    class="h-7 w-24 px-2 text-xs tabular-nums [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
-                  />
-                </div>
-                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
-                  <div class="space-y-1">
-                    <Label for="auto-calculate-total-rows">
-                      {{ t("settings.autoCalculateTotalRows") }}
-                    </Label>
-                    <p class="text-xs text-muted-foreground">
-                      {{ t("settings.autoCalculateTotalRowsDescription") }}
-                    </p>
-                  </div>
-                  <Switch id="auto-calculate-total-rows" v-model="editAutoCalculateTotalRows" />
-                </div>
-              </div>
-
-              <Separator />
-
               <div class="space-y-2">
                 <div class="flex items-center gap-2">
                   <Label>{{ t("settings.toolbarTitle") }}</Label>
@@ -4778,7 +4746,141 @@ onUnmounted(() => {
                       {{ t("settings.tableOpenPageSizeDescription") }}
                     </p>
                   </div>
-                  <Input id="table-open-page-size" type="number" inputmode="numeric" class="h-7 w-24 px-2 text-right text-xs tabular-nums" :min="MIN_RESULT_PAGE_SIZE" :max="MAX_RESULT_PAGE_SIZE" :model-value="editTableOpenPageSize" @update:model-value="updateTableOpenPageSizeDraft" />
+                  <Input id="table-open-page-size" type="number" inputmode="numeric" class="h-7 w-24 px-2 text-left text-xs tabular-nums" :min="MIN_RESULT_PAGE_SIZE" :max="MAX_RESULT_PAGE_SIZE" :model-value="editTableOpenPageSize" @update:model-value="updateTableOpenPageSizeDraft" />
+                </div>
+                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                  <div class="space-y-1">
+                    <Label for="query-page-size">
+                      {{ t("settings.queryPageSize") }}
+                    </Label>
+                    <p class="text-xs text-muted-foreground">
+                      {{ t("settings.queryPageSizeDescription", { max: MAX_RESULT_PAGE_SIZE.toLocaleString() }) }}
+                    </p>
+                  </div>
+                  <Input
+                    id="query-page-size"
+                    type="number"
+                    inputmode="numeric"
+                    class="h-7 w-24 px-2 text-left text-xs tabular-nums"
+                    :min="MIN_RESULT_PAGE_SIZE"
+                    :max="MAX_RESULT_PAGE_SIZE"
+                    :model-value="editPageSize"
+                    :aria-invalid="hasBlockingQueryResultRowLimit"
+                    @update:model-value="updatePageSizeDraft"
+                  />
+                </div>
+                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                  <div class="space-y-1">
+                    <Label for="query-result-max-rows-enabled">
+                      {{ t("settings.queryResultMaxRows") }}
+                    </Label>
+                    <p class="text-xs" :class="hasBlockingQueryResultRowLimit ? 'text-destructive' : 'text-muted-foreground'">
+                      {{ hasBlockingQueryResultRowLimit ? t("settings.queryResultMaxRowsTooSmall", { pageSize: editPageSize }) : editQueryResultMaxRowsEnabled ? t("settings.queryResultMaxRowsDescription") : t("settings.queryResultMaxRowsUnlimitedDescription") }}
+                    </p>
+                  </div>
+                  <div class="flex shrink-0 items-center gap-2">
+                    <Input
+                      id="query-result-max-rows"
+                      type="number"
+                      inputmode="numeric"
+                      class="h-7 w-[130px] px-2 text-left text-xs tabular-nums"
+                      :min="1"
+                      :max="MAX_QUERY_RESULT_MAX_ROWS"
+                      :model-value="editQueryResultMaxRows"
+                      :disabled="!editQueryResultMaxRowsEnabled"
+                      :aria-invalid="hasBlockingQueryResultRowLimit"
+                      @input="updateQueryResultMaxRowsInput"
+                    />
+                    <Switch id="query-result-max-rows-enabled" v-model="editQueryResultMaxRowsEnabled" :aria-label="t('settings.queryResultMaxRowsEnabled')" />
+                  </div>
+                </div>
+                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                  <div class="space-y-1">
+                    <Label for="infinite-scroll">
+                      {{ t("settings.infiniteScroll") }}
+                    </Label>
+                    <p class="text-xs text-muted-foreground">
+                      {{ t("settings.infiniteScrollDescription") }}
+                    </p>
+                  </div>
+                  <Switch id="infinite-scroll" v-model="editInfiniteScroll" />
+                </div>
+                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                  <div class="space-y-1">
+                    <Label for="auto-calculate-total-rows">
+                      {{ t("settings.autoCalculateTotalRows") }}
+                    </Label>
+                    <p class="text-xs text-muted-foreground">
+                      {{ t("settings.autoCalculateTotalRowsDescription") }}
+                    </p>
+                  </div>
+                  <Switch id="auto-calculate-total-rows" v-model="editAutoCalculateTotalRows" />
+                </div>
+                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                  <div class="space-y-1">
+                    <Label for="show-column-comments-in-header">
+                      {{ t("settings.showColumnCommentsInHeader") }}
+                    </Label>
+                    <p class="text-xs text-muted-foreground">
+                      {{ t("settings.showColumnCommentsInHeaderDescription") }}
+                    </p>
+                  </div>
+                  <Switch id="show-column-comments-in-header" v-model="editShowColumnCommentsInHeader" />
+                </div>
+                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                  <div class="space-y-1">
+                    <Label for="show-column-types-in-header">
+                      {{ t("settings.showColumnTypesInHeader") }}
+                    </Label>
+                    <p class="text-xs text-muted-foreground">
+                      {{ t("settings.showColumnTypesInHeaderDescription") }}
+                    </p>
+                  </div>
+                  <Switch id="show-column-types-in-header" v-model="editShowColumnTypesInHeader" />
+                </div>
+                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                  <div class="space-y-1">
+                    <Label for="show-index-indicators-in-header">
+                      {{ t("settings.showIndexIndicatorsInHeader") }}
+                    </Label>
+                    <p class="text-xs text-muted-foreground">
+                      {{ t("settings.showIndexIndicatorsInHeaderDescription") }}
+                    </p>
+                  </div>
+                  <Switch id="show-index-indicators-in-header" v-model="editShowIndexIndicatorsInHeader" />
+                </div>
+                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                  <div class="space-y-1">
+                    <Label for="compact-column-header-actions">
+                      {{ t("settings.compactColumnHeaderActions") }}
+                    </Label>
+                    <p class="text-xs text-muted-foreground">
+                      {{ t("settings.compactColumnHeaderActionsDescription") }}
+                    </p>
+                  </div>
+                  <Switch id="compact-column-header-actions" v-model="editCompactColumnHeaderActions" />
+                </div>
+                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                  <div class="space-y-1">
+                    <Label for="data-grid-quick-entry">
+                      {{ t("settings.dataGridQuickEntry") }}
+                    </Label>
+                    <p class="text-xs text-muted-foreground">
+                      {{ t("settings.dataGridQuickEntryDescription") }}
+                    </p>
+                  </div>
+                  <Switch id="data-grid-quick-entry" v-model="editDataGridQuickEntry" />
+                </div>
+                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                  <div class="space-y-1">
+                    <Label for="data-grid-auto-transpose-single-row">
+                      {{ t("settings.dataGridAutoTransposeSingleRow") }}
+                    </Label>
+                    <p class="text-xs text-muted-foreground">
+                      {{ t("settings.dataGridAutoTransposeSingleRowDescription") }}
+                    </p>
+                  </div>
+                  <Switch id="data-grid-auto-transpose-single-row" v-model="editDataGridAutoTransposeSingleRow" />
                 </div>
               </div>
 
@@ -4907,7 +5009,7 @@ onUnmounted(() => {
                 <div class="space-y-2">
                   <Label>{{ t("settings.exportBatchSize") }}</Label>
                   <div class="flex items-center gap-3">
-                    <Input type="number" list="export-batch-sizes" min="100" max="100000" step="100" v-model.number="editExportBatchSize" class="h-9 w-28 [&::-webkit-inner-spin-button]:appearance-none" />
+                    <Input type="number" list="export-batch-sizes" min="100" max="100000" step="100" v-model.number="editExportBatchSize" class="settings-export-number-input h-9 w-28 [&::-webkit-inner-spin-button]:appearance-none" />
                     <datalist id="export-batch-sizes">
                       <option value="500" />
                       <option value="1000" />
@@ -4930,7 +5032,7 @@ onUnmounted(() => {
                 <div class="space-y-2">
                   <Label for="export-row-limit">{{ t("settings.exportRowLimit") }}</Label>
                   <div class="flex items-center gap-3">
-                    <Input id="export-row-limit" type="number" min="100" max="2147483647" step="100" v-model.number="editExportRowLimit" :disabled="!editExportRowLimitEnabled" class="h-9 w-32 [&::-webkit-inner-spin-button]:appearance-none" />
+                    <Input id="export-row-limit" type="number" min="100" max="2147483647" step="100" v-model.number="editExportRowLimit" :disabled="!editExportRowLimitEnabled" class="settings-export-number-input h-9 w-32 [&::-webkit-inner-spin-button]:appearance-none" />
                     <span class="text-xs text-muted-foreground">
                       {{ editExportRowLimitEnabled ? t("settings.exportRowLimitDescription") : t("settings.exportRowLimitUnlimited") }}
                     </span>
@@ -5065,8 +5167,8 @@ onUnmounted(() => {
                 <div v-if="filteredShortcutDefinitions.length === 0" class="px-3 py-8 text-center text-sm text-muted-foreground">
                   {{ t("settings.shortcutSearchNoResults") }}
                 </div>
-                <div v-for="definition in filteredShortcutDefinitions" :key="definition.id" class="group -mt-px grid gap-2 border-t border-border/70 px-3 py-2 transition-colors first:mt-0 first:border-t-0 hover:bg-muted/40 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
-                  <div class="min-w-0">
+                <div v-for="definition in filteredShortcutDefinitions" :key="definition.id" class="settings-shortcut-row group -mt-px grid gap-2 border-t border-border/70 px-3 py-2 transition-colors first:mt-0 first:border-t-0 hover:bg-muted/40 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
+                  <div class="settings-shortcut-label min-w-0">
                     <div class="flex min-w-0 items-center gap-2">
                       <Label class="min-w-0 truncate leading-none">{{ t(definition.labelKey) }}</Label>
                       <Badge variant="outline" class="h-5 shrink-0 rounded-md border-border/60 px-1.5 text-[11px] font-normal text-muted-foreground">
@@ -5074,8 +5176,8 @@ onUnmounted(() => {
                       </Badge>
                     </div>
                   </div>
-                  <div class="min-w-0 space-y-1">
-                    <div class="flex items-center justify-end gap-1.5">
+                  <div class="settings-shortcut-actions min-w-0 space-y-1 text-right">
+                    <div class="settings-shortcut-controls flex items-center justify-end gap-1.5">
                       <input
                         :data-shortcut-input="definition.id"
                         :value="editingShortcutId === definition.id ? '' : formatShortcutPill(editShortcuts[definition.id])"
@@ -5094,7 +5196,7 @@ onUnmounted(() => {
                         type="button"
                         variant="ghost"
                         size="icon"
-                        class="h-7 w-7 shrink-0 text-muted-foreground opacity-0 transition-opacity hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100"
+                        class="settings-shortcut-action-button h-7 w-7 shrink-0 text-muted-foreground opacity-0 transition-opacity hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100"
                         :aria-label="t('settings.shortcutPressShortcut')"
                         @click="focusShortcutInput(definition.id)"
                       >
@@ -5108,7 +5210,7 @@ onUnmounted(() => {
                         type="button"
                         variant="ghost"
                         size="icon"
-                        class="h-7 w-7 shrink-0 text-muted-foreground opacity-0 transition-opacity hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100"
+                        class="settings-shortcut-action-button h-7 w-7 shrink-0 text-muted-foreground opacity-0 transition-opacity hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100"
                         :aria-label="t('settings.reset')"
                         @click="resetShortcut(definition.id)"
                       >
@@ -5119,7 +5221,7 @@ onUnmounted(() => {
                         type="button"
                         variant="ghost"
                         size="icon"
-                        class="h-7 w-7 shrink-0 text-muted-foreground opacity-0 transition-opacity hover:text-destructive focus-visible:opacity-100 group-hover:opacity-100"
+                        class="settings-shortcut-action-button h-7 w-7 shrink-0 text-muted-foreground opacity-0 transition-opacity hover:text-destructive focus-visible:opacity-100 group-hover:opacity-100"
                         :aria-label="t('settings.shortcutClear')"
                         @click="clearShortcut(definition.id)"
                       >
@@ -5726,7 +5828,7 @@ onUnmounted(() => {
               <!-- Config Edit View -->
               <div v-else class="space-y-4">
                 <div class="flex items-center justify-between">
-                  <Button type="button" variant="ghost" size="sm" @click="aiEnterListMode()">
+                  <Button type="button" variant="ghost" size="sm" class="settings-ai-back-button" @click="aiEnterListMode()">
                     <ArrowLeft class="mr-1 h-3.5 w-3.5" />
                     {{ t("common.back") }}
                   </Button>
@@ -6321,19 +6423,21 @@ onUnmounted(() => {
 
             <section v-else-if="activeSettingsTab === 'about'" data-settings-search-id="about" :class="['flex flex-col gap-5 py-2', settingsSearchTargetClass('about')]">
               <div class="rounded-lg border p-4">
-                <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                <div class="settings-about-section-header flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
                   <div class="min-w-0 space-y-1">
                     <Label>{{ t("settings.supportInfoTitle") }}</Label>
                     <p class="text-sm text-muted-foreground">
                       {{ t("settings.supportInfoDescription") }}
                     </p>
                   </div>
-                  <Button type="button" variant="outline" size="sm" class="shrink-0" :disabled="appSupportInfoLoading && !appSupportInfo" @click="copyAppSupportInfo">
-                    <Loader2 v-if="appSupportInfoLoading && !appSupportInfo" class="mr-1 h-3.5 w-3.5 animate-spin" />
-                    <CheckCircle2 v-else-if="appSupportInfoCopied" class="mr-1 h-3.5 w-3.5" />
-                    <Copy v-else class="mr-1 h-3.5 w-3.5" />
-                    {{ appSupportInfoCopied ? t("settings.supportInfoCopied") : t("settings.supportInfoCopy") }}
-                  </Button>
+                  <div class="settings-about-section-actions flex shrink-0 flex-wrap items-center gap-2">
+                    <Button type="button" variant="outline" size="sm" class="shrink-0" :disabled="appSupportInfoLoading && !appSupportInfo" @click="copyAppSupportInfo">
+                      <Loader2 v-if="appSupportInfoLoading && !appSupportInfo" class="mr-1 h-3.5 w-3.5 animate-spin" />
+                      <CheckCircle2 v-else-if="appSupportInfoCopied" class="mr-1 h-3.5 w-3.5" />
+                      <Copy v-else class="mr-1 h-3.5 w-3.5" />
+                      {{ appSupportInfoCopied ? t("settings.supportInfoCopied") : t("settings.supportInfoCopy") }}
+                    </Button>
+                  </div>
                 </div>
                 <div v-if="appSupportInfoRows.length" class="mt-4 grid gap-3 sm:grid-cols-2">
                   <div v-for="row in appSupportInfoRows" :key="row.key" class="min-w-0 rounded-md bg-muted/30 px-3 py-2">
@@ -6671,6 +6775,103 @@ onUnmounted(() => {
 
 .settings-option-stack > * + * {
   margin-top: 0.625rem;
+}
+
+html.dbx-legacy-webview .settings-shortcut-row:hover .settings-shortcut-action-button,
+html.dbx-legacy-webview .settings-shortcut-row:focus-within .settings-shortcut-action-button {
+  opacity: 1 !important;
+}
+
+html.dbx-legacy-webview .settings-layout [data-slot="select-trigger"][data-size="default"]:not(.h-7) {
+  height: 2rem !important;
+  min-height: 2rem !important;
+  box-sizing: border-box !important;
+}
+
+html.dbx-legacy-webview .settings-layout [data-slot="select-trigger"].h-9 {
+  height: 2rem !important;
+  min-height: 2rem !important;
+  box-sizing: border-box !important;
+}
+
+html.dbx-legacy-webview .settings-layout [data-slot="select-trigger"][data-size="sm"],
+html.dbx-legacy-webview .settings-layout [data-slot="select-trigger"].h-7 {
+  height: 1.75rem !important;
+  min-height: 1.75rem !important;
+  box-sizing: border-box !important;
+}
+
+html.dbx-legacy-webview .settings-layout .settings-shortcut-row {
+  grid-template-columns: minmax(0, 1fr) auto !important;
+  align-items: center !important;
+  column-gap: 0.75rem !important;
+}
+
+html.dbx-legacy-webview .settings-layout .settings-shortcut-label {
+  align-self: center !important;
+}
+
+html.dbx-legacy-webview .settings-layout .settings-shortcut-actions {
+  justify-self: end !important;
+  align-self: center !important;
+  text-align: right !important;
+}
+
+html.dbx-legacy-webview .settings-layout .settings-shortcut-controls {
+  display: flex !important;
+  flex-direction: row !important;
+  align-items: center !important;
+  justify-content: flex-end !important;
+  gap: 0.375rem !important;
+}
+
+html.dbx-legacy-webview .settings-layout .settings-export-number-input {
+  height: 2rem !important;
+  min-height: 2rem !important;
+  padding-top: 0.25rem !important;
+  padding-bottom: 0.25rem !important;
+  line-height: 1.25rem !important;
+  font-variant-numeric: tabular-nums;
+}
+
+html.dbx-legacy-webview .settings-layout .settings-export-number-input::-webkit-inner-spin-button,
+html.dbx-legacy-webview .settings-layout .settings-export-number-input::-webkit-outer-spin-button {
+  -webkit-appearance: inner-spin-button !important;
+  appearance: auto !important;
+  min-height: 1.5rem !important;
+  opacity: 1 !important;
+}
+
+html.dbx-legacy-webview .settings-ai-back-button {
+  margin-left: -0.625rem !important;
+}
+
+html.dbx-legacy-webview .settings-about-section-header {
+  display: flex !important;
+  flex-direction: row !important;
+  align-items: flex-start !important;
+  justify-content: space-between !important;
+  gap: 0.75rem !important;
+}
+
+html.dbx-legacy-webview .settings-about-section-actions {
+  display: flex !important;
+  flex-wrap: wrap !important;
+  align-items: center !important;
+  justify-content: flex-end !important;
+  margin-left: auto !important;
+  gap: 0.5rem !important;
+}
+
+@media (max-width: 640px) {
+  html.dbx-legacy-webview .settings-about-section-header {
+    flex-direction: column !important;
+  }
+
+  html.dbx-legacy-webview .settings-about-section-actions {
+    justify-content: flex-start !important;
+    margin-left: 0 !important;
+  }
 }
 
 @media (max-width: 760px) {

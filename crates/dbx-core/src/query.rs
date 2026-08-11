@@ -30,6 +30,7 @@ use crate::sql_risk::{classify_sql_risk_for_database, SqlRisk};
 
 pub const QUERY_TIMEOUT: Duration = Duration::from_secs(30);
 pub const MAX_ROWS: usize = 10000;
+pub const AGENT_PROTOCOL_MAX_ROWS: usize = i32::MAX as usize;
 pub const QUERY_CANCELED: &str = "Query canceled";
 /// Fallback when a Mongo connection hits the generic SQL executor instead of the shell path.
 /// Wording must match packages/mongo-shell `MONGO_SHELL_COMMAND_HINT`
@@ -659,7 +660,7 @@ pub fn agent_execute_query_params(
 ) -> serde_json::Value {
     let mut params = serde_json::json!({
         "sql": sql,
-        "maxRows": options.max_rows.unwrap_or(MAX_ROWS),
+        "maxRows": agent_protocol_row_count(options.max_rows.unwrap_or(MAX_ROWS)),
     });
     if let Some(database) = database.map(str::trim).filter(|database| !database.is_empty()) {
         params["database"] = serde_json::json!(database);
@@ -668,7 +669,7 @@ pub fn agent_execute_query_params(
         params["schema"] = serde_json::json!(schema);
     }
     if let Some(fetch_size) = options.fetch_size {
-        params["fetchSize"] = serde_json::json!(fetch_size);
+        params["fetchSize"] = serde_json::json!(agent_protocol_row_count(fetch_size));
     }
     if let Some(timeout_secs) = options.timeout_secs {
         params["timeoutSecs"] = serde_json::json!(timeout_secs);
@@ -684,8 +685,8 @@ pub fn agent_execute_query_page_params(
 ) -> serde_json::Value {
     let mut params = serde_json::json!({
         "sql": sql,
-        "pageSize": options.page_size.unwrap_or(MAX_ROWS),
-        "maxRows": options.max_rows.unwrap_or(MAX_ROWS),
+        "pageSize": agent_protocol_row_count(options.page_size.unwrap_or(MAX_ROWS)),
+        "maxRows": agent_protocol_row_count(options.max_rows.unwrap_or(MAX_ROWS)),
     });
     if let Some(database) = database.map(str::trim).filter(|database| !database.is_empty()) {
         params["database"] = serde_json::json!(database);
@@ -694,7 +695,7 @@ pub fn agent_execute_query_page_params(
         params["schema"] = serde_json::json!(schema);
     }
     if let Some(fetch_size) = options.fetch_size {
-        params["fetchSize"] = serde_json::json!(fetch_size);
+        params["fetchSize"] = serde_json::json!(agent_protocol_row_count(fetch_size));
     }
     if let Some(timeout_secs) = options.timeout_secs {
         params["timeoutSecs"] = serde_json::json!(timeout_secs);
@@ -705,8 +706,12 @@ pub fn agent_execute_query_page_params(
 pub fn agent_fetch_query_page_params(session_id: &str, page_size: usize) -> serde_json::Value {
     serde_json::json!({
         "sessionId": session_id,
-        "pageSize": page_size,
+        "pageSize": agent_protocol_row_count(page_size),
     })
+}
+
+fn agent_protocol_row_count(value: usize) -> usize {
+    value.clamp(1, AGENT_PROTOCOL_MAX_ROWS)
 }
 
 pub fn agent_close_query_session_params(session_id: &str) -> serde_json::Value {
@@ -1669,6 +1674,7 @@ async fn do_execute_typed(
             .map(|result| truncate_result_with_max_rows(result, max_rows))
         }
         PoolKind::HBase(_) => Err("SQL execution is not supported for HBase connections".to_string()),
+        PoolKind::Consul(_) => Err("SQL execution is not supported for Consul connections".to_string()),
     };
     result
         .map(normalize_query_result_for_js)
@@ -2318,6 +2324,23 @@ fn single_statement_multi_result(
 
 trait MysqlBatchStatementExecutor {
     async fn execute_statement(&mut self, statement: &str) -> Result<Vec<db::QueryResult>, String>;
+
+    async fn execute_non_result_batch(&mut self, statements: &[String]) -> db::mysql::MySqlNonResultBatchOutcome {
+        let mut results = Vec::with_capacity(statements.len());
+        for statement in statements {
+            match self.execute_statement(statement).await {
+                Ok(mut statement_results) if statement_results.len() == 1 => results.append(&mut statement_results),
+                Ok(_) => {
+                    return db::mysql::MySqlNonResultBatchOutcome {
+                        results,
+                        error: Some("A non-result MySQL batch statement returned multiple results.".to_string()),
+                    };
+                }
+                Err(error) => return db::mysql::MySqlNonResultBatchOutcome { results, error: Some(error) },
+            }
+        }
+        db::mysql::MySqlNonResultBatchOutcome { results, error: None }
+    }
 }
 
 struct MysqlBatchConnection<'a> {
@@ -2344,25 +2367,128 @@ impl MysqlBatchStatementExecutor for MysqlBatchConnection<'_> {
         )
         .await
     }
+
+    async fn execute_non_result_batch(&mut self, statements: &[String]) -> db::mysql::MySqlNonResultBatchOutcome {
+        let sql = statements.join(";\n");
+        match wait_for_result_opt(
+            self.cancel_token.clone(),
+            self.query_timeout,
+            db::mysql::execute_non_result_batch_on_conn(&mut *self.conn, &sql, statements.len()),
+        )
+        .await
+        {
+            Ok(outcome) => outcome,
+            Err(error) => db::mysql::MySqlNonResultBatchOutcome { results: Vec::new(), error: Some(error) },
+        }
+    }
+}
+
+const MYSQL_MULTI_STATEMENT_BATCH_MAX_STATEMENTS: usize = 50;
+const MYSQL_MULTI_STATEMENT_BATCH_MAX_BYTES: usize = 4 * 1024 * 1024;
+
+fn mysql_batch_pool_error_action(db_type: Option<DatabaseType>, error: &str) -> PoolErrorAction {
+    if error == QUERY_CANCELED {
+        // Dropping an in-flight COM_QUERY future can leave unread packets on the
+        // connection. Do not return that connection to the pool.
+        PoolErrorAction::Discard
+    } else {
+        pool_error_action(db_type, error)
+    }
+}
+
+fn mysql_non_result_batch_end(
+    statements: &[String],
+    start: usize,
+    dialect: db::mysql::MySqlQueryDialect,
+    max_bytes: usize,
+) -> usize {
+    let Some(first) = statements.get(start) else {
+        return start;
+    };
+    if !db::mysql::is_batchable_non_result_query(first, dialect) {
+        return start + 1;
+    }
+
+    let mut end = start;
+    let mut byte_len = 0usize;
+    while let Some(statement) = statements.get(end) {
+        if end - start >= MYSQL_MULTI_STATEMENT_BATCH_MAX_STATEMENTS
+            || !db::mysql::is_batchable_non_result_query(statement, dialect)
+        {
+            break;
+        }
+        let next_len = byte_len.saturating_add(statement.len()).saturating_add(2);
+        if end > start && next_len > max_bytes {
+            break;
+        }
+        byte_len = next_len;
+        end += 1;
+    }
+    end.max(start + 1)
 }
 
 async fn execute_mysql_batch_statements<E>(
     executor: &mut E,
     statements: &[String],
     db_type: Option<DatabaseType>,
+    mysql_dialect: db::mysql::MySqlQueryDialect,
     cancel_token: Option<CancellationToken>,
     continue_on_error: bool,
+    pipeline_non_result_max_bytes: Option<usize>,
     progress: Option<&ExecuteMultiProgressCallback>,
 ) -> (Vec<ExecuteMultiResult>, Option<PoolErrorAction>)
 where
     E: MysqlBatchStatementExecutor,
 {
     let mut results = Vec::with_capacity(statements.len());
-    for (statement_index, statement) in statements.iter().enumerate() {
+    let mut statement_index = 0usize;
+    while statement_index < statements.len() {
         if is_canceled(&cancel_token) {
             results.push(ExecuteMultiResult::execution_error(error_query_result(canceled_error())));
             return (results, None);
         }
+
+        let batch_end = if let Some(max_bytes) = pipeline_non_result_max_bytes {
+            mysql_non_result_batch_end(statements, statement_index, mysql_dialect, max_bytes)
+        } else {
+            statement_index + 1
+        };
+        if batch_end > statement_index + 1 {
+            let outcome = executor.execute_non_result_batch(&statements[statement_index..batch_end]).await;
+            let completed = outcome.results.len();
+            for (offset, result) in outcome.results.into_iter().enumerate() {
+                results.push(ExecuteMultiResult::success_with_index(result, statement_index + offset));
+            }
+            if completed > 0 {
+                let last_index = statement_index + completed - 1;
+                let last_result = &results.last().expect("completed MySQL batch result").result;
+                report_execute_multi_progress(progress, last_index, statements.len(), last_result, true, None);
+            }
+            if let Some(error) = outcome.error {
+                let failed_index = statement_index + completed;
+                let action = mysql_batch_pool_error_action(db_type, &error);
+                let result = error_query_result(error.clone());
+                let backend_error = crate::backend_error::BackendError::from_legacy_backend(&error);
+                report_execute_multi_progress(
+                    progress,
+                    failed_index,
+                    statements.len(),
+                    &result,
+                    false,
+                    Some(backend_error.clone()),
+                );
+                results.push(ExecuteMultiResult::execution_error_with_backend(
+                    result,
+                    Some(failed_index),
+                    backend_error,
+                ));
+                return (results, Some(action));
+            }
+            statement_index = batch_end;
+            continue;
+        }
+
+        let statement = &statements[statement_index];
 
         match executor.execute_statement(statement).await {
             Ok(statement_results) => {
@@ -2376,7 +2502,7 @@ where
                 );
             }
             Err(err) => {
-                let action = pool_error_action(db_type, &err);
+                let action = mysql_batch_pool_error_action(db_type, &err);
                 let result = error_query_result(err.clone());
                 report_execute_multi_progress(
                     progress,
@@ -2394,6 +2520,7 @@ where
                 }
             }
         }
+        statement_index += 1;
     }
 
     (results, None)
@@ -2418,6 +2545,7 @@ async fn execute_multi_mysql(
     let operation_budget = operation_budget_for_pool_key(state, pool_key, query_timeout).await;
     let bare = mode == crate::connection::MysqlMode::Bare;
     let max_rows = options.max_rows;
+    let pipeline_non_result_statements = !options.continue_on_error && mode == crate::connection::MysqlMode::Normal;
     let mut conn = match db::mysql::get_conn_with_health_check_with_cancel(
         pool,
         operation_budget.checkout_timeout,
@@ -2443,6 +2571,15 @@ async fn execute_multi_mysql(
         db::mysql::apply_catalog_database_context(&mut conn, catalog_dialect, options.catalog.as_deref(), database),
     )
     .await?;
+    let pipeline_non_result_max_bytes = if pipeline_non_result_statements {
+        db::mysql::max_allowed_packet_on_conn(&mut conn)
+            .await
+            .ok()
+            .and_then(db::mysql::mysql_sql_statement_hard_limit)
+            .map(|limit| limit.min(MYSQL_MULTI_STATEMENT_BATCH_MAX_BYTES))
+    } else {
+        None
+    };
 
     let mut executor = MysqlBatchConnection {
         conn: &mut conn,
@@ -2456,8 +2593,10 @@ async fn execute_multi_mysql(
         &mut executor,
         statements,
         db_type,
+        dialect,
         cancel_token,
         options.continue_on_error,
+        pipeline_non_result_max_bytes,
         progress,
     )
     .await;
@@ -2852,6 +2991,7 @@ fn pool_kind_has_transactional_path(pool: &PoolKind) -> bool {
         | PoolKind::Agent(_) => true,
         PoolKind::MessageQueue
         | PoolKind::Nacos
+        | PoolKind::Consul(_)
         | PoolKind::HBase(_)
         | PoolKind::DuckDbWorker(_)
         | PoolKind::Redis(_)
@@ -3095,7 +3235,7 @@ pub async fn execute_statements_in_transaction_on_pool_typed(
                 TxPath::Explicit
             }
             PoolKind::Agent(client) => TxPath::Agent(client.clone()),
-            PoolKind::MessageQueue | PoolKind::Nacos | PoolKind::HBase(_) => TxPath::None,
+            PoolKind::MessageQueue | PoolKind::Nacos | PoolKind::Consul(_) | PoolKind::HBase(_) => TxPath::None,
             #[cfg(feature = "mq-admin")]
             PoolKind::Mqtt(_) => TxPath::None,
             PoolKind::DuckDbWorker(_)
@@ -4793,6 +4933,25 @@ for line in sys.stdin:
         }
     }
 
+    struct FakePipelinedMysqlBatchExecutor {
+        batch_outcomes: std::collections::VecDeque<db::mysql::MySqlNonResultBatchOutcome>,
+        statement_outcomes: std::collections::VecDeque<Result<Vec<db::QueryResult>, String>>,
+        batches: Vec<Vec<String>>,
+        statements: Vec<String>,
+    }
+
+    impl MysqlBatchStatementExecutor for FakePipelinedMysqlBatchExecutor {
+        async fn execute_statement(&mut self, statement: &str) -> Result<Vec<db::QueryResult>, String> {
+            self.statements.push(statement.to_string());
+            self.statement_outcomes.pop_front().expect("test outcome for single statement")
+        }
+
+        async fn execute_non_result_batch(&mut self, statements: &[String]) -> db::mysql::MySqlNonResultBatchOutcome {
+            self.batches.push(statements.to_vec());
+            self.batch_outcomes.pop_front().expect("test outcome for pipelined statements")
+        }
+    }
+
     fn mysql_batch_result(result: db::QueryResult) -> Result<Vec<db::QueryResult>, String> {
         Ok(vec![result])
     }
@@ -4904,9 +5063,17 @@ for line in sys.stdin:
             executed: Vec::new(),
         };
 
-        let (results, error_action) =
-            execute_mysql_batch_statements(&mut executor, &statements, Some(DatabaseType::Mysql), None, false, None)
-                .await;
+        let (results, error_action) = execute_mysql_batch_statements(
+            &mut executor,
+            &statements,
+            Some(DatabaseType::Mysql),
+            db::mysql::MySqlQueryDialect::default(),
+            None,
+            false,
+            None,
+            None,
+        )
+        .await;
 
         assert_eq!(executor.executed, vec!["first", "fails"]);
         assert_eq!(results.len(), 2);
@@ -4936,8 +5103,10 @@ for line in sys.stdin:
             &mut executor,
             &statements,
             Some(DatabaseType::Mysql),
+            db::mysql::MySqlQueryDialect::default(),
             None,
             false,
+            None,
             Some(&progress),
         )
         .await;
@@ -4971,6 +5140,184 @@ for line in sys.stdin:
     }
 
     #[tokio::test]
+    async fn mysql_batch_pipelines_adjacent_non_result_statements() {
+        let statements = vec![
+            "SET @batch = 1".to_string(),
+            "INSERT INTO users(id) VALUES (1)".to_string(),
+            "INSERT INTO users(id) VALUES (2)".to_string(),
+            "SELECT COUNT(*) FROM users".to_string(),
+        ];
+        let mut executor = FakePipelinedMysqlBatchExecutor {
+            batch_outcomes: std::collections::VecDeque::from([db::mysql::MySqlNonResultBatchOutcome {
+                results: vec![empty_query_result(2), empty_query_result(3)],
+                error: None,
+            }]),
+            statement_outcomes: std::collections::VecDeque::from([
+                mysql_batch_result(empty_query_result(1)),
+                mysql_batch_result(db::QueryResult {
+                    columns: vec!["COUNT(*)".to_string()],
+                    column_types: vec!["BIGINT".to_string()],
+                    column_sortables: vec![],
+                    spatial_columns: vec![],
+                    spatial_values: vec![],
+                    rows: vec![vec![serde_json::json!(2)]],
+                    affected_rows: 0,
+                    execution_time_ms: 4,
+                    truncated: false,
+                    session_id: None,
+                    has_more: false,
+                    elasticsearch_raw_body: None,
+                    messages: Vec::new(),
+                }),
+            ]),
+            batches: Vec::new(),
+            statements: Vec::new(),
+        };
+        let progress_events = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let progress: ExecuteMultiProgressCallback = {
+            let progress_events = Arc::clone(&progress_events);
+            Arc::new(move |event| progress_events.lock().unwrap().push(event))
+        };
+
+        let (results, error_action) = execute_mysql_batch_statements(
+            &mut executor,
+            &statements,
+            Some(DatabaseType::Mysql),
+            db::mysql::MySqlQueryDialect::default(),
+            None,
+            false,
+            Some(MYSQL_MULTI_STATEMENT_BATCH_MAX_BYTES),
+            Some(&progress),
+        )
+        .await;
+
+        assert_eq!(executor.batches, vec![statements[1..3].to_vec()]);
+        assert_eq!(executor.statements, vec![statements[0].clone(), statements[3].clone()]);
+        assert_eq!(results.len(), 4);
+        assert_eq!(
+            results.iter().map(|result| result.statement_index).collect::<Vec<_>>(),
+            vec![Some(0), Some(1), Some(2), Some(3)]
+        );
+        assert_eq!(
+            progress_events.lock().unwrap().iter().map(|event| event.completed).collect::<Vec<_>>(),
+            vec![1, 3, 4]
+        );
+        assert_eq!(error_action, None);
+    }
+
+    #[tokio::test]
+    async fn mysql_pipelined_batch_reports_the_first_failed_statement() {
+        let statements = vec![
+            "INSERT INTO users(id) VALUES (1)".to_string(),
+            "INSERT INTO users(id) VALUES (1)".to_string(),
+            "INSERT INTO users(id) VALUES (2)".to_string(),
+        ];
+        let mut executor = FakePipelinedMysqlBatchExecutor {
+            batch_outcomes: std::collections::VecDeque::from([db::mysql::MySqlNonResultBatchOutcome {
+                results: vec![empty_query_result(1)],
+                error: Some("Duplicate entry".to_string()),
+            }]),
+            statement_outcomes: std::collections::VecDeque::new(),
+            batches: Vec::new(),
+            statements: Vec::new(),
+        };
+
+        let (results, error_action) = execute_mysql_batch_statements(
+            &mut executor,
+            &statements,
+            Some(DatabaseType::Mysql),
+            db::mysql::MySqlQueryDialect::default(),
+            None,
+            false,
+            Some(MYSQL_MULTI_STATEMENT_BATCH_MAX_BYTES),
+            None,
+        )
+        .await;
+
+        assert_eq!(executor.batches, vec![statements]);
+        assert!(executor.statements.is_empty());
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].statement_index, Some(0));
+        assert_eq!(results[1].statement_index, Some(1));
+        assert!(results[1].execution_error);
+        assert_eq!(error_action, Some(PoolErrorAction::Keep));
+    }
+
+    #[tokio::test]
+    async fn mysql_pipelined_batch_discards_a_cancelled_connection() {
+        let statements =
+            vec!["INSERT INTO users(id) VALUES (1)".to_string(), "INSERT INTO users(id) VALUES (2)".to_string()];
+        let mut executor = FakePipelinedMysqlBatchExecutor {
+            batch_outcomes: std::collections::VecDeque::from([db::mysql::MySqlNonResultBatchOutcome {
+                results: Vec::new(),
+                error: Some(QUERY_CANCELED.to_string()),
+            }]),
+            statement_outcomes: std::collections::VecDeque::new(),
+            batches: Vec::new(),
+            statements: Vec::new(),
+        };
+
+        let (results, error_action) = execute_mysql_batch_statements(
+            &mut executor,
+            &statements,
+            Some(DatabaseType::Mysql),
+            db::mysql::MySqlQueryDialect::default(),
+            None,
+            false,
+            Some(MYSQL_MULTI_STATEMENT_BATCH_MAX_BYTES),
+            None,
+        )
+        .await;
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].statement_index, Some(0));
+        assert!(results[0].execution_error);
+        assert_eq!(error_action, Some(PoolErrorAction::Discard));
+    }
+
+    #[test]
+    fn mysql_non_result_batches_respect_the_statement_limit() {
+        let statements = (0..51).map(|index| format!("INSERT INTO users(id) VALUES ({index})")).collect::<Vec<_>>();
+
+        assert_eq!(
+            mysql_non_result_batch_end(
+                &statements,
+                0,
+                db::mysql::MySqlQueryDialect::default(),
+                MYSQL_MULTI_STATEMENT_BATCH_MAX_BYTES,
+            ),
+            MYSQL_MULTI_STATEMENT_BATCH_MAX_STATEMENTS
+        );
+        assert_eq!(
+            mysql_non_result_batch_end(
+                &statements,
+                MYSQL_MULTI_STATEMENT_BATCH_MAX_STATEMENTS,
+                db::mysql::MySqlQueryDialect::default(),
+                MYSQL_MULTI_STATEMENT_BATCH_MAX_BYTES,
+            ),
+            51
+        );
+    }
+
+    #[test]
+    fn mysql_non_result_batches_respect_the_byte_limit() {
+        let payload = "x".repeat(1_500_000);
+        let statements = (0..3)
+            .map(|index| format!("INSERT INTO users(id, payload) VALUES ({index}, '{payload}')"))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            mysql_non_result_batch_end(
+                &statements,
+                0,
+                db::mysql::MySqlQueryDialect::default(),
+                MYSQL_MULTI_STATEMENT_BATCH_MAX_BYTES,
+            ),
+            2
+        );
+    }
+
+    #[tokio::test]
     async fn mysql_batch_preserves_multiple_result_sets_from_one_statement() {
         let statements = vec!["CALL testA()".to_string(), "UPDATE users SET active = 1".to_string()];
         let result_set = |value| db::QueryResult {
@@ -4996,9 +5343,17 @@ for line in sys.stdin:
             executed: Vec::new(),
         };
 
-        let (results, error_action) =
-            execute_mysql_batch_statements(&mut executor, &statements, Some(DatabaseType::Mysql), None, false, None)
-                .await;
+        let (results, error_action) = execute_mysql_batch_statements(
+            &mut executor,
+            &statements,
+            Some(DatabaseType::Mysql),
+            db::mysql::MySqlQueryDialect::default(),
+            None,
+            false,
+            None,
+            None,
+        )
+        .await;
 
         assert_eq!(executor.executed, statements);
         assert_eq!(results.len(), 4);
@@ -5024,9 +5379,17 @@ for line in sys.stdin:
             executed: Vec::new(),
         };
 
-        let (results, error_action) =
-            execute_mysql_batch_statements(&mut executor, &statements, Some(DatabaseType::Mysql), None, false, None)
-                .await;
+        let (results, error_action) = execute_mysql_batch_statements(
+            &mut executor,
+            &statements,
+            Some(DatabaseType::Mysql),
+            db::mysql::MySqlQueryDialect::default(),
+            None,
+            false,
+            None,
+            None,
+        )
+        .await;
 
         assert_eq!(executor.executed, vec!["fails"]);
         assert_eq!(results.len(), 1);
@@ -5046,9 +5409,17 @@ for line in sys.stdin:
             executed: Vec::new(),
         };
 
-        let (results, error_action) =
-            execute_mysql_batch_statements(&mut executor, &statements, Some(DatabaseType::Mysql), None, true, None)
-                .await;
+        let (results, error_action) = execute_mysql_batch_statements(
+            &mut executor,
+            &statements,
+            Some(DatabaseType::Mysql),
+            db::mysql::MySqlQueryDialect::default(),
+            None,
+            true,
+            None,
+            None,
+        )
+        .await;
 
         assert_eq!(executor.executed, statements);
         assert_eq!(results.len(), 3);
@@ -5071,9 +5442,17 @@ for line in sys.stdin:
             executed: Vec::new(),
         };
 
-        let (results, error_action) =
-            execute_mysql_batch_statements(&mut executor, &statements, Some(DatabaseType::Mysql), None, true, None)
-                .await;
+        let (results, error_action) = execute_mysql_batch_statements(
+            &mut executor,
+            &statements,
+            Some(DatabaseType::Mysql),
+            db::mysql::MySqlQueryDialect::default(),
+            None,
+            true,
+            None,
+            None,
+        )
+        .await;
 
         assert_eq!(executor.executed, statements);
         assert_eq!(results.len(), 2);
@@ -5093,9 +5472,17 @@ for line in sys.stdin:
             executed: Vec::new(),
         };
 
-        let (results, error_action) =
-            execute_mysql_batch_statements(&mut executor, &statements, Some(DatabaseType::Mysql), None, true, None)
-                .await;
+        let (results, error_action) = execute_mysql_batch_statements(
+            &mut executor,
+            &statements,
+            Some(DatabaseType::Mysql),
+            db::mysql::MySqlQueryDialect::default(),
+            None,
+            true,
+            None,
+            None,
+        )
+        .await;
 
         assert_eq!(executor.executed, vec!["first", "disconnects"]);
         assert_eq!(results.len(), 2);
@@ -6100,6 +6487,27 @@ for line in sys.stdin:
         assert_eq!(params["fetchSize"], 250);
         assert_eq!(params["timeoutSecs"], 600);
         assert_eq!(params["maxRows"], MAX_ROWS);
+    }
+
+    #[test]
+    fn agent_query_row_counts_are_clamped_to_java_signed_int_range() {
+        let oversized = AGENT_PROTOCOL_MAX_ROWS.saturating_add(1);
+        let params = agent_execute_query_page_params(
+            "SELECT * FROM events",
+            None,
+            None,
+            QueryExecutionOptions {
+                page_size: Some(oversized),
+                fetch_size: Some(oversized),
+                max_rows: Some(oversized),
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(params["pageSize"], AGENT_PROTOCOL_MAX_ROWS);
+        assert_eq!(params["fetchSize"], AGENT_PROTOCOL_MAX_ROWS);
+        assert_eq!(params["maxRows"], AGENT_PROTOCOL_MAX_ROWS);
+        assert_eq!(agent_fetch_query_page_params("session-1", oversized)["pageSize"], AGENT_PROTOCOL_MAX_ROWS);
     }
 
     #[test]

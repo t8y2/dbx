@@ -17,6 +17,7 @@ NATIVE_ONLY_AGENT_MODULES = {
     "duckdb": "drivers/duckdb",
     "oracle": "drivers/oracle-go",
     "kingbase": "drivers/kingbase-go",
+    "iotdb": "drivers/iotdb",
     "neo4j": "drivers/neo4j-go",
     "vastbase": "drivers/vastbase-go",
     "tdengine": "drivers/tdengine",

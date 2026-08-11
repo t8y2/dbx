@@ -22,6 +22,12 @@ export function canDownloadAndInstallUpdate(info: api.UpdateInfo | null, isDeskt
   return isDesktop && info?.update_available === true && info.manual_update_only !== true;
 }
 
+export function isUpdateIgnored(info: api.UpdateInfo | null, ignoredVersion: string | undefined): boolean {
+  const latest = info?.latest_version;
+  if (!latest || !ignoredVersion) return false;
+  return tagVersion(latest) === tagVersion(ignoredVersion);
+}
+
 export function normalizeUpdateDownloadSource(value: unknown): SettingsUpdateDownloadSource {
   // Old persisted AtomGit preferences should retain their mainland mirror behavior.
   if (value === "atomgit") return "cnb";
@@ -66,7 +72,7 @@ export function useAppUpdater(options: UseAppUpdaterOptions = {}) {
   const isInstallingUpdate = ref(false);
   const updateReady = ref(false);
   const activeTaskCount = computed(() => Math.max(0, Math.trunc(options.getActiveTaskCount?.() ?? 0)));
-  const hasUpdateAvailable = computed(() => updateInfo.value?.update_available === true);
+  const hasUpdateAvailable = computed(() => updateInfo.value?.update_available === true && !isUpdateIgnored(updateInfo.value, settingsStore.editorSettings.ignoredUpdateVersion));
   const latestReleaseUrl = "https://github.com/t8y2/dbx/releases/latest";
   let activeDownloadAttempt = 0;
   let pendingCancellation: Promise<void> | undefined;
@@ -121,6 +127,14 @@ export function useAppUpdater(options: UseAppUpdaterOptions = {}) {
   function openLatestRelease() {
     const url = resolveUpdateReleaseUrl(updateInfo.value, settingsStore.editorSettings.updateDownloadSource, latestReleaseUrl);
     openUrl(url);
+  }
+
+  function ignoreCurrentVersion() {
+    const latest = updateInfo.value?.latest_version;
+    if (!latest) return;
+    settingsStore.updateEditorSettings({ ignoredUpdateVersion: latest });
+    showUpdateDialog.value = false;
+    toast(t("updates.versionIgnored", { version: tagVersion(latest) }), 5000);
   }
 
   function blockUpdateForActiveTasks(): boolean {
@@ -257,6 +271,7 @@ export function useAppUpdater(options: UseAppUpdaterOptions = {}) {
     checkUpdates,
     formatUpdateError,
     openLatestRelease,
+    ignoreCurrentVersion,
     downloadAndInstallUpdate,
     cancelDownload,
     installDownloadedUpdate,

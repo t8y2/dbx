@@ -247,6 +247,8 @@ export default {
     failed: "Failed to check updates: {error}",
     rateLimited: "GitHub update checks are temporarily rate limited. You can still open the release page to check manually.",
     openRelease: "Open Release",
+    ignoreVersion: "Ignore this version",
+    versionIgnored: "Version {version} ignored. You'll be reminded when the next version releases.",
     downloadAndInstall: "Download & Install",
     activeTasksBlockUpdate: "{count} task(s) are still running. Wait for them to finish before updating DBX.",
     portableAutomaticUpdate: "DBX will download the signed portable ZIP, replace only DBX.exe after exit, and restart automatically. portable.dbx and data will be kept.",

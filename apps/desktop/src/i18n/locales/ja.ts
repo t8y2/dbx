@@ -248,6 +248,8 @@ export default withEnglishFallback({
     failed: "アップデートの確認に失敗しました: {error}",
     rateLimited: "GitHubのアップデート確認が一時的に制限されています。リリースページで手動確認できます。",
     openRelease: "リリースページを開く",
+    ignoreVersion: "このバージョンを無視",
+    versionIgnored: "バージョン {version} を無視しました。次のバージョンがリリースされたときに再度通知します。",
     downloadAndInstall: "ダウンロード & インストール",
     activeTasksBlockUpdate: "{count} 件のタスクが実行中です。完了してから DBX を更新してください。",
     portableAutomaticUpdate: "DBX は署名済みのポータブル ZIP をダウンロードし、終了後に DBX.exe のみを置き換えて自動的に再起動します。portable.dbx とデータは保持されます。",

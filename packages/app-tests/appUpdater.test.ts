@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "vitest";
 
-import { canDownloadAndInstallUpdate, normalizeUpdateDownloadSource, resolveUpdateReleaseUrl, tagVersion } from "../../apps/desktop/src/composables/useAppUpdater.ts";
+import { canDownloadAndInstallUpdate, isUpdateIgnored, normalizeUpdateDownloadSource, resolveUpdateReleaseUrl, tagVersion } from "../../apps/desktop/src/composables/useAppUpdater.ts";
 import { downloadAndInstallUpdateWhenIdle, installDownloadedUpdateWhenIdle } from "../../apps/desktop/src/lib/app/appUpdateInstallFlow.ts";
 import { countActiveUpdateBlockingTasks, shouldBlockAppUpdate } from "../../apps/desktop/src/lib/app/appUpdateTaskGuard.ts";
 import type { UpdateInfo } from "../../apps/desktop/src/lib/backend/api.ts";
@@ -32,6 +32,22 @@ test("blocks in-app update installation outside desktop runtime or without an up
   assert.equal(canDownloadAndInstallUpdate(updateInfo(), false), false);
   assert.equal(canDownloadAndInstallUpdate(updateInfo({ update_available: false }), true), false);
   assert.equal(canDownloadAndInstallUpdate(null, true), false);
+});
+
+test("treats the latest version as ignored when it matches the stored value", () => {
+  assert.equal(isUpdateIgnored(updateInfo({ latest_version: "0.5.26" }), "0.5.26"), true);
+});
+
+test("does not ignore the latest version when versions differ or are absent", () => {
+  assert.equal(isUpdateIgnored(updateInfo({ latest_version: "0.5.26" }), "0.5.27"), false);
+  assert.equal(isUpdateIgnored(updateInfo({ latest_version: "0.5.26" }), ""), false);
+  assert.equal(isUpdateIgnored(updateInfo({ latest_version: "0.5.26" }), undefined), false);
+  assert.equal(isUpdateIgnored(null, "0.5.26"), false);
+});
+
+test("normalizes v-prefixed ignored versions before comparing", () => {
+  assert.equal(isUpdateIgnored(updateInfo({ latest_version: "0.5.26" }), "v0.5.26"), true);
+  assert.equal(isUpdateIgnored(updateInfo({ latest_version: "v0.5.26" }), "0.5.26"), true);
 });
 
 test("normalizes update download source", () => {
@@ -104,4 +120,6 @@ test("wires the active task guard into update installation and restart", () => {
   assert.equal(updaterSource.match(/if \(blockUpdateForActiveTasks\(\)\) return;/g)?.length, 2);
   assert.match(dialogSource, /role="alert"[\s\S]*updates\.activeTasksBlockUpdate/);
   assert.equal(dialogSource.match(/:disabled="activeTaskCount > 0"/g)?.length, 3);
+  assert.match(dialogSource, /ignore-version/);
+  assert.match(updaterSource, /ignoreCurrentVersion/);
 });

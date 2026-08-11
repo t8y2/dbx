@@ -19,8 +19,12 @@ vi.mock("@/lib/backend/tauriRuntime", () => ({
 vi.mock("@/composables/useToast", () => ({
   useToast: () => ({ toast: vi.fn() }),
 }));
+const settingsStoreMock = vi.hoisted(() => ({
+  editorSettings: { updateDownloadSource: "official", ignoredUpdateVersion: "" },
+  updateEditorSettings: vi.fn(),
+}));
 vi.mock("@/stores/settingsStore", () => ({
-  useSettingsStore: () => ({ editorSettings: { updateDownloadSource: "official" } }),
+  useSettingsStore: () => settingsStoreMock,
 }));
 vi.mock("@tauri-apps/api/event", () => ({
   listen: listenMock,
@@ -47,6 +51,7 @@ let container: HTMLDivElement | undefined;
 
 beforeEach(() => {
   vi.clearAllMocks();
+  settingsStoreMock.editorSettings.ignoredUpdateVersion = "";
   listenMock.mockResolvedValue(vi.fn());
   apiMock.installDownloadedUpdate.mockResolvedValue();
 });
@@ -114,5 +119,37 @@ describe("useAppUpdater download attempts", () => {
     expect(apiMock.installDownloadedUpdate).toHaveBeenCalledOnce();
     expect(updater.isDownloadingUpdate.value).toBe(false);
     expect(updater.updateReady.value).toBe(true);
+  });
+});
+
+describe("useAppUpdater ignore version", () => {
+  it("persists the ignored latest version and closes the update dialog", async () => {
+    let updater!: ReturnType<typeof useAppUpdater>;
+    container = document.createElement("div");
+    document.body.append(container);
+    app = createApp(
+      defineComponent({
+        setup() {
+          updater = useAppUpdater();
+          return () => h("div");
+        },
+      }),
+    );
+    app.use(i18n);
+    app.mount(container);
+    updater.updateInfo.value = {
+      current_version: "0.5.69",
+      latest_version: "0.5.70",
+      update_available: true,
+      release_name: "DBX v0.5.70",
+      release_url: "https://github.com/t8y2/dbx/releases/tag/v0.5.70",
+      release_notes: "",
+    };
+    updater.showUpdateDialog.value = true;
+
+    updater.ignoreCurrentVersion();
+
+    expect(settingsStoreMock.updateEditorSettings).toHaveBeenCalledWith({ ignoredUpdateVersion: "0.5.70" });
+    expect(updater.showUpdateDialog.value).toBe(false);
   });
 });

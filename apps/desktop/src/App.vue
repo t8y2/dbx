@@ -177,6 +177,7 @@ const {
   openUrl,
   checkUpdates,
   openLatestRelease,
+  ignoreCurrentVersion,
   downloadAndInstallUpdate,
   cancelDownload,
   installDownloadedUpdate,
@@ -2863,6 +2864,7 @@ onUnmounted(() => {
           @cancel-download="cancelDownload"
           @install-downloaded="installDownloadedUpdate"
           @restart="restartApp"
+          @ignore-version="ignoreCurrentVersion"
         />
         <ExternalSqlFileChangeDialog :prompt="externalSqlFilePrompt" @decide="externalSqlFileChanges.resolvePrompt" />
         <CloseActionPromptDialog v-if="isDesktop && showCloseActionPrompt" :open="showCloseActionPrompt" @update:open="handleCloseActionPromptOpenChange" @quit="chooseQuit" @minimize="chooseMinimize" />

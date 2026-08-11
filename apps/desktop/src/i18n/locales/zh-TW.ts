@@ -248,6 +248,8 @@ export default withEnglishFallback({
     failed: "檢查更新失敗：{error}",
     rateLimited: "GitHub 更新檢查暫時觸發頻率限制。你仍然可以開啟下載頁手動檢視。",
     openRelease: "開啟下載頁",
+    ignoreVersion: "忽略此版本",
+    versionIgnored: "已忽略 {version}，將在下個版本發布時再次提醒。",
     downloadAndInstall: "下載並安裝",
     activeTasksBlockUpdate: "有 {count} 個任務正在執行，請等待任務完成後再更新 DBX。",
     portableAutomaticUpdate: "DBX 將下載已簽署的可攜版 ZIP，結束後僅替換 DBX.exe 並自動重新啟動。portable.dbx 和 data 會保留。",

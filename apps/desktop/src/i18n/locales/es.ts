@@ -248,6 +248,8 @@ export default withEnglishFallback({
     failed: "Error al buscar actualizaciones: {error}",
     rateLimited: "Las verificaciones de actualizaciones de GitHub están temporalmente limitadas. Puedes abrir la página de lanzamientos para verificar manualmente.",
     openRelease: "Abrir lanzamiento",
+    ignoreVersion: "Ignorar esta versión",
+    versionIgnored: "Versión {version} ignorada. Se te recordará cuando se publique la próxima versión.",
     downloadAndInstall: "Descargar e instalar",
     activeTasksBlockUpdate: "Hay {count} tarea(s) en ejecución. Espera a que terminen antes de actualizar DBX.",
     portableAutomaticUpdate: "DBX descargará el ZIP portable firmado, reemplazará solo DBX.exe después de salir y se reiniciará automáticamente. portable.dbx y data se conservarán.",

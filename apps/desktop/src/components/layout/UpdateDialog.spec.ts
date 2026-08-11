@@ -41,6 +41,7 @@ async function mountDialog(activeTaskCount: number, initialState: Partial<Dialog
   });
   const downloadAndInstall = vi.fn();
   const cancelDownload = vi.fn();
+  const ignoreVersion = vi.fn();
   const container = document.createElement("div");
   document.body.append(container);
   const app = createApp(
@@ -85,6 +86,7 @@ async function mountDialog(activeTaskCount: number, initialState: Partial<Dialog
             "onDownload-and-install": downloadAndInstall,
             "onCancel-download": cancelDownload,
             "onInstall-downloaded": handleInstallDownloaded,
+            "onIgnore-version": ignoreVersion,
           });
       },
     }),
@@ -94,7 +96,7 @@ async function mountDialog(activeTaskCount: number, initialState: Partial<Dialog
   app.mount(container);
   await flushDialog();
 
-  return { state, downloadAndInstall, cancelDownload, installDownloaded };
+  return { state, downloadAndInstall, cancelDownload, installDownloaded, ignoreVersion };
 }
 
 function buttonWithText(text: string): HTMLButtonElement | undefined {
@@ -273,5 +275,24 @@ describe("UpdateDialog close protection", () => {
     expect(state.open).toBe(false);
     expect(installDownloaded).toHaveBeenCalledOnce();
     expect(downloadAndInstall).not.toHaveBeenCalled();
+  });
+});
+
+describe("UpdateDialog ignore version", () => {
+  it("emits ignore-version when the ignore button is clicked", async () => {
+    const { ignoreVersion } = await mountDialog(0);
+
+    const ignoreButton = buttonWithText("Ignore this version");
+    expect(ignoreButton).toBeDefined();
+    ignoreButton?.click();
+    await flushDialog();
+
+    expect(ignoreVersion).toHaveBeenCalledOnce();
+  });
+
+  it("hides the ignore button once an update has been downloaded", async () => {
+    await mountDialog(0, { updateDownloaded: true, downloadProgress: 100 });
+
+    expect(buttonWithText("Ignore this version")).toBeUndefined();
   });
 });

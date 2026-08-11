@@ -5435,7 +5435,7 @@ export default withEnglishFallback({
     shortcutNewQuery: "Nuova query",
     shortcutOpenSettings: "Apri impostazioni",
     shortcutCloseTab: "Chiudi scheda",
-    shortcutFocusSearch: "Focalizza ricerca",
+    shortcutFocusSearch: "Focalizza la ricerca nella vista corrente",
     shortcutQuickOpen: "Apertura rapida (ricerca tutti gli oggetti del database)",
     shortcutSwitchToPreviousTab: "Passa alla scheda precedente",
     shortcutSwitchToNextTab: "Passa alla scheda successiva",

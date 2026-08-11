@@ -5436,7 +5436,7 @@ export default withEnglishFallback({
     shortcutOpenSettings: "Abrir configuración",
     shortcutCloseTab: "Cerrar pestaña",
     shortcutToggleSidebar: "Alternar barra lateral",
-    shortcutFocusSearch: "Enfocar búsqueda",
+    shortcutFocusSearch: "Enfocar búsqueda de la vista actual",
     shortcutQuickOpen: "Abrir rápido (buscar todos los objetos de base de datos)",
     shortcutSwitchToPreviousTab: "Cambiar a la pestaña anterior",
     shortcutSwitchToNextTab: "Cambiar a la pestaña siguiente",

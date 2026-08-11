@@ -4871,7 +4871,7 @@ export default withEnglishFallback({
     shortcutOpenSettings: "開啟設定",
     shortcutCloseTab: "關閉分頁",
     shortcutToggleSidebar: "切換側邊欄",
-    shortcutFocusSearch: "聚焦搜尋",
+    shortcutFocusSearch: "聚焦目前頁面搜尋",
     shortcutQuickOpen: "快速開啟 (搜尋所有資料庫物件)",
     shortcutSwitchToPreviousTab: "切換到左側分頁",
     shortcutSwitchToNextTab: "切換到右側分頁",

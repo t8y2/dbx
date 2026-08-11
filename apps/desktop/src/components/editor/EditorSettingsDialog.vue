@@ -275,8 +275,6 @@ const editActiveCustomThemeId = ref(settingsStore.editorSettings.activeCustomThe
 const showThemeCustomizer = ref(false);
 const editExecuteMode = ref(settingsStore.editorSettings.executeMode);
 const editExecuteAllOnBlankLine = ref(settingsStore.editorSettings.executeAllOnBlankLine);
-const editGlobalConnectTimeoutSecs = ref(settingsStore.editorSettings.globalConnectTimeoutSecs);
-const editGlobalQueryTimeoutSecs = ref(settingsStore.editorSettings.globalQueryTimeoutSecs);
 const editShowExecutionTargetPicker = ref(settingsStore.editorSettings.showExecutionTargetPicker);
 const editShowStatementRunButtons = ref(settingsStore.editorSettings.showStatementRunButtons);
 const editShowCurrentStatementFrame = ref(settingsStore.editorSettings.showCurrentStatementFrame);
@@ -465,8 +463,6 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     activeCustomThemeId: editActiveCustomThemeId.value,
     executeMode: editExecuteMode.value,
     executeAllOnBlankLine: editExecuteAllOnBlankLine.value,
-    globalConnectTimeoutSecs: editGlobalConnectTimeoutSecs.value,
-    globalQueryTimeoutSecs: editGlobalQueryTimeoutSecs.value,
     showExecutionTargetPicker: editShowExecutionTargetPicker.value,
     showStatementRunButtons: editShowStatementRunButtons.value,
     showCurrentStatementFrame: editShowCurrentStatementFrame.value,
@@ -738,8 +734,6 @@ function syncEditorSettingsDraftFromStore() {
   editActiveCustomThemeId.value = settingsStore.editorSettings.activeCustomThemeId;
   editExecuteMode.value = settingsStore.editorSettings.executeMode;
   editExecuteAllOnBlankLine.value = settingsStore.editorSettings.executeAllOnBlankLine;
-  editGlobalConnectTimeoutSecs.value = settingsStore.editorSettings.globalConnectTimeoutSecs;
-  editGlobalQueryTimeoutSecs.value = settingsStore.editorSettings.globalQueryTimeoutSecs;
   editShowExecutionTargetPicker.value = settingsStore.editorSettings.showExecutionTargetPicker;
   editShowStatementRunButtons.value = settingsStore.editorSettings.showStatementRunButtons;
   editShowCurrentStatementFrame.value = settingsStore.editorSettings.showCurrentStatementFrame;
@@ -895,20 +889,12 @@ function hasChanges(): boolean {
 async function persistSettings() {
   if (hasApplyBlocker.value) return;
   const editorSettingsPatch = editorSettingsPatchFromDraft(currentEditorSettingsDraft(), editEditorSettingsBase.value);
-  const globalConnectTimeoutChanged = editorSettingsPatch.globalConnectTimeoutSecs !== undefined;
-  const globalQueryTimeoutChanged = editorSettingsPatch.globalQueryTimeoutSecs !== undefined;
   const sidebarObjectDisplayChanged = editorSettingsPatch.sidebarObjectDisplay !== undefined && editorSettingsPatch.sidebarObjectDisplay !== settingsStore.editorSettings.sidebarObjectDisplay;
   const sidebarTablePageSizeChanged = editSidebarTablePageSize.value !== (settingsStore.desktopSettings.sidebar_table_page_size ?? DEFAULT_SIDEBAR_TABLE_PAGE_SIZE);
   if (Object.keys(editorSettingsPatch).length > 0) {
     settingsStore.updateEditorSettings(editorSettingsPatch);
     await settingsStore.persistEditorSettings();
     editEditorSettingsBase.value = editorSettingsDraftFromSettings(settingsStore.editorSettings);
-  }
-  if (globalConnectTimeoutChanged || globalQueryTimeoutChanged) {
-    await connectionStore.applyGlobalTimeouts({
-      connectTimeoutSecs: globalConnectTimeoutChanged ? settingsStore.editorSettings.globalConnectTimeoutSecs : undefined,
-      queryTimeoutSecs: globalQueryTimeoutChanged ? settingsStore.editorSettings.globalQueryTimeoutSecs : undefined,
-    });
   }
   await settingsStore.updateDesktopSettings({
     show_tray_icon: editShowTrayIcon.value,
@@ -957,8 +943,6 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editFontSize.value = DEFAULT_EDITOR_SETTINGS.fontSize;
     editExecuteMode.value = DEFAULT_EDITOR_SETTINGS.executeMode;
     editExecuteAllOnBlankLine.value = DEFAULT_EDITOR_SETTINGS.executeAllOnBlankLine;
-    editGlobalConnectTimeoutSecs.value = DEFAULT_EDITOR_SETTINGS.globalConnectTimeoutSecs;
-    editGlobalQueryTimeoutSecs.value = DEFAULT_EDITOR_SETTINGS.globalQueryTimeoutSecs;
     editShowExecutionTargetPicker.value = DEFAULT_EDITOR_SETTINGS.showExecutionTargetPicker;
     editShowStatementRunButtons.value = DEFAULT_EDITOR_SETTINGS.showStatementRunButtons;
     editShowCurrentStatementFrame.value = DEFAULT_EDITOR_SETTINGS.showCurrentStatementFrame;
@@ -1055,8 +1039,6 @@ function resetAllDefaults() {
   editActiveCustomThemeId.value = DEFAULT_EDITOR_SETTINGS.activeCustomThemeId;
   editExecuteMode.value = DEFAULT_EDITOR_SETTINGS.executeMode;
   editExecuteAllOnBlankLine.value = DEFAULT_EDITOR_SETTINGS.executeAllOnBlankLine;
-  editGlobalConnectTimeoutSecs.value = DEFAULT_EDITOR_SETTINGS.globalConnectTimeoutSecs;
-  editGlobalQueryTimeoutSecs.value = DEFAULT_EDITOR_SETTINGS.globalQueryTimeoutSecs;
   editShowExecutionTargetPicker.value = DEFAULT_EDITOR_SETTINGS.showExecutionTargetPicker;
   editShowStatementRunButtons.value = DEFAULT_EDITOR_SETTINGS.showStatementRunButtons;
   editShowCurrentStatementFrame.value = DEFAULT_EDITOR_SETTINGS.showCurrentStatementFrame;
@@ -3679,26 +3661,6 @@ onUnmounted(() => {
                     </p>
                   </div>
                   <Switch id="editor-execute-all-on-blank-line" v-model="editExecuteAllOnBlankLine" :disabled="editExecuteMode !== 'current'" class="mt-0.5" />
-                </div>
-
-                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
-                  <div class="space-y-1">
-                    <Label for="editor-global-connect-timeout">{{ t("settings.globalConnectTimeout") }}</Label>
-                    <p class="text-xs text-muted-foreground">
-                      {{ t("settings.globalConnectTimeoutDescription") }}
-                    </p>
-                  </div>
-                  <Input id="editor-global-connect-timeout" v-model.number="editGlobalConnectTimeoutSecs" type="number" min="1" max="300" step="1" class="w-24" />
-                </div>
-
-                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
-                  <div class="space-y-1">
-                    <Label for="editor-global-query-timeout">{{ t("settings.globalQueryTimeout") }}</Label>
-                    <p class="text-xs text-muted-foreground">
-                      {{ t("settings.globalQueryTimeoutDescription") }}
-                    </p>
-                  </div>
-                  <Input id="editor-global-query-timeout" v-model.number="editGlobalQueryTimeoutSecs" type="number" min="0" max="300" step="1" class="w-24" />
                 </div>
 
                 <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">

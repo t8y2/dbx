@@ -5643,7 +5643,7 @@ export default withEnglishFallback({
     shortcutOpenSettings: "打开设置",
     shortcutCloseTab: "关闭标签页",
     shortcutToggleSidebar: "切换侧边栏",
-    shortcutFocusSearch: "聚焦搜索",
+    shortcutFocusSearch: "聚焦当前页面搜索",
     shortcutQuickOpen: "快速打开 (搜索所有数据库对象)",
     shortcutSwitchToPreviousTab: "切换到左侧标签页",
     shortcutSwitchToNextTab: "切换到右侧标签页",

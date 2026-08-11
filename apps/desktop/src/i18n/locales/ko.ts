@@ -5202,7 +5202,7 @@ export default withEnglishFallback({
     shortcutNewQuery: "새 쿼리",
     shortcutOpenSettings: "설정 열기",
     shortcutCloseTab: "탭 닫기",
-    shortcutFocusSearch: "검색에 포커스",
+    shortcutFocusSearch: "현재 화면 검색에 포커스",
     shortcutQuickOpen: "빠른 열기 (모든 데이터베이스 객체 검색)",
     shortcutSwitchToPreviousTab: "이전 탭으로 전환",
     shortcutSwitchToNextTab: "다음 탭으로 전환",

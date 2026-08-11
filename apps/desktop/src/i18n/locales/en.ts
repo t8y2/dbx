@@ -5718,7 +5718,7 @@ export default {
     shortcutNewQuery: "New query",
     shortcutOpenSettings: "Open settings",
     shortcutCloseTab: "Close tab",
-    shortcutFocusSearch: "Focus search",
+    shortcutFocusSearch: "Focus current view search",
     shortcutQuickOpen: "Quick open (search all database objects)",
     shortcutSwitchToPreviousTab: "Switch to previous tab",
     shortcutSwitchToNextTab: "Switch to next tab",

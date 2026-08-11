@@ -156,7 +156,8 @@ describe("NacosAdminConsole config workbench layout", () => {
     expect(source).toContain('await confirmNacosMutation(t("nacos.batchDelete"), snapshot.connectionId, snapshot.namespace)');
     expect(source).toContain("for (const key of snapshot.keys)");
     expect(source).toContain("await api.nacosDeleteConfig(snapshot.connectionId, key);");
-    expect(source).toContain("selectedConfigKeys.value = selectedConfigKeys.value.filter((key) => !deletedKeys.has(key));");
+    expect(source).toContain("function reconcileDeletedConfigSelection(deletedKeys: ReadonlySet<string>)");
+    expect(source).toContain("reconcileDeletedConfigSelection(deletedKeys);");
     expect(source).toContain("nacos.batchDeletePartial");
     expect(source).toContain("nacos.batchDeleteInterrupted");
   });

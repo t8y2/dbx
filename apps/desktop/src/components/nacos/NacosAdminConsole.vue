@@ -761,6 +761,8 @@ async function loadConfigs(page = configPageNo.value): Promise<boolean> {
       pageSize: requestPageSize,
     });
     if (!isCurrentRequest()) return false;
+    const lastPage = Math.max(1, Math.ceil(result.totalCount / Math.max(1, requestPageSize)));
+    if (page > lastPage) return loadConfigs(lastPage);
     configs.value = applyKnownConfigFormats(result.items.map(normalizeConfigItemFormat));
     configTotal.value = result.totalCount;
     return true;
@@ -1588,6 +1590,11 @@ function requestDeleteConfig() {
   pendingDeleteConfig.value = createNacosConfigDeleteSnapshot(props.connectionId, key, selectedConfig.value);
 }
 
+function reconcileDeletedConfigSelection(deletedKeys: ReadonlySet<string>) {
+  if (!deletedKeys.size) return;
+  selectedConfigKeys.value = selectedConfigKeys.value.filter((key) => !deletedKeys.has(key));
+}
+
 async function deleteConfig() {
   const snapshot = pendingDeleteConfig.value;
   if (!snapshot || !isNacosConfigDeleteSnapshotInScope(snapshot, props.connectionId, namespace.value)) {
@@ -1613,7 +1620,10 @@ async function deleteConfig() {
   try {
     await api.nacosDeleteConfig(snapshot.connectionId, snapshot.key);
     const remainsInDeletedScope = isNacosConfigDeleteSnapshotInScope(snapshot, props.connectionId, namespace.value);
-    if (remainsInDeletedScope) await loadConfigs();
+    if (remainsInDeletedScope) {
+      reconcileDeletedConfigSelection(new Set([configIdentityKey(snapshot.key)]));
+      await loadConfigs();
+    }
     const stillViewingDeletedConfig =
       remainsInDeletedScope &&
       editorSessionId === configEditorSessionId &&
@@ -1691,7 +1701,7 @@ async function deleteSelectedConfigs() {
     if (!isBatchDeleteSnapshotInScope(snapshot)) interrupted = true;
     if (!interrupted) {
       if (deletedKeys.size) {
-        selectedConfigKeys.value = selectedConfigKeys.value.filter((key) => !deletedKeys.has(key));
+        reconcileDeletedConfigSelection(deletedKeys);
         await loadConfigs();
       }
       const selectedKey = selectedConfigOriginalKey.value;

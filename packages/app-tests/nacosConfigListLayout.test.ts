@@ -1,13 +1,7 @@
 import assert from "node:assert/strict";
 import { ref } from "vue";
 import { afterEach, beforeEach, test } from "vitest";
-import {
-  NACOS_CONFIG_LIST_COLUMN_WIDTHS_STORAGE_KEY,
-  NACOS_CONFIG_LIST_HIDDEN_COLUMNS_STORAGE_KEY,
-  DEFAULT_NACOS_CONFIG_LIST_COLUMN_WIDTHS,
-  NACOS_CONFIG_LIST_HORIZONTAL_PADDING,
-  useNacosConfigListColumnResize,
-} from "../../apps/desktop/src/composables/useNacosConfigListColumnResize.ts";
+import { NACOS_CONFIG_LIST_COLUMN_WIDTHS_STORAGE_KEY, NACOS_CONFIG_LIST_HIDDEN_COLUMNS_STORAGE_KEY, DEFAULT_NACOS_CONFIG_LIST_COLUMN_WIDTHS, NACOS_CONFIG_LIST_HORIZONTAL_PADDING, useNacosConfigListColumnResize } from "../../apps/desktop/src/composables/useNacosConfigListColumnResize.ts";
 
 function installLocalStorage() {
   const original = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
@@ -125,7 +119,10 @@ test("Nacos config list fits every default column into the actual list viewport"
 
   assert.equal(layout.totalWidth.value, 800 - NACOS_CONFIG_LIST_HORIZONTAL_PADDING);
   assert.equal(layout.minWidth.value, "800px");
-  assert.equal(layout.columnWidths.value.every((width) => width > 0), true);
+  assert.equal(
+    layout.columnWidths.value.every((width) => width > 0),
+    true,
+  );
 });
 
 test("Nacos config list persists hidden optional columns and gives the remaining columns the available space", () => {

@@ -6190,7 +6190,7 @@ function onTransposeCellContext(rowIndex: number, actualColIdx: number, event: M
   contextCell.value = item ? { rowId: item.id, rowIndex, col: actualColIdx } : null;
 }
 
-watch([selectedRange, showCellDetail, isEditingDetail], () => {
+watch([selectedRange, showCellDetail, isEditingDetail, isSelectingCells], () => {
   if (isSelectingCells.value) return;
   const selectedCell = currentSelectedCellPosition();
   const target = linkedCellDetailTarget({

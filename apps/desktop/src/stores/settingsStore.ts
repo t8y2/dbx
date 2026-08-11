@@ -1748,16 +1748,6 @@ export const useSettingsStore = defineStore("settings", () => {
     return update;
   }
 
-  async function persistSidebarShowConnectionNotes(value: boolean): Promise<void> {
-    await initEditorSettings();
-    const normalizedValue = value === true;
-    await api.saveEditorSettings({
-      ...editorSettingsSnapshot(editorSettings.value),
-      sidebarShowConnectionNotes: normalizedValue,
-    });
-    editorSettings.value.sidebarShowConnectionNotes = normalizedValue;
-  }
-
   function updateColumnFormatter(key: string, formatter: ColumnFormatterConfig | undefined) {
     const columnFormatters = { ...editorSettings.value.columnFormatters };
     const normalized = normalizeColumnFormatter(formatter);
@@ -1823,7 +1813,6 @@ export const useSettingsStore = defineStore("settings", () => {
     updateEditorSettings,
     updateEditorSettingsAndPersist,
     persistEditorSettings,
-    persistSidebarShowConnectionNotes,
     initDesktopSettings,
     updateDesktopSettings,
     initMcpGlobalPolicy,

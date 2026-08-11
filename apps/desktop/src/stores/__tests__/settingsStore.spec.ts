@@ -672,7 +672,7 @@ describe("settingsStore persisted settings initialization", () => {
     );
   });
 
-  it("updates connection note visibility only after persistence succeeds and supports retry", async () => {
+  it("atomically updates connection note visibility and supports retry", async () => {
     const loadEditorSettings = vi.fn().mockResolvedValue({ sidebarShowConnectionNotes: false });
     const saveEditorSettings = vi.fn().mockResolvedValue(undefined);
     vi.doMock("@/lib/backend/api", () => ({ loadEditorSettings, saveEditorSettings }));
@@ -683,10 +683,10 @@ describe("settingsStore persisted settings initialization", () => {
     saveEditorSettings.mockClear();
     saveEditorSettings.mockRejectedValueOnce(new Error("storage unavailable")).mockResolvedValueOnce(undefined);
 
-    await expect(store.persistSidebarShowConnectionNotes(true)).rejects.toThrow("storage unavailable");
+    await expect(store.updateEditorSettingsAndPersist({ sidebarShowConnectionNotes: true })).rejects.toThrow("storage unavailable");
     expect(store.editorSettings.sidebarShowConnectionNotes).toBe(false);
 
-    await store.persistSidebarShowConnectionNotes(true);
+    await store.updateEditorSettingsAndPersist({ sidebarShowConnectionNotes: true });
     expect(store.editorSettings.sidebarShowConnectionNotes).toBe(true);
     expect(saveEditorSettings).toHaveBeenCalledTimes(2);
     expect(saveEditorSettings).toHaveBeenLastCalledWith(expect.objectContaining({ sidebarShowConnectionNotes: true }));

@@ -5027,7 +5027,7 @@ async function persistGlobalTimeoutDrafts() {
 }
 
 async function persistConnectionNoteVisibilityDraft() {
-  await persistConnectionNoteVisibilityDraftState(connectionNoteVisibilityDraft, settingsStore.editorSettings.sidebarShowConnectionNotes, (value) => settingsStore.persistSidebarShowConnectionNotes(value));
+  await persistConnectionNoteVisibilityDraftState(connectionNoteVisibilityDraft, settingsStore.editorSettings.sidebarShowConnectionNotes, (value) => settingsStore.updateEditorSettingsAndPersist({ sidebarShowConnectionNotes: value }));
 }
 
 async function save() {

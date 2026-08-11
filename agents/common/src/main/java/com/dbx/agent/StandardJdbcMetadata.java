@@ -207,10 +207,16 @@ public final class StandardJdbcMetadata {
         });
     }
 
-    public List<IndexInfo> listIndexes(Connection conn, String configuredDatabase, String schema, String table) {
+    public List<IndexInfo> listIndexes(
+        Connection conn,
+        JdbcAgentProfile profile,
+        String configuredDatabase,
+        String schema,
+        String table
+    ) {
         return unchecked(() -> {
             List<IndexInfo> result = listIndexesInternal(conn, null, schema, table);
-            if (result.isEmpty() && hasConfiguredDatabase(configuredDatabase)) {
+            if (result.isEmpty() && profile.getCatalogFallbackEnabled() && hasConfiguredDatabase(configuredDatabase)) {
                 result = listIndexesInternal(conn, configuredDatabase, schema, table);
             }
             return result;

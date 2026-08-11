@@ -108,10 +108,11 @@ export function useSidebarTreeExportRuntime(options: SidebarTreeExportRuntimeOpt
     return includeTable ? [t("contextMenu.structureDocTable"), ...headers] : headers;
   }
 
-  function columnDocCells(target: TreeNode, column: ColumnInfo, includeTable: boolean): unknown[] {
+  function columnDocCells(target: TreeNode & { connectionId: string }, column: ColumnInfo, includeTable: boolean): unknown[] {
     const config = connectionStore.getConfig(target.connectionId);
     const isGaussdbM = effectiveDatabaseTypeForConnection(config) === "gaussdb" && config?.driver_profile?.toLowerCase() === "gaussdb-m";
-    const dataType = isGaussdbM ? gaussdbMTypeDisplayName(column.data_type) : column.data_type;
+    const sourceDataType = column.data_type;
+    const dataType = isGaussdbM && sourceDataType ? gaussdbMTypeDisplayName(sourceDataType) : sourceDataType;
     const cells = [column.name, dataType, column.is_primary_key ? t("contextMenu.structureDocYes") : t("contextMenu.structureDocNo"), column.is_nullable ? t("contextMenu.structureDocYes") : t("contextMenu.structureDocNo"), column.column_default, column.comment];
     return includeTable ? [structureTargetName(target), ...cells] : cells;
   }

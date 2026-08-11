@@ -75,3 +75,6 @@ DBX_*_x64-portable.zip
 # Local devtest connections (contains credentials; do not commit)
 dbx-devtest-connections.json
 .npmrc
+
+# Real database integration credentials (see docs/TEST_ENVIRONMENTS.md)
+/docs/TEST_ENVIRONMENTS.md

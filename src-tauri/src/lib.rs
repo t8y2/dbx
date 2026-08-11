@@ -1644,6 +1644,7 @@ pub fn run() {
             commands::schema::list_completion_objects,
             commands::schema::completion_assistant_search,
             commands::schema::get_object_source,
+            commands::schema::get_custom_type_details,
             commands::schema::list_schemas,
             commands::schema::list_schema_infos,
             commands::schema::list_data_types,

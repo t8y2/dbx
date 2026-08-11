@@ -6,6 +6,7 @@ import { DATA_GRID_MAX_BATCH_INSERT_ROWS, DATA_GRID_QUICK_ENTRY_DRAFT_ROW_ID, us
 import type { CellValue } from "../../apps/desktop/src/lib/dataGrid/cellValue.ts";
 import type { DataGridSaveStatementOptions } from "../../apps/desktop/src/lib/dataGrid/dataGridSql.ts";
 import { matchesRowStatusFilter, type RowStatusFilter } from "../../apps/desktop/src/lib/dataGrid/gridRowStatus.ts";
+import { useConnectionStore } from "../../apps/desktop/src/stores/connectionStore.ts";
 import type { ColumnInfo } from "../../apps/desktop/src/types/database.ts";
 
 function installBrowserTestGlobals() {
@@ -191,7 +192,7 @@ function createQuickEntryEditor(options: {
   return editor;
 }
 
-function createPeopleGridEditor(result = computed(() => ({ columns: ["id", "name"], rows: [[1, "Ada"] as CellValue[]] }))) {
+function createPeopleGridEditor(result = computed(() => ({ columns: ["id", "name"], rows: [[1, "Ada"] as CellValue[]] })), connectionId?: string) {
   const rowStatusFilter = ref<RowStatusFilter>("all");
   let editor: ReturnType<typeof useDataGridEditor>;
 
@@ -199,7 +200,7 @@ function createPeopleGridEditor(result = computed(() => ({ columns: ["id", "name
     result,
     editable: computed(() => true),
     databaseType: computed(() => "postgres"),
-    connectionId: computed(() => undefined),
+    connectionId: computed(() => connectionId),
     database: computed(() => undefined),
     tableMeta: computed(() => ({
       tableName: "people",
@@ -249,6 +250,33 @@ function createPeopleGridEditor(result = computed(() => ({ columns: ["id", "name
 
   return editor;
 }
+
+test("data grid save forwards the GBase 8s driver profile", async () => {
+  setActivePinia(createPinia());
+  installBrowserTestGlobals();
+  useConnectionStore().addEphemeralConnection({
+    id: "gbase8s-1",
+    name: "GBase 8s",
+    db_type: "informix",
+    driver_profile: "gbase8s",
+    host: "localhost",
+    port: 9088,
+    username: "gbasedbt",
+    password: "",
+  });
+  let requestBody: Record<string, unknown> | undefined;
+  globalThis.fetch = (async (input, init) => {
+    if (String(input) !== "/api/query/prepare-data-grid-save") return new Response("unexpected request", { status: 500 });
+    requestBody = JSON.parse(String(init?.body ?? "{}"));
+    return Response.json({ statements: [], rollbackStatements: [] });
+  }) as typeof fetch;
+
+  const editor = createPeopleGridEditor(undefined, "gbase8s-1");
+  editor.applyCellValue(0, 1, "Grace");
+  await editor.previewChanges();
+
+  assert.equal(requestBody?.driverProfile, "gbase8s");
+});
 
 test("row data helper reuses unchanged rows and clones dirty rows only", () => {
   setActivePinia(createPinia());

@@ -742,8 +742,7 @@ function editorIndentUnit(): string {
 }
 
 function handleTab(view: EditorViewType): boolean {
-  if (codeMirrorCompletionStatus?.(view.state)) return false;
-  return performNormalTab(view);
+  return acceptCompletionOrNextSnippetField(view) || performNormalTab(view);
 }
 
 function performNormalTab(view: EditorViewType): boolean {
@@ -1853,11 +1852,8 @@ function extendQueryEditorSelectionForView(currentView: EditorViewType): boolean
 function acceptCompletionOrNextSnippetField(view: EditorViewType): boolean {
   const completionStatus = codeMirrorCompletionStatus?.(view.state) ?? null;
   if (completionStatus === "active" && (codeMirrorAcceptCompletion?.(view) ?? false)) return true;
-  // Snippet fields keep their normal immediate Tab priority when completion
-  // is pending or still inside CodeMirror's interaction delay.
-  if (codeMirrorNextSnippetField?.(view)) return true;
   if (completionStatus) return waitForCompletionTab(view);
-  return false;
+  return codeMirrorNextSnippetField?.(view) ?? false;
 }
 
 function clearPendingCompletionTab() {
@@ -1879,7 +1875,6 @@ function waitForCompletionTab(view: EditorViewType): boolean {
 
     const completionStatus = codeMirrorCompletionStatus?.(view.state) ?? null;
     if (completionStatus === "active" && (codeMirrorAcceptCompletion?.(view) ?? false)) return;
-    if (codeMirrorNextSnippetField?.(view)) return;
     if (completionStatus && Date.now() - startedAt < COMPLETION_TAB_MAX_WAIT_MS) {
       pendingCompletionTabTimer = setTimeout(retry, COMPLETION_TAB_RETRY_DELAY_MS);
       return;

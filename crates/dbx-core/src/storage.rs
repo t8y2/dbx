@@ -5480,6 +5480,8 @@ mod tests {
                 grok_cli_env: std::collections::HashMap::new(),
                 codebuddy_cli_path: None,
                 codebuddy_cli_env: std::collections::HashMap::new(),
+                qoder_cli_path: None,
+                qoder_cli_env: Default::default(),
             },
         }
     }

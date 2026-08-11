@@ -24,7 +24,7 @@ describe("isAiConfigModelCandidate", () => {
     expect(isAiConfigModelCandidate(config({ apiKey: "" }), true)).toBe(false);
   });
 
-  it.each(["codex-cli", "claude-code-cli", "opencode-cli", "pi-agent-cli", "cursor-cli", "grok-cli", "codebuddy-cli"] as const)("keeps %s configs eligible without endpoint, API key, or model metadata", (provider) => {
+  it.each(["codex-cli", "claude-code-cli", "opencode-cli", "pi-agent-cli", "cursor-cli", "grok-cli", "codebuddy-cli", "qoder-cli"] as const)("keeps %s configs eligible without endpoint, API key, or model metadata", (provider) => {
     expect(
       isAiConfigModelCandidate(
         config({
@@ -37,5 +37,20 @@ describe("isAiConfigModelCandidate", () => {
         false,
       ),
     ).toBe(true);
+  });
+
+  it.each(["codex-cli", "claude-code-cli", "opencode-cli", "pi-agent-cli", "cursor-cli", "grok-cli", "codebuddy-cli", "qoder-cli"] as const)("filters existing %s configs when local CLI providers are unavailable", (provider) => {
+    expect(
+      isAiConfigModelCandidate(
+        config({
+          provider,
+          endpoint: "",
+          apiKey: "",
+          model: "default",
+        }),
+        false,
+        false,
+      ),
+    ).toBe(false);
   });
 });

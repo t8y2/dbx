@@ -9595,8 +9595,8 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                                 </Select>
                               </div>
 
-                              <div v-if="formatterKind === 'datetime'" class="flex gap-2">
-                                <div class="space-y-1.5">
+                              <div v-if="formatterKind === 'datetime'" class="flex min-w-0 gap-2">
+                                <div class="shrink-0 space-y-1.5">
                                   <div class="text-xs font-medium text-muted-foreground">
                                     {{ t("grid.formatterTimestampUnit") }}
                                   </div>
@@ -9611,7 +9611,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                                     </SelectContent>
                                   </Select>
                                 </div>
-                                <div class="space-y-1.5 flex-1">
+                                <div class="min-w-0 flex-1 space-y-1.5">
                                   <div class="text-xs font-medium text-muted-foreground">
                                     {{ t("grid.formatterDatetimePattern") }}
                                   </div>
@@ -9623,13 +9623,13 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                                     :empty-text="t('grid.formatterDatetimePatternEmpty')"
                                     :loading-text="t('common.loading')"
                                     :allow-custom="true"
-                                    :trigger-class="['border border-input h-8 w-72 pl-2.5 text-xs']"
+                                    :trigger-class="['border border-input h-8 pl-2.5 text-xs']"
                                     content-class="w-72"
                                     item-class="h-auto min-h-8 px-2 py-1.5 text-xs"
                                     @update:model-value="(value: any) => (formatterDatetimePattern = value)"
                                   />
                                 </div>
-                                <div class="space-y-1.5 flex-1">
+                                <div class="min-w-0 flex-1 space-y-1.5">
                                   <div class="text-xs font-medium text-muted-foreground">
                                     {{ t("grid.formatterDatetimeTimezone") }}
                                   </div>

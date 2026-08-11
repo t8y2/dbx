@@ -19,6 +19,8 @@ const treeGroupNodeTypes = new Set<TreeNodeType>([
   "group-types",
   "group-partitions",
   "group-extensions",
+  "type-attributes",
+  "type-methods",
 ]);
 
 export function isTreeGroupNodeType(type: TreeNodeType): boolean {

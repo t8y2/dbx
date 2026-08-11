@@ -59,6 +59,7 @@ fn integration_params() -> Option<Value> {
         "port": env::var("TDENGINE_TEST_PORT").ok().and_then(|value| value.parse::<u16>().ok()).unwrap_or(6041),
         "username": env::var("TDENGINE_TEST_USERNAME").unwrap_or_else(|_| "root".into()),
         "password": env::var("TDENGINE_TEST_PASSWORD").unwrap_or_else(|_| "taosdata".into()),
+        "url_params": "timezone=Asia/Shanghai",
         "connect_timeout_secs": 20,
     }))
 }

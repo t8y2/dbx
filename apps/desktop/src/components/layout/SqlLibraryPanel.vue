@@ -17,6 +17,7 @@ import { useQueryStore } from "@/stores/queryStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { focusSidebarRenameInput } from "@/lib/sidebar/sidebarRenameFocus";
 import { savedSqlFolderBranchFileCount } from "@/lib/savedSql/savedSqlFolderCounts";
+import { collectSavedSqlDirectoryImportFiles } from "@/lib/savedSql/savedSqlDirectoryImport";
 import { ensureSqlExtension, stripSqlExtension } from "@/lib/savedSql/savedSqlFileName";
 import { savedSqlExecutionTargetFromTab, type SavedSqlOpenTargetMode } from "@/lib/savedSql/savedSqlExecutionTarget";
 import type { SavedSqlFile, SavedSqlFolder } from "@/types/database";
@@ -74,14 +75,6 @@ function importConnectionIdForFolder(folder?: SavedSqlFolder) {
 
 function sanitizeFileSystemSegment(name: string) {
   return name.replace(/[<>:"/\\|?*\p{Cc}]/gu, "_").trim() || "untitled";
-}
-
-function relativeImportName(baseDir: string, filePath: string) {
-  const normalizedBase = baseDir.replace(/\\/g, "/").replace(/\/+$/, "");
-  const normalizedFile = filePath.replace(/\\/g, "/");
-  const relative = normalizedFile.startsWith(`${normalizedBase}/`) ? normalizedFile.slice(normalizedBase.length + 1) : normalizedFile.split("/").pop() || "import.sql";
-  const pretty = relative.replace(/\//g, " - ");
-  return ensureSqlExtension(pretty);
 }
 
 function uniqueImportedName(name: string, takenNames: Set<string>) {
@@ -201,10 +194,27 @@ async function exportFolderContents(folder?: SavedSqlFolder) {
   }
 }
 
-async function collectSqlFilesRecursively(dir: string): Promise<string[]> {
-  const collectPaths = (entries: Awaited<ReturnType<typeof api.listSqlFilesInFolder>>): string[] => entries.flatMap((entry) => (entry.is_dir ? collectPaths(entry.children) : [entry.path]));
+async function collectSqlFilesRecursively(dir: string) {
+  return collectSavedSqlDirectoryImportFiles(await api.listSqlFilesInFolder(dir));
+}
 
-  return collectPaths(await api.listSqlFilesInFolder(dir));
+function importedFolderCacheKey(parentFolderId: string | undefined, name: string) {
+  return JSON.stringify([parentFolderId || "", name]);
+}
+
+async function resolveImportedFolder(connectionId: string, rootFolderId: string | undefined, folderNames: string[], folderCache: Map<string, SavedSqlFolder>) {
+  let parentFolderId = rootFolderId;
+  for (const name of folderNames) {
+    const cacheKey = importedFolderCacheKey(parentFolderId, name);
+    let folder = folderCache.get(cacheKey);
+    if (!folder) {
+      folder = savedSqlStore.listChildFolders(connectionId, parentFolderId).find((candidate) => candidate.name === name);
+      if (!folder) folder = await savedSqlStore.createFolder(connectionId, name, parentFolderId);
+      folderCache.set(cacheKey, folder);
+    }
+    parentFolderId = folder.id;
+  }
+  return parentFolderId;
 }
 
 async function importDirectoryIntoLibrary(targetFolder?: SavedSqlFolder) {
@@ -229,27 +239,36 @@ async function importDirectoryIntoLibrary(targetFolder?: SavedSqlFolder) {
     });
     if (!selected || Array.isArray(selected)) return;
 
-    const sqlPaths = await collectSqlFilesRecursively(selected);
-    if (sqlPaths.length === 0) {
+    const importFiles = await collectSqlFilesRecursively(selected);
+    if (importFiles.length === 0) {
       toast(t("sqlLibrary.importNone"), 3000);
       return;
     }
 
-    const takenNames = new Set((targetFolder ? savedSqlStore.filesInFolder(targetFolder.id) : savedSqlStore.filesWithoutFolder()).map((file) => file.name));
+    const folderCache = new Map<string, SavedSqlFolder>();
+    const takenNamesByFolder = new Map<string, Set<string>>();
 
-    for (const path of sqlPaths) {
+    for (const file of importFiles) {
+      const folderId = await resolveImportedFolder(connectionId, targetFolder?.id, file.folderNames, folderCache);
+      const folderKey = folderId || "";
+      let takenNames = takenNamesByFolder.get(folderKey);
+      if (!takenNames) {
+        takenNames = new Set(savedSqlStore.listFiles(connectionId, folderId).map((savedFile) => savedFile.name));
+        takenNamesByFolder.set(folderKey, takenNames);
+      }
+      const path = file.path;
       const content = await api.readExternalSqlFile(path);
-      const displayName = uniqueImportedName(relativeImportName(selected, path), takenNames);
+      const displayName = uniqueImportedName(file.name, takenNames);
       await savedSqlStore.saveFile({
         connectionId,
-        folderId: targetFolder?.id,
+        folderId,
         name: displayName,
         database: "",
         sql: content,
       });
     }
 
-    toast(t("sqlLibrary.imported", { count: sqlPaths.length }), 2500);
+    toast(t("sqlLibrary.imported", { count: importFiles.length }), 2500);
   } catch (e: any) {
     toast(t("sqlLibrary.importFailed", { message: externalSqlFileOpenErrorMessage(e, (key, params) => t(key, params)) }), 5000);
   }

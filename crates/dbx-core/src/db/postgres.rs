@@ -32,10 +32,11 @@ use crate::query::{await_stream_with_progress_timeout, DbOperationBudget, Stream
 use crate::sql::starts_with_executable_sql_keyword;
 use crate::types::{
     ColumnInfo, CompletionAssistantCandidate, CompletionAssistantCandidateKind, CompletionAssistantMatchMode,
-    CompletionAssistantObjectKind, CompletionAssistantRequest, CompletionAssistantResponse, DatabaseInfo,
-    DatabaseStorageInfo, ExtensionInfo, ForeignKeyInfo, FunctionInfo, IndexInfo, ObjectInfo, ObjectStatistics,
-    OwnerInfo, QueryMessage, QueryResult, RuleInfo, SchemaInfo, SequenceInfo, SpatialColumnBuilder, TableInfo,
-    TriggerInfo,
+    CompletionAssistantObjectKind, CompletionAssistantRequest, CompletionAssistantResponse, CustomTypeDdl,
+    CustomTypeDetails, CustomTypeDomainConstraint, CustomTypeKind, CustomTypeMember, CustomTypeProperties,
+    DatabaseInfo, DatabaseStorageInfo, ExtensionInfo, ForeignKeyInfo, FunctionInfo, IndexInfo, ObjectInfo,
+    ObjectStatistics, OwnerInfo, QueryMessage, QueryResult, RuleInfo, SchemaInfo, SequenceInfo, SpatialColumnBuilder,
+    TableInfo, TriggerInfo,
 };
 
 pub(crate) const GAUSSDB_COMPATIBILITY_SQL: &str =
@@ -2990,17 +2991,82 @@ fn list_object_routines_sql(include_timestamps: bool, has_proc_prokind: bool, ha
      WHERE n.nspname = $1 AND NOT p.proisagg AND NOT p.proiswindow"
 }
 
+/// SQL for listing user-defined types in one schema.
+///
+/// Only explicitly created types are returned: base types (b), standalone
+/// composite types (c), domains (d), enums (e), ranges (r) and multiranges (m).
+/// Relation auto-generated row types (table/view/materialized view/foreign
+/// table/partitioned table) are excluded via `typrelid = 0 OR relkind = 'c'`,
+/// and array companion types are excluded via `typelem = 0`. The type branch
+/// has no usable timestamp/stat columns, so created_at/updated_at are always
+/// NULL. Column order must match the relation and routine branches.
+fn list_object_custom_types_sql() -> &'static str {
+    "SELECT t.typname AS object_name, \
+       'TYPE' AS object_type, \
+       d.description AS object_comment, \
+       NULL::text AS created_at, \
+       NULL::text AS updated_at, \
+       NULL::text AS parent_schema, \
+       NULL::text AS parent_name, \
+       (t.typtype::text || ':' || CASE \
+         WHEN t.typtype = 'c' THEN CASE WHEN EXISTS ( \
+           SELECT 1 FROM pg_catalog.pg_attribute a \
+           WHERE a.attrelid = t.typrelid AND a.attnum > 0 AND NOT a.attisdropped \
+         ) THEN '1' ELSE '0' END \
+         WHEN t.typtype = 'e' THEN CASE WHEN EXISTS ( \
+           SELECT 1 FROM pg_catalog.pg_enum e WHERE e.enumtypid = t.oid \
+         ) THEN '1' ELSE '0' END \
+         ELSE '0' \
+       END) AS signature, \
+       5 AS sort_order \
+     FROM pg_catalog.pg_type t \
+     JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace \
+     LEFT JOIN pg_catalog.pg_class c ON c.oid = t.typrelid \
+     LEFT JOIN pg_catalog.pg_description d \
+       ON d.objoid = t.oid \
+      AND d.classoid = 'pg_catalog.pg_type'::regclass \
+      AND d.objsubid = 0 \
+     WHERE n.nspname = $1 \
+       AND t.typtype IN ('b', 'c', 'd', 'e', 'r', 'm') \
+       AND t.typisdefined \
+       AND t.typelem = 0 \
+       AND (t.typrelid = 0 OR c.relkind = 'c') \
+       AND n.nspname <> 'pg_catalog' \
+       AND n.nspname <> 'information_schema' \
+       AND n.nspname NOT LIKE 'pg_toast%' \
+       AND n.nspname NOT LIKE 'pg_temp%'"
+}
+
+fn is_postgres_system_schema(schema: &str) -> bool {
+    schema == "pg_catalog"
+        || schema == "information_schema"
+        || schema.starts_with("pg_toast")
+        || schema.starts_with("pg_temp")
+}
+
 fn list_objects_sql(
     include_timestamps: bool,
     has_proc_prokind: bool,
     has_proc_prosp: bool,
     has_function_identity_arguments: bool,
+    include_relations: bool,
+    include_routines: bool,
+    include_custom_types: bool,
 ) -> String {
-    let sql = format!(
-        "{} UNION ALL {} ORDER BY sort_order, object_name",
-        list_object_relations_sql(include_timestamps),
-        list_object_routines_sql(include_timestamps, has_proc_prokind, has_proc_prosp)
-    );
+    let mut parts: Vec<String> = Vec::new();
+    if include_relations {
+        parts.push(list_object_relations_sql(include_timestamps).to_string());
+    }
+    if include_routines {
+        parts.push(list_object_routines_sql(include_timestamps, has_proc_prokind, has_proc_prosp).to_string());
+    }
+    if include_custom_types {
+        parts.push(list_object_custom_types_sql().to_string());
+    }
+    let mut sql = parts.join(" UNION ALL ");
+    if !parts.is_empty() {
+        sql = format!("{sql} ORDER BY sort_order, object_name");
+    }
     if has_function_identity_arguments {
         sql
     } else {
@@ -3066,18 +3132,52 @@ async fn list_objects_rows(
     has_proc_prokind: bool,
     has_proc_prosp: bool,
     has_function_identity_arguments: bool,
+    include_relations: bool,
+    include_routines: bool,
+    include_custom_types: bool,
 ) -> Result<Vec<Row>, String> {
-    let sql = list_objects_sql(include_timestamps, has_proc_prokind, has_proc_prosp, has_function_identity_arguments);
+    let sql = list_objects_sql(
+        include_timestamps,
+        has_proc_prokind,
+        has_proc_prosp,
+        has_function_identity_arguments,
+        include_relations,
+        include_routines,
+        include_custom_types,
+    );
+    if sql.is_empty() {
+        // No branch was selected (e.g. an object_types filter the catalog
+        // cannot serve); skip the round-trip instead of executing empty SQL.
+        return Ok(Vec::new());
+    }
     postgres_query_cached(client, &sql, &[&schema]).await.map_err(|e| e.to_string())
 }
 
-pub async fn list_objects(pool: &Pool, schema: &str) -> Result<Vec<ObjectInfo>, String> {
+pub async fn list_objects(
+    pool: &Pool,
+    schema: &str,
+    include_relations: bool,
+    include_routines: bool,
+    include_custom_types: bool,
+) -> Result<Vec<ObjectInfo>, String> {
+    // System schemas may be visible in the schema tree, but their catalog
+    // types are implementation details and are never custom types.
+    let include_custom_types = include_custom_types && !is_postgres_system_schema(schema);
     let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
-    let has_proc_prokind = postgres_proc_has_prokind(&client).await?;
-    // Some GaussDB-compatible catalogs expose prosp alongside, or instead of,
-    // PostgreSQL 11's prokind. Treat prosp as an extra procedure signal.
-    let has_proc_prosp = postgres_proc_has_prosp(&client).await?;
-    let has_function_identity_arguments = postgres_has_function_identity_arguments(&client).await?;
+    // Routine catalog probes are only needed when the routine branch runs.
+    // Skipping them for relation/type-only requests avoids three extra
+    // pg_proc/pg_attribute round-trips and keeps compatible catalogs that lack
+    // prokind/prosp from breaking a plain type listing.
+    let (has_proc_prokind, has_proc_prosp, has_function_identity_arguments) = if include_routines {
+        let has_proc_prokind = postgres_proc_has_prokind(&client).await?;
+        // Some GaussDB-compatible catalogs expose prosp alongside, or instead of,
+        // PostgreSQL 11's prokind. Treat prosp as an extra procedure signal.
+        let has_proc_prosp = postgres_proc_has_prosp(&client).await?;
+        let has_function_identity_arguments = postgres_has_function_identity_arguments(&client).await?;
+        (has_proc_prokind, has_proc_prosp, has_function_identity_arguments)
+    } else {
+        (false, false, false)
+    };
     let rows = match list_objects_rows(
         &client,
         schema,
@@ -3085,6 +3185,9 @@ pub async fn list_objects(pool: &Pool, schema: &str) -> Result<Vec<ObjectInfo>, 
         has_proc_prokind,
         has_proc_prosp,
         has_function_identity_arguments,
+        include_relations,
+        include_routines,
+        include_custom_types,
     )
     .await
     {
@@ -3098,6 +3201,9 @@ pub async fn list_objects(pool: &Pool, schema: &str) -> Result<Vec<ObjectInfo>, 
                 has_proc_prokind,
                 has_proc_prosp,
                 has_function_identity_arguments,
+                include_relations,
+                include_routines,
+                include_custom_types,
             )
             .await
             {
@@ -3111,21 +3217,686 @@ pub async fn list_objects(pool: &Pool, schema: &str) -> Result<Vec<ObjectInfo>, 
 
     Ok(rows
         .iter()
-        .map(|row| ObjectInfo {
-            name: pg_row_try_string(row, 0),
-            object_type: pg_row_try_string(row, 1),
-            schema: Some(schema.to_string()),
-            valid: None,
-            comment: row.try_get::<_, Option<String>>(2).ok().flatten().filter(|s| !s.is_empty()),
-            created_at: row.try_get::<_, Option<String>>(3).ok().flatten().filter(|s| !s.is_empty()),
-            updated_at: row.try_get::<_, Option<String>>(4).ok().flatten().filter(|s| !s.is_empty()),
-            parent_schema: row.try_get::<_, Option<String>>(5).ok().flatten().filter(|s| !s.is_empty()),
-            parent_name: row.try_get::<_, Option<String>>(6).ok().flatten().filter(|s| !s.is_empty()),
-            signature: row.try_get::<_, Option<String>>(7).ok().flatten(),
-            trigger: None,
-            xugu_type_members_expandable: None,
+        .map(|row| {
+            let object_type = pg_row_try_string(row, 1);
+            let raw_signature = row.try_get::<_, Option<String>>(7).ok().flatten();
+            let (signature, custom_type_kind, has_members) = if object_type == "TYPE" {
+                let (kind, has_members) = custom_type_list_metadata(raw_signature.as_deref());
+                (None, kind, has_members)
+            } else {
+                (raw_signature, None, None)
+            };
+            ObjectInfo {
+                name: pg_row_try_string(row, 0),
+                object_type,
+                schema: Some(schema.to_string()),
+                valid: None,
+                signature,
+                custom_type_kind,
+                has_members,
+                comment: row.try_get::<_, Option<String>>(2).ok().flatten().filter(|s| !s.is_empty()),
+                created_at: row.try_get::<_, Option<String>>(3).ok().flatten().filter(|s| !s.is_empty()),
+                updated_at: row.try_get::<_, Option<String>>(4).ok().flatten().filter(|s| !s.is_empty()),
+                parent_schema: row.try_get::<_, Option<String>>(5).ok().flatten().filter(|s| !s.is_empty()),
+                parent_name: row.try_get::<_, Option<String>>(6).ok().flatten().filter(|s| !s.is_empty()),
+                trigger: None,
+                xugu_type_members_expandable: None,
+            }
         })
         .collect())
+}
+
+fn custom_type_list_metadata(value: Option<&str>) -> (Option<String>, Option<bool>) {
+    let Some((kind_code, has_members)) = value.and_then(|value| value.split_once(':')) else {
+        return (None, None);
+    };
+    let kind = custom_type_kind_for(kind_code).map(|kind| kind.as_str().to_string());
+    let has_members = match has_members {
+        "1" => Some(true),
+        "0" => Some(false),
+        _ => None,
+    };
+    (kind, has_members)
+}
+
+/// General `pg_type` row for a user-defined type located by schema + name.
+///
+/// The query never interpolates user input: schema and name are bound as
+/// parameters. Function OIDs are joined to `pg_proc` so the DDL generator and
+/// the properties panel get human-readable names without extra round-trips.
+struct CustomTypeGeneralInfo {
+    oid: u32,
+    typtype: String,
+    typisdefined: bool,
+    typbasetype: u32,
+    typnotnull: bool,
+    typrelid: u32,
+    typelem: u32,
+    typcollation: u32,
+    typdefaultbin: Option<String>,
+    typdefault: Option<String>,
+    typlen: i16,
+    typbyval: bool,
+    typalign: String,
+    typstorage: String,
+    typtypmod: i32,
+    input_function: Option<String>,
+    output_function: Option<String>,
+    receive_function: Option<String>,
+    send_function: Option<String>,
+    analyze_function: Option<String>,
+    comment: Option<String>,
+    relkind: Option<String>,
+    collation: Option<String>,
+}
+
+fn custom_type_general_info_sql() -> &'static str {
+    "SELECT t.oid, t.typtype::text, t.typisdefined, \
+       t.typbasetype, t.typnotnull, t.typrelid, t.typelem, \
+       t.typcollation, t.typdefaultbin, t.typdefault, \
+       t.typlen, t.typbyval, t.typalign::text, t.typstorage::text, t.typtypmod, \
+       pi.proname AS input_fn, po.proname AS output_fn, \
+       pr.proname AS receive_fn, ps.proname AS send_fn, pa.proname AS analyze_fn, \
+       d.description, \
+       CASE WHEN t.typrelid != 0 THEN \
+         (SELECT c.relkind::text FROM pg_catalog.pg_class c WHERE c.oid = t.typrelid) \
+       END AS relkind, \
+       CASE WHEN cl.oid IS NULL THEN NULL ELSE quote_ident(ncl.nspname) || '.' || quote_ident(cl.collname) END \
+     FROM pg_catalog.pg_type t \
+     JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace \
+     LEFT JOIN pg_catalog.pg_description d \
+       ON d.objoid = t.oid AND d.classoid = 'pg_catalog.pg_type'::regclass AND d.objsubid = 0 \
+     LEFT JOIN pg_catalog.pg_proc pi ON pi.oid = t.typinput \
+     LEFT JOIN pg_catalog.pg_proc po ON po.oid = t.typoutput \
+     LEFT JOIN pg_catalog.pg_proc pr ON pr.oid = t.typreceive \
+     LEFT JOIN pg_catalog.pg_proc ps ON ps.oid = t.typsend \
+     LEFT JOIN pg_catalog.pg_proc pa ON pa.oid = t.typanalyze \
+     LEFT JOIN pg_catalog.pg_collation cl ON cl.oid = t.typcollation \
+     LEFT JOIN pg_catalog.pg_namespace ncl ON ncl.oid = cl.collnamespace \
+     WHERE n.nspname = $1 AND t.typname = $2"
+}
+
+async fn custom_type_general_info(
+    client: &deadpool_postgres::Client,
+    schema: &str,
+    name: &str,
+) -> Result<CustomTypeGeneralInfo, String> {
+    let rows = postgres_query_cached(client, custom_type_general_info_sql(), &[&schema, &name])
+        .await
+        .map_err(|e| format!("failed to locate custom type {schema}.{name}: {e}"))?;
+    let row = rows.first().ok_or_else(|| format!("custom type {schema}.{name} does not exist"))?;
+    Ok(CustomTypeGeneralInfo {
+        oid: row.try_get::<_, u32>(0).unwrap_or(0),
+        typtype: pg_row_try_string(row, 1),
+        typisdefined: pg_row_try_bool(row, 2).unwrap_or(false),
+        typbasetype: row.try_get::<_, u32>(3).unwrap_or(0),
+        typnotnull: pg_row_try_bool(row, 4).unwrap_or(false),
+        typrelid: row.try_get::<_, u32>(5).unwrap_or(0),
+        typelem: row.try_get::<_, u32>(6).unwrap_or(0),
+        typcollation: row.try_get::<_, u32>(7).unwrap_or(0),
+        typdefaultbin: row.try_get::<_, Option<String>>(8).ok().flatten(),
+        typdefault: row.try_get::<_, Option<String>>(9).ok().flatten(),
+        typlen: row.try_get::<_, i16>(10).unwrap_or(-1),
+        typbyval: pg_row_try_bool(row, 11).unwrap_or(false),
+        typalign: pg_row_try_string(row, 12),
+        typstorage: pg_row_try_string(row, 13),
+        typtypmod: row.try_get::<_, i32>(14).unwrap_or(-1),
+        input_function: row.try_get::<_, Option<String>>(15).ok().flatten(),
+        output_function: row.try_get::<_, Option<String>>(16).ok().flatten(),
+        receive_function: row.try_get::<_, Option<String>>(17).ok().flatten(),
+        send_function: row.try_get::<_, Option<String>>(18).ok().flatten(),
+        analyze_function: row.try_get::<_, Option<String>>(19).ok().flatten(),
+        comment: row.try_get::<_, Option<String>>(20).ok().flatten(),
+        relkind: row.try_get::<_, Option<String>>(21).ok().flatten(),
+        collation: row.try_get::<_, Option<String>>(22).ok().flatten(),
+    })
+}
+
+async fn custom_type_rendered_domain_default(
+    client: &deadpool_postgres::Client,
+    oid: u32,
+) -> Result<Option<String>, String> {
+    let rows = postgres_query_cached(
+        client,
+        "SELECT pg_catalog.pg_get_expr(t.typdefaultbin, 0) \
+         FROM pg_catalog.pg_type t WHERE t.oid = $1",
+        &[&oid],
+    )
+    .await
+    .map_err(|error| format!("failed to render domain default: {error}"))?;
+    Ok(rows
+        .first()
+        .and_then(|row| row.try_get::<_, Option<String>>(0).ok().flatten())
+        .filter(|value| !value.is_empty()))
+}
+
+fn domain_default_from_render_result(result: Result<Option<String>, String>) -> (Option<String>, Option<String>) {
+    match result {
+        Ok(Some(value)) if !value.is_empty() => (Some(value), None),
+        Ok(_) => (None, Some("default value could not be rendered; the generated DDL is incomplete".to_string())),
+        Err(error) => {
+            (None, Some(format!("default value could not be rendered; the generated DDL is incomplete: {error}")))
+        }
+    }
+}
+
+fn custom_type_kind_for(typtype: &str) -> Option<CustomTypeKind> {
+    match typtype {
+        "b" => Some(CustomTypeKind::Base),
+        "c" => Some(CustomTypeKind::Composite),
+        "d" => Some(CustomTypeKind::Domain),
+        "e" => Some(CustomTypeKind::Enum),
+        "r" => Some(CustomTypeKind::Range),
+        "m" => Some(CustomTypeKind::Multirange),
+        _ => None,
+    }
+}
+
+async fn custom_type_enum_members(
+    client: &deadpool_postgres::Client,
+    oid: u32,
+) -> Result<Vec<CustomTypeMember>, String> {
+    let rows = postgres_query_cached(
+        client,
+        "SELECT e.enumlabel, e.enumsortorder \
+         FROM pg_catalog.pg_enum e \
+         WHERE e.enumtypid = $1 \
+         ORDER BY e.enumsortorder",
+        &[&oid],
+    )
+    .await
+    .map_err(|e| format!("failed to read enum values: {e}"))?;
+    Ok(rows
+        .iter()
+        .enumerate()
+        .map(|(index, row)| CustomTypeMember {
+            name: String::new(),
+            data_type: String::new(),
+            // enumsortorder is float4: ALTER TYPE ... ADD VALUE BEFORE/AFTER can
+            // produce fractional values (1.5). Use the position after ORDER BY
+            // instead so ordinals stay unique and stable for UI keys.
+            ordinal: index as i32 + 1,
+            nullable: None,
+            default: None,
+            comment: None,
+            enum_value: Some(pg_row_try_string(row, 0)),
+        })
+        .collect())
+}
+
+async fn custom_type_composite_members(
+    client: &deadpool_postgres::Client,
+    typrelid: u32,
+) -> Result<Vec<CustomTypeMember>, String> {
+    let data_type =
+        postgres_qualified_format_type_expression("at", "atn", "elem", "elem_n", "a.atttypid", "a.atttypmod");
+    let rows = postgres_query_cached(
+        client,
+        &format!(
+            "SELECT a.attname, {data_type} AS data_type, \
+                a.attnum, NOT a.attnotnull AS nullable, a.atthasdef, \
+                pg_get_expr(ad.adbin, ad.adrelid) AS default_expr, \
+                col_description($1, a.attnum) AS comment \
+         FROM pg_catalog.pg_attribute a \
+         JOIN pg_catalog.pg_type at ON at.oid = a.atttypid \
+         JOIN pg_catalog.pg_namespace atn ON atn.oid = at.typnamespace \
+         LEFT JOIN pg_catalog.pg_type elem ON elem.oid = at.typelem \
+         LEFT JOIN pg_catalog.pg_namespace elem_n ON elem_n.oid = elem.typnamespace \
+         LEFT JOIN pg_catalog.pg_attrdef ad \
+           ON ad.adrelid = a.attrelid AND ad.adnum = a.attnum \
+         WHERE a.attrelid = $1 AND a.attnum > 0 AND NOT a.attisdropped \
+         ORDER BY a.attnum"
+        ),
+        &[&typrelid],
+    )
+    .await
+    .map_err(|e| format!("failed to read composite fields: {e}"))?;
+    let mut members = Vec::with_capacity(rows.len());
+    for row in rows {
+        let name =
+            row.try_get::<_, String>(0).map_err(|error| format!("failed to decode composite field name: {error}"))?;
+        let data_type =
+            row.try_get::<_, String>(1).map_err(|error| format!("failed to decode composite field type: {error}"))?;
+        let ordinal =
+            row.try_get::<_, i16>(2).map_err(|error| format!("failed to decode composite field ordinal: {error}"))?;
+        if name.is_empty() || data_type.is_empty() {
+            return Err("composite field name or type is empty".to_string());
+        }
+        let has_default = pg_row_try_bool(&row, 4).unwrap_or(false);
+        members.push(CustomTypeMember {
+            name,
+            data_type,
+            ordinal: ordinal as i32,
+            nullable: pg_row_try_bool(&row, 3),
+            default: if has_default { row.try_get::<_, Option<String>>(5).ok().flatten() } else { None },
+            comment: row.try_get::<_, Option<String>>(6).ok().flatten(),
+            enum_value: None,
+        });
+    }
+    Ok(members)
+}
+
+/// Catalog-qualified type rendering for generated DDL. `format_type` omits a
+/// user type's schema when it is on the current search path, so use it only
+/// for pg_catalog types where it also preserves typmods. User-defined types
+/// and their array companions retain an explicit, safely quoted schema.
+fn postgres_qualified_format_type_expression(
+    type_alias: &str,
+    namespace_alias: &str,
+    element_alias: &str,
+    element_namespace_alias: &str,
+    oid_expression: &str,
+    typmod_expression: &str,
+) -> String {
+    format!(
+        "CASE \
+           WHEN {type_alias}.typelem <> 0 AND {element_namespace_alias}.nspname <> 'pg_catalog' \
+             THEN quote_ident({element_namespace_alias}.nspname) || '.' || quote_ident({element_alias}.typname) || '[]' \
+           WHEN {namespace_alias}.nspname <> 'pg_catalog' \
+             THEN quote_ident({namespace_alias}.nspname) || '.' || quote_ident({type_alias}.typname) \
+           ELSE format_type({oid_expression}, {typmod_expression}) \
+         END"
+    )
+}
+
+/// Domain-only attributes. Runs a category query that some compatible
+/// catalogs (older openGauss/GaussDB) may reject; on failure the caller
+/// degrades to missing attributes with a warning instead of failing the whole
+/// details request.
+async fn custom_type_domain_attributes(
+    client: &deadpool_postgres::Client,
+    info: &CustomTypeGeneralInfo,
+    properties: &mut CustomTypeProperties,
+) -> Vec<String> {
+    let mut warnings = Vec::new();
+    let base_type_expression =
+        postgres_qualified_format_type_expression("t", "n", "elem", "elem_n", "t.oid", "$2::int4");
+    let base_type = postgres_query_cached(
+        client,
+        &format!(
+            "SELECT {base_type_expression} \
+             FROM pg_catalog.pg_type t \
+             JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace \
+             LEFT JOIN pg_catalog.pg_type elem ON elem.oid = t.typelem \
+             LEFT JOIN pg_catalog.pg_namespace elem_n ON elem_n.oid = elem.typnamespace \
+             WHERE t.oid = $1"
+        ),
+        &[&info.typbasetype, &info.typtypmod],
+    )
+    .await
+    .ok()
+    .and_then(|rows| rows.first().map(|row| pg_row_try_string(row, 0)));
+    if let Some(base) = base_type.filter(|value| !value.is_empty()) {
+        properties.base_type = Some(base);
+    }
+    properties.not_null = Some(info.typnotnull);
+    properties.default = info.typdefault.clone().filter(|value| !value.is_empty());
+    if properties.default.is_none() && info.typdefaultbin.as_deref().is_some_and(|value| !value.is_empty()) {
+        let (default, warning) =
+            domain_default_from_render_result(custom_type_rendered_domain_default(client, info.oid).await);
+        properties.default = default;
+        if let Some(warning) = warning {
+            warnings.push(warning);
+        }
+    }
+    if info.typcollation != 0 {
+        properties.collation = info.collation.clone();
+    }
+    match postgres_query_cached(
+        client,
+        "SELECT c.conname, pg_get_constraintdef(c.oid, true) AS definition \
+         FROM pg_catalog.pg_constraint c \
+         WHERE c.contypid = $1 \
+         ORDER BY c.conname",
+        &[&info.oid],
+    )
+    .await
+    {
+        Ok(rows) => {
+            properties.domain_constraints.clear();
+            for row in rows {
+                let name = match row.try_get::<_, String>(0) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        warnings.push(format!("domain constraints could not be decoded (name): {error}"));
+                        continue;
+                    }
+                };
+                let definition = match row.try_get::<_, String>(1) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        warnings.push(format!("domain constraints could not be decoded ({name}): {error}"));
+                        continue;
+                    }
+                };
+                if !definition.is_empty() {
+                    properties.domain_constraints.push(CustomTypeDomainConstraint { name, definition });
+                }
+            }
+        }
+        Err(error) => {
+            warnings.push(format!("domain constraints could not be read: {error}"));
+        }
+    }
+    warnings
+}
+
+/// Range/multirange attributes. Like the domain branch this is a category
+/// extension: failures degrade to missing attributes with a warning. The
+/// multirange companion name (PG 13+ `rngmultitypid`) is queried separately
+/// because openGauss/GaussDB kernels predate that column.
+async fn custom_type_range_attributes(
+    client: &deadpool_postgres::Client,
+    oid: u32,
+    is_multirange: bool,
+    properties: &mut CustomTypeProperties,
+) -> Vec<String> {
+    // pg_range.rngtypid always stores the RANGE oid. A multirange view must
+    // first resolve its owning range through rngmultitypid.
+    let range_oid_clause = if is_multirange { "WHERE r.rngmultitypid = $1" } else { "WHERE r.rngtypid = $1" };
+    let subtype =
+        postgres_qualified_format_type_expression("st", "stn", "elem", "elem_n", "r.rngsubtype", "NULL::integer");
+    let rows = match postgres_query_cached(
+        client,
+        &format!(
+            "SELECT {subtype} AS subtype, \
+                CASE WHEN pcan.oid IS NULL THEN NULL ELSE quote_ident(ncan.nspname) || '.' || quote_ident(pcan.proname) END AS canonical_fn, \
+                CASE WHEN pdiff.oid IS NULL THEN NULL ELSE quote_ident(ndiff.nspname) || '.' || quote_ident(pdiff.proname) END AS subdiff_fn, \
+                CASE WHEN opc.oid IS NULL THEN NULL ELSE quote_ident(nopc.nspname) || '.' || quote_ident(opc.opcname) END AS subtype_opclass \
+         FROM pg_catalog.pg_range r \
+         JOIN pg_catalog.pg_type st ON st.oid = r.rngsubtype \
+         JOIN pg_catalog.pg_namespace stn ON stn.oid = st.typnamespace \
+         LEFT JOIN pg_catalog.pg_type elem ON elem.oid = st.typelem \
+         LEFT JOIN pg_catalog.pg_namespace elem_n ON elem_n.oid = elem.typnamespace \
+         LEFT JOIN pg_catalog.pg_proc pcan ON pcan.oid = r.rngcanonical \
+         LEFT JOIN pg_catalog.pg_proc pdiff ON pdiff.oid = r.rngsubdiff \
+         LEFT JOIN pg_catalog.pg_opclass opc ON opc.oid = r.rngsubopc \
+         LEFT JOIN pg_catalog.pg_namespace ncan ON ncan.oid = pcan.pronamespace \
+         LEFT JOIN pg_catalog.pg_namespace ndiff ON ndiff.oid = pdiff.pronamespace \
+         LEFT JOIN pg_catalog.pg_namespace nopc ON nopc.oid = opc.opcnamespace \
+         {range_oid_clause}"
+        ),
+        &[&oid],
+    )
+    .await
+    {
+        Ok(rows) => rows,
+        Err(error) => return vec![format!("range attributes could not be read: {error}")],
+    };
+    let mut warnings = Vec::new();
+    if let Some(row) = rows.first() {
+        match row.try_get::<_, Option<String>>(0) {
+            Ok(value) => properties.range_subtype = value.filter(|value| !value.is_empty()),
+            Err(error) => warnings.push(format!("range subtype could not be read: {error}")),
+        }
+        match row.try_get::<_, Option<String>>(1) {
+            Ok(value) => properties.range_canonical_function = value.filter(|value| !value.is_empty()),
+            Err(error) => warnings.push(format!("range canonical function could not be read: {error}")),
+        }
+        match row.try_get::<_, Option<String>>(2) {
+            Ok(value) => properties.range_subtype_diff_function = value.filter(|value| !value.is_empty()),
+            Err(error) => warnings.push(format!("range subtype diff function could not be read: {error}")),
+        }
+        match row.try_get::<_, Option<String>>(3) {
+            Ok(value) => properties.range_subtype_opclass = value.filter(|value| !value.is_empty()),
+            Err(error) => warnings.push(format!("range subtype opclass could not be read: {error}")),
+        }
+    } else {
+        warnings.push("range attributes returned no rows".to_string());
+    }
+    // Optional PG 13+ multirange companion; older kernels simply have no column.
+    match postgres_query_cached(
+        client,
+        "SELECT mt.typname \
+         FROM pg_catalog.pg_range r \
+         JOIN pg_catalog.pg_type mt ON mt.oid = r.rngmultitypid \
+         WHERE r.rngtypid = $1",
+        &[&oid],
+    )
+    .await
+    {
+        Ok(rows) => {
+            properties.range_multirange_name =
+                rows.first().map(|row| pg_row_try_string(row, 0)).filter(|value| !value.is_empty());
+        }
+        Err(error) => warnings.push(format!("multirange companion could not be read: {error}")),
+    }
+    warnings
+}
+
+/// Generate normalized `CREATE TYPE` text for a user-defined type.
+///
+/// `complete` is only true when the text can be executed standalone in the
+/// current schema. Multiranges (auto-generated companions) and base types
+/// (whose I/O functions cannot be reconstructed from catalogs) are always
+/// marked incomplete with visible warnings.
+fn build_custom_type_ddl(
+    schema: &str,
+    name: &str,
+    kind: CustomTypeKind,
+    info: &CustomTypeGeneralInfo,
+    members: &[CustomTypeMember],
+    properties: &CustomTypeProperties,
+    warnings: &[String],
+) -> CustomTypeDdl {
+    let qualified = format!("{}.{}", pg_quote_ident(schema), pg_quote_ident(name));
+    match kind {
+        CustomTypeKind::Enum => {
+            let values = members
+                .iter()
+                .map(|member| member.enum_value.as_deref().unwrap_or_default())
+                .map(pg_quote_literal)
+                .collect::<Vec<_>>()
+                .join(", ");
+            CustomTypeDdl {
+                sql: format!("CREATE TYPE {qualified} AS ENUM ({values});"),
+                complete: true,
+                warnings: warnings.to_vec(),
+            }
+        }
+        CustomTypeKind::Composite => {
+            let fields = members
+                .iter()
+                .map(|member| format!("{} {}", pg_quote_ident(&member.name), member.data_type))
+                .collect::<Vec<_>>()
+                .join(",\n  ");
+            let mut sql = format!("CREATE TYPE {qualified} AS (\n  {fields}\n);");
+            let comments = members
+                .iter()
+                .filter_map(|member| {
+                    member.comment.as_ref().map(|comment| {
+                        format!(
+                            "COMMENT ON COLUMN {}.{} IS {};",
+                            qualified,
+                            pg_quote_ident(&member.name),
+                            pg_quote_literal(comment)
+                        )
+                    })
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            if !comments.is_empty() {
+                sql = format!("{sql}\n{comments}");
+            }
+            CustomTypeDdl { sql, complete: true, warnings: warnings.to_vec() }
+        }
+        CustomTypeKind::Domain => {
+            let mut warnings = warnings.to_vec();
+            // A domain without a resolvable base type or constraints cannot be
+            // rebuilt faithfully; mark it incomplete so the UI never presents
+            // the truncated text as executable source.
+            let mut complete = true;
+            let base = match properties.base_type.as_deref().filter(|v| !v.is_empty()) {
+                Some(base) => base.to_string(),
+                None => {
+                    complete = false;
+                    warnings.push("base type could not be resolved; the generated DDL is incomplete".to_string());
+                    "unknown".to_string()
+                }
+            };
+            let mut parts = vec![format!("CREATE DOMAIN {qualified} AS {base}")];
+            if let Some(collation) = properties.collation.as_deref().filter(|v| !v.is_empty()) {
+                parts.push(format!("COLLATE {}", pg_quote_catalog_identifier(collation)));
+            }
+            if let Some(default) = properties.default.as_deref().filter(|v| !v.is_empty()) {
+                parts.push(format!("DEFAULT {default}"));
+            }
+            if properties.not_null == Some(true) {
+                parts.push("NOT NULL".to_string());
+            }
+            let incomplete_warning = warnings.iter().any(|warning| {
+                warning.contains("domain constraints") || warning.contains("default value could not be rendered")
+            });
+            if incomplete_warning {
+                complete = false;
+            }
+            for constraint in &properties.domain_constraints {
+                let body = constraint.definition.trim().trim_start_matches("CHECK").trim();
+                let constraint_name =
+                    if constraint.name.is_empty() { format!("{name}_check") } else { constraint.name.clone() };
+                parts.push(format!("CONSTRAINT {} CHECK {body}", pg_quote_ident(&constraint_name)));
+            }
+            CustomTypeDdl { sql: format!("{};", parts.join("\n  ")), complete, warnings }
+        }
+        CustomTypeKind::Range => {
+            let mut args = Vec::new();
+            if let Some(subtype) = properties.range_subtype.as_deref().filter(|v| !v.is_empty()) {
+                args.push(format!("subtype = {subtype}"));
+            }
+            if let Some(opclass) = properties.range_subtype_opclass.as_deref().filter(|v| !v.is_empty()) {
+                args.push(format!("subtype_opclass = {}", pg_quote_catalog_identifier(opclass)));
+            }
+            if let Some(value) = properties.range_canonical_function.as_deref().filter(|v| !v.is_empty()) {
+                args.push(format!("canonical = {}", pg_quote_catalog_identifier(value)));
+            }
+            if let Some(value) = properties.range_subtype_diff_function.as_deref().filter(|v| !v.is_empty()) {
+                args.push(format!("subtype_diff = {}", pg_quote_catalog_identifier(value)));
+            }
+            if let Some(value) = properties.range_multirange_name.as_deref().filter(|v| !v.is_empty()) {
+                args.push(format!("multirange_type_name = {}", pg_quote_catalog_identifier(value)));
+            }
+            if properties.range_subtype.as_deref().is_none_or(|value| value.is_empty()) {
+                let mut warnings = warnings.to_vec();
+                warnings.push("range attributes could not be resolved".to_string());
+                CustomTypeDdl {
+                    sql: format!("CREATE TYPE {qualified} AS RANGE (subtype = unknown);"),
+                    complete: false,
+                    warnings,
+                }
+            } else {
+                CustomTypeDdl {
+                    sql: format!("CREATE TYPE {qualified} AS RANGE (\n  {}\n);", args.join(",\n  ")),
+                    complete: true,
+                    warnings: warnings.to_vec(),
+                }
+            }
+        }
+        CustomTypeKind::Multirange => {
+            let mut all = warnings.to_vec();
+            all.push(format!(
+                "{} is the auto-generated multirange companion of a range type; it has no standalone CREATE statement",
+                qualified
+            ));
+            CustomTypeDdl { sql: String::new(), complete: false, warnings: all }
+        }
+        CustomTypeKind::Base => {
+            let mut all = warnings.to_vec();
+            all.push(format!(
+                "{} is a base type; its input/output functions ({}) cannot be rebuilt from catalogs",
+                qualified,
+                info.input_function.clone().unwrap_or_else(|| "unknown".to_string())
+            ));
+            CustomTypeDdl {
+                sql: format!("CREATE TYPE {qualified};  -- base type attributes require manual reconstruction"),
+                complete: false,
+                warnings: all,
+            }
+        }
+    }
+}
+
+/// Category-independent attribute assembly shared by all kinds.
+fn custom_type_common_properties(info: &CustomTypeGeneralInfo) -> CustomTypeProperties {
+    CustomTypeProperties {
+        input_function: info.input_function.clone(),
+        output_function: info.output_function.clone(),
+        receive_function: info.receive_function.clone(),
+        send_function: info.send_function.clone(),
+        analyze_function: info.analyze_function.clone(),
+        internallength: (info.typlen != -1 && info.typlen > 0).then_some(info.typlen as i32),
+        passed_by_value: Some(info.typbyval),
+        alignment: (!info.typalign.is_empty()).then(|| info.typalign.clone()),
+        storage: (!info.typstorage.is_empty()).then(|| info.typstorage.clone()),
+        ..Default::default()
+    }
+}
+
+/// Fetch the read-only details of a user-defined type.
+///
+/// The caller must already have routed the connection to a verified
+/// PostgreSQL-family database; this function validates that the target object
+/// is an independent user-defined type (never a relation row type, an array
+/// companion, an undefined type or a system-schema type).
+pub async fn get_custom_type_details(pool: &Pool, schema: &str, name: &str) -> Result<CustomTypeDetails, String> {
+    let schema = schema.trim();
+    let name = name.trim();
+    if schema.is_empty() || name.is_empty() {
+        return Err("schema and type name are required".to_string());
+    }
+    if is_postgres_system_schema(schema) {
+        return Err(format!("system schema {schema} is not supported for custom type details"));
+    }
+    let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
+    let info = custom_type_general_info(&client, schema, name).await?;
+    if !info.typisdefined {
+        return Err(format!("custom type {schema}.{name} is not fully defined"));
+    }
+    if info.typelem != 0 {
+        return Err(format!("custom type {schema}.{name} is an array companion type"));
+    }
+    let Some(kind) = custom_type_kind_for(&info.typtype) else {
+        return Err(format!("custom type {schema}.{name} is a pseudo type (typtype={})", info.typtype));
+    };
+    if let Some(relkind) = info.relkind.as_deref() {
+        if relkind != "c" {
+            return Err(format!(
+                "{schema}.{name} is the auto-generated row type of a relation, not an independent custom type"
+            ));
+        }
+    }
+
+    let mut members = Vec::new();
+    let mut properties = custom_type_common_properties(&info);
+    let mut warnings = Vec::new();
+    match kind {
+        CustomTypeKind::Enum => {
+            members = custom_type_enum_members(&client, info.oid).await?;
+        }
+        CustomTypeKind::Composite => {
+            members = custom_type_composite_members(&client, info.typrelid).await?;
+        }
+        CustomTypeKind::Domain => {
+            warnings.extend(custom_type_domain_attributes(&client, &info, &mut properties).await);
+        }
+        CustomTypeKind::Range => {
+            warnings.extend(custom_type_range_attributes(&client, info.oid, false, &mut properties).await);
+        }
+        CustomTypeKind::Multirange => {
+            warnings.extend(custom_type_range_attributes(&client, info.oid, true, &mut properties).await);
+        }
+        CustomTypeKind::Base => {}
+    }
+
+    let ddl = build_custom_type_ddl(schema, name, kind, &info, &members, &properties, &warnings);
+    Ok(CustomTypeDetails {
+        name: name.to_string(),
+        schema: schema.to_string(),
+        kind,
+        comment: info.comment.clone(),
+        members,
+        properties,
+        ddl: Some(ddl),
+    })
 }
 
 pub async fn list_object_statistics(pool: &Pool, schema: &str) -> Result<Vec<ObjectStatistics>, String> {
@@ -3516,6 +4287,17 @@ pub async fn get_redshift_columns(pool: &Pool, schema: &str, table: &str) -> Res
 
 pub(crate) fn pg_quote_ident(ident: &str) -> String {
     format!("\"{}\"", ident.replace('"', "\"\""))
+}
+
+fn pg_quote_catalog_identifier(ident: &str) -> String {
+    let ident = ident.trim();
+    if ident.starts_with('"') && ident.ends_with('"') && ident.contains("\".\"") {
+        return ident.to_string();
+    }
+    if let Some((schema, name)) = ident.rsplit_once('.') {
+        return format!("{}.{}", pg_quote_ident(schema), pg_quote_ident(name));
+    }
+    pg_quote_ident(ident)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -5950,6 +6732,266 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires DBX_TEST_GAUSSDB_URL pointing at a writable GaussDB database"]
+    async fn gaussdb_list_custom_types_excludes_relation_row_types_and_arrays() {
+        let url = std::env::var("DBX_TEST_GAUSSDB_URL").expect("DBX_TEST_GAUSSDB_URL");
+        let pool = connect(&url, Duration::from_secs(5)).await.expect("connect gaussdb");
+        let schema = format!("dbx_types_{}", uuid::Uuid::new_v4().simple());
+        let schema_ident = pg_quote_ident(&schema);
+        let status_type = format!("{schema_ident}.status");
+        let address_type = format!("{schema_ident}.address");
+        let orders_table = format!("{schema_ident}.orders");
+        execute_query(&pool, &format!("CREATE SCHEMA {schema_ident}")).await.expect("create schema");
+
+        let exercise = async {
+            execute_query(&pool, &format!("CREATE TYPE {status_type} AS ENUM ('draft', 'published')")).await?;
+            execute_query(&pool, &format!("CREATE TYPE {address_type} AS (city text, zip text)")).await?;
+            execute_query(&pool, &format!("COMMENT ON TYPE {status_type} IS '订单状态'")).await?;
+            execute_query(
+                &pool,
+                &format!("CREATE TABLE {orders_table} (id bigint, state {status_type}, ship_to {address_type})"),
+            )
+            .await?;
+            let custom = list_objects(&pool, &schema, false, false, true).await?;
+            let all = list_objects(&pool, &schema, true, true, true).await?;
+            Ok::<_, String>((custom, all))
+        }
+        .await;
+
+        let cleanup = execute_query(&pool, &format!("DROP SCHEMA {schema_ident} CASCADE")).await;
+        cleanup.expect("drop schema");
+        let (custom, all) = exercise.expect("exercise gaussdb custom type listing");
+
+        // GaussDB supports enum and composite user types but not domains.
+        let mut type_names: Vec<&str> = custom.iter().map(|o| o.name.as_str()).collect();
+        type_names.sort_unstable();
+        assert_eq!(type_names, vec!["address", "status"], "custom types = {custom:?}");
+        for object in &custom {
+            assert_eq!(object.object_type, "TYPE");
+            assert_eq!(object.schema.as_deref(), Some(schema.as_str()));
+        }
+        let status = custom.iter().find(|o| o.name == "status").expect("status type");
+        assert_eq!(status.comment.as_deref(), Some("订单状态"), "type comment was lost: {custom:?}");
+
+        let all_names: Vec<&str> = all.iter().map(|o| o.name.as_str()).collect();
+        assert!(all_names.contains(&"orders"), "table missing from full listing: {all:?}");
+        assert!(
+            all_names.iter().all(|name| !name.starts_with('_')),
+            "auto-generated array companions leaked into the listing: {all:?}"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DBX_TEST_POSTGRES_URL pointing at a writable PostgreSQL database"]
+    async fn postgres_list_custom_types_excludes_relation_row_types_and_arrays() {
+        let url = std::env::var("DBX_TEST_POSTGRES_URL").expect("DBX_TEST_POSTGRES_URL");
+        let pool = connect(&url, Duration::from_secs(5)).await.expect("connect postgres");
+        let schema = format!("dbx_types_{}", uuid::Uuid::new_v4().simple());
+        let schema_ident = pg_quote_ident(&schema);
+        let status_type = format!("{schema_ident}.status");
+        let email_domain = format!("{schema_ident}.email");
+        let address_type = format!("{schema_ident}.address");
+        let orders_table = format!("{schema_ident}.orders");
+        execute_query(&pool, &format!("CREATE SCHEMA {schema_ident}")).await.expect("create schema");
+
+        let exercise = async {
+            execute_query(&pool, &format!("CREATE TYPE {status_type} AS ENUM ('draft', 'published')")).await?;
+            execute_query(&pool, &format!("CREATE DOMAIN {email_domain} AS text CHECK (VALUE ~ '.+@.+')")).await?;
+            execute_query(&pool, &format!("CREATE TYPE {address_type} AS (city text, zip text)")).await?;
+            execute_query(
+                &pool,
+                &format!("CREATE TABLE {orders_table} (id bigint, state {status_type}, ship_to {address_type})"),
+            )
+            .await?;
+            let custom = list_objects(&pool, &schema, false, false, true).await?;
+            let all = list_objects(&pool, &schema, true, true, true).await?;
+            Ok::<_, String>((custom, all))
+        }
+        .await;
+
+        let cleanup = execute_query(&pool, &format!("DROP SCHEMA {schema_ident} CASCADE")).await;
+        cleanup.expect("drop schema");
+        let (custom, all) = exercise.expect("exercise custom type listing");
+
+        // The type-only request returns exactly the user-created enum, domain
+        // and composite type, sorted by name. The table's auto-generated row
+        // type (orders) and the array companions (_status, _email, _address)
+        // must stay out.
+        let mut type_names: Vec<&str> = custom.iter().map(|o| o.name.as_str()).collect();
+        type_names.sort_unstable();
+        assert_eq!(type_names, vec!["address", "email", "status"], "custom types = {custom:?}");
+        for object in &custom {
+            assert_eq!(object.object_type, "TYPE");
+            assert_eq!(object.schema.as_deref(), Some(schema.as_str()));
+        }
+
+        let all_names: Vec<&str> = all.iter().map(|o| o.name.as_str()).collect();
+        assert!(all_names.contains(&"orders"), "table missing from full listing: {all:?}");
+        assert!(
+            all_names.iter().all(|name| !name.starts_with('_')),
+            "auto-generated array companions leaked into the listing: {all:?}"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DBX_TEST_POSTGRES_URL pointing at a writable PostgreSQL database"]
+    async fn postgres_custom_type_details_reads_members_and_ddl() {
+        let url = std::env::var("DBX_TEST_POSTGRES_URL").expect("DBX_TEST_POSTGRES_URL");
+        let pool = connect(&url, Duration::from_secs(5)).await.expect("connect postgres");
+        let schema = format!("dbx_details_{}", uuid::Uuid::new_v4().simple());
+        let schema_ident = pg_quote_ident(&schema);
+        let status_type = format!("{schema_ident}.status");
+        let email_domain = format!("{schema_ident}.email");
+        let address_type = format!("{schema_ident}.address");
+        let price_range_type = format!("{schema_ident}.price_range");
+        let orders_table = format!("{schema_ident}.orders");
+        execute_query(&pool, &format!("CREATE SCHEMA {schema_ident}")).await.expect("create schema");
+
+        let exercise = async {
+            execute_query(&pool, &format!("CREATE TYPE {status_type} AS ENUM ('draft', 'published', '已归档')"))
+                .await?;
+            execute_query(&pool, &format!("CREATE DOMAIN {email_domain} AS text DEFAULT '' CHECK (VALUE <> '')"))
+                .await?;
+            execute_query(&pool, &format!("CREATE TYPE {address_type} AS (city text, zip numeric(6))")).await?;
+            execute_query(&pool, &format!("COMMENT ON TYPE {address_type} IS 'shipping address'")).await?;
+            execute_query(&pool, &format!("COMMENT ON COLUMN {address_type}.city IS 'city name'")).await?;
+            execute_query(&pool, &format!("CREATE TYPE {price_range_type} AS RANGE (subtype = numeric)")).await?;
+            execute_query(
+                &pool,
+                &format!(
+                    "CREATE TABLE {orders_table} (state {status_type}, address {address_type}, email {email_domain})"
+                ),
+            )
+            .await?;
+            let status = get_custom_type_details(&pool, &schema, "status").await?;
+            let email = get_custom_type_details(&pool, &schema, "email").await?;
+            let address = get_custom_type_details(&pool, &schema, "address").await?;
+            let price_range = get_custom_type_details(&pool, &schema, "price_range").await?;
+            let row_type_error = get_custom_type_details(&pool, &schema, "orders").await.err();
+            let array_type_error = get_custom_type_details(&pool, &schema, "_status").await.err();
+            Ok::<_, String>((status, email, address, price_range, row_type_error, array_type_error))
+        }
+        .await;
+
+        let cleanup = execute_query(&pool, &format!("DROP SCHEMA {schema_ident} CASCADE")).await;
+        cleanup.expect("drop schema");
+        let (status, email, address, price_range, row_type_error, array_type_error) =
+            exercise.expect("exercise custom type details");
+
+        assert_eq!(status.kind, CustomTypeKind::Enum);
+        let enum_values: Vec<&str> = status.members.iter().map(|m| m.enum_value.as_deref().unwrap()).collect();
+        assert_eq!(enum_values, vec!["draft", "published", "已归档"]);
+        let status_ddl = status.ddl.expect("enum ddl");
+        assert!(status_ddl.complete);
+        assert!(status_ddl.sql.contains("AS ENUM ('draft', 'published', '已归档')"), "{}", status_ddl.sql);
+
+        assert_eq!(email.kind, CustomTypeKind::Domain);
+        assert_eq!(email.properties.base_type.as_deref(), Some("text"));
+        assert!(email.properties.default.is_some(), "domain default was lost");
+        assert!(
+            email.properties.domain_constraints.iter().any(|c| c.definition.contains("VALUE")),
+            "domain constraint was lost: {:?}",
+            email.properties.domain_constraints
+        );
+        let email_ddl = email.ddl.expect("domain ddl");
+        assert!(email_ddl.complete);
+        assert!(email_ddl.sql.contains("CREATE DOMAIN"), "{}", email_ddl.sql);
+
+        assert_eq!(address.kind, CustomTypeKind::Composite);
+        assert_eq!(address.comment.as_deref(), Some("shipping address"));
+        assert_eq!(address.members.len(), 2);
+        assert_eq!(address.members[0].name, "city");
+        assert_eq!(address.members[0].data_type, "text");
+        assert_eq!(address.members[0].comment.as_deref(), Some("city name"));
+        assert_eq!(address.members[1].name, "zip");
+        // format_type normalizes numeric(6) to numeric(6,0) on real servers.
+        assert_eq!(address.members[1].data_type, "numeric(6,0)");
+        let address_ddl = address.ddl.expect("composite ddl");
+        assert!(address_ddl.complete);
+        assert!(address_ddl.sql.contains("\"city\" text"), "{}", address_ddl.sql);
+        assert!(
+            address_ddl.sql.contains(&format!("COMMENT ON COLUMN \"{schema}\".\"address\".\"city\" IS 'city name'")),
+            "{}",
+            address_ddl.sql
+        );
+
+        assert_eq!(price_range.kind, CustomTypeKind::Range);
+        assert_eq!(price_range.properties.range_subtype.as_deref(), Some("numeric"));
+        let range_ddl = price_range.ddl.expect("range ddl");
+        assert!(range_ddl.complete);
+        assert!(range_ddl.sql.contains("subtype = numeric"), "{}", range_ddl.sql);
+
+        // Relation row types and array companions must be rejected, never
+        // presented as independent composite types.
+        assert!(row_type_error.is_some(), "relation row type must be rejected");
+        assert!(array_type_error.is_some(), "array companion must be rejected");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DBX_TEST_GAUSSDB_URL pointing at a writable GaussDB database"]
+    async fn gaussdb_custom_type_details_reads_members_and_ddl() {
+        let url = std::env::var("DBX_TEST_GAUSSDB_URL").expect("DBX_TEST_GAUSSDB_URL");
+        let pool = connect(&url, Duration::from_secs(5)).await.expect("connect gaussdb");
+        let schema = format!("dbx_gdetails_{}", uuid::Uuid::new_v4().simple());
+        let schema_ident = pg_quote_ident(&schema);
+        let status_type = format!("{schema_ident}.status");
+        let address_type = format!("{schema_ident}.address");
+        let price_range_type = format!("{schema_ident}.price_range");
+        let orders_table = format!("{schema_ident}.orders");
+        execute_query(&pool, &format!("CREATE SCHEMA {schema_ident}")).await.expect("create schema");
+
+        let exercise = async {
+            execute_query(&pool, &format!("CREATE TYPE {status_type} AS ENUM ('draft', 'published')")).await?;
+            execute_query(&pool, &format!("CREATE TYPE {address_type} AS (city text, zip numeric(6))")).await?;
+            execute_query(&pool, &format!("COMMENT ON COLUMN {address_type}.city IS 'city name'")).await?;
+            execute_query(&pool, &format!("CREATE TYPE {price_range_type} AS RANGE (subtype = numeric)")).await?;
+            execute_query(&pool, &format!("CREATE TABLE {orders_table} (state {status_type}, address {address_type})"))
+                .await?;
+            let status = get_custom_type_details(&pool, &schema, "status").await?;
+            let address = get_custom_type_details(&pool, &schema, "address").await?;
+            let price_range = get_custom_type_details(&pool, &schema, "price_range").await?;
+            let row_type_error = get_custom_type_details(&pool, &schema, "orders").await.err();
+            let array_type_error = get_custom_type_details(&pool, &schema, "_status").await.err();
+            Ok::<_, String>((status, address, price_range, row_type_error, array_type_error))
+        }
+        .await;
+
+        let cleanup = execute_query(&pool, &format!("DROP SCHEMA {schema_ident} CASCADE")).await;
+        if let Err(error) = cleanup {
+            // GaussDB range types own system canonical functions, so CASCADE
+            // cleanup is subject to instance privileges; that is a server
+            // limitation, not a details-query failure.
+            eprintln!("[gaussdb][custom-type-details][cleanup] {error}");
+        }
+        let (status, address, price_range, row_type_error, array_type_error) =
+            exercise.expect("exercise gaussdb custom type details");
+
+        assert_eq!(status.kind, CustomTypeKind::Enum);
+        let enum_values: Vec<&str> = status.members.iter().map(|m| m.enum_value.as_deref().unwrap()).collect();
+        assert_eq!(enum_values, vec!["draft", "published"]);
+        let status_ddl = status.ddl.expect("enum ddl");
+        assert!(status_ddl.complete);
+        assert!(status_ddl.sql.contains("AS ENUM ('draft', 'published')"), "{}", status_ddl.sql);
+
+        assert_eq!(address.kind, CustomTypeKind::Composite);
+        assert_eq!(address.members.len(), 2);
+        assert_eq!(address.members[0].name, "city");
+        assert_eq!(address.members[0].comment.as_deref(), Some("city name"));
+        let address_ddl = address.ddl.expect("composite ddl");
+        assert!(address_ddl.complete);
+        assert!(address_ddl.sql.contains("\"city\" text"), "{}", address_ddl.sql);
+
+        assert_eq!(price_range.kind, CustomTypeKind::Range);
+        assert_eq!(price_range.properties.range_subtype.as_deref(), Some("numeric"));
+        let range_ddl = price_range.ddl.expect("range ddl");
+        assert!(range_ddl.complete);
+        assert!(range_ddl.sql.contains("subtype = numeric"), "{}", range_ddl.sql);
+
+        assert!(row_type_error.is_some(), "relation row type must be rejected");
+        assert!(array_type_error.is_some(), "array companion must be rejected");
+    }
+
+    #[tokio::test]
     #[ignore = "requires DBX_TEST_POSTGRES_URL pointing at a writable PostgreSQL 18 database"]
     async fn postgres_custom_type_fallback_refreshes_stale_cached_metadata() {
         let url = std::env::var("DBX_TEST_POSTGRES_URL").expect("DBX_TEST_POSTGRES_URL");
@@ -7081,9 +8123,346 @@ mod tests {
         assert_eq!(postgres_owner_object_type("?"), "?");
     }
 
+    fn test_custom_type_info(typtype: &str) -> CustomTypeGeneralInfo {
+        CustomTypeGeneralInfo {
+            oid: 100,
+            typtype: typtype.to_string(),
+            typisdefined: true,
+            typbasetype: 0,
+            typnotnull: false,
+            typrelid: 0,
+            typelem: 0,
+            typcollation: 0,
+            typdefaultbin: None,
+            typdefault: None,
+            typlen: -1,
+            typbyval: false,
+            typalign: "c".to_string(),
+            typstorage: "p".to_string(),
+            typtypmod: -1,
+            input_function: None,
+            output_function: None,
+            receive_function: None,
+            send_function: None,
+            analyze_function: None,
+            comment: None,
+            relkind: None,
+            collation: None,
+        }
+    }
+
+    #[test]
+    fn custom_type_ddl_enum_quotes_values_in_order() {
+        let info = test_custom_type_info("e");
+        let members = vec![
+            CustomTypeMember {
+                name: String::new(),
+                data_type: String::new(),
+                ordinal: 1,
+                nullable: None,
+                default: None,
+                comment: None,
+                enum_value: Some("draft".to_string()),
+            },
+            CustomTypeMember {
+                name: String::new(),
+                data_type: String::new(),
+                ordinal: 2,
+                nullable: None,
+                default: None,
+                comment: None,
+                enum_value: Some("已归档".to_string()),
+            },
+        ];
+        let ddl = build_custom_type_ddl(
+            "app",
+            "status",
+            CustomTypeKind::Enum,
+            &info,
+            &members,
+            &CustomTypeProperties::default(),
+            &[],
+        );
+        assert_eq!(ddl.sql, "CREATE TYPE \"app\".\"status\" AS ENUM ('draft', '已归档');");
+        assert!(ddl.complete);
+        assert!(ddl.warnings.is_empty());
+    }
+
+    #[test]
+    fn custom_type_ddl_composite_lists_fields_and_comments() {
+        let info = test_custom_type_info("c");
+        let members = vec![
+            CustomTypeMember {
+                name: "city".to_string(),
+                data_type: "text".to_string(),
+                ordinal: 1,
+                nullable: Some(true),
+                default: None,
+                comment: Some("city name".to_string()),
+                enum_value: None,
+            },
+            CustomTypeMember {
+                name: "zip".to_string(),
+                data_type: "numeric(6)".to_string(),
+                ordinal: 2,
+                nullable: Some(true),
+                default: None,
+                comment: None,
+                enum_value: None,
+            },
+        ];
+        let ddl = build_custom_type_ddl(
+            "app",
+            "address",
+            CustomTypeKind::Composite,
+            &info,
+            &members,
+            &CustomTypeProperties::default(),
+            &[],
+        );
+        assert_eq!(
+            ddl.sql,
+            "CREATE TYPE \"app\".\"address\" AS (\n  \"city\" text,\n  \"zip\" numeric(6)\n);\nCOMMENT ON COLUMN \"app\".\"address\".\"city\" IS 'city name';"
+        );
+        assert!(ddl.complete);
+    }
+
+    #[test]
+    fn custom_type_ddl_domain_combines_base_default_notnull_and_constraints() {
+        let info = test_custom_type_info("d");
+        let properties = CustomTypeProperties {
+            base_type: Some("text".to_string()),
+            collation: Some("C".to_string()),
+            default: Some("''::text".to_string()),
+            not_null: Some(true),
+            domain_constraints: vec![CustomTypeDomainConstraint {
+                name: "email_valid".to_string(),
+                definition: "CHECK ((VALUE <> ''::text))".to_string(),
+            }],
+            ..Default::default()
+        };
+        let ddl = build_custom_type_ddl("app", "email", CustomTypeKind::Domain, &info, &[], &properties, &[]);
+        assert_eq!(
+            ddl.sql,
+            "CREATE DOMAIN \"app\".\"email\" AS text\n  COLLATE \"C\"\n  DEFAULT ''::text\n  NOT NULL\n  CONSTRAINT \"email_valid\" CHECK ((VALUE <> ''::text));"
+        );
+        assert!(ddl.complete);
+    }
+
+    #[test]
+    fn custom_type_ddl_domain_is_incomplete_when_attributes_failed() {
+        let info = test_custom_type_info("d");
+        let properties = CustomTypeProperties { base_type: Some("text".to_string()), ..Default::default() };
+        let ddl = build_custom_type_ddl(
+            "app",
+            "email",
+            CustomTypeKind::Domain,
+            &info,
+            &[],
+            &properties,
+            &["domain constraints could not be read: x".to_string()],
+        );
+        assert!(!ddl.complete, "DDL must be marked incomplete when constraints failed: {ddl:?}");
+
+        let constraint_decode_failed = build_custom_type_ddl(
+            "app",
+            "email",
+            CustomTypeKind::Domain,
+            &info,
+            &[],
+            &properties,
+            &["domain constraints could not be decoded: x".to_string()],
+        );
+        assert!(
+            !constraint_decode_failed.complete,
+            "DDL must be marked incomplete when constraints cannot be decoded: {constraint_decode_failed:?}"
+        );
+
+        let default_failed = build_custom_type_ddl(
+            "app",
+            "email",
+            CustomTypeKind::Domain,
+            &info,
+            &[],
+            &properties,
+            &["default value could not be rendered; the generated DDL is incomplete".to_string()],
+        );
+        assert!(!default_failed.complete, "DDL must be marked incomplete when the default failed: {default_failed:?}");
+        assert!(default_failed.warnings.iter().any(|w| w.contains("default value")));
+    }
+
+    #[test]
+    fn custom_type_qualified_format_type_expression_qualifies_user_types() {
+        let expression = postgres_qualified_format_type_expression("t", "n", "elem", "elem_n", "t.oid", "t.typtypmod");
+        assert!(expression.contains("quote_ident(n.nspname) || '.' || quote_ident(t.typname)"));
+        assert!(expression.contains("quote_ident(elem_n.nspname) || '.' || quote_ident(elem.typname) || '[]'"));
+        assert!(expression.contains("format_type(t.oid, t.typtypmod)"));
+    }
+
+    #[test]
+    fn custom_type_ddl_range_uses_subtype_and_canonical() {
+        let info = test_custom_type_info("r");
+        let properties = CustomTypeProperties {
+            range_subtype: Some("numeric".to_string()),
+            range_canonical_function: Some("numeric_range_canonical".to_string()),
+            range_subtype_diff_function: Some("numeric_range_subdiff".to_string()),
+            ..Default::default()
+        };
+        let ddl = build_custom_type_ddl("app", "price_range", CustomTypeKind::Range, &info, &[], &properties, &[]);
+        assert_eq!(
+            ddl.sql,
+            "CREATE TYPE \"app\".\"price_range\" AS RANGE (\n  subtype = numeric,\n  canonical = \"numeric_range_canonical\",\n  subtype_diff = \"numeric_range_subdiff\"\n);"
+        );
+        assert!(ddl.complete);
+    }
+
+    #[test]
+    fn custom_type_ddl_range_without_subtype_is_incomplete() {
+        let info = test_custom_type_info("r");
+        let properties = CustomTypeProperties {
+            range_multirange_name: Some("price_multirange".to_string()),
+            range_canonical_function: Some("range_canonical".to_string()),
+            ..Default::default()
+        };
+        let ddl = build_custom_type_ddl("app", "price_range", CustomTypeKind::Range, &info, &[], &properties, &[]);
+
+        assert!(!ddl.complete, "a range without subtype cannot be reconstructed: {ddl:?}");
+        assert_eq!(ddl.sql, "CREATE TYPE \"app\".\"price_range\" AS RANGE (subtype = unknown);");
+        assert!(ddl.warnings.iter().any(|warning| warning.contains("range attributes")));
+    }
+
+    #[test]
+    fn custom_type_ddl_range_keeps_catalog_qualified_names() {
+        let info = test_custom_type_info("r");
+        let properties = CustomTypeProperties {
+            range_subtype: Some("numeric".to_string()),
+            range_canonical_function: Some("\"extensions\".\"range_canonical\"".to_string()),
+            range_subtype_diff_function: Some("\"extensions\".\"range_subdiff\"".to_string()),
+            range_subtype_opclass: Some("\"extensions\".\"numeric_ops\"".to_string()),
+            ..Default::default()
+        };
+        let ddl = build_custom_type_ddl("app", "price_range", CustomTypeKind::Range, &info, &[], &properties, &[]);
+
+        assert!(ddl.complete, "{ddl:?}");
+        assert!(ddl.sql.contains("subtype_opclass = \"extensions\".\"numeric_ops\""));
+        assert!(ddl.sql.contains("canonical = \"extensions\".\"range_canonical\""));
+        assert!(ddl.sql.contains("subtype_diff = \"extensions\".\"range_subdiff\""));
+    }
+
+    #[test]
+    fn custom_type_ddl_range_emits_custom_multirange_name() {
+        let info = test_custom_type_info("r");
+        let properties = CustomTypeProperties {
+            range_subtype: Some("numeric".to_string()),
+            range_multirange_name: Some("price_multirange".to_string()),
+            ..Default::default()
+        };
+        let ddl = build_custom_type_ddl("app", "price_range", CustomTypeKind::Range, &info, &[], &properties, &[]);
+        assert!(ddl.complete, "{ddl:?}");
+        assert!(
+            ddl.sql.contains("multirange_type_name = \"price_multirange\""),
+            "custom multirange name must be emitted: {}",
+            ddl.sql
+        );
+    }
+
+    #[test]
+    fn custom_type_ddl_multirange_and_base_are_marked_incomplete() {
+        let multirange = build_custom_type_ddl(
+            "app",
+            "_price_range",
+            CustomTypeKind::Multirange,
+            &test_custom_type_info("m"),
+            &[],
+            &CustomTypeProperties::default(),
+            &[],
+        );
+        assert!(!multirange.complete);
+        assert!(multirange.sql.is_empty());
+        assert!(multirange.warnings.iter().any(|w| w.contains("multirange companion")));
+
+        let base = build_custom_type_ddl(
+            "app",
+            "point2d",
+            CustomTypeKind::Base,
+            &test_custom_type_info("b"),
+            &[],
+            &CustomTypeProperties::default(),
+            &[],
+        );
+        assert!(!base.complete);
+        assert!(base.warnings.iter().any(|w| w.contains("base type")));
+    }
+
+    #[test]
+    fn custom_type_ddl_escapes_identifiers_and_literals() {
+        let info = test_custom_type_info("e");
+        let members = vec![CustomTypeMember {
+            name: String::new(),
+            data_type: String::new(),
+            ordinal: 1,
+            nullable: None,
+            default: None,
+            comment: None,
+            enum_value: Some("it's \"quoted\"".to_string()),
+        }];
+        let ddl = build_custom_type_ddl(
+            "we\"ird",
+            "ty\"pe",
+            CustomTypeKind::Enum,
+            &info,
+            &members,
+            &CustomTypeProperties::default(),
+            &[],
+        );
+        assert_eq!(ddl.sql, "CREATE TYPE \"we\"\"ird\".\"ty\"\"pe\" AS ENUM ('it''s \"quoted\"');");
+    }
+
+    #[test]
+    fn custom_type_kind_for_maps_catalog_codes() {
+        assert_eq!(custom_type_kind_for("b"), Some(CustomTypeKind::Base));
+        assert_eq!(custom_type_kind_for("c"), Some(CustomTypeKind::Composite));
+        assert_eq!(custom_type_kind_for("d"), Some(CustomTypeKind::Domain));
+        assert_eq!(custom_type_kind_for("e"), Some(CustomTypeKind::Enum));
+        assert_eq!(custom_type_kind_for("r"), Some(CustomTypeKind::Range));
+        assert_eq!(custom_type_kind_for("m"), Some(CustomTypeKind::Multirange));
+        assert_eq!(custom_type_kind_for("p"), None);
+    }
+
+    #[test]
+    fn custom_type_list_metadata_decodes_kind_and_member_capability() {
+        assert_eq!(custom_type_list_metadata(Some("c:1")), (Some("composite".to_string()), Some(true)));
+        assert_eq!(custom_type_list_metadata(Some("d:0")), (Some("domain".to_string()), Some(false)));
+        assert_eq!(custom_type_list_metadata(None), (None, None));
+        assert_eq!(custom_type_list_metadata(Some("invalid")), (None, None));
+    }
+
+    #[test]
+    fn custom_type_general_info_sql_looks_up_by_schema_and_name() {
+        let sql = custom_type_general_info_sql();
+        assert!(sql.contains("pg_catalog.pg_type"));
+        assert!(sql.contains("pg_catalog.pg_namespace"));
+        assert!(sql.contains("pg_catalog.pg_description"));
+        assert!(sql.contains("pg_catalog.pg_proc"));
+        assert!(sql.contains("pg_catalog.pg_collation"));
+        assert!(sql.contains("pg_catalog.pg_namespace ncl"));
+        assert!(sql.contains("d.classoid = 'pg_catalog.pg_type'::regclass"));
+        assert!(sql.contains("n.nspname = $1 AND t.typname = $2"));
+        assert!(!sql.contains("pg_get_expr"));
+    }
+
+    #[test]
+    fn custom_type_domain_default_render_failure_is_degradable() {
+        let (default, warning) = domain_default_from_render_result(Err(
+            "function pg_get_expr(pg_node_tree, integer) does not exist".to_string(),
+        ));
+        assert!(default.is_none());
+        assert!(warning.as_deref().is_some_and(|value| value.contains("DDL is incomplete")));
+    }
+
     #[test]
     fn list_objects_sql_includes_routines() {
-        let sql = list_objects_sql(true, true, false, true);
+        let sql = list_objects_sql(true, true, false, true, true, true, false);
         assert!(sql.contains("pg_catalog.pg_class"));
         assert!(sql.contains("pg_catalog.pg_proc"));
         assert!(sql.contains("pg_catalog.pg_inherits"));
@@ -7096,11 +8475,118 @@ mod tests {
         assert!(sql.contains("pg_xact_commit_timestamp"));
         assert!(sql.contains("'PROCEDURE'"));
         assert!(sql.contains("'FUNCTION'"));
+        assert!(!sql.contains("pg_catalog.pg_type"));
+    }
+
+    #[test]
+    fn list_objects_sql_includes_custom_types_when_enabled() {
+        let sql = list_objects_sql(true, true, false, true, true, true, true);
+        assert!(sql.contains("pg_catalog.pg_type"));
+        assert!(sql.contains("pg_catalog.pg_class"));
+        assert!(sql.contains("pg_catalog.pg_description"));
+        assert!(sql.contains("t.typtype IN ('b', 'c', 'd', 'e', 'r', 'm')"));
+        assert!(sql.contains("t.typisdefined"));
+        assert!(sql.contains("t.typelem = 0"));
+        assert!(sql.contains("t.typrelid = 0 OR c.relkind = 'c'"));
+        assert!(sql.contains("FROM pg_catalog.pg_attribute a"));
+        assert!(sql.contains("FROM pg_catalog.pg_enum e"));
+        assert!(sql.contains("END) AS signature"));
+        assert!(sql.contains("'TYPE' AS object_type"));
+        assert!(sql.contains("5 AS sort_order"));
+        assert!(sql.contains("n.nspname = $1"));
+        assert!(sql.contains("n.nspname <> 'pg_catalog'"));
+        assert!(sql.contains("n.nspname <> 'information_schema'"));
+        assert!(sql.contains("n.nspname NOT LIKE 'pg_toast%'"));
+        assert!(sql.contains("n.nspname NOT LIKE 'pg_temp%'"));
+    }
+
+    #[test]
+    fn postgres_system_schemas_are_not_custom_type_schemas() {
+        for schema in ["pg_catalog", "information_schema", "pg_toast", "pg_toast_temp_5", "pg_temp_5"] {
+            assert!(is_postgres_system_schema(schema), "{schema} should be a system schema");
+        }
+        assert!(!is_postgres_system_schema("public"));
+        assert!(!is_postgres_system_schema("app"));
+    }
+
+    #[test]
+    fn list_objects_sql_omits_custom_types_when_disabled() {
+        let sql = list_objects_sql(true, true, false, true, true, true, false);
+        assert!(!sql.contains("pg_type"));
+        assert!(!sql.contains("t.typtype"));
+    }
+
+    #[test]
+    fn list_objects_sql_type_only_skips_relations_and_routines() {
+        let sql = list_objects_sql(true, true, false, true, false, false, true);
+        assert!(sql.contains("pg_catalog.pg_type"));
+        assert!(!sql.contains("FROM pg_catalog.pg_class"));
+        assert!(!sql.contains("pg_catalog.pg_proc"));
+        assert!(!sql.contains("pg_stat_file"));
+        assert!(!sql.contains("pg_get_function_identity_arguments"));
+    }
+
+    #[test]
+    fn list_objects_sql_table_only_skips_routines_and_custom_types() {
+        let sql = list_objects_sql(true, true, false, true, true, false, false);
+        assert!(sql.contains("pg_catalog.pg_class"));
+        assert!(!sql.contains("pg_catalog.pg_proc"));
+        assert!(!sql.contains("pg_catalog.pg_type"));
+    }
+
+    #[test]
+    fn list_objects_sql_routine_only_skips_relations_and_custom_types() {
+        let sql = list_objects_sql(true, true, false, true, false, true, false);
+        assert!(sql.contains("pg_catalog.pg_proc"));
+        assert!(!sql.contains("pg_catalog.pg_class"));
+        assert!(!sql.contains("pg_catalog.pg_type"));
+    }
+
+    #[test]
+    fn list_objects_sql_empty_scope_produces_no_sql() {
+        let sql = list_objects_sql(true, true, false, true, false, false, false);
+        assert!(sql.is_empty());
+    }
+
+    #[test]
+    fn list_objects_sql_custom_types_branch_in_both_timestamp_variants() {
+        // The pg_type branch carries the same filters whether the timestamp
+        // query or the timestamp fallback query is used.
+        for sql in [
+            list_objects_sql(true, true, false, true, false, false, true),
+            list_objects_sql(false, true, false, true, false, false, true),
+        ] {
+            assert!(sql.contains("pg_catalog.pg_type"));
+            assert!(sql.contains("t.typtype IN ('b', 'c', 'd', 'e', 'r', 'm')"));
+            assert!(sql.contains("t.typelem = 0"));
+            assert!(sql.contains("t.typrelid = 0 OR c.relkind = 'c'"));
+            assert!(sql.contains("'TYPE' AS object_type"));
+        }
+    }
+
+    #[test]
+    fn list_objects_sql_custom_types_keeps_comment_join_semantics() {
+        let sql = list_objects_sql(true, true, false, true, false, false, true);
+        assert!(sql.contains("d.objoid = t.oid"));
+        assert!(sql.contains("d.classoid = 'pg_catalog.pg_type'::regclass"));
+        assert!(sql.contains("d.objsubid = 0"));
+        assert!(sql.contains("d.description AS object_comment"));
+    }
+
+    #[test]
+    fn list_objects_sql_custom_types_uses_null_timestamps() {
+        let sql = list_objects_sql(true, true, false, true, false, false, true);
+        assert!(sql.contains("NULL::text AS created_at"));
+        assert!(sql.contains("NULL::text AS updated_at"));
+        assert!(sql.contains("NULL::text AS parent_schema"));
+        assert!(sql.contains("NULL::text AS parent_name"));
+        assert!(sql.contains("t.typtype::text || ':'"));
+        assert!(sql.contains("END) AS signature"));
     }
 
     #[test]
     fn list_objects_sql_without_timestamps_omits_stat_file() {
-        let sql = list_objects_sql(false, true, false, true);
+        let sql = list_objects_sql(false, true, false, true, true, true, false);
         assert!(!sql.contains("pg_stat_file"));
         assert!(sql.contains("NULL::text AS created_at"));
         assert!(sql.contains("NULL::text AS updated_at"));
@@ -7108,7 +8594,7 @@ mod tests {
 
     #[test]
     fn redshift_compatible_list_objects_sql_uses_legacy_argument_formatter() {
-        let sql = list_objects_sql(false, false, false, false);
+        let sql = list_objects_sql(false, false, false, false, true, true, false);
         assert!(sql.contains("pg_get_function_arguments(p.oid) AS signature"));
         assert!(!sql.contains("pg_get_function_identity_arguments"));
     }
@@ -7179,31 +8665,31 @@ mod tests {
 
     #[test]
     fn both_list_objects_sql_variants_use_parameter() {
-        assert!(list_objects_sql(true, true, true, true).contains("$1"));
-        assert!(list_objects_sql(false, true, true, true).contains("$1"));
-        assert!(list_objects_sql(true, true, false, true).contains("$1"));
-        assert!(list_objects_sql(false, true, false, true).contains("$1"));
-        assert!(list_objects_sql(true, false, true, true).contains("$1"));
-        assert!(list_objects_sql(false, false, true, true).contains("$1"));
-        assert!(list_objects_sql(true, false, false, true).contains("$1"));
-        assert!(list_objects_sql(false, false, false, true).contains("$1"));
+        assert!(list_objects_sql(true, true, true, true, true, true, false).contains("$1"));
+        assert!(list_objects_sql(false, true, true, true, true, true, false).contains("$1"));
+        assert!(list_objects_sql(true, true, false, true, true, true, false).contains("$1"));
+        assert!(list_objects_sql(false, true, false, true, true, true, false).contains("$1"));
+        assert!(list_objects_sql(true, false, true, true, true, true, false).contains("$1"));
+        assert!(list_objects_sql(false, false, true, true, true, true, false).contains("$1"));
+        assert!(list_objects_sql(true, false, false, true, true, true, false).contains("$1"));
+        assert!(list_objects_sql(false, false, false, true, true, true, false).contains("$1"));
     }
 
     #[test]
     fn both_list_objects_sql_variants_include_pg_proc() {
-        assert!(list_objects_sql(true, true, true, true).contains("pg_catalog.pg_proc"));
-        assert!(list_objects_sql(false, true, true, true).contains("pg_catalog.pg_proc"));
-        assert!(list_objects_sql(true, true, false, true).contains("pg_catalog.pg_proc"));
-        assert!(list_objects_sql(false, true, false, true).contains("pg_catalog.pg_proc"));
-        assert!(list_objects_sql(true, false, true, true).contains("pg_catalog.pg_proc"));
-        assert!(list_objects_sql(false, false, true, true).contains("pg_catalog.pg_proc"));
-        assert!(list_objects_sql(true, false, false, true).contains("pg_catalog.pg_proc"));
-        assert!(list_objects_sql(false, false, false, true).contains("pg_catalog.pg_proc"));
+        assert!(list_objects_sql(true, true, true, true, true, true, false).contains("pg_catalog.pg_proc"));
+        assert!(list_objects_sql(false, true, true, true, true, true, false).contains("pg_catalog.pg_proc"));
+        assert!(list_objects_sql(true, true, false, true, true, true, false).contains("pg_catalog.pg_proc"));
+        assert!(list_objects_sql(false, true, false, true, true, true, false).contains("pg_catalog.pg_proc"));
+        assert!(list_objects_sql(true, false, true, true, true, true, false).contains("pg_catalog.pg_proc"));
+        assert!(list_objects_sql(false, false, true, true, true, true, false).contains("pg_catalog.pg_proc"));
+        assert!(list_objects_sql(true, false, false, true, true, true, false).contains("pg_catalog.pg_proc"));
+        assert!(list_objects_sql(false, false, false, true, true, true, false).contains("pg_catalog.pg_proc"));
     }
 
     #[test]
     fn legacy_list_objects_sql_avoids_pg11_proc_kind_column() {
-        let sql = list_objects_sql(true, false, false, true);
+        let sql = list_objects_sql(true, false, false, true, true, true, false);
         assert!(!sql.contains("p.prokind"));
         assert!(!sql.contains("p.prosp"));
         assert!(sql.contains("NOT p.proisagg"));
@@ -7215,7 +8701,7 @@ mod tests {
 
     #[test]
     fn gaussdb_compatible_list_objects_sql_uses_prosp_when_prokind_is_missing() {
-        let sql = list_objects_sql(true, false, true, true);
+        let sql = list_objects_sql(true, false, true, true, true, true, false);
         assert!(!sql.contains("p.prokind"));
         assert!(sql.contains("CASE WHEN p.prosp THEN 'PROCEDURE' ELSE 'FUNCTION' END AS object_type"));
         assert!(sql.contains("CASE WHEN p.prosp THEN 2 ELSE 3 END AS sort_order"));
@@ -7226,7 +8712,7 @@ mod tests {
 
     #[test]
     fn gaussdb_compatible_list_objects_sql_uses_prosp_with_prokind_when_available() {
-        let sql = list_objects_sql(true, true, true, true);
+        let sql = list_objects_sql(true, true, true, true, true, true, false);
         assert!(
             sql.contains("CASE WHEN p.prokind = 'p' OR p.prosp THEN 'PROCEDURE' ELSE 'FUNCTION' END AS object_type")
         );

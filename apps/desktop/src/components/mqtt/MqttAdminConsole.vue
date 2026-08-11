@@ -369,7 +369,7 @@ onUnmounted(stopPolling);
           </label>
           <label class="flex items-center gap-2 text-xs font-medium">
             <input v-model="formNoLocal" type="checkbox" :disabled="savingSubscription || !mqtt5" />
-            <span>{{ t("connection.mqttNoLocal") }}（No Local）</span>
+            <span>{{ t("connection.mqttNoLocal") }}</span>
             <span v-if="!mqtt5" class="font-normal text-muted-foreground">{{ t("connection.mqttNoLocalMqtt5Only") }}</span>
           </label>
           <label class="flex items-start gap-2 text-xs font-medium">

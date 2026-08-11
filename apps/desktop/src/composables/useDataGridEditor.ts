@@ -1388,6 +1388,11 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     };
   }
 
+  function saveDriverProfile() {
+    const id = connectionId.value;
+    return id ? connectionStore.getConfig(id)?.driver_profile : undefined;
+  }
+
   function tableHistoryTarget() {
     if (!tableMeta.value) return "";
     return [tableMeta.value.schema, tableMeta.value.tableName].filter(Boolean).join(".");
@@ -1514,7 +1519,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     let preparedSave: Awaited<ReturnType<typeof api.prepareDataGridSave>> | undefined;
     if (stmtOptions) {
       try {
-        preparedSave = await api.prepareDataGridSave(stmtOptions);
+        preparedSave = await api.prepareDataGridSave(stmtOptions, saveDriverProfile());
       } catch (e: any) {
         saveError.value = normalizeDataGridSaveError(databaseType.value, e);
         await finishInterruptedSaveChanges(snapshot);
@@ -1720,7 +1725,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
       }
       const stmtOptions = saveStatementOptions();
       if (!stmtOptions) return [];
-      const prepared = await api.prepareDataGridSave(stmtOptions);
+      const prepared = await api.prepareDataGridSave(stmtOptions, saveDriverProfile());
       if (prepared?.validationError) {
         saveError.value = prepared.validationError;
         return [];

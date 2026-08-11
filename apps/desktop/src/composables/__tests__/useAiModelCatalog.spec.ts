@@ -166,6 +166,30 @@ describe("useAiModelCatalog", () => {
     expect(apiMock.aiListModels).toHaveBeenCalledTimes(2);
   });
 
+  it("tracks Qoder executable and environment changes without depending on environment key order", async () => {
+    const initial: AiConfigItem = {
+      ...config(),
+      provider: "qoder-cli",
+      endpoint: "",
+      apiKey: "",
+      model: "default",
+      qoderCliPath: "/opt/homebrew/bin/qodercli",
+      qoderCliEnv: { HTTPS_PROXY: "http://127.0.0.1:7890", NO_PROXY: "localhost" },
+    };
+    apiMock.aiListModels.mockResolvedValueOnce([{ id: "first" }]).mockResolvedValueOnce([{ id: "second" }]);
+
+    await expect(catalog.loadModels(initial)).resolves.toEqual([{ id: "first" }]);
+    await expect(
+      catalog.loadModels({
+        ...initial,
+        qoderCliEnv: { NO_PROXY: "localhost", HTTPS_PROXY: "http://127.0.0.1:7890" },
+      }),
+    ).resolves.toEqual([{ id: "first" }]);
+    await expect(catalog.loadModels({ ...initial, qoderCliPath: "/usr/local/bin/qodercli" })).resolves.toEqual([{ id: "second" }]);
+
+    expect(apiMock.aiListModels).toHaveBeenCalledTimes(2);
+  });
+
   it("does not let a stale request overwrite a newer provider catalog", async () => {
     let resolveInitial: ((models: { id: string }[]) => void) | undefined;
     apiMock.aiListModels

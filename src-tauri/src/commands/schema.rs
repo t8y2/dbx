@@ -240,6 +240,8 @@ pub async fn list_objects(
                 updated_at: None,
                 parent_schema: table.parent_schema,
                 parent_name: table.parent_name,
+                custom_type_kind: None,
+                has_members: None,
                 trigger: None,
                 xugu_type_members_expandable: None,
             })
@@ -308,6 +310,17 @@ pub async fn get_object_source(
         relation_name.as_deref(),
     )
     .await
+}
+
+#[tauri::command]
+pub async fn get_custom_type_details(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: String,
+    schema: String,
+    name: String,
+) -> Result<db::CustomTypeDetails, String> {
+    dbx_core::schema::get_custom_type_details_core(&state, &connection_id, &database, &schema, &name).await
 }
 
 #[tauri::command]

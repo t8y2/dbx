@@ -55,15 +55,25 @@ impl ChClient {
     }
 }
 
-/// 归一化用户填写的「URL 参数」：去除首尾空白与开头的 `?`/`&`，
-/// 返回可直接拼接到 query string 的片段；为空时返回 None。
+const CLICKHOUSE_CLIENT_ONLY_PARAMS: [&str; 2] = ["secure", "ssl"];
+
+/// 归一化用户填写的「URL 参数」，并排除传输层参数。ClickHouse HTTP
+/// 会把其余 URL 参数解释为服务端 setting，因此 JDBC 风格的 SSL 参数
+/// 不能继续透传，否则连接测试本身就会触发 UNKNOWN_SETTING。
 fn normalize_extra_params(params: Option<&str>) -> Option<String> {
-    let trimmed = params?.trim().trim_start_matches('?').trim_start_matches('&').trim();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed.to_string())
-    }
+    let trimmed = params?.trim().trim_start_matches(['?', '&', ';']).trim();
+    let params = trimmed
+        .split(['&', ';'])
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .filter(|part| {
+            let key = part.split_once('=').map(|(key, _)| key).unwrap_or(part).trim();
+            let key = percent_encoding::percent_decode_str(key).decode_utf8_lossy();
+            !CLICKHOUSE_CLIENT_ONLY_PARAMS.iter().any(|candidate| key.eq_ignore_ascii_case(candidate))
+        })
+        .collect::<Vec<_>>()
+        .join("&");
+    (!params.is_empty()).then_some(params)
 }
 
 fn expand_cert_path(path: &str) -> String {
@@ -170,11 +180,21 @@ fn build_query_url_with_format(
     if let QueryResultLimit::Limited(max_rows) = limit {
         url.push_str(&format!("&max_result_rows={max_rows}&result_overflow_mode=break"));
     }
-    // 用户自定义 URL 参数放在最后追加，允许其覆盖前面的默认设置（ClickHouse 取同名参数的最后一个值）
-    if let Some(params) = normalize_extra_params(extra_params) {
+    append_extra_params(&mut url, extra_params);
+    url
+}
+
+fn append_extra_params(url: &mut String, extra_params: Option<&str>) {
+    // 用户自定义服务端 setting 放在最后，允许其覆盖驱动默认值。
+    if let Some(params) = extra_params.filter(|params| !params.is_empty()) {
         url.push('&');
-        url.push_str(&params);
+        url.push_str(params);
     }
+}
+
+fn build_connection_test_url(base_url: &str, extra_params: Option<&str>) -> String {
+    let mut url = format!("{}/?query=SELECT%201", base_url);
+    append_extra_params(&mut url, extra_params);
     url
 }
 
@@ -572,11 +592,7 @@ fn limited_query_result(result: ChJsonResult, execution_time_ms: u128, max_rows:
 }
 
 pub async fn test_connection(client: &ChClient, timeout: Duration) -> Result<(), String> {
-    let mut url = format!("{}/?query=SELECT%201", client.base_url);
-    if let Some(params) = normalize_extra_params(client.extra_params.as_deref()) {
-        url.push('&');
-        url.push_str(&params);
-    }
+    let url = build_connection_test_url(&client.base_url, client.extra_params.as_deref());
     let req = build_request(client, client.http.get(&url));
     let resp = with_connection_timeout("ClickHouse", timeout, async {
         req.send().await.map_err(|e| format!("ClickHouse connection failed: {e}"))
@@ -910,17 +926,57 @@ mod tests {
     #[test]
     fn query_url_normalizes_leading_symbols_and_ignores_blank_params() {
         // 允许用户带上开头的 ? 或 &，也允许多个参数
-        let url = build_query_url(
-            "http://localhost:8123",
-            None,
-            QueryResultLimit::Unlimited,
-            Some("?dialect_type=ANSI&max_threads=8"),
-        );
+        let params = normalize_extra_params(Some("?dialect_type=ANSI&max_threads=8"));
+        let url = build_query_url("http://localhost:8123", None, QueryResultLimit::Unlimited, params.as_deref());
         assert_eq!(url, "http://localhost:8123/?default_format=JSONCompact&dialect_type=ANSI&max_threads=8");
 
         // 空白参数不产生多余的 &
-        let url = build_query_url("http://localhost:8123", None, QueryResultLimit::Unlimited, Some("   "));
+        let params = normalize_extra_params(Some("   "));
+        let url = build_query_url("http://localhost:8123", None, QueryResultLimit::Unlimited, params.as_deref());
         assert_eq!(url, "http://localhost:8123/?default_format=JSONCompact");
+    }
+
+    #[test]
+    fn clickhouse_transport_params_are_not_forwarded_as_server_settings() {
+        let client = ChClient::new_with_ca_cert(
+            "http://localhost:8123",
+            None,
+            None,
+            None,
+            Some("?%53SL=true;secure=false&dialect_type=ANSI&unknown_setting=1"),
+            Duration::from_secs(1),
+        )
+        .unwrap();
+
+        assert_eq!(client.extra_params.as_deref(), Some("dialect_type=ANSI&unknown_setting=1"));
+        assert_eq!(
+            build_query_url(&client.base_url, None, QueryResultLimit::Unlimited, client.extra_params.as_deref()),
+            "http://localhost:8123/?default_format=JSONCompact&dialect_type=ANSI&unknown_setting=1"
+        );
+        assert_eq!(
+            build_connection_test_url(&client.base_url, client.extra_params.as_deref()),
+            "http://localhost:8123/?query=SELECT%201&dialect_type=ANSI&unknown_setting=1"
+        );
+        assert_eq!(
+            build_query_url_with_format(
+                &client.base_url,
+                None,
+                QueryResultLimit::Unlimited,
+                QueryResultFormat::JsonCompactEachRowWithNamesAndTypes,
+                client.extra_params.as_deref(),
+            ),
+            "http://localhost:8123/?default_format=JSONCompactEachRowWithNamesAndTypes&dialect_type=ANSI&unknown_setting=1"
+        );
+
+        assert_eq!(
+            normalize_extra_params(Some("&ssl=false;secure=false&max_execution_time=30")),
+            Some("max_execution_time=30".to_string())
+        );
+        assert_eq!(normalize_extra_params(Some("SSL=true&secure=true")), None);
+        assert_eq!(
+            normalize_extra_params(Some("sslmode=strict&sslrootcert=%2Ftmp%2Fca.pem")),
+            Some("sslmode=strict&sslrootcert=%2Ftmp%2Fca.pem".to_string())
+        );
     }
 
     #[test]

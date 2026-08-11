@@ -880,6 +880,8 @@ mod tests {
             grok_cli_env: HashMap::new(),
             codebuddy_cli_path: None,
             codebuddy_cli_env: HashMap::new(),
+            qoder_cli_path: None,
+            qoder_cli_env: Default::default(),
         }
     }
 

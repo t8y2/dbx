@@ -23,6 +23,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -32,8 +33,13 @@ import org.apache.kafka.clients.admin.AlterConfigOp;
 import org.apache.kafka.clients.admin.Config;
 import org.apache.kafka.clients.admin.ConfigEntry;
 import org.apache.kafka.clients.admin.RaftVoterEndpoint;
+import org.apache.kafka.clients.admin.TopicDescription;
+import org.apache.kafka.clients.admin.TopicListing;
 import org.apache.kafka.common.Node;
 import org.apache.kafka.common.TopicPartition;
+import org.apache.kafka.common.TopicPartitionInfo;
+import org.apache.kafka.common.Uuid;
+import org.apache.kafka.common.errors.UnsupportedVersionException;
 import org.apache.zookeeper.CreateMode;
 import org.apache.zookeeper.Watcher;
 import org.apache.zookeeper.ZooDefs;
@@ -47,6 +53,68 @@ import org.junit.jupiter.api.io.TempDir;
 class KafkaAgentTest {
     @TempDir
     Path tempDir;
+
+    @Test
+    void topicListingFallsBackWhenDescriptionsAreUnsupported() throws Exception {
+        Object result = KafkaAgent.topicListResult(
+            Arrays.asList(
+                new TopicListing("orders", Uuid.randomUuid(), false),
+                new TopicListing("__consumer_offsets", Uuid.randomUuid(), true)
+            ),
+            names -> {
+                throw new ExecutionException(new UnsupportedVersionException("The version of API is not supported."));
+            }
+        );
+
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> topics = (List<Map<String, Object>>) ((Map<String, Object>) result).get("topics");
+        assertEquals(Arrays.asList("__consumer_offsets", "orders"), topics.stream().map(topic -> topic.get("name")).toList());
+        assertEquals(true, topics.get(0).get("internal"));
+        assertFalse(topics.get(0).containsKey("partitions"));
+        assertFalse(topics.get(1).containsKey("partitions"));
+    }
+
+    @Test
+    void topicListingPreservesNonVersionDescriptionErrors() {
+        IllegalStateException failure = new IllegalStateException("metadata authorization failed");
+
+        IllegalStateException thrown = assertThrows(IllegalStateException.class, () -> KafkaAgent.topicListResult(
+            Collections.singletonList(new TopicListing("orders", Uuid.randomUuid(), false)),
+            names -> {
+                throw failure;
+            }
+        ));
+
+        assertEquals(failure, thrown);
+    }
+
+    @Test
+    void topicListingKeepsDescriptionMetadataWhenSupported() throws Exception {
+        Node leader = new Node(1, "broker-1", 9092);
+        Node replica = new Node(2, "broker-2", 9092);
+        TopicDescription description = new TopicDescription(
+            "orders",
+            false,
+            Collections.singletonList(new TopicPartitionInfo(
+                0,
+                leader,
+                Arrays.asList(leader, replica),
+                Collections.singletonList(leader)
+            ))
+        );
+
+        Object result = KafkaAgent.topicListResult(
+            Collections.singletonList(new TopicListing("orders", Uuid.randomUuid(), false)),
+            names -> Collections.singletonMap("orders", description)
+        );
+
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> topics = (List<Map<String, Object>>) ((Map<String, Object>) result).get("topics");
+        assertEquals(1, topics.size());
+        assertEquals(1, topics.get(0).get("partitions"));
+        assertEquals(2, topics.get(0).get("replicationFactor"));
+        assertEquals(false, topics.get(0).get("internal"));
+    }
 
     @Test
     void resolvesBootstrapServersFromKafka11ZooKeeperRegistrationWithChroot() throws Exception {

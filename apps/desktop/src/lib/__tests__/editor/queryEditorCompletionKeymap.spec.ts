@@ -141,21 +141,29 @@ describe("QueryEditor completion Tab keymap", () => {
     const harness = createHarness({ completionStatus: () => null, nextSnippetField });
     const view = createView();
 
-    expect(harness.acceptCompletionOrNextSnippetField(view)).toBe(true);
+    expect(harness.handleTab(view)).toBe(true);
     expect(nextSnippetField).toHaveBeenCalledWith(view);
     expect(view.dispatch).not.toHaveBeenCalled();
   });
 
-  it("advances an available snippet field immediately while completion is pending", () => {
+  it("waits for pending completion before advancing a snippet field", async () => {
     vi.useFakeTimers();
+    let status: "active" | "pending" | null = "pending";
+    const acceptCompletion = vi.fn(() => true);
     const nextSnippetField = vi.fn(() => true);
     const indentMore = vi.fn(() => true);
-    const harness = createHarness({ completionStatus: () => "pending", nextSnippetField, indentMore });
+    const harness = createHarness({ completionStatus: () => status, acceptCompletion, nextSnippetField, indentMore });
     const view = createView();
 
     expect(harness.acceptCompletionOrNextSnippetField(view)).toBe(true);
-    expect(nextSnippetField).toHaveBeenCalledWith(view);
-    expect(vi.getTimerCount()).toBe(0);
+    expect(nextSnippetField).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(1);
+
+    status = "active";
+    await vi.advanceTimersByTimeAsync(16);
+
+    expect(acceptCompletion).toHaveBeenCalledWith(view);
+    expect(nextSnippetField).not.toHaveBeenCalled();
     expect(indentMore).not.toHaveBeenCalled();
     expect(view.dispatch).not.toHaveBeenCalled();
   });

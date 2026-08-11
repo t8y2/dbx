@@ -13,7 +13,21 @@ const TABLE_VIEW_MV_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "MATERIALIZ
 
 const ROUTINE_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "PROCEDURE", "FUNCTION"];
 
-const POSTGRES_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION", "SEQUENCE"];
+// PostgreSQL-family databases with a verified pg_type listing path. TYPE only
+// covers user-created types (enum/domain/composite/range/multirange/base);
+// relation auto-generated row types stay hidden.
+const POSTGRES_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION", "SEQUENCE", "TYPE"];
+
+// KWDB is routed through the PostgreSQL pool but its pg_type catalog
+// compatibility is not verified yet, so it stays on the pre-TYPE object set.
+const POSTGRES_NO_TYPE_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION", "SEQUENCE"];
+
+// Kingbase and Vastbase agents support the same user-defined type listing via
+// their own metadata query, but do not expose sequences. Kept separate from
+// POSTGRES_OBJECTS and POSTGRES_LIKE_OBJECTS so unverified PG-like databases
+// (highgo/uxdb/redshift) never advertise TYPE.
+const KINGBASE_VASTBASE_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION", "TYPE"];
+
 const POSTGRES_LIKE_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION"];
 const ORACLE_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION", "PACKAGE", "PACKAGE_BODY"];
 const DAMENG_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION", "SEQUENCE", "PACKAGE", "PACKAGE_BODY"];
@@ -24,13 +38,13 @@ const DATABASE_TYPE_OBJECTS = new Map<DatabaseType, SidebarObjectKind[]>([
   // postgres
   ["postgres", POSTGRES_OBJECTS],
   ["gaussdb", POSTGRES_OBJECTS],
-  ["kwdb", POSTGRES_OBJECTS],
+  ["kwdb", POSTGRES_NO_TYPE_OBJECTS],
   ["opengauss", POSTGRES_OBJECTS],
   // postgres like
-  ["kingbase", POSTGRES_LIKE_OBJECTS],
+  ["kingbase", KINGBASE_VASTBASE_OBJECTS],
   ["highgo", POSTGRES_LIKE_OBJECTS],
   ["uxdb", POSTGRES_LIKE_OBJECTS],
-  ["vastbase", POSTGRES_LIKE_OBJECTS],
+  ["vastbase", KINGBASE_VASTBASE_OBJECTS],
   ["redshift", POSTGRES_LIKE_OBJECTS],
   // oracle
   ["oracle", ORACLE_OBJECTS],
@@ -69,11 +83,22 @@ const DATABASE_TYPE_OBJECTS = new Map<DatabaseType, SidebarObjectKind[]>([
   ["manticoresearch", ["TABLE", "FUNCTION"]],
   ["databend", ["TABLE", "VIEW", "PROCEDURE"]],
 ]);
+/**
+ * Whether a kind is readable as object source for the given connection type.
+ * TYPE/TYPE_BODY only have a real source implementation on Xugu; PostgreSQL-
+ * family databases list types without a CREATE TYPE getter this cycle.
+ */
+function isSourceReadableObjectKind(kind: SidebarObjectKind, dbType?: DatabaseType): boolean {
+  if (kind === "TABLE") return false;
+  if (kind === "TYPE" || kind === "TYPE_BODY") return supportsTypeObjectSource(dbType);
+  return true;
+}
+
 export function databaseObjectCapabilities(dbType?: DatabaseType): DatabaseObjectCapabilities {
   const sidebarObjects = sidebarObjectKindsForDatabase(dbType);
   return {
     sidebarObjects,
-    sourceReadable: sidebarObjects.filter((kind) => kind !== "TABLE"),
+    sourceReadable: sidebarObjects.filter((kind) => isSourceReadableObjectKind(kind, dbType)),
     executable: sidebarObjects.filter((kind) => kind === "PROCEDURE"),
   };
 }
@@ -81,6 +106,37 @@ export function databaseObjectCapabilities(dbType?: DatabaseType): DatabaseObjec
 export function sidebarObjectKindsForDatabase(dbType?: DatabaseType): SidebarObjectKind[] {
   if (!dbType) return [...TABLE_VIEW_OBJECTS];
   return DATABASE_TYPE_OBJECTS.get(dbType) ?? [...ROUTINE_OBJECTS];
+}
+
+/**
+ * Whether a connection's TYPE tree nodes may be opened as object source.
+ *
+ * Xugu has a real TYPE/TYPE_BODY source implementation. PostgreSQL-family
+ * databases only list user-defined types this cycle; their CREATE TYPE DDL has
+ * no unified catalog getter, so opening source would error. Callers must gate
+ * the source action (single/double click, context menu, shortcuts) on this
+ * before dispatching getObjectSource.
+ */
+export function supportsTypeObjectSource(dbType?: DatabaseType): boolean {
+  return dbType === "xugu";
+}
+
+export type CustomTypeCapabilities = {
+  details: boolean;
+  members: boolean;
+  ddl: boolean;
+};
+
+const VERIFIED_CUSTOM_TYPE_DATABASES = new Set<DatabaseType>(["postgres", "opengauss", "gaussdb", "kingbase", "vastbase"]);
+
+/**
+ * Whether a connection may open read-only custom type details (phase 2).
+ * Kept separate from the listing capability so a future per-kind DDL toggle
+ * can be introduced without touching the object-list sets.
+ */
+export function customTypeCapabilities(dbType?: DatabaseType): CustomTypeCapabilities {
+  const supported = !!dbType && VERIFIED_CUSTOM_TYPE_DATABASES.has(dbType);
+  return { details: supported, members: supported, ddl: supported };
 }
 
 export function supportsPackageMemberExpansion(dbType?: DatabaseType): boolean {

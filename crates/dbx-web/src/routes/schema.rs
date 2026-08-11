@@ -250,6 +250,8 @@ pub async fn list_objects(
                 schema: Some(database.to_string()),
                 valid: None,
                 signature: None,
+                custom_type_kind: None,
+                has_members: None,
                 comment: table.comment,
                 created_at: None,
                 updated_at: None,
@@ -329,6 +331,19 @@ pub async fn get_object_source(
     )
     .await
     .map_err(AppError::from)?;
+    Ok(Json(result))
+}
+
+pub async fn get_custom_type_details(
+    State(state): State<Arc<WebState>>,
+    Query(q): Query<SchemaQuery>,
+) -> Result<Json<dbx_core::db::CustomTypeDetails>, AppError> {
+    let database = q.database.as_deref().unwrap_or("");
+    let schema = q.schema.as_deref().unwrap_or("");
+    let name = q.table.as_deref().unwrap_or("");
+    let result = dbx_core::schema::get_custom_type_details_core(&state.app, &q.connection_id, database, schema, name)
+        .await
+        .map_err(AppError::from)?;
     Ok(Json(result))
 }
 

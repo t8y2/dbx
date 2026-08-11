@@ -3,13 +3,15 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, useId,
 import { Compartment, type Extension } from "@codemirror/state";
 import { StreamLanguage } from "@codemirror/language";
 import type { EditorView } from "@codemirror/view";
-import { Archive, ArrowLeftRight, CheckCircle2, ChevronDown, Clipboard, Download, FileClock, FileInput, FileText, Loader2, Network, Plus, RefreshCw, Save, Search, Send, Server, Trash2, X } from "@lucide/vue";
+import { Archive, ArrowLeftRight, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, Clipboard, Columns3, Download, FileClock, FileInput, FileText, Loader2, Network, Plus, RefreshCw, Save, Search, Send, Server, Trash2, X } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import ProductionContextBadge from "@/components/common/ProductionContextBadge.vue";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { DropdownMenu, DropdownMenuCheckboxItem, DropdownMenuContent, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
 import EditorSearchPanel from "@/components/editor/EditorSearchPanel.vue";
 import NacosConfigDiffDialog from "@/components/nacos/NacosConfigDiffDialog.vue";
@@ -17,7 +19,7 @@ import NacosConfigHistoryDialog from "@/components/nacos/NacosConfigHistoryDialo
 import NacosConfigBatchDialog, { type NacosBatchDialogMode, type NacosConfigTransferTarget } from "@/components/nacos/NacosConfigBatchDialog.vue";
 import NacosContentSearchDialog from "@/components/nacos/NacosContentSearchDialog.vue";
 import { useToast } from "@/composables/useToast";
-import { useNacosConfigListColumnResize } from "@/composables/useNacosConfigListColumnResize";
+import { useNacosConfigListColumnResize, type ToggleableNacosConfigListColumnKey } from "@/composables/useNacosConfigListColumnResize";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
 import { useI18n } from "vue-i18n";
@@ -47,6 +49,7 @@ import { copyToClipboard, readTextFromClipboard } from "@/lib/common/clipboard";
 import { trimmedSelectionLayer } from "@/lib/editor/codemirrorTrimmedSelectionLayer";
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
 import { editorFontTheme, loadEditorTheme } from "@/lib/editor/editorThemes";
+import { clampEditorFontSize, createEditorZoomCommitScheduler, fontSizeFromWheelDelta } from "@/lib/editor/editorZoom";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useTheme } from "@/composables/useTheme";
@@ -110,7 +113,10 @@ const configGroup = ref("");
 const configDataId = ref("");
 const configAppName = ref("");
 const configPageNo = ref(1);
-const configPageSize = ref(20);
+const NACOS_CONFIG_PAGE_SIZE_OPTIONS = [20, 50, 100, 200, 500] as const;
+const NACOS_CONFIG_PAGE_SIZE_STORAGE_KEY = "dbx-nacos-config-page-size";
+const savedNacosConfigPageSize = Number(safeLocalStorageGet(NACOS_CONFIG_PAGE_SIZE_STORAGE_KEY));
+const configPageSize = ref<number>(NACOS_CONFIG_PAGE_SIZE_OPTIONS.find((size) => size === savedNacosConfigPageSize) ?? 20);
 const configs = ref<NacosConfigItem[]>([]);
 const configTotal = ref(0);
 const selectedConfig = ref<NacosConfigItem | null>(null);
@@ -126,6 +132,12 @@ const configAdvancedOpen = ref(false);
 const configSaveNotice = ref("");
 const pendingConfigSave = ref(false);
 const pendingDeleteConfig = ref<NacosConfigDeleteSnapshot | null>(null);
+interface NacosBatchDeleteSnapshot {
+  connectionId: string;
+  namespace: string;
+  keys: NacosConfigKey[];
+}
+const pendingBatchDelete = ref<NacosBatchDeleteSnapshot | null>(null);
 const historyOpen = ref(false);
 const historyLoading = ref(false);
 const historyError = ref("");
@@ -154,6 +166,11 @@ const configFormatOptions = ["text", "json", "xml", "yaml", "html", "properties"
 const configEditorHost = ref<HTMLDivElement | null>(null);
 const configEditorView = shallowRef<EditorView | null>(null);
 const configSearchPanelRef = ref<InstanceType<typeof EditorSearchPanel>>();
+const configEditorFontSize = ref(clampEditorFontSize(settingsStore.editorSettings.fontSize));
+const configEditorZoomCommitScheduler = createEditorZoomCommitScheduler((fontSize) => {
+  if (settingsStore.editorSettings.fontSize === fontSize) return;
+  settingsStore.updateEditorSettings({ fontSize });
+});
 const knownConfigFormats = ref<Record<string, string>>({});
 const selectedConfigKeys = ref<string[]>([]);
 const searchOpen = ref(false);
@@ -237,7 +254,26 @@ const CONNECTION_NOT_FOUND_RETRY_DELAYS_MS = [150, 350, 700];
 const configListViewport = ref<HTMLElement | null>(null);
 const configListViewportWidth = ref(0);
 let configListResizeObserver: ResizeObserver | null = null;
-const { gridTemplateColumns: configListGridTemplate, minWidth: configListMinWidth, resizingColumnIndex: configListResizingColumnIndex, onResizeStart: onConfigListColumnResizeStart } = useNacosConfigListColumnResize(configListViewportWidth);
+const {
+  visibleColumns: configListColumns,
+  toggleableColumns: configListToggleableColumns,
+  gridTemplateColumns: configListGridTemplate,
+  minWidth: configListMinWidth,
+  resizingColumnIndex: configListResizingColumnIndex,
+  onResizeStart: onConfigListColumnResizeStart,
+  isColumnVisible: isConfigListColumnVisible,
+  setColumnVisible: setConfigListColumnVisible,
+} = useNacosConfigListColumnResize(configListViewportWidth);
+
+function configListColumnLabel(column: ToggleableNacosConfigListColumnKey) {
+  if (column === "group") return t("nacos.group");
+  if (column === "application") return t("nacos.configListApplication");
+  return t("nacos.configListFormat");
+}
+
+function isSelectedConfigListItem(item: NacosConfigItem) {
+  return selectedConfig.value?.dataId === item.dataId && selectedConfig.value?.group === item.group && (selectedConfig.value?.namespace || namespace.value) === (item.namespace || namespace.value);
+}
 
 const namespace = computed(() => props.namespace ?? connectionInfo.value?.namespace ?? "");
 const nacosProductionContext = computed(() => productionContextForDatabase(connectionStore.getConfig(props.connectionId), namespace.value));
@@ -343,9 +379,12 @@ const configMutationGuardState = computed(() => ({
   hasPendingDelete: !!pendingDeleteConfig.value,
   hasPendingSave: pendingConfigSave.value,
 }));
+const selectedConfigCount = computed(() => selectedConfigKeys.value.length);
 const canRequestConfigSave = computed(() => canStartNacosConfigSave(configMutationGuardState.value));
 const canRequestConfigDelete = computed(() => canStartNacosConfigDelete(configMutationGuardState.value, selectedConfigOriginalKey.value));
 const pendingDeleteDetails = computed(() => (pendingDeleteConfig.value ? buildNacosConfigDeleteConfirm(pendingDeleteConfig.value.config, pendingDeleteConfig.value.key.namespace || "") : ""));
+const canRequestBatchDeleteConfigs = computed(() => !props.readOnly && !savingConfig.value && !deletingConfig.value && !pendingConfigSave.value && !pendingDeleteConfig.value && selectedConfigCount.value > 0);
+const pendingBatchDeleteDetails = computed(() => pendingBatchDelete.value?.keys.map((key) => `namespace=${key.namespace || "public"}\ndataId=${key.dataId}\ngroup=${key.group || "DEFAULT_GROUP"}`).join("\n\n") || "");
 const pendingHistoryRollbackDetails = computed(() => (pendingHistoryRollback.value ? buildNacosConfigHistoryRollbackConfirm(pendingHistoryRollback.value, namespace.value) : ""));
 const pendingInstanceDetails = computed(() => (pendingInstanceUpdate.value && selectedService.value ? buildNacosInstanceConfirm(selectedService.value, pendingInstanceUpdate.value.instance, pendingInstanceUpdate.value.patch, serviceGroup.value, namespace.value) : ""));
 const pendingInstanceDeregisterDetails = computed(() => {
@@ -361,13 +400,12 @@ const pendingInstanceDeregisterDetails = computed(() => {
     type: lifetime,
   });
 });
-const selectedConfigCount = computed(() => selectedConfigKeys.value.length);
 const hasSearchSession = computed(() => !!(searchResult.value || searchProgress.value || searchError.value));
 const retainedSearchMatchCount = computed(() => searchResult.value?.matches.length ?? searchProgress.value?.matches.length ?? 0);
 const currentPageConfigKeys = computed(() => configs.value.map((item) => configIdentityKey(item)));
 const allCurrentPageSelected = computed(() => currentPageConfigKeys.value.length > 0 && currentPageConfigKeys.value.every((key) => selectedConfigKeys.value.includes(key)));
 
-function configIdentityKey(item: Pick<NacosConfigItem, "namespace" | "group" | "dataId">): string {
+function configIdentityKey(item: { namespace?: string; group?: string; dataId: string }): string {
   return [item.namespace || namespace.value || "", item.group || "DEFAULT_GROUP", item.dataId].join("\u0000");
 }
 
@@ -393,6 +431,10 @@ function selectedKeys(): NacosConfigKey[] {
     const [selectedNamespace = "", group = "DEFAULT_GROUP", dataId = ""] = value.split("\u0000");
     return { namespace: selectedNamespace || undefined, group, dataId };
   });
+}
+
+function isBatchDeleteSnapshotInScope(snapshot: NacosBatchDeleteSnapshot) {
+  return snapshot.connectionId === props.connectionId && snapshot.namespace === namespace.value;
 }
 
 function buildConfigSelector(scope: NacosConfigSelectionScope): NacosConfigSelector {
@@ -472,6 +514,7 @@ async function mountConfigEditor() {
     configLanguageExtension(format),
   ]);
   const editorSettings = settingsStore.editorSettings;
+  configEditorFontSize.value = clampEditorFontSize(editorSettings.fontSize);
   const theme = await loadEditorTheme(editorSettings.theme, editorThemeAppearance(), currentCustomThemeColors(), themePalette.value);
   if (generation !== configEditorGeneration || editorSessionId !== configEditorSessionId || host !== configEditorHost.value || configEditorView.value || !selectedConfig.value) return;
   const view = new EditorView({
@@ -492,6 +535,21 @@ async function mountConfigEditor() {
         trimmedSelectionLayer(),
         Prec.highest(keymap.of([{ key: "Mod-f", run: () => configSearchPanelRef.value?.openSearch() ?? false, preventDefault: true }, { key: "Mod-h", run: () => configSearchPanelRef.value?.openReplace() ?? false, preventDefault: true }, indentWithTab])),
         keymap.of([...defaultKeymap, ...historyKeymap]),
+        EditorView.domEventHandlers({
+          wheel(event, eventView) {
+            if (!event.metaKey && !event.ctrlKey) return false;
+            event.preventDefault();
+            const next = fontSizeFromWheelDelta(configEditorFontSize.value, event.deltaY);
+            if (next !== configEditorFontSize.value) {
+              configEditorFontSize.value = next;
+              eventView.dispatch({
+                effects: configEditorFontTheme.reconfigure(editorFontTheme(EditorView, next, settingsStore.editorSettings.fontFamily, { fixedHeight: true, scrollable: true })),
+              });
+            }
+            configEditorZoomCommitScheduler.schedule(next);
+            return true;
+          },
+        }),
         configEditorLanguage.of(language),
         configEditorTheme.of(theme),
         configEditorFontTheme.of(editorFontTheme(EditorView, editorSettings.fontSize, editorSettings.fontFamily, { fixedHeight: true, scrollable: true })),
@@ -703,6 +761,8 @@ async function loadConfigs(page = configPageNo.value): Promise<boolean> {
       pageSize: requestPageSize,
     });
     if (!isCurrentRequest()) return false;
+    const lastPage = Math.max(1, Math.ceil(result.totalCount / Math.max(1, requestPageSize)));
+    if (page > lastPage) return loadConfigs(lastPage);
     configs.value = applyKnownConfigFormats(result.items.map(normalizeConfigItemFormat));
     configTotal.value = result.totalCount;
     return true;
@@ -736,9 +796,20 @@ function clearConfigFilter(filter: "dataId" | "group" | "appName") {
   void loadConfigsWithRetry(1);
 }
 
+function setConfigPageSize(value: string) {
+  const nextPageSize = Number(value);
+  if (!NACOS_CONFIG_PAGE_SIZE_OPTIONS.some((size) => size === nextPageSize) || nextPageSize === configPageSize.value) return;
+  configPageSize.value = nextPageSize;
+  safeLocalStorageSet(NACOS_CONFIG_PAGE_SIZE_STORAGE_KEY, String(nextPageSize));
+  void loadConfigsWithRetry(1);
+}
+
 function closePendingConfigMutationConfirmations() {
   pendingConfigSave.value = false;
-  if (!deletingConfig.value) pendingDeleteConfig.value = null;
+  if (!deletingConfig.value) {
+    pendingDeleteConfig.value = null;
+    pendingBatchDelete.value = null;
+  }
 }
 
 async function selectConfig(item: NacosConfigItem) {
@@ -1519,6 +1590,11 @@ function requestDeleteConfig() {
   pendingDeleteConfig.value = createNacosConfigDeleteSnapshot(props.connectionId, key, selectedConfig.value);
 }
 
+function reconcileDeletedConfigSelection(deletedKeys: ReadonlySet<string>) {
+  if (!deletedKeys.size) return;
+  selectedConfigKeys.value = selectedConfigKeys.value.filter((key) => !deletedKeys.has(key));
+}
+
 async function deleteConfig() {
   const snapshot = pendingDeleteConfig.value;
   if (!snapshot || !isNacosConfigDeleteSnapshotInScope(snapshot, props.connectionId, namespace.value)) {
@@ -1544,7 +1620,10 @@ async function deleteConfig() {
   try {
     await api.nacosDeleteConfig(snapshot.connectionId, snapshot.key);
     const remainsInDeletedScope = isNacosConfigDeleteSnapshotInScope(snapshot, props.connectionId, namespace.value);
-    if (remainsInDeletedScope) await loadConfigs();
+    if (remainsInDeletedScope) {
+      reconcileDeletedConfigSelection(new Set([configIdentityKey(snapshot.key)]));
+      await loadConfigs();
+    }
     const stillViewingDeletedConfig =
       remainsInDeletedScope &&
       editorSessionId === configEditorSessionId &&
@@ -1563,6 +1642,89 @@ async function deleteConfig() {
     toast(t("nacos.deleted"), 2000);
   } catch (error) {
     if (isNacosConfigDeleteSnapshotInScope(snapshot, props.connectionId, namespace.value)) configError.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    deletingConfig.value = false;
+  }
+}
+
+function requestBatchDeleteConfigs() {
+  if (!canRequestBatchDeleteConfigs.value) return;
+  const keys = selectedKeys();
+  if (!keys.length) return;
+  pendingBatchDelete.value = {
+    connectionId: props.connectionId,
+    namespace: namespace.value,
+    keys: keys.map((key) => ({
+      namespace: key.namespace || undefined,
+      dataId: key.dataId,
+      group: key.group || "DEFAULT_GROUP",
+    })),
+  };
+}
+
+async function deleteSelectedConfigs() {
+  const snapshot = pendingBatchDelete.value;
+  if (!snapshot || !isBatchDeleteSnapshotInScope(snapshot)) {
+    pendingBatchDelete.value = null;
+    return;
+  }
+  if (!canRequestBatchDeleteConfigs.value) return;
+  if (!(await confirmNacosMutation(t("nacos.batchDelete"), snapshot.connectionId, snapshot.namespace))) return;
+  if (!isBatchDeleteSnapshotInScope(snapshot)) {
+    pendingBatchDelete.value = null;
+    return;
+  }
+
+  const editorSessionId = configEditorSessionId;
+  pendingBatchDelete.value = null;
+  deletingConfig.value = true;
+  configError.value = "";
+  configSaveNotice.value = "";
+  const deletedKeys = new Set<string>();
+  let firstError = "";
+  let interrupted = false;
+  try {
+    // Reuse the version-aware single-config delete path rather than relying on a batch API that differs across Nacos implementations.
+    for (const key of snapshot.keys) {
+      if (!isBatchDeleteSnapshotInScope(snapshot)) {
+        interrupted = true;
+        break;
+      }
+      try {
+        await api.nacosDeleteConfig(snapshot.connectionId, key);
+        deletedKeys.add(configIdentityKey(key));
+      } catch (error) {
+        if (!firstError) firstError = error instanceof Error ? error.message : String(error);
+      }
+    }
+
+    if (!isBatchDeleteSnapshotInScope(snapshot)) interrupted = true;
+    if (!interrupted) {
+      if (deletedKeys.size) {
+        reconcileDeletedConfigSelection(deletedKeys);
+        await loadConfigs();
+      }
+      const selectedKey = selectedConfigOriginalKey.value;
+      const stillViewingDeletedConfig = editorSessionId === configEditorSessionId && selectedKey != null && deletedKeys.has(configIdentityKey(selectedKey));
+      if (stillViewingDeletedConfig) {
+        configDetailRequestGuard.invalidate();
+        configEditorSessionId += 1;
+        selectedConfig.value = null;
+        selectedConfigOriginalKey.value = null;
+        configContent.value = "";
+        originalConfigContent.value = "";
+        destroyConfigEditor();
+      }
+
+      if (firstError) {
+        configError.value = `${t("nacos.batchDeletePartial", { deleted: deletedKeys.size, failed: snapshot.keys.length - deletedKeys.size })} ${firstError}`;
+        toast(t("nacos.batchDeletePartial", { deleted: deletedKeys.size, failed: snapshot.keys.length - deletedKeys.size }), 3000);
+      } else {
+        toast(t("nacos.batchDeleteSuccess", { count: deletedKeys.size }), 2000);
+      }
+    } else {
+      toast(t("nacos.batchDeleteInterrupted", { deleted: deletedKeys.size }), 3000);
+    }
   } finally {
     deletingConfig.value = false;
   }
@@ -2150,6 +2312,7 @@ watch(
     if (!view) return;
     const [{ EditorView }, theme] = await Promise.all([import("@codemirror/view"), loadEditorTheme(settings.theme, editorThemeAppearance(), currentCustomThemeColors(), themePalette.value)]);
     if (configEditorView.value !== view) return;
+    configEditorFontSize.value = clampEditorFontSize(settings.fontSize);
     view.dispatch({
       effects: [configEditorTheme.reconfigure(theme), configEditorFontTheme.reconfigure(editorFontTheme(EditorView, settings.fontSize, settings.fontFamily, { fixedHeight: true, scrollable: true }))],
     });
@@ -2226,6 +2389,7 @@ onBeforeUnmount(() => {
   stopNacosNamespacesChangedListener = null;
   if (activeSearchOperationId.value) void api.nacosCancelConfigContentSearch(activeSearchOperationId.value);
   configListResizeObserver?.disconnect();
+  configEditorZoomCommitScheduler.dispose();
   destroyConfigEditor();
 });
 </script>
@@ -2270,6 +2434,11 @@ onBeforeUnmount(() => {
           <ArrowLeftRight class="h-3.5 w-3.5" />
           {{ t("nacos.copyToNamespace") }}
         </Button>
+        <Button v-if="activeTab === 'configs' && selectedConfigCount > 0" size="sm" variant="destructive" class="h-8 gap-1.5" :disabled="!canRequestBatchDeleteConfigs" @click="requestBatchDeleteConfigs">
+          <Trash2 class="h-3.5 w-3.5" />
+          {{ t("nacos.batchDelete") }}
+          <span class="border-l border-current/30 pl-1.5 text-xs font-semibold tabular-nums">{{ selectedConfigCount }}</span>
+        </Button>
       </div>
     </div>
 
@@ -2296,7 +2465,7 @@ onBeforeUnmount(() => {
               </button>
             </div>
             <div class="relative min-w-0">
-              <Input v-model="configGroup" class="h-8 min-w-0 pr-8" :placeholder="t('nacos.allGroups')" @keyup.enter="loadConfigsWithRetry(1)" />
+              <Input v-model="configGroup" class="h-8 min-w-0 pr-8" :placeholder="t('nacos.configListGroup')" @keyup.enter="loadConfigsWithRetry(1)" />
               <button
                 v-if="configGroup"
                 type="button"
@@ -2309,7 +2478,7 @@ onBeforeUnmount(() => {
               </button>
             </div>
             <div class="relative min-w-0">
-              <Input v-model="configAppName" class="h-8 min-w-0 pr-8" :placeholder="t('nacos.application')" @keyup.enter="loadConfigsWithRetry(1)" />
+              <Input v-model="configAppName" class="h-8 min-w-0 pr-8" :placeholder="t('nacos.configListApplication')" @keyup.enter="loadConfigsWithRetry(1)" />
               <button
                 v-if="configAppName"
                 type="button"
@@ -2333,86 +2502,85 @@ onBeforeUnmount(() => {
           <div ref="configListViewport" class="min-h-0 flex-1 overflow-auto">
             <div class="w-max min-w-full" :style="{ minWidth: configListMinWidth }">
               <div class="sticky top-0 z-20 grid border-b bg-muted px-3 py-2 text-[11px] font-medium uppercase tracking-wide text-muted-foreground shadow-sm" :style="{ gridTemplateColumns: configListGridTemplate }">
-                <div class="relative min-w-0 pr-3">
-                  <span class="flex items-center gap-2">
+                <div v-for="(column, columnIndex) in configListColumns" :key="column" class="relative min-w-0" :class="column === 'dataId' ? 'pr-3' : columnIndex === configListColumns.length - 1 ? 'pl-3 pr-10' : 'px-3'">
+                  <span v-if="column === 'dataId'" class="flex items-center gap-2">
                     <input type="checkbox" :checked="allCurrentPageSelected" :aria-label="t('nacos.selectCurrentPage')" @change="toggleCurrentPageSelection(($event.target as HTMLInputElement).checked)" />
                     <span class="block truncate">dataID</span>
                   </span>
+                  <span v-else-if="column === 'group'" class="block truncate">{{ t("nacos.group") }}</span>
+                  <span v-else-if="column === 'application'" class="block truncate">{{ configListColumnLabel("application") }}</span>
+                  <span v-else class="block truncate">{{ configListColumnLabel("format") }}</span>
                   <div
+                    v-if="columnIndex < configListColumns.length - 1"
                     data-column-resize-handle
                     role="separator"
                     aria-orientation="vertical"
                     :aria-label="t('nacos.resizeColumn')"
                     class="group absolute -right-1 top-0 z-10 h-full w-2 cursor-col-resize hover:bg-primary/10"
-                    :class="configListResizingColumnIndex === 0 ? 'bg-primary/15' : ''"
-                    @mousedown="onConfigListColumnResizeStart(0, $event)"
+                    :class="configListResizingColumnIndex === columnIndex ? 'bg-primary/15' : ''"
+                    @mousedown="onConfigListColumnResizeStart(columnIndex, $event)"
                   >
                     <span class="pointer-events-none absolute left-1/2 top-1/2 h-5 w-px -translate-x-1/2 -translate-y-1/2 bg-border/90 transition-colors group-hover:bg-primary" />
                   </div>
                 </div>
-                <div class="relative min-w-0 px-3">
-                  <span class="block truncate">{{ t("nacos.group") }}</span>
-                  <div
-                    data-column-resize-handle
-                    role="separator"
-                    aria-orientation="vertical"
-                    :aria-label="t('nacos.resizeColumn')"
-                    class="group absolute -right-1 top-0 z-10 h-full w-2 cursor-col-resize hover:bg-primary/10"
-                    :class="configListResizingColumnIndex === 1 ? 'bg-primary/15' : ''"
-                    @mousedown="onConfigListColumnResizeStart(1, $event)"
-                  >
-                    <span class="pointer-events-none absolute left-1/2 top-1/2 h-5 w-px -translate-x-1/2 -translate-y-1/2 bg-border/90 transition-colors group-hover:bg-primary" />
-                  </div>
-                </div>
-                <div class="relative min-w-0 px-3">
-                  <span class="block truncate">{{ t("nacos.application") }}</span>
-                  <div
-                    data-column-resize-handle
-                    role="separator"
-                    aria-orientation="vertical"
-                    :aria-label="t('nacos.resizeColumn')"
-                    class="group absolute -right-1 top-0 z-10 h-full w-2 cursor-col-resize hover:bg-primary/10"
-                    :class="configListResizingColumnIndex === 2 ? 'bg-primary/15' : ''"
-                    @mousedown="onConfigListColumnResizeStart(2, $event)"
-                  >
-                    <span class="pointer-events-none absolute left-1/2 top-1/2 h-5 w-px -translate-x-1/2 -translate-y-1/2 bg-border/90 transition-colors group-hover:bg-primary" />
-                  </div>
-                </div>
-                <div class="relative min-w-0 pl-3">
-                  <span class="block truncate">{{ t("nacos.format") }}</span>
-                </div>
+                <DropdownMenu>
+                  <DropdownMenuTrigger as-child>
+                    <Button size="sm" variant="ghost" class="absolute right-1 top-1/2 z-20 h-7 w-7 -translate-y-1/2 p-0" :title="t('nacos.visibleColumns')" :aria-label="t('nacos.visibleColumns')">
+                      <Columns3 class="h-3.5 w-3.5" />
+                    </Button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="end" class="min-w-40" @close-auto-focus.prevent>
+                    <DropdownMenuCheckboxItem v-for="column in configListToggleableColumns" :key="column" :model-value="isConfigListColumnVisible(column)" @select.prevent @update:model-value="setConfigListColumnVisible(column, $event)">
+                      {{ configListColumnLabel(column) }}
+                    </DropdownMenuCheckboxItem>
+                  </DropdownMenuContent>
+                </DropdownMenu>
               </div>
               <div
                 v-for="item in configs"
                 :key="`${item.namespace}:${item.group}:${item.dataId}`"
                 class="grid w-full cursor-pointer items-center border-b px-3 py-2.5 text-left text-sm transition-colors hover:bg-accent/50"
-                :class="{ 'bg-accent': selectedConfig?.dataId === item.dataId && selectedConfig?.group === item.group && (selectedConfig?.namespace || namespace) === (item.namespace || namespace) }"
+                :class="{ 'border-l-2 border-l-primary': isSelectedConfigListItem(item) }"
                 :style="{ gridTemplateColumns: configListGridTemplate }"
                 @click="selectConfig(item)"
               >
-                <span class="flex min-w-0 items-center gap-2 pr-3" :title="item.dataId">
-                  <input type="checkbox" :checked="selectedConfigKeys.includes(configIdentityKey(item))" :aria-label="t('nacos.selectConfigForBatch', { dataId: item.dataId })" @click.stop @change.stop="toggleConfigSelection(item, ($event.target as HTMLInputElement).checked)" />
-                  <button type="button" class="flex min-w-0 items-center gap-2 text-left" @click.stop="selectConfig(item)">
-                    <FileText class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-                    <span class="truncate font-medium text-foreground">{{ item.dataId }}</span>
-                  </button>
-                </span>
-                <span class="truncate px-3 text-xs text-muted-foreground" :title="item.group || 'DEFAULT_GROUP'">{{ item.group || "DEFAULT_GROUP" }}</span>
-                <span class="truncate px-3 text-xs text-muted-foreground" :title="item.appName || '-'">{{ item.appName || "-" }}</span>
-                <span class="truncate pl-3 text-xs text-muted-foreground" :title="configFormatLabel(item)">{{ configFormatLabel(item) }}</span>
+                <template v-for="column in configListColumns" :key="column">
+                  <span v-if="column === 'dataId'" class="flex min-w-0 items-center gap-2 pr-3" :title="item.dataId">
+                    <input type="checkbox" :checked="selectedConfigKeys.includes(configIdentityKey(item))" :aria-label="t('nacos.selectConfigForBatch', { dataId: item.dataId })" @click.stop @change.stop="toggleConfigSelection(item, ($event.target as HTMLInputElement).checked)" />
+                    <button type="button" class="flex min-w-0 items-center gap-2 text-left" @click.stop="selectConfig(item)">
+                      <FileText class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                      <span class="truncate font-medium text-foreground">{{ item.dataId }}</span>
+                    </button>
+                  </span>
+                  <span v-else-if="column === 'group'" class="truncate px-3 text-xs text-muted-foreground" :title="item.group || 'DEFAULT_GROUP'">{{ item.group || "DEFAULT_GROUP" }}</span>
+                  <span v-else-if="column === 'application'" class="truncate px-3 text-xs text-muted-foreground" :title="item.appName || '-'">{{ item.appName || "-" }}</span>
+                  <span v-else class="truncate pl-3 text-xs text-muted-foreground" :title="configFormatLabel(item)">{{ configFormatLabel(item) }}</span>
+                </template>
               </div>
             </div>
             <div v-if="!configLoading && configs.length === 0" class="flex h-full items-center justify-center text-sm text-muted-foreground">{{ t("nacos.noConfigs") }}</div>
           </div>
-          <div class="flex shrink-0 items-center justify-between border-t px-3 py-2 text-xs text-muted-foreground">
-            <div class="flex items-center gap-3">
-              <span>{{ t("nacos.total", { count: configTotal }) }}</span>
-              <span>{{ t("nacos.selectedCount", { count: selectedConfigCount }) }}</span>
+          <div class="grid shrink-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-2 border-t px-3 py-2 text-xs text-muted-foreground">
+            <div class="flex min-w-0 items-center gap-3 overflow-hidden">
+              <span class="min-w-0 truncate">{{ t("nacos.total", { count: configTotal }) }}</span>
             </div>
-            <div class="flex items-center gap-2">
-              <Button size="sm" variant="outline" class="h-7" :disabled="configPageNo <= 1 || configLoading" @click="loadConfigs(configPageNo - 1)">{{ t("nacos.prev") }}</Button>
+            <div class="flex shrink-0 items-center gap-2">
+              <div class="flex items-center gap-1.5 whitespace-nowrap">
+                <span>{{ t("nacos.configPageSize") }}</span>
+                <Select :model-value="String(configPageSize)" :disabled="configLoading" @update:model-value="setConfigPageSize(String($event))">
+                  <SelectTrigger size="sm" class="w-16 text-xs" :aria-label="t('nacos.configPageSize')"><SelectValue /></SelectTrigger>
+                  <SelectContent position="popper">
+                    <SelectItem v-for="size in NACOS_CONFIG_PAGE_SIZE_OPTIONS" :key="size" :value="String(size)">{{ size }}</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <Button size="icon" variant="outline" class="h-7 w-7" :title="t('nacos.prev')" :aria-label="t('nacos.prev')" :disabled="configPageNo <= 1 || configLoading" @click="loadConfigs(configPageNo - 1)">
+                <ChevronLeft class="h-3.5 w-3.5" />
+              </Button>
               <span>{{ configPageNo }} / {{ configTotalPages }}</span>
-              <Button size="sm" variant="outline" class="h-7" :disabled="configPageNo >= configTotalPages || configLoading" @click="loadConfigs(configPageNo + 1)">{{ t("nacos.next") }}</Button>
+              <Button size="icon" variant="outline" class="h-7 w-7" :title="t('nacos.next')" :aria-label="t('nacos.next')" :disabled="configPageNo >= configTotalPages || configLoading" @click="loadConfigs(configPageNo + 1)">
+                <ChevronRight class="h-3.5 w-3.5" />
+              </Button>
             </div>
           </div>
         </div>
@@ -2806,7 +2974,14 @@ onBeforeUnmount(() => {
                   </div>
                   <div class="flex shrink-0 flex-wrap items-center gap-2 xl:justify-end">
                     <Button size="sm" variant="outline" class="h-7" :disabled="readOnly || !supportsInstanceUpdate || isInstanceUpdating(instance)" @click="openInstanceEditor(instance)">{{ t("nacos.edit") }}</Button>
-                    <Button size="sm" variant="outline" class="h-7 gap-1" :disabled="readOnly || !supportsInstanceUpdate || isInstanceUpdating(instance)" @click="requestUpdateInstance(instance, { enabled: !instance.enabled })">
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      class="h-7 gap-1"
+                      :class="instance.enabled === false ? 'border-emerald-500/50 text-emerald-700 hover:bg-emerald-500/10 hover:text-emerald-800 dark:text-emerald-300 dark:hover:text-emerald-200' : 'border-destructive/50 text-destructive hover:bg-destructive/10'"
+                      :disabled="readOnly || !supportsInstanceUpdate || isInstanceUpdating(instance)"
+                      @click="requestUpdateInstance(instance, { enabled: !instance.enabled })"
+                    >
                       <Loader2 v-if="isInstanceUpdating(instance)" class="h-3 w-3 animate-spin" />
                       {{ instance.enabled === false ? t("nacos.enable") : t("nacos.disable") }}
                     </Button>
@@ -3037,6 +3212,22 @@ onBeforeUnmount(() => {
         }
       "
       @confirm="deleteConfig"
+    />
+
+    <DangerConfirmDialog
+      :open="!!pendingBatchDelete"
+      :title="t('nacos.batchDeleteTitle')"
+      :message="t('nacos.batchDeleteConfirm', { count: pendingBatchDelete?.keys.length || 0 })"
+      :details="pendingBatchDeleteDetails"
+      :confirm-label="t('nacos.batchDelete')"
+      :loading="deletingConfig"
+      :close-on-confirm="false"
+      @update:open="
+        (value: boolean) => {
+          if (!value && !deletingConfig) pendingBatchDelete = null;
+        }
+      "
+      @confirm="deleteSelectedConfigs"
     />
 
     <DangerConfirmDialog

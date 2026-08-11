@@ -18,6 +18,7 @@ import {
   Eraser,
   Eye,
   FileCode,
+  Info,
   GripVertical,
   KeyRound,
   LayoutGrid,
@@ -55,6 +56,7 @@ import { SearchableSelect } from "@/components/ui/searchable-select";
 import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
 import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
 import ProcedureExecutionDialog from "@/components/objects/ProcedureExecutionDialog.vue";
+import CustomTypeInfoPanel from "@/components/objects/CustomTypeInfoPanel.vue";
 import XlsxHeaderDialog from "@/components/export/XlsxHeaderDialog.vue";
 import * as api from "@/lib/backend/api";
 import type { ColumnInfo, ConnectionConfig, ForeignKeyInfo, IndexInfo, ObjectBrowserViewMode, ObjectBrowserViewport, ObjectInfo, ObjectSourceKind, ObjectStatistics, TableInfoTab, TreeNode, TriggerInfo } from "@/types/database";
@@ -118,6 +120,7 @@ import {
   type ObjectBrowserSortKey,
 } from "@/lib/table/objectBrowserRows";
 import { isSourceOnlyObjectBrowserRow, resolveRowClickAction, shouldDeferSingleClick, type ObjectBrowserRowAction } from "@/lib/table/objectBrowserRowAction";
+import { customTypeCapabilities, supportsTypeObjectSource } from "@/lib/database/databaseObjectCapabilities";
 import { filterObjectBrowserTableColumns } from "@/lib/table/objectBrowserTableInfo";
 import { createSidePanelRequestGuard } from "@/lib/table/sidePanelRequestGuard";
 import { runBatchTableTruncate } from "@/lib/table/batchTableTruncate";
@@ -173,7 +176,7 @@ const sourceCanEdit = ref(true);
 // --- Right-side panel state ---
 // Unified panel: either "table-info" (for tables) or "source" (for views/procedures/etc.)
 const sidePanelRow = ref<ObjectBrowserRow | null>(null);
-const sidePanelMode = ref<"table-info" | "source">("source");
+const sidePanelMode = ref<"table-info" | "source" | "type-info">("source");
 // Table info panel state
 const tableInfoTab = ref<TableInfoTab>("ddl");
 const tableColumns = ref<ColumnInfo[]>([]);
@@ -196,6 +199,7 @@ let sidePanelResizeStartX = 0;
 let sidePanelResizeStartWidth = 0;
 const isResizingSidePanel = ref(false);
 const sidePanelGuard = createSidePanelRequestGuard();
+const sidePanelRef = ref<InstanceType<typeof CustomTypeInfoPanel> | null>(null);
 const tableMetadataCapabilities = computed<TableMetadataCapabilities>(() => getTableMetadataCapabilities(effectiveDatabaseType.value));
 const effectiveDatabaseType = computed(() => effectiveDatabaseTypeForConnection(props.connection) ?? props.connection.db_type);
 const isVictoriaMetrics = computed(() => effectiveDatabaseType.value === "victoriametrics");
@@ -822,6 +826,9 @@ function executeRowAction(row: ObjectBrowserRow, action: ObjectBrowserRowAction)
     case "table-info":
       void openTableInfo(row);
       break;
+    case "type-info":
+      void openTypeInfo(row);
+      break;
     case "open-table":
       emit("openTable", { tableName: row.name, schema: row.schema, catalog: props.catalog });
       break;
@@ -833,7 +840,7 @@ function executeRowAction(row: ObjectBrowserRow, action: ObjectBrowserRowAction)
 
 function onRowClick(row: ObjectBrowserRow, event: MouseEvent) {
   const activation = settingsStore.editorSettings.sidebarActivation;
-  const { action, isDouble } = resolveRowClickAction(row, event.detail, activation);
+  const { action, isDouble } = resolveRowClickAction(row, event.detail, activation, effectiveDatabaseType.value);
   // Double click: cancel any pending single-click and fire immediately
   if (isDouble) {
     if (singleClickTimer) {
@@ -1105,6 +1112,28 @@ function closeSidePanel() {
   sidePanelRow.value = null;
   sidePanelMode.value = "source";
   sidePanelGuard.bump();
+}
+
+async function openTypeInfo(row: ObjectBrowserRow) {
+  if (sidePanelRow.value?.id === row.id && sidePanelMode.value === "type-info") {
+    closeSidePanel();
+    return;
+  }
+  sidePanelRow.value = row;
+  sidePanelMode.value = "type-info";
+  sidePanelGuard.bump();
+}
+
+function openTypeDdl(row: ObjectBrowserRow) {
+  sidePanelRow.value = row;
+  sidePanelMode.value = "type-info";
+  sidePanelGuard.bump();
+  // DDL tab is selected by the panel once details load; switching the tab is
+  // deferred via a dedicated request so the panel can focus it.
+  nextTick(() => {
+    const panel = sidePanelRef.value;
+    panel?.selectTab("ddl");
+  });
 }
 
 const canOpenTableStructureEditor = computed(() => sidePanelRow.value?.type === "TABLE" && canOpenStructureEditor.value);
@@ -2737,9 +2766,32 @@ function getPackageMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
   ];
 }
 
+function getTypeMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
+  const items: ContextMenuItem[] = [];
+  const capabilities = customTypeCapabilities(effectiveDatabaseType.value);
+  // Verified PG-family types open the read-only details panel; Xugu keeps its
+  // “view source” entry for TYPE/TYPE_BODY rows.
+  if (supportsTypeObjectSource(effectiveDatabaseType.value)) {
+    items.push({ label: t("contextMenu.viewSource"), action: () => openSource(item), icon: Code2 });
+  }
+  if (capabilities.details) {
+    items.push({ label: t("contextMenu.viewDetails"), action: () => void openTypeInfo(item), icon: Info });
+    if (capabilities.ddl) {
+      items.push({ label: t("contextMenu.viewDdl"), action: () => openTypeDdl(item), icon: FileCode });
+    }
+  }
+  // Only separate when an action precedes copy-name.
+  if (items.length > 0) {
+    items.push({ label: "", separator: true });
+  }
+  items.push({ label: t("contextMenu.copyName"), action: () => copyName(item), icon: Copy });
+  return items;
+}
+
 function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
   if (item.type === "TABLE") return getTableMenuItems(item);
   if (item.type === "VIEW" || item.type === "MATERIALIZED_VIEW") return getViewMenuItems(item);
+  if (item.type === "TYPE" || item.type === "TYPE_BODY") return getTypeMenuItems(item);
   if (isSourceOnlyObjectBrowserRow(item)) return getPackageMenuItems(item);
   return getProcFuncMenuItems(item);
 }
@@ -3232,6 +3284,10 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
           <div v-else class="flex-1 flex items-center justify-center">
             <Loader2 class="w-4 h-4 animate-spin text-muted-foreground" />
           </div>
+        </template>
+        <!-- Type info mode (read-only user-defined type details) -->
+        <template v-else-if="sidePanelMode === 'type-info'">
+          <CustomTypeInfoPanel ref="sidePanelRef" :connection="props.connection" :database="props.database" :schema="sidePanelRow?.schema || selectedSchema || props.database" :name="sidePanelRow?.name || ''" :catalog="props.catalog" @close="closeSidePanel" />
         </template>
         <!-- Source mode (views, procedures, functions, sequences) -->
         <template v-else>

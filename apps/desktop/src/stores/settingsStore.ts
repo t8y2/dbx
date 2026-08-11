@@ -264,6 +264,15 @@ export const AI_PROVIDER_PRESETS: Record<AiProvider, AiProviderPreset> = {
     authMethod: "bearer",
     requiresApiKey: false,
   },
+  "qoder-cli": {
+    label: "Qoder CLI",
+    provider: "qoder-cli",
+    endpoint: "",
+    model: "default",
+    apiStyle: "completions",
+    authMethod: "bearer",
+    requiresApiKey: false,
+  },
   "grok-cli": {
     label: "Grok CLI",
     iconSlug: "grok",
@@ -348,6 +357,8 @@ export function normalizeAiConfig(config: Partial<AiConfig> | null | undefined):
     grokCliEnv: normalizeAiEnv(config?.grokCliEnv),
     codebuddyCliPath: config?.codebuddyCliPath?.trim() || undefined,
     codebuddyCliEnv: normalizeAiEnv(config?.codebuddyCliEnv),
+    qoderCliPath: config?.qoderCliPath?.trim() || undefined,
+    qoderCliEnv: normalizeAiEnv(config?.qoderCliEnv),
   };
 }
 
@@ -580,6 +591,7 @@ export interface EditorSettings {
   exportRowLimit: number;
   queryExportKeysetOptimizationEnabled: boolean;
   updateDownloadSource: UpdateDownloadSource;
+  ignoredUpdateVersion: string;
   toolbarItems: ToolbarItems;
   objectBrowserShowCheckbox: boolean;
   objectBrowserViewMode: "list" | "grid";
@@ -770,6 +782,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   exportRowLimit: 100000,
   queryExportKeysetOptimizationEnabled: true,
   updateDownloadSource: "official",
+  ignoredUpdateVersion: "",
   toolbarItems: { ...DEFAULT_TOOLBAR_ITEMS },
   objectBrowserShowCheckbox: false,
   objectBrowserViewMode: "list",
@@ -1145,6 +1158,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     exportRowLimit: typeof settings.exportRowLimit === "number" && settings.exportRowLimit >= 100 && settings.exportRowLimit <= 2147483647 ? Math.round(settings.exportRowLimit) : DEFAULT_EDITOR_SETTINGS.exportRowLimit,
     queryExportKeysetOptimizationEnabled: typeof settings.queryExportKeysetOptimizationEnabled === "boolean" ? settings.queryExportKeysetOptimizationEnabled : DEFAULT_EDITOR_SETTINGS.queryExportKeysetOptimizationEnabled,
     updateDownloadSource: normalizeUpdateDownloadSource(settings.updateDownloadSource),
+    ignoredUpdateVersion: typeof settings.ignoredUpdateVersion === "string" ? settings.ignoredUpdateVersion : DEFAULT_EDITOR_SETTINGS.ignoredUpdateVersion,
     toolbarItems: normalizeToolbarItems(settings.toolbarItems),
     objectBrowserShowCheckbox: typeof settings.objectBrowserShowCheckbox === "boolean" ? settings.objectBrowserShowCheckbox : DEFAULT_EDITOR_SETTINGS.objectBrowserShowCheckbox,
     objectBrowserViewMode: settings.objectBrowserViewMode === "grid" ? "grid" : DEFAULT_EDITOR_SETTINGS.objectBrowserViewMode,
@@ -1189,10 +1203,6 @@ function editorSettingsPatchSnapshot(settings: Partial<EditorSettings>): Partial
   return JSON.parse(JSON.stringify(settings)) as Partial<EditorSettings>;
 }
 
-function saveEditorSettings(settings: EditorSettings) {
-  void api.saveEditorSettings(editorSettingsSnapshot(settings)).catch(() => {});
-}
-
 export interface SettingsNavigationRequest {
   id: number;
   tab: string;
@@ -1216,10 +1226,36 @@ export const useSettingsStore = defineStore("settings", () => {
   const isEditorSettingsLoaded = ref(false);
   let initEditorSettingsPromise: Promise<void> | null = null;
   let pendingEditorSettingsPatches: Partial<EditorSettings>[] = [];
+  let editorSettingsSaveQueue: Promise<void> | null = null;
+  let editorSettingsAtomicUpdateQueue: Promise<void> = Promise.resolve();
+  let editorSettingsPatchRevision = 0;
+  const editorSettingsFieldRevisions = new Map<keyof EditorSettings, number>();
   let pendingAiChatSelection: AiChatSelectionState | null = null;
   let aiChatSelectionSaveRunning = false;
 
   const editorSettings = ref<EditorSettings>(normalizeEditorSettings({}));
+
+  function enqueueEditorSettingsSave(): Promise<void> {
+    const saveCurrentSettings = () => api.saveEditorSettings(editorSettingsSnapshot(editorSettings.value));
+    const save = editorSettingsSaveQueue ? editorSettingsSaveQueue.catch(() => {}).then(saveCurrentSettings) : saveCurrentSettings();
+    const trackedSave = save.finally(() => {
+      if (editorSettingsSaveQueue === trackedSave) editorSettingsSaveQueue = null;
+    });
+    editorSettingsSaveQueue = trackedSave;
+    return trackedSave;
+  }
+
+  function saveEditorSettings() {
+    void enqueueEditorSettingsSave().catch(() => {});
+  }
+
+  function markEditorSettingsPatch(partial: Partial<EditorSettings>): number {
+    const revision = ++editorSettingsPatchRevision;
+    for (const key of Object.keys(partial) as (keyof EditorSettings)[]) {
+      if (partial[key] !== undefined) editorSettingsFieldRevisions.set(key, revision);
+    }
+    return revision;
+  }
 
   function requestSettingsNavigation(tab: string, section?: string) {
     settingsNavigationRequest.value = {
@@ -1238,7 +1274,7 @@ export const useSettingsStore = defineStore("settings", () => {
     pendingEditorSettingsPatches = [];
     for (const patch of pendingPatches) applyEditorSettingsPatch(patch);
     isEditorSettingsLoaded.value = true;
-    if (pendingPatches.length) saveEditorSettings(editorSettings.value);
+    if (pendingPatches.length) saveEditorSettings();
   }
 
   async function initEditorSettings() {
@@ -1257,7 +1293,7 @@ export const useSettingsStore = defineStore("settings", () => {
           const savedUpdateDownloadSource = (saved as { updateDownloadSource?: unknown }).updateDownloadSource;
           if (savedUpdateDownloadSource === "atomgit" || needsExecuteModeDefaultMigration) {
             // Persist one-time migrations so removed or unsafe defaults cannot reappear.
-            await api.saveEditorSettings(normalized).catch(() => {});
+            await enqueueEditorSettingsSave().catch(() => {});
           }
           completeEditorSettingsInitialization();
           return;
@@ -1267,7 +1303,7 @@ export const useSettingsStore = defineStore("settings", () => {
         if (legacy) {
           editorSettings.value = legacy;
           try {
-            await api.saveEditorSettings(legacy);
+            await enqueueEditorSettingsSave();
             // Existing desktop users keep settings in localStorage; remove them only
             // after the async store has accepted the migrated value.
             clearLegacyEditorSettings();
@@ -1520,7 +1556,17 @@ export const useSettingsStore = defineStore("settings", () => {
     const config = aiConfigs.value.find((c) => c.id === activeModel.value!.configId);
     if (!config) return false;
     const preset = AI_PROVIDER_PRESETS[config.provider];
-    if (config.provider === "codex-cli" || config.provider === "claude-code-cli" || config.provider === "pi-agent-cli" || config.provider === "opencode-cli" || config.provider === "cursor-cli" || config.provider === "grok-cli" || config.provider === "codebuddy-cli") return true;
+    if (
+      config.provider === "codex-cli" ||
+      config.provider === "claude-code-cli" ||
+      config.provider === "pi-agent-cli" ||
+      config.provider === "opencode-cli" ||
+      config.provider === "cursor-cli" ||
+      config.provider === "grok-cli" ||
+      config.provider === "codebuddy-cli" ||
+      config.provider === "qoder-cli"
+    )
+      return true;
     return !!config.endpoint && !!activeModel.value!.modelId && (!preset.requiresApiKey || !!config.apiKey);
   });
 
@@ -1649,6 +1695,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.exportRowLimit !== undefined) editorSettings.value.exportRowLimit = Math.min(2147483647, Math.max(100, Math.round(partial.exportRowLimit)));
     if (partial.queryExportKeysetOptimizationEnabled !== undefined) editorSettings.value.queryExportKeysetOptimizationEnabled = partial.queryExportKeysetOptimizationEnabled;
     if (partial.updateDownloadSource !== undefined) editorSettings.value.updateDownloadSource = normalizeUpdateDownloadSource(partial.updateDownloadSource);
+    if (partial.ignoredUpdateVersion !== undefined) editorSettings.value.ignoredUpdateVersion = typeof partial.ignoredUpdateVersion === "string" ? partial.ignoredUpdateVersion : "";
     if (partial.toolbarItems !== undefined) editorSettings.value.toolbarItems = normalizeToolbarItems(partial.toolbarItems);
     if (partial.objectBrowserShowCheckbox !== undefined) editorSettings.value.objectBrowserShowCheckbox = partial.objectBrowserShowCheckbox === true;
     if (partial.objectBrowserViewMode !== undefined) editorSettings.value.objectBrowserViewMode = partial.objectBrowserViewMode === "grid" ? "grid" : "list";
@@ -1660,16 +1707,45 @@ export const useSettingsStore = defineStore("settings", () => {
 
   function updateEditorSettings(partial: Partial<EditorSettings>) {
     applyEditorSettingsPatch(partial);
+    markEditorSettingsPatch(partial);
     if (!isEditorSettingsLoaded.value) {
       pendingEditorSettingsPatches.push(editorSettingsPatchSnapshot(partial));
       return;
     }
-    saveEditorSettings(editorSettings.value);
+    saveEditorSettings();
   }
 
   async function persistEditorSettings(): Promise<void> {
     await initEditorSettings();
-    await api.saveEditorSettings(editorSettingsSnapshot(editorSettings.value));
+    await enqueueEditorSettingsSave();
+  }
+
+  function updateEditorSettingsAndPersist(partial: Partial<EditorSettings>): Promise<void> {
+    const update = editorSettingsAtomicUpdateQueue
+      .catch(() => {})
+      .then(async () => {
+        await initEditorSettings();
+        const previous = editorSettingsSnapshot(editorSettings.value);
+        applyEditorSettingsPatch(partial);
+        const revision = markEditorSettingsPatch(partial);
+        try {
+          await enqueueEditorSettingsSave();
+        } catch (error) {
+          const restored = editorSettingsSnapshot(editorSettings.value) as unknown as Record<string, unknown>;
+          const previousSettings = previous as unknown as Record<string, unknown>;
+          let changed = false;
+          for (const key of Object.keys(partial) as (keyof EditorSettings)[]) {
+            if (partial[key] === undefined || editorSettingsFieldRevisions.get(key) !== revision) continue;
+            restored[key] = previousSettings[key];
+            editorSettingsFieldRevisions.set(key, ++editorSettingsPatchRevision);
+            changed = true;
+          }
+          if (changed) editorSettings.value = normalizeEditorSettings(restored);
+          throw error;
+        }
+      });
+    editorSettingsAtomicUpdateQueue = update.catch(() => {});
+    return update;
   }
 
   async function persistSidebarShowConnectionNotes(value: boolean): Promise<void> {
@@ -1745,6 +1821,7 @@ export const useSettingsStore = defineStore("settings", () => {
     mcpGlobalPolicy,
     initEditorSettings,
     updateEditorSettings,
+    updateEditorSettingsAndPersist,
     persistEditorSettings,
     persistSidebarShowConnectionNotes,
     initDesktopSettings,

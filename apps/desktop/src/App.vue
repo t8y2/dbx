@@ -172,11 +172,13 @@ const {
   updateDownloaded,
   isInstallingUpdate,
   updateReady,
+  isIgnoringUpdate,
   activeTaskCount: activeUpdateTaskCount,
   hasUpdateAvailable,
   openUrl,
   checkUpdates,
   openLatestRelease,
+  ignoreCurrentVersion,
   downloadAndInstallUpdate,
   cancelDownload,
   installDownloadedUpdate,
@@ -2857,12 +2859,14 @@ onUnmounted(() => {
           :update-downloaded="updateDownloaded"
           :is-installing-update="isInstallingUpdate"
           :update-ready="updateReady"
+          :is-ignoring-update="isIgnoringUpdate"
           :active-task-count="activeUpdateTaskCount"
           @open-latest-release="openLatestRelease"
           @download-and-install="downloadAndInstallUpdate"
           @cancel-download="cancelDownload"
           @install-downloaded="installDownloadedUpdate"
           @restart="restartApp"
+          @ignore-version="ignoreCurrentVersion"
         />
         <ExternalSqlFileChangeDialog :prompt="externalSqlFilePrompt" @decide="externalSqlFileChanges.resolvePrompt" />
         <CloseActionPromptDialog v-if="isDesktop && showCloseActionPrompt" :open="showCloseActionPrompt" @update:open="handleCloseActionPromptOpenChange" @quit="chooseQuit" @minimize="chooseMinimize" />

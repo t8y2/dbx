@@ -126,6 +126,8 @@ pub async fn list_objects(pool: &mysql_async::Pool, schema: &str) -> Result<Vec<
                 .or_else(|| (!schema.trim().is_empty()).then(|| schema.to_string())),
             valid: None,
             signature: None,
+            custom_type_kind: None,
+            has_members: None,
             comment: None,
             created_at: None,
             updated_at: None,

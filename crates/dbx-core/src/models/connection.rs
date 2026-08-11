@@ -1514,7 +1514,9 @@ impl ConnectionConfig {
     }
 
     pub fn clickhouse_uses_tls(&self) -> bool {
-        self.ssl || url_params_contains_flag(self.url_params.as_deref(), "secure", "true")
+        self.ssl
+            || clickhouse_url_params_contains_flag(self.url_params.as_deref(), "secure", "true")
+            || clickhouse_url_params_contains_flag(self.url_params.as_deref(), "ssl", "true")
     }
 
     pub fn mysql_uses_tls(&self) -> bool {
@@ -1609,10 +1611,18 @@ fn without_sqlserver_legacy_compatibility_param(params: Option<&str>) -> Option<
     Some(output)
 }
 
-fn url_params_contains_flag(params: Option<&str>, key: &str, expected: &str) -> bool {
-    params.unwrap_or("").trim().trim_start_matches('?').split(['&', ';']).filter_map(|part| part.split_once('=')).any(
-        |(part_key, value)| part_key.trim().eq_ignore_ascii_case(key) && value.trim().eq_ignore_ascii_case(expected),
-    )
+fn clickhouse_url_params_contains_flag(params: Option<&str>, key: &str, expected: &str) -> bool {
+    params
+        .unwrap_or("")
+        .trim()
+        .trim_start_matches(['?', '&', ';'])
+        .split(['&', ';'])
+        .filter_map(|part| part.split_once('='))
+        .any(|(part_key, value)| {
+            let part_key = percent_encoding::percent_decode_str(part_key.trim()).decode_utf8_lossy();
+            let value = percent_encoding::percent_decode_str(value.trim()).decode_utf8_lossy();
+            part_key.eq_ignore_ascii_case(key) && value.eq_ignore_ascii_case(expected)
+        })
 }
 
 fn mysql_tls_file_param_is(key: &str, target: &str) -> bool {
@@ -3025,6 +3035,15 @@ mod tests {
 
         config.ssl = false;
         config.url_params = Some("secure=true".to_string());
+        assert_eq!(config.connection_url(), "https://10.1.2.3:8443");
+
+        config.url_params = Some("SSL=TrUe&dialect_type=ANSI".to_string());
+        assert_eq!(config.connection_url(), "https://10.1.2.3:8443");
+
+        config.url_params = Some("ssl=false&dialect_type=ANSI".to_string());
+        assert_eq!(config.connection_url(), "http://10.1.2.3:8443");
+
+        config.url_params = Some("?%53SL=Tr%75e;dialect_type=ANSI".to_string());
         assert_eq!(config.connection_url(), "https://10.1.2.3:8443");
     }
 

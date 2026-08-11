@@ -559,6 +559,8 @@ test("AI provider presets include common hosted and local providers", () => {
   assert.equal(AI_PROVIDER_PRESETS["codebuddy-cli"].model, "default");
   assert.equal(AI_PROVIDER_PRESETS["codebuddy-cli"].iconSlug, "codebuddy");
   assert.equal(AI_PROVIDER_PRESETS["codebuddy-cli"].requiresApiKey, false);
+  assert.equal(AI_PROVIDER_PRESETS["qoder-cli"].model, "default");
+  assert.equal(AI_PROVIDER_PRESETS["qoder-cli"].requiresApiKey, false);
   assert.equal(AI_PROVIDER_PRESETS["grok-cli"].model, "default");
   assert.equal(AI_PROVIDER_PRESETS["grok-cli"].iconSlug, "grok");
   assert.equal(AI_PROVIDER_PRESETS["grok-cli"].requiresApiKey, false);
@@ -576,6 +578,8 @@ test("AI provider presets include common hosted and local providers", () => {
   assert.ok(Object.keys(AI_PROVIDER_PRESETS).indexOf("cursor-cli") < Object.keys(AI_PROVIDER_PRESETS).indexOf("pi-agent-cli"));
   assert.ok(Object.keys(AI_PROVIDER_PRESETS).indexOf("cursor-cli") < Object.keys(AI_PROVIDER_PRESETS).indexOf("codebuddy-cli"));
   assert.ok(Object.keys(AI_PROVIDER_PRESETS).indexOf("codebuddy-cli") < Object.keys(AI_PROVIDER_PRESETS).indexOf("grok-cli"));
+  assert.ok(Object.keys(AI_PROVIDER_PRESETS).indexOf("codebuddy-cli") < Object.keys(AI_PROVIDER_PRESETS).indexOf("qoder-cli"));
+  assert.ok(Object.keys(AI_PROVIDER_PRESETS).indexOf("qoder-cli") < Object.keys(AI_PROVIDER_PRESETS).indexOf("grok-cli"));
   assert.ok(Object.keys(AI_PROVIDER_PRESETS).indexOf("codex-cli") < Object.keys(AI_PROVIDER_PRESETS).indexOf("grok-cli"));
   assert.ok(Object.keys(AI_PROVIDER_PRESETS).indexOf("codex-cli") < Object.keys(AI_PROVIDER_PRESETS).indexOf("pi-agent-cli"));
 });
@@ -670,6 +674,14 @@ test("normalizes legacy AI config and fills provider defaults", () => {
   assert.equal(codeBuddy.codebuddyCliPath, "/opt/homebrew/bin/codebuddy");
   assert.deepEqual(codeBuddy.codebuddyCliEnv, { HTTPS_PROXY: "http://proxy:9800" });
   assert.equal(codeBuddy.model, "default");
+  const qoder = normalizeAiConfig({
+    provider: "qoder-cli",
+    qoderCliPath: " /opt/homebrew/bin/qodercli ",
+    qoderCliEnv: { QODER_PERSONAL_ACCESS_TOKEN: "token" },
+  });
+  assert.equal(qoder.qoderCliPath, "/opt/homebrew/bin/qodercli");
+  assert.deepEqual(qoder.qoderCliEnv, { QODER_PERSONAL_ACCESS_TOKEN: "token" });
+  assert.equal(qoder.model, "default");
 });
 
 test("infers legacy AI provider from saved endpoint and model", () => {

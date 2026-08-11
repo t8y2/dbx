@@ -3,6 +3,10 @@ import type { QueryTab, TreeNode } from "@/types/database";
 
 export type ActiveTabSidebarTarget =
   | {
+      type: "connection";
+      connectionId: string;
+    }
+  | {
       type: "table";
       connectionId: string;
       database: string;
@@ -79,6 +83,10 @@ export type ActiveTabSidebarTarget =
 
 export function activeTabSidebarTarget(tab: QueryTab | undefined | null): ActiveTabSidebarTarget | null {
   if (!tab) return null;
+
+  if (tab.mode === "databases") {
+    return { type: "connection", connectionId: tab.connectionId };
+  }
 
   if (tab.mode === "data") {
     const tableName = tab.tableMeta?.tableName || tab.title;
@@ -199,6 +207,10 @@ function schemaMatches(node: TreeNode, schema: string | undefined): boolean {
 }
 
 export function matchesTarget(node: TreeNode, target: ActiveTabSidebarTarget): boolean {
+  if (target.type === "connection") {
+    return node.type === "connection" && node.connectionId === target.connectionId;
+  }
+
   if (target.type === "mongo-collection") {
     if (node.type === "elasticsearch-index") {
       return node.connectionId === target.connectionId && node.label === target.collectionName;

@@ -169,7 +169,16 @@ async function refresh(): Promise<boolean> {
   loading.value = true;
   error.value = "";
   try {
-    const databases = await api.listDatabaseMetadata(props.connection.id);
+    let databases;
+    try {
+      databases = await api.listDatabaseMetadata(props.connection.id);
+    } catch (metadataError) {
+      try {
+        databases = await api.listDatabases(props.connection.id);
+      } catch {
+        throw metadataError;
+      }
+    }
     const visibleNames = new Set(
       filterDatabaseNamesForConnection(
         databases.map((database) => database.name),

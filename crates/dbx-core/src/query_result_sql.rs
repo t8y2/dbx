@@ -1109,8 +1109,36 @@ fn has_top_level_limit(sql: &str) -> bool {
 /// True when the statement has a top-level `TOP` clause (SQL Server dialect).
 /// Kingbase's SQL Server compatibility mode treats TOP as a real clause, so a
 /// statement that already bounds rows with TOP must not receive a sibling LIMIT.
-fn has_top_level_top(sql: &str) -> bool {
+pub(crate) fn has_top_level_top(sql: &str) -> bool {
     top_level_sql_tokens(sql).iter().any(|token| token.text == "TOP")
+}
+
+/// Concrete row-count bound of a top-level `TOP` clause when written as a
+/// literal (`TOP n`, `TOP(n)`, `TOP (n)`). Returns `None` for percentage TOP
+/// (`TOP n PERCENT`), `WITH TIES` (the server may return more than `n` rows),
+/// or when the TOP clause has no literal at all.
+pub(crate) fn top_level_top_row_count(sql: &str) -> Option<usize> {
+    let tokens = top_level_sql_tokens(sql);
+    let top_index = tokens.iter().position(|token| token.text == "TOP")?;
+    let top_token = &tokens[top_index];
+    // A modifier keyword directly after TOP (ALL / DISTINCT) means the following
+    // literal is not a plain row-count bound. PERCENT / WITH TIES come after the
+    // literal and are handled by the check below.
+    if tokens.get(top_index + 1).is_some_and(|token| matches!(token.text.as_str(), "ALL" | "DISTINCT")) {
+        return None;
+    }
+    let mut cursor = skip_sql_whitespace(sql, top_token.start + top_token.text.len());
+    if sql.get(cursor..)?.starts_with('(') {
+        cursor = skip_sql_whitespace(sql, cursor + 1);
+    }
+    let count = parse_usize_literal(sql, &mut cursor)?;
+    // `TOP n PERCENT` and `TOP n WITH TIES` tokenize the literal first but do not
+    // bound the row count to it, so reject both.
+    let after = skip_sql_whitespace(sql, cursor);
+    if tokens.iter().any(|token| token.start >= after && matches!(token.text.as_str(), "PERCENT" | "WITH")) {
+        return None;
+    }
+    Some(count)
 }
 
 fn top_level_limit_row_count(sql: &str) -> Option<usize> {
@@ -3235,6 +3263,26 @@ WHERE u.id = picked.id;
         assert_eq!(plan.page_offset, Some(0));
         assert!(plan.use_agent_result_session);
         assert!(!plan.single_execution);
+    }
+
+    #[test]
+    fn top_level_top_row_count_extracts_only_concrete_bounds() {
+        assert_eq!(top_level_top_row_count("SELECT TOP 100 * FROM events"), Some(100));
+        assert_eq!(top_level_top_row_count("SELECT TOP(100) * FROM events"), Some(100));
+        assert_eq!(top_level_top_row_count("SELECT TOP (100) * FROM events"), Some(100));
+        assert_eq!(top_level_top_row_count("SELECT TOP 100 events.name FROM events ORDER BY events.name"), Some(100));
+        assert_eq!(top_level_top_row_count("SELECT TOP 100 * FROM events LIMIT 5"), Some(100));
+
+        // Percentage TOP and WITH TIES are not concrete row-count bounds.
+        assert_eq!(top_level_top_row_count("SELECT TOP 10 PERCENT * FROM events"), None);
+        assert_eq!(top_level_top_row_count("SELECT TOP (10) PERCENT * FROM events"), None);
+        assert_eq!(top_level_top_row_count("SELECT TOP (2) WITH TIES * FROM events"), None);
+        assert_eq!(top_level_top_row_count("SELECT TOP 2 WITH TIES * FROM events"), None);
+
+        // No TOP clause at all.
+        assert_eq!(top_level_top_row_count("SELECT * FROM events"), None);
+        // TOP only inside a subquery is not a top-level clause.
+        assert_eq!(top_level_top_row_count("SELECT * FROM (SELECT TOP 5 * FROM events) t"), None);
     }
 
     #[test]

@@ -19,7 +19,8 @@ use crate::query::{
     operation_budget_for_pool_key, QueryExecutionOptions, StreamProgressClock, QUERY_CANCELED,
 };
 use crate::query_result_sql::{
-    build_query_pagination_execution_plan, QueryPagination, QueryPaginationExecutionPlanOptions,
+    build_query_pagination_execution_plan, has_top_level_top, top_level_top_row_count, QueryPagination,
+    QueryPaginationExecutionPlanOptions,
 };
 use crate::table_export::TableExportProgress;
 use crate::transfer::keyset_pagination_sql;
@@ -461,20 +462,33 @@ fn supports_streaming_offset_pagination(request: &QueryResultExportRequest, page
         && !first_sql.trim().eq_ignore_ascii_case(second_sql.trim())
 }
 
+/// Enforceable in-memory row bound for a single-execution export, or `None`
+/// when the query cannot be safely streamed in one shot without an Agent
+/// cursor. Kingbase SQL Server compatibility mode TOP queries cannot be
+/// rewritten with LIMIT/OFFSET; a concrete `TOP n` bounds the result and the
+/// user's export row limit caps it further. Percentage TOP / `WITH TIES` have
+/// no concrete row bound, so they are only single-execution-capable when a row
+/// limit is configured.
+fn single_execution_row_bound(request: &QueryResultExportRequest) -> Option<usize> {
+    if !has_top_level_top(&request.sql) {
+        return None;
+    }
+    match (top_level_top_row_count(&request.sql), request.row_limit) {
+        (Some(top), Some(row_limit)) => Some(top.min(row_limit)),
+        (Some(top), None) => Some(top),
+        (None, Some(row_limit)) => Some(row_limit),
+        (None, None) => None,
+    }
+}
+
 /// True when a non-agent export can still stream this query by executing it
-/// exactly once and writing the whole result. Used for statements that cannot
-/// be rewritten with LIMIT/OFFSET (Kingbase SQL Server compatibility mode
-/// top-level TOP), where the TOP clause itself bounds the row count.
+/// exactly once with an enforceable row bound. The bound is never
+/// `i32::MAX`: without a concrete `TOP n` or a configured row limit there is no
+/// cap, so the query is rejected at the streaming-pagination guard instead of
+/// buffering an unbounded result in memory.
+#[cfg(test)]
 fn supports_single_execution_export(request: &QueryResultExportRequest) -> bool {
-    let plan = build_query_pagination_execution_plan(QueryPaginationExecutionPlanOptions {
-        sql: request.sql.clone(),
-        query_base_sql: request.query_base_sql.clone(),
-        database_type: Some(request.database_type),
-        pagination: QueryPagination { limit: request.page_size.max(1), offset: 0, session_id: None },
-        use_agent_cursor: false,
-        first_page_uses_actual_sql: true,
-    });
-    plan.single_execution
+    single_execution_row_bound(request).is_some()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -527,6 +541,7 @@ fn safe_keyset_candidate(sql: &str) -> Option<SafeKeysetCandidate> {
         return None;
     };
     if select.distinct.is_some()
+        || select.top.is_some()
         || !matches!(&select.group_by, GroupByExpr::Expressions(exprs, _) if exprs.is_empty())
         || select.having.is_some()
         || select.selection.is_some()
@@ -666,14 +681,15 @@ async fn export_query_result_core_inner(
     let mut offset: usize = 0;
     let mut wrote_text_header = false;
     let mut keyset_plan = build_keyset_plan(state, request).await;
-    // A statement that can only be exported with a single execution (e.g.
-    // Kingbase SQL Server compat top-level TOP) sizes its page to the whole
-    // remaining row budget and stops after the first response.
-    let single_execution_capable = supports_single_execution_export(request);
+    // A Kingbase SQL Server compat TOP query that cannot be offset-paginated is
+    // exported with a single execution whose page size is the enforceable row
+    // bound (concrete TOP count and/or the configured export row limit), then it
+    // stops after the first response.
+    let single_execution_bound = single_execution_row_bound(request);
     if keyset_plan.is_none()
         && !request.use_agent_cursor
         && !supports_streaming_offset_pagination(request, page_size)
-        && !single_execution_capable
+        && single_execution_bound.is_none()
     {
         return Err(STREAMING_PAGINATION_UNSUPPORTED_ERROR.to_string());
     }
@@ -698,8 +714,10 @@ async fn export_query_result_core_inner(
         if matches!(remaining, Some(0)) {
             break;
         }
-        let this_page = if single_execution_capable {
-            remaining.map_or(AGENT_UNBOUNDED_ROW_LIMIT, |rem| rem.max(1))
+        let this_page = if keyset_plan.is_none() && single_execution_bound.is_some() {
+            // Single execution covers the whole enforceable TOP/row-limit bound in
+            // one shot; never an unbounded i32::MAX page.
+            single_execution_bound.unwrap_or(page_size).max(1)
         } else {
             remaining.map_or(page_size, |rem| rem.min(page_size)).max(1)
         };
@@ -2049,6 +2067,56 @@ mod tests {
 
         assert!(!supports_streaming_offset_pagination(&req, 100));
         assert!(supports_single_execution_export(&req));
+        // The enforceable bound is the concrete TOP count (100), not the row limit.
+        assert_eq!(single_execution_row_bound(&req), Some(100));
+    }
+
+    #[test]
+    fn kingbase_single_table_top_query_never_uses_keyset_and_is_bounded() {
+        // P0 regression: a simple `SELECT TOP 100 * FROM users` must not qualify
+        // for the keyset path (which reconstructs SQL and drops TOP), and its
+        // single-execution bound is exactly 100 — never an unbounded page.
+        let req = QueryResultExportRequest {
+            sql: "SELECT TOP 100 * FROM users".to_string(),
+            query_base_sql: "SELECT TOP 100 * FROM users".to_string(),
+            database_type: DatabaseType::Kingbase,
+            use_agent_cursor: false,
+            ..request("csv", None, None)
+        };
+
+        assert!(safe_keyset_candidate(&req.sql).is_none(), "TOP must not qualify for keyset");
+        assert!(!supports_streaming_offset_pagination(&req, 100));
+        assert_eq!(single_execution_row_bound(&req), Some(100));
+    }
+
+    #[test]
+    fn kingbase_percent_and_with_ties_need_a_row_limit_for_single_execution() {
+        // Percentage TOP and WITH TIES have no concrete row-count bound, so
+        // without a configured export row limit the single-execution fallback is
+        // unavailable (the export is rejected honestly instead of unbounded).
+        let percent_no_limit = QueryResultExportRequest {
+            sql: "SELECT TOP 10 PERCENT * FROM orders".to_string(),
+            query_base_sql: "SELECT TOP 10 PERCENT * FROM orders".to_string(),
+            database_type: DatabaseType::Kingbase,
+            use_agent_cursor: false,
+            ..request("csv", None, None)
+        };
+        assert!(!supports_single_execution_export(&percent_no_limit));
+        assert_eq!(single_execution_row_bound(&percent_no_limit), None);
+
+        let ties_no_limit = QueryResultExportRequest {
+            sql: "SELECT TOP (2) WITH TIES * FROM orders".to_string(),
+            query_base_sql: "SELECT TOP (2) WITH TIES * FROM orders".to_string(),
+            database_type: DatabaseType::Kingbase,
+            use_agent_cursor: false,
+            ..request("csv", None, None)
+        };
+        assert!(!supports_single_execution_export(&ties_no_limit));
+        assert_eq!(single_execution_row_bound(&ties_no_limit), None);
+
+        // With a configured row limit the same queries are capped by that limit.
+        let percent_with_limit = QueryResultExportRequest { row_limit: Some(5000), ..percent_no_limit };
+        assert_eq!(single_execution_row_bound(&percent_with_limit), Some(5000));
     }
 
     #[test]

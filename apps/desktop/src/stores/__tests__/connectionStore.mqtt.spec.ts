@@ -47,11 +47,9 @@ describe("connectionStore MQTT sidebar tree", () => {
     setActivePinia(createPinia());
   });
 
-  it("labels the MQTT console node via i18n instead of a hardcoded string", async () => {
+  it("stores a stable i18n key for the MQTT console node", async () => {
     mockApi();
 
-    const { default: i18n } = await import("@/i18n");
-    i18n.global.locale.value = "en";
     const { useConnectionStore } = await import("@/stores/connectionStore");
     const store = useConnectionStore();
     const connection = mqttConnection();
@@ -74,60 +72,42 @@ describe("connectionStore MQTT sidebar tree", () => {
     expect(node.children?.[0]).toMatchObject({
       id: `${connection.id}:mqtt-topic:__console__`,
       type: "mqtt-topic",
-      label: i18n.global.t("connection.mqttConsoleTitle"),
+      label: "connection.mqttConsoleTitle",
     });
-    // Regression guard for issue #5858: the sidebar entry must follow the active
-    // locale. Under "en" it must read "MQTT Console", never the hardcoded Chinese.
-    expect(node.children?.[0]?.label).toBe("MQTT Console");
-    expect(node.children?.[0]?.label).not.toContain("控制台");
   });
 
-  it("still resolves the console node label when the active locale is Chinese", async () => {
+  it("updates an existing MQTT tab title across locale changes and reopen", async () => {
     mockApi();
 
-    const { default: i18n, loadLocaleMessages } = await import("@/i18n");
-    // zh-CN messages are lazy-loaded in the app (only "en" ships eagerly); mirror
-    // that by loading the locale before switching so we do not assert against the
-    // en fallback.
-    await loadLocaleMessages("zh-CN");
-    i18n.global.locale.value = "zh-CN";
-    const { useConnectionStore } = await import("@/stores/connectionStore");
-    const store = useConnectionStore();
-    const connection = mqttConnection();
-    const node: TreeNode = {
-      id: connection.id,
-      label: connection.name,
-      type: "connection",
-      connectionId: connection.id,
-      isExpanded: false,
-      children: [],
-    };
-
-    store.connections = [connection];
-    store.connectedIds.add(connection.id);
-    store.treeNodes = [node];
-
-    await store.refreshTreeNode(node);
-
-    expect(node.children?.[0]?.label).toBe(i18n.global.t("connection.mqttConsoleTitle"));
-    expect(node.children?.[0]?.label).toBe("MQTT 控制台");
-  });
-
-  it("localizes the MQTT admin tab title via i18n", async () => {
-    mockApi();
-
-    const { default: i18n } = await import("@/i18n");
-    i18n.global.locale.value = "en";
+    const { default: i18n, setLocale } = await import("@/i18n");
+    const { tabDisplayTitle } = await import("@/lib/tabs/tabPresentation");
     const { useConnectionStore } = await import("@/stores/connectionStore");
     const { useQueryStore } = await import("@/stores/queryStore");
     const connectionStore = useConnectionStore();
     const queryStore = useQueryStore();
     connectionStore.connections = [mqttConnection()];
+    const translate = (key: string) => i18n.global.t(key);
 
-    const tabId = queryStore.openMqttAdmin("mqtt-1");
-    const tab = queryStore.tabs.find((candidate) => candidate.id === tabId);
+    await setLocale("en");
+    const originalTabId = queryStore.openMqttAdmin("mqtt-1");
+    const originalTab = queryStore.tabs.find((candidate) => candidate.id === originalTabId);
 
-    expect(tab?.title).toBe("test-mqtt - MQTT Console");
-    expect(tab?.title).not.toContain("控制台");
+    expect(originalTab?.title).toBe("connection.mqttConsoleTitle");
+    expect(originalTab && tabDisplayTitle(originalTab, translate)).toBe("test-mqtt - MQTT Console");
+
+    await setLocale("zh-CN");
+    const reusedTabId = queryStore.openMqttAdmin("mqtt-1");
+
+    expect(reusedTabId).toBe(originalTabId);
+    expect(queryStore.tabs).toHaveLength(1);
+    expect(originalTab && tabDisplayTitle(originalTab, translate)).toBe("test-mqtt - MQTT 控制台");
+
+    queryStore.closeTab(originalTabId, { force: true });
+    const reopenedTabId = queryStore.openMqttAdmin("mqtt-1");
+    const reopenedTab = queryStore.tabs.find((candidate) => candidate.id === reopenedTabId);
+
+    expect(reopenedTabId).not.toBe(originalTabId);
+    expect(reopenedTab?.title).toBe("connection.mqttConsoleTitle");
+    expect(reopenedTab && tabDisplayTitle(reopenedTab, translate)).toBe("test-mqtt - MQTT 控制台");
   });
 });

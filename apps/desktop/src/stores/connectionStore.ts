@@ -3518,7 +3518,7 @@ export const useConnectionStore = defineStore("connection", () => {
       // exposes a single navigation entry and must not keep a second topic tree.
       const consoleNode: TreeNode = {
         id: `${connectionId}:mqtt-topic:__console__`,
-        label: i18n.global.t("connection.mqttConsoleTitle"),
+        label: "connection.mqttConsoleTitle",
         type: "mqtt-topic" as const,
         connectionId,
         children: [],

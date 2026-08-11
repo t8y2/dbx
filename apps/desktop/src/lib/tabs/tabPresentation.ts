@@ -127,6 +127,9 @@ export function tabDisplayTitle(tab: QueryTab, t: Translate): string {
     if (compact) return connectionDisplayName(tab.connectionId);
     return `${connectionDisplayName(tab.connectionId)}@${t("consul.ui.overview")}`;
   }
+  if (tab.mode === "mqtt") {
+    return `${connectionDisplayName(tab.connectionId)} - ${t("connection.mqttConsoleTitle")}`;
+  }
   if (tab.mode === "objects") {
     const schema = tab.objectBrowser?.schema;
     if (compact) return schema || tab.title;

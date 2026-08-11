@@ -111,6 +111,8 @@ const HEX_VALUE_RE = /^(?:0[xX]|\\x)([0-9a-fA-F\s]+)$/;
 const BARE_HEX_RE = /^[0-9a-fA-F\s]+$/;
 const HEX_ESCAPE_RE = /^(?:\\x[0-9a-fA-F]{2}|\s)+$/;
 const BINARY_TYPE_RE = /^(?:blob|tinyblob|mediumblob|longblob|bytea|bytes|binary|varbinary|image|raw|long\s+raw)(?:\b|\()/i;
+const FIXED_BINARY_TYPE_RE = /^binary(?:\b|\()/i;
+const BINARY_STRING_TYPE_RE = /^(?:binary|varbinary)(?:\b|\()/i;
 const MYSQL_FILE_IMPORT_TYPE_RE = /^(?:blob|tinyblob|mediumblob|longblob|binary|varbinary)(?:\b|\()/i;
 
 function copyBytesForBlob(bytes: Uint8Array): Uint8Array<ArrayBuffer> {
@@ -192,7 +194,33 @@ export function canDownloadBinaryCellValue(value: unknown, columnType?: string):
 export function binaryCellDisplayText(value: unknown, columnType?: string): string | null {
   const bytes = parseBinaryCellBytes(value, columnType);
   if (!bytes || !isBinaryCellColumnType(columnType)) return null;
+  if (BINARY_STRING_TYPE_RE.test((columnType ?? "").trim())) {
+    const previewBytes = FIXED_BINARY_TYPE_RE.test((columnType ?? "").trim()) ? trimTrailingNullBytes(bytes) : bytes;
+    const text = printableUtf8Text(previewBytes);
+    if (text !== null) return text;
+  }
   return `${binaryCellDisplayLabel(columnType)} [${formatBinaryCellByteSize(bytes.length)}]`;
+}
+
+function trimTrailingNullBytes(bytes: Uint8Array): Uint8Array {
+  let end = bytes.length;
+  while (end > 0 && bytes[end - 1] === 0) end--;
+  return bytes.subarray(0, end);
+}
+
+function printableUtf8Text(bytes: Uint8Array): string | null {
+  let text: string;
+  try {
+    text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    return null;
+  }
+  for (const char of text) {
+    const codePoint = char.codePointAt(0) ?? 0;
+    const allowedWhitespace = codePoint === 9 || codePoint === 10 || codePoint === 13;
+    if (!allowedWhitespace && (codePoint <= 31 || (codePoint >= 127 && codePoint <= 159))) return null;
+  }
+  return text;
 }
 
 function binaryCellDisplayLabel(columnType?: string): string {

@@ -283,21 +283,6 @@ fn is_mysql_binary_string_column(column: &mysql_async::Column) -> bool {
         )
 }
 
-fn mysql_printable_binary_preview(bytes: &[u8]) -> Option<String> {
-    let trimmed = bytes.strip_suffix(&[0]).map_or(bytes, |mut value| {
-        while let Some(rest) = value.strip_suffix(&[0]) {
-            value = rest;
-        }
-        value
-    });
-    if trimmed.is_empty() {
-        return Some(String::new());
-    }
-
-    let text = std::str::from_utf8(trimmed).ok()?;
-    text.chars().all(|ch| !ch.is_control() || matches!(ch, '\t' | '\n' | '\r')).then(|| text.to_string())
-}
-
 fn mysql_blob_preview(bytes: &[u8], label: &str) -> serde_json::Value {
     if label == "BLOB" {
         return super::binary_value_to_json(bytes);
@@ -326,9 +311,7 @@ fn mysql_bytes_to_json(bytes: Vec<u8>, column: &mysql_async::Column) -> serde_js
         return mysql_blob_preview(&bytes, "BLOB");
     }
     if is_mysql_binary_string_column(column) {
-        return mysql_printable_binary_preview(&bytes)
-            .map(serde_json::Value::String)
-            .unwrap_or_else(|| super::binary_value_to_json(&bytes));
+        return super::binary_value_to_json(&bytes);
     }
     serde_json::Value::String(bytes_to_string_lossy(bytes))
 }
@@ -6390,16 +6373,23 @@ mod tests {
     }
 
     #[test]
-    fn mysql_binary_preview_renders_binary_and_varbinary_like_navicat_text_preview() {
+    fn mysql_binary_values_preserve_all_bytes_as_hex() {
         let binary_column = mysql_test_column(ColumnType::MYSQL_TYPE_STRING, 63, ColumnFlags::BINARY_FLAG, 8);
         let varbinary_column = mysql_test_column(ColumnType::MYSQL_TYPE_VAR_STRING, 63, ColumnFlags::BINARY_FLAG, 8);
 
-        assert_eq!(mysql_bytes_to_json(b"150010\0\0".to_vec(), &binary_column), serde_json::json!("150010"));
-        assert_eq!(mysql_bytes_to_json(b"150010".to_vec(), &varbinary_column), serde_json::json!("150010"));
+        assert_eq!(
+            mysql_bytes_to_json(b"150010\0\0".to_vec(), &binary_column),
+            serde_json::json!("0x3135303031300000")
+        );
+        assert_eq!(mysql_bytes_to_json(b"150010".to_vec(), &varbinary_column), serde_json::json!("0x313530303130"));
+        assert_eq!(
+            mysql_bytes_to_json(b"SN-A0001".to_vec(), &varbinary_column),
+            serde_json::json!("0x534e2d4130303031")
+        );
     }
 
     #[test]
-    fn mysql_binary_preview_falls_back_to_hex_for_unprintable_bytes() {
+    fn mysql_binary_values_preserve_unprintable_bytes_as_hex() {
         let binary_column = mysql_test_column(ColumnType::MYSQL_TYPE_STRING, 63, ColumnFlags::BINARY_FLAG, 8);
         let varbinary_column = mysql_test_column(ColumnType::MYSQL_TYPE_VAR_STRING, 63, ColumnFlags::BINARY_FLAG, 8);
 

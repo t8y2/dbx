@@ -2120,6 +2120,26 @@ mod tests {
     }
 
     #[test]
+    fn kingbase_top_expression_export_requires_row_limit_or_cursor() {
+        // P1: TOP (100 + 1) returns 101 rows, so its bound must not be treated as
+        // 100 (which would silently truncate the export). Without a row limit the
+        // single-execution fallback is unavailable and the export is rejected.
+        let req = QueryResultExportRequest {
+            sql: "SELECT TOP (100 + 1) * FROM orders".to_string(),
+            query_base_sql: "SELECT TOP (100 + 1) * FROM orders".to_string(),
+            database_type: DatabaseType::Kingbase,
+            use_agent_cursor: false,
+            ..request("csv", None, None)
+        };
+        assert!(!supports_single_execution_export(&req));
+        assert_eq!(single_execution_row_bound(&req), None);
+
+        // A configured row limit gives the export an explicit cap.
+        let with_limit = QueryResultExportRequest { row_limit: Some(200), ..req };
+        assert_eq!(single_execution_row_bound(&with_limit), Some(200));
+    }
+
+    #[test]
     fn kingbase_without_top_uses_streaming_offset_pagination() {
         let req = QueryResultExportRequest {
             sql: "SELECT * FROM orders o JOIN customers c ON c.id = o.customer_id ORDER BY o.id".to_string(),

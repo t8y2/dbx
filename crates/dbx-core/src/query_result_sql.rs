@@ -1116,7 +1116,10 @@ pub(crate) fn has_top_level_top(sql: &str) -> bool {
 /// Concrete row-count bound of a top-level `TOP` clause when written as a
 /// literal (`TOP n`, `TOP(n)`, `TOP (n)`). Returns `None` for percentage TOP
 /// (`TOP n PERCENT`), `WITH TIES` (the server may return more than `n` rows),
-/// or when the TOP clause has no literal at all.
+/// parenthesized expressions (`TOP (100 + 1)`, `TOP (100 * 2)`), or when the
+/// TOP clause has no literal at all. A parenthesized form is only accepted when
+/// it is exactly one integer literal followed by `)`, so the returned bound is
+/// always exact — never a silent under-count.
 pub(crate) fn top_level_top_row_count(sql: &str) -> Option<usize> {
     let tokens = top_level_sql_tokens(sql);
     let top_index = tokens.iter().position(|token| token.text == "TOP")?;
@@ -1128,14 +1131,25 @@ pub(crate) fn top_level_top_row_count(sql: &str) -> Option<usize> {
         return None;
     }
     let mut cursor = skip_sql_whitespace(sql, top_token.start + top_token.text.len());
-    if sql.get(cursor..)?.starts_with('(') {
+    let parenthesized = sql.get(cursor..)?.starts_with('(');
+    if parenthesized {
         cursor = skip_sql_whitespace(sql, cursor + 1);
     }
     let count = parse_usize_literal(sql, &mut cursor)?;
-    // `TOP n PERCENT` and `TOP n WITH TIES` tokenize the literal first but do not
-    // bound the row count to it, so reject both.
     let after = skip_sql_whitespace(sql, cursor);
-    if tokens.iter().any(|token| token.start >= after && matches!(token.text.as_str(), "PERCENT" | "WITH")) {
+    if parenthesized {
+        // The parenthesized form must be exactly one integer literal followed by
+        // `)`. Anything else is an expression whose real bound we cannot know
+        // (e.g. TOP (100 + 1) returns 101 rows, not 100), so refuse to treat it
+        // as a bound.
+        if !sql.get(after..)?.starts_with(')') {
+            return None;
+        }
+    }
+    // `TOP n PERCENT` and `TOP n WITH TIES` (parenthesized or not) do not bound
+    // the row count to the literal, so reject both.
+    let after_paren = if parenthesized { skip_sql_whitespace(sql, after + 1) } else { after };
+    if tokens.iter().any(|token| token.start >= after_paren && matches!(token.text.as_str(), "PERCENT" | "WITH")) {
         return None;
     }
     Some(count)
@@ -3270,10 +3284,20 @@ WHERE u.id = picked.id;
         assert_eq!(top_level_top_row_count("SELECT TOP 100 * FROM events"), Some(100));
         assert_eq!(top_level_top_row_count("SELECT TOP(100) * FROM events"), Some(100));
         assert_eq!(top_level_top_row_count("SELECT TOP (100) * FROM events"), Some(100));
+        // Whitespace-only inside the parens is still a single literal bound.
+        assert_eq!(top_level_top_row_count("SELECT TOP ( 100 ) * FROM events"), Some(100));
         assert_eq!(top_level_top_row_count("SELECT TOP 100 events.name FROM events ORDER BY events.name"), Some(100));
         assert_eq!(top_level_top_row_count("SELECT TOP 100 * FROM events LIMIT 5"), Some(100));
 
-        // Percentage TOP and WITH TIES are not concrete row-count bounds.
+        // Parenthesized expressions have a real bound different from the leading
+        // digits; refusing them (None) beats silently under-counting the export.
+        assert_eq!(top_level_top_row_count("SELECT TOP (100 + 1) * FROM events"), None);
+        assert_eq!(top_level_top_row_count("SELECT TOP (100 * 2) * FROM events"), None);
+        assert_eq!(top_level_top_row_count("SELECT TOP (100 - 1) * FROM events"), None);
+        assert_eq!(top_level_top_row_count("SELECT TOP (len(events.name)) * FROM events"), None);
+
+        // Percentage TOP and WITH TIES are not concrete row-count bounds, with or
+        // without parentheses.
         assert_eq!(top_level_top_row_count("SELECT TOP 10 PERCENT * FROM events"), None);
         assert_eq!(top_level_top_row_count("SELECT TOP (10) PERCENT * FROM events"), None);
         assert_eq!(top_level_top_row_count("SELECT TOP (2) WITH TIES * FROM events"), None);

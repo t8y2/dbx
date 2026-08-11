@@ -60,6 +60,7 @@ import { hexToRgba } from "@/lib/common/color";
 import { sidebarDisplayTableName } from "@/lib/sidebar/sidebarTableNameDisplay";
 import { shouldMeasureSidebarLabelOverflow } from "@/lib/sidebar/sidebarLabelTooltip";
 import { treeSelectionRangeIdsByIndex, treeSelectionRangeIds } from "@/lib/sidebar/sidebarTreeSelection";
+import { applyConnectionMultiSelection, connectionMultiSelectionAfterToggle } from "@/lib/sidebar/sidebarConnectionMultiSelect";
 import { isSidebarDatabaseOpenForVisual } from "@/lib/sidebar/sidebarDatabaseOpenState";
 import { sidebarTreeContextKey } from "@/lib/sidebar/sidebarTreeContext";
 import { connectionCanConfigureSidebarVisibleDatabases } from "@/lib/sidebar/sidebarVisibleFilterMenu";
@@ -550,15 +551,8 @@ function toggleConnectionMultiSelection(event: MouseEvent) {
 
   // Keep connection-id normalization off the row render path; this handler only
   // runs when the checkbox is clicked, while the checked state updates often.
-  const next = new Set(connectionStore.connectionMultiSelectActive ? selectedConnectionIdsForAction() : []);
-  if (next.has(activeNode.value.connectionId)) next.delete(activeNode.value.connectionId);
-  else next.add(activeNode.value.connectionId);
-
-  const ids = [...next];
-  connectionStore.selectedTreeNodeIds = ids;
-  connectionStore.selectedTreeNodeId = ids.includes(activeNode.value.connectionId) ? activeNode.value.connectionId : (ids[0] ?? null);
-  connectionStore.treeSelectionAnchorId = activeNode.value.connectionId;
-  connectionStore.connectionMultiSelectActive = ids.length > 0;
+  const current = { connectionIds: selectedConnectionIdsForAction(), active: connectionStore.connectionMultiSelectActive };
+  applyConnectionMultiSelection(connectionStore, connectionMultiSelectionAfterToggle(current, activeNode.value.connectionId));
   rowRef.value?.focus({ preventScroll: true });
 }
 

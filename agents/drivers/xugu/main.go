@@ -48,12 +48,12 @@ JOIN ALL_SCHEMAS s ON s.DB_ID = q.DB_ID AND s.SCHEMA_ID = q.SCHEMA_ID
 WHERE s.DB_ID = CURRENT_DB_ID
   AND q.IS_SYS = FALSE`
 const xuguCatalogSynonymSelectSQL = `
-SELECT s.SCHEMA_NAME, y.SYNO_NAME, t.SCHEMA_NAME AS TARGET_SCHEMA, y.TARG_NAME
+SELECT CASE WHEN y.IS_PUBLIC = TRUE THEN 'GUEST' ELSE s.SCHEMA_NAME END AS SCHEMA_NAME,
+       y.SYNO_NAME, t.SCHEMA_NAME AS TARGET_SCHEMA, y.TARG_NAME, y.IS_PUBLIC
 FROM ALL_SYNONYMS y
-JOIN ALL_SCHEMAS s ON s.DB_ID = y.DB_ID AND s.SCHEMA_ID = y.SCHEMA_ID
+LEFT JOIN ALL_SCHEMAS s ON s.DB_ID = y.DB_ID AND s.SCHEMA_ID = y.SCHEMA_ID
 LEFT JOIN ALL_SCHEMAS t ON t.DB_ID = y.DB_ID AND t.SCHEMA_ID = y.TARG_SCHE_ID
-WHERE s.DB_ID = CURRENT_DB_ID
-  AND y.IS_PUBLIC = FALSE`
+WHERE y.DB_ID = CURRENT_DB_ID`
 const xuguPrimaryKeyColumnsSQL = `
 SELECT c.DEFINE
 FROM ALL_CONSTRAINTS c
@@ -457,6 +457,7 @@ type xuguCatalogSynonym struct {
 	Name         string
 	TargetSchema sql.NullString
 	TargetName   string
+	Public       bool
 }
 
 // xuguIndexKey preserves the catalog spelling and SQL semantics of an index
@@ -2160,6 +2161,21 @@ WHERE s.DB_ID = CURRENT_DB_ID
 }
 
 func xuguListObjectsQuery(schema string, constraints metadataListConstraints) xuguMetadataListQuery {
+	publicSynonymScope := strings.EqualFold(strings.TrimSpace(schema), "GUEST")
+	synonymSQL := `
+SELECT y.SYNO_NAME AS OBJECT_NAME, 'SYNONYM' AS OBJECT_TYPE, NULL AS COMMENTS, y.VALID, NULL AS XUGU_TYPE_MEMBERS_EXPANDABLE
+FROM ALL_SYNONYMS y
+WHERE y.DB_ID = CURRENT_DB_ID
+  AND y.IS_PUBLIC = TRUE`
+	if !publicSynonymScope {
+		synonymSQL = `
+SELECT y.SYNO_NAME AS OBJECT_NAME, 'SYNONYM' AS OBJECT_TYPE, NULL AS COMMENTS, y.VALID, NULL AS XUGU_TYPE_MEMBERS_EXPANDABLE
+FROM ALL_SYNONYMS y
+JOIN ALL_SCHEMAS s ON s.DB_ID = y.DB_ID AND s.SCHEMA_ID = y.SCHEMA_ID
+WHERE y.DB_ID = CURRENT_DB_ID
+  AND UPPER(s.SCHEMA_NAME) = UPPER(?)
+  AND y.IS_PUBLIC = FALSE`
+	}
 	type objectSource struct {
 		objectTypes []string
 		sql         string
@@ -2211,13 +2227,7 @@ JOIN ALL_SCHEMAS s ON s.DB_ID = q.DB_ID AND s.SCHEMA_ID = q.SCHEMA_ID
 WHERE s.DB_ID = CURRENT_DB_ID
   AND UPPER(s.SCHEMA_NAME) = UPPER(?)
   AND q.IS_SYS = FALSE`},
-		{objectTypes: []string{"SYNONYM"}, sql: `
-SELECT y.SYNO_NAME AS OBJECT_NAME, 'SYNONYM' AS OBJECT_TYPE, NULL AS COMMENTS, y.VALID, NULL AS XUGU_TYPE_MEMBERS_EXPANDABLE
-FROM ALL_SYNONYMS y
-JOIN ALL_SCHEMAS s ON s.DB_ID = y.DB_ID AND s.SCHEMA_ID = y.SCHEMA_ID
-WHERE s.DB_ID = CURRENT_DB_ID
-  AND UPPER(s.SCHEMA_NAME) = UPPER(?)
-	AND y.IS_PUBLIC = FALSE`},
+		{objectTypes: []string{"SYNONYM"}, sql: synonymSQL},
 		{objectTypes: []string{"TYPE"}, sql: `
 SELECT u.TYPE_NAME AS OBJECT_NAME, 'TYPE' AS OBJECT_TYPE, u.COMMENTS, u.VALID,
 	       CASE WHEN u.UDT_TYPE = 1001 THEN TRUE ELSE FALSE END AS XUGU_TYPE_MEMBERS_EXPANDABLE
@@ -2263,7 +2273,9 @@ WHERE s.DB_ID = CURRENT_DB_ID
 	baseArgs := make([]any, 0, len(baseSources))
 	for _, source := range baseSources {
 		baseSQLParts = append(baseSQLParts, source.sql)
-		baseArgs = append(baseArgs, schema)
+		if !(publicSynonymScope && len(source.objectTypes) == 1 && source.objectTypes[0] == "SYNONYM") {
+			baseArgs = append(baseArgs, schema)
+		}
 	}
 	return xuguConstrainedMetadataListQuery(
 		strings.Join(baseSQLParts, "\nUNION ALL\n"),
@@ -2929,9 +2941,9 @@ func renderXuguSequenceDDL(sequence xuguSequenceMetadata) string {
 	return builder.String()
 }
 
-// getSynonymSource reconstructs private synonym DDL from ALL_SYNONYMS. Public
-// synonyms deliberately remain outside schema groups: their catalog rows have
-// no owning schema and showing them in every schema would duplicate objects.
+// getSynonymSource reconstructs synonym DDL from ALL_SYNONYMS. Public
+// synonyms are exposed in the synthetic GUEST scope, matching the database
+// global metadata model, and therefore use PUBLIC syntax without a schema.
 func (s *server) getSynonymSource(schema, name string) (map[string]any, error) {
 	synonym, err := s.resolveCatalogSynonym(schema, name)
 	if err != nil {
@@ -2942,10 +2954,15 @@ func (s *server) getSynonymSource(schema, name string) (map[string]any, error) {
 	}
 
 	var builder strings.Builder
-	builder.WriteString("CREATE SYNONYM ")
-	builder.WriteString(quoteIdentifier(synonym.Schema))
-	builder.WriteByte('.')
-	builder.WriteString(quoteIdentifier(synonym.Name))
+	if synonym.Public {
+		builder.WriteString("CREATE PUBLIC SYNONYM ")
+		builder.WriteString(quoteIdentifier(synonym.Name))
+	} else {
+		builder.WriteString("CREATE SYNONYM ")
+		builder.WriteString(quoteIdentifier(synonym.Schema))
+		builder.WriteByte('.')
+		builder.WriteString(quoteIdentifier(synonym.Name))
+	}
 	builder.WriteString("\nFOR ")
 	if targetSchema := strings.TrimSpace(synonym.TargetSchema.String); targetSchema != "" {
 		builder.WriteString(quoteIdentifier(targetSchema))
@@ -2996,13 +3013,20 @@ func (s *server) resolveCatalogSynonym(schema, name string) (xuguCatalogSynonym,
 func xuguCatalogSynonymQuery(schema, name string, caseInsensitive bool) string {
 	schemaExpr := quoteStringLiteral(schema)
 	nameExpr := quoteStringLiteral(name)
+	publicScope := strings.EqualFold(strings.TrimSpace(schema), "GUEST")
 	if caseInsensitive {
-		schemaExpr = quoteStringLiteral(strings.ToUpper(schema))
 		nameExpr = quoteStringLiteral(strings.ToUpper(name))
-		return xuguCatalogSynonymSelectSQL + "\n  AND UPPER(s.SCHEMA_NAME) = " + schemaExpr +
+		if publicScope {
+			return xuguCatalogSynonymSelectSQL + "\n  AND y.IS_PUBLIC = TRUE\n  AND UPPER(y.SYNO_NAME) = " + nameExpr
+		}
+		schemaExpr = quoteStringLiteral(strings.ToUpper(schema))
+		return xuguCatalogSynonymSelectSQL + "\n  AND y.IS_PUBLIC = FALSE\n  AND UPPER(s.SCHEMA_NAME) = " + schemaExpr +
 			"\n  AND UPPER(y.SYNO_NAME) = " + nameExpr
 	}
-	return xuguCatalogSynonymSelectSQL + "\n  AND s.SCHEMA_NAME = " + schemaExpr +
+	if publicScope {
+		return xuguCatalogSynonymSelectSQL + "\n  AND y.IS_PUBLIC = TRUE\n  AND y.SYNO_NAME = " + nameExpr
+	}
+	return xuguCatalogSynonymSelectSQL + "\n  AND y.IS_PUBLIC = FALSE\n  AND s.SCHEMA_NAME = " + schemaExpr +
 		"\n  AND y.SYNO_NAME = " + nameExpr
 }
 
@@ -3016,7 +3040,7 @@ func (s *server) catalogSynonymCandidates(query string) ([]xuguCatalogSynonym, e
 	var candidates []xuguCatalogSynonym
 	for rows.Next() {
 		var candidate xuguCatalogSynonym
-		if err := rows.Scan(&candidate.Schema, &candidate.Name, &candidate.TargetSchema, &candidate.TargetName); err != nil {
+		if err := rows.Scan(&candidate.Schema, &candidate.Name, &candidate.TargetSchema, &candidate.TargetName, &candidate.Public); err != nil {
 			return nil, err
 		}
 		candidates = append(candidates, candidate)

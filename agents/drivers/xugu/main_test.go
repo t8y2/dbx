@@ -1131,6 +1131,35 @@ func TestAvailableXuguObjectTypesRespectsConstraints(t *testing.T) {
 	}
 }
 
+func TestXuguListObjectsQueryExposesPublicSynonymsOnlyInGuestScope(t *testing.T) {
+	query := xuguListObjectsQuery("GUEST", metadataListConstraints{ObjectTypes: []string{"SYNONYM"}})
+	upper := strings.ToUpper(query.SQL)
+	for _, want := range []string{"FROM ALL_SYNONYMS Y", "Y.IS_PUBLIC = TRUE", "OBJECT_TYPE IN (?)"} {
+		if !strings.Contains(upper, want) {
+			t.Fatalf("public synonym query is missing %q:\n%s", want, query.SQL)
+		}
+	}
+	synonymStart := strings.Index(upper, "SELECT Y.SYNO_NAME")
+	synonymEnd := strings.Index(upper[synonymStart:], "UNION ALL")
+	if synonymStart < 0 {
+		t.Fatalf("public synonym branch could not be isolated:\n%s", query.SQL)
+	}
+	if synonymEnd < 0 {
+		synonymEnd = len(upper) - synonymStart
+	}
+	synonymBranch := upper[synonymStart : synonymStart+synonymEnd]
+	if strings.Contains(synonymBranch, "JOIN ALL_SCHEMAS") || strings.Contains(synonymBranch, "UPPER(S.SCHEMA_NAME)") {
+		t.Fatalf("public synonym query must not require an owning schema:\n%s", query.SQL)
+	}
+	assertArgs(t, query.Args, []any{"SYNONYM"})
+
+	private := xuguListObjectsQuery("SYSDBA", metadataListConstraints{ObjectTypes: []string{"SYNONYM"}})
+	privateUpper := strings.ToUpper(private.SQL)
+	if !strings.Contains(privateUpper, "Y.IS_PUBLIC = FALSE") || !strings.Contains(privateUpper, "JOIN ALL_SCHEMAS") {
+		t.Fatalf("private synonym query must remain schema-scoped:\n%s", private.SQL)
+	}
+}
+
 func TestXuguListObjectsQueryExcludesSystemSequences(t *testing.T) {
 	query := xuguListObjectsQuery("APP", metadataListConstraints{
 		ObjectTypes: []string{"sequence"},
@@ -1205,6 +1234,47 @@ func TestGetSynonymSourceReconstructsPrivateQuotedDDL(t *testing.T) {
 	want := "CREATE SYNONYM \"SYSDBA\".\"dbxSynonymReplayCase\"\nFOR \"AppSchema\".\"tbUserProfile\";"
 	if ddl != want {
 		t.Fatalf("synonym DDL = %q, want %q", ddl, want)
+	}
+}
+
+func TestGetSynonymSourceReconstructsPublicDDLWithoutSyntheticSchema(t *testing.T) {
+	db, err := sql.Open("xugu-test-public-synonym-source", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	s := newServer()
+	s.db = db
+	source, err := s.getObjectSource("GUEST", "DbxPublicMixed", "SYNONYM")
+	if err != nil {
+		t.Fatalf("get public synonym source: %v", err)
+	}
+	if source["schema"] != "GUEST" || source["name"] != "DbxPublicMixed" {
+		t.Fatalf("public synonym source must preserve synthetic scope and catalog spelling: %#v", source)
+	}
+	ddl, _ := source["source"].(string)
+	want := "CREATE PUBLIC SYNONYM \"DbxPublicMixed\"\nFOR \"SYSDBA\".\"SHOP_USERS\";"
+	if ddl != want {
+		t.Fatalf("public synonym DDL = %q, want %q", ddl, want)
+	}
+}
+
+func TestXuguCatalogSynonymQueryUsesGuestGlobalScope(t *testing.T) {
+	exact := strings.ToUpper(xuguCatalogSynonymQuery("GUEST", "DbxPublicMixed", false))
+	if !strings.Contains(exact, "Y.IS_PUBLIC = TRUE") || !strings.Contains(exact, "Y.SYNO_NAME = 'DBXPUBLICMIXED'") {
+		t.Fatalf("exact public synonym lookup must be global and exact:\n%s", exact)
+	}
+	if strings.Contains(exact, "S.SCHEMA_NAME =") {
+		t.Fatalf("exact public synonym lookup must not require an owning schema:\n%s", exact)
+	}
+
+	folded := strings.ToUpper(xuguCatalogSynonymQuery("guest", "dbxpublicmixed", true))
+	if !strings.Contains(folded, "Y.IS_PUBLIC = TRUE") || !strings.Contains(folded, "UPPER(Y.SYNO_NAME) = 'DBXPUBLICMIXED'") {
+		t.Fatalf("case-insensitive public synonym lookup must remain global:\n%s", folded)
+	}
+	if strings.Contains(folded, "S.SCHEMA_NAME =") {
+		t.Fatalf("case-insensitive public synonym lookup must not require an owning schema:\n%s", folded)
 	}
 }
 
@@ -2204,6 +2274,7 @@ func init() {
 	sql.Register("xugu-test-show-result", &xuguShowResultDriver{})
 	sql.Register("xugu-test-sequence-source", &xuguSequenceSourceDriver{})
 	sql.Register("xugu-test-synonym-source", &xuguSynonymSourceDriver{})
+	sql.Register("xugu-test-public-synonym-source", &xuguPublicSynonymSourceDriver{})
 	sql.Register("xugu-test-permission-metadata", &xuguPermissionMetadataDriver{})
 	sql.Register("xugu-test-fallback-errors", &xuguFallbackErrorDriver{})
 	sql.Register("xugu-test-eof", &xuguEOFDriver{})
@@ -2656,8 +2727,37 @@ func (c *xuguSynonymSourceConn) QueryContext(_ context.Context, query string, _ 
 		return nil, fmt.Errorf("synonym resolution must prioritize exact catalog identifiers: %s", query)
 	}
 	return &xuguStaticRows{
-		columns: []string{"SCHEMA_NAME", "SYNO_NAME", "TARGET_SCHEMA", "TARG_NAME"},
-		values:  [][]driver.Value{{"SYSDBA", "dbxSynonymReplayCase", "AppSchema", "tbUserProfile"}},
+		columns: []string{"SCHEMA_NAME", "SYNO_NAME", "TARGET_SCHEMA", "TARG_NAME", "IS_PUBLIC"},
+		values:  [][]driver.Value{{"SYSDBA", "dbxSynonymReplayCase", "AppSchema", "tbUserProfile", false}},
+	}, nil
+}
+
+type xuguPublicSynonymSourceDriver struct{}
+
+func (d *xuguPublicSynonymSourceDriver) Open(name string) (driver.Conn, error) {
+	return &xuguPublicSynonymSourceConn{}, nil
+}
+
+type xuguPublicSynonymSourceConn struct{}
+
+func (c *xuguPublicSynonymSourceConn) Prepare(query string) (driver.Stmt, error) {
+	return nil, errors.New("not supported")
+}
+func (c *xuguPublicSynonymSourceConn) Close() error { return nil }
+func (c *xuguPublicSynonymSourceConn) Begin() (driver.Tx, error) {
+	return nil, errors.New("not supported")
+}
+func (c *xuguPublicSynonymSourceConn) QueryContext(_ context.Context, query string, _ []driver.NamedValue) (driver.Rows, error) {
+	upper := strings.ToUpper(query)
+	if !strings.Contains(upper, "FROM ALL_SYNONYMS") || !strings.Contains(upper, "Y.IS_PUBLIC = TRUE") {
+		return nil, fmt.Errorf("unexpected public synonym source query: %s", query)
+	}
+	if strings.Contains(upper, "S.SCHEMA_NAME =") || strings.Contains(upper, "UPPER(") || !strings.Contains(query, "y.SYNO_NAME = 'DbxPublicMixed'") {
+		return nil, fmt.Errorf("public synonym resolution must use the global exact lookup: %s", query)
+	}
+	return &xuguStaticRows{
+		columns: []string{"SCHEMA_NAME", "SYNO_NAME", "TARGET_SCHEMA", "TARG_NAME", "IS_PUBLIC"},
+		values:  [][]driver.Value{{"GUEST", "DbxPublicMixed", "SYSDBA", "SHOP_USERS", true}},
 	}, nil
 }
 

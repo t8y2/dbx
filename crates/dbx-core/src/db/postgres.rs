@@ -8252,10 +8252,7 @@ mod tests {
     #[test]
     fn custom_type_ddl_domain_is_incomplete_when_attributes_failed() {
         let info = test_custom_type_info("d");
-        let properties = CustomTypeProperties {
-            base_type: Some("text".to_string()),
-            ..Default::default()
-        };
+        let properties = CustomTypeProperties { base_type: Some("text".to_string()), ..Default::default() };
         let ddl = build_custom_type_ddl(
             "app",
             "email",

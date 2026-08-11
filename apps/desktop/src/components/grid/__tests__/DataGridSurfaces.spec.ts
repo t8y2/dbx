@@ -291,6 +291,26 @@ describe("DataGridPagination", () => {
 });
 
 describe("DataGridColumnHeader", () => {
+  it("limits the metadata tooltip trigger to the column text block", () => {
+    const mounted = mountComponent(DataGridColumnHeader, {
+      name: "status",
+      actualColumnIndex: 0,
+      visibleColumnIndex: 0,
+      copyColumnNameLabel: "copy",
+      columnNameLabel: "name",
+      columnTypeLabel: "type",
+      columnCommentLabel: "comment",
+    });
+    const tooltip = findOne(mounted.root, (node) => node.props["data-stub"] === "LightTooltip");
+    const trigger = findOne(mounted.root, (node) => node.props["data-column-tooltip-trigger"] === "");
+    const actions = findOne(mounted.root, (node) => node.props["data-column-header-actions"] === "");
+    const resizeHandle = findOne(mounted.root, (node) => node.props["data-column-resize-handle"] === "");
+
+    expect(trigger.parent).toBe(tooltip);
+    expect(actions.parent).not.toBe(tooltip);
+    expect(resizeHandle.parent).not.toBe(tooltip);
+  });
+
   it("cancels resize-handle clicks without leaking header click events", () => {
     const click = vi.fn();
     const clickCapture = vi.fn();

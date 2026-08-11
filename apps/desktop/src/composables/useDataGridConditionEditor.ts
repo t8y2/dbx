@@ -45,6 +45,7 @@ export interface UseDataGridConditionEditorOptions {
   suggestionProvider?: DataGridConditionSuggestionProvider;
   suggestionDebounceMs?: number;
   suggestionLimit?: number;
+  suggestionsEnabled?: MaybeRefOrGetter<boolean>;
 }
 
 const WHERE_TOKEN_PATTERN = /([^\s,()><=!&|]+)$/;
@@ -299,6 +300,7 @@ export function useDataGridConditionEditor(options: UseDataGridConditionEditorOp
     suggestions.value = [];
     highlightedIndex.value = -1;
     historyOpen.value = false;
+    if (options.suggestionsEnabled !== undefined && !toValue(options.suggestionsEnabled)) return;
     if (!value.trim()) return;
 
     const target = conditionCompletionTarget(options.kind, value, selectionStart, selectionEnd, toValue(options.identifierQuote));

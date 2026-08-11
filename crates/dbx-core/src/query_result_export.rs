@@ -481,14 +481,17 @@ fn single_execution_row_bound(request: &QueryResultExportRequest) -> Option<usiz
     }
 }
 
+fn single_execution_page_limit(request: &QueryResultExportRequest, page_size: usize) -> Option<usize> {
+    single_execution_row_bound(request).filter(|bound| *bound > 0 && *bound <= page_size.max(1))
+}
+
 /// True when a non-agent export can still stream this query by executing it
-/// exactly once with an enforceable row bound. The bound is never
-/// `i32::MAX`: without a concrete `TOP n` or a configured row limit there is no
-/// cap, so the query is rejected at the streaming-pagination guard instead of
-/// buffering an unbounded result in memory.
+/// exactly once without exceeding one normal export page. Larger TOP/row-limit
+/// bounds require an Agent result session; executing them in one response would
+/// defeat streaming and recreate the large-result memory spike.
 #[cfg(test)]
-fn supports_single_execution_export(request: &QueryResultExportRequest) -> bool {
-    single_execution_row_bound(request).is_some()
+fn supports_single_execution_export(request: &QueryResultExportRequest, page_size: usize) -> bool {
+    single_execution_page_limit(request, page_size).is_some()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -685,7 +688,7 @@ async fn export_query_result_core_inner(
     // exported with a single execution whose page size is the enforceable row
     // bound (concrete TOP count and/or the configured export row limit), then it
     // stops after the first response.
-    let single_execution_bound = single_execution_row_bound(request);
+    let single_execution_bound = single_execution_page_limit(request, page_size);
     if keyset_plan.is_none()
         && !request.use_agent_cursor
         && !supports_streaming_offset_pagination(request, page_size)
@@ -2066,7 +2069,7 @@ mod tests {
         };
 
         assert!(!supports_streaming_offset_pagination(&req, 100));
-        assert!(supports_single_execution_export(&req));
+        assert!(supports_single_execution_export(&req, 100));
         // The enforceable bound is the concrete TOP count (100), not the row limit.
         assert_eq!(single_execution_row_bound(&req), Some(100));
     }
@@ -2087,6 +2090,7 @@ mod tests {
         assert!(safe_keyset_candidate(&req.sql).is_none(), "TOP must not qualify for keyset");
         assert!(!supports_streaming_offset_pagination(&req, 100));
         assert_eq!(single_execution_row_bound(&req), Some(100));
+        assert!(supports_single_execution_export(&req, 100));
     }
 
     #[test]
@@ -2101,7 +2105,7 @@ mod tests {
             use_agent_cursor: false,
             ..request("csv", None, None)
         };
-        assert!(!supports_single_execution_export(&percent_no_limit));
+        assert!(!supports_single_execution_export(&percent_no_limit, 100));
         assert_eq!(single_execution_row_bound(&percent_no_limit), None);
 
         let ties_no_limit = QueryResultExportRequest {
@@ -2111,12 +2115,13 @@ mod tests {
             use_agent_cursor: false,
             ..request("csv", None, None)
         };
-        assert!(!supports_single_execution_export(&ties_no_limit));
+        assert!(!supports_single_execution_export(&ties_no_limit, 100));
         assert_eq!(single_execution_row_bound(&ties_no_limit), None);
 
         // With a configured row limit the same queries are capped by that limit.
         let percent_with_limit = QueryResultExportRequest { row_limit: Some(5000), ..percent_no_limit };
         assert_eq!(single_execution_row_bound(&percent_with_limit), Some(5000));
+        assert!(!supports_single_execution_export(&percent_with_limit, 100));
     }
 
     #[test]
@@ -2131,12 +2136,13 @@ mod tests {
             use_agent_cursor: false,
             ..request("csv", None, None)
         };
-        assert!(!supports_single_execution_export(&req));
+        assert!(!supports_single_execution_export(&req, 100));
         assert_eq!(single_execution_row_bound(&req), None);
 
         // A configured row limit gives the export an explicit cap.
         let with_limit = QueryResultExportRequest { row_limit: Some(200), ..req };
         assert_eq!(single_execution_row_bound(&with_limit), Some(200));
+        assert!(!supports_single_execution_export(&with_limit, 100));
     }
 
     #[test]
@@ -2150,7 +2156,22 @@ mod tests {
         };
 
         assert!(supports_streaming_offset_pagination(&req, 100));
-        assert!(!supports_single_execution_export(&req));
+        assert!(!supports_single_execution_export(&req, 100));
+    }
+
+    #[test]
+    fn kingbase_single_execution_never_exceeds_one_export_page() {
+        let req = QueryResultExportRequest {
+            sql: "SELECT TOP 1000 * FROM orders".to_string(),
+            query_base_sql: "SELECT TOP 1000 * FROM orders".to_string(),
+            database_type: DatabaseType::Kingbase,
+            use_agent_cursor: false,
+            ..request("csv", None, None)
+        };
+
+        assert_eq!(single_execution_row_bound(&req), Some(1000));
+        assert_eq!(single_execution_page_limit(&req, 100), None);
+        assert!(supports_single_execution_export(&req, 1000));
     }
 
     #[test]

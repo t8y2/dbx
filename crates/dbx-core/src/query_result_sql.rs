@@ -1147,9 +1147,14 @@ pub(crate) fn top_level_top_row_count(sql: &str) -> Option<usize> {
         }
     }
     // `TOP n PERCENT` and `TOP n WITH TIES` (parenthesized or not) do not bound
-    // the row count to the literal, so reject both.
+    // the row count to the literal, so reject those adjacent modifiers. A later
+    // table hint such as `FROM events WITH (NOLOCK)` is unrelated to TOP.
     let after_paren = if parenthesized { skip_sql_whitespace(sql, after + 1) } else { after };
-    if tokens.iter().any(|token| token.start >= after_paren && matches!(token.text.as_str(), "PERCENT" | "WITH")) {
+    let modifier_index = tokens.iter().position(|token| token.start >= after_paren);
+    if modifier_index.is_some_and(|index| {
+        tokens[index].text == "PERCENT"
+            || (tokens[index].text == "WITH" && tokens.get(index + 1).is_some_and(|token| token.text == "TIES"))
+    }) {
         return None;
     }
     Some(count)
@@ -3302,6 +3307,7 @@ WHERE u.id = picked.id;
         assert_eq!(top_level_top_row_count("SELECT TOP (10) PERCENT * FROM events"), None);
         assert_eq!(top_level_top_row_count("SELECT TOP (2) WITH TIES * FROM events"), None);
         assert_eq!(top_level_top_row_count("SELECT TOP 2 WITH TIES * FROM events"), None);
+        assert_eq!(top_level_top_row_count("SELECT TOP 2 * FROM events WITH (NOLOCK)"), Some(2));
 
         // No TOP clause at all.
         assert_eq!(top_level_top_row_count("SELECT * FROM events"), None);

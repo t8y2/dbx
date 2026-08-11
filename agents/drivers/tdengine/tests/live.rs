@@ -89,7 +89,7 @@ fn tdengine_websocket_live_compatibility() {
                 format!("CREATE DATABASE IF NOT EXISTS {database}"),
                 format!("CREATE STABLE IF NOT EXISTS {database}.meters (ts TIMESTAMP, current FLOAT, voltage INT, active BOOL, note NCHAR(32)) TAGS (location NCHAR(64), group_id INT)"),
                 format!("CREATE TABLE IF NOT EXISTS {database}.d1001 USING {database}.meters TAGS ('California.SanFrancisco', 2)"),
-                format!("INSERT INTO {database}.d1001 VALUES ('2026-08-04 10:00:00.001', 10.1, 220, true, 'first') ('2026-08-04 10:00:00.002', 10.2, 221, false, 'second') ('2026-08-04 10:00:00.003', 10.3, 222, true, 'third')")
+                format!("INSERT INTO {database}.d1001 VALUES (1785808800001, 10.1, 220, true, 'first') (1785808800002, 10.2, 221, false, 'second') (1785808800003, 10.3, 222, true, 'third')")
             ]
         }),
     );

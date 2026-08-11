@@ -1601,16 +1601,17 @@ export const useConnectionStore = defineStore("connection", () => {
   }
 
   function objectGroupChildrenFromObjects(options: { node: TreeNode; parentNodeId: string; effectiveSchema?: string; objectTypes: DatabaseObjectTreeKind[]; objects: ObjectInfo[] }): TreeNode[] {
+    const databaseType = options.node.connectionId ? effectiveDatabaseTypeForConnection(getConfig(options.node.connectionId)) : undefined;
     const grouped = buildGroupedObjectTreeNodes({
       nodeId: options.parentNodeId,
       connectionId: options.node.connectionId || "",
       database: options.node.database || "",
       schema: options.effectiveSchema,
       objects: options.objects.filter((object) => options.objectTypes.includes(normalizedObjectTreeKind(object.object_type))),
+      databaseType,
     });
     const refreshedGroup = grouped.find((group) => group.type === options.node.type);
     const children = refreshedGroup?.children ?? [];
-    const databaseType = options.node.connectionId ? effectiveDatabaseTypeForConnection(getConfig(options.node.connectionId)) : undefined;
     return supportsPackageMemberExpansion(databaseType) ? markPackageNodesExpandable(children) : children;
   }
 
@@ -1868,14 +1869,15 @@ export const useConnectionStore = defineStore("connection", () => {
       );
       const supplementalObjects = filterSimpleSidebarSupplementalObjects(objects);
       if (supplementalObjects.length === 0) return;
+      const databaseType = effectiveDatabaseTypeForConnection(getConfig(options.connectionId));
       let supplementalChildren = buildSimpleObjectTreeNodes({
         nodeId: options.nodeId,
         connectionId: options.connectionId,
         database: options.database,
         schema: options.effectiveSchema,
         objects: supplementalObjects,
+        databaseType,
       });
-      const databaseType = effectiveDatabaseTypeForConnection(getConfig(options.connectionId));
       if (supportsPackageMemberExpansion(databaseType)) {
         supplementalChildren = markPackageNodesExpandable(supplementalChildren);
       }
@@ -5698,7 +5700,7 @@ export const useConnectionStore = defineStore("connection", () => {
           });
           const targetNode = treeNodeLoadTarget(load);
           if (!targetNode) return;
-          setChildren(targetNode, buildPackageMemberNodes(targetNode, response.candidates));
+          setChildren(targetNode, buildPackageMemberNodes(targetNode, response.candidates, databaseType));
           targetNode.isExpanded = true;
         },
         options,

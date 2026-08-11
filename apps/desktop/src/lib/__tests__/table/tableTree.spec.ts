@@ -117,6 +117,76 @@ describe("PostgreSQL custom type metadata", () => {
 });
 
 describe("programmable database objects", () => {
+  it("coalesces Xugu package specification and body into one top-level node", () => {
+    const objects: ObjectInfo[] = [
+      { name: "DBX_UI_PKG", object_type: "PACKAGE", schema: "APP", valid: true },
+      { name: "DBX_UI_PKG", object_type: "PACKAGE_BODY", schema: "APP", valid: false },
+    ];
+
+    const nodes = buildSimpleObjectTreeNodes({ ...context, schema: "APP", objects, databaseType: "xugu" });
+    expect(nodes).toHaveLength(1);
+    expect(nodes[0]).toEqual(
+      expect.objectContaining({
+        type: "package",
+        objectName: "DBX_UI_PKG",
+        valid: false,
+        xuguPackageBodyAvailable: true,
+        xuguPackageBodyValid: false,
+      }),
+    );
+  });
+
+  it("keeps the package body as metadata for the expandable Xugu package node", () => {
+    const objects: ObjectInfo[] = [
+      { name: "DBX_UI_PKG", object_type: "PACKAGE", schema: "APP", valid: true },
+      { name: "DBX_UI_PKG", object_type: "PACKAGE_BODY", schema: "APP", valid: true },
+    ];
+
+    const groups = buildGroupedObjectTreeNodes({ ...context, schema: "APP", objects, databaseType: "xugu" });
+    const packageGroup = groups.find((node) => node.type === "group-packages");
+    expect(packageGroup?.objectCount).toBe(1);
+    expect(packageGroup?.children).toEqual([expect.objectContaining({ type: "package", objectName: "DBX_UI_PKG" })]);
+  });
+
+  it("keeps a body-only Xugu metadata response visible as a package", () => {
+    const nodes = buildSimpleObjectTreeNodes({
+      ...context,
+      schema: "APP",
+      objects: [{ name: "BODY_ONLY_PKG", object_type: "PACKAGE_BODY", schema: "APP", valid: true }],
+      databaseType: "xugu",
+    });
+
+    expect(nodes).toEqual([
+      expect.objectContaining({
+        type: "package",
+        objectName: "BODY_ONLY_PKG",
+        xuguPackageBodyAvailable: true,
+        xuguPackageBodyValid: true,
+      }),
+    ]);
+  });
+
+  it("does not advertise a body child for a specification-only Xugu package", () => {
+    const nodes = buildSimpleObjectTreeNodes({
+      ...context,
+      schema: "APP",
+      objects: [{ name: "SPEC_ONLY_PKG", object_type: "PACKAGE", schema: "APP", valid: true }],
+      databaseType: "xugu",
+    });
+
+    expect(nodes[0]).toEqual(expect.objectContaining({ type: "package", xuguPackageBodyAvailable: undefined }));
+  });
+
+  it("does not merge package and package body for other databases", () => {
+    const objects: ObjectInfo[] = [
+      { name: "DBX_UI_PKG", object_type: "PACKAGE", schema: "APP" },
+      { name: "DBX_UI_PKG", object_type: "PACKAGE_BODY", schema: "APP" },
+    ];
+
+    const nodes = buildSimpleObjectTreeNodes({ ...context, schema: "APP", objects, databaseType: "oracle" });
+    expect(nodes.map((node) => node.type)).toEqual(["package", "package-body"]);
+  });
+
   it("keeps Xugu trigger/type nodes distinct and preserves an invalid status", () => {
     const objects: ObjectInfo[] = [
       { name: "TRG_AUDIT", object_type: "TRIGGER", schema: "APP", valid: false },

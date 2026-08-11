@@ -198,8 +198,12 @@ describe("connectionStore metadata loading", () => {
       match_mode: "prefix",
     });
     expect(packageNode.isExpanded).toBe(true);
-    expect(packageNode.children?.map((child) => child.label)).toEqual(["process_item(p_id IN INT)", "process_item(p_code IN VARCHAR)", "item_count"]);
-    expect(packageNode.children?.every((child) => child.parentName === "business_api")).toBe(true);
+    expect(packageNode.children?.map((child) => [child.type, child.label, child.objectCount])).toEqual([
+      ["group-procedures", "tree.procedures", 2],
+      ["group-functions", "tree.functions", 1],
+    ]);
+    expect(packageNode.children?.flatMap((group) => group.children ?? []).map((child) => child.label)).toEqual(["process_item(p_id IN INT)", "process_item(p_code IN VARCHAR)", "item_count"]);
+    expect(packageNode.children?.flatMap((group) => group.children ?? []).every((child) => child.parentName === "business_api")).toBe(true);
   }, 15000);
 
   it("loads Xugu object type members through the scoped completion endpoint", async () => {

@@ -75,6 +75,23 @@ describe("treeNodeClick", () => {
     });
   });
 
+  it("routes the package body action to the owning package source", () => {
+    expect(
+      objectSourceTargetForTreeNode({
+        id: "pkg:body",
+        label: "business_api",
+        type: "package-body",
+        objectName: "business_api",
+        schema: "app_schema",
+      }),
+    ).toEqual({
+      name: "business_api",
+      schema: "app_schema",
+      objectType: "PACKAGE_BODY",
+      signature: undefined,
+    });
+  });
+
   it("keeps standalone routine source routing unchanged", () => {
     expect(objectSourceTargetForTreeNode({ id: "proc", label: "standalone_proc", type: "procedure", schema: "app" })).toEqual({
       name: "standalone_proc",

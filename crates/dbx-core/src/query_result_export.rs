@@ -461,6 +461,22 @@ fn supports_streaming_offset_pagination(request: &QueryResultExportRequest, page
         && !first_sql.trim().eq_ignore_ascii_case(second_sql.trim())
 }
 
+/// True when a non-agent export can still stream this query by executing it
+/// exactly once and writing the whole result. Used for statements that cannot
+/// be rewritten with LIMIT/OFFSET (Kingbase SQL Server compatibility mode
+/// top-level TOP), where the TOP clause itself bounds the row count.
+fn supports_single_execution_export(request: &QueryResultExportRequest) -> bool {
+    let plan = build_query_pagination_execution_plan(QueryPaginationExecutionPlanOptions {
+        sql: request.sql.clone(),
+        query_base_sql: request.query_base_sql.clone(),
+        database_type: Some(request.database_type),
+        pagination: QueryPagination { limit: request.page_size.max(1), offset: 0, session_id: None },
+        use_agent_cursor: false,
+        first_page_uses_actual_sql: true,
+    });
+    plan.single_execution
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SafeKeysetCandidate {
     schema: Option<String>,
@@ -650,7 +666,15 @@ async fn export_query_result_core_inner(
     let mut offset: usize = 0;
     let mut wrote_text_header = false;
     let mut keyset_plan = build_keyset_plan(state, request).await;
-    if keyset_plan.is_none() && !request.use_agent_cursor && !supports_streaming_offset_pagination(request, page_size) {
+    // A statement that can only be exported with a single execution (e.g.
+    // Kingbase SQL Server compat top-level TOP) sizes its page to the whole
+    // remaining row budget and stops after the first response.
+    let single_execution_capable = supports_single_execution_export(request);
+    if keyset_plan.is_none()
+        && !request.use_agent_cursor
+        && !supports_streaming_offset_pagination(request, page_size)
+        && !single_execution_capable
+    {
         return Err(STREAMING_PAGINATION_UNSUPPORTED_ERROR.to_string());
     }
 
@@ -674,36 +698,42 @@ async fn export_query_result_core_inner(
         if matches!(remaining, Some(0)) {
             break;
         }
-        let this_page = remaining.map_or(page_size, |rem| rem.min(page_size)).max(1);
-
-        let (sql_to_execute, plan_limit, use_agent_result_session) = if let Some(plan) = keyset_plan.as_ref() {
-            (
-                keyset_pagination_sql(
-                    &plan.columns,
-                    &plan.table,
-                    &plan.schema,
-                    &request.database_type,
-                    &plan.primary_keys,
-                    &plan.last_pk_values,
-                    this_page,
-                ),
-                this_page,
-                false,
-            )
+        let this_page = if single_execution_capable {
+            remaining.map_or(AGENT_UNBOUNDED_ROW_LIMIT, |rem| rem.max(1))
         } else {
-            let plan = build_query_pagination_execution_plan(QueryPaginationExecutionPlanOptions {
-                sql: request.sql.clone(),
-                query_base_sql: request.query_base_sql.clone(),
-                database_type: Some(request.database_type),
-                pagination: QueryPagination { limit: this_page, offset, session_id: session_id.clone() },
-                use_agent_cursor: request.use_agent_cursor,
-                first_page_uses_actual_sql: true,
-            });
-            let Some(plan_limit) = plan.page_limit else {
-                return Err("Failed to build query pagination plan for export".to_string());
-            };
-            (plan.sql_to_execute, plan_limit, plan.use_agent_result_session)
+            remaining.map_or(page_size, |rem| rem.min(page_size)).max(1)
         };
+
+        let (sql_to_execute, plan_limit, use_agent_result_session, single_execution) =
+            if let Some(plan) = keyset_plan.as_ref() {
+                (
+                    keyset_pagination_sql(
+                        &plan.columns,
+                        &plan.table,
+                        &plan.schema,
+                        &request.database_type,
+                        &plan.primary_keys,
+                        &plan.last_pk_values,
+                        this_page,
+                    ),
+                    this_page,
+                    false,
+                    false,
+                )
+            } else {
+                let plan = build_query_pagination_execution_plan(QueryPaginationExecutionPlanOptions {
+                    sql: request.sql.clone(),
+                    query_base_sql: request.query_base_sql.clone(),
+                    database_type: Some(request.database_type),
+                    pagination: QueryPagination { limit: this_page, offset, session_id: session_id.clone() },
+                    use_agent_cursor: request.use_agent_cursor,
+                    first_page_uses_actual_sql: true,
+                });
+                let Some(plan_limit) = plan.page_limit else {
+                    return Err("Failed to build query pagination plan for export".to_string());
+                };
+                (plan.sql_to_execute, plan_limit, plan.use_agent_result_session, plan.single_execution)
+            };
 
         let options = if use_agent_result_session {
             QueryExecutionOptions {
@@ -841,8 +871,13 @@ async fn export_query_result_core_inner(
                     plan.pk_indices.iter().map(|&index| last_row.get(index).cloned().unwrap_or(Value::Null)).collect();
             }
         }
-        let should_continue =
-            should_fetch_next_page(use_agent_result_session, result.has_more, fetched_row_count, row_count, plan_limit);
+        let should_continue = if single_execution {
+            // A single execution already streamed the full (TOP-bounded) result;
+            // there is no offset to advance to.
+            false
+        } else {
+            should_fetch_next_page(use_agent_result_session, result.has_more, fetched_row_count, row_count, plan_limit)
+        };
         if cancel_token.as_ref().is_some_and(|token| token.is_cancelled())
             || is_export_cancelled(&request.export_id).await
         {
@@ -1994,6 +2029,40 @@ mod tests {
         let oracle_req =
             QueryResultExportRequest { database_type: DatabaseType::Oracle, ..request("csv", Some(1000), None) };
         assert!(!supports_streaming_offset_pagination(&oracle_req, 100));
+    }
+
+    #[test]
+    fn kingbase_non_keyset_top_export_falls_back_to_single_execution() {
+        // Regression for t8y2/dbx#5910: a non-keyset Kingbase SQL Server compat
+        // TOP query (e.g. a join) cannot be offset-paginated, so the export must
+        // stream it in a single execution rather than reject it. This mirrors the
+        // guard in export_query_result_core_inner: offset pagination says no, but
+        // single-execution support lets the export proceed.
+        let req = QueryResultExportRequest {
+            sql: "SELECT TOP 100 * FROM orders o JOIN customers c ON c.id = o.customer_id ORDER BY o.id".to_string(),
+            query_base_sql: "SELECT TOP 100 * FROM orders o JOIN customers c ON c.id = o.customer_id ORDER BY o.id"
+                .to_string(),
+            database_type: DatabaseType::Kingbase,
+            use_agent_cursor: false,
+            ..request("csv", Some(1000), None)
+        };
+
+        assert!(!supports_streaming_offset_pagination(&req, 100));
+        assert!(supports_single_execution_export(&req));
+    }
+
+    #[test]
+    fn kingbase_without_top_uses_streaming_offset_pagination() {
+        let req = QueryResultExportRequest {
+            sql: "SELECT * FROM orders o JOIN customers c ON c.id = o.customer_id ORDER BY o.id".to_string(),
+            query_base_sql: "SELECT * FROM orders o JOIN customers c ON c.id = o.customer_id ORDER BY o.id".to_string(),
+            database_type: DatabaseType::Kingbase,
+            use_agent_cursor: false,
+            ..request("csv", Some(1000), None)
+        };
+
+        assert!(supports_streaming_offset_pagination(&req, 100));
+        assert!(!supports_single_execution_export(&req));
     }
 
     #[test]

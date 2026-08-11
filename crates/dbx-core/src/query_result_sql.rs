@@ -57,6 +57,12 @@ pub struct QueryPaginationExecutionPlan {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub count_sql: Option<String>,
     pub use_agent_result_session: bool,
+    /// True when the statement cannot be paginated server-side and must be
+    /// executed once with the whole result streamed back (single execution).
+    /// Only meaningful to in-process callers (query-result export); never
+    /// serialized to the frontend.
+    #[serde(skip)]
+    pub single_execution: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -116,6 +122,7 @@ pub fn build_query_pagination_execution_plan(
         page_offset: None,
         count_sql: None,
         use_agent_result_session: false,
+        single_execution: false,
     };
 
     let counted = build_count_query_sql(CountQuerySqlOptions {
@@ -171,6 +178,17 @@ pub fn build_query_pagination_execution_plan(
         plan.page_limit = Some(options.pagination.limit);
         plan.page_offset = Some(options.pagination.offset);
         plan.use_agent_result_session = true;
+    } else if options.database_type == Some(DatabaseType::Kingbase)
+        && single_selectable_statement(&options.sql).is_ok()
+        && has_top_level_top(&options.sql)
+    {
+        // Kingbase SQL Server compatibility mode rejects a statement that mixes a
+        // top-level TOP with a sibling LIMIT/OFFSET. Without an Agent cursor the
+        // query-result export executes the statement once and streams the whole
+        // result; the TOP clause already bounds the row count.
+        plan.page_limit = Some(options.pagination.limit);
+        plan.page_offset = Some(options.pagination.offset);
+        plan.single_execution = true;
     }
     plan
 }
@@ -3165,6 +3183,58 @@ WHERE u.id = picked.id;
         assert_eq!(plan.page_limit, Some(500));
         assert_eq!(plan.page_offset, Some(0));
         assert!(!plan.use_agent_result_session);
+    }
+
+    #[test]
+    fn kingbase_top_clause_without_agent_uses_single_execution() {
+        // Non-agent callers (query-result export with use_agent_cursor=false)
+        // cannot open an Agent result session, so the Kingbase-TOP plan must
+        // mark the query single-execution instead: original SQL unchanged, no
+        // page_sql, but bounded page limits the export loop can stream once.
+        for sql in [
+            "SELECT TOP 100 * FROM events",
+            "SELECT TOP(100) * FROM events",
+            "SELECT TOP 10 PERCENT * FROM events",
+            "SELECT TOP (2) WITH TIES * FROM events",
+            "SELECT TOP 100 events.name FROM events JOIN users ON users.id = events.id",
+        ] {
+            let plan = build_query_pagination_execution_plan(QueryPaginationExecutionPlanOptions {
+                sql: sql.to_string(),
+                query_base_sql: sql.to_string(),
+                database_type: Some(DatabaseType::Kingbase),
+                pagination: QueryPagination { limit: 500, offset: 0, session_id: None },
+                use_agent_cursor: false,
+                first_page_uses_actual_sql: true,
+            });
+
+            assert_eq!(plan.sql_to_execute, sql, "sql_to_execute should stay untouched for {sql}");
+            assert!(plan.page_sql.is_none(), "no LIMIT rewrite for {sql}");
+            assert_eq!(plan.page_limit, Some(500));
+            assert_eq!(plan.page_offset, Some(0));
+            assert!(!plan.use_agent_result_session);
+            assert!(plan.single_execution, "single-execution fallback for {sql}");
+        }
+    }
+
+    #[test]
+    fn kingbase_top_with_agent_still_uses_agent_session() {
+        // Grid/query path: with an Agent cursor available the Kingbase-TOP query
+        // keeps the existing bounded Agent-session fallback (not single-execution).
+        let plan = build_query_pagination_execution_plan(QueryPaginationExecutionPlanOptions {
+            sql: "SELECT TOP 100 * FROM events".to_string(),
+            query_base_sql: "SELECT TOP 100 * FROM events".to_string(),
+            database_type: Some(DatabaseType::Kingbase),
+            pagination: QueryPagination { limit: 500, offset: 0, session_id: None },
+            use_agent_cursor: true,
+            first_page_uses_actual_sql: false,
+        });
+
+        assert_eq!(plan.sql_to_execute, "SELECT TOP 100 * FROM events");
+        assert!(plan.page_sql.is_none());
+        assert_eq!(plan.page_limit, Some(500));
+        assert_eq!(plan.page_offset, Some(0));
+        assert!(plan.use_agent_result_session);
+        assert!(!plan.single_execution);
     }
 
     #[test]

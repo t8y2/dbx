@@ -1034,6 +1034,7 @@ export default withEnglishFallback({
     mqttRetainMessage: "Mantieni messaggio",
     mqttPayloadEncoding: "Codifica del Payload",
     mqttPayload: "Payload",
+    mqttResizePayload: "Trascina per regolare l'altezza del campo messaggio",
     mqttPayloadPlaceholderPlaintext: "Inserisci il contenuto del messaggio...",
     mqttPayloadPlaceholderJson: "Inserisci JSON, ad esempio {example}",
     mqttPayloadPlaceholderBase64: "Inserisci dati codificati in Base64",

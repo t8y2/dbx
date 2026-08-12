@@ -1034,6 +1034,7 @@ export default withEnglishFallback({
     mqttRetainMessage: "メッセージを保持",
     mqttPayloadEncoding: "ペイロードのエンコード",
     mqttPayload: "ペイロード",
+    mqttResizePayload: "ドラッグしてメッセージ入力欄の高さを調整",
     mqttPayloadPlaceholderPlaintext: "メッセージ内容を入力...",
     mqttPayloadPlaceholderJson: "JSON を入力（例: {example}）",
     mqttPayloadPlaceholderBase64: "Base64 エンコード済みデータを入力",

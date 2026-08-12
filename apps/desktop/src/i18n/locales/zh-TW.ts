@@ -1034,6 +1034,7 @@ export default withEnglishFallback({
     mqttRetainMessage: "保留訊息",
     mqttPayloadEncoding: "Payload 編碼",
     mqttPayload: "訊息內容 (Payload)",
+    mqttResizePayload: "拖曳調整訊息輸入框高度",
     mqttPayloadPlaceholderPlaintext: "輸入訊息內容...",
     mqttPayloadPlaceholderJson: "輸入 JSON，例如 {example}",
     mqttPayloadPlaceholderBase64: "輸入 Base64 編碼的資料",

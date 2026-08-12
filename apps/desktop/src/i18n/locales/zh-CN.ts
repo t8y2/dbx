@@ -729,6 +729,7 @@ export default withEnglishFallback({
     mqttRetainMessage: "保留消息",
     mqttPayloadEncoding: "Payload 编码",
     mqttPayload: "消息内容 (Payload)",
+    mqttResizePayload: "拖动调节消息输入框高度",
     mqttPayloadPlaceholderPlaintext: "输入消息内容...",
     mqttPayloadPlaceholderJson: "输入 JSON，例如 {example}",
     mqttPayloadPlaceholderBase64: "输入 Base64 编码的数据",

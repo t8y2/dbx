@@ -804,6 +804,7 @@ export default {
     mqttRetainMessage: "Retain message",
     mqttPayloadEncoding: "Payload encoding",
     mqttPayload: "Payload",
+    mqttResizePayload: "Drag to resize the message input",
     mqttPayloadPlaceholderPlaintext: "Enter message content...",
     mqttPayloadPlaceholderJson: "Enter JSON, for example {example}",
     mqttPayloadPlaceholderBase64: "Enter Base64-encoded data",

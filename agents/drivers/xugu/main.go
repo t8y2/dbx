@@ -28,6 +28,11 @@ const defaultMaxRows = 1000
 const defaultXuguPort = 5138
 const legacyAgentSessionID = "__legacy__"
 const maxAgentSessions = 256
+
+// xuguPublicSynonymScope is a protocol-only namespace for database-global
+// synonyms. It is deliberately not a real schema name (and must never be
+// interpreted as one by metadata queries).
+const xuguPublicSynonymScope = "__DBX_XUGU_PUBLIC_SYNONYMS__"
 const xuguListDatabasesSQL = `
 SELECT DB_NAME
 FROM ALL_DATABASES
@@ -37,6 +42,11 @@ SELECT SCHEMA_NAME
 FROM ALL_SCHEMAS
 WHERE DB_ID = CURRENT_DB_ID
 ORDER BY SCHEMA_NAME`
+const xuguPublicSynonymScopeProbeSQL = `
+SELECT 1
+FROM ALL_SYNONYMS
+WHERE DB_ID = CURRENT_DB_ID
+  AND IS_PUBLIC = TRUE`
 const xuguCatalogTableNameSelectSQL = `
 SELECT s.SCHEMA_NAME, t.TABLE_NAME
 FROM ALL_TABLES t
@@ -48,7 +58,7 @@ JOIN ALL_SCHEMAS s ON s.DB_ID = q.DB_ID AND s.SCHEMA_ID = q.SCHEMA_ID
 WHERE s.DB_ID = CURRENT_DB_ID
   AND q.IS_SYS = FALSE`
 const xuguCatalogSynonymSelectSQL = `
-SELECT CASE WHEN y.IS_PUBLIC = TRUE THEN 'GUEST' ELSE s.SCHEMA_NAME END AS SCHEMA_NAME,
+SELECT CASE WHEN y.IS_PUBLIC = TRUE THEN '__DBX_XUGU_PUBLIC_SYNONYMS__' ELSE s.SCHEMA_NAME END AS SCHEMA_NAME,
        y.SYNO_NAME, t.SCHEMA_NAME AS TARGET_SCHEMA, y.TARG_NAME, y.IS_PUBLIC
 FROM ALL_SYNONYMS y
 LEFT JOIN ALL_SCHEMAS s ON s.DB_ID = y.DB_ID AND s.SCHEMA_ID = y.SCHEMA_ID
@@ -1704,7 +1714,43 @@ func (s *server) listSchemas() ([]string, error) {
 		}
 		result = append(result, schema)
 	}
-	return emptyIfNil(result), rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	// Public synonyms have no owning schema in Xugu. Probe them separately so
+	// a catalog permission/version difference cannot make ordinary schemas
+	// disappear, while still making the public namespace discoverable when it
+	// is available.
+	if public, err := s.hasPublicSynonymScope(); err == nil && public {
+		result = append(result, xuguPublicSynonymScope)
+	}
+	return dedupeXuguSchemaNames(result), nil
+}
+
+func (s *server) hasPublicSynonymScope() (bool, error) {
+	rows, err := s.queryRows(xuguPublicSynonymScopeProbeSQL, nil)
+	if err != nil {
+		return false, err
+	}
+	defer s.closeRows(rows)
+	return rows.Next(), rows.Err()
+}
+
+func dedupeXuguSchemaNames(names []string) []string {
+	seen := make(map[string]struct{}, len(names))
+	result := make([]string, 0, len(names))
+	for _, name := range names {
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		result = append(result, name)
+	}
+	return emptyIfNil(result)
+}
+
+func isXuguPublicSynonymScope(schema string) bool {
+	return strings.TrimSpace(schema) == xuguPublicSynonymScope
 }
 
 func (s *server) currentSchema() (string, error) {
@@ -2161,7 +2207,10 @@ WHERE s.DB_ID = CURRENT_DB_ID
 }
 
 func xuguListObjectsQuery(schema string, constraints metadataListConstraints) xuguMetadataListQuery {
-	publicSynonymScope := strings.EqualFold(strings.TrimSpace(schema), "GUEST")
+	// Public synonyms have no owning schema in Xugu. They are queried only
+	// through the reserved protocol scope; a real schema named GUEST remains
+	// a normal private-synonym namespace.
+	publicSynonymScope := isXuguPublicSynonymScope(schema)
 	synonymSQL := `
 SELECT y.SYNO_NAME AS OBJECT_NAME, 'SYNONYM' AS OBJECT_TYPE, NULL AS COMMENTS, y.VALID, NULL AS XUGU_TYPE_MEMBERS_EXPANDABLE
 FROM ALL_SYNONYMS y
@@ -2942,8 +2991,8 @@ func renderXuguSequenceDDL(sequence xuguSequenceMetadata) string {
 }
 
 // getSynonymSource reconstructs synonym DDL from ALL_SYNONYMS. Public
-// synonyms are exposed in the synthetic GUEST scope, matching the database
-// global metadata model, and therefore use PUBLIC syntax without a schema.
+// synonyms are exposed in the reserved database-global scope and therefore
+// use PUBLIC syntax without a schema qualifier.
 func (s *server) getSynonymSource(schema, name string) (map[string]any, error) {
 	synonym, err := s.resolveCatalogSynonym(schema, name)
 	if err != nil {
@@ -3013,7 +3062,7 @@ func (s *server) resolveCatalogSynonym(schema, name string) (xuguCatalogSynonym,
 func xuguCatalogSynonymQuery(schema, name string, caseInsensitive bool) string {
 	schemaExpr := quoteStringLiteral(schema)
 	nameExpr := quoteStringLiteral(name)
-	publicScope := strings.EqualFold(strings.TrimSpace(schema), "GUEST")
+	publicScope := isXuguPublicSynonymScope(schema)
 	if caseInsensitive {
 		nameExpr = quoteStringLiteral(strings.ToUpper(name))
 		if publicScope {

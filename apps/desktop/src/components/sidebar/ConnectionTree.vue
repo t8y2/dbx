@@ -1226,7 +1226,7 @@ function findDatabaseNode(nodes: TreeNode[], connId: string, database: string): 
 
 function findSchemaNode(nodes: TreeNode[], connId: string, database: string, schema: string): TreeNode | null {
   for (const node of nodes) {
-    if (node.type === "schema" && node.connectionId === connId && sameTreeName(node.database, database) && sameTreeName(node.label, schema)) {
+    if (node.type === "schema" && node.connectionId === connId && sameTreeName(node.database, database) && sameTreeName(node.schema || node.label, schema)) {
       return node;
     }
     if (node.children) {

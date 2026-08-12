@@ -517,22 +517,21 @@ function isFolderActive(folderId: string): boolean {
   return activeItemType.value === "folder" && activeItemId.value === folderId;
 }
 
-function selectionRowClass(selected: boolean, active: boolean): string {
-  if (selected) return "bg-primary/10 text-foreground";
-  if (active) return "bg-primary/12 text-foreground";
-  return "hover:bg-accent";
+function selectionRowClass(selected: boolean, active: boolean, contextOpen: boolean): string {
+  if (selected || active || contextOpen) return "bg-accent text-accent-foreground";
+  return "hover:bg-accent/40";
 }
 
 function fileRowClass(fileId: string): string {
-  return selectionRowClass(isFileSelected(fileId), isFileActive(fileId));
+  return selectionRowClass(isFileSelected(fileId), isFileActive(fileId), isContextFile(fileId));
 }
 
 function folderRowClass(folderId: string): string {
-  return selectionRowClass(isFolderSelected(folderId), isFolderActive(folderId));
+  return selectionRowClass(isFolderSelected(folderId), isFolderActive(folderId), isContextFolder(folderId));
 }
 
 function fileMetaClass(fileId: string): string {
-  return isFileSelected(fileId) || isFileActive(fileId) ? "text-foreground/70" : "text-muted-foreground";
+  return isFileSelected(fileId) || isFileActive(fileId) || isContextFile(fileId) ? "text-foreground/70" : "text-muted-foreground";
 }
 
 function isFileDirty(file: SavedSqlFile): boolean {
@@ -797,6 +796,14 @@ function handleFolderClick(folder: SavedSqlFolder, event: MouseEvent) {
 }
 
 const contextTarget = ref<SavedSqlFolder | SavedSqlFile | "panel" | null>(null);
+
+function isContextFile(fileId: string): boolean {
+  return contextTarget.value !== null && contextTarget.value !== "panel" && "sql" in contextTarget.value && contextTarget.value.id === fileId;
+}
+
+function isContextFolder(folderId: string): boolean {
+  return contextTarget.value !== null && contextTarget.value !== "panel" && !("sql" in contextTarget.value) && contextTarget.value.id === folderId;
+}
 
 function folderMoveMenuItems(fileIds: string[]): CtxMenuItem[] {
   const files = [...new Set(fileIds)].map((id) => savedSqlStore.getFile(id)).filter((file): file is SavedSqlFile => Boolean(file));

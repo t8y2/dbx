@@ -381,8 +381,8 @@ function clearContextTarget() {
           <div v-else>
             <div v-for="(folder, fi) in folders" :key="folder.path" class="border-b last:border-b-0">
               <div
-                class="flex cursor-default items-center gap-1 px-2 py-1.5 text-[11px] font-medium text-muted-foreground bg-muted/10 sticky top-0 select-none hover:bg-muted/30"
-                :class="selectedPath === folder.path ? 'bg-accent/60 text-accent-foreground' : ''"
+                class="flex cursor-default items-center gap-1 px-2 py-1.5 text-[11px] font-medium text-muted-foreground bg-muted/10 sticky top-0 select-none"
+                :class="selectedPath === folder.path ? 'bg-accent text-accent-foreground' : 'hover:bg-accent/40'"
                 @click="
                   toggleFolderCollapse(folder);
                   selectPath(folder.path);
@@ -429,8 +429,8 @@ function clearContextTarget() {
                   <div
                     v-for="{ entry, depth } in flatTree(folder.entries, folder.expanded)"
                     :key="entry.path"
-                    class="flex cursor-default items-center gap-1 px-2 py-1 hover:bg-muted/60 text-sm"
-                    :class="[entry.is_dir ? 'rounded-sm' : 'rounded-none', selectedPath === entry.path ? 'bg-accent text-accent-foreground' : '']"
+                    class="flex cursor-default select-none items-center gap-1 px-2 py-1 text-sm"
+                    :class="[entry.is_dir ? 'rounded-sm' : 'rounded-none', selectedPath === entry.path ? 'bg-accent text-accent-foreground' : 'hover:bg-accent/40']"
                     :style="{ paddingLeft: depth * 16 + 8 + 'px' }"
                     @click="
                       selectPath(entry.path);

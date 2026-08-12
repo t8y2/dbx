@@ -1870,10 +1870,10 @@ defineExpose({
           </div>
           <div v-else class="h-full overflow-auto py-1 text-sm">
             <template v-for="row in visibleRows" :key="row.type === 'node' ? row.node.id : row.id">
-              <CustomContextMenu v-if="row.type === 'node'" :items="nodeContextMenuItems(row.node)" v-slot="{ onContextMenu }">
+              <CustomContextMenu v-if="row.type === 'node'" :items="nodeContextMenuItems(row.node)" v-slot="{ onContextMenu, isOpen }">
                 <div
-                  class="flex h-8 w-full select-none items-center gap-1.5 pr-2 text-left transition-colors hover:bg-accent"
-                  :class="rowIsSelected(row.node) ? 'bg-primary/10 font-medium text-foreground shadow-[inset_3px_0_0_hsl(var(--primary))]' : ''"
+                  class="flex h-8 w-full select-none items-center gap-1.5 pr-2 text-left transition-colors"
+                  :class="isOpen || rowIsSelected(row.node) ? 'bg-accent font-medium text-accent-foreground shadow-[inset_3px_0_0_hsl(var(--primary))]' : 'hover:bg-accent/40'"
                   :style="{ paddingLeft: `${8 + row.depth * 18}px` }"
                   @mousedown.right.prevent
                   @contextmenu="(event) => onRowContextMenu(event, row.node, onContextMenu)"

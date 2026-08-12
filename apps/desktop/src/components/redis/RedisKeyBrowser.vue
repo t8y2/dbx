@@ -1802,10 +1802,10 @@ defineExpose({ focusSearch, insertCommand, executeCommand: executeAiCommand });
           </div>
           <RecycleScroller v-else class="redis-key-scroller flex-1" :items="visibleRows" :item-size="30" :buffer="600" :skip-hover="true" key-field="id" @scroll="onRedisKeyScroll">
             <template #default="{ item: row }">
-              <CustomContextMenu :items="redisKeyContextMenuItems(row.node)" v-slot="{ onContextMenu }">
+              <CustomContextMenu :items="redisKeyContextMenuItems(row.node)" v-slot="{ onContextMenu, isOpen }">
                 <div
-                  class="flex items-center gap-2 border-b px-3 text-[13px] cursor-pointer hover:bg-accent/50 group"
-                  :class="{ 'bg-accent': row.node.kind === 'leaf' && selectedKeyRaw === row.node.keyRaw }"
+                  class="flex items-center gap-2 border-b px-3 text-[13px] cursor-pointer group"
+                  :class="isOpen || (row.node.kind === 'leaf' && selectedKeyRaw === row.node.keyRaw) ? 'bg-accent text-accent-foreground' : 'hover:bg-accent/40'"
                   :style="{ height: '30px' }"
                   @click="onRowClick(row.node)"
                   @contextmenu="(event) => onRedisRowContextMenu(event, row.node, onContextMenu)"

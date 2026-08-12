@@ -909,6 +909,8 @@ export default withEnglishFallback({
     connectTimeout: "연결 제한 시간 (초)",
     queryTimeout: "쿼리 제한 시간 (초)",
     useGlobalQueryTimeout: "전역",
+    globalConnectTimeoutHint: "범위: 1~300초",
+    globalQueryTimeoutHint: "범위: 0~3600초. 0으로 설정하면 제한이 없습니다.",
     useConnectionQueryTimeout: "연결",
     idleTimeout: "유휴 제한 시간 (초)",
     keepaliveInterval: "킵얼라이브 간격 (초)",

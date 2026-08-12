@@ -794,6 +794,8 @@ export default withEnglishFallback({
     connectTimeout: "Timeout de Conexão (segundos)",
     queryTimeout: "Timeout de Consulta (segundos)",
     useGlobalQueryTimeout: "Global",
+    globalConnectTimeoutHint: "Intervalo: de 1 a 300 segundos",
+    globalQueryTimeoutHint: "Intervalo: de 0 a 3600 segundos. Defina 0 para não haver limite.",
     useConnectionQueryTimeout: "Conexão",
     idleTimeout: "Timeout de Inatividade (segundos)",
     keepaliveInterval: "Intervalo de keepalive (segundos)",

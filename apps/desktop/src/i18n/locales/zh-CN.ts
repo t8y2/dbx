@@ -940,6 +940,8 @@ export default withEnglishFallback({
     connectTimeout: "连接超时（秒）",
     queryTimeout: "查询超时（秒）",
     useGlobalQueryTimeout: "全局",
+    globalConnectTimeoutHint: "范围为1～300秒",
+    globalQueryTimeoutHint: "范围为0～3600秒。设为0表示不限制",
     useConnectionQueryTimeout: "当前连接",
     idleTimeout: "空闲超时（秒）",
     keepaliveInterval: "保持连接间隔（秒）",

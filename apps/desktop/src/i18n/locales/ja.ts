@@ -759,6 +759,8 @@ export default withEnglishFallback({
     connectTimeout: "接続タイムアウト（秒）",
     queryTimeout: "クエリタイムアウト（秒）",
     useGlobalQueryTimeout: "グローバル",
+    globalConnectTimeoutHint: "1～300 秒の範囲で指定します",
+    globalQueryTimeoutHint: "0～3600 秒の範囲で指定します。0 はタイムアウトなしです。",
     useConnectionQueryTimeout: "接続",
     idleTimeout: "アイドルタイムアウト（秒）",
     keepaliveInterval: "Keepalive 間隔（秒）",

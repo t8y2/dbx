@@ -1012,6 +1012,8 @@ export default {
     connectTimeout: "Connection Timeout (seconds)",
     queryTimeout: "Query Timeout (seconds)",
     useGlobalQueryTimeout: "Global",
+    globalConnectTimeoutHint: "Range: 1 to 300 seconds",
+    globalQueryTimeoutHint: "Range: 0 to 3600 seconds. Set to 0 for no timeout.",
     useConnectionQueryTimeout: "Connection",
     idleTimeout: "Idle Timeout (seconds)",
     keepaliveInterval: "Keepalive Interval (seconds)",

@@ -793,6 +793,8 @@ export default withEnglishFallback({
     connectTimeout: "連線逾時（秒）",
     queryTimeout: "查詢逾時（秒）",
     useGlobalQueryTimeout: "全域",
+    globalConnectTimeoutHint: "範圍為1～300秒",
+    globalQueryTimeoutHint: "範圍為0～3600秒。設為0表示不限制",
     useConnectionQueryTimeout: "目前連線",
     idleTimeout: "閒置逾時（秒）",
     keepaliveInterval: "保持連線間隔（秒）",

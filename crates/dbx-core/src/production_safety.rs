@@ -688,6 +688,7 @@ mod tests {
             informix_server: String::new(),
             external_config: None,
             one_time: false,
+            save_password: true,
             read_only: false,
             is_production: false,
             production_databases: vec!["prod_app".to_string()],

@@ -302,6 +302,8 @@ type MetadataListPageResult = TableInfo[] | ObjectInfo[];
 type BeforeConnectHandler = (config: ConnectionConfig) => Promise<void>;
 
 export const CONNECTION_ATTEMPT_CANCELLED_MESSAGE = "Connection attempt was cancelled";
+/** Thrown when a no-save-password connection is connected without a typed password. */
+export const CONNECTION_PASSWORD_REQUIRED_MESSAGE = "Password is required for this connection";
 
 function metadataDriverProfile(config?: ConnectionConfig): string | undefined {
   return config?.driver_profile || config?.db_type;
@@ -2339,6 +2341,7 @@ export const useConnectionStore = defineStore("connection", () => {
 
   async function addConnection(config: ConnectionConfig, targetGroupId?: string | null) {
     const normalized = normalizeConnection(config);
+    if (normalized.save_password === false) normalized.password = "";
     await persistTimeoutInheritance(normalized.id, normalized.connect_timeout_inherit === true, normalized.query_timeout_inherit === true);
     const existing = connections.value.findIndex((c) => c.id === normalized.id);
     const nextConnections = [...connections.value];
@@ -2502,6 +2505,7 @@ export const useConnectionStore = defineStore("connection", () => {
 
   async function updateConnection(config: ConnectionConfig) {
     config = normalizeConnection(config);
+    if (config.save_password === false) config.password = "";
     const idx = connections.value.findIndex((c) => c.id === config.id);
     if (idx < 0) return;
     const runtimeConfigChanged = connectionConfigFingerprint(connections.value[idx]) !== connectionConfigFingerprint(config);
@@ -2827,11 +2831,32 @@ export const useConnectionStore = defineStore("connection", () => {
     }
   }
 
+  /**
+   * For a connection configured with `save_password === false` (password not
+   * persisted), prompt the user for the password and return a copy of the
+   * config carrying the typed value. The returned config is used only for the
+   * immediate `connectDb` call — it is never written back to the store, so the
+   * typed password is not persisted and the next connect prompts again.
+   */
+  async function ensureConnectionPassword(config: ConnectionConfig): Promise<ConnectionConfig> {
+    if (config.save_password !== false || config.password) return config;
+    const { useConnectionPasswordPromptStore } = await import("@/stores/connectionPasswordPromptStore");
+    const password = await useConnectionPasswordPromptStore().requestPassword({
+      connectionId: config.id,
+      connectionName: config.name,
+    });
+    if (!password) throw new Error(CONNECTION_PASSWORD_REQUIRED_MESSAGE);
+    return { ...config, password };
+  }
+
   async function connect(config: ConnectionConfig) {
     config = normalizeConnection(config);
     if (getBlockingDisconnectInFlight(config.id)) await waitForBlockingDisconnectInFlight(config.id);
     const localAttempt = beginLocalConnectionAttempt(config.id);
     try {
+      if (config.save_password === false && !config.password) {
+        config = await ensureConnectionPassword(config);
+      }
       await beforeConnectHandler?.(config);
       if (config.db_type === "sqlserver") {
         await ensureSqlServerLegacyCompatibilityComponentInstalled(config);
@@ -3011,6 +3036,12 @@ export const useConnectionStore = defineStore("connection", () => {
     }
     const localAttempt = beginLocalConnectionAttempt(connectionId);
     const connectPromise = (async () => {
+      // Fast-path the common case (password saved or no password needed) so the
+      // in-flight dedup above keeps its exact microtask cadence; only await the
+      // interactive prompt when the connection actually needs a typed password.
+      if (config.save_password === false && !config.password) {
+        config = await ensureConnectionPassword(config);
+      }
       await beforeConnectHandler?.(config);
       if (config.db_type === "sqlserver") {
         await ensureSqlServerLegacyCompatibilityComponentInstalled(config);

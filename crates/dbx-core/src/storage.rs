@@ -2222,7 +2222,14 @@ fn persist_connection_in_tx(tx: &rusqlite::Transaction<'_>, config: &ConnectionC
     tx.execute("INSERT INTO connections (id, config_json) VALUES (?1, ?2)", params![config_id, json])
         .map_err(|e| e.to_string())?;
 
-    persist_secret_in_tx(tx, &config.id, "password", &config.password)?;
+    if config.save_password {
+        persist_secret_in_tx(tx, &config.id, "password", &config.password)?;
+    } else {
+        // "Don't save password": write an empty value, which persist_secret_in_tx
+        // turns into a DELETE — the password secret is never persisted (and any
+        // previously stored secret is removed on this save).
+        persist_secret_in_tx(tx, &config.id, "password", "")?;
+    }
     delete_secret_prefix_in_tx(tx, &config.id, TRANSPORT_LAYER_SECRET_PREFIX)?;
     for (index, layer) in config.transport_layers.iter().enumerate() {
         match layer {
@@ -2343,6 +2350,12 @@ impl Storage {
             for config in &configs {
                 let config = config.canonicalized();
                 let config_id = config.id.clone();
+                if !config.save_password {
+                    // Metadata-only imports/sync preserve existing secrets by default.
+                    // This preference is an exception: retaining the old password would
+                    // make a no-save connection silently authenticate without prompting.
+                    persist_secret_in_tx(&tx, &config.id, "password", "")?;
+                }
                 let mut sanitized = config;
                 sanitized.password = String::new();
                 scrub_transport_layer_secrets(&mut sanitized);
@@ -4181,6 +4194,73 @@ mod tests {
         let _ = std::fs::remove_file(path);
     }
 
+    fn plain_connection(id: &str, password: &str) -> ConnectionConfig {
+        serde_json::from_value::<ConnectionConfig>(serde_json::json!({
+            "id": id,
+            "name": format!("conn {id}"),
+            "db_type": "postgres",
+            "host": "127.0.0.1",
+            "port": 5432,
+            "username": "postgres",
+            "password": password,
+            "database": "app"
+        }))
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn save_connections_does_not_persist_password_when_save_password_false() {
+        let path = temp_db_path("save-password-false");
+        let storage = Storage::open(&path).await.unwrap();
+
+        let mut config = plain_connection("no-save", "hunter2");
+        config.save_password = false;
+        storage.save_connections(&[config.clone()]).await.unwrap();
+
+        assert_eq!(storage.get_secret(&config.id, "password").await.unwrap(), None);
+        let loaded = storage.load_connections().await.unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].password, "");
+        assert!(!loaded[0].save_password);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn save_connections_persists_password_when_save_password_true() {
+        let path = temp_db_path("save-password-true");
+        let storage = Storage::open(&path).await.unwrap();
+
+        let config = plain_connection("save-yes", "hunter2");
+        storage.save_connections(&[config.clone()]).await.unwrap();
+
+        assert_eq!(storage.get_secret(&config.id, "password").await.unwrap().as_deref(), Some("hunter2"));
+        let loaded = storage.load_connections().await.unwrap();
+        assert_eq!(loaded[0].password, "hunter2");
+        assert!(loaded[0].save_password);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn switching_save_password_off_removes_stored_password() {
+        let path = temp_db_path("save-password-switch-off");
+        let storage = Storage::open(&path).await.unwrap();
+
+        let mut config = plain_connection("switch", "hunter2");
+        storage.save_connections(&[config.clone()]).await.unwrap();
+        assert_eq!(storage.get_secret(&config.id, "password").await.unwrap().as_deref(), Some("hunter2"));
+
+        config.save_password = false;
+        storage.save_connections(&[config.clone()]).await.unwrap();
+        assert_eq!(storage.get_secret(&config.id, "password").await.unwrap(), None);
+        let loaded = storage.load_connections().await.unwrap();
+        assert_eq!(loaded[0].password, "");
+        assert!(!loaded[0].save_password);
+
+        let _ = std::fs::remove_file(path);
+    }
+
     fn mq_connection(id: &str, token: &str) -> ConnectionConfig {
         ConnectionConfig {
             docs_notes_path: None,
@@ -4240,6 +4320,7 @@ mod tests {
             jdbc_driver_class: None,
             jdbc_driver_paths: Vec::new(),
             one_time: false,
+            save_password: true,
             read_only: false,
             is_production: false,
             production_databases: vec![],
@@ -4307,6 +4388,7 @@ mod tests {
             jdbc_driver_class: None,
             jdbc_driver_paths: Vec::new(),
             one_time: false,
+            save_password: true,
             read_only: false,
             is_production: false,
             production_databases: vec![],

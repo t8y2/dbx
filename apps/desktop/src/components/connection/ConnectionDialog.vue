@@ -320,6 +320,7 @@ const defaultForm = (): ConnectionForm => ({
   is_production: false,
   production_databases: [],
   visible_databases: undefined,
+  save_password: true,
 });
 
 const elasticsearchConnectionMode = ref<ElasticsearchConnectionMode>("direct");
@@ -2470,6 +2471,7 @@ watch(
         production_databases: config.production_databases || [],
         visible_databases: config.visible_databases,
         visible_schemas: config.visible_schemas,
+        save_password: config.save_password !== false,
       };
       oracleTnsAdminPath.value = parseOracleTnsConnectionString(config.connection_string)?.tnsAdmin || "";
       productionProtectionEnabled.value = !!config.is_production || (config.production_databases?.length ?? 0) > 0;
@@ -3755,6 +3757,9 @@ function connectionConfigForSubmit(id: string, generatedName = ""): ConnectionCo
   }
   if (!config.one_time) config.one_time = undefined;
   if (!config.read_only) config.read_only = undefined;
+  // Save-password is a positive default: only an explicit unchecked state (false)
+  // is persisted; anything else keeps the current behavior.
+  config.save_password = config.save_password !== false;
   if ((isSingleDatabase(config.db_type) || config.db_type === "mq" || config.db_type === "mqtt") && config.production_databases?.length) {
     // Single-database / MQ drivers expose no independently selectable database list for PROD scope.
     config.is_production = true;
@@ -5814,6 +5819,14 @@ function openExternalUrl(url: string) {
                     <Label :class="connectionLabelClass">{{ t("connection.password") }}</Label>
                     <PasswordInput v-model="form.password" class="col-span-3" />
                   </div>
+                  <div class="grid grid-cols-4 items-center gap-4">
+                    <span />
+                    <label class="col-span-3 flex items-center gap-2 text-sm">
+                      <input v-model="form.save_password" type="checkbox" class="h-4 w-4 rounded border-border accent-primary" :aria-label="t('connection.savePassword')" />
+                      <span>{{ t("connection.savePassword") }}</span>
+                      <span class="text-xs text-muted-foreground">{{ t("connection.savePasswordHint") }}</span>
+                    </label>
+                  </div>
                   <div class="grid grid-cols-4 items-start gap-4">
                     <Label :class="connectionLabelTopClass">{{ t("connection.jdbcDriverPaths") }}</Label>
                     <div class="col-span-3 space-y-2">
@@ -6951,6 +6964,15 @@ function openExternalUrl(url: string) {
                   <div class="grid grid-cols-4 items-center gap-4">
                     <Label :class="connectionLabelClass">{{ t("connection.password") }}</Label>
                     <PasswordInput v-model="form.password" class="col-span-3" />
+                  </div>
+
+                  <div class="grid grid-cols-4 items-center gap-4">
+                    <span />
+                    <label class="col-span-3 flex items-center gap-2 text-sm">
+                      <input v-model="form.save_password" type="checkbox" class="h-4 w-4 rounded border-border accent-primary" :aria-label="t('connection.savePassword')" />
+                      <span>{{ t("connection.savePassword") }}</span>
+                      <span class="text-xs text-muted-foreground">{{ t("connection.savePasswordHint") }}</span>
+                    </label>
                   </div>
 
                   <div v-if="form.db_type !== 'hbase'" class="grid grid-cols-4 items-center gap-4">

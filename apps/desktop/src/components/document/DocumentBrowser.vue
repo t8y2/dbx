@@ -2,7 +2,7 @@
 import { computed, ref, nextTick, watch, onMounted, onBeforeUnmount } from "vue";
 import { uuid } from "@/lib/common/utils";
 import { useI18n } from "vue-i18n";
-import { RefreshCw, Trash2, Plus, Save, ChevronDown, ChevronLeft, ChevronRight, Table2, Braces, X, Search, Wrench, Filter, Columns3Cog, SquareDashed, Minus, Rows3, AlignLeft, AlignRight, EyeOff } from "@lucide/vue";
+import { RefreshCw, Trash2, Plus, Save, ChevronDown, ChevronLeft, ChevronRight, Table2, Braces, X, Search, Wrench, Filter, Columns3Cog, SquareDashed, Minus, Rows3, AlignLeft, AlignRight, EyeOff, Palette } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
@@ -135,6 +135,7 @@ const columnWidthDensity = computed(() => settingsStore.editorSettings.columnWid
 const dataGridRenderMode = computed(() => settingsStore.editorSettings.dataGridRenderMode);
 const tableFontSize = computed(() => settingsStore.editorSettings.tableFontSize);
 const numericColumnRightAlign = computed(() => settingsStore.editorSettings.numericColumnRightAlign ?? true);
+const colorizeDataGridCellTypes = computed(() => settingsStore.editorSettings.colorizeDataGridCellTypes);
 const viewMode = computed<ViewMode>({
   get: () => settingsStore.editorSettings.mongoViewMode,
   set: (value) => settingsStore.updateEditorSettings({ mongoViewMode: value }),
@@ -176,6 +177,10 @@ function increaseTableFontSize() {
 
 function setNumericColumnRightAlign(value: boolean) {
   settingsStore.updateEditorSettings({ numericColumnRightAlign: value });
+}
+
+function setColorizeDataGridCellTypes(value: boolean) {
+  settingsStore.updateEditorSettings({ colorizeDataGridCellTypes: value });
 }
 const tableSearchSplitContainerRef = ref<HTMLDivElement>();
 const tableFindPaneWidth = ref<number | null>(null);
@@ -1866,6 +1871,13 @@ defineExpose({ focusSearch });
                 {{ t(rightAlign ? "grid.numericColumnAlignRight" : "grid.numericColumnAlignLeft") }}
               </button>
             </div>
+          </div>
+          <div class="flex items-center justify-between gap-3 px-3 py-1.5 text-xs">
+            <div class="min-w-0 flex items-center gap-2 font-medium">
+              <Palette class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+              <span>{{ t("grid.colorizeDataTypes") }}</span>
+            </div>
+            <Switch size="sm" :model-value="colorizeDataGridCellTypes" :aria-label="t('grid.colorizeDataTypes')" @update:model-value="setColorizeDataGridCellTypes" />
           </div>
           <div class="flex items-center justify-between gap-3 px-3 py-1.5 text-xs" :class="{ 'opacity-60': !dataGridRef?.canToggleAllNullColumns }">
             <span class="min-w-0 flex items-center gap-2 font-medium">

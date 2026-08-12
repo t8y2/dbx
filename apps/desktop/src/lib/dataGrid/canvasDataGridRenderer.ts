@@ -1,9 +1,11 @@
 import { firstLineCellDisplayValue, type CellValue } from "@/lib/dataGrid/cellValue";
 import { BOOLEAN_CHECKBOX_SIZE, isBooleanCellValue, normalizeBooleanCellValue } from "@/lib/dataGrid/dataGridBooleanColumn";
+import { resolveDataGridCellTextRole } from "@/lib/dataGrid/dataGridCellTextVisual";
+import type { DataGridTypeVisualKind } from "@/lib/dataGrid/dataGridColumnType";
 import { dataGridFrameCoversRow, dataGridFrameIsMultiCell, dataGridSelectionFrameKindAtCell, dataGridSelectionUsesOuterFrame } from "@/lib/dataGrid/dataGridSelectionFrames";
 import type { CellSelectionRange } from "@/lib/dataGrid/gridSelection";
 import type { RowStatus } from "@/lib/dataGrid/gridRowStatus";
-import { DATA_GRID_DARK_SEARCH_COLORS, resolveDataGridPaintTheme, type DataGridPaintTheme } from "@/lib/dataGrid/dataGridPaintTheme";
+import { DATA_GRID_DARK_SEARCH_COLORS, dataGridTypeForeground, resolveDataGridPaintTheme, type DataGridPaintTheme } from "@/lib/dataGrid/dataGridPaintTheme";
 
 export const CANVAS_DATA_GRID_ROW_HEIGHT = 26;
 export const MAX_CANVAS_DATA_GRID_PIXEL_RATIO = 4;
@@ -89,6 +91,8 @@ export interface DrawCanvasDataGridOptions {
   pageOffset: number;
   frozenColumnCount?: number;
   columnAligns?: readonly ("left" | "right")[];
+  columnTypeVisualKinds?: readonly DataGridTypeVisualKind[];
+  colorizeDataTypes?: boolean;
   rightAlignedActionCell?: CanvasRightAlignedActionCell | null;
   booleanDisplayMode?: "checkbox" | "dropdown";
 }
@@ -344,6 +348,8 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
     pageOffset,
     frozenColumnCount = 0,
     columnAligns,
+    columnTypeVisualKinds,
+    colorizeDataTypes = false,
     rightAlignedActionCell,
     columnIsBoolean,
     booleanDisplayMode = "dropdown",
@@ -534,8 +540,23 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
       const isEditingThisCell = editingCell?.rowId === item.id && editingCell.col === actualColIdx;
       const isBooleanNullCell = booleanDisplayMode === "checkbox" && isBooleanCell && value === null && !isEditingThisCell;
       const shouldRenderBooleanCheckbox = booleanDisplayMode === "checkbox" && isBooleanCell && value !== null && !isEditingThisCell;
+      const typeKind = columnTypeVisualKinds?.[visibleColIdx] ?? "unknown";
+      const textRole = resolveDataGridCellTextRole({
+        colorizeTypes: colorizeDataTypes,
+        typeKind,
+        isNull: value === null,
+        isDraft: item.isDraft && value === null,
+        isEditing: isEditingThisCell,
+        isControl: shouldRenderBooleanCheckbox,
+        isSelected: selectedFillVisual,
+        isCurrentSearchMatch,
+        isSearchMatch,
+        isDirty: isDirtyCell,
+        isDeleted: item.isDeleted,
+      });
+      const cellTextColor = textRole === "muted" ? theme.mutedForeground : textRole === "type" ? dataGridTypeForeground(theme, typeKind) : theme.foreground;
       ctx.textAlign = isBooleanNullCell ? "center" : isRightAlign ? "right" : "left";
-      ctx.fillStyle = value === null ? theme.mutedForeground : theme.foreground;
+      ctx.fillStyle = cellTextColor;
       ctx.font = value === null ? italicFont : tabularFont;
       setCanvasNumericVariant(ctx, value === null ? "normal" : "tabular-nums");
       const reservedWidth = rightAlignedActionCell?.rowIndex === item.displayIndex && rightAlignedActionCell.visibleColIdx === visibleColIdx ? rightAlignedActionCell.reservedWidth : 0;
@@ -545,7 +566,7 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
         if (item.isDeleted) {
           const boxX = alignCanvasPixel(drawX + (colWidth - BOOLEAN_CHECKBOX_SIZE) / 2, scaleX);
           const strikeY = alignCanvasPixel(y + CANVAS_DATA_GRID_ROW_HEIGHT / 2, scaleY);
-          ctx.strokeStyle = theme.foreground;
+          ctx.strokeStyle = cellTextColor;
           ctx.lineWidth = 1;
           ctx.beginPath();
           ctx.moveTo(boxX - 1, strikeY);
@@ -561,7 +582,7 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
         if (item.isDeleted && text) {
           const textWidth = ctx.measureText(text).width;
           const lineStartX = isBooleanNullCell ? anchorX - textWidth / 2 : isRightAlign ? textAnchorX - textWidth : textAnchorX;
-          ctx.strokeStyle = theme.foreground;
+          ctx.strokeStyle = cellTextColor;
           ctx.beginPath();
           ctx.moveTo(lineStartX, textY);
           ctx.lineTo(alignCanvasPixel(lineStartX + textWidth, scaleX), textY);

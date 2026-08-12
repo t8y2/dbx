@@ -3,6 +3,8 @@ import { readFileSync } from "node:fs";
 import { DATA_GRID_DARK_ACTIVE_ROW_BG, DATA_GRID_LIGHT_ACTIVE_ROW_BG, dataGridActiveRowBackground, resolveDataGridPaintTheme } from "@/lib/dataGrid/dataGridPaintTheme";
 
 function parseRgb(value: string): { r: number; g: number; b: number } | null {
+  const hex = value.match(/^#([\da-f]{2})([\da-f]{2})([\da-f]{2})$/i);
+  if (hex) return { r: Number.parseInt(hex[1], 16), g: Number.parseInt(hex[2], 16), b: Number.parseInt(hex[3], 16) };
   const match = value.match(/rgba?\(\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)/i);
   if (!match) return null;
   return { r: Number(match[1]), g: Number(match[2]), b: Number(match[3]) };
@@ -111,6 +113,39 @@ describe("data grid paint theme", () => {
     });
 
     expect(theme.cellDirty).toBe("rgb(94, 56, 57)");
+  });
+
+  it("resolves accessible semantic type colors for light and dark grids", () => {
+    const emptyCssVariable = () => "";
+    const light = resolveDataGridPaintTheme({ getVar: emptyCssVariable, isDark: false });
+    const dark = resolveDataGridPaintTheme({ getVar: emptyCssVariable, isDark: true });
+
+    expect(light.typeForegrounds.integer).toBe("#1d4ed8");
+    expect(light.typeForegrounds.boolean).toBe("#c2410c");
+    expect(dark.typeForegrounds.integer).toBe("#93c5fd");
+    expect(dark.typeForegrounds.boolean).toBe("#fdba74");
+    expect(light.typeForegrounds.unknown).toBe(light.foreground);
+    expect(dark.typeForegrounds.unknown).toBe(dark.foreground);
+
+    for (const [kind, color] of Object.entries(light.typeForegrounds)) {
+      if (kind === "unknown") continue;
+      expect(contrastRatio(color, "#ffffff")).toBeGreaterThanOrEqual(4.5);
+      expect(contrastRatio(color, "#f0f0f0")).toBeGreaterThanOrEqual(4.5);
+    }
+    for (const [kind, color] of Object.entries(dark.typeForegrounds)) {
+      if (kind === "unknown") continue;
+      expect(contrastRatio(color, "#131416")).toBeGreaterThanOrEqual(4.5);
+      expect(contrastRatio(color, "#28282b")).toBeGreaterThanOrEqual(4.5);
+    }
+  });
+
+  it("honors a custom semantic type color token", () => {
+    const theme = resolveDataGridPaintTheme({
+      getVar: (name) => (name === "--data-grid-type-spatial-fg" ? "rgb(12, 98, 74)" : ""),
+      isDark: false,
+    });
+
+    expect(theme.typeForegrounds.spatial).toBe("rgb(12, 98, 74)");
   });
 });
 

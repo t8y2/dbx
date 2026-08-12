@@ -1564,6 +1564,7 @@ async function newQuery() {
     targetConnectionId: target.connectionId,
     targetDatabase: target.database,
     databaseType: effectiveDatabaseTypeForConnection(conn),
+    identifierQuote: connectionStore.connectionIdentifierQuote?.(target.connectionId),
   });
   const tabId = queryStore.createTab(conn.id, target.database, undefined, "query", target.schema, initialSql, target.catalog);
   if (initialSql) {

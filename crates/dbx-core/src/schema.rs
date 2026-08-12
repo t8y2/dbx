@@ -7287,6 +7287,41 @@ async fn get_object_source_once(
             let config = config.clone();
             let session = session.clone();
             drop(connections);
+            // GaussDB M-mode supports SHOW CREATE VIEW, but the JDBC plugin's
+            // getObjectSource only handles Oracle.  Route View DDL through a
+            // direct query instead.
+            if matches!(object_type, db::ObjectSourceKind::View) && gaussdb_uses_m_jdbc_driver(config.as_ref()) {
+                let sql = format!("SHOW CREATE VIEW {}", mysql_ident(name));
+                let result: db::QueryResult = session
+                    .invoke_with_timeout(
+                        "executeQuery",
+                        serde_json::json!({
+                            "connection": config.as_ref(),
+                            "database": database,
+                            "schema": schema,
+                            "sql": sql,
+                            "maxRows": 1,
+                        }),
+                        agent_metadata_timeout(Some(config.as_ref())),
+                    )
+                    .await?;
+                let row = result.rows.first().ok_or_else(|| "View not found".to_string())?;
+                let named_index =
+                    result.columns.iter().position(|column| column.trim().eq_ignore_ascii_case("Create View"));
+                let source = named_index
+                    .into_iter()
+                    .chain(std::iter::once(1))
+                    .filter_map(|index| query_result_cell_string(row, index))
+                    .find(|value| !value.trim().is_empty())
+                    .ok_or_else(|| "Failed to read view DDL".to_string())?;
+                return Ok(db::ObjectSource {
+                    name: name.to_string(),
+                    object_type,
+                    schema: if schema.is_empty() { None } else { Some(schema.to_string()) },
+                    source,
+                    editable: None,
+                });
+            }
             let result: db::ObjectSource = session
                 .invoke_with_timeout(
                     "getObjectSource",

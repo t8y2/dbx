@@ -4051,7 +4051,7 @@ fn transfer_ddl_statements(sql: &str, db_type: &DatabaseType) -> Vec<String> {
                 .collect()
         }
     } else if matches!(db_type, DatabaseType::Dameng) {
-        let statements = split_sql_statements_for_database(sql, db_type.clone());
+        let statements = split_sql_statements_for_database(sql, *db_type);
         if statements.is_empty() {
             vec![sql.trim().to_string()]
         } else {

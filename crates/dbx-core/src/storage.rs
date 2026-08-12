@@ -4215,7 +4215,7 @@ mod tests {
 
         let mut config = plain_connection("no-save", "hunter2");
         config.save_password = false;
-        storage.save_connections(&[config.clone()]).await.unwrap();
+        storage.save_connections(std::slice::from_ref(&config)).await.unwrap();
 
         assert_eq!(storage.get_secret(&config.id, "password").await.unwrap(), None);
         let loaded = storage.load_connections().await.unwrap();
@@ -4232,7 +4232,7 @@ mod tests {
         let storage = Storage::open(&path).await.unwrap();
 
         let config = plain_connection("save-yes", "hunter2");
-        storage.save_connections(&[config.clone()]).await.unwrap();
+        storage.save_connections(std::slice::from_ref(&config)).await.unwrap();
 
         assert_eq!(storage.get_secret(&config.id, "password").await.unwrap().as_deref(), Some("hunter2"));
         let loaded = storage.load_connections().await.unwrap();
@@ -4248,11 +4248,11 @@ mod tests {
         let storage = Storage::open(&path).await.unwrap();
 
         let mut config = plain_connection("switch", "hunter2");
-        storage.save_connections(&[config.clone()]).await.unwrap();
+        storage.save_connections(std::slice::from_ref(&config)).await.unwrap();
         assert_eq!(storage.get_secret(&config.id, "password").await.unwrap().as_deref(), Some("hunter2"));
 
         config.save_password = false;
-        storage.save_connections(&[config.clone()]).await.unwrap();
+        storage.save_connections(std::slice::from_ref(&config)).await.unwrap();
         assert_eq!(storage.get_secret(&config.id, "password").await.unwrap(), None);
         let loaded = storage.load_connections().await.unwrap();
         assert_eq!(loaded[0].password, "");

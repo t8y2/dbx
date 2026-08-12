@@ -242,7 +242,9 @@ export function useSidebarConnectionMutationRuntime(options: SidebarConnectionMu
     return targets.length > 1 ? t("contextMenu.closeSelectedConnections", { count: connectedCount }) : t("contextMenu.closeConnection");
   }
 
-  const canDisconnectConnection = computed(() => connectionDisconnectTargets().some((target) => connectionStore.connectedIds.has(target.connectionId)));
+  function canDisconnectConnection(): boolean {
+    return connectionDisconnectTargets().some((target) => connectionStore.connectedIds.has(target.connectionId));
+  }
 
   async function cancelConnectionAttempt() {
     const connectionId = activeNode.value.connectionId;

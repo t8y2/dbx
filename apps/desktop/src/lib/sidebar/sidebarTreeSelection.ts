@@ -15,11 +15,7 @@ export function selectedTreeNodesInVisibleOrder(visibleNodes: TreeNode[], select
   return visibleNodes.filter((node) => ids.has(node.id));
 }
 
-export function selectedSidebarBatchTargets(
-  activeNode: TreeNode,
-  selectedNodes: readonly TreeNode[],
-  canUseTarget: (node: TreeNode) => boolean,
-): TreeNode[] {
+export function selectedSidebarBatchTargets(activeNode: TreeNode, selectedNodes: readonly TreeNode[], canUseTarget: (node: TreeNode) => boolean): TreeNode[] {
   if (selectedNodes.length <= 1 || !selectedNodes.some((node) => node.id === activeNode.id)) return [];
   const first = selectedNodes[0];
   if (!first?.connectionId || !first.database || !selectedNodes.every((node) => node.type === first.type)) return [];

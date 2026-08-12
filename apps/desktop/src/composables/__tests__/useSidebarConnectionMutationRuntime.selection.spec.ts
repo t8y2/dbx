@@ -150,6 +150,21 @@ describe("sidebar connection disconnect selection", () => {
     expect(mocks.toast).toHaveBeenCalledWith('connection.disconnectedSelected:{"count":2}', 2000);
   });
 
+  it("recomputes disconnect availability when the selected connections change", () => {
+    const nodes = [connectionNode("conn-1"), connectionNode("conn-2")];
+    const selected = [nodes[0]];
+    const store = connectionStore(selected.map((node) => node.id));
+    store.connectedIds = new Set(["conn-2"]);
+    const { canDisconnectConnection, connectionDisconnectMenuLabel } = runtime(nodes[0], store, selected);
+
+    expect(canDisconnectConnection()).toBe(false);
+
+    selected.push(nodes[1]);
+
+    expect(canDisconnectConnection()).toBe(true);
+    expect(connectionDisconnectMenuLabel()).toBe('contextMenu.closeSelectedConnections:{"count":1}');
+  });
+
   it("continues disconnecting after one selected connection fails", async () => {
     const nodes = [connectionNode("conn-1"), connectionNode("conn-2")];
     const store = connectionStore(nodes.map((node) => node.id));

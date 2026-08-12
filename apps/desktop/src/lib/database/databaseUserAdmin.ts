@@ -1,6 +1,6 @@
 import type { ConnectionConfig, DatabaseType, QueryResult } from "@/types/database";
 import { supportsDatabaseFeature } from "@/lib/database/databaseDriverManifest";
-import { effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
+import { effectiveDatabaseTypeForConnection, gaussdbConnectionMode } from "@/lib/database/jdbcDialect";
 
 export type UserAdminDialect = "mysql" | "postgres";
 export type PrivilegeScope = "mysql" | "database" | "schema" | "table" | "role";
@@ -301,15 +301,32 @@ export function postgresListRolesSql(): string {
   const bypassRls = postgresRoleBypassRlsSql("r");
   return `
 SELECT
-  r.rolname AS user,
-  CASE WHEN r.rolcanlogin THEN 'LOGIN' ELSE 'ROLE' END AS host,
+  r.rolname AS "user",
+  CASE WHEN r.rolcanlogin THEN 'LOGIN' ELSE 'ROLE' END AS "host",
   concat_ws(', ',
     CASE WHEN r.rolsuper THEN 'SUPERUSER' END,
     CASE WHEN r.rolcreatedb THEN 'CREATEDB' END,
     CASE WHEN r.rolcreaterole THEN 'CREATEROLE' END,
     CASE WHEN r.rolreplication THEN 'REPLICATION' END,
     CASE WHEN ${bypassRls} THEN 'BYPASSRLS' END
-  ) AS plugin
+  ) AS "plugin"
+FROM pg_catalog.pg_roles r
+ORDER BY r.rolname;`.trim();
+}
+
+export function gaussdbMListRolesSql(): string {
+  const bypassRls = postgresRoleBypassRlsSql("r");
+  return `
+SELECT
+  r.rolname AS \`user\`,
+  CASE WHEN r.rolcanlogin THEN 'LOGIN' ELSE 'ROLE' END AS \`host\`,
+  concat_ws(', ',
+    CASE WHEN r.rolsuper THEN 'SUPERUSER' END,
+    CASE WHEN r.rolcreatedb THEN 'CREATEDB' END,
+    CASE WHEN r.rolcreaterole THEN 'CREATEROLE' END,
+    CASE WHEN r.rolreplication THEN 'REPLICATION' END,
+    CASE WHEN ${bypassRls} THEN 'BYPASSRLS' END
+  ) AS \`plugin\`
 FROM pg_catalog.pg_roles r
 ORDER BY r.rolname;`.trim();
 }
@@ -384,18 +401,90 @@ FROM (
 ORDER BY sort, line;`.trim();
 }
 
+export function gaussdbMShowGrantsSql(user: DatabaseUserIdentity): string {
+  const role = quoteSqlString(user.user);
+  const bypassRls = postgresRoleBypassRlsSql("r");
+  // GaussDB M mode (MySQL-compatible) omits role_table_grants and treats ||
+  // as boolean OR, so use concat() and table_privileges instead.
+  // CAST(... AS text) is avoided because "text" is a reserved keyword in M
+  // mode; privilege_type and is_grantable are already text/varchar types.
+  return `
+WITH target AS (
+  SELECT oid, rolname, rolsuper, rolcreatedb, rolcreaterole, rolcanlogin, rolreplication, ${bypassRls} AS \`rolbypassrls\`
+  FROM pg_catalog.pg_roles r
+  WHERE r.rolname = ${role}
+)
+SELECT \`line\`
+FROM (
+  SELECT 1 AS \`sort\`, concat('Role: ', quote_ident(rolname)) AS \`line\`
+  FROM target
+  UNION ALL
+  SELECT 2, concat('Attributes: ', COALESCE(NULLIF(concat_ws(', ',
+    CASE WHEN rolsuper THEN 'SUPERUSER' END,
+    CASE WHEN rolcreatedb THEN 'CREATEDB' END,
+    CASE WHEN rolcreaterole THEN 'CREATEROLE' END,
+    CASE WHEN rolcanlogin THEN 'LOGIN' ELSE 'NOLOGIN' END,
+    CASE WHEN rolreplication THEN 'REPLICATION' END,
+    CASE WHEN rolbypassrls THEN 'BYPASSRLS' END
+  ), ''), 'none'))
+  FROM target
+  UNION ALL
+  SELECT 10, concat('Member of: ', quote_ident(parent.rolname), CASE WHEN m.admin_option THEN ' WITH ADMIN OPTION' ELSE '' END)
+  FROM pg_catalog.pg_auth_members m
+  JOIN target t ON t.oid = m.member
+  JOIN pg_catalog.pg_roles parent ON parent.oid = m.roleid
+  UNION ALL
+  SELECT 20, concat('Has member: ', quote_ident(member.rolname), CASE WHEN m.admin_option THEN ' WITH ADMIN OPTION' ELSE '' END)
+  FROM pg_catalog.pg_auth_members m
+  JOIN target t ON t.oid = m.roleid
+  JOIN pg_catalog.pg_roles member ON member.oid = m.member
+  UNION ALL
+  SELECT 30, concat('Database: ', quote_ident(d.datname), ' = ',
+    concat_ws(', ',
+      CASE WHEN has_database_privilege(t.rolname, d.oid, 'CONNECT') THEN 'CONNECT' END,
+      CASE WHEN has_database_privilege(t.rolname, d.oid, 'CREATE') THEN 'CREATE' END,
+      CASE WHEN has_database_privilege(t.rolname, d.oid, 'TEMPORARY') THEN 'TEMPORARY' END
+    ))
+  FROM target t
+  CROSS JOIN pg_catalog.pg_database d
+  WHERE has_database_privilege(t.rolname, d.oid, 'CONNECT')
+     OR has_database_privilege(t.rolname, d.oid, 'CREATE')
+     OR has_database_privilege(t.rolname, d.oid, 'TEMPORARY')
+  UNION ALL
+  SELECT 40, concat('Schema: ', quote_ident(n.nspname), ' = ',
+    concat_ws(', ',
+      CASE WHEN has_schema_privilege(t.rolname, n.oid, 'USAGE') THEN 'USAGE' END,
+      CASE WHEN has_schema_privilege(t.rolname, n.oid, 'CREATE') THEN 'CREATE' END
+    ))
+  FROM target t
+  CROSS JOIN pg_catalog.pg_namespace n
+  WHERE n.nspname NOT LIKE 'pg~_%' ESCAPE '~'
+    AND n.nspname <> 'information_schema'
+    AND (has_schema_privilege(t.rolname, n.oid, 'USAGE') OR has_schema_privilege(t.rolname, n.oid, 'CREATE'))
+  UNION ALL
+  SELECT 50, concat('Table: ', quote_ident(table_schema), '.', quote_ident(table_name), ' = ',
+    string_agg(concat(privilege_type, CASE WHEN is_grantable = 'YES' THEN ' WITH GRANT OPTION' ELSE '' END), ', ' ORDER BY privilege_type))
+  FROM information_schema.table_privileges
+  WHERE grantee = ${role}
+    AND UPPER(table_schema) <> 'INFORMATION_SCHEMA'
+    AND UPPER(table_schema) NOT LIKE 'PG~_%' ESCAPE '~'
+  GROUP BY table_schema, table_name
+) grants
+ORDER BY \`sort\`, \`line\`;`.trim();
+}
+
 export function kingbaseListRolesSql(): string {
   return `
 SELECT
-  r.rolname AS user,
-  CASE WHEN r.rolcanlogin THEN 'LOGIN' ELSE 'ROLE' END AS host,
+  r.rolname AS "user",
+  CASE WHEN r.rolcanlogin THEN 'LOGIN' ELSE 'ROLE' END AS "host",
   concat_ws(', ',
     CASE WHEN r.rolsuper THEN 'SUPERUSER' END,
     CASE WHEN r.rolcreatedb THEN 'CREATEDB' END,
     CASE WHEN r.rolcreaterole THEN 'CREATEROLE' END,
     CASE WHEN r.rolreplication THEN 'REPLICATION' END,
     CASE WHEN r.rolbypassrls THEN 'BYPASSRLS' END
-  ) AS plugin
+  ) AS "plugin"
 FROM sys_catalog.sys_roles r
 ORDER BY r.rolname;`.trim();
 }
@@ -637,6 +726,12 @@ export const kingbaseUserAdminProvider: DatabaseUserAdminProvider = {
   showGrantsSql: kingbaseShowGrantsSql,
 };
 
+export const gaussdbMUserAdminProvider: DatabaseUserAdminProvider = {
+  ...postgresUserAdminProvider,
+  listUsersSql: gaussdbMListRolesSql,
+  showGrantsSql: gaussdbMShowGrantsSql,
+};
+
 export const dorisUserAdminProvider: DatabaseUserAdminProvider = {
   dialect: "mysql",
   defaultScope: "table",
@@ -690,17 +785,24 @@ const DATABASE_USER_ADMIN_PROVIDER_BY_TYPE = new Map<DatabaseType, DatabaseUserA
   ["starrocks", starrocksUserAdminProvider],
 ]);
 
-export function getDatabaseUserAdminProvider(dbType: DatabaseType | undefined): DatabaseUserAdminProvider | null {
-  return dbType ? (DATABASE_USER_ADMIN_PROVIDER_BY_TYPE.get(dbType) ?? null) : null;
+export function getDatabaseUserAdminProvider(dbType: DatabaseType | undefined, connection?: ConnectionConfig): DatabaseUserAdminProvider | null {
+  if (!dbType) return null;
+  // GaussDB M mode (MySQL-compatible) uses backtick quoting and treats "user"
+  // as a reserved keyword, so a dedicated provider with backtick-quoted aliases
+  // is required.
+  if (dbType === "gaussdb" && connection && gaussdbConnectionMode(connection) === "m-jdbc") {
+    return gaussdbMUserAdminProvider;
+  }
+  return DATABASE_USER_ADMIN_PROVIDER_BY_TYPE.get(dbType) ?? null;
 }
 
 export function supportsDatabaseUserAdmin(dbType: DatabaseType | undefined): boolean {
-  return !!dbType && supportsDatabaseFeature(dbType, "userAdmin") && DATABASE_USER_ADMIN_PROVIDER_BY_TYPE.has(dbType);
+  return !!dbType && supportsDatabaseFeature(dbType, "userAdmin") && (dbType === "gaussdb" || DATABASE_USER_ADMIN_PROVIDER_BY_TYPE.has(dbType));
 }
 
 export function resolveDatabaseUserAdminProviderForConnection(connection: ConnectionConfig | undefined): DatabaseUserAdminProvider | null {
   const dbType = effectiveDatabaseTypeForConnection(connection);
-  return supportsDatabaseUserAdmin(dbType) ? getDatabaseUserAdminProvider(dbType) : null;
+  return supportsDatabaseUserAdmin(dbType) ? getDatabaseUserAdminProvider(dbType, connection) : null;
 }
 
 export function connectionSupportsDatabaseUserAdmin(connection: ConnectionConfig | undefined): boolean {

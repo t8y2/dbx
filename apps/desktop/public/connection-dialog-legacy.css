@@ -90,6 +90,19 @@
     align-content: start !important;
   }
 
+  html.dbx-legacy-webview [data-slot="dialog-content"].connection-dialog-content--config .connection-dialog-footer {
+    flex-direction: row !important;
+    align-items: center !important;
+    justify-content: flex-end !important;
+    flex-wrap: nowrap !important;
+  }
+
+  html.dbx-legacy-webview [data-slot="dialog-content"].connection-dialog-content--config .connection-dialog-test-status {
+    flex: 1 1 12rem !important;
+    min-width: 12rem !important;
+    width: auto !important;
+  }
+
   html.dbx-legacy-webview [data-slot="dialog-content"].connection-dialog-content--config .connection-url-params-row--compact {
     align-items: center !important;
   }

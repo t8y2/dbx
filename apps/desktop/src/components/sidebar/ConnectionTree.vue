@@ -2144,7 +2144,7 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes });
   z-index: 10;
   width: 12px;
   cursor: default;
-  opacity: 0;
+  opacity: 0.78;
   transition: opacity 120ms ease;
 }
 
@@ -2176,6 +2176,28 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes });
   right: 1px;
   width: 8px;
   background: color-mix(in oklch, var(--foreground) 48%, transparent);
+}
+
+html.dbx-legacy-webview .sidebar-tree-scrollbar {
+  opacity: 0.9;
+}
+
+html.dbx-legacy-webview .sidebar-tree-scrollbar__thumb {
+  background: rgba(82, 82, 82, 0.42);
+}
+
+html.dbx-legacy-webview.dark .sidebar-tree-scrollbar__thumb {
+  background: rgba(212, 212, 216, 0.42);
+}
+
+html.dbx-legacy-webview .sidebar-tree-scrollbar:hover .sidebar-tree-scrollbar__thumb,
+html.dbx-legacy-webview .sidebar-tree-scrollbar--dragging .sidebar-tree-scrollbar__thumb {
+  background: rgba(82, 82, 82, 0.62);
+}
+
+html.dbx-legacy-webview.dark .sidebar-tree-scrollbar:hover .sidebar-tree-scrollbar__thumb,
+html.dbx-legacy-webview.dark .sidebar-tree-scrollbar--dragging .sidebar-tree-scrollbar__thumb {
+  background: rgba(212, 212, 216, 0.62);
 }
 
 .sidebar-tree-horizontal-scrollbar {

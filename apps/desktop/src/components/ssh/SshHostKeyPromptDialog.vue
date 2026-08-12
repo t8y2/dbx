@@ -238,7 +238,16 @@ function submitSecret() {
 
 <template>
   <Dialog v-model:open="visible">
-    <DialogContent class="sm:max-w-[460px]" :show-close-button="false" @interact-outside.prevent @escape-key-down.prevent>
+    <!-- Every dialog portal teleports into <body> when its component mounts, so
+    body order (and therefore paint order at the shared z-50) is fixed by mount
+    order, not by which dialog opened last. This prompt mounts once at app start,
+    so a dialog mounted on demand later (e.g. the connection editor) paints over
+    it while still being demoted to pointer-events:none as the lower modal layer
+    — the prompt is invisible, the dialog is dead, and the window is stuck. This
+    is a blocking prompt, so keep it above every other layer in the app (the
+    tallest today are the image preview at 80/81 and the sidebar overlays at
+    100). -->
+    <DialogContent class="sm:max-w-[460px]" overlay-class="z-[200]" portal-class="z-[200]" :show-close-button="false" @interact-outside.prevent @escape-key-down.prevent>
       <DialogHeader>
         <DialogTitle>
           {{ t(isSecretPrompt ? "connection.sshInteractiveTitle" : "connection.sshHostKeyVerifyTitle") }}

@@ -658,7 +658,7 @@ function selectedSortMenuValue(column: string, columnIndex: number): SortMenuVal
 }
 
 function typeColorClass(t: string): string {
-  return dataGridTypeVisualClass(resolveDataGridTypeVisualKind(t));
+  return dataGridTypeVisualClass(resolveDataGridTypeVisualKind(t, resolvedDatabaseType.value));
 }
 const contextCell = ref<{
   rowId: number;
@@ -1961,7 +1961,7 @@ const allColumnTypes = computed(() =>
   ),
 );
 const visibleColumnTypes = computed(() => visibleColumnIndexes.value.map((index) => allColumnTypes.value[index]));
-const allColumnTypeVisualKinds = computed(() => allColumnTypes.value.map(resolveDataGridTypeVisualKind));
+const allColumnTypeVisualKinds = computed(() => allColumnTypes.value.map((type) => resolveDataGridTypeVisualKind(type, resolvedDatabaseType.value)));
 const visibleColumnTypeVisualKinds = computed(() => visibleColumnIndexes.value.map((index) => allColumnTypeVisualKinds.value[index] ?? "unknown"));
 const visibleColumnComments = computed(() => visibleColumnIndexes.value.map((index) => dataGridColumnCommentFor(columnCommentMap.value, props.result.columns[index] ?? "", props.sourceColumns?.[index])));
 const visibleColumnCount = computed(() => visibleColumnIndexes.value.length);
@@ -1973,6 +1973,7 @@ const columnAligns = computed<("left" | "right")[]>(() => {
 });
 
 function gridCellTextColorClass(item: RowItem, actualColIdx: number, visibleColIdx: number): string {
+  if (!colorizeDataGridCellTypes.value) return "text-foreground";
   const value = item.data[actualColIdx];
   const checkbox = booleanCellsUseCheckbox.value && isBooleanGridCell(item, actualColIdx) && value !== null;
   return dataGridCellTextClass({
@@ -1991,6 +1992,7 @@ function gridCellTextColorClass(item: RowItem, actualColIdx: number, visibleColI
 }
 
 function transposeCellTextColorClass(recordIndex: number, actualColIdx: number): string {
+  if (!colorizeDataGridCellTypes.value) return "text-foreground";
   const item = displayItems.value[recordIndex];
   if (!item) return "text-foreground";
   const value = item.data[actualColIdx];

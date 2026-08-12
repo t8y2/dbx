@@ -100,40 +100,42 @@
   --data-grid-type-spatial-fg: #6ee7b7;
 }
 
-.data-grid-type-integer {
-  color: var(--data-grid-type-integer-fg);
-}
+@layer components {
+  .data-grid-type-integer {
+    color: var(--data-grid-type-integer-fg);
+  }
 
-.data-grid-type-numeric {
-  color: var(--data-grid-type-numeric-fg);
-}
+  .data-grid-type-numeric {
+    color: var(--data-grid-type-numeric-fg);
+  }
 
-.data-grid-type-string {
-  color: var(--data-grid-type-string-fg);
-}
+  .data-grid-type-string {
+    color: var(--data-grid-type-string-fg);
+  }
 
-.data-grid-type-boolean {
-  color: var(--data-grid-type-boolean-fg);
-}
+  .data-grid-type-boolean {
+    color: var(--data-grid-type-boolean-fg);
+  }
 
-.data-grid-type-temporal {
-  color: var(--data-grid-type-temporal-fg);
-}
+  .data-grid-type-temporal {
+    color: var(--data-grid-type-temporal-fg);
+  }
 
-.data-grid-type-structured {
-  color: var(--data-grid-type-structured-fg);
-}
+  .data-grid-type-structured {
+    color: var(--data-grid-type-structured-fg);
+  }
 
-.data-grid-type-identifier {
-  color: var(--data-grid-type-identifier-fg);
-}
+  .data-grid-type-identifier {
+    color: var(--data-grid-type-identifier-fg);
+  }
 
-.data-grid-type-binary {
-  color: var(--data-grid-type-binary-fg);
-}
+  .data-grid-type-binary {
+    color: var(--data-grid-type-binary-fg);
+  }
 
-.data-grid-type-spatial {
-  color: var(--data-grid-type-spatial-fg);
+  .data-grid-type-spatial {
+    color: var(--data-grid-type-spatial-fg);
+  }
 }
 
 :root[data-corner-style="large"] {

@@ -1,3 +1,5 @@
+import type { DatabaseType } from "@/types/database";
+
 /**
  * Resolve the data type to display in a data-grid column header.
  *
@@ -251,10 +253,12 @@ function dataGridColumnTypeBase(dataType: string): { base: string; array: boolea
  * Collapse driver-specific SQL type names into the small semantic palette used
  * by grid headers and values. Unknown types deliberately stay neutral.
  */
-export function resolveDataGridTypeVisualKind(dataType: string | undefined): DataGridTypeVisualKind {
+export function resolveDataGridTypeVisualKind(dataType: string | undefined, databaseType?: DatabaseType): DataGridTypeVisualKind {
   if (!dataType?.trim()) return "unknown";
   const { base, array } = dataGridColumnTypeBase(dataType);
   if (array) return "structured";
+  if (databaseType === "sqlserver" && (base === "timestamp" || base === "rowversion")) return "binary";
+  if (databaseType === "postgres" && (base === "bit" || base === "bit varying")) return "binary";
   if (INTEGER_COLUMN_TYPE_BASES.has(base)) return "integer";
   if (isNumericColumnType(dataType)) return "numeric";
   if (BOOLEAN_COLUMN_TYPE_BASES.has(base)) return "boolean";

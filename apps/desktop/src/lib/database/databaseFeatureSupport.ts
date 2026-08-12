@@ -167,6 +167,10 @@ export function supportsObjectBrowser(dbType?: DatabaseType): boolean {
   return supportsDatabaseFeature(dbType, "objectBrowser");
 }
 
+export function supportsConnectionDatabaseBrowser(dbType?: DatabaseType): boolean {
+  return supportsObjectBrowser(dbType);
+}
+
 export function supportsObjectBrowserTreeNode(dbType: DatabaseType | undefined, nodeType: TreeNodeType): boolean {
   if (!supportsObjectBrowser(dbType)) return false;
   if (nodeType === "database" && usesDatabaseObjectTreeMode(dbType)) return true;

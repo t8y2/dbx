@@ -53,6 +53,7 @@ const expandedHeight = ref(56);
 const suggestionPosition = ref({ left: 0, top: 0, width: 180 });
 const historyPreview = ref<{ value: string; left: number; top: number; maxWidth: number; arrowTop: number; side: "left" | "right" } | null>(null);
 const pointerMovedSuggestionIndex = ref(-1);
+const editorFocused = ref(false);
 let collapseTimer: ReturnType<typeof setTimeout> | undefined;
 let resizeObserver: ResizeObserver | undefined;
 let expandAfterComposition = false;
@@ -67,6 +68,7 @@ const editor = useDataGridConditionEditor({
   historyScope: () => props.historyScope,
   suggestionProvider: props.suggestionProvider,
   suggestionDebounceMs: props.suggestionDebounceMs,
+  suggestionsEnabled: editorFocused,
 });
 
 const activeEditor = computed(() => overlayRef.value ?? inputRef.value);
@@ -316,6 +318,7 @@ function syncSelection(target: HTMLTextAreaElement) {
 }
 
 function onFocus(event: FocusEvent) {
+  editorFocused.value = true;
   syncSelection(event.currentTarget as HTMLTextAreaElement);
   resizeEditor(true);
 }
@@ -334,6 +337,8 @@ function scheduleCollapse() {
   collapseTimer = setTimeout(() => {
     const active = document.activeElement;
     if (active === inputRef.value || active === overlayRef.value) return;
+    editorFocused.value = false;
+    editor.dismiss();
     expanded.value = false;
   }, 0);
 }

@@ -2,7 +2,7 @@
 import { computed, ref, nextTick, watch, onMounted, onBeforeUnmount } from "vue";
 import { uuid } from "@/lib/common/utils";
 import { useI18n } from "vue-i18n";
-import { RefreshCw, Trash2, Plus, Save, ChevronDown, ChevronUp, ChevronLeft, ChevronRight, Table2, Braces, X, Search, Wrench, Filter, Columns3Cog, SquareDashed, Minus, Rows3, AlignLeft, AlignRight, EyeOff } from "@lucide/vue";
+import { RefreshCw, Trash2, Plus, Save, ChevronDown, ChevronLeft, ChevronRight, Table2, Braces, X, Search, Wrench, Filter, Columns3Cog, SquareDashed, Minus, Rows3, AlignLeft, AlignRight, EyeOff } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
@@ -82,7 +82,6 @@ import {
 } from "@/lib/mongo/mongoDocumentValues";
 import type { GridNewRowMeta } from "@/lib/dataGrid/gridNewRowPlacement";
 import { normalizeResultPageSize } from "@/lib/dataGrid/paginationPageSize";
-import { findDocumentTextMatches, renderDocumentJsonHtml } from "@/lib/document/documentJsonSearch";
 import { documentDataGridColumnLayoutScopeKey } from "@/lib/dataGrid/dataGridColumnLayoutStorage";
 import { documentGridColumnVisibilityScopeKey, migrateDocumentGridColumnVisibilityToLayout } from "@/lib/document/documentGridColumnVisibilityStorage";
 import { TABLE_FONT_SIZE_MAX, TABLE_FONT_SIZE_MIN, useSettingsStore } from "@/stores/settingsStore";
@@ -146,12 +145,7 @@ const sortInputRef = ref<HTMLTextAreaElement>();
 const dataGridRef = ref<InstanceType<typeof DataGrid>>();
 const viewOptionsOpen = ref(false);
 const mongoUpdateTarget = computed(() => (props.databaseType === "mongodb" && mongoCopyDocumentsAvailable.value ? { collection: props.collection, idColumn: "_id" as const } : undefined));
-const documentViewerRef = ref<HTMLElement>();
-const documentSearchInputRef = ref<HTMLInputElement>();
-const documentSearchOpen = ref(false);
-const documentSearchQuery = ref("");
-const documentSearchMatchIndex = ref(0);
-const documentSearchHasNavigated = ref(false);
+const documentJsonEditorRef = ref<{ openSearch: () => boolean }>();
 const documentViewerSearchActive = ref(false);
 
 function openDataGridExtractorConfiguration() {
@@ -285,16 +279,6 @@ const selectedDocumentIdLabel = computed(() => {
   return typeof id === "object" ? stringifyDocumentStoreValue(id, documentStoreProvider.value.kind) : String(id);
 });
 const selectedDocumentIdWidth = computed(() => `${Math.min(Math.max(Array.from(selectedDocumentIdLabel.value).length + 2, 5), 52)}ch`);
-const documentSearchText = computed(() => editJson.value);
-const documentSearchMatches = computed(() => findDocumentTextMatches(documentSearchText.value, documentSearchQuery.value));
-const documentSearchActiveIndex = computed(() => {
-  if (documentSearchMatches.value.length === 0) return 0;
-  return Math.min(documentSearchMatchIndex.value, documentSearchMatches.value.length - 1);
-});
-const documentSearchStatus = computed(() => {
-  const count = documentSearchMatches.value.length;
-  return count > 0 ? `${documentSearchActiveIndex.value + 1}/${count}` : "0/0";
-});
 
 const editKeyWidth = computed(() => {
   const longest = editFields.value.reduce((max, field) => {
@@ -1591,15 +1575,12 @@ function docPreview(doc: JsonRecord): string {
   return `${id} - ${preview}`;
 }
 
-function highlightedJson(json: string): string {
-  return renderDocumentJsonHtml(json, documentSearchOpen.value ? documentSearchQuery.value : "", documentSearchActiveIndex.value);
-}
-
 function handleDocumentViewerDoubleClick(event: MouseEvent) {
   const target = event.target;
   if (!(target instanceof Element)) return;
-  const jsonViewer = target.closest(".json-viewer");
-  if (jsonViewer && target !== jsonViewer) return;
+  // CodeMirror uses .cm-line for rendered document content. Preserve the
+  // existing shortcut only for whitespace around the source, not text itself.
+  if (target.closest(".cm-line")) return;
   const selection = window.getSelection();
   if (selection && !selection.isCollapsed && selection.toString()) return;
   startEdit();
@@ -1614,55 +1595,12 @@ function focusSearch(): boolean {
   if (viewMode.value !== "document" || !documentViewerSearchActive.value) return false;
   if (isEditing.value) return false;
   if (!isNew.value && selectedIdx.value === null) return false;
-  documentSearchOpen.value = true;
-  documentSearchHasNavigated.value = false;
-  void nextTick(() => {
-    documentSearchInputRef.value?.focus();
-    documentSearchInputRef.value?.select();
-  });
-  return true;
+  return documentJsonEditorRef.value?.openSearch() ?? false;
 }
-
-function closeDocumentSearch() {
-  documentSearchOpen.value = false;
-  void nextTick(() => {
-    documentViewerRef.value?.focus();
-  });
-}
-
-function moveDocumentSearchMatch(delta: -1 | 1) {
-  const count = documentSearchMatches.value.length;
-  if (count === 0) return;
-  documentSearchMatchIndex.value = (documentSearchActiveIndex.value + delta + count) % count;
-  documentSearchHasNavigated.value = true;
-  void scrollDocumentSearchMatchIntoView();
-}
-
-function activateDocumentSearchMatch(delta: -1 | 1) {
-  if (documentSearchMatches.value.length === 0) return;
-  if (!documentSearchHasNavigated.value) {
-    documentSearchHasNavigated.value = true;
-    void scrollDocumentSearchMatchIntoView();
-    return;
-  }
-  moveDocumentSearchMatch(delta);
-}
-
-async function scrollDocumentSearchMatchIntoView() {
-  await nextTick();
-  documentViewerRef.value?.querySelector<HTMLElement>('[data-document-search-active="true"]')?.scrollIntoView({ block: "center", inline: "nearest" });
-}
-
-watch([documentSearchQuery, documentSearchText], () => {
-  documentSearchMatchIndex.value = 0;
-  documentSearchHasNavigated.value = false;
-  void scrollDocumentSearchMatchIntoView();
-});
 
 watch([viewMode, isEditing, selectedIdx], ([mode, editing, index]) => {
   if (mode === "document" && !editing && index !== null) return;
   documentViewerSearchActive.value = false;
-  documentSearchOpen.value = false;
 });
 
 onMounted(async () => {
@@ -2255,23 +2193,6 @@ defineExpose({ focusSearch });
               </template>
             </div>
 
-            <div v-if="documentSearchOpen && (!isEditing || documentEditMode === 'json')" data-document-search class="flex h-9 shrink-0 items-center justify-end gap-1 border-b bg-background px-2">
-              <div class="relative w-56 max-w-[45%] min-w-32">
-                <Search class="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
-                <Input ref="documentSearchInputRef" v-model="documentSearchQuery" class="h-7 select-text pl-7 pr-2 text-xs" :placeholder="t('editor.search.find')" @keydown.enter.prevent="activateDocumentSearchMatch($event.shiftKey ? -1 : 1)" @keydown.escape.prevent="closeDocumentSearch" />
-              </div>
-              <span class="w-12 text-center text-[11px] tabular-nums text-muted-foreground">{{ documentSearchStatus }}</span>
-              <Button variant="ghost" size="icon" class="h-7 w-7" :title="t('editor.search.prevMatch')" :disabled="documentSearchMatches.length === 0" @click="moveDocumentSearchMatch(-1)">
-                <ChevronUp class="h-3.5 w-3.5" />
-              </Button>
-              <Button variant="ghost" size="icon" class="h-7 w-7" :title="t('editor.search.nextMatch')" :disabled="documentSearchMatches.length === 0" @click="moveDocumentSearchMatch(1)">
-                <ChevronDown class="h-3.5 w-3.5" />
-              </Button>
-              <Button variant="ghost" size="icon" class="h-7 w-7" @click="closeDocumentSearch">
-                <X class="h-3.5 w-3.5" />
-              </Button>
-            </div>
-
             <div v-if="isEditing && documentEditMode === 'json' && !isNew" class="px-4 py-1.5 text-[11px] text-muted-foreground border-b bg-muted/20 shrink-0">
               {{ t("mongo.jsonReplaceHint") }}
             </div>
@@ -2293,8 +2214,8 @@ defineExpose({ focusSearch });
               </div>
             </div>
 
-            <div v-else ref="documentViewerRef" data-document-json-viewer tabindex="-1" class="flex-1 overflow-auto bg-muted/10 outline-none" @dblclick="handleDocumentViewerDoubleClick">
-              <pre class="json-viewer min-w-fit select-text p-5" :style="documentFontStyle" v-html="highlightedJson(editJson)" />
+            <div v-else data-document-json-viewer class="flex-1 min-h-0 bg-muted/10 outline-none" @dblclick="handleDocumentViewerDoubleClick">
+              <RedisJsonEditor ref="documentJsonEditorRef" :model-value="editJson" read-only :line-numbers="false" presentation="viewer" class="h-full" />
             </div>
           </template>
           <div v-else class="h-full flex items-center justify-center text-muted-foreground text-sm">
@@ -2317,15 +2238,6 @@ defineExpose({ focusSearch });
   resize: none;
   overflow-y: auto;
   white-space: pre-wrap;
-}
-
-.json-viewer {
-  font-family: var(--dbx-editor-font-family);
-  font-size: var(--dbx-editor-font-size);
-  line-height: 1.6;
-  tab-size: 2;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
 }
 
 .json-edit {

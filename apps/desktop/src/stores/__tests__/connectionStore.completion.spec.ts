@@ -36,6 +36,17 @@ function mysqlConnection(): ConnectionConfig {
   } as ConnectionConfig;
 }
 
+function redisConnection(): ConnectionConfig {
+  return {
+    ...postgresConnection(),
+    id: "redis-1",
+    name: "Redis",
+    db_type: "redis",
+    port: 6379,
+    database: "0",
+  } as ConnectionConfig;
+}
+
 function oracleConnection(): ConnectionConfig {
   return {
     ...postgresConnection(),
@@ -151,6 +162,145 @@ describe("connectionStore completion assistant", () => {
     expect(store.connectedIds.has("pg-1")).toBe(true);
     expect(store.activeConnectionId).toBe("already-active");
     expect(tables).toEqual([{ name: "users", schema: "public", type: "table" }]);
+  });
+
+  it("falls back to the server COMMAND catalog when COMMAND DOCS is unsupported", async () => {
+    const redisExecuteCommand = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("unknown subcommand 'DOCS'"))
+      .mockResolvedValueOnce({
+        command: "COMMAND",
+        safety: "allowed",
+        value: [["get", 2, ["readonly"], 1, 1, 1, ["@read"], [], [], []]],
+      });
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      redisExecuteCommand,
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.connections = [redisConnection()];
+    store.connectedIds.add("redis-1");
+
+    const docs = await store.listRedisCompletionCommandDocs("redis-1", "0");
+    const cached = await store.listRedisCompletionCommandDocs("redis-1", "0");
+
+    expect(redisExecuteCommand).toHaveBeenNthCalledWith(1, "redis-1", 0, "COMMAND DOCS");
+    expect(redisExecuteCommand).toHaveBeenNthCalledWith(2, "redis-1", 0, "COMMAND");
+    expect(redisExecuteCommand).toHaveBeenCalledTimes(2);
+    expect(docs).toEqual([
+      {
+        name: "GET",
+        summary: undefined,
+        since: undefined,
+        group: undefined,
+        arity: 2,
+        keySpecs: [{ beginSearch: { type: "index", index: 1 }, findKeys: { type: "range", lastKey: 0, keyStep: 1, limit: 0 } }],
+      },
+    ]);
+    expect(cached).toEqual(docs);
+  });
+
+  it("merges COMMAND key positions into COMMAND DOCS metadata", async () => {
+    const redisExecuteCommand = vi
+      .fn()
+      .mockResolvedValueOnce({
+        command: "COMMAND DOCS",
+        safety: "allowed",
+        value: { get: { summary: "Returns a value.", arguments: [{ name: "key", type: "key" }] } },
+      })
+      .mockResolvedValueOnce({
+        command: "COMMAND",
+        safety: "allowed",
+        value: [["get", 2, ["readonly"], 1, 1, 1, ["@read"], [], [], []]],
+      });
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      redisExecuteCommand,
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.connections = [redisConnection()];
+    store.connectedIds.add("redis-1");
+
+    const docs = await store.listRedisCompletionCommandDocs("redis-1", "0");
+
+    expect(docs[0]).toMatchObject({
+      name: "GET",
+      arity: 2,
+      keySpecs: [{ beginSearch: { type: "index", index: 1 }, findKeys: { type: "range", lastKey: 0, keyStep: 1, limit: 0 } }],
+    });
+  });
+
+  it("does not let an invalidated Redis metadata request overwrite fresh cache", async () => {
+    const staleDocs = deferred<{ command: string; safety: string; value: unknown }>();
+    const freshDocs = deferred<{ command: string; safety: string; value: unknown }>();
+    let docsRequestCount = 0;
+    const redisExecuteCommand = vi.fn((_connectionId: string, _database: number, command: string) => {
+      if (command === "COMMAND DOCS") {
+        docsRequestCount += 1;
+        return docsRequestCount === 1 ? staleDocs.promise : freshDocs.promise;
+      }
+      return Promise.resolve({
+        command: "COMMAND",
+        safety: "allowed",
+        value: [["get", 2, ["readonly"], 1, 1, 1, ["@read"], [], [], []]],
+      });
+    });
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      redisExecuteCommand,
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.connections = [redisConnection()];
+    store.connectedIds.add("redis-1");
+
+    const staleRequest = store.listRedisCompletionCommandDocs("redis-1", "0");
+    await vi.waitFor(() => expect(redisExecuteCommand).toHaveBeenCalledTimes(1));
+    store.invalidateCompletionCache("redis-1");
+    const freshRequest = store.listRedisCompletionCommandDocs("redis-1", "0");
+    freshDocs.resolve({ command: "COMMAND DOCS", safety: "allowed", value: { get: { summary: "fresh" } } });
+    await expect(freshRequest).resolves.toEqual(expect.arrayContaining([expect.objectContaining({ name: "GET", summary: "fresh" })]));
+
+    staleDocs.resolve({ command: "COMMAND DOCS", safety: "allowed", value: { get: { summary: "stale" } } });
+    await staleRequest;
+
+    await expect(store.listRedisCompletionCommandDocs("redis-1", "0")).resolves.toEqual(expect.arrayContaining([expect.objectContaining({ name: "GET", summary: "fresh" })]));
+  });
+
+  it("does not suggest binary Redis key displays that the command input cannot execute", async () => {
+    const redisScanKeysBatch = vi.fn().mockResolvedValue({
+      cursor: 0,
+      keys: [
+        { key_display: "plain", key_raw: "cGxhaW4=", key_type: "string", ttl: -1 },
+        { key_display: String.raw`literal\\xAC`, key_raw: "bGl0ZXJhbFx4QUM=", key_type: "string", ttl: -1 },
+        { key_display: "\\xac", key_raw: "rA==", key_type: "string", ttl: -1 },
+      ],
+      total_keys: 3,
+    });
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      redisScanKeysBatch,
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.connections = [redisConnection()];
+    store.connectedIds.add("redis-1");
+
+    await expect(store.listRedisCompletionKeys("redis-1", "0")).resolves.toEqual(["plain", String.raw`literal\\xAC`]);
   });
 
   it("preserves TDengine stable type in completion metadata", async () => {

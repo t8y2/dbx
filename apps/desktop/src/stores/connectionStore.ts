@@ -73,6 +73,7 @@ import { shouldMarkDisconnected } from "@/lib/connection/connectionHealth";
 import { connectionAttemptOriginalErrorMessage, connectionAttemptTimeoutMessage, connectionAttemptTimeoutMs } from "@/lib/connection/connectionAttemptTimeout";
 import { loadTimeoutInheritanceBackup, saveTimeoutInheritanceBackup } from "@/lib/connection/timeoutInheritanceBackup";
 import { migrateSqlServerLegacyCompatibilityConfig, requiresSqlServerLegacyCompatibilityComponent, SQLSERVER_LEGACY_COMPATIBILITY_DRIVER_KEY } from "@/lib/connection/sqlServerLegacyCompatibility";
+import { gaussdbMTypeDisplayName } from "@/lib/table/postgresDataTypeHelp";
 import { deleteTabResultSnapshotsForOwner } from "@/lib/tabs/tabResultCache";
 import { connectionUsesVisibleSchemaFilter, filterDatabaseNamesForConnection, filterSchemaNamesForConnection, filterVisibleDatabaseNames, normalizeVisibleDatabaseSelection } from "@/lib/database/visibleDatabases";
 import {
@@ -98,6 +99,7 @@ import { decodeSchemaTreeCache, encodeSchemaTreeCache } from "@/lib/metadata/sch
 import { sortSidebarTreeChildrenForParent } from "@/lib/sidebar/sidebarNodeOrdering";
 import { connectionSupportsDatabaseUserAdmin } from "@/lib/database/databaseUserAdmin";
 import { getTableMetadataCapabilities } from "@/lib/table/tableMetadataCapabilities";
+import { mergeRedisCommandDocumentation, parseRedisCommandCatalog, parseRedisCommandDocumentation, type RedisCommandDocumentation } from "@/lib/redis/redisCommandDocs";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { encodeSqlServerLinkedSchema, parseSqlServerLinkedSchema } from "@/lib/database/sqlServerLinkedServers";
 import { inferMongoCompletionFields, type MongoCompletionField } from "@/lib/mongo/mongoCompletion";
@@ -355,6 +357,8 @@ export const useConnectionStore = defineStore("connection", () => {
   const sqlServerCompletionContextCache = ref<Record<string, SqlServerCompletionContext>>({});
   const elasticsearchCompletionIndicesCache = ref<Record<string, string[]>>({});
   const redisCompletionKeysCache = ref<Record<string, string[]>>({});
+  const redisCommandDocsCache = ref<Record<string, RedisCommandDocumentation[]>>({});
+  const redisCommandDocsCacheGeneration = new Map<string, number>();
   const mongoCompletionCollectionsCache = ref<Record<string, string[]>>({});
   const mongoCompletionFieldsCache = ref<Record<string, MongoCompletionField[]>>({});
   const schemaListCache = ref<Record<string, string[]>>({});
@@ -1601,16 +1605,17 @@ export const useConnectionStore = defineStore("connection", () => {
   }
 
   function objectGroupChildrenFromObjects(options: { node: TreeNode; parentNodeId: string; effectiveSchema?: string; objectTypes: DatabaseObjectTreeKind[]; objects: ObjectInfo[] }): TreeNode[] {
+    const databaseType = options.node.connectionId ? effectiveDatabaseTypeForConnection(getConfig(options.node.connectionId)) : undefined;
     const grouped = buildGroupedObjectTreeNodes({
       nodeId: options.parentNodeId,
       connectionId: options.node.connectionId || "",
       database: options.node.database || "",
       schema: options.effectiveSchema,
       objects: options.objects.filter((object) => options.objectTypes.includes(normalizedObjectTreeKind(object.object_type))),
+      databaseType,
     });
     const refreshedGroup = grouped.find((group) => group.type === options.node.type);
     const children = refreshedGroup?.children ?? [];
-    const databaseType = options.node.connectionId ? effectiveDatabaseTypeForConnection(getConfig(options.node.connectionId)) : undefined;
     return supportsPackageMemberExpansion(databaseType) ? markPackageNodesExpandable(children) : children;
   }
 
@@ -1640,12 +1645,20 @@ export const useConnectionStore = defineStore("connection", () => {
     const tableChildren = pageChildren.filter((child) => child.type === "table");
     const nonTableChildren = pageChildren.filter((child) => child.type !== "table");
     let merged = tableChildren.length ? mergeTableTreePageChildren(currentChildren, tableChildren, connectionId, database) : [...currentChildren];
-    const existing = new Set(merged.map(treeNodeObjectIdentity));
+    const existing = new Map(merged.map((node) => [treeNodeObjectIdentity(node), node]));
     for (const child of nonTableChildren) {
       const key = treeNodeObjectIdentity(child);
-      if (existing.has(key)) continue;
+      const existingNode = existing.get(key);
+      if (existingNode) {
+        if (child.type === "package" && child.xuguPackageBodyAvailable === true) {
+          existingNode.xuguPackageBodyAvailable = true;
+          existingNode.xuguPackageBodyValid = child.xuguPackageBodyValid;
+          existingNode.valid = existingNode.valid === false || child.valid === false ? false : (existingNode.valid ?? child.valid ?? null);
+        }
+        continue;
+      }
       merged.push(child);
-      existing.add(key);
+      existing.set(key, child);
     }
     const config = parent.connectionId ? getConfig(parent.connectionId) : undefined;
     return sortSidebarTreeChildrenForParent(
@@ -1868,14 +1881,15 @@ export const useConnectionStore = defineStore("connection", () => {
       );
       const supplementalObjects = filterSimpleSidebarSupplementalObjects(objects);
       if (supplementalObjects.length === 0) return;
+      const databaseType = effectiveDatabaseTypeForConnection(getConfig(options.connectionId));
       let supplementalChildren = buildSimpleObjectTreeNodes({
         nodeId: options.nodeId,
         connectionId: options.connectionId,
         database: options.database,
         schema: options.effectiveSchema,
         objects: supplementalObjects,
+        databaseType,
       });
-      const databaseType = effectiveDatabaseTypeForConnection(getConfig(options.connectionId));
       if (supportsPackageMemberExpansion(databaseType)) {
         supplementalChildren = markPackageNodesExpandable(supplementalChildren);
       }
@@ -2377,6 +2391,10 @@ export const useConnectionStore = defineStore("connection", () => {
     }
     for (const key of Object.keys(redisCompletionKeysCache.value)) {
       if (key === exactCacheKey || key.startsWith(cachePrefix)) delete redisCompletionKeysCache.value[key];
+    }
+    if (database == null) {
+      delete redisCommandDocsCache.value[connectionId];
+      redisCommandDocsCacheGeneration.set(connectionId, (redisCommandDocsCacheGeneration.get(connectionId) ?? 0) + 1);
     }
     for (const key of Object.keys(mongoCompletionCollectionsCache.value)) {
       if (key === exactCacheKey || key.startsWith(cachePrefix)) delete mongoCompletionCollectionsCache.value[key];
@@ -3521,7 +3539,7 @@ export const useConnectionStore = defineStore("connection", () => {
       // exposes a single navigation entry and must not keep a second topic tree.
       const consoleNode: TreeNode = {
         id: `${connectionId}:mqtt-topic:__console__`,
-        label: "MQTT 控制台",
+        label: "connection.mqttConsoleTitle",
         type: "mqtt-topic" as const,
         connectionId,
         children: [],
@@ -5059,11 +5077,13 @@ export const useConnectionStore = defineStore("connection", () => {
       const columns = await api.getColumns(connectionId, database, querySchema, table, catalog);
       const targetNode = treeNodeLoadTarget(load);
       if (!targetNode) return;
+      const connConfig = getConfig(connectionId);
+      const isGaussdbM = effectiveDatabaseTypeForConnection(connConfig) === "gaussdb" && connConfig?.driver_profile?.toLowerCase() === "gaussdb-m";
       setChildren(
         targetNode,
         columns.map((col) => ({
           id: `${parentId}:${col.name}`,
-          label: `${col.name} (${col.data_type})`,
+          label: `${col.name} (${isGaussdbM ? gaussdbMTypeDisplayName(col.data_type) : col.data_type})`,
           type: "column" as const,
           connectionId,
           database,
@@ -5698,7 +5718,7 @@ export const useConnectionStore = defineStore("connection", () => {
           });
           const targetNode = treeNodeLoadTarget(load);
           if (!targetNode) return;
-          setChildren(targetNode, buildPackageMemberNodes(targetNode, response.candidates));
+          setChildren(targetNode, buildPackageMemberNodes(targetNode, response.candidates, databaseType));
           targetNode.isExpanded = true;
         },
         options,
@@ -5728,40 +5748,64 @@ export const useConnectionStore = defineStore("connection", () => {
 
     const schema = node.schema || "";
     const parentName = node.objectName || node.label;
-    node.isLoading = true;
+    let load = beginTreeNodeLoad(node);
     try {
-      const [attributes, methods] = await Promise.all([
-        completionAssistantSearch({
-          connection_id: connectionId,
+      await runTreeMetadataLoad(
+        {
+          kind: "xugu-type-members",
+          connectionId,
           database,
           schema,
-          object_kinds: ["column"],
-          mask: "",
-          max_results: 500,
-          global_search: false,
-          parent_schema: schema,
-          parent_name: parentName,
-          parent_type: "type",
-          match_mode: "prefix",
-        }),
-        completionAssistantSearch({
-          connection_id: connectionId,
-          database,
-          schema,
-          object_kinds: ["routine"],
-          mask: "",
-          max_results: 500,
-          global_search: false,
-          parent_schema: schema,
-          parent_name: parentName,
-          parent_type: "type",
-          match_mode: "prefix",
-        }),
-      ]);
-      node.children = buildXuguTypeMemberNodes(node, [...attributes.candidates, ...methods.candidates]);
-      node.isExpanded = true;
+          nodeKind: node.type,
+          extra: { typeName: parentName },
+        },
+        async () => {
+          await ensureConnected(connectionId);
+          load = reclaimTreeNodeLoad(load, node);
+          const [attributes, methods] = await Promise.all([
+            completionAssistantSearch({
+              connection_id: connectionId,
+              database,
+              schema,
+              object_kinds: ["column"],
+              mask: "",
+              max_results: 500,
+              global_search: false,
+              parent_schema: schema,
+              parent_name: parentName,
+              parent_type: "type",
+              match_mode: "prefix",
+            }),
+            completionAssistantSearch({
+              connection_id: connectionId,
+              database,
+              schema,
+              object_kinds: ["routine"],
+              mask: "",
+              max_results: 500,
+              global_search: false,
+              parent_schema: schema,
+              parent_name: parentName,
+              parent_type: "type",
+              match_mode: "prefix",
+            }),
+          ]);
+          const targetNode = treeNodeLoadTarget(load);
+          if (!targetNode) return;
+          const children = buildXuguTypeMemberNodes(targetNode, [...attributes.candidates, ...methods.candidates], {
+            attributes: "tree.attributes",
+            methods: "tree.methods",
+          });
+          setChildren(targetNode, children);
+          targetNode.isExpanded = children.length > 0;
+          if (children.length === 0) targetNode.xuguTypeMembersExpandable = false;
+        },
+      );
+    } catch (error) {
+      recordMetadataLoadError(connectionId, error, load);
+      throw error;
     } finally {
-      node.isLoading = false;
+      finishTreeNodeLoad(load);
     }
   }
 
@@ -6190,6 +6234,8 @@ export const useConnectionStore = defineStore("connection", () => {
   // Upper bound on cached key names per db, to keep completion memory bounded
   // (Redis can hold far more keys than we ever want resident for autocomplete).
   const REDIS_COMPLETION_KEYS_MAX = 1000;
+  // `\\xNN` is binary only when it has an even number of preceding slashes.
+  const BINARY_REDIS_KEY_ESCAPE = /(^|[^\\])(?:\\\\)*\\x[0-9a-f]{2}/i;
 
   async function listRedisCompletionKeys(connectionId: string, database: string): Promise<string[]> {
     if (!database) return [];
@@ -6201,10 +6247,48 @@ export const useConnectionStore = defineStore("connection", () => {
       const pageSize = getConfig(connectionId)?.redis_scan_page_size ?? REDIS_SCAN_PAGE_SIZE_DEFAULT;
       // Bounded multi-round SCAN: trade coverage for latency/memory safety.
       const result = await api.redisScanKeysBatch(connectionId, Number(database), 0, "*", pageSize, 6, false);
-      const keys = result.keys.map((key) => key.key_display).slice(0, REDIS_COMPLETION_KEYS_MAX);
+      const keys = result.keys
+        .map((key) => key.key_display)
+        .filter((key) => !BINARY_REDIS_KEY_ESCAPE.test(key))
+        .slice(0, REDIS_COMPLETION_KEYS_MAX);
       redisCompletionKeysCache.value[cacheKey] = keys;
       evictOldestCacheEntries(redisCompletionKeysCache.value, COMPLETION_CACHE_MAX);
       return keys;
+    });
+  }
+
+  async function listRedisCompletionCommandDocs(connectionId: string, database: string): Promise<RedisCommandDocumentation[]> {
+    const cached = redisCommandDocsCache.value[connectionId];
+    if (cached) return cached;
+    return withCompletionInFlight(`${connectionId}:redis-command-docs`, async () => {
+      const generation = redisCommandDocsCacheGeneration.get(connectionId) ?? 0;
+      await ensureConnected(connectionId);
+      const db = Number.parseInt(database, 10) || 0;
+      let docs: RedisCommandDocumentation[];
+      try {
+        // Redis recommends COMMAND DOCS for complete, version-aware client metadata.
+        const docsResult = await api.redisExecuteCommand(connectionId, db, "COMMAND DOCS");
+        docs = parseRedisCommandDocumentation(docsResult.value);
+        try {
+          const catalogResult = await api.redisExecuteCommand(connectionId, db, "COMMAND");
+          docs = mergeRedisCommandDocumentation(docs, parseRedisCommandCatalog(catalogResult.value));
+        } catch {
+          // Documentation still provides useful grammar when COMMAND is restricted.
+        }
+      } catch (docsError) {
+        // Redis before 7.0 lacks COMMAND DOCS; COMMAND still reports its actual command inventory.
+        try {
+          const result = await api.redisExecuteCommand(connectionId, db, "COMMAND");
+          docs = parseRedisCommandCatalog(result.value);
+        } catch {
+          throw docsError;
+        }
+      }
+      if ((redisCommandDocsCacheGeneration.get(connectionId) ?? 0) === generation) {
+        redisCommandDocsCache.value[connectionId] = docs;
+        evictOldestCacheEntries(redisCommandDocsCache.value, COMPLETION_CACHE_MAX);
+      }
+      return docs;
     });
   }
 
@@ -6739,6 +6823,7 @@ export const useConnectionStore = defineStore("connection", () => {
           return inheritNaturalTreeNodeOrder(node, {
             ...existing,
             label: node.label,
+            comment: node.comment,
             pinned: node.pinned,
             children: withSavedSqlRoot(node.connectionId!, existing.children || [], existing),
           });
@@ -7411,6 +7496,7 @@ export const useConnectionStore = defineStore("connection", () => {
     refreshCompletionDatabases,
     listElasticsearchCompletionIndices,
     listRedisCompletionKeys,
+    listRedisCompletionCommandDocs,
     listMongoCompletionCollections,
     listMongoCompletionFields,
     invalidateCompletionCache,

@@ -644,6 +644,22 @@ describe("useDataGridExport prepared row statements", () => {
     expect(toast).not.toHaveBeenCalledWith("grid.copyExtractorWarningOmittedColumns", 5000);
   });
 
+  it.each([
+    ["output limit", { code: "output-too-large", message: "Extracted clipboard output exceeds 32 MiB; export the data to a file instead." }, "Extracted clipboard output exceeds 32 MiB; export the data to a file instead."],
+    ["input limit", { code: "input-too-large", message: "Selected data is too large for clipboard extraction; export the data to a file instead." }, "Selected data is too large for clipboard extraction; export the data to a file instead."],
+    ["Error", new Error("extractor failed"), "extractor failed"],
+    ["string", "extractor failed", "extractor failed"],
+    ["null", null, "Unknown error occurred"],
+  ])("formats %s extractor failures", async (_label, rejection, expectedMessage) => {
+    const matrix: CellSelectionMatrix = { rowIndexes: [0], columnIndexes: [0], columns: ["id"], rows: [[1]] };
+    vi.mocked(extractDataGridSelection).mockRejectedValueOnce(rejection);
+    const state = createExportState(editableTable, ["id"], matrix, [1]);
+
+    await expect(state.copyWithExtractor("csv")).resolves.toBe(false);
+
+    expect(toast).toHaveBeenCalledWith(`grid.copyFailed: ${expectedMessage}`, 5000);
+  });
+
   it("rejects irregular discrete cell selections before building an extractor request", async () => {
     const state = createExportState(editableTable, ["id", "name"], undefined, undefined, {
       columns: ["id", "name"],

@@ -31,11 +31,32 @@ describe("Xugu object type members", () => {
       { name: "itemId", kind: "column", data_type: "INTEGER" },
     ]);
 
-    expect(nodes.map((node) => ({ type: node.type, label: node.label }))).toEqual([
-      { type: "type-attribute", label: "itemId (INTEGER)" },
+    expect(nodes.map((node) => ({ type: node.type, label: node.label, objectCount: node.objectCount }))).toEqual([
+      { type: "type-attributes", label: "tree.attributes", objectCount: 1 },
+      { type: "type-methods", label: "tree.methods", objectCount: 2 },
+    ]);
+    expect(nodes.every((node) => node.parentType === "type" && node.parentName === "OrderType")).toBe(true);
+    expect(nodes[0].children?.map((node) => ({ type: node.type, label: node.label }))).toEqual([{ type: "type-attribute", label: "itemId (INTEGER)" }]);
+    expect(nodes[1].children?.map((node) => ({ type: node.type, label: node.label }))).toEqual([
       { type: "type-method", label: "FUNCTION total(quantity INTEGER, price NUMERIC(12,2)) → NUMERIC(18,2)" },
       { type: "type-method", label: "PROCEDURE rename(OUT result VARCHAR(40))" },
     ]);
-    expect(nodes.every((node) => node.parentType === "type" && node.parentName === "OrderType" && node.children === undefined)).toBe(true);
+    expect(nodes.flatMap((node) => node.children ?? []).every((node) => node.parentType === "type" && node.parentName === "OrderType" && node.children === undefined)).toBe(true);
+  });
+
+  it("omits the methods group when a type only has attributes", () => {
+    const nodes = buildXuguTypeMemberNodes(typeNode, [{ name: "itemId", kind: "column", data_type: "INTEGER" }]);
+
+    expect(nodes.map((node) => ({ type: node.type, objectCount: node.objectCount }))).toEqual([{ type: "type-attributes", objectCount: 1 }]);
+  });
+
+  it("omits the attributes group when a type only has methods", () => {
+    const nodes = buildXuguTypeMemberNodes(typeNode, [{ name: "rename", kind: "procedure", signature: "newName VARCHAR(40)" }]);
+
+    expect(nodes.map((node) => ({ type: node.type, objectCount: node.objectCount }))).toEqual([{ type: "type-methods", objectCount: 1 }]);
+  });
+
+  it("returns no groups when a type has no members", () => {
+    expect(buildXuguTypeMemberNodes(typeNode, [])).toEqual([]);
   });
 });

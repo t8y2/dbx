@@ -62,6 +62,9 @@ public final class RocketMqAgent {
 
     private static final Gson GSON = new GsonBuilder().serializeNulls().create();
     private static final int DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
+    private static final int DEFAULT_CONNECT_TIMEOUT_MS = 10_000;
+    private static final long MIN_ACL_PROBE_TIMEOUT_MS = 500;
+    private static final long MAX_ACL_PROBE_TIMEOUT_MS = 5_000;
     private static final int DEFAULT_LIST_LIMIT = 200;
     private static final int CONSUMER_GROUP_ENRICH_CONCURRENCY = 8;
     private static final int CONSUMER_GROUP_COLLECT_CONCURRENCY = 8;
@@ -435,7 +438,7 @@ public final class RocketMqAgent {
     ) throws Exception {
         String clusterName = resolveClusterName(clusterInfo, conn);
         List<Map<String, Object>> brokers = brokerNodes(clusterInfo);
-        boolean aclEnabled = probeAclSupport(admin, clusterInfo);
+        boolean aclEnabled = probeAclSupport(admin, clusterInfo, conn);
 
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("ok", true);
@@ -3056,17 +3059,43 @@ public final class RocketMqAgent {
         };
     }
 
-    private static boolean probeAclSupport(DefaultMQAdminExt admin, ClusterInfo clusterInfo) {
+    private static boolean probeAclSupport(DefaultMQAdminExt admin, ClusterInfo clusterInfo, JsonObject conn) {
+        return probeAclSupport(clusterInfo, conn, (brokerAddr, timeoutMs) -> {
+            admin.getDefaultMQAdminExtImpl()
+                .getMqClientInstance()
+                .getMQClientAPIImpl()
+                .getBrokerClusterAclInfo(brokerAddr, timeoutMs);
+        });
+    }
+
+    @FunctionalInterface
+    interface BrokerAclProbe {
+        void probe(String brokerAddr, long timeoutMs) throws Exception;
+    }
+
+    static long aclProbeTimeoutMs(JsonObject conn) {
+        long connectTimeoutMs = Math.max(
+            1_000L,
+            (long) intOrDefault(conn, "connect_timeout_ms", DEFAULT_CONNECT_TIMEOUT_MS)
+        );
+        return Math.max(
+            MIN_ACL_PROBE_TIMEOUT_MS,
+            Math.min(MAX_ACL_PROBE_TIMEOUT_MS, connectTimeoutMs / 2)
+        );
+    }
+
+    static boolean probeAclSupport(ClusterInfo clusterInfo, JsonObject conn, BrokerAclProbe probe) {
         try {
             if (clusterInfo == null || clusterInfo.getBrokerAddrTable() == null) {
                 return false;
             }
+            long timeoutMs = aclProbeTimeoutMs(conn);
             for (BrokerData broker : clusterInfo.getBrokerAddrTable().values()) {
                 String brokerAddr = broker.selectBrokerAddr();
                 if (brokerAddr == null || brokerAddr.isBlank()) {
                     continue;
                 }
-                admin.examineBrokerClusterAclVersionInfo(brokerAddr);
+                probe.probe(remapBrokerAddrForClient(brokerAddr, conn), timeoutMs);
                 return true;
             }
         } catch (Exception ignored) {

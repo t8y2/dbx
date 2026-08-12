@@ -1561,9 +1561,11 @@ pub fn parse_command_argv(command_text: &str) -> Result<Vec<String>, String> {
     let mut chars = command_text.chars().peekable();
     let mut quote: Option<char> = None;
     let mut escaping = false;
+    let mut token_started = false;
 
     while let Some(ch) = chars.next() {
         if escaping {
+            token_started = true;
             current.push(match ch {
                 'n' => '\n',
                 'r' => '\r',
@@ -1575,6 +1577,7 @@ pub fn parse_command_argv(command_text: &str) -> Result<Vec<String>, String> {
         }
 
         if ch == '\\' {
+            token_started = true;
             escaping = true;
             continue;
         }
@@ -1589,20 +1592,23 @@ pub fn parse_command_argv(command_text: &str) -> Result<Vec<String>, String> {
         }
 
         if ch == '"' || ch == '\'' {
+            token_started = true;
             quote = Some(ch);
             continue;
         }
 
         if ch.is_whitespace() {
-            if !current.is_empty() {
+            if token_started {
                 argv.push(std::mem::take(&mut current));
             }
+            token_started = false;
             while matches!(chars.peek(), Some(next) if next.is_whitespace()) {
                 chars.next();
             }
             continue;
         }
 
+        token_started = true;
         current.push(ch);
     }
 
@@ -1612,10 +1618,10 @@ pub fn parse_command_argv(command_text: &str) -> Result<Vec<String>, String> {
     if quote.is_some() {
         return Err("Redis command has an unterminated quote".to_string());
     }
-    if !current.is_empty() {
+    if token_started {
         argv.push(current);
     }
-    if argv.is_empty() {
+    if argv.first().is_none_or(String::is_empty) {
         return Err("Redis command is empty".to_string());
     }
     Ok(argv)
@@ -5053,6 +5059,13 @@ mod tests {
     }
 
     #[test]
+    fn parses_empty_quoted_arguments() {
+        let argv = parse_command_argv(r#"SET "" """#).unwrap();
+
+        assert_eq!(argv, vec!["SET", "", ""]);
+    }
+
+    #[test]
     fn parses_quoted_and_escaped_command_names_before_classification() {
         for command_text in [r#""JSON.SET" user:1 $ {}"#, r#"JSON\.SET user:1 $ {}"#] {
             let argv = parse_command_argv(command_text).unwrap();
@@ -5062,7 +5075,9 @@ mod tests {
 
     #[test]
     fn rejects_empty_command_text() {
-        assert_eq!(parse_command_argv("   ").unwrap_err(), "Redis command is empty");
+        for command_text in ["   ", "\"\""] {
+            assert_eq!(parse_command_argv(command_text).unwrap_err(), "Redis command is empty");
+        }
     }
 
     #[tokio::test]

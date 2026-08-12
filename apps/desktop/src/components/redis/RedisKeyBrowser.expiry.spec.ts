@@ -22,9 +22,13 @@ const mocks = vi.hoisted(() => ({
   redisCheckJsonModule: vi.fn(),
   redisDeleteKey: vi.fn(),
   redisDeleteKeys: vi.fn(),
+  redisExecuteCommand: vi.fn(),
+  saveHistory: vi.fn(),
   canBuildRedisFuzzyTree: vi.fn((loadedKeyCount: number) => loadedKeyCount <= 200_000),
   toast: vi.fn(),
   updateRedisDbKeyStats: vi.fn(),
+  listRedisCompletionCommandDocs: vi.fn(),
+  listRedisCompletionKeys: vi.fn(),
   redisScanPageSize: 100,
   infiniteScroll: false,
   queryResultMaxRowsEnabled: true,
@@ -46,6 +50,8 @@ vi.mock("@/lib/backend/api", () => ({
   redisCheckJsonModule: mocks.redisCheckJsonModule,
   redisDeleteKey: mocks.redisDeleteKey,
   redisDeleteKeys: mocks.redisDeleteKeys,
+  redisExecuteCommand: mocks.redisExecuteCommand,
+  saveHistory: mocks.saveHistory,
 }));
 
 vi.mock("@/lib/redis/redisKeyTree", async (importOriginal) => {
@@ -58,6 +64,8 @@ vi.mock("@/stores/connectionStore", () => ({
     ensureConnected: vi.fn().mockResolvedValue(undefined),
     getConfig: () => ({ name: "Redis", redis_key_separator: ":", redis_scan_page_size: mocks.redisScanPageSize }),
     updateRedisDbKeyStats: mocks.updateRedisDbKeyStats,
+    listRedisCompletionCommandDocs: mocks.listRedisCompletionCommandDocs,
+    listRedisCompletionKeys: mocks.listRedisCompletionKeys,
     invalidateCompletionCache: vi.fn(),
     refreshRedisDbKeyCounts: vi.fn(),
   }),
@@ -346,6 +354,15 @@ function redisKeyInfo(keyType = "json") {
   return { key_display: KEY_NAME, key_raw: KEY_RAW, key_type: keyType, ttl: 90, size: 7, value_preview: "{}" };
 }
 
+const completionCommands = [
+  { name: "GET", group: "string", arity: 2, keySpecs: [{ beginSearch: { type: "index" as const, index: 1 }, findKeys: { type: "range" as const, lastKey: 0, keyStep: 1, limit: 0 } }] },
+  { name: "GETEX", group: "string", arity: -2, keySpecs: [{ beginSearch: { type: "index" as const, index: 1 }, findKeys: { type: "range" as const, lastKey: 0, keyStep: 1, limit: 0 } }] },
+  { name: "GETSET", group: "string", arity: 3, keySpecs: [{ beginSearch: { type: "index" as const, index: 1 }, findKeys: { type: "range" as const, lastKey: 0, keyStep: 1, limit: 0 } }] },
+  { name: "PING", group: "connection", arity: -1, keySpecs: [] },
+  { name: "SET", group: "string", arity: -3, keySpecs: [{ beginSearch: { type: "index" as const, index: 1 }, findKeys: { type: "range" as const, lastKey: 0, keyStep: 1, limit: 0 } }] },
+  { name: "VGET", group: "string", arity: 2, summary: "Reads a vendor key.", keySpecs: [{ beginSearch: { type: "index" as const, index: 1 }, findKeys: { type: "range" as const, lastKey: 0, keyStep: 1, limit: 0 } }] },
+];
+
 function deferred<T>() {
   let resolve!: (value: T) => void;
   let reject!: (reason?: unknown) => void;
@@ -376,6 +393,10 @@ function resetApiMocks() {
   mocks.redisCheckJsonModule.mockResolvedValue(true);
   mocks.redisDeleteKey.mockResolvedValue(undefined);
   mocks.redisDeleteKeys.mockResolvedValue(0);
+  mocks.redisExecuteCommand.mockResolvedValue({ value: "OK" });
+  mocks.saveHistory.mockResolvedValue(undefined);
+  mocks.listRedisCompletionCommandDocs.mockResolvedValue(completionCommands);
+  mocks.listRedisCompletionKeys.mockResolvedValue(["user:1"]);
   mocks.canBuildRedisFuzzyTree.mockImplementation((loadedKeyCount: number) => loadedKeyCount <= 200_000);
 }
 
@@ -386,6 +407,7 @@ function mountBrowser() {
   app.use(createI18n({ legacy: false, locale: "en", messages: { en: {} }, missingWarn: false, fallbackWarn: false }));
   app.mount(host);
   mountedApps.push({ unmount: () => app.unmount(), host });
+  return host;
 }
 
 function mountScopedBrowser() {
@@ -502,6 +524,21 @@ async function openCreateDialog() {
   await setInput('input[placeholder="redis.createKeyNamePlaceholder"]', KEY_NAME);
 }
 
+async function openCommandPanel() {
+  const trigger = document.querySelector<HTMLElement>('[value="command"]');
+  expect(trigger, "redis.commandLine trigger").toBeDefined();
+  trigger!.click();
+  await settle();
+}
+
+function commandCompletionLabels(): string[] {
+  return Array.from(document.querySelectorAll<HTMLButtonElement>('[role="option"]')).map((item) => item.textContent?.trim() ?? "");
+}
+
+async function setCommandInput(value: string) {
+  await setInput("[data-redis-command-input]", value);
+}
+
 async function fillCreateValue(type: CreateType) {
   if (type === "string") {
     const textarea = requiredElement<HTMLTextAreaElement>("textarea");
@@ -594,6 +631,186 @@ describe("RedisKeyBrowser scope changes", () => {
 
     expect(browser.host.textContent).toContain("db1-key");
     expect(browser.host.textContent).not.toContain("db0-key");
+  });
+});
+
+describe("RedisKeyBrowser command completion", () => {
+  it("uses the connected server's module command docs and accepts the selection with Tab", async () => {
+    mountBrowser();
+    await settle();
+    await openCommandPanel();
+    await setCommandInput("VGE");
+
+    expect(mocks.listRedisCompletionCommandDocs).toHaveBeenCalledWith("connection", "0");
+    expect(commandCompletionLabels()).toContain("VGETReads a vendor key.string");
+
+    const input = requiredElement<HTMLInputElement>("[data-redis-command-input]");
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", shiftKey: true, bubbles: true }));
+    await settle();
+    expect(input.value).toBe("VGE");
+
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", bubbles: true }));
+    await settle();
+    expect(input.value).toBe("VGET ");
+  });
+
+  it("completes known keys only at a documented key argument", async () => {
+    mountBrowser();
+    await settle();
+    await openCommandPanel();
+    await setCommandInput("VGET ");
+
+    expect(mocks.listRedisCompletionKeys).toHaveBeenCalledWith("connection", "0");
+    expect(commandCompletionLabels()).toContain("user:1key");
+
+    const input = requiredElement<HTMLInputElement>("[data-redis-command-input]");
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", bubbles: true }));
+    await settle();
+    expect(input.value).toBe("VGET user:1");
+  });
+
+  it("replaces an incomplete quoted key with the executable completion text", async () => {
+    mocks.listRedisCompletionKeys.mockResolvedValueOnce(["user name"]);
+    mountBrowser();
+    await settle();
+    await openCommandPanel();
+    await setCommandInput('VGET "user');
+
+    const input = requiredElement<HTMLInputElement>("[data-redis-command-input]");
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", bubbles: true }));
+    await settle();
+
+    expect(input.value).toBe('VGET "user name"');
+  });
+
+  it("does not guess command candidates when server metadata is unavailable", async () => {
+    mocks.listRedisCompletionCommandDocs.mockRejectedValueOnce(new Error("unknown subcommand 'DOCS'"));
+    mountBrowser();
+    await settle();
+    await openCommandPanel();
+    await setCommandInput("GE");
+
+    expect(commandCompletionLabels()).toEqual([]);
+  });
+
+  it("keeps one selected completion while pointer and keyboard move it", async () => {
+    mountBrowser();
+    await settle();
+    await openCommandPanel();
+    await setCommandInput("GE");
+
+    const options = Array.from(document.querySelectorAll<HTMLButtonElement>('[role="option"]'));
+    const input = requiredElement<HTMLInputElement>("[data-redis-command-input]");
+    const listbox = requiredElement<HTMLElement>('[role="listbox"]');
+    expect(options.length).toBeGreaterThan(1);
+    expect(options.filter((option) => option.getAttribute("aria-selected") === "true")).toEqual([options[0]]);
+    expect(options.every((option) => !option.hasAttribute("title"))).toBe(true);
+    expect(input.getAttribute("aria-controls")).toBe(listbox.id);
+    expect(input.getAttribute("aria-activedescendant")).toBe(options[0]!.id);
+
+    options[1]!.dispatchEvent(new Event("pointerenter", { bubbles: true }));
+    await settle();
+    expect(options.filter((option) => option.getAttribute("aria-selected") === "true")).toEqual([options[1]]);
+    expect(input.getAttribute("aria-activedescendant")).toBe(options[1]!.id);
+
+    listbox.scrollTop = 20;
+    vi.spyOn(listbox, "getBoundingClientRect").mockReturnValue({ top: 100, bottom: 200 } as DOMRect);
+    vi.spyOn(options[2]!, "getBoundingClientRect").mockReturnValue({ top: 180, bottom: 224 } as DOMRect);
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+    await settle();
+    expect(options.filter((option) => option.getAttribute("aria-selected") === "true")).toEqual([options[2]]);
+    expect(listbox.scrollTop).toBe(44);
+
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+    await settle();
+    expect(options.filter((option) => option.getAttribute("aria-selected") === "true")).toEqual([options[2]]);
+
+    vi.spyOn(options[1]!, "getBoundingClientRect").mockReturnValue({ top: 76, bottom: 120 } as DOMRect);
+    vi.spyOn(options[0]!, "getBoundingClientRect").mockReturnValue({ top: 100, bottom: 144 } as DOMRect);
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true }));
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true }));
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true }));
+    await settle();
+    expect(options.filter((option) => option.getAttribute("aria-selected") === "true")).toEqual([options[0]]);
+    expect(listbox.scrollTop).toBe(20);
+  });
+
+  it("accepts a documented argument keyword and advances to its value", async () => {
+    mocks.listRedisCompletionCommandDocs.mockResolvedValueOnce([
+      ...completionCommands,
+      {
+        name: "XREAD",
+        group: "stream",
+        arity: -4,
+        keySpecs: [],
+        arguments: [
+          { name: "count", token: "COUNT", type: "integer", optional: true },
+          { name: "streams", token: "STREAMS", type: "block", arguments: [{ name: "key", type: "key", multiple: true }] },
+        ],
+      },
+    ]);
+    mountBrowser();
+    await settle();
+    await openCommandPanel();
+    await setCommandInput("XREAD C");
+
+    const input = requiredElement<HTMLInputElement>("[data-redis-command-input]");
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", bubbles: true }));
+    await settle();
+
+    expect(input.value).toBe("XREAD COUNT ");
+    expect(commandCompletionLabels()).toEqual([]);
+  });
+
+  it("accepts the selected completion before executing on Enter", async () => {
+    mountBrowser();
+    await settle();
+    await openCommandPanel();
+    await setCommandInput("SE");
+
+    const input = requiredElement<HTMLInputElement>("[data-redis-command-input]");
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    await settle();
+
+    expect(input.value).toBe("SET ");
+    expect(commandCompletionLabels()).toContain("user:1key");
+  });
+
+  it("waits for command metadata instead of sending a partial command on Enter", async () => {
+    const docs = deferred<typeof completionCommands>();
+    mocks.listRedisCompletionCommandDocs.mockReturnValueOnce(docs.promise);
+    mountBrowser();
+    await settle();
+    await openCommandPanel();
+    await setCommandInput("SE");
+
+    const input = requiredElement<HTMLInputElement>("[data-redis-command-input]");
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    await settle();
+
+    expect(input.value).toBe("SE");
+    expect(mocks.redisExecuteCommand).not.toHaveBeenCalled();
+
+    docs.resolve(completionCommands);
+    await settle();
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    await settle();
+    expect(input.value).toBe("SET ");
+    expect(mocks.redisExecuteCommand).not.toHaveBeenCalled();
+  });
+
+  it("executes an exact command instead of completing it a second time", async () => {
+    mountBrowser();
+    await settle();
+    await openCommandPanel();
+    await setCommandInput("PING");
+
+    const input = requiredElement<HTMLInputElement>("[data-redis-command-input]");
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    await settle();
+
+    expect(mocks.redisExecuteCommand).toHaveBeenCalledWith("connection", 0, "PING", true);
+    expect(input.value).toBe("");
   });
 });
 

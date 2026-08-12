@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import type { ObjectDirective } from "vue";
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
+import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from "vue";
 import { uuid } from "@/lib/common/utils";
 import { useI18n } from "vue-i18n";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
@@ -25,6 +25,7 @@ import { useTunnelProfileStore } from "@/stores/tunnelProfileStore";
 import { detachTunnelProfileLayer, tunnelProfileReferenceLayer, tunnelProfileSummary } from "@/lib/connection/tunnelProfiles";
 import { applySshConfigHostAliasPrefill as prefillSshConfigHostAlias } from "@/lib/connection/sshConfigHosts";
 import { canPersistConnectionTestResult, connectionEditDraftSyncAction } from "./connectionEditDraftSync";
+import { createConnectionNoteVisibilityDraft, persistConnectionNoteVisibilityDraft as persistConnectionNoteVisibilityDraftState, resetConnectionNoteVisibilityDraft, setConnectionNoteVisibilityDraft, syncConnectionNoteVisibilityDraft } from "./connectionNoteVisibilityDraft";
 import { REDIS_SCAN_PAGE_SIZE_DEFAULT, REDIS_SCAN_PAGE_SIZE_MIN, REDIS_SCAN_PAGE_SIZE_MAX, REDIS_SCAN_PAGE_SIZE_OPTIONS } from "@/lib/redis/redisKeyPattern";
 import { normalizeGlobalConnectTimeoutSecs, normalizeGlobalQueryTimeoutSecs, useSettingsStore } from "@/stores/settingsStore";
 import { useToast } from "@/composables/useToast";
@@ -189,6 +190,11 @@ type ConnectionTestState = ConnectionTestResult & { ok: boolean };
 const { t } = useI18n();
 const { toast } = useToast();
 const settingsStore = useSettingsStore();
+const connectionNoteVisibilityDraft = reactive(createConnectionNoteVisibilityDraft(settingsStore.editorSettings.sidebarShowConnectionNotes));
+const showConnectionNotesInSidebar = computed({
+  get: () => connectionNoteVisibilityDraft.value,
+  set: (value: boolean) => setConnectionNoteVisibilityDraft(connectionNoteVisibilityDraft, value),
+});
 const editGlobalConnectTimeoutSecs = ref(settingsStore.editorSettings.globalConnectTimeoutSecs);
 const editGlobalQueryTimeoutSecs = ref(settingsStore.editorSettings.globalQueryTimeoutSecs);
 const open = defineModel<boolean>("open", { default: false });
@@ -2400,6 +2406,7 @@ watch(
   ([config, isOpen]) => {
     const syncAction = connectionEditDraftSyncAction(config?.id ?? null, isOpen, editingId.value);
     if (syncAction === "preserve") return;
+    resetConnectionNoteVisibilityDraft(connectionNoteVisibilityDraft, settingsStore.editorSettings.sidebarShowConnectionNotes);
     editGlobalConnectTimeoutSecs.value = settingsStore.editorSettings.globalConnectTimeoutSecs;
     editGlobalQueryTimeoutSecs.value = settingsStore.editorSettings.globalQueryTimeoutSecs;
     if (syncAction === "hydrate" && config) {
@@ -2550,6 +2557,11 @@ watch(
     resetTestState();
   },
   { immediate: true },
+);
+
+watch(
+  () => settingsStore.editorSettings.sidebarShowConnectionNotes,
+  (value) => syncConnectionNoteVisibilityDraft(connectionNoteVisibilityDraft, value),
 );
 
 const isEditing = ref(false);
@@ -4656,6 +4668,7 @@ function openJdbcDriverManagerFromError() {
 function resetForm() {
   editingId.value = null;
   form.value = defaultForm();
+  resetConnectionNoteVisibilityDraft(connectionNoteVisibilityDraft, settingsStore.editorSettings.sidebarShowConnectionNotes);
   editGlobalConnectTimeoutSecs.value = settingsStore.editorSettings.globalConnectTimeoutSecs;
   editGlobalQueryTimeoutSecs.value = settingsStore.editorSettings.globalQueryTimeoutSecs;
   selectedTransportLayerId.value = null;
@@ -5013,11 +5026,16 @@ async function persistGlobalTimeoutDrafts() {
   });
 }
 
+async function persistConnectionNoteVisibilityDraft() {
+  await persistConnectionNoteVisibilityDraftState(connectionNoteVisibilityDraft, settingsStore.editorSettings.sidebarShowConnectionNotes, (value) => settingsStore.updateEditorSettingsAndPersist({ sidebarShowConnectionNotes: value }));
+}
+
 async function save() {
   if (!ensureConnectionHostResolvedFromUrl()) return;
   if (isSaving.value) return;
   const databaseInfoForSave = visibleTestDatabaseInfo.value ?? visibleSavedDatabaseInfo.value;
   isSaving.value = true;
+  let connectionSaved = false;
   try {
     if (editingId.value) {
       const updated = withSavedDatabaseInfo(connectionConfigForSubmit(editingId.value), databaseInfoForSave);
@@ -5025,6 +5043,8 @@ async function save() {
       await ensureRequiredGaussdbMJdbcRuntime(updated);
       await persistGlobalTimeoutDrafts();
       await store.updateConnection(updated);
+      connectionSaved = true;
+      await persistConnectionNoteVisibilityDraft();
       store.stopEditing();
     } else {
       const config = withSavedDatabaseInfo(connectionConfigForSubmit(draftTestConnectionId.value), databaseInfoForSave);
@@ -5032,6 +5052,8 @@ async function save() {
       await ensureRequiredGaussdbMJdbcRuntime(config);
       await persistGlobalTimeoutDrafts();
       await store.addConnection(config);
+      connectionSaved = true;
+      await persistConnectionNoteVisibilityDraft();
       draftTestConnectionId.value = uuid();
       if (config.db_type === "jdbc") {
         open.value = false;
@@ -5055,7 +5077,8 @@ async function save() {
     }
     open.value = false;
   } catch (e: any) {
-    const message = mongodbAuthFailureHint(String(e?.message || e));
+    const cause = mongodbAuthFailureHint(String(e?.message || e));
+    const message = connectionSaved ? t("connection.savedSettingsFailed", { message: cause }) : cause;
     testResult.value = { ok: false, message };
     showConnectionError(message);
   } finally {
@@ -7204,14 +7227,32 @@ function openExternalUrl(url: string) {
 
                 <div class="grid grid-cols-4 items-start gap-4">
                   <Label :class="connectionLabelTopClass">{{ t("connection.note") }}</Label>
-                  <textarea
-                    ref="noteTextareaRef"
-                    v-model="form.note"
-                    rows="1"
-                    class="col-span-3 min-h-8 w-full min-w-0 resize-none overflow-y-hidden rounded-md border border-input bg-transparent px-2.5 py-1 text-base leading-5 transition-colors outline-none placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 dark:bg-input/30 md:text-sm"
-                    :placeholder="t('connection.notePlaceholder')"
-                    @input="resizeNoteTextarea"
-                  />
+                  <div class="col-span-3 flex min-w-0 items-start gap-3">
+                    <textarea
+                      ref="noteTextareaRef"
+                      v-model="form.note"
+                      rows="1"
+                      class="min-h-8 min-w-0 flex-1 resize-none overflow-y-hidden rounded-md border border-input bg-transparent px-2.5 py-1 text-base leading-5 transition-colors outline-none placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 dark:bg-input/30 md:text-sm"
+                      :placeholder="t('connection.notePlaceholder')"
+                      @input="resizeNoteTextarea"
+                    />
+                    <div class="mt-1.5 flex shrink-0 items-center gap-2">
+                      <div class="flex items-center gap-1">
+                        <Label for="connection-note-sidebar-visibility" class="text-xs font-normal text-muted-foreground">
+                          {{ t("connection.noteShow") }}
+                        </Label>
+                        <Tooltip>
+                          <TooltipTrigger as-child>
+                            <CircleHelp class="h-3.5 w-3.5 cursor-help text-muted-foreground hover:text-foreground" />
+                          </TooltipTrigger>
+                          <TooltipContent side="top" align="center" class="max-w-[280px] text-xs leading-relaxed">
+                            {{ t("connection.noteShowInSidebar") }}
+                          </TooltipContent>
+                        </Tooltip>
+                      </div>
+                      <Switch id="connection-note-sidebar-visibility" v-model="showConnectionNotesInSidebar" :aria-label="t('connection.noteShowInSidebar')" />
+                    </div>
+                  </div>
                 </div>
               </div>
             </TabsContent>

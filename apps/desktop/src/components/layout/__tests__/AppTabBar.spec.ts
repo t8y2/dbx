@@ -27,10 +27,12 @@ describe("AppTabBar HBase presentation", () => {
   });
 });
 
-describe("AppTabBar objects presentation", () => {
-  it("uses an amber icon color on regular, pinned, and overflow tab surfaces", () => {
-    expect(tabBarSource).toContain('if (tab.mode === "objects") return "text-amber-500 dark:text-amber-400";');
+describe("AppTabBar object browser presentation", () => {
+  it("uses matching icons and colors for object and database browser tabs", () => {
+    expect(tabBarSource).toContain('if (tab.mode === "databases" || tab.mode === "objects") return "text-amber-500 dark:text-amber-400";');
+    expect(tabBarSource).toContain('if (tab.mode === "databases") return Database;');
     expect(tabBarSource).toContain('if (tab.mode === "objects") return TableProperties;');
+    expect(tabBarSource.match(/tab\.mode === 'databases'/g)).toHaveLength(2);
     expect(tabBarSource.match(/:class="tabIconClass\(tab\)"/g)).toHaveLength(2);
     expect(tabBarSource.match(/tabMenuIcon\(tab\).*tabIconClass\(tab\)/g)).toHaveLength(2);
   });

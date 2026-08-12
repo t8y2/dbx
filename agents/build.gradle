@@ -6,7 +6,7 @@ def infrastructureProjects = ['common', 'test-support'] as Set
 def legacyStandaloneProjects = ['mongodb', 'kafka', 'rocketmq'] as Set
 def pooledJdbcProjects = [
     'access', 'bigquery', 'dameng', 'databend', 'databricks', 'db2', 'exasol',
-    'firebird', 'gbase8a', 'gbase8s', 'goldendb', 'h2', 'h2-legacy', 'highgo', 'hive',
+    'firebird', 'gbase8a', 'gbase8s', 'goldendb', 'h2', 'h2-legacy', 'highgo',
     'informix', 'iris', 'kylin', 'oceanbase-oracle', 'oscar', 'saphana',
     'snowflake', 'spark', 'sqlserver-legacy', 'sundb', 'teradata', 'trino', 'uxdb',
     'vertica', 'yashandb'

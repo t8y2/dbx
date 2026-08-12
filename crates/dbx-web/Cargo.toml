@@ -1,6 +1,6 @@
 [package]
 name = "dbx-web"
-version = "0.5.81"
+version = "0.5.82"
 edition = "2021"
 license = "Apache-2.0"
 

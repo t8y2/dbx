@@ -275,8 +275,6 @@ const editActiveCustomThemeId = ref(settingsStore.editorSettings.activeCustomThe
 const showThemeCustomizer = ref(false);
 const editExecuteMode = ref(settingsStore.editorSettings.executeMode);
 const editExecuteAllOnBlankLine = ref(settingsStore.editorSettings.executeAllOnBlankLine);
-const editGlobalConnectTimeoutSecs = ref(settingsStore.editorSettings.globalConnectTimeoutSecs);
-const editGlobalQueryTimeoutSecs = ref(settingsStore.editorSettings.globalQueryTimeoutSecs);
 const editShowExecutionTargetPicker = ref(settingsStore.editorSettings.showExecutionTargetPicker);
 const editShowStatementRunButtons = ref(settingsStore.editorSettings.showStatementRunButtons);
 const editShowCurrentStatementFrame = ref(settingsStore.editorSettings.showCurrentStatementFrame);
@@ -465,8 +463,6 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     activeCustomThemeId: editActiveCustomThemeId.value,
     executeMode: editExecuteMode.value,
     executeAllOnBlankLine: editExecuteAllOnBlankLine.value,
-    globalConnectTimeoutSecs: editGlobalConnectTimeoutSecs.value,
-    globalQueryTimeoutSecs: editGlobalQueryTimeoutSecs.value,
     showExecutionTargetPicker: editShowExecutionTargetPicker.value,
     showStatementRunButtons: editShowStatementRunButtons.value,
     showCurrentStatementFrame: editShowCurrentStatementFrame.value,
@@ -738,8 +734,6 @@ function syncEditorSettingsDraftFromStore() {
   editActiveCustomThemeId.value = settingsStore.editorSettings.activeCustomThemeId;
   editExecuteMode.value = settingsStore.editorSettings.executeMode;
   editExecuteAllOnBlankLine.value = settingsStore.editorSettings.executeAllOnBlankLine;
-  editGlobalConnectTimeoutSecs.value = settingsStore.editorSettings.globalConnectTimeoutSecs;
-  editGlobalQueryTimeoutSecs.value = settingsStore.editorSettings.globalQueryTimeoutSecs;
   editShowExecutionTargetPicker.value = settingsStore.editorSettings.showExecutionTargetPicker;
   editShowStatementRunButtons.value = settingsStore.editorSettings.showStatementRunButtons;
   editShowCurrentStatementFrame.value = settingsStore.editorSettings.showCurrentStatementFrame;
@@ -895,20 +889,12 @@ function hasChanges(): boolean {
 async function persistSettings() {
   if (hasApplyBlocker.value) return;
   const editorSettingsPatch = editorSettingsPatchFromDraft(currentEditorSettingsDraft(), editEditorSettingsBase.value);
-  const globalConnectTimeoutChanged = editorSettingsPatch.globalConnectTimeoutSecs !== undefined;
-  const globalQueryTimeoutChanged = editorSettingsPatch.globalQueryTimeoutSecs !== undefined;
   const sidebarObjectDisplayChanged = editorSettingsPatch.sidebarObjectDisplay !== undefined && editorSettingsPatch.sidebarObjectDisplay !== settingsStore.editorSettings.sidebarObjectDisplay;
   const sidebarTablePageSizeChanged = editSidebarTablePageSize.value !== (settingsStore.desktopSettings.sidebar_table_page_size ?? DEFAULT_SIDEBAR_TABLE_PAGE_SIZE);
   if (Object.keys(editorSettingsPatch).length > 0) {
     settingsStore.updateEditorSettings(editorSettingsPatch);
     await settingsStore.persistEditorSettings();
     editEditorSettingsBase.value = editorSettingsDraftFromSettings(settingsStore.editorSettings);
-  }
-  if (globalConnectTimeoutChanged || globalQueryTimeoutChanged) {
-    await connectionStore.applyGlobalTimeouts({
-      connectTimeoutSecs: globalConnectTimeoutChanged ? settingsStore.editorSettings.globalConnectTimeoutSecs : undefined,
-      queryTimeoutSecs: globalQueryTimeoutChanged ? settingsStore.editorSettings.globalQueryTimeoutSecs : undefined,
-    });
   }
   await settingsStore.updateDesktopSettings({
     show_tray_icon: editShowTrayIcon.value,
@@ -957,8 +943,6 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editFontSize.value = DEFAULT_EDITOR_SETTINGS.fontSize;
     editExecuteMode.value = DEFAULT_EDITOR_SETTINGS.executeMode;
     editExecuteAllOnBlankLine.value = DEFAULT_EDITOR_SETTINGS.executeAllOnBlankLine;
-    editGlobalConnectTimeoutSecs.value = DEFAULT_EDITOR_SETTINGS.globalConnectTimeoutSecs;
-    editGlobalQueryTimeoutSecs.value = DEFAULT_EDITOR_SETTINGS.globalQueryTimeoutSecs;
     editShowExecutionTargetPicker.value = DEFAULT_EDITOR_SETTINGS.showExecutionTargetPicker;
     editShowStatementRunButtons.value = DEFAULT_EDITOR_SETTINGS.showStatementRunButtons;
     editShowCurrentStatementFrame.value = DEFAULT_EDITOR_SETTINGS.showCurrentStatementFrame;
@@ -1055,8 +1039,6 @@ function resetAllDefaults() {
   editActiveCustomThemeId.value = DEFAULT_EDITOR_SETTINGS.activeCustomThemeId;
   editExecuteMode.value = DEFAULT_EDITOR_SETTINGS.executeMode;
   editExecuteAllOnBlankLine.value = DEFAULT_EDITOR_SETTINGS.executeAllOnBlankLine;
-  editGlobalConnectTimeoutSecs.value = DEFAULT_EDITOR_SETTINGS.globalConnectTimeoutSecs;
-  editGlobalQueryTimeoutSecs.value = DEFAULT_EDITOR_SETTINGS.globalQueryTimeoutSecs;
   editShowExecutionTargetPicker.value = DEFAULT_EDITOR_SETTINGS.showExecutionTargetPicker;
   editShowStatementRunButtons.value = DEFAULT_EDITOR_SETTINGS.showStatementRunButtons;
   editShowCurrentStatementFrame.value = DEFAULT_EDITOR_SETTINGS.showCurrentStatementFrame;
@@ -2668,7 +2650,7 @@ function normalizeMaxRetries(value: number | undefined): number {
 const aiDeleteConfirmOpen = ref(false);
 const aiDeleteConfigId = ref<string | null>(null);
 
-const CLI_AI_PROVIDERS = new Set<AiProvider>(["claude-code-cli", "codex-cli", "opencode-cli", "pi-agent-cli", "cursor-cli", "grok-cli", "codebuddy-cli"]);
+const CLI_AI_PROVIDERS = new Set<AiProvider>(["claude-code-cli", "codex-cli", "opencode-cli", "pi-agent-cli", "cursor-cli", "grok-cli", "codebuddy-cli", "qoder-cli"]);
 const OPENCODE_CONTROL_ENV = new Set(["OPENCODE_CONFIG", "OPENCODE_CONFIG_CONTENT", "OPENCODE_CONFIG_DIR", "OPENCODE_DB", "OPENCODE_PERMISSION", "OPENCODE_DISABLE_PROJECT_CONFIG"]);
 const CURSOR_CONTROL_ENV = new Set(["CURSOR_CONFIG_DIR", "CURSOR_DATA_DIR"]);
 const aiProviderOptions = computed(() => Object.values(AI_PROVIDER_PRESETS).filter((provider) => !isWeb || !CLI_AI_PROVIDERS.has(provider.provider)));
@@ -2700,6 +2682,8 @@ const aiEditGrokCliPath = ref("");
 const aiEditGrokCliEnvRows = ref<AiEnvRow[]>([]);
 const aiEditCodeBuddyCliPath = ref("");
 const aiEditCodeBuddyCliEnvRows = ref<AiEnvRow[]>([]);
+const aiEditQoderCliPath = ref("");
+const aiEditQoderCliEnvRows = ref<AiEnvRow[]>([]);
 
 const aiAnthropicMessagesMode = computed(() => aiEditApiStyle.value === "anthropic-messages");
 
@@ -2734,6 +2718,7 @@ const aiIsOpenCodeCli = computed(() => aiEditProvider.value === "opencode-cli");
 const aiIsCursorCli = computed(() => aiEditProvider.value === "cursor-cli");
 const aiIsGrokCli = computed(() => aiEditProvider.value === "grok-cli");
 const aiIsCodeBuddyCli = computed(() => aiEditProvider.value === "codebuddy-cli");
+const aiIsQoderCli = computed(() => aiEditProvider.value === "qoder-cli");
 const aiIsCliProvider = computed(() => CLI_AI_PROVIDERS.has(aiEditProvider.value));
 const aiCliProviderLabel = computed(() => selectedAiProviderPreset.value.label);
 const aiCliCommandName = computed(() => {
@@ -2743,6 +2728,7 @@ const aiCliCommandName = computed(() => {
   if (aiIsCursorCli.value) return "agent";
   if (aiIsGrokCli.value) return "grok";
   if (aiIsCodeBuddyCli.value) return "codebuddy";
+  if (aiIsQoderCli.value) return "qodercli";
   return "codex";
 });
 const aiCliLoginCommand = computed(() => {
@@ -2752,6 +2738,7 @@ const aiCliLoginCommand = computed(() => {
   if (aiIsCursorCli.value) return "agent login";
   if (aiIsGrokCli.value) return "grok login";
   if (aiIsCodeBuddyCli.value) return "codebuddy";
+  if (aiIsQoderCli.value) return "qodercli login";
   return "codex login";
 });
 const aiEditCliPath = computed({
@@ -2762,6 +2749,7 @@ const aiEditCliPath = computed({
     if (aiIsCursorCli.value) return aiEditCursorCliPath.value;
     if (aiIsGrokCli.value) return aiEditGrokCliPath.value;
     if (aiIsCodeBuddyCli.value) return aiEditCodeBuddyCliPath.value;
+    if (aiIsQoderCli.value) return aiEditQoderCliPath.value;
     return aiEditCodexCliPath.value;
   },
   set: (value: string) => {
@@ -2777,6 +2765,8 @@ const aiEditCliPath = computed({
       aiEditGrokCliPath.value = value;
     } else if (aiIsCodeBuddyCli.value) {
       aiEditCodeBuddyCliPath.value = value;
+    } else if (aiIsQoderCli.value) {
+      aiEditQoderCliPath.value = value;
     } else {
       aiEditCodexCliPath.value = value;
     }
@@ -2789,6 +2779,7 @@ const aiEditCliEnvRows = computed(() => {
   if (aiIsCursorCli.value) return aiEditCursorCliEnvRows.value;
   if (aiIsGrokCli.value) return aiEditGrokCliEnvRows.value;
   if (aiIsCodeBuddyCli.value) return aiEditCodeBuddyCliEnvRows.value;
+  if (aiIsQoderCli.value) return aiEditQoderCliEnvRows.value;
   return aiEditCodexCliEnvRows.value;
 });
 watch(aiIsCliProvider, (isCliProvider) => {
@@ -2889,6 +2880,8 @@ function removeCliEnvRow(id: string) {
     aiEditGrokCliEnvRows.value = aiEditGrokCliEnvRows.value.filter((row) => row.id !== id);
   } else if (aiIsCodeBuddyCli.value) {
     aiEditCodeBuddyCliEnvRows.value = aiEditCodeBuddyCliEnvRows.value.filter((row) => row.id !== id);
+  } else if (aiIsQoderCli.value) {
+    aiEditQoderCliEnvRows.value = aiEditQoderCliEnvRows.value.filter((row) => row.id !== id);
   } else {
     aiEditCodexCliEnvRows.value = aiEditCodexCliEnvRows.value.filter((row) => row.id !== id);
   }
@@ -2925,6 +2918,8 @@ function currentAiEditConfig() {
     grokCliEnv: aiIsGrokCli.value ? cliEnvFromRows(aiEditGrokCliEnvRows.value) : {},
     codebuddyCliPath: aiEditCodeBuddyCliPath.value.trim() || undefined,
     codebuddyCliEnv: aiIsCodeBuddyCli.value ? cliEnvFromRows(aiEditCodeBuddyCliEnvRows.value) : {},
+    qoderCliPath: aiEditQoderCliPath.value.trim() || undefined,
+    qoderCliEnv: aiIsQoderCli.value ? cliEnvFromRows(aiEditQoderCliEnvRows.value) : {},
   };
 }
 
@@ -3002,6 +2997,8 @@ function aiEnterEditMode(configId?: string) {
       aiEditGrokCliEnvRows.value = aiEnvRowsFromConfig(config.grokCliEnv);
       aiEditCodeBuddyCliPath.value = config.codebuddyCliPath ?? "";
       aiEditCodeBuddyCliEnvRows.value = aiEnvRowsFromConfig(config.codebuddyCliEnv);
+      aiEditQoderCliPath.value = config.qoderCliPath ?? "";
+      aiEditQoderCliEnvRows.value = aiEnvRowsFromConfig(config.qoderCliEnv);
     }
   } else {
     aiEditConfigName.value = "";
@@ -3031,6 +3028,8 @@ function aiEnterEditMode(configId?: string) {
     aiEditGrokCliEnvRows.value = [];
     aiEditCodeBuddyCliPath.value = "";
     aiEditCodeBuddyCliEnvRows.value = [];
+    aiEditQoderCliPath.value = "";
+    aiEditQoderCliEnvRows.value = [];
   }
 }
 
@@ -3679,26 +3678,6 @@ onUnmounted(() => {
                     </p>
                   </div>
                   <Switch id="editor-execute-all-on-blank-line" v-model="editExecuteAllOnBlankLine" :disabled="editExecuteMode !== 'current'" class="mt-0.5" />
-                </div>
-
-                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
-                  <div class="space-y-1">
-                    <Label for="editor-global-connect-timeout">{{ t("settings.globalConnectTimeout") }}</Label>
-                    <p class="text-xs text-muted-foreground">
-                      {{ t("settings.globalConnectTimeoutDescription") }}
-                    </p>
-                  </div>
-                  <Input id="editor-global-connect-timeout" v-model.number="editGlobalConnectTimeoutSecs" type="number" min="1" max="300" step="1" class="w-24" />
-                </div>
-
-                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
-                  <div class="space-y-1">
-                    <Label for="editor-global-query-timeout">{{ t("settings.globalQueryTimeout") }}</Label>
-                    <p class="text-xs text-muted-foreground">
-                      {{ t("settings.globalQueryTimeoutDescription") }}
-                    </p>
-                  </div>
-                  <Input id="editor-global-query-timeout" v-model.number="editGlobalQueryTimeoutSecs" type="number" min="0" max="300" step="1" class="w-24" />
                 </div>
 
                 <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">

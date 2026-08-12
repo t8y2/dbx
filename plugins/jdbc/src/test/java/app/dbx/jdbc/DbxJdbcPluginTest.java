@@ -905,6 +905,11 @@ final class DbxJdbcPluginTest {
               "connection_string": "jdbc:mysql://127.0.0.1:9030/demo"
             }
             """);
+        JsonNode hive = MAPPER.readTree("""
+            {
+              "connection_string": "jdbc:hive2://127.0.0.1:10000/default"
+            }
+            """);
         JsonNode kingbase = MAPPER.readTree("""
             {
               "connection_string": "jdbc:kingbase8://127.0.0.1:54321/demo"
@@ -943,8 +948,10 @@ final class DbxJdbcPluginTest {
             DbxJdbcPlugin.driverQuirks(cache).statementMaxRowsMode()
         );
         assertEquals(true, DbxJdbcPlugin.driverQuirks(mysql).useCatalogFallbackSql());
+        assertEquals(true, DbxJdbcPlugin.driverQuirks(hive).schemasAsDatabasesFallback());
         assertEquals(true, DbxJdbcPlugin.driverQuirks(kingbase).ignoreCatalogForSchemaMetadata());
         assertEquals(true, DbxJdbcPlugin.driverQuirks(kyuubi).useCatalogFallbackSql());
+        assertEquals(true, DbxJdbcPlugin.driverQuirks(kyuubi).schemasAsDatabasesFallback());
         assertEquals(true, DbxJdbcPlugin.driverQuirks(taos).preferExecuteQueryForResultSetSql());
     }
 
@@ -1161,6 +1168,34 @@ final class DbxJdbcPluginTest {
             }
         }
         assertEquals(true, found);
+    }
+
+    @Test
+    void listDatabasesFallsBackToSchemasForHiveJdbc() throws Exception {
+        List<String> calls = new ArrayList<>();
+        Driver driver = new HiveMetadataDriver(calls);
+        DriverManager.registerDriver(driver);
+        String connection = """
+            {
+              "connection_string": "jdbc:hive2:dbx-schema-fallback"
+            }
+            """;
+        try {
+            JsonNode response = request("listDatabases", """
+                { "connection": %s }
+                """.formatted(connection));
+
+            assertFalse(response.has("error"), response.toString());
+            assertEquals(2, response.path("result").size());
+            assertEquals("default", response.path("result").path(0).path("name").asText());
+            assertEquals("warehouse", response.path("result").path(1).path("name").asText());
+            assertEquals(List.of("getCatalogs", "getSchemas"), calls);
+        } finally {
+            request("close", """
+                { "connection": %s }
+                """.formatted(connection));
+            DriverManager.deregisterDriver(driver);
+        }
     }
 
     @Test
@@ -2279,6 +2314,82 @@ final class DbxJdbcPluginTest {
         public java.util.logging.Logger getParentLogger() {
             return java.util.logging.Logger.getGlobal();
         }
+    }
+
+    private static final class HiveMetadataDriver implements Driver {
+        private final List<String> calls;
+
+        private HiveMetadataDriver(List<String> calls) {
+            this.calls = calls;
+        }
+
+        @Override
+        public Connection connect(String url, Properties info) {
+            return acceptsURL(url) ? hiveMetadataConnection(calls) : null;
+        }
+
+        @Override
+        public boolean acceptsURL(String url) {
+            return url != null && url.startsWith("jdbc:hive2:dbx-schema-fallback");
+        }
+
+        @Override
+        public DriverPropertyInfo[] getPropertyInfo(String url, Properties info) {
+            return new DriverPropertyInfo[0];
+        }
+
+        @Override
+        public int getMajorVersion() {
+            return 1;
+        }
+
+        @Override
+        public int getMinorVersion() {
+            return 0;
+        }
+
+        @Override
+        public boolean jdbcCompliant() {
+            return false;
+        }
+
+        @Override
+        public java.util.logging.Logger getParentLogger() {
+            return java.util.logging.Logger.getGlobal();
+        }
+    }
+
+    private static Connection hiveMetadataConnection(List<String> calls) {
+        DatabaseMetaData metadata = (DatabaseMetaData) Proxy.newProxyInstance(
+            DbxJdbcPluginTest.class.getClassLoader(),
+            new Class<?>[] { DatabaseMetaData.class },
+            (proxy, method, args) -> switch (method.getName()) {
+                case "getCatalogs" -> {
+                    calls.add("getCatalogs");
+                    yield rowsResultSet(new String[] { "TABLE_CAT" }, new Object[0][]);
+                }
+                case "getSchemas" -> {
+                    calls.add("getSchemas");
+                    yield rowsResultSet(
+                        new String[] { "TABLE_SCHEM" },
+                        new Object[][] { { "default" }, { "warehouse" }, { "default" } }
+                    );
+                }
+                default -> defaultValue(method.getReturnType());
+            }
+        );
+        return (Connection) Proxy.newProxyInstance(
+            DbxJdbcPluginTest.class.getClassLoader(),
+            new Class<?>[] { Connection.class },
+            (proxy, method, args) -> switch (method.getName()) {
+                case "getMetaData" -> metadata;
+                case "isClosed" -> false;
+                case "isValid" -> true;
+                case "getCatalog" -> null;
+                case "close" -> null;
+                default -> defaultValue(method.getReturnType());
+            }
+        );
     }
 
     private static final class GaussDbMetadataDriver implements Driver {

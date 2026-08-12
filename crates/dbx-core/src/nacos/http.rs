@@ -2706,12 +2706,48 @@ fn parse_config_history_item(
         operator: optional_string_field(&item, &["operator", "opUser", "srcUser", "createUser", "modifyUser", "user"]),
         last_modified_time: optional_string_field(
             &item,
-            &["lastModifiedTime", "lastModifiedTs", "gmtModified", "modifiedTime", "opTime", "createdTime"],
+            &[
+                "lastModifiedTime",
+                "lastModifiedTs",
+                "lastModified",
+                "last_modified_time",
+                "last_modified",
+                "gmtModified",
+                "gmt_modified",
+                "modifiedTime",
+                "modifyTime",
+                "updateTime",
+                "update_time",
+                "publishTime",
+                "publish_time",
+                "opTime",
+                "createdTime",
+                "createTime",
+                "create_time",
+            ],
         )
         .or_else(|| {
             optional_u64_field(
                 &item,
-                &["lastModifiedTime", "lastModifiedTs", "gmtModified", "modifiedTime", "opTime", "createdTime"],
+                &[
+                    "lastModifiedTime",
+                    "lastModifiedTs",
+                    "lastModified",
+                    "last_modified_time",
+                    "last_modified",
+                    "gmtModified",
+                    "gmt_modified",
+                    "modifiedTime",
+                    "modifyTime",
+                    "updateTime",
+                    "update_time",
+                    "publishTime",
+                    "publish_time",
+                    "opTime",
+                    "createdTime",
+                    "createTime",
+                    "create_time",
+                ],
             )
             .map(|value| value.to_string())
         }),
@@ -5280,6 +5316,35 @@ mod tests {
         assert_eq!(parsed.items[0].nid, Some(7));
         assert_eq!(parsed.items[0].namespace, "ops");
         assert_eq!(parsed.items[0].operation.as_deref(), Some("publish"));
+    }
+
+    #[test]
+    fn parses_history_last_modified_aliases() {
+        let parsed = parse_config_history_list(
+            serde_json::json!({
+                "data": {
+                    "pageItems": [{
+                        "id": 7,
+                        "dataId": "app.yaml",
+                        "group": "DEFAULT_GROUP",
+                        "lastModified": "2026-08-11 15:07:48"
+                    }, {
+                        "id": 8,
+                        "dataId": "app.yaml",
+                        "group": "DEFAULT_GROUP",
+                        "publish_time": 1786430868000i64
+                    }]
+                }
+            }),
+            "public".to_string(),
+            1,
+            20,
+            "fallback.yaml",
+            "DEFAULT_GROUP",
+        );
+
+        assert_eq!(parsed.items[0].last_modified_time.as_deref(), Some("2026-08-11 15:07:48"));
+        assert_eq!(parsed.items[1].last_modified_time.as_deref(), Some("1786430868000"));
     }
 
     #[test]

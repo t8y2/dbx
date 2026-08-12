@@ -66,6 +66,7 @@ const MqAdminConsole = defineAsyncComponent(() => import("@/components/mq/MqAdmi
 const MqttAdminConsole = defineAsyncComponent(() => import("@/components/mqtt/MqttAdminConsole.vue"));
 const NacosAdminConsole = defineAsyncComponent(() => import("@/components/nacos/NacosAdminConsole.vue"));
 const NacosDashboard = defineAsyncComponent(() => import("@/components/nacos/NacosDashboard.vue"));
+const DatabaseBrowser = defineAsyncComponent(() => import("@/components/objects/DatabaseBrowser.vue"));
 const ObjectBrowser = defineAsyncComponent(() => import("@/components/objects/ObjectBrowser.vue"));
 const TableStructureEditor = defineAsyncComponent(() => import("@/components/structure/TableStructureEditor.vue"));
 const DatabaseUserAdmin = defineAsyncComponent(() => import("@/components/admin/DatabaseUserAdmin.vue"));
@@ -247,6 +248,7 @@ const etcdDashboardRef = ref<{ refresh?: () => boolean }>();
 const zookeeperKeyBrowserRef = ref<SearchableBrowserHandle>();
 const consulOverviewRef = ref<{ refresh?: () => boolean }>();
 const consulWorkspaceRef = ref<SearchableBrowserHandle>();
+const databaseBrowserRef = ref<SearchableBrowserHandle>();
 const objectBrowserRef = ref<SearchableBrowserHandle>();
 const activeTableMeta = computed(() => props.activeTab.tableMeta);
 const activeDataTabTableMeta = computed(() => tableMetaForDataTab(props.activeTab));
@@ -785,6 +787,7 @@ function focusSearch(): boolean {
   if (props.activeTab.mode === "etcd") return etcdKeyBrowserRef.value?.focusSearch() ?? false;
   if (props.activeTab.mode === "zookeeper") return zookeeperKeyBrowserRef.value?.focusSearch() ?? false;
   if (props.activeTab.mode === "consul") return consulWorkspaceRef.value?.focusSearch() ?? false;
+  if (props.activeTab.mode === "databases") return databaseBrowserRef.value?.focusSearch() ?? false;
   if (props.activeTab.mode === "objects") return objectBrowserRef.value?.focusSearch() ?? false;
   if (props.activeTab.mode === "query") return queryEditorRef.value?.openSearch() ?? false;
   return dataGridRef.value?.focusSearch() ?? false;
@@ -804,6 +807,7 @@ function refreshData(): boolean {
   if (props.activeTab.mode === "zookeeper") return zookeeperKeyBrowserRef.value?.refresh?.() ?? false;
   if (props.activeTab.mode === "consul-overview") return consulOverviewRef.value?.refresh?.() ?? false;
   if (props.activeTab.mode === "consul") return consulWorkspaceRef.value?.refresh?.() ?? false;
+  if (props.activeTab.mode === "databases") return databaseBrowserRef.value?.refresh?.() ?? false;
   // Restored data tabs intentionally omit row data, so refresh must work before DataGrid mounts.
   if (canReloadUnavailableDataTab(props.activeTab)) {
     emit("reload");
@@ -1040,7 +1044,15 @@ defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, hand
               @click-column="onHandleClickColumn"
               @close-column-panel="onHandleCloseColumnPanel"
             />
-            <ColumnInfoPanel v-if="showColumnInfo" :columns="columnInfoColumns" :loading="columnInfoLoading" :error="columnInfoError" @close="closeColumnInfo" />
+            <ColumnInfoPanel
+              v-if="showColumnInfo"
+              :columns="columnInfoColumns"
+              :loading="columnInfoLoading"
+              :error="columnInfoError"
+              :database-type="activeEffectiveDatabaseType"
+              :is-gaussdb-m="activeEffectiveDatabaseType === 'gaussdb' && activeResultConnection?.driver_profile?.toLowerCase() === 'gaussdb-m'"
+              @close="closeColumnInfo"
+            />
             <Button v-if="hasQueryOutput && !resultsPaneOpen" variant="secondary" size="sm" class="absolute bottom-3 right-3 z-20 h-7 gap-1.5 rounded-full border bg-background/95 px-3 text-xs shadow-lg hover:bg-accent" @click="resultsPaneOpen = true">
               <ChevronUp class="h-3.5 w-3.5" />
               {{ t("editor.showResultsPane") }}
@@ -2030,6 +2042,12 @@ defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, hand
           :target-request-id="activeTab.nacosTargetRequestId"
           :read-only="activeConnection?.read_only ?? false"
         />
+      </div>
+    </template>
+
+    <template v-else-if="activeTab.mode === 'databases' && activeConnection">
+      <div class="min-w-0 flex-1 min-h-0">
+        <DatabaseBrowser ref="databaseBrowserRef" :connection="activeConnection" />
       </div>
     </template>
 

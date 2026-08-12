@@ -89,7 +89,8 @@ pub fn static_effort_capability(config: &AiConfig, model_id: &str) -> Option<AiE
         | AiProvider::OpenCodeCli
         | AiProvider::CursorCli
         | AiProvider::GrokCli
-        | AiProvider::CodeBuddyCli => None,
+        | AiProvider::CodeBuddyCli
+        | AiProvider::QoderCli => None,
     }
 }
 
@@ -198,6 +199,7 @@ pub fn registry_source_url(provider: &AiProvider) -> Option<&'static str> {
         | AiProvider::CursorCli
         | AiProvider::GrokCli
         | AiProvider::CodeBuddyCli
+        | AiProvider::QoderCli
         | AiProvider::Custom => None,
     }
 }
@@ -220,6 +222,7 @@ pub fn validate_runtime_effort(config: &AiConfig) -> Result<(), String> {
             | AiProvider::CursorCli
             | AiProvider::GrokCli
             | AiProvider::CodeBuddyCli
+            | AiProvider::QoderCli
     ) {
         return match selection {
             AiEffortSelection::Enum(value) if !value.trim().is_empty() => Ok(()),
@@ -278,7 +281,8 @@ pub fn apply_runtime_effort(body: &mut Value, config: &AiConfig) {
         | AiProvider::OpenCodeCli
         | AiProvider::CursorCli
         | AiProvider::GrokCli
-        | AiProvider::CodeBuddyCli => {}
+        | AiProvider::CodeBuddyCli
+        | AiProvider::QoderCli => {}
     }
 }
 
@@ -440,6 +444,8 @@ mod tests {
             grok_cli_env: Default::default(),
             codebuddy_cli_path: None,
             codebuddy_cli_env: Default::default(),
+            qoder_cli_path: None,
+            qoder_cli_env: Default::default(),
         }
     }
 

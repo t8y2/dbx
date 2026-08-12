@@ -381,6 +381,12 @@ export interface JdbcPluginStatus {
 
 export interface DatabaseInfo {
   name: string;
+  size_bytes?: number | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+  comment?: string | null;
+  default_charset?: string | null;
+  default_collation?: string | null;
 }
 
 export interface DatabaseStorageInfo {
@@ -438,6 +444,9 @@ export interface ObjectInfo {
   parent_name?: string | null;
   trigger?: TriggerInfo | null;
   xugu_type_members_expandable?: boolean | null;
+  /** Xugu package metadata merged from the PACKAGE_BODY catalog row. */
+  xugu_package_body_available?: boolean | null;
+  xugu_package_body_valid?: boolean | null;
 }
 
 export interface ObjectStatistics {
@@ -902,6 +911,8 @@ export type TreeNodeType =
   | "column"
   | "type-attribute"
   | "type-method"
+  | "type-attributes"
+  | "type-methods"
   | "index"
   | "fkey"
   | "trigger"
@@ -971,6 +982,10 @@ export interface TreeNode {
   parentType?: TreeNodeType;
   /** Set only for XuguDB object types whose members can be loaded lazily. */
   xuguTypeMembersExpandable?: boolean;
+  /** Set on a Xugu package specification when a package body exists. */
+  xuguPackageBodyAvailable?: boolean;
+  /** Validity reported for the Xugu package body, independent of the spec. */
+  xuguPackageBodyValid?: boolean | null;
   tableType?: string;
   comment?: string | null;
   valid?: boolean | null;
@@ -1142,6 +1157,7 @@ export interface QueryTab {
     | "mqtt"
     | "nacos"
     | "nacos-dashboard"
+    | "databases"
     | "objects"
     | "structure"
     | "users"

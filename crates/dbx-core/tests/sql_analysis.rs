@@ -411,6 +411,152 @@ fn sqlserver_proc_identifiers_remain_identifiers_outside_create() {
 }
 
 #[test]
+fn sqlserver_cursor_declaration_analyzes_its_query_without_a_cursor_table() {
+    let sql = "DECLARE schema_cursor CURSOR LOCAL FAST_FORWARD FOR
+               SELECT s.name FROM sys.schemas s WHERE s.schema_id > 0;
+               OPEN schema_cursor;
+               FETCH NEXT FROM schema_cursor INTO @schema;
+               CLOSE schema_cursor;
+               DEALLOCATE schema_cursor;";
+    let analysis = analyze_sql_references(sql, Some("sqlserver"))
+        .unwrap_or_else(|error| panic!("valid SQL Server cursor declaration should analyze: {error}"));
+
+    let tables: Vec<_> = analysis.tables.iter().map(|table| (table.schema.as_deref(), table.name.as_str())).collect();
+    assert_eq!(tables, vec![(Some("sys"), "schemas")]);
+    assert!(analysis.tables.iter().all(|table| table.name != "schema_cursor"));
+}
+
+#[test]
+fn sqlserver_reported_cursor_query_does_not_raise_parser_or_table_errors() {
+    let analysis = analyze_sql_references(
+        "DECLARE schema_cursor CURSOR LOCAL FAST_FORWARD FOR
+         SELECT N'dbo' UNION ALL SELECT N'dev';",
+        Some("sqlserver"),
+    )
+    .expect("the reported SQL Server cursor declaration should analyze");
+
+    assert!(analysis.tables.is_empty());
+    assert!(analysis.columns.is_empty());
+}
+
+#[test]
+fn sqlserver_cursor_fallback_is_limited_to_the_reported_option_subset() {
+    for sql in [
+        "DECLARE plain_cursor CURSOR FOR SELECT name FROM dbo.reports;",
+        "DECLARE local_cursor CURSOR LOCAL FOR SELECT name FROM dbo.reports;",
+        "DECLARE fast_cursor CURSOR FAST_FORWARD FOR SELECT name FROM dbo.reports;",
+        "DECLARE global_cursor CURSOR GLOBAL FAST_FORWARD FOR SELECT name FROM dbo.reports;",
+        "DECLARE json_cursor CURSOR LOCAL FAST_FORWARD FOR SELECT (SELECT TOP 1 a.note FROM dbo.audit a FOR JSON PATH) AS payload FROM dbo.reports;",
+    ] {
+        let analysis = analyze_sql_references(sql, Some("sqlserver"))
+            .unwrap_or_else(|error| panic!("the reported cursor option subset should analyze: {error}"));
+        assert!(analysis.tables.iter().any(|table| table.name == "reports"));
+    }
+
+    for sql in [
+        "DECLARE report_cursor CURSOR LOCAL FAST_FORWARD;",
+        "DECLARE report_cursor CURSOR LOCAL FAST_FORWARD FOR UPDATE dbo.reports SET name = 'invalid';",
+        "DECLARE report_cursor CURSOR SCROLL FAST_FORWARD FOR SELECT name FROM dbo.reports;",
+        "DECLARE report_cursor CURSOR LOCAL KEYSET FOR SELECT name FROM dbo.reports;",
+        "DECLARE report_cursor CURSOR LOCAL FAST_FORWARD READ_ONLY FOR SELECT name FROM dbo.reports;",
+        "DECLARE report_cursor CURSOR LOCAL FAST_FORWARD FOR SELECT name INTO #report_copy FROM dbo.reports;",
+        "DECLARE report_cursor CURSOR LOCAL FAST_FORWARD FOR SELECT name FROM dbo.reports FOR BROWSE;",
+    ] {
+        if analyze_sql_references(sql, Some("sqlserver")).is_ok() {
+            panic!("unsupported or invalid cursor syntax must not be suppressed: {sql}");
+        }
+    }
+}
+
+#[test]
+fn sqlserver_cursor_uses_native_lifecycle_statements_and_preserves_query_spans() {
+    for sql in [
+        "OPEN schema_cursor",
+        "FETCH NEXT FROM schema_cursor INTO @schema",
+        "CLOSE schema_cursor",
+        "DEALLOCATE schema_cursor",
+    ] {
+        analyze_sql_references(sql, Some("sqlserver"))
+            .unwrap_or_else(|error| panic!("sqlparser should parse ordinary cursor lifecycle SQL {sql:?}: {error}"));
+    }
+
+    let analysis = analyze_sql_references(
+        "DECLARE schema_cursor CURSOR LOCAL FAST_FORWARD FOR\n    SELECT r.name FROM dbo.reports r OPTION (RECOMPILE);",
+        Some("sqlserver"),
+    )
+    .expect("cursor option and query-hint fallbacks should compose");
+    assert_eq!(analysis.tables[0].name, "reports");
+    assert_eq!(analysis.tables[0].span.start_line, 2);
+    assert_eq!(analysis.tables[0].span.start_column, 28);
+    assert_eq!(analysis.columns[0].name, "name");
+    assert_eq!(analysis.columns[0].span.start_line, 2);
+    assert_eq!(analysis.columns[0].span.start_column, 14);
+
+    analyze_sql_references(
+        "DECLARE schema_cursor CURSOR LOCAL FAST_FORWARD FOR SELECT name FROM dbo.reports OPTION (RECOMPILE);\
+         ALTER TABLE dbo.demo ADD first_flag BIT NULL, second_flag BIT NULL;",
+        Some("sqlserver"),
+    )
+    .expect("cursor, query-hint, and ALTER TABLE fallbacks should compose");
+}
+
+#[test]
+fn sqlserver_cursor_fallback_is_dialect_scoped_and_preserves_other_statements() {
+    let cursor_sql = "DECLARE report_cursor CURSOR LOCAL FAST_FORWARD FOR SELECT name FROM dbo.reports;";
+    analyze_sql_references(cursor_sql, Some("postgres"))
+        .expect_err("other dialects must not inherit SQL Server cursor handling");
+
+    let analysis =
+        analyze_sql_references("DECLARE @schema SYSNAME; SELECT u.name FROM dbo.users u;", Some("sqlserver"))
+            .expect("ordinary SQL Server variable declarations and table references should remain parseable");
+    assert_eq!(analysis.tables.len(), 1);
+    assert_eq!(analysis.tables[0].schema.as_deref(), Some("dbo"));
+    assert_eq!(analysis.tables[0].name, "users");
+}
+
+#[test]
+fn sqlserver_reported_cursor_batch_analyzes_with_control_flow_and_go() {
+    use dbx_core::sql::split_sql_batches;
+
+    let sql = "IF SCHEMA_ID(N'dev') IS NULL
+    EXEC(N'CREATE SCHEMA dev AUTHORIZATION dbo');
+GO
+
+IF COL_LENGTH(N'dbo.sys_user', N'highStandarUser') IS NULL
+    ALTER TABLE dbo.sys_user ADD highStandarUser INT NOT NULL DEFAULT 0;
+GO
+
+DECLARE @schema SYSNAME;
+DECLARE @sql NVARCHAR(MAX);
+DECLARE schema_cursor CURSOR LOCAL FAST_FORWARD FOR
+    SELECT N'dbo' UNION ALL SELECT N'dev';
+
+OPEN schema_cursor;
+FETCH NEXT FROM schema_cursor INTO @schema;
+
+WHILE @@FETCH_STATUS = 0
+BEGIN
+    IF OBJECT_ID(QUOTENAME(@schema) + N'.dashboard', N'U') IS NULL
+    BEGIN
+        SET @sql = N'CREATE TABLE dbo.dashboard (id INT);';
+        EXEC sys.sp_executesql @sql;
+    END;
+    FETCH NEXT FROM schema_cursor INTO @schema;
+END;
+
+CLOSE schema_cursor;
+DEALLOCATE schema_cursor;
+GO";
+
+    let batches = split_sql_batches(sql);
+    assert_eq!(batches.len(), 3);
+    for batch in batches {
+        analyze_sql_references(&batch, Some("sqlserver"))
+            .unwrap_or_else(|error| panic!("the reported SQL Server batch should analyze after removing GO: {error}"));
+    }
+}
+
+#[test]
 fn sqlserver_alter_table_single_add_supports_multiple_columns() {
     for sql in [
         "ALTER TABLE dbo.demo\nADD isOldWell BIT NULL,\n    isNewWell BIT NULL;",

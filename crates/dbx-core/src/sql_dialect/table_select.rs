@@ -19,15 +19,23 @@ pub fn build_count_table_sql(database_type: Option<DatabaseType>, schema: Option
     format!("SELECT COUNT(*) AS row_count FROM {}", qualified_table_name(database_type, schema, table_name))
 }
 
-pub fn build_table_data_select_sql(options: TableDataSelectSqlOptions) -> String {
-    let database_type = options.database_type;
-    let schema = if database_type == Some(DatabaseType::Informix)
-        && options.driver_profile.as_deref().is_some_and(|profile| profile.eq_ignore_ascii_case("gbase8s"))
+pub(crate) fn table_data_schema<'a>(
+    database_type: Option<DatabaseType>,
+    driver_profile: Option<&str>,
+    schema: Option<&'a str>,
+) -> Option<&'a str> {
+    if database_type == Some(DatabaseType::Informix)
+        && driver_profile.is_some_and(|profile| profile.eq_ignore_ascii_case("gbase8s"))
     {
         None
     } else {
-        options.schema.as_deref()
-    };
+        schema
+    }
+}
+
+pub fn build_table_data_select_sql(options: TableDataSelectSqlOptions) -> String {
+    let database_type = options.database_type;
+    let schema = table_data_schema(database_type, options.driver_profile.as_deref(), options.schema.as_deref());
     let limit = options.limit.unwrap_or(100);
     if database_type == Some(DatabaseType::Neo4j) {
         return build_neo4j_table_select_sql(&options, limit);

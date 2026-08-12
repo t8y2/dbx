@@ -35,6 +35,7 @@ pub enum CliAgentJsonlDialect {
     CodexExec,
     ClaudeCodePrint,
     CodeBuddyPrint,
+    QoderPrint,
     OpenCodeRun,
     CursorPrint,
     /// Grok Build headless `--output-format streaming-json` (ACP-derived NDJSON).
@@ -240,9 +241,78 @@ fn parse_cli_jsonl_line(line: &str, dialect: CliAgentJsonlDialect) -> ParsedCliA
         CliAgentJsonlDialect::CodexExec => parse_codex_jsonl_line(line),
         CliAgentJsonlDialect::ClaudeCodePrint => parse_claude_compatible_jsonl_line(line, "Claude Code CLI failed"),
         CliAgentJsonlDialect::CodeBuddyPrint => parse_claude_compatible_jsonl_line(line, "CodeBuddy Code CLI failed"),
+        CliAgentJsonlDialect::QoderPrint => parse_qoder_jsonl_line(line),
         CliAgentJsonlDialect::OpenCodeRun => parse_open_code_jsonl_line(line),
         CliAgentJsonlDialect::CursorPrint => parse_cursor_jsonl_line(line),
         CliAgentJsonlDialect::GrokStreamingJson => parse_grok_streaming_json_line(line),
+    }
+}
+
+fn parse_qoder_jsonl_line(line: &str) -> ParsedCliAgentEvent {
+    let value = serde_json::from_str::<Value>(line).ok();
+    if let Some(value) = value.as_ref().filter(|value| {
+        value.get("type").and_then(Value::as_str) == Some("result")
+            && value.get("subtype").and_then(Value::as_str).unwrap_or("success") != "success"
+    }) {
+        let message = value
+            .get("errors")
+            .and_then(Value::as_array)
+            .map(|errors| {
+                errors
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .filter(|error| !error.trim().is_empty())
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+            .filter(|message| !message.is_empty())
+            .unwrap_or_else(|| claude_code_error_message(value, "Qoder CLI failed"));
+        return ParsedCliAgentEvent {
+            error: Some(message.clone()),
+            events: vec![AgentEvent::Error { message }],
+            ..Default::default()
+        };
+    }
+
+    let compatible = parse_claude_compatible_jsonl_line(line, "Qoder CLI failed");
+    if !compatible.events.is_empty()
+        || compatible.final_text.is_some()
+        || compatible.error.is_some()
+        || compatible.usage_delta.is_some()
+    {
+        return compatible;
+    }
+
+    let Some(value) = value else {
+        return ParsedCliAgentEvent::default();
+    };
+    if value.get("type").and_then(Value::as_str) != Some("stream_event") {
+        return ParsedCliAgentEvent::default();
+    }
+    let Some(delta) = value.get("event").and_then(|event| event.get("delta")) else {
+        return ParsedCliAgentEvent::default();
+    };
+    match delta.get("type").and_then(Value::as_str).unwrap_or_default() {
+        "text_delta" => {
+            let Some(text) = delta.get("text").and_then(Value::as_str).filter(|text| !text.is_empty()) else {
+                return ParsedCliAgentEvent::default();
+            };
+            ParsedCliAgentEvent {
+                final_text: Some(text.to_string()),
+                events: vec![AgentEvent::TextDelta { delta: text.to_string() }],
+                ..Default::default()
+            }
+        }
+        "thinking_delta" => {
+            let Some(text) = delta.get("thinking").and_then(Value::as_str).filter(|text| !text.is_empty()) else {
+                return ParsedCliAgentEvent::default();
+            };
+            ParsedCliAgentEvent {
+                events: vec![AgentEvent::ReasoningDelta { delta: text.to_string() }],
+                ..Default::default()
+            }
+        }
+        _ => ParsedCliAgentEvent::default(),
     }
 }
 

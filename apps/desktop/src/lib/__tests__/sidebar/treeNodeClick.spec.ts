@@ -44,6 +44,11 @@ describe("treeNodeClick", () => {
     expect(treeNodeRowAction("consul-overview", false, "double")).toBe("toggle");
   });
 
+  it("opens the connection database browser only when the capability is enabled", () => {
+    expect(treeNodeRowDoubleClickAction("connection", false, "single", true, "postgres", true)).toBe("open-database-browser");
+    expect(treeNodeRowDoubleClickAction("connection", false, "double", true, "postgres", false)).toBe("toggle");
+  });
+
   it("expands package containers while preserving source behavior for leaf packages", () => {
     expect(treeNodeRowAction("package", true)).toBe("toggle");
     expect(treeNodeRowAction("package", false)).toBe("open-source");
@@ -72,6 +77,23 @@ describe("treeNodeClick", () => {
       schema: "app_schema",
       objectType: "PACKAGE",
       signature: "p_value IN INT",
+    });
+  });
+
+  it("routes the package body action to the owning package source", () => {
+    expect(
+      objectSourceTargetForTreeNode({
+        id: "pkg:body",
+        label: "business_api",
+        type: "package-body",
+        objectName: "business_api",
+        schema: "app_schema",
+      }),
+    ).toEqual({
+      name: "business_api",
+      schema: "app_schema",
+      objectType: "PACKAGE_BODY",
+      signature: undefined,
     });
   });
 

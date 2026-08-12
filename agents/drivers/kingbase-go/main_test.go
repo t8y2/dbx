@@ -387,6 +387,12 @@ func openMetadataDB(t *testing.T, state *metadataDriverState) *sql.DB {
 	return db
 }
 
+func (state *metadataDriverState) snapshotQueries() []string {
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	return append([]string(nil), state.queries...)
+}
+
 func TestHandshakeAdvertisesMultiSession(t *testing.T) {
 	runtime := &runtimeServer{sessions: map[string]*agentSession{}}
 	result, shutdown, err := runtime.dispatch("handshake", nil)
@@ -1235,6 +1241,224 @@ func TestListObjectsIncludesCustomTypesWhenUnfiltered(t *testing.T) {
 	}
 }
 
+func TestListObjectsIncludesMySQLCompatRoutines(t *testing.T) {
+	state := &metadataDriverState{query: func(query string) (driver.Rows, error) {
+		switch {
+		case strings.Contains(query, "FROM information_schema.routines"):
+			if !strings.Contains(query, "WHERE ROUTINE_SCHEMA = 'team''s'") {
+				return nil, errors.New("routine query did not quote the schema: " + query)
+			}
+			return &valueRows{
+				columns: []string{"routine_name", "routine_type", "routine_comment"},
+				rows: [][]driver.Value{
+					{"format_name", "FUNCTION", "formats a name"},
+					{"refresh_cache", "PROCEDURE", nil},
+				},
+			}, nil
+		default:
+			return nil, errors.New("unexpected query: " + query)
+		}
+	}}
+	server := newServer()
+	server.db = openMetadataDB(t, state)
+	server.mode.mysqlCompat = true
+
+	objects, err := server.listObjects("team's", metadataListConstraints{ObjectTypes: []string{"FUNCTION", "PROCEDURE"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(objects) != 2 {
+		t.Fatalf("expected MySQL-compatible routines, got %#v", objects)
+	}
+	if objects[0].Name != "refresh_cache" || objects[0].ObjectType != "PROCEDURE" || objects[0].Schema != "team's" || objects[0].Comment != nil {
+		t.Fatalf("unexpected procedure: %#v", objects[0])
+	}
+	if objects[1].Name != "format_name" || objects[1].ObjectType != "FUNCTION" || objects[1].Schema != "team's" || objects[1].Comment == nil || *objects[1].Comment != "formats a name" {
+		t.Fatalf("unexpected function: %#v", objects[1])
+	}
+	queries := state.snapshotQueries()
+	if len(queries) != 1 || !strings.Contains(queries[0], "FROM information_schema.routines") {
+		t.Fatalf("expected exactly one routine query, got %v", queries)
+	}
+}
+
+func TestListObjectsFiltersSortsAndPagesMySQLCompatObjects(t *testing.T) {
+	state := &metadataDriverState{query: func(query string) (driver.Rows, error) {
+		switch {
+		case strings.Contains(query, "FROM sys_catalog.sys_class c"):
+			return &valueRows{
+				columns: []string{"relname", "relkind", "comment"},
+				rows:    [][]driver.Value{{"match_table", "TABLE", nil}},
+			}, nil
+		case strings.Contains(query, "FROM information_schema.routines"):
+			return &valueRows{
+				columns: []string{"routine_name", "routine_type", "routine_comment"},
+				rows: [][]driver.Value{
+					{"z_match_fn", "FUNCTION", nil},
+					{"other_fn", "FUNCTION", nil},
+					{"match_proc", "PROCEDURE", nil},
+					{"a_match_fn", "FUNCTION", nil},
+				},
+			}, nil
+		default:
+			return nil, errors.New("unexpected query: " + query)
+		}
+	}}
+	server := newServer()
+	server.db = openMetadataDB(t, state)
+	server.mode.mysqlCompat = true
+
+	objects, err := server.listObjects("public", metadataListConstraints{
+		Filter:      "match",
+		Limit:       2,
+		Offset:      1,
+		ObjectTypes: []string{"TABLE", "FUNCTION", "PROCEDURE"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(objects) != 2 || objects[0].Name != "match_proc" || objects[0].ObjectType != "PROCEDURE" || objects[1].Name != "a_match_fn" || objects[1].ObjectType != "FUNCTION" {
+		t.Fatalf("unexpected filtered page: %#v", objects)
+	}
+	queries := state.snapshotQueries()
+	if len(queries) != 2 {
+		t.Fatalf("expected one table query and one routine query, got %v", queries)
+	}
+}
+
+func TestListObjectsFiltersMySQLCompatRoutineKindsWithoutTableScan(t *testing.T) {
+	for _, objectType := range []string{"FUNCTION", "PROCEDURE"} {
+		t.Run(objectType, func(t *testing.T) {
+			state := &metadataDriverState{query: func(query string) (driver.Rows, error) {
+				if !strings.Contains(query, "FROM information_schema.routines") {
+					return nil, errors.New("routine-only request must not scan tables: " + query)
+				}
+				return &valueRows{
+					columns: []string{"routine_name", "routine_type", "routine_comment"},
+					rows: [][]driver.Value{
+						{"format_name", "FUNCTION", nil},
+						{"refresh_cache", "PROCEDURE", nil},
+					},
+				}, nil
+			}}
+			server := newServer()
+			server.db = openMetadataDB(t, state)
+			server.mode.mysqlCompat = true
+
+			objects, err := server.listObjects("public", metadataListConstraints{ObjectTypes: []string{objectType}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(objects) != 1 || objects[0].ObjectType != objectType {
+				t.Fatalf("expected only %s, got %#v", objectType, objects)
+			}
+			queries := state.snapshotQueries()
+			if len(queries) != 1 || !strings.Contains(queries[0], "FROM information_schema.routines") {
+				t.Fatalf("expected one routine query, got %v", queries)
+			}
+		})
+	}
+}
+
+func TestListObjectsSkipsMySQLCompatRoutineQueryForNonRoutineConstraints(t *testing.T) {
+	for _, objectType := range []string{"TABLE", "TYPE"} {
+		t.Run(objectType, func(t *testing.T) {
+			state := &metadataDriverState{query: func(query string) (driver.Rows, error) {
+				if strings.Contains(query, "information_schema.routines") {
+					return nil, errors.New("non-routine request must not query routines: " + query)
+				}
+				if objectType == "TABLE" && strings.Contains(query, "FROM sys_catalog.sys_class c") {
+					return &valueRows{columns: []string{"relname", "relkind", "comment"}}, nil
+				}
+				return nil, errors.New("unexpected query: " + query)
+			}}
+			server := newServer()
+			server.db = openMetadataDB(t, state)
+			server.mode.mysqlCompat = true
+
+			if _, err := server.listObjects("public", metadataListConstraints{ObjectTypes: []string{objectType}}); err != nil {
+				t.Fatal(err)
+			}
+			queries := state.snapshotQueries()
+			expectedQueries := 0
+			if objectType == "TABLE" {
+				expectedQueries = 1
+			}
+			if len(queries) != expectedQueries {
+				t.Fatalf("unexpected %s query count: %v", objectType, queries)
+			}
+		})
+	}
+}
+
+func TestListObjectsUsesCatalogRoutinesOutsideMySQLCompat(t *testing.T) {
+	for _, test := range []struct {
+		name            string
+		mode            kingbaseMode
+		catalogFragment string
+	}{
+		{name: "sys", catalogFragment: "FROM sys_catalog.sys_proc p"},
+		{name: "pg", mode: kingbaseMode{postgresCatalog: true}, catalogFragment: "FROM pg_catalog.pg_proc p"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			state := &metadataDriverState{query: func(query string) (driver.Rows, error) {
+				if strings.Contains(query, "information_schema.routines") || !strings.Contains(query, test.catalogFragment) {
+					return nil, errors.New("unexpected query: " + query)
+				}
+				return &valueRows{
+					columns: []string{"proname", "kind", "comment"},
+					rows:    [][]driver.Value{{"format_name", "FUNCTION", nil}},
+				}, nil
+			}}
+			server := newServer()
+			server.db = openMetadataDB(t, state)
+			server.mode = test.mode
+
+			objects, err := server.listObjects("public", metadataListConstraints{ObjectTypes: []string{"FUNCTION"}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(objects) != 1 || objects[0].Name != "format_name" || objects[0].ObjectType != "FUNCTION" {
+				t.Fatalf("unexpected catalog routines: %#v", objects)
+			}
+			if queries := state.snapshotQueries(); len(queries) != 1 {
+				t.Fatalf("expected one catalog routine query, got %v", queries)
+			}
+		})
+	}
+}
+
+func TestListObjectsKeepsTablesWhenMySQLCompatRoutineQueryFails(t *testing.T) {
+	state := &metadataDriverState{query: func(query string) (driver.Rows, error) {
+		switch {
+		case strings.Contains(query, "FROM sys_catalog.sys_class c"):
+			return &valueRows{
+				columns: []string{"relname", "relkind", "comment"},
+				rows:    [][]driver.Value{{"orders", "TABLE", "orders table"}},
+			}, nil
+		case strings.Contains(query, "FROM information_schema.routines"):
+			return nil, errors.New("routine catalog unavailable")
+		default:
+			return nil, errors.New("unexpected query: " + query)
+		}
+	}}
+	server := newServer()
+	server.db = openMetadataDB(t, state)
+	server.mode.mysqlCompat = true
+
+	objects, err := server.listObjects("public", metadataListConstraints{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(objects) != 1 || objects[0].Name != "orders" || objects[0].ObjectType != "TABLE" || objects[0].Comment == nil || *objects[0].Comment != "orders table" {
+		t.Fatalf("table must survive a best-effort routine query failure: %#v", objects)
+	}
+	queries := state.snapshotQueries()
+	if len(queries) != 2 || !strings.Contains(queries[1], "FROM information_schema.routines") {
+		t.Fatalf("unexpected best-effort query sequence: %v", queries)
+	}
+}
+
 func TestListObjectsOnlyCustomTypesWhenTypeRequested(t *testing.T) {
 	state := &metadataDriverState{query: func(query string) (driver.Rows, error) {
 		if strings.Contains(query, "FROM sys_catalog.sys_class c") || strings.Contains(query, "sys_proc p") {
@@ -1982,8 +2206,15 @@ func TestInformationSchemaColumnsResolveUserDefinedTypeWithoutColumnType(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(columns) != 1 || columns[0].FullDataType != "datetime" {
+	if len(columns) != 1 || columns[0].DataType != "datetime" || columns[0].FullDataType != "datetime" {
 		t.Fatalf("unexpected user-defined metadata columns: %#v", columns)
+	}
+	payload, err := json.Marshal(columns[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(payload), `"data_type":"datetime"`) || strings.Contains(string(payload), "USER-DEFINED") {
+		t.Fatalf("unresolved user-defined type leaked into get_columns payload: %s", payload)
 	}
 	if ddl := renderTableDDL("public", "orders", columns, nil); !strings.Contains(ddl, `"created_at" datetime`) || strings.Contains(ddl, "USER-DEFINED") {
 		t.Fatalf("unexpected user-defined type DDL:\n%s", ddl)
@@ -1997,6 +2228,29 @@ func TestInformationSchemaColumnsResolveUserDefinedTypeWithoutColumnType(t *test
 	state.mu.Unlock()
 	if len(queries) != 3 || strings.Contains(queries[2], "c.column_type") {
 		t.Fatalf("missing column_type capability must be cached: %v", queries)
+	}
+}
+
+func TestResolvedInformationSchemaDataType(t *testing.T) {
+	tests := []struct {
+		name         string
+		dataType     string
+		fullDataType string
+		want         string
+	}{
+		{name: "hyphen marker", dataType: "USER-DEFINED", fullDataType: "datetime", want: "datetime"},
+		{name: "underscore marker with qualified type", dataType: "USER_DEFINED", fullDataType: `sys."datetime"`, want: `sys."datetime"`},
+		{name: "parameterized resolved type", dataType: " user-defined ", fullDataType: " datetime(6) ", want: "datetime(6)"},
+		{name: "ordinary type keeps protocol type", dataType: "varchar", fullDataType: "varchar(64)", want: "varchar"},
+		{name: "missing resolved type keeps marker", dataType: "USER-DEFINED", fullDataType: "", want: "USER-DEFINED"},
+		{name: "unresolved marker keeps original", dataType: "USER_DEFINED", fullDataType: "USER-DEFINED", want: "USER_DEFINED"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := resolvedInformationSchemaDataType(test.dataType, test.fullDataType); got != test.want {
+				t.Fatalf("unexpected resolved data type: got %q, want %q", got, test.want)
+			}
+		})
 	}
 }
 

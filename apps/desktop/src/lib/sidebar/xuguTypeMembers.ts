@@ -1,10 +1,15 @@
 import type { CompletionAssistantCandidate, TreeNode } from "@/types/database";
 
+export type XuguTypeMemberGroupLabels = {
+  attributes: string;
+  methods: string;
+};
+
 export function isXuguTypeMemberContainer(node: TreeNode, databaseType?: string): boolean {
   return databaseType === "xugu" && node.type === "type" && node.xuguTypeMembersExpandable === true && !!node.connectionId && !!node.database;
 }
 
-export function buildXuguTypeMemberNodes(typeNode: TreeNode, candidates: readonly CompletionAssistantCandidate[]): TreeNode[] {
+export function buildXuguTypeMemberNodes(typeNode: TreeNode, candidates: readonly CompletionAssistantCandidate[], labels: XuguTypeMemberGroupLabels = { attributes: "tree.attributes", methods: "tree.methods" }): TreeNode[] {
   const parentName = typeNode.objectName || typeNode.label;
   const parentSchema = typeNode.schema;
   const seen = new Set<string>();
@@ -53,5 +58,38 @@ export function buildXuguTypeMemberNodes(typeNode: TreeNode, candidates: readonl
     });
   }
 
-  return [...attributes, ...methods];
+  const groupBase = {
+    connectionId: typeNode.connectionId,
+    database: typeNode.database,
+    schema: parentSchema,
+    parentName,
+    parentSchema,
+    parentType: "type" as const,
+    isExpanded: false,
+  };
+
+  const groups: TreeNode[] = [];
+  if (attributes.length > 0) {
+    groups.push({
+      ...groupBase,
+      id: `${typeNode.id}:attributes`,
+      label: labels.attributes,
+      type: "type-attributes",
+      objectName: parentName,
+      objectCount: attributes.length,
+      children: attributes,
+    });
+  }
+  if (methods.length > 0) {
+    groups.push({
+      ...groupBase,
+      id: `${typeNode.id}:methods`,
+      label: labels.methods,
+      type: "type-methods",
+      objectName: parentName,
+      objectCount: methods.length,
+      children: methods,
+    });
+  }
+  return groups;
 }

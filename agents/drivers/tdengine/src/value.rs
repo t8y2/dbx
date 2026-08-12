@@ -102,6 +102,23 @@ mod tests {
             ),
             Value::String("2024-01-01 00:00:00.1234".into())
         );
+        assert_eq!(
+            borrowed_value_to_json(
+                BorrowedValue::Timestamp(Timestamp::Nanoseconds(1_704_067_200_123_456_789)),
+                Some(chrono_tz::UTC)
+            ),
+            Value::String("2024-01-01 00:00:00.123456789".into())
+        );
+    }
+
+    #[test]
+    fn formats_timestamps_in_the_selected_timezone() {
+        let timestamp = BorrowedValue::Timestamp(Timestamp::Milliseconds(1_704_067_200_123));
+        assert_eq!(
+            borrowed_value_to_json(timestamp.clone(), Some(chrono_tz::Asia::Shanghai)),
+            Value::String("2024-01-01 08:00:00.123".into())
+        );
+        assert_eq!(borrowed_value_to_json(timestamp, None), Value::String("2024-01-01 00:00:00.123".into()));
     }
 
     #[test]

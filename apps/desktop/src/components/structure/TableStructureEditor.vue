@@ -32,7 +32,7 @@ import { invalidateTableMetadataCache } from "@/lib/metadata/tableMetadataCache"
 import { type BuildTableStructureChangeSqlOptions, type EditableStructureColumn, type EditableStructureForeignKey, type EditableStructureIndex, type EditableStructureTrigger } from "@/lib/table/tableStructureEditorSql";
 import { PRESET_FIELDS_TEMPLATE_ID, createTableColumnTemplateDrafts } from "@/lib/table/tableColumnTemplates";
 import { getMysqlDataTypeHelp } from "@/lib/table/mysqlDataTypeHelp";
-import { getPostgresDataTypeHelp } from "@/lib/table/postgresDataTypeHelp";
+import { getPostgresDataTypeHelp, gaussdbMTypeDisplayName } from "@/lib/table/postgresDataTypeHelp";
 import { getSqliteDataTypeHelp } from "@/lib/table/sqliteDataTypeHelp";
 import { getTableMetadataCapabilities, firstStructureMetadataTab, isStructureMetadataTabSupported } from "@/lib/table/tableMetadataCapabilities";
 import { hasTableStructureRefreshWork, unloadedTableStructureRefreshScope, visibleTableStructureRefreshScope, type TableStructureRefreshScope } from "@/lib/table/tableStructureMetadataLoading";
@@ -1079,6 +1079,16 @@ function dataTypeTooltip(option: string): string | undefined {
   return undefined;
 }
 
+function gaussdbMDataTypeDisplayName(option: string): string {
+  if (databaseType.value === "gaussdb") {
+    const conn = connection.value;
+    if (conn?.driver_profile?.toLowerCase() === "gaussdb-m") {
+      return gaussdbMTypeDisplayName(option);
+    }
+  }
+  return option;
+}
+
 async function loadDynamicDataTypeOptions() {
   const requestId = ++dataTypeOptionsRequestId;
   const connectionId = props.connectionId;
@@ -1119,10 +1129,10 @@ function scheduleSqlPreviewRefresh() {
   }
   sqlPreviewRequestId++;
   deferredSqlPreviewRefresh = false;
-  pendingStatements.value = [];
-  warnings.value = [];
-  sqliteSchemaRevision.value = undefined;
   if (!hasPendingStructureChanges()) {
+    pendingStatements.value = [];
+    warnings.value = [];
+    sqliteSchemaRevision.value = undefined;
     sqlPreviewLoading.value = false;
     return;
   }
@@ -2801,10 +2811,11 @@ watch([activeTab, ddlLoading], ([tab, loading]) => {
                       :loading-text="t('common.loading')"
                       :allow-custom="true"
                       :option-tooltip="dataTypeTooltip"
+                      :display-name="gaussdbMDataTypeDisplayName"
                       :trigger-class="[structureMonoControlClass, 'w-full']"
                       @update:model-value="(v: string) => updateColumnDataType(column, v)"
                     />
-                    <Input v-else :model-value="splitDataType(column.dataType).baseType" :class="[structureMonoControlClass, 'w-full']" disabled />
+                    <Input v-else :model-value="gaussdbMDataTypeDisplayName(splitDataType(column.dataType).baseType)" :class="[structureMonoControlClass, 'w-full']" disabled />
                   </td>
                   <td v-if="columnEditorControls.length" :class="structureCellClass">
                     <Popover v-if="isMysqlEnumDataType(databaseType, column.dataType)">

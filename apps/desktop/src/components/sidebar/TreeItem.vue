@@ -60,6 +60,7 @@ import { hexToRgba } from "@/lib/common/color";
 import { sidebarDisplayTableName } from "@/lib/sidebar/sidebarTableNameDisplay";
 import { shouldMeasureSidebarLabelOverflow } from "@/lib/sidebar/sidebarLabelTooltip";
 import { treeSelectionRangeIdsByIndex, treeSelectionRangeIds } from "@/lib/sidebar/sidebarTreeSelection";
+import { applyConnectionMultiSelection, connectionMultiSelectionAfterToggle } from "@/lib/sidebar/sidebarConnectionMultiSelect";
 import { isSidebarDatabaseOpenForVisual } from "@/lib/sidebar/sidebarDatabaseOpenState";
 import { sidebarTreeContextKey } from "@/lib/sidebar/sidebarTreeContext";
 import { connectionCanConfigureSidebarVisibleDatabases } from "@/lib/sidebar/sidebarVisibleFilterMenu";
@@ -229,6 +230,14 @@ function getIconInfo(node: TreeNode): { icon: any; colorClass: string } | null {
       } else {
         return { icon: Columns3, colorClass: "text-muted-foreground" };
       }
+    case "type-attribute":
+      return { icon: Columns3, colorClass: "text-muted-foreground" };
+    case "type-method":
+      return { icon: Braces, colorClass: "text-amber-500" };
+    case "type-attributes":
+      return { icon: ListTree, colorClass: "text-green-400" };
+    case "type-methods":
+      return { icon: Braces, colorClass: "text-amber-500" };
     case "group-columns":
       return { icon: ListTree, colorClass: "text-green-400" };
     case "group-indexes":
@@ -342,6 +351,7 @@ function displayLabel(node: TreeNode): string {
   if (node.type === "object-browser") return t(node.label, { count: node.objectCount ?? 0 });
   if (node.type === "user-admin" || node.type === "dameng-job-admin") return t(node.label);
   if (node.type === "linked-server-root") return t(node.label);
+  if (node.type === "mqtt-topic" && node.id.endsWith(":mqtt-topic:__console__")) return t(node.label);
   if (node.label === "tree.defaultDatabase") return t(node.label);
   return isGroupLabel(node) ? t(node.label) : node.label;
 }
@@ -559,15 +569,8 @@ function toggleConnectionMultiSelection(event: MouseEvent) {
 
   // Keep connection-id normalization off the row render path; this handler only
   // runs when the checkbox is clicked, while the checked state updates often.
-  const next = new Set(connectionStore.connectionMultiSelectActive ? selectedConnectionIdsForAction() : []);
-  if (next.has(activeNode.value.connectionId)) next.delete(activeNode.value.connectionId);
-  else next.add(activeNode.value.connectionId);
-
-  const ids = [...next];
-  connectionStore.selectedTreeNodeIds = ids;
-  connectionStore.selectedTreeNodeId = ids.includes(activeNode.value.connectionId) ? activeNode.value.connectionId : (ids[0] ?? null);
-  connectionStore.treeSelectionAnchorId = activeNode.value.connectionId;
-  connectionStore.connectionMultiSelectActive = ids.length > 0;
+  const current = { connectionIds: selectedConnectionIdsForAction(), active: connectionStore.connectionMultiSelectActive };
+  applyConnectionMultiSelection(connectionStore, connectionMultiSelectionAfterToggle(current, activeNode.value.connectionId));
   rowRef.value?.focus({ preventScroll: true });
 }
 
@@ -610,7 +613,7 @@ function isNodeDefaultSchema(): boolean {
 
 const trailingComment = computed(() => {
   if (!settingsStore.editorSettings.sidebarObjectInfoMode.startsWith("comment-")) return null;
-  return sidebarTreeNodeComment(activeNode.value);
+  return sidebarTreeNodeComment(activeNode.value, settingsStore.editorSettings.sidebarShowConnectionNotes);
 });
 
 function isRightAlignedComment(): boolean {
@@ -1247,7 +1250,9 @@ function onKeydown(event: KeyboardEvent) {
                   node.type === 'group-synonyms' ||
                   node.type === 'group-packages' ||
                   node.type === 'group-types' ||
-                  node.type === 'group-partitions') &&
+                  node.type === 'group-partitions' ||
+                  node.type === 'type-attributes' ||
+                  node.type === 'type-methods') &&
                 node.objectCount != null
               "
               class="text-muted-foreground text-[10px] shrink-0"

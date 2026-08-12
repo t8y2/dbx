@@ -648,6 +648,10 @@ export async function listDatabases(connectionId: string): Promise<DatabaseInfo[
   return get(`/api/schema/databases?${qs({ connection_id: connectionId })}`);
 }
 
+export async function listDatabaseMetadata(connectionId: string): Promise<DatabaseInfo[]> {
+  return get(`/api/schema/database-metadata?${qs({ connection_id: connectionId })}`);
+}
+
 export async function listDatabaseStorage(connectionId: string, databases: string[]): Promise<DatabaseStorageInfo[]> {
   return post("/api/schema/database-storage", {
     connection_id: connectionId,
@@ -1255,8 +1259,8 @@ export async function analyzeEditableQueryEditability(sql: string): Promise<Quer
   return post("/api/query/analyze-editability", { sql });
 }
 
-export async function prepareDataGridSave(options: DataGridSaveStatementOptions): Promise<DataGridSavePreparation> {
-  return post("/api/query/prepare-data-grid-save", { options });
+export async function prepareDataGridSave(options: DataGridSaveStatementOptions, driverProfile?: string): Promise<DataGridSavePreparation> {
+  return post("/api/query/prepare-data-grid-save", { options, driverProfile });
 }
 
 export async function extractDataGridSelection(request: DataGridExtractRequest): Promise<DataGridExtractResult> {

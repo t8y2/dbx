@@ -509,7 +509,7 @@ function measureSidebarCommentLabelWidths() {
       id,
       depth,
       alignable: isSidebarCommentAlignableNode(node),
-      hasComment: !!sidebarTreeNodeComment(node),
+      hasComment: !!sidebarTreeNodeComment(node, settingsStore.editorSettings.sidebarShowConnectionNotes),
       labelWidth: context.measureText(sidebarCommentLabel(node)).width,
     })),
   );
@@ -526,7 +526,7 @@ function scheduleSidebarCommentLabelMeasure() {
 
 function sidebarNodeHasTrailingMetadata(node: TreeNode): boolean {
   const mode = settingsStore.editorSettings.sidebarObjectInfoMode;
-  if (mode.startsWith("comment-") && sidebarTreeNodeComment(node)) return true;
+  if (mode.startsWith("comment-") && sidebarTreeNodeComment(node, settingsStore.editorSettings.sidebarShowConnectionNotes)) return true;
   return mode === "size" && sidebarStorageDisplayTypes.has(node.type) && !!formatSidebarObjectStorage(node.sizeBytes);
 }
 
@@ -563,10 +563,14 @@ function scheduleSidebarTreeContentWidthMeasure() {
   sidebarTreeContentMeasureFrame = window.requestAnimationFrame(measureSidebarTreeContentWidth);
 }
 
-watch([flatNodes, () => settingsStore.editorSettings.sidebarObjectInfoMode, () => settingsStore.editorSettings.sidebarHiddenTablePrefixes, () => settingsStore.editorSettings.uiFontFamily, () => settingsStore.editorSettings.uiScale], scheduleSidebarCommentLabelMeasure, {
-  flush: "post",
-  immediate: true,
-});
+watch(
+  [flatNodes, () => settingsStore.editorSettings.sidebarObjectInfoMode, () => settingsStore.editorSettings.sidebarShowConnectionNotes, () => settingsStore.editorSettings.sidebarHiddenTablePrefixes, () => settingsStore.editorSettings.uiFontFamily, () => settingsStore.editorSettings.uiScale],
+  scheduleSidebarCommentLabelMeasure,
+  {
+    flush: "post",
+    immediate: true,
+  },
+);
 
 watch([sidebarTreeNaturalWidthItems, () => settingsStore.editorSettings.uiFontFamily, () => settingsStore.editorSettings.uiScale], scheduleSidebarTreeContentWidthMeasure, {
   flush: "post",

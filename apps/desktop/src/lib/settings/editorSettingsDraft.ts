@@ -14,8 +14,6 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "activeCustomThemeId",
   "executeMode",
   "executeAllOnBlankLine",
-  "globalConnectTimeoutSecs",
-  "globalQueryTimeoutSecs",
   "showExecutionTargetPicker",
   "showStatementRunButtons",
   "showCurrentStatementFrame",

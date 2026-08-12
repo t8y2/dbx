@@ -214,6 +214,121 @@ class RocketMqAgentTest {
     }
 
     @Test
+    void aclProbeTimeoutUsesConnectBudgetWithoutReducingOperationBudget() {
+        JsonObject conn = JsonParser.parseString("""
+            {"connect_timeout_ms":10000,"request_timeout_ms":120000}
+            """).getAsJsonObject();
+        assertEquals(5_000L, RocketMqAgent.aclProbeTimeoutMs(conn));
+        assertEquals(120_000L, RocketMqAgent.operationBudgetMs(conn));
+
+        assertEquals(500L, RocketMqAgent.aclProbeTimeoutMs(JsonParser.parseString("""
+            {"connect_timeout_ms":1000}
+            """).getAsJsonObject()));
+        assertEquals(5_000L, RocketMqAgent.aclProbeTimeoutMs(JsonParser.parseString("""
+            {"connect_timeout_ms":120000}
+            """).getAsJsonObject()));
+        assertEquals(500L, RocketMqAgent.aclProbeTimeoutMs(JsonParser.parseString("""
+            {"connect_timeout_ms":-2147483648}
+            """).getAsJsonObject()));
+        assertEquals(5_000L, RocketMqAgent.aclProbeTimeoutMs(JsonParser.parseString("""
+            {"connect_timeout_ms":2147483647}
+            """).getAsJsonObject()));
+    }
+
+    @Test
+    void probeAclSupportRemapsBrokerAndPassesIndependentTimeout() {
+        var clusterInfo = clusterInfoWithBrokers("172.18.0.3:10911");
+        JsonObject conn = JsonParser.parseString("""
+            {
+              "namesrv_addr":"127.0.0.1:9876",
+              "connect_timeout_ms":10000,
+              "request_timeout_ms":120000
+            }
+            """).getAsJsonObject();
+        List<String> addresses = new ArrayList<>();
+        List<Long> timeouts = new ArrayList<>();
+
+        assertTrue(RocketMqAgent.probeAclSupport(clusterInfo, conn, (address, timeoutMs) -> {
+            addresses.add(address);
+            timeouts.add(timeoutMs);
+        }));
+        assertEquals(List.of("127.0.0.1:10911"), addresses);
+        assertEquals(List.of(5_000L), timeouts);
+    }
+
+    @Test
+    void probeAclSupportPreservesPublicExplicitAndSocksAddresses() {
+        List<String> addresses = new ArrayList<>();
+        RocketMqAgent.BrokerAclProbe capture = (address, timeoutMs) -> addresses.add(address);
+
+        assertTrue(RocketMqAgent.probeAclSupport(
+            clusterInfoWithBrokers("broker.example.com:10911"),
+            JsonParser.parseString("""
+                {"namesrv_addr":"ns.example.com:9876","connect_timeout_ms":10000}
+                """).getAsJsonObject(),
+            capture));
+        assertTrue(RocketMqAgent.probeAclSupport(
+            clusterInfoWithBrokers("172.18.0.3:10911"),
+            JsonParser.parseString("""
+                {
+                  "namesrv_addr":"127.0.0.1:9876",
+                  "broker_addr":"published.example.com:10911",
+                  "connect_timeout_ms":10000
+                }
+                """).getAsJsonObject(),
+            capture));
+        assertTrue(RocketMqAgent.probeAclSupport(
+            clusterInfoWithBrokers("172.18.0.3:10911"),
+            JsonParser.parseString("""
+                {
+                  "namesrv_addr":"172.19.191.166:9876",
+                  "socks_proxy":{"host":"127.0.0.1","port":41080},
+                  "connect_timeout_ms":10000
+                }
+                """).getAsJsonObject(),
+            capture));
+
+        assertEquals(List.of(
+            "broker.example.com:10911",
+            "published.example.com:10911",
+            "172.18.0.3:10911"
+        ), addresses);
+    }
+
+    @Test
+    void probeAclSupportReturnsFalseWithoutRetryOnTimeoutOrError() {
+        var clusterInfo = clusterInfoWithBrokers("broker-a:10911", "broker-b:10911");
+        JsonObject conn = JsonParser.parseString("""
+            {"namesrv_addr":"ns.example.com:9876","connect_timeout_ms":10000}
+            """).getAsJsonObject();
+        AtomicInteger calls = new AtomicInteger();
+
+        assertFalse(RocketMqAgent.probeAclSupport(clusterInfo, conn, (address, timeoutMs) -> {
+            calls.incrementAndGet();
+            throw new java.util.concurrent.TimeoutException("blackholed broker");
+        }));
+        assertEquals(1, calls.get());
+
+        assertFalse(RocketMqAgent.probeAclSupport(clusterInfo, conn, (address, timeoutMs) -> {
+            throw new IllegalStateException("ACL unavailable");
+        }));
+    }
+
+    @Test
+    void probeAclSupportReturnsFalseForMissingBrokersWithoutNetworkCall() {
+        AtomicInteger calls = new AtomicInteger();
+        RocketMqAgent.BrokerAclProbe probe = (address, timeoutMs) -> calls.incrementAndGet();
+        JsonObject conn = JsonParser.parseString("""
+            {"namesrv_addr":"ns.example.com:9876","connect_timeout_ms":10000}
+            """).getAsJsonObject();
+
+        assertFalse(RocketMqAgent.probeAclSupport(null, conn, probe));
+        assertFalse(RocketMqAgent.probeAclSupport(
+            new org.apache.rocketmq.remoting.protocol.body.ClusterInfo(), conn, probe));
+        assertEquals(0, calls.get());
+    }
+
+    @Test
     void parseHostFromSocketAddressHandlesIpv6AndPorts() {
         assertEquals("127.0.0.1", RocketMqAgent.parseHostFromSocketAddress("127.0.0.1:9876"));
         assertEquals("2001:db8::1", RocketMqAgent.parseHostFromSocketAddress("[2001:db8::1]:9876"));
@@ -1140,5 +1255,18 @@ class RocketMqAgentTest {
         addrs.put(0L, masterAddr);
         data.setBrokerAddrs(addrs);
         return data;
+    }
+
+    private static org.apache.rocketmq.remoting.protocol.body.ClusterInfo clusterInfoWithBrokers(
+        String... masterAddrs) {
+        org.apache.rocketmq.remoting.protocol.body.ClusterInfo clusterInfo =
+            new org.apache.rocketmq.remoting.protocol.body.ClusterInfo();
+        HashMap<String, org.apache.rocketmq.remoting.protocol.route.BrokerData> table = new HashMap<>();
+        for (int index = 0; index < masterAddrs.length; index++) {
+            String name = "broker-" + index;
+            table.put(name, brokerData(name, masterAddrs[index]));
+        }
+        clusterInfo.setBrokerAddrTable(table);
+        return clusterInfo;
     }
 }

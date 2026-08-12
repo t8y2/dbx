@@ -183,7 +183,7 @@ pub async fn test_connection(client: &VictoriaMetricsClient, timeout: Duration) 
 }
 
 pub async fn list_databases(client: &VictoriaMetricsClient) -> Result<Vec<DatabaseInfo>, String> {
-    Ok(vec![DatabaseInfo { name: client.database_label.clone() }])
+    Ok(vec![DatabaseInfo { name: client.database_label.clone(), ..Default::default() }])
 }
 
 pub async fn list_tables(client: &VictoriaMetricsClient) -> Result<Vec<TableInfo>, String> {

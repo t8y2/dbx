@@ -72,6 +72,191 @@ async fn query_scalar(pool: &deadpool_postgres::Pool, sql: &str) -> serde_json::
 }
 
 #[tokio::test]
+#[ignore = "requires PostgreSQL URLs via DBX_LIVE_PG_TRANSFER_SOURCE_URL and DBX_LIVE_PG_TRANSFER_TARGET_URL"]
+async fn live_postgres_transfer_upserts_generated_always_identity_values() {
+    let source_url = std::env::var("DBX_LIVE_PG_TRANSFER_SOURCE_URL").expect("DBX_LIVE_PG_TRANSFER_SOURCE_URL");
+    let target_url = std::env::var("DBX_LIVE_PG_TRANSFER_TARGET_URL").unwrap_or_else(|_| source_url.clone());
+    let source_pool = postgres::connect(&source_url, std::time::Duration::from_secs(5)).await.unwrap();
+    let target_pool = postgres::connect(&target_url, std::time::Duration::from_secs(5)).await.unwrap();
+    let source_database = query_scalar(&source_pool, "SELECT current_database()").await.as_str().unwrap().to_string();
+    let target_database = query_scalar(&target_pool, "SELECT current_database()").await.as_str().unwrap().to_string();
+
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let source_schema = format!("dbx_src_always_{}", &suffix[..8]);
+    let target_schema = format!("dbx_dst_always_{}", &suffix[..8]);
+    let cleanup_sql = [
+        format!("DROP SCHEMA IF EXISTS \"{}\" CASCADE", source_schema),
+        format!("DROP SCHEMA IF EXISTS \"{}\" CASCADE", target_schema),
+    ];
+
+    postgres::execute_batch(
+        &source_pool,
+        &[
+            format!("CREATE SCHEMA \"{}\"", source_schema),
+            format!(
+                "CREATE TABLE \"{}\".\"items\" (\"id\" bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, \"name\" text NOT NULL)",
+                source_schema
+            ),
+            format!(
+                "INSERT INTO \"{}\".\"items\" (\"id\", \"name\") OVERRIDING SYSTEM VALUE VALUES (42, 'Ada')",
+                source_schema
+            ),
+        ],
+    )
+    .await
+    .unwrap();
+    postgres::execute_batch(
+        &target_pool,
+        &[
+            format!("CREATE SCHEMA \"{}\"", target_schema),
+            format!(
+                "CREATE TABLE \"{}\".\"items\" (\"id\" bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, \"name\" text NOT NULL)",
+                target_schema
+            ),
+        ],
+    )
+    .await
+    .unwrap();
+
+    let old_sql = format!(
+        "INSERT INTO \"{}\".\"items\" (\"id\", \"name\") VALUES (43, 'old-writer') ON CONFLICT (\"id\") DO UPDATE SET \"name\" = EXCLUDED.\"name\"",
+        target_schema
+    );
+    let old_error = postgres::execute_query(&target_pool, &old_sql).await.unwrap_err();
+    assert!(old_error.contains("identity column defined as GENERATED ALWAYS"), "{old_error}");
+
+    postgres::execute_query(
+        &target_pool,
+        &format!(
+            "INSERT INTO \"{}\".\"items\" (\"id\", \"name\") OVERRIDING SYSTEM VALUE VALUES (43, 'append')",
+            target_schema
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        query_scalar(&target_pool, &format!("SELECT \"name\" FROM \"{}\".\"items\" WHERE \"id\" = 43", target_schema))
+            .await,
+        json!("append")
+    );
+    postgres::execute_batch(
+        &target_pool,
+        &[
+            format!("TRUNCATE TABLE \"{}\".\"items\"", target_schema),
+            format!(
+                "INSERT INTO \"{}\".\"items\" (\"id\", \"name\") OVERRIDING SYSTEM VALUE VALUES (44, 'overwrite')",
+                target_schema
+            ),
+        ],
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        query_scalar(&target_pool, &format!("SELECT \"name\" FROM \"{}\".\"items\" WHERE \"id\" = 44", target_schema))
+            .await,
+        json!("overwrite")
+    );
+    postgres::execute_query(&target_pool, &format!("TRUNCATE TABLE \"{}\".\"items\"", target_schema)).await.unwrap();
+
+    let dir = std::env::temp_dir().join(format!("dbx-live-always-transfer-{suffix}"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+    let state = AppState::new(storage);
+    let source_connection_id = "live-always-source";
+    let target_connection_id = "live-always-target";
+    let source_pool_key = format!("{source_connection_id}:{source_database}");
+    let target_pool_key = format!("{target_connection_id}:{target_database}");
+    state.connections.write().await.insert(source_pool_key.clone(), PoolKind::Postgres(source_pool.clone()));
+    state.connections.write().await.insert(target_pool_key.clone(), PoolKind::Postgres(target_pool.clone()));
+    state
+        .configs
+        .write()
+        .await
+        .insert(source_connection_id.to_string(), postgres_test_config(source_connection_id, &source_database));
+    state
+        .configs
+        .write()
+        .await
+        .insert(target_connection_id.to_string(), postgres_test_config(target_connection_id, &target_database));
+
+    let request = TransferRequest {
+        transfer_id: format!("live-always-transfer-{suffix}"),
+        source_connection_id: source_connection_id.to_string(),
+        source_database: source_database.clone(),
+        source_schema: source_schema.clone(),
+        source_catalog: None,
+        target_connection_id: target_connection_id.to_string(),
+        target_database: target_database.clone(),
+        target_schema: target_schema.clone(),
+        target_catalog: None,
+        tables: vec!["items".to_string()],
+        create_table: false,
+        content: dbx_core::transfer::TransferContent::default(),
+        objects: Vec::new(),
+        mode: TransferMode::Upsert,
+        target_table_name_case: TransferTableNameCase::Preserve,
+        ownership_policy: TransferOwnershipPolicy::Preserve,
+        batch_size: 100,
+    };
+    let source_db_type = get_db_type(&state, source_connection_id).await.unwrap();
+    let target_db_type = get_db_type(&state, target_connection_id).await.unwrap();
+    let transferred = transfer_table(
+        &state,
+        &request,
+        "items",
+        0,
+        &source_db_type,
+        &target_db_type,
+        &source_pool_key,
+        &target_pool_key,
+        |_| {},
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(transferred, 1);
+    assert_eq!(
+        query_scalar(&target_pool, &format!("SELECT \"name\" FROM \"{}\".\"items\" WHERE \"id\" = 42", target_schema))
+            .await,
+        json!("Ada")
+    );
+    assert_eq!(
+        query_scalar(&target_pool, &format!("SELECT count(*) FROM \"{}\".\"items\"", target_schema)).await,
+        json!(1)
+    );
+
+    postgres::execute_query(
+        &source_pool,
+        &format!("UPDATE \"{}\".\"items\" SET \"name\" = 'Grace' WHERE \"id\" = 42", source_schema),
+    )
+    .await
+    .unwrap();
+    let updated = transfer_table(
+        &state,
+        &request,
+        "items",
+        0,
+        &source_db_type,
+        &target_db_type,
+        &source_pool_key,
+        &target_pool_key,
+        |_| {},
+    )
+    .await
+    .unwrap();
+    assert_eq!(updated, 1);
+    assert_eq!(
+        query_scalar(&target_pool, &format!("SELECT \"name\" FROM \"{}\".\"items\" WHERE \"id\" = 42", target_schema))
+            .await,
+        json!("Grace")
+    );
+
+    let _ = postgres::execute_batch(&source_pool, &[cleanup_sql[0].clone()]).await;
+    let _ = postgres::execute_batch(&target_pool, &[cleanup_sql[1].clone()]).await;
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
 #[ignore = "requires source/target PostgreSQL URLs via DBX_LIVE_PG_TRANSFER_SOURCE_URL and DBX_LIVE_PG_TRANSFER_TARGET_URL"]
 async fn live_postgres_transfer_preserves_data_and_schema_objects() {
     let source_url = std::env::var("DBX_LIVE_PG_TRANSFER_SOURCE_URL").expect("DBX_LIVE_PG_TRANSFER_SOURCE_URL");

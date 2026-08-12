@@ -137,6 +137,7 @@ export const syncSavedSqlDirectory = forward("syncSavedSqlDirectory");
 
 // Schema
 export const listDatabases = forward("listDatabases");
+export const listDatabaseMetadata = forward("listDatabaseMetadata");
 export const listDatabaseStorage = forward("listDatabaseStorage");
 export const getSqlServerCompletionContext = forward("getSqlServerCompletionContext");
 export const listDorisCatalogs = forward("listDorisCatalogs");

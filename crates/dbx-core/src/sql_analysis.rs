@@ -127,7 +127,8 @@ fn parse_sqlserver(sql: &str) -> Result<Vec<Statement>, ParserError> {
         Err(error) => {
             let mut fallback_tokens = Tokenizer::new(&dialect, sql).tokenize_with_location()?;
             normalize_sqlserver_create_proc_tokens(&mut fallback_tokens);
-            let mut changed = normalize_sqlserver_alter_table_add_tokens(&mut fallback_tokens);
+            let mut changed = normalize_sqlserver_cursor_tokens(&mut fallback_tokens);
+            changed |= normalize_sqlserver_alter_table_add_tokens(&mut fallback_tokens);
             changed |= remove_sqlserver_query_hint_tokens(&mut fallback_tokens);
             if changed {
                 if let Ok(statements) =
@@ -139,6 +140,109 @@ fn parse_sqlserver(sql: &str) -> Result<Vec<Statement>, ParserError> {
             Err(error)
         }
     }
+}
+
+fn normalize_sqlserver_cursor_tokens(tokens: &mut Vec<TokenWithSpan>) -> bool {
+    let mut removals = Vec::new();
+    let mut index = 0usize;
+
+    while let Some(statement_start) = next_significant_token_index(tokens, index) {
+        if matches!(tokens[statement_start].token, Token::EOF) {
+            break;
+        }
+        if matches!(tokens[statement_start].token, Token::SemiColon) {
+            index = statement_start + 1;
+            continue;
+        }
+
+        let statement_end = sqlserver_statement_end_index(tokens, statement_start);
+        let significant_indexes = tokens
+            .iter()
+            .enumerate()
+            .take(statement_end)
+            .skip(statement_start)
+            .filter_map(|(index, token)| (!matches!(token.token, Token::Whitespace(_))).then_some(index))
+            .collect::<Vec<_>>();
+
+        if let Some(removal) = sqlserver_cursor_option_removal(tokens, &significant_indexes) {
+            removals.push(removal);
+        }
+
+        index = statement_end.saturating_add(1);
+    }
+
+    let changed = !removals.is_empty();
+    for removal in removals.into_iter().rev() {
+        tokens.drain(removal);
+    }
+    changed
+}
+
+fn sqlserver_cursor_option_removal(tokens: &[TokenWithSpan], indexes: &[usize]) -> Option<std::ops::Range<usize>> {
+    if indexes.len() < 4
+        || !unquoted_token_word_eq(&tokens[indexes[0]], "DECLARE")
+        || !is_sqlserver_named_cursor(&tokens[indexes[1]])
+        || !unquoted_token_word_eq(&tokens[indexes[2]], "CURSOR")
+    {
+        return None;
+    }
+
+    let mut position = 3usize;
+    if indexes.get(position).is_some_and(|index| {
+        unquoted_token_word_eq(&tokens[*index], "LOCAL") || unquoted_token_word_eq(&tokens[*index], "GLOBAL")
+    }) {
+        position += 1;
+    }
+    if indexes.get(position).is_some_and(|index| unquoted_token_word_eq(&tokens[*index], "FAST_FORWARD")) {
+        position += 1;
+    }
+    if position == 3 || !indexes.get(position).is_some_and(|index| unquoted_token_word_eq(&tokens[*index], "FOR")) {
+        return None;
+    }
+
+    let query_position = position + 1;
+    let query_start = *indexes.get(query_position)?;
+    if (!unquoted_token_word_eq(&tokens[query_start], "SELECT")
+        && !unquoted_token_word_eq(&tokens[query_start], "WITH"))
+        || sqlserver_cursor_query_has_forbidden_clause(tokens, &indexes[query_position..])
+    {
+        return None;
+    }
+
+    Some(indexes[3]..indexes[position])
+}
+
+fn is_sqlserver_named_cursor(token: &TokenWithSpan) -> bool {
+    let Token::Word(word) = &token.token else {
+        return false;
+    };
+    !word.value.starts_with('@') && (word.quote_style.is_some() || word.keyword == Keyword::NoKeyword)
+}
+
+fn sqlserver_cursor_query_has_forbidden_clause(tokens: &[TokenWithSpan], indexes: &[usize]) -> bool {
+    let mut depth = 0usize;
+    for (position, index) in indexes.iter().copied().enumerate() {
+        match tokens[index].token {
+            Token::LParen => depth += 1,
+            Token::RParen => depth = depth.saturating_sub(1),
+            _ if depth == 0
+                && (unquoted_token_word_eq(&tokens[index], "INTO")
+                    || unquoted_token_word_eq(&tokens[index], "COMPUTE")
+                    || unquoted_token_word_eq(&tokens[index], "FOR")
+                        && indexes
+                            .get(position + 1)
+                            .is_some_and(|index| unquoted_token_word_eq(&tokens[*index], "BROWSE"))) =>
+            {
+                return true;
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+fn unquoted_token_word_eq(token: &TokenWithSpan, expected: &str) -> bool {
+    matches!(&token.token, Token::Word(word) if word.quote_style.is_none() && word.value.eq_ignore_ascii_case(expected))
 }
 
 fn normalize_sqlserver_alter_table_add_tokens(tokens: &mut Vec<TokenWithSpan>) -> bool {
@@ -477,8 +581,16 @@ fn normalize_dialect(dialect: Option<&str>) -> String {
 
 impl Analyzer {
     fn visit_statement(&mut self, statement: &Statement) {
-        if let Statement::Query(query) = statement {
-            self.visit_query_in_new_scope(query, None);
+        match statement {
+            Statement::Query(query) => self.visit_query_in_new_scope(query, None),
+            Statement::Declare { stmts } if self.is_sqlserver => {
+                for declaration in stmts {
+                    if let Some(query) = &declaration.for_query {
+                        self.visit_query_in_new_scope(query, None);
+                    }
+                }
+            }
+            _ => {}
         }
     }
 

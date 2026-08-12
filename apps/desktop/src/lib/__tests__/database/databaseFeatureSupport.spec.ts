@@ -5,6 +5,7 @@ import { buildGetDatabaseCommentSql } from "@/lib/database/dbAdminSql";
 import {
   isSchemaAware,
   supportsConnectionScopedQueryExecution,
+  supportsConnectionDatabaseBrowser,
   supportsDatabaseNameCompletion,
   supportsDatabaseSchemaQualifier,
   supportsQueryTargetDatabaseListing,
@@ -17,6 +18,13 @@ import {
 describe("schema awareness", () => {
   it("keeps SQLite database aliases separate from schema-capable databases", () => {
     expect(isSchemaAware("sqlite")).toBe(false);
+  });
+});
+
+describe("connection database browser", () => {
+  it("follows object browser support without enabling unsupported connection types", () => {
+    expect(supportsConnectionDatabaseBrowser("postgres")).toBe(true);
+    expect(supportsConnectionDatabaseBrowser("redis")).toBe(false);
   });
 });
 

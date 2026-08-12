@@ -156,6 +156,22 @@ function alignColumnRows(rows: ColumnFieldParts[]): string[] {
 }
 
 /**
+ * Collapse the multi-space column-alignment padding from {@link alignColumnRows}
+ * back to single spaces, keeping each line's leading indentation intact. The
+ * hover tooltip renders that padding for readability, but pasting the raw
+ * text into a plain editor (e.g. an IDE) exposes it as long literal space runs.
+ */
+export function normalizeAlignedSqlWhitespace(text: string): string {
+  return text
+    .split("\n")
+    .map((line) => {
+      const leading = /^[ \t]*/.exec(line)?.[0] ?? "";
+      return leading + line.slice(leading.length).replace(/ {2,}/g, " ");
+    })
+    .join("\n");
+}
+
+/**
  * Quote a SQL identifier by wrapping it in double quotes with proper escaping.
  */
 export function quoteIdentifier(name: string): string {

@@ -80,7 +80,7 @@ import {
   sqlObjectNavigationTypeFromCompletionObjectType,
   type SqlObjectNavigationTarget,
 } from "@/lib/sql/sqlNavigation";
-import { buildHoverTableSql, ddlForHoverPreview, hoverTableMatchesScope, quoteIdentifier, quoteQualifiedName, reformatHoverDdl, scopeHoverTables, type HoverTableScope } from "@/lib/editor/hoverTableSql";
+import { buildHoverTableSql, ddlForHoverPreview, hoverTableMatchesScope, normalizeAlignedSqlWhitespace, quoteIdentifier, quoteQualifiedName, reformatHoverDdl, scopeHoverTables, type HoverTableScope } from "@/lib/editor/hoverTableSql";
 import { constrainSqlHoverLayout } from "@/lib/editor/sqlHoverLayout";
 import { lineColumnToOffset, sqlErrorDecorationRange as resolveSqlErrorDecorationRange } from "@/lib/sql/sqlDiagnostics";
 import {
@@ -2331,6 +2331,7 @@ function createHoverDom(title: string, detail: string, sqlContent?: string, rows
   dom.appendChild(detailNode);
 
   let layoutController: ReturnType<typeof constrainSqlHoverLayout> | null = null;
+  let handleCopy: ((event: ClipboardEvent) => void) | null = null;
 
   if (sqlContent) {
     const separator = document.createElement("div");
@@ -2351,6 +2352,23 @@ function createHoverDom(title: string, detail: string, sqlContent?: string, rows
     // 返回 mount/destroy 给 CodeMirror TooltipView 生命周期钩子，
     // 避免 MutationObserver 监听 body 全子树来兜底清理。
     layoutController = constrainSqlHoverLayout(dom, sqlContainer);
+
+    // The tooltip pads column names/types with literal spaces so they line up
+    // visually (see alignColumnRows). Selecting that text and copying it via
+    // the native OS/browser copy carries those spaces verbatim, which shows
+    // up as long literal space runs when pasted into a plain-text editor.
+    // Normalize just the clipboard payload so the on-screen alignment is
+    // untouched but paste targets get clean single-spaced SQL.
+    handleCopy = (event: ClipboardEvent) => {
+      const selection = document.getSelection();
+      if (!selection || selection.isCollapsed) return;
+      if (!dom.contains(selection.anchorNode) && !dom.contains(selection.focusNode)) return;
+      const text = selection.toString();
+      const normalized = normalizeAlignedSqlWhitespace(text);
+      if (normalized === text) return;
+      event.clipboardData?.setData("text/plain", normalized);
+      event.preventDefault();
+    };
   }
 
   for (const row of rows) {
@@ -2362,8 +2380,20 @@ function createHoverDom(title: string, detail: string, sqlContent?: string, rows
 
   return {
     dom,
-    mount: layoutController ? () => layoutController?.mount() : undefined,
-    destroy: layoutController ? () => layoutController?.destroy() : undefined,
+    mount:
+      layoutController || handleCopy
+        ? () => {
+            layoutController?.mount();
+            if (handleCopy) document.addEventListener("copy", handleCopy);
+          }
+        : undefined,
+    destroy:
+      layoutController || handleCopy
+        ? () => {
+            layoutController?.destroy();
+            if (handleCopy) document.removeEventListener("copy", handleCopy);
+          }
+        : undefined,
   };
 }
 

@@ -66,6 +66,7 @@ import {
 import { usesOracleSessionCompletionColumns as shouldUseOracleSessionCompletionColumns } from "@/lib/sql/oracleCompletionSession";
 import {
   extractIdentifierDetailsAt,
+  extractQualifiedIdentifierAt,
   isSqlKeyword,
   matchSqlObject,
   matchTable,
@@ -79,7 +80,7 @@ import {
   sqlObjectNavigationTypeFromCompletionObjectType,
   type SqlObjectNavigationTarget,
 } from "@/lib/sql/sqlNavigation";
-import { buildHoverTableSql, ddlForHoverPreview, hoverTableMatchesScope, quoteQualifiedName, reformatHoverDdl, scopeHoverTables, type HoverTableScope } from "@/lib/editor/hoverTableSql";
+import { buildHoverTableSql, ddlForHoverPreview, hoverTableMatchesScope, quoteIdentifier, quoteQualifiedName, reformatHoverDdl, scopeHoverTables, type HoverTableScope } from "@/lib/editor/hoverTableSql";
 import { constrainSqlHoverLayout } from "@/lib/editor/sqlHoverLayout";
 import { lineColumnToOffset, sqlErrorDecorationRange as resolveSqlErrorDecorationRange } from "@/lib/sql/sqlDiagnostics";
 import {
@@ -1986,18 +1987,23 @@ function sqlExecutionSnapshotForRange(currentView: EditorViewType, range: Pick<S
   };
 }
 
+/**
+ * Locate the qualified identifier at `pos`, delegating to the same quote-aware
+ * parser used by Ctrl+click navigation. A plain word-character scan (the
+ * previous approach here) breaks on quoted identifiers containing characters
+ * outside `[\w$]` (hyphens, spaces, ...), e.g. `schema."my-table"`.
+ *
+ * Every part is re-quoted in the returned text (regardless of whether it was
+ * originally quoted) so downstream re-parsing via `splitQualifiedIdentifier`
+ * round-trips correctly even when a part's raw value isn't a bare word.
+ */
 function identifierRangeAt(sql: string, pos: number): { from: number; to: number; text: string } | null {
-  const isIdentifierChar = (ch: string | undefined) => !!ch && /[\w$.]/.test(ch);
-  if (!isIdentifierChar(sql[pos]) && !isIdentifierChar(sql[pos - 1])) return null;
-
-  let from = pos;
-  while (from > 0 && isIdentifierChar(sql[from - 1])) from--;
-  let to = pos;
-  while (to < sql.length && isIdentifierChar(sql[to])) to++;
-
-  const text = sql.slice(from, to).replace(/^\.+|\.+$/g, "");
-  if (!text || isSqlKeyword(text)) return null;
-  return { from, to, text };
+  const located = extractQualifiedIdentifierAt(sql, pos);
+  if (!located) return null;
+  if (located.parts.length === 1 && !located.parts[0].quoted && isSqlKeyword(located.parts[0].value)) return null;
+  const text = located.parts.map((part) => quoteIdentifier(part.value)).join(".");
+  if (!text) return null;
+  return { from: located.start, to: located.end, text };
 }
 
 type CompletionMetadataScope = Pick<SqlCompletionScope, "database" | "schema">;

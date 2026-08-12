@@ -363,8 +363,8 @@ mod tests {
 
     impl TestDirectory {
         fn new(name: &str) -> Self {
-            let task_tmp = std::env::var("DBX_TEST_TMP_DIR").expect("DBX_TEST_TMP_DIR");
-            let path = PathBuf::from(task_tmp).join(format!("dbx-saved-sql-{name}-{}", uuid::Uuid::new_v4()));
+            let task_tmp = std::env::var_os("DBX_TEST_TMP_DIR").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
+            let path = task_tmp.join(format!("dbx-saved-sql-{name}-{}", uuid::Uuid::new_v4()));
             std::fs::create_dir_all(&path).unwrap();
             Self(path)
         }

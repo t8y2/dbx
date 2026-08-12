@@ -5695,7 +5695,7 @@ export default withEnglishFallback({
     showInsertValueHintsDescription: "开启后，在 INSERT ... VALUES 子句的每个值旁显示对应列名提示。",
     previewStatementRunButton: "预览语句执行按钮",
     wordWrap: "自动换行",
-    wordWrapDescription: "长 SQL 在编辑器宽度内自动折行显示",
+    wordWrapDescription: "长内容在编辑器宽度内自动折行显示",
     vimMode: "Vim 模式",
     vimModeDescription: "在 SQL 编辑器中使用 Vim 风格的模态编辑",
     autoCloseBrackets: "自动成对补全",

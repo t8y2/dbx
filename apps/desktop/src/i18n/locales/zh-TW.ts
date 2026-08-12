@@ -4838,7 +4838,7 @@ export default withEnglishFallback({
     showInsertValueHintsDescription: "啟用後，在 INSERT ... VALUES 子句的每個值旁顯示對應欄位名稱提示。",
     previewStatementRunButton: "預覽語句執行按鈕",
     wordWrap: "自動換行",
-    wordWrapDescription: "長 SQL 在編輯器寬度內自動折行顯示",
+    wordWrapDescription: "長內容在編輯器寬度內自動折行顯示",
     vimMode: "Vim 模式",
     vimModeDescription: "在 SQL 編輯器中使用 Vim 風格的模態編輯",
     autoCloseBrackets: "自動成對補全",

@@ -5501,7 +5501,7 @@ export default withEnglishFallback({
     showInsertValueHintsDescription: "Quando ativado, o editor SQL mostra o nome da coluna ao lado de cada valor em cláusulas INSERT ... VALUES.",
     previewStatementRunButton: "Botão de execução de instrução na prévia",
     wordWrap: "Quebra de linha",
-    wordWrapDescription: "Quebrar linhas SQL longas dentro da largura do editor",
+    wordWrapDescription: "Quebrar linhas longas dentro da largura do editor",
     vimMode: "Modo Vim",
     vimModeDescription: "Usar edição modal no estilo Vim no editor SQL",
     autoCloseBrackets: "Fechar parênteses automaticamente",

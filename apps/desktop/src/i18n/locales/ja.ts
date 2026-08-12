@@ -5528,7 +5528,7 @@ export default withEnglishFallback({
     showInsertValueHintsDescription: "有効にすると、INSERT ... VALUES 句の各値の横に対応する列名ヒントを表示します。",
     previewStatementRunButton: "文の実行ボタンのプレビュー",
     wordWrap: "折り返し",
-    wordWrapDescription: "長いSQL行をエディタ幅内で折り返します",
+    wordWrapDescription: "長い行をエディタ幅内で折り返します",
     vimMode: "Vimモード",
     vimModeDescription: "SQLエディタでVim形式のモーダル編集を使用します",
     autoCloseBrackets: "自動括弧補完",

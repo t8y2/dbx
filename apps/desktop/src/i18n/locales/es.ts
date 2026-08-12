@@ -5499,7 +5499,7 @@ export default withEnglishFallback({
     showInsertValueHintsDescription: "Al activarlo, el editor SQL muestra el nombre de columna junto a cada valor en cláusulas INSERT ... VALUES.",
     previewStatementRunButton: "Botón de ejecución de sentencia en vista previa",
     wordWrap: "Ajuste de línea",
-    wordWrapDescription: "Ajustar las líneas largas de SQL al ancho del editor",
+    wordWrapDescription: "Ajustar las líneas largas al ancho del editor",
     vimMode: "Modo Vim",
     vimModeDescription: "Usar edición modal estilo Vim en el editor SQL",
     autoCloseBrackets: "Cerrar paréntesis automáticamente",

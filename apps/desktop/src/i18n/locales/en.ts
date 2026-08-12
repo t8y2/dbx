@@ -5774,7 +5774,7 @@ export default {
     showInsertValueHintsDescription: "When enabled, the SQL editor shows column-name hints next to each value in INSERT ... VALUES clauses.",
     previewStatementRunButton: "Preview statement run button",
     wordWrap: "Word wrap",
-    wordWrapDescription: "Wrap long SQL lines within the editor width",
+    wordWrapDescription: "Wrap long lines within the editor width",
     vimMode: "Vim mode",
     vimModeDescription: "Use Vim-style modal editing in the SQL editor",
     autoCloseBrackets: "Auto-close brackets",

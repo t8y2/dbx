@@ -5261,7 +5261,7 @@ export default withEnglishFallback({
     showInsertValueHintsDescription: "활성화하면 SQL 편집기가 INSERT ... VALUES 절의 각 값 옆에 컬럼 이름 힌트를 표시합니다.",
     previewStatementRunButton: "구문 실행 버튼 미리보기",
     wordWrap: "자동 줄바꿈",
-    wordWrapDescription: "편집기 너비 내에서 긴 SQL 줄을 줄바꿈합니다",
+    wordWrapDescription: "편집기 너비 내에서 긴 줄을 줄바꿈합니다",
     vimMode: "Vim 모드",
     vimModeDescription: "SQL 편집기에서 Vim 스타일의 모달 편집을 사용합니다",
     autoCloseBrackets: "괄호 자동 닫기",

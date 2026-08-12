@@ -1,0 +1,472 @@
+package com.dbx.agent.spanner;
+
+import com.dbx.agent.ColumnInfo;
+import com.dbx.agent.ConnectParams;
+import com.dbx.agent.DatabaseAgent;
+import com.dbx.agent.DatabaseInfo;
+import com.dbx.agent.ForeignKeyInfo;
+import com.dbx.agent.IndexInfo;
+import com.dbx.agent.TableInfo;
+import com.dbx.agent.test.JdbcFakeExecutionBehaviorTest;
+import com.dbx.agent.test.TestSupport;
+import org.junit.jupiter.api.Test;
+
+import java.lang.reflect.Field;
+import java.lang.reflect.InvocationHandler;
+import java.lang.reflect.Method;
+import java.lang.reflect.Proxy;
+import java.sql.Connection;
+import java.sql.DatabaseMetaData;
+import java.sql.ResultSet;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+class SpannerAgentTest extends JdbcFakeExecutionBehaviorTest {
+    private static final String GOOGLE_SQL_PRODUCT = "Google Cloud Spanner";
+    private static final String POSTGRES_PRODUCT = "Google Cloud Spanner PostgreSQL";
+
+    @Override
+    protected DatabaseAgent createAgent() {
+        return new SpannerAgent();
+    }
+
+    @Override
+    protected String resultSetSql() {
+        return "SHOW VARIABLE AUTOCOMMIT";
+    }
+
+    @Test
+    void usesBacktickIdentifierQuoteForGoogleSqlDialect() {
+        SpannerAgent agent = new SpannerAgent();
+
+        agent.detectDialect(fakeConnection(GOOGLE_SQL_PRODUCT, null, new LinkedHashMap<>()));
+
+        assertEquals("`", agent.getIdentifierQuote());
+    }
+
+    @Test
+    void usesDoubleQuoteIdentifierQuoteForPostgresDialect() {
+        SpannerAgent agent = new SpannerAgent();
+
+        agent.detectDialect(fakeConnection(POSTGRES_PRODUCT, "public", new LinkedHashMap<>()));
+
+        assertEquals("\"", agent.getIdentifierQuote());
+    }
+
+    @Test
+    void keepsBacktickQuoteBeforeTheDialectIsProbed() {
+        assertEquals("`", new SpannerAgent().getIdentifierQuote());
+    }
+
+    @Test
+    void reportsTheEmptyGoogleSqlSchemaInsteadOfDroppingIt() {
+        SpannerAgent agent = connectedAgent(GOOGLE_SQL_PRODUCT, null, new LinkedHashMap<>());
+
+        assertEquals(Collections.singletonList(""), agent.listSchemas());
+    }
+
+    @Test
+    void reportsThePostgresDialectSchema() {
+        SpannerAgent agent = connectedAgent(POSTGRES_PRODUCT, "public", new LinkedHashMap<>());
+
+        assertEquals(Collections.singletonList("public"), agent.listSchemas());
+    }
+
+    @Test
+    void passesTheEmptyGoogleSqlSchemaVerbatimToTheDriver() {
+        List<String> calls = new ArrayList<>();
+        Map<String, List<Map<String, Object>>> rows = new LinkedHashMap<>();
+        rows.put("getTables", Arrays.asList(
+            row("TABLE_NAME", "singers", "TABLE_TYPE", "TABLE"),
+            row("TABLE_NAME", "v_singer_albums", "TABLE_TYPE", "VIEW")
+        ));
+        SpannerAgent agent = connectedAgent(GOOGLE_SQL_PRODUCT, null, rows, calls);
+
+        List<TableInfo> tables = agent.listTables("");
+
+        assertEquals(Arrays.asList("singers", "v_singer_albums"), names(tables));
+        assertEquals("TABLE", tables.get(0).getTable_type());
+        assertEquals("VIEW", tables.get(1).getTable_type());
+        // Empty string, never null: null would also return the INFORMATION_SCHEMA/SPANNER_SYS views.
+        assertEquals(Collections.singletonList("getTables(catalog=null, schema=[], pattern=%, types=[TABLE, VIEW])"), calls);
+    }
+
+    @Test
+    void fallsBackToTheDialectSchemaWhenTheCallerSendsNone() {
+        List<String> calls = new ArrayList<>();
+        Map<String, List<Map<String, Object>>> rows = new LinkedHashMap<>();
+        rows.put("getTables", Collections.emptyList());
+        SpannerAgent agent = connectedAgent(POSTGRES_PRODUCT, "public", rows, calls);
+
+        agent.listTables(null);
+
+        assertEquals(
+            Collections.singletonList("getTables(catalog=null, schema=[public], pattern=%, types=[TABLE, VIEW])"),
+            calls
+        );
+    }
+
+    @Test
+    void treatsTheResourcePathAsAnUnspecifiedSchema() {
+        List<String> calls = new ArrayList<>();
+        Map<String, List<Map<String, Object>>> rows = new LinkedHashMap<>();
+        rows.put("getTables", Collections.singletonList(row("TABLE_NAME", "singers", "TABLE_TYPE", "TABLE")));
+        SpannerAgent agent = connectedAgent(GOOGLE_SQL_PRODUCT, null, rows, calls);
+
+        // Hosts without a schema level send the database identifier as the metadata schema, and for
+        // Spanner that identifier is the resource path. Forwarding it verbatim matches nothing.
+        assertEquals(
+            Collections.singletonList("singers"),
+            names(agent.listTables("projects/test-project/instances/test-instance/databases/gsqldb"))
+        );
+        assertEquals(Collections.singletonList("getTables(catalog=null, schema=[], pattern=%, types=[TABLE, VIEW])"), calls);
+    }
+
+    @Test
+    void resolvesTheSchemaBeforeRenderingTableDdl() {
+        Map<String, List<Map<String, Object>>> rows = new LinkedHashMap<>();
+        rows.put("getColumns", Collections.singletonList(row(
+            "COLUMN_NAME", "singer_id",
+            "TYPE_NAME", "INT64",
+            "NULLABLE", DatabaseMetaData.columnNoNulls
+        )));
+        SpannerAgent agent = connectedAgent(GOOGLE_SQL_PRODUCT, null, rows);
+
+        String ddl = agent.getTableDdl("projects/test-project/instances/test-instance/databases/gsqldb", "singers");
+
+        // The resource path must not become a DDL qualifier, and the columns must still resolve.
+        assertFalse(ddl.contains("projects/"));
+        assertTrue(ddl.contains("singers"));
+        assertTrue(ddl.contains("singer_id"));
+    }
+
+    @Test
+    void skipsStoringIndexColumnsThatHaveNoOrdinalPosition() {
+        Map<String, List<Map<String, Object>>> rows = new LinkedHashMap<>();
+        rows.put("getIndexInfo", Arrays.asList(
+            indexRow("PRIMARY_KEY", "singer_id", 1, false),
+            indexRow("PRIMARY_KEY", "album_id", 2, false),
+            // STORING (GoogleSQL) / INCLUDE (PostgreSQL) column: ORDINAL_POSITION is NULL and the
+            // driver returns it before the real key column.
+            indexRow("idx_albums_title", "release_ts", null, true),
+            indexRow("idx_albums_title", "title", 1, true)
+        ));
+        SpannerAgent agent = connectedAgent(GOOGLE_SQL_PRODUCT, null, rows);
+
+        List<IndexInfo> indexes = agent.listIndexes("", "albums");
+
+        assertEquals(2, indexes.size());
+        IndexInfo primaryKey = indexes.get(0);
+        assertEquals("PRIMARY_KEY", primaryKey.getName());
+        assertEquals(Arrays.asList("singer_id", "album_id"), primaryKey.getColumns());
+        assertTrue(primaryKey.getIs_unique());
+        // Spanner names the primary key index PRIMARY_KEY, so a "PRIMARY" comparison never matches.
+        assertTrue(primaryKey.getIs_primary());
+        assertNull(primaryKey.getIncluded_columns());
+
+        IndexInfo secondary = indexes.get(1);
+        assertEquals("idx_albums_title", secondary.getName());
+        assertEquals(Collections.singletonList("title"), secondary.getColumns());
+        assertEquals(Collections.singletonList("release_ts"), secondary.getIncluded_columns());
+        assertFalse(secondary.getIs_unique());
+        assertFalse(secondary.getIs_primary());
+    }
+
+    @Test
+    void skipsUnnamedInterleaveRelationshipsReportedAsForeignKeys() {
+        Map<String, List<Map<String, Object>>> rows = new LinkedHashMap<>();
+        rows.put("getImportedKeys", Arrays.asList(
+            row(
+                "FK_NAME", null,
+                "FKCOLUMN_NAME", "singer_id",
+                "PKTABLE_NAME", "singers",
+                "PKCOLUMN_NAME", "singer_id"
+            ),
+            row(
+                "FK_NAME", "fk_concerts_singer",
+                "FKCOLUMN_NAME", "singer_id",
+                "PKTABLE_NAME", "singers",
+                "PKCOLUMN_NAME", "singer_id"
+            )
+        ));
+        SpannerAgent agent = connectedAgent(GOOGLE_SQL_PRODUCT, null, rows);
+
+        List<ForeignKeyInfo> foreignKeys = agent.listForeignKeys("", "albums");
+
+        assertEquals(1, foreignKeys.size());
+        assertEquals("fk_concerts_singer", foreignKeys.get(0).getName());
+    }
+
+    @Test
+    void keepsNativeSpannerTypeNamesOnColumns() {
+        Map<String, List<Map<String, Object>>> rows = new LinkedHashMap<>();
+        rows.put("getPrimaryKeys", Collections.singletonList(row("COLUMN_NAME", "singer_id")));
+        rows.put("getColumns", Arrays.asList(
+            row(
+                "COLUMN_NAME", "singer_id",
+                "TYPE_NAME", "INT64",
+                "NULLABLE", DatabaseMetaData.columnNoNulls
+            ),
+            row(
+                "COLUMN_NAME", "tags",
+                "TYPE_NAME", "ARRAY<STRING(MAX)>",
+                "NULLABLE", DatabaseMetaData.columnNullable
+            )
+        ));
+        SpannerAgent agent = connectedAgent(GOOGLE_SQL_PRODUCT, null, rows);
+
+        List<ColumnInfo> columns = agent.getColumns("", "singers");
+
+        assertEquals(Arrays.asList("singer_id", "tags"), Arrays.asList(
+            columns.get(0).getName(),
+            columns.get(1).getName()
+        ));
+        assertEquals("INT64", columns.get(0).getData_type());
+        assertTrue(columns.get(0).getIs_primary_key());
+        assertFalse(columns.get(0).getIs_nullable());
+        assertEquals("ARRAY<STRING(MAX)>", columns.get(1).getData_type());
+        assertFalse(columns.get(1).getIs_primary_key());
+        assertTrue(columns.get(1).getIs_nullable());
+    }
+
+    @Test
+    void reportsTheConfiguredDatabaseOnlyOnce() {
+        SpannerAgent agent = connectedAgent(POSTGRES_PRODUCT, "public", new LinkedHashMap<>());
+        String resourcePath = "projects/test-project/instances/test-instance/databases/pgdb";
+        setConfiguredDatabase(agent, resourcePath);
+
+        // The shared adapter reports [pgdb, projects/.../databases/pgdb] for the PostgreSQL dialect.
+        assertEquals(Collections.singletonList(resourcePath), databaseNames(agent.listDatabases()));
+    }
+
+    @Test
+    void omitsTheEndpointWhenNoHostIsConfigured() {
+        ConnectParams params = new ConnectParams();
+        params.setDatabase("projects/p/instances/i/databases/d");
+
+        assertEquals("jdbc:cloudspanner:/projects/p/instances/i/databases/d", SpannerAgent.spannerUrl(params));
+    }
+
+    @Test
+    void buildsAnEndpointUrlForTheEmulator() {
+        ConnectParams params = new ConnectParams();
+        params.setHost("localhost");
+        params.setPort(9010);
+        params.setDatabase("projects/p/instances/i/databases/d");
+        params.setUrl_params("usePlainText=true;autoConfigEmulator=true");
+
+        assertEquals(
+            "jdbc:cloudspanner://localhost:9010/projects/p/instances/i/databases/d"
+                + "?usePlainText=true;autoConfigEmulator=true",
+            SpannerAgent.spannerUrl(params)
+        );
+    }
+
+    @Test
+    void usesTheDefaultPortWhenNoneIsConfigured() {
+        ConnectParams params = new ConnectParams();
+        params.setHost("spanner.googleapis.com");
+        params.setDatabase("projects/p/instances/i/databases/d");
+
+        assertEquals(
+            "jdbc:cloudspanner://spanner.googleapis.com:443/projects/p/instances/i/databases/d",
+            SpannerAgent.spannerUrl(params)
+        );
+    }
+
+    @Test
+    void skipsSchemaSwitchingBecauseSpannerHasNoSchemaStatement() {
+        assertEquals("", new SpannerAgent().setSchemaSQL("public"));
+    }
+
+    private static List<String> names(List<TableInfo> tables) {
+        List<String> result = new ArrayList<>();
+        for (TableInfo table : tables) {
+            result.add(table.getName());
+        }
+        return result;
+    }
+
+    private static List<String> databaseNames(List<DatabaseInfo> databases) {
+        List<String> result = new ArrayList<>();
+        for (DatabaseInfo database : databases) {
+            result.add(database.getName());
+        }
+        return result;
+    }
+
+    private static void setConfiguredDatabase(SpannerAgent agent, String database) {
+        for (Class<?> type = agent.getClass(); type != null; type = type.getSuperclass()) {
+            try {
+                Field field = type.getDeclaredField("configuredDatabase");
+                field.setAccessible(true);
+                field.set(agent, database);
+            } catch (NoSuchFieldException ignored) {
+                continue;
+            } catch (IllegalAccessException e) {
+                throw new IllegalStateException(e);
+            }
+        }
+    }
+
+    private static SpannerAgent connectedAgent(
+        String product,
+        String schema,
+        Map<String, List<Map<String, Object>>> rowsByCall
+    ) {
+        return connectedAgent(product, schema, rowsByCall, new ArrayList<>());
+    }
+
+    private static SpannerAgent connectedAgent(
+        String product,
+        String schema,
+        Map<String, List<Map<String, Object>>> rowsByCall,
+        List<String> calls
+    ) {
+        SpannerAgent agent = new SpannerAgent();
+        Connection conn = fakeConnection(product, schema, rowsByCall, calls);
+        agent.detectDialect(conn);
+        TestSupport.setPrivateConnection(agent, conn);
+        return agent;
+    }
+
+    private static Connection fakeConnection(
+        String product,
+        String schema,
+        Map<String, List<Map<String, Object>>> rowsByCall
+    ) {
+        return fakeConnection(product, schema, rowsByCall, new ArrayList<>());
+    }
+
+    private static Connection fakeConnection(
+        String product,
+        String schema,
+        Map<String, List<Map<String, Object>>> rowsByCall,
+        List<String> calls
+    ) {
+        DatabaseMetaData metaData = fakeMetaData(product, rowsByCall, calls);
+        return proxy(Connection.class, (method, args) -> {
+            String name = method.getName();
+            if ("getMetaData".equals(name)) {
+                return metaData;
+            }
+            if ("getSchema".equals(name)) {
+                return schema;
+            }
+            return defaultValue(method.getReturnType());
+        });
+    }
+
+    private static DatabaseMetaData fakeMetaData(
+        String product,
+        Map<String, List<Map<String, Object>>> rowsByCall,
+        List<String> calls
+    ) {
+        return proxy(DatabaseMetaData.class, (method, args) -> {
+            String name = method.getName();
+            if ("getDatabaseProductName".equals(name)) {
+                return product;
+            }
+            if ("getTables".equals(name)) {
+                calls.add("getTables(catalog=" + args[0] + ", schema=[" + args[1] + "], pattern=" + args[2]
+                    + ", types=" + Arrays.toString((String[]) args[3]) + ")");
+                return fakeResultSet(rowsByCall.get("getTables"));
+            }
+            if ("getColumns".equals(name) || "getPrimaryKeys".equals(name)
+                || "getIndexInfo".equals(name) || "getImportedKeys".equals(name)) {
+                calls.add(name + "(catalog=" + args[0] + ", schema=[" + args[1] + "], table=" + args[2] + ")");
+                return fakeResultSet(rowsByCall.get(name));
+            }
+            if ("getSearchStringEscape".equals(name)) {
+                return "\\";
+            }
+            if ("getIdentifierQuoteString".equals(name)) {
+                // The driver hardcodes a backtick for both dialects; the agent must not trust it.
+                return "`";
+            }
+            return defaultValue(method.getReturnType());
+        });
+    }
+
+    private static ResultSet fakeResultSet(List<Map<String, Object>> rows) {
+        List<Map<String, Object>> values = rows == null ? Collections.emptyList() : rows;
+        int[] index = {-1};
+        return proxy(ResultSet.class, (method, args) -> {
+            String name = method.getName();
+            if ("next".equals(name)) {
+                index[0] += 1;
+                return index[0] < values.size();
+            }
+            if ("getString".equals(name)) {
+                Object value = values.get(index[0]).get((String) args[0]);
+                return value == null ? null : String.valueOf(value);
+            }
+            if ("getObject".equals(name)) {
+                return values.get(index[0]).get((String) args[0]);
+            }
+            if ("getInt".equals(name)) {
+                Object value = values.get(index[0]).get((String) args[0]);
+                return value instanceof Number ? ((Number) value).intValue() : 0;
+            }
+            if ("getBoolean".equals(name)) {
+                Object value = values.get(index[0]).get((String) args[0]);
+                return Boolean.TRUE.equals(value);
+            }
+            return defaultValue(method.getReturnType());
+        });
+    }
+
+    private static Map<String, Object> row(Object... keyValues) {
+        Map<String, Object> result = new LinkedHashMap<>();
+        for (int i = 0; i < keyValues.length; i += 2) {
+            result.put((String) keyValues[i], keyValues[i + 1]);
+        }
+        return result;
+    }
+
+    private static Map<String, Object> indexRow(String indexName, String column, Integer ordinal, boolean nonUnique) {
+        return row(
+            "INDEX_NAME", indexName,
+            "COLUMN_NAME", column,
+            "ORDINAL_POSITION", ordinal,
+            "NON_UNIQUE", nonUnique
+        );
+    }
+
+    @SuppressWarnings("unchecked")
+    private static <T> T proxy(Class<T> type, MethodHandler handler) {
+        InvocationHandler invocationHandler = new InvocationHandler() {
+            @Override
+            public Object invoke(Object instance, Method method, Object[] args) throws Throwable {
+                return handler.handle(method, args == null ? new Object[0] : args);
+            }
+        };
+        return (T) Proxy.newProxyInstance(type.getClassLoader(), new Class<?>[]{type}, invocationHandler);
+    }
+
+    private static Object defaultValue(Class<?> type) {
+        if (Boolean.TYPE.equals(type)) {
+            return false;
+        }
+        if (Integer.TYPE.equals(type)) {
+            return 0;
+        }
+        if (Short.TYPE.equals(type)) {
+            return (short) 0;
+        }
+        return null;
+    }
+
+    private interface MethodHandler {
+        Object handle(Method method, Object[] args) throws Throwable;
+    }
+}

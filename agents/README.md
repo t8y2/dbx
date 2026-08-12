@@ -36,6 +36,7 @@ Each agent runs as a standalone process and communicates with DBX via stdin/stdo
 | neo4j | Neo4j | Official Neo4j Go Driver native agent |
 | cassandra | Apache Cassandra 2.1+ | Apache cassandra-gocql-driver native agent |
 | bigquery | Google BigQuery | BigQuery JDBC |
+| spanner | Google Cloud Spanner | Google Cloud Spanner JDBC |
 | kylin | Apache Kylin | Kylin JDBC |
 | ignite | Apache Ignite | Ignite JDBC thin (ignite-core) |
 | ignite3 | Apache Ignite 3 | Ignite 3 JDBC thin (ignite-jdbc) |

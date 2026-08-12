@@ -1065,7 +1065,11 @@ async function locateActiveTabInSidebar() {
   if (!nodePath) return;
 
   for (const ancestor of nodePath) {
-    if (!ancestor.isExpanded) {
+    // Only flip the arrow when this node's own children are already loaded
+    // (e.g. by ensureTreeLoadedForTarget above). Forcing isExpanded on a
+    // table/collection whose column/index groups were never fetched shows an
+    // "expanded" arrow with no content underneath (issue #5850).
+    if (!ancestor.isExpanded && store.canUseLoadedTreeNodeToggle(ancestor)) {
       ancestor.isExpanded = true;
     }
   }

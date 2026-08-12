@@ -9,6 +9,7 @@ import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useToast } from "@/composables/useToast";
 import { copyToClipboard } from "@/lib/common/clipboard";
+import { saveTextFile } from "@/lib/export/saveTextFile";
 import {
   DEFAULT_SQL_FORMATTER_SETTINGS,
   SQL_FORMATTER_CONFIG_FORMATTER,
@@ -299,16 +300,8 @@ async function onImportFile(event: Event) {
   }
 }
 
-function exportConfig() {
-  const blob = new Blob([serializeSqlFormatterConfig(settings.value)], { type: "application/json" });
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = "dbx-sql-formatter.json";
-  document.body.appendChild(link);
-  link.click();
-  link.remove();
-  URL.revokeObjectURL(url);
+async function exportConfig() {
+  await saveTextFile(serializeSqlFormatterConfig(settings.value), "dbx-sql-formatter.json", "JSON", "json");
 }
 
 async function copyJsonDraft() {

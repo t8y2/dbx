@@ -2364,6 +2364,7 @@ function createHoverDom(title: string, detail: string, sqlContent?: string, rows
       if (!selection || selection.isCollapsed) return;
       if (!dom.contains(selection.anchorNode) && !dom.contains(selection.focusNode)) return;
       const text = selection.toString();
+      if (text !== sqlContent) return;
       const normalized = normalizeAlignedSqlWhitespace(text);
       if (normalized === text) return;
       event.clipboardData?.setData("text/plain", normalized);

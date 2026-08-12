@@ -342,4 +342,20 @@ describe("normalizeAlignedSqlWhitespace", () => {
     const text = "create table t (a int);";
     expect(normalizeAlignedSqlWhitespace(text)).toBe(text);
   });
+
+  it("preserves semantic whitespace in literals, identifiers, and comments", () => {
+    const aligned = `create table t (
+    "display  name" varchar(20) default 'a  b' not null, -- keep  this
+    [comment  text]  varchar(20) comment 'first  second',
+    escaped         varchar(20) default 'it\\'s  spaced',
+    body            text default $$x  y$$ /* keep  that */
+);`;
+
+    expect(normalizeAlignedSqlWhitespace(aligned)).toBe(`create table t (
+    "display  name" varchar(20) default 'a  b' not null, -- keep  this
+    [comment  text] varchar(20) comment 'first  second',
+    escaped varchar(20) default 'it\\'s  spaced',
+    body text default $$x  y$$ /* keep  that */
+);`);
+  });
 });

@@ -127,6 +127,7 @@ function onContextMenu(event: MouseEvent, itemsOverride?: ContextMenuItem[]) {
   event.stopPropagation();
   x.value = event.clientX;
   y.value = event.clientY;
+  contextMenuRegistration?.activate();
   show.value = true;
   emit("open");
   nextTick(() => {

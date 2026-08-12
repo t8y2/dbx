@@ -53,11 +53,18 @@ describe("CustomContextMenu lifecycle", () => {
     expect(firstOpen).toHaveBeenCalledTimes(1);
     expect(firstClose).not.toHaveBeenCalled();
 
+    firstTarget?.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true }));
+    await nextTick();
+    expect(firstTarget?.getAttribute("data-context-open")).toBe("true");
+    expect(secondTarget?.getAttribute("data-context-open")).toBe("false");
+    expect(firstOpen).toHaveBeenCalledTimes(2);
+    expect(firstClose).toHaveBeenCalledTimes(1);
+
     secondTarget?.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true }));
     await nextTick();
     expect(firstTarget?.getAttribute("data-context-open")).toBe("false");
     expect(secondTarget?.getAttribute("data-context-open")).toBe("true");
-    expect(firstClose).toHaveBeenCalledTimes(1);
+    expect(firstClose).toHaveBeenCalledTimes(2);
     expect(secondOpen).toHaveBeenCalledTimes(1);
 
     window.dispatchEvent(new Event("resize"));

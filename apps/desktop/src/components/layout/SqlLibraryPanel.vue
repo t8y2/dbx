@@ -531,7 +531,7 @@ function folderRowClass(folderId: string): string {
 }
 
 function fileMetaClass(fileId: string): string {
-  return isFileSelected(fileId) || isFileActive(fileId) || isContextFile(fileId) ? "text-foreground/70" : "text-muted-foreground";
+  return isFileSelected(fileId) || isFileActive(fileId) || isContextFile(fileId) ? "text-accent-foreground" : "text-muted-foreground";
 }
 
 function isFileDirty(file: SavedSqlFile): boolean {

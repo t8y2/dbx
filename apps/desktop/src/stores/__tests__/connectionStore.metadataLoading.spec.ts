@@ -1679,6 +1679,110 @@ describe("connectionStore metadata loading", () => {
     expect(storedProcedureGroup?.children?.map((node) => node.label)).toEqual(["p_0999"]);
   });
 
+  it("merges Xugu package body metadata when it arrives on the next page", async () => {
+    const packageSpec: ObjectInfo = {
+      name: "business_api",
+      object_type: "PACKAGE",
+      schema: "app_schema",
+      valid: true,
+      comment: null,
+      created_at: null,
+      updated_at: null,
+      parent_schema: null,
+      parent_name: null,
+    };
+    const packageBody: ObjectInfo = {
+      ...packageSpec,
+      object_type: "PACKAGE_BODY",
+      valid: false,
+    };
+    const listObjects = vi.fn().mockResolvedValueOnce([packageSpec, packageBody]).mockResolvedValueOnce([packageBody]);
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+      listObjects,
+      loadSchemaCache: vi.fn().mockResolvedValue(null),
+      saveSchemaCache: vi.fn().mockResolvedValue(undefined),
+      saveConnections: vi.fn().mockResolvedValue(undefined),
+      saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const store = useConnectionStore();
+    const settingsStore = useSettingsStore();
+    settingsStore.editorSettings.sidebarObjectDisplay = "grouped";
+    settingsStore.desktopSettings.sidebar_table_page_size = 1;
+
+    const connection = xuguConnection();
+    const packageGroup: TreeNode = {
+      id: "xugu-1:app_db:app_schema:__packages",
+      label: "tree.packages",
+      type: "group-packages",
+      connectionId: connection.id,
+      database: "app_db",
+      schema: "app_schema",
+      isExpanded: false,
+      children: [],
+    };
+    store.connections = [connection];
+    store.connectedIds.add(connection.id);
+    store.treeNodes = [
+      {
+        id: connection.id,
+        label: connection.name,
+        type: "connection",
+        connectionId: connection.id,
+        isExpanded: true,
+        children: [
+          {
+            id: "xugu-1:app_db",
+            label: "app_db",
+            type: "database",
+            connectionId: connection.id,
+            database: "app_db",
+            isExpanded: true,
+            children: [
+              {
+                id: "xugu-1:app_db:app_schema",
+                label: "app_schema",
+                type: "schema",
+                connectionId: connection.id,
+                database: "app_db",
+                schema: "app_schema",
+                isExpanded: true,
+                children: [packageGroup],
+              },
+            ],
+          },
+        ],
+      },
+    ];
+
+    await store.loadObjectGroupChildren(packageGroup);
+    const packageNode = packageGroup.children?.[0];
+    expect(packageNode).toEqual(expect.objectContaining({ type: "package", label: "business_api", xuguPackageBodyAvailable: undefined, valid: true }));
+    const packageNodeId = packageNode?.id;
+
+    const loadMoreNode = packageGroup.children?.at(-1);
+    expect(loadMoreNode?.type).toBe("load-more");
+    await store.loadMoreObjectGroupChildren(loadMoreNode!);
+
+    expect(packageGroup.children).toHaveLength(1);
+    expect(packageGroup.children?.[0]?.id).toBe(packageNodeId);
+    expect(packageGroup.children?.[0]).toEqual(
+      expect.objectContaining({
+        type: "package",
+        label: "business_api",
+        xuguPackageBodyAvailable: true,
+        xuguPackageBodyValid: false,
+        valid: false,
+      }),
+    );
+  });
+
   it("reloads a collapsed database after a forced connection database refresh", async () => {
     const listDatabases = vi
       .fn()

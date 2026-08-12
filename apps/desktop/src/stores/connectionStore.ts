@@ -1641,12 +1641,20 @@ export const useConnectionStore = defineStore("connection", () => {
     const tableChildren = pageChildren.filter((child) => child.type === "table");
     const nonTableChildren = pageChildren.filter((child) => child.type !== "table");
     let merged = tableChildren.length ? mergeTableTreePageChildren(currentChildren, tableChildren, connectionId, database) : [...currentChildren];
-    const existing = new Set(merged.map(treeNodeObjectIdentity));
+    const existing = new Map(merged.map((node) => [treeNodeObjectIdentity(node), node]));
     for (const child of nonTableChildren) {
       const key = treeNodeObjectIdentity(child);
-      if (existing.has(key)) continue;
+      const existingNode = existing.get(key);
+      if (existingNode) {
+        if (child.type === "package" && child.xuguPackageBodyAvailable === true) {
+          existingNode.xuguPackageBodyAvailable = true;
+          existingNode.xuguPackageBodyValid = child.xuguPackageBodyValid;
+          existingNode.valid = existingNode.valid === false || child.valid === false ? false : (existingNode.valid ?? child.valid ?? null);
+        }
+        continue;
+      }
       merged.push(child);
-      existing.add(key);
+      existing.set(key, child);
     }
     const config = parent.connectionId ? getConfig(parent.connectionId) : undefined;
     return sortSidebarTreeChildrenForParent(

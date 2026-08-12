@@ -4399,6 +4399,7 @@ export default withEnglishFallback({
     type: "型",
     value: "値",
     valuePlaceholder: "値を入力",
+    collectionValuePlaceholder: "JSON 配列またはカンマ区切りの値を入力",
     preview: "SQLプレビュー",
     execute: "実行",
     kind: {

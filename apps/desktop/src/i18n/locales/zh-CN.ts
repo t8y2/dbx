@@ -4504,6 +4504,7 @@ export default withEnglishFallback({
     type: "类型",
     value: "参数值",
     valuePlaceholder: "输入参数值",
+    collectionValuePlaceholder: "输入 JSON 数组或逗号分隔值",
     preview: "SQL 预览",
     execute: "执行",
     kind: {

@@ -14,6 +14,7 @@ export interface SqlParameterDescriptor {
   name: string;
   syntax: SqlParameterSyntax;
   token: string;
+  collection?: boolean;
 }
 
 export interface SqlBracedParameter extends SqlParameterDescriptor {
@@ -24,7 +25,16 @@ export interface SqlBracedParameter extends SqlParameterDescriptor {
 interface ParameterOccurrence extends SqlParameterDescriptor {
   start: number;
   end: number;
-  replacement?: "string-fragment";
+  replacement?: "string-fragment" | "mybatis-foreach";
+  foreach?: MyBatisForeach;
+}
+
+interface MyBatisForeach {
+  item: string;
+  open: string;
+  separator: string;
+  close: string;
+  body: string;
 }
 
 interface DuckDbStructLiteralContext {
@@ -150,15 +160,30 @@ export function extractSqlParameters(sql: string, options?: SqlParameterOptions)
 export function extractSqlParameterDescriptors(sql: string, options?: SqlParameterOptions): SqlParameterDescriptor[] {
   const names = new Set<string>();
   const descriptors: SqlParameterDescriptor[] = [];
+  const appendDescriptor = (descriptor: SqlParameterDescriptor) => {
+    if (names.has(descriptor.key)) {
+      if (descriptor.collection) {
+        const existing = descriptors.find((item) => item.key === descriptor.key);
+        if (existing) Object.assign(existing, { token: descriptor.token, collection: true });
+      }
+      return;
+    }
+    names.add(descriptor.key);
+    descriptors.push(descriptor);
+  };
   for (const occurrence of findSqlParameterOccurrences(sql, options)) {
-    if (names.has(occurrence.key)) continue;
-    names.add(occurrence.key);
-    descriptors.push({
+    appendDescriptor({
       key: occurrence.key,
       name: occurrence.name,
       syntax: occurrence.syntax,
       token: occurrence.token,
+      ...(occurrence.collection ? { collection: true } : {}),
     });
+    if (occurrence.replacement === "mybatis-foreach" && occurrence.foreach) {
+      for (const nested of extractSqlParameterDescriptors(occurrence.foreach.body, options)) {
+        if (nested.key !== occurrence.foreach.item) appendDescriptor(nested);
+      }
+    }
   }
   return descriptors;
 }
@@ -173,6 +198,11 @@ export function substituteSqlParameters(sql: string, values: Record<string, SqlP
   for (const occurrence of occurrences) {
     result += decodeSourceFragment(sql.slice(cursor, occurrence.start));
     const input = values[occurrence.key] ?? { kind: "string", value: "" };
+    if (occurrence.replacement === "mybatis-foreach" && occurrence.foreach) {
+      result += renderMyBatisForeach(occurrence.foreach, input, values, options);
+      cursor = occurrence.end;
+      continue;
+    }
     // Embedded placeholders stay inside the surrounding SQL string, so their value
     // must be escaped as text instead of being wrapped in a second SQL literal.
     result += occurrence.replacement === "string-fragment" ? sqlParameterStringFragment(input) : sqlParameterLiteral(input);
@@ -180,6 +210,71 @@ export function substituteSqlParameters(sql: string, values: Record<string, SqlP
   }
   result += decodeSourceFragment(sql.slice(cursor));
   return result;
+}
+
+function renderMyBatisForeach(foreach: MyBatisForeach, input: SqlParameterInput, values: Record<string, SqlParameterInput>, options?: SqlParameterOptions): string {
+  const items = parseSqlParameterList(input.value);
+  if (items.length === 0) return `${foreach.open}NULL${foreach.close}`;
+
+  const renderedItems = items.map((item) => {
+    const itemInput: SqlParameterInput = item === null ? { kind: "null", value: "NULL" } : { kind: input.kind, value: String(item) };
+    return substituteSqlParameters(foreach.body, { ...values, [foreach.item]: itemInput }, options);
+  });
+  return `${foreach.open}${renderedItems.join(foreach.separator)}${foreach.close}`;
+}
+
+function parseSqlParameterList(raw: string): Array<string | number | boolean | null> {
+  const value = raw.trim();
+  if (!value) return [];
+
+  if (value.startsWith("[")) {
+    try {
+      const parsed = JSON.parse(value);
+      if (Array.isArray(parsed) && parsed.every((item) => item === null || ["string", "number", "boolean"].includes(typeof item))) return parsed;
+    } catch {
+      return [];
+    }
+    return [];
+  }
+
+  return splitCommaSeparatedValues(value).map(unquoteListValue);
+}
+
+function splitCommaSeparatedValues(value: string): string[] {
+  const items: string[] = [];
+  let start = 0;
+  let quote = "";
+
+  for (let i = 0; i < value.length; i += 1) {
+    const ch = value[i];
+    if (quote) {
+      if (ch === "\\" && quote === '"' && i + 1 < value.length) i += 1;
+      else if (ch === quote) {
+        if (value[i + 1] === quote) i += 1;
+        else quote = "";
+      }
+      continue;
+    }
+    if (ch === "'" || ch === '"') quote = ch;
+    else if (ch === ",") {
+      items.push(value.slice(start, i).trim());
+      start = i + 1;
+    }
+  }
+  items.push(value.slice(start).trim());
+  return items;
+}
+
+function unquoteListValue(value: string): string {
+  if (value.length < 2 || value[0] !== value[value.length - 1] || (value[0] !== "'" && value[0] !== '"')) return value;
+  const quote = value[0];
+  const inner = value.slice(1, -1);
+  if (quote === "'") return inner.replace(/''/g, "'");
+  try {
+    return JSON.parse(value);
+  } catch {
+    return inner.replace(/""/g, '"');
+  }
 }
 
 function decodeMyBatisXmlComparisonEntities(fragment: string): string {
@@ -219,6 +314,25 @@ function findSqlParameterOccurrences(sql: string, options?: SqlParameterOptions)
 
     const ch = sql[i];
     const next = sql[i + 1];
+
+    if (ch === "<" && isSyntaxEnabled("mybatis")) {
+      const foreach = readMyBatisForeachAt(sql, i);
+      if (foreach) {
+        occurrences.push({
+          key: foreach.collection,
+          name: foreach.collection,
+          syntax: "mybatis",
+          token: "<foreach>",
+          collection: true,
+          replacement: "mybatis-foreach",
+          foreach: foreach.render,
+          start: i,
+          end: foreach.end,
+        });
+        i = foreach.end;
+        continue;
+      }
+    }
 
     if (ch === "'" || ch === '"') {
       // Exact quoted placeholders use SQL-literal replacement; embedded placeholders
@@ -319,6 +433,91 @@ function findSqlParameterOccurrences(sql: string, options?: SqlParameterOptions)
   }
 
   return occurrences;
+}
+
+function readMyBatisForeachAt(sql: string, start: number): { collection: string; render: MyBatisForeach; end: number } | null {
+  if (!/^<foreach(?:\s|>)/i.test(sql.slice(start))) return null;
+  const openingEnd = findXmlTagEnd(sql, start);
+  if (openingEnd === -1) return null;
+  const attributes = parseXmlAttributes(sql.slice(start + "<foreach".length, openingEnd));
+  if (!attributes) return null;
+
+  const collection = attributes.get("collection")?.trim() ?? "";
+  const item = attributes.get("item")?.trim() ?? "";
+  if (!PARAMETER_NAME_RE.test(collection) || !PARAMETER_NAME_RE.test(item)) return null;
+
+  const close = findMatchingForeachClose(sql, openingEnd + 1);
+  if (!close) return null;
+  return {
+    collection,
+    render: {
+      item,
+      open: attributes.get("open") ?? "",
+      separator: attributes.get("separator") ?? "",
+      close: attributes.get("close") ?? "",
+      body: sql.slice(openingEnd + 1, close.start),
+    },
+    end: close.end,
+  };
+}
+
+function findXmlTagEnd(source: string, start: number): number {
+  let quote = "";
+  for (let i = start + 1; i < source.length; i += 1) {
+    const ch = source[i];
+    if (quote) {
+      if (ch === quote) quote = "";
+    } else if (ch === "'" || ch === '"') quote = ch;
+    else if (ch === ">") return i;
+  }
+  return -1;
+}
+
+function parseXmlAttributes(source: string): Map<string, string> | null {
+  const attributes = new Map<string, string>();
+  let i = 0;
+  while (i < source.length) {
+    while (/\s/.test(source[i] ?? "")) i += 1;
+    if (i >= source.length) break;
+
+    const nameStart = i;
+    while (/[\w:-]/.test(source[i] ?? "")) i += 1;
+    if (i === nameStart) return null;
+    const name = source.slice(nameStart, i).toLowerCase();
+    while (/\s/.test(source[i] ?? "")) i += 1;
+    if (source[i] !== "=") return null;
+    i += 1;
+    while (/\s/.test(source[i] ?? "")) i += 1;
+    const quote = source[i];
+    if (quote !== "'" && quote !== '"') return null;
+    const valueStart = ++i;
+    while (i < source.length && source[i] !== quote) i += 1;
+    if (i >= source.length) return null;
+    attributes.set(name, decodeXmlAttribute(source.slice(valueStart, i)));
+    i += 1;
+  }
+  return attributes;
+}
+
+function decodeXmlAttribute(value: string): string {
+  return value.replace(/&(?:lt|gt|amp|quot|apos);/g, (entity) => ({ "&lt;": "<", "&gt;": ">", "&amp;": "&", "&quot;": '"', "&apos;": "'" })[entity] ?? entity);
+}
+
+function findMatchingForeachClose(sql: string, start: number): { start: number; end: number } | null {
+  let depth = 1;
+  let cursor = start;
+  const tagPattern = /<\/?foreach(?:\s|>)/gi;
+  tagPattern.lastIndex = cursor;
+  for (let match = tagPattern.exec(sql); match; match = tagPattern.exec(sql)) {
+    const tagStart = match.index;
+    const tagEnd = findXmlTagEnd(sql, tagStart);
+    if (tagEnd === -1) return null;
+    const closing = sql[tagStart + 1] === "/";
+    depth += closing ? -1 : 1;
+    if (depth === 0) return { start: tagStart, end: tagEnd + 1 };
+    tagPattern.lastIndex = tagEnd + 1;
+  }
+  return null;
 }
 
 function isDuckDbCompactPrefixAliasSeparator(sql: string, index: number, databaseType?: DatabaseType): boolean {

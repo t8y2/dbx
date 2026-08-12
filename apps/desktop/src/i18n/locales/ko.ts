@@ -4084,6 +4084,7 @@ export default withEnglishFallback({
     type: "유형",
     value: "값",
     valuePlaceholder: "값 입력",
+    collectionValuePlaceholder: "JSON 배열 또는 쉼표로 구분된 값 입력",
     preview: "SQL 미리보기",
     execute: "실행",
     kind: {

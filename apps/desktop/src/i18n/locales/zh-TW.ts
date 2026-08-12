@@ -3716,6 +3716,7 @@ export default withEnglishFallback({
     type: "類型",
     value: "參數值",
     valuePlaceholder: "輸入參數值",
+    collectionValuePlaceholder: "輸入 JSON 陣列或逗號分隔值",
     preview: "SQL 預覽",
     execute: "執行",
     kind: {

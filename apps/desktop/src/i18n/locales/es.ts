@@ -4371,6 +4371,7 @@ export default withEnglishFallback({
     type: "Tipo",
     value: "Valor",
     valuePlaceholder: "Introduce un valor",
+    collectionValuePlaceholder: "Introduce un array JSON o valores separados por comas",
     preview: "Vista previa SQL",
     execute: "Ejecutar",
     kind: {

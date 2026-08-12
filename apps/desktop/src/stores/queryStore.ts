@@ -108,6 +108,16 @@ interface OpenSavedSqlOptions {
   targetMode?: SavedSqlOpenTargetMode;
 }
 
+interface OpenObjectSourceTabOptions {
+  connectionId: string;
+  database: string;
+  title: string;
+  schema?: string;
+  catalog?: string;
+  sql: string;
+  objectSource: NonNullable<QueryTab["objectSource"]>;
+}
+
 interface UpdateExecutionTargetOptions {
   persistSavedSqlTarget?: boolean;
 }
@@ -1622,6 +1632,33 @@ export const useQueryStore = defineStore("query", () => {
     if (mode === "query") tab.originalSql = initialSql ?? "";
     tabs.value.push(tab);
     if (options.activate !== false) activeTabId.value = id;
+    return id;
+  }
+
+  function openObjectSourceTab(options: OpenObjectSourceTabOptions) {
+    const existing = tabs.value.find(
+      (tab) =>
+        tab.mode === "query" &&
+        tab.connectionId === options.connectionId &&
+        tab.database === options.database &&
+        (tab.schema || "") === (options.schema || "") &&
+        (tab.catalog || "") === (options.catalog || "") &&
+        tab.objectSource?.name === options.objectSource.name &&
+        tab.objectSource.objectType === options.objectSource.objectType &&
+        (tab.objectSource.schema || "") === (options.objectSource.schema || "") &&
+        (tab.objectSource.signature || "") === (options.objectSource.signature || ""),
+    );
+    if (existing) {
+      switchTab(existing.id);
+      if (!isTabDirty(existing)) {
+        updateSql(existing.id, options.sql);
+        markTabClean(existing);
+      }
+      return existing.id;
+    }
+
+    const id = createTab(options.connectionId, options.database, options.title, "query", options.schema, options.sql, options.catalog, { forceNew: true });
+    setObjectSource(id, options.objectSource);
     return id;
   }
 
@@ -5799,6 +5836,7 @@ export const useQueryStore = defineStore("query", () => {
     hasDirtyTabs,
     isConfirmingAppClose,
     createTab,
+    openObjectSourceTab,
     showExecutedQueryResults,
     switchTab,
     closeTab,

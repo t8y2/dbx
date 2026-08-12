@@ -554,15 +554,73 @@ test("marked-clean object source tabs close without unsaved confirmation", () =>
   );
 });
 
-test("object source tabs can force distinct clean identities for overloaded routines", () => {
+test("reopening a dirty object source tab preserves its unsaved SQL", () => {
   setActivePinia(createPinia());
   const store = useQueryStore();
-  const firstId = store.createTab("conn-1", "db", "Source - calculate", "query", "public", "CREATE FUNCTION calculate(integer)", undefined, { forceNew: true });
-  const secondId = store.createTab("conn-1", "db", "Source - calculate", "query", "public", "CREATE FUNCTION calculate(text)", undefined, { forceNew: true });
+  const options = {
+    connectionId: "conn-1",
+    database: "db",
+    title: "Source - refresh_orders",
+    schema: "public",
+    sql: "CREATE PROCEDURE refresh_orders() SELECT 1;",
+    objectSource: {
+      schema: "public",
+      name: "refresh_orders",
+      objectType: "PROCEDURE" as const,
+    },
+  };
+  const tabId = store.openObjectSourceTab(options);
+  store.updateSql(tabId, "CREATE PROCEDURE refresh_orders() SELECT 2;");
 
-  assert.notEqual(firstId, secondId);
-  assert.equal(store.isTabDirty(store.tabs.find((tab) => tab.id === firstId)!), false);
-  assert.equal(store.isTabDirty(store.tabs.find((tab) => tab.id === secondId)!), false);
+  const reopenedId = store.openObjectSourceTab({ ...options, sql: "CREATE PROCEDURE refresh_orders() SELECT 3;" });
+  const tab = store.tabs.find((item) => item.id === tabId);
+
+  assert.equal(reopenedId, tabId);
+  assert.equal(store.activeTabId, tabId);
+  assert.equal(tab?.sql, "CREATE PROCEDURE refresh_orders() SELECT 2;");
+  assert.equal(store.isTabDirty(tab!), true);
+});
+
+test("clean object source tabs refresh while object type and signature identities stay distinct", () => {
+  setActivePinia(createPinia());
+  const store = useQueryStore();
+  const options = {
+    connectionId: "conn-1",
+    database: "db",
+    title: "Source - order_api",
+    schema: "public",
+    sql: "CREATE PACKAGE order_api AS END;",
+    objectSource: {
+      schema: "public",
+      name: "order_api",
+      objectType: "PACKAGE" as const,
+    },
+  };
+  const specId = store.openObjectSourceTab(options);
+  const refreshedSpecId = store.openObjectSourceTab({ ...options, sql: "CREATE PACKAGE order_api AS PROCEDURE refresh; END;" });
+  const bodyId = store.openObjectSourceTab({
+    ...options,
+    sql: "CREATE PACKAGE BODY order_api AS END;",
+    objectSource: { ...options.objectSource, objectType: "PACKAGE_BODY" },
+  });
+  const integerOverloadId = store.openObjectSourceTab({
+    ...options,
+    title: "Source - calculate",
+    sql: "CREATE FUNCTION calculate(integer) RETURNS integer;",
+    objectSource: { ...options.objectSource, name: "calculate", objectType: "FUNCTION", signature: "integer" },
+  });
+  const textOverloadId = store.openObjectSourceTab({
+    ...options,
+    title: "Source - calculate",
+    sql: "CREATE FUNCTION calculate(text) RETURNS text;",
+    objectSource: { ...options.objectSource, name: "calculate", objectType: "FUNCTION", signature: "text" },
+  });
+
+  assert.equal(refreshedSpecId, specId);
+  assert.equal(store.tabs.find((tab) => tab.id === specId)?.sql, "CREATE PACKAGE order_api AS PROCEDURE refresh; END;");
+  assert.equal(store.isTabDirty(store.tabs.find((tab) => tab.id === specId)!), false);
+  assert.notEqual(bodyId, specId);
+  assert.notEqual(integerOverloadId, textOverloadId);
 });
 
 test("close all tabs pauses on unsaved query tabs", () => {

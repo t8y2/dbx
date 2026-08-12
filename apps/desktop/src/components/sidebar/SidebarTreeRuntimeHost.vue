@@ -1813,15 +1813,24 @@ function openObjectSourceDialog(initialEditing: boolean, viewPackageBody = false
           databaseType,
           signature: sourceNode.signature,
         });
-        const tabId = queryStore.createTab(connectionId, database, `Source - ${node.label}`, "query", schema, editableSource, node.catalog, { forceNew: true });
         const sourceIsEditable = raw.editable !== false && !["SEQUENCE", "TRIGGER", "TYPE", "TYPE_BODY"].includes(resolvedType);
         if (sourceIsEditable) {
-          queryStore.setObjectSource(tabId, {
+          queryStore.openObjectSourceTab({
+            connectionId,
+            database,
+            title: `Source - ${node.label}`,
             schema,
-            name: objectName,
-            objectType: resolvedType,
-            signature: node.signature,
+            catalog: node.catalog,
+            sql: editableSource,
+            objectSource: {
+              schema,
+              name: objectName,
+              objectType: resolvedType,
+              signature: node.signature,
+            },
           });
+        } else {
+          queryStore.createTab(connectionId, database, `Source - ${node.label}`, "query", schema, editableSource, node.catalog, { forceNew: true });
         }
       })
       .catch((e: any) => {

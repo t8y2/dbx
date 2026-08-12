@@ -4296,6 +4296,7 @@ async fn flush_sqlite_append_transaction(
     Ok(rows_imported.saturating_add(rows))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn finish_sqlite_append_transaction<F>(
     state: &AppState,
     pool_key: &str,

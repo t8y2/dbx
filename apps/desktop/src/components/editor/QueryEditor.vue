@@ -4679,6 +4679,10 @@ onMounted(async () => {
           dom.style.display = "none";
           return { dom };
         },
+        // Center the match instead of the default "nearest" alignment, which
+        // often lands the match flush against the viewport edge and makes an
+        // immediate drag-select there trigger CodeMirror's edge autoscroll.
+        scrollToMatch: (range) => EditorView.scrollIntoView(range, { y: "center" }),
       }),
       runGutterComp.of(runStatementGutterExtension()),
       lineNumbers({

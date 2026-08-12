@@ -58,7 +58,7 @@ import { uuid } from "@/lib/common/utils";
 import { isMacOS, isWindows } from "@/lib/backend/platform";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { openQueryResultArchiveFile } from "@/lib/query/queryResultArchiveFile";
-import { rememberExternalSqlFileTarget, resolveExternalSqlFileTarget } from "@/lib/sql/externalSqlFileTarget";
+import { rememberExternalSqlFileTarget, resolveExternalSqlFileTarget, unassociatedExternalSqlFileTarget } from "@/lib/sql/externalSqlFileTarget";
 import { externalSqlFileOpenErrorMessage, readBrowserSqlFile, sqlFileTitleFromPath } from "@/lib/sql/sqlFileOpen";
 import type { ConnectionConfig, DatabaseType, ObjectSourceKind, QueryTab } from "@/types/database";
 import { parseConnectionDeepLink, type ConnectionDeepLinkDraft } from "@/lib/connection/connectionDeepLink";
@@ -1314,10 +1314,7 @@ async function saveActiveSqlAsLocalFile() {
 }
 
 function applyExternalSqlFileTarget(tab: QueryTab, path: string) {
-  const target = resolveExternalSqlFileTarget(path, (savedConnectionId) => !!connectionStore.getConfig(savedConnectionId), {
-    connectionId: tab.connectionId,
-    database: tab.database,
-  });
+  const target = resolveExternalSqlFileTarget(path, (savedConnectionId) => !!connectionStore.getConfig(savedConnectionId), unassociatedExternalSqlFileTarget());
   if (target.connectionId !== tab.connectionId) {
     queryStore.updateConnection(tab.id, target.connectionId, target.database);
   } else if (target.database !== tab.database) {
@@ -1392,10 +1389,7 @@ async function openSqlFilePath(path: string) {
   try {
     await desktopOpenTabsRestorationBarrier?.settled;
     const snapshot = await api.readExternalSqlFileSnapshot(path);
-    const connectionId = connectionStore.activeConnectionId || activeTab.value?.connectionId || connectionStore.connections[0]?.id || "";
-    const connection = connectionId ? connectionStore.getConfig(connectionId) : undefined;
-    const database = activeTab.value?.database || (connection ? resolveDefaultDatabase(connection, []) : "");
-    const target = resolveExternalSqlFileTarget(path, (savedConnectionId) => !!connectionStore.getConfig(savedConnectionId), { connectionId, database });
+    const target = resolveExternalSqlFileTarget(path, (savedConnectionId) => !!connectionStore.getConfig(savedConnectionId), unassociatedExternalSqlFileTarget());
     queryStore.openExternalSqlFile(target.connectionId, target.database, path, snapshot.content, snapshot.version);
   } catch (e: any) {
     toast(t("toolbar.sqlOpenFailed", { message: externalSqlFileOpenErrorMessage(e, (key, params) => t(key, params)) }), 5000);
@@ -1647,7 +1641,8 @@ async function openSavedSqlFromWelcome(fileId: string) {
   const file = await savedSqlStore.ensureFileContent(fileId);
   if (!file) return;
   const tabId = queryStore.openSavedSql(file);
-  connectionStore.activeConnectionId = queryStore.tabs.find((tab) => tab.id === tabId)?.connectionId ?? file.connectionId;
+  const openedConnectionId = queryStore.tabs.find((tab) => tab.id === tabId)?.connectionId ?? file.connectionId;
+  if (openedConnectionId) connectionStore.activeConnectionId = openedConnectionId;
   void savedSqlStore.recordFileUsage(file.id);
   toast(t("welcome.fileOpened", { name: file.name }), 2000);
 }
@@ -1817,13 +1812,16 @@ async function changeActiveConnection(connectionId: string) {
   if (!tab) return;
   const connection = connectionStore.getConfig(connectionId);
   if (!connection) return;
-  queryStore.updateConnection(tab.id, connectionId, resolveDefaultDatabase(connection, []));
+  const initialDatabase = resolveDefaultDatabase(connection, []);
+  queryStore.updateConnection(tab.id, connectionId, initialDatabase);
+  if (tab.externalSqlPath) rememberExternalSqlFileTarget(tab.externalSqlPath, { connectionId, database: initialDatabase });
   connectionStore.activeConnectionId = connectionId;
   try {
     await connectionStore.ensureConnected(connectionId);
     const options = await getDatabaseOptions(connectionId);
     const database = resolveDefaultDatabase(connection, options);
     queryStore.updateDatabase(tab.id, database);
+    if (tab.externalSqlPath) rememberExternalSqlFileTarget(tab.externalSqlPath, { connectionId, database });
     if (connection.default_schema || connection.db_type === "oracle") {
       try {
         // A configured default wins. Otherwise Oracle returns the session's current schema first.
@@ -1850,6 +1848,7 @@ function changeActiveDatabase(database: string) {
   const tab = activeTab.value;
   if (tab) {
     queryStore.updateDatabase(tab.id, database);
+    if (tab.externalSqlPath) rememberExternalSqlFileTarget(tab.externalSqlPath, { connectionId: tab.connectionId, database });
     if (databaseRequiredTabId.value === tab.id && database) {
       databaseRequiredTabId.value = null;
     }
@@ -1987,10 +1986,8 @@ async function handleQuickOpenSelect(item: any) {
   if (item.type === "sql_file" && item.filePath) {
     try {
       const snapshot = await api.readExternalSqlFileSnapshot(item.filePath);
-      const connectionId = connectionStore.activeConnectionId || connectionStore.connections[0]?.id || "";
-      const connection = connectionId ? connectionStore.getConfig(connectionId) : undefined;
-      const database = connection ? resolveDefaultDatabase(connection, []) : "";
-      queryStore.openExternalSqlFile(connectionId, database, item.filePath, snapshot.content, snapshot.version);
+      const target = resolveExternalSqlFileTarget(item.filePath, (savedConnectionId) => !!connectionStore.getConfig(savedConnectionId), unassociatedExternalSqlFileTarget());
+      queryStore.openExternalSqlFile(target.connectionId, target.database, item.filePath, snapshot.content, snapshot.version);
     } catch (e: any) {
       toast(
         externalSqlFileOpenErrorMessage(e, (key, params) => t(key, params)),

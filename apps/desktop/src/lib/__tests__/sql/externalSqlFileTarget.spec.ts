@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 
 import { beforeEach, describe, expect, it } from "vitest";
-import { EXTERNAL_SQL_FILE_TARGETS_STORAGE_KEY, MAX_EXTERNAL_SQL_FILE_TARGETS, rememberExternalSqlFileTarget, resolveExternalSqlFileTarget } from "@/lib/sql/externalSqlFileTarget";
+import { EXTERNAL_SQL_FILE_TARGETS_STORAGE_KEY, MAX_EXTERNAL_SQL_FILE_TARGETS, rememberExternalSqlFileTarget, resolveExternalSqlFileTarget, unassociatedExternalSqlFileTarget } from "@/lib/sql/externalSqlFileTarget";
 
 describe("external SQL file targets", () => {
   beforeEach(() => {
@@ -17,12 +17,19 @@ describe("external SQL file targets", () => {
     });
   });
 
+  it("keeps a new file path unassociated", () => {
+    expect(resolveExternalSqlFileTarget("/work/new.sql", () => true, unassociatedExternalSqlFileTarget())).toEqual({
+      connectionId: "",
+      database: "",
+    });
+  });
+
   it("falls back when the saved connection no longer exists", () => {
     rememberExternalSqlFileTarget("/work/report.sql", { connectionId: "deleted-connection", database: "analytics" });
 
-    expect(resolveExternalSqlFileTarget("/work/report.sql", () => false, { connectionId: "fallback", database: "default" })).toEqual({
-      connectionId: "fallback",
-      database: "default",
+    expect(resolveExternalSqlFileTarget("/work/report.sql", () => false, unassociatedExternalSqlFileTarget())).toEqual({
+      connectionId: "",
+      database: "",
     });
   });
 

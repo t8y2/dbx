@@ -8,6 +8,10 @@ export interface ExternalSqlFileTarget {
   database: string;
 }
 
+export function unassociatedExternalSqlFileTarget(): ExternalSqlFileTarget {
+  return { connectionId: "", database: "" };
+}
+
 interface StoredExternalSqlFileTarget extends ExternalSqlFileTarget {
   path: string;
   updatedAt: number;

@@ -179,6 +179,18 @@ afterEach(() => {
 });
 
 describe("SqlFileExecutionDialog retries", () => {
+  it("does not auto-select the first connection for an unassociated external file", async () => {
+    root = document.createElement("div");
+    document.body.append(root);
+    app = createApp(SqlFileExecutionDialog, { open: true, prefillFilePath: "/tmp/unassociated.sql" });
+    app.mount(root);
+
+    await vi.waitFor(() => expect(mocks.previewSqlFile).toHaveBeenCalledWith("/tmp/unassociated.sql"));
+    expect(mocks.ensureConnected).not.toHaveBeenCalled();
+    expect(mocks.fetchSqlFileTargetOptions).not.toHaveBeenCalled();
+    expect(findButton("sqlFile.execute").disabled).toBe(true);
+  });
+
   it("does not restore a completed run's file summary after an early retry failure", async () => {
     await mountReadyDialog();
     await completeFirstExecution();

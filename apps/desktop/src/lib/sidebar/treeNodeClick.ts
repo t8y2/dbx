@@ -25,6 +25,8 @@ const toggleLeafNodeTypes = new Set<TreeNodeType>([
   "vector-collection",
   "elasticsearch-index",
   "user-admin",
+  "dameng-users",
+  "dameng-roles",
 ]);
 // These are application entry points rather than database objects. They should
 // always navigate on a single click, even when the user prefers double-click

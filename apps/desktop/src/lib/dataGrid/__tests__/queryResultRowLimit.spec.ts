@@ -17,10 +17,17 @@ describe("query result row limits", () => {
 
   it("limits the final page and caps totals", () => {
     expect(limitQueryPagination({ limit: 100, offset: 950 }, 1_000)).toEqual({ limit: 50, offset: 950 });
-    expect(limitQueryPagination({ limit: 100, offset: 2_000 }, 1_000)).toEqual({ limit: 1, offset: 999 });
+    expect(limitQueryPagination({ limit: 100, offset: 2_000 }, 1_000)).toEqual({ limit: 100, offset: 900 });
     expect(queryResultLimitReached(950, 50, 1_000)).toBe(true);
     expect(queryResultLimitReached(900, 50, 1_000)).toBe(false);
     expect(capQueryResultTotal(1_500, 1_000)).toBe(1_000);
     expect(capQueryResultTotal(1_500, undefined)).toBe(1_500);
+  });
+
+  it("keeps the configured page size when a last-page jump exceeds the row cap", () => {
+    expect(limitQueryPagination({ limit: 100, offset: 2_952_900 }, 100_000)).toEqual({ limit: 100, offset: 99_900 });
+    expect(limitQueryPagination({ limit: 100, offset: 2_952_900 }, undefined)).toEqual({ limit: 100, offset: 2_952_900 });
+    expect(limitQueryPagination({ limit: 100, offset: 2_000 }, 1_050)).toEqual({ limit: 50, offset: 1_000 });
+    expect(limitQueryPagination({ limit: 100, offset: 2_000 }, 50)).toEqual({ limit: 50, offset: 0 });
   });
 });

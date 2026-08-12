@@ -9,7 +9,7 @@ use crate::db::mongo_driver::MongoDocumentResult;
 use crate::models::connection::DatabaseType;
 use crate::object_source_sql::{build_executable_object_source_statements, EditableObjectSourceSqlInput};
 use crate::query::{agent_execute_query_params, pool_error_action, PoolErrorAction, QueryExecutionOptions};
-use crate::sql::split_sql_statements;
+use crate::sql::{split_sql_statements, split_sql_statements_for_database};
 use crate::sql_dialect::{qualified_transfer_table, quote_transfer_identifier};
 
 static CANCELLED: std::sync::LazyLock<RwLock<HashSet<String>>> =
@@ -4049,6 +4049,13 @@ fn transfer_ddl_statements(sql: &str, db_type: &DatabaseType) -> Vec<String> {
                 .map(|statement| sanitize_postgres_transfer_ddl_statement(&statement))
                 .filter(|statement| !is_postgres_post_table_index_statement(statement))
                 .collect()
+        }
+    } else if matches!(db_type, DatabaseType::Dameng) {
+        let statements = split_sql_statements_for_database(sql, db_type.clone());
+        if statements.is_empty() {
+            vec![sql.trim().to_string()]
+        } else {
+            statements
         }
     } else {
         vec![sql.to_string()]
@@ -8452,6 +8459,51 @@ mod tests {
                 "COMMENT ON TABLE \"public\".\"items\" IS 'items'".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn dameng_transfer_ddl_splits_reused_table_comments() {
+        let ddl = "CREATE TABLE \"APP\".\"ITEMS\" (\n\
+                     \"ID\" INTEGER,\n\
+                     \"NOTE\" VARCHAR(100)\n\
+                   );\n\
+                   COMMENT ON TABLE \"APP\".\"ITEMS\" IS 'owner''s; items';\n\
+                   COMMENT ON COLUMN \"APP\".\"ITEMS\".\"NOTE\" IS 'line; two';";
+
+        let statements = transfer_ddl_statements(ddl, &DatabaseType::Dameng);
+
+        assert_eq!(
+            statements,
+            vec![
+                "CREATE TABLE \"APP\".\"ITEMS\" (\n\
+                   \"ID\" INTEGER,\n\
+                   \"NOTE\" VARCHAR(100)\n\
+                 )"
+                .to_string(),
+                "COMMENT ON TABLE \"APP\".\"ITEMS\" IS 'owner''s; items'".to_string(),
+                "COMMENT ON COLUMN \"APP\".\"ITEMS\".\"NOTE\" IS 'line; two'".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn dameng_transfer_ddl_preserves_plsql_blocks_and_single_statements() {
+        let script = "BEGIN\n\
+                        EXECUTE IMMEDIATE 'CREATE TABLE \"APP\".\"AUDIT\" (\"ID\" INTEGER)';\n\
+                      END;\n\
+                      /\n\
+                      COMMENT ON TABLE \"APP\".\"AUDIT\" IS 'audit';";
+
+        let statements = transfer_ddl_statements(script, &DatabaseType::Dameng);
+
+        assert_eq!(statements.len(), 2);
+        assert!(statements[0].starts_with("BEGIN\n"));
+        assert!(statements[0].contains("EXECUTE IMMEDIATE 'CREATE TABLE"));
+        assert!(statements[0].ends_with("END;"));
+        assert_eq!(statements[1], "COMMENT ON TABLE \"APP\".\"AUDIT\" IS 'audit'");
+
+        let single = "CREATE TABLE \"APP\".\"SINGLE_ITEM\" (\"ID\" INTEGER)";
+        assert_eq!(transfer_ddl_statements(single, &DatabaseType::Dameng), vec![single.to_string()]);
     }
 
     #[test]

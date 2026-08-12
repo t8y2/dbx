@@ -3385,6 +3385,9 @@ for line in sys.stdin:
             internal: false,
             message_type: None,
             namespace: Some("default".to_string()),
+            message_count: None,
+            messages_ready: None,
+            messages_unacked: None,
         }]);
 
         assert_eq!(tables.len(), 1);

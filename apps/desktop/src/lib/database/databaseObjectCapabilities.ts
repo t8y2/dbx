@@ -12,6 +12,7 @@ const TABLE_VIEW_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW"];
 const TABLE_VIEW_MV_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "MATERIALIZED_VIEW"];
 
 const ROUTINE_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "PROCEDURE", "FUNCTION"];
+const MYSQL_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "PROCEDURE", "FUNCTION", "TRIGGER"];
 
 // PostgreSQL-family databases with a verified pg_type listing path. TYPE only
 // covers user-created types (enum/domain/composite/range/multirange/base);
@@ -29,7 +30,8 @@ const POSTGRES_NO_TYPE_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "MATERIA
 const KINGBASE_VASTBASE_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION", "TYPE"];
 
 const POSTGRES_LIKE_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION"];
-const ORACLE_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION", "PACKAGE", "PACKAGE_BODY"];
+const ORACLE_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION", "SYNONYM", "PACKAGE", "PACKAGE_BODY"];
+const OCEANBASE_ORACLE_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION", "PACKAGE", "PACKAGE_BODY"];
 const DAMENG_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION", "SEQUENCE", "PACKAGE", "PACKAGE_BODY"];
 const XUGU_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "PROCEDURE", "FUNCTION", "TRIGGER", "SEQUENCE", "SYNONYM", "PACKAGE", "PACKAGE_BODY", "TYPE", "TYPE_BODY"];
 const PACKAGE_MEMBER_EXPANSION_DATABASES = new Set<DatabaseType>(["oracle", "xugu"]);
@@ -49,8 +51,9 @@ const DATABASE_TYPE_OBJECTS = new Map<DatabaseType, SidebarObjectKind[]>([
   // oracle
   ["oracle", ORACLE_OBJECTS],
   ["dameng", DAMENG_OBJECTS],
-  ["oceanbase-oracle", ORACLE_OBJECTS],
+  ["oceanbase-oracle", OCEANBASE_ORACLE_OBJECTS],
   ["xugu", XUGU_OBJECTS],
+  ["mysql", MYSQL_OBJECTS],
   // table and view
   ["sqlite", TABLE_VIEW_OBJECTS],
   ["rqlite", TABLE_VIEW_OBJECTS],

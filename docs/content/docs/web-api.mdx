@@ -89,7 +89,7 @@ Cookie: dbx_session=...
 | `DBX_PORT` | Change the listen port (default `4224`) |
 | `DBX_DATA_DIR` | Data directory containing `dbx.db` |
 | `DBX_PUBLIC_BASE_PATH` | Serve DBX under a subpath such as `/dbx` |
-| `DBX_MAX_UPLOAD_MB` | Override the general request/upload limit; default 1024 MB |
+| `DBX_MAX_UPLOAD_MB` | Override the general request and uploaded-file limit; default 1024 MB. Multipart routes reserve fixed protocol overhead (set at least `4096` for a 4 GiB file) |
 | `DBX_AGENT_DIR` | Override the Web Agent/driver directory; defaults to `agents` under the data directory |
 | `DBX_STATIC_DIR` | Override the Web static asset directory |
 

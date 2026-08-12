@@ -4,6 +4,7 @@ import { createApp, defineComponent, h, nextTick, type App } from "vue";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import i18n from "@/i18n";
 import TreeItem from "@/components/sidebar/TreeItem.vue";
+import { filterSidebarTree } from "@/lib/sidebar/sidebarSearchTree";
 import { createSidebarTreeRuntime, sidebarTreeRuntimeKey, type SidebarTreeRuntimeHost } from "@/lib/sidebar/sidebarTreeRuntime";
 import type { TreeNode } from "@/types/database";
 
@@ -11,9 +12,12 @@ const connectionStore = {
   activeConnectionId: "connection-1",
   connectedIds: new Set(["connection-1"]),
   connectingIds: new Set<string>(),
+  connectionErrors: {},
   connectionMultiSelectActive: false,
   connections: [],
   getConfig: () => ({ id: "connection-1", db_type: "sqlserver" }),
+  getSidebarVisibleFilterSummary: () => null,
+  clearConnectionError: vi.fn(),
   isDefaultDatabase: () => false,
   isDefaultSchema: () => false,
   isPinnedTreeNodeReorderTarget: () => false,
@@ -180,5 +184,60 @@ describe("TreeItem load-more activation", () => {
     const unknown = await mountTreeItem(unknownNode);
     expect(unknown.row.textContent).not.toContain("INVALID");
     expect(unknown.row.querySelector('[data-invalid-object-indicator="true"]')).toBeNull();
+  });
+});
+
+describe("TreeItem searched connection activation", () => {
+  function searchedConnection(): TreeNode {
+    const filtered = filterSidebarTree(
+      [
+        {
+          id: "connection-1",
+          label: "1000",
+          type: "connection",
+          connectionId: "connection-1",
+          isExpanded: false,
+          children: [
+            {
+              id: "connection-1:__user_admin",
+              label: "tree.userAdmin",
+              type: "user-admin",
+              connectionId: "connection-1",
+              database: "",
+            },
+          ],
+        },
+      ],
+      "1000",
+      new Set(),
+    )[0];
+    if (!filtered) throw new Error("Expected the matching connection search result");
+    return filtered;
+  }
+
+  it("activates a connection search result on one click in single-click mode", async () => {
+    settingsStore.editorSettings.sidebarActivation = "single";
+    const node = searchedConnection();
+    const { row, host } = await mountTreeItem(node);
+
+    row.dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 1 }));
+
+    expect(node.children).toEqual([]);
+    expect(node.isExpanded).toBe(false);
+    expect(host.handleRowClick).toHaveBeenCalledWith(node, 1);
+    expect(host.handleRowDoubleClick).not.toHaveBeenCalled();
+  });
+
+  it("waits for a double click before activating a connection search result in double-click mode", async () => {
+    settingsStore.editorSettings.sidebarActivation = "double";
+    const node = searchedConnection();
+    const { row, host } = await mountTreeItem(node);
+
+    row.dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 1 }));
+    expect(host.handleRowClick).not.toHaveBeenCalled();
+
+    row.dispatchEvent(new MouseEvent("dblclick", { bubbles: true, detail: 2 }));
+
+    expect(host.handleRowDoubleClick).toHaveBeenCalledWith(node, expect.any(MouseEvent));
   });
 });

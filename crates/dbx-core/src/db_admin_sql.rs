@@ -685,7 +685,11 @@ pub fn supports_object_rename(database_type: Option<DatabaseType>, object_type: 
     }
     if matches!(
         database_type,
-        DatabaseType::Sqlite | DatabaseType::Rqlite | DatabaseType::Turso | DatabaseType::CloudflareD1
+        DatabaseType::Sqlite
+            | DatabaseType::Rqlite
+            | DatabaseType::Turso
+            | DatabaseType::CloudflareD1
+            | DatabaseType::DuckDb
     ) {
         return object_type == DatabaseObjectType::Table;
     }
@@ -729,7 +733,13 @@ pub fn build_rename_object_sql(options: RenameObjectSqlOptions) -> Result<String
 
     if matches!(
         database_type,
-        Some(DatabaseType::Sqlite | DatabaseType::Rqlite | DatabaseType::Turso | DatabaseType::CloudflareD1)
+        Some(
+            DatabaseType::Sqlite
+                | DatabaseType::Rqlite
+                | DatabaseType::Turso
+                | DatabaseType::CloudflareD1
+                | DatabaseType::DuckDb
+        )
     ) {
         return Ok(format!(
             "ALTER TABLE {} RENAME TO {};",
@@ -1864,6 +1874,23 @@ mod tests {
                 expected
             );
         }
+    }
+
+    #[test]
+    fn builds_duckdb_table_rename_sql() {
+        assert!(supports_object_rename(Some(DatabaseType::DuckDb), DatabaseObjectType::Table));
+        assert!(!supports_object_rename(Some(DatabaseType::DuckDb), DatabaseObjectType::View));
+        assert_eq!(
+            build_rename_object_sql(RenameObjectSqlOptions {
+                database_type: Some(DatabaseType::DuckDb),
+                object_type: DatabaseObjectType::Table,
+                schema: Some("main".to_string()),
+                old_name: "users".to_string(),
+                new_name: "app users".to_string(),
+            })
+            .unwrap(),
+            "ALTER TABLE \"main\".\"users\" RENAME TO \"app users\";"
+        );
     }
 
     #[test]

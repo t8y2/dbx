@@ -49,6 +49,7 @@ export interface BuildDataGridCellDetailOptions {
   displayValue: (value: CellValue, columnIndex: number) => string;
   isEditable: boolean;
   includeBinaryImagePreview?: boolean;
+  isValuePreviewTruncated?: boolean;
 }
 
 export interface BuildDataGridRowDetailOptions {
@@ -62,6 +63,7 @@ export interface BuildDataGridRowDetailOptions {
   commentByColumn?: ReadonlyMap<string, string>;
   displayValue: (value: CellValue, columnIndex: number) => string;
   isEditableColumn?: (columnIndex: number) => boolean;
+  isValuePreviewTruncated?: (columnIndex: number) => boolean;
 }
 
 export interface BuildDataGridColumnDetailRow {
@@ -69,6 +71,7 @@ export interface BuildDataGridColumnDetailRow {
   rowId: number;
   row: readonly CellValue[];
   isEditable?: boolean;
+  isValuePreviewTruncated?: boolean;
 }
 
 export interface BuildDataGridColumnDetailOptions {
@@ -105,7 +108,7 @@ export function buildDataGridCellDetail(options: BuildDataGridCellDetailOptions)
     rawValuePreview,
     displayValue,
     displayValuePreview,
-    isValuePreviewTruncated: rawValuePreview.length < rawValue.length || displayValuePreview.length < displayValue.length,
+    isValuePreviewTruncated: options.isValuePreviewTruncated === true || rawValuePreview.length < rawValue.length || displayValuePreview.length < displayValue.length,
     imagePreviewUrl: cellImagePreviewUrl(value, type, { binary: options.includeBinaryImagePreview !== false }),
     length: value === null ? 0 : String(value).length,
     formattedJson,
@@ -131,6 +134,7 @@ export function buildDataGridColumnDetail(options: BuildDataGridColumnDetailOpti
         displayValue: options.displayValue,
         isEditable: row.isEditable ?? false,
         includeBinaryImagePreview: false,
+        isValuePreviewTruncated: row.isValuePreviewTruncated,
       }),
     )
     .filter((field): field is DataGridCellDetail => field !== null);
@@ -159,6 +163,7 @@ export function buildDataGridRowDetail(options: BuildDataGridRowDetailOptions): 
         displayValue: options.displayValue,
         isEditable: options.isEditableColumn?.(columnIndex) ?? false,
         includeBinaryImagePreview: false,
+        isValuePreviewTruncated: options.isValuePreviewTruncated?.(columnIndex),
       }),
     )
     .filter((field): field is DataGridCellDetail => field !== null);

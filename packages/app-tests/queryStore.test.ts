@@ -6103,6 +6103,42 @@ test("closing a data tab releases its tab-scoped client session", async () => {
   }
 });
 
+test("closing a MySQL dashboard releases its tab-scoped client session", async () => {
+  const restoreStorage = installMemoryStorage();
+  setActivePinia(createPinia());
+  const connectionStore = useConnectionStore();
+  const store = useQueryStore();
+  const originalFetch = globalThis.fetch;
+
+  connectionStore.addEphemeralConnection({ ...conn("mysql-1"), db_type: "mysql", port: 3306, database: "app" });
+  const tabId = store.openMysqlDashboard("mysql-1");
+  const closedSessions: any[] = [];
+
+  globalThis.fetch = async (input, init) => {
+    if (String(input) === "/api/query/close-client-session") {
+      closedSessions.push(JSON.parse(String(init?.body ?? "{}")));
+      return new Response(JSON.stringify(true), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    return new Response("unexpected request", { status: 500 });
+  };
+
+  try {
+    store.closeTab(tabId, { force: true });
+
+    await waitFor(() => closedSessions.some((body) => body.clientSessionId === tabId));
+    assert.ok(
+      closedSessions.some((body) => body.connectionId === "mysql-1" && body.database === "" && body.clientSessionId === tabId),
+      `expected close-client-session for MySQL dashboard, got ${JSON.stringify(closedSessions)}`,
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreStorage();
+  }
+});
+
 for (const dbType of ["oracle", "dameng", "gaussdb", "oceanbase-oracle"] as const) {
   test(`clearing a ${dbType} query schema releases its tab-scoped client session`, async () => {
     const restoreStorage = installMemoryStorage();

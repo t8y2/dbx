@@ -22,6 +22,13 @@ test("extension rows open their metadata details", () => {
   assert.equal(treeNodeRowDoubleClickAction("extension", false, "double"), "open-extension-details");
 });
 
+test("dameng user and role admin rows toggle their tabs", () => {
+  assert.equal(treeNodeRowAction("dameng-users", false), "toggle");
+  assert.equal(treeNodeRowAction("dameng-roles", false), "toggle");
+  assert.equal(treeNodeRowAction("dameng-users", true), "toggle");
+  assert.equal(treeNodeRowAction("dameng-roles", true), "toggle");
+});
+
 test("double click navigation mode selects rows on single click", () => {
   assert.equal(treeNodeRowAction("table", true, "double"), "none");
   assert.equal(treeNodeRowAction("view", true, "double"), "none");

@@ -9,6 +9,7 @@ import { type ColumnFormatterConfig, type CustomColumnFormatterConfig, normalize
 import { type DataGridCopyPreference, type DataGridExtractorOptions, DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS, normalizeDataGridCopyPreference, normalizeDataGridExtractorOptions } from "@/lib/dataGrid/dataGridCopyExtractor";
 import { normalizeResultPageSize } from "@/lib/dataGrid/paginationPageSize";
 import { DEFAULT_QUERY_RESULT_MAX_ROWS, normalizeQueryResultMaxRows } from "@/lib/dataGrid/queryResultRowLimit";
+import { normalizeConnectTimeoutSecs, normalizeQueryTimeoutSecs } from "@/lib/connection/timeoutLimits";
 import { normalizeShortcutSettings, type ShortcutSettings } from "@/lib/editor/shortcutRegistry";
 import type { SavedSqlOpenTargetMode } from "@/lib/savedSql/savedSqlExecutionTarget";
 import type { ConnectionListSortMode } from "@/lib/sidebar/connectionListSort";
@@ -800,13 +801,11 @@ const MIN_UI_SCALE = 0.75;
 const MAX_UI_SCALE = 2;
 
 export function normalizeGlobalQueryTimeoutSecs(value: unknown): number {
-  if (typeof value !== "number" || !Number.isFinite(value)) return DEFAULT_EDITOR_SETTINGS.globalQueryTimeoutSecs;
-  return Math.min(300, Math.max(0, Math.round(value)));
+  return normalizeQueryTimeoutSecs(value);
 }
 
 export function normalizeGlobalConnectTimeoutSecs(value: unknown): number {
-  if (typeof value !== "number" || !Number.isFinite(value)) return DEFAULT_EDITOR_SETTINGS.globalConnectTimeoutSecs;
-  return Math.min(300, Math.max(1, Math.round(value)));
+  return normalizeConnectTimeoutSecs(value);
 }
 
 function normalizeUiScale(value: unknown): number {

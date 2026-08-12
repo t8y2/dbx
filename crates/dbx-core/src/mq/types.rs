@@ -331,6 +331,15 @@ pub struct TopicInfo {
     /// cross-namespace listings such as the RabbitMQ "all vhosts" mode.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub namespace: Option<String>,
+    /// RabbitMQ total queue messages, including ready and unacknowledged messages.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_count: Option<i64>,
+    /// RabbitMQ messages ready for delivery.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub messages_ready: Option<i64>,
+    /// RabbitMQ messages delivered but not yet acknowledged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub messages_unacked: Option<i64>,
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]

@@ -98,6 +98,7 @@ export interface UseDataGridExportOptions {
   getRowItem: (rowId: number) => RowItem | undefined;
   selectedRowIds: Ref<Set<number>> | ComputedRef<Set<number>>;
   hasRowSelection: ComputedRef<boolean>;
+  resolveSourceValues?: (rowIds: number[], sourceColumnIndexes: number[]) => Promise<Map<number, Map<number, CellValue>>>;
   fullExportResult?: (onProgress?: (info: { rowsExported: number; totalRows: number | null }) => void) => Promise<QueryResult | undefined>;
   queryResultExportRequest?: (options: { exportId: string; filePath: string; format: "csv" | "xlsx" | "txt" | "sql"; includeSqlSheet?: boolean; exportTableName?: string; exportColumnTypes?: Array<string | null | undefined> }) => Promise<QueryResultExportRequest | undefined>;
   /**
@@ -182,6 +183,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     getRowItem,
     selectedRowIds,
     hasRowSelection,
+    resolveSourceValues,
     fullExportResult,
     queryResultExportRequest,
     hasCompleteLocalResult,
@@ -221,6 +223,25 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     if (rowIds === undefined) return displayItems.value.filter((item) => !item.isDraft);
     const rowIdSet = new Set(rowIds);
     return displayItems.value.filter((item) => rowIdSet.has(item.id) && !item.isDraft);
+  }
+
+  async function resolveVisibleRowValues(items: RowItem[], visibleIndexes = visibleColumnIndexes.value): Promise<RowItem[]> {
+    if (!resolveSourceValues || items.length === 0 || visibleIndexes.length === 0) return items;
+    const resolved = await resolveSourceValues(
+      items.map((item) => item.id),
+      visibleIndexes,
+    );
+    if (resolved.size === 0) return items;
+    return items.map((item) => {
+      const values = resolved.get(item.id);
+      if (!values) return item;
+      const data = [...item.data];
+      visibleIndexes.forEach((sourceIndex) => {
+        const visibleIndex = visibleColumnIndexes.value.indexOf(sourceIndex);
+        if (visibleIndex >= 0 && values.has(sourceIndex)) data[visibleIndex] = values.get(sourceIndex) ?? null;
+      });
+      return { ...item, data };
+    });
   }
 
   function applyGlobalDateTimeExportFormat(result: { columns: string[]; columnTypes: string[]; rows: CellValue[][] }, enabled: boolean) {
@@ -315,7 +336,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
         {
           columns: columns.value,
           columnTypes: (columnTypes.value ?? []).map((type) => type ?? ""),
-          rows: rowsToExport(rowIds).map((item) => item.data),
+          rows: (await resolveVisibleRowValues(rowsToExport(rowIds))).map((item) => item.data),
         },
         formatDateTime,
       ),
@@ -436,7 +457,8 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
 
   async function copyRowsAsJson(items: RowItem[]) {
     if (items.length === 0) return;
-    const value = items.length === 1 ? rowToJsonObject(items[0]) : items.map(rowToJsonObject);
+    const resolvedItems = await resolveVisibleRowValues(items);
+    const value = resolvedItems.length === 1 ? rowToJsonObject(resolvedItems[0]) : resolvedItems.map(rowToJsonObject);
     const hasOriginalMongoDocuments = options.databaseType.value === "mongodb" && items.every((item) => item.sourceIndex !== undefined && options.mongoDocuments?.value?.[item.sourceIndex] !== undefined);
     const copyValue = options.databaseType.value === "mongodb" && !hasOriginalMongoDocuments ? expandNestedJsonStringsForCopy(value) : value;
     await copyText(JSON.stringify(copyValue, null, 2));
@@ -447,7 +469,9 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     if (!contextCell.value || contextCell.value.col < 0) return;
     const item = getRowItem(contextCell.value.rowId);
     if (!item || item.isDraft) return;
-    const val = item?.data[contextCell.value.col] ?? null;
+    const sourceIndex = visibleColumnIndexes.value[contextCell.value.col] ?? contextCell.value.col;
+    const [resolvedItem] = await resolveVisibleRowValues([item], [sourceIndex]);
+    const val = resolvedItem?.data[contextCell.value.col] ?? null;
     await copyText(displayCellValue(val), { rows: [[val]] });
   }
 
@@ -575,6 +599,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     hasRowSelection,
     hasColumnSelection,
     selectedRowIds,
+    resolveSourceValues,
     copyText,
     canCopySqlInsert: (request) => {
       const selectedColumns = request.selectedColumnIndexes.map((index) => request.columns[index]?.sourceName ?? request.columns[index]?.displayName).filter((column): column is string => !!column);
@@ -589,7 +614,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
 
   async function copyAll() {
     const header = columns.value.join("\t");
-    const rows = displayItems.value.filter((item) => !item.isDraft).map((item) => item.data);
+    const rows = (await resolveVisibleRowValues(displayItems.value.filter((item) => !item.isDraft))).map((item) => item.data);
     const body = rows.map((row) => row.map((cell) => displayCellValue(cell)).join("\t")).join("\n");
     await copyText(`${header}\n${body}`, { rows, header: columns.value });
   }

@@ -1026,24 +1026,13 @@ fn validate_sql_policy(
         ));
     }
     let high_risk = risk == SqlRisk::Ddl || is_dangerous_sql_for_database(sql, connection.db_type);
-    let confirmed_sql = mcp_confirmed_write_sql_from_env();
-    if high_risk && !policy.allow_dangerous_sql && confirmed_sql.is_none() {
+    if high_risk && !policy.allow_dangerous_sql {
         return Err(tool_error("SQL_BLOCKED", "High-risk SQL is disabled in DBX MCP settings."));
     }
     if is_write && targets_production_database(connection, database, sql) {
         return Err(tool_error("PRODUCTION_WRITE_BLOCKED", "MCP cannot execute writes against a production database."));
     }
-    let mut permissions = mcp_permissions(connection, policy);
-    // When the user confirmed a specific write/DDL SQL via the CLI agent, the
-    // confirmed-SQL binding authorises dangerous (DDL) execution in the SQL
-    // path only. The precise SQL match check (sql_matches_confirmed_write) in
-    // agent_tools still guards execution — only the exact confirmed statement
-    // can run. Redis and Mongo paths are unaffected; they continue to use the
-    // persistent policy (mcp_permissions) without any confirmed-SQL elevation.
-    if confirmed_sql.is_some() {
-        permissions.allow_dangerous = true;
-    }
-    Ok(permissions)
+    Ok(mcp_permissions(connection, policy))
 }
 
 // CallToolResult is the transport-native error payload; boxing it would complicate every MCP call site.
@@ -1563,39 +1552,59 @@ mod tests {
     }
 
     #[test]
-    fn confirmed_sql_binding_tests() {
+    fn confirmed_sql_binding_cannot_elevate_central_policy() {
         let connection = connection("dev", "dev", "postgres", "app");
 
-        // 1. mcp_permissions (Redis/Mongo path) must NOT elevate allow_dangerous.
+        // An exact confirmation remains available as a narrowing constraint,
+        // but cannot turn the central safe-write policy into full access.
         let _guard = EnvGuard::set("DBX_MCP_CONFIRMED_WRITE_SQL", "CREATE TABLE metrics (id INT)");
-        let policy = McpGlobalPolicy { read_only: false, allow_dangerous_sql: false, allowed_connection_ids: None };
-        let permissions = mcp_permissions(&connection, &policy);
+        let safe_write = McpGlobalPolicy { read_only: false, allow_dangerous_sql: false, allowed_connection_ids: None };
+        let permissions = mcp_permissions(&connection, &safe_write);
         assert!(!permissions.allow_dangerous, "confirmed SQL must NOT elevate allow_dangerous for Redis/Mongo paths");
         assert!(permissions.allow_writes);
         assert_eq!(permissions.confirmed_write_sql.as_deref(), Some("CREATE TABLE metrics (id INT)"));
 
-        // 2. SQL path (validate_sql_policy) elevates allow_dangerous with a confirmed binding.
-        let permissions =
-            validate_sql_policy(&connection, &policy, "app", "CREATE TABLE metrics (id INT)", false).unwrap();
-        assert!(permissions.allow_dangerous, "SQL path should elevate allow_dangerous with confirmed binding");
-        assert!(permissions.allow_writes);
-        assert_eq!(permissions.confirmed_write_sql.as_deref(), Some("CREATE TABLE metrics (id INT)"));
-        drop(_guard);
-
-        // 3. Without a confirmed binding, high-risk SQL is blocked.
-        let _guard = EnvGuard::remove("DBX_MCP_CONFIRMED_WRITE_SQL");
-        let error = validate_sql_policy(&connection, &policy, "app", "DROP TABLE sessions", false).unwrap_err();
+        let error =
+            validate_sql_policy(&connection, &safe_write, "app", "CREATE TABLE metrics (id INT)", false).unwrap_err();
         assert!(result_text(&error).contains("SQL_BLOCKED"));
         assert!(result_text(&error).contains("High-risk SQL is disabled"));
         drop(_guard);
 
-        // 4. Confirmed SQL must not bypass global read_only.
+        // A missing binding cannot change the same safe-write boundary.
+        let _guard = EnvGuard::remove("DBX_MCP_CONFIRMED_WRITE_SQL");
+        let error = validate_sql_policy(&connection, &safe_write, "app", "DROP TABLE sessions", false).unwrap_err();
+        assert!(result_text(&error).contains("SQL_BLOCKED"));
+        assert!(result_text(&error).contains("High-risk SQL is disabled"));
+        drop(_guard);
+
+        // Full access still permits an exact confirmed DDL statement and keeps
+        // the binding for the execution-time anti-replay check.
         let _guard = EnvGuard::set("DBX_MCP_CONFIRMED_WRITE_SQL", "CREATE TABLE metrics (id INT)");
+        let full_access = McpGlobalPolicy { read_only: false, allow_dangerous_sql: true, allowed_connection_ids: None };
+        let permissions =
+            validate_sql_policy(&connection, &full_access, "app", "CREATE TABLE metrics (id INT)", false).unwrap();
+        assert!(permissions.allow_writes);
+        assert!(permissions.allow_dangerous);
+        assert_eq!(permissions.confirmed_write_sql.as_deref(), Some("CREATE TABLE metrics (id INT)"));
+
+        // A global read-only policy is still authoritative even for the exact
+        // confirmed statement, while read queries remain available.
         let read_only_policy =
             McpGlobalPolicy { read_only: true, allow_dangerous_sql: false, allowed_connection_ids: None };
         let error = validate_sql_policy(&connection, &read_only_policy, "app", "CREATE TABLE metrics (id INT)", false)
             .unwrap_err();
         assert!(result_text(&error).contains("MCP_READ_ONLY"), "confirmed SQL must not bypass global read_only");
+        assert!(validate_sql_policy(&connection, &read_only_policy, "app", "SELECT 1", false).is_ok());
+        drop(_guard);
+
+        // Safe-write DML remains allowed, and an exact binding never grants the
+        // DDL/high-risk bit implicitly.
+        let _guard = EnvGuard::set("DBX_MCP_CONFIRMED_WRITE_SQL", "INSERT INTO metrics (id) VALUES (1)");
+        let permissions =
+            validate_sql_policy(&connection, &safe_write, "app", "INSERT INTO metrics (id) VALUES (1)", false).unwrap();
+        assert!(permissions.allow_writes);
+        assert!(!permissions.allow_dangerous);
+        assert_eq!(permissions.confirmed_write_sql.as_deref(), Some("INSERT INTO metrics (id) VALUES (1)"));
     }
 
     #[test]

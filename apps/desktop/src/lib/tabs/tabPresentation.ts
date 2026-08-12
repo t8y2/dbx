@@ -349,6 +349,10 @@ export function resultGridCacheKey(tab: Pick<QueryTab, "id" | "activeResultRunId
   return `${tab.id}-${tab.activeResultRunId ?? "current"}-${tab.activeResultIndex ?? 0}`;
 }
 
+export function resultGridInstanceKey(tab: Pick<QueryTab, "id" | "activeResultRunId" | "activeResultIndex" | "resultGridRevision">): string {
+  return `${resultGridCacheKey(tab)}-${tab.resultGridRevision ?? "initial"}`;
+}
+
 export function nextExecutionSummaryView(currentView: OutputView, canShowResult: boolean): OutputView {
   if (currentView === "summary" && canShowResult) return "result";
   return "summary";

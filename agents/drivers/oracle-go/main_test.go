@@ -1600,6 +1600,9 @@ func TestListObjectsSQLUsesSplitDictionaryQuery(t *testing.T) {
 	if !strings.Contains(sqlText, "'PACKAGE BODY'") || !strings.Contains(sqlText, "PACKAGE_BODY") {
 		t.Fatalf("object listing should include package bodies with normalized type, got: %s", oracleListObjectsSQL)
 	}
+	if !strings.Contains(sqlText, "ALL_SYNONYMS") || !strings.Contains(sqlText, "'SYNONYM' AS OBJECT_TYPE") {
+		t.Fatalf("object listing should include schema synonyms, got: %s", oracleListObjectsSQL)
+	}
 }
 
 func TestListObjectsQueryAppliesMetadataConstraints(t *testing.T) {
@@ -1610,19 +1613,19 @@ func TestListObjectsQueryAppliesMetadataConstraints(t *testing.T) {
 	})
 	sqlText := strings.ToUpper(query.SQL)
 
-	if !strings.Contains(sqlText, "UPPER(OBJECT_NAME) LIKE :3 ESCAPE '\\'") {
+	if !strings.Contains(sqlText, "UPPER(OBJECT_NAME) LIKE :4 ESCAPE '\\'") {
 		t.Fatalf("object listing should push filter predicate, got: %s", query.SQL)
 	}
-	if !strings.Contains(sqlText, "OBJECT_TYPE IN (:4,:5)") {
+	if !strings.Contains(sqlText, "OBJECT_TYPE IN (:5,:6)") {
 		t.Fatalf("object listing should push object type predicate, got: %s", query.SQL)
 	}
-	if !strings.Contains(sqlText, "ROWNUM <= :6") || !strings.Contains(sqlText, "DBX_RN > :7") {
+	if !strings.Contains(sqlText, "ROWNUM <= :7") || !strings.Contains(sqlText, "DBX_RN > :8") {
 		t.Fatalf("object listing should use rownum pagination, got: %s", query.SQL)
 	}
-	if len(query.Args) != 7 {
+	if len(query.Args) != 8 {
 		t.Fatalf("unexpected args: %#v", query.Args)
 	}
-	if query.Args[2] != "%P%K%G%\\%%" || query.Args[3] != "FUNCTION" || query.Args[4] != "PACKAGE" || query.Args[5] != 25 || query.Args[6] != 0 {
+	if query.Args[0] != "APP" || query.Args[1] != "APP" || query.Args[2] != "APP" || query.Args[3] != "%P%K%G%\\%%" || query.Args[4] != "FUNCTION" || query.Args[5] != "PACKAGE" || query.Args[6] != 25 || query.Args[7] != 0 {
 		t.Fatalf("object constraints args were not normalized: %#v", query.Args)
 	}
 }
@@ -1641,6 +1644,9 @@ func TestListSessionUserObjectsQueryUsesUserDictionary(t *testing.T) {
 	if strings.Contains(sqlText, "ALL_TABLES") || strings.Contains(sqlText, "ALL_OBJECTS") {
 		t.Fatalf("session-user object listing should avoid ALL_* dictionaries, got: %s", query.SQL)
 	}
+	if !strings.Contains(sqlText, "USER_SYNONYMS") {
+		t.Fatalf("session-user object listing should include owned synonyms, got: %s", query.SQL)
+	}
 	if strings.Contains(sqlText, "OWNER =") {
 		t.Fatalf("session-user object listing should not add owner predicates, got: %s", query.SQL)
 	}
@@ -1658,6 +1664,26 @@ func TestListSessionUserObjectsQueryUsesUserDictionary(t *testing.T) {
 	}
 	if query.Args[0] != "%P%K%G%\\%%" || query.Args[1] != "FUNCTION" || query.Args[2] != "PACKAGE" || query.Args[3] != 25 || query.Args[4] != 0 {
 		t.Fatalf("object constraints args were not normalized: %#v", query.Args)
+	}
+}
+
+func TestListObjectsQuerySupportsSynonymOnlyFiltering(t *testing.T) {
+	query := oracleListObjectsQuery("AP", metadataListConstraints{
+		Filter:      "spec",
+		Limit:       10,
+		Offset:      20,
+		ObjectTypes: []string{"synonym"},
+	})
+	sqlText := strings.ToUpper(query.SQL)
+
+	if !strings.Contains(sqlText, "FROM ALL_SYNONYMS") || !strings.Contains(sqlText, "S.OWNER = :3") {
+		t.Fatalf("cross-schema synonym listing should use the selected owner, got: %s", query.SQL)
+	}
+	if !strings.Contains(sqlText, "OBJECT_TYPE IN (:5)") {
+		t.Fatalf("synonym filtering should be pushed into the constrained query, got: %s", query.SQL)
+	}
+	if len(query.Args) != 7 || query.Args[2] != "AP" || query.Args[3] != "%S%P%E%C%" || query.Args[4] != "SYNONYM" || query.Args[5] != 30 || query.Args[6] != 20 {
+		t.Fatalf("unexpected synonym query args: %#v", query.Args)
 	}
 }
 
@@ -2019,6 +2045,55 @@ func TestGetObjectSourceUsesOriginalViewNameWithDBMSMetadata(t *testing.T) {
 				t.Fatalf("expected %d queries, got %d", len(scripted.steps), scripted.next)
 			}
 		})
+	}
+}
+
+func TestGetObjectSourceUsesDBMSMetadataForSynonym(t *testing.T) {
+	const ddl = `CREATE OR REPLACE EDITIONABLE SYNONYM "AP"."S_SPECS" FOR "ADM"."S_SPECS"`
+	db, scripted := openOracleViewSourceTestDB(t, []oracleViewSourceQueryStep{
+		{
+			queryContains: "DBMS_METADATA.GET_DDL(:1, :2, :3)",
+			args:          []driver.Value{"SYNONYM", "S_SPECS", "AP"},
+			rows:          [][]driver.Value{{ddl}},
+		},
+	})
+	s := newServer()
+	s.db = db
+
+	result, err := s.getObjectSource("AP", "S_SPECS", "SYNONYM")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result["source"] != ddl || result["object_type"] != "SYNONYM" {
+		t.Fatalf("unexpected synonym source: %#v", result)
+	}
+	if scripted.next != len(scripted.steps) {
+		t.Fatalf("expected %d queries, got %d", len(scripted.steps), scripted.next)
+	}
+}
+
+func TestGetObjectSourcePreservesQuotedSynonymName(t *testing.T) {
+	const synonym = "MixedSynonym"
+	const ddl = `CREATE OR REPLACE EDITIONABLE SYNONYM "AP"."MixedSynonym" FOR "ADM"."S_SPECS"`
+	db, scripted := openOracleViewSourceTestDB(t, []oracleViewSourceQueryStep{
+		{
+			queryContains: "DBMS_METADATA.GET_DDL(:1, :2, :3)",
+			args:          []driver.Value{"SYNONYM", synonym, "AP"},
+			rows:          [][]driver.Value{{ddl}},
+		},
+	})
+	s := newServer()
+	s.db = db
+
+	result, err := s.getObjectSource("AP", synonym, "SYNONYM")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result["name"] != synonym || result["source"] != ddl {
+		t.Fatalf("quoted synonym identity was not preserved: %#v", result)
+	}
+	if scripted.next != len(scripted.steps) {
+		t.Fatalf("expected %d queries, got %d", len(scripted.steps), scripted.next)
 	}
 }
 

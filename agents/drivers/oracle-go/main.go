@@ -138,6 +138,12 @@ SELECT o.OBJECT_NAME,
 FROM ALL_OBJECTS o
 WHERE o.OWNER = :2
   AND o.OBJECT_TYPE IN ('VIEW', 'PROCEDURE', 'FUNCTION', 'PACKAGE', 'PACKAGE BODY')
+UNION ALL
+SELECT s.SYNONYM_NAME AS OBJECT_NAME,
+       'SYNONYM' AS OBJECT_TYPE,
+       CAST(NULL AS VARCHAR2(4000)) AS COMMENTS
+FROM ALL_SYNONYMS s
+WHERE s.OWNER = :3
 )`
 const oracleListObjectsSessionUserBaseSQL = `
 SELECT OBJECT_NAME, OBJECT_TYPE, COMMENTS
@@ -153,14 +159,20 @@ SELECT o.OBJECT_NAME,
        CAST(NULL AS VARCHAR2(4000)) AS COMMENTS
 FROM USER_OBJECTS o
 WHERE o.OBJECT_TYPE IN ('VIEW', 'PROCEDURE', 'FUNCTION', 'PACKAGE', 'PACKAGE BODY')
+UNION ALL
+SELECT s.SYNONYM_NAME AS OBJECT_NAME,
+       'SYNONYM' AS OBJECT_TYPE,
+       CAST(NULL AS VARCHAR2(4000)) AS COMMENTS
+FROM USER_SYNONYMS s
 )`
 const oracleListObjectsOrderSQL = `ORDER BY CASE OBJECT_TYPE
   WHEN 'TABLE' THEN 0
   WHEN 'VIEW' THEN 1
   WHEN 'PROCEDURE' THEN 2
   WHEN 'FUNCTION' THEN 3
-  WHEN 'PACKAGE' THEN 4
-  ELSE 5
+  WHEN 'SYNONYM' THEN 4
+  WHEN 'PACKAGE' THEN 5
+  ELSE 6
 END, OBJECT_NAME`
 const oracleListObjectsSQL = oracleListObjectsBaseSQL + "\n" + oracleListObjectsOrderSQL
 const oracleListTriggersSQL = `
@@ -1511,7 +1523,7 @@ func oracleListObjectsQuery(schema string, constraints metadataListConstraints) 
 		"OBJECT_NAME, OBJECT_TYPE, COMMENTS",
 		"OBJECT_TYPE",
 		oracleListObjectsOrderSQL,
-		[]any{schema, schema},
+		[]any{schema, schema, schema},
 		constraints,
 	)
 }
@@ -2597,6 +2609,9 @@ func (s *server) getObjectSource(schema, name, objectType string) (map[string]an
 		}
 		return map[string]any{"name": name, "object_type": objectType, "schema": schema, "source": source}, nil
 	}
+	if upperType == "SYNONYM" {
+		return s.getMetadataObjectSource(schema, name, upperType)
+	}
 
 	// Unquoted Oracle identifiers are stored uppercase; quoted mixed-case names must stay exact.
 	// Try caller-provided identity first, then uppercase fallback (same pattern as column metadata).
@@ -2610,6 +2625,22 @@ func (s *server) getObjectSource(schema, name, objectType string) (map[string]an
 		}
 	}
 	return map[string]any{"name": name, "object_type": objectType, "schema": schema, "source": ""}, nil
+}
+
+func (s *server) getMetadataObjectSource(schema, name, objectType string) (map[string]any, error) {
+	db, err := s.requireDB()
+	if err != nil {
+		return nil, err
+	}
+	var lastErr error
+	for _, candidate := range oracleObjectIdentityNameCandidates(name) {
+		var source string
+		lastErr = db.QueryRow("SELECT DBMS_METADATA.GET_DDL(:1, :2, :3) FROM DUAL", objectType, candidate, schema).Scan(&source)
+		if lastErr == nil {
+			return map[string]any{"name": candidate, "object_type": objectType, "schema": schema, "source": source}, nil
+		}
+	}
+	return nil, lastErr
 }
 
 func (s *server) loadObjectSourceText(schema, name, objectType string) (string, bool, error) {

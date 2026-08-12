@@ -74,6 +74,8 @@ const ProcessListPanel = defineAsyncComponent(() => import("@/components/admin/P
 const MySqlDashboard = defineAsyncComponent(() => import("@/components/admin/MySqlDashboard.vue"));
 const PostgresDashboard = defineAsyncComponent(() => import("@/components/admin/PostgresDashboard.vue"));
 const DamengJobAdmin = defineAsyncComponent(() => import("@/components/admin/DamengJobAdmin.vue"));
+const DamengUserAdmin = defineAsyncComponent(() => import("@/components/admin/DamengUserAdmin.vue"));
+const DamengRoleAdmin = defineAsyncComponent(() => import("@/components/admin/DamengRoleAdmin.vue"));
 const ExplainPlanViewer = defineAsyncComponent(() => import("@/components/explain/ExplainPlanViewer.vue"));
 const QueryChart = defineAsyncComponent(() => import("@/components/chart/QueryChart.vue"));
 import { useQueryStore } from "@/stores/queryStore";
@@ -82,7 +84,7 @@ import { TABLE_FONT_SIZE_MAX, TABLE_FONT_SIZE_MIN, useSettingsStore, type DataGr
 import { useToast } from "@/composables/useToast";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { canCancelQueryExecution, queryExecutionLabelKey } from "@/lib/sql/queryExecutionState";
-import { databaseDisplayNameForTab, executionSummaryItems, queryResultExecutionSql, resultGridCacheKey, resultRunItems, resultSourceRange, resultSqlForGrid, statementExecutionMarkers, tabularResultItems, type ExecutionSummaryItem } from "@/lib/tabs/tabPresentation";
+import { databaseDisplayNameForTab, executionSummaryItems, queryResultExecutionSql, resultGridCacheKey, resultGridInstanceKey, resultRunItems, resultSourceRange, resultSqlForGrid, statementExecutionMarkers, tabularResultItems, type ExecutionSummaryItem } from "@/lib/tabs/tabPresentation";
 import { defaultQueryResultArchiveFileName } from "@/lib/query/queryResultArchive";
 import { saveQueryResultArchiveFile } from "@/lib/query/queryResultArchiveFile";
 import { isTableDataEditable } from "@/lib/table/tableEditing";
@@ -390,6 +392,7 @@ const allResultExportSheets = computed(() =>
 );
 const resultRuns = computed(() => resultRunItems(props.activeTab));
 const activeResultGridCacheKey = computed(() => resultGridCacheKey(props.activeTab));
+const activeResultGridInstanceKey = computed(() => resultGridInstanceKey(props.activeTab));
 const activeResultSql = computed(() => resultSqlForGrid(props.activeTab));
 const activeResultExportSql = computed(() => queryResultExecutionSql(props.activeTab));
 const activeStatementExecutionMarkers = computed(() =>
@@ -1508,8 +1511,9 @@ defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, hand
               <DataGrid
                 v-else-if="activeTab.result && hasTabularResult"
                 ref="dataGridRef"
-                :key="activeResultGridCacheKey"
+                :key="activeResultGridInstanceKey"
                 :cache-key="activeResultGridCacheKey"
+                :pending-state-key="activeResultGridInstanceKey"
                 class="flex-1 min-h-0"
                 :result="activeTab.result"
                 :sort-column="activeTab.resultSortColumn"
@@ -2100,7 +2104,7 @@ defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, hand
 
     <template v-else-if="activeTab.mode === 'mysql-dashboard'">
       <div class="min-h-0 flex-1">
-        <MySqlDashboard :key="activeTab.id" :connection-id="activeTab.connectionId" />
+        <MySqlDashboard :key="activeTab.id" :connection-id="activeTab.connectionId" :client-session-id="activeTab.id" />
       </div>
     </template>
 
@@ -2118,6 +2122,14 @@ defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, hand
 
     <template v-else-if="activeTab.mode === 'dameng-jobs' && activeConnection">
       <DamengJobAdmin :key="activeTab.id" :connection="activeConnection" />
+    </template>
+
+    <template v-else-if="activeTab.mode === 'dameng-users' && activeConnection">
+      <DamengUserAdmin :key="activeTab.id" :connection="activeConnection" />
+    </template>
+
+    <template v-else-if="activeTab.mode === 'dameng-roles' && activeConnection">
+      <DamengRoleAdmin :key="activeTab.id" :connection="activeConnection" />
     </template>
   </div>
 </template>

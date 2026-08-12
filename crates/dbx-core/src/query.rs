@@ -168,6 +168,8 @@ fn append_typed_sql_error_context(error: &str, _sql: &str) -> String {
 pub struct ExecuteMultiResult {
     #[serde(flatten)]
     pub result: db::QueryResult,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub large_value_cells: Vec<db::LargeValueCell>,
     #[serde(skip_serializing_if = "is_false")]
     pub execution_error: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -215,12 +217,26 @@ fn report_execute_multi_progress(
 impl ExecuteMultiResult {
     fn execution_error(result: db::QueryResult) -> Self {
         let error = error_from_query_result(&result);
-        Self { result, execution_error: true, statement_index: None, error, server_message: false }
+        Self {
+            result,
+            large_value_cells: Vec::new(),
+            execution_error: true,
+            statement_index: None,
+            error,
+            server_message: false,
+        }
     }
 
     fn execution_error_with_index(result: db::QueryResult, statement_index: usize) -> Self {
         let error = error_from_query_result(&result);
-        Self { result, execution_error: true, statement_index: Some(statement_index), error, server_message: false }
+        Self {
+            result,
+            large_value_cells: Vec::new(),
+            execution_error: true,
+            statement_index: Some(statement_index),
+            error,
+            server_message: false,
+        }
     }
 
     fn execution_error_with_backend(
@@ -228,12 +244,35 @@ impl ExecuteMultiResult {
         statement_index: Option<usize>,
         error: crate::backend_error::BackendError,
     ) -> Self {
-        Self { result, execution_error: true, statement_index, error: Some(error), server_message: false }
+        Self {
+            result,
+            large_value_cells: Vec::new(),
+            execution_error: true,
+            statement_index,
+            error: Some(error),
+            server_message: false,
+        }
     }
 
     fn success_with_index(result: db::QueryResult, statement_index: usize) -> Self {
         Self {
             result,
+            large_value_cells: Vec::new(),
+            execution_error: false,
+            statement_index: Some(statement_index),
+            error: None,
+            server_message: false,
+        }
+    }
+
+    fn success_with_index_and_large_values(
+        result: db::QueryResult,
+        statement_index: usize,
+        large_value_cells: Vec<db::LargeValueCell>,
+    ) -> Self {
+        Self {
+            result,
+            large_value_cells,
             execution_error: false,
             statement_index: Some(statement_index),
             error: None,
@@ -253,7 +292,14 @@ impl ExecuteMultiResult {
 
 impl From<db::QueryResult> for ExecuteMultiResult {
     fn from(result: db::QueryResult) -> Self {
-        Self { result, execution_error: false, statement_index: None, error: None, server_message: false }
+        Self {
+            result,
+            large_value_cells: Vec::new(),
+            execution_error: false,
+            statement_index: None,
+            error: None,
+            server_message: false,
+        }
     }
 }
 
@@ -261,6 +307,7 @@ impl From<db::sqlserver::SqlServerBatchResult> for ExecuteMultiResult {
     fn from(result: db::sqlserver::SqlServerBatchResult) -> Self {
         Self {
             result: result.result,
+            large_value_cells: Vec::new(),
             execution_error: false,
             statement_index: None,
             error: None,
@@ -588,6 +635,10 @@ pub struct QueryExecutionOptions {
     pub max_rows: Option<usize>,
     pub fetch_size: Option<usize>,
     pub page_size: Option<usize>,
+    pub max_result_bytes: Option<usize>,
+    /// Result columns that must stay exact because clients use them as stable
+    /// row identifiers when fetching full large-cell values on demand.
+    pub result_key_columns: Vec<String>,
     /// Doris / StarRocks catalog selected for this query tab.
     pub catalog: Option<String>,
     pub result_session_id: Option<String>,
@@ -1318,6 +1369,7 @@ async fn do_execute_typed(
             let p = p.clone();
             let bare = *mode == crate::connection::MysqlMode::Bare;
             let max_rows = options.max_rows;
+            let max_result_bytes = options.max_result_bytes.filter(|value| *value > 0);
             drop(connections);
             let mut conn = match db::mysql::get_conn_with_health_check_with_cancel(
                 &p,
@@ -1358,12 +1410,21 @@ async fn do_execute_typed(
                 ),
             )
             .await?;
-            wait_for_query_opt(
+            wait_for_result_opt(
                 cancel_token,
                 query_timeout,
-                db::mysql::execute_query_on_conn_with_max_rows(&mut conn, sql, bare, max_rows, mysql_dialect),
+                db::mysql::execute_query_on_conn_with_limits(
+                    &mut conn,
+                    sql,
+                    bare,
+                    max_rows,
+                    max_result_bytes,
+                    &options.result_key_columns,
+                    mysql_dialect,
+                ),
             )
             .await
+            .map(|result| result.result)
         }
         PoolKind::Postgres(p) => {
             let p = p.clone();
@@ -2219,7 +2280,7 @@ pub async fn execute_multi_core_with_options_for_client_and_progress_typed(
         }
     };
 
-    if statements.len() <= 1 {
+    if statements.len() <= 1 && !(mysql_pool.is_some() && options.max_result_bytes.is_some_and(|value| value > 0)) {
         let single_sql = statements.into_iter().next().unwrap_or_default();
         return single_statement_multi_result(
             execute_sql_statement_with_options_typed(
@@ -2323,13 +2384,15 @@ fn single_statement_multi_result(
 }
 
 trait MysqlBatchStatementExecutor {
-    async fn execute_statement(&mut self, statement: &str) -> Result<Vec<db::QueryResult>, String>;
+    async fn execute_statement(&mut self, statement: &str) -> Result<Vec<db::mysql::MySqlQueryResult>, String>;
 
     async fn execute_non_result_batch(&mut self, statements: &[String]) -> db::mysql::MySqlNonResultBatchOutcome {
         let mut results = Vec::with_capacity(statements.len());
         for statement in statements {
             match self.execute_statement(statement).await {
-                Ok(mut statement_results) if statement_results.len() == 1 => results.append(&mut statement_results),
+                Ok(statement_results) if statement_results.len() == 1 => {
+                    results.push(statement_results.into_iter().next().expect("single MySQL batch result").result);
+                }
                 Ok(_) => {
                     return db::mysql::MySqlNonResultBatchOutcome {
                         results,
@@ -2349,19 +2412,23 @@ struct MysqlBatchConnection<'a> {
     query_timeout: Option<Duration>,
     bare: bool,
     max_rows: Option<usize>,
+    max_result_bytes: Option<usize>,
+    result_key_columns: &'a [String],
     dialect: db::mysql::MySqlQueryDialect,
 }
 
 impl MysqlBatchStatementExecutor for MysqlBatchConnection<'_> {
-    async fn execute_statement(&mut self, statement: &str) -> Result<Vec<db::QueryResult>, String> {
+    async fn execute_statement(&mut self, statement: &str) -> Result<Vec<db::mysql::MySqlQueryResult>, String> {
         wait_for_result_opt(
             self.cancel_token.clone(),
             self.query_timeout,
-            db::mysql::execute_query_results_on_conn_with_max_rows(
+            db::mysql::execute_query_results_on_conn_with_limits(
                 &mut *self.conn,
                 statement,
                 self.bare,
                 self.max_rows,
+                self.max_result_bytes,
+                self.result_key_columns,
                 self.dialect,
             ),
         )
@@ -2493,13 +2560,22 @@ where
         match executor.execute_statement(statement).await {
             Ok(statement_results) => {
                 if let Some(result) = statement_results.last() {
-                    report_execute_multi_progress(progress, statement_index, statements.len(), result, true, None);
+                    report_execute_multi_progress(
+                        progress,
+                        statement_index,
+                        statements.len(),
+                        &result.result,
+                        true,
+                        None,
+                    );
                 }
-                results.extend(
-                    statement_results
-                        .into_iter()
-                        .map(|result| ExecuteMultiResult::success_with_index(result, statement_index)),
-                );
+                results.extend(statement_results.into_iter().map(|result| {
+                    ExecuteMultiResult::success_with_index_and_large_values(
+                        result.result,
+                        statement_index,
+                        result.large_value_cells,
+                    )
+                }));
             }
             Err(err) => {
                 let action = mysql_batch_pool_error_action(db_type, &err);
@@ -2545,6 +2621,7 @@ async fn execute_multi_mysql(
     let operation_budget = operation_budget_for_pool_key(state, pool_key, query_timeout).await;
     let bare = mode == crate::connection::MysqlMode::Bare;
     let max_rows = options.max_rows;
+    let max_result_bytes = options.max_result_bytes.filter(|value| *value > 0);
     let pipeline_non_result_statements = !options.continue_on_error && mode == crate::connection::MysqlMode::Normal;
     let mut conn = match db::mysql::get_conn_with_health_check_with_cancel(
         pool,
@@ -2587,6 +2664,8 @@ async fn execute_multi_mysql(
         query_timeout,
         bare,
         max_rows,
+        max_result_bytes,
+        result_key_columns: &options.result_key_columns,
         dialect,
     };
     let (results, error_action) = execute_mysql_batch_statements(
@@ -4922,26 +5001,34 @@ for line in sys.stdin:
     }
 
     struct FakeMysqlBatchExecutor {
-        outcomes: std::collections::VecDeque<Result<Vec<db::QueryResult>, String>>,
+        outcomes: std::collections::VecDeque<Result<Vec<db::mysql::MySqlQueryResult>, String>>,
         executed: Vec<String>,
     }
 
     impl MysqlBatchStatementExecutor for FakeMysqlBatchExecutor {
-        async fn execute_statement(&mut self, statement: &str) -> Result<Vec<db::QueryResult>, String> {
+        async fn execute_statement(&mut self, statement: &str) -> Result<Vec<db::mysql::MySqlQueryResult>, String> {
             self.executed.push(statement.to_string());
             self.outcomes.pop_front().expect("test outcome for statement")
         }
     }
 
+    fn mysql_query_result(result: db::QueryResult) -> db::mysql::MySqlQueryResult {
+        db::mysql::MySqlQueryResult { result, large_value_cells: Vec::new() }
+    }
+
+    fn mysql_batch_result(result: db::QueryResult) -> Result<Vec<db::mysql::MySqlQueryResult>, String> {
+        Ok(vec![mysql_query_result(result)])
+    }
+
     struct FakePipelinedMysqlBatchExecutor {
         batch_outcomes: std::collections::VecDeque<db::mysql::MySqlNonResultBatchOutcome>,
-        statement_outcomes: std::collections::VecDeque<Result<Vec<db::QueryResult>, String>>,
+        statement_outcomes: std::collections::VecDeque<Result<Vec<db::mysql::MySqlQueryResult>, String>>,
         batches: Vec<Vec<String>>,
         statements: Vec<String>,
     }
 
     impl MysqlBatchStatementExecutor for FakePipelinedMysqlBatchExecutor {
-        async fn execute_statement(&mut self, statement: &str) -> Result<Vec<db::QueryResult>, String> {
+        async fn execute_statement(&mut self, statement: &str) -> Result<Vec<db::mysql::MySqlQueryResult>, String> {
             self.statements.push(statement.to_string());
             self.statement_outcomes.pop_front().expect("test outcome for single statement")
         }
@@ -4950,10 +5037,6 @@ for line in sys.stdin:
             self.batches.push(statements.to_vec());
             self.batch_outcomes.pop_front().expect("test outcome for pipelined statements")
         }
-    }
-
-    fn mysql_batch_result(result: db::QueryResult) -> Result<Vec<db::QueryResult>, String> {
-        Ok(vec![result])
     }
 
     async fn assert_sqlite_batch_error_behavior(failure_first: bool, continue_on_error: bool) {
@@ -5337,7 +5420,11 @@ for line in sys.stdin:
         };
         let mut executor = FakeMysqlBatchExecutor {
             outcomes: std::collections::VecDeque::from([
-                Ok(vec![result_set(1), result_set(2), result_set(3)]),
+                Ok(vec![
+                    mysql_query_result(result_set(1)),
+                    mysql_query_result(result_set(2)),
+                    mysql_query_result(result_set(3)),
+                ]),
                 mysql_batch_result(empty_query_result(1)),
             ]),
             executed: Vec::new(),
@@ -5497,6 +5584,7 @@ for line in sys.stdin:
         assert!(success.get("execution_error").is_none());
         assert!(success.get("statement_index").is_none());
         assert!(success.get("server_message").is_none());
+        assert!(success.get("large_value_cells").is_none());
 
         let mut error_column = empty_query_result(0);
         error_column.columns = vec!["Error".to_string()];
@@ -5524,6 +5612,21 @@ for line in sys.stdin:
         )
         .unwrap();
         assert!(redacted.get("error").and_then(|value| value.get("detail")).is_none());
+    }
+
+    #[test]
+    fn execute_multi_result_serializes_large_value_metadata_only_when_present() {
+        let result = ExecuteMultiResult::success_with_index_and_large_values(
+            empty_query_result(1),
+            0,
+            vec![db::LargeValueCell { row_index: 2, column_index: 3, original_bytes: 65_536 }],
+        );
+
+        let serialized = serde_json::to_value(result).unwrap();
+        assert_eq!(
+            serialized.get("large_value_cells"),
+            Some(&serde_json::json!([{"row_index": 2, "column_index": 3, "original_bytes": 65_536}]))
+        );
     }
 
     #[test]

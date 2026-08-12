@@ -1274,6 +1274,136 @@ final class DbxJdbcPluginTest {
     }
 
     @Test
+    void listObjectsTreatsNullRoutineMetadataAsUnsupported() throws Exception {
+        RoutineMetadataResponse metadata = requestRoutineObjects(
+            "null-routines",
+            RoutineMetadataBehavior.NULL,
+            RoutineMetadataBehavior.NULL,
+            false
+        );
+
+        assertFalse(metadata.response().has("error"), metadata.response().toString());
+        assertEquals(1, metadata.response().path("result").size());
+        assertEquals("meters", metadata.response().path("result").path(0).path("name").asText());
+        assertEquals(List.of("getTableTypes", "getTables", "getProcedures", "getFunctions"), metadata.calls());
+    }
+
+    @Test
+    void listObjectsKeepsFunctionsWhenProcedureMetadataIsNull() throws Exception {
+        JsonNode response = requestRoutineObjects(
+            "null-procedures",
+            RoutineMetadataBehavior.NULL,
+            RoutineMetadataBehavior.ROWS,
+            false
+        ).response();
+
+        assertFalse(response.has("error"), response.toString());
+        assertEquals(3, response.path("result").size());
+        assertEquals("FUNCTION", response.path("result").path(1).path("object_type").asText());
+        assertEquals("shared_routine", response.path("result").path(1).path("name").asText());
+        assertEquals("unique_function", response.path("result").path(2).path("name").asText());
+    }
+
+    @Test
+    void listObjectsKeepsProceduresWhenFunctionMetadataIsNull() throws Exception {
+        JsonNode response = requestRoutineObjects(
+            "null-functions",
+            RoutineMetadataBehavior.ROWS,
+            RoutineMetadataBehavior.NULL,
+            false
+        ).response();
+
+        assertFalse(response.has("error"), response.toString());
+        assertEquals(2, response.path("result").size());
+        assertEquals("PROCEDURE", response.path("result").path(1).path("object_type").asText());
+        assertEquals("shared_routine", response.path("result").path(1).path("name").asText());
+    }
+
+    @Test
+    void listObjectsPreservesNonNullRoutineMetadataAndDeduplication() throws Exception {
+        JsonNode response = requestRoutineObjects(
+            "routine-rows",
+            RoutineMetadataBehavior.ROWS,
+            RoutineMetadataBehavior.ROWS,
+            false
+        ).response();
+
+        assertFalse(response.has("error"), response.toString());
+        assertEquals(3, response.path("result").size());
+        assertEquals("PROCEDURE", response.path("result").path(1).path("object_type").asText());
+        assertEquals("shared_routine", response.path("result").path(1).path("name").asText());
+        assertEquals("FUNCTION", response.path("result").path(2).path("object_type").asText());
+        assertEquals("unique_function", response.path("result").path(2).path("name").asText());
+    }
+
+    @Test
+    void listObjectsSkipsRoutineMetadataWhenOnlyTablesAreRequested() throws Exception {
+        RoutineMetadataResponse metadata = requestRoutineObjects(
+            "table-only",
+            RoutineMetadataBehavior.NULL,
+            RoutineMetadataBehavior.NULL,
+            false,
+            "TABLE"
+        );
+
+        assertFalse(metadata.response().has("error"), metadata.response().toString());
+        assertEquals(1, metadata.response().path("result").size());
+        assertEquals(List.of("getTableTypes", "getTables"), metadata.calls());
+    }
+
+    @Test
+    void listObjectsOnlyQueriesRequestedRoutineMetadata() throws Exception {
+        RoutineMetadataResponse procedures = requestRoutineObjects(
+            "procedure-only",
+            RoutineMetadataBehavior.ROWS,
+            RoutineMetadataBehavior.SQL_EXCEPTION,
+            false,
+            "PROCEDURE"
+        );
+        assertFalse(procedures.response().has("error"), procedures.response().toString());
+        assertEquals(1, procedures.response().path("result").size());
+        assertEquals(List.of("getTableTypes", "getProcedures"), procedures.calls());
+
+        RoutineMetadataResponse functions = requestRoutineObjects(
+            "function-only",
+            RoutineMetadataBehavior.SQL_EXCEPTION,
+            RoutineMetadataBehavior.ROWS,
+            false,
+            "FUNCTION"
+        );
+        assertFalse(functions.response().has("error"), functions.response().toString());
+        assertEquals(2, functions.response().path("result").size());
+        assertEquals(List.of("getTableTypes", "getFunctions"), functions.calls());
+    }
+
+    @Test
+    void listObjectsKeepsExistingOptionalRoutineSqlExceptionFallback() throws Exception {
+        RoutineMetadataResponse metadata = requestRoutineObjects(
+            "routine-errors",
+            RoutineMetadataBehavior.SQL_EXCEPTION,
+            RoutineMetadataBehavior.SQL_EXCEPTION,
+            false
+        );
+
+        assertFalse(metadata.response().has("error"), metadata.response().toString());
+        assertEquals(1, metadata.response().path("result").size());
+        assertEquals(List.of("getTableTypes", "getTables", "getProcedures", "getFunctions"), metadata.calls());
+    }
+
+    @Test
+    void listObjectsStillPropagatesRequiredTableMetadataFailures() throws Exception {
+        RoutineMetadataResponse metadata = requestRoutineObjects(
+            "table-error",
+            RoutineMetadataBehavior.NULL,
+            RoutineMetadataBehavior.NULL,
+            true
+        );
+
+        assertEquals("required table metadata failed", metadata.response().path("error").path("message").asText());
+        assertEquals(List.of("getTableTypes", "getTables"), metadata.calls());
+    }
+
+    @Test
     void getColumnsFallsBackWhenCatalogFiltersEverything() throws Exception {
         createPeopleTable();
 
@@ -2392,6 +2522,165 @@ final class DbxJdbcPluginTest {
         );
     }
 
+    private enum RoutineMetadataBehavior {
+        NULL,
+        ROWS,
+        SQL_EXCEPTION
+    }
+
+    private record RoutineMetadataResponse(JsonNode response, List<String> calls) {}
+
+    private static RoutineMetadataResponse requestRoutineObjects(
+        String id,
+        RoutineMetadataBehavior procedures,
+        RoutineMetadataBehavior functions,
+        boolean failTables,
+        String... objectTypes
+    ) throws Exception {
+        List<String> calls = new ArrayList<>();
+        String url = "jdbc:dbx-" + id + ":";
+        Driver driver = new RoutineMetadataDriver(url, procedures, functions, failTables, calls);
+        DriverManager.registerDriver(driver);
+        String connection = """
+            { "connection_string": "%sdemo" }
+            """.formatted(url);
+        String objectTypeParams = objectTypes.length == 0
+            ? ""
+            : ", \"object_types\": [\"" + String.join("\", \"", objectTypes) + "\"]";
+        try {
+            JsonNode response = request("listObjects", """
+                { "connection": %s, "schema": "PUBLIC"%s }
+                """.formatted(connection, objectTypeParams));
+            return new RoutineMetadataResponse(response, calls);
+        } finally {
+            closeAndDeregister(connection, driver);
+        }
+    }
+
+    private static final class RoutineMetadataDriver implements Driver {
+        private final String urlPrefix;
+        private final RoutineMetadataBehavior procedures;
+        private final RoutineMetadataBehavior functions;
+        private final boolean failTables;
+        private final List<String> calls;
+
+        private RoutineMetadataDriver(
+            String urlPrefix,
+            RoutineMetadataBehavior procedures,
+            RoutineMetadataBehavior functions,
+            boolean failTables,
+            List<String> calls
+        ) {
+            this.urlPrefix = urlPrefix;
+            this.procedures = procedures;
+            this.functions = functions;
+            this.failTables = failTables;
+            this.calls = calls;
+        }
+
+        @Override
+        public Connection connect(String url, Properties info) {
+            return acceptsURL(url) ? routineMetadataConnection(procedures, functions, failTables, calls) : null;
+        }
+
+        @Override
+        public boolean acceptsURL(String url) {
+            return url != null && url.startsWith(urlPrefix);
+        }
+
+        @Override
+        public DriverPropertyInfo[] getPropertyInfo(String url, Properties info) {
+            return new DriverPropertyInfo[0];
+        }
+
+        @Override
+        public int getMajorVersion() {
+            return 1;
+        }
+
+        @Override
+        public int getMinorVersion() {
+            return 0;
+        }
+
+        @Override
+        public boolean jdbcCompliant() {
+            return false;
+        }
+
+        @Override
+        public java.util.logging.Logger getParentLogger() {
+            return java.util.logging.Logger.getGlobal();
+        }
+    }
+
+    private static Connection routineMetadataConnection(
+        RoutineMetadataBehavior procedures,
+        RoutineMetadataBehavior functions,
+        boolean failTables,
+        List<String> calls
+    ) {
+        DatabaseMetaData metadata = (DatabaseMetaData) Proxy.newProxyInstance(
+            DbxJdbcPluginTest.class.getClassLoader(),
+            new Class<?>[] { DatabaseMetaData.class },
+            (proxy, method, args) -> switch (method.getName()) {
+                case "getTableTypes" -> {
+                    calls.add("getTableTypes");
+                    yield rowsResultSet(new String[] { "TABLE_TYPE" }, new Object[][] { { "TABLE" } });
+                }
+                case "getTables" -> {
+                    calls.add("getTables");
+                    if (failTables) {
+                        throw new SQLException("required table metadata failed");
+                    }
+                    yield rowsResultSet(
+                        new String[] { "TABLE_NAME", "TABLE_TYPE", "REMARKS" },
+                        new Object[][] { { "meters", "TABLE", "TDengine table" } }
+                    );
+                }
+                case "getProcedures" -> {
+                    calls.add("getProcedures");
+                    yield routineMetadataResult(procedures, true);
+                }
+                case "getFunctions" -> {
+                    calls.add("getFunctions");
+                    yield routineMetadataResult(functions, false);
+                }
+                default -> defaultValue(method.getReturnType());
+            }
+        );
+        return (Connection) Proxy.newProxyInstance(
+            DbxJdbcPluginTest.class.getClassLoader(),
+            new Class<?>[] { Connection.class },
+            (proxy, method, args) -> switch (method.getName()) {
+                case "getMetaData" -> metadata;
+                case "isClosed" -> false;
+                case "isValid" -> true;
+                case "getCatalog", "getSchema", "close", "setCatalog", "setSchema" -> null;
+                default -> defaultValue(method.getReturnType());
+            }
+        );
+    }
+
+    private static ResultSet routineMetadataResult(RoutineMetadataBehavior behavior, boolean procedures)
+        throws SQLException {
+        if (behavior == RoutineMetadataBehavior.NULL) {
+            return null;
+        }
+        if (behavior == RoutineMetadataBehavior.SQL_EXCEPTION) {
+            throw new SQLException("optional routine metadata failed");
+        }
+        return procedures
+            ? rowsResultSet(
+                new String[] { "PROCEDURE_NAME", "REMARKS" },
+                new Object[][] { { "shared_routine", "procedure" } }
+            )
+            : rowsResultSet(
+                new String[] { "FUNCTION_NAME", "REMARKS" },
+                new Object[][] { { "shared_routine", "duplicate" }, { "unique_function", "function" } }
+            );
+    }
+
     private static final class GaussDbMetadataDriver implements Driver {
         private final List<String> calls;
 
@@ -2487,6 +2776,16 @@ final class DbxJdbcPluginTest {
 
     private static String metadataArgument(Object value) {
         return value == null ? "<null>" : String.valueOf(value);
+    }
+
+    private static void closeAndDeregister(String connection, Driver driver) throws Exception {
+        try {
+            request("close", """
+                { "connection": %s }
+                """.formatted(connection));
+        } finally {
+            DriverManager.deregisterDriver(driver);
+        }
     }
 
     private static Connection recordingConnection() {

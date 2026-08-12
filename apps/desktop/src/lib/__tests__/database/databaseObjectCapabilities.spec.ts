@@ -6,8 +6,10 @@ describe("databaseObjectCapabilities", () => {
     expect(sidebarObjectKindsForDatabase("dameng")).toEqual(expect.arrayContaining(["MATERIALIZED_VIEW", "SEQUENCE", "PACKAGE", "PACKAGE_BODY"]));
   });
 
-  it("exposes synonyms for Xugu only", () => {
+  it("exposes synonyms only for database paths with synonym metadata", () => {
+    expect(sidebarObjectKindsForDatabase("oracle")).toContain("SYNONYM");
     expect(sidebarObjectKindsForDatabase("xugu")).toContain("SYNONYM");
+    expect(sidebarObjectKindsForDatabase("oceanbase-oracle")).not.toContain("SYNONYM");
     expect(sidebarObjectKindsForDatabase("postgres")).not.toContain("SYNONYM");
   });
 
@@ -34,6 +36,16 @@ describe("databaseObjectCapabilities", () => {
     // lands.
     expect(sidebarObjectKindsForDatabase("doris")).not.toContain("MATERIALIZED_VIEW");
     expect(sidebarObjectKindsForDatabase("doris")).toEqual(expect.arrayContaining(["TABLE", "VIEW"]));
+  });
+
+  it("exposes triggers only for native MySQL among MySQL-compatible paths", () => {
+    expect(sidebarObjectKindsForDatabase("mysql")).toEqual(["TABLE", "VIEW", "PROCEDURE", "FUNCTION", "TRIGGER"]);
+    expect(databaseObjectCapabilities("mysql").sourceReadable).toEqual(["VIEW", "PROCEDURE", "FUNCTION", "TRIGGER"]);
+
+    expect(sidebarObjectKindsForDatabase("doris")).toEqual(["TABLE", "VIEW"]);
+    expect(sidebarObjectKindsForDatabase("starrocks")).toEqual(["TABLE", "VIEW", "MATERIALIZED_VIEW"]);
+    expect(sidebarObjectKindsForDatabase("manticoresearch")).toEqual(["TABLE", "FUNCTION"]);
+    expect(sidebarObjectKindsForDatabase("jdbc")).toEqual(["TABLE", "VIEW", "PROCEDURE", "FUNCTION"]);
   });
 
   it("normalizes space separated materialized view types", () => {

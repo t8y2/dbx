@@ -163,6 +163,25 @@ describe("tab result cache statement execution metadata", () => {
     expect(result?.spatial_values).toEqual([[4326], [3857], [null]]);
   });
 
+  it("preserves large-value preview metadata", () => {
+    const encoded = encodeTabResultSnapshot({
+      result: {
+        columns: ["id", "payload"],
+        rows: [[1, "preview..."]],
+        large_value_cells: [{ row_index: 0, column_index: 1, original_bytes: 1_000_000 }],
+        affected_rows: 0,
+        execution_time_ms: 1,
+      },
+      resultLocalSortOriginalRows: [[1, "preview..."]],
+      resultLocalSortOriginalLargeValueCells: [{ row_index: 0, column_index: 1, original_bytes: 1_000_000 }],
+      cachedAt: 1,
+    });
+
+    const restored = decodeTabResultSnapshot(encoded);
+    expect(restored?.result?.large_value_cells).toEqual([{ row_index: 0, column_index: 1, original_bytes: 1_000_000 }]);
+    expect(restored?.resultLocalSortOriginalLargeValueCells).toEqual([{ row_index: 0, column_index: 1, original_bytes: 1_000_000 }]);
+  });
+
   it("restores multi-result, pagination, local-sort, and editable metadata fixtures", () => {
     const restored = decodeTabResultSnapshot(encodeTabResultSnapshot(queryResultLifecycleSnapshot()));
 

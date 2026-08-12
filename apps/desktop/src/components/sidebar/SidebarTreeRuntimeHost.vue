@@ -45,6 +45,7 @@ import {
   ListFilter,
   Clipboard,
   UsersRound,
+  ShieldCheck,
   Activity,
   Gauge,
   CalendarClock,
@@ -725,6 +726,12 @@ async function toggle() {
     } else if (node.type === "user-admin" && node.connectionId) {
       await connectionStore.ensureConnected(node.connectionId);
       queryStore.openUserAdmin(node.connectionId);
+    } else if (node.type === "dameng-users" && node.connectionId) {
+      await connectionStore.ensureConnected(node.connectionId);
+      queryStore.openDamengUsers(node.connectionId);
+    } else if (node.type === "dameng-roles" && node.connectionId) {
+      await connectionStore.ensureConnected(node.connectionId);
+      queryStore.openDamengRoles(node.connectionId);
     } else if (node.type === "dameng-job-admin" && node.connectionId) {
       await connectionStore.ensureConnected(node.connectionId);
       queryStore.openDamengJobAdmin(node.connectionId);
@@ -1296,6 +1303,30 @@ async function openServerDashboard() {
     } else {
       queryStore.openMysqlDashboard(node.connectionId);
     }
+  } catch (e: any) {
+    toast(t("connection.connectFailed", { message: translateBackendError(t, e) }), 5000);
+  }
+}
+
+async function openDamengUsers() {
+  const node = activeNode.value;
+  if (!node.connectionId) return;
+  try {
+    await connectionStore.ensureConnected(node.connectionId);
+    connectionStore.activeConnectionId = node.connectionId;
+    queryStore.openDamengUsers(node.connectionId);
+  } catch (e: any) {
+    toast(t("connection.connectFailed", { message: translateBackendError(t, e) }), 5000);
+  }
+}
+
+async function openDamengRoles() {
+  const node = activeNode.value;
+  if (!node.connectionId) return;
+  try {
+    await connectionStore.ensureConnected(node.connectionId);
+    connectionStore.activeConnectionId = node.connectionId;
+    queryStore.openDamengRoles(node.connectionId);
   } catch (e: any) {
     toast(t("connection.connectFailed", { message: translateBackendError(t, e) }), 5000);
   }
@@ -4148,6 +4179,8 @@ function buildConnectionSidebarMenu(context: SidebarMenuFactoryContext): boolean
       items.push({ label: t("contextMenu.serverDashboard"), action: openServerDashboard, icon: Gauge });
     }
     if (currentDatabaseType() === "dameng") {
+      items.push({ label: t("contextMenu.damengUsers"), action: openDamengUsers, icon: UsersRound });
+      items.push({ label: t("contextMenu.damengRoles"), action: openDamengRoles, icon: ShieldCheck });
       items.push({ label: t("contextMenu.damengJobAdmin"), action: openDamengJobAdmin, icon: CalendarClock });
     }
     if (canCopyFinalProxyPort.value) {

@@ -140,6 +140,7 @@ export function useSidebarDataOpenRuntime() {
       tab.resultSortDirection = undefined;
       tab.resultSortMode = undefined;
       tab.resultLocalSortOriginalRows = undefined;
+      tab.resultLocalSortOriginalLargeValueCells = undefined;
       tab.resultLocalSortOriginalMongoDocuments = undefined;
       tab.resultLocalSortOriginalMongoCopyDocuments = undefined;
       tab.resultSortedSql = undefined;

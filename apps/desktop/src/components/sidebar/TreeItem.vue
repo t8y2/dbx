@@ -255,6 +255,10 @@ function getIconInfo(node: TreeNode): { icon: any; colorClass: string } | null {
       return { icon: TableProperties, colorClass: "text-primary" };
     case "user-admin":
       return { icon: UsersRound, colorClass: "text-primary" };
+    case "dameng-users":
+      return { icon: UsersRound, colorClass: "text-primary" };
+    case "dameng-roles":
+      return { icon: ShieldCheck, colorClass: "text-primary" };
     case "dameng-job-admin":
       return { icon: CalendarClock, colorClass: "text-primary" };
     case "index":
@@ -349,7 +353,7 @@ function isGroupLabel(node: TreeNode): boolean {
 function displayLabel(node: TreeNode): string {
   if (node.type === "load-more") return t(node.label);
   if (node.type === "object-browser") return t(node.label, { count: node.objectCount ?? 0 });
-  if (node.type === "user-admin" || node.type === "dameng-job-admin") return t(node.label);
+  if (node.type === "user-admin" || node.type === "dameng-users" || node.type === "dameng-roles" || node.type === "dameng-job-admin") return t(node.label);
   if (node.type === "linked-server-root") return t(node.label);
   if (node.type === "mqtt-topic" && node.id.endsWith(":mqtt-topic:__console__")) return t(node.label);
   if (node.label === "tree.defaultDatabase") return t(node.label);

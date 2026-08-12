@@ -156,6 +156,12 @@ export interface TopicInfo {
   messageType?: RocketMqTopicMessageType | string;
   /** RabbitMQ: owning virtual host, present when listing across all vhosts. */
   namespace?: string;
+  /** RabbitMQ total queue messages, including ready and unacknowledged messages. */
+  messageCount?: number;
+  /** RabbitMQ messages ready for delivery. */
+  messagesReady?: number;
+  /** RabbitMQ messages delivered but not yet acknowledged. */
+  messagesUnacked?: number;
 }
 
 export interface ListTopicsOpts {

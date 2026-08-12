@@ -2745,7 +2745,11 @@ pub async fn get_table_partition_local_objects(
 
 fn postgres_table_partition_relation_sql() -> &'static str {
     "SELECT c.relkind::text, \
-            COALESCE((pg_catalog.row_to_json(c)->>'relispartition')::boolean, false) AS is_partition \
+            EXISTS ( \
+              SELECT 1 FROM pg_catalog.pg_inherits i \
+              WHERE i.inhrelid = c.oid \
+                AND (SELECT parent.relkind FROM pg_catalog.pg_class parent WHERE parent.oid = i.inhparent) = 'p' \
+            ) AS is_partition \
      FROM pg_catalog.pg_class c \
      JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
      WHERE n.nspname = $1 AND c.relname = $2 AND c.relkind IN ('r','p') \
@@ -7774,7 +7778,12 @@ mod tests {
         let info_sql = postgres_table_partition_info_sql();
         let local_objects_sql = postgres_table_partition_local_objects_sql();
 
-        assert!(relation_sql.contains("row_to_json(c)->>'relispartition'"));
+        assert!(!relation_sql.contains("row_to_json"));
+        assert!(!relation_sql.contains("relispartition"));
+        assert!(!relation_sql.contains("relpartbound"));
+        assert!(relation_sql.contains("pg_catalog.pg_inherits"));
+        assert!(relation_sql.contains("parent.oid = i.inhparent"));
+        assert!(relation_sql.contains(") = 'p'"));
         assert!(relation_sql.contains("c.relkind IN ('r','p')"));
         assert!(info_sql.contains("pg_catalog.pg_get_expr(c.relpartbound, c.oid, true)"));
         assert!(info_sql.contains("pg_catalog.pg_get_partkeydef(c.oid)"));
@@ -7925,6 +7934,56 @@ mod tests {
         assert!(info.is_nullable);
         // int4 1 should be interpreted as true for is_primary_key
         assert!(info.is_primary_key);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DBX_TEST_POSTGRES_URL pointing at a writable PostgreSQL 9.x database"]
+    async fn postgres_legacy_table_ddl_uses_compatible_partition_probe() {
+        let url = std::env::var("DBX_TEST_POSTGRES_URL").expect("DBX_TEST_POSTGRES_URL");
+        let pool = connect(&url, Duration::from_secs(5)).await.expect("connect postgres");
+        let version = execute_query(&pool, "SHOW server_version_num").await.expect("query PostgreSQL version");
+        let version_num = version.rows[0][0]
+            .as_str()
+            .expect("server_version_num should be text")
+            .parse::<u32>()
+            .expect("server_version_num should be numeric");
+        assert!((90000..100000).contains(&version_num), "expected PostgreSQL 9.x, got {version_num}");
+
+        let schema = format!("dbx_legacy_ddl_{}", uuid::Uuid::new_v4().simple());
+        let schema_ident = pg_quote_ident(&schema);
+        let parent = format!("{schema_ident}.parent");
+        let child = format!("{schema_ident}.child");
+        let function = format!("{schema_ident}.fill_child_name");
+        let client = pool.get().await.expect("get postgres client");
+        client
+            .batch_execute(&format!(
+                "CREATE SCHEMA {schema_ident}; \
+                 CREATE TABLE {parent} (id integer PRIMARY KEY); \
+                 CREATE TABLE {child} (parent_id integer REFERENCES {parent}(id), name text) INHERITS ({parent}); \
+                 ALTER TABLE {child} ADD PRIMARY KEY (id); \
+                 CREATE INDEX child_name_idx ON {child}(name); \
+                 CREATE FUNCTION {function}() RETURNS trigger LANGUAGE plpgsql AS $$BEGIN NEW.name := COALESCE(NEW.name, chr(120)); RETURN NEW; END$$; \
+                 CREATE TRIGGER child_bi BEFORE INSERT ON {child} FOR EACH ROW EXECUTE PROCEDURE {function}()"
+            ))
+            .await
+            .expect("create PostgreSQL 9.x DDL fixtures");
+        drop(client);
+
+        let partition_info =
+            get_table_partition_info(&pool, &schema, "child").await.expect("classify PostgreSQL 9.x inherited table");
+        let ddl = crate::schema::pg_ddl(&pool, &schema, "child").await;
+        execute_query(&pool, &format!("DROP SCHEMA {schema_ident} CASCADE"))
+            .await
+            .expect("drop PostgreSQL 9.x DDL fixtures");
+        let ddl = ddl.expect("generate PostgreSQL 9.x table DDL");
+
+        assert!(ddl.contains("CREATE TABLE"), "ddl: {ddl}");
+        assert!(ddl.contains("PRIMARY KEY"), "ddl: {ddl}");
+        assert!(ddl.contains("FOREIGN KEY"), "ddl: {ddl}");
+        assert!(ddl.contains("CREATE INDEX \"child_name_idx\""), "ddl: {ddl}");
+        assert!(ddl.contains("CREATE TRIGGER child_bi"), "ddl: {ddl}");
+        assert_eq!(partition_info, PostgresTablePartitionInfo::default());
+        assert!(!ddl.contains("PARTITION OF"), "ddl: {ddl}");
     }
 
     #[tokio::test]

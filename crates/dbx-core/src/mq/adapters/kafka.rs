@@ -203,6 +203,9 @@ impl MessageQueueAdmin for KafkaAdmin {
                     internal: t.get("internal").and_then(|v| v.as_bool()).unwrap_or(false),
                     message_type: None,
                     namespace: None,
+                    message_count: None,
+                    messages_ready: None,
+                    messages_unacked: None,
                 }
             })
             .collect())

@@ -15,6 +15,20 @@ const documentJsonEditor = vi.hoisted(() => ({
   openSearch: vi.fn().mockReturnValue(true),
 }));
 
+const dataGrid = vi.hoisted(() => ({
+  fullExportResult: undefined as
+    | ((onProgress?: (info: { rowsExported: number; totalRows: number | null }) => void) => Promise<
+        | {
+            columns: string[];
+            column_types?: string[];
+            rows: Array<Array<string | number | boolean | null>>;
+            mongo_copy_documents?: unknown[];
+          }
+        | undefined
+      >)
+    | undefined,
+}));
+
 const settings = vi.hoisted(() => ({
   editorSettings: {
     pageSize: 100,
@@ -25,6 +39,9 @@ const settings = vi.hoisted(() => ({
     tableFontSize: 12,
     numericColumnRightAlign: true,
     confirmDangerousSqlExecution: true,
+    exportBatchSize: 2,
+    exportRowLimitEnabled: false,
+    exportRowLimit: 100_000,
   },
   updateEditorSettings: vi.fn(),
 }));
@@ -64,8 +81,10 @@ vi.mock("@/components/grid/DataGrid.vue", async () => {
         connectionId: { type: String, default: "" },
         database: { type: String, default: "" },
         columnLayoutScopeKey: { type: String, default: "" },
+        fullExportResult: { type: Function, default: undefined },
       },
       setup(props, { expose, slots }) {
+        dataGrid.fullExportResult = props.fullExportResult as typeof dataGrid.fullExportResult;
         expose({
           visibleColumnCount: 2,
           displayableColumnCount: 2,
@@ -95,6 +114,7 @@ vi.mock("@/components/grid/DataGrid.vue", async () => {
               "data-column-layout-scope-key": props.columnLayoutScopeKey,
               "data-result-hidden-column-keys": JSON.stringify((props.result as { local_hidden_column_keys?: string[] }).local_hidden_column_keys ?? []),
               "data-result-column-types": JSON.stringify((props.result as { column_types?: string[] }).column_types ?? []),
+              "data-result-rows": JSON.stringify((props.result as { rows?: unknown[] }).rows ?? []),
             },
             [
               slots["search-bar"]?.({
@@ -258,6 +278,7 @@ beforeEach(async () => {
   backend.cancelQuery.mockReset();
   backend.ensureConnected.mockReset();
   backend.documentDeleteDocument.mockReset();
+  dataGrid.fullExportResult = undefined;
   documentJsonEditor.openSearch.mockClear();
   backend.documentDeleteDocument.mockResolvedValue(undefined);
   settings.editorSettings.mongoViewMode = "table";
@@ -267,6 +288,9 @@ beforeEach(async () => {
   settings.editorSettings.tableFontSize = 12;
   settings.editorSettings.numericColumnRightAlign = true;
   settings.editorSettings.confirmDangerousSqlExecution = true;
+  settings.editorSettings.exportBatchSize = 2;
+  settings.editorSettings.exportRowLimitEnabled = false;
+  settings.editorSettings.exportRowLimit = 100_000;
   settings.updateEditorSettings.mockReset();
   settings.updateEditorSettings.mockImplementation((partial: Partial<typeof settings.editorSettings>) => Object.assign(settings.editorSettings, partial));
   backend.ensureConnected.mockResolvedValue(undefined);
@@ -407,6 +431,105 @@ describe("DocumentBrowser Elasticsearch field search", () => {
 });
 
 describe("DocumentBrowser MongoDB filter value types", () => {
+  it("exports all matching MongoDB documents without changing the visible page", async () => {
+    app?.unmount();
+    settings.editorSettings.exportBatchSize = 2;
+    settings.editorSettings.exportRowLimitEnabled = true;
+    settings.editorSettings.exportRowLimit = 3;
+    backend.documentFindDocuments.mockReset();
+    backend.documentFindDocuments
+      .mockResolvedValueOnce({
+        documents: [{ _id: "visible", name: "Visible" }],
+        extended_documents: [{ _id: { $oid: "000000000000000000000001" }, name: "Visible" }],
+        total: 5,
+        total_is_exact: true,
+      })
+      .mockResolvedValueOnce({
+        documents: [
+          { _id: "one", name: "First" },
+          { _id: "two", name: "Second" },
+        ],
+        extended_documents: [
+          { _id: { $oid: "000000000000000000000002" }, name: "First" },
+          { _id: { $oid: "000000000000000000000003" }, name: "Second" },
+        ],
+        total: 5,
+        total_is_exact: true,
+      })
+      .mockResolvedValueOnce({
+        documents: [{ _id: "three", later: { $numberLong: "9007199254740993" } }],
+        extended_documents: [{ _id: { $oid: "000000000000000000000004" }, later: { $numberLong: "9007199254740993" } }],
+        total: 5,
+        total_is_exact: true,
+      });
+    app = createApp(DocumentBrowser, {
+      connectionId: "mongo-1",
+      database: "test",
+      collection: "orders",
+      databaseType: "mongodb",
+    });
+    app.mount(root!);
+    await flushUi();
+
+    const inputs = root!.querySelectorAll<HTMLTextAreaElement>("textarea");
+    inputs[0]!.value = '{"active":true}';
+    inputs[0]!.dispatchEvent(new Event("input", { bubbles: true }));
+    inputs[1]!.value = '{"createdAt":-1}';
+    inputs[1]!.dispatchEvent(new Event("input", { bubbles: true }));
+    await flushUi();
+
+    expect(dataGrid.fullExportResult).toBeTypeOf("function");
+    const progress = vi.fn();
+    const result = await dataGrid.fullExportResult!(progress);
+
+    expect(backend.documentFindDocuments.mock.calls.slice(1).map((call) => call.slice(0, 9))).toEqual([
+      ["mongo-1", "test", "orders", 0, 2, '{"active":true}', undefined, '{"createdAt":-1}', undefined],
+      ["mongo-1", "test", "orders", 2, 1, '{"active":true}', undefined, '{"createdAt":-1}', undefined],
+    ]);
+    expect(result?.columns).toEqual(["_id", "name", "later"]);
+    expect(result?.rows).toEqual([
+      ["one", "First", null],
+      ["two", "Second", null],
+      ["three", null, "9007199254740993"],
+    ]);
+    expect(result?.mongo_copy_documents).toEqual([
+      { _id: { $oid: "000000000000000000000002" }, name: "First" },
+      { _id: { $oid: "000000000000000000000003" }, name: "Second" },
+      { _id: { $oid: "000000000000000000000004" }, later: { $numberLong: "9007199254740993" } },
+    ]);
+    expect(progress).toHaveBeenLastCalledWith({ rowsExported: 3, totalRows: 3 });
+    const visibleGrid = root!.querySelector<HTMLElement>('[data-testid="data-grid"]')!;
+    expect(JSON.parse(visibleGrid.dataset.resultColumnTypes ?? "[]")).toEqual(["", ""]);
+    expect(JSON.parse(visibleGrid.dataset.resultRows ?? "[]")).toEqual([["visible", "Visible"]]);
+    expect(inputs[0]!.value).toBe('{"active":true}');
+    expect(inputs[1]!.value).toBe('{"createdAt":-1}');
+  });
+
+  it("stops MongoDB full export on a short page when the total is estimated", async () => {
+    app?.unmount();
+    backend.documentFindDocuments.mockReset();
+    backend.documentFindDocuments.mockResolvedValueOnce({ documents: [{ _id: "visible" }], total: 500, total_is_exact: false }).mockResolvedValueOnce({ documents: [{ _id: "only" }], total: 500, total_is_exact: false });
+    app = createApp(DocumentBrowser, {
+      connectionId: "mongo-1",
+      database: "test",
+      collection: "orders",
+      databaseType: "mongodb",
+    });
+    app.mount(root!);
+    await flushUi();
+
+    const progress = vi.fn();
+    const result = await dataGrid.fullExportResult!(progress);
+
+    expect(backend.documentFindDocuments).toHaveBeenCalledTimes(2);
+    expect(result?.rows).toEqual([["only"]]);
+    expect(progress).toHaveBeenLastCalledWith({ rowsExported: 1, totalRows: null });
+  });
+
+  it("does not offer the MongoDB full export callback to Elasticsearch viewers", () => {
+    expect(dataGrid.fullExportResult).toBeUndefined();
+  });
+
   it("identifies consistently numeric MongoDB columns for shared grid alignment", async () => {
     app?.unmount();
     backend.documentFindDocuments.mockReset();

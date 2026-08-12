@@ -763,6 +763,103 @@ describe("useDataGridExport prepared row statements", () => {
     expect(extractDataGridSelection).toHaveBeenNthCalledWith(2, expect.objectContaining({ rows: [[7, { name: "Ada", tags: ["admin"] }]] }));
   });
 
+  it("resolves large-value previews before building an extractor request", async () => {
+    const matrix: CellSelectionMatrix = {
+      rowIndexes: [0],
+      columnIndexes: [0, 1],
+      columns: ["id", "name"],
+      rows: [[7, "preview..."]],
+    };
+    const item = row([7, "preview..."]);
+    const resolveSourceValues = vi.fn(async () => new Map([[item.id, new Map([[1, "full payload"]])]]));
+    const options: UseDataGridExportOptions = {
+      columns: computed(() => ["id", "name"]),
+      displayItems: computed(() => [item]),
+      allColumns: computed(() => ["id", "name"]),
+      allDisplayItems: computed(() => [item]),
+      visibleColumnIndexes: computed(() => [0, 1]),
+      sql: computed(() => undefined),
+      tableMeta: computed(() => editableTable),
+      databaseType: computed(() => "mysql"),
+      connectionId: computed(() => "connection-1"),
+      database: computed(() => "dbx"),
+      context: computed(() => "table-data"),
+      sourceColumns: computed(() => ["id", "name"]),
+      columnTypes: computed(() => ["int", "varchar"]),
+      whereInput: computed(() => undefined),
+      orderBy: computed(() => undefined),
+      exportBatchSize: computed(() => 1000),
+      hasCellSelection: computed(() => true),
+      selectedCells: computed(() => matrix),
+      selectedCellMatrix: computed(() => matrix),
+      selectedRange: computed(() => ({ startRow: 0, endRow: 0, startCol: 0, endCol: 1 })),
+      contextCell: ref({ rowId: item.id, rowIndex: 0, col: 1 }),
+      contextSelectionIsSynthetic: ref(false),
+      getRowItem: () => item,
+      selectedRowIds: ref(new Set<number>()),
+      hasRowSelection: computed(() => false),
+      resolveSourceValues,
+    };
+    vi.mocked(extractDataGridSelection).mockResolvedValueOnce({
+      text: "copied",
+      mimeType: "text/tab-separated-values",
+      fileExtension: "tsv",
+      rowCount: 1,
+      columnCount: 2,
+    });
+
+    await expect(useDataGridExport(options).copyWithExtractor("tsv")).resolves.toBe(true);
+
+    expect(resolveSourceValues).toHaveBeenCalledWith([item.id], [0, 1]);
+    expect(extractDataGridSelection).toHaveBeenCalledWith(expect.objectContaining({ rows: [[7, "full payload"]] }));
+  });
+
+  it("does not copy a preview when full-value resolution fails", async () => {
+    const matrix: CellSelectionMatrix = {
+      rowIndexes: [0],
+      columnIndexes: [0],
+      columns: ["name"],
+      rows: [["preview..."]],
+    };
+    const item = row(["preview..."]);
+    const state = useDataGridExport({
+      columns: computed(() => ["name"]),
+      displayItems: computed(() => [item]),
+      allColumns: computed(() => ["name"]),
+      allDisplayItems: computed(() => [item]),
+      visibleColumnIndexes: computed(() => [0]),
+      sql: computed(() => undefined),
+      tableMeta: computed(() => editableTable),
+      databaseType: computed(() => "mysql"),
+      connectionId: computed(() => "connection-1"),
+      database: computed(() => "dbx"),
+      context: computed(() => "table-data"),
+      sourceColumns: computed(() => ["name"]),
+      columnTypes: computed(() => ["varchar"]),
+      whereInput: computed(() => undefined),
+      orderBy: computed(() => undefined),
+      exportBatchSize: computed(() => 1000),
+      hasCellSelection: computed(() => true),
+      selectedCells: computed(() => matrix),
+      selectedCellMatrix: computed(() => matrix),
+      selectedRange: computed(() => ({ startRow: 0, endRow: 0, startCol: 0, endCol: 0 })),
+      contextCell: ref({ rowId: item.id, rowIndex: 0, col: 0 }),
+      contextSelectionIsSynthetic: ref(false),
+      getRowItem: () => item,
+      selectedRowIds: ref(new Set<number>()),
+      hasRowSelection: computed(() => false),
+      resolveSourceValues: async () => {
+        throw new Error("stable key required");
+      },
+    });
+
+    await expect(state.copyWithExtractor("tsv")).resolves.toBe(false);
+
+    expect(extractDataGridSelection).not.toHaveBeenCalled();
+    expect(copyToClipboard).not.toHaveBeenCalled();
+    expect(toast).toHaveBeenCalledWith("grid.copyFailed: stable key required", 5000);
+  });
+
   it("rejects SQL UPDATE instead of silently skipping a row with a null primary key", async () => {
     const matrix: CellSelectionMatrix = {
       rowIndexes: [0],

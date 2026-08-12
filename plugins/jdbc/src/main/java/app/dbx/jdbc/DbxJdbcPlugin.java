@@ -1549,6 +1549,7 @@ public final class DbxJdbcPlugin {
         JdbcDriverQuirks quirks = driverQuirks(connection);
         String catalog = metadataCatalog(database, quirks);
         String schemaPattern = resolveSchemaPattern(meta, database, schema, quirks);
+        Set<String> allowedObjectTypes = normalizedObjectTypes(objectTypes);
 
         if (!kingbase) {
             String[] tableTypes = constrainedJdbcTableTypes(jdbcTableTypes(meta), objectTypes);
@@ -1560,16 +1561,18 @@ public final class DbxJdbcPlugin {
             }
         }
 
-        try (ResultSet rs = meta.getProcedures(catalog, schemaPattern, "%")) {
-            while (rs.next()) {
-                ObjectNode item = MAPPER.createObjectNode();
-                item.put("name", rs.getString("PROCEDURE_NAME"));
-                item.put("object_type", "PROCEDURE");
-                putNullable(item, "schema", schema);
-                putNullable(item, "comment", rs.getString("REMARKS"));
-                result.add(item);
+        if (allowedObjectTypes.isEmpty() || allowedObjectTypes.contains("PROCEDURE")) {
+            try (ResultSet rs = meta.getProcedures(catalog, schemaPattern, "%")) {
+                while (rs != null && rs.next()) {
+                    ObjectNode item = MAPPER.createObjectNode();
+                    item.put("name", rs.getString("PROCEDURE_NAME"));
+                    item.put("object_type", "PROCEDURE");
+                    putNullable(item, "schema", schema);
+                    putNullable(item, "comment", rs.getString("REMARKS"));
+                    result.add(item);
+                }
+            } catch (SQLException ignored) {
             }
-        } catch (SQLException ignored) {
         }
 
         Set<String> procedureNames = new HashSet<>();
@@ -1578,19 +1581,21 @@ public final class DbxJdbcPlugin {
                 procedureNames.add(node.path("name").asText());
             }
         }
-        try (ResultSet rs = meta.getFunctions(catalog, schemaPattern, "%")) {
-            while (rs.next()) {
-                String name = rs.getString("FUNCTION_NAME");
-                if (!procedureNames.contains(name)) {
-                    ObjectNode item = MAPPER.createObjectNode();
-                    item.put("name", name);
-                    item.put("object_type", "FUNCTION");
-                    putNullable(item, "schema", schema);
-                    putNullable(item, "comment", rs.getString("REMARKS"));
-                    result.add(item);
+        if (allowedObjectTypes.isEmpty() || allowedObjectTypes.contains("FUNCTION")) {
+            try (ResultSet rs = meta.getFunctions(catalog, schemaPattern, "%")) {
+                while (rs != null && rs.next()) {
+                    String name = rs.getString("FUNCTION_NAME");
+                    if (!procedureNames.contains(name)) {
+                        ObjectNode item = MAPPER.createObjectNode();
+                        item.put("name", name);
+                        item.put("object_type", "FUNCTION");
+                        putNullable(item, "schema", schema);
+                        putNullable(item, "comment", rs.getString("REMARKS"));
+                        result.add(item);
+                    }
                 }
+            } catch (SQLException ignored) {
             }
-        } catch (SQLException ignored) {
         }
 
         return filterMetadataNodes(result, filter, limit, offset, objectTypes, "object_type", false);

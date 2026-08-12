@@ -2,6 +2,7 @@ import type { TreeNode, TreeNodeType } from "@/types/database";
 import { createSidebarLabelMatcher, type SidebarLabelMatcher } from "@/lib/sidebar/sidebarSearch";
 
 const preserveMatchedSubtreeTypes = new Set(["connection", "database", "schema", "table", "view", "mongo-db", "mongo-collection"]);
+const hiddenSearchNodeTypes = new Set<TreeNodeType>(["user-admin", "dameng-job-admin"]);
 
 function bestMatch(matchLabel: SidebarLabelMatcher, label: string, comment?: string | null) {
   const lm = matchLabel(label);
@@ -43,10 +44,16 @@ function applySearchCollapsedState(node: TreeNode, collapsedIds: ReadonlySet<str
   };
 }
 
+function preservedSearchChildren(node: TreeNode, collapsedIds: ReadonlySet<string>): TreeNode[] | undefined {
+  if (!node.children) return undefined;
+  return node.children.filter((child) => !hiddenSearchNodeTypes.has(child.type)).map((child) => applySearchCollapsedState(child, collapsedIds));
+}
+
 function filterSidebarTreeWithMatcher(nodes: TreeNode[], matchLabel: SidebarLabelMatcher | undefined, collapsedIds: ReadonlySet<string>, searchableNodeTypes?: ReadonlySet<TreeNodeType>): TreeNode[] {
   const filteredNodes: { node: TreeNode; score: number }[] = [];
 
   for (const node of nodes) {
+    if (matchLabel && hiddenSearchNodeTypes.has(node.type)) continue;
     if (node.type === "object-browser" && node.hiddenChildren) {
       const matches = node.hiddenChildren.flatMap((child) => {
         if (searchableNodeTypes && !searchableNodeTypes.has(child.type)) return [];
@@ -67,7 +74,10 @@ function filterSidebarTreeWithMatcher(nodes: TreeNode[], matchLabel: SidebarLabe
     // A type-matched table keeps its loaded detail groups after the text query
     // is cleared instead of being rebuilt with an empty filtered child list.
     const preservesTypeMatchedTable = !matchLabel && !!selfMatch && node.type === "table";
-    const filteredChildren = preservesSubtree ? node.children?.map((child) => applySearchCollapsedState(child, collapsedIds)) : node.children ? filterSidebarTreeWithMatcher(node.children, matchLabel, collapsedIds, searchableNodeTypes) : undefined;
+    // Connection utility entries are synthetic navigation actions, not schema
+    // search results. Keep real loaded descendants for connection-name matches,
+    // but do not let those actions make a disconnected result look expanded.
+    const filteredChildren = preservesSubtree ? preservedSearchChildren(node, collapsedIds) : node.children ? filterSidebarTreeWithMatcher(node.children, matchLabel, collapsedIds, searchableNodeTypes) : undefined;
 
     if (selfMatch || (filteredChildren && filteredChildren.length > 0)) {
       if (!node.children || preservesTypeMatchedTable) {

@@ -238,7 +238,9 @@ describe("normalizeEditorSettings", () => {
     expect(normalizeEditorSettings({}).globalQueryTimeoutSecs).toBe(30);
     expect(normalizeEditorSettings({ queryTimeoutSecs: 45 } as any).globalQueryTimeoutSecs).toBe(45);
     expect(normalizeEditorSettings({ globalQueryTimeoutSecs: -1 }).globalQueryTimeoutSecs).toBe(0);
-    expect(normalizeEditorSettings({ globalQueryTimeoutSecs: 301 }).globalQueryTimeoutSecs).toBe(300);
+    expect(normalizeEditorSettings({ globalQueryTimeoutSecs: 301 }).globalQueryTimeoutSecs).toBe(301);
+    expect(normalizeEditorSettings({ globalQueryTimeoutSecs: 3600 }).globalQueryTimeoutSecs).toBe(3600);
+    expect(normalizeEditorSettings({ globalQueryTimeoutSecs: 3601 }).globalQueryTimeoutSecs).toBe(3600);
     expect(normalizeEditorSettings({ connectTimeoutInheritConnectionIds: ["one", "one", " ", "two"] }).connectTimeoutInheritConnectionIds).toEqual(["one", "two"]);
     expect(normalizeEditorSettings({ queryTimeoutInheritConnectionIds: ["one", "one", " ", "two"] }).queryTimeoutInheritConnectionIds).toEqual(["one", "two"]);
     expect(normalizeEditorSettings({}).timeoutInheritanceMigrationVersion).toBe(0);

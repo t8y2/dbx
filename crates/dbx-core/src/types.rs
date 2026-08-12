@@ -341,6 +341,15 @@ impl QueryMessage {
     }
 }
 
+/// A result cell whose full variable-length value was replaced by a bounded
+/// preview before the result crossed the desktop/web transport boundary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LargeValueCell {
+    pub row_index: usize,
+    pub column_index: usize,
+    pub original_bytes: usize,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueryResult {
     pub columns: Vec<String>,

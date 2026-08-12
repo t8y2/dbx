@@ -297,6 +297,9 @@ impl MessageQueueAdmin for PulsarAdmin {
                         internal: false,
                         message_type: None,
                         namespace: None,
+                        message_count: None,
+                        messages_ready: None,
+                        messages_unacked: None,
                     })
                 })
                 .buffered(PARTITION_METADATA_CONCURRENCY)
@@ -323,6 +326,9 @@ impl MessageQueueAdmin for PulsarAdmin {
                     internal: false,
                     message_type: None,
                     namespace: None,
+                    message_count: None,
+                    messages_ready: None,
+                    messages_unacked: None,
                 });
             }
         }

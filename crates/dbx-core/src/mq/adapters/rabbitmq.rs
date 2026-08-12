@@ -183,23 +183,7 @@ impl MessageQueueAdmin for RabbitMqAdmin {
         let result: serde_json::Value = self.call("mq_list_topics", params).await?;
         let topics = result.get("topics").and_then(|v| v.as_array()).cloned().unwrap_or_default();
 
-        Ok(topics
-            .into_iter()
-            .map(|t| {
-                let name = t.get("name").and_then(|v| v.as_str()).unwrap_or_default().to_string();
-                TopicInfo {
-                    name: name.clone(),
-                    short_name: name,
-                    partitioned: false,
-                    partitions: None,
-                    persistent: t.get("durable").and_then(|v| v.as_bool()).unwrap_or(true),
-                    internal: t.get("internal").and_then(|v| v.as_bool()).unwrap_or(false),
-                    message_type: None,
-                    // All-vhosts listings report each queue's own vhost.
-                    namespace: t.get("vhost").and_then(|v| v.as_str()).map(String::from),
-                }
-            })
-            .collect())
+        Ok(topics.into_iter().map(|topic| topic_info_from_agent_value(&topic)).collect())
     }
 
     async fn create_topic(&self, topic: &TopicRef, _partitions: Option<u32>) -> Result<(), String> {
@@ -1013,6 +997,24 @@ fn peeked_message_from_json(idx: usize, m: &serde_json::Value) -> PeekedMessage 
     }
 }
 
+fn topic_info_from_agent_value(topic: &serde_json::Value) -> TopicInfo {
+    let name = topic.get("name").and_then(|value| value.as_str()).unwrap_or_default().to_string();
+    TopicInfo {
+        name: name.clone(),
+        short_name: name,
+        partitioned: false,
+        partitions: None,
+        persistent: topic.get("durable").and_then(|value| value.as_bool()).unwrap_or(true),
+        internal: topic.get("internal").and_then(|value| value.as_bool()).unwrap_or(false),
+        message_type: None,
+        // All-vhosts listings report each queue's own vhost.
+        namespace: topic.get("vhost").and_then(|value| value.as_str()).map(String::from),
+        message_count: topic.get("messages").and_then(|value| value.as_i64()),
+        messages_ready: topic.get("messagesReady").and_then(|value| value.as_i64()),
+        messages_unacked: topic.get("messagesUnacked").and_then(|value| value.as_i64()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1186,6 +1188,23 @@ mod tests {
         };
 
         assert_eq!(queue_name(&topic), "orders.queue");
+    }
+
+    #[test]
+    fn topic_info_maps_queue_message_counts() {
+        let topic = topic_info_from_agent_value(&serde_json::json!({
+            "name": "orders",
+            "durable": true,
+            "vhost": "/",
+            "messages": 12,
+            "messagesReady": 10,
+            "messagesUnacked": 2
+        }));
+
+        assert_eq!(topic.message_count, Some(12));
+        assert_eq!(topic.messages_ready, Some(10));
+        assert_eq!(topic.messages_unacked, Some(2));
+        assert_eq!(topic.namespace.as_deref(), Some("/"));
     }
 
     #[test]

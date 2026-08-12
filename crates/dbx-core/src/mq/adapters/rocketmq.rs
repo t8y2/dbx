@@ -764,6 +764,9 @@ fn topic_info_from_agent_value(t: &serde_json::Value) -> TopicInfo {
         internal: t.get("internal").and_then(|v| v.as_bool()).unwrap_or(false),
         message_type: t.get("messageType").and_then(|v| v.as_str()).map(String::from),
         namespace: None,
+        message_count: None,
+        messages_ready: None,
+        messages_unacked: None,
     }
 }
 

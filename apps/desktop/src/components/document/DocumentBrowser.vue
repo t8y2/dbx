@@ -80,6 +80,7 @@ import {
   serializeMongoDocumentId,
   type MongoInputValue,
 } from "@/lib/mongo/mongoDocumentValues";
+import { mongoDocumentsToQueryResult } from "@/lib/mongo/mongoShellCommand";
 import type { GridNewRowMeta } from "@/lib/dataGrid/gridNewRowPlacement";
 import { normalizeResultPageSize } from "@/lib/dataGrid/paginationPageSize";
 import { documentDataGridColumnLayoutScopeKey } from "@/lib/dataGrid/dataGridColumnLayoutStorage";
@@ -338,6 +339,54 @@ const gridResult = computed<QueryResult>(() => {
 
   return { columns, column_types: columnTypes, rows, mongo_documents: docs, mongo_copy_documents: copyDocuments.value, affected_rows: 0, execution_time_ms: 0, truncated: false };
 });
+
+async function exportAllMongoDocuments(onProgress?: (info: { rowsExported: number; totalRows: number | null }) => void): Promise<QueryResult | undefined> {
+  if (documentStoreProvider.value.kind !== "mongodb") return undefined;
+
+  const connectionId = props.connectionId;
+  const database = props.database;
+  const collection = props.collection;
+  const filter = currentDocumentFilter();
+  const sort = currentDocumentSortJson(sortInput.value);
+  const exportSettings = settingsStore.editorSettings;
+  const batchSize = Math.max(1, Math.trunc(exportSettings.exportBatchSize));
+  const rowLimit = exportSettings.exportRowLimitEnabled ? Math.max(0, Math.trunc(exportSettings.exportRowLimit)) : Number.POSITIVE_INFINITY;
+  const exportExecutionId = uuid();
+  const exportStartedAt = performance.now();
+  const exportedDocuments: JsonRecord[] = [];
+  let exportedCopyDocuments: JsonRecord[] | undefined = [];
+  let totalRows: number | null = null;
+
+  while (exportedDocuments.length < rowLimit) {
+    const requestLimit = Math.min(batchSize, rowLimit - exportedDocuments.length);
+    if (requestLimit <= 0) break;
+    const result = await api.documentFindDocuments(connectionId, database, collection, exportedDocuments.length, requestLimit, filter, undefined, sort, undefined, exportExecutionId);
+    const pageDocuments = result.documents.slice(0, requestLimit).map(asRecord);
+    exportedDocuments.push(...pageDocuments);
+
+    if (exportedCopyDocuments) {
+      if (result.extended_documents?.length === result.documents.length) {
+        exportedCopyDocuments.push(...result.extended_documents.slice(0, pageDocuments.length).map(asRecord));
+      } else {
+        exportedCopyDocuments = undefined;
+      }
+    }
+
+    if (result.total_is_exact !== false) totalRows = Math.min(result.total, rowLimit);
+    onProgress?.({ rowsExported: exportedDocuments.length, totalRows });
+
+    const reachedExactTotal = result.total_is_exact !== false && exportedDocuments.length >= result.total;
+    if (pageDocuments.length === 0 || pageDocuments.length < requestLimit || reachedExactTotal) break;
+  }
+
+  const result = mongoDocumentsToQueryResult(exportedDocuments, performance.now() - exportStartedAt, totalRows ?? exportedDocuments.length, exportedCopyDocuments, totalRows !== null);
+  if (result.columns.length === 0) result.columns = gridResult.value.columns;
+  result.column_types = mongoDocumentGridColumnTypes(exportedDocuments, result.columns);
+  result.affected_rows = exportedDocuments.length;
+  result.truncated = false;
+  result.has_more = false;
+  return result;
+}
 const expandedDocumentFilterFieldPaths = ref<Set<string>>(new Set());
 const elasticsearchFieldTypes = computed(() => new Map(elasticsearchMappingFields.value.map((field) => [field.name, field.data_type])));
 const elasticsearchFilterFieldNames = computed(() => {
@@ -1871,6 +1920,7 @@ defineExpose({ focusSearch });
       :inexact-total-row-count-mode="documentStoreProvider.kind === 'mongodb' ? 'estimated' : 'at-least'"
       :pagination-total-row-count="pageTotal"
       :count-total-rows="countExactDocumentTotal"
+      :full-export-result="documentStoreProvider.kind === 'mongodb' ? exportAllMongoDocuments : undefined"
       @sort="onSort"
       @reload="refreshDocuments"
       @paginate="(offset: number, limit: number) => paginate(offset, limit)"

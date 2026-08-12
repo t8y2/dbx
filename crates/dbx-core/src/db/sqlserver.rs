@@ -72,6 +72,7 @@ const SQLSERVER_RESULT_TYPE_PROBE_SQL: &str = "\
         END CATCH \
     END";
 const SIMPLE_QUERY_MODULE_KEYWORDS: &[&str] = &["FUNCTION", "PROC", "PROCEDURE", "TRIGGER", "VIEW"];
+const SQLSERVER_INTERNAL_HEALTH_CHECK_SQL: &str = "/* DBX_INTERNAL_TRACE */ SELECT 1";
 // Match JDBC/tiberius `encrypt=false`: encrypt only login, then drop back to raw TDS.
 const SQLSERVER_LEGACY_ENCRYPTION_LEVEL: tiberius::EncryptionLevel = tiberius::EncryptionLevel::Off;
 // Some very old SQL Server setups only accepted DBX <= 0.5.48 because the fallback
@@ -1817,7 +1818,7 @@ pub async fn get_completion_context(client: &mut SqlServerClient) -> Result<SqlS
 
 pub async fn test_connection(client: &mut SqlServerClient) -> Result<(), String> {
     crate::db::with_connection_timeout("SQL Server", crate::db::connection_timeout(), async {
-        let stream = client.simple_query("SELECT 1").await.map_err(|e| e.to_string())?;
+        let stream = client.simple_query(SQLSERVER_INTERNAL_HEALTH_CHECK_SQL).await.map_err(|e| e.to_string())?;
         let _ = stream.into_first_result().await.map_err(|e| e.to_string())?;
         Ok(())
     })

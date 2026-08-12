@@ -1,6 +1,7 @@
 import { withEnglishFallback } from "./fallback";
 import docs from "./docs/zh-TW";
 import { consulUiMessages } from "./consulUi";
+import { sqlServerTraceMessages as sqlServerTrace } from "./sqlServerTraceMessages";
 
 const consul = {
   ...consulUiMessages,
@@ -2779,6 +2780,7 @@ export default withEnglishFallback({
     manageExtension: "管理擴展...",
     dropExtension: "刪除擴展",
     processList: "處理程序清單",
+    sqlServerTrace: "活動追蹤",
     serverDashboard: "伺服器儀表板",
     createProcedure: "新增儲存程序",
     createFunction: "新增函數",
@@ -6384,6 +6386,7 @@ export default withEnglishFallback({
     },
   },
   consul,
+  sqlServerTrace,
   zookeeper: {
     prefixPlaceholder: "路徑前綴，例如 /app/",
     newKey: "新增 Znode",

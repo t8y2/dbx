@@ -1,6 +1,7 @@
 import { withEnglishFallback } from "./fallback";
 import docs from "./docs/ko";
 import { consulUiMessages } from "./consulUi";
+import { sqlServerTraceMessages as sqlServerTrace } from "./sqlServerTraceMessages";
 
 const consul = {
   ...consulUiMessages,
@@ -2415,6 +2416,7 @@ export default withEnglishFallback({
     userAdmin: "사용자 및 권한",
     openUserAdmin: "사용자 및 권한 열기",
     processList: "프로세스 목록",
+    sqlServerTrace: "활동 추적",
     serverDashboard: "서버 대시보드",
     damengJobAdmin: "Dameng 에이전트 작업",
     openDamengJobAdmin: "Dameng 에이전트 작업 열기",
@@ -3583,6 +3585,7 @@ export default withEnglishFallback({
     },
   },
   consul,
+  sqlServerTrace,
   zookeeper: {
     prefixPlaceholder: "경로 접두사, 예: /app/",
     newKey: "새 Znode",

@@ -1,5 +1,6 @@
 import docs from "./docs/en";
 import { consulUiMessages } from "./consulUi";
+import { sqlServerTraceMessages as sqlServerTrace } from "./sqlServerTraceMessages";
 
 const consul = {
   ...consulUiMessages,
@@ -2559,6 +2560,7 @@ export default {
     userAdmin: "Users & Privileges",
     openUserAdmin: "Open Users & Privileges",
     processList: "Process List",
+    sqlServerTrace: "Activity Trace",
     serverDashboard: "Server Dashboard",
     damengUsers: "Dameng Users",
     openDamengUsers: "Open Dameng User Admin",
@@ -2967,6 +2969,7 @@ export default {
     copy: "Copy",
     copied: "Copied",
   },
+  sqlServerTrace,
   serverDashboard: {
     title: "Server Dashboard",
     autoRefresh: "Auto-refresh",

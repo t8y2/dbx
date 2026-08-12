@@ -1180,6 +1180,7 @@ export interface QueryTab {
     | "dameng-roles"
     | "dameng-jobs"
     | "processlist"
+    | "sqlserver-trace"
     | "mysql-dashboard"
     | "postgres-dashboard";
   /** Ephemeral navigation intent; it is consumed by HBaseBrowser and is not persisted. */

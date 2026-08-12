@@ -1,6 +1,7 @@
 import { withEnglishFallback } from "./fallback";
 import docs from "./docs/ja";
 import { consulUiMessages } from "./consulUi";
+import { sqlServerTraceMessages as sqlServerTrace } from "./sqlServerTraceMessages";
 
 const consul = {
   ...consulUiMessages,
@@ -2805,6 +2806,7 @@ export default withEnglishFallback({
     manageExtension: "拡張機能を管理...",
     dropExtension: "拡張機能を削除",
     processList: "プロセス一覧",
+    sqlServerTrace: "アクティビティ追跡",
     serverDashboard: "サーバーダッシュボード",
     createProcedure: "新規ストアドプロシージャ",
     createFunction: "新規関数",
@@ -2881,6 +2883,7 @@ export default withEnglishFallback({
     buckets: "バケット",
   },
   consul,
+  sqlServerTrace,
   zookeeper: {
     prefixPlaceholder: "パスプレフィックス（例: /app/）",
     newKey: "新しいZnode",

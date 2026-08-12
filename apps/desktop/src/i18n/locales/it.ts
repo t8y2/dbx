@@ -1,6 +1,7 @@
 import { withEnglishFallback } from "./fallback";
 import docs from "./docs/it";
 import { consulUiMessages } from "./consulUi";
+import { sqlServerTraceMessages as sqlServerTrace } from "./sqlServerTraceMessages";
 const consul = {
   ...consulUiMessages,
   prefixPlaceholder: "Key prefix, e.g. app/ or services/",
@@ -2778,6 +2779,7 @@ export default withEnglishFallback({
     manageExtension: "Gestisci estensione...",
     dropExtension: "Elimina estensione",
     processList: "Elenco processi",
+    sqlServerTrace: "Tracciamento attività",
     serverDashboard: "Dashboard del server",
     createProcedure: "Nuovo stored procedure",
     createFunction: "Nuova funzione",
@@ -3912,6 +3914,7 @@ export default withEnglishFallback({
     },
   },
   consul,
+  sqlServerTrace,
   zookeeper: {
     prefixPlaceholder: "Prefisso percorso, es. /app/",
     newKey: "Nuovo Znode",

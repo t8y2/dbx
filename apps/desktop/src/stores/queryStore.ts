@@ -1833,6 +1833,31 @@ export const useQueryStore = defineStore("query", () => {
     return id;
   }
 
+  function openSqlServerActivityTrace(connectionId: string) {
+    const existing = tabs.value.find((tab) => tab.mode === "sqlserver-trace" && tab.connectionId === connectionId);
+    if (existing) {
+      switchTab(existing.id);
+      return existing.id;
+    }
+
+    const conn = useConnectionStore().getConfig(connectionId);
+    const id = uuid();
+    const tab: QueryTab = {
+      id,
+      title: conn?.name ? `${conn.name} - ${t("sqlServerTrace.title")}` : t("sqlServerTrace.title"),
+      connectionId,
+      database: conn?.database || "",
+      sql: "",
+      isExecuting: false,
+      isCancelling: false,
+      isExplaining: false,
+      mode: "sqlserver-trace",
+    };
+    tabs.value.push(tab);
+    activeTabId.value = id;
+    return id;
+  }
+
   function openMysqlDashboard(connectionId: string) {
     const existing = tabs.value.find((tab) => tab.mode === "mysql-dashboard" && tab.connectionId === connectionId);
     if (existing) {
@@ -5929,6 +5954,7 @@ export const useQueryStore = defineStore("query", () => {
     openMongoBucket,
     openUserAdmin,
     openProcessList,
+    openSqlServerActivityTrace,
     openMysqlDashboard,
     openPostgresDashboard,
     openNacosDashboard,

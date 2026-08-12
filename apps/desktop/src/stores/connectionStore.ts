@@ -69,8 +69,18 @@ import * as api from "@/lib/backend/api";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { useTunnelProfileStore } from "@/stores/tunnelProfileStore";
 import { connectionIsDorisFamilyCatalogCapable, isInternalDorisCatalog, isSchemaAware, normalizeSidebarObjectKind, sidebarObjectKindsForDatabase, supportsPackageMemberExpansion, usesTreeSchemaMode } from "@/lib/database/databaseCapabilities";
-import { connectionObjectTreeNodeSchema, connectionObjectTreeQuerySchema, connectionShouldDiscoverJdbcSchemas, connectionShouldLoadIdentifierQuote, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection, gaussdbIdentifierQuoteOverride } from "@/lib/database/jdbcDialect";
+import {
+  connectionDatabaseMetadataSchema,
+  connectionObjectTreeNodeSchema,
+  connectionObjectTreeQuerySchema,
+  connectionShouldDiscoverJdbcSchemas,
+  connectionShouldLoadIdentifierQuote,
+  connectionUsesDatabaseObjectTreeMode,
+  effectiveDatabaseTypeForConnection,
+  gaussdbIdentifierQuoteOverride,
+} from "@/lib/database/jdbcDialect";
 import { buildDatabaseTreeNodes, buildDuckDbConnectionTreeNodes, compareSidebarNames, sortSidebarDatabases, sortSidebarNames, shouldIncludeDefaultDatabaseNode } from "@/lib/database/databaseTree";
+import { spannerDisplayDatabase } from "@/lib/connection/spannerResourcePath";
 import { buildSqlServerDatabaseTreeNodes } from "@/lib/database/sqlServerTree";
 import { collapseExpandedTreeNodes } from "@/lib/sidebar/sidebarTreeCollapse";
 import { findNodePathByIdentity, nodeMatchesRegexScopeIdentity, type SidebarRegexScopeIdentity } from "@/lib/sidebar/sidebarSearchTree";
@@ -1149,6 +1159,7 @@ export const useConnectionStore = defineStore("connection", () => {
       neo4j: "Neo4j",
       cassandra: "Cassandra",
       bigquery: "BigQuery",
+      spanner: "Cloud Spanner",
       kylin: "Kylin",
       ignite: "Apache Ignite",
       ignite3: "Apache Ignite 3",
@@ -3880,6 +3891,9 @@ export const useConnectionStore = defineStore("connection", () => {
               const effectiveDbType = effectiveDatabaseTypeForConnection(config);
               const databaseNodes = buildDatabaseTreeNodes(connectionId, visibleDatabases, {
                 includeDefaultWhenEmpty: usesTreeSchemaMode(effectiveDbType) || shouldIncludeDefaultDatabaseNode(config, visibleDatabases),
+                // Cloud Spanner reports the full resource path as the database
+                // name; show only the database id so the sidebar stays readable.
+                displayLabel: effectiveDbType === "spanner" ? spannerDisplayDatabase : undefined,
               });
               if (config?.db_type === "sqlserver") {
                 const linkedServers = await withMetadataLoadTimeout(connectionId, api.listSqlServerLinkedServers(connectionId), "linked servers").catch(() => []);
@@ -7122,7 +7136,7 @@ export const useConnectionStore = defineStore("connection", () => {
           return completionTablesCache.value[cacheKey];
         }
 
-        const querySchema = catalog ? "" : database;
+        const querySchema = catalog ? "" : connectionDatabaseMetadataSchema(getConfig(connectionId), database);
         let tables = await listCompletionTableMetadata(connectionId, database, querySchema, trimmedFilter, limit, catalog);
         if (tables.length === 0 && relaxedFilter) {
           tables = await listCompletionTableMetadata(connectionId, database, querySchema, relaxedFilter, expandedCompletionLimit(limit), catalog);
@@ -7201,12 +7215,12 @@ export const useConnectionStore = defineStore("connection", () => {
               if (objectKinds.length === 1 && objectKinds[0] === "sequence") {
                 completionObjectsCache.value[cacheKey] = [];
               } else {
-                const objects = isSchemaAwareDatabase(connectionId) ? await listSchemaAwareCompletionObjects(connectionId, database, schema) : await api.listCompletionObjects(connectionId, database, schema || database);
+                const objects = isSchemaAwareDatabase(connectionId) ? await listSchemaAwareCompletionObjects(connectionId, database, schema) : await api.listCompletionObjects(connectionId, database, connectionDatabaseMetadataSchema(getConfig(connectionId), database, schema));
                 completionObjectsCache.value[cacheKey] = dedupeCompletionObjects(objects.map(toSqlCompletionObject).filter((object): object is SqlCompletionObject => object != null));
               }
             }
           } else {
-            const objects = isSchemaAwareDatabase(connectionId) ? await listSchemaAwareCompletionObjects(connectionId, database, schema) : await api.listCompletionObjects(connectionId, database, schema || database);
+            const objects = isSchemaAwareDatabase(connectionId) ? await listSchemaAwareCompletionObjects(connectionId, database, schema) : await api.listCompletionObjects(connectionId, database, connectionDatabaseMetadataSchema(getConfig(connectionId), database, schema));
             completionObjectsCache.value[cacheKey] = dedupeCompletionObjects(objects.map(toSqlCompletionObject).filter((object): object is SqlCompletionObject => object != null));
           }
           indexCompletionObjects(connectionId, database, schema, completionObjectsCache.value[cacheKey]);

@@ -77,6 +77,9 @@ const DATABASE_TYPE_OBJECTS = new Map<DatabaseType, SidebarObjectKind[]>([
   ["prestosql", TABLE_VIEW_OBJECTS],
   ["cassandra", TABLE_VIEW_OBJECTS],
   ["bigquery", TABLE_VIEW_OBJECTS],
+  // Cloud Spanner has no triggers, routines, sequences, or synonyms; without an
+  // explicit entry the sidebar would fall back to ROUTINE_OBJECTS.
+  ["spanner", TABLE_VIEW_OBJECTS],
   ["kylin", TABLE_VIEW_OBJECTS],
   ["ignite", TABLE_VIEW_OBJECTS],
   ["ignite3", TABLE_VIEW_OBJECTS],

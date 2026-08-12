@@ -81,6 +81,7 @@ describe("AGENT_DRIVER_CATEGORY_MAP integrity", () => {
       "informix",
       "iris",
       "oracle",
+      "spanner",
       "sqlserver-legacy",
       // analytics
       "bigquery",

@@ -59,6 +59,42 @@ describe("quoteTableIdentifier", () => {
     expect(quoteTableIdentifier("bigquery", "a`b")).toBe("`a\\`b`");
   });
 
+  it("backtick-quotes Cloud Spanner GoogleSQL identifiers by default", () => {
+    expect(quoteTableIdentifier("spanner", "order")).toBe("`order`");
+    expect(quoteTableIdentifier("spanner", "a`b")).toBe("`a\\`b`");
+  });
+
+  it("uses the connection-reported quote for Cloud Spanner table-data identifiers", () => {
+    // GoogleSQL dialect: the agent reports a backtick.
+    expect(quoteTableDataIdentifier("spanner", "order", "`")).toBe("`order`");
+    // PostgreSQL dialect: the agent reports a double quote.
+    expect(quoteTableDataIdentifier("spanner", "MixedCase", '"')).toBe('"MixedCase"');
+  });
+
+  it("keeps Cloud Spanner GoogleSQL names single-segment and qualifies PostgreSQL-dialect names", () => {
+    // GoogleSQL user schema is the empty string; a two-part name would be a syntax error.
+    expect(qualifiedTableName({ databaseType: "spanner", schema: "", tableName: "singers", identifierQuote: "`" })).toBe("`singers`");
+    expect(qualifiedTableName({ databaseType: "spanner", schema: "public", tableName: "singers", identifierQuote: '"' })).toBe('"public"."singers"');
+    // No reported quote: fall back to the GoogleSQL default.
+    expect(qualifiedTableName({ databaseType: "spanner", tableName: "singers" })).toBe("`singers`");
+  });
+
+  it("never qualifies a Cloud Spanner table with the resource path", () => {
+    // The sidebar SQL template path collapses `node.schema || node.database`, and for Spanner the
+    // database is the resource path, which is not a schema and is not valid inside a table name.
+    const resourcePath = "projects/p/instances/i/databases/db";
+    expect(qualifiedTableName({ databaseType: "spanner", schema: resourcePath, database: resourcePath, tableName: "singers", identifierQuote: "`" })).toBe("`singers`");
+    expect(qualifiedTableName({ databaseType: "spanner", schema: resourcePath, database: resourcePath, tableName: "singers", identifierQuote: '"' })).toBe('"singers"');
+    expect(qualifiedTableName({ databaseType: "spanner", schema: resourcePath, tableName: "singers" })).toBe("`singers`");
+  });
+
+  it("keeps the Cloud Spanner schema qualifier even before the connection quote loads", () => {
+    // The quote is fetched asynchronously after connect and can be missing, so the
+    // branch is unconditional: a named schema must never lose its qualifier.
+    expect(qualifiedTableName({ databaseType: "spanner", schema: "analytics", tableName: "singers" })).toBe("`analytics`.`singers`");
+    expect(qualifiedTableName({ databaseType: "spanner", schema: "  ", tableName: "singers" })).toBe("`singers`");
+  });
+
   it("bracket-quotes sqlserver identifiers", () => {
     expect(quoteTableIdentifier("sqlserver", "orders")).toBe("[orders]");
   });

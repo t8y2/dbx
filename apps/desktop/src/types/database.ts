@@ -62,6 +62,7 @@ export type DatabaseType =
   | "neo4j"
   | "cassandra"
   | "bigquery"
+  | "spanner"
   | "kylin"
   | "ignite"
   | "ignite3"

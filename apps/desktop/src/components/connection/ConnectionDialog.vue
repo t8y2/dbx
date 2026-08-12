@@ -106,10 +106,12 @@ import { canSaveVisibleDatabaseSelection, connectionUsesVisibleSchemaFilter, fil
 import { isSchemaAware, isSingleDatabase } from "@/lib/database/databaseFeatureSupport";
 import VisibleSchemasDialog from "@/components/sidebar/VisibleSchemasDialog.vue";
 import CloudflareD1ConnectionFields from "@/components/connection/CloudflareD1ConnectionFields.vue";
+import SpannerConnectionFields from "@/components/connection/SpannerConnectionFields.vue";
 import { oceanbaseModeConnectionPatch, oceanbaseSubModeFromConfig } from "@/lib/database/oceanbaseConnectionMode";
 import { translateBackendError } from "@/i18n/backend-errors";
 import { applyHiveKerberosSubmitConfig, hiveKerberosFormConfig, type HiveKerberosAuthMode } from "@/lib/database/hiveKerberosOptions";
 import { hasCloudflareD1Credentials, isCloudflareD1Connection, normalizeCloudflareD1Connection } from "@/lib/connection/cloudflareD1";
+import { hasSpannerResourcePath, isSpannerConnection, normalizeSpannerConnection } from "@/lib/connection/spannerResourcePath";
 import {
   buildElasticsearchExternalConfig,
   elasticsearchConnectionModeFromConfig,
@@ -1233,6 +1235,7 @@ const driverProfiles: Record<
     icon: "bigquery",
     host: "https://www.googleapis.com/bigquery/v2",
   },
+  spanner: { type: "spanner", port: 443, user: "", label: "Cloud Spanner", icon: "spanner" },
   kylin: { type: "kylin", port: 7070, user: "ADMIN", label: "Apache Kylin", icon: "kylin" },
   ignite: { type: "ignite", port: 10800, user: "", label: "Apache Ignite", icon: "ignite" },
   ignite3: { type: "ignite3", port: 10800, user: "", label: "Apache Ignite 3", icon: "ignite" },
@@ -2520,6 +2523,15 @@ function applyProfile(val: string, preserveConnectionFields = false) {
       jdbcDriverPathsInput.value = "";
       jdbcManualClasspathOpen.value = true;
     }
+    if (profile.type === "spanner") {
+      // Google Cloud endpoints carry no host; the local emulator is opted into
+      // by typing host `localhost` and port 9010 explicitly.
+      form.value.host = "";
+      form.value.username = "";
+      form.value.password = "";
+      form.value.database = undefined;
+      form.value.connection_string = undefined;
+    }
     if (profile.type === "mq") {
       resetMqFields(defaultMqFieldsForProfile(val));
       syncMqSystemKindFromSelectedType();
@@ -2974,6 +2986,7 @@ const iconTypeMap: Record<string, string> = {
   neo4j: "neo4j",
   cassandra: "cassandra",
   bigquery: "bigquery",
+  spanner: "spanner",
   kylin: "kylin",
   ignite: "ignite",
   ignite3: "ignite",
@@ -3057,6 +3070,7 @@ const dbOptions: DbOption[] = [
   { value: "neo4j", label: "Neo4j" },
   { value: "cassandra", label: "Cassandra" },
   { value: "bigquery", label: "BigQuery" },
+  { value: "spanner", label: "Cloud Spanner" },
   { value: "kylin", label: "Kylin" },
   { value: "ignite", label: "Apache Ignite" },
   { value: "ignite3", label: "Apache Ignite 3" },
@@ -3093,7 +3107,7 @@ const dbCategoryDefinitions: Array<{
   {
     key: "sql",
     titleKey: "connection.databaseCategorySql",
-    optionValues: ["postgres", "mysql", "oracle", "sqlserver", "mariadb", "cockroachdb", "db2", "informix", "firebird", "iris", "jdbcx", "custom_mysql", "custom_postgres", "dolt"],
+    optionValues: ["postgres", "mysql", "oracle", "sqlserver", "mariadb", "cockroachdb", "db2", "informix", "firebird", "iris", "spanner", "jdbcx", "custom_mysql", "custom_postgres", "dolt"],
   },
   {
     key: "analytics",
@@ -3617,6 +3631,8 @@ const hasRequiredConnectionTarget = computed(() => {
   if (form.value.db_type === "nacos") return !!nacosServerAddr.value.trim();
   if (form.value.db_type === "consul") return !!consulServerAddr.value.trim();
   if (isCloudflareD1Connection(form.value)) return hasCloudflareD1Credentials(form.value);
+  // Cloud Spanner has no host to fall back on: the resource path is the target.
+  if (isSpannerConnection(form.value)) return hasSpannerResourcePath(form.value);
   if (isH2FileMode.value) return !!(form.value.host.trim() || h2FilePathFromJdbcUrl(form.value.connection_string));
   return !!(form.value.host || (mongoUseUrl.value && form.value.connection_string) || (form.value.db_type === "jdbc" && form.value.connection_string) || connectionUrlInput.value.trim());
 });
@@ -3954,6 +3970,12 @@ function connectionConfigForSubmit(id: string, generatedName = ""): ConnectionCo
     normalizeCloudflareD1Connection(config);
     if (!hasCloudflareD1Credentials(config)) {
       throw new Error(t("connection.d1FieldsRequired"));
+    }
+  }
+  if (isSpannerConnection(config)) {
+    normalizeSpannerConnection(config);
+    if (!hasSpannerResourcePath(config)) {
+      throw new Error(t("connection.spannerFieldsRequired"));
     }
   }
   config.transport_layers = (config.transport_layers || []).map(normalizeTransportLayer);
@@ -7307,17 +7329,17 @@ function openExternalUrl(url: string) {
                     <Input v-model="form.informix_server" class="col-span-3" placeholder="ol_informix1170" />
                   </div>
 
-                  <div v-if="form.db_type !== 'meilisearch'" class="grid grid-cols-4 items-center gap-4">
+                  <div v-if="form.db_type !== 'meilisearch' && form.db_type !== 'spanner'" class="grid grid-cols-4 items-center gap-4">
                     <Label :class="connectionLabelClass">{{ t("connection.user") }}</Label>
                     <Input v-model="form.username" class="col-span-3" />
                   </div>
 
-                  <div class="grid grid-cols-4 items-center gap-4">
+                  <div v-if="form.db_type !== 'spanner'" class="grid grid-cols-4 items-center gap-4">
                     <Label :class="connectionLabelClass">{{ form.db_type === "meilisearch" ? t("connection.mqAuthApiKey") : t("connection.password") }}</Label>
                     <PasswordInput v-model="form.password" class="col-span-3" />
                   </div>
 
-                  <div class="grid grid-cols-4 items-center gap-4">
+                  <div v-if="form.db_type !== 'spanner'" class="grid grid-cols-4 items-center gap-4">
                     <span />
                     <div class="col-span-3 flex items-center gap-1.5 text-sm">
                       <label class="flex items-center gap-2">
@@ -7330,10 +7352,19 @@ function openExternalUrl(url: string) {
                     </div>
                   </div>
 
-                  <div v-if="form.db_type !== 'hbase' && form.db_type !== 'meilisearch'" class="grid grid-cols-4 items-center gap-4">
+                  <div v-if="form.db_type !== 'hbase' && form.db_type !== 'meilisearch' && form.db_type !== 'spanner'" class="grid grid-cols-4 items-center gap-4">
                     <Label :class="connectionLabelClass">{{ databaseLabel }}</Label>
                     <Input v-model="form.database" class="col-span-3" :placeholder="databasePlaceholder" />
                   </div>
+
+                  <!-- Cloud Spanner: project/instance/database resource path instead of user/password/database -->
+                  <template v-if="form.db_type === 'spanner'">
+                    <div class="grid grid-cols-4 items-start gap-4">
+                      <span />
+                      <p class="col-span-3 text-xs leading-5 text-muted-foreground">{{ t("connection.spannerHostHint") }}</p>
+                    </div>
+                    <SpannerConnectionFields v-model:database="form.database" @change="resetTestState" />
+                  </template>
 
                   <div v-if="form.db_type === 'oracle' && form.oracle_connection_type === 'tns'" class="grid grid-cols-4 items-center gap-4">
                     <Label :class="connectionLabelSmallClass">TNS_ADMIN</Label>
@@ -7490,13 +7521,15 @@ function openExternalUrl(url: string) {
                                   ? 'secure=true'
                                   : form.db_type === 'bigquery'
                                     ? 'OAuthType=0;OAuthServiceAcctEmail=svc@project.iam.gserviceaccount.com;OAuthPvtKeyPath=/path/key.json'
-                                    : form.db_type === 'informix'
-                                      ? 'CLIENT_LOCALE=en_US.utf8;DB_LOCALE=en_US.utf8'
-                                      : form.db_type === 'spark'
-                                        ? 'catalog=paimon_catalog'
-                                        : form.db_type === 'cassandra'
-                                          ? 'localdatacenter=dc1'
-                                          : 'sslmode=prefer'
+                                    : form.db_type === 'spanner'
+                                      ? 'credentials=/path/key.json;autocommit=true'
+                                      : form.db_type === 'informix'
+                                        ? 'CLIENT_LOCALE=en_US.utf8;DB_LOCALE=en_US.utf8'
+                                        : form.db_type === 'spark'
+                                          ? 'catalog=paimon_catalog'
+                                          : form.db_type === 'cassandra'
+                                            ? 'localdatacenter=dc1'
+                                            : 'sslmode=prefer'
                         "
                       />
                       <p v-if="showGenericUrlParamsHint" class="text-xs leading-5 text-muted-foreground">

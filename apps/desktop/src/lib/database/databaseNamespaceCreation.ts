@@ -75,6 +75,7 @@ export const DATABASE_NAMESPACE_CREATION_MATRIX = {
   neo4j: { deferred: "database creation depends on edition/admin privileges" },
   cassandra: { deferred: "keyspace creation requires replication options" },
   bigquery: { deferred: "dataset creation needs project/location options" },
+  spanner: { deferred: "database creation requires the Cloud Spanner Admin API" },
   kylin: { deferred: "project/model lifecycle is not SQL database creation" },
   ignite: { deferred: "schema lifecycle is managed through cluster/cache configuration" },
   ignite3: { deferred: "schema lifecycle is managed through cluster configuration" },

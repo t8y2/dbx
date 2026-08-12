@@ -55,6 +55,7 @@ export const AGENT_DRIVER_CATEGORY_MAP: Readonly<Record<string, DriverCategoryKe
   rocketmq: "mq",
   saphana: "analytics",
   snowflake: "analytics",
+  spanner: "sql",
   spark: "analytics",
   "sqlserver-legacy": "sql",
   sundb: "domestic",

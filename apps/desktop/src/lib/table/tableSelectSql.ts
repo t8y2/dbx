@@ -33,6 +33,9 @@ export function quoteTableIdentifier(databaseType: DatabaseType | undefined, nam
   // (DatabaseMetaData.getIdentifierQuoteString()) — pass through unquoted.
   if (databaseType === "jdbc") return name;
   if (databaseType === "bigquery") return `\`${name.replace(/`/g, "\\`")}\``;
+  // Cloud Spanner defaults to the GoogleSQL dialect (backticks). PostgreSQL-dialect
+  // databases report `"` on connect and take the quoteTableDataIdentifier path.
+  if (databaseType === "spanner") return `\`${name.replace(/`/g, "\\`")}\``;
   if (
     databaseType === "mysql" ||
     databaseType === "clickhouse" ||
@@ -55,7 +58,7 @@ export function quoteTableIdentifier(databaseType: DatabaseType | undefined, nam
 
 export function quoteTableDataIdentifier(databaseType: DatabaseType | undefined, name: string, identifierQuote?: string): string {
   if ((databaseType === "gaussdb" || databaseType === "opengauss" || databaseType === "postgres") && identifierQuote != null) return quoteGaussDbJdbcIdentifier(name, identifierQuote);
-  if ((databaseType === "kingbase" || databaseType === "informix") && identifierQuote != null) {
+  if ((databaseType === "kingbase" || databaseType === "informix" || databaseType === "spanner") && identifierQuote != null) {
     if (!identifierQuote) return name;
     return `${identifierQuote}${name.replaceAll(identifierQuote, identifierQuote + identifierQuote)}${identifierQuote}`;
   }
@@ -99,6 +102,23 @@ export function qualifiedTableName(options: Pick<BuildTableSelectSqlOptions, "da
       return `${quoteTableDataIdentifier(databaseType, trimmedSchema, identifierQuote)}.${quotedTable}`;
     }
     return quotedTable;
+  }
+  // Cloud Spanner mirrors `uses_connection_identifier_quote` on the backend, which
+  // counts Spanner unconditionally: the branch must not be gated on a reported
+  // quote, otherwise a connection whose quote has not loaded yet would fall through
+  // to the SCHEMA_AWARE_TYPES path and silently drop the schema qualifier. A blank
+  // schema (GoogleSQL's default) drops the dot separator with it, because
+  // `` `s`.`t` `` with an empty `s` is a Spanner syntax error; a missing quote falls
+  // back to the GoogleSQL backtick default, exactly like `identifiers.rs`.
+  if (databaseType === "spanner") {
+    const quotedTable = quoteTableDataIdentifier(databaseType, tableName, identifierQuote);
+    // `database` holds the resource path `projects/{p}/instances/{i}/databases/{d}`, and callers
+    // that treat the database as the schema (the sidebar SQL templates collapse
+    // `node.schema || node.database`) would otherwise emit `` `projects/…`.`singers` ``. A Spanner
+    // schema name is letters, digits and underscores, so the path separator identifies it.
+    const trimmedSchema = schema?.trim();
+    const schemaQualifier = trimmedSchema && !trimmedSchema.includes("/") ? trimmedSchema : undefined;
+    return schemaQualifier ? `${quoteTableDataIdentifier(databaseType, schemaQualifier, identifierQuote)}.${quotedTable}` : quotedTable;
   }
   if (databaseType === "informix" && identifierQuote != null) {
     const quotedTable = quoteTableDataIdentifier(databaseType, tableName, identifierQuote);

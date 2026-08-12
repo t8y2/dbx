@@ -81,6 +81,12 @@ export function connectionShouldLoadIdentifierQuote(connection: JdbcDialectConne
   if (!connection) return false;
   if (connection.db_type === "gbase" && isGbase8sProfile(connection.driver_profile)) return true;
   if (connection.db_type === "kingbase") return true;
+  // Cloud Spanner is dual-dialect: the agent reports a backtick for GoogleSQL and
+  // a double quote for PostgreSQL-dialect databases. The backend counts Spanner
+  // unconditionally in `uses_connection_identifier_quote`, so the UI must fetch
+  // the reported quote or every locally built statement would use the GoogleSQL
+  // default against a PostgreSQL-dialect database.
+  if (connection.db_type === "spanner") return true;
   if (gaussdbIdentifierQuoteStyle(connection) !== "auto") return false;
   if (connection.db_type === "gaussdb") return true;
   if (connection.db_type !== "jdbc") return false;
@@ -207,8 +213,30 @@ export function connectionQueryExecutionSchema(connection: JdbcDialectConnection
 export function connectionObjectTreeQuerySchema(connection: JdbcDialectConnection | undefined, database: string, schema?: string): string {
   if (connection?.db_type === "jdbc" && inferJdbcDialect(connection) === "databend") return schema || database;
   if (connectionUsesDatabaseObjectTreeMode(connection)) return "";
-  if (effectiveDatabaseTypeForConnection(connection) === "informix") return schema || "";
+  const type = effectiveDatabaseTypeForConnection(connection);
+  if (type === "informix") return schema || "";
+  // Cloud Spanner keeps a resource path (`projects/…/databases/db`) in `database`,
+  // which is never a schema name, and GoogleSQL's default schema is the empty string
+  // that the agent forwards to the driver verbatim. Falling through to the
+  // `schema || database` default would send the resource path as the schema and every
+  // metadata lookup would match nothing, so the blank schema must survive `||`.
+  // Callers that already collapsed `schema || node.database` (the sidebar SQL template
+  // and DDL paths) are normalized back to the blank schema here: a Spanner schema name
+  // is letters, digits and underscores, so it can never contain the path separator.
+  if (type === "spanner") return schema && !schema.includes("/") ? schema : "";
   return schema || database;
+}
+
+/**
+ * Metadata schema for query paths that treat the database name as the schema when a
+ * connection exposes no schema level (MySQL, HBase, and the other flat engines).
+ * Cloud Spanner is the exception: its database is a resource path, so the blank
+ * GoogleSQL schema has to be sent instead of the path. Behavior for every other
+ * database type is exactly `schema || database`.
+ */
+export function connectionDatabaseMetadataSchema(connection: JdbcDialectConnection | undefined, database: string, schema?: string): string {
+  if (schema) return schema;
+  return effectiveDatabaseTypeForConnection(connection) === "spanner" ? "" : database;
 }
 
 export function metadataSchemaForConnection(connection: JdbcDialectConnection | undefined, database: string, schema?: string): string {

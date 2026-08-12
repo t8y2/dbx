@@ -4,6 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::path_utils::expand_tilde;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
@@ -462,8 +463,15 @@ async fn connect_and_authenticate(
                 connect_timeout_secs,
             )
             .await?;
-        } else if !auth_res.success() {
-            return Err("SSH public key authentication failed".to_string());
+        } else if let AuthResult::Failure { remaining_methods, partial_success } = &auth_res {
+            // Keep the structured detail russh returned, exactly like the
+            // "key+password" branch above already does. Discarding it left the
+            // user with a bare "authentication failed" that never said the key
+            // itself was refused, nor what the server would still accept.
+            return Err(format!(
+                "SSH public key authentication failed: the server rejected the key \
+                 (remaining_methods={remaining_methods:?}, partial_success={partial_success})"
+            ));
         }
     } else if try_password {
         let auth_res = tokio::time::timeout(connect_timeout, session.authenticate_password(ssh_user, ssh_password))
@@ -480,8 +488,11 @@ async fn connect_and_authenticate(
                 connect_timeout_secs,
             )
             .await?;
-        } else if !auth_res.success() {
-            return Err("SSH password authentication failed".to_string());
+        } else if let AuthResult::Failure { remaining_methods, partial_success } = &auth_res {
+            return Err(format!(
+                "SSH password authentication failed: the server rejected the password \
+                 (remaining_methods={remaining_methods:?}, partial_success={partial_success})"
+            ));
         }
     } else if try_agent {
         match try_authenticate_with_agent(&mut session, ssh_user, ssh_agent_sock_path, &connect_timeout).await {
@@ -997,12 +1008,17 @@ async fn tunnel_reconnect_loop(
     listener: TcpListener,
     target: TunnelTarget,
     allow_exec_channel_proxy: bool,
+    status: Arc<TunnelStatus>,
 ) {
     loop {
+        // Reaching the top of the loop means a live session: either the initial
+        // handshake or a successful reconnect. Clear any recorded failure.
+        status.mark_connected();
         log::info!("SSH tunnel active: {}:{} -> {}", connect_host, connect_port, target.description());
 
         forward_loop(&session, &listener, &target, allow_exec_channel_proxy).await;
 
+        status.mark_disconnected();
         log::warn!("SSH tunnel connection lost ({}:{}), reconnecting...", connect_host, connect_port);
 
         // Reconnect with exponential backoff
@@ -1053,6 +1069,13 @@ async fn tunnel_reconnect_loop(
                         connect_host,
                         connect_port,
                     );
+                    // Publish the reason as well as logging it. Without this the
+                    // tunnel keeps a local listener open with no SSH session
+                    // behind it, and the next database connection fails with an
+                    // unrelated generic I/O error instead of this cause.
+                    status.record_failure(format!(
+                        "SSH tunnel to {connect_host}:{connect_port} lost its session and could not reconnect: {e}"
+                    ));
                     // Exponential backoff: double the delay, cap at MAX_RECONNECT_DELAY
                     delay = std::cmp::min(delay * 2, MAX_RECONNECT_DELAY);
                 }
@@ -1067,8 +1090,62 @@ enum TunnelKind {
     Socks5,
 }
 
+/// Shared health state of one tunnel's background task.
+///
+/// [`tunnel_reconnect_loop`] runs detached from whoever started the tunnel, so
+/// a failure there — typically an SSH authentication rejection — used to be
+/// visible only through `log::error!`. Recording it here lets [`TunnelManager`]
+/// answer the next `start_*` call with the real reason instead of handing back
+/// a local port whose SSH session is dead, which reached the user as an
+/// unrelated generic driver error such as "connection closed".
+struct TunnelStatus {
+    connected: AtomicBool,
+    last_error: std::sync::Mutex<Option<String>>,
+}
+
+impl TunnelStatus {
+    /// A tunnel is only registered after a successful handshake, so it starts
+    /// out connected.
+    fn new_connected() -> Self {
+        Self { connected: AtomicBool::new(true), last_error: std::sync::Mutex::new(None) }
+    }
+
+    fn mark_connected(&self) {
+        self.connected.store(true, Ordering::SeqCst);
+        if let Ok(mut last_error) = self.last_error.lock() {
+            *last_error = None;
+        }
+    }
+
+    fn mark_disconnected(&self) {
+        self.connected.store(false, Ordering::SeqCst);
+    }
+
+    fn record_failure(&self, error: String) {
+        self.connected.store(false, Ordering::SeqCst);
+        if let Ok(mut last_error) = self.last_error.lock() {
+            *last_error = Some(error);
+        }
+    }
+
+    /// The reason this tunnel is currently unusable, when that reason is known.
+    ///
+    /// Returns `None` while the tunnel is up, and deliberately also during the
+    /// first backoff window after a session drop: a short blip normally
+    /// reconnects on its own, and callers should keep using the port rather
+    /// than be given a spurious error. Only once a reconnect attempt has
+    /// actually been refused do we report it.
+    fn failure(&self) -> Option<String> {
+        if self.connected.load(Ordering::SeqCst) {
+            return None;
+        }
+        self.last_error.lock().ok().and_then(|error| error.clone())
+    }
+}
+
 struct TunnelEntry {
     handles: Vec<JoinHandle<()>>,
+    statuses: Vec<Arc<TunnelStatus>>,
     local_port: u16,
     kind: TunnelKind,
 }
@@ -1181,7 +1258,7 @@ impl TunnelManager {
     ) -> Result<u16, String> {
         {
             let mut tunnels = self.tunnels.lock().await;
-            if let Some(port) = Self::get_active_port(&mut tunnels, connection_id, TunnelKind::Fixed) {
+            if let Some(port) = Self::get_active_port(&mut tunnels, connection_id, TunnelKind::Fixed)? {
                 if requested_local_port.is_none_or(|requested| requested == port) {
                     return Ok(port);
                 }
@@ -1194,7 +1271,7 @@ impl TunnelManager {
         // A concurrent caller may have completed while this task waited.
         {
             let mut tunnels = self.tunnels.lock().await;
-            if let Some(port) = Self::get_active_port(&mut tunnels, connection_id, TunnelKind::Fixed) {
+            if let Some(port) = Self::get_active_port(&mut tunnels, connection_id, TunnelKind::Fixed)? {
                 if requested_local_port.is_none_or(|requested| requested == port) {
                     return Ok(port);
                 }
@@ -1205,7 +1282,7 @@ impl TunnelManager {
                 }
             }
         }
-        let (handle, local_port) = spawn_tunnel(
+        let (handle, local_port, status) = spawn_tunnel(
             connect_host,
             connect_port,
             host_key_host,
@@ -1229,7 +1306,7 @@ impl TunnelManager {
 
         self.tunnels.lock().await.insert(
             connection_id.to_string(),
-            TunnelEntry { handles: vec![handle], local_port, kind: TunnelKind::Fixed },
+            TunnelEntry { handles: vec![handle], statuses: vec![status], local_port, kind: TunnelKind::Fixed },
         );
         Ok(local_port)
     }
@@ -1254,7 +1331,7 @@ impl TunnelManager {
     ) -> Result<u16, String> {
         {
             let mut tunnels = self.tunnels.lock().await;
-            if let Some(port) = Self::get_active_port(&mut tunnels, connection_id, TunnelKind::Socks5) {
+            if let Some(port) = Self::get_active_port(&mut tunnels, connection_id, TunnelKind::Socks5)? {
                 return Ok(port);
             }
         }
@@ -1263,7 +1340,7 @@ impl TunnelManager {
         let _start_guard = start_lock.lock().await;
         {
             let mut tunnels = self.tunnels.lock().await;
-            if let Some(port) = Self::get_active_port(&mut tunnels, connection_id, TunnelKind::Socks5) {
+            if let Some(port) = Self::get_active_port(&mut tunnels, connection_id, TunnelKind::Socks5)? {
                 return Ok(port);
             }
             if let Some(entry) = tunnels.remove(connection_id) {
@@ -1273,7 +1350,7 @@ impl TunnelManager {
             }
         }
 
-        let (handle, local_port) = spawn_socks5_proxy(
+        let (handle, local_port, status) = spawn_socks5_proxy(
             connect_host,
             connect_port,
             host_key_host,
@@ -1293,28 +1370,53 @@ impl TunnelManager {
 
         self.tunnels.lock().await.insert(
             connection_id.to_string(),
-            TunnelEntry { handles: vec![handle], local_port, kind: TunnelKind::Socks5 },
+            TunnelEntry { handles: vec![handle], statuses: vec![status], local_port, kind: TunnelKind::Socks5 },
         );
         Ok(local_port)
     }
 
-    /// Returns the local port for a cached tunnel entry, or `None` if the entry
-    /// is stale (all background handles have exited).
+    /// Returns the local port for a cached tunnel entry.
+    ///
+    /// * `Ok(None)` — no usable entry: it is absent, of the wrong kind, or
+    ///   stale because every background handle has exited. The caller starts a
+    ///   fresh tunnel, and any handshake error surfaces from that attempt.
+    /// * `Err(reason)` — the background task is still running but its SSH
+    ///   session is known to be down and we know why (a reconnect was refused).
+    ///   Reporting the recorded reason is what stops the caller from handing a
+    ///   port with no live SSH session behind it to a database driver, which is
+    ///   what turned an SSH auth rejection into a generic "connection closed".
+    ///   The dead entry is dropped at the same time, so a later attempt (for
+    ///   example after the user fixes the key) performs a fresh handshake
+    ///   instead of replaying the recorded failure until the retry budget runs
+    ///   out.
+    /// * `Ok(Some(port))` — the tunnel is healthy.
     fn get_active_port(
         tunnels: &mut HashMap<String, TunnelEntry>,
         connection_id: &str,
         expected_kind: TunnelKind,
-    ) -> Option<u16> {
-        let entry = tunnels.get(connection_id)?;
+    ) -> Result<Option<u16>, String> {
+        let Some(entry) = tunnels.get(connection_id) else {
+            return Ok(None);
+        };
         if entry.kind != expected_kind || entry.handles.iter().all(|h| h.is_finished()) {
             if let Some(entry) = tunnels.remove(connection_id) {
                 for handle in entry.handles {
                     handle.abort();
                 }
             }
-            return None;
+            return Ok(None);
         }
-        Some(entry.local_port)
+        let local_port = entry.local_port;
+        let failure = entry.statuses.iter().find_map(|status| status.failure());
+        if let Some(failure) = failure {
+            if let Some(entry) = tunnels.remove(connection_id) {
+                for handle in entry.handles {
+                    handle.abort();
+                }
+            }
+            return Err(failure);
+        }
+        Ok(Some(local_port))
     }
 
     pub async fn start_chain(
@@ -1329,7 +1431,7 @@ impl TunnelManager {
         }
         {
             let mut tunnels = self.tunnels.lock().await;
-            if let Some(port) = Self::get_active_port(&mut tunnels, connection_id, TunnelKind::Fixed) {
+            if let Some(port) = Self::get_active_port(&mut tunnels, connection_id, TunnelKind::Fixed)? {
                 return Ok(port);
             }
         }
@@ -1338,11 +1440,12 @@ impl TunnelManager {
         let _start_guard = start_lock.lock().await;
         {
             let mut tunnels = self.tunnels.lock().await;
-            if let Some(port) = Self::get_active_port(&mut tunnels, connection_id, TunnelKind::Fixed) {
+            if let Some(port) = Self::get_active_port(&mut tunnels, connection_id, TunnelKind::Fixed)? {
                 return Ok(port);
             }
         }
         let mut handles = Vec::new();
+        let mut statuses = Vec::new();
         let mut next_connect_endpoint: Option<(String, u16)> = None;
         let mut final_local_port = 0;
 
@@ -1356,7 +1459,7 @@ impl TunnelManager {
                 (hops[index + 1].host.clone(), hops[index + 1].port)
             };
 
-            let (handle, local_port) = spawn_tunnel(
+            let (handle, local_port, status) = spawn_tunnel(
                 &connect_host,
                 connect_port,
                 &hop.host,
@@ -1380,19 +1483,40 @@ impl TunnelManager {
             .map_err(|err| format!("SSH hop {} failed: {err}", index + 1))?;
 
             handles.push(handle);
+            statuses.push(status);
             final_local_port = local_port;
             next_connect_endpoint = Some(("127.0.0.1".to_string(), local_port));
         }
 
         self.tunnels.lock().await.insert(
             connection_id.to_string(),
-            TunnelEntry { handles, local_port: final_local_port, kind: TunnelKind::Fixed },
+            TunnelEntry { handles, statuses, local_port: final_local_port, kind: TunnelKind::Fixed },
         );
         Ok(final_local_port)
     }
 
+    /// Returns the local port for a cached tunnel entry, or `None` if there is
+    /// none, it is stale, or its SSH session is known to be dead.
+    ///
+    /// Mirrors the staleness/failure handling in [`Self::get_active_port`] (but
+    /// ignores `TunnelKind`, matching this method's existing kind-agnostic
+    /// contract) so that a caller checking "is there already a usable tunnel
+    /// for this connection" can't be handed a port with no live SSH session
+    /// behind it — the same bug this fix closes for `start_tunnel` et al.
     pub async fn local_port(&self, connection_id: &str) -> Option<u16> {
-        self.tunnels.lock().await.get(connection_id).map(|entry| entry.local_port)
+        let mut tunnels = self.tunnels.lock().await;
+        let entry = tunnels.get(connection_id)?;
+        let is_dead = entry.handles.iter().all(|h| h.is_finished())
+            || entry.statuses.iter().any(|status| status.failure().is_some());
+        if is_dead {
+            if let Some(entry) = tunnels.remove(connection_id) {
+                for handle in entry.handles {
+                    handle.abort();
+                }
+            }
+            return None;
+        }
+        Some(entry.local_port)
     }
 
     pub async fn stop_tunnel(&self, connection_id: &str) {
@@ -1452,7 +1576,7 @@ async fn spawn_tunnel(
     expose_to_lan: bool,
     allow_exec_channel_proxy: bool,
     requested_local_port: Option<u16>,
-) -> Result<(JoinHandle<()>, u16), String> {
+) -> Result<(JoinHandle<()>, u16, Arc<TunnelStatus>), String> {
     spawn_tunnel_target(
         connect_host,
         connect_port,
@@ -1491,7 +1615,7 @@ async fn spawn_socks5_proxy(
     connect_timeout_secs: u64,
     known_hosts_path: &Path,
     allow_exec_channel_proxy: bool,
-) -> Result<(JoinHandle<()>, u16), String> {
+) -> Result<(JoinHandle<()>, u16, Arc<TunnelStatus>), String> {
     spawn_tunnel_target(
         connect_host,
         connect_port,
@@ -1533,7 +1657,7 @@ async fn spawn_tunnel_target(
     expose_to_lan: bool,
     allow_exec_channel_proxy: bool,
     requested_local_port: Option<u16>,
-) -> Result<(JoinHandle<()>, u16), String> {
+) -> Result<(JoinHandle<()>, u16, Arc<TunnelStatus>), String> {
     let (listener, local_port) = bind_tunnel_listener(expose_to_lan, requested_local_port).await?;
 
     // Initial connection: fail fast on bad credentials
@@ -1554,6 +1678,7 @@ async fn spawn_tunnel_target(
     )
     .await?;
 
+    let status = Arc::new(TunnelStatus::new_connected());
     let handle = tokio::spawn(tunnel_reconnect_loop(
         session,
         connect_host.to_string(),
@@ -1572,9 +1697,10 @@ async fn spawn_tunnel_target(
         listener,
         target,
         allow_exec_channel_proxy,
+        status.clone(),
     ));
 
-    Ok((handle, local_port))
+    Ok((handle, local_port, status))
 }
 
 async fn bind_tunnel_listener(
@@ -1652,7 +1778,7 @@ mod tests {
         bind_tunnel_listener, connect_and_authenticate, effective_hop_timeout, netcat_proxy_command,
         openssh_padding_len, plan_chain, read_ssh_string, sanitize_unencrypted_openssh_comment_bytes,
         server_offers_keyboard_interactive, server_offers_password, ssh_client_config, HostKeyState, HostKeyVerifier,
-        PlannedTunnel, TunnelManager,
+        PlannedTunnel, TunnelEntry, TunnelKind, TunnelManager, TunnelStatus,
     };
     use crate::db::ssh_prompt;
     use crate::models::connection::{default_ssh_connect_timeout_secs, SshTunnelConfig};
@@ -1833,6 +1959,31 @@ mod tests {
 
         assert_eq!(manager.local_port("missing").await, None);
         manager.stop_tunnel("missing").await;
+    }
+
+    #[tokio::test]
+    async fn local_port_hides_a_tunnel_with_a_recorded_failure() {
+        // `local_port` used to hand back the cached port unconditionally,
+        // bypassing the same failure tracking `get_active_port` uses. A caller
+        // relying on it to decide "is there already a usable tunnel" (e.g. to
+        // avoid starting a redundant one) could be handed a port with no live
+        // SSH session behind it, reproducing the bug this fix closes.
+        let manager = TunnelManager::new(std::env::temp_dir().to_path_buf());
+
+        let status = Arc::new(TunnelStatus::new_connected());
+        status.record_failure("SSH public key authentication failed".to_string());
+        // A handle that never finishes, so the entry is only excluded by the
+        // recorded failure below, not by the unrelated staleness check.
+        let handle = tokio::spawn(std::future::pending::<()>());
+
+        manager.tunnels.lock().await.insert(
+            "conn".to_string(),
+            TunnelEntry { handles: vec![handle], statuses: vec![status], local_port: 54321, kind: TunnelKind::Fixed },
+        );
+
+        assert_eq!(manager.local_port("conn").await, None);
+        // The dead entry is also cleared out, same as get_active_port does.
+        assert!(!manager.tunnels.lock().await.contains_key("conn"));
     }
 
     // --- Host-key verification (MITM hardening) ---------------------------------
@@ -2750,6 +2901,230 @@ uveF/dLmnVN1IriEyEvHAAAACGRieC10ZXN0AQIDBAU=
             connect_result.is_err() || connect_result.unwrap().is_err(),
             "connection should fail when the host key cannot be verified/persisted"
         );
+
+        server_task.abort();
+    }
+
+    // --- Reconnect-path authentication failure ---------------------------------
+
+    /// SSH server that accepts the client key exactly once and refuses every
+    /// later authentication, and that drops the session as soon as the tunnel
+    /// forwards its first connection. This models the real-world sequence
+    /// behind the bug: the tunnel comes up, the SSH session later dies, and the
+    /// background reconnect is then refused by the server (key revoked or
+    /// rotated, `authorized_keys` changed, server policy tightened).
+    struct KeyOnceThenRejectServer {
+        publickey_attempts: Arc<AtomicUsize>,
+    }
+
+    impl server::Server for KeyOnceThenRejectServer {
+        type Handler = KeyOnceThenRejectHandler;
+
+        fn new_client(&mut self, _peer: Option<std::net::SocketAddr>) -> KeyOnceThenRejectHandler {
+            KeyOnceThenRejectHandler { publickey_attempts: self.publickey_attempts.clone() }
+        }
+    }
+
+    struct KeyOnceThenRejectHandler {
+        publickey_attempts: Arc<AtomicUsize>,
+    }
+
+    impl server::Handler for KeyOnceThenRejectHandler {
+        type Error = russh::Error;
+
+        async fn auth_publickey(
+            &mut self,
+            _user: &str,
+            _public_key: &russh::keys::ssh_key::PublicKey,
+        ) -> Result<Auth, Self::Error> {
+            if self.publickey_attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                Ok(Auth::Accept)
+            } else {
+                Ok(Auth::Reject {
+                    proceed_with_methods: Some(MethodSet::from(&[MethodKind::PublicKey][..])),
+                    partial_success: false,
+                })
+            }
+        }
+
+        async fn channel_open_direct_tcpip(
+            &mut self,
+            _channel: Channel<server::Msg>,
+            _host_to_connect: &str,
+            _port_to_connect: u32,
+            _originator_address: &str,
+            _originator_port: u32,
+            session: &mut server::Session,
+        ) -> Result<bool, Self::Error> {
+            // Simulate the SSH session dying while the tunnel is in use.
+            let _ = session.disconnect(russh::Disconnect::ByApplication, "simulated session drop", "");
+            Ok(false)
+        }
+    }
+
+    async fn start_key_once_then_reject_server(
+        publickey_attempts: Arc<AtomicUsize>,
+    ) -> (u16, tokio::task::JoinHandle<()>) {
+        let server_key = decode_secret_key(TEST_SERVER_KEY_PEM, None).expect("decode test server key");
+        let server_config = server::Config {
+            keys: vec![server_key],
+            methods: MethodSet::from(&[MethodKind::PublicKey][..]),
+            auth_rejection_time: std::time::Duration::ZERO,
+            auth_rejection_time_initial: Some(std::time::Duration::ZERO),
+            ..Default::default()
+        };
+        let port = portpicker::pick_unused_port().expect("no free port");
+        let mut server = KeyOnceThenRejectServer { publickey_attempts };
+        let task = tokio::spawn(async move {
+            let _ = server.run_on_address(Arc::new(server_config), ("127.0.0.1", port)).await;
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        (port, task)
+    }
+
+    #[tokio::test]
+    async fn reconnect_auth_failure_is_reported_instead_of_a_dead_local_port() {
+        let _guard = PROMPT_TEST_LOCK.lock().await;
+        ssh_prompt::clear_ssh_prompt_gateway();
+
+        let publickey_attempts = Arc::new(AtomicUsize::new(0));
+        let (ssh_port, server_task) = start_key_once_then_reject_server(publickey_attempts.clone()).await;
+
+        let dir = tempdir().unwrap();
+        let known_hosts_path = dir.path().join("known_hosts");
+        HostKeyVerifier::new(known_hosts_path).learn("127.0.0.1", ssh_port, &test_server_public_key()).unwrap();
+        let key_path = dir.path().join("id_ed25519");
+        std::fs::write(&key_path, TEST_SERVER_KEY_PEM).unwrap();
+        let key_path = key_path.to_str().unwrap().to_string();
+
+        let manager = TunnelManager::new(dir.path().to_path_buf());
+        let local_port = manager
+            .start_tunnel(
+                "reconnect-auth",
+                "127.0.0.1",
+                ssh_port,
+                "127.0.0.1",
+                ssh_port,
+                "user",
+                "",
+                &key_path,
+                "",
+                false,
+                "",
+                "key",
+                5,
+                "db.internal",
+                3306,
+                false,
+                false,
+            )
+            .await
+            .expect("initial tunnel start should succeed");
+
+        // The first client through the tunnel makes the server drop the SSH
+        // session. dbx closes the accepted socket without sending anything,
+        // which is exactly what a database driver surfaces as a bare
+        // "connection closed" with no hint of the real cause.
+        let mut client = TcpStream::connect(("127.0.0.1", local_port)).await.unwrap();
+        let mut buf = [0_u8; 1];
+        let first_read = tokio::time::timeout(std::time::Duration::from_secs(5), client.read(&mut buf)).await;
+        assert!(
+            matches!(first_read, Ok(Ok(0))),
+            "the dead tunnel should close the client socket with no data (this is the generic \
+             error the user used to see): {first_read:?}"
+        );
+
+        // The background reconnect loop now re-authenticates and is refused.
+        tokio::time::sleep(std::time::Duration::from_secs(9)).await;
+        let attempts = publickey_attempts.load(Ordering::SeqCst);
+        assert!(attempts >= 2, "the reconnect loop should have re-attempted publickey auth, got {attempts}");
+
+        // The user retries the connection. This is the call whose result the
+        // UI turns into the message shown to the user. It must now carry the
+        // SSH authentication rejection rather than a port with no session.
+        let retry = manager
+            .start_tunnel(
+                "reconnect-auth",
+                "127.0.0.1",
+                ssh_port,
+                "127.0.0.1",
+                ssh_port,
+                "user",
+                "",
+                &key_path,
+                "",
+                false,
+                "",
+                "key",
+                5,
+                "db.internal",
+                3306,
+                false,
+                false,
+            )
+            .await;
+
+        let error = retry.expect_err("a tunnel whose reconnect was refused must not report success");
+        println!("REPRO start_tunnel after the failed reconnect = Err({error})");
+        assert!(
+            error.contains("could not reconnect"),
+            "the error should say the tunnel could not reconnect: {error}"
+        );
+        assert!(
+            error.contains("public key authentication failed"),
+            "the error should name the real cause (key rejected), not a generic I/O failure: {error}"
+        );
+
+        manager.stop_tunnel("reconnect-auth").await;
+        server_task.abort();
+    }
+
+    #[tokio::test]
+    async fn rejected_public_key_reports_what_the_server_refused() {
+        let _guard = PROMPT_TEST_LOCK.lock().await;
+        ssh_prompt::clear_ssh_prompt_gateway();
+
+        // Every publickey attempt is refused, so this exercises the initial
+        // handshake rather than the reconnect path.
+        let publickey_attempts = Arc::new(AtomicUsize::new(1));
+        let (ssh_port, server_task) = start_key_once_then_reject_server(publickey_attempts).await;
+
+        let dir = tempdir().unwrap();
+        let known_hosts_path = dir.path().join("known_hosts");
+        HostKeyVerifier::new(known_hosts_path.clone())
+            .learn("127.0.0.1", ssh_port, &test_server_public_key())
+            .unwrap();
+        let key_path = dir.path().join("id_ed25519");
+        std::fs::write(&key_path, TEST_SERVER_KEY_PEM).unwrap();
+
+        // `Handle<SshClient>` is not Debug, so unwrap the error by hand.
+        let error = match connect_and_authenticate(
+            "127.0.0.1",
+            ssh_port,
+            "127.0.0.1",
+            ssh_port,
+            "user",
+            "",
+            key_path.to_str().unwrap(),
+            "",
+            false,
+            "",
+            "key",
+            5,
+            &known_hosts_path,
+        )
+        .await
+        {
+            Ok(_) => panic!("a refused key must not authenticate"),
+            Err(error) => error,
+        };
+
+        println!("REPRO initial key rejection = {error}");
+        assert!(error.contains("the server rejected the key"), "{error}");
+        // The structured detail russh returned must survive, like the
+        // key+password branch already did.
+        assert!(error.contains("remaining_methods="), "{error}");
+        assert!(error.contains("partial_success=false"), "{error}");
 
         server_task.abort();
     }

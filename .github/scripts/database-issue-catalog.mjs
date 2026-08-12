@@ -55,6 +55,7 @@ const extraAliases = {
   db2: ["ibm db2"],
   informix: ["ibm informix"],
   bigquery: ["google bigquery"],
+  spanner: ["cloud spanner", "google spanner", "google cloud spanner"],
   kylin: ["apache kylin"],
   oscar: ["shentong", "oscar", "神通"],
   xugu: ["xugudb", "xugu", "虚谷"],

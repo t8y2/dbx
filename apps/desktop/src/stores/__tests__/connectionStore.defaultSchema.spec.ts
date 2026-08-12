@@ -1,6 +1,7 @@
 import { createPinia, setActivePinia } from "pinia";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ConnectionConfig, TreeNode } from "@/types/database";
+import { XUGU_PUBLIC_SYNONYM_SCOPE } from "@/lib/sidebar/xuguPublicSynonyms";
 
 function installLocalStorage() {
   const data = new Map<string, string>();
@@ -21,6 +22,18 @@ function postgresConnection(): ConnectionConfig {
     username: "postgres",
     password: "",
     database: "app",
+  };
+}
+
+function xuguConnection(): ConnectionConfig {
+  return {
+    ...postgresConnection(),
+    id: "xugu-1",
+    name: "Xugu",
+    db_type: "xugu",
+    port: 5138,
+    username: "SYSDBA",
+    database: "SYSTEM",
   };
 }
 
@@ -85,5 +98,27 @@ describe("connectionStore default schema", () => {
     expect(store.connectedIds.has(connection.id)).toBe(true);
     expect(schemaLabels()).toEqual(["archive", "public"]);
     expect(saveConnections).toHaveBeenLastCalledWith([expect.objectContaining({ id: connection.id, default_schema: undefined })]);
+  });
+
+  it("does not persist the synthetic Xugu public-synonym scope as a default schema", async () => {
+    const saveConnections = vi.fn().mockResolvedValue(undefined);
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+      loadSchemaCache: vi.fn().mockResolvedValue(null),
+      saveConnections,
+      saveSchemaCache: vi.fn().mockResolvedValue(undefined),
+      saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    const connection = xuguConnection();
+    store.addEphemeralConnection(connection);
+
+    await store.setDefaultSchema(connection.id, XUGU_PUBLIC_SYNONYM_SCOPE);
+
+    expect(store.getConfig(connection.id)?.default_schema).toBeUndefined();
+    expect(saveConnections).not.toHaveBeenCalled();
   });
 });

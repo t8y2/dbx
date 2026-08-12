@@ -32,21 +32,26 @@ const maxAgentSessions = 256
 // xuguPublicSynonymScope is a protocol-only namespace for database-global
 // synonyms. It is deliberately not a real schema name (and must never be
 // interpreted as one by metadata queries).
-const xuguPublicSynonymScope = "__DBX_XUGU_PUBLIC_SYNONYMS__"
+const xuguPublicSynonymScope = "\x00DBX_XUGU_PUBLIC_SYNONYMS"
 const xuguListDatabasesSQL = `
 SELECT DB_NAME
 FROM ALL_DATABASES
 ORDER BY DB_NAME`
 const xuguListSchemasSQL = `
+SELECT s.SCHEMA_NAME AS SCHEMA_NAME, FALSE AS IS_PUBLIC_SCOPE
+FROM ALL_SCHEMAS s
+WHERE s.DB_ID = CURRENT_DB_ID
+UNION
+SELECT '' AS SCHEMA_NAME, TRUE AS IS_PUBLIC_SCOPE
+FROM ALL_SYNONYMS y
+WHERE y.DB_ID = CURRENT_DB_ID
+  AND y.IS_PUBLIC = TRUE
+ORDER BY IS_PUBLIC_SCOPE, SCHEMA_NAME`
+const xuguListSchemasFallbackSQL = `
 SELECT SCHEMA_NAME
 FROM ALL_SCHEMAS
 WHERE DB_ID = CURRENT_DB_ID
 ORDER BY SCHEMA_NAME`
-const xuguPublicSynonymScopeProbeSQL = `
-SELECT 1
-FROM ALL_SYNONYMS
-WHERE DB_ID = CURRENT_DB_ID
-  AND IS_PUBLIC = TRUE`
 const xuguCatalogTableNameSelectSQL = `
 SELECT s.SCHEMA_NAME, t.TABLE_NAME
 FROM ALL_TABLES t
@@ -58,7 +63,7 @@ JOIN ALL_SCHEMAS s ON s.DB_ID = q.DB_ID AND s.SCHEMA_ID = q.SCHEMA_ID
 WHERE s.DB_ID = CURRENT_DB_ID
   AND q.IS_SYS = FALSE`
 const xuguCatalogSynonymSelectSQL = `
-SELECT CASE WHEN y.IS_PUBLIC = TRUE THEN '__DBX_XUGU_PUBLIC_SYNONYMS__' ELSE s.SCHEMA_NAME END AS SCHEMA_NAME,
+SELECT s.SCHEMA_NAME,
        y.SYNO_NAME, t.SCHEMA_NAME AS TARGET_SCHEMA, y.TARG_NAME, y.IS_PUBLIC
 FROM ALL_SYNONYMS y
 LEFT JOIN ALL_SCHEMAS s ON s.DB_ID = y.DB_ID AND s.SCHEMA_ID = y.SCHEMA_ID
@@ -1700,40 +1705,43 @@ func xuguDSNValue(dsn string, key string) string {
 func (s *server) listSchemas() ([]string, error) {
 	rows, err := s.queryRows(xuguListSchemasSQL, nil)
 	if err != nil {
-		if fallback := strings.ToUpper(strings.TrimSpace(s.params.Username)); fallback != "" && isXuguMetadataUnavailableError(err) {
-			return []string{fallback}, nil
+		rows, err = s.queryRows(xuguListSchemasFallbackSQL, nil)
+		if err != nil {
+			if fallback := strings.ToUpper(strings.TrimSpace(s.params.Username)); fallback != "" && isXuguMetadataUnavailableError(err) {
+				return []string{fallback}, nil
+			}
+			return nil, err
 		}
-		return nil, err
+		return s.scanXuguSchemaRows(rows, false)
 	}
+	return s.scanXuguSchemaRows(rows, true)
+}
+
+func (s *server) scanXuguSchemaRows(rows *sql.Rows, includesPublicScope bool) ([]string, error) {
 	defer s.closeRows(rows)
 	var result []string
 	for rows.Next() {
-		var schema string
-		if err := rows.Scan(&schema); err != nil {
+		var schema sql.NullString
+		var publicScope bool
+		var err error
+		if includesPublicScope {
+			err = rows.Scan(&schema, &publicScope)
+		} else {
+			err = rows.Scan(&schema)
+		}
+		if err != nil {
 			return nil, err
 		}
-		result = append(result, schema)
+		if publicScope {
+			result = append(result, xuguPublicSynonymScope)
+		} else if schema.Valid && schema.String != "" {
+			result = append(result, schema.String)
+		}
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	// Public synonyms have no owning schema in Xugu. Probe them separately so
-	// a catalog permission/version difference cannot make ordinary schemas
-	// disappear, while still making the public namespace discoverable when it
-	// is available.
-	if public, err := s.hasPublicSynonymScope(); err == nil && public {
-		result = append(result, xuguPublicSynonymScope)
-	}
 	return dedupeXuguSchemaNames(result), nil
-}
-
-func (s *server) hasPublicSynonymScope() (bool, error) {
-	rows, err := s.queryRows(xuguPublicSynonymScopeProbeSQL, nil)
-	if err != nil {
-		return false, err
-	}
-	defer s.closeRows(rows)
-	return rows.Next(), rows.Err()
 }
 
 func dedupeXuguSchemaNames(names []string) []string {
@@ -3089,8 +3097,14 @@ func (s *server) catalogSynonymCandidates(query string) ([]xuguCatalogSynonym, e
 	var candidates []xuguCatalogSynonym
 	for rows.Next() {
 		var candidate xuguCatalogSynonym
-		if err := rows.Scan(&candidate.Schema, &candidate.Name, &candidate.TargetSchema, &candidate.TargetName, &candidate.Public); err != nil {
+		var schema sql.NullString
+		if err := rows.Scan(&schema, &candidate.Name, &candidate.TargetSchema, &candidate.TargetName, &candidate.Public); err != nil {
 			return nil, err
+		}
+		if candidate.Public {
+			candidate.Schema = xuguPublicSynonymScope
+		} else {
+			candidate.Schema = schema.String
 		}
 		candidates = append(candidates, candidate)
 	}

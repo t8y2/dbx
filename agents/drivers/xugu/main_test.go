@@ -711,6 +711,9 @@ func TestSchemaListingSQLUsesLowPrivilegeDictionary(t *testing.T) {
 	if !strings.Contains(sqlText, "ALL_SCHEMAS") || strings.Contains(sqlText, "SYS_SCHEMAS") {
 		t.Fatalf("schema listing should query low-privilege ALL_SCHEMAS, got: %s", xuguListSchemasSQL)
 	}
+	if !strings.Contains(sqlText, "ALL_SYNONYMS") || !strings.Contains(sqlText, "IS_PUBLIC_SCOPE") {
+		t.Fatalf("schema listing should expose public synonyms in the same query: %s", xuguListSchemasSQL)
+	}
 	if !strings.Contains(sqlText, "DB_ID = CURRENT_DB_ID") {
 		t.Fatalf("schema listing must be scoped to the selected database: %s", xuguListSchemasSQL)
 	}
@@ -724,20 +727,25 @@ func TestXuguListSchemasExposesPublicScopeWithoutGUESTCollision(t *testing.T) {
 	defer db.Close()
 
 	cases := []struct {
-		name      string
-		realGuest bool
-		public    bool
-		want      []string
+		name         string
+		realGuest    bool
+		realReserved bool
+		public       bool
+		want         []string
 	}{
 		{name: "private only", want: []string{"APP_TEST", "SYSDBA"}},
 		{name: "public without real guest", public: true, want: []string{"APP_TEST", "SYSDBA", xuguPublicSynonymScope}},
 		{name: "public with real guest", realGuest: true, public: true, want: []string{"APP_TEST", "GUEST", "SYSDBA", xuguPublicSynonymScope}},
+		{name: "public with former reserved schema", realReserved: true, public: true, want: []string{"APP_TEST", "__DBX_XUGU_PUBLIC_SYNONYMS__", "SYSDBA", xuguPublicSynonymScope}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			xuguSchemaListingState.Lock()
 			xuguSchemaListingState.realGuest = tc.realGuest
+			xuguSchemaListingState.realReserved = tc.realReserved
 			xuguSchemaListingState.public = tc.public
+			xuguSchemaListingState.combinedUnavailable = false
+			xuguSchemaListingState.queryCount = 0
 			xuguSchemaListingState.Unlock()
 
 			s := newServer()
@@ -749,7 +757,45 @@ func TestXuguListSchemasExposesPublicScopeWithoutGUESTCollision(t *testing.T) {
 			if !reflect.DeepEqual(got, tc.want) {
 				t.Fatalf("listSchemas() = %v, want %v", got, tc.want)
 			}
+			xuguSchemaListingState.Lock()
+			queryCount := xuguSchemaListingState.queryCount
+			xuguSchemaListingState.Unlock()
+			if queryCount != 1 {
+				t.Fatalf("listSchemas() made %d metadata requests, want 1", queryCount)
+			}
 		})
+	}
+}
+
+func TestXuguListSchemasFallsBackWhenCombinedQueryIsUnavailable(t *testing.T) {
+	db, err := sql.Open("xugu-test-schema-listing", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	xuguSchemaListingState.Lock()
+	xuguSchemaListingState.realGuest = true
+	xuguSchemaListingState.realReserved = false
+	xuguSchemaListingState.public = true
+	xuguSchemaListingState.combinedUnavailable = true
+	xuguSchemaListingState.queryCount = 0
+	xuguSchemaListingState.Unlock()
+
+	s := newServer()
+	s.db = db
+	got, err := s.listSchemas()
+	if err != nil {
+		t.Fatalf("listSchemas() error: %v", err)
+	}
+	if want := []string{"APP_TEST", "GUEST", "SYSDBA"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("listSchemas() = %v, want %v", got, want)
+	}
+	xuguSchemaListingState.Lock()
+	queryCount := xuguSchemaListingState.queryCount
+	xuguSchemaListingState.Unlock()
+	if queryCount != 2 {
+		t.Fatalf("fallback listSchemas() made %d metadata requests, want 2", queryCount)
 	}
 }
 
@@ -2357,8 +2403,11 @@ func init() {
 
 var xuguSchemaListingState struct {
 	sync.Mutex
-	realGuest bool
-	public    bool
+	realGuest           bool
+	realReserved        bool
+	public              bool
+	combinedUnavailable bool
+	queryCount          int
 }
 
 type xuguSchemaListingDriver struct{}
@@ -2377,21 +2426,41 @@ func (c *xuguSchemaListingConn) Begin() (driver.Tx, error) { return nil, errors.
 func (c *xuguSchemaListingConn) QueryContext(_ context.Context, query string, _ []driver.NamedValue) (driver.Rows, error) {
 	upper := strings.ToUpper(query)
 	xuguSchemaListingState.Lock()
-	realGuest, public := xuguSchemaListingState.realGuest, xuguSchemaListingState.public
+	realGuest, realReserved := xuguSchemaListingState.realGuest, xuguSchemaListingState.realReserved
+	public, combinedUnavailable := xuguSchemaListingState.public, xuguSchemaListingState.combinedUnavailable
+	xuguSchemaListingState.queryCount++
 	xuguSchemaListingState.Unlock()
 	switch {
+	case strings.Contains(upper, "FROM ALL_SCHEMAS") && strings.Contains(upper, "FROM ALL_SYNONYMS"):
+		if combinedUnavailable {
+			return nil, errors.New("combined public synonym scope query is unavailable")
+		}
+		values := [][]driver.Value{{"APP_TEST"}}
+		if realGuest {
+			values = append(values, []driver.Value{"GUEST"})
+		}
+		if realReserved {
+			values = append(values, []driver.Value{"__DBX_XUGU_PUBLIC_SYNONYMS__"})
+		}
+		values = append(values, []driver.Value{"SYSDBA"})
+		combinedValues := make([][]driver.Value, 0, len(values)+1)
+		for _, value := range values {
+			combinedValues = append(combinedValues, []driver.Value{value[0], false})
+		}
+		if public {
+			combinedValues = append(combinedValues, []driver.Value{"", true})
+		}
+		return &xuguStaticRows{columns: []string{"SCHEMA_NAME", "IS_PUBLIC_SCOPE"}, values: combinedValues}, nil
 	case strings.Contains(upper, "FROM ALL_SCHEMAS"):
 		values := [][]driver.Value{{"APP_TEST"}}
 		if realGuest {
 			values = append(values, []driver.Value{"GUEST"})
 		}
+		if realReserved {
+			values = append(values, []driver.Value{"__DBX_XUGU_PUBLIC_SYNONYMS__"})
+		}
 		values = append(values, []driver.Value{"SYSDBA"})
 		return &xuguStaticRows{columns: []string{"SCHEMA_NAME"}, values: values}, nil
-	case strings.Contains(upper, "FROM ALL_SYNONYMS") && strings.Contains(upper, "IS_PUBLIC = TRUE"):
-		if !public {
-			return &xuguStaticRows{columns: []string{"1"}}, nil
-		}
-		return &xuguStaticRows{columns: []string{"1"}, values: [][]driver.Value{{int64(1)}}}, nil
 	default:
 		return nil, fmt.Errorf("unexpected schema listing query: %s", query)
 	}
@@ -2873,7 +2942,7 @@ func (c *xuguPublicSynonymSourceConn) QueryContext(_ context.Context, query stri
 	}
 	return &xuguStaticRows{
 		columns: []string{"SCHEMA_NAME", "SYNO_NAME", "TARGET_SCHEMA", "TARG_NAME", "IS_PUBLIC"},
-		values:  [][]driver.Value{{xuguPublicSynonymScope, "DbxPublicMixed", "SYSDBA", "SHOP_USERS", true}},
+		values:  [][]driver.Value{{nil, "DbxPublicMixed", "SYSDBA", "SHOP_USERS", true}},
 	}, nil
 }
 

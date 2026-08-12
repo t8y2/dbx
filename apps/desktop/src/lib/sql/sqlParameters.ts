@@ -31,6 +31,7 @@ interface ParameterOccurrence extends SqlParameterDescriptor {
 
 interface MyBatisForeach {
   item: string;
+  index?: string;
   open: string;
   separator: string;
   close: string;
@@ -181,7 +182,7 @@ export function extractSqlParameterDescriptors(sql: string, options?: SqlParamet
     });
     if (occurrence.replacement === "mybatis-foreach" && occurrence.foreach) {
       for (const nested of extractSqlParameterDescriptors(occurrence.foreach.body, options)) {
-        if (nested.key !== occurrence.foreach.item) appendDescriptor(nested);
+        if (nested.key !== occurrence.foreach.item && nested.key !== occurrence.foreach.index) appendDescriptor(nested);
       }
     }
   }
@@ -191,12 +192,12 @@ export function extractSqlParameterDescriptors(sql: string, options?: SqlParamet
 export function substituteSqlParameters(sql: string, values: Record<string, SqlParameterInput>, options?: SqlParameterOptions): string {
   const occurrences = findSqlParameterOccurrences(sql, options);
   if (!occurrences.length) return sql;
-  const decodeSourceFragment = occurrences.some((occurrence) => occurrence.syntax === "mybatis") ? decodeMyBatisXmlComparisonEntities : (fragment: string) => fragment;
+  const decodeMyBatisEntities = occurrences.some((occurrence) => occurrence.syntax === "mybatis");
 
   let result = "";
   let cursor = 0;
   for (const occurrence of occurrences) {
-    result += decodeSourceFragment(sql.slice(cursor, occurrence.start));
+    result += sql.slice(cursor, occurrence.start);
     const input = values[occurrence.key] ?? { kind: "string", value: "" };
     if (occurrence.replacement === "mybatis-foreach" && occurrence.foreach) {
       result += renderMyBatisForeach(occurrence.foreach, input, values, options);
@@ -208,17 +209,19 @@ export function substituteSqlParameters(sql: string, values: Record<string, SqlP
     result += occurrence.replacement === "string-fragment" ? sqlParameterStringFragment(input) : sqlParameterLiteral(input);
     cursor = occurrence.end;
   }
-  result += decodeSourceFragment(sql.slice(cursor));
-  return result;
+  result += sql.slice(cursor);
+  return decodeMyBatisEntities ? decodeMyBatisXmlComparisonEntities(result) : result;
 }
 
 function renderMyBatisForeach(foreach: MyBatisForeach, input: SqlParameterInput, values: Record<string, SqlParameterInput>, options?: SqlParameterOptions): string {
   const items = parseSqlParameterList(input.value);
   if (items.length === 0) return `${foreach.open}NULL${foreach.close}`;
 
-  const renderedItems = items.map((item) => {
+  const renderedItems = items.map((item, index) => {
     const itemInput: SqlParameterInput = item === null ? { kind: "null", value: "NULL" } : { kind: input.kind, value: String(item) };
-    return substituteSqlParameters(foreach.body, { ...values, [foreach.item]: itemInput }, options);
+    const iterationValues = { ...values, [foreach.item]: itemInput };
+    if (foreach.index) iterationValues[foreach.index] = { kind: "number", value: String(index) };
+    return substituteSqlParameters(foreach.body, iterationValues, options);
   });
   return `${foreach.open}${renderedItems.join(foreach.separator)}${foreach.close}`;
 }
@@ -277,8 +280,55 @@ function unquoteListValue(value: string): string {
   }
 }
 
-function decodeMyBatisXmlComparisonEntities(fragment: string): string {
-  return fragment.replace(/&(?:lt|gt);/g, (entity) => (entity === "&lt;" ? "<" : ">"));
+function decodeMyBatisXmlComparisonEntities(sql: string): string {
+  let result = "";
+  let cursor = 0;
+  let i = 0;
+
+  while (i < sql.length) {
+    const ch = sql[i];
+    const next = sql[i + 1];
+
+    if (ch === "'" || ch === '"' || ch === "`") {
+      i = skipQuoted(sql, i, ch);
+      continue;
+    }
+    if (ch === "[") {
+      i = skipBracketIdentifier(sql, i);
+      continue;
+    }
+    if (ch === "-" && next === "-") {
+      i = skipLine(sql, i + 2);
+      continue;
+    }
+    if (ch === "/" && next === "*") {
+      i = skipBlockComment(sql, i + 2);
+      continue;
+    }
+    if (isHashLineComment(sql, i)) {
+      i = skipLine(sql, i + 1);
+      continue;
+    }
+    if (ch === "$") {
+      const marker = readDollarQuoteMarker(sql, i);
+      if (marker) {
+        const end = sql.indexOf(marker, i + marker.length);
+        i = end === -1 ? sql.length : end + marker.length;
+        continue;
+      }
+    }
+
+    const replacement = sql.startsWith("&lt;", i) ? "<" : sql.startsWith("&gt;", i) ? ">" : "";
+    if (replacement) {
+      result += sql.slice(cursor, i) + replacement;
+      i += 4;
+      cursor = i;
+      continue;
+    }
+    i += 1;
+  }
+
+  return result + sql.slice(cursor);
 }
 
 export function sqlParameterLiteral(input: SqlParameterInput): string {
@@ -444,7 +494,8 @@ function readMyBatisForeachAt(sql: string, start: number): { collection: string;
 
   const collection = attributes.get("collection")?.trim() ?? "";
   const item = attributes.get("item")?.trim() ?? "";
-  if (!PARAMETER_NAME_RE.test(collection) || !PARAMETER_NAME_RE.test(item)) return null;
+  const index = attributes.get("index")?.trim();
+  if (!PARAMETER_NAME_RE.test(collection) || !PARAMETER_NAME_RE.test(item) || (index !== undefined && !PARAMETER_NAME_RE.test(index))) return null;
 
   const close = findMatchingForeachClose(sql, openingEnd + 1);
   if (!close) return null;
@@ -452,6 +503,7 @@ function readMyBatisForeachAt(sql: string, start: number): { collection: string;
     collection,
     render: {
       item,
+      ...(index ? { index } : {}),
       open: attributes.get("open") ?? "",
       separator: attributes.get("separator") ?? "",
       close: attributes.get("close") ?? "",
@@ -505,19 +557,62 @@ function decodeXmlAttribute(value: string): string {
 
 function findMatchingForeachClose(sql: string, start: number): { start: number; end: number } | null {
   let depth = 1;
-  let cursor = start;
-  const tagPattern = /<\/?foreach(?:\s|>)/gi;
-  tagPattern.lastIndex = cursor;
-  for (let match = tagPattern.exec(sql); match; match = tagPattern.exec(sql)) {
-    const tagStart = match.index;
-    const tagEnd = findXmlTagEnd(sql, tagStart);
-    if (tagEnd === -1) return null;
-    const closing = sql[tagStart + 1] === "/";
-    depth += closing ? -1 : 1;
-    if (depth === 0) return { start: tagStart, end: tagEnd + 1 };
-    tagPattern.lastIndex = tagEnd + 1;
+  let i = start;
+
+  while (i < sql.length) {
+    const ch = sql[i];
+    const next = sql[i + 1];
+
+    if (ch === "'" || ch === '"' || ch === "`") {
+      i = skipQuoted(sql, i, ch);
+      continue;
+    }
+    if (ch === "[") {
+      i = skipBracketIdentifier(sql, i);
+      continue;
+    }
+    if (ch === "-" && next === "-") {
+      i = skipLine(sql, i + 2);
+      continue;
+    }
+    if (ch === "/" && next === "*") {
+      i = skipBlockComment(sql, i + 2);
+      continue;
+    }
+    if (isHashLineComment(sql, i)) {
+      i = skipLine(sql, i + 1);
+      continue;
+    }
+    if (ch === "$") {
+      const marker = readDollarQuoteMarker(sql, i);
+      if (marker) {
+        const end = sql.indexOf(marker, i + marker.length);
+        i = end === -1 ? sql.length : end + marker.length;
+        continue;
+      }
+    }
+    if (ch === "<") {
+      const tag = readForeachTagAt(sql, i);
+      if (tag) {
+        depth += tag.closing ? -1 : 1;
+        if (depth === 0) return { start: i, end: tag.end };
+        i = tag.end;
+        continue;
+      }
+    }
+    i += 1;
   }
   return null;
+}
+
+function readForeachTagAt(sql: string, start: number): { closing: boolean; end: number } | null {
+  const closing = sql[start + 1] === "/";
+  const nameStart = start + (closing ? 2 : 1);
+  if (sql.slice(nameStart, nameStart + "foreach".length).toLowerCase() !== "foreach") return null;
+  const boundary = sql[nameStart + "foreach".length];
+  if (boundary !== ">" && !/\s/.test(boundary ?? "")) return null;
+  const tagEnd = findXmlTagEnd(sql, start);
+  return tagEnd === -1 ? null : { closing, end: tagEnd + 1 };
 }
 
 function isDuckDbCompactPrefixAliasSeparator(sql: string, index: number, databaseType?: DatabaseType): boolean {

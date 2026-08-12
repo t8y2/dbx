@@ -5343,6 +5343,87 @@ mod tests {
             .all(|statement| statement.contains("`gc`.`docfileinfo`") && !statement.contains('"')));
     }
 
+    /// Spanner's dialect is fixed at database creation time and only the connected agent
+    /// knows it: GoogleSQL quotes with backticks (and has an empty default schema),
+    /// the PostgreSQL dialect quotes with double quotes and defaults to `public`.
+    #[test]
+    fn spanner_save_uses_connection_identifier_quote_per_dialect() {
+        let googlesql = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Spanner),
+            identifier_quote: Some("`".to_string()),
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some(String::new()),
+                table_name: "singers".to_string(),
+                primary_keys: vec!["id".to_string()],
+                columns: Some(vec![column("id", "INT64", false, None), column("name", "STRING(100)", false, None)]),
+            },
+            columns: vec!["id".to_string(), "name".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!(1), json!("old")]],
+            dirty_rows: vec![(0, vec![(1, json!("Ada"))])],
+            deleted_rows: vec![],
+            new_rows: vec![],
+        });
+
+        assert_eq!(googlesql.validation_error, None);
+        // Single-segment table name: `` ``.`singers` `` would be `Invalid empty identifier`.
+        assert_eq!(googlesql.statements, vec!["UPDATE `singers` SET `name` = 'Ada' WHERE `id` = 1;"]);
+
+        let postgres_dialect = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Spanner),
+            identifier_quote: Some("\"".to_string()),
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("public".to_string()),
+                table_name: "singers".to_string(),
+                primary_keys: vec!["id".to_string()],
+                columns: Some(vec![
+                    column("id", "bigint", false, None),
+                    column("name", "character varying", false, None),
+                ]),
+            },
+            columns: vec!["id".to_string(), "name".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!(1), json!("old")]],
+            dirty_rows: vec![(0, vec![(1, json!("Ada"))])],
+            deleted_rows: vec![],
+            new_rows: vec![],
+        });
+
+        assert_eq!(postgres_dialect.validation_error, None);
+        assert_eq!(
+            postgres_dialect.statements,
+            vec!["UPDATE \"public\".\"singers\" SET \"name\" = 'Ada' WHERE \"id\" = 1;"]
+        );
+
+        // No quote reported: fall back to the GoogleSQL default (backticks), never to the
+        // ANSI double quote, which GoogleSQL parses as a string literal.
+        let no_reported_quote = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Spanner),
+            identifier_quote: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some(String::new()),
+                table_name: "singers".to_string(),
+                primary_keys: vec!["id".to_string()],
+                columns: Some(vec![column("id", "INT64", false, None), column("name", "STRING(100)", false, None)]),
+            },
+            columns: vec!["id".to_string(), "name".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!(1), json!("old")]],
+            dirty_rows: vec![(0, vec![(1, json!("Ada"))])],
+            deleted_rows: vec![],
+            new_rows: vec![],
+        });
+
+        assert_eq!(no_reported_quote.validation_error, None);
+        assert_eq!(no_reported_quote.statements, vec!["UPDATE `singers` SET `name` = 'Ada' WHERE `id` = 1;"]);
+    }
+
     #[test]
     fn kingbase_mysql_compat_copy_insert_uses_backtick_identifiers() {
         let statement = build_data_grid_copy_insert_statement(DataGridCopyInsertStatementOptions {

@@ -577,6 +577,8 @@ pub enum DatabaseType {
     Cassandra,
     #[serde(rename = "bigquery")]
     Bigquery,
+    #[serde(rename = "spanner")]
+    Spanner,
     Kylin,
     Sundb,
     Oscar,
@@ -1176,6 +1178,7 @@ impl ConnectionConfig {
             DatabaseType::Neo4j => format!("neo4j://{host}:{port}{db_part}"),
             DatabaseType::Cassandra => format!("cassandra://{host}:{port}{db_part}"),
             DatabaseType::Bigquery => format!("bigquery://{host}/{db_part}"),
+            DatabaseType::Spanner => self.spanner_display_url(&host, port),
             DatabaseType::Kylin => format!("kylin://{host}:{port}{db_part}"),
             DatabaseType::Sundb => format!("sundb://{host}:{port}{db_part}"),
             DatabaseType::Oscar => format!("oscar://{host}:{port}{db_part}"),
@@ -1426,6 +1429,9 @@ impl ConnectionConfig {
             DatabaseType::Bigquery => {
                 format!("bigquery://{}:{}@{host}/{db_part}", username, password)
             }
+            // Spanner authenticates through driver properties (`credentials=…`), never
+            // through username/password, so the display URL carries neither.
+            DatabaseType::Spanner => self.spanner_display_url(&host, port),
             DatabaseType::Kylin => {
                 format!("kylin://{}:{}@{host}:{port}{db_part}", username, password)
             }
@@ -1477,6 +1483,25 @@ impl ConnectionConfig {
             DatabaseType::Mqtt => self.mqtt_broker_url(),
             DatabaseType::Nacos => self.nacos_admin_url(),
             DatabaseType::Consul => self.consul_api_url(),
+        }
+    }
+
+    /// Display-only URL for Cloud Spanner connections.
+    ///
+    /// Spanner is agent-backed: the real JDBC URL is assembled inside the Spanner
+    /// agent from the structured `ConnectParams`, so this string is used purely for
+    /// the sidebar / connection card / logs. `database` holds the full resource path
+    /// `projects/{p}/instances/{i}/databases/{d}`, which the shared
+    /// [`encode_url_part`] would mangle into `projects%2Fmy%2Dproject%2F…` because it
+    /// escapes every non-alphanumeric byte. [`encode_spanner_resource_path`] keeps the
+    /// separators and unreserved characters readable instead. `host` is empty for real
+    /// Cloud Spanner and only set for the emulator or a custom endpoint.
+    fn spanner_display_url(&self, host: &str, port: u16) -> String {
+        let path = self.effective_database().map(encode_spanner_resource_path).unwrap_or_default();
+        if host.is_empty() {
+            format!("spanner:///{path}")
+        } else {
+            format!("spanner://{host}:{port}/{path}")
         }
     }
 
@@ -2402,6 +2427,30 @@ fn encode_url_part(value: &str) -> String {
     utf8_percent_encode(value, NON_ALPHANUMERIC).to_string()
 }
 
+/// Percent-encode set for Spanner resource paths: everything [`NON_ALPHANUMERIC`]
+/// escapes, minus the RFC 3986 *unreserved* characters, which must stay literal.
+///
+/// `-` matters most in practice: GCP project and instance IDs allow only lowercase
+/// letters, digits and hyphens, so without this a hyphenated project would render as
+/// `my%2Dproject` in every Spanner connection.
+const SPANNER_PATH_ENCODE_SET: &percent_encoding::AsciiSet =
+    &NON_ALPHANUMERIC.remove(b'-').remove(b'_').remove(b'.').remove(b'~');
+
+/// Percent-encode a Spanner resource path, keeping the `/` separators and the RFC 3986
+/// unreserved characters literal while still escaping everything else (spaces become
+/// `%20`).
+///
+/// Display-only. Native drivers must keep using [`encode_url_part`] — their URLs are
+/// real DSNs, where an unescaped `/` or `-` in a database name can change how the
+/// connection string parses.
+fn encode_spanner_resource_path(value: &str) -> String {
+    value
+        .split('/')
+        .map(|segment| utf8_percent_encode(segment, SPANNER_PATH_ENCODE_SET).to_string())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
 fn bracket_ipv6(host: &str) -> String {
     if host.contains(':') && !host.starts_with('[') {
         format!("[{host}]")
@@ -2696,6 +2745,32 @@ mod tests {
         config.db_type = DatabaseType::Postgres;
         assert_eq!(config.effective_database(), Some(" analytics "));
         assert_eq!(config.connection_url(), "postgres://root:secret@10.1.2.3:2883/%20analytics%20?sslmode=prefer");
+    }
+
+    /// Spanner keeps the full resource path in `database`. Its URL is display-only (the
+    /// agent builds the real JDBC URL), so the separators and the RFC 3986 unreserved
+    /// characters must stay literal instead of being mangled into
+    /// `projects%2Fmy%2Dproject%2F…` by the shared `encode_url_part`. Hyphens matter in
+    /// practice: GCP project and instance IDs allow only lowercase letters, digits and
+    /// hyphens. Characters that genuinely need escaping (here a space) still are.
+    #[test]
+    fn spanner_display_url_keeps_resource_path_separators() {
+        let mut config = mysql_config("", "", Some("projects/my-project/instances/my-instance/databases/my db"));
+        config.db_type = DatabaseType::Spanner;
+        config.host = String::new();
+        config.port = 443;
+
+        assert_eq!(config.connection_url(), "spanner:///projects/my-project/instances/my-instance/databases/my%20db");
+        // Display and redacted forms match: Spanner carries no credentials in the URL.
+        assert_eq!(config.redacted_connection_url(), config.connection_url());
+
+        // Emulator / custom endpoint: the host and port are shown.
+        config.host = "localhost".to_string();
+        config.port = 9010;
+        assert_eq!(
+            config.connection_url(),
+            "spanner://localhost:9010/projects/my-project/instances/my-instance/databases/my%20db"
+        );
     }
 
     #[test]

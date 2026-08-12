@@ -488,7 +488,9 @@ pub fn build_empty_table_sql(options: TableAdminSqlOptions) -> String {
     let table = qualified_name(options.database_type, options.schema.as_deref(), &options.table_name);
     match options.database_type {
         Some(DatabaseType::ClickHouse) => format!("ALTER TABLE {table} DELETE WHERE 1 = 1;"),
-        Some(DatabaseType::Bigquery) => format!("DELETE FROM {table} WHERE TRUE;"),
+        // BigQuery and Spanner both reject an unqualified `DELETE FROM t`; DML requires a
+        // WHERE clause.
+        Some(DatabaseType::Bigquery | DatabaseType::Spanner) => format!("DELETE FROM {table} WHERE TRUE;"),
         Some(
             DatabaseType::Cassandra
             | DatabaseType::Hive
@@ -507,6 +509,10 @@ pub fn build_truncate_table_sql(options: TableAdminSqlOptions) -> String {
     let table = qualified_name(options.database_type, options.schema.as_deref(), &options.table_name);
     if matches!(options.database_type, Some(DatabaseType::Iotdb)) {
         format!("DELETE FROM {};", iotdb_timeseries_pattern(&table))
+    } else if matches!(options.database_type, Some(DatabaseType::Spanner)) {
+        // Spanner has no TRUNCATE statement (it reports `Unknown statement`), and its DML
+        // requires a WHERE clause. Unlike BigQuery it cannot use the TRUNCATE fallback.
+        format!("DELETE FROM {table} WHERE TRUE;")
     } else if matches!(options.database_type, Some(DatabaseType::Sqlite | DatabaseType::DuckDb)) {
         format!("DELETE FROM {table};")
     } else {
@@ -1376,6 +1382,35 @@ mod tests {
                 cascade: None,
             }),
             "DELETE FROM `events` WHERE TRUE;"
+        );
+        // Spanner rejects both a WHERE-less DELETE and TRUNCATE TABLE (`Unknown statement`),
+        // so unlike BigQuery it must not fall through to the TRUNCATE default.
+        assert_eq!(
+            build_empty_table_sql(TableAdminSqlOptions {
+                database_type: Some(DatabaseType::Spanner),
+                schema: None,
+                table_name: "events".to_string(),
+                cascade: None,
+            }),
+            "DELETE FROM `events` WHERE TRUE;"
+        );
+        assert_eq!(
+            build_truncate_table_sql(TableAdminSqlOptions {
+                database_type: Some(DatabaseType::Spanner),
+                schema: None,
+                table_name: "events".to_string(),
+                cascade: None,
+            }),
+            "DELETE FROM `events` WHERE TRUE;"
+        );
+        assert_eq!(
+            build_truncate_table_sql(TableAdminSqlOptions {
+                database_type: Some(DatabaseType::Spanner),
+                schema: Some("public".to_string()),
+                table_name: "events".to_string(),
+                cascade: Some(true),
+            }),
+            "DELETE FROM `public`.`events` WHERE TRUE;"
         );
         assert_eq!(
             build_empty_table_sql(TableAdminSqlOptions {

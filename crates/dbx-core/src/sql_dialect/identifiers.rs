@@ -136,6 +136,11 @@ pub fn quote_table_identifier(database_type: Option<DatabaseType>, name: &str) -
             | DatabaseType::Tdengine
             | DatabaseType::Access
             | DatabaseType::Bigquery
+            // GoogleSQL (Spanner's default dialect) quotes identifiers with backticks;
+            // double quotes are string literals there, so `SELECT * FROM "users"` is a
+            // syntax error. PostgreSQL-dialect Spanner databases override this through
+            // the identifier quote reported by the agent on connect.
+            | DatabaseType::Spanner
             | DatabaseType::Questdb,
         ) => {
             format!("`{}`", name.replace('`', "``"))

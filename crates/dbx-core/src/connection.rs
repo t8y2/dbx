@@ -221,6 +221,7 @@ macro_rules! agent_connection_pool_database_type {
             | DatabaseType::Neo4j
             | DatabaseType::Cassandra
             | DatabaseType::Bigquery
+            | DatabaseType::Spanner
             | DatabaseType::Kylin
             | DatabaseType::Ignite
             | DatabaseType::Ignite3

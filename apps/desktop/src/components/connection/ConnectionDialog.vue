@@ -3704,8 +3704,7 @@ function connectionConfigForSubmit(id: string, generatedName = ""): ConnectionCo
     // service, SID, and descriptor JDBC strings exactly as before.
     config.connection_string = undefined;
   }
-  const connectTimeout = Number(config.connect_timeout_secs);
-  config.connect_timeout_secs = config.connect_timeout_inherit === true ? normalizeGlobalConnectTimeoutSecs(editGlobalConnectTimeoutSecs.value) : normalizeGlobalConnectTimeoutSecs(connectTimeout);
+  config.connect_timeout_secs = config.connect_timeout_inherit === true ? normalizeGlobalConnectTimeoutSecs(editGlobalConnectTimeoutSecs.value) : normalizeGlobalConnectTimeoutSecs(config.connect_timeout_secs);
   const queryTimeout = Number(config.query_timeout_secs);
   config.query_timeout_secs = config.query_timeout_inherit === true ? normalizeGlobalQueryTimeoutSecs(editGlobalQueryTimeoutSecs.value) : normalizeGlobalQueryTimeoutSecs(queryTimeout);
   const idleTimeout = Number(config.idle_timeout_secs);

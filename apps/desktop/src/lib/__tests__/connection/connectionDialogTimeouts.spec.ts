@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
+import { DEFAULT_CONNECT_TIMEOUT_SECS, normalizeConnectTimeoutSecs } from "@/lib/connection/timeoutLimits";
 
 const dialogSource = readFileSync(new URL("../../../components/connection/ConnectionDialog.vue", import.meta.url), "utf8");
 
@@ -16,6 +17,12 @@ describe("ConnectionDialog timeout controls", () => {
     expect(dialogSource).toContain("@input=\"clampConnectTimeoutInput($event, 'global')\"");
     expect(dialogSource).toContain("@input=\"clampConnectTimeoutInput($event, 'connection')\"");
     expect(dialogSource).not.toContain('@blur="editGlobalQueryTimeoutSecs = normalizeGlobalQueryTimeoutSecs');
+  });
+
+  it("restores the default when the connection timeout input is cleared", () => {
+    expect(normalizeConnectTimeoutSecs("")).toBe(DEFAULT_CONNECT_TIMEOUT_SECS);
+    expect(dialogSource).toContain("normalizeGlobalConnectTimeoutSecs(config.connect_timeout_secs)");
+    expect(dialogSource).not.toContain("Number(config.connect_timeout_secs)");
   });
 
   it("shows range help beside both global timeout labels", () => {

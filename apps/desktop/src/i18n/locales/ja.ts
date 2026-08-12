@@ -319,6 +319,7 @@ export default withEnglishFallback({
     showMore: "さらに{count}件表示...",
     filterByType: "タイプでフィルター",
     showActiveConnectionsOnly: "アクティブな接続のみを表示",
+    disconnectAllActiveConnections: "すべてのアクティブな接続を切断",
     sortConnections: "接続を並べ替え",
     sortConnectionsManual: "手動順",
     sortConnectionsAscending: "名前: A–Z",
@@ -719,6 +720,8 @@ export default withEnglishFallback({
     deletedSelected: "{count}件の接続を削除しました",
     copied: "コピーしました",
     disconnected: "切断しました",
+    disconnectedSelected: "{count}件の接続を切断しました",
+    disconnectSelectedPartial: "{succeeded}件の接続を切断し、{failed}件失敗しました",
     databaseConnectionClosed: "データベース接続を閉じました: {name}",
     duplicated: "接続を複製しました",
     duplicatedSelected: "{count}件の接続を複製しました",
@@ -2114,6 +2117,7 @@ export default withEnglishFallback({
     deselectConnection: "接続の選択を解除",
     selectAllConnections: "すべての接続を選択",
     deselectAllConnections: "すべての接続の選択を解除",
+    selectedConnections: "{count}件選択",
     exitMultiSelect: "複数選択を終了",
   },
   databaseSearch: {
@@ -2498,6 +2502,7 @@ export default withEnglishFallback({
   contextMenu: {
     openConnection: "接続を開く",
     closeConnection: "接続を閉じる",
+    closeSelectedConnections: "選択した{count}件の接続を閉じる",
     closeDatabaseConnection: "データベース接続を閉じる",
     deleteConnection: "接続を削除",
     deleteSelectedConnections: "選択した{count}件の接続を削除",

@@ -319,6 +319,7 @@ export default withEnglishFallback({
     showMore: "Mostrar {count} más...",
     filterByType: "Filtrar por tipo",
     showActiveConnectionsOnly: "Mostrar solo conexiones activas",
+    disconnectAllActiveConnections: "Desconectar todas las conexiones activas",
     sortConnections: "Ordenar conexiones",
     sortConnectionsManual: "Orden manual",
     sortConnectionsAscending: "Nombre: A–Z",
@@ -755,6 +756,8 @@ export default withEnglishFallback({
     deletedSelected: "{count} conexiones eliminadas",
     copied: "Copiado",
     disconnected: "Desconectado",
+    disconnectedSelected: "{count} conexiones desconectadas",
+    disconnectSelectedPartial: "Se desconectaron {succeeded} conexiones; {failed} fallaron",
     databaseConnectionClosed: "Conexión de base de datos cerrada: {name}",
     duplicated: "Conexión duplicada",
     duplicatedSelected: "{count} conexiones duplicadas",
@@ -2089,6 +2092,7 @@ export default withEnglishFallback({
     deselectConnection: "Deseleccionar conexión",
     selectAllConnections: "Seleccionar todas las conexiones",
     deselectAllConnections: "Deseleccionar todas las conexiones",
+    selectedConnections: "{count} seleccionadas",
     exitMultiSelect: "Salir de selección múltiple",
   },
   databaseSearch: {
@@ -2473,6 +2477,7 @@ export default withEnglishFallback({
   contextMenu: {
     openConnection: "Abrir conexión",
     closeConnection: "Cerrar conexión",
+    closeSelectedConnections: "Cerrar {count} conexiones seleccionadas",
     closeDatabaseConnection: "Cerrar conexión de base de datos",
     deleteConnection: "Eliminar conexión",
     deleteSelectedConnections: "Eliminar {count} conexiones seleccionadas",

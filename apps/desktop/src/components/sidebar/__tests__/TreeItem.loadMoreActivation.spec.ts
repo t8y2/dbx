@@ -101,6 +101,7 @@ afterEach(() => {
   connectionStore.selectedTreeNodeId = null;
   connectionStore.selectedTreeNodeIds = [];
   connectionStore.selectedTreeNodeIdsSet = new Set<string>();
+  connectionStore.treeNodes = [];
   connectionStore.treeSelectionAnchorId = null;
   settingsStore.editorSettings.sidebarActivation = "double";
   vi.restoreAllMocks();
@@ -142,6 +143,37 @@ describe("TreeItem load-more activation", () => {
     row.dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 1 }));
 
     expect(host.handleRowClick).not.toHaveBeenCalled();
+  });
+
+  it("drops a selected object group when modifier-selecting a real table", async () => {
+    const group: TreeNode = {
+      id: "connection-1:app:dbo:__tables",
+      label: "tree.tables",
+      type: "group-tables",
+      connectionId: "connection-1",
+      database: "app",
+      schema: "dbo",
+    };
+    const table: TreeNode = {
+      id: "connection-1:app:dbo:orders",
+      label: "orders",
+      type: "table",
+      connectionId: "connection-1",
+      database: "app",
+      schema: "dbo",
+    };
+    connectionStore.treeNodes = [{ ...group, children: [table] }];
+    connectionStore.selectedTreeNodeId = group.id;
+    connectionStore.selectedTreeNodeIds = [group.id];
+    connectionStore.selectedTreeNodeIdsSet = new Set([group.id]);
+    connectionStore.treeSelectionAnchorId = group.id;
+    const { row } = await mountTreeItem(table);
+
+    row.dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 1, metaKey: true }));
+
+    expect(connectionStore.selectedTreeNodeIds).toEqual([table.id]);
+    expect(connectionStore.selectedTreeNodeId).toBe(table.id);
+    expect(connectionStore.treeSelectionAnchorId).toBe(table.id);
   });
 
   it("shows the invalid marker for objects reported as invalid", async () => {

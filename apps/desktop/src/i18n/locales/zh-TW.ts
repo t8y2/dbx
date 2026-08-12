@@ -319,6 +319,7 @@ export default withEnglishFallback({
     showMore: "再顯示 {count} 個……",
     filterByType: "依類型篩選",
     showActiveConnectionsOnly: "僅顯示作用中連線",
+    disconnectAllActiveConnections: "關閉所有作用中連線",
     sortConnections: "連線排序",
     sortConnectionsManual: "手動排序",
     sortConnectionsAscending: "名稱：A–Z",
@@ -753,6 +754,8 @@ export default withEnglishFallback({
     deletedSelected: "已刪除 {count} 個連線",
     copied: "已複製",
     disconnected: "已斷開連線",
+    disconnectedSelected: "已斷開 {count} 個連線",
+    disconnectSelectedPartial: "已斷開 {succeeded} 個連線，{failed} 個失敗",
     databaseConnectionClosed: "已關閉資料庫連線：{name}",
     duplicated: "連線已複製",
     duplicatedSelected: "已複製 {count} 個連線",
@@ -2088,6 +2091,7 @@ export default withEnglishFallback({
     deselectConnection: "取消選擇連接",
     selectAllConnections: "全選連接",
     deselectAllConnections: "取消全選連接",
+    selectedConnections: "已選 {count}",
     exitMultiSelect: "退出多選",
   },
   databaseSearch: {
@@ -2472,6 +2476,7 @@ export default withEnglishFallback({
   contextMenu: {
     openConnection: "開啟連線",
     closeConnection: "關閉連線",
+    closeSelectedConnections: "關閉選取的 {count} 個連線",
     closeDatabaseConnection: "關閉資料庫連線",
     deleteConnection: "刪除連線",
     deleteSelectedConnections: "刪除選取的 {count} 個連線",

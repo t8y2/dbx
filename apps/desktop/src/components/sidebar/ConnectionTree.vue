@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, shallowRef, computed, nextTick, watch, provide, onMounted, onUnmounted, type Component, type ComponentPublicInstance, type CSSProperties } from "vue";
 import { useI18n } from "vue-i18n";
-import { Search, X, ListFilter, ListOrdered, ArrowDownAZ, ArrowUpZA, CircleDot, Crosshair, Server, Database, FolderTree, Table2, Eye, RotateCcw } from "@lucide/vue";
+import { Search, X, ListFilter, ListOrdered, ArrowDownAZ, ArrowUpZA, CircleDot, Crosshair, Server, Database, FolderTree, Table2, Eye, RotateCcw, Loader2, Unplug } from "@lucide/vue";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
 import { useSettingsStore } from "@/stores/settingsStore";
@@ -52,6 +52,7 @@ import { sidebarDisplayTableName } from "@/lib/sidebar/sidebarTableNameDisplay";
 import { alignedSidebarCommentLabelWidths, isSidebarCommentAlignableNode, sidebarTreeNaturalContentWidth, sidebarTreeNodeComment, usesFullWidthTreeLabel } from "@/lib/sidebar/sidebarTreeItemLayout";
 import { formatSidebarObjectStorage, sidebarTableStorageScopes, supportsSidebarTableStorage } from "@/lib/sidebar/sidebarDatabaseStorage";
 import { sidebarScrollbarGeometry as calculateSidebarScrollbarGeometry } from "@/lib/sidebar/sidebarScrollbar";
+import { disconnectSidebarConnections } from "@/lib/sidebar/sidebarConnectionDisconnect";
 
 const { t } = useI18n();
 const store = useConnectionStore();
@@ -61,6 +62,7 @@ const { toast } = useToast();
 const searchQuery = ref("");
 const deferredSearchQuery = ref("");
 const showConnectedConnectionsOnly = ref(false);
+const isDisconnectingAllActiveConnections = ref(false);
 const searchInputRef = ref<HTMLInputElement>();
 const rootRef = ref<HTMLElement>();
 const pointerInsideTree = ref(false);
@@ -158,6 +160,39 @@ watch(
   },
   { flush: "sync" },
 );
+
+watch(
+  [showConnectedConnectionsOnly, () => store.connectedIds.size],
+  ([showConnectedOnly, activeConnectionCount]) => {
+    if (showConnectedOnly && activeConnectionCount === 0) showConnectedConnectionsOnly.value = false;
+  },
+  { flush: "sync" },
+);
+
+async function disconnectAllActiveConnections() {
+  if (isDisconnectingAllActiveConnections.value) return;
+  const connectionIds = [...store.connectedIds];
+  if (!connectionIds.length) {
+    showConnectedConnectionsOnly.value = false;
+    return;
+  }
+
+  isDisconnectingAllActiveConnections.value = true;
+  try {
+    const result = await disconnectSidebarConnections(connectionIds, (connectionId) => store.disconnect(connectionId));
+    if (!result.failed) {
+      toast(t("connection.disconnectedSelected", { count: connectionIds.length }), 2000);
+    } else if (result.succeeded > 0) {
+      toast(t("connection.disconnectSelectedPartial", { succeeded: result.succeeded, failed: result.failed }), 5000);
+    } else {
+      const message = result.firstError instanceof Error ? result.firstError.message : String(result.firstError);
+      toast(t("connection.saveFailed", { message }), 5000);
+    }
+  } finally {
+    isDisconnectingAllActiveConnections.value = false;
+    if (store.connectedIds.size === 0) showConnectedConnectionsOnly.value = false;
+  }
+}
 
 function refreshActiveSidebarTableSearches() {
   if (isTreeSearchFiltering.value) return;
@@ -1974,6 +2009,20 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes });
         </div>
       </div>
     </CustomContextMenu>
+    <div v-if="showConnectedConnectionsOnly && store.connectedIds.size > 0" class="shrink-0 border-t border-border bg-background px-2 py-2">
+      <Button
+        type="button"
+        variant="outline"
+        size="sm"
+        class="h-7 w-full justify-center gap-1.5 text-xs"
+        :disabled="isDisconnectingAllActiveConnections"
+        @click="disconnectAllActiveConnections"
+      >
+        <Loader2 v-if="isDisconnectingAllActiveConnections" class="h-3.5 w-3.5 animate-spin" />
+        <Unplug v-else class="h-3.5 w-3.5" />
+        {{ t("sidebar.disconnectAllActiveConnections") }}
+      </Button>
+    </div>
     <SidebarDdlViewDialog
       v-if="sidebarDdlTarget"
       v-model:open="sidebarDdlOpen"

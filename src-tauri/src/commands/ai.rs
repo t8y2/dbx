@@ -123,6 +123,13 @@ use dbx_core::agent_loop::{run_agent_loop, AgentLoopContext};
 use dbx_core::ai_cli_agent::CliAgentCommandSpec;
 use dbx_core::models::connection::DatabaseType;
 
+#[derive(serde::Serialize)]
+struct AiAgentEventPayload {
+    session_id: String,
+    #[serde(flatten)]
+    event: AgentEvent,
+}
+
 #[tauri::command]
 pub async fn ai_cancel_stream(session_id: String) -> Result<bool, String> {
     Ok(dbx_core::ai::cancel_stream(&session_id).await)
@@ -214,8 +221,10 @@ pub async fn ai_agent_stream(
         &agent_ctx,
         {
             let app = app.clone();
+            let event_session_id = session_id.clone();
             move |event: AgentEvent| {
-                let _ = app.emit("ai-agent-event", &event);
+                let payload = AiAgentEventPayload { session_id: event_session_id.clone(), event };
+                let _ = app.emit("ai-agent-event", &payload);
             }
         },
         &cancelled,

@@ -97,7 +97,7 @@ export function createAiMessageRenderer(options: AiMessageRendererOptions) {
     }
     const lang = normalizeAiCodeLanguage(segment.lang);
     // Highlighting a block that is still streaming is wasted work: it is re-highlighted once the fence closes.
-    const highlighted = flags.live && flags.pending ? undefined : options.highlightCode?.(segment.content, lang);
+    const highlighted = flags.live && flags.pending ? undefined : safeHighlightCode(segment.content, lang);
     return {
       type: "code",
       content: segment.content,
@@ -106,6 +106,15 @@ export function createAiMessageRenderer(options: AiMessageRendererOptions) {
       isSql: isSqlAiCodeLanguage(lang),
       pending: flags.pending,
     };
+  }
+
+  function safeHighlightCode(content: string, lang: string): string | undefined {
+    if (!options.highlightCode) return undefined;
+    try {
+      return options.highlightCode(content, lang);
+    } catch {
+      return undefined;
+    }
   }
 
   function renderCachedSegment(segment: MessageSegment, flags: SegmentRenderFlags): AiMessageRenderSegment {

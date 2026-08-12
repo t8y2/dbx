@@ -31,6 +31,7 @@ const resizing = ref(false);
 
 const MQTT_PAYLOAD_MIN_HEIGHT_PX = 60;
 const MQTT_PAYLOAD_MAX_PANEL_RATIO = 0.5;
+const MQTT_PAYLOAD_KEYBOARD_STEP_PX = 10;
 const MQTT_PAYLOAD_HEIGHT_STORAGE_KEY = "dbx-mqtt-payload-height";
 let resizeStartY = 0;
 let resizeStartHeight = 0;
@@ -80,6 +81,11 @@ function clampPayloadHeight(height: number) {
   return Math.max(MQTT_PAYLOAD_MIN_HEIGHT_PX, Math.min(maxPayloadHeight(), Math.round(height)));
 }
 
+function persistPayloadHeight(height: number) {
+  payloadHeight.value = clampPayloadHeight(height);
+  localStorage.setItem(MQTT_PAYLOAD_HEIGHT_STORAGE_KEY, payloadHeight.value.toString());
+}
+
 /** 容器尺寸变化时同步收缩输入框，保证消息列表仍可见 */
 function handlePanelResize() {
   payloadHeight.value = clampPayloadHeight(payloadHeight.value);
@@ -104,6 +110,13 @@ function handleResize(event: MouseEvent) {
   payloadHeight.value = clampPayloadHeight(resizeStartHeight + resizeStartY - event.clientY);
 }
 
+function handleResizeKeydown(event: KeyboardEvent) {
+  const direction = event.key === "ArrowUp" ? 1 : event.key === "ArrowDown" ? -1 : 0;
+  if (direction === 0) return;
+  event.preventDefault();
+  persistPayloadHeight(payloadHeight.value + direction * MQTT_PAYLOAD_KEYBOARD_STEP_PX);
+}
+
 /** 结束拖动并记住用户设置的高度 */
 function stopResize() {
   if (!resizing.value) return;
@@ -112,7 +125,7 @@ function stopResize() {
   document.removeEventListener("mouseup", stopResize);
   document.body.style.userSelect = "";
   document.body.style.cursor = "";
-  localStorage.setItem(MQTT_PAYLOAD_HEIGHT_STORAGE_KEY, clampPayloadHeight(payloadHeight.value).toString());
+  persistPayloadHeight(payloadHeight.value);
 }
 
 onMounted(() => {
@@ -185,7 +198,19 @@ function clearForm() {
 
 <template>
   <div ref="publishPanelRef" class="publish-panel">
-    <div class="payload-resize-handle" role="separator" aria-orientation="horizontal" :aria-label="t('connection.mqttResizePayload')" :title="t('connection.mqttResizePayload')" @mousedown="startResize" />
+    <div
+      class="payload-resize-handle"
+      role="separator"
+      tabindex="0"
+      aria-orientation="horizontal"
+      :aria-label="t('connection.mqttResizePayload')"
+      :aria-valuemin="MQTT_PAYLOAD_MIN_HEIGHT_PX"
+      :aria-valuemax="maxPayloadHeight()"
+      :aria-valuenow="payloadHeight"
+      :title="t('connection.mqttResizePayload')"
+      @mousedown="startResize"
+      @keydown="handleResizeKeydown"
+    />
     <div class="panel-header">
       <span class="panel-title">{{ t("connection.mqttPublish") }}</span>
       <Button size="sm" variant="ghost" class="h-6 text-xs" @click="clearForm">{{ t("common.clear") }}</Button>
@@ -282,8 +307,14 @@ function clearForm() {
   transition: background-color 0.15s ease;
 }
 
-.payload-resize-handle:hover::before {
+.payload-resize-handle:hover::before,
+.payload-resize-handle:focus-visible::before {
   background-color: color-mix(in srgb, var(--color-text) 20%, transparent);
+}
+
+.payload-resize-handle:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: -2px;
 }
 
 .panel-header {

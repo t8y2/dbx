@@ -107,7 +107,7 @@ export function retainBinaryCellDownloadMenuForHover(openCell: BinaryCellPositio
   return openCell?.rowIndex === hoveredCell.rowIndex && openCell.col === hoveredCell.col ? openCell : null;
 }
 
-const HEX_VALUE_RE = /^(?:0[xX]|\\x)([0-9a-fA-F\s]+)$/;
+const HEX_VALUE_RE = /^(?:0[xX]|\\x)([0-9a-fA-F\s]*)$/;
 const BARE_HEX_RE = /^[0-9a-fA-F\s]+$/;
 const HEX_ESCAPE_RE = /^(?:\\x[0-9a-fA-F]{2}|\s)+$/;
 const BINARY_TYPE_RE = /^(?:blob|tinyblob|mediumblob|longblob|bytea|bytes|binary|varbinary|image|raw|long\s+raw)(?:\b|\()/i;
@@ -129,7 +129,8 @@ export function parseBinaryCellHexValue(value: CellValue): Uint8Array | null {
 
 function bytesFromHex(value: string): Uint8Array | null {
   const hex = value.replace(/\s+/g, "");
-  if (!hex || hex.length % 2 !== 0 || !/^[0-9a-fA-F]+$/.test(hex)) return null;
+  if (hex.length === 0) return new Uint8Array();
+  if (hex.length % 2 !== 0 || !/^[0-9a-fA-F]+$/.test(hex)) return null;
 
   const bytes = new Uint8Array(hex.length / 2);
   for (let i = 0; i < bytes.length; i++) {

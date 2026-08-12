@@ -19,6 +19,7 @@ import {
 test("parseBinaryCellHexValue accepts 0x and \\x prefixed hex values", () => {
   assert.deepEqual(Array.from(parseBinaryCellHexValue("0X48656c6c6f") ?? []), [72, 101, 108, 108, 111]);
   assert.deepEqual(Array.from(parseBinaryCellHexValue("\\x00 ff") ?? []), [0, 255]);
+  assert.deepEqual(Array.from(parseBinaryCellHexValue("0x") ?? []), []);
 });
 
 test("parseBinaryCellHexValue rejects non-hex and odd-length payloads", () => {
@@ -75,6 +76,7 @@ test("binaryCellDisplayText previews printable binary strings without changing t
   assert.equal(binaryCellDisplayText("0x89504e47", "BLOB"), "BLOB [4 bytes]");
   assert.equal(binaryCellDisplayText(`0x${"00".repeat(2048)}`, "VARBINARY(2048)"), "VARBINARY [2.0 KB]");
   assert.equal(binaryCellDisplayText("0x89504e47"), null);
+  assert.equal(binaryCellDisplayText("0x", "VARBINARY(0)"), "");
 });
 
 test("binaryCellDownloadPayload builds raw and decoded payloads", () => {
@@ -90,6 +92,16 @@ test("binaryCellDownloadPayload builds raw and decoded payloads", () => {
 
   const paddedBinary = binaryCellDownloadPayload("0x3135303031300000", "binary", "BINARY(8)");
   assert.deepEqual(Array.from(paddedBinary.data as Uint8Array), [49, 53, 48, 48, 49, 48, 0, 0]);
+
+  const emptyBinary = binaryCellDownloadPayload("0x", "binary", "VARBINARY(0)");
+  assert.deepEqual(Array.from(emptyBinary.data as Uint8Array), []);
+});
+
+test("DataGrid binary preview prefers ResultSet column types when table metadata is unavailable", () => {
+  const source = readFileSync("apps/desktop/src/components/grid/DataGrid.vue", "utf8");
+  const formatter = source.match(/function formatCell\([^]*?\n\}/)?.[0] ?? "";
+
+  assert.match(formatter, /binaryCellDisplayText\(value, columnIndex === undefined \? undefined : allColumnTypes\.value\[columnIndex\]\)/);
 });
 
 test("binaryCellDownloadPayload decodes GBK text bytes", () => {

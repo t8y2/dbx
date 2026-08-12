@@ -1,10 +1,14 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
+import { Copy } from "@lucide/vue";
 import type { MqSystemKind, PeekedMessage, PeekMessagesOptions, TopicRef } from "@/types/mq";
 import { mqPeekMessages } from "@/lib/backend/api";
 import { formatError } from "@/lib/backend/errorUtils";
+import { copyToClipboard } from "@/lib/common/clipboard";
 import { parseNonNegativeSafeInteger } from "@/lib/mq/mqPeekFilters";
+import { useToast } from "@/composables/useToast";
+import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 
 type MessageBrowserAppearance = "form" | "monitoring";
@@ -21,6 +25,7 @@ const props = withDefaults(defineProps<Props>(), {
   appearance: "form",
 });
 const { t } = useI18n();
+const { toast } = useToast();
 
 const loading = ref(false);
 const error = ref<string>();
@@ -113,6 +118,23 @@ function invalidateMessageRequest() {
 
 function messagePayload(message: PeekedMessage): string {
   return message.payloadText ?? message.payloadBase64;
+}
+
+async function copyMessagePayload(message: PeekedMessage) {
+  await copyMessageText(messagePayload(message));
+}
+
+async function copyMessageHeaders(message: PeekedMessage) {
+  await copyMessageText(JSON.stringify(message.headers, null, 2));
+}
+
+async function copyMessageText(text: string) {
+  try {
+    await copyToClipboard(text);
+    toast(t("grid.copied"));
+  } catch (cause: unknown) {
+    toast(t("grid.copyFailed", { message: formatError(cause) }), 5000);
+  }
 }
 
 function formatMessageTimestamp(value?: string): string {
@@ -215,9 +237,27 @@ watch(kafkaStartPosition, () => {
           <span v-if="message.key">{{ t("mqMessages.metaKey", { key: message.key }) }}</span>
           <span>{{ formatMessageTimestamp(message.publishTime) }}</span>
         </div>
-        <pre class="message-payload">{{ messagePayload(message) }}</pre>
+        <div class="message-payload-section">
+          <div class="message-payload-heading">
+            <span>{{ t("mqMessages.messageContent") }}</span>
+            <Button type="button" variant="outline" size="sm" class="message-copy-action h-7 gap-1.5 px-2 text-xs" :aria-label="`${t('grid.copy')} ${t('mqMessages.messageContent')}`" data-testid="copy-message-payload" @click="copyMessagePayload(message)">
+              <Copy :size="14" aria-hidden="true" />
+              {{ t("grid.copy") }}
+            </Button>
+          </div>
+          <pre data-native-clipboard class="message-payload">{{ messagePayload(message) }}</pre>
+        </div>
         <div v-if="Object.keys(message.headers || {}).length" class="message-headers">
-          <span v-for="(value, key) in message.headers" :key="key">{{ key }}: {{ value }}</span>
+          <div class="message-headers-heading">
+            <span>{{ t("mqMessages.messageHeaders") }}</span>
+            <Button type="button" variant="outline" size="sm" class="message-copy-action h-7 gap-1.5 px-2 text-xs" :aria-label="`${t('grid.copy')} ${t('mqMessages.messageHeaders')}`" data-testid="copy-message-headers" @click="copyMessageHeaders(message)">
+              <Copy :size="14" aria-hidden="true" />
+              {{ t("grid.copy") }}
+            </Button>
+          </div>
+          <div class="message-headers-values">
+            <span v-for="(value, key) in message.headers" :key="key">{{ key }}: {{ value }}</span>
+          </div>
         </div>
       </article>
     </div>
@@ -411,8 +451,38 @@ watch(kafkaStartPosition, () => {
   font-weight: 700;
 }
 
+.message-copy-action {
+  flex-shrink: 0;
+}
+
+.message-payload-section,
+.message-headers {
+  margin-top: 8px;
+}
+
+.message-payload-heading,
+.message-headers-heading,
+.message-headers-values {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.message-payload-heading,
+.message-headers-heading {
+  color: var(--color-text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.message-payload-heading .message-copy-action,
+.message-headers-heading .message-copy-action {
+  margin-left: auto;
+}
+
 .message-payload {
-  margin: 8px 0 0;
+  margin: 6px 0 0;
   padding: 10px;
   max-height: 160px;
   overflow: auto;
@@ -426,14 +496,11 @@ watch(kafkaStartPosition, () => {
   word-break: break-word;
 }
 
-.message-headers {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin-top: 8px;
+.message-headers-heading {
+  margin-bottom: 6px;
 }
 
-.message-headers span {
+.message-headers-values span {
   padding: 2px 6px;
   border: 1px solid var(--color-border);
   border-radius: var(--dbx-radius-fixed-4);

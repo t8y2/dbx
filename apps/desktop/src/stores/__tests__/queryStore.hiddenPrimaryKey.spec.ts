@@ -1,5 +1,5 @@
 import { createPinia, setActivePinia } from "pinia";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const executeMulti = vi.fn();
 const executeQuery = vi.fn();
@@ -8,6 +8,7 @@ const getColumns = vi.fn();
 const listIndexes = vi.fn();
 const listObjects = vi.fn();
 const getConnectionConfig = vi.fn();
+const lookupLocalCompletionTables = vi.fn();
 const buildSortedQuerySql = vi.fn();
 const buildDataGridCountSql = vi.fn();
 const prepareQueryPaginationExecutionPlan = vi.fn(async (options) => ({
@@ -50,6 +51,7 @@ vi.mock("@/stores/connectionStore", () => ({
   useConnectionStore: () => ({
     ensureConnected: vi.fn().mockResolvedValue(undefined),
     getConfig: getConnectionConfig,
+    lookupLocalCompletionTables,
     recordConnectionLostError: vi.fn(),
   }),
 }));
@@ -86,6 +88,7 @@ describe("queryStore hidden primary key editing", () => {
     ]);
     listIndexes.mockResolvedValue([]);
     listObjects.mockResolvedValue([]);
+    lookupLocalCompletionTables.mockReturnValue([]);
     analyzeEditableQueryEditability.mockImplementation(async (sql: string) => queryAnalysis(sql));
     buildSortedQuerySql.mockImplementation(async (options) => ({ ok: true, sql: `${options.originalSql} ORDER BY ${options.column} ${options.direction.toUpperCase()}` }));
     buildDataGridCountSql.mockResolvedValue("SELECT COUNT(*) FROM `users`");
@@ -113,6 +116,10 @@ describe("queryStore hidden primary key editing", () => {
         execution_time_ms: 1,
       },
     ]);
+  });
+
+  afterEach(() => {
+    expect(listObjects).not.toHaveBeenCalled();
   });
 
   it("executes and hides an omitted primary key while retaining its source mapping", async () => {
@@ -329,7 +336,10 @@ describe("queryStore hidden primary key editing", () => {
       { name: "ID", data_type: "NUMBER", is_nullable: false, column_default: null, is_primary_key: false, extra: null },
       { name: "PLATFORM", data_type: "VARCHAR2(100)", is_nullable: true, column_default: null, is_primary_key: false, extra: null },
     ]);
-    listObjects.mockResolvedValue([{ name: "TT_PLATFORM_CARS", object_type: "TABLE", schema: "SH_SMCVDMS_OVERSEAS_DRSSITB" }]);
+    lookupLocalCompletionTables.mockReturnValue([
+      { name: "TT_PLATFORM_CARS", type: "view", schema: "REPORTING" },
+      { name: "TT_PLATFORM_CARS", type: "table", schema: "SH_SMCVDMS_OVERSEAS_DRSSITB" },
+    ]);
     analyzeEditableQueryEditability.mockImplementation(async (sql: string) => {
       const hidden = sql.includes("__DBX_PK_0");
       return {
@@ -364,6 +374,7 @@ describe("queryStore hidden primary key editing", () => {
     await store.executeTabSql(tabId, "SELECT t.* FROM SH_SMCVDMS_OVERSEAS_DRSSITB.TT_PLATFORM_CARS t WHERE t.PLATFORM = '轻卡'");
 
     expect(executeMulti).toHaveBeenCalledWith("oracle-1", "ORCL", "SELECT t.*, ROWIDTOCHAR(ROWID) AS \"__DBX_PK_0\" FROM SH_SMCVDMS_OVERSEAS_DRSSITB.TT_PLATFORM_CARS t WHERE t.PLATFORM = '轻卡'", undefined, expect.any(String), expect.objectContaining({ timeoutSecs: 30 }));
+    expect(lookupLocalCompletionTables).toHaveBeenCalledWith("oracle-1", "ORCL", "TT_PLATFORM_CARS", 20, "SH_SMCVDMS_OVERSEAS_DRSSITB", undefined);
     const tab = store.tabs.find((item) => item.id === tabId)!;
     expect(tab.result?.hidden_column_indexes).toEqual([2]);
     await vi.waitFor(() => expect(tab.querySourceColumns).toEqual(["ID", "PLATFORM", "__DBX_ROWID"]));
@@ -371,6 +382,53 @@ describe("queryStore hidden primary key editing", () => {
     expect(tab.queryAnalysis).toBeDefined();
     expect(tab.queryAnalysis?.allowInsert).not.toBe(false);
     expect(tab.queryEditabilityReason).toBeUndefined();
+  });
+
+  it("uses the configured current schema to keep an unqualified Oracle base-table query editable", async () => {
+    getConnectionConfig.mockReturnValue({ id: "oracle-1", name: "Oracle", db_type: "oracle", database: "ORCL", default_schema: "APP", query_timeout_secs: 30 });
+    getColumns.mockResolvedValue([
+      { name: "ID", data_type: "NUMBER", is_nullable: false, column_default: null, is_primary_key: false, extra: null },
+      { name: "NAME", data_type: "VARCHAR2(100)", is_nullable: true, column_default: null, is_primary_key: false, extra: null },
+    ]);
+    lookupLocalCompletionTables.mockReturnValue([
+      { name: "CUSTOMERS", type: "view", schema: "REPORTING" },
+      { name: "CUSTOMERS", type: "table", schema: "APP" },
+    ]);
+    analyzeEditableQueryEditability.mockImplementation(async (sql: string) => {
+      const hidden = sql.includes("__DBX_PK_0");
+      return {
+        editable: true,
+        analysis: {
+          schema: undefined,
+          tableName: "CUSTOMERS",
+          selectStar: !hidden,
+          columns: hidden
+            ? [
+                { star: true, sourceKey: "CUSTOMERS:0", resultName: "*", expression: "*" },
+                { resultName: "__DBX_PK_0", expression: "ROWIDTOCHAR(ROWID)" },
+              ]
+            : [],
+        },
+      };
+    });
+    executeMulti.mockResolvedValue([
+      {
+        columns: ["ID", "NAME", "__DBX_PK_0"],
+        rows: [[1, "Alice", "AAAPr9AAEAAAACXAAA"]],
+        affected_rows: 0,
+        execution_time_ms: 1,
+      },
+    ]);
+
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("oracle-1", "ORCL", "Query");
+
+    await store.executeTabSql(tabId, "SELECT * FROM CUSTOMERS");
+
+    expect(executeMulti).toHaveBeenCalledWith("oracle-1", "ORCL", 'SELECT CUSTOMERS.*, ROWIDTOCHAR(ROWID) AS "__DBX_PK_0" FROM CUSTOMERS', undefined, expect.any(String), expect.objectContaining({ timeoutSecs: 30 }));
+    expect(lookupLocalCompletionTables).toHaveBeenCalledWith("oracle-1", "ORCL", "CUSTOMERS", 20, "APP", undefined);
+    expect(store.tabs.find((item) => item.id === tabId)?.result?.hidden_column_indexes).toEqual([2]);
   });
 
   it("does not check Oracle ROWID eligibility when query metadata returns no columns", async () => {
@@ -405,6 +463,44 @@ describe("queryStore hidden primary key editing", () => {
     expect(listIndexes).toHaveBeenCalledWith("oracle-1", "ORCL", "", "AA", undefined);
     expect(listObjects).not.toHaveBeenCalled();
     expect(executeMulti).toHaveBeenCalledWith("oracle-1", "ORCL", "SELECT * FROM aa", undefined, expect.any(String), expect.objectContaining({ timeoutSecs: 30 }));
+  });
+
+  it("executes an Oracle cache-miss query without waiting for object discovery", async () => {
+    getConnectionConfig.mockReturnValue({ id: "oracle-1", name: "Oracle", db_type: "oracle", database: "ncdb", query_timeout_secs: 30 });
+    getColumns.mockResolvedValue([
+      { name: "ID", data_type: "NUMBER", is_nullable: false, column_default: null, is_primary_key: false, extra: null },
+      { name: "PRODUCT_NAME", data_type: "VARCHAR2(100)", is_nullable: true, column_default: null, is_primary_key: false, extra: null },
+    ]);
+    listIndexes.mockResolvedValue([]);
+    listObjects.mockReturnValue(new Promise(() => undefined));
+    analyzeEditableQueryEditability.mockResolvedValue({
+      editable: true,
+      analysis: {
+        schema: undefined,
+        tableName: "VITF_PRODUCT_INFOOA",
+        selectStar: true,
+        columns: [],
+      },
+    });
+    executeMulti.mockResolvedValue([
+      {
+        columns: ["ID", "PRODUCT_NAME"],
+        rows: [],
+        affected_rows: 0,
+        execution_time_ms: 473,
+      },
+    ]);
+
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("oracle-1", "ncdb", "Query");
+    const sql = "SELECT * FROM VITF_PRODUCT_INFOOA WHERE PK_MATERIAL IN ('1', '2')";
+
+    const execution = store.executeTabSql(tabId, sql);
+    await vi.waitFor(() => expect(executeMulti).toHaveBeenCalledWith("oracle-1", "ncdb", sql, undefined, expect.any(String), expect.objectContaining({ timeoutSecs: 30 })), { timeout: 1000 });
+    await execution;
+
+    expect(lookupLocalCompletionTables).not.toHaveBeenCalled();
   });
 
   it("starts an Oracle primary-key star query before slow column metadata finishes", async () => {
@@ -452,7 +548,7 @@ describe("queryStore hidden primary key editing", () => {
       { name: "ID", data_type: "NUMBER", is_nullable: false, column_default: null, is_primary_key: false, extra: null },
       { name: "CUSTOMER_NO", data_type: "NUMBER", is_nullable: true, column_default: null, is_primary_key: false, extra: null },
     ]);
-    listObjects.mockResolvedValue([{ name: "PLATFORM_CARS", object_type: "TABLE", schema: "APP" }]);
+    lookupLocalCompletionTables.mockReturnValue([{ name: "PLATFORM_CARS", type: "table", schema: "APP" }]);
     analyzeEditableQueryEditability.mockImplementation(async (sql: string) => {
       const hidden = sql.includes("__DBX_PK_0");
       return {
@@ -510,7 +606,7 @@ describe("queryStore hidden primary key editing", () => {
       { name: "PLATFORM", data_type: "VARCHAR2(100)", is_nullable: true, column_default: null, is_primary_key: false, extra: null },
     ]);
     listIndexes.mockResolvedValue([]);
-    listObjects.mockResolvedValue([{ name: "PLATFORM_VIEW", object_type: "VIEW", schema: "APP" }]);
+    lookupLocalCompletionTables.mockReturnValue([{ name: "PLATFORM_VIEW", type: "view", schema: "APP" }]);
     analyzeEditableQueryEditability.mockResolvedValue({
       editable: true,
       analysis: {
@@ -532,12 +628,50 @@ describe("queryStore hidden primary key editing", () => {
     const store = useQueryStore();
     const tabId = store.createTab("oracle-1", "ORCL", "Query");
     const tab = store.tabs.find((item) => item.id === tabId)!;
-    tab.tableMeta = { schema: "APP", tableName: "PLATFORM_VIEW", tableType: "VIEW", columns: [], primaryKeys: [] };
 
     await store.executeTabSql(tabId, "SELECT * FROM APP.PLATFORM_VIEW");
 
     expect(executeMulti).toHaveBeenCalledWith("oracle-1", "ORCL", "SELECT * FROM APP.PLATFORM_VIEW", undefined, expect.any(String), expect.objectContaining({ timeoutSecs: 30 }));
+    expect(lookupLocalCompletionTables).toHaveBeenCalledWith("oracle-1", "ORCL", "PLATFORM_VIEW", 20, "APP", undefined);
     expect(tab.result?.hidden_column_indexes).toBeUndefined();
+  });
+
+  it.each([
+    ["only a foreign owner is cached", [{ name: "CUSTOMERS", type: "table", schema: "APP" }]],
+    [
+      "multiple owners are cached",
+      [
+        { name: "CUSTOMERS", type: "table", schema: "APP" },
+        { name: "CUSTOMERS", type: "table", schema: "REPORTING" },
+      ],
+    ],
+  ])("does not infer the current schema when %s", async (_caseName, cachedTables) => {
+    getConnectionConfig.mockReturnValue({ id: "oracle-1", name: "Oracle", db_type: "oracle", database: "ORCL", query_timeout_secs: 30 });
+    getColumns.mockResolvedValue([
+      { name: "ID", data_type: "NUMBER", is_nullable: false, column_default: null, is_primary_key: false, extra: null },
+      { name: "NAME", data_type: "VARCHAR2(100)", is_nullable: true, column_default: null, is_primary_key: false, extra: null },
+    ]);
+    lookupLocalCompletionTables.mockReturnValue(cachedTables);
+    analyzeEditableQueryEditability.mockResolvedValue({
+      editable: true,
+      analysis: {
+        schema: undefined,
+        tableName: "CUSTOMERS",
+        selectStar: true,
+        columns: [],
+      },
+    });
+    executeMulti.mockResolvedValue([{ columns: ["ID", "NAME"], rows: [[1, "Alice"]], affected_rows: 0, execution_time_ms: 1 }]);
+
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("oracle-1", "ORCL", "Query");
+
+    await store.executeTabSql(tabId, "SELECT * FROM CUSTOMERS");
+
+    expect(executeMulti).toHaveBeenCalledWith("oracle-1", "ORCL", "SELECT * FROM CUSTOMERS", undefined, expect.any(String), expect.objectContaining({ timeoutSecs: 30 }));
+    expect(lookupLocalCompletionTables).not.toHaveBeenCalled();
+    expect(store.tabs.find((item) => item.id === tabId)?.result?.hidden_column_indexes).toBeUndefined();
   });
 
   it("keeps hidden primary keys and editability after database sorting", async () => {

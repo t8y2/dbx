@@ -1348,7 +1348,7 @@ watch(driverStoreTab, (tab) => {
                   </SelectContent>
                 </Select>
               </div>
-              <Button variant="ghost" size="sm" class="h-7 rounded-md text-xs gap-1 text-muted-foreground" :disabled="agentImportBusy || installing !== null || upgradingAll || reinstallingJre !== null || queuedDriverInstalls.length > 0" @click="importOfflineZip">
+              <Button v-if="driverStoreTab === 'agent'" variant="ghost" size="sm" class="h-7 rounded-md text-xs gap-1 text-muted-foreground" :disabled="agentImportBusy || installing !== null || upgradingAll || reinstallingJre !== null || queuedDriverInstalls.length > 0" @click="importOfflineZip">
                 <Loader2 v-if="agentImportBusy" class="h-3.5 w-3.5 animate-spin" />
                 <FileUp v-else class="h-3.5 w-3.5" />
                 {{ agentImportBusy ? t("driverStore.importing") : t("driverStore.importOfflinePackage") }}
@@ -1744,7 +1744,7 @@ watch(driverStoreTab, (tab) => {
                   <Button v-else type="button" variant="default" class="rounded-md" :disabled="isInstallingJdbcPlugin" @click="installJdbcPlugin">
                     {{ isInstallingJdbcPlugin ? t("common.loading") : t("settings.jdbcPluginInstall") }}
                   </Button>
-                  <Button v-if="!jdbcPluginStatus?.installed" type="button" variant="outline" class="rounded-md" :disabled="isInstallingJdbcPlugin" @click="installJdbcPluginLocal">
+                  <Button type="button" variant="outline" class="rounded-md" :disabled="isInstallingJdbcPlugin || isUninstallingJdbcPlugin" @click="installJdbcPluginLocal">
                     <FolderOpen class="h-3.5 w-3.5 mr-1" />
                     {{ t("driverStore.localInstall") }}
                   </Button>

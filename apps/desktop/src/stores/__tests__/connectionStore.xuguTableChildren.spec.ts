@@ -42,6 +42,7 @@ async function setup(dbType: ConnectionConfig["db_type"], overrides: Record<stri
     listInstalledAgentsLocal: vi.fn().mockResolvedValue([{ db_type: "xugu", installed: true, installed_version: "0.1.23" }]),
     listPartitions: vi.fn().mockResolvedValue([]),
     listSubpartitions: vi.fn().mockResolvedValue([]),
+    listTriggers: vi.fn().mockResolvedValue([]),
     loadSchemaCache: vi.fn().mockResolvedValue(null),
     saveSchemaCache: vi.fn().mockResolvedValue(undefined),
     saveConnections: vi.fn().mockResolvedValue(undefined),
@@ -158,5 +159,46 @@ describe("connectionStore Xugu table child metadata", () => {
     expect(partitions.isLoading).toBe(false);
     expect(partitions.isExpanded).toBe(false);
     expect(partitions.children).toEqual([]);
+  });
+
+  it("shows Xugu trigger level and status without changing other database labels", async () => {
+    const trigger = {
+      name: "TR_EVENTS_ROW",
+      timing: "BEFORE",
+      event: "INSERT",
+      level: "FOR EACH ROW",
+      enabled: false,
+      valid: false,
+      condition: "NEW_VALUE >= 0",
+      language: "PL/SQL",
+      comment: "row audit trigger",
+      created_at: "2026-08-10 09:30:00",
+    };
+    const xugu = await setup("xugu", { listTriggers: vi.fn().mockResolvedValue([trigger]) });
+    const xuguGroup = findNode(xugu.store.treeNodes, `${xugu.tableId}:__triggers`)!;
+    await xugu.store.loadTreeNodeChildren(xuguGroup);
+
+    expect(xugu.api.listTriggers).toHaveBeenCalledWith(xugu.config.id, "SHOP_DEMO", "SYSDBA", "SHOP_ORDERS", undefined);
+    expect(xuguGroup.children?.[0]).toMatchObject({
+      type: "trigger",
+      label: "TR_EVENTS_ROW (BEFORE · INSERT · FOR EACH ROW · Disabled · Invalid)",
+      valid: false,
+      comment: "row audit trigger",
+      meta: trigger,
+    });
+
+    vi.resetModules();
+    setActivePinia(createPinia());
+    const postgres = await setup("postgres", { listTriggers: vi.fn().mockResolvedValue([trigger]) });
+    const postgresGroup = findNode(postgres.store.treeNodes, `${postgres.tableId}:__triggers`)!;
+    await postgres.store.loadTreeNodeChildren(postgresGroup);
+
+    expect(postgresGroup.children?.[0]).toMatchObject({
+      type: "trigger",
+      label: "TR_EVENTS_ROW (BEFORE INSERT)",
+      meta: trigger,
+    });
+    expect(postgresGroup.children?.[0]?.valid).toBeUndefined();
+    expect(postgresGroup.children?.[0]?.comment).toBeUndefined();
   });
 });

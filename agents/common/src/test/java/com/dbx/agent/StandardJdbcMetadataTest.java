@@ -419,11 +419,60 @@ class StandardJdbcMetadataTest {
             rows()
         );
 
-        List<IndexInfo> indexes = StandardJdbcMetadata.INSTANCE.listIndexes(conn, "APP", "ORDERS");
+        List<IndexInfo> indexes = StandardJdbcMetadata.INSTANCE.listIndexes(conn, profile, null, "APP", "ORDERS");
 
         assertEquals(1, indexes.size());
         assertEquals(Arrays.asList("A", "B"), indexes.get(0).getColumns());
         assertFalse(indexes.get(0).getIs_unique());
+    }
+
+    @Test
+    void listIndexesUsesConfiguredCatalogOnlyWhenProfileAllowsFallback() {
+        Connection enabledConn = catalogIndexFallbackConnection(
+            "TENANTDB",
+            rows(),
+            rows(row("INDEX_NAME", "IDX_ORDERS", "COLUMN_NAME", "ID", "ORDINAL_POSITION", (short) 1, "NON_UNIQUE", false))
+        );
+
+        List<IndexInfo> enabledIndexes = StandardJdbcMetadata.INSTANCE.listIndexes(
+            enabledConn,
+            profile,
+            "TENANTDB",
+            "APP",
+            "ORDERS"
+        );
+
+        assertEquals(1, enabledIndexes.size());
+
+        JdbcAgentProfile fallbackDisabledProfile = new JdbcAgentProfile(
+            "example.Driver",
+            "jdbc:example://{host}:{port}/{database}",
+            0,
+            false,
+            Collections.emptySet(),
+            Collections.singletonList("TABLE"),
+            "\"",
+            "SET SCHEMA",
+            false,
+            false,
+            false,
+            false
+        );
+        Connection disabledConn = catalogIndexFallbackConnection(
+            "TENANTDB",
+            rows(),
+            rows(row("INDEX_NAME", "IDX_ORDERS", "COLUMN_NAME", "ID", "ORDINAL_POSITION", (short) 1, "NON_UNIQUE", false))
+        );
+
+        List<IndexInfo> disabledIndexes = StandardJdbcMetadata.INSTANCE.listIndexes(
+            disabledConn,
+            fallbackDisabledProfile,
+            "TENANTDB",
+            "APP",
+            "ORDERS"
+        );
+
+        assertTrue(disabledIndexes.isEmpty());
     }
 
     @Test
@@ -661,6 +710,31 @@ class StandardJdbcMetadataTest {
                 }
                 if ("getCatalog".equals(method.getName())) {
                     return null;
+                }
+                return defaultValue(method.getReturnType());
+            }
+        });
+    }
+
+    private static Connection catalogIndexFallbackConnection(
+        String fallbackCatalog,
+        ResultSet defaultIndexes,
+        ResultSet fallbackIndexes
+    ) {
+        DatabaseMetaData meta = proxy(DatabaseMetaData.class, new MethodHandler() {
+            @Override
+            public Object handle(Method method, Object[] args) {
+                if ("getIndexInfo".equals(method.getName())) {
+                    return fallbackCatalog.equals(args[0]) ? fallbackIndexes : defaultIndexes;
+                }
+                return defaultValue(method.getReturnType());
+            }
+        });
+        return proxy(Connection.class, new MethodHandler() {
+            @Override
+            public Object handle(Method method, Object[] args) {
+                if ("getMetaData".equals(method.getName())) {
+                    return meta;
                 }
                 return defaultValue(method.getReturnType());
             }

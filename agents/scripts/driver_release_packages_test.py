@@ -41,6 +41,7 @@ class DriverReleasePackagesTest(unittest.TestCase):
                 "duckdb": "0.1.0",
                 "rabbitmq": "0.1.0",
                 "cassandra": "0.1.37",
+                "hive": "0.1.43",
                 "tdengine": "0.1.0",
             }
 
@@ -260,6 +261,21 @@ class DriverReleasePackagesTest(unittest.TestCase):
             self.assertEqual(renamed, [versioned])
             self.assertFalse(source.exists())
             self.assertEqual(versioned.read_bytes(), b"\x7fELFtest-iotdb-agent")
+
+    def test_versions_hive_native_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            release_dir = Path(temp_dir)
+            source = release_dir / "dbx-agent-hive-windows-x64.exe"
+            source.write_bytes(b"MZtest-hive-agent")
+            versions = {driver: "0.1.0" for driver in NATIVE_DRIVERS}
+            versions["hive"] = "0.1.44"
+
+            renamed = version_agent_artifacts(release_dir, versions)
+            versioned = release_dir / "dbx-agent-hive-0.1.44-windows-x64.exe"
+
+            self.assertEqual(renamed, [versioned])
+            self.assertFalse(source.exists())
+            self.assertEqual(versioned.read_bytes(), b"MZtest-hive-agent")
 
     def test_full_offline_bundle_includes_supported_windows_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

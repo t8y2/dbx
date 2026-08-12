@@ -71,6 +71,7 @@ import { canTreeNodePin, canTreeNodeShowExpander } from "@/lib/sidebar/sidebarTr
 import { sidebarConnectionVisibleFilterMenu } from "@/lib/sidebar/sidebarVisibleFilterMenu";
 import { objectTypesForGroupNode } from "@/lib/table/tableTree";
 import { loadSidebarObjectGroup } from "@/lib/sidebar/sidebarObjectGroupRouting";
+import { isXuguTypeMemberContainer } from "@/lib/sidebar/xuguTypeMembers";
 import { mysqlObjectTemplateForGroup } from "@/lib/sidebar/mysqlObjectTemplates";
 import { buildTableDeleteTemplate, buildTableInsertTemplate, buildTableSelectTemplate, buildTableUpdateTemplate } from "@/lib/table/tableSqlTemplates";
 import { driverStoreFocusForInstallError } from "@/lib/connection/agentDriverInstallHint";
@@ -82,6 +83,7 @@ import {
   editableDatabasePropertyGroups,
   supportsDatabaseCreation,
   supportsDatabaseSearch,
+  supportsConnectionDatabaseBrowser,
   supportsConnectionQueryActions,
   supportsFieldLineage,
   supportsObjectBrowserTreeNode,
@@ -91,10 +93,12 @@ import {
   supportsTableTruncate,
   supportsTableStructureEditing,
   supportsTransfer,
+  supportsPackageMemberExpansion,
   usesTreeSchemaMode,
   isSingleDatabase,
 } from "@/lib/database/databaseCapabilities";
-import { copyNameForTreeNode, isDirectNavigationTreeNode, isDocumentBrowserTreeNode, objectSourceKindForTreeNode, shouldRunTreeNodeRowAction, treeNodeRowAction, treeNodeRowDoubleClickAction } from "@/lib/sidebar/treeNodeClick";
+import { copyNameForTreeNode, isDirectNavigationTreeNode, isDocumentBrowserTreeNode, objectSourceTargetForTreeNode, shouldRunTreeNodeRowAction, treeNodeRowAction, treeNodeRowDoubleClickAction } from "@/lib/sidebar/treeNodeClick";
+import { customTypeCapabilities, supportsTypeObjectSource } from "@/lib/database/databaseObjectCapabilities";
 import { mongoCollectionTableTypeFromNode, mongoDropIndexFailureCount } from "@/lib/sidebar/mongoCollectionMutation";
 import { dataTabOpenModeFromTreeClick, type DataTabOpenMode } from "@/lib/sidebar/dataTabOpenPolicy";
 import { isCopySidebarSelectionShortcut, isEditSidebarConnectionShortcut, isPasteSidebarSelectionShortcut } from "@/lib/editor/keyboardShortcuts";
@@ -382,6 +386,7 @@ const {
   newSubgroup,
   confirmDeleteGroup,
   moveToGroup,
+  createGroupAndMoveConnection,
 } = useSidebarConnectionMutationRuntime({
   activeNode,
   releaseActiveNodeReference,
@@ -563,6 +568,9 @@ async function toggle() {
     }
     return;
   }
+  // PostgreSQL-family custom types without members (enum/domain/range/base) do
+  // not toggle; only composite types expand into their member list.
+  if (node.type === "type" && customTypeCapabilities(currentDatabaseType()).details && node.hasMembers === false) return;
   if (node.isLoading) {
     if (node.isExpanded) {
       node.isExpanded = false;
@@ -591,6 +599,12 @@ async function toggle() {
     return;
   }
 
+  if (node.type === "type" && customTypeCapabilities(currentDatabaseType()).details && node.children !== undefined) {
+    node.isExpanded = node.children.length > 0 ? !node.isExpanded : false;
+    emitNodeToggled(node, wasExpanded);
+    return;
+  }
+
   // Keep the click path aligned with every object-group definition. In
   // particular, schema-level trigger/type groups have no tableName, so they
   // must use the generic object loader rather than the table-trigger loader.
@@ -602,9 +616,21 @@ async function toggle() {
     return;
   }
 
+  if (node.type === "type-attributes" || node.type === "type-methods") {
+    node.isExpanded = !node.isExpanded;
+    emitNodeToggled(node, wasExpanded);
+    return;
+  }
+
   if (node.type === "group-extensions" && connectionStore.canUseLoadedTreeNodeToggle(node)) {
     node.isExpanded = !node.isExpanded;
     if (wasExpanded && !connectionStore.sidebarSearchQuery) connectionStore.releaseCollapsedTreeNodeChildren(node.id);
+    emitNodeToggled(node, wasExpanded);
+    return;
+  }
+
+  if (isXuguTypeMemberContainer(node, connectionStore.getConfig(node.connectionId || "")?.db_type)) {
+    await connectionStore.loadXuguTypeMembers(node);
     emitNodeToggled(node, wasExpanded);
     return;
   }
@@ -617,7 +643,19 @@ async function toggle() {
   }
 
   try {
+    if (node.type === "type" && customTypeCapabilities(currentDatabaseType()).details) {
+      await connectionStore.loadCustomTypeChildren(node);
+      emitNodeToggled(node, wasExpanded);
+      return;
+    }
+
     if (await loadSidebarObjectGroup(node, connectionStore)) {
+      emitNodeToggled(node, wasExpanded);
+      return;
+    }
+
+    if (node.type === "package" && node.connectionId && supportsPackageMemberExpansion(currentDatabaseType())) {
+      await connectionStore.loadPackageMembers(node);
       emitNodeToggled(node, wasExpanded);
       return;
     }
@@ -789,7 +827,7 @@ function runRowClickAction(clickDetail: number) {
     openMongoTreeData(node);
     return;
   }
-  const action = treeNodeRowAction(node.type, canExpand.value, settingsStore.editorSettings.sidebarActivation);
+  const action = treeNodeRowAction(node.type, canExpand.value, settingsStore.editorSettings.sidebarActivation, currentDatabaseType());
   if (!shouldRunTreeNodeRowAction(action, clickDetail, isGroupLabel(node))) return;
   if (action === "open-data") {
     scheduleOpenData(node);
@@ -1098,8 +1136,10 @@ function requestDeleteSelectedNode(): boolean {
 
 function onDoubleClick(event: MouseEvent) {
   if (dataTabOpenModeFromTreeClick(activeNode.value.type, event, settingsStore.editorSettings.shortcuts.openDataInNewTab) === "new-tab") return;
-  const action = treeNodeRowDoubleClickAction(activeNode.value.type, canOpenObjectBrowser.value, settingsStore.editorSettings.sidebarActivation, canExpand.value);
-  if (action === "open-object-browser") {
+  const action = treeNodeRowDoubleClickAction(activeNode.value.type, canOpenObjectBrowser.value, settingsStore.editorSettings.sidebarActivation, canExpand.value, currentDatabaseType(), canOpenConnectionDatabaseBrowser.value);
+  if (action === "open-database-browser") {
+    void openDatabaseBrowser();
+  } else if (action === "open-object-browser") {
     void openObjectBrowser();
   } else if (action === "open-object-browser-and-expand") {
     void openObjectBrowser();
@@ -1200,6 +1240,19 @@ async function openObjectBrowser() {
     } else {
       await toggle();
     }
+  } catch (e: any) {
+    toast(t("connection.connectFailed", { message: translateBackendError(t, e) }), 5000);
+    openDriverStoreForInstallError(e?.message || String(e));
+  }
+}
+
+async function openDatabaseBrowser() {
+  const node = activeNode.value;
+  if (node.type !== "connection" || !node.connectionId) return;
+  try {
+    await connectionStore.ensureConnected(node.connectionId);
+    connectionStore.activeConnectionId = node.connectionId;
+    queryStore.openDatabaseBrowser(node.connectionId);
   } catch (e: any) {
     toast(t("connection.connectFailed", { message: translateBackendError(t, e) }), 5000);
     openDriverStoreForInstallError(e?.message || String(e));
@@ -1492,6 +1545,28 @@ async function copyName() {
   }
 }
 
+async function copyCustomTypeDdl() {
+  const node = createSidebarActionTarget(activeNode.value);
+  if (!node.connectionId || !node.database) return;
+  try {
+    await connectionStore.ensureConnected(node.connectionId);
+    const details = await api.getCustomTypeDetails(node.connectionId, node.database, node.schema || node.database, node.objectName || node.label);
+    const sql = details.ddl?.sql?.trim();
+    if (!sql) {
+      toast(t("customType.ddl.empty"), 3000);
+      return;
+    }
+    if (!details.ddl?.complete) {
+      toast(t("customType.ddl.incomplete"), 5000);
+      return;
+    }
+    await copyToClipboard(sql);
+    toast(t("contextMenu.ddlCopied"), 2000);
+  } catch (error: any) {
+    toast(t("grid.copyFailed", { message: translateBackendError(t, error) }), 5000);
+  }
+}
+
 async function copySelectedNames() {
   const selectedNodes = selectedTreeNodesInVisibleOrder();
   const nodes = selectedNodes.length > 1 && selectedNodes.some((node) => node.id === activeNode.value.id) ? selectedNodes : [activeNode.value];
@@ -1669,23 +1744,28 @@ async function refreshDropTableChildObjectPreviewSql() {
   dropTableChildObjectPreviewSql.value = options ? await buildDropTableChildObjectSql(options).catch(() => "") : "";
 }
 
-function openObjectSourceDialog(initialEditing: boolean) {
+function openObjectSourceDialog(initialEditing: boolean, viewPackageBody = false) {
   const node = activeNode.value;
   if (!node.connectionId || !node.database) return;
+  if (viewPackageBody && (node.type !== "package" || node.xuguPackageBodyAvailable !== true || currentDatabaseType() !== "xugu")) return;
+  const sourceNode: TreeNode = viewPackageBody ? { ...node, type: "package-body" } : node;
+  // TYPE/TYPE_BODY only have a source implementation on Xugu; PostgreSQL-family
+  // connections list user-defined types without a CREATE TYPE getter this cycle.
+  if ((sourceNode.type === "type" || sourceNode.type === "type-body") && !supportsTypeObjectSource(currentDatabaseType())) return;
   const connectionId = node.connectionId;
   const database = node.database;
-  const objectType = objectSourceKindForTreeNode(node.type);
-  if (!objectType) return;
+  const sourceTarget = objectSourceTargetForTreeNode(sourceNode);
+  if (!sourceTarget) return;
   const openMode = settingsStore.editorSettings.routineSourceOpenMode;
   if (openMode === "query-tab") {
     void connectionStore
       .ensureConnected(connectionId)
       .then(async () => {
         connectionStore.activeConnectionId = connectionId;
-        const schema = node.schema || database;
+        const schema = sourceTarget.schema || database;
         const databaseType = effectiveDatabaseTypeForConnection(connectionStore.getConfig(connectionId));
         if (!databaseType) throw new Error("Connection type is unavailable.");
-        const objectName = node.objectName || node.label;
+        const objectName = sourceTarget.name;
         const {
           raw,
           editableSource,
@@ -1695,9 +1775,9 @@ function openObjectSourceDialog(initialEditing: boolean) {
           database,
           schema,
           name: objectName,
-          objectType: objectType as any,
+          objectType: sourceTarget.objectType as any,
           databaseType,
-          signature: node.signature,
+          signature: sourceNode.signature,
         });
         const tabId = queryStore.createTab(connectionId, database, `Source - ${node.label}`, "query", schema, editableSource, node.catalog, { forceNew: true });
         const sourceIsEditable = raw.editable !== false && !["SEQUENCE", "TRIGGER", "TYPE", "TYPE_BODY"].includes(resolvedType);
@@ -1719,7 +1799,7 @@ function openObjectSourceDialog(initialEditing: boolean) {
     .ensureConnected(connectionId)
     .then(() => {
       connectionStore.activeConnectionId = connectionId;
-      emit("open-object-source", node, initialEditing);
+      emit("open-object-source", sourceNode, initialEditing);
     })
     .catch((e: any) => {
       toast(e?.message || String(e), 5000);
@@ -3394,12 +3474,16 @@ function createMysqlObjectTemplate() {
   queryStore.updateSql(tabId, template.sql);
 }
 
-const canExpand = computed(() =>
-  canTreeNodeShowExpander({
+const canExpand = computed(() => {
+  if (activeNode.value.type === "type" && customTypeCapabilities(currentDatabaseType()).details) {
+    return activeNode.value.hasMembers === true;
+  }
+  return canTreeNodeShowExpander({
     type: activeNode.value.type,
     childCount: activeNode.value.children?.length ?? 0,
-  }),
-);
+    explicitContainer: activeNode.value.xuguTypeMembersExpandable === true,
+  });
+});
 
 const canPin = computed(() => canTreeNodePin(activeNode.value.type));
 
@@ -3423,6 +3507,10 @@ const canOpenDatabaseSearch = computed(() => {
 
 const canOpenObjectBrowser = computed(() => {
   return supportsObjectBrowserTreeNode(rawDatabaseType(), activeNode.value.type);
+});
+
+const canOpenConnectionDatabaseBrowser = computed(() => {
+  return activeNode.value.type === "connection" && supportsConnectionDatabaseBrowser(rawDatabaseType());
 });
 
 const canOpenTableImport = computed(() => {
@@ -3734,12 +3822,7 @@ function moveToNewGroup() {
 }
 
 function confirmMoveToNewGroup() {
-  const name = moveToNewGroupName.value.trim();
-  const node = sidebarFormTarget.value ?? activeNode.value;
-  if (name && node.connectionId) {
-    const groupId = connectionStore.createConnectionGroup(name);
-    connectionStore.moveConnectionToGroup(node.connectionId, groupId);
-  }
+  createGroupAndMoveConnection(moveToNewGroupName.value);
   showMoveToNewGroupDialog.value = false;
 }
 
@@ -4044,6 +4127,9 @@ function buildConnectionSidebarMenu(context: SidebarMenuFactoryContext): boolean
     const supportsQueryActions = supportsConnectionQueryActions(currentDatabaseType());
     if (supportsQueryActions) {
       items.push({ label: t("contextMenu.newQuery"), action: newQuery, icon: TerminalSquare });
+    }
+    if (canOpenConnectionDatabaseBrowser.value) {
+      items.push({ label: t("contextMenu.openDatabaseBrowser"), action: openDatabaseBrowser, icon: TableProperties });
     }
     if (currentDatabaseType() === "redis") {
       items.push({ label: t("contextMenu.instanceInfo"), action: openRedisInstanceInfo, icon: Info });
@@ -4649,14 +4735,15 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
 
   // 8. Procedure / Function / Package
   if (node.type === "procedure" || node.type === "function") {
-    if (node.type === "procedure") {
+    const isPackageMember = node.parentType === "package" && !!node.parentName;
+    if (node.type === "procedure" && !isPackageMember) {
       items.push({ label: t("contextMenu.executeProcedure"), action: openProcedureExecution, icon: Play });
     }
-    if (currentDatabaseType() === "xugu" && buildXuguCompileSql({ objectType: node.type, schema: node.schema, name: node.objectName || node.label })) {
+    if (!isPackageMember && currentDatabaseType() === "xugu" && buildXuguCompileSql({ objectType: node.type, schema: node.schema, name: node.objectName || node.label })) {
       items.push({ label: t("contextMenu.compileObject"), action: compileXuguObject, icon: Wrench });
     }
     items.push({ label: t("contextMenu.viewSource"), action: () => openObjectSourceDialog(false), icon: Code2 });
-    if (canRenameObject.value) {
+    if (!isPackageMember && canRenameObject.value) {
       items.push({
         label: t("contextMenu.renameObject"),
         action: openRenameObjectDialog,
@@ -4666,14 +4753,16 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
     }
     items.push({ label: "", separator: true });
     items.push({ label: t("contextMenu.changeOpenMode"), action: () => emit("open-settings", "navigation"), icon: Settings2 });
-    items.push({ label: "", separator: true });
-    items.push({
-      label: deleteMenuLabel(node.type === "procedure" ? t("contextMenu.dropProcedure") : t("contextMenu.dropFunction")),
-      action: deleteMenuAction(requestDropObject),
-      icon: Trash2,
-      shortcut: shortcutDelete,
-      variant: "destructive" as const,
-    });
+    if (!isPackageMember) {
+      items.push({ label: "", separator: true });
+      items.push({
+        label: deleteMenuLabel(node.type === "procedure" ? t("contextMenu.dropProcedure") : t("contextMenu.dropFunction")),
+        action: deleteMenuAction(requestDropObject),
+        icon: Trash2,
+        shortcut: shortcutDelete,
+        variant: "destructive" as const,
+      });
+    }
     return true;
   }
 
@@ -4684,13 +4773,37 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
     return true;
   }
 
-  if (node.type === "trigger" || node.type === "package" || node.type === "package-body" || node.type === "type" || node.type === "type-body") {
+  if (node.type === "trigger" || node.type === "package" || node.type === "package-body") {
     if (currentDatabaseType() === "xugu" && buildXuguCompileSql({ objectType: node.type, schema: node.schema, name: node.objectName || node.label })) {
       items.push({ label: t("contextMenu.compileObject"), action: compileXuguObject, icon: Wrench });
     }
     items.push({ label: t("contextMenu.viewSource"), action: () => openObjectSourceDialog(false), icon: Code2 });
+    if (node.type === "package" && currentDatabaseType() === "xugu" && node.xuguPackageBodyAvailable === true) {
+      items.push({
+        label: `${t("contextMenu.viewSource")} (${t("objects.packageBody")})`,
+        action: () => openObjectSourceDialog(false, true),
+        icon: Code2,
+      });
+    }
     items.push({ label: t("contextMenu.copyName"), action: copyName, icon: Copy, shortcut: shortcutCopyName.value });
     items.push({ label: t("contextMenu.changeOpenMode"), action: () => emit("open-settings", "navigation"), icon: Settings2 });
+    return true;
+  }
+
+  // PostgreSQL-family types expand in the tree and expose DDL as a lightweight
+  // copy action. Xugu keeps its source/change-open-mode entries.
+  if (node.type === "type" || node.type === "type-body") {
+    if (supportsTypeObjectSource(currentDatabaseType())) {
+      items.push({ label: t("contextMenu.viewSource"), action: () => openObjectSourceDialog(false), icon: Code2 });
+      items.push({ label: t("contextMenu.copyName"), action: copyName, icon: Copy, shortcut: shortcutCopyName.value });
+      items.push({ label: t("contextMenu.changeOpenMode"), action: () => emit("open-settings", "navigation"), icon: Settings2 });
+      return true;
+    }
+    if (customTypeCapabilities(currentDatabaseType()).details) {
+      items.push({ label: t("contextMenu.copyDdl"), action: copyCustomTypeDdl, icon: Copy });
+      items.push({ label: "", separator: true });
+    }
+    items.push({ label: t("contextMenu.copyName"), action: copyName, icon: Copy, shortcut: shortcutCopyName.value });
     return true;
   }
   return false;

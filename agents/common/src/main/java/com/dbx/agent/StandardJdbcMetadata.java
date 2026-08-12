@@ -207,12 +207,28 @@ public final class StandardJdbcMetadata {
         });
     }
 
-    public List<IndexInfo> listIndexes(Connection conn, String schema, String table) {
+    public List<IndexInfo> listIndexes(
+        Connection conn,
+        JdbcAgentProfile profile,
+        String configuredDatabase,
+        String schema,
+        String table
+    ) {
+        return unchecked(() -> {
+            List<IndexInfo> result = listIndexesInternal(conn, null, schema, table);
+            if (result.isEmpty() && profile.getCatalogFallbackEnabled() && hasConfiguredDatabase(configuredDatabase)) {
+                result = listIndexesInternal(conn, configuredDatabase, schema, table);
+            }
+            return result;
+        });
+    }
+
+    private List<IndexInfo> listIndexesInternal(Connection conn, String catalog, String schema, String table) {
         return unchecked(() -> {
             DatabaseMetaData meta = conn.getMetaData();
             Map<String, List<IndexColumn>> indexes = new LinkedHashMap<>();
             Map<String, Boolean> unique = new LinkedHashMap<>();
-            try (ResultSet rs = meta.getIndexInfo(null, blankToNull(schema), table, false, false)) {
+            try (ResultSet rs = meta.getIndexInfo(blankToNull(catalog), blankToNull(schema), table, false, false)) {
                 while (rs.next()) {
                     String name = rs.getString("INDEX_NAME");
                     String column = rs.getString("COLUMN_NAME");

@@ -646,13 +646,13 @@ fn safe_excel_number(value: &str) -> Option<&str> {
     if trimmed.is_empty() || trimmed.parse::<f64>().ok().is_none_or(|number| !number.is_finite()) {
         return None;
     }
-    // Excel stores numbers with at most 15 significant decimal digits. Keep
-    // higher-precision database values as text rather than silently rounding.
-    let significant_digits = trimmed
-        .split(['e', 'E'])
-        .next()
-        .unwrap_or(trimmed)
+    // Fractional trailing zeros preserve database scale but add no numeric
+    // precision. Keep values with more than 15 actual digits as text.
+    let significand = trimmed.split(['e', 'E']).next().unwrap_or(trimmed);
+    let (integer, fraction) = significand.split_once('.').unwrap_or((significand, ""));
+    let significant_digits = integer
         .chars()
+        .chain(fraction.trim_end_matches('0').chars())
         .filter(|ch| ch.is_ascii_digit())
         .skip_while(|ch| *ch == '0')
         .count();
@@ -1139,6 +1139,41 @@ mod tests {
         assert!(sheet.contains("<c r=\"A2\" s=\"5\"><v>1.00000</v></c>"));
         assert!(sheet.contains("<c r=\"B2\" s=\"5\"><v>2800.000000</v></c>"));
         assert!(sheet.contains("<c r=\"C2\" t=\"inlineStr\"><is><t>00123</t></is></c>"));
+    }
+
+    #[test]
+    fn ignores_fractional_trailing_zeros_when_checking_excel_numeric_precision() {
+        let workbook = build_xlsx_workbook(&XlsxWorksheetData {
+            sheet_name: Some("Numeric precision".to_string()),
+            columns: vec![
+                "reported".to_string(),
+                "negative_boundary".to_string(),
+                "safe_boundary".to_string(),
+                "unsafe_integer".to_string(),
+                "precise_fraction".to_string(),
+                "fallback".to_string(),
+            ],
+            column_types: vec!["numeric".to_string(); 6],
+            column_comments: vec![],
+            rows: vec![vec![
+                json!("-100000.0000000000"),
+                json!("-999999999999999.0000"),
+                json!("123456789012345.0000000000"),
+                json!("1234567890123456.0000"),
+                json!("100000.0000000001"),
+                json!("not-a-number"),
+            ]],
+            numeric_column_right_align: true,
+        })
+        .expect("build workbook");
+
+        let sheet = read_zip_entry(&workbook, "xl/worksheets/sheet1.xml");
+        assert!(sheet.contains("<c r=\"A2\" s=\"4\"><v>-100000.0000000000</v></c>"));
+        assert!(sheet.contains("<c r=\"B2\" s=\"4\"><v>-999999999999999.0000</v></c>"));
+        assert!(sheet.contains("<c r=\"C2\" s=\"4\"><v>123456789012345.0000000000</v></c>"));
+        assert!(sheet.contains("<c r=\"D2\" t=\"inlineStr\" s=\"4\"><is><t>1234567890123456.0000</t></is></c>"));
+        assert!(sheet.contains("<c r=\"E2\" t=\"inlineStr\" s=\"4\"><is><t>100000.0000000001</t></is></c>"));
+        assert!(sheet.contains("<c r=\"F2\" t=\"inlineStr\" s=\"4\"><is><t>not-a-number</t></is></c>"));
     }
 
     #[test]

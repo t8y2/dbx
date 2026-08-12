@@ -19,6 +19,7 @@ import {
   type DataGridExtractWarningCode,
 } from "@/lib/dataGrid/dataGridCopyExtractor";
 import type { DataGridTableMeta } from "@/lib/dataGrid/dataGridSql";
+import { formatError } from "@/lib/backend/errorUtils";
 import type { DatabaseType } from "@/types/database";
 
 interface ExtractorRowItem {
@@ -245,7 +246,7 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
       showWarnings(result.warnings, result.omittedColumns);
       return true;
     } catch (error: unknown) {
-      toast(t("grid.copyFailed", { message: errorMessage(error) }), 5000);
+      toast(t("grid.copyFailed", { message: formatError(error) }), 5000);
       return false;
     }
   }
@@ -293,10 +294,6 @@ function compactTableMeta(tableMeta: DataGridTableMeta | undefined, requiredColu
   if (!tableMeta?.columns) return tableMeta;
   const requiredNames = new Set(requiredColumns.map(normalizeName));
   return { ...tableMeta, columns: tableMeta.columns.filter((column) => requiredNames.has(normalizeName(column.name))) };
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }
 
 function normalizeName(name: string): string {

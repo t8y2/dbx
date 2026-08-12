@@ -11,6 +11,10 @@ const backend = vi.hoisted(() => ({
   documentDeleteDocument: vi.fn(),
 }));
 
+const documentJsonEditor = vi.hoisted(() => ({
+  openSearch: vi.fn().mockReturnValue(true),
+}));
+
 const settings = vi.hoisted(() => ({
   editorSettings: {
     pageSize: 100,
@@ -101,6 +105,24 @@ vi.mock("@/components/grid/DataGrid.vue", async () => {
               }),
             ],
           );
+      },
+    }),
+  };
+});
+
+vi.mock("@/components/redis/RedisJsonEditor.vue", async () => {
+  const { defineComponent, h } = await import("vue");
+  return {
+    default: defineComponent({
+      props: {
+        modelValue: { type: String, required: true },
+        readOnly: { type: Boolean, default: false },
+        lineNumbers: { type: Boolean, default: true },
+        presentation: { type: String, default: "editor" },
+      },
+      setup(props, { expose }) {
+        expose({ openSearch: documentJsonEditor.openSearch });
+        return () => h("div", { "data-redis-json-editor-stub": "", "data-read-only": String(props.readOnly), "data-line-numbers": String(props.lineNumbers), "data-presentation": props.presentation }, [h("div", { class: "cm-line" }, h("span", { class: "json-string" }, props.modelValue))]);
       },
     }),
   };
@@ -236,6 +258,7 @@ beforeEach(async () => {
   backend.cancelQuery.mockReset();
   backend.ensureConnected.mockReset();
   backend.documentDeleteDocument.mockReset();
+  documentJsonEditor.openSearch.mockClear();
   backend.documentDeleteDocument.mockResolvedValue(undefined);
   settings.editorSettings.mongoViewMode = "table";
   settings.editorSettings.columnWidthDensity = "standard";
@@ -532,7 +555,7 @@ describe("DocumentBrowser MongoDB filter value types", () => {
       collection: "typed_ids",
       databaseType: "mongodb",
     });
-    app.mount(root!);
+    const documentBrowser = app.mount(root!) as unknown as { focusSearch: () => boolean };
     await flushUi();
 
     const documentRow = [...root!.querySelectorAll<HTMLElement>(".group")].find((element) => element.textContent?.includes("document-1"))!;
@@ -540,7 +563,7 @@ describe("DocumentBrowser MongoDB filter value types", () => {
     await flushUi();
 
     const viewer = root!.querySelector<HTMLElement>("[data-document-json-viewer]")!;
-    const jsonText = viewer.querySelector<HTMLElement>(".json-string")!;
+    const jsonText = viewer.querySelector<HTMLElement>(".cm-line .json-string")!;
     const documentId = root!.querySelector<HTMLInputElement>('input[aria-label^="_id:"]')!;
     expect(root!.firstElementChild?.classList.contains("select-none")).toBe(true);
     expect(documentId.readOnly).toBe(true);
@@ -550,7 +573,9 @@ describe("DocumentBrowser MongoDB filter value types", () => {
     expect(documentIdBadge).not.toBeNull();
     expect(documentIdBadge?.classList.contains("rounded")).toBe(true);
     expect(documentIdBadge?.classList.contains("rounded-4xl")).toBe(false);
-    expect(viewer.querySelector(".json-viewer")?.classList.contains("select-text")).toBe(true);
+    expect(viewer.querySelector<HTMLElement>("[data-redis-json-editor-stub]")?.dataset.readOnly).toBe("true");
+    expect(viewer.querySelector<HTMLElement>("[data-redis-json-editor-stub]")?.dataset.lineNumbers).toBe("false");
+    expect(viewer.querySelector<HTMLElement>("[data-redis-json-editor-stub]")?.dataset.presentation).toBe("viewer");
 
     documentId.setSelectionRange(0, documentId.value.length);
     expect(documentId.selectionStart).toBe(0);
@@ -560,6 +585,10 @@ describe("DocumentBrowser MongoDB filter value types", () => {
     jsonText.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
     await flushUi();
     expect(buttonWithText("mongo.edit")).toBeDefined();
+
+    viewer.dispatchEvent(new Event("pointerdown", { bubbles: true }));
+    expect(documentBrowser.focusSearch()).toBe(true);
+    expect(documentJsonEditor.openSearch).toHaveBeenCalledOnce();
 
     viewer.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
     await flushUi();

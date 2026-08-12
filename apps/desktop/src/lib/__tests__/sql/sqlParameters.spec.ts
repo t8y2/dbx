@@ -43,6 +43,51 @@ describe("extractSqlParameters", () => {
     expect(extractSqlParameters(sql)).toEqual(["?1", "named", "shell_name", "mybatis_name", "sql_server_name"]);
   });
 
+  it("preserves PostgreSQL JSON question-mark operators", () => {
+    const sql = `
+      select
+        c."CallResult",
+        c."CallResult" -> 'data' ? 'callingResults' as "HasResult",
+        c."CallResult" ?| array['data', 'error'] as "HasAnyResult",
+        c."CallResult" ?& array['data', 'callingResults'] as "HasAllResults",
+        c."CallResult" @? '$.data.callingResults' as "MatchesPath"
+      from "FaultResultCallInfo" as c
+    `;
+
+    expect(extractSqlParameters(sql, { databaseType: "postgres" })).toEqual([]);
+    expect(substituteSqlParameters(sql, {}, { databaseType: "postgres" })).toBe(sql);
+  });
+
+  it("keeps PostgreSQL positional placeholders around JSON operators", () => {
+    const sql = "select ? as input_value from events where id = ? and payload ? ? and payload ?| ? and payload ?& ? limit ?";
+
+    expect(extractSqlParameters(sql, { databaseType: "postgres" })).toEqual(["?1", "?2", "?3", "?4", "?5", "?6"]);
+    expect(
+      substituteSqlParameters(
+        sql,
+        {
+          "?1": { kind: "number", value: "1" },
+          "?2": { kind: "number", value: "2" },
+          "?3": { kind: "string", value: "callingResults" },
+          "?4": { kind: "raw", value: "ARRAY['data', 'error']" },
+          "?5": { kind: "raw", value: "ARRAY['data', 'callingResults']" },
+          "?6": { kind: "number", value: "100" },
+        },
+        { databaseType: "postgres" },
+      ),
+    ).toBe("select 1 as input_value from events where id = 2 and payload ? 'callingResults' and payload ?| ARRAY['data', 'error'] and payload ?& ARRAY['data', 'callingResults'] limit 100");
+  });
+
+  it("keeps ordinary PostgreSQL positional placeholder contexts", () => {
+    const sql = "select ?::jsonb, coalesce(?, '{}'::jsonb) from events where ? = id order by ? limit ? offset ?";
+
+    expect(extractSqlParameters(sql, { databaseType: "postgres" })).toEqual(["?1", "?2", "?3", "?4", "?5", "?6"]);
+  });
+
+  it("keeps question marks as positional placeholders for other databases", () => {
+    expect(extractSqlParameters("select payload ? 'callingResults' from events", { databaseType: "mysql" })).toEqual(["?1"]);
+  });
+
   it("ignores npm scoped packages in JDBCX MCP command arguments", () => {
     const sql = '{{ mcp(cmd=npx, args=-y @modelcontextprotocol/server-everything, tool=echo): {"message":"hello"} }}';
     expect(extractSqlParameters(sql)).toEqual([]);

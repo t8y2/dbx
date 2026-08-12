@@ -1651,6 +1651,21 @@ pub async fn insert_document(
     Ok(format!("{}", result.inserted_id))
 }
 
+/// Inserts a document from canonical Extended JSON without interpreting
+/// Mongo shell-like strings such as `ISODate(...)`.
+pub async fn insert_document_extended_json(
+    client: &Client,
+    database: &str,
+    collection: &str,
+    doc_json: &str,
+) -> Result<String, String> {
+    let value: serde_json::Value = serde_json::from_str(doc_json).map_err(|e| format!("Invalid JSON: {e}"))?;
+    let doc = json_object_to_document_extended_json(&value).map_err(|e| format!("Invalid document: {e}"))?;
+    let col = client.database(database).collection::<Document>(collection);
+    let result = col.insert_one(doc).await.map_err(|e| e.to_string())?;
+    Ok(format!("{}", result.inserted_id))
+}
+
 pub async fn insert_documents(
     client: &Client,
     database: &str,
@@ -3490,6 +3505,21 @@ mod tests {
         assert!(matches!(doc.get("_id"), Some(Bson::ObjectId(oid)) if oid.to_hex() == "507f1f77bcf86cd799439011"));
         assert!(matches!(doc.get("created_at"), Some(Bson::DateTime(_))));
         assert!(matches!(doc.get("count"), Some(Bson::Int64(42))));
+    }
+
+    #[test]
+    fn json_object_to_document_extended_json_keeps_shell_date_strings_literal() {
+        let value = serde_json::json!({
+            "date_text": "ISODate(\"2026-08-10T00:00:00.000Z\")",
+            "actual_date": { "$date": "2026-08-10T00:00:00.000Z" },
+        });
+        let doc = json_object_to_document_extended_json(&value).unwrap();
+
+        assert!(matches!(
+            doc.get("date_text"),
+            Some(Bson::String(value)) if value == "ISODate(\"2026-08-10T00:00:00.000Z\")"
+        ));
+        assert!(matches!(doc.get("actual_date"), Some(Bson::DateTime(_))));
     }
 
     #[test]

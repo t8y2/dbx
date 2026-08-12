@@ -1369,6 +1369,20 @@ pub fn prepare_sql_file_statement(
     driver_profile: Option<&str>,
 ) -> SqlFileStatementAction {
     let statement = statement.trim();
+    let postgres_statement =
+        (*db_type == DatabaseType::Postgres).then(|| strip_postgres_pg_dump_guard_command(statement)).flatten();
+    let statement = postgres_statement.as_deref().unwrap_or(statement).trim();
+    if statement.is_empty()
+        || (*db_type == DatabaseType::Postgres
+            && postgres_statement.is_some()
+            && !has_executable_sql_with_options(
+                statement,
+                SqlParsingOptions::for_database_type(DatabaseType::Postgres),
+            ))
+    {
+        return SqlFileStatementAction::Skip;
+    }
+
     let is_mysql_compatible_target = is_mysql_compatible_import_target(db_type, driver_profile);
     if is_mysql_compatible_target && is_mysql_lock_table_statement(statement) {
         return SqlFileStatementAction::Skip;
@@ -1391,6 +1405,37 @@ pub fn prepare_sql_file_statement(
     }
 
     SqlFileStatementAction::Execute(body.to_string())
+}
+
+fn strip_postgres_pg_dump_guard_command(statement: &str) -> Option<String> {
+    let executable =
+        leading_executable_sql_with_options(statement, SqlParsingOptions::for_database_type(DatabaseType::Postgres));
+    let line_end = executable.find('\n').unwrap_or(executable.len());
+    if !is_postgres_pg_dump_guard_command(&executable[..line_end]) {
+        return None;
+    }
+
+    let prefix_len = statement.len() - executable.len();
+    let suffix_start = prefix_len + line_end + usize::from(line_end < executable.len());
+    let mut prepared = String::with_capacity(statement.len());
+    prepared.push_str(&statement[..prefix_len]);
+    prepared.push_str(&statement[suffix_start..]);
+    Some(prepared)
+}
+
+fn is_postgres_pg_dump_guard_command(line: &str) -> bool {
+    let mut parts = line.split_whitespace();
+    let Some(command) = parts.next() else {
+        return false;
+    };
+    if !matches!(command, "\\restrict" | "\\unrestrict") {
+        return false;
+    }
+
+    let Some(key) = parts.next() else {
+        return false;
+    };
+    parts.next().is_none() && key.bytes().all(|byte| byte.is_ascii_alphanumeric())
 }
 
 pub fn optimize_sql_file_import_statements(
@@ -2822,6 +2867,42 @@ mod tests {
                 None
             ),
             SqlFileStatementAction::Skip
+        );
+    }
+
+    #[test]
+    fn prepares_postgres_pg_dump_restrict_guard_with_following_sql() {
+        assert_eq!(
+            prepare_sql_file_statement(
+                "-- PostgreSQL database dump\n\n\\restrict PreICrqH3VX69RwvK06tauVFPoZ3tThfV0y2zIFL2uSfhfNPSu1pWtu1QTudUAc\n\nSET statement_timeout = 0",
+                &DatabaseType::Postgres,
+                None
+            ),
+            SqlFileStatementAction::Execute("-- PostgreSQL database dump\n\n\nSET statement_timeout = 0".to_string())
+        );
+    }
+
+    #[test]
+    fn skips_standalone_postgres_pg_dump_unrestrict_guard() {
+        assert_eq!(
+            prepare_sql_file_statement(
+                "--\n-- PostgreSQL database dump complete\n--\n\n\\unrestrict PreICrqH3VX69RwvK06tauVFPoZ3tThfV0y2zIFL2uSfhfNPSu1pWtu1QTudUAc",
+                &DatabaseType::Postgres,
+                None
+            ),
+            SqlFileStatementAction::Skip
+        );
+    }
+
+    #[test]
+    fn keeps_other_postgres_psql_commands_unsupported() {
+        assert_eq!(
+            prepare_sql_file_statement("\\copy users FROM 'users.csv'", &DatabaseType::Postgres, None),
+            SqlFileStatementAction::Execute("\\copy users FROM 'users.csv'".to_string())
+        );
+        assert_eq!(
+            prepare_sql_file_statement("\\restrict invalid-key", &DatabaseType::Postgres, None),
+            SqlFileStatementAction::Execute("\\restrict invalid-key".to_string())
         );
     }
 

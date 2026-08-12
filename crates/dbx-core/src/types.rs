@@ -1,8 +1,20 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DatabaseInfo {
     pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size_bytes: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comment: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_charset: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_collation: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -71,11 +83,19 @@ pub struct ObjectInfo {
     pub valid: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signature: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_type_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub has_members: Option<bool>,
     pub comment: Option<String>,
     pub created_at: Option<String>,
     pub updated_at: Option<String>,
     pub parent_schema: Option<String>,
     pub parent_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger: Option<TriggerInfo>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub xugu_type_members_expandable: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -396,6 +416,20 @@ pub struct TriggerInfo {
     pub event: String,
     pub timing: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub level: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub condition: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub valid: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comment: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub statement: Option<String>,
 }
 
@@ -492,6 +526,118 @@ pub struct OwnerInfo {
     pub owner: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CustomTypeKind {
+    Base,
+    Composite,
+    Domain,
+    Enum,
+    Range,
+    Multirange,
+}
+
+impl CustomTypeKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Base => "base",
+            Self::Composite => "composite",
+            Self::Domain => "domain",
+            Self::Enum => "enum",
+            Self::Range => "range",
+            Self::Multirange => "multirange",
+        }
+    }
+}
+
+/// A member of a user-defined type.
+///
+/// Composite types expose fields (`name`/`data_type`/`ordinal`/`nullable`/
+/// `default`/`comment`), enums expose values (`ordinal`/`enum_value`), and
+/// domains/ranges/base types expose neither (their members list stays empty;
+/// the UI shows an explanatory empty state instead).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CustomTypeMember {
+    pub name: String,
+    pub data_type: String,
+    pub ordinal: i32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nullable: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comment: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enum_value: Option<String>,
+}
+
+/// A domain CHECK constraint, keeping its name so generated DDL never invents
+/// duplicate constraint identifiers.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CustomTypeDomainConstraint {
+    pub name: String,
+    pub definition: String,
+}
+
+/// Category-specific type attributes. Fields that do not apply to a category
+/// are `None`, never empty strings, so the UI can distinguish “unknown” from
+/// “not applicable”.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CustomTypeProperties {
+    pub base_type: Option<String>,
+    pub not_null: Option<bool>,
+    pub default: Option<String>,
+    pub collation: Option<String>,
+    #[serde(default)]
+    pub domain_constraints: Vec<CustomTypeDomainConstraint>,
+    pub range_subtype: Option<String>,
+    pub range_multirange_name: Option<String>,
+    pub range_canonical_function: Option<String>,
+    pub range_subtype_diff_function: Option<String>,
+    pub range_subtype_opclass: Option<String>,
+    pub input_function: Option<String>,
+    pub output_function: Option<String>,
+    pub receive_function: Option<String>,
+    pub send_function: Option<String>,
+    pub analyze_function: Option<String>,
+    pub internallength: Option<i32>,
+    pub passed_by_value: Option<bool>,
+    pub alignment: Option<String>,
+    pub storage: Option<String>,
+}
+
+/// Generated `CREATE TYPE` text for a user-defined type.
+///
+/// `complete = true` means the text can be executed standalone in the current
+/// schema. `complete = false` means the text is for viewing only (it may depend
+/// on other types/functions or internal attributes); `warnings` must be shown
+/// in the UI and the text must never be presented as executable source.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CustomTypeDdl {
+    pub sql: String,
+    pub complete: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CustomTypeDetails {
+    pub name: String,
+    pub schema: String,
+    pub kind: CustomTypeKind,
+    pub comment: Option<String>,
+    #[serde(default)]
+    pub members: Vec<CustomTypeMember>,
+    pub properties: CustomTypeProperties,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ddl: Option<CustomTypeDdl>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::{ObjectInfo, ObjectSourceKind, QueryMessage, SpatialColumn, SpatialColumnBuilder};
@@ -579,11 +725,18 @@ mod tests {
     #[test]
     fn list_objects_payload_preserves_optional_validity() {
         let objects: Vec<ObjectInfo> =
-            serde_json::from_str(r#"[{"name":"TRG_AUDIT","object_type":"TRIGGER","schema":"APP","valid":false}]"#)
+            serde_json::from_str(
+                r#"[{"name":"TRG_AUDIT","object_type":"TRIGGER","schema":"APP","valid":false,"trigger":{"name":"TRG_AUDIT","event":"INSERT","timing":"BEFORE","level":"FOR EACH ROW","enabled":false,"valid":false,"comment":"audit","created_at":"2026-08-10 09:30:00"}},{"name":"ORDER_TYPE","object_type":"TYPE","schema":"APP","xugu_type_members_expandable":true}]"#,
+            )
                 .unwrap();
 
         assert_eq!(objects[0].valid, Some(false));
         assert_eq!(objects[0].object_type, "TRIGGER");
+        let trigger = objects[0].trigger.as_ref().unwrap();
+        assert_eq!(trigger.level.as_deref(), Some("FOR EACH ROW"));
+        assert_eq!(trigger.enabled, Some(false));
+        assert_eq!(trigger.comment.as_deref(), Some("audit"));
+        assert_eq!(objects[1].xugu_type_members_expandable, Some(true));
     }
 
     #[test]

@@ -1284,7 +1284,7 @@ pub async fn list_databases(pool: &SqliteHandle) -> Result<Vec<DatabaseInfo>, St
             let mut stmt = conn.prepare("PRAGMA database_list").map_err(|e| e.to_string())?;
             let rows = stmt.query_map([], |row| row.get::<_, String>("name")).map_err(|e| e.to_string())?;
             rows.filter_map(|row| match row {
-                Ok(name) if !name.eq_ignore_ascii_case("temp") => Some(Ok(DatabaseInfo { name })),
+                Ok(name) if !name.eq_ignore_ascii_case("temp") => Some(Ok(DatabaseInfo { name, ..Default::default() })),
                 Ok(_) => None,
                 Err(error) => Some(Err(error)),
             })
@@ -2345,6 +2345,13 @@ pub async fn list_triggers(pool: &SqliteHandle, schema: &str, table: &str) -> Re
                         name: row.get("name")?,
                         event: event.to_string(),
                         timing: timing.to_string(),
+                        level: None,
+                        condition: None,
+                        language: None,
+                        enabled: None,
+                        valid: None,
+                        comment: None,
+                        created_at: None,
                         statement: sql_text,
                     })
                 })

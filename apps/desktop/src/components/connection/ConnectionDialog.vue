@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import type { ObjectDirective } from "vue";
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
+import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from "vue";
 import { uuid } from "@/lib/common/utils";
 import { useI18n } from "vue-i18n";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
@@ -25,6 +25,7 @@ import { useTunnelProfileStore } from "@/stores/tunnelProfileStore";
 import { detachTunnelProfileLayer, tunnelProfileReferenceLayer, tunnelProfileSummary } from "@/lib/connection/tunnelProfiles";
 import { applySshConfigHostAliasPrefill as prefillSshConfigHostAlias } from "@/lib/connection/sshConfigHosts";
 import { canPersistConnectionTestResult, connectionEditDraftSyncAction } from "./connectionEditDraftSync";
+import { createConnectionNoteVisibilityDraft, persistConnectionNoteVisibilityDraft as persistConnectionNoteVisibilityDraftState, resetConnectionNoteVisibilityDraft, setConnectionNoteVisibilityDraft, syncConnectionNoteVisibilityDraft } from "./connectionNoteVisibilityDraft";
 import { REDIS_SCAN_PAGE_SIZE_DEFAULT, REDIS_SCAN_PAGE_SIZE_MIN, REDIS_SCAN_PAGE_SIZE_MAX, REDIS_SCAN_PAGE_SIZE_OPTIONS } from "@/lib/redis/redisKeyPattern";
 import { normalizeGlobalConnectTimeoutSecs, normalizeGlobalQueryTimeoutSecs, useSettingsStore } from "@/stores/settingsStore";
 import { useToast } from "@/composables/useToast";
@@ -33,7 +34,7 @@ import * as api from "@/lib/backend/api";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { applyParsedConnectionUrl, normalizeMongoConnectionString, parseConnectionUrl } from "@/lib/connection/connectionUrl";
 import { buildOracleTnsConnectionString, normalizeOracleTnsAdminPath, parseOracleTnsConnectionString } from "@/lib/connection/oracleTnsConnection";
-import { parseConnectionDeepLink, type ConnectionDeepLinkDraft } from "@/lib/connection/connectionDeepLink";
+import { connectionDeepLinkServiceHydrationValue, parseConnectionDeepLink, parseServiceConnectionUrl, type ConnectionDeepLinkDraft } from "@/lib/connection/connectionDeepLink";
 import { connectionUrlPlaceholder as getUrlPlaceholder } from "@/lib/connection/connectionPresentation";
 import { parseGaussdbHosts, serializeGaussdbHosts, type GaussdbHostEntry } from "@/lib/connection/gaussdbHosts";
 import { h2ConnectionModeForConfig, h2FileJdbcUrlWithPath, h2FilePathFromJdbcUrl, isH2SplitJdbcUrl, type H2ConnectionMode } from "@/lib/database/h2Connection";
@@ -105,7 +106,7 @@ import { oceanbaseModeConnectionPatch, oceanbaseSubModeFromConfig } from "@/lib/
 import { translateBackendError } from "@/i18n/backend-errors";
 import { applyHiveKerberosSubmitConfig, hiveKerberosFormConfig, type HiveKerberosAuthMode } from "@/lib/database/hiveKerberosOptions";
 import { hasCloudflareD1Credentials, isCloudflareD1Connection, normalizeCloudflareD1Connection } from "@/lib/connection/cloudflareD1";
-import { buildElasticsearchExternalConfig, elasticsearchConnectionModeFromConfig, elasticsearchConnectivityCheckPathFromConfig, elasticsearchKibanaBasePathFromConfig, type ElasticsearchConnectionMode } from "@/lib/connection/elasticsearchKibanaProxy";
+import { buildElasticsearchExternalConfig, elasticsearchConnectionModeFromConfig, elasticsearchConnectivityCheckPathFromConfig, elasticsearchIndexGroupingPatternFromConfig, elasticsearchKibanaBasePathFromConfig, type ElasticsearchConnectionMode } from "@/lib/connection/elasticsearchKibanaProxy";
 import { GAUSSDB_M_JDBC_DRIVER_CLASS, gaussdbConnectionMode, gaussdbIdentifierQuoteStyle, setGaussdbConnectionMode, setGaussdbIdentifierQuoteStyle, supportsGaussdbIdentifierQuoteStyle, type GaussdbConnectionMode, type GaussdbIdentifierQuoteStyle } from "@/lib/database/jdbcDialect";
 import { normalizeStoredConnectionDatabase } from "@/lib/database/sqliteNamespace";
 import {
@@ -189,6 +190,11 @@ type ConnectionTestState = ConnectionTestResult & { ok: boolean };
 const { t } = useI18n();
 const { toast } = useToast();
 const settingsStore = useSettingsStore();
+const connectionNoteVisibilityDraft = reactive(createConnectionNoteVisibilityDraft(settingsStore.editorSettings.sidebarShowConnectionNotes));
+const showConnectionNotesInSidebar = computed({
+  get: () => connectionNoteVisibilityDraft.value,
+  set: (value: boolean) => setConnectionNoteVisibilityDraft(connectionNoteVisibilityDraft, value),
+});
 const editGlobalConnectTimeoutSecs = ref(settingsStore.editorSettings.globalConnectTimeoutSecs);
 const editGlobalQueryTimeoutSecs = ref(settingsStore.editorSettings.globalQueryTimeoutSecs);
 const open = defineModel<boolean>("open", { default: false });
@@ -318,6 +324,7 @@ const defaultForm = (): ConnectionForm => ({
 const elasticsearchConnectionMode = ref<ElasticsearchConnectionMode>("direct");
 const elasticsearchKibanaBasePath = ref("");
 const elasticsearchConnectivityCheckPath = ref("");
+const elasticsearchIndexGroupingPattern = ref("");
 const elasticsearchConnectionPorts = ref<Record<ElasticsearchConnectionMode, number>>({
   direct: 9200,
   kibana: 5601,
@@ -328,6 +335,7 @@ function resetElasticsearchProxyFields(externalConfig?: unknown) {
   elasticsearchConnectionMode.value = mode;
   elasticsearchKibanaBasePath.value = elasticsearchKibanaBasePathFromConfig(externalConfig);
   elasticsearchConnectivityCheckPath.value = elasticsearchConnectivityCheckPathFromConfig(externalConfig);
+  elasticsearchIndexGroupingPattern.value = elasticsearchIndexGroupingPatternFromConfig(externalConfig);
   elasticsearchConnectionPorts.value = {
     direct: mode === "direct" ? form.value.port : 9200,
     kibana: mode === "kibana" ? form.value.port : 5601,
@@ -2398,6 +2406,7 @@ watch(
   ([config, isOpen]) => {
     const syncAction = connectionEditDraftSyncAction(config?.id ?? null, isOpen, editingId.value);
     if (syncAction === "preserve") return;
+    resetConnectionNoteVisibilityDraft(connectionNoteVisibilityDraft, settingsStore.editorSettings.sidebarShowConnectionNotes);
     editGlobalConnectTimeoutSecs.value = settingsStore.editorSettings.globalConnectTimeoutSecs;
     editGlobalQueryTimeoutSecs.value = settingsStore.editorSettings.globalQueryTimeoutSecs;
     if (syncAction === "hydrate" && config) {
@@ -2548,6 +2557,11 @@ watch(
     resetTestState();
   },
   { immediate: true },
+);
+
+watch(
+  () => settingsStore.editorSettings.sidebarShowConnectionNotes,
+  (value) => syncConnectionNoteVisibilityDraft(connectionNoteVisibilityDraft, value),
 );
 
 const isEditing = ref(false);
@@ -3500,7 +3514,7 @@ function clearEditedConnectionErrorAfterSuccessfulTest() {
 
 function applyConnectionUrlToForm(input: string): boolean {
   try {
-    const draft = parseConnectionDeepLink(input);
+    const draft = parseConnectionDeepLink(input) ?? parseServiceConnectionUrl(input);
     if (draft) {
       applyConnectionDraftToForm({ ...draft, oneTime: undefined });
       resetTestState();
@@ -3821,7 +3835,7 @@ function connectionConfigForSubmit(id: string, generatedName = ""): ConnectionCo
     config.database = "metrics";
     config.username = config.username.trim();
   } else if (config.db_type === "elasticsearch") {
-    config.external_config = buildElasticsearchExternalConfig(elasticsearchConnectionMode.value, elasticsearchKibanaBasePath.value, elasticsearchConnectivityCheckPath.value);
+    config.external_config = buildElasticsearchExternalConfig(elasticsearchConnectionMode.value, elasticsearchKibanaBasePath.value, elasticsearchConnectivityCheckPath.value, elasticsearchIndexGroupingPattern.value);
   } else if (config.db_type === "sqlserver") {
     config.external_config = sqlServerPortExplicitFromConfig(config) ? { portExplicit: true } : undefined;
   } else if (supportsGaussdbIdentifierQuoteStyle(config)) {
@@ -4654,6 +4668,7 @@ function openJdbcDriverManagerFromError() {
 function resetForm() {
   editingId.value = null;
   form.value = defaultForm();
+  resetConnectionNoteVisibilityDraft(connectionNoteVisibilityDraft, settingsStore.editorSettings.sidebarShowConnectionNotes);
   editGlobalConnectTimeoutSecs.value = settingsStore.editorSettings.globalConnectTimeoutSecs;
   editGlobalQueryTimeoutSecs.value = settingsStore.editorSettings.globalQueryTimeoutSecs;
   selectedTransportLayerId.value = null;
@@ -4685,7 +4700,24 @@ function resetForm() {
 const submittedOneTimePrefillKey = ref<string | null>(null);
 
 function oneTimePrefillKey(draft: ConnectionDeepLinkDraft) {
-  return JSON.stringify([draft.name, draft.dbType, draft.driverProfile, draft.driverLabel, draft.host, draft.port, draft.portExplicit, draft.username, draft.password, draft.database, draft.urlParams, draft.ssl, draft.connectionString, draft.oracleConnectionType, draft.useMongoUrl]);
+  return JSON.stringify([
+    draft.name,
+    draft.dbType,
+    draft.driverProfile,
+    draft.driverLabel,
+    draft.host,
+    draft.port,
+    draft.portExplicit,
+    draft.username,
+    draft.password,
+    draft.database,
+    draft.urlParams,
+    draft.ssl,
+    draft.connectionString,
+    draft.oracleConnectionType,
+    draft.useMongoUrl,
+    draft.serviceConfig,
+  ]);
 }
 
 function submitOneTimePrefill(draft: ConnectionDeepLinkDraft) {
@@ -4720,6 +4752,11 @@ function applyConnectionDraftToConfig(config: Omit<ConnectionConfig, "id">, draf
 function applyConnectionDraftToForm(draft: ConnectionDeepLinkDraft) {
   applyProfile(draft.driverProfile);
   form.value = applyConnectionDraftToConfig(form.value, draft);
+  if (draft.serviceConfig?.kind === "consul") {
+    hydrateConsulFields(connectionDeepLinkServiceHydrationValue(draft.serviceConfig));
+  } else if (draft.serviceConfig?.kind === "nacos") {
+    hydrateNacosFields(connectionDeepLinkServiceHydrationValue(draft.serviceConfig));
+  }
   oracleTnsAdminPath.value = parseOracleTnsConnectionString(form.value.connection_string)?.tnsAdmin || "";
   selectedType.value = draft.driverProfile;
   if (form.value.db_type === "h2") {
@@ -4989,11 +5026,16 @@ async function persistGlobalTimeoutDrafts() {
   });
 }
 
+async function persistConnectionNoteVisibilityDraft() {
+  await persistConnectionNoteVisibilityDraftState(connectionNoteVisibilityDraft, settingsStore.editorSettings.sidebarShowConnectionNotes, (value) => settingsStore.updateEditorSettingsAndPersist({ sidebarShowConnectionNotes: value }));
+}
+
 async function save() {
   if (!ensureConnectionHostResolvedFromUrl()) return;
   if (isSaving.value) return;
   const databaseInfoForSave = visibleTestDatabaseInfo.value ?? visibleSavedDatabaseInfo.value;
   isSaving.value = true;
+  let connectionSaved = false;
   try {
     if (editingId.value) {
       const updated = withSavedDatabaseInfo(connectionConfigForSubmit(editingId.value), databaseInfoForSave);
@@ -5001,6 +5043,8 @@ async function save() {
       await ensureRequiredGaussdbMJdbcRuntime(updated);
       await persistGlobalTimeoutDrafts();
       await store.updateConnection(updated);
+      connectionSaved = true;
+      await persistConnectionNoteVisibilityDraft();
       store.stopEditing();
     } else {
       const config = withSavedDatabaseInfo(connectionConfigForSubmit(draftTestConnectionId.value), databaseInfoForSave);
@@ -5008,6 +5052,8 @@ async function save() {
       await ensureRequiredGaussdbMJdbcRuntime(config);
       await persistGlobalTimeoutDrafts();
       await store.addConnection(config);
+      connectionSaved = true;
+      await persistConnectionNoteVisibilityDraft();
       draftTestConnectionId.value = uuid();
       if (config.db_type === "jdbc") {
         open.value = false;
@@ -5031,7 +5077,8 @@ async function save() {
     }
     open.value = false;
   } catch (e: any) {
-    const message = mongodbAuthFailureHint(String(e?.message || e));
+    const cause = mongodbAuthFailureHint(String(e?.message || e));
+    const message = connectionSaved ? t("connection.savedSettingsFailed", { message: cause }) : cause;
     testResult.value = { ok: false, message };
     showConnectionError(message);
   } finally {
@@ -6855,6 +6902,14 @@ function openExternalUrl(url: string) {
                     <Input v-model="elasticsearchConnectivityCheckPath" class="col-span-3" :placeholder="t('connection.elasticsearchConnectivityCheckPathPlaceholder')" @input="resetTestState" />
                   </div>
 
+                  <div v-if="form.db_type === 'elasticsearch'" class="grid grid-cols-4 items-center gap-4">
+                    <Label :class="connectionLabelSmallClass">{{ t("connection.elasticsearchIndexGroupingPattern") }}</Label>
+                    <div class="col-span-3 space-y-1">
+                      <Input v-model="elasticsearchIndexGroupingPattern" :placeholder="t('connection.elasticsearchIndexGroupingPatternPlaceholder')" @input="resetTestState" />
+                      <p class="text-xs text-muted-foreground">{{ t("connection.elasticsearchIndexGroupingPatternHint") }}</p>
+                    </div>
+                  </div>
+
                   <div v-if="form.driver_profile === 'gbase8s'" class="grid grid-cols-4 items-center gap-4">
                     <Label :class="connectionLabelSmallClass">{{ t("connection.gbaseServer") }}</Label>
                     <div class="col-span-3 space-y-1">
@@ -7172,14 +7227,32 @@ function openExternalUrl(url: string) {
 
                 <div class="grid grid-cols-4 items-start gap-4">
                   <Label :class="connectionLabelTopClass">{{ t("connection.note") }}</Label>
-                  <textarea
-                    ref="noteTextareaRef"
-                    v-model="form.note"
-                    rows="1"
-                    class="col-span-3 min-h-8 w-full min-w-0 resize-none overflow-y-hidden rounded-md border border-input bg-transparent px-2.5 py-1 text-base leading-5 transition-colors outline-none placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 dark:bg-input/30 md:text-sm"
-                    :placeholder="t('connection.notePlaceholder')"
-                    @input="resizeNoteTextarea"
-                  />
+                  <div class="col-span-3 flex min-w-0 items-start gap-3">
+                    <textarea
+                      ref="noteTextareaRef"
+                      v-model="form.note"
+                      rows="1"
+                      class="min-h-8 min-w-0 flex-1 resize-none overflow-y-hidden rounded-md border border-input bg-transparent px-2.5 py-1 text-base leading-5 transition-colors outline-none placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 dark:bg-input/30 md:text-sm"
+                      :placeholder="t('connection.notePlaceholder')"
+                      @input="resizeNoteTextarea"
+                    />
+                    <div class="mt-1.5 flex shrink-0 items-center gap-2">
+                      <div class="flex items-center gap-1">
+                        <Label for="connection-note-sidebar-visibility" class="text-xs font-normal text-muted-foreground">
+                          {{ t("connection.noteShow") }}
+                        </Label>
+                        <Tooltip>
+                          <TooltipTrigger as-child>
+                            <CircleHelp class="h-3.5 w-3.5 cursor-help text-muted-foreground hover:text-foreground" />
+                          </TooltipTrigger>
+                          <TooltipContent side="top" align="center" class="max-w-[280px] text-xs leading-relaxed">
+                            {{ t("connection.noteShowInSidebar") }}
+                          </TooltipContent>
+                        </Tooltip>
+                      </div>
+                      <Switch id="connection-note-sidebar-visibility" v-model="showConnectionNotesInSidebar" :aria-label="t('connection.noteShowInSidebar')" />
+                    </div>
+                  </div>
                 </div>
               </div>
             </TabsContent>

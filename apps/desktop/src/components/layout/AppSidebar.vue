@@ -9,6 +9,7 @@ import { Input } from "@/components/ui/input";
 import LightDropdown from "@/components/ui/LightDropdown.vue";
 import LightTooltip from "@/components/ui/LightTooltip.vue";
 import ConnectionTree from "@/components/sidebar/ConnectionTree.vue";
+import { applyConnectionMultiSelection, emptyConnectionMultiSelection } from "@/lib/sidebar/sidebarConnectionMultiSelect";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useToast } from "@/composables/useToast";
 
@@ -86,10 +87,7 @@ function focusSearch(): boolean {
 }
 
 function clearConnectionMultiSelection() {
-  connectionStore.connectionMultiSelectActive = false;
-  connectionStore.selectedTreeNodeIds = [];
-  connectionStore.selectedTreeNodeId = null;
-  connectionStore.treeSelectionAnchorId = null;
+  applyConnectionMultiSelection(connectionStore, emptyConnectionMultiSelection());
 }
 
 function toggleAllConnectionsSelected() {
@@ -125,9 +123,13 @@ async function confirmDeleteSelectedConnections() {
 
 function moveSelectedConnectionsToGroup(value: string) {
   const groupId = value === UNGROUPED_GROUP_VALUE ? null : value;
-  for (const connectionId of selectedConnectionIds.value) {
+  const ids = selectedConnectionIds.value;
+  for (const connectionId of ids) {
     connectionStore.moveConnectionToGroup(connectionId, groupId);
   }
+  // The moved connections stay selected otherwise, so the next batch would be
+  // moved together with them (issue #5758).
+  clearConnectionMultiSelection();
 }
 
 function openCreateSelectedGroupDialog() {
@@ -137,11 +139,13 @@ function openCreateSelectedGroupDialog() {
 
 function confirmCreateSelectedGroup() {
   const name = selectedGroupName.value.trim();
-  if (!name || selectedConnectionIds.value.length === 0) return;
+  const ids = selectedConnectionIds.value;
+  if (!name || ids.length === 0) return;
   const groupId = connectionStore.createConnectionGroup(name);
-  for (const connectionId of selectedConnectionIds.value) {
+  for (const connectionId of ids) {
     connectionStore.moveConnectionToGroup(connectionId, groupId);
   }
+  clearConnectionMultiSelection();
   showCreateSelectedGroupDialog.value = false;
 }
 

@@ -13,7 +13,9 @@ use argon2::password_hash::rand_core::OsRng;
 use argon2::password_hash::SaltString;
 use argon2::{Argon2, PasswordHasher};
 use axum::extract::DefaultBodyLimit;
+use axum::http::Uri;
 use axum::middleware;
+use axum::response::Redirect;
 use axum::routing::{delete, get, post};
 use axum::Router;
 use dbx_core::connection::AppState;
@@ -99,6 +101,49 @@ fn normalize_public_base_path(value: Option<String>) -> String {
     } else {
         format!("/{trimmed}")
     }
+}
+
+fn add_public_base_path_redirect<S>(app: Router<S>, public_base_path: &str) -> Router<S>
+where
+    S: Clone + Send + Sync + 'static,
+{
+    if public_base_path == "/" {
+        return app;
+    }
+
+    // Derive the target from the configured base path so single- and multi-segment prefixes both work.
+    let redirect_target = format!("{public_base_path}/");
+    app.route(
+        public_base_path,
+        get(move |uri: Uri| {
+            let redirect_target = redirect_target.clone();
+            async move {
+                let location = uri.query().map(|query| format!("{redirect_target}?{query}")).unwrap_or(redirect_target);
+                Redirect::permanent(&location)
+            }
+        }),
+    )
+}
+
+fn mount_public_base_path(mut app: Router, public_base_path: &str, static_dir: Option<&std::path::Path>) -> Router {
+    if let Some(static_dir) = static_dir {
+        use tower_http::services::{ServeDir, ServeFile};
+        let index_path = static_dir.join("index.html");
+        let serve_dir = ServeDir::new(static_dir).not_found_service(ServeFile::new(index_path));
+        app = app.fallback_service(serve_dir);
+    }
+
+    if public_base_path == "/" {
+        return app;
+    }
+
+    app = Router::new().nest(public_base_path, app);
+    app = add_public_base_path_redirect(app, public_base_path);
+    if let Some(static_dir) = static_dir {
+        use tower_http::services::ServeFile;
+        app = app.route_service(&format!("{public_base_path}/"), ServeFile::new(static_dir.join("index.html")));
+    }
+    app
 }
 
 #[cfg(feature = "mq-admin")]
@@ -345,6 +390,7 @@ async fn main() {
         .route("/agents/progress/{operationId}", get(routes::agents::agent_progress))
         // Schema
         .route("/schema/databases", get(routes::schema::list_databases))
+        .route("/schema/database-metadata", get(routes::schema::list_database_metadata))
         .route("/schema/database-storage", post(routes::schema::list_database_storage))
         .route("/schema/sqlserver/completion-context", get(routes::schema::get_sqlserver_completion_context))
         .route("/schema/doris/catalogs", get(routes::schema::list_doris_catalogs))
@@ -361,6 +407,7 @@ async fn main() {
         .route("/schema/completion-objects", get(routes::schema::list_completion_objects))
         .route("/schema/completion-assistant", post(routes::schema::completion_assistant_search))
         .route("/schema/object-source", get(routes::schema::get_object_source))
+        .route("/schema/custom-type-details", get(routes::schema::get_custom_type_details))
         .route("/schema/columns", get(routes::schema::list_columns))
         .route("/schema/all-columns", get(routes::schema::get_all_columns))
         .route("/schema/data-types", get(routes::schema::list_data_types))
@@ -902,25 +949,8 @@ async fn main() {
         .layer(CompressionLayer::new().compress_when(web_compression_predicate()))
         .layer(tower_http::trace::TraceLayer::new_for_http());
 
-    // Static file serving
-    if let Ok(static_dir) = std::env::var("DBX_STATIC_DIR") {
-        use tower_http::services::{ServeDir, ServeFile};
-        let index_path = format!("{}/index.html", static_dir);
-        let serve_dir = ServeDir::new(&static_dir).not_found_service(ServeFile::new(&index_path));
-        app = app.fallback_service(serve_dir);
-    }
-
-    if public_base_path != "/" {
-        app = Router::new().nest(&public_base_path, app);
-        // axum 的 nest 不匹配“子路径根目录”(带尾斜杠,如 /dbx/),导致子路径部署时首页 404。
-        // 在 nest 外层显式把根目录挂到 index.html,浏览器地址栏保持 /dbx/ 不变,
-        // 相对资源与前端路径推断都依赖这个 URL 形态。见 issue #5518。
-        if let Ok(static_dir) = std::env::var("DBX_STATIC_DIR") {
-            use tower_http::services::ServeFile;
-            let index_path = format!("{static_dir}/index.html");
-            app = app.route_service(&format!("{public_base_path}/"), ServeFile::new(index_path));
-        }
-    }
+    let static_dir = std::env::var_os("DBX_STATIC_DIR").map(std::path::PathBuf::from);
+    app = mount_public_base_path(app, &public_base_path, static_dir.as_deref());
 
     // Bind address
     let port: u16 = std::env::var("DBX_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(4224);
@@ -951,10 +981,15 @@ async fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_public_base_path, web_agent_dir_from_env, web_compression_predicate, XLSX_CONTENT_TYPE};
+    use super::{
+        mount_public_base_path, normalize_public_base_path, web_agent_dir_from_env, web_compression_predicate,
+        XLSX_CONTENT_TYPE,
+    };
     use axum::body::Body;
     use axum::http::header::CONTENT_TYPE;
     use axum::http::Response;
+    use axum::routing::get;
+    use axum::Router;
     use tower_http::compression::predicate::Predicate;
 
     fn compression_response(content_type: &str) -> Response<Body> {
@@ -1003,5 +1038,100 @@ mod tests {
             web_agent_dir_from_env(&data_dir, Some("/custom/agents".to_string())),
             std::path::PathBuf::from("/custom/agents")
         );
+    }
+
+    #[tokio::test]
+    async fn public_base_path_routes_preserve_redirect_query_static_files_and_api() {
+        let client =
+            reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).build().expect("build test client");
+        let static_dir = std::env::temp_dir().join(format!("dbx-web-public-base-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&static_dir).expect("create static directory");
+        std::fs::write(static_dir.join("index.html"), "subpath index").expect("write index");
+        std::fs::write(static_dir.join("app.js"), "subpath asset").expect("write asset");
+
+        for public_base_path in ["/dbx", "/xxxx/rsu"] {
+            let router = mount_public_base_path(
+                Router::new().route("/api/ping", get(|| async { "pong" })),
+                public_base_path,
+                Some(&static_dir),
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind test listener");
+            let address = listener.local_addr().expect("test listener address");
+            let server = tokio::spawn(async move {
+                axum::serve(listener, router).await.expect("serve test router");
+            });
+
+            let expected_target = format!("{public_base_path}/");
+            let response =
+                client.get(format!("http://{address}{public_base_path}")).send().await.expect("GET bare base path");
+
+            assert_eq!(response.status(), reqwest::StatusCode::PERMANENT_REDIRECT);
+            assert_eq!(
+                response.headers().get(reqwest::header::LOCATION).and_then(|value| value.to_str().ok()),
+                Some(expected_target.as_str())
+            );
+
+            let response = client
+                .get(format!("http://{address}{public_base_path}?next=%2Fworkspace&theme=dark"))
+                .send()
+                .await
+                .expect("GET bare base path with query");
+            let expected_target_with_query = format!("{public_base_path}/?next=%2Fworkspace&theme=dark");
+            assert_eq!(response.status(), reqwest::StatusCode::PERMANENT_REDIRECT);
+            assert_eq!(
+                response.headers().get(reqwest::header::LOCATION).and_then(|value| value.to_str().ok()),
+                Some(expected_target_with_query.as_str())
+            );
+
+            let response = client
+                .get(format!("http://{address}{public_base_path}/?next=%2Fworkspace"))
+                .send()
+                .await
+                .expect("GET trailing slash base path");
+            assert_eq!(response.status(), reqwest::StatusCode::OK);
+            assert_eq!(response.text().await.expect("read index response"), "subpath index");
+
+            let response = client
+                .get(format!("http://{address}{public_base_path}/app.js"))
+                .send()
+                .await
+                .expect("GET static asset");
+            assert_eq!(response.status(), reqwest::StatusCode::OK);
+            assert_eq!(response.text().await.expect("read asset response"), "subpath asset");
+
+            let response =
+                client.get(format!("http://{address}{public_base_path}/api/ping")).send().await.expect("GET API route");
+            assert_eq!(response.status(), reqwest::StatusCode::OK);
+            assert_eq!(response.text().await.expect("read API response"), "pong");
+
+            server.abort();
+        }
+
+        std::fs::remove_dir_all(static_dir).expect("remove static directory");
+    }
+
+    #[tokio::test]
+    async fn root_public_base_path_preserves_static_files_and_api() {
+        let static_dir = std::env::temp_dir().join(format!("dbx-web-root-base-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&static_dir).expect("create static directory");
+        std::fs::write(static_dir.join("index.html"), "root index").expect("write index");
+        std::fs::write(static_dir.join("app.js"), "root asset").expect("write asset");
+        let router =
+            mount_public_base_path(Router::new().route("/api/ping", get(|| async { "pong" })), "/", Some(&static_dir));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind test listener");
+        let address = listener.local_addr().expect("test listener address");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router).await.expect("serve test router");
+        });
+        let client = reqwest::Client::new();
+
+        for (request_path, expected_body) in [("/", "root index"), ("/app.js", "root asset"), ("/api/ping", "pong")] {
+            let response = client.get(format!("http://{address}{request_path}")).send().await.expect("GET root route");
+            assert_eq!(response.status(), reqwest::StatusCode::OK);
+            assert_eq!(response.text().await.expect("read root response"), expected_body);
+        }
+
+        server.abort();
+        std::fs::remove_dir_all(static_dir).expect("remove static directory");
     }
 }

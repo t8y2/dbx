@@ -137,6 +137,7 @@ export const syncSavedSqlDirectory = forward("syncSavedSqlDirectory");
 
 // Schema
 export const listDatabases = forward("listDatabases");
+export const listDatabaseMetadata = forward("listDatabaseMetadata");
 export const listDatabaseStorage = forward("listDatabaseStorage");
 export const getSqlServerCompletionContext = forward("getSqlServerCompletionContext");
 export const listDorisCatalogs = forward("listDorisCatalogs");
@@ -157,6 +158,7 @@ export const listObjectStatistics = forward("listObjectStatistics");
 export const listCompletionObjects = forward("listCompletionObjects");
 export const completionAssistantSearch = forward("completionAssistantSearch");
 export const getObjectSource = forward("getObjectSource");
+export const getCustomTypeDetails = forward("getCustomTypeDetails");
 export const getColumns = forward("getColumns");
 export const getAllColumns = forward("getAllColumns");
 export const getSqlServerColumnMetadata = forward("getSqlServerColumnMetadata");

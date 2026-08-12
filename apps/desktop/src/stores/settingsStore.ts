@@ -8,6 +8,7 @@ import { safeLocalStorageGet, safeLocalStorageRemove } from "@/lib/backend/safeS
 import { type ColumnFormatterConfig, type CustomColumnFormatterConfig, normalizeColumnFormatter, normalizeCustomColumnFormatter, normalizeGlobalDateTimePattern } from "@/lib/dataGrid/columnFormatter";
 import { type DataGridCopyPreference, type DataGridExtractorOptions, DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS, normalizeDataGridCopyPreference, normalizeDataGridExtractorOptions } from "@/lib/dataGrid/dataGridCopyExtractor";
 import { normalizeResultPageSize } from "@/lib/dataGrid/paginationPageSize";
+import { DEFAULT_QUERY_RESULT_MAX_ROWS, normalizeQueryResultMaxRows } from "@/lib/dataGrid/queryResultRowLimit";
 import { normalizeShortcutSettings, type ShortcutSettings } from "@/lib/editor/shortcutRegistry";
 import type { SavedSqlOpenTargetMode } from "@/lib/savedSql/savedSqlExecutionTarget";
 import type { ConnectionListSortMode } from "@/lib/sidebar/connectionListSort";
@@ -253,6 +254,25 @@ export const AI_PROVIDER_PRESETS: Record<AiProvider, AiProviderPreset> = {
     authMethod: "bearer",
     requiresApiKey: false,
   },
+  "codebuddy-cli": {
+    label: "CodeBuddy Code",
+    iconSlug: "codebuddy",
+    provider: "codebuddy-cli",
+    endpoint: "",
+    model: "default",
+    apiStyle: "completions",
+    authMethod: "bearer",
+    requiresApiKey: false,
+  },
+  "qoder-cli": {
+    label: "Qoder CLI",
+    provider: "qoder-cli",
+    endpoint: "",
+    model: "default",
+    apiStyle: "completions",
+    authMethod: "bearer",
+    requiresApiKey: false,
+  },
   "grok-cli": {
     label: "Grok CLI",
     iconSlug: "grok",
@@ -335,6 +355,10 @@ export function normalizeAiConfig(config: Partial<AiConfig> | null | undefined):
     cursorCliEnv: normalizeAiEnv(config?.cursorCliEnv),
     grokCliPath: config?.grokCliPath?.trim() || undefined,
     grokCliEnv: normalizeAiEnv(config?.grokCliEnv),
+    codebuddyCliPath: config?.codebuddyCliPath?.trim() || undefined,
+    codebuddyCliEnv: normalizeAiEnv(config?.codebuddyCliEnv),
+    qoderCliPath: config?.qoderCliPath?.trim() || undefined,
+    qoderCliEnv: normalizeAiEnv(config?.qoderCliEnv),
   };
 }
 
@@ -478,6 +502,7 @@ export interface EditorSettings {
   activeCustomThemeId: string;
   executeMode: "all" | "current";
   executeModeDefaultVersion: number;
+  executeAllOnBlankLine: boolean;
   globalConnectTimeoutSecs: number;
   connectTimeoutInheritConnectionIds: string[];
   globalQueryTimeoutSecs: number;
@@ -502,7 +527,10 @@ export interface EditorSettings {
   appLayout: "separated" | "classic";
   pageSize: number;
   tableOpenPageSize: number;
+  queryResultMaxRowsEnabled: boolean;
+  queryResultMaxRows: number;
   infiniteScroll: boolean;
+  /** Preserved for downgrade compatibility; current clients use queryResultMaxRows. */
   infiniteScrollMaxRows: number;
   regexMaxMatchCount: number;
   autoCalculateTotalRows: boolean;
@@ -549,6 +577,7 @@ export interface EditorSettings {
   updateNotificationsEnabled: boolean;
   sidebarHiddenTablePrefixes: string[];
   sidebarObjectInfoMode: SidebarObjectInfoMode;
+  sidebarShowConnectionNotes: boolean;
   sidebarAllowHorizontalScroll: boolean;
   columnFormatters: Record<string, ColumnFormatterConfig>;
   customColumnFormatters: Record<string, CustomColumnFormatterConfig>;
@@ -562,6 +591,7 @@ export interface EditorSettings {
   exportRowLimit: number;
   queryExportKeysetOptimizationEnabled: boolean;
   updateDownloadSource: UpdateDownloadSource;
+  ignoredUpdateVersion: string;
   toolbarItems: ToolbarItems;
   objectBrowserShowCheckbox: boolean;
   objectBrowserViewMode: "list" | "grid";
@@ -664,6 +694,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   activeCustomThemeId: "default",
   executeMode: "current",
   executeModeDefaultVersion: EXECUTE_MODE_CURRENT_DEFAULT_VERSION,
+  executeAllOnBlankLine: false,
   globalConnectTimeoutSecs: 10,
   connectTimeoutInheritConnectionIds: [],
   globalQueryTimeoutSecs: 30,
@@ -688,6 +719,8 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   appLayout: "classic",
   pageSize: 100,
   tableOpenPageSize: 100,
+  queryResultMaxRowsEnabled: true,
+  queryResultMaxRows: DEFAULT_QUERY_RESULT_MAX_ROWS,
   infiniteScroll: false,
   infiniteScrollMaxRows: 5000,
   regexMaxMatchCount: 1000,
@@ -735,6 +768,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   updateNotificationsEnabled: true,
   sidebarHiddenTablePrefixes: [],
   sidebarObjectInfoMode: "comment-inline",
+  sidebarShowConnectionNotes: false,
   sidebarAllowHorizontalScroll: false,
   columnFormatters: {},
   customColumnFormatters: {},
@@ -748,6 +782,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   exportRowLimit: 100000,
   queryExportKeysetOptimizationEnabled: true,
   updateDownloadSource: "official",
+  ignoredUpdateVersion: "",
   toolbarItems: { ...DEFAULT_TOOLBAR_ITEMS },
   objectBrowserShowCheckbox: false,
   objectBrowserViewMode: "list",
@@ -992,6 +1027,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     activeCustomThemeId: settings.activeCustomThemeId ?? "default",
     executeMode: hasCurrentExecuteModeDefault && (settings.executeMode === "all" || settings.executeMode === "current") ? settings.executeMode : DEFAULT_EDITOR_SETTINGS.executeMode,
     executeModeDefaultVersion,
+    executeAllOnBlankLine: settings.executeAllOnBlankLine === true,
     globalConnectTimeoutSecs: normalizeGlobalConnectTimeoutSecs(settings.globalConnectTimeoutSecs),
     connectTimeoutInheritConnectionIds: Array.isArray(settings.connectTimeoutInheritConnectionIds) ? [...new Set(settings.connectTimeoutInheritConnectionIds.filter((id): id is string => typeof id === "string" && id.trim().length > 0).map((id) => id.trim()))] : [],
     globalQueryTimeoutSecs: normalizeGlobalQueryTimeoutSecs(settings.globalQueryTimeoutSecs ?? legacyTimeoutSettings.queryTimeoutSecs),
@@ -1021,6 +1057,8 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     appLayout: settings.appLayout ?? DEFAULT_EDITOR_SETTINGS.appLayout,
     pageSize: normalizeResultPageSize(settings.pageSize),
     tableOpenPageSize: normalizeResultPageSize(settings.tableOpenPageSize, DEFAULT_EDITOR_SETTINGS.tableOpenPageSize),
+    queryResultMaxRowsEnabled: settings.queryResultMaxRowsEnabled !== false,
+    queryResultMaxRows: normalizeQueryResultMaxRows(settings.queryResultMaxRows),
     infiniteScroll: settings.infiniteScroll ?? DEFAULT_EDITOR_SETTINGS.infiniteScroll,
     infiniteScrollMaxRows: typeof settings.infiniteScrollMaxRows === "number" && settings.infiniteScrollMaxRows >= 1000 && settings.infiniteScrollMaxRows <= 50000 ? Math.round(settings.infiniteScrollMaxRows) : DEFAULT_EDITOR_SETTINGS.infiniteScrollMaxRows,
     regexMaxMatchCount: typeof settings.regexMaxMatchCount === "number" && Number.isFinite(settings.regexMaxMatchCount) && settings.regexMaxMatchCount >= 100 && settings.regexMaxMatchCount <= 10000 ? Math.round(settings.regexMaxMatchCount) : DEFAULT_EDITOR_SETTINGS.regexMaxMatchCount,
@@ -1106,6 +1144,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
         }
       ).sidebarShowDatabaseSizes,
     ),
+    sidebarShowConnectionNotes: settings.sidebarShowConnectionNotes === true,
     sidebarAllowHorizontalScroll: settings.sidebarAllowHorizontalScroll ?? DEFAULT_EDITOR_SETTINGS.sidebarAllowHorizontalScroll,
     columnFormatters: normalizeColumnFormatters(settings.columnFormatters),
     customColumnFormatters: normalizeCustomColumnFormatters(settings.customColumnFormatters),
@@ -1119,6 +1158,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     exportRowLimit: typeof settings.exportRowLimit === "number" && settings.exportRowLimit >= 100 && settings.exportRowLimit <= 2147483647 ? Math.round(settings.exportRowLimit) : DEFAULT_EDITOR_SETTINGS.exportRowLimit,
     queryExportKeysetOptimizationEnabled: typeof settings.queryExportKeysetOptimizationEnabled === "boolean" ? settings.queryExportKeysetOptimizationEnabled : DEFAULT_EDITOR_SETTINGS.queryExportKeysetOptimizationEnabled,
     updateDownloadSource: normalizeUpdateDownloadSource(settings.updateDownloadSource),
+    ignoredUpdateVersion: typeof settings.ignoredUpdateVersion === "string" ? settings.ignoredUpdateVersion : DEFAULT_EDITOR_SETTINGS.ignoredUpdateVersion,
     toolbarItems: normalizeToolbarItems(settings.toolbarItems),
     objectBrowserShowCheckbox: typeof settings.objectBrowserShowCheckbox === "boolean" ? settings.objectBrowserShowCheckbox : DEFAULT_EDITOR_SETTINGS.objectBrowserShowCheckbox,
     objectBrowserViewMode: settings.objectBrowserViewMode === "grid" ? "grid" : DEFAULT_EDITOR_SETTINGS.objectBrowserViewMode,
@@ -1163,10 +1203,6 @@ function editorSettingsPatchSnapshot(settings: Partial<EditorSettings>): Partial
   return JSON.parse(JSON.stringify(settings)) as Partial<EditorSettings>;
 }
 
-function saveEditorSettings(settings: EditorSettings) {
-  void api.saveEditorSettings(editorSettingsSnapshot(settings)).catch(() => {});
-}
-
 export interface SettingsNavigationRequest {
   id: number;
   tab: string;
@@ -1190,10 +1226,36 @@ export const useSettingsStore = defineStore("settings", () => {
   const isEditorSettingsLoaded = ref(false);
   let initEditorSettingsPromise: Promise<void> | null = null;
   let pendingEditorSettingsPatches: Partial<EditorSettings>[] = [];
+  let editorSettingsSaveQueue: Promise<void> | null = null;
+  let editorSettingsAtomicUpdateQueue: Promise<void> = Promise.resolve();
+  let editorSettingsPatchRevision = 0;
+  const editorSettingsFieldRevisions = new Map<keyof EditorSettings, number>();
   let pendingAiChatSelection: AiChatSelectionState | null = null;
   let aiChatSelectionSaveRunning = false;
 
   const editorSettings = ref<EditorSettings>(normalizeEditorSettings({}));
+
+  function enqueueEditorSettingsSave(): Promise<void> {
+    const saveCurrentSettings = () => api.saveEditorSettings(editorSettingsSnapshot(editorSettings.value));
+    const save = editorSettingsSaveQueue ? editorSettingsSaveQueue.catch(() => {}).then(saveCurrentSettings) : saveCurrentSettings();
+    const trackedSave = save.finally(() => {
+      if (editorSettingsSaveQueue === trackedSave) editorSettingsSaveQueue = null;
+    });
+    editorSettingsSaveQueue = trackedSave;
+    return trackedSave;
+  }
+
+  function saveEditorSettings() {
+    void enqueueEditorSettingsSave().catch(() => {});
+  }
+
+  function markEditorSettingsPatch(partial: Partial<EditorSettings>): number {
+    const revision = ++editorSettingsPatchRevision;
+    for (const key of Object.keys(partial) as (keyof EditorSettings)[]) {
+      if (partial[key] !== undefined) editorSettingsFieldRevisions.set(key, revision);
+    }
+    return revision;
+  }
 
   function requestSettingsNavigation(tab: string, section?: string) {
     settingsNavigationRequest.value = {
@@ -1212,7 +1274,7 @@ export const useSettingsStore = defineStore("settings", () => {
     pendingEditorSettingsPatches = [];
     for (const patch of pendingPatches) applyEditorSettingsPatch(patch);
     isEditorSettingsLoaded.value = true;
-    if (pendingPatches.length) saveEditorSettings(editorSettings.value);
+    if (pendingPatches.length) saveEditorSettings();
   }
 
   async function initEditorSettings() {
@@ -1231,7 +1293,7 @@ export const useSettingsStore = defineStore("settings", () => {
           const savedUpdateDownloadSource = (saved as { updateDownloadSource?: unknown }).updateDownloadSource;
           if (savedUpdateDownloadSource === "atomgit" || needsExecuteModeDefaultMigration) {
             // Persist one-time migrations so removed or unsafe defaults cannot reappear.
-            await api.saveEditorSettings(normalized).catch(() => {});
+            await enqueueEditorSettingsSave().catch(() => {});
           }
           completeEditorSettingsInitialization();
           return;
@@ -1241,7 +1303,7 @@ export const useSettingsStore = defineStore("settings", () => {
         if (legacy) {
           editorSettings.value = legacy;
           try {
-            await api.saveEditorSettings(legacy);
+            await enqueueEditorSettingsSave();
             // Existing desktop users keep settings in localStorage; remove them only
             // after the async store has accepted the migrated value.
             clearLegacyEditorSettings();
@@ -1494,7 +1556,17 @@ export const useSettingsStore = defineStore("settings", () => {
     const config = aiConfigs.value.find((c) => c.id === activeModel.value!.configId);
     if (!config) return false;
     const preset = AI_PROVIDER_PRESETS[config.provider];
-    if (config.provider === "codex-cli" || config.provider === "claude-code-cli" || config.provider === "pi-agent-cli" || config.provider === "opencode-cli" || config.provider === "cursor-cli" || config.provider === "grok-cli") return true;
+    if (
+      config.provider === "codex-cli" ||
+      config.provider === "claude-code-cli" ||
+      config.provider === "pi-agent-cli" ||
+      config.provider === "opencode-cli" ||
+      config.provider === "cursor-cli" ||
+      config.provider === "grok-cli" ||
+      config.provider === "codebuddy-cli" ||
+      config.provider === "qoder-cli"
+    )
+      return true;
     return !!config.endpoint && !!activeModel.value!.modelId && (!preset.requiresApiKey || !!config.apiKey);
   });
 
@@ -1525,6 +1597,7 @@ export const useSettingsStore = defineStore("settings", () => {
       }
     }
     if (partial.executeMode !== undefined) editorSettings.value.executeMode = partial.executeMode;
+    if (partial.executeAllOnBlankLine !== undefined) editorSettings.value.executeAllOnBlankLine = partial.executeAllOnBlankLine === true;
     if (partial.globalConnectTimeoutSecs !== undefined) editorSettings.value.globalConnectTimeoutSecs = normalizeGlobalConnectTimeoutSecs(partial.globalConnectTimeoutSecs);
     if (partial.connectTimeoutInheritConnectionIds !== undefined) {
       editorSettings.value.connectTimeoutInheritConnectionIds = [...new Set(partial.connectTimeoutInheritConnectionIds.filter((id): id is string => typeof id === "string" && id.trim().length > 0).map((id) => id.trim()))];
@@ -1556,6 +1629,8 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.appLayout !== undefined) editorSettings.value.appLayout = partial.appLayout;
     if (partial.pageSize !== undefined) editorSettings.value.pageSize = normalizeResultPageSize(partial.pageSize);
     if (partial.tableOpenPageSize !== undefined) editorSettings.value.tableOpenPageSize = normalizeResultPageSize(partial.tableOpenPageSize, DEFAULT_EDITOR_SETTINGS.tableOpenPageSize);
+    if (partial.queryResultMaxRowsEnabled !== undefined) editorSettings.value.queryResultMaxRowsEnabled = Boolean(partial.queryResultMaxRowsEnabled);
+    if (partial.queryResultMaxRows !== undefined) editorSettings.value.queryResultMaxRows = normalizeQueryResultMaxRows(partial.queryResultMaxRows, editorSettings.value.queryResultMaxRows);
     if (partial.infiniteScroll !== undefined) editorSettings.value.infiniteScroll = partial.infiniteScroll;
     if (partial.infiniteScrollMaxRows !== undefined)
       editorSettings.value.infiniteScrollMaxRows = typeof partial.infiniteScrollMaxRows === "number" && partial.infiniteScrollMaxRows >= 1000 && partial.infiniteScrollMaxRows <= 50000 ? Math.round(partial.infiniteScrollMaxRows) : DEFAULT_EDITOR_SETTINGS.infiniteScrollMaxRows;
@@ -1606,6 +1681,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.updateNotificationsEnabled !== undefined) editorSettings.value.updateNotificationsEnabled = partial.updateNotificationsEnabled;
     if (partial.sidebarHiddenTablePrefixes !== undefined) editorSettings.value.sidebarHiddenTablePrefixes = normalizeSidebarHiddenTablePrefixes(partial.sidebarHiddenTablePrefixes);
     if (partial.sidebarObjectInfoMode !== undefined) editorSettings.value.sidebarObjectInfoMode = normalizeSidebarObjectInfoMode(partial.sidebarObjectInfoMode);
+    if (partial.sidebarShowConnectionNotes !== undefined) editorSettings.value.sidebarShowConnectionNotes = partial.sidebarShowConnectionNotes === true;
     if (partial.sidebarAllowHorizontalScroll !== undefined) editorSettings.value.sidebarAllowHorizontalScroll = partial.sidebarAllowHorizontalScroll;
     if (partial.columnFormatters !== undefined) editorSettings.value.columnFormatters = partial.columnFormatters;
     if (partial.customColumnFormatters !== undefined) editorSettings.value.customColumnFormatters = partial.customColumnFormatters;
@@ -1619,6 +1695,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.exportRowLimit !== undefined) editorSettings.value.exportRowLimit = Math.min(2147483647, Math.max(100, Math.round(partial.exportRowLimit)));
     if (partial.queryExportKeysetOptimizationEnabled !== undefined) editorSettings.value.queryExportKeysetOptimizationEnabled = partial.queryExportKeysetOptimizationEnabled;
     if (partial.updateDownloadSource !== undefined) editorSettings.value.updateDownloadSource = normalizeUpdateDownloadSource(partial.updateDownloadSource);
+    if (partial.ignoredUpdateVersion !== undefined) editorSettings.value.ignoredUpdateVersion = typeof partial.ignoredUpdateVersion === "string" ? partial.ignoredUpdateVersion : "";
     if (partial.toolbarItems !== undefined) editorSettings.value.toolbarItems = normalizeToolbarItems(partial.toolbarItems);
     if (partial.objectBrowserShowCheckbox !== undefined) editorSettings.value.objectBrowserShowCheckbox = partial.objectBrowserShowCheckbox === true;
     if (partial.objectBrowserViewMode !== undefined) editorSettings.value.objectBrowserViewMode = partial.objectBrowserViewMode === "grid" ? "grid" : "list";
@@ -1630,16 +1707,45 @@ export const useSettingsStore = defineStore("settings", () => {
 
   function updateEditorSettings(partial: Partial<EditorSettings>) {
     applyEditorSettingsPatch(partial);
+    markEditorSettingsPatch(partial);
     if (!isEditorSettingsLoaded.value) {
       pendingEditorSettingsPatches.push(editorSettingsPatchSnapshot(partial));
       return;
     }
-    saveEditorSettings(editorSettings.value);
+    saveEditorSettings();
   }
 
   async function persistEditorSettings(): Promise<void> {
     await initEditorSettings();
-    await api.saveEditorSettings(editorSettingsSnapshot(editorSettings.value));
+    await enqueueEditorSettingsSave();
+  }
+
+  function updateEditorSettingsAndPersist(partial: Partial<EditorSettings>): Promise<void> {
+    const update = editorSettingsAtomicUpdateQueue
+      .catch(() => {})
+      .then(async () => {
+        await initEditorSettings();
+        const previous = editorSettingsSnapshot(editorSettings.value);
+        applyEditorSettingsPatch(partial);
+        const revision = markEditorSettingsPatch(partial);
+        try {
+          await enqueueEditorSettingsSave();
+        } catch (error) {
+          const restored = editorSettingsSnapshot(editorSettings.value) as unknown as Record<string, unknown>;
+          const previousSettings = previous as unknown as Record<string, unknown>;
+          let changed = false;
+          for (const key of Object.keys(partial) as (keyof EditorSettings)[]) {
+            if (partial[key] === undefined || editorSettingsFieldRevisions.get(key) !== revision) continue;
+            restored[key] = previousSettings[key];
+            editorSettingsFieldRevisions.set(key, ++editorSettingsPatchRevision);
+            changed = true;
+          }
+          if (changed) editorSettings.value = normalizeEditorSettings(restored);
+          throw error;
+        }
+      });
+    editorSettingsAtomicUpdateQueue = update.catch(() => {});
+    return update;
   }
 
   function updateColumnFormatter(key: string, formatter: ColumnFormatterConfig | undefined) {
@@ -1705,6 +1811,7 @@ export const useSettingsStore = defineStore("settings", () => {
     mcpGlobalPolicy,
     initEditorSettings,
     updateEditorSettings,
+    updateEditorSettingsAndPersist,
     persistEditorSettings,
     initDesktopSettings,
     updateDesktopSettings,

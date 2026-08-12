@@ -68,6 +68,23 @@ test("writes MySQL 5.7 numeric strings as numeric cells", () => {
   assert.match(text, /<c r="E2" t="inlineStr" s="3"><is><t>9007199254740992<\/t><\/is><\/c>/);
 });
 
+test("ignores fractional trailing zeros when checking Excel numeric precision", () => {
+  const workbook = buildXlsxWorkbook({
+    sheetName: "Numeric precision",
+    columns: ["reported", "negative_boundary", "safe_boundary", "unsafe_integer", "precise_fraction", "fallback"],
+    columnTypes: ["numeric", "numeric", "numeric", "numeric", "numeric", "numeric"],
+    rows: [["-100000.0000000000", "-999999999999999.0000", "123456789012345.0000000000", "1234567890123456.0000", "100000.0000000001", "not-a-number"]],
+  });
+  const text = new TextDecoder().decode(workbook);
+
+  assert.match(text, /<c r="A2" s="2"><v>-100000\.0000000000<\/v><\/c>/);
+  assert.match(text, /<c r="B2" s="2"><v>-999999999999999\.0000<\/v><\/c>/);
+  assert.match(text, /<c r="C2" s="2"><v>123456789012345\.0000000000<\/v><\/c>/);
+  assert.match(text, /<c r="D2" t="inlineStr" s="2"><is><t>1234567890123456\.0000<\/t><\/is><\/c>/);
+  assert.match(text, /<c r="E2" t="inlineStr" s="2"><is><t>100000\.0000000001<\/t><\/is><\/c>/);
+  assert.match(text, /<c r="F2" t="inlineStr" s="2"><is><t>not-a-number<\/t><\/is><\/c>/);
+});
+
 test("builds a result workbook with a separate SQL worksheet", () => {
   const sqlWorksheet = buildXlsxSqlWorksheet([{ sql: "SELECT id, name FROM users WHERE active = true" }]);
   assert.ok(sqlWorksheet);

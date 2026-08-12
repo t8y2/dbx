@@ -252,6 +252,8 @@ pub struct BuildSingleColumnAlterSqlRequest {
 #[serde(rename_all = "camelCase")]
 pub struct PrepareDataGridSaveRequest {
     pub options: dbx_core::data_grid_sql::DataGridSaveStatementOptions,
+    #[serde(default)]
+    pub driver_profile: Option<String>,
 }
 
 #[derive(Deserialize, utoipa::ToSchema)]
@@ -802,7 +804,7 @@ pub async fn analyze_editable_query_editability(
 pub async fn prepare_data_grid_save(
     Json(req): Json<PrepareDataGridSaveRequest>,
 ) -> Json<dbx_core::data_grid_sql::DataGridSavePreparation> {
-    Json(dbx_core::data_grid_sql::prepare_data_grid_save(req.options))
+    Json(dbx_core::data_grid_sql::prepare_data_grid_save_for_driver_profile(req.options, req.driver_profile.as_deref()))
 }
 
 #[utoipa::path(

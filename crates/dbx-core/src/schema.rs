@@ -174,6 +174,16 @@ pub async fn list_databases_core(state: &AppState, connection_id: &str) -> Resul
     retry_metadata_connection(state, connection_id, None, || list_databases_once(state, connection_id)).await
 }
 
+/// Loads the more expensive database-level properties needed only by the
+/// connection resource browser. General metadata paths keep using
+/// `list_databases_core`, which only enumerates names.
+pub async fn list_database_metadata_core(
+    state: &AppState,
+    connection_id: &str,
+) -> Result<Vec<db::DatabaseInfo>, String> {
+    retry_metadata_connection(state, connection_id, None, || list_database_metadata_once(state, connection_id)).await
+}
+
 pub async fn list_database_storage_core(
     state: &AppState,
     connection_id: &str,
@@ -592,7 +602,7 @@ async fn list_databases_once(state: &AppState, connection_id: &str) -> Result<Ve
             if is_mongo {
                 drop(connections);
                 let dbs = crate::mongo_ops::mongo_list_databases_core(state, connection_id).await?;
-                return Ok(dbs.into_iter().map(|name| db::DatabaseInfo { name }).collect());
+                return Ok(dbs.into_iter().map(|name| db::DatabaseInfo { name, ..Default::default() }).collect());
             }
             drop(connections);
             let mut client = client.lock().await;
@@ -630,6 +640,35 @@ async fn list_databases_once(state: &AppState, connection_id: &str) -> Result<Ve
         PoolKind::CloudflareD1(client) => db::cloudflare_d1_driver::list_databases(client).await,
         _ => Ok(vec![]),
     }
+}
+
+async fn list_database_metadata_once(state: &AppState, connection_id: &str) -> Result<Vec<db::DatabaseInfo>, String> {
+    let config = connection_config(state, connection_id).await;
+    if config.as_ref().is_some_and(|config| db::dolt::is_config(config) || is_doris_family_config(config)) {
+        return list_databases_once(state, connection_id).await;
+    }
+    let connections = state.connections.read().await;
+    if let Some(client) = extract_pool!(&connections, connection_id, SqlServer) {
+        drop(connections);
+        let mut client = client.lock().await;
+        return db::sqlserver::list_database_metadata(&mut client).await;
+    }
+    if let Some(PoolKind::Mysql(pool, mode)) = connections.get(connection_id) {
+        let pool = pool.clone();
+        let mode = *mode;
+        drop(connections);
+        return if mode == MysqlMode::OceanBaseOracle {
+            db::ob_oracle::list_databases(&pool).await
+        } else {
+            db::mysql::list_database_metadata(&pool).await
+        };
+    }
+    if let Some(pool) = extract_pool!(&connections, connection_id, Postgres) {
+        drop(connections);
+        return db::postgres::list_database_metadata(&pool).await;
+    }
+    drop(connections);
+    list_databases_once(state, connection_id).await
 }
 
 pub async fn list_schemas_core(state: &AppState, connection_id: &str, database: &str) -> Result<Vec<String>, String> {
@@ -2124,6 +2163,10 @@ async fn list_tables_once(
             if *mode == MysqlMode::OceanBaseOracle {
                 let tables = db::ob_oracle::list_tables(p, schema).await?;
                 Ok(filter_table_infos(tables, filter, limit, offset, object_types, table_name_filter))
+            } else if mysql_table_list_source_for_config(db_config.as_ref()) == MysqlTableListSource::ShowFullTables {
+                db::mysql::list_shardingsphere_tables(p, mysql_table_metadata_catalog(database, schema))
+                    .await
+                    .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types, table_name_filter))
             } else {
                 db::mysql::list_tables_filtered(
                     p,
@@ -2383,11 +2426,15 @@ async fn external_driver_presto_like_objects(
             schema: Some(schema.to_string()),
             valid: None,
             signature: None,
+            custom_type_kind: None,
+            has_members: None,
             comment: table.comment,
             created_at: None,
             updated_at: None,
             parent_schema: table.parent_schema,
             parent_name: table.parent_name,
+            trigger: None,
+            xugu_type_members_expandable: None,
         })
         .collect())
 }
@@ -2562,6 +2609,29 @@ fn mysql_table_metadata_catalog<'a>(database: &'a str, schema: &'a str) -> &'a s
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MysqlTableListSource {
+    InformationSchema,
+    ShowFullTables,
+}
+
+fn is_shardingsphere_proxy_version(version: &str) -> bool {
+    const MARKER: &[u8] = b"shardingsphere-proxy";
+    version.as_bytes().windows(MARKER.len()).any(|window| window.eq_ignore_ascii_case(MARKER))
+}
+
+fn mysql_table_list_source_for_config(config: Option<&ConnectionConfig>) -> MysqlTableListSource {
+    if config
+        .and_then(|config| config.database_info.as_ref())
+        .and_then(|info| info.product_version.as_deref())
+        .is_some_and(is_shardingsphere_proxy_version)
+    {
+        MysqlTableListSource::ShowFullTables
+    } else {
+        MysqlTableListSource::InformationSchema
+    }
+}
+
 fn quote_presto_like_identifier(identifier: &str) -> String {
     format!("\"{}\"", identifier.replace('"', "\"\""))
 }
@@ -2585,21 +2655,25 @@ mod tests {
         gbase8a_object_statistics_sql, is_agent_postgres_metadata_fallback_config, is_mysql_external_driver_config,
         is_retryable_metadata_error, metadata_error_action, metadata_name_or_comment_matches,
         mysql_external_driver_ddl_from_query_result, mysql_external_driver_ddl_sql,
-        mysql_object_source_ddl_column_index, mysql_object_source_sql, mysql_table_metadata_catalog,
-        normalize_information_schema_table_type, oracle_columns_from_query_result, oracle_columns_sql,
-        oracle_object_statistics_dba_segments_sql, oracle_object_statistics_from_query_result,
+        mysql_object_source_ddl_column_index, mysql_object_source_sql, mysql_table_list_source_for_config,
+        mysql_table_metadata_catalog, normalize_information_schema_table_type, oracle_columns_from_query_result,
+        oracle_columns_sql, oracle_object_statistics_dba_segments_sql, oracle_object_statistics_from_query_result,
         oracle_object_statistics_rows_only_sql, oracle_object_statistics_sql,
         oracle_object_statistics_user_segments_sql, oracle_table_comment_from_query_result, oracle_table_comment_sql,
         oracle_table_comments_sql, presto_like_columns_from_query_result, presto_like_information_schema_columns_sql,
         presto_like_information_schema_tables_sql, presto_like_tables_from_query_result, replace_metadata_runtime,
         should_query_oracle_columns_via_sql_first, table_comments_from_query_result, table_name_filter_matches,
         tdengine_table_comment_like_pattern, tdengine_table_comment_sql, tdengine_table_comments_sql,
-        uses_mongodb_agent_collection_listing, visible_schema_filter, MetadataErrorAction, TableNameFilter,
-        TDENGINE_COMMENT_SEARCH_TIMEOUT, TDENGINE_LIKE_PATTERN_MAX_BYTES,
+        uses_mongodb_agent_collection_listing, visible_schema_filter, MetadataErrorAction, MysqlTableListSource,
+        TableNameFilter, TDENGINE_COMMENT_SEARCH_TIMEOUT, TDENGINE_LIKE_PATTERN_MAX_BYTES,
     };
     use super::{list_databases_core, list_tables_core};
+    use super::{
+        object_types_include_custom_types, object_types_include_relations, object_types_include_routines,
+        object_types_only_custom_types, supports_custom_type_details, supports_pg_custom_type_objects,
+    };
     use crate::connection::{AppState, PoolKind};
-    use crate::models::connection::{ConnectionConfig, DatabaseType};
+    use crate::models::connection::{ConnectionConfig, DatabaseConnectionInfo, DatabaseType};
     use crate::storage::Storage;
     use std::collections::HashMap;
     use std::time::Duration;
@@ -2768,6 +2842,96 @@ mod tests {
         server.await.unwrap();
         drop(state);
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn supports_pg_custom_type_objects_only_for_verified_family() {
+        for db_type in [DatabaseType::Postgres, DatabaseType::OpenGauss, DatabaseType::Gaussdb] {
+            assert!(supports_pg_custom_type_objects(&test_connection_config(db_type)), "{db_type:?}");
+        }
+        for db_type in [
+            DatabaseType::Kingbase,
+            DatabaseType::Vastbase,
+            DatabaseType::Highgo,
+            DatabaseType::Uxdb,
+            DatabaseType::Kwdb,
+            DatabaseType::Redshift,
+        ] {
+            assert!(!supports_pg_custom_type_objects(&test_connection_config(db_type)), "{db_type:?}");
+        }
+    }
+
+    #[test]
+    fn supports_custom_type_details_covers_five_verified_families() {
+        for db_type in [
+            DatabaseType::Postgres,
+            DatabaseType::OpenGauss,
+            DatabaseType::Gaussdb,
+            DatabaseType::Kingbase,
+            DatabaseType::Vastbase,
+        ] {
+            assert!(supports_custom_type_details(&test_connection_config(db_type)), "{db_type:?}");
+        }
+        for db_type in [
+            DatabaseType::Highgo,
+            DatabaseType::Uxdb,
+            DatabaseType::Kwdb,
+            DatabaseType::Redshift,
+            DatabaseType::Mysql,
+            DatabaseType::Xugu,
+        ] {
+            assert!(!supports_custom_type_details(&test_connection_config(db_type)), "{db_type:?}");
+        }
+    }
+
+    #[test]
+    fn object_types_include_custom_types_only_when_unfiltered_or_type_requested() {
+        assert!(object_types_include_custom_types(None));
+        assert!(object_types_include_custom_types(Some(&["TYPE".to_string()])));
+        assert!(object_types_include_custom_types(Some(&["type_body".to_string()])));
+        assert!(object_types_include_custom_types(Some(&["table".to_string(), "type".to_string()])));
+        assert!(!object_types_include_custom_types(Some(&["TABLE".to_string()])));
+        assert!(!object_types_include_custom_types(Some(&["FUNCTION".to_string()])));
+    }
+
+    #[test]
+    fn object_types_select_independent_catalog_branches() {
+        assert!(object_types_include_relations(None));
+        assert!(object_types_include_routines(None));
+        assert!(object_types_include_custom_types(None));
+
+        assert!(object_types_include_relations(Some(&["TABLE".to_string()])));
+        assert!(object_types_include_relations(Some(&["VIEW".to_string()])));
+        assert!(object_types_include_relations(Some(&["SEQUENCE".to_string()])));
+        assert!(!object_types_include_routines(Some(&["TABLE".to_string()])));
+        assert!(!object_types_include_custom_types(Some(&["TABLE".to_string()])));
+
+        assert!(object_types_include_routines(Some(&["PROCEDURE".to_string()])));
+        assert!(object_types_include_routines(Some(&["FUNCTION".to_string()])));
+        assert!(!object_types_include_relations(Some(&["FUNCTION".to_string()])));
+        assert!(!object_types_include_custom_types(Some(&["FUNCTION".to_string()])));
+
+        assert!(object_types_include_custom_types(Some(&["TYPE".to_string()])));
+        assert!(!object_types_include_relations(Some(&["TYPE".to_string()])));
+        assert!(!object_types_include_routines(Some(&["TYPE".to_string()])));
+
+        // The sidebar type group sends the TYPE_BODY companion kind as well;
+        // it must select the type branch alone, never relations or routines.
+        let type_group = ["TYPE".to_string(), "TYPE_BODY".to_string()];
+        assert!(object_types_include_custom_types(Some(&type_group)));
+        assert!(!object_types_include_relations(Some(&type_group)));
+        assert!(!object_types_include_routines(Some(&type_group)));
+    }
+
+    #[test]
+    fn object_types_only_custom_types_detects_dedicated_type_requests() {
+        assert!(!object_types_only_custom_types(None));
+        assert!(object_types_only_custom_types(Some(&["TYPE".to_string()])));
+        assert!(object_types_only_custom_types(Some(&["TYPE".to_string(), "TYPE_BODY".to_string()])));
+        assert!(object_types_only_custom_types(Some(&["type_body".to_string()])));
+        assert!(!object_types_only_custom_types(Some(&["TYPE".to_string(), "TABLE".to_string()])));
+        assert!(!object_types_only_custom_types(Some(&["TABLE".to_string()])));
+        assert!(!object_types_only_custom_types(Some(&[])));
     }
 
     #[test]
@@ -3236,16 +3400,20 @@ for line in sys.stdin:
             schema: Some("app".to_string()),
             valid: None,
             signature: None,
+            custom_type_kind: None,
+            has_members: None,
             comment: None,
             created_at: None,
             updated_at: None,
             parent_schema: None,
             parent_name: None,
+            trigger: None,
+            xugu_type_members_expandable: None,
         }
     }
 
     fn test_database_info(name: &str) -> super::db::DatabaseInfo {
-        super::db::DatabaseInfo { name: name.to_string() }
+        super::db::DatabaseInfo { name: name.to_string(), ..Default::default() }
     }
 
     #[test]
@@ -3304,6 +3472,55 @@ for line in sys.stdin:
 
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].name, "audit_record");
+    }
+
+    #[test]
+    fn shardingsphere_proxy_marker_is_ascii_case_insensitive_and_exact() {
+        assert!(super::is_shardingsphere_proxy_version("5.7.22-ShardingSphere-Proxy 5.5.2"));
+        assert!(super::is_shardingsphere_proxy_version("8.0.36-SHARDINGSPHERE-PROXY 5.5.2"));
+        assert!(!super::is_shardingsphere_proxy_version("8.0.36-ShardingSphere Proxy 5.5.2"));
+        assert!(!super::is_shardingsphere_proxy_version("8.0.36-MySQL Community Server"));
+    }
+
+    #[test]
+    fn mysql_table_list_source_uses_only_saved_shardingsphere_version() {
+        let mut config = test_connection_config(DatabaseType::Mysql);
+        assert_eq!(mysql_table_list_source_for_config(Some(&config)), MysqlTableListSource::InformationSchema);
+
+        config.database_info = Some(DatabaseConnectionInfo {
+            product_version: Some("5.7.22-ShardingSphere-Proxy 5.5.2".to_string()),
+            ..DatabaseConnectionInfo::default()
+        });
+        assert_eq!(mysql_table_list_source_for_config(Some(&config)), MysqlTableListSource::ShowFullTables);
+
+        config.database_info.as_mut().unwrap().product_version = Some("8.0.36-MySQL Community Server".to_string());
+        assert_eq!(mysql_table_list_source_for_config(Some(&config)), MysqlTableListSource::InformationSchema);
+        assert_eq!(mysql_table_list_source_for_config(None), MysqlTableListSource::InformationSchema);
+    }
+
+    #[test]
+    fn shardingsphere_logical_tables_keep_local_constraints() {
+        let tables = vec![
+            test_table_info("normal_table"),
+            test_table_info("t_order"),
+            test_table_info("t_order_archive"),
+            super::db::TableInfo {
+                name: "t_order_view".to_string(),
+                table_type: "VIEW".to_string(),
+                comment: None,
+                parent_schema: None,
+                parent_name: None,
+            },
+            test_table_info("t_user"),
+        ];
+        let table_types = vec!["TABLE".to_string()];
+        let name_filter =
+            TableNameFilter { include_patterns: vec!["t_%".to_string()], exclude_patterns: vec!["%user%".to_string()] };
+
+        let filtered =
+            filter_table_infos(tables, Some("order"), Some(1), Some(1), Some(&table_types), Some(&name_filter));
+
+        assert_eq!(filtered.into_iter().map(|table| table.name).collect::<Vec<_>>(), vec!["t_order_archive"]);
     }
 
     #[test]
@@ -4134,11 +4351,15 @@ for line in sys.stdin:
                 schema: Some("DBX_TEST".to_string()),
                 valid: None,
                 signature: None,
+                custom_type_kind: None,
+                has_members: None,
                 comment: None,
                 created_at: None,
                 updated_at: None,
                 parent_schema: None,
                 parent_name: None,
+                trigger: None,
+                xugu_type_members_expandable: None,
             },
             super::db::ObjectInfo {
                 name: "ORDERS_VIEW".to_string(),
@@ -4146,11 +4367,15 @@ for line in sys.stdin:
                 schema: Some("DBX_TEST".to_string()),
                 valid: None,
                 signature: None,
+                custom_type_kind: None,
+                has_members: None,
                 comment: None,
                 created_at: None,
                 updated_at: None,
                 parent_schema: None,
                 parent_name: None,
+                trigger: None,
+                xugu_type_members_expandable: None,
             },
             super::db::ObjectInfo {
                 name: "REFRESH_ORDERS".to_string(),
@@ -4158,11 +4383,15 @@ for line in sys.stdin:
                 schema: Some("DBX_TEST".to_string()),
                 valid: None,
                 signature: None,
+                custom_type_kind: None,
+                has_members: None,
                 comment: None,
                 created_at: None,
                 updated_at: None,
                 parent_schema: None,
                 parent_name: None,
+                trigger: None,
+                xugu_type_members_expandable: None,
             },
         ];
 
@@ -4760,10 +4989,19 @@ async fn list_objects_once(
                     return Ok(unpaged_object_list(objects));
                 }
                 Ok(objects) => {
+                    if object_types_only_custom_types(object_types) {
+                        // A dedicated type request: the agent is authoritative.
+                        // The native fallback never lists types, so running it
+                        // would turn a real empty schema or a catalog error into
+                        // a misleading empty type group.
+                        return Ok(unpaged_object_list(objects));
+                    }
                     if let Some(config) = fallback_config.as_ref() {
                         match native_postgres_metadata_pool(state, connection_id, database, config).await {
                             Ok(Some(pool)) => {
-                                return db::postgres::list_objects(&pool, schema).await.map(unpaged_object_list)
+                                return db::postgres::list_objects(&pool, schema, true, true, false)
+                                    .await
+                                    .map(unpaged_object_list)
                             }
                             Ok(None) => return Ok(unpaged_object_list(objects)),
                             Err(error) => {
@@ -4780,18 +5018,25 @@ async fn list_objects_once(
                     return Ok(unpaged_object_list(objects));
                 }
                 Err(agent_error) => {
+                    if object_types_only_custom_types(object_types) {
+                        // Preserve the type catalog error instead of masking it
+                        // with a relation/function fallback that cannot serve
+                        // user-defined types.
+                        return Err(agent_error);
+                    }
                     if let Some(config) = fallback_config.as_ref() {
                         if let Some(pool) =
                             native_postgres_metadata_pool(state, connection_id, database, config).await?
                         {
-                            return db::postgres::list_objects(&pool, schema).await.map(unpaged_object_list).map_err(
-                                |fallback_error| {
+                            return db::postgres::list_objects(&pool, schema, true, true, false)
+                                .await
+                                .map(unpaged_object_list)
+                                .map_err(|fallback_error| {
                                     crate::db::agent_driver::append_legacy_error_context(
                                         &agent_error,
                                         &format!("Native PostgreSQL metadata fallback failed: {fallback_error}"),
                                     )
-                                },
-                            );
+                                });
                         }
                     }
                     return Err(agent_error);
@@ -4826,7 +5071,15 @@ async fn list_objects_once(
         PoolKind::Postgres(p) if db_config.as_ref().is_some_and(is_cloudberry_config) => {
             db::cloudberry::list_objects(p, schema).await.map(unpaged_object_list)
         }
-        PoolKind::Postgres(p) => db::postgres::list_objects(p, schema).await.map(unpaged_object_list),
+        PoolKind::Postgres(p) => {
+            let include_relations = object_types_include_relations(object_types);
+            let include_routines = object_types_include_routines(object_types);
+            let include_custom_types = db_config.as_ref().is_some_and(supports_pg_custom_type_objects)
+                && object_types_include_custom_types(object_types);
+            db::postgres::list_objects(p, schema, include_relations, include_routines, include_custom_types)
+                .await
+                .map(unpaged_object_list)
+        }
         _ => {
             drop(connections);
             Ok(unpaged_object_list(
@@ -4839,11 +5092,15 @@ async fn list_objects_once(
                         schema: if schema.is_empty() { None } else { Some(schema.to_string()) },
                         valid: None,
                         signature: None,
+                        custom_type_kind: None,
+                        has_members: None,
                         comment: table.comment,
                         created_at: None,
                         updated_at: None,
                         parent_schema: table.parent_schema,
                         parent_name: table.parent_name,
+                        trigger: None,
+                        xugu_type_members_expandable: None,
                     })
                     .collect(),
             ))
@@ -4893,7 +5150,9 @@ async fn list_completion_objects_once(
                     if let Some(config) = fallback_config.as_ref() {
                         match native_postgres_metadata_pool(state, connection_id, database, config).await {
                             Ok(Some(pool)) => {
-                                return db::postgres::list_objects(&pool, schema).await.map(filter_completion_objects)
+                                return db::postgres::list_objects(&pool, schema, true, true, false)
+                                    .await
+                                    .map(filter_completion_objects)
                             }
                             Ok(None) => objects,
                             Err(error) => {
@@ -4916,7 +5175,7 @@ async fn list_completion_objects_once(
                         if let Some(pool) =
                             native_postgres_metadata_pool(state, connection_id, database, config).await?
                         {
-                            return db::postgres::list_objects(&pool, schema)
+                            return db::postgres::list_objects(&pool, schema, true, true, false)
                                 .await
                                 .map(filter_completion_objects)
                                 .map_err(|fallback_error| {
@@ -4948,7 +5207,9 @@ async fn list_completion_objects_once(
         PoolKind::Postgres(p) if db_config.as_ref().is_some_and(is_cloudberry_config) => {
             db::cloudberry::list_objects(p, schema).await.map(filter_completion_objects)
         }
-        PoolKind::Postgres(p) => db::postgres::list_objects(p, schema).await.map(filter_completion_objects),
+        PoolKind::Postgres(p) => {
+            db::postgres::list_objects(p, schema, true, true, false).await.map(filter_completion_objects)
+        }
         PoolKind::SqlServer(_) => {
             drop(connections);
             let outcome =
@@ -6225,6 +6486,52 @@ fn is_cloudberry_config(config: &ConnectionConfig) -> bool {
     matches!(config.driver_profile.as_deref(), Some("cloudberry"))
 }
 
+/// Whether a native PostgreSQL connection should list user-defined types.
+///
+/// Only databases with a verified `pg_type` catalog contract are enabled.
+/// Other PG-protocol connections (Redshift, QuestDB, Cloudberry, KWDB, ...)
+/// keep the legacy object list even though they share `PoolKind::Postgres`.
+fn supports_pg_custom_type_objects(config: &ConnectionConfig) -> bool {
+    matches!(config.db_type, DatabaseType::Postgres | DatabaseType::OpenGauss | DatabaseType::Gaussdb)
+}
+
+/// Whether a typed object-list request needs the pg_class relation branch.
+///
+/// `None` means the caller wants the full object list (object browser “all
+/// objects” view), so every branch is selected. Group loads only request their
+/// own kinds (e.g. `["TABLE"]`), which skips the other catalog scans entirely.
+fn object_types_include_relations(object_types: Option<&[String]>) -> bool {
+    object_types.is_none_or(|types| {
+        types.iter().any(|t| {
+            matches!(
+                t.to_ascii_uppercase().as_str(),
+                "TABLE" | "VIEW" | "MATERIALIZED_VIEW" | "SEQUENCE" | "FOREIGN_TABLE" | "PARTITIONED_TABLE"
+            )
+        })
+    })
+}
+
+fn object_types_include_routines(object_types: Option<&[String]>) -> bool {
+    object_types
+        .is_none_or(|types| types.iter().any(|t| matches!(t.to_ascii_uppercase().as_str(), "PROCEDURE" | "FUNCTION")))
+}
+
+fn object_types_include_custom_types(object_types: Option<&[String]>) -> bool {
+    object_types
+        .is_none_or(|types| types.iter().any(|t| t.eq_ignore_ascii_case("TYPE") || t.eq_ignore_ascii_case("TYPE_BODY")))
+}
+
+/// Whether the object-type filter exclusively asks for user-defined types.
+///
+/// Used to keep agent errors visible: the native PostgreSQL fallback never
+/// lists custom types, so running it for a dedicated type request would mask a
+/// real catalog failure as an empty type group.
+fn object_types_only_custom_types(object_types: Option<&[String]>) -> bool {
+    object_types.is_some_and(|types| {
+        !types.is_empty() && types.iter().all(|t| t.eq_ignore_ascii_case("TYPE") || t.eq_ignore_ascii_case("TYPE_BODY"))
+    })
+}
+
 fn is_default_oracle_agent_config(config: &ConnectionConfig) -> bool {
     // Only the default go-oracle agent handles filtered/paged metadata; legacy profiles keep Rust fallback paging.
     matches!(config.db_type, DatabaseType::Oracle)
@@ -6868,6 +7175,67 @@ async fn read_mysql_object_source_row(
         .ok_or_else(|| "Failed to read object source".to_string())
 }
 
+/// Whether a connection may serve custom type details (phase 2). Kept
+/// separate from listing support so a future per-kind DDL capability can be
+/// toggled independently.
+fn supports_custom_type_details(config: &ConnectionConfig) -> bool {
+    matches!(
+        config.db_type,
+        DatabaseType::Postgres
+            | DatabaseType::OpenGauss
+            | DatabaseType::Gaussdb
+            | DatabaseType::Kingbase
+            | DatabaseType::Vastbase
+    )
+}
+
+pub async fn get_custom_type_details_core(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    schema: &str,
+    name: &str,
+) -> Result<db::CustomTypeDetails, String> {
+    retry_metadata_connection(state, connection_id, Some(database), || {
+        get_custom_type_details_once(state, connection_id, database, schema, name)
+    })
+    .await
+}
+
+async fn get_custom_type_details_once(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    schema: &str,
+    name: &str,
+) -> Result<db::CustomTypeDetails, String> {
+    let pool_key = state.get_or_create_metadata_pool_for_session(connection_id, Some(database), None).await?;
+    let db_config = connection_config(state, connection_id).await;
+    let Some(config) = db_config.as_ref() else {
+        return Err("connection not found".to_string());
+    };
+    if !supports_custom_type_details(config) {
+        return Err(format!("custom type details are not supported for {:?} connections", config.db_type));
+    }
+    {
+        let connections = state.connections.read().await;
+        if let Some(client) = extract_pool!(&connections, &pool_key, Agent) {
+            let timeout_duration = agent_metadata_timeout(db_config.as_ref());
+            drop(connections);
+            let mut client = client.lock().await;
+            return client
+                .get_custom_type_details::<db::CustomTypeDetails>(database, schema, name, timeout_duration)
+                .await;
+        }
+    }
+    let connections = state.connections.read().await;
+    let pool = connections.get(&pool_key).ok_or("Pool not found")?;
+    match pool {
+        PoolKind::Postgres(p) => db::postgres::get_custom_type_details(p, schema, name).await,
+        _ => Err("custom type details are not supported for this connection type".to_string()),
+    }
+}
+
 pub async fn get_object_source_core(
     state: &AppState,
     connection_id: &str,
@@ -7097,11 +7465,15 @@ async fn oracle_agent_list_objects(
                 schema,
                 valid: None,
                 signature: None,
+                custom_type_kind: None,
+                has_members: None,
                 comment: None,
                 created_at: None,
                 updated_at: None,
                 parent_schema: None,
                 parent_name: None,
+                trigger: None,
+                xugu_type_members_expandable: None,
             })
         })
         .collect();
@@ -8221,30 +8593,201 @@ mod ddl_tests {
 
         assert_eq!(ensure_display_ddl_terminated(ddl.to_string()), ddl);
     }
+
+    struct FakeMysqlDdlExecutor {
+        outcomes: std::collections::VecDeque<Result<String, MysqlDdlQueryError>>,
+        executed: Vec<String>,
+    }
+
+    impl MysqlDdlQueryExecutor for FakeMysqlDdlExecutor {
+        async fn execute(&mut self, sql: &str) -> Result<String, MysqlDdlQueryError> {
+            self.executed.push(sql.to_string());
+            self.outcomes.pop_front().expect("test outcome for DDL query")
+        }
+    }
+
+    fn mysql_server_error(code: u16, message: &str) -> MysqlDdlQueryError {
+        MysqlDdlQueryError::Query(mysql_async::Error::Server(mysql_async::ServerError {
+            code,
+            message: message.to_string(),
+            state: "HY000".to_string(),
+        }))
+    }
+
+    #[tokio::test]
+    async fn mysql_ddl_uses_one_qualified_query_on_success() {
+        let mut executor = FakeMysqlDdlExecutor {
+            outcomes: [Ok("CREATE TABLE `users` (`id` int)".to_string())].into(),
+            executed: Vec::new(),
+        };
+
+        let ddl = mysql_ddl_with_executor(&mut executor, "app", "users").await.unwrap();
+
+        assert_eq!(ddl, "CREATE TABLE `users` (`id` int);");
+        assert_eq!(executor.executed, ["SHOW CREATE TABLE `app`.`users`"]);
+    }
+
+    #[tokio::test]
+    async fn mysql_ddl_retries_unqualified_after_no_such_table() {
+        let mut executor = FakeMysqlDdlExecutor {
+            outcomes: [
+                Err(mysql_server_error(1146, "Table 'retail`fas.account`details' doesn't exist")),
+                Ok("CREATE TABLE `account``details` (`id` int)".to_string()),
+            ]
+            .into(),
+            executed: Vec::new(),
+        };
+
+        let ddl = mysql_ddl_with_executor(&mut executor, "retail`fas", "account`details").await.unwrap();
+
+        assert_eq!(ddl, "CREATE TABLE `account``details` (`id` int);");
+        assert_eq!(
+            executor.executed,
+            ["SHOW CREATE TABLE `retail``fas`.`account``details`", "SHOW CREATE TABLE `account``details`",]
+        );
+    }
+
+    #[tokio::test]
+    async fn mysql_ddl_preserves_qualified_error_when_fallback_fails() {
+        let first_error = mysql_server_error(1146, "qualified table doesn't exist");
+        let expected = first_error.to_string();
+        let mut executor = FakeMysqlDdlExecutor {
+            outcomes: [Err(first_error), Err(mysql_server_error(1146, "unqualified table doesn't exist"))].into(),
+            executed: Vec::new(),
+        };
+
+        let error = mysql_ddl_with_executor(&mut executor, "app", "missing").await.unwrap_err();
+
+        assert_eq!(error, expected);
+        assert_eq!(executor.executed, ["SHOW CREATE TABLE `app`.`missing`", "SHOW CREATE TABLE `missing`"]);
+    }
+
+    #[tokio::test]
+    async fn mysql_ddl_does_not_retry_other_server_errors() {
+        let first_error = mysql_server_error(1044, "access denied");
+        let expected = first_error.to_string();
+        let mut executor = FakeMysqlDdlExecutor {
+            outcomes: [Err(first_error), Ok("unexpected fallback".to_string())].into(),
+            executed: Vec::new(),
+        };
+
+        let error = mysql_ddl_with_executor(&mut executor, "app", "users").await.unwrap_err();
+
+        assert_eq!(error, expected);
+        assert_eq!(executor.executed, ["SHOW CREATE TABLE `app`.`users`"]);
+    }
+
+    #[tokio::test]
+    async fn mysql_ddl_does_not_retry_without_a_database() {
+        let first_error = mysql_server_error(1146, "table doesn't exist");
+        let expected = first_error.to_string();
+        let mut executor = FakeMysqlDdlExecutor {
+            outcomes: [Err(first_error), Ok("unexpected fallback".to_string())].into(),
+            executed: Vec::new(),
+        };
+
+        let error = mysql_ddl_with_executor(&mut executor, "", "missing").await.unwrap_err();
+
+        assert_eq!(error, expected);
+        assert_eq!(executor.executed, ["SHOW CREATE TABLE `missing`"]);
+    }
+
+    #[tokio::test]
+    async fn mysql_ddl_does_not_retry_result_parsing_errors() {
+        let mut executor = FakeMysqlDdlExecutor {
+            outcomes: [
+                Err(MysqlDdlQueryError::Result("DDL not found".to_string())),
+                Ok("unexpected fallback".to_string()),
+            ]
+            .into(),
+            executed: Vec::new(),
+        };
+
+        let error = mysql_ddl_with_executor(&mut executor, "app", "users").await.unwrap_err();
+
+        assert_eq!(error, "DDL not found");
+        assert_eq!(executor.executed, ["SHOW CREATE TABLE `app`.`users`"]);
+    }
+}
+
+#[derive(Debug)]
+enum MysqlDdlQueryError {
+    Query(mysql_async::Error),
+    Result(String),
+}
+
+impl MysqlDdlQueryError {
+    fn is_no_such_table(&self) -> bool {
+        matches!(self, Self::Query(mysql_async::Error::Server(error)) if error.code == 1146)
+    }
+}
+
+impl std::fmt::Display for MysqlDdlQueryError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Query(error) => error.fmt(formatter),
+            Self::Result(error) => error.fmt(formatter),
+        }
+    }
+}
+
+trait MysqlDdlQueryExecutor {
+    async fn execute(&mut self, sql: &str) -> Result<String, MysqlDdlQueryError>;
+}
+
+struct MysqlDdlConnection<'a> {
+    conn: &'a mut mysql_async::Conn,
+}
+
+impl MysqlDdlQueryExecutor for MysqlDdlConnection<'_> {
+    async fn execute(&mut self, sql: &str) -> Result<String, MysqlDdlQueryError> {
+        use mysql_async::prelude::*;
+
+        let result = self.conn.query_iter(sql).await.map_err(MysqlDdlQueryError::Query)?;
+        let rows: Vec<mysql_async::Row> = result.collect_and_drop().await.map_err(MysqlDdlQueryError::Query)?;
+        let row = rows.first().ok_or_else(|| MysqlDdlQueryError::Result("DDL not found".to_string()))?;
+        row.get_opt::<String, usize>(1)
+            .and_then(|result| result.ok())
+            .or_else(|| {
+                row.get_opt::<Vec<u8>, usize>(1)
+                    .and_then(|result| result.ok())
+                    .map(|bytes| String::from_utf8_lossy(&bytes).to_string())
+            })
+            .ok_or_else(|| MysqlDdlQueryError::Result("Failed to read DDL".to_string()))
+    }
+}
+
+async fn mysql_ddl_with_executor(
+    executor: &mut impl MysqlDdlQueryExecutor,
+    database: &str,
+    table: &str,
+) -> Result<String, String> {
+    let sql = format!("SHOW CREATE TABLE {}", mysql_qualified_name(database, table));
+    let qualified_error = match executor.execute(&sql).await {
+        Ok(ddl) => return Ok(ensure_display_ddl_terminated(ddl)),
+        Err(error) => error,
+    };
+    if database.trim().is_empty() || !qualified_error.is_no_such_table() {
+        return Err(qualified_error.to_string());
+    }
+
+    // Mycat 1.x routes by the logical qualifier but forwards it unchanged to a
+    // physical schema; the metadata pool has already selected the logical database.
+    let fallback_sql = format!("SHOW CREATE TABLE {}", mysql_ident(table));
+    match executor.execute(&fallback_sql).await {
+        Ok(ddl) => Ok(ensure_display_ddl_terminated(ddl)),
+        Err(_) => Err(qualified_error.to_string()),
+    }
 }
 
 pub async fn mysql_ddl(pool: &db::mysql::MySqlPool, database: &str, table: &str) -> Result<String, String> {
-    use mysql_async::prelude::*;
-    let sql = format!("SHOW CREATE TABLE {}", mysql_qualified_name(database, table));
     // Use the health-checked getter so a stale pooled connection (server closed
     // it after an idle timeout, NAT/firewall dropped the TCP state, etc.) is
     // detected and replaced before issuing the query. Without this, the first
     // DDL request after a period of inactivity could surface a low-level
     // connection error that a manual refresh would have masked.
     let mut conn = db::mysql::get_conn_with_health_check(pool).await?;
-    let result = conn.query_iter(&sql).await.map_err(|e| e.to_string())?;
-    let rows: Vec<mysql_async::Row> = result.collect_and_drop().await.map_err(|e| e.to_string())?;
-    let row = rows.first().ok_or("DDL not found")?;
-    let ddl = row
-        .get_opt::<String, usize>(1)
-        .and_then(|result| result.ok())
-        .or_else(|| {
-            row.get_opt::<Vec<u8>, usize>(1)
-                .and_then(|result| result.ok())
-                .map(|b| String::from_utf8_lossy(&b).to_string())
-        })
-        .ok_or_else(|| "Failed to read DDL".to_string())?;
-    Ok(ensure_display_ddl_terminated(ddl))
+    mysql_ddl_with_executor(&mut MysqlDdlConnection { conn: &mut conn }, database, table).await
 }
 
 async fn external_driver_mysql_ddl(

@@ -744,6 +744,10 @@ jobs:
         run: go test ./...
         working-directory: agents/drivers/cassandra-go
 
+      - name: Hive native agent tests
+        run: go test ./...
+        working-directory: agents/drivers/hive-go
+
       - name: Vastbase native agent tests
         run: go test ./...
         working-directory: agents/drivers/vastbase-go
@@ -771,6 +775,10 @@ jobs:
       - name: Cassandra native agent build
         run: CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o /tmp/dbx-agent-cassandra-linux-x64 .
         working-directory: agents/drivers/cassandra-go
+
+      - name: Hive native agent build
+        run: CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o /tmp/dbx-agent-hive-linux-x64 .
+        working-directory: agents/drivers/hive-go
 
       - name: Vastbase native agent build
         run: CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o /tmp/dbx-agent-vastbase-linux-x64 .

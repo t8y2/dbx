@@ -32,6 +32,7 @@ vi.mock("@lucide/vue", async () => {
     BarChart3: Icon,
     Boxes: Icon,
     CheckCircle2: Icon,
+    Copy: Icon,
     Database: Icon,
     Download: Icon,
     Gauge: Icon,

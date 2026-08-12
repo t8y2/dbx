@@ -37,45 +37,141 @@ export interface QuickOpenItem {
   sqlFileId?: string; // For saved SQL library files
 }
 
-/**
- * Fuzzy match function that checks if query matches text
- * Returns the matched indices for highlighting
- */
-function fuzzyMatch(query: string, text: string): { score: number; indices: number[] } | null {
-  const lowerQuery = query.toLowerCase();
-  const lowerText = text.toLowerCase();
+export type QuickOpenMatchKind = "exact" | "initials" | "prefix" | "word-prefix" | "substring" | "fuzzy";
 
-  if (!lowerQuery) return { score: Infinity, indices: [] };
-  if (lowerText.includes(lowerQuery)) {
-    // Exact substring match gets highest score
-    const startIdx = lowerText.indexOf(lowerQuery);
-    return {
-      score: 1,
-      indices: Array.from({ length: lowerQuery.length }, (_, i) => startIdx + i),
-    };
+export interface QuickOpenMatch {
+  kind: QuickOpenMatchKind;
+  score: number;
+  indices: number[];
+}
+
+interface IdentifierWord {
+  text: string;
+  start: number;
+}
+
+const IDENTIFIER_SEPARATOR_RE = /[_\-. /\\]/;
+
+function identifierWords(text: string): IdentifierWord[] {
+  const words: IdentifierWord[] = [];
+  let start = -1;
+
+  function pushWord(end: number): void {
+    if (start < 0 || end <= start) return;
+    words.push({ text: text.slice(start, end), start });
   }
 
-  // Fuzzy match: find all characters in order
-  let queryIdx = 0;
-  const indices: number[] = [];
-  let score = 0;
-  let lastMatchIdx = -1;
-
-  for (let i = 0; i < lowerText.length && queryIdx < lowerQuery.length; i++) {
-    if (lowerText[i] === lowerQuery[queryIdx]) {
-      indices.push(i);
-      // Score based on proximity (consecutive chars score better)
-      score += lastMatchIdx === i - 1 ? 2 : 1;
-      lastMatchIdx = i;
-      queryIdx++;
+  for (let index = 0; index < text.length; index++) {
+    const char = text[index];
+    if (IDENTIFIER_SEPARATOR_RE.test(char)) {
+      pushWord(index);
+      start = -1;
+      continue;
+    }
+    if (start < 0) {
+      start = index;
+      continue;
+    }
+    const previous = text[index - 1];
+    if (previous >= "a" && previous <= "z" && char >= "A" && char <= "Z") {
+      pushWord(index);
+      start = index;
     }
   }
+  pushWord(text.length);
+  return words;
+}
 
-  if (queryIdx === lowerQuery.length) {
-    return { score: score / lowerQuery.length, indices };
+function rangeIndices(start: number, length: number): number[] {
+  return Array.from({ length }, (_, index) => start + index);
+}
+
+function matchWordPrefixes(words: IdentifierWord[], query: string): number[] | null {
+  interface PrefixState {
+    queryIndex: number;
+    firstWordIndex: number;
+    lastWordIndex: number;
+    usedWords: number;
+    indices: number[];
   }
 
-  return null;
+  function stateScore(state: PrefixState): number {
+    if (state.usedWords === 0) return 0;
+    return (state.lastWordIndex - state.firstWordIndex - state.usedWords + 1) * 10 + state.usedWords;
+  }
+
+  function retainBest(states: Map<string, PrefixState>, candidate: PrefixState): void {
+    const key = `${candidate.queryIndex}:${candidate.usedWords}`;
+    const current = states.get(key);
+    if (!current || stateScore(candidate) < stateScore(current)) states.set(key, candidate);
+  }
+
+  let states = new Map<string, PrefixState>([["0:0", { queryIndex: 0, firstWordIndex: -1, lastWordIndex: -1, usedWords: 0, indices: [] }]]);
+  for (let wordIndex = 0; wordIndex < words.length; wordIndex++) {
+    const nextStates = new Map(states);
+    const word = words[wordIndex];
+    const lowerWord = word.text.toLowerCase();
+    for (const state of states.values()) {
+      const maxLength = Math.min(lowerWord.length, query.length - state.queryIndex);
+      for (let length = 1; length <= maxLength; length++) {
+        if (lowerWord.slice(0, length) !== query.slice(state.queryIndex, state.queryIndex + length)) break;
+        retainBest(nextStates, {
+          queryIndex: state.queryIndex + length,
+          firstWordIndex: state.usedWords === 0 ? wordIndex : state.firstWordIndex,
+          lastWordIndex: wordIndex,
+          usedWords: state.usedWords + 1,
+          indices: [...state.indices, ...rangeIndices(word.start, length)],
+        });
+      }
+    }
+    states = nextStates;
+  }
+
+  return [...states.values()].filter((state) => state.queryIndex === query.length && state.usedWords >= 2).sort((a, b) => stateScore(a) - stateScore(b))[0]?.indices ?? null;
+}
+
+/** Match one quick-open field and return label-relative highlight indices. */
+export function matchQuickOpenText(query: string, text: string): QuickOpenMatch | null {
+  const lowerQuery = query.trim().toLowerCase();
+  const lowerText = text.toLowerCase();
+  if (!lowerQuery) return { kind: "exact", score: Infinity, indices: [] };
+
+  if (lowerText === lowerQuery) {
+    return { kind: "exact", score: 1, indices: rangeIndices(0, text.length) };
+  }
+
+  const words = identifierWords(text);
+  const initials = words.map((word) => word.text[0]?.toLowerCase() ?? "").join("");
+  if (words.length >= 2 && initials === lowerQuery) {
+    return { kind: "initials", score: 100 + Math.min(words.length, 99), indices: words.map((word) => word.start) };
+  }
+
+  if (lowerText.startsWith(lowerQuery)) {
+    return { kind: "prefix", score: 200 + Math.min(text.length - lowerQuery.length, 99), indices: rangeIndices(0, lowerQuery.length) };
+  }
+
+  const wordPrefixIndices = matchWordPrefixes(words, lowerQuery);
+  if (wordPrefixIndices) {
+    return { kind: "word-prefix", score: 300 + Math.min(text.length - lowerQuery.length, 99), indices: wordPrefixIndices };
+  }
+
+  const substringIndex = lowerText.indexOf(lowerQuery);
+  if (substringIndex >= 0) {
+    return { kind: "substring", score: 400 + Math.min(substringIndex, 99), indices: rangeIndices(substringIndex, lowerQuery.length) };
+  }
+
+  if (lowerQuery.length < 2) return null;
+  const indices: number[] = [];
+  let queryIndex = 0;
+  for (let index = 0; index < lowerText.length && queryIndex < lowerQuery.length; index++) {
+    if (lowerText[index] !== lowerQuery[queryIndex]) continue;
+    indices.push(index);
+    queryIndex++;
+  }
+  if (queryIndex !== lowerQuery.length) return null;
+
+  const span = indices[indices.length - 1] - indices[0] + 1;
+  return { kind: "fuzzy", score: 500 + Math.min(span - lowerQuery.length, 99), indices };
 }
 
 interface MatchedItem extends QuickOpenItem {
@@ -574,6 +670,7 @@ export function useQuickOpen() {
   watch(
     searchQuery,
     (query) => {
+      selectedIndex.value = 0;
       const generation = ++remoteSearchGeneration;
       cancelStaleRemoteRequestWaiters(generation);
       if (remoteSearchTimer) clearTimeout(remoteSearchTimer);
@@ -616,12 +713,14 @@ export function useQuickOpen() {
       const key = quickOpenItemKey(item);
       if (seen.has(key)) continue;
       seen.add(key);
-      const result = fuzzyMatch(searchQuery.value, item.searchText);
+      const labelMatch = matchQuickOpenText(searchQuery.value, item.label);
+      const metadataMatch = labelMatch ? null : matchQuickOpenText(searchQuery.value, item.searchText);
+      const result = labelMatch ?? metadataMatch;
       if (result) {
         matched.push({
           ...item,
-          matchScore: result.score,
-          matchIndices: result.indices,
+          matchScore: result.score + (labelMatch ? 0 : 1000),
+          matchIndices: labelMatch ? result.indices : [],
         });
       }
     }
@@ -647,7 +746,11 @@ export function useQuickOpen() {
         sql_library_file: 11,
         sql_file: 12,
       };
-      return typeOrder[a.type] - typeOrder[b.type];
+      const typeDifference = typeOrder[a.type] - typeOrder[b.type];
+      if (typeDifference !== 0) return typeDifference;
+      const lengthDifference = a.label.length - b.label.length;
+      if (lengthDifference !== 0) return lengthDifference;
+      return a.label.localeCompare(b.label);
     });
 
     return matched.slice(0, QUICK_OPEN_MAX_RESULTS);

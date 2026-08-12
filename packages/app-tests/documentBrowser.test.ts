@@ -31,6 +31,16 @@ test("mongo document table passes copy context to the data grid", () => {
   assert.match(source, /props\.databaseType === "mongodb" && mongoCopyDocumentsAvailable\.value/);
 });
 
+test("mongo document row clones reuse the type-preserving source document for saves and previews", () => {
+  const source = documentBrowserSource();
+  assert.match(source, /type DocumentGridChanges = \{[\s\S]*?newRowMeta: GridNewRowMeta\[\];/);
+  assert.match(source, /function buildMongoGridInsertDocument\([\s\S]*?copyDocuments\.value\[sourceIndex\][\s\S]*?buildMongoCopyDocumentFromOriginal\([\s\S]*?excludePrimaryKeys: true/);
+  assert.match(source, /buildMongoGridInsertDocument\(newRow, cols, newRowMeta\)/);
+  assert.match(source, /buildMongoGridInsertDocument\(newRow, columns, newRowMeta\[newRowIndex\]\)/);
+  assert.match(source, /preserveBsonTypes = sourceIndex !== undefined && copyDocuments\.value\[sourceIndex\] !== undefined/);
+  assert.match(source, /documentInsertDocument\(props\.connectionId, props\.database, props\.collection, JSON\.stringify\(doc\), undefined, preserveBsonTypes\)/);
+});
+
 test("document edit mode toggles whole JSON editing for insert and save", () => {
   const source = documentBrowserSource();
   assert.match(source, /documentEditMode = ref<"fields" \| "json">\("json"\)/);

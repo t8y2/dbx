@@ -62,6 +62,20 @@ afterEach(() => {
 });
 
 describe("DataGridConditionEditor quote completion", () => {
+  it("does not open suggestions for a programmatic value update while unfocused", async () => {
+    const { value, input } = mountEditor("where", "", { columns: ["status", "started_at"] });
+
+    value.value = "sta";
+    await nextTick();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(document.querySelector('[role="listbox"]')).toBeNull();
+
+    input.focus();
+    input.setSelectionRange(3, 3);
+    input.dispatchEvent(new Event("select", { bubbles: true }));
+    await vi.waitFor(() => expect(document.querySelectorAll('[role="option"]')).toHaveLength(2));
+  });
+
   it("inserts paired quotes in WHERE and places the caret between them", async () => {
     const { value, input } = mountEditor("where", "id = ");
     input.focus();

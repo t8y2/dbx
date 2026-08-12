@@ -57,6 +57,7 @@ import { useToast } from "@/composables/useToast";
 import { useNavigationTargets } from "@/composables/useNavigationTargets";
 import { buildAiContext, resolveAiDatabaseTarget, resolveAiNamespaceSelection, resolveDefaultAiSchema, runAgentStream, isVectorDbType, isValidActionForMode, defaultActionForMode, type AiAction, type AiAssistantMode, type AiSqlFileContext, type CustomPromptContext } from "@/lib/ai/ai";
 import { isAiConfigModelCandidate } from "@/lib/ai/aiConfigCandidates";
+import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { addConfiguredAiModel, aiModelOptions } from "@/lib/ai/aiConfigList";
 import { orderAiConfigsForDisplay } from "@/lib/ai/aiConfigOrdering";
 import { effortSelectionEquals, runtimeEffortFromPreference } from "@/lib/ai/aiEffortPreference";
@@ -105,6 +106,7 @@ const { openTableTarget } = useNavigationTargets({
 });
 const { toast } = useToast();
 const { isDark } = useTheme();
+const supportsCliProviders = isTauriRuntime();
 
 type AiMessageMention =
   | {
@@ -299,7 +301,7 @@ function submitEdit(visibleIndex: number) {
   const actualIndex = visibleToActualIndex(messages.value, visibleIndex);
   if (actualIndex < 0) return;
   if (!props.connection || !props.tab) return;
-  if (!settings.isConfigured) {
+  if (!activeFullConfig.value) {
     toast(t("ai.noConfig"));
     return;
   }
@@ -339,7 +341,7 @@ const { catalogs: modelCatalogs, effortCatalogs, loadModels, resolveEffort, effo
 
 // Configured providers for quick switching - get from aiConfigs
 const configuredProviders = computed(() => {
-  const providers = orderAiConfigsForDisplay(settings.aiConfigs.filter((config) => isAiConfigModelCandidate(config, AI_PROVIDER_PRESETS[config.provider].requiresApiKey)));
+  const providers = orderAiConfigsForDisplay(settings.aiConfigs.filter(isModelCandidate));
   if (modelSearchQuery.value.trim()) {
     const query = modelSearchQuery.value.trim().toLowerCase();
     return providers.filter((c) => {
@@ -354,10 +356,14 @@ const configuredProviders = computed(() => {
 const activeFullConfig = computed(() => {
   if (!settings.activeModel) return null;
   const item = settings.aiConfigs.find((c) => c.id === settings.activeModel!.configId);
-  if (!item) return null;
+  if (!item || !isModelCandidate(item)) return null;
   const modelId = settings.activeModel.modelId;
   return normalizeAiConfig({ ...item, model: modelId, runtimeEffort: runtimeEffortFromPreference(settings.activeEffort) });
 });
+
+function isModelCandidate(config: AiConfigItem): boolean {
+  return isAiConfigModelCandidate(config, AI_PROVIDER_PRESETS[config.provider].requiresApiKey, supportsCliProviders);
+}
 
 function getModelsForConfig(configId: string) {
   const config = settings.aiConfigs.find((item) => item.id === configId);
@@ -392,7 +398,7 @@ function toggleModelConfig(configId: string) {
 }
 
 async function loadConfiguredModelCatalogs(force = false) {
-  const configs = settings.aiConfigs.filter((config) => isAiConfigModelCandidate(config, AI_PROVIDER_PRESETS[config.provider].requiresApiKey));
+  const configs = settings.aiConfigs.filter(isModelCandidate);
   const queue = [...configs];
   const workers = Array.from({ length: Math.min(3, queue.length) }, async () => {
     while (queue.length) {
@@ -1707,7 +1713,8 @@ async function send() {
     clearPendingWriteGrant();
     return;
   }
-  if (!settings.isConfigured) {
+  const activeConfig = activeFullConfig.value;
+  if (!activeConfig) {
     clearPendingWriteGrant();
     toast(t("ai.noConfig"));
     return;
@@ -1820,7 +1827,7 @@ async function send() {
     const history: AiMessage[] = messagesForAgentHistory(messages.value.slice(0, -2));
     await runAgentStream(
       {
-        config: activeFullConfig.value!,
+        config: activeConfig,
         action: requestedAction,
         mode: requestedMode,
         instruction: modelInstruction,

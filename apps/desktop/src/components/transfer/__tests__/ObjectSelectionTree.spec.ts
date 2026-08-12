@@ -28,7 +28,7 @@ vi.mock("@/components/ui/button", () => ({ Button: passthrough("button") }));
 
 import ObjectSelectionTree from "../ObjectSelectionTree.vue";
 
-type Kind = "TABLE" | "VIEW" | "FUNCTION";
+type Kind = "TABLE" | "VIEW" | "FUNCTION" | "SEQUENCE";
 
 interface TreeGroup {
   kind: Kind;
@@ -39,6 +39,12 @@ interface TreeGroup {
 const VIEWS: TreeGroup = { kind: "VIEW", label: "Views", items: ["v1", "v2", "v3"] };
 const FUNCTIONS: TreeGroup = { kind: "FUNCTION", label: "Fns", items: ["f1", "f2"] };
 const TABLES: TreeGroup = { kind: "TABLE", label: "Tables", items: ["t1", "t2"] };
+const POSTGRES_FUNCTIONS: TreeGroup = {
+  kind: "FUNCTION",
+  label: "Fns",
+  items: ["_st_beststride", "_st_coveredby", "box", "box2d"],
+};
+const POSTGRES_SEQUENCES: TreeGroup = { kind: "SEQUENCE", label: "Sequences", items: ["biz_banner_id_seq"] };
 
 function mountTree(init: { groups?: TreeGroup[]; disabledGroups?: Kind[]; disabledHints?: Record<string, string>; selection?: Record<string, string[]>; search?: string }) {
   const { groups = [VIEWS, FUNCTIONS], disabledGroups = [], disabledHints = {}, selection = {}, search = "" } = init;
@@ -125,6 +131,18 @@ describe("ObjectSelectionTree interaction", () => {
     groupToggle(container).click();
     await nextTick();
     expect(state.selection.VIEW).toEqual(["v1", "v3"]);
+  });
+
+  it("updates expanded PostgreSQL object lists immediately while searching", async () => {
+    const { container, app } = mountTree({ groups: [POSTGRES_FUNCTIONS, POSTGRES_SEQUENCES] });
+    cleanup = () => app.unmount();
+
+    expect(container.querySelector('label[data-test="item-FUNCTION-box"]')).not.toBeNull();
+    await typeSearch(container, "biz_ban");
+
+    expect(container.querySelector('label[data-test="item-FUNCTION-box"]')).toBeNull();
+    expect(container.querySelector('label[data-test="item-SEQUENCE-biz_banner_id_seq"]')).not.toBeNull();
+    expect(container.querySelector('[data-test="group-FUNCTION"]')?.textContent).toContain("无匹配");
   });
 
   it("deselect all only clears visible enabled selections, keeping hidden ones", async () => {

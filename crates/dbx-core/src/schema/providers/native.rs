@@ -97,7 +97,7 @@ pub(in crate::schema) async fn list_objects(
         PoolKind::Postgres(p) if config.is_some_and(is_cloudberry_config) => {
             db::cloudberry::list_objects(p, schema).await.map(Some)
         }
-        PoolKind::Postgres(p) => db::postgres::list_objects(p, schema).await.map(Some),
+        PoolKind::Postgres(p) => db::postgres::list_objects(p, schema, true, true, false).await.map(Some),
         _ => Ok(None),
     }
 }
@@ -121,7 +121,7 @@ pub(in crate::schema) async fn list_completion_objects(
         PoolKind::Postgres(p) if config.is_some_and(is_cloudberry_config) => {
             db::cloudberry::list_objects(p, schema).await.map(Some)
         }
-        PoolKind::Postgres(p) => db::postgres::list_objects(p, schema).await.map(Some),
+        PoolKind::Postgres(p) => db::postgres::list_objects(p, schema, true, true, false).await.map(Some),
         _ => Ok(None),
     }
 }

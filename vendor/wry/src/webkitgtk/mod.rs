@@ -356,7 +356,7 @@ impl InnerWebView {
         if let Some(pending_scripts) = pending_scripts_.take() {
           let cancellable: Option<&Cancellable> = None;
           for script in pending_scripts {
-            webview.run_javascript(&script, cancellable, |_| ());
+            webview.evaluate_javascript(&script, None::<&str>, None::<&str>, cancellable, |_| ());
           }
         }
       }
@@ -699,13 +699,13 @@ impl InnerWebView {
       #[cfg(feature = "tracing")]
       let span = SendEnteredSpan(tracing::debug_span!("wry::eval").entered());
 
-      self.webview.run_javascript(js, cancellable, |result| {
+      self.webview.evaluate_javascript(js, None::<&str>, None::<&str>, cancellable, |result| {
         #[cfg(feature = "tracing")]
         drop(span);
 
         if let Some(callback) = callback {
           let result = result
-            .map(|r| r.js_value().and_then(|js| js.to_json(0)))
+            .map(|r| r.to_json(0))
             .unwrap_or_default()
             .unwrap_or_default()
             .to_string();

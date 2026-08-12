@@ -140,7 +140,7 @@ pub async fn test_connection(client: &TursoClient, timeout: Duration) -> Result<
 }
 
 pub async fn list_databases(_client: &TursoClient) -> Result<Vec<DatabaseInfo>, String> {
-    Ok(vec![DatabaseInfo { name: "main".to_string() }])
+    Ok(vec![DatabaseInfo { name: "main".to_string(), ..Default::default() }])
 }
 
 pub async fn list_tables(client: &TursoClient, _schema: &str) -> Result<Vec<TableInfo>, String> {
@@ -280,6 +280,13 @@ pub async fn list_triggers(client: &TursoClient, _schema: &str, table: &str) -> 
                 name: value_as_string(row.first()).unwrap_or_default(),
                 event: event.to_string(),
                 timing: timing.to_string(),
+                level: None,
+                condition: None,
+                language: None,
+                enabled: None,
+                valid: None,
+                comment: None,
+                created_at: None,
                 statement: value_as_string(row.get(1)),
             }
         })

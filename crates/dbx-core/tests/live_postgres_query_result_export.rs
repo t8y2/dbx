@@ -242,6 +242,76 @@ async fn live_postgres_query_result_xlsx_preserves_temporal_cell_types() {
 }
 
 #[tokio::test]
+#[ignore = "requires DBX_LIVE_POSTGRES_HOST/PORT/USER/PASSWORD/DATABASE pointing at PostgreSQL 16.3"]
+async fn live_postgres_numeric_xlsx_ignores_fractional_trailing_zeros() {
+    let host = std::env::var("DBX_LIVE_POSTGRES_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
+    let port = std::env::var("DBX_LIVE_POSTGRES_PORT").ok().and_then(|value| value.parse().ok()).unwrap_or(5432);
+    let user = std::env::var("DBX_LIVE_POSTGRES_USER").unwrap_or_else(|_| "postgres".to_string());
+    let password = std::env::var("DBX_LIVE_POSTGRES_PASSWORD").unwrap_or_default();
+    let database = std::env::var("DBX_LIVE_POSTGRES_DATABASE").unwrap_or_else(|_| "postgres".to_string());
+
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let dir = std::env::temp_dir().join(format!("dbx-live-postgres-xlsx-numeric-{suffix}"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+    let state = AppState::new(storage);
+    let connection_id = "live-postgres-xlsx-numeric";
+    let config = live_postgres_config(connection_id, &host, port, &user, &password, &database);
+    state.configs.write().await.insert(config.id.clone(), config);
+
+    let file_path = dir.join("result.xlsx");
+    let sql = "SELECT fee FROM (VALUES \
+               (1, (-100000.0000000000)::numeric), \
+               (2, (-999999999999999.0000)::numeric), \
+               (3, (123456789012345.0000000000)::numeric), \
+               (4, (1234567890123456.0000)::numeric), \
+               (5, (100000.0000000001)::numeric)) AS v(ord, fee) ORDER BY ord"
+        .to_string();
+    let request = QueryResultExportRequest {
+        export_id: format!("live-postgres-xlsx-numeric-{suffix}"),
+        connection_id: connection_id.to_string(),
+        database: database.clone(),
+        schema: None,
+        catalog: None,
+        sql: sql.clone(),
+        query_base_sql: sql,
+        setup_sql: Vec::new(),
+        database_type: DatabaseType::Postgres,
+        use_agent_cursor: false,
+        file_path: file_path.to_string_lossy().to_string(),
+        format: "xlsx".to_string(),
+        include_sql_sheet: false,
+        page_size: 100,
+        row_limit: None,
+        total_rows: None,
+        timeout_secs: Some(30),
+        keyset_optimization_enabled: false,
+        client_session_id: Some(format!("live-postgres-xlsx-numeric-{suffix}")),
+        execution_id: Some(format!("live-postgres-xlsx-numeric-{suffix}")),
+        date_time_format: None,
+        export_table_name: None,
+        export_column_types: None,
+        column_comments: None,
+        numeric_column_right_align: true,
+    };
+
+    export_query_result_core(&state, &request, None, |_| {}).await.expect("export numeric XLSX");
+
+    let workbook = std::fs::read(&file_path).unwrap();
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(workbook)).expect("open generated XLSX");
+    let mut sheet = String::new();
+    archive.by_name("xl/worksheets/sheet1.xml").unwrap().read_to_string(&mut sheet).unwrap();
+    assert!(sheet.contains("<c r=\"A2\" s=\"4\"><v>-100000.0000000000</v></c>"), "sheet={sheet}");
+    assert!(sheet.contains("<c r=\"A3\" s=\"4\"><v>-999999999999999.0000</v></c>"), "sheet={sheet}");
+    assert!(sheet.contains("<c r=\"A4\" s=\"4\"><v>123456789012345.0000000000</v></c>"), "sheet={sheet}");
+    assert!(sheet.contains("<c r=\"A5\" t=\"inlineStr\" s=\"4\"><is><t>1234567890123456.0000</t></is></c>"));
+    assert!(sheet.contains("<c r=\"A6\" t=\"inlineStr\" s=\"4\"><is><t>100000.0000000001</t></is></c>"));
+
+    drop(archive);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
 #[ignore = "requires DBX_LIVE_POSTGRES_* env vars for temporary-table CSV/XLSX export"]
 async fn live_postgres_truncated_batch_result_export_replays_safe_temp_setup() {
     let host = std::env::var("DBX_LIVE_POSTGRES_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());

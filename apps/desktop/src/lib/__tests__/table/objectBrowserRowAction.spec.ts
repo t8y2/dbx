@@ -39,8 +39,30 @@ describe("singleClickRowAction", () => {
     expect(singleClickRowAction(row("PACKAGE_BODY", "pkg_body_test"))).toBe("open-source");
   });
 
-  it.each(["TRIGGER", "TYPE", "TYPE_BODY"] as const)("returns open-source for %s", (type) => {
-    expect(singleClickRowAction(row(type, "programmable_test"))).toBe("open-source");
+  it.each(["TRIGGER", "TYPE", "TYPE_BODY"] as const)("returns open-source for %s on Xugu", (type) => {
+    expect(singleClickRowAction(row(type, "programmable_test"), "xugu")).toBe("open-source");
+  });
+
+  it("only Xugu TYPE rows open source", () => {
+    expect(singleClickRowAction(row("TYPE", "app_status"), "xugu")).toBe("open-source");
+    expect(doubleClickRowAction(row("TYPE", "app_status"), "xugu")).toBe("open-source");
+    expect(singleClickRowAction(row("TYPE_BODY", "app_status"), "xugu")).toBe("open-source");
+    for (const dbType of ["postgres", "opengauss", "gaussdb", "kingbase", "vastbase"] as const) {
+      // Verified PG-family TYPE rows open the read-only details panel.
+      expect(singleClickRowAction(row("TYPE", "app_status"), dbType), String(dbType)).toBe("type-info");
+      expect(doubleClickRowAction(row("TYPE", "app_status"), dbType), String(dbType)).toBe("type-info");
+      // TYPE_BODY has no backend getter on these databases.
+      expect(singleClickRowAction(row("TYPE_BODY", "app_status"), dbType), String(dbType)).toBe("none");
+    }
+    // Unknown connection type keeps the conservative no-action behavior.
+    expect(singleClickRowAction(row("TYPE", "app_status"), undefined)).toBe("none");
+    expect(doubleClickRowAction(row("TYPE", "app_status"), undefined)).toBe("none");
+  });
+
+  it("keeps source actions for non-type rows on PG-family databases", () => {
+    for (const type of ["VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION", "TRIGGER", "SEQUENCE", "PACKAGE", "PACKAGE_BODY"] as const) {
+      expect(singleClickRowAction(row(type), "postgres"), type).toBe("open-source");
+    }
   });
 
   it("returns none for null/undefined", () => {

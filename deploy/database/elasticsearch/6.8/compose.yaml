@@ -1,0 +1,21 @@
+services:
+  database:
+    image: docker.cnb.cool/znb/images/elasticsearch:6.8
+    container_name: dbx-elasticsearch-6.8
+    restart: always
+    ports:
+      - "${DB_BIND_ADDRESS:-127.0.0.1}:${DB_PORT:-11500}:9200"
+      - "${DB_BIND_ADDRESS:-127.0.0.1}:${ELASTICSEARCH_TRANSPORT_PORT:-11501}:9300"
+    environment:
+      discovery.type: single-node
+      xpack.ml.enabled: "false"
+    volumes:
+      - data:/usr/share/elasticsearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl --fail --silent 'http://127.0.0.1:9200/_cluster/health?wait_for_status=yellow&timeout=1s' >/dev/null"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+volumes:
+  data:

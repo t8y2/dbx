@@ -749,7 +749,7 @@ watch(
             </div>
           </div>
         </div>
-        <DialogFooter class="shrink-0 border-t px-5 py-3">
+        <DialogFooter class="mx-0 mb-0 shrink-0 border-t px-5 py-3">
           <Button v-if="isExecuting" variant="destructive" class="gap-1.5" @click="execution.cancel()">
             <X class="h-4 w-4" />
             {{ t("multiDbExecute.cancelBatch") }}
@@ -792,7 +792,7 @@ watch(
             </div>
           </div>
         </div>
-        <DialogFooter class="shrink-0 border-t px-5 py-3">
+        <DialogFooter class="mx-0 mb-0 shrink-0 border-t px-5 py-3">
           <Button variant="outline" @click="manageGroups = false">{{ t("common.close") }}</Button>
         </DialogFooter>
       </div>

@@ -1,5 +1,6 @@
 import { createPinia, setActivePinia } from "pinia";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { canTreeNodeShowExpander } from "@/lib/sidebar/sidebarTreeItemLayout";
 import type { ConnectionConfig, ObjectInfo, TableInfo, TreeNode } from "@/types/database";
 
 function installLocalStorage() {
@@ -57,6 +58,19 @@ function oracleConnection(): ConnectionConfig {
     username: "SYSTEM",
     password: "",
     database: "XE",
+  } as ConnectionConfig;
+}
+
+function xuguConnection(): ConnectionConfig {
+  return {
+    id: "xugu-1",
+    name: "XuguDB",
+    db_type: "xugu",
+    host: "127.0.0.1",
+    port: 5138,
+    username: "app_user",
+    password: "",
+    database: "app_db",
   } as ConnectionConfig;
 }
 
@@ -131,6 +145,251 @@ describe("connectionStore metadata loading", () => {
     installLocalStorage();
     setActivePinia(createPinia());
   });
+
+  // Dynamic import of the merged connectionStore plus the scoped metadata
+  // load can exceed Vitest's 5s default on slower CI runners; the assertion
+  // is deterministic, so allow a wider timeout.
+  it("loads Xugu package members through the scoped completion endpoint", async () => {
+    const completionAssistantSearch = vi.fn().mockResolvedValue({
+      candidates: [
+        { name: "process_item", kind: "procedure", signature: "p_id IN INT" },
+        { name: "process_item", kind: "procedure", signature: "p_code IN VARCHAR" },
+        { name: "item_count", kind: "function", data_type: "INT" },
+      ],
+      incomplete: false,
+      fallback_used: false,
+    });
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({ checkConnectionHealth: vi.fn().mockResolvedValue(undefined), completionAssistantSearch }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    const connection = xuguConnection();
+    const packageNode: TreeNode = {
+      id: "xugu-1:app_db:app_schema:package:business_api",
+      label: "business_api",
+      type: "package",
+      connectionId: connection.id,
+      database: "app_db",
+      schema: "app_schema",
+      children: [],
+      isExpanded: false,
+    };
+    store.connections = [connection];
+    store.connectedIds = new Set([connection.id]);
+    store.treeNodes = [packageNode];
+
+    await store.loadPackageMembers(packageNode);
+
+    expect(completionAssistantSearch).toHaveBeenCalledWith({
+      connection_id: connection.id,
+      database: "app_db",
+      schema: "app_schema",
+      object_kinds: ["routine"],
+      mask: "",
+      case_sensitive: true,
+      global_search: false,
+      max_results: 1000,
+      search_in_comments: false,
+      search_in_definitions: false,
+      parent_schema: "app_schema",
+      parent_name: "business_api",
+      parent_type: "package",
+      match_mode: "prefix",
+    });
+    expect(packageNode.isExpanded).toBe(true);
+    expect(packageNode.children?.map((child) => [child.type, child.label, child.objectCount])).toEqual([
+      ["group-procedures", "tree.procedures", 2],
+      ["group-functions", "tree.functions", 1],
+    ]);
+    expect(packageNode.children?.flatMap((group) => group.children ?? []).map((child) => child.label)).toEqual(["process_item(p_id IN INT)", "process_item(p_code IN VARCHAR)", "item_count"]);
+    expect(packageNode.children?.flatMap((group) => group.children ?? []).every((child) => child.parentName === "business_api")).toBe(true);
+  }, 15000);
+
+  it("loads Xugu object type members through the scoped completion endpoint", async () => {
+    const completionAssistantSearch = vi.fn(async (request: { object_kinds?: string[] }) => ({
+      candidates: request.object_kinds?.includes("column")
+        ? [
+            { name: "street", kind: "column", data_type: "VARCHAR(120)" },
+            { name: "created_at", kind: "column", data_type: "DATETIME" },
+          ]
+        : [{ name: "format", kind: "function", signature: "p_locale IN VARCHAR", data_type: "VARCHAR" }],
+      incomplete: false,
+      fallback_used: false,
+    }));
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({ checkConnectionHealth: vi.fn().mockResolvedValue(undefined), completionAssistantSearch }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    const connection = xuguConnection();
+    const typeNode: TreeNode = {
+      id: "xugu-1:app_db:app_schema:type:address_t",
+      label: "ADDRESS_T",
+      type: "type",
+      objectName: "ADDRESS_T",
+      connectionId: connection.id,
+      database: "app_db",
+      schema: "app_schema",
+      xuguTypeMembersExpandable: true,
+      children: [],
+      isExpanded: false,
+    };
+    store.connections = [connection];
+    store.connectedIds = new Set([connection.id]);
+    store.treeNodes = [typeNode];
+
+    await store.loadXuguTypeMembers(typeNode);
+
+    expect(completionAssistantSearch).toHaveBeenCalledTimes(2);
+    expect(completionAssistantSearch).toHaveBeenCalledWith(
+      expect.objectContaining({
+        connection_id: connection.id,
+        database: "app_db",
+        schema: "app_schema",
+        object_kinds: ["column"],
+        parent_schema: "app_schema",
+        parent_name: "ADDRESS_T",
+        parent_type: "type",
+      }),
+    );
+    expect(completionAssistantSearch).toHaveBeenCalledWith(
+      expect.objectContaining({
+        connection_id: connection.id,
+        database: "app_db",
+        schema: "app_schema",
+        object_kinds: ["routine"],
+        parent_schema: "app_schema",
+        parent_name: "ADDRESS_T",
+        parent_type: "type",
+      }),
+    );
+    expect(typeNode.isExpanded).toBe(true);
+    expect(typeNode.children?.map((child) => ({ label: child.label, objectCount: child.objectCount }))).toEqual([
+      { label: "tree.attributes", objectCount: 2 },
+      { label: "tree.methods", objectCount: 1 },
+    ]);
+    expect(typeNode.children?.[0].children?.map((child) => child.label)).toEqual(["street (VARCHAR(120))", "created_at (DATETIME)"]);
+    expect(typeNode.children?.[1].children?.map((child) => child.label)).toEqual(["FUNCTION format(p_locale IN VARCHAR) → VARCHAR"]);
+    expect(typeNode.children?.every((child) => child.parentName === "ADDRESS_T")).toBe(true);
+  }, 15000);
+
+  it("hides the Xugu type expander after loading no members", async () => {
+    const completionAssistantSearch = vi.fn().mockResolvedValue({ candidates: [], incomplete: false, fallback_used: false });
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({ checkConnectionHealth: vi.fn().mockResolvedValue(undefined), completionAssistantSearch }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    const connection = xuguConnection();
+    const typeNode: TreeNode = {
+      id: "xugu-1:app_db:app_schema:type:empty_t",
+      label: "EMPTY_T",
+      type: "type",
+      objectName: "EMPTY_T",
+      connectionId: connection.id,
+      database: "app_db",
+      schema: "app_schema",
+      xuguTypeMembersExpandable: true,
+      children: [],
+      isExpanded: false,
+    };
+    store.connections = [connection];
+    store.connectedIds = new Set([connection.id]);
+    store.treeNodes = [typeNode];
+
+    await store.loadXuguTypeMembers(typeNode);
+
+    expect(completionAssistantSearch).toHaveBeenCalledTimes(2);
+    expect(typeNode.children).toEqual([]);
+    expect(typeNode.isExpanded).toBe(false);
+    expect(typeNode.xuguTypeMembersExpandable).toBe(false);
+    expect(
+      canTreeNodeShowExpander({
+        type: typeNode.type,
+        childCount: typeNode.children?.length ?? 0,
+        explicitContainer: typeNode.xuguTypeMembersExpandable === true,
+      }),
+    ).toBe(false);
+  }, 15000);
+
+  it("loads Oracle package overloads through the shared package member path", async () => {
+    const completionAssistantSearch = vi.fn().mockResolvedValue({
+      candidates: [
+        { name: "CALCULATE", kind: "procedure", signature: "P_VALUE IN NUMBER" },
+        { name: "CALCULATE", kind: "procedure", signature: "P_VALUE IN VARCHAR2" },
+        { name: "ITEM_COUNT", kind: "function", data_type: "NUMBER" },
+      ],
+      incomplete: false,
+      fallback_used: false,
+    });
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({ checkConnectionHealth: vi.fn().mockResolvedValue(undefined), completionAssistantSearch }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    const connection = oracleConnection();
+    const packageNode: TreeNode = {
+      id: "oracle-1:XE:APP:package:BUSINESS_API",
+      label: "BUSINESS_API",
+      type: "package",
+      connectionId: connection.id,
+      database: "XE",
+      schema: "APP",
+      children: [],
+      isExpanded: false,
+    };
+    store.connections = [connection];
+    store.connectedIds = new Set([connection.id]);
+    store.treeNodes = [packageNode];
+
+    await store.loadPackageMembers(packageNode);
+
+    expect(completionAssistantSearch).toHaveBeenCalledWith({
+      connection_id: connection.id,
+      database: "XE",
+      schema: "APP",
+      object_kinds: ["routine"],
+      mask: "",
+      case_sensitive: true,
+      global_search: false,
+      max_results: 1000,
+      search_in_comments: false,
+      search_in_definitions: false,
+      parent_schema: "APP",
+      parent_name: "BUSINESS_API",
+      match_mode: "prefix",
+    });
+    expect(packageNode.isExpanded).toBe(true);
+    expect(packageNode.children?.map((child) => child.label)).toEqual(["CALCULATE(P_VALUE IN NUMBER)", "CALCULATE(P_VALUE IN VARCHAR2)", "ITEM_COUNT"]);
+  }, 15000);
+
+  it("does not query package members for unsupported databases", async () => {
+    const completionAssistantSearch = vi.fn();
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({ checkConnectionHealth: vi.fn().mockResolvedValue(undefined), completionAssistantSearch }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    const connection = { ...xuguConnection(), id: "dameng-1", db_type: "dameng" } as ConnectionConfig;
+    const packageNode: TreeNode = {
+      id: "dameng-1:APP:package:BUSINESS_API",
+      label: "BUSINESS_API",
+      type: "package",
+      connectionId: connection.id,
+      database: "APP",
+      schema: "APP",
+      children: [],
+      isExpanded: false,
+    };
+    store.connections = [connection];
+    store.connectedIds = new Set([connection.id]);
+
+    await store.loadPackageMembers(packageNode);
+
+    expect(completionAssistantSearch).not.toHaveBeenCalled();
+    expect(packageNode.isExpanded).toBe(false);
+  }, 15000);
 
   it("loads missing database roots only for connected sidebar search targets", async () => {
     const checkConnectionHealth = vi.fn().mockResolvedValue(undefined);
@@ -436,7 +695,7 @@ describe("connectionStore metadata loading", () => {
   });
 
   it("keeps concurrent table-tree and local-index refreshes in separate cache entries", async () => {
-    const treeCacheKey = "pg-1:app:public:group-tables:objects-v6";
+    const treeCacheKey = "pg-1:app:public:group-tables:objects-v8";
     const indexCacheKey = `${treeCacheKey}:table-search-index-v1`;
     const cachedPayloads = new Map<string, unknown>([
       [
@@ -1418,6 +1677,110 @@ describe("connectionStore metadata loading", () => {
 
     expect(listObjects).toHaveBeenNthCalledWith(3, connection.id, "app", "app", ["PROCEDURE"], "p_0999", undefined, undefined);
     expect(storedProcedureGroup?.children?.map((node) => node.label)).toEqual(["p_0999"]);
+  });
+
+  it("merges Xugu package body metadata when it arrives on the next page", async () => {
+    const packageSpec: ObjectInfo = {
+      name: "business_api",
+      object_type: "PACKAGE",
+      schema: "app_schema",
+      valid: true,
+      comment: null,
+      created_at: null,
+      updated_at: null,
+      parent_schema: null,
+      parent_name: null,
+    };
+    const packageBody: ObjectInfo = {
+      ...packageSpec,
+      object_type: "PACKAGE_BODY",
+      valid: false,
+    };
+    const listObjects = vi.fn().mockResolvedValueOnce([packageSpec, packageBody]).mockResolvedValueOnce([packageBody]);
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+      listObjects,
+      loadSchemaCache: vi.fn().mockResolvedValue(null),
+      saveSchemaCache: vi.fn().mockResolvedValue(undefined),
+      saveConnections: vi.fn().mockResolvedValue(undefined),
+      saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const store = useConnectionStore();
+    const settingsStore = useSettingsStore();
+    settingsStore.editorSettings.sidebarObjectDisplay = "grouped";
+    settingsStore.desktopSettings.sidebar_table_page_size = 1;
+
+    const connection = xuguConnection();
+    const packageGroup: TreeNode = {
+      id: "xugu-1:app_db:app_schema:__packages",
+      label: "tree.packages",
+      type: "group-packages",
+      connectionId: connection.id,
+      database: "app_db",
+      schema: "app_schema",
+      isExpanded: false,
+      children: [],
+    };
+    store.connections = [connection];
+    store.connectedIds.add(connection.id);
+    store.treeNodes = [
+      {
+        id: connection.id,
+        label: connection.name,
+        type: "connection",
+        connectionId: connection.id,
+        isExpanded: true,
+        children: [
+          {
+            id: "xugu-1:app_db",
+            label: "app_db",
+            type: "database",
+            connectionId: connection.id,
+            database: "app_db",
+            isExpanded: true,
+            children: [
+              {
+                id: "xugu-1:app_db:app_schema",
+                label: "app_schema",
+                type: "schema",
+                connectionId: connection.id,
+                database: "app_db",
+                schema: "app_schema",
+                isExpanded: true,
+                children: [packageGroup],
+              },
+            ],
+          },
+        ],
+      },
+    ];
+
+    await store.loadObjectGroupChildren(packageGroup);
+    const packageNode = packageGroup.children?.[0];
+    expect(packageNode).toEqual(expect.objectContaining({ type: "package", label: "business_api", xuguPackageBodyAvailable: undefined, valid: true }));
+    const packageNodeId = packageNode?.id;
+
+    const loadMoreNode = packageGroup.children?.at(-1);
+    expect(loadMoreNode?.type).toBe("load-more");
+    await store.loadMoreObjectGroupChildren(loadMoreNode!);
+
+    expect(packageGroup.children).toHaveLength(1);
+    expect(packageGroup.children?.[0]?.id).toBe(packageNodeId);
+    expect(packageGroup.children?.[0]).toEqual(
+      expect.objectContaining({
+        type: "package",
+        label: "business_api",
+        xuguPackageBodyAvailable: true,
+        xuguPackageBodyValid: false,
+        valid: false,
+      }),
+    );
   });
 
   it("reloads a collapsed database after a forced connection database refresh", async () => {
@@ -2418,7 +2781,7 @@ describe("connectionStore metadata loading", () => {
 
     const loadPromise = store.loadTables(connection.id, "prulife", "xtdpcky", { force: true });
     await vi.waitFor(() => expect(saveSchemaCache).toHaveBeenCalledTimes(1));
-    expect(saveSchemaCache.mock.calls[0]?.[0]).toBe(`${connection.id}:prulife:xtdpcky:objects-grouped-v7-informix-owner-v2`);
+    expect(saveSchemaCache.mock.calls[0]?.[0]).toBe(`${connection.id}:prulife:xtdpcky:objects-grouped-v8-informix-owner-v2`);
     expect(schemaNode.isLoading).toBe(true);
 
     schemaNode.isExpanded = false;
@@ -2840,5 +3203,76 @@ describe("connectionStore metadata loading", () => {
     expect(staleDbNode.children?.length ?? 0).toBe(0);
     expect(replacementDb.children?.length ?? 0).toBeGreaterThan(0);
     expect(store.isTreeNodeChildrenLoaded(dbId)).toBe(true);
+  });
+
+  it("loads custom type members into the current tree node and ignores stale responses", async () => {
+    let resolveFirst!: (value: any) => void;
+    const first = new Promise((resolve) => {
+      resolveFirst = resolve;
+    });
+    const getCustomTypeDetails = vi
+      .fn()
+      .mockReturnValueOnce(first)
+      .mockResolvedValueOnce({
+        name: "status",
+        schema: "app",
+        kind: "enum",
+        members: [{ name: "", dataType: "", ordinal: 1, enumValue: "published" }],
+        properties: { domainConstraints: [] },
+      });
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+      getCustomTypeDetails,
+      loadSchemaCache: vi.fn().mockResolvedValue(null),
+      saveSchemaCache: vi.fn().mockResolvedValue(undefined),
+      saveConnections: vi.fn().mockResolvedValue(undefined),
+      saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    const connection = postgresConnection();
+    const typeNode: TreeNode = {
+      id: `${connection.id}:app:types:status`,
+      label: "status",
+      objectName: "status",
+      type: "type",
+      connectionId: connection.id,
+      database: "app",
+      schema: "app",
+      children: undefined,
+    };
+    store.connections = [connection];
+    store.connectedIds.add(connection.id);
+    store.treeNodes = [
+      {
+        id: connection.id,
+        label: connection.name,
+        type: "connection",
+        connectionId: connection.id,
+        children: [typeNode],
+      },
+    ];
+
+    const staleLoad = store.loadCustomTypeChildren(typeNode, { force: true });
+    await vi.waitFor(() => expect(getCustomTypeDetails).toHaveBeenCalledTimes(1));
+    await store.loadCustomTypeChildren(typeNode, { force: true });
+    resolveFirst({
+      name: "status",
+      schema: "app",
+      kind: "enum",
+      members: [{ name: "", dataType: "", ordinal: 1, enumValue: "draft" }],
+      properties: { domainConstraints: [] },
+    });
+    await staleLoad;
+
+    expect(typeNode.isExpanded).toBe(true);
+    expect(typeNode.customTypeKind).toBe("enum");
+    expect(typeNode.hasMembers).toBe(true);
+    expect(typeNode.children?.map((child) => child.label)).toEqual(["published"]);
+    expect(store.isTreeNodeChildrenLoaded(typeNode.id)).toBe(true);
   });
 });

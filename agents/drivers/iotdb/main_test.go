@@ -60,6 +60,25 @@ func TestParseConnectionConfig(t *testing.T) {
 	}
 }
 
+func TestBundledTimeZoneDatabase(t *testing.T) {
+	dataSet, err := client.NewIoTDBRpcDataSet(
+		"", nil, nil, nil, true, false, 0, 0, nil, 0, nil, 0, nil,
+		"Asia/Shanghai", "default", 1000, nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dataSet == nil {
+		t.Fatal("expected IoTDB dataset with bundled timezone data")
+	}
+	if _, err := client.NewIoTDBRpcDataSet(
+		"", nil, nil, nil, true, false, 0, 0, nil, 0, nil, 0, nil,
+		"Invalid/Zone", "default", 1000, nil,
+	); err == nil {
+		t.Fatal("expected invalid timezone to remain rejected")
+	}
+}
+
 func TestParseConnectionConfigTLS(t *testing.T) {
 	config, err := parseConnectionConfig(connectParams{
 		Host: "iotdb.example.com", SSL: true, CACertPath: "/tmp/ca.pem",

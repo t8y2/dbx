@@ -2930,14 +2930,16 @@ mod agent_registry_install_tests {
     }
 
     #[tokio::test]
-    async fn registry_install_accepts_native_driver_with_legacy_jar_fallback() {
-        let manager = test_manager("native-with-jar-fallback");
-        let db_type = "oracle";
+    async fn registry_install_replaces_hive_legacy_jar_with_native_driver() {
+        let manager = test_manager("hive-native-replaces-legacy-jar");
+        let db_type = "hive";
         let version = "0.1.31";
-        let native_url = "https://example.com/dbx-agent-oracle";
+        let native_url = "https://example.com/dbx-agent-hive";
         let native_bytes = b"native-agent";
         let registry = registry_with_native_and_legacy_jar(db_type, version, native_url, native_bytes.len() as u64);
         let native_path = manager.driver_native_path(db_type);
+        std::fs::create_dir_all(manager.driver_dir(db_type)).unwrap();
+        write_test_agent_jar(&manager.driver_jar_path(db_type));
         let cache_path =
             write_cached_driver_download(&manager, db_type, version, native_url, &native_path, native_bytes);
         let events = std::sync::Mutex::new(Vec::new());

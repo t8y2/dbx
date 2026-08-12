@@ -232,6 +232,7 @@ type completionAssistantCandidate struct {
 	ParentName   *string `json:"parent_name"`
 	Comment      *string `json:"comment"`
 	DataType     *string `json:"data_type"`
+	Signature    *string `json:"signature"`
 }
 
 type completionAssistantResponse struct {
@@ -1845,6 +1846,10 @@ func (s *server) oracleCompletionValidSynonymTargets(targets []oracleCompletionS
 }
 
 func (s *server) completionAssistantRoutines(request completionAssistantRequest, preferredSchema string, limit int) (completionAssistantResponse, error) {
+	if strings.TrimSpace(request.ParentName) != "" {
+		return s.completionAssistantPackageRoutines(request, preferredSchema, limit)
+	}
+
 	query := oracleCompletionRoutinesQuery(request, preferredSchema, limit+1)
 	rows, err := s.queryRows(query.SQL, query.Args)
 	if err != nil {
@@ -1884,6 +1889,176 @@ func (s *server) completionAssistantRoutines(request completionAssistantRequest,
 		candidates = candidates[:limit]
 	}
 	return completionAssistantResponse{Candidates: candidates, Incomplete: incomplete}, nil
+}
+
+type oraclePackageRoutineRow struct {
+	owner         string
+	parentName    string
+	name          string
+	objectID      int64
+	subprogramID  int64
+	position      sql.NullInt64
+	sequence      sql.NullInt64
+	argumentName  sql.NullString
+	inOut         sql.NullString
+	dataType      sql.NullString
+	typeOwner     sql.NullString
+	typeName      sql.NullString
+	typeSubname   sql.NullString
+	dataLength    sql.NullInt64
+	dataPrecision sql.NullInt64
+	dataScale     sql.NullInt64
+}
+
+type oraclePackageRoutine struct {
+	owner        string
+	parentName   string
+	name         string
+	isFunction   bool
+	returnType   string
+	argumentList []string
+}
+
+func (s *server) completionAssistantPackageRoutines(request completionAssistantRequest, preferredSchema string, limit int) (completionAssistantResponse, error) {
+	query := oracleCompletionPackageRoutinesQuery(request, preferredSchema)
+	rows, err := s.queryRows(query.SQL, query.Args)
+	if err != nil {
+		return completionAssistantResponse{}, err
+	}
+	defer s.closeRows(rows)
+
+	packageRows := make([]oraclePackageRoutineRow, 0)
+	for rows.Next() {
+		var row oraclePackageRoutineRow
+		if err := rows.Scan(
+			&row.owner,
+			&row.parentName,
+			&row.name,
+			&row.objectID,
+			&row.subprogramID,
+			&row.position,
+			&row.sequence,
+			&row.argumentName,
+			&row.inOut,
+			&row.dataType,
+			&row.typeOwner,
+			&row.typeName,
+			&row.typeSubname,
+			&row.dataLength,
+			&row.dataPrecision,
+			&row.dataScale,
+		); err != nil {
+			return completionAssistantResponse{}, err
+		}
+		packageRows = append(packageRows, row)
+	}
+	if err := rows.Err(); err != nil {
+		return completionAssistantResponse{}, err
+	}
+	return oracleCompletionPackageCandidates(packageRows, request.Database, limit), nil
+}
+
+func oracleCompletionPackageCandidates(rows []oraclePackageRoutineRow, database string, limit int) completionAssistantResponse {
+	routines := make([]oraclePackageRoutine, 0)
+	routineIndexes := make(map[string]int)
+	for _, row := range rows {
+		key := fmt.Sprintf("%s\x00%d\x00%d", row.owner, row.objectID, row.subprogramID)
+		index, found := routineIndexes[key]
+		if !found {
+			index = len(routines)
+			routineIndexes[key] = index
+			routines = append(routines, oraclePackageRoutine{owner: row.owner, parentName: row.parentName, name: row.name})
+		}
+		routine := &routines[index]
+		if !row.position.Valid {
+			continue
+		}
+		dataType := oracleCompletionArgumentDataType(row)
+		if row.position.Int64 == 0 {
+			routine.isFunction = true
+			routine.returnType = dataType
+			continue
+		}
+		argument := oracleCompletionArgumentSignature(row, dataType)
+		if argument != "" {
+			routine.argumentList = append(routine.argumentList, argument)
+		}
+	}
+
+	incomplete := len(routines) > limit
+	if incomplete {
+		routines = routines[:limit]
+	}
+	candidates := make([]completionAssistantCandidate, 0, len(routines))
+	for _, routine := range routines {
+		kind := "procedure"
+		if routine.isFunction {
+			kind = "function"
+		}
+		candidate := completionAssistantCandidate{
+			Name:         routine.name,
+			Kind:         kind,
+			Database:     stringPointer(database),
+			Schema:       stringPointer(routine.owner),
+			ParentSchema: stringPointer(routine.owner),
+			ParentName:   stringPointer(routine.parentName),
+			Signature:    stringPointer(strings.Join(routine.argumentList, ", ")),
+		}
+		if routine.returnType != "" {
+			candidate.DataType = stringPointer(routine.returnType)
+		}
+		candidates = append(candidates, candidate)
+	}
+	return completionAssistantResponse{Candidates: candidates, Incomplete: incomplete}
+}
+
+func oracleCompletionArgumentSignature(row oraclePackageRoutineRow, dataType string) string {
+	parts := make([]string, 0, 3)
+	if row.argumentName.Valid {
+		parts = append(parts, strings.TrimSpace(row.argumentName.String))
+	}
+	if row.inOut.Valid {
+		direction := strings.Join(strings.Fields(strings.ReplaceAll(row.inOut.String, "/", " ")), " ")
+		if direction != "" {
+			parts = append(parts, direction)
+		}
+	}
+	if dataType != "" {
+		parts = append(parts, dataType)
+	}
+	return strings.Join(parts, " ")
+}
+
+func oracleCompletionArgumentDataType(row oraclePackageRoutineRow) string {
+	typeParts := make([]string, 0, 3)
+	if row.typeOwner.Valid && strings.TrimSpace(row.typeOwner.String) != "" {
+		typeParts = append(typeParts, strings.TrimSpace(row.typeOwner.String))
+	}
+	if row.typeName.Valid && strings.TrimSpace(row.typeName.String) != "" {
+		typeParts = append(typeParts, strings.TrimSpace(row.typeName.String))
+	}
+	if row.typeSubname.Valid && strings.TrimSpace(row.typeSubname.String) != "" {
+		typeParts = append(typeParts, strings.TrimSpace(row.typeSubname.String))
+	}
+	if len(typeParts) > 0 {
+		return strings.Join(typeParts, ".")
+	}
+
+	dataType := strings.TrimSpace(row.dataType.String)
+	switch strings.ToUpper(dataType) {
+	case "NUMBER", "NUMERIC", "DECIMAL":
+		if row.dataPrecision.Valid {
+			if row.dataScale.Valid {
+				return fmt.Sprintf("%s(%d, %d)", dataType, row.dataPrecision.Int64, row.dataScale.Int64)
+			}
+			return fmt.Sprintf("%s(%d)", dataType, row.dataPrecision.Int64)
+		}
+	case "CHAR", "VARCHAR", "VARCHAR2", "NCHAR", "NVARCHAR2", "RAW":
+		if row.dataLength.Valid && row.dataLength.Int64 > 0 {
+			return fmt.Sprintf("%s(%d)", dataType, row.dataLength.Int64)
+		}
+	}
+	return dataType
 }
 
 func stringPointer(value string) *string {
@@ -1983,31 +2158,11 @@ func oracleCompletionSynonymTargetsQuery(targets []oracleCompletionSynonymTarget
 
 func oracleCompletionRoutinesQuery(request completionAssistantRequest, preferredSchema string, limit int) oracleMetadataListQuery {
 	pattern := oracleCompletionLikePattern(request.Mask, request.MatchMode)
-	args := make([]any, 0, 6)
+	args := make([]any, 0, 5)
 	baseSQL := `
 SELECT o.OWNER, o.OBJECT_NAME, o.OBJECT_TYPE, CAST(NULL AS VARCHAR2(128)) AS PARENT_NAME
 FROM ALL_OBJECTS o
 WHERE o.OBJECT_TYPE IN ('FUNCTION', 'PROCEDURE', 'PACKAGE')`
-	if parentName := strings.ToUpper(strings.TrimSpace(request.ParentName)); parentName != "" {
-		args = append(args, parentName)
-		parentParam := len(args)
-		baseSQL = fmt.Sprintf(`
-SELECT p.OWNER,
-       p.PROCEDURE_NAME AS OBJECT_NAME,
-       CASE WHEN EXISTS (
-         SELECT 1
-         FROM ALL_ARGUMENTS a
-         WHERE a.OWNER = p.OWNER
-           AND a.OBJECT_ID = p.OBJECT_ID
-           AND a.SUBPROGRAM_ID = p.SUBPROGRAM_ID
-           AND a.POSITION = 0
-       ) THEN 'FUNCTION' ELSE 'PROCEDURE' END AS OBJECT_TYPE,
-       p.OBJECT_NAME AS PARENT_NAME
-FROM ALL_PROCEDURES p
-WHERE p.OBJECT_TYPE = 'PACKAGE'
-  AND p.PROCEDURE_NAME IS NOT NULL
-  AND p.OBJECT_NAME = :%d`, parentParam)
-	}
 	args = append(args, pattern)
 	nameParam := len(args)
 
@@ -2034,6 +2189,52 @@ WHERE p.OBJECT_TYPE = 'PACKAGE'
 	orderedSQL := oracleCompletionOrderedSQL(filteredSQL, "OBJECT_NAME", "OBJECT_TYPE", preferredParam, exactParam)
 	return oracleMetadataListQuery{
 		SQL:  fmt.Sprintf("SELECT OWNER, OBJECT_NAME, OBJECT_TYPE, PARENT_NAME FROM (\n%s\n) WHERE ROWNUM <= :%d", orderedSQL, limitParam),
+		Args: args,
+	}
+}
+
+func oracleCompletionPackageRoutinesQuery(request completionAssistantRequest, preferredSchema string) oracleMetadataListQuery {
+	owner := strings.TrimSpace(request.ParentSchema)
+	if owner == "" {
+		owner = strings.TrimSpace(request.Schema)
+	}
+	if owner == "" {
+		owner = preferredSchema
+	}
+	parentName := strings.TrimSpace(request.ParentName)
+	pattern := oracleCompletionLikePattern(request.Mask, request.MatchMode)
+	args := []any{owner, parentName, pattern}
+	return oracleMetadataListQuery{
+		SQL: fmt.Sprintf(`SELECT p.OWNER,
+       p.OBJECT_NAME AS PARENT_NAME,
+       p.PROCEDURE_NAME AS OBJECT_NAME,
+       p.OBJECT_ID,
+       p.SUBPROGRAM_ID,
+       a.POSITION,
+       a.SEQUENCE,
+       a.ARGUMENT_NAME,
+       a.IN_OUT,
+       a.DATA_TYPE,
+       a.TYPE_OWNER,
+       a.TYPE_NAME,
+       a.TYPE_SUBNAME,
+       a.DATA_LENGTH,
+       a.DATA_PRECISION,
+       a.DATA_SCALE
+FROM ALL_PROCEDURES p
+LEFT JOIN ALL_ARGUMENTS a
+  ON a.OWNER = p.OWNER
+ AND a.OBJECT_ID = p.OBJECT_ID
+ AND a.SUBPROGRAM_ID = p.SUBPROGRAM_ID
+ AND a.DATA_LEVEL = 0
+WHERE p.OBJECT_TYPE = 'PACKAGE'
+  AND p.PROCEDURE_NAME IS NOT NULL
+  AND p.OWNER = :1
+  AND p.OBJECT_NAME = :2
+  AND %s
+ORDER BY p.PROCEDURE_NAME,
+         p.SUBPROGRAM_ID,
+         NVL(a.SEQUENCE, 0)`, oracleCompletionNamePredicate("p.PROCEDURE_NAME", 3, request.CaseSensitive)),
 		Args: args,
 	}
 }
@@ -2213,7 +2414,7 @@ func (s *server) listIndexes(schema, table string) ([]indexInfo, error) {
 	if err != nil {
 		return nil, err
 	}
-	table = strings.ToUpper(strings.TrimSpace(table))
+	table = strings.TrimSpace(table)
 	rows, err := s.queryRows(`
 SELECT i.INDEX_NAME,
        ic.COLUMN_NAME,
@@ -2273,7 +2474,7 @@ func (s *server) listForeignKeys(schema, table string) ([]foreignKeyInfo, error)
 	if err != nil {
 		return nil, err
 	}
-	table = strings.ToUpper(strings.TrimSpace(table))
+	table = strings.TrimSpace(table)
 	rows, err := s.queryRows(`
 SELECT ac.CONSTRAINT_NAME,
        acc.COLUMN_NAME,
@@ -2309,7 +2510,7 @@ func (s *server) listTriggers(schema, table string) ([]triggerInfo, error) {
 	if err != nil {
 		return nil, err
 	}
-	table = strings.ToUpper(strings.TrimSpace(table))
+	table = strings.TrimSpace(table)
 	rows, err := s.queryRows(oracleListTriggersSQL, []any{schema, table})
 	if err != nil {
 		return nil, err

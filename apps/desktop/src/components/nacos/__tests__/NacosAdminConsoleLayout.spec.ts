@@ -115,6 +115,76 @@ describe("NacosAdminConsole config workbench layout", () => {
     expect(source).toContain("instance.healthy === false ? 'border-destructive/50 text-destructive' : 'border-emerald-500/50 text-emerald-700 dark:text-emerald-300'");
   });
 
+  it("keeps the configuration editor zoom behavior aligned with the SQL editor", () => {
+    expect(source).toContain("createEditorZoomCommitScheduler");
+    expect(source).toContain("EditorView.domEventHandlers");
+    expect(source).toContain("fontSizeFromWheelDelta(configEditorFontSize.value, event.deltaY)");
+    expect(source).toContain("if (!event.metaKey && !event.ctrlKey) return false;");
+    expect(source).toContain("configEditorZoomCommitScheduler.dispose()");
+  });
+
+  it("allows optional configuration columns to be hidden without hiding the data ID", () => {
+    const configListHeader = source.indexOf('class="sticky top-0 z-20 grid border-b bg-muted');
+    const columnVisibility = source.indexOf("nacos.visibleColumns");
+
+    expect(configListHeader).toBeGreaterThan(0);
+    expect(columnVisibility).toBeGreaterThan(configListHeader);
+    expect(source).toContain("configListToggleableColumns");
+    expect(source).toContain("DropdownMenuCheckboxItem");
+    expect(source).toContain("nacos.visibleColumns");
+    expect(source).toContain('v-for="(column, columnIndex) in configListColumns"');
+    expect(source).toContain("column === 'dataId'");
+  });
+
+  it("marks the selected configuration without giving its row the header background", () => {
+    expect(source).toContain("function isSelectedConfigListItem");
+    expect(source).toContain(":class=\"{ 'border-l-2 border-l-primary': isSelectedConfigListItem(item) }\"");
+  });
+
+  it("adds a guarded batch delete action for selected configurations", () => {
+    const toolbar = source.indexOf('class="flex min-w-0 flex-wrap items-center justify-end gap-2"');
+    const batchDeleteButton = source.indexOf("v-if=\"activeTab === 'configs' && selectedConfigCount > 0\"");
+
+    expect(toolbar).toBeGreaterThan(0);
+    expect(batchDeleteButton).toBeGreaterThan(toolbar);
+    expect(source).toContain('class="border-l border-current/30 pl-1.5 text-xs font-semibold tabular-nums"');
+    expect(source).not.toContain('<Badge variant="outline" class="h-5 min-w-5 border-current px-1.5 text-current">{{ selectedConfigCount }}</Badge>');
+    expect(source).toContain("const pendingBatchDelete = ref<NacosBatchDeleteSnapshot | null>(null);");
+    expect(source).toContain("const canRequestBatchDeleteConfigs = computed(");
+    expect(source).toContain("function requestBatchDeleteConfigs()");
+    expect(source).toContain("async function deleteSelectedConfigs()");
+    expect(source).toContain('await confirmNacosMutation(t("nacos.batchDelete"), snapshot.connectionId, snapshot.namespace)');
+    expect(source).toContain("for (const key of snapshot.keys)");
+    expect(source).toContain("await api.nacosDeleteConfig(snapshot.connectionId, key);");
+    expect(source).toContain("function reconcileDeletedConfigSelection(deletedKeys: ReadonlySet<string>)");
+    expect(source).toContain("reconcileDeletedConfigSelection(deletedKeys);");
+    expect(source).toContain("nacos.batchDeletePartial");
+    expect(source).toContain("nacos.batchDeleteInterrupted");
+  });
+
+  it("allows the Nacos configuration page size to be changed within the supported range", () => {
+    expect(source).toContain("const NACOS_CONFIG_PAGE_SIZE_OPTIONS = [20, 50, 100, 200, 500] as const;");
+    expect(source).toContain('const NACOS_CONFIG_PAGE_SIZE_STORAGE_KEY = "dbx-nacos-config-page-size";');
+    expect(source).toContain("function setConfigPageSize(value: string)");
+    expect(source).toContain("safeLocalStorageSet(NACOS_CONFIG_PAGE_SIZE_STORAGE_KEY, String(nextPageSize));");
+    expect(source).toContain('t("nacos.configPageSize")');
+    expect(source).toContain('v-for="size in NACOS_CONFIG_PAGE_SIZE_OPTIONS"');
+    expect(source).toContain('@update:model-value="setConfigPageSize(String($event))"');
+    expect(source).toContain(":aria-label=\"t('nacos.configPageSize')\"");
+    expect(source).toContain('class="grid shrink-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-2 border-t px-3 py-2 text-xs text-muted-foreground"');
+    expect(source).not.toContain('class="flex shrink-0 flex-wrap items-center justify-between gap-x-3 gap-y-2 border-t px-3 py-2 text-xs text-muted-foreground"');
+    const footerStart = source.indexOf('class="grid shrink-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-2 border-t px-3 py-2 text-xs text-muted-foreground"');
+    const footerEnd = source.indexOf("</div>\n        </div>\n      </Pane>", footerStart);
+    expect(source.slice(footerStart, footerEnd)).not.toContain('t("nacos.selectedCount", { count: selectedConfigCount })');
+    expect(source).toContain('<ChevronLeft class="h-3.5 w-3.5" />');
+    expect(source).toContain('<ChevronRight class="h-3.5 w-3.5" />');
+  });
+
+  it("uses semantic coloring for instance enable and disable actions", () => {
+    expect(source).toContain("border-emerald-500/50 text-emerald-700");
+    expect(source).toContain("border-destructive/50 text-destructive hover:bg-destructive/10");
+  });
+
   it("separates the service header, filtering controls, and management actions", () => {
     expect(source).toContain('<header class="shrink-0 border-b bg-background">');
     expect(source).toContain('class="flex flex-wrap items-center gap-x-4 gap-y-2 border-t bg-muted/30 px-4 py-2"');

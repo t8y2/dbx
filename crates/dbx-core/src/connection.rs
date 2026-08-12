@@ -2465,6 +2465,15 @@ impl AppState {
             return Err("Oracle TNS connections cannot be combined with SSH, proxy, or HTTP tunnel layers. Remove the transport layer or use Service Name/SID mode.".to_string());
         }
 
+        #[cfg(feature = "mq-admin")]
+        if config.db_type == DatabaseType::MessageQueue
+            && crate::mq::config::MqAdminConfig::from_connection(config)?.system_kind
+                == crate::mq::types::MqSystemKind::RocketMq
+        {
+            self.rocketmq_socks_proxy_for_transport_layers(connection_id, &transport_layers).await?;
+            return Ok((config.host.clone(), config.port));
+        }
+
         let (remote_host, remote_port) = connection_remote_endpoint(config);
         let local_port = db::transport_layer_tunnel::start_transport_layers(
             connection_id,
@@ -2670,6 +2679,69 @@ impl AppState {
     }
 
     #[cfg(feature = "mq-admin")]
+    async fn rocketmq_socks_proxy_for_transport_layers(
+        &self,
+        connection_id: &str,
+        transport_layers: &[TransportLayerConfig],
+    ) -> Result<crate::mq::config::MqSocksProxy, String> {
+        // ProxyType 仅此 mq-admin 分支用到，局部导入避免在关闭 mq-admin 时
+        // 顶层 import 触发 unused 警告。
+        use crate::models::connection::ProxyType;
+        let final_layer = transport_layers.last().ok_or("No transport layers configured")?;
+        match final_layer {
+            TransportLayerConfig::Ssh(_) => {
+                let local_port = db::transport_layer_tunnel::start_transport_layers_with_final_ssh_socks5(
+                    connection_id,
+                    transport_layers,
+                    &self.tunnels,
+                    &self.proxy_tunnels,
+                    &self.http_tunnels,
+                )
+                .await?;
+                Ok(crate::mq::config::MqSocksProxy {
+                    host: "127.0.0.1".to_string(),
+                    port: local_port,
+                    username: String::new(),
+                    password: String::new(),
+                })
+            }
+            TransportLayerConfig::Proxy(proxy) if proxy.proxy_type == ProxyType::Socks5 => {
+                if transport_layers.len() == 1 {
+                    Ok(crate::mq::config::MqSocksProxy {
+                        host: proxy.host.clone(),
+                        port: proxy.port,
+                        username: proxy.username.clone(),
+                        password: proxy.password.clone(),
+                    })
+                } else {
+                    let local_port = db::transport_layer_tunnel::start_transport_layers(
+                        connection_id,
+                        &transport_layers[..transport_layers.len() - 1],
+                        &proxy.host,
+                        proxy.port,
+                        &self.tunnels,
+                        &self.proxy_tunnels,
+                        &self.http_tunnels,
+                    )
+                    .await?;
+                    Ok(crate::mq::config::MqSocksProxy {
+                        host: "127.0.0.1".to_string(),
+                        port: local_port,
+                        username: proxy.username.clone(),
+                        password: proxy.password.clone(),
+                    })
+                }
+            }
+            TransportLayerConfig::Proxy(_) => {
+                Err("RocketMQ requires a SOCKS5 proxy as the final proxy layer".to_string())
+            }
+            TransportLayerConfig::HttpTunnel(_) => {
+                Err("RocketMQ does not support an HTTP tunnel as the final transport layer".to_string())
+            }
+        }
+    }
+
+    #[cfg(feature = "mq-admin")]
     pub async fn mq_admin_config_for_connection(
         &self,
         connection_id: &str,
@@ -2678,6 +2750,12 @@ impl AppState {
         let mqc = crate::mq::config::MqAdminConfig::from_connection(config)?;
         if !config.has_effective_transport_layers() {
             return Ok(mqc);
+        }
+
+        if mqc.system_kind == crate::mq::types::MqSystemKind::RocketMq {
+            let transport_layers = self.resolved_transport_layers(config).await?;
+            let proxy = self.rocketmq_socks_proxy_for_transport_layers(connection_id, &transport_layers).await?;
+            return Ok(mqc.with_socks_proxy(&proxy.host, proxy.port, &proxy.username, &proxy.password));
         }
 
         if mqc.system_kind == crate::mq::types::MqSystemKind::RabbitMq {
@@ -7826,6 +7904,50 @@ for line in sys.stdin:
         assert_eq!(connect_override.host, "127.0.0.1");
         assert_ne!(connect_override.port, 8443);
         state.proxy_tunnels.stop_tunnel("proxied-mq:transport:0").await;
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(feature = "mq-admin")]
+    #[tokio::test]
+    async fn rocketmq_transport_passes_socks_proxy_to_multi_endpoint_client() {
+        let (state, dir) = test_app_state().await;
+        let mut config = mysql_config(None);
+        config.id = "proxied-rocketmq".to_string();
+        config.db_type = DatabaseType::MessageQueue;
+        config.host = "172.19.191.166".to_string();
+        config.port = 9876;
+        config.external_config = Some(serde_json::json!({
+            "systemKind": "rocketmq",
+            "adminUrl": "",
+            "auth": { "kind": "none" },
+            "extra": { "namesrvAddr": "172.19.191.166:9876" }
+        }));
+        config.transport_layers = vec![TransportLayerConfig::Proxy(ProxyTunnelConfig {
+            profile_id: String::new(),
+            id: "proxy".to_string(),
+            name: String::new(),
+            enabled: true,
+            proxy_type: ProxyType::Socks5,
+            host: "proxy.internal".to_string(),
+            port: 1080,
+            username: "proxy-user".to_string(),
+            password: "proxy-secret".to_string(),
+            test_target: None,
+        })];
+
+        let endpoint = state.connection_host_port("proxied-rocketmq", &config).await.unwrap();
+        assert_eq!(endpoint, ("172.19.191.166".to_string(), 9876));
+        assert!(state.proxy_tunnels.local_port("proxied-rocketmq:transport:0").await.is_none());
+
+        let mqc = state.mq_admin_config_for_connection("proxied-rocketmq", &config).await.unwrap();
+
+        let socks_proxy = mqc.socks_proxy.expect("RocketMQ transport should configure SOCKS5 routing");
+        assert_eq!(socks_proxy.host, "proxy.internal");
+        assert_eq!(socks_proxy.port, 1080);
+        assert_eq!(socks_proxy.username, "proxy-user");
+        assert_eq!(socks_proxy.password, "proxy-secret");
+        assert!(mqc.connect_override.is_none());
+        assert!(state.proxy_tunnels.local_port("proxied-rocketmq:transport:0").await.is_none());
         let _ = std::fs::remove_dir_all(dir);
     }
 

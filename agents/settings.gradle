@@ -4,7 +4,7 @@ def infrastructureModules = ['common', 'test-support']
 def driverModules = [
     'access', 'dameng', 'goldendb', 'databend', 'databricks', 'saphana',
     'teradata', 'vertica', 'firebird', 'exasol', 'oceanbase-oracle', 'gbase8a', 'gbase8s',
-    'bigquery', 'kylin', 'sundb', 'h2', 'h2-legacy', 'snowflake', 'trino', 'hive', 'spark',
+    'bigquery', 'kylin', 'sundb', 'h2', 'h2-legacy', 'snowflake', 'trino', 'spark',
     'db2', 'informix', 'mongodb', 'highgo', 'uxdb', 'yashandb', 'oscar',
     'iris', 'etcd', 'zookeeper', 'kafka', 'rocketmq', 'sqlserver-legacy'
 ]

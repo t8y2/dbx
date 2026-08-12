@@ -14,6 +14,7 @@ import type {
   CompletionAssistantRequest,
   CompletionAssistantResponse,
   ObjectStatistics,
+  CustomTypeDetails,
   ObjectSource,
   ObjectSourceKind,
   ColumnInfo,
@@ -647,6 +648,10 @@ export async function listDatabases(connectionId: string): Promise<DatabaseInfo[
   return get(`/api/schema/databases?${qs({ connection_id: connectionId })}`);
 }
 
+export async function listDatabaseMetadata(connectionId: string): Promise<DatabaseInfo[]> {
+  return get(`/api/schema/database-metadata?${qs({ connection_id: connectionId })}`);
+}
+
 export async function listDatabaseStorage(connectionId: string, databases: string[]): Promise<DatabaseStorageInfo[]> {
   return post("/api/schema/database-storage", {
     connection_id: connectionId,
@@ -740,6 +745,10 @@ export async function completionAssistantSearch(request: CompletionAssistantRequ
 
 export async function getObjectSource(connectionId: string, database: string, schema: string, name: string, objectType: ObjectSourceKind, signature?: string, relationName?: string): Promise<ObjectSource> {
   return get(`/api/schema/object-source?${qs({ connection_id: connectionId, database, schema, table: name, object_type: objectType, signature, relation_name: relationName })}`);
+}
+
+export async function getCustomTypeDetails(connectionId: string, database: string, schema: string, name: string): Promise<CustomTypeDetails> {
+  return get(`/api/schema/custom-type-details?${qs({ connection_id: connectionId, database, schema, table: name })}`);
 }
 
 export async function getColumns(connectionId: string, database: string, schema: string, table: string, catalog?: string, clientSessionId?: string): Promise<ColumnInfo[]> {
@@ -1246,8 +1255,8 @@ export async function analyzeEditableQueryEditability(sql: string): Promise<Quer
   return post("/api/query/analyze-editability", { sql });
 }
 
-export async function prepareDataGridSave(options: DataGridSaveStatementOptions): Promise<DataGridSavePreparation> {
-  return post("/api/query/prepare-data-grid-save", { options });
+export async function prepareDataGridSave(options: DataGridSaveStatementOptions, driverProfile?: string): Promise<DataGridSavePreparation> {
+  return post("/api/query/prepare-data-grid-save", { options, driverProfile });
 }
 
 export async function extractDataGridSelection(request: DataGridExtractRequest): Promise<DataGridExtractResult> {
@@ -3584,13 +3593,14 @@ export async function mongoInsertDocument(connectionId: string, database: string
   return documentInsertDocument(connectionId, database, collection, docJson, routing);
 }
 
-export async function documentInsertDocument(connectionId: string, database: string, collection: string, docJson: string, routing?: string): Promise<string> {
+export async function documentInsertDocument(connectionId: string, database: string, collection: string, docJson: string, routing?: string, preserveBsonTypes?: boolean): Promise<string> {
   return post("/api/document-store/insert-document", {
     connectionId,
     database,
     collection,
     docJson,
     routing,
+    preserveBsonTypes,
   });
 }
 

@@ -18,7 +18,7 @@ pub struct ConsulClient {
 }
 
 impl ConsulClient {
-    pub async fn new(config: ConsulConfig) -> Result<Self, String> {
+    pub async fn new(mut config: ConsulConfig) -> Result<Self, String> {
         let mut builder = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(config.connect_timeout_secs.max(1)))
             .redirect(reqwest::redirect::Policy::none());
@@ -58,12 +58,16 @@ impl ConsulClient {
                 .map_err(|error| format!("Failed to parse Consul client identity: {error}"))?;
             builder = builder.identity(identity);
         }
-        if let Some((override_host, override_port)) = &config.connect_override {
-            let original_host = config.base_url.host_str().ok_or("Consul server address has no host")?;
+        if let Some((override_host, override_port)) = config.connect_override.clone() {
+            let original_host = config.base_url.host_str().ok_or("Consul server address has no host")?.to_string();
             let ip = override_host
                 .parse::<IpAddr>()
                 .map_err(|_| format!("Consul transport target must resolve to an IP address: {override_host}"))?;
-            builder = builder.resolve(original_host, SocketAddr::new(ip, *override_port));
+            config
+                .base_url
+                .set_port(Some(override_port))
+                .map_err(|_| "Consul server address cannot use the transport override port".to_string())?;
+            builder = builder.resolve(&original_host, SocketAddr::new(ip, override_port));
         }
         let http = builder.build().map_err(|error| format!("Failed to initialize Consul HTTP client: {error}"))?;
         Ok(Self { config, http })
@@ -240,6 +244,41 @@ pub(crate) async fn ensure_writable_core(state: &AppState, connection_id: &str, 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::consul::test_support::serve_once;
+
+    #[tokio::test]
+    async fn connect_override_replaces_explicit_base_url_port() {
+        let body = "[]";
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let (mut base_url, request_rx) = serve_once(response).await;
+        let tunnel_port = base_url.port().unwrap();
+        base_url.set_host(Some("consul.internal")).unwrap();
+        base_url.set_port(Some(1)).unwrap();
+        let mut config = test_config("");
+        config.base_url = base_url;
+        config.connect_override = Some(("127.0.0.1".to_string(), tunnel_port));
+
+        let client = ConsulClient::new(config).await.unwrap();
+        assert_eq!(client.config.base_url.host_str(), Some("consul.internal"));
+        assert_eq!(client.config.base_url.port(), Some(tunnel_port));
+        client.probe().await.unwrap();
+
+        let request = request_rx.await.unwrap();
+        assert!(request.starts_with("GET /proxy/v1/kv/?"));
+    }
+
+    #[tokio::test]
+    async fn direct_connection_preserves_base_url() {
+        let config = test_config("");
+        let expected = config.base_url.clone();
+
+        let client = ConsulClient::new(config).await.unwrap();
+
+        assert_eq!(client.config.base_url, expected);
+    }
 
     #[test]
     fn preserves_proxy_path_scope_and_token_header() {

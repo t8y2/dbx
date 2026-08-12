@@ -598,8 +598,9 @@ pub fn analyze_editable_query_editability(sql: String) -> Result<dbx_core::sql_e
 #[tauri::command]
 pub fn prepare_data_grid_save(
     options: dbx_core::data_grid_sql::DataGridSaveStatementOptions,
+    driver_profile: Option<String>,
 ) -> Result<dbx_core::data_grid_sql::DataGridSavePreparation, String> {
-    Ok(dbx_core::data_grid_sql::prepare_data_grid_save(options))
+    Ok(dbx_core::data_grid_sql::prepare_data_grid_save_for_driver_profile(options, driver_profile.as_deref()))
 }
 
 #[tauri::command]

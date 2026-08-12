@@ -32,6 +32,7 @@ import java.sql.SQLFeatureNotSupportedException;
 import java.sql.SQLNonTransientConnectionException;
 import java.sql.SQLRecoverableException;
 import java.sql.SQLSyntaxErrorException;
+import java.sql.SQLTimeoutException;
 import java.sql.SQLTransientConnectionException;
 import java.sql.SQLXML;
 import java.sql.Statement;
@@ -48,6 +49,7 @@ import java.util.Set;
 
 public final class DamengAgent extends AbstractJdbcAgent {
     private static final String AGENT_VERSION = "9999.06.04.1-fix-default";
+    private static final int DBMS_OUTPUT_ENABLE_TIMEOUT_SECS = 5;
     private static final String DAMENG_CLASSIFIED_OBJECT_TYPE_SQL =
         "CASE WHEN o.OBJECT_TYPE = 'MATERIALIZED VIEW' OR (o.OBJECT_TYPE = 'VIEW' AND mv.MVIEW_NAME IS NOT NULL) "
             + "THEN 'MATERIALIZED_VIEW' ELSE o.OBJECT_TYPE END";
@@ -110,6 +112,7 @@ public final class DamengAgent extends AbstractJdbcAgent {
     @Override
     protected void afterPhysicalConnect(ConnectParams params, Connection connection) throws SQLException {
         try (Statement statement = connection.createStatement()) {
+            statement.setQueryTimeout(DBMS_OUTPUT_ENABLE_TIMEOUT_SECS);
             statement.execute("BEGIN DBMS_OUTPUT.ENABLE(1000000); END;");
         } catch (SQLException error) {
             if (!isIgnorableDbmsOutputError(error)) {
@@ -131,7 +134,9 @@ public final class DamengAgent extends AbstractJdbcAgent {
         for (Throwable current = error; current != null; current = current.getCause()) {
             if (current instanceof SQLException sqlError) {
                 for (SQLException candidate = sqlError; candidate != null; candidate = candidate.getNextException()) {
-                    if (candidate instanceof SQLFeatureNotSupportedException || candidate instanceof SQLSyntaxErrorException) {
+                    if (candidate instanceof SQLFeatureNotSupportedException
+                        || candidate instanceof SQLSyntaxErrorException
+                        || candidate instanceof SQLTimeoutException) {
                         return true;
                     }
                     String sqlState = candidate.getSQLState();

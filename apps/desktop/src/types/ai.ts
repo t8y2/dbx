@@ -1,4 +1,4 @@
-export type AiProvider = "claude" | "openai" | "gemini" | "deepseek" | "qwen" | "minimax" | "ollama" | "anthropic-compatible" | "openai-compatible" | "claude-code-cli" | "pi-agent-cli" | "codex-cli" | "opencode-cli" | "cursor-cli" | "grok-cli" | "custom";
+export type AiProvider = "claude" | "openai" | "gemini" | "deepseek" | "qwen" | "minimax" | "ollama" | "anthropic-compatible" | "openai-compatible" | "claude-code-cli" | "pi-agent-cli" | "codex-cli" | "opencode-cli" | "cursor-cli" | "grok-cli" | "codebuddy-cli" | "qoder-cli" | "custom";
 export type AiApiStyle = "completions" | "responses" | "anthropic-messages";
 export type AiAuthMethod = "api-key" | "bearer";
 export type AiEffortLevel = "low" | "medium" | "high" | "xhigh" | "max";
@@ -53,6 +53,10 @@ export interface AiConfig {
   cursorCliEnv?: Record<string, string>;
   grokCliPath?: string | null;
   grokCliEnv?: Record<string, string>;
+  codebuddyCliPath?: string | null;
+  codebuddyCliEnv?: Record<string, string>;
+  qoderCliPath?: string | null;
+  qoderCliEnv?: Record<string, string>;
   runtimeEffort?: AiEffortSelection | null;
 }
 

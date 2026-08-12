@@ -315,6 +315,30 @@ class MongoAgentTest {
     }
 
     @Test
+    void findOnePreservesTopLevelAndNestedNullsOverJsonRpc() {
+        List<String> calls = new ArrayList<>();
+        MongoClient client = recordingFindOneMongoClient(
+            calls,
+            new Document("_id", 1)
+                .append("nullable", null)
+                .append("nested", new Document("nullable", null).append("kept", "value"))
+        );
+
+        JsonObject result = JsonParser.parseString(MongoAgent.handleRequest(
+            "{\"jsonrpc\":\"2.0\",\"id\":22,\"method\":\"find_one\"," +
+                "\"params\":{\"database\":\"app\",\"collection\":\"orders\"}}",
+            client
+        )).getAsJsonObject().getAsJsonObject("result");
+        JsonObject document = result.getAsJsonArray("documents").get(0).getAsJsonObject();
+
+        assertTrue(document.has("nullable"));
+        assertTrue(document.get("nullable").isJsonNull());
+        assertTrue(document.getAsJsonObject("nested").get("nullable").isJsonNull());
+        assertEquals("value", document.getAsJsonObject("nested").get("kept").getAsString());
+        assertFalse(document.has("missing"));
+    }
+
+    @Test
     void findOneReturnsEmptyResultWhenNoDocumentMatches() {
         List<String> calls = new ArrayList<>();
         MongoClient client = recordingFindOneMongoClient(calls, null);

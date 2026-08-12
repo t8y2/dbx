@@ -12,7 +12,8 @@ import { matchSidebarLabel } from "@/lib/sidebar/sidebarSearch";
 import { buildTableTreeNodes } from "@/lib/table/tableTree";
 import { isCancelSearchShortcut, isCopySidebarSelectionShortcut, isEditSidebarConnectionShortcut, isPasteSidebarSelectionShortcut, isViewTableDdlShortcut } from "@/lib/editor/keyboardShortcuts";
 import { sidebarNodeSupportsDdlView } from "@/lib/sidebar/sidebarTreeDdlShortcut";
-import { copyNameForTreeNode, objectSourceKindForTreeNode } from "@/lib/sidebar/treeNodeClick";
+import { copyNameForTreeNode, objectSourceTargetForTreeNode } from "@/lib/sidebar/treeNodeClick";
+import { supportsTypeObjectSource } from "@/lib/database/databaseObjectCapabilities";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { connectionPasteTargetGroupId, copySelectedConnectionsToClipboards, selectedConnectionEditTarget } from "@/lib/sidebar/sidebarConnectionSelection";
 import { isEditableSidebarTypeSearchTarget, sidebarTypeSearchNextQuery } from "@/lib/sidebar/sidebarTypeSearch";
@@ -106,7 +107,8 @@ const sidebarDdlDatabaseType = computed(() => {
   const connectionId = sidebarDdlTarget.value?.connectionId;
   return connectionId ? effectiveDatabaseTypeForConnection(store.getConfig(connectionId)) : undefined;
 });
-const sidebarObjectSourceType = computed(() => (sidebarObjectSourceTarget.value ? objectSourceKindForTreeNode(sidebarObjectSourceTarget.value.node.type) : null));
+const sidebarObjectSourceResolvedTarget = computed(() => (sidebarObjectSourceTarget.value ? objectSourceTargetForTreeNode(sidebarObjectSourceTarget.value.node) : null));
+const sidebarObjectSourceType = computed(() => sidebarObjectSourceResolvedTarget.value?.objectType ?? null);
 const sidebarObjectSourceDatabaseType = computed(() => {
   const connectionId = sidebarObjectSourceTarget.value?.node.connectionId;
   return connectionId ? effectiveDatabaseTypeForConnection(store.getConfig(connectionId)) : undefined;
@@ -507,7 +509,7 @@ function measureSidebarCommentLabelWidths() {
       id,
       depth,
       alignable: isSidebarCommentAlignableNode(node),
-      hasComment: !!sidebarTreeNodeComment(node),
+      hasComment: !!sidebarTreeNodeComment(node, settingsStore.editorSettings.sidebarShowConnectionNotes),
       labelWidth: context.measureText(sidebarCommentLabel(node)).width,
     })),
   );
@@ -524,7 +526,7 @@ function scheduleSidebarCommentLabelMeasure() {
 
 function sidebarNodeHasTrailingMetadata(node: TreeNode): boolean {
   const mode = settingsStore.editorSettings.sidebarObjectInfoMode;
-  if (mode.startsWith("comment-") && sidebarTreeNodeComment(node)) return true;
+  if (mode.startsWith("comment-") && sidebarTreeNodeComment(node, settingsStore.editorSettings.sidebarShowConnectionNotes)) return true;
   return mode === "size" && sidebarStorageDisplayTypes.has(node.type) && !!formatSidebarObjectStorage(node.sizeBytes);
 }
 
@@ -561,10 +563,14 @@ function scheduleSidebarTreeContentWidthMeasure() {
   sidebarTreeContentMeasureFrame = window.requestAnimationFrame(measureSidebarTreeContentWidth);
 }
 
-watch([flatNodes, () => settingsStore.editorSettings.sidebarObjectInfoMode, () => settingsStore.editorSettings.sidebarHiddenTablePrefixes, () => settingsStore.editorSettings.uiFontFamily, () => settingsStore.editorSettings.uiScale], scheduleSidebarCommentLabelMeasure, {
-  flush: "post",
-  immediate: true,
-});
+watch(
+  [flatNodes, () => settingsStore.editorSettings.sidebarObjectInfoMode, () => settingsStore.editorSettings.sidebarShowConnectionNotes, () => settingsStore.editorSettings.sidebarHiddenTablePrefixes, () => settingsStore.editorSettings.uiFontFamily, () => settingsStore.editorSettings.uiScale],
+  scheduleSidebarCommentLabelMeasure,
+  {
+    flush: "post",
+    immediate: true,
+  },
+);
 
 watch([sidebarTreeNaturalWidthItems, () => settingsStore.editorSettings.uiFontFamily, () => settingsStore.editorSettings.uiScale], scheduleSidebarTreeContentWidthMeasure, {
   flush: "post",
@@ -1336,7 +1342,10 @@ function openSidebarDdlForSelection(): boolean {
 }
 
 function openSidebarObjectSource(node: TreeNode, initialEditing: boolean) {
-  if (!node.connectionId || !node.database || !objectSourceKindForTreeNode(node.type)) return;
+  if (!node.connectionId || !node.database || !objectSourceTargetForTreeNode(node)) return;
+  // TYPE/TYPE_BODY only have a source implementation on Xugu; PostgreSQL-family
+  // connections list user-defined types without a CREATE TYPE getter this cycle.
+  if ((node.type === "type" || node.type === "type-body") && !supportsTypeObjectSource(store.getConfig(node.connectionId)?.db_type)) return;
   const target = createSidebarActionTarget(node);
   const requestGeneration = beginSidebarAction();
   void store
@@ -1980,10 +1989,10 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes });
       v-model:open="sidebarObjectSourceOpen"
       :connection-id="sidebarObjectSourceTarget.node.connectionId!"
       :database="sidebarObjectSourceTarget.node.database!"
-      :schema="sidebarObjectSourceTarget.node.schema"
-      :name="sidebarObjectSourceTarget.node.objectName || sidebarObjectSourceTarget.node.label"
+      :schema="sidebarObjectSourceResolvedTarget?.schema"
+      :name="sidebarObjectSourceResolvedTarget!.name"
       :relation-name="sidebarObjectSourceTarget.node.tableName"
-      :signature="sidebarObjectSourceTarget.node.signature"
+      :signature="sidebarObjectSourceResolvedTarget?.signature"
       :object-type="sidebarObjectSourceType"
       :database-type="sidebarObjectSourceDatabaseType"
       :dialect="sidebarObjectSourceDialect"

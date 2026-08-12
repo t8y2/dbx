@@ -217,6 +217,20 @@ describe("useNavigationTargets with the real query store", () => {
     expect(queryStore.activeTabId).toBe(sidebarTabId);
   });
 
+  it("reuses existing table tab when navigating via object browser target in same-table mode", async () => {
+    mocks.settingsStore.editorSettings.dataTabReuseMode = "same-table";
+    const { navigation, queryStore } = await setupNavigation();
+    const target = { connectionId: "connection-1", database: "app", schema: "public", tableName: "users", tableType: "TABLE" };
+
+    await navigation.openObjectBrowserTableTarget(target);
+    const firstTabId = queryStore.activeTabId;
+
+    await navigation.openObjectBrowserTableTarget(target);
+
+    expect(queryStore.tabs).toHaveLength(1);
+    expect(queryStore.activeTabId).toBe(firstTabId);
+  });
+
   it("reuses a restored legacy MySQL tab when the same table is opened from the sidebar", async () => {
     mocks.connectionStore.getConfig.mockImplementation((connectionId: string) => ({ id: connectionId, db_type: "mysql" }));
     mocks.loadOpenTabsState.mockResolvedValue({

@@ -27,6 +27,7 @@ import type {
   CompletionAssistantRequest,
   CompletionAssistantResponse,
   ObjectStatistics,
+  CustomTypeDetails,
   ObjectSource,
   ObjectSourceKind,
   ColumnInfo,
@@ -927,6 +928,10 @@ export async function listDatabases(connectionId: string): Promise<DatabaseInfo[
   return invoke("list_databases", { connectionId });
 }
 
+export async function listDatabaseMetadata(connectionId: string): Promise<DatabaseInfo[]> {
+  return invoke("list_database_metadata", { connectionId });
+}
+
 export async function listDatabaseStorage(connectionId: string, databases: string[]): Promise<DatabaseStorageInfo[]> {
   return invoke("list_database_storage", { connectionId, databases });
 }
@@ -1055,6 +1060,9 @@ export async function listSchemaInfos(connectionId: string, database: string): P
   return invoke("list_schema_infos", { connectionId, database });
 }
 
+export async function getCustomTypeDetails(connectionId: string, database: string, schema: string, name: string): Promise<CustomTypeDetails> {
+  return invoke("get_custom_type_details", { connectionId, database, schema, name });
+}
 export async function getColumns(connectionId: string, database: string, schema: string, table: string, catalog?: string, clientSessionId?: string): Promise<ColumnInfo[]> {
   return invoke("get_columns", {
     connectionId,
@@ -1458,8 +1466,8 @@ export interface DataGridSavePreparation {
   executionSchema?: string;
 }
 
-export async function prepareDataGridSave(options: DataGridSaveStatementOptions): Promise<DataGridSavePreparation> {
-  return invoke("prepare_data_grid_save", { options });
+export async function prepareDataGridSave(options: DataGridSaveStatementOptions, driverProfile?: string): Promise<DataGridSavePreparation> {
+  return invoke("prepare_data_grid_save", { options, driverProfile });
 }
 
 export async function extractDataGridSelection(request: DataGridExtractRequest): Promise<DataGridExtractResult> {
@@ -3523,13 +3531,14 @@ export async function mongoInsertDocument(connectionId: string, database: string
   return documentInsertDocument(connectionId, database, collection, docJson, routing);
 }
 
-export async function documentInsertDocument(connectionId: string, database: string, collection: string, docJson: string, routing?: string): Promise<string> {
+export async function documentInsertDocument(connectionId: string, database: string, collection: string, docJson: string, routing?: string, preserveBsonTypes?: boolean): Promise<string> {
   return invoke("document_insert_document", {
     connectionId,
     database,
     collection,
     docJson,
     routing,
+    preserveBsonTypes,
   });
 }
 

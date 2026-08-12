@@ -609,28 +609,50 @@ public final class KafkaAgent {
     private static Object listTopics(JsonObject params) throws Exception {
         AdminClient admin = requireAdmin();
         int timeout = requestTimeout(params);
-        Set<String> names = admin.listTopics(new ListTopicsOptions().timeoutMs(timeout))
-            .names().get(timeout, TimeUnit.MILLISECONDS);
-        if (names.isEmpty()) {
+        Collection<TopicListing> listings = admin.listTopics(new ListTopicsOptions().timeoutMs(timeout))
+            .listings().get(timeout, TimeUnit.MILLISECONDS);
+        return topicListResult(
+            listings,
+            names -> admin.describeTopics(names).allTopicNames().get(timeout, TimeUnit.MILLISECONDS)
+        );
+    }
+
+    static Object topicListResult(Collection<TopicListing> listings, TopicDescriptionLoader descriptionLoader) throws Exception {
+        if (listings.isEmpty()) {
             return Collections.singletonMap("topics", Collections.emptyList());
         }
 
-        Map<String, TopicDescription> descriptions = admin.describeTopics(names)
-            .allTopicNames().get(timeout, TimeUnit.MILLISECONDS);
-
         List<Map<String, Object>> topics = new ArrayList<>();
-        for (Map.Entry<String, TopicDescription> entry : descriptions.entrySet()) {
-            TopicDescription desc = entry.getValue();
-            Map<String, Object> topic = new LinkedHashMap<>();
-            topic.put("name", desc.name());
-            topic.put("partitions", desc.partitions().size());
-            topic.put("replicationFactor", desc.partitions().isEmpty() ? 0
-                : desc.partitions().get(0).replicas().size());
-            topic.put("internal", desc.isInternal());
-            topics.add(topic);
+        try {
+            Set<String> names = listings.stream().map(TopicListing::name).collect(Collectors.toCollection(LinkedHashSet::new));
+            Map<String, TopicDescription> descriptions = descriptionLoader.load(names);
+            for (TopicDescription desc : descriptions.values()) {
+                Map<String, Object> topic = new LinkedHashMap<>();
+                topic.put("name", desc.name());
+                topic.put("partitions", desc.partitions().size());
+                topic.put("replicationFactor", desc.partitions().isEmpty() ? 0
+                    : desc.partitions().get(0).replicas().size());
+                topic.put("internal", desc.isInternal());
+                topics.add(topic);
+            }
+        } catch (Exception error) {
+            if (!isUnsupportedVersionError(error)) {
+                throw error;
+            }
+            for (TopicListing listing : listings) {
+                Map<String, Object> topic = new LinkedHashMap<>();
+                topic.put("name", listing.name());
+                topic.put("internal", listing.isInternal());
+                topics.add(topic);
+            }
         }
         topics.sort(Comparator.comparing(m -> (String) m.get("name")));
         return Collections.singletonMap("topics", topics);
+    }
+
+    @FunctionalInterface
+    interface TopicDescriptionLoader {
+        Map<String, TopicDescription> load(Set<String> names) throws Exception;
     }
 
     private static Object createTopic(JsonObject params) throws Exception {

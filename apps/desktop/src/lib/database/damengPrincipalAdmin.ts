@@ -63,17 +63,18 @@ export interface DamengCreateUserInput {
  * Built-in system accounts that must never be dropped, locked or altered from
  * the UI. Compared case-insensitively (see `isDamengSystemUser`).
  */
-export const DAMENG_SYSTEM_USERS = ["SYSDBA", "SYSSSO", "SYSAUDITOR", "SYS"] as const;
+export const DAMENG_SYSTEM_USERS = ["SYSDBA", "SYSSSO", "SYSAUDITOR", "SYSDBO", "SYS"] as const;
 
 /**
  * Identity category of each built-in system account, matching the DM
  * management tool terminology: SYSDBA = admin, SYSAUDITOR = audit,
- * SYSSSO = security, SYS = system.
+ * SYSSSO = security. SYSDBO and SYS remain in the protected system group.
  */
 export const DAMENG_SYSTEM_USER_CATEGORIES: Record<string, string> = {
   SYSDBA: "admin",
   SYSAUDITOR: "auditor",
   SYSSSO: "security",
+  SYSDBO: "system",
   SYS: "system",
 };
 
@@ -165,6 +166,11 @@ export const DAMENG_SYSTEM_PRIVILEGES = [
 export function isDamengSystemUser(username: string): boolean {
   const normalized = username.trim().toUpperCase();
   return DAMENG_SYSTEM_USERS.some((systemUser) => systemUser === normalized);
+}
+
+/** Direct role grants on regular users may be revoked, including predefined roles. */
+export function canDamengRevokeRoleGrant(username: string | undefined, grant: Pick<DamengGrant, "grantedRole" | "inherited"> | undefined): boolean {
+  return !!username && !!grant && !isDamengSystemUser(username) && !grant.inherited;
 }
 
 /**

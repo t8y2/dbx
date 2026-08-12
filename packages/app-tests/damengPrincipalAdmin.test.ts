@@ -30,6 +30,7 @@ import {
   parseDamengSystemPrivilegeMap,
   damengAvailableSystemPrivileges,
   canDamengAlterUserPassword,
+  canDamengRevokeRoleGrant,
   DAMENG_HIDDEN_ROLES,
   damengRoleGraphSql,
   parseDamengRoleGraph,
@@ -155,6 +156,8 @@ test("grant system privilege SQL supports admin option", () => {
 test("system users are protected", () => {
   for (const name of DAMENG_SYSTEM_USERS) assert.equal(isDamengSystemUser(name), true, name);
   assert.equal(isDamengSystemUser("sysdba"), true);
+  assert.equal(isDamengSystemUser("sysdbo"), true);
+  assert.equal(isDamengSystemUser("SYSDBO"), true);
   assert.equal(isDamengSystemUser("sys"), true);
   assert.equal(isDamengSystemUser("alice"), false);
 });
@@ -163,6 +166,8 @@ test("user grouping maps system accounts to categories and others to other", () 
   assert.equal(damengUserGroup("SYSDBA"), "admin");
   assert.equal(damengUserGroup("SYSAUDITOR"), "auditor");
   assert.equal(damengUserGroup("SYSSSO"), "security");
+  assert.equal(damengUserGroup("SYSDBO"), "system");
+  assert.equal(damengUserGroup("sysdbo"), "system");
   assert.equal(damengUserGroup("SYS"), "system");
   assert.equal(damengUserGroup("sysdba"), "admin");
   assert.equal(damengUserGroup("alice"), "other");
@@ -264,6 +269,8 @@ test("parseDamengTablespaces returns table space names", () => {
   assert.equal(canDamengAlterUserPassword("SYSDBA", "SYSAUDITOR"), false);
   assert.equal(canDamengAlterUserPassword("SYSSSO", "SYSSSO"), true);
   assert.equal(canDamengAlterUserPassword("SYSAUDITOR", "SYSAUDITOR"), true);
+  assert.equal(canDamengAlterUserPassword("SYSDBO", "SYSDBO"), true);
+  assert.equal(canDamengAlterUserPassword("SYSDBA", "SYSDBO"), false);
   // SYSDBA can change any regular user's password.
   assert.equal(canDamengAlterUserPassword("SYSDBA", "alice"), true);
   // A regular user can only change their own password.
@@ -277,6 +284,16 @@ test("parseDamengTablespaces returns table space names", () => {
   assert.equal(canDamengAlterUserPassword("sysdba", "ALICE"), true);
   assert.equal(canDamengAlterUserPassword(undefined, "alice"), false);
   assert.equal(canDamengAlterUserPassword("SYSDBA", undefined), false);
+});
+
+test("role revoke policy permits direct predefined grants only for regular users", () => {
+  assert.equal(canDamengRevokeRoleGrant("alice", { grantedRole: "DBA", inherited: false }), true);
+  assert.equal(canDamengRevokeRoleGrant("alice", { grantedRole: "RESOURCE" }), true);
+  assert.equal(canDamengRevokeRoleGrant("alice", { grantedRole: "VTI", inherited: true }), false);
+  assert.equal(canDamengRevokeRoleGrant("alice", { grantedRole: "SVI", inherited: true }), false);
+  assert.equal(canDamengRevokeRoleGrant("SYSDBO", { grantedRole: "DB_OBJECT_ADMIN", inherited: false }), false);
+  assert.equal(canDamengRevokeRoleGrant("sysdba", { grantedRole: "DBA", inherited: false }), false);
+  assert.equal(canDamengRevokeRoleGrant(undefined, { grantedRole: "DBA", inherited: false }), false);
 });
 test("damengRoleGraphSql selects the full role graph", () => {
   assert.equal(damengRoleGraphSql(), "SELECT GRANTEE, GRANTED_ROLE FROM DBA_ROLE_PRIVS");

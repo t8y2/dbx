@@ -36,6 +36,7 @@ import {
   damengUnlockUserSql,
   damengUserTypeGrantSqls,
   canDamengAlterUserPassword,
+  canDamengRevokeRoleGrant,
   isDamengSystemUser,
   isDamengPredefinedRole,
   DAMENG_HIDDEN_ROLES,
@@ -422,7 +423,7 @@ function previewGrantRole() {
 
 function previewRevokeRole(grant: DamengGrant) {
   const user = selectedUser.value;
-  if (!user) return;
+  if (!user || !canDamengRevokeRoleGrant(user.username, grant)) return;
   previewSql(damengRevokeRoleSql(user.username, grant.grantedRole), { danger: true });
 }
 
@@ -593,8 +594,8 @@ onMounted(() => {
                   size="sm"
                   variant="ghost"
                   class="h-6 gap-1 px-2 text-xs text-destructive hover:text-destructive"
-                  :disabled="selectedIsSystemUser || isDamengPredefinedRole(grant.grantedRole)"
-                  :title="selectedIsSystemUser ? t('damengUserAdmin.systemUserProtected') : isDamengPredefinedRole(grant.grantedRole) ? t('damengUserAdmin.builtinRoleProtected') : ''"
+                  :disabled="!canDamengRevokeRoleGrant(selectedUser.username, grant)"
+                  :title="selectedIsSystemUser ? t('damengUserAdmin.systemUserProtected') : ''"
                   @click="previewRevokeRole(grant)"
                 >
                   <Trash2 class="h-3 w-3" />

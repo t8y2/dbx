@@ -74,6 +74,10 @@ describe("sqlFormatter", () => {
     await expect(formatSqlForEditing("SELECT 1 .\n", "dameng")).resolves.toBe("SELECT\n  1 .\n");
   });
 
+  it("preserves the newline before a trailing dot after a line comment", async () => {
+    await expect(formatSqlForEditing("DELETE FROM accounts -- comment\n .", "dameng")).resolves.toBe("DELETE FROM accounts -- comment\n .");
+  });
+
   it("does not change trailing-dot formatting for other databases", async () => {
     await expect(formatSqlText("SELECT 1 .", "generic")).rejects.toThrow();
     await expect(formatSqlForEditing("SELECT 1 .", "generic")).resolves.toBe("SELECT 1 .");

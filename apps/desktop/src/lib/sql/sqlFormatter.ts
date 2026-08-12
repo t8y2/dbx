@@ -82,8 +82,8 @@ function splitTrailingStandaloneDot(sql: string): { body: string; suffix: string
   if (!match || match.index === 0) return null;
 
   return {
-    body: sql.slice(0, match.index).trimEnd(),
-    suffix: ` .${match[1]}`,
+    body: sql.slice(0, match.index),
+    suffix: match[0],
   };
 }
 

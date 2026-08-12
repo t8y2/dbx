@@ -339,8 +339,21 @@ function applySqlFormatterLayout(sql: string, settings: SqlFormatterSettings, di
   return formatted;
 }
 
+/**
+ * sql-formatter throws two distinct shapes when it can't parse the input:
+ * - Grammar-level (nearley parser): `Parse error at token: ... ` with `.offset`/`.token`
+ *   set on the error, e.g. valid tokens in an unexpected position (mid-edit SQL).
+ * - Lexer-level (TokenizerEngine): a plain `Parse error: Unexpected "..." at line ...`
+ *   when a character sequence doesn't match any token rule at all — e.g. full-width
+ *   punctuation (`≠`, `（`, `）`) that MySQL accepts in identifiers/expressions but
+ *   sql-formatter's tokenizer doesn't recognize.
+ * Both mean "sql-formatter can't handle this text", so both should fall back to the
+ * original SQL instead of surfacing a failure.
+ */
 function isSqlFormatterParseError(error: unknown): boolean {
-  if (!(error instanceof Error) || !error.message.startsWith("Parse error at token:")) return false;
+  if (!(error instanceof Error)) return false;
+  if (error.message.startsWith("Parse error: Unexpected ")) return true;
+  if (!error.message.startsWith("Parse error at token:")) return false;
   const candidate = error as Error & { offset?: unknown; token?: unknown };
   return typeof candidate.offset === "number" && candidate.token !== undefined;
 }

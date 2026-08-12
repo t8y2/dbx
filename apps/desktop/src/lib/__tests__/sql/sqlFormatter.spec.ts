@@ -57,6 +57,13 @@ describe("sqlFormatter", () => {
     await expect(formatSqlForEditing(sql, "mysql")).resolves.toBe(sql);
   });
 
+  it("keeps editor SQL unchanged when it contains full-width characters the tokenizer can't parse", async () => {
+    const sql = "update t set a=concat(t.入池时间（审核通过时间）,' 00:00:00') where t.入池时间（审核通过时间） ≠ '';";
+
+    await expect(formatSqlText(sql, "mysql")).rejects.toThrow("Parse error: Unexpected");
+    await expect(formatSqlForEditing(sql, "mysql")).resolves.toBe(sql);
+  });
+
   it("keeps non-parse editor formatting failures visible", async () => {
     const oversizedSql = "x".repeat(MAX_SQL_FORMAT_CHARS + 1);
 

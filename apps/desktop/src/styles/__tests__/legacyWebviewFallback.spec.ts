@@ -129,10 +129,11 @@ describe("legacy WebView CSS fallbacks", () => {
     expect(connectionDialogSource).not.toContain("@media (min-width: 640px)");
   });
 
-  it("keeps the sidebar table tree scrollbar discoverable in legacy WebViews", () => {
+  it("keeps the sidebar table tree scrollbar unchanged outside legacy WebViews", () => {
     expect(connectionTreeSource).toContain('class="sidebar-tree-scrollbar"');
-    expect(connectionTreeSource).toContain("opacity: 0.78;");
+    expect(connectionTreeSource).toMatch(/\.sidebar-tree-scrollbar \{[\s\S]*?opacity: 0;/);
     expect(connectionTreeSource).toContain("html.dbx-legacy-webview .sidebar-tree-scrollbar");
+    expect(connectionTreeSource).toMatch(/html\.dbx-legacy-webview \.sidebar-tree-scrollbar \{[\s\S]*?opacity: 0\.9;/);
     expect(connectionTreeSource).toContain("html.dbx-legacy-webview .sidebar-tree-scrollbar__thumb");
     expect(connectionTreeSource).toContain("background: rgba(82, 82, 82, 0.42);");
     expect(connectionTreeSource).toContain("html.dbx-legacy-webview.dark .sidebar-tree-scrollbar__thumb");

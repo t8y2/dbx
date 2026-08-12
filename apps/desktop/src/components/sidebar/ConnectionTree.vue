@@ -2144,7 +2144,7 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes });
   z-index: 10;
   width: 12px;
   cursor: default;
-  opacity: 0.78;
+  opacity: 0;
   transition: opacity 120ms ease;
 }
 

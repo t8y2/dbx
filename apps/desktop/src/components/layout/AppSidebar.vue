@@ -208,8 +208,8 @@ defineExpose({ focusSearch });
                 :items="importSourceItems"
                 :aria-label="t('sidebar.import')"
                 :trigger-icon="Download"
-                trigger-class="inline-flex h-5 w-5 items-center justify-center rounded-md outline-none hover:bg-muted hover:text-foreground focus-visible:ring-0"
-                trigger-icon-class="h-3.5 w-3.5"
+                trigger-class="inline-flex h-6 w-5 items-center justify-center rounded-md outline-none hover:bg-muted hover:text-foreground focus-visible:ring-0"
+                trigger-icon-class="h-4 w-4"
                 content-class="w-44"
                 :show-trigger-label="false"
                 :show-chevron="false"
@@ -222,26 +222,26 @@ defineExpose({ focusSearch });
           </LightTooltip>
           <LightTooltip :text="t('sidebar.export')" side="bottom" :delay="0" :close-delay="0" nowrap>
             <Button variant="ghost" size="icon" class="h-5 w-5" @click="emit('export')">
-              <Upload class="h-3.5 w-3.5" />
+              <Upload class="h-3 w-3" />
             </Button>
           </LightTooltip>
           <LightTooltip :text="t('sidebar.collapseAll')" side="bottom" :delay="0" :close-delay="0" nowrap>
             <Button variant="ghost" size="icon" class="h-5 w-5" @click="collapseAllTreeNodes">
-              <ChevronsUp class="h-3.5 w-3.5" />
+              <ChevronsUp class="h-3 w-3" />
             </Button>
           </LightTooltip>
           <LightTooltip :text="t('connectionGroup.createGroup')" side="bottom" :delay="0" :close-delay="0" nowrap>
             <Button variant="ghost" size="icon" class="h-5 w-5" @click="createNewGroup">
-              <FolderPlus class="h-3.5 w-3.5" />
+              <FolderPlus class="h-3 w-3" />
             </Button>
           </LightTooltip>
           <LightTooltip :text="t('contextMenu.refreshChildren')" side="bottom" :delay="0" :close-delay="0" nowrap>
             <Button variant="ghost" size="icon" class="h-5 w-5" @click="refreshTree">
-              <RefreshCw class="h-3.5 w-3.5" />
+              <RefreshCw class="h-3 w-3" />
             </Button>
           </LightTooltip>
           <LightTooltip :text="t('sidebar.collapse')" side="bottom" :delay="0" :close-delay="0" nowrap>
-            <Button variant="ghost" size="icon" class="h-5 w-5" @click="emit('collapse')">
+            <Button variant="ghost" size="icon" class="h-6 w-6" @click="emit('collapse')">
               <ChevronsLeft class="h-3.5 w-3.5" />
             </Button>
           </LightTooltip>

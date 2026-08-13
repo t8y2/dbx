@@ -5,6 +5,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::error::Error;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::Duration;
 
 use super::{http_client_builder, with_connection_timeout};
@@ -96,7 +97,10 @@ impl EsClient {
             (Some(u), Some(p)) if !u.is_empty() => Some((u.to_string(), p.to_string())),
             _ => None,
         };
-        let builder = http_client_builder(timeout).danger_accept_invalid_certs(accept_invalid_certs);
+        let mut builder = http_client_builder(timeout).danger_accept_invalid_certs(accept_invalid_certs);
+        if let Some(addrs) = elasticsearch_localhost_resolve_addrs(&base_url, connectivity_check_disabled) {
+            builder = builder.resolve_to_addrs("localhost", &addrs);
+        }
         let http = builder.build().unwrap_or_else(|_| HttpClient::new());
         let fallback_base_urls = elasticsearch_base_url_fallbacks(&base_url);
         Self {
@@ -392,6 +396,17 @@ fn elasticsearch_base_url_fallbacks(base_url: &str) -> Vec<String> {
     } else {
         Vec::new()
     }
+}
+
+fn elasticsearch_localhost_resolve_addrs(base_url: &str, connectivity_check_disabled: bool) -> Option<[SocketAddr; 2]> {
+    if !connectivity_check_disabled {
+        return None;
+    }
+    let parsed = reqwest::Url::parse(base_url).ok()?;
+    if !parsed.host_str()?.eq_ignore_ascii_case("localhost") {
+        return None;
+    }
+    Some([SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 0), SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)])
 }
 
 fn elasticsearch_index_path(index: &str, endpoint: &str) -> String {
@@ -2454,6 +2469,51 @@ mod tests {
             vec!["https://127.0.0.1:9200".to_string()]
         );
         assert_eq!(elasticsearch_base_url_fallbacks("https://search.example.com:9200"), Vec::<String>::new());
+    }
+
+    #[test]
+    fn disabled_connectivity_check_keeps_localhost_request_fallback() {
+        assert_eq!(
+            super::elasticsearch_localhost_resolve_addrs("https://localhost:9200", true),
+            Some(["[::1]:0".parse().unwrap(), "127.0.0.1:0".parse().unwrap()])
+        );
+        assert_eq!(super::elasticsearch_localhost_resolve_addrs("https://localhost:9200", false), None);
+        assert_eq!(super::elasticsearch_localhost_resolve_addrs("https://search.example.com:9200", true), None);
+    }
+
+    #[tokio::test]
+    async fn disabled_connectivity_check_can_request_ipv4_localhost() {
+        use tokio::io::AsyncWriteExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_http_request(&mut socket).await;
+            assert!(request.starts_with("GET /_cluster/health "), "unexpected request: {request}");
+            let body = r#"{"status":"green"}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let mut client = EsClient::from_config(
+            &format!("http://localhost:{}", addr.port()),
+            None,
+            None,
+            false,
+            None,
+            Some(&json!({ "connectivityCheckDisabled": "yes" })),
+            Duration::from_secs(2),
+        );
+        super::test_connection(&mut client, Duration::from_secs(2)).await.unwrap();
+        let response = client.get("/_cluster/health").send().await.unwrap();
+
+        assert!(response.status().is_success());
+        server.await.unwrap();
     }
 
     #[test]

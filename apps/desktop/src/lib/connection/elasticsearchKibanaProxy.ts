@@ -49,7 +49,11 @@ export function elasticsearchConnectivityCheckPathFromConfig(value: unknown): st
 }
 
 export function elasticsearchConnectivityCheckDisabledFromConfig(value: unknown): boolean {
-  return externalConfigRecord(value).connectivityCheckDisabled === true;
+  const disabled = externalConfigRecord(value).connectivityCheckDisabled;
+  if (disabled === true) return true;
+  if (typeof disabled !== "string") return false;
+  const normalized = disabled.trim().toLowerCase();
+  return normalized === "true" || normalized === "1" || normalized === "yes" || normalized === "on";
 }
 
 export function elasticsearchIndexGroupingPatternFromConfig(value: unknown): string {

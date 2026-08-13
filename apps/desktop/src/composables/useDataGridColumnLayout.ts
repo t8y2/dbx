@@ -1,6 +1,6 @@
 import { computed, nextTick, onScopeDispose, ref, toValue, watch, type MaybeRefOrGetter } from "vue";
 import { columnOrderKeysForIndexes, isDefaultColumnOrder, mergeUnavailableColumnOrderKeys, moveDisplayableColumnIndex, moveVisibleColumnIndex, orderedColumnIndexes } from "@/lib/dataGrid/dataGridColumnOrder";
-import { columnHeaderCanvasPointerDisabled, columnHeaderClickShouldBeSuppressed, columnHeaderPreviewOffsetForColumn, columnHeaderTooltipDisabled } from "@/lib/dataGrid/dataGridColumnHeaderInteraction";
+import { columnHeaderCanvasPointerDisabled, columnHeaderClickShouldBeSuppressed, columnHeaderDragAutoScrollDelta, columnHeaderDropTargetIndex, columnHeaderPreviewOffsetForColumn, columnHeaderTooltipDisabled } from "@/lib/dataGrid/dataGridColumnHeaderInteraction";
 import {
   loadDataGridColumnLayout,
   loadDataGridColumnFrozenState,
@@ -42,7 +42,13 @@ type ColumnHeaderDragState = {
   startX: number;
   startY: number;
   currentX: number;
+  startScrollLeft: number;
+  currentScrollLeft: number;
+  dragCenterClientOffsetX: number;
+  lastClientX: number;
+  direction: -1 | 0 | 1;
   columnRects: { visibleIndex: number; left: number; width: number }[];
+  previewElement: HTMLElement | null;
   dragging: boolean;
 };
 
@@ -408,12 +414,14 @@ export function useDataGridColumnLayout(options: {
   rowNumberWidth: MaybeRefOrGetter<number>;
   bufferPx?: number;
   headerRef?: MaybeRefOrGetter<HTMLElement | null | undefined>;
+  getScrollElement?: () => HTMLElement | null;
   orderedColumnIndexes?: MaybeRefOrGetter<readonly number[]>;
   hiddenColumnIndexes?: MaybeRefOrGetter<ReadonlySet<number>>;
   getIsResizing?: () => boolean;
   onResizeStart?: (visibleColIdx: number, event: MouseEvent) => void;
   onCanvasMouseLeave?: () => void;
   onCanvasDrawSchedule?: () => void;
+  onHorizontalScroll?: (element: HTMLElement) => void;
   onRefreshMetrics?: () => void;
   onPersistColumnOrder?: (indexes: number[]) => void;
   frozenColumnCount?: MaybeRefOrGetter<number>;
@@ -561,13 +569,75 @@ export function useDataGridColumnLayout(options: {
     return target instanceof HTMLElement && !!target.closest("button, input, textarea, select, [contenteditable='true'], [role='button'], [data-column-resize-handle]");
   }
 
-  function columnHeaderDropTargetVisibleIndex(clientX: number): number {
+  function columnHeaderPointerContentX(clientX: number, scroller?: HTMLElement | null): number {
+    if (!scroller) return clientX;
+    const viewport = scroller.getBoundingClientRect();
+    const frozen = frozenColumnCount.value;
+    const pointerViewportX = clientX - viewport.left;
+    const frozenRight = toValue(options.rowNumberWidth) + (renderedColumnOffsets.value[frozen] ?? 0);
+    return frozen > 0 && pointerViewportX < frozenRight ? pointerViewportX - toValue(options.rowNumberWidth) : scroller.scrollLeft + pointerViewportX - toValue(options.rowNumberWidth);
+  }
+
+  function columnHeaderDropTargetVisibleIndex(clientX: number, scroller = options.getScrollElement?.()): number {
     const state = columnHeaderDragState.value;
-    if (!state || state.columnRects.length === 0) return state?.sourceVisibleIndex ?? 0;
-    for (const rect of state.columnRects) {
-      if (clientX < rect.left + rect.width / 2) return rect.visibleIndex;
+    if (!state) return 0;
+    const visibleColumnCount = toValue(options.visibleColumnIndexes).length;
+    const movement = clientX - state.lastClientX;
+    if (Math.abs(movement) >= 0.5) state.direction = movement < 0 ? -1 : 1;
+    state.lastClientX = clientX;
+    const dragCenterClientX = clientX + state.dragCenterClientOffsetX;
+    const dragCenterContentX = columnHeaderPointerContentX(dragCenterClientX, scroller);
+    if (scroller) {
+      const viewport = scroller.getBoundingClientRect();
+      const maxScrollLeft = Math.max(0, scroller.scrollWidth - scroller.clientWidth);
+      if (state.direction < 0 && scroller.scrollLeft <= 0 && clientX <= viewport.left + 64) return 0;
+      if (state.direction > 0 && scroller.scrollLeft >= maxScrollLeft - 0.5 && clientX >= viewport.right - 64) return Math.max(0, visibleColumnCount - 1);
+
+      const widths = toValue(options.renderedColumnWidths);
+      return columnHeaderDropTargetIndex({ pointerContentX: dragCenterContentX, sourceVisibleIndex: state.sourceVisibleIndex, currentTargetIndex: state.targetVisibleIndex, direction: state.direction, columnWidths: widths, columnOffsets: renderedColumnOffsets.value });
     }
-    return toValue(options.visibleColumnIndexes).length;
+    if (state.columnRects.length === 0) return state.sourceVisibleIndex;
+    const widths = state.columnRects.map((rect) => rect.width);
+    const offsets = state.columnRects.map((rect) => rect.left);
+    return Math.min(Math.max(0, visibleColumnCount - 1), columnHeaderDropTargetIndex({ pointerContentX: dragCenterContentX, sourceVisibleIndex: state.sourceVisibleIndex, currentTargetIndex: state.targetVisibleIndex, direction: state.direction, columnWidths: widths, columnOffsets: offsets }));
+  }
+
+  function createColumnHeaderDragPreview(state: ColumnHeaderDragState) {
+    if (state.previewElement) return;
+    const header = toValue(options.headerRef);
+    const source = header?.querySelector<HTMLElement>(`[data-visible-col-index="${state.sourceVisibleIndex}"]`);
+    if (!source) return;
+    const rect = source.getBoundingClientRect();
+    const preview = source.cloneNode(true) as HTMLElement;
+    preview.dataset.columnHeaderDragPreview = "";
+    preview.removeAttribute("data-visible-col-index");
+    preview.setAttribute("aria-hidden", "true");
+    preview.inert = true;
+    Object.assign(preview.style, {
+      position: "fixed",
+      left: `${rect.left}px`,
+      top: `${rect.top}px`,
+      width: `${rect.width}px`,
+      height: `${rect.height}px`,
+      margin: "0",
+      transform: "translateX(0)",
+      transition: "none",
+      zIndex: "100",
+      pointerEvents: "none",
+    });
+    preview.classList.add("shadow-lg", "ring-1", "ring-primary/40");
+    document.body.append(preview);
+    state.previewElement = preview;
+  }
+
+  function updateColumnHeaderDragPreview(state: ColumnHeaderDragState) {
+    if (!state.previewElement) return;
+    state.previewElement.style.transform = `translateX(${state.currentX - state.startX}px)`;
+  }
+
+  function removeColumnHeaderDragPreview(state: ColumnHeaderDragState) {
+    state.previewElement?.remove();
+    state.previewElement = null;
   }
 
   function applyColumnHeaderDragPreview() {
@@ -575,8 +645,28 @@ export function useDataGridColumnLayout(options: {
     const state = columnHeaderDragState.value;
     if (!state?.dragging) return;
     state.currentX = columnHeaderPendingClientX;
-    state.targetVisibleIndex = columnHeaderDropTargetVisibleIndex(columnHeaderPendingClientX);
+    updateColumnHeaderDragPreview(state);
+    const scroller = options.getScrollElement?.();
+    if (scroller) state.currentScrollLeft = scroller.scrollLeft;
+    state.targetVisibleIndex = columnHeaderDropTargetVisibleIndex(columnHeaderPendingClientX, scroller);
+    let keepScrolling = false;
+    if (scroller) {
+      const viewport = scroller.getBoundingClientRect();
+      const frozenWidth = renderedColumnOffsets.value[frozenColumnCount.value] ?? 0;
+      const scrollViewportLeft = Math.min(viewport.right, viewport.left + toValue(options.rowNumberWidth) + frozenWidth);
+      const scrollDelta = columnHeaderDragAutoScrollDelta({ clientX: columnHeaderPendingClientX, viewportLeft: scrollViewportLeft, viewportRight: viewport.right });
+      const maxScrollLeft = Math.max(0, scroller.scrollWidth - scroller.clientWidth);
+      const nextScrollLeft = Math.max(0, Math.min(maxScrollLeft, scroller.scrollLeft + scrollDelta));
+      if (Math.abs(nextScrollLeft - scroller.scrollLeft) >= 0.5) {
+        scroller.scrollLeft = nextScrollLeft;
+        state.currentScrollLeft = scroller.scrollLeft;
+        options.onHorizontalScroll?.(scroller);
+        state.targetVisibleIndex = columnHeaderDropTargetVisibleIndex(columnHeaderPendingClientX, scroller);
+        keepScrolling = true;
+      }
+    }
     options.onCanvasDrawSchedule?.();
+    if (keepScrolling) columnHeaderDragFrame = requestAnimationFrame(applyColumnHeaderDragPreview);
   }
 
   function scheduleColumnHeaderDragPreview(clientX: number) {
@@ -613,7 +703,9 @@ export function useDataGridColumnLayout(options: {
     window.removeEventListener("pointermove", onColumnHeaderPointerMove, true);
     window.removeEventListener("pointerup", onColumnHeaderPointerUp, true);
     window.removeEventListener("pointercancel", onColumnHeaderPointerCancel, true);
+    window.removeEventListener("blur", onColumnHeaderPointerCancel, true);
     cancelColumnHeaderDragPreview();
+    removeColumnHeaderDragPreview(state);
     document.body.style.userSelect = "";
     columnHeaderDragState.value = null;
     if (hadCanvasPreview) options.onCanvasDrawSchedule?.();
@@ -637,6 +729,7 @@ export function useDataGridColumnLayout(options: {
       state.dragging = true;
       document.body.style.userSelect = "none";
       options.onCanvasMouseLeave?.();
+      createColumnHeaderDragPreview(state);
     }
     if (!state.dragging) return;
     event.preventDefault();
@@ -655,19 +748,31 @@ export function useDataGridColumnLayout(options: {
 
   function startColumnHeaderDrag(visibleColIdx: number, event: PointerEvent) {
     if (event.button !== 0 || options.getIsResizing?.() || columnHeaderInteractiveTarget(event.target)) return;
+    const scroller = options.getScrollElement?.();
+    const scrollLeft = scroller?.scrollLeft ?? 0;
+    const columnRects = columnHeaderLayoutRects();
+    const sourceRect = columnRects.find((rect) => rect.visibleIndex === visibleColIdx);
+    const dragCenterClientOffsetX = sourceRect ? sourceRect.left + sourceRect.width / 2 - event.clientX : 0;
     columnHeaderDragState.value = {
       sourceVisibleIndex: visibleColIdx,
       targetVisibleIndex: visibleColIdx,
       startX: event.clientX,
       startY: event.clientY,
       currentX: event.clientX,
-      columnRects: columnHeaderLayoutRects(),
+      startScrollLeft: scrollLeft,
+      currentScrollLeft: scrollLeft,
+      dragCenterClientOffsetX,
+      lastClientX: event.clientX,
+      direction: 0,
+      columnRects,
+      previewElement: null,
       dragging: false,
     };
     columnHeaderPendingClientX = event.clientX;
     window.addEventListener("pointermove", onColumnHeaderPointerMove, true);
     window.addEventListener("pointerup", onColumnHeaderPointerUp, true);
     window.addEventListener("pointercancel", onColumnHeaderPointerCancel, true);
+    window.addEventListener("blur", onColumnHeaderPointerCancel, true);
   }
 
   function suppressHeaderClickIfNeeded(event: MouseEvent): boolean {
@@ -681,19 +786,20 @@ export function useDataGridColumnLayout(options: {
 
   function columnHeaderDragClass(visibleColIdx: number) {
     const state = columnHeaderDragState.value;
-    return { "z-30 shadow-lg ring-1 ring-primary/40 bg-background dark:bg-muted pointer-events-none": state?.dragging && state.sourceVisibleIndex === visibleColIdx };
+    return { "opacity-0 pointer-events-none": state?.dragging && state.sourceVisibleIndex === visibleColIdx };
   }
 
   function columnHeaderPreviewOffset(visibleColIdx: number): number {
     const state = columnHeaderDragState.value;
     if (!state) return 0;
+    const scrollCompensation = state.sourceVisibleIndex < frozenColumnCount.value ? 0 : state.currentScrollLeft - state.startScrollLeft;
     return columnHeaderPreviewOffsetForColumn({
       columnDragActive: state.dragging,
       visibleColIdx,
       sourceVisibleIndex: state.sourceVisibleIndex,
       targetVisibleIndex: state.targetVisibleIndex,
       startX: state.startX,
-      currentX: state.currentX,
+      currentX: state.currentX + scrollCompensation,
       sourceWidth: toValue(options.renderedColumnWidths)[state.sourceVisibleIndex] ?? 0,
     });
   }

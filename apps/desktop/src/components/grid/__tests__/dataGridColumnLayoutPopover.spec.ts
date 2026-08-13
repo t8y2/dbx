@@ -1,5 +1,6 @@
 // @vitest-environment happy-dom
 
+import { readFileSync } from "node:fs";
 import { createApp, nextTick, type App } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import i18n from "@/i18n";
@@ -38,6 +39,8 @@ vi.mock("@/components/ui/button", async () => {
 });
 
 import DataGridColumnLayoutPopover from "../DataGridColumnLayoutPopover.vue";
+
+const contentAreaSource = readFileSync(new URL("../../layout/ContentArea.vue", import.meta.url), "utf8");
 
 const mountedApps: Array<{ app: App; host: HTMLElement }> = [];
 
@@ -137,6 +140,23 @@ afterEach(() => {
 });
 
 describe("data grid column layout popover", () => {
+  it("is available from the query result toolbar and keeps a labelled compact trigger", async () => {
+    expect(contentAreaSource).toContain('<DataGridColumnLayoutPopover :grid="dataGridRef" :compact="compact" />');
+
+    const gridState = createGrid(4);
+    const host = document.createElement("div");
+    document.body.append(host);
+    const app = createApp(DataGridColumnLayoutPopover, { grid: gridState.grid, compact: true });
+    app.use(i18n);
+    app.mount(host);
+    mountedApps.push({ app, host });
+    await nextTick();
+
+    const trigger = host.querySelector<HTMLButtonElement>('[aria-label="Column visibility"]');
+    expect(trigger?.className).toContain("w-6");
+    expect(trigger?.textContent?.trim()).toBe("");
+  });
+
   it("renders only the visible field window plus a bounded buffer", () => {
     const window = dataGridColumnLayoutVirtualWindow({
       itemCount: 500,

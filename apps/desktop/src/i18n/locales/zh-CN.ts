@@ -4180,6 +4180,8 @@ export default withEnglishFallback({
     copyInsertStatementBinary: "二进制数据无法生成插入语句",
     editMember: "编辑",
     jsonView: "JSON 视图",
+    jsonViewRaw: "原始",
+    jsonViewDecoded: "解码",
     rawContent: "原始内容",
     wordWrap: "自动换行",
     decompressedView: "解压视图",

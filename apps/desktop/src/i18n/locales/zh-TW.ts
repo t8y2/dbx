@@ -3444,6 +3444,8 @@ export default withEnglishFallback({
     copyInsertStatementBinary: "無法為二進位資料產生 INSERT 語句",
     editMember: "編輯",
     jsonView: "JSON 檢視",
+    jsonViewRaw: "原始",
+    jsonViewDecoded: "解碼",
     rawContent: "原始內容",
     wordWrap: "自動換行",
     decompressedView: "解壓檢視",

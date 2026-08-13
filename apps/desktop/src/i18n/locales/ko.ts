@@ -3761,6 +3761,8 @@ export default withEnglishFallback({
     copyInsertStatementBinary: "바이너리 데이터에 대한 INSERT 구문을 생성할 수 없습니다",
     editMember: "편집",
     jsonView: "JSON 보기",
+    jsonViewRaw: "원본",
+    jsonViewDecoded: "디코딩",
     rawContent: "원시 내용",
     wordWrap: "자동 줄바꿈",
     decompressedView: "압축 해제 보기",

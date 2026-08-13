@@ -4127,6 +4127,8 @@ export default withEnglishFallback({
     copyInsertStatementBinary: "バイナリデータのINSERT文は生成できません",
     editMember: "編集",
     jsonView: "JSONビュー",
+    jsonViewRaw: "原文",
+    jsonViewDecoded: "デコード",
     rawContent: "生コンテンツ",
     wordWrap: "折り返し",
     decompressedView: "解凍ビュー",

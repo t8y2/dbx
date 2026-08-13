@@ -4097,6 +4097,8 @@ export default withEnglishFallback({
     copied: "Copiado",
     editMember: "Editar",
     jsonView: "Vista JSON",
+    jsonViewRaw: "Original",
+    jsonViewDecoded: "Decodificado",
     rawContent: "Contenido original",
     wordWrap: "Ajuste de línea",
     decompressedView: "Descomprimido",

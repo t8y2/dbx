@@ -4099,6 +4099,8 @@ export default withEnglishFallback({
     copyInsertStatementBinary: "Não é possível gerar instrução de inserção para dados binários",
     editMember: "Editar",
     jsonView: "Visão JSON",
+    jsonViewRaw: "Original",
+    jsonViewDecoded: "Decodificado",
     rawContent: "Conteúdo bruto",
     wordWrap: "Quebra de linha",
     decompressedView: "Descomprimido",

@@ -9,6 +9,7 @@ import { useToast } from "@/composables/useToast";
 import type { ObjectSourceKind, TableInfo, TableNameFilter, TreeNode, TreeNodeType } from "@/types/database";
 import { filterSidebarSearchRootsByConnectionState, filterSidebarTree, filterSidebarTreeToConnectedConnections, resolveSidebarFilterGuards, reuseLiveSidebarTreeNodes } from "@/lib/sidebar/sidebarSearchTree";
 import { matchSidebarLabel } from "@/lib/sidebar/sidebarSearch";
+import { runSidebarSearchAutoLoad, shouldAutoLoadForSidebarSearch } from "@/lib/sidebar/sidebarSearchAutoLoad";
 import { buildTableTreeNodes } from "@/lib/table/tableTree";
 import { isCancelSearchShortcut, isCopySidebarSelectionShortcut, isEditSidebarConnectionShortcut, isPasteSidebarSelectionShortcut, isViewTableDdlShortcut } from "@/lib/editor/keyboardShortcuts";
 import { sidebarNodeSupportsDdlView } from "@/lib/sidebar/sidebarTreeDdlShortcut";
@@ -21,6 +22,7 @@ import { usesTreeSchemaMode } from "@/lib/database/databaseFeatureSupport";
 import { connectionObjectTreeNodeSchema, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { activeTabSidebarTarget, findSidebarNodeForActiveTab, findSidebarNodeForTarget, findNodePathForTarget, scrollTopForSidebarNode, shouldScrollActiveSidebarSelection, type ActiveTabSidebarTarget, type SidebarNodeScrollAlign } from "@/lib/sidebar/sidebarActiveTabTarget";
 import { findLoadedTableTargetForCandidate, queryContextTargetFromCandidate, queryCursorTableCandidate, type QueryCursorTableCandidate } from "@/lib/sql/queryCursorTableTarget";
+import { findTreeNodeById } from "@/lib/sql/newQueryContext";
 import { createFlatTreeIndex, SIDEBAR_TREE_ROW_HEIGHT, SIDEBAR_TREE_PRERENDER_COUNT, SIDEBAR_TREE_SCROLL_BUFFER, flattenTree, shouldVirtualizeFlatTree, type FlatTreeNode } from "@/composables/useFlatTree";
 import { sidebarTreeContextKey } from "@/lib/sidebar/sidebarTreeContext";
 import { createSidebarTreeRuntime, sidebarTreeRuntimeKey, type SidebarTreeRuntimeHostInstance } from "@/lib/sidebar/sidebarTreeRuntime";
@@ -327,6 +329,27 @@ const searchableNodeTypes = computed<Set<TreeNodeType> | undefined>(() => {
   return types;
 });
 
+// Global search only matches nodes already held in memory, so a collapsed
+// database hid its tables even while its connection was open. Preload those
+// levels whenever a query is active: the filter then spans every open
+// connection instead of forcing the user to expand databases one at a time.
+let searchAutoLoadToken = 0;
+function startSidebarSearchAutoLoad(): void {
+  const token = ++searchAutoLoadToken;
+  void runSidebarSearchAutoLoad({
+    getTreeNodes: () => store.treeNodes,
+    isConnected: (connectionId) => store.connectedIds.has(connectionId),
+    isChildrenLoaded: (nodeId) => store.isTreeNodeChildrenLoaded(nodeId),
+    loadChildren: (node) => store.loadTreeNodeChildren(node),
+    liveNode: (nodeId) => findTreeNodeById(store.treeNodes, nodeId),
+    isCancelled: () => token !== searchAutoLoadToken || !deferredSearchQuery.value.trim(),
+  });
+}
+
+watch([deferredSearchQuery, searchableNodeTypes], ([query, nodeTypes]) => {
+  if (shouldAutoLoadForSidebarSearch(query, nodeTypes)) startSidebarSearchAutoLoad();
+});
+
 function toggleSearchScope(scope: SearchScope) {
   const idx = selectedSearchScopes.value.indexOf(scope);
   if (idx >= 0) {
@@ -509,7 +532,7 @@ function measureSidebarCommentLabelWidths() {
       id,
       depth,
       alignable: isSidebarCommentAlignableNode(node),
-      hasComment: !!sidebarTreeNodeComment(node),
+      hasComment: !!sidebarTreeNodeComment(node, settingsStore.editorSettings.sidebarShowConnectionNotes),
       labelWidth: context.measureText(sidebarCommentLabel(node)).width,
     })),
   );
@@ -526,7 +549,7 @@ function scheduleSidebarCommentLabelMeasure() {
 
 function sidebarNodeHasTrailingMetadata(node: TreeNode): boolean {
   const mode = settingsStore.editorSettings.sidebarObjectInfoMode;
-  if (mode.startsWith("comment-") && sidebarTreeNodeComment(node)) return true;
+  if (mode.startsWith("comment-") && sidebarTreeNodeComment(node, settingsStore.editorSettings.sidebarShowConnectionNotes)) return true;
   return mode === "size" && sidebarStorageDisplayTypes.has(node.type) && !!formatSidebarObjectStorage(node.sizeBytes);
 }
 
@@ -563,10 +586,14 @@ function scheduleSidebarTreeContentWidthMeasure() {
   sidebarTreeContentMeasureFrame = window.requestAnimationFrame(measureSidebarTreeContentWidth);
 }
 
-watch([flatNodes, () => settingsStore.editorSettings.sidebarObjectInfoMode, () => settingsStore.editorSettings.sidebarHiddenTablePrefixes, () => settingsStore.editorSettings.uiFontFamily, () => settingsStore.editorSettings.uiScale], scheduleSidebarCommentLabelMeasure, {
-  flush: "post",
-  immediate: true,
-});
+watch(
+  [flatNodes, () => settingsStore.editorSettings.sidebarObjectInfoMode, () => settingsStore.editorSettings.sidebarShowConnectionNotes, () => settingsStore.editorSettings.sidebarHiddenTablePrefixes, () => settingsStore.editorSettings.uiFontFamily, () => settingsStore.editorSettings.uiScale],
+  scheduleSidebarCommentLabelMeasure,
+  {
+    flush: "post",
+    immediate: true,
+  },
+);
 
 watch([sidebarTreeNaturalWidthItems, () => settingsStore.editorSettings.uiFontFamily, () => settingsStore.editorSettings.uiScale], scheduleSidebarTreeContentWidthMeasure, {
   flush: "post",

@@ -3128,10 +3128,6 @@ async function aiTestConn() {
   aiTestErrorCopied.value = false;
   try {
     const config = currentAiEditConfig();
-    const activeModel = settingsStore.activeModel;
-    if (aiEditConfigId.value && activeModel?.configId === aiEditConfigId.value) {
-      config.model = activeModel.modelId;
-    }
     const result = await aiTestConnection(config);
     aiTestLatency.value = result.latencyMs ?? null;
     aiTestResult.value = "success";

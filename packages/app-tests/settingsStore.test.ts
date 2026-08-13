@@ -648,6 +648,18 @@ test("API AI provider settings expose and persist a default model ID", () => {
   assert.match(source, /model:\s*aiEditModel\.value/);
 });
 
+test("AI connection test uses the model currently entered in the config form", () => {
+  const source = readFileSync("apps/desktop/src/components/editor/EditorSettingsDialog.vue", "utf8");
+  const testConnectionStart = source.indexOf("async function aiTestConn()");
+  const testConnectionEnd = source.indexOf("async function copyAiTestError()", testConnectionStart);
+  const testConnection = source.slice(testConnectionStart, testConnectionEnd);
+
+  assert.notEqual(testConnectionStart, -1);
+  assert.notEqual(testConnectionEnd, -1);
+  assert.match(testConnection, /const config = currentAiEditConfig\(\);[\s\S]*aiTestConnection\(config\)/);
+  assert.doesNotMatch(testConnection, /activeModel|config\.model\s*=/);
+});
+
 test("normalizes legacy AI config and fills provider defaults", () => {
   const legacy = normalizeAiConfig({
     provider: "openai",

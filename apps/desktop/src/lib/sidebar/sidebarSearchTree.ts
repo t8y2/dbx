@@ -4,12 +4,14 @@ import { createSidebarLabelMatcher, type SidebarLabelMatcher } from "@/lib/sideb
 const preserveMatchedSubtreeTypes = new Set(["connection", "database", "schema", "table", "view", "mongo-db", "mongo-collection"]);
 const hiddenSearchNodeTypes = new Set<TreeNodeType>(["user-admin", "dameng-job-admin"]);
 
-function bestMatch(matchLabel: SidebarLabelMatcher, label: string, comment?: string | null) {
-  const lm = matchLabel(label);
-  if (!comment) return lm;
-  const cm = matchLabel(comment);
-  if (lm && cm) return lm.score >= cm.score ? lm : cm;
-  return lm ?? cm;
+function bestMatch(matchLabel: SidebarLabelMatcher, label: string, comment?: string | null, aliases?: readonly string[]) {
+  let best = matchLabel(label);
+  for (const candidate of [comment, ...(aliases ?? [])]) {
+    if (!candidate) continue;
+    const match = matchLabel(candidate);
+    if (match && (!best || match.score > best.score)) best = match;
+  }
+  return best;
 }
 
 function normalizedLabel(node: TreeNode): string {
@@ -67,7 +69,7 @@ function filterSidebarTreeWithMatcher(nodes: TreeNode[], matchLabel: SidebarLabe
 
     const label = normalizedLabel(node);
     const canSelfMatch = !searchableNodeTypes || searchableNodeTypes.has(node.type);
-    const selfMatch = canSelfMatch ? (matchLabel ? bestMatch(matchLabel, label, node.comment) : { score: 0 }) : null;
+    const selfMatch = canSelfMatch ? (matchLabel ? bestMatch(matchLabel, label, node.comment, node.searchAliases) : { score: 0 }) : null;
     // Type-only filtering keeps matching rows and their ancestor path, but not
     // unrelated descendants that would make the selected type appear ignored.
     const preservesSubtree = !!matchLabel && !!selfMatch && preserveMatchedSubtreeTypes.has(node.type);

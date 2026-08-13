@@ -55,6 +55,7 @@ import {
   remapSidebarLayoutConnectionIds,
   reorderEntry as reorderEntryOp,
   buildConnectionGroupPathMap,
+  connectionSidebarSearchAliases,
   type DropPosition,
 } from "@/lib/sidebar/sidebarLayout";
 import type { SqlCompletionColumn, SqlCompletionForeignKey, SqlCompletionObject, SqlCompletionTable } from "@/lib/sql/sqlCompletion";
@@ -2882,6 +2883,7 @@ export const useConnectionStore = defineStore("connection", () => {
       if (existing) {
         existing.label = config.name;
         existing.type = "connection";
+        existing.searchAliases = connectionSidebarSearchAliases(config);
         existing.connectionId = id;
         existing.comment = config.note || null;
         existing.children = existing.children || [];
@@ -2890,6 +2892,7 @@ export const useConnectionStore = defineStore("connection", () => {
           id,
           label: config.name,
           type: "connection",
+          searchAliases: connectionSidebarSearchAliases(config),
           connectionId: id,
           isExpanded: false,
           children: [],
@@ -6917,6 +6920,7 @@ export const useConnectionStore = defineStore("connection", () => {
             ...existing,
             label: node.label,
             comment: node.comment,
+            searchAliases: node.searchAliases,
             pinned: node.pinned,
             children: withSavedSqlRoot(node.connectionId!, existing.children || [], existing),
           });

@@ -968,6 +968,8 @@ export interface TreeNode {
   id: string;
   label: string;
   type: TreeNodeType;
+  /** Additional values matched by sidebar search without rendering them. */
+  searchAliases?: string[];
   children?: TreeNode[];
   isLoading?: boolean;
   isExpanded?: boolean;

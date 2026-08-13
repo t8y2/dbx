@@ -2833,6 +2833,32 @@ export interface MongoDropIndexesResult {
   failures?: MongoDropIndexFailure[];
 }
 
+export interface MongoIndexKey {
+  field: string;
+  /** `1`, `-1`, or a MongoDB key type such as `text` / `2dsphere` / `hashed`. */
+  direction: string;
+}
+
+/** Full MongoDB index specification, carrying the options `IndexInfo` cannot hold. */
+export interface MongoIndexSpec {
+  name: string;
+  keys: MongoIndexKey[];
+  is_unique: boolean;
+  is_primary: boolean;
+  is_sparse: boolean;
+  /** TTL in seconds; null when the index does not expire. */
+  expire_after_seconds: number | null;
+  partial_filter_expression: string | null;
+  /** Ignored by MongoDB 4.2+, still reported by older servers. */
+  background: boolean;
+  /** Only meaningful for geoHaystack indexes, removed in MongoDB 4.4+. */
+  bucket_size: number | null;
+  hidden: boolean;
+  /** False when the driver could not report the properties above (Legacy Agent). */
+  properties_complete: boolean;
+  extra_options: string | null;
+}
+
 export interface MongoGridFsFileInfo {
   id: string;
   filename?: string;
@@ -3068,6 +3094,14 @@ export async function mongoCollectionStats(connectionId: string, database: strin
     collection,
     scale,
     executionId,
+  });
+}
+
+export async function mongoListIndexSpecs(connectionId: string, database: string, collection: string): Promise<MongoIndexSpec[]> {
+  return invoke("mongo_list_index_specs", {
+    connectionId,
+    database,
+    collection,
   });
 }
 

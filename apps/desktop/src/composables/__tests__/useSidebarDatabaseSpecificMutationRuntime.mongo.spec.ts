@@ -1,13 +1,30 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
-import { shallowRef } from "vue";
+import { nextTick, shallowRef } from "vue";
 import type { TreeNode } from "@/types/database";
-import { mongoCreateIndexError, mongoCreateIndexForm, resetMongoCreateIndexForm, sidebarDangerTarget, sidebarFormTarget, showCreateMongoIndexDialog, showDropAllMongoIndexesConfirm, showDropMongoCollectionConfirm } from "@/components/sidebar/sidebarTreeDialogState";
+import {
+  mongoCreateIndexError,
+  mongoCreateIndexForm,
+  mongoIndexManagerError,
+  mongoIndexManagerLoading,
+  mongoIndexManagerMode,
+  mongoIndexManagerRows,
+  mongoIndexManagerSelectedName,
+  resetMongoCreateIndexForm,
+  resetMongoIndexManager,
+  sidebarDangerTarget,
+  sidebarFormTarget,
+  showCreateMongoIndexDialog,
+  showDropAllMongoIndexesConfirm,
+  showDropMongoCollectionConfirm,
+  showMongoIndexManagerDialog,
+} from "@/components/sidebar/sidebarTreeDialogState";
 
 const mocks = vi.hoisted(() => ({
   toast: vi.fn(),
   ensureConnected: vi.fn().mockResolvedValue(undefined),
   loadIndexes: vi.fn().mockResolvedValue(undefined),
+  mongoListIndexSpecs: vi.fn().mockResolvedValue([]),
   listMongoCompletionFields: vi.fn().mockResolvedValue([{ name: "email", type: "string" }]),
   loadMongoCollections: vi.fn().mockResolvedValue(undefined),
   loadMongoDatabases: vi.fn().mockResolvedValue(undefined),
@@ -34,6 +51,7 @@ vi.mock("@/stores/connectionStore", () => ({
 }));
 
 vi.mock("@/lib/backend/api", () => ({
+  mongoListIndexSpecs: (...args: unknown[]) => mocks.mongoListIndexSpecs(...args),
   mongoCreateIndex: (...args: unknown[]) => mocks.mongoCreateIndex(...args),
   mongoDropCollection: (...args: unknown[]) => mocks.mongoDropCollection(...args),
   mongoDropDatabase: (...args: unknown[]) => mocks.mongoDropDatabase(...args),
@@ -114,6 +132,13 @@ function mongoIndexNode(name: string, kind: "collection" | "view" | "timeseries"
   };
 }
 
+/** Let the panel's fire-and-forget index load settle before asserting. */
+async function flush(): Promise<void> {
+  await Promise.resolve();
+  await Promise.resolve();
+  await nextTick();
+}
+
 function runtime(activeNode: TreeNode) {
   const indexesGroup = activeNode.type === "group-indexes" ? activeNode : mongoIndexesGroupNode();
   return useSidebarDatabaseSpecificMutationRuntime({
@@ -138,6 +163,23 @@ describe("MongoDB sidebar mutation runtime", () => {
     mocks.getConfig.mockReturnValue(mongoConfig());
     mocks.ensureConnected.mockResolvedValue(undefined);
     mocks.loadIndexes.mockResolvedValue(undefined);
+    mocks.mongoListIndexSpecs.mockResolvedValue([
+      { name: "_id_", keys: [{ field: "_id", direction: "1" }], is_unique: true, is_primary: true, is_sparse: false, expire_after_seconds: null, partial_filter_expression: null, background: false, bucket_size: null, hidden: false, properties_complete: true, extra_options: null },
+      {
+        name: "email_1",
+        keys: [{ field: "email", direction: "1" }],
+        is_unique: false,
+        is_primary: false,
+        is_sparse: true,
+        expire_after_seconds: 3600,
+        partial_filter_expression: '{"archived":false}',
+        background: false,
+        bucket_size: null,
+        hidden: false,
+        properties_complete: true,
+        extra_options: null,
+      },
+    ]);
     mocks.listMongoCompletionFields.mockResolvedValue([{ name: "email", type: "string" }]);
     mocks.loadMongoCollections.mockResolvedValue(undefined);
     mocks.loadMongoDatabases.mockResolvedValue(undefined);
@@ -150,7 +192,9 @@ describe("MongoDB sidebar mutation runtime", () => {
     showCreateMongoIndexDialog.value = false;
     showDropAllMongoIndexesConfirm.value = false;
     showDropMongoCollectionConfirm.value = false;
+    showMongoIndexManagerDialog.value = false;
     resetMongoCreateIndexForm();
+    resetMongoIndexManager();
   });
 
   it("keeps Legacy MongoDB mutations available while limiting index actions to the Indexes group", () => {
@@ -251,6 +295,10 @@ describe("MongoDB sidebar mutation runtime", () => {
       fields: [{ id: 7, path: "location", type: "2dsphere" }],
       unique: true,
       sparse: true,
+      expireAfterSeconds: "600",
+      partialFilterExpression: '{"active":true}',
+      background: true,
+      bucketSize: "32",
     };
     mongoCreateIndexError.value = "previous failure";
 
@@ -261,6 +309,10 @@ describe("MongoDB sidebar mutation runtime", () => {
       fields: [{ id: 1, path: "", type: "1" }],
       unique: false,
       sparse: false,
+      expireAfterSeconds: "",
+      partialFilterExpression: "",
+      background: false,
+      bucketSize: "",
     });
     expect(mongoCreateIndexError.value).toBe("");
     expect(showCreateMongoIndexDialog.value).toBe(true);
@@ -276,6 +328,120 @@ describe("MongoDB sidebar mutation runtime", () => {
     await feature.confirmCreateMongoIndex();
 
     expect(mocks.mongoCreateIndex).not.toHaveBeenCalled();
+  });
+
+  it("opens the index manager panel from a collection node and lists its indexes", async () => {
+    const node = mongoCollectionNode();
+    const feature = runtime(node);
+    sidebarFormTarget.value = node;
+
+    expect(feature.canManageMongoIndexes.value).toBe(true);
+    feature.prepareMongoIndexManagerDialog();
+    await flush();
+
+    expect(showMongoIndexManagerDialog.value).toBe(true);
+    expect(mocks.mongoListIndexSpecs).toHaveBeenCalledWith("conn-1", "app", "users");
+    expect(mongoIndexManagerRows.value).toEqual([
+      {
+        name: "_id_",
+        keys: "_id ASC",
+        isUnique: true,
+        isProtected: true,
+        isSparse: false,
+        expireAfterSeconds: undefined,
+        partialFilterExpression: undefined,
+        background: false,
+        bucketSize: undefined,
+        hidden: false,
+        propertiesComplete: true,
+        extraOptions: undefined,
+      },
+      {
+        name: "email_1",
+        keys: "email ASC",
+        isUnique: false,
+        isProtected: false,
+        isSparse: true,
+        expireAfterSeconds: 3600,
+        partialFilterExpression: '{"archived":false}',
+        background: false,
+        bucketSize: undefined,
+        hidden: false,
+        propertiesComplete: true,
+        extraOptions: undefined,
+      },
+    ]);
+    // The first row is auto-selected so the property pane is never blank.
+    expect(mongoIndexManagerSelectedName.value).toBe("_id_");
+    expect(feature.canDropSelectedMongoIndexRow.value).toBe(false);
+  });
+
+  it("creates an index from the panel opened on a collection node and returns to view mode", async () => {
+    const node = mongoCollectionNode();
+    const feature = runtime(node);
+    sidebarFormTarget.value = node;
+
+    feature.prepareMongoIndexManagerDialog();
+    await flush();
+
+    feature.startCreateMongoIndexDraft();
+    expect(mongoIndexManagerMode.value).toBe("create");
+    mongoCreateIndexForm.value = { ...mongoCreateIndexForm.value, fields: [{ id: 1, path: "email", type: "1" }], expireAfterSeconds: "3600" };
+    await feature.confirmCreateMongoIndex();
+    await flush();
+
+    expect(mocks.mongoCreateIndex).toHaveBeenCalledWith("conn-1", "app", "users", '{"email":1}', '{"expireAfterSeconds":3600}');
+    // The panel stays open, drops back to read-only, and selects the new index.
+    expect(showMongoIndexManagerDialog.value).toBe(true);
+    expect(mongoIndexManagerMode.value).toBe("view");
+    expect(mongoIndexManagerSelectedName.value).toBe("email_1");
+  });
+
+  it("drops the selected index from the panel while protecting the default index", async () => {
+    const node = mongoCollectionNode();
+    const feature = runtime(node);
+    sidebarFormTarget.value = node;
+
+    feature.prepareMongoIndexManagerDialog();
+    await flush();
+
+    feature.selectMongoIndexRow("email_1");
+    expect(feature.canDropSelectedMongoIndexRow.value).toBe(true);
+    await feature.dropSelectedMongoIndexRow();
+
+    expect(mocks.mongoDropIndexes).toHaveBeenCalledWith("conn-1", "app", "users", '"email_1"', true);
+
+    feature.selectMongoIndexRow("_id_");
+    mocks.mongoDropIndexes.mockClear();
+    await feature.dropSelectedMongoIndexRow();
+
+    expect(mocks.mongoDropIndexes).not.toHaveBeenCalled();
+  });
+
+  it("surfaces an index-list failure in the panel instead of showing a stale list", async () => {
+    const node = mongoCollectionNode();
+    const feature = runtime(node);
+    sidebarFormTarget.value = node;
+    mocks.mongoListIndexSpecs.mockRejectedValueOnce(new Error("listIndexes failed"));
+
+    feature.prepareMongoIndexManagerDialog();
+    await flush();
+
+    expect(mongoIndexManagerRows.value).toEqual([]);
+    expect(mongoIndexManagerSelectedName.value).toBe("");
+    expect(mongoIndexManagerError.value).toContain("listIndexes failed");
+    expect(mongoIndexManagerLoading.value).toBe(false);
+  });
+
+  it("does not open the index manager panel for read-only MongoDB connections", () => {
+    mocks.getConfig.mockReturnValue({ ...mongoConfig(), read_only: true });
+    const node = mongoCollectionNode();
+    const feature = runtime(node);
+
+    feature.prepareMongoIndexManagerDialog();
+
+    expect(showMongoIndexManagerDialog.value).toBe(false);
+    expect(mocks.mongoListIndexSpecs).not.toHaveBeenCalled();
   });
 
   it("does not clear indexes through a collection node", async () => {

@@ -563,6 +563,7 @@ export const mongoServerVersion = forward("mongoServerVersion");
 export const mongoAggregateDocuments = forward("mongoAggregateDocuments");
 export const mongoDistinct = forward("mongoDistinct");
 export const mongoCollectionStats = forward("mongoCollectionStats");
+export const mongoListIndexSpecs = forward("mongoListIndexSpecs");
 export const mongoCreateIndex = forward("mongoCreateIndex");
 export const mongoDropIndexes = forward("mongoDropIndexes");
 export const documentInsertDocument = forward("documentInsertDocument");

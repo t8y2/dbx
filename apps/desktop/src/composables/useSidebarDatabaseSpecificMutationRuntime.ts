@@ -20,6 +20,8 @@ import {
   mongoDropDatabasePreview,
   mongoDropIndexPreview,
   mongoRenameCollectionPreview,
+  toMongoIndexRow,
+  type MongoCreateIndexRequest,
 } from "@/lib/sidebar/mongoCollectionMutation";
 import { supportsMongoAllDriverMutations, supportsMongoIndexMutations, supportsNativeMongoDriverMutations } from "@/lib/mongo/mongoCapabilities";
 import { runMongoSidebarMutation } from "@/lib/sidebar/runMongoSidebarMutation";
@@ -59,6 +61,13 @@ import {
   mongoCreateIndexError,
   mongoCreateIndexLoading,
   resetMongoCreateIndexForm,
+  showMongoIndexManagerDialog,
+  mongoIndexManagerRows,
+  mongoIndexManagerLoading,
+  mongoIndexManagerError,
+  mongoIndexManagerSelectedName,
+  mongoIndexManagerMode,
+  resetMongoIndexManager,
 } from "@/components/sidebar/sidebarTreeDialogState";
 
 interface SidebarDatabaseSpecificMutationRuntimeOptions {
@@ -179,11 +188,25 @@ export function useSidebarDatabaseSpecificMutationRuntime(options: SidebarDataba
     return node.type === "group-indexes" ? node.tableName || "" : "";
   }
 
+  /**
+   * The manager panel is also reachable from the collection node, while direct
+   * create / drop-all actions stay scoped to the Indexes group.
+   */
+  function mongoIndexPanelCollectionName(node: TreeNode): string {
+    if (node.type === "mongo-collection") return node.label;
+    return mongoIndexCollectionName(node);
+  }
+
+  function canManageMongoIndexPanelNode(node: TreeNode): boolean {
+    return !!mongoIndexPanelCollectionName(node) && !!node.database && canMutateMongoIndexes(node);
+  }
+
   function canManageMongoIndexesNode(node: TreeNode): boolean {
     return !!mongoIndexCollectionName(node) && !!node.database && canMutateMongoIndexes(node);
   }
 
   const canDropAllMongoIndexes = computed(() => canManageMongoIndexesNode(activeNode.value));
+  const canManageMongoIndexes = computed(() => canManageMongoIndexPanelNode(activeNode.value));
 
   function mongoIndexDropPreview(node: Pick<TreeNode, "database" | "tableName">, indexName: string): string {
     return mongoDropIndexPreview(node.database || "", node.tableName || "", indexName);
@@ -198,7 +221,8 @@ export function useSidebarDatabaseSpecificMutationRuntime(options: SidebarDataba
   }
 
   const canCreateMongoIndex = computed(() => canCreateMongoIndexNode(activeNode.value));
-  const mongoCreateIndexCanSubmit = computed(() => mongoCreateIndexForm.value.fields.length > 0 && mongoCreateIndexForm.value.fields.every((field) => !!field.path.trim()));
+  /** Mirror the full request validation so the button never invites a known error. */
+  const mongoCreateIndexCanSubmit = computed(() => buildMongoCreateIndexRequest(mongoCreateIndexForm.value).valid);
   const mongoCreateIndexCanAddField = computed(() => mongoCreateIndexForm.value.fields.every((field) => !!field.path.trim()));
 
   watch(
@@ -225,6 +249,118 @@ export function useSidebarDatabaseSpecificMutationRuntime(options: SidebarDataba
       });
   }
 
+  async function loadMongoIndexManagerRows() {
+    const node = sidebarFormTarget.value ?? activeNode.value;
+    const connectionId = node.connectionId;
+    const database = node.database;
+    const collection = mongoIndexPanelCollectionName(node);
+    if (!connectionId || !database || !collection) return;
+
+    mongoIndexManagerLoading.value = true;
+    mongoIndexManagerError.value = "";
+    try {
+      await connectionStore.ensureConnected(connectionId);
+      // MongoDB-specific read: the shared IndexInfo shape cannot carry sparse,
+      // TTL, background or bucketSize. The backend degrades to the generic
+      // listing for Legacy Agent connections and flags it there.
+      const specs = await api.mongoListIndexSpecs(connectionId, database, collection);
+      mongoIndexManagerRows.value = specs.map(toMongoIndexRow);
+      const selected = mongoIndexManagerSelectedName.value;
+      if (!selected || !mongoIndexManagerRows.value.some((row) => row.name === selected)) {
+        mongoIndexManagerSelectedName.value = mongoIndexManagerRows.value[0]?.name ?? "";
+      }
+    } catch (error) {
+      mongoIndexManagerRows.value = [];
+      mongoIndexManagerSelectedName.value = "";
+      mongoIndexManagerError.value = translateBackendError(t, errorMessage(error));
+    } finally {
+      mongoIndexManagerLoading.value = false;
+    }
+  }
+
+  function prepareMongoIndexManagerDialog() {
+    const node = activeNode.value;
+    if (!canManageMongoIndexPanelNode(node) || !node.connectionId || !node.database) return;
+    resetMongoIndexManager();
+    resetMongoCreateIndexForm();
+    showMongoIndexManagerDialog.value = true;
+    void loadMongoIndexManagerRows();
+  }
+
+  const mongoIndexManagerSelected = computed(() => mongoIndexManagerRows.value.find((row) => row.name === mongoIndexManagerSelectedName.value));
+
+  /** Resolve against the dialog's own target so the header survives tree selection changes. */
+  const mongoIndexManagerCollectionName = computed(() => mongoIndexPanelCollectionName(sidebarFormTarget.value ?? activeNode.value));
+
+  function selectMongoIndexRow(name: string) {
+    if (mongoIndexManagerMode.value === "create") return;
+    mongoIndexManagerSelectedName.value = name;
+  }
+
+  /** Switch the property pane into an editable draft for a brand new index. */
+  function startCreateMongoIndexDraft() {
+    const node = sidebarFormTarget.value ?? activeNode.value;
+    resetMongoCreateIndexForm();
+    mongoIndexManagerMode.value = "create";
+    mongoIndexManagerError.value = "";
+    if (!node.connectionId || !node.database) return;
+    const collection = mongoIndexPanelCollectionName(node);
+    if (!collection) return;
+    void connectionStore
+      .listMongoCompletionFields(node.connectionId, node.database, collection)
+      .then((fields) => {
+        if (showMongoIndexManagerDialog.value) mongoCreateIndexFieldOptions.value = fields.map((field) => field.name);
+      })
+      .catch(() => {
+        // MongoDB is schemaless; a field that was never sampled is still valid.
+      });
+  }
+
+  function cancelMongoIndexDraft() {
+    mongoIndexManagerMode.value = "view";
+    resetMongoCreateIndexForm();
+  }
+
+  /** The default _id index is never droppable, so the panel must not offer it. */
+  const canDropSelectedMongoIndexRow = computed(() => {
+    if (mongoIndexManagerMode.value === "create") return false;
+    const row = mongoIndexManagerSelected.value;
+    return !!row && !row.isProtected;
+  });
+
+  async function dropSelectedMongoIndexRow() {
+    const node = sidebarFormTarget.value ?? activeNode.value;
+    const connectionId = node.connectionId;
+    const database = node.database;
+    const collection = mongoIndexPanelCollectionName(node);
+    const row = mongoIndexManagerSelected.value;
+    if (!canDropSelectedMongoIndexRow.value || !row || !connectionId || !database || !collection) return;
+
+    await runMongoSidebarMutation({
+      connection: connectionStore.getConfig(connectionId),
+      database,
+      reviewText: mongoDropIndexPreview(database, collection, row.name),
+      source: t("production.sourceSidebar"),
+      loading: mongoIndexManagerLoading,
+      beforeExecute: () => connectionStore.ensureConnected(connectionId),
+      execute: () => api.mongoDropIndexes(connectionId, database, collection, JSON.stringify(row.name), true),
+      onSuccess: async (result) => {
+        const failed = mongoDropIndexFailureCount(result);
+        if (failed > 0) {
+          toast(t("contextMenu.dropIndexesPartialFailure", { success: result.dropped_names.length, failed }), 5000);
+        } else {
+          toast(t("contextMenu.dropTableChildObjectSuccess", { name: row.name }), 3000);
+        }
+        mongoIndexManagerSelectedName.value = "";
+        await refreshMongoIndexTreeAfterMutation({ ...node, tableName: collection });
+        await loadMongoIndexManagerRows();
+      },
+      onError: (error) => {
+        mongoIndexManagerError.value = translateBackendError(t, errorMessage(error));
+      },
+    });
+  }
+
   function addMongoCreateIndexField() {
     if (!mongoCreateIndexCanAddField.value) return;
     const nextId = Math.max(0, ...mongoCreateIndexForm.value.fields.map((field) => field.id)) + 1;
@@ -236,16 +372,34 @@ export function useSidebarDatabaseSpecificMutationRuntime(options: SidebarDataba
     mongoCreateIndexForm.value.fields = mongoCreateIndexForm.value.fields.filter((field) => field.id !== id);
   }
 
+  function mongoCreateIndexRequestErrorText(request: Extract<MongoCreateIndexRequest, { valid: false }>): string {
+    switch (request.error) {
+      case "field-duplicate":
+        return t("mongo.duplicateField", { field: request.field });
+      case "ttl-invalid":
+        return t("contextMenu.createMongoIndexTtlInvalid");
+      case "filter-invalid":
+        return t("contextMenu.createMongoIndexFilterInvalid");
+      case "bucket-size-invalid":
+        return t("contextMenu.createMongoIndexBucketSizeInvalid");
+      default:
+        return t("contextMenu.createMongoIndexFieldRequired");
+    }
+  }
+
   async function confirmCreateMongoIndex() {
     const node = sidebarFormTarget.value ?? activeNode.value;
     const connectionId = node.connectionId;
     const database = node.database;
-    const collectionName = mongoIndexCollectionName(node);
-    if (!canCreateMongoIndexNode(node) || !connectionId || !database || !collectionName) return;
+    // When called from the manager panel the node may be a collection node;
+    // when called from the standalone create dialog it is always a group-indexes node.
+    const collectionName = showMongoIndexManagerDialog.value ? mongoIndexPanelCollectionName(node) : mongoIndexCollectionName(node);
+    const canProceed = showMongoIndexManagerDialog.value ? canManageMongoIndexPanelNode(node) : canCreateMongoIndexNode(node);
+    if (!canProceed || !connectionId || !database || !collectionName) return;
 
     const request = buildMongoCreateIndexRequest(mongoCreateIndexForm.value);
     if (!request.valid) {
-      mongoCreateIndexError.value = request.error === "field-duplicate" ? t("mongo.duplicateField", { field: request.field }) : t("contextMenu.createMongoIndexFieldRequired");
+      mongoCreateIndexError.value = mongoCreateIndexRequestErrorText(request);
       return;
     }
 
@@ -261,6 +415,14 @@ export function useSidebarDatabaseSpecificMutationRuntime(options: SidebarDataba
       onSuccess: async (created) => {
         showCreateMongoIndexDialog.value = false;
         toast(t("contextMenu.createMongoIndexSuccess", { name: created.name, collection: collectionName }), 3000);
+        // In the manager panel the dialog stays open: return the property pane to
+        // read-only and reload the list so the new index shows up selected.
+        if (showMongoIndexManagerDialog.value) {
+          mongoIndexManagerMode.value = "view";
+          mongoIndexManagerSelectedName.value = created.name;
+          resetMongoCreateIndexForm();
+          await loadMongoIndexManagerRows();
+        }
         await refreshMongoIndexTreeAfterMutation({ ...node, tableName: collectionName });
       },
       onError: (error) => {
@@ -555,6 +717,7 @@ export function useSidebarDatabaseSpecificMutationRuntime(options: SidebarDataba
     mongoDropAllIndexesPreview: mongoDropAllIndexesPreviewForNode,
     refreshMongoIndexTreeAfterMutation,
     canCreateMongoIndex,
+    canManageMongoIndexes,
     mongoIndexKeyTypes: MONGO_INDEX_KEY_TYPES,
     mongoCreateIndexCanSubmit,
     mongoCreateIndexCanAddField,
@@ -562,6 +725,15 @@ export function useSidebarDatabaseSpecificMutationRuntime(options: SidebarDataba
     addMongoCreateIndexField,
     removeMongoCreateIndexField,
     confirmCreateMongoIndex,
+    prepareMongoIndexManagerDialog,
+    loadMongoIndexManagerRows,
+    mongoIndexManagerSelected,
+    mongoIndexManagerCollectionName,
+    selectMongoIndexRow,
+    startCreateMongoIndexDraft,
+    cancelMongoIndexDraft,
+    dropSelectedMongoIndexRow,
+    canDropSelectedMongoIndexRow,
     openCreateNacosNamespaceDialog,
     confirmCreateNacosNamespace,
     openEditNacosNamespaceDialog,

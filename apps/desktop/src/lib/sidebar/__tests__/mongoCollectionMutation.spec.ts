@@ -10,13 +10,15 @@ import {
   mongoDropAllIndexesPreview,
   mongoDropIndexFailureCount,
   mongoDropIndexPreview,
+  mongoIndexKeyLabel,
   mongoRenameCollectionPreview,
   toMongoCollectionKind,
+  toMongoIndexRow,
   type MongoCreateIndexForm,
 } from "../mongoCollectionMutation";
 
 function indexForm(fields: MongoCreateIndexForm["fields"], options: Partial<Omit<MongoCreateIndexForm, "fields">> = {}): MongoCreateIndexForm {
-  return { name: "", unique: false, sparse: false, ...options, fields };
+  return { name: "", unique: false, sparse: false, expireAfterSeconds: "", partialFilterExpression: "", background: false, bucketSize: "", ...options, fields };
 }
 
 describe("isRenamableMongoCollection", () => {
@@ -135,5 +137,130 @@ describe("mongo shell previews", () => {
         ]),
       ),
     ).toEqual({ valid: false, error: "field-duplicate", field: "email" });
+  });
+
+  it("emits TTL and partial-filter options in a stable order", () => {
+    const request = buildMongoCreateIndexRequest(
+      indexForm([{ id: 1, path: "createdAt", type: "1" }], {
+        name: "ttl_idx",
+        unique: true,
+        sparse: true,
+        expireAfterSeconds: "3600",
+        partialFilterExpression: '{"archived":false}',
+      }),
+    );
+
+    expect(request).toEqual({
+      valid: true,
+      keysJson: '{"createdAt":1}',
+      optionsJson: '{"name":"ttl_idx","unique":true,"sparse":true,"expireAfterSeconds":3600,"partialFilterExpression":{"archived":false}}',
+    });
+  });
+
+  it("keeps a zero-second TTL distinct from an empty box", () => {
+    const withZero = buildMongoCreateIndexRequest(indexForm([{ id: 1, path: "createdAt", type: "1" }], { expireAfterSeconds: "0" }));
+    expect(withZero).toEqual({ valid: true, keysJson: '{"createdAt":1}', optionsJson: '{"expireAfterSeconds":0}' });
+
+    const withBlank = buildMongoCreateIndexRequest(indexForm([{ id: 1, path: "createdAt", type: "1" }], { expireAfterSeconds: "   " }));
+    expect(withBlank).toEqual({ valid: true, keysJson: '{"createdAt":1}', optionsJson: undefined });
+  });
+
+  it("passes legacy options through only when enabled", () => {
+    const request = buildMongoCreateIndexRequest(indexForm([{ id: 1, path: "email", type: "1" }], { background: true, bucketSize: "10" }));
+    expect(request).toEqual({ valid: true, keysJson: '{"email":1}', optionsJson: '{"background":true,"bucketSize":10}' });
+  });
+
+  it("rejects a non-numeric TTL, a bad bucket size, and a non-object filter", () => {
+    expect(buildMongoCreateIndexRequest(indexForm([{ id: 1, path: "a", type: "1" }], { expireAfterSeconds: "-5" }))).toEqual({ valid: false, error: "ttl-invalid" });
+    expect(buildMongoCreateIndexRequest(indexForm([{ id: 1, path: "a", type: "1" }], { expireAfterSeconds: "1.5" }))).toEqual({ valid: false, error: "ttl-invalid" });
+    expect(buildMongoCreateIndexRequest(indexForm([{ id: 1, path: "a", type: "1" }], { bucketSize: "abc" }))).toEqual({ valid: false, error: "bucket-size-invalid" });
+    expect(buildMongoCreateIndexRequest(indexForm([{ id: 1, path: "a", type: "1" }], { partialFilterExpression: "{not valid" }))).toEqual({ valid: false, error: "filter-invalid" });
+    expect(buildMongoCreateIndexRequest(indexForm([{ id: 1, path: "a", type: "1" }], { partialFilterExpression: "[1,2]" }))).toEqual({ valid: false, error: "filter-invalid" });
+  });
+
+  it("reports a missing field before a malformed option", () => {
+    expect(buildMongoCreateIndexRequest(indexForm([{ id: 1, path: "", type: "1" }], { expireAfterSeconds: "nope" }))).toEqual({ valid: false, error: "field-required" });
+  });
+});
+
+describe("mongoIndexKeyLabel", () => {
+  it("maps sort directions to readable labels and passes other types through", () => {
+    expect(mongoIndexKeyLabel(1)).toBe("ASC");
+    expect(mongoIndexKeyLabel("1")).toBe("ASC");
+    expect(mongoIndexKeyLabel(-1)).toBe("DESC");
+    expect(mongoIndexKeyLabel("-1")).toBe("DESC");
+    expect(mongoIndexKeyLabel("text")).toBe("text");
+    expect(mongoIndexKeyLabel(undefined)).toBe("");
+  });
+});
+
+describe("toMongoIndexRow", () => {
+  it("describes compound keys from a spec with directions", () => {
+    expect(
+      toMongoIndexRow({
+        name: "account_created",
+        keys: [
+          { field: "account", direction: "1" },
+          { field: "createTime", direction: "-1" },
+        ],
+      }),
+    ).toEqual({
+      name: "account_created",
+      keys: "account ASC, createTime DESC",
+      isUnique: false,
+      isProtected: false,
+      isSparse: false,
+      expireAfterSeconds: undefined,
+      partialFilterExpression: undefined,
+      background: false,
+      bucketSize: undefined,
+      hidden: false,
+      propertiesComplete: true,
+      extraOptions: undefined,
+    });
+  });
+
+  it("keeps non-numeric directions literal", () => {
+    expect(
+      toMongoIndexRow({
+        name: "content_text",
+        keys: [{ field: "content", direction: "text" }],
+      }).keys,
+    ).toBe("content text");
+  });
+
+  it("maps spec properties and flags the default index as protected", () => {
+    const row = toMongoIndexRow({
+      name: "_id_",
+      keys: [{ field: "_id", direction: "1" }],
+      is_unique: true,
+      is_primary: true,
+      is_sparse: true,
+      expire_after_seconds: 3600,
+      partial_filter_expression: '{"archived":false}',
+      background: true,
+      bucket_size: 32,
+      hidden: true,
+      properties_complete: true,
+      extra_options: '{"collation":{"locale":"en"}}',
+    });
+
+    expect(row.isProtected).toBe(true);
+    expect(row.isSparse).toBe(true);
+    expect(row.expireAfterSeconds).toBe(3600);
+    expect(row.partialFilterExpression).toBe('{"archived":false}');
+    expect(row.background).toBe(true);
+    expect(row.bucketSize).toBe(32);
+    expect(row.hidden).toBe(true);
+    expect(row.propertiesComplete).toBe(true);
+    expect(row.extraOptions).toBe('{"collation":{"locale":"en"}}');
+  });
+
+  it("exposes the Legacy Agent's incomplete property set", () => {
+    const row = toMongoIndexRow({ name: "email_1", keys: [{ field: "email", direction: "1" }], properties_complete: false });
+
+    expect(row.propertiesComplete).toBe(false);
+    expect(row.isSparse).toBe(false);
+    expect(row.expireAfterSeconds).toBeUndefined();
   });
 });

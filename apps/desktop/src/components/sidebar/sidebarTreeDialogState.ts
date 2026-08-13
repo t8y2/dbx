@@ -4,7 +4,7 @@ import type { PasteTableMode } from "@/lib/table/tableClipboard";
 import { fallbackCreateDatabaseCharsetMetadata } from "@/lib/database/createDatabaseCharsetOptions";
 import type { DatabaseUserIdentity } from "@/lib/database/databaseUserAdmin";
 import type { AuthorizationPlan, AuthorizationStepResult } from "@/lib/database/databaseAuthorizationPlan";
-import type { MongoCreateIndexForm } from "@/lib/sidebar/mongoCollectionMutation";
+import type { MongoCreateIndexForm, MongoIndexRow } from "@/lib/sidebar/mongoCollectionMutation";
 
 export type DuplicateStructureSource = TreeNode & { connectionId: string; database: string };
 type ConnectionDeleteTarget = TreeNode & { connectionId: string };
@@ -98,16 +98,45 @@ export const dropMongoIndexLoading = ref(false);
 export const showDropAllMongoIndexesConfirm = ref(false);
 export const dropAllMongoIndexesLoading = ref(false);
 export const showCreateMongoIndexDialog = ref(false);
-export const mongoCreateIndexForm = ref<MongoCreateIndexForm>({ name: "", fields: [{ id: 1, path: "", type: "1" }], unique: false, sparse: false });
+
+function emptyMongoCreateIndexForm(): MongoCreateIndexForm {
+  return {
+    name: "",
+    fields: [{ id: 1, path: "", type: "1" }],
+    unique: false,
+    sparse: false,
+    expireAfterSeconds: "",
+    partialFilterExpression: "",
+    background: false,
+    bucketSize: "",
+  };
+}
+
+export const mongoCreateIndexForm = ref<MongoCreateIndexForm>(emptyMongoCreateIndexForm());
 export const mongoCreateIndexFieldOptions = ref<string[]>([]);
 export const mongoCreateIndexError = ref("");
 export const mongoCreateIndexLoading = ref(false);
 
 export function resetMongoCreateIndexForm() {
-  mongoCreateIndexForm.value = { name: "", fields: [{ id: 1, path: "", type: "1" }], unique: false, sparse: false };
+  mongoCreateIndexForm.value = emptyMongoCreateIndexForm();
   mongoCreateIndexFieldOptions.value = [];
   mongoCreateIndexError.value = "";
   mongoCreateIndexLoading.value = false;
+}
+
+export const showMongoIndexManagerDialog = ref(false);
+export const mongoIndexManagerRows = ref<MongoIndexRow[]>([]);
+export const mongoIndexManagerLoading = ref(false);
+export const mongoIndexManagerError = ref("");
+export const mongoIndexManagerSelectedName = ref("");
+export const mongoIndexManagerMode = ref<"view" | "create">("view");
+
+export function resetMongoIndexManager() {
+  mongoIndexManagerRows.value = [];
+  mongoIndexManagerLoading.value = false;
+  mongoIndexManagerError.value = "";
+  mongoIndexManagerSelectedName.value = "";
+  mongoIndexManagerMode.value = "view";
 }
 export const showFlushRedisDbConfirm = ref(false);
 export const showRedisDatabaseAliasDialog = ref(false);
@@ -155,6 +184,7 @@ const openFlags = [
   showDropMongoIndexConfirm,
   showDropAllMongoIndexesConfirm,
   showCreateMongoIndexDialog,
+  showMongoIndexManagerDialog,
   showFlushRedisDbConfirm,
   showRedisDatabaseAliasDialog,
   showCreateSchemaDialog,
@@ -177,6 +207,7 @@ export function resetSidebarTreeDialogState() {
   redisDatabaseAliasInput.value = "";
   redisDatabaseAliasSaving.value = false;
   resetMongoCreateIndexForm();
+  resetMongoIndexManager();
   sidebarTreeDialogOwner.value = null;
   sidebarDangerTarget.value = null;
   sidebarFormTarget.value = null;

@@ -15,6 +15,14 @@ export interface MongoCreateIndexForm {
   fields: MongoCreateIndexField[];
   unique: boolean;
   sparse: boolean;
+  /** TTL in seconds. Kept as text so an empty box stays distinct from `0`. */
+  expireAfterSeconds: string;
+  /** Partial index condition, entered as an object literal. */
+  partialFilterExpression: string;
+  /** Ignored by MongoDB 4.2+; retained for older servers. */
+  background: boolean;
+  /** Only meaningful for geoHaystack indexes, removed in MongoDB 4.4+. */
+  bucketSize: string;
 }
 
 export type MongoCreateIndexRequest =
@@ -25,7 +33,7 @@ export type MongoCreateIndexRequest =
     }
   | {
       valid: false;
-      error: "field-required" | "field-duplicate";
+      error: "field-required" | "field-duplicate" | "ttl-invalid" | "filter-invalid" | "bucket-size-invalid";
       field?: string;
     };
 
@@ -87,6 +95,28 @@ export function isProtectedMongoIndex(index: { name: string; is_primary?: boolea
   return index.name === "_id_" || !!index.is_primary;
 }
 
+/** Parse an optional non-negative integer box; `null` marks a malformed entry. */
+function optionalNonNegativeInteger(raw: string | undefined): number | undefined | null {
+  const value = raw?.trim();
+  if (!value) return undefined;
+  if (!/^\d+$/.test(value)) return null;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) ? parsed : null;
+}
+
+/** Parse the partial filter box; `null` marks anything that is not an object literal. */
+function optionalFilterObject(raw: string | undefined): Record<string, unknown> | undefined | null {
+  const value = raw?.trim();
+  if (!value) return undefined;
+  try {
+    const parsed = JSON.parse(value);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+    return parsed as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
+
 /** Convert the visual form into the driver's JSON transport format. */
 export function buildMongoCreateIndexRequest(form: MongoCreateIndexForm): MongoCreateIndexRequest {
   const fields = form.fields.map((field) => ({ ...field, path: field.path.trim() }));
@@ -100,10 +130,21 @@ export function buildMongoCreateIndexRequest(form: MongoCreateIndexForm): MongoC
   // Build the object text directly so compound indexes retain their visual row order,
   // including when a field name looks like an integer.
   const keysJson = `{${fields.map((field) => `${JSON.stringify(field.path)}:${JSON.stringify(field.type === "1" ? 1 : field.type === "-1" ? -1 : field.type)}`).join(",")}}`;
+  const expireAfterSeconds = optionalNonNegativeInteger(form.expireAfterSeconds);
+  if (expireAfterSeconds === null) return { valid: false, error: "ttl-invalid" };
+  const bucketSize = optionalNonNegativeInteger(form.bucketSize);
+  if (bucketSize === null) return { valid: false, error: "bucket-size-invalid" };
+  const partialFilterExpression = optionalFilterObject(form.partialFilterExpression);
+  if (partialFilterExpression === null) return { valid: false, error: "filter-invalid" };
+
   const options = {
     ...(form.name.trim() ? { name: form.name.trim() } : {}),
     ...(form.unique ? { unique: true } : {}),
     ...(form.sparse ? { sparse: true } : {}),
+    ...(expireAfterSeconds === undefined ? {} : { expireAfterSeconds }),
+    ...(partialFilterExpression === undefined ? {} : { partialFilterExpression }),
+    ...(form.background ? { background: true } : {}),
+    ...(bucketSize === undefined ? {} : { bucketSize }),
   };
   const optionsJson = Object.keys(options).length ? JSON.stringify(options) : undefined;
   return { valid: true, keysJson, optionsJson };
@@ -117,4 +158,77 @@ export function buildMongoCreateIndexRequest(form: MongoCreateIndexForm): MongoC
 export function mongoCreateIndexPreview(database: string, collection: string, keysJson: string, optionsJson?: string): string {
   const args = [keysJson, ...(optionsJson ? [optionsJson] : [])];
   return `db.getSiblingDB(${JSON.stringify(database)}).getCollection(${JSON.stringify(collection)}).createIndex(${args.join(", ")})`;
+}
+
+/** Render a key direction the way index management tools label it. */
+export function mongoIndexKeyLabel(value: unknown): string {
+  if (value === 1 || value === "1") return "ASC";
+  if (value === -1 || value === "-1") return "DESC";
+  return String(value ?? "");
+}
+
+/** One row of the index management panel. */
+export interface MongoIndexRow {
+  name: string;
+  /** Per-key description, e.g. `account ASC`. */
+  keys: string;
+  isUnique: boolean;
+  isProtected: boolean;
+  isSparse: boolean;
+  /** TTL in seconds; undefined when the index does not expire. */
+  expireAfterSeconds?: number;
+  partialFilterExpression?: string;
+  background: boolean;
+  bucketSize?: number;
+  hidden: boolean;
+  /**
+   * False when the driver could not report the properties above, so the panel
+   * hides them instead of presenting defaults as if the server had said so.
+   */
+  propertiesComplete: boolean;
+  extraOptions?: string;
+}
+
+type MongoIndexSpecSource = {
+  name: string;
+  keys?: readonly { field: string; direction: string }[] | null;
+  is_unique?: boolean;
+  is_primary?: boolean;
+  is_sparse?: boolean;
+  expire_after_seconds?: number | null;
+  partial_filter_expression?: string | null;
+  background?: boolean;
+  bucket_size?: number | null;
+  hidden?: boolean;
+  properties_complete?: boolean;
+  extra_options?: string | null;
+};
+
+/** Describe every key as `field LABEL`, e.g. `account ASC, createTime DESC`. */
+function mongoIndexKeyDescription(keys: readonly { field: string; direction: string }[]): string {
+  return keys
+    .map((key) => {
+      const label = mongoIndexKeyLabel(key.direction);
+      return label ? `${key.field} ${label}` : key.field;
+    })
+    .join(", ");
+}
+
+/** Adapt a backend index spec into the management panel's row model. */
+export function toMongoIndexRow(source: MongoIndexSpecSource): MongoIndexRow {
+  return {
+    name: source.name,
+    keys: mongoIndexKeyDescription(source.keys ?? []),
+    isUnique: !!source.is_unique,
+    isProtected: isProtectedMongoIndex({ name: source.name, is_primary: source.is_primary }),
+    isSparse: !!source.is_sparse,
+    expireAfterSeconds: source.expire_after_seconds ?? undefined,
+    partialFilterExpression: source.partial_filter_expression?.trim() || undefined,
+    background: !!source.background,
+    bucketSize: source.bucket_size ?? undefined,
+    hidden: !!source.hidden,
+    // Absent means the caller did not say, and only the Legacy Agent path says false.
+    propertiesComplete: source.properties_complete !== false,
+    extraOptions: source.extra_options?.trim() || undefined,
+  };
 }

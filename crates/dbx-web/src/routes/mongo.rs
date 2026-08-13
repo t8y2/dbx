@@ -551,6 +551,23 @@ pub async fn distinct(
     Ok(Json(serde_json::to_value(result).map_err(|e| AppError::from(e.to_string()))?))
 }
 
+pub async fn list_index_specs(
+    State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
+    Json(req): Json<MongoCollectionNameRequest>,
+) -> Result<Json<Vec<dbx_core::db::mongo_driver::MongoIndexSpec>>, AppError> {
+    super::mcp_policy::ensure_scope(&state, &headers, &req.connection_id).await?;
+    let result = dbx_core::mongo_ops::mongo_list_index_specs_core(
+        &state.app,
+        &req.connection_id,
+        &req.database,
+        &req.collection,
+    )
+    .await
+    .map_err(AppError::from)?;
+    Ok(Json(result))
+}
+
 pub async fn create_index(
     State(state): State<Arc<WebState>>,
     headers: HeaderMap,

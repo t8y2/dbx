@@ -617,6 +617,7 @@ async fn main() {
         .route("/mongo/collection-stats", post(routes::mongo::collection_stats))
         .route("/mongo/aggregate-documents", post(routes::mongo::aggregate_documents))
         .route("/mongo/distinct", post(routes::mongo::distinct))
+        .route("/mongo/list-index-specs", post(routes::mongo::list_index_specs))
         .route("/mongo/create-index", post(routes::mongo::create_index))
         .route("/mongo/drop-indexes", post(routes::mongo::drop_indexes))
         .route("/mongo/insert-document", post(routes::mongo::insert_document))

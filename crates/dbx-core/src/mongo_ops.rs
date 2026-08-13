@@ -320,6 +320,43 @@ pub async fn mongo_distinct_core(
     }
 }
 
+/// Read every index of a collection with its full MongoDB option set.
+///
+/// The native driver reports `sparse`, `expireAfterSeconds`, `background` and
+/// `bucketSize`, which the shared `IndexInfo` cannot carry. The Legacy Agent has no
+/// equivalent method, so it degrades to the generic index listing with
+/// `properties_complete: false` rather than presenting defaults as server truth.
+pub async fn mongo_list_index_specs_core(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    collection: &str,
+) -> Result<Vec<mongo_driver::MongoIndexSpec>, String> {
+    mongo_driver::validate_mongo_namespace_name(database, "Database")?;
+    mongo_driver::validate_mongo_namespace_name(collection, "Collection")?;
+    ensure_document_pool(state, connection_id).await?;
+    let is_native = {
+        let connections = state.connections.read().await;
+        match connections.get(connection_id).ok_or("Not found")? {
+            PoolKind::MongoDb(_) => true,
+            PoolKind::Agent(_) => false,
+            _ => return Err("Not a MongoDB connection".to_string()),
+        }
+    };
+
+    if !is_native {
+        // `list_indexes_core` owns the agent metadata session, so borrow nothing here.
+        let indexes = crate::schema::list_indexes_core(state, connection_id, database, database, collection).await?;
+        return Ok(indexes.iter().map(mongo_driver::index_spec_from_index_info).collect());
+    }
+
+    let connections = state.connections.read().await;
+    match connections.get(connection_id).ok_or("Not found")? {
+        PoolKind::MongoDb(client) => mongo_driver::list_index_specs(client, database, collection).await,
+        _ => Err("Not a MongoDB connection".to_string()),
+    }
+}
+
 pub async fn mongo_create_index_core(
     state: &AppState,
     connection_id: &str,

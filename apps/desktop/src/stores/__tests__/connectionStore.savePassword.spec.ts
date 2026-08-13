@@ -101,7 +101,7 @@ describe("connectionStore save_password opt-out", () => {
   it("connect prompts for the password and uses it only for connectDb", async () => {
     installApiMocks();
     installPasswordPromptMock();
-    requestPassword.mockResolvedValue("typed-pw");
+    requestPassword.mockResolvedValue({ password: "typed-pw", rememberPassword: false });
     const { useConnectionStore } = await import("@/stores/connectionStore");
     const store = useConnectionStore();
     const connection = postgresConnection({ id: "pg-1", save_password: false, password: "" });
@@ -144,5 +144,34 @@ describe("connectionStore save_password opt-out", () => {
     await store.connect(fresh);
 
     expect(requestPassword).not.toHaveBeenCalled();
+  });
+
+  it("prompts and retries when MySQL rejects a synced connection that sent no password", async () => {
+    const connectDb = vi.fn().mockRejectedValueOnce(new Error("MySQL connection failed: Access denied for user 'root'@'192.168.100.133' (using password: NO)")).mockResolvedValueOnce("mysql-1");
+    installApiMocks({ connectDb });
+    installPasswordPromptMock();
+    requestPassword.mockResolvedValue({ password: "typed-pw", rememberPassword: true });
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    const connection = postgresConnection({
+      id: "mysql-1",
+      name: "Synced MySQL",
+      db_type: "mysql",
+      port: 3306,
+      username: "root",
+      save_password: true,
+      password: "",
+    });
+    store.connections = [connection];
+
+    await store.connect(connection);
+
+    expect(requestPassword).toHaveBeenCalledWith({ connectionId: "mysql-1", connectionName: "Synced MySQL" });
+    expect(connectDb).toHaveBeenCalledTimes(2);
+    expect(connectDb).toHaveBeenNthCalledWith(1, expect.objectContaining({ password: "" }), expect.any(Number));
+    expect(connectDb).toHaveBeenNthCalledWith(2, expect.objectContaining({ password: "typed-pw" }), expect.any(Number));
+    const { saveConnections } = await import("@/lib/backend/api");
+    expect(saveConnections).toHaveBeenLastCalledWith(expect.arrayContaining([expect.objectContaining({ id: "mysql-1", password: "typed-pw", save_password: true })]));
+    expect(store.getConfig("mysql-1")?.password).toBe("typed-pw");
   });
 });

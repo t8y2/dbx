@@ -111,7 +111,7 @@ import { kvRootNodeLabel } from "@/lib/kv/kvRootPresentation";
 import { REDIS_SCAN_PAGE_SIZE_DEFAULT } from "@/lib/redis/redisKeyPattern";
 import { normalizeRedisDatabaseAliases, redisDatabaseAlias, redisDatabaseLabel } from "@/lib/redis/redisDatabaseAlias";
 import { appendAgentDriverUpdateHint, hasAgentDriverUpdate, hasInstalledAgentVersion, type AgentDriverInstallState } from "@/lib/connection/agentDriverInstallHint";
-import { appendConnectionErrorHints } from "@/lib/connection/connectionErrorHints";
+import { appendConnectionErrorHints, isMysqlMissingPasswordFailure } from "@/lib/connection/connectionErrorHints";
 import { appendVisibleDatabaseSelection } from "@/lib/connection/connectionVisibleDatabases";
 import { buildXuguTypeMemberNodes, isXuguTypeMemberContainer } from "@/lib/sidebar/xuguTypeMembers";
 import { isXuguPublicSynonymScope, xuguSchemaDisplayName, XUGU_PUBLIC_SYNONYM_SCOPE } from "@/lib/sidebar/xuguPublicSynonyms";
@@ -2834,21 +2834,45 @@ export const useConnectionStore = defineStore("connection", () => {
   }
 
   /**
-   * For a connection configured with `save_password === false` (password not
-   * persisted), prompt the user for the password and return a copy of the
-   * config carrying the typed value. The returned config is used only for the
-   * immediate `connectDb` call — it is never written back to the store, so the
-   * typed password is not persisted and the next connect prompts again.
+   * Prompt for a transient password when saving is disabled, or when a server
+   * confirms that a metadata-only synced connection sent no password. The
+   * password is used for the immediate `connectDb` call and is persisted only
+   * after a successful connection when the user selects "remember password".
    */
-  async function ensureConnectionPassword(config: ConnectionConfig): Promise<ConnectionConfig> {
-    if (config.save_password !== false || config.password) return config;
+  async function ensureConnectionPassword(config: ConnectionConfig, force = false): Promise<{ config: ConnectionConfig; rememberPassword: boolean }> {
+    if (!force && (config.save_password !== false || config.password)) return { config, rememberPassword: false };
     const { useConnectionPasswordPromptStore } = await import("@/stores/connectionPasswordPromptStore");
-    const password = await useConnectionPasswordPromptStore().requestPassword({
+    const result = await useConnectionPasswordPromptStore().requestPassword({
       connectionId: config.id,
       connectionName: config.name,
     });
-    if (!password) throw new Error(CONNECTION_PASSWORD_REQUIRED_MESSAGE);
-    return { ...config, password };
+    if (!result?.password) throw new Error(CONNECTION_PASSWORD_REQUIRED_MESSAGE);
+    return { config: { ...config, password: result.password }, rememberPassword: result.rememberPassword };
+  }
+
+  async function persistRememberedConnectionPassword(config: ConnectionConfig, rememberPassword: boolean): Promise<void> {
+    if (!rememberPassword || !config.password) return;
+    const index = connections.value.findIndex((connection) => connection.id === config.id);
+    if (index < 0) return;
+    const nextConnections = [...connections.value];
+    nextConnections[index] = { ...nextConnections[index], password: config.password, save_password: true };
+    await persistConnections(nextConnections);
+    connections.value = nextConnections;
+    rebuildTreeNodes();
+  }
+
+  async function connectDbWithMissingPasswordRetry(config: ConnectionConfig, localAttempt: number): Promise<{ config: ConnectionConfig; id: string; rememberPassword: boolean }> {
+    try {
+      const id = await withConnectionAttemptTimeout(api.connectDb(config, localAttempt), config);
+      return { config, id, rememberPassword: false };
+    } catch (error) {
+      if (!isMysqlMissingPasswordFailure(config, connectionErrorMessage(error))) throw error;
+      const prompted = await ensureConnectionPassword(config, true);
+      config = prompted.config;
+      ensureLocalConnectionAttemptActive(config.id, localAttempt);
+      const id = await withConnectionAttemptTimeout(api.connectDb(config, localAttempt), config);
+      return { config, id, rememberPassword: prompted.rememberPassword };
+    }
   }
 
   async function connect(config: ConnectionConfig) {
@@ -2856,16 +2880,23 @@ export const useConnectionStore = defineStore("connection", () => {
     if (getBlockingDisconnectInFlight(config.id)) await waitForBlockingDisconnectInFlight(config.id);
     const localAttempt = beginLocalConnectionAttempt(config.id);
     try {
+      let rememberPassword = false;
       if (config.save_password === false && !config.password) {
-        config = await ensureConnectionPassword(config);
+        const prompted = await ensureConnectionPassword(config);
+        config = prompted.config;
+        rememberPassword = prompted.rememberPassword;
       }
       await beforeConnectHandler?.(config);
       if (config.db_type === "sqlserver") {
         await ensureSqlServerLegacyCompatibilityComponentInstalled(config);
       }
       ensureLocalConnectionAttemptActive(config.id, localAttempt);
-      const id = await withConnectionAttemptTimeout(api.connectDb(config, localAttempt), config);
+      const connection = await connectDbWithMissingPasswordRetry(config, localAttempt);
+      config = connection.config;
+      rememberPassword ||= connection.rememberPassword;
+      const id = connection.id;
       await ensureLocalConnectionAttemptActiveAfterConnectResult(config.id, localAttempt, id);
+      await persistRememberedConnectionPassword(config, rememberPassword);
       await syncMongoLegacyDriverFallback(id, config);
       await ensureLocalConnectionAttemptActiveAfterConnectResult(config.id, localAttempt, id);
       activeConnectionId.value = id;
@@ -3040,19 +3071,26 @@ export const useConnectionStore = defineStore("connection", () => {
     }
     const localAttempt = beginLocalConnectionAttempt(connectionId);
     const connectPromise = (async () => {
+      let rememberPassword = false;
       // Fast-path the common case (password saved or no password needed) so the
       // in-flight dedup above keeps its exact microtask cadence; only await the
       // interactive prompt when the connection actually needs a typed password.
       if (config.save_password === false && !config.password) {
-        config = await ensureConnectionPassword(config);
+        const prompted = await ensureConnectionPassword(config);
+        config = prompted.config;
+        rememberPassword = prompted.rememberPassword;
       }
       await beforeConnectHandler?.(config);
       if (config.db_type === "sqlserver") {
         await ensureSqlServerLegacyCompatibilityComponentInstalled(config);
       }
       ensureLocalConnectionAttemptActive(connectionId, localAttempt);
-      const id = await withConnectionAttemptTimeout(api.connectDb(config, localAttempt), config);
+      const connection = await connectDbWithMissingPasswordRetry(config, localAttempt);
+      config = connection.config;
+      rememberPassword ||= connection.rememberPassword;
+      const id = connection.id;
       await ensureLocalConnectionAttemptActiveAfterConnectResult(connectionId, localAttempt, id);
+      await persistRememberedConnectionPassword(config, rememberPassword);
       await syncMongoLegacyDriverFallback(connectionId, config);
       await ensureLocalConnectionAttemptActiveAfterConnectResult(connectionId, localAttempt, id);
       connectedIds.value.add(connectionId);

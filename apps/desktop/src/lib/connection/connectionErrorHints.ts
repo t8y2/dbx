@@ -37,6 +37,11 @@ function isMysqlTlsLikeFailure(message: string): boolean {
   );
 }
 
+export function isMysqlMissingPasswordFailure(config: ConnectionConfig, message: string): boolean {
+  if (config.db_type !== "mysql" || config.password) return false;
+  return /access denied for user[\s\S]*using password:\s*no/i.test(message);
+}
+
 export function isJdbcMissingRuntimeDependencyError(message: string): boolean {
   return /Missing Java class|NoClassDefFoundError|ClassNotFoundException/i.test(message);
 }
@@ -52,6 +57,13 @@ export function appendConnectionErrorHints(config: ConnectionConfig | undefined,
     result = appendHint(result, t("connection.jdbcMissingRuntimeDependencyHint"));
   }
   if (config.db_type !== "mysql") return result;
+  // MySQL includes the client's source IP in this error, which is easy to
+  // mistake for a host rewritten by sync. When no password was sent, lead
+  // with the actionable fix and reserve the native grant error for attempts
+  // that actually supplied credentials.
+  if (isMysqlMissingPasswordFailure(config, message)) {
+    return t("connection.mysqlMissingPasswordHint");
+  }
   if (mysqlTlsMode(config) === "disabled") return message;
   if (!isMysqlTlsLikeFailure(message)) return message;
   const hint = t("connection.mysqlTlsConnectionFailureHint");

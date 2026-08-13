@@ -33,6 +33,7 @@ function jdbcConfig(): ConnectionConfig {
 
 const t = (key: string) => {
   if (key === "connection.mysqlTlsConnectionFailureHint") return "Set TLS Mode to Disabled.";
+  if (key === "connection.mysqlMissingPasswordHint") return "No database password was sent.";
   if (key === "connection.jdbcMissingRuntimeDependencyHint") return "Install from Maven or import every dependency JAR.";
   return key;
 };
@@ -62,6 +63,20 @@ describe("appendConnectionErrorHints", () => {
     const message = appendConnectionErrorHints(mysqlConfig("ssl-mode=preferred"), "Access denied for user root", t);
 
     expect(message).toBe("Access denied for user root");
+  });
+
+  it("replaces a passwordless MySQL access-denied error with an actionable message", () => {
+    const message = appendConnectionErrorHints(mysqlConfig(undefined), "MySQL connection failed: Server error: `ERROR 1045 (28000): Access denied for user 'root'@'192.168.100.133' (using password: NO)'", t);
+
+    expect(message).toBe("No database password was sent.");
+    expect(message).not.toContain("192.168.100.133");
+  });
+
+  it("keeps the native MySQL access-denied error when a password was supplied", () => {
+    const config = { ...mysqlConfig(undefined), password: "wrong-password" };
+    const error = "Access denied for user 'root'@'192.168.100.133' (using password: YES)";
+
+    expect(appendConnectionErrorHints(config, error, t)).toBe(error);
   });
 
   it("adds an installation hint when a custom JDBC driver is missing a runtime dependency", () => {

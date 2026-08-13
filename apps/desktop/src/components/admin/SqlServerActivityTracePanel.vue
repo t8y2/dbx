@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, toRefs, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { Activity, AlertTriangle, Download, Eraser, Loader2, Pause, Play, Search, Square, X } from "@lucide/vue";
 import { Badge } from "@/components/ui/badge";
@@ -8,71 +8,33 @@ import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { useConnectionStore } from "@/stores/connectionStore";
-import { useQueryStore } from "@/stores/queryStore";
 import { useToast } from "@/composables/useToast";
 import { translateBackendError } from "@/i18n/backend-errors";
 import * as api from "@/lib/backend/api";
 import { compactLocalTimestamp, sanitizeExportBaseName, saveTextFile } from "@/lib/export/saveTextFile";
 import type { ConnectionConfig } from "@/types/database";
-import {
-  SQLSERVER_TRACE_DEFAULT_DURATION_MINUTES,
-  SQLSERVER_TRACE_DEFAULT_MAX_EVENTS,
-  buildCreateSqlServerTraceSessionSql,
-  buildCleanupSqlServerTraceSessionsSql,
-  buildDropSqlServerTraceSessionSql,
-  buildListSqlServerTraceSessionsSql,
-  buildReadSqlServerTraceEventsSql,
-  buildSqlServerTraceCapabilitiesSql,
-  buildSqlServerTraceSessionName,
-  buildStopSqlServerTraceSessionSql,
-  normalizeSqlServerTraceDurationMinutes,
-  normalizeSqlServerTraceMaxEvents,
-  mergeSqlServerTraceEventSnapshot,
-  parseSqlServerTraceCapabilities,
-  parseSqlServerTraceEvents,
-  sqlServerTraceCapabilityProblem,
-  sqlServerTraceEventsToCsv,
-  staleSqlServerTraceSessionNames,
-  type SqlServerTraceEvent,
-} from "@/lib/sqlserver/sqlServerActivityTrace";
+import { normalizeSqlServerTraceDurationMinutes, normalizeSqlServerTraceMaxEvents, sqlServerTraceEventsToCsv } from "@/lib/sqlserver/sqlServerActivityTrace";
+import { getSqlServerActivityTraceRuntime } from "@/lib/sqlserver/sqlServerActivityTraceRuntime";
 
 const props = defineProps<{
   connection: ConnectionConfig;
   tabId: string;
 }>();
 
-type TraceStatus = "idle" | "starting" | "running" | "paused" | "stopping" | "stopped" | "error";
-
 const { t } = useI18n();
 const connectionStore = useConnectionStore();
-const queryStore = useQueryStore();
 const { toast } = useToast();
-const status = ref<TraceStatus>("idle");
+const traceRuntime = getSqlServerActivityTraceRuntime(props.tabId, props.connection.id, props.connection.database || "");
+const { status, selectedDatabase, includeStatements, maxEvents, durationMinutes, events, selectedEvent, sqlFilter, loginFilter, clientFilter, sessionFilter, error, sessionName, elapsedSeconds, autoStopReason, autoStopRevision, capabilityProblem, capabilityVersion, missingCapabilities } = toRefs(
+  traceRuntime.state,
+);
 const databases = ref<string[]>([]);
-const selectedDatabase = ref(props.connection.database || "");
 const loadingDatabases = ref(false);
-const includeStatements = ref(false);
-const maxEvents = ref(SQLSERVER_TRACE_DEFAULT_MAX_EVENTS);
-const durationMinutes = ref(SQLSERVER_TRACE_DEFAULT_DURATION_MINUTES);
-const events = ref<SqlServerTraceEvent[]>([]);
-let knownEventCounts = new Map<string, number>();
-const selectedEvent = ref<SqlServerTraceEvent | null>(null);
-const sqlFilter = ref("");
-const loginFilter = ref("");
-const clientFilter = ref("");
-const sessionFilter = ref("");
-const error = ref("");
-const sessionName = ref("");
-const startedAt = ref<number | null>(null);
-const elapsedSeconds = ref(0);
-const polling = ref(false);
 const tableScroller = ref<HTMLDivElement>();
 const tableElement = ref<HTMLTableElement>();
 const horizontalScrollbarTrack = ref<HTMLDivElement>();
 const horizontalScrollbarThumb = ref<HTMLDivElement>();
 const hasHorizontalOverflow = ref(false);
-let pollTimer: ReturnType<typeof setInterval> | undefined;
-let elapsedTimer: ReturnType<typeof setInterval> | undefined;
 let tableResizeObserver: ResizeObserver | undefined;
 let horizontalScrollbarDrag:
   | {
@@ -80,13 +42,18 @@ let horizontalScrollbarDrag:
       thumbOffset: number;
     }
   | undefined;
-let disposed = false;
-
 const traceActive = computed(() => status.value === "running" || status.value === "paused");
 const traceSessionOpen = computed(() => !!sessionName.value || status.value === "starting" || traceActive.value || status.value === "stopping");
 const busy = computed(() => status.value === "starting" || status.value === "stopping");
 const canStart = computed(() => !!selectedDatabase.value && !traceActive.value && !busy.value);
 const statusLabel = computed(() => t(`sqlServerTrace.statuses.${status.value}`));
+const displayedError = computed(() => {
+  if (!capabilityProblem.value) return error.value ? translateBackendError(t, error.value) : "";
+  return t(`sqlServerTrace.capabilityErrors.${capabilityProblem.value}`, {
+    version: capabilityVersion.value,
+    capabilities: missingCapabilities.value.join(", "),
+  });
+});
 const filteredEvents = computed(() => {
   const sql = sqlFilter.value.trim().toLowerCase();
   const login = loginFilter.value.trim().toLowerCase();
@@ -119,14 +86,6 @@ function eventTypeLabel(eventName: string): string {
   return translated === key ? eventName : translated;
 }
 
-function capabilityErrorKey(problem: ReturnType<typeof sqlServerTraceCapabilityProblem>): string {
-  return problem ? `sqlServerTrace.capabilityErrors.${problem}` : "";
-}
-
-async function execute(sql: string, database = selectedDatabase.value, maxRows = 5000) {
-  return api.executeQuery(props.connection.id, database, sql, undefined, undefined, { maxRows });
-}
-
 async function loadDatabases() {
   loadingDatabases.value = true;
   error.value = "";
@@ -142,32 +101,6 @@ async function loadDatabases() {
   } finally {
     loadingDatabases.value = false;
   }
-}
-
-function stopTimers() {
-  if (pollTimer) clearInterval(pollTimer);
-  if (elapsedTimer) clearInterval(elapsedTimer);
-  pollTimer = undefined;
-  elapsedTimer = undefined;
-}
-
-function restartPolling() {
-  if (pollTimer) clearInterval(pollTimer);
-  pollTimer = setInterval(() => {
-    if (document.hidden || status.value !== "running") return;
-    void pollEvents();
-  }, 1000);
-}
-
-function restartElapsedTimer() {
-  if (elapsedTimer) clearInterval(elapsedTimer);
-  elapsedTimer = setInterval(() => {
-    if (!startedAt.value || !traceActive.value) return;
-    elapsedSeconds.value = Math.max(0, Math.floor((Date.now() - startedAt.value) / 1000));
-    if (elapsedSeconds.value >= normalizeSqlServerTraceDurationMinutes(durationMinutes.value) * 60) {
-      void stopTrace("duration");
-    }
-  }, 1000);
 }
 
 function syncHorizontalScrollbar() {
@@ -245,126 +178,30 @@ function observeTableSize() {
   syncHorizontalScrollbar();
 }
 
-async function pollEvents(options: { final?: boolean } = {}) {
-  if (!sessionName.value || polling.value) return;
-  polling.value = true;
-  let autoStopReason: "events" | undefined;
-  try {
-    const result = await execute(buildReadSqlServerTraceEventsSql(sessionName.value), selectedDatabase.value, normalizeSqlServerTraceMaxEvents(maxEvents.value));
-    const merged = mergeSqlServerTraceEventSnapshot(knownEventCounts, parseSqlServerTraceEvents(result));
-    knownEventCounts = merged.counts;
-    const additions = merged.additions;
-    if (additions.length > 0) events.value.push(...additions);
-    const capturedCount = Array.from(knownEventCounts.values()).reduce((total, count) => total + count, 0);
-    if (!options.final && capturedCount >= normalizeSqlServerTraceMaxEvents(maxEvents.value)) autoStopReason = "events";
-  } catch (cause) {
-    if (!options.final) {
-      error.value = translateBackendError(t, cause);
-      status.value = "error";
-      stopTimers();
-      await cleanupSession();
-    }
-  } finally {
-    polling.value = false;
-    if (autoStopReason) void stopTrace(autoStopReason);
-  }
-}
-
-async function waitForCurrentPoll() {
-  const deadline = Date.now() + 5000;
-  while (polling.value && Date.now() < deadline) {
-    await new Promise((resolve) => setTimeout(resolve, 25));
-  }
-}
-
-async function cleanupSession() {
-  const name = sessionName.value;
-  if (!name) return;
-  try {
-    await execute(buildStopSqlServerTraceSessionSql(name));
-  } catch {
-    // A failed start or an already-stopped session is safe to drop directly.
-  }
-  try {
-    await execute(buildDropSqlServerTraceSessionSql(name));
-    sessionName.value = "";
-  } catch (cause) {
-    if (!disposed) error.value = translateBackendError(t, cause);
-  }
-}
-
 async function startTrace() {
   if (!canStart.value) return;
-  error.value = "";
-  status.value = "starting";
-  maxEvents.value = normalizeSqlServerTraceMaxEvents(maxEvents.value);
-  durationMinutes.value = normalizeSqlServerTraceDurationMinutes(durationMinutes.value);
-  events.value = [];
-  knownEventCounts = new Map();
-  selectedEvent.value = null;
-  elapsedSeconds.value = 0;
   try {
     await connectionStore.ensureConnected(props.connection.id);
-    const capabilities = parseSqlServerTraceCapabilities(await execute(buildSqlServerTraceCapabilitiesSql(selectedDatabase.value), selectedDatabase.value, 1));
-    const problem = sqlServerTraceCapabilityProblem(capabilities);
-    if (problem) throw new Error(t(capabilityErrorKey(problem), { version: capabilities.productVersion }));
-    const staleSessions = staleSqlServerTraceSessionNames(await execute(buildListSqlServerTraceSessionsSql(), selectedDatabase.value, 100));
-    if (staleSessions.length > 0) {
-      await execute(buildCleanupSqlServerTraceSessionsSql(staleSessions), selectedDatabase.value, 1);
-      toast(t("sqlServerTrace.cleanedStaleSessions", { count: staleSessions.length }), 4000);
-    }
-    const name = buildSqlServerTraceSessionName();
-    sessionName.value = name;
-    await execute(
-      buildCreateSqlServerTraceSessionSql({
-        sessionName: name,
-        databaseId: capabilities.databaseId,
-        maxEvents: maxEvents.value,
-        includeStatements: includeStatements.value,
-      }),
-    );
-    startedAt.value = Date.now();
-    status.value = "running";
-    restartPolling();
-    restartElapsedTimer();
-    await pollEvents();
+    await traceRuntime.start();
   } catch (cause) {
     error.value = translateBackendError(t, cause);
-    status.value = "error";
-    stopTimers();
-    await cleanupSession();
   }
 }
 
 function pauseTrace() {
-  if (status.value !== "running") return;
-  status.value = "paused";
-  if (pollTimer) clearInterval(pollTimer);
-  pollTimer = undefined;
+  traceRuntime.pause();
 }
 
 async function resumeTrace() {
-  if (status.value !== "paused") return;
-  status.value = "running";
-  restartPolling();
-  await pollEvents();
+  await traceRuntime.resume();
 }
 
 async function stopTrace(reason?: "duration" | "events") {
-  if (!sessionName.value || status.value === "stopping") return;
-  status.value = "stopping";
-  stopTimers();
-  await waitForCurrentPoll();
-  await pollEvents({ final: true });
-  await cleanupSession();
-  if (disposed) return;
-  status.value = sessionName.value ? "error" : "stopped";
-  if (reason && !sessionName.value) toast(t(`sqlServerTrace.autoStopped.${reason}`), 4000);
+  await traceRuntime.stop(reason);
 }
 
 function clearEvents() {
-  events.value = [];
-  selectedEvent.value = null;
+  traceRuntime.clearEvents();
 }
 
 async function exportCsv() {
@@ -377,20 +214,12 @@ onMounted(() => {
   void loadDatabases();
   void nextTick(observeTableSize);
 });
-watch(
-  () => queryStore.tabs.some((tab) => tab.id === props.tabId),
-  (exists) => {
-    if (exists) return;
-    stopTimers();
-    void cleanupSession();
-  },
-);
+watch(autoStopRevision, () => {
+  if (autoStopReason.value) toast(t(`sqlServerTrace.autoStopped.${autoStopReason.value}`), 4000);
+});
 onBeforeUnmount(() => {
-  disposed = true;
-  stopTimers();
   stopHorizontalScrollbarDrag();
   tableResizeObserver?.disconnect();
-  void cleanupSession();
 });
 </script>
 
@@ -461,10 +290,10 @@ onBeforeUnmount(() => {
       <Input v-model="sessionFilter" inputmode="numeric" class="h-7 min-w-0 text-xs" :placeholder="t('sqlServerTrace.filterSession')" />
     </div>
 
-    <div v-if="error" class="flex shrink-0 items-start gap-2 border-b border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">
+    <div v-if="displayedError" class="flex shrink-0 items-start gap-2 border-b border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">
       <AlertTriangle class="mt-0.5 h-3.5 w-3.5 shrink-0" />
-      <span data-native-clipboard class="min-w-0 flex-1 select-text whitespace-pre-wrap">{{ error }}</span>
-      <button type="button" class="rounded p-0.5 hover:bg-destructive/10" :aria-label="t('common.close')" @click="error = ''"><X class="h-3.5 w-3.5" /></button>
+      <span data-native-clipboard class="min-w-0 flex-1 select-text whitespace-pre-wrap">{{ displayedError }}</span>
+      <button type="button" class="rounded p-0.5 hover:bg-destructive/10" :aria-label="t('common.close')" @click="((error = ''), (capabilityProblem = null))"><X class="h-3.5 w-3.5" /></button>
     </div>
 
     <div class="relative flex min-h-0 flex-1 flex-col">

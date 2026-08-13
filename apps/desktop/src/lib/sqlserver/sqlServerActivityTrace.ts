@@ -9,6 +9,8 @@ export const SQLSERVER_TRACE_DEFAULT_DURATION_MINUTES = 10;
 export const SQLSERVER_TRACE_MIN_DURATION_MINUTES = 1;
 export const SQLSERVER_TRACE_MAX_DURATION_MINUTES = 60;
 export const SQLSERVER_TRACE_STALE_GRACE_MINUTES = 5;
+export const SQLSERVER_TRACE_RING_BUFFER_MAX_EVENTS = 256;
+export const SQLSERVER_TRACE_READ_BATCH_SIZE = 256;
 
 export interface SqlServerTraceCapabilities {
   productVersion: string;
@@ -18,6 +20,13 @@ export interface SqlServerTraceCapabilities {
   canAlterEventSession: boolean;
   canViewServerState: boolean;
   canViewServerPerformanceState: boolean;
+  hasRpcCompletedEvent: boolean;
+  hasSqlBatchCompletedEvent: boolean;
+  hasSpStatementCompletedEvent: boolean;
+  hasRingBufferTarget: boolean;
+  hasDatabaseIdPredicate: boolean;
+  hasLikePredicate: boolean;
+  availableActions: Set<string>;
 }
 
 export interface SqlServerTraceEvent {
@@ -60,8 +69,8 @@ export function normalizeSqlServerTraceDurationMinutes(value: number): number {
   return clampInteger(value, SQLSERVER_TRACE_MIN_DURATION_MINUTES, SQLSERVER_TRACE_MAX_DURATION_MINUTES, SQLSERVER_TRACE_DEFAULT_DURATION_MINUTES);
 }
 
-export function buildSqlServerTraceSessionName(now = Date.now(), random = Math.random()): string {
-  const timePart = Math.max(0, Math.floor(now)).toString(36).toUpperCase();
+export function buildSqlServerTraceSessionName(expiresAt = Date.now() + (SQLSERVER_TRACE_MAX_DURATION_MINUTES + SQLSERVER_TRACE_STALE_GRACE_MINUTES) * 60_000, random = Math.random()): string {
+  const timePart = Math.max(0, Math.floor(expiresAt)).toString(36).toUpperCase();
   const randomPart = Math.max(0, Math.min(0.999999999, random)).toString(36).slice(2, 10).toUpperCase().padEnd(8, "0");
   return `${SQLSERVER_TRACE_SESSION_PREFIX}${timePart}_${randomPart}`;
 }
@@ -94,7 +103,50 @@ export function buildSqlServerTraceCapabilitiesSql(database: string): string {
     WHEN EXISTS (SELECT 1 FROM sys.fn_builtin_permissions(DEFAULT) WHERE permission_name = N'VIEW SERVER PERFORMANCE STATE')
       THEN HAS_PERMS_BY_NAME(NULL, NULL, N'VIEW SERVER PERFORMANCE STATE')
     ELSE 1
-  END) AS can_view_server_performance_state;`);
+  END) AS can_view_server_performance_state,
+  CONVERT(int, CASE WHEN EXISTS (
+    SELECT 1 FROM sys.dm_xe_objects object
+    JOIN sys.dm_xe_packages package ON package.guid = object.package_guid
+    WHERE package.name = N'sqlserver' AND object.object_type = N'event' AND object.name = N'rpc_completed'
+  ) THEN 1 ELSE 0 END) AS has_rpc_completed_event,
+  CONVERT(int, CASE WHEN EXISTS (
+    SELECT 1 FROM sys.dm_xe_objects object
+    JOIN sys.dm_xe_packages package ON package.guid = object.package_guid
+    WHERE package.name = N'sqlserver' AND object.object_type = N'event' AND object.name = N'sql_batch_completed'
+  ) THEN 1 ELSE 0 END) AS has_sql_batch_completed_event,
+  CONVERT(int, CASE WHEN EXISTS (
+    SELECT 1 FROM sys.dm_xe_objects object
+    JOIN sys.dm_xe_packages package ON package.guid = object.package_guid
+    WHERE package.name = N'sqlserver' AND object.object_type = N'event' AND object.name = N'sp_statement_completed'
+  ) THEN 1 ELSE 0 END) AS has_sp_statement_completed_event,
+  CONVERT(int, CASE WHEN EXISTS (
+    SELECT 1 FROM sys.dm_xe_objects object
+    JOIN sys.dm_xe_packages package ON package.guid = object.package_guid
+    WHERE package.name = N'package0' AND object.object_type = N'target' AND object.name = N'ring_buffer'
+  ) THEN 1 ELSE 0 END) AS has_ring_buffer_target,
+  CONVERT(int, CASE WHEN EXISTS (
+    SELECT 1 FROM sys.dm_xe_objects object
+    JOIN sys.dm_xe_packages package ON package.guid = object.package_guid
+    WHERE package.name = N'sqlserver' AND object.object_type = N'pred_source' AND object.name = N'database_id'
+  ) THEN 1 ELSE 0 END) AS has_database_id_predicate,
+  CONVERT(int, CASE WHEN EXISTS (
+    SELECT 1 FROM sys.dm_xe_objects object
+    JOIN sys.dm_xe_packages package ON package.guid = object.package_guid
+    WHERE package.name = N'sqlserver' AND object.object_type = N'pred_compare' AND object.name = N'like_i_sql_unicode_string'
+  ) THEN 1 ELSE 0 END) AS has_like_predicate,
+  STUFF((
+    SELECT N',' + object.name
+    FROM sys.dm_xe_objects object
+    JOIN sys.dm_xe_packages package ON package.guid = object.package_guid
+    WHERE package.name = N'sqlserver'
+      AND object.object_type = N'action'
+      AND object.name IN (
+        N'client_app_name', N'client_hostname', N'database_id', N'database_name',
+        N'server_principal_name', N'session_id', N'sql_text'
+      )
+    ORDER BY object.name
+    FOR XML PATH(N''), TYPE
+  ).value(N'.', N'nvarchar(max)'), 1, 1, N'') AS available_actions;`);
 }
 
 function columnIndex(result: QueryResult, name: string): number {
@@ -139,16 +191,46 @@ export function parseSqlServerTraceCapabilities(result: QueryResult): SqlServerT
     canAlterEventSession: booleanValue(cell(result, row, "can_alter_event_session")),
     canViewServerState: booleanValue(cell(result, row, "can_view_server_state")),
     canViewServerPerformanceState: booleanValue(cell(result, row, "can_view_server_performance_state")),
+    hasRpcCompletedEvent: booleanValue(cell(result, row, "has_rpc_completed_event")),
+    hasSqlBatchCompletedEvent: booleanValue(cell(result, row, "has_sql_batch_completed_event")),
+    hasSpStatementCompletedEvent: booleanValue(cell(result, row, "has_sp_statement_completed_event")),
+    hasRingBufferTarget: booleanValue(cell(result, row, "has_ring_buffer_target")),
+    hasDatabaseIdPredicate: booleanValue(cell(result, row, "has_database_id_predicate")),
+    hasLikePredicate: booleanValue(cell(result, row, "has_like_predicate")),
+    availableActions: new Set(
+      textValue(cell(result, row, "available_actions"))
+        .split(",")
+        .filter(Boolean),
+    ),
   };
 }
 
-export function sqlServerTraceCapabilityProblem(capabilities: SqlServerTraceCapabilities): "unsupported-version" | "unsupported-engine" | "alter-permission" | "view-permission" | null {
+const REQUIRED_SQLSERVER_TRACE_ACTIONS = ["client_app_name", "client_hostname", "database_id", "database_name", "server_principal_name", "session_id", "sql_text"] as const;
+
+export function missingSqlServerTraceCapabilities(capabilities: SqlServerTraceCapabilities, includeStatements: boolean): string[] {
+  const missing: string[] = [];
+  if (!capabilities.hasRpcCompletedEvent) missing.push("sqlserver.rpc_completed");
+  if (!capabilities.hasSqlBatchCompletedEvent) missing.push("sqlserver.sql_batch_completed");
+  if (includeStatements && !capabilities.hasSpStatementCompletedEvent) missing.push("sqlserver.sp_statement_completed");
+  if (!capabilities.hasRingBufferTarget) missing.push("package0.ring_buffer");
+  if (!capabilities.hasDatabaseIdPredicate) missing.push("sqlserver.database_id predicate");
+  if (!capabilities.hasLikePredicate) missing.push("sqlserver.like_i_sql_unicode_string predicate");
+  for (const action of REQUIRED_SQLSERVER_TRACE_ACTIONS) {
+    if (!capabilities.availableActions.has(action)) missing.push(`sqlserver.${action} action`);
+  }
+  return missing;
+}
+
+export type SqlServerTraceCapabilityProblem = "unsupported-version" | "unsupported-engine" | "alter-permission" | "view-permission" | "missing-capability";
+
+export function sqlServerTraceCapabilityProblem(capabilities: SqlServerTraceCapabilities, includeStatements = false): SqlServerTraceCapabilityProblem | null {
   if (capabilities.majorVersion < 10) return "unsupported-version";
   // Azure SQL Database uses database-scoped XE sessions, which are outside the
   // first release. Boxed SQL Server, Managed Instance and SQL Edge use SERVER.
   if (![1, 2, 3, 4, 8, 9].includes(capabilities.engineEdition)) return "unsupported-engine";
   if (!capabilities.canAlterEventSession) return "alter-permission";
   if (capabilities.majorVersion >= 16 ? !capabilities.canViewServerPerformanceState : !capabilities.canViewServerState) return "view-permission";
+  if (missingSqlServerTraceCapabilities(capabilities, includeStatements).length > 0) return "missing-capability";
   return null;
 }
 
@@ -180,7 +262,7 @@ export function buildCreateSqlServerTraceSessionSql(options: SqlServerTraceSessi
 CREATE EVENT SESSION [${sessionName}] ON SERVER
 ${events.join(",\n")}
 ADD TARGET package0.ring_buffer(
-  SET max_events_limit=(${maxEvents}), max_memory=(4096)
+  SET max_events_limit=(${Math.min(maxEvents, SQLSERVER_TRACE_RING_BUFFER_MAX_EVENTS)}), max_memory=(4096)
 )
 WITH (
   MAX_MEMORY=4096 KB,
@@ -192,14 +274,15 @@ WITH (
 ALTER EVENT SESSION [${sessionName}] ON SERVER STATE = START;`);
 }
 
-export function buildReadSqlServerTraceEventsSql(sessionName: string): string {
+export function buildReadSqlServerTraceEventsSql(sessionName: string, afterTimestamp?: string): string {
   assertSessionName(sessionName);
+  const cursorPredicate = afterTimestamp ? `WHERE event_time_utc >= CONVERT(datetime2(7), ${sqlString(afterTimestamp.replace(" ", "T"))}, 126)` : "";
   return internalSql(`;WITH target AS (
   SELECT CAST(target.target_data AS xml) AS target_data
   FROM sys.dm_xe_session_targets target
   JOIN sys.dm_xe_sessions session ON session.address = target.event_session_address
   WHERE session.name = ${sqlString(sessionName)} AND target.target_name = N'ring_buffer'
-)
+), event_rows AS (
 SELECT
   event_node.value('(@name)[1]', 'nvarchar(128)') AS event_name,
   event_node.value('(@timestamp)[1]', 'datetime2(7)') AS event_time_utc,
@@ -221,6 +304,14 @@ SELECT
   event_node.value('(data[@name="result"]/text/text())[1]', 'nvarchar(256)') AS result_text
 FROM target
 CROSS APPLY target_data.nodes('/RingBufferTarget/event') AS events(event_node)
+), bounded_events AS (
+  SELECT TOP (${SQLSERVER_TRACE_READ_BATCH_SIZE}) *
+  FROM event_rows
+  ${cursorPredicate}
+  ORDER BY event_time_utc DESC
+)
+SELECT *
+FROM bounded_events
 ORDER BY event_time_utc;`);
 }
 
@@ -242,7 +333,7 @@ FROM sys.server_event_sessions
 WHERE name LIKE N'${SQLSERVER_TRACE_SESSION_PREFIX}%';`);
 }
 
-export function sqlServerTraceSessionStartedAt(sessionName: string): number | null {
+export function sqlServerTraceSessionExpiresAt(sessionName: string): number | null {
   if (!isValidSqlServerTraceSessionName(sessionName)) return null;
   const encoded = sessionName.slice(SQLSERVER_TRACE_SESSION_PREFIX.length).split("_")[0];
   const timestamp = Number.parseInt(encoded, 36);
@@ -250,12 +341,11 @@ export function sqlServerTraceSessionStartedAt(sessionName: string): number | nu
 }
 
 export function staleSqlServerTraceSessionNames(result: QueryResult, now = Date.now()): string[] {
-  const threshold = now - (SQLSERVER_TRACE_MAX_DURATION_MINUTES + SQLSERVER_TRACE_STALE_GRACE_MINUTES) * 60_000;
   return result.rows
     .map((row) => textValue(cell(result, row, "name")))
     .filter((name) => {
-      const startedAt = sqlServerTraceSessionStartedAt(name);
-      return startedAt !== null && startedAt < threshold;
+      const expiresAt = sqlServerTraceSessionExpiresAt(name);
+      return expiresAt !== null && expiresAt <= now;
     });
 }
 

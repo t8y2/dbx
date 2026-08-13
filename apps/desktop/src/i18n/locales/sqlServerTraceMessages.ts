@@ -62,5 +62,6 @@ export const sqlServerTraceMessages = {
     "unsupported-engine": "This SQL Server edition uses database-scoped Extended Events, which are not supported in the first release.",
     "alter-permission": "The current login lacks ALTER ANY EVENT SESSION permission.",
     "view-permission": "The current login lacks the server-state permission required to read trace events.",
+    "missing-capability": "This SQL Server instance is missing required Extended Events capabilities: {capabilities}.",
   },
 };

@@ -2957,6 +2957,7 @@ export default withEnglishFallback({
       "unsupported-engine": "当前 SQL Server 版本使用数据库级 Extended Events，第一版暂不支持。",
       "alter-permission": "当前登录用户缺少 ALTER ANY EVENT SESSION 权限。",
       "view-permission": "当前登录用户缺少读取跟踪事件所需的服务器状态查看权限。",
+      "missing-capability": "当前 SQL Server 实例缺少所需的 Extended Events 能力：{capabilities}。",
     },
   },
   serverDashboard: {

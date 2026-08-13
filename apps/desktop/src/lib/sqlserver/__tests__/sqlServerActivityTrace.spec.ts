@@ -8,13 +8,14 @@ import {
   buildReadSqlServerTraceEventsSql,
   buildSqlServerTraceCapabilitiesSql,
   buildSqlServerTraceSessionName,
+  missingSqlServerTraceCapabilities,
   normalizeSqlServerTraceDurationMinutes,
   normalizeSqlServerTraceMaxEvents,
   mergeSqlServerTraceEventSnapshot,
   parseSqlServerTraceCapabilities,
   parseSqlServerTraceEvents,
   sqlServerTraceCapabilityProblem,
-  sqlServerTraceSessionStartedAt,
+  sqlServerTraceSessionExpiresAt,
   sqlServerTraceEventsToCsv,
   staleSqlServerTraceSessionNames,
 } from "../sqlServerActivityTrace";
@@ -36,7 +37,7 @@ describe("SQL Server activity trace", () => {
     expect(sql).toContain("ADD EVENT sqlserver.sp_statement_completed");
     expect(sql).toContain("[sqlserver].[database_id]=(7)");
     expect(sql).toContain("like_i_sql_unicode_string");
-    expect(sql).toContain("max_events_limit=(5000)");
+    expect(sql).toContain("max_events_limit=(256)");
     expect(sql).toContain("STARTUP_STATE=OFF");
   });
 
@@ -52,13 +53,13 @@ describe("SQL Server activity trace", () => {
     expect(normalizeSqlServerTraceDurationMinutes(0)).toBe(1);
     expect(normalizeSqlServerTraceDurationMinutes(99)).toBe(60);
     expect(buildSqlServerTraceSessionName(123456789, 0.25)).toMatch(/^DBX_TRACE_[A-Z0-9]+_[A-Z0-9]{8}$/);
-    expect(sqlServerTraceSessionStartedAt(buildSqlServerTraceSessionName(123456789, 0.25))).toBe(123456789);
+    expect(sqlServerTraceSessionExpiresAt(buildSqlServerTraceSessionName(123456789, 0.25))).toBe(123456789);
   });
 
   it("identifies only expired DBX sessions for cleanup", () => {
     const now = Date.UTC(2026, 7, 12, 12);
-    const oldName = buildSqlServerTraceSessionName(now - 66 * 60_000, 0.1);
-    const activeName = buildSqlServerTraceSessionName(now - 10 * 60_000, 0.2);
+    const oldName = buildSqlServerTraceSessionName(now - 1, 0.1);
+    const activeName = buildSqlServerTraceSessionName(now + 10 * 60_000, 0.2);
     const stale = staleSqlServerTraceSessionNames(result(["name"], [[oldName], [activeName], ["OTHER_TRACE"]]), now);
     expect(stale).toEqual([oldName]);
     expect(buildListSqlServerTraceSessionsSql()).toContain("DBX_TRACE_%");
@@ -69,12 +70,42 @@ describe("SQL Server activity trace", () => {
   });
 
   it("parses capabilities and applies version-specific permission rules", () => {
-    const capabilities = parseSqlServerTraceCapabilities(result(["product_version", "engine_edition", "database_id", "can_alter_event_session", "can_view_server_state", "can_view_server_performance_state"], [["16.0.4225.2", 3, 5, 1, 1, 1]]));
+    const capabilities = parseSqlServerTraceCapabilities(
+      result(
+        [
+          "product_version",
+          "engine_edition",
+          "database_id",
+          "can_alter_event_session",
+          "can_view_server_state",
+          "can_view_server_performance_state",
+          "has_rpc_completed_event",
+          "has_sql_batch_completed_event",
+          "has_sp_statement_completed_event",
+          "has_ring_buffer_target",
+          "has_database_id_predicate",
+          "has_like_predicate",
+          "available_actions",
+        ],
+        [["16.0.4225.2", 3, 5, 1, 1, 1, 1, 1, 1, 1, 1, 1, "client_app_name,client_hostname,database_id,database_name,server_principal_name,session_id,sql_text"]],
+      ),
+    );
     expect(capabilities.majorVersion).toBe(16);
     expect(sqlServerTraceCapabilityProblem(capabilities)).toBeNull();
     expect(sqlServerTraceCapabilityProblem({ ...capabilities, canViewServerPerformanceState: false })).toBe("view-permission");
     expect(sqlServerTraceCapabilityProblem({ ...capabilities, engineEdition: 5 })).toBe("unsupported-engine");
     expect(sqlServerTraceCapabilityProblem({ ...capabilities, engineEdition: 11 })).toBe("unsupported-engine");
+    expect(sqlServerTraceCapabilityProblem({ ...capabilities, hasRingBufferTarget: false })).toBe("missing-capability");
+    expect(missingSqlServerTraceCapabilities({ ...capabilities, hasRingBufferTarget: false }, false)).toEqual(["package0.ring_buffer"]);
+    expect(sqlServerTraceCapabilityProblem({ ...capabilities, hasSpStatementCompletedEvent: false }, false)).toBeNull();
+    expect(sqlServerTraceCapabilityProblem({ ...capabilities, hasSpStatementCompletedEvent: false }, true)).toBe("missing-capability");
+  });
+
+  it("bounds each ring-buffer parse and reads incrementally from the timestamp cursor", () => {
+    const sql = buildReadSqlServerTraceEventsSql("DBX_TRACE_ABC_123", "2026-08-12T13:23:45.0840000");
+    expect(sql).toContain("SELECT TOP (256) *");
+    expect(sql).toContain("event_time_utc >= CONVERT(datetime2(7), N'2026-08-12T13:23:45.0840000', 126)");
+    expect(sql).toContain("ORDER BY event_time_utc DESC");
   });
 
   it("maps XE rows by column name, converts microseconds and removes internal events", () => {

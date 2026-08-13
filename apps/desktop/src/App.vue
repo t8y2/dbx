@@ -33,6 +33,7 @@ import { useNavigationTargets } from "@/composables/useNavigationTargets";
 import { useDataGridActions } from "@/composables/useDataGridActions";
 import { useTauriEvents } from "@/composables/useTauriEvents";
 import { useCloseActionPrompt, type AppCloseAction, type AppCloseRequestOptions } from "@/composables/useCloseActionPrompt";
+import { disposeAllSqlServerActivityTraces } from "@/lib/sqlserver/sqlServerActivityTraceRuntime";
 import { useVisibilityChange } from "@/composables/useVisibilityChange";
 import { useExternalSqlFileChanges } from "@/composables/useExternalSqlFileChanges";
 import { useWebDavAutoUpload } from "@/composables/useWebDavAutoUpload";
@@ -947,7 +948,7 @@ function cancelPendingAppClose() {
   pendingSaveShouldCloseTab.value = true;
 }
 
-function finishPendingAppClose(action: AppCloseAction) {
+async function finishPendingAppClose(action: AppCloseAction) {
   if (pendingCloseActionChoice.value) {
     pendingCloseActionChoice.value = false;
     showCloseActionPrompt.value = true;
@@ -955,10 +956,9 @@ function finishPendingAppClose(action: AppCloseAction) {
   }
   pendingAppCloseAction.value = null;
   pendingSaveShouldCloseTab.value = true;
-  void queryStore
-    .flushPendingPersist()
-    .catch(() => {})
-    .finally(() => performCloseAction(action));
+  if (action === "quit") await disposeAllSqlServerActivityTraces().catch(() => undefined);
+  await queryStore.flushPendingPersist().catch(() => undefined);
+  await performCloseAction(action);
 }
 
 function continuePendingAppCloseAfterSave() {

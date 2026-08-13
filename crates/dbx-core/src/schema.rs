@@ -6783,12 +6783,12 @@ fn external_driver_uses_mysql_ddl(config: &ConnectionConfig) -> bool {
 
 fn gaussdb_m_view_object_source_sql(
     config: &ConnectionConfig,
-    database: &str,
+    schema: &str,
     name: &str,
     kind: &db::ObjectSourceKind,
 ) -> Option<String> {
     (gaussdb_uses_m_jdbc_driver(config) && matches!(kind, db::ObjectSourceKind::View))
-        .then(|| mysql_object_source_sql(database, name, kind))
+        .then(|| mysql_object_source_sql(schema, name, kind))
 }
 
 fn mysql_external_driver_ddl_sql(database: &str, schema: &str, table: &str) -> String {
@@ -7427,7 +7427,7 @@ async fn get_object_source_once(
             let config = config.clone();
             let session = session.clone();
             drop(connections);
-            if let Some(sql) = gaussdb_m_view_object_source_sql(config.as_ref(), database, name, &object_type) {
+            if let Some(sql) = gaussdb_m_view_object_source_sql(config.as_ref(), schema, name, &object_type) {
                 let result: db::QueryResult = session
                     .invoke_with_timeout(
                         "executeQuery",

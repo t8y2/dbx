@@ -3059,6 +3059,33 @@ mod tests {
     }
 
     #[test]
+    fn mysql_external_driver_ddl_repairs_double_encoded_comments() {
+        let result = db::QueryResult {
+            columns: vec!["Table".to_string(), "Create Table".to_string()],
+            column_types: Vec::new(),
+            column_sortables: Vec::new(),
+            spatial_columns: vec![],
+            spatial_values: vec![],
+            rows: vec![vec![
+                serde_json::json!("orders"),
+                serde_json::json!("CREATE TABLE `orders` (`id` bigint COMMENT 'è®¢åID')"),
+            ]],
+            affected_rows: 0,
+            execution_time_ms: 0,
+            truncated: false,
+            session_id: None,
+            has_more: false,
+            elasticsearch_raw_body: None,
+            messages: Vec::new(),
+        };
+
+        assert_eq!(
+            mysql_external_driver_ddl_from_query_result(result, "Create Table").unwrap(),
+            "CREATE TABLE `orders` (`id` bigint COMMENT '订单ID');"
+        );
+    }
+
+    #[test]
     fn mysql_external_driver_ddl_falls_back_to_second_column() {
         let result = db::QueryResult {
             columns: vec!["name".to_string(), "definition".to_string()],
@@ -6780,7 +6807,11 @@ fn mysql_external_driver_ddl_from_query_result(
         .filter_map(|index| query_result_cell_string(row, index))
         .find(|value| !value.trim().is_empty())
         .ok_or_else(|| "Failed to read DDL".to_string())?;
-    Ok(ensure_display_ddl_terminated(ddl))
+    if named_ddl_column.eq_ignore_ascii_case("Create Table") {
+        Ok(normalize_mysql_display_ddl(ddl))
+    } else {
+        Ok(ensure_display_ddl_terminated(ddl))
+    }
 }
 
 fn sqlite_object_type(kind: &db::ObjectSourceKind) -> &'static str {
@@ -8730,6 +8761,43 @@ mod ddl_tests {
         assert_eq!(ensure_display_ddl_terminated(ddl.to_string()), ddl);
     }
 
+    #[test]
+    fn mysql_display_ddl_repairs_double_encoded_comments() {
+        let ddl = "CREATE TABLE `订单` (\n  `id` bigint COMMENT 'è®¢åID',\n  `reviewed_at` datetime COMMENT 'å®¡æ ¸æ¶é´'\n) COMMENT='订单表'";
+
+        assert_eq!(
+            normalize_mysql_display_ddl(ddl.to_string()),
+            "CREATE TABLE `订单` (\n  `id` bigint COMMENT '订单ID',\n  `reviewed_at` datetime COMMENT '审核时间'\n) COMMENT='订单表';"
+        );
+    }
+
+    #[test]
+    fn mysql_display_ddl_preserves_valid_text() {
+        let ddl = "CREATE TABLE `orders` (`id` bigint COMMENT '订单ID') ENGINE=InnoDB";
+
+        assert_eq!(
+            normalize_mysql_display_ddl(ddl.to_string()),
+            "CREATE TABLE `orders` (`id` bigint COMMENT '订单ID') ENGINE=InnoDB;"
+        );
+    }
+
+    #[test]
+    fn mysql_display_ddl_only_repairs_comment_clauses() {
+        let ddl = "CREATE TABLE `comment` (\n  `comment` varchar(64) DEFAULT 'è®¢åID',\n  `kind` enum('comment', 'å®¡æ ¸æ¶é´') COMMENT 'å®¡æ ¸æ¶é´'\n) /* COMMENT 'è®¢åID' */";
+
+        assert_eq!(
+            normalize_mysql_display_ddl(ddl.to_string()),
+            "CREATE TABLE `comment` (\n  `comment` varchar(64) DEFAULT 'è®¢åID',\n  `kind` enum('comment', 'å®¡æ ¸æ¶é´') COMMENT '审核时间'\n) /* COMMENT 'è®¢åID' */;"
+        );
+    }
+
+    #[test]
+    fn mysql_display_ddl_preserves_unterminated_literals() {
+        let ddl = "CREATE TABLE `orders` (`note` varchar(64) DEFAULT 'unfinished COMMENT 'è®¢åID'";
+
+        assert_eq!(normalize_mysql_display_ddl(ddl.to_string()), format!("{ddl};"));
+    }
+
     struct FakeMysqlDdlExecutor {
         outcomes: std::collections::VecDeque<Result<String, MysqlDdlQueryError>>,
         executed: Vec<String>,
@@ -8900,7 +8968,7 @@ async fn mysql_ddl_with_executor(
 ) -> Result<String, String> {
     let sql = format!("SHOW CREATE TABLE {}", mysql_qualified_name(database, table));
     let qualified_error = match executor.execute(&sql).await {
-        Ok(ddl) => return Ok(ensure_display_ddl_terminated(ddl)),
+        Ok(ddl) => return Ok(normalize_mysql_display_ddl(ddl)),
         Err(error) => error,
     };
     if database.trim().is_empty() || !qualified_error.is_no_such_table() {
@@ -8911,7 +8979,7 @@ async fn mysql_ddl_with_executor(
     // physical schema; the metadata pool has already selected the logical database.
     let fallback_sql = format!("SHOW CREATE TABLE {}", mysql_ident(table));
     match executor.execute(&fallback_sql).await {
-        Ok(ddl) => Ok(ensure_display_ddl_terminated(ddl)),
+        Ok(ddl) => Ok(normalize_mysql_display_ddl(ddl)),
         Err(_) => Err(qualified_error.to_string()),
     }
 }
@@ -8947,6 +9015,97 @@ async fn external_driver_mysql_ddl(
         )
         .await?;
     mysql_external_driver_ddl_from_query_result(result, "Create Table")
+}
+
+fn normalize_mysql_display_ddl(sql: String) -> String {
+    ensure_display_ddl_terminated(repair_mysql_ddl_comments(&sql))
+}
+
+fn repair_mysql_ddl_comments(sql: &str) -> String {
+    let mut repaired = String::with_capacity(sql.len());
+    let mut cursor = 0;
+
+    while let Some((comment_start, value_start, value_end)) = next_mysql_ddl_comment_literal(sql, cursor) {
+        repaired.push_str(&sql[cursor..comment_start]);
+        repaired.push_str(&sql[comment_start..value_start]);
+        repaired.push_str(&db::mysql::fix_potential_double_encoding(&sql[value_start..value_end]));
+        repaired.push('\'');
+        cursor = value_end + 1;
+    }
+
+    repaired.push_str(&sql[cursor..]);
+    repaired
+}
+
+fn next_mysql_ddl_comment_literal(sql: &str, from: usize) -> Option<(usize, usize, usize)> {
+    let bytes = sql.as_bytes();
+    let mut index = from;
+    while index + 7 <= bytes.len() {
+        match bytes[index] {
+            b'\'' | b'"' | b'`' => {
+                index = mysql_quoted_value_end(bytes, index)?;
+                continue;
+            }
+            b'#' => {
+                index = mysql_line_comment_end(bytes, index + 1);
+                continue;
+            }
+            b'-' if bytes.get(index + 1) == Some(&b'-') => {
+                index = mysql_line_comment_end(bytes, index + 2);
+                continue;
+            }
+            b'/' if bytes.get(index + 1) == Some(&b'*') => {
+                index = mysql_block_comment_end(bytes, index + 2)?;
+                continue;
+            }
+            _ => {}
+        }
+
+        if bytes[index..index + 7].eq_ignore_ascii_case(b"COMMENT")
+            && (index == 0 || !is_mysql_identifier_byte(bytes[index - 1]))
+            && (index + 7 == bytes.len() || !is_mysql_identifier_byte(bytes[index + 7]))
+        {
+            let comment_start = index;
+            let mut quote = index + 7;
+            while quote < bytes.len() && (bytes[quote].is_ascii_whitespace() || bytes[quote] == b'=') {
+                quote += 1;
+            }
+            if bytes.get(quote) == Some(&b'\'') {
+                let value_end = mysql_quoted_value_end(bytes, quote)?.saturating_sub(1);
+                return Some((comment_start, quote + 1, value_end));
+            }
+            index += 7;
+            continue;
+        }
+        index += 1;
+    }
+    None
+}
+
+fn is_mysql_identifier_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'$'
+}
+
+fn mysql_quoted_value_end(bytes: &[u8], quote: usize) -> Option<usize> {
+    let delimiter = *bytes.get(quote)?;
+    let mut index = quote + 1;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\\' => index = (index + 2).min(bytes.len()),
+            value if value == delimiter && bytes.get(index + 1) == Some(&delimiter) => index += 2,
+            value if value == delimiter => return Some(index + 1),
+            _ => index += 1,
+        }
+    }
+    None
+}
+
+fn mysql_line_comment_end(bytes: &[u8], from: usize) -> usize {
+    bytes[from..].iter().position(|byte| *byte == b'\n').map_or(bytes.len(), |offset| from + offset + 1)
+}
+
+fn mysql_block_comment_end(bytes: &[u8], from: usize) -> Option<usize> {
+    bytes[from..].windows(2).position(|window| window == b"*/").map(|offset| from + offset + 2)
 }
 
 fn ensure_display_ddl_terminated(sql: String) -> String {

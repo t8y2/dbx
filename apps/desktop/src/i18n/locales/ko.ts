@@ -2182,6 +2182,7 @@ export default withEnglishFallback({
   },
   connectionGroup: {
     createGroup: "새 그룹",
+    group: "그룹",
     groupNamePlaceholder: "그룹 이름",
     selectConnection: "연결 선택",
     deselectConnection: "연결 선택 해제",
@@ -2196,7 +2197,7 @@ export default withEnglishFallback({
     moveToGroup: "그룹으로 이동",
     moveToNewGroup: "새 그룹으로 이동",
     ungrouped: "그룹 없음",
-    ungroupedLabel: "그룹 없음",
+    ungroupedLabel: "기본",
     newGroup: "새 그룹...",
     newGroupDefault: "새 그룹",
     deleteGroupConfirmTitle: "그룹 삭제",

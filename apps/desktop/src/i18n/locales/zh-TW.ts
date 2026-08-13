@@ -2282,6 +2282,7 @@ export default withEnglishFallback({
   },
   connectionGroup: {
     createGroup: "建立群組",
+    group: "群組",
     groupNamePlaceholder: "群組名稱",
     renameGroup: "重新命名群組",
     closeConnections: "關閉群組內連線（{count}）",
@@ -2290,7 +2291,7 @@ export default withEnglishFallback({
     moveToGroup: "移至群組",
     moveToNewGroup: "移至新群組",
     ungrouped: "取消群組",
-    ungroupedLabel: "未分組",
+    ungroupedLabel: "預設",
     newGroup: "新增群組……",
     newGroupDefault: "新群組",
     deleteGroupConfirmTitle: "刪除群組",

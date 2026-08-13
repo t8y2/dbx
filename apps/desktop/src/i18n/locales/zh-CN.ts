@@ -2272,6 +2272,7 @@ export default withEnglishFallback({
   },
   connectionGroup: {
     createGroup: "新建分组",
+    group: "分组",
     groupNamePlaceholder: "分组名称",
     selectConnection: "选择连接",
     deselectConnection: "取消选择连接",
@@ -2286,7 +2287,7 @@ export default withEnglishFallback({
     moveToGroup: "移至分组",
     moveToNewGroup: "移至新分组",
     ungrouped: "取消分组",
-    ungroupedLabel: "未分组",
+    ungroupedLabel: "默认",
     newGroup: "新建分组...",
     newGroupDefault: "新分组",
     deleteGroupConfirmTitle: "删除分组",

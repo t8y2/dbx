@@ -2283,6 +2283,7 @@ export default withEnglishFallback({
   },
   connectionGroup: {
     createGroup: "Novo Grupo",
+    group: "Grupo",
     groupNamePlaceholder: "Nome do grupo",
     renameGroup: "Renomear Grupo",
     closeConnections: "Fechar conexões do grupo ({count})",
@@ -2291,7 +2292,7 @@ export default withEnglishFallback({
     moveToGroup: "Mover para Grupo",
     moveToNewGroup: "Mover para Novo Grupo",
     ungrouped: "Sem grupo",
-    ungroupedLabel: "Sem grupo",
+    ungroupedLabel: "Padrão",
     newGroup: "Novo Grupo...",
     newGroupDefault: "Novo Grupo",
     deleteGroupConfirmTitle: "Excluir Grupo",

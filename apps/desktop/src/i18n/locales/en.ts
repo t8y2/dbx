@@ -2348,6 +2348,7 @@ export default {
   },
   connectionGroup: {
     createGroup: "New Group",
+    group: "Group",
     groupNamePlaceholder: "Group name",
     selectConnection: "Select connection",
     deselectConnection: "Deselect connection",
@@ -2362,7 +2363,7 @@ export default {
     moveToGroup: "Move to Group",
     moveToNewGroup: "Move to New Group",
     ungrouped: "Ungrouped",
-    ungroupedLabel: "Ungrouped",
+    ungroupedLabel: "Default",
     newGroup: "New Group...",
     newGroupDefault: "New Group",
     deleteGroupConfirmTitle: "Delete Group",

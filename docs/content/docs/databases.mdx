@@ -30,7 +30,7 @@ Desktop file paths belong to the local computer. Docker/Web paths belong to the 
 ### Specialized Data Models and Services
 
 - Redis and MongoDB
-- Elasticsearch, Easysearch, and Manticore Search
+- Elasticsearch, Easysearch, Meilisearch, and Manticore Search
 - Qdrant, Milvus, Weaviate, and ChromaDB
 - HBase
 - Pulsar, Kafka, RocketMQ, and RabbitMQ
@@ -94,7 +94,7 @@ Both runtimes share most Rust core query, metadata, and safety policy, but are n
 
 ## Default Ports and Connection URLs
 
-Profiles prefill common defaults such as MySQL `3306`, PostgreSQL `5432`, Redis `6379`, MongoDB `27017`, SQL Server `1433`, Oracle `1521`, Elasticsearch `9200`, and RabbitMQ AMQP `5672`. These are defaults, not requirements.
+Profiles prefill common defaults such as MySQL `3306`, PostgreSQL `5432`, Redis `6379`, MongoDB `27017`, SQL Server `1433`, Oracle `1521`, Elasticsearch `9200`, Meilisearch `7700`, and RabbitMQ AMQP `5672`. These are defaults, not requirements.
 
 Services such as RabbitMQ may expose separate business and management ports. A custom AMQP port must not be used to infer the Management API port. SSH tunnels, HTTP proxies, TLS SNI, and physical dial targets should also be verified independently.
 

@@ -1161,7 +1161,7 @@ async function ensureTreeLoadedForTarget(target: ActiveTabSidebarTarget, opts?: 
         await store.loadRedisDatabases(connId);
       } else if (config.db_type === "mongodb") {
         await store.loadMongoDatabases(connId);
-      } else if (config.db_type === "elasticsearch" || config.db_type === "easysearch") {
+      } else if (config.db_type === "elasticsearch" || config.db_type === "easysearch" || config.db_type === "meilisearch") {
         await store.loadElasticsearchIndices(connId);
       } else if (config.db_type === "qdrant" || config.db_type === "milvus" || config.db_type === "weaviate" || config.db_type === "chromadb") {
         await store.loadVectorCollections(connId);

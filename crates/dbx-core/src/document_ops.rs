@@ -56,6 +56,7 @@ pub async fn list_databases_core(state: &AppState, connection_id: &str) -> Resul
         },
         PoolKind::Elasticsearch(_) => Ok(vec!["default".to_string()]),
         PoolKind::Easysearch(_) => Ok(vec!["default".to_string()]),
+        PoolKind::Meilisearch(_) => Ok(vec!["default".to_string()]),
         PoolKind::VectorDb(client) => vector_driver::list_databases(client).await,
         PoolKind::Agent(client) => {
             let mut client = client.lock().await;
@@ -253,6 +254,10 @@ pub async fn list_collections_core(
             let names = sort_names(easysearch_driver::list_indices(client).await?);
             Ok(names.into_iter().map(|n| CollectionInfo { name: n.clone(), id: n, ..Default::default() }).collect())
         }
+        PoolKind::Meilisearch(client) => {
+            let names = sort_names(crate::db::meilisearch_driver::list_indexes(client).await?);
+            Ok(names.into_iter().map(|n| CollectionInfo { name: n.clone(), id: n, ..Default::default() }).collect())
+        }
         PoolKind::VectorDb(client) => vector_driver::list_collections_with_db(client, database).await,
         PoolKind::Agent(client) => {
             let mut client = client.lock().await;
@@ -425,6 +430,11 @@ pub async fn find_documents_core(
             drop(connections);
             easysearch_driver::find_documents(&client, collection, skip, limit, filter, sort).await
         }
+        PoolKind::Meilisearch(client) => {
+            let client = client.clone();
+            drop(connections);
+            crate::db::meilisearch_driver::find_documents(&client, collection, skip, limit, filter, sort).await
+        }
         PoolKind::VectorDb(client) => {
             let client = client.clone();
             drop(connections);
@@ -509,6 +519,11 @@ pub async fn insert_document_core(
             drop(connections);
             easysearch_driver::insert_document(&client, collection, doc_json, routing).await
         }
+        PoolKind::Meilisearch(client) => {
+            let client = client.clone();
+            drop(connections);
+            crate::db::meilisearch_driver::insert_document(&client, collection, doc_json).await
+        }
         PoolKind::Agent(client) => {
             let mut client = client.lock().await;
             let result: serde_json::Value = client
@@ -570,6 +585,11 @@ pub async fn update_document_core(
             drop(connections);
             easysearch_driver::update_document(&client, collection, id, doc_json, routing).await
         }
+        PoolKind::Meilisearch(client) => {
+            let client = client.clone();
+            drop(connections);
+            crate::db::meilisearch_driver::update_document(&client, collection, id, doc_json).await
+        }
         PoolKind::Agent(client) => {
             let mut client = client.lock().await;
             let result: serde_json::Value = client
@@ -622,6 +642,11 @@ pub async fn delete_document_core_with_type(
             drop(connections);
             easysearch_driver::delete_document(&client, collection, id, document_type, routing).await
         }
+        PoolKind::Meilisearch(client) => {
+            let client = client.clone();
+            drop(connections);
+            crate::db::meilisearch_driver::delete_document(&client, collection, id).await
+        }
         PoolKind::Agent(client) => {
             let mut client = client.lock().await;
             let result: serde_json::Value =
@@ -629,6 +654,26 @@ pub async fn delete_document_core_with_type(
             Ok(result.get("deleted_count").and_then(|v| v.as_u64()).unwrap_or(0))
         }
         _ => Err("Not a MongoDB/Elasticsearch connection".to_string()),
+    }
+}
+
+pub async fn save_meilisearch_document_batch_core(
+    state: &AppState,
+    connection_id: &str,
+    collection: &str,
+    updates: &[crate::db::meilisearch_driver::MeilisearchDocumentUpdate],
+    delete_ids: &[String],
+    inserts: &[String],
+) -> Result<u64, String> {
+    ensure_document_pool(state, connection_id).await?;
+    let connections = state.connections.read().await;
+    match connections.get(connection_id).ok_or("Not found")? {
+        PoolKind::Meilisearch(client) => {
+            let client = client.clone();
+            drop(connections);
+            crate::db::meilisearch_driver::save_document_batch(&client, collection, updates, delete_ids, inserts).await
+        }
+        _ => Err("Not a Meilisearch connection".to_string()),
     }
 }
 

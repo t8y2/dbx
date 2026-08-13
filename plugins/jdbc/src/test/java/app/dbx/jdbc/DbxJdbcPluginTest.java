@@ -21,6 +21,7 @@ import java.sql.ResultSetMetaData;
 import java.sql.SQLException;
 import java.sql.SQLFeatureNotSupportedException;
 import java.sql.Statement;
+import java.sql.Time;
 import java.sql.Timestamp;
 import java.sql.Types;
 import java.util.ArrayList;
@@ -250,21 +251,199 @@ final class DbxJdbcPluginTest {
 
     @Test
     void readValueFormatsDateColumnsWithoutMidnightTime() throws Exception {
-        Method method = DbxJdbcPlugin.class.getDeclaredMethod("readValue", ResultSet.class, ResultSetMetaData.class, int.class);
+        Method method = DbxJdbcPlugin.class.getDeclaredMethod(
+            "readValue",
+            ResultSet.class,
+            ResultSetMetaData.class,
+            int.class,
+            boolean.class
+        );
         method.setAccessible(true);
-        ResultSet rs = temporalResultSet(Timestamp.valueOf("2026-06-10 00:00:00"), Date.valueOf("2026-06-10"));
+        List<String> calls = new ArrayList<>();
+        ResultSet rs = temporalResultSet(
+            Timestamp.valueOf("2026-06-10 00:00:00"),
+            Date.valueOf("2026-06-10"),
+            calls
+        );
 
-        assertEquals("2026-06-10", method.invoke(null, rs, columnMeta(Types.DATE), 1));
+        assertEquals("2026-06-10", method.invoke(null, rs, columnMeta(Types.DATE), 1, false));
+        assertEquals(List.of("getObject", "getDate"), calls);
+    }
+
+    @Test
+    void readValuePreservesOracleDateTimeComponent() throws Exception {
+        Method method = DbxJdbcPlugin.class.getDeclaredMethod(
+            "readValue",
+            ResultSet.class,
+            ResultSetMetaData.class,
+            int.class,
+            boolean.class
+        );
+        method.setAccessible(true);
+        List<String> calls = new ArrayList<>();
+        Timestamp timestamp = Timestamp.valueOf("2026-06-10 12:34:56");
+        ResultSet rs = temporalResultSet(timestamp, Date.valueOf("2026-06-10"), calls);
+
+        assertEquals("2026-06-10 12:34:56.0", method.invoke(null, rs, columnMeta(Types.DATE), 1, true));
+        assertEquals(List.of("getObject", "getTimestamp"), calls);
+    }
+
+    @Test
+    void readValuePreservesOracleDateAtMidnight() throws Exception {
+        Method method = DbxJdbcPlugin.class.getDeclaredMethod(
+            "readValue",
+            ResultSet.class,
+            ResultSetMetaData.class,
+            int.class,
+            boolean.class
+        );
+        method.setAccessible(true);
+        List<String> calls = new ArrayList<>();
+        Timestamp timestamp = Timestamp.valueOf("2026-06-10 00:00:00");
+        ResultSet rs = temporalResultSet(timestamp, Date.valueOf("2026-06-10"), calls);
+
+        assertEquals("2026-06-10 00:00:00.0", method.invoke(null, rs, columnMeta(Types.DATE), 1, true));
+        assertEquals(List.of("getObject", "getTimestamp"), calls);
     }
 
     @Test
     void readValueKeepsTimestampTimeComponent() throws Exception {
-        Method method = DbxJdbcPlugin.class.getDeclaredMethod("readValue", ResultSet.class, ResultSetMetaData.class, int.class);
+        Method method = DbxJdbcPlugin.class.getDeclaredMethod(
+            "readValue",
+            ResultSet.class,
+            ResultSetMetaData.class,
+            int.class,
+            boolean.class
+        );
         method.setAccessible(true);
+        List<String> calls = new ArrayList<>();
         Timestamp timestamp = Timestamp.valueOf("2026-06-10 12:34:56");
-        ResultSet rs = temporalResultSet(timestamp, Date.valueOf("2026-06-10"));
+        ResultSet rs = temporalResultSet(timestamp, Date.valueOf("2026-06-10"), calls);
 
-        assertEquals("2026-06-10 12:34:56.0", method.invoke(null, rs, columnMeta(Types.TIMESTAMP), 1));
+        assertEquals("2026-06-10 12:34:56.0", method.invoke(null, rs, columnMeta(Types.TIMESTAMP), 1, false));
+        assertEquals(List.of("getObject", "getTimestamp"), calls);
+    }
+
+    @Test
+    void readValueKeepsTimeColumnsUnchanged() throws Exception {
+        Method method = DbxJdbcPlugin.class.getDeclaredMethod(
+            "readValue",
+            ResultSet.class,
+            ResultSetMetaData.class,
+            int.class,
+            boolean.class
+        );
+        method.setAccessible(true);
+        Time time = Time.valueOf("12:34:56");
+        ResultSet rs = (ResultSet) Proxy.newProxyInstance(
+            DbxJdbcPluginTest.class.getClassLoader(),
+            new Class<?>[] { ResultSet.class },
+            (proxy, invokedMethod, args) -> switch (invokedMethod.getName()) {
+                case "getObject", "getTime" -> time;
+                default -> defaultValue(invokedMethod.getReturnType());
+            }
+        );
+
+        assertEquals("12:34:56", method.invoke(null, rs, columnMeta(Types.TIME), 1, true));
+    }
+
+    @Test
+    void readValueKeepsNullTemporalValues() throws Exception {
+        Method method = DbxJdbcPlugin.class.getDeclaredMethod(
+            "readValue",
+            ResultSet.class,
+            ResultSetMetaData.class,
+            int.class,
+            boolean.class
+        );
+        method.setAccessible(true);
+        List<String> calls = new ArrayList<>();
+        ResultSet rs = temporalResultSet(null, null, calls);
+
+        assertEquals(null, method.invoke(null, rs, columnMeta(Types.DATE), 1, true));
+        assertEquals(List.of("getObject"), calls);
+    }
+
+    @Test
+    void executeQueryPreservesOracleDateTimeComponent() throws Exception {
+        List<String> calls = new ArrayList<>();
+        Driver driver = new OracleDateDriver(
+            new Timestamp[] { Timestamp.valueOf("2026-08-12 10:30:03") },
+            calls
+        );
+        DriverManager.registerDriver(driver);
+        String connection = """
+            { "connection_string": "jdbc:oracle:dbx-date:single" }
+            """;
+        try {
+            JsonNode response = request("executeQuery", """
+                {
+                  "connection": %s,
+                  "sql": "SELECT created_at FROM events"
+                }
+                """.formatted(connection));
+
+            assertFalse(response.has("error"), response.toString());
+            assertEquals("2026-08-12 10:30:03.0", response.path("result").path("rows").path(0).path(0).asText());
+            assertEquals(List.of("getTimestamp"), calls);
+        } finally {
+            closeAndDeregister(connection, driver);
+        }
+    }
+
+    @Test
+    void pagedQueryPreservesOracleDateTimeAcrossPages() throws Exception {
+        List<String> calls = new ArrayList<>();
+        Driver driver = new OracleDateDriver(
+            new Timestamp[] {
+                Timestamp.valueOf("2026-08-12 10:30:01"),
+                Timestamp.valueOf("2026-08-12 10:30:02"),
+                Timestamp.valueOf("2026-08-12 10:30:03")
+            },
+            calls
+        );
+        DriverManager.registerDriver(driver);
+        String connection = """
+            { "connection_string": "jdbc:oracle:dbx-date:paged" }
+            """;
+        try {
+            JsonNode first = request("executeQueryPage", """
+                {
+                  "connection": %s,
+                  "sql": "SELECT created_at FROM events",
+                  "pageSize": 1,
+                  "maxRows": 10
+                }
+                """.formatted(connection));
+
+            assertFalse(first.has("error"), first.toString());
+            assertEquals("2026-08-12 10:30:01.0", first.path("result").path("rows").path(0).path(0).asText());
+            String sessionId = first.path("result").path("session_id").asText();
+
+            JsonNode second = request("fetchQueryPage", """
+                {
+                  "connection": %s,
+                  "sessionId": "%s",
+                  "pageSize": 1
+                }
+                """.formatted(connection, sessionId));
+            assertFalse(second.has("error"), second.toString());
+            assertEquals("2026-08-12 10:30:02.0", second.path("result").path("rows").path(0).path(0).asText());
+
+            JsonNode third = request("fetchQueryPage", """
+                {
+                  "connection": %s,
+                  "sessionId": "%s",
+                  "pageSize": 1
+                }
+                """.formatted(connection, second.path("result").path("session_id").asText()));
+            assertFalse(third.has("error"), third.toString());
+            assertEquals("2026-08-12 10:30:03.0", third.path("result").path("rows").path(0).path(0).asText());
+            assertEquals(false, third.path("result").path("has_more").asBoolean());
+            assertEquals(List.of("getTimestamp", "getTimestamp", "getTimestamp"), calls);
+        } finally {
+            closeAndDeregister(connection, driver);
+        }
     }
 
     @Test
@@ -1905,15 +2084,20 @@ final class DbxJdbcPluginTest {
         );
     }
 
-    private static ResultSet temporalResultSet(Object objectValue, Date dateValue) {
+    private static ResultSet temporalResultSet(Object objectValue, Date dateValue, List<String> calls) {
         return (ResultSet) Proxy.newProxyInstance(
             DbxJdbcPluginTest.class.getClassLoader(),
             new Class<?>[] { ResultSet.class },
-            (proxy, method, args) -> switch (method.getName()) {
-                case "getObject", "getTimestamp" -> objectValue;
-                case "getDate" -> dateValue;
-                case "getBytes" -> null;
-                default -> null;
+            (proxy, method, args) -> {
+                if ("getObject".equals(method.getName()) || "getTimestamp".equals(method.getName()) || "getDate".equals(method.getName())) {
+                    calls.add(method.getName());
+                }
+                return switch (method.getName()) {
+                    case "getObject", "getTimestamp" -> objectValue;
+                    case "getDate" -> dateValue;
+                    case "getBytes" -> null;
+                    default -> null;
+                };
             }
         );
     }
@@ -1923,10 +2107,12 @@ final class DbxJdbcPluginTest {
             DbxJdbcPluginTest.class.getClassLoader(),
             new Class<?>[] { ResultSetMetaData.class },
             (proxy, method, args) -> {
-                if ("getColumnType".equals(method.getName())) {
-                    return columnType;
-                }
-                return null;
+                return switch (method.getName()) {
+                    case "getColumnCount" -> 1;
+                    case "getColumnLabel", "getColumnName" -> "CREATED_AT";
+                    case "getColumnType" -> columnType;
+                    default -> defaultValue(method.getReturnType());
+                };
             }
         );
     }
@@ -2797,6 +2983,108 @@ final class DbxJdbcPluginTest {
                 case "isValid" -> true;
                 case "close" -> null;
                 default -> defaultValue(method.getReturnType());
+            }
+        );
+    }
+
+    private static final class OracleDateDriver implements Driver {
+        private final Timestamp[] values;
+        private final List<String> calls;
+
+        private OracleDateDriver(Timestamp[] values, List<String> calls) {
+            this.values = values;
+            this.calls = calls;
+        }
+
+        @Override
+        public Connection connect(String url, Properties info) {
+            return acceptsURL(url) ? oracleDateConnection(values, calls) : null;
+        }
+
+        @Override
+        public boolean acceptsURL(String url) {
+            return url != null && url.startsWith("jdbc:oracle:dbx-date:");
+        }
+
+        @Override
+        public DriverPropertyInfo[] getPropertyInfo(String url, Properties info) {
+            return new DriverPropertyInfo[0];
+        }
+
+        @Override
+        public int getMajorVersion() {
+            return 1;
+        }
+
+        @Override
+        public int getMinorVersion() {
+            return 0;
+        }
+
+        @Override
+        public boolean jdbcCompliant() {
+            return false;
+        }
+
+        @Override
+        public java.util.logging.Logger getParentLogger() {
+            return java.util.logging.Logger.getGlobal();
+        }
+    }
+
+    private static Connection oracleDateConnection(Timestamp[] values, List<String> calls) {
+        return (Connection) Proxy.newProxyInstance(
+            DbxJdbcPluginTest.class.getClassLoader(),
+            new Class<?>[] { Connection.class },
+            (proxy, method, args) -> switch (method.getName()) {
+                case "createStatement" -> oracleDateStatement(values, calls);
+                case "isClosed" -> false;
+                case "close", "setCatalog", "setSchema" -> null;
+                default -> defaultValue(method.getReturnType());
+            }
+        );
+    }
+
+    private static Statement oracleDateStatement(Timestamp[] values, List<String> calls) {
+        ResultSet resultSet = oracleDateResultSet(values, calls);
+        return (Statement) Proxy.newProxyInstance(
+            DbxJdbcPluginTest.class.getClassLoader(),
+            new Class<?>[] { Statement.class },
+            (proxy, method, args) -> switch (method.getName()) {
+                case "execute" -> true;
+                case "getResultSet" -> resultSet;
+                case "getUpdateCount" -> -1;
+                case "setMaxRows", "setFetchSize", "setQueryTimeout", "close" -> null;
+                default -> defaultValue(method.getReturnType());
+            }
+        );
+    }
+
+    private static ResultSet oracleDateResultSet(Timestamp[] values, List<String> calls) {
+        return (ResultSet) Proxy.newProxyInstance(
+            DbxJdbcPluginTest.class.getClassLoader(),
+            new Class<?>[] { ResultSet.class },
+            new java.lang.reflect.InvocationHandler() {
+                private int index = -1;
+
+                @Override
+                public Object invoke(Object proxy, Method method, Object[] args) {
+                    return switch (method.getName()) {
+                        case "next" -> ++index < values.length;
+                        case "getMetaData" -> columnMeta(Types.DATE);
+                        case "getObject" -> values[index];
+                        case "getDate" -> {
+                            calls.add("getDate");
+                            yield Date.valueOf(values[index].toLocalDateTime().toLocalDate());
+                        }
+                        case "getTimestamp" -> {
+                            calls.add("getTimestamp");
+                            yield values[index];
+                        }
+                        case "close" -> null;
+                        default -> defaultValue(method.getReturnType());
+                    };
+                }
             }
         );
     }

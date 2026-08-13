@@ -30,15 +30,56 @@ export function executableStatementRangeCacheForDoc(
 
   const byStart = new Map<number, SqlTextRange>();
   const byExecutableLineStart = new Map<number, SqlTextRange>();
-  const ranges = parse(doc.toString(), databaseType, parameterOptions);
+  const sql = doc.toString();
+  const ranges = parse(sql, databaseType, parameterOptions);
   for (const range of ranges) {
     byStart.set(range.from, range);
     const line = doc.lineAt(range.from);
     if (doc.sliceString(line.from, range.from).trim() === "") {
       byExecutableLineStart.set(line.from, range);
     }
+    const executableStart = executableStartAfterLeadingDirective(sql, range, databaseType, parameterOptions);
+    if (executableStart !== null) {
+      byExecutableLineStart.set(doc.lineAt(executableStart).from, range);
+    }
   }
   return { doc, databaseType, parameterOptions, parameterSyntaxKey, byStart, byExecutableLineStart, ranges };
+}
+
+function executableStartAfterLeadingDirective(sql: string, range: SqlTextRange, databaseType?: DatabaseType, parameterOptions?: SqlParameterOptions): number | null {
+  const text = range.sql;
+  const hasExecutableDirective = text.startsWith("/*+") || text.startsWith("/*@") || text.startsWith("/*&") || (databaseType === "mysql" && text.startsWith("/*proxy*/"));
+  if (!hasExecutableDirective) return null;
+
+  let offset = 0;
+  while (offset < text.length) {
+    while (/\s/.test(text[offset] ?? "")) offset += 1;
+
+    if (text.startsWith("/*", offset)) {
+      const close = text.indexOf("*/", offset + 2);
+      if (close < 0) return null;
+      offset = close + 2;
+      continue;
+    }
+
+    if (text.startsWith("--", offset)) {
+      const newline = text.indexOf("\n", offset + 2);
+      if (newline < 0) return null;
+      offset = newline + 1;
+      continue;
+    }
+
+    if (databaseType !== "sqlserver" && text[offset] === "#" && readSqlBracedParameterAt(sql, range.from + offset, parameterOptions)?.syntax !== "mybatis") {
+      const newline = text.indexOf("\n", offset + 1);
+      if (newline < 0) return null;
+      offset = newline + 1;
+      continue;
+    }
+
+    return offset < text.length ? range.from + offset : null;
+  }
+
+  return null;
 }
 
 export function executableStatementRangeStartingAt(cache: ExecutableStatementRangeCache, lineFrom: number): SqlTextRange | null {

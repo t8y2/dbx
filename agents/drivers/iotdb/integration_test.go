@@ -87,6 +87,30 @@ func TestLiveIoTDBAgentTreeAndTable(t *testing.T) {
 	}
 }
 
+func TestLiveIoTDBAgentTreeDatabaseConnection(t *testing.T) {
+	if os.Getenv("DBX_IOTDB_LIVE") != "1" {
+		t.Skip("set DBX_IOTDB_LIVE=1 to run against a real IoTDB server")
+	}
+	database := "root.dbx_go_connection_" + strconv.Itoa(os.Getpid())
+	bootstrap := liveIoTDBServer(t, connectParams{})
+	defer bootstrap.disconnect()
+	mustExecuteNonQuery(t, bootstrap, "CREATE DATABASE "+database, "")
+	defer func() { _ = bootstrap.executeNonQuery("DELETE DATABASE "+database, "", 0) }()
+
+	scoped := liveIoTDBServer(t, connectParams{Database: database})
+	defer scoped.disconnect()
+	if err := scoped.validateConnection(); err != nil {
+		t.Fatal(err)
+	}
+	tables, err := scoped.listTables(database, metadataListConstraints{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tables == nil {
+		t.Fatal("expected an initialized tree table list")
+	}
+}
+
 func TestLiveIoTDBAgentProcessMultiSessionAndCancellation(t *testing.T) {
 	if os.Getenv("DBX_IOTDB_LIVE") != "1" {
 		t.Skip("set DBX_IOTDB_LIVE=1 to run against a real IoTDB server")

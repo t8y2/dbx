@@ -2010,6 +2010,7 @@ pub fn run() {
             commands::mongo_cmd::mongo_update_document,
             commands::mongo_cmd::mongo_update_documents,
             commands::document_cmd::document_delete_document,
+            commands::document_cmd::document_save_meilisearch_batch,
             commands::hbase_cmd::hbase_get_table_schema,
             commands::hbase_cmd::hbase_scan_rows,
             commands::hbase_cmd::hbase_get_row,

@@ -103,7 +103,7 @@ const exportElapsedText = computed(() => {
   return formatDataTransferDuration((exportFinishedAt.value ?? currentTime.value) - exportStartedAt.value);
 });
 
-const sqlConnections = computed(() => store.connections.filter((c) => !["redis", "mongodb", "elasticsearch", "easysearch", "qdrant", "milvus", "weaviate", "chromadb", "etcd", "zookeeper", "consul", "mq", "nacos"].includes(c.db_type)));
+const sqlConnections = computed(() => store.connections.filter((c) => !["redis", "mongodb", "elasticsearch", "easysearch", "meilisearch", "qdrant", "milvus", "weaviate", "chromadb", "etcd", "zookeeper", "consul", "mq", "nacos"].includes(c.db_type)));
 
 const canExport = computed(() => {
   const hasContent = includeStructure.value || includeData.value || includeObjects.value;

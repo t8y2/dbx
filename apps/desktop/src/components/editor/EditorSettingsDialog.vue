@@ -309,6 +309,7 @@ const debugLogCopied = ref(false);
 const debugLogDownloaded = ref(false);
 const editShowColumnCommentsInHeader = ref(settingsStore.editorSettings.showColumnCommentsInHeader);
 const editShowColumnTypesInHeader = ref(settingsStore.editorSettings.showColumnTypesInHeader);
+const editColorizeDataGridCellTypes = ref(settingsStore.editorSettings.colorizeDataGridCellTypes);
 const editShowIndexIndicatorsInHeader = ref(settingsStore.editorSettings.showIndexIndicatorsInHeader);
 const editCompactColumnHeaderActions = ref(settingsStore.editorSettings.compactColumnHeaderActions);
 const editDataGridQuickEntry = ref(settingsStore.editorSettings.dataGridQuickEntry);
@@ -482,6 +483,7 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     tabLayout: editTabLayout.value,
     showColumnCommentsInHeader: editShowColumnCommentsInHeader.value,
     showColumnTypesInHeader: editShowColumnTypesInHeader.value,
+    colorizeDataGridCellTypes: editColorizeDataGridCellTypes.value,
     showIndexIndicatorsInHeader: editShowIndexIndicatorsInHeader.value,
     compactColumnHeaderActions: editCompactColumnHeaderActions.value,
     dataGridQuickEntry: editDataGridQuickEntry.value,
@@ -754,6 +756,7 @@ function syncEditorSettingsDraftFromStore() {
   editTabLayout.value = settingsStore.editorSettings.tabLayout;
   editShowColumnCommentsInHeader.value = settingsStore.editorSettings.showColumnCommentsInHeader;
   editShowColumnTypesInHeader.value = settingsStore.editorSettings.showColumnTypesInHeader;
+  editColorizeDataGridCellTypes.value = settingsStore.editorSettings.colorizeDataGridCellTypes;
   editShowIndexIndicatorsInHeader.value = settingsStore.editorSettings.showIndexIndicatorsInHeader;
   editCompactColumnHeaderActions.value = settingsStore.editorSettings.compactColumnHeaderActions;
   editDataGridQuickEntry.value = settingsStore.editorSettings.dataGridQuickEntry;
@@ -998,6 +1001,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
   } else if (tab === "data") {
     editShowColumnCommentsInHeader.value = DEFAULT_EDITOR_SETTINGS.showColumnCommentsInHeader;
     editShowColumnTypesInHeader.value = DEFAULT_EDITOR_SETTINGS.showColumnTypesInHeader;
+    editColorizeDataGridCellTypes.value = DEFAULT_EDITOR_SETTINGS.colorizeDataGridCellTypes;
     editShowIndexIndicatorsInHeader.value = DEFAULT_EDITOR_SETTINGS.showIndexIndicatorsInHeader;
     editCompactColumnHeaderActions.value = DEFAULT_EDITOR_SETTINGS.compactColumnHeaderActions;
     editDataGridQuickEntry.value = DEFAULT_EDITOR_SETTINGS.dataGridQuickEntry;
@@ -1065,6 +1069,7 @@ function resetAllDefaults() {
   editSidebarTablePageSize.value = DEFAULT_SIDEBAR_TABLE_PAGE_SIZE;
   editShowColumnCommentsInHeader.value = DEFAULT_EDITOR_SETTINGS.showColumnCommentsInHeader;
   editShowColumnTypesInHeader.value = DEFAULT_EDITOR_SETTINGS.showColumnTypesInHeader;
+  editColorizeDataGridCellTypes.value = DEFAULT_EDITOR_SETTINGS.colorizeDataGridCellTypes;
   editShowIndexIndicatorsInHeader.value = DEFAULT_EDITOR_SETTINGS.showIndexIndicatorsInHeader;
   editCompactColumnHeaderActions.value = DEFAULT_EDITOR_SETTINGS.compactColumnHeaderActions;
   editDataGridQuickEntry.value = DEFAULT_EDITOR_SETTINGS.dataGridQuickEntry;
@@ -4816,6 +4821,17 @@ onUnmounted(() => {
                     </p>
                   </div>
                   <Switch id="show-column-types-in-header" v-model="editShowColumnTypesInHeader" />
+                </div>
+                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                  <div class="space-y-1">
+                    <Label for="colorize-data-grid-cell-types">
+                      {{ t("settings.colorizeDataGridCellTypes") }}
+                    </Label>
+                    <p class="text-xs text-muted-foreground">
+                      {{ t("settings.colorizeDataGridCellTypesDescription") }}
+                    </p>
+                  </div>
+                  <Switch id="colorize-data-grid-cell-types" v-model="editColorizeDataGridCellTypes" />
                 </div>
                 <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                   <div class="space-y-1">

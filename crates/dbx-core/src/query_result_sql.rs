@@ -56,6 +56,8 @@ pub struct QueryPaginationExecutionPlan {
     pub page_offset: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub count_sql: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exact_query_row_bound: Option<usize>,
     pub use_agent_result_session: bool,
     /// True when the statement cannot be paginated server-side and must be
     /// executed once with the whole result streamed back (single execution).
@@ -115,12 +117,18 @@ pub struct SortedQuerySqlOptions {
 pub fn build_query_pagination_execution_plan(
     options: QueryPaginationExecutionPlanOptions,
 ) -> QueryPaginationExecutionPlan {
+    let exact_query_row_bound = if options.database_type == Some(DatabaseType::SqlServer) {
+        top_level_top_row_count(&options.query_base_sql)
+    } else {
+        None
+    };
     let mut plan = QueryPaginationExecutionPlan {
         sql_to_execute: options.sql.clone(),
         page_sql: None,
         page_limit: None,
         page_offset: None,
         count_sql: None,
+        exact_query_row_bound,
         use_agent_result_session: false,
         single_execution: false,
     };
@@ -3313,6 +3321,39 @@ WHERE u.id = picked.id;
         assert_eq!(top_level_top_row_count("SELECT * FROM events"), None);
         // TOP only inside a subquery is not a top-level clause.
         assert_eq!(top_level_top_row_count("SELECT * FROM (SELECT TOP 5 * FROM events) t"), None);
+    }
+
+    #[test]
+    fn sql_server_pagination_plan_exposes_only_safe_exact_top_bounds() {
+        for (database_type, sql, expected) in [
+            (Some(DatabaseType::SqlServer), "SELECT TOP 100 * FROM events", Some(100)),
+            (Some(DatabaseType::SqlServer), "SELECT TOP(50) * FROM events", Some(50)),
+            (Some(DatabaseType::SqlServer), "SELECT TOP (250) * FROM events", Some(250)),
+            (Some(DatabaseType::SqlServer), "SELECT TOP 10 PERCENT * FROM events", None),
+            (Some(DatabaseType::SqlServer), "SELECT TOP (2) WITH TIES * FROM events", None),
+            (Some(DatabaseType::SqlServer), "SELECT TOP (100 + 1) * FROM events", None),
+            (Some(DatabaseType::SqlServer), "SELECT TOP (@row_count) * FROM events", None),
+            (Some(DatabaseType::SqlServer), "SELECT * FROM (SELECT TOP 5 * FROM events) t", None),
+            (Some(DatabaseType::SqlServer), "SELECT * FROM events", None),
+            (Some(DatabaseType::Postgres), "SELECT TOP 100 * FROM events", None),
+            (Some(DatabaseType::Kingbase), "SELECT TOP 100 * FROM events", None),
+        ] {
+            let plan = build_query_pagination_execution_plan(QueryPaginationExecutionPlanOptions {
+                sql: sql.to_string(),
+                query_base_sql: sql.to_string(),
+                database_type,
+                pagination: QueryPagination { limit: 100, offset: 0, session_id: None },
+                use_agent_cursor: false,
+                first_page_uses_actual_sql: false,
+            });
+
+            assert_eq!(plan.exact_query_row_bound, expected, "unexpected bound for {database_type:?}: {sql}");
+            let serialized = serde_json::to_value(&plan).unwrap();
+            assert_eq!(
+                serialized.get("exactQueryRowBound").and_then(serde_json::Value::as_u64),
+                expected.map(|value| value as u64)
+            );
+        }
     }
 
     #[test]

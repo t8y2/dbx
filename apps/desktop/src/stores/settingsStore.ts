@@ -538,6 +538,7 @@ export interface EditorSettings {
   mongoViewMode: "document" | "table";
   showColumnCommentsInHeader: boolean;
   showColumnTypesInHeader: boolean;
+  colorizeDataGridCellTypes: boolean;
   showIndexIndicatorsInHeader: boolean;
   compactColumnHeaderActions: boolean;
   columnWidthDensity: ColumnWidthDensity;
@@ -729,6 +730,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   mongoViewMode: "document",
   showColumnCommentsInHeader: true,
   showColumnTypesInHeader: true,
+  colorizeDataGridCellTypes: false,
   showIndexIndicatorsInHeader: true,
   compactColumnHeaderActions: true,
   columnWidthDensity: "standard",
@@ -1065,6 +1067,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     mongoViewMode: settings.mongoViewMode === "table" ? "table" : DEFAULT_EDITOR_SETTINGS.mongoViewMode,
     showColumnCommentsInHeader: settings.showColumnCommentsInHeader ?? DEFAULT_EDITOR_SETTINGS.showColumnCommentsInHeader,
     showColumnTypesInHeader: settings.showColumnTypesInHeader ?? DEFAULT_EDITOR_SETTINGS.showColumnTypesInHeader,
+    colorizeDataGridCellTypes: settings.colorizeDataGridCellTypes ?? DEFAULT_EDITOR_SETTINGS.colorizeDataGridCellTypes,
     showIndexIndicatorsInHeader: settings.showIndexIndicatorsInHeader ?? DEFAULT_EDITOR_SETTINGS.showIndexIndicatorsInHeader,
     compactColumnHeaderActions: settings.compactColumnHeaderActions ?? DEFAULT_EDITOR_SETTINGS.compactColumnHeaderActions,
     columnWidthDensity: normalizeColumnWidthDensity(settings.columnWidthDensity),
@@ -1640,6 +1643,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.mongoViewMode !== undefined) editorSettings.value.mongoViewMode = partial.mongoViewMode;
     if (partial.showColumnCommentsInHeader !== undefined) editorSettings.value.showColumnCommentsInHeader = partial.showColumnCommentsInHeader;
     if (partial.showColumnTypesInHeader !== undefined) editorSettings.value.showColumnTypesInHeader = partial.showColumnTypesInHeader;
+    if (partial.colorizeDataGridCellTypes !== undefined) editorSettings.value.colorizeDataGridCellTypes = partial.colorizeDataGridCellTypes === true;
     if (partial.showIndexIndicatorsInHeader !== undefined) editorSettings.value.showIndexIndicatorsInHeader = partial.showIndexIndicatorsInHeader;
     if (partial.compactColumnHeaderActions !== undefined) editorSettings.value.compactColumnHeaderActions = partial.compactColumnHeaderActions;
     if (partial.columnWidthDensity !== undefined) editorSettings.value.columnWidthDensity = normalizeColumnWidthDensity(partial.columnWidthDensity);

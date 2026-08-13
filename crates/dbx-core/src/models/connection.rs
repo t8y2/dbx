@@ -517,6 +517,8 @@ pub enum DatabaseType {
     Elasticsearch,
     #[serde(rename = "easysearch")]
     Easysearch,
+    #[serde(rename = "meilisearch")]
+    Meilisearch,
     Hbase,
     #[serde(rename = "qdrant")]
     Qdrant,
@@ -1092,6 +1094,7 @@ impl ConnectionConfig {
             DatabaseType::Oracle => format!("oracle://{host}:{port}{db_part}"),
             DatabaseType::Elasticsearch
             | DatabaseType::Easysearch
+            | DatabaseType::Meilisearch
             | DatabaseType::Hbase
             | DatabaseType::Qdrant
             | DatabaseType::Milvus
@@ -1256,6 +1259,7 @@ impl ConnectionConfig {
             }
             DatabaseType::Elasticsearch
             | DatabaseType::Easysearch
+            | DatabaseType::Meilisearch
             | DatabaseType::Hbase
             | DatabaseType::Qdrant
             | DatabaseType::Milvus
@@ -2325,6 +2329,12 @@ mod tests {
     #[test]
     fn default_query_timeout_is_sixty_seconds() {
         assert_eq!(default_query_timeout_secs(), 60);
+    }
+
+    #[test]
+    fn meilisearch_database_type_serializes_stably() {
+        assert_eq!(serde_json::to_string(&DatabaseType::Meilisearch).unwrap(), "\"meilisearch\"");
+        assert_eq!(serde_json::from_str::<DatabaseType>("\"meilisearch\"").unwrap(), DatabaseType::Meilisearch);
     }
 
     #[test]

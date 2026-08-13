@@ -308,6 +308,7 @@ export interface QueryPaginationExecutionPlan {
   pageLimit?: number;
   pageOffset?: number;
   countSql?: string;
+  exactQueryRowBound?: number;
   useAgentResultSession: boolean;
 }
 
@@ -3611,6 +3612,16 @@ export async function documentDeleteDocument(connectionId: string, database: str
     id,
     routing,
     documentType,
+  });
+}
+
+export async function documentSaveMeilisearchBatch(connectionId: string, collection: string, updates: Array<{ id: string; docJson: string }>, deleteIds: string[], inserts: string[]): Promise<number> {
+  return invoke("document_save_meilisearch_batch", {
+    connectionId,
+    collection,
+    updates,
+    deleteIds,
+    inserts,
   });
 }
 

@@ -52,7 +52,7 @@ tiberius = { version = "0.12.3", default-features = false, features = ["tds73", 
 tokio-util = { version = "0.7", features = ["compat"] }
 reqwest = { version = "0.12", features = ["json", "stream"] }
 futures = "0.3"
-mongodb = "3.2.5"
+mongodb = { version = "3.2.5", features = ["socks5-proxy"] }
 percent-encoding = "2"
 minisign-verify = "0.2.5"
 semver = "1"

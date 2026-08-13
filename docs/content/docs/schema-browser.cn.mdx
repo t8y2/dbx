@@ -27,7 +27,7 @@ description: 使用 DBX 侧边栏组织连接、搜索数据库对象、打开�
 | Doris / StarRocks | 可在多 Catalog 时显示 Catalog → 数据库 → 表；只有 `internal` 时保持扁平 |
 | Redis | 连接 → Redis DB；Key 在专用浏览器中分页展示 |
 | MongoDB | 连接 → 数据库 → 集合、索引和 GridFS Bucket |
-| Elasticsearch / Easysearch | 连接 → 索引等文档对象 |
+| Elasticsearch / Easysearch / Meilisearch | 连接 → 索引等文档对象 |
 | HBase、向量、消息队列、etcd、ZooKeeper、Nacos | 展示系统对应对象，并打开 [专项工作台](/cn/docs/specialized-workspaces) |
 
 ## 连接分组与批量管理
@@ -125,7 +125,7 @@ DBX 不会把所有系统强制映射成关系型树。例如：
 - SQL Server 可以浏览 Linked Server 和数据库对象
 - Doris / StarRocks 支持外部 Catalog，外部 Catalog 表使用三段式名称
 - MongoDB 展示 Collection、索引和 GridFS
-- Elasticsearch / Easysearch 将索引作为一等对象
+- Elasticsearch / Easysearch / Meilisearch 将索引作为一等对象
 - 达梦、Oracle、PostgreSQL 等可以展示更多例程、任务、扩展或管理对象
 - etcd、Nacos、消息队列和向量数据库从树节点进入专用工作台
 

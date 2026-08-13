@@ -1,16 +1,16 @@
 import type { ConnectionConfig, DatabaseType, QueryResult } from "@/types/database";
 import { effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
-import { buildKillSql as buildMysqlKillSql, mapProcessRows as mapMysqlProcessRows, PROCESS_LIST_SQL as MYSQL_PROCESS_LIST_SQL, supportsProcessList as supportsMysqlProcessList } from "./mysqlProcessList";
+import { buildCancelQuerySql as buildMysqlCancelQuerySql, mapProcessRows as mapMysqlProcessRows, PROCESS_LIST_SQL as MYSQL_PROCESS_LIST_SQL, supportsProcessList as supportsMysqlProcessList } from "./mysqlProcessList";
 import {
-  buildKingbaseKillSql,
-  buildKingbasePgKillSql,
-  buildPgKillSql,
+  buildKingbaseCancelQuerySql,
+  buildKingbasePgCancelQuerySql,
+  buildPgCancelQuerySql,
   isKingbaseOwnSessionCatalogCompatibilityError,
   isKingbaseProcessListCatalogCompatibilityError,
-  isKingbaseTerminateCatalogCompatibilityError,
+  isKingbaseCancelCatalogCompatibilityError,
   isPgProcessListCompatibilityError,
-  kingbaseKillResultError,
-  kingbasePgKillResultError,
+  kingbaseCancelQueryResultError,
+  kingbasePgCancelQueryResultError,
   KINGBASE_OWN_SESSION_SQL,
   KINGBASE_PG_OWN_SESSION_SQL,
   KINGBASE_PG_PROCESS_LIST_SQL,
@@ -18,7 +18,7 @@ import {
   mapPgProcessRows,
   OPENGAUSS_OWN_SESSION_SQL,
   OPENGAUSS_PROCESS_LIST_SQL,
-  pgKillResultError,
+  pgCancelQueryResultError,
   PG_OWN_SESSION_SQL,
   PG_PROCESS_LIST_LEGACY_SQL,
   PG_PROCESS_LIST_SQL,
@@ -67,16 +67,16 @@ export interface ProcessListDriver {
   maxRows: number;
   /** Map a raw list result into typed rows. */
   mapRows(result: QueryResult | null | undefined): ProcessRow[];
-  /** Build the validated statement that kills the given session id. */
-  buildKillSql(id: number): string;
-  /** Build the compatibility statement used when the primary kill function is unavailable. */
-  buildFallbackKillSql?(id: number): string;
-  /** Restrict kill fallback attempts to known compatibility failures. */
-  shouldUseFallbackKillSql?(error: unknown): boolean;
-  /** Validate any engine-specific success value returned by the kill statement. */
-  killResultError?(results: QueryResult[]): string | null;
-  /** Validate the success value returned by the compatibility kill statement. */
-  fallbackKillResultError?(results: QueryResult[]): string | null;
+  /** Build the validated statement that cancels the selected session's running query. */
+  buildCancelQuerySql(id: number): string;
+  /** Build the compatibility statement used when the primary cancellation function is unavailable. */
+  buildFallbackCancelQuerySql?(id: number): string;
+  /** Restrict cancellation fallback attempts to known compatibility failures. */
+  shouldUseFallbackCancelQuerySql?(error: unknown): boolean;
+  /** Validate any engine-specific success value returned by the cancellation statement. */
+  cancelQueryResultError?(results: QueryResult[]): string | null;
+  /** Validate the success value returned by the compatibility cancellation statement. */
+  fallbackCancelQueryResultError?(results: QueryResult[]): string | null;
 }
 
 const MYSQL_COLUMNS: ProcessColumn[] = [
@@ -110,7 +110,7 @@ const MYSQL_DRIVER: ProcessListDriver = {
   maxRows: 5000,
   // Typed structs carry no index signature; they are plain string-keyed objects at runtime.
   mapRows: (result) => mapMysqlProcessRows(result) as unknown as ProcessRow[],
-  buildKillSql: buildMysqlKillSql,
+  buildCancelQuerySql: buildMysqlCancelQuerySql,
 };
 
 const POSTGRES_DRIVER: ProcessListDriver = {
@@ -122,8 +122,8 @@ const POSTGRES_DRIVER: ProcessListDriver = {
   defaultSortKey: "time",
   maxRows: 5000,
   mapRows: (result) => mapPgProcessRows(result) as unknown as ProcessRow[],
-  buildKillSql: buildPgKillSql,
-  killResultError: pgKillResultError,
+  buildCancelQuerySql: buildPgCancelQuerySql,
+  cancelQueryResultError: pgCancelQueryResultError,
 };
 
 const OPENGAUSS_DRIVER: ProcessListDriver = {
@@ -133,8 +133,8 @@ const OPENGAUSS_DRIVER: ProcessListDriver = {
   defaultSortKey: "time",
   maxRows: 5000,
   mapRows: (result) => mapPgProcessRows(result) as unknown as ProcessRow[],
-  buildKillSql: buildPgKillSql,
-  killResultError: pgKillResultError,
+  buildCancelQuerySql: buildPgCancelQuerySql,
+  cancelQueryResultError: pgCancelQueryResultError,
 };
 
 const KINGBASE_DRIVER: ProcessListDriver = {
@@ -148,11 +148,11 @@ const KINGBASE_DRIVER: ProcessListDriver = {
   defaultSortKey: "time",
   maxRows: 5000,
   mapRows: (result) => mapPgProcessRows(result) as unknown as ProcessRow[],
-  buildKillSql: buildKingbaseKillSql,
-  buildFallbackKillSql: buildKingbasePgKillSql,
-  shouldUseFallbackKillSql: isKingbaseTerminateCatalogCompatibilityError,
-  killResultError: kingbaseKillResultError,
-  fallbackKillResultError: kingbasePgKillResultError,
+  buildCancelQuerySql: buildKingbaseCancelQuerySql,
+  buildFallbackCancelQuerySql: buildKingbasePgCancelQuerySql,
+  shouldUseFallbackCancelQuerySql: isKingbaseCancelCatalogCompatibilityError,
+  cancelQueryResultError: kingbaseCancelQueryResultError,
+  fallbackCancelQueryResultError: kingbasePgCancelQueryResultError,
 };
 
 /** Resolve the process-list driver for a connection, or null if unsupported. */

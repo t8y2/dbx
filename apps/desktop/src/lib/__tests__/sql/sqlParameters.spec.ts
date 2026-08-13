@@ -564,6 +564,75 @@ describe("substituteSqlParameters", () => {
     ).toBe("select 7, 'Alice', 'prefixO''Reilly'");
   });
 
+  it("extracts a MyBatis foreach collection instead of its item placeholder", () => {
+    const sql = `select * from tasks where task_id in
+      <foreach collection="taskIds" item="taskId" open="(" separator="," close=")">
+        #{taskId}
+      </foreach>`;
+
+    expect(extractSqlParameterDescriptors(sql, { enabledSyntaxes: ["mybatis"] })).toEqual([{ key: "taskIds", name: "taskIds", syntax: "mybatis", token: "<foreach>", collection: true }]);
+  });
+
+  it("expands a MyBatis foreach JSON string collection with escaped SQL literals", () => {
+    const sql = `select * from tasks where task_id in
+      <foreach collection='taskIds' item='taskId' open='(' separator=',' close=')'>#{taskId}</foreach>`;
+
+    expect(substituteSqlParameters(sql, { taskIds: { kind: "string", value: `["A", "O'Reilly"]` } }, { databaseType: "oracle", enabledSyntaxes: ["mybatis"] })).toBe("select * from tasks where task_id in\n      ('A','O''Reilly')");
+  });
+
+  it("expands comma-separated MyBatis foreach values using the selected item type", () => {
+    const sql = 'select * from tasks where task_id in <foreach collection="taskIds" item="taskId" open="(" separator=", " close=")">#{taskId}</foreach>';
+
+    expect(substituteSqlParameters(sql, { taskIds: { kind: "number", value: "1, 2, 3" } }, { enabledSyntaxes: ["mybatis"] })).toBe("select * from tasks where task_id in (1, 2, 3)");
+  });
+
+  it("renders an empty MyBatis foreach collection as a safe legal IN list", () => {
+    const sql = 'select * from tasks where task_id in <foreach collection="taskIds" item="taskId" open="(" separator="," close=")">#{taskId}</foreach>';
+
+    expect(substituteSqlParameters(sql, { taskIds: { kind: "string", value: "[]" } }, { enabledSyntaxes: ["mybatis"] })).toBe("select * from tasks where task_id in (NULL)");
+    expect(substituteSqlParameters(sql, { taskIds: { kind: "string", value: "[1,2" } }, { enabledSyntaxes: ["mybatis"] })).toBe("select * from tasks where task_id in (NULL)");
+    expect(substituteSqlParameters(sql, { taskIds: { kind: "string", value: '[{"id":1}]' } }, { enabledSyntaxes: ["mybatis"] })).toBe("select * from tasks where task_id in (NULL)");
+  });
+
+  it("substitutes other placeholders inside each MyBatis foreach body", () => {
+    const sql = 'select * from task_pairs where (task_id, tenant_id) in <foreach collection="taskIds" item="taskId" open="(" separator="," close=")">(#{taskId}, #{tenantId})</foreach>';
+
+    expect(substituteSqlParameters(sql, { taskIds: { kind: "number", value: "[1,2]" }, tenantId: { kind: "number", value: "9" } }, { enabledSyntaxes: ["mybatis"] })).toBe("select * from task_pairs where (task_id, tenant_id) in ((1, 9),(2, 9))");
+    expect(extractSqlParameterDescriptors(sql, { enabledSyntaxes: ["mybatis"] })).toEqual([
+      { key: "taskIds", name: "taskIds", syntax: "mybatis", token: "<foreach>", collection: true },
+      { key: "tenantId", name: "tenantId", syntax: "mybatis", token: "#{tenantId}" },
+    ]);
+  });
+
+  it("uses the zero-based MyBatis foreach index without exposing it as a global parameter", () => {
+    const sql = 'select * from task_pairs where (position, task_id) in <foreach collection="taskIds" item="taskId" index="idx" open="(" separator="," close=")">(#{idx},#{taskId})</foreach>';
+
+    expect(extractSqlParameterDescriptors(sql, { enabledSyntaxes: ["mybatis"] })).toEqual([{ key: "taskIds", name: "taskIds", syntax: "mybatis", token: "<foreach>", collection: true }]);
+    expect(substituteSqlParameters(sql, { taskIds: { kind: "number", value: "[10,20]" }, idx: { kind: "number", value: "99" } }, { enabledSyntaxes: ["mybatis"] })).toBe("select * from task_pairs where (position, task_id) in ((0,10),(1,20))");
+  });
+
+  it("ignores foreach-like tags in SQL strings and comments when matching the closing tag", () => {
+    const sql = `select * from tasks where task_id in <foreach collection="taskIds" item="taskId" open="(" separator="," close=")">
+      #{taskId} /* </foreach> */ || '<foreach collection="fake" item="value">'
+      -- <foreach collection="fake" item="value">
+    </foreach>`;
+
+    expect(substituteSqlParameters(sql, { taskIds: { kind: "number", value: "[1,2]" } }, { enabledSyntaxes: ["mybatis"] })).toBe(`select * from tasks where task_id in (
+      1 /* </foreach> */ || '<foreach collection="fake" item="value">'
+      -- <foreach collection="fake" item="value">
+    ,
+      2 /* </foreach> */ || '<foreach collection="fake" item="value">'
+      -- <foreach collection="fake" item="value">
+    )`);
+  });
+
+  it("leaves MyBatis foreach tags untouched when MyBatis substitution is disabled", () => {
+    const sql = 'select * from tasks where task_id in <foreach collection="taskIds" item="taskId" open="(" separator="," close=")">#{taskId}</foreach>';
+
+    expect(extractSqlParameterDescriptors(sql, { enabledSyntaxes: ["shell"] })).toEqual([]);
+    expect(substituteSqlParameters(sql, {}, { enabledSyntaxes: ["shell"] })).toBe(sql);
+  });
+
   it("decodes XML comparison entities when substituting MyBatis parameters", () => {
     const sql = "select * from orders where created_at &gt;= #{start} and created_at &lt; #{end} and owner_id = #{owner_id} or reviewer_id = #{owner_id}";
 
@@ -580,7 +649,7 @@ describe("substituteSqlParameters", () => {
     ).toBe("select * from orders where created_at >= '2026-01-01' and created_at < '2026-02-01' and owner_id = 7 or reviewer_id = 7");
   });
 
-  it("only decodes exact comparison entities in MyBatis SQL source fragments", () => {
+  it("only decodes comparison entities in executable MyBatis SQL", () => {
     const sql = "select '&amp;', '&quot;', '&apos;', '&amp;lt;', '&LT;', '&lt', '&lt;source&gt;', #{raw_value}, #{string_value} where score &gt; #{minimum} /* &lt;source-comment&gt; */";
 
     expect(
@@ -593,7 +662,17 @@ describe("substituteSqlParameters", () => {
         },
         { enabledSyntaxes: ["mybatis"] },
       ),
-    ).toBe("select '&amp;', '&quot;', '&apos;', '&amp;lt;', '&LT;', '&lt', '<source>', '&lt;raw&gt;', '&lt;string&gt;' where score > 10 /* <source-comment> */");
+    ).toBe("select '&amp;', '&quot;', '&apos;', '&amp;lt;', '&LT;', '&lt', '&lt;source&gt;', '&lt;raw&gt;', '&lt;string&gt;' where score > 10 /* &lt;source-comment&gt; */");
+  });
+
+  it("preserves comparison entities in quoted identifiers, comments, and dollar-quoted strings", () => {
+    const sql = `select "a&lt;b", \`c&gt;d\`, [e&lt;f], $$g&gt;h$$, #{id}
+      where score &gt; 0 /* &lt;block&gt; */ -- &gt; line
+      and score &lt; 10`;
+
+    expect(substituteSqlParameters(sql, { id: { kind: "number", value: "7" } }, { enabledSyntaxes: ["mybatis"] })).toBe(`select "a&lt;b", \`c&gt;d\`, [e&lt;f], $$g&gt;h$$, 7
+      where score > 0 /* &lt;block&gt; */ -- &gt; line
+      and score < 10`);
   });
 
   it("does not decode XML entities without an enabled valid MyBatis replacement", () => {

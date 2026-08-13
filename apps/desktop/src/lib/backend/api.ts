@@ -699,6 +699,7 @@ export const documentUpdateDocument = forward("documentUpdateDocument");
 export const mongoUpdateDocument = forward("mongoUpdateDocument");
 export const mongoUpdateDocuments = forward("mongoUpdateDocuments");
 export const documentDeleteDocument = forward("documentDeleteDocument");
+export const documentSaveMeilisearchBatch = forward("documentSaveMeilisearchBatch");
 export const mongoDeleteDocument = forward("mongoDeleteDocument");
 export const mongoDeleteDocuments = forward("mongoDeleteDocuments");
 export const mongoFindOneAndUpdate = forward("mongoFindOneAndUpdate");

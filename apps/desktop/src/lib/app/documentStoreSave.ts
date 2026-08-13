@@ -7,6 +7,13 @@ export type DocumentStoreWriteApis = {
   delete: (id: string, routing?: string) => Promise<number>;
 };
 
+export function formatMeilisearchDocumentOperationPreview(options: { action: "insert" | "upsert" | "update" | "delete"; index: string; id?: unknown; document?: Record<string, unknown> }): string {
+  const lines = [`DBX MEILISEARCH ${options.action.toUpperCase()} DOCUMENT`, `index: ${JSON.stringify(options.index)}`];
+  if (options.id !== undefined) lines.push(`id: ${stringifyDocumentStoreValue(options.id, "meilisearch")}`);
+  if (options.document) lines.push("document:", stringifyDocumentStoreValue(options.document, "meilisearch", 2));
+  return lines.join("\n");
+}
+
 /**
  * Write a document body under a known identity.
  * - `put`: Elasticsearch index-by-id / Mongo update-by-id (identity via path, not body).
@@ -48,8 +55,8 @@ export async function applyDocumentStoreIdentityPlan(options: { kind: DocumentSt
     return;
   }
 
-  // Rekey write: ES uses put under the new id/routing; Mongo inserts a new document then deletes the old id.
-  if (kind === "elasticsearch") {
+  // Path-identity stores write under the new id first; Mongo inserts a new document.
+  if (kind !== "mongodb") {
     await writeDocumentStoreDocument({
       kind,
       op: "put",
@@ -71,10 +78,10 @@ export async function applyDocumentStoreIdentityPlan(options: { kind: DocumentSt
   await apis.delete(plan.deleteId, plan.deleteRouting);
 }
 
-/** Insert a new document (optional explicit ES id uses put). */
+/** Insert a new document (optional explicit path identity uses put). */
 export async function insertDocumentStoreDocument(options: { kind: DocumentStoreKind; document: Record<string, unknown>; explicitId?: string | null; routing?: string; apis: Pick<DocumentStoreWriteApis, "insert" | "update"> }): Promise<void> {
   const { kind, document, explicitId, routing, apis } = options;
-  if (kind === "elasticsearch" && explicitId) {
+  if (kind !== "mongodb" && explicitId) {
     await writeDocumentStoreDocument({
       kind,
       op: "put",

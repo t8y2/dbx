@@ -85,6 +85,192 @@ async fn local_backend_reads_dbx_storage_without_desktop_process() {
 }
 
 #[tokio::test]
+async fn duplicate_connection_preserves_secrets_ssh_and_sidebar_group() {
+    let directory = tempdir().expect("temporary data directory");
+    let db_path = directory.path().join("dbx.db");
+    let storage = Storage::open(&db_path).await.expect("open storage");
+    storage
+        .save_mcp_global_policy(&dbx_core::storage::McpGlobalPolicy {
+            read_only: false,
+            allow_dangerous_sql: false,
+            allowed_connection_ids: None,
+        })
+        .await
+        .expect("enable MCP connection management");
+    let source: ConnectionConfig = serde_json::from_value(json!({
+        "id": "source",
+        "name": "production-through-bastion",
+        "note": "full configuration must survive",
+        "db_type": "postgres",
+        "driver_profile": "postgres-42.7",
+        "host": "db.internal",
+        "port": 5432,
+        "username": "app",
+        "password": "database-secret",
+        "database": "app",
+        "default_schema": "private",
+        "url_params": "application_name=dbx",
+        "connection_string": "postgres://app:database-secret@db.internal/app",
+        "init_script": "SET application_name = 'dbx-secret-script'",
+        "save_password": true,
+        "ssl": true,
+        "transport_layers": [{
+            "type": "ssh",
+            "id": "bastion",
+            "name": "Bastion",
+            "enabled": true,
+            "host": "bastion.internal",
+            "port": 22,
+            "user": "deploy",
+            "password": "ssh-secret",
+            "key_path": "/keys/deploy",
+            "key_passphrase": "key-secret",
+            "auth_method": "key+password"
+        }]
+    }))
+    .expect("full source connection");
+    let unrelated: ConnectionConfig = serde_json::from_value(json!({
+        "id": "unrelated",
+        "name": "unrelated",
+        "db_type": "sqlite",
+        "host": ":memory:",
+        "port": 0,
+        "username": "",
+        "password": "",
+        "ssl": false
+    }))
+    .expect("unrelated connection");
+    storage.save_connections(&[source.clone(), unrelated]).await.expect("save source connections");
+    storage
+        .save_sidebar_layout(&json!({
+            "groups": [
+                { "id": "project", "name": "Project", "collapsed": false },
+                { "id": "production", "name": "Production", "collapsed": false }
+            ],
+            "order": [{
+                "type": "group",
+                "id": "project",
+                "children": [{
+                    "type": "group",
+                    "id": "production",
+                    "children": [{ "type": "connection", "id": "source" }]
+                }]
+            }, { "type": "connection", "id": "unrelated" }],
+            "futureField": { "preserved": true }
+        }))
+        .await
+        .expect("save sidebar layout");
+
+    let backend = Arc::new(LocalBackend::open(&db_path).await.expect("open local backend"));
+    let policy = backend.load_mcp_global_policy().await.expect("load configured policy");
+    assert!(!policy.read_only);
+    let server = DbxMcpServer::with_runtime_options(backend, McpScope::default(), false);
+    let (server_transport, client_transport) = tokio::io::duplex(16 * 1024);
+    let server_task = tokio::spawn(async move { server.serve(server_transport).await });
+    let client = ().serve(client_transport).await.expect("initialize client");
+    let arguments = json!({
+        "connection_id": "source",
+        "new_name": "production-through-bastion-copy"
+    })
+    .as_object()
+    .cloned()
+    .unwrap_or_else(Map::new);
+    let result = client
+        .peer()
+        .call_tool(CallToolRequestParams::new("dbx_duplicate_connection").with_arguments(arguments.clone()))
+        .await
+        .expect("duplicate connection");
+    assert_ne!(result.is_error, Some(true), "unexpected duplicate error: {:?}", result.content);
+
+    let duplicate_again = client
+        .peer()
+        .call_tool(CallToolRequestParams::new("dbx_duplicate_connection").with_arguments(arguments))
+        .await
+        .expect("reject duplicate target name");
+    assert_eq!(duplicate_again.is_error, Some(true));
+    assert!(duplicate_again.content[0]
+        .as_text()
+        .expect("duplicate error text")
+        .text
+        .contains("CONNECTION_ALREADY_EXISTS"));
+
+    let missing_arguments = json!({
+        "connection_id": "missing",
+        "new_name": "must-not-be-created"
+    })
+    .as_object()
+    .cloned()
+    .unwrap_or_else(Map::new);
+    let missing = client
+        .peer()
+        .call_tool(CallToolRequestParams::new("dbx_duplicate_connection").with_arguments(missing_arguments))
+        .await
+        .expect("reject missing source");
+    assert_eq!(missing.is_error, Some(true));
+    assert!(missing.content[0].as_text().expect("missing error text").text.contains("CONNECTION_NOT_FOUND"));
+
+    let root_arguments = json!({
+        "connection_id": "unrelated",
+        "new_name": "unrelated-copy"
+    })
+    .as_object()
+    .cloned()
+    .unwrap_or_else(Map::new);
+    let root_copy = client
+        .peer()
+        .call_tool(CallToolRequestParams::new("dbx_duplicate_connection").with_arguments(root_arguments))
+        .await
+        .expect("duplicate root connection");
+    assert_ne!(root_copy.is_error, Some(true));
+
+    storage
+        .save_mcp_global_policy(&dbx_core::storage::McpGlobalPolicy {
+            read_only: true,
+            allow_dangerous_sql: false,
+            allowed_connection_ids: None,
+        })
+        .await
+        .expect("enable MCP read-only policy");
+    let read_only_arguments = json!({
+        "connection_id": "source",
+        "new_name": "must-not-pass-read-only"
+    })
+    .as_object()
+    .cloned()
+    .unwrap_or_else(Map::new);
+    let read_only = client
+        .peer()
+        .call_tool(CallToolRequestParams::new("dbx_duplicate_connection").with_arguments(read_only_arguments))
+        .await
+        .expect("reject read-only duplicate");
+    assert_eq!(read_only.is_error, Some(true));
+    assert!(read_only.content[0].as_text().expect("read-only error text").text.contains("MCP_READ_ONLY"));
+    client.cancel().await.expect("close client");
+    server_task.abort();
+
+    let reopened = Storage::open(&db_path).await.expect("reopen storage");
+    let connections = reopened.load_connections().await.expect("reload connections");
+    assert_eq!(connections.len(), 4, "failed duplicates must not add connections");
+    let copied = connections
+        .iter()
+        .find(|connection| connection.name == "production-through-bastion-copy")
+        .expect("persisted copied connection");
+    let mut expected = source.clone();
+    expected.id = copied.id.clone();
+    expected.name = copied.name.clone();
+    assert_ne!(copied.id, source.id);
+    assert_eq!(copied, &expected);
+    let root_copy = connections.iter().find(|connection| connection.name == "unrelated-copy").expect("root copy");
+
+    let layout = reopened.load_sidebar_layout().await.expect("load copied layout").expect("sidebar layout");
+    assert_eq!(layout["futureField"]["preserved"], true);
+    assert_eq!(layout["order"][0]["children"][0]["children"][0]["id"], "source");
+    assert_eq!(layout["order"][0]["children"][0]["children"][1]["id"], copied.id);
+    assert_eq!(layout["order"][1]["id"], "unrelated");
+    assert_eq!(layout["order"][2]["id"], root_copy.id);
+}
+
+#[tokio::test]
 async fn local_backend_picks_up_connections_added_after_startup_without_reload() {
     // Regression for issue #5428: after an agent connects to MCP, a connection created in the DBX
     // desktop UI is not reflected in the MCP server's AppState.configs in-memory cache, so the
@@ -192,7 +378,6 @@ async fn local_backend_uses_the_installed_duckdb_sidecar() {
 
 #[tokio::test]
 async fn legacy_read_only_config_applies_before_settings_are_opened() {
-    let _allow_writes = EnvVarGuard::set("DBX_MCP_ALLOW_WRITES", "0");
     let directory = tempdir().expect("temporary data directory");
     let db_path = directory.path().join("dbx.db");
     let storage = Storage::open(&db_path).await.expect("open storage");
@@ -210,6 +395,7 @@ async fn legacy_read_only_config_applies_before_settings_are_opened() {
     }))
     .expect("minimal connection config");
     storage.save_connections(&[connection]).await.expect("save connection");
+    let _allow_writes = EnvVarGuard::set("DBX_MCP_ALLOW_WRITES", "0");
 
     let backend = Arc::new(LocalBackend::open(&db_path).await.expect("open local backend"));
     let server = DbxMcpServer::with_runtime_options(backend, McpScope::default(), false);

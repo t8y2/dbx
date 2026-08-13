@@ -67,6 +67,39 @@ describe("executableStatementRangeCacheForDoc", () => {
     expect(executableStatementRangeStartingAt(cache, doc.line(5).from)).toBeNull();
   });
 
+  it.each(["/*& tenant:'gdx' */", "/*&tenant:mctest*/", "/*+ MAX_EXECUTION_TIME(1000) */", "/*@global:true*/", "/*proxy*/"])("resolves the SQL line after a preserved leading directive for gutter execution: %s", (directive) => {
+    const sql = `SELECT 0;\n${directive}\nSELECT 1;`;
+    const doc = Text.of(sql.split("\n"));
+    const cache = executableStatementRangeCacheForDoc(null, doc, "mysql");
+
+    expect(executableStatementRangeStartingAt(cache, doc.line(3).from)?.sql).toBe(`${directive}\nSELECT 1`);
+  });
+
+  it("keeps a same-line tenant hint in the gutter execution range", () => {
+    const sql = "/*& tenant:'gdx' */ SELECT\n*\nFROM table";
+    const doc = Text.of(sql.split("\n"));
+    const cache = executableStatementRangeCacheForDoc(null, doc, "mysql");
+
+    expect(executableStatementRangeStartingAt(cache, doc.line(1).from)?.sql).toBe(sql);
+  });
+
+  it("treats a SQL Server temporary table after a hint as executable content", () => {
+    const sql = "/*+ hint */\n#temporary_table";
+    const doc = Text.of(sql.split("\n"));
+    const cache = executableStatementRangeCacheForDoc(null, doc, "sqlserver");
+
+    expect(executableStatementRangeStartingAt(cache, doc.line(2).from)?.sql).toBe(sql);
+  });
+
+  it("does not attach ordinary leading block comments to gutter execution", () => {
+    const doc = Text.of(["/* comment */", "SELECT 1;", "/* comment only */"]);
+    const cache = executableStatementRangeCacheForDoc(null, doc, "mysql");
+
+    expect(executableStatementRangeStartingAt(cache, doc.line(1).from)).toBeNull();
+    expect(executableStatementRangeStartingAt(cache, doc.line(2).from)?.sql).toBe("SELECT 1");
+    expect(executableStatementRangeStartingAt(cache, doc.line(3).from)).toBeNull();
+  });
+
   it("does not resolve gutter run buttons when non-whitespace precedes the statement on the same line", () => {
     const doc = Text.of(["/* comment */ SELECT 1;"]);
     const cache = executableStatementRangeCacheForDoc(null, doc, "mysql");

@@ -974,16 +974,16 @@ export function splitDataType(raw: string): { baseType: string; params: string }
 
 export type DataTypeLengthUnit = "BYTE" | "CHAR";
 
-const DAMENG_LENGTH_UNIT_TYPES = new Set(["char", "varchar", "varchar2"]);
-const DAMENG_LENGTH_UNITS: readonly DataTypeLengthUnit[] = ["BYTE", "CHAR"];
+const CHARACTER_LENGTH_UNIT_TYPES = new Set(["char", "varchar", "varchar2"]);
+const CHARACTER_LENGTH_UNITS: readonly DataTypeLengthUnit[] = ["BYTE", "CHAR"];
 
 function normalizedDataTypeName(rawDataType: string): string {
   return splitDataType(rawDataType).baseType.trim().replace(/\s+/g, " ").toLowerCase();
 }
 
 export function getDataTypeLengthUnitOptions(dbType: DatabaseType | undefined, rawDataType: string): readonly DataTypeLengthUnit[] {
-  if (dbType !== "dameng") return [];
-  return DAMENG_LENGTH_UNIT_TYPES.has(normalizedDataTypeName(rawDataType)) ? DAMENG_LENGTH_UNITS : [];
+  if (dbType !== "dameng" && dbType !== "oracle") return [];
+  return CHARACTER_LENGTH_UNIT_TYPES.has(normalizedDataTypeName(rawDataType)) ? CHARACTER_LENGTH_UNITS : [];
 }
 
 function splitDataTypeLengthParams(dbType: DatabaseType | undefined, rawDataType: string): { length: string; unit: DataTypeLengthUnit | "" } {
@@ -1015,13 +1015,13 @@ export function combineDataTypeForDatabaseWithLengthUnit(dbType: DatabaseType | 
   return combineDataTypeForDatabase(dbType, baseType, params);
 }
 
-export function restoreDamengLengthUnitsAfterSave(columns: EditableStructureColumn[], savedDataTypesByColumn: ReadonlyMap<string, string>): EditableStructureColumn[] {
+export function restoreCharacterLengthUnitsAfterSave(dbType: DatabaseType | undefined, columns: EditableStructureColumn[], savedDataTypesByColumn: ReadonlyMap<string, string>): EditableStructureColumn[] {
   if (savedDataTypesByColumn.size === 0) return columns;
 
   return columns.map((column) => {
-    if (dataTypeLengthUnitValue("dameng", column.dataType)) return column;
+    if (dataTypeLengthUnitValue(dbType, column.dataType)) return column;
     const savedDataType = savedDataTypesByColumn.get(column.name.trim().toLowerCase());
-    if (!savedDataType || !dataTypeLengthUnitValue("dameng", savedDataType)) return column;
+    if (!savedDataType || !dataTypeLengthUnitValue(dbType, savedDataType)) return column;
     if (normalizedDataTypeName(savedDataType) !== normalizedDataTypeName(column.dataType)) return column;
 
     return {

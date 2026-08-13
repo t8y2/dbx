@@ -285,6 +285,7 @@ export function shouldRunSqlSemanticDiagnostics(sql: string, cursor: number, opt
     options.databaseType === "mongodb" ||
     options.databaseType === "elasticsearch" ||
     options.databaseType === "easysearch" ||
+    options.databaseType === "meilisearch" ||
     options.databaseType === "qdrant" ||
     options.databaseType === "milvus" ||
     options.databaseType === "weaviate" ||
@@ -304,6 +305,7 @@ export function isSqlSemanticDiagnosticInputContext(sql: string, cursor: number,
     options.databaseType === "mongodb" ||
     options.databaseType === "elasticsearch" ||
     options.databaseType === "easysearch" ||
+    options.databaseType === "meilisearch" ||
     options.databaseType === "qdrant" ||
     options.databaseType === "milvus" ||
     options.databaseType === "weaviate" ||

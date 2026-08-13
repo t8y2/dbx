@@ -31,6 +31,7 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "tabLayout",
   "showColumnCommentsInHeader",
   "showColumnTypesInHeader",
+  "colorizeDataGridCellTypes",
   "showIndexIndicatorsInHeader",
   "compactColumnHeaderActions",
   "dataGridQuickEntry",

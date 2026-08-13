@@ -1467,6 +1467,31 @@ public final class MongoAgent {
         return Collections.singletonMap("inserted_id", insertedId);
     }
 
+    private static Object insertDocuments(JsonObject params) {
+        String docsJson = params.get("docs_json").getAsString();
+        JsonElement parsed = JsonParser.parseString(docsJson);
+        if (!parsed.isJsonArray()) {
+            throw new IllegalArgumentException("MongoDB insertMany documents must be a JSON array");
+        }
+
+        List<Document> documents = new ArrayList<>();
+        for (JsonElement item : parsed.getAsJsonArray()) {
+            if (!item.isJsonObject()) {
+                throw new IllegalArgumentException("Each MongoDB insertMany document must be an object");
+            }
+            documents.add(documentForWrite(item.toString()));
+        }
+        if (documents.isEmpty()) {
+            return Collections.singletonMap("affected_rows", 0);
+        }
+
+        MongoClient client = requireClient();
+        String database = params.get("database").getAsString();
+        String collection = params.get("collection").getAsString();
+        client.getDatabase(database).getCollection(collection).insertMany(documents);
+        return Collections.singletonMap("affected_rows", documents.size());
+    }
+
     static Object parseId(String id) {
         String stringId = decodeStringDocumentId(id);
         if (stringId != null) {
@@ -1830,6 +1855,7 @@ public final class MongoAgent {
             case AgentProtocol.MONGO_METHOD_CLONE_COLLECTION -> cloneCollection(params);
             case AgentProtocol.MONGO_METHOD_DROP_DATABASE -> dropDatabase(params);
             case AgentProtocol.MONGO_METHOD_INSERT_DOCUMENT -> insertDocument(params);
+            case AgentProtocol.MONGO_METHOD_INSERT_DOCUMENTS -> insertDocuments(params);
             case AgentProtocol.MONGO_METHOD_UPDATE_DOCUMENT -> updateDocument(params);
             case AgentProtocol.MONGO_METHOD_UPDATE_DOCUMENTS -> updateDocuments(params);
             case AgentProtocol.MONGO_METHOD_DELETE_DOCUMENT -> deleteDocument(params);

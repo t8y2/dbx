@@ -65,8 +65,10 @@ const formData = ref({
 });
 
 const resetFormData = ref({
-  position: "latest" as "earliest" | "latest" | "timestamp",
+  position: "latest" as "earliest" | "latest" | "timestamp" | "partitionOffset",
   timestampMs: Date.now(),
+  partition: 0,
+  offset: 0,
 });
 
 const skipFormData = ref({
@@ -261,6 +263,8 @@ function openResetDialog(sub: SubscriptionInfo) {
   resetFormData.value = {
     position: "latest",
     timestampMs: Date.now(),
+    partition: 0,
+    offset: 0,
   };
   showResetDialog.value = true;
 }
@@ -365,6 +369,13 @@ async function handleResetCursor() {
     let pos: ResetPosition;
     if (resetFormData.value.position === "timestamp") {
       pos = { kind: "timestamp", timestampMs: resetFormData.value.timestampMs };
+    } else if (resetFormData.value.position === "partitionOffset") {
+      const { partition, offset } = resetFormData.value;
+      if (!Number.isSafeInteger(partition) || partition < 0 || !Number.isSafeInteger(offset) || offset < 0) {
+        error.value = t("mqSubscriptions.nonNegativeIntegerRequired");
+        return;
+      }
+      pos = { kind: "partitionOffset", partition, offset };
     } else {
       pos = { kind: resetFormData.value.position };
     }
@@ -650,12 +661,22 @@ watch(
                 <input type="radio" v-model="resetFormData.position" value="timestamp" :disabled="readOnly" />
                 {{ t("mqSubscriptions.timestamp") }}
               </label>
+              <label v-if="mqSystemKind === 'kafka'" class="radio-label">
+                <input type="radio" v-model="resetFormData.position" value="partitionOffset" :disabled="readOnly" />
+                {{ t("mqSubscriptions.partitionOffset") }}
+              </label>
             </div>
           </div>
           <div v-if="resetFormData.position === 'timestamp'" class="form-group">
             <label>{{ t("mqSubscriptions.timestampMs") }}</label>
             <input v-model.number="resetFormData.timestampMs" type="number" :disabled="readOnly" />
             <div class="form-hint">{{ t("mqSubscriptions.currentTime", { time: new Date(resetFormData.timestampMs).toLocaleString() }) }}</div>
+          </div>
+          <div v-if="mqSystemKind === 'kafka' && resetFormData.position === 'partitionOffset'" class="form-group">
+            <label>{{ t("mqSubscriptions.partition") }}</label>
+            <input v-model.number="resetFormData.partition" data-testid="reset-partition" type="number" min="0" step="1" :disabled="readOnly" />
+            <label>{{ t("mqSubscriptions.offset") }}</label>
+            <input v-model.number="resetFormData.offset" data-testid="reset-offset" type="number" min="0" step="1" :disabled="readOnly" />
           </div>
           <div v-if="error" class="form-error">{{ error }}</div>
         </div>

@@ -734,6 +734,16 @@ fn reset_cursor_params(topic: &TopicRef, sub: &str, pos: ResetPosition) -> Resul
             "position": "timestamp",
             "timestampMs": timestamp_ms,
         })),
+        ResetPosition::PartitionOffset { partition, offset } => {
+            if partition < 0 || offset < 0 {
+                return Err("Kafka partition and offset must be non-negative integers".to_string());
+            }
+            Ok(serde_json::json!({
+                "groupId": sub,
+                "topic": topic.topic,
+                "offsets": [{ "partition": partition, "offset": offset }],
+            }))
+        }
         ResetPosition::MessageId { .. } => Err("Kafka does not support cursor reset by Pulsar message id".to_string()),
     }
 }
@@ -1069,6 +1079,50 @@ mod tests {
             .expect_err("Kafka should not accept Pulsar message ids");
 
         assert!(err.contains("message id"));
+    }
+
+    #[test]
+    fn reset_cursor_params_maps_one_absolute_partition_offset() {
+        let topic = TopicRef {
+            tenant: "_kafka".to_string(),
+            namespace: "_kafka".to_string(),
+            topic: "events".to_string(),
+            persistent: true,
+            partitioned: Some(true),
+            message_type: None,
+            ..TopicRef::default()
+        };
+
+        let params =
+            reset_cursor_params(&topic, "group-a", ResetPosition::PartitionOffset { partition: 2, offset: 41 })
+                .expect("Kafka should support an absolute offset for one partition");
+
+        assert_eq!(
+            params,
+            serde_json::json!({
+                "groupId": "group-a",
+                "topic": "events",
+                "offsets": [{ "partition": 2, "offset": 41 }]
+            })
+        );
+    }
+
+    #[test]
+    fn reset_cursor_params_rejects_negative_absolute_positions() {
+        let topic = TopicRef {
+            tenant: "_kafka".to_string(),
+            namespace: "_kafka".to_string(),
+            topic: "events".to_string(),
+            persistent: true,
+            partitioned: Some(true),
+            message_type: None,
+            ..TopicRef::default()
+        };
+
+        assert!(reset_cursor_params(&topic, "group-a", ResetPosition::PartitionOffset { partition: -1, offset: 41 },)
+            .is_err());
+        assert!(reset_cursor_params(&topic, "group-a", ResetPosition::PartitionOffset { partition: 1, offset: -1 },)
+            .is_err());
     }
 
     #[test]

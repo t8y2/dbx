@@ -103,6 +103,7 @@ pub enum PoolKind {
     SqlServer(Arc<tokio::sync::Mutex<db::sqlserver::SqlServerClient>>),
     Elasticsearch(db::elasticsearch_driver::EsClient),
     Easysearch(db::easysearch_driver::EasysearchClient),
+    Meilisearch(db::meilisearch_driver::MeilisearchClient),
     HBase(db::hbase_driver::HBaseClient),
     VectorDb(db::vector_driver::VectorClient),
     InfluxDb(db::influxdb_driver::InfluxdbClient),
@@ -1989,6 +1990,17 @@ impl AppState {
                 db::easysearch_driver::test_connection(&mut client, connect_timeout).await?;
                 PoolKind::Easysearch(client)
             }
+            DatabaseType::Meilisearch => {
+                let client = db::meilisearch_driver::MeilisearchClient::new(
+                    &url,
+                    Some(&db_config.password),
+                    db_config.ssl,
+                    db_config.url_params.as_deref(),
+                    connect_timeout,
+                )?;
+                db::meilisearch_driver::test_connection(&client, connect_timeout).await?;
+                PoolKind::Meilisearch(client)
+            }
             DatabaseType::Hbase => {
                 let client = db::hbase_driver::HBaseClient::new(
                     &url,
@@ -3049,6 +3061,18 @@ impl AppState {
                         }
                     }
                 }
+                PoolKind::Meilisearch(client) => {
+                    let client = client.clone();
+                    drop(connections);
+                    let timeout = crate::db::connection_timeout();
+                    match db::meilisearch_driver::test_connection(&client, timeout).await {
+                        Ok(()) => false,
+                        Err(err) => {
+                            log::warn!("Meilisearch connection pool '{pool_key}' is stale: {err}");
+                            true
+                        }
+                    }
+                }
                 PoolKind::HBase(client) => {
                     let client = client.clone();
                     drop(connections);
@@ -3979,6 +4003,16 @@ impl AppState {
                         }
                     }
                 }
+                PoolKind::Meilisearch(client) => {
+                    let client = client.clone();
+                    match db::meilisearch_driver::test_connection(&client, timeout).await {
+                        Ok(()) => true,
+                        Err(e) => {
+                            log::warn!("Meilisearch connection pool '{key}' is unhealthy: {e}");
+                            false
+                        }
+                    }
+                }
                 PoolKind::HBase(client) => match db::hbase_driver::test_connection(client, timeout).await {
                     Ok(_) => true,
                     Err(e) => {
@@ -4717,6 +4751,7 @@ fn clone_pool_kind(pool: &PoolKind) -> PoolKind {
         PoolKind::SqlServer(client) => PoolKind::SqlServer(client.clone()),
         PoolKind::Elasticsearch(client) => PoolKind::Elasticsearch(client.clone()),
         PoolKind::Easysearch(client) => PoolKind::Easysearch(client.clone()),
+        PoolKind::Meilisearch(client) => PoolKind::Meilisearch(client.clone()),
         PoolKind::HBase(client) => PoolKind::HBase(client.clone()),
         PoolKind::VectorDb(client) => PoolKind::VectorDb(client.clone()),
         PoolKind::InfluxDb(client) => PoolKind::InfluxDb(client.clone()),
@@ -4766,6 +4801,9 @@ async fn close_pool_kind(pool: PoolKind) -> Result<(), String> {
             drop(client);
         }
         PoolKind::Easysearch(client) => {
+            drop(client);
+        }
+        PoolKind::Meilisearch(client) => {
             drop(client);
         }
         PoolKind::HBase(client) => {

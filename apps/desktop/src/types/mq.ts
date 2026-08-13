@@ -232,7 +232,12 @@ export interface ProducerInfo {
   clientVersion: string;
 }
 
-export type ResetPosition = { kind: "earliest" } | { kind: "latest" } | { kind: "timestamp"; timestampMs: number } | { kind: "messageId"; ledgerId: number; entryId: number };
+export type ResetPosition =
+  | { kind: "earliest" }
+  | { kind: "latest" }
+  | { kind: "timestamp"; timestampMs: number }
+  | { kind: "partitionOffset"; partition: number; offset: number }
+  | { kind: "messageId"; ledgerId: number; entryId: number };
 
 export type SkipCount = { kind: "all" } | { kind: "count"; count: number };
 

@@ -27,6 +27,7 @@
     <img src="https://img.shields.io/badge/SQL%20Server-CC2927?logo=microsoftsqlserver&logoColor=white" />
     <img src="https://img.shields.io/badge/Oracle-F80000?logo=oracle&logoColor=white" />
     <img src="https://img.shields.io/badge/Elasticsearch-005571?logo=elasticsearch&logoColor=white" />
+    <img src="https://img.shields.io/badge/Meilisearch-FF5CAA?logo=meilisearch&logoColor=white" />
     <img src="https://img.shields.io/badge/MariaDB-003545?logo=mariadb&logoColor=white" />
     <img src="https://img.shields.io/badge/TiDB-DC150B?logo=tidb&logoColor=white" />
     <img src="https://img.shields.io/badge/Doris-0052CC?logoColor=white" />
@@ -90,7 +91,7 @@
 
 ### 70+ Databases, One Tool
 
-MySQL, PostgreSQL, SQLite, Cloudflare D1, Redis, MongoDB, DuckDB, ClickHouse, SQL Server, Oracle, Elasticsearch, Easysearch, Qdrant, Milvus, Weaviate, MariaDB, TiDB, OceanBase, openGauss, GaussDB, KWDB, KingBase, Vastbase, GoldenDB, Doris, SelectDB, StarRocks, Manticore Search, Redshift, DM, TDengine, XuguDB, CockroachDB, Access, HighGo, UXDB, Dolt, and more. Agent-based profiles extend DBX to H2, Snowflake, Trino, PrestoSQL, Hive, DB2, Informix, Neo4j, Cassandra, BigQuery, Kylin, SunDB, JDBCX, and custom JDBC connections. New native and agent-driven drivers also cover Databricks, SAP HANA, Teradata, Vertica, Firebird, Exasol, YashanDB, GBase 8a/8s, Databend, RQLite, Turso, InfluxDB, QuestDB, IoTDB, etcd, ZooKeeper, Nacos, Consul KV, IRIS, and more. Message queue admin is also available for Pulsar, Kafka, and RocketMQ. All in a single ~20 MB app. No bundled Chromium.
+MySQL, PostgreSQL, SQLite, Cloudflare D1, Redis, MongoDB, DuckDB, ClickHouse, SQL Server, Oracle, Elasticsearch, Easysearch, Meilisearch, Qdrant, Milvus, Weaviate, MariaDB, TiDB, OceanBase, openGauss, GaussDB, KWDB, KingBase, Vastbase, GoldenDB, Doris, SelectDB, StarRocks, Manticore Search, Redshift, DM, TDengine, XuguDB, CockroachDB, Access, HighGo, UXDB, Dolt, and more. Agent-based profiles extend DBX to H2, Snowflake, Trino, PrestoSQL, Hive, DB2, Informix, Neo4j, Cassandra, BigQuery, Kylin, SunDB, JDBCX, and custom JDBC connections. New native and agent-driven drivers also cover Databricks, SAP HANA, Teradata, Vertica, Firebird, Exasol, YashanDB, GBase 8a/8s, Databend, RQLite, Turso, InfluxDB, QuestDB, IoTDB, etcd, ZooKeeper, Nacos, Consul KV, IRIS, and more. Message queue admin is also available for Pulsar, Kafka, and RocketMQ. All in a single ~20 MB app. No bundled Chromium.
 
 ### Query Editor
 
@@ -483,7 +484,7 @@ DBX is 20 MB with no runtime dependencies for its native database features (no s
 
 <details>
 <summary><strong>What databases are supported?</strong></summary>
-MySQL, PostgreSQL, SQLite, Cloudflare D1, Redis, MongoDB, DuckDB, ClickHouse, SQL Server, Oracle, Elasticsearch, Easysearch, Qdrant, Milvus, Weaviate, MariaDB, TiDB, OceanBase, openGauss, GaussDB, KWDB, KingBase, Vastbase, GoldenDB, Doris, SelectDB, StarRocks, Manticore Search, Redshift, DM, TDengine, XuguDB, CockroachDB, Access, HighGo, UXDB, and more. Agent-based profiles extend support to H2, Snowflake, Trino, PrestoSQL, Hive, DB2, Informix, Neo4j, Cassandra, BigQuery, Kylin, SunDB, JDBCX, Databricks, SAP HANA, Teradata, Vertica, Firebird, Exasol, YashanDB, GBase 8a/8s, Databend, RQLite, Turso, InfluxDB, QuestDB, IoTDB, etcd, ZooKeeper, Nacos, Consul KV, IRIS, and custom JDBC connections. Message queue admin (Pulsar, Kafka, RocketMQ) is also supported.
+MySQL, PostgreSQL, SQLite, Cloudflare D1, Redis, MongoDB, DuckDB, ClickHouse, SQL Server, Oracle, Elasticsearch, Easysearch, Meilisearch, Qdrant, Milvus, Weaviate, MariaDB, TiDB, OceanBase, openGauss, GaussDB, KWDB, KingBase, Vastbase, GoldenDB, Doris, SelectDB, StarRocks, Manticore Search, Redshift, DM, TDengine, XuguDB, CockroachDB, Access, HighGo, UXDB, and more. Agent-based profiles extend support to H2, Snowflake, Trino, PrestoSQL, Hive, DB2, Informix, Neo4j, Cassandra, BigQuery, Kylin, SunDB, JDBCX, Databricks, SAP HANA, Teradata, Vertica, Firebird, Exasol, YashanDB, GBase 8a/8s, Databend, RQLite, Turso, InfluxDB, QuestDB, IoTDB, etcd, ZooKeeper, Nacos, Consul KV, IRIS, and custom JDBC connections. Message queue admin (Pulsar, Kafka, RocketMQ) is also supported.
 </details>
 
 <details>

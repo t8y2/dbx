@@ -406,6 +406,7 @@ type columnInfo struct {
 	NumericPrecision       *int    `json:"numeric_precision"`
 	NumericScale           *int    `json:"numeric_scale"`
 	CharacterMaximumLength *int    `json:"character_maximum_length"`
+	CharacterLengthUnit    *string `json:"-"`
 }
 
 type indexInfo struct {
@@ -2309,7 +2310,8 @@ SELECT c.COLUMN_NAME,
        cc.COMMENTS,
        c.DATA_PRECISION,
        c.DATA_SCALE,
-       c.CHAR_LENGTH
+       c.CHAR_LENGTH,
+       c.CHAR_USED
 FROM ALL_TAB_COLUMNS c
 LEFT JOIN (
   SELECT acc.OWNER, acc.TABLE_NAME, acc.COLUMN_NAME
@@ -2339,6 +2341,7 @@ ORDER BY c.COLUMN_ID`, []any{schema, table})
 			&item.NumericPrecision,
 			&item.NumericScale,
 			&item.CharacterMaximumLength,
+			&item.CharacterLengthUnit,
 		); err != nil {
 			return nil, err
 		}
@@ -3038,6 +3041,9 @@ func oracleColumnTypeDDL(column columnInfo) string {
 		return dataType
 	}
 	if isOracleCharacterType(dataType) && column.CharacterMaximumLength != nil && *column.CharacterMaximumLength > 0 {
+		if unit := oracleCharacterLengthUnit(dataType, column.CharacterLengthUnit); unit != "" {
+			return fmt.Sprintf("%s(%d %s)", dataType, *column.CharacterMaximumLength, unit)
+		}
 		return fmt.Sprintf("%s(%d)", dataType, *column.CharacterMaximumLength)
 	}
 	if dataType == "NUMBER" {
@@ -3054,6 +3060,25 @@ func oracleColumnTypeDDL(column columnInfo) string {
 		return fmt.Sprintf("%s(%d)", dataType, *column.NumericPrecision)
 	}
 	return dataType
+}
+
+func oracleCharacterLengthUnit(dataType string, charUsed *string) string {
+	switch dataType {
+	case "CHAR", "VARCHAR", "VARCHAR2":
+	default:
+		return ""
+	}
+	if charUsed == nil {
+		return ""
+	}
+	switch strings.ToUpper(strings.TrimSpace(*charUsed)) {
+	case "B":
+		return "BYTE"
+	case "C":
+		return "CHAR"
+	default:
+		return ""
+	}
 }
 
 func isOracleCharacterType(dataType string) bool {

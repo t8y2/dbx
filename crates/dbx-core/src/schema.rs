@@ -2225,6 +2225,10 @@ async fn list_tables_once(
             .await
             .map(|names| collection_names_to_tables(names, "INDEX"))
             .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types, table_name_filter)),
+        PoolKind::Meilisearch(client) => db::meilisearch_driver::list_indexes(client)
+            .await
+            .map(|names| collection_names_to_tables(names, "INDEX"))
+            .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types, table_name_filter)),
         PoolKind::HBase(client) => db::hbase_driver::list_tables(client, database)
             .await
             .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types, table_name_filter)),
@@ -5829,6 +5833,9 @@ async fn get_columns_core_for_session_inner(
             }
             PoolKind::Easysearch(client) => {
                 db::easysearch_driver::get_columns(client, table).await.map(deduplicate_column_infos)
+            }
+            PoolKind::Meilisearch(client) => {
+                db::meilisearch_driver::get_columns(client, table).await.map(deduplicate_column_infos)
             }
             PoolKind::HBase(client) => {
                 db::hbase_driver::get_columns(client, database, table).await.map(deduplicate_column_infos)

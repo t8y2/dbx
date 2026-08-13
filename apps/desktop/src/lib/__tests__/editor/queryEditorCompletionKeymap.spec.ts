@@ -34,6 +34,7 @@ interface MockState {
   doc: {
     lineAt: (position: number) => { from: number; text: string };
   };
+  sliceDoc: (from: number, to: number) => string;
   selection: { main: MockSelection };
   replaceSelection: ReturnType<typeof vi.fn>;
   update: ReturnType<typeof vi.fn>;
@@ -47,10 +48,18 @@ interface MockView {
 interface TabHarness {
   handleTab: (view: MockView) => boolean;
   acceptCompletionOrNextSnippetField: (view: MockView) => boolean;
+  acceptSqlServerCompletionOnSpace: (view: MockView) => boolean;
   clearPendingCompletionTab: () => void;
 }
 
-function createHarness(options: { completionStatus: (state: MockState) => "active" | "pending" | null; acceptCompletion?: (view: MockView) => boolean; nextSnippetField?: (view: MockView) => boolean; indentMore?: (view: MockView) => boolean }): TabHarness {
+function createHarness(options: {
+  databaseType?: string;
+  completionStatus: (state: MockState) => "active" | "pending" | null;
+  selectedCompletion?: (state: MockState) => { type?: string } | null;
+  acceptCompletion?: (view: MockView) => boolean;
+  nextSnippetField?: (view: MockView) => boolean;
+  indentMore?: (view: MockView) => boolean;
+}): TabHarness {
   const source = [
     extractDeclaration(/const COMPLETION_REMOTE_LATENCY_BUDGET_MS = \d+;/, "remote completion latency budget"),
     extractDeclaration(/const COMPLETION_DEBOUNCE_DELAY_MS = \d+;/, "completion debounce delay"),
@@ -61,14 +70,26 @@ function createHarness(options: { completionStatus: (state: MockState) => "activ
     extractFunction("handleTab"),
     extractFunction("performNormalTab"),
     extractFunction("acceptCompletionOrNextSnippetField"),
+    extractFunction("acceptSqlServerCompletionOnSpace"),
     extractFunction("clearPendingCompletionTab"),
     extractFunction("waitForCompletionTab"),
   ].join("\n");
   const javascript = ts.transpileModule(source, {
     compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 },
   }).outputText;
-  const factory = new Function("codeMirrorCompletionStatus", "codeMirrorAcceptCompletion", "codeMirrorNextSnippetField", "codeMirrorIndentMore", "settingsStore", `${javascript}\nreturn { handleTab, acceptCompletionOrNextSnippetField, clearPendingCompletionTab };`);
-  return factory(options.completionStatus, options.acceptCompletion ?? (() => false), options.nextSnippetField ?? (() => false), options.indentMore ?? (() => false), { editorSettings: { sqlFormatter: { useTabs: false, tabWidth: 2 } } }) as TabHarness;
+  const factory = new Function(
+    "props",
+    "codeMirrorCompletionStatus",
+    "codeMirrorSelectedCompletion",
+    "codeMirrorAcceptCompletion",
+    "codeMirrorNextSnippetField",
+    "codeMirrorIndentMore",
+    "settingsStore",
+    `${javascript}\nreturn { handleTab, acceptCompletionOrNextSnippetField, acceptSqlServerCompletionOnSpace, clearPendingCompletionTab };`,
+  );
+  return factory({ databaseType: options.databaseType }, options.completionStatus, options.selectedCompletion ?? (() => ({ type: "column" })), options.acceptCompletion ?? (() => false), options.nextSnippetField ?? (() => false), options.indentMore ?? (() => false), {
+    editorSettings: { sqlFormatter: { useTabs: false, tabWidth: 2 } },
+  }) as TabHarness;
 }
 
 function createView(text = "SELECT", position = text.length): MockView {
@@ -77,6 +98,7 @@ function createView(text = "SELECT", position = text.length): MockView {
     doc: {
       lineAt: () => ({ from: 0, text }),
     },
+    sliceDoc: (from, to) => text.slice(from, to),
     selection: { main: selection },
     replaceSelection: vi.fn((insert: string) => ({ insert })),
     update: vi.fn((change: unknown, options: unknown) => ({ change, options })),
@@ -206,5 +228,66 @@ describe("QueryEditor completion Tab keymap", () => {
 
     expect(view.state.replaceSelection).toHaveBeenCalledWith("  ");
     expect(view.dispatch).toHaveBeenCalledOnce();
+  });
+});
+
+describe("QueryEditor SQL Server completion Space keymap", () => {
+  it.each(["keyword", "table", "column"])("accepts an active %s completion", (type) => {
+    const acceptCompletion = vi.fn(() => true);
+    const harness = createHarness({
+      databaseType: "sqlserver",
+      completionStatus: () => "active",
+      selectedCompletion: () => ({ type }),
+      acceptCompletion,
+    });
+    const view = createView("FXXX ");
+
+    expect(harness.acceptSqlServerCompletionOnSpace(view)).toBe(true);
+    expect(acceptCompletion).toHaveBeenCalledWith(view);
+    expect(view.dispatch).not.toHaveBeenCalled();
+  });
+
+  it("inserts the typed space when automatic completion spacing is disabled", () => {
+    const harness = createHarness({ databaseType: "sqlserver", completionStatus: () => "active", acceptCompletion: () => true });
+    const view = createView("FXXX");
+
+    expect(harness.acceptSqlServerCompletionOnSpace(view)).toBe(true);
+    expect(view.dispatch).toHaveBeenCalledWith({
+      changes: { from: 4, insert: " " },
+      selection: { anchor: 5 },
+      scrollIntoView: true,
+    });
+  });
+
+  it("moves over an existing following space instead of duplicating it", () => {
+    const harness = createHarness({ databaseType: "sqlserver", completionStatus: () => "active", acceptCompletion: () => true });
+    const view = createView("FXXX ", 4);
+
+    expect(harness.acceptSqlServerCompletionOnSpace(view)).toBe(true);
+    expect(view.dispatch).toHaveBeenCalledWith({ selection: { anchor: 5 }, scrollIntoView: true });
+  });
+
+  it.each([
+    { databaseType: "postgresql", status: "active", completionType: "column" },
+    { databaseType: "sqlserver", status: "pending", completionType: "column" },
+    { databaseType: "sqlserver", status: "active", completionType: "function" },
+    { databaseType: "sqlserver", status: "active", completionType: "snippet" },
+  ])("keeps ordinary Space input for $databaseType/$status/$completionType", ({ databaseType, status, completionType }) => {
+    const acceptCompletion = vi.fn(() => true);
+    const harness = createHarness({
+      databaseType,
+      completionStatus: () => status as "active" | "pending",
+      selectedCompletion: () => ({ type: completionType }),
+      acceptCompletion,
+    });
+
+    expect(harness.acceptSqlServerCompletionOnSpace(createView())).toBe(false);
+    expect(acceptCompletion).not.toHaveBeenCalled();
+  });
+
+  it("keeps ordinary Space input when CodeMirror cannot accept the selected completion", () => {
+    const harness = createHarness({ databaseType: "sqlserver", completionStatus: () => "active", acceptCompletion: () => false });
+
+    expect(harness.acceptSqlServerCompletionOnSpace(createView())).toBe(false);
   });
 });

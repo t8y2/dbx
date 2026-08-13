@@ -51,6 +51,9 @@ pub struct EsClient {
     transport_mode: ElasticsearchTransportMode,
     /// GET path used for connect / health / test (default "/").
     connectivity_check_path: String,
+    /// 为 true 时完全跳过连通性检查（test_connection 直接返回 Ok）。
+    /// 用于账号连 `/` 或任何检查路径都无权限、且集群间权限不统一的场景。
+    connectivity_check_disabled: bool,
     /// 正则:把易变的时间/滚动后缀折叠成 `*`，将同一前缀的滚动索引聚合成一个
     /// pattern 节点。`None` 表示关闭聚合，展示原始索引名。
     index_grouping: Option<Regex>,
@@ -72,6 +75,7 @@ impl EsClient {
             timeout,
             ElasticsearchTransportMode::Direct,
             "/".to_string(),
+            false,
             None,
         )
     }
@@ -84,6 +88,7 @@ impl EsClient {
         timeout: Duration,
         transport_mode: ElasticsearchTransportMode,
         connectivity_check_path: String,
+        connectivity_check_disabled: bool,
         index_grouping: Option<Regex>,
     ) -> Self {
         let base_url = url.trim_end_matches('/').to_string();
@@ -94,7 +99,16 @@ impl EsClient {
         let builder = http_client_builder(timeout).danger_accept_invalid_certs(accept_invalid_certs);
         let http = builder.build().unwrap_or_else(|_| HttpClient::new());
         let fallback_base_urls = elasticsearch_base_url_fallbacks(&base_url);
-        Self { http, base_url, fallback_base_urls, auth, transport_mode, connectivity_check_path, index_grouping }
+        Self {
+            http,
+            base_url,
+            fallback_base_urls,
+            auth,
+            transport_mode,
+            connectivity_check_path,
+            connectivity_check_disabled,
+            index_grouping,
+        }
     }
 
     pub fn from_config(
@@ -114,6 +128,7 @@ impl EsClient {
         };
         let base_url = format!("{}{}", url.trim_end_matches('/'), kibana_base_path.as_deref().unwrap_or(""));
         let connectivity_check_path = elasticsearch_connectivity_check_path(external_config);
+        let connectivity_check_disabled = elasticsearch_connectivity_check_disabled(external_config);
         let index_grouping = elasticsearch_index_grouping(external_config);
         Self::new_with_mode(
             &base_url,
@@ -123,6 +138,7 @@ impl EsClient {
             timeout,
             transport_mode,
             connectivity_check_path,
+            connectivity_check_disabled,
             index_grouping,
         )
     }
@@ -188,6 +204,7 @@ impl Clone for EsClient {
             auth: self.auth.clone(),
             transport_mode: self.transport_mode,
             connectivity_check_path: self.connectivity_check_path.clone(),
+            connectivity_check_disabled: self.connectivity_check_disabled,
             index_grouping: self.index_grouping.clone(),
         }
     }
@@ -242,6 +259,23 @@ pub fn elasticsearch_connectivity_check_path(external_config: Option<&Value>) ->
 ///
 /// 语义：用 `${1}*` 模板替换匹配区间——正则带捕获组 1 时保留其内容做前缀，
 /// 不带捕获组时即把匹配到的“易变尾巴”替换成 `*`。
+/// 是否完全跳过连通性检查。读取配置 `connectivityCheckDisabled`（布尔）。
+/// 也兼容字符串 "true"/"1"/"yes"/"on"。用于账号无任何集群/索引探活权限的场景。
+pub fn elasticsearch_connectivity_check_disabled(external_config: Option<&Value>) -> bool {
+    let Some(value) = external_config.and_then(Value::as_object).and_then(|c| c.get("connectivityCheckDisabled"))
+    else {
+        return false;
+    };
+    match value {
+        Value::Bool(b) => *b,
+        Value::String(s) => {
+            let s = s.trim();
+            s.eq_ignore_ascii_case("true") || s == "1" || s.eq_ignore_ascii_case("yes") || s.eq_ignore_ascii_case("on")
+        }
+        _ => false,
+    }
+}
+
 pub fn elasticsearch_index_grouping(external_config: Option<&Value>) -> Option<Regex> {
     let raw = external_config
         .and_then(Value::as_object)
@@ -277,6 +311,10 @@ fn group_index_names(names: Vec<String>, pattern: Option<&Regex>) -> Vec<String>
 }
 
 pub async fn test_connection(client: &mut EsClient, timeout: Duration) -> Result<(), String> {
+    // 用户显式关闭连通性检查：不发探活请求，直接视为可连。
+    if client.connectivity_check_disabled {
+        return Ok(());
+    }
     let mut errors = Vec::new();
     let urls = std::iter::once(client.base_url.clone()).chain(client.fallback_base_urls.clone());
     let check_path = client.connectivity_check_path.clone();
@@ -2271,6 +2309,18 @@ mod tests {
         );
         // 去掉点前缀内部索引、排序、去重。
         assert_eq!(names, vec!["ngx-log-1".to_string(), "ngx-log-2".to_string()]);
+    }
+
+    #[test]
+    fn connectivity_check_disabled_parses_bool_and_string() {
+        use super::elasticsearch_connectivity_check_disabled as disabled;
+        assert!(!disabled(None));
+        assert!(!disabled(Some(&serde_json::json!({}))));
+        assert!(disabled(Some(&serde_json::json!({ "connectivityCheckDisabled": true }))));
+        assert!(disabled(Some(&serde_json::json!({ "connectivityCheckDisabled": "on" }))));
+        assert!(disabled(Some(&serde_json::json!({ "connectivityCheckDisabled": "TRUE" }))));
+        assert!(!disabled(Some(&serde_json::json!({ "connectivityCheckDisabled": false }))));
+        assert!(!disabled(Some(&serde_json::json!({ "connectivityCheckDisabled": "off" }))));
     }
 
     #[test]

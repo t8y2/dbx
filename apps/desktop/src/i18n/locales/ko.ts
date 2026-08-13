@@ -461,6 +461,8 @@ export default withEnglishFallback({
     elasticsearchKibanaBasePath: "기본 경로",
     elasticsearchConnectivityCheckPath: "연결 확인 경로",
     elasticsearchConnectivityCheckPathPlaceholder: "/ 또는 /my-index/_search",
+    elasticsearchConnectivityCheckDisabled: "Disable connectivity check",
+    elasticsearchConnectivityCheckDisabledHint: "When on, connect and test skip the probe request and treat the server as reachable. Use it when the account lacks permission for the root path and any check path, or when permissions differ across clusters.",
     elasticsearchIndexGroupingPattern: "Index grouping regex",
     elasticsearchIndexGroupingPatternPlaceholder: "off by default; enter a regex to enable",
     elasticsearchIndexGroupingPatternHint: "Off by default (naming schemes vary). Enter a regular expression to enable: matched rolling or time-series indices are aggregated into one queryable wildcard pattern, hiding per-day detail.",

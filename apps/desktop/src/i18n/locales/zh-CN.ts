@@ -393,6 +393,8 @@ export default withEnglishFallback({
     elasticsearchKibanaBasePath: "基础路径",
     elasticsearchConnectivityCheckPath: "连通性检查路径",
     elasticsearchConnectivityCheckPathPlaceholder: "/ 或 /my-index/_search",
+    elasticsearchConnectivityCheckDisabled: "关闭连通性检查",
+    elasticsearchConnectivityCheckDisabledHint: "开启后连接与测试都不发探活请求，直接视为可连。用于账号对根路径和任何检查路径都无权限、或集群间权限不统一的情况。",
     elasticsearchIndexGroupingPattern: "索引聚合正则",
     elasticsearchIndexGroupingPatternPlaceholder: "默认关闭，填正则表达式开启",
     elasticsearchIndexGroupingPatternHint: "默认关闭（命名格式因环境而异）。填入正则表达式即可开启：将匹配到的滚动或时间序列索引聚合成一个可查询的通配 pattern，隐藏每日明细。",

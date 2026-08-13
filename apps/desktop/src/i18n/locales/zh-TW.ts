@@ -974,6 +974,8 @@ export default withEnglishFallback({
     elasticsearchKibanaBasePath: "基礎路徑",
     elasticsearchConnectivityCheckPath: "連通性檢查路徑",
     elasticsearchConnectivityCheckPathPlaceholder: "/ 或 /my-index/_search",
+    elasticsearchConnectivityCheckDisabled: "關閉連通性檢查",
+    elasticsearchConnectivityCheckDisabledHint: "開啟後連線與測試都不發探活請求，直接視為可連。用於帳號對根路徑和任何檢查路徑都無權限、或叢集間權限不統一的情況。",
     elasticsearchIndexGroupingPattern: "索引聚合正則",
     elasticsearchIndexGroupingPatternPlaceholder: "預設關閉，填正則表達式開啟",
     elasticsearchIndexGroupingPatternHint: "預設關閉（命名格式因環境而異）。填入正則表達式即可開啟：將比對到的滾動或時間序列索引聚合成一個可查詢的通配 pattern，隱藏每日明細。",

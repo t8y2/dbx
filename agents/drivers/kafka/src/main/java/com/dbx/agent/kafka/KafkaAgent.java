@@ -1141,9 +1141,11 @@ public final class KafkaAgent {
             }
 
             int messagesPerPartition = startPosition == PeekStartPosition.LATEST
-                ? count
+                ? latestPeekMessagesPerPartition(count, readablePartitions.size())
                 : peekMessagesPerPartition(count, readablePartitions.size());
             int scanLimit = peekScanLimit(count, readablePartitions.size(), startPosition);
+            boolean latestBudgetLimited = startPosition == PeekStartPosition.LATEST
+                && latestPeekBudgetLimited(count, readablePartitions.size());
             Map<TopicPartition, Long> snapshotEndOffsets = new LinkedHashMap<>();
             if (startPosition == PeekStartPosition.LATEST) {
                 for (TopicPartition tp : readablePartitions) {
@@ -1178,6 +1180,7 @@ public final class KafkaAgent {
                     deadlineNs,
                     pollTimeout
                 );
+                collection.incomplete = collection.incomplete || latestBudgetLimited;
             } else {
                 PeekCollectionCompletionChecker snapshotComplete = state -> allPeekPartitionsComplete(
                     readablePartitions,
@@ -1196,11 +1199,9 @@ public final class KafkaAgent {
                     pollTimeout
                 );
             }
-            List<Map<String, Object>> messages = collection.messages;
-            sortPeekedMessages(messages, startPosition);
-            if (messages.size() > count) {
-                messages = new ArrayList<>(messages.subList(0, count));
-            }
+            List<Map<String, Object>> messages = sortAndLimitPeekedMessages(
+                collection.messages, count, startPosition
+            );
             return peekMessagesResult(messages, collection.incomplete);
         }
     }
@@ -1313,9 +1314,10 @@ public final class KafkaAgent {
                 continue;
             }
             for (ConsumerRecord<String, byte[]> record : records) {
-                if (++collection.scannedRecords > maxScanRecords) {
+                if (collection.scannedRecords >= maxScanRecords) {
                     return false;
                 }
+                collection.scannedRecords++;
                 TopicPartition partition = new TopicPartition(record.topic(), record.partition());
                 int remaining = collection.remainingByPartition.getOrDefault(partition, 0);
                 if (remaining <= 0 || !recordFilter.include(record)) {
@@ -1431,10 +1433,11 @@ public final class KafkaAgent {
                 : pollTimeout;
             ConsumerRecords<String, byte[]> records = poller.poll(timeout);
             for (ConsumerRecord<String, byte[]> record : records) {
-                if (++collection.scannedRecords > maxScanRecords) {
+                if (collection.scannedRecords >= maxScanRecords) {
                     commitLatestPeekRange(rangeMessages, collection);
                     return false;
                 }
+                collection.scannedRecords++;
                 TopicPartition partition = new TopicPartition(record.topic(), record.partition());
                 int remaining = collection.remainingByPartition.getOrDefault(partition, 0);
                 if (remaining <= 0 || !recordFilter.include(record)) {
@@ -1669,17 +1672,46 @@ public final class KafkaAgent {
     }
 
     static int peekScanLimit(int count, int readablePartitionCount, PeekStartPosition startPosition) {
-        int messagesPerPartition = startPosition == PeekStartPosition.LATEST
-            ? count
-            : peekMessagesPerPartition(count, readablePartitionCount);
-        int fetchCount = recentPeekFetchCount(messagesPerPartition, readablePartitionCount);
-        if (fetchCount > MAX_PEEK_SCAN_RECORDS) {
+        if (startPosition == PeekStartPosition.LATEST
+            && readablePartitionCount > MAX_PEEK_SCAN_RECORDS) {
             throw new IllegalArgumentException(
-                "Kafka message browse would scan more than " + MAX_PEEK_SCAN_RECORDS
-                    + " records; reduce the message count or select a partition"
+                "Kafka topic has more than " + MAX_PEEK_SCAN_RECORDS
+                    + " readable partitions; select a partition to browse latest messages"
             );
         }
         return MAX_PEEK_SCAN_RECORDS;
+    }
+
+    /**
+     * Latest is a topic-level query. Below the scan budget, every partition contributes the
+     * requested count so the global merge is exact. Above it, the fixed budget is shared across
+     * partitions and the response is marked incomplete.
+     */
+    static int latestPeekMessagesPerPartition(int count, int readablePartitionCount) {
+        int safePartitionCount = Math.max(1, readablePartitionCount);
+        if (safePartitionCount > MAX_PEEK_SCAN_RECORDS) {
+            throw new IllegalArgumentException(
+                "Kafka topic has more than " + MAX_PEEK_SCAN_RECORDS
+                    + " readable partitions; select a partition to browse latest messages"
+            );
+        }
+        return Math.min(count, MAX_PEEK_SCAN_RECORDS / safePartitionCount);
+    }
+
+    static boolean latestPeekBudgetLimited(int count, int readablePartitionCount) {
+        return latestPeekMessagesPerPartition(count, readablePartitionCount) < count;
+    }
+
+    static List<Map<String, Object>> sortAndLimitPeekedMessages(
+        List<Map<String, Object>> messages,
+        int count,
+        PeekStartPosition startPosition
+    ) {
+        sortPeekedMessages(messages, startPosition);
+        if (messages.size() <= count) {
+            return messages;
+        }
+        return new ArrayList<>(messages.subList(0, count));
     }
 
     static void sortPeekedMessages(List<Map<String, Object>> messages) {
@@ -2156,11 +2188,6 @@ public final class KafkaAgent {
             : safeWindowWidth * 2;
         long distanceToBeginning = currentStartOffset - beginningOffset;
         return currentStartOffset - Math.min(distanceToBeginning, expandedWindowWidth);
-    }
-
-    static int recentPeekFetchCount(int messagesPerPartition, int partitionCount) {
-        long total = (long) messagesPerPartition * Math.max(1, partitionCount);
-        return (int) Math.min(Integer.MAX_VALUE, total);
     }
 
     private static String stringOrNull(JsonObject object, String key) {

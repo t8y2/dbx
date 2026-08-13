@@ -3026,6 +3026,19 @@ public final class DbxJdbcPlugin {
         int index,
         boolean preserveOracleDateTime
     ) throws SQLException {
+        int columnType = meta.getColumnType(index);
+
+        // GaussDB M-mode JDBC driver may return boolean columns as byte[]
+        // (0x74 for true, 0x66 for false) instead of java.lang.Boolean.
+        // Use rs.getBoolean() for BIT/BOOLEAN columns to get the correct value.
+        if (columnType == Types.BIT || columnType == Types.BOOLEAN) {
+            boolean boolValue = rs.getBoolean(index);
+            if (!rs.wasNull()) {
+                return boolValue;
+            }
+            return null;
+        }
+
         Object value = rs.getObject(index);
         if (value == null) {
             return null;

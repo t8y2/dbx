@@ -1089,6 +1089,7 @@ async fn tunnel_reconnect_loop(
             {
                 Ok(new_session) => {
                     session = new_session;
+                    status.mark_connected();
                     log::info!(
                         "SSH tunnel reconnected to {}:{} (attempt {})",
                         connect_host,
@@ -2036,6 +2037,21 @@ mod tests {
         assert_eq!(manager.local_port("conn").await, None);
         // The dead entry is also cleared out, same as get_active_port does.
         assert!(!manager.tunnels.lock().await.contains_key("conn"));
+    }
+
+    #[tokio::test]
+    async fn successful_reconnect_clears_failure_before_port_reuse() {
+        let status = Arc::new(TunnelStatus::new_connected());
+        status.record_failure("SSH public key authentication failed".to_string());
+        status.mark_connected();
+        let handle = tokio::spawn(std::future::pending::<()>());
+        let mut tunnels = std::collections::HashMap::from([(
+            "conn".to_string(),
+            TunnelEntry { handles: vec![handle], statuses: vec![status], local_port: 54321, kind: TunnelKind::Fixed },
+        )]);
+
+        assert_eq!(TunnelManager::get_active_port(&mut tunnels, "conn", TunnelKind::Fixed), Ok(Some(54321)));
+        assert!(tunnels.contains_key("conn"));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

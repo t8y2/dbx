@@ -3108,14 +3108,14 @@ fn quote_id(name: &str, db_type: DatabaseType) -> String {
     profile_for(db_type).quote_ident(name)
 }
 
-fn column_def(col: &ColumnInfo, db_type: DatabaseType) -> String {
+fn column_def(col: &ColumnInfo, db_type: DatabaseType, source_dialect: Option<DialectKind>) -> String {
     let profile = profile_for(db_type);
     let mut definition = format!("{} {}", quote_id(&col.name, db_type), col.data_type);
     if !col.is_nullable {
         definition.push_str(" NOT NULL");
     }
     if let Some(default) = &col.column_default {
-        let default = profile.format_default(&col.data_type, default);
+        let default = profile.format_default(&col.data_type, default, col.extra.as_deref(), source_dialect);
         definition.push_str(&format!(" DEFAULT {default}"));
     }
     if profile.inline_column_comment {
@@ -3357,7 +3357,8 @@ fn generate_create_table_sql(
                 }
                 if !skip_default {
                     if let Some(default) = &col.column_default {
-                        let default = profile.format_default(&mapped_type, default);
+                        let default =
+                            profile.format_default(&mapped_type, default, col.extra.as_deref(), source_dialect);
                         def.push_str(&format!(" DEFAULT {default}"));
                     }
                 }
@@ -3385,7 +3386,8 @@ fn generate_create_table_sql(
                 }
                 if !skip_default {
                     if let Some(default) = &col.column_default {
-                        let default = profile.format_default(&mapped_type, default);
+                        let default =
+                            profile.format_default(&mapped_type, default, col.extra.as_deref(), source_dialect);
                         def.push_str(&format!(" DEFAULT {default}"));
                     }
                 }
@@ -3863,7 +3865,7 @@ fn generate_schema_sync_sql_inner(
                             };
                             parts.push(format!(
                                 "  ADD COLUMN {}{}",
-                                column_def(&convert_col(source), db_type),
+                                column_def(&convert_col(source), db_type, source_dialect),
                                 position
                             ));
                         }
@@ -3876,7 +3878,10 @@ fn generate_schema_sync_sql_inner(
                             let mapped = convert_col(source);
                             if profile.alter_uses_modify_column {
                                 if column.changes.iter().any(|change| !change.starts_with("order:")) {
-                                    parts.push(format!("  MODIFY COLUMN {}", column_def(&mapped, db_type)));
+                                    parts.push(format!(
+                                        "  MODIFY COLUMN {}",
+                                        column_def(&mapped, db_type, source_dialect)
+                                    ));
                                 }
                             } else {
                                 let name = quote_id(&column.name, db_type);
@@ -3892,7 +3897,12 @@ fn generate_schema_sync_sql_inner(
                                 }
                                 if column.changes.iter().any(|change| change.starts_with("default:")) {
                                     parts.push(if let Some(default) = &source.column_default {
-                                        let default = profile.format_default(&mapped.data_type, default);
+                                        let default = profile.format_default(
+                                            &mapped.data_type,
+                                            default,
+                                            source.extra.as_deref(),
+                                            source_dialect,
+                                        );
                                         format!("  ALTER COLUMN {name} SET DEFAULT {default}")
                                     } else {
                                         format!("  ALTER COLUMN {name} DROP DEFAULT")
@@ -3911,7 +3921,7 @@ fn generate_schema_sync_sql_inner(
                                     parts.push(format!(
                                         "  CHANGE COLUMN {} {}",
                                         old_name,
-                                        column_def(&mapped, db_type)
+                                        column_def(&mapped, db_type, source_dialect)
                                     ));
                                 }
                                 RenameColumnSyntax::RenameColumn => {
@@ -6200,7 +6210,8 @@ mod tests {
                 columns: vec![
                     ColumnInfo {
                         is_primary_key: true,
-                        column_default: Some("(uuid())".to_string()),
+                        column_default: Some("uuid()".to_string()),
+                        extra: Some("DEFAULT_GENERATED".to_string()),
                         ..column("item-id", "varchar(36)", Some("stable item id"))
                     },
                     ColumnInfo {
@@ -6235,7 +6246,7 @@ mod tests {
         let rollback = result.rollback_sync_sql.unwrap();
 
         assert!(rollback.contains("CREATE TABLE `shop`.`order-items`"), "{rollback}");
-        assert!(rollback.contains("`item-id` varchar(36) NOT NULL DEFAULT (uuid()) COMMENT 'stable item id'"));
+        assert!(rollback.contains("`item-id` varchar(36) NOT NULL DEFAULT uuid() COMMENT 'stable item id'"));
         assert!(rollback.contains("PRIMARY KEY (`item-id`)"), "{rollback}");
         assert!(rollback.contains("CREATE UNIQUE INDEX `status-index` USING BTREE ON `shop`.`order-items` (`status`)"));
         assert!(rollback.contains("COMMENT 'status lookup'"), "{rollback}");
@@ -6831,8 +6842,13 @@ mod tests {
 
     #[test]
     fn mysql_create_table_leaves_function_call_default_unquoted() {
+        // Verified against live MySQL 8.4: `CHAR(36) DEFAULT (uuid())` reports
+        // COLUMN_DEFAULT = "uuid()" (no wrapping parens, indistinguishable by shape from a
+        // literal like `a(b)`) and EXTRA = "DEFAULT_GENERATED" — that EXTRA marker, not the
+        // value's shape, is what must gate quoting.
         let columns = vec![added_column_diff(ColumnInfo {
             column_default: Some("uuid()".into()),
+            extra: Some("DEFAULT_GENERATED".into()),
             ..column("id", "varchar(36)", None)
         })];
         let (sql, missing) =
@@ -6845,12 +6861,123 @@ mod tests {
     fn mysql_create_table_leaves_current_timestamp_default_unquoted() {
         let columns = vec![added_column_diff(ColumnInfo {
             column_default: Some("CURRENT_TIMESTAMP".into()),
+            extra: Some("DEFAULT_GENERATED".into()),
             ..column("created_at", "datetime", None)
         })];
         let (sql, missing) =
             generate_create_table_sql("t", &columns, &[], &[], None, DatabaseType::Mysql, None, None, &[], &[]);
         assert!(missing.is_empty(), "{missing:?}");
         assert!(sql.contains("DEFAULT CURRENT_TIMESTAMP"), "keyword default must stay unquoted: {sql}");
+    }
+
+    #[test]
+    fn mysql_create_table_leaves_precision_timestamp_default_unquoted() {
+        // Regression: `CURRENT_TIMESTAMP(3)` was previously misclassified as a literal because
+        // it contains digits/parens, producing invalid `DEFAULT 'CURRENT_TIMESTAMP(3)'`.
+        let columns = vec![added_column_diff(ColumnInfo {
+            column_default: Some("CURRENT_TIMESTAMP(3)".into()),
+            extra: Some("DEFAULT_GENERATED".into()),
+            ..column("created_at", "datetime(3)", None)
+        })];
+        let (sql, missing) =
+            generate_create_table_sql("t", &columns, &[], &[], None, DatabaseType::Mysql, None, None, &[], &[]);
+        assert!(missing.is_empty(), "{missing:?}");
+        assert!(sql.contains("DEFAULT CURRENT_TIMESTAMP(3)"), "precision temporal default must stay unquoted: {sql}");
+    }
+
+    #[test]
+    fn mysql_create_table_leaves_precision_timestamp_default_unquoted_without_extra() {
+        // Fallback path: some MySQL-compatible engines don't populate EXTRA the way MySQL
+        // 8.4 does, so the keyword-with-precision shape must still be recognized on its own.
+        let columns = vec![added_column_diff(ColumnInfo {
+            column_default: Some("CURRENT_TIMESTAMP(3)".into()),
+            ..column("created_at", "datetime(3)", None)
+        })];
+        let (sql, missing) =
+            generate_create_table_sql("t", &columns, &[], &[], None, DatabaseType::Mysql, None, None, &[], &[]);
+        assert!(missing.is_empty(), "{missing:?}");
+        assert!(sql.contains("DEFAULT CURRENT_TIMESTAMP(3)"), "precision temporal default must stay unquoted: {sql}");
+    }
+
+    #[test]
+    fn mysql_create_table_quotes_literal_that_contains_parens() {
+        // Regression: a literal string default like `a(b)` was previously mistaken for an
+        // expression purely because it contains `(`, and left unquoted (invalid SQL). Verified
+        // against live MySQL 8.4: `VARCHAR(20) DEFAULT 'a(b)'` reports COLUMN_DEFAULT = "a(b)"
+        // with an empty EXTRA — same shape as a real expression default, distinguished only by
+        // the (here-empty) EXTRA marker.
+        let columns = vec![added_column_diff(ColumnInfo {
+            column_default: Some("a(b)".into()),
+            ..column("code", "varchar(20)", None)
+        })];
+        let (sql, missing) =
+            generate_create_table_sql("t", &columns, &[], &[], None, DatabaseType::Mysql, None, None, &[], &[]);
+        assert!(missing.is_empty(), "{missing:?}");
+        assert!(sql.contains("DEFAULT 'a(b)'"), "literal containing parens must be quoted: {sql}");
+    }
+
+    #[test]
+    fn mysql_create_table_quotes_empty_string_default() {
+        // Regression: an empty-string default was previously left completely unquoted,
+        // producing a bare, syntactically invalid `DEFAULT` with nothing after it.
+        let columns = vec![added_column_diff(ColumnInfo {
+            column_default: Some("".into()),
+            ..column("note", "varchar(50)", None)
+        })];
+        let (sql, missing) =
+            generate_create_table_sql("t", &columns, &[], &[], None, DatabaseType::Mysql, None, None, &[], &[]);
+        assert!(missing.is_empty(), "{missing:?}");
+        assert!(sql.contains("DEFAULT ''"), "empty string default must be quoted: {sql}");
+    }
+
+    #[test]
+    fn mysql_target_from_postgres_source_leaves_current_user_default_unquoted() {
+        // Regression: cross-dialect sync (Postgres source → MySQL target) must not turn the
+        // Postgres `CURRENT_USER` expression default into a fixed string literal. Postgres's
+        // own introspection (pg_get_expr) never reports bare unquoted string literals, so the
+        // MySQL-specific unquote-fixup must not run at all when the source isn't MySQL-family.
+        let columns = vec![added_column_diff(ColumnInfo {
+            column_default: Some("CURRENT_USER".into()),
+            ..column("created_by", "varchar(64)", None)
+        })];
+        let (sql, missing) = generate_create_table_sql(
+            "t",
+            &columns,
+            &[],
+            &[],
+            None,
+            DatabaseType::Mysql,
+            None,
+            Some(DialectKind::Postgres),
+            &[],
+            &[],
+        );
+        assert!(missing.is_empty(), "{missing:?}");
+        assert!(sql.contains("DEFAULT CURRENT_USER"), "Postgres CURRENT_USER must stay unquoted: {sql}");
+        assert!(!sql.contains("DEFAULT 'CURRENT_USER'"), "must not turn expression into a literal: {sql}");
+    }
+
+    #[test]
+    fn mysql_target_from_oracle_source_leaves_user_default_unquoted() {
+        let columns = vec![added_column_diff(ColumnInfo {
+            column_default: Some("USER".into()),
+            ..column("owner", "varchar(64)", None)
+        })];
+        let (sql, missing) = generate_create_table_sql(
+            "t",
+            &columns,
+            &[],
+            &[],
+            None,
+            DatabaseType::Mysql,
+            None,
+            Some(DialectKind::Oracle),
+            &[],
+            &[],
+        );
+        assert!(missing.is_empty(), "{missing:?}");
+        assert!(sql.contains("DEFAULT USER"), "Oracle USER must stay unquoted: {sql}");
+        assert!(!sql.contains("DEFAULT 'USER'"), "must not turn expression into a literal: {sql}");
     }
 
     #[test]

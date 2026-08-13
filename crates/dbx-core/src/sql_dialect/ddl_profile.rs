@@ -4,6 +4,7 @@
 //! they only consult profile fields (quote style, auto-increment form, type map, …).
 
 use crate::models::connection::DatabaseType;
+use crate::sql_dialect::descriptor::DialectKind;
 
 /// Identifier quoting style for generated DDL.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -183,10 +184,28 @@ impl DdlDialectProfile {
     /// introspection *without* the surrounding quotes (e.g. `active` instead of `'active'`),
     /// unlike Postgres/SQL Server/Oracle/SQLite which already include them. When
     /// `quote_unquoted_string_defaults` is set, add quoting (with `'` escaping) for those
-    /// bare literals while leaving expressions/keywords like `CURRENT_TIMESTAMP` or
-    /// `uuid()` untouched.
-    pub fn format_default(&self, data_type: &str, default_value: &str) -> String {
-        if self.quote_unquoted_string_defaults && mysql_default_needs_quoting(data_type, default_value) {
+    /// bare literals while leaving expressions (detected via `extra`/keyword-with-precision
+    /// shape) untouched.
+    ///
+    /// This unquoted-raw-literal format is specific to how the MySQL family's own
+    /// introspection reports defaults, so the fix-up only runs when the *source* the value
+    /// was read from is itself MySQL-family (or unknown, e.g. same-dialect comparisons where
+    /// no source dialect was supplied). Cross-dialect syncs from Postgres/Oracle/etc., whose
+    /// introspection already returns correctly-formed literals or bare expression keywords
+    /// (`CURRENT_USER`, `USER`), must pass the value through unchanged — otherwise those
+    /// expressions would be turned into fixed string literals.
+    pub fn format_default(
+        &self,
+        data_type: &str,
+        default_value: &str,
+        extra: Option<&str>,
+        source_dialect: Option<DialectKind>,
+    ) -> String {
+        let source_is_mysql_or_unknown = matches!(source_dialect, None | Some(DialectKind::Mysql));
+        if self.quote_unquoted_string_defaults
+            && source_is_mysql_or_unknown
+            && mysql_default_needs_quoting(data_type, default_value, extra)
+        {
             return format!("'{}'", default_value.replace('\'', "''"));
         }
         default_value.to_string()
@@ -304,10 +323,21 @@ const SQLITE_TYPE_MAP: &[TypeMapEntry] = &[
 
 /// True when `default_value` is a bare MySQL literal that `INFORMATION_SCHEMA.COLUMNS` /
 /// `SHOW COLUMNS` returned without quotes and that needs quoting for the given column's
-/// base type before being embedded in generated DDL. Function-call expressions
-/// (`uuid()`, `CURRENT_TIMESTAMP()`) and bare keyword expressions (`CURRENT_TIMESTAMP`)
-/// are left alone since they are not string/date literals.
-fn mysql_default_needs_quoting(data_type: &str, default_value: &str) -> bool {
+/// base type before being embedded in generated DDL.
+///
+/// Expression defaults (`uuid()`, `(json_array())`, `CURRENT_TIMESTAMP(3)`, …) must be left
+/// alone. Verified against a live MySQL 8.4 instance: for an expression default MySQL's
+/// `COLUMN_DEFAULT`/`Default` is byte-for-byte indistinguishable from a string literal that
+/// happens to contain parentheses — e.g. a `VARCHAR DEFAULT 'a(b)'` and a
+/// `CHAR DEFAULT (uuid())` both report their raw value as-is (`a(b)` vs `uuid()`), so shape
+/// alone (e.g. "contains `(`") cannot tell them apart. The one field that reliably does is
+/// `EXTRA`, which MySQL sets to `DEFAULT_GENERATED` for expression defaults (including the
+/// `CURRENT_TIMESTAMP` family) and leaves empty for literals — so that is the primary signal.
+/// When `extra` is unavailable (older MySQL-compatible engines), fall back to recognizing the
+/// bare-keyword-with-optional-precision shape (`CURRENT_TIMESTAMP`, `CURRENT_TIMESTAMP(3)`,
+/// `NOW()`) for temporal columns only, where a false-negative just means an unusual literal
+/// stays unquoted rather than an expression getting corrupted into a string.
+fn mysql_default_needs_quoting(data_type: &str, default_value: &str, extra: Option<&str>) -> bool {
     const STRING_TYPES: &[&str] = &[
         "char",
         "varchar",
@@ -330,19 +360,38 @@ fn mysql_default_needs_quoting(data_type: &str, default_value: &str) -> bool {
     const TEMPORAL_TYPES: &[&str] = &["date", "datetime", "timestamp", "time", "year"];
 
     let trimmed = default_value.trim();
-    if trimmed.is_empty() || trimmed.starts_with('\'') || trimmed.contains('(') {
+    if trimmed.starts_with('\'') {
+        return false; // already quoted
+    }
+    let is_expression = extra.is_some_and(|e| e.to_ascii_lowercase().contains("default_generated"));
+    if is_expression {
         return false;
     }
+
     let base_type = data_type.split('(').next().unwrap_or(data_type).trim().to_ascii_lowercase();
     if STRING_TYPES.contains(&base_type.as_str()) {
-        return true;
+        return true; // literal (including empty string `''`)
     }
     if TEMPORAL_TYPES.contains(&base_type.as_str()) {
-        // Bare keyword expressions (CURRENT_TIMESTAMP, CURRENT_DATE, …) stay unquoted;
-        // anything else (digits/punctuation like `2024-01-01 00:00:00`) is a literal.
-        return !trimmed.chars().all(|c| c.is_ascii_alphabetic() || c == '_');
+        // Bare keyword expressions (CURRENT_TIMESTAMP, CURRENT_TIMESTAMP(3), NOW(), …) stay
+        // unquoted; anything else (e.g. `2024-01-01 00:00:00`) is a literal.
+        return !is_bare_keyword_or_precision_function(trimmed);
     }
     false
+}
+
+/// True for `IDENT` or `IDENT(<digits>)` shapes like `CURRENT_TIMESTAMP`, `CURRENT_TIMESTAMP(3)`,
+/// `NOW()`, `NOW(6)` — the MySQL "flexible" temporal default/on-update functions, which stay
+/// unquoted even when introspection doesn't expose an `EXTRA = DEFAULT_GENERATED` marker.
+fn is_bare_keyword_or_precision_function(value: &str) -> bool {
+    let (ident, precision) = match value.find('(') {
+        Some(idx) if value.ends_with(')') => (&value[..idx], Some(&value[idx + 1..value.len() - 1])),
+        Some(_) => return false, // unbalanced parens: not a clean function-call shape
+        None => (value, None),
+    };
+    let ident_ok = !ident.is_empty() && ident.chars().all(|c| c.is_ascii_alphabetic() || c == '_');
+    let precision_ok = precision.is_none_or(|p| p.chars().all(|c| c.is_ascii_digit()));
+    ident_ok && precision_ok
 }
 
 fn mysql_family(db: DatabaseType) -> DdlDialectProfile {

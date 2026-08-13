@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::models::connection::ConnectionConfig;
 
@@ -109,6 +110,13 @@ pub fn default_page_size() -> u32 {
 }
 
 impl NacosAdminConfig {
+    /// Binds short-lived, destructive workflows to the exact Nacos target and
+    /// credentials that created them. The digest is never exposed or persisted.
+    pub fn operation_fingerprint(&self) -> String {
+        let encoded = serde_json::to_vec(self).expect("NacosAdminConfig serialization must succeed");
+        format!("{:x}", Sha256::digest(encoded))
+    }
+
     pub fn from_connection(cfg: &ConnectionConfig) -> Result<Self, String> {
         let parsed = if let Some(raw) = cfg.external_config.as_ref() {
             serde_json::from_value::<NacosAdminConfig>(raw.clone())

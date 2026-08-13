@@ -35,10 +35,7 @@ describe("connectionStore Nacos namespace access", () => {
       namespace,
       namespaceShowName: namespace || "public",
     }));
-    const nacosListConfigs = vi.fn(async (_connectionId: string, query: { namespace?: string }) => {
-      if (query.namespace === "bb") return { pageNo: 1, pageSize: 1, totalCount: 0, items: [] };
-      throw new Error('NACOS_ERROR[authFailed]: Nacos admin /v1/cs/configs returned 403 Forbidden: {"message":"authorization failed!"}');
-    });
+    const nacosListConfigs = vi.fn();
 
     vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
     vi.doMock("@/lib/backend/api", () => ({
@@ -79,12 +76,12 @@ describe("connectionStore Nacos namespace access", () => {
     return { root, store, nacosListConfigs };
   }
 
-  it("shows and counts only namespaces that the current user can read", async () => {
+  it("loads the sidebar without probing every namespace", async () => {
     const { root, store, nacosListConfigs } = await loadNacosTree(false);
 
-    expect(nacosListConfigs).toHaveBeenCalledTimes(4);
-    expect(root.children?.filter((node) => node.type === "nacos-namespace").map((node) => node.label)).toEqual(["bb"]);
-    expect(store.getSidebarVisibleFilterSummary("nacos-bb")).toEqual({ mode: "namespace", isActive: false, selected: 1, total: 1 });
+    expect(nacosListConfigs).not.toHaveBeenCalled();
+    expect(root.children?.filter((node) => node.type === "nacos-namespace").map((node) => node.label)).toEqual(["aa", "bb", "cc", "public"]);
+    expect(store.getSidebarVisibleFilterSummary("nacos-bb")).toEqual({ mode: "namespace", isActive: false, selected: 4, total: 4 });
     expect(root.children?.some((node) => node.type === "nacos-access-control")).toBe(false);
   });
 

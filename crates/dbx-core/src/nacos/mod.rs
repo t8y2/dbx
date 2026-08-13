@@ -117,6 +117,7 @@ impl NacosAdminRegistry {
     pub async fn drop_connection(&self, connection_id: &str) {
         self.instances.write().await.remove(connection_id);
         self.build_locks.write().await.remove(connection_id);
+        access_control::invalidate_operations(connection_id);
     }
 
     async fn rnacos_console_session(&self, cfg: &NacosAdminConfig) -> RNacosConsoleSessionHandle {

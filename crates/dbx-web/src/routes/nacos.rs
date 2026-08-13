@@ -481,10 +481,13 @@ pub async fn start_access_operation(
 }
 
 pub async fn get_access_operation(
+    State(state): State<Arc<WebState>>,
     Json(req): Json<AccessOperationIdReq>,
 ) -> Result<Json<dbx_core::nacos::NacosAccessOperationResult>, AppError> {
-    let result = dbx_core::nacos::service::nacos_get_access_operation_core(&req.connection_id, &req.operation_id)
-        .map_err(AppError::from)?;
+    let result =
+        dbx_core::nacos::service::nacos_get_access_operation_core(&state.app, &req.connection_id, &req.operation_id)
+            .await
+            .map_err(AppError::from)?;
     Ok(Json(result))
 }
 

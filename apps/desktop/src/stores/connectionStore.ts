@@ -115,7 +115,7 @@ import { appendConnectionErrorHints } from "@/lib/connection/connectionErrorHint
 import { appendVisibleDatabaseSelection } from "@/lib/connection/connectionVisibleDatabases";
 import { buildXuguTypeMemberNodes, isXuguTypeMemberContainer } from "@/lib/sidebar/xuguTypeMembers";
 import { isXuguPublicSynonymScope, xuguSchemaDisplayName, XUGU_PUBLIC_SYNONYM_SCOPE } from "@/lib/sidebar/xuguPublicSynonyms";
-import { filterNacosNamespacesForSidebar, loadReadableNacosNamespaces } from "@/lib/nacos/nacosNamespaceVisibility";
+import { filterNacosNamespacesForSidebar, normalizeNacosNamespacesForDisplay } from "@/lib/nacos/nacosNamespaceVisibility";
 import { buildPackageMemberNodes, markPackageNodesExpandable } from "@/lib/sidebar/packageMembers";
 import { configuredDatabaseProductName, connectionConfigFingerprint, normalizeDatabaseConnectionInfo } from "@/lib/connection/connectionDatabaseInfo";
 import { createMetadataLoadTrace, logMetadataLoadTrace, MetadataLoadCoordinator, type MetadataLoadTraceLogger } from "@/lib/metadata/metadataLoadCoordinator";
@@ -3689,7 +3689,8 @@ export const useConnectionStore = defineStore("connection", () => {
       load = reclaimTreeNodeLoad(load, node);
       if (useCachedChildren(node, options, load)) return;
 
-      const [namespaces, connectionInfo] = await Promise.all([loadReadableNacosNamespaces(connectionId, api), api.nacosTestConnection(connectionId)]);
+      const [listedNamespaces, connectionInfo] = await Promise.all([api.nacosListNamespaces(connectionId), api.nacosTestConnection(connectionId)]);
+      const namespaces = normalizeNacosNamespacesForDisplay(listedNamespaces);
       const visibleNamespaces = filterNacosNamespacesForSidebar(namespaces, getConfig(connectionId)?.visible_databases);
       const sorted = [...visibleNamespaces].sort((left, right) => {
         const leftLabel = left.namespaceShowName || left.namespace || "public";

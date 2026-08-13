@@ -38,6 +38,7 @@ type ValidatedMembers = (Vec<String>, HashMap<String, String>, Vec<StepCommand>)
 #[derive(Clone)]
 struct StoredOperation {
     connection_id: String,
+    connection_fingerprint: String,
     result: NacosAccessOperationResult,
     failed: Vec<(usize, StepCommand)>,
     undo: Vec<StepCommand>,
@@ -253,6 +254,7 @@ fn merge_actions(left: &str, right: &str) -> String {
 
 pub async fn start_operation(
     connection_id: &str,
+    connection_fingerprint: String,
     admin: Arc<dyn NacosAdmin>,
     request: NacosAccessOperationRequest,
 ) -> Result<NacosAccessOperationResult, String> {
@@ -262,9 +264,17 @@ pub async fn start_operation(
     let execution_strategy = execution_strategy_for_request(&request);
     let (commands, credentials, undoable) = plan_operation(&snapshot, request)?;
     let operation_id = uuid::Uuid::new_v4().to_string();
-    let stored =
-        execute_commands(connection_id, &operation_id, admin, commands, &credentials, undoable, execution_strategy)
-            .await;
+    let stored = execute_commands(
+        connection_id,
+        connection_fingerprint,
+        &operation_id,
+        admin,
+        commands,
+        &credentials,
+        undoable,
+        execution_strategy,
+    )
+    .await;
     let result = stored.result.clone();
     let mut registry = operations().lock().unwrap_or_else(|error| error.into_inner());
     cleanup_operations(&mut registry);
@@ -287,19 +297,24 @@ fn execution_strategy_for_request(request: &NacosAccessOperationRequest) -> Exec
     }
 }
 
-pub fn get_operation(connection_id: &str, operation_id: &str) -> Result<NacosAccessOperationResult, String> {
+pub fn get_operation(
+    connection_id: &str,
+    connection_fingerprint: &str,
+    operation_id: &str,
+) -> Result<NacosAccessOperationResult, String> {
     let mut registry = operations().lock().unwrap_or_else(|error| error.into_inner());
     cleanup_operations(&mut registry);
     let operation =
         registry.get(operation_id).ok_or_else(|| "Nacos access operation was not found or expired".to_string())?;
-    if operation.connection_id != connection_id {
-        return Err("Nacos access operation belongs to another connection".to_string());
+    if operation.connection_id != connection_id || operation.connection_fingerprint != connection_fingerprint {
+        return Err("Nacos access operation was not found or expired".to_string());
     }
     Ok(operation.result.clone())
 }
 
 pub async fn retry_operation(
     connection_id: &str,
+    connection_fingerprint: String,
     admin: Arc<dyn NacosAdmin>,
     retry: NacosAccessOperationRetry,
 ) -> Result<NacosAccessOperationResult, String> {
@@ -310,7 +325,9 @@ pub async fn retry_operation(
         cleanup_operations(&mut registry);
         registry
             .get(&retry.operation_id)
-            .filter(|operation| operation.connection_id == connection_id)
+            .filter(|operation| {
+                operation.connection_id == connection_id && operation.connection_fingerprint == connection_fingerprint
+            })
             .cloned()
             .ok_or_else(|| "Nacos access operation was not found or expired".to_string())?
     };
@@ -327,6 +344,7 @@ pub async fn retry_operation(
     validate_replayed_commands(&snapshot, &commands)?;
     let retried = execute_commands(
         connection_id,
+        connection_fingerprint,
         &retry.operation_id,
         admin,
         commands,
@@ -364,6 +382,7 @@ pub async fn retry_operation(
 
 pub async fn undo_operation(
     connection_id: &str,
+    connection_fingerprint: String,
     admin: Arc<dyn NacosAdmin>,
     operation_id: &str,
 ) -> Result<NacosAccessOperationResult, String> {
@@ -374,7 +393,9 @@ pub async fn undo_operation(
         cleanup_operations(&mut registry);
         registry
             .get(operation_id)
-            .filter(|operation| operation.connection_id == connection_id)
+            .filter(|operation| {
+                operation.connection_id == connection_id && operation.connection_fingerprint == connection_fingerprint
+            })
             .cloned()
             .ok_or_else(|| "Nacos access operation was not found or expired".to_string())?
     };
@@ -386,6 +407,7 @@ pub async fn undo_operation(
     validate_replayed_commands(&snapshot, &commands)?;
     let mut undone = execute_commands(
         connection_id,
+        connection_fingerprint,
         operation_id,
         admin,
         commands,
@@ -818,6 +840,7 @@ fn expand_permissions(role: &str, drafts: Vec<NacosPermissionDraft>) -> Result<V
 
 async fn execute_commands(
     connection_id: &str,
+    connection_fingerprint: String,
     operation_id: &str,
     admin: Arc<dyn NacosAdmin>,
     commands: Vec<StepCommand>,
@@ -878,6 +901,7 @@ async fn execute_commands(
     result.can_undo = undoable && !undo.is_empty();
     StoredOperation {
         connection_id: connection_id.to_string(),
+        connection_fingerprint,
         result,
         failed,
         undo,
@@ -885,6 +909,13 @@ async fn execute_commands(
         execution_strategy,
         expires_at: Instant::now() + OPERATION_TTL,
     }
+}
+
+/// Connection teardown and configuration replacement must make old retry and
+/// undo records unusable before a new adapter can target another server.
+pub fn invalidate_operations(connection_id: &str) {
+    let mut registry = operations().lock().unwrap_or_else(|error| error.into_inner());
+    registry.retain(|_, operation| operation.connection_id != connection_id);
 }
 
 async fn validate_command_before_execution(admin: Arc<dyn NacosAdmin>, command: &StepCommand) -> Result<(), String> {
@@ -1266,6 +1297,38 @@ mod tests {
 
         assert!(Arc::ptr_eq(&first, &same));
         assert!(!Arc::ptr_eq(&first, &other));
+    }
+
+    #[test]
+    fn operations_cannot_be_reused_after_the_connection_identity_changes() {
+        let operation_id = "fingerprint-check".to_string();
+        let mut registry = operations().lock().unwrap_or_else(|error| error.into_inner());
+        registry.insert(
+            operation_id.clone(),
+            StoredOperation {
+                connection_id: "nacos".to_string(),
+                connection_fingerprint: "server-a".to_string(),
+                result: NacosAccessOperationResult {
+                    operation_id: operation_id.clone(),
+                    status: NacosAccessOperationStatus::Succeeded,
+                    steps: Vec::new(),
+                    can_retry: false,
+                    can_undo: false,
+                },
+                failed: Vec::new(),
+                undo: Vec::new(),
+                undoable: false,
+                execution_strategy: ExecutionStrategy::StopAfterFailure,
+                expires_at: Instant::now() + OPERATION_TTL,
+            },
+        );
+        drop(registry);
+
+        assert!(get_operation("nacos", "server-a", &operation_id).is_ok());
+        assert!(get_operation("nacos", "server-b", &operation_id).is_err());
+
+        invalidate_operations("nacos");
+        assert!(get_operation("nacos", "server-a", &operation_id).is_err());
     }
 
     #[test]

@@ -1218,6 +1218,7 @@ pub async fn connect_db(
     let mut connected_db_config = db_config.clone();
 
     state.remove_connection_pools_detached(&id).await;
+    drop_nacos_adapters_for_connection_ids(state.inner(), std::slice::from_ref(&id)).await;
     state.reset_connection_transport_for_config(&id, &db_config).await;
 
     let (host, port) = state.connection_host_port(&id, &db_config).await?;

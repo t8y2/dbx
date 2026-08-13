@@ -202,10 +202,11 @@ pub async fn nacos_start_access_operation(
 
 #[tauri::command]
 pub async fn nacos_get_access_operation(
+    state: State<'_, Arc<AppState>>,
     connection_id: String,
     operation_id: String,
 ) -> Result<dbx_core::nacos::NacosAccessOperationResult, String> {
-    dbx_core::nacos::service::nacos_get_access_operation_core(&connection_id, &operation_id)
+    dbx_core::nacos::service::nacos_get_access_operation_core(&state, &connection_id, &operation_id).await
 }
 
 #[tauri::command]

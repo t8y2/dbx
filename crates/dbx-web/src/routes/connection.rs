@@ -269,6 +269,7 @@ pub async fn connect_db(
     let attempt = app.begin_connection_attempt_with_client_attempt(&connection_id, body.client_attempt).await;
 
     app.remove_connection_pools_detached(&connection_id).await;
+    app.nacos_registry.drop_connection(&connection_id).await;
     app.reset_connection_transport_for_config(&connection_id, &config).await;
     app.configs.write().await.insert(connection_id.clone(), config.clone());
 

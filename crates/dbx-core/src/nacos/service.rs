@@ -214,18 +214,20 @@ pub async fn nacos_start_access_operation_core(
     req: NacosAccessOperationRequest,
 ) -> Result<NacosAccessOperationResult, String> {
     ensure_connection_writable(state, conn_id, "Manage Nacos access control").await?;
-    let admin = get_admin(state, conn_id).await?;
+    let (admin, fingerprint) = get_admin_with_operation_fingerprint(state, conn_id).await?;
     if !admin.access_control_capabilities().enhanced_workspace {
         return Err("The enhanced access-control workspace is unavailable for this Nacos connection".to_string());
     }
-    crate::nacos::access_control::start_operation(conn_id, admin, req).await
+    crate::nacos::access_control::start_operation(conn_id, fingerprint, admin, req).await
 }
 
-pub fn nacos_get_access_operation_core(
+pub async fn nacos_get_access_operation_core(
+    state: &AppState,
     conn_id: &str,
     operation_id: &str,
 ) -> Result<NacosAccessOperationResult, String> {
-    crate::nacos::access_control::get_operation(conn_id, operation_id)
+    let (_, fingerprint) = get_admin_with_operation_fingerprint(state, conn_id).await?;
+    crate::nacos::access_control::get_operation(conn_id, &fingerprint, operation_id)
 }
 
 pub async fn nacos_retry_access_operation_core(
@@ -234,8 +236,8 @@ pub async fn nacos_retry_access_operation_core(
     retry: NacosAccessOperationRetry,
 ) -> Result<NacosAccessOperationResult, String> {
     ensure_connection_writable(state, conn_id, "Retry Nacos access-control operation").await?;
-    let admin = get_admin(state, conn_id).await?;
-    crate::nacos::access_control::retry_operation(conn_id, admin, retry).await
+    let (admin, fingerprint) = get_admin_with_operation_fingerprint(state, conn_id).await?;
+    crate::nacos::access_control::retry_operation(conn_id, fingerprint, admin, retry).await
 }
 
 pub async fn nacos_undo_access_operation_core(
@@ -244,8 +246,8 @@ pub async fn nacos_undo_access_operation_core(
     operation_id: &str,
 ) -> Result<NacosAccessOperationResult, String> {
     ensure_connection_writable(state, conn_id, "Undo Nacos access-control operation").await?;
-    let admin = get_admin(state, conn_id).await?;
-    crate::nacos::access_control::undo_operation(conn_id, admin, operation_id).await
+    let (admin, fingerprint) = get_admin_with_operation_fingerprint(state, conn_id).await?;
+    crate::nacos::access_control::undo_operation(conn_id, fingerprint, admin, operation_id).await
 }
 
 pub async fn nacos_list_services_core(
@@ -390,6 +392,20 @@ pub(crate) async fn get_admin(
     }
     let admin_config = state.nacos_admin_config_for_connection(conn_id, &cfg).await?;
     state.nacos_registry.get_or_build_config(conn_id, admin_config).await
+}
+
+async fn get_admin_with_operation_fingerprint(
+    state: &AppState,
+    conn_id: &str,
+) -> Result<(std::sync::Arc<dyn crate::nacos::port::NacosAdmin>, String), String> {
+    let cfg = state.configs.read().await.get(conn_id).cloned().ok_or("Connection not found")?;
+    if cfg.db_type != DatabaseType::Nacos {
+        return Err("Connection is not a Nacos admin connection".to_string());
+    }
+    let admin_config = state.nacos_admin_config_for_connection(conn_id, &cfg).await?;
+    let fingerprint = admin_config.operation_fingerprint();
+    let admin = state.nacos_registry.get_or_build_config(conn_id, admin_config).await?;
+    Ok((admin, fingerprint))
 }
 
 pub(crate) async fn ensure_connection_writable(state: &AppState, conn_id: &str, action: &str) -> Result<(), String> {

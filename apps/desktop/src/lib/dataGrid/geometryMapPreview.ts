@@ -2,6 +2,7 @@ import { Map as MapIcon } from "@lucide/vue";
 import { registerPreviewAction, type PreviewActionContext } from "@/lib/dataGrid/resultPreviewRegistry";
 import { wktToGeoJson, type GeoJsonGeometry } from "@/lib/dataGrid/geometryPreview";
 import LayerPreviewDialog from "@/components/grid/LayerPreviewDialog.vue";
+import type { QueryResult } from "@/types/database";
 
 export interface GeometryMapFeature {
   type: "Feature";
@@ -21,13 +22,7 @@ registerPreviewAction({
   label: "grid.layerPreview",
   icon: MapIcon,
   isAvailable(result) {
-    return (result.column_types ?? []).some((t) => {
-      const base = (t ?? "")
-        .trim()
-        .toLowerCase()
-        .split(/[(:\s]/)[0];
-      return base === "geometry" || base === "geography";
-    });
+    return hasGeometryMapPreviewData(result);
   },
   execute(ctx) {
     const featureCollection = buildGeometryMapFeatureCollection(ctx);
@@ -41,6 +36,22 @@ registerPreviewAction({
     };
   },
 });
+
+export function hasGeometryMapPreviewData(result: Pick<QueryResult, "column_types" | "rows">): boolean {
+  const geomIndices = geometryColumnIndices(result.column_types);
+  if (geomIndices.length === 0) return false;
+
+  for (const row of result.rows) {
+    for (const colIdx of geomIndices) {
+      const raw = row[colIdx];
+      if (raw === null || raw === undefined) continue;
+      const wkt = String(raw);
+      if (wkt.startsWith("0x")) continue;
+      if (wktToGeoJson(wkt)) return true;
+    }
+  }
+  return false;
+}
 
 export function buildGeometryMapFeatureCollection(ctx: PreviewActionContext): GeometryMapFeatureCollection | null {
   const geomIndices = geometryColumnIndices(ctx.result.column_types);

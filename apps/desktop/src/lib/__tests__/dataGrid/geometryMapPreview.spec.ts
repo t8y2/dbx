@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildGeometryMapFeatureCollection } from "@/lib/dataGrid/geometryMapPreview";
+import { buildGeometryMapFeatureCollection, hasGeometryMapPreviewData } from "@/lib/dataGrid/geometryMapPreview";
 import type { PreviewActionContext } from "@/lib/dataGrid/resultPreviewRegistry";
 
 function context(): PreviewActionContext {
@@ -29,6 +29,18 @@ function context(): PreviewActionContext {
 }
 
 describe("buildGeometryMapFeatureCollection", () => {
+  it("only exposes the preview action when at least one geometry value is parseable", () => {
+    const result = context().result;
+    expect(hasGeometryMapPreviewData(result)).toBe(true);
+
+    result.rows = [
+      [null, "empty"],
+      ["0x0101000000", "binary"],
+      ["not geometry", "invalid"],
+    ];
+    expect(hasGeometryMapPreviewData(result)).toBe(false);
+  });
+
   it("exposes the detected layer SRID and binds row properties by sourceIndex", () => {
     const collection = buildGeometryMapFeatureCollection(context());
 

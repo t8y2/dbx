@@ -3288,24 +3288,21 @@ fn effective_source_dialect(source_dialect: Option<DialectKind>, db_type: Databa
 /// `transfer::format_mysql_default_literal` do the same job on their own paths;
 /// both are private to their modules.
 fn default_literal(default: &str, data_type: &str, source: DialectKind, extra: Option<&str>) -> String {
-    let trimmed = default.trim();
-    if trimmed.eq_ignore_ascii_case("NULL") {
-        return trimmed.to_string();
-    }
+    let normalized = default.trim();
 
     // Every dialect except MySQL returns a string default already quoted, cast
     // or wrapped, so a bare token there is an expression and rewriting it would
     // change its meaning: Postgres `text DEFAULT CURRENT_USER`, Oracle
     // `varchar2 DEFAULT USER`, SQL Server `('x')`.
     if source != DialectKind::Mysql {
-        return trimmed.to_string();
+        return normalized.to_string();
     }
 
     // MySQL 8.0.13 and later flag an expression default in `EXTRA`. That marker
     // is authoritative, so consult it before looking at the value at all: a
     // default is a literal unless the server says it was generated.
     if extra.is_some_and(|value| value.to_ascii_uppercase().contains("DEFAULT_GENERATED")) {
-        return trimmed.to_string();
+        return normalized.to_string();
     }
 
     // MySQL writes an expression default wrapped in parentheses, `DEFAULT
@@ -3314,14 +3311,14 @@ fn default_literal(default: &str, data_type: &str, source: DialectKind, extra: O
     // whether the value *is* parenthesised, not whether it merely contains a
     // parenthesis: the string default `a(b)` is not wrapped and is still
     // quoted.
-    if trimmed.starts_with('(') && trimmed.ends_with(')') {
-        return trimmed.to_string();
+    if normalized.starts_with('(') && normalized.ends_with(')') {
+        return normalized.to_string();
     }
 
     // Already a literal: `'x'` or a prefixed form like `x'1f'`.
-    let lowered = trimmed.to_ascii_lowercase();
-    if trimmed.starts_with('\'') || QUOTED_LITERAL_PREFIXES.iter().any(|prefix| lowered.starts_with(prefix)) {
-        return trimmed.to_string();
+    let lowered = normalized.to_ascii_lowercase();
+    if normalized.starts_with('\'') || QUOTED_LITERAL_PREFIXES.iter().any(|prefix| lowered.starts_with(prefix)) {
+        return normalized.to_string();
     }
 
     let base_type = data_type.split('(').next().unwrap_or(data_type).trim().to_ascii_lowercase();
@@ -3332,21 +3329,21 @@ fn default_literal(default: &str, data_type: &str, source: DialectKind, extra: O
 
     // Before 8.0.13 there is no `EXTRA` marker and a temporal column was the
     // only place an expression default could appear.
-    if takes_temporal_literal && is_temporal_keyword_default(trimmed) {
-        return trimmed.to_string();
+    if takes_temporal_literal && is_temporal_keyword_default(normalized) {
+        return normalized.to_string();
     }
     // A binary default is commonly reported as a hex literal, which is already
     // valid unquoted; a bare string on the same column still needs quoting.
-    if takes_binary_literal && is_hex_literal(trimmed) {
-        return trimmed.to_string();
+    if takes_binary_literal && is_hex_literal(normalized) {
+        return normalized.to_string();
     }
     if takes_text_literal || takes_binary_literal || takes_temporal_literal {
         // Deliberately no parenthesis check. MySQL reports the string default
         // `'a(b)'` as the bare value `a(b)`, and treating a parenthesis as proof
         // of a function call is what produced invalid `DEFAULT a(b)`.
-        return format!("'{}'", trimmed.replace('\'', "''"));
+        return format!("'{}'", default.replace('\'', "''"));
     }
-    trimmed.to_string()
+    normalized.to_string()
 }
 
 /// A bare temporal default, with or without a precision argument, so
@@ -6946,10 +6943,12 @@ mod tests {
         assert_eq!(default_literal("2024-01-01", "date", Mysql, None), "'2024-01-01'");
         // `DEFAULT ''` previously emitted a bare `DEFAULT `.
         assert_eq!(default_literal("", "varchar(20)", Mysql, None), "''");
-        // Untouched on MySQL: already quoted, a number, and an explicit NULL.
+        // Untouched on MySQL: already quoted and numeric values.
         assert_eq!(default_literal("'guest'", "varchar(50)", Mysql, None), "'guest'");
         assert_eq!(default_literal("0", "bigint", Mysql, None), "0");
-        assert_eq!(default_literal("NULL", "varchar(10)", Mysql, None), "NULL");
+        assert_eq!(default_literal("NULL", "varchar(10)", Mysql, None), "'NULL'");
+        assert_eq!(default_literal("null", "text", Mysql, None), "'null'");
+        assert_eq!(default_literal("  spaced  ", "varchar(32)", Mysql, None), "'  spaced  '");
     }
 
     #[test]
@@ -7015,6 +7014,7 @@ mod tests {
         assert_eq!(default_literal("nextval('s'::regclass)", "integer", Postgres, None), "nextval('s'::regclass)");
         assert_eq!(default_literal("N'guest'", "nvarchar(50)", SqlServer, None), "N'guest'");
         assert_eq!(default_literal("('x')", "varchar(10)", SqlServer, None), "('x')");
+        assert_eq!(default_literal("NULL", "text", Postgres, None), "NULL");
         // The same bare token on MySQL is a string, which is why the rule has to
         // follow the source dialect rather than the value.
         assert_eq!(default_literal("CURRENT_USER", "text", DialectKind::Mysql, None), "'CURRENT_USER'");

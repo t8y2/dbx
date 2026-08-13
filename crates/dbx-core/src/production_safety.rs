@@ -638,6 +638,7 @@ mod tests {
 
     fn config() -> ConnectionConfig {
         ConnectionConfig {
+            docs_notes_path: None,
             id: "conn".to_string(),
             name: "test".to_string(),
             note: String::new(),
@@ -651,6 +652,7 @@ mod tests {
             username: "root".to_string(),
             password: String::new(),
             database: None,
+            default_schema: None,
             visible_databases: None,
             visible_schemas: None,
             show_system_schemas: false,
@@ -686,6 +688,7 @@ mod tests {
             informix_server: String::new(),
             external_config: None,
             one_time: false,
+            save_password: true,
             read_only: false,
             is_production: false,
             production_databases: vec!["prod_app".to_string()],

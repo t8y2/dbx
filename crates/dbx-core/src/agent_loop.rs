@@ -139,7 +139,7 @@ pub async fn run_agent_loop(
     let contract_system_prompt = augment_system_prompt_with_task_contract(system_prompt, task_contract, is_agent_mode);
     let system_prompt = contract_system_prompt.as_str();
 
-    if matches!(config.provider, AiProvider::CodexCli | AiProvider::ClaudeCodeCli | AiProvider::PiAgentCli) {
+    if crate::ai::is_cli_provider(&config.provider) {
         let connection_name = {
             let configs = agent_ctx.state.configs.read().await;
             configs
@@ -174,6 +174,43 @@ pub async fn run_agent_loop(
                 agent_ctx.sql_permissions.allow_writes,
             );
             return crate::ai_pi_agent_cli::run_pi_agent(config, &prompt, options, cancelled, on_event).await;
+        }
+        if matches!(config.provider, AiProvider::OpenCodeCli) {
+            let prompt = crate::ai_opencode_cli::build_opencode_prompt(
+                system_prompt,
+                messages,
+                agent_ctx.sql_permissions.allow_writes,
+            );
+            return crate::ai_opencode_cli::run_opencode_agent(config, &prompt, options, cancelled, on_event).await;
+        }
+        if matches!(config.provider, AiProvider::CursorCli) {
+            let prompt = crate::ai_cursor_cli::build_cursor_prompt(
+                system_prompt,
+                messages,
+                agent_ctx.sql_permissions.allow_writes,
+            );
+            return crate::ai_cursor_cli::run_cursor_agent(config, &prompt, options, cancelled, on_event).await;
+        }
+        if matches!(config.provider, AiProvider::GrokCli) {
+            let prompt =
+                crate::ai_grok_cli::build_grok_prompt(system_prompt, messages, agent_ctx.sql_permissions.allow_writes);
+            return crate::ai_grok_cli::run_grok_agent(config, &prompt, options, cancelled, on_event).await;
+        }
+        if matches!(config.provider, AiProvider::CodeBuddyCli) {
+            let prompt = crate::ai_codebuddy_cli::build_codebuddy_prompt(
+                system_prompt,
+                messages,
+                agent_ctx.sql_permissions.allow_writes,
+            );
+            return crate::ai_codebuddy_cli::run_codebuddy_agent(config, &prompt, options, cancelled, on_event).await;
+        }
+        if matches!(config.provider, AiProvider::QoderCli) {
+            let prompt = crate::ai_qoder_cli::build_qoder_prompt(
+                system_prompt,
+                messages,
+                agent_ctx.sql_permissions.allow_writes,
+            );
+            return crate::ai_qoder_cli::run_qoder_agent(config, &prompt, options, cancelled, on_event).await;
         }
         let prompt =
             crate::ai_codex_cli::build_codex_prompt(system_prompt, messages, agent_ctx.sql_permissions.allow_writes);
@@ -983,6 +1020,12 @@ fn context_window_for_model(model: &str) -> u32 {
     if m.contains("gpt-4.1") {
         return 1_000_000;
     }
+    if m.contains("minimax-m3") {
+        return 1_000_000;
+    }
+    if m.contains("minimax-m2") {
+        return 204_800;
+    }
     if m.contains("claude") || m.contains("o1") || m.starts_with("o3") || m.starts_with("o4") {
         200_000
     } else if m.contains("gpt-4") {
@@ -992,6 +1035,10 @@ fn context_window_for_model(model: &str) -> u32 {
     } else {
         128_000
     }
+}
+
+fn effective_context_window(config: &AiConfig) -> u32 {
+    config.context_window.unwrap_or_else(|| context_window_for_model(&config.model))
 }
 
 fn prompt_budget(window: u32, max_tokens: Option<u32>) -> u32 {
@@ -1024,7 +1071,7 @@ async fn maybe_compact(
     cancelled: &Notify,
     force: bool,
 ) -> CompactResult {
-    let window = config.context_window.unwrap_or_else(|| context_window_for_model(&config.model));
+    let window = effective_context_window(config);
     let budget = prompt_budget(window, max_tokens);
     let estimated_before = estimate_current_prompt_tokens(system_prompt, tools, messages);
 
@@ -1314,6 +1361,27 @@ mod tests {
         assert_eq!(clamp_max_agent_turns(DEFAULT_MAX_AGENT_TURNS), DEFAULT_MAX_AGENT_TURNS);
         assert_eq!(clamp_max_agent_turns(200), 200);
         assert_eq!(clamp_max_agent_turns(u32::MAX), MAX_MAX_AGENT_TURNS);
+    }
+
+    #[test]
+    fn minimax_context_windows_follow_official_model_families() {
+        assert_eq!(context_window_for_model("MiniMax-M3"), 1_000_000);
+        assert_eq!(context_window_for_model("vendor/MiniMax-M3.1"), 1_000_000);
+        assert_eq!(context_window_for_model("MiniMax-M2.7"), 204_800);
+        assert_eq!(context_window_for_model("MiniMax-M2.5-highspeed"), 204_800);
+        assert_eq!(context_window_for_model("MiniMax-future"), 128_000);
+    }
+
+    #[test]
+    fn explicit_context_window_overrides_minimax_family_default() {
+        let config: AiConfig = serde_json::from_value(serde_json::json!({
+            "provider": "minimax",
+            "model": "MiniMax-M3",
+            "contextWindow": 65_536
+        }))
+        .unwrap();
+
+        assert_eq!(effective_context_window(&config), 65_536);
     }
 
     #[test]

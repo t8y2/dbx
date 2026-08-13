@@ -178,6 +178,7 @@ mod tests {
 
     fn mongodb_config() -> ConnectionConfig {
         ConnectionConfig {
+            docs_notes_path: None,
             id: "mongo".to_string(),
             name: "MongoDB".to_string(),
             note: String::new(),
@@ -191,6 +192,7 @@ mod tests {
             username: "mongouser".to_string(),
             password: "secret".to_string(),
             database: Some("RestCloud_V45PUB_Gateway".to_string()),
+            default_schema: None,
             visible_databases: None,
             visible_schemas: None,
             show_system_schemas: false,
@@ -228,6 +230,7 @@ mod tests {
             jdbc_driver_class: None,
             jdbc_driver_paths: Vec::new(),
             one_time: false,
+            save_password: true,
             read_only: false,
             is_production: false,
             production_databases: vec![],
@@ -998,6 +1001,18 @@ async fn test_connection_with_info_inner(
                     .await
                     .map(|_| "Connection successful".to_string())
             }
+            DatabaseType::Meilisearch => {
+                let client = db::meilisearch_driver::MeilisearchClient::new(
+                    &url,
+                    Some(&config.password),
+                    config.ssl,
+                    config.url_params.as_deref(),
+                    connect_timeout,
+                )?;
+                db::meilisearch_driver::test_connection(&client, connect_timeout)
+                    .await
+                    .map(|_| "Connection successful".to_string())
+            }
             DatabaseType::Hbase => {
                 let client = db::hbase_driver::HBaseClient::new(
                     &url,
@@ -1089,6 +1104,27 @@ async fn test_connection_with_info_inner(
                 let adapter = state.nacos_registry.build_transient_config(admin_config).await?;
                 adapter.test_connection().await?;
                 Ok("Connection successful".to_string())
+            }
+            DatabaseType::Consul => {
+                let mut consul_config = dbx_core::consul::ConsulConfig::from_connection(&config)?;
+                let validate_agent_target = consul_config.agent_target.is_some();
+                let original_host = consul_config.base_url.host_str().unwrap_or_default();
+                let original_port = consul_config.base_url.port_or_known_default().unwrap_or(config.port);
+                if host != original_host || port != original_port {
+                    consul_config = consul_config.with_connect_override(&host, port);
+                }
+                let client = dbx_core::consul::ConsulClient::new(consul_config).await?;
+                client.probe().await?;
+                let identity = if validate_agent_target {
+                    Some(client.validate_configured_agent_target().await?)
+                } else {
+                    client.agent_self().await.ok()
+                };
+                Ok(identity
+                    .map(|identity| format!("Connection successful (Agent: {} at {})", identity.node, identity.address))
+                    .unwrap_or_else(|| {
+                        "Connection successful (Agent identity unavailable; Agent writes disabled)".to_string()
+                    }))
             }
             #[cfg(feature = "mq-admin")]
             DatabaseType::MessageQueue => {
@@ -1347,6 +1383,17 @@ pub async fn connect_db(
             db::easysearch_driver::test_connection(&mut client, connect_timeout).await?;
             PoolKind::Easysearch(client)
         }
+        DatabaseType::Meilisearch => {
+            let client = db::meilisearch_driver::MeilisearchClient::new(
+                &url,
+                Some(&db_config.password),
+                db_config.ssl,
+                db_config.url_params.as_deref(),
+                connect_timeout,
+            )?;
+            db::meilisearch_driver::test_connection(&client, connect_timeout).await?;
+            PoolKind::Meilisearch(client)
+        }
         DatabaseType::Hbase => {
             let client = db::hbase_driver::HBaseClient::new(
                 &url,
@@ -1432,6 +1479,17 @@ pub async fn connect_db(
             let adapter = state.nacos_registry.build_transient_config(admin_config).await?;
             adapter.test_connection().await?;
             PoolKind::Nacos
+        }
+        DatabaseType::Consul => {
+            let mut consul_config = dbx_core::consul::ConsulConfig::from_connection(&db_config)?;
+            let original_host = consul_config.base_url.host_str().unwrap_or_default();
+            let original_port = consul_config.base_url.port_or_known_default().unwrap_or(db_config.port);
+            if host != original_host || port != original_port {
+                consul_config = consul_config.with_connect_override(&host, port);
+            }
+            let client = dbx_core::consul::ConsulClient::new(consul_config).await?;
+            client.probe().await?;
+            PoolKind::Consul(client)
         }
         #[cfg(feature = "mq-admin")]
         DatabaseType::MessageQueue => {

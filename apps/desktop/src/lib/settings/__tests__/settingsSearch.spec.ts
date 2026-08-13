@@ -37,6 +37,11 @@ describe("settings search", () => {
     { id: "desktop", category: "about", titleKey: "hidden", visible: ({ isWeb }) => !isWeb },
   ];
 
+  it("does not index connection or query timeout under editor settings", () => {
+    expect(SETTINGS_SEARCH_DEFINITIONS.map((definition) => definition.id)).not.toContain("editor-global-connect-timeout");
+    expect(SETTINGS_SEARCH_DEFINITIONS.map((definition) => definition.id)).not.toContain("editor-global-query-timeout");
+  });
+
   it("matches translated title, description, and category without changing declared order", () => {
     const entries = resolveSettingsSearchEntries(definitions, { isWeb: false, visibleCategories: allCategories }, translate, categoryLabels);
     expect(searchSettings(entries, "TYPEFACE", "en").map((entry) => entry.id)).toEqual(["font"]);
@@ -131,12 +136,14 @@ describe("settings search", () => {
       { titleKey: "settings.savedSqlOpenTarget", category: "editor", targetId: "editor" },
       { titleKey: "settings.confirmDangerousSqlExecution", category: "editor", targetId: "editor" },
       { titleKey: "settings.continueOnErrorOnBatch", category: "editor", targetId: "editor" },
-      { titleKey: "settings.dataGridQuickEntry", category: "appearance", targetId: "appearance" },
+      { titleKey: "settings.dataGridQuickEntry", category: "data", targetId: "data" },
+      { titleKey: "settings.colorizeDataGridCellTypes", category: "data", targetId: "data" },
       { titleKey: "transfer.dataTransfer", category: "appearance", targetId: "appearance" },
       { titleKey: "toolbar.driverManager", category: "appearance", targetId: "appearance" },
       { titleKey: "toolbar.theme", category: "appearance", targetId: "appearance" },
       { titleKey: "settings.sidebarObjectInfoMode", category: "navigation", targetId: "navigation" },
       { titleKey: "settings.insertSpaceAfterCompletion", category: "editor", targetId: "editor" },
+      { titleKey: "settings.completionTriggerMode", category: "editor", targetId: "editor" },
       { titleKey: "settings.autoAliasTables", category: "editor", targetId: "editor" },
       { titleKey: "settings.clickTableNavigationTarget", category: "editor", targetId: "editor" },
       { titleKey: "settings.sqlFormatterKeywordCase", category: "formatter", targetId: "formatter" },
@@ -154,14 +161,15 @@ describe("settings search", () => {
       { titleKey: "settings.sqlFormatterParamTypes", category: "formatter", targetId: "formatter" },
       { titleKey: "settings.routineSourceOpenMode", category: "navigation", targetId: "navigation" },
       { titleKey: "settings.disconnectTabHandlingMode", category: "navigation", targetId: "navigation" },
-      { titleKey: "settings.compactColumnHeaderActions", category: "appearance", targetId: "appearance" },
-      { titleKey: "settings.infiniteScrollMaxRows", category: "appearance", targetId: "appearance" },
+      { titleKey: "settings.compactColumnHeaderActions", category: "data", targetId: "data" },
+      { titleKey: "settings.infiniteScroll", category: "data", targetId: "data" },
       { titleKey: "settings.globalDateTimeDisplayFormat", category: "data", targetId: "data" },
       { titleKey: "settings.globalDateTimeExportFormat", category: "data", targetId: "data" },
       { titleKey: "settings.globalDateTimeImportFormat", category: "data", targetId: "data" },
       { titleKey: "settings.exportRowLimitEnabled", category: "data", targetId: "data" },
       { titleKey: "settings.exportRowLimit", category: "data", targetId: "data" },
       { titleKey: "settings.queryExportKeysetOptimizationEnabled", category: "data", targetId: "data" },
+      { titleKey: "ai.defaultAiMode", category: "ai", targetId: "ai" },
       { titleKey: "ai.maxAgentTurns", category: "ai", targetId: "ai" },
       { titleKey: "ai.maxRetriesGlobal", category: "ai", targetId: "ai" },
       { titleKey: "ai.globalInstructions", category: "ai", targetId: "ai" },

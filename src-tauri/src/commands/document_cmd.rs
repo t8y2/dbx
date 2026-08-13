@@ -105,17 +105,30 @@ pub async fn document_insert_document(
     collection: String,
     doc_json: String,
     routing: Option<String>,
+    preserve_bson_types: Option<bool>,
 ) -> Result<String, String> {
     ensure_connection_writable(&state, &connection_id, "Insert").await?;
-    dbx_core::document_ops::insert_document_core(
-        &state,
-        &connection_id,
-        &database,
-        &collection,
-        &doc_json,
-        routing.as_deref(),
-    )
-    .await
+    if preserve_bson_types.unwrap_or(false) {
+        dbx_core::document_ops::insert_document_preserving_bson_types_core(
+            &state,
+            &connection_id,
+            &database,
+            &collection,
+            &doc_json,
+            routing.as_deref(),
+        )
+        .await
+    } else {
+        dbx_core::document_ops::insert_document_core(
+            &state,
+            &connection_id,
+            &database,
+            &collection,
+            &doc_json,
+            routing.as_deref(),
+        )
+        .await
+    }
 }
 
 #[tauri::command]
@@ -160,6 +173,27 @@ pub async fn document_delete_document(
         &id,
         routing.as_deref(),
         document_type.as_deref(),
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn document_save_meilisearch_batch(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    collection: String,
+    updates: Vec<dbx_core::db::meilisearch_driver::MeilisearchDocumentUpdate>,
+    delete_ids: Vec<String>,
+    inserts: Vec<String>,
+) -> Result<u64, String> {
+    ensure_connection_writable(&state, &connection_id, "Save").await?;
+    dbx_core::document_ops::save_meilisearch_document_batch_core(
+        &state,
+        &connection_id,
+        &collection,
+        &updates,
+        &delete_ids,
+        &inserts,
     )
     .await
 }

@@ -2,6 +2,7 @@
 
 import { createApp, defineComponent, h, nextTick, reactive } from "vue";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import i18n from "@/i18n";
 import SidebarTreeItemDialogs from "../SidebarTreeItemDialogs.vue";
 
 const mountedApps: ReturnType<typeof createApp>[] = [];
@@ -54,6 +55,7 @@ describe("SidebarTreeItemDialogs MongoDB index form", () => {
       }),
     );
     mountedApps.push(app);
+    app.use(i18n);
     app.mount(document.createElement("div"));
     await nextTick();
 

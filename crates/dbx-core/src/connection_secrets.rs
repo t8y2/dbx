@@ -824,6 +824,7 @@ mod tests {
 
     fn connection(id: &str, password: &str, _ssh_password: &str) -> ConnectionConfig {
         ConnectionConfig {
+            docs_notes_path: None,
             id: id.to_string(),
             name: format!("{id} connection"),
             note: String::new(),
@@ -837,6 +838,7 @@ mod tests {
             username: "postgres".to_string(),
             password: password.to_string(),
             database: Some("postgres".to_string()),
+            default_schema: None,
             visible_databases: None,
             visible_schemas: None,
             show_system_schemas: false,
@@ -872,6 +874,7 @@ mod tests {
             jdbc_driver_class: None,
             jdbc_driver_paths: Vec::new(),
             one_time: false,
+            save_password: true,
             read_only: false,
             is_production: false,
             production_databases: vec![],

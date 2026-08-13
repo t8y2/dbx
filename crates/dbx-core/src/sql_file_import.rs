@@ -1660,6 +1660,22 @@ mod tests {
     }
 
     #[test]
+    fn postgres_pg_dump_guards_are_removed_from_import_plan() {
+        let statements = split_sql_file_import_statements(
+            "-- PostgreSQL database dump\n\n\\restrict Guard123\n\nSET statement_timeout = 0;\nSELECT 1;\n\n-- PostgreSQL database dump complete\n\n\\unrestrict Guard123",
+            Some(DatabaseType::Postgres),
+        );
+        let planned = optimize_sql_file_import_statements(&statements, Some(DatabaseType::Postgres), None);
+
+        assert_eq!(planned.len(), 3);
+        assert_eq!(planned[0].kind, SqlFileImportStatementKind::Execute);
+        assert!(!planned[0].sql.contains("\\restrict"));
+        assert!(planned[0].sql.contains("SET statement_timeout = 0"));
+        assert_eq!(planned[1].sql, "SELECT 1");
+        assert_eq!(planned[2].kind, SqlFileImportStatementKind::Skip);
+    }
+
+    #[test]
     fn stop_on_error_returns_err_with_terminal_error_progress() {
         let decision = statement_error_decision(
             "exec-1",

@@ -4,12 +4,14 @@ import { describe, expect, it } from "vitest";
 const dataGridSource = readFileSync(new URL("../DataGrid.vue", import.meta.url), "utf8");
 
 describe("DataGrid transpose presentation", () => {
-  it("keeps field metadata in one compact row", () => {
-    expect(dataGridSource).toContain(':item-size="30"');
-    expect(dataGridSource).not.toContain("data-grid-transpose-field-info");
-    expect(dataGridSource).not.toContain("data-grid-transpose-comment-inline");
-    expect(dataGridSource).not.toContain("data-grid-transpose-comment-line");
-    expect(dataGridSource).not.toContain("data-grid-transpose-type-line");
+  it("renders field metadata and index indicator on separate lines in the pinned transpose column", () => {
+    expect(dataGridSource).toContain(':item-size="transposeRowHeight"');
+    expect(dataGridSource).toContain("data-grid-transpose-type-line");
+    expect(dataGridSource).toContain("data-grid-transpose-comment-line");
+    expect(dataGridSource).toContain("data-grid-transpose-index-indicator");
+    expect(dataGridSource).toContain("showColumnTypesInHeader && item.type");
+    expect(dataGridSource).toContain("showColumnCommentsInHeader && item.comment");
+    expect(dataGridSource).toContain("transposeColumnIndexKind(item.column)");
   });
 
   it("shows complete long metadata in a hoverable, bounded tooltip", () => {

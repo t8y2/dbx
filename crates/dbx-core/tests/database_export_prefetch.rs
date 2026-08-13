@@ -85,6 +85,7 @@ fn psql(container: &DockerPostgres, sql: &str) {
 
 fn postgres_test_config(id: &str, port: u16) -> ConnectionConfig {
     ConnectionConfig {
+        docs_notes_path: None,
         id: id.to_string(),
         name: id.to_string(),
         note: String::new(),
@@ -98,6 +99,7 @@ fn postgres_test_config(id: &str, port: u16) -> ConnectionConfig {
         username: "postgres".to_string(),
         password: "postgres".to_string(),
         database: Some("postgres".to_string()),
+        default_schema: None,
         visible_databases: None,
         visible_schemas: None,
         attached_databases: Vec::new(),
@@ -132,6 +134,7 @@ fn postgres_test_config(id: &str, port: u16) -> ConnectionConfig {
         jdbc_driver_class: None,
         jdbc_driver_paths: Vec::new(),
         one_time: false,
+        save_password: true,
         read_only: false,
         is_production: false,
         production_databases: vec![],

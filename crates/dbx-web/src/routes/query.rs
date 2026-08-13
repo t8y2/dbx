@@ -21,6 +21,9 @@ pub struct ExecuteQueryRequest {
     pub max_rows: Option<usize>,
     pub fetch_size: Option<usize>,
     pub page_size: Option<usize>,
+    pub max_result_bytes: Option<usize>,
+    #[serde(default)]
+    pub result_key_columns: Vec<String>,
     pub result_session_id: Option<String>,
     pub client_session_id: Option<String>,
     pub timeout_secs: Option<u64>,
@@ -252,6 +255,8 @@ pub struct BuildSingleColumnAlterSqlRequest {
 #[serde(rename_all = "camelCase")]
 pub struct PrepareDataGridSaveRequest {
     pub options: dbx_core::data_grid_sql::DataGridSaveStatementOptions,
+    #[serde(default)]
+    pub driver_profile: Option<String>,
 }
 
 #[derive(Deserialize, utoipa::ToSchema)]
@@ -355,6 +360,8 @@ pub async fn execute_query(
             max_rows: req.max_rows,
             fetch_size: req.fetch_size,
             page_size: req.page_size,
+            max_result_bytes: req.max_result_bytes,
+            result_key_columns: req.result_key_columns,
             catalog: req.catalog,
             result_session_id: req.result_session_id,
             client_session_id: req.client_session_id,
@@ -401,6 +408,8 @@ pub async fn execute_multi(
             max_rows: req.max_rows,
             fetch_size: req.fetch_size,
             page_size: req.page_size,
+            max_result_bytes: req.max_result_bytes,
+            result_key_columns: req.result_key_columns,
             catalog: req.catalog,
             result_session_id: req.result_session_id,
             client_session_id: req.client_session_id,
@@ -802,7 +811,7 @@ pub async fn analyze_editable_query_editability(
 pub async fn prepare_data_grid_save(
     Json(req): Json<PrepareDataGridSaveRequest>,
 ) -> Json<dbx_core::data_grid_sql::DataGridSavePreparation> {
-    Json(dbx_core::data_grid_sql::prepare_data_grid_save(req.options))
+    Json(dbx_core::data_grid_sql::prepare_data_grid_save_for_driver_profile(req.options, req.driver_profile.as_deref()))
 }
 
 #[utoipa::path(
@@ -1027,7 +1036,9 @@ mod tests {
                 session_id: None,
                 has_more: false,
                 elasticsearch_raw_body: None,
+                messages: Vec::new(),
             },
+            large_value_cells: Vec::new(),
             execution_error: true,
             statement_index: Some(1),
             error: Some(dbx_core::backend_error::BackendError::from_sql_detail(

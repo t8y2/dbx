@@ -1,14 +1,45 @@
-import type { ObjectSourceKind, TreeNode, TreeNodeType } from "@/types/database";
+import type { DatabaseType, ObjectSourceKind, TreeNode, TreeNodeType } from "@/types/database";
+import { customTypeCapabilities, supportsTypeObjectSource } from "@/lib/database/databaseObjectCapabilities";
 import { matchesShortcut, type ShortcutLikeEvent } from "@/lib/editor/keyboardShortcuts";
 
-export type TreeNodeRowAction = "open-data" | "open-source" | "toggle" | "none";
-export type TreeNodeRowDoubleClickAction = "open-data" | "activate-data" | "open-object-browser" | "open-object-browser-and-expand" | "open-source" | "open-saved-sql" | "toggle" | "none";
+export type TreeNodeRowAction = "open-data" | "open-source" | "open-extension-details" | "toggle" | "none";
+export type TreeNodeRowDoubleClickAction = "open-data" | "activate-data" | "open-database-browser" | "open-object-browser" | "open-object-browser-and-expand" | "open-source" | "open-extension-details" | "open-saved-sql" | "toggle" | "none";
 export type SidebarSelectionCopyAction = "copy-name" | "none";
 export type SidebarActivation = "single" | "double";
 
 const dataNodeTypes = new Set<TreeNodeType>(["table", "view", "materialized_view"]);
 const documentBrowserNodeTypes = new Set<TreeNodeType>(["mongo-collection", "mongo-bucket"]);
-const toggleLeafNodeTypes = new Set<TreeNodeType>(["redis-db", "mq-tenant", "etcd-root", "etcd-dashboard", "etcd-access-control", "zookeeper-root", "mongo-gridfs", "mongo-collection", "mongo-bucket", "vector-collection", "elasticsearch-index", "user-admin"]);
+const toggleLeafNodeTypes = new Set<TreeNodeType>([
+  "redis-db",
+  "mq-tenant",
+  "mqtt-topic",
+  "etcd-root",
+  "etcd-dashboard",
+  "etcd-access-control",
+  "zookeeper-root",
+  "consul-root",
+  "consul-overview",
+  "mongo-gridfs",
+  "mongo-collection",
+  "mongo-bucket",
+  "vector-collection",
+  "elasticsearch-index",
+  "user-admin",
+  "dameng-users",
+  "dameng-roles",
+]);
+// These are application entry points rather than database objects. They should
+// always navigate on a single click, even when the user prefers double-click
+// activation for ordinary tree objects.
+const directNavigationTreeNodeTypes = new Set<TreeNodeType>(["consul-root", "consul-overview"]);
+
+export function isDirectNavigationTreeNode(type: TreeNodeType): boolean {
+  return directNavigationTreeNodeTypes.has(type);
+}
+
+export function shouldActivateTreeNodeOnSingleClick(type: TreeNodeType, activation: SidebarActivation = "single"): boolean {
+  return activation !== "double" || isDirectNavigationTreeNode(type);
+}
 const objectBrowserNodeTypes = new Set<TreeNodeType>(["database", "schema", "object-browser"]);
 const sourceNodeTypes = new Set<TreeNodeType>(["materialized_view", "procedure", "function", "trigger", "sequence", "synonym", "package", "package-body", "type", "type-body"]);
 const savedSqlNodeTypes = new Set<TreeNodeType>(["saved-sql-file"]);
@@ -30,14 +61,55 @@ export function objectSourceKindForTreeNode(type: TreeNodeType): ObjectSourceKin
   return null;
 }
 
+export interface TreeNodeObjectSourceTarget {
+  name: string;
+  schema?: string;
+  objectType: ObjectSourceKind;
+  signature?: string;
+}
+
+export function objectSourceTargetForTreeNode(node: TreeNode): TreeNodeObjectSourceTarget | null {
+  if ((node.type === "procedure" || node.type === "function") && node.parentType === "package" && node.parentName) {
+    return {
+      name: node.parentName,
+      schema: node.parentSchema || node.schema,
+      objectType: "PACKAGE",
+      signature: node.signature,
+    };
+  }
+  const objectType = objectSourceKindForTreeNode(node.type);
+  if (!objectType) return null;
+  return {
+    name: node.objectName || node.label,
+    schema: node.schema,
+    objectType,
+    signature: node.signature,
+  };
+}
+
 export function isDocumentBrowserTreeNode(type: TreeNodeType): boolean {
   return documentBrowserNodeTypes.has(type);
 }
 
-export function treeNodeRowAction(type: TreeNodeType, canExpand: boolean, activation: SidebarActivation = "single"): TreeNodeRowAction {
-  if (activation === "double") return "none";
+/**
+ * Whether a tree node type may open an object source dialog for the given
+ * connection type. TYPE/TYPE_BODY only have a real source implementation on
+ * Xugu; other databases list types without a DDL getter this cycle.
+ */
+function canOpenTreeNodeSource(type: TreeNodeType, dbType?: DatabaseType): boolean {
+  if (type === "type" || type === "type-body") return supportsTypeObjectSource(dbType);
+  return true;
+}
+
+export function treeNodeRowAction(type: TreeNodeType, canExpand: boolean, activation: SidebarActivation = "single", dbType?: DatabaseType): TreeNodeRowAction {
+  if (!shouldActivateTreeNodeOnSingleClick(type, activation)) return "none";
+  if (type === "extension") return "open-extension-details";
   if (dataNodeTypes.has(type)) return "open-data";
-  if (sourceNodeTypes.has(type)) return "open-source";
+  // PostgreSQL-family custom types: open read-only details (toggle when expandable).
+  if (type === "type" && customTypeCapabilities(dbType).details) return canExpand ? "toggle" : "none";
+  // Xugu and other databases: expandable package/type nodes toggle their members.
+  if ((type === "package" || type === "type") && canExpand) return "toggle";
+  if (sourceNodeTypes.has(type) && canOpenTreeNodeSource(type, dbType)) return "open-source";
   if (toggleLeafNodeTypes.has(type)) return "toggle";
   if (canExpand) return "toggle";
   return "none";
@@ -50,13 +122,16 @@ export function shouldRunTreeNodeRowAction(action: TreeNodeRowAction, clickDetai
   return action !== "none" && clickDetail <= 1;
 }
 
-export function treeNodeRowDoubleClickAction(type: TreeNodeType, canOpenObjectBrowser: boolean, activation: SidebarActivation = "single", canExpand = false): TreeNodeRowDoubleClickAction {
+export function treeNodeRowDoubleClickAction(type: TreeNodeType, canOpenObjectBrowser: boolean, activation: SidebarActivation = "single", canExpand = false, dbType?: DatabaseType, canOpenDatabaseBrowser = false): TreeNodeRowDoubleClickAction {
   // Single-click activation already handles the first click in a dblclick
   // sequence. Only double-click activation needs a second-stage table action.
   if (type === "table") return activation === "double" ? "activate-data" : "none";
+  if (type === "connection" && canOpenDatabaseBrowser) return "open-database-browser";
   if (activation === "double") {
+    if (type === "extension") return "open-extension-details";
     if (dataNodeTypes.has(type)) return "open-data";
-    if (sourceNodeTypes.has(type)) return "open-source";
+    if (type === "type" && customTypeCapabilities(dbType).details) return canExpand ? "toggle" : "none";
+    if (sourceNodeTypes.has(type) && canOpenTreeNodeSource(type, dbType)) return "open-source";
     if (savedSqlNodeTypes.has(type)) return "open-saved-sql";
     if (toggleLeafNodeTypes.has(type)) return "toggle";
     if (canOpenObjectBrowser && objectBrowserNodeTypes.has(type) && canExpand) return "open-object-browser-and-expand";

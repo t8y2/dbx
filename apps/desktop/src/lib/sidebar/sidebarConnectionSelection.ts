@@ -24,6 +24,10 @@ export function selectedConnectionDuplicateTargets(currentNode: TreeNode, select
   return selectedConnectionActionTargets(currentNode, selectedNodes);
 }
 
+export function selectedConnectionDisconnectTargets(currentNode: TreeNode, selectedNodes: TreeNode[]): ConnectionTreeNode[] {
+  return selectedConnectionActionTargets(currentNode, selectedNodes);
+}
+
 export function selectedConnectionClipboardTargets(currentNode: TreeNode, selectedNodes: TreeNode[]): ConnectionTreeNode[] {
   return selectedConnectionActionTargets(currentNode, selectedNodes);
 }

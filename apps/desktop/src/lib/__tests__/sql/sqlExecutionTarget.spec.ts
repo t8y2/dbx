@@ -13,6 +13,12 @@ describe("resolveExecutableSql", () => {
 
     expect(resolveExecutableSql(sql, selectedSql, { mode: "current", cursorPos: cursorAfterFirstSemicolon })).toBe("select 2;");
   });
+
+  it("keeps a manually selected proxy directive unchanged", () => {
+    const selectedSql = "/*proxy*/\nSHOW PROXY STATUS";
+
+    expect(resolveExecutableSql("SELECT 1;", selectedSql, { mode: "current", cursorPos: 0 })).toBe(selectedSql);
+  });
 });
 
 describe("executionCandidateForMode", () => {
@@ -21,6 +27,13 @@ describe("executionCandidateForMode", () => {
 
     expect(executionCandidateForMode([all], "current")).toBeNull();
     expect(executionCandidateForMode([all], "all")).toBe(all);
+  });
+
+  it("falls back to all SQL only when blank-line execution is enabled", () => {
+    const all = candidate("all", ["all"]);
+
+    expect(executionCandidateForMode([all], "current", { executeAllOnBlankLine: false })).toBeNull();
+    expect(executionCandidateForMode([all], "current", { executeAllOnBlankLine: true })).toBe(all);
   });
 
   it("uses the deduplicated candidate when one statement is both current and all", () => {

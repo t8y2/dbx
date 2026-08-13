@@ -9,9 +9,41 @@ describe("extractSqlParameters", () => {
     expect(readSqlBracedParameterAt("#{month}", 0, { enabledSyntaxes: ["shell"] })).toBeNull();
   });
 
+  it("recognizes dotted braced parameter names as complete keys", () => {
+    expect(readSqlBracedParameterAt("${params.profile.name}", 0)).toMatchObject({
+      key: "params.profile.name",
+      name: "params.profile.name",
+      syntax: "shell",
+    });
+    expect(readSqlBracedParameterAt("#{ 参数.用户_2.名称 }", 0)).toMatchObject({
+      key: "参数.用户_2.名称",
+      name: "参数.用户_2.名称",
+      syntax: "mybatis",
+    });
+  });
+
+  it("rejects malformed dotted braced parameter names", () => {
+    for (const token of ["${.name}", "${params.}", "${params..name}", "${params.1name}", "${params[0]}"]) {
+      expect(readSqlBracedParameterAt(token, 0)).toBeNull();
+      expect(extractSqlParameters(`select ${token}`)).toEqual([]);
+    }
+  });
+
+  it("keeps colon and at-sign parameters single-segment", () => {
+    expect(extractSqlParameterDescriptors("select :params.name, @context.user")).toEqual([
+      { key: "params", name: "params", syntax: "named", token: ":params" },
+      { key: "context", name: "context", syntax: "sqlserver", token: "@context" },
+    ]);
+  });
+
   it("extracts unique template parameters in order", () => {
     const sql = "select * from t where pt_dt between ${start_date} and ${end_date} or pt_dt = ${start_date}";
     expect(extractSqlParameters(sql)).toEqual(["start_date", "end_date"]);
+  });
+
+  it("extracts dotted braced parameters in unquoted and quoted contexts", () => {
+    const sql = "select ${params.id}, #{params.profile.name}, '${params.label}', 'prefix#{params.code}'";
+    expect(extractSqlParameters(sql)).toEqual(["params.id", "params.profile.name", "params.label", "params.code"]);
   });
 
   it("extracts quoted braced placeholders while ignoring backticks and comments", () => {
@@ -41,6 +73,51 @@ describe("extractSqlParameters", () => {
   it("extracts supported placeholder syntaxes in order", () => {
     const sql = "select ? as a, :named as b, ${shell_name} as c, #{mybatis_name} as d, @sql_server_name as e";
     expect(extractSqlParameters(sql)).toEqual(["?1", "named", "shell_name", "mybatis_name", "sql_server_name"]);
+  });
+
+  it("preserves PostgreSQL JSON question-mark operators", () => {
+    const sql = `
+      select
+        c."CallResult",
+        c."CallResult" -> 'data' ? 'callingResults' as "HasResult",
+        c."CallResult" ?| array['data', 'error'] as "HasAnyResult",
+        c."CallResult" ?& array['data', 'callingResults'] as "HasAllResults",
+        c."CallResult" @? '$.data.callingResults' as "MatchesPath"
+      from "FaultResultCallInfo" as c
+    `;
+
+    expect(extractSqlParameters(sql, { databaseType: "postgres" })).toEqual([]);
+    expect(substituteSqlParameters(sql, {}, { databaseType: "postgres" })).toBe(sql);
+  });
+
+  it("keeps PostgreSQL positional placeholders around JSON operators", () => {
+    const sql = "select ? as input_value from events where id = ? and payload ? ? and payload ?| ? and payload ?& ? limit ?";
+
+    expect(extractSqlParameters(sql, { databaseType: "postgres" })).toEqual(["?1", "?2", "?3", "?4", "?5", "?6"]);
+    expect(
+      substituteSqlParameters(
+        sql,
+        {
+          "?1": { kind: "number", value: "1" },
+          "?2": { kind: "number", value: "2" },
+          "?3": { kind: "string", value: "callingResults" },
+          "?4": { kind: "raw", value: "ARRAY['data', 'error']" },
+          "?5": { kind: "raw", value: "ARRAY['data', 'callingResults']" },
+          "?6": { kind: "number", value: "100" },
+        },
+        { databaseType: "postgres" },
+      ),
+    ).toBe("select 1 as input_value from events where id = 2 and payload ? 'callingResults' and payload ?| ARRAY['data', 'error'] and payload ?& ARRAY['data', 'callingResults'] limit 100");
+  });
+
+  it("keeps ordinary PostgreSQL positional placeholder contexts", () => {
+    const sql = "select ?::jsonb, coalesce(?, '{}'::jsonb) from events where ? = id order by ? limit ? offset ?";
+
+    expect(extractSqlParameters(sql, { databaseType: "postgres" })).toEqual(["?1", "?2", "?3", "?4", "?5", "?6"]);
+  });
+
+  it("keeps question marks as positional placeholders for other databases", () => {
+    expect(extractSqlParameters("select payload ? 'callingResults' from events", { databaseType: "mysql" })).toEqual(["?1"]);
   });
 
   it("ignores npm scoped packages in JDBCX MCP command arguments", () => {
@@ -321,6 +398,30 @@ describe("extractSqlParameters", () => {
     expect(extractSqlParameters(sql, { databaseType: "duckdb" })).toEqual(["column", "nested_column", "later"]);
   });
 
+  it("ignores compact DuckDB prefix alias separators", () => {
+    const sql = 'select total:price * quantity, "order":sum(amount) from sales';
+
+    expect(extractSqlParameters(sql, { databaseType: "duckdb" })).toEqual([]);
+    expect(substituteSqlParameters(sql, {}, { databaseType: "duckdb" })).toBe(sql);
+    expect(extractSqlParameters(sql, { databaseType: "postgres" })).toEqual(["price", "sum"]);
+  });
+
+  it("keeps named parameters inside DuckDB prefix alias expressions", () => {
+    const sql = "from r:range(:row_count) select total:r.range + :offset";
+
+    expect(extractSqlParameters(sql, { databaseType: "duckdb" })).toEqual(["row_count", "offset"]);
+    expect(
+      substituteSqlParameters(
+        sql,
+        {
+          row_count: { kind: "number", value: "3" },
+          offset: { kind: "number", value: "10" },
+        },
+        { databaseType: "duckdb" },
+      ),
+    ).toBe("from r:range(3) select total:r.range + 10");
+  });
+
   it("ignores Doris VARIANT field type separators", () => {
     const sql = `
       create table \`events\` (
@@ -452,6 +553,148 @@ describe("Oracle and Dameng trigger pseudo-records", () => {
 });
 
 describe("substituteSqlParameters", () => {
+  it("substitutes dotted names by their complete key", () => {
+    const sql = "select ${params.id}, #{params.profile.name}, 'prefix${params.label}'";
+    expect(
+      substituteSqlParameters(sql, {
+        "params.id": { kind: "number", value: "7" },
+        "params.profile.name": { kind: "string", value: "Alice" },
+        "params.label": { kind: "string", value: "O'Reilly" },
+      }),
+    ).toBe("select 7, 'Alice', 'prefixO''Reilly'");
+  });
+
+  it("extracts a MyBatis foreach collection instead of its item placeholder", () => {
+    const sql = `select * from tasks where task_id in
+      <foreach collection="taskIds" item="taskId" open="(" separator="," close=")">
+        #{taskId}
+      </foreach>`;
+
+    expect(extractSqlParameterDescriptors(sql, { enabledSyntaxes: ["mybatis"] })).toEqual([{ key: "taskIds", name: "taskIds", syntax: "mybatis", token: "<foreach>", collection: true }]);
+  });
+
+  it("expands a MyBatis foreach JSON string collection with escaped SQL literals", () => {
+    const sql = `select * from tasks where task_id in
+      <foreach collection='taskIds' item='taskId' open='(' separator=',' close=')'>#{taskId}</foreach>`;
+
+    expect(substituteSqlParameters(sql, { taskIds: { kind: "string", value: `["A", "O'Reilly"]` } }, { databaseType: "oracle", enabledSyntaxes: ["mybatis"] })).toBe("select * from tasks where task_id in\n      ('A','O''Reilly')");
+  });
+
+  it("expands comma-separated MyBatis foreach values using the selected item type", () => {
+    const sql = 'select * from tasks where task_id in <foreach collection="taskIds" item="taskId" open="(" separator=", " close=")">#{taskId}</foreach>';
+
+    expect(substituteSqlParameters(sql, { taskIds: { kind: "number", value: "1, 2, 3" } }, { enabledSyntaxes: ["mybatis"] })).toBe("select * from tasks where task_id in (1, 2, 3)");
+  });
+
+  it("renders an empty MyBatis foreach collection as a safe legal IN list", () => {
+    const sql = 'select * from tasks where task_id in <foreach collection="taskIds" item="taskId" open="(" separator="," close=")">#{taskId}</foreach>';
+
+    expect(substituteSqlParameters(sql, { taskIds: { kind: "string", value: "[]" } }, { enabledSyntaxes: ["mybatis"] })).toBe("select * from tasks where task_id in (NULL)");
+    expect(substituteSqlParameters(sql, { taskIds: { kind: "string", value: "[1,2" } }, { enabledSyntaxes: ["mybatis"] })).toBe("select * from tasks where task_id in (NULL)");
+    expect(substituteSqlParameters(sql, { taskIds: { kind: "string", value: '[{"id":1}]' } }, { enabledSyntaxes: ["mybatis"] })).toBe("select * from tasks where task_id in (NULL)");
+  });
+
+  it("substitutes other placeholders inside each MyBatis foreach body", () => {
+    const sql = 'select * from task_pairs where (task_id, tenant_id) in <foreach collection="taskIds" item="taskId" open="(" separator="," close=")">(#{taskId}, #{tenantId})</foreach>';
+
+    expect(substituteSqlParameters(sql, { taskIds: { kind: "number", value: "[1,2]" }, tenantId: { kind: "number", value: "9" } }, { enabledSyntaxes: ["mybatis"] })).toBe("select * from task_pairs where (task_id, tenant_id) in ((1, 9),(2, 9))");
+    expect(extractSqlParameterDescriptors(sql, { enabledSyntaxes: ["mybatis"] })).toEqual([
+      { key: "taskIds", name: "taskIds", syntax: "mybatis", token: "<foreach>", collection: true },
+      { key: "tenantId", name: "tenantId", syntax: "mybatis", token: "#{tenantId}" },
+    ]);
+  });
+
+  it("uses the zero-based MyBatis foreach index without exposing it as a global parameter", () => {
+    const sql = 'select * from task_pairs where (position, task_id) in <foreach collection="taskIds" item="taskId" index="idx" open="(" separator="," close=")">(#{idx},#{taskId})</foreach>';
+
+    expect(extractSqlParameterDescriptors(sql, { enabledSyntaxes: ["mybatis"] })).toEqual([{ key: "taskIds", name: "taskIds", syntax: "mybatis", token: "<foreach>", collection: true }]);
+    expect(substituteSqlParameters(sql, { taskIds: { kind: "number", value: "[10,20]" }, idx: { kind: "number", value: "99" } }, { enabledSyntaxes: ["mybatis"] })).toBe("select * from task_pairs where (position, task_id) in ((0,10),(1,20))");
+  });
+
+  it("ignores foreach-like tags in SQL strings and comments when matching the closing tag", () => {
+    const sql = `select * from tasks where task_id in <foreach collection="taskIds" item="taskId" open="(" separator="," close=")">
+      #{taskId} /* </foreach> */ || '<foreach collection="fake" item="value">'
+      -- <foreach collection="fake" item="value">
+    </foreach>`;
+
+    expect(substituteSqlParameters(sql, { taskIds: { kind: "number", value: "[1,2]" } }, { enabledSyntaxes: ["mybatis"] })).toBe(`select * from tasks where task_id in (
+      1 /* </foreach> */ || '<foreach collection="fake" item="value">'
+      -- <foreach collection="fake" item="value">
+    ,
+      2 /* </foreach> */ || '<foreach collection="fake" item="value">'
+      -- <foreach collection="fake" item="value">
+    )`);
+  });
+
+  it("leaves MyBatis foreach tags untouched when MyBatis substitution is disabled", () => {
+    const sql = 'select * from tasks where task_id in <foreach collection="taskIds" item="taskId" open="(" separator="," close=")">#{taskId}</foreach>';
+
+    expect(extractSqlParameterDescriptors(sql, { enabledSyntaxes: ["shell"] })).toEqual([]);
+    expect(substituteSqlParameters(sql, {}, { enabledSyntaxes: ["shell"] })).toBe(sql);
+  });
+
+  it("decodes XML comparison entities when substituting MyBatis parameters", () => {
+    const sql = "select * from orders where created_at &gt;= #{start} and created_at &lt; #{end} and owner_id = #{owner_id} or reviewer_id = #{owner_id}";
+
+    expect(
+      substituteSqlParameters(
+        sql,
+        {
+          start: { kind: "string", value: "2026-01-01" },
+          end: { kind: "string", value: "2026-02-01" },
+          owner_id: { kind: "number", value: "7" },
+        },
+        { enabledSyntaxes: ["mybatis"] },
+      ),
+    ).toBe("select * from orders where created_at >= '2026-01-01' and created_at < '2026-02-01' and owner_id = 7 or reviewer_id = 7");
+  });
+
+  it("only decodes comparison entities in executable MyBatis SQL", () => {
+    const sql = "select '&amp;', '&quot;', '&apos;', '&amp;lt;', '&LT;', '&lt', '&lt;source&gt;', #{raw_value}, #{string_value} where score &gt; #{minimum} /* &lt;source-comment&gt; */";
+
+    expect(
+      substituteSqlParameters(
+        sql,
+        {
+          raw_value: { kind: "raw", value: "'&lt;raw&gt;'" },
+          string_value: { kind: "string", value: "&lt;string&gt;" },
+          minimum: { kind: "number", value: "10" },
+        },
+        { enabledSyntaxes: ["mybatis"] },
+      ),
+    ).toBe("select '&amp;', '&quot;', '&apos;', '&amp;lt;', '&LT;', '&lt', '&lt;source&gt;', '&lt;raw&gt;', '&lt;string&gt;' where score > 10 /* &lt;source-comment&gt; */");
+  });
+
+  it("preserves comparison entities in quoted identifiers, comments, and dollar-quoted strings", () => {
+    const sql = `select "a&lt;b", \`c&gt;d\`, [e&lt;f], $$g&gt;h$$, #{id}
+      where score &gt; 0 /* &lt;block&gt; */ -- &gt; line
+      and score &lt; 10`;
+
+    expect(substituteSqlParameters(sql, { id: { kind: "number", value: "7" } }, { enabledSyntaxes: ["mybatis"] })).toBe(`select "a&lt;b", \`c&gt;d\`, [e&lt;f], $$g&gt;h$$, 7
+      where score > 0 /* &lt;block&gt; */ -- &gt; line
+      and score < 10`);
+  });
+
+  it("does not decode XML entities without an enabled valid MyBatis replacement", () => {
+    const mybatisSql = "select * from orders where total &gt; #{minimum} and owner = ${owner}";
+    const shellSql = "select * from orders where total &lt; ${maximum}";
+    const invalidMybatisSql = "select * from orders where total &gt; #{1minimum} and owner = ${owner}";
+    const otherSyntaxSql = "select ?, :named, @sql_server_name where total &gt; 10";
+    const plainSql = "select '&lt;plain&gt;'";
+
+    expect(substituteSqlParameters(mybatisSql, { owner: { kind: "string", value: "alice" } }, { enabledSyntaxes: ["shell"] })).toBe("select * from orders where total &gt; #{minimum} and owner = 'alice'");
+    expect(substituteSqlParameters(shellSql, { maximum: { kind: "number", value: "10" } }, { enabledSyntaxes: ["shell"] })).toBe("select * from orders where total &lt; 10");
+    expect(substituteSqlParameters(invalidMybatisSql, { owner: { kind: "string", value: "alice" } })).toBe("select * from orders where total &gt; #{1minimum} and owner = 'alice'");
+    expect(
+      substituteSqlParameters(otherSyntaxSql, {
+        "?1": { kind: "number", value: "1" },
+        named: { kind: "number", value: "2" },
+        sql_server_name: { kind: "number", value: "3" },
+      }),
+    ).toBe("select 1, 2, 3 where total &gt; 10");
+    expect(substituteSqlParameters(plainSql, {})).toBe(plainSql);
+  });
+
   it("replaces placeholders with SQL literals", () => {
     const sql = "select * from t where dt >= ${start_date} and amount > ${amount} and enabled = ${enabled}";
     expect(

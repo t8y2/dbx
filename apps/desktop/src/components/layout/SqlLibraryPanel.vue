@@ -17,6 +17,7 @@ import { useQueryStore } from "@/stores/queryStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { focusSidebarRenameInput } from "@/lib/sidebar/sidebarRenameFocus";
 import { savedSqlFolderBranchFileCount } from "@/lib/savedSql/savedSqlFolderCounts";
+import { collectSavedSqlDirectoryImportFiles } from "@/lib/savedSql/savedSqlDirectoryImport";
 import { ensureSqlExtension, stripSqlExtension } from "@/lib/savedSql/savedSqlFileName";
 import { savedSqlExecutionTargetFromTab, type SavedSqlOpenTargetMode } from "@/lib/savedSql/savedSqlExecutionTarget";
 import type { SavedSqlFile, SavedSqlFolder } from "@/types/database";
@@ -74,14 +75,6 @@ function importConnectionIdForFolder(folder?: SavedSqlFolder) {
 
 function sanitizeFileSystemSegment(name: string) {
   return name.replace(/[<>:"/\\|?*\p{Cc}]/gu, "_").trim() || "untitled";
-}
-
-function relativeImportName(baseDir: string, filePath: string) {
-  const normalizedBase = baseDir.replace(/\\/g, "/").replace(/\/+$/, "");
-  const normalizedFile = filePath.replace(/\\/g, "/");
-  const relative = normalizedFile.startsWith(`${normalizedBase}/`) ? normalizedFile.slice(normalizedBase.length + 1) : normalizedFile.split("/").pop() || "import.sql";
-  const pretty = relative.replace(/\//g, " - ");
-  return ensureSqlExtension(pretty);
 }
 
 function uniqueImportedName(name: string, takenNames: Set<string>) {
@@ -201,10 +194,27 @@ async function exportFolderContents(folder?: SavedSqlFolder) {
   }
 }
 
-async function collectSqlFilesRecursively(dir: string): Promise<string[]> {
-  const collectPaths = (entries: Awaited<ReturnType<typeof api.listSqlFilesInFolder>>): string[] => entries.flatMap((entry) => (entry.is_dir ? collectPaths(entry.children) : [entry.path]));
+async function collectSqlFilesRecursively(dir: string) {
+  return collectSavedSqlDirectoryImportFiles(await api.listSqlFilesInFolder(dir));
+}
 
-  return collectPaths(await api.listSqlFilesInFolder(dir));
+function importedFolderCacheKey(parentFolderId: string | undefined, name: string) {
+  return JSON.stringify([parentFolderId || "", name]);
+}
+
+async function resolveImportedFolder(connectionId: string, rootFolderId: string | undefined, folderNames: string[], folderCache: Map<string, SavedSqlFolder>) {
+  let parentFolderId = rootFolderId;
+  for (const name of folderNames) {
+    const cacheKey = importedFolderCacheKey(parentFolderId, name);
+    let folder = folderCache.get(cacheKey);
+    if (!folder) {
+      folder = savedSqlStore.listChildFolders(connectionId, parentFolderId).find((candidate) => candidate.name === name);
+      if (!folder) folder = await savedSqlStore.createFolder(connectionId, name, parentFolderId);
+      folderCache.set(cacheKey, folder);
+    }
+    parentFolderId = folder.id;
+  }
+  return parentFolderId;
 }
 
 async function importDirectoryIntoLibrary(targetFolder?: SavedSqlFolder) {
@@ -229,27 +239,36 @@ async function importDirectoryIntoLibrary(targetFolder?: SavedSqlFolder) {
     });
     if (!selected || Array.isArray(selected)) return;
 
-    const sqlPaths = await collectSqlFilesRecursively(selected);
-    if (sqlPaths.length === 0) {
+    const importFiles = await collectSqlFilesRecursively(selected);
+    if (importFiles.length === 0) {
       toast(t("sqlLibrary.importNone"), 3000);
       return;
     }
 
-    const takenNames = new Set((targetFolder ? savedSqlStore.filesInFolder(targetFolder.id) : savedSqlStore.filesWithoutFolder()).map((file) => file.name));
+    const folderCache = new Map<string, SavedSqlFolder>();
+    const takenNamesByFolder = new Map<string, Set<string>>();
 
-    for (const path of sqlPaths) {
+    for (const file of importFiles) {
+      const folderId = await resolveImportedFolder(connectionId, targetFolder?.id, file.folderNames, folderCache);
+      const folderKey = folderId || "";
+      let takenNames = takenNamesByFolder.get(folderKey);
+      if (!takenNames) {
+        takenNames = new Set(savedSqlStore.listFiles(connectionId, folderId).map((savedFile) => savedFile.name));
+        takenNamesByFolder.set(folderKey, takenNames);
+      }
+      const path = file.path;
       const content = await api.readExternalSqlFile(path);
-      const displayName = uniqueImportedName(relativeImportName(selected, path), takenNames);
+      const displayName = uniqueImportedName(file.name, takenNames);
       await savedSqlStore.saveFile({
         connectionId,
-        folderId: targetFolder?.id,
+        folderId,
         name: displayName,
         database: "",
         sql: content,
       });
     }
 
-    toast(t("sqlLibrary.imported", { count: sqlPaths.length }), 2500);
+    toast(t("sqlLibrary.imported", { count: importFiles.length }), 2500);
   } catch (e: any) {
     toast(t("sqlLibrary.importFailed", { message: externalSqlFileOpenErrorMessage(e, (key, params) => t(key, params)) }), 5000);
   }
@@ -498,22 +517,21 @@ function isFolderActive(folderId: string): boolean {
   return activeItemType.value === "folder" && activeItemId.value === folderId;
 }
 
-function selectionRowClass(selected: boolean, active: boolean): string {
-  if (selected) return "bg-primary/10 text-foreground";
-  if (active) return "bg-primary/12 text-foreground";
-  return "hover:bg-accent";
+function selectionRowClass(selected: boolean, active: boolean, contextOpen: boolean): string {
+  if (selected || active || contextOpen) return "bg-accent text-accent-foreground";
+  return "hover:bg-accent/40";
 }
 
 function fileRowClass(fileId: string): string {
-  return selectionRowClass(isFileSelected(fileId), isFileActive(fileId));
+  return selectionRowClass(isFileSelected(fileId), isFileActive(fileId), isContextFile(fileId));
 }
 
 function folderRowClass(folderId: string): string {
-  return selectionRowClass(isFolderSelected(folderId), isFolderActive(folderId));
+  return selectionRowClass(isFolderSelected(folderId), isFolderActive(folderId), isContextFolder(folderId));
 }
 
 function fileMetaClass(fileId: string): string {
-  return isFileSelected(fileId) || isFileActive(fileId) ? "text-foreground/70" : "text-muted-foreground";
+  return isFileSelected(fileId) || isFileActive(fileId) || isContextFile(fileId) ? "text-accent-foreground" : "text-muted-foreground";
 }
 
 function isFileDirty(file: SavedSqlFile): boolean {
@@ -778,6 +796,14 @@ function handleFolderClick(folder: SavedSqlFolder, event: MouseEvent) {
 }
 
 const contextTarget = ref<SavedSqlFolder | SavedSqlFile | "panel" | null>(null);
+
+function isContextFile(fileId: string): boolean {
+  return contextTarget.value !== null && contextTarget.value !== "panel" && "sql" in contextTarget.value && contextTarget.value.id === fileId;
+}
+
+function isContextFolder(folderId: string): boolean {
+  return contextTarget.value !== null && contextTarget.value !== "panel" && !("sql" in contextTarget.value) && contextTarget.value.id === folderId;
+}
 
 function folderMoveMenuItems(fileIds: string[]): CtxMenuItem[] {
   const files = [...new Set(fileIds)].map((id) => savedSqlStore.getFile(id)).filter((file): file is SavedSqlFile => Boolean(file));
@@ -1179,7 +1205,7 @@ function showDropInside(targetId: string) {
               <div v-for="item in itemsByDate" :key="item.type + '-' + item.item.id">
                 <div
                   v-if="item.type === 'folder'"
-                  class="relative flex items-center gap-1 px-2 py-1.5 text-[13px] cursor-pointer group"
+                  class="relative flex cursor-default items-center gap-1 px-2 py-1.5 text-[13px] group"
                   :class="[folderRowClass(item.item.id), isDraggingItem(item.item.id) ? 'opacity-50' : '']"
                   @mousedown="handleDragMouseDown($event, item.item.id, 'folder')"
                   @click="handleFolderClick(item.item, $event)"
@@ -1223,7 +1249,7 @@ function showDropInside(targetId: string) {
 
                 <div
                   v-else
-                  class="relative flex items-center gap-1 px-2 py-1.5 text-[13px] cursor-pointer group"
+                  class="relative flex cursor-default items-center gap-1 px-2 py-1.5 text-[13px] group"
                   :class="[fileRowClass(item.item.id), isDraggingItem(item.item.id) ? 'opacity-50' : '']"
                   @mousedown="handleDragMouseDown($event, item.item.id, 'file')"
                   @click="handleFileClick(item.item, $event)"
@@ -1259,7 +1285,7 @@ function showDropInside(targetId: string) {
               <div v-for="row in visibleFolderRows" :key="row.type === 'folder' ? row.folder.id : row.file.id">
                 <div
                   v-if="row.type === 'folder'"
-                  class="relative flex items-center gap-1 py-1.5 pr-2 text-[13px] cursor-pointer group"
+                  class="relative flex cursor-default items-center gap-1 py-1.5 pr-2 text-[13px] group"
                   :style="{ paddingLeft: `${8 + row.depth * 16}px` }"
                   :class="[showDropInside(row.folder.id) ? 'ring-1 ring-primary/50 bg-primary/5' : folderRowClass(row.folder.id), isDraggingItem(row.folder.id) ? 'opacity-50' : '']"
                   @mousedown="handleDragMouseDown($event, row.folder.id, 'folder')"
@@ -1308,7 +1334,7 @@ function showDropInside(targetId: string) {
 
                 <div
                   v-else
-                  class="relative flex items-center gap-1 py-1.5 pr-2 text-[13px] cursor-pointer group"
+                  class="relative flex cursor-default items-center gap-1 py-1.5 pr-2 text-[13px] group"
                   :style="{ paddingLeft: `${8 + row.depth * 16}px` }"
                   :class="[fileRowClass(row.file.id), isDraggingItem(row.file.id) ? 'opacity-50' : '']"
                   @mousedown="handleDragMouseDown($event, row.file.id, 'file')"
@@ -1356,7 +1382,7 @@ function showDropInside(targetId: string) {
                 <div
                   v-for="file in visibleFiles"
                   :key="file.id"
-                  class="relative flex items-center gap-1 px-2 py-1.5 text-[13px] cursor-pointer group"
+                  class="relative flex cursor-default items-center gap-1 px-2 py-1.5 text-[13px] group"
                   :class="[fileRowClass(file.id), isDraggingItem(file.id) ? 'opacity-50' : '']"
                   @mousedown="handleDragMouseDown($event, file.id, 'file')"
                   @mousemove="updateDropTarget($event, file.id, 'file')"

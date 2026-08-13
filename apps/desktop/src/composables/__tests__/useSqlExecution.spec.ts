@@ -1,7 +1,7 @@
 import { computed, ref } from "vue";
 import { createPinia, setActivePinia } from "pinia";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { requiresDatabaseSelection, useSqlExecution } from "../useSqlExecution";
+import { isDangerousSql, requiresDatabaseSelection, supportsSqlTemplateParameters, useSqlExecution } from "../useSqlExecution";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useHistoryStore } from "@/stores/historyStore";
 import { useQueryStore } from "@/stores/queryStore";
@@ -112,6 +112,13 @@ describe("requiresDatabaseSelection", () => {
 
   it("allows PostgreSQL with default database (empty string) to execute queries", () => {
     expect(requiresDatabaseSelection(queryTab(""), connection("postgres"), "SELECT * FROM public.users")).toBe(false);
+  });
+});
+
+describe("supportsSqlTemplateParameters", () => {
+  it("disables SQL parameter prompts for Meilisearch input", () => {
+    expect(supportsSqlTemplateParameters(connection("meilisearch"), "GET /indexes/:uid")).toBe(false);
+    expect(supportsSqlTemplateParameters(connection("meilisearch"), "plain :value")).toBe(false);
   });
 });
 
@@ -262,6 +269,108 @@ SELECT @value AS Message;`;
 
     expect(activeOutputView.value).toBe("summary");
     expect(activeTab.value?.result?.rows).toEqual([["x"]]);
+  });
+
+  it("opens the messages view for a message-only result", async () => {
+    const sql = "DO $$ BEGIN RAISE NOTICE 'hello'; END $$;";
+    const activeTab = ref<QueryTab | undefined>({ ...queryTab("app"), sql });
+    const activeConnection = ref<ConnectionConfig | undefined>(connection("postgres"));
+    const activeOutputView = ref<"result" | "summary" | "explain" | "chart" | "messages">("result");
+    const queryStore = useQueryStore();
+    vi.spyOn(queryStore, "executeCurrentSql").mockImplementation(async () => {
+      if (activeTab.value) activeTab.value.result = { columns: [], rows: [], affected_rows: 0, execution_time_ms: 1, messages: [{ severity: "NOTICE", message: "hello", code: "00000" }] };
+    });
+    vi.spyOn(useHistoryStore(), "add").mockResolvedValue(undefined);
+
+    const execution = useSqlExecution({
+      activeTab: computed(() => activeTab.value),
+      activeConnection: computed(() => activeConnection.value),
+      executableSql: computed(() => sql),
+      activeOutputView,
+    });
+
+    await execution.tryExecute();
+
+    expect(activeOutputView.value).toBe("messages");
+  });
+
+  it("keeps the summary view for a MySQL INSERT that carries an INFO message", async () => {
+    const sql = "INSERT INTO users (name) VALUES ('a'), ('b')";
+    const activeTab = ref<QueryTab | undefined>({ ...queryTab("app"), sql });
+    const activeConnection = ref<ConnectionConfig | undefined>(connection("mysql"));
+    const activeOutputView = ref<"result" | "summary" | "explain" | "chart" | "messages">("result");
+    const queryStore = useQueryStore();
+    vi.spyOn(queryStore, "executeCurrentSql").mockImplementation(async () => {
+      if (activeTab.value) activeTab.value.result = { columns: [], rows: [], affected_rows: 2, execution_time_ms: 1, messages: [{ severity: "Note", message: "Records: 2  Duplicates: 0  Warnings: 0" }] };
+    });
+    vi.spyOn(useHistoryStore(), "add").mockResolvedValue(undefined);
+
+    const execution = useSqlExecution({
+      activeTab: computed(() => activeTab.value),
+      activeConnection: computed(() => activeConnection.value),
+      executableSql: computed(() => sql),
+      activeOutputView,
+    });
+
+    await execution.tryExecute();
+
+    expect(activeOutputView.value).toBe("summary");
+  });
+
+  it("keeps the summary view for a batch whose statements emit messages", async () => {
+    const sql = "DO $$ BEGIN RAISE NOTICE 'one'; END $$;\nDO $$ BEGIN RAISE NOTICE 'two'; END $$;";
+    const activeTab = ref<QueryTab | undefined>({ ...queryTab("app"), sql });
+    const activeConnection = ref<ConnectionConfig | undefined>(connection("postgres"));
+    const activeOutputView = ref<"result" | "summary" | "explain" | "chart" | "messages">("result");
+    const queryStore = useQueryStore();
+    vi.spyOn(queryStore, "executeCurrentSql").mockImplementation(async () => {
+      if (activeTab.value)
+        activeTab.value.result = {
+          columns: [],
+          rows: [],
+          affected_rows: 0,
+          execution_time_ms: 1,
+          messages: [
+            { severity: "NOTICE", message: "one" },
+            { severity: "NOTICE", message: "two" },
+          ],
+        };
+    });
+    vi.spyOn(useHistoryStore(), "add").mockResolvedValue(undefined);
+
+    const execution = useSqlExecution({
+      activeTab: computed(() => activeTab.value),
+      activeConnection: computed(() => activeConnection.value),
+      executableSql: computed(() => sql),
+      activeOutputView,
+    });
+
+    await execution.tryExecute();
+
+    expect(activeOutputView.value).toBe("summary");
+  });
+
+  it("keeps the result view when messages accompany a tabular result", async () => {
+    const sql = "SELECT 1";
+    const activeTab = ref<QueryTab | undefined>({ ...queryTab("app"), sql });
+    const activeConnection = ref<ConnectionConfig | undefined>(connection("postgres"));
+    const activeOutputView = ref<"result" | "summary" | "explain" | "chart" | "messages">("result");
+    const queryStore = useQueryStore();
+    vi.spyOn(queryStore, "executeCurrentSql").mockImplementation(async () => {
+      if (activeTab.value) activeTab.value.result = { columns: ["value"], rows: [[1]], affected_rows: 0, execution_time_ms: 1, messages: [{ severity: "NOTICE", message: "hello" }] };
+    });
+    vi.spyOn(useHistoryStore(), "add").mockResolvedValue(undefined);
+
+    const execution = useSqlExecution({
+      activeTab: computed(() => activeTab.value),
+      activeConnection: computed(() => activeConnection.value),
+      executableSql: computed(() => sql),
+      activeOutputView,
+    });
+
+    await execution.tryExecute();
+
+    expect(activeOutputView.value).toBe("result");
   });
 
   it("forwards execute-in-new-result-tab intent to the query store", async () => {
@@ -625,6 +734,30 @@ SELECT @value AS Message;`;
     expect(activeTab.value?.result).toEqual(result);
   });
 
+  it("uses the inferred Oracle dialect when explaining through custom JDBC", async () => {
+    const sql = "SELECT * FROM DUAL";
+    const activeTab = ref<QueryTab | undefined>({ ...queryTab("ORCL"), sql });
+    const activeConnection = ref<ConnectionConfig | undefined>({
+      ...connection("jdbc"),
+      connection_string: "jdbc:oracle:thin:@127.0.0.1:1521:ORCL",
+      jdbc_driver_class: "oracle.jdbc.OracleDriver",
+    });
+    const activeOutputView = ref<"result" | "summary" | "explain" | "chart">("result");
+    const queryStore = useQueryStore();
+    const explainTabSql = vi.spyOn(queryStore, "explainTabSql").mockResolvedValue({ ok: true, sql });
+
+    const execution = useSqlExecution({
+      activeTab: computed(() => activeTab.value),
+      activeConnection: computed(() => activeConnection.value),
+      executableSql: computed(() => sql),
+      activeOutputView,
+    });
+
+    await execution.tryExplain();
+
+    expect(explainTabSql).toHaveBeenCalledWith("tab-1", sql, "oracle", "explain");
+  });
+
   it("keeps the new-result-tab intent through Redis command confirmation", async () => {
     const sql = "DEL user:1";
     const activeTab = ref<QueryTab | undefined>({ ...queryTab("0"), sql });
@@ -652,6 +785,20 @@ SELECT @value AS Message;`;
     await execution.onDangerConfirm();
 
     expect(executeCurrentSql).toHaveBeenCalledWith(sql, { skipRedisSafetyCheck: false, openInNewResultTab: true });
+  });
+
+  it("distinguishes read-only and mutating Meilisearch REST requests", () => {
+    expect(isDangerousSql("GET /health", "meilisearch")).toBe(false);
+    expect(isDangerousSql('POST /indexes/movies/documents/fetch\n{"limit":10}', "meilisearch")).toBe(false);
+    expect(isDangerousSql('POST /indexes/movies/search\n{"q":"space"}', "meilisearch")).toBe(false);
+    expect(isDangerousSql('POST /indexes\n{"uid":"movies"}', "meilisearch")).toBe(true);
+    expect(isDangerousSql("PUT /indexes/movies/settings", "meilisearch")).toBe(true);
+    expect(isDangerousSql("DELETE /indexes/movies/documents/001", "meilisearch")).toBe(true);
+  });
+
+  it("treats Elasticsearch PATCH requests as mutating", () => {
+    expect(isDangerousSql('PATCH /products/_settings\n{"index":{"refresh_interval":"5s"}}', "elasticsearch")).toBe(true);
+    expect(isDangerousSql('PATCH /products/_settings\n{"index":{"refresh_interval":"5s"}}', "easysearch")).toBe(true);
   });
 
   it("requires production confirmation even when ordinary danger prompts are disabled", async () => {

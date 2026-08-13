@@ -30,6 +30,7 @@ export const DATABASE_NAMESPACE_CREATION_MATRIX = {
   oracle: { deferred: "Oracle schemas are users; database creation is not a normal connected DDL action" },
   elasticsearch: { deferred: "index creation is not modeled as database creation" },
   easysearch: { deferred: "index creation is not modeled as database creation" },
+  meilisearch: { deferred: "index creation is not modeled as database creation" },
   hbase: { deferred: "namespace creation needs dedicated HBase namespace options" },
   qdrant: { deferred: "collection creation is separate from database creation" },
   milvus: { deferred: "collection/database lifecycle needs a dedicated vector workflow" },
@@ -85,6 +86,7 @@ export const DATABASE_NAMESPACE_CREATION_MATRIX = {
   jdbc: { deferred: "generic JDBC does not expose a reliable dialect-specific create target" },
   mq: { deferred: "message queue namespaces are handled by MQ admin panels" },
   nacos: { deferred: "Nacos namespace creation already uses the Nacos admin flow" },
+  consul: { deferred: "Consul namespaces and partitions are connection scopes, not KV resources" },
   mqtt: { deferred: "MQTT topics are managed via the MQTT console" },
 } satisfies Record<DatabaseType, DatabaseNamespaceCreationMatrixEntry>;
 

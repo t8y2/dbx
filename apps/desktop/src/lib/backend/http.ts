@@ -14,6 +14,7 @@ import type {
   CompletionAssistantRequest,
   CompletionAssistantResponse,
   ObjectStatistics,
+  CustomTypeDetails,
   ObjectSource,
   ObjectSourceKind,
   ColumnInfo,
@@ -99,6 +100,7 @@ import type {
   DocumentQueryResult,
   MongoDocumentResult,
   MongoCollectionStatsResult,
+  MongoCloneCollectionResult,
   MongoDropIndexesResult,
   MongoIndexSpec,
   MongoGridFsBucketInfo,
@@ -184,8 +186,10 @@ import type {
   NacosConnectionInfo,
   NacosRNacosConsoleCaptcha,
   NacosInstanceInfo,
+  NacosInstanceRef,
+  NacosInstanceRegistration,
   NacosInstanceQuery,
-  NacosInstanceUpdate,
+  NacosInstanceUpdateRequest,
   NacosDashboardQuery,
   NacosDashboardSnapshot,
   NacosNamespaceCreate,
@@ -194,11 +198,14 @@ import type {
   NacosRawRequest,
   NacosRawResponse,
   NacosServiceList,
+  NacosServiceDetail,
   NacosServiceQuery,
+  NacosServiceUpsert,
   NacosSearchProgress,
 } from "@/types/nacos";
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
 import { normalizeConnectionTestResult } from "@/lib/connection/connectionDatabaseInfo";
+import type { AnnotationFile, SchemaSnapshot } from "@/docs/types";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -642,6 +649,10 @@ export async function listDatabases(connectionId: string): Promise<DatabaseInfo[
   return get(`/api/schema/databases?${qs({ connection_id: connectionId })}`);
 }
 
+export async function listDatabaseMetadata(connectionId: string): Promise<DatabaseInfo[]> {
+  return get(`/api/schema/database-metadata?${qs({ connection_id: connectionId })}`);
+}
+
 export async function listDatabaseStorage(connectionId: string, databases: string[]): Promise<DatabaseStorageInfo[]> {
   return post("/api/schema/database-storage", {
     connection_id: connectionId,
@@ -735,6 +746,10 @@ export async function completionAssistantSearch(request: CompletionAssistantRequ
 
 export async function getObjectSource(connectionId: string, database: string, schema: string, name: string, objectType: ObjectSourceKind, signature?: string, relationName?: string): Promise<ObjectSource> {
   return get(`/api/schema/object-source?${qs({ connection_id: connectionId, database, schema, table: name, object_type: objectType, signature, relation_name: relationName })}`);
+}
+
+export async function getCustomTypeDetails(connectionId: string, database: string, schema: string, name: string): Promise<CustomTypeDetails> {
+  return get(`/api/schema/custom-type-details?${qs({ connection_id: connectionId, database, schema, table: name })}`);
 }
 
 export async function getColumns(connectionId: string, database: string, schema: string, table: string, catalog?: string, clientSessionId?: string): Promise<ColumnInfo[]> {
@@ -837,6 +852,41 @@ export async function listDialectDataTypes(dialectName: string): Promise<string[
 }
 
 // ---------------------------------------------------------------------------
+// Docs
+// ---------------------------------------------------------------------------
+
+export async function collectDocsSnapshot(connectionId: string, database: string, schemas: string[], tables: string[], projectName?: string): Promise<SchemaSnapshot> {
+  return post("/api/docs/snapshot", { connectionId, database, schemas, tables, projectName });
+}
+
+export async function loadDocsAnnotations(connectionId: string): Promise<AnnotationFile | null> {
+  return post("/api/docs/annotations/load", { connectionId });
+}
+
+export async function applyDocsAnnotations(connectionId: string, snapshot: SchemaSnapshot, annotations: AnnotationFile): Promise<SchemaSnapshot> {
+  return post("/api/docs/annotations/apply", { connectionId, snapshot, annotations });
+}
+
+export async function saveDocsAnnotations(connectionId: string, annotations: AnnotationFile): Promise<void> {
+  return post("/api/docs/annotations/save", { connectionId, annotations });
+}
+
+export async function exportDocsHtml(filePath: string, snapshot: SchemaSnapshot, annotations: AnnotationFile, lang: string): Promise<void> {
+  const result = await post<{ content: string }>("/api/docs/export", { snapshot, annotations, lang });
+  // No `downloadTextFile` here: it prepends a BOM, which the Tauri command's
+  // `std::fs::write(&file_path, html)` does not. The two callers must produce
+  // byte-identical output for the same inputs.
+  const fileName = filePath.split(/[\\/]/).pop() || "docs.html";
+  const blob = new Blob([result.content], { type: "text/html;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = fileName;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+// ---------------------------------------------------------------------------
 // Query
 // ---------------------------------------------------------------------------
 
@@ -878,6 +928,8 @@ export async function executeMulti(
     catalog?: string;
     fetchSize?: number;
     pageSize?: number;
+    maxResultBytes?: number;
+    resultKeyColumns?: string[];
     resultSessionId?: string;
     clientSessionId?: string;
     timeoutSecs?: number;
@@ -918,6 +970,8 @@ export async function executeMultiWithProgress(
     catalog?: string;
     fetchSize?: number;
     pageSize?: number;
+    maxResultBytes?: number;
+    resultKeyColumns?: string[];
     resultSessionId?: string;
     clientSessionId?: string;
     timeoutSecs?: number;
@@ -1206,8 +1260,8 @@ export async function analyzeEditableQueryEditability(sql: string): Promise<Quer
   return post("/api/query/analyze-editability", { sql });
 }
 
-export async function prepareDataGridSave(options: DataGridSaveStatementOptions): Promise<DataGridSavePreparation> {
-  return post("/api/query/prepare-data-grid-save", { options });
+export async function prepareDataGridSave(options: DataGridSaveStatementOptions, driverProfile?: string): Promise<DataGridSavePreparation> {
+  return post("/api/query/prepare-data-grid-save", { options, driverProfile });
 }
 
 export async function extractDataGridSelection(request: DataGridExtractRequest): Promise<DataGridExtractResult> {
@@ -1861,11 +1915,19 @@ export async function readExternalSqlFile(_path: string): Promise<string> {
   throw new Error("Opening external SQL file paths is only available in the desktop app");
 }
 
-export async function writeExternalSqlFile(_path: string, _content: string): Promise<void> {
+export async function readExternalSqlFileSnapshot(_path: string): Promise<import("@/lib/backend/tauri").ExternalSqlFileSnapshot> {
+  throw new Error("Opening external SQL file paths is only available in the desktop app");
+}
+
+export async function inspectExternalSqlFile(_path: string): Promise<import("@/lib/backend/tauri").ExternalSqlFileStatus> {
+  throw new Error("Inspecting external SQL file paths is only available in the desktop app");
+}
+
+export async function writeExternalSqlFile(_path: string, _content: string, _options: { expectedContentHash?: string; expectedMissing?: boolean } = {}): Promise<import("@/lib/backend/tauri").ExternalSqlFileWriteResult> {
   throw new Error("Saving external SQL file paths is only available in the desktop app");
 }
 
-export async function saveExternalSqlFile(_defaultFileName: string, _content: string): Promise<string | null> {
+export async function saveExternalSqlFile(_defaultFileName: string, _content: string): Promise<{ path: string; version: import("@/types/database").ExternalSqlFileVersion } | null> {
   throw new Error("Saving SQL files locally is only available in the desktop app");
 }
 
@@ -2376,6 +2438,14 @@ export async function redisHashDel(connectionId: string, db: number, keyRaw: str
   return post("/api/redis/hash-del", { connectionId, db, keyRaw, field });
 }
 
+export async function redisHashFieldSetTtl(connectionId: string, db: number, keyRaw: string, field: string, ttl: number): Promise<void> {
+  return post("/api/redis/hash-field-set-ttl", { connectionId, db, keyRaw, field, ttl });
+}
+
+export async function redisHashFieldSetExpireAt(connectionId: string, db: number, keyRaw: string, field: string, expireAt: number): Promise<void> {
+  return post("/api/redis/hash-field-set-expire-at", { connectionId, db, keyRaw, field, expireAt });
+}
+
 export async function redisListPush(connectionId: string, db: number, keyRaw: string, value: string, ttl?: number): Promise<void> {
   return post("/api/redis/list-push", { connectionId, db, keyRaw, value, ttl });
 }
@@ -2651,6 +2721,355 @@ export async function zookeeperDelete(connectionId: string, key: string): Promis
 }
 
 // ---------------------------------------------------------------------------
+// Consul
+// ---------------------------------------------------------------------------
+
+export async function consulCapabilities(connectionId: string): Promise<import("@/types/consul").ConsulCapabilities> {
+  return post("/api/consul/capabilities", { connectionId });
+}
+
+export async function consulTxn(connectionId: string, request: import("@/types/consul").ConsulTxnRequest): Promise<import("@/types/consul").ConsulTxnResult> {
+  return post("/api/consul/txn", { connectionId, request });
+}
+
+export async function consulRenameKey(connectionId: string, source: string, target: string, expectedModifyIndex: KvInt64, copy = false): Promise<import("@/types/consul").ConsulTxnResult> {
+  return post("/api/consul/rename-key", { connectionId, source, target, expectedModifyIndex, copy });
+}
+
+export async function consulBlockingQuery(connectionId: string, request: import("@/types/consul").ConsulBlockingRequest): Promise<import("@/types/consul").ConsulBlockingResponse> {
+  return post("/api/consul/blocking-query", { connectionId, request });
+}
+
+export function consulDomainWatch(connectionId: string, request: import("@/types/consul").ConsulDomainWatchRequest & { target: { kind: "catalogServices" } }): Promise<import("@/types/consul").ConsulDomainWatchResponse<Record<string, string[]>>>;
+export function consulDomainWatch(connectionId: string, request: import("@/types/consul").ConsulDomainWatchRequest & { target: { kind: "catalogNodes" } }): Promise<import("@/types/consul").ConsulDomainWatchResponse<import("@/types/consul").ConsulCatalogNode[]>>;
+export function consulDomainWatch(connectionId: string, request: import("@/types/consul").ConsulDomainWatchRequest & { target: { kind: "catalogServiceNodes"; service: string } }): Promise<import("@/types/consul").ConsulDomainWatchResponse<import("@/types/consul").ConsulCatalogServiceNode[]>>;
+export function consulDomainWatch(connectionId: string, request: import("@/types/consul").ConsulDomainWatchRequest & { target: { kind: "catalogNodeServices"; node: string } }): Promise<import("@/types/consul").ConsulDomainWatchResponse<import("@/types/consul").ConsulNodeServices>>;
+export function consulDomainWatch(connectionId: string, request: import("@/types/consul").ConsulDomainWatchRequest & { target: { kind: "healthNode"; node: string } }): Promise<import("@/types/consul").ConsulDomainWatchResponse<import("@/types/consul").ConsulHealthCheck[]>>;
+export function consulDomainWatch(connectionId: string, request: import("@/types/consul").ConsulDomainWatchRequest & { target: { kind: "healthServiceChecks"; service: string } }): Promise<import("@/types/consul").ConsulDomainWatchResponse<import("@/types/consul").ConsulHealthCheck[]>>;
+export function consulDomainWatch(
+  connectionId: string,
+  request: import("@/types/consul").ConsulDomainWatchRequest & { target: { kind: "healthServiceInstances"; service: string; passing: boolean | null } },
+): Promise<import("@/types/consul").ConsulDomainWatchResponse<import("@/types/consul").ConsulServiceInstance[]>>;
+export function consulDomainWatch(connectionId: string, request: import("@/types/consul").ConsulDomainWatchRequest & { target: { kind: "healthState"; state: string } }): Promise<import("@/types/consul").ConsulDomainWatchResponse<import("@/types/consul").ConsulHealthCheck[]>>;
+export function consulDomainWatch(connectionId: string, request: import("@/types/consul").ConsulDomainWatchRequest): Promise<import("@/types/consul").ConsulDomainWatchResponse<import("@/types/consul").ConsulDomainWatchItems>>;
+export async function consulDomainWatch(connectionId: string, request: import("@/types/consul").ConsulDomainWatchRequest): Promise<import("@/types/consul").ConsulDomainWatchResponse<import("@/types/consul").ConsulDomainWatchItems>> {
+  return post("/api/consul/domain-watch", { connectionId, request });
+}
+
+export async function consulCancelBlocking(connectionId: string, scope: import("@/types/consul").ConsulScope, generation: number, operationId: string): Promise<boolean> {
+  return post("/api/consul/cancel-blocking", { connectionId, scope, generation, operationId });
+}
+
+export async function consulWatchStart(connectionId: string, request: import("@/types/consul").ConsulBlockingRequest): Promise<string> {
+  await consulBlockingQuery(connectionId, request);
+  return request.operationId;
+}
+
+export async function consulListRecursive(connectionId: string, prefix: string, maxEntries = 10_000, maxValueBytes = 32 * 1024 * 1024): Promise<import("@/types/consul").ConsulRecursiveListResponse> {
+  return post("/api/consul/list-recursive", { connectionId, prefix, maxEntries, maxValueBytes });
+}
+
+export async function consulSearch(connectionId: string, request: import("@/types/consul").ConsulSearchRequest): Promise<import("@/types/consul").ConsulSearchResponse> {
+  return post("/api/consul/search", { connectionId, request });
+}
+
+export async function consulSearchProgress(connectionId: string, requestId: string, scope: import("@/types/consul").ConsulScope, generation: number): Promise<import("@/types/consul").ConsulSearchProgress> {
+  return post("/api/consul/search-progress", { connectionId, requestId, scope, generation });
+}
+
+export async function consulCancelSearch(connectionId: string, requestId: string, scope: import("@/types/consul").ConsulScope, generation: number): Promise<boolean> {
+  return post("/api/consul/cancel-search", { connectionId, requestId, scope, generation });
+}
+
+export async function consulExportBundle(connectionId: string, request: import("@/types/consul").ConsulExportRequest): Promise<import("@/types/consul").ConsulKvBundle> {
+  return post("/api/consul/export-bundle", { connectionId, request });
+}
+
+export async function consulImportPreview(connectionId: string, request: import("@/types/consul").ConsulImportRequest): Promise<import("@/types/consul").ConsulImportPreview> {
+  return post("/api/consul/import-preview", { connectionId, request });
+}
+
+export async function consulImportExecute(connectionId: string, request: import("@/types/consul").ConsulImportRequest): Promise<import("@/types/consul").ConsulImportReport> {
+  return post("/api/consul/import-execute", { connectionId, request });
+}
+
+export async function consulDeletePrefixPreview(connectionId: string, prefix: string): Promise<import("@/types/consul").ConsulDeletePrefixPreview> {
+  return post("/api/consul/delete-prefix-preview", { connectionId, prefix });
+}
+
+export async function consulDeletePrefixExecute(connectionId: string, request: import("@/types/consul").ConsulDeletePrefixRequest): Promise<import("@/types/consul").ConsulDeletePrefixReport> {
+  return post("/api/consul/delete-prefix-execute", { connectionId, request });
+}
+
+export async function consulListPrefix(connectionId: string, prefix: string, limit: number, continuation?: string | null): Promise<KvListPrefixResponse> {
+  return post("/api/consul/list-prefix", { connectionId, prefix, limit, continuation: continuation ?? null });
+}
+
+export async function consulGet(connectionId: string, key: string): Promise<KvGetResponse> {
+  return post("/api/consul/get", { connectionId, key });
+}
+
+export async function consulPut(connectionId: string, key: string, value: KvValue, options?: KvPutOptions | null): Promise<KvPutResponse> {
+  return post("/api/consul/put", { connectionId, key, value, options: options ?? null });
+}
+
+export async function consulDelete(connectionId: string, key: string, options?: KvDeleteOptions | null): Promise<KvDeleteResponse> {
+  return post("/api/consul/delete", { connectionId, key, options: options ?? null });
+}
+
+export async function consulPreparedQueryList(connectionId: string): Promise<import("@/types/consul").ConsulPreparedQuery[]> {
+  return post("/api/consul/prepared-query/list", { connectionId });
+}
+export async function consulPreparedQueryRead(connectionId: string, id: string): Promise<import("@/types/consul").ConsulPreparedQuery> {
+  return post("/api/consul/prepared-query/read", { connectionId, id });
+}
+export async function consulPreparedQueryCreate(connectionId: string, input: import("@/types/consul").ConsulPreparedQueryInput): Promise<string> {
+  return post("/api/consul/prepared-query/create", { connectionId, input });
+}
+export async function consulPreparedQueryUpdate(connectionId: string, id: string, input: import("@/types/consul").ConsulPreparedQueryInput): Promise<void> {
+  await post("/api/consul/prepared-query/update", { connectionId, id, input });
+}
+export async function consulPreparedQueryDelete(connectionId: string, id: string): Promise<void> {
+  await post("/api/consul/prepared-query/delete", { connectionId, id });
+}
+export async function consulPreparedQueryExecute(connectionId: string, request: import("@/types/consul").ConsulPreparedQueryExecuteRequest): Promise<import("@/types/consul").ConsulPreparedQueryExecuteResponse> {
+  return post("/api/consul/prepared-query/execute", { connectionId, request });
+}
+export async function consulPreparedQueryExplain(connectionId: string, query: string): Promise<unknown> {
+  return post("/api/consul/prepared-query/explain", { connectionId, id: query });
+}
+export async function consulEventList(connectionId: string, name?: string | null): Promise<import("@/types/consul").ConsulEvent[]> {
+  return post("/api/consul/event/list", { connectionId, name: name ?? null });
+}
+export async function consulEventFire(connectionId: string, request: import("@/types/consul").ConsulEventFireRequest): Promise<import("@/types/consul").ConsulEvent> {
+  return post("/api/consul/event/fire", { connectionId, request });
+}
+export async function consulCoordinateNodes(connectionId: string): Promise<import("@/types/consul").ConsulCoordinate[]> {
+  return post("/api/consul/coordinate/nodes", { connectionId });
+}
+export async function consulOperatorRead(connectionId: string, kind: import("@/types/consul").ConsulOperatorReadKind): Promise<import("@/types/consul").ConsulOperatorDocument> {
+  return post("/api/consul/operator/read", { connectionId, kind });
+}
+export async function consulSnapshotGenerate(connectionId: string): Promise<import("@/types/consul").ConsulSnapshot> {
+  return post("/api/consul/operator/snapshot/generate", { connectionId });
+}
+export async function consulSnapshotRestore(connectionId: string, request: import("@/types/consul").ConsulSnapshotRestoreRequest): Promise<void> {
+  await post("/api/consul/operator/snapshot/restore", { connectionId, request });
+}
+export async function consulAutopilotUpdate(connectionId: string, update: import("@/types/consul").ConsulAutopilotUpdate, confirmation: string): Promise<void> {
+  await post("/api/consul/operator/autopilot/update", { connectionId, update, confirmation });
+}
+export async function consulRaftTransfer(connectionId: string, request: import("@/types/consul").ConsulRaftWriteRequest): Promise<void> {
+  await post("/api/consul/operator/raft/transfer", { connectionId, request });
+}
+export async function consulRaftRemove(connectionId: string, request: import("@/types/consul").ConsulRaftWriteRequest): Promise<void> {
+  await post("/api/consul/operator/raft/remove", { connectionId, request });
+}
+export async function consulKeyringWrite(connectionId: string, request: import("@/types/consul").ConsulKeyringWriteRequest): Promise<void> {
+  await post("/api/consul/operator/keyring/write", { connectionId, request });
+}
+export async function consulLicenseWrite(connectionId: string, request: import("@/types/consul").ConsulLicenseWriteRequest): Promise<void> {
+  await post("/api/consul/operator/license/write", { connectionId, request });
+}
+
+export async function consulStatusLeader(connectionId: string): Promise<string> {
+  return post("/api/consul/status/leader", { connectionId });
+}
+export async function consulStatusPeers(connectionId: string): Promise<string[]> {
+  return post("/api/consul/status/peers", { connectionId });
+}
+export async function consulAgentSelf(connectionId: string): Promise<import("@/types/consul").ConsulAgentIdentity> {
+  return post("/api/consul/agent/self", { connectionId });
+}
+export async function consulAgentMembers(connectionId: string, wan = false, segment?: string | null): Promise<import("@/types/consul").ConsulAgentMember[]> {
+  return post("/api/consul/agent/members", { connectionId, wan, segment: segment ?? null });
+}
+export async function consulAgentMetrics(connectionId: string): Promise<unknown> {
+  return post("/api/consul/agent/metrics", { connectionId });
+}
+export async function consulCatalogDatacenters(connectionId: string): Promise<string[]> {
+  return post("/api/consul/catalog/datacenters", { connectionId });
+}
+export async function consulCatalogNodes(connectionId: string, options: import("@/types/consul").ConsulReadOptions = {}): Promise<import("@/types/consul").ConsulListResponse<import("@/types/consul").ConsulCatalogNode[]>> {
+  return post("/api/consul/catalog/nodes", { connectionId, options });
+}
+export async function consulCatalogServices(connectionId: string, options: import("@/types/consul").ConsulReadOptions = {}): Promise<import("@/types/consul").ConsulListResponse<Record<string, string[]>>> {
+  return post("/api/consul/catalog/services", { connectionId, options });
+}
+export async function consulCatalogServiceNodes(connectionId: string, service: string, options: import("@/types/consul").ConsulReadOptions = {}): Promise<import("@/types/consul").ConsulListResponse<import("@/types/consul").ConsulCatalogServiceNode[]>> {
+  return post("/api/consul/catalog/service-nodes", { connectionId, name: service, options });
+}
+export async function consulCatalogNodeServices(connectionId: string, node: string, options: import("@/types/consul").ConsulReadOptions = {}): Promise<import("@/types/consul").ConsulListResponse<import("@/types/consul").ConsulNodeServices>> {
+  return post("/api/consul/catalog/node-services", { connectionId, name: node, options });
+}
+export async function consulHealthNode(connectionId: string, node: string, options: import("@/types/consul").ConsulReadOptions = {}): Promise<import("@/types/consul").ConsulListResponse<import("@/types/consul").ConsulHealthCheck[]>> {
+  return post("/api/consul/health/node", { connectionId, name: node, options });
+}
+export async function consulHealthChecks(connectionId: string, service: string, options: import("@/types/consul").ConsulReadOptions = {}): Promise<import("@/types/consul").ConsulListResponse<import("@/types/consul").ConsulHealthCheck[]>> {
+  return post("/api/consul/health/checks", { connectionId, name: service, options });
+}
+export async function consulHealthService(connectionId: string, service: string, passing: boolean | null = null, options: import("@/types/consul").ConsulReadOptions = {}): Promise<import("@/types/consul").ConsulListResponse<import("@/types/consul").ConsulServiceInstance[]>> {
+  return post("/api/consul/health/service", { connectionId, name: service, passing, options });
+}
+export async function consulHealthState(connectionId: string, healthState: string, options: import("@/types/consul").ConsulReadOptions = {}): Promise<import("@/types/consul").ConsulListResponse<import("@/types/consul").ConsulHealthCheck[]>> {
+  return post("/api/consul/health/state", { connectionId, name: healthState, options });
+}
+export async function consulAgentServices(connectionId: string): Promise<Record<string, import("@/types/consul").ConsulAgentService>> {
+  return post("/api/consul/agent/services", { connectionId });
+}
+export async function consulAgentService(connectionId: string, id: string): Promise<import("@/types/consul").ConsulAgentService> {
+  return post("/api/consul/agent/service", { connectionId, id });
+}
+export async function consulAgentChecks(connectionId: string): Promise<Record<string, import("@/types/consul").ConsulHealthCheck>> {
+  return post("/api/consul/agent/checks", { connectionId });
+}
+export async function consulAgentRegisterService(connectionId: string, registration: import("@/types/consul").ConsulAgentServiceRegistration): Promise<import("@/types/consul").ConsulAgentWriteResult> {
+  return post("/api/consul/agent/service/register", { connectionId, registration });
+}
+export async function consulAgentDeregisterService(connectionId: string, id: string): Promise<import("@/types/consul").ConsulAgentWriteResult> {
+  return post("/api/consul/agent/service/deregister", { connectionId, id });
+}
+export async function consulAgentServiceMaintenance(connectionId: string, id: string, enable: boolean, reason?: string | null): Promise<import("@/types/consul").ConsulAgentWriteResult> {
+  return post("/api/consul/agent/service/maintenance", { connectionId, id, enable, reason: reason ?? null });
+}
+export async function consulAgentRegisterCheck(connectionId: string, registration: import("@/types/consul").ConsulAgentCheckRegistration): Promise<import("@/types/consul").ConsulAgentWriteResult> {
+  return post("/api/consul/agent/check/register", { connectionId, registration });
+}
+export async function consulAgentDeregisterCheck(connectionId: string, id: string): Promise<import("@/types/consul").ConsulAgentWriteResult> {
+  return post("/api/consul/agent/check/deregister", { connectionId, id });
+}
+export async function consulAgentUpdateTtl(connectionId: string, id: string, status: import("@/types/consul").ConsulCheckStatus, output?: string | null): Promise<import("@/types/consul").ConsulAgentWriteResult> {
+  return post("/api/consul/agent/check/ttl", { connectionId, id, status, output: output ?? null });
+}
+export async function consulSessions(connectionId: string, options: import("@/types/consul").ConsulReadOptions = {}): Promise<import("@/types/consul").ConsulListResponse<import("@/types/consul").ConsulSession[]>> {
+  return post("/api/consul/sessions", { connectionId, options });
+}
+export async function consulNodeSessions(connectionId: string, node: string, options: import("@/types/consul").ConsulReadOptions = {}): Promise<import("@/types/consul").ConsulListResponse<import("@/types/consul").ConsulSession[]>> {
+  return post("/api/consul/sessions/node", { connectionId, name: node, options });
+}
+export async function consulSession(connectionId: string, id: string): Promise<import("@/types/consul").ConsulSession | null> {
+  return post("/api/consul/session", { connectionId, id });
+}
+export async function consulSessionKeys(connectionId: string, id: string): Promise<import("@/types/consul").ConsulSessionKeysResponse> {
+  return post("/api/consul/session/keys", { connectionId, id });
+}
+export async function consulSessionDestroyImpact(connectionId: string, id: string): Promise<import("@/types/consul").ConsulSessionDestroyImpact> {
+  return post("/api/consul/session/destroy-impact", { connectionId, id });
+}
+export async function consulCreateSession(connectionId: string, request: import("@/types/consul").ConsulSessionCreateRequest): Promise<import("@/types/consul").ConsulSession> {
+  return post("/api/consul/session/create", { connectionId, request });
+}
+export async function consulRenewSession(connectionId: string, id: string): Promise<import("@/types/consul").ConsulSession> {
+  return post("/api/consul/session/renew", { connectionId, id });
+}
+export async function consulDestroySession(connectionId: string, request: import("@/types/consul").ConsulSessionDestroyRequest): Promise<boolean> {
+  return post("/api/consul/session/destroy", { connectionId, request });
+}
+export async function consulAcquireLock(connectionId: string, request: import("@/types/consul").ConsulLockRequest): Promise<import("@/types/consul").ConsulLockResponse> {
+  return post("/api/consul/lock/acquire", { connectionId, request });
+}
+export async function consulReleaseLock(connectionId: string, key: string, session: string): Promise<import("@/types/consul").ConsulLockResponse> {
+  return post("/api/consul/lock/release", { connectionId, key, session });
+}
+
+export async function consulAclList(connectionId: string, kind: import("@/types/consul").ConsulAclKind): Promise<import("@/types/consul").ConsulAclList> {
+  return post("/api/consul/acl/list", { connectionId, kind });
+}
+export async function consulAclTokenSelf(connectionId: string): Promise<import("@/types/consul").ConsulAclToken> {
+  return post("/api/consul/acl/token/self", { connectionId });
+}
+export async function consulAclTokenClone(connectionId: string, accessorId: string, description: string): Promise<import("@/types/consul").ConsulAclToken> {
+  return post("/api/consul/acl/token/clone", { connectionId, id: accessorId, description });
+}
+export async function consulAclGet(connectionId: string, kind: import("@/types/consul").ConsulAclKind, id: string): Promise<import("@/types/consul").ConsulAclItem> {
+  return post("/api/consul/acl/get", { connectionId, kind, id });
+}
+export async function consulAclApply(connectionId: string, id: string | null, value: import("@/types/consul").ConsulAclWrite): Promise<import("@/types/consul").ConsulAclItem> {
+  return post("/api/consul/acl/apply", { connectionId, id, value });
+}
+export async function consulAclReferences(connectionId: string, kind: import("@/types/consul").ConsulAclKind, id: string): Promise<import("@/types/consul").ConsulAclReferences> {
+  return post("/api/consul/acl/references", { connectionId, kind, id });
+}
+export async function consulAclDelete(connectionId: string, kind: import("@/types/consul").ConsulAclKind, id: string): Promise<import("@/types/consul").ConsulAclReferences> {
+  return post("/api/consul/acl/delete", { connectionId, kind, id });
+}
+export async function consulEnterpriseList(connectionId: string, kind: import("@/types/consul").ConsulEnterpriseKind): Promise<import("@/types/consul").ConsulEnterpriseList> {
+  return post("/api/consul/enterprise/list", { connectionId, kind });
+}
+export async function consulEnterpriseGet(connectionId: string, kind: import("@/types/consul").ConsulEnterpriseKind, name: string): Promise<import("@/types/consul").ConsulEnterpriseItem> {
+  return post("/api/consul/enterprise/get", { connectionId, kind, name });
+}
+export async function consulEnterpriseApply(connectionId: string, existingName: string | null, item: import("@/types/consul").ConsulEnterpriseWrite): Promise<import("@/types/consul").ConsulEnterpriseItem> {
+  return post("/api/consul/enterprise/apply", { connectionId, existingName, item });
+}
+export async function consulEnterpriseImpact(connectionId: string, kind: import("@/types/consul").ConsulEnterpriseKind, name: string): Promise<import("@/types/consul").ConsulScopeImpact> {
+  return post("/api/consul/enterprise/impact", { connectionId, kind, name });
+}
+export async function consulEnterpriseDelete(connectionId: string, kind: import("@/types/consul").ConsulEnterpriseKind, name: string): Promise<import("@/types/consul").ConsulScopeImpact> {
+  return post("/api/consul/enterprise/delete", { connectionId, kind, name });
+}
+export async function consulMeshConfigList(connectionId: string, kind: string): Promise<import("@/types/consul").ConsulConfigEntry[]> {
+  return post("/api/consul/mesh/config/list", { connectionId, kind });
+}
+export async function consulMeshConfigGet(connectionId: string, kind: string, name: string): Promise<import("@/types/consul").ConsulConfigEntry> {
+  return post("/api/consul/mesh/config/get", { connectionId, kind, name });
+}
+export async function consulMeshConfigApply(connectionId: string, request: import("@/types/consul").ConsulConfigEntryApply): Promise<import("@/types/consul").ConsulConfigEntry> {
+  return post("/api/consul/mesh/config/apply", { connectionId, request });
+}
+export async function consulMeshConfigDelete(connectionId: string, kind: string, name: string, expectedModifyIndex: number): Promise<boolean> {
+  return post("/api/consul/mesh/config/delete", { connectionId, kind, name, expectedModifyIndex });
+}
+export async function consulMeshIntentionsList(connectionId: string): Promise<import("@/types/consul").ConsulIntention[]> {
+  return post("/api/consul/mesh/intentions/list", { connectionId });
+}
+export async function consulMeshIntentionGet(connectionId: string, id: string): Promise<import("@/types/consul").ConsulIntention> {
+  return post("/api/consul/mesh/intentions/get", { connectionId, id });
+}
+export async function consulMeshIntentionGetExact(connectionId: string, request: import("@/types/consul").ConsulIntentionExactRequest): Promise<import("@/types/consul").ConsulIntention> {
+  return post("/api/consul/mesh/intentions/get-exact", { connectionId, exactRequest: request });
+}
+export async function consulMeshIntentionUpsert(connectionId: string, item: import("@/types/consul").ConsulIntention): Promise<import("@/types/consul").ConsulIntention> {
+  return post("/api/consul/mesh/intentions/upsert", { connectionId, intention: item });
+}
+export async function consulMeshIntentionDelete(connectionId: string, id: string): Promise<boolean> {
+  return post("/api/consul/mesh/intentions/delete", { connectionId, id });
+}
+export async function consulMeshIntentionDeleteExact(connectionId: string, request: import("@/types/consul").ConsulIntentionExactRequest): Promise<boolean> {
+  return post("/api/consul/mesh/intentions/delete-exact", { connectionId, exactRequest: request });
+}
+export async function consulMeshIntentionMatch(connectionId: string, request: import("@/types/consul").ConsulIntentionMatchRequest): Promise<import("@/types/consul").ConsulIntention[]> {
+  return post("/api/consul/mesh/intentions/match", { connectionId, matchRequest: request });
+}
+export async function consulMeshIntentionCheck(connectionId: string, request: import("@/types/consul").ConsulIntentionCheckRequest): Promise<import("@/types/consul").ConsulIntentionCheckResponse> {
+  return post("/api/consul/mesh/intentions/check", { connectionId, checkRequest: request });
+}
+export async function consulMeshDiscoveryChain(connectionId: string, service: string): Promise<import("@/types/consul").ConsulDiscoveryChain> {
+  return post("/api/consul/mesh/discovery-chain", { connectionId, service });
+}
+export async function consulMeshPeeringList(connectionId: string): Promise<import("@/types/consul").ConsulPeering[]> {
+  return post("/api/consul/mesh/peerings/list", { connectionId });
+}
+export async function consulMeshPeeringGet(connectionId: string, name: string): Promise<import("@/types/consul").ConsulPeering> {
+  return post("/api/consul/mesh/peerings/get", { connectionId, name });
+}
+export async function consulMeshPeeringGenerateToken(connectionId: string, request: import("@/types/consul").ConsulPeeringGenerateRequest): Promise<import("@/types/consul").ConsulPeeringToken> {
+  return post("/api/consul/mesh/peerings/generate-token", { connectionId, generateRequest: request });
+}
+export async function consulMeshPeeringEstablish(connectionId: string, request: import("@/types/consul").ConsulPeeringEstablishRequest): Promise<import("@/types/consul").ConsulPeering> {
+  return post("/api/consul/mesh/peerings/establish", { connectionId, establishRequest: request });
+}
+export async function consulMeshPeeringDelete(connectionId: string, name: string): Promise<boolean> {
+  return post("/api/consul/mesh/peerings/delete", { connectionId, name });
+}
+export async function consulMeshExportedServicesList(connectionId: string): Promise<import("@/types/consul").ConsulExportedService[]> {
+  return post("/api/consul/mesh/exported-services/list", { connectionId });
+}
+export async function consulMeshExportedServicesApply(connectionId: string, name: string, expectedModifyIndex: number, raw: Record<string, unknown>): Promise<import("@/types/consul").ConsulConfigEntry> {
+  return post("/api/consul/mesh/exported-services/apply", { connectionId, name, expectedModifyIndex, raw });
+}
+
+// ---------------------------------------------------------------------------
 // Nacos
 // ---------------------------------------------------------------------------
 
@@ -2807,12 +3226,36 @@ export async function nacosListServices(connectionId: string, query: NacosServic
   return post("/api/nacos/services/list", { connectionId, query });
 }
 
+export async function nacosGetService(connectionId: string, query: NacosServiceQuery): Promise<NacosServiceDetail> {
+  return post("/api/nacos/services/get", { connectionId, query });
+}
+
+export async function nacosCreateService(connectionId: string, req: NacosServiceUpsert): Promise<void> {
+  return post("/api/nacos/services/create", { connectionId, req });
+}
+
+export async function nacosUpdateService(connectionId: string, req: NacosServiceUpsert): Promise<void> {
+  return post("/api/nacos/services/update", { connectionId, req });
+}
+
+export async function nacosDeleteService(connectionId: string, query: NacosServiceQuery): Promise<void> {
+  return post("/api/nacos/services/delete", { connectionId, query });
+}
+
 export async function nacosListInstances(connectionId: string, query: NacosInstanceQuery): Promise<NacosInstanceInfo[]> {
   return post("/api/nacos/instances/list", { connectionId, query });
 }
 
-export async function nacosUpdateInstance(connectionId: string, req: NacosInstanceUpdate): Promise<void> {
+export async function nacosUpdateInstance(connectionId: string, req: NacosInstanceUpdateRequest): Promise<void> {
   return post("/api/nacos/instances/update", { connectionId, req });
+}
+
+export async function nacosRegisterInstance(connectionId: string, req: NacosInstanceRegistration): Promise<void> {
+  return post("/api/nacos/instances/register", { connectionId, req });
+}
+
+export async function nacosDeregisterInstance(connectionId: string, req: NacosInstanceRef): Promise<void> {
+  return post("/api/nacos/instances/deregister", { connectionId, req });
 }
 
 export async function nacosGetDashboard(connectionId: string, query: NacosDashboardQuery): Promise<NacosDashboardSnapshot> {
@@ -2923,6 +3366,15 @@ export async function mongoRenameCollection(connectionId: string, database: stri
     database,
     collection,
     newName,
+  });
+}
+
+export async function mongoCloneCollection(connectionId: string, database: string, sourceCollection: string, targetCollection: string): Promise<MongoCloneCollectionResult> {
+  return post("/api/mongo/clone-collection", {
+    connectionId,
+    database,
+    sourceCollection,
+    targetCollection,
   });
 }
 
@@ -3131,6 +3583,24 @@ export async function mongoCreateIndex(connectionId: string, database: string, c
   });
 }
 
+export async function mongoCreateUser(connectionId: string, database: string, userJson: string, writeConcernJson?: string): Promise<{ affected_rows: number }> {
+  return post("/api/mongo/create-user", {
+    connectionId,
+    database,
+    userJson,
+    writeConcernJson,
+  });
+}
+
+export async function mongoRunCommand(connectionId: string, database: string, commandJson: string, executionId?: string): Promise<MongoDocumentResult> {
+  return post("/api/mongo/run-command", {
+    connectionId,
+    database,
+    commandJson,
+    executionId,
+  });
+}
+
 export async function mongoDropIndexes(connectionId: string, database: string, collection: string, indexesJson?: string, single = false): Promise<MongoDropIndexesResult> {
   return post("/api/mongo/drop-indexes", {
     connectionId,
@@ -3145,13 +3615,14 @@ export async function mongoInsertDocument(connectionId: string, database: string
   return documentInsertDocument(connectionId, database, collection, docJson, routing);
 }
 
-export async function documentInsertDocument(connectionId: string, database: string, collection: string, docJson: string, routing?: string): Promise<string> {
+export async function documentInsertDocument(connectionId: string, database: string, collection: string, docJson: string, routing?: string, preserveBsonTypes?: boolean): Promise<string> {
   return post("/api/document-store/insert-document", {
     connectionId,
     database,
     collection,
     docJson,
     routing,
+    preserveBsonTypes,
   });
 }
 
@@ -3203,6 +3674,16 @@ export async function documentDeleteDocument(connectionId: string, database: str
     id,
     routing,
     documentType,
+  });
+}
+
+export async function documentSaveMeilisearchBatch(connectionId: string, collection: string, updates: Array<{ id: string; docJson: string }>, deleteIds: string[], inserts: string[]): Promise<number> {
+  return post("/api/document-store/save-meilisearch-batch", {
+    connectionId,
+    collection,
+    updates,
+    deleteIds,
+    inserts,
   });
 }
 

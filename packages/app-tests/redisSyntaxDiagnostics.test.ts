@@ -162,3 +162,18 @@ test("tokenizeRedisLine handles backslash escapes", () => {
     ["SET", "k", "a b"],
   );
 });
+
+test("tokenizeRedisLine follows Redis escapes and quotes anywhere in an argument", () => {
+  const { argv } = tokenizeRedisLine('SET pre" has space"post line\\nnext;');
+  assert.deepEqual(
+    argv.map((token) => token.value),
+    ["SET", "pre has spacepost", "line\nnext"],
+  );
+});
+
+test("tokenizeRedisLine preserves empty quoted arguments", () => {
+  assert.deepEqual(
+    tokenizeRedisLine('SET "" ""').argv.map((token) => token.value),
+    ["SET", "", ""],
+  );
+});

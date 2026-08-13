@@ -109,6 +109,7 @@ async function openTableTarget(target: NavigationTarget, options: { tableInfoTab
       const primaryKeys = editableRowIdentifierColumns(effectiveDbType, columns, undefined, targetTableType);
       const sql = await buildTableSelectSql({
         databaseType: effectiveDbType,
+        driverProfile: config.driver_profile,
         identifierQuote,
         schema: tableSchema,
         catalog: target.catalog,
@@ -137,6 +138,7 @@ async function openTableTarget(target: NavigationTarget, options: { tableInfoTab
     }
     const sql = await buildTableSelectSql({
       databaseType: effectiveDbType,
+      driverProfile: config.driver_profile,
       identifierQuote,
       schema: tableSchema,
       catalog: target.catalog,
@@ -180,6 +182,7 @@ async function openTableTarget(target: NavigationTarget, options: { tableInfoTab
     if (fellBackToLimitZero) {
       const emptySql = await buildTableSelectSql({
         databaseType: effectiveDbType,
+        driverProfile: config.driver_profile,
         identifierQuote,
         schema: tableSchema,
         catalog: target.catalog,
@@ -224,6 +227,7 @@ async function openTableTarget(target: NavigationTarget, options: { tableInfoTab
       if (!fellBackToLimitZero && !firstQueryFailed && (useRowId || config.db_type === "tdengine")) {
         const newSql = await buildTableSelectSql({
           databaseType: effectiveDbType,
+          driverProfile: config.driver_profile,
           identifierQuote,
           schema: tableSchema,
           catalog: target.catalog,

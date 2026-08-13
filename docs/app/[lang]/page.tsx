@@ -58,7 +58,8 @@ const databaseSupport = [
   { name: "MongoDB", icon: "/icons/database/mongodb.svg", tone: "#47a248" },
   { name: "Oracle", icon: "/icons/database/oracle.svg", tone: "#f80000" },
   { name: "Elasticsearch", icon: "/icons/database/elasticsearch.svg", tone: "#00bfb3" },
-  { name: "Easysearch", icon: "/icons/database/easysearch.svg", tone: "#231815" },
+  { name: "Easysearch", icon: "/icons/database/easysearch.svg", tone: "#836eff" },
+  { name: "Meilisearch", icon: "/icons/database/meilisearch.svg", tone: "#ff5caa" },
   { name: "Qdrant", icon: "/icons/database/qdrant.svg", tone: "#dc244c" },
   { name: "Milvus", icon: "/icons/database/milvus.png", tone: "#00a1ea" },
   { name: "Weaviate", icon: "/icons/database/weaviate.svg", tone: "#00b894" },
@@ -393,6 +394,8 @@ const i18nText = {
     rainyunSponsorAction: "Visit RainYun",
     easysearchSponsorDesc: "Easysearch is an enterprise-grade distributed search engine compatible with Elasticsearch APIs, combining full-text, vector, geospatial search, real-time analytics, and AI capabilities in one platform.",
     easysearchSponsorAction: "Visit Easysearch",
+    atlasCloudSponsorDesc: "Atlas Cloud gives developers one unified API for 400+ AI models across chat, image, video, and audio.",
+    atlasCloudSponsorAction: "Visit Atlas Cloud",
     footerTitle: "Ready to try DBX?",
     footerDesc: "Use the desktop app for local work, or deploy the Docker version for browser-based access.",
     release: "Latest release",
@@ -423,6 +426,8 @@ const i18nText = {
     rainyunSponsorAction: "访问雨云",
     easysearchSponsorDesc: "Easysearch 是一款企业级分布式搜索引擎，兼容 ES API、融合全文检索、向量检索、地理空间位置检索、实时分析与 AI 能力，为企业提供统一的数据检索与智能分析基础设施。",
     easysearchSponsorAction: "访问 Easysearch",
+    atlasCloudSponsorDesc: "Atlas Cloud 为开发者提供统一的多模态 AI API，可通过一个接口访问聊天、图像、视频和音频等 400+ 模型。",
+    atlasCloudSponsorAction: "访问 Atlas Cloud",
     footerTitle: "准备试试 DBX？",
     footerDesc: "本地工作使用桌面版，需要浏览器访问时部署 Docker 版。",
     release: "最新版本",
@@ -495,6 +500,14 @@ export default async function LandingPage({ params }: { params: Promise<{ lang: 
       description: t.easysearchSponsorDesc,
       action: t.easysearchSponsorAction,
     },
+    {
+      name: "Atlas Cloud",
+      href: "https://www.atlascloud.ai/?ref=6YYXWA",
+      logo: "https://www.atlascloud.ai/logo.svg",
+      logoClass: "w-full max-w-[100px] object-contain",
+      description: t.atlasCloudSponsorDesc,
+      action: t.atlasCloudSponsorAction,
+    },
   ];
 
   return (
@@ -508,7 +521,9 @@ export default async function LandingPage({ params }: { params: Promise<{ lang: 
         <Spotlight />
         <div className="relative z-[1] max-w-[1180px] mx-auto px-7 max-[1040px]:max-w-[920px] max-[760px]:px-[18px]">
           <div className="landing-hero-copy relative z-[6] grid justify-items-center max-w-[900px] mx-auto text-center max-[1040px]:max-w-[760px]">
-            <h1 id="landing-title" className="min-w-0 m-0 text-[clamp(36px,4.2vw,56px)] font-[820] leading-[1.06] text-landing-ink whitespace-nowrap max-[760px]:max-w-[12ch] max-[760px]:whitespace-normal max-[760px]:text-balance max-[760px]:text-[clamp(29px,8.7vw,38px)] max-[760px]:leading-[1.08]">{t.heroTitle}</h1>
+            <h1 id="landing-title" className="min-w-0 m-0 text-[clamp(36px,4.2vw,56px)] font-[820] leading-[1.06] text-landing-ink whitespace-nowrap max-[760px]:max-w-[12ch] max-[760px]:whitespace-normal max-[760px]:text-balance max-[760px]:text-[clamp(29px,8.7vw,38px)] max-[760px]:leading-[1.08]">
+              {t.heroTitle}
+            </h1>
             <p className="landing-hero-subtitle min-w-0 mt-5 mx-auto text-[17px] font-[460] leading-[1.8] whitespace-nowrap max-[900px]:max-w-[680px] max-[900px]:whitespace-normal max-[760px]:max-w-[320px] max-[760px]:text-[15px] max-[760px]:leading-[1.68]">{t.heroSubtitle}</p>
             <div className="w-full max-w-[520px] mt-10 max-[760px]:mt-7">
               <InstallTabs lang={l} version={initialDownloadVersion} />
@@ -548,13 +563,7 @@ export default async function LandingPage({ params }: { params: Promise<{ lang: 
         </div>
         <div className="landing-workflow-grid grid grid-cols-4 rounded-[10px] overflow-hidden max-[1040px]:grid-cols-2 max-[760px]:grid-cols-2 max-[360px]:grid-cols-1">
           {workflowItems.map((item, i) => (
-            <Link
-              key={item.title}
-              href={item.href}
-              className={`landing-workflow-card min-h-[250px] p-6 border-r border-r-landing-line max-[760px]:min-h-0 max-[760px]:p-[18px] ${i === workflowItems.length - 1 ? "border-r-0" : ""}`}
-              target="_blank"
-              data-stagger
-            >
+            <Link key={item.title} href={item.href} className={`landing-workflow-card min-h-[250px] p-6 border-r border-r-landing-line max-[760px]:min-h-0 max-[760px]:p-[18px] ${i === workflowItems.length - 1 ? "border-r-0" : ""}`} target="_blank" data-stagger>
               <item.icon size={20} className="text-landing-blue" />
               <h3 className="mt-[18px] text-base font-bold">{item.title}</h3>
               <p className="mt-2.5 text-landing-muted text-[13px] leading-[1.62]">{item.desc}</p>
@@ -584,22 +593,22 @@ export default async function LandingPage({ params }: { params: Promise<{ lang: 
             const isCta = "href" in db && db.href;
             const CardTag = isCta ? "a" : "div";
             return (
-            <CardTag
-              className={`landing-db-card grid place-items-center aspect-square rounded-[10px] px-2.5 py-[18px] max-[760px]:px-1.5 max-[760px]:py-2.5 ${isCta ? "border-2 border-dashed border-[color-mix(in_srgb,var(--color-landing-blue)_40%,transparent)] hover:border-[color-mix(in_srgb,var(--color-landing-blue)_70%,transparent)] transition-colors cursor-pointer" : ""}`}
-              key={db.name}
-              {...(isCta ? { href: db.href, target: "_blank", rel: "noopener noreferrer" } : {})}
-              style={{ "--db-tone": db.tone } as CSSProperties}
-              data-stagger
-            >
-              <div className="landing-db-icon grid place-items-center w-12 h-12 mb-[15px] max-[760px]:size-8 max-[760px]:mb-2">
-                {isCta ? (
-                  <span className="grid place-items-center w-10 h-10 rounded-full border-2 border-dashed text-landing-blue border-landing-blue text-2xl leading-none">+</span>
-                ) : (
-                  <img src={db.icon} alt="" width={38} height={38} loading="lazy" decoding="async" className="block w-[38px] h-[38px] object-contain max-[760px]:size-7" />
-                )}
-              </div>
-              <strong className={`text-sm font-[650] leading-[1.2] text-center max-[760px]:text-[11px] ${isCta ? "text-landing-blue" : "text-[color-mix(in_srgb,var(--color-landing-ink)_92%,var(--color-landing-muted))]"}`}>{db.name}</strong>
-            </CardTag>
+              <CardTag
+                className={`landing-db-card grid place-items-center aspect-square rounded-[10px] px-2.5 py-[18px] max-[760px]:px-1.5 max-[760px]:py-2.5 ${isCta ? "border-2 border-dashed border-[color-mix(in_srgb,var(--color-landing-blue)_40%,transparent)] hover:border-[color-mix(in_srgb,var(--color-landing-blue)_70%,transparent)] transition-colors cursor-pointer" : ""}`}
+                key={db.name}
+                {...(isCta ? { href: db.href, target: "_blank", rel: "noopener noreferrer" } : {})}
+                style={{ "--db-tone": db.tone } as CSSProperties}
+                data-stagger
+              >
+                <div className="landing-db-icon grid place-items-center w-12 h-12 mb-[15px] max-[760px]:size-8 max-[760px]:mb-2">
+                  {isCta ? (
+                    <span className="grid place-items-center w-10 h-10 rounded-full border-2 border-dashed text-landing-blue border-landing-blue text-2xl leading-none">+</span>
+                  ) : (
+                    <img src={db.icon} alt="" width={38} height={38} loading="lazy" decoding="async" className="block w-[38px] h-[38px] object-contain max-[760px]:size-7" />
+                  )}
+                </div>
+                <strong className={`text-sm font-[650] leading-[1.2] text-center max-[760px]:text-[11px] ${isCta ? "text-landing-blue" : "text-[color-mix(in_srgb,var(--color-landing-ink)_92%,var(--color-landing-muted))]"}`}>{db.name}</strong>
+              </CardTag>
             );
           })}
         </ExpandableDatabaseGrid>

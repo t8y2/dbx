@@ -62,6 +62,14 @@ pub struct McpAddConnectionRequest {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct McpDuplicateConnectionRequest {
+    pub source_id: String,
+    pub copy_id: String,
+    pub copy_name: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct McpRemoveConnectionRequest {
     pub connection_id: String,
 }
@@ -180,6 +188,41 @@ async fn run_temporary_connection_test(
         None
     };
 
+    // Keep all fallible post-connect checks inside this block so cleanup below
+    // runs before either a successful result or an error is returned.
+    let result: Result<ConnectionTestResult, String> = async {
+        let success_message = if pool_result.is_ok() && config.db_type == DatabaseType::Consul {
+            let client = {
+                let connections = app.connections.read().await;
+                match connections.get(&temp_id) {
+                    Some(PoolKind::Consul(client)) => Some(client.clone()),
+                    _ => None,
+                }
+            };
+            if let Some(client) = client {
+                let configured_target =
+                    dbx_core::consul::ConsulConfig::from_connection(&config)?.agent_target.is_some();
+                let identity = if configured_target {
+                    Some(client.validate_configured_agent_target().await?)
+                } else {
+                    client.agent_self().await.ok()
+                };
+                identity
+                    .map(|identity| format!("Connection successful (Agent: {} at {})", identity.node, identity.address))
+                    .unwrap_or_else(|| {
+                        "Connection successful (Agent identity unavailable; Agent writes disabled)".to_string()
+                    })
+            } else {
+                "Connection successful (Agent identity unavailable; Agent writes disabled)".to_string()
+            }
+        } else {
+            "Connection successful".to_string()
+        };
+
+        pool_result.map(|_| ConnectionTestResult::success(success_message).with_database_info(database_info))
+    }
+    .await;
+
     app.remove_connection_pools(&temp_id).await;
     // Pool drain intentionally keeps durable MQ adapters for reconnect reuse; temporary
     // probes must still release any registry entry if a cached path was used.
@@ -188,7 +231,7 @@ async fn run_temporary_connection_test(
     app.reset_connection_transport_for_config(&temp_id, &config).await;
     app.configs.write().await.remove(&temp_id);
 
-    pool_result.map(|_| ConnectionTestResult::success("Connection successful").with_database_info(database_info))
+    result
 }
 
 pub async fn test_connection(
@@ -377,6 +420,20 @@ pub async fn mcp_add_connection(
     Ok(Json(saved))
 }
 
+pub async fn mcp_duplicate_connection(
+    State(state): State<Arc<WebState>>,
+    Json(body): Json<McpDuplicateConnectionRequest>,
+) -> Result<Json<ConnectionConfig>, AppError> {
+    let saved = state
+        .app
+        .storage
+        .duplicate_connection_for_mcp(&body.source_id, &body.copy_id, &body.copy_name)
+        .await
+        .map_err(AppError::from)?;
+    state.app.configs.write().await.insert(saved.id.clone(), saved.clone());
+    Ok(Json(saved))
+}
+
 pub async fn mcp_remove_connection(
     State(state): State<Arc<WebState>>,
     Json(body): Json<McpRemoveConnectionRequest>,
@@ -484,9 +541,11 @@ async fn remove_connection_pools_for_connection_ids(state: &WebState, connection
 mod tests {
     use super::{
         apply_mongo_legacy_driver_profile, connect_db, connection_final_proxy_port, disconnect_db, load_connections,
-        mark_mongo_legacy_driver, mcp_add_connection, mcp_remove_connection, save_connection_database_info,
-        save_connections, test_connection, test_connection_with_info, ConnectRequest, DisconnectRequest,
-        McpAddConnectionRequest, McpRemoveConnectionRequest, SaveConnectionDatabaseInfoRequest, SaveConnectionsRequest,
+        mark_mongo_legacy_driver, mcp_add_connection, mcp_duplicate_connection, mcp_remove_connection,
+        run_temporary_connection_test, save_connection_database_info, save_connections, test_connection,
+        test_connection_with_info, ConnectRequest, DisconnectRequest, McpAddConnectionRequest,
+        McpDuplicateConnectionRequest, McpRemoveConnectionRequest, SaveConnectionDatabaseInfoRequest,
+        SaveConnectionsRequest,
     };
     use crate::state::WebState;
     use axum::extract::State;
@@ -498,13 +557,12 @@ mod tests {
     };
     use dbx_core::storage::{McpGlobalPolicy, Storage};
     use std::sync::Arc;
-    #[cfg(feature = "mq-admin")]
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    #[cfg(feature = "mq-admin")]
     use tokio::net::TcpListener;
 
     fn sqlite_config(id: &str, path: &str) -> ConnectionConfig {
         ConnectionConfig {
+            docs_notes_path: None,
             id: id.to_string(),
             name: "SQLite".to_string(),
             note: String::new(),
@@ -518,6 +576,7 @@ mod tests {
             username: String::new(),
             password: String::new(),
             database: None,
+            default_schema: None,
             visible_databases: None,
             visible_schemas: None,
             show_system_schemas: false,
@@ -553,6 +612,7 @@ mod tests {
             jdbc_driver_class: None,
             jdbc_driver_paths: Vec::new(),
             one_time: false,
+            save_password: true,
             read_only: false,
             is_production: false,
             production_databases: vec![],
@@ -569,6 +629,23 @@ mod tests {
             "adminUrl": admin_url,
             "auth": { "kind": "none" },
             "pinnedVersion": "3.1"
+        }));
+        config
+    }
+
+    fn consul_config(id: &str, server_addr: &str) -> ConnectionConfig {
+        let parsed = reqwest::Url::parse(server_addr).unwrap();
+        let mut config = sqlite_config(id, "");
+        config.name = "Consul".to_string();
+        config.db_type = DatabaseType::Consul;
+        config.host = parsed.host_str().unwrap().to_string();
+        config.port = parsed.port().unwrap();
+        config.external_config = Some(serde_json::json!({
+            "serverAddr": server_addr,
+            "agentTarget": {
+                "node": "expected-agent",
+                "address": "127.0.0.1"
+            }
         }));
         config
     }
@@ -671,6 +748,51 @@ mod tests {
         assert!(state.app.connections.read().await.keys().all(|key| !key.starts_with("__test_")));
 
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn failed_consul_agent_target_validation_cleans_up_temporary_state() {
+        let (state, dir) = test_web_state().await;
+        let server_addr = spawn_consul_agent_server().await;
+        let config = consul_config("consul-test", &server_addr);
+
+        let error = run_temporary_connection_test(&state.app, config, false).await.unwrap_err();
+
+        assert!(error.contains("CONSUL_AGENT_TARGET_MISMATCH"), "unexpected error: {error}");
+        assert!(state.app.configs.read().await.keys().all(|key| !key.starts_with("__test_")));
+        assert!(state.app.connections.read().await.keys().all(|key| !key.starts_with("__test_")));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    async fn spawn_consul_agent_server() -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    break;
+                };
+                tokio::spawn(async move {
+                    let mut buf = [0_u8; 2048];
+                    let Ok(n) = stream.read(&mut buf).await else {
+                        return;
+                    };
+                    let request = String::from_utf8_lossy(&buf[..n]);
+                    let body = if request.starts_with("GET /v1/agent/self ") {
+                        r#"{"Config":{"NodeName":"actual-agent","Datacenter":"dc1"},"Member":{"Addr":"127.0.0.1","Tags":{}}}"#
+                    } else {
+                        "[]"
+                    };
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = stream.write_all(response.as_bytes()).await;
+                });
+            }
+        });
+        format!("http://{addr}")
     }
 
     #[cfg(feature = "mq-admin")]
@@ -830,6 +952,41 @@ mod tests {
         );
         assert!(persisted.iter().any(|config| config.id == added.id));
         assert!(state.app.configs.read().await.contains_key(&added.id));
+
+        state
+            .app
+            .storage
+            .save_sidebar_layout(&serde_json::json!({
+                "groups": [{ "id": "group", "name": "Group" }],
+                "order": [{
+                    "type": "group",
+                    "id": "group",
+                    "children": [{ "type": "connection", "id": "existing" }]
+                }, { "type": "connection", "id": "added" }],
+                "concurrentField": "keep"
+            }))
+            .await
+            .unwrap();
+        let copied = mcp_duplicate_connection(
+            State(state.clone()),
+            Json(McpDuplicateConnectionRequest {
+                source_id: existing.id.clone(),
+                copy_id: "copy".to_string(),
+                copy_name: "Existing Copy".to_string(),
+            }),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{}", error.message))
+        .0;
+        assert_eq!(state.app.configs.read().await.get(&copied.id), Some(&copied));
+        let persisted = state.app.storage.load_connections().await.unwrap();
+        assert_eq!(persisted.iter().find(|config| config.id == existing.id).unwrap().host, existing.host);
+        assert!(persisted.iter().any(|config| config.id == added.id));
+        let layout = state.app.storage.load_sidebar_layout().await.unwrap().unwrap();
+        assert_eq!(layout["concurrentField"], "keep");
+        assert_eq!(layout["order"][0]["children"][0]["id"], existing.id);
+        assert_eq!(layout["order"][0]["children"][1]["id"], copied.id);
+        assert_eq!(layout["order"][1]["id"], added.id);
 
         let _ = std::fs::remove_dir_all(dir);
     }

@@ -119,6 +119,21 @@ export function tabDisplayTitle(tab: QueryTab, t: Translate): string {
     if (compact) return connectionDisplayName(tab.connectionId);
     return `${connectionDisplayName(tab.connectionId)}@keys`;
   }
+  if (tab.mode === "consul") {
+    if (compact) return connectionDisplayName(tab.connectionId);
+    return `${connectionDisplayName(tab.connectionId)}@keys`;
+  }
+  if (tab.mode === "consul-overview") {
+    if (compact) return connectionDisplayName(tab.connectionId);
+    return `${connectionDisplayName(tab.connectionId)}@${t("consul.ui.overview")}`;
+  }
+  if (tab.mode === "mqtt") {
+    return `${connectionDisplayName(tab.connectionId)} - ${t("connection.mqttConsoleTitle")}`;
+  }
+  if (tab.mode === "databases") {
+    if (compact) return t("tabs.databases");
+    return `${t("tabs.databases")}@${connectionDisplayName(tab.connectionId)}`;
+  }
   if (tab.mode === "objects") {
     const schema = tab.objectBrowser?.schema;
     if (compact) return schema || tab.title;
@@ -141,6 +156,7 @@ export function tabTooltipLines(tab: QueryTab, t: Translate): { label: string; v
   }
   if (tab.mode === "query" && tab.externalSqlPath) {
     lines.push({ label: t("tabs.tooltipFilePath"), value: tab.externalSqlPath });
+    if (tab.externalSqlFileMissing) lines.push({ label: t("tabs.tooltipFileStatus"), value: t("tabs.externalFileMissing") });
   }
   if (tab.mode === "data" && tab.tableMeta?.tableName) {
     lines.push({ label: t("tabs.tooltipTable"), value: tab.tableMeta.tableName });
@@ -333,6 +349,10 @@ export function resultGridCacheKey(tab: Pick<QueryTab, "id" | "activeResultRunId
   return `${tab.id}-${tab.activeResultRunId ?? "current"}-${tab.activeResultIndex ?? 0}`;
 }
 
+export function resultGridInstanceKey(tab: Pick<QueryTab, "id" | "activeResultRunId" | "activeResultIndex" | "resultGridRevision">): string {
+  return `${resultGridCacheKey(tab)}-${tab.resultGridRevision ?? "initial"}`;
+}
+
 export function nextExecutionSummaryView(currentView: OutputView, canShowResult: boolean): OutputView {
   if (currentView === "summary" && canShowResult) return "result";
   return "summary";
@@ -350,6 +370,7 @@ export interface ExecutionSummaryItem {
   returnedColumns: number;
   returnedRows: number;
   affectedRows: number;
+  rowCount: number;
   executionTimeMs: number;
   hasTabularResult: boolean;
   isError: boolean;
@@ -358,8 +379,15 @@ export interface ExecutionSummaryItem {
 export function executionSummaryItems(tab: Pick<QueryTab, "result" | "results" | "batchSqlExecution">): ExecutionSummaryItem[] {
   const results = tab.results?.length ? tab.results : tab.result ? [tab.result] : [];
   if (tab.batchSqlExecution?.items.length) {
+    const resultsByStatementIndex = new Map<number, QueryResult>();
+    results.forEach((result, resultIndex) => {
+      resultsByStatementIndex.set(result.statement_index ?? resultIndex, result);
+    });
     return tab.batchSqlExecution.items.map((item, index) => {
-      const result = results.find((candidate, resultIndex) => (candidate.statement_index ?? resultIndex) === item.statementIndex);
+      const result = resultsByStatementIndex.get(item.statementIndex);
+      const returnedRows = result?.rows.length ?? 0;
+      const affectedRows = item.affectedRows ?? result?.affected_rows ?? 0;
+      const hasTabularResult = (result?.columns.length ?? 0) > 0;
       return {
         result,
         index,
@@ -370,10 +398,11 @@ export function executionSummaryItems(tab: Pick<QueryTab, "result" | "results" |
         status: item.status,
         error: item.error,
         returnedColumns: result?.columns.length ?? 0,
-        returnedRows: result?.rows.length ?? 0,
-        affectedRows: item.affectedRows ?? result?.affected_rows ?? 0,
+        returnedRows,
+        affectedRows,
+        rowCount: hasTabularResult ? returnedRows : affectedRows,
         executionTimeMs: item.executionTimeMs ?? result?.execution_time_ms ?? 0,
-        hasTabularResult: (result?.columns.length ?? 0) > 0,
+        hasTabularResult,
         isError: item.status === "error",
       };
     });
@@ -392,6 +421,7 @@ export function executionSummaryItems(tab: Pick<QueryTab, "result" | "results" |
       returnedColumns: result.columns.length,
       returnedRows: result.rows.length,
       affectedRows: result.affected_rows,
+      rowCount: result.columns.length > 0 ? result.rows.length : result.affected_rows,
       executionTimeMs: result.execution_time_ms,
       hasTabularResult: result.columns.length > 0,
       isError,
@@ -411,7 +441,10 @@ export function tabModeLabel(tab: QueryTab, t: Translate): string {
   if (tab.mode === "etcd-dashboard") return t("tabs.etcdDashboard");
   if (tab.mode === "etcd-access-control") return t("tabs.etcdAccessControl");
   if (tab.mode === "zookeeper") return t("tabs.zookeeper");
+  if (tab.mode === "consul") return t("tabs.consul");
+  if (tab.mode === "consul-overview") return t("consul.ui.overview");
   if (tab.mode === "nacos") return "Nacos";
+  if (tab.mode === "databases") return t("tabs.databases");
   if (tab.mode === "objects") return t("tabs.objects");
   if (tab.mode === "users") return t("tabs.users");
   return tab.mode;

@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
   buildMongoCreateIndexRequest,
+  isCloneableMongoCollection,
   isProtectedMongoIndex,
   isRenamableMongoCollection,
   mongoCollectionKindFromNode,
   mongoCollectionTableTypeFromNode,
+  mongoCloneCollectionPreview,
   mongoCreateIndexPreview,
   mongoDropCollectionPreview,
   mongoDropAllIndexesPreview,
@@ -31,6 +33,15 @@ describe("isRenamableMongoCollection", () => {
     expect(isRenamableMongoCollection("users_view", "view")).toBe(false);
     expect(isRenamableMongoCollection("metrics", "timeseries")).toBe(false);
     expect(isRenamableMongoCollection("system.views", "collection")).toBe(false);
+  });
+});
+
+describe("isCloneableMongoCollection", () => {
+  it("allows ordinary collections only", () => {
+    expect(isCloneableMongoCollection("users")).toBe(true);
+    expect(isCloneableMongoCollection("report_view", "view")).toBe(false);
+    expect(isCloneableMongoCollection("metrics", "timeseries")).toBe(false);
+    expect(isCloneableMongoCollection("system.users")).toBe(false);
   });
 });
 
@@ -69,6 +80,15 @@ describe("isProtectedMongoIndex", () => {
 describe("mongo shell previews", () => {
   it("preserves identifier whitespace in rename preview", () => {
     expect(mongoRenameCollectionPreview("app", " users ", " renamed ")).toBe('db.getSiblingDB("app").getCollection(" users ").renameCollection(" renamed ")');
+  });
+
+  it("describes the version-compatible clone primitives", () => {
+    expect(mongoCloneCollectionPreview("app", " users ", " users_backup ")).toBe(
+      "// DBX copies collection options, documents, and non-_id indexes.\n" +
+        'db.getSiblingDB("app").createCollection(" users_backup ", /* source options */);\n' +
+        'db.getSiblingDB("app").getCollection(" users ").find({}).forEach(function (document) { db.getSiblingDB("app").getCollection(" users_backup ").insertOne(document); });\n' +
+        "// Recreate source indexes except the target's automatic _id index.",
+    );
   });
 
   it("builds drop previews with database scope", () => {

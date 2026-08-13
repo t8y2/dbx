@@ -60,9 +60,9 @@ type GridScrollerRef =
     };
 
 export interface CustomSaveHandler {
-  save: (changes: { dirtyRows: Map<number, Map<number, CellValue>>; newRows: CellValue[][]; deletedRows: Set<number>; columns: string[]; rows: CellValue[][] }) => Promise<void>;
+  save: (changes: { dirtyRows: Map<number, Map<number, CellValue>>; newRows: CellValue[][]; newRowMeta: GridNewRowMeta[]; deletedRows: Set<number>; columns: string[]; rows: CellValue[][] }) => Promise<void>;
   applySavedChanges?: (changes: { dirtyRows: Map<number, Map<number, CellValue>>; columns: string[] }) => void;
-  preview?: (changes: { dirtyRows: Map<number, Map<number, CellValue>>; newRows: CellValue[][]; deletedRows: Set<number>; columns: string[]; rows: CellValue[][] }) => Promise<string[]>;
+  preview?: (changes: { dirtyRows: Map<number, Map<number, CellValue>>; newRows: CellValue[][]; newRowMeta: GridNewRowMeta[]; deletedRows: Set<number>; columns: string[]; rows: CellValue[][] }) => Promise<string[]>;
   canInsert?: boolean;
   canDelete?: boolean;
   readonlyColumns?: string[];
@@ -96,6 +96,7 @@ export interface UseDataGridEditorOptions {
   orderByInput: Ref<string>;
   rowStatusFilter: Ref<RowStatusFilter>;
   dataGridQuickEntryEnabled?: ComputedRef<boolean>;
+  confirmDangerousRowDeletion?: ComputedRef<boolean>;
   initialEditColumn?: ComputedRef<number>;
   getRowItem: (rowId: number) => RowItem | undefined;
   pageSize: Ref<number>;
@@ -125,6 +126,7 @@ interface PendingChangesSnapshot {
 interface PendingSaveSnapshot {
   newRows: CellValue[][];
   newRowRefs: CellValue[][];
+  newRowMeta: GridNewRowMeta[];
   dirtyRows: Map<number, Map<number, CellValue>>;
   deletedRows: Set<number>;
 }
@@ -181,6 +183,10 @@ export function clearDataGridPendingSnapshotsForTab(tabId: string) {
   }
 }
 
+export function clearDataGridPendingSnapshot(cacheKey: string) {
+  pendingChangesCache.delete(cacheKey);
+}
+
 export function useDataGridEditor(options: UseDataGridEditorOptions) {
   const connectionStore = useConnectionStore();
   const historyStore = useHistoryStore();
@@ -202,6 +208,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     orderByInput,
     rowStatusFilter,
     dataGridQuickEntryEnabled = computed(() => false),
+    confirmDangerousRowDeletion = computed(() => true),
     initialEditColumn,
     getRowItem,
     pageSize,
@@ -218,11 +225,37 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
   // Kept in lockstep with every structural mutation of newRows.
   const newRowMeta = ref<GridNewRowMeta[]>([]);
   let nextNewRowToken = 1;
-  function allocateNewRowMeta(placement: GridNewRowPlacement | null): GridNewRowMeta {
-    return { token: nextNewRowToken++, placement };
+  function allocateNewRowMeta(placement: GridNewRowPlacement | null, sourceIndex?: number, editedColumns?: readonly number[]): GridNewRowMeta {
+    return { token: nextNewRowToken++, placement, sourceIndex, editedColumns: editedColumns?.length ? [...editedColumns] : undefined };
   }
   function cloneNewRowMeta(meta: readonly GridNewRowMeta[]): GridNewRowMeta[] {
-    return meta.map((item) => ({ token: item.token, placement: item.placement ? { ...item.placement } : null }));
+    return meta.map((item) => ({ token: item.token, placement: item.placement ? { ...item.placement } : null, sourceIndex: item.sourceIndex, editedColumns: item.editedColumns ? [...item.editedColumns] : undefined }));
+  }
+
+  function updateClonedRowEditedColumns(newIndex: number, col: number, value: CellValue) {
+    const meta = newRowMeta.value[newIndex];
+    if (!meta || meta.sourceIndex === undefined) return;
+    const baseline = result.value.rows[meta.sourceIndex]?.[col];
+    const edited = new Set(meta.editedColumns);
+    if (value === baseline) edited.delete(col);
+    else edited.add(col);
+    meta.editedColumns = edited.size > 0 ? [...edited].sort((left, right) => left - right) : undefined;
+  }
+
+  function clonedRowMeta(item: RowItem, row: readonly CellValue[]): GridNewRowMeta {
+    const inherited = item.newIndex === undefined ? undefined : newRowMeta.value[item.newIndex];
+    const sourceIndex = item.sourceIndex ?? inherited?.sourceIndex;
+    const edited = new Set(inherited?.editedColumns);
+    if (item.sourceIndex !== undefined) {
+      for (const column of dirtyRows.value.get(item.sourceIndex)?.keys() ?? []) edited.add(column);
+    }
+    if (sourceIndex !== undefined) {
+      const baseline = result.value.rows[sourceIndex] ?? [];
+      row.forEach((value, column) => {
+        if (value !== baseline[column]) edited.add(column);
+      });
+    }
+    return allocateNewRowMeta(null, sourceIndex, [...edited]);
   }
   // Restore a metadata snapshot and resume token allocation past its maximum so
   // newly created rows never collide with tokens held by restored rows (a fresh
@@ -740,8 +773,10 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
       if (changed) pushUndoSnapshot();
       if (newRows.value[item.newIndex]) {
         newRows.value[item.newIndex][col] = newVal;
+        updateClonedRowEditedColumns(item.newIndex, col, newVal);
       }
       newRows.value = [...newRows.value];
+      newRowMeta.value = [...newRowMeta.value];
       if (changed) touchPendingChanges();
       editingCell.value = null;
       isCommitting = false;
@@ -847,9 +882,11 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
         pushUndoSnapshot();
       }
       row[col] = newVal;
+      updateClonedRowEditedColumns(item.newIndex, col, newVal);
       markBatchMutated();
       if (!isBatching) {
         newRows.value = [...newRows.value];
+        newRowMeta.value = [...newRowMeta.value];
         touchPendingChanges();
       }
       return;
@@ -922,7 +959,9 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
       if (!row || row[col] === null) return;
       pushUndoSnapshot();
       row[col] = null;
+      updateClonedRowEditedColumns(item.newIndex, col, null);
       newRows.value = [...newRows.value];
+      newRowMeta.value = [...newRowMeta.value];
       touchPendingChanges();
       return;
     }
@@ -1085,12 +1124,13 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     return { ok: true, rowCount: mappedRows.length };
   }
 
-  function clonedRowData(item: RowItem): CellValue[] {
+  function clonedRowData(item: RowItem, resolvedValues?: ReadonlyMap<number, CellValue>): CellValue[] {
     const columnInfoByName = new Map((tableMeta.value?.columns ?? []).map((column) => [column.name.toLowerCase(), column]));
     return item.data.map((val, i) => {
       const columnName = sourceColumns.value?.[i] ?? result.value.columns[i];
       const columnInfo = columnInfoByName.get(columnName.toLowerCase());
-      return shouldClearClonedColumn(columnName, columnInfo) ? null : val;
+      if (shouldClearClonedColumn(columnName, columnInfo)) return null;
+      return resolvedValues?.has(i) ? (resolvedValues.get(i) ?? null) : val;
     });
   }
 
@@ -1102,14 +1142,14 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     return /\b(auto_increment|autoincrement|identity|generated)\b/i.test(extra) || /\bnextval\s*\(/i.test(columnDefault);
   }
 
-  function cloneRow(rowId: number) {
+  function cloneRow(rowId: number, resolvedValues?: ReadonlyMap<number, CellValue>) {
     const item = getRowItem(rowId);
     if (!item) return;
-    const clonedData = clonedRowData(item);
+    const clonedData = clonedRowData(item, resolvedValues);
     pushUndoSnapshot();
     rowStatusFilter.value = rowStatusFilterAfterAddingRow(rowStatusFilter.value);
     newRows.value.push(clonedData);
-    newRowMeta.value.push(allocateNewRowMeta(null));
+    newRowMeta.value.push(clonedRowMeta(item, clonedData));
     newRows.value = [...newRows.value];
     newRowMeta.value = [...newRowMeta.value];
     touchPendingChanges();
@@ -1124,15 +1164,15 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     });
   }
 
-  function cloneRows(rowIds: number[]) {
+  function cloneRows(rowIds: number[], resolvedValues?: ReadonlyMap<number, ReadonlyMap<number, CellValue>>) {
     const rowsToClone = rowIds.map((rowId) => getRowItem(rowId)).filter(Boolean) as RowItem[];
     if (rowsToClone.length === 0) return;
     pushUndoSnapshot();
     rowStatusFilter.value = rowStatusFilterAfterAddingRow(rowStatusFilter.value);
     for (const item of rowsToClone) {
-      const clonedData = clonedRowData(item);
+      const clonedData = clonedRowData(item, resolvedValues?.get(item.id));
       newRows.value.push(clonedData);
-      newRowMeta.value.push(allocateNewRowMeta(null));
+      newRowMeta.value.push(clonedRowMeta(item, clonedData));
     }
     newRows.value = [...newRows.value];
     newRowMeta.value = [...newRowMeta.value];
@@ -1200,11 +1240,19 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
   const pendingDeleteRowIds = ref<number[]>([]);
 
   function requestDeleteRow(rowId: number) {
+    if (!confirmDangerousRowDeletion.value) {
+      applyDeleteRow(rowId);
+      return;
+    }
     pendingDeleteRowId.value = rowId;
     showDeleteRowConfirm.value = true;
   }
 
   function requestDeleteRows(rowIds: number[]) {
+    if (!confirmDangerousRowDeletion.value) {
+      applyDeleteRows(rowIds);
+      return;
+    }
     pendingDeleteRowIds.value = rowIds;
     showDeleteRowConfirm.value = true;
   }
@@ -1253,6 +1301,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
       dirtyRows: new Map([...dirtyRows.value.entries()].map(([rowIndex, changes]) => [rowIndex, new Map(changes)])),
       newRows: currentNewRows.map((row) => [...row]),
       newRowRefs: currentNewRows,
+      newRowMeta: cloneNewRowMeta(newRowMeta.value),
       deletedRows: new Set(deletedRows.value),
     };
   }
@@ -1342,6 +1391,11 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
       deletedRows: [...snapshot.deletedRows],
       newRows: snapshot.newRows,
     };
+  }
+
+  function saveDriverProfile() {
+    const id = connectionId.value;
+    return id ? connectionStore.getConfig(id)?.driver_profile : undefined;
   }
 
   function tableHistoryTarget() {
@@ -1442,6 +1496,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
         await customHandler.save({
           dirtyRows: snapshot.dirtyRows,
           newRows: snapshot.newRows,
+          newRowMeta: snapshot.newRowMeta,
           deletedRows: snapshot.deletedRows,
           columns: result.value.columns,
           rows: result.value.rows,
@@ -1469,7 +1524,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     let preparedSave: Awaited<ReturnType<typeof api.prepareDataGridSave>> | undefined;
     if (stmtOptions) {
       try {
-        preparedSave = await api.prepareDataGridSave(stmtOptions);
+        preparedSave = await api.prepareDataGridSave(stmtOptions, saveDriverProfile());
       } catch (e: any) {
         saveError.value = normalizeDataGridSaveError(databaseType.value, e);
         await finishInterruptedSaveChanges(snapshot);
@@ -1670,12 +1725,12 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     try {
       if (customSaveHandler?.value) {
         const preview = customSaveHandler.value.preview;
-        if (preview) return await preview({ dirtyRows: dirtyRows.value, newRows: newRows.value, deletedRows: deletedRows.value, columns: result.value.columns, rows: result.value.rows });
+        if (preview) return await preview({ dirtyRows: dirtyRows.value, newRows: newRows.value, newRowMeta: cloneNewRowMeta(newRowMeta.value), deletedRows: deletedRows.value, columns: result.value.columns, rows: result.value.rows });
         return [];
       }
       const stmtOptions = saveStatementOptions();
       if (!stmtOptions) return [];
-      const prepared = await api.prepareDataGridSave(stmtOptions);
+      const prepared = await api.prepareDataGridSave(stmtOptions, saveDriverProfile());
       if (prepared?.validationError) {
         saveError.value = prepared.validationError;
         return [];

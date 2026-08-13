@@ -4,6 +4,7 @@ pub mod cloudberry;
 pub mod cloudflare_d1;
 pub use cloudflare_d1 as cloudflare_d1_driver;
 pub mod document_result;
+pub mod dolt;
 pub mod doris;
 pub mod duckdb_sql;
 #[cfg(feature = "duckdb-sidecar")]
@@ -18,6 +19,7 @@ pub mod hbase_driver;
 pub mod http_tunnel;
 pub mod influxdb_driver;
 pub mod manticoresearch;
+pub mod meilisearch_driver;
 pub mod mongo_driver;
 pub mod mysql;
 pub mod mysql_compatible;

@@ -123,6 +123,13 @@ use dbx_core::agent_loop::{run_agent_loop, AgentLoopContext};
 use dbx_core::ai_cli_agent::CliAgentCommandSpec;
 use dbx_core::models::connection::DatabaseType;
 
+#[derive(serde::Serialize)]
+struct AiAgentEventPayload {
+    session_id: String,
+    #[serde(flatten)]
+    event: AgentEvent,
+}
+
 #[tauri::command]
 pub async fn ai_cancel_stream(session_id: String) -> Result<bool, String> {
     Ok(dbx_core::ai::cancel_stream(&session_id).await)
@@ -214,8 +221,10 @@ pub async fn ai_agent_stream(
         &agent_ctx,
         {
             let app = app.clone();
+            let event_session_id = session_id.clone();
             move |event: AgentEvent| {
-                let _ = app.emit("ai-agent-event", &event);
+                let payload = AiAgentEventPayload { session_id: event_session_id.clone(), event };
+                let _ = app.emit("ai-agent-event", &payload);
             }
         },
         &cancelled,
@@ -239,6 +248,11 @@ fn resolve_cli_provider_config(mut config: AiConfig) -> AiConfig {
         AiProvider::CodexCli => (&mut config.codex_cli_path, "codex"),
         AiProvider::ClaudeCodeCli => (&mut config.claude_code_cli_path, "claude"),
         AiProvider::PiAgentCli => (&mut config.pi_agent_cli_path, "pi"),
+        AiProvider::OpenCodeCli => (&mut config.opencode_cli_path, "opencode"),
+        AiProvider::CursorCli => (&mut config.cursor_cli_path, "agent"),
+        AiProvider::GrokCli => (&mut config.grok_cli_path, "grok"),
+        AiProvider::CodeBuddyCli => (&mut config.codebuddy_cli_path, "codebuddy"),
+        AiProvider::QoderCli => (&mut config.qoder_cli_path, "qodercli"),
         _ => return config,
     };
     let command = path_slot.as_deref().map(str::trim).filter(|path| !path.is_empty()).unwrap_or(default_command);
@@ -324,6 +338,16 @@ mod tests {
             claude_code_cli_env: Default::default(),
             pi_agent_cli_path: None,
             pi_agent_cli_env: Default::default(),
+            opencode_cli_path: None,
+            opencode_cli_env: Default::default(),
+            cursor_cli_path: None,
+            cursor_cli_env: Default::default(),
+            grok_cli_path: None,
+            grok_cli_env: Default::default(),
+            codebuddy_cli_path: None,
+            codebuddy_cli_env: Default::default(),
+            qoder_cli_path: None,
+            qoder_cli_env: Default::default(),
         }
     }
 

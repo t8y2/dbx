@@ -10,9 +10,11 @@ import { findSidebarActionTarget } from "@/lib/sidebar/sidebarActionTarget";
 import {
   MONGO_INDEX_KEY_TYPES,
   buildMongoCreateIndexRequest,
+  isCloneableMongoCollection,
   isProtectedMongoIndex,
   isRenamableMongoCollection,
   mongoCollectionKindFromNode,
+  mongoCloneCollectionPreview,
   mongoCreateIndexPreview,
   mongoDropAllIndexesPreview,
   mongoDropCollectionPreview,
@@ -25,6 +27,7 @@ import {
 } from "@/lib/sidebar/mongoCollectionMutation";
 import { supportsMongoAllDriverMutations, supportsMongoIndexMutations, supportsNativeMongoDriverMutations } from "@/lib/mongo/mongoCapabilities";
 import { runMongoSidebarMutation } from "@/lib/sidebar/runMongoSidebarMutation";
+import { executeWithProductionContextGuard } from "@/lib/database/productionExecutionGuard";
 import { refreshLoadedMongoIndexes } from "@/lib/mongo/mongoIndexMetadata";
 import {
   sidebarDangerTarget,
@@ -55,6 +58,10 @@ import {
   renameMongoCollectionError,
   renameMongoCollectionPreview,
   renameMongoCollectionLoading,
+  showCloneMongoCollectionDialog,
+  cloneMongoCollectionName,
+  cloneMongoCollectionError,
+  cloneMongoCollectionLoading,
   showCreateMongoIndexDialog,
   mongoCreateIndexForm,
   mongoCreateIndexFieldOptions,
@@ -110,8 +117,13 @@ export function useSidebarDatabaseSpecificMutationRuntime(options: SidebarDataba
     return canMutateMongoCollectionNode(node) && usesNativeMongoDriver(node) && isRenamableMongoCollection(node.label, mongoCollectionKindFromNode(node));
   }
 
+  function canCloneMongoCollectionNode(node: TreeNode): boolean {
+    return canMutateMongoCollectionNode(node) && isCloneableMongoCollection(node.label, mongoCollectionKindFromNode(node));
+  }
+
   const canDropMongoCollection = computed(() => canMutateMongoCollectionNode(activeNode.value));
   const canRenameMongoCollection = computed(() => canRenameMongoCollectionNode(activeNode.value));
+  const canCloneMongoCollection = computed(() => canCloneMongoCollectionNode(activeNode.value));
 
   function toastMutationError(error: unknown) {
     toast(t("contextMenu.tableOperationFailed", { message: errorMessage(error) }), 5000);
@@ -167,6 +179,55 @@ export function useSidebarDatabaseSpecificMutationRuntime(options: SidebarDataba
       },
       onError: (error) => {
         renameMongoCollectionError.value = translateBackendError(t, errorMessage(error));
+      },
+    });
+  }
+
+  function prepareCloneMongoCollectionDialog() {
+    cloneMongoCollectionName.value = `${activeNode.value.label}_copy`;
+    cloneMongoCollectionError.value = "";
+    cloneMongoCollectionLoading.value = false;
+    showCloneMongoCollectionDialog.value = true;
+  }
+
+  async function confirmCloneMongoCollection() {
+    const node = sidebarFormTarget.value ?? activeNode.value;
+    const connectionId = node.connectionId;
+    const database = node.database;
+    const targetName = cloneMongoCollectionName.value;
+    if (!canCloneMongoCollectionNode(node) || !connectionId || !database || !targetName || targetName === node.label) return;
+
+    const sourceName = node.label;
+    cloneMongoCollectionError.value = "";
+    await runMongoSidebarMutation({
+      connection: connectionStore.getConfig(connectionId),
+      database,
+      reviewText: mongoCloneCollectionPreview(database, sourceName, targetName),
+      source: t("production.sourceSidebar"),
+      loading: cloneMongoCollectionLoading,
+      beforeExecute: () => connectionStore.ensureConnected(connectionId),
+      execute: async () => {
+        try {
+          return await api.mongoCloneCollection(connectionId, database, sourceName, targetName);
+        } finally {
+          // A failed write can still leave a target collection with partial data;
+          // refresh so it is visible and can be inspected or removed explicitly.
+          await connectionStore.loadMongoCollections(connectionId, database);
+        }
+      },
+      onSuccess: (result) => {
+        toast(
+          t("contextMenu.cloneCollectionSuccess", {
+            name: targetName,
+            documents: result.documents_copied,
+            indexes: result.indexes_copied,
+          }),
+          3000,
+        );
+        showCloneMongoCollectionDialog.value = false;
+      },
+      onError: (error) => {
+        cloneMongoCollectionError.value = translateBackendError(t, errorMessage(error));
       },
     });
   }
@@ -442,10 +503,19 @@ export function useSidebarDatabaseSpecificMutationRuntime(options: SidebarDataba
     const node = sidebarFormTarget.value ?? activeNode.value;
     const namespaceName = createNacosNamespaceName.value.trim();
     if (!node.connectionId || !namespaceName || createNacosNamespaceLoading.value) return;
+    const namespaceId = createNacosNamespaceId.value.trim();
+    const confirmed = await executeWithProductionContextGuard({
+      connection: connectionStore.getConfig(node.connectionId),
+      database: namespaceId || undefined,
+      reviewText: t("nacos.createNamespace"),
+      source: t("production.sourceSidebar"),
+      execute: async () => true,
+    });
+    if (confirmed !== true) return;
     createNacosNamespaceLoading.value = true;
     try {
       await api.nacosCreateNamespace(node.connectionId, {
-        namespaceId: createNacosNamespaceId.value.trim() || undefined,
+        namespaceId: namespaceId || undefined,
         namespaceName,
         namespaceDesc: createNacosNamespaceDesc.value.trim() || namespaceName,
       });
@@ -473,6 +543,14 @@ export function useSidebarDatabaseSpecificMutationRuntime(options: SidebarDataba
     const namespaceId = node.nacosNamespace?.trim() || "";
     const namespaceName = editNacosNamespaceName.value.trim();
     if (!node.connectionId || !namespaceId || !namespaceName || editNacosNamespaceLoading.value) return;
+    const confirmed = await executeWithProductionContextGuard({
+      connection: connectionStore.getConfig(node.connectionId),
+      database: namespaceId,
+      reviewText: t("nacos.editNamespace"),
+      source: t("production.sourceSidebar"),
+      execute: async () => true,
+    });
+    if (confirmed !== true) return;
     editNacosNamespaceLoading.value = true;
     try {
       await api.nacosUpdateNamespace(node.connectionId, {
@@ -702,6 +780,7 @@ export function useSidebarDatabaseSpecificMutationRuntime(options: SidebarDataba
     canDropMongoDatabase,
     canDropMongoCollection,
     canRenameMongoCollection,
+    canCloneMongoCollection,
     prepareRenameMongoCollectionDialog,
     confirmRenameMongoCollection,
     showRenameMongoCollectionDialog,
@@ -709,6 +788,12 @@ export function useSidebarDatabaseSpecificMutationRuntime(options: SidebarDataba
     renameMongoCollectionError,
     renameMongoCollectionPreview,
     renameMongoCollectionLoading,
+    prepareCloneMongoCollectionDialog,
+    confirmCloneMongoCollection,
+    showCloneMongoCollectionDialog,
+    cloneMongoCollectionName,
+    cloneMongoCollectionError,
+    cloneMongoCollectionLoading,
     mongoIndexNameForNode,
     canDropMongoIndexNode,
     canDropMongoIndex,

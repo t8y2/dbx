@@ -96,6 +96,7 @@ pub fn build_single_column_alter_sql(options: SingleColumnAlterSqlOptions) -> Ta
                 statements.extend(build_oracle_like_existing_column_sql(dialect, &table, &options.column))
             }
         }
+        StructureDialect::Oscar => statements.extend(build_oscar_existing_column_sql(dialect, &table, &options.column)),
         StructureDialect::H2 => statements.extend(build_h2_existing_column_sql(&table, &options.column)),
         StructureDialect::ClickHouse => {
             statements.extend(build_clickhouse_existing_column_sql(&table, &options.column, ""))
@@ -505,6 +506,64 @@ pub(super) fn build_iris_existing_column_sql(table: &str, column: &EditableStruc
             parts.push(if column.is_nullable { "NULL".to_string() } else { "NOT NULL".to_string() });
         }
         statements.push(format!("ALTER TABLE {table} MODIFY ({});", parts.join(" ")));
+    }
+    statements
+}
+
+/// 神通 Oscar 的 ALTER 已有列 SQL。
+///
+/// 神通的 `ALTER TABLE ... MODIFY` 语法与 Oracle 有重要差异（实测 v7.0.8）：
+/// 带圆括号的 `MODIFY (col TYPE [DEFAULT ...])` 不允许出现 `NULL`/`NOT NULL`，否则
+/// parser 报 `syntax error at or near "NULL"`。要改可空性必须用不带括号、不带类型的
+/// `MODIFY col NOT NULL` / `MODIFY col NULL` 单独一条。因此类型/默认值变更与可空性
+/// 变更需拆成两条语句，而不能像 Oracle/Dameng 那样合并进单个 `MODIFY (...)`。
+pub(super) fn build_oscar_existing_column_sql(
+    dialect: StructureDialect,
+    table: &str,
+    column: &EditableStructureColumn,
+) -> Vec<String> {
+    let Some(original) = &column.original else {
+        return Vec::new();
+    };
+    let mut statements = Vec::new();
+    let mut current_name = original.name.clone();
+    if column.name != original.name {
+        statements.push(format!(
+            "ALTER TABLE {table} RENAME COLUMN {} TO {};",
+            quote_ident(dialect, &original.name),
+            quote_ident(dialect, &column.name)
+        ));
+        current_name = column.name.clone();
+    }
+    let type_changed = column.data_type.trim() != original.data_type.trim();
+    let nullable_changed = column.is_nullable != original.is_nullable;
+    let default_changed = normalize_default(Some(&column.default_value)) != original_default(column);
+
+    // 类型或默认值变更：带括号的 MODIFY 只允许 "col TYPE [DEFAULT ...]"，不含 NULL/NOT NULL。
+    if type_changed || default_changed {
+        let data_type = column_data_type(dialect, column);
+        let mut parts = vec![quote_ident(dialect, &current_name), data_type];
+        let default_value = normalize_default(Some(&column.default_value));
+        if !default_value.is_empty() {
+            parts.push(format!("DEFAULT {}", format_default_for_sql(dialect, &column.data_type, &default_value)));
+        } else if default_changed {
+            // User cleared the default — explicitly drop it. MODIFY (col DEFAULT NULL) 合法。
+            parts.push("DEFAULT NULL".to_string());
+        }
+        statements.push(format!("ALTER TABLE {table} MODIFY ({});", parts.join(" ")));
+    }
+
+    // 可空性变更：神通要求不带括号、不带类型的单独 MODIFY，否则 parser 报错。
+    if nullable_changed {
+        let nullability = if column.is_nullable { "NULL" } else { "NOT NULL" };
+        statements.push(format!("ALTER TABLE {table} MODIFY {} {};", quote_ident(dialect, &current_name), nullability));
+    }
+
+    if clean(&column.comment) != original_comment(column) {
+        let comment_value =
+            if clean(&column.comment).is_empty() { "NULL".to_string() } else { quote_string(&clean(&column.comment)) };
+        statements
+            .push(format!("COMMENT ON COLUMN {table}.{} IS {comment_value};", quote_ident(dialect, &current_name)));
     }
     statements
 }

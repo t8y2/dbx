@@ -6,6 +6,7 @@ import { isExplicitlyQuotedSqlIdentifier, quoteGaussDbJdbcIdentifier } from "@/l
 
 export interface BuildTableSelectSqlOptions {
   databaseType?: DatabaseType;
+  driverProfile?: string;
   identifierQuote?: string;
   schema?: string;
   tableName: string;
@@ -50,8 +51,11 @@ function quoteCypherIdentifier(name: string): string {
   return `\`${name.replace(/`/g, "``")}\``;
 }
 
-export function qualifiedTableName(options: Pick<BuildTableSelectSqlOptions, "databaseType" | "identifierQuote" | "schema" | "tableName" | "catalog" | "database">): string {
-  const { databaseType, identifierQuote, schema, tableName, catalog, database } = options;
+export function qualifiedTableName(options: Pick<BuildTableSelectSqlOptions, "databaseType" | "driverProfile" | "identifierQuote" | "schema" | "tableName" | "catalog" | "database">): string {
+  const { databaseType, driverProfile, identifierQuote, schema, tableName, catalog, database } = options;
+  if (databaseType === "informix" && driverProfile?.trim().toLowerCase() === "gbase8s") {
+    return quoteTableDataIdentifier(databaseType, tableName, identifierQuote);
+  }
   // Doris / StarRocks multi-catalog: address external-catalog tables with the
   // 3-part `catalog.database.table` form, which the engines accept directly.
   if (catalog && catalog !== "internal" && (databaseType === "doris" || databaseType === "starrocks")) {

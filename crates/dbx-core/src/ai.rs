@@ -79,6 +79,16 @@ pub enum AiProvider {
     ClaudeCodeCli,
     #[serde(rename = "pi-agent-cli")]
     PiAgentCli,
+    #[serde(rename = "opencode-cli")]
+    OpenCodeCli,
+    #[serde(rename = "cursor-cli")]
+    CursorCli,
+    #[serde(rename = "grok-cli")]
+    GrokCli,
+    #[serde(rename = "codebuddy-cli")]
+    CodeBuddyCli,
+    #[serde(rename = "qoder-cli")]
+    QoderCli,
     Custom,
 }
 
@@ -96,6 +106,11 @@ impl AiProvider {
             AiProvider::OpenaiCompatible => "openai-compatible",
             AiProvider::ClaudeCodeCli => "claude-code-cli",
             AiProvider::PiAgentCli => "pi-agent-cli",
+            AiProvider::OpenCodeCli => "opencode-cli",
+            AiProvider::CursorCli => "cursor-cli",
+            AiProvider::GrokCli => "grok-cli",
+            AiProvider::CodeBuddyCli => "codebuddy-cli",
+            AiProvider::QoderCli => "qoder-cli",
             AiProvider::CodexCli => "codex-cli",
             AiProvider::Custom => "custom",
         }
@@ -278,6 +293,13 @@ pub struct AiModelEffortPreference {
     pub selection: AiEffortSelection,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AiAssistantMode {
+    Ask,
+    Agent,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct AiChatSelectionState {
@@ -287,11 +309,18 @@ pub struct AiChatSelectionState {
     pub active: Option<AiActiveModelSelection>,
     #[serde(default)]
     pub effort_preferences: Vec<AiModelEffortPreference>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_mode: Option<AiAssistantMode>,
 }
 
 impl Default for AiChatSelectionState {
     fn default() -> Self {
-        Self { version: default_ai_chat_selection_version(), active: None, effort_preferences: Vec::new() }
+        Self {
+            version: default_ai_chat_selection_version(),
+            active: None,
+            effort_preferences: Vec::new(),
+            default_mode: None,
+        }
     }
 }
 
@@ -373,6 +402,26 @@ pub struct AiConfig {
     pub pi_agent_cli_path: Option<String>,
     #[serde(default)]
     pub pi_agent_cli_env: HashMap<String, String>,
+    #[serde(default)]
+    pub opencode_cli_path: Option<String>,
+    #[serde(default)]
+    pub opencode_cli_env: HashMap<String, String>,
+    #[serde(default)]
+    pub cursor_cli_path: Option<String>,
+    #[serde(default)]
+    pub cursor_cli_env: HashMap<String, String>,
+    #[serde(default)]
+    pub grok_cli_path: Option<String>,
+    #[serde(default)]
+    pub grok_cli_env: HashMap<String, String>,
+    #[serde(default)]
+    pub codebuddy_cli_path: Option<String>,
+    #[serde(default)]
+    pub codebuddy_cli_env: HashMap<String, String>,
+    #[serde(default)]
+    pub qoder_cli_path: Option<String>,
+    #[serde(default)]
+    pub qoder_cli_env: HashMap<String, String>,
 }
 
 fn default_enable_thinking() -> bool {
@@ -380,10 +429,20 @@ fn default_enable_thinking() -> bool {
 }
 
 /// Whether the provider is a CLI-based provider that goes through its own
-/// executable (claude-code, codex, pi) rather than through `with_retry` /
+/// executable (claude-code, codex, cursor, opencode, pi) rather than through `with_retry` /
 /// `with_stream_retry`.
 pub fn is_cli_provider(provider: &AiProvider) -> bool {
-    matches!(provider, AiProvider::CodexCli | AiProvider::ClaudeCodeCli | AiProvider::PiAgentCli)
+    matches!(
+        provider,
+        AiProvider::CodexCli
+            | AiProvider::ClaudeCodeCli
+            | AiProvider::PiAgentCli
+            | AiProvider::OpenCodeCli
+            | AiProvider::CursorCli
+            | AiProvider::GrokCli
+            | AiProvider::CodeBuddyCli
+            | AiProvider::QoderCli
+    )
 }
 
 /// Merge the global `max_retries` setting into an `AiConfig`.
@@ -612,6 +671,11 @@ pub fn resolve_endpoint(config: &AiConfig) -> String {
         | AiProvider::CodexCli
         | AiProvider::ClaudeCodeCli
         | AiProvider::PiAgentCli
+        | AiProvider::OpenCodeCli
+        | AiProvider::CursorCli
+        | AiProvider::GrokCli
+        | AiProvider::CodeBuddyCli
+        | AiProvider::QoderCli
         | AiProvider::Gemini => unreachable!(),
     }
 }
@@ -781,6 +845,207 @@ pub fn openai_stream_reasoning(event: &serde_json::Value) -> Option<&str> {
         .filter(|text| !text.is_empty())
 }
 
+const MINIMAX_REASONING_DETAILS_PAYLOAD_KEY: &str = "minimax_reasoning_details";
+
+#[derive(Debug, Clone, Copy, Default)]
+enum MiniMaxStreamSemantics {
+    #[default]
+    Auto,
+    Incremental,
+}
+
+fn minimax_stream_semantics(config: &AiConfig) -> MiniMaxStreamSemantics {
+    // The China platform currently emits ordinary fragments, while the global
+    // SDK example documents cumulative snapshots. A fixed regional mode avoids
+    // the inherently ambiguous case where two incremental fragments happen to
+    // share a prefix; custom gateways retain the tolerant auto mode.
+    let china_endpoint = reqwest::Url::parse(&config.endpoint)
+        .ok()
+        .and_then(|url| url.host_str().map(ToString::to_string))
+        .is_some_and(|host| host.eq_ignore_ascii_case("api.minimaxi.com"));
+    if china_endpoint {
+        MiniMaxStreamSemantics::Incremental
+    } else {
+        MiniMaxStreamSemantics::Auto
+    }
+}
+
+fn minimax_stream_reasoning_details(event: &serde_json::Value) -> Option<&Vec<serde_json::Value>> {
+    event["choices"]
+        .get(0)
+        .and_then(|choice| choice["delta"]["reasoning_details"].as_array())
+        .filter(|details| !details.is_empty())
+}
+
+/// Converts cumulative text snapshots or ordinary incremental chunks into
+/// incremental deltas while retaining the complete assembled text.
+///
+/// MiniMax deployments do not all use the same streaming semantics: the global
+/// API examples use cumulative snapshots, while the China API currently emits
+/// incremental fragments. Accepting both forms keeps rendering and tool-call
+/// replay consistent across the official endpoints and compatible gateways.
+#[derive(Debug, Default)]
+struct MiniMaxTextAccumulator {
+    semantics: MiniMaxStreamSemantics,
+    latest: String,
+    complete: String,
+}
+
+impl MiniMaxTextAccumulator {
+    fn new(semantics: MiniMaxStreamSemantics) -> Self {
+        Self { semantics, latest: String::new(), complete: String::new() }
+    }
+
+    fn push(&mut self, value: &str) -> Option<String> {
+        if value.is_empty() {
+            return None;
+        }
+
+        if matches!(self.semantics, MiniMaxStreamSemantics::Incremental) {
+            self.latest = value.to_string();
+            self.complete.push_str(value);
+            return Some(value.to_string());
+        }
+
+        if value == self.latest {
+            return None;
+        }
+
+        if let Some(suffix) = value.strip_prefix(&self.latest) {
+            let delta = suffix.to_string();
+            self.latest = value.to_string();
+            self.complete.push_str(&delta);
+            return (!delta.is_empty()).then_some(delta);
+        }
+
+        if self.latest.starts_with(value) {
+            // Ignore an older/shorter cumulative snapshot that arrived late.
+            return None;
+        }
+
+        self.latest = value.to_string();
+        self.complete.push_str(value);
+        Some(value.to_string())
+    }
+
+    fn complete(&self) -> &str {
+        &self.complete
+    }
+}
+
+#[derive(Debug)]
+struct MiniMaxReasoningDetailState {
+    position: usize,
+    latest: serde_json::Value,
+    text: MiniMaxTextAccumulator,
+}
+
+impl MiniMaxReasoningDetailState {
+    fn matches(&self, detail: &serde_json::Value, position: usize) -> bool {
+        let id = detail["id"].as_str().filter(|id| !id.is_empty());
+        if let (Some(id), Some(latest_id)) = (id, self.latest["id"].as_str().filter(|id| !id.is_empty())) {
+            return id == latest_id;
+        }
+
+        let index = detail["index"].as_u64();
+        if let (Some(index), Some(latest_index)) = (index, self.latest["index"].as_u64()) {
+            return index == latest_index;
+        }
+
+        self.position == position
+    }
+
+    fn process(&mut self, detail: &serde_json::Value) -> Option<String> {
+        let delta = detail["text"].as_str().and_then(|text| self.text.push(text));
+        self.latest = detail.clone();
+        delta
+    }
+
+    fn replay_value(&self) -> serde_json::Value {
+        let mut detail = self.latest.clone();
+        if detail.get("text").is_some() {
+            detail["text"] = serde_json::Value::String(self.text.complete().to_string());
+        }
+        detail
+    }
+}
+
+#[derive(Debug)]
+struct MiniMaxStreamState {
+    semantics: MiniMaxStreamSemantics,
+    content: MiniMaxTextAccumulator,
+    reasoning_fallback: MiniMaxTextAccumulator,
+    reasoning_details: Vec<MiniMaxReasoningDetailState>,
+}
+
+#[derive(Debug, Default, PartialEq)]
+struct MiniMaxStreamDelta {
+    text: Option<String>,
+    reasoning: Option<String>,
+}
+
+impl MiniMaxStreamState {
+    fn new(semantics: MiniMaxStreamSemantics) -> Self {
+        Self {
+            semantics,
+            content: MiniMaxTextAccumulator::new(semantics),
+            reasoning_fallback: MiniMaxTextAccumulator::new(semantics),
+            reasoning_details: Vec::new(),
+        }
+    }
+
+    fn process(&mut self, event: &serde_json::Value) -> MiniMaxStreamDelta {
+        let text = openai_stream_text(event).and_then(|text| self.content.push(&text));
+        let reasoning = if let Some(details) = minimax_stream_reasoning_details(event) {
+            let fallback_delta =
+                openai_stream_reasoning(event).and_then(|reasoning| self.reasoning_fallback.push(reasoning));
+            let has_detail_text =
+                details.iter().any(|detail| detail["text"].as_str().is_some_and(|text| !text.is_empty()));
+            let mut delta = String::new();
+            for (position, detail) in details.iter().enumerate() {
+                let state_index =
+                    self.reasoning_details.iter().position(|state| state.matches(detail, position)).unwrap_or_else(
+                        || {
+                            self.reasoning_details.push(MiniMaxReasoningDetailState {
+                                position,
+                                latest: detail.clone(),
+                                text: MiniMaxTextAccumulator::new(self.semantics),
+                            });
+                            self.reasoning_details.len() - 1
+                        },
+                    );
+                if let Some(fragment) = self.reasoning_details[state_index].process(detail) {
+                    delta.push_str(&fragment);
+                }
+            }
+            if has_detail_text {
+                (!delta.is_empty()).then_some(delta)
+            } else {
+                fallback_delta
+            }
+        } else {
+            openai_stream_reasoning(event).and_then(|reasoning| self.reasoning_fallback.push(reasoning))
+        };
+        MiniMaxStreamDelta { text, reasoning }
+    }
+
+    fn provider_payload(&self) -> Option<serde_json::Value> {
+        (!self.reasoning_details.is_empty()).then(|| {
+            let details =
+                self.reasoning_details.iter().map(MiniMaxReasoningDetailState::replay_value).collect::<Vec<_>>();
+            json!({
+                MINIMAX_REASONING_DETAILS_PAYLOAD_KEY: details,
+            })
+        })
+    }
+}
+
+impl Default for MiniMaxStreamState {
+    fn default() -> Self {
+        Self::new(MiniMaxStreamSemantics::Auto)
+    }
+}
+
 fn openai_stream_has_finish_reason(event: &serde_json::Value) -> bool {
     event["choices"].as_array().is_some_and(|choices| {
         choices.iter().any(|choice| choice["finish_reason"].as_str().is_some_and(|reason| !reason.is_empty()))
@@ -824,16 +1089,30 @@ fn is_openai_reasoning_model(model: &str) -> bool {
     model.starts_with("gpt-5") || model.starts_with("o1") || model.starts_with("o3") || model.starts_with("o4")
 }
 
-fn uses_openai_max_completion_tokens(config: &AiConfig) -> bool {
-    is_openai_api_config(config) && is_openai_reasoning_model(&config.model)
+fn uses_chat_completion_max_completion_tokens(config: &AiConfig) -> bool {
+    matches!(config.provider, AiProvider::MiniMax)
+        || is_openai_api_config(config) && is_openai_reasoning_model(&config.model)
 }
 
 fn set_chat_completion_token_limit(body: &mut serde_json::Value, config: &AiConfig, max_tokens: u32) {
-    if uses_openai_max_completion_tokens(config) {
+    if uses_chat_completion_max_completion_tokens(config) {
         body["max_completion_tokens"] = json!(max_tokens);
     } else {
         body["max_tokens"] = json!(max_tokens);
     }
+}
+
+fn apply_minimax_chat_completion_fields(body: &mut serde_json::Value, config: &AiConfig) {
+    if matches!(config.provider, AiProvider::MiniMax) {
+        body["reasoning_split"] = json!(true);
+    }
+}
+
+fn decorate_chat_completion_body(body: &mut serde_json::Value, config: &AiConfig, max_tokens: u32) {
+    set_chat_completion_token_limit(body, config, max_tokens);
+    apply_minimax_chat_completion_fields(body, config);
+    apply_chat_completion_thinking_toggle(body, config);
+    crate::ai_effort::apply_runtime_effort(body, config);
 }
 
 /// Kimi K2.5+ models (including K2.7-Code) handle thinking flags differently
@@ -1064,8 +1343,12 @@ fn normalized_api_key(config: &AiConfig) -> &str {
 
 fn validate_config(config: &AiConfig) -> Result<(), String> {
     crate::ai_effort::validate_runtime_effort(config)?;
-    if matches!(config.provider, AiProvider::CodexCli | AiProvider::ClaudeCodeCli | AiProvider::PiAgentCli) {
+    if is_cli_provider(&config.provider) {
         return Ok(());
+    }
+    if matches!(config.provider, AiProvider::MiniMax) && config.api_style != AiApiStyle::Completions {
+        return Err("MiniMax currently supports the Chat Completions API style in DBX; select Completions and retry"
+            .to_string());
     }
     if provider_requires_api_key(&config.provider) && config.api_key.trim().is_empty() {
         return Err("API key is required".to_string());
@@ -1080,7 +1363,7 @@ fn validate_config(config: &AiConfig) -> Result<(), String> {
 }
 
 fn validate_model_list_config(config: &AiConfig) -> Result<(), String> {
-    if matches!(config.provider, AiProvider::CodexCli | AiProvider::ClaudeCodeCli | AiProvider::PiAgentCli) {
+    if is_cli_provider(&config.provider) {
         return Ok(());
     }
     if provider_requires_api_key(&config.provider) && config.api_key.trim().is_empty() {
@@ -1459,6 +1742,11 @@ pub async fn list_models_core(config: &AiConfig) -> Result<Vec<AiModelInfo>, Str
         AiProvider::CodexCli => crate::ai_codex_cli::list_codex_models(config).await?,
         AiProvider::ClaudeCodeCli => crate::ai_claude_code_cli::list_claude_code_models(config).await?,
         AiProvider::PiAgentCli => crate::ai_pi_agent_cli::list_pi_agent_models(config).await?,
+        AiProvider::OpenCodeCli => crate::ai_opencode_cli::list_opencode_models(config).await?,
+        AiProvider::CursorCli => crate::ai_cursor_cli::list_cursor_models(config).await?,
+        AiProvider::GrokCli => crate::ai_grok_cli::list_grok_models(config).await?,
+        AiProvider::CodeBuddyCli => crate::ai_codebuddy_cli::list_codebuddy_models(config).await?,
+        AiProvider::QoderCli => crate::ai_qoder_cli::list_qoder_models(config).await?,
         _ => {
             validate_model_list_config(config)?;
             let client = build_ai_http_client(config, 30)?;
@@ -1481,7 +1769,16 @@ pub async fn list_models_core(config: &AiConfig) -> Result<Vec<AiModelInfo>, Str
                         list_openai_compatible_models(&client, config).await?
                     }
                 }
-                AiProvider::CodexCli | AiProvider::ClaudeCodeCli | AiProvider::PiAgentCli => unreachable!(),
+                AiProvider::CodexCli
+                | AiProvider::ClaudeCodeCli
+                | AiProvider::PiAgentCli
+                | AiProvider::OpenCodeCli
+                | AiProvider::CursorCli
+                | AiProvider::GrokCli
+                | AiProvider::CodeBuddyCli
+                | AiProvider::QoderCli => {
+                    unreachable!()
+                }
             }
         }
     };
@@ -1500,7 +1797,23 @@ pub async fn resolve_model_effort_core(config: &AiConfig, model_id: &str) -> Res
         return crate::ai_pi_agent_cli::resolve_pi_agent_model_effort(config, model_id).await;
     }
 
-    if matches!(config.provider, AiProvider::CodexCli | AiProvider::ClaudeCodeCli) {
+    if matches!(config.provider, AiProvider::OpenCodeCli) {
+        return crate::ai_opencode_cli::resolve_opencode_model_effort(config, model_id).await;
+    }
+
+    if matches!(config.provider, AiProvider::CodeBuddyCli) {
+        return crate::ai_codebuddy_cli::resolve_codebuddy_model_effort(config, model_id).await;
+    }
+
+    if matches!(config.provider, AiProvider::QoderCli) {
+        return crate::ai_qoder_cli::resolve_qoder_model_effort(config, model_id).await;
+    }
+
+    if matches!(config.provider, AiProvider::CursorCli) {
+        return Ok(AiEffortCapability::Unsupported);
+    }
+
+    if matches!(config.provider, AiProvider::CodexCli | AiProvider::ClaudeCodeCli | AiProvider::GrokCli) {
         let models = list_models_core(config).await?;
         return Ok(models
             .into_iter()
@@ -1567,19 +1880,60 @@ pub async fn call_claude(client: &reqwest::Client, request: AiCompletionRequest)
         .to_string())
 }
 
+fn minimax_reasoning_details_from_tool_calls(tool_calls: &[ToolCallRef]) -> Option<serde_json::Value> {
+    tool_calls.iter().filter_map(|tool_call| tool_call.provider_payload.as_ref()).find_map(|payload| {
+        payload.get(MINIMAX_REASONING_DETAILS_PAYLOAD_KEY).filter(|details| details.is_array()).cloned()
+    })
+}
+
+fn build_openai_chat_messages(
+    config: &AiConfig,
+    system_prompt: &str,
+    messages: &[AiMessage],
+) -> Vec<serde_json::Value> {
+    let mut output = vec![json!({ "role": "system", "content": system_prompt })];
+    output.extend(messages.iter().map(|message| {
+        let mut item = json!({ "role": message.role, "content": message.content });
+        if message.role == "tool" {
+            if let Some(tool_call_id) = message.tool_call_id.as_ref() {
+                item["tool_call_id"] = json!(tool_call_id);
+            }
+        } else if message.role == "assistant" && !message.tool_calls.is_empty() {
+            item["tool_calls"] = json!(message
+                .tool_calls
+                .iter()
+                .map(|tool_call| {
+                    json!({
+                        "id": tool_call.id,
+                        "type": "function",
+                        "function": {
+                            "name": tool_call.name,
+                            "arguments": tool_call.arguments.to_string(),
+                        }
+                    })
+                })
+                .collect::<Vec<_>>());
+            if matches!(config.provider, AiProvider::MiniMax) {
+                if let Some(reasoning_details) = minimax_reasoning_details_from_tool_calls(&message.tool_calls) {
+                    item["reasoning_details"] = reasoning_details;
+                }
+            }
+        }
+        item
+    }));
+    output
+}
+
 pub async fn call_openai_compatible(client: &reqwest::Client, request: AiCompletionRequest) -> Result<String, String> {
     let headers = maybe_bearer_headers(&request.config)?;
 
-    let mut messages = vec![json!({ "role": "system", "content": request.system_prompt })];
-    messages.extend(request.messages.iter().map(|message| json!({ "role": message.role, "content": message.content })));
+    let messages = build_openai_chat_messages(&request.config, &request.system_prompt, &request.messages);
 
     let mut body_obj = json!({
         "model": request.config.model,
         "messages": messages,
     });
-    set_chat_completion_token_limit(&mut body_obj, &request.config, request.max_tokens.unwrap_or(2048));
-    apply_chat_completion_thinking_toggle(&mut body_obj, &request.config);
-    crate::ai_effort::apply_runtime_effort(&mut body_obj, &request.config);
+    decorate_chat_completion_body(&mut body_obj, &request.config, request.max_tokens.unwrap_or(2048));
 
     let res = client
         .post(resolve_endpoint(&request.config))
@@ -1850,6 +2204,8 @@ fn probe_stream_payload(
     event_name: Option<&str>,
     is_claude: bool,
     is_gemini: bool,
+    is_minimax: bool,
+    minimax_state: &mut MiniMaxStreamState,
     diagnostics: &mut StreamProbeDiagnostics,
 ) -> Result<Option<String>, String> {
     diagnostics.data_events += 1;
@@ -1869,7 +2225,10 @@ fn probe_stream_payload(
         diagnostics.observe_gemini(&parsed);
     }
 
-    let delta = if is_claude {
+    let delta = if is_minimax {
+        let delta = minimax_state.process(&parsed);
+        delta.text.or(delta.reasoning)
+    } else if is_claude {
         claude_stream_text(&parsed).or_else(|| parsed["delta"]["thinking"].as_str()).map(ToString::to_string)
     } else if is_gemini {
         let text = gemini_text(&parsed);
@@ -1952,10 +2311,12 @@ async fn measure_first_stream_chunk(
     start: std::time::Instant,
     is_claude: bool,
     is_gemini: bool,
+    is_minimax: bool,
 ) -> Result<(u64, String), String> {
     let mut buf = Vec::new();
     let mut diagnostics = StreamProbeDiagnostics::default();
     let mut event_name: Option<String> = None;
+    let mut minimax_state = MiniMaxStreamState::default();
     while let Some(chunk) = byte_stream.next().await {
         let chunk = chunk.map_err(|e| format!("stream read error: {}", e.without_url()))?;
         diagnostics.bytes_received += chunk.len();
@@ -1975,9 +2336,15 @@ async fn measure_first_stream_chunk(
                 diagnostics.data_events += 1;
                 return Err(diagnostics.empty_stream_error(is_gemini));
             }
-            if let Some(text) =
-                probe_stream_payload(data, event_name.as_deref(), is_claude, is_gemini, &mut diagnostics)?
-            {
+            if let Some(text) = probe_stream_payload(
+                data,
+                event_name.as_deref(),
+                is_claude,
+                is_gemini,
+                is_minimax,
+                &mut minimax_state,
+                &mut diagnostics,
+            )? {
                 let latency = start.elapsed().as_millis() as u64;
                 return Ok((latency, text));
             }
@@ -1987,9 +2354,15 @@ async fn measure_first_stream_chunk(
     if !buf.is_empty() {
         let line = String::from_utf8(buf).map_err(|e| format!("AI stream returned invalid UTF-8: {e}"))?;
         if let Some(data) = stream_data_payload(&line) {
-            if let Some(text) =
-                probe_stream_payload(data, event_name.as_deref(), is_claude, is_gemini, &mut diagnostics)?
-            {
+            if let Some(text) = probe_stream_payload(
+                data,
+                event_name.as_deref(),
+                is_claude,
+                is_gemini,
+                is_minimax,
+                &mut minimax_state,
+                &mut diagnostics,
+            )? {
                 let latency = start.elapsed().as_millis() as u64;
                 return Ok((latency, text));
             }
@@ -2028,6 +2401,22 @@ pub async fn test_connection_core(config: &AiConfig) -> Result<AiTestConnectionR
     if matches!(config.provider, AiProvider::PiAgentCli) {
         return crate::ai_pi_agent_cli::test_pi_agent_connection(config).await;
     }
+    if matches!(config.provider, AiProvider::OpenCodeCli) {
+        return crate::ai_opencode_cli::test_opencode_connection(config).await;
+    }
+    if matches!(config.provider, AiProvider::CursorCli) {
+        return crate::ai_cursor_cli::test_cursor_connection(config).await;
+    }
+
+    if matches!(config.provider, AiProvider::GrokCli) {
+        return crate::ai_grok_cli::test_grok_connection(config).await;
+    }
+    if matches!(config.provider, AiProvider::CodeBuddyCli) {
+        return crate::ai_codebuddy_cli::test_codebuddy_connection(config).await;
+    }
+    if matches!(config.provider, AiProvider::QoderCli) {
+        return crate::ai_qoder_cli::test_qoder_connection(config).await;
+    }
     let mut resolved_config = config.clone();
     if resolved_config.model.trim().is_empty() {
         let model = list_models_core(&resolved_config)
@@ -2048,6 +2437,7 @@ pub async fn test_connection_core(config: &AiConfig) -> Result<AiTestConnectionR
     let provider = config.provider.clone();
     let is_claude = uses_anthropic_messages_api(config);
     let is_gemini = matches!(config.provider, AiProvider::Gemini);
+    let is_minimax = matches!(config.provider, AiProvider::MiniMax);
     let api_key = normalized_api_key(config).to_string();
     let endpoint = resolve_endpoint(config);
     let gemini_ep = resolve_gemini_stream_endpoint(config);
@@ -2108,7 +2498,7 @@ pub async fn test_connection_core(config: &AiConfig) -> Result<AiTestConnectionR
                     }
                     AiProvider::Claude | AiProvider::AnthropicCompatible => unreachable!(),
                     _ => {
-                        let mut body_obj = if api_style == AiApiStyle::Responses {
+                        let body_obj = if api_style == AiApiStyle::Responses {
                             json!({
                                 "model": &model,
                                 "input": [{ "role": "user", "content": TEST_PROMPT }],
@@ -2122,12 +2512,9 @@ pub async fn test_connection_core(config: &AiConfig) -> Result<AiTestConnectionR
                                 "messages": messages,
                                 "stream": true,
                             });
-                            set_chat_completion_token_limit(&mut body, &config_inner, 16);
+                            decorate_chat_completion_body(&mut body, &config_inner, 16);
                             body
                         };
-                        if api_style != AiApiStyle::Responses {
-                            apply_chat_completion_thinking_toggle(&mut body_obj, &config_inner);
-                        }
                         let headers = maybe_bearer_headers(&config_inner)?;
                         let res = client
                             .post(&endpoint)
@@ -2144,7 +2531,7 @@ pub async fn test_connection_core(config: &AiConfig) -> Result<AiTestConnectionR
                 }
             };
 
-            match measure_first_stream_chunk(byte_stream, start, is_claude, is_gemini).await {
+            match measure_first_stream_chunk(byte_stream, start, is_claude, is_gemini, is_minimax).await {
                 Ok((latency, _delta)) => Ok(AiTestConnectionResult {
                     success: true,
                     message: format!("OK — {}ms", latency),
@@ -2383,7 +2770,7 @@ where
 pub async fn complete(request: &AiCompletionRequest) -> Result<String, String> {
     validate_config(&request.config)?;
 
-    if matches!(request.config.provider, AiProvider::CodexCli | AiProvider::ClaudeCodeCli | AiProvider::PiAgentCli) {
+    if is_cli_provider(&request.config.provider) {
         return Err("CLI providers are only supported in DBX AI agent mode".to_string());
     }
 
@@ -2400,7 +2787,16 @@ pub async fn complete(request: &AiCompletionRequest) -> Result<String, String> {
 
             match request.config.provider {
                 AiProvider::Gemini => call_gemini(&client, request).await,
-                AiProvider::CodexCli | AiProvider::ClaudeCodeCli | AiProvider::PiAgentCli => unreachable!(),
+                AiProvider::CodexCli
+                | AiProvider::ClaudeCodeCli
+                | AiProvider::PiAgentCli
+                | AiProvider::OpenCodeCli
+                | AiProvider::CursorCli
+                | AiProvider::GrokCli
+                | AiProvider::CodeBuddyCli
+                | AiProvider::QoderCli => {
+                    unreachable!()
+                }
                 AiProvider::Openai
                 | AiProvider::Deepseek
                 | AiProvider::Qwen
@@ -2439,7 +2835,7 @@ pub async fn stream(
 ) -> Result<(), String> {
     validate_config(&request.config)?;
 
-    if matches!(request.config.provider, AiProvider::CodexCli | AiProvider::ClaudeCodeCli | AiProvider::PiAgentCli) {
+    if is_cli_provider(&request.config.provider) {
         return Err("CLI providers are only supported in DBX AI agent mode".to_string());
     }
 
@@ -2452,7 +2848,16 @@ pub async fn stream(
 
     match request.config.provider {
         AiProvider::Gemini => stream_gemini(&client, session_id, request, cancelled, &on_chunk).await,
-        AiProvider::CodexCli | AiProvider::ClaudeCodeCli | AiProvider::PiAgentCli => unreachable!(),
+        AiProvider::CodexCli
+        | AiProvider::ClaudeCodeCli
+        | AiProvider::PiAgentCli
+        | AiProvider::OpenCodeCli
+        | AiProvider::CursorCli
+        | AiProvider::GrokCli
+        | AiProvider::CodeBuddyCli
+        | AiProvider::QoderCli => {
+            unreachable!()
+        }
         AiProvider::Openai
         | AiProvider::Deepseek
         | AiProvider::Qwen
@@ -2586,20 +2991,19 @@ async fn stream_openai(
 ) -> Result<(), String> {
     let headers = maybe_bearer_headers(&request.config)?;
 
-    let mut messages = vec![json!({ "role": "system", "content": request.system_prompt })];
-    messages.extend(request.messages.iter().map(|m| json!({ "role": m.role, "content": m.content })));
+    let messages = build_openai_chat_messages(&request.config, &request.system_prompt, &request.messages);
 
     let mut body_obj = json!({
         "model": request.config.model,
         "messages": messages,
         "stream": true,
     });
-    set_chat_completion_token_limit(&mut body_obj, &request.config, request.max_tokens.unwrap_or(2048));
-    apply_chat_completion_thinking_toggle(&mut body_obj, &request.config);
-    crate::ai_effort::apply_runtime_effort(&mut body_obj, &request.config);
+    decorate_chat_completion_body(&mut body_obj, &request.config, request.max_tokens.unwrap_or(2048));
 
     let endpoint = resolve_endpoint(&request.config);
     let config = request.config.clone();
+    let is_minimax = matches!(request.config.provider, AiProvider::MiniMax);
+    let minimax_semantics = minimax_stream_semantics(&request.config);
     let emitted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
 
     with_stream_retry(&config, &emitted, Some(cancelled), || {
@@ -2609,6 +3013,7 @@ async fn stream_openai(
         let session_id = session_id.to_string();
         let emitted = emitted.clone();
         async move {
+            let mut minimax_state = MiniMaxStreamState::new(minimax_semantics);
             let res = client
                 .post(&endpoint)
                 .headers(headers)
@@ -2640,23 +3045,45 @@ async fn stream_openai(
                             }
 
                             if let Ok(event) = serde_json::from_str::<serde_json::Value>(data) {
-                                if let Some(reasoning) = openai_stream_reasoning(&event) {
-                                    emitted.store(true, std::sync::atomic::Ordering::Relaxed);
-                                    on_chunk(AiStreamChunk {
-                                        session_id: session_id.clone(),
-                                        delta: String::new(),
-                                        reasoning_delta: Some(reasoning.to_string()),
-                                        done: false,
-                                    });
-                                }
-                                if let Some(text) = openai_stream_text(&event) {
-                                    emitted.store(true, std::sync::atomic::Ordering::Relaxed);
-                                    on_chunk(AiStreamChunk {
-                                        session_id: session_id.clone(),
-                                        delta: text,
-                                        reasoning_delta: None,
-                                        done: false,
-                                    });
+                                if is_minimax {
+                                    let delta = minimax_state.process(&event);
+                                    if let Some(reasoning) = delta.reasoning {
+                                        emitted.store(true, std::sync::atomic::Ordering::Relaxed);
+                                        on_chunk(AiStreamChunk {
+                                            session_id: session_id.clone(),
+                                            delta: String::new(),
+                                            reasoning_delta: Some(reasoning),
+                                            done: false,
+                                        });
+                                    }
+                                    if let Some(text) = delta.text {
+                                        emitted.store(true, std::sync::atomic::Ordering::Relaxed);
+                                        on_chunk(AiStreamChunk {
+                                            session_id: session_id.clone(),
+                                            delta: text,
+                                            reasoning_delta: None,
+                                            done: false,
+                                        });
+                                    }
+                                } else {
+                                    if let Some(reasoning) = openai_stream_reasoning(&event) {
+                                        emitted.store(true, std::sync::atomic::Ordering::Relaxed);
+                                        on_chunk(AiStreamChunk {
+                                            session_id: session_id.clone(),
+                                            delta: String::new(),
+                                            reasoning_delta: Some(reasoning.to_string()),
+                                            done: false,
+                                        });
+                                    }
+                                    if let Some(text) = openai_stream_text(&event) {
+                                        emitted.store(true, std::sync::atomic::Ordering::Relaxed);
+                                        on_chunk(AiStreamChunk {
+                                            session_id: session_id.clone(),
+                                            delta: text,
+                                            reasoning_delta: None,
+                                            done: false,
+                                        });
+                                    }
                                 }
                                 if finish_reason_deadline.is_none() && openai_stream_has_finish_reason(&event) {
                                     finish_reason_deadline =
@@ -3206,32 +3633,7 @@ async fn stream_openai_with_tools(
 ) -> Result<Option<TokenUsage>, String> {
     let headers = maybe_bearer_headers(&request.config)?;
 
-    let mut messages = vec![json!({ "role": "system", "content": request.system_prompt })];
-    messages.extend(request.messages.iter().map(|m| {
-        let mut msg = json!({ "role": m.role, "content": m.content });
-        if m.role == "tool" {
-            if let Some(ref tc_id) = m.tool_call_id {
-                msg["tool_call_id"] = json!(tc_id);
-            }
-        } else if m.role == "assistant" && !m.tool_calls.is_empty() {
-            let calls: Vec<serde_json::Value> = m
-                .tool_calls
-                .iter()
-                .map(|tc| {
-                    json!({
-                        "id": tc.id,
-                        "type": "function",
-                        "function": {
-                            "name": tc.name,
-                            "arguments": tc.arguments.to_string()
-                        }
-                    })
-                })
-                .collect();
-            msg["tool_calls"] = json!(calls);
-        }
-        msg
-    }));
+    let messages = build_openai_chat_messages(&request.config, &request.system_prompt, &request.messages);
 
     let tool_json: Vec<serde_json::Value> = tools.iter().map(|t| t.to_openai_tool()).collect();
 
@@ -3244,9 +3646,10 @@ async fn stream_openai_with_tools(
         "stream_options": { "include_usage": true },
     });
     set_chat_completion_token_limit(&mut body, &request.config, request.max_tokens.unwrap_or(4096));
+    apply_minimax_chat_completion_fields(&mut body, &request.config);
 
     if request.config.runtime_effort.is_none() && !request.config.enable_thinking {
-        if matches!(request.config.provider, AiProvider::Ollama) {
+        if matches!(request.config.provider, AiProvider::MiniMax | AiProvider::Ollama) {
             apply_chat_completion_thinking_toggle(&mut body, &request.config);
         } else if matches!(request.config.provider, AiProvider::Deepseek) {
             // DeepSeek uses its own thinking field for tool-enabled requests.
@@ -3257,6 +3660,8 @@ async fn stream_openai_with_tools(
 
     let endpoint = resolve_endpoint(&request.config);
     let config = request.config.clone();
+    let is_minimax = matches!(request.config.provider, AiProvider::MiniMax);
+    let minimax_semantics = minimax_stream_semantics(&request.config);
     let emitted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
 
     with_stream_retry(&config, &emitted, Some(cancelled), || {
@@ -3266,6 +3671,8 @@ async fn stream_openai_with_tools(
         let session_id = session_id.to_string();
         let emitted = emitted.clone();
         async move {
+            let mut minimax_state = MiniMaxStreamState::new(minimax_semantics);
+            let mut first_tool_index = None;
             let res = client
                 .post(&endpoint)
                 .headers(headers)
@@ -3308,24 +3715,45 @@ async fn stream_openai_with_tools(
                                     }
                                 }
                                 // Reasoning
-                                if let Some(reasoning) = openai_stream_reasoning(&event) {
-                                    emitted.store(true, std::sync::atomic::Ordering::Relaxed);
-                                    on_event(StreamToolEvent::Chunk(AiStreamChunk {
-                                        session_id: session_id.clone(),
-                                        delta: String::new(),
-                                        reasoning_delta: Some(reasoning.to_string()),
-                                        done: false,
-                                    }));
-                                }
-                                // Text
-                                if let Some(text) = openai_stream_text(&event) {
-                                    emitted.store(true, std::sync::atomic::Ordering::Relaxed);
-                                    on_event(StreamToolEvent::Chunk(AiStreamChunk {
-                                        session_id: session_id.clone(),
-                                        delta: text,
-                                        reasoning_delta: None,
-                                        done: false,
-                                    }));
+                                if is_minimax {
+                                    let delta = minimax_state.process(&event);
+                                    if let Some(reasoning) = delta.reasoning {
+                                        emitted.store(true, std::sync::atomic::Ordering::Relaxed);
+                                        on_event(StreamToolEvent::Chunk(AiStreamChunk {
+                                            session_id: session_id.clone(),
+                                            delta: String::new(),
+                                            reasoning_delta: Some(reasoning),
+                                            done: false,
+                                        }));
+                                    }
+                                    if let Some(text) = delta.text {
+                                        emitted.store(true, std::sync::atomic::Ordering::Relaxed);
+                                        on_event(StreamToolEvent::Chunk(AiStreamChunk {
+                                            session_id: session_id.clone(),
+                                            delta: text,
+                                            reasoning_delta: None,
+                                            done: false,
+                                        }));
+                                    }
+                                } else {
+                                    if let Some(reasoning) = openai_stream_reasoning(&event) {
+                                        emitted.store(true, std::sync::atomic::Ordering::Relaxed);
+                                        on_event(StreamToolEvent::Chunk(AiStreamChunk {
+                                            session_id: session_id.clone(),
+                                            delta: String::new(),
+                                            reasoning_delta: Some(reasoning.to_string()),
+                                            done: false,
+                                        }));
+                                    }
+                                    if let Some(text) = openai_stream_text(&event) {
+                                        emitted.store(true, std::sync::atomic::Ordering::Relaxed);
+                                        on_event(StreamToolEvent::Chunk(AiStreamChunk {
+                                            session_id: session_id.clone(),
+                                            delta: text,
+                                            reasoning_delta: None,
+                                            done: false,
+                                        }));
+                                    }
                                 }
                                 // Tool calls
                                 if let Some(tool_calls) = event["choices"].get(0).and_then(|c| c["delta"]["tool_calls"].as_array()) {
@@ -3336,6 +3764,7 @@ async fn stream_openai_with_tools(
                                         // (e.g. GLM) send id="" on subsequent deltas, so
                                         // only a non-empty id marks a genuine start.
                                         if let Some(id) = tc["id"].as_str().filter(|s| !s.is_empty()) {
+                                            first_tool_index.get_or_insert(idx);
                                             let name = tc["function"]["name"].as_str().unwrap_or_default().to_string();
                                             emitted.store(true, std::sync::atomic::Ordering::Relaxed);
                                             on_event(StreamToolEvent::ToolCallStart { index: idx, id: id.to_string(), name });
@@ -3366,6 +3795,10 @@ async fn stream_openai_with_tools(
                         }
                     } => { break; }
                 }
+            }
+
+            if let (Some(index), Some(payload)) = (first_tool_index, minimax_state.provider_payload()) {
+                on_event(StreamToolEvent::ToolCallProviderPayload { index, payload });
             }
 
             Ok(token_usage)
@@ -3736,7 +4169,7 @@ pub async fn stream_with_tools(
     on_chunk: impl Fn(AiStreamChunk),
 ) -> Result<(Vec<crate::agent_events::ToolCall>, Option<TokenUsage>), String> {
     validate_config(config)?;
-    if matches!(config.provider, AiProvider::CodexCli | AiProvider::ClaudeCodeCli | AiProvider::PiAgentCli) {
+    if is_cli_provider(&config.provider) {
         return Err("CLI providers are only supported through the DBX AI agent loop".to_string());
     }
 
@@ -3842,22 +4275,43 @@ mod tests {
 
     use super::{
         append_gemini_model_parts, apply_chat_completion_thinking_toggle, build_ai_http_client, build_gemini_contents,
-        build_responses_input_with_tools, call_claude, classify_error, claude_headers, claude_system_prompt, complete,
+        build_openai_chat_messages, build_responses_input_with_tools, call_claude, call_openai_compatible,
+        classify_error, claude_headers, claude_system_prompt, complete, decorate_chat_completion_body,
         drain_next_stream_line, emit_gemini_tool_call_parts, emit_responses_function_call_item, format_transport_error,
         gemini_text, is_kimi_model, is_retryable_error, list_models_core, maybe_bearer_headers, maybe_tag_retry_after,
-        measure_first_stream_chunk, merge_global_max_retries, ollama_selected_model_tool_support, openai_response_text,
-        openai_stream_reasoning, openai_stream_text, parse_dynamic_effort_capability, parse_gemini_model_list_response,
-        parse_model_list_response, parse_retry_after, parse_retry_after_secs, provider_requires_api_key,
-        resolve_endpoint, resolve_gemini_stream_endpoint, resolve_model_effort_core, resolve_model_list_endpoint,
+        measure_first_stream_chunk, merge_global_max_retries, minimax_stream_semantics,
+        ollama_selected_model_tool_support, openai_response_text, openai_stream_reasoning, openai_stream_text,
+        parse_dynamic_effort_capability, parse_gemini_model_list_response, parse_model_list_response,
+        parse_retry_after, parse_retry_after_secs, provider_requires_api_key, resolve_endpoint,
+        resolve_gemini_stream_endpoint, resolve_model_effort_core, resolve_model_list_endpoint,
         resolve_ollama_show_endpoint, responses_function_tool, responses_max_output_tokens, responses_stream_text,
         responses_text, responses_token_usage, retain_ollama_completion_models, retry_after_secs,
         set_chat_completion_token_limit, stream, stream_claude, stream_claude_with_tools, stream_data_payload,
         stream_error, stream_openai_with_tools, stream_with_tools, test_connection_core, uses_anthropic_messages_api,
-        validate_config, validate_model_list_config, with_retry, with_stream_retry, AiApiStyle, AiAuthMethod,
-        AiCapabilitySource, AiCompletionRequest, AiConfig, AiEffortCapability, AiEffortOption, AiEffortSelection,
-        AiMessage, AiModelInfo, AiProvider, AiReasoningLevel, StreamToolEvent, StreamingToolCallAccumulator,
-        ToolCallRef, AUTHORIZATION, CLAUDE_DEFAULT_SYSTEM, TEST_PROMPT,
+        validate_config, validate_model_list_config, with_retry, with_stream_retry, AiApiStyle, AiAssistantMode,
+        AiAuthMethod, AiCapabilitySource, AiChatSelectionState, AiCompletionRequest, AiConfig, AiEffortCapability,
+        AiEffortOption, AiEffortSelection, AiMessage, AiModelInfo, AiProvider, AiReasoningLevel, MiniMaxStreamDelta,
+        MiniMaxStreamState, MiniMaxTextAccumulator, StreamToolEvent, StreamingToolCallAccumulator, ToolCallRef,
+        AUTHORIZATION, CLAUDE_DEFAULT_SYSTEM, MINIMAX_REASONING_DETAILS_PAYLOAD_KEY, TEST_PROMPT,
     };
+
+    #[test]
+    fn ai_chat_selection_default_mode_serde() {
+        // Old blobs without a defaultMode field load as None (no migration needed).
+        let legacy: AiChatSelectionState =
+            serde_json::from_str(r#"{"version":1,"active":null,"effortPreferences":[]}"#).unwrap();
+        assert_eq!(legacy.default_mode, None);
+
+        let agent: AiChatSelectionState = serde_json::from_str(r#"{"version":1,"defaultMode":"agent"}"#).unwrap();
+        assert_eq!(agent.default_mode, Some(AiAssistantMode::Agent));
+
+        let ask: AiChatSelectionState = serde_json::from_str(r#"{"version":1,"defaultMode":"ask"}"#).unwrap();
+        assert_eq!(ask.default_mode, Some(AiAssistantMode::Ask));
+
+        // camelCase key + lowercase value round-trip.
+        let serialized = serde_json::to_value(agent).unwrap();
+        assert_eq!(serialized["defaultMode"], serde_json::json!("agent"));
+    }
 
     struct CapturedJsonRequest {
         headers: String,
@@ -4088,6 +4542,16 @@ mod tests {
                 claude_code_cli_env: Default::default(),
                 pi_agent_cli_path: None,
                 pi_agent_cli_env: Default::default(),
+                opencode_cli_path: None,
+                opencode_cli_env: Default::default(),
+                cursor_cli_path: None,
+                cursor_cli_env: Default::default(),
+                grok_cli_path: None,
+                grok_cli_env: Default::default(),
+                codebuddy_cli_path: None,
+                codebuddy_cli_env: Default::default(),
+                qoder_cli_path: None,
+                qoder_cli_env: Default::default(),
             },
             system_prompt: "Be concise.".to_string(),
             messages: vec![AiMessage {
@@ -4108,6 +4572,32 @@ mod tests {
         request.config.api_style = AiApiStyle::AnthropicMessages;
         request.config.model = "gateway-model".to_string();
         request
+    }
+
+    fn minimax_test_config(endpoint: impl Into<String>) -> AiConfig {
+        let mut config = test_config(AiProvider::MiniMax);
+        config.api_key = "minimax-test-key".to_string();
+        config.auth_method = AiAuthMethod::Bearer;
+        config.endpoint = endpoint.into();
+        config.model = "MiniMax-M3".to_string();
+        config.api_style = AiApiStyle::Completions;
+        config.enable_thinking = true;
+        config
+    }
+
+    fn minimax_test_request(endpoint: impl Into<String>) -> AiCompletionRequest {
+        AiCompletionRequest {
+            config: minimax_test_config(endpoint),
+            system_prompt: "Be concise.".to_string(),
+            messages: vec![AiMessage {
+                role: "user".to_string(),
+                content: "Hello".to_string(),
+                tool_call_id: None,
+                tool_calls: Vec::new(),
+            }],
+            task_contract: None,
+            max_tokens: Some(64),
+        }
     }
 
     fn assert_claude_http_request(captured: CapturedJsonRequest) {
@@ -4568,7 +5058,8 @@ mod tests {
         });
         let stream = futures::stream::iter([Ok::<_, reqwest::Error>(bytes::Bytes::from(format!("data: {event}\n\n")))]);
 
-        let error = measure_first_stream_chunk(stream, std::time::Instant::now(), false, true).await.unwrap_err();
+        let error =
+            measure_first_stream_chunk(stream, std::time::Instant::now(), false, true, false).await.unwrap_err();
 
         assert!(error.contains("finishReason=MAX_TOKENS"));
         assert!(error.contains("thoughts=256"));
@@ -4590,7 +5081,8 @@ mod tests {
         });
         let stream = futures::stream::iter([Ok::<_, reqwest::Error>(bytes::Bytes::from(format!("data: {event}\n\n")))]);
 
-        let error = measure_first_stream_chunk(stream, std::time::Instant::now(), false, true).await.unwrap_err();
+        let error =
+            measure_first_stream_chunk(stream, std::time::Instant::now(), false, true, false).await.unwrap_err();
 
         assert!(error.contains("blockReason=SAFETY"));
         assert!(error.contains("HARM_CATEGORY_DANGEROUS_CONTENT:HIGH:blocked"));
@@ -4618,13 +5110,15 @@ mod tests {
     #[tokio::test]
     async fn connection_probe_distinguishes_empty_body_from_non_sse_proxy_response() {
         let empty = futures::stream::empty::<Result<bytes::Bytes, reqwest::Error>>();
-        let empty_error = measure_first_stream_chunk(empty, std::time::Instant::now(), false, true).await.unwrap_err();
+        let empty_error =
+            measure_first_stream_chunk(empty, std::time::Instant::now(), false, true, false).await.unwrap_err();
         assert!(empty_error.contains("response body was empty"));
         assert!(empty_error.contains("endpoint or proxy"));
         assert_eq!(classify_error(&empty_error), "emptyResponse");
 
         let proxy = futures::stream::iter([Ok::<_, reqwest::Error>(bytes::Bytes::from_static(b"proxy response"))]);
-        let proxy_error = measure_first_stream_chunk(proxy, std::time::Instant::now(), false, true).await.unwrap_err();
+        let proxy_error =
+            measure_first_stream_chunk(proxy, std::time::Instant::now(), false, true, false).await.unwrap_err();
         assert!(proxy_error.contains("14 bytes but no SSE data events"));
         assert!(proxy_error.contains("proxy streaming support"));
         assert_eq!(classify_error(&proxy_error), "emptyResponse");
@@ -4637,7 +5131,8 @@ mod tests {
         });
         let stream = futures::stream::iter([Ok::<_, reqwest::Error>(bytes::Bytes::from(format!("data: {event}")))]);
 
-        let (_, text) = measure_first_stream_chunk(stream, std::time::Instant::now(), false, true).await.unwrap();
+        let (_, text) =
+            measure_first_stream_chunk(stream, std::time::Instant::now(), false, true, false).await.unwrap();
 
         assert_eq!(text, "OK");
     }
@@ -4669,6 +5164,14 @@ mod tests {
         assert!(config.codex_cli_env.is_empty());
         assert!(config.pi_agent_cli_path.is_none());
         assert!(config.pi_agent_cli_env.is_empty());
+        assert!(config.opencode_cli_path.is_none());
+        assert!(config.opencode_cli_env.is_empty());
+        assert!(config.cursor_cli_path.is_none());
+        assert!(config.cursor_cli_env.is_empty());
+        assert!(config.codebuddy_cli_path.is_none());
+        assert!(config.codebuddy_cli_env.is_empty());
+        assert!(config.qoder_cli_path.is_none());
+        assert!(config.qoder_cli_env.is_empty());
     }
 
     #[test]
@@ -4694,6 +5197,16 @@ mod tests {
             claude_code_cli_env: Default::default(),
             pi_agent_cli_path: None,
             pi_agent_cli_env: Default::default(),
+            opencode_cli_path: None,
+            opencode_cli_env: Default::default(),
+            cursor_cli_path: None,
+            cursor_cli_env: Default::default(),
+            grok_cli_path: None,
+            grok_cli_env: Default::default(),
+            codebuddy_cli_path: None,
+            codebuddy_cli_env: Default::default(),
+            qoder_cli_path: None,
+            qoder_cli_env: Default::default(),
         };
 
         let err = build_ai_http_client(&config, 1).unwrap_err();
@@ -4724,6 +5237,16 @@ mod tests {
             claude_code_cli_env: Default::default(),
             pi_agent_cli_path: None,
             pi_agent_cli_env: Default::default(),
+            opencode_cli_path: None,
+            opencode_cli_env: Default::default(),
+            cursor_cli_path: None,
+            cursor_cli_env: Default::default(),
+            grok_cli_path: None,
+            grok_cli_env: Default::default(),
+            codebuddy_cli_path: None,
+            codebuddy_cli_env: Default::default(),
+            qoder_cli_path: None,
+            qoder_cli_env: Default::default(),
         };
 
         build_ai_http_client(&config, 1).unwrap();
@@ -4752,6 +5275,16 @@ mod tests {
             claude_code_cli_env: Default::default(),
             pi_agent_cli_path: None,
             pi_agent_cli_env: Default::default(),
+            opencode_cli_path: None,
+            opencode_cli_env: Default::default(),
+            cursor_cli_path: None,
+            cursor_cli_env: Default::default(),
+            grok_cli_path: None,
+            grok_cli_env: Default::default(),
+            codebuddy_cli_path: None,
+            codebuddy_cli_env: Default::default(),
+            qoder_cli_path: None,
+            qoder_cli_env: Default::default(),
         };
 
         build_ai_http_client(&config, 1).unwrap();
@@ -4780,6 +5313,16 @@ mod tests {
             claude_code_cli_env: Default::default(),
             pi_agent_cli_path: None,
             pi_agent_cli_env: Default::default(),
+            opencode_cli_path: None,
+            opencode_cli_env: Default::default(),
+            cursor_cli_path: None,
+            cursor_cli_env: Default::default(),
+            grok_cli_path: None,
+            grok_cli_env: Default::default(),
+            codebuddy_cli_path: None,
+            codebuddy_cli_env: Default::default(),
+            qoder_cli_path: None,
+            qoder_cli_env: Default::default(),
         };
 
         assert_eq!(
@@ -4812,6 +5355,16 @@ mod tests {
             claude_code_cli_env: Default::default(),
             pi_agent_cli_path: None,
             pi_agent_cli_env: Default::default(),
+            opencode_cli_path: None,
+            opencode_cli_env: Default::default(),
+            cursor_cli_path: None,
+            cursor_cli_env: Default::default(),
+            grok_cli_path: None,
+            grok_cli_env: Default::default(),
+            codebuddy_cli_path: None,
+            codebuddy_cli_env: Default::default(),
+            qoder_cli_path: None,
+            qoder_cli_env: Default::default(),
         };
 
         assert_eq!(resolve_endpoint(&ollama), "http://localhost:11434/v1/chat/completions");
@@ -4841,6 +5394,16 @@ mod tests {
             claude_code_cli_env: Default::default(),
             pi_agent_cli_path: None,
             pi_agent_cli_env: Default::default(),
+            opencode_cli_path: None,
+            opencode_cli_env: Default::default(),
+            cursor_cli_path: None,
+            cursor_cli_env: Default::default(),
+            grok_cli_path: None,
+            grok_cli_env: Default::default(),
+            codebuddy_cli_path: None,
+            codebuddy_cli_env: Default::default(),
+            qoder_cli_path: None,
+            qoder_cli_env: Default::default(),
         };
 
         for provider in
@@ -4889,6 +5452,16 @@ mod tests {
             claude_code_cli_env: Default::default(),
             pi_agent_cli_path: None,
             pi_agent_cli_env: Default::default(),
+            opencode_cli_path: None,
+            opencode_cli_env: Default::default(),
+            cursor_cli_path: None,
+            cursor_cli_env: Default::default(),
+            grok_cli_path: None,
+            grok_cli_env: Default::default(),
+            codebuddy_cli_path: None,
+            codebuddy_cli_env: Default::default(),
+            qoder_cli_path: None,
+            qoder_cli_env: Default::default(),
         };
         assert_eq!(resolve_model_list_endpoint(&openai).unwrap(), "https://api.openai.com/v1/models");
 
@@ -4913,6 +5486,16 @@ mod tests {
             claude_code_cli_env: Default::default(),
             pi_agent_cli_path: None,
             pi_agent_cli_env: Default::default(),
+            opencode_cli_path: None,
+            opencode_cli_env: Default::default(),
+            cursor_cli_path: None,
+            cursor_cli_env: Default::default(),
+            grok_cli_path: None,
+            grok_cli_env: Default::default(),
+            codebuddy_cli_path: None,
+            codebuddy_cli_env: Default::default(),
+            qoder_cli_path: None,
+            qoder_cli_env: Default::default(),
         };
         assert_eq!(resolve_model_list_endpoint(&claude).unwrap(), "https://api.anthropic.com/v1/models");
     }
@@ -4940,6 +5523,16 @@ mod tests {
             claude_code_cli_env: Default::default(),
             pi_agent_cli_path: None,
             pi_agent_cli_env: Default::default(),
+            opencode_cli_path: None,
+            opencode_cli_env: Default::default(),
+            cursor_cli_path: None,
+            cursor_cli_env: Default::default(),
+            grok_cli_path: None,
+            grok_cli_env: Default::default(),
+            codebuddy_cli_path: None,
+            codebuddy_cli_env: Default::default(),
+            qoder_cli_path: None,
+            qoder_cli_env: Default::default(),
         };
 
         assert!(uses_anthropic_messages_api(&config));
@@ -5019,6 +5612,16 @@ mod tests {
             claude_code_cli_env: Default::default(),
             pi_agent_cli_path: None,
             pi_agent_cli_env: Default::default(),
+            opencode_cli_path: None,
+            opencode_cli_env: Default::default(),
+            cursor_cli_path: None,
+            cursor_cli_env: Default::default(),
+            grok_cli_path: None,
+            grok_cli_env: Default::default(),
+            codebuddy_cli_path: None,
+            codebuddy_cli_env: Default::default(),
+            qoder_cli_path: None,
+            qoder_cli_env: Default::default(),
         };
 
         assert!(!uses_anthropic_messages_api(&config));
@@ -5026,8 +5629,18 @@ mod tests {
         assert_eq!(resolve_model_list_endpoint(&config).unwrap(), "https://api.minimax.io/v1/models");
         assert!(provider_requires_api_key(&config.provider));
 
+        let china = AiConfig { endpoint: "https://api.minimaxi.com/v1".to_string(), ..config.clone() };
+        assert_eq!(resolve_endpoint(&china), "https://api.minimaxi.com/v1/chat/completions");
+        assert_eq!(resolve_model_list_endpoint(&china).unwrap(), "https://api.minimaxi.com/v1/models");
+
         let no_key = AiConfig { api_key: String::new(), ..config.clone() };
         assert_eq!(validate_config(&no_key).unwrap_err(), "API key is required");
+
+        let responses = AiConfig { api_style: AiApiStyle::Responses, ..config.clone() };
+        assert_eq!(
+            validate_config(&responses).unwrap_err(),
+            "MiniMax currently supports the Chat Completions API style in DBX; select Completions and retry"
+        );
 
         let provider_json = serde_json::to_string(&AiProvider::MiniMax).unwrap();
         assert_eq!(provider_json, r#""minimax""#);
@@ -5058,6 +5671,16 @@ mod tests {
             claude_code_cli_env: Default::default(),
             pi_agent_cli_path: None,
             pi_agent_cli_env: Default::default(),
+            opencode_cli_path: None,
+            opencode_cli_env: Default::default(),
+            cursor_cli_path: None,
+            cursor_cli_env: Default::default(),
+            grok_cli_path: None,
+            grok_cli_env: Default::default(),
+            codebuddy_cli_path: None,
+            codebuddy_cli_env: Default::default(),
+            qoder_cli_path: None,
+            qoder_cli_env: Default::default(),
         };
         assert_eq!(resolve_endpoint(&config), "https://api.example.com/v1/chat/completions");
         assert_eq!(resolve_model_list_endpoint(&config).unwrap(), "https://api.example.com/v1/models");
@@ -5121,6 +5744,16 @@ mod tests {
             claude_code_cli_env: Default::default(),
             pi_agent_cli_path: None,
             pi_agent_cli_env: Default::default(),
+            opencode_cli_path: None,
+            opencode_cli_env: Default::default(),
+            cursor_cli_path: None,
+            cursor_cli_env: Default::default(),
+            grok_cli_path: None,
+            grok_cli_env: Default::default(),
+            codebuddy_cli_path: None,
+            codebuddy_cli_env: Default::default(),
+            qoder_cli_path: None,
+            qoder_cli_env: Default::default(),
         };
 
         assert_eq!(resolve_endpoint(&config), "https://api.openai.com/v1/responses");
@@ -5156,6 +5789,16 @@ mod tests {
             claude_code_cli_env: Default::default(),
             pi_agent_cli_path: None,
             pi_agent_cli_env: Default::default(),
+            opencode_cli_path: None,
+            opencode_cli_env: Default::default(),
+            cursor_cli_path: None,
+            cursor_cli_env: Default::default(),
+            grok_cli_path: None,
+            grok_cli_env: Default::default(),
+            codebuddy_cli_path: None,
+            codebuddy_cli_env: Default::default(),
+            qoder_cli_path: None,
+            qoder_cli_env: Default::default(),
         };
 
         let api_key_headers = claude_headers(&config).unwrap();
@@ -5271,6 +5914,16 @@ mod tests {
             claude_code_cli_env: Default::default(),
             pi_agent_cli_path: None,
             pi_agent_cli_env: Default::default(),
+            opencode_cli_path: None,
+            opencode_cli_env: Default::default(),
+            cursor_cli_path: None,
+            cursor_cli_env: Default::default(),
+            grok_cli_path: None,
+            grok_cli_env: Default::default(),
+            codebuddy_cli_path: None,
+            codebuddy_cli_env: Default::default(),
+            qoder_cli_path: None,
+            qoder_cli_env: Default::default(),
         };
         assert_eq!(resolve_ollama_show_endpoint(&config).unwrap(), "http://localhost:11434/api/show");
 
@@ -5303,6 +5956,16 @@ mod tests {
             claude_code_cli_env: Default::default(),
             pi_agent_cli_path: None,
             pi_agent_cli_env: Default::default(),
+            opencode_cli_path: None,
+            opencode_cli_env: Default::default(),
+            cursor_cli_path: None,
+            cursor_cli_env: Default::default(),
+            grok_cli_path: None,
+            grok_cli_env: Default::default(),
+            codebuddy_cli_path: None,
+            codebuddy_cli_env: Default::default(),
+            qoder_cli_path: None,
+            qoder_cli_env: Default::default(),
         };
 
         assert_eq!(ollama_selected_model_tool_support(&config).await.unwrap(), Some(true));
@@ -5384,6 +6047,16 @@ mod tests {
             claude_code_cli_env: Default::default(),
             pi_agent_cli_path: None,
             pi_agent_cli_env: Default::default(),
+            opencode_cli_path: None,
+            opencode_cli_env: Default::default(),
+            cursor_cli_path: None,
+            cursor_cli_env: Default::default(),
+            grok_cli_path: None,
+            grok_cli_env: Default::default(),
+            codebuddy_cli_path: None,
+            codebuddy_cli_env: Default::default(),
+            qoder_cli_path: None,
+            qoder_cli_env: Default::default(),
         };
         let models = vec![
             AiModelInfo::new("qwen3:0.6b", None),
@@ -5645,6 +6318,16 @@ mod tests {
             claude_code_cli_env: Default::default(),
             pi_agent_cli_path: None,
             pi_agent_cli_env: Default::default(),
+            opencode_cli_path: None,
+            opencode_cli_env: Default::default(),
+            cursor_cli_path: None,
+            cursor_cli_env: Default::default(),
+            grok_cli_path: None,
+            grok_cli_env: Default::default(),
+            codebuddy_cli_path: None,
+            codebuddy_cli_env: Default::default(),
+            qoder_cli_path: None,
+            qoder_cli_env: Default::default(),
         };
 
         let mut body = serde_json::json!({
@@ -5856,6 +6539,16 @@ mod tests {
             claude_code_cli_env: Default::default(),
             pi_agent_cli_path: None,
             pi_agent_cli_env: Default::default(),
+            opencode_cli_path: None,
+            opencode_cli_env: Default::default(),
+            cursor_cli_path: None,
+            cursor_cli_env: Default::default(),
+            grok_cli_path: None,
+            grok_cli_env: Default::default(),
+            codebuddy_cli_path: None,
+            codebuddy_cli_env: Default::default(),
+            qoder_cli_path: None,
+            qoder_cli_env: Default::default(),
         };
         let mut body = serde_json::json!({
             "model": &config.model,
@@ -5893,6 +6586,16 @@ mod tests {
             claude_code_cli_env: Default::default(),
             pi_agent_cli_path: None,
             pi_agent_cli_env: Default::default(),
+            opencode_cli_path: None,
+            opencode_cli_env: Default::default(),
+            cursor_cli_path: None,
+            cursor_cli_env: Default::default(),
+            grok_cli_path: None,
+            grok_cli_env: Default::default(),
+            codebuddy_cli_path: None,
+            codebuddy_cli_env: Default::default(),
+            qoder_cli_path: None,
+            qoder_cli_env: Default::default(),
         };
         let mut body = serde_json::json!({ "model": &config.model });
 
@@ -5936,6 +6639,16 @@ mod tests {
             claude_code_cli_env: Default::default(),
             pi_agent_cli_path: None,
             pi_agent_cli_env: Default::default(),
+            opencode_cli_path: None,
+            opencode_cli_env: Default::default(),
+            cursor_cli_path: None,
+            cursor_cli_env: Default::default(),
+            grok_cli_path: None,
+            grok_cli_env: Default::default(),
+            codebuddy_cli_path: None,
+            codebuddy_cli_env: Default::default(),
+            qoder_cli_path: None,
+            qoder_cli_env: Default::default(),
         };
         let mut body = serde_json::json!({ "model": &config.model });
 
@@ -5973,6 +6686,16 @@ mod tests {
             claude_code_cli_env: Default::default(),
             pi_agent_cli_path: None,
             pi_agent_cli_env: Default::default(),
+            opencode_cli_path: None,
+            opencode_cli_env: Default::default(),
+            cursor_cli_path: None,
+            cursor_cli_env: Default::default(),
+            grok_cli_path: None,
+            grok_cli_env: Default::default(),
+            codebuddy_cli_path: None,
+            codebuddy_cli_env: Default::default(),
+            qoder_cli_path: None,
+            qoder_cli_env: Default::default(),
         };
         let mut body = serde_json::json!({ "model": &config.model });
 
@@ -5981,6 +6704,353 @@ mod tests {
         assert_eq!(body["thinking"]["type"], "disabled");
         assert!(body.get("extra_body").is_none());
         assert!(body.get("reasoning_effort").is_none());
+    }
+
+    #[test]
+    fn minimax_chat_completion_decorator_uses_official_fields() {
+        let mut config = minimax_test_config("https://api.minimaxi.com/v1");
+        config.enable_thinking = false;
+        let mut body = serde_json::json!({ "model": &config.model });
+
+        decorate_chat_completion_body(&mut body, &config, 1024);
+
+        assert_eq!(body["reasoning_split"], true);
+        assert_eq!(body["max_completion_tokens"], 1024);
+        assert_eq!(body["thinking"]["type"], "disabled");
+        assert!(body.get("max_tokens").is_none());
+        assert!(body.get("extra_body").is_none());
+    }
+
+    #[tokio::test]
+    async fn minimax_completion_request_sends_official_chat_fields() {
+        let (capture_endpoint, server) =
+            spawn_json_capture_server("application/json", r#"{"choices":[{"message":{"content":"ok"}}]}"#).await;
+        let endpoint = capture_endpoint.trim_end_matches("/v1/messages").to_string();
+        let mut request = minimax_test_request(endpoint);
+        request.config.enable_thinking = false;
+        let client = build_ai_http_client(&request.config, 10).unwrap();
+
+        assert_eq!(call_openai_compatible(&client, request).await.unwrap(), "ok");
+
+        let captured = server.await.unwrap();
+        assert!(captured.headers.starts_with("POST /v1/chat/completions "));
+        assert!(captured.headers.to_ascii_lowercase().contains("authorization: bearer minimax-test-key"));
+        assert_eq!(captured.body["reasoning_split"], true);
+        assert_eq!(captured.body["max_completion_tokens"], 64);
+        assert_eq!(captured.body["thinking"]["type"], "disabled");
+        assert!(captured.body.get("max_tokens").is_none());
+    }
+
+    #[test]
+    fn minimax_cumulative_text_normalizer_emits_only_new_suffixes() {
+        let mut normalizer = MiniMaxTextAccumulator::default();
+
+        assert_eq!(normalizer.push("Hel"), Some("Hel".to_string()));
+        assert_eq!(normalizer.push("Hello"), Some("lo".to_string()));
+        assert_eq!(normalizer.push("Hello"), None);
+        assert_eq!(normalizer.push("Hell"), None);
+        assert_eq!(normalizer.push("Hello world"), Some(" world".to_string()));
+        assert_eq!(normalizer.push(""), None);
+        assert_eq!(normalizer.complete(), "Hello world");
+    }
+
+    #[test]
+    fn minimax_cumulative_text_normalizer_accepts_reset_or_incremental_chunks() {
+        let mut normalizer = MiniMaxTextAccumulator::default();
+
+        assert_eq!(normalizer.push("Hello"), Some("Hello".to_string()));
+        assert_eq!(normalizer.push(" world"), Some(" world".to_string()));
+        assert_eq!(normalizer.push("!"), Some("!".to_string()));
+        assert_eq!(normalizer.complete(), "Hello world!");
+    }
+
+    #[test]
+    fn minimax_stream_state_splits_cumulative_reasoning_and_content() {
+        let mut state = MiniMaxStreamState::default();
+        let first_details = serde_json::json!([{
+            "type": "reasoning.text",
+            "text": "Inspect"
+        }]);
+        let first = serde_json::json!({
+            "choices": [{
+                "delta": {
+                    "content": "An",
+                    "reasoning_details": first_details
+                }
+            }]
+        });
+        assert_eq!(
+            state.process(&first),
+            MiniMaxStreamDelta { text: Some("An".to_string()), reasoning: Some("Inspect".to_string()) }
+        );
+
+        let latest_details = serde_json::json!([{
+            "type": "reasoning.text",
+            "text": "Inspect schema"
+        }]);
+        let second = serde_json::json!({
+            "choices": [{
+                "delta": {
+                    "content": "Answer",
+                    "reasoning_details": latest_details
+                }
+            }]
+        });
+        assert_eq!(
+            state.process(&second),
+            MiniMaxStreamDelta { text: Some("swer".to_string()), reasoning: Some(" schema".to_string()) }
+        );
+        assert_eq!(
+            state.provider_payload(),
+            Some(serde_json::json!({
+                MINIMAX_REASONING_DETAILS_PAYLOAD_KEY: latest_details,
+            }))
+        );
+    }
+
+    #[test]
+    fn minimax_stream_state_reconstructs_incremental_reasoning_details_for_replay() {
+        let mut state = MiniMaxStreamState::default();
+        let first = serde_json::json!({
+            "choices": [{
+                "delta": {
+                    "reasoning_content": "Inspect",
+                    "reasoning_details": [{
+                        "type": "reasoning.text",
+                        "id": "reasoning-text-1",
+                        "format": "MiniMax-response-v1",
+                        "index": 0,
+                        "text": "Inspect"
+                    }]
+                }
+            }]
+        });
+        let second = serde_json::json!({
+            "choices": [{
+                "delta": {
+                    "reasoning_content": " schema",
+                    "reasoning_details": [{
+                        "type": "reasoning.text",
+                        "id": "reasoning-text-1",
+                        "format": "MiniMax-response-v1",
+                        "index": 0,
+                        "text": " schema"
+                    }]
+                }
+            }]
+        });
+
+        assert_eq!(state.process(&first).reasoning, Some("Inspect".to_string()));
+        assert_eq!(state.process(&second).reasoning, Some(" schema".to_string()));
+        assert_eq!(
+            state.provider_payload(),
+            Some(serde_json::json!({
+                MINIMAX_REASONING_DETAILS_PAYLOAD_KEY: [{
+                    "type": "reasoning.text",
+                    "id": "reasoning-text-1",
+                    "format": "MiniMax-response-v1",
+                    "index": 0,
+                    "text": "Inspect schema"
+                }]
+            }))
+        );
+    }
+
+    #[test]
+    fn minimax_china_stream_keeps_incremental_fragments_that_share_a_prefix() {
+        let config = minimax_test_config("https://api.minimaxi.com/v1");
+        let mut state = MiniMaxStreamState::new(minimax_stream_semantics(&config));
+        let first = serde_json::json!({
+            "choices": [{
+                "delta": {
+                    "content": "a",
+                    "reasoning_details": [{
+                        "type": "reasoning.text",
+                        "id": "reasoning-text-1",
+                        "index": 0,
+                        "text": "a"
+                    }]
+                }
+            }]
+        });
+        let second = serde_json::json!({
+            "choices": [{
+                "delta": {
+                    "content": "and",
+                    "reasoning_details": [{
+                        "type": "reasoning.text",
+                        "id": "reasoning-text-1",
+                        "index": 0,
+                        "text": "and"
+                    }]
+                }
+            }]
+        });
+
+        assert_eq!(
+            state.process(&first),
+            MiniMaxStreamDelta { text: Some("a".to_string()), reasoning: Some("a".to_string()) }
+        );
+        assert_eq!(
+            state.process(&second),
+            MiniMaxStreamDelta { text: Some("and".to_string()), reasoning: Some("and".to_string()) }
+        );
+        assert_eq!(
+            state.provider_payload(),
+            Some(serde_json::json!({
+                MINIMAX_REASONING_DETAILS_PAYLOAD_KEY: [{
+                    "type": "reasoning.text",
+                    "id": "reasoning-text-1",
+                    "index": 0,
+                    "text": "aand"
+                }]
+            }))
+        );
+    }
+
+    #[test]
+    fn minimax_stream_state_accepts_reasoning_content_without_details() {
+        let mut state = MiniMaxStreamState::default();
+        let content_only = serde_json::json!({
+            "choices": [{
+                "delta": {
+                    "reasoning_content": "Fallback reasoning"
+                }
+            }]
+        });
+        let metadata_only_details = serde_json::json!({
+            "choices": [{
+                "delta": {
+                    "reasoning_content": " continues",
+                    "reasoning_details": [{
+                        "type": "reasoning.text",
+                        "id": "reasoning-text-1",
+                        "index": 0
+                    }]
+                }
+            }]
+        });
+
+        assert_eq!(state.process(&content_only).reasoning, Some("Fallback reasoning".to_string()));
+        assert_eq!(state.process(&metadata_only_details).reasoning, Some(" continues".to_string()));
+        assert_eq!(
+            state.provider_payload(),
+            Some(serde_json::json!({
+                MINIMAX_REASONING_DETAILS_PAYLOAD_KEY: [{
+                    "type": "reasoning.text",
+                    "id": "reasoning-text-1",
+                    "index": 0
+                }]
+            }))
+        );
+    }
+
+    #[test]
+    fn minimax_tool_history_replays_reasoning_details_once_for_parallel_calls() {
+        let details = serde_json::json!([{
+            "type": "reasoning.text",
+            "text": "Need two lookups"
+        }]);
+        let payload = serde_json::json!({
+            MINIMAX_REASONING_DETAILS_PAYLOAD_KEY: details,
+        });
+        let message = AiMessage {
+            role: "assistant".to_string(),
+            content: String::new(),
+            tool_call_id: None,
+            tool_calls: vec![
+                ToolCallRef {
+                    id: "call_1".to_string(),
+                    name: "list_tables".to_string(),
+                    arguments: serde_json::json!({"schema": "public"}),
+                    provider_payload: Some(payload),
+                },
+                ToolCallRef {
+                    id: "call_2".to_string(),
+                    name: "list_tables".to_string(),
+                    arguments: serde_json::json!({"schema": "audit"}),
+                    provider_payload: None,
+                },
+            ],
+        };
+
+        let config = minimax_test_config("https://api.minimax.io/v1");
+        let messages = build_openai_chat_messages(&config, "system", std::slice::from_ref(&message));
+        assert_eq!(messages[1]["reasoning_details"], details);
+        assert_eq!(messages[1]["tool_calls"].as_array().unwrap().len(), 2);
+        assert_eq!(messages[1]["tool_calls"][0]["function"]["arguments"], r#"{"schema":"public"}"#);
+
+        let mut compatible = config;
+        compatible.provider = AiProvider::OpenaiCompatible;
+        let generic = build_openai_chat_messages(&compatible, "system", &[message]);
+        assert!(generic[1].get("reasoning_details").is_none());
+    }
+
+    #[tokio::test]
+    async fn minimax_connection_probe_accepts_split_reasoning() {
+        let event = serde_json::json!({
+            "choices": [{
+                "delta": {
+                    "reasoning_details": [{
+                        "type": "reasoning.text",
+                        "text": "Ready"
+                    }]
+                }
+            }]
+        });
+        let stream = futures::stream::iter([Ok::<_, reqwest::Error>(bytes::Bytes::from(format!("data: {event}\n\n")))]);
+
+        let (_, text) =
+            measure_first_stream_chunk(stream, std::time::Instant::now(), false, false, true).await.unwrap();
+
+        assert_eq!(text, "Ready");
+    }
+
+    #[tokio::test]
+    async fn minimax_tool_stream_preserves_reasoning_details_for_replay() {
+        let response = concat!(
+            "data: {\"choices\":[{\"delta\":{\"reasoning_details\":[{\"type\":\"reasoning.text\",\"id\":\"reasoning-text-1\",\"index\":0,\"text\":\"Inspect\"}]}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"reasoning_details\":[{\"type\":\"reasoning.text\",\"id\":\"reasoning-text-1\",\"index\":0,\"text\":\" schema\"}]}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"function\":{\"name\":\"list_tables\",\"arguments\":\"{\\\"schema\\\":\\\"public\\\"}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
+            "data: [DONE]\n\n"
+        );
+        let (capture_endpoint, server) = spawn_json_capture_server("text/event-stream", response).await;
+        let endpoint = capture_endpoint.trim_end_matches("/v1/messages").to_string();
+        let request = minimax_test_request(endpoint);
+        let chunks = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let observed = chunks.clone();
+
+        let (calls, _) =
+            stream_with_tools(&request.config, &request, "minimax-tool-test", &[], &Notify::new(), move |chunk| {
+                observed.lock().unwrap().push(chunk)
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].id, "call_1");
+        assert_eq!(calls[0].name, "list_tables");
+        assert_eq!(calls[0].arguments, serde_json::json!({"schema": "public"}));
+        assert_eq!(
+            calls[0].provider_payload,
+            Some(serde_json::json!({
+                MINIMAX_REASONING_DETAILS_PAYLOAD_KEY: [{
+                    "type": "reasoning.text",
+                    "id": "reasoning-text-1",
+                    "index": 0,
+                    "text": "Inspect schema"
+                }]
+            }))
+        );
+        assert_eq!(
+            chunks.lock().unwrap().iter().filter_map(|chunk| chunk.reasoning_delta.as_deref()).collect::<String>(),
+            "Inspect schema"
+        );
+
+        let captured = server.await.unwrap();
+        assert!(captured.headers.starts_with("POST /v1/chat/completions "));
+        assert_eq!(captured.body["reasoning_split"], true);
+        assert_eq!(captured.body["max_completion_tokens"], 64);
     }
 
     #[test]
@@ -6006,6 +7076,16 @@ mod tests {
             claude_code_cli_env: Default::default(),
             pi_agent_cli_path: None,
             pi_agent_cli_env: Default::default(),
+            opencode_cli_path: None,
+            opencode_cli_env: Default::default(),
+            cursor_cli_path: None,
+            cursor_cli_env: Default::default(),
+            grok_cli_path: None,
+            grok_cli_env: Default::default(),
+            codebuddy_cli_path: None,
+            codebuddy_cli_env: Default::default(),
+            qoder_cli_path: None,
+            qoder_cli_env: Default::default(),
         };
         let mut body = serde_json::json!({ "model": &config.model });
 
@@ -6070,6 +7150,16 @@ mod tests {
             claude_code_cli_env: Default::default(),
             pi_agent_cli_path: None,
             pi_agent_cli_env: Default::default(),
+            opencode_cli_path: None,
+            opencode_cli_env: Default::default(),
+            cursor_cli_path: None,
+            cursor_cli_env: Default::default(),
+            grok_cli_path: None,
+            grok_cli_env: Default::default(),
+            codebuddy_cli_path: None,
+            codebuddy_cli_env: Default::default(),
+            qoder_cli_path: None,
+            qoder_cli_env: Default::default(),
         };
         let request = AiCompletionRequest {
             config: config.clone(),
@@ -6128,6 +7218,16 @@ mod tests {
             claude_code_cli_env: Default::default(),
             pi_agent_cli_path: None,
             pi_agent_cli_env: Default::default(),
+            opencode_cli_path: None,
+            opencode_cli_env: Default::default(),
+            cursor_cli_path: None,
+            cursor_cli_env: Default::default(),
+            grok_cli_path: None,
+            grok_cli_env: Default::default(),
+            codebuddy_cli_path: None,
+            codebuddy_cli_env: Default::default(),
+            qoder_cli_path: None,
+            qoder_cli_env: Default::default(),
         };
         let mut body = serde_json::json!({
             "model": &config.model,
@@ -6654,7 +7754,16 @@ mod tests {
 
     #[test]
     fn merge_global_max_retries_skips_cli_providers() {
-        for provider in [AiProvider::CodexCli, AiProvider::ClaudeCodeCli, AiProvider::PiAgentCli] {
+        for provider in [
+            AiProvider::CodexCli,
+            AiProvider::ClaudeCodeCli,
+            AiProvider::PiAgentCli,
+            AiProvider::OpenCodeCli,
+            AiProvider::CursorCli,
+            AiProvider::GrokCli,
+            AiProvider::CodeBuddyCli,
+            AiProvider::QoderCli,
+        ] {
             let mut config = test_config(provider.clone());
             config.max_retries = None;
             merge_global_max_retries(&mut config, 0);

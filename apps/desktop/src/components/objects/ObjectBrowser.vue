@@ -18,6 +18,7 @@ import {
   Eraser,
   Eye,
   FileCode,
+  Info,
   GripVertical,
   KeyRound,
   LayoutGrid,
@@ -44,6 +45,7 @@ import {
   Trash2,
   WrapText,
   X,
+  Wrench,
 } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
 import i18n from "@/i18n";
@@ -54,6 +56,7 @@ import { SearchableSelect } from "@/components/ui/searchable-select";
 import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
 import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
 import ProcedureExecutionDialog from "@/components/objects/ProcedureExecutionDialog.vue";
+import CustomTypeInfoPanel from "@/components/objects/CustomTypeInfoPanel.vue";
 import XlsxHeaderDialog from "@/components/export/XlsxHeaderDialog.vue";
 import * as api from "@/lib/backend/api";
 import type { ColumnInfo, ConnectionConfig, ForeignKeyInfo, IndexInfo, ObjectBrowserViewMode, ObjectBrowserViewport, ObjectInfo, ObjectSourceKind, ObjectStatistics, TableInfoTab, TreeNode, TriggerInfo } from "@/types/database";
@@ -66,12 +69,10 @@ import { buildTableSelectSql } from "@/lib/table/tableSelectSql";
 import {
   buildDropObjectSql,
   buildDropTableSql,
-  buildDuplicateTableStructureSql,
+  buildDuplicateTableStructurePlan as buildSharedDuplicateTableStructurePlan,
   buildCopyTableDataSql,
   buildEmptyTableSql,
   buildTruncateTableSql,
-  collectDuplicateTableColumnComments,
-  duplicateTableStructureRequiresScript,
   supportsDropTableCascade,
   supportsTruncateTableCascade,
   type TableAdminSqlOptions,
@@ -94,6 +95,7 @@ import QueryEditor from "@/components/editor/QueryEditor.vue";
 import { sqlFormatDialectForDbType, type SqlFormatDialect } from "@/lib/sql/sqlFormatter";
 import { isCancelSearchShortcut } from "@/lib/editor/keyboardShortcuts";
 import { executeWithProductionSqlGuard } from "@/lib/database/productionExecutionGuard";
+import { buildXuguCompileSql } from "@/lib/database/xuguCompileSql";
 import { formatShortcut } from "@/lib/editor/shortcutRegistry";
 import { batchTableEmptyFeedback, buildBatchTableEmptyPlan, runBatchTableEmpty, type BatchTableEmptyPlanItem } from "@/lib/sidebar/batchTableEmpty";
 import { runBatchTableDrop } from "@/lib/table/batchTableDrop";
@@ -118,10 +120,12 @@ import {
   type ObjectBrowserSortKey,
 } from "@/lib/table/objectBrowserRows";
 import { isSourceOnlyObjectBrowserRow, resolveRowClickAction, shouldDeferSingleClick, type ObjectBrowserRowAction } from "@/lib/table/objectBrowserRowAction";
+import { customTypeCapabilities, supportsTypeObjectSource } from "@/lib/database/databaseObjectCapabilities";
 import { filterObjectBrowserTableColumns } from "@/lib/table/objectBrowserTableInfo";
 import { createSidePanelRequestGuard } from "@/lib/table/sidePanelRequestGuard";
 import { runBatchTableTruncate } from "@/lib/table/batchTableTruncate";
 import { tableColumnDefaultDisplayValue } from "@/lib/table/tableColumnDefaultPresentation";
+import { gaussdbMTypeDisplayName } from "@/lib/table/postgresDataTypeHelp";
 import { cacheObjectBrowserRows, createObjectBrowserRowsCacheWriteToken, getCachedObjectBrowserRows, type ObjectBrowserRowsCacheScope, type ObjectBrowserRowsCacheWriteToken } from "@/lib/table/objectBrowserRowsCache";
 import { createObjectBrowserRowsLoadGuard, type ObjectBrowserRowsLoadHandle } from "@/lib/table/objectBrowserRowsLoadGuard";
 
@@ -173,7 +177,7 @@ const sourceCanEdit = ref(true);
 // --- Right-side panel state ---
 // Unified panel: either "table-info" (for tables) or "source" (for views/procedures/etc.)
 const sidePanelRow = ref<ObjectBrowserRow | null>(null);
-const sidePanelMode = ref<"table-info" | "source">("source");
+const sidePanelMode = ref<"table-info" | "source" | "type-info">("source");
 // Table info panel state
 const tableInfoTab = ref<TableInfoTab>("ddl");
 const tableColumns = ref<ColumnInfo[]>([]);
@@ -196,10 +200,19 @@ let sidePanelResizeStartX = 0;
 let sidePanelResizeStartWidth = 0;
 const isResizingSidePanel = ref(false);
 const sidePanelGuard = createSidePanelRequestGuard();
+const sidePanelRef = ref<InstanceType<typeof CustomTypeInfoPanel> | null>(null);
 const tableMetadataCapabilities = computed<TableMetadataCapabilities>(() => getTableMetadataCapabilities(effectiveDatabaseType.value));
 const effectiveDatabaseType = computed(() => effectiveDatabaseTypeForConnection(props.connection) ?? props.connection.db_type);
+const isGaussdbM = computed(() => effectiveDatabaseType.value === "gaussdb" && props.connection.driver_profile?.toLowerCase() === "gaussdb-m");
 const isVictoriaMetrics = computed(() => effectiveDatabaseType.value === "victoriametrics");
 const objectRowsLabel = computed(() => t(isVictoriaMetrics.value ? "objects.series" : "objects.rows"));
+
+function gaussdbMColumnType(dataType: string): string {
+  if (isGaussdbM.value) {
+    return gaussdbMTypeDisplayName(dataType);
+  }
+  return dataType;
+}
 const tableStructureDatabaseType = computed(() => tableStructureDatabaseTypeForConnection(props.connection) ?? props.connection.db_type);
 const sourceEditableText = ref("");
 const sourceDraft = ref("");
@@ -822,6 +835,9 @@ function executeRowAction(row: ObjectBrowserRow, action: ObjectBrowserRowAction)
     case "table-info":
       void openTableInfo(row);
       break;
+    case "type-info":
+      void openTypeInfo(row);
+      break;
     case "open-table":
       emit("openTable", { tableName: row.name, schema: row.schema, catalog: props.catalog });
       break;
@@ -833,7 +849,7 @@ function executeRowAction(row: ObjectBrowserRow, action: ObjectBrowserRowAction)
 
 function onRowClick(row: ObjectBrowserRow, event: MouseEvent) {
   const activation = settingsStore.editorSettings.sidebarActivation;
-  const { action, isDouble } = resolveRowClickAction(row, event.detail, activation);
+  const { action, isDouble } = resolveRowClickAction(row, event.detail, activation, effectiveDatabaseType.value);
   // Double click: cancel any pending single-click and fire immediately
   if (isDouble) {
     if (singleClickTimer) {
@@ -931,8 +947,8 @@ async function openTableInfo(row: ObjectBrowserRow, initialTab?: TableInfoTab) {
   tableForeignKeys.value = [];
   tableTriggers.value = [];
   tableInfoSearchQuery.value = "";
-  // Determine initial tab: explicit request > first available > ddl
-  const firstTab = initialTab ?? tableInfoTabs.value[0]?.id ?? "ddl";
+  // Determine initial tab: explicit request > previously activated
+  const firstTab = initialTab ?? tableInfoTab.value;
   await selectTableInfoTab(firstTab);
 }
 
@@ -1107,6 +1123,28 @@ function closeSidePanel() {
   sidePanelGuard.bump();
 }
 
+async function openTypeInfo(row: ObjectBrowserRow) {
+  if (sidePanelRow.value?.id === row.id && sidePanelMode.value === "type-info") {
+    closeSidePanel();
+    return;
+  }
+  sidePanelRow.value = row;
+  sidePanelMode.value = "type-info";
+  sidePanelGuard.bump();
+}
+
+function openTypeDdl(row: ObjectBrowserRow) {
+  sidePanelRow.value = row;
+  sidePanelMode.value = "type-info";
+  sidePanelGuard.bump();
+  // DDL tab is selected by the panel once details load; switching the tab is
+  // deferred via a dedicated request so the panel can focus it.
+  nextTick(() => {
+    const panel = sidePanelRef.value;
+    panel?.selectTab("ddl");
+  });
+}
+
 const canOpenTableStructureEditor = computed(() => sidePanelRow.value?.type === "TABLE" && canOpenStructureEditor.value);
 
 function openTableStructureEditor() {
@@ -1176,6 +1214,7 @@ async function openNewQuery(row: ObjectBrowserRow) {
     tabId,
     await buildTableSelectSql({
       databaseType: effectiveDatabaseType.value,
+      driverProfile: props.connection.driver_profile,
       identifierQuote: connectionStore.connectionIdentifierQuote?.(props.connection.id),
       catalog: props.catalog,
       database: props.database,
@@ -1930,24 +1969,17 @@ function requestDuplicateStructure(row: ObjectBrowserRow) {
 }
 
 async function buildDuplicateStructurePlan(sourceName: string, targetName: string, schema: string | undefined, tableComment?: string | null, sourceColumns?: ColumnInfo[]) {
-  let columns = sourceColumns;
-  if (effectiveDatabaseType.value === "dameng" && !columns) {
-    try {
-      columns = await api.getColumns(props.connection.id, props.database, schema || "", sourceName, props.catalog);
-    } catch (error) {
-      console.warn(`Failed to load Dameng column comments for table clone: ${sourceName}`, error);
-    }
-  }
-  const columnComments = effectiveDatabaseType.value === "dameng" ? collectDuplicateTableColumnComments(columns ?? []) : [];
-  const sql = await buildDuplicateTableStructureSql({
+  return buildSharedDuplicateTableStructurePlan({
+    connectionId: props.connection.id,
+    database: props.database,
+    catalog: props.catalog,
     databaseType: effectiveDatabaseType.value,
     schema,
     sourceName,
     targetName,
     tableComment,
-    columnComments,
+    sourceColumns,
   });
-  return { sql, sourceColumns: columns, executeAsScript: duplicateTableStructureRequiresScript(sql) };
 }
 
 function executeDuplicateStructurePlan(plan: { sql: string; executeAsScript: boolean }, schema: string | undefined) {
@@ -2197,6 +2229,21 @@ async function executeObjectBrowserSqlWithProductionGuard<T>(sql: string, execut
     source: t("production.sourceObjectBrowser"),
     execute,
   });
+}
+
+async function compileXuguObject(row: ObjectBrowserRow) {
+  if (effectiveDatabaseType.value !== "xugu") return;
+  const sql = buildXuguCompileSql({ objectType: row.type, schema: row.schema || selectedSchema.value, name: row.name });
+  if (!sql) return;
+  try {
+    const executed = await executeObjectBrowserSqlWithProductionGuard(sql, () => api.executeQuery(props.connection.id, props.database, sql, row.schema || selectedSchema.value));
+    if (!executed) return;
+    toast(t("contextMenu.compileObjectSuccess", { name: row.name }));
+    await reload();
+    await connectionStore.refreshObjectListTreeNode(props.connection.id, props.database, row.schema || selectedSchema.value);
+  } catch (e: any) {
+    toast(t("contextMenu.tableOperationFailed", { message: e?.message || String(e) }), 5000);
+  }
 }
 
 async function refreshTruncatePreviewSql(row: ObjectBrowserRow) {
@@ -2704,6 +2751,7 @@ function getViewMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
 function getProcFuncMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
   return [
     ...(item.type === "PROCEDURE" ? [{ label: t("contextMenu.executeProcedure"), action: () => openProcedureExecution(item), icon: Play }] : []),
+    ...(effectiveDatabaseType.value === "xugu" && buildXuguCompileSql({ objectType: item.type, schema: item.schema || selectedSchema.value, name: item.name }) ? [{ label: t("contextMenu.compileObject"), action: () => compileXuguObject(item), icon: Wrench }] : []),
     { label: t("contextMenu.viewSource"), action: () => openSource(item), icon: Code2 },
     ...(canRename(item) ? [{ label: t("contextMenu.renameObject"), action: () => requestRename(item), icon: Pencil }] : []),
     { label: "", separator: true },
@@ -2720,15 +2768,39 @@ function getProcFuncMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
 
 function getPackageMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
   return [
+    ...(effectiveDatabaseType.value === "xugu" && buildXuguCompileSql({ objectType: item.type, schema: item.schema || selectedSchema.value, name: item.name }) ? [{ label: t("contextMenu.compileObject"), action: () => compileXuguObject(item), icon: Wrench }] : []),
     { label: t("contextMenu.viewSource"), action: () => openSource(item), icon: Code2 },
     { label: "", separator: true },
     { label: t("contextMenu.copyName"), action: () => copyName(item), icon: Copy },
   ];
 }
 
+function getTypeMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
+  const items: ContextMenuItem[] = [];
+  const capabilities = customTypeCapabilities(effectiveDatabaseType.value);
+  // Verified PG-family types open the read-only details panel; Xugu keeps its
+  // “view source” entry for TYPE/TYPE_BODY rows.
+  if (supportsTypeObjectSource(effectiveDatabaseType.value)) {
+    items.push({ label: t("contextMenu.viewSource"), action: () => openSource(item), icon: Code2 });
+  }
+  if (capabilities.details) {
+    items.push({ label: t("contextMenu.viewDetails"), action: () => void openTypeInfo(item), icon: Info });
+    if (capabilities.ddl) {
+      items.push({ label: t("contextMenu.viewDdl"), action: () => openTypeDdl(item), icon: FileCode });
+    }
+  }
+  // Only separate when an action precedes copy-name.
+  if (items.length > 0) {
+    items.push({ label: "", separator: true });
+  }
+  items.push({ label: t("contextMenu.copyName"), action: () => copyName(item), icon: Copy });
+  return items;
+}
+
 function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
   if (item.type === "TABLE") return getTableMenuItems(item);
   if (item.type === "VIEW" || item.type === "MATERIALIZED_VIEW") return getViewMenuItems(item);
+  if (item.type === "TYPE" || item.type === "TYPE_BODY") return getTypeMenuItems(item);
   if (isSourceOnlyObjectBrowserRow(item)) return getPackageMenuItems(item);
   return getProcFuncMenuItems(item);
 }
@@ -2957,13 +3029,12 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
           </div>
           <RecycleScroller ref="listScrollerRef" class="object-browser-scroller min-h-0 flex-1" :style="{ minWidth: `${objectGridMinWidth}px` }" :items="filteredRows" :item-size="34" :buffer="600" :skip-hover="true" key-field="id">
             <template #default="{ item }">
-              <CustomContextMenu :items="() => getObjectBrowserMenuItems(item)" v-slot="{ onContextMenu }">
+              <CustomContextMenu :items="() => getObjectBrowserMenuItems(item)" v-slot="{ onContextMenu, isOpen }">
                 <div
-                  class="grid h-[34px] cursor-pointer items-center gap-3 border-b px-3 hover:bg-accent/50"
+                  class="grid h-[34px] cursor-default items-center gap-3 border-b px-3"
                   :class="{
-                    'bg-accent/40': sourceRow?.id === item.id,
-                    'bg-primary/10': sidePanelRow?.id === item.id && !selectedTableIds.has(item.id),
-                    'bg-primary/5': selectedTableIds.has(item.id),
+                    'bg-accent text-accent-foreground': isOpen || sourceRow?.id === item.id || sidePanelRow?.id === item.id || selectedTableIds.has(item.id),
+                    'hover:bg-accent/40': !isOpen && sourceRow?.id !== item.id && sidePanelRow?.id !== item.id && !selectedTableIds.has(item.id),
                   }"
                   :style="{ gridTemplateColumns, boxShadow: sidePanelRow?.id === item.id && !selectedTableIds.has(item.id) ? 'inset 3px 0 0 var(--primary)' : undefined }"
                   @click="onRowClick(item, $event)"
@@ -3016,13 +3087,12 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
           <RecycleScroller ref="gridScrollerRef" v-if="gridRows.length > 0" class="object-browser-grid-scroller h-full" :items="gridRows" :item-size="objectGridRowHeight" :buffer="600" :skip-hover="true" key-field="key">
             <template #default="{ item: row }">
               <div class="object-browser-grid-row" :style="{ gridTemplateColumns: `repeat(${gridColumns}, minmax(0, 1fr))`, height: `${objectGridRowHeight - OBJECT_GRID_GAP}px` }">
-                <CustomContextMenu v-for="item in row.cards" :key="item.id" :items="() => getObjectBrowserMenuItems(item)" v-slot="{ onContextMenu }">
+                <CustomContextMenu v-for="item in row.cards" :key="item.id" :items="() => getObjectBrowserMenuItems(item)" v-slot="{ onContextMenu, isOpen }">
                   <div
-                    class="relative flex h-full min-h-0 cursor-pointer flex-col items-center gap-1 rounded-lg border bg-card p-3 text-center transition-all hover:border-primary/40 hover:shadow-sm"
+                    class="relative flex h-full min-h-0 cursor-default flex-col items-center gap-1 rounded-lg border p-3 text-center transition-all"
                     :class="{
-                      'border-primary bg-primary/5': selectedTableIds.has(item.id),
-                      'border-primary/60': sourceRow?.id === item.id && !selectedTableIds.has(item.id),
-                      'border-primary bg-primary/8 shadow-sm': sidePanelRow?.id === item.id && !selectedTableIds.has(item.id),
+                      'border-primary bg-accent shadow-sm': isOpen || sourceRow?.id === item.id || sidePanelRow?.id === item.id || selectedTableIds.has(item.id),
+                      'bg-card hover:border-primary/40 hover:bg-accent/40 hover:shadow-sm': !isOpen && sourceRow?.id !== item.id && sidePanelRow?.id !== item.id && !selectedTableIds.has(item.id),
                     }"
                     :title="item.displayName"
                     @click="onRowClick(item, $event)"
@@ -3137,7 +3207,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
                       {{ column.comment }}
                     </div>
                   </td>
-                  <td class="px-3 py-2 font-mono text-[11px] text-muted-foreground">{{ column.data_type }}</td>
+                  <td class="px-3 py-2 font-mono text-[11px] text-muted-foreground">{{ gaussdbMColumnType(column.data_type) }}</td>
                   <td class="px-3 py-2">{{ column.is_nullable ? "YES" : "NO" }}</td>
                   <td data-table-info-column-default class="max-w-56 px-3 py-2 font-mono text-[11px]" :class="{ 'text-muted-foreground/70': column.column_default == null }" :title="column.column_default ?? undefined">
                     <span class="block max-w-56 truncate">{{ tableColumnDefaultDisplayValue(column.column_default) }}</span>
@@ -3221,6 +3291,10 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
           <div v-else class="flex-1 flex items-center justify-center">
             <Loader2 class="w-4 h-4 animate-spin text-muted-foreground" />
           </div>
+        </template>
+        <!-- Type info mode (read-only user-defined type details) -->
+        <template v-else-if="sidePanelMode === 'type-info'">
+          <CustomTypeInfoPanel ref="sidePanelRef" :connection="props.connection" :database="props.database" :schema="sidePanelRow?.schema || selectedSchema || props.database" :name="sidePanelRow?.name || ''" :catalog="props.catalog" @close="closeSidePanel" />
         </template>
         <!-- Source mode (views, procedures, functions, sequences) -->
         <template v-else>

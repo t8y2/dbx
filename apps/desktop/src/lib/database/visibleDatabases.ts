@@ -1,4 +1,7 @@
 import type { ConnectionConfig, DatabaseType } from "@/types/database";
+import { connectionUsesConnectionRootSchemaMode, effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
+
+type VisibleDatabaseConnection = Partial<ConnectionConfig>;
 
 type SystemNameRules = {
   exact?: ReadonlySet<string>;
@@ -171,7 +174,7 @@ export function isSystemSchemaName(databaseType: DatabaseType | undefined, schem
   return rules.prefixes?.some((prefix) => normalized.startsWith(prefix)) ?? false;
 }
 
-export function filterDatabaseNamesForConnection(databaseNames: string[], connection: Pick<ConnectionConfig, "db_type" | "driver_profile" | "visible_databases"> | undefined): string[] {
+export function filterDatabaseNamesForConnection(databaseNames: string[], connection: VisibleDatabaseConnection | undefined): string[] {
   const visibleDatabases = connection?.visible_databases;
   if (visibleDatabaseFilterIsEnabled(visibleDatabases)) {
     return filterVisibleDatabaseNames(databaseNames, visibleDatabases);
@@ -179,33 +182,29 @@ export function filterDatabaseNamesForConnection(databaseNames: string[], connec
   return filterDatabaseNamesForVisiblePicker(databaseNames, connection);
 }
 
-export function filterDatabaseNamesForVisiblePicker(databaseNames: string[], connection: Pick<ConnectionConfig, "db_type" | "driver_profile"> | undefined): string[] {
+export function filterDatabaseNamesForVisiblePicker(databaseNames: string[], connection: VisibleDatabaseConnection | undefined): string[] {
   if (connection?.db_type === "gbase" && connection.driver_profile === "gbase8s") {
     return databaseNames;
   }
-  return databaseNames.filter((name) => !isSystemDatabaseName(connection?.db_type, name));
+  return databaseNames.filter((name) => !isSystemDatabaseName(effectiveDatabaseTypeForConnection(connection), name));
 }
 
-export function filterSchemaNamesForVisiblePicker(schemaNames: string[], connection: Partial<Pick<ConnectionConfig, "db_type" | "username" | "show_system_schemas">> | undefined, options?: SchemaFilterOptions): string[] {
+export function filterSchemaNamesForVisiblePicker(schemaNames: string[], connection: VisibleDatabaseConnection | undefined, options?: SchemaFilterOptions): string[] {
   if (schemaFilterShowSystemSchemas(connection, options)) return schemaNames;
   const currentSchema = connection?.username?.trim().toLowerCase();
-  return schemaNames.filter((name) => name.toLowerCase() === currentSchema || !isSystemSchemaName(connection?.db_type, name));
+  const databaseType = effectiveDatabaseTypeForConnection(connection);
+  return schemaNames.filter((name) => name.toLowerCase() === currentSchema || !isSystemSchemaName(databaseType, name));
 }
 
-export function connectionUsesVisibleSchemaFilter(connection: Pick<ConnectionConfig, "db_type"> | undefined): boolean {
-  return connection?.db_type === "oracle" || connection?.db_type === "dameng" || connection?.db_type === "oceanbase-oracle";
+export function connectionUsesVisibleSchemaFilter(connection: VisibleDatabaseConnection | undefined): boolean {
+  return connectionUsesConnectionRootSchemaMode(connection);
 }
 
 export function visibleSchemaFilterIsEnabled(visibleSchemas: Record<string, string[]> | undefined, database: string): boolean {
   return Array.isArray(visibleSchemas?.[database]);
 }
 
-export function filterSchemaNamesForConnection(
-  schemaNames: string[],
-  connection: (Pick<ConnectionConfig, "db_type" | "visible_schemas" | "visible_databases" | "show_system_schemas"> & Partial<Pick<ConnectionConfig, "username">>) | undefined,
-  database: string,
-  options?: SchemaFilterOptions,
-): string[] {
+export function filterSchemaNamesForConnection(schemaNames: string[], connection: VisibleDatabaseConnection | undefined, database: string, options?: SchemaFilterOptions): string[] {
   const visibleSchemas = connection?.visible_schemas;
   if (!visibleSchemaFilterIsEnabled(visibleSchemas, database)) {
     if (connectionUsesVisibleSchemaFilter(connection) && visibleDatabaseFilterIsEnabled(connection?.visible_databases)) {

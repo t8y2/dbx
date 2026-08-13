@@ -88,6 +88,8 @@ pub async fn execute_multi(
     max_rows: Option<usize>,
     fetch_size: Option<usize>,
     page_size: Option<usize>,
+    max_result_bytes: Option<usize>,
+    result_key_columns: Option<Vec<String>>,
     result_session_id: Option<String>,
     client_session_id: Option<String>,
     timeout_secs: Option<u64>,
@@ -144,6 +146,8 @@ pub async fn execute_multi(
             max_rows,
             fetch_size,
             page_size,
+            max_result_bytes,
+            result_key_columns: result_key_columns.unwrap_or_default(),
             catalog,
             result_session_id,
             client_session_id,
@@ -598,8 +602,9 @@ pub fn analyze_editable_query_editability(sql: String) -> Result<dbx_core::sql_e
 #[tauri::command]
 pub fn prepare_data_grid_save(
     options: dbx_core::data_grid_sql::DataGridSaveStatementOptions,
+    driver_profile: Option<String>,
 ) -> Result<dbx_core::data_grid_sql::DataGridSavePreparation, String> {
-    Ok(dbx_core::data_grid_sql::prepare_data_grid_save(options))
+    Ok(dbx_core::data_grid_sql::prepare_data_grid_save_for_driver_profile(options, driver_profile.as_deref()))
 }
 
 #[tauri::command]

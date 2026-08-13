@@ -14,6 +14,7 @@ import { useVerticalOverlayScrollbar } from "@/composables/useVerticalOverlayScr
 
 const props = defineProps<{
   connectionId: string;
+  clientSessionId: string;
 }>();
 
 const { t } = useI18n();
@@ -115,7 +116,7 @@ function formatClock(at: number): string {
 
 async function fetchVariables() {
   try {
-    const result = await api.executeQuery(props.connectionId, "", GLOBAL_VARIABLES_SQL, undefined, undefined, { maxRows: 2000 });
+    const result = await api.executeQuery(props.connectionId, "", GLOBAL_VARIABLES_SQL, undefined, undefined, { maxRows: 2000, clientSessionId: props.clientSessionId });
     variables.value = parseStatusResult(result);
   } catch {
     // Non-fatal: cards that depend on variables (max_connections/version) degrade.
@@ -129,7 +130,7 @@ async function fetchStatus(options: { silent?: boolean } = {}) {
   error.value = "";
   try {
     await connectionStore.ensureConnected(props.connectionId);
-    const result = await api.executeQuery(props.connectionId, "", GLOBAL_STATUS_SQL, undefined, undefined, { maxRows: 2000 });
+    const result = await api.executeQuery(props.connectionId, "", GLOBAL_STATUS_SQL, undefined, undefined, { maxRows: 2000, clientSessionId: props.clientSessionId });
     const sample: StatusSample = { at: Date.now(), status: parseStatusResult(result) };
     const next = [...samples.value, sample];
     samples.value = next.length > MAX_SAMPLES ? next.slice(next.length - MAX_SAMPLES) : next;

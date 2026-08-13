@@ -2222,7 +2222,14 @@ fn persist_connection_in_tx(tx: &rusqlite::Transaction<'_>, config: &ConnectionC
     tx.execute("INSERT INTO connections (id, config_json) VALUES (?1, ?2)", params![config_id, json])
         .map_err(|e| e.to_string())?;
 
-    persist_secret_in_tx(tx, &config.id, "password", &config.password)?;
+    if config.save_password {
+        persist_secret_in_tx(tx, &config.id, "password", &config.password)?;
+    } else {
+        // "Don't save password": write an empty value, which persist_secret_in_tx
+        // turns into a DELETE — the password secret is never persisted (and any
+        // previously stored secret is removed on this save).
+        persist_secret_in_tx(tx, &config.id, "password", "")?;
+    }
     delete_secret_prefix_in_tx(tx, &config.id, TRANSPORT_LAYER_SECRET_PREFIX)?;
     for (index, layer) in config.transport_layers.iter().enumerate() {
         match layer {
@@ -2279,6 +2286,60 @@ fn persist_connection_in_tx(tx: &rusqlite::Transaction<'_>, config: &ConnectionC
     persist_mq_auth_secrets_in_tx(tx, &config)?;
     persist_mq_token_signing_secret_in_tx(tx, &config)?;
     persist_nacos_auth_secrets_in_tx(tx, &config)
+}
+
+fn insert_connection_copy_next_to_source(entries: &mut Vec<serde_json::Value>, source_id: &str, copy_id: &str) -> bool {
+    let mut index = 0;
+    while index < entries.len() {
+        let entry_type = entries[index].get("type").and_then(serde_json::Value::as_str);
+        if entry_type == Some("connection")
+            && entries[index].get("id").and_then(serde_json::Value::as_str) == Some(source_id)
+        {
+            entries.insert(index + 1, serde_json::json!({ "type": "connection", "id": copy_id }));
+            return true;
+        }
+        if entry_type == Some("group") {
+            if let Some(children) = entries[index].get_mut("children").and_then(serde_json::Value::as_array_mut) {
+                if insert_connection_copy_next_to_source(children, source_id, copy_id) {
+                    return true;
+                }
+            } else if let Some(connection_ids) =
+                entries[index].get_mut("connectionIds").and_then(serde_json::Value::as_array_mut)
+            {
+                if let Some(source_index) = connection_ids.iter().position(|id| id.as_str() == Some(source_id)) {
+                    connection_ids.insert(source_index + 1, serde_json::Value::String(copy_id.to_string()));
+                    return true;
+                }
+            }
+        }
+        index += 1;
+    }
+    false
+}
+
+fn copy_sidebar_layout_entry_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    source_id: &str,
+    copy_id: &str,
+) -> Result<(), String> {
+    let Some(layout_json) = tx
+        .query_row("SELECT layout_json FROM sidebar_layout WHERE id = 1", [], |row| row.get::<_, String>(0))
+        .optional()
+        .map_err(|error| error.to_string())?
+    else {
+        return Ok(());
+    };
+    let mut layout: serde_json::Value = serde_json::from_str(&layout_json).map_err(|error| error.to_string())?;
+    let Some(order) = layout.get_mut("order").and_then(serde_json::Value::as_array_mut) else {
+        return Err("INVALID_SIDEBAR_LAYOUT: sidebar order is not an array".to_string());
+    };
+    if !insert_connection_copy_next_to_source(order, source_id, copy_id) {
+        order.push(serde_json::json!({ "type": "connection", "id": copy_id }));
+    }
+    let updated = serde_json::to_string(&layout).map_err(|error| error.to_string())?;
+    tx.execute("UPDATE sidebar_layout SET layout_json = ?1 WHERE id = 1", [updated])
+        .map(|_| ())
+        .map_err(|error| error.to_string())
 }
 
 fn preserve_unreadable_connections_for_replacement(
@@ -2343,6 +2404,12 @@ impl Storage {
             for config in &configs {
                 let config = config.canonicalized();
                 let config_id = config.id.clone();
+                if !config.save_password {
+                    // Metadata-only imports/sync preserve existing secrets by default.
+                    // This preference is an exception: retaining the old password would
+                    // make a no-save connection silently authenticate without prompting.
+                    persist_secret_in_tx(&tx, &config.id, "password", "")?;
+                }
                 let mut sanitized = config;
                 sanitized.password = String::new();
                 scrub_transport_layer_secrets(&mut sanitized);
@@ -2397,6 +2464,62 @@ impl Storage {
         .await
     }
 
+    pub async fn duplicate_connection_for_mcp(
+        &self,
+        source_id: &str,
+        copy_id: &str,
+        copy_name: &str,
+    ) -> Result<ConnectionConfig, String> {
+        let source_id = source_id.to_string();
+        let copy_id = copy_id.to_string();
+        let copied_id = copy_id.clone();
+        let copy_name = copy_name.to_string();
+        self.with_conn(move |conn| {
+            let tx = conn.transaction().map_err(|error| error.to_string())?;
+            ensure_mcp_connection_change_allowed_in_tx(&tx, Some(&source_id))?;
+            let copy_name_lower = copy_name.to_lowercase();
+            let mut names = tx.prepare("SELECT config_json FROM connections").map_err(|error| error.to_string())?;
+            let duplicate_name = names
+                .query_map([], |row| row.get::<_, String>(0))
+                .map_err(|error| error.to_string())?
+                .filter_map(Result::ok)
+                .filter_map(|json| serde_json::from_str::<ConnectionConfig>(&json).ok())
+                .any(|connection| connection.name.to_lowercase() == copy_name_lower);
+            drop(names);
+            if duplicate_name {
+                return Err(format!("CONNECTION_ALREADY_EXISTS: connection '{copy_name}' already exists"));
+            }
+            let source_json = tx
+                .query_row("SELECT config_json FROM connections WHERE id = ?1", [&source_id], |row| {
+                    row.get::<_, String>(0)
+                })
+                .optional()
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| format!("CONNECTION_NOT_FOUND: connection '{source_id}' was not found"))?;
+            let mut copy: ConnectionConfig = serde_json::from_str(&source_json).map_err(|error| error.to_string())?;
+            copy.id = copy_id.clone();
+            copy.name = copy_name;
+            let copy_json = serde_json::to_string(&copy).map_err(|error| error.to_string())?;
+            tx.execute("INSERT INTO connections (id, config_json) VALUES (?1, ?2)", params![copy_id, copy_json])
+                .map_err(|error| error.to_string())?;
+            tx.execute(
+                "INSERT INTO connection_secrets (connection_id, key, secret) \
+                 SELECT ?1, key, secret FROM connection_secrets WHERE connection_id = ?2",
+                params![copy.id, source_id],
+            )
+            .map_err(|error| error.to_string())?;
+            copy_sidebar_layout_entry_in_tx(&tx, &source_id, &copy.id)?;
+            tx.commit().map_err(|error| error.to_string())?;
+            Ok(copy)
+        })
+        .await?;
+        self.load_connections()
+            .await?
+            .into_iter()
+            .find(|connection| connection.id == copied_id)
+            .ok_or_else(|| "CONNECTION_SAVE_ERROR: copied connection could not be reloaded".to_string())
+    }
+
     pub async fn remove_connection_for_mcp(&self, connection_id: &str) -> Result<bool, String> {
         let connection_id = connection_id.to_string();
         self.with_conn(move |conn| {
@@ -2434,6 +2557,47 @@ impl Storage {
             conn.execute("UPDATE connections SET config_json = ?1 WHERE id = ?2", params![json, connection_id])
                 .map(|_| ())
                 .map_err(|error| error.to_string())
+        })
+        .await
+    }
+
+    /// Update only the persisted MQTT saved-topic metadata for one connection.
+    ///
+    /// Unlike `save_connections`, this is an in-place update and must not replace
+    /// the saved connection list or touch separately stored connection secrets.
+    pub async fn save_connection_mqtt_saved_topics(
+        &self,
+        connection_id: &str,
+        saved_topics: serde_json::Value,
+    ) -> Result<(), String> {
+        let connection_id = connection_id.to_string();
+        self.with_conn(move |conn| {
+            let json = conn
+                .query_row("SELECT config_json FROM connections WHERE id = ?1", [&connection_id], |row| {
+                    row.get::<_, String>(0)
+                })
+                .optional()
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| format!("Connection config not found: {connection_id}"))?;
+            let mut config: ConnectionConfig = serde_json::from_str(&json).map_err(|error| error.to_string())?;
+            let mut external_config = config.external_config.take().unwrap_or_else(|| serde_json::json!({}));
+            let Some(external_object) = external_config.as_object_mut() else {
+                return Err("MQTT external_config 必须是 JSON 对象".to_string());
+            };
+            external_object.insert("savedTopics".to_string(), saved_topics);
+            config.external_config = Some(external_config);
+            let updated_json = serde_json::to_string(&config).map_err(|error| error.to_string())?;
+            conn.execute("UPDATE connections SET config_json = ?1 WHERE id = ?2", params![updated_json, connection_id])
+                .map(
+                    |updated| {
+                        if updated == 0 {
+                            Err(format!("Connection config not found: {connection_id}"))
+                        } else {
+                            Ok(())
+                        }
+                    },
+                )
+                .map_err(|error| error.to_string())?
         })
         .await
     }
@@ -3866,7 +4030,9 @@ mod tests {
         maybe_import_user_data_db, DataDbImportResult, DesktopIconTheme, DesktopSettings, McpGlobalPolicy,
         McpGlobalPolicyState, Storage, MCP_GLOBAL_POLICY_KEY,
     };
-    use crate::ai::{AiActiveModelSelection, AiChatSelectionState, AiEffortSelection, AiModelEffortPreference};
+    use crate::ai::{
+        AiActiveModelSelection, AiAssistantMode, AiChatSelectionState, AiEffortSelection, AiModelEffortPreference,
+    };
     use crate::connection_secrets::NACOS_RNACOS_CONSOLE_PASSWORD_KEY;
     use crate::connection_secrets::{
         MQ_AUTH_PASSWORD_KEY, MQ_AUTH_TOKEN_KEY, MQ_TOKEN_SIGNING_KEY, NACOS_AUTH_PASSWORD_KEY,
@@ -4138,8 +4304,76 @@ mod tests {
         let _ = std::fs::remove_file(path);
     }
 
+    fn plain_connection(id: &str, password: &str) -> ConnectionConfig {
+        serde_json::from_value::<ConnectionConfig>(serde_json::json!({
+            "id": id,
+            "name": format!("conn {id}"),
+            "db_type": "postgres",
+            "host": "127.0.0.1",
+            "port": 5432,
+            "username": "postgres",
+            "password": password,
+            "database": "app"
+        }))
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn save_connections_does_not_persist_password_when_save_password_false() {
+        let path = temp_db_path("save-password-false");
+        let storage = Storage::open(&path).await.unwrap();
+
+        let mut config = plain_connection("no-save", "hunter2");
+        config.save_password = false;
+        storage.save_connections(std::slice::from_ref(&config)).await.unwrap();
+
+        assert_eq!(storage.get_secret(&config.id, "password").await.unwrap(), None);
+        let loaded = storage.load_connections().await.unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].password, "");
+        assert!(!loaded[0].save_password);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn save_connections_persists_password_when_save_password_true() {
+        let path = temp_db_path("save-password-true");
+        let storage = Storage::open(&path).await.unwrap();
+
+        let config = plain_connection("save-yes", "hunter2");
+        storage.save_connections(std::slice::from_ref(&config)).await.unwrap();
+
+        assert_eq!(storage.get_secret(&config.id, "password").await.unwrap().as_deref(), Some("hunter2"));
+        let loaded = storage.load_connections().await.unwrap();
+        assert_eq!(loaded[0].password, "hunter2");
+        assert!(loaded[0].save_password);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn switching_save_password_off_removes_stored_password() {
+        let path = temp_db_path("save-password-switch-off");
+        let storage = Storage::open(&path).await.unwrap();
+
+        let mut config = plain_connection("switch", "hunter2");
+        storage.save_connections(std::slice::from_ref(&config)).await.unwrap();
+        assert_eq!(storage.get_secret(&config.id, "password").await.unwrap().as_deref(), Some("hunter2"));
+
+        config.save_password = false;
+        storage.save_connections(std::slice::from_ref(&config)).await.unwrap();
+        assert_eq!(storage.get_secret(&config.id, "password").await.unwrap(), None);
+        let loaded = storage.load_connections().await.unwrap();
+        assert_eq!(loaded[0].password, "");
+        assert!(!loaded[0].save_password);
+
+        let _ = std::fs::remove_file(path);
+    }
+
     fn mq_connection(id: &str, token: &str) -> ConnectionConfig {
         ConnectionConfig {
+            docs_notes_path: None,
             id: id.to_string(),
             name: "Pulsar".to_string(),
             note: String::new(),
@@ -4153,6 +4387,7 @@ mod tests {
             username: String::new(),
             password: String::new(),
             database: None,
+            default_schema: None,
             visible_databases: None,
             visible_schemas: None,
             show_system_schemas: false,
@@ -4195,6 +4430,7 @@ mod tests {
             jdbc_driver_class: None,
             jdbc_driver_paths: Vec::new(),
             one_time: false,
+            save_password: true,
             read_only: false,
             is_production: false,
             production_databases: vec![],
@@ -4204,6 +4440,7 @@ mod tests {
 
     fn nacos_connection(id: &str, password: &str) -> ConnectionConfig {
         ConnectionConfig {
+            docs_notes_path: None,
             id: id.to_string(),
             name: "Nacos".to_string(),
             note: String::new(),
@@ -4217,6 +4454,7 @@ mod tests {
             username: "nacos".to_string(),
             password: String::new(),
             database: None,
+            default_schema: None,
             visible_databases: None,
             visible_schemas: None,
             show_system_schemas: false,
@@ -4260,6 +4498,7 @@ mod tests {
             jdbc_driver_class: None,
             jdbc_driver_paths: Vec::new(),
             one_time: false,
+            save_password: true,
             read_only: false,
             is_production: false,
             production_databases: vec![],
@@ -4422,6 +4661,46 @@ mod tests {
         let _ = std::fs::remove_file(path);
     }
 
+    #[tokio::test]
+    async fn save_connection_mqtt_saved_topics_updates_only_target_and_preserves_secrets() {
+        let path = temp_db_path("mqtt-saved-topics");
+        let storage = Storage::open(&path).await.unwrap();
+        let target = mq_connection("target", "target-secret");
+        let untouched = mq_connection("untouched", "untouched-secret");
+        storage.save_connections(&[target.clone(), untouched.clone()]).await.unwrap();
+
+        let saved_topics = serde_json::json!([{
+            "topic": "sensors/temperature",
+            "qos": "atleastonce",
+            "noLocal": false,
+        }]);
+        storage.save_connection_mqtt_saved_topics(&target.id, saved_topics.clone()).await.unwrap();
+
+        let loaded = storage.load_connections().await.unwrap();
+        assert_eq!(loaded.len(), 2);
+        let updated = loaded.iter().find(|config| config.id == target.id).unwrap();
+        assert_eq!(updated.external_config.as_ref().unwrap()["savedTopics"], saved_topics);
+        assert_eq!(mq_token(updated), Some("target-secret"));
+        assert_eq!(loaded.iter().find(|config| config.id == untouched.id), Some(&untouched));
+        assert_eq!(mq_token(loaded.iter().find(|config| config.id == untouched.id).unwrap()), Some("untouched-secret"));
+
+        assert!(storage.save_connection_mqtt_saved_topics("missing", serde_json::json!([])).await.is_err());
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn save_connection_mqtt_saved_topics_rejects_non_object_external_config() {
+        let path = temp_db_path("mqtt-saved-topics-invalid");
+        let storage = Storage::open(&path).await.unwrap();
+        let mut target = mq_connection("target", "target-secret");
+        target.external_config = Some(serde_json::json!("invalid"));
+        storage.save_connections(std::slice::from_ref(&target)).await.unwrap();
+
+        let error = storage.save_connection_mqtt_saved_topics(&target.id, serde_json::json!([])).await.unwrap_err();
+        assert!(error.contains("external_config"));
+        assert_eq!(storage.load_connections().await.unwrap(), vec![target]);
+        let _ = std::fs::remove_file(path);
+    }
     #[tokio::test]
     async fn save_connection_driver_profile_updates_only_the_target_metadata() {
         let path = temp_db_path("connection-driver-profile");
@@ -5183,6 +5462,7 @@ mod tests {
                 model_id: "model-1".to_string(),
                 selection: AiEffortSelection::Enum("high".to_string()),
             }],
+            default_mode: Some(AiAssistantMode::Agent),
         };
 
         storage.save_ai_chat_selection(&selection).await.unwrap();
@@ -5384,6 +5664,16 @@ mod tests {
                 claude_code_cli_env: std::collections::HashMap::new(),
                 pi_agent_cli_path: None,
                 pi_agent_cli_env: std::collections::HashMap::new(),
+                opencode_cli_path: None,
+                opencode_cli_env: std::collections::HashMap::new(),
+                cursor_cli_path: None,
+                cursor_cli_env: std::collections::HashMap::new(),
+                grok_cli_path: None,
+                grok_cli_env: std::collections::HashMap::new(),
+                codebuddy_cli_path: None,
+                codebuddy_cli_env: std::collections::HashMap::new(),
+                qoder_cli_path: None,
+                qoder_cli_env: Default::default(),
             },
         }
     }
@@ -5416,6 +5706,111 @@ mod tests {
         assert_eq!(
             loaded[0].config.models[0].supported_effort_levels,
             vec![AiEffortLevel::Low, AiEffortLevel::High, AiEffortLevel::Xhigh]
+        );
+
+        std::fs::remove_file(&db).ok();
+    }
+
+    #[tokio::test]
+    async fn opencode_cli_ai_config_roundtrip() {
+        let db = temp_db_path("opencode-cli-ai-roundtrip");
+        let storage = Storage::open(&db).await.unwrap();
+
+        let mut cfg = make_ai_config("opencode-cli", true);
+        cfg.config.provider = AiProvider::OpenCodeCli;
+        cfg.config.api_key.clear();
+        cfg.config.endpoint.clear();
+        cfg.config.model = "openai/gpt-5.4-mini".to_string();
+        cfg.config.opencode_cli_path = Some("/opt/homebrew/bin/opencode".to_string());
+        cfg.config.opencode_cli_env.insert("HTTPS_PROXY".to_string(), "http://127.0.0.1:7890".to_string());
+        storage.save_ai_config_item(&cfg).await.unwrap();
+
+        let loaded = storage.load_ai_configs().await.unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert!(matches!(loaded[0].config.provider, AiProvider::OpenCodeCli));
+        assert_eq!(loaded[0].config.model, "openai/gpt-5.4-mini");
+        assert_eq!(loaded[0].config.opencode_cli_path.as_deref(), Some("/opt/homebrew/bin/opencode"));
+        assert_eq!(
+            loaded[0].config.opencode_cli_env.get("HTTPS_PROXY").map(String::as_str),
+            Some("http://127.0.0.1:7890")
+        );
+
+        std::fs::remove_file(&db).ok();
+    }
+
+    #[tokio::test]
+    async fn cursor_cli_ai_config_roundtrip() {
+        let db = temp_db_path("cursor-cli-ai-roundtrip");
+        let storage = Storage::open(&db).await.unwrap();
+
+        let mut cfg = make_ai_config("cursor-cli", true);
+        cfg.config.provider = AiProvider::CursorCli;
+        cfg.config.api_key.clear();
+        cfg.config.endpoint.clear();
+        cfg.config.model = "composer-2.5".to_string();
+        cfg.config.cursor_cli_path = Some("~/.local/bin/agent".to_string());
+        cfg.config.cursor_cli_env.insert("HTTPS_PROXY".to_string(), "http://127.0.0.1:7890".to_string());
+        storage.save_ai_config_item(&cfg).await.unwrap();
+
+        let loaded = storage.load_ai_configs().await.unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert!(matches!(loaded[0].config.provider, AiProvider::CursorCli));
+        assert_eq!(loaded[0].config.model, "composer-2.5");
+        assert_eq!(loaded[0].config.cursor_cli_path.as_deref(), Some("~/.local/bin/agent"));
+        assert_eq!(
+            loaded[0].config.cursor_cli_env.get("HTTPS_PROXY").map(String::as_str),
+            Some("http://127.0.0.1:7890")
+        );
+
+        std::fs::remove_file(&db).ok();
+    }
+
+    #[tokio::test]
+    async fn grok_cli_ai_config_roundtrip() {
+        let db = temp_db_path("grok-cli-ai-roundtrip");
+        let storage = Storage::open(&db).await.unwrap();
+
+        let mut cfg = make_ai_config("grok-cli", true);
+        cfg.config.provider = AiProvider::GrokCli;
+        cfg.config.api_key = String::new();
+        cfg.config.auth_method = AiAuthMethod::Bearer;
+        cfg.config.endpoint = String::new();
+        cfg.config.model = "default".to_string();
+        cfg.config.api_style = AiApiStyle::Completions;
+        cfg.config.grok_cli_path = Some("/Users/me/.grok/bin/grok".to_string());
+        storage.save_ai_config_item(&cfg).await.unwrap();
+
+        let loaded = storage.load_ai_configs().await.unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert!(matches!(loaded[0].config.provider, AiProvider::GrokCli));
+        assert_eq!(loaded[0].config.model, "default");
+        assert_eq!(loaded[0].config.grok_cli_path.as_deref(), Some("/Users/me/.grok/bin/grok"));
+
+        std::fs::remove_file(&db).ok();
+    }
+
+    #[tokio::test]
+    async fn codebuddy_cli_ai_config_roundtrip() {
+        let db = temp_db_path("codebuddy-cli-ai-roundtrip");
+        let storage = Storage::open(&db).await.unwrap();
+
+        let mut cfg = make_ai_config("codebuddy-cli", true);
+        cfg.config.provider = AiProvider::CodeBuddyCli;
+        cfg.config.api_key.clear();
+        cfg.config.endpoint.clear();
+        cfg.config.model = "kimi-k2.5".to_string();
+        cfg.config.codebuddy_cli_path = Some("/opt/homebrew/bin/codebuddy".to_string());
+        cfg.config.codebuddy_cli_env.insert("HTTPS_PROXY".to_string(), "http://127.0.0.1:7890".to_string());
+        storage.save_ai_config_item(&cfg).await.unwrap();
+
+        let loaded = storage.load_ai_configs().await.unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert!(matches!(loaded[0].config.provider, AiProvider::CodeBuddyCli));
+        assert_eq!(loaded[0].config.model, "kimi-k2.5");
+        assert_eq!(loaded[0].config.codebuddy_cli_path.as_deref(), Some("/opt/homebrew/bin/codebuddy"));
+        assert_eq!(
+            loaded[0].config.codebuddy_cli_env.get("HTTPS_PROXY").map(String::as_str),
+            Some("http://127.0.0.1:7890")
         );
 
         std::fs::remove_file(&db).ok();

@@ -10,6 +10,7 @@ import PasswordInput from "@/components/ui/PasswordInput.vue";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useToast } from "@/composables/useToast";
+import { fetchNamespaceOptionsForConnection } from "@/composables/useDatabaseOptions";
 import { useSqlHighlighter } from "@/composables/useSqlHighlighter";
 import type { ConnectionConfig } from "@/types/database";
 import * as api from "@/lib/backend/api";
@@ -223,7 +224,8 @@ async function openCreateUserDialog() {
   createDatabasesLoading.value = true;
   try {
     await ensureConnection();
-    createDatabases.value = (await api.listDatabases(props.connection.id)).map((database) => database.name);
+    const config = props.connection;
+    createDatabases.value = config.db_type === "dameng" ? await fetchNamespaceOptionsForConnection(config.id, config) : (await api.listDatabases(config.id)).map((database) => database.name);
   } catch (error: any) {
     toast(t("userAdmin.loadDatabasesFailed", { message: error?.message || String(error) }), 5000);
   } finally {

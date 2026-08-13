@@ -276,6 +276,22 @@ mod tests {
     }
 
     #[test]
+    fn hive_native_launch_ignores_stale_legacy_jar_without_jre() {
+        let manager = test_manager("hive-native-over-legacy-jar");
+        let native = manager.driver_native_path("hive");
+        touch(&native);
+        touch(&manager.driver_jar_path("hive"));
+
+        let launch = manager
+            .resolve_agent_launch_spec(&AgentState::default(), "hive", DEFAULT_JRE_KEY)
+            .expect("Hive native launch should not require a JRE");
+
+        assert_eq!(launch.program, native);
+        assert_eq!(launch.args, Vec::<String>::new());
+        assert_eq!(launch.working_dir.as_deref(), Some(manager.driver_dir("hive").as_path()));
+    }
+
+    #[test]
     fn resolves_relative_native_agent_launch_with_absolute_paths() {
         let base_dir =
             PathBuf::from("target").join(format!("dbx-agent-manager-relative-native-{}", uuid::Uuid::new_v4()));

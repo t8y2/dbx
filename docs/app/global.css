@@ -651,7 +651,7 @@ a {
 
 /* Install dropdown */
 
-.landing-install::after {
+.landing-install-control::after {
   content: "";
   position: absolute;
   top: 100%;
@@ -1119,6 +1119,19 @@ a {
 }
 
 @media (max-width: 760px) {
+  .landing-install-menu {
+    position: static;
+    display: none;
+    width: min(380px, calc(100vw - 32px));
+    margin-top: 12px;
+    translate: none;
+    transform: none;
+  }
+
+  .landing-install[data-open="true"] .landing-install-menu {
+    display: grid;
+  }
+
   .landing-nav-inner {
     padding-right: max(14px, env(safe-area-inset-right));
     padding-left: max(14px, env(safe-area-inset-left));

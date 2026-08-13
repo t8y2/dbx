@@ -19,8 +19,12 @@ use tokio::io::AsyncWriteExt;
 use crate::error::AppError;
 use crate::state::WebState;
 
-const MAX_IMPORT_UPLOAD_BYTES: usize = 100 * 1024 * 1024;
+pub(crate) const IMPORT_MULTIPART_OVERHEAD_BYTES: usize = 1024 * 1024;
 const TABLE_IMPORT_PROGRESS_TTL: Duration = Duration::from_secs(30);
+
+pub(crate) fn import_request_body_limit_for_upload(max_upload_bytes: usize) -> usize {
+    max_upload_bytes.saturating_add(IMPORT_MULTIPART_OVERHEAD_BYTES)
+}
 
 fn initial_import_progress(import_id: &str, started_at: Instant) -> TableImportProgress {
     TableImportProgress {
@@ -227,7 +231,7 @@ pub async fn release_import_source(
 }
 
 async fn write_import_upload(field: axum::extract::multipart::Field<'_>, file_path: &StdPath) -> Result<(), AppError> {
-    write_import_upload_stream(field, file_path, MAX_IMPORT_UPLOAD_BYTES).await
+    write_import_upload_stream(field, file_path, crate::web_body_limit_bytes()).await
 }
 
 async fn write_import_upload_stream<S, E>(
@@ -461,6 +465,25 @@ mod tests {
         cleanup_uploaded_import_path(&file_path).await;
     }
 
+    #[test]
+    fn multipart_request_limit_adds_framing_without_reducing_file_limit() {
+        assert_eq!(import_request_body_limit_for_upload(8), IMPORT_MULTIPART_OVERHEAD_BYTES + 8);
+        assert_eq!(import_request_body_limit_for_upload(usize::MAX), usize::MAX);
+    }
+
+    #[tokio::test]
+    async fn streams_import_upload_past_historical_limit_when_configured() {
+        const MIB: usize = 1024 * 1024;
+        const CONFIGURED_LIMIT: usize = 101 * MIB;
+        let file_path = test_upload_path();
+        let chunk = Bytes::from(vec![b'x'; MIB]);
+        let chunks = stream::iter((0..101).map(|_| Ok::<_, String>(chunk.clone())));
+
+        assert!(write_import_upload_stream(chunks, &file_path, CONFIGURED_LIMIT).await.is_ok());
+        assert_eq!(tokio::fs::metadata(&file_path).await.unwrap().len(), CONFIGURED_LIMIT as u64);
+        cleanup_uploaded_import_path(&file_path).await;
+    }
+
     #[tokio::test]
     async fn removes_partial_upload_when_size_limit_is_exceeded() {
         let file_path = test_upload_path();
@@ -468,7 +491,7 @@ mod tests {
 
         let error = write_import_upload_stream(chunks, &file_path, 4).await.unwrap_err();
 
-        assert!(error.message.contains("File too large"));
+        assert_eq!(error.message, "File too large: 5 bytes received (max 4 bytes)");
         assert!(!file_path.exists());
     }
 

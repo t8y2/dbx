@@ -10,7 +10,7 @@ import SearchableSelect from "@/components/ui/searchable-select/SearchableSelect
 import ConnectionGroupBadge from "@/components/connection/ConnectionGroupBadge.vue";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useToast } from "@/composables/useToast";
-import { databaseOptionsForConnection } from "@/composables/useDatabaseOptions";
+import { databaseOptionsForConnection, fetchNamespaceOptionsForConnection } from "@/composables/useDatabaseOptions";
 import { isSchemaAware } from "@/lib/database/databaseCapabilities";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import type { DataCompareCellValue, DataCompareModifiedRow, DataCompareResult, DataCompareRow, DataCompareSyncPlan, DataCompareSyncPlanTableOptions } from "@/lib/dataGrid/dataCompare";
@@ -118,7 +118,7 @@ const showModified = ref(true);
 
 let syncPlanRequestId = 0;
 
-const sqlConnections = computed(() => store.connections.filter((connection) => !["redis", "mongodb", "elasticsearch", "easysearch", "qdrant", "milvus", "weaviate", "chromadb", "etcd", "zookeeper", "mq", "nacos"].includes(connection.db_type)));
+const sqlConnections = computed(() => store.connections.filter((connection) => !["redis", "mongodb", "elasticsearch", "easysearch", "meilisearch", "qdrant", "milvus", "weaviate", "chromadb", "etcd", "zookeeper", "consul", "mq", "nacos"].includes(connection.db_type)));
 const selectedSourceTableNames = computed(() => sourceTables.value.filter((table) => selectedSourceTables.value.has(table)));
 const isBatchCompare = computed(() => selectedSourceTableNames.value.length > 1);
 const filteredSourceTables = computed(() => {
@@ -334,10 +334,14 @@ async function loadSchemas(side: "source" | "target", preferredSchema = "") {
 async function loadDatabases(connectionId: string, side: "source" | "target") {
   if (!connectionId) return;
   await store.ensureConnected(connectionId);
-  const names = databaseOptionsForConnection(
-    (await api.listDatabases(connectionId)).map((database) => database.name),
-    store.getConfig(connectionId),
-  );
+  const config = store.getConfig(connectionId);
+  const names =
+    config?.db_type === "dameng"
+      ? await fetchNamespaceOptionsForConnection(connectionId, config)
+      : databaseOptionsForConnection(
+          (await api.listDatabases(connectionId)).map((database) => database.name),
+          config,
+        );
   if (side === "source") {
     sourceDatabases.value = names;
     sourceDatabase.value = names.length === 1 ? names[0] : "";

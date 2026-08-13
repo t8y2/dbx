@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/url"
 	"os"
@@ -137,6 +138,12 @@ SELECT o.OBJECT_NAME,
 FROM ALL_OBJECTS o
 WHERE o.OWNER = :2
   AND o.OBJECT_TYPE IN ('VIEW', 'PROCEDURE', 'FUNCTION', 'PACKAGE', 'PACKAGE BODY')
+UNION ALL
+SELECT s.SYNONYM_NAME AS OBJECT_NAME,
+       'SYNONYM' AS OBJECT_TYPE,
+       CAST(NULL AS VARCHAR2(4000)) AS COMMENTS
+FROM ALL_SYNONYMS s
+WHERE s.OWNER = :3
 )`
 const oracleListObjectsSessionUserBaseSQL = `
 SELECT OBJECT_NAME, OBJECT_TYPE, COMMENTS
@@ -152,14 +159,20 @@ SELECT o.OBJECT_NAME,
        CAST(NULL AS VARCHAR2(4000)) AS COMMENTS
 FROM USER_OBJECTS o
 WHERE o.OBJECT_TYPE IN ('VIEW', 'PROCEDURE', 'FUNCTION', 'PACKAGE', 'PACKAGE BODY')
+UNION ALL
+SELECT s.SYNONYM_NAME AS OBJECT_NAME,
+       'SYNONYM' AS OBJECT_TYPE,
+       CAST(NULL AS VARCHAR2(4000)) AS COMMENTS
+FROM USER_SYNONYMS s
 )`
 const oracleListObjectsOrderSQL = `ORDER BY CASE OBJECT_TYPE
   WHEN 'TABLE' THEN 0
   WHEN 'VIEW' THEN 1
   WHEN 'PROCEDURE' THEN 2
   WHEN 'FUNCTION' THEN 3
-  WHEN 'PACKAGE' THEN 4
-  ELSE 5
+  WHEN 'SYNONYM' THEN 4
+  WHEN 'PACKAGE' THEN 5
+  ELSE 6
 END, OBJECT_NAME`
 const oracleListObjectsSQL = oracleListObjectsBaseSQL + "\n" + oracleListObjectsOrderSQL
 const oracleListTriggersSQL = `
@@ -231,6 +244,7 @@ type completionAssistantCandidate struct {
 	ParentName   *string `json:"parent_name"`
 	Comment      *string `json:"comment"`
 	DataType     *string `json:"data_type"`
+	Signature    *string `json:"signature"`
 }
 
 type completionAssistantResponse struct {
@@ -269,6 +283,15 @@ func (r queryResult) MarshalJSON() ([]byte, error) {
 	if value.Rows == nil {
 		value.Rows = [][]any{}
 	}
+	data, err := json.Marshal(value)
+	if err == nil {
+		return data, nil
+	}
+	rows, changed := normalizeNonFiniteQueryRows(value.Rows)
+	if !changed {
+		return nil, err
+	}
+	value.Rows = rows
 	return json.Marshal(value)
 }
 
@@ -295,7 +318,42 @@ func (r queryPageResult) MarshalJSON() ([]byte, error) {
 	if value.Rows == nil {
 		value.Rows = [][]any{}
 	}
+	data, err := json.Marshal(value)
+	if err == nil {
+		return data, nil
+	}
+	rows, changed := normalizeNonFiniteQueryRows(value.Rows)
+	if !changed {
+		return nil, err
+	}
+	value.Rows = rows
 	return json.Marshal(value)
+}
+
+func normalizeNonFiniteQueryRows(rows [][]any) ([][]any, bool) {
+	result := rows
+	changed := false
+	for rowIndex, row := range rows {
+		var normalizedRow []any
+		for columnIndex, value := range row {
+			floatValue, ok := value.(float64)
+			if !ok || (!math.IsNaN(floatValue) && !math.IsInf(floatValue, 0)) {
+				continue
+			}
+			if normalizedRow == nil {
+				normalizedRow = append([]any(nil), row...)
+			}
+			normalizedRow[columnIndex] = fmt.Sprint(floatValue)
+		}
+		if normalizedRow != nil {
+			if !changed {
+				result = append([][]any(nil), rows...)
+				changed = true
+			}
+			result[rowIndex] = normalizedRow
+		}
+	}
+	return result, changed
 }
 
 type querySession struct {
@@ -348,6 +406,7 @@ type columnInfo struct {
 	NumericPrecision       *int    `json:"numeric_precision"`
 	NumericScale           *int    `json:"numeric_scale"`
 	CharacterMaximumLength *int    `json:"character_maximum_length"`
+	CharacterLengthUnit    *string `json:"-"`
 }
 
 type indexInfo struct {
@@ -376,8 +435,10 @@ func (i indexInfo) MarshalJSON() ([]byte, error) {
 type foreignKeyInfo struct {
 	Name      string `json:"name"`
 	Column    string `json:"column"`
+	RefSchema string `json:"ref_schema"`
 	RefTable  string `json:"ref_table"`
 	RefColumn string `json:"ref_column"`
+	OnDelete  string `json:"on_delete"`
 }
 
 type triggerInfo struct {
@@ -729,6 +790,11 @@ func (s *server) dispatch(method string, params map[string]json.RawMessage) (any
 		schema := stringParam(params, "schema")
 		table := stringParam(params, "table")
 		result, err := s.getColumns(schema, table)
+		return result, false, err
+	case "get_table_comment":
+		schema := stringParam(params, "schema")
+		table := stringParam(params, "table")
+		result, err := s.getTableComment(schema, table)
 		return result, false, err
 	case "get_object_source":
 		schema := stringParam(params, "schema")
@@ -1458,7 +1524,7 @@ func oracleListObjectsQuery(schema string, constraints metadataListConstraints) 
 		"OBJECT_NAME, OBJECT_TYPE, COMMENTS",
 		"OBJECT_TYPE",
 		oracleListObjectsOrderSQL,
-		[]any{schema, schema},
+		[]any{schema, schema, schema},
 		constraints,
 	)
 }
@@ -1793,6 +1859,10 @@ func (s *server) oracleCompletionValidSynonymTargets(targets []oracleCompletionS
 }
 
 func (s *server) completionAssistantRoutines(request completionAssistantRequest, preferredSchema string, limit int) (completionAssistantResponse, error) {
+	if strings.TrimSpace(request.ParentName) != "" {
+		return s.completionAssistantPackageRoutines(request, preferredSchema, limit)
+	}
+
 	query := oracleCompletionRoutinesQuery(request, preferredSchema, limit+1)
 	rows, err := s.queryRows(query.SQL, query.Args)
 	if err != nil {
@@ -1832,6 +1902,176 @@ func (s *server) completionAssistantRoutines(request completionAssistantRequest,
 		candidates = candidates[:limit]
 	}
 	return completionAssistantResponse{Candidates: candidates, Incomplete: incomplete}, nil
+}
+
+type oraclePackageRoutineRow struct {
+	owner         string
+	parentName    string
+	name          string
+	objectID      int64
+	subprogramID  int64
+	position      sql.NullInt64
+	sequence      sql.NullInt64
+	argumentName  sql.NullString
+	inOut         sql.NullString
+	dataType      sql.NullString
+	typeOwner     sql.NullString
+	typeName      sql.NullString
+	typeSubname   sql.NullString
+	dataLength    sql.NullInt64
+	dataPrecision sql.NullInt64
+	dataScale     sql.NullInt64
+}
+
+type oraclePackageRoutine struct {
+	owner        string
+	parentName   string
+	name         string
+	isFunction   bool
+	returnType   string
+	argumentList []string
+}
+
+func (s *server) completionAssistantPackageRoutines(request completionAssistantRequest, preferredSchema string, limit int) (completionAssistantResponse, error) {
+	query := oracleCompletionPackageRoutinesQuery(request, preferredSchema)
+	rows, err := s.queryRows(query.SQL, query.Args)
+	if err != nil {
+		return completionAssistantResponse{}, err
+	}
+	defer s.closeRows(rows)
+
+	packageRows := make([]oraclePackageRoutineRow, 0)
+	for rows.Next() {
+		var row oraclePackageRoutineRow
+		if err := rows.Scan(
+			&row.owner,
+			&row.parentName,
+			&row.name,
+			&row.objectID,
+			&row.subprogramID,
+			&row.position,
+			&row.sequence,
+			&row.argumentName,
+			&row.inOut,
+			&row.dataType,
+			&row.typeOwner,
+			&row.typeName,
+			&row.typeSubname,
+			&row.dataLength,
+			&row.dataPrecision,
+			&row.dataScale,
+		); err != nil {
+			return completionAssistantResponse{}, err
+		}
+		packageRows = append(packageRows, row)
+	}
+	if err := rows.Err(); err != nil {
+		return completionAssistantResponse{}, err
+	}
+	return oracleCompletionPackageCandidates(packageRows, request.Database, limit), nil
+}
+
+func oracleCompletionPackageCandidates(rows []oraclePackageRoutineRow, database string, limit int) completionAssistantResponse {
+	routines := make([]oraclePackageRoutine, 0)
+	routineIndexes := make(map[string]int)
+	for _, row := range rows {
+		key := fmt.Sprintf("%s\x00%d\x00%d", row.owner, row.objectID, row.subprogramID)
+		index, found := routineIndexes[key]
+		if !found {
+			index = len(routines)
+			routineIndexes[key] = index
+			routines = append(routines, oraclePackageRoutine{owner: row.owner, parentName: row.parentName, name: row.name})
+		}
+		routine := &routines[index]
+		if !row.position.Valid {
+			continue
+		}
+		dataType := oracleCompletionArgumentDataType(row)
+		if row.position.Int64 == 0 {
+			routine.isFunction = true
+			routine.returnType = dataType
+			continue
+		}
+		argument := oracleCompletionArgumentSignature(row, dataType)
+		if argument != "" {
+			routine.argumentList = append(routine.argumentList, argument)
+		}
+	}
+
+	incomplete := len(routines) > limit
+	if incomplete {
+		routines = routines[:limit]
+	}
+	candidates := make([]completionAssistantCandidate, 0, len(routines))
+	for _, routine := range routines {
+		kind := "procedure"
+		if routine.isFunction {
+			kind = "function"
+		}
+		candidate := completionAssistantCandidate{
+			Name:         routine.name,
+			Kind:         kind,
+			Database:     stringPointer(database),
+			Schema:       stringPointer(routine.owner),
+			ParentSchema: stringPointer(routine.owner),
+			ParentName:   stringPointer(routine.parentName),
+			Signature:    stringPointer(strings.Join(routine.argumentList, ", ")),
+		}
+		if routine.returnType != "" {
+			candidate.DataType = stringPointer(routine.returnType)
+		}
+		candidates = append(candidates, candidate)
+	}
+	return completionAssistantResponse{Candidates: candidates, Incomplete: incomplete}
+}
+
+func oracleCompletionArgumentSignature(row oraclePackageRoutineRow, dataType string) string {
+	parts := make([]string, 0, 3)
+	if row.argumentName.Valid {
+		parts = append(parts, strings.TrimSpace(row.argumentName.String))
+	}
+	if row.inOut.Valid {
+		direction := strings.Join(strings.Fields(strings.ReplaceAll(row.inOut.String, "/", " ")), " ")
+		if direction != "" {
+			parts = append(parts, direction)
+		}
+	}
+	if dataType != "" {
+		parts = append(parts, dataType)
+	}
+	return strings.Join(parts, " ")
+}
+
+func oracleCompletionArgumentDataType(row oraclePackageRoutineRow) string {
+	typeParts := make([]string, 0, 3)
+	if row.typeOwner.Valid && strings.TrimSpace(row.typeOwner.String) != "" {
+		typeParts = append(typeParts, strings.TrimSpace(row.typeOwner.String))
+	}
+	if row.typeName.Valid && strings.TrimSpace(row.typeName.String) != "" {
+		typeParts = append(typeParts, strings.TrimSpace(row.typeName.String))
+	}
+	if row.typeSubname.Valid && strings.TrimSpace(row.typeSubname.String) != "" {
+		typeParts = append(typeParts, strings.TrimSpace(row.typeSubname.String))
+	}
+	if len(typeParts) > 0 {
+		return strings.Join(typeParts, ".")
+	}
+
+	dataType := strings.TrimSpace(row.dataType.String)
+	switch strings.ToUpper(dataType) {
+	case "NUMBER", "NUMERIC", "DECIMAL":
+		if row.dataPrecision.Valid {
+			if row.dataScale.Valid {
+				return fmt.Sprintf("%s(%d, %d)", dataType, row.dataPrecision.Int64, row.dataScale.Int64)
+			}
+			return fmt.Sprintf("%s(%d)", dataType, row.dataPrecision.Int64)
+		}
+	case "CHAR", "VARCHAR", "VARCHAR2", "NCHAR", "NVARCHAR2", "RAW":
+		if row.dataLength.Valid && row.dataLength.Int64 > 0 {
+			return fmt.Sprintf("%s(%d)", dataType, row.dataLength.Int64)
+		}
+	}
+	return dataType
 }
 
 func stringPointer(value string) *string {
@@ -1931,31 +2171,11 @@ func oracleCompletionSynonymTargetsQuery(targets []oracleCompletionSynonymTarget
 
 func oracleCompletionRoutinesQuery(request completionAssistantRequest, preferredSchema string, limit int) oracleMetadataListQuery {
 	pattern := oracleCompletionLikePattern(request.Mask, request.MatchMode)
-	args := make([]any, 0, 6)
+	args := make([]any, 0, 5)
 	baseSQL := `
 SELECT o.OWNER, o.OBJECT_NAME, o.OBJECT_TYPE, CAST(NULL AS VARCHAR2(128)) AS PARENT_NAME
 FROM ALL_OBJECTS o
 WHERE o.OBJECT_TYPE IN ('FUNCTION', 'PROCEDURE', 'PACKAGE')`
-	if parentName := strings.ToUpper(strings.TrimSpace(request.ParentName)); parentName != "" {
-		args = append(args, parentName)
-		parentParam := len(args)
-		baseSQL = fmt.Sprintf(`
-SELECT p.OWNER,
-       p.PROCEDURE_NAME AS OBJECT_NAME,
-       CASE WHEN EXISTS (
-         SELECT 1
-         FROM ALL_ARGUMENTS a
-         WHERE a.OWNER = p.OWNER
-           AND a.OBJECT_ID = p.OBJECT_ID
-           AND a.SUBPROGRAM_ID = p.SUBPROGRAM_ID
-           AND a.POSITION = 0
-       ) THEN 'FUNCTION' ELSE 'PROCEDURE' END AS OBJECT_TYPE,
-       p.OBJECT_NAME AS PARENT_NAME
-FROM ALL_PROCEDURES p
-WHERE p.OBJECT_TYPE = 'PACKAGE'
-  AND p.PROCEDURE_NAME IS NOT NULL
-  AND p.OBJECT_NAME = :%d`, parentParam)
-	}
 	args = append(args, pattern)
 	nameParam := len(args)
 
@@ -1982,6 +2202,52 @@ WHERE p.OBJECT_TYPE = 'PACKAGE'
 	orderedSQL := oracleCompletionOrderedSQL(filteredSQL, "OBJECT_NAME", "OBJECT_TYPE", preferredParam, exactParam)
 	return oracleMetadataListQuery{
 		SQL:  fmt.Sprintf("SELECT OWNER, OBJECT_NAME, OBJECT_TYPE, PARENT_NAME FROM (\n%s\n) WHERE ROWNUM <= :%d", orderedSQL, limitParam),
+		Args: args,
+	}
+}
+
+func oracleCompletionPackageRoutinesQuery(request completionAssistantRequest, preferredSchema string) oracleMetadataListQuery {
+	owner := strings.TrimSpace(request.ParentSchema)
+	if owner == "" {
+		owner = strings.TrimSpace(request.Schema)
+	}
+	if owner == "" {
+		owner = preferredSchema
+	}
+	parentName := strings.TrimSpace(request.ParentName)
+	pattern := oracleCompletionLikePattern(request.Mask, request.MatchMode)
+	args := []any{owner, parentName, pattern}
+	return oracleMetadataListQuery{
+		SQL: fmt.Sprintf(`SELECT p.OWNER,
+       p.OBJECT_NAME AS PARENT_NAME,
+       p.PROCEDURE_NAME AS OBJECT_NAME,
+       p.OBJECT_ID,
+       p.SUBPROGRAM_ID,
+       a.POSITION,
+       a.SEQUENCE,
+       a.ARGUMENT_NAME,
+       a.IN_OUT,
+       a.DATA_TYPE,
+       a.TYPE_OWNER,
+       a.TYPE_NAME,
+       a.TYPE_SUBNAME,
+       a.DATA_LENGTH,
+       a.DATA_PRECISION,
+       a.DATA_SCALE
+FROM ALL_PROCEDURES p
+LEFT JOIN ALL_ARGUMENTS a
+  ON a.OWNER = p.OWNER
+ AND a.OBJECT_ID = p.OBJECT_ID
+ AND a.SUBPROGRAM_ID = p.SUBPROGRAM_ID
+ AND a.DATA_LEVEL = 0
+WHERE p.OBJECT_TYPE = 'PACKAGE'
+  AND p.PROCEDURE_NAME IS NOT NULL
+  AND p.OWNER = :1
+  AND p.OBJECT_NAME = :2
+  AND %s
+ORDER BY p.PROCEDURE_NAME,
+         p.SUBPROGRAM_ID,
+         NVL(a.SEQUENCE, 0)`, oracleCompletionNamePredicate("p.PROCEDURE_NAME", 3, request.CaseSensitive)),
 		Args: args,
 	}
 }
@@ -2044,7 +2310,8 @@ SELECT c.COLUMN_NAME,
        cc.COMMENTS,
        c.DATA_PRECISION,
        c.DATA_SCALE,
-       c.CHAR_LENGTH
+       c.CHAR_LENGTH,
+       c.CHAR_USED
 FROM ALL_TAB_COLUMNS c
 LEFT JOIN (
   SELECT acc.OWNER, acc.TABLE_NAME, acc.COLUMN_NAME
@@ -2074,6 +2341,7 @@ ORDER BY c.COLUMN_ID`, []any{schema, table})
 			&item.NumericPrecision,
 			&item.NumericScale,
 			&item.CharacterMaximumLength,
+			&item.CharacterLengthUnit,
 		); err != nil {
 			return nil, err
 		}
@@ -2083,6 +2351,43 @@ ORDER BY c.COLUMN_ID`, []any{schema, table})
 		result = append(result, item)
 	}
 	return emptyIfNil(result), rows.Err()
+}
+
+func (s *server) getTableComment(schema, table string) (*string, error) {
+	schema, err := s.normalizeSchema(schema)
+	if err != nil {
+		return nil, err
+	}
+	exact, uppercase, hasUppercaseFallback := oracleObjectNameCandidates(table)
+	comment, found, err := s.getTableCommentByName(schema, exact)
+	if err != nil || found || !hasUppercaseFallback {
+		return comment, err
+	}
+	comment, _, err = s.getTableCommentByName(schema, uppercase)
+	return comment, err
+}
+
+func (s *server) getTableCommentByName(schema, table string) (*string, bool, error) {
+	db, err := s.requireDB()
+	if err != nil {
+		return nil, false, err
+	}
+	var comment sql.NullString
+	err = db.QueryRow(
+		"SELECT COMMENTS FROM ALL_TAB_COMMENTS WHERE OWNER = :1 AND TABLE_NAME = :2",
+		schema,
+		table,
+	).Scan(&comment)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	if !comment.Valid {
+		return nil, true, nil
+	}
+	return &comment.String, true, nil
 }
 
 func (s *server) loadOracleColumnMeta(schema, table string) ([]oracleColumnMeta, error) {
@@ -2124,7 +2429,7 @@ func (s *server) listIndexes(schema, table string) ([]indexInfo, error) {
 	if err != nil {
 		return nil, err
 	}
-	table = strings.ToUpper(strings.TrimSpace(table))
+	table = strings.TrimSpace(table)
 	rows, err := s.queryRows(`
 SELECT i.INDEX_NAME,
        ic.COLUMN_NAME,
@@ -2184,12 +2489,14 @@ func (s *server) listForeignKeys(schema, table string) ([]foreignKeyInfo, error)
 	if err != nil {
 		return nil, err
 	}
-	table = strings.ToUpper(strings.TrimSpace(table))
+	table = strings.TrimSpace(table)
 	rows, err := s.queryRows(`
 SELECT ac.CONSTRAINT_NAME,
        acc.COLUMN_NAME,
+       rcc.OWNER AS REF_SCHEMA,
        rcc.TABLE_NAME AS REF_TABLE,
-       rcc.COLUMN_NAME AS REF_COLUMN
+       rcc.COLUMN_NAME AS REF_COLUMN,
+       ac.DELETE_RULE
 FROM ALL_CONSTRAINTS ac
 JOIN ALL_CONS_COLUMNS acc ON acc.OWNER = ac.OWNER AND acc.CONSTRAINT_NAME = ac.CONSTRAINT_NAME
 JOIN ALL_CONS_COLUMNS rcc ON rcc.OWNER = ac.R_OWNER AND rcc.CONSTRAINT_NAME = ac.R_CONSTRAINT_NAME
@@ -2205,7 +2512,7 @@ ORDER BY ac.CONSTRAINT_NAME, acc.POSITION`, []any{schema, table})
 	var result []foreignKeyInfo
 	for rows.Next() {
 		var item foreignKeyInfo
-		if err := rows.Scan(&item.Name, &item.Column, &item.RefTable, &item.RefColumn); err != nil {
+		if err := rows.Scan(&item.Name, &item.Column, &item.RefSchema, &item.RefTable, &item.RefColumn, &item.OnDelete); err != nil {
 			return nil, err
 		}
 		result = append(result, item)
@@ -2218,7 +2525,7 @@ func (s *server) listTriggers(schema, table string) ([]triggerInfo, error) {
 	if err != nil {
 		return nil, err
 	}
-	table = strings.ToUpper(strings.TrimSpace(table))
+	table = strings.TrimSpace(table)
 	rows, err := s.queryRows(oracleListTriggersSQL, []any{schema, table})
 	if err != nil {
 		return nil, err
@@ -2305,6 +2612,9 @@ func (s *server) getObjectSource(schema, name, objectType string) (map[string]an
 		}
 		return map[string]any{"name": name, "object_type": objectType, "schema": schema, "source": source}, nil
 	}
+	if upperType == "SYNONYM" {
+		return s.getMetadataObjectSource(schema, name, upperType)
+	}
 
 	// Unquoted Oracle identifiers are stored uppercase; quoted mixed-case names must stay exact.
 	// Try caller-provided identity first, then uppercase fallback (same pattern as column metadata).
@@ -2318,6 +2628,22 @@ func (s *server) getObjectSource(schema, name, objectType string) (map[string]an
 		}
 	}
 	return map[string]any{"name": name, "object_type": objectType, "schema": schema, "source": ""}, nil
+}
+
+func (s *server) getMetadataObjectSource(schema, name, objectType string) (map[string]any, error) {
+	db, err := s.requireDB()
+	if err != nil {
+		return nil, err
+	}
+	var lastErr error
+	for _, candidate := range oracleObjectIdentityNameCandidates(name) {
+		var source string
+		lastErr = db.QueryRow("SELECT DBMS_METADATA.GET_DDL(:1, :2, :3) FROM DUAL", objectType, candidate, schema).Scan(&source)
+		if lastErr == nil {
+			return map[string]any{"name": candidate, "object_type": objectType, "schema": schema, "source": source}, nil
+		}
+	}
+	return nil, lastErr
 }
 
 func (s *server) loadObjectSourceText(schema, name, objectType string) (string, bool, error) {
@@ -2391,12 +2717,174 @@ func (s *server) getTableDDL(schema, table, objectType string) (string, error) {
 	var ddl string
 	err = db.QueryRow("SELECT DBMS_METADATA.GET_DDL(:1, :2, :3) FROM DUAL", objectType, table, schema).Scan(&ddl)
 	if err == nil && strings.TrimSpace(ddl) != "" {
+		if objectType == "TABLE" {
+			return s.appendTableDependentDDL(schema, table, ddl), nil
+		}
 		return ddl, nil
 	}
 	if objectType == "TABLE" {
-		return s.buildTableDDL(schema, table)
+		fallback, fallbackErr := s.buildTableDDL(schema, table)
+		if fallbackErr != nil {
+			return "", fallbackErr
+		}
+		return s.appendTableDependentDDL(schema, table, fallback), nil
 	}
 	return "", err
+}
+
+func (s *server) appendTableDependentDDL(schema, table, tableDDL string) string {
+	var builder strings.Builder
+	baseDDL := strings.TrimSpace(tableDDL)
+	builder.WriteString(baseDDL)
+	dependentAppended := false
+	appendDependent := func(ddl string) {
+		if strings.TrimSpace(ddl) == "" {
+			return
+		}
+		if !dependentAppended && !strings.HasSuffix(baseDDL, ";") && !strings.HasSuffix(baseDDL, "/") {
+			builder.WriteByte(';')
+		}
+		appendOracleDDLFragment(&builder, ddl)
+		dependentAppended = true
+	}
+
+	if indexDDLs, err := s.loadTableIndexDDLs(schema, table); err == nil {
+		for _, ddl := range indexDDLs {
+			appendDependent(ddl)
+		}
+	}
+	if triggerDDLs, err := s.loadTableTriggerDDLs(schema, table); err == nil {
+		for _, ddl := range triggerDDLs {
+			appendDependent(ddl)
+		}
+	}
+	if comments, err := s.loadTableCommentDDLs(schema, table); err == nil {
+		for _, ddl := range comments {
+			appendDependent(ddl)
+		}
+	}
+	return builder.String()
+}
+
+func (s *server) loadTableIndexDDLs(schema, table string) ([]string, error) {
+	rows, err := s.queryRows(`
+SELECT DBMS_METADATA.GET_DDL('INDEX', i.INDEX_NAME, i.OWNER)
+FROM ALL_INDEXES i
+WHERE i.TABLE_OWNER = :1
+  AND i.TABLE_NAME = :2
+  AND i.GENERATED = 'N'
+  AND i.INDEX_NAME NOT IN (
+    SELECT c.INDEX_NAME
+    FROM ALL_CONSTRAINTS c
+    WHERE c.OWNER = :3
+      AND c.TABLE_NAME = :4
+      AND c.CONSTRAINT_TYPE IN ('P', 'U')
+      AND c.INDEX_NAME IS NOT NULL
+  )
+ORDER BY i.INDEX_NAME`, []any{schema, table, schema, table})
+	if err != nil {
+		return nil, err
+	}
+	defer s.closeRows(rows)
+	var result []string
+	for rows.Next() {
+		var ddl sql.NullString
+		if err := rows.Scan(&ddl); err != nil {
+			return nil, err
+		}
+		if ddl.Valid && strings.TrimSpace(ddl.String) != "" {
+			result = append(result, ddl.String)
+		}
+	}
+	return result, rows.Err()
+}
+
+func (s *server) loadTableTriggerDDLs(schema, table string) ([]string, error) {
+	rows, err := s.queryRows(`
+SELECT DBMS_METADATA.GET_DDL('TRIGGER', t.TRIGGER_NAME, t.OWNER)
+FROM ALL_TRIGGERS t
+WHERE t.TABLE_OWNER = :1 AND t.TABLE_NAME = :2
+ORDER BY t.TRIGGER_NAME`, []any{schema, table})
+	if err != nil {
+		return nil, err
+	}
+	defer s.closeRows(rows)
+	var result []string
+	for rows.Next() {
+		var ddl sql.NullString
+		if err := rows.Scan(&ddl); err != nil {
+			return nil, err
+		}
+		if ddl.Valid && strings.TrimSpace(ddl.String) != "" {
+			result = append(result, ddl.String)
+		}
+	}
+	return result, rows.Err()
+}
+
+func (s *server) loadTableCommentDDLs(schema, table string) ([]string, error) {
+	db, err := s.requireDB()
+	if err != nil {
+		return nil, err
+	}
+	qualifiedTable := quoteIdentifier(schema) + "." + quoteIdentifier(table)
+	var result []string
+	var tableComment sql.NullString
+	err = db.QueryRow(
+		"SELECT COMMENTS FROM ALL_TAB_COMMENTS WHERE OWNER = :1 AND TABLE_NAME = :2",
+		schema,
+		table,
+	).Scan(&tableComment)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return nil, err
+	}
+	if tableComment.Valid && strings.TrimSpace(tableComment.String) != "" {
+		result = append(result, fmt.Sprintf("COMMENT ON TABLE %s IS %s", qualifiedTable, oracleStringLiteral(tableComment.String)))
+	}
+
+	rows, err := s.queryRows(`
+SELECT COLUMN_NAME, COMMENTS
+FROM ALL_COL_COMMENTS
+WHERE OWNER = :1 AND TABLE_NAME = :2 AND COMMENTS IS NOT NULL
+ORDER BY COLUMN_NAME`, []any{schema, table})
+	if err != nil {
+		return nil, err
+	}
+	defer s.closeRows(rows)
+	for rows.Next() {
+		var columnName string
+		var comment sql.NullString
+		if err := rows.Scan(&columnName, &comment); err != nil {
+			return nil, err
+		}
+		if comment.Valid && strings.TrimSpace(comment.String) != "" {
+			result = append(result, fmt.Sprintf(
+				"COMMENT ON COLUMN %s.%s IS %s",
+				qualifiedTable,
+				quoteIdentifier(columnName),
+				oracleStringLiteral(comment.String),
+			))
+		}
+	}
+	return result, rows.Err()
+}
+
+func appendOracleDDLFragment(builder *strings.Builder, ddl string) {
+	trimmed := strings.TrimSpace(ddl)
+	if trimmed == "" {
+		return
+	}
+	if builder.Len() > 0 {
+		builder.WriteString("\n\n")
+	}
+	builder.WriteString(trimmed)
+	if !strings.HasSuffix(trimmed, ";") && !strings.HasSuffix(trimmed, "/") {
+		builder.WriteByte(';')
+	}
+}
+
+func oracleStringLiteral(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "''") + "'"
 }
 
 func (s *server) resolveDDLObject(schema, name, requested string) (string, string, error) {
@@ -2553,6 +3041,9 @@ func oracleColumnTypeDDL(column columnInfo) string {
 		return dataType
 	}
 	if isOracleCharacterType(dataType) && column.CharacterMaximumLength != nil && *column.CharacterMaximumLength > 0 {
+		if unit := oracleCharacterLengthUnit(dataType, column.CharacterLengthUnit); unit != "" {
+			return fmt.Sprintf("%s(%d %s)", dataType, *column.CharacterMaximumLength, unit)
+		}
 		return fmt.Sprintf("%s(%d)", dataType, *column.CharacterMaximumLength)
 	}
 	if dataType == "NUMBER" {
@@ -2569,6 +3060,25 @@ func oracleColumnTypeDDL(column columnInfo) string {
 		return fmt.Sprintf("%s(%d)", dataType, *column.NumericPrecision)
 	}
 	return dataType
+}
+
+func oracleCharacterLengthUnit(dataType string, charUsed *string) string {
+	switch dataType {
+	case "CHAR", "VARCHAR", "VARCHAR2":
+	default:
+		return ""
+	}
+	if charUsed == nil {
+		return ""
+	}
+	switch strings.ToUpper(strings.TrimSpace(*charUsed)) {
+	case "B":
+		return "BYTE"
+	case "C":
+		return "CHAR"
+	default:
+		return ""
+	}
 }
 
 func isOracleCharacterType(dataType string) bool {

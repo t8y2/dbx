@@ -1,6 +1,7 @@
 import type { SqlCompletionColumn, SqlCompletionTable } from "@/lib/sql/sqlCompletion";
 import { getSqlCompletionContext, isOracleSystemValueName } from "@/lib/sql/sqlCompletion";
 import { executableStatementRanges, isOraclePlSqlStatement, type SqlTextRange } from "@/lib/sql/sqlStatementRanges";
+import { DBX_TDENGINE_TBNAME_COLUMN, isTdengineStableTableType } from "@/lib/table/tableEditing";
 import type { DatabaseType, SqlColumnReference, SqlReferenceAnalysis, SqlReferenceScope, SqlTableReference, SqlTextSpan } from "@/types/database";
 
 export interface SqlSemanticDiagnostic {
@@ -24,7 +25,8 @@ export interface SqlSemanticDiagnosticVisibleRange {
 }
 
 export function sqlSemanticDiagnosticRangesForViewport(sql: string, visibleRanges: readonly SqlSemanticDiagnosticVisibleRange[], databaseType?: DatabaseType): SqlTextRange[] {
-  const statements = executableStatementRanges(sql, databaseType);
+  const executableRanges = executableStatementRanges(sql, databaseType);
+  const statements = databaseType === "sqlserver" ? mergeSqlServerDiagnosticBatchRanges(sql, executableRanges) : executableRanges;
   if (statements.length === 0 || visibleRanges.length === 0) return [];
 
   const selected: SqlTextRange[] = [];
@@ -40,11 +42,74 @@ export function sqlSemanticDiagnosticRangesForViewport(sql: string, visibleRange
   return selected;
 }
 
+function mergeSqlServerDiagnosticBatchRanges(sql: string, statements: readonly SqlTextRange[]): SqlTextRange[] {
+  if (statements.length < 2) return [...statements];
+
+  const ranges: SqlTextRange[] = [];
+  let batch: SqlTextRange[] = [statements[0]];
+  for (const statement of statements.slice(1)) {
+    if (sqlServerGapContainsGoSeparator(sql.slice(batch[batch.length - 1].to, statement.from))) {
+      pushSqlServerDiagnosticBatchRanges(ranges, sql, batch);
+      batch = [];
+    }
+    batch.push(statement);
+  }
+  pushSqlServerDiagnosticBatchRanges(ranges, sql, batch);
+  return ranges;
+}
+
+function pushSqlServerDiagnosticBatchRanges(ranges: SqlTextRange[], sql: string, batch: readonly SqlTextRange[]) {
+  if (batch.length > 1 && batch.some((statement) => sqlServerStatementNeedsBatchContext(statement.sql))) {
+    const from = batch[0].from;
+    const to = batch[batch.length - 1].to;
+    ranges.push({ from, to, sql: sql.slice(from, to) });
+  } else {
+    ranges.push(...batch);
+  }
+}
+
+function sqlServerStatementNeedsBatchContext(sql: string): boolean {
+  return /^\s*(?:WHILE|BEGIN|END|IF|ELSE|TRY|CATCH)\b/i.test(sql) || /^\s*DECLARE\s+(?:\[[^\]]+\]|"[^"]+"|[A-Z_@#][\w@$#]*)\s+CURSOR\b/i.test(sql);
+}
+
+function sqlServerGapContainsGoSeparator(gap: string): boolean {
+  let inBlockComment = false;
+  let lineStart = 0;
+  while (lineStart <= gap.length) {
+    const newline = gap.indexOf("\n", lineStart);
+    const lineEnd = newline < 0 ? gap.length : newline;
+    const line = gap.slice(lineStart, lineEnd).replace(/\r$/, "");
+    if (!inBlockComment && /^\s*go(?:\s+\d+)?\s*$/i.test(line)) return true;
+
+    let offset = 0;
+    while (offset < line.length) {
+      if (inBlockComment) {
+        const close = line.indexOf("*/", offset);
+        if (close < 0) break;
+        inBlockComment = false;
+        offset = close + 2;
+        continue;
+      }
+      const open = line.indexOf("/*", offset);
+      if (open < 0) break;
+      const lineComment = line.indexOf("--", offset);
+      if (lineComment >= 0 && lineComment < open) break;
+      inBlockComment = true;
+      offset = open + 2;
+    }
+
+    if (newline < 0) break;
+    lineStart = newline + 1;
+  }
+  return false;
+}
+
 export function buildSqlSemanticDiagnostics(analysis: SqlReferenceAnalysis, schema: SqlSemanticDiagnosticSchema): SqlSemanticDiagnostic[] {
   const diagnostics: SqlSemanticDiagnostic[] = [];
   const tables = analysis.tables.filter((table) => table.name.trim());
   const knownTables = new Map<string, SqlTableReference>();
   const scopesById = scopesByIdMap(analysis.scopes);
+  let tdengineStableTables: Set<string> | undefined;
 
   for (const table of tables) {
     knownTables.set(normalizeName(table.name), table);
@@ -73,6 +138,10 @@ export function buildSqlSemanticDiagnostics(analysis: SqlReferenceAnalysis, sche
 
     const columnNames = new Set(columns.map((item) => normalizeName(item.name)));
     if (columnNames.has(normalizeName(column.name))) continue;
+    if (schema.databaseType === "tdengine" && normalizeName(column.name) === DBX_TDENGINE_TBNAME_COLUMN) {
+      tdengineStableTables ??= tdengineStableTableKeys(schema.tables);
+      if (tdengineStableTables.has(tableReferenceKey(table))) continue;
+    }
 
     const displayName = column.qualifier ? `${column.qualifier}.${column.name}` : column.name;
     diagnostics.push({
@@ -83,6 +152,20 @@ export function buildSqlSemanticDiagnostics(analysis: SqlReferenceAnalysis, sche
   }
 
   return diagnostics;
+}
+
+function tdengineStableTableKeys(tables: readonly SqlCompletionTable[]): Set<string> {
+  const keys = new Set<string>();
+  for (const table of tables) {
+    if (!isTdengineStableTableType(table.tableType)) continue;
+    keys.add(completionTableReferenceKey(table));
+  }
+  return keys;
+}
+
+function completionTableReferenceKey(table: Pick<SqlCompletionTable, "name" | "database" | "schema">): string {
+  if (table.schema) return normalizeName(`${table.database ? `${table.database}.` : ""}${table.schema}.${table.name}`);
+  return normalizeName(table.name);
 }
 
 function isUnquotedOracleSystemValueReference(column: SqlColumnReference, schema: SqlSemanticDiagnosticSchema): boolean {
@@ -202,6 +285,7 @@ export function shouldRunSqlSemanticDiagnostics(sql: string, cursor: number, opt
     options.databaseType === "mongodb" ||
     options.databaseType === "elasticsearch" ||
     options.databaseType === "easysearch" ||
+    options.databaseType === "meilisearch" ||
     options.databaseType === "qdrant" ||
     options.databaseType === "milvus" ||
     options.databaseType === "weaviate" ||
@@ -221,6 +305,7 @@ export function isSqlSemanticDiagnosticInputContext(sql: string, cursor: number,
     options.databaseType === "mongodb" ||
     options.databaseType === "elasticsearch" ||
     options.databaseType === "easysearch" ||
+    options.databaseType === "meilisearch" ||
     options.databaseType === "qdrant" ||
     options.databaseType === "milvus" ||
     options.databaseType === "weaviate" ||

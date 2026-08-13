@@ -11,14 +11,17 @@ const SchemaDiffDialog = defineAsyncComponent(() => import("@/components/diff/Sc
 const DataCompareDialog = defineAsyncComponent(() => import("@/components/diff/DataCompareDialog.vue"));
 const SqlFileExecutionDialog = defineAsyncComponent(() => import("@/components/sql-file/SqlFileExecutionDialog.vue"));
 const SchemaDiagramDialog = defineAsyncComponent(() => import("@/components/diagram/SchemaDiagramDialog.vue"));
+const DatabaseDocsDialog = defineAsyncComponent(() => import("@/components/docs/DatabaseDocsDialog.vue"));
 const TableImportDialog = defineAsyncComponent(() => import("@/components/import/TableImportDialog.vue"));
 const FieldLineageDialog = defineAsyncComponent(() => import("@/components/lineage/FieldLineageDialog.vue"));
 const ConfigPassphraseDialog = defineAsyncComponent(() => import("@/components/config/ConfigPassphraseDialog.vue"));
 const DatabaseSearchDialog = defineAsyncComponent(() => import("@/components/search/DatabaseSearchDialog.vue"));
 const SshHostKeyPromptDialog = defineAsyncComponent(() => import("@/components/ssh/SshHostKeyPromptDialog.vue"));
+const ConnectionPasswordPromptDialog = defineAsyncComponent(() => import("@/components/connection/ConnectionPasswordPromptDialog.vue"));
 const DatabaseExportDialog = defineAsyncComponent(() => import("@/components/export/DatabaseExportDialog.vue"));
 const DataGenerateDialog = defineAsyncComponent(() => import("@/components/generate/DataGenerateDialog.vue"));
 import { useConnectionStore } from "@/stores/connectionStore";
+import { useSqlExecutionDangerStore } from "@/stores/sqlExecutionDangerStore";
 import { useProductionSafetyStore } from "@/stores/productionSafetyStore";
 import { useDialogSources } from "@/composables/useDialogSources";
 import type { ConnectionDeepLinkDraft } from "@/lib/connection/connectionDeepLink";
@@ -88,6 +91,7 @@ const emit = defineEmits<{
 const { t } = useI18n();
 const connectionStore = useConnectionStore();
 const productionSafetyStore = useProductionSafetyStore();
+const sqlExecutionDangerStore = useSqlExecutionDangerStore();
 const dialogs = useDialogSources();
 const productionConfirmationDetails = computed(() => {
   const request = productionSafetyStore.pending;
@@ -97,6 +101,15 @@ const productionConfirmationDetails = computed(() => {
     database: request.productionDatabases?.join(", ") || request.database || "-",
     source: request.source || "-",
   });
+});
+const multiDbDangerDetails = computed(() => {
+  const request = sqlExecutionDangerStore.pending;
+  if (!request) return "";
+  return [request.targetLabel || request.connectionName, request.database].filter(Boolean).join("\n");
+});
+const multiDbDangerMessage = computed(() => {
+  const request = sqlExecutionDangerStore.pending;
+  return request?.kind === "redis" ? t("dangerDialog.redisCommandMessage") : t("dangerDialog.message");
 });
 
 const editConfig = computed(() => {
@@ -164,6 +177,19 @@ watch(
     @update:open="(open) => !open && productionSafetyStore.cancel()"
     @confirm="productionSafetyStore.confirm()"
   />
+  <DangerConfirmDialog
+    v-if="sqlExecutionDangerStore.pending"
+    :open="true"
+    :title="t('multiDbExecute.dangerTitle')"
+    :message="multiDbDangerMessage"
+    :details-text="multiDbDangerDetails"
+    :sql="sqlExecutionDangerStore.pending.sql"
+    :confirm-label="t('multiDbExecute.dangerConfirm')"
+    :show-suppress-toggle="false"
+    :close-on-confirm="false"
+    @update:open="(open) => !open && sqlExecutionDangerStore.cancel()"
+    @confirm="sqlExecutionDangerStore.confirm()"
+  />
   <SqlParameterDialog
     v-if="showSqlParameterDialog"
     :open="showSqlParameterDialog"
@@ -204,6 +230,7 @@ watch(
     :focus-table-name="dialogs.diagramFocusTableName.value"
     @open-target="emit('openDiagramTarget', $event)"
   />
+  <DatabaseDocsDialog v-if="dialogs.showDocsDialog.value" v-model:open="dialogs.showDocsDialog.value" :prefill-connection-id="dialogs.docsPrefillConnectionId.value" :prefill-database="dialogs.docsPrefillDatabase.value" :prefill-schema="dialogs.docsPrefillSchema.value" />
   <TableImportDialog
     v-if="dialogs.showTableImportDialog.value"
     v-model:open="dialogs.showTableImportDialog.value"
@@ -274,4 +301,5 @@ watch(
     </DialogContent>
   </Dialog>
   <SshHostKeyPromptDialog />
+  <ConnectionPasswordPromptDialog />
 </template>

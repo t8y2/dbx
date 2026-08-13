@@ -12,7 +12,7 @@ The new-connection picker provides more than 70 database and service profiles. A
 ### SQL and Compatible Protocols
 
 - Core SQL engines such as MySQL, PostgreSQL, SQLite, SQL Server, ClickHouse, Oracle, and Redshift
-- MySQL-protocol or syntax profiles such as MariaDB, TiDB, OceanBase, Doris, SelectDB, StarRocks, Manticore Search, and GoldenDB
+- MySQL-protocol or syntax profiles such as MariaDB, TiDB, OceanBase, Doris, SelectDB, StarRocks, Manticore Search, GoldenDB, and Dolt
 - PostgreSQL-compatible profiles such as openGauss, GaussDB, KingBase, HighGo, Vastbase, and CockroachDB
 - Vendor databases including DM, KWDB, YashanDB, GBase, Teradata, Vertica, Exasol, Firebird, and SAP HANA
 - Agent/JDBC analytics engines such as Snowflake, Trino, PrestoSQL, Hive, Spark, DB2, Informix, Databricks, and BigQuery
@@ -30,11 +30,11 @@ Desktop file paths belong to the local computer. Docker/Web paths belong to the 
 ### Specialized Data Models and Services
 
 - Redis and MongoDB
-- Elasticsearch, Easysearch, and Manticore Search
+- Elasticsearch, Easysearch, Meilisearch, and Manticore Search
 - Qdrant, Milvus, Weaviate, and ChromaDB
 - HBase
 - Pulsar, Kafka, RocketMQ, and RabbitMQ
-- etcd, ZooKeeper, and Nacos
+- etcd, ZooKeeper, Nacos, and Consul KV
 - InfluxDB, IoTDB, TDengine, and other time-series or IoT profiles
 
 These connections use key-value, document, search, vector, messaging, or configuration-center workspaces. They do not inherit every relational grid or SQL concept. See [Specialized Workspaces](/en/docs/specialized-workspaces).
@@ -94,7 +94,7 @@ Both runtimes share most Rust core query, metadata, and safety policy, but are n
 
 ## Default Ports and Connection URLs
 
-Profiles prefill common defaults such as MySQL `3306`, PostgreSQL `5432`, Redis `6379`, MongoDB `27017`, SQL Server `1433`, Oracle `1521`, Elasticsearch `9200`, and RabbitMQ AMQP `5672`. These are defaults, not requirements.
+Profiles prefill common defaults such as MySQL `3306`, PostgreSQL `5432`, Redis `6379`, MongoDB `27017`, SQL Server `1433`, Oracle `1521`, Elasticsearch `9200`, Meilisearch `7700`, and RabbitMQ AMQP `5672`. These are defaults, not requirements.
 
 Services such as RabbitMQ may expose separate business and management ports. A custom AMQP port must not be used to infer the Management API port. SSH tunnels, HTTP proxies, TLS SNI, and physical dial targets should also be verified independently.
 

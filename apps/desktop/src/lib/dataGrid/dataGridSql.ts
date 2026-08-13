@@ -56,7 +56,7 @@ export interface DataGridCopyInsertStatementOptions {
   insertMode?: DataGridCopyInsertMode;
 }
 
-export type DataGridContextFilterMode = "equals" | "not-equals" | "is-null" | "is-not-null" | "like" | "not-like" | "less-than" | "greater-than" | "in" | "not-in" | "between" | "not-between";
+export type DataGridContextFilterMode = "equals" | "not-equals" | "is-null" | "is-not-null" | "like" | "not-like" | "less-than" | "less-than-or-equal" | "greater-than" | "greater-than-or-equal" | "in" | "not-in" | "between" | "not-between";
 
 export interface DataGridContextFilterConditionOptions {
   databaseType?: DatabaseType;

@@ -67,6 +67,39 @@ describe("executableStatementRangeCacheForDoc", () => {
     expect(executableStatementRangeStartingAt(cache, doc.line(5).from)).toBeNull();
   });
 
+  it.each(["/*& tenant:'gdx' */", "/*&tenant:mctest*/", "/*+ MAX_EXECUTION_TIME(1000) */", "/*@global:true*/", "/*proxy*/"])("resolves the SQL line after a preserved leading directive for gutter execution: %s", (directive) => {
+    const sql = `SELECT 0;\n${directive}\nSELECT 1;`;
+    const doc = Text.of(sql.split("\n"));
+    const cache = executableStatementRangeCacheForDoc(null, doc, "mysql");
+
+    expect(executableStatementRangeStartingAt(cache, doc.line(3).from)?.sql).toBe(`${directive}\nSELECT 1`);
+  });
+
+  it("keeps a same-line tenant hint in the gutter execution range", () => {
+    const sql = "/*& tenant:'gdx' */ SELECT\n*\nFROM table";
+    const doc = Text.of(sql.split("\n"));
+    const cache = executableStatementRangeCacheForDoc(null, doc, "mysql");
+
+    expect(executableStatementRangeStartingAt(cache, doc.line(1).from)?.sql).toBe(sql);
+  });
+
+  it("treats a SQL Server temporary table after a hint as executable content", () => {
+    const sql = "/*+ hint */\n#temporary_table";
+    const doc = Text.of(sql.split("\n"));
+    const cache = executableStatementRangeCacheForDoc(null, doc, "sqlserver");
+
+    expect(executableStatementRangeStartingAt(cache, doc.line(2).from)?.sql).toBe(sql);
+  });
+
+  it("does not attach ordinary leading block comments to gutter execution", () => {
+    const doc = Text.of(["/* comment */", "SELECT 1;", "/* comment only */"]);
+    const cache = executableStatementRangeCacheForDoc(null, doc, "mysql");
+
+    expect(executableStatementRangeStartingAt(cache, doc.line(1).from)).toBeNull();
+    expect(executableStatementRangeStartingAt(cache, doc.line(2).from)?.sql).toBe("SELECT 1");
+    expect(executableStatementRangeStartingAt(cache, doc.line(3).from)).toBeNull();
+  });
+
   it("does not resolve gutter run buttons when non-whitespace precedes the statement on the same line", () => {
     const doc = Text.of(["/* comment */ SELECT 1;"]);
     const cache = executableStatementRangeCacheForDoc(null, doc, "mysql");
@@ -101,6 +134,40 @@ describe("executableStatementRangeCacheForDoc", () => {
 
     expect(executableStatementRangeAtCursor(cache, delimiterCursor)?.sql).toBe("SELECT *\nFROM users");
     expect(executableStatementRangeAtCursor(cache, delimiterCursor + 1)?.sql).toBe("SELECT *\nFROM users");
+  });
+
+  it("resolves a trailing-whitespace cursor on a multi-line statement tail to that statement", () => {
+    const sql = "WITH x AS (SELECT 1)\nSELECT 2   \nSELECT 3;";
+    const doc = Text.of(sql.split("\n"));
+    const cache = executableStatementRangeCacheForDoc(null, doc, "mysql");
+    const contentEnd = sql.indexOf("SELECT 2") + "SELECT 2".length;
+
+    expect(executableStatementRangeAtCursor(cache, contentEnd)?.sql).toBe("WITH x AS (SELECT 1)\nSELECT 2");
+    expect(executableStatementRangeAtCursor(cache, contentEnd + 1)?.sql).toBe("WITH x AS (SELECT 1)\nSELECT 2");
+    expect(executableStatementRangeAtCursor(cache, contentEnd + 2)?.sql).toBe("WITH x AS (SELECT 1)\nSELECT 2");
+  });
+
+  it("keeps the simple single-line trailing-whitespace case on the current statement", () => {
+    const sql = "SELECT 1;\nSELECT 2   \nSELECT 3;";
+    const doc = Text.of(sql.split("\n"));
+    const cache = executableStatementRangeCacheForDoc(null, doc, "mysql");
+    const contentEnd = sql.indexOf("SELECT 2") + "SELECT 2".length;
+
+    expect(executableStatementRangeAtCursor(cache, contentEnd)?.sql).toBe("SELECT 2");
+    expect(executableStatementRangeAtCursor(cache, contentEnd + 1)?.sql).toBe("SELECT 2");
+  });
+
+  it("keeps a trailing-whitespace cursor on a non-final line of a multi-line statement in the frame cache", () => {
+    const sql = "SELECT * FROM `profiles`;\nSELECT * FROM `users` AS uu   \nWHERE id = 2\nSELECT * FROM `orders`;";
+    const doc = Text.of(sql.split("\n"));
+    const cache = executableStatementRangeCacheForDoc(null, doc, "mysql");
+    const markerEnd = sql.indexOf("uu") + 2;
+    const lineEnd = sql.indexOf("\n", markerEnd);
+    const expected = "SELECT * FROM `users` AS uu   \nWHERE id = 2";
+
+    for (let pos = markerEnd; pos < lineEnd; pos += 1) {
+      expect(executableStatementRangeAtCursor(cache, pos)?.sql).toBe(expected);
+    }
   });
 
   it("does not attach a semicolon after a blank line to the previous statement", () => {

@@ -47,6 +47,10 @@ const syntaxLabels: Record<SqlParameterSyntax, string> = {
   sqlserver: "@name",
 };
 
+function syntaxLabel(parameter: SqlParameterDescriptor): string {
+  return parameter.collection ? "<foreach>" : syntaxLabels[parameter.syntax];
+}
+
 const resolvedSql = computed(() => substituteSqlParameters(props.sql, values.value, { databaseType: props.databaseType, enabledSyntaxes: props.enabledSyntaxes }));
 const highlightedSql = computed(() => highlight(resolvedSql.value));
 
@@ -143,7 +147,7 @@ async function copyResolvedSql() {
             </div>
             <div v-for="parameter in parameters" :key="parameter.key" class="grid grid-cols-[minmax(140px,1fr)_104px_132px_minmax(180px,1.5fr)] items-center gap-2 border-b px-3 py-2 text-sm last:border-b-0">
               <div class="min-w-0 truncate font-mono text-xs">{{ parameter.name }}</div>
-              <div class="min-w-0 truncate font-mono text-[11px] text-muted-foreground">{{ syntaxLabels[parameter.syntax] }}</div>
+              <div class="min-w-0 truncate font-mono text-[11px] text-muted-foreground">{{ syntaxLabel(parameter) }}</div>
               <Select :model-value="values[parameter.key]?.kind || 'string'" @update:model-value="(value) => updateKind(parameter.key, value as SqlParameterValueKind)">
                 <SelectTrigger class="h-8 bg-background text-xs">
                   <SelectValue />
@@ -164,7 +168,7 @@ async function copyResolvedSql() {
                       autocomplete="off"
                       data-lpignore="true"
                       data-form-type="other"
-                      :placeholder="t('sqlParameters.valuePlaceholder')"
+                      :placeholder="parameter.collection ? t('sqlParameters.collectionValuePlaceholder') : t('sqlParameters.valuePlaceholder')"
                       @focus="focusParameterInput(parameter.key, $event)"
                       @blur="closeParameterHistory(parameter.key)"
                       @update:model-value="(value) => updateValue(parameter.key, String(value))"

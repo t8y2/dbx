@@ -5,7 +5,7 @@ import { useTheme } from "@/composables/useTheme";
 import { webPath } from "@/lib/common/webPath";
 
 const props = defineProps<{
-  dbType: string;
+  dbType?: string;
 }>();
 const { isDark } = useTheme();
 
@@ -27,6 +27,7 @@ const assetIcons: Record<string, string> = {
   tidb: "tidb",
   elasticsearch: "elasticsearch",
   easysearch: "easysearch",
+  meilisearch: "meilisearch",
   oracle: "oracle",
   "oracle-10g": "oracle",
   "oracle-legacy": "oracle",
@@ -55,6 +56,7 @@ const assetIcons: Record<string, string> = {
   prestosql: "presto",
   hive: "hive",
   hbase: "hbase",
+  phoenix: "phoenix",
   spark: "spark-logo.png",
   apache_kylin: "apache_kylin",
   sundb: "sundb",
@@ -98,6 +100,7 @@ const assetIcons: Record<string, string> = {
   rocketmq: "rocketmq",
   rabbitmq: "rabbitmq",
   nacos: "nacos.png",
+  consul: "consul",
   iris: "iris",
   influxdb: "influxdb",
   victoriametrics: "victoriametrics.png",
@@ -105,9 +108,10 @@ const assetIcons: Record<string, string> = {
   oscar: "oscar.png",
   jdbcx: "jdbcx",
   mqtt: "mqtt",
+  dolt: "dolt",
 };
 
-const normalizedType = computed(() => props.dbType.toLowerCase().replace(/[\s-]+/g, "_"));
+const normalizedType = computed(() => (props.dbType || "").toLowerCase().replace(/[\s-]+/g, "_"));
 const assetName = computed(() => assetIcons[normalizedType.value]);
 const useLightIconInDarkMode = computed(() => normalizedType.value === "easysearch" && isDark.value);
 const assetSrc = computed(() => {

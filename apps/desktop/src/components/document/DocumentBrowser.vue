@@ -2,7 +2,7 @@
 import { computed, ref, nextTick, watch, onMounted, onBeforeUnmount } from "vue";
 import { uuid } from "@/lib/common/utils";
 import { useI18n } from "vue-i18n";
-import { RefreshCw, Trash2, Plus, Save, ChevronDown, ChevronUp, ChevronLeft, ChevronRight, Table2, Braces, X, Search, Wrench, Filter } from "@lucide/vue";
+import { RefreshCw, Trash2, Plus, Save, ChevronDown, ChevronLeft, ChevronRight, Table2, Braces, X, Search, Wrench, Filter, Columns3Cog, SquareDashed, Minus, Rows3, AlignLeft, AlignRight, EyeOff, Palette } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
@@ -13,6 +13,9 @@ import ErrorBanner from "@/components/ui/ErrorBanner.vue";
 import DataGrid from "@/components/grid/DataGrid.vue";
 import DataGridColumnLayoutPopover from "@/components/grid/DataGridColumnLayoutPopover.vue";
 import DataGridCopyFormatControl from "@/components/grid/DataGridCopyFormatControl.vue";
+import DataGridFontFamilyControl from "@/components/grid/DataGridFontFamilyControl.vue";
+import LightTooltip from "@/components/ui/LightTooltip.vue";
+import { Switch } from "@/components/ui/switch";
 import QueryLoadingState from "@/components/common/QueryLoadingState.vue";
 import * as api from "@/lib/backend/api";
 import { useConnectionStore } from "@/stores/connectionStore";
@@ -33,7 +36,8 @@ import {
   flattenDocumentFieldPathTree,
   searchDocumentFieldPathTree,
   documentFilterModeNeedsValue,
-  documentFilterModeOptions,
+  documentFilterModeOptionsFor,
+  documentFilterValueTypeOptions,
   documentStoreProviderFor,
   elasticsearchBoolClauseOptions,
   elasticsearchFieldPathTreeFromFieldNames,
@@ -45,6 +49,7 @@ import {
   type DocumentFieldPathNode,
   type DocumentFilterMode,
   type DocumentFilterRule,
+  type DocumentFilterValueType,
   type DocumentStoreKind,
   type ElasticsearchBoolClause,
   type ElasticsearchQueryType,
@@ -55,20 +60,33 @@ import {
   parseDocumentStoreInputValue,
   parseDocumentStoreJsonDocument,
   planDocumentStoreIdentityMigration,
+  prepareDocumentStoreWriteDocument,
   resolveDocumentStoreWriteRouting,
   serializeDocumentStoreId,
   stringifyDocumentStoreValue,
   documentStoreValueForGrid,
 } from "@/lib/app/documentJsonValues";
-import { applyDocumentStoreIdentityPlan, insertDocumentStoreDocument as insertDocumentStoreDocumentCore } from "@/lib/app/documentStoreSave";
+import { applyDocumentStoreIdentityPlan, formatMeilisearchDocumentOperationPreview, insertDocumentStoreDocument as insertDocumentStoreDocumentCore } from "@/lib/app/documentStoreSave";
 import RedisJsonEditor from "@/components/redis/RedisJsonEditor.vue";
 import { isLosslessJsonNumber, parseJsonPreservingLargeNumbers } from "@/lib/common/safeJsonFormat";
-import { buildMongoInsertDocument, buildMongoUpdateDocument, formatMongoShellLiteral, mongoDocumentDisplayValue, mongoDocumentIdForGrid, parseMongoDocumentInputValue, serializeMongoDocumentId, type MongoInputValue } from "@/lib/mongo/mongoDocumentValues";
+import {
+  buildMongoCopyDocumentFromOriginal,
+  buildMongoInsertDocument,
+  buildMongoUpdateDocument,
+  formatMongoShellLiteral,
+  mongoDocumentDisplayValue,
+  mongoDocumentGridColumnTypes,
+  mongoDocumentIdForGrid,
+  parseMongoDocumentInputValue,
+  serializeMongoDocumentId,
+  type MongoInputValue,
+} from "@/lib/mongo/mongoDocumentValues";
+import { mongoDocumentsToQueryResult } from "@/lib/mongo/mongoShellCommand";
+import type { GridNewRowMeta } from "@/lib/dataGrid/gridNewRowPlacement";
 import { normalizeResultPageSize } from "@/lib/dataGrid/paginationPageSize";
-import { findDocumentTextMatches, renderDocumentJsonHtml } from "@/lib/document/documentJsonSearch";
 import { documentDataGridColumnLayoutScopeKey } from "@/lib/dataGrid/dataGridColumnLayoutStorage";
 import { documentGridColumnVisibilityScopeKey, migrateDocumentGridColumnVisibilityToLayout } from "@/lib/document/documentGridColumnVisibilityStorage";
-import { useSettingsStore } from "@/stores/settingsStore";
+import { TABLE_FONT_SIZE_MAX, TABLE_FONT_SIZE_MIN, useSettingsStore } from "@/stores/settingsStore";
 import JsonEditNode from "./JsonEditNode.vue";
 import type { EditNode } from "@/types/editor";
 import type { ColumnInfo, DatabaseType, QueryResult, QueryTab } from "@/types/database";
@@ -95,6 +113,7 @@ const documents = ref<JsonRecord[]>([]);
 const copyDocuments = ref<JsonRecord[]>([]);
 const mongoCopyDocumentsAvailable = ref(false);
 const lastGridColumns = ref<string[]>([]);
+const lastGridColumnTypes = ref<string[]>([]);
 const total = ref<number | undefined>(undefined);
 const totalIsExact = ref(true);
 const paginationTotal = ref<number | undefined>(undefined);
@@ -113,6 +132,11 @@ const isSavingDocument = ref(false);
 const error = ref("");
 const editFields = ref<EditNode[]>([]);
 const showDeleteConfirm = ref(false);
+const columnWidthDensity = computed(() => settingsStore.editorSettings.columnWidthDensity);
+const dataGridRenderMode = computed(() => settingsStore.editorSettings.dataGridRenderMode);
+const tableFontSize = computed(() => settingsStore.editorSettings.tableFontSize);
+const numericColumnRightAlign = computed(() => settingsStore.editorSettings.numericColumnRightAlign ?? true);
+const colorizeDataGridCellTypes = computed(() => settingsStore.editorSettings.colorizeDataGridCellTypes);
 const viewMode = computed<ViewMode>({
   get: () => settingsStore.editorSettings.mongoViewMode,
   set: (value) => settingsStore.updateEditorSettings({ mongoViewMode: value }),
@@ -124,17 +148,40 @@ const sortInputRef = ref<HTMLTextAreaElement>();
 const dataGridRef = ref<InstanceType<typeof DataGrid>>();
 const viewOptionsOpen = ref(false);
 const mongoUpdateTarget = computed(() => (props.databaseType === "mongodb" && mongoCopyDocumentsAvailable.value ? { collection: props.collection, idColumn: "_id" as const } : undefined));
-const documentViewerRef = ref<HTMLElement>();
-const documentSearchInputRef = ref<HTMLInputElement>();
-const documentSearchOpen = ref(false);
-const documentSearchQuery = ref("");
-const documentSearchMatchIndex = ref(0);
-const documentSearchHasNavigated = ref(false);
+const documentJsonEditorRef = ref<{ openSearch: () => boolean }>();
 const documentViewerSearchActive = ref(false);
 
 function openDataGridExtractorConfiguration() {
   viewOptionsOpen.value = false;
   void nextTick(() => dataGridRef.value?.openExtractorConfiguration());
+}
+
+function setColumnWidthDensity(value: "compact" | "standard" | "comfortable") {
+  settingsStore.updateEditorSettings({ columnWidthDensity: value });
+}
+
+function setDataGridRenderMode(value: "canvas" | "dom") {
+  settingsStore.updateEditorSettings({ dataGridRenderMode: value });
+}
+
+function setTableFontSize(value: number) {
+  settingsStore.updateEditorSettings({ tableFontSize: value });
+}
+
+function decreaseTableFontSize() {
+  setTableFontSize(tableFontSize.value - 1);
+}
+
+function increaseTableFontSize() {
+  setTableFontSize(tableFontSize.value + 1);
+}
+
+function setNumericColumnRightAlign(value: boolean) {
+  settingsStore.updateEditorSettings({ numericColumnRightAlign: value });
+}
+
+function setColorizeDataGridCellTypes(value: boolean) {
+  settingsStore.updateEditorSettings({ colorizeDataGridCellTypes: value });
 }
 const tableSearchSplitContainerRef = ref<HTMLDivElement>();
 const tableFindPaneWidth = ref<number | null>(null);
@@ -212,6 +259,7 @@ type DocumentGridChanges = {
   dirtyRows: Map<number, Map<number, MongoInputValue>>;
   deletedRows: Set<number>;
   newRows: MongoInputValue[][];
+  newRowMeta: GridNewRowMeta[];
   columns: string[];
   rows: MongoInputValue[][];
 };
@@ -223,21 +271,21 @@ const appliedDocumentFilter = ref<Record<string, unknown> | null>(null);
 const elasticsearchMappingFields = ref<ColumnInfo[]>([]);
 
 const pendingDelete = ref<PendingDelete | null>(null);
+const documentFilterComposingEditors = new Set<string>();
+const documentFilterCompositionEndedAt = new Map<string, number>();
+const DOCUMENT_FILTER_IME_COMPOSITION_END_GRACE_MS = 120;
 
 const selectedDoc = computed(() => {
   if (selectedIdx.value === null) return null;
   return documents.value[selectedIdx.value] ?? null;
 });
-const documentSearchText = computed(() => editJson.value);
-const documentSearchMatches = computed(() => findDocumentTextMatches(documentSearchText.value, documentSearchQuery.value));
-const documentSearchActiveIndex = computed(() => {
-  if (documentSearchMatches.value.length === 0) return 0;
-  return Math.min(documentSearchMatchIndex.value, documentSearchMatches.value.length - 1);
+const selectedDocumentIdLabel = computed(() => {
+  if (isNew.value) return "New";
+  const id = selectedDoc.value?._id;
+  if (id === undefined || id === null) return "";
+  return typeof id === "object" ? stringifyDocumentStoreValue(id, documentStoreProvider.value.kind) : String(id);
 });
-const documentSearchStatus = computed(() => {
-  const count = documentSearchMatches.value.length;
-  return count > 0 ? `${documentSearchActiveIndex.value + 1}/${count}` : "0/0";
-});
+const selectedDocumentIdWidth = computed(() => `${Math.min(Math.max(Array.from(selectedDocumentIdLabel.value).length + 2, 5), 52)}ch`);
 
 const editKeyWidth = computed(() => {
   const longest = editFields.value.reduce((max, field) => {
@@ -252,8 +300,8 @@ const deleteDetails = computed(() => {
   if (pending.kind === "document") {
     const id = documents.value[pending.index]?._id ?? "";
     const displayId = mongoDocumentIdForGrid(id);
-    if (props.databaseType === "elasticsearch" || props.databaseType === "easysearch") {
-      const product = props.databaseType === "easysearch" ? "Easysearch" : "Elasticsearch";
+    if (props.databaseType === "elasticsearch" || props.databaseType === "easysearch" || props.databaseType === "meilisearch") {
+      const product = props.databaseType === "easysearch" ? "Easysearch" : props.databaseType === "meilisearch" ? "Meilisearch" : "Elasticsearch";
       return `${product} index: ${props.collection}\nDocument _id: ${String(displayId)}`;
     }
     return t("dangerDialog.mongoDocumentDetails", { collection: props.collection, id: String(displayId) });
@@ -266,6 +314,7 @@ const gridResult = computed<QueryResult>(() => {
   if (!docs.length) {
     return {
       columns: lastGridColumns.value,
+      column_types: lastGridColumnTypes.value,
       rows: [],
       affected_rows: 0,
       execution_time_ms: 0,
@@ -281,20 +330,69 @@ const gridResult = computed<QueryResult>(() => {
     }
   }
   const columns = [...keySet];
+  const columnTypes = documentStoreProvider.value.kind === "mongodb" ? mongoDocumentGridColumnTypes(docs, columns) : undefined;
 
   const rows = docs.map((doc) =>
     columns.map((col) => {
       const val = mongoDocumentDisplayValue(doc[col]);
       if (val === undefined || val === null) return null;
-      if (col === "_id") return documentStoreProvider.value.kind === "elasticsearch" ? documentStoreValueForGrid(val, "elasticsearch") : mongoDocumentIdForGrid(val);
+      if (col === "_id") return documentStoreProvider.value.kind === "mongodb" ? mongoDocumentIdForGrid(val) : documentStoreValueForGrid(val, documentStoreProvider.value.kind);
       if (typeof val === "object") return documentStoreValueForGrid(val, documentStoreProvider.value.kind);
       if (typeof val === "string" || typeof val === "number" || typeof val === "boolean") return val;
       return String(val);
     }),
   );
 
-  return { columns, rows, mongo_documents: docs, mongo_copy_documents: copyDocuments.value, affected_rows: 0, execution_time_ms: 0, truncated: false };
+  return { columns, column_types: columnTypes, rows, mongo_documents: docs, mongo_copy_documents: copyDocuments.value, affected_rows: 0, execution_time_ms: 0, truncated: false };
 });
+
+async function exportAllMongoDocuments(onProgress?: (info: { rowsExported: number; totalRows: number | null }) => void): Promise<QueryResult | undefined> {
+  if (documentStoreProvider.value.kind !== "mongodb") return undefined;
+
+  const connectionId = props.connectionId;
+  const database = props.database;
+  const collection = props.collection;
+  const filter = currentDocumentFilter();
+  const sort = currentDocumentSortJson(sortInput.value);
+  const exportSettings = settingsStore.editorSettings;
+  const batchSize = Math.max(1, Math.trunc(exportSettings.exportBatchSize));
+  const rowLimit = exportSettings.exportRowLimitEnabled ? Math.max(0, Math.trunc(exportSettings.exportRowLimit)) : Number.POSITIVE_INFINITY;
+  const exportExecutionId = uuid();
+  const exportStartedAt = performance.now();
+  const exportedDocuments: JsonRecord[] = [];
+  let exportedCopyDocuments: JsonRecord[] | undefined = [];
+  let totalRows: number | null = null;
+
+  while (exportedDocuments.length < rowLimit) {
+    const requestLimit = Math.min(batchSize, rowLimit - exportedDocuments.length);
+    if (requestLimit <= 0) break;
+    const result = await api.documentFindDocuments(connectionId, database, collection, exportedDocuments.length, requestLimit, filter, undefined, sort, undefined, exportExecutionId);
+    const pageDocuments = result.documents.slice(0, requestLimit).map(asRecord);
+    exportedDocuments.push(...pageDocuments);
+
+    if (exportedCopyDocuments) {
+      if (result.extended_documents?.length === result.documents.length) {
+        exportedCopyDocuments.push(...result.extended_documents.slice(0, pageDocuments.length).map(asRecord));
+      } else {
+        exportedCopyDocuments = undefined;
+      }
+    }
+
+    if (result.total_is_exact !== false) totalRows = Math.min(result.total, rowLimit);
+    onProgress?.({ rowsExported: exportedDocuments.length, totalRows });
+
+    const reachedExactTotal = result.total_is_exact !== false && exportedDocuments.length >= result.total;
+    if (pageDocuments.length === 0 || pageDocuments.length < requestLimit || reachedExactTotal) break;
+  }
+
+  const result = mongoDocumentsToQueryResult(exportedDocuments, performance.now() - exportStartedAt, totalRows ?? exportedDocuments.length, exportedCopyDocuments, totalRows !== null);
+  if (result.columns.length === 0) result.columns = gridResult.value.columns;
+  result.column_types = mongoDocumentGridColumnTypes(exportedDocuments, result.columns);
+  result.affected_rows = exportedDocuments.length;
+  result.truncated = false;
+  result.has_more = false;
+  return result;
+}
 const expandedDocumentFilterFieldPaths = ref<Set<string>>(new Set());
 const elasticsearchFieldTypes = computed(() => new Map(elasticsearchMappingFields.value.map((field) => [field.name, field.data_type])));
 const elasticsearchFilterFieldNames = computed(() => {
@@ -340,6 +438,7 @@ const documentStructuredFilterCount = computed(() => {
     return count + (Array.isArray(rules) ? rules.length : 0);
   }, 0);
 });
+const currentDocumentFilterModeOptions = computed(() => documentFilterModeOptionsFor(documentStoreProvider.value.kind));
 const documentLoadingLabelKey = computed(() => (documentLoadCancelling.value ? "common.stopping" : "common.loading"));
 let documentLoadingTimer: ReturnType<typeof setInterval> | undefined;
 
@@ -358,9 +457,52 @@ function ensureDocumentFilterRule() {
   }
 }
 
-function addDocumentFilterRule() {
+function appendDocumentFilterRule(openFieldSelect: boolean) {
   ensureDocumentFilterRule();
-  documentFilterRules.value = [...documentFilterRules.value, createDocumentFilterRule()];
+  const rule = createDocumentFilterRule();
+  documentFilterRules.value = [...documentFilterRules.value, rule];
+  if (openFieldSelect) setDocumentFilterFieldPopoverOpen(rule.id, true);
+}
+
+function addDocumentFilterRule() {
+  appendDocumentFilterRule(false);
+}
+
+function addDocumentFilterRuleFromKeyboard() {
+  appendDocumentFilterRule(true);
+}
+
+function startDocumentFilterImeComposition(editorKey: string) {
+  documentFilterComposingEditors.add(editorKey);
+  documentFilterCompositionEndedAt.delete(editorKey);
+}
+
+function endDocumentFilterImeComposition(editorKey: string) {
+  documentFilterComposingEditors.delete(editorKey);
+  documentFilterCompositionEndedAt.set(editorKey, Date.now());
+}
+
+function isDocumentFilterImeCompositionKey(event: KeyboardEvent, editorKey: string) {
+  const endedAt = documentFilterCompositionEndedAt.get(editorKey);
+  const justEnded = event.key === "Enter" && endedAt !== undefined && Date.now() - endedAt <= DOCUMENT_FILTER_IME_COMPOSITION_END_GRACE_MS;
+  if (justEnded || (endedAt !== undefined && event.key !== "Process")) documentFilterCompositionEndedAt.delete(editorKey);
+  return event.isComposing || event.key === "Process" || event.keyCode === 229 || documentFilterComposingEditors.has(editorKey) || justEnded;
+}
+
+function handleDocumentFilterValueKeydown(event: KeyboardEvent, ruleId: string) {
+  const editorKey = `value:${ruleId}`;
+  if (isDocumentFilterImeCompositionKey(event, editorKey)) {
+    event.stopPropagation();
+    return;
+  }
+  if (event.key !== "Enter") return;
+  event.preventDefault();
+  if (!event.shiftKey) {
+    void applyDocumentStructuredFilters();
+    return;
+  }
+  event.stopPropagation();
+  if (!event.repeat) addDocumentFilterRuleFromKeyboard();
 }
 
 function visibleDocumentFilterFieldRows(nodes: readonly DocumentFieldPathNode[], depth = 0): DocumentFilterFieldTreeRow[] {
@@ -445,8 +587,9 @@ function updateDocumentFilterRule(ruleId: string, patch: Partial<DocumentFilterR
         next.elasticsearchQueryType = queryTypes[0];
       }
       if (!elasticsearchQueryTypeNeedsValue(next.elasticsearchQueryType)) next.rawValue = "";
-    } else if (!documentFilterModeNeedsValue(next.mode)) {
-      next.rawValue = "";
+    } else {
+      if (patch.fieldName !== undefined && patch.fieldName !== rule.fieldName) next.valueType = "auto";
+      if (!documentFilterModeNeedsValue(next.mode)) next.rawValue = "";
     }
     return next;
   });
@@ -535,15 +678,22 @@ async function applyDocumentStructuredFilters() {
     applyFilter();
     return;
   }
-  const items = documentFilterRules.value
-    .map((rule) => ({
-      rule,
-      condition: buildDocumentFilterCondition(rule, {
-        kind: documentStoreProvider.value.kind,
-        sampleValue: documentFilterFieldByPath.value.get(rule.fieldName)?.sampleValue,
-      }),
-    }))
-    .filter((item): item is { rule: DocumentFilterRule; condition: Record<string, unknown> } => !!item.condition);
+  let items: Array<{ rule: DocumentFilterRule; condition: Record<string, unknown> }>;
+  try {
+    items = documentFilterRules.value
+      .map((rule) => ({
+        rule,
+        condition: buildDocumentFilterCondition(rule, {
+          kind: documentStoreProvider.value.kind,
+          sampleValue: documentFilterFieldByPath.value.get(rule.fieldName)?.sampleValue,
+        }),
+      }))
+      .filter((item): item is { rule: DocumentFilterRule; condition: Record<string, unknown> } => !!item.condition);
+  } catch (e) {
+    error.value = e instanceof Error ? e.message : String(e);
+    return;
+  }
+  error.value = "";
   const structured = combineDocumentFilterConditions(
     items.map((item) => item.condition),
     items.map((item) => item.rule),
@@ -617,28 +767,60 @@ async function gridSave(changes: DocumentGridChanges) {
   const cols = changes.columns;
   const idColIdx = cols.indexOf("_id");
   if (idColIdx < 0) throw new Error("No _id column");
-  const isEs = documentStoreProvider.value.kind === "elasticsearch";
+  const kind = documentStoreProvider.value.kind;
+  const isPathIdentityStore = kind !== "mongodb";
+  const isEs = kind === "elasticsearch";
+
+  if (kind === "meilisearch") {
+    const updates: Array<{ id: string; docJson: string }> = [];
+    const deleteIds: string[] = [];
+    const inserts: string[] = [];
+
+    for (const [rowIdx, dirtyCols] of changes.dirtyRows) {
+      const row = changes.rows[rowIdx];
+      const id = row?.[idColIdx];
+      const doc = documents.value[rowIdx];
+      if (id == null || !doc) continue;
+      const updated = buildPathIdentityUpdatedDocument(doc, dirtyCols, cols, kind);
+      const writeDocument = prepareDocumentStoreWriteDocument(updated, { kind, mode: "update" });
+      updates.push({
+        id: serializeDocumentStoreId(doc._id ?? id, kind),
+        docJson: stringifyDocumentStoreValue(writeDocument, kind),
+      });
+    }
+
+    for (const rowIdx of changes.deletedRows) {
+      const row = changes.rows[rowIdx];
+      const id = row?.[idColIdx];
+      if (id == null) continue;
+      deleteIds.push(serializeDocumentStoreId(documents.value[rowIdx]?._id ?? id, kind));
+    }
+
+    for (const newRow of changes.newRows) {
+      const doc = buildPathIdentityInsertDocument(newRow, cols, kind);
+      const idValue = newRow[idColIdx];
+      if (idValue !== null && idValue !== undefined && idValue !== "") doc._id = parseDocumentStoreInputValue(idValue, kind);
+      inserts.push(stringifyDocumentStoreValue(doc, kind));
+    }
+
+    await api.documentSaveMeilisearchBatch(props.connectionId, props.collection, updates, deleteIds, inserts);
+    await load();
+    return;
+  }
 
   for (const [rowIdx, dirtyCols] of changes.dirtyRows) {
     const row = changes.rows[rowIdx];
     const id = row?.[idColIdx];
     if (id == null) continue;
 
-    if (isEs) {
+    if (isPathIdentityStore) {
       const doc = documents.value[rowIdx];
       if (!doc) continue;
-      const routing = documentRoutingFromDocument(doc);
-      const updated = { ...doc };
-      for (const [colIdx, newVal] of dirtyCols) {
-        const col = cols[colIdx];
-        if (col === "_id" || col === "_routing") continue;
-        if (newVal === null) {
-          delete updated[col];
-        } else {
-          updated[col] = parseDocumentStoreInputValue(newVal, "elasticsearch");
-        }
-      }
-      await api.documentUpdateDocument(props.connectionId, props.database, props.collection, String(id), stringifyDocumentStoreValue(updated, "elasticsearch"), routing);
+      const routing = isEs ? documentRoutingFromDocument(doc) : undefined;
+      const updated = buildPathIdentityUpdatedDocument(doc, dirtyCols, cols, kind);
+      const writeDocument = prepareDocumentStoreWriteDocument(updated, { kind, mode: "update" });
+      const documentId = serializeDocumentStoreId(doc._id ?? id, kind);
+      await api.documentUpdateDocument(props.connectionId, props.database, props.collection, documentId, stringifyDocumentStoreValue(writeDocument, kind), routing);
       continue;
     }
 
@@ -655,38 +837,69 @@ async function gridSave(changes: DocumentGridChanges) {
     const document = documents.value[rowIdx];
     const routing = isEs ? documentRoutingFromDocument(document) : undefined;
     const documentType = isEs ? documentTypeFromDocument(document) : undefined;
-    const documentId = isEs ? id : (document?._id ?? id);
-    await api.documentDeleteDocument(props.connectionId, props.database, props.collection, isEs ? String(documentId) : serializeMongoDocumentId(documentId), routing, documentType);
+    const documentId = document?._id ?? id;
+    await api.documentDeleteDocument(props.connectionId, props.database, props.collection, isPathIdentityStore ? serializeDocumentStoreId(documentId, kind) : serializeMongoDocumentId(documentId), routing, documentType);
   }
 
-  for (const newRow of changes.newRows) {
-    const doc = isEs ? buildElasticsearchInsertDocument(newRow, cols) : buildMongoInsertDocument(newRow, cols);
-    if (isEs) {
-      const id = documentIdFromGridValue(newRow[idColIdx]);
-      const routing = documentRoutingFromGridRow(newRow, cols);
+  for (const [newRowIndex, newRow] of changes.newRows.entries()) {
+    const newRowMeta = changes.newRowMeta[newRowIndex];
+    const doc = isPathIdentityStore ? buildPathIdentityInsertDocument(newRow, cols, kind) : buildMongoGridInsertDocument(newRow, cols, newRowMeta);
+    if (isPathIdentityStore) {
+      const idValue = newRow[idColIdx];
+      const id = idValue === null || idValue === undefined || idValue === "" ? null : serializeDocumentStoreId(parseDocumentStoreInputValue(idValue, kind), kind);
+      const routing = isEs ? documentRoutingFromGridRow(newRow, cols) : undefined;
       if (id) {
-        await api.documentUpdateDocument(props.connectionId, props.database, props.collection, id, stringifyDocumentStoreValue(doc, "elasticsearch"), routing);
+        await api.documentUpdateDocument(props.connectionId, props.database, props.collection, id, stringifyDocumentStoreValue(doc, kind), routing);
       } else {
-        await api.documentInsertDocument(props.connectionId, props.database, props.collection, stringifyDocumentStoreValue(doc, "elasticsearch"), routing);
+        await api.documentInsertDocument(props.connectionId, props.database, props.collection, stringifyDocumentStoreValue(doc, kind), routing);
       }
       continue;
     }
-    await api.documentInsertDocument(props.connectionId, props.database, props.collection, JSON.stringify(doc));
+    const sourceIndex = newRowMeta?.sourceIndex;
+    const preserveBsonTypes = sourceIndex !== undefined && copyDocuments.value[sourceIndex] !== undefined;
+    await api.documentInsertDocument(props.connectionId, props.database, props.collection, JSON.stringify(doc), undefined, preserveBsonTypes);
   }
 
   if (isEs) resetElasticsearchTotals({ preservePaginationTotal: true });
   await load();
 }
 
-function buildElasticsearchInsertDocument(row: MongoInputValue[], columns: string[]): JsonRecord {
+function buildPathIdentityInsertDocument(row: MongoInputValue[], columns: string[], kind: Exclude<DocumentStoreKind, "mongodb">): JsonRecord {
   const doc: JsonRecord = {};
   for (let columnIndex = 0; columnIndex < columns.length; columnIndex += 1) {
     const column = columns[columnIndex];
-    if (!column || column === "_id" || column === "_routing") continue;
+    if (!column || column === "_id" || (kind === "elasticsearch" && column === "_routing")) continue;
     const value = row[columnIndex];
-    if (value !== null) doc[column] = parseDocumentStoreInputValue(value, "elasticsearch");
+    if (value !== null) doc[column] = parseDocumentStoreInputValue(value, kind);
   }
   return doc;
+}
+
+function buildPathIdentityUpdatedDocument(document: JsonRecord, changes: Map<number, MongoInputValue>, columns: string[], kind: Exclude<DocumentStoreKind, "mongodb">): JsonRecord {
+  const updated = { ...document };
+  for (const [columnIndex, newValue] of changes) {
+    const column = columns[columnIndex];
+    if (!column || column === "_id" || (kind === "elasticsearch" && column === "_routing")) continue;
+    if (newValue === null) delete updated[column];
+    else updated[column] = parseDocumentStoreInputValue(newValue, kind);
+  }
+  return updated;
+}
+
+function buildMongoGridInsertDocument(row: MongoInputValue[], columns: string[], meta?: GridNewRowMeta): Record<string, unknown> {
+  const sourceIndex = meta?.sourceIndex;
+  const sourceDocument = sourceIndex === undefined ? undefined : copyDocuments.value[sourceIndex];
+  if (!sourceDocument) return buildMongoInsertDocument(row, columns);
+  const editedColumns = new Set(meta?.editedColumns);
+  return (
+    buildMongoCopyDocumentFromOriginal(
+      sourceDocument,
+      row,
+      columns,
+      columns.map((_, index) => editedColumns.has(index)),
+      { excludePrimaryKeys: true },
+    ) ?? buildMongoInsertDocument(row, columns)
+  );
 }
 
 function elasticsearchPathIdPreview(id: string): string {
@@ -708,20 +921,31 @@ function buildElasticsearchPartialUpdateDocument(changes: Map<number, MongoInput
 }
 
 async function previewDocumentChanges(changes: DocumentGridChanges): Promise<string[]> {
-  const { dirtyRows, deletedRows, newRows, columns, rows } = changes;
+  const { dirtyRows, deletedRows, newRows, newRowMeta, columns, rows } = changes;
   const idColIdx = columns.indexOf("_id");
   const stmts: string[] = [];
   const coll = props.collection;
-  const isEs = documentStoreProvider.value.kind === "elasticsearch";
+  const kind = documentStoreProvider.value.kind;
+  const isPathIdentityStore = kind !== "mongodb";
+  const isEs = kind === "elasticsearch";
 
   for (const [rowIdx, dirtyCols] of dirtyRows) {
     const row = rows[rowIdx];
     const id = row?.[idColIdx];
     if (id == null) continue;
-    if (isEs) {
-      const updateDoc = buildElasticsearchPartialUpdateDocument(dirtyCols, columns);
-      const routing = documentRoutingFromGridRow(row, columns);
-      stmts.push(`POST /${coll}/_update/${elasticsearchPathIdPreview(String(id))}${elasticsearchRoutingPreview(routing)}\n${stringifyDocumentStoreValue({ doc: updateDoc.$set ?? updateDoc }, "elasticsearch", 2)}`);
+    if (isPathIdentityStore) {
+      if (isEs) {
+        const updateDoc = buildElasticsearchPartialUpdateDocument(dirtyCols, columns);
+        const routing = documentRoutingFromGridRow(row, columns);
+        stmts.push(`POST /${coll}/_update/${elasticsearchPathIdPreview(String(id))}${elasticsearchRoutingPreview(routing)}\n${stringifyDocumentStoreValue({ doc: updateDoc.$set ?? updateDoc }, "elasticsearch", 2)}`);
+      } else {
+        const sourceDocument = documents.value[rowIdx];
+        if (!sourceDocument) continue;
+        const documentId = sourceDocument._id ?? id;
+        const updated = buildPathIdentityUpdatedDocument(sourceDocument, dirtyCols, columns, "meilisearch");
+        const writeDocument = prepareDocumentStoreWriteDocument(updated, { kind: "meilisearch", mode: "update" });
+        stmts.push(formatMeilisearchDocumentOperationPreview({ action: "update", index: coll, id: documentId, document: writeDocument }));
+      }
     } else {
       const updateDoc = buildMongoUpdateDocument(dirtyCols, columns, documents.value[rowIdx]);
       stmts.push(`db.${coll}.updateOne({_id: ${formatMongoShellLiteral(documents.value[rowIdx]?._id ?? id)}}, ${formatMongoShellLiteral(updateDoc)})`);
@@ -732,7 +956,11 @@ async function previewDocumentChanges(changes: DocumentGridChanges): Promise<str
     const row = rows[rowIdx];
     const id = row?.[idColIdx];
     if (id == null) continue;
-    if (isEs) {
+    if (isPathIdentityStore) {
+      if (!isEs) {
+        stmts.push(formatMeilisearchDocumentOperationPreview({ action: "delete", index: coll, id: documents.value[rowIdx]?._id ?? id }));
+        continue;
+      }
       const routing = documentRoutingFromGridRow(row, columns);
       stmts.push(`DELETE /${coll}/_doc/${elasticsearchPathIdPreview(String(id))}${elasticsearchRoutingPreview(routing)}`);
     } else {
@@ -740,9 +968,15 @@ async function previewDocumentChanges(changes: DocumentGridChanges): Promise<str
     }
   }
 
-  for (const newRow of newRows) {
-    const doc = isEs ? buildElasticsearchInsertDocument(newRow, columns) : buildMongoInsertDocument(newRow, columns);
-    if (isEs) {
+  for (const [newRowIndex, newRow] of newRows.entries()) {
+    const doc = isPathIdentityStore ? buildPathIdentityInsertDocument(newRow, columns, kind) : buildMongoGridInsertDocument(newRow, columns, newRowMeta[newRowIndex]);
+    if (isPathIdentityStore) {
+      if (!isEs) {
+        const idValue = idColIdx >= 0 ? newRow[idColIdx] : null;
+        const id = idValue === null || idValue === undefined || idValue === "" ? undefined : parseDocumentStoreInputValue(idValue, "meilisearch");
+        stmts.push(formatMeilisearchDocumentOperationPreview({ action: id === undefined ? "insert" : "upsert", index: coll, id, document: doc }));
+        continue;
+      }
       const id = idColIdx >= 0 ? documentIdFromGridValue(newRow[idColIdx]) : null;
       if (id) {
         stmts.push(`PUT /${coll}/_doc/${elasticsearchPathIdPreview(id)}\n${stringifyDocumentStoreValue(doc, "elasticsearch", 2)}`);
@@ -934,6 +1168,7 @@ async function load(options: { page?: number } = {}) {
         }
       }
       lastGridColumns.value = [...keySet];
+      lastGridColumnTypes.value = storeKind === "mongodb" ? mongoDocumentGridColumnTypes(nextDocuments, lastGridColumns.value) : [];
     }
     if (storeKind === "elasticsearch") {
       applyElasticsearchSearchTotal(result.total, result.total_is_exact !== false, filter);
@@ -1347,7 +1582,7 @@ async function saveDoc() {
 
     if (isNew.value) {
       const apis = documentStoreWriteApis();
-      const explicitId = kind === "elasticsearch" ? documentIdFromGridValue(documentStoreValueForGrid(doc._id, "elasticsearch")) : null;
+      const explicitId = kind === "mongodb" || doc._id === undefined || doc._id === null || doc._id === "" ? null : resolveDocumentStorePathId(doc._id);
       await insertDocumentStoreDocumentCore({
         kind,
         document: doc,
@@ -1405,7 +1640,7 @@ async function saveDoc() {
 async function applyDeleteDoc(idx: number) {
   const doc = documents.value[idx];
   const id = doc._id;
-  if (!id) return;
+  if (id === undefined || id === null || id === "") return;
   error.value = "";
   try {
     await api.documentDeleteDocument(props.connectionId, props.database, props.collection, serializeDocumentStoreId(id, documentStoreProvider.value.kind), documentRoutingFromDocument(doc), documentStoreProvider.value.kind === "elasticsearch" ? documentTypeFromDocument(doc) : undefined);
@@ -1421,6 +1656,10 @@ async function applyDeleteDoc(idx: number) {
 }
 
 function requestDeleteDoc(idx: number) {
+  if (!settingsStore.editorSettings.confirmDangerousSqlExecution) {
+    void applyDeleteDoc(idx);
+    return;
+  }
   pendingDelete.value = { kind: "document", index: idx };
   showDeleteConfirm.value = true;
 }
@@ -1457,8 +1696,15 @@ function docPreview(doc: JsonRecord): string {
   return `${id} - ${preview}`;
 }
 
-function highlightedJson(json: string): string {
-  return renderDocumentJsonHtml(json, documentSearchOpen.value ? documentSearchQuery.value : "", documentSearchActiveIndex.value);
+function handleDocumentViewerDoubleClick(event: MouseEvent) {
+  const target = event.target;
+  if (!(target instanceof Element)) return;
+  // CodeMirror uses .cm-line for rendered document content. Preserve the
+  // existing shortcut only for whitespace around the source, not text itself.
+  if (target.closest(".cm-line")) return;
+  const selection = window.getSelection();
+  if (selection && !selection.isCollapsed && selection.toString()) return;
+  startEdit();
 }
 
 function handleDocumentBrowserPointerDown(event: PointerEvent) {
@@ -1470,55 +1716,12 @@ function focusSearch(): boolean {
   if (viewMode.value !== "document" || !documentViewerSearchActive.value) return false;
   if (isEditing.value) return false;
   if (!isNew.value && selectedIdx.value === null) return false;
-  documentSearchOpen.value = true;
-  documentSearchHasNavigated.value = false;
-  void nextTick(() => {
-    documentSearchInputRef.value?.focus();
-    documentSearchInputRef.value?.select();
-  });
-  return true;
+  return documentJsonEditorRef.value?.openSearch() ?? false;
 }
-
-function closeDocumentSearch() {
-  documentSearchOpen.value = false;
-  void nextTick(() => {
-    documentViewerRef.value?.focus();
-  });
-}
-
-function moveDocumentSearchMatch(delta: -1 | 1) {
-  const count = documentSearchMatches.value.length;
-  if (count === 0) return;
-  documentSearchMatchIndex.value = (documentSearchActiveIndex.value + delta + count) % count;
-  documentSearchHasNavigated.value = true;
-  void scrollDocumentSearchMatchIntoView();
-}
-
-function activateDocumentSearchMatch(delta: -1 | 1) {
-  if (documentSearchMatches.value.length === 0) return;
-  if (!documentSearchHasNavigated.value) {
-    documentSearchHasNavigated.value = true;
-    void scrollDocumentSearchMatchIntoView();
-    return;
-  }
-  moveDocumentSearchMatch(delta);
-}
-
-async function scrollDocumentSearchMatchIntoView() {
-  await nextTick();
-  documentViewerRef.value?.querySelector<HTMLElement>('[data-document-search-active="true"]')?.scrollIntoView({ block: "center", inline: "nearest" });
-}
-
-watch([documentSearchQuery, documentSearchText], () => {
-  documentSearchMatchIndex.value = 0;
-  documentSearchHasNavigated.value = false;
-  void scrollDocumentSearchMatchIntoView();
-});
 
 watch([viewMode, isEditing, selectedIdx], ([mode, editing, index]) => {
   if (mode === "document" && !editing && index !== null) return;
   documentViewerSearchActive.value = false;
-  documentSearchOpen.value = false;
 });
 
 onMounted(async () => {
@@ -1590,7 +1793,7 @@ defineExpose({ focusSearch });
 </script>
 
 <template>
-  <div class="h-full flex flex-col overflow-hidden">
+  <div class="h-full flex flex-col overflow-hidden" :class="{ 'select-none': viewMode === 'document' }">
     <!-- Top toolbar: view toggle + document count + pagination + actions -->
     <div class="h-9 flex items-center gap-1 px-3 border-b shrink-0 text-xs text-muted-foreground">
       <div class="flex items-center border rounded-md overflow-hidden mr-2">
@@ -1632,13 +1835,125 @@ defineExpose({ focusSearch });
           <div class="border-b bg-muted/40 px-3 py-2">
             <div class="text-xs font-semibold">{{ t("grid.viewOptions") }}</div>
           </div>
-          <label class="flex cursor-pointer items-center gap-2 px-3 py-2 text-xs hover:bg-accent" :class="{ 'cursor-not-allowed opacity-60': !dataGridRef?.canToggleAllNullColumns }">
-            <input type="checkbox" class="h-3.5 w-3.5 shrink-0 accent-primary" :checked="!!dataGridRef?.nullColumnsHidden" :disabled="!dataGridRef?.canToggleAllNullColumns" @change="dataGridRef?.toggleAllNullColumns()" />
-            <span class="min-w-0 flex items-center gap-1 font-medium">
+          <div class="flex items-center justify-between gap-3 px-3 py-1.5 text-xs">
+            <div class="min-w-0 flex items-center gap-2 font-medium">
+              <SquareDashed class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+              <span>{{ t("grid.renderMode") }}</span>
+            </div>
+            <LightTooltip :text="t('grid.renderModeHint')" side="left" :side-offset="6" :delay="0" :open-on-focus="false">
+              <div class="grid w-32 grid-cols-2 rounded-md border bg-muted/40 p-0.5">
+                <button
+                  v-for="mode in ['canvas', 'dom'] as const"
+                  :key="mode"
+                  type="button"
+                  class="h-5 min-w-0 truncate whitespace-nowrap rounded-[5px] px-2 text-xs transition-colors"
+                  :class="dataGridRenderMode === mode ? 'bg-background font-semibold text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'"
+                  @click="setDataGridRenderMode(mode)"
+                >
+                  {{ t(mode === "canvas" ? "grid.canvasRenderMode" : "grid.domRenderMode") }}
+                </button>
+              </div>
+            </LightTooltip>
+          </div>
+          <div class="flex items-center justify-between gap-3 px-3 py-1.5 text-xs">
+            <div class="min-w-0 flex items-center gap-2 font-medium">
+              <Columns3Cog class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+              <span>{{ t("grid.columnWidth") }}</span>
+            </div>
+            <div class="grid w-48 grid-cols-3 rounded-md border bg-muted/40 p-0.5">
+              <button
+                v-for="density in ['compact', 'standard', 'comfortable'] as const"
+                :key="density"
+                type="button"
+                class="h-5 min-w-0 truncate whitespace-nowrap rounded-[5px] px-1.5 text-xs transition-colors"
+                :class="columnWidthDensity === density ? 'bg-background font-semibold text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'"
+                @click="setColumnWidthDensity(density)"
+              >
+                {{ t(`grid.columnWidth${density.charAt(0).toUpperCase()}${density.slice(1)}`) }}
+              </button>
+            </div>
+          </div>
+          <DataGridFontFamilyControl />
+          <div class="flex items-center justify-between gap-3 px-3 py-1.5 text-xs">
+            <div class="min-w-0 flex items-center gap-2 font-medium">
+              <span class="flex h-3.5 w-3.5 shrink-0 items-center justify-center text-[11px] font-semibold text-muted-foreground">A</span>
+              <span>{{ t("grid.tableFontSize") }}</span>
+            </div>
+            <div class="flex h-6 w-32 items-center rounded-md border bg-muted/40 p-0.5">
+              <button
+                type="button"
+                class="flex h-5 w-8 items-center justify-center rounded-[5px] bg-background text-foreground shadow-sm transition-colors hover:text-foreground disabled:pointer-events-none disabled:bg-muted/40 disabled:text-muted-foreground disabled:opacity-50 disabled:shadow-none"
+                :disabled="tableFontSize <= TABLE_FONT_SIZE_MIN"
+                :aria-label="t('common.decrease')"
+                @click="decreaseTableFontSize"
+              >
+                <Minus class="h-3.5 w-3.5" />
+              </button>
+              <span class="flex-1 text-center text-xs font-semibold tabular-nums">{{ tableFontSize }}</span>
+              <button
+                type="button"
+                class="flex h-5 w-8 items-center justify-center rounded-[5px] bg-background text-foreground shadow-sm transition-colors hover:text-foreground disabled:pointer-events-none disabled:bg-muted/40 disabled:text-muted-foreground disabled:opacity-50 disabled:shadow-none"
+                :disabled="tableFontSize >= TABLE_FONT_SIZE_MAX"
+                :aria-label="t('common.increase')"
+                @click="increaseTableFontSize"
+              >
+                <Plus class="h-3.5 w-3.5" />
+              </button>
+            </div>
+          </div>
+          <div class="flex items-center justify-between gap-3 px-3 py-1.5 text-xs">
+            <div class="min-w-0 flex items-center gap-2 font-medium">
+              <Rows3 class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+              <span>{{ t("grid.transposeMultiRowToggle") }}</span>
+            </div>
+            <LightTooltip :text="t('grid.transposeMultiRowHint')" side="left" :side-offset="6" :delay="0" :open-on-focus="false">
+              <div class="grid w-32 grid-cols-2 rounded-md border bg-muted/40 p-0.5">
+                <button
+                  v-for="multiRow in [false, true]"
+                  :key="String(multiRow)"
+                  type="button"
+                  class="h-5 min-w-0 truncate whitespace-nowrap rounded-[5px] px-2 text-xs transition-colors"
+                  :class="dataGridRef?.multiRowTranspose === multiRow ? 'bg-background font-semibold text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'"
+                  @click="dataGridRef?.setMultiRowTranspose(multiRow)"
+                >
+                  {{ t(multiRow ? "grid.transposeMultiRow" : "grid.transposeSingleRow") }}
+                </button>
+              </div>
+            </LightTooltip>
+          </div>
+          <div class="flex items-center justify-between gap-3 px-3 py-1.5 text-xs">
+            <div class="min-w-0 flex items-center gap-2 font-medium">
+              <component :is="numericColumnRightAlign ? AlignRight : AlignLeft" class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+              <span>{{ t("grid.numericColumnAlign") }}</span>
+            </div>
+            <div class="grid w-32 grid-cols-2 rounded-md border bg-muted/40 p-0.5">
+              <button
+                v-for="rightAlign in [false, true]"
+                :key="String(rightAlign)"
+                type="button"
+                class="h-5 min-w-0 truncate whitespace-nowrap rounded-[5px] px-2 text-xs transition-colors"
+                :class="numericColumnRightAlign === rightAlign ? 'bg-background font-semibold text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'"
+                @click="setNumericColumnRightAlign(rightAlign)"
+              >
+                {{ t(rightAlign ? "grid.numericColumnAlignRight" : "grid.numericColumnAlignLeft") }}
+              </button>
+            </div>
+          </div>
+          <div class="flex items-center justify-between gap-3 px-3 py-1.5 text-xs">
+            <div class="min-w-0 flex items-center gap-2 font-medium">
+              <Palette class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+              <span>{{ t("grid.colorizeDataTypes") }}</span>
+            </div>
+            <Switch size="sm" :model-value="colorizeDataGridCellTypes" :aria-label="t('grid.colorizeDataTypes')" @update:model-value="setColorizeDataGridCellTypes" />
+          </div>
+          <div class="flex items-center justify-between gap-3 px-3 py-1.5 text-xs" :class="{ 'opacity-60': !dataGridRef?.canToggleAllNullColumns }">
+            <span class="min-w-0 flex items-center gap-2 font-medium">
+              <EyeOff class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
               {{ t("grid.hideNullColumns") }}
               <span v-if="(dataGridRef?.allNullColumnCount ?? 0) > 0" class="text-muted-foreground tabular-nums"> ({{ dataGridRef?.allNullColumnCount }}) </span>
             </span>
-          </label>
+            <Switch size="sm" :model-value="!!dataGridRef?.nullColumnsHidden" :disabled="!dataGridRef?.canToggleAllNullColumns" :aria-label="t('grid.hideNullColumns')" @update:model-value="dataGridRef?.toggleAllNullColumns()" />
+          </div>
           <DataGridCopyFormatControl
             :current-label="dataGridRef?.defaultCopyPreferenceLabel ?? '-'"
             :current-value="dataGridRef?.defaultCopyPreference ?? ''"
@@ -1684,13 +1999,14 @@ defineExpose({ focusSearch });
       :inexact-total-row-count-mode="documentStoreProvider.kind === 'mongodb' ? 'estimated' : 'at-least'"
       :pagination-total-row-count="pageTotal"
       :count-total-rows="countExactDocumentTotal"
+      :full-export-result="documentStoreProvider.kind === 'mongodb' ? exportAllMongoDocuments : undefined"
       @sort="onSort"
       @reload="refreshDocuments"
       @paginate="(offset: number, limit: number) => paginate(offset, limit)"
     >
       <template #search-bar="{ localFilterCount, hasLocalColumnFilters, localFilterSummaries, clearLocalFilter }: { localFilterCount: number; hasLocalColumnFilters: boolean; localFilterSummaries: LocalFilterSummary[]; clearLocalFilter: (columnIndex?: number) => void }">
         <div ref="tableSearchSplitContainerRef" class="flex flex-1 min-w-0">
-          <div class="flex flex-1 items-start gap-1 px-2 py-0.5 min-w-0" :style="tableFindPaneStyle">
+          <div class="flex flex-1 items-center gap-1 px-2 py-0.5 min-w-0" :style="tableFindPaneStyle">
             <Popover v-model:open="documentFilterBuilderOpen">
               <PopoverTrigger as-child>
                 <button
@@ -1705,12 +2021,12 @@ defineExpose({ focusSearch });
                   </span>
                 </button>
               </PopoverTrigger>
-              <PopoverContent align="start" class="max-w-[calc(100vw-32px)] gap-3 p-3" :class="documentStoreProvider.kind === 'elasticsearch' ? 'w-[680px]' : 'w-[360px]'">
-                <div class="flex items-center justify-between gap-3">
+              <PopoverContent align="start" class="max-w-[calc(100vw-32px)] gap-3 p-3" :class="documentStoreProvider.kind === 'elasticsearch' ? 'w-[680px]' : 'w-[468px]'">
+                <div class="flex items-center justify-between gap-2">
                   <div class="text-xs font-medium text-foreground">{{ t("grid.filter") }}</div>
-                  <Button variant="ghost" size="sm" class="h-7 px-2 text-xs" @click="addDocumentFilterRule">
-                    <Plus class="mr-1 h-3.5 w-3.5" />
-                    {{ t("grid.filterBuilderAddRule") }}
+                  <Button variant="ghost" size="sm" class="h-7 px-2 text-xs" @click="clearDocumentFilters(clearLocalFilter)">
+                    <Trash2 class="mr-1 h-3.5 w-3.5" />
+                    {{ t("grid.clearFilter") }}
                   </Button>
                 </div>
                 <div v-if="hasLocalColumnFilters" class="space-y-2 rounded-md border border-primary/20 bg-primary/5 px-2.5 py-2">
@@ -1751,7 +2067,7 @@ defineExpose({ focusSearch });
                       <Button
                         variant="ghost"
                         size="sm"
-                        class="h-6 px-2 text-[11px] font-medium text-muted-foreground hover:text-foreground"
+                        class="h-5 px-2 text-[11px] font-medium text-muted-foreground hover:text-foreground"
                         @click="
                           updateDocumentFilterRule(rule.id, {
                             conjunction: rule.conjunction === 'AND' ? 'OR' : 'AND',
@@ -1761,7 +2077,7 @@ defineExpose({ focusSearch });
                         {{ rule.conjunction }}
                       </Button>
                     </div>
-                    <div class="grid items-center gap-1.5" :class="documentStoreProvider.kind === 'elasticsearch' ? 'grid-cols-[minmax(0,0.75fr)_minmax(0,1.2fr)_minmax(0,1fr)_minmax(0,1fr)_auto]' : 'grid-cols-[minmax(0,1fr)_minmax(0,0.95fr)_minmax(0,1fr)_auto]'">
+                    <div class="grid items-center gap-1.5" :class="documentStoreProvider.kind === 'elasticsearch' ? 'grid-cols-[minmax(0,0.75fr)_minmax(0,1.2fr)_minmax(0,1fr)_minmax(0,1fr)_auto]' : 'grid-cols-[minmax(0,1fr)_minmax(0,0.9fr)_88px_minmax(0,1fr)_auto]'">
                       <Select v-if="documentStoreProvider.kind === 'elasticsearch'" :model-value="rule.elasticsearchClause || 'filter'" @update:model-value="(value: any) => updateDocumentFilterRule(rule.id, { elasticsearchClause: value as ElasticsearchBoolClause })">
                         <SelectTrigger class="h-8 w-full min-w-0 overflow-hidden text-xs [&_[data-slot=select-value]]:min-w-0 [&_[data-slot=select-value]]:truncate">
                           <SelectValue />
@@ -1837,7 +2153,18 @@ defineExpose({ focusSearch });
                           <SelectValue />
                         </SelectTrigger>
                         <SelectContent position="popper">
-                          <SelectItem v-for="option in documentFilterModeOptions" :key="option.value" :value="option.value">
+                          <SelectItem v-for="option in currentDocumentFilterModeOptions" :key="option.value" :value="option.value">
+                            {{ t(option.labelKey) }}
+                          </SelectItem>
+                        </SelectContent>
+                      </Select>
+
+                      <Select v-if="documentStoreProvider.kind === 'mongodb'" :model-value="rule.valueType || 'auto'" :disabled="!documentFilterModeNeedsValue(rule.mode)" @update:model-value="(value: any) => updateDocumentFilterRule(rule.id, { valueType: value as DocumentFilterValueType })">
+                        <SelectTrigger class="h-8 w-full min-w-0 overflow-hidden text-xs [&_[data-slot=select-value]]:min-w-0 [&_[data-slot=select-value]]:truncate">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent position="popper">
+                          <SelectItem v-for="option in documentFilterValueTypeOptions" :key="option.value" :value="option.value">
                             {{ t(option.labelKey) }}
                           </SelectItem>
                         </SelectContent>
@@ -1849,14 +2176,16 @@ defineExpose({ focusSearch });
                         class="h-8 min-w-0 text-xs"
                         :placeholder="t('grid.filterBuilderValue')"
                         @update:model-value="(value) => updateDocumentFilterRule(rule.id, { rawValue: String(value ?? '') })"
-                        @keydown.enter.prevent="applyDocumentStructuredFilters"
+                        @compositionend="endDocumentFilterImeComposition(`value:${rule.id}`)"
+                        @compositionstart="startDocumentFilterImeComposition(`value:${rule.id}`)"
+                        @keydown="handleDocumentFilterValueKeydown($event, rule.id)"
                       />
                       <div v-else class="flex h-8 min-w-0 items-center overflow-hidden rounded-md border border-dashed px-2 text-xs text-muted-foreground">
                         <span class="truncate">{{ t("grid.filterBuilderNoValue") }}</span>
                       </div>
 
-                      <Button variant="ghost" size="icon" class="h-8 w-8 shrink-0 text-muted-foreground hover:text-destructive" :disabled="documentFilterRules.length === 1" @click="removeDocumentFilterRule(rule.id)">
-                        <Trash2 class="h-3.5 w-3.5" />
+                      <Button variant="ghost" size="icon" class="h-7 w-7 shrink-0 text-muted-foreground hover:text-destructive" :disabled="documentFilterRules.length === 1" @click="removeDocumentFilterRule(rule.id)">
+                        <X class="h-3.5 w-3.5" />
                       </Button>
                     </div>
                   </template>
@@ -1865,22 +2194,23 @@ defineExpose({ focusSearch });
                   {{ t("grid.filterBuilderEmpty") }}
                 </div>
 
-                <div class="flex items-center justify-between gap-2 pt-1">
-                  <Button variant="ghost" size="sm" class="h-8 px-2 text-xs" @click="clearDocumentFilters(clearLocalFilter)">
-                    {{ t("grid.clearFilter") }}
+                <div class="flex items-center justify-between gap-2">
+                  <Button variant="ghost" size="sm" class="h-7 px-2 text-xs" @click="addDocumentFilterRule">
+                    <Plus class="mr-1 h-3.5 w-3.5" />
+                    {{ t("grid.filterBuilderAddRule") }}
                   </Button>
-                  <div class="flex items-center gap-2">
-                    <Button variant="ghost" size="sm" class="h-8 px-2 text-xs" @click="resetDocumentFilterBuilder">
+                  <div class="flex items-center gap-1.5">
+                    <Button variant="ghost" size="sm" class="h-7 px-2 text-xs" @click="resetDocumentFilterBuilder">
                       {{ t("grid.resetFilterBuilder") }}
                     </Button>
-                    <Button size="sm" class="h-8 px-3 text-xs" @click="applyDocumentStructuredFilters">
+                    <Button size="sm" class="h-7 px-3 text-xs" @click="applyDocumentStructuredFilters">
                       {{ t("grid.applyFilter") }}
                     </Button>
                   </div>
                 </div>
               </PopoverContent>
             </Popover>
-            <span class="text-blue-600 dark:text-blue-400 text-xs font-medium select-none shrink-0 pt-0.5">{{ documentStoreProvider.filterInputLabel }}</span>
+            <span class="text-blue-600 dark:text-blue-400 text-xs font-medium select-none shrink-0">{{ documentStoreProvider.filterInputLabel }}</span>
             <textarea
               ref="filterInputRef"
               v-model="filterInput"
@@ -1894,13 +2224,13 @@ defineExpose({ focusSearch });
               @keydown.ctrl.enter.prevent="applyFilter"
               @keydown.meta.enter.prevent="applyFilter"
             />
-            <button v-if="filterInput.trim()" type="button" class="text-muted-foreground hover:text-foreground shrink-0 mt-0.5" title="Format JSON" aria-label="Format JSON" @click="formatFilterInput">
+            <button v-if="filterInput.trim()" type="button" class="flex h-5 shrink-0 items-center text-muted-foreground hover:text-foreground" title="Format JSON" aria-label="Format JSON" @click="formatFilterInput">
               <Braces class="w-3 h-3" />
             </button>
             <button
               v-if="filterInput.trim()"
               type="button"
-              class="text-muted-foreground hover:text-foreground shrink-0 mt-0.5"
+              class="flex h-5 shrink-0 items-center text-muted-foreground hover:text-foreground"
               @click="
                 filterInput = '';
                 applyFilter();
@@ -1918,8 +2248,8 @@ defineExpose({ focusSearch });
           >
             <span class="h-5 w-px bg-border group-hover:bg-primary/60" />
           </button>
-          <div class="flex flex-1 items-start gap-1 px-2 py-0.5 min-w-0">
-            <span class="text-orange-600 dark:text-orange-400 text-xs font-medium select-none shrink-0 pt-0.5">{{ documentStoreProvider.sortInputLabel }}</span>
+          <div class="flex flex-1 items-center gap-1 px-2 py-0.5 min-w-0">
+            <span class="text-orange-600 dark:text-orange-400 text-xs font-medium select-none shrink-0">{{ documentStoreProvider.sortInputLabel }}</span>
             <textarea
               ref="sortInputRef"
               v-model="sortInput"
@@ -1933,13 +2263,13 @@ defineExpose({ focusSearch });
               @keydown.ctrl.enter.prevent="applyFilter"
               @keydown.meta.enter.prevent="applyFilter"
             />
-            <button v-if="sortInput.trim()" type="button" class="text-muted-foreground hover:text-foreground shrink-0 mt-0.5" title="Format JSON" aria-label="Format JSON" @click="formatSortInput">
+            <button v-if="sortInput.trim()" type="button" class="flex h-5 shrink-0 items-center text-muted-foreground hover:text-foreground" title="Format JSON" aria-label="Format JSON" @click="formatSortInput">
               <Braces class="w-3 h-3" />
             </button>
             <button
               v-if="sortInput.trim()"
               type="button"
-              class="text-muted-foreground hover:text-foreground shrink-0 mt-0.5"
+              class="flex h-5 shrink-0 items-center text-muted-foreground hover:text-foreground"
               @click="
                 sortInput = '';
                 applyFilter();
@@ -1976,7 +2306,9 @@ defineExpose({ focusSearch });
         <div class="h-full flex flex-col min-w-0 overflow-hidden">
           <template v-if="selectedIdx !== null || isNew">
             <div class="h-9 flex items-center gap-2 px-4 border-b bg-muted/30 shrink-0">
-              <Badge variant="secondary" class="text-xs">{{ isNew ? "New" : selectedDoc?._id }}</Badge>
+              <Badge variant="secondary" class="max-w-[50%] rounded text-xs" :style="{ width: selectedDocumentIdWidth }">
+                <input class="min-w-0 w-full cursor-text select-text appearance-none border-0 bg-transparent p-0 text-inherit outline-none focus:ring-0" :value="selectedDocumentIdLabel" :aria-label="`_id: ${selectedDocumentIdLabel}`" readonly spellcheck="false" />
+              </Badge>
               <span class="flex-1" />
               <Button v-if="!isEditing" variant="ghost" size="sm" class="h-6 text-xs" @click="startEdit">{{ t("mongo.edit") }}</Button>
               <template v-if="isEditing">
@@ -1990,33 +2322,16 @@ defineExpose({ focusSearch });
               </template>
             </div>
 
-            <div v-if="documentSearchOpen && (!isEditing || documentEditMode === 'json')" data-document-search class="flex h-9 shrink-0 items-center justify-end gap-1 border-b bg-background px-2">
-              <div class="relative w-56 max-w-[45%] min-w-32">
-                <Search class="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
-                <Input ref="documentSearchInputRef" v-model="documentSearchQuery" class="h-7 pl-7 pr-2 text-xs" :placeholder="t('editor.search.find')" @keydown.enter.prevent="activateDocumentSearchMatch($event.shiftKey ? -1 : 1)" @keydown.escape.prevent="closeDocumentSearch" />
-              </div>
-              <span class="w-12 text-center text-[11px] tabular-nums text-muted-foreground">{{ documentSearchStatus }}</span>
-              <Button variant="ghost" size="icon" class="h-7 w-7" :title="t('editor.search.prevMatch')" :disabled="documentSearchMatches.length === 0" @click="moveDocumentSearchMatch(-1)">
-                <ChevronUp class="h-3.5 w-3.5" />
-              </Button>
-              <Button variant="ghost" size="icon" class="h-7 w-7" :title="t('editor.search.nextMatch')" :disabled="documentSearchMatches.length === 0" @click="moveDocumentSearchMatch(1)">
-                <ChevronDown class="h-3.5 w-3.5" />
-              </Button>
-              <Button variant="ghost" size="icon" class="h-7 w-7" @click="closeDocumentSearch">
-                <X class="h-3.5 w-3.5" />
-              </Button>
-            </div>
-
             <div v-if="isEditing && documentEditMode === 'json' && !isNew" class="px-4 py-1.5 text-[11px] text-muted-foreground border-b bg-muted/20 shrink-0">
               {{ t("mongo.jsonReplaceHint") }}
             </div>
 
             <div v-if="isEditing" class="flex-1 min-h-0 overflow-hidden bg-muted/10">
-              <div v-if="documentEditMode === 'json'" class="h-full min-h-0 p-2">
+              <div v-if="documentEditMode === 'json'" class="h-full min-h-0 select-text p-2">
                 <RedisJsonEditor v-model="editJson" class="h-full rounded border bg-background" :save-disabled="isSavingDocument" :read-only="isSavingDocument" @save="saveDoc" />
               </div>
               <div v-else class="h-full overflow-auto">
-                <div class="json-edit min-w-fit p-5" :class="{ 'pointer-events-none opacity-60': isSavingDocument }" :style="{ ...documentFontStyle, '--mongo-key-width': editKeyWidth }" :aria-disabled="isSavingDocument ? 'true' : undefined">
+                <div class="json-edit min-w-fit select-text p-5" :class="{ 'pointer-events-none opacity-60': isSavingDocument }" :style="{ ...documentFontStyle, '--mongo-key-width': editKeyWidth }" :aria-disabled="isSavingDocument ? 'true' : undefined">
                   <div class="json-edit-brace">{</div>
 
                   <JsonEditNode v-for="(field, idx) in editFields" :key="field.key" :node="field" parent-kind="root" :removable="!isSavingDocument && !field.readonlyValue" @remove="requestRemoveField(idx)" />
@@ -2028,8 +2343,8 @@ defineExpose({ focusSearch });
               </div>
             </div>
 
-            <div v-else ref="documentViewerRef" data-document-json-viewer tabindex="-1" class="flex-1 overflow-auto bg-muted/10 outline-none">
-              <pre class="json-viewer min-w-fit p-5" :style="documentFontStyle" v-html="highlightedJson(editJson)" />
+            <div v-else data-document-json-viewer class="flex-1 min-h-0 bg-muted/10 outline-none" @dblclick="handleDocumentViewerDoubleClick">
+              <RedisJsonEditor ref="documentJsonEditorRef" :model-value="editJson" read-only :line-numbers="false" presentation="viewer" class="h-full" />
             </div>
           </template>
           <div v-else class="h-full flex items-center justify-center text-muted-foreground text-sm">
@@ -2052,15 +2367,6 @@ defineExpose({ focusSearch });
   resize: none;
   overflow-y: auto;
   white-space: pre-wrap;
-}
-
-.json-viewer {
-  font-family: var(--dbx-editor-font-family);
-  font-size: var(--dbx-editor-font-size);
-  line-height: 1.6;
-  tab-size: 2;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
 }
 
 .json-edit {

@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
 import { useConnectionStore } from "@/stores/connectionStore";
-import { connectionGroupDisplayName, executionSummaryItems, middleEllipsis, queryResultBaseSql, queryResultExecutionSql, resultSourceRange, statementExecutionMarkers, tabTooltipLines, tabularResultItems } from "@/lib/tabs/tabPresentation";
+import { connectionGroupDisplayName, executionSummaryItems, middleEllipsis, queryResultBaseSql, queryResultExecutionSql, resultGridCacheKey, resultGridInstanceKey, resultSourceRange, statementExecutionMarkers, tabTooltipLines, tabularResultItems } from "@/lib/tabs/tabPresentation";
 import { sqlTextFingerprint } from "@/lib/sql/sqlTextFingerprint";
 import type { ConnectionConfig, QueryTab } from "@/types/database";
 
@@ -133,6 +133,18 @@ describe("query result labels", () => {
   });
 });
 
+describe("query result grid identity", () => {
+  it("separates rerun payloads while retaining run and result-set identity", () => {
+    const first = queryTab({ activeResultRunId: "run-1", activeResultIndex: 2, resultGridRevision: "execution-1" });
+    const rerun = queryTab({ activeResultRunId: "run-1", activeResultIndex: 2, resultGridRevision: "execution-2" });
+
+    expect(resultGridInstanceKey(first)).toBe("tab-1-run-1-2-execution-1");
+    expect(resultGridInstanceKey(rerun)).not.toBe(resultGridInstanceKey(first));
+    expect(resultGridInstanceKey({ ...first, activeResultIndex: 1 })).toBe("tab-1-run-1-1-execution-1");
+    expect(resultGridCacheKey(rerun)).toBe(resultGridCacheKey(first));
+  });
+});
+
 describe("tab group presentation", () => {
   it("adds the full, live group path to tab tooltips", () => {
     const store = useConnectionStore();
@@ -232,6 +244,35 @@ describe("execution summary", () => {
     expect(executionSummaryItems({ results: [successfulAlias, markedFailure] }).map(({ status, isError }) => ({ status, isError }))).toEqual([
       { status: "success", isError: false },
       { status: "error", isError: true },
+    ]);
+  });
+
+  it("maps out-of-order results to their explicit statement indexes", () => {
+    const items = executionSummaryItems({
+      results: [
+        { columns: ["value"], rows: [["third"]], affected_rows: 0, execution_time_ms: 3, statement_index: 2 },
+        { columns: ["value"], rows: [["first"]], affected_rows: 0, execution_time_ms: 1, statement_index: 0 },
+      ],
+      batchSqlExecution: {
+        executionId: "run-out-of-order",
+        submittedSql: "SELECT 'first'; SELECT 'second'; SELECT 'third'",
+        editorFingerprint: "fingerprint",
+        sourceOffset: 0,
+        completed: 2,
+        total: 3,
+        startedAt: 1,
+        items: [
+          { statementIndex: 0, sql: "SELECT 'first'", from: 0, to: 14, status: "success" },
+          { statementIndex: 1, sql: "SELECT 'second'", from: 16, to: 31, status: "skipped" },
+          { statementIndex: 2, sql: "SELECT 'third'", from: 33, to: 47, status: "success" },
+        ],
+      },
+    });
+
+    expect(items.map((item) => [item.statementIndex, item.result?.rows[0]?.[0]])).toEqual([
+      [0, "first"],
+      [1, undefined],
+      [2, "third"],
     ]);
   });
 });

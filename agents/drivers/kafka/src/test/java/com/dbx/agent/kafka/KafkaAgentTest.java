@@ -23,6 +23,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -31,7 +32,14 @@ import org.apache.kafka.clients.consumer.ConsumerRecords;
 import org.apache.kafka.clients.admin.AlterConfigOp;
 import org.apache.kafka.clients.admin.Config;
 import org.apache.kafka.clients.admin.ConfigEntry;
+import org.apache.kafka.clients.admin.RaftVoterEndpoint;
+import org.apache.kafka.clients.admin.TopicDescription;
+import org.apache.kafka.clients.admin.TopicListing;
+import org.apache.kafka.common.Node;
 import org.apache.kafka.common.TopicPartition;
+import org.apache.kafka.common.TopicPartitionInfo;
+import org.apache.kafka.common.Uuid;
+import org.apache.kafka.common.errors.UnsupportedVersionException;
 import org.apache.zookeeper.CreateMode;
 import org.apache.zookeeper.Watcher;
 import org.apache.zookeeper.ZooDefs;
@@ -45,6 +53,102 @@ import org.junit.jupiter.api.io.TempDir;
 class KafkaAgentTest {
     @TempDir
     Path tempDir;
+
+    @Test
+    void explicitConsumerGroupOffsetsAcceptOneBoundedPartitionOffset() {
+        JsonObject params = JsonParser.parseString("""
+            {"offsets":[{"partition":1,"offset":42}]}
+            """).getAsJsonObject();
+
+        assertEquals(
+            Map.of(new TopicPartition("events", 1), new org.apache.kafka.clients.consumer.OffsetAndMetadata(42L)),
+            KafkaAgent.explicitConsumerGroupOffsets(params, "events")
+        );
+    }
+
+    @Test
+    void explicitConsumerGroupOffsetsRejectMalformedOrNegativeValues() {
+        for (String json : List.of(
+            "{\"offsets\":[{\"partition\":-1,\"offset\":42}]}",
+            "{\"offsets\":[{\"partition\":1,\"offset\":-1}]}",
+            "{\"offsets\":[{\"partition\":1.5,\"offset\":42}]}",
+            "{\"offsets\":[{\"partition\":1,\"offset\":42.5}]}",
+            "{\"offsets\":[{\"partition\":\"1\",\"offset\":42}]}",
+            "{\"offsets\":[{\"partition\":1,\"offset\":\"42\"}]}",
+            "{\"offsets\":[{\"partition\":1}]}",
+            "{\"offsets\":[42]}",
+            "{\"offsets\":[{\"partition\":2147483648,\"offset\":42}]}",
+            "{\"offsets\":[{\"partition\":1,\"offset\":9223372036854775808}]}",
+            "{\"offsets\":[{\"partition\":1,\"offset\":42},{\"partition\":1,\"offset\":43}]}",
+            "{\"offsets\":[]}",
+            "{\"offsets\":{}}"
+        )) {
+            JsonObject params = JsonParser.parseString(json).getAsJsonObject();
+            assertThrows(IllegalArgumentException.class, () -> KafkaAgent.explicitConsumerGroupOffsets(params, "events"), json);
+        }
+    }
+
+    @Test
+    void topicListingFallsBackWhenDescriptionsAreUnsupported() throws Exception {
+        Object result = KafkaAgent.topicListResult(
+            Arrays.asList(
+                new TopicListing("orders", Uuid.randomUuid(), false),
+                new TopicListing("__consumer_offsets", Uuid.randomUuid(), true)
+            ),
+            names -> {
+                throw new ExecutionException(new UnsupportedVersionException("The version of API is not supported."));
+            }
+        );
+
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> topics = (List<Map<String, Object>>) ((Map<String, Object>) result).get("topics");
+        assertEquals(Arrays.asList("__consumer_offsets", "orders"), topics.stream().map(topic -> topic.get("name")).toList());
+        assertEquals(true, topics.get(0).get("internal"));
+        assertFalse(topics.get(0).containsKey("partitions"));
+        assertFalse(topics.get(1).containsKey("partitions"));
+    }
+
+    @Test
+    void topicListingPreservesNonVersionDescriptionErrors() {
+        IllegalStateException failure = new IllegalStateException("metadata authorization failed");
+
+        IllegalStateException thrown = assertThrows(IllegalStateException.class, () -> KafkaAgent.topicListResult(
+            Collections.singletonList(new TopicListing("orders", Uuid.randomUuid(), false)),
+            names -> {
+                throw failure;
+            }
+        ));
+
+        assertEquals(failure, thrown);
+    }
+
+    @Test
+    void topicListingKeepsDescriptionMetadataWhenSupported() throws Exception {
+        Node leader = new Node(1, "broker-1", 9092);
+        Node replica = new Node(2, "broker-2", 9092);
+        TopicDescription description = new TopicDescription(
+            "orders",
+            false,
+            Collections.singletonList(new TopicPartitionInfo(
+                0,
+                leader,
+                Arrays.asList(leader, replica),
+                Collections.singletonList(leader)
+            ))
+        );
+
+        Object result = KafkaAgent.topicListResult(
+            Collections.singletonList(new TopicListing("orders", Uuid.randomUuid(), false)),
+            names -> Collections.singletonMap("orders", description)
+        );
+
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> topics = (List<Map<String, Object>>) ((Map<String, Object>) result).get("topics");
+        assertEquals(1, topics.size());
+        assertEquals(1, topics.get(0).get("partitions"));
+        assertEquals(2, topics.get(0).get("replicationFactor"));
+        assertEquals(false, topics.get(0).get("internal"));
+    }
 
     @Test
     void resolvesBootstrapServersFromKafka11ZooKeeperRegistrationWithChroot() throws Exception {
@@ -245,6 +349,58 @@ class KafkaAgentTest {
 
         assertTrue(KafkaAgent.isAclDisabledError(disabled));
         assertFalse(KafkaAgent.isAclDisabledError(new RuntimeException("Timed out waiting for broker response")));
+    }
+
+    @Test
+    void metadataQuorumControllerUsesMatchingBrokerEndpoint() {
+        Map<String, Object> controller = KafkaAgent.metadataQuorumControllerToMap(
+            1,
+            Arrays.asList(
+                new Node(1, "broker-1", 9092),
+                new Node(2, "broker-2", 9092)
+            ),
+            Collections.emptyMap()
+        );
+
+        assertEquals(1, controller.get("id"));
+        assertEquals("broker-1", controller.get("host"));
+        assertEquals(9092, controller.get("port"));
+    }
+
+    @Test
+    void metadataQuorumControllerUsesIsolatedControllerEndpoint() {
+        Map<String, Object> controller = KafkaAgent.metadataQuorumControllerToMap(
+            9,
+            Collections.singletonList(new Node(1, "broker-1", 9092)),
+            Collections.singletonMap(
+                9,
+                Collections.singletonList(new RaftVoterEndpoint("CONTROLLER", "controller-9", 19093))
+            )
+        );
+
+        assertEquals(9, controller.get("id"));
+        assertEquals("controller-9", controller.get("host"));
+        assertEquals(19093, controller.get("port"));
+    }
+
+    @Test
+    void metadataQuorumControllerKeepsLeaderIdWithoutEndpoint() {
+        Map<String, Object> controller = KafkaAgent.metadataQuorumControllerToMap(
+            9,
+            Collections.singletonList(new Node(1, "broker-1", 9092)),
+            Collections.emptyMap()
+        );
+
+        assertEquals(Collections.singletonMap("id", 9), controller);
+    }
+
+    @Test
+    void metadataQuorumControllerReturnsNullWithoutLeader() {
+        assertNull(KafkaAgent.metadataQuorumControllerToMap(
+            -1,
+            Collections.singletonList(new Node(1, "broker-1", 9092)),
+            Collections.emptyMap()
+        ));
     }
 
     @Test

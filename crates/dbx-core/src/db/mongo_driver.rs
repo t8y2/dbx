@@ -58,6 +58,13 @@ pub struct MongoCollectionStatsResult {
     pub nindexes: serde_json::Value,
 }
 
+/// Result counts returned after cloning a regular MongoDB collection.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MongoCloneCollectionResult {
+    pub documents_copied: u64,
+    pub indexes_copied: u64,
+}
+
 pub async fn connect(url: &str, timeout: Duration, idle_timeout: Duration) -> Result<Client, String> {
     let url = normalize_mongo_uri_direct_connection(url);
     let is_multi_host = is_multi_host_mongo_uri(&url);
@@ -164,6 +171,25 @@ pub async fn server_version(client: &Client, database: &str) -> Result<String, S
     let database = if database.is_empty() { "admin" } else { database };
     let result = client.database(database).run_command(doc! { "buildInfo": 1 }).await.map_err(|e| e.to_string())?;
     server_version_from_build_info(&result)
+}
+
+pub async fn run_command(client: &Client, database: &str, command_json: &str) -> Result<MongoDocumentResult, String> {
+    let value: serde_json::Value =
+        serde_json::from_str(command_json).map_err(|error| format!("Invalid MongoDB command JSON: {error}"))?;
+    let command = json_object_to_document_extended_json(&value)
+        .map_err(|error| format!("Invalid MongoDB command document: {error}"))?;
+    if command.is_empty() {
+        return Err("MongoDB runCommand requires a non-empty command document".to_string());
+    }
+    let result = client.database(database).run_command(command).await.map_err(|error| error.to_string())?;
+    let (document, extended_document) = document_json_views(result);
+    Ok(MongoDocumentResult {
+        documents: vec![document],
+        raw_documents: None,
+        extended_documents: Some(vec![extended_document]),
+        total: 1,
+        total_is_exact: true,
+    })
 }
 
 fn server_version_from_build_info(result: &Document) -> Result<String, String> {
@@ -645,6 +671,122 @@ pub async fn rename_collection(client: &Client, database: &str, old_name: &str, 
     Ok(())
 }
 
+/// Clone a regular collection within one database without relying on MongoDB's
+/// deprecated clone commands. The individual commands used here have been
+/// available across the MongoDB versions supported by the native driver.
+pub async fn clone_collection(
+    client: &Client,
+    database: &str,
+    source_name: &str,
+    target_name: &str,
+) -> Result<MongoCloneCollectionResult, String> {
+    validate_clone_collection_names(database, source_name, target_name)?;
+
+    let database = client.database(database);
+    let source_spec = find_collection_specification(&database, source_name).await?;
+    if !matches!(source_spec.collection_type, mongodb::results::CollectionType::Collection) {
+        return Err(
+            "Only regular MongoDB collections can be cloned; views and time-series collections are not supported"
+                .to_string(),
+        );
+    }
+
+    // Create explicitly before copying data so an existing target fails rather
+    // than being silently merged with or overwritten by the source documents.
+    database
+        .create_collection(target_name)
+        .with_options(source_spec.options.clone())
+        .await
+        .map_err(|error| error.to_string())?;
+
+    let source = database.collection::<Document>(source_name);
+    let target = database.collection::<Document>(target_name);
+    let needs_validation_bypass = source_spec.options.validator.is_some()
+        || source_spec.options.validation_level.is_some()
+        || source_spec.options.validation_action.is_some();
+    let mut cursor = source.find(doc! {}).await.map_err(|error| error.to_string())?;
+    let mut batch = Vec::with_capacity(1_000);
+    let mut documents_copied = 0_u64;
+
+    while let Some(document) = cursor.try_next().await.map_err(|error| error.to_string())? {
+        batch.push(document);
+        if batch.len() == 1_000 {
+            documents_copied += insert_clone_batch(&target, &mut batch, needs_validation_bypass).await?;
+        }
+    }
+    if !batch.is_empty() {
+        documents_copied += insert_clone_batch(&target, &mut batch, needs_validation_bypass).await?;
+    }
+
+    // The target gets its _id index during createCollection. Recreating every
+    // other source index after the data copy avoids needless index maintenance.
+    let mut index_cursor = source.list_indexes().await.map_err(|error| error.to_string())?;
+    let mut indexes_copied = 0_u64;
+    while let Some(index) = index_cursor.try_next().await.map_err(|error| error.to_string())? {
+        if is_automatic_id_index(&index) {
+            continue;
+        }
+        target.create_index(index).await.map_err(|error| error.to_string())?;
+        indexes_copied += 1;
+    }
+
+    Ok(MongoCloneCollectionResult { documents_copied, indexes_copied })
+}
+
+async fn find_collection_specification(
+    database: &Database,
+    source_name: &str,
+) -> Result<mongodb::results::CollectionSpecification, String> {
+    let mut cursor = database.list_collections().await.map_err(|error| error.to_string())?;
+    while let Some(specification) = cursor.try_next().await.map_err(|error| error.to_string())? {
+        if specification.name == source_name {
+            return Ok(specification);
+        }
+    }
+    Err(format!("MongoDB collection '{source_name}' was not found"))
+}
+
+async fn insert_clone_batch(
+    target: &mongodb::Collection<Document>,
+    batch: &mut Vec<Document>,
+    bypass_document_validation: bool,
+) -> Result<u64, String> {
+    let documents = std::mem::take(batch);
+    let result = if bypass_document_validation {
+        target.insert_many(documents).bypass_document_validation(true).await
+    } else {
+        target.insert_many(documents).await
+    }
+    .map_err(|error| error.to_string())?;
+    Ok(result.inserted_ids.len() as u64)
+}
+
+/// `createCollection` always creates the `_id` index, but it need not be named
+/// `_id_` (for example, on a clustered collection). Compare the key instead
+/// of the name so cloning never attempts to create it a second time.
+fn is_automatic_id_index(index: &IndexModel) -> bool {
+    index.keys.len() == 1
+        && (matches!(index.keys.get("_id"), Some(Bson::Int32(1) | Bson::Int64(1)))
+            || matches!(index.keys.get("_id"), Some(Bson::Double(value)) if *value == 1.0))
+}
+
+pub(crate) fn validate_clone_collection_names(
+    database: &str,
+    source_name: &str,
+    target_name: &str,
+) -> Result<(), String> {
+    validate_mongo_namespace_name(database, "Database")?;
+    validate_mongo_namespace_name(source_name, "Source collection")?;
+    validate_mongo_namespace_name(target_name, "Target collection")?;
+    if source_name == target_name {
+        return Err("Target collection name must differ from the source collection name".to_string());
+    }
+    if source_name.starts_with("system.") || target_name.starts_with("system.") {
+        return Err("System collections cannot be cloned".to_string());
+    }
+    Ok(())
+}
+
 pub async fn list_indexes(client: &Client, database: &str, collection: &str) -> Result<Vec<IndexInfo>, String> {
     let col = client.database(database).collection::<Document>(collection);
     let mut cursor = col.list_indexes().await.map_err(|e| e.to_string())?;
@@ -892,6 +1034,105 @@ pub async fn find_documents(
     sort: Option<&str>,
     collation: Option<&str>,
 ) -> Result<MongoDocumentResult, String> {
+    find_documents_with_total(client, database, collection, skip, limit, filter, projection, sort, collation, true)
+        .await
+}
+
+/// Execute a find without the document browser's separate total-count query.
+/// Agent callers only consume returned rows, so counting the full result set adds latency
+/// without providing any useful output.
+pub async fn find_documents_without_total(
+    client: &Client,
+    database: &str,
+    collection: &str,
+    skip: u64,
+    limit: i64,
+    filter: Option<&str>,
+    projection: Option<&str>,
+    sort: Option<&str>,
+    collation: Option<&str>,
+) -> Result<MongoDocumentResult, String> {
+    find_documents_with_total(client, database, collection, skip, limit, filter, projection, sort, collation, false)
+        .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn explain_find(
+    client: &Client,
+    database: &str,
+    collection: &str,
+    skip: u64,
+    limit: i64,
+    filter: Option<&str>,
+    projection: Option<&str>,
+    sort: Option<&str>,
+    collation: Option<&str>,
+    verbosity: &str,
+) -> Result<serde_json::Value, String> {
+    let command = build_find_explain_command(collection, skip, limit, filter, projection, sort, collation, verbosity)?;
+    let result = client.database(database).run_command(command).await.map_err(|error| error.to_string())?;
+    Ok(bson_to_json(&Bson::Document(result)))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_find_explain_command(
+    collection: &str,
+    skip: u64,
+    limit: i64,
+    filter: Option<&str>,
+    projection: Option<&str>,
+    sort: Option<&str>,
+    collation: Option<&str>,
+    verbosity: &str,
+) -> Result<Document, String> {
+    let mut find = doc! {
+        "find": collection,
+        "filter": parse_optional_filter_document(filter)?.unwrap_or_default(),
+    };
+    if let Some(projection) = parse_optional_json_document(projection, "projection")? {
+        find.insert("projection", projection);
+    }
+    if let Some(sort) = parse_optional_json_document(sort, "sort")? {
+        find.insert("sort", sort);
+    }
+    if let Some(collation) = parse_find_collation(collation)? {
+        find.insert(
+            "collation",
+            mongodb::bson::to_document(&collation).map_err(|error| format!("Invalid collation: {error}"))?,
+        );
+    }
+    if skip > 0 {
+        find.insert("skip", i64::try_from(skip).map_err(|_| "MongoDB skip exceeds the supported range")?);
+    }
+    if limit > 0 {
+        find.insert("limit", limit);
+    }
+    Ok(doc! {
+        "explain": find,
+        "verbosity": validate_find_explain_verbosity(verbosity)?,
+    })
+}
+
+fn validate_find_explain_verbosity(verbosity: &str) -> Result<&str, String> {
+    match verbosity {
+        "queryPlanner" | "executionStats" | "allPlansExecution" => Ok(verbosity),
+        _ => Err("MongoDB explain verbosity must be queryPlanner, executionStats, or allPlansExecution.".to_string()),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn find_documents_with_total(
+    client: &Client,
+    database: &str,
+    collection: &str,
+    skip: u64,
+    limit: i64,
+    filter: Option<&str>,
+    projection: Option<&str>,
+    sort: Option<&str>,
+    collation: Option<&str>,
+    include_total: bool,
+) -> Result<MongoDocumentResult, String> {
     let col = client.database(database).collection::<Document>(collection);
 
     let filter_doc: Document = match filter {
@@ -904,14 +1145,16 @@ pub async fn find_documents(
 
     let collation = parse_find_collation(collation)?;
     let count_is_exact = !filter_doc.is_empty();
-    let total_result = if count_is_exact {
+    let total_result = if !include_total {
+        None
+    } else if count_is_exact {
         let mut count = col.count_documents(filter_doc.clone());
         if let Some(collation) = collation.clone() {
             count = count.collation(collation);
         }
-        count.await.map_err(|e| e.to_string())
+        Some(count.await.map_err(|e| e.to_string()))
     } else {
-        col.estimated_document_count().await.map_err(|e| e.to_string())
+        Some(col.estimated_document_count().await.map_err(|e| e.to_string()))
     };
 
     let mut find = col.find(filter_doc).skip(skip).limit(limit);
@@ -943,7 +1186,10 @@ pub async fn find_documents(
         documents.push(bson_to_json(&Bson::Document(doc.clone())));
         extended_documents.push(Bson::Document(doc).into_canonical_extjson());
     }
-    let (total, total_is_exact) = resolve_mongo_find_total(total_result, count_is_exact, skip, documents.len());
+    let (total, total_is_exact) = match total_result {
+        Some(total_result) => resolve_mongo_find_total(total_result, count_is_exact, skip, documents.len()),
+        None => (documents.len() as u64, false),
+    };
 
     Ok(MongoDocumentResult {
         documents,
@@ -1309,6 +1555,48 @@ pub async fn create_index(
     Ok(name)
 }
 
+pub async fn create_user(
+    client: &Client,
+    database: &str,
+    user_json: &str,
+    write_concern_json: Option<&str>,
+) -> Result<(), String> {
+    let database = validate_mongo_namespace_name(database, "Database")?;
+    let command = create_user_command(user_json, write_concern_json)?;
+    client.database(database).run_command(command).await.map_err(|error| error.kind.to_string())?;
+    Ok(())
+}
+
+pub fn validate_create_user_request(user_json: &str, write_concern_json: Option<&str>) -> Result<(), String> {
+    create_user_command(user_json, write_concern_json).map(|_| ())
+}
+
+fn create_user_command(user_json: &str, write_concern_json: Option<&str>) -> Result<Document, String> {
+    let user_value: serde_json::Value =
+        serde_json::from_str(user_json).map_err(|error| format!("Invalid MongoDB user JSON: {error}"))?;
+    let mut user = json_object_to_document_extended_json(&user_value)
+        .map_err(|error| format!("Invalid MongoDB user document: {error}"))?;
+    let username = user
+        .remove("user")
+        .and_then(|value| value.as_str().map(str::to_string))
+        .filter(|value| !value.trim().is_empty())
+        .ok_or("MongoDB createUser requires a non-empty user name")?;
+    if user.contains_key("createUser") || user.contains_key("writeConcern") {
+        return Err("MongoDB createUser user document contains reserved command fields".to_string());
+    }
+
+    let mut command = doc! { "createUser": username };
+    command.extend(user);
+    if let Some(write_concern_json) = write_concern_json.filter(|value| !value.trim().is_empty()) {
+        let write_concern_value: serde_json::Value = serde_json::from_str(write_concern_json)
+            .map_err(|error| format!("Invalid MongoDB write concern JSON: {error}"))?;
+        let write_concern = json_object_to_document_extended_json(&write_concern_value)
+            .map_err(|error| format!("Invalid MongoDB write concern: {error}"))?;
+        command.insert("writeConcern", write_concern);
+    }
+    Ok(command)
+}
+
 /// Validate an index request before it reaches either the native driver or the
 /// Legacy Agent. In particular, `key` belongs to the createIndexes command
 /// itself and must not be smuggled through the options document.
@@ -1559,6 +1847,21 @@ pub async fn insert_document(
 ) -> Result<String, String> {
     let value: serde_json::Value = serde_json::from_str(doc_json).map_err(|e| format!("Invalid JSON: {e}"))?;
     let doc = json_object_to_document(&value).map_err(|e| format!("Invalid document: {e}"))?;
+    let col = client.database(database).collection::<Document>(collection);
+    let result = col.insert_one(doc).await.map_err(|e| e.to_string())?;
+    Ok(format!("{}", result.inserted_id))
+}
+
+/// Inserts a document from canonical Extended JSON without interpreting
+/// Mongo shell-like strings such as `ISODate(...)`.
+pub async fn insert_document_extended_json(
+    client: &Client,
+    database: &str,
+    collection: &str,
+    doc_json: &str,
+) -> Result<String, String> {
+    let value: serde_json::Value = serde_json::from_str(doc_json).map_err(|e| format!("Invalid JSON: {e}"))?;
+    let doc = json_object_to_document_extended_json(&value).map_err(|e| format!("Invalid document: {e}"))?;
     let col = client.database(database).collection::<Document>(collection);
     let result = col.insert_one(doc).await.map_err(|e| e.to_string())?;
     Ok(format!("{}", result.inserted_id))
@@ -2383,6 +2686,37 @@ mod tests {
     }
 
     #[test]
+    fn builds_find_explain_command_with_all_find_options() {
+        let command = build_find_explain_command(
+            "im_msg",
+            2,
+            5,
+            Some(r#"{"active":true}"#),
+            Some(r#"{"email":1}"#),
+            Some(r#"{"email":1}"#),
+            Some(r#"{"locale":"en","strength":1}"#),
+            "executionStats",
+        )
+        .unwrap();
+
+        let find = command.get_document("explain").unwrap();
+        assert_eq!(find.get_str("find").unwrap(), "im_msg");
+        assert!(find.get_document("filter").unwrap().get_bool("active").unwrap());
+        assert_eq!(find.get_document("projection").unwrap().get_i64("email").unwrap(), 1);
+        assert_eq!(find.get_document("sort").unwrap().get_i64("email").unwrap(), 1);
+        assert_eq!(find.get_i64("skip").unwrap(), 2);
+        assert_eq!(find.get_i64("limit").unwrap(), 5);
+        assert_eq!(find.get_document("collation").unwrap().get_str("locale").unwrap(), "en");
+        assert_eq!(command.get_str("verbosity").unwrap(), "executionStats");
+    }
+
+    #[test]
+    fn rejects_invalid_find_explain_verbosity() {
+        let error = build_find_explain_command("items", 0, 0, None, None, None, None, "invalid").unwrap_err();
+        assert!(error.contains("queryPlanner, executionStats, or allPlansExecution"));
+    }
+
+    #[test]
     fn mongo_find_count_failure_returns_loaded_lower_bound() {
         let error = "invalid type: floating point `2053278871.0`, expected u64".to_string();
 
@@ -2571,6 +2905,33 @@ mod tests {
         // Existing target names must fail at the server instead of being overwritten.
         let command = rename_collection_command_document("app", "users", "accounts").unwrap();
         assert!(!command.contains_key("dropTarget"));
+    }
+
+    #[test]
+    fn clone_collection_validation_preserves_identifiers_and_rejects_unsafe_targets() {
+        validate_clone_collection_names("app", " users ", " users_backup ").unwrap();
+        assert!(validate_clone_collection_names("app", "users", "users").unwrap_err().contains("differ"));
+        assert!(validate_clone_collection_names("app", "system.users", "users_backup")
+            .unwrap_err()
+            .contains("System collections"));
+        assert!(validate_clone_collection_names("app", "users", "system.users_backup")
+            .unwrap_err()
+            .contains("System collections"));
+    }
+
+    #[test]
+    fn clone_collection_skips_the_automatic_id_index_by_key_not_name() {
+        let automatic_id = IndexModel::builder()
+            .keys(doc! { "_id": 1 })
+            .options(IndexOptions::builder().name("custom_id_name".to_string()).build())
+            .build();
+        let ordinary_index = IndexModel::builder()
+            .keys(doc! { "external_id": 1 })
+            .options(IndexOptions::builder().name("external_id_1".to_string()).build())
+            .build();
+
+        assert!(is_automatic_id_index(&automatic_id));
+        assert!(!is_automatic_id_index(&ordinary_index));
     }
 
     #[test]
@@ -3210,6 +3571,35 @@ mod tests {
     }
 
     #[test]
+    fn create_user_command_preserves_roles_and_write_concern() {
+        let command = create_user_command(
+            r#"{"user":"test-db","pwd":"test-password","roles":[{"role":"readWrite","db":"db1"}]}"#,
+            Some(r#"{"w":"majority","wtimeout":5000}"#),
+        )
+        .unwrap();
+
+        assert_eq!(command.keys().next().map(String::as_str), Some("createUser"));
+        assert_eq!(command.get_str("createUser").unwrap(), "test-db");
+        assert_eq!(command.get_str("pwd").unwrap(), "test-password");
+        let roles = command.get_array("roles").unwrap();
+        assert_eq!(roles[0].as_document().unwrap(), &doc! { "role": "readWrite", "db": "db1" });
+        assert_eq!(command.get_document("writeConcern").unwrap(), &doc! { "w": "majority", "wtimeout": 5000_i32 });
+    }
+
+    #[test]
+    fn create_user_command_rejects_missing_names_and_reserved_fields() {
+        for user in [
+            r#"{"pwd":"secret","roles":[]}"#,
+            r#"{"user":"","pwd":"secret","roles":[]}"#,
+            r#"{"user":"app","createUser":"other","pwd":"secret","roles":[]}"#,
+            r#"{"user":"app","writeConcern":{"w":1},"pwd":"secret","roles":[]}"#,
+        ] {
+            assert!(create_user_command(user, None).is_err(), "{user}");
+        }
+        assert!(create_user_command(r#"{"user":"app","pwd":"secret","roles":[]}"#, Some("true")).is_err());
+    }
+
+    #[test]
     fn create_indexes_command_keeps_raw_options_and_generates_a_name() {
         let (command, name) = create_indexes_command(
             "users",
@@ -3465,6 +3855,21 @@ mod tests {
         assert!(matches!(doc.get("_id"), Some(Bson::ObjectId(oid)) if oid.to_hex() == "507f1f77bcf86cd799439011"));
         assert!(matches!(doc.get("created_at"), Some(Bson::DateTime(_))));
         assert!(matches!(doc.get("count"), Some(Bson::Int64(42))));
+    }
+
+    #[test]
+    fn json_object_to_document_extended_json_keeps_shell_date_strings_literal() {
+        let value = serde_json::json!({
+            "date_text": "ISODate(\"2026-08-10T00:00:00.000Z\")",
+            "actual_date": { "$date": "2026-08-10T00:00:00.000Z" },
+        });
+        let doc = json_object_to_document_extended_json(&value).unwrap();
+
+        assert!(matches!(
+            doc.get("date_text"),
+            Some(Bson::String(value)) if value == "ISODate(\"2026-08-10T00:00:00.000Z\")"
+        ));
+        assert!(matches!(doc.get("actual_date"), Some(Bson::DateTime(_))));
     }
 
     #[test]

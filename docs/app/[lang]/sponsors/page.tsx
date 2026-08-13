@@ -15,6 +15,8 @@ const i18n = {
     rainyunSponsorAction: "Visit RainYun",
     easysearchSponsorDesc: "Easysearch is an enterprise-grade distributed search engine compatible with Elasticsearch APIs, combining full-text, vector, geospatial search, real-time analytics, and AI capabilities in one platform.",
     easysearchSponsorAction: "Visit Easysearch",
+    atlasCloudSponsorDesc: "Atlas Cloud gives developers one unified API for 400+ AI models across chat, image, video, and audio.",
+    atlasCloudSponsorAction: "Visit Atlas Cloud",
     becomeTitle: "Sponsorship inquiries",
     becomeDesc: "If you would like to support DBX with funding, infrastructure, developer tools, or services, tell us about the idea and how to reach you.",
   },
@@ -27,6 +29,8 @@ const i18n = {
     rainyunSponsorAction: "访问雨云",
     easysearchSponsorDesc: "Easysearch 是一款企业级分布式搜索引擎，兼容 ES API、融合全文检索、向量检索、地理空间位置检索、实时分析与 AI 能力，为企业提供统一的数据检索与智能分析基础设施。",
     easysearchSponsorAction: "访问 Easysearch",
+    atlasCloudSponsorDesc: "Atlas Cloud 为开发者提供统一的多模态 AI API，可通过一个接口访问聊天、图像、视频和音频等 400+ 模型。",
+    atlasCloudSponsorAction: "访问 Atlas Cloud",
     becomeTitle: "赞助合作",
     becomeDesc: "如果你愿意通过资金、基础设施、开发工具或服务资源支持 DBX，请留下联系方式和合作说明。",
   },
@@ -73,6 +77,14 @@ export default async function SponsorsPage({ params }: { params: Promise<{ lang:
       logoClass: "w-full max-w-[136px] object-contain",
       description: t.easysearchSponsorDesc,
       action: t.easysearchSponsorAction,
+    },
+    {
+      name: "Atlas Cloud",
+      href: "https://www.atlascloud.ai/?ref=6YYXWA",
+      logo: "https://www.atlascloud.ai/logo.svg",
+      logoClass: "w-full max-w-[136px] object-contain",
+      description: t.atlasCloudSponsorDesc,
+      action: t.atlasCloudSponsorAction,
     },
   ];
 

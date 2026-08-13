@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { copySelectedConnectionsToClipboards, selectedConnectionDeleteTargets, selectedConnectionDuplicateTargets } from "@/lib/sidebar/sidebarConnectionSelection";
+import { copySelectedConnectionsToClipboards, selectedConnectionDeleteTargets, selectedConnectionDisconnectTargets, selectedConnectionDuplicateTargets } from "@/lib/sidebar/sidebarConnectionSelection";
 import type { TreeNode } from "@/types/database";
 
 function node(id: string, type: TreeNode["type"] = "connection"): TreeNode {
@@ -31,6 +31,14 @@ describe("sidebar connection selection", () => {
     const selected = [current, node("conn-2")];
 
     expect(selectedConnectionDuplicateTargets(current, selected)).toEqual(selectedConnectionDeleteTargets(current, selected));
+    expect(selectedConnectionDisconnectTargets(current, selected)).toEqual(selectedConnectionDeleteTargets(current, selected));
+  });
+
+  it("disconnects only the right-clicked connection when it is outside the selection", () => {
+    const current = node("conn-3");
+    const selected = [node("conn-1"), node("conn-2")];
+
+    expect(selectedConnectionDisconnectTargets(current, selected).map((item) => item.connectionId)).toEqual(["conn-3"]);
   });
 
   it("copies selected connection names to the system clipboard for the sidebar copy shortcut", () => {

@@ -10,6 +10,99 @@ pub struct NacosCapabilities {
     pub supports_service_management: bool,
     pub supports_instance_update: bool,
     pub supports_raw_api: bool,
+    #[serde(default)]
+    pub service_management: NacosServiceCapabilities,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct NacosOperationCapability {
+    pub supported: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<NacosCapabilityReason>,
+}
+
+impl NacosOperationCapability {
+    pub fn supported() -> Self {
+        Self { supported: true, reason: None }
+    }
+
+    pub fn unsupported(reason: NacosCapabilityReason) -> Self {
+        Self { supported: false, reason: Some(reason) }
+    }
+}
+
+impl Default for NacosOperationCapability {
+    fn default() -> Self {
+        Self::supported()
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum NacosCapabilityReason {
+    ImplementationReadOnly,
+    VersionUnsupported,
+    EndpointUnavailable,
+    NotVerified,
+    ConnectionReadOnly,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NacosServiceOperation {
+    ListServices,
+    GetService,
+    CreateService,
+    UpdateService,
+    DeleteService,
+    ListInstances,
+    UpdateInstance,
+    RegisterInstance,
+    DeregisterInstance,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct NacosServiceCapabilities {
+    pub list_services: NacosOperationCapability,
+    pub get_service: NacosOperationCapability,
+    pub create_service: NacosOperationCapability,
+    pub update_service: NacosOperationCapability,
+    pub delete_service: NacosOperationCapability,
+    pub list_instances: NacosOperationCapability,
+    pub update_instance: NacosOperationCapability,
+    pub register_instance: NacosOperationCapability,
+    pub deregister_instance: NacosOperationCapability,
+}
+
+impl NacosServiceCapabilities {
+    pub fn read_only(reason: NacosCapabilityReason) -> Self {
+        Self {
+            list_services: NacosOperationCapability::supported(),
+            get_service: NacosOperationCapability::supported(),
+            create_service: NacosOperationCapability::unsupported(reason),
+            update_service: NacosOperationCapability::unsupported(reason),
+            delete_service: NacosOperationCapability::unsupported(reason),
+            list_instances: NacosOperationCapability::supported(),
+            update_instance: NacosOperationCapability::unsupported(reason),
+            register_instance: NacosOperationCapability::unsupported(reason),
+            deregister_instance: NacosOperationCapability::unsupported(reason),
+        }
+    }
+
+    pub fn operation(&self, operation: NacosServiceOperation) -> &NacosOperationCapability {
+        match operation {
+            NacosServiceOperation::ListServices => &self.list_services,
+            NacosServiceOperation::GetService => &self.get_service,
+            NacosServiceOperation::CreateService => &self.create_service,
+            NacosServiceOperation::UpdateService => &self.update_service,
+            NacosServiceOperation::DeleteService => &self.delete_service,
+            NacosServiceOperation::ListInstances => &self.list_instances,
+            NacosServiceOperation::UpdateInstance => &self.update_instance,
+            NacosServiceOperation::RegisterInstance => &self.register_instance,
+            NacosServiceOperation::DeregisterInstance => &self.deregister_instance,
+        }
+    }
 }
 
 impl Default for NacosCapabilities {
@@ -21,6 +114,7 @@ impl Default for NacosCapabilities {
             supports_service_management: true,
             supports_instance_update: true,
             supports_raw_api: true,
+            service_management: NacosServiceCapabilities::default(),
         }
     }
 }
@@ -90,6 +184,10 @@ pub struct NacosConfigQuery {
     pub namespace: Option<String>,
     #[serde(default)]
     pub group: Option<String>,
+    /// Applies case-insensitive contains matching to `group` after listing.
+    /// Defaults to exact server-side filtering for internal callers.
+    #[serde(default)]
+    pub group_contains: bool,
     #[serde(default)]
     pub data_id: Option<String>,
     #[serde(default)]
@@ -439,6 +537,40 @@ pub struct NacosServiceList {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
+pub struct NacosServiceDetail {
+    pub service_name: String,
+    #[serde(default)]
+    pub group_name: Option<String>,
+    #[serde(default)]
+    pub metadata: serde_json::Value,
+    #[serde(default)]
+    pub protect_threshold: Option<f64>,
+    #[serde(default)]
+    pub selector: Option<serde_json::Value>,
+    #[serde(default)]
+    pub ephemeral: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct NacosServiceUpsert {
+    #[serde(default)]
+    pub namespace: Option<String>,
+    pub service_name: String,
+    #[serde(default)]
+    pub group_name: Option<String>,
+    #[serde(default)]
+    pub metadata: Option<serde_json::Value>,
+    #[serde(default)]
+    pub protect_threshold: Option<f64>,
+    #[serde(default)]
+    pub selector: Option<serde_json::Value>,
+    #[serde(default)]
+    pub ephemeral: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct NacosInstanceInfo {
     pub ip: String,
     pub port: u16,
@@ -474,7 +606,7 @@ pub struct NacosInstanceQuery {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub struct NacosInstanceUpdate {
+pub struct NacosInstanceRef {
     #[serde(default)]
     pub namespace: Option<String>,
     pub service_name: String,
@@ -485,11 +617,41 @@ pub struct NacosInstanceUpdate {
     #[serde(default)]
     pub cluster_name: Option<String>,
     #[serde(default)]
+    pub ephemeral: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct NacosInstancePatch {
+    #[serde(default)]
     pub healthy: Option<bool>,
     #[serde(default)]
     pub enabled: Option<bool>,
     #[serde(default)]
-    pub ephemeral: Option<bool>,
+    pub weight: Option<f64>,
+    #[serde(default)]
+    pub metadata: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct NacosInstanceUpdateRequest {
+    pub target: NacosInstanceRef,
+    pub patch: NacosInstancePatch,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct NacosInstanceRegistration {
+    #[serde(default)]
+    pub namespace: Option<String>,
+    pub service_name: String,
+    pub ip: String,
+    pub port: u16,
+    #[serde(default)]
+    pub group_name: Option<String>,
+    #[serde(default)]
+    pub cluster_name: Option<String>,
     #[serde(default)]
     pub weight: Option<f64>,
     #[serde(default)]
@@ -501,6 +663,86 @@ pub struct NacosInstanceUpdate {
 pub struct NacosDashboardQuery {
     #[serde(default)]
     pub namespace: Option<String>,
+}
+
+#[cfg(test)]
+mod service_capability_tests {
+    use super::*;
+
+    #[test]
+    fn official_nacos_service_capabilities_enable_every_supported_operation() {
+        let capabilities = NacosServiceCapabilities::default();
+        for operation in [
+            NacosServiceOperation::ListServices,
+            NacosServiceOperation::GetService,
+            NacosServiceOperation::CreateService,
+            NacosServiceOperation::UpdateService,
+            NacosServiceOperation::DeleteService,
+            NacosServiceOperation::ListInstances,
+            NacosServiceOperation::UpdateInstance,
+            NacosServiceOperation::RegisterInstance,
+            NacosServiceOperation::DeregisterInstance,
+        ] {
+            assert!(capabilities.operation(operation).supported);
+        }
+    }
+
+    #[test]
+    fn read_only_implementation_preserves_reads_and_explains_writes() {
+        let capabilities = NacosServiceCapabilities::read_only(NacosCapabilityReason::ImplementationReadOnly);
+        assert!(capabilities.list_services.supported);
+        assert!(capabilities.get_service.supported);
+        assert!(capabilities.list_instances.supported);
+        assert_eq!(capabilities.update_instance.reason, Some(NacosCapabilityReason::ImplementationReadOnly));
+        assert_eq!(capabilities.create_service.reason, Some(NacosCapabilityReason::ImplementationReadOnly));
+        assert_eq!(capabilities.deregister_instance.reason, Some(NacosCapabilityReason::ImplementationReadOnly));
+    }
+
+    #[test]
+    fn service_capabilities_use_the_tauri_and_web_camel_case_contract() {
+        let value =
+            serde_json::to_value(NacosServiceCapabilities::read_only(NacosCapabilityReason::NotVerified)).unwrap();
+        assert_eq!(value["listServices"]["supported"], true);
+        assert_eq!(value["createService"]["supported"], false);
+        assert_eq!(value["createService"]["reason"], "notVerified");
+        assert!(value.get("manageServices").is_none());
+    }
+
+    #[test]
+    fn instance_update_uses_nested_target_and_patch_transport_contract() {
+        let value = serde_json::to_value(NacosInstanceUpdateRequest {
+            target: NacosInstanceRef {
+                namespace: Some("public".to_string()),
+                service_name: "api".to_string(),
+                ip: "127.0.0.1".to_string(),
+                port: 8080,
+                group_name: Some("DBX_TEST".to_string()),
+                cluster_name: Some("blue".to_string()),
+                ephemeral: Some(false),
+            },
+            patch: NacosInstancePatch { enabled: Some(false), ..Default::default() },
+        })
+        .unwrap();
+        assert_eq!(value["target"]["serviceName"], "api");
+        assert_eq!(value["target"]["ephemeral"], false);
+        assert_eq!(value["patch"]["enabled"], false);
+        assert!(value.get("serviceName").is_none());
+        assert!(value["patch"].get("weight").is_some_and(serde_json::Value::is_null));
+    }
+
+    #[test]
+    fn legacy_capabilities_without_the_operation_matrix_remain_readable() {
+        let capabilities: NacosCapabilities = serde_json::from_value(serde_json::json!({
+            "supportsConfigManagement": true,
+            "supportsConfigHistory": true,
+            "supportsServiceManagement": true,
+            "supportsInstanceUpdate": true,
+            "supportsRawApi": true
+        }))
+        .unwrap();
+        assert!(capabilities.service_management.list_services.supported);
+        assert!(capabilities.service_management.update_instance.supported);
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]

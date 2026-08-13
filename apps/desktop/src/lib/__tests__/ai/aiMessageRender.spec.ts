@@ -80,6 +80,26 @@ describe("createAiMessageRenderer", () => {
     expect(code).toMatchObject({ type: "code", pending: false, html: "<span>SELECT 1</span>" });
   });
 
+  it("falls back to escaped code when highlighting is not supported", () => {
+    const markdown = (text: string) => `<p>${text}</p>`;
+    const highlightCode = vi.fn(() => {
+      throw new SyntaxError("Invalid regular expression: invalid group specifier name");
+    });
+    const renderer = createAiMessageRenderer({ markdown, highlightCode });
+
+    const [code] = renderer.render("```sql\nSELECT < 1\n```");
+
+    expect(highlightCode).toHaveBeenCalledWith("SELECT < 1", "SQL");
+    expect(code).toEqual({
+      type: "code",
+      content: "SELECT < 1",
+      html: "SELECT &lt; 1",
+      lang: "SQL",
+      isSql: true,
+      pending: false,
+    });
+  });
+
   it("re-parses only the last paragraph of a long streaming answer", () => {
     const markdown = vi.fn((text: string) => `<p>${text}</p>`);
     const renderer = createAiMessageRenderer({ markdown });

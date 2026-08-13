@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { EDITOR_SETTINGS_DRAFT_KEYS, editorSettingsDraftFromSettings, editorSettingsDraftChanged, editorSettingsPatchFromDraft, normalizeTableOpenPageSizeDraft } from "../editorSettingsDraft";
+import { EDITOR_SETTINGS_DRAFT_KEYS, editorSettingsDraftFromSettings, editorSettingsDraftChanged, editorSettingsPatchFromDraft, normalizeQueryResultMaxRowsDraft, normalizeTableOpenPageSizeDraft } from "../editorSettingsDraft";
 import type { EditorSettings } from "@/stores/settingsStore";
 
 function makeSettings(overrides: Partial<EditorSettings> = {}): EditorSettings {
@@ -7,6 +7,8 @@ function makeSettings(overrides: Partial<EditorSettings> = {}): EditorSettings {
     autoCalculateTotalRows: false,
     pageSize: 100,
     tableOpenPageSize: 100,
+    queryResultMaxRowsEnabled: true,
+    queryResultMaxRows: 100000,
     sqlEngine: "desktop",
     tabSize: 2,
     keywordCase: "upper",
@@ -30,12 +32,20 @@ function makeSettings(overrides: Partial<EditorSettings> = {}): EditorSettings {
 }
 
 describe("EDITOR_SETTINGS_DRAFT_KEYS", () => {
+  it("keeps connection and query timeout ownership outside editor settings", () => {
+    expect(EDITOR_SETTINGS_DRAFT_KEYS).not.toContain("globalConnectTimeoutSecs");
+    expect(EDITOR_SETTINGS_DRAFT_KEYS).not.toContain("globalQueryTimeoutSecs");
+  });
+
   it("includes continueOnErrorOnBatch", () => {
     expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("continueOnErrorOnBatch");
   });
 
   it("includes the table-open page size", () => {
+    expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("pageSize");
     expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("tableOpenPageSize");
+    expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("queryResultMaxRowsEnabled");
+    expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("queryResultMaxRows");
   });
 
   it("includes the saved SQL open target mode", () => {
@@ -49,9 +59,27 @@ describe("EDITOR_SETTINGS_DRAFT_KEYS", () => {
   it("includes the data-tab reuse mode", () => {
     expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("dataTabReuseMode");
   });
+
+  it("includes data grid type colors", () => {
+    expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("colorizeDataGridCellTypes");
+  });
+
+  it("includes completionTriggerMode", () => {
+    expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("completionTriggerMode");
+  });
 });
 
 describe("editorSettingsDraftFromSettings", () => {
+  it("does not include persisted global timeout values in editor drafts", () => {
+    const settings = makeSettings({ globalConnectTimeoutSecs: 17, globalQueryTimeoutSecs: 43 });
+    const draft = editorSettingsDraftFromSettings(settings);
+
+    expect(draft).not.toHaveProperty("globalConnectTimeoutSecs");
+    expect(draft).not.toHaveProperty("globalQueryTimeoutSecs");
+    expect(editorSettingsPatchFromDraft(draft, draft)).not.toHaveProperty("globalConnectTimeoutSecs");
+    expect(editorSettingsPatchFromDraft(draft, draft)).not.toHaveProperty("globalQueryTimeoutSecs");
+  });
+
   it("maps continueOnErrorOnBatch from settings", () => {
     const draft = editorSettingsDraftFromSettings(makeSettings({ continueOnErrorOnBatch: true }));
     expect(draft.continueOnErrorOnBatch).toBe(true);
@@ -60,6 +88,10 @@ describe("editorSettingsDraftFromSettings", () => {
   it("maps continueOnErrorOnBatch=false from settings", () => {
     const draft = editorSettingsDraftFromSettings(makeSettings({ continueOnErrorOnBatch: false }));
     expect(draft.continueOnErrorOnBatch).toBe(false);
+  });
+
+  it("maps the data grid type color preference from settings", () => {
+    expect(editorSettingsDraftFromSettings(makeSettings({ colorizeDataGridCellTypes: false })).colorizeDataGridCellTypes).toBe(false);
   });
 
   it("preserves the table-open default for legacy settings", () => {
@@ -71,11 +103,22 @@ describe("editorSettingsDraftFromSettings", () => {
   it("maps the saved SQL open target mode", () => {
     expect(editorSettingsDraftFromSettings(makeSettings({ savedSqlOpenTargetMode: "current" })).savedSqlOpenTargetMode).toBe("current");
   });
+
+  it("maps completionTriggerMode from settings", () => {
+    const draft = editorSettingsDraftFromSettings(makeSettings({ completionTriggerMode: "require-prefix" } as Partial<EditorSettings>));
+    expect(draft.completionTriggerMode).toBe("require-prefix");
+  });
+
+  it("normalizes invalid completionTriggerMode to positional", () => {
+    const draft = editorSettingsDraftFromSettings(makeSettings({ completionTriggerMode: "always" as unknown } as Partial<EditorSettings>));
+    expect(draft.completionTriggerMode).toBe("positional");
+  });
 });
 
 describe("normalizeTableOpenPageSizeDraft", () => {
   it.each([
-    [200000, 100000],
+    [200000, 200000],
+    [2000000, 1000000],
     [0, 100],
     [-1, 100],
     ["123.9", 123],
@@ -85,6 +128,17 @@ describe("normalizeTableOpenPageSizeDraft", () => {
     [500, 500],
   ])("normalizes %s to %s", (value, expected) => {
     expect(normalizeTableOpenPageSizeDraft(value)).toBe(expected);
+  });
+});
+
+describe("normalizeQueryResultMaxRowsDraft", () => {
+  it.each([
+    [250000, 250000],
+    [0, 1],
+    [2147483648, 2147483647],
+    [Number.NaN, 100000],
+  ])("normalizes %s to %s", (value, expected) => {
+    expect(normalizeQueryResultMaxRowsDraft(value)).toBe(expected);
   });
 });
 
@@ -127,6 +181,21 @@ describe("editorSettingsDraftChanged", () => {
     draft.dataTabReuseMode = "active-tab";
     expect(editorSettingsDraftChanged(draft, base)).toBe(true);
   });
+
+  it("detects completionTriggerMode change", () => {
+    const settings = makeSettings({ completionTriggerMode: "positional" } as Partial<EditorSettings>);
+    const draft = editorSettingsDraftFromSettings(settings);
+    const base = editorSettingsDraftFromSettings(settings);
+    draft.completionTriggerMode = "manual";
+    expect(editorSettingsDraftChanged(draft, base)).toBe(true);
+  });
+
+  it("detects no change when completionTriggerMode matches", () => {
+    const settings = makeSettings({ completionTriggerMode: "require-prefix" } as Partial<EditorSettings>);
+    const draft = editorSettingsDraftFromSettings(settings);
+    const base = editorSettingsDraftFromSettings(settings);
+    expect(editorSettingsDraftChanged(draft, base)).toBe(false);
+  });
 });
 
 describe("editorSettingsPatchFromDraft", () => {
@@ -152,7 +221,7 @@ describe("editorSettingsPatchFromDraft", () => {
     const draft = editorSettingsDraftFromSettings(settings);
     const base = editorSettingsDraftFromSettings(settings);
     draft.tableOpenPageSize = 200000.9;
-    expect(editorSettingsPatchFromDraft(draft, base).tableOpenPageSize).toBe(100000);
+    expect(editorSettingsPatchFromDraft(draft, base).tableOpenPageSize).toBe(200000);
   });
 
   it("includes the saved SQL open target when changed", () => {
@@ -169,6 +238,23 @@ describe("editorSettingsPatchFromDraft", () => {
     const base = editorSettingsDraftFromSettings(settings);
     draft.dataTabReuseMode = "always-new";
     expect(editorSettingsPatchFromDraft(draft, base).dataTabReuseMode).toBe("always-new");
+  });
+
+  it("includes completionTriggerMode in patch when changed", () => {
+    const settings = makeSettings({ completionTriggerMode: "positional" } as Partial<EditorSettings>);
+    const draft = editorSettingsDraftFromSettings(settings);
+    const base = editorSettingsDraftFromSettings(settings);
+    draft.completionTriggerMode = "manual";
+    const patch = editorSettingsPatchFromDraft(draft, base);
+    expect(patch.completionTriggerMode).toBe("manual");
+  });
+
+  it("omits completionTriggerMode when unchanged", () => {
+    const settings = makeSettings({ completionTriggerMode: "require-prefix" } as Partial<EditorSettings>);
+    const draft = editorSettingsDraftFromSettings(settings);
+    const base = editorSettingsDraftFromSettings(settings);
+    const patch = editorSettingsPatchFromDraft(draft, base);
+    expect(patch.completionTriggerMode).toBeUndefined();
   });
 });
 

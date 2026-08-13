@@ -15,13 +15,16 @@ use std::collections::{BTreeSet, HashMap};
 use std::fs::File;
 use std::future::Future;
 use std::io::BufReader;
+use std::pin::Pin;
 use std::str::FromStr;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
+use tokio::task::JoinHandle;
 use tokio_postgres::config::SslMode;
+use tokio_postgres::tls::{MakeTlsConnect, TlsConnect};
 use tokio_postgres::types::{FromSql, Kind, Type};
-use tokio_postgres::{NoTls, Row, SimpleQueryMessage};
+use tokio_postgres::{AsyncMessage, NoTls, Row, SimpleQueryMessage, Socket};
 use tokio_util::sync::CancellationToken;
 
 use super::file_validator::validate_file_path;
@@ -29,9 +32,11 @@ use crate::query::{await_stream_with_progress_timeout, DbOperationBudget, Stream
 use crate::sql::starts_with_executable_sql_keyword;
 use crate::types::{
     ColumnInfo, CompletionAssistantCandidate, CompletionAssistantCandidateKind, CompletionAssistantMatchMode,
-    CompletionAssistantObjectKind, CompletionAssistantRequest, CompletionAssistantResponse, DatabaseInfo,
-    DatabaseStorageInfo, ExtensionInfo, ForeignKeyInfo, FunctionInfo, IndexInfo, ObjectInfo, ObjectStatistics,
-    OwnerInfo, QueryResult, RuleInfo, SchemaInfo, SequenceInfo, SpatialColumnBuilder, TableInfo, TriggerInfo,
+    CompletionAssistantObjectKind, CompletionAssistantRequest, CompletionAssistantResponse, CustomTypeDdl,
+    CustomTypeDetails, CustomTypeDomainConstraint, CustomTypeKind, CustomTypeMember, CustomTypeProperties,
+    DatabaseInfo, DatabaseStorageInfo, ExtensionInfo, ForeignKeyInfo, FunctionInfo, IndexInfo, ObjectInfo,
+    ObjectStatistics, OwnerInfo, QueryMessage, QueryResult, RuleInfo, SchemaInfo, SequenceInfo, SpatialColumnBuilder,
+    TableInfo, TriggerInfo,
 };
 
 pub(crate) const GAUSSDB_COMPATIBILITY_SQL: &str =
@@ -147,6 +152,44 @@ impl<'a> FromSql<'a> for PgRawBytes {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct PgPoint {
+    x: f64,
+    y: f64,
+}
+
+impl<'a> FromSql<'a> for PgPoint {
+    fn from_sql(_: &Type, raw: &'a [u8]) -> Result<Self, Box<dyn std::error::Error + Sync + Send>> {
+        decode_pg_point_bytes(raw).ok_or_else(|| "expected 16 bytes for PostgreSQL point".into())
+    }
+
+    fn accepts(ty: &Type) -> bool {
+        *ty == Type::POINT
+    }
+}
+
+fn decode_pg_point_bytes(raw: &[u8]) -> Option<PgPoint> {
+    let raw: [u8; 16] = raw.try_into().ok()?;
+    Some(PgPoint {
+        x: f64::from_be_bytes(raw[0..8].try_into().ok()?),
+        y: f64::from_be_bytes(raw[8..16].try_into().ok()?),
+    })
+}
+
+fn format_pg_float(value: f64) -> String {
+    if value == f64::INFINITY {
+        "Infinity".to_string()
+    } else if value == f64::NEG_INFINITY {
+        "-Infinity".to_string()
+    } else {
+        value.to_string()
+    }
+}
+
+fn format_pg_point(point: PgPoint) -> String {
+    format!("({},{})", format_pg_float(point.x), format_pg_float(point.y))
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct PgInterval {
     microseconds: i64,
@@ -208,6 +251,80 @@ fn format_pg_interval(interval: PgInterval) -> String {
     push_pg_interval_component(&mut parts, i64::from(interval.days), "day", "days");
     parts.push(format_pg_interval_time(interval.microseconds));
     parts.join(" ")
+}
+
+struct PgDateRange(String);
+
+impl<'a> FromSql<'a> for PgDateRange {
+    fn from_sql(_: &Type, raw: &'a [u8]) -> Result<Self, Box<dyn std::error::Error + Sync + Send>> {
+        decode_pg_daterange_bytes(raw).map(Self).ok_or_else(|| "invalid PostgreSQL daterange binary value".into())
+    }
+
+    fn accepts(ty: &Type) -> bool {
+        *ty == Type::DATE_RANGE
+    }
+}
+
+const PG_RANGE_EMPTY: u8 = 0b0000_0001;
+const PG_RANGE_LOWER_INCLUSIVE: u8 = 0b0000_0010;
+const PG_RANGE_UPPER_INCLUSIVE: u8 = 0b0000_0100;
+const PG_RANGE_LOWER_UNBOUNDED: u8 = 0b0000_1000;
+const PG_RANGE_UPPER_UNBOUNDED: u8 = 0b0001_0000;
+const PG_RANGE_KNOWN_FLAGS: u8 = PG_RANGE_EMPTY
+    | PG_RANGE_LOWER_INCLUSIVE
+    | PG_RANGE_UPPER_INCLUSIVE
+    | PG_RANGE_LOWER_UNBOUNDED
+    | PG_RANGE_UPPER_UNBOUNDED;
+
+fn decode_pg_date_bound(raw: &[u8], cursor: &mut usize, unbounded: bool) -> Option<String> {
+    if unbounded {
+        return Some(String::new());
+    }
+
+    let length = read_i32_be(raw, cursor)?;
+    if length != 4 {
+        return None;
+    }
+    let days = read_i32_be(raw, cursor)?;
+    match days {
+        i32::MIN => Some("-infinity".to_string()),
+        i32::MAX => Some("infinity".to_string()),
+        days => NaiveDate::from_ymd_opt(2000, 1, 1)?
+            .checked_add_signed(chrono::Duration::days(i64::from(days)))
+            .map(|date| date.to_string()),
+    }
+}
+
+fn decode_pg_daterange_bytes(raw: &[u8]) -> Option<String> {
+    let (&flags, _) = raw.split_first()?;
+    if flags & !PG_RANGE_KNOWN_FLAGS != 0 {
+        return None;
+    }
+    if flags == PG_RANGE_EMPTY {
+        return (raw.len() == 1).then(|| "empty".to_string());
+    }
+    if flags & PG_RANGE_EMPTY != 0 {
+        return None;
+    }
+
+    let lower_unbounded = flags & PG_RANGE_LOWER_UNBOUNDED != 0;
+    let upper_unbounded = flags & PG_RANGE_UPPER_UNBOUNDED != 0;
+    if (lower_unbounded && flags & PG_RANGE_LOWER_INCLUSIVE != 0)
+        || (upper_unbounded && flags & PG_RANGE_UPPER_INCLUSIVE != 0)
+    {
+        return None;
+    }
+
+    let mut cursor = 1;
+    let lower = decode_pg_date_bound(raw, &mut cursor, lower_unbounded)?;
+    let upper = decode_pg_date_bound(raw, &mut cursor, upper_unbounded)?;
+    if cursor != raw.len() {
+        return None;
+    }
+
+    let lower_delimiter = if flags & PG_RANGE_LOWER_INCLUSIVE != 0 { '[' } else { '(' };
+    let upper_delimiter = if flags & PG_RANGE_UPPER_INCLUSIVE != 0 { ']' } else { ')' };
+    Some(format!("{lower_delimiter}{lower},{upper}{upper_delimiter}"))
 }
 
 /// Decode pgvector binary format into a Vec<f32>.
@@ -446,7 +563,9 @@ pub(crate) enum PgColType {
     Bytea,
     Json,
     Bool,
+    Point,
     Interval,
+    DateRange,
     Temporal { fallback: PgTemporalFallback },
     Numeric,
     Uuid,
@@ -464,10 +583,8 @@ pub(crate) enum PgColType {
     Other,
 }
 
-const POSTGRES_FIRST_NORMAL_OBJECT_ID: u32 = 16_384;
-
 fn pg_scalar_type_requires_text_protocol(oid: u32, col_type: PgColType) -> bool {
-    oid >= POSTGRES_FIRST_NORMAL_OBJECT_ID && !matches!(col_type, PgColType::Vector | PgColType::Geometry)
+    Type::from_oid(oid).is_none() && !matches!(col_type, PgColType::Vector | PgColType::Geometry)
 }
 
 fn pg_type_requires_text_protocol(pg_type: &Type, col_type: PgColType) -> bool {
@@ -477,9 +594,9 @@ fn pg_type_requires_text_protocol(pg_type: &Type, col_type: PgColType) -> bool {
 
     match pg_type.kind() {
         Kind::Enum(_) => false,
-        Kind::Array(element_type) => element_type.oid() >= POSTGRES_FIRST_NORMAL_OBJECT_ID,
+        Kind::Array(element_type) => Type::from_oid(element_type.oid()).is_none(),
         Kind::Simple => pg_scalar_type_requires_text_protocol(pg_type.oid(), col_type),
-        _ => pg_type.oid() >= POSTGRES_FIRST_NORMAL_OBJECT_ID,
+        _ => Type::from_oid(pg_type.oid()).is_none(),
     }
 }
 
@@ -495,8 +612,14 @@ pub(crate) fn classify_pg_type(type_name: &str) -> PgColType {
     if upper == "BOOL" {
         return PgColType::Bool;
     }
+    if upper == "POINT" {
+        return PgColType::Point;
+    }
     if upper == "INTERVAL" {
         return PgColType::Interval;
+    }
+    if upper == "DATERANGE" {
+        return PgColType::DateRange;
     }
     if upper.contains("TIMESTAMP")
         || upper == "DATE"
@@ -575,9 +698,17 @@ pub(crate) fn pg_value_to_json_classified(row: &Row, idx: usize, col_type: PgCol
             serde_json::Value::Null
         }
         PgColType::Bool => pg_bool_value_to_json(row, idx),
+        PgColType::Point => row
+            .try_get::<_, PgPoint>(idx)
+            .map(|point| serde_json::Value::String(format_pg_point(point)))
+            .unwrap_or(serde_json::Value::Null),
         PgColType::Interval => row
             .try_get::<_, PgInterval>(idx)
             .map(|interval| serde_json::Value::String(format_pg_interval(interval)))
+            .unwrap_or_else(|_| pg_fallback_value_to_json(row, idx)),
+        PgColType::DateRange => row
+            .try_get::<_, PgDateRange>(idx)
+            .map(|range| serde_json::Value::String(range.0))
             .unwrap_or_else(|_| pg_fallback_value_to_json(row, idx)),
         PgColType::Temporal { fallback } => {
             if let Some(v) = pg_temporal_to_json_value(row, idx) {
@@ -931,8 +1062,9 @@ async fn postgres_query_one_cached(
     }
 }
 
+#[allow(clippy::large_enum_variant)]
 enum PreparedSelectOutcome {
-    Complete(QueryResult),
+    Complete(Box<QueryResult>),
     TextFallback { column_types: Vec<String>, unsupported_type: String },
 }
 
@@ -972,9 +1104,13 @@ async fn execute_select_prepared(
     sql: &str,
     start: Instant,
     row_limit: usize,
+    progress_clock: Option<&StreamProgressClock>,
 ) -> Result<PreparedSelectOutcome, tokio_postgres::Error> {
     let prepared_start = Instant::now();
     let (stmt, metadata) = prepare_select_with_metadata(client, sql).await?;
+    if let Some(progress_clock) = progress_clock {
+        progress_clock.mark();
+    }
     log::info!(
         "[postgres][select:prepare_cached:done] elapsed_ms={} total_ms={}",
         prepared_start.elapsed().as_millis(),
@@ -988,6 +1124,9 @@ async fn execute_select_prepared(
     let params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = Vec::new();
     let query_start = Instant::now();
     let stream = client.query_raw(&stmt, params).await?;
+    if let Some(progress_clock) = progress_clock {
+        progress_clock.mark();
+    }
     log::info!(
         "[postgres][select:query_raw:done] elapsed_ms={} total_ms={} column_count={}",
         query_start.elapsed().as_millis(),
@@ -1007,6 +1146,9 @@ async fn execute_select_prepared(
 
     let rows_start = Instant::now();
     while let Some(row_result) = stream.next().await {
+        if let Some(progress_clock) = progress_clock {
+            progress_clock.mark();
+        }
         if result_rows.len() >= row_limit {
             truncated = true;
             break;
@@ -1035,7 +1177,7 @@ async fn execute_select_prepared(
     );
 
     let (spatial_columns, spatial_values) = spatial_columns.finish_with_values(spatial_values);
-    Ok(PreparedSelectOutcome::Complete(QueryResult {
+    Ok(PreparedSelectOutcome::Complete(Box::new(QueryResult {
         columns,
         column_types,
         column_sortables: Vec::new(),
@@ -1048,7 +1190,8 @@ async fn execute_select_prepared(
         session_id: None,
         has_more: false,
         elasticsearch_raw_body: None,
-    }))
+        messages: Vec::new(),
+    })))
 }
 
 fn matching_pg_text_column_types(columns: &[String], prepared: Option<Vec<String>>) -> Vec<String> {
@@ -1061,8 +1204,12 @@ async fn execute_select_text(
     start: Instant,
     row_limit: usize,
     prepared_column_types: Option<Vec<String>>,
+    progress_clock: Option<&StreamProgressClock>,
 ) -> Result<QueryResult, String> {
     let stream = client.simple_query_raw(sql).await.map_err(pg_error_to_string)?;
+    if let Some(progress_clock) = progress_clock {
+        progress_clock.mark();
+    }
     tokio::pin!(stream);
     let mut columns: Vec<String> = Vec::new();
     let mut result_rows: Vec<Vec<serde_json::Value>> = Vec::new();
@@ -1078,6 +1225,9 @@ async fn execute_select_text(
     let mut truncated = false;
 
     while let Some(message) = stream.next().await {
+        if let Some(progress_clock) = progress_clock {
+            progress_clock.mark();
+        }
         match message {
             Ok(SimpleQueryMessage::RowDescription(cols)) => {
                 columns = cols.iter().map(|c| c.name().to_string()).collect();
@@ -1135,6 +1285,7 @@ async fn execute_select_text(
         session_id: None,
         has_more: false,
         elasticsearch_raw_body: None,
+        messages: Vec::new(),
     })
 }
 
@@ -1144,15 +1295,16 @@ async fn finish_prepared_select(
     start: Instant,
     row_limit: usize,
     outcome: PreparedSelectOutcome,
+    progress_clock: Option<&StreamProgressClock>,
 ) -> Result<QueryResult, String> {
     match outcome {
-        PreparedSelectOutcome::Complete(result) => Ok(result),
+        PreparedSelectOutcome::Complete(result) => Ok(*result),
         PreparedSelectOutcome::TextFallback { column_types, unsupported_type } => {
             log::info!(
                 "[postgres][select:text_fallback] unsupported_type={} switching_to=simple_query",
                 unsupported_type
             );
-            execute_select_text(client, sql, start, row_limit, Some(column_types)).await
+            execute_select_text(client, sql, start, row_limit, Some(column_types), progress_clock).await
         }
     }
 }
@@ -1163,24 +1315,34 @@ pub(crate) async fn execute_select_query(
     start: Instant,
     row_limit: usize,
 ) -> Result<QueryResult, String> {
-    match execute_select_prepared(client, sql, start, row_limit).await {
-        Ok(outcome) => finish_prepared_select(client, sql, start, row_limit, outcome).await,
+    execute_select_query_with_progress(client, sql, start, row_limit, None).await
+}
+
+async fn execute_select_query_with_progress(
+    client: &deadpool_postgres::Client,
+    sql: &str,
+    start: Instant,
+    row_limit: usize,
+    progress_clock: Option<&StreamProgressClock>,
+) -> Result<QueryResult, String> {
+    match execute_select_prepared(client, sql, start, row_limit, progress_clock).await {
+        Ok(outcome) => finish_prepared_select(client, sql, start, row_limit, outcome, progress_clock).await,
         Err(err) if should_retry_postgres_stale_cache(&err) => {
             // The cached prepared statement is stale (e.g. the view or table
             // schema changed since the statement was prepared). Evict the
             // stale entry and retry with a fresh server-side prepare.
             log::warn!("[postgres][select:stale_cache] evicting cached statement: {}", pg_error_to_string(err));
             client.statement_cache.remove(sql, &[]);
-            match execute_select_prepared(client, sql, start, row_limit).await {
-                Ok(outcome) => finish_prepared_select(client, sql, start, row_limit, outcome).await,
+            match execute_select_prepared(client, sql, start, row_limit, progress_clock).await {
+                Ok(outcome) => finish_prepared_select(client, sql, start, row_limit, outcome, progress_clock).await,
                 Err(err) if should_retry_postgres_text_query(&err) => {
-                    execute_select_text(client, sql, start, row_limit, None).await
+                    execute_select_text(client, sql, start, row_limit, None, progress_clock).await
                 }
                 Err(err) => Err(pg_error_to_string(err)),
             }
         }
         Err(err) if should_retry_postgres_text_query(&err) => {
-            execute_select_text(client, sql, start, row_limit, None).await
+            execute_select_text(client, sql, start, row_limit, None, progress_clock).await
         }
         Err(err) => Err(pg_error_to_string(err)),
     }
@@ -1458,6 +1620,194 @@ async fn connect_with_local_timezone(url: &str, fallback_timeout: Duration, time
     connect_with_optional_local_timezone(url, fallback_timeout, Some(timezone)).await
 }
 
+/// Identity of one physical backend connection for notice attribution:
+/// (server address, server port, backend PID). The PID alone is not unique
+/// across different servers, so the server's own address/port disambiguate
+/// (`inet_server_addr()` is NULL for Unix sockets, hence the fallback).
+type PostgresConnectionKey = (String, String, String);
+
+const POSTGRES_CONNECTION_IDENTITY_SQL: &str = "SELECT pg_backend_pid()::text, \
+     COALESCE(host(inet_server_addr()), 'unix'), \
+     COALESCE(inet_server_port()::text, current_setting('port'))";
+
+fn postgres_connection_key_from_row(row: &Row) -> Option<PostgresConnectionKey> {
+    Some((row.try_get::<_, String>(1).ok()?, row.try_get::<_, String>(2).ok()?, row.try_get::<_, String>(0).ok()?))
+}
+
+/// Notice buffers for live connections, keyed by connection identity. Entries
+/// are weak so they disappear once the pooled connection (and its driver
+/// task) is dropped.
+type PostgresNoticeBuffers = HashMap<PostgresConnectionKey, Weak<Mutex<Vec<QueryMessage>>>>;
+
+fn postgres_notice_buffers() -> &'static Mutex<PostgresNoticeBuffers> {
+    static BUFFERS: OnceLock<Mutex<PostgresNoticeBuffers>> = OnceLock::new();
+    BUFFERS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Connection identity cache, keyed by the per-physical-connection statement
+/// cache pointer (same identity pattern as `postgres_single_schema_clients`).
+/// The `Weak` guards against pointer reuse: a new connection whose
+/// `StatementCache` lands on a freed entry's address fails the `ptr_eq` check
+/// and is treated as a miss. The value is `None` when the identity query
+/// failed, so it is issued at most once per physical connection — it must
+/// never be retried from `drain_postgres_notices`, which can run inside the
+/// read-only transaction used for EXPLAIN, where a failing query would abort
+/// the user's statement.
+type PostgresClientKeys = HashMap<usize, (Weak<deadpool_postgres::StatementCache>, Option<PostgresConnectionKey>)>;
+
+fn postgres_client_keys() -> &'static Mutex<PostgresClientKeys> {
+    static KEYS: OnceLock<Mutex<PostgresClientKeys>> = OnceLock::new();
+    KEYS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Establishes connections like deadpool's `ConfigConnectImpl`, but drives
+/// each connection with a task that captures `NoticeResponse` messages
+/// (`RAISE NOTICE`/`WARNING`, etc.) into a per-backend buffer instead of
+/// discarding them. Query execution drains the buffer so notices are
+/// attached to the `QueryResult` of the statement that raised them.
+struct NoticeCapturingConnect<T>
+where
+    T: MakeTlsConnect<Socket> + Clone + Sync + Send + 'static,
+    T::Stream: Sync + Send,
+    T::TlsConnect: Sync + Send,
+    <T::TlsConnect as TlsConnect<Socket>>::Future: Send,
+{
+    tls: T,
+}
+
+impl<T> deadpool_postgres::Connect for NoticeCapturingConnect<T>
+where
+    T: MakeTlsConnect<Socket> + Clone + Sync + Send + 'static,
+    T::Stream: Sync + Send,
+    T::TlsConnect: Sync + Send,
+    <T::TlsConnect as TlsConnect<Socket>>::Future: Send,
+{
+    fn connect(
+        &self,
+        pg_config: &tokio_postgres::Config,
+    ) -> Pin<
+        Box<dyn Future<Output = Result<(tokio_postgres::Client, JoinHandle<()>), tokio_postgres::Error>> + Send + '_>,
+    > {
+        let tls = self.tls.clone();
+        let pg_config = pg_config.clone();
+        Box::pin(async move {
+            let (client, mut connection) = pg_config.connect(tls).await?;
+            // No query can complete before the connection is being driven, so
+            // the notice buffer is handed to the driver task through a slot
+            // that is filled once the backend PID is known.
+            let notice_buffer = Arc::new(Mutex::new(None::<Arc<Mutex<Vec<QueryMessage>>>>));
+            let task_buffer = Arc::clone(&notice_buffer);
+            let conn_task = tokio::spawn(async move {
+                loop {
+                    match std::future::poll_fn(|cx| connection.poll_message(cx)).await {
+                        Some(Ok(AsyncMessage::Notice(error))) => {
+                            let message = QueryMessage {
+                                severity: error.severity().to_string(),
+                                message: error.message().to_string(),
+                                code: Some(error.code().code().to_string()),
+                                detail: error.detail().map(str::to_string),
+                                hint: error.hint().map(str::to_string),
+                            };
+                            let buffer = task_buffer.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
+                            match buffer {
+                                Some(buffer) => {
+                                    buffer.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).push(message);
+                                }
+                                None => {
+                                    log::info!("[postgres][notice] {}: {}", message.severity, message.message);
+                                }
+                            }
+                        }
+                        // LISTEN/NOTIFY messages are not surfaced anywhere.
+                        Some(Ok(_)) => {}
+                        Some(Err(err)) => {
+                            log::warn!("[postgres] connection driver error: {err}");
+                            break;
+                        }
+                        None => break,
+                    }
+                }
+            });
+
+            // Best-effort: without the connection identity, notices cannot be
+            // attributed to query results on this connection and are logged
+            // by the driver task instead. Never fail the connection over this.
+            if let Ok(row) = client.query_one(POSTGRES_CONNECTION_IDENTITY_SQL, &[]).await {
+                if let Some(key) = postgres_connection_key_from_row(&row) {
+                    let buffer = Arc::new(Mutex::new(Vec::new()));
+                    let mut buffers = postgres_notice_buffers().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                    buffers.retain(|_, weak| weak.strong_count() > 0);
+                    buffers.insert(key, Arc::downgrade(&buffer));
+                    drop(buffers);
+                    *notice_buffer.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(buffer);
+                }
+            }
+
+            Ok((client, conn_task))
+        })
+    }
+}
+
+/// Cached identity lookup. `Some(Some(key))` = resolved, `Some(None)` =
+/// identity query failed before (do not retry), `None` = never seen (or the
+/// entry belonged to a dropped connection whose address was reused).
+fn cached_postgres_client_key(client: &deadpool_postgres::Client) -> Option<Option<PostgresConnectionKey>> {
+    let cache_key = Arc::as_ptr(&client.statement_cache) as usize;
+    let mut keys = postgres_client_keys().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    match keys.get(&cache_key) {
+        Some((cached, key)) if cached.upgrade().is_some_and(|cached| Arc::ptr_eq(&cached, &client.statement_cache)) => {
+            Some(key.clone())
+        }
+        Some(_) => {
+            keys.remove(&cache_key);
+            None
+        }
+        None => None,
+    }
+}
+
+/// Best-effort identity resolution. Failures are cached as `None` so the
+/// identity query runs at most once per physical connection.
+async fn resolve_postgres_client_key(client: &deadpool_postgres::Client) -> Option<PostgresConnectionKey> {
+    if let Some(key) = cached_postgres_client_key(client) {
+        return key;
+    }
+    let key: Option<PostgresConnectionKey> = client
+        .query_one(POSTGRES_CONNECTION_IDENTITY_SQL, &[])
+        .await
+        .ok()
+        .and_then(|row| postgres_connection_key_from_row(&row));
+    let mut keys = postgres_client_keys().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    keys.retain(|_, (cached, _)| cached.strong_count() > 0);
+    let cache_key = Arc::as_ptr(&client.statement_cache) as usize;
+    keys.insert(cache_key, (Arc::downgrade(&client.statement_cache), key.clone()));
+    key
+}
+
+async fn postgres_client_key(client: &deadpool_postgres::Client) -> Option<PostgresConnectionKey> {
+    resolve_postgres_client_key(client).await
+}
+
+fn take_notices_for_key(key: &PostgresConnectionKey) -> Vec<QueryMessage> {
+    let buffer = {
+        let mut buffers = postgres_notice_buffers().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        buffers.retain(|_, weak| weak.strong_count() > 0);
+        buffers.get(key).and_then(Weak::upgrade)
+    };
+    let Some(buffer) = buffer else {
+        return Vec::new();
+    };
+    let notices = std::mem::take(&mut *buffer.lock().unwrap_or_else(|poisoned| poisoned.into_inner()));
+    notices
+}
+
+async fn drain_postgres_notices(client: &deadpool_postgres::Client) -> Vec<QueryMessage> {
+    match postgres_client_key(client).await {
+        Some(key) => take_notices_for_key(&key),
+        None => Vec::new(),
+    }
+}
+
 async fn connect_with_optional_local_timezone(
     url: &str,
     fallback_timeout: Duration,
@@ -1469,7 +1819,7 @@ async fn connect_with_optional_local_timezone(
 
     let timeout = super::parse_connect_timeout_with_fallback(url, fallback_timeout);
 
-    super::with_connection_timeout("PostgreSQL", timeout, async {
+    let (pool, client) = super::with_connection_timeout("PostgreSQL", timeout, async {
         let pg_config = tokio_postgres::Config::from_str(&postgres_url.url)
             .map_err(|e| format!("Invalid PostgreSQL connection URL: {e}"))?;
 
@@ -1486,9 +1836,9 @@ async fn connect_with_optional_local_timezone(
             postgres_url.accepts_invalid_certs,
             postgres_url.verifies_hostname,
         )?;
-        let mgr = deadpool_postgres::Manager::from_config(
+        let mgr = deadpool_postgres::Manager::from_connect(
             pg_config.clone(),
-            tokio_postgres_rustls::MakeRustlsConnect::new(tls_config),
+            NoticeCapturingConnect { tls: tokio_postgres_rustls::MakeRustlsConnect::new(tls_config) },
             mgr_config,
         );
         let pool = Pool::builder(mgr)
@@ -1500,19 +1850,33 @@ async fn connect_with_optional_local_timezone(
             .build()
             .map_err(|e| format!("Failed to create PostgreSQL pool: {e}"))?;
 
-        // Verify connectivity and set timezone. Explicit connection options are
-        // handled by PostgreSQL during startup and must remain strict.
+        // Verify connectivity. Explicit connection options are handled by
+        // PostgreSQL during startup and must remain strict.
         let client =
             pool.get().await.map_err(|e| format!("PostgreSQL connection failed: {}", pg_pool_error_to_string(e)))?;
-        if !pg_url_has_timezone_setting(url) {
-            if let Some(timezone) = timezone {
-                set_automatic_postgres_timezone(&client, timezone).await?;
-            }
-        }
-
-        Ok(pool)
+        Ok((pool, client))
     })
-    .await
+    .await?;
+
+    // Creating the physical connection and applying session defaults are two
+    // sequential network phases. Give each phase the configured connection
+    // timeout instead of sharing one deadline that can expire during the
+    // optional SET timezone round-trip on higher-latency tunnels.
+    if !pg_url_has_timezone_setting(url) {
+        if let Some(timezone) = timezone {
+            postgres_session_setup_with_timeout(timeout, set_automatic_postgres_timezone(&client, timezone)).await?;
+        }
+    }
+
+    drop(client);
+    Ok(pool)
+}
+
+async fn postgres_session_setup_with_timeout<T, F>(timeout: Duration, future: F) -> Result<T, String>
+where
+    F: Future<Output = Result<T, String>>,
+{
+    super::with_connection_timeout("PostgreSQL session setup", timeout, future).await
 }
 
 async fn set_automatic_postgres_timezone(client: &deadpool_postgres::Client, timezone: &str) -> Result<(), String> {
@@ -1952,9 +2316,29 @@ fn validate_postgres_ssl_paths(url: &str) -> Result<(), String> {
 }
 
 fn list_databases_sql() -> &'static str {
-    "SELECT datname FROM pg_database \
+    "SELECT datname \
+     FROM pg_database \
      WHERE datallowconn = true \
      ORDER BY datname"
+}
+
+fn database_metadata_sql() -> &'static str {
+    "SELECT d.datname, \
+            CASE \
+              WHEN has_database_privilege(d.datname, 'CONNECT') \
+                OR COALESCE(( \
+                  SELECT pg_has_role(current_user, r.oid, 'MEMBER') \
+                  FROM pg_roles r \
+                  WHERE r.rolname = 'pg_read_all_stats' \
+                ), false) \
+              THEN pg_database_size(d.oid) \
+              ELSE NULL \
+            END AS size_bytes, \
+            obj_description(d.oid, 'pg_database') AS comment, \
+            pg_encoding_to_char(d.encoding) AS default_charset \
+     FROM pg_database d \
+     WHERE datallowconn = true \
+     ORDER BY d.datname"
 }
 
 fn database_storage_sql() -> &'static str {
@@ -1979,7 +2363,26 @@ pub async fn list_databases(pool: &Pool) -> Result<Vec<DatabaseInfo>, String> {
     let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
     let rows = postgres_query_cached(&client, list_databases_sql(), &[]).await.map_err(|e| e.to_string())?;
 
-    Ok(rows.iter().map(|row| DatabaseInfo { name: pg_row_try_string(row, 0) }).collect())
+    Ok(rows.iter().map(|row| DatabaseInfo { name: pg_row_try_string(row, 0), ..Default::default() }).collect())
+}
+
+pub async fn list_database_metadata(pool: &Pool) -> Result<Vec<DatabaseInfo>, String> {
+    let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
+    let rows = postgres_query_cached(&client, database_metadata_sql(), &[]).await.map_err(|e| e.to_string())?;
+    Ok(rows
+        .iter()
+        .map(|row| DatabaseInfo {
+            name: pg_row_try_string(row, 0),
+            size_bytes: row.try_get::<_, Option<i64>>(1).ok().flatten(),
+            comment: row.try_get::<_, Option<String>>(2).ok().flatten().filter(|value| !value.trim().is_empty()),
+            default_charset: row
+                .try_get::<_, Option<String>>(3)
+                .ok()
+                .flatten()
+                .filter(|value| !value.trim().is_empty()),
+            ..Default::default()
+        })
+        .collect())
 }
 
 pub async fn list_database_storage(pool: &Pool, database_names: &[String]) -> Result<Vec<DatabaseStorageInfo>, String> {
@@ -2017,13 +2420,12 @@ pub async fn list_tables_filtered(
     let limit_param = limit.and_then(|value| i64::try_from(value).ok());
     let offset_param = offset.and_then(|value| i64::try_from(value).ok()).unwrap_or(0);
     let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
-    let rows = postgres_query_cached(
-        &client,
-        postgres_tables_sql(),
-        &[&schema, &filter_pattern, &fuzzy_filter_pattern, &limit_param, &offset_param],
-    )
-    .await
-    .map_err(|e| e.to_string())?;
+    let sql = postgres_tables_sql(limit_param, offset_param);
+    let params: &[(&(dyn tokio_postgres::types::ToSql + Sync), Type)] =
+        &[(&schema, Type::VARCHAR), (&filter_pattern, Type::VARCHAR), (&fuzzy_filter_pattern, Type::VARCHAR)];
+    // The pagination literals make this SQL vary by page. Use an unnamed typed
+    // query so each load stays one round trip without growing the statement cache.
+    let rows = client.query_typed(&sql, params).await.map_err(|e| e.to_string())?;
 
     Ok(rows
         .iter()
@@ -2343,7 +2745,11 @@ pub async fn get_table_partition_local_objects(
 
 fn postgres_table_partition_relation_sql() -> &'static str {
     "SELECT c.relkind::text, \
-            COALESCE((pg_catalog.row_to_json(c)->>'relispartition')::boolean, false) AS is_partition \
+            EXISTS ( \
+              SELECT 1 FROM pg_catalog.pg_inherits i \
+              WHERE i.inhrelid = c.oid \
+                AND (SELECT parent.relkind FROM pg_catalog.pg_class parent WHERE parent.oid = i.inhparent) = 'p' \
+            ) AS is_partition \
      FROM pg_catalog.pg_class c \
      JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
      WHERE n.nspname = $1 AND c.relname = $2 AND c.relkind IN ('r','p') \
@@ -2391,12 +2797,18 @@ fn postgres_table_comment_sql() -> &'static str {
      LIMIT 1"
 }
 
-fn postgres_tables_sql() -> &'static str {
-    // PostgreSQL and Redshift can infer different wire types for LIMIT/OFFSET
-    // placeholders. Keep them explicit so the shared i64 parameters serialize reliably.
-    // Root relations must precede partition descendants so a large partition
-    // hierarchy cannot push unrelated schema tables into later sidebar pages.
-    "SELECT c.relname AS table_name, \
+fn postgres_tables_sql(limit: Option<i64>, offset: i64) -> String {
+    // PostgreSQL-compatible servers do not agree on the inferred wire types
+    // or accepted expression grammar for LIMIT/OFFSET parameters. These values
+    // originate as usize and are converted to non-negative i64 literals.
+    // Omitting an explicit ESCAPE keeps compatibility with servers that expose
+    // only two-argument ILIKE; bound patterns use the default backslash escape.
+    let pagination = match limit {
+        Some(limit) => format!("LIMIT {limit} OFFSET {offset}"),
+        None => format!("OFFSET {offset}"),
+    };
+    format!(
+        "SELECT c.relname AS table_name, \
          CASE c.relkind WHEN 'r' THEN 'BASE TABLE' WHEN 'v' THEN 'VIEW' \
            WHEN 'm' THEN 'MATERIALIZED_VIEW' WHEN 'f' THEN 'FOREIGN TABLE' \
            WHEN 'p' THEN 'BASE TABLE' END AS table_type, \
@@ -2409,9 +2821,10 @@ fn postgres_tables_sql() -> &'static str {
          LEFT JOIN pg_catalog.pg_class pc ON pc.oid = i.inhparent \
          LEFT JOIN pg_catalog.pg_namespace pn ON pn.oid = pc.relnamespace \
          WHERE n.nspname = $1 AND c.relkind IN ('r','v','m','f','p') \
-           AND ($2 = '%%' OR c.relname ILIKE $2 ESCAPE '~' OR ($3 <> '' AND c.relname ILIKE $3 ESCAPE '~')) \
+           AND ($2 = '%%' OR c.relname ILIKE $2 OR ($3 <> '' AND c.relname ILIKE $3)) \
          ORDER BY CASE WHEN pc.relkind = 'p' THEN 1 ELSE 0 END, c.relname \
-         LIMIT CAST($4 AS BIGINT) OFFSET CAST($5 AS BIGINT)"
+         {pagination}"
+    )
 }
 
 fn like_contains_pattern(value: &str) -> String {
@@ -2422,8 +2835,8 @@ fn like_contains_pattern(value: &str) -> String {
     let mut pattern = String::with_capacity(value.len() + 2);
     pattern.push('%');
     for ch in value.chars() {
-        if ch == '~' || ch == '%' || ch == '_' {
-            pattern.push('~');
+        if ch == '\\' || ch == '%' || ch == '_' {
+            pattern.push('\\');
         }
         pattern.push(ch);
     }
@@ -2435,8 +2848,8 @@ fn like_fuzzy_pattern(value: &str) -> String {
     crate::sql::fuzzy_like_pattern_with_escape(value, |value| {
         let mut escaped = String::with_capacity(value.len() + 1);
         for ch in value.chars() {
-            if ch == '~' || ch == '%' || ch == '_' {
-                escaped.push('~');
+            if ch == '\\' || ch == '%' || ch == '_' {
+                escaped.push('\\');
             }
             escaped.push(ch);
         }
@@ -2621,17 +3034,82 @@ fn list_object_routines_sql(include_timestamps: bool, has_proc_prokind: bool, ha
      WHERE n.nspname = $1 AND NOT p.proisagg AND NOT p.proiswindow"
 }
 
+/// SQL for listing user-defined types in one schema.
+///
+/// Only explicitly created types are returned: base types (b), standalone
+/// composite types (c), domains (d), enums (e), ranges (r) and multiranges (m).
+/// Relation auto-generated row types (table/view/materialized view/foreign
+/// table/partitioned table) are excluded via `typrelid = 0 OR relkind = 'c'`,
+/// and array companion types are excluded via `typelem = 0`. The type branch
+/// has no usable timestamp/stat columns, so created_at/updated_at are always
+/// NULL. Column order must match the relation and routine branches.
+fn list_object_custom_types_sql() -> &'static str {
+    "SELECT t.typname AS object_name, \
+       'TYPE' AS object_type, \
+       d.description AS object_comment, \
+       NULL::text AS created_at, \
+       NULL::text AS updated_at, \
+       NULL::text AS parent_schema, \
+       NULL::text AS parent_name, \
+       (t.typtype::text || ':' || CASE \
+         WHEN t.typtype = 'c' THEN CASE WHEN EXISTS ( \
+           SELECT 1 FROM pg_catalog.pg_attribute a \
+           WHERE a.attrelid = t.typrelid AND a.attnum > 0 AND NOT a.attisdropped \
+         ) THEN '1' ELSE '0' END \
+         WHEN t.typtype = 'e' THEN CASE WHEN EXISTS ( \
+           SELECT 1 FROM pg_catalog.pg_enum e WHERE e.enumtypid = t.oid \
+         ) THEN '1' ELSE '0' END \
+         ELSE '0' \
+       END) AS signature, \
+       5 AS sort_order \
+     FROM pg_catalog.pg_type t \
+     JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace \
+     LEFT JOIN pg_catalog.pg_class c ON c.oid = t.typrelid \
+     LEFT JOIN pg_catalog.pg_description d \
+       ON d.objoid = t.oid \
+      AND d.classoid = 'pg_catalog.pg_type'::regclass \
+      AND d.objsubid = 0 \
+     WHERE n.nspname = $1 \
+       AND t.typtype IN ('b', 'c', 'd', 'e', 'r', 'm') \
+       AND t.typisdefined \
+       AND t.typelem = 0 \
+       AND (t.typrelid = 0 OR c.relkind = 'c') \
+       AND n.nspname <> 'pg_catalog' \
+       AND n.nspname <> 'information_schema' \
+       AND n.nspname NOT LIKE 'pg_toast%' \
+       AND n.nspname NOT LIKE 'pg_temp%'"
+}
+
+fn is_postgres_system_schema(schema: &str) -> bool {
+    schema == "pg_catalog"
+        || schema == "information_schema"
+        || schema.starts_with("pg_toast")
+        || schema.starts_with("pg_temp")
+}
+
 fn list_objects_sql(
     include_timestamps: bool,
     has_proc_prokind: bool,
     has_proc_prosp: bool,
     has_function_identity_arguments: bool,
+    include_relations: bool,
+    include_routines: bool,
+    include_custom_types: bool,
 ) -> String {
-    let sql = format!(
-        "{} UNION ALL {} ORDER BY sort_order, object_name",
-        list_object_relations_sql(include_timestamps),
-        list_object_routines_sql(include_timestamps, has_proc_prokind, has_proc_prosp)
-    );
+    let mut parts: Vec<String> = Vec::new();
+    if include_relations {
+        parts.push(list_object_relations_sql(include_timestamps).to_string());
+    }
+    if include_routines {
+        parts.push(list_object_routines_sql(include_timestamps, has_proc_prokind, has_proc_prosp).to_string());
+    }
+    if include_custom_types {
+        parts.push(list_object_custom_types_sql().to_string());
+    }
+    let mut sql = parts.join(" UNION ALL ");
+    if !parts.is_empty() {
+        sql = format!("{sql} ORDER BY sort_order, object_name");
+    }
     if has_function_identity_arguments {
         sql
     } else {
@@ -2697,18 +3175,52 @@ async fn list_objects_rows(
     has_proc_prokind: bool,
     has_proc_prosp: bool,
     has_function_identity_arguments: bool,
+    include_relations: bool,
+    include_routines: bool,
+    include_custom_types: bool,
 ) -> Result<Vec<Row>, String> {
-    let sql = list_objects_sql(include_timestamps, has_proc_prokind, has_proc_prosp, has_function_identity_arguments);
+    let sql = list_objects_sql(
+        include_timestamps,
+        has_proc_prokind,
+        has_proc_prosp,
+        has_function_identity_arguments,
+        include_relations,
+        include_routines,
+        include_custom_types,
+    );
+    if sql.is_empty() {
+        // No branch was selected (e.g. an object_types filter the catalog
+        // cannot serve); skip the round-trip instead of executing empty SQL.
+        return Ok(Vec::new());
+    }
     postgres_query_cached(client, &sql, &[&schema]).await.map_err(|e| e.to_string())
 }
 
-pub async fn list_objects(pool: &Pool, schema: &str) -> Result<Vec<ObjectInfo>, String> {
+pub async fn list_objects(
+    pool: &Pool,
+    schema: &str,
+    include_relations: bool,
+    include_routines: bool,
+    include_custom_types: bool,
+) -> Result<Vec<ObjectInfo>, String> {
+    // System schemas may be visible in the schema tree, but their catalog
+    // types are implementation details and are never custom types.
+    let include_custom_types = include_custom_types && !is_postgres_system_schema(schema);
     let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
-    let has_proc_prokind = postgres_proc_has_prokind(&client).await?;
-    // Some GaussDB-compatible catalogs expose prosp alongside, or instead of,
-    // PostgreSQL 11's prokind. Treat prosp as an extra procedure signal.
-    let has_proc_prosp = postgres_proc_has_prosp(&client).await?;
-    let has_function_identity_arguments = postgres_has_function_identity_arguments(&client).await?;
+    // Routine catalog probes are only needed when the routine branch runs.
+    // Skipping them for relation/type-only requests avoids three extra
+    // pg_proc/pg_attribute round-trips and keeps compatible catalogs that lack
+    // prokind/prosp from breaking a plain type listing.
+    let (has_proc_prokind, has_proc_prosp, has_function_identity_arguments) = if include_routines {
+        let has_proc_prokind = postgres_proc_has_prokind(&client).await?;
+        // Some GaussDB-compatible catalogs expose prosp alongside, or instead of,
+        // PostgreSQL 11's prokind. Treat prosp as an extra procedure signal.
+        let has_proc_prosp = postgres_proc_has_prosp(&client).await?;
+        let has_function_identity_arguments = postgres_has_function_identity_arguments(&client).await?;
+        (has_proc_prokind, has_proc_prosp, has_function_identity_arguments)
+    } else {
+        (false, false, false)
+    };
     let rows = match list_objects_rows(
         &client,
         schema,
@@ -2716,6 +3228,9 @@ pub async fn list_objects(pool: &Pool, schema: &str) -> Result<Vec<ObjectInfo>, 
         has_proc_prokind,
         has_proc_prosp,
         has_function_identity_arguments,
+        include_relations,
+        include_routines,
+        include_custom_types,
     )
     .await
     {
@@ -2729,6 +3244,9 @@ pub async fn list_objects(pool: &Pool, schema: &str) -> Result<Vec<ObjectInfo>, 
                 has_proc_prokind,
                 has_proc_prosp,
                 has_function_identity_arguments,
+                include_relations,
+                include_routines,
+                include_custom_types,
             )
             .await
             {
@@ -2742,19 +3260,686 @@ pub async fn list_objects(pool: &Pool, schema: &str) -> Result<Vec<ObjectInfo>, 
 
     Ok(rows
         .iter()
-        .map(|row| ObjectInfo {
-            name: pg_row_try_string(row, 0),
-            object_type: pg_row_try_string(row, 1),
-            schema: Some(schema.to_string()),
-            valid: None,
-            comment: row.try_get::<_, Option<String>>(2).ok().flatten().filter(|s| !s.is_empty()),
-            created_at: row.try_get::<_, Option<String>>(3).ok().flatten().filter(|s| !s.is_empty()),
-            updated_at: row.try_get::<_, Option<String>>(4).ok().flatten().filter(|s| !s.is_empty()),
-            parent_schema: row.try_get::<_, Option<String>>(5).ok().flatten().filter(|s| !s.is_empty()),
-            parent_name: row.try_get::<_, Option<String>>(6).ok().flatten().filter(|s| !s.is_empty()),
-            signature: row.try_get::<_, Option<String>>(7).ok().flatten(),
+        .map(|row| {
+            let object_type = pg_row_try_string(row, 1);
+            let raw_signature = row.try_get::<_, Option<String>>(7).ok().flatten();
+            let (signature, custom_type_kind, has_members) = if object_type == "TYPE" {
+                let (kind, has_members) = custom_type_list_metadata(raw_signature.as_deref());
+                (None, kind, has_members)
+            } else {
+                (raw_signature, None, None)
+            };
+            ObjectInfo {
+                name: pg_row_try_string(row, 0),
+                object_type,
+                schema: Some(schema.to_string()),
+                valid: None,
+                signature,
+                custom_type_kind,
+                has_members,
+                comment: row.try_get::<_, Option<String>>(2).ok().flatten().filter(|s| !s.is_empty()),
+                created_at: row.try_get::<_, Option<String>>(3).ok().flatten().filter(|s| !s.is_empty()),
+                updated_at: row.try_get::<_, Option<String>>(4).ok().flatten().filter(|s| !s.is_empty()),
+                parent_schema: row.try_get::<_, Option<String>>(5).ok().flatten().filter(|s| !s.is_empty()),
+                parent_name: row.try_get::<_, Option<String>>(6).ok().flatten().filter(|s| !s.is_empty()),
+                trigger: None,
+                xugu_type_members_expandable: None,
+            }
         })
         .collect())
+}
+
+fn custom_type_list_metadata(value: Option<&str>) -> (Option<String>, Option<bool>) {
+    let Some((kind_code, has_members)) = value.and_then(|value| value.split_once(':')) else {
+        return (None, None);
+    };
+    let kind = custom_type_kind_for(kind_code).map(|kind| kind.as_str().to_string());
+    let has_members = match has_members {
+        "1" => Some(true),
+        "0" => Some(false),
+        _ => None,
+    };
+    (kind, has_members)
+}
+
+/// General `pg_type` row for a user-defined type located by schema + name.
+///
+/// The query never interpolates user input: schema and name are bound as
+/// parameters. Function OIDs are joined to `pg_proc` so the DDL generator and
+/// the properties panel get human-readable names without extra round-trips.
+struct CustomTypeGeneralInfo {
+    oid: u32,
+    typtype: String,
+    typisdefined: bool,
+    typbasetype: u32,
+    typnotnull: bool,
+    typrelid: u32,
+    typelem: u32,
+    typcollation: u32,
+    typdefaultbin: Option<String>,
+    typdefault: Option<String>,
+    typlen: i16,
+    typbyval: bool,
+    typalign: String,
+    typstorage: String,
+    typtypmod: i32,
+    input_function: Option<String>,
+    output_function: Option<String>,
+    receive_function: Option<String>,
+    send_function: Option<String>,
+    analyze_function: Option<String>,
+    comment: Option<String>,
+    relkind: Option<String>,
+    collation: Option<String>,
+}
+
+fn custom_type_general_info_sql() -> &'static str {
+    "SELECT t.oid, t.typtype::text, t.typisdefined, \
+       t.typbasetype, t.typnotnull, t.typrelid, t.typelem, \
+       t.typcollation, t.typdefaultbin, t.typdefault, \
+       t.typlen, t.typbyval, t.typalign::text, t.typstorage::text, t.typtypmod, \
+       pi.proname AS input_fn, po.proname AS output_fn, \
+       pr.proname AS receive_fn, ps.proname AS send_fn, pa.proname AS analyze_fn, \
+       d.description, \
+       CASE WHEN t.typrelid != 0 THEN \
+         (SELECT c.relkind::text FROM pg_catalog.pg_class c WHERE c.oid = t.typrelid) \
+       END AS relkind, \
+       CASE WHEN cl.oid IS NULL THEN NULL ELSE quote_ident(ncl.nspname) || '.' || quote_ident(cl.collname) END \
+     FROM pg_catalog.pg_type t \
+     JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace \
+     LEFT JOIN pg_catalog.pg_description d \
+       ON d.objoid = t.oid AND d.classoid = 'pg_catalog.pg_type'::regclass AND d.objsubid = 0 \
+     LEFT JOIN pg_catalog.pg_proc pi ON pi.oid = t.typinput \
+     LEFT JOIN pg_catalog.pg_proc po ON po.oid = t.typoutput \
+     LEFT JOIN pg_catalog.pg_proc pr ON pr.oid = t.typreceive \
+     LEFT JOIN pg_catalog.pg_proc ps ON ps.oid = t.typsend \
+     LEFT JOIN pg_catalog.pg_proc pa ON pa.oid = t.typanalyze \
+     LEFT JOIN pg_catalog.pg_collation cl ON cl.oid = t.typcollation \
+     LEFT JOIN pg_catalog.pg_namespace ncl ON ncl.oid = cl.collnamespace \
+     WHERE n.nspname = $1 AND t.typname = $2"
+}
+
+async fn custom_type_general_info(
+    client: &deadpool_postgres::Client,
+    schema: &str,
+    name: &str,
+) -> Result<CustomTypeGeneralInfo, String> {
+    let rows = postgres_query_cached(client, custom_type_general_info_sql(), &[&schema, &name])
+        .await
+        .map_err(|e| format!("failed to locate custom type {schema}.{name}: {e}"))?;
+    let row = rows.first().ok_or_else(|| format!("custom type {schema}.{name} does not exist"))?;
+    Ok(CustomTypeGeneralInfo {
+        oid: row.try_get::<_, u32>(0).unwrap_or(0),
+        typtype: pg_row_try_string(row, 1),
+        typisdefined: pg_row_try_bool(row, 2).unwrap_or(false),
+        typbasetype: row.try_get::<_, u32>(3).unwrap_or(0),
+        typnotnull: pg_row_try_bool(row, 4).unwrap_or(false),
+        typrelid: row.try_get::<_, u32>(5).unwrap_or(0),
+        typelem: row.try_get::<_, u32>(6).unwrap_or(0),
+        typcollation: row.try_get::<_, u32>(7).unwrap_or(0),
+        typdefaultbin: row.try_get::<_, Option<String>>(8).ok().flatten(),
+        typdefault: row.try_get::<_, Option<String>>(9).ok().flatten(),
+        typlen: row.try_get::<_, i16>(10).unwrap_or(-1),
+        typbyval: pg_row_try_bool(row, 11).unwrap_or(false),
+        typalign: pg_row_try_string(row, 12),
+        typstorage: pg_row_try_string(row, 13),
+        typtypmod: row.try_get::<_, i32>(14).unwrap_or(-1),
+        input_function: row.try_get::<_, Option<String>>(15).ok().flatten(),
+        output_function: row.try_get::<_, Option<String>>(16).ok().flatten(),
+        receive_function: row.try_get::<_, Option<String>>(17).ok().flatten(),
+        send_function: row.try_get::<_, Option<String>>(18).ok().flatten(),
+        analyze_function: row.try_get::<_, Option<String>>(19).ok().flatten(),
+        comment: row.try_get::<_, Option<String>>(20).ok().flatten(),
+        relkind: row.try_get::<_, Option<String>>(21).ok().flatten(),
+        collation: row.try_get::<_, Option<String>>(22).ok().flatten(),
+    })
+}
+
+async fn custom_type_rendered_domain_default(
+    client: &deadpool_postgres::Client,
+    oid: u32,
+) -> Result<Option<String>, String> {
+    let rows = postgres_query_cached(
+        client,
+        "SELECT pg_catalog.pg_get_expr(t.typdefaultbin, 0) \
+         FROM pg_catalog.pg_type t WHERE t.oid = $1",
+        &[&oid],
+    )
+    .await
+    .map_err(|error| format!("failed to render domain default: {error}"))?;
+    Ok(rows
+        .first()
+        .and_then(|row| row.try_get::<_, Option<String>>(0).ok().flatten())
+        .filter(|value| !value.is_empty()))
+}
+
+fn domain_default_from_render_result(result: Result<Option<String>, String>) -> (Option<String>, Option<String>) {
+    match result {
+        Ok(Some(value)) if !value.is_empty() => (Some(value), None),
+        Ok(_) => (None, Some("default value could not be rendered; the generated DDL is incomplete".to_string())),
+        Err(error) => {
+            (None, Some(format!("default value could not be rendered; the generated DDL is incomplete: {error}")))
+        }
+    }
+}
+
+fn custom_type_kind_for(typtype: &str) -> Option<CustomTypeKind> {
+    match typtype {
+        "b" => Some(CustomTypeKind::Base),
+        "c" => Some(CustomTypeKind::Composite),
+        "d" => Some(CustomTypeKind::Domain),
+        "e" => Some(CustomTypeKind::Enum),
+        "r" => Some(CustomTypeKind::Range),
+        "m" => Some(CustomTypeKind::Multirange),
+        _ => None,
+    }
+}
+
+async fn custom_type_enum_members(
+    client: &deadpool_postgres::Client,
+    oid: u32,
+) -> Result<Vec<CustomTypeMember>, String> {
+    let rows = postgres_query_cached(
+        client,
+        "SELECT e.enumlabel, e.enumsortorder \
+         FROM pg_catalog.pg_enum e \
+         WHERE e.enumtypid = $1 \
+         ORDER BY e.enumsortorder",
+        &[&oid],
+    )
+    .await
+    .map_err(|e| format!("failed to read enum values: {e}"))?;
+    Ok(rows
+        .iter()
+        .enumerate()
+        .map(|(index, row)| CustomTypeMember {
+            name: String::new(),
+            data_type: String::new(),
+            // enumsortorder is float4: ALTER TYPE ... ADD VALUE BEFORE/AFTER can
+            // produce fractional values (1.5). Use the position after ORDER BY
+            // instead so ordinals stay unique and stable for UI keys.
+            ordinal: index as i32 + 1,
+            nullable: None,
+            default: None,
+            comment: None,
+            enum_value: Some(pg_row_try_string(row, 0)),
+        })
+        .collect())
+}
+
+async fn custom_type_composite_members(
+    client: &deadpool_postgres::Client,
+    typrelid: u32,
+) -> Result<Vec<CustomTypeMember>, String> {
+    let data_type =
+        postgres_qualified_format_type_expression("at", "atn", "elem", "elem_n", "a.atttypid", "a.atttypmod");
+    let rows = postgres_query_cached(
+        client,
+        &format!(
+            "SELECT a.attname, {data_type} AS data_type, \
+                a.attnum, NOT a.attnotnull AS nullable, a.atthasdef, \
+                pg_get_expr(ad.adbin, ad.adrelid) AS default_expr, \
+                col_description($1, a.attnum) AS comment \
+         FROM pg_catalog.pg_attribute a \
+         JOIN pg_catalog.pg_type at ON at.oid = a.atttypid \
+         JOIN pg_catalog.pg_namespace atn ON atn.oid = at.typnamespace \
+         LEFT JOIN pg_catalog.pg_type elem ON elem.oid = at.typelem \
+         LEFT JOIN pg_catalog.pg_namespace elem_n ON elem_n.oid = elem.typnamespace \
+         LEFT JOIN pg_catalog.pg_attrdef ad \
+           ON ad.adrelid = a.attrelid AND ad.adnum = a.attnum \
+         WHERE a.attrelid = $1 AND a.attnum > 0 AND NOT a.attisdropped \
+         ORDER BY a.attnum"
+        ),
+        &[&typrelid],
+    )
+    .await
+    .map_err(|e| format!("failed to read composite fields: {e}"))?;
+    let mut members = Vec::with_capacity(rows.len());
+    for row in rows {
+        let name =
+            row.try_get::<_, String>(0).map_err(|error| format!("failed to decode composite field name: {error}"))?;
+        let data_type =
+            row.try_get::<_, String>(1).map_err(|error| format!("failed to decode composite field type: {error}"))?;
+        let ordinal =
+            row.try_get::<_, i16>(2).map_err(|error| format!("failed to decode composite field ordinal: {error}"))?;
+        if name.is_empty() || data_type.is_empty() {
+            return Err("composite field name or type is empty".to_string());
+        }
+        let has_default = pg_row_try_bool(&row, 4).unwrap_or(false);
+        members.push(CustomTypeMember {
+            name,
+            data_type,
+            ordinal: ordinal as i32,
+            nullable: pg_row_try_bool(&row, 3),
+            default: if has_default { row.try_get::<_, Option<String>>(5).ok().flatten() } else { None },
+            comment: row.try_get::<_, Option<String>>(6).ok().flatten(),
+            enum_value: None,
+        });
+    }
+    Ok(members)
+}
+
+/// Catalog-qualified type rendering for generated DDL. `format_type` omits a
+/// user type's schema when it is on the current search path, so use it only
+/// for pg_catalog types where it also preserves typmods. User-defined types
+/// and their array companions retain an explicit, safely quoted schema.
+fn postgres_qualified_format_type_expression(
+    type_alias: &str,
+    namespace_alias: &str,
+    element_alias: &str,
+    element_namespace_alias: &str,
+    oid_expression: &str,
+    typmod_expression: &str,
+) -> String {
+    format!(
+        "CASE \
+           WHEN {type_alias}.typelem <> 0 AND {element_namespace_alias}.nspname <> 'pg_catalog' \
+             THEN quote_ident({element_namespace_alias}.nspname) || '.' || quote_ident({element_alias}.typname) || '[]' \
+           WHEN {namespace_alias}.nspname <> 'pg_catalog' \
+             THEN quote_ident({namespace_alias}.nspname) || '.' || quote_ident({type_alias}.typname) \
+           ELSE format_type({oid_expression}, {typmod_expression}) \
+         END"
+    )
+}
+
+/// Domain-only attributes. Runs a category query that some compatible
+/// catalogs (older openGauss/GaussDB) may reject; on failure the caller
+/// degrades to missing attributes with a warning instead of failing the whole
+/// details request.
+async fn custom_type_domain_attributes(
+    client: &deadpool_postgres::Client,
+    info: &CustomTypeGeneralInfo,
+    properties: &mut CustomTypeProperties,
+) -> Vec<String> {
+    let mut warnings = Vec::new();
+    let base_type_expression =
+        postgres_qualified_format_type_expression("t", "n", "elem", "elem_n", "t.oid", "$2::int4");
+    let base_type = postgres_query_cached(
+        client,
+        &format!(
+            "SELECT {base_type_expression} \
+             FROM pg_catalog.pg_type t \
+             JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace \
+             LEFT JOIN pg_catalog.pg_type elem ON elem.oid = t.typelem \
+             LEFT JOIN pg_catalog.pg_namespace elem_n ON elem_n.oid = elem.typnamespace \
+             WHERE t.oid = $1"
+        ),
+        &[&info.typbasetype, &info.typtypmod],
+    )
+    .await
+    .ok()
+    .and_then(|rows| rows.first().map(|row| pg_row_try_string(row, 0)));
+    if let Some(base) = base_type.filter(|value| !value.is_empty()) {
+        properties.base_type = Some(base);
+    }
+    properties.not_null = Some(info.typnotnull);
+    properties.default = info.typdefault.clone().filter(|value| !value.is_empty());
+    if properties.default.is_none() && info.typdefaultbin.as_deref().is_some_and(|value| !value.is_empty()) {
+        let (default, warning) =
+            domain_default_from_render_result(custom_type_rendered_domain_default(client, info.oid).await);
+        properties.default = default;
+        if let Some(warning) = warning {
+            warnings.push(warning);
+        }
+    }
+    if info.typcollation != 0 {
+        properties.collation = info.collation.clone();
+    }
+    match postgres_query_cached(
+        client,
+        "SELECT c.conname, pg_get_constraintdef(c.oid, true) AS definition \
+         FROM pg_catalog.pg_constraint c \
+         WHERE c.contypid = $1 \
+         ORDER BY c.conname",
+        &[&info.oid],
+    )
+    .await
+    {
+        Ok(rows) => {
+            properties.domain_constraints.clear();
+            for row in rows {
+                let name = match row.try_get::<_, String>(0) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        warnings.push(format!("domain constraints could not be decoded (name): {error}"));
+                        continue;
+                    }
+                };
+                let definition = match row.try_get::<_, String>(1) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        warnings.push(format!("domain constraints could not be decoded ({name}): {error}"));
+                        continue;
+                    }
+                };
+                if !definition.is_empty() {
+                    properties.domain_constraints.push(CustomTypeDomainConstraint { name, definition });
+                }
+            }
+        }
+        Err(error) => {
+            warnings.push(format!("domain constraints could not be read: {error}"));
+        }
+    }
+    warnings
+}
+
+/// Range/multirange attributes. Like the domain branch this is a category
+/// extension: failures degrade to missing attributes with a warning. The
+/// multirange companion name (PG 13+ `rngmultitypid`) is queried separately
+/// because openGauss/GaussDB kernels predate that column.
+async fn custom_type_range_attributes(
+    client: &deadpool_postgres::Client,
+    oid: u32,
+    is_multirange: bool,
+    properties: &mut CustomTypeProperties,
+) -> Vec<String> {
+    // pg_range.rngtypid always stores the RANGE oid. A multirange view must
+    // first resolve its owning range through rngmultitypid.
+    let range_oid_clause = if is_multirange { "WHERE r.rngmultitypid = $1" } else { "WHERE r.rngtypid = $1" };
+    let subtype =
+        postgres_qualified_format_type_expression("st", "stn", "elem", "elem_n", "r.rngsubtype", "NULL::integer");
+    let rows = match postgres_query_cached(
+        client,
+        &format!(
+            "SELECT {subtype} AS subtype, \
+                CASE WHEN pcan.oid IS NULL THEN NULL ELSE quote_ident(ncan.nspname) || '.' || quote_ident(pcan.proname) END AS canonical_fn, \
+                CASE WHEN pdiff.oid IS NULL THEN NULL ELSE quote_ident(ndiff.nspname) || '.' || quote_ident(pdiff.proname) END AS subdiff_fn, \
+                CASE WHEN opc.oid IS NULL THEN NULL ELSE quote_ident(nopc.nspname) || '.' || quote_ident(opc.opcname) END AS subtype_opclass \
+         FROM pg_catalog.pg_range r \
+         JOIN pg_catalog.pg_type st ON st.oid = r.rngsubtype \
+         JOIN pg_catalog.pg_namespace stn ON stn.oid = st.typnamespace \
+         LEFT JOIN pg_catalog.pg_type elem ON elem.oid = st.typelem \
+         LEFT JOIN pg_catalog.pg_namespace elem_n ON elem_n.oid = elem.typnamespace \
+         LEFT JOIN pg_catalog.pg_proc pcan ON pcan.oid = r.rngcanonical \
+         LEFT JOIN pg_catalog.pg_proc pdiff ON pdiff.oid = r.rngsubdiff \
+         LEFT JOIN pg_catalog.pg_opclass opc ON opc.oid = r.rngsubopc \
+         LEFT JOIN pg_catalog.pg_namespace ncan ON ncan.oid = pcan.pronamespace \
+         LEFT JOIN pg_catalog.pg_namespace ndiff ON ndiff.oid = pdiff.pronamespace \
+         LEFT JOIN pg_catalog.pg_namespace nopc ON nopc.oid = opc.opcnamespace \
+         {range_oid_clause}"
+        ),
+        &[&oid],
+    )
+    .await
+    {
+        Ok(rows) => rows,
+        Err(error) => return vec![format!("range attributes could not be read: {error}")],
+    };
+    let mut warnings = Vec::new();
+    if let Some(row) = rows.first() {
+        match row.try_get::<_, Option<String>>(0) {
+            Ok(value) => properties.range_subtype = value.filter(|value| !value.is_empty()),
+            Err(error) => warnings.push(format!("range subtype could not be read: {error}")),
+        }
+        match row.try_get::<_, Option<String>>(1) {
+            Ok(value) => properties.range_canonical_function = value.filter(|value| !value.is_empty()),
+            Err(error) => warnings.push(format!("range canonical function could not be read: {error}")),
+        }
+        match row.try_get::<_, Option<String>>(2) {
+            Ok(value) => properties.range_subtype_diff_function = value.filter(|value| !value.is_empty()),
+            Err(error) => warnings.push(format!("range subtype diff function could not be read: {error}")),
+        }
+        match row.try_get::<_, Option<String>>(3) {
+            Ok(value) => properties.range_subtype_opclass = value.filter(|value| !value.is_empty()),
+            Err(error) => warnings.push(format!("range subtype opclass could not be read: {error}")),
+        }
+    } else {
+        warnings.push("range attributes returned no rows".to_string());
+    }
+    // Optional PG 13+ multirange companion; older kernels simply have no column.
+    match postgres_query_cached(
+        client,
+        "SELECT mt.typname \
+         FROM pg_catalog.pg_range r \
+         JOIN pg_catalog.pg_type mt ON mt.oid = r.rngmultitypid \
+         WHERE r.rngtypid = $1",
+        &[&oid],
+    )
+    .await
+    {
+        Ok(rows) => {
+            properties.range_multirange_name =
+                rows.first().map(|row| pg_row_try_string(row, 0)).filter(|value| !value.is_empty());
+        }
+        Err(error) => warnings.push(format!("multirange companion could not be read: {error}")),
+    }
+    warnings
+}
+
+/// Generate normalized `CREATE TYPE` text for a user-defined type.
+///
+/// `complete` is only true when the text can be executed standalone in the
+/// current schema. Multiranges (auto-generated companions) and base types
+/// (whose I/O functions cannot be reconstructed from catalogs) are always
+/// marked incomplete with visible warnings.
+fn build_custom_type_ddl(
+    schema: &str,
+    name: &str,
+    kind: CustomTypeKind,
+    info: &CustomTypeGeneralInfo,
+    members: &[CustomTypeMember],
+    properties: &CustomTypeProperties,
+    warnings: &[String],
+) -> CustomTypeDdl {
+    let qualified = format!("{}.{}", pg_quote_ident(schema), pg_quote_ident(name));
+    match kind {
+        CustomTypeKind::Enum => {
+            let values = members
+                .iter()
+                .map(|member| member.enum_value.as_deref().unwrap_or_default())
+                .map(pg_quote_literal)
+                .collect::<Vec<_>>()
+                .join(", ");
+            CustomTypeDdl {
+                sql: format!("CREATE TYPE {qualified} AS ENUM ({values});"),
+                complete: true,
+                warnings: warnings.to_vec(),
+            }
+        }
+        CustomTypeKind::Composite => {
+            let fields = members
+                .iter()
+                .map(|member| format!("{} {}", pg_quote_ident(&member.name), member.data_type))
+                .collect::<Vec<_>>()
+                .join(",\n  ");
+            let mut sql = format!("CREATE TYPE {qualified} AS (\n  {fields}\n);");
+            let comments = members
+                .iter()
+                .filter_map(|member| {
+                    member.comment.as_ref().map(|comment| {
+                        format!(
+                            "COMMENT ON COLUMN {}.{} IS {};",
+                            qualified,
+                            pg_quote_ident(&member.name),
+                            pg_quote_literal(comment)
+                        )
+                    })
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            if !comments.is_empty() {
+                sql = format!("{sql}\n{comments}");
+            }
+            CustomTypeDdl { sql, complete: true, warnings: warnings.to_vec() }
+        }
+        CustomTypeKind::Domain => {
+            let mut warnings = warnings.to_vec();
+            // A domain without a resolvable base type or constraints cannot be
+            // rebuilt faithfully; mark it incomplete so the UI never presents
+            // the truncated text as executable source.
+            let mut complete = true;
+            let base = match properties.base_type.as_deref().filter(|v| !v.is_empty()) {
+                Some(base) => base.to_string(),
+                None => {
+                    complete = false;
+                    warnings.push("base type could not be resolved; the generated DDL is incomplete".to_string());
+                    "unknown".to_string()
+                }
+            };
+            let mut parts = vec![format!("CREATE DOMAIN {qualified} AS {base}")];
+            if let Some(collation) = properties.collation.as_deref().filter(|v| !v.is_empty()) {
+                parts.push(format!("COLLATE {}", pg_quote_catalog_identifier(collation)));
+            }
+            if let Some(default) = properties.default.as_deref().filter(|v| !v.is_empty()) {
+                parts.push(format!("DEFAULT {default}"));
+            }
+            if properties.not_null == Some(true) {
+                parts.push("NOT NULL".to_string());
+            }
+            let incomplete_warning = warnings.iter().any(|warning| {
+                warning.contains("domain constraints") || warning.contains("default value could not be rendered")
+            });
+            if incomplete_warning {
+                complete = false;
+            }
+            for constraint in &properties.domain_constraints {
+                let body = constraint.definition.trim().trim_start_matches("CHECK").trim();
+                let constraint_name =
+                    if constraint.name.is_empty() { format!("{name}_check") } else { constraint.name.clone() };
+                parts.push(format!("CONSTRAINT {} CHECK {body}", pg_quote_ident(&constraint_name)));
+            }
+            CustomTypeDdl { sql: format!("{};", parts.join("\n  ")), complete, warnings }
+        }
+        CustomTypeKind::Range => {
+            let mut args = Vec::new();
+            if let Some(subtype) = properties.range_subtype.as_deref().filter(|v| !v.is_empty()) {
+                args.push(format!("subtype = {subtype}"));
+            }
+            if let Some(opclass) = properties.range_subtype_opclass.as_deref().filter(|v| !v.is_empty()) {
+                args.push(format!("subtype_opclass = {}", pg_quote_catalog_identifier(opclass)));
+            }
+            if let Some(value) = properties.range_canonical_function.as_deref().filter(|v| !v.is_empty()) {
+                args.push(format!("canonical = {}", pg_quote_catalog_identifier(value)));
+            }
+            if let Some(value) = properties.range_subtype_diff_function.as_deref().filter(|v| !v.is_empty()) {
+                args.push(format!("subtype_diff = {}", pg_quote_catalog_identifier(value)));
+            }
+            if let Some(value) = properties.range_multirange_name.as_deref().filter(|v| !v.is_empty()) {
+                args.push(format!("multirange_type_name = {}", pg_quote_catalog_identifier(value)));
+            }
+            if properties.range_subtype.as_deref().is_none_or(|value| value.is_empty()) {
+                let mut warnings = warnings.to_vec();
+                warnings.push("range attributes could not be resolved".to_string());
+                CustomTypeDdl {
+                    sql: format!("CREATE TYPE {qualified} AS RANGE (subtype = unknown);"),
+                    complete: false,
+                    warnings,
+                }
+            } else {
+                CustomTypeDdl {
+                    sql: format!("CREATE TYPE {qualified} AS RANGE (\n  {}\n);", args.join(",\n  ")),
+                    complete: true,
+                    warnings: warnings.to_vec(),
+                }
+            }
+        }
+        CustomTypeKind::Multirange => {
+            let mut all = warnings.to_vec();
+            all.push(format!(
+                "{} is the auto-generated multirange companion of a range type; it has no standalone CREATE statement",
+                qualified
+            ));
+            CustomTypeDdl { sql: String::new(), complete: false, warnings: all }
+        }
+        CustomTypeKind::Base => {
+            let mut all = warnings.to_vec();
+            all.push(format!(
+                "{} is a base type; its input/output functions ({}) cannot be rebuilt from catalogs",
+                qualified,
+                info.input_function.clone().unwrap_or_else(|| "unknown".to_string())
+            ));
+            CustomTypeDdl {
+                sql: format!("CREATE TYPE {qualified};  -- base type attributes require manual reconstruction"),
+                complete: false,
+                warnings: all,
+            }
+        }
+    }
+}
+
+/// Category-independent attribute assembly shared by all kinds.
+fn custom_type_common_properties(info: &CustomTypeGeneralInfo) -> CustomTypeProperties {
+    CustomTypeProperties {
+        input_function: info.input_function.clone(),
+        output_function: info.output_function.clone(),
+        receive_function: info.receive_function.clone(),
+        send_function: info.send_function.clone(),
+        analyze_function: info.analyze_function.clone(),
+        internallength: (info.typlen != -1 && info.typlen > 0).then_some(info.typlen as i32),
+        passed_by_value: Some(info.typbyval),
+        alignment: (!info.typalign.is_empty()).then(|| info.typalign.clone()),
+        storage: (!info.typstorage.is_empty()).then(|| info.typstorage.clone()),
+        ..Default::default()
+    }
+}
+
+/// Fetch the read-only details of a user-defined type.
+///
+/// The caller must already have routed the connection to a verified
+/// PostgreSQL-family database; this function validates that the target object
+/// is an independent user-defined type (never a relation row type, an array
+/// companion, an undefined type or a system-schema type).
+pub async fn get_custom_type_details(pool: &Pool, schema: &str, name: &str) -> Result<CustomTypeDetails, String> {
+    let schema = schema.trim();
+    let name = name.trim();
+    if schema.is_empty() || name.is_empty() {
+        return Err("schema and type name are required".to_string());
+    }
+    if is_postgres_system_schema(schema) {
+        return Err(format!("system schema {schema} is not supported for custom type details"));
+    }
+    let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
+    let info = custom_type_general_info(&client, schema, name).await?;
+    if !info.typisdefined {
+        return Err(format!("custom type {schema}.{name} is not fully defined"));
+    }
+    if info.typelem != 0 {
+        return Err(format!("custom type {schema}.{name} is an array companion type"));
+    }
+    let Some(kind) = custom_type_kind_for(&info.typtype) else {
+        return Err(format!("custom type {schema}.{name} is a pseudo type (typtype={})", info.typtype));
+    };
+    if let Some(relkind) = info.relkind.as_deref() {
+        if relkind != "c" {
+            return Err(format!(
+                "{schema}.{name} is the auto-generated row type of a relation, not an independent custom type"
+            ));
+        }
+    }
+
+    let mut members = Vec::new();
+    let mut properties = custom_type_common_properties(&info);
+    let mut warnings = Vec::new();
+    match kind {
+        CustomTypeKind::Enum => {
+            members = custom_type_enum_members(&client, info.oid).await?;
+        }
+        CustomTypeKind::Composite => {
+            members = custom_type_composite_members(&client, info.typrelid).await?;
+        }
+        CustomTypeKind::Domain => {
+            warnings.extend(custom_type_domain_attributes(&client, &info, &mut properties).await);
+        }
+        CustomTypeKind::Range => {
+            warnings.extend(custom_type_range_attributes(&client, info.oid, false, &mut properties).await);
+        }
+        CustomTypeKind::Multirange => {
+            warnings.extend(custom_type_range_attributes(&client, info.oid, true, &mut properties).await);
+        }
+        CustomTypeKind::Base => {}
+    }
+
+    let ddl = build_custom_type_ddl(schema, name, kind, &info, &members, &properties, &warnings);
+    Ok(CustomTypeDetails {
+        name: name.to_string(),
+        schema: schema.to_string(),
+        kind,
+        comment: info.comment.clone(),
+        members,
+        properties,
+        ddl: Some(ddl),
+    })
 }
 
 pub async fn list_object_statistics(pool: &Pool, schema: &str) -> Result<Vec<ObjectStatistics>, String> {
@@ -3137,6 +4322,7 @@ pub async fn get_redshift_columns(pool: &Pool, schema: &str, table: &str) -> Res
         Instant::now(),
         crate::query::MAX_ROWS,
         None,
+        None,
     )
     .await?;
     Ok(redshift_columns_from_query_result(result))
@@ -3144,6 +4330,17 @@ pub async fn get_redshift_columns(pool: &Pool, schema: &str, table: &str) -> Res
 
 pub(crate) fn pg_quote_ident(ident: &str) -> String {
     format!("\"{}\"", ident.replace('"', "\"\""))
+}
+
+fn pg_quote_catalog_identifier(ident: &str) -> String {
+    let ident = ident.trim();
+    if ident.starts_with('"') && ident.ends_with('"') && ident.contains("\".\"") {
+        return ident.to_string();
+    }
+    if let Some((schema, name)) = ident.rsplit_once('.') {
+        return format!("{}.{}", pg_quote_ident(schema), pg_quote_ident(name));
+    }
+    pg_quote_ident(ident)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3300,6 +4497,7 @@ pub async fn execute_query_with_max_rows(
             session_id: None,
             has_more: false,
             elasticsearch_raw_body: None,
+            messages: Vec::new(),
         })
     }
 }
@@ -3314,14 +4512,15 @@ pub async fn execute_query_with_max_rows_and_cancel(
     prefer_text_protocol: bool,
 ) -> Result<QueryResult, String> {
     let client = checkout_postgres_client(pool, cancel_token.as_ref(), budget.checkout_timeout).await?;
-    let pg_cancel_token = client.cancel_token();
-    wait_postgres_query(
-        pg_cancel_token,
-        cancel_context,
+    execute_postgres_user_query(
+        &client,
+        sql,
+        max_rows,
         cancel_token,
         budget.query_timeout,
         budget.cancel_timeout,
-        execute_query_with_max_rows_inner(&client, sql, max_rows, prefer_text_protocol),
+        cancel_context,
+        prefer_text_protocol,
     )
     .await
 }
@@ -3388,14 +4587,15 @@ pub async fn execute_query_in_read_only_transaction_with_rollback(
                 execute_postgres_infra_statement(&client, &statement, budget.recycle_timeout, stage).await?;
             }
 
-            let pg_cancel_token = client.cancel_token();
-            wait_postgres_query(
-                pg_cancel_token,
-                cancel_context,
+            execute_postgres_user_query(
+                &client,
+                sql,
+                max_rows,
                 cancel_token,
                 budget.query_timeout,
                 budget.cancel_timeout,
-                execute_query_with_max_rows_inner(&client, sql, max_rows, false),
+                cancel_context,
+                false,
             )
             .await
         },
@@ -3536,7 +4736,7 @@ pub async fn execute_query_with_schema_and_max_rows(
             "[postgres][execute_with_schema:skip-search-path] total_ms={} reason=transaction-recovery",
             start.elapsed().as_millis()
         );
-        return execute_query_with_max_rows_inner(&client, sql, max_rows, false).await;
+        return execute_query_with_max_rows_inner(&client, sql, max_rows, false, None).await;
     }
 
     let set_schema_start = Instant::now();
@@ -3548,7 +4748,7 @@ pub async fn execute_query_with_schema_and_max_rows(
     );
 
     let query_start = Instant::now();
-    let result = execute_query_with_max_rows_inner(&client, sql, max_rows, false).await;
+    let result = execute_query_with_max_rows_inner(&client, sql, max_rows, false, None).await;
     if result.is_ok() {
         clear_postgres_caches_after_ddl(pool, Some(&client), sql);
     }
@@ -3587,14 +4787,15 @@ pub async fn execute_query_with_schema_and_max_rows_and_cancel(
             "[postgres][execute_with_schema:skip-search-path] total_ms={} reason=transaction-recovery",
             start.elapsed().as_millis()
         );
-        let pg_cancel_token = client.cancel_token();
-        return wait_postgres_query(
-            pg_cancel_token,
-            cancel_context,
+        return execute_postgres_user_query(
+            &client,
+            sql,
+            max_rows,
             cancel_token,
             budget.query_timeout,
             budget.cancel_timeout,
-            execute_query_with_max_rows_inner(&client, sql, max_rows, prefer_text_protocol),
+            cancel_context,
+            prefer_text_protocol,
         )
         .await;
     }
@@ -3608,14 +4809,15 @@ pub async fn execute_query_with_schema_and_max_rows_and_cancel(
     );
 
     let query_start = Instant::now();
-    let pg_cancel_token = client.cancel_token();
-    let result = wait_postgres_query(
-        pg_cancel_token,
-        cancel_context,
+    let result = execute_postgres_user_query(
+        &client,
+        sql,
+        max_rows,
         cancel_token,
         budget.query_timeout,
         budget.cancel_timeout,
-        execute_query_with_max_rows_inner(&client, sql, max_rows, prefer_text_protocol),
+        cancel_context,
+        prefer_text_protocol,
     )
     .await;
     if result.is_ok() {
@@ -3749,6 +4951,52 @@ where
     }
 }
 
+async fn execute_postgres_user_query(
+    client: &deadpool_postgres::Client,
+    sql: &str,
+    max_rows: Option<usize>,
+    cancel_token: Option<CancellationToken>,
+    timeout_duration: Option<Duration>,
+    cancel_timeout: Duration,
+    cancel_context: Option<PostgresCancelContext>,
+    prefer_text_protocol: bool,
+) -> Result<QueryResult, String> {
+    let pg_cancel_token = client.cancel_token();
+    // Commands do not expose incremental results, so keep their timeout as a
+    // wall-clock deadline. Row-returning queries may spend longer transferring
+    // a bounded result through a slow tunnel; for those, the same setting is an
+    // inactivity budget that resets only after real PostgreSQL progress.
+    if !postgres_statement_returns_rows(sql) {
+        return wait_postgres_query(
+            pg_cancel_token,
+            cancel_context,
+            cancel_token,
+            timeout_duration,
+            cancel_timeout,
+            execute_query_with_max_rows_inner(client, sql, max_rows, prefer_text_protocol, None),
+        )
+        .await;
+    }
+
+    let timeout_error =
+        format!("Query timed out after {} seconds", timeout_duration.map_or(0, |timeout| timeout.as_secs()));
+    let progress_clock = Arc::new(StreamProgressClock::new());
+    let result = await_stream_with_progress_timeout(
+        execute_query_with_max_rows_inner(client, sql, max_rows, prefer_text_protocol, Some(progress_clock.clone())),
+        timeout_duration,
+        progress_clock,
+        cancel_token.as_ref(),
+        timeout_error.clone(),
+    )
+    .await;
+
+    if result.as_ref().is_err_and(|error| error == &timeout_error || error == crate::query::QUERY_CANCELED) {
+        cancel_postgres_query(pg_cancel_token, cancel_context.as_ref(), cancel_timeout).await;
+    }
+
+    result
+}
+
 /// PostgreSQL pool checkout with timeout and cancel token support.
 /// When the checkout phase is stuck, the cancel token can terminate the wait early.
 /// The timeout error message includes "checkout timed out" to ensure is_connection_error can classify it correctly.
@@ -3757,6 +5005,7 @@ pub async fn checkout_postgres_client(
     cancel_token: Option<&CancellationToken>,
     checkout_timeout: Duration,
 ) -> Result<deadpool_postgres::Object, String> {
+    let checkout_timeout = effective_postgres_checkout_timeout(pool, checkout_timeout);
     let start = Instant::now();
     let get_future = async {
         tokio::time::timeout(checkout_timeout, pool.get())
@@ -3798,14 +5047,28 @@ pub async fn checkout_postgres_client(
         },
         None => get_future.await,
     };
-    if result.is_ok() {
+    if let Ok(client) = &result {
         log::debug!(
             "[db:pool.checkout:done] elapsed_ms={} timeout_ms={}",
             start.elapsed().as_millis(),
             checkout_timeout.as_millis()
         );
+        // Resolve the notice-attribution identity here, outside of any
+        // transaction: a lazy first lookup from `drain_postgres_notices`
+        // could run inside the read-only EXPLAIN transaction, where a
+        // failing identity query would abort the user's statement. Cached
+        // after the first checkout of each physical connection.
+        let _ = resolve_postgres_client_key(client).await;
     }
     result
+}
+
+fn effective_postgres_checkout_timeout(pool: &Pool, requested_timeout: Duration) -> Duration {
+    let configured = pool.timeouts();
+    [configured.wait, configured.create, configured.recycle]
+        .into_iter()
+        .flatten()
+        .fold(requested_timeout, std::cmp::max)
 }
 
 async fn cancel_postgres_query(
@@ -3855,20 +5118,24 @@ async fn execute_query_with_max_rows_inner(
     sql: &str,
     max_rows: Option<usize>,
     prefer_text_protocol: bool,
+    progress_clock: Option<Arc<StreamProgressClock>>,
 ) -> Result<QueryResult, String> {
     let start = Instant::now();
     let row_limit = query_result_row_limit(max_rows);
 
-    if postgres_statement_returns_rows(sql) {
+    // Discard stale notices from infrastructure statements (e.g. the timezone
+    // SET issued at connect time) so only messages raised by this statement
+    // are attached to its result.
+    let _ = drain_postgres_notices(client).await;
+
+    let result = if postgres_statement_returns_rows(sql) {
         if prefer_text_protocol {
-            execute_select_text(client, sql, start, row_limit, None).await
+            execute_select_text(client, sql, start, row_limit, None, progress_clock.as_deref()).await
         } else {
-            execute_select_query(client, sql, start, row_limit).await
+            execute_select_query_with_progress(client, sql, start, row_limit, progress_clock.as_deref()).await
         }
     } else {
-        let affected = client.execute(sql, &[]).await.map_err(pg_error_to_string)?;
-
-        Ok(QueryResult {
+        client.execute(sql, &[]).await.map_err(pg_error_to_string).map(|affected| QueryResult {
             columns: vec![],
             column_types: Vec::new(),
             column_sortables: Vec::new(),
@@ -3881,7 +5148,21 @@ async fn execute_query_with_max_rows_inner(
             session_id: None,
             has_more: false,
             elasticsearch_raw_body: None,
+            messages: Vec::new(),
         })
+    };
+
+    match result {
+        Ok(mut result) => {
+            result.messages = drain_postgres_notices(client).await;
+            Ok(result)
+        }
+        Err(error) => {
+            // Drop notices so an errored statement's messages cannot leak
+            // into the next query on this pooled connection.
+            let _ = drain_postgres_notices(client).await;
+            Err(error)
+        }
     }
 }
 
@@ -4125,6 +5406,13 @@ pub async fn list_triggers(pool: &Pool, schema: &str, table: &str) -> Result<Vec
             name: pg_row_try_string(row, 0),
             event: pg_row_try_string(row, 1),
             timing: pg_row_try_string(row, 2),
+            level: None,
+            condition: None,
+            language: None,
+            enabled: None,
+            valid: None,
+            comment: None,
+            created_at: None,
             statement: None,
         })
         .collect())
@@ -4633,6 +5921,132 @@ mod tests {
         assert_eq!(gaussdb_identifier_quote_for_compatibility_mode(""), None);
     }
 
+    fn test_query_message(message: &str) -> QueryMessage {
+        QueryMessage {
+            severity: "NOTICE".to_string(),
+            message: message.to_string(),
+            code: Some("00000".to_string()),
+            detail: None,
+            hint: None,
+        }
+    }
+
+    #[test]
+    fn postgres_connection_identity_normalizes_vendor_numeric_types_to_text() {
+        assert!(POSTGRES_CONNECTION_IDENTITY_SQL.contains("pg_backend_pid()::text"));
+        assert!(POSTGRES_CONNECTION_IDENTITY_SQL.contains("inet_server_port()::text"));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DBX_TEST_POSTGRES_URL pointing at a PostgreSQL-compatible database"]
+    async fn postgres_connection_identity_supports_compatible_servers() {
+        let url = std::env::var("DBX_TEST_POSTGRES_URL").expect("DBX_TEST_POSTGRES_URL");
+        let pool = connect_with_local_timezone(&url, Duration::from_secs(10), "UTC")
+            .await
+            .expect("connect PostgreSQL-compatible database");
+        let client = pool.get().await.expect("checkout PostgreSQL-compatible database");
+        let key = postgres_client_key(&client).await.expect("resolve text connection identity");
+
+        assert!(!key.0.is_empty());
+        assert!(!key.1.is_empty());
+        assert!(!key.2.is_empty());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DBX_TEST_POSTGRES_URL pointing at a PostgreSQL database"]
+    async fn postgres_connection_identity_preserves_notice_capture() {
+        let url = std::env::var("DBX_TEST_POSTGRES_URL").expect("DBX_TEST_POSTGRES_URL");
+        let pool = connect_with_local_timezone(&url, Duration::from_secs(10), "UTC")
+            .await
+            .expect("connect PostgreSQL database");
+        let client = pool.get().await.expect("checkout PostgreSQL database");
+
+        let result = execute_query_with_max_rows_inner(
+            &client,
+            "DO $$ BEGIN RAISE NOTICE 'dbx notice identity regression'; END $$",
+            None,
+            false,
+            None,
+        )
+        .await
+        .expect("execute statement with notice");
+
+        assert!(result.messages.iter().any(|message| message.message == "dbx notice identity regression"));
+    }
+
+    #[test]
+    fn take_notices_for_key_returns_buffered_notices_and_empties_buffer() {
+        let key = ("test-host".to_string(), "9000001".to_string(), "9000001".to_string());
+        let buffer = Arc::new(Mutex::new(vec![test_query_message("first"), test_query_message("second")]));
+        postgres_notice_buffers()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(key.clone(), Arc::downgrade(&buffer));
+
+        let notices = take_notices_for_key(&key);
+        assert_eq!(notices.len(), 2);
+        assert_eq!(notices[0].message, "first");
+        assert_eq!(notices[1].message, "second");
+        assert_eq!(notices[0].severity, "NOTICE");
+        assert_eq!(notices[0].code.as_deref(), Some("00000"));
+
+        // The buffer was drained but stays registered while the connection lives.
+        assert!(take_notices_for_key(&key).is_empty());
+        buffer.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).push(test_query_message("third"));
+        let notices = take_notices_for_key(&key);
+        assert_eq!(notices.len(), 1);
+        assert_eq!(notices[0].message, "third");
+    }
+
+    #[test]
+    fn take_notices_for_key_prunes_dead_buffers_and_misses_return_empty() {
+        let live_key = ("test-host".to_string(), "9000002".to_string(), "9000002".to_string());
+        let dead_key = ("test-host".to_string(), "9000003".to_string(), "9000003".to_string());
+        let live = Arc::new(Mutex::new(vec![test_query_message("live")]));
+        let dead = Arc::new(Mutex::new(vec![test_query_message("dead")]));
+        {
+            let mut buffers = postgres_notice_buffers().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            buffers.insert(live_key.clone(), Arc::downgrade(&live));
+            buffers.insert(dead_key.clone(), Arc::downgrade(&dead));
+        }
+        drop(dead);
+
+        assert!(
+            take_notices_for_key(&("test-host".to_string(), "9000004".to_string(), "9000004".to_string())).is_empty()
+        );
+        assert!(take_notices_for_key(&dead_key).is_empty());
+        let buffers = postgres_notice_buffers().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert!(!buffers.contains_key(&dead_key));
+        assert!(buffers.contains_key(&live_key));
+        drop(buffers);
+
+        let notices = take_notices_for_key(&live_key);
+        assert_eq!(notices.len(), 1);
+        assert_eq!(notices[0].message, "live");
+    }
+
+    #[test]
+    fn take_notices_for_key_distinguishes_same_pid_on_different_servers() {
+        // Backend PIDs collide across servers; the (address, port, pid) key
+        // keeps notice attribution separate.
+        let key_a = ("server-a".to_string(), "5432".to_string(), "42".to_string());
+        let key_b = ("server-b".to_string(), "5432".to_string(), "42".to_string());
+        let buffer_a = Arc::new(Mutex::new(vec![test_query_message("from-a")]));
+        let buffer_b = Arc::new(Mutex::new(vec![test_query_message("from-b")]));
+        {
+            let mut buffers = postgres_notice_buffers().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            buffers.insert(key_a.clone(), Arc::downgrade(&buffer_a));
+            buffers.insert(key_b.clone(), Arc::downgrade(&buffer_b));
+        }
+
+        let notices_a = take_notices_for_key(&key_a);
+        let notices_b = take_notices_for_key(&key_b);
+        assert_eq!(notices_a.len(), 1);
+        assert_eq!(notices_a[0].message, "from-a");
+        assert_eq!(notices_b.len(), 1);
+        assert_eq!(notices_b[0].message, "from-b");
+    }
+
     #[test]
     fn postgres_json_arrays_decode_elements_without_jsonb_version_bytes() {
         let json_raw = pg_array_binary(
@@ -4785,9 +6199,73 @@ mod tests {
         assert!(!pg_type_requires_text_protocol(&Type::INTERVAL, PgColType::Interval));
     }
 
+    fn pg_date_range_bytes(flags: u8, lower: Option<i32>, upper: Option<i32>) -> Vec<u8> {
+        let mut raw = vec![flags];
+        for days in [lower, upper].into_iter().flatten() {
+            raw.extend_from_slice(&4_i32.to_be_bytes());
+            raw.extend_from_slice(&days.to_be_bytes());
+        }
+        raw
+    }
+
+    #[test]
+    fn postgres_daterange_binary_decodes_reported_value() {
+        let raw = pg_date_range_bytes(PG_RANGE_LOWER_INCLUSIVE, Some(9_163), Some(9_168));
+        let range = PgDateRange::from_sql(&Type::DATE_RANGE, &raw).unwrap();
+
+        assert_eq!(range.0, "[2025-02-01,2025-02-06)");
+    }
+
+    #[test]
+    fn postgres_daterange_binary_handles_empty_unbounded_and_infinite_bounds() {
+        assert_eq!(PgDateRange::from_sql(&Type::DATE_RANGE, &[PG_RANGE_EMPTY]).unwrap().0, "empty");
+        assert_eq!(
+            PgDateRange::from_sql(
+                &Type::DATE_RANGE,
+                &pg_date_range_bytes(PG_RANGE_UPPER_UNBOUNDED | PG_RANGE_LOWER_INCLUSIVE, Some(9_163), None),
+            )
+            .unwrap()
+            .0,
+            "[2025-02-01,)"
+        );
+        assert_eq!(
+            PgDateRange::from_sql(
+                &Type::DATE_RANGE,
+                &pg_date_range_bytes(PG_RANGE_LOWER_UNBOUNDED, None, Some(9_168)),
+            )
+            .unwrap()
+            .0,
+            "(,2025-02-06)"
+        );
+        assert_eq!(
+            PgDateRange::from_sql(
+                &Type::DATE_RANGE,
+                &pg_date_range_bytes(PG_RANGE_LOWER_INCLUSIVE, Some(i32::MIN), Some(i32::MAX)),
+            )
+            .unwrap()
+            .0,
+            "[-infinity,infinity)"
+        );
+    }
+
+    #[test]
+    fn postgres_daterange_rejects_malformed_binary_and_keeps_binary_protocol() {
+        assert!(PgDateRange::from_sql(&Type::DATE_RANGE, &[]).is_err());
+        assert!(PgDateRange::from_sql(&Type::DATE_RANGE, &[PG_RANGE_EMPTY, 0]).is_err());
+        assert!(PgDateRange::from_sql(
+            &Type::DATE_RANGE,
+            &pg_date_range_bytes(PG_RANGE_LOWER_UNBOUNDED | PG_RANGE_LOWER_INCLUSIVE, None, Some(9_168)),
+        )
+        .is_err());
+        assert!(PgDateRange::from_sql(&Type::DATE_RANGE, &[PG_RANGE_LOWER_INCLUSIVE, 0, 0, 0, 3, 0, 0, 0]).is_err());
+        assert_eq!(classify_pg_type("daterange"), PgColType::DateRange);
+        assert_eq!(classify_pg_type("_daterange"), PgColType::GenericArray);
+        assert!(!pg_type_requires_text_protocol(&Type::DATE_RANGE, PgColType::DateRange));
+    }
+
     #[test]
     fn postgres_custom_other_type_requires_text_protocol() {
-        assert!(pg_scalar_type_requires_text_protocol(POSTGRES_FIRST_NORMAL_OBJECT_ID, PgColType::Other));
+        assert!(pg_scalar_type_requires_text_protocol(8_880, PgColType::Other));
         assert!(pg_scalar_type_requires_text_protocol(98_765, PgColType::Other));
         assert!(pg_scalar_type_requires_text_protocol(98_765, PgColType::GenericArray));
     }
@@ -4822,12 +6300,25 @@ mod tests {
 
     #[test]
     fn postgres_builtin_or_supported_type_keeps_binary_protocol() {
-        assert!(!pg_scalar_type_requires_text_protocol(POSTGRES_FIRST_NORMAL_OBJECT_ID - 1, PgColType::Other));
         assert!(!pg_type_requires_text_protocol(&Type::INT4, PgColType::Other));
         assert!(!pg_type_requires_text_protocol(&Type::VARCHAR, PgColType::Other));
         assert!(!pg_type_requires_text_protocol(&Type::INT4_ARRAY, PgColType::GenericArray));
         assert!(!pg_scalar_type_requires_text_protocol(98_765, PgColType::Vector));
         assert!(!pg_scalar_type_requires_text_protocol(98_765, PgColType::Geometry));
+    }
+
+    #[test]
+    fn postgres_compatible_builtin_names_with_unknown_low_oids_require_text_protocol() {
+        let compatible_date = Type::new("date".to_string(), 8_881, Kind::Simple, "pg_catalog".to_string());
+        let compatible_tinyint = Type::new("tinyint".to_string(), 8_882, Kind::Simple, "pg_catalog".to_string());
+
+        assert!(Type::from_oid(compatible_date.oid()).is_none());
+        assert!(Type::from_oid(compatible_tinyint.oid()).is_none());
+        assert!(pg_type_requires_text_protocol(
+            &compatible_date,
+            PgColType::Temporal { fallback: PgTemporalFallback::Probe }
+        ));
+        assert!(pg_type_requires_text_protocol(&compatible_tinyint, PgColType::Other));
     }
 
     #[test]
@@ -4956,6 +6447,7 @@ mod tests {
         assert_eq!(classify_pg_type("json"), PgColType::Json);
         assert_eq!(classify_pg_type("JSONB"), PgColType::Json);
         assert_eq!(classify_pg_type("bool"), PgColType::Bool);
+        assert_eq!(classify_pg_type("point"), PgColType::Point);
         assert_eq!(classify_pg_type("timestamp"), PgColType::Temporal { fallback: PgTemporalFallback::Probe });
         assert_eq!(classify_pg_type("timestamptz"), PgColType::Temporal { fallback: PgTemporalFallback::Probe });
         assert_eq!(classify_pg_type("date"), PgColType::Temporal { fallback: PgTemporalFallback::Probe });
@@ -5283,6 +6775,266 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires DBX_TEST_GAUSSDB_URL pointing at a writable GaussDB database"]
+    async fn gaussdb_list_custom_types_excludes_relation_row_types_and_arrays() {
+        let url = std::env::var("DBX_TEST_GAUSSDB_URL").expect("DBX_TEST_GAUSSDB_URL");
+        let pool = connect(&url, Duration::from_secs(5)).await.expect("connect gaussdb");
+        let schema = format!("dbx_types_{}", uuid::Uuid::new_v4().simple());
+        let schema_ident = pg_quote_ident(&schema);
+        let status_type = format!("{schema_ident}.status");
+        let address_type = format!("{schema_ident}.address");
+        let orders_table = format!("{schema_ident}.orders");
+        execute_query(&pool, &format!("CREATE SCHEMA {schema_ident}")).await.expect("create schema");
+
+        let exercise = async {
+            execute_query(&pool, &format!("CREATE TYPE {status_type} AS ENUM ('draft', 'published')")).await?;
+            execute_query(&pool, &format!("CREATE TYPE {address_type} AS (city text, zip text)")).await?;
+            execute_query(&pool, &format!("COMMENT ON TYPE {status_type} IS '订单状态'")).await?;
+            execute_query(
+                &pool,
+                &format!("CREATE TABLE {orders_table} (id bigint, state {status_type}, ship_to {address_type})"),
+            )
+            .await?;
+            let custom = list_objects(&pool, &schema, false, false, true).await?;
+            let all = list_objects(&pool, &schema, true, true, true).await?;
+            Ok::<_, String>((custom, all))
+        }
+        .await;
+
+        let cleanup = execute_query(&pool, &format!("DROP SCHEMA {schema_ident} CASCADE")).await;
+        cleanup.expect("drop schema");
+        let (custom, all) = exercise.expect("exercise gaussdb custom type listing");
+
+        // GaussDB supports enum and composite user types but not domains.
+        let mut type_names: Vec<&str> = custom.iter().map(|o| o.name.as_str()).collect();
+        type_names.sort_unstable();
+        assert_eq!(type_names, vec!["address", "status"], "custom types = {custom:?}");
+        for object in &custom {
+            assert_eq!(object.object_type, "TYPE");
+            assert_eq!(object.schema.as_deref(), Some(schema.as_str()));
+        }
+        let status = custom.iter().find(|o| o.name == "status").expect("status type");
+        assert_eq!(status.comment.as_deref(), Some("订单状态"), "type comment was lost: {custom:?}");
+
+        let all_names: Vec<&str> = all.iter().map(|o| o.name.as_str()).collect();
+        assert!(all_names.contains(&"orders"), "table missing from full listing: {all:?}");
+        assert!(
+            all_names.iter().all(|name| !name.starts_with('_')),
+            "auto-generated array companions leaked into the listing: {all:?}"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DBX_TEST_POSTGRES_URL pointing at a writable PostgreSQL database"]
+    async fn postgres_list_custom_types_excludes_relation_row_types_and_arrays() {
+        let url = std::env::var("DBX_TEST_POSTGRES_URL").expect("DBX_TEST_POSTGRES_URL");
+        let pool = connect(&url, Duration::from_secs(5)).await.expect("connect postgres");
+        let schema = format!("dbx_types_{}", uuid::Uuid::new_v4().simple());
+        let schema_ident = pg_quote_ident(&schema);
+        let status_type = format!("{schema_ident}.status");
+        let email_domain = format!("{schema_ident}.email");
+        let address_type = format!("{schema_ident}.address");
+        let orders_table = format!("{schema_ident}.orders");
+        execute_query(&pool, &format!("CREATE SCHEMA {schema_ident}")).await.expect("create schema");
+
+        let exercise = async {
+            execute_query(&pool, &format!("CREATE TYPE {status_type} AS ENUM ('draft', 'published')")).await?;
+            execute_query(&pool, &format!("CREATE DOMAIN {email_domain} AS text CHECK (VALUE ~ '.+@.+')")).await?;
+            execute_query(&pool, &format!("CREATE TYPE {address_type} AS (city text, zip text)")).await?;
+            execute_query(
+                &pool,
+                &format!("CREATE TABLE {orders_table} (id bigint, state {status_type}, ship_to {address_type})"),
+            )
+            .await?;
+            let custom = list_objects(&pool, &schema, false, false, true).await?;
+            let all = list_objects(&pool, &schema, true, true, true).await?;
+            Ok::<_, String>((custom, all))
+        }
+        .await;
+
+        let cleanup = execute_query(&pool, &format!("DROP SCHEMA {schema_ident} CASCADE")).await;
+        cleanup.expect("drop schema");
+        let (custom, all) = exercise.expect("exercise custom type listing");
+
+        // The type-only request returns exactly the user-created enum, domain
+        // and composite type, sorted by name. The table's auto-generated row
+        // type (orders) and the array companions (_status, _email, _address)
+        // must stay out.
+        let mut type_names: Vec<&str> = custom.iter().map(|o| o.name.as_str()).collect();
+        type_names.sort_unstable();
+        assert_eq!(type_names, vec!["address", "email", "status"], "custom types = {custom:?}");
+        for object in &custom {
+            assert_eq!(object.object_type, "TYPE");
+            assert_eq!(object.schema.as_deref(), Some(schema.as_str()));
+        }
+
+        let all_names: Vec<&str> = all.iter().map(|o| o.name.as_str()).collect();
+        assert!(all_names.contains(&"orders"), "table missing from full listing: {all:?}");
+        assert!(
+            all_names.iter().all(|name| !name.starts_with('_')),
+            "auto-generated array companions leaked into the listing: {all:?}"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DBX_TEST_POSTGRES_URL pointing at a writable PostgreSQL database"]
+    async fn postgres_custom_type_details_reads_members_and_ddl() {
+        let url = std::env::var("DBX_TEST_POSTGRES_URL").expect("DBX_TEST_POSTGRES_URL");
+        let pool = connect(&url, Duration::from_secs(5)).await.expect("connect postgres");
+        let schema = format!("dbx_details_{}", uuid::Uuid::new_v4().simple());
+        let schema_ident = pg_quote_ident(&schema);
+        let status_type = format!("{schema_ident}.status");
+        let email_domain = format!("{schema_ident}.email");
+        let address_type = format!("{schema_ident}.address");
+        let price_range_type = format!("{schema_ident}.price_range");
+        let orders_table = format!("{schema_ident}.orders");
+        execute_query(&pool, &format!("CREATE SCHEMA {schema_ident}")).await.expect("create schema");
+
+        let exercise = async {
+            execute_query(&pool, &format!("CREATE TYPE {status_type} AS ENUM ('draft', 'published', '已归档')"))
+                .await?;
+            execute_query(&pool, &format!("CREATE DOMAIN {email_domain} AS text DEFAULT '' CHECK (VALUE <> '')"))
+                .await?;
+            execute_query(&pool, &format!("CREATE TYPE {address_type} AS (city text, zip numeric(6))")).await?;
+            execute_query(&pool, &format!("COMMENT ON TYPE {address_type} IS 'shipping address'")).await?;
+            execute_query(&pool, &format!("COMMENT ON COLUMN {address_type}.city IS 'city name'")).await?;
+            execute_query(&pool, &format!("CREATE TYPE {price_range_type} AS RANGE (subtype = numeric)")).await?;
+            execute_query(
+                &pool,
+                &format!(
+                    "CREATE TABLE {orders_table} (state {status_type}, address {address_type}, email {email_domain})"
+                ),
+            )
+            .await?;
+            let status = get_custom_type_details(&pool, &schema, "status").await?;
+            let email = get_custom_type_details(&pool, &schema, "email").await?;
+            let address = get_custom_type_details(&pool, &schema, "address").await?;
+            let price_range = get_custom_type_details(&pool, &schema, "price_range").await?;
+            let row_type_error = get_custom_type_details(&pool, &schema, "orders").await.err();
+            let array_type_error = get_custom_type_details(&pool, &schema, "_status").await.err();
+            Ok::<_, String>((status, email, address, price_range, row_type_error, array_type_error))
+        }
+        .await;
+
+        let cleanup = execute_query(&pool, &format!("DROP SCHEMA {schema_ident} CASCADE")).await;
+        cleanup.expect("drop schema");
+        let (status, email, address, price_range, row_type_error, array_type_error) =
+            exercise.expect("exercise custom type details");
+
+        assert_eq!(status.kind, CustomTypeKind::Enum);
+        let enum_values: Vec<&str> = status.members.iter().map(|m| m.enum_value.as_deref().unwrap()).collect();
+        assert_eq!(enum_values, vec!["draft", "published", "已归档"]);
+        let status_ddl = status.ddl.expect("enum ddl");
+        assert!(status_ddl.complete);
+        assert!(status_ddl.sql.contains("AS ENUM ('draft', 'published', '已归档')"), "{}", status_ddl.sql);
+
+        assert_eq!(email.kind, CustomTypeKind::Domain);
+        assert_eq!(email.properties.base_type.as_deref(), Some("text"));
+        assert!(email.properties.default.is_some(), "domain default was lost");
+        assert!(
+            email.properties.domain_constraints.iter().any(|c| c.definition.contains("VALUE")),
+            "domain constraint was lost: {:?}",
+            email.properties.domain_constraints
+        );
+        let email_ddl = email.ddl.expect("domain ddl");
+        assert!(email_ddl.complete);
+        assert!(email_ddl.sql.contains("CREATE DOMAIN"), "{}", email_ddl.sql);
+
+        assert_eq!(address.kind, CustomTypeKind::Composite);
+        assert_eq!(address.comment.as_deref(), Some("shipping address"));
+        assert_eq!(address.members.len(), 2);
+        assert_eq!(address.members[0].name, "city");
+        assert_eq!(address.members[0].data_type, "text");
+        assert_eq!(address.members[0].comment.as_deref(), Some("city name"));
+        assert_eq!(address.members[1].name, "zip");
+        // format_type normalizes numeric(6) to numeric(6,0) on real servers.
+        assert_eq!(address.members[1].data_type, "numeric(6,0)");
+        let address_ddl = address.ddl.expect("composite ddl");
+        assert!(address_ddl.complete);
+        assert!(address_ddl.sql.contains("\"city\" text"), "{}", address_ddl.sql);
+        assert!(
+            address_ddl.sql.contains(&format!("COMMENT ON COLUMN \"{schema}\".\"address\".\"city\" IS 'city name'")),
+            "{}",
+            address_ddl.sql
+        );
+
+        assert_eq!(price_range.kind, CustomTypeKind::Range);
+        assert_eq!(price_range.properties.range_subtype.as_deref(), Some("numeric"));
+        let range_ddl = price_range.ddl.expect("range ddl");
+        assert!(range_ddl.complete);
+        assert!(range_ddl.sql.contains("subtype = numeric"), "{}", range_ddl.sql);
+
+        // Relation row types and array companions must be rejected, never
+        // presented as independent composite types.
+        assert!(row_type_error.is_some(), "relation row type must be rejected");
+        assert!(array_type_error.is_some(), "array companion must be rejected");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DBX_TEST_GAUSSDB_URL pointing at a writable GaussDB database"]
+    async fn gaussdb_custom_type_details_reads_members_and_ddl() {
+        let url = std::env::var("DBX_TEST_GAUSSDB_URL").expect("DBX_TEST_GAUSSDB_URL");
+        let pool = connect(&url, Duration::from_secs(5)).await.expect("connect gaussdb");
+        let schema = format!("dbx_gdetails_{}", uuid::Uuid::new_v4().simple());
+        let schema_ident = pg_quote_ident(&schema);
+        let status_type = format!("{schema_ident}.status");
+        let address_type = format!("{schema_ident}.address");
+        let price_range_type = format!("{schema_ident}.price_range");
+        let orders_table = format!("{schema_ident}.orders");
+        execute_query(&pool, &format!("CREATE SCHEMA {schema_ident}")).await.expect("create schema");
+
+        let exercise = async {
+            execute_query(&pool, &format!("CREATE TYPE {status_type} AS ENUM ('draft', 'published')")).await?;
+            execute_query(&pool, &format!("CREATE TYPE {address_type} AS (city text, zip numeric(6))")).await?;
+            execute_query(&pool, &format!("COMMENT ON COLUMN {address_type}.city IS 'city name'")).await?;
+            execute_query(&pool, &format!("CREATE TYPE {price_range_type} AS RANGE (subtype = numeric)")).await?;
+            execute_query(&pool, &format!("CREATE TABLE {orders_table} (state {status_type}, address {address_type})"))
+                .await?;
+            let status = get_custom_type_details(&pool, &schema, "status").await?;
+            let address = get_custom_type_details(&pool, &schema, "address").await?;
+            let price_range = get_custom_type_details(&pool, &schema, "price_range").await?;
+            let row_type_error = get_custom_type_details(&pool, &schema, "orders").await.err();
+            let array_type_error = get_custom_type_details(&pool, &schema, "_status").await.err();
+            Ok::<_, String>((status, address, price_range, row_type_error, array_type_error))
+        }
+        .await;
+
+        let cleanup = execute_query(&pool, &format!("DROP SCHEMA {schema_ident} CASCADE")).await;
+        if let Err(error) = cleanup {
+            // GaussDB range types own system canonical functions, so CASCADE
+            // cleanup is subject to instance privileges; that is a server
+            // limitation, not a details-query failure.
+            eprintln!("[gaussdb][custom-type-details][cleanup] {error}");
+        }
+        let (status, address, price_range, row_type_error, array_type_error) =
+            exercise.expect("exercise gaussdb custom type details");
+
+        assert_eq!(status.kind, CustomTypeKind::Enum);
+        let enum_values: Vec<&str> = status.members.iter().map(|m| m.enum_value.as_deref().unwrap()).collect();
+        assert_eq!(enum_values, vec!["draft", "published"]);
+        let status_ddl = status.ddl.expect("enum ddl");
+        assert!(status_ddl.complete);
+        assert!(status_ddl.sql.contains("AS ENUM ('draft', 'published')"), "{}", status_ddl.sql);
+
+        assert_eq!(address.kind, CustomTypeKind::Composite);
+        assert_eq!(address.members.len(), 2);
+        assert_eq!(address.members[0].name, "city");
+        assert_eq!(address.members[0].comment.as_deref(), Some("city name"));
+        let address_ddl = address.ddl.expect("composite ddl");
+        assert!(address_ddl.complete);
+        assert!(address_ddl.sql.contains("\"city\" text"), "{}", address_ddl.sql);
+
+        assert_eq!(price_range.kind, CustomTypeKind::Range);
+        assert_eq!(price_range.properties.range_subtype.as_deref(), Some("numeric"));
+        let range_ddl = price_range.ddl.expect("range ddl");
+        assert!(range_ddl.complete);
+        assert!(range_ddl.sql.contains("subtype = numeric"), "{}", range_ddl.sql);
+
+        assert!(row_type_error.is_some(), "relation row type must be rejected");
+        assert!(array_type_error.is_some(), "array companion must be rejected");
+    }
+
+    #[tokio::test]
     #[ignore = "requires DBX_TEST_POSTGRES_URL pointing at a writable PostgreSQL 18 database"]
     async fn postgres_custom_type_fallback_refreshes_stale_cached_metadata() {
         let url = std::env::var("DBX_TEST_POSTGRES_URL").expect("DBX_TEST_POSTGRES_URL");
@@ -5392,6 +7144,22 @@ mod tests {
         assert!(PgSystemU32::accepts(&Type::CID));
         assert!(!PgSystemU32::accepts(&Type::OID));
         assert!(!PgSystemU32::accepts(&Type::INT4));
+    }
+
+    #[test]
+    fn pg_point_decodes_binary_coordinates_as_text() {
+        let mut raw = Vec::new();
+        raw.extend_from_slice(&(-194.0_f64).to_be_bytes());
+        raw.extend_from_slice(&53.0_f64.to_be_bytes());
+
+        let point = PgPoint::from_sql(&Type::POINT, &raw).unwrap();
+
+        assert_eq!(point, PgPoint { x: -194.0, y: 53.0 });
+        assert_eq!(format_pg_point(point), "(-194,53)");
+        assert_eq!(format_pg_point(PgPoint { x: f64::NEG_INFINITY, y: f64::INFINITY }), "(-Infinity,Infinity)");
+        assert!(PgPoint::from_sql(&Type::POINT, &[0; 15]).is_err());
+        assert!(PgPoint::accepts(&Type::POINT));
+        assert!(!PgPoint::accepts(&Type::BYTEA));
     }
 
     #[test]
@@ -5884,6 +7652,71 @@ mod tests {
     }
 
     #[test]
+    fn postgres_checkout_timeout_respects_pool_configuration() {
+        let manager = deadpool_postgres::Manager::new(tokio_postgres::Config::new(), NoTls);
+        let pool = Pool::builder(manager)
+            .runtime(Runtime::Tokio1)
+            .wait_timeout(Some(Duration::from_secs(10)))
+            .create_timeout(Some(Duration::from_secs(10)))
+            .recycle_timeout(Some(Duration::from_secs(10)))
+            .build()
+            .expect("build postgres pool");
+
+        assert_eq!(effective_postgres_checkout_timeout(&pool, Duration::from_secs(5)), Duration::from_secs(10));
+        assert_eq!(effective_postgres_checkout_timeout(&pool, Duration::from_secs(15)), Duration::from_secs(15));
+    }
+
+    #[tokio::test]
+    async fn postgres_session_setup_reports_its_own_timeout_stage() {
+        let error =
+            postgres_session_setup_with_timeout(Duration::from_millis(1), std::future::pending::<Result<(), String>>())
+                .await
+                .expect_err("pending session setup should time out");
+
+        assert!(error.starts_with("PostgreSQL session setup connection timed out"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn postgres_row_query_timeout_tracks_inactivity_instead_of_total_duration() {
+        let progress_clock = Arc::new(StreamProgressClock::new());
+        let progress_clock_for_query = progress_clock.clone();
+        let future = async {
+            for _ in 0..4 {
+                tokio::time::sleep(Duration::from_millis(40)).await;
+                progress_clock_for_query.mark();
+            }
+            Ok::<_, String>(())
+        };
+
+        let result = await_stream_with_progress_timeout(
+            future,
+            Some(Duration::from_millis(100)),
+            progress_clock,
+            None,
+            "query inactivity timeout".to_string(),
+        )
+        .await;
+
+        assert_eq!(result, Ok(()));
+    }
+
+    #[tokio::test]
+    async fn postgres_row_query_timeout_still_fires_after_no_progress() {
+        let progress_clock = Arc::new(StreamProgressClock::new());
+        let error = await_stream_with_progress_timeout(
+            std::future::pending::<Result<(), String>>(),
+            Some(Duration::from_millis(10)),
+            progress_clock,
+            None,
+            "query inactivity timeout".to_string(),
+        )
+        .await
+        .expect_err("a stalled query should time out");
+
+        assert_eq!(error, "query inactivity timeout");
+    }
+
+    #[test]
     fn postgres_cancel_context_omits_disabled_ssl_mode() {
         assert!(build_postgres_cancel_context("postgres://localhost/app?sslmode=disable").is_none());
     }
@@ -5913,7 +7746,7 @@ mod tests {
 
     #[test]
     fn postgres_tables_sql_contains_expected_columns() {
-        let sql = postgres_tables_sql();
+        let sql = postgres_tables_sql(Some(500), 0);
         assert!(sql.contains("table_name"));
         assert!(sql.contains("table_type"));
         assert!(sql.contains("table_comment"));
@@ -5945,7 +7778,12 @@ mod tests {
         let info_sql = postgres_table_partition_info_sql();
         let local_objects_sql = postgres_table_partition_local_objects_sql();
 
-        assert!(relation_sql.contains("row_to_json(c)->>'relispartition'"));
+        assert!(!relation_sql.contains("row_to_json"));
+        assert!(!relation_sql.contains("relispartition"));
+        assert!(!relation_sql.contains("relpartbound"));
+        assert!(relation_sql.contains("pg_catalog.pg_inherits"));
+        assert!(relation_sql.contains("parent.oid = i.inhparent"));
+        assert!(relation_sql.contains(") = 'p'"));
         assert!(relation_sql.contains("c.relkind IN ('r','p')"));
         assert!(info_sql.contains("pg_catalog.pg_get_expr(c.relpartbound, c.oid, true)"));
         assert!(info_sql.contains("pg_catalog.pg_get_partkeydef(c.oid)"));
@@ -6096,6 +7934,56 @@ mod tests {
         assert!(info.is_nullable);
         // int4 1 should be interpreted as true for is_primary_key
         assert!(info.is_primary_key);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DBX_TEST_POSTGRES_URL pointing at a writable PostgreSQL 9.x database"]
+    async fn postgres_legacy_table_ddl_uses_compatible_partition_probe() {
+        let url = std::env::var("DBX_TEST_POSTGRES_URL").expect("DBX_TEST_POSTGRES_URL");
+        let pool = connect(&url, Duration::from_secs(5)).await.expect("connect postgres");
+        let version = execute_query(&pool, "SHOW server_version_num").await.expect("query PostgreSQL version");
+        let version_num = version.rows[0][0]
+            .as_str()
+            .expect("server_version_num should be text")
+            .parse::<u32>()
+            .expect("server_version_num should be numeric");
+        assert!((90000..100000).contains(&version_num), "expected PostgreSQL 9.x, got {version_num}");
+
+        let schema = format!("dbx_legacy_ddl_{}", uuid::Uuid::new_v4().simple());
+        let schema_ident = pg_quote_ident(&schema);
+        let parent = format!("{schema_ident}.parent");
+        let child = format!("{schema_ident}.child");
+        let function = format!("{schema_ident}.fill_child_name");
+        let client = pool.get().await.expect("get postgres client");
+        client
+            .batch_execute(&format!(
+                "CREATE SCHEMA {schema_ident}; \
+                 CREATE TABLE {parent} (id integer PRIMARY KEY); \
+                 CREATE TABLE {child} (parent_id integer REFERENCES {parent}(id), name text) INHERITS ({parent}); \
+                 ALTER TABLE {child} ADD PRIMARY KEY (id); \
+                 CREATE INDEX child_name_idx ON {child}(name); \
+                 CREATE FUNCTION {function}() RETURNS trigger LANGUAGE plpgsql AS $$BEGIN NEW.name := COALESCE(NEW.name, chr(120)); RETURN NEW; END$$; \
+                 CREATE TRIGGER child_bi BEFORE INSERT ON {child} FOR EACH ROW EXECUTE PROCEDURE {function}()"
+            ))
+            .await
+            .expect("create PostgreSQL 9.x DDL fixtures");
+        drop(client);
+
+        let partition_info =
+            get_table_partition_info(&pool, &schema, "child").await.expect("classify PostgreSQL 9.x inherited table");
+        let ddl = crate::schema::pg_ddl(&pool, &schema, "child").await;
+        execute_query(&pool, &format!("DROP SCHEMA {schema_ident} CASCADE"))
+            .await
+            .expect("drop PostgreSQL 9.x DDL fixtures");
+        let ddl = ddl.expect("generate PostgreSQL 9.x table DDL");
+
+        assert!(ddl.contains("CREATE TABLE"), "ddl: {ddl}");
+        assert!(ddl.contains("PRIMARY KEY"), "ddl: {ddl}");
+        assert!(ddl.contains("FOREIGN KEY"), "ddl: {ddl}");
+        assert!(ddl.contains("CREATE INDEX \"child_name_idx\""), "ddl: {ddl}");
+        assert!(ddl.contains("CREATE TRIGGER child_bi"), "ddl: {ddl}");
+        assert_eq!(partition_info, PostgresTablePartitionInfo::default());
+        assert!(!ddl.contains("PARTITION OF"), "ddl: {ddl}");
     }
 
     #[tokio::test]
@@ -6333,9 +8221,346 @@ mod tests {
         assert_eq!(postgres_owner_object_type("?"), "?");
     }
 
+    fn test_custom_type_info(typtype: &str) -> CustomTypeGeneralInfo {
+        CustomTypeGeneralInfo {
+            oid: 100,
+            typtype: typtype.to_string(),
+            typisdefined: true,
+            typbasetype: 0,
+            typnotnull: false,
+            typrelid: 0,
+            typelem: 0,
+            typcollation: 0,
+            typdefaultbin: None,
+            typdefault: None,
+            typlen: -1,
+            typbyval: false,
+            typalign: "c".to_string(),
+            typstorage: "p".to_string(),
+            typtypmod: -1,
+            input_function: None,
+            output_function: None,
+            receive_function: None,
+            send_function: None,
+            analyze_function: None,
+            comment: None,
+            relkind: None,
+            collation: None,
+        }
+    }
+
+    #[test]
+    fn custom_type_ddl_enum_quotes_values_in_order() {
+        let info = test_custom_type_info("e");
+        let members = vec![
+            CustomTypeMember {
+                name: String::new(),
+                data_type: String::new(),
+                ordinal: 1,
+                nullable: None,
+                default: None,
+                comment: None,
+                enum_value: Some("draft".to_string()),
+            },
+            CustomTypeMember {
+                name: String::new(),
+                data_type: String::new(),
+                ordinal: 2,
+                nullable: None,
+                default: None,
+                comment: None,
+                enum_value: Some("已归档".to_string()),
+            },
+        ];
+        let ddl = build_custom_type_ddl(
+            "app",
+            "status",
+            CustomTypeKind::Enum,
+            &info,
+            &members,
+            &CustomTypeProperties::default(),
+            &[],
+        );
+        assert_eq!(ddl.sql, "CREATE TYPE \"app\".\"status\" AS ENUM ('draft', '已归档');");
+        assert!(ddl.complete);
+        assert!(ddl.warnings.is_empty());
+    }
+
+    #[test]
+    fn custom_type_ddl_composite_lists_fields_and_comments() {
+        let info = test_custom_type_info("c");
+        let members = vec![
+            CustomTypeMember {
+                name: "city".to_string(),
+                data_type: "text".to_string(),
+                ordinal: 1,
+                nullable: Some(true),
+                default: None,
+                comment: Some("city name".to_string()),
+                enum_value: None,
+            },
+            CustomTypeMember {
+                name: "zip".to_string(),
+                data_type: "numeric(6)".to_string(),
+                ordinal: 2,
+                nullable: Some(true),
+                default: None,
+                comment: None,
+                enum_value: None,
+            },
+        ];
+        let ddl = build_custom_type_ddl(
+            "app",
+            "address",
+            CustomTypeKind::Composite,
+            &info,
+            &members,
+            &CustomTypeProperties::default(),
+            &[],
+        );
+        assert_eq!(
+            ddl.sql,
+            "CREATE TYPE \"app\".\"address\" AS (\n  \"city\" text,\n  \"zip\" numeric(6)\n);\nCOMMENT ON COLUMN \"app\".\"address\".\"city\" IS 'city name';"
+        );
+        assert!(ddl.complete);
+    }
+
+    #[test]
+    fn custom_type_ddl_domain_combines_base_default_notnull_and_constraints() {
+        let info = test_custom_type_info("d");
+        let properties = CustomTypeProperties {
+            base_type: Some("text".to_string()),
+            collation: Some("C".to_string()),
+            default: Some("''::text".to_string()),
+            not_null: Some(true),
+            domain_constraints: vec![CustomTypeDomainConstraint {
+                name: "email_valid".to_string(),
+                definition: "CHECK ((VALUE <> ''::text))".to_string(),
+            }],
+            ..Default::default()
+        };
+        let ddl = build_custom_type_ddl("app", "email", CustomTypeKind::Domain, &info, &[], &properties, &[]);
+        assert_eq!(
+            ddl.sql,
+            "CREATE DOMAIN \"app\".\"email\" AS text\n  COLLATE \"C\"\n  DEFAULT ''::text\n  NOT NULL\n  CONSTRAINT \"email_valid\" CHECK ((VALUE <> ''::text));"
+        );
+        assert!(ddl.complete);
+    }
+
+    #[test]
+    fn custom_type_ddl_domain_is_incomplete_when_attributes_failed() {
+        let info = test_custom_type_info("d");
+        let properties = CustomTypeProperties { base_type: Some("text".to_string()), ..Default::default() };
+        let ddl = build_custom_type_ddl(
+            "app",
+            "email",
+            CustomTypeKind::Domain,
+            &info,
+            &[],
+            &properties,
+            &["domain constraints could not be read: x".to_string()],
+        );
+        assert!(!ddl.complete, "DDL must be marked incomplete when constraints failed: {ddl:?}");
+
+        let constraint_decode_failed = build_custom_type_ddl(
+            "app",
+            "email",
+            CustomTypeKind::Domain,
+            &info,
+            &[],
+            &properties,
+            &["domain constraints could not be decoded: x".to_string()],
+        );
+        assert!(
+            !constraint_decode_failed.complete,
+            "DDL must be marked incomplete when constraints cannot be decoded: {constraint_decode_failed:?}"
+        );
+
+        let default_failed = build_custom_type_ddl(
+            "app",
+            "email",
+            CustomTypeKind::Domain,
+            &info,
+            &[],
+            &properties,
+            &["default value could not be rendered; the generated DDL is incomplete".to_string()],
+        );
+        assert!(!default_failed.complete, "DDL must be marked incomplete when the default failed: {default_failed:?}");
+        assert!(default_failed.warnings.iter().any(|w| w.contains("default value")));
+    }
+
+    #[test]
+    fn custom_type_qualified_format_type_expression_qualifies_user_types() {
+        let expression = postgres_qualified_format_type_expression("t", "n", "elem", "elem_n", "t.oid", "t.typtypmod");
+        assert!(expression.contains("quote_ident(n.nspname) || '.' || quote_ident(t.typname)"));
+        assert!(expression.contains("quote_ident(elem_n.nspname) || '.' || quote_ident(elem.typname) || '[]'"));
+        assert!(expression.contains("format_type(t.oid, t.typtypmod)"));
+    }
+
+    #[test]
+    fn custom_type_ddl_range_uses_subtype_and_canonical() {
+        let info = test_custom_type_info("r");
+        let properties = CustomTypeProperties {
+            range_subtype: Some("numeric".to_string()),
+            range_canonical_function: Some("numeric_range_canonical".to_string()),
+            range_subtype_diff_function: Some("numeric_range_subdiff".to_string()),
+            ..Default::default()
+        };
+        let ddl = build_custom_type_ddl("app", "price_range", CustomTypeKind::Range, &info, &[], &properties, &[]);
+        assert_eq!(
+            ddl.sql,
+            "CREATE TYPE \"app\".\"price_range\" AS RANGE (\n  subtype = numeric,\n  canonical = \"numeric_range_canonical\",\n  subtype_diff = \"numeric_range_subdiff\"\n);"
+        );
+        assert!(ddl.complete);
+    }
+
+    #[test]
+    fn custom_type_ddl_range_without_subtype_is_incomplete() {
+        let info = test_custom_type_info("r");
+        let properties = CustomTypeProperties {
+            range_multirange_name: Some("price_multirange".to_string()),
+            range_canonical_function: Some("range_canonical".to_string()),
+            ..Default::default()
+        };
+        let ddl = build_custom_type_ddl("app", "price_range", CustomTypeKind::Range, &info, &[], &properties, &[]);
+
+        assert!(!ddl.complete, "a range without subtype cannot be reconstructed: {ddl:?}");
+        assert_eq!(ddl.sql, "CREATE TYPE \"app\".\"price_range\" AS RANGE (subtype = unknown);");
+        assert!(ddl.warnings.iter().any(|warning| warning.contains("range attributes")));
+    }
+
+    #[test]
+    fn custom_type_ddl_range_keeps_catalog_qualified_names() {
+        let info = test_custom_type_info("r");
+        let properties = CustomTypeProperties {
+            range_subtype: Some("numeric".to_string()),
+            range_canonical_function: Some("\"extensions\".\"range_canonical\"".to_string()),
+            range_subtype_diff_function: Some("\"extensions\".\"range_subdiff\"".to_string()),
+            range_subtype_opclass: Some("\"extensions\".\"numeric_ops\"".to_string()),
+            ..Default::default()
+        };
+        let ddl = build_custom_type_ddl("app", "price_range", CustomTypeKind::Range, &info, &[], &properties, &[]);
+
+        assert!(ddl.complete, "{ddl:?}");
+        assert!(ddl.sql.contains("subtype_opclass = \"extensions\".\"numeric_ops\""));
+        assert!(ddl.sql.contains("canonical = \"extensions\".\"range_canonical\""));
+        assert!(ddl.sql.contains("subtype_diff = \"extensions\".\"range_subdiff\""));
+    }
+
+    #[test]
+    fn custom_type_ddl_range_emits_custom_multirange_name() {
+        let info = test_custom_type_info("r");
+        let properties = CustomTypeProperties {
+            range_subtype: Some("numeric".to_string()),
+            range_multirange_name: Some("price_multirange".to_string()),
+            ..Default::default()
+        };
+        let ddl = build_custom_type_ddl("app", "price_range", CustomTypeKind::Range, &info, &[], &properties, &[]);
+        assert!(ddl.complete, "{ddl:?}");
+        assert!(
+            ddl.sql.contains("multirange_type_name = \"price_multirange\""),
+            "custom multirange name must be emitted: {}",
+            ddl.sql
+        );
+    }
+
+    #[test]
+    fn custom_type_ddl_multirange_and_base_are_marked_incomplete() {
+        let multirange = build_custom_type_ddl(
+            "app",
+            "_price_range",
+            CustomTypeKind::Multirange,
+            &test_custom_type_info("m"),
+            &[],
+            &CustomTypeProperties::default(),
+            &[],
+        );
+        assert!(!multirange.complete);
+        assert!(multirange.sql.is_empty());
+        assert!(multirange.warnings.iter().any(|w| w.contains("multirange companion")));
+
+        let base = build_custom_type_ddl(
+            "app",
+            "point2d",
+            CustomTypeKind::Base,
+            &test_custom_type_info("b"),
+            &[],
+            &CustomTypeProperties::default(),
+            &[],
+        );
+        assert!(!base.complete);
+        assert!(base.warnings.iter().any(|w| w.contains("base type")));
+    }
+
+    #[test]
+    fn custom_type_ddl_escapes_identifiers_and_literals() {
+        let info = test_custom_type_info("e");
+        let members = vec![CustomTypeMember {
+            name: String::new(),
+            data_type: String::new(),
+            ordinal: 1,
+            nullable: None,
+            default: None,
+            comment: None,
+            enum_value: Some("it's \"quoted\"".to_string()),
+        }];
+        let ddl = build_custom_type_ddl(
+            "we\"ird",
+            "ty\"pe",
+            CustomTypeKind::Enum,
+            &info,
+            &members,
+            &CustomTypeProperties::default(),
+            &[],
+        );
+        assert_eq!(ddl.sql, "CREATE TYPE \"we\"\"ird\".\"ty\"\"pe\" AS ENUM ('it''s \"quoted\"');");
+    }
+
+    #[test]
+    fn custom_type_kind_for_maps_catalog_codes() {
+        assert_eq!(custom_type_kind_for("b"), Some(CustomTypeKind::Base));
+        assert_eq!(custom_type_kind_for("c"), Some(CustomTypeKind::Composite));
+        assert_eq!(custom_type_kind_for("d"), Some(CustomTypeKind::Domain));
+        assert_eq!(custom_type_kind_for("e"), Some(CustomTypeKind::Enum));
+        assert_eq!(custom_type_kind_for("r"), Some(CustomTypeKind::Range));
+        assert_eq!(custom_type_kind_for("m"), Some(CustomTypeKind::Multirange));
+        assert_eq!(custom_type_kind_for("p"), None);
+    }
+
+    #[test]
+    fn custom_type_list_metadata_decodes_kind_and_member_capability() {
+        assert_eq!(custom_type_list_metadata(Some("c:1")), (Some("composite".to_string()), Some(true)));
+        assert_eq!(custom_type_list_metadata(Some("d:0")), (Some("domain".to_string()), Some(false)));
+        assert_eq!(custom_type_list_metadata(None), (None, None));
+        assert_eq!(custom_type_list_metadata(Some("invalid")), (None, None));
+    }
+
+    #[test]
+    fn custom_type_general_info_sql_looks_up_by_schema_and_name() {
+        let sql = custom_type_general_info_sql();
+        assert!(sql.contains("pg_catalog.pg_type"));
+        assert!(sql.contains("pg_catalog.pg_namespace"));
+        assert!(sql.contains("pg_catalog.pg_description"));
+        assert!(sql.contains("pg_catalog.pg_proc"));
+        assert!(sql.contains("pg_catalog.pg_collation"));
+        assert!(sql.contains("pg_catalog.pg_namespace ncl"));
+        assert!(sql.contains("d.classoid = 'pg_catalog.pg_type'::regclass"));
+        assert!(sql.contains("n.nspname = $1 AND t.typname = $2"));
+        assert!(!sql.contains("pg_get_expr"));
+    }
+
+    #[test]
+    fn custom_type_domain_default_render_failure_is_degradable() {
+        let (default, warning) = domain_default_from_render_result(Err(
+            "function pg_get_expr(pg_node_tree, integer) does not exist".to_string(),
+        ));
+        assert!(default.is_none());
+        assert!(warning.as_deref().is_some_and(|value| value.contains("DDL is incomplete")));
+    }
+
     #[test]
     fn list_objects_sql_includes_routines() {
-        let sql = list_objects_sql(true, true, false, true);
+        let sql = list_objects_sql(true, true, false, true, true, true, false);
         assert!(sql.contains("pg_catalog.pg_class"));
         assert!(sql.contains("pg_catalog.pg_proc"));
         assert!(sql.contains("pg_catalog.pg_inherits"));
@@ -6348,11 +8573,118 @@ mod tests {
         assert!(sql.contains("pg_xact_commit_timestamp"));
         assert!(sql.contains("'PROCEDURE'"));
         assert!(sql.contains("'FUNCTION'"));
+        assert!(!sql.contains("pg_catalog.pg_type"));
+    }
+
+    #[test]
+    fn list_objects_sql_includes_custom_types_when_enabled() {
+        let sql = list_objects_sql(true, true, false, true, true, true, true);
+        assert!(sql.contains("pg_catalog.pg_type"));
+        assert!(sql.contains("pg_catalog.pg_class"));
+        assert!(sql.contains("pg_catalog.pg_description"));
+        assert!(sql.contains("t.typtype IN ('b', 'c', 'd', 'e', 'r', 'm')"));
+        assert!(sql.contains("t.typisdefined"));
+        assert!(sql.contains("t.typelem = 0"));
+        assert!(sql.contains("t.typrelid = 0 OR c.relkind = 'c'"));
+        assert!(sql.contains("FROM pg_catalog.pg_attribute a"));
+        assert!(sql.contains("FROM pg_catalog.pg_enum e"));
+        assert!(sql.contains("END) AS signature"));
+        assert!(sql.contains("'TYPE' AS object_type"));
+        assert!(sql.contains("5 AS sort_order"));
+        assert!(sql.contains("n.nspname = $1"));
+        assert!(sql.contains("n.nspname <> 'pg_catalog'"));
+        assert!(sql.contains("n.nspname <> 'information_schema'"));
+        assert!(sql.contains("n.nspname NOT LIKE 'pg_toast%'"));
+        assert!(sql.contains("n.nspname NOT LIKE 'pg_temp%'"));
+    }
+
+    #[test]
+    fn postgres_system_schemas_are_not_custom_type_schemas() {
+        for schema in ["pg_catalog", "information_schema", "pg_toast", "pg_toast_temp_5", "pg_temp_5"] {
+            assert!(is_postgres_system_schema(schema), "{schema} should be a system schema");
+        }
+        assert!(!is_postgres_system_schema("public"));
+        assert!(!is_postgres_system_schema("app"));
+    }
+
+    #[test]
+    fn list_objects_sql_omits_custom_types_when_disabled() {
+        let sql = list_objects_sql(true, true, false, true, true, true, false);
+        assert!(!sql.contains("pg_type"));
+        assert!(!sql.contains("t.typtype"));
+    }
+
+    #[test]
+    fn list_objects_sql_type_only_skips_relations_and_routines() {
+        let sql = list_objects_sql(true, true, false, true, false, false, true);
+        assert!(sql.contains("pg_catalog.pg_type"));
+        assert!(!sql.contains("FROM pg_catalog.pg_class"));
+        assert!(!sql.contains("pg_catalog.pg_proc"));
+        assert!(!sql.contains("pg_stat_file"));
+        assert!(!sql.contains("pg_get_function_identity_arguments"));
+    }
+
+    #[test]
+    fn list_objects_sql_table_only_skips_routines_and_custom_types() {
+        let sql = list_objects_sql(true, true, false, true, true, false, false);
+        assert!(sql.contains("pg_catalog.pg_class"));
+        assert!(!sql.contains("pg_catalog.pg_proc"));
+        assert!(!sql.contains("pg_catalog.pg_type"));
+    }
+
+    #[test]
+    fn list_objects_sql_routine_only_skips_relations_and_custom_types() {
+        let sql = list_objects_sql(true, true, false, true, false, true, false);
+        assert!(sql.contains("pg_catalog.pg_proc"));
+        assert!(!sql.contains("pg_catalog.pg_class"));
+        assert!(!sql.contains("pg_catalog.pg_type"));
+    }
+
+    #[test]
+    fn list_objects_sql_empty_scope_produces_no_sql() {
+        let sql = list_objects_sql(true, true, false, true, false, false, false);
+        assert!(sql.is_empty());
+    }
+
+    #[test]
+    fn list_objects_sql_custom_types_branch_in_both_timestamp_variants() {
+        // The pg_type branch carries the same filters whether the timestamp
+        // query or the timestamp fallback query is used.
+        for sql in [
+            list_objects_sql(true, true, false, true, false, false, true),
+            list_objects_sql(false, true, false, true, false, false, true),
+        ] {
+            assert!(sql.contains("pg_catalog.pg_type"));
+            assert!(sql.contains("t.typtype IN ('b', 'c', 'd', 'e', 'r', 'm')"));
+            assert!(sql.contains("t.typelem = 0"));
+            assert!(sql.contains("t.typrelid = 0 OR c.relkind = 'c'"));
+            assert!(sql.contains("'TYPE' AS object_type"));
+        }
+    }
+
+    #[test]
+    fn list_objects_sql_custom_types_keeps_comment_join_semantics() {
+        let sql = list_objects_sql(true, true, false, true, false, false, true);
+        assert!(sql.contains("d.objoid = t.oid"));
+        assert!(sql.contains("d.classoid = 'pg_catalog.pg_type'::regclass"));
+        assert!(sql.contains("d.objsubid = 0"));
+        assert!(sql.contains("d.description AS object_comment"));
+    }
+
+    #[test]
+    fn list_objects_sql_custom_types_uses_null_timestamps() {
+        let sql = list_objects_sql(true, true, false, true, false, false, true);
+        assert!(sql.contains("NULL::text AS created_at"));
+        assert!(sql.contains("NULL::text AS updated_at"));
+        assert!(sql.contains("NULL::text AS parent_schema"));
+        assert!(sql.contains("NULL::text AS parent_name"));
+        assert!(sql.contains("t.typtype::text || ':'"));
+        assert!(sql.contains("END) AS signature"));
     }
 
     #[test]
     fn list_objects_sql_without_timestamps_omits_stat_file() {
-        let sql = list_objects_sql(false, true, false, true);
+        let sql = list_objects_sql(false, true, false, true, true, true, false);
         assert!(!sql.contains("pg_stat_file"));
         assert!(sql.contains("NULL::text AS created_at"));
         assert!(sql.contains("NULL::text AS updated_at"));
@@ -6360,7 +8692,7 @@ mod tests {
 
     #[test]
     fn redshift_compatible_list_objects_sql_uses_legacy_argument_formatter() {
-        let sql = list_objects_sql(false, false, false, false);
+        let sql = list_objects_sql(false, false, false, false, true, true, false);
         assert!(sql.contains("pg_get_function_arguments(p.oid) AS signature"));
         assert!(!sql.contains("pg_get_function_identity_arguments"));
     }
@@ -6407,6 +8739,7 @@ mod tests {
             session_id: None,
             has_more: false,
             elasticsearch_raw_body: None,
+            messages: Vec::new(),
         };
 
         let columns = redshift_columns_from_query_result(result);
@@ -6430,31 +8763,31 @@ mod tests {
 
     #[test]
     fn both_list_objects_sql_variants_use_parameter() {
-        assert!(list_objects_sql(true, true, true, true).contains("$1"));
-        assert!(list_objects_sql(false, true, true, true).contains("$1"));
-        assert!(list_objects_sql(true, true, false, true).contains("$1"));
-        assert!(list_objects_sql(false, true, false, true).contains("$1"));
-        assert!(list_objects_sql(true, false, true, true).contains("$1"));
-        assert!(list_objects_sql(false, false, true, true).contains("$1"));
-        assert!(list_objects_sql(true, false, false, true).contains("$1"));
-        assert!(list_objects_sql(false, false, false, true).contains("$1"));
+        assert!(list_objects_sql(true, true, true, true, true, true, false).contains("$1"));
+        assert!(list_objects_sql(false, true, true, true, true, true, false).contains("$1"));
+        assert!(list_objects_sql(true, true, false, true, true, true, false).contains("$1"));
+        assert!(list_objects_sql(false, true, false, true, true, true, false).contains("$1"));
+        assert!(list_objects_sql(true, false, true, true, true, true, false).contains("$1"));
+        assert!(list_objects_sql(false, false, true, true, true, true, false).contains("$1"));
+        assert!(list_objects_sql(true, false, false, true, true, true, false).contains("$1"));
+        assert!(list_objects_sql(false, false, false, true, true, true, false).contains("$1"));
     }
 
     #[test]
     fn both_list_objects_sql_variants_include_pg_proc() {
-        assert!(list_objects_sql(true, true, true, true).contains("pg_catalog.pg_proc"));
-        assert!(list_objects_sql(false, true, true, true).contains("pg_catalog.pg_proc"));
-        assert!(list_objects_sql(true, true, false, true).contains("pg_catalog.pg_proc"));
-        assert!(list_objects_sql(false, true, false, true).contains("pg_catalog.pg_proc"));
-        assert!(list_objects_sql(true, false, true, true).contains("pg_catalog.pg_proc"));
-        assert!(list_objects_sql(false, false, true, true).contains("pg_catalog.pg_proc"));
-        assert!(list_objects_sql(true, false, false, true).contains("pg_catalog.pg_proc"));
-        assert!(list_objects_sql(false, false, false, true).contains("pg_catalog.pg_proc"));
+        assert!(list_objects_sql(true, true, true, true, true, true, false).contains("pg_catalog.pg_proc"));
+        assert!(list_objects_sql(false, true, true, true, true, true, false).contains("pg_catalog.pg_proc"));
+        assert!(list_objects_sql(true, true, false, true, true, true, false).contains("pg_catalog.pg_proc"));
+        assert!(list_objects_sql(false, true, false, true, true, true, false).contains("pg_catalog.pg_proc"));
+        assert!(list_objects_sql(true, false, true, true, true, true, false).contains("pg_catalog.pg_proc"));
+        assert!(list_objects_sql(false, false, true, true, true, true, false).contains("pg_catalog.pg_proc"));
+        assert!(list_objects_sql(true, false, false, true, true, true, false).contains("pg_catalog.pg_proc"));
+        assert!(list_objects_sql(false, false, false, true, true, true, false).contains("pg_catalog.pg_proc"));
     }
 
     #[test]
     fn legacy_list_objects_sql_avoids_pg11_proc_kind_column() {
-        let sql = list_objects_sql(true, false, false, true);
+        let sql = list_objects_sql(true, false, false, true, true, true, false);
         assert!(!sql.contains("p.prokind"));
         assert!(!sql.contains("p.prosp"));
         assert!(sql.contains("NOT p.proisagg"));
@@ -6466,7 +8799,7 @@ mod tests {
 
     #[test]
     fn gaussdb_compatible_list_objects_sql_uses_prosp_when_prokind_is_missing() {
-        let sql = list_objects_sql(true, false, true, true);
+        let sql = list_objects_sql(true, false, true, true, true, true, false);
         assert!(!sql.contains("p.prokind"));
         assert!(sql.contains("CASE WHEN p.prosp THEN 'PROCEDURE' ELSE 'FUNCTION' END AS object_type"));
         assert!(sql.contains("CASE WHEN p.prosp THEN 2 ELSE 3 END AS sort_order"));
@@ -6477,7 +8810,7 @@ mod tests {
 
     #[test]
     fn gaussdb_compatible_list_objects_sql_uses_prosp_with_prokind_when_available() {
-        let sql = list_objects_sql(true, true, true, true);
+        let sql = list_objects_sql(true, true, true, true, true, true, false);
         assert!(
             sql.contains("CASE WHEN p.prokind = 'p' OR p.prosp THEN 'PROCEDURE' ELSE 'FUNCTION' END AS object_type")
         );
@@ -6708,31 +9041,117 @@ mod tests {
         assert_eq!(timezone, "UTC");
     }
 
+    #[tokio::test]
+    #[ignore = "requires DBX_TEST_POSTGRES_URL pointing at a writable PostgreSQL-compatible database"]
+    async fn list_tables_filtered_supports_risingwave_pagination_and_filtering() {
+        let url = std::env::var("DBX_TEST_POSTGRES_URL").expect("DBX_TEST_POSTGRES_URL");
+        let pool = connect_with_local_timezone(&url, Duration::from_secs(5), "UTC")
+            .await
+            .expect("connect PostgreSQL-compatible database");
+        let client = pool.get().await.expect("checkout postgres");
+        client
+            .batch_execute(
+                r#"DROP TABLE IF EXISTS public."dbx_issue_5584_live_page_a";
+                   DROP TABLE IF EXISTS public."dbx_issue_5584_live_page_b";
+                   DROP TABLE IF EXISTS public."dbx_issue_5584_live_order_100%";
+                   DROP TABLE IF EXISTS public."dbx_issue_5584_live_back\slash";
+                   DROP TABLE IF EXISTS public."dbx_issue_5584_live_system_users";
+                   CREATE TABLE public."dbx_issue_5584_live_page_a"(id int);
+                   CREATE TABLE public."dbx_issue_5584_live_page_b"(id int);
+                   CREATE TABLE public."dbx_issue_5584_live_order_100%"(id int);
+                   CREATE TABLE public."dbx_issue_5584_live_back\slash"(id int);
+                   CREATE TABLE public."dbx_issue_5584_live_system_users"(id int);"#,
+            )
+            .await
+            .expect("create live table fixtures");
+        drop(client);
+
+        let all_tables = list_tables(&pool, "public").await.expect("expand complete table list");
+        let first_page = list_tables_filtered(&pool, "public", Some("dbx_issue_5584_live_page_"), Some(1), Some(0))
+            .await
+            .expect("list first table page");
+        let second_page = list_tables_filtered(&pool, "public", Some("dbx_issue_5584_live_page_"), Some(1), Some(1))
+            .await
+            .expect("list second table page");
+        let wildcard_match =
+            list_tables_filtered(&pool, "public", Some("dbx_issue_5584_live_order_100%"), Some(10), Some(0))
+                .await
+                .expect("filter table with wildcard characters");
+        let backslash_match =
+            list_tables_filtered(&pool, "public", Some(r"dbx_issue_5584_live_back\slash"), Some(10), Some(0))
+                .await
+                .expect("filter table with backslash");
+        let fuzzy_match = list_tables_filtered(&pool, "public", Some("i5584su"), Some(10), Some(0))
+            .await
+            .expect("fuzzy filter table name");
+
+        assert!(all_tables.iter().any(|table| table.name == "dbx_issue_5584_live_page_a"));
+        assert!(all_tables.iter().any(|table| table.name == "dbx_issue_5584_live_page_b"));
+        assert_eq!(
+            first_page.iter().map(|table| table.name.as_str()).collect::<Vec<_>>(),
+            ["dbx_issue_5584_live_page_a"]
+        );
+        assert_eq!(
+            second_page.iter().map(|table| table.name.as_str()).collect::<Vec<_>>(),
+            ["dbx_issue_5584_live_page_b"]
+        );
+        assert_eq!(
+            wildcard_match.iter().map(|table| table.name.as_str()).collect::<Vec<_>>(),
+            ["dbx_issue_5584_live_order_100%"]
+        );
+        assert_eq!(
+            backslash_match.iter().map(|table| table.name.as_str()).collect::<Vec<_>>(),
+            [r"dbx_issue_5584_live_back\slash"]
+        );
+        assert_eq!(
+            fuzzy_match.iter().map(|table| table.name.as_str()).collect::<Vec<_>>(),
+            ["dbx_issue_5584_live_system_users"]
+        );
+
+        let client = pool.get().await.expect("checkout postgres for cleanup");
+        client
+            .batch_execute(
+                r#"DROP TABLE IF EXISTS public."dbx_issue_5584_live_page_a";
+                   DROP TABLE IF EXISTS public."dbx_issue_5584_live_page_b";
+                   DROP TABLE IF EXISTS public."dbx_issue_5584_live_order_100%";
+                   DROP TABLE IF EXISTS public."dbx_issue_5584_live_back\slash";
+                   DROP TABLE IF EXISTS public."dbx_issue_5584_live_system_users";"#,
+            )
+            .await
+            .expect("drop live table fixtures");
+    }
+
     #[test]
     fn like_contains_pattern_escapes_wildcards() {
         assert_eq!(like_contains_pattern(""), "%%");
-        assert_eq!(like_contains_pattern("order_100%"), "%order~_100~%%");
-        assert_eq!(like_contains_pattern("tilde~name"), "%tilde~~name%");
-        assert_eq!(like_contains_pattern(r"foo\bar"), r"%foo\bar%");
+        assert_eq!(like_contains_pattern("order_100%"), "%order\\_100\\%%");
+        assert_eq!(like_contains_pattern("tilde~name"), "%tilde~name%");
+        assert_eq!(like_contains_pattern(r"foo\bar"), r"%foo\\bar%");
     }
 
     #[test]
     fn like_fuzzy_pattern_escapes_wildcards() {
         assert_eq!(like_fuzzy_pattern(""), "%%");
         assert_eq!(like_fuzzy_pattern("sysu"), "%s%y%s%u%");
-        assert_eq!(like_fuzzy_pattern("user_%"), "%u%s%e%r%~_%~%%");
-        assert_eq!(like_fuzzy_pattern("tilde~name"), "%t%i%l%d%e%~~%n%a%m%e%");
+        assert_eq!(like_fuzzy_pattern("user_%"), "%u%s%e%r%\\_%\\%%");
+        assert_eq!(like_fuzzy_pattern("tilde~name"), "%t%i%l%d%e%~%n%a%m%e%");
     }
 
     #[test]
-    fn postgres_tables_sql_uses_non_backslash_like_escape() {
-        let sql = postgres_tables_sql();
+    fn postgres_tables_sql_uses_literal_pagination_without_escape_clause() {
+        let paged_sql = postgres_tables_sql(Some(500), 200);
+        assert!(paged_sql.contains("ILIKE $2 OR"));
+        assert!(paged_sql.contains("$3 <> ''"));
+        assert!(paged_sql.contains("ILIKE $3"));
+        assert!(!paged_sql.contains("ESCAPE"));
+        assert!(paged_sql.contains("ORDER BY CASE WHEN pc.relkind = 'p' THEN 1 ELSE 0 END, c.relname"));
+        assert!(paged_sql.contains("LIMIT 500 OFFSET 200"));
+        assert!(!paged_sql.contains("$4"));
+        assert!(!paged_sql.contains("$5"));
 
-        assert!(sql.contains("ILIKE $2 ESCAPE '~'"));
-        assert!(sql.contains("$3 <> ''"));
-        assert!(sql.contains("ILIKE $3 ESCAPE '~'"));
-        assert!(sql.contains("ORDER BY CASE WHEN pc.relkind = 'p' THEN 1 ELSE 0 END, c.relname"));
-        assert!(sql.contains("LIMIT CAST($4 AS BIGINT) OFFSET CAST($5 AS BIGINT)"));
+        let unbounded_sql = postgres_tables_sql(None, 0);
+        assert!(unbounded_sql.ends_with("OFFSET 0"));
+        assert!(!unbounded_sql.contains("LIMIT"));
     }
 
     #[test]

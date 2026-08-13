@@ -112,6 +112,7 @@ export interface ColumnDiff {
   source?: ColumnInfo;
   target?: ColumnInfo;
   changes?: string[];
+  addPosition?: "first" | { after: string };
 }
 
 export interface IndexDiff {

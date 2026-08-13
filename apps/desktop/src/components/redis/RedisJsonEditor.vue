@@ -14,6 +14,10 @@ const props = withDefaults(
     saveDisabled?: boolean;
     readOnly?: boolean;
     wordWrap?: boolean;
+    /** Document previews keep folding controls but do not need source line numbers. */
+    lineNumbers?: boolean;
+    /** A lighter reading surface for read-only JSON previews. */
+    presentation?: "editor" | "viewer";
     /**
      * When false, Mod+F is left to a parent find surface (RedisValueViewer).
      * Default true so DocumentBrowser and other callers keep CodeMirror find.
@@ -24,6 +28,8 @@ const props = withDefaults(
     saveDisabled: false,
     readOnly: false,
     wordWrap: false,
+    lineNumbers: true,
+    presentation: "editor",
     enableBuiltinFind: true,
   },
 );
@@ -39,7 +45,7 @@ const { isDark, themePalette } = useTheme();
 
 const editor = useCellDetailEditor({
   language: "json",
-  lineNumbers: true,
+  lineNumbers: props.lineNumbers,
   folding: true,
   lineWrapping: () => props.wordWrap,
   readOnly: () => props.readOnly,
@@ -85,5 +91,39 @@ defineExpose({ openSearch, selectRange });
 </script>
 
 <template>
-  <div ref="editorContainer" class="h-full min-h-0 w-full" data-redis-json-editor />
+  <div ref="editorContainer" class="h-full min-h-0 w-full" :class="{ 'redis-json-editor--viewer': presentation === 'viewer' }" data-redis-json-editor />
 </template>
+
+<style scoped>
+.redis-json-editor--viewer :deep(.cm-editor) {
+  background: transparent;
+}
+
+.redis-json-editor--viewer :deep(.cm-scroller) {
+  padding-block: 0.75rem;
+}
+
+.redis-json-editor--viewer :deep(.cm-content) {
+  padding: 0 1rem 1rem 0.375rem;
+}
+
+.redis-json-editor--viewer :deep(.cm-gutters) {
+  background: transparent;
+  border-right: 1px solid var(--border);
+  padding-inline: 0.25rem;
+}
+
+.redis-json-editor--viewer :deep(.cm-foldGutter .cm-gutterElement) {
+  border-radius: 3px;
+  color: var(--muted-foreground);
+  cursor: pointer;
+  transition:
+    background-color 0.15s,
+    color 0.15s;
+}
+
+.redis-json-editor--viewer :deep(.cm-foldGutter .cm-gutterElement:hover) {
+  background: var(--accent);
+  color: var(--foreground);
+}
+</style>

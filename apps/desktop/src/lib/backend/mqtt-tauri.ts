@@ -4,8 +4,16 @@ export async function mqttGetBrokerInfo(connectionId: string) {
   return invoke("mqtt_get_broker_info", { connectionId });
 }
 
-export async function mqttSubscribe(connectionId: string, topic: string, qos?: string | null) {
-  return invoke("mqtt_subscribe", { connectionId, topic, qos: qos ?? null });
+export async function mqttSubscribe(connectionId: string, topic: string, qos?: string | null, noLocal?: boolean) {
+  return invoke("mqtt_subscribe", { connectionId, topic, qos: qos ?? null, noLocal: noLocal ?? false });
+}
+
+export async function mqttSaveTopicConfig(connectionId: string, topic: string, qos: string, noLocal: boolean, enabled = false) {
+  return invoke("mqtt_save_topic_config", { connectionId, config: { topic, qos, noLocal, enabled } });
+}
+
+export async function mqttDeleteTopicConfig(connectionId: string, topic: string) {
+  return invoke("mqtt_delete_topic_config", { connectionId, topic });
 }
 
 export async function mqttUnsubscribe(connectionId: string, topic: string) {
@@ -18,6 +26,10 @@ export async function mqttPublish(connectionId: string, request: { topic: string
 
 export async function mqttListTopics(connectionId: string) {
   return invoke("mqtt_list_topics", { connectionId });
+}
+
+export async function mqttListSavedTopicConfigs(connectionId: string) {
+  return invoke("mqtt_list_saved_topic_configs", { connectionId });
 }
 
 export async function mqttGetTopicTree(connectionId: string) {

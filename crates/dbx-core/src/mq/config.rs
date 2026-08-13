@@ -30,6 +30,17 @@ pub struct MqConnectOverride {
     pub port: u16,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MqSocksProxy {
+    pub host: String,
+    pub port: u16,
+    #[serde(default)]
+    pub username: String,
+    #[serde(default)]
+    pub password: String,
+}
+
 /// Configuration for an MQ admin connection, decoded from
 /// `ConnectionConfig.external_config`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -60,6 +71,8 @@ pub struct MqAdminConfig {
     /// its Management HTTP API listens on an independently configured port.
     #[serde(skip)]
     pub management_connect_override: Option<MqConnectOverride>,
+    #[serde(skip)]
+    pub socks_proxy: Option<MqSocksProxy>,
     /// Runtime-only: from `ConnectionConfig.query_timeout_secs` (`0` = unlimited).
     #[serde(skip)]
     pub query_timeout_secs: u64,
@@ -118,6 +131,11 @@ impl MqAdminConfig {
         Duration::from_secs(self.connect_timeout_secs.max(1))
     }
 
+    /// Milliseconds for agent `connect_timeout_ms` (Advanced connect timeout).
+    pub fn connect_timeout_ms(&self) -> u64 {
+        self.connect_timeout_secs.saturating_mul(1000).max(1_000)
+    }
+
     pub fn token_signing_configured(&self) -> bool {
         self.token_signing.as_ref().is_some_and(MqTokenSigningConfig::is_configured)
     }
@@ -136,6 +154,16 @@ impl MqAdminConfig {
         self.management_connect_override = Some(MqConnectOverride { host: host.to_string(), port });
         self
     }
+
+    pub fn with_socks_proxy(mut self, host: &str, port: u16, username: &str, password: &str) -> Self {
+        self.socks_proxy = Some(MqSocksProxy {
+            host: host.to_string(),
+            port,
+            username: username.to_string(),
+            password: password.to_string(),
+        });
+        self
+    }
 }
 
 pub fn admin_url_with_endpoint(admin_url: &str, host: &str, port: u16) -> Result<String, String> {
@@ -151,6 +179,7 @@ mod tests {
 
     fn connection_with_external(value: serde_json::Value) -> ConnectionConfig {
         let mut cfg = ConnectionConfig {
+            docs_notes_path: None,
             id: "c1".to_string(),
             name: "mq".to_string(),
             note: String::new(),
@@ -164,6 +193,7 @@ mod tests {
             username: String::new(),
             password: String::new(),
             database: None,
+            default_schema: None,
             visible_databases: None,
             visible_schemas: None,
             show_system_schemas: false,
@@ -199,6 +229,7 @@ mod tests {
             jdbc_driver_class: None,
             jdbc_driver_paths: Vec::new(),
             one_time: false,
+            save_password: true,
             read_only: false,
             is_production: false,
             production_databases: vec![],
@@ -285,6 +316,7 @@ mod tests {
         assert_eq!(mqc.query_timeout_secs, 120);
         assert_eq!(mqc.connect_timeout_secs, 15);
         assert_eq!(mqc.request_timeout_ms(), 120_000);
+        assert_eq!(mqc.connect_timeout_ms(), 15_000);
         assert_eq!(mqc.rpc_timeout(), Some(std::time::Duration::from_secs(120)));
     }
 

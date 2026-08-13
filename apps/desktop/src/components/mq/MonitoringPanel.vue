@@ -929,8 +929,7 @@ onUnmounted(() => {
   gap: 16px;
   padding: 14px 20px;
   border-bottom: 1px solid var(--monitor-border);
-  background: color-mix(in srgb, var(--monitor-surface) 92%, transparent);
-  backdrop-filter: blur(10px);
+  background: var(--monitor-surface);
   position: sticky;
   top: 0;
   z-index: 1;

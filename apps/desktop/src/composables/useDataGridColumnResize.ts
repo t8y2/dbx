@@ -36,6 +36,7 @@ export interface UseDataGridColumnResizeOptions {
   columnIndexes: ComputedRef<number[]>;
   density: Ref<ColumnWidthDensity>;
   compactColumnHeaderActions: ComputedRef<boolean>;
+  columnIndexIndicators?: ComputedRef<readonly boolean[]>;
   cacheKey?: ComputedRef<string | undefined>;
   columnStructureSignature: ComputedRef<string>;
   measureHeaderText?: (text: string) => number | undefined;
@@ -79,6 +80,7 @@ export function useDataGridColumnResize(options: UseDataGridColumnResizeOptions)
       density: density.value,
       compactColumnHeaderActions: compactColumnHeaderActions.value,
       headerTextWidth: measureHeaderText?.(colName),
+      hasIndexIndicator: options.columnIndexIndicators?.value[colIdx] ?? false,
     });
   }
 
@@ -191,6 +193,7 @@ export function useDataGridColumnResize(options: UseDataGridColumnResizeOptions)
       compactColumnHeaderActions: compactColumnHeaderActions.value,
       includeValues: true,
       headerTextWidth: measureHeaderText?.(colName),
+      hasIndexIndicator: options.columnIndexIndicators?.value[colIdx] ?? false,
     });
     markColumnUserSized(colIdx);
     persistColumnWidths();

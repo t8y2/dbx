@@ -685,7 +685,11 @@ pub fn supports_object_rename(database_type: Option<DatabaseType>, object_type: 
     }
     if matches!(
         database_type,
-        DatabaseType::Sqlite | DatabaseType::Rqlite | DatabaseType::Turso | DatabaseType::CloudflareD1
+        DatabaseType::Sqlite
+            | DatabaseType::Rqlite
+            | DatabaseType::Turso
+            | DatabaseType::CloudflareD1
+            | DatabaseType::DuckDb
     ) {
         return object_type == DatabaseObjectType::Table;
     }
@@ -729,7 +733,13 @@ pub fn build_rename_object_sql(options: RenameObjectSqlOptions) -> Result<String
 
     if matches!(
         database_type,
-        Some(DatabaseType::Sqlite | DatabaseType::Rqlite | DatabaseType::Turso | DatabaseType::CloudflareD1)
+        Some(
+            DatabaseType::Sqlite
+                | DatabaseType::Rqlite
+                | DatabaseType::Turso
+                | DatabaseType::CloudflareD1
+                | DatabaseType::DuckDb
+        )
     ) {
         return Ok(format!(
             "ALTER TABLE {} RENAME TO {};",
@@ -771,7 +781,8 @@ fn is_postgres_like_rename(database_type: DatabaseType) -> bool {
 }
 
 fn is_oracle_like_rename(database_type: DatabaseType) -> bool {
-    matches!(database_type, DatabaseType::Oracle | DatabaseType::Dameng)
+    // 神通 Oscar 实测支持 `ALTER TABLE old RENAME TO new`（PG 风格，与 Dameng/Oracle 一致）。
+    matches!(database_type, DatabaseType::Oracle | DatabaseType::Dameng | DatabaseType::Oscar)
 }
 
 fn is_postgres_like_structure_copy(database_type: DatabaseType) -> bool {
@@ -794,6 +805,7 @@ fn supports_duplicate_table_comment(database_type: DatabaseType) -> bool {
             | DatabaseType::Gaussdb
             | DatabaseType::Kwdb
             | DatabaseType::OpenGauss
+            | DatabaseType::Dameng
     )
 }
 
@@ -875,6 +887,11 @@ fn quote_sql_string(value: &str) -> String {
 }
 
 fn quote_duplicate_table_comment(database_type: DatabaseType, value: &str) -> String {
+    // Dameng rejects Postgres E'...' escape strings; keep standard '' escaping
+    // (same as DamengAgent COMMENT ON / COMMENT ON COLUMN generation).
+    if database_type == DatabaseType::Dameng {
+        return quote_sql_string(value);
+    }
     if !value.contains('\\') && !value.chars().any(|character| character.is_ascii_control()) {
         return quote_sql_string(value);
     }
@@ -1624,7 +1641,7 @@ mod tests {
             schema: Some("APP".to_string()),
             source_name: "USERS".to_string(),
             target_name: "users_copy".to_string(),
-            table_comment: None,
+            table_comment: Some("测试'克隆".to_string()),
             column_comments: vec![
                 DuplicateTableColumnComment {
                     name: "DISPLAY\"NAME".to_string(),
@@ -1636,16 +1653,31 @@ mod tests {
         });
         assert_eq!(
             dameng_sql,
-            "CREATE TABLE \"APP\".USERS_COPY AS SELECT * FROM \"APP\".\"USERS\" WHERE 1=0;\nCOMMENT ON COLUMN \"APP\".USERS_COPY.\"DISPLAY\"\"NAME\" IS '  Owner''s; display name';\nCOMMENT ON COLUMN \"APP\".USERS_COPY.\"STATUS\" IS 'active  ';"
+            "CREATE TABLE \"APP\".USERS_COPY AS SELECT * FROM \"APP\".\"USERS\" WHERE 1=0;\nCOMMENT ON TABLE \"APP\".USERS_COPY IS '测试''克隆';\nCOMMENT ON COLUMN \"APP\".USERS_COPY.\"DISPLAY\"\"NAME\" IS '  Owner''s; display name';\nCOMMENT ON COLUMN \"APP\".USERS_COPY.\"STATUS\" IS 'active  ';"
         );
         assert_eq!(
             crate::sql::split_sql_statements_for_database(&dameng_sql, DatabaseType::Dameng),
             vec![
                 "CREATE TABLE \"APP\".USERS_COPY AS SELECT * FROM \"APP\".\"USERS\" WHERE 1=0".to_string(),
+                "COMMENT ON TABLE \"APP\".USERS_COPY IS '测试''克隆'".to_string(),
                 "COMMENT ON COLUMN \"APP\".USERS_COPY.\"DISPLAY\"\"NAME\" IS '  Owner''s; display name'".to_string(),
                 "COMMENT ON COLUMN \"APP\".USERS_COPY.\"STATUS\" IS 'active  '".to_string(),
             ]
         );
+        // Control chars / backslashes must not switch Dameng to Postgres E'...' literals.
+        let dameng_escape_sql = build_duplicate_table_structure_sql(DuplicateTableStructureSqlOptions {
+            database_type: Some(DatabaseType::Dameng),
+            schema: Some("APP".to_string()),
+            source_name: "USERS".to_string(),
+            target_name: "users_copy".to_string(),
+            table_comment: Some("line1\\path\nline2".to_string()),
+            column_comments: vec![],
+        });
+        assert_eq!(
+            dameng_escape_sql,
+            "CREATE TABLE \"APP\".USERS_COPY AS SELECT * FROM \"APP\".\"USERS\" WHERE 1=0;\nCOMMENT ON TABLE \"APP\".USERS_COPY IS 'line1\\path\nline2';"
+        );
+        assert!(!dameng_escape_sql.contains("E'"));
         assert_eq!(
             build_duplicate_table_structure_sql(DuplicateTableStructureSqlOptions {
                 database_type: Some(DatabaseType::Dameng),
@@ -1845,6 +1877,23 @@ mod tests {
     }
 
     #[test]
+    fn builds_duckdb_table_rename_sql() {
+        assert!(supports_object_rename(Some(DatabaseType::DuckDb), DatabaseObjectType::Table));
+        assert!(!supports_object_rename(Some(DatabaseType::DuckDb), DatabaseObjectType::View));
+        assert_eq!(
+            build_rename_object_sql(RenameObjectSqlOptions {
+                database_type: Some(DatabaseType::DuckDb),
+                object_type: DatabaseObjectType::Table,
+                schema: Some("main".to_string()),
+                old_name: "users".to_string(),
+                new_name: "app users".to_string(),
+            })
+            .unwrap(),
+            "ALTER TABLE \"main\".\"users\" RENAME TO \"app users\";"
+        );
+    }
+
+    #[test]
     fn builds_postgres_table_and_view_rename_sql() {
         assert_eq!(
             build_rename_object_sql(RenameObjectSqlOptions {
@@ -1909,6 +1958,22 @@ mod tests {
             })
             .unwrap(),
             "ALTER VIEW \"SYSDBA\".\"ACTIVE_USERS\" RENAME TO \"ENABLED_USERS\";"
+        );
+    }
+
+    #[test]
+    fn builds_oscar_table_rename_sql() {
+        // 神通实测支持 `ALTER TABLE old RENAME TO new`（issue #5505 探测）。
+        assert_eq!(
+            build_rename_object_sql(RenameObjectSqlOptions {
+                database_type: Some(DatabaseType::Oscar),
+                object_type: DatabaseObjectType::Table,
+                schema: Some("SYSDBA".to_string()),
+                old_name: "OLD_USERS".to_string(),
+                new_name: "NEW_USERS".to_string(),
+            })
+            .unwrap(),
+            "ALTER TABLE \"SYSDBA\".\"OLD_USERS\" RENAME TO \"NEW_USERS\";"
         );
     }
 

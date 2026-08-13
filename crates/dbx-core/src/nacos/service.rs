@@ -140,6 +140,7 @@ pub async fn nacos_list_services_core(
     query: NacosServiceQuery,
 ) -> Result<NacosServiceList, String> {
     let admin = get_admin(state, conn_id).await?;
+    ensure_service_operation(admin.as_ref(), NacosServiceOperation::ListServices)?;
     admin.list_services(query).await
 }
 
@@ -149,17 +150,98 @@ pub async fn nacos_list_instances_core(
     query: NacosInstanceQuery,
 ) -> Result<Vec<NacosInstanceInfo>, String> {
     let admin = get_admin(state, conn_id).await?;
+    ensure_service_operation(admin.as_ref(), NacosServiceOperation::ListInstances)?;
     admin.list_instances(query).await
+}
+
+pub async fn nacos_get_service_core(
+    state: &AppState,
+    conn_id: &str,
+    query: NacosServiceQuery,
+) -> Result<NacosServiceDetail, String> {
+    let admin = get_admin(state, conn_id).await?;
+    ensure_service_operation(admin.as_ref(), NacosServiceOperation::GetService)?;
+    admin.get_service(query).await
+}
+
+pub async fn nacos_create_service_core(state: &AppState, conn_id: &str, req: NacosServiceUpsert) -> Result<(), String> {
+    ensure_connection_writable(state, conn_id, "Create Nacos service").await?;
+    let admin = get_admin(state, conn_id).await?;
+    ensure_service_operation(admin.as_ref(), NacosServiceOperation::CreateService)?;
+    admin.create_service(req).await
+}
+
+pub async fn nacos_update_service_core(state: &AppState, conn_id: &str, req: NacosServiceUpsert) -> Result<(), String> {
+    ensure_connection_writable(state, conn_id, "Update Nacos service").await?;
+    let admin = get_admin(state, conn_id).await?;
+    ensure_service_operation(admin.as_ref(), NacosServiceOperation::UpdateService)?;
+    admin.update_service(req).await
+}
+
+pub async fn nacos_delete_service_core(
+    state: &AppState,
+    conn_id: &str,
+    query: NacosServiceQuery,
+) -> Result<(), String> {
+    ensure_connection_writable(state, conn_id, "Delete Nacos service").await?;
+    let admin = get_admin(state, conn_id).await?;
+    ensure_service_operation(admin.as_ref(), NacosServiceOperation::DeleteService)?;
+    ensure_service_operation(admin.as_ref(), NacosServiceOperation::ListInstances)?;
+    let service_name = query
+        .service_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| "Nacos service name is required".to_string())?
+        .to_string();
+    let instances = admin
+        .list_instances_for_service_delete(NacosInstanceQuery {
+            namespace: query.namespace.clone(),
+            service_name,
+            group_name: query.group_name.clone(),
+            clusters: None,
+        })
+        .await?;
+    if !instances.is_empty() {
+        return Err(format!(
+            "NACOS_ERROR[serviceNotEmpty]: Nacos service still contains {} instance(s); deregister them before deletion",
+            instances.len()
+        ));
+    }
+    admin.delete_service(query).await
 }
 
 pub async fn nacos_update_instance_core(
     state: &AppState,
     conn_id: &str,
-    req: NacosInstanceUpdate,
+    req: NacosInstanceUpdateRequest,
 ) -> Result<(), String> {
     ensure_connection_writable(state, conn_id, "Update Nacos instance").await?;
     let admin = get_admin(state, conn_id).await?;
+    ensure_service_operation(admin.as_ref(), NacosServiceOperation::UpdateInstance)?;
     admin.update_instance(req).await
+}
+
+pub async fn nacos_register_instance_core(
+    state: &AppState,
+    conn_id: &str,
+    req: NacosInstanceRegistration,
+) -> Result<(), String> {
+    ensure_connection_writable(state, conn_id, "Register Nacos instance").await?;
+    let admin = get_admin(state, conn_id).await?;
+    ensure_service_operation(admin.as_ref(), NacosServiceOperation::RegisterInstance)?;
+    admin.register_instance(req).await
+}
+
+pub async fn nacos_deregister_instance_core(
+    state: &AppState,
+    conn_id: &str,
+    req: NacosInstanceRef,
+) -> Result<(), String> {
+    ensure_connection_writable(state, conn_id, "Deregister Nacos instance").await?;
+    let admin = get_admin(state, conn_id).await?;
+    ensure_service_operation(admin.as_ref(), NacosServiceOperation::DeregisterInstance)?;
+    admin.deregister_instance(req).await
 }
 
 pub async fn nacos_get_dashboard_core(
@@ -205,9 +287,64 @@ pub(crate) async fn ensure_connection_writable(state: &AppState, conn_id: &str, 
     }
 }
 
+fn ensure_service_operation(
+    admin: &dyn crate::nacos::port::NacosAdmin,
+    operation: NacosServiceOperation,
+) -> Result<(), String> {
+    let capabilities = admin.service_capabilities();
+    let capability = capabilities.operation(operation);
+    if capability.supported {
+        return Ok(());
+    }
+    let reason = match capability.reason {
+        Some(NacosCapabilityReason::ImplementationReadOnly) => "implementationReadOnly",
+        Some(NacosCapabilityReason::VersionUnsupported) => "versionUnsupported",
+        Some(NacosCapabilityReason::EndpointUnavailable) => "endpointUnavailable",
+        Some(NacosCapabilityReason::NotVerified) => "notVerified",
+        Some(NacosCapabilityReason::ConnectionReadOnly) => "connectionReadOnly",
+        None => "notVerified",
+    };
+    Err(format!("NACOS_ERROR[unsupportedOperation]: Nacos service operation {operation:?} is unavailable ({reason})"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn core_service_operation_guard_allows_documented_rnacos_v1_writes() {
+        use crate::nacos::config::{
+            NacosAdminConfig, NacosAuthConfig, NacosImplementation, NacosMetricsMode, NacosRNacosConsoleAuth,
+            NacosVersionMode,
+        };
+        use crate::nacos::http::NacosOpenApiAdmin;
+        use crate::nacos::port::NacosAdmin;
+
+        let admin = NacosOpenApiAdmin::new(NacosAdminConfig {
+            implementation: Some(NacosImplementation::RNacos),
+            server_addr: "http://127.0.0.1:3848".to_string(),
+            display_server_addr: "http://127.0.0.1:3848".to_string(),
+            namespace: "public".to_string(),
+            version_mode: Some(NacosVersionMode::Auto),
+            context_path: "/nacos".to_string(),
+            rnacos_console_addr: String::new(),
+            rnacos_history_enabled: Some(false),
+            rnacos_console_auth: NacosRNacosConsoleAuth::Inherit,
+            auth: NacosAuthConfig::None,
+            tls_skip_verify: false,
+            metrics_mode: NacosMetricsMode::Disabled,
+            metrics_url: String::new(),
+            page_size: 20,
+            connect_override: None,
+        })
+        .unwrap();
+        assert!(ensure_service_operation(&admin, NacosServiceOperation::ListServices).is_ok());
+        assert!(ensure_service_operation(&admin, NacosServiceOperation::CreateService).is_ok());
+        assert!(ensure_service_operation(&admin, NacosServiceOperation::UpdateInstance).is_ok());
+        assert!(admin.service_capabilities().create_service.supported);
+        let error = ensure_service_operation(&admin, NacosServiceOperation::DeleteService).unwrap_err();
+        assert!(error.contains("endpointUnavailable"));
+    }
 
     #[tokio::test]
     async fn raw_mutation_requires_writable_connection_before_adapter_build() {
@@ -216,6 +353,7 @@ mod tests {
         let storage = crate::storage::Storage::open(&dir.join("storage.db")).await.unwrap();
         let state = AppState::new(storage);
         let mut cfg = crate::models::connection::ConnectionConfig {
+            docs_notes_path: None,
             id: "nacos-1".to_string(),
             name: "Nacos".to_string(),
             note: String::new(),
@@ -229,6 +367,7 @@ mod tests {
             username: String::new(),
             password: String::new(),
             database: None,
+            default_schema: None,
             visible_databases: None,
             visible_schemas: None,
             show_system_schemas: false,
@@ -264,6 +403,7 @@ mod tests {
             jdbc_driver_class: None,
             jdbc_driver_paths: Vec::new(),
             one_time: false,
+            save_password: true,
             read_only: true,
             is_production: false,
             production_databases: Vec::new(),
@@ -288,6 +428,7 @@ mod tests {
         let storage = crate::storage::Storage::open(&dir.join("storage.db")).await.unwrap();
         let state = AppState::new(storage);
         let cfg = crate::models::connection::ConnectionConfig {
+            docs_notes_path: None,
             id: "nacos-rollback".to_string(),
             name: "Nacos".to_string(),
             note: String::new(),
@@ -301,6 +442,7 @@ mod tests {
             username: String::new(),
             password: String::new(),
             database: None,
+            default_schema: None,
             visible_databases: None,
             visible_schemas: None,
             show_system_schemas: false,
@@ -336,6 +478,7 @@ mod tests {
             jdbc_driver_class: None,
             jdbc_driver_paths: Vec::new(),
             one_time: false,
+            save_password: true,
             read_only: true,
             is_production: false,
             production_databases: Vec::new(),

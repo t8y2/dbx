@@ -53,8 +53,8 @@ async fn live_mysql_database_export_restores_dependent_views() {
     for sql in [
         format!("DROP DATABASE IF EXISTS `{database}`"),
         format!("CREATE DATABASE `{database}`"),
-        format!("CREATE TABLE `{database}`.`base_table` (id INT PRIMARY KEY)"),
-        format!("INSERT INTO `{database}`.`base_table` VALUES (7)"),
+        format!("CREATE TABLE `{database}`.`base_table` (id INT PRIMARY KEY, location POINT)"),
+        format!("INSERT INTO `{database}`.`base_table` VALUES (7, ST_GeomFromText('POINT(1 2)', 4326))"),
         format!("CREATE VIEW `{database}`.`z_view` AS SELECT id FROM `{database}`.`base_table`"),
         format!("CREATE VIEW `{database}`.`a_view` AS SELECT id FROM `{database}`.`z_view`"),
     ] {
@@ -83,6 +83,9 @@ async fn live_mysql_database_export_restores_dependent_views() {
     let test_result = async {
         export_database_sql_core(&state, &export_request, |_| {}).await?;
         let exported = std::fs::read_to_string(&file_path).map_err(|error| error.to_string())?;
+        if !exported.contains("ST_GeomFromWKB(") {
+            return Err("MySQL geometry export did not use ST_GeomFromWKB".to_string());
+        }
         let referenced_view = exported_view_position(&exported, "z_view")
             .ok_or_else(|| "exported z_view DDL was not found".to_string())?;
         let dependent_view = exported_view_position(&exported, "a_view")
@@ -108,7 +111,16 @@ async fn live_mysql_database_export_restores_dependent_views() {
 
         let result =
             execute_sql_statement(&state, &connection_id, &database, "SELECT id FROM a_view", None, None).await?;
-        Ok::<_, String>((referenced_view, dependent_view, result))
+        let spatial_result = execute_sql_statement(
+            &state,
+            &connection_id,
+            &database,
+            "SELECT ST_SRID(location), ST_Equals(location, ST_GeomFromText('POINT(1 2)', 4326)) FROM base_table",
+            None,
+            None,
+        )
+        .await?;
+        Ok::<_, String>((referenced_view, dependent_view, result, spatial_result))
     }
     .await;
     let cleanup =
@@ -116,7 +128,8 @@ async fn live_mysql_database_export_restores_dependent_views() {
 
     cleanup.unwrap();
     std::fs::remove_dir_all(dir).unwrap();
-    let (referenced_view, dependent_view, result) = test_result.unwrap();
+    let (referenced_view, dependent_view, result, spatial_result) = test_result.unwrap();
     assert!(referenced_view < dependent_view);
     assert_eq!(result.rows, vec![vec![serde_json::json!("7")]]);
+    assert_eq!(spatial_result.rows, vec![vec![serde_json::json!(4326), serde_json::json!(1)]]);
 }

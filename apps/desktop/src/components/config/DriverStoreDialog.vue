@@ -30,7 +30,7 @@ import {
   updatePerDriverProgress,
   type DriverInstallProgress,
 } from "@/lib/connection/driverInstallProgressUi";
-import { PRESTOSQL_DRIVER_DB_TYPE, prestoSqlBuiltinDriverRow, prestoSqlMavenBundle } from "@/lib/database/prestoSqlBuiltinDriver";
+import { installRegisteredManagedJdbcDriver, isManagedJdbcDriver, managedJdbcDriverRows, uninstallRegisteredManagedJdbcDriver } from "@/lib/database/managedJdbcDrivers";
 import type { DriverStoreFocus } from "@/lib/connection/agentDriverInstallHint";
 import { isOfflineDriverPackage, webDriverImportAccept } from "@/lib/driverStore/driverImportSelection";
 import { translateBackendError } from "@/i18n/backend-errors";
@@ -347,11 +347,11 @@ function getJreReinstallTitle(fallback: string): string {
   return formatProgressText(jreReinstallProgress.value) || fallback;
 }
 
-function isPrestoSqlBuiltinDriver(dbType: string): boolean {
-  return dbType === PRESTOSQL_DRIVER_DB_TYPE;
+function isManagedJdbcBuiltinDriver(dbType: string): boolean {
+  return isManagedJdbcDriver(dbType);
 }
 
-const builtinDriverRows = computed<AgentDriverInfo[]>(() => [...drivers.value, prestoSqlBuiltinDriverRow(jdbcMavenBundles.value)]);
+const builtinDriverRows = computed<AgentDriverInfo[]>(() => [...drivers.value, ...managedJdbcDriverRows(jdbcMavenBundles.value, jdbcPluginStatus.value)]);
 
 function driverLabel(dbType: string): string {
   return builtinDriverRows.value.find((d) => d.db_type === dbType)?.label ?? dbType;
@@ -469,13 +469,14 @@ async function runDriverInstall(dbType: string) {
   activeAgentOperationId.value = uuid();
   resetAgentInstallProgress();
   try {
-    if (isPrestoSqlBuiltinDriver(dbType)) {
-      if (!jdbcPluginStatus.value?.installed || !jdbcPluginStatus.value.compatible) {
-        jdbcPluginStatus.value = await api.installJdbcPlugin();
+    const managedResult = await installRegisteredManagedJdbcDriver(dbType, jdbcMavenBundles.value, jdbcPluginStatus.value, api);
+    if (managedResult) {
+      if (managedResult.pluginStatus) {
+        jdbcPluginStatus.value = managedResult.pluginStatus;
         emitDriverUpdateCount();
       }
-      jdbcDrivers.value = await api.installPrestoSqlJdbcDriver();
-      jdbcMavenBundles.value = await api.listJdbcMavenBundles();
+      if (managedResult.drivers) jdbcDrivers.value = managedResult.drivers;
+      jdbcMavenBundles.value = managedResult.bundles;
       void loadDriverStoreUsage();
       toast(t("driverStore.driverInstallSuccess", { label }));
       return;
@@ -544,11 +545,10 @@ async function upgradeAll() {
 async function uninstallDriver(dbType: string) {
   const label = driverLabel(dbType);
   try {
-    if (isPrestoSqlBuiltinDriver(dbType)) {
-      const bundle = prestoSqlMavenBundle(jdbcMavenBundles.value);
-      if (!bundle) return;
-      jdbcDrivers.value = await api.deleteJdbcMavenBundle(bundle.id);
-      jdbcMavenBundles.value = await api.listJdbcMavenBundles();
+    const managedResult = await uninstallRegisteredManagedJdbcDriver(dbType, jdbcMavenBundles.value, api);
+    if (managedResult) {
+      if (managedResult.drivers) jdbcDrivers.value = managedResult.drivers;
+      jdbcMavenBundles.value = managedResult.bundles;
       void loadDriverStoreUsage();
       toast(t("driverStore.driverUninstallSuccess", { label }));
       return;
@@ -642,7 +642,7 @@ async function importOfflineZip() {
 async function importDriverFile(driver: AgentDriverInfo) {
   if (agentImportBusy.value) return;
   const dbType = driver.db_type;
-  if (isPrestoSqlBuiltinDriver(dbType)) {
+  if (isManagedJdbcBuiltinDriver(dbType)) {
     await importJdbcDrivers();
     return;
   }
@@ -1267,11 +1267,11 @@ onMounted(async () => {
     const incoming = payload as DriverInstallProgress;
     if (!isDriverInstallProgressForOperation(incoming, activeAgentOperationId.value)) return;
     const channel = driverInstallProgressChannel(incoming);
-    const jdbcProgressBelongsToPrestoSql = channel === "jdbc-plugin" && installing.value === PRESTOSQL_DRIVER_DB_TYPE && !isInstallingJdbcPlugin.value;
-    if (jdbcProgressBelongsToPrestoSql) {
-      // PrestoSQL is shown as a built-in driver but installs through the JDBC plugin pipeline.
-      // Route its events into the per-driver map using the presto key.
-      updatePerDriverProgress(agentProgressByDbType, { ...incoming, db_type: PRESTOSQL_DRIVER_DB_TYPE });
+    const jdbcProgressBuiltinDriver = channel === "jdbc-plugin" && installing.value && isManagedJdbcBuiltinDriver(installing.value) && !isInstallingJdbcPlugin.value ? installing.value : null;
+    if (jdbcProgressBuiltinDriver) {
+      // Built-in JDBC profiles are shown alongside Agent drivers but install
+      // through the JDBC plugin pipeline. Route plugin events into their row.
+      updatePerDriverProgress(agentProgressByDbType, { ...incoming, db_type: jdbcProgressBuiltinDriver });
     } else if (channel === "agent") {
       if (incoming.db_type) {
         updatePerDriverProgress(agentProgressByDbType, incoming);
@@ -1348,7 +1348,7 @@ watch(driverStoreTab, (tab) => {
                   </SelectContent>
                 </Select>
               </div>
-              <Button variant="ghost" size="sm" class="h-7 rounded-md text-xs gap-1 text-muted-foreground" :disabled="agentImportBusy || installing !== null || upgradingAll || reinstallingJre !== null || queuedDriverInstalls.length > 0" @click="importOfflineZip">
+              <Button v-if="driverStoreTab === 'agent'" variant="ghost" size="sm" class="h-7 rounded-md text-xs gap-1 text-muted-foreground" :disabled="agentImportBusy || installing !== null || upgradingAll || reinstallingJre !== null || queuedDriverInstalls.length > 0" @click="importOfflineZip">
                 <Loader2 v-if="agentImportBusy" class="h-3.5 w-3.5 animate-spin" />
                 <FileUp v-else class="h-3.5 w-3.5" />
                 {{ agentImportBusy ? t("driverStore.importing") : t("driverStore.importOfflinePackage") }}
@@ -1473,10 +1473,10 @@ watch(driverStoreTab, (tab) => {
                     {{ t("driverStore.install") }}
                   </Button>
                   <Button
-                    v-if="!driver.installed && !isPrestoSqlBuiltinDriver(driver.db_type) && !isDriverProgressActive(driver.db_type) && !isDriverQueued(driver.db_type)"
+                    v-if="!driver.installed && !isManagedJdbcBuiltinDriver(driver.db_type) && !isDriverProgressActive(driver.db_type) && !isDriverQueued(driver.db_type)"
                     size="sm"
                     variant="ghost"
-                    class="h-7 w-7 rounded-md text-xs text-muted-foreground"
+                    class="driver-store-local-import-button h-7 w-7 rounded-md text-xs text-muted-foreground"
                     :title="importingDriver === driver.db_type ? t('driverStore.importing') : t('driverStore.importLocalJar')"
                     :disabled="upgradingAll || installing !== null || agentImportBusy"
                     @click="importDriverFile(driver)"
@@ -1533,7 +1533,7 @@ watch(driverStoreTab, (tab) => {
               </nav>
 
               <!-- Driver list area -->
-              <div class="min-w-0 flex-1 overflow-y-auto sm:pl-4">
+              <div class="driver-store-agent-results min-w-0 flex-1 overflow-y-auto sm:pl-4">
                 <!-- Empty: still loading -->
                 <div v-if="drivers.length === 0" class="py-12 text-center text-sm text-muted-foreground">
                   {{ t("common.loading") }}
@@ -1591,10 +1591,10 @@ watch(driverStoreTab, (tab) => {
                             {{ t("driverStore.install") }}
                           </Button>
                           <Button
-                            v-if="!driver.installed && !isPrestoSqlBuiltinDriver(driver.db_type) && !isDriverProgressActive(driver.db_type) && !isDriverQueued(driver.db_type)"
+                            v-if="!driver.installed && !isManagedJdbcBuiltinDriver(driver.db_type) && !isDriverProgressActive(driver.db_type) && !isDriverQueued(driver.db_type)"
                             size="sm"
                             variant="ghost"
-                            class="h-7 w-7 rounded-md text-xs text-muted-foreground"
+                            class="driver-store-local-import-button h-7 w-7 rounded-md text-xs text-muted-foreground"
                             :title="importingDriver === driver.db_type ? t('driverStore.importing') : t('driverStore.importLocalJar')"
                             :disabled="upgradingAll || installing !== null || agentImportBusy"
                             @click="importDriverFile(driver)"
@@ -1675,10 +1675,10 @@ watch(driverStoreTab, (tab) => {
                         {{ t("driverStore.install") }}
                       </Button>
                       <Button
-                        v-if="!driver.installed && !isPrestoSqlBuiltinDriver(driver.db_type) && !isDriverProgressActive(driver.db_type) && !isDriverQueued(driver.db_type)"
+                        v-if="!driver.installed && !isManagedJdbcBuiltinDriver(driver.db_type) && !isDriverProgressActive(driver.db_type) && !isDriverQueued(driver.db_type)"
                         size="sm"
                         variant="ghost"
-                        class="h-7 w-7 rounded-md text-xs text-muted-foreground"
+                        class="driver-store-local-import-button h-7 w-7 rounded-md text-xs text-muted-foreground"
                         :title="importingDriver === driver.db_type ? t('driverStore.importing') : t('driverStore.importLocalJar')"
                         :disabled="upgradingAll || installing !== null || agentImportBusy"
                         @click="importDriverFile(driver)"
@@ -1744,7 +1744,7 @@ watch(driverStoreTab, (tab) => {
                   <Button v-else type="button" variant="default" class="rounded-md" :disabled="isInstallingJdbcPlugin" @click="installJdbcPlugin">
                     {{ isInstallingJdbcPlugin ? t("common.loading") : t("settings.jdbcPluginInstall") }}
                   </Button>
-                  <Button v-if="!jdbcPluginStatus?.installed" type="button" variant="outline" class="rounded-md" :disabled="isInstallingJdbcPlugin" @click="installJdbcPluginLocal">
+                  <Button type="button" variant="outline" class="rounded-md" :disabled="isInstallingJdbcPlugin || isUninstallingJdbcPlugin" @click="installJdbcPluginLocal">
                     <FolderOpen class="h-3.5 w-3.5 mr-1" />
                     {{ t("driverStore.localInstall") }}
                   </Button>
@@ -2138,6 +2138,71 @@ watch(driverStoreTab, (tab) => {
 .driver-store-jdbc-row > button {
   width: 2rem !important;
   height: 2rem !important;
+}
+
+html.dbx-legacy-webview .driver-store-tab {
+  margin-top: 1.25rem !important;
+}
+
+html.dbx-legacy-webview .driver-store-agent-tab:not([hidden]),
+html.dbx-legacy-webview .driver-store-jdbc-tab:not([hidden]),
+html.dbx-legacy-webview .driver-store-storage-tab:not([hidden]) {
+  display: flex !important;
+  flex-direction: column !important;
+  gap: 1.25rem !important;
+}
+
+html.dbx-legacy-webview .driver-store-agent-tab > :not([hidden]) ~ :not([hidden]),
+html.dbx-legacy-webview .driver-store-jdbc-tab > :not([hidden]) ~ :not([hidden]),
+html.dbx-legacy-webview .driver-store-storage-tab > :not([hidden]) ~ :not([hidden]) {
+  margin-top: 0 !important;
+}
+
+html.dbx-legacy-webview .driver-store-local-import-button {
+  width: 2rem !important;
+  height: 2rem !important;
+  padding: 0 !important;
+}
+
+html.dbx-legacy-webview .driver-store-local-import-button svg {
+  width: 1rem !important;
+  height: 1rem !important;
+}
+
+@media (min-width: 640px) {
+  html.dbx-legacy-webview [data-driver-category-nav] {
+    width: 10rem !important;
+    flex-direction: column !important;
+    overflow-x: hidden !important;
+    overflow-y: auto !important;
+    border-right-width: 1px !important;
+    border-bottom-width: 0 !important;
+    padding-top: 0.125rem !important;
+    padding-right: 0.875rem !important;
+    padding-bottom: 0.125rem !important;
+  }
+
+  html.dbx-legacy-webview [data-driver-category-nav] > button {
+    width: 100% !important;
+    align-self: stretch !important;
+  }
+
+  html.dbx-legacy-webview [data-driver-category-nav] > button[aria-current="page"] {
+    background-color: rgba(23, 23, 23, 0.08) !important;
+    color: rgb(23, 23, 23) !important;
+  }
+
+  html.dbx-legacy-webview.dark [data-driver-category-nav] > button[aria-current="page"] {
+    background-color: rgba(255, 255, 255, 0.1) !important;
+    color: rgb(244, 244, 245) !important;
+  }
+
+  html.dbx-legacy-webview .driver-store-agent-results {
+    width: 0 !important;
+    min-width: 0 !important;
+    flex: 1 1 0% !important;
+    padding-left: 1rem !important;
+  }
 }
 
 @media (max-width: 900px) {

@@ -1650,7 +1650,7 @@ dependencies = [
 
 [[package]]
 name = "dbx"
-version = "0.5.76"
+version = "0.5.82"
 dependencies = [
  "anyhow",
  "axum",
@@ -1704,7 +1704,7 @@ dependencies = [
 
 [[package]]
 name = "dbx-cli"
-version = "0.4.55"
+version = "0.4.60"
 dependencies = [
  "async-trait",
  "dbx-core",
@@ -1745,6 +1745,7 @@ dependencies = [
  "minijinja",
  "mongodb",
  "mysql_async",
+ "mysql_common",
  "notify",
  "pageant",
  "percent-encoding",
@@ -1790,7 +1791,7 @@ dependencies = [
 
 [[package]]
 name = "dbx-mcp"
-version = "0.4.55"
+version = "0.4.60"
 dependencies = [
  "async-trait",
  "dbx-core",
@@ -1808,7 +1809,7 @@ dependencies = [
 
 [[package]]
 name = "dbx-web"
-version = "0.5.76"
+version = "0.5.82"
 dependencies = [
  "aes-gcm 0.10.3",
  "argon2",
@@ -2413,6 +2414,20 @@ name = "fast-float2"
 version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8eb564c5c7423d25c886fb561d1e4ee69f72354d16918afa32c08811f6b6a55"
+
+[[package]]
+name = "fast-socks5"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d09fe4a491909a716088083eeb5bcc25427330fdbcd4ecd3dfa5469b3da795df"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "log",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-stream",
+]
 
 [[package]]
 name = "fastrand"
@@ -4464,6 +4479,7 @@ dependencies = [
  "bson",
  "derive-where",
  "derive_more",
+ "fast-socks5",
  "futures-core",
  "futures-io",
  "futures-util",

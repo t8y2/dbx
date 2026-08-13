@@ -866,6 +866,7 @@ mod tests {
 
     fn mq_connection(read_only: bool) -> ConnectionConfig {
         ConnectionConfig {
+            docs_notes_path: None,
             id: "readonly-mq".to_string(),
             name: "Read only MQ".to_string(),
             note: String::new(),
@@ -879,6 +880,7 @@ mod tests {
             username: String::new(),
             password: String::new(),
             database: None,
+            default_schema: None,
             visible_databases: None,
             visible_schemas: None,
             show_system_schemas: false,
@@ -918,6 +920,7 @@ mod tests {
             jdbc_driver_class: None,
             jdbc_driver_paths: Vec::new(),
             one_time: false,
+            save_password: true,
             read_only,
             is_production: false,
             production_databases: Vec::new(),

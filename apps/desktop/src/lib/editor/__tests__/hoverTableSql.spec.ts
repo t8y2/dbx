@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { buildHoverTableSql, ddlForHoverPreview, hoverTableMatchesScope, reformatHoverDdl, sanitizeHoverDdl, scopeHoverTables } from "@/lib/editor/hoverTableSql";
+import { buildHoverTableSql, ddlForHoverPreview, hoverTableMatchesScope, normalizeAlignedSqlWhitespace, reformatHoverDdl, sanitizeHoverDdl, scopeHoverTables } from "@/lib/editor/hoverTableSql";
 import type { ColumnInfo, IndexInfo } from "@/types/database";
 
 type ColumnOverride = Partial<ColumnInfo> & { name: string; data_type: string };
@@ -325,5 +325,37 @@ describe("hover table scope", () => {
 
   it("does not trust an unscoped cached table", () => {
     expect(hoverTableMatchesScope({ name: "orders" }, { database: "sales", schema: "public" })).toBe(false);
+  });
+});
+
+describe("normalizeAlignedSqlWhitespace", () => {
+  it("collapses column-alignment padding to single spaces", () => {
+    const aligned = '    "id"         integer default nextval(\'x\'::regclass) not null,\n    "username"   character varying(255) not null,';
+    expect(normalizeAlignedSqlWhitespace(aligned)).toBe('    "id" integer default nextval(\'x\'::regclass) not null,\n    "username" character varying(255) not null,');
+  });
+
+  it("preserves each line's leading indentation", () => {
+    expect(normalizeAlignedSqlWhitespace('  primary key ("id")')).toBe('  primary key ("id")');
+  });
+
+  it("leaves single-spaced text unchanged", () => {
+    const text = "create table t (a int);";
+    expect(normalizeAlignedSqlWhitespace(text)).toBe(text);
+  });
+
+  it("preserves semantic whitespace in literals, identifiers, and comments", () => {
+    const aligned = `create table t (
+    "display  name" varchar(20) default 'a  b' not null, -- keep  this
+    [comment  text]  varchar(20) comment 'first  second',
+    escaped         varchar(20) default 'it\\'s  spaced',
+    body            text default $$x  y$$ /* keep  that */
+);`;
+
+    expect(normalizeAlignedSqlWhitespace(aligned)).toBe(`create table t (
+    "display  name" varchar(20) default 'a  b' not null, -- keep  this
+    [comment  text] varchar(20) comment 'first  second',
+    escaped varchar(20) default 'it\\'s  spaced',
+    body text default $$x  y$$ /* keep  that */
+);`);
   });
 });

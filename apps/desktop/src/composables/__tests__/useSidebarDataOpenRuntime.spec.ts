@@ -212,17 +212,20 @@ describe("useSidebarDataOpenRuntime", () => {
     await useSidebarDataOpenRuntime().openData(tableNode);
     mocks.tabs[0]!.isExecuting = false;
     mocks.tabs[0]!.executionId = undefined;
+    mocks.tabs[0]!.resultLocalSortOriginalLargeValueCells = [{ row_index: 0, column_index: 1, original_bytes: 1_000_000 }];
     await useSidebarDataOpenRuntime().openData(ordersNode);
 
     expect(mocks.tabs).toHaveLength(1);
     expect(mocks.tabs[0]?.title).toBe("orders");
     expect(mocks.tabs[0]?.tableMeta?.tableName).toBe("orders");
+    expect(mocks.tabs[0]?.resultLocalSortOriginalLargeValueCells).toBeUndefined();
   });
 
   it.each([
     ["pinned", { pinned: true }],
     ["executing", { isExecuting: true, executionId: "running" }],
     ["pending edits", { pendingDataChangeCount: 1 }],
+    ["pending editor draft", { hasPendingDataEditorDraft: true }],
   ])("opens a new tab instead of replacing an active %s data tab", async (_label, patch) => {
     mocks.dataTabReuseMode = "active-tab";
     const activeTab = {

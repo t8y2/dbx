@@ -1,10 +1,9 @@
-//! Apache RocketMQ admin adapter. Communicates with a Java agent process
-//! (`RocketMqAgent.java`) via JSON-RPC over stdin/stdout. The Java agent uses
-//! `DefaultMQAdminExt` for admin operations and `DefaultMQProducer` for
-//! message production.
+//! Apache RocketMQ admin adapter. Communicates with the Go native agent via
+//! JSON-RPC over stdin/stdout. The agent uses `rocketmq-admin-go` plus direct
+//! remoting calls for compatibility gaps in the upstream admin API.
 //!
-//! This adapter follows the same pattern as the ZooKeeper/Etcd agents:
-//! 1. Spawn a Java agent process via `AgentDriverClient`
+//! This adapter follows the same process-agent pattern as the other drivers:
+//! 1. Spawn the native agent process via `AgentDriverClient`
 //! 2. Perform JSON-RPC handshake + connect
 //! 3. Delegate all `MessageQueueAdmin` trait methods to JSON-RPC calls
 
@@ -97,21 +96,22 @@ fn cluster_info_from_agent_result(result: &serde_json::Value) -> MqClusterInfo {
 }
 
 impl RocketMqAdmin {
-    /// Spawn the RocketMQ Java agent, perform handshake, and connect.
+    /// Spawn the RocketMQ native agent, perform handshake, and connect.
     ///
     /// Callers must probe NameServer reachability before invoking this so the
-    /// connect-timeout wall covers only JVM spawn + handshake + connect.
+    /// connect-timeout wall covers only process spawn + handshake + connect.
     pub async fn new(cfg: MqAdminConfig, launch: AgentLaunchSpec) -> Result<Self, String> {
         let mut client = AgentDriverClient::spawn(launch).await?;
 
-        // Handshake
+        // Handshake / connect use Advanced connect timeout; ops RPC keep query timeout.
         let _: serde_json::Value =
-            client.call_with_timeout("handshake", serde_json::json!({}), cfg.rpc_timeout()).await?;
+            client.call_with_timeout("handshake", serde_json::json!({}), Some(cfg.connect_timeout())).await?;
 
         // Build the connection params from MqAdminConfig
         let conn_params = build_connection_params(&cfg);
         let connect_params = serde_json::json!({ "connection": conn_params });
-        let _: serde_json::Value = client.call_with_timeout("connect", connect_params, cfg.rpc_timeout()).await?;
+        let _: serde_json::Value =
+            client.call_with_timeout("connect", connect_params, Some(cfg.connect_timeout())).await?;
 
         log::info!("RocketMQ admin connected via agent (namesrv: {})", namesrv_addr(&cfg));
 
@@ -763,6 +763,9 @@ fn topic_info_from_agent_value(t: &serde_json::Value) -> TopicInfo {
         internal: t.get("internal").and_then(|v| v.as_bool()).unwrap_or(false),
         message_type: t.get("messageType").and_then(|v| v.as_str()).map(String::from),
         namespace: None,
+        message_count: None,
+        messages_ready: None,
+        messages_unacked: None,
     }
 }
 
@@ -810,7 +813,7 @@ fn rocketmq_topic_admin_params(topic: &TopicRef, partitions: Option<u32>) -> ser
     params
 }
 
-/// Build the connection params JSON from MqAdminConfig for the Java agent.
+/// Build the connection params JSON from MqAdminConfig for the native agent.
 fn build_connection_params(cfg: &MqAdminConfig) -> serde_json::Value {
     let extra = &cfg.extra;
     let access_key = extra_str(extra, "accessKey")
@@ -840,6 +843,13 @@ fn build_connection_params(cfg: &MqAdminConfig) -> serde_json::Value {
         "secret_key": secret_key,
         "tls_skip_verify": cfg.tls_skip_verify,
         "request_timeout_ms": cfg.request_timeout_ms(),
+        "connect_timeout_ms": cfg.connect_timeout_ms(),
+        "socks_proxy": cfg.socks_proxy.as_ref().map(|proxy| serde_json::json!({
+            "host": proxy.host,
+            "port": proxy.port,
+            "username": proxy.username,
+            "password": proxy.password,
+        })),
     })
 }
 
@@ -861,6 +871,9 @@ fn reset_cursor_params(topic: &TopicRef, sub: &str, pos: ResetPosition) -> Resul
             "position": "timestamp",
             "timestampMs": timestamp_ms,
         })),
+        ResetPosition::PartitionOffset { .. } => {
+            Err("RocketMQ does not support cursor reset by Kafka partition offset".to_string())
+        }
         ResetPosition::MessageId { .. } => {
             Err("RocketMQ does not support cursor reset by Pulsar message id".to_string())
         }
@@ -950,7 +963,90 @@ fn rocketmq_subscription_from_group(group: &serde_json::Value) -> SubscriptionIn
 /// Fail fast on unreachable NameServer before paying for JVM agent startup.
 /// Called outside the connect-timeout wall so the probe does not steal JVM budget.
 pub(crate) async fn probe_namesrv_before_connect(cfg: &MqAdminConfig, budget: Duration) -> Result<(), String> {
-    probe_namesrv_tcp(&namesrv_addr(cfg), budget).await
+    if let Some(proxy) = &cfg.socks_proxy {
+        probe_namesrv_via_socks5(&namesrv_addr(cfg), proxy, budget).await
+    } else {
+        probe_namesrv_tcp(&namesrv_addr(cfg), budget).await
+    }
+}
+
+async fn probe_namesrv_via_socks5(
+    namesrv: &str,
+    proxy: &crate::mq::config::MqSocksProxy,
+    budget: Duration,
+) -> Result<(), String> {
+    let targets: Vec<String> =
+        namesrv.split(';').map(str::trim).filter(|part| !part.is_empty()).map(str::to_string).collect();
+    if targets.is_empty() {
+        return Err("RocketMQ namesrv_addr is empty".to_string());
+    }
+
+    let deadline = tokio::time::Instant::now() + budget;
+    let per_attempt =
+        if targets.len() <= 1 { budget } else { (budget / targets.len() as u32).max(Duration::from_millis(500)) };
+    let mut last_error = String::new();
+    for target in targets {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        let (host, port) = match parse_namesrv_target(&target) {
+            Ok(endpoint) => endpoint,
+            Err(error) => {
+                last_error = error;
+                continue;
+            }
+        };
+        let attempt = remaining.min(per_attempt);
+        match timeout(
+            attempt,
+            crate::db::proxy_tunnel::connect_via_socks5_proxy(
+                &proxy.host,
+                proxy.port,
+                &proxy.username,
+                &proxy.password,
+                &host,
+                port,
+            ),
+        )
+        .await
+        {
+            Ok(Ok(_stream)) => return Ok(()),
+            Ok(Err(error)) => {
+                last_error = format!("Cannot reach RocketMQ NameServer {target} through SOCKS5 proxy: {error}");
+            }
+            Err(_) => {
+                last_error = format!(
+                    "RocketMQ NameServer {target} connect through SOCKS5 proxy timed out after {}ms",
+                    attempt.as_millis()
+                );
+            }
+        }
+    }
+    Err(if last_error.is_empty() {
+        format!("RocketMQ NameServer connect through SOCKS5 proxy timed out after {}s", budget.as_secs())
+    } else {
+        last_error
+    })
+}
+
+fn parse_namesrv_target(target: &str) -> Result<(String, u16), String> {
+    let target = target.trim();
+    let (host, port) = if let Some(rest) = target.strip_prefix('[') {
+        let (host, port) =
+            rest.split_once("]:").ok_or_else(|| format!("RocketMQ NameServer address '{target}' is invalid"))?;
+        (host, port)
+    } else {
+        target.rsplit_once(':').ok_or_else(|| format!("RocketMQ NameServer address '{target}' is invalid"))?
+    };
+    if host.trim().is_empty() {
+        return Err(format!("RocketMQ NameServer address '{target}' is invalid"));
+    }
+    let port = port
+        .trim()
+        .parse::<u16>()
+        .map_err(|_| format!("RocketMQ NameServer address '{target}' has an invalid port"))?;
+    Ok((host.trim().to_string(), port))
 }
 
 /// Probe NameServer addresses so connect fails before spawning the JVM agent.
@@ -964,12 +1060,10 @@ async fn probe_namesrv_tcp(namesrv: &str, budget: Duration) -> Result<(), String
     }
 
     let deadline = tokio::time::Instant::now() + budget;
-    // Multi-NS HA: cap each attempt so a blackholed first node leaves budget for later hosts.
-    let per_attempt = if hosts.len() <= 1 {
-        budget
-    } else {
-        (budget / hosts.len() as u32).clamp(Duration::from_millis(500), Duration::from_secs(3))
-    };
+    // Multi-NS HA: share budget across hosts so a blackholed first node leaves time for later ones.
+    // Floor 500ms; no hard 3s cap so Advanced connect timeout can raise the per-host attempt.
+    let per_attempt =
+        if hosts.len() <= 1 { budget } else { (budget / hosts.len() as u32).max(Duration::from_millis(500)) };
     let mut last_error = String::new();
     for host in &hosts {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -1060,7 +1154,10 @@ fn peeked_message_from_agent_json(idx: usize, message: &serde_json::Value) -> Pe
 mod tests {
     use super::*;
     use crate::mq::auth::MqAuth;
+    use crate::mq::config::MqSocksProxy;
     use crate::mq::types::MqSystemKind;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
 
     fn rocketmq_config(extra: serde_json::Value, auth: MqAuth) -> MqAdminConfig {
         MqAdminConfig {
@@ -1072,6 +1169,7 @@ mod tests {
             token_signing: None,
             connect_override: None,
             management_connect_override: None,
+            socks_proxy: None,
             query_timeout_secs: crate::mq::config::DEFAULT_MQ_QUERY_TIMEOUT_SECS,
             connect_timeout_secs: crate::mq::config::DEFAULT_MQ_CONNECT_TIMEOUT_SECS,
             extra,
@@ -1082,6 +1180,41 @@ mod tests {
     async fn probe_namesrv_rejects_empty_address_list() {
         let err = probe_namesrv_tcp(" ; ; ", Duration::from_millis(200)).await.expect_err("empty");
         assert!(err.contains("empty"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn probe_namesrv_uses_socks_proxy_for_logical_target() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let proxy_port = listener.local_addr().unwrap().port();
+        let (target_tx, target_rx) = tokio::sync::oneshot::channel();
+        let proxy_task = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut greeting = [0_u8; 3];
+            stream.read_exact(&mut greeting).await.unwrap();
+            assert_eq!(greeting, [0x05, 0x01, 0x00]);
+            stream.write_all(&[0x05, 0x00]).await.unwrap();
+
+            let mut request = [0_u8; 10];
+            stream.read_exact(&mut request).await.unwrap();
+            assert_eq!(&request[..4], &[0x05, 0x01, 0x00, 0x01]);
+            let host = std::net::Ipv4Addr::new(request[4], request[5], request[6], request[7]).to_string();
+            let port = u16::from_be_bytes([request[8], request[9]]);
+            let _ = target_tx.send((host, port));
+            stream.write_all(&[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0]).await.unwrap();
+        });
+
+        let mut cfg = rocketmq_config(serde_json::json!({ "namesrvAddr": "172.19.191.166:9876" }), MqAuth::None);
+        cfg.socks_proxy = Some(MqSocksProxy {
+            host: "127.0.0.1".to_string(),
+            port: proxy_port,
+            username: String::new(),
+            password: String::new(),
+        });
+
+        probe_namesrv_before_connect(&cfg, Duration::from_secs(2)).await.unwrap();
+
+        assert_eq!(target_rx.await.unwrap(), ("172.19.191.166".to_string(), 9876));
+        proxy_task.await.unwrap();
     }
 
     #[test]
@@ -1101,6 +1234,46 @@ mod tests {
         assert_eq!(params.get("access_key").and_then(|v| v.as_str()), Some("rocket"));
         assert_eq!(params.get("secret_key").and_then(|v| v.as_str()), Some("secret"));
         assert_eq!(params.get("request_timeout_ms").and_then(|v| v.as_u64()), Some(30_000));
+        assert_eq!(
+            params.get("connect_timeout_ms").and_then(|v| v.as_u64()),
+            Some(crate::mq::config::DEFAULT_MQ_CONNECT_TIMEOUT_SECS.saturating_mul(1000).max(1_000))
+        );
+    }
+
+    #[test]
+    fn connection_params_follow_advanced_timeouts() {
+        let mut cfg = rocketmq_config(serde_json::json!({ "namesrvAddr": "127.0.0.1:9876" }), MqAuth::None);
+        cfg.query_timeout_secs = 120;
+        cfg.connect_timeout_secs = 15;
+
+        let params = build_connection_params(&cfg);
+        assert_eq!(params.get("request_timeout_ms").and_then(|v| v.as_u64()), Some(120_000));
+        assert_eq!(params.get("connect_timeout_ms").and_then(|v| v.as_u64()), Some(15_000));
+    }
+
+    #[test]
+    fn connection_params_include_runtime_socks_proxy() {
+        let mut cfg = rocketmq_config(serde_json::json!({ "namesrvAddr": "mq.internal:9876" }), MqAuth::None);
+        cfg.socks_proxy = Some(MqSocksProxy {
+            host: "127.0.0.1".to_string(),
+            port: 41080,
+            username: "proxy-user".to_string(),
+            password: "proxy-secret".to_string(),
+        });
+
+        let params = build_connection_params(&cfg);
+
+        assert_eq!(params.pointer("/socks_proxy/host").and_then(|v| v.as_str()), Some("127.0.0.1"));
+        assert_eq!(params.pointer("/socks_proxy/port").and_then(|v| v.as_u64()), Some(41080));
+        assert_eq!(params.pointer("/socks_proxy/username").and_then(|v| v.as_str()), Some("proxy-user"));
+        assert_eq!(params.pointer("/socks_proxy/password").and_then(|v| v.as_str()), Some("proxy-secret"));
+    }
+
+    #[test]
+    fn parse_namesrv_target_accepts_ipv4_domain_and_ipv6() {
+        assert_eq!(parse_namesrv_target("172.19.191.166:9876").unwrap(), ("172.19.191.166".to_string(), 9876));
+        assert_eq!(parse_namesrv_target("mq.internal:9876").unwrap(), ("mq.internal".to_string(), 9876));
+        assert_eq!(parse_namesrv_target("[2001:db8::1]:9876").unwrap(), ("2001:db8::1".to_string(), 9876));
     }
 
     #[test]
@@ -1120,6 +1293,23 @@ mod tests {
 
         assert_eq!(params.get("groupId").and_then(|v| v.as_str()), Some("group-a"));
         assert_eq!(params.get("position").and_then(|v| v.as_str()), Some("timestamp"));
+    }
+
+    #[test]
+    fn reset_cursor_params_rejects_kafka_partition_offsets() {
+        let topic = TopicRef {
+            tenant: "_rocketmq".to_string(),
+            namespace: "default".to_string(),
+            topic: "events".to_string(),
+            persistent: true,
+            partitioned: None,
+            message_type: None,
+            ..TopicRef::default()
+        };
+
+        let error = reset_cursor_params(&topic, "group-a", ResetPosition::PartitionOffset { partition: 0, offset: 9 })
+            .expect_err("RocketMQ must not reinterpret Kafka partition offsets");
+        assert!(error.contains("Kafka partition offset"));
     }
 
     #[test]

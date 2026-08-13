@@ -78,6 +78,40 @@ fn index(name: &str, columns: &[&str]) -> EditableStructureIndex {
     }
 }
 
+fn existing_index(name: &str, columns: &[&str], is_unique: bool) -> EditableStructureIndex {
+    let mut index = index(name, columns);
+    index.is_unique = is_unique;
+    index.original = Some(IndexInfo {
+        name: name.to_string(),
+        columns: columns.iter().map(|column| column.to_string()).collect(),
+        is_unique,
+        is_primary: false,
+        filter: None,
+        index_type: None,
+        included_columns: None,
+        comment: None,
+    });
+    index
+}
+
+fn index_change_options(
+    database_type: DatabaseType,
+    schema: Option<&str>,
+    index: EditableStructureIndex,
+) -> TableStructureSqlOptions {
+    TableStructureSqlOptions {
+        database_type: Some(database_type),
+        schema: schema.map(str::to_string),
+        table_name: "USERS".to_string(),
+        columns: Vec::new(),
+        indexes: vec![index],
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
+        table_comment: None,
+        original_table_comment: None,
+    }
+}
+
 fn foreign_key(name: &str, column: &str, ref_table: &str, ref_column: &str) -> EditableStructureForeignKey {
     EditableStructureForeignKey {
         id: name.to_string(),
@@ -161,6 +195,158 @@ fn builds_mysql_column_and_index_changes() {
             "CREATE UNIQUE INDEX `uniq_users_email` ON `users` (`email`);",
         ]
     );
+}
+
+#[test]
+fn dameng_replaces_same_name_index_before_validating_uniqueness() {
+    let mut changed = existing_index("IDX_USERS_EMAIL", &["EMAIL"], false);
+    changed.name = "  IDX_USERS_EMAIL  ".to_string();
+    changed.is_unique = true;
+
+    let mut options = index_change_options(DatabaseType::Dameng, Some("SYSDBA"), changed);
+    options.table_name = "DBX_6002_USERS".to_string();
+    let result = build_table_structure_change_sql(options);
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec!["CREATE OR REPLACE UNIQUE INDEX \"IDX_USERS_EMAIL\" ON \"SYSDBA\".\"DBX_6002_USERS\" (\"EMAIL\");"]
+    );
+}
+
+#[test]
+fn dameng_replaces_same_name_unique_index_with_normal_index() {
+    let mut changed = existing_index("IDX_USERS_EMAIL", &["EMAIL"], true);
+    changed.is_unique = false;
+
+    let result = build_table_structure_change_sql(index_change_options(DatabaseType::Dameng, Some("APP"), changed));
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec!["CREATE OR REPLACE INDEX \"IDX_USERS_EMAIL\" ON \"APP\".\"USERS\" (\"EMAIL\");"]
+    );
+}
+
+#[test]
+fn dameng_replaces_same_name_index_when_columns_change() {
+    let mut changed = existing_index("IDX_USERS_EMAIL", &["EMAIL"], false);
+    changed.columns = vec!["LOGIN".to_string(), "EMAIL".to_string()];
+
+    let result = build_table_structure_change_sql(index_change_options(DatabaseType::Dameng, Some("APP"), changed));
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec!["CREATE OR REPLACE INDEX \"IDX_USERS_EMAIL\" ON \"APP\".\"USERS\" (\"LOGIN\", \"EMAIL\");"]
+    );
+}
+
+#[test]
+fn dameng_replaces_same_name_index_when_type_changes_to_bitmap() {
+    let mut changed = existing_index("IDX_USERS_EMAIL", &["EMAIL"], false);
+    changed.index_type = "bitmap".to_string();
+
+    let result = build_table_structure_change_sql(index_change_options(DatabaseType::Dameng, Some("APP"), changed));
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec!["CREATE OR REPLACE BITMAP INDEX \"IDX_USERS_EMAIL\" ON \"APP\".\"USERS\" (\"EMAIL\");"]
+    );
+}
+
+#[test]
+fn dameng_replaces_same_name_index_without_unsupported_comment_clause() {
+    let mut changed = existing_index("IDX_USERS_EMAIL", &["EMAIL"], false);
+    changed.comment = "New comment".to_string();
+    changed.original.as_mut().unwrap().comment = Some("Old comment".to_string());
+
+    let result = build_table_structure_change_sql(index_change_options(DatabaseType::Dameng, Some("APP"), changed));
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec!["CREATE OR REPLACE INDEX \"IDX_USERS_EMAIL\" ON \"APP\".\"USERS\" (\"EMAIL\");"]
+    );
+}
+
+#[test]
+fn dameng_renamed_index_keeps_drop_then_create_path() {
+    let mut changed = existing_index("IDX_USERS_EMAIL", &["EMAIL"], false);
+    changed.name = "IDX_USERS_LOGIN".to_string();
+
+    let result = build_table_structure_change_sql(index_change_options(DatabaseType::Dameng, Some("APP"), changed));
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec![
+            "DROP INDEX \"APP\".\"IDX_USERS_EMAIL\";",
+            "CREATE INDEX \"IDX_USERS_LOGIN\" ON \"APP\".\"USERS\" (\"EMAIL\");",
+        ]
+    );
+}
+
+#[test]
+fn dameng_primary_and_unchanged_indexes_keep_existing_behavior() {
+    let unchanged = existing_index("IDX_USERS_EMAIL", &["EMAIL"], false);
+    let unchanged_result =
+        build_table_structure_change_sql(index_change_options(DatabaseType::Dameng, Some("APP"), unchanged));
+    assert_eq!(unchanged_result.warnings, Vec::<String>::new());
+    assert!(unchanged_result.statements.is_empty());
+
+    let mut primary = existing_index("PK_USERS", &["ID"], true);
+    primary.columns.push("TENANT_ID".to_string());
+    primary.original.as_mut().unwrap().is_primary = true;
+    let primary_result =
+        build_table_structure_change_sql(index_change_options(DatabaseType::Dameng, Some("APP"), primary));
+    assert!(primary_result.statements.is_empty());
+    assert_eq!(primary_result.warnings, vec!["Primary index \"PK_USERS\" cannot be edited from this editor."]);
+}
+
+#[test]
+fn dameng_new_and_dropped_indexes_do_not_use_or_replace() {
+    let new_index = index("IDX_USERS_LOGIN", &["LOGIN"]);
+    let new_result =
+        build_table_structure_change_sql(index_change_options(DatabaseType::Dameng, Some("APP"), new_index));
+    assert_eq!(new_result.warnings, Vec::<String>::new());
+    assert_eq!(new_result.statements, vec!["CREATE INDEX \"IDX_USERS_LOGIN\" ON \"APP\".\"USERS\" (\"LOGIN\");"]);
+
+    let mut dropped = existing_index("IDX_USERS_EMAIL", &["EMAIL"], false);
+    dropped.marked_for_drop = true;
+    let drop_result =
+        build_table_structure_change_sql(index_change_options(DatabaseType::Dameng, Some("APP"), dropped));
+    assert_eq!(drop_result.warnings, Vec::<String>::new());
+    assert_eq!(drop_result.statements, vec!["DROP INDEX \"APP\".\"IDX_USERS_EMAIL\";"]);
+}
+
+#[test]
+fn non_dameng_index_rebuilds_do_not_use_or_replace() {
+    for database_type in [
+        DatabaseType::Mysql,
+        DatabaseType::Postgres,
+        DatabaseType::Sqlite,
+        DatabaseType::SqlServer,
+        DatabaseType::Oracle,
+        DatabaseType::Oscar,
+        DatabaseType::H2,
+        DatabaseType::Informix,
+        DatabaseType::Iris,
+    ] {
+        let mut changed = existing_index("IDX_USERS_EMAIL", &["EMAIL"], false);
+        changed.is_unique = true;
+        let result = build_table_structure_change_sql(index_change_options(database_type, None, changed));
+
+        assert_eq!(result.warnings, Vec::<String>::new(), "database type: {database_type:?}");
+        assert_eq!(result.statements.len(), 2, "database type: {database_type:?}");
+        assert!(result.statements[0].starts_with("DROP INDEX "), "database type: {database_type:?}");
+        assert!(result.statements[1].starts_with("CREATE UNIQUE INDEX "), "database type: {database_type:?}");
+        assert!(
+            result.statements.iter().all(|statement| !statement.contains("OR REPLACE")),
+            "database type: {database_type:?}"
+        );
+    }
 }
 
 #[test]
@@ -660,6 +846,57 @@ fn oracle_timestamp_default_precedes_nullability_in_modify_sql() {
     assert_eq!(
         result.statements,
         vec!["ALTER TABLE \"DBX_TEST\".\"test\" MODIFY (\"time\" TIMESTAMP(6) DEFAULT CURRENT_TIMESTAMP);"]
+    );
+}
+
+#[test]
+fn oracle_create_table_preserves_character_length_units() {
+    let mut byte_col = column("BYTE_COL");
+    byte_col.data_type = "VARCHAR2(12 BYTE)".to_string();
+    let mut char_col = column("CHAR_COL");
+    char_col.data_type = "VARCHAR2(12 CHAR)".to_string();
+
+    let result = build_create_table_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::Oracle),
+        schema: Some("DBX_APP".to_string()),
+        table_name: "DBX_ISSUE_4739".to_string(),
+        columns: vec![byte_col, char_col],
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
+        table_comment: None,
+        original_table_comment: None,
+    });
+
+    assert!(result.statements[0].contains("\"BYTE_COL\" VARCHAR2(12 BYTE)"));
+    assert!(result.statements[0].contains("\"CHAR_COL\" VARCHAR2(12 CHAR)"));
+}
+
+#[test]
+fn oracle_alter_column_preserves_character_length_unit() {
+    let mut column = column("DISPLAY_NAME");
+    column.data_type = "VARCHAR2(64 CHAR)".to_string();
+    column.original = Some(ColumnInfo {
+        name: "DISPLAY_NAME".to_string(),
+        data_type: "VARCHAR2(64 BYTE)".to_string(),
+        is_nullable: true,
+        column_default: None,
+        is_primary_key: false,
+        extra: None,
+        comment: None,
+        ..Default::default()
+    });
+
+    let result = build_single_column_alter_sql(SingleColumnAlterSqlOptions {
+        database_type: Some(DatabaseType::Oracle),
+        schema: Some("DBX_APP".to_string()),
+        table_name: "DBX_ISSUE_4739".to_string(),
+        column,
+    });
+
+    assert_eq!(
+        result.statements,
+        vec!["ALTER TABLE \"DBX_APP\".\"DBX_ISSUE_4739\" MODIFY (\"DISPLAY_NAME\" VARCHAR2(64 CHAR));"]
     );
 }
 
@@ -3527,6 +3764,71 @@ fn builds_mysql_composite_foreign_key() {
 }
 
 #[test]
+fn builds_oracle_foreign_key_with_supported_actions() {
+    let mut customer_id = column("CUSTOMER_ID");
+    customer_id.data_type = "NUMBER(19)".to_string();
+    let mut customer_fk = foreign_key("ORDERS_COPY_FK1", "CUSTOMER_ID", "CUSTOMERS", "ID");
+    customer_fk.ref_schema = "CRM".to_string();
+    customer_fk.on_update = "NO ACTION".to_string();
+    customer_fk.on_delete = "CASCADE".to_string();
+
+    let result = build_create_table_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::Oracle),
+        schema: Some("HR".to_string()),
+        table_name: "ORDERS_COPY".to_string(),
+        columns: vec![customer_id],
+        indexes: Vec::new(),
+        foreign_keys: vec![customer_fk],
+        triggers: Vec::new(),
+        table_comment: None,
+        original_table_comment: None,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements[1],
+        "ALTER TABLE \"HR\".\"ORDERS_COPY\" ADD CONSTRAINT \"ORDERS_COPY_FK1\" FOREIGN KEY (\"CUSTOMER_ID\") REFERENCES \"CRM\".\"CUSTOMERS\" (\"ID\") ON DELETE CASCADE;"
+    );
+}
+
+#[test]
+fn builds_oracle_foreign_key_replacement() {
+    let mut customer_fk = foreign_key("ORDERS_FK1", "CUSTOMER_ID", "CUSTOMERS", "ID");
+    customer_fk.on_delete = "SET NULL".to_string();
+    customer_fk.original = Some(ForeignKeyInfo {
+        name: "ORDERS_FK_OLD".to_string(),
+        column: "CUSTOMER_ID".to_string(),
+        ref_schema: Some("CRM".to_string()),
+        ref_table: "CUSTOMERS".to_string(),
+        ref_column: "ID".to_string(),
+        on_update: None,
+        on_delete: Some("NO ACTION".to_string()),
+    });
+    customer_fk.ref_schema = "CRM".to_string();
+
+    let result = build_table_structure_change_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::Oracle),
+        schema: Some("HR".to_string()),
+        table_name: "ORDERS".to_string(),
+        columns: Vec::new(),
+        indexes: Vec::new(),
+        foreign_keys: vec![customer_fk],
+        triggers: Vec::new(),
+        table_comment: None,
+        original_table_comment: None,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec![
+            "ALTER TABLE \"HR\".\"ORDERS\" DROP CONSTRAINT \"ORDERS_FK_OLD\";",
+            "ALTER TABLE \"HR\".\"ORDERS\" ADD CONSTRAINT \"ORDERS_FK1\" FOREIGN KEY (\"CUSTOMER_ID\") REFERENCES \"CRM\".\"CUSTOMERS\" (\"ID\") ON DELETE SET NULL;",
+        ]
+    );
+}
+
+#[test]
 fn builds_mysql_trigger_changes() {
     let mut existing = trigger("orders_bu", "BEFORE", "UPDATE", "BEGIN\n  SET NEW.updated_at = NOW();\nEND");
     existing.original = Some(TriggerInfo {
@@ -4108,4 +4410,243 @@ fn mysql_character_column_preserves_charset_collation_on_other_change() {
         result.statements,
         vec!["ALTER TABLE `users` MODIFY COLUMN `name` varchar(255) CHARACTER SET `utf8mb4` COLLATE `utf8mb4_unicode_ci` DEFAULT 'guest';"]
     );
+}
+
+// ---- Oscar (神通) ----
+// 神通 v7 是 Oracle 兼容方言，且实测支持 ALTER TABLE DROP/ADD PRIMARY KEY（与 Dameng 一致，
+// 不同于 Oracle）。DDL 生成走 StructureDialect::Oscar，与 Dameng 共享 Oracle-like 分支。
+// 这些测试锁定 issue #5505 的核心场景：建表/改列/主键/索引/注释，防回归。
+
+#[test]
+fn oscar_create_table_with_primary_key_and_comments() {
+    let mut id = column("ID");
+    id.data_type = "NUMBER(10)".to_string();
+    id.is_nullable = false;
+    id.is_primary_key = true;
+    let mut name = column("NAME");
+    name.data_type = "VARCHAR2(100)".to_string();
+    name.is_nullable = false;
+    name.comment = "name col".to_string();
+
+    let result = build_create_table_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::Oscar),
+        schema: Some("SYSDBA".to_string()),
+        table_name: "USERS".to_string(),
+        columns: vec![id, name],
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
+        table_comment: Some("user table".to_string()),
+        original_table_comment: None,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert!(result.statements[0].contains("CREATE TABLE \"SYSDBA\".\"USERS\""), "ddl: {}", result.statements[0]);
+    // Oracle 风格：PK 在表定义末尾单独声明；PK 列省略 NOT NULL（主键隐含），非 PK 非空列显式 NOT NULL。
+    assert!(result.statements[0].contains("\"ID\" NUMBER(10),"), "ddl: {}", result.statements[0]);
+    assert!(result.statements[0].contains("\"NAME\" VARCHAR2(100) NOT NULL,"), "ddl: {}", result.statements[0]);
+    assert!(result.statements[0].contains("PRIMARY KEY (\"ID\")"), "ddl: {}", result.statements[0]);
+    assert!(
+        result.statements.iter().any(|s| s == "COMMENT ON TABLE \"SYSDBA\".\"USERS\" IS 'user table';"),
+        "comments: {:?}",
+        result.statements
+    );
+    assert!(
+        result.statements.iter().any(|s| s == "COMMENT ON COLUMN \"SYSDBA\".\"USERS\".\"NAME\" IS 'name col';"),
+        "comments: {:?}",
+        result.statements
+    );
+}
+
+#[test]
+fn oscar_add_column_with_comment() {
+    let mut age = column("AGE");
+    age.data_type = "NUMBER(3)".to_string();
+    age.is_nullable = true;
+    age.comment = "age col".to_string();
+
+    let result = build_table_structure_change_sql(structure_change_options(
+        DatabaseType::Oscar,
+        Some("SYSDBA"),
+        "users",
+        vec![age],
+    ));
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    // Oracle 风格：ADD 用圆括号包裹列定义，可空列省略 NULL 关键字。
+    assert_eq!(
+        result.statements,
+        vec![
+            "ALTER TABLE \"SYSDBA\".\"users\" ADD (\"AGE\" NUMBER(3));",
+            "COMMENT ON COLUMN \"SYSDBA\".\"users\".\"AGE\" IS 'age col';",
+        ]
+    );
+}
+
+#[test]
+fn oscar_alter_existing_column_modify_type_and_nullability() {
+    let mut name = column("NAME");
+    name.data_type = "VARCHAR2(100)".to_string();
+    name.is_nullable = false;
+    name.original = Some(ColumnInfo {
+        name: "NAME".to_string(),
+        data_type: "VARCHAR2(50)".to_string(),
+        is_nullable: true,
+        column_default: None,
+        is_primary_key: false,
+        extra: None,
+        comment: None,
+        ..Default::default()
+    });
+
+    let result = build_table_structure_change_sql(structure_change_options(
+        DatabaseType::Oscar,
+        Some("SYSDBA"),
+        "users",
+        vec![name],
+    ));
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    // 神通 MODIFY 语法差异：类型变更与可空性变更需拆成两条（带括号的 MODIFY 不允许 NULL/NOT NULL）。
+    assert_eq!(
+        result.statements,
+        vec![
+            "ALTER TABLE \"SYSDBA\".\"users\" MODIFY (\"NAME\" VARCHAR2(100));",
+            "ALTER TABLE \"SYSDBA\".\"users\" MODIFY \"NAME\" NOT NULL;",
+        ]
+    );
+}
+
+#[test]
+fn oscar_alter_only_nullability_emits_single_unparenthesized_modify() {
+    // 只改可空性（类型不变）：应只生成一条不带括号的 MODIFY col NOT NULL，不重复发类型变更。
+    let mut name = column("NAME");
+    name.data_type = "VARCHAR2(100)".to_string();
+    name.is_nullable = false;
+    name.original = Some(ColumnInfo {
+        name: "NAME".to_string(),
+        data_type: "VARCHAR2(100)".to_string(),
+        is_nullable: true,
+        column_default: None,
+        is_primary_key: false,
+        extra: None,
+        comment: None,
+        ..Default::default()
+    });
+
+    let result = build_table_structure_change_sql(structure_change_options(
+        DatabaseType::Oscar,
+        Some("SYSDBA"),
+        "users",
+        vec![name],
+    ));
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(result.statements, vec!["ALTER TABLE \"SYSDBA\".\"users\" MODIFY \"NAME\" NOT NULL;"]);
+}
+
+#[test]
+fn oscar_alter_only_default_keeps_parenthesized_modify() {
+    // 只改默认值（类型与可空性不变）：带括号的 MODIFY 允许 DEFAULT，不触发可空性单独语句。
+    let mut name = column("NAME");
+    name.data_type = "VARCHAR2(100)".to_string();
+    name.is_nullable = true;
+    name.default_value = "'guest'".to_string();
+    name.original = Some(ColumnInfo {
+        name: "NAME".to_string(),
+        data_type: "VARCHAR2(100)".to_string(),
+        is_nullable: true,
+        column_default: None,
+        is_primary_key: false,
+        extra: None,
+        comment: None,
+        ..Default::default()
+    });
+
+    let result = build_table_structure_change_sql(structure_change_options(
+        DatabaseType::Oscar,
+        Some("SYSDBA"),
+        "users",
+        vec![name],
+    ));
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec!["ALTER TABLE \"SYSDBA\".\"users\" MODIFY (\"NAME\" VARCHAR2(100) DEFAULT 'guest');"]
+    );
+}
+
+#[test]
+fn oscar_drop_and_readd_primary_key() {
+    // 神通实测支持 ALTER TABLE DROP/ADD PRIMARY KEY（与 Dameng 一致）。
+    let mut old_pk = existing_pk_column("id", "INT", true, false);
+    old_pk.id = "old_id".to_string();
+    let mut new_pk = existing_pk_column("code", "VARCHAR(50)", false, true);
+    new_pk.id = "new_code".to_string();
+
+    let result = build_table_structure_change_sql(structure_change_options(
+        DatabaseType::Oscar,
+        Some("SYSDBA"),
+        "users",
+        vec![old_pk, new_pk],
+    ));
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec![
+            "ALTER TABLE \"SYSDBA\".\"users\" DROP PRIMARY KEY;",
+            "ALTER TABLE \"SYSDBA\".\"users\" ADD PRIMARY KEY (\"code\");",
+        ]
+    );
+}
+
+#[test]
+fn oscar_drop_index_with_schema_qualifier() {
+    let mut idx = index("DBX_PROBE_IDX", &["NAME"]);
+    idx.marked_for_drop = true;
+    idx.original = Some(IndexInfo {
+        name: "DBX_PROBE_IDX".to_string(),
+        columns: vec!["NAME".to_string()],
+        is_unique: false,
+        is_primary: false,
+        filter: None,
+        index_type: None,
+        included_columns: None,
+        comment: None,
+    });
+
+    let result = build_table_structure_change_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::Oscar),
+        schema: Some("SYSDBA".to_string()),
+        table_name: "users".to_string(),
+        columns: Vec::new(),
+        indexes: vec![idx],
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
+        table_comment: None,
+        original_table_comment: None,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(result.statements, vec!["DROP INDEX \"SYSDBA\".\"DBX_PROBE_IDX\";"]);
+}
+
+#[test]
+fn oscar_table_comment_uses_comment_on_table() {
+    let result = build_table_structure_change_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::Oscar),
+        schema: Some("SYSDBA".to_string()),
+        table_name: "users".to_string(),
+        columns: Vec::new(),
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
+        table_comment: Some("new comment".to_string()),
+        original_table_comment: Some("old comment".to_string()),
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(result.statements, vec!["COMMENT ON TABLE \"SYSDBA\".\"users\" IS 'new comment';"]);
 }

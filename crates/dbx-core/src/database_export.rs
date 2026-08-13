@@ -370,6 +370,7 @@ fn format_export_sql_literal_typed(
     value: &Value,
     database_type: Option<DatabaseType>,
     column_type: Option<&str>,
+    sqlserver_unicode_string: bool,
 ) -> String {
     if is_postgres_json_export_column(database_type, column_type) {
         return format_postgres_json_export_literal(value);
@@ -379,6 +380,9 @@ fn format_export_sql_literal_typed(
     }
     if matches!(database_type, Some(DatabaseType::Mysql)) && column_type.is_some_and(is_mysql_bit_type) {
         return format_mysql_bit_literal(value);
+    }
+    if let Some(literal) = format_mysql_spatial_export_literal(value, database_type, column_type) {
+        return literal;
     }
     if is_mysql_compatible_export_literal_target(database_type) {
         if column_type.is_some_and(is_mysql_binary_export_type) {
@@ -402,6 +406,11 @@ fn format_export_sql_literal_typed(
     }
     if let Some(literal) = format_export_temporal_literal(value, database_type, column_type) {
         return literal;
+    }
+    if sqlserver_unicode_string {
+        if let Some(text) = value.as_str() {
+            return format!("N{}", quote_export_sql_string(text));
+        }
     }
     format_export_sql_literal_for_database(value, database_type)
 }
@@ -447,6 +456,11 @@ fn format_postgres_vector_export_element(value: &Value) -> String {
 
 fn quote_export_sql_string(text: &str) -> String {
     format!("'{}'", text.replace('\\', "\\\\").replace('\'', "''"))
+}
+
+fn is_sqlserver_unicode_export_type(column_type: &str) -> bool {
+    let base = column_type.trim().split(|ch: char| ch == '(' || ch.is_whitespace()).next().unwrap_or("");
+    ["nchar", "nvarchar", "ntext", "sysname"].iter().any(|candidate| base.eq_ignore_ascii_case(candidate))
 }
 
 fn quote_export_sql_string_for_database(text: &str, database_type: Option<DatabaseType>) -> String {
@@ -769,6 +783,72 @@ fn is_mysql_binary_export_type(column_type: &str) -> bool {
     matches!(base, "binary" | "varbinary" | "blob" | "tinyblob" | "mediumblob" | "longblob")
 }
 
+pub(crate) fn is_mysql_spatial_export_type(column_type: &str) -> bool {
+    let base = column_type
+        .trim()
+        .to_ascii_lowercase()
+        .split(['(', ':', ' ', '\t', '\n'])
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    matches!(
+        base.as_str(),
+        "geometry"
+            | "point"
+            | "linestring"
+            | "polygon"
+            | "multipoint"
+            | "multilinestring"
+            | "multipolygon"
+            | "geometrycollection"
+            | "geomcollection"
+    )
+}
+
+/// Database exports encode MySQL spatial cells as `DBX_WKB:<srid>:<hex>` while
+/// reading them. Keeping this marker internal lets the normal JSON row shape
+/// and all non-export query paths continue to expose readable WKT values.
+pub(crate) fn format_mysql_spatial_export_literal(
+    value: &Value,
+    database_type: Option<DatabaseType>,
+    column_type: Option<&str>,
+) -> Option<String> {
+    if database_type != Some(DatabaseType::Mysql) || !column_type.is_some_and(is_mysql_spatial_export_type) {
+        return None;
+    }
+    let Value::String(value) = value else {
+        return value.is_null().then(|| "NULL".to_string());
+    };
+    let marker = value.strip_prefix("DBX_WKB:")?;
+    let (srid, hex) = marker.split_once(':')?;
+    if srid.is_empty()
+        || !srid.as_bytes().iter().all(u8::is_ascii_digit)
+        || hex.is_empty()
+        || hex.len() % 2 != 0
+        || !hex.as_bytes().iter().all(u8::is_ascii_hexdigit)
+    {
+        return None;
+    }
+    let wkb = decode_mysql_spatial_export_wkb(hex)?;
+    crate::db::wkb::decode_wkb_geometry(&wkb)?;
+    let srid = srid.parse::<u32>().ok()?;
+    Some(if srid == 0 { format!("ST_GeomFromWKB(0x{hex})") } else { format!("ST_GeomFromWKB(0x{hex}, {srid})") })
+}
+
+fn decode_mysql_spatial_export_wkb(hex: &str) -> Option<Vec<u8>> {
+    fn nibble(byte: u8) -> Option<u8> {
+        match byte {
+            b'0'..=b'9' => Some(byte - b'0'),
+            b'a'..=b'f' => Some(byte - b'a' + 10),
+            b'A'..=b'F' => Some(byte - b'A' + 10),
+            _ => None,
+        }
+    }
+
+    hex.as_bytes().chunks_exact(2).map(|pair| Some((nibble(pair[0])? << 4) | nibble(pair[1])?)).collect()
+}
+
 fn format_mysql_binary_export_literal(value: &Value) -> Option<String> {
     match value {
         Value::Null => Some("NULL".to_string()),
@@ -844,13 +924,19 @@ pub fn build_export_insert_statements(options: BuildExportInsertStatementsOption
         .columns
         .iter()
         .enumerate()
-        .filter(|(index, column)| {
+        .filter_map(|(index, column)| {
+            let column_type = options.column_types.get(index).and_then(|value| value.as_deref());
             is_export_insert_column(
                 options.database_type,
                 column,
-                options.column_types.get(*index).and_then(|value| value.as_deref()),
-                options.column_extras.get(*index).and_then(|value| value.as_deref()),
+                column_type,
+                options.column_extras.get(index).and_then(|value| value.as_deref()),
             )
+            .then(|| {
+                let sqlserver_unicode_string = options.database_type == Some(DatabaseType::SqlServer)
+                    && column_type.is_some_and(is_sqlserver_unicode_export_type);
+                (index, column, sqlserver_unicode_string)
+            })
         })
         .collect::<Vec<_>>();
     if insert_columns.is_empty() {
@@ -868,12 +954,12 @@ pub fn build_export_insert_statements(options: BuildExportInsertStatementsOption
     };
     let columns = insert_columns
         .iter()
-        .map(|(_, column)| quote_table_identifier(options.database_type, column))
+        .map(|(_, column, _)| quote_table_identifier(options.database_type, column))
         .collect::<Vec<_>>()
         .join(", ");
     let mut statements = Vec::new();
     let needs_dameng_identity_insert = options.database_type == Some(DatabaseType::Dameng)
-        && insert_columns.iter().any(|(index, _)| {
+        && insert_columns.iter().any(|(index, _, _)| {
             is_identity_column_extra(options.column_extras.get(*index).and_then(|value| value.as_deref()))
         });
 
@@ -901,12 +987,13 @@ pub fn build_export_insert_statements(options: BuildExportInsertStatementsOption
     for row in options.rows {
         let row_values = insert_columns
             .iter()
-            .map(|(index, _)| {
+            .map(|(index, _, sqlserver_unicode_string)| {
                 let value = row.get(*index).unwrap_or(&Value::Null);
                 format_export_sql_literal_typed(
                     value,
                     options.database_type,
                     options.column_types.get(*index).and_then(|value| value.as_deref()),
+                    *sqlserver_unicode_string,
                 )
             })
             .collect::<Vec<_>>()
@@ -1376,8 +1463,59 @@ fn record_export_error<W: Write>(file: &mut W, fail_on_error: bool, message: Str
     }
 }
 
-fn database_export_select_sql(columns: &[String], table: &str, schema: &str, db_type: &DatabaseType) -> String {
-    let columns = columns.iter().map(|column| quote_identifier(column, db_type)).collect::<Vec<_>>().join(", ");
+fn mysql_spatial_export_marker_expression(column: &str) -> String {
+    let quoted = quote_identifier(column, &DatabaseType::Mysql);
+    format!(
+        "CASE WHEN {quoted} IS NULL THEN NULL ELSE CONCAT('DBX_WKB:', ST_SRID({quoted}), ':', HEX(ST_AsWKB({quoted}))) END AS {quoted}"
+    )
+}
+
+fn database_export_select_list(columns: &[String], column_types: &[Option<String>], db_type: &DatabaseType) -> String {
+    columns
+        .iter()
+        .enumerate()
+        .map(|(index, column)| {
+            if *db_type == DatabaseType::Mysql
+                && column_types.get(index).and_then(|value| value.as_deref()).is_some_and(is_mysql_spatial_export_type)
+            {
+                mysql_spatial_export_marker_expression(column)
+            } else {
+                quote_identifier(column, db_type)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+pub(crate) fn replace_database_export_select_list(
+    sql: String,
+    columns: &[String],
+    column_types: &[Option<String>],
+    db_type: &DatabaseType,
+) -> String {
+    let original = columns.iter().map(|column| quote_identifier(column, db_type)).collect::<Vec<_>>().join(", ");
+    let replacement = database_export_select_list(columns, column_types, db_type);
+    if replacement == original {
+        return sql;
+    }
+    let prefix = format!("SELECT {original}");
+    if !sql.starts_with(&prefix) {
+        log::warn!(
+            "MySQL spatial database export could not replace its SELECT list; geometry columns will be exported as WKT"
+        );
+        return sql;
+    }
+    format!("SELECT {replacement}{}", &sql[prefix.len()..])
+}
+
+fn database_export_select_sql(
+    columns: &[String],
+    column_types: &[Option<String>],
+    table: &str,
+    schema: &str,
+    db_type: &DatabaseType,
+) -> String {
+    let columns = database_export_select_list(columns, column_types, db_type);
     let table = crate::transfer::qualified_table(table, schema, db_type, None);
     format!("SELECT {columns} FROM {table}")
 }
@@ -1481,6 +1619,12 @@ pub async fn export_database_sql_core(
     request: &DatabaseExportRequest,
     on_progress: impl Fn(ExportProgress) + Sync,
 ) -> Result<(), String> {
+    let _snapshot_keep_alive = if let Some(snapshot_session_id) = request.snapshot_session_id.as_deref() {
+        Some(crate::query::keep_manual_transaction_alive(state, snapshot_session_id).await?)
+    } else {
+        None
+    };
+
     // Emit immediately so the UI is never blank while we list schema metadata.
     emit_database_export_running(&on_progress, &request.export_id, "", 0, 0, 0, true);
 
@@ -1960,7 +2104,7 @@ pub async fn export_database_sql_core(
 
             if !col_names.is_empty() {
                 if let Some(snapshot_session_id) = request.snapshot_session_id.as_deref() {
-                    let sql = database_export_select_sql(&col_names, table_name, &request.schema, &db_type);
+                    let sql = database_export_select_sql(&col_names, &col_types, table_name, &request.schema, &db_type);
                     crate::query::stream_rows_in_manual_transaction(
                         state,
                         snapshot_session_id,
@@ -2031,7 +2175,7 @@ pub async fn export_database_sql_core(
                         }
 
                         let sql = if use_keyset {
-                            keyset_pagination_sql_with_identifier_quote(
+                            let sql = keyset_pagination_sql_with_identifier_quote(
                                 &col_names,
                                 table_name,
                                 &request.schema,
@@ -2040,16 +2184,18 @@ pub async fn export_database_sql_core(
                                 &last_primary_key_values,
                                 batch_size,
                                 None,
-                            )
+                            );
+                            replace_database_export_select_list(sql, &col_names, &col_types, &db_type)
                         } else {
-                            crate::transfer::pagination_sql(
+                            let sql = crate::transfer::pagination_sql(
                                 &col_names,
                                 table_name,
                                 &request.schema,
                                 &db_type,
                                 offset,
                                 batch_size,
-                            )
+                            );
+                            replace_database_export_select_list(sql, &col_names, &col_types, &db_type)
                         };
                         let result = match crate::transfer::execute_read_on_pool(state, &pool_key, &sql).await {
                             Ok(result) => result,
@@ -2353,15 +2499,16 @@ fn build_database_export_object_source_sql(
 mod tests {
     use super::{
         build_database_export_object_source_sql, build_database_sql_export, build_export_insert_statements,
-        database_export_total_objects, drop_table_if_exists_sql, filter_export_table_infos, format_export_sql_literal,
-        format_export_table_ddl, generate_postgres_extension_ddl, generate_postgres_sequence_create_ddl,
-        generate_postgres_sequence_owner_ddl, generate_postgres_sequence_setval_sql,
-        is_postgres_extension_member_routine, mysql_database_export_preamble, mysql_view_dependencies_from_rows,
-        mysql_view_dependencies_sql, normalize_export_table_ddl, record_export_error,
-        sort_export_views_by_dependencies, write_database_export_rows, BuildDatabaseSqlExportOptions,
-        BuildExportInsertStatementsOptions, DatabaseExportObjectCounts, DatabaseExportRequest, DdlNormalizeOptions,
-        ExportedTableSql, PostgresExportExtension, PostgresExportSequence, PostgresExtensionMembers,
-        DATABASE_EXPORT_INSERT_BATCH_SIZE, DATABASE_EXPORT_ROW_LIMIT,
+        database_export_select_sql, database_export_total_objects, drop_table_if_exists_sql, filter_export_table_infos,
+        format_export_sql_literal, format_export_table_ddl, format_mysql_spatial_export_literal,
+        generate_postgres_extension_ddl, generate_postgres_sequence_create_ddl, generate_postgres_sequence_owner_ddl,
+        generate_postgres_sequence_setval_sql, is_postgres_extension_member_routine, mysql_database_export_preamble,
+        mysql_view_dependencies_from_rows, mysql_view_dependencies_sql, normalize_export_table_ddl,
+        record_export_error, replace_database_export_select_list, sort_export_views_by_dependencies,
+        write_database_export_rows, BuildDatabaseSqlExportOptions, BuildExportInsertStatementsOptions,
+        DatabaseExportObjectCounts, DatabaseExportRequest, DdlNormalizeOptions, ExportedTableSql,
+        PostgresExportExtension, PostgresExportSequence, PostgresExtensionMembers, DATABASE_EXPORT_INSERT_BATCH_SIZE,
+        DATABASE_EXPORT_ROW_LIMIT,
     };
     use super::{concurrent_metadata_prefetch_allowed, database_export_metadata_prefetch_concurrency};
     use crate::models::connection::DatabaseType;
@@ -2385,11 +2532,15 @@ mod tests {
             schema: Some("public".to_string()),
             valid: None,
             signature: Some(signature.to_string()),
+            custom_type_kind: None,
+            has_members: None,
             comment: None,
             created_at: None,
             updated_at: None,
             parent_schema: None,
             parent_name: None,
+            trigger: None,
+            xugu_type_members_expandable: None,
         }
     }
 
@@ -2665,6 +2816,83 @@ mod tests {
     }
 
     #[test]
+    fn mysql_spatial_export_uses_wkb_constructor_and_preserves_srid() {
+        let statements = build_export_insert_statements(BuildExportInsertStatementsOptions {
+            database_type: Some(DatabaseType::Mysql),
+            schema: None,
+            table_name: Some("places".to_string()),
+            qualified_table_name: None,
+            columns: vec!["location".to_string(), "shape".to_string()],
+            column_types: vec![Some("point".to_string()), Some("geometry".to_string())],
+            column_extras: Vec::new(),
+            rows: vec![vec![
+                json!("DBX_WKB:4326:0101000000AE47E17A14AE5C4052B81E85EBF34240"),
+                json!("DBX_WKB:0:0101000000000000000000F03F0000000000000040"),
+            ]],
+            batch_size: Some(10),
+        })
+        .unwrap();
+
+        assert_eq!(
+            statements,
+            vec!["INSERT INTO `places` (`location`, `shape`) VALUES (ST_GeomFromWKB(0x0101000000AE47E17A14AE5C4052B81E85EBF34240, 4326), ST_GeomFromWKB(0x0101000000000000000000F03F0000000000000040));"]
+        );
+    }
+
+    #[test]
+    fn mysql_spatial_export_rejects_markers_for_unknown_or_nonspatial_types() {
+        let marker = json!("DBX_WKB:4326:0101000000AE47E17A14AE5C4052B81E85EBF34240");
+        assert!(format_mysql_spatial_export_literal(&marker, Some(DatabaseType::Mysql), None).is_none());
+        assert!(format_mysql_spatial_export_literal(&marker, Some(DatabaseType::Mysql), Some("varchar")).is_none());
+        assert!(format_mysql_spatial_export_literal(
+            &json!("DBX_WKB:4326:0101000000"),
+            Some(DatabaseType::Mysql),
+            Some("geometry"),
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn mysql_spatial_export_select_normalizes_geometry_columns_to_wkb_markers() {
+        let sql = database_export_select_sql(
+            &["id".to_string(), "location".to_string(), "name".to_string()],
+            &[Some("int".to_string()), Some("point".to_string()), Some("varchar(32)".to_string())],
+            "places",
+            "app",
+            &DatabaseType::Mysql,
+        );
+
+        assert_eq!(
+            sql,
+            "SELECT `id`, CASE WHEN `location` IS NULL THEN NULL ELSE CONCAT('DBX_WKB:', ST_SRID(`location`), ':', HEX(ST_AsWKB(`location`))) END AS `location`, `name` FROM `places`"
+        );
+    }
+
+    #[test]
+    fn mysql_spatial_export_keeps_keyset_pagination_when_replacing_select_list() {
+        let columns = vec!["id".to_string(), "location".to_string()];
+        let column_types = vec![Some("bigint".to_string()), Some("geometry".to_string())];
+        let sql = crate::transfer::keyset_pagination_sql_with_identifier_quote(
+            &columns,
+            "places",
+            "app",
+            &DatabaseType::Mysql,
+            &["id".to_string()],
+            &[json!(7)],
+            1000,
+            None,
+        );
+
+        let sql = replace_database_export_select_list(sql, &columns, &column_types, &DatabaseType::Mysql);
+
+        assert!(sql.starts_with(
+            "SELECT `id`, CASE WHEN `location` IS NULL THEN NULL ELSE CONCAT('DBX_WKB:', ST_SRID(`location`), ':', HEX(ST_AsWKB(`location`))) END AS `location` FROM `places`"
+        ));
+        assert!(sql.contains("WHERE `id` > 7"), "sql: {sql}");
+        assert!(sql.contains("ORDER BY `id` ASC LIMIT 1000"), "sql: {sql}");
+    }
+
+    #[test]
     fn database_specific_boolean_export_literals() {
         let sqlserver_statements = build_export_insert_statements(BuildExportInsertStatementsOptions {
             database_type: Some(DatabaseType::SqlServer),
@@ -2699,6 +2927,50 @@ mod tests {
             postgres_statements,
             vec![
                 "INSERT INTO \"public\".\"flags\" (\"enabled\", \"disabled\", \"unknown\") VALUES (TRUE, FALSE, NULL);"
+            ]
+        );
+    }
+
+    #[test]
+    fn sqlserver_export_prefixes_unicode_string_literals() {
+        let statements = build_export_insert_statements(BuildExportInsertStatementsOptions {
+            database_type: Some(DatabaseType::SqlServer),
+            schema: Some("dbo".to_string()),
+            table_name: Some("people".to_string()),
+            qualified_table_name: None,
+            columns: vec![
+                "name".to_string(),
+                "code".to_string(),
+                "legacy_note".to_string(),
+                "alias_name".to_string(),
+                "plain_text".to_string(),
+                "missing".to_string(),
+            ],
+            column_types: vec![
+                Some("NVARCHAR(255)".to_string()),
+                Some(" nchar (10) ".to_string()),
+                Some("ntext".to_string()),
+                Some("sysname".to_string()),
+                Some("varchar(255)".to_string()),
+                Some("nvarchar(20)".to_string()),
+            ],
+            column_extras: Vec::new(),
+            rows: vec![vec![
+                json!("张'三"),
+                json!("中文"),
+                json!("旧文本"),
+                json!("别名"),
+                json!("plain"),
+                Value::Null,
+            ]],
+            batch_size: Some(10),
+        })
+        .unwrap();
+
+        assert_eq!(
+            statements,
+            vec![
+                "INSERT INTO [dbo].[people] ([name], [code], [legacy_note], [alias_name], [plain_text], [missing]) VALUES (N'张''三', N'中文', N'旧文本', N'别名', 'plain', NULL);"
             ]
         );
     }

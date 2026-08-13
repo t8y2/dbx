@@ -1,10 +1,11 @@
 <script setup lang="ts">
-import { BarChart3, ListChecks } from "@lucide/vue";
+import { computed } from "vue";
+import { BarChart3, ListChecks, MessageSquareText } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
 import { Button } from "@/components/ui/button";
 import LightTooltip from "@/components/ui/LightTooltip.vue";
 
-type OutputView = "result" | "summary" | "explain" | "chart";
+type OutputView = "result" | "summary" | "explain" | "chart" | "messages";
 type PrimaryResultView = Exclude<OutputView, "explain">;
 
 const props = withDefaults(
@@ -13,9 +14,11 @@ const props = withDefaults(
     canShowResult: boolean;
     canShowSummary: boolean;
     canShowChart: boolean;
+    canShowMessages: boolean;
+    messageCount?: number;
     compact?: boolean;
   }>(),
-  { compact: false },
+  { compact: false, messageCount: 0 },
 );
 
 const emit = defineEmits<{
@@ -23,6 +26,8 @@ const emit = defineEmits<{
 }>();
 
 const { t } = useI18n();
+
+const messagesTooltip = computed(() => (props.messageCount > 0 ? `${t("tabs.messages")} (${props.messageCount})` : t("tabs.messages")));
 
 function selectView(view: PrimaryResultView) {
   if (props.activeView === view) return;
@@ -67,6 +72,24 @@ function selectView(view: PrimaryResultView) {
       >
         <BarChart3 class="block h-3.5 w-3.5 self-center" />
         <span v-if="!compact" class="inline-flex h-4 items-center leading-none">{{ t("chart.title") }}</span>
+      </Button>
+    </LightTooltip>
+
+    <LightTooltip :text="messagesTooltip" :disabled="!compact" side="bottom" :delay="0" :close-delay="0" nowrap>
+      <Button
+        size="sm"
+        :variant="activeView === 'messages' ? 'secondary' : 'ghost'"
+        class="h-5 shrink-0 text-xs leading-none"
+        :class="compact ? 'w-6 gap-0 px-0' : 'gap-1 px-2'"
+        :title="messagesTooltip"
+        :aria-label="messagesTooltip"
+        :aria-pressed="activeView === 'messages'"
+        :disabled="!canShowMessages"
+        @click="selectView('messages')"
+      >
+        <MessageSquareText class="block h-3.5 w-3.5 self-center" />
+        <span v-if="!compact" class="inline-flex h-4 items-center leading-none">{{ t("tabs.messages") }}</span>
+        <span v-if="!compact && messageCount > 0" class="inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-muted px-1 text-[10px] leading-none tabular-nums text-muted-foreground">{{ messageCount }}</span>
       </Button>
     </LightTooltip>
   </div>

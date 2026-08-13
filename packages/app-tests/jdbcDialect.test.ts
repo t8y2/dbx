@@ -4,6 +4,7 @@ import {
   codeMirrorSqlDialectForConnection,
   connectionShouldDiscoverJdbcSchemas,
   connectionShouldLoadIdentifierQuote,
+  connectionUsesConnectionRootSchemaMode,
   connectionUsesDatabaseObjectTreeMode,
   effectiveDatabaseTypeForConnection,
   gaussdbIdentifierQuoteOverride,
@@ -39,6 +40,16 @@ test("infers JDBC dialect from driver profile", () => {
     }),
     "sqlserver",
   );
+});
+
+test("Oracle JDBC uses connection-root schema navigation", () => {
+  const connection = {
+    db_type: "jdbc" as const,
+    connection_string: "jdbc:oracle:thin:@//127.0.0.1:1521/XE",
+  };
+
+  assert.equal(connectionUsesConnectionRootSchemaMode(connection), true);
+  assert.equal(connectionUsesDatabaseObjectTreeMode(connection), false);
 });
 
 test("uses dedicated ClickHouse editor syntax for inferred JDBC connections", () => {
@@ -118,6 +129,20 @@ test("infers Dameng JDBC connections", () => {
 test("discovers schemas only for unknown generic JDBC connections", () => {
   assert.equal(connectionShouldDiscoverJdbcSchemas({ db_type: "jdbc", driver_profile: "jdbc" }), true);
   assert.equal(connectionShouldDiscoverJdbcSchemas({ db_type: "jdbc", connection_string: "jdbc:mysql://127.0.0.1:3306/app" }), false);
+});
+
+test("keeps Phoenix on the generic JDBC metadata and object tree path", () => {
+  const connection = {
+    db_type: "jdbc" as const,
+    driver_profile: "phoenix",
+    connection_string: "jdbc:phoenix:localhost",
+    jdbc_driver_class: "org.apache.phoenix.jdbc.PhoenixDriver",
+  };
+
+  assert.equal(inferJdbcDialect(connection), undefined);
+  assert.equal(effectiveDatabaseTypeForConnection(connection), "jdbc");
+  assert.equal(connectionShouldDiscoverJdbcSchemas(connection), true);
+  assert.equal(connectionUsesDatabaseObjectTreeMode(connection), true);
 });
 
 test("uses SQL Server editor syntax for ASE without changing its effective JDBC type", () => {

@@ -609,28 +609,50 @@ public final class KafkaAgent {
     private static Object listTopics(JsonObject params) throws Exception {
         AdminClient admin = requireAdmin();
         int timeout = requestTimeout(params);
-        Set<String> names = admin.listTopics(new ListTopicsOptions().timeoutMs(timeout))
-            .names().get(timeout, TimeUnit.MILLISECONDS);
-        if (names.isEmpty()) {
+        Collection<TopicListing> listings = admin.listTopics(new ListTopicsOptions().timeoutMs(timeout))
+            .listings().get(timeout, TimeUnit.MILLISECONDS);
+        return topicListResult(
+            listings,
+            names -> admin.describeTopics(names).allTopicNames().get(timeout, TimeUnit.MILLISECONDS)
+        );
+    }
+
+    static Object topicListResult(Collection<TopicListing> listings, TopicDescriptionLoader descriptionLoader) throws Exception {
+        if (listings.isEmpty()) {
             return Collections.singletonMap("topics", Collections.emptyList());
         }
 
-        Map<String, TopicDescription> descriptions = admin.describeTopics(names)
-            .allTopicNames().get(timeout, TimeUnit.MILLISECONDS);
-
         List<Map<String, Object>> topics = new ArrayList<>();
-        for (Map.Entry<String, TopicDescription> entry : descriptions.entrySet()) {
-            TopicDescription desc = entry.getValue();
-            Map<String, Object> topic = new LinkedHashMap<>();
-            topic.put("name", desc.name());
-            topic.put("partitions", desc.partitions().size());
-            topic.put("replicationFactor", desc.partitions().isEmpty() ? 0
-                : desc.partitions().get(0).replicas().size());
-            topic.put("internal", desc.isInternal());
-            topics.add(topic);
+        try {
+            Set<String> names = listings.stream().map(TopicListing::name).collect(Collectors.toCollection(LinkedHashSet::new));
+            Map<String, TopicDescription> descriptions = descriptionLoader.load(names);
+            for (TopicDescription desc : descriptions.values()) {
+                Map<String, Object> topic = new LinkedHashMap<>();
+                topic.put("name", desc.name());
+                topic.put("partitions", desc.partitions().size());
+                topic.put("replicationFactor", desc.partitions().isEmpty() ? 0
+                    : desc.partitions().get(0).replicas().size());
+                topic.put("internal", desc.isInternal());
+                topics.add(topic);
+            }
+        } catch (Exception error) {
+            if (!isUnsupportedVersionError(error)) {
+                throw error;
+            }
+            for (TopicListing listing : listings) {
+                Map<String, Object> topic = new LinkedHashMap<>();
+                topic.put("name", listing.name());
+                topic.put("internal", listing.isInternal());
+                topics.add(topic);
+            }
         }
         topics.sort(Comparator.comparing(m -> (String) m.get("name")));
         return Collections.singletonMap("topics", topics);
+    }
+
+    @FunctionalInterface
+    interface TopicDescriptionLoader {
+        Map<String, TopicDescription> load(Set<String> names) throws Exception;
     }
 
     private static Object createTopic(JsonObject params) throws Exception {
@@ -951,16 +973,7 @@ public final class KafkaAgent {
         String groupId = stringOrEmpty(params, "groupId");
         String topic = stringOrEmpty(params, "topic");
 
-        Map<TopicPartition, OffsetAndMetadata> offsets = new HashMap<>();
-        JsonArray offsetArray = params.has("offsets") && params.get("offsets").isJsonArray()
-            ? params.getAsJsonArray("offsets") : new JsonArray();
-
-        for (JsonElement el : offsetArray) {
-            JsonObject offsetObj = el.getAsJsonObject();
-            int partition = offsetObj.get("partition").getAsInt();
-            long offset = offsetObj.get("offset").getAsLong();
-            offsets.put(new TopicPartition(topic, partition), new OffsetAndMetadata(offset));
-        }
+        Map<TopicPartition, OffsetAndMetadata> offsets = explicitConsumerGroupOffsets(params, topic);
 
         // If no explicit offsets, check for a "position" parameter.
         if (offsets.isEmpty()) {
@@ -1002,6 +1015,58 @@ public final class KafkaAgent {
         admin.alterConsumerGroupOffsets(groupId, offsets)
             .all().get(timeout, TimeUnit.MILLISECONDS);
         return Collections.singletonMap("ok", true);
+    }
+
+    static Map<TopicPartition, OffsetAndMetadata> explicitConsumerGroupOffsets(JsonObject params, String topic) {
+        Map<TopicPartition, OffsetAndMetadata> offsets = new HashMap<>();
+        if (!params.has("offsets")) {
+            return offsets;
+        }
+        JsonElement offsetsElement = params.get("offsets");
+        if (!offsetsElement.isJsonArray()) {
+            throw new IllegalArgumentException("offsets must be an array");
+        }
+        JsonArray offsetArray = offsetsElement.getAsJsonArray();
+        if (offsetArray.isEmpty()) {
+            throw new IllegalArgumentException("offsets must contain at least one partition offset");
+        }
+        for (JsonElement element : offsetArray) {
+            if (!element.isJsonObject()) {
+                throw new IllegalArgumentException("each offset must be an object");
+            }
+            JsonObject value = element.getAsJsonObject();
+            int partition = nonNegativeExactInt(value, "partition");
+            long offset = nonNegativeExactLong(value, "offset");
+            TopicPartition topicPartition = new TopicPartition(topic, partition);
+            if (offsets.put(topicPartition, new OffsetAndMetadata(offset)) != null) {
+                throw new IllegalArgumentException("duplicate partition in offsets: " + partition);
+            }
+        }
+        return offsets;
+    }
+
+    private static int nonNegativeExactInt(JsonObject object, String name) {
+        long value = nonNegativeExactLong(object, name);
+        if (value > Integer.MAX_VALUE) {
+            throw new IllegalArgumentException(name + " is outside the supported integer range");
+        }
+        return (int) value;
+    }
+
+    private static long nonNegativeExactLong(JsonObject object, String name) {
+        JsonElement element = object.get(name);
+        if (element == null || !element.isJsonPrimitive() || !element.getAsJsonPrimitive().isNumber()) {
+            throw new IllegalArgumentException(name + " must be a non-negative integer");
+        }
+        try {
+            java.math.BigDecimal decimal = element.getAsBigDecimal();
+            if (decimal.signum() < 0 || decimal.stripTrailingZeros().scale() > 0) {
+                throw new IllegalArgumentException(name + " must be a non-negative integer");
+            }
+            return decimal.longValueExact();
+        } catch (ArithmeticException error) {
+            throw new IllegalArgumentException(name + " is outside the supported integer range", error);
+        }
     }
 
     static OffsetSpec offsetSpecForPosition(String position, Long timestampMs) {
@@ -1821,13 +1886,14 @@ public final class KafkaAgent {
         int timeout = requestTimeout(params);
 
         DescribeClusterResult cluster = admin.describeCluster();
+        DescribeMetadataQuorumResult metadataQuorum = admin.describeMetadataQuorum();
         String clusterId = cluster.clusterId().get(timeout, TimeUnit.MILLISECONDS);
-        Node controller = cluster.controller().get(timeout, TimeUnit.MILLISECONDS);
         Collection<Node> nodes = cluster.nodes().get(timeout, TimeUnit.MILLISECONDS);
+        Map<String, Object> controller = resolveClusterController(metadataQuorum, cluster, nodes, timeout);
 
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("clusterId", clusterId);
-        result.put("controller", controller != null ? nodeToMap(controller) : null);
+        result.put("controller", controller);
         List<Map<String, Object>> brokerList = new ArrayList<>();
         for (Node node : nodes) {
             brokerList.add(nodeToMap(node));
@@ -1835,6 +1901,52 @@ public final class KafkaAgent {
         result.put("brokers", brokerList);
         result.put("nodeCount", nodes.size());
         return result;
+    }
+
+    private static Map<String, Object> resolveClusterController(
+        DescribeMetadataQuorumResult metadataQuorum,
+        DescribeClusterResult cluster,
+        Collection<Node> brokers,
+        int timeout
+    ) throws Exception {
+        try {
+            QuorumInfo quorum = metadataQuorum.quorumInfo().get(timeout, TimeUnit.MILLISECONDS);
+            Map<Integer, List<RaftVoterEndpoint>> endpointsByNode = new HashMap<>();
+            for (Map.Entry<Integer, QuorumInfo.Node> entry : quorum.nodes().entrySet()) {
+                endpointsByNode.put(entry.getKey(), entry.getValue().endpoints());
+            }
+            return metadataQuorumControllerToMap(quorum.leaderId(), brokers, endpointsByNode);
+        } catch (Exception e) {
+            if (isUnsupportedVersionError(e)) {
+                Node controller = cluster.controller().get(timeout, TimeUnit.MILLISECONDS);
+                return controller != null ? nodeToMap(controller) : null;
+            }
+            logger().warn("Unable to resolve Kafka metadata quorum leader; omitting the controller", e);
+            return null;
+        }
+    }
+
+    static Map<String, Object> metadataQuorumControllerToMap(
+        int leaderId,
+        Collection<Node> brokers,
+        Map<Integer, List<RaftVoterEndpoint>> endpointsByNode
+    ) {
+        if (leaderId < 0) {
+            return null;
+        }
+        for (Node broker : brokers) {
+            if (broker.id() == leaderId) {
+                return nodeToMap(broker);
+            }
+        }
+        List<RaftVoterEndpoint> endpoints = endpointsByNode.getOrDefault(leaderId, Collections.emptyList());
+        if (!endpoints.isEmpty()) {
+            RaftVoterEndpoint endpoint = endpoints.get(0);
+            return nodeToMap(new Node(leaderId, endpoint.host(), endpoint.port()));
+        }
+        Map<String, Object> controller = new LinkedHashMap<>();
+        controller.put("id", leaderId);
+        return controller;
     }
 
     private static Object getConsumerLag(JsonObject params) throws Exception {

@@ -5,6 +5,10 @@ import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs
 const VERSIONS_PATH = "agents/versions.json";
 const VERSION_SYNC_SUBJECT = "chore: bump module versions [skip ci]";
 const JRE_BUILD_PATHS = new Set([".github/workflows/agents-release.yml"]);
+const NATIVE_RELEASE_PACKAGING_PATHS = new Set([
+  ".github/scripts/reuse-agent-release-assets.mjs",
+  "agents/scripts/version_agent_artifacts.py",
+]);
 
 function bumpPatchVersion(version) {
   const match = /^(\d+)\.(\d+)\.(\d+)(.*)$/.exec(version);
@@ -47,14 +51,24 @@ function fileContainsCommonDependency(path, moduleExists, readModuleFile) {
 const nativeDriverDirectories = {
   cassandra: "cassandra-go",
   duckdb: "duckdb",
+  hive: "hive-go",
   oracle: "oracle-go",
   kingbase: "kingbase-go",
+  iotdb: "iotdb",
   neo4j: "neo4j-go",
   vastbase: "vastbase-go",
   rabbitmq: "rabbitmq",
+  rocketmq: "rocketmq",
   tdengine: "tdengine",
 };
-const nativeDriverModules = new Set(["cassandra", "duckdb", "oracle", "xugu", "kingbase", "neo4j", "vastbase", "rabbitmq", "tdengine"]);
+const nativeDriverModules = new Set(["cassandra", "duckdb", "hive", "oracle", "xugu", "kingbase", "iotdb", "neo4j", "vastbase", "rabbitmq", "rocketmq", "tdengine"]);
+const nativeDriverSharedPaths = {
+  hive: [
+    "agents/go-common/go-gssapi",
+    "agents/go-common/gohive",
+    "agents/go-common/gosasl",
+  ],
+};
 
 function resolveAgentModule(moduleName, { legacyStandaloneModules, moduleExists, readModuleFile }) {
   let checkDir = null;
@@ -77,6 +91,7 @@ function resolveAgentModule(moduleName, { legacyStandaloneModules, moduleExists,
   return {
     checkDir,
     modulePath,
+    sharedPaths: nativeDriverSharedPaths[moduleName] ?? [],
     javaBuild: hasBuildGradle,
     nativeBuild: nativeDriverModules.has(moduleName),
     commonDependent: hasBuildGradle && (explicitlyDependsOnCommon || !legacyStandaloneModules.has(moduleName)),
@@ -126,16 +141,22 @@ export function evaluateAgentVersionBump({
   if (commonChanged) {
     logs.push("Common agent runtime changes detected; common-triggered bumps are limited to modules that package agents/common.");
   }
+  const nativeReleasePackagingChanged = changedFiles.some((file) => NATIVE_RELEASE_PACKAGING_PATHS.has(file));
+  if (nativeReleasePackagingChanged) {
+    logs.push("Shared native release packaging changes detected; all native modules will be rebuilt.");
+  }
 
   for (const { moduleName, module } of resolvedModules) {
-    const moduleChanged = pathChanged(changedFiles, module.modulePath);
+    const moduleChanged = [module.modulePath, ...module.sharedPaths]
+      .some((path) => pathChanged(changedFiles, path));
     // Only modules that package agents/common need installer-visible updates
     // for shared Java runtime changes; native and standalone agents do not.
     const commonAffectsModule = commonChanged && module.commonDependent;
+    const nativePackagingAffectsModule = nativeReleasePackagingChanged && module.nativeBuild;
     const oldVersion = nextVersions[moduleName] ?? "0.1.0";
     const prevVersion = prevVersions[moduleName] ?? "";
     const manuallyVersioned = manualVersionsChanged && (!prevVersion || prevVersion !== oldVersion);
-    const moduleNeedsBuild = moduleChanged || commonAffectsModule || manuallyVersioned;
+    const moduleNeedsBuild = moduleChanged || commonAffectsModule || nativePackagingAffectsModule || manuallyVersioned;
 
     if (!moduleNeedsBuild) {
       logs.push(`  ${moduleName}: no changes`);

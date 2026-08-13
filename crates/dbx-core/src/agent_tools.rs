@@ -10,7 +10,7 @@ use crate::query::QueryExecutionOptions;
 use crate::query_execution_sql::{build_explain_sql, supports_explain_plan, supports_sql_query, ExplainSqlOptions};
 use crate::sql_dialect::{build_table_data_select_sql, TableDataSelectSqlOptions};
 use crate::sql_risk::SqlRisk;
-use crate::types::QueryResult;
+use crate::types::{QueryMessage, QueryResult};
 
 /// Maximum number of tables returned by list_tables tool.
 const LIST_TABLES_LIMIT: usize = 200;
@@ -26,6 +26,53 @@ const BROWSE_COLLECTION_LIMIT: usize = 20;
 
 /// Absolute maximum rows any query tool may request.
 const MAX_ALLOWED_ROWS: usize = 100;
+
+/// Default string-cell character budget for AI and local MCP query results.
+const DEFAULT_QUERY_CELL_CHAR_LIMIT: usize = 200;
+
+/// Explicit string-cell windows stay bounded so one tool call cannot flood the model context.
+const MAX_QUERY_CELL_CHAR_LIMIT: usize = 4_000;
+
+/// Bounds explicit sliding-window scans without changing the underlying database request.
+const MAX_QUERY_CELL_CHAR_OFFSET: usize = 1_000_000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QueryCellWindow {
+    offset: usize,
+    limit: usize,
+}
+
+impl Default for QueryCellWindow {
+    fn default() -> Self {
+        Self { offset: 0, limit: DEFAULT_QUERY_CELL_CHAR_LIMIT }
+    }
+}
+
+impl QueryCellWindow {
+    pub fn from_options(offset: Option<u64>, limit: Option<u64>) -> Self {
+        Self {
+            offset: bounded_query_cell_option(offset, 0, MAX_QUERY_CELL_CHAR_OFFSET),
+            limit: bounded_query_cell_option(limit, DEFAULT_QUERY_CELL_CHAR_LIMIT, MAX_QUERY_CELL_CHAR_LIMIT).max(1),
+        }
+    }
+
+    pub fn from_arguments(arguments: &serde_json::Value) -> Self {
+        Self::from_options(
+            arguments.get("cell_char_offset").and_then(serde_json::Value::as_u64),
+            arguments.get("cell_char_limit").and_then(serde_json::Value::as_u64),
+        )
+    }
+
+    pub fn explicit_from_arguments(arguments: &serde_json::Value) -> Option<Self> {
+        let offset = arguments.get("cell_char_offset").and_then(serde_json::Value::as_u64);
+        let limit = arguments.get("cell_char_limit").and_then(serde_json::Value::as_u64);
+        (offset.is_some() || limit.is_some()).then(|| Self::from_options(offset, limit))
+    }
+}
+
+fn bounded_query_cell_option(value: Option<u64>, default: usize, maximum: usize) -> usize {
+    value.map(|value| value.min(maximum as u64) as usize).unwrap_or(default)
+}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AgentSqlPermissions {
@@ -191,7 +238,9 @@ pub fn all_tools(db_type: DatabaseType, sql_permissions: AgentSqlPermissions) ->
         return vec![list_collections_tool(), browse_collection_tool(), get_current_time_tool()];
     }
     let mut tools = vec![list_tables_tool(), get_columns_tool(), get_current_time_tool()];
-    if supports_sql_query(db_type) {
+    if db_type == DatabaseType::MongoDb {
+        tools.push(mongo_execute_query_tool(sql_permissions));
+    } else if supports_sql_query(db_type) {
         tools.push(execute_query_tool(sql_permissions));
         tools.push(get_sample_data_tool());
     }
@@ -199,6 +248,29 @@ pub fn all_tools(db_type: DatabaseType, sql_permissions: AgentSqlPermissions) ->
         tools.push(explain_query_tool());
     }
     tools
+}
+
+fn mongo_execute_query_tool(_sql_permissions: AgentSqlPermissions) -> ToolDefinition {
+    ToolDefinition {
+        name: "execute_query",
+        description: "Execute a read-only MongoDB shell command and return results (max 50 rows). Use commands such as db.collection.find({}), db.collection.findOne({}), db.collection.aggregate([]), or db.collection.countDocuments({}). Write commands are not available to the MongoDB Agent.",
+        parameters: json!({
+            "type": "object",
+            "properties": {
+                "sql": {
+                    "type": "string",
+                    "description": "The MongoDB shell-style command to execute"
+                },
+                "limit": {
+                    "type": "number",
+                    "description": "Max rows to return (default 50, max 100)"
+                }
+            },
+            "required": ["sql"]
+        }),
+        read_only: true,
+        parallel_ok: false,
+    }
 }
 
 /// list_tables tool definition.
@@ -271,6 +343,18 @@ fn execute_query_tool(sql_permissions: AgentSqlPermissions) -> ToolDefinition {
                 "limit": {
                     "type": "number",
                     "description": "Max rows to return (default 50, max 100)"
+                },
+                "cell_char_offset": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 1000000,
+                    "description": "Start character offset for every string cell (default 0). Use the next offset reported by a truncated result to slide through long values. Narrow the query to the target row and column before expanding."
+                },
+                "cell_char_limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 4000,
+                    "description": "Maximum characters returned per string cell (default 200, max 4000). Increase only for an explicit long-value expansion."
                 },
                 "client_session_id": {
                     "type": "string",
@@ -619,6 +703,11 @@ async fn execute_execute_query(
         .and_then(|v| v.as_u64())
         .map(|l| (l as usize).min(MAX_ALLOWED_ROWS))
         .unwrap_or(EXECUTE_QUERY_LIMIT);
+    let cell_window = QueryCellWindow::from_arguments(&tool_call.arguments);
+
+    if *db_type == DatabaseType::MongoDb {
+        return execute_mongo_query(state, connection_id, database, sql, limit.max(1), cell_window).await;
+    }
 
     // Classify SQL risk using the concrete database dialect.
     let risk = crate::sql_risk::classify_sql_risk_for_database(sql, *db_type)?;
@@ -674,15 +763,46 @@ async fn execute_execute_query(
     )
     .await?;
 
-    format_query_result_as_text(&result, limit)
+    format_query_result_as_text(&result, limit, cell_window)
+}
+
+async fn execute_mongo_query(
+    state: &Arc<AppState>,
+    connection_id: &str,
+    database: &str,
+    source: &str,
+    limit: usize,
+    cell_window: QueryCellWindow,
+) -> Result<String, String> {
+    let command = crate::mongo_shell::parse(source).map_err(|error| {
+        format!(
+            "{error} Use MongoDB shell-style commands such as db.collection.find({{}}), db.collection.findOne({{}}), or db.collection.aggregate([])."
+        )
+    })?;
+    if command.is_mutating() {
+        return Err(
+            "Blocked: MongoDB Agent queries are read-only. Return the command for the user to review and execute manually in DBX."
+                .to_string(),
+        );
+    }
+
+    let result = crate::mongo_ops::execute_mongo_command_core(state, connection_id, database, &command, limit).await?;
+    format_query_result_as_text(&result, limit, cell_window)
 }
 
 /// Format a QueryResult as a Markdown table for LLM consumption.
-fn format_query_result_as_text(result: &QueryResult, limit: usize) -> Result<String, String> {
+pub fn format_query_result_as_text(
+    result: &QueryResult,
+    limit: usize,
+    cell_window: QueryCellWindow,
+) -> Result<String, String> {
     // A result without columns is a command result, not an empty result set.
     // This is how drivers represent DML that does not use RETURNING.
     if result.columns.is_empty() {
-        return Ok(format!("Query executed. {} row(s) affected.", result.affected_rows));
+        return Ok(append_server_messages(
+            format!("Query executed. {} row(s) affected.", result.affected_rows),
+            &result.messages,
+        ));
     }
 
     let mut lines = Vec::new();
@@ -698,16 +818,7 @@ fn format_query_result_as_text(result: &QueryResult, limit: usize) -> Result<Str
             .iter()
             .map(|v| match v {
                 serde_json::Value::Null => "NULL".to_string(),
-                serde_json::Value::String(s) => {
-                    // Truncate long strings to keep result compact
-                    if s.len() > 200 {
-                        let truncated: String =
-                            s.char_indices().take_while(|(i, _)| *i < 200).map(|(_, c)| c).collect();
-                        format!("{}...", truncated)
-                    } else {
-                        s.clone()
-                    }
-                }
+                serde_json::Value::String(value) => format_query_string_cell(value, cell_window),
                 other => other.to_string(),
             })
             .collect();
@@ -722,7 +833,38 @@ fn format_query_result_as_text(result: &QueryResult, limit: usize) -> Result<Str
     // Stats line
     lines.push(format!("({} rows, {}ms)", result.rows.len(), result.execution_time_ms));
 
-    Ok(lines.join("\n"))
+    Ok(append_server_messages(lines.join("\n"), &result.messages))
+}
+
+fn format_query_string_cell(value: &str, window: QueryCellWindow) -> String {
+    let mut characters = value.chars().skip(window.offset);
+    let mut returned = 0usize;
+    let content = characters.by_ref().take(window.limit).inspect(|_| returned += 1).collect::<String>();
+    let has_more = characters.next().is_some();
+    if window.offset == 0 && !has_more {
+        return content;
+    }
+
+    let end = window.offset.saturating_add(returned);
+    let prefix = if window.offset > 0 { "..." } else { "" };
+    if has_more {
+        format!("{prefix}{content}... [chars {}..{end}; next cell_char_offset={end}]", window.offset)
+    } else {
+        format!("{prefix}{content} [chars {}..{end}; end of value]", window.offset)
+    }
+}
+
+/// Append server messages in the same style as the MCP `format_query_result`
+/// renderer: a `Server messages:` section with `- SEVERITY: message` lines.
+fn append_server_messages(mut output: String, messages: &[QueryMessage]) -> String {
+    if messages.is_empty() {
+        return output;
+    }
+    output.push_str("\n\nServer messages:");
+    for message in messages {
+        output.push_str(&format!("\n- {}", message.format_line()));
+    }
+    output
 }
 
 /// Get sample data from a table via the get_sample_data tool.
@@ -874,7 +1016,7 @@ async fn execute_explain_query(
 
     // Serialize the raw QueryResult for the frontend ExplainPlanViewer
     let explain_data = serde_json::to_value(&result).ok();
-    let text = match format_query_result_as_text(&result, 100) {
+    let text = match format_query_result_as_text(&result, 100, QueryCellWindow::default()) {
         Ok(t) => t,
         Err(e) => return (Err(e), None),
     };
@@ -974,7 +1116,7 @@ async fn execute_browse_collection(
         crate::query::execute_sql_statement_with_options(state, connection_id, database, &query, None, None, options)
             .await?;
 
-    format_query_result_as_text(&result, limit)
+    format_query_result_as_text(&result, limit, QueryCellWindow::default())
 }
 
 /// Build a browse query for the given vector database type.
@@ -1099,6 +1241,7 @@ for line in sys.stdin:
     #[cfg(unix)]
     fn agent_test_connection(id: &str, name: &str, db_type: DatabaseType, database: &str) -> ConnectionConfig {
         ConnectionConfig {
+            docs_notes_path: None,
             id: id.to_string(),
             name: name.to_string(),
             note: String::new(),
@@ -1112,6 +1255,7 @@ for line in sys.stdin:
             username: "APP_USER".to_string(),
             password: String::new(),
             database: Some(database.to_string()),
+            default_schema: None,
             visible_databases: None,
             visible_schemas: None,
             show_system_schemas: false,
@@ -1147,6 +1291,7 @@ for line in sys.stdin:
             jdbc_driver_class: None,
             jdbc_driver_paths: Vec::new(),
             one_time: false,
+            save_password: true,
             read_only: false,
             is_production: false,
             production_databases: vec![],
@@ -1172,6 +1317,95 @@ for line in sys.stdin:
         assert!(names.contains(&"list_collections"));
         assert!(names.contains(&"browse_collection"));
         assert!(names.contains(&"get_current_time"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn mongodb_agent_registers_shell_query_tool_and_routes_find_one_as_read_only() {
+        let tools = all_tools(DatabaseType::MongoDb, AgentSqlPermissions::default());
+        let names = tools.iter().map(|tool| tool.name).collect::<Vec<_>>();
+        assert!(names.contains(&"execute_query"));
+        assert!(!names.contains(&"get_sample_data"));
+        assert!(!names.contains(&"explain_query"));
+        let execute_query = tools.iter().find(|tool| tool.name == "execute_query").unwrap();
+        assert!(execute_query.description.contains("MongoDB shell command"));
+        assert!(!execute_query.description.contains("SQL query"));
+        assert!(execute_query.description.contains("read-only"));
+
+        let confirmed_tools = all_tools(
+            DatabaseType::MongoDb,
+            AgentSqlPermissions {
+                allow_writes: true,
+                allow_dangerous: true,
+                confirmed_write_sql: Some("db.items.insertOne({name: 'test'})".to_string()),
+            },
+        );
+        let confirmed_execute_query = confirmed_tools.iter().find(|tool| tool.name == "execute_query").unwrap();
+        assert!(confirmed_execute_query.description.contains("read-only"));
+        assert!(!confirmed_execute_query.description.contains("confirmed write"));
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(&temp_dir.path().join("storage.db")).await.unwrap();
+        let state = Arc::new(AppState::new(storage));
+        let call = ToolCall {
+            id: "mongo-find-one".to_string(),
+            name: "execute_query".to_string(),
+            arguments: json!({ "sql": "db.BenchmarkIndex_approved.findOne({})" }),
+            provider_payload: None,
+        };
+
+        let result = execute_tool(
+            &call,
+            &state,
+            "mongo-1",
+            "benchmark",
+            None,
+            &DatabaseType::MongoDb,
+            AgentSqlPermissions::default(),
+        )
+        .await;
+
+        assert!(result.is_error);
+        assert!(!result.content.contains("Blocked:"), "{}", result.content);
+        assert!(result.content.contains("Connection") || result.content.contains("connection"), "{}", result.content);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn mongodb_agent_keeps_all_writes_blocked_after_sql_confirmation() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(&temp_dir.path().join("storage.db")).await.unwrap();
+        let state = Arc::new(AppState::new(storage));
+        let permissions = AgentSqlPermissions {
+            allow_writes: true,
+            allow_dangerous: true,
+            confirmed_write_sql: Some("SQL confirmation does not grant MongoDB writes".to_string()),
+        };
+
+        for (index, source) in [
+            "db.items.insertOne({name: 'test'})",
+            "db.items.updateMany({tenant: 7}, {$set: {active: false}})",
+            "db.items.deleteMany({tenant: 7})",
+            "db.items.createIndex({tenant: 1})",
+            "db.runCommand({compact: 'items'})",
+            r#"db.items.aggregate([{"$out":"items_backup"}])"#,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let call = ToolCall {
+                id: format!("mongo-write-{index}"),
+                name: "execute_query".to_string(),
+                arguments: json!({ "sql": source }),
+                provider_payload: None,
+            };
+            let result =
+                execute_tool(&call, &state, "mongo-1", "benchmark", None, &DatabaseType::MongoDb, permissions.clone())
+                    .await;
+
+            assert!(result.is_error, "{source}: {}", result.content);
+            assert!(result.content.contains("read-only"), "{source}: {}", result.content);
+        }
     }
 
     #[test]
@@ -1222,6 +1456,7 @@ for line in sys.stdin:
             session_id: None,
             has_more: false,
             elasticsearch_raw_body: None,
+            messages: Vec::new(),
         }
     }
 
@@ -1229,7 +1464,10 @@ for line in sys.stdin:
     fn query_result_formatter_reports_dml_affected_rows() {
         let result = query_result(vec![], vec![], 2);
 
-        assert_eq!(format_query_result_as_text(&result, 50).unwrap(), "Query executed. 2 row(s) affected.");
+        assert_eq!(
+            format_query_result_as_text(&result, 50, QueryCellWindow::default()).unwrap(),
+            "Query executed. 2 row(s) affected."
+        );
     }
 
     #[test]
@@ -1237,8 +1475,14 @@ for line in sys.stdin:
         let dml = query_result(vec![], vec![], 0);
         let returning = query_result(vec!["id", "name"], vec![], 0);
 
-        assert_eq!(format_query_result_as_text(&dml, 50).unwrap(), "Query executed. 0 row(s) affected.");
-        assert_eq!(format_query_result_as_text(&returning, 50).unwrap(), "| id | name |\n|---|---|\n(0 rows, 1ms)");
+        assert_eq!(
+            format_query_result_as_text(&dml, 50, QueryCellWindow::default()).unwrap(),
+            "Query executed. 0 row(s) affected."
+        );
+        assert_eq!(
+            format_query_result_as_text(&returning, 50, QueryCellWindow::default()).unwrap(),
+            "| id | name |\n|---|---|\n(0 rows, 1ms)"
+        );
     }
 
     #[test]
@@ -1247,8 +1491,94 @@ for line in sys.stdin:
             query_result(vec!["id", "name"], vec![vec![serde_json::json!(5), serde_json::json!("returning")]], 0);
 
         assert_eq!(
-            format_query_result_as_text(&result, 50).unwrap(),
+            format_query_result_as_text(&result, 50, QueryCellWindow::default()).unwrap(),
             "| id | name |\n|---|---|\n| 5 | returning |\n(1 rows, 1ms)"
+        );
+    }
+
+    #[test]
+    fn query_result_formatter_marks_the_default_character_window() {
+        let value = format!("{}DBX_ISSUE_5620_SENTINEL", "A".repeat(200));
+        let result = query_result(vec!["message"], vec![vec![serde_json::json!(value)]], 0);
+
+        let output = format_query_result_as_text(&result, 50, QueryCellWindow::from_options(None, None)).unwrap();
+
+        assert!(output.contains(&format!("{}... [chars 0..200; next cell_char_offset=200]", "A".repeat(200))));
+        assert!(!output.contains("DBX_ISSUE_5620_SENTINEL"));
+    }
+
+    #[test]
+    fn query_result_formatter_supports_expanded_and_sliding_character_windows() {
+        let value = format!("{}DBX_ISSUE_5620_SENTINEL{}", "A".repeat(200), "Z".repeat(20));
+        let result = query_result(vec!["message"], vec![vec![serde_json::json!(value)]], 0);
+
+        let expanded =
+            format_query_result_as_text(&result, 50, QueryCellWindow::from_options(None, Some(400))).unwrap();
+        assert!(expanded.contains("DBX_ISSUE_5620_SENTINEL"));
+        assert!(!expanded.contains("next cell_char_offset"));
+
+        let sliding =
+            format_query_result_as_text(&result, 50, QueryCellWindow::from_options(Some(200), Some(23))).unwrap();
+        assert!(sliding.contains("...DBX_ISSUE_5620_SENTINEL... [chars 200..223; next cell_char_offset=223]"));
+    }
+
+    #[test]
+    fn query_result_formatter_counts_unicode_characters_in_windows() {
+        let result = query_result(vec!["message"], vec![vec![serde_json::json!("甲乙丙丁戊己庚辛")]], 0);
+
+        let output = format_query_result_as_text(&result, 50, QueryCellWindow::from_options(Some(2), Some(3))).unwrap();
+
+        assert!(output.contains("...丙丁戊... [chars 2..5; next cell_char_offset=5]"));
+    }
+
+    #[test]
+    fn query_cell_window_clamps_explicit_bounds() {
+        assert_eq!(QueryCellWindow::from_options(None, None), QueryCellWindow::default());
+        assert_eq!(
+            QueryCellWindow::from_options(Some(u64::MAX), Some(0)),
+            QueryCellWindow { offset: 1_000_000, limit: 1 }
+        );
+        assert_eq!(
+            QueryCellWindow::from_options(Some(1_000_001), Some(u64::MAX)),
+            QueryCellWindow { offset: 1_000_000, limit: 4_000 }
+        );
+    }
+
+    #[test]
+    fn query_result_formatter_appends_server_messages() {
+        let mut dml = query_result(vec![], vec![], 2);
+        dml.messages = vec![
+            QueryMessage {
+                severity: "notice".to_string(),
+                message: "hello world".to_string(),
+                code: Some("00000".to_string()),
+                detail: None,
+                hint: Some("use a table".to_string()),
+            },
+            QueryMessage {
+                severity: "WARNING".to_string(),
+                message: "careful".to_string(),
+                code: None,
+                detail: None,
+                hint: None,
+            },
+        ];
+        assert_eq!(
+            format_query_result_as_text(&dml, 50, QueryCellWindow::default()).unwrap(),
+            "Query executed. 2 row(s) affected.\n\nServer messages:\n- NOTICE: hello world (code: 00000, hint: use a table)\n- WARNING: careful"
+        );
+
+        let mut result = query_result(vec!["id"], vec![vec![serde_json::json!(1)]], 0);
+        result.messages = vec![QueryMessage {
+            severity: "INFO".to_string(),
+            message: "print output".to_string(),
+            code: None,
+            detail: None,
+            hint: None,
+        }];
+        assert_eq!(
+            format_query_result_as_text(&result, 50, QueryCellWindow::default()).unwrap(),
+            "| id |\n|---|\n| 1 |\n(1 rows, 1ms)\n\nServer messages:\n- INFO: print output"
         );
     }
 
@@ -1553,6 +1883,40 @@ for line in sys.stdin:
             assert!(!permissions.allow_writes);
             assert!(!permissions.allow_dangerous);
             assert_eq!(permissions.confirmed_write_sql, None);
+        }
+    }
+
+    #[test]
+    fn confirmed_write_target_binding_rejects_replay_to_another_scope() {
+        let confirmed_sql = Some("DELETE FROM sessions WHERE id = 7".to_string());
+        let matching = verify_confirmed_target(
+            Some(true),
+            confirmed_sql.clone(),
+            Some("connection-1".to_string()),
+            Some("app".to_string()),
+            Some("public".to_string()),
+            "connection-1",
+            "app",
+            Some("public"),
+        );
+        assert_eq!(matching, (Some(true), confirmed_sql.clone()));
+
+        for (connection_id, database, schema) in [
+            ("connection-2", "app", Some("public")),
+            ("connection-1", "audit", Some("public")),
+            ("connection-1", "app", Some("private")),
+        ] {
+            let rejected = verify_confirmed_target(
+                Some(true),
+                confirmed_sql.clone(),
+                Some("connection-1".to_string()),
+                Some("app".to_string()),
+                Some("public".to_string()),
+                connection_id,
+                database,
+                schema,
+            );
+            assert_eq!(rejected, (Some(false), None));
         }
     }
 

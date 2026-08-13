@@ -6,8 +6,8 @@ export default defineConfig({
   plugins: [vue()],
   resolve: {
     alias: {
-      "@": path.resolve(__dirname, "apps/desktop/src"),
-      "@dbx-app/mongo-shell": path.resolve(__dirname, "packages/mongo-shell/src/index.ts"),
+      "@": path.resolve(import.meta.dirname, "apps/desktop/src"),
+      "@dbx-app/mongo-shell": path.resolve(import.meta.dirname, "packages/mongo-shell/src/index.ts"),
     },
   },
   test: {

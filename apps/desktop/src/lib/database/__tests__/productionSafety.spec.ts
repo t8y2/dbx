@@ -40,6 +40,12 @@ describe("production SQL safety", () => {
     expect(productionContextForDatabase(connection(), "staging").active).toBe(false);
   });
 
+  it("treats Nacos public and empty namespace IDs as the same protected namespace", () => {
+    const nacos = connection({ db_type: "nacos", production_databases: [""] });
+    expect(productionContextForDatabase(nacos, "public")).toMatchObject({ active: true, reason: "database", databases: ["public"] });
+    expect(productionContextForDatabase(nacos, "")).toMatchObject({ active: true, reason: "database", databases: ["public"] });
+  });
+
   it("detects a write after a USE production switch despite comments", () => {
     const assessment = assessProductionSql("-- install\nUSE `prod_app`; /* migration */ DELETE FROM users", connection(), "staging");
     expect(assessment).toMatchObject({ active: true, isMutation: true, databases: ["prod_app"] });

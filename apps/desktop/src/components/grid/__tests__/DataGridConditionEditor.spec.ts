@@ -62,6 +62,20 @@ afterEach(() => {
 });
 
 describe("DataGridConditionEditor quote completion", () => {
+  it("does not open suggestions for a programmatic value update while unfocused", async () => {
+    const { value, input } = mountEditor("where", "", { columns: ["status", "started_at"] });
+
+    value.value = "sta";
+    await nextTick();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(document.querySelector('[role="listbox"]')).toBeNull();
+
+    input.focus();
+    input.setSelectionRange(3, 3);
+    input.dispatchEvent(new Event("select", { bubbles: true }));
+    await vi.waitFor(() => expect(document.querySelectorAll('[role="option"]')).toHaveLength(2));
+  });
+
   it("inserts paired quotes in WHERE and places the caret between them", async () => {
     const { value, input } = mountEditor("where", "id = ");
     input.focus();
@@ -172,6 +186,23 @@ describe("DataGridConditionEditor quote completion", () => {
     nextFirstOption.dispatchEvent(new MouseEvent("mousemove", { bubbles: true, cancelable: true }));
     await nextTick();
     expect(document.querySelector('[role="option"][aria-selected="true"]')?.textContent).toContain("name");
+  });
+
+  it("keeps suggestions closed after Enter applies a complete condition", async () => {
+    const { input } = mountEditor("where", "", { columns: ["id", "order0", "status"] });
+    input.focus();
+    input.value = "id > 0";
+    input.setSelectionRange(6, 6);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    await vi.waitFor(() => expect(document.querySelectorAll('[role="option"]')).toHaveLength(1));
+
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+    await nextTick();
+    input.setSelectionRange(0, 0);
+    input.dispatchEvent(new Event("select", { bubbles: true }));
+    await nextTick();
+
+    expect(document.querySelector('[role="listbox"]')).toBeNull();
   });
 
   it("keeps expanded input first-line indent and wraps long tokens", () => {

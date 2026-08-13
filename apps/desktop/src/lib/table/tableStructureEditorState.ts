@@ -5,6 +5,12 @@ export function hasExistingColumnTypeChange(columns: readonly EditableStructureC
   return columns.some((column) => !!column.original && !column.markedForDrop && column.dataType !== column.original.data_type);
 }
 
+const POSTGRES_SERIAL_PSEUDO_TYPES = new Set(["smallserial", "serial", "bigserial"]);
+
+function withPostgresArrayTypes(types: readonly string[]): string[] {
+  return [...types, ...types.filter((type) => !POSTGRES_SERIAL_PSEUDO_TYPES.has(type)).map((type) => `${type}[]`)];
+}
+
 export const DATA_TYPE_OPTIONS: Record<string, string[]> = {
   mysql: [
     "tinyint",
@@ -58,7 +64,7 @@ export const DATA_TYPE_OPTIONS: Record<string, string[]> = {
     "multipolygon",
     "geometrycollection",
   ],
-  postgres: [
+  postgres: withPostgresArrayTypes([
     "smallint",
     "int2",
     "integer",
@@ -122,7 +128,7 @@ export const DATA_TYPE_OPTIONS: Record<string, string[]> = {
     "tstzrange",
     "daterange",
     "oid",
-  ],
+  ]),
   sqlite: ["integer", "real", "text", "blob", "numeric"],
   rqlite: ["integer", "real", "text", "blob", "numeric"],
   turso: ["integer", "real", "text", "blob", "numeric"],
@@ -192,6 +198,63 @@ export const DATA_TYPE_OPTIONS: Record<string, string[]> = {
     "urowid",
     "xmltype",
     "sdo_geometry",
+  ],
+  dameng: [
+    "number",
+    "numeric",
+    "decimal",
+    "dec",
+    "integer",
+    "int",
+    "bigint",
+    "smallint",
+    "tinyint",
+    "byte",
+    "float",
+    "double",
+    "real",
+    "double precision",
+    "bit",
+    "binary",
+    "varbinary",
+    "raw",
+    "char",
+    "character",
+    "varchar2",
+    "varchar",
+    "rowid",
+    "bool",
+    "boolean",
+    "date",
+    "time",
+    "timestamp",
+    "datetime",
+    "time with time zone",
+    "timestamp with time zone",
+    "timestamp with local time zone",
+    "interval year",
+    "interval month",
+    "interval year to month",
+    "interval day",
+    "interval hour",
+    "interval minute",
+    "interval second",
+    "interval day to hour",
+    "interval day to minute",
+    "interval day to second",
+    "interval hour to minute",
+    "interval hour to second",
+    "interval minute to second",
+    "text",
+    "long",
+    "longvarchar",
+    "image",
+    "longvarbinary",
+    "blob",
+    "clob",
+    "bfile",
+    "json",
+    "jsonb",
   ],
   clickhouse: [
     "Int8",
@@ -295,7 +358,6 @@ const DATA_TYPE_OPTION_ALIASES: Partial<Record<DatabaseType, string>> = {
   vastbase: "postgres",
   kingbase: "postgres",
   firebird: "postgres",
-  dameng: "oracle",
   "oceanbase-oracle": "oracle",
   iris: "oracle",
   yashandb: "oracle",
@@ -912,16 +974,16 @@ export function splitDataType(raw: string): { baseType: string; params: string }
 
 export type DataTypeLengthUnit = "BYTE" | "CHAR";
 
-const DAMENG_LENGTH_UNIT_TYPES = new Set(["char", "varchar", "varchar2"]);
-const DAMENG_LENGTH_UNITS: readonly DataTypeLengthUnit[] = ["BYTE", "CHAR"];
+const CHARACTER_LENGTH_UNIT_TYPES = new Set(["char", "varchar", "varchar2"]);
+const CHARACTER_LENGTH_UNITS: readonly DataTypeLengthUnit[] = ["BYTE", "CHAR"];
 
 function normalizedDataTypeName(rawDataType: string): string {
   return splitDataType(rawDataType).baseType.trim().replace(/\s+/g, " ").toLowerCase();
 }
 
 export function getDataTypeLengthUnitOptions(dbType: DatabaseType | undefined, rawDataType: string): readonly DataTypeLengthUnit[] {
-  if (dbType !== "dameng") return [];
-  return DAMENG_LENGTH_UNIT_TYPES.has(normalizedDataTypeName(rawDataType)) ? DAMENG_LENGTH_UNITS : [];
+  if (dbType !== "dameng" && dbType !== "oracle") return [];
+  return CHARACTER_LENGTH_UNIT_TYPES.has(normalizedDataTypeName(rawDataType)) ? CHARACTER_LENGTH_UNITS : [];
 }
 
 function splitDataTypeLengthParams(dbType: DatabaseType | undefined, rawDataType: string): { length: string; unit: DataTypeLengthUnit | "" } {
@@ -953,13 +1015,13 @@ export function combineDataTypeForDatabaseWithLengthUnit(dbType: DatabaseType | 
   return combineDataTypeForDatabase(dbType, baseType, params);
 }
 
-export function restoreDamengLengthUnitsAfterSave(columns: EditableStructureColumn[], savedDataTypesByColumn: ReadonlyMap<string, string>): EditableStructureColumn[] {
+export function restoreCharacterLengthUnitsAfterSave(dbType: DatabaseType | undefined, columns: EditableStructureColumn[], savedDataTypesByColumn: ReadonlyMap<string, string>): EditableStructureColumn[] {
   if (savedDataTypesByColumn.size === 0) return columns;
 
   return columns.map((column) => {
-    if (dataTypeLengthUnitValue("dameng", column.dataType)) return column;
+    if (dataTypeLengthUnitValue(dbType, column.dataType)) return column;
     const savedDataType = savedDataTypesByColumn.get(column.name.trim().toLowerCase());
-    if (!savedDataType || !dataTypeLengthUnitValue("dameng", savedDataType)) return column;
+    if (!savedDataType || !dataTypeLengthUnitValue(dbType, savedDataType)) return column;
     if (normalizedDataTypeName(savedDataType) !== normalizedDataTypeName(column.dataType)) return column;
 
     return {
@@ -1132,7 +1194,11 @@ export function defaultNewColumnDataType(dbType: DatabaseType | undefined, dataT
   }
 
   if (options.length > 0) {
-    const preferred = options.find((type) => /^(varchar|character varying|nvarchar)$/i.test(type.trim())) ?? options.find((type) => /^(string|clob|lvarchar|text)$/i.test(type.trim())) ?? options.find((type) => /^varchar/i.test(type.trim()));
+    const preferred =
+      (dbType === "dameng" ? options.find((type) => /^varchar2$/i.test(type.trim())) : undefined) ??
+      options.find((type) => /^(varchar|character varying|nvarchar)$/i.test(type.trim())) ??
+      options.find((type) => /^(string|clob|lvarchar|text)$/i.test(type.trim())) ??
+      options.find((type) => /^varchar/i.test(type.trim()));
     if (preferred) {
       return combineDataTypeForDatabase(dbType, preferred, getDefaultLengthForType(dbType, preferred));
     }
@@ -1161,7 +1227,7 @@ export function isDataTypeLengthDisabled(_dbType: DatabaseType | undefined, base
   } else if (_dbType === "manticoresearch") {
     return key !== "bit" && key !== "float_vector";
   } else if (_dbType === "postgres" || _dbType === "gaussdb" || _dbType === "kwdb" || _dbType === "opengauss" || _dbType === "highgo" || _dbType === "uxdb" || _dbType === "vastbase" || _dbType === "kingbase") {
-    return POSTGRES_TYPE_LENGTH_DISABLES.includes(key);
+    return key.endsWith("[]") || POSTGRES_TYPE_LENGTH_DISABLES.includes(key);
   } else if (isOracleLikeStructureType(_dbType)) {
     // Dameng/Oracle integer aliases have fixed precision; MySQL-style display widths generate invalid DDL.
     return ORACLE_LIKE_TYPE_LENGTH_DISABLES.includes(key);

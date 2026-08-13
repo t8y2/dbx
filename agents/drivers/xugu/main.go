@@ -28,13 +28,29 @@ const defaultMaxRows = 1000
 const defaultXuguPort = 5138
 const legacyAgentSessionID = "__legacy__"
 const maxAgentSessions = 256
+
+// xuguPublicSynonymScope is a protocol-only namespace for database-global
+// synonyms. It is deliberately not a real schema name (and must never be
+// interpreted as one by metadata queries).
+const xuguPublicSynonymScope = "\x00DBX_XUGU_PUBLIC_SYNONYMS"
 const xuguListDatabasesSQL = `
 SELECT DB_NAME
 FROM ALL_DATABASES
 ORDER BY DB_NAME`
 const xuguListSchemasSQL = `
+SELECT s.SCHEMA_NAME AS SCHEMA_NAME, FALSE AS IS_PUBLIC_SCOPE
+FROM ALL_SCHEMAS s
+WHERE s.DB_ID = CURRENT_DB_ID
+UNION
+SELECT '' AS SCHEMA_NAME, TRUE AS IS_PUBLIC_SCOPE
+FROM ALL_SYNONYMS y
+WHERE y.DB_ID = CURRENT_DB_ID
+  AND y.IS_PUBLIC = TRUE
+ORDER BY IS_PUBLIC_SCOPE, SCHEMA_NAME`
+const xuguListSchemasFallbackSQL = `
 SELECT SCHEMA_NAME
 FROM ALL_SCHEMAS
+WHERE DB_ID = CURRENT_DB_ID
 ORDER BY SCHEMA_NAME`
 const xuguCatalogTableNameSelectSQL = `
 SELECT s.SCHEMA_NAME, t.TABLE_NAME
@@ -44,19 +60,22 @@ const xuguCatalogSequenceNameSelectSQL = `
 SELECT s.SCHEMA_NAME, q.SEQ_NAME
 FROM ALL_SEQUENCES q
 JOIN ALL_SCHEMAS s ON s.DB_ID = q.DB_ID AND s.SCHEMA_ID = q.SCHEMA_ID
-WHERE q.IS_SYS = FALSE`
+WHERE s.DB_ID = CURRENT_DB_ID
+  AND q.IS_SYS = FALSE`
 const xuguCatalogSynonymSelectSQL = `
-SELECT s.SCHEMA_NAME, y.SYNO_NAME, t.SCHEMA_NAME AS TARGET_SCHEMA, y.TARG_NAME
+SELECT s.SCHEMA_NAME,
+       y.SYNO_NAME, t.SCHEMA_NAME AS TARGET_SCHEMA, y.TARG_NAME, y.IS_PUBLIC
 FROM ALL_SYNONYMS y
-JOIN ALL_SCHEMAS s ON s.DB_ID = y.DB_ID AND s.SCHEMA_ID = y.SCHEMA_ID
+LEFT JOIN ALL_SCHEMAS s ON s.DB_ID = y.DB_ID AND s.SCHEMA_ID = y.SCHEMA_ID
 LEFT JOIN ALL_SCHEMAS t ON t.DB_ID = y.DB_ID AND t.SCHEMA_ID = y.TARG_SCHE_ID
-WHERE y.IS_PUBLIC = FALSE`
+WHERE y.DB_ID = CURRENT_DB_ID`
 const xuguPrimaryKeyColumnsSQL = `
 SELECT c.DEFINE
 FROM ALL_CONSTRAINTS c
 JOIN ALL_TABLES t ON t.DB_ID = c.DB_ID AND t.TABLE_ID = c.TABLE_ID
 JOIN ALL_SCHEMAS s ON s.DB_ID = t.DB_ID AND s.SCHEMA_ID = t.SCHEMA_ID
-WHERE s.SCHEMA_NAME = ?
+WHERE s.DB_ID = CURRENT_DB_ID
+  AND s.SCHEMA_NAME = ?
   AND t.TABLE_NAME = ?
   AND c.CONS_TYPE = 'P'`
 const xuguListColumnsSQL = `
@@ -64,7 +83,8 @@ SELECT c.COL_NAME, c.TYPE_NAME, c.NOT_NULL, c.DEF_VAL, c.ON_NULL, c.COMMENTS, c.
 FROM ALL_COLUMNS c
 JOIN ALL_TABLES t ON t.DB_ID = c.DB_ID AND t.TABLE_ID = c.TABLE_ID
 JOIN ALL_SCHEMAS s ON s.DB_ID = t.DB_ID AND s.SCHEMA_ID = t.SCHEMA_ID
-WHERE s.SCHEMA_NAME = ?
+WHERE s.DB_ID = CURRENT_DB_ID
+  AND s.SCHEMA_NAME = ?
   AND t.TABLE_NAME = ?
   AND (c.IS_HIDE IS NULL OR c.IS_HIDE = FALSE)
 ORDER BY c.COL_NO`
@@ -73,7 +93,8 @@ SELECT c.COL_NAME, c.TYPE_NAME, c.NOT_NULL, c.DEF_VAL, c.COMMENTS, c.SCALE, c."V
 FROM ALL_COLUMNS c
 JOIN ALL_TABLES t ON t.DB_ID = c.DB_ID AND t.TABLE_ID = c.TABLE_ID
 JOIN ALL_SCHEMAS s ON s.DB_ID = t.DB_ID AND s.SCHEMA_ID = t.SCHEMA_ID
-WHERE s.SCHEMA_NAME = ?
+WHERE s.DB_ID = CURRENT_DB_ID
+  AND s.SCHEMA_NAME = ?
   AND t.TABLE_NAME = ?
   AND (c.IS_HIDE IS NULL OR c.IS_HIDE = FALSE)
 ORDER BY c.COL_NO`
@@ -82,7 +103,8 @@ SELECT i.INDEX_NAME, i.KEYS, i.IS_UNIQUE, i.IS_PRIMARY, i.INDEX_TYPE, i.FILTER
 FROM ALL_INDEXES i
 JOIN ALL_TABLES t ON t.DB_ID = i.DB_ID AND t.TABLE_ID = i.TABLE_ID
 JOIN ALL_SCHEMAS s ON s.DB_ID = t.DB_ID AND s.SCHEMA_ID = t.SCHEMA_ID
-WHERE s.SCHEMA_NAME = ?
+WHERE s.DB_ID = CURRENT_DB_ID
+  AND s.SCHEMA_NAME = ?
   AND t.TABLE_NAME = ?
 ORDER BY i.INDEX_NAME`
 const xuguTableMetadataSQL = `
@@ -92,7 +114,8 @@ SELECT t.TEMP_TYPE, t.ON_COMMIT_DEL, t.PCTFREE, t.COPY_NUM,
        t.SUBPARTI_TYPE, t.SUBPARTI_NUM, t.SUBPARTI_KEY, t.COMMENTS
 FROM ALL_TABLES t
 JOIN ALL_SCHEMAS s ON s.DB_ID = t.DB_ID AND s.SCHEMA_ID = t.SCHEMA_ID
-WHERE s.SCHEMA_NAME = ?
+WHERE s.DB_ID = CURRENT_DB_ID
+  AND s.SCHEMA_NAME = ?
   AND t.TABLE_NAME = ?`
 const xuguTableIdentitySQL = `
 SELECT c.COL_NAME, q.MIN_VAL, q.STEP_VAL, q.IS_SYS
@@ -100,7 +123,8 @@ FROM ALL_COLUMNS c
 JOIN ALL_TABLES t ON t.DB_ID = c.DB_ID AND t.TABLE_ID = c.TABLE_ID
 JOIN ALL_SCHEMAS s ON s.DB_ID = t.DB_ID AND s.SCHEMA_ID = t.SCHEMA_ID
 JOIN ALL_SEQUENCES q ON q.DB_ID = c.DB_ID AND q.SEQ_ID = c.SERIAL_ID
-WHERE s.SCHEMA_NAME = ?
+WHERE s.DB_ID = CURRENT_DB_ID
+  AND s.SCHEMA_NAME = ?
   AND t.TABLE_NAME = ?
   AND c.IS_SERIAL = TRUE`
 const xuguTableConstraintsSQL = `
@@ -113,7 +137,8 @@ JOIN ALL_TABLES t ON t.DB_ID = c.DB_ID AND t.TABLE_ID = c.TABLE_ID
 JOIN ALL_SCHEMAS s ON s.DB_ID = t.DB_ID AND s.SCHEMA_ID = t.SCHEMA_ID
 LEFT JOIN ALL_TABLES rt ON rt.DB_ID = c.DB_ID AND rt.TABLE_ID = c.REF_TABLE_ID
 LEFT JOIN ALL_SCHEMAS rs ON rs.DB_ID = rt.DB_ID AND rs.SCHEMA_ID = rt.SCHEMA_ID
-WHERE s.SCHEMA_NAME = ?
+WHERE s.DB_ID = CURRENT_DB_ID
+  AND s.SCHEMA_NAME = ?
   AND t.TABLE_NAME = ?
   AND c.CONS_TYPE <> 'F'
 ORDER BY c.CONS_NAME`
@@ -131,7 +156,8 @@ JOIN ALL_TABLES t ON t.DB_ID = c.DB_ID AND t.TABLE_ID = c.TABLE_ID
 JOIN ALL_SCHEMAS s ON s.DB_ID = t.DB_ID AND s.SCHEMA_ID = t.SCHEMA_ID
 LEFT JOIN ALL_TABLES rt ON rt.DB_ID = c.DB_ID AND rt.TABLE_ID = c.REF_TABLE_ID
 LEFT JOIN ALL_SCHEMAS rs ON rs.DB_ID = rt.DB_ID AND rs.SCHEMA_ID = rt.SCHEMA_ID
-WHERE s.SCHEMA_NAME = ?
+WHERE s.DB_ID = CURRENT_DB_ID
+  AND s.SCHEMA_NAME = ?
   AND t.TABLE_NAME = ?
   AND c.CONS_TYPE = 'F'
 ORDER BY c.CONS_NAME`
@@ -141,7 +167,8 @@ SELECT p.PARTI_NO, p.PARTI_NAME, p.PARTI_VAL, p.ONLINE,
 FROM ALL_PARTIS p
 JOIN ALL_TABLES t ON t.DB_ID = p.DB_ID AND t.TABLE_ID = p.TABLE_ID
 JOIN ALL_SCHEMAS s ON s.DB_ID = t.DB_ID AND s.SCHEMA_ID = t.SCHEMA_ID
-WHERE s.SCHEMA_NAME = ?
+WHERE s.DB_ID = CURRENT_DB_ID
+  AND s.SCHEMA_NAME = ?
   AND t.TABLE_NAME = ?
 ORDER BY p.PARTI_NO`
 const xuguTableSubpartitionsSQL = `
@@ -150,7 +177,8 @@ SELECT p.SUBPARTI_NO, p.SUBPARTI_NAME, p.SUBPARTI_VAL,
 FROM ALL_SUBPARTIS p
 JOIN ALL_TABLES t ON t.DB_ID = p.DB_ID AND t.TABLE_ID = p.TABLE_ID
 JOIN ALL_SCHEMAS s ON s.DB_ID = t.DB_ID AND s.SCHEMA_ID = t.SCHEMA_ID
-WHERE s.SCHEMA_NAME = ?
+WHERE s.DB_ID = CURRENT_DB_ID
+  AND s.SCHEMA_NAME = ?
   AND t.TABLE_NAME = ?
 ORDER BY p.SUBPARTI_NO`
 
@@ -195,11 +223,6 @@ type response struct {
 	ID      json.RawMessage `json:"id,omitempty"`
 	Result  any             `json:"result,omitempty"`
 	Error   *rpcError       `json:"error,omitempty"`
-}
-
-type rpcError struct {
-	Code    int    `json:"code"`
-	Message string `json:"message"`
 }
 
 type connectParams struct {
@@ -291,11 +314,13 @@ type tableInfo struct {
 }
 
 type objectInfo struct {
-	Name       string  `json:"name"`
-	ObjectType string  `json:"object_type"`
-	Schema     string  `json:"schema"`
-	Comment    *string `json:"comment"`
-	Valid      *bool   `json:"valid,omitempty"`
+	Name                      string       `json:"name"`
+	ObjectType                string       `json:"object_type"`
+	Schema                    string       `json:"schema"`
+	Comment                   *string      `json:"comment"`
+	Valid                     *bool        `json:"valid,omitempty"`
+	Trigger                   *triggerInfo `json:"trigger,omitempty"`
+	XuguTypeMembersExpandable *bool        `json:"xugu_type_members_expandable,omitempty"`
 }
 
 type metadataListConstraints struct {
@@ -442,6 +467,7 @@ type xuguCatalogSynonym struct {
 	Name         string
 	TargetSchema sql.NullString
 	TargetName   string
+	Public       bool
 }
 
 // xuguIndexKey preserves the catalog spelling and SQL semantics of an index
@@ -477,9 +503,16 @@ type xuguPartitionInfo struct {
 }
 
 type triggerInfo struct {
-	Name   string `json:"name"`
-	Event  string `json:"event"`
-	Timing string `json:"timing"`
+	Name      string  `json:"name"`
+	Event     string  `json:"event"`
+	Timing    string  `json:"timing"`
+	Level     string  `json:"level"`
+	Condition *string `json:"condition,omitempty"`
+	Language  *string `json:"language,omitempty"`
+	Enabled   *bool   `json:"enabled,omitempty"`
+	Valid     *bool   `json:"valid,omitempty"`
+	Comment   *string `json:"comment,omitempty"`
+	CreatedAt *string `json:"created_at,omitempty"`
 }
 
 type server struct {
@@ -501,6 +534,7 @@ type server struct {
 	activeRows        map[*sql.Rows]context.CancelFunc
 	activeTimer       *time.Timer
 	activeTimedOut    bool
+	activeCanceled    bool
 	// killSession, if non-nil, is called to force-kill the current
 	// statement on the database server. Tests may replace it with a
 	// stub. The real implementation is set during connectWithControl.
@@ -581,14 +615,14 @@ func newRuntimeServer() *runtimeServer {
 func (r *runtimeServer) handleLine(line string) (response, bool) {
 	var req request
 	if err := json.Unmarshal([]byte(line), &req); err != nil {
-		return errorResponse(nil, err), false
+		return errorResponse(nil, "", "", err), false
 	}
 	if len(req.ID) == 0 {
 		req.ID = json.RawMessage("1")
 	}
 	result, shutdown, err := r.dispatch(req.Method, req.Params)
 	if err != nil {
-		return errorResponse(req.ID, err), false
+		return errorResponse(req.ID, req.Method, stringParam(req.Params, "agentSessionId"), err), false
 	}
 	return response{JSONRPC: "2.0", ID: req.ID, Result: result}, shutdown
 }
@@ -599,7 +633,7 @@ func (r *runtimeServer) dispatch(method string, params map[string]json.RawMessag
 		return map[string]any{
 			"protocolVersion":      multiSessionProtocolVersion,
 			"agentProtocolVersion": multiSessionProtocolVersion,
-			"capabilities":         []string{"connect", "test_connection", "metadata", "query", "ddl", "multi_session"},
+			"capabilities":         []string{"connect", "test_connection", "metadata", "query", "ddl", "structured_error_v1", "multi_session"},
 		}, false, nil
 	case "open_session":
 		agentSessionID := stringParam(params, "agentSessionId")
@@ -673,7 +707,7 @@ func (r *runtimeServer) openSession(agentSessionID string, params connectParams)
 	}
 	if len(r.sessions) >= maxAgentSessions {
 		r.mu.Unlock()
-		return fmt.Errorf("agent session limit reached: %d", maxAgentSessions)
+		return fmt.Errorf("%w: %d", errAgentSessionLimit, maxAgentSessions)
 	}
 	r.mu.Unlock()
 
@@ -739,7 +773,7 @@ func (r *runtimeServer) registerSession(agentSessionID string, server *server, c
 	if len(r.sessions) >= maxAgentSessions {
 		_ = server.disconnect()
 		r.releaseControl(controlKey)
-		return fmt.Errorf("agent session limit reached: %d", maxAgentSessions)
+		return fmt.Errorf("%w: %d", errAgentSessionLimit, maxAgentSessions)
 	}
 	r.sessions[agentSessionID] = session
 	return nil
@@ -773,7 +807,7 @@ func (r *runtimeServer) session(agentSessionID string) (*agentSession, error) {
 	session := r.sessions[agentSessionID]
 	r.mu.RUnlock()
 	if session == nil {
-		return nil, fmt.Errorf("agent session not found: %s", agentSessionID)
+		return nil, fmt.Errorf("%w: %s", errAgentSessionNotFound, agentSessionID)
 	}
 	return session, nil
 }
@@ -859,14 +893,14 @@ func (r *runtimeServer) closeAllSessions() error {
 func (s *server) handleLine(line string) (response, bool) {
 	var req request
 	if err := json.Unmarshal([]byte(line), &req); err != nil {
-		return errorResponse(nil, err), false
+		return errorResponse(nil, "", "", err), false
 	}
 	if len(req.ID) == 0 {
 		req.ID = json.RawMessage("1")
 	}
 	result, shutdown, err := s.dispatch(req.Method, req.Params)
 	if err != nil {
-		return errorResponse(req.ID, err), false
+		return errorResponse(req.ID, req.Method, stringParam(req.Params, "agentSessionId"), err), false
 	}
 	return response{JSONRPC: "2.0", ID: req.ID, Result: result}, shutdown
 }
@@ -925,6 +959,16 @@ func (s *server) dispatch(method string, params map[string]json.RawMessage) (any
 		}
 		schema := stringParam(params, "schema")
 		result, err := s.listObjects(schema, metadataListConstraintsFromParams(params))
+		return result, false, err
+	case "completion_assistant_search_v1":
+		var request completionAssistantRequest
+		if err := decodeParams(params, &request); err != nil {
+			return nil, false, err
+		}
+		if err := s.useDatabase(request.Database); err != nil {
+			return nil, false, err
+		}
+		result, err := s.completionAssistantSearch(request)
 		return result, false, err
 	case "list_data_types":
 		return xuguDataTypes, false, nil
@@ -1657,21 +1701,60 @@ func xuguDSNValue(dsn string, key string) string {
 func (s *server) listSchemas() ([]string, error) {
 	rows, err := s.queryRows(xuguListSchemasSQL, nil)
 	if err != nil {
-		if fallback := strings.ToUpper(strings.TrimSpace(s.params.Username)); fallback != "" && isXuguMetadataUnavailableError(err) {
-			return []string{fallback}, nil
+		rows, err = s.queryRows(xuguListSchemasFallbackSQL, nil)
+		if err != nil {
+			if fallback := strings.ToUpper(strings.TrimSpace(s.params.Username)); fallback != "" && isXuguMetadataUnavailableError(err) {
+				return []string{fallback}, nil
+			}
+			return nil, err
 		}
-		return nil, err
+		return s.scanXuguSchemaRows(rows, false)
 	}
+	return s.scanXuguSchemaRows(rows, true)
+}
+
+func (s *server) scanXuguSchemaRows(rows *sql.Rows, includesPublicScope bool) ([]string, error) {
 	defer s.closeRows(rows)
 	var result []string
 	for rows.Next() {
-		var schema string
-		if err := rows.Scan(&schema); err != nil {
+		var schema sql.NullString
+		var publicScope bool
+		var err error
+		if includesPublicScope {
+			err = rows.Scan(&schema, &publicScope)
+		} else {
+			err = rows.Scan(&schema)
+		}
+		if err != nil {
 			return nil, err
 		}
-		result = append(result, schema)
+		if publicScope {
+			result = append(result, xuguPublicSynonymScope)
+		} else if schema.Valid && schema.String != "" {
+			result = append(result, schema.String)
+		}
 	}
-	return emptyIfNil(result), rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return dedupeXuguSchemaNames(result), nil
+}
+
+func dedupeXuguSchemaNames(names []string) []string {
+	seen := make(map[string]struct{}, len(names))
+	result := make([]string, 0, len(names))
+	for _, name := range names {
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		result = append(result, name)
+	}
+	return emptyIfNil(result)
+}
+
+func isXuguPublicSynonymScope(schema string) bool {
+	return strings.TrimSpace(schema) == xuguPublicSynonymScope
 }
 
 func (s *server) currentSchema() (string, error) {
@@ -1679,7 +1762,8 @@ func (s *server) currentSchema() (string, error) {
 SELECT s.SCHEMA_NAME
 FROM SYS_SCHEMAS s
 JOIN SYS_USERS u ON u.DB_ID = s.DB_ID AND u.USER_ID = s.USER_ID
-WHERE UPPER(u.USER_NAME) = UPPER(?)
+WHERE s.DB_ID = CURRENT_DB_ID
+  AND UPPER(u.USER_NAME) = UPPER(?)
 ORDER BY CASE WHEN UPPER(s.SCHEMA_NAME) = UPPER(?) THEN 0 ELSE 1 END, s.SCHEMA_NAME`, []any{s.params.Username, s.params.Username})
 	if err != nil {
 		if fallback := strings.ToUpper(strings.TrimSpace(s.params.Username)); fallback != "" && isXuguMetadataUnavailableError(err) {
@@ -1842,6 +1926,9 @@ func (s *server) listObjects(schema string, constraints metadataListConstraints)
 	if err != nil {
 		return nil, err
 	}
+	if isOnlyXuguObjectType(constraints, "TRIGGER") {
+		return s.listSchemaTriggers(schema, constraints)
+	}
 	query := xuguListObjectsQuery(schema, constraints)
 	rows, err := s.queryRows(query.SQL, query.Args)
 	if err != nil {
@@ -1912,18 +1999,77 @@ func (s *server) listObjects(schema string, constraints metadataListConstraints)
 	return readXuguObjectRows(rows, schema)
 }
 
+func isOnlyXuguObjectType(constraints metadataListConstraints, objectType string) bool {
+	objectTypes := normalizedXuguObjectTypes(constraints.ObjectTypes)
+	return len(objectTypes) == 1 && objectTypes[0] == objectType
+}
+
+func (s *server) listSchemaTriggers(schema string, constraints metadataListConstraints) ([]objectInfo, error) {
+	query := xuguSchemaTriggersQuery(schema, constraints)
+	rows, err := s.queryRows(query.SQL, query.Args)
+	if err != nil {
+		if isXuguMetadataUnavailableError(err) {
+			return []objectInfo{}, nil
+		}
+		return nil, err
+	}
+	defer s.closeRows(rows)
+
+	var result []objectInfo
+	for rows.Next() {
+		var item objectInfo
+		var event, timing, level, condition, language, enabled, valid, comment, createdAt any
+		if err := rows.Scan(&item.Name, &item.ObjectType, &comment, &valid, &event, &timing, &level, &condition, &language, &enabled, &createdAt); err != nil {
+			return nil, err
+		}
+		item.Schema = schema
+		item.Comment = optionalString(xuguString(comment))
+		item.Valid = optionalBool(valid)
+		item.Trigger = &triggerInfo{
+			Name:      item.Name,
+			Event:     triggerEventName(event),
+			Timing:    triggerTimingName(timing),
+			Level:     triggerLevelName(level),
+			Condition: optionalString(xuguString(condition)),
+			Language:  optionalString(xuguString(language)),
+			Enabled:   optionalBool(enabled),
+			Valid:     item.Valid,
+			Comment:   item.Comment,
+			CreatedAt: optionalString(xuguString(createdAt)),
+		}
+		result = append(result, item)
+	}
+	return emptyIfNil(result), rows.Err()
+}
+
+func xuguSchemaTriggersQuery(schema string, constraints metadataListConstraints) xuguMetadataListQuery {
+	return xuguConstrainedMetadataListQuery(`
+SELECT tr.TRIG_NAME AS OBJECT_NAME, 'TRIGGER' AS OBJECT_TYPE, tr.COMMENTS, tr.VALID,
+       tr.TRIG_EVENT, tr.TRIG_TIME, tr.TRIG_TYPE, tr.TRIG_COND, tr.LANGUAGE, tr.ENABLE, tr.CREATE_TIME
+FROM ALL_TRIGGERS tr
+JOIN ALL_SCHEMAS s ON s.DB_ID = tr.DB_ID AND s.SCHEMA_ID = tr.SCHEMA_ID
+WHERE s.DB_ID = CURRENT_DB_ID
+  AND UPPER(s.SCHEMA_NAME) = UPPER(?)`,
+		"OBJECT_NAME, OBJECT_TYPE, COMMENTS, VALID, TRIG_EVENT, TRIG_TIME, TRIG_TYPE, TRIG_COND, LANGUAGE, ENABLE, CREATE_TIME",
+		"OBJECT_NAME", "OBJECT_TYPE", []any{schema}, constraints)
+}
+
 func readXuguObjectRows(rows *sql.Rows, schema string) ([]objectInfo, error) {
 	var result []objectInfo
 	for rows.Next() {
 		var item objectInfo
-		var valid any
+		var valid, xuguTypeMembersExpandable any
 		item.Schema = schema
-		if err := rows.Scan(&item.Name, &item.ObjectType, &item.Comment, &valid); err != nil {
+		if err := rows.Scan(&item.Name, &item.ObjectType, &item.Comment, &valid, &xuguTypeMembersExpandable); err != nil {
 			return nil, err
 		}
 		if valid != nil {
 			value := truthy(valid)
 			item.Valid = &value
+		}
+		if normalizeValue(xuguTypeMembersExpandable) != nil {
+			value := truthy(xuguTypeMembersExpandable)
+			item.XuguTypeMembersExpandable = &value
 		}
 		result = append(result, item)
 	}
@@ -2025,12 +2171,14 @@ func xuguListTablesQuery(schema string, constraints metadataListConstraints) xug
 SELECT t.TABLE_NAME, 'TABLE' AS TABLE_TYPE, t.COMMENTS
 FROM ALL_TABLES t
 JOIN ALL_SCHEMAS s ON s.DB_ID = t.DB_ID AND s.SCHEMA_ID = t.SCHEMA_ID
-WHERE UPPER(s.SCHEMA_NAME) = UPPER(?)`},
+WHERE s.DB_ID = CURRENT_DB_ID
+  AND UPPER(s.SCHEMA_NAME) = UPPER(?)`},
 		{objectType: "VIEW", sql: `
 SELECT v.VIEW_NAME AS TABLE_NAME, 'VIEW' AS TABLE_TYPE, v.COMMENTS
 FROM ALL_VIEWS v
 JOIN ALL_SCHEMAS s ON s.DB_ID = v.DB_ID AND s.SCHEMA_ID = v.SCHEMA_ID
-WHERE UPPER(s.SCHEMA_NAME) = UPPER(?)`},
+WHERE s.DB_ID = CURRENT_DB_ID
+  AND UPPER(s.SCHEMA_NAME) = UPPER(?)`},
 	}
 	selected := normalizedXuguObjectTypes(constraints.ObjectTypes)
 	selectedSet := make(map[string]bool, len(selected))
@@ -2063,66 +2211,89 @@ WHERE UPPER(s.SCHEMA_NAME) = UPPER(?)`},
 }
 
 func xuguListObjectsQuery(schema string, constraints metadataListConstraints) xuguMetadataListQuery {
+	// Public synonyms have no owning schema in Xugu. They are queried only
+	// through the reserved protocol scope; a real schema named GUEST remains
+	// a normal private-synonym namespace.
+	publicSynonymScope := isXuguPublicSynonymScope(schema)
+	synonymSQL := `
+SELECT y.SYNO_NAME AS OBJECT_NAME, 'SYNONYM' AS OBJECT_TYPE, NULL AS COMMENTS, y.VALID, NULL AS XUGU_TYPE_MEMBERS_EXPANDABLE
+FROM ALL_SYNONYMS y
+WHERE y.DB_ID = CURRENT_DB_ID
+  AND y.IS_PUBLIC = TRUE`
+	if !publicSynonymScope {
+		synonymSQL = `
+SELECT y.SYNO_NAME AS OBJECT_NAME, 'SYNONYM' AS OBJECT_TYPE, NULL AS COMMENTS, y.VALID, NULL AS XUGU_TYPE_MEMBERS_EXPANDABLE
+FROM ALL_SYNONYMS y
+JOIN ALL_SCHEMAS s ON s.DB_ID = y.DB_ID AND s.SCHEMA_ID = y.SCHEMA_ID
+WHERE y.DB_ID = CURRENT_DB_ID
+  AND UPPER(s.SCHEMA_NAME) = UPPER(?)
+  AND y.IS_PUBLIC = FALSE`
+	}
 	type objectSource struct {
 		objectTypes []string
 		sql         string
 	}
 	sources := []objectSource{
 		{objectTypes: []string{"TABLE"}, sql: `
-SELECT t.TABLE_NAME AS OBJECT_NAME, 'TABLE' AS OBJECT_TYPE, t.COMMENTS, NULL AS VALID
+SELECT t.TABLE_NAME AS OBJECT_NAME, 'TABLE' AS OBJECT_TYPE, t.COMMENTS, NULL AS VALID, NULL AS XUGU_TYPE_MEMBERS_EXPANDABLE
 FROM ALL_TABLES t
 JOIN ALL_SCHEMAS s ON s.DB_ID = t.DB_ID AND s.SCHEMA_ID = t.SCHEMA_ID
-WHERE UPPER(s.SCHEMA_NAME) = UPPER(?)`},
+WHERE s.DB_ID = CURRENT_DB_ID
+  AND UPPER(s.SCHEMA_NAME) = UPPER(?)`},
 		{objectTypes: []string{"VIEW"}, sql: `
-SELECT v.VIEW_NAME AS OBJECT_NAME, 'VIEW' AS OBJECT_TYPE, v.COMMENTS, NULL AS VALID
+SELECT v.VIEW_NAME AS OBJECT_NAME, 'VIEW' AS OBJECT_TYPE, v.COMMENTS, v.VALID, NULL AS XUGU_TYPE_MEMBERS_EXPANDABLE
 FROM ALL_VIEWS v
 JOIN ALL_SCHEMAS s ON s.DB_ID = v.DB_ID AND s.SCHEMA_ID = v.SCHEMA_ID
-WHERE UPPER(s.SCHEMA_NAME) = UPPER(?)`},
+WHERE s.DB_ID = CURRENT_DB_ID
+  AND UPPER(s.SCHEMA_NAME) = UPPER(?)`},
 		{objectTypes: []string{"PROCEDURE", "FUNCTION"}, sql: `
 		SELECT p.PROC_NAME AS OBJECT_NAME,
 		       CASE WHEN p.RET_TYPE IS NULL THEN 'PROCEDURE' ELSE 'FUNCTION' END AS OBJECT_TYPE,
-		       p.COMMENTS, p.VALID
+		       p.COMMENTS, p.VALID, NULL AS XUGU_TYPE_MEMBERS_EXPANDABLE
 		FROM ALL_PROCEDURES p
 		JOIN ALL_SCHEMAS s ON s.DB_ID = p.DB_ID AND s.SCHEMA_ID = p.SCHEMA_ID
-		WHERE UPPER(s.SCHEMA_NAME) = UPPER(?)`},
+		WHERE s.DB_ID = CURRENT_DB_ID
+		  AND UPPER(s.SCHEMA_NAME) = UPPER(?)`},
 		{objectTypes: []string{"PACKAGE"}, sql: `
-SELECT p.PACK_NAME AS OBJECT_NAME, 'PACKAGE' AS OBJECT_TYPE, p.COMMENTS, p.VALID
+SELECT p.PACK_NAME AS OBJECT_NAME, 'PACKAGE' AS OBJECT_TYPE, p.COMMENTS, p.VALID, NULL AS XUGU_TYPE_MEMBERS_EXPANDABLE
 FROM ALL_PACKAGES p
 JOIN ALL_SCHEMAS s ON s.DB_ID = p.DB_ID AND s.SCHEMA_ID = p.SCHEMA_ID
-WHERE UPPER(s.SCHEMA_NAME) = UPPER(?)`},
+WHERE s.DB_ID = CURRENT_DB_ID
+  AND UPPER(s.SCHEMA_NAME) = UPPER(?)`},
 		{objectTypes: []string{"PACKAGE_BODY"}, sql: `
-SELECT p.PACK_NAME AS OBJECT_NAME, 'PACKAGE_BODY' AS OBJECT_TYPE, p.COMMENTS, p.ALL_OK
+SELECT p.PACK_NAME AS OBJECT_NAME, 'PACKAGE_BODY' AS OBJECT_TYPE, p.COMMENTS, p.ALL_OK, NULL AS XUGU_TYPE_MEMBERS_EXPANDABLE
 FROM ALL_PACKAGES p
 JOIN ALL_SCHEMAS s ON s.DB_ID = p.DB_ID AND s.SCHEMA_ID = p.SCHEMA_ID
-WHERE UPPER(s.SCHEMA_NAME) = UPPER(?)
+WHERE s.DB_ID = CURRENT_DB_ID
+  AND UPPER(s.SCHEMA_NAME) = UPPER(?)
   AND p.BODY IS NOT NULL`},
 		{objectTypes: []string{"TRIGGER"}, sql: `
-SELECT tr.TRIG_NAME AS OBJECT_NAME, 'TRIGGER' AS OBJECT_TYPE, tr.COMMENTS, tr.VALID
+SELECT tr.TRIG_NAME AS OBJECT_NAME, 'TRIGGER' AS OBJECT_TYPE, tr.COMMENTS, tr.VALID, NULL AS XUGU_TYPE_MEMBERS_EXPANDABLE
 FROM ALL_TRIGGERS tr
 JOIN ALL_SCHEMAS s ON s.DB_ID = tr.DB_ID AND s.SCHEMA_ID = tr.SCHEMA_ID
-WHERE UPPER(s.SCHEMA_NAME) = UPPER(?)`},
+WHERE s.DB_ID = CURRENT_DB_ID
+  AND UPPER(s.SCHEMA_NAME) = UPPER(?)`},
 		{objectTypes: []string{"SEQUENCE"}, sql: `
-		SELECT q.SEQ_NAME AS OBJECT_NAME, 'SEQUENCE' AS OBJECT_TYPE, NULL AS COMMENTS, NULL AS VALID
+		SELECT q.SEQ_NAME AS OBJECT_NAME, 'SEQUENCE' AS OBJECT_TYPE, NULL AS COMMENTS, NULL AS VALID, NULL AS XUGU_TYPE_MEMBERS_EXPANDABLE
 FROM ALL_SEQUENCES q
 JOIN ALL_SCHEMAS s ON s.DB_ID = q.DB_ID AND s.SCHEMA_ID = q.SCHEMA_ID
-WHERE UPPER(s.SCHEMA_NAME) = UPPER(?)
+WHERE s.DB_ID = CURRENT_DB_ID
+  AND UPPER(s.SCHEMA_NAME) = UPPER(?)
   AND q.IS_SYS = FALSE`},
-		{objectTypes: []string{"SYNONYM"}, sql: `
-SELECT y.SYNO_NAME AS OBJECT_NAME, 'SYNONYM' AS OBJECT_TYPE, NULL AS COMMENTS, y.VALID
-FROM ALL_SYNONYMS y
-JOIN ALL_SCHEMAS s ON s.DB_ID = y.DB_ID AND s.SCHEMA_ID = y.SCHEMA_ID
-WHERE UPPER(s.SCHEMA_NAME) = UPPER(?)
-	AND y.IS_PUBLIC = FALSE`},
+		{objectTypes: []string{"SYNONYM"}, sql: synonymSQL},
 		{objectTypes: []string{"TYPE"}, sql: `
-SELECT u.TYPE_NAME AS OBJECT_NAME, 'TYPE' AS OBJECT_TYPE, u.COMMENTS, u.VALID
+SELECT u.TYPE_NAME AS OBJECT_NAME, 'TYPE' AS OBJECT_TYPE, u.COMMENTS, u.VALID,
+	       CASE WHEN u.UDT_TYPE = 1001 THEN TRUE ELSE FALSE END AS XUGU_TYPE_MEMBERS_EXPANDABLE
 FROM ALL_TYPES u
 JOIN ALL_SCHEMAS s ON s.DB_ID = u.DB_ID AND s.SCHEMA_ID = u.SCHEMA_ID
-WHERE UPPER(s.SCHEMA_NAME) = UPPER(?)`},
+WHERE s.DB_ID = CURRENT_DB_ID
+  AND UPPER(s.SCHEMA_NAME) = UPPER(?)`},
 		{objectTypes: []string{"TYPE_BODY"}, sql: `
-SELECT u.TYPE_NAME AS OBJECT_NAME, 'TYPE_BODY' AS OBJECT_TYPE, u.COMMENTS, u.VALID
+SELECT u.TYPE_NAME AS OBJECT_NAME, 'TYPE_BODY' AS OBJECT_TYPE, u.COMMENTS, u.VALID, NULL AS XUGU_TYPE_MEMBERS_EXPANDABLE
 FROM ALL_TYPES u
 JOIN ALL_SCHEMAS s ON s.DB_ID = u.DB_ID AND s.SCHEMA_ID = u.SCHEMA_ID
-WHERE UPPER(s.SCHEMA_NAME) = UPPER(?)
+WHERE s.DB_ID = CURRENT_DB_ID
+  AND UPPER(s.SCHEMA_NAME) = UPPER(?)
   AND u.BODY IS NOT NULL`},
 	}
 
@@ -2155,11 +2326,13 @@ WHERE UPPER(s.SCHEMA_NAME) = UPPER(?)
 	baseArgs := make([]any, 0, len(baseSources))
 	for _, source := range baseSources {
 		baseSQLParts = append(baseSQLParts, source.sql)
-		baseArgs = append(baseArgs, schema)
+		if !(publicSynonymScope && len(source.objectTypes) == 1 && source.objectTypes[0] == "SYNONYM") {
+			baseArgs = append(baseArgs, schema)
+		}
 	}
 	return xuguConstrainedMetadataListQuery(
 		strings.Join(baseSQLParts, "\nUNION ALL\n"),
-		"OBJECT_NAME, OBJECT_TYPE, COMMENTS, VALID",
+		"OBJECT_NAME, OBJECT_TYPE, COMMENTS, VALID, XUGU_TYPE_MEMBERS_EXPANDABLE",
 		"OBJECT_NAME",
 		"OBJECT_TYPE",
 		baseArgs,
@@ -2489,11 +2662,13 @@ func (s *server) listTriggers(schema, table string) ([]triggerInfo, error) {
 	}
 	table = strings.ToUpper(strings.TrimSpace(table))
 	rows, err := s.queryRows(`
-SELECT tr.TRIG_NAME, tr.TRIG_EVENT, tr.TRIG_TIME
+SELECT tr.TRIG_NAME, tr.TRIG_EVENT, tr.TRIG_TIME, tr.TRIG_TYPE,
+       tr.TRIG_COND, tr.LANGUAGE, tr.ENABLE, tr.VALID, tr.COMMENTS, tr.CREATE_TIME
 FROM ALL_TRIGGERS tr
 JOIN ALL_TABLES t ON t.DB_ID = tr.DB_ID AND t.TABLE_ID = tr.OBJ_ID
 JOIN ALL_SCHEMAS s ON s.DB_ID = t.DB_ID AND s.SCHEMA_ID = t.SCHEMA_ID
-WHERE UPPER(s.SCHEMA_NAME) = UPPER(?)
+WHERE s.DB_ID = CURRENT_DB_ID
+  AND UPPER(s.SCHEMA_NAME) = UPPER(?)
   AND UPPER(t.TABLE_NAME) = UPPER(?)
 ORDER BY tr.TRIG_NAME`, []any{schema, table})
 	if err != nil {
@@ -2506,12 +2681,19 @@ ORDER BY tr.TRIG_NAME`, []any{schema, table})
 	var result []triggerInfo
 	for rows.Next() {
 		var item triggerInfo
-		var event, timing any
-		if err := rows.Scan(&item.Name, &event, &timing); err != nil {
+		var event, timing, level, condition, language, enabled, valid, comment, createdAt any
+		if err := rows.Scan(&item.Name, &event, &timing, &level, &condition, &language, &enabled, &valid, &comment, &createdAt); err != nil {
 			return nil, err
 		}
 		item.Event = triggerEventName(event)
 		item.Timing = triggerTimingName(timing)
+		item.Level = triggerLevelName(level)
+		item.Condition = optionalString(xuguString(condition))
+		item.Language = optionalString(xuguString(language))
+		item.Enabled = optionalBool(enabled)
+		item.Valid = optionalBool(valid)
+		item.Comment = optionalString(xuguString(comment))
+		item.CreatedAt = optionalString(xuguString(createdAt))
 		result = append(result, item)
 	}
 	return emptyIfNil(result), rows.Err()
@@ -2707,7 +2889,8 @@ SELECT s.SCHEMA_NAME, q.SEQ_NAME,
        q.CACHE_VAL, q.IS_CYCLE, q.COMMENTS
 FROM ALL_SEQUENCES q
 JOIN ALL_SCHEMAS s ON s.DB_ID = q.DB_ID AND s.SCHEMA_ID = q.SCHEMA_ID
-WHERE s.SCHEMA_NAME = ` + quoteStringLiteral(schema) + `
+WHERE s.DB_ID = CURRENT_DB_ID
+  AND s.SCHEMA_NAME = ` + quoteStringLiteral(schema) + `
   AND q.SEQ_NAME = ` + quoteStringLiteral(name) + `
   AND q.IS_SYS = FALSE`
 }
@@ -2811,9 +2994,9 @@ func renderXuguSequenceDDL(sequence xuguSequenceMetadata) string {
 	return builder.String()
 }
 
-// getSynonymSource reconstructs private synonym DDL from ALL_SYNONYMS. Public
-// synonyms deliberately remain outside schema groups: their catalog rows have
-// no owning schema and showing them in every schema would duplicate objects.
+// getSynonymSource reconstructs synonym DDL from ALL_SYNONYMS. Public
+// synonyms are exposed in the reserved database-global scope and therefore
+// use PUBLIC syntax without a schema qualifier.
 func (s *server) getSynonymSource(schema, name string) (map[string]any, error) {
 	synonym, err := s.resolveCatalogSynonym(schema, name)
 	if err != nil {
@@ -2824,10 +3007,15 @@ func (s *server) getSynonymSource(schema, name string) (map[string]any, error) {
 	}
 
 	var builder strings.Builder
-	builder.WriteString("CREATE SYNONYM ")
-	builder.WriteString(quoteIdentifier(synonym.Schema))
-	builder.WriteByte('.')
-	builder.WriteString(quoteIdentifier(synonym.Name))
+	if synonym.Public {
+		builder.WriteString("CREATE PUBLIC SYNONYM ")
+		builder.WriteString(quoteIdentifier(synonym.Name))
+	} else {
+		builder.WriteString("CREATE SYNONYM ")
+		builder.WriteString(quoteIdentifier(synonym.Schema))
+		builder.WriteByte('.')
+		builder.WriteString(quoteIdentifier(synonym.Name))
+	}
 	builder.WriteString("\nFOR ")
 	if targetSchema := strings.TrimSpace(synonym.TargetSchema.String); targetSchema != "" {
 		builder.WriteString(quoteIdentifier(targetSchema))
@@ -2878,13 +3066,20 @@ func (s *server) resolveCatalogSynonym(schema, name string) (xuguCatalogSynonym,
 func xuguCatalogSynonymQuery(schema, name string, caseInsensitive bool) string {
 	schemaExpr := quoteStringLiteral(schema)
 	nameExpr := quoteStringLiteral(name)
+	publicScope := isXuguPublicSynonymScope(schema)
 	if caseInsensitive {
-		schemaExpr = quoteStringLiteral(strings.ToUpper(schema))
 		nameExpr = quoteStringLiteral(strings.ToUpper(name))
-		return xuguCatalogSynonymSelectSQL + "\n  AND UPPER(s.SCHEMA_NAME) = " + schemaExpr +
+		if publicScope {
+			return xuguCatalogSynonymSelectSQL + "\n  AND y.IS_PUBLIC = TRUE\n  AND UPPER(y.SYNO_NAME) = " + nameExpr
+		}
+		schemaExpr = quoteStringLiteral(strings.ToUpper(schema))
+		return xuguCatalogSynonymSelectSQL + "\n  AND y.IS_PUBLIC = FALSE\n  AND UPPER(s.SCHEMA_NAME) = " + schemaExpr +
 			"\n  AND UPPER(y.SYNO_NAME) = " + nameExpr
 	}
-	return xuguCatalogSynonymSelectSQL + "\n  AND s.SCHEMA_NAME = " + schemaExpr +
+	if publicScope {
+		return xuguCatalogSynonymSelectSQL + "\n  AND y.IS_PUBLIC = TRUE\n  AND y.SYNO_NAME = " + nameExpr
+	}
+	return xuguCatalogSynonymSelectSQL + "\n  AND y.IS_PUBLIC = FALSE\n  AND s.SCHEMA_NAME = " + schemaExpr +
 		"\n  AND y.SYNO_NAME = " + nameExpr
 }
 
@@ -2898,8 +3093,14 @@ func (s *server) catalogSynonymCandidates(query string) ([]xuguCatalogSynonym, e
 	var candidates []xuguCatalogSynonym
 	for rows.Next() {
 		var candidate xuguCatalogSynonym
-		if err := rows.Scan(&candidate.Schema, &candidate.Name, &candidate.TargetSchema, &candidate.TargetName); err != nil {
+		var schema sql.NullString
+		if err := rows.Scan(&schema, &candidate.Name, &candidate.TargetSchema, &candidate.TargetName, &candidate.Public); err != nil {
 			return nil, err
+		}
+		if candidate.Public {
+			candidate.Schema = xuguPublicSynonymScope
+		} else {
+			candidate.Schema = schema.String
 		}
 		candidates = append(candidates, candidate)
 	}
@@ -3030,10 +3231,10 @@ func xuguCatalogTableNameQuery(schema, table string, caseInsensitive bool) strin
 	if caseInsensitive {
 		schemaExpr = quoteStringLiteral(strings.ToUpper(schema))
 		tableExpr = quoteStringLiteral(strings.ToUpper(table))
-		return xuguCatalogTableNameSelectSQL + "\nWHERE UPPER(s.SCHEMA_NAME) = " + schemaExpr +
+		return xuguCatalogTableNameSelectSQL + "\nWHERE s.DB_ID = CURRENT_DB_ID\n  AND UPPER(s.SCHEMA_NAME) = " + schemaExpr +
 			"\n  AND UPPER(t.TABLE_NAME) = " + tableExpr
 	}
-	return xuguCatalogTableNameSelectSQL + "\nWHERE s.SCHEMA_NAME = " + schemaExpr +
+	return xuguCatalogTableNameSelectSQL + "\nWHERE s.DB_ID = CURRENT_DB_ID\n  AND s.SCHEMA_NAME = " + schemaExpr +
 		"\n  AND t.TABLE_NAME = " + tableExpr
 }
 
@@ -3106,7 +3307,7 @@ func (s *server) getExplainInfo(sqlText string) (string, error) {
 	return strings.TrimSpace(builder.String()), rows.Err()
 }
 
-func (s *server) executeTransaction(params map[string]json.RawMessage) (queryResult, error) {
+func (s *server) executeTransaction(params map[string]json.RawMessage) (result queryResult, err error) {
 	var payload struct {
 		Statements []string `json:"statements"`
 		Schema     string   `json:"schema"`
@@ -3119,7 +3320,9 @@ func (s *server) executeTransaction(params map[string]json.RawMessage) (queryRes
 		return queryResult{}, err
 	}
 	ctx, cancel := s.beginActiveOperation()
-	defer s.endActiveOperation(cancel)
+	defer func() {
+		err = s.finishActiveOperation(cancel, 0, err)
+	}()
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return queryResult{}, err
@@ -3137,12 +3340,12 @@ func (s *server) executeTransaction(params map[string]json.RawMessage) (queryRes
 		if statement == "" {
 			continue
 		}
-		result, err := tx.ExecContext(ctx, statement)
+		execResult, err := tx.ExecContext(ctx, statement)
 		if err != nil {
 			tx.Rollback()
 			return queryResult{}, err
 		}
-		count, _ := result.RowsAffected()
+		count, _ := execResult.RowsAffected()
 		affected += count
 	}
 	if err := tx.Commit(); err != nil {
@@ -3315,8 +3518,8 @@ func (s *server) executeQuery(opts queryOptions) (queryResult, error) {
 		return queryResult{}, err
 	}
 	ctx, cancel := s.beginActiveOperationWithTimeout(opts.TimeoutSecs)
-	defer s.endActiveOperation(cancel)
 	execResult, err := db.ExecContext(ctx, sqlText)
+	err = s.finishActiveOperation(cancel, opts.TimeoutSecs, err)
 	if err != nil {
 		return queryResult{}, err
 	}
@@ -3413,18 +3616,20 @@ func (s *server) queryRowsWithTimeoutOnce(sqlText string, args []any, timeoutSec
 		s.activeTimer = nil
 	}
 	timedOut := s.activeTimedOut
-	if queryErr != nil {
-		cancel()
-	} else if timedOut {
-		cancel()
-		if rows != nil {
-			rows.Close()
-		}
-		queryErr = fmt.Errorf("query timed out after %ds", timeoutSecs)
-	} else {
+	canceled := s.activeCanceled
+	s.activeTimedOut = false
+	s.activeCanceled = false
+	if queryErr == nil && !timedOut && !canceled {
 		s.activeRows[rows] = cancel
 	}
 	s.activeCancelMu.Unlock()
+	if queryErr != nil || timedOut || canceled {
+		cancel()
+		if rows != nil {
+			_ = rows.Close()
+		}
+		queryErr = xuguOperationResultError(timedOut, canceled, timeoutSecs, queryErr)
+	}
 	return rows, queryErr
 }
 
@@ -3454,7 +3659,7 @@ func (s *server) execWithReconnect(statement string) error {
 	}
 	ctx, cancel := s.beginActiveOperation()
 	_, execErr := db.ExecContext(ctx, statement)
-	s.endActiveOperation(cancel)
+	execErr = s.finishActiveOperation(cancel, 0, execErr)
 	if execErr == nil || !isXuguConnectionClosedError(execErr) {
 		return execErr
 	}
@@ -3467,7 +3672,7 @@ func (s *server) execWithReconnect(statement string) error {
 	}
 	ctx, cancel = s.beginActiveOperation()
 	_, execErr = db.ExecContext(ctx, statement)
-	s.endActiveOperation(cancel)
+	execErr = s.finishActiveOperation(cancel, 0, execErr)
 	return execErr
 }
 
@@ -3497,25 +3702,60 @@ func (s *server) beginActiveOperationWithTimeout(timeoutSecs int) (context.Conte
 	s.activeCancel = cancel
 	s.activeTimer = timer
 	s.activeTimedOut = false
+	s.activeCanceled = false
 	s.activeCancelMu.Unlock()
 	return ctx, cancel
 }
 
 func (s *server) endActiveOperation(cancel context.CancelFunc) {
-	cancel()
+	_ = s.finishActiveOperation(cancel, 0, nil)
+}
+
+func (s *server) finishActiveOperation(cancel context.CancelFunc, timeoutSecs int, operationErr error) error {
 	s.activeCancelMu.Lock()
 	s.activeCancel = nil
 	if s.activeTimer != nil {
 		s.activeTimer.Stop()
 		s.activeTimer = nil
 	}
+	timedOut := s.activeTimedOut
+	canceled := s.activeCanceled
+	s.activeTimedOut = false
+	s.activeCanceled = false
 	s.activeCancelMu.Unlock()
+	cancel()
+	return xuguOperationResultError(timedOut, canceled, timeoutSecs, operationErr)
+}
+
+func xuguOperationResultError(timedOut, canceled bool, timeoutSecs int, operationErr error) error {
+	if timedOut {
+		if operationErr != nil {
+			return fmt.Errorf("%w after %ds: %v", errXuguOperationTimeout, timeoutSecs, operationErr)
+		}
+		return fmt.Errorf("%w after %ds", errXuguOperationTimeout, timeoutSecs)
+	}
+	if canceled {
+		if operationErr != nil {
+			return fmt.Errorf("%w: %v", errXuguOperationCanceled, operationErr)
+		}
+		return errXuguOperationCanceled
+	}
+	return operationErr
 }
 
 func (s *server) cancelActiveQuery() {
 	s.activeCancelMu.Lock()
 	cancels := make([]context.CancelFunc, 0, len(s.activeRows)+1)
 	if s.activeCancel != nil {
+		if !s.activeTimedOut {
+			s.activeCanceled = true
+			// Explicit cancellation won the race. Disable the watchdog so a
+			// slow driver return cannot relabel this operation as a timeout.
+			if s.activeTimer != nil {
+				s.activeTimer.Stop()
+				s.activeTimer = nil
+			}
+		}
 		cancels = append(cancels, s.activeCancel)
 	}
 	for _, cancel := range s.activeRows {
@@ -3558,43 +3798,50 @@ func objectSourceQuery(schema, name, objectType string) (string, []any, error) {
 SELECT TO_CHAR(v.DEFINE)
 FROM ALL_VIEWS v
 JOIN ALL_SCHEMAS s ON s.DB_ID = v.DB_ID AND s.SCHEMA_ID = v.SCHEMA_ID
-WHERE UPPER(s.SCHEMA_NAME) = UPPER(?) AND UPPER(v.VIEW_NAME) = UPPER(?)`, []any{schema, name}, nil
+WHERE s.DB_ID = CURRENT_DB_ID
+  AND UPPER(s.SCHEMA_NAME) = UPPER(?) AND UPPER(v.VIEW_NAME) = UPPER(?)`, []any{schema, name}, nil
 	case "TRIGGER":
 		return `
 SELECT TO_CHAR(t.DEFINE)
 FROM ALL_TRIGGERS t
 JOIN ALL_SCHEMAS s ON s.DB_ID = t.DB_ID AND s.SCHEMA_ID = t.SCHEMA_ID
-WHERE UPPER(s.SCHEMA_NAME) = UPPER(?) AND UPPER(t.TRIG_NAME) = UPPER(?)`, []any{schema, name}, nil
+WHERE s.DB_ID = CURRENT_DB_ID
+  AND UPPER(s.SCHEMA_NAME) = UPPER(?) AND UPPER(t.TRIG_NAME) = UPPER(?)`, []any{schema, name}, nil
 	case "PROCEDURE", "FUNCTION":
 		return `
 SELECT TO_CHAR(p.DEFINE)
 FROM ALL_PROCEDURES p
 JOIN ALL_SCHEMAS s ON s.DB_ID = p.DB_ID AND s.SCHEMA_ID = p.SCHEMA_ID
-WHERE UPPER(s.SCHEMA_NAME) = UPPER(?) AND UPPER(p.PROC_NAME) = UPPER(?)`, []any{schema, name}, nil
+WHERE s.DB_ID = CURRENT_DB_ID
+  AND UPPER(s.SCHEMA_NAME) = UPPER(?) AND UPPER(p.PROC_NAME) = UPPER(?)`, []any{schema, name}, nil
 	case "PACKAGE":
 		return `
 SELECT COALESCE(TO_CHAR(k.SPEC), '')
 FROM ALL_PACKAGES k
 JOIN ALL_SCHEMAS s ON s.DB_ID = k.DB_ID AND s.SCHEMA_ID = k.SCHEMA_ID
-WHERE UPPER(s.SCHEMA_NAME) = UPPER(?) AND UPPER(k.PACK_NAME) = UPPER(?)`, []any{schema, name}, nil
+WHERE s.DB_ID = CURRENT_DB_ID
+  AND UPPER(s.SCHEMA_NAME) = UPPER(?) AND UPPER(k.PACK_NAME) = UPPER(?)`, []any{schema, name}, nil
 	case "PACKAGE BODY", "PACKAGE_BODY":
 		return `
 SELECT COALESCE(TO_CHAR(k.BODY), '')
 FROM ALL_PACKAGES k
 JOIN ALL_SCHEMAS s ON s.DB_ID = k.DB_ID AND s.SCHEMA_ID = k.SCHEMA_ID
-WHERE UPPER(s.SCHEMA_NAME) = UPPER(?) AND UPPER(k.PACK_NAME) = UPPER(?)`, []any{schema, name}, nil
+WHERE s.DB_ID = CURRENT_DB_ID
+  AND UPPER(s.SCHEMA_NAME) = UPPER(?) AND UPPER(k.PACK_NAME) = UPPER(?)`, []any{schema, name}, nil
 	case "TYPE":
 		return `
 SELECT COALESCE(TO_CHAR(u.SPEC), '')
 FROM ALL_TYPES u
 JOIN ALL_SCHEMAS s ON s.DB_ID = u.DB_ID AND s.SCHEMA_ID = u.SCHEMA_ID
-WHERE UPPER(s.SCHEMA_NAME) = UPPER(?) AND UPPER(u.TYPE_NAME) = UPPER(?)`, []any{schema, name}, nil
+WHERE s.DB_ID = CURRENT_DB_ID
+  AND UPPER(s.SCHEMA_NAME) = UPPER(?) AND UPPER(u.TYPE_NAME) = UPPER(?)`, []any{schema, name}, nil
 	case "TYPE BODY", "TYPE_BODY":
 		return `
 SELECT COALESCE(TO_CHAR(u.BODY), '')
 FROM ALL_TYPES u
 JOIN ALL_SCHEMAS s ON s.DB_ID = u.DB_ID AND s.SCHEMA_ID = u.SCHEMA_ID
-WHERE UPPER(s.SCHEMA_NAME) = UPPER(?) AND UPPER(u.TYPE_NAME) = UPPER(?)
+WHERE s.DB_ID = CURRENT_DB_ID
+  AND UPPER(s.SCHEMA_NAME) = UPPER(?) AND UPPER(u.TYPE_NAME) = UPPER(?)
   AND u.BODY IS NOT NULL`, []any{schema, name}, nil
 	default:
 		return "", nil, fmt.Errorf("object source is not supported for %s", objectType)
@@ -4214,6 +4461,14 @@ func optionalString(value string) *string {
 	return &value
 }
 
+func optionalBool(value any) *bool {
+	if normalizeValue(value) == nil {
+		return nil
+	}
+	result := truthy(value)
+	return &result
+}
+
 func xuguPartitionType(value int) string {
 	switch value {
 	case 1:
@@ -4380,7 +4635,8 @@ func (s *server) tableComment(schema, table string) (string, error) {
 SELECT t.COMMENTS
 FROM ALL_TABLES t
 JOIN ALL_SCHEMAS s ON s.DB_ID = t.DB_ID AND s.SCHEMA_ID = t.SCHEMA_ID
-WHERE UPPER(s.SCHEMA_NAME) = UPPER(?)
+WHERE s.DB_ID = CURRENT_DB_ID
+  AND UPPER(s.SCHEMA_NAME) = UPPER(?)
   AND UPPER(t.TABLE_NAME) = UPPER(?)`, []any{schema, table})
 	if err != nil {
 		return "", err
@@ -4817,6 +5073,17 @@ func triggerTimingName(value any) string {
 	}
 }
 
+func triggerLevelName(value any) string {
+	switch fmt.Sprint(normalizeValue(value)) {
+	case "1":
+		return "FOR EACH ROW"
+	case "2":
+		return "FOR STATEMENT"
+	default:
+		return fmt.Sprint(normalizeValue(value))
+	}
+}
+
 func joinValues(values []any, sep string) string {
 	parts := make([]string, len(values))
 	for i, value := range values {
@@ -4873,8 +5140,8 @@ func stringSliceParam(params map[string]json.RawMessage, key string) []string {
 	return nil
 }
 
-func errorResponse(id json.RawMessage, err error) response {
-	return response{JSONRPC: "2.0", ID: id, Error: &rpcError{Code: -1, Message: err.Error()}}
+func errorResponse(id json.RawMessage, method, agentSessionID string, err error) response {
+	return response{JSONRPC: "2.0", ID: id, Error: classifyRPCError(method, agentSessionID, err)}
 }
 
 func trimStatementSQL(sqlText string) string {

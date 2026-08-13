@@ -147,10 +147,9 @@ impl NacosAdminConfig {
         }
         let context_path_is_explicit_root = self.context_path.trim() == "/";
         self.context_path = normalize_context_path(&self.context_path);
-        // Nacos 3 separates the console (normally :8080) from the server-side
-        // Admin API (normally :8848/nacos). Older DBX connection records did
-        // not persist the default server context, so repair only explicit
-        // Nacos 3 profiles here while preserving custom contexts.
+        // Nacos 3 management uses the server-side Admin API, normally
+        // `:8848/nacos`. Keep the documented default context for explicit V3
+        // profiles while preserving custom reverse-proxy prefixes.
         if self.context_path.is_empty()
             && !context_path_is_explicit_root
             && matches!(self.implementation, Some(NacosImplementation::Nacos))
@@ -284,6 +283,7 @@ mod tests {
 
     fn connection_with_external(value: serde_json::Value) -> ConnectionConfig {
         ConnectionConfig {
+            docs_notes_path: None,
             id: "nacos-1".to_string(),
             name: "Nacos".to_string(),
             note: String::new(),
@@ -297,6 +297,7 @@ mod tests {
             username: String::new(),
             password: String::new(),
             database: None,
+            default_schema: None,
             visible_databases: None,
             visible_schemas: None,
             show_system_schemas: false,
@@ -332,6 +333,7 @@ mod tests {
             jdbc_driver_class: None,
             jdbc_driver_paths: Vec::new(),
             one_time: false,
+            save_password: true,
             read_only: false,
             is_production: false,
             production_databases: vec![],

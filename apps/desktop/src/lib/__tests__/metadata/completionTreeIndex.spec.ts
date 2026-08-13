@@ -100,4 +100,19 @@ describe("completionTreeIndex", () => {
     expect(completionTablesFromTree(tree, "doris", "sales")).toEqual([{ name: "orders", schema: undefined, type: "table" }]);
     expect(completionTablesFromTree(tree, "doris", "sales", undefined, "hive_catalog")).toEqual([{ name: "orders", catalog: "hive_catalog", schema: undefined, type: "table" }]);
   });
+
+  it("preserves TDengine stable metadata from the sidebar tree", () => {
+    const tree: TreeNode[] = [
+      {
+        id: "tdengine-stable",
+        label: "test_tb",
+        type: "table",
+        tableType: "STABLE",
+        connectionId: "tdengine",
+        database: "issue_5685",
+      },
+    ];
+
+    expect(completionTablesFromTree(tree, "tdengine", "issue_5685")).toEqual([{ name: "test_tb", schema: undefined, type: "table", tableType: "STABLE" }]);
+  });
 });

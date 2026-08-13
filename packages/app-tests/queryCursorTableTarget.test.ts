@@ -8,6 +8,7 @@ import {
   queryContextTargetFromCandidate,
   queryCursorTableCandidate,
   queryTableCandidateAtSqlPosition,
+  queryTableNavigationTargetAtSqlPosition,
   resolveQueryContextCandidateDatabase,
   resolveQueryContextObjectTarget,
 } from "../../apps/desktop/src/lib/sql/queryCursorTableTarget.ts";
@@ -85,6 +86,70 @@ test("builds database-qualified candidates for multi-database non-schema engines
     schema: undefined,
     tableName: "events",
   });
+});
+
+test("maps qualified relation navigation to database or schema by dialect", () => {
+  const mysqlSql = "select * from promotion.p_settlement_account";
+  assert.deepEqual(
+    queryTableNavigationTargetAtSqlPosition(
+      {
+        connectionId: "conn-1",
+        database: "nova",
+        databaseType: "mysql",
+        sql: mysqlSql,
+        position: mysqlSql.indexOf("p_settlement_account"),
+      },
+      { name: "p_settlement_account", schema: "promotion", type: "table" },
+    ),
+    {
+      name: "p_settlement_account",
+      database: "promotion",
+      type: "table",
+    },
+  );
+
+  const postgresSql = "select * from reporting.orders";
+  assert.deepEqual(
+    queryTableNavigationTargetAtSqlPosition(
+      {
+        connectionId: "conn-1",
+        database: "app",
+        schema: "public",
+        databaseType: "postgres",
+        sql: postgresSql,
+        position: postgresSql.indexOf("orders"),
+      },
+      { name: "orders", schema: "reporting", type: "view" },
+    ),
+    {
+      name: "orders",
+      database: "app",
+      schema: "reporting",
+      type: "view",
+    },
+  );
+});
+
+test("keeps metadata scope for unqualified relation navigation", () => {
+  const sql = "select * from orders";
+  assert.deepEqual(
+    queryTableNavigationTargetAtSqlPosition(
+      {
+        connectionId: "conn-1",
+        database: "app",
+        schema: "public",
+        databaseType: "postgres",
+        sql,
+        position: sql.indexOf("orders"),
+      },
+      { name: "Orders", schema: "archive", type: "table" },
+    ),
+    {
+      name: "Orders",
+      schema: "archive",
+      type: "table",
+    },
+  );
 });
 
 test("builds three-part candidates at an explicit context-menu position", () => {

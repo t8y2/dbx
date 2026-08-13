@@ -1,14 +1,23 @@
 import { describe, expect, it } from "vitest";
-import { normalizeSidebarObjectKind, sidebarObjectKindsForDatabase } from "@/lib/database/databaseObjectCapabilities";
+import { customTypeCapabilities, databaseObjectCapabilities, normalizeSidebarObjectKind, sidebarObjectKindsForDatabase, supportsPackageMemberExpansion, supportsTypeObjectSource } from "@/lib/database/databaseObjectCapabilities";
 
 describe("databaseObjectCapabilities", () => {
   it("exposes supported programmable objects for Dameng", () => {
     expect(sidebarObjectKindsForDatabase("dameng")).toEqual(expect.arrayContaining(["MATERIALIZED_VIEW", "SEQUENCE", "PACKAGE", "PACKAGE_BODY"]));
   });
 
-  it("exposes synonyms for Xugu only", () => {
+  it("exposes synonyms only for database paths with synonym metadata", () => {
+    expect(sidebarObjectKindsForDatabase("oracle")).toContain("SYNONYM");
     expect(sidebarObjectKindsForDatabase("xugu")).toContain("SYNONYM");
+    expect(sidebarObjectKindsForDatabase("oceanbase-oracle")).not.toContain("SYNONYM");
     expect(sidebarObjectKindsForDatabase("postgres")).not.toContain("SYNONYM");
+  });
+
+  it("expands package members only for implemented database paths", () => {
+    expect(supportsPackageMemberExpansion("oracle")).toBe(true);
+    expect(supportsPackageMemberExpansion("xugu")).toBe(true);
+    expect(supportsPackageMemberExpansion("dameng")).toBe(false);
+    expect(supportsPackageMemberExpansion("opengauss")).toBe(false);
   });
 
   it("exposes only tables for HBase namespaces", () => {
@@ -29,7 +38,54 @@ describe("databaseObjectCapabilities", () => {
     expect(sidebarObjectKindsForDatabase("doris")).toEqual(expect.arrayContaining(["TABLE", "VIEW"]));
   });
 
+  it("exposes triggers only for native MySQL among MySQL-compatible paths", () => {
+    expect(sidebarObjectKindsForDatabase("mysql")).toEqual(["TABLE", "VIEW", "PROCEDURE", "FUNCTION", "TRIGGER"]);
+    expect(databaseObjectCapabilities("mysql").sourceReadable).toEqual(["VIEW", "PROCEDURE", "FUNCTION", "TRIGGER"]);
+
+    expect(sidebarObjectKindsForDatabase("doris")).toEqual(["TABLE", "VIEW"]);
+    expect(sidebarObjectKindsForDatabase("starrocks")).toEqual(["TABLE", "VIEW", "MATERIALIZED_VIEW"]);
+    expect(sidebarObjectKindsForDatabase("manticoresearch")).toEqual(["TABLE", "FUNCTION"]);
+    expect(sidebarObjectKindsForDatabase("jdbc")).toEqual(["TABLE", "VIEW", "PROCEDURE", "FUNCTION"]);
+  });
+
   it("normalizes space separated materialized view types", () => {
     expect(normalizeSidebarObjectKind("MATERIALIZED VIEW")).toBe("MATERIALIZED_VIEW");
+  });
+
+  it("exposes TYPE for verified PostgreSQL-family databases only", () => {
+    for (const dbType of ["postgres", "opengauss", "gaussdb", "kingbase", "vastbase"] as const) {
+      expect(sidebarObjectKindsForDatabase(dbType), dbType).toContain("TYPE");
+    }
+    // Unverified PG-like databases must not advertise TYPE this cycle.
+    for (const dbType of ["highgo", "uxdb", "redshift", "kwdb"] as const) {
+      expect(sidebarObjectKindsForDatabase(dbType), dbType).not.toContain("TYPE");
+    }
+  });
+
+  it("only Xugu TYPE nodes can open object source", () => {
+    expect(supportsTypeObjectSource("xugu")).toBe(true);
+    for (const dbType of ["postgres", "opengauss", "gaussdb", "kingbase", "vastbase", undefined] as const) {
+      expect(supportsTypeObjectSource(dbType), String(dbType)).toBe(false);
+    }
+  });
+
+  it("keeps sourceReadable in sync with supportsTypeObjectSource", () => {
+    expect(databaseObjectCapabilities("xugu").sourceReadable).toContain("TYPE");
+    expect(databaseObjectCapabilities("xugu").sourceReadable).toContain("TYPE_BODY");
+    for (const dbType of ["postgres", "opengauss", "gaussdb", "kingbase", "vastbase"] as const) {
+      expect(databaseObjectCapabilities(dbType).sourceReadable, dbType).not.toContain("TYPE");
+      expect(databaseObjectCapabilities(dbType).sourceReadable, dbType).not.toContain("TYPE_BODY");
+      // Non-type programmable objects stay source-readable on PG-family.
+      expect(databaseObjectCapabilities(dbType).sourceReadable, dbType).toContain("FUNCTION");
+    }
+  });
+
+  it("enables custom type details only for verified PG-family databases", () => {
+    for (const dbType of ["postgres", "opengauss", "gaussdb", "kingbase", "vastbase"] as const) {
+      expect(customTypeCapabilities(dbType), dbType).toEqual({ details: true, members: true, ddl: true });
+    }
+    for (const dbType of ["xugu", "highgo", "uxdb", "redshift", "mysql", undefined] as const) {
+      expect(customTypeCapabilities(dbType), String(dbType)).toEqual({ details: false, members: false, ddl: false });
+    }
   });
 });

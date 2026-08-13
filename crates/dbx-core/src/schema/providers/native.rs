@@ -64,6 +64,9 @@ pub(in crate::schema) async fn list_tables(
         PoolKind::Easysearch(client) => {
             db::easysearch_driver::list_indices(client).await.map(|names| collection_names_to_tables(names, "INDEX"))
         }
+        PoolKind::Meilisearch(client) => {
+            db::meilisearch_driver::list_indexes(client).await.map(|names| collection_names_to_tables(names, "INDEX"))
+        }
         PoolKind::HBase(client) => db::hbase_driver::list_tables(client, database).await,
         PoolKind::VectorDb(client) => db::vector_driver::list_collections(client)
             .await
@@ -97,7 +100,7 @@ pub(in crate::schema) async fn list_objects(
         PoolKind::Postgres(p) if config.is_some_and(is_cloudberry_config) => {
             db::cloudberry::list_objects(p, schema).await.map(Some)
         }
-        PoolKind::Postgres(p) => db::postgres::list_objects(p, schema).await.map(Some),
+        PoolKind::Postgres(p) => db::postgres::list_objects(p, schema, true, true, false).await.map(Some),
         _ => Ok(None),
     }
 }
@@ -121,7 +124,7 @@ pub(in crate::schema) async fn list_completion_objects(
         PoolKind::Postgres(p) if config.is_some_and(is_cloudberry_config) => {
             db::cloudberry::list_objects(p, schema).await.map(Some)
         }
-        PoolKind::Postgres(p) => db::postgres::list_objects(p, schema).await.map(Some),
+        PoolKind::Postgres(p) => db::postgres::list_objects(p, schema, true, true, false).await.map(Some),
         _ => Ok(None),
     }
 }
@@ -155,6 +158,7 @@ pub(in crate::schema) async fn get_columns(
         PoolKind::Turso(client) => db::turso_driver::get_columns(client, schema, table).await,
         PoolKind::Elasticsearch(client) => db::elasticsearch_driver::get_columns(client, table).await,
         PoolKind::Easysearch(client) => db::easysearch_driver::get_columns(client, table).await,
+        PoolKind::Meilisearch(client) => db::meilisearch_driver::get_columns(client, table).await,
         PoolKind::HBase(client) => db::hbase_driver::get_columns(client, database, table).await,
         PoolKind::VectorDb(_) => Ok(vec![]),
         _ => Ok(vec![]),

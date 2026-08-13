@@ -762,19 +762,19 @@ export function buildEditorFontThemeRules(opts?: { fixedHeight?: boolean; scroll
     },
     ".cm-lineNumbers .cm-gutterElement": {
       cursor: "pointer",
-      paddingRight: "16px",
+      paddingRight: "8px",
       userSelect: "none",
     },
     ".cm-run-statement-gutter": {
-      minWidth: "34px",
+      minWidth: "28px",
     },
     ".cm-run-statement-gutter .cm-gutterElement": {
       alignItems: "center",
       boxSizing: "border-box",
       display: "flex",
       justifyContent: "center",
-      minWidth: "34px",
-      padding: "0 5px",
+      minWidth: "28px",
+      padding: "0 2px",
     },
     ".cm-run-statement-marker": {
       alignItems: "center",
@@ -972,6 +972,12 @@ export function buildSqlCompletionThemeRules(): CodeMirrorStyleSpec {
     ".cm-completionIcon-schema": {
       color: colorMixValue("var(--amber-500, #f59e0b)", "color-mix(in oklch, var(--amber-500, #f59e0b) 92%, var(--popover-foreground))"),
       ...lucideCompletionIconMask(SCHEMA_ICON),
+    },
+    // Reuse the table glyph for aliases instead of CodeMirror's default text
+    // icon, which is rendered as a solid black square in some themes.
+    ".cm-completionIcon-text": {
+      color: colorMixValue("var(--violet-500, #8b5cf6)", "color-mix(in oklch, var(--violet-500, #8b5cf6) 92%, var(--popover-foreground))"),
+      ...lucideCompletionIconMask(TABLE_ICON),
     },
     ".cm-completionLabel": {
       color: "inherit",

@@ -9,6 +9,7 @@ import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useToast } from "@/composables/useToast";
 import { copyToClipboard } from "@/lib/common/clipboard";
+import { saveTextFile } from "@/lib/export/saveTextFile";
 import {
   DEFAULT_SQL_FORMATTER_SETTINGS,
   SQL_FORMATTER_CONFIG_FORMATTER,
@@ -19,6 +20,7 @@ import {
   syncSqlFormatterConfigDraft,
   type SqlFormatterCase,
   type SqlFormatterExpressionWidth,
+  type SqlFormatterFromClauseLayout,
   type SqlFormatterIndentStyle,
   type SqlFormatterLinesBetweenQueries,
   type SqlFormatterLogicalOperatorNewline,
@@ -77,6 +79,12 @@ const caseOptions: { value: SqlFormatterCase; labelKey: string }[] = [
 const logicalOperatorOptions: { value: SqlFormatterLogicalOperatorNewline; labelKey: string }[] = [
   { value: "before", labelKey: "settings.sqlFormatterLogicalBefore" },
   { value: "after", labelKey: "settings.sqlFormatterLogicalAfter" },
+  { value: "none", labelKey: "settings.sqlFormatterLogicalSameLine" },
+];
+
+const fromClauseLayoutOptions: { value: SqlFormatterFromClauseLayout; labelKey: string }[] = [
+  { value: "newLine", labelKey: "settings.sqlFormatterFromNewLine" },
+  { value: "sameLine", labelKey: "settings.sqlFormatterFromSameLine" },
 ];
 
 const indentStyleOptions: { value: SqlFormatterIndentStyle; labelKey: string }[] = [
@@ -97,6 +105,7 @@ const sqlFormatterOptionLabelKeys: Record<keyof SqlFormatterOptionSettings, stri
   useTabs: "settings.sqlFormatterIndent",
   tabWidth: "settings.sqlFormatterTabWidth",
   logicalOperatorNewline: "settings.sqlFormatterLogicalOperatorNewline",
+  fromClauseLayout: "settings.sqlFormatterFromClauseLayout",
   expressionWidth: "settings.sqlFormatterExpressionWidth",
   linesBetweenQueries: "settings.sqlFormatterLinesBetweenQueries",
   denseOperators: "settings.sqlFormatterDenseOperators",
@@ -184,7 +193,11 @@ function onIndentStyle(value: any) {
 }
 
 function onLogicalOperatorNewline(value: any) {
-  if (value === "before" || value === "after") updateOption("logicalOperatorNewline", value);
+  if (value === "before" || value === "after" || value === "none") updateOption("logicalOperatorNewline", value);
+}
+
+function onFromClauseLayout(value: any) {
+  if (value === "newLine" || value === "sameLine") updateOption("fromClauseLayout", value);
 }
 
 function onTabWidth(value: any) {
@@ -287,16 +300,8 @@ async function onImportFile(event: Event) {
   }
 }
 
-function exportConfig() {
-  const blob = new Blob([serializeSqlFormatterConfig(settings.value)], { type: "application/json" });
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = "dbx-sql-formatter.json";
-  document.body.appendChild(link);
-  link.click();
-  link.remove();
-  URL.revokeObjectURL(url);
+async function exportConfig() {
+  await saveTextFile(serializeSqlFormatterConfig(settings.value), "dbx-sql-formatter.json", "JSON", "json");
 }
 
 async function copyJsonDraft() {
@@ -611,6 +616,20 @@ onBeforeUnmount(() => {
               </SelectTrigger>
               <SelectContent>
                 <SelectItem v-for="option in logicalOperatorOptions" :key="option.value" :value="option.value">
+                  {{ t(option.labelKey) }}
+                </SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+
+          <div class="space-y-2">
+            <Label>{{ t("settings.sqlFormatterFromClauseLayout") }}</Label>
+            <Select :model-value="settings.fromClauseLayout" @update:model-value="onFromClauseLayout">
+              <SelectTrigger class="w-full">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem v-for="option in fromClauseLayoutOptions" :key="option.value" :value="option.value">
                   {{ t(option.labelKey) }}
                 </SelectItem>
               </SelectContent>

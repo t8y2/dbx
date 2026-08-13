@@ -25,6 +25,10 @@ export interface GridNewRowMeta {
   token: number;
   /** Display placement; `null` appends at the end of the result. */
   placement: GridNewRowPlacement | null;
+  /** Source result row for a cloned pending row, when it has one. */
+  sourceIndex?: number;
+  /** Columns whose values differ from the cloned source row. */
+  editedColumns?: number[];
 }
 
 export type GridOrderedRowEntry = { kind: "source"; sourceIndex: number } | { kind: "new"; newIndex: number };

@@ -10,8 +10,10 @@ const leafTypes: Set<TreeNodeType> = new Set([
   "synonym",
   "package",
   "package-body",
-  "type",
   "type-body",
+  "type-member",
+  "type-attribute",
+  "type-method",
   "object-browser",
   "redis-db",
   "mq-tenant",
@@ -19,11 +21,15 @@ const leafTypes: Set<TreeNodeType> = new Set([
   "etcd-dashboard",
   "etcd-access-control",
   "zookeeper-root",
+  "consul-root",
+  "consul-overview",
   "mongo-gridfs",
   "mongo-bucket",
   "vector-collection",
   "elasticsearch-index",
   "user-admin",
+  "dameng-users",
+  "dameng-roles",
   "saved-sql-file",
   "table-search-control",
   "load-more",
@@ -32,7 +38,7 @@ const leafTypes: Set<TreeNodeType> = new Set([
 
 const fullWidthLabelTypes: Set<TreeNodeType> = new Set(["table", "view", "materialized_view", "mongo-collection", "mongo-bucket", "vector-collection", "elasticsearch-index"]);
 
-const emptyContainerTypes: Set<TreeNodeType> = new Set(["saved-sql-root", "saved-sql-folder"]);
+const emptyContainerTypes: Set<TreeNodeType> = new Set(["saved-sql-root", "saved-sql-folder", "type"]);
 
 const pinnableTypes: Set<TreeNodeType> = new Set([
   "connection-group",
@@ -123,8 +129,9 @@ export function alignedSidebarCommentLabelWidths(items: readonly SidebarCommentA
   return widths;
 }
 
-export function sidebarTreeNodeComment(node: TreeNode): string | null {
+export function sidebarTreeNodeComment(node: TreeNode, showConnectionNotes: boolean): string | null {
   if (!commentTypes.has(node.type)) return null;
+  if (node.type === "connection" && !showConnectionNotes) return null;
   if (node.type === "column" && node.meta && "comment" in node.meta) {
     const comment = node.meta.comment;
     return typeof comment === "string" && comment ? comment : null;
@@ -153,9 +160,13 @@ export function canTreeNodeExpand(type: TreeNodeType): boolean {
   return !leafTypes.has(type);
 }
 
-export function canTreeNodeShowExpander({ type, childCount }: { type: TreeNodeType; childCount?: number }): boolean {
-  if (!canTreeNodeExpand(type)) return false;
-  if (childCount === 0 && emptyContainerTypes.has(type)) return false;
+export function canTreeNodeShowExpander({ type, childCount, explicitContainer = false }: { type: TreeNodeType; childCount?: number; explicitContainer?: boolean }): boolean {
+  if (!canTreeNodeExpand(type) && !((type === "package" || type === "type") && explicitContainer)) return false;
+  // An empty type node only hides its expander when it is not an explicitly
+  // marked container. Xugu TYPE specifications use explicitContainer to lazy
+  // load members even when childCount is currently 0; PostgreSQL-family types
+  // without members rely on the caller's hasMembers gate instead.
+  if (childCount === 0 && emptyContainerTypes.has(type) && !explicitContainer) return false;
   return true;
 }
 

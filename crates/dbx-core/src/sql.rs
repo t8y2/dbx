@@ -117,6 +117,7 @@ struct SqlDialectProfile {
     supports_hana_do_blocks: bool,
     supports_go_batch_separator: bool,
     keeps_sqlserver_module_batch_at_cursor: bool,
+    preserves_tdsql_proxy_directive: bool,
 }
 
 impl Default for SqlDialectProfile {
@@ -132,12 +133,17 @@ impl Default for SqlDialectProfile {
             supports_hana_do_blocks: false,
             supports_go_batch_separator: false,
             keeps_sqlserver_module_batch_at_cursor: false,
+            preserves_tdsql_proxy_directive: false,
         }
     }
 }
 
 impl SqlDialectProfile {
     fn for_database_type(db_type: DatabaseType) -> Self {
+        if matches!(db_type, DatabaseType::Mysql) {
+            return Self::mysql();
+        }
+
         if matches!(db_type, DatabaseType::Gaussdb) {
             return Self::gaussdb();
         }
@@ -163,6 +169,10 @@ impl SqlDialectProfile {
 
     fn mysql_compatible() -> Self {
         Self { supports_hash_line_comments: true, supports_mysql_routine_blocks: true, ..Self::default() }
+    }
+
+    fn mysql() -> Self {
+        Self { preserves_tdsql_proxy_directive: true, ..Self::mysql_compatible() }
     }
 
     fn oracle_like() -> Self {
@@ -1369,6 +1379,20 @@ pub fn prepare_sql_file_statement(
     driver_profile: Option<&str>,
 ) -> SqlFileStatementAction {
     let statement = statement.trim();
+    let postgres_statement =
+        (*db_type == DatabaseType::Postgres).then(|| strip_postgres_pg_dump_guard_command(statement)).flatten();
+    let statement = postgres_statement.as_deref().unwrap_or(statement).trim();
+    if statement.is_empty()
+        || (*db_type == DatabaseType::Postgres
+            && postgres_statement.is_some()
+            && !has_executable_sql_with_options(
+                statement,
+                SqlParsingOptions::for_database_type(DatabaseType::Postgres),
+            ))
+    {
+        return SqlFileStatementAction::Skip;
+    }
+
     let is_mysql_compatible_target = is_mysql_compatible_import_target(db_type, driver_profile);
     if is_mysql_compatible_target && is_mysql_lock_table_statement(statement) {
         return SqlFileStatementAction::Skip;
@@ -1391,6 +1415,37 @@ pub fn prepare_sql_file_statement(
     }
 
     SqlFileStatementAction::Execute(body.to_string())
+}
+
+fn strip_postgres_pg_dump_guard_command(statement: &str) -> Option<String> {
+    let executable =
+        leading_executable_sql_with_options(statement, SqlParsingOptions::for_database_type(DatabaseType::Postgres));
+    let line_end = executable.find('\n').unwrap_or(executable.len());
+    if !is_postgres_pg_dump_guard_command(&executable[..line_end]) {
+        return None;
+    }
+
+    let prefix_len = statement.len() - executable.len();
+    let suffix_start = prefix_len + line_end + usize::from(line_end < executable.len());
+    let mut prepared = String::with_capacity(statement.len());
+    prepared.push_str(&statement[..prefix_len]);
+    prepared.push_str(&statement[suffix_start..]);
+    Some(prepared)
+}
+
+fn is_postgres_pg_dump_guard_command(line: &str) -> bool {
+    let mut parts = line.split_whitespace();
+    let Some(command) = parts.next() else {
+        return false;
+    };
+    if !matches!(command, "\\restrict" | "\\unrestrict") {
+        return false;
+    }
+
+    let Some(key) = parts.next() else {
+        return false;
+    };
+    parts.next().is_none() && key.bytes().all(|byte| byte.is_ascii_alphanumeric())
 }
 
 pub fn optimize_sql_file_import_statements(
@@ -2418,8 +2473,18 @@ fn executable_sql_bounds(statement: &str, options: SqlParsingOptions) -> Option<
     if executable.is_empty() {
         return None;
     }
-    let start = trimmed.len() - executable.len();
+    let executable_start = trimmed.len() - executable.len();
+    let start = if options.profile.preserves_tdsql_proxy_directive {
+        tdsql_proxy_directive_start(trimmed, executable_start).unwrap_or(executable_start)
+    } else {
+        executable_start
+    };
     Some((start, trimmed_end))
+}
+
+fn tdsql_proxy_directive_start(statement: &str, executable_start: usize) -> Option<usize> {
+    let prefix = statement.get(..executable_start)?.trim_end();
+    prefix.strip_suffix("/*proxy*/").map(|before| before.len())
 }
 
 fn has_executable_sql_with_options(statement: &str, options: SqlParsingOptions) -> bool {
@@ -2826,6 +2891,42 @@ mod tests {
     }
 
     #[test]
+    fn prepares_postgres_pg_dump_restrict_guard_with_following_sql() {
+        assert_eq!(
+            prepare_sql_file_statement(
+                "-- PostgreSQL database dump\n\n\\restrict PreICrqH3VX69RwvK06tauVFPoZ3tThfV0y2zIFL2uSfhfNPSu1pWtu1QTudUAc\n\nSET statement_timeout = 0",
+                &DatabaseType::Postgres,
+                None
+            ),
+            SqlFileStatementAction::Execute("-- PostgreSQL database dump\n\n\nSET statement_timeout = 0".to_string())
+        );
+    }
+
+    #[test]
+    fn skips_standalone_postgres_pg_dump_unrestrict_guard() {
+        assert_eq!(
+            prepare_sql_file_statement(
+                "--\n-- PostgreSQL database dump complete\n--\n\n\\unrestrict PreICrqH3VX69RwvK06tauVFPoZ3tThfV0y2zIFL2uSfhfNPSu1pWtu1QTudUAc",
+                &DatabaseType::Postgres,
+                None
+            ),
+            SqlFileStatementAction::Skip
+        );
+    }
+
+    #[test]
+    fn keeps_other_postgres_psql_commands_unsupported() {
+        assert_eq!(
+            prepare_sql_file_statement("\\copy users FROM 'users.csv'", &DatabaseType::Postgres, None),
+            SqlFileStatementAction::Execute("\\copy users FROM 'users.csv'".to_string())
+        );
+        assert_eq!(
+            prepare_sql_file_statement("\\restrict invalid-key", &DatabaseType::Postgres, None),
+            SqlFileStatementAction::Execute("\\restrict invalid-key".to_string())
+        );
+    }
+
+    #[test]
     fn optimizes_adjacent_single_row_inserts_into_multi_row_insert() {
         let statements = vec![
             "INSERT INTO users (id, name) VALUES (1, 'Ada')".to_string(),
@@ -3109,12 +3210,15 @@ SELECT 2;";
         assert!(!default.supports_slash_line_block_delimiter);
         assert!(!default.supports_go_batch_separator);
         assert!(!default.keeps_sqlserver_module_batch_at_cursor);
+        assert!(!default.preserves_tdsql_proxy_directive);
 
         let mysql = SqlDialectProfile::for_database_type(DatabaseType::Mysql);
-        assert_eq!(mysql, SqlDialectProfile::mysql_compatible());
+        assert_eq!(mysql, SqlDialectProfile::mysql());
         assert!(mysql.supports_hash_line_comments);
         assert!(mysql.supports_mysql_routine_blocks);
+        assert!(mysql.preserves_tdsql_proxy_directive);
         assert!(SqlDialectProfile::for_database_type(DatabaseType::Doris).supports_hash_line_comments);
+        assert!(!SqlDialectProfile::for_database_type(DatabaseType::Doris).preserves_tdsql_proxy_directive);
         assert!(SqlDialectProfile::for_database_type(DatabaseType::StarRocks).supports_hash_line_comments);
         assert!(SqlDialectProfile::for_database_type(DatabaseType::ManticoreSearch).supports_hash_line_comments);
         assert!(SqlDialectProfile::for_database_type(DatabaseType::Goldendb).supports_hash_line_comments);
@@ -3985,6 +4089,65 @@ delimiter ;";
         assert_eq!(
             find_statement_at_cursor_for_database(sql, cursor, DatabaseType::Mysql),
             "SELECT 2 # trailing comment"
+        );
+    }
+
+    #[test]
+    fn mysql_current_statement_preserves_only_exact_tdsql_proxy_directive() {
+        let sql = "SELECT 1;\n/*proxy*/ \n\tSHOW PROXY STATUS;\nSELECT 2;";
+        let cursor = sql[..sql.find("STATUS").unwrap()].encode_utf16().count();
+
+        assert_eq!(
+            find_statement_at_cursor_for_database(sql, cursor, DatabaseType::Mysql),
+            "/*proxy*/ \n\tSHOW PROXY STATUS"
+        );
+        assert_eq!(
+            split_sql_statements_for_database(sql, DatabaseType::Mysql),
+            vec!["SELECT 1", "/*proxy*/ \n\tSHOW PROXY STATUS", "SELECT 2"]
+        );
+        for inline in [
+            "/*proxy*/SHOW PROXY STATUS",
+            "/* ordinary */\n/*proxy*/SHOW PROXY STATUS",
+            "/*+ route */\n/*proxy*/SHOW PROXY STATUS",
+        ] {
+            let cursor = inline[..inline.find("STATUS").unwrap()].encode_utf16().count();
+            assert_eq!(
+                find_statement_at_cursor_for_database(inline, cursor, DatabaseType::Mysql),
+                "/*proxy*/SHOW PROXY STATUS"
+            );
+        }
+        assert!(split_sql_statements_for_database("/*proxy*/", DatabaseType::Mysql).is_empty());
+    }
+
+    #[test]
+    fn mysql_current_statement_strips_other_leading_block_comments() {
+        for comment in ["/* ordinary */", "/*unknown*/", "/* proxy */", "/*PROXY*/"] {
+            let sql = format!("{comment}\nSHOW PROXY STATUS");
+            let cursor = sql[..sql.find("STATUS").unwrap()].encode_utf16().count();
+
+            assert_eq!(find_statement_at_cursor_for_database(&sql, cursor, DatabaseType::Mysql), "SHOW PROXY STATUS");
+        }
+
+        for separated in ["/*proxy*/\n/* audit */\nSHOW PROXY STATUS", "/*proxy*/\n-- audit\nSHOW PROXY STATUS"] {
+            let cursor = separated[..separated.find("STATUS").unwrap()].encode_utf16().count();
+            assert_eq!(
+                find_statement_at_cursor_for_database(separated, cursor, DatabaseType::Mysql),
+                "SHOW PROXY STATUS"
+            );
+        }
+
+        let postgres = "/*proxy*/\nSHOW PROXY STATUS";
+        let cursor = postgres[..postgres.find("STATUS").unwrap()].encode_utf16().count();
+        assert_eq!(
+            find_statement_at_cursor_for_database(postgres, cursor, DatabaseType::Postgres),
+            "SHOW PROXY STATUS"
+        );
+
+        let followed_by_hint = "/*proxy*/\n/*+ route */\nSHOW PROXY STATUS";
+        let cursor = followed_by_hint[..followed_by_hint.find("STATUS").unwrap()].encode_utf16().count();
+        assert_eq!(
+            find_statement_at_cursor_for_database(followed_by_hint, cursor, DatabaseType::Mysql),
+            "SHOW PROXY STATUS"
         );
     }
 

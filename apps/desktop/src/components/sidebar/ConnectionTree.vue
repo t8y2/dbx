@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, shallowRef, computed, nextTick, watch, provide, onMounted, onUnmounted, type Component, type ComponentPublicInstance, type CSSProperties } from "vue";
 import { useI18n } from "vue-i18n";
-import { Search, X, ListFilter, ListOrdered, ArrowDownAZ, ArrowUpZA, CircleDot, Crosshair, Server, Database, FolderTree, Table2, Eye, RotateCcw } from "@lucide/vue";
+import { Search, X, ListFilter, ListOrdered, ArrowDownAZ, ArrowUpZA, CircleDot, Crosshair, Server, Database, FolderTree, Table2, Eye, RotateCcw, Loader2, Unplug } from "@lucide/vue";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
 import { useSettingsStore } from "@/stores/settingsStore";
@@ -12,7 +12,8 @@ import { matchSidebarLabel } from "@/lib/sidebar/sidebarSearch";
 import { buildTableTreeNodes } from "@/lib/table/tableTree";
 import { isCancelSearchShortcut, isCopySidebarSelectionShortcut, isEditSidebarConnectionShortcut, isPasteSidebarSelectionShortcut, isViewTableDdlShortcut } from "@/lib/editor/keyboardShortcuts";
 import { sidebarNodeSupportsDdlView } from "@/lib/sidebar/sidebarTreeDdlShortcut";
-import { copyNameForTreeNode, objectSourceKindForTreeNode } from "@/lib/sidebar/treeNodeClick";
+import { copyNameForTreeNode, objectSourceTargetForTreeNode } from "@/lib/sidebar/treeNodeClick";
+import { supportsTypeObjectSource } from "@/lib/database/databaseObjectCapabilities";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { connectionPasteTargetGroupId, copySelectedConnectionsToClipboards, selectedConnectionEditTarget } from "@/lib/sidebar/sidebarConnectionSelection";
 import { isEditableSidebarTypeSearchTarget, sidebarTypeSearchNextQuery } from "@/lib/sidebar/sidebarTypeSearch";
@@ -29,6 +30,7 @@ import TreeItem from "./TreeItem.vue";
 import SidebarTreeRuntimeHost from "./SidebarTreeRuntimeHost.vue";
 import SidebarTreeItemDialogs from "./SidebarTreeItemDialogs.vue";
 import InstallExtensionDialog from "@/components/objects/InstallExtensionDialog.vue";
+import ExtensionDetailsDialog from "@/components/objects/ExtensionDetailsDialog.vue";
 import { RecycleScroller } from "vue-virtual-scroller";
 import "vue-virtual-scroller/dist/vue-virtual-scroller.css";
 import LightDropdown from "@/components/ui/LightDropdown.vue";
@@ -44,12 +46,13 @@ import { createSidebarActionTarget, findSidebarActionTarget, matchesSidebarActio
 import { syncSidebarTreeNodeExpansion } from "@/lib/sidebar/sidebarTreeExpansion";
 import type { SidebarDangerDialogRequest } from "@/lib/sidebar/sidebarDangerDialog";
 import { resetSidebarTreeDialogState } from "./sidebarTreeDialogState";
-import { SidebarDangerConfirmDialog, SidebarDdlViewDialog, SidebarObjectSourceDialog, SidebarProcedureExecutionDialog, SidebarVisibleDatabasesDialog, SidebarVisibleSchemasDialog } from "./sidebarAsyncDialogs";
+import { SidebarDangerConfirmDialog, SidebarDdlViewDialog, SidebarObjectSourceDialog, SidebarProcedureExecutionDialog, SidebarVisibleDatabasesDialog, SidebarVisibleNacosNamespacesDialog, SidebarVisibleSchemasDialog } from "./sidebarAsyncDialogs";
 import { sortConnectionListForDisplay } from "@/lib/sidebar/connectionListSort";
 import { sidebarDisplayTableName } from "@/lib/sidebar/sidebarTableNameDisplay";
 import { alignedSidebarCommentLabelWidths, isSidebarCommentAlignableNode, sidebarTreeNaturalContentWidth, sidebarTreeNodeComment, usesFullWidthTreeLabel } from "@/lib/sidebar/sidebarTreeItemLayout";
 import { formatSidebarObjectStorage, sidebarTableStorageScopes, supportsSidebarTableStorage } from "@/lib/sidebar/sidebarDatabaseStorage";
 import { sidebarScrollbarGeometry as calculateSidebarScrollbarGeometry } from "@/lib/sidebar/sidebarScrollbar";
+import { disconnectSidebarConnections } from "@/lib/sidebar/sidebarConnectionDisconnect";
 
 const { t } = useI18n();
 const store = useConnectionStore();
@@ -59,6 +62,7 @@ const { toast } = useToast();
 const searchQuery = ref("");
 const deferredSearchQuery = ref("");
 const showConnectedConnectionsOnly = ref(false);
+const isDisconnectingAllActiveConnections = ref(false);
 const searchInputRef = ref<HTMLInputElement>();
 const rootRef = ref<HTMLElement>();
 const pointerInsideTree = ref(false);
@@ -79,6 +83,8 @@ const sidebarDangerDialogConfirming = ref(false);
 const sidebarTreeItemDialogController = ref<Record<string, any> | null>(null);
 const sidebarInstallExtensionTarget = ref<TreeNode | null>(null);
 const sidebarInstallExtensionDialogRef = ref<InstanceType<typeof InstallExtensionDialog> | null>(null);
+const sidebarExtensionDetailsTarget = ref<TreeNode | null>(null);
+const sidebarExtensionDetailsDialogRef = ref<InstanceType<typeof ExtensionDetailsDialog> | null>(null);
 const sidebarTreeRuntimeHostRef = ref<SidebarTreeRuntimeHostInstance | null>(null);
 const sidebarTreeRuntime = createSidebarTreeRuntime();
 const sidebarTreeRuntimeInitialNode: TreeNode = { id: "__sidebar-runtime__", label: "", type: "connection-group" };
@@ -92,6 +98,8 @@ const sidebarVisibleDatabasesTarget = ref<TreeNode | null>(null);
 const sidebarVisibleDatabasesOpen = ref(false);
 const sidebarVisibleSchemasTarget = ref<TreeNode | null>(null);
 const sidebarVisibleSchemasOpen = ref(false);
+const sidebarVisibleNacosNamespacesTarget = ref<TreeNode | null>(null);
+const sidebarVisibleNacosNamespacesOpen = ref(false);
 const sidebarTableNameFilterTarget = ref<TreeNode | null>(null);
 const sidebarTableNameFilterOpen = ref(false);
 const tableNameFilterIncludeDraft = ref("");
@@ -101,7 +109,8 @@ const sidebarDdlDatabaseType = computed(() => {
   const connectionId = sidebarDdlTarget.value?.connectionId;
   return connectionId ? effectiveDatabaseTypeForConnection(store.getConfig(connectionId)) : undefined;
 });
-const sidebarObjectSourceType = computed(() => (sidebarObjectSourceTarget.value ? objectSourceKindForTreeNode(sidebarObjectSourceTarget.value.node.type) : null));
+const sidebarObjectSourceResolvedTarget = computed(() => (sidebarObjectSourceTarget.value ? objectSourceTargetForTreeNode(sidebarObjectSourceTarget.value.node) : null));
+const sidebarObjectSourceType = computed(() => sidebarObjectSourceResolvedTarget.value?.objectType ?? null);
 const sidebarObjectSourceDatabaseType = computed(() => {
   const connectionId = sidebarObjectSourceTarget.value?.node.connectionId;
   return connectionId ? effectiveDatabaseTypeForConnection(store.getConfig(connectionId)) : undefined;
@@ -117,7 +126,22 @@ const tableSearchTimers = new Map<string, number>();
 const tableSearchFocusRestoreTokens = new Map<string, number>();
 let tableSearchFocusRestoreTokenSeq = 0;
 let latestTableSearchInteractionParentId: string | null = null;
+let latestTableSearchInteractionId = 0;
+let tableSearchInteractionIdSeq = 0;
 let localTableSearchFocusPending = false;
+
+type TableSearchSelection = {
+  start: number;
+  end: number;
+  direction: "forward" | "backward" | "none";
+};
+
+type TableSearchFocusRestore = {
+  interactionId: number;
+  parentNodeId: string;
+  shouldRestoreFocus: boolean;
+  selection: TableSearchSelection | null;
+};
 
 watch(
   searchQuery,
@@ -136,6 +160,39 @@ watch(
   },
   { flush: "sync" },
 );
+
+watch(
+  [showConnectedConnectionsOnly, () => store.connectedIds.size],
+  ([showConnectedOnly, activeConnectionCount]) => {
+    if (showConnectedOnly && activeConnectionCount === 0) showConnectedConnectionsOnly.value = false;
+  },
+  { flush: "sync" },
+);
+
+async function disconnectAllActiveConnections() {
+  if (isDisconnectingAllActiveConnections.value) return;
+  const connectionIds = [...store.connectedIds];
+  if (!connectionIds.length) {
+    showConnectedConnectionsOnly.value = false;
+    return;
+  }
+
+  isDisconnectingAllActiveConnections.value = true;
+  try {
+    const result = await disconnectSidebarConnections(connectionIds, (connectionId) => store.disconnect(connectionId));
+    if (!result.failed) {
+      toast(t("connection.disconnectedSelected", { count: connectionIds.length }), 2000);
+    } else if (result.succeeded > 0) {
+      toast(t("connection.disconnectSelectedPartial", { succeeded: result.succeeded, failed: result.failed }), 5000);
+    } else {
+      const message = result.firstError instanceof Error ? result.firstError.message : String(result.firstError);
+      toast(t("connection.saveFailed", { message }), 5000);
+    }
+  } finally {
+    isDisconnectingAllActiveConnections.value = false;
+    if (store.connectedIds.size === 0) showConnectedConnectionsOnly.value = false;
+  }
+}
 
 function refreshActiveSidebarTableSearches() {
   if (isTreeSearchFiltering.value) return;
@@ -158,6 +215,7 @@ watch(
       store.setSidebarTableSearchQuery(parentNodeId, "");
     }
     latestTableSearchInteractionParentId = null;
+    latestTableSearchInteractionId = 0;
     void Promise.all(parentNodeIds.map((parentNodeId) => store.refreshSidebarTableSearch(parentNodeId))).catch(() => {});
   },
 );
@@ -231,7 +289,7 @@ const isRootListPartial = computed(() => sidebarFilterGuards.value.isRootListPar
 
 const SEARCH_SCOPE_TO_NODE_TYPES: Record<SearchScope, TreeNodeType[]> = {
   connection: ["connection"],
-  database: ["database", "redis-db", "mq-tenant", "nacos-namespace", "mongo-db"],
+  database: ["database", "redis-db", "mq-tenant", "nacos-namespace", "consul-root", "mongo-db"],
   schema: ["schema"],
   table: ["table", "mongo-collection", "mongo-bucket", "vector-collection", "elasticsearch-index"],
   view: ["view"],
@@ -325,10 +383,10 @@ function clearSearchScopeFilter() {
   selectedSearchScopes.value = [];
 }
 
-function scheduleSidebarTableSearchRefresh(parentNodeId: string, options?: { restoreFocus?: boolean }) {
+function scheduleSidebarTableSearchRefresh(parentNodeId: string, options?: { focusRestore?: TableSearchFocusRestore }) {
   window.clearTimeout(tableSearchTimers.get(parentNodeId));
   if (isTreeSearchFiltering.value) return;
-  const restoreToken = options?.restoreFocus ? ++tableSearchFocusRestoreTokenSeq : 0;
+  const restoreToken = options?.focusRestore?.shouldRestoreFocus ? ++tableSearchFocusRestoreTokenSeq : 0;
   if (restoreToken) {
     tableSearchFocusRestoreTokens.clear();
     tableSearchFocusRestoreTokens.set(parentNodeId, restoreToken);
@@ -339,30 +397,63 @@ function scheduleSidebarTableSearchRefresh(parentNodeId: string, options?: { res
       if (!restoreToken) return;
       if (tableSearchFocusRestoreTokens.get(parentNodeId) !== restoreToken) return;
       tableSearchFocusRestoreTokens.delete(parentNodeId);
-      if (latestTableSearchInteractionParentId !== parentNodeId) return;
-      if (document.activeElement === document.body || activeTableSearchParentId() === parentNodeId) {
-        focusTableSearchInput(parentNodeId);
-      }
+      const focusRestore = options?.focusRestore;
+      if (!focusRestore || !isCurrentTableSearchInteraction(focusRestore)) return;
+      restoreTableSearchInput(focusRestore);
     });
   }, 250);
   tableSearchTimers.set(parentNodeId, timer);
 }
 
-function activeTableSearchParentId(): string | null {
+function captureTableSearchFocus(parentNodeId: string): TableSearchFocusRestore {
+  const interactionId = ++tableSearchInteractionIdSeq;
   const active = document.activeElement;
-  if (!(active instanceof HTMLElement)) return null;
-  return active.dataset.sidebarTableSearchParentId || null;
+  const isActiveSearchInput = active instanceof HTMLInputElement && active.dataset.sidebarTableSearchParentId === parentNodeId;
+
+  return {
+    interactionId,
+    parentNodeId,
+    shouldRestoreFocus: isActiveSearchInput,
+    selection: isActiveSearchInput
+      ? {
+          start: active.selectionStart ?? active.value.length,
+          end: active.selectionEnd ?? active.value.length,
+          direction: active.selectionDirection ?? "none",
+        }
+      : null,
+  };
 }
 
-function focusTableSearchInput(parentNodeId: string) {
+function isCurrentTableSearchInteraction(focusRestore: TableSearchFocusRestore): boolean {
+  return latestTableSearchInteractionParentId === focusRestore.parentNodeId && latestTableSearchInteractionId === focusRestore.interactionId;
+}
+
+function restoreTableSearchInput(focusRestore: TableSearchFocusRestore) {
   void nextTick(() => {
+    if (!isCurrentTableSearchInteraction(focusRestore) || !focusRestore.shouldRestoreFocus) return;
     const root = rootRef.value;
     if (!root) return;
-    const input = Array.from(root.querySelectorAll<HTMLInputElement>("[data-sidebar-table-search-parent-id]")).find((item) => item.dataset.sidebarTableSearchParentId === parentNodeId);
+    const input = Array.from(root.querySelectorAll<HTMLInputElement>("[data-sidebar-table-search-parent-id]")).find((item) => item.dataset.sidebarTableSearchParentId === focusRestore.parentNodeId);
     if (!input) return;
+
+    // Keep the browser's current selection when the tree update preserved the
+    // input element. Only restore focus and selection if the async update
+    // actually displaced focus or recreated the input.
+    if (document.activeElement === input) return;
+    if (document.activeElement !== document.body) return;
+
     input.focus({ preventScroll: true });
-    const end = input.value.length;
-    input.setSelectionRange(end, end);
+    const selection = focusRestore.selection;
+    if (!selection) {
+      const end = input.value.length;
+      input.setSelectionRange(end, end);
+      return;
+    }
+
+    const valueLength = input.value.length;
+    const start = Math.min(selection.start, valueLength);
+    const end = Math.min(selection.end, valueLength);
+    input.setSelectionRange(start, end, selection.direction);
   });
 }
 
@@ -379,25 +470,24 @@ function filterLocallySearchedTables(nodes: TreeNode[]): TreeNode[] {
     if (!query || !children) return children === node.children ? node : { ...node, children };
 
     const indexed = localTableSearchResults.value[node.id];
+    // matchSidebarLabel compares case-insensitively internally and needs the
+    // ORIGINAL label (and entry name) so camelCase boundaries stay detectable.
     const matchingChildren =
       indexed === null
-        ? children.filter((child) => localTableSearchChildTypes.has(child.type) && !!matchSidebarLabel(child.label.toLowerCase(), query.toLowerCase()))
+        ? children.filter((child) => localTableSearchChildTypes.has(child.type) && !!matchSidebarLabel(child.label, query))
         : indexed
-          ? reuseLiveSidebarTreeNodes(
-              buildTableTreeNodes({ nodeId: node.id, connectionId: node.connectionId || "", database: node.database || "", schema: node.schema, catalog: node.catalog, tables: indexed.filter((entry) => !!matchSidebarLabel(entry.name.toLowerCase(), query.toLowerCase())) }),
-              children,
-            )
-          : children.filter((child) => localTableSearchChildTypes.has(child.type) && !!matchSidebarLabel(child.label.toLowerCase(), query.toLowerCase()));
+          ? reuseLiveSidebarTreeNodes(buildTableTreeNodes({ nodeId: node.id, connectionId: node.connectionId || "", database: node.database || "", schema: node.schema, catalog: node.catalog, tables: indexed.filter((entry) => !!matchSidebarLabel(entry.name, query)) }), children)
+          : children.filter((child) => localTableSearchChildTypes.has(child.type) && !!matchSidebarLabel(child.label, query));
     return { ...node, children: matchingChildren };
   });
 }
 
-async function loadLocalTableSearchResults(parentNodeId: string, refresh = false) {
+async function loadLocalTableSearchResults(parentNodeId: string, refresh = false, focusRestore?: TableSearchFocusRestore) {
   try {
     const entries = refresh ? await store.refreshSidebarTableSearchIndex(parentNodeId) : await store.loadSidebarTableSearchIndex(parentNodeId);
     localTableSearchResults.value = { ...localTableSearchResults.value, [parentNodeId]: entries };
   } finally {
-    if (latestTableSearchInteractionParentId === parentNodeId) focusTableSearchInput(parentNodeId);
+    if (focusRestore) restoreTableSearchInput(focusRestore);
   }
 }
 
@@ -454,7 +544,7 @@ function measureSidebarCommentLabelWidths() {
       id,
       depth,
       alignable: isSidebarCommentAlignableNode(node),
-      hasComment: !!sidebarTreeNodeComment(node),
+      hasComment: !!sidebarTreeNodeComment(node, settingsStore.editorSettings.sidebarShowConnectionNotes),
       labelWidth: context.measureText(sidebarCommentLabel(node)).width,
     })),
   );
@@ -471,7 +561,7 @@ function scheduleSidebarCommentLabelMeasure() {
 
 function sidebarNodeHasTrailingMetadata(node: TreeNode): boolean {
   const mode = settingsStore.editorSettings.sidebarObjectInfoMode;
-  if (mode.startsWith("comment-") && sidebarTreeNodeComment(node)) return true;
+  if (mode.startsWith("comment-") && sidebarTreeNodeComment(node, settingsStore.editorSettings.sidebarShowConnectionNotes)) return true;
   return mode === "size" && sidebarStorageDisplayTypes.has(node.type) && !!formatSidebarObjectStorage(node.sizeBytes);
 }
 
@@ -508,10 +598,14 @@ function scheduleSidebarTreeContentWidthMeasure() {
   sidebarTreeContentMeasureFrame = window.requestAnimationFrame(measureSidebarTreeContentWidth);
 }
 
-watch([flatNodes, () => settingsStore.editorSettings.sidebarObjectInfoMode, () => settingsStore.editorSettings.sidebarHiddenTablePrefixes, () => settingsStore.editorSettings.uiFontFamily, () => settingsStore.editorSettings.uiScale], scheduleSidebarCommentLabelMeasure, {
-  flush: "post",
-  immediate: true,
-});
+watch(
+  [flatNodes, () => settingsStore.editorSettings.sidebarObjectInfoMode, () => settingsStore.editorSettings.sidebarShowConnectionNotes, () => settingsStore.editorSettings.sidebarHiddenTablePrefixes, () => settingsStore.editorSettings.uiFontFamily, () => settingsStore.editorSettings.uiScale],
+  scheduleSidebarCommentLabelMeasure,
+  {
+    flush: "post",
+    immediate: true,
+  },
+);
 
 watch([sidebarTreeNaturalWidthItems, () => settingsStore.editorSettings.uiFontFamily, () => settingsStore.editorSettings.uiScale], scheduleSidebarTreeContentWidthMeasure, {
   flush: "post",
@@ -843,16 +937,18 @@ provide(sidebarTreeContextKey, {
   getVisibleNodes: () => selectableVisibleNodes.value,
   getVisibleNodeIndex: (id: string) => selectableVisibleNodeIndexById.value.get(id) ?? -1,
   setTableSearchQuery: (parentNodeId, query, local) => {
+    const focusRestore = captureTableSearchFocus(parentNodeId);
     latestTableSearchInteractionParentId = parentNodeId;
+    latestTableSearchInteractionId = focusRestore.interactionId;
     store.setSidebarTableSearchQuery(parentNodeId, query);
     if (local) {
       localTableSearchFocusPending = true;
       void nextTick(() => {
-        focusTableSearchInput(parentNodeId);
+        restoreTableSearchInput(focusRestore);
         localTableSearchFocusPending = false;
       });
-      void loadLocalTableSearchResults(parentNodeId);
-    } else scheduleSidebarTableSearchRefresh(parentNodeId, { restoreFocus: true });
+      void loadLocalTableSearchResults(parentNodeId, false, focusRestore);
+    } else scheduleSidebarTableSearchRefresh(parentNodeId, { focusRestore });
   },
   refreshTableSearchIndex: (parentNodeId) => void loadLocalTableSearchResults(parentNodeId, true),
   registerPasteHandler: pasteHandlerRegistry.register,
@@ -1004,7 +1100,11 @@ async function locateActiveTabInSidebar() {
   if (!nodePath) return;
 
   for (const ancestor of nodePath) {
-    if (!ancestor.isExpanded) {
+    // Only flip the arrow when this node's own children are already loaded
+    // (e.g. by ensureTreeLoadedForTarget above). Forcing isExpanded on a
+    // table/collection whose column/index groups were never fetched shows an
+    // "expanded" arrow with no content underneath (issue #5850).
+    if (!ancestor.isExpanded && store.canUseLoadedTreeNodeToggle(ancestor)) {
       ancestor.isExpanded = true;
     }
   }
@@ -1039,7 +1139,7 @@ function resolveLoadedLocateTarget(target: ActiveTabSidebarTarget, candidate: Qu
 }
 
 async function ensureTreeLoadedForTarget(target: ActiveTabSidebarTarget, opts?: { force?: boolean }) {
-  if (target.type === "saved-sql-file" || target.type === "etcd-root" || target.type === "etcd-dashboard" || target.type === "etcd-access-control" || target.type === "zookeeper-root") return;
+  if (target.type === "saved-sql-file" || target.type === "etcd-root" || target.type === "etcd-dashboard" || target.type === "etcd-access-control" || target.type === "zookeeper-root" || target.type === "consul-root") return;
   const connId = target.connectionId;
   if (!connId) return;
 
@@ -1061,7 +1161,7 @@ async function ensureTreeLoadedForTarget(target: ActiveTabSidebarTarget, opts?: 
         await store.loadRedisDatabases(connId);
       } else if (config.db_type === "mongodb") {
         await store.loadMongoDatabases(connId);
-      } else if (config.db_type === "elasticsearch" || config.db_type === "easysearch") {
+      } else if (config.db_type === "elasticsearch" || config.db_type === "easysearch" || config.db_type === "meilisearch") {
         await store.loadElasticsearchIndices(connId);
       } else if (config.db_type === "qdrant" || config.db_type === "milvus" || config.db_type === "weaviate" || config.db_type === "chromadb") {
         await store.loadVectorCollections(connId);
@@ -1077,7 +1177,7 @@ async function ensureTreeLoadedForTarget(target: ActiveTabSidebarTarget, opts?: 
     }
   }
 
-  if (config.db_type === "mq" || config.db_type === "nacos") return;
+  if (config.db_type === "mq" || config.db_type === "nacos" || config.db_type === "consul") return;
   if (!("database" in target) || !target.database) return;
 
   // Find the database node
@@ -1165,7 +1265,7 @@ function findDatabaseNode(nodes: TreeNode[], connId: string, database: string): 
 
 function findSchemaNode(nodes: TreeNode[], connId: string, database: string, schema: string): TreeNode | null {
   for (const node of nodes) {
-    if (node.type === "schema" && node.connectionId === connId && sameTreeName(node.database, database) && sameTreeName(node.label, schema)) {
+    if (node.type === "schema" && node.connectionId === connId && sameTreeName(node.database, database) && sameTreeName(node.schema || node.label, schema)) {
       return node;
     }
     if (node.children) {
@@ -1184,9 +1284,9 @@ function onSearchToggle(node: TreeNode) {
   searchCollapsedIds.value = next;
 }
 
-function onNodeToggled(node: TreeNode, wasExpanded: boolean) {
+function onNodeToggled(node: TreeNode, expanded: boolean) {
   if (isTreeSearchFiltering.value) return;
-  syncSidebarTreeNodeExpansion(store.treeNodes, node, !wasExpanded);
+  syncSidebarTreeNodeExpansion(store.treeNodes, node, expanded);
 }
 
 function openSidebarContextMenu(event: MouseEvent, node: TreeNode, openContextMenu: (event: MouseEvent, itemsOverride?: ContextMenuItem[]) => void) {
@@ -1234,6 +1334,12 @@ async function openSidebarInstallExtension(node: TreeNode) {
   sidebarInstallExtensionDialogRef.value?.show();
 }
 
+async function openSidebarExtensionDetails(node: TreeNode) {
+  sidebarExtensionDetailsTarget.value = createSidebarActionTarget(node);
+  await nextTick();
+  sidebarExtensionDetailsDialogRef.value?.show();
+}
+
 function beginSidebarAction(): number {
   sidebarActionGeneration += 1;
   sidebarDdlOpen.value = false;
@@ -1241,12 +1347,14 @@ function beginSidebarAction(): number {
   sidebarProcedureOpen.value = false;
   sidebarVisibleDatabasesOpen.value = false;
   sidebarVisibleSchemasOpen.value = false;
+  sidebarVisibleNacosNamespacesOpen.value = false;
   sidebarTableNameFilterOpen.value = false;
   sidebarDdlTarget.value = null;
   sidebarObjectSourceTarget.value = null;
   sidebarProcedureTarget.value = null;
   sidebarVisibleDatabasesTarget.value = null;
   sidebarVisibleSchemasTarget.value = null;
+  sidebarVisibleNacosNamespacesTarget.value = null;
   sidebarTableNameFilterTarget.value = null;
   return sidebarActionGeneration;
 }
@@ -1273,7 +1381,10 @@ function openSidebarDdlForSelection(): boolean {
 }
 
 function openSidebarObjectSource(node: TreeNode, initialEditing: boolean) {
-  if (!node.connectionId || !node.database || !objectSourceKindForTreeNode(node.type)) return;
+  if (!node.connectionId || !node.database || !objectSourceTargetForTreeNode(node)) return;
+  // TYPE/TYPE_BODY only have a source implementation on Xugu; PostgreSQL-family
+  // connections list user-defined types without a CREATE TYPE getter this cycle.
+  if ((node.type === "type" || node.type === "type-body") && !supportsTypeObjectSource(store.getConfig(node.connectionId)?.db_type)) return;
   const target = createSidebarActionTarget(node);
   const requestGeneration = beginSidebarAction();
   void store
@@ -1330,6 +1441,13 @@ function openSidebarVisibleSchemas(node: TreeNode) {
   beginSidebarAction();
   sidebarVisibleSchemasTarget.value = createSidebarActionTarget({ ...node, database });
   sidebarVisibleSchemasOpen.value = true;
+}
+
+function openSidebarVisibleNacosNamespaces(node: TreeNode) {
+  if (node.type !== "connection" || !node.connectionId || store.getConfig(node.connectionId)?.db_type !== "nacos") return;
+  beginSidebarAction();
+  sidebarVisibleNacosNamespacesTarget.value = createSidebarActionTarget(node);
+  sidebarVisibleNacosNamespacesOpen.value = true;
 }
 
 function tableNameFilterScopeForNode(node: TreeNode): string | null {
@@ -1432,6 +1550,10 @@ watch(sidebarVisibleDatabasesOpen, (open) => {
 
 watch(sidebarVisibleSchemasOpen, (open) => {
   if (!open) sidebarVisibleSchemasTarget.value = null;
+});
+
+watch(sidebarVisibleNacosNamespacesOpen, (open) => {
+  if (!open) sidebarVisibleNacosNamespacesTarget.value = null;
 });
 
 watch(sidebarTableNameFilterOpen, (open) => {
@@ -1657,6 +1779,7 @@ onUnmounted(() => {
   sidebarProcedureTarget.value = null;
   sidebarVisibleDatabasesTarget.value = null;
   sidebarVisibleSchemasTarget.value = null;
+  sidebarVisibleNacosNamespacesTarget.value = null;
   sidebarTreeItemDialogController.value = null;
   sidebarDangerDialogRequest.value = null;
   resetSidebarTreeDialogState();
@@ -1668,6 +1791,7 @@ onUnmounted(() => {
   tableSearchTimers.clear();
   tableSearchFocusRestoreTokens.clear();
   latestTableSearchInteractionParentId = null;
+  latestTableSearchInteractionId = 0;
   stopSidebarScrollbarDrag();
   stopSidebarHorizontalScrollbarDrag();
   sidebarScrollbarResizeObserver?.disconnect();
@@ -1695,11 +1819,13 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes });
       @open-data="openSidebarData"
       @open-visible-databases="openSidebarVisibleDatabases"
       @open-visible-schemas="openSidebarVisibleSchemas"
+      @open-visible-nacos-namespaces="openSidebarVisibleNacosNamespaces"
       @open-table-name-filters="openSidebarTableNameFilters"
       @request-group-rename="startRenamingCreatedGroup"
       @open-danger-dialog="openSidebarDangerDialog"
       @open-dialog-controller="updateSidebarTreeItemDialogController"
       @open-install-extension="openSidebarInstallExtension"
+      @open-extension-details="openSidebarExtensionDetails"
     />
     <div class="connection-tree-search sticky top-0 z-10 bg-background px-2 py-1">
       <div class="relative flex items-center gap-1">
@@ -1883,6 +2009,13 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes });
         </div>
       </div>
     </CustomContextMenu>
+    <div v-if="showConnectedConnectionsOnly && store.connectedIds.size > 0" class="shrink-0 border-t border-border bg-background px-2 py-2">
+      <Button type="button" variant="outline" size="sm" class="h-7 w-full justify-center gap-1.5 text-xs" :disabled="isDisconnectingAllActiveConnections" @click="disconnectAllActiveConnections">
+        <Loader2 v-if="isDisconnectingAllActiveConnections" class="h-3.5 w-3.5 animate-spin" />
+        <Unplug v-else class="h-3.5 w-3.5" />
+        {{ t("sidebar.disconnectAllActiveConnections") }}
+      </Button>
+    </div>
     <SidebarDdlViewDialog
       v-if="sidebarDdlTarget"
       v-model:open="sidebarDdlOpen"
@@ -1902,10 +2035,10 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes });
       v-model:open="sidebarObjectSourceOpen"
       :connection-id="sidebarObjectSourceTarget.node.connectionId!"
       :database="sidebarObjectSourceTarget.node.database!"
-      :schema="sidebarObjectSourceTarget.node.schema"
-      :name="sidebarObjectSourceTarget.node.objectName || sidebarObjectSourceTarget.node.label"
+      :schema="sidebarObjectSourceResolvedTarget?.schema"
+      :name="sidebarObjectSourceResolvedTarget!.name"
       :relation-name="sidebarObjectSourceTarget.node.tableName"
-      :signature="sidebarObjectSourceTarget.node.signature"
+      :signature="sidebarObjectSourceResolvedTarget?.signature"
       :object-type="sidebarObjectSourceType"
       :database-type="sidebarObjectSourceDatabaseType"
       :dialect="sidebarObjectSourceDialect"
@@ -1935,6 +2068,8 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes });
       :connection-name="sidebarVisibleSchemasTarget.label"
       :database="sidebarVisibleSchemasTarget.database"
     />
+
+    <SidebarVisibleNacosNamespacesDialog v-if="sidebarVisibleNacosNamespacesTarget?.connectionId" v-model:open="sidebarVisibleNacosNamespacesOpen" :connection-id="sidebarVisibleNacosNamespacesTarget.connectionId" :connection-name="sidebarVisibleNacosNamespacesTarget.label" />
     <Dialog v-model:open="sidebarTableNameFilterOpen">
       <DialogContent class="max-w-xl">
         <DialogHeader class="space-y-2">
@@ -2005,6 +2140,7 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes });
     </SidebarDangerConfirmDialog>
     <SidebarTreeItemDialogs v-if="sidebarTreeItemDialogController" :key="sidebarTreeItemDialogController.node?.id" :controller="sidebarTreeItemDialogController" @closed="sidebarTreeItemDialogController = null" />
     <InstallExtensionDialog v-if="sidebarInstallExtensionTarget" ref="sidebarInstallExtensionDialogRef" :node="sidebarInstallExtensionTarget" @close="refreshSidebarActionTarget" @changed="refreshSidebarActionTarget" />
+    <ExtensionDetailsDialog v-if="sidebarExtensionDetailsTarget" ref="sidebarExtensionDetailsDialogRef" :node="sidebarExtensionDetailsTarget" />
     <div v-if="store.treeNodes.length === 0" class="px-3 py-8 text-center text-muted-foreground text-xs">
       {{ t("sidebar.noConnections") }}
     </div>
@@ -2086,6 +2222,28 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes });
   right: 1px;
   width: 8px;
   background: color-mix(in oklch, var(--foreground) 48%, transparent);
+}
+
+html.dbx-legacy-webview .sidebar-tree-scrollbar {
+  opacity: 0.9;
+}
+
+html.dbx-legacy-webview .sidebar-tree-scrollbar__thumb {
+  background: rgba(82, 82, 82, 0.42);
+}
+
+html.dbx-legacy-webview.dark .sidebar-tree-scrollbar__thumb {
+  background: rgba(212, 212, 216, 0.42);
+}
+
+html.dbx-legacy-webview .sidebar-tree-scrollbar:hover .sidebar-tree-scrollbar__thumb,
+html.dbx-legacy-webview .sidebar-tree-scrollbar--dragging .sidebar-tree-scrollbar__thumb {
+  background: rgba(82, 82, 82, 0.62);
+}
+
+html.dbx-legacy-webview.dark .sidebar-tree-scrollbar:hover .sidebar-tree-scrollbar__thumb,
+html.dbx-legacy-webview.dark .sidebar-tree-scrollbar--dragging .sidebar-tree-scrollbar__thumb {
+  background: rgba(212, 212, 216, 0.62);
 }
 
 .sidebar-tree-horizontal-scrollbar {

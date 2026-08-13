@@ -16,6 +16,8 @@ import {
   parseMongoAggregateCommand,
   parseMongoCollectionStatsCommand,
   parseMongoCommand,
+  parseMongoCreateUserCommand,
+  parseMongoRunCommand,
   parseMongoCountDocumentsCommand,
   parseMongoDistinctCommand,
   parseMongoFindCommand,
@@ -47,6 +49,88 @@ test("normalizeRustMongoCommand preserves the desktop command contract", () => {
   assert.deepEqual(normalizeRustMongoCommand({ kind: "countDocuments", collection: "users", filter: "{}", accurate: false }), { kind: "countDocuments", collection: "users", filter: "{}", mode: "legacy" });
   assert.deepEqual(normalizeRustMongoCommand({ kind: "dropIndexes", collection: "users", indexes: '"email_1"', single: true }), { kind: "dropIndex", collection: "users", index: '"email_1"' });
   assert.deepEqual(normalizeRustMongoCommand({ kind: "findOne", collection: "users", filter: "{}", projection: null, options: null }), { kind: "findOne", collection: "users", filter: "{}" });
+});
+
+test("parseMongoCreateUserCommand normalizes user and write concern documents", () => {
+  assert.deepEqual(
+    parseMongoCreateUserCommand(`db.createUser({
+      user: "test-db",
+      pwd: "test-password",
+      roles: [{ role: "readWrite", db: "db1" }]
+    }, { w: "majority", wtimeout: 5000 })`),
+    {
+      userJson: '{"user":"test-db","pwd":"test-password","roles":[{"role":"readWrite","db":"db1"}]}',
+      writeConcernJson: '{"w":"majority","wtimeout":5000}',
+    },
+  );
+  assert.equal(parseMongoCreateUserCommand('db.createUser({pwd: "missing-user", roles: []})'), null);
+  assert.equal(parseMongoCreateUserCommand('db.createUser({user: "test"}, "majority")'), null);
+});
+
+test("splitMongoCommands executes use before createUser", () => {
+  const commands = splitMongoCommands(`use admin
+
+db.createUser({
+  user: "test-db",
+  pwd: "test-password",
+  roles: [{ role: "readWrite", db: "db1" }]
+})`);
+
+  assert.deepEqual(
+    commands.map(({ command }) => command.kind),
+    ["use", "createUser"],
+  );
+  const createUser = commands[1]?.command;
+  assert.equal(createUser?.kind, "createUser");
+  if (createUser?.kind === "createUser") {
+    assert.equal(JSON.parse(createUser.userJson).user, "test-db");
+    assert.match(evaluateMongoWriteSafety(createUser, { allowWrites: true }).reason || "", /high-risk operations/i);
+    assert.equal(evaluateMongoWriteSafety(createUser, { allowWrites: true, allowDangerous: true }).allowed, true);
+  }
+});
+
+test("parseMongoRunCommand normalizes one non-empty command document", () => {
+  assert.deepEqual(
+    parseMongoRunCommand(`db.runCommand({
+      find: "orders",
+      filter: {_id: ObjectId("507f1f77bcf86cd799439011")},
+      createdAt: ISODate("2025-01-01T00:00:00Z")
+    })`),
+    {
+      commandJson: '{"find":"orders","filter":{"_id":{"$oid":"507f1f77bcf86cd799439011"}},"createdAt":{"$date":"2025-01-01T00:00:00Z"}}',
+    },
+  );
+
+  for (const source of ["db.runCommand()", "db.runCommand({})", "db.runCommand('ping')", "db.runCommand({ping: 1}, {readPreference: 'primary'})", "db.runCommand({ping: 1}).valueOf()", "db.runCommand([1, 2, 3])"]) {
+    assert.equal(parseMongoRunCommand(source), null, source);
+  }
+});
+
+test("runCommand support does not accept arbitrary Mongo shell JavaScript", () => {
+  assert.deepEqual(
+    splitMongoCommands(`for (let i = 0; i < 2; i += 1) {
+  db.items.insertOne({ index: i });
+}`),
+    [],
+  );
+});
+
+test("splitMongoCommands keeps runCommand after a database switch", () => {
+  const commands = splitMongoCommands(`use admin
+
+db.runCommand({ ping: 1 })`);
+
+  assert.deepEqual(
+    commands.map(({ command }) => command.kind),
+    ["use", "runCommand"],
+  );
+  const runCommand = commands[1]?.command;
+  assert.equal(runCommand?.kind, "runCommand");
+  if (runCommand?.kind === "runCommand") {
+    assert.deepEqual(JSON.parse(runCommand.commandJson), { ping: 1 });
+    assert.equal(evaluateMongoWriteSafety(runCommand, { allowWrites: true }).allowed, false);
+    assert.equal(evaluateMongoWriteSafety(runCommand, { allowWrites: true, allowDangerous: true }).allowed, true);
+  }
 });
 
 test("parseMongoFindCommand parses getCollection find with chained sort skip and limit", () => {

@@ -13,6 +13,7 @@ use crate::backend::{format_query_result, new_connection_config, parse_database_
 use crate::mongo::{self, MongoCommand, MongoSafetyError};
 use crate::session::{McpSession, McpSessionStore};
 use dbx_core::{
+    agent_tools::{format_query_result_as_text, QueryCellWindow},
     db::redis_driver::{classify_command, parse_command_argv, RedisCommandResult, RedisCommandSafety},
     models::connection::DatabaseType,
     production_safety::{
@@ -70,6 +71,14 @@ pub struct ExecuteQueryRequest {
         description = "Session ID from dbx_open_session. When set, the query runs on the session's pinned connection, preserving USE/SET and other session state across calls."
     )]
     pub session_id: Option<String>,
+    #[schemars(
+        description = "Start character offset for every string cell (default 0, max 1000000). Use the next offset reported by a truncated result to slide through a long value; narrow the query to the target row and column first."
+    )]
+    pub cell_char_offset: Option<u64>,
+    #[schemars(
+        description = "Maximum characters returned per string cell (default 200, max 4000). Increase only for an explicit long-value expansion."
+    )]
+    pub cell_char_limit: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -100,6 +109,14 @@ pub struct AddConnectionRequest {
     #[serde(default)]
     pub ssl: bool,
     pub driver_profile: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct DuplicateConnectionRequest {
+    #[serde(flatten)]
+    pub selector: ConnectionSelector,
+    #[schemars(description = "Name for the copied connection")]
+    pub new_name: String,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -209,6 +226,7 @@ impl DbxMcpServer {
         let mut tool_router = Self::tool_router();
         if scope.enabled() {
             tool_router.disable_route("dbx_add_connection");
+            tool_router.disable_route("dbx_duplicate_connection");
             tool_router.disable_route("dbx_remove_connection");
         }
         // Desktop UI bridge operations are intentionally unavailable remotely and in scoped AI sessions.
@@ -233,7 +251,7 @@ impl DbxMcpServer {
 impl DbxMcpServer {
     #[tool(
         name = "dbx_list_connections",
-        description = "List database connections configured in DBX. Returns connection IDs, names, database types, endpoints, and selected databases."
+        description = "List database connections configured in DBX. Returns connection IDs, names, group paths, database types, endpoints, and selected databases."
     )]
     async fn list_connections(
         &self,
@@ -242,7 +260,15 @@ impl DbxMcpServer {
         match self.load_scoped_connections().await {
             Ok(connections) if connections.is_empty() => text("No connections configured in DBX."),
             Ok(connections) => {
-                let rows = connections.iter().map(ConnectionSummary::from).collect::<Vec<_>>();
+                let group_paths = self.backend.load_connection_group_paths().await.unwrap_or_default();
+                let rows = connections
+                    .iter()
+                    .map(|connection| {
+                        let mut summary = ConnectionSummary::from(connection);
+                        summary.group_path = group_paths.get(&connection.id).cloned().unwrap_or_default();
+                        summary
+                    })
+                    .collect::<Vec<_>>();
                 text(format_connections(&rows))
             }
             Err(error) => backend_tool_error("CONNECTION_LOAD_ERROR", error),
@@ -309,6 +335,8 @@ impl DbxMcpServer {
         description = "Execute a SQL query on a database connection (max 100 rows returned)"
     )]
     async fn execute_query(&self, Parameters(request): Parameters<ExecuteQueryRequest>) -> CallToolResult {
+        let explicit_cell_window = (request.cell_char_offset.is_some() || request.cell_char_limit.is_some())
+            .then(|| QueryCellWindow::from_options(request.cell_char_offset, request.cell_char_limit));
         let resolved = match self.resolve_connection(&request.selector).await {
             Ok(resolved) => resolved,
             Err(error) => return error,
@@ -367,7 +395,13 @@ impl DbxMcpServer {
                 Err(error) => return error,
             };
             return match self.backend.execute_mongo_command(connection, &database, &command).await {
-                Ok(result) => text(format_query_result(&result, 100)),
+                Ok(result) => match explicit_cell_window {
+                    Some(window) => match format_query_result_as_text(&result, 100, window) {
+                        Ok(output) => text(output),
+                        Err(error) => backend_tool_error("QUERY_FORMAT_ERROR", error),
+                    },
+                    None => text(format_query_result(&result, 100)),
+                },
                 Err(error) => backend_tool_error("QUERY_ERROR", error),
             };
         }
@@ -386,6 +420,12 @@ impl DbxMcpServer {
         }
         if let Some(session) = &session {
             arguments["client_session_id"] = json!(session.client_session_id);
+        }
+        if let Some(offset) = request.cell_char_offset {
+            arguments["cell_char_offset"] = json!(offset);
+        }
+        if let Some(limit) = request.cell_char_limit {
+            arguments["cell_char_limit"] = json!(limit);
         }
         let result =
             self.backend.execute_agent_tool(connection, &database, "execute_query", arguments, permissions).await;
@@ -613,6 +653,67 @@ impl DbxMcpServer {
         };
         match self.backend.add_connection_for_mcp(config).await {
             Ok(config) => text(format!("Connection \"{}\" added (id: {}).", config.name, config.id)),
+            Err(error) => backend_tool_error("CONNECTION_SAVE_ERROR", error),
+        }
+    }
+
+    #[tool(
+        name = "dbx_duplicate_connection",
+        description = "Duplicate a DBX connection with its complete settings, credentials, tunnels, and sidebar group"
+    )]
+    async fn duplicate_connection(
+        &self,
+        Parameters(request): Parameters<DuplicateConnectionRequest>,
+    ) -> CallToolResult {
+        let policy = match self.load_policy().await {
+            Ok(policy) => policy,
+            Err(error) => return error,
+        };
+        if policy.read_only {
+            return tool_error(
+                "MCP_READ_ONLY",
+                "DBX global MCP read-only mode is enabled. Connection management is not allowed.",
+            );
+        }
+        let connections = match self.backend.load_connections().await {
+            Ok(connections) => connections,
+            Err(error) => return tool_error("CONNECTION_LOAD_ERROR", error),
+        };
+        let allowed = connections
+            .iter()
+            .filter(|connection| policy_allows_connection(&policy, connection))
+            .cloned()
+            .collect::<Vec<_>>();
+        let source =
+            if let Some(id) = request.selector.connection_id.as_deref().map(str::trim).filter(|id| !id.is_empty()) {
+                allowed.iter().find(|connection| connection.id == id).cloned()
+            } else if let Some(name) =
+                request.selector.connection_name.as_deref().map(str::trim).filter(|name| !name.is_empty())
+            {
+                let matching = allowed
+                    .iter()
+                    .filter(|connection| connection.name.eq_ignore_ascii_case(name))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                if matching.len() > 1 {
+                    return tool_error("AMBIGUOUS_CONNECTION", ambiguous_connections(name, &matching));
+                }
+                matching.into_iter().next()
+            } else {
+                return tool_error("CONNECTION_NOT_FOUND", "Either connection_id or connection_name is required.");
+            };
+        let Some(source) = source else {
+            return tool_error("CONNECTION_NOT_FOUND", "The source connection was not found or is outside MCP scope.");
+        };
+        let new_name = request.new_name.trim();
+        if new_name.is_empty() {
+            return tool_error("INVALID_CONNECTION", "The copied connection name must not be empty.");
+        }
+        if connections.iter().any(|connection| connection.name.eq_ignore_ascii_case(new_name)) {
+            return tool_error("CONNECTION_ALREADY_EXISTS", format!("Connection \"{new_name}\" already exists."));
+        }
+        match self.backend.duplicate_connection_for_mcp(&source.id, &Uuid::new_v4().to_string(), new_name).await {
+            Ok(copy) => text(format!("Connection \"{}\" duplicated (id: {}).", copy.name, copy.id)),
             Err(error) => backend_tool_error("CONNECTION_SAVE_ERROR", error),
         }
     }
@@ -1003,24 +1104,13 @@ fn validate_sql_policy(
         ));
     }
     let high_risk = risk == SqlRisk::Ddl || is_dangerous_sql_for_database(sql, connection.db_type);
-    let confirmed_sql = mcp_confirmed_write_sql_from_env();
-    if high_risk && !policy.allow_dangerous_sql && confirmed_sql.is_none() {
+    if high_risk && !policy.allow_dangerous_sql {
         return Err(tool_error("SQL_BLOCKED", "High-risk SQL is disabled in DBX MCP settings."));
     }
     if is_write && targets_production_database(connection, database, sql) {
         return Err(tool_error("PRODUCTION_WRITE_BLOCKED", "MCP cannot execute writes against a production database."));
     }
-    let mut permissions = mcp_permissions(connection, policy);
-    // When the user confirmed a specific write/DDL SQL via the CLI agent, the
-    // confirmed-SQL binding authorises dangerous (DDL) execution in the SQL
-    // path only. The precise SQL match check (sql_matches_confirmed_write) in
-    // agent_tools still guards execution — only the exact confirmed statement
-    // can run. Redis and Mongo paths are unaffected; they continue to use the
-    // persistent policy (mcp_permissions) without any confirmed-SQL elevation.
-    if confirmed_sql.is_some() {
-        permissions.allow_dangerous = true;
-    }
-    Ok(permissions)
+    Ok(mcp_permissions(connection, policy))
 }
 
 // CallToolResult is the transport-native error payload; boxing it would complicate every MCP call site.
@@ -1039,6 +1129,12 @@ fn validate_mongo_command(
             ),
         )
     })?;
+    if matches!(command, MongoCommand::RunCommand { .. }) {
+        return Err(tool_error(
+            "SQL_BLOCKED",
+            "MongoDB runCommand is not available through MCP; review and execute it manually in DBX.",
+        ));
+    }
     let permissions = mcp_permissions(connection, policy);
     let production_database = match &command {
         MongoCommand::Aggregate { pipeline, .. } => {
@@ -1114,13 +1210,15 @@ fn ambiguous_connections(name: &str, connections: &[dbx_core::models::connection
 }
 
 fn format_connections(connections: &[ConnectionSummary]) -> String {
-    let mut output =
-        String::from("| ID | Name | Type | Host | Port | Database |\n| --- | --- | --- | --- | --- | --- |");
+    let mut output = String::from(
+        "| ID | Name | Group Path | Type | Host | Port | Database |\n| --- | --- | --- | --- | --- | --- | --- |",
+    );
     for connection in connections {
         output.push_str(&format!(
-            "\n| {} | {} | {} | {} | {} | {} |",
+            "\n| {} | {} | {} | {} | {} | {} | {} |",
             escape_cell(&connection.id),
             escape_cell(&connection.name),
+            escape_cell(&connection.group_path.join(" / ")),
             escape_cell(&connection.db_type),
             escape_cell(&connection.host),
             connection.port,
@@ -1320,6 +1418,23 @@ mod tests {
             Ok(config)
         }
 
+        async fn duplicate_connection_for_mcp(
+            &self,
+            source_id: &str,
+            copy_id: &str,
+            copy_name: &str,
+        ) -> Result<ConnectionConfig, String> {
+            let mut copy = self
+                .connections
+                .iter()
+                .find(|connection| connection.id == source_id)
+                .cloned()
+                .ok_or_else(|| "source not found".to_string())?;
+            copy.id = copy_id.to_string();
+            copy.name = copy_name.to_string();
+            Ok(copy)
+        }
+
         async fn remove_connection_for_mcp(&self, _connection_id: &str) -> Result<bool, String> {
             Ok(true)
         }
@@ -1334,9 +1449,11 @@ mod tests {
             host: "127.0.0.1".to_string(),
             port: 5432,
             database: "app".to_string(),
+            group_path: vec!["Project|A".to_string(), "Staging\nWest".to_string()],
         }]);
         assert!(output.contains("id\\|1"));
         assert!(output.contains("local pg"));
+        assert!(output.contains("Project\\|A / Staging West"));
     }
 
     #[test]
@@ -1344,12 +1461,13 @@ mod tests {
         let server = DbxMcpServer::with_runtime_options(Arc::new(FakeBackend::default()), McpScope::default(), false);
         let tools = server.tool_router.list_all();
         let names = tools.iter().map(|tool| tool.name.as_ref()).collect::<Vec<_>>();
-        assert_eq!(tools.len(), 12);
+        assert_eq!(tools.len(), 13);
         assert!(names.contains(&"dbx_list_connections"));
         assert!(names.contains(&"dbx_list_tables"));
         assert!(names.contains(&"dbx_describe_table"));
         assert!(names.contains(&"dbx_execute_query"));
         assert!(names.contains(&"dbx_add_connection"));
+        assert!(names.contains(&"dbx_duplicate_connection"));
         assert!(names.contains(&"dbx_remove_connection"));
         assert!(names.contains(&"dbx_execute_redis_command"));
         assert!(names.contains(&"dbx_get_schema_context"));
@@ -1369,6 +1487,7 @@ mod tests {
         let names = server.tool_router.list_all().into_iter().map(|tool| tool.name).collect::<Vec<_>>();
         assert_eq!(names.len(), 8);
         assert!(!names.iter().any(|name| name == "dbx_add_connection"));
+        assert!(!names.iter().any(|name| name == "dbx_duplicate_connection"));
         assert!(!names.iter().any(|name| name == "dbx_remove_connection"));
         assert!(!names.iter().any(|name| name == "dbx_open_table"));
         assert!(!names.iter().any(|name| name == "dbx_execute_and_show"));
@@ -1475,6 +1594,22 @@ mod tests {
     }
 
     #[test]
+    fn mongo_run_command_is_never_exposed_through_mcp() {
+        let mongo = connection("mongo", "mongo", "mongodb", "staging");
+        let source = r#"db.runCommand({ping: 1})"#;
+
+        for policy in [
+            McpGlobalPolicy { read_only: true, allow_dangerous_sql: false, allowed_connection_ids: None },
+            McpGlobalPolicy { read_only: false, allow_dangerous_sql: false, allowed_connection_ids: None },
+            McpGlobalPolicy { read_only: false, allow_dangerous_sql: true, allowed_connection_ids: None },
+        ] {
+            let error = validate_mongo_command(&mongo, &policy, "staging", source).unwrap_err();
+            assert!(result_text(&error).contains("SQL_BLOCKED"));
+            assert!(result_text(&error).contains("runCommand"));
+        }
+    }
+
+    #[test]
     fn agent_results_preserve_stable_backend_policy_errors() {
         let result = agent_result(dbx_core::agent_events::ToolResult {
             tool_call_id: "test".to_string(),
@@ -1540,39 +1675,59 @@ mod tests {
     }
 
     #[test]
-    fn confirmed_sql_binding_tests() {
+    fn confirmed_sql_binding_cannot_elevate_central_policy() {
         let connection = connection("dev", "dev", "postgres", "app");
 
-        // 1. mcp_permissions (Redis/Mongo path) must NOT elevate allow_dangerous.
+        // An exact confirmation remains available as a narrowing constraint,
+        // but cannot turn the central safe-write policy into full access.
         let _guard = EnvGuard::set("DBX_MCP_CONFIRMED_WRITE_SQL", "CREATE TABLE metrics (id INT)");
-        let policy = McpGlobalPolicy { read_only: false, allow_dangerous_sql: false, allowed_connection_ids: None };
-        let permissions = mcp_permissions(&connection, &policy);
+        let safe_write = McpGlobalPolicy { read_only: false, allow_dangerous_sql: false, allowed_connection_ids: None };
+        let permissions = mcp_permissions(&connection, &safe_write);
         assert!(!permissions.allow_dangerous, "confirmed SQL must NOT elevate allow_dangerous for Redis/Mongo paths");
         assert!(permissions.allow_writes);
         assert_eq!(permissions.confirmed_write_sql.as_deref(), Some("CREATE TABLE metrics (id INT)"));
 
-        // 2. SQL path (validate_sql_policy) elevates allow_dangerous with a confirmed binding.
-        let permissions =
-            validate_sql_policy(&connection, &policy, "app", "CREATE TABLE metrics (id INT)", false).unwrap();
-        assert!(permissions.allow_dangerous, "SQL path should elevate allow_dangerous with confirmed binding");
-        assert!(permissions.allow_writes);
-        assert_eq!(permissions.confirmed_write_sql.as_deref(), Some("CREATE TABLE metrics (id INT)"));
-        drop(_guard);
-
-        // 3. Without a confirmed binding, high-risk SQL is blocked.
-        let _guard = EnvGuard::remove("DBX_MCP_CONFIRMED_WRITE_SQL");
-        let error = validate_sql_policy(&connection, &policy, "app", "DROP TABLE sessions", false).unwrap_err();
+        let error =
+            validate_sql_policy(&connection, &safe_write, "app", "CREATE TABLE metrics (id INT)", false).unwrap_err();
         assert!(result_text(&error).contains("SQL_BLOCKED"));
         assert!(result_text(&error).contains("High-risk SQL is disabled"));
         drop(_guard);
 
-        // 4. Confirmed SQL must not bypass global read_only.
+        // A missing binding cannot change the same safe-write boundary.
+        let _guard = EnvGuard::remove("DBX_MCP_CONFIRMED_WRITE_SQL");
+        let error = validate_sql_policy(&connection, &safe_write, "app", "DROP TABLE sessions", false).unwrap_err();
+        assert!(result_text(&error).contains("SQL_BLOCKED"));
+        assert!(result_text(&error).contains("High-risk SQL is disabled"));
+        drop(_guard);
+
+        // Full access still permits an exact confirmed DDL statement and keeps
+        // the binding for the execution-time anti-replay check.
         let _guard = EnvGuard::set("DBX_MCP_CONFIRMED_WRITE_SQL", "CREATE TABLE metrics (id INT)");
+        let full_access = McpGlobalPolicy { read_only: false, allow_dangerous_sql: true, allowed_connection_ids: None };
+        let permissions =
+            validate_sql_policy(&connection, &full_access, "app", "CREATE TABLE metrics (id INT)", false).unwrap();
+        assert!(permissions.allow_writes);
+        assert!(permissions.allow_dangerous);
+        assert_eq!(permissions.confirmed_write_sql.as_deref(), Some("CREATE TABLE metrics (id INT)"));
+
+        // A global read-only policy is still authoritative even for the exact
+        // confirmed statement, while read queries remain available.
         let read_only_policy =
             McpGlobalPolicy { read_only: true, allow_dangerous_sql: false, allowed_connection_ids: None };
         let error = validate_sql_policy(&connection, &read_only_policy, "app", "CREATE TABLE metrics (id INT)", false)
             .unwrap_err();
         assert!(result_text(&error).contains("MCP_READ_ONLY"), "confirmed SQL must not bypass global read_only");
+        assert!(validate_sql_policy(&connection, &read_only_policy, "app", "SELECT 1", false).is_ok());
+        drop(_guard);
+
+        // Safe-write DML remains allowed, and an exact binding never grants the
+        // DDL/high-risk bit implicitly.
+        let _guard = EnvGuard::set("DBX_MCP_CONFIRMED_WRITE_SQL", "INSERT INTO metrics (id) VALUES (1)");
+        let permissions =
+            validate_sql_policy(&connection, &safe_write, "app", "INSERT INTO metrics (id) VALUES (1)", false).unwrap();
+        assert!(permissions.allow_writes);
+        assert!(!permissions.allow_dangerous);
+        assert_eq!(permissions.confirmed_write_sql.as_deref(), Some("INSERT INTO metrics (id) VALUES (1)"));
     }
 
     #[test]
@@ -1610,6 +1765,8 @@ mod tests {
                 database: None,
                 sql: "USE analytics".to_string(),
                 session_id: Some(session_id.clone()),
+                cell_char_offset: None,
+                cell_char_limit: None,
             }))
             .await;
         assert_eq!(result_text(&result), "ok");
@@ -1627,6 +1784,8 @@ mod tests {
                 database: Some("other".to_string()),
                 sql: "SELECT 1".to_string(),
                 session_id: Some(session_id.clone()),
+                cell_char_offset: None,
+                cell_char_limit: None,
             }))
             .await;
         assert!(result_text(&mismatch).contains("SESSION_DATABASE_MISMATCH"));
@@ -1643,12 +1802,38 @@ mod tests {
                 database: None,
                 sql: "SELECT 1".to_string(),
                 session_id: Some(session_id.clone()),
+                cell_char_offset: None,
+                cell_char_limit: None,
             }))
             .await;
         assert!(result_text(&missing).contains("SESSION_NOT_FOUND"));
 
         let second_close = server.close_session(Parameters(CloseSessionRequest { session_id })).await;
         assert!(result_text(&second_close).contains("SESSION_NOT_FOUND"));
+    }
+
+    #[tokio::test]
+    async fn execute_query_forwards_character_window_options() {
+        let elasticsearch = connection("es", "es", "elasticsearch", "");
+        let backend = Arc::new(FakeBackend { connections: vec![elasticsearch], ..Default::default() });
+        let server = DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false);
+
+        let result = server
+            .execute_query(Parameters(ExecuteQueryRequest {
+                selector: selector("es"),
+                database: None,
+                sql: "GET /logs/_search".to_string(),
+                session_id: None,
+                cell_char_offset: Some(200),
+                cell_char_limit: Some(800),
+            }))
+            .await;
+
+        assert_eq!(result_text(&result), "ok");
+        let recorded = backend.recorded_arguments.lock().unwrap();
+        let (_, arguments) = recorded.iter().find(|(name, _)| name == "execute_query").unwrap();
+        assert_eq!(arguments["cell_char_offset"], 200);
+        assert_eq!(arguments["cell_char_limit"], 800);
     }
 
     #[tokio::test]
@@ -1668,6 +1853,8 @@ mod tests {
                     database: None,
                     sql: "SELECT 1".to_string(),
                     session_id: Some(session_id.clone()),
+                    cell_char_offset: None,
+                    cell_char_limit: None,
                 }))
                 .await;
             assert_eq!(result_text(&result), "ok");
@@ -1703,6 +1890,8 @@ mod tests {
                 database: None,
                 sql: "SELECT 1".to_string(),
                 session_id: Some(session_id.clone()),
+                cell_char_offset: None,
+                cell_char_limit: None,
             }))
             .await;
         assert_eq!(result_text(&query), "ok");
@@ -1717,6 +1906,8 @@ mod tests {
                 database: None,
                 sql: "SELECT 1".to_string(),
                 session_id: Some(session_id.clone()),
+                cell_char_offset: None,
+                cell_char_limit: None,
             }))
             .await;
         assert_eq!(result_text(&retry_query), "ok");
@@ -1746,6 +1937,8 @@ mod tests {
                 database: None,
                 sql: "SELECT 1".to_string(),
                 session_id: Some("mcp-session-nope".to_string()),
+                cell_char_offset: None,
+                cell_char_limit: None,
             }))
             .await;
         assert!(result_text(&missing).contains("SESSION_NOT_FOUND"));

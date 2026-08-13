@@ -15,13 +15,16 @@ NON_JDBC_AGENT_MODULES = {"mongodb", "etcd", "zookeeper", "kafka", "rocketmq", "
 NATIVE_ONLY_AGENT_MODULES = {
     "cassandra": "drivers/cassandra-go",
     "duckdb": "drivers/duckdb",
+    "hive": "drivers/hive-go",
     "oracle": "drivers/oracle-go",
     "kingbase": "drivers/kingbase-go",
+    "iotdb": "drivers/iotdb",
     "neo4j": "drivers/neo4j-go",
     "vastbase": "drivers/vastbase-go",
     "tdengine": "drivers/tdengine",
     "xugu": "drivers/xugu",
     "rabbitmq": "drivers/rabbitmq",
+    "rocketmq": "drivers/rocketmq",
 }
 AUTO_VERSIONED_NATIVE_MODULES = {"duckdb"}
 JDBC_ARCHITECTURE_ALLOWLIST = {

@@ -140,6 +140,7 @@ export function useSidebarDataOpenRuntime() {
       tab.resultSortDirection = undefined;
       tab.resultSortMode = undefined;
       tab.resultLocalSortOriginalRows = undefined;
+      tab.resultLocalSortOriginalLargeValueCells = undefined;
       tab.resultLocalSortOriginalMongoDocuments = undefined;
       tab.resultLocalSortOriginalMongoCopyDocuments = undefined;
       tab.resultSortedSql = undefined;
@@ -307,6 +308,7 @@ export function useSidebarDataOpenRuntime() {
       const includeRowId = usesSyntheticRowIdKey(effectiveDbType, primaryKeys, tableType);
       const sql = await buildTableSelectSql({
         databaseType: effectiveDbType,
+        driverProfile: config?.driver_profile,
         identifierQuote: connectionStore.connectionIdentifierQuote?.(node.connectionId),
         schema: tableSchema,
         database: node.database,

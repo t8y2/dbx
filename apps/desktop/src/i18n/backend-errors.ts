@@ -1,4 +1,5 @@
 import { normalizeBackendError, sanitizeBackendErrorMessage, type BackendError } from "@/lib/backend/errorUtils";
+import { PHOENIX_DRIVER_NOT_INSTALLED_ERROR, PHOENIX_JDBC_PLUGIN_NOT_INSTALLED_ERROR } from "@/lib/database/phoenixConnection";
 
 /**
  * Minimal shape of a translate function, satisfied by both `useI18n().t` inside
@@ -32,6 +33,57 @@ const taggedAiCliErrorKeys: Record<string, string> = {
   piAgentProtocolError: "ai.cliErrors.piAgentProtocolError",
   piAgentModelInvalid: "ai.cliErrors.piAgentModelInvalid",
   piAgentRunFailed: "ai.cliErrors.piAgentRunFailed",
+  openCodeNotInstalled: "ai.cliErrors.openCodeNotInstalled",
+  openCodeCliPathInvalid: "ai.cliErrors.openCodeCliPathInvalid",
+  openCodeEnvInvalid: "ai.cliErrors.openCodeEnvInvalid",
+  openCodeEnvReserved: "ai.cliErrors.openCodeEnvReserved",
+  openCodeNotAuthenticated: "ai.cliErrors.openCodeNotAuthenticated",
+  openCodeMcpStartupFailed: "ai.cliErrors.openCodeMcpStartupFailed",
+  openCodeTimeout: "ai.cliErrors.openCodeTimeout",
+  openCodeProtocolError: "ai.cliErrors.openCodeProtocolError",
+  openCodeRunFailed: "ai.cliErrors.openCodeRunFailed",
+  cursorNotInstalled: "ai.cliErrors.cursorNotInstalled",
+  cursorCliPathInvalid: "ai.cliErrors.cursorCliPathInvalid",
+  grokCliNotInstalled: "ai.cliErrors.grokCliNotInstalled",
+  grokCliPathInvalid: "ai.cliErrors.grokCliPathInvalid",
+  grokCliEnvInvalid: "ai.cliErrors.grokCliEnvInvalid",
+  grokCliEnvReserved: "ai.cliErrors.grokCliEnvReserved",
+  grokCliNotAuthenticated: "ai.cliErrors.grokCliNotAuthenticated",
+  grokCliMcpStartupFailed: "ai.cliErrors.grokCliMcpStartupFailed",
+  grokCliCommandLineTooLong: "ai.cliErrors.grokCliCommandLineTooLong",
+  grokCliRunFailed: "ai.cliErrors.grokCliRunFailed",
+  codeBuddyNotInstalled: "ai.cliErrors.codeBuddyNotInstalled",
+  codeBuddyCliPathInvalid: "ai.cliErrors.codeBuddyCliPathInvalid",
+  codeBuddyEnvInvalid: "ai.cliErrors.codeBuddyEnvInvalid",
+  codeBuddyEnvReserved: "ai.cliErrors.codeBuddyEnvReserved",
+  codeBuddyNotAuthenticated: "ai.cliErrors.codeBuddyNotAuthenticated",
+  codeBuddyTimeout: "ai.cliErrors.codeBuddyTimeout",
+  codeBuddyMcpConfigInvalid: "ai.cliErrors.codeBuddyMcpConfigInvalid",
+  codeBuddyMcpStartupFailed: "ai.cliErrors.codeBuddyMcpStartupFailed",
+  codeBuddyProtocolError: "ai.cliErrors.codeBuddyProtocolError",
+  codeBuddyRunFailed: "ai.cliErrors.codeBuddyRunFailed",
+  qoderNotInstalled: "ai.cliErrors.qoderNotInstalled",
+  qoderCliPathInvalid: "ai.cliErrors.qoderCliPathInvalid",
+  qoderEnvInvalid: "ai.cliErrors.qoderEnvInvalid",
+  qoderEnvReserved: "ai.cliErrors.qoderEnvReserved",
+  qoderNotAuthenticated: "ai.cliErrors.qoderNotAuthenticated",
+  qoderTimeout: "ai.cliErrors.qoderTimeout",
+  qoderMcpConfigInvalid: "ai.cliErrors.qoderMcpConfigInvalid",
+  qoderMcpStartupFailed: "ai.cliErrors.qoderMcpStartupFailed",
+  qoderProtocolError: "ai.cliErrors.qoderProtocolError",
+  qoderRunFailed: "ai.cliErrors.qoderRunFailed",
+  cursorEnvInvalid: "ai.cliErrors.cursorEnvInvalid",
+  cursorEnvReserved: "ai.cliErrors.cursorEnvReserved",
+  cursorNotAuthenticated: "ai.cliErrors.cursorNotAuthenticated",
+  cursorMcpStartupFailed: "ai.cliErrors.cursorMcpStartupFailed",
+  cursorTimeout: "ai.cliErrors.cursorTimeout",
+  cursorProtocolError: "ai.cliErrors.cursorProtocolError",
+  cursorRunFailed: "ai.cliErrors.cursorRunFailed",
+};
+
+const exactMessageKeys: Record<string, string> = {
+  [PHOENIX_DRIVER_NOT_INSTALLED_ERROR]: "connection.phoenixDriverNotInstalled",
+  [PHOENIX_JDBC_PLUGIN_NOT_INSTALLED_ERROR]: "connection.phoenixDriverNotInstalled",
 };
 
 const patterns: [RegExp, string][] = [
@@ -139,6 +191,9 @@ export function translateBackendError(t: BackendErrorTranslate, error: unknown):
   if (structured) return translateStructuredBackendError(t, structured);
 
   const message = backendErrorMessage(error);
+  const exactKey = exactMessageKeys[message];
+  if (exactKey) return t(exactKey);
+
   const tagged = message.match(/^\[([A-Za-z][A-Za-z0-9]+)\]\s*([\s\S]*)$/);
   if (tagged) {
     const [, code, rawDetail] = tagged;

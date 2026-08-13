@@ -562,6 +562,7 @@ test("keeps only valid saved column formatter configs", () => {
       "conn::db::public::users::payload": { kind: "json-path", path: "$.user.name" },
       "conn::db::public::users::invalid_json": { kind: "json-path", path: "user.name" },
       "conn::db::public::users::status": { kind: "custom-ref", formatterId: "fmt_1" },
+      "conn::db::public::orders::user_id": { kind: "foreign-key-display", refSchema: "public", refTable: "users", refColumn: "id", displayColumn: "name" },
     },
     customColumnFormatters: {
       fmt_1: { id: "fmt_1", name: "Status label", template: "status:${value}" },
@@ -575,6 +576,7 @@ test("keeps only valid saved column formatter configs", () => {
     "conn::db::public::users::name": { kind: "mask", prefix: 2, suffix: 2 },
     "conn::db::public::users::payload": { kind: "json-path", path: "$.user.name" },
     "conn::db::public::users::status": { kind: "custom-ref", formatterId: "fmt_1" },
+    "conn::db::public::orders::user_id": { kind: "foreign-key-display", refSchema: "public", refTable: "users", refColumn: "id", displayColumn: "name" },
   });
   assert.deepEqual(settings.customColumnFormatters, {
     fmt_1: { id: "fmt_1", name: "Status label", template: "status:${value}" },

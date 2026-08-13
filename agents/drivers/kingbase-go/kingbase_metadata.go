@@ -179,6 +179,18 @@ func (s *server) identifierQuote() string {
 	return `"`
 }
 
+// quoteDDLIdentifier quotes an identifier inside generated DDL using the mode's
+// identifier quote. MySQL compatibility mode uses backticks (and backtick
+// escaping); everything else keeps the PostgreSQL-compatible double quote, so
+// schema/table names containing hyphens or other special characters render as
+// valid SQL instead of being parsed as operators or bare tokens.
+func (s *server) quoteDDLIdentifier(value string) string {
+	if s.mode.mysqlCompat {
+		return "`" + strings.ReplaceAll(value, "`", "``") + "`"
+	}
+	return quoteIdentifier(value)
+}
+
 func (s *server) connectionInfo() (map[string]any, error) {
 	db, err := s.requireDB()
 	if err != nil {
@@ -700,7 +712,7 @@ func (s *server) getTypeDetails(schema, name string) (*customTypeDetails, error)
 		warnings = append(warnings, s.customTypeRangeAttributes(queries, &details.Properties, oid, true)...)
 	case customTypeKindBase:
 	}
-	details.DDL = buildCustomTypeDDL(schema, name, kind, inputFn, &details.Members, &details.Properties, warnings)
+	details.DDL = s.buildCustomTypeDDL(schema, name, kind, inputFn, &details.Members, &details.Properties, warnings)
 	return details, nil
 }
 
@@ -924,22 +936,22 @@ func resolveCustomTypeDomainDefault(typdefaultbin, typdefault sql.NullString, re
 	return &value, nil
 }
 
-func quoteCatalogIdentifier(value string) string {
+func (s *server) quoteCatalogIdentifier(value string) string {
 	value = strings.TrimSpace(value)
 	if strings.HasPrefix(value, `"`) && strings.HasSuffix(value, `"`) && strings.Contains(value, `"."`) {
 		return value
 	}
 	if separator := strings.LastIndexByte(value, '.'); separator >= 0 {
-		return quoteIdentifier(value[:separator]) + "." + quoteIdentifier(value[separator+1:])
+		return s.quoteDDLIdentifier(value[:separator]) + "." + s.quoteDDLIdentifier(value[separator+1:])
 	}
-	return quoteIdentifier(value)
+	return s.quoteDDLIdentifier(value)
 }
 
 // buildCustomTypeDDL generates normalized CREATE TYPE text. complete is only
 // true when the text can be executed standalone; multiranges and base types
 // are marked incomplete with visible warnings.
-func buildCustomTypeDDL(schema, name string, kind customTypeKind, inputFn sql.NullString, members *[]customTypeMember, properties *customTypeProperties, warnings []string) *customTypeDdl {
-	qualified := quoteIdentifier(schema) + "." + quoteIdentifier(name)
+func (s *server) buildCustomTypeDDL(schema, name string, kind customTypeKind, inputFn sql.NullString, members *[]customTypeMember, properties *customTypeProperties, warnings []string) *customTypeDdl {
+	qualified := s.quoteDDLIdentifier(schema) + "." + s.quoteDDLIdentifier(name)
 	switch kind {
 	case customTypeKindEnum:
 		values := make([]string, 0, len(*members))
@@ -957,9 +969,9 @@ func buildCustomTypeDDL(schema, name string, kind customTypeKind, inputFn sql.Nu
 		fields := make([]string, 0, len(*members))
 		comments := make([]string, 0, len(*members))
 		for _, member := range *members {
-			fields = append(fields, quoteIdentifier(member.Name)+" "+member.DataType)
+			fields = append(fields, s.quoteDDLIdentifier(member.Name)+" "+member.DataType)
 			if member.Comment != nil {
-				comments = append(comments, fmt.Sprintf("COMMENT ON COLUMN %s.%s IS %s;", qualified, quoteIdentifier(member.Name), quoteLiteral(*member.Comment)))
+				comments = append(comments, fmt.Sprintf("COMMENT ON COLUMN %s.%s IS %s;", qualified, s.quoteDDLIdentifier(member.Name), quoteLiteral(*member.Comment)))
 			}
 		}
 		sql := fmt.Sprintf("CREATE TYPE %s AS (\n  %s\n);", qualified, strings.Join(fields, ",\n  "))
@@ -978,7 +990,7 @@ func buildCustomTypeDDL(schema, name string, kind customTypeKind, inputFn sql.Nu
 		}
 		parts := []string{fmt.Sprintf("CREATE DOMAIN %s AS %s", qualified, base)}
 		if properties.Collation != nil && *properties.Collation != "" {
-			parts = append(parts, "COLLATE "+quoteCatalogIdentifier(*properties.Collation))
+			parts = append(parts, "COLLATE "+s.quoteCatalogIdentifier(*properties.Collation))
 		}
 		if properties.Default != nil && *properties.Default != "" {
 			parts = append(parts, "DEFAULT "+*properties.Default)
@@ -992,7 +1004,7 @@ func buildCustomTypeDDL(schema, name string, kind customTypeKind, inputFn sql.Nu
 			if constraintName == "" {
 				constraintName = name + "_check"
 			}
-			parts = append(parts, fmt.Sprintf("CONSTRAINT %s CHECK %s", quoteIdentifier(constraintName), body))
+			parts = append(parts, fmt.Sprintf("CONSTRAINT %s CHECK %s", s.quoteDDLIdentifier(constraintName), body))
 		}
 		for _, warning := range warnings {
 			if strings.Contains(warning, "domain constraints") || strings.Contains(warning, "default value could not be rendered") {
@@ -1006,16 +1018,16 @@ func buildCustomTypeDDL(schema, name string, kind customTypeKind, inputFn sql.Nu
 			args = append(args, "subtype = "+*properties.RangeSubtype)
 		}
 		if properties.RangeSubtypeOpclass != nil && *properties.RangeSubtypeOpclass != "" {
-			args = append(args, "subtype_opclass = "+quoteCatalogIdentifier(*properties.RangeSubtypeOpclass))
+			args = append(args, "subtype_opclass = "+s.quoteCatalogIdentifier(*properties.RangeSubtypeOpclass))
 		}
 		if properties.RangeCanonicalFunction != nil && *properties.RangeCanonicalFunction != "" {
-			args = append(args, "canonical = "+quoteCatalogIdentifier(*properties.RangeCanonicalFunction))
+			args = append(args, "canonical = "+s.quoteCatalogIdentifier(*properties.RangeCanonicalFunction))
 		}
 		if properties.RangeSubtypeDiffFunction != nil && *properties.RangeSubtypeDiffFunction != "" {
-			args = append(args, "subtype_diff = "+quoteCatalogIdentifier(*properties.RangeSubtypeDiffFunction))
+			args = append(args, "subtype_diff = "+s.quoteCatalogIdentifier(*properties.RangeSubtypeDiffFunction))
 		}
 		if properties.RangeMultirangeName != nil && *properties.RangeMultirangeName != "" {
-			args = append(args, "multirange_type_name = "+quoteCatalogIdentifier(*properties.RangeMultirangeName))
+			args = append(args, "multirange_type_name = "+s.quoteCatalogIdentifier(*properties.RangeMultirangeName))
 		}
 		if properties.RangeSubtype == nil || *properties.RangeSubtype == "" {
 			result := &customTypeDdl{
@@ -1552,7 +1564,7 @@ func (s *server) getTableDDL(schema, table string) (string, error) {
 		return "", err
 	}
 	tableComment, _ := s.getTableComment(effective, table)
-	ddl := renderTableDDL(effective, table, columns, tableComment)
+	ddl := s.renderTableDDL(effective, table, columns, tableComment)
 	ddl, err = s.appendTableIndexDDL(effective, table, ddl)
 	if err != nil {
 		return "", err
@@ -1564,19 +1576,19 @@ func (s *server) getTableDDL(schema, table string) (string, error) {
 	return ddl, nil
 }
 
-func renderTableDDL(schema, table string, columns []columnInfo, tableComment *string) string {
+func (s *server) renderTableDDL(schema, table string, columns []columnInfo, tableComment *string) string {
 	definitions := make([]string, 0, len(columns)+1)
 	primary := []string{}
 	for _, column := range columns {
-		definitions = append(definitions, columnDDLDefinition(column))
+		definitions = append(definitions, s.columnDDLDefinition(column))
 		if column.IsPrimaryKey {
-			primary = append(primary, quoteIdentifier(column.Name))
+			primary = append(primary, s.quoteDDLIdentifier(column.Name))
 		}
 	}
 	if len(primary) > 0 {
 		definitions = append(definitions, "PRIMARY KEY ("+strings.Join(primary, ", ")+")")
 	}
-	qualifiedTable := quoteIdentifier(schema) + "." + quoteIdentifier(table)
+	qualifiedTable := s.quoteDDLIdentifier(schema) + "." + s.quoteDDLIdentifier(table)
 	ddl := "CREATE TABLE " + qualifiedTable + " (\n  " + strings.Join(definitions, ",\n  ") + "\n);"
 	if tableComment != nil && strings.TrimSpace(*tableComment) != "" {
 		ddl += "\nCOMMENT ON TABLE " + qualifiedTable + " IS " + quoteLiteral(*tableComment) + ";"
@@ -1585,7 +1597,7 @@ func renderTableDDL(schema, table string, columns []columnInfo, tableComment *st
 		if column.Comment == nil || strings.TrimSpace(*column.Comment) == "" {
 			continue
 		}
-		ddl += "\nCOMMENT ON COLUMN " + qualifiedTable + "." + quoteIdentifier(column.Name) + " IS " + quoteLiteral(*column.Comment) + ";"
+		ddl += "\nCOMMENT ON COLUMN " + qualifiedTable + "." + s.quoteDDLIdentifier(column.Name) + " IS " + quoteLiteral(*column.Comment) + ";"
 	}
 	return ddl
 }
@@ -1637,7 +1649,7 @@ WHERE n.nspname = %s AND t.relname = %s AND NOT ix.indisprimary ORDER BY i.relna
 			result = append(result, definition)
 		}
 		if comment.Valid && strings.TrimSpace(comment.String) != "" {
-			result = append(result, "COMMENT ON INDEX "+quoteIdentifier(effective)+"."+quoteIdentifier(name)+" IS "+quoteLiteral(comment.String))
+			result = append(result, "COMMENT ON INDEX "+s.quoteDDLIdentifier(effective)+"."+s.quoteDDLIdentifier(name)+" IS "+quoteLiteral(comment.String))
 		}
 	}
 	return result, rows.Err()
@@ -1704,8 +1716,8 @@ func ensureStatementTerminator(statement string) string {
 	return trimmed + ";"
 }
 
-func columnDDLDefinition(column columnInfo) string {
-	definition := quoteIdentifier(column.Name) + " " + columnDDLDataType(column)
+func (s *server) columnDDLDefinition(column columnInfo) string {
+	definition := s.quoteDDLIdentifier(column.Name) + " " + columnDDLDataType(column)
 	if column.Extra != nil && *column.Extra != "" {
 		// Identity clauses belong immediately after the data type in both
 		// PostgreSQL-compatible and SQL Server-compatible Kingbase modes.

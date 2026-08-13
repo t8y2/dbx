@@ -1635,8 +1635,8 @@ defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, hand
                   <QueryErrorActions
                     :error-message="String(errorMessage)"
                     :backend-error="activeTab.result.error"
-                    :connection-id="activeTab.connectionId"
-                    @change-query-timeout="activeTab.connectionId && emit('openConnectionSettings', activeTab.connectionId, 'advanced')"
+                    :connection-id="activeResultConnectionId"
+                    @change-query-timeout="activeResultConnectionId && emit('openConnectionSettings', activeResultConnectionId, 'advanced')"
                     @fix-with-ai="(message) => emit('fixWithAi', message)"
                   />
                 </template>
@@ -1969,8 +1969,8 @@ defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, hand
             <QueryErrorActions
               :error-message="String(errorMessage)"
               :backend-error="activeTab.result.error"
-              :connection-id="activeTab.connectionId"
-              @change-query-timeout="activeTab.connectionId && emit('openConnectionSettings', activeTab.connectionId, 'advanced')"
+              :connection-id="activeResultConnectionId"
+              @change-query-timeout="activeResultConnectionId && emit('openConnectionSettings', activeResultConnectionId, 'advanced')"
               @fix-with-ai="(message) => emit('fixWithAi', message)"
             />
           </template>

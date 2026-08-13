@@ -2652,7 +2652,7 @@ pub fn map_column_type(source_type: &str, _source_db: &DatabaseType, target_db: 
     // Extract basic type, `bigint unsigned` -> `bigint`
     base = base.split(' ').next().unwrap_or(base).trim();
 
-    if matches!(target_db, DatabaseType::Hive) {
+    if matches!(target_db, DatabaseType::Hive | DatabaseType::Impala) {
         return match base {
             "tinyint" => "TINYINT".into(),
             "smallint" | "int2" => "SMALLINT".into(),
@@ -2852,7 +2852,7 @@ pub fn generate_create_table_ddl(
                 line.push(' ');
                 line.push_str(&default_clause);
             }
-            if !c.is_nullable && !matches!(target_db, DatabaseType::Hive) {
+            if !c.is_nullable && !matches!(target_db, DatabaseType::Hive | DatabaseType::Impala) {
                 line.push_str(" NOT NULL");
             }
             if is_mysql_family {
@@ -2875,7 +2875,7 @@ pub fn generate_create_table_ddl(
     }
 
     let mut pks = Vec::with_capacity(columns.iter().filter(|c| c.is_primary_key).count());
-    if !matches!(target_db, DatabaseType::Hive) {
+    if !matches!(target_db, DatabaseType::Hive | DatabaseType::Impala) {
         for c in columns {
             if c.is_primary_key {
                 let qname = quote_identifier(&c.name, target_db);
@@ -3313,7 +3313,7 @@ fn generate_upsert_typed_for_transfer(
 fn max_transfer_write_rows(db_type: &DatabaseType, mode: &TransferMode) -> usize {
     match (db_type, mode) {
         (DatabaseType::SqlServer, TransferMode::Append | TransferMode::Overwrite) => MAX_SQLSERVER_INSERT_ROWS,
-        (DatabaseType::Hive, _) => 500,
+        (DatabaseType::Hive | DatabaseType::Impala, _) => 500,
         (DatabaseType::Oracle, TransferMode::Append | TransferMode::Overwrite) => MAX_ORACLE_INSERT_ALL_ROWS,
         (DatabaseType::Oracle, TransferMode::Upsert) => MAX_ORACLE_MERGE_ROWS,
         _ => usize::MAX,
@@ -6688,7 +6688,7 @@ where
     }
 
     let target_columns = if (request.mode == TransferMode::Upsert
-        && !matches!(target_db_type, DatabaseType::ClickHouse | DatabaseType::Hive))
+        && !matches!(target_db_type, DatabaseType::ClickHouse | DatabaseType::Hive | DatabaseType::Impala))
         || matches!(target_db_type, DatabaseType::Postgres | DatabaseType::Dameng)
     {
         get_columns_for_transfer(
@@ -6708,7 +6708,7 @@ where
 
     // Determine effective mode and PK columns for upsert
     let (effective_mode, pk_columns) = if request.mode == TransferMode::Upsert {
-        if matches!(target_db_type, DatabaseType::ClickHouse | DatabaseType::Hive) {
+        if matches!(target_db_type, DatabaseType::ClickHouse | DatabaseType::Hive | DatabaseType::Impala) {
             log::warn!("[transfer] upsert not supported for {:?}, falling back to append", target_db_type);
             (TransferMode::Append, vec![])
         } else {
@@ -9217,6 +9217,33 @@ mod tests {
             map_column_type("timestamp with time zone", &DatabaseType::Postgres, &DatabaseType::Hive),
             "TIMESTAMP"
         );
+    }
+
+    #[test]
+    fn impala_transfer_uses_impala_compatible_ddl_and_batches() {
+        let cols = vec![
+            db::ColumnInfo { is_primary_key: true, is_nullable: false, ..test_column("id", "bigint") },
+            db::ColumnInfo { is_nullable: false, ..test_column("payload", "jsonb") },
+        ];
+
+        let ddl = generate_create_table_ddl(
+            &cols,
+            "events",
+            "public",
+            "warehouse",
+            &DatabaseType::Impala,
+            &DatabaseType::Postgres,
+            None,
+            None,
+        );
+
+        assert!(ddl.contains("CREATE TABLE IF NOT EXISTS `warehouse`.`events`"));
+        assert!(ddl.contains("`id` BIGINT"));
+        assert!(ddl.contains("`payload` STRING"));
+        assert!(!ddl.contains("PRIMARY KEY"));
+        assert!(!ddl.contains("NOT NULL"));
+        assert_eq!(max_transfer_write_rows(&DatabaseType::Impala, &TransferMode::Append), 500);
+        assert_eq!(max_transfer_write_rows(&DatabaseType::Impala, &TransferMode::Upsert), 500);
     }
 
     #[test]

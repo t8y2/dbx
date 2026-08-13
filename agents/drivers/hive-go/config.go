@@ -24,6 +24,7 @@ const (
 	defaultHiveDatabase        = "default"
 	defaultHiveHTTPPath        = "cliservice"
 	defaultHiveService         = "hive"
+	defaultImpalaService       = "impala"
 	defaultZooKeeperNamespace  = "hiveserver2"
 	resultSetUniqueColumnNames = "hive.resultset.use.unique.column.names"
 	defaultConnectTimeout      = 15 * time.Second
@@ -47,6 +48,7 @@ type connectParams struct {
 	ConnectTimeout   int      `json:"connect_timeout_secs"`
 	AgentJavaOptions []string `json:"agent_java_options"`
 	SessionRole      string   `json:"sessionRole"`
+	DatabaseType     string   `json:"database_type"`
 }
 
 type endpoint struct {
@@ -95,6 +97,7 @@ type zooKeeperKerberosConfig struct {
 }
 
 type connectionConfig struct {
+	DatabaseType           string
 	Endpoints              []endpoint
 	Database               string
 	Username               string
@@ -138,6 +141,7 @@ type connectionConfig struct {
 
 func parseConnectionConfig(params connectParams) (connectionConfig, error) {
 	config := connectionConfig{
+		DatabaseType:           strings.ToLower(strings.TrimSpace(params.DatabaseType)),
 		Database:               strings.TrimSpace(params.Database),
 		Username:               params.Username,
 		Password:               params.Password,
@@ -164,6 +168,10 @@ func parseConnectionConfig(params connectParams) (connectionConfig, error) {
 			QOP:               "auth",
 			CanonicalHostname: true,
 		},
+	}
+	if strings.EqualFold(params.DatabaseType, "impala") {
+		config.Auth = "NOSASL"
+		config.Kerberos.Service = defaultImpalaService
 	}
 	if config.Database == "" {
 		config.Database = defaultHiveDatabase
@@ -596,7 +604,7 @@ func applyHiveParameters(config *connectionConfig, values, hiveConfs map[string]
 		parameter(values, "clientprincipal"),
 		parameter(values, "userprincipal"),
 	)
-	kerberos.Service = firstNonEmpty(parameter(values, "service"), serviceFromPrincipal(kerberos.ServerPrincipal), defaultHiveService)
+	kerberos.Service = firstNonEmpty(parameter(values, "service"), serviceFromPrincipal(kerberos.ServerPrincipal), kerberos.Service)
 	kerberos.ServerName = parameter(values, "servername")
 	kerberos.Realm = firstNonEmpty(parameter(values, "realm"), realmFromPrincipal(kerberos.ClientPrincipal))
 	kerberos.ConfigPath = firstNonEmpty(parameter(values, "krb5conf"), parameter(values, "kerberosconfig"))

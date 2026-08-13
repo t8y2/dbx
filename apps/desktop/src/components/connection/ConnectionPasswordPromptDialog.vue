@@ -31,7 +31,7 @@ watch(
 );
 
 function submit() {
-  if (resolving.value || !password.value) return;
+  if (resolving.value) return;
   resolving.value = true;
   promptStore.submit(password.value, rememberPassword.value);
 }
@@ -67,7 +67,7 @@ function cancel() {
         <Button variant="outline" :disabled="resolving" @click="cancel">
           {{ t("connection.promptPasswordCancel") }}
         </Button>
-        <Button :disabled="resolving || !password" @click="submit">
+        <Button :disabled="resolving" @click="submit">
           {{ t("connection.promptPasswordSubmit") }}
         </Button>
       </DialogFooter>

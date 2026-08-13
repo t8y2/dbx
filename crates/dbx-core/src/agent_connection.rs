@@ -110,6 +110,7 @@ pub fn agent_connect_params_with_role(
         "jdbc_driver_class": agent_jdbc_driver_class(config),
         "jdbc_driver_paths": &config.jdbc_driver_paths,
         "sessionRole": session_role.as_str(),
+        "database_type": config.db_type,
     });
     if config.db_type == DatabaseType::ZooKeeper {
         params["connection_timeout_ms"] = serde_json::json!(
@@ -700,6 +701,7 @@ mod tests {
     fn agent_connect_params_default_to_workload_session_role() {
         let params = agent_connect_params(&config(DatabaseType::H2, Some("test")), "127.0.0.1", 9092, "test");
         assert_eq!(params["sessionRole"], "workload");
+        assert_eq!(params["database_type"], "h2");
     }
 
     #[test]

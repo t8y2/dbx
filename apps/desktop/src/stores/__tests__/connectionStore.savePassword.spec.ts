@@ -130,6 +130,62 @@ describe("connectionStore save_password opt-out", () => {
     expect(store.getConfig("pg-1")?.password).toBe("");
   });
 
+  it("connects with an explicitly submitted empty password", async () => {
+    installApiMocks();
+    installPasswordPromptMock();
+    requestPassword.mockResolvedValue({ password: "", rememberPassword: false });
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    const connection = postgresConnection({ id: "pg-1", save_password: false, password: "" });
+    store.connections = [connection];
+
+    await store.connect(connection);
+
+    const { connectDb } = await import("@/lib/backend/api");
+    expect(connectDb).toHaveBeenCalledWith(expect.objectContaining({ id: "pg-1", password: "" }), expect.any(Number));
+    expect(store.getConfig("pg-1")).toEqual(expect.objectContaining({ password: "", save_password: false }));
+  });
+
+  it("connects to NOSASL Impala without prompting for an empty password", async () => {
+    installApiMocks();
+    installPasswordPromptMock();
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    const connection = postgresConnection({
+      id: "impala-1",
+      name: "Impala",
+      db_type: "impala",
+      port: 21050,
+      username: "",
+      password: "",
+      save_password: false,
+      url_params: "auth=noSasl",
+    });
+    store.connections = [connection];
+
+    await store.connect(connection);
+
+    expect(requestPassword).not.toHaveBeenCalled();
+    const { connectDb } = await import("@/lib/backend/api");
+    expect(connectDb).toHaveBeenCalledWith(expect.objectContaining({ id: "impala-1", password: "", save_password: false }), expect.any(Number));
+  });
+
+  it("remembers an explicitly submitted empty password", async () => {
+    installApiMocks();
+    installPasswordPromptMock();
+    requestPassword.mockResolvedValue({ password: "", rememberPassword: true });
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    const connection = postgresConnection({ id: "pg-1", save_password: false, password: "" });
+    store.connections = [connection];
+
+    await store.connect(connection);
+
+    const { saveConnections } = await import("@/lib/backend/api");
+    expect(saveConnections).toHaveBeenLastCalledWith(expect.arrayContaining([expect.objectContaining({ id: "pg-1", password: "", save_password: true })]));
+    expect(store.getConfig("pg-1")).toEqual(expect.objectContaining({ password: "", save_password: true }));
+  });
+
   it("connect cancels when the prompt is dismissed", async () => {
     installApiMocks();
     installPasswordPromptMock();

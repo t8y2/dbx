@@ -197,6 +197,13 @@ const AGENT_CATALOG: &[AgentCatalogEntry] = &[
         profiles: &[],
     },
     AgentCatalogEntry {
+        db_type: DatabaseType::Impala,
+        key: "hive",
+        label: "Apache Impala",
+        store_visible: false,
+        profiles: &[],
+    },
+    AgentCatalogEntry {
         db_type: DatabaseType::Spark,
         key: "spark",
         label: "Apache Spark",
@@ -396,5 +403,11 @@ mod tests {
         assert!(driver_store_entries().any(|(key, label)| key == "duckdb" && label == "DuckDB"));
         assert_eq!(label_for_key("duckdb"), Some("DuckDB"));
         assert!(!is_agent_type(&DatabaseType::DuckDb));
+    }
+
+    #[test]
+    fn impala_reuses_hive_agent_without_duplicate_store_entry() {
+        assert_eq!(agent_key(&DatabaseType::Impala, None), Some("hive"));
+        assert_eq!(driver_store_entries().filter(|(key, _)| *key == "hive").count(), 1);
     }
 }

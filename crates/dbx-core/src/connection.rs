@@ -185,6 +185,7 @@ macro_rules! agent_connection_pool_database_type {
             | DatabaseType::Snowflake
             | DatabaseType::Trino
             | DatabaseType::Hive
+            | DatabaseType::Impala
             | DatabaseType::Spark
             | DatabaseType::Db2
             | DatabaseType::Informix

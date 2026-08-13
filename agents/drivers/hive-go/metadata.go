@@ -197,6 +197,14 @@ func (server *server) connectionInfo() (map[string]any, error) {
 			username = current
 		}
 	}
+	productName := "Apache Hive"
+	compatibilityMode := "hive"
+	driverName := "DBX Hive Go Agent"
+	if strings.EqualFold(server.params.DatabaseType, "impala") || strings.Contains(strings.ToLower(version), "impalad version") {
+		productName = "Apache Impala"
+		compatibilityMode = "impala"
+		driverName = "DBX Impala Go Agent"
+	}
 	return map[string]any{
 		"database":          server.config.Database,
 		"schema":            server.config.Database,
@@ -204,13 +212,13 @@ func (server *server) connectionInfo() (map[string]any, error) {
 		"version":           version,
 		"sqlDialect":        "HIVE",
 		"identifierQuote":   "`",
-		"compatibilityMode": "hive",
+		"compatibilityMode": compatibilityMode,
 		"databaseInfo": map[string]string{
-			"productName":            "Apache Hive",
+			"productName":            productName,
 			"productVersion":         version,
 			"unquotedIdentifierCase": "mixed",
 			"quotedIdentifierCase":   "mixed",
-			"driverName":             "DBX Hive Go Agent",
+			"driverName":             driverName,
 			"driverVersion":          "gohive-v2.1.0",
 		},
 	}, nil

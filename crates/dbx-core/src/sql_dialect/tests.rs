@@ -4,11 +4,13 @@ use crate::models::connection::DatabaseType;
 #[test]
 fn transfer_identifier_policy_preserves_legacy_output() {
     assert_eq!(quote_transfer_identifier("user`events", &DatabaseType::Hive), "`user``events`");
+    assert_eq!(quote_transfer_identifier("user`events", &DatabaseType::Impala), "`user``events`");
     assert_eq!(quote_transfer_identifier("user`events", &DatabaseType::ClickHouse), "`user``events`");
     assert_eq!(quote_transfer_identifier("user`events", &DatabaseType::Doris), "`user``events`");
     assert_eq!(quote_transfer_identifier("user]events", &DatabaseType::SqlServer), "[user]]events]");
     assert_eq!(quote_transfer_identifier("user\"events", &DatabaseType::Postgres), "\"user\"\"events\"");
     assert_eq!(qualified_transfer_table("events", "warehouse", &DatabaseType::Hive, None), "`warehouse`.`events`");
+    assert_eq!(qualified_transfer_table("events", "warehouse", &DatabaseType::Impala, None), "`warehouse`.`events`");
     assert_eq!(qualified_transfer_table("events", "warehouse", &DatabaseType::Mysql, None), "`events`");
 }
 
@@ -247,6 +249,17 @@ fn builds_select_sql_with_limit_syntax_for_database_type() {
     );
     assert_eq!(
         build_table_select_sql(TableSelectSqlOptions {
+            database_type: Some(DatabaseType::Impala),
+            schema: Some("dbx_demo"),
+            table_name: "connection_test",
+            columns: &[],
+            order_columns: &[],
+            limit: 100,
+        }),
+        "SELECT * FROM `dbx_demo`.`connection_test` LIMIT 100;"
+    );
+    assert_eq!(
+        build_table_select_sql(TableSelectSqlOptions {
             database_type: Some(DatabaseType::StarRocks),
             schema: None,
             table_name: "sales_report",
@@ -339,6 +352,24 @@ fn builds_table_data_where_and_schema_queries() {
             ..Default::default()
         }),
         "SELECT * FROM \"public\".\"orders\" WHERE (amount > 10) LIMIT 50 OFFSET 100;"
+    );
+    assert_eq!(
+        build_table_data_select_sql(TableDataSelectSqlOptions {
+            database_type: Some(DatabaseType::Impala),
+            schema: Some("dbx_demo".to_string()),
+            table_name: "connection_test".to_string(),
+            table_type: Some("TABLE".to_string()),
+            primary_keys: Vec::new(),
+            columns: vec!["id".to_string(), "name".to_string()],
+            fallback_order_columns: Vec::new(),
+            order_by: None,
+            limit: Some(2),
+            offset: Some(1),
+            where_input: None,
+            include_row_id: false,
+            ..Default::default()
+        }),
+        "SELECT `id` AS `id`, `name` AS `name` FROM `dbx_demo`.`connection_test` ORDER BY 1 LIMIT 2 OFFSET 1;"
     );
     assert_eq!(
         build_table_data_select_sql(TableDataSelectSqlOptions {

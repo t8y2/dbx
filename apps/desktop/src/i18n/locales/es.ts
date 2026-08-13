@@ -449,7 +449,7 @@ export default withEnglishFallback({
     disconnectAndForgetPassword: "Desconectar y olvidar la contraseña",
     passwordForgotten: "Contraseña olvidada. La próxima conexión la solicitará de nuevo.",
     promptPasswordTitle: "Introducir contraseña",
-    promptPasswordMessage: "Introduzca la contraseña de la conexión “{connection}”.",
+    promptPasswordMessage: "Introduzca la contraseña de la conexión “{connection}”. Si está vacía, conéctese directamente.",
     promptPasswordPlaceholder: "Contraseña",
     promptPasswordSubmit: "Conectar",
     promptPasswordCancel: "Cancelar",

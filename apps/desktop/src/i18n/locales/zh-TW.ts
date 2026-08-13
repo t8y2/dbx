@@ -449,7 +449,7 @@ export default withEnglishFallback({
     disconnectAndForgetPassword: "中斷連線並忘記本次密碼",
     passwordForgotten: "已忘記密碼，下次連線需重新輸入。",
     promptPasswordTitle: "輸入密碼",
-    promptPasswordMessage: "請輸入連線「{connection}」的密碼。",
+    promptPasswordMessage: "請輸入連線「{connection}」的密碼；若密碼為空，可直接連線",
     promptPasswordPlaceholder: "密碼",
     promptPasswordSubmit: "連線",
     promptPasswordCancel: "取消",

@@ -30,6 +30,10 @@ describe("dataGridRuntime", () => {
     expect(dataGridSource).toContain(":title=\"t('grid.queryError')\"");
   });
 
+  it("redraws canvas rows when multiline flattening changes", () => {
+    expect(dataGridSource).toContain("watch(flatteningMultiLineEnabled, () => scheduleCanvasDraw());");
+  });
+
   it("disposes registered resources in reverse order and only once", () => {
     const scope = createDataGridRuntimeScope();
     const calls: string[] = [];

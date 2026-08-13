@@ -190,30 +190,12 @@ describe("SubscriptionsPanel message peek", () => {
     await flushUi();
 
     second.resolve({
-      messages: [
-        {
-          position: 1,
-          messageId: "new",
-          payloadBase64: "",
-          payloadText: "payments message",
-          properties: {},
-          headers: {},
-        },
-      ],
+      messages: [{ position: 1, messageId: "new", payloadBase64: "", payloadText: "payments message", properties: {}, headers: {} }],
       incomplete: false,
     });
     await flushUi();
     first.resolve({
-      messages: [
-        {
-          position: 1,
-          messageId: "old",
-          payloadBase64: "",
-          payloadText: "orders message",
-          properties: {},
-          headers: {},
-        },
-      ],
+      messages: [{ position: 1, messageId: "old", payloadBase64: "", payloadText: "orders message", properties: {}, headers: {} }],
       incomplete: false,
     });
     await flushUi();
@@ -256,7 +238,12 @@ describe("SubscriptionsPanel Kafka absolute offset reset", () => {
     buttonWithExactText(panel, "mqSubscriptions.reset").click();
     await flushUi();
 
-    expect(backend.mqResetCursor).toHaveBeenCalledWith("mq-1", expect.objectContaining({ topic: "events" }), "orders-consumer", { kind: "partitionOffset", partition: 1, offset: 42 });
+    expect(backend.mqResetCursor).toHaveBeenCalledWith(
+      "mq-1",
+      expect.objectContaining({ topic: "events" }),
+      "orders-consumer",
+      { kind: "partitionOffset", partition: 1, offset: 42 },
+    );
   });
 
   it.each([

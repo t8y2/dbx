@@ -27,14 +27,7 @@ import {
 
 describe("tableStructureEditorState", () => {
   it("keeps existing Oracle trigger drafts read-only until full source editing is available", () => {
-    const [existing] = createTriggerDrafts([
-      {
-        name: "ORDERS_AUDIT",
-        timing: "AFTER EACH ROW",
-        event: "INSERT OR UPDATE",
-        statement: "BEGIN NULL; END;",
-      },
-    ]);
+    const [existing] = createTriggerDrafts([{ name: "ORDERS_AUDIT", timing: "AFTER EACH ROW", event: "INSERT OR UPDATE", statement: "BEGIN NULL; END;" }]);
     if (!existing) throw new Error("expected an existing trigger draft");
 
     expect(canEditStructuredTriggerDraft("oracle", existing)).toBe(false);
@@ -279,16 +272,7 @@ describe("tableStructureEditorState", () => {
 
   it("keeps a saved Oracle length unit when refreshed metadata omits it", () => {
     const [legacyAgentDraft] = createColumnDrafts(
-      [
-        {
-          name: "DISPLAY_NAME",
-          data_type: "VARCHAR2(255)",
-          is_nullable: true,
-          column_default: null,
-          is_primary_key: false,
-          extra: null,
-        },
-      ],
+      [{ name: "DISPLAY_NAME", data_type: "VARCHAR2(255)", is_nullable: true, column_default: null, is_primary_key: false, extra: null }],
       "oracle",
     );
 

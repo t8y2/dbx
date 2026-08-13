@@ -426,6 +426,39 @@ final class DbxJdbcPluginTest {
     }
 
     @Test
+    void readValueConvertsGaussDbBooleanBytesWithoutCollapsingMultiBitValues() throws Exception {
+        Method method = DbxJdbcPlugin.class.getDeclaredMethod(
+            "readValue",
+            ResultSet.class,
+            ResultSetMetaData.class,
+            int.class,
+            boolean.class
+        );
+        method.setAccessible(true);
+
+        assertEquals(true, method.invoke(null, objectResultSet(new byte[] { 't' }), columnMeta(Types.BIT), 1, false));
+        assertEquals(false, method.invoke(null, objectResultSet(new byte[] { 'f' }), columnMeta(Types.BIT), 1, false));
+        assertEquals(null, method.invoke(null, objectResultSet(null), columnMeta(Types.BIT), 1, false));
+        assertEquals("0x0102", method.invoke(null, objectResultSet(new byte[] { 1, 2 }), columnMeta(Types.BIT), 1, false));
+    }
+
+    @Test
+    void readValueUsesJdbcBooleanAccessForBooleanColumns() throws Exception {
+        Method method = DbxJdbcPlugin.class.getDeclaredMethod(
+            "readValue",
+            ResultSet.class,
+            ResultSetMetaData.class,
+            int.class,
+            boolean.class
+        );
+        method.setAccessible(true);
+
+        assertEquals(true, method.invoke(null, booleanResultSet(true), columnMeta(Types.BOOLEAN), 1, false));
+        assertEquals(false, method.invoke(null, booleanResultSet(false), columnMeta(Types.BOOLEAN), 1, false));
+        assertEquals(null, method.invoke(null, booleanResultSet(null), columnMeta(Types.BOOLEAN), 1, false));
+    }
+
+    @Test
     void executeQueryPreservesOracleDateTimeComponent() throws Exception {
         List<String> calls = new ArrayList<>();
         Driver driver = new OracleDateDriver(
@@ -2188,6 +2221,29 @@ final class DbxJdbcPluginTest {
                     case "getColumnType" -> columnType;
                     default -> defaultValue(method.getReturnType());
                 };
+            }
+        );
+    }
+
+    private static ResultSet objectResultSet(Object value) {
+        return (ResultSet) Proxy.newProxyInstance(
+            DbxJdbcPluginTest.class.getClassLoader(),
+            new Class<?>[] { ResultSet.class },
+            (proxy, method, args) -> switch (method.getName()) {
+                case "getObject" -> value;
+                default -> defaultValue(method.getReturnType());
+            }
+        );
+    }
+
+    private static ResultSet booleanResultSet(Boolean value) {
+        return (ResultSet) Proxy.newProxyInstance(
+            DbxJdbcPluginTest.class.getClassLoader(),
+            new Class<?>[] { ResultSet.class },
+            (proxy, method, args) -> switch (method.getName()) {
+                case "getBoolean" -> Boolean.TRUE.equals(value);
+                case "wasNull" -> value == null;
+                default -> defaultValue(method.getReturnType());
             }
         );
     }

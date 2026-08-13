@@ -3028,10 +3028,7 @@ public final class DbxJdbcPlugin {
     ) throws SQLException {
         int columnType = meta.getColumnType(index);
 
-        // GaussDB M-mode JDBC driver may return boolean columns as byte[]
-        // (0x74 for true, 0x66 for false) instead of java.lang.Boolean.
-        // Use rs.getBoolean() for BIT/BOOLEAN columns to get the correct value.
-        if (columnType == Types.BIT || columnType == Types.BOOLEAN) {
+        if (columnType == Types.BOOLEAN) {
             boolean boolValue = rs.getBoolean(index);
             if (!rs.wasNull()) {
                 return boolValue;
@@ -3044,6 +3041,9 @@ public final class DbxJdbcPlugin {
             return null;
         }
         if (value instanceof byte[] bytes) {
+            if (columnType == Types.BIT && bytes.length == 1 && (bytes[0] == 't' || bytes[0] == 'f')) {
+                return bytes[0] == 't';
+            }
             return binaryToHex(bytes);
         }
         if (value instanceof Clob clob) {

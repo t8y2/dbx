@@ -643,17 +643,13 @@ fn sql_server_derived_pagination_order(statement: &str) -> Option<String> {
         return None;
     }
 
-    let mut column_names = HashSet::with_capacity(select.projection.len());
-    for item in &select.projection {
-        let Some(name) = sql_server_derived_projection_name(item) else {
-            return None;
-        };
-        column_names.insert(name.to_lowercase());
-    }
+    let output_columns =
+        select.projection.iter().map(sql_server_derived_projection_name).collect::<Option<Vec<_>>>()?;
+    let column_names = output_columns.iter().map(|name| name.to_lowercase()).collect::<HashSet<_>>();
 
     let mut parts = Vec::with_capacity(order_by_exprs.len());
     for order_by in order_by_exprs {
-        let Some(column) = sql_server_order_expr_output_column(&order_by.expr, &column_names) else {
+        let Some(column) = sql_server_order_expr_output_column(&order_by.expr, &output_columns, &column_names) else {
             return None;
         };
         let direction = match order_by.options.asc {
@@ -670,10 +666,15 @@ fn sql_server_derived_pagination_order(statement: &str) -> Option<String> {
 
 /// Maps one ORDER BY expression to a reference that stays valid outside the
 /// derived table: output columns by name (case-insensitive, bracket/quoted
-/// identifiers already unquoted by the parser) or positional ordinals.
+/// identifiers already unquoted by the parser) or positional ordinals mapped
+/// to their corresponding output column.
 /// Anything else (functions, unprojected columns, ...) cannot be referenced
 /// from the wrapper and makes the caller fall back to its default ordering.
-fn sql_server_order_expr_output_column(expr: &Expr, column_names: &HashSet<String>) -> Option<String> {
+fn sql_server_order_expr_output_column(
+    expr: &Expr,
+    output_columns: &[&str],
+    column_names: &HashSet<String>,
+) -> Option<String> {
     match expr {
         Expr::Identifier(identifier) => {
             let name = identifier.value.to_lowercase();
@@ -686,7 +687,10 @@ fn sql_server_order_expr_output_column(expr: &Expr, column_names: &HashSet<Strin
             let name = last.value.to_lowercase();
             column_names.contains(&name).then(|| quote_table_identifier(Some(DatabaseType::SqlServer), &last.value))
         }
-        Expr::Value(ValueWithSpan { value: Value::Number(number, _), .. }) => Some(number.clone()),
+        Expr::Value(ValueWithSpan { value: Value::Number(number, _), .. }) => {
+            let ordinal = number.parse::<usize>().ok()?.checked_sub(1)?;
+            output_columns.get(ordinal).map(|name| quote_table_identifier(Some(DatabaseType::SqlServer), name))
+        }
         _ => None,
     }
 }
@@ -2147,7 +2151,39 @@ mod tests {
         assert!(result.ok);
         assert_eq!(
             result.sql.unwrap(),
-            "SELECT TOP (100) * FROM (SELECT top 100 [ID], [Name] FROM [dbo].[_WorkList] ORDER BY 2 DESC) [dbx_page] ORDER BY 2 DESC;"
+            "SELECT TOP (100) * FROM (SELECT top 100 [ID], [Name] FROM [dbo].[_WorkList] ORDER BY 2 DESC) [dbx_page] ORDER BY [Name] DESC;"
+        );
+    }
+
+    #[test]
+    fn paginates_later_sqlserver_top_page_mapping_ordinal_order_to_output_column() {
+        let sql = "SELECT top 100 [ID], [Name] FROM [dbo].[_WorkList] ORDER BY 2 DESC";
+        let result = build_paginated_query_sql(PaginatedQuerySqlOptions {
+            original_sql: sql.to_string(),
+            database_type: Some(DatabaseType::SqlServer),
+            limit: 100,
+            offset: 100,
+        });
+        assert!(result.ok);
+        assert_eq!(
+            result.sql.unwrap(),
+            "SELECT * FROM (SELECT dbx_page_source.*, ROW_NUMBER() OVER (ORDER BY [Name] DESC) AS [__dbx_row_num] FROM (SELECT top 100 [ID], [Name] FROM [dbo].[_WorkList] ORDER BY 2 DESC) dbx_page_source) dbx_page WHERE [__dbx_row_num] > 100 AND [__dbx_row_num] <= 200 ORDER BY [__dbx_row_num];"
+        );
+    }
+
+    #[test]
+    fn paginates_sqlserver_top_clause_falling_back_for_out_of_range_ordinal() {
+        let sql = "SELECT top 100 [ID], [Name] FROM [dbo].[_WorkList] ORDER BY 3 DESC";
+        let result = build_paginated_query_sql(PaginatedQuerySqlOptions {
+            original_sql: sql.to_string(),
+            database_type: Some(DatabaseType::SqlServer),
+            limit: 100,
+            offset: 100,
+        });
+        assert!(result.ok);
+        assert_eq!(
+            result.sql.unwrap(),
+            "SELECT * FROM (SELECT dbx_page_source.*, ROW_NUMBER() OVER (ORDER BY [ID]) AS [__dbx_row_num] FROM (SELECT top 100 [ID], [Name] FROM [dbo].[_WorkList] ORDER BY 3 DESC) dbx_page_source) dbx_page WHERE [__dbx_row_num] > 100 AND [__dbx_row_num] <= 200 ORDER BY [__dbx_row_num];"
         );
     }
 

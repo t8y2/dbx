@@ -248,6 +248,21 @@ BEGIN
 END;
 SELECT 2;`;
 
+const mysqlRoutineWithNestedCaseBlockFixture = `CREATE PROCEDURE p_nested_case()
+BEGIN
+  CASE
+    WHEN active = 1 THEN
+      BEGIN
+        SET @status_code = 1;
+      END;
+    ELSE SET @status_code = 0;
+  END CASE;
+
+  DELETE FROM stale_rows
+  WHERE expires_at < NOW();
+END;
+SELECT 2;`;
+
 const mysqlDelimitedRoutineFixture = `DELIMITER //
 CREATE PROCEDURE sp_insert_random_users(IN p_count INT)
 BEGIN
@@ -358,6 +373,10 @@ describe("splitSqlStatementRanges", () => {
     expect(ranges[0].sql).toContain("SELECT 1;");
     expect(ranges[0].sql).toContain("END IF;");
     expect(ranges[0].sql).not.toMatch(/END;$/);
+  });
+
+  it("closes nested MySQL CASE and BEGIN blocks in their opening order", () => {
+    expect(rangeSqlTexts(splitSqlStatementRanges(mysqlRoutineWithNestedCaseBlockFixture, "mysql"))).toEqual([mysqlRoutineWithNestedCaseBlockFixture.slice(0, mysqlRoutineWithNestedCaseBlockFixture.indexOf("\nSELECT 2;")).replace(/;$/, "").trim(), "SELECT 2"]);
   });
 
   it("does not merge regular MySQL transaction statements as routine blocks", () => {
@@ -1125,6 +1144,10 @@ describe("executableStatementRanges", () => {
 
   it("does not treat a CASE expression ending as the end of a MySQL routine", () => {
     expect(rangeSqlTexts(executableStatementRanges(mysqlRoutineWithCaseExpressionFixture, "mysql"))).toEqual([mysqlRoutineWithCaseExpressionFixture.slice(0, mysqlRoutineWithCaseExpressionFixture.indexOf("\nSELECT 2;")).replace(/;$/, "").trim(), "SELECT 2"]);
+  });
+
+  it("does not split MySQL routine ranges when a CASE branch contains a BEGIN block", () => {
+    expect(rangeSqlTexts(executableStatementRanges(mysqlRoutineWithNestedCaseBlockFixture, "mysql"))).toEqual([mysqlRoutineWithNestedCaseBlockFixture.slice(0, mysqlRoutineWithNestedCaseBlockFixture.indexOf("\nSELECT 2;")).replace(/;$/, "").trim(), "SELECT 2"]);
   });
 
   it("does not expose run targets for statements inside a delimited MySQL routine", () => {

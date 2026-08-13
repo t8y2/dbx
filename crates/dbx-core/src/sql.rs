@@ -1164,14 +1164,19 @@ fn is_mysql_routine_ddl_start(sql: &str) -> bool {
     false
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MysqlRoutineBlockType {
+    Begin,
+    Case,
+}
+
 fn mysql_routine_block_is_complete(sql: &str) -> bool {
     if !starts_with_mysql_routine_block(sql) {
         return false;
     }
 
     let tokens = mysql_routine_tokens(sql);
-    let mut begin_depth = 0usize;
-    let mut case_depth = 0usize;
+    let mut block_stack = Vec::new();
     let mut saw_begin = false;
 
     for (index, token) in tokens.iter().enumerate() {
@@ -1184,7 +1189,7 @@ fn mysql_routine_block_is_complete(sql: &str) -> bool {
                 continue;
             }
             saw_begin = true;
-            begin_depth += 1;
+            block_stack.push(MysqlRoutineBlockType::Begin);
             continue;
         }
         if token.eq_ignore_ascii_case("CASE") {
@@ -1192,27 +1197,25 @@ fn mysql_routine_block_is_complete(sql: &str) -> bool {
             {
                 continue;
             }
-            case_depth += 1;
+            block_stack.push(MysqlRoutineBlockType::Case);
             continue;
         }
         if token.eq_ignore_ascii_case("END") && saw_begin {
             let suffix = next_mysql_routine_word(&tokens, index);
             if suffix.is_some_and(|next| next.eq_ignore_ascii_case("CASE")) {
-                case_depth = case_depth.saturating_sub(1);
+                if block_stack.last() == Some(&MysqlRoutineBlockType::Case) {
+                    block_stack.pop();
+                }
                 continue;
             }
             if suffix.is_some_and(is_mysql_control_block_suffix) {
                 continue;
             }
-            if case_depth > 0 {
-                case_depth -= 1;
-                continue;
-            }
-            begin_depth = begin_depth.saturating_sub(1);
+            block_stack.pop();
         }
     }
 
-    saw_begin && begin_depth == 0 && case_depth == 0 && tokens.last().is_some_and(|token| token == ";")
+    saw_begin && block_stack.is_empty() && tokens.last().is_some_and(|token| token == ";")
 }
 
 fn is_mysql_control_block_suffix(token: &str) -> bool {
@@ -3236,6 +3239,24 @@ SELECT 2;";
             split_sql_statements_for_database(statement, DatabaseType::Mysql),
             vec![
                 "CREATE PROCEDURE p_case_statement()\nBEGIN\n  CASE WHEN active = 1 THEN SELECT 1; ELSE SELECT 0; END CASE;\n  DELETE FROM stale_rows WHERE expires_at < NOW();\nEND",
+                "SELECT 2",
+            ]
+        );
+    }
+
+    #[test]
+    fn mysql_routine_without_delimiter_closes_nested_case_begin_blocks_in_order() {
+        let sql = "\
+CREATE PROCEDURE p_nested_case()
+BEGIN
+  CASE WHEN active = 1 THEN BEGIN SELECT 1; END; ELSE SELECT 0; END CASE;
+  DELETE FROM stale_rows WHERE expires_at < NOW();
+END;
+SELECT 2;";
+        assert_eq!(
+            split_sql_statements_for_database(sql, DatabaseType::Mysql),
+            vec![
+                "CREATE PROCEDURE p_nested_case()\nBEGIN\n  CASE WHEN active = 1 THEN BEGIN SELECT 1; END; ELSE SELECT 0; END CASE;\n  DELETE FROM stale_rows WHERE expires_at < NOW();\nEND",
                 "SELECT 2",
             ]
         );

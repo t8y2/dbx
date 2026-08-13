@@ -6649,14 +6649,18 @@ function selectExportMenuItem(value: string) {
 }
 
 // --- Cell selection and detail ---
+function hydrateCellDetailTarget(target: { rowIndex: number; col: number }) {
+  const item = displayItemAt(target.rowIndex);
+  if (item && isLargeValuePreview(item, target.col)) void hydrateLargeValueCell(item.id, target.col);
+}
+
 function showCellDetails(rowIndex: number, colIndex: number) {
   closeMongoJsonPreview();
   resetDetailEdit();
   detailCell.value = { rowIndex, col: colIndex };
   activeCellDetailTab.value = defaultCellDetailTab();
   showCellDetail.value = true;
-  const item = displayItemAt(rowIndex);
-  if (item && isLargeValuePreview(item, colIndex)) void hydrateLargeValueCell(item.id, colIndex);
+  hydrateCellDetailTarget(detailCell.value);
 }
 
 function showCellDetailsForVisibleCell(rowIndex: number, visibleColIdx: number, actualColIdx: number) {
@@ -6669,8 +6673,7 @@ function showCellDetailsForVisibleCell(rowIndex: number, visibleColIdx: number, 
 function openCellDetailDialog(rowIndex: number, columnIndex: number) {
   cellDetailDialogTarget.value = { rowIndex, col: columnIndex };
   cellDetailDialogOpen.value = true;
-  const item = displayItemAt(rowIndex);
-  if (item && isLargeValuePreview(item, columnIndex)) void hydrateLargeValueCell(item.id, columnIndex);
+  hydrateCellDetailTarget(cellDetailDialogTarget.value);
 }
 
 function openColumnDetailDialog(columnIndex: number) {
@@ -6807,6 +6810,7 @@ watch([selectedRange, showCellDetail, isEditingDetail, isSelectingCells], () => 
   });
   if (!target) return;
   detailCell.value = target;
+  hydrateCellDetailTarget(target);
 });
 
 function openImagePreview(src: string, title: string) {

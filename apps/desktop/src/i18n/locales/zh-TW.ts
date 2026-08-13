@@ -1022,6 +1022,8 @@ export default withEnglishFallback({
     mqttRefresh: "重新整理",
     mqttPublishDialogTitle: "發布 MQTT 訊息",
     mqttClearMessages: "清除訊息",
+    mqttHidePublishPanel: "隱藏發布區",
+    mqttShowPublishPanel: "顯示發布區",
     mqttNoTopicsHint: "目前沒有訂閱。請使用下方輸入框訂閱 Topic。",
     mqttSubscribePlaceholder: "輸入要訂閱的 Topic 篩選器...",
     mqttMessagesForTopic: "訊息：{topic}",

@@ -1022,6 +1022,8 @@ export default withEnglishFallback({
     mqttRefresh: "更新",
     mqttPublishDialogTitle: "MQTT メッセージを公開",
     mqttClearMessages: "メッセージを消去",
+    mqttHidePublishPanel: "公開パネルを隠す",
+    mqttShowPublishPanel: "公開パネルを表示",
     mqttNoTopicsHint: "購読はありません。下の入力欄からトピックを購読してください。",
     mqttSubscribePlaceholder: "トピックフィルターを入力...",
     mqttMessagesForTopic: "メッセージ: {topic}",

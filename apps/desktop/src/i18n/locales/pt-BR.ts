@@ -1023,6 +1023,8 @@ export default withEnglishFallback({
     mqttRefresh: "Atualizar",
     mqttPublishDialogTitle: "Publicar mensagem MQTT",
     mqttClearMessages: "Limpar mensagens",
+    mqttHidePublishPanel: "Ocultar painel de publicação",
+    mqttShowPublishPanel: "Mostrar painel de publicação",
     mqttNoTopicsHint: "Nenhuma inscrição. Use o campo abaixo para assinar um Topic.",
     mqttSubscribePlaceholder: "Digite um filtro de Topic...",
     mqttMessagesForTopic: "Mensagens: {topic}",

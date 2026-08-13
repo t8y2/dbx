@@ -717,6 +717,8 @@ export default withEnglishFallback({
     mqttRefresh: "刷新",
     mqttPublishDialogTitle: "发布 MQTT 消息",
     mqttClearMessages: "清空消息",
+    mqttHidePublishPanel: "隐藏发布区",
+    mqttShowPublishPanel: "显示发布区",
     mqttNoTopicsHint: "暂无订阅。使用下方输入框订阅 Topic。",
     mqttSubscribePlaceholder: "输入要订阅的 Topic...",
     mqttMessagesForTopic: "消息：{topic}",

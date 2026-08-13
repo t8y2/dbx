@@ -792,6 +792,8 @@ export default {
     mqttRefresh: "Refresh",
     mqttPublishDialogTitle: "Publish MQTT Message",
     mqttClearMessages: "Clear messages",
+    mqttHidePublishPanel: "Hide publish panel",
+    mqttShowPublishPanel: "Show publish panel",
     mqttNoTopicsHint: "No subscriptions. Use the field below to subscribe to a topic.",
     mqttSubscribePlaceholder: "Enter a topic filter...",
     mqttMessagesForTopic: "Messages: {topic}",

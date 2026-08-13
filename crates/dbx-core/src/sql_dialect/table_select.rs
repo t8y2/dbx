@@ -12,6 +12,131 @@ use super::types::{
     DBX_TDENGINE_TBNAME_COLUMN,
 };
 
+pub const DBX_LARGE_VALUE_BYTES_COLUMN_PREFIX: &str = "__DBX_LARGE_VALUE_BYTES_";
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LargeValuePreviewKind {
+    Text,
+    Binary,
+    TextCast,
+    Vector,
+}
+
+fn large_value_marker_alias_kind(kind: LargeValuePreviewKind, data_type: &str) -> &'static str {
+    match kind {
+        LargeValuePreviewKind::Binary => "B",
+        LargeValuePreviewKind::Vector => "V",
+        LargeValuePreviewKind::TextCast => match normalized_data_type_base(data_type).as_str() {
+            "json" => "J",
+            "jsonb" => "K",
+            "tsvector" => "S",
+            _ => "T",
+        },
+        LargeValuePreviewKind::Text => "T",
+    }
+}
+
+fn normalized_data_type_base(data_type: &str) -> String {
+    data_type.trim().split(['(', '[']).next().unwrap_or_default().trim().to_ascii_lowercase()
+}
+
+fn large_value_preview_kind(database_type: Option<DatabaseType>, data_type: &str) -> Option<LargeValuePreviewKind> {
+    let normalized = data_type.trim().to_ascii_lowercase();
+    let base = normalized_data_type_base(data_type);
+    match database_type {
+        Some(DatabaseType::Mysql) => {
+            if matches!(base.as_str(), "binary" | "varbinary" | "tinyblob" | "blob" | "mediumblob" | "longblob") {
+                Some(LargeValuePreviewKind::Binary)
+            } else if base == "json" {
+                Some(LargeValuePreviewKind::TextCast)
+            } else if matches!(base.as_str(), "char" | "varchar" | "tinytext" | "text" | "mediumtext" | "longtext") {
+                Some(LargeValuePreviewKind::Text)
+            } else {
+                None
+            }
+        }
+        Some(DatabaseType::Postgres) => {
+            if base == "bytea" {
+                Some(LargeValuePreviewKind::Binary)
+            } else if matches!(base.as_str(), "char" | "character" | "varchar" | "text" | "citext" | "name" | "xml")
+                || normalized.starts_with("character varying")
+            {
+                Some(LargeValuePreviewKind::Text)
+            } else if base == "vector" {
+                Some(LargeValuePreviewKind::Vector)
+            } else if matches!(base.as_str(), "json" | "jsonb" | "tsvector") {
+                Some(LargeValuePreviewKind::TextCast)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+fn build_large_value_preview_columns(options: &TableDataSelectSqlOptions) -> Option<String> {
+    let database_type = options.database_type;
+    let preview_size = options.large_value_preview_size?.max(1);
+    if options.columns.is_empty()
+        || options.columns.len() != options.column_types.len()
+        || options.primary_keys.is_empty()
+        || options
+            .columns
+            .iter()
+            .any(|column| column.to_ascii_uppercase().starts_with(DBX_LARGE_VALUE_BYTES_COLUMN_PREFIX))
+    {
+        return None;
+    }
+
+    let protected: std::collections::HashSet<String> =
+        options.primary_keys.iter().map(|column| column.to_ascii_lowercase()).collect();
+    let mut projections = Vec::with_capacity(options.columns.len() * 2);
+    let mut marker_count = 0;
+    for (column_index, (column, data_type)) in options.columns.iter().zip(&options.column_types).enumerate() {
+        let quoted = if uses_connection_identifier_quote(database_type, options.identifier_quote.as_deref()) {
+            quote_table_data_identifier(database_type, column, options.identifier_quote.as_deref())
+        } else {
+            quote_table_identifier(database_type, column)
+        };
+        let kind = (!protected.contains(&column.to_ascii_lowercase()))
+            .then(|| large_value_preview_kind(database_type, data_type))
+            .flatten();
+        let Some(kind) = kind else {
+            projections.push(quoted);
+            continue;
+        };
+
+        let alias_kind = large_value_marker_alias_kind(kind, data_type);
+        let marker_alias = quote_table_identifier(
+            database_type,
+            &format!("{DBX_LARGE_VALUE_BYTES_COLUMN_PREFIX}{alias_kind}_{column_index}"),
+        );
+        let prefix_size = preview_size.saturating_add(1);
+        let (preview, marker_kind) = match database_type {
+            Some(DatabaseType::Mysql) if kind == LargeValuePreviewKind::Binary => {
+                (format!("LEFT({quoted}, {prefix_size}) AS {quoted}"), "B")
+            }
+            Some(DatabaseType::Mysql) => (format!("LEFT({quoted}, {prefix_size}) AS {quoted}"), "T"),
+            Some(DatabaseType::Postgres) if kind == LargeValuePreviewKind::Binary => {
+                (format!("substring({quoted} from 1 for {prefix_size}) AS {quoted}"), "B")
+            }
+            Some(DatabaseType::Postgres) if kind == LargeValuePreviewKind::TextCast => {
+                (format!("left({quoted}::text, {prefix_size}) AS {quoted}"), "T")
+            }
+            Some(DatabaseType::Postgres) if kind == LargeValuePreviewKind::Vector => {
+                (format!("left({quoted}::text, {prefix_size}) AS {quoted}"), "V")
+            }
+            Some(DatabaseType::Postgres) => (format!("left({quoted}, {prefix_size}) AS {quoted}"), "T"),
+            _ => return None,
+        };
+        let marker = format!("'{marker_kind}:{preview_size}' AS {marker_alias}");
+        projections.push(preview);
+        projections.push(marker);
+        marker_count += 1;
+    }
+    (marker_count > 0).then(|| projections.join(", "))
+}
+
 pub fn build_count_table_sql(database_type: Option<DatabaseType>, schema: Option<&str>, table_name: &str) -> String {
     if database_type == Some(DatabaseType::VictoriaMetrics) {
         return format!("count({})", victoriametrics_metric_selector(table_name));
@@ -77,6 +202,8 @@ pub fn build_table_data_select_sql(options: TableDataSelectSqlOptions) -> String
 
     let select_columns = if include_oracle_row_id {
         format!("ROWIDTOCHAR(t.ROWID) AS \"{DBX_ROWID_COLUMN}\", t.*")
+    } else if let Some(preview_columns) = build_large_value_preview_columns(&options) {
+        preview_columns
     } else {
         build_select_columns(
             database_type,
@@ -521,6 +648,8 @@ mod tests {
             table_type: None,
             primary_keys: Vec::new(),
             columns: Vec::new(),
+            column_types: Vec::new(),
+            large_value_preview_size: None,
             fallback_order_columns: Vec::new(),
             order_by: None,
             limit: Some(10),

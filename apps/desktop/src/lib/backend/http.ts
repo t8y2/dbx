@@ -929,6 +929,7 @@ export async function executeMulti(
     pageSize?: number;
     maxResultBytes?: number;
     resultKeyColumns?: string[];
+    tableDataPreview?: boolean;
     resultSessionId?: string;
     clientSessionId?: string;
     timeoutSecs?: number;
@@ -971,6 +972,7 @@ export async function executeMultiWithProgress(
     pageSize?: number;
     maxResultBytes?: number;
     resultKeyColumns?: string[];
+    tableDataPreview?: boolean;
     resultSessionId?: string;
     clientSessionId?: string;
     timeoutSecs?: number;

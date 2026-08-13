@@ -1,8 +1,63 @@
 import { describe, expect, it } from "vitest";
-import { appendLargeValueCells, largeValueCellMap, remapLargeValueCells } from "@/lib/dataGrid/dataGridLargeValues";
+import {
+  appendLargeValueCells,
+  canUseTableDataLargeValuePreview,
+  largeValueCellMap,
+  remapLargeValueCells,
+  TABLE_DATA_CELL_PREVIEW_MIN_SIZE,
+  TABLE_DATA_CELL_PREVIEW_SIZE,
+  tableDataLargeValuePreviewOptions,
+} from "@/lib/dataGrid/dataGridLargeValues";
 import { buildDataGridCellDetail } from "@/lib/dataGrid/dataGridDetail";
+import type { ColumnInfo } from "@/types/database";
+
+function column(name: string, dataType: string, isPrimaryKey = false): ColumnInfo {
+  return {
+    name,
+    data_type: dataType,
+    is_nullable: false,
+    column_default: null,
+    is_primary_key: isPrimaryKey,
+    extra: null,
+  };
+}
 
 describe("data grid large-value metadata", () => {
+  it("enables bounded table previews only for supported databases with stable keys", () => {
+    const columns = [column("id", "bigint", true), column("payload", "longtext")];
+
+    expect(tableDataLargeValuePreviewOptions("mysql", columns, ["id"], 100)).toEqual({
+      columnTypes: ["bigint", "longtext"],
+      largeValuePreviewSize: TABLE_DATA_CELL_PREVIEW_SIZE,
+    });
+    expect(tableDataLargeValuePreviewOptions("postgres", columns, ["id"], 100)).toEqual({
+      columnTypes: ["bigint", "longtext"],
+      largeValuePreviewSize: TABLE_DATA_CELL_PREVIEW_SIZE,
+    });
+    expect(tableDataLargeValuePreviewOptions("sqlite", columns, ["id"], 100)).toEqual({});
+    expect(tableDataLargeValuePreviewOptions("mysql", columns, [], 100)).toEqual({});
+    expect(tableDataLargeValuePreviewOptions("mysql", [columns[0]!], ["id"], 100)).toEqual({});
+  });
+
+  it("disables marker parsing when a real column uses the reserved preview prefix", () => {
+    const columns = [
+      column("id", "bigint", true),
+      column("__dbx_large_value_bytes_t_0", "text"),
+    ];
+
+    expect(canUseTableDataLargeValuePreview("postgres", columns, ["id"])).toBe(false);
+    expect(tableDataLargeValuePreviewOptions("postgres", columns, ["id"], 100)).toEqual({});
+  });
+
+  it("shrinks each cell preview to fit many columns and rows without changing page size", () => {
+    const columns = [column("id", "bigint", true), ...Array.from({ length: 256 }, (_, index) => column(`payload_${index}`, "text"))];
+
+    expect(tableDataLargeValuePreviewOptions("postgres", columns, ["ID"], 1_000)).toEqual({
+      columnTypes: columns.map((item) => item.data_type),
+      largeValuePreviewSize: TABLE_DATA_CELL_PREVIEW_MIN_SIZE,
+    });
+  });
+
   it("offsets appended segment rows and discards metadata beyond the append cap", () => {
     expect(
       appendLargeValueCells(

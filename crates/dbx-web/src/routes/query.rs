@@ -24,6 +24,8 @@ pub struct ExecuteQueryRequest {
     pub max_result_bytes: Option<usize>,
     #[serde(default)]
     pub result_key_columns: Vec<String>,
+    #[serde(default)]
+    pub table_data_preview: bool,
     pub result_session_id: Option<String>,
     pub client_session_id: Option<String>,
     pub timeout_secs: Option<u64>,
@@ -362,6 +364,7 @@ pub async fn execute_query(
             page_size: req.page_size,
             max_result_bytes: req.max_result_bytes,
             result_key_columns: req.result_key_columns,
+            table_data_preview: req.table_data_preview,
             catalog: req.catalog,
             result_session_id: req.result_session_id,
             client_session_id: req.client_session_id,
@@ -410,6 +413,7 @@ pub async fn execute_multi(
             page_size: req.page_size,
             max_result_bytes: req.max_result_bytes,
             result_key_columns: req.result_key_columns,
+            table_data_preview: req.table_data_preview,
             catalog: req.catalog,
             result_session_id: req.result_session_id,
             client_session_id: req.client_session_id,

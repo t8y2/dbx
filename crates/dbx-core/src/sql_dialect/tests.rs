@@ -642,6 +642,97 @@ fn builds_table_data_where_and_schema_queries() {
 }
 
 #[test]
+fn builds_mysql_table_data_large_value_previews_without_truncating_keys() {
+    let sql = build_table_data_select_sql(TableDataSelectSqlOptions {
+        database_type: Some(DatabaseType::Mysql),
+        table_name: "large_rows".to_string(),
+        primary_keys: vec!["id".to_string()],
+        columns: vec!["id".to_string(), "payload".to_string(), "raw_value".to_string(), "metadata".to_string()],
+        column_types: vec!["bigint".to_string(), "longtext".to_string(), "longblob".to_string(), "json".to_string()],
+        large_value_preview_size: Some(4096),
+        limit: Some(100),
+        ..Default::default()
+    });
+
+    assert!(sql.starts_with("SELECT `id`, LEFT(`payload`, 4097) AS `payload`"));
+    assert!(sql.contains("'T:4096' AS `__DBX_LARGE_VALUE_BYTES_T_1`"));
+    assert!(sql.contains("LEFT(`raw_value`, 4097) AS `raw_value`"));
+    assert!(sql.contains("'B:4096' AS `__DBX_LARGE_VALUE_BYTES_B_2`"));
+    assert!(sql.contains("LEFT(`metadata`, 4097) AS `metadata`"));
+    assert!(sql.contains("'T:4096' AS `__DBX_LARGE_VALUE_BYTES_J_3`"));
+    assert!(!sql.contains("__DBX_LARGE_VALUE_BYTES_0"));
+}
+
+#[test]
+fn builds_postgres_table_data_large_value_previews() {
+    let sql = build_table_data_select_sql(TableDataSelectSqlOptions {
+        database_type: Some(DatabaseType::Postgres),
+        schema: Some("public".to_string()),
+        table_name: "large_rows".to_string(),
+        primary_keys: vec!["id".to_string()],
+        columns: vec!["id".to_string(), "payload".to_string(), "metadata".to_string()],
+        column_types: vec!["integer".to_string(), "text".to_string(), "jsonb".to_string()],
+        large_value_preview_size: Some(8192),
+        limit: Some(100),
+        ..Default::default()
+    });
+
+    assert!(sql.starts_with("SELECT \"id\", left(\"payload\", 8193) AS \"payload\""));
+    assert!(sql.contains("'T:8192' AS \"__DBX_LARGE_VALUE_BYTES_T_1\""));
+    assert!(sql.contains("left(\"metadata\"::text, 8193) AS \"metadata\""));
+    assert!(sql.contains("'T:8192' AS \"__DBX_LARGE_VALUE_BYTES_K_2\""));
+}
+
+#[test]
+fn builds_pgvector_table_data_preview_with_compatible_text_cast() {
+    let sql = build_table_data_select_sql(TableDataSelectSqlOptions {
+        database_type: Some(DatabaseType::Postgres),
+        schema: Some("public".to_string()),
+        table_name: "embeddings".to_string(),
+        primary_keys: vec!["id".to_string()],
+        columns: vec!["id".to_string(), "embedding".to_string()],
+        column_types: vec!["integer".to_string(), "vector(16000)".to_string()],
+        large_value_preview_size: Some(8192),
+        limit: Some(100),
+        ..Default::default()
+    });
+
+    assert!(sql.contains("left(\"embedding\"::text, 8193) AS \"embedding\""));
+    assert!(sql.contains("'V:8192' AS \"__DBX_LARGE_VALUE_BYTES_V_1\""));
+}
+
+#[test]
+fn table_data_preview_requires_stable_keys_and_parallel_types() {
+    let base = TableDataSelectSqlOptions {
+        database_type: Some(DatabaseType::Postgres),
+        table_name: "large_rows".to_string(),
+        columns: vec!["payload".to_string()],
+        column_types: vec!["text".to_string()],
+        large_value_preview_size: Some(8192),
+        limit: Some(100),
+        ..Default::default()
+    };
+    assert_eq!(build_table_data_select_sql(base.clone()), "SELECT * FROM \"large_rows\" LIMIT 100;");
+    assert_eq!(
+        build_table_data_select_sql(TableDataSelectSqlOptions {
+            primary_keys: vec!["id".to_string()],
+            column_types: Vec::new(),
+            ..base.clone()
+        }),
+        "SELECT * FROM \"large_rows\" LIMIT 100;"
+    );
+    assert_eq!(
+        build_table_data_select_sql(TableDataSelectSqlOptions {
+            primary_keys: vec!["id".to_string()],
+            columns: vec!["id".to_string(), "__dbx_large_value_bytes_t_0".to_string()],
+            column_types: vec!["integer".to_string(), "text".to_string()],
+            ..base
+        }),
+        "SELECT * FROM \"large_rows\" LIMIT 100;"
+    );
+}
+
+#[test]
 fn builds_informix_table_data_with_skip_first_pagination() {
     assert_eq!(
         build_table_data_select_sql(TableDataSelectSqlOptions {

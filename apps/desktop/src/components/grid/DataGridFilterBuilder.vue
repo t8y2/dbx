@@ -30,8 +30,9 @@ const props = withDefaults(
     disabled?: boolean;
     showHeader?: boolean;
     showFooter?: boolean;
+    layout?: "popover" | "panel";
   }>(),
-  { showHeader: true, showFooter: true },
+  { showHeader: true, showFooter: true, layout: "popover" },
 );
 const emit = defineEmits<{
   add: [];
@@ -306,7 +307,7 @@ function blurValueRule(id: string) {
 </script>
 
 <template>
-  <div class="w-fit max-w-full space-y-2" :style="filterBuilderStyle">
+  <div class="w-fit max-w-full space-y-2" :class="props.layout === 'panel' ? '!w-full' : ''" :style="filterBuilderStyle">
     <div v-if="props.showHeader !== false" class="flex items-center justify-between gap-2">
       <div class="text-xs font-medium text-foreground">{{ t("grid.filter") }}</div>
       <Button variant="ghost" size="sm" class="h-7 px-2 text-xs" @click="emit('clear')"> <Trash2 class="mr-1 h-3.5 w-3.5" />{{ t("grid.clearFilter") }} </Button>
@@ -317,7 +318,11 @@ function blurValueRule(id: string) {
         <div v-if="index > 0" class="flex justify-center">
           <Button variant="ghost" size="sm" class="h-5 px-2 text-[11px]" @click="emit('updateRule', rule.id, { conjunction: rule.conjunction === 'AND' ? 'OR' : 'AND' })">{{ rule.conjunction }}</Button>
         </div>
-        <div :ref="(element) => setFilterRuleElement(rule.id, element)" class="grid grid-cols-[var(--filter-builder-column-width)_92px_var(--filter-builder-value-width)_auto] items-center justify-start gap-1.5">
+        <div
+          :ref="(element) => setFilterRuleElement(rule.id, element)"
+          class="grid items-center justify-start gap-1.5"
+          :class="props.layout === 'panel' ? 'grid-cols-[minmax(128px,1fr)_132px_minmax(158px,1.35fr)_auto]' : 'grid-cols-[var(--filter-builder-column-width)_92px_var(--filter-builder-value-width)_auto]'"
+        >
           <Select :model-value="rule.columnName" :open="openColumnSelectIds.has(rule.id)" :disabled="rule.disabled" @update:model-value="(value: any) => updateRuleColumn(rule, value)" @update:open="(open: boolean) => handleColumnSelectOpen(rule, open)">
             <SelectTrigger size="sm" class="h-7 w-full min-w-0 overflow-hidden text-xs [&_[data-slot=select-value]]:min-w-0 [&_[data-slot=select-value]]:truncate">
               <SelectValue v-if="rule.columnName">{{ rule.columnName }}</SelectValue>

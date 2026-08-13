@@ -90,6 +90,7 @@ import DataGridCellDetailPanel from "@/components/grid/DataGridCellDetailPanel.v
 import DataGridColumnHeader from "@/components/grid/DataGridColumnHeader.vue";
 import DataGridCopyColumnNamesDialog from "@/components/grid/DataGridCopyColumnNamesDialog.vue";
 import DataGridFilterBuilder from "@/components/grid/DataGridFilterBuilder.vue";
+import DataGridFilterWorkbench from "@/components/grid/DataGridFilterWorkbench.vue";
 import DataGridPagination from "@/components/grid/DataGridPagination.vue";
 import DataGridQueryControls from "@/components/grid/DataGridQueryControls.vue";
 import DataGridSearchBar from "@/components/grid/DataGridSearchBar.vue";
@@ -730,6 +731,7 @@ describe("DataGridQueryControls", () => {
       compact: false,
       leadingBorder: false,
       filterBuilderOpen: false,
+      filterEditorView: "quick",
       filterButtonActive: false,
       filterButtonCount: 0,
       hasLocalColumnFilters: false,
@@ -772,6 +774,7 @@ describe("DataGridQueryControls", () => {
       compact: false,
       leadingBorder: false,
       filterBuilderOpen: false,
+      filterEditorView: "quick",
       filterButtonActive: true,
       filterButtonCount: 1,
       hasLocalColumnFilters: false,
@@ -807,6 +810,7 @@ describe("DataGridQueryControls", () => {
       compact: false,
       leadingBorder: false,
       filterBuilderOpen: true,
+      filterEditorView: "quick",
       filterButtonActive: false,
       filterButtonCount: 0,
       hasLocalColumnFilters: false,
@@ -841,6 +845,7 @@ describe("DataGridQueryControls", () => {
       compact: false,
       leadingBorder: false,
       filterBuilderOpen: true,
+      filterEditorView: "quick",
       filterButtonActive: true,
       filterButtonCount: 1,
       hasLocalColumnFilters: false,
@@ -885,6 +890,131 @@ describe("DataGridQueryControls", () => {
     expect(clearFilters).toHaveBeenCalledTimes(2);
     expect(resetFilters).toHaveBeenCalledOnce();
     expect(applyFilters).toHaveBeenCalledOnce();
+  });
+
+  it("switches from the default quick view to the persistent conditions view", () => {
+    const updateView = vi.fn();
+    const updateOpen = vi.fn();
+    const mounted = mountComponent(DataGridQueryControls, {
+      whereInput: "",
+      orderByInput: "",
+      columns: ["id"],
+      conditionColumns: ["id"],
+      historyScope: {},
+      canUseWhereSearch: true,
+      compact: false,
+      leadingBorder: false,
+      filterBuilderOpen: true,
+      filterEditorView: "quick",
+      filterButtonActive: false,
+      filterButtonCount: 0,
+      hasLocalColumnFilters: false,
+      localFilterCount: 0,
+      localFilterSummaries: [],
+      rules: [{ id: "r1", columnName: "", mode: "equals", rawValue: "", rawEndValue: "", conjunction: "AND" }],
+      filteredColumns: ["id"],
+      modeOptions: [{ value: "equals", labelKey: "equals" }],
+      columnSearch: "",
+      applyWhere: vi.fn(),
+      applyOrderBy: vi.fn(),
+      clearOrderBy: vi.fn(),
+      "onUpdate:filterEditorView": updateView,
+      "onUpdate:filterBuilderOpen": updateOpen,
+    });
+
+    dispatch(
+      findOne(mounted.root, (node) => node.type === "button" && hostText(node) === "grid.filterConditionView"),
+      "click",
+    );
+
+    expect(updateView).toHaveBeenCalledWith("conditions");
+    expect(updateOpen).toHaveBeenCalledWith(false);
+  });
+});
+
+describe("DataGridFilterWorkbench", () => {
+  it("exposes persistent condition editing, SQL preview, and explicit actions", async () => {
+    const ensureRule = vi.fn();
+    const addRule = vi.fn();
+    const apply = vi.fn();
+    const reset = vi.fn();
+    const clear = vi.fn();
+    const copySql = vi.fn();
+    const updateView = vi.fn();
+    const mounted = mountComponent(DataGridFilterWorkbench, {
+      whereInput: "tenant_id = 7",
+      sqlPreview: "WHERE (tenant_id = 7) AND (status = 'open')",
+      rules: [{ id: "r1", columnName: "status", mode: "equals", rawValue: "open", rawEndValue: "", conjunction: "AND" }],
+      columns: ["id", "tenant_id", "status"],
+      filteredColumns: ["id", "tenant_id", "status"],
+      modeOptions: [{ value: "equals", labelKey: "equals" }],
+      columnSearch: "",
+      conditionColumns: ["id", "tenant_id", "status"],
+      historyScope: {},
+      activeRuleCount: 1,
+      onEnsureRule: ensureRule,
+      onAddRule: addRule,
+      onApply: apply,
+      onReset: reset,
+      onClear: clear,
+      onCopySql: copySql,
+      "onUpdate:view": updateView,
+    });
+    await nextTick();
+
+    expect(ensureRule).toHaveBeenCalledOnce();
+    expect(hostText(mounted.root)).toContain("grid.filterConditionPanel");
+    expect(hostText(mounted.root)).toContain("WHERE (tenant_id = 7) AND (status = 'open')");
+
+    dispatch(
+      findOne(mounted.root, (node) => node.type === "button" && hostText(node) === "grid.filterQuickView"),
+      "click",
+    );
+    dispatch(
+      findOne(mounted.root, (node) => node.props["aria-label"] === "grid.copyFilterSql"),
+      "click",
+    );
+    dispatch(
+      findOne(mounted.root, (node) => node.type === "button" && hostText(node) === "grid.filterBuilderAddRule"),
+      "click",
+    );
+    dispatch(
+      findOne(mounted.root, (node) => node.type === "button" && hostText(node) === "grid.resetFilterBuilder"),
+      "click",
+    );
+    dispatch(
+      findOne(mounted.root, (node) => node.type === "button" && hostText(node) === "grid.applyFilter"),
+      "click",
+    );
+    dispatch(
+      findOne(mounted.root, (node) => node.props["aria-label"] === "grid.clearFilter"),
+      "click",
+    );
+
+    expect(updateView).toHaveBeenCalledWith("quick");
+    expect(copySql).toHaveBeenCalledOnce();
+    expect(addRule).toHaveBeenCalledOnce();
+    expect(reset).toHaveBeenCalledOnce();
+    expect(apply).toHaveBeenCalledOnce();
+    expect(clear).toHaveBeenCalledOnce();
+  });
+
+  it("shows the empty preview state without enabling copy", () => {
+    const mounted = mountComponent(DataGridFilterWorkbench, {
+      whereInput: "",
+      sqlPreview: "",
+      rules: [],
+      columns: [],
+      filteredColumns: [],
+      modeOptions: [],
+      columnSearch: "",
+      conditionColumns: [],
+      historyScope: {},
+      activeRuleCount: 0,
+    });
+
+    expect(hostText(mounted.root)).toContain("grid.filterSqlPreviewEmpty");
+    expect(findOne(mounted.root, (node) => node.props["aria-label"] === "grid.copyFilterSql").props.disabled).toBe(true);
   });
 });
 

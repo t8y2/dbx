@@ -6,12 +6,15 @@ export type DataGridCachedServerColumnFilter = {
   labels: string[];
 };
 
+export type DataGridFilterEditorView = "quick" | "conditions";
+
 export type DataGridStructuredFilterCacheState = {
   scopeKey: string;
   manualWhereInput: string;
   rules: DataGridStructuredFilterRule[];
   appliedWhereInput: string;
   serverColumnFilters: Record<number, DataGridCachedServerColumnFilter>;
+  editorView?: DataGridFilterEditorView;
 };
 
 const structuredFilterStateCache = new Map<string, DataGridStructuredFilterCacheState>();

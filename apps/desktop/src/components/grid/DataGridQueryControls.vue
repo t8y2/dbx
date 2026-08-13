@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onUnmounted, ref, watch } from "vue";
-import { Filter, Trash2, X } from "@lucide/vue";
+import { Code2, Filter, Trash2, X } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
 import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
@@ -10,6 +10,7 @@ import type { DataGridConditionColumnOption } from "@/composables/useDataGridCon
 import type { DataGridStructuredFilterRule } from "@/composables/useDataGridFilterBuilder";
 import type { DataGridConditionHistoryScope } from "@/lib/dataGrid/dataGridConditionHistory";
 import type { DataGridContextFilterMode } from "@/lib/dataGrid/dataGridSql";
+import type { DataGridFilterEditorView } from "@/lib/dataGrid/dataGridFilterBuilderPersistence";
 import { clampSearchSplitWidth } from "@/lib/dataGrid/dataGridSearchSplit";
 
 type LocalFilterSummary = {
@@ -30,6 +31,7 @@ const props = defineProps<{
   compact: boolean;
   leadingBorder: boolean;
   filterBuilderOpen: boolean;
+  filterEditorView: DataGridFilterEditorView;
   filterButtonActive: boolean;
   filterButtonCount: number;
   hasLocalColumnFilters: boolean;
@@ -48,6 +50,7 @@ const emit = defineEmits<{
   "update:whereInput": [value: string];
   "update:orderByInput": [value: string];
   "update:filterBuilderOpen": [value: boolean];
+  "update:filterEditorView": [value: DataGridFilterEditorView];
   "update:columnSearch": [value: string];
   ensureRule: [];
   addRule: [];
@@ -115,6 +118,11 @@ function clearWhere() {
   emit("clearFilters");
 }
 
+function selectFilterEditorView(view: DataGridFilterEditorView) {
+  emit("update:filterEditorView", view);
+  if (view === "conditions") emit("update:filterBuilderOpen", false);
+}
+
 async function openPendingFirstEmptyRuleColumnSearch() {
   if (openingFirstEmptyRuleColumnSearch || !pendingFirstEmptyRuleColumnSearch.value || !props.filterBuilderOpen || !filterBuilderRef.value) return;
   if (!props.rules.some((rule) => !rule.columnName && !rule.disabled)) return;
@@ -147,80 +155,93 @@ onUnmounted(onResizeEnd);
 <template>
   <div ref="containerRef" class="flex flex-1 min-w-0">
     <div class="flex flex-1 items-center gap-1 px-2 py-0.5 min-w-0 relative" :class="{ 'border-l': leadingBorder }" :style="wherePaneStyle">
-      <Popover :open="filterBuilderOpen" @update:open="emit('update:filterBuilderOpen', $event)">
-        <PopoverTrigger as-child>
-          <button
-            type="button"
-            class="relative flex h-5 w-5 -translate-x-1 shrink-0 items-center justify-center rounded border text-[11px] font-medium transition-colors"
-            :class="filterButtonActive ? 'border-primary/40 bg-primary/10 text-primary hover:bg-primary/15' : 'border-border/70 text-muted-foreground hover:bg-accent hover:text-foreground'"
-            :disabled="!canUseWhereSearch"
-            @click="handleFilterButtonClick"
-          >
-            <Filter class="h-3 w-3" />
-            <span v-if="filterButtonCount" class="absolute -right-1 -top-1 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-primary px-1 text-[9px] leading-none text-primary-foreground">{{ filterButtonCount }}</span>
-          </button>
-        </PopoverTrigger>
-        <PopoverContent align="start" class="w-fit max-w-[calc(100vw-16px)] gap-2 p-2.5">
-          <div class="flex items-center justify-between gap-2">
-            <div class="text-xs font-medium text-foreground">{{ t("grid.filter") }}</div>
-            <Button variant="ghost" size="sm" class="h-6 px-2 text-xs" @click="emit('clearFilters')"><Trash2 class="mr-1 h-3.5 w-3.5" />{{ t("grid.clearFilter") }}</Button>
-          </div>
-
-          <div v-if="hasLocalColumnFilters" class="space-y-1.5 rounded-md border border-primary/20 bg-primary/5 px-2 py-1.5">
+      <template v-if="filterEditorView === 'conditions'">
+        <button type="button" class="flex h-5 min-w-0 items-center gap-1.5 px-1 text-xs font-medium text-primary hover:bg-primary/10" :aria-label="t('grid.filterConditionPanel')" @click="selectFilterEditorView('quick')">
+          <Filter class="h-3 w-3 shrink-0" />
+          <span class="truncate">{{ t("grid.filterConditionPanel") }}</span>
+          <span v-if="filterButtonCount" class="rounded bg-primary/10 px-1 text-[10px] leading-4">{{ filterButtonCount }}</span>
+        </button>
+      </template>
+      <template v-else>
+        <Popover :open="filterBuilderOpen" @update:open="emit('update:filterBuilderOpen', $event)">
+          <PopoverTrigger as-child>
+            <button
+              type="button"
+              class="relative flex h-5 w-5 -translate-x-1 shrink-0 items-center justify-center rounded border text-[11px] font-medium transition-colors"
+              :class="filterButtonActive ? 'border-primary/40 bg-primary/10 text-primary hover:bg-primary/15' : 'border-border/70 text-muted-foreground hover:bg-accent hover:text-foreground'"
+              :disabled="!canUseWhereSearch"
+              @click="handleFilterButtonClick"
+            >
+              <Filter class="h-3 w-3" />
+              <span v-if="filterButtonCount" class="absolute -right-1 -top-1 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-primary px-1 text-[9px] leading-none text-primary-foreground">{{ filterButtonCount }}</span>
+            </button>
+          </PopoverTrigger>
+          <PopoverContent align="start" class="w-fit max-w-[calc(100vw-16px)] gap-2 p-2.5">
             <div class="flex items-center justify-between gap-2">
-              <div class="flex min-w-0 items-center gap-2 text-xs font-medium text-primary">
-                <Filter class="h-3.5 w-3.5 shrink-0" /><span class="truncate">{{ t("grid.localFiltersActive", { count: localFilterCount }) }}</span>
+              <div class="text-xs font-medium text-foreground">{{ t("grid.filter") }}</div>
+              <div class="flex h-6 items-center border bg-muted/20 p-0.5" role="group" :aria-label="t('grid.filterView')">
+                <button type="button" class="flex h-5 items-center gap-1 bg-background px-2 text-[11px] font-medium text-foreground shadow-sm" @click="selectFilterEditorView('quick')"><Code2 class="h-3 w-3" />{{ t("grid.filterQuickView") }}</button>
+                <button type="button" class="flex h-5 items-center gap-1 px-2 text-[11px] text-muted-foreground hover:text-foreground" @click="selectFilterEditorView('conditions')"><Filter class="h-3 w-3" />{{ t("grid.filterConditionView") }}</button>
               </div>
-              <Button variant="ghost" size="sm" class="h-6 shrink-0 px-2 text-xs" @click="emit('clearLocalFilter')"><X class="mr-1 h-3.5 w-3.5" />{{ t("grid.clearLocalFiltersShort") }}</Button>
+              <Button variant="ghost" size="sm" class="h-6 px-2 text-xs" @click="emit('clearFilters')"><Trash2 class="mr-1 h-3.5 w-3.5" />{{ t("grid.clearFilter") }}</Button>
             </div>
-            <div class="space-y-0.5">
-              <div v-for="summary in localFilterSummaries" :key="summary.columnIndex" class="grid grid-cols-[minmax(0,0.9fr)_minmax(0,1.6fr)_auto] items-center gap-1.5 rounded border border-primary/10 bg-background/70 px-2 py-0.5 text-xs">
-                <span class="truncate font-medium text-foreground" :title="summary.columnName">{{ summary.columnName }}</span>
-                <span class="min-w-0 truncate font-mono text-muted-foreground">
-                  <template v-for="(value, valueIndex) in summary.values" :key="valueIndex"
-                    ><span v-if="valueIndex > 0">, </span><span>{{ value }}</span></template
-                  >
-                  <span v-if="summary.hiddenValueCount">{{ t("grid.localFilterMoreValues", { count: summary.hiddenValueCount }) }}</span>
-                </span>
-                <Button variant="ghost" size="icon" class="h-5 w-5 text-muted-foreground hover:text-destructive" :title="t('grid.clearFilter')" @click="emit('clearLocalFilter', summary.columnIndex)"><X class="h-3.5 w-3.5" /></Button>
-              </div>
-            </div>
-          </div>
 
-          <DataGridFilterBuilder
-            ref="filterBuilderRef"
-            :rules="rules"
-            :columns="[...columns]"
-            :filtered-columns="filteredColumns"
-            :mode-options="modeOptions"
-            :column-search="columnSearch"
-            :disabled="!canUseWhereSearch"
-            :show-header="false"
-            @add="emit('addRule')"
-            @apply="emit('applyFilters')"
-            @reset="emit('resetFilters')"
-            @clear="emit('clearFilters')"
-            @remove="emit('removeRule', $event)"
-            @update-rule="updateRule"
-            @update:column-search="emit('update:columnSearch', $event)"
-          />
-        </PopoverContent>
-      </Popover>
-      <DataGridConditionEditor
-        :model-value="whereInput"
-        kind="where"
-        :columns="conditionColumns"
-        :identifier-quote="identifierQuote"
-        :history-scope="historyScope"
-        placeholder="WHERE"
-        :history-empty-text="t('grid.conditionHistoryEmpty')"
-        :history-no-matches-text="t('grid.conditionHistoryNoMatches')"
-        :disabled="!canUseWhereSearch"
-        :compact="compact"
-        :apply="applyWhere"
-        :clear="clearWhere"
-        @update:model-value="emit('update:whereInput', $event)"
-      />
+            <div v-if="hasLocalColumnFilters" class="space-y-1.5 rounded-md border border-primary/20 bg-primary/5 px-2 py-1.5">
+              <div class="flex items-center justify-between gap-2">
+                <div class="flex min-w-0 items-center gap-2 text-xs font-medium text-primary">
+                  <Filter class="h-3.5 w-3.5 shrink-0" /><span class="truncate">{{ t("grid.localFiltersActive", { count: localFilterCount }) }}</span>
+                </div>
+                <Button variant="ghost" size="sm" class="h-6 shrink-0 px-2 text-xs" @click="emit('clearLocalFilter')"><X class="mr-1 h-3.5 w-3.5" />{{ t("grid.clearLocalFiltersShort") }}</Button>
+              </div>
+              <div class="space-y-0.5">
+                <div v-for="summary in localFilterSummaries" :key="summary.columnIndex" class="grid grid-cols-[minmax(0,0.9fr)_minmax(0,1.6fr)_auto] items-center gap-1.5 rounded border border-primary/10 bg-background/70 px-2 py-0.5 text-xs">
+                  <span class="truncate font-medium text-foreground" :title="summary.columnName">{{ summary.columnName }}</span>
+                  <span class="min-w-0 truncate font-mono text-muted-foreground">
+                    <template v-for="(value, valueIndex) in summary.values" :key="valueIndex"
+                      ><span v-if="valueIndex > 0">, </span><span>{{ value }}</span></template
+                    >
+                    <span v-if="summary.hiddenValueCount">{{ t("grid.localFilterMoreValues", { count: summary.hiddenValueCount }) }}</span>
+                  </span>
+                  <Button variant="ghost" size="icon" class="h-5 w-5 text-muted-foreground hover:text-destructive" :title="t('grid.clearFilter')" @click="emit('clearLocalFilter', summary.columnIndex)"><X class="h-3.5 w-3.5" /></Button>
+                </div>
+              </div>
+            </div>
+
+            <DataGridFilterBuilder
+              ref="filterBuilderRef"
+              :rules="rules"
+              :columns="[...columns]"
+              :filtered-columns="filteredColumns"
+              :mode-options="modeOptions"
+              :column-search="columnSearch"
+              :disabled="!canUseWhereSearch"
+              :show-header="false"
+              @add="emit('addRule')"
+              @apply="emit('applyFilters')"
+              @reset="emit('resetFilters')"
+              @clear="emit('clearFilters')"
+              @remove="emit('removeRule', $event)"
+              @update-rule="updateRule"
+              @update:column-search="emit('update:columnSearch', $event)"
+            />
+          </PopoverContent>
+        </Popover>
+        <DataGridConditionEditor
+          :model-value="whereInput"
+          kind="where"
+          :columns="conditionColumns"
+          :identifier-quote="identifierQuote"
+          :history-scope="historyScope"
+          placeholder="WHERE"
+          :history-empty-text="t('grid.conditionHistoryEmpty')"
+          :history-no-matches-text="t('grid.conditionHistoryNoMatches')"
+          :disabled="!canUseWhereSearch"
+          :compact="compact"
+          :apply="applyWhere"
+          :clear="clearWhere"
+          @update:model-value="emit('update:whereInput', $event)"
+        />
+      </template>
     </div>
     <button
       type="button"

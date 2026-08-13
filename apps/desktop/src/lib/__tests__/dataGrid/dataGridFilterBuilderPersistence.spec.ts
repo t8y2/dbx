@@ -1,24 +1,42 @@
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import { loadDataGridStructuredFilterState, saveDataGridStructuredFilterState } from "@/lib/dataGrid/dataGridFilterBuilderPersistence";
 
-describe("data grid filter builder persistence", () => {
-  it("isolates scopes and returns cloned state", () => {
-    saveDataGridStructuredFilterState("cache", {
-      scopeKey: "scope-a",
-      manualWhereInput: "status = 1",
-      rules: [{ id: "rule-1", columnName: "status", mode: "equals", rawValue: "1", rawEndValue: "", conjunction: "AND" }],
-      appliedWhereInput: '"status" = 1',
-      serverColumnFilters: { 0: { condition: '"status" = 1', keys: ["1"], labels: ["1"] } },
+describe("data grid structured filter persistence", () => {
+  const cacheKey = "issue-436-filter-view";
+  const scopeKey = "mysql\0demo\0users";
+
+  beforeEach(() => {
+    saveDataGridStructuredFilterState(cacheKey, {
+      scopeKey,
+      manualWhereInput: "tenant_id = 7",
+      rules: [{ id: "r1", columnName: "status", mode: "equals", rawValue: "open", rawEndValue: "", conjunction: "AND" }],
+      appliedWhereInput: "status = 'open'",
+      serverColumnFilters: {},
+      editorView: "conditions",
     });
+  });
 
-    expect(loadDataGridStructuredFilterState("cache", "scope-b")).toBeUndefined();
-    const restored = loadDataGridStructuredFilterState("cache", "scope-a")!;
-    restored.rules[0].rawValue = "2";
-    restored.serverColumnFilters[0].keys.push("2");
+  it("restores the selected editor view with the filter rules", () => {
+    expect(loadDataGridStructuredFilterState(cacheKey, scopeKey)).toMatchObject({
+      manualWhereInput: "tenant_id = 7",
+      editorView: "conditions",
+      rules: [{ columnName: "status", rawValue: "open" }],
+    });
+  });
 
-    expect(loadDataGridStructuredFilterState("cache", "scope-a")).toMatchObject({
-      rules: [{ rawValue: "1" }],
-      serverColumnFilters: { 0: { keys: ["1"] } },
+  it("does not leak the selected view into another table scope", () => {
+    expect(loadDataGridStructuredFilterState(cacheKey, `${scopeKey}\0archive`)).toBeUndefined();
+  });
+
+  it("returns cloned state without mutating the cache", () => {
+    const restored = loadDataGridStructuredFilterState(cacheKey, scopeKey)!;
+    restored.rules[0].rawValue = "closed";
+    restored.serverColumnFilters[0] = { condition: "\"status\" = 'closed'", keys: ["closed"], labels: ["closed"] };
+
+    expect(loadDataGridStructuredFilterState(cacheKey, scopeKey)).toMatchObject({
+      rules: [{ rawValue: "open" }],
+      serverColumnFilters: {},
+      editorView: "conditions",
     });
   });
 });

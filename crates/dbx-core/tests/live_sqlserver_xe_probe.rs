@@ -85,8 +85,8 @@ async fn sqlserver_extended_events_probe_captures_rpc_and_batch_events() {
     eprintln!("capabilities={:?}", probe.rows);
     let capability_row = &probe.rows[0];
     let database_id = capability_row[2].as_i64().expect("database id");
-    for index in 3..12 {
-        assert_eq!(capability_row[index].as_i64(), Some(1), "missing XE capability in {}", probe.columns[index]);
+    for (column, value) in probe.columns[3..12].iter().zip(&capability_row[3..12]) {
+        assert_eq!(value.as_i64(), Some(1), "missing XE capability in {column}");
     }
     let actions = capability_row[12].as_str().expect("available XE actions");
     for action in [

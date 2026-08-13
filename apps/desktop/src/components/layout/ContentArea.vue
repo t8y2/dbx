@@ -1632,7 +1632,7 @@ defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, hand
                   />
                 </template>
                 <template v-if="activeTab.result && isQueryExecutionErrorResult(activeTab.result)" #error-actions="{ errorMessage }">
-                  <QueryErrorActions :error-message="String(errorMessage)" :connection-id="activeTab.connectionId" @change-query-timeout="activeTab.connectionId && emit('openConnectionSettings', activeTab.connectionId, 'advanced')" @fix-with-ai="(message) => emit('fixWithAi', message)" />
+                  <QueryErrorActions :error-message="String(errorMessage)" :backend-error="activeTab.result.error" :connection-id="activeTab.connectionId" @change-query-timeout="activeTab.connectionId && emit('openConnectionSettings', activeTab.connectionId, 'advanced')" @fix-with-ai="(message) => emit('fixWithAi', message)" />
                 </template>
               </DataGrid>
               <QueryLoadingState
@@ -1960,7 +1960,7 @@ defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, hand
           @sort="(column: string, columnIndex: number, direction: 'asc' | 'desc' | null, whereInput?: string, mode?: DataGridSortMode) => emit('sort', column, columnIndex, direction, whereInput, mode)"
         >
           <template v-if="activeTab.result && isQueryExecutionErrorResult(activeTab.result)" #error-actions="{ errorMessage }">
-            <QueryErrorActions :error-message="String(errorMessage)" :connection-id="activeTab.connectionId" @change-query-timeout="activeTab.connectionId && emit('openConnectionSettings', activeTab.connectionId, 'advanced')" @fix-with-ai="(message) => emit('fixWithAi', message)" />
+            <QueryErrorActions :error-message="String(errorMessage)" :backend-error="activeTab.result.error" :connection-id="activeTab.connectionId" @change-query-timeout="activeTab.connectionId && emit('openConnectionSettings', activeTab.connectionId, 'advanced')" @fix-with-ai="(message) => emit('fixWithAi', message)" />
           </template>
         </DataGrid>
         <QueryLoadingState v-else-if="activeTab.isExecuting" class="h-full" :label-key="queryExecutionLabelKey(activeTab)" :elapsed-seconds="queryRunningElapsedSeconds" show-cancel :cancel-disabled="!canCancelQueryExecution(activeTab)" :cancelling="activeTab.isCancelling" @cancel="emit('cancel')" />

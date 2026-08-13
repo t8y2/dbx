@@ -649,9 +649,7 @@ fn sql_server_derived_pagination_order(statement: &str) -> Option<String> {
 
     let mut parts = Vec::with_capacity(order_by_exprs.len());
     for order_by in order_by_exprs {
-        let Some(column) = sql_server_order_expr_output_column(&order_by.expr, &output_columns, &column_names) else {
-            return None;
-        };
+        let column = sql_server_order_expr_output_column(&order_by.expr, &output_columns, &column_names)?;
         let direction = match order_by.options.asc {
             Some(true) => " ASC",
             Some(false) => " DESC",

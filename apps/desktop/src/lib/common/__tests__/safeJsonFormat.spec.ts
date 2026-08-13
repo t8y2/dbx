@@ -300,6 +300,15 @@ describe("mapDisplayToRaw", () => {
     expect(decodeJsonUnicodeEscapes(mapped)).toBe(edited);
   });
 
+  it("keeps surrogate pairs intact when replacing an escaped emoji", () => {
+    const raw = '{"e":"\\ud83d\\ude00"}';
+    const edited = '{"e":"😁"}';
+    const mapped = mapDisplayToRaw(raw, edited);
+    expect(mapped).toBe(edited);
+    expect(JSON.parse(mapped)).toEqual({ e: "😁" });
+    expect(decodeJsonUnicodeEscapes(mapped)).toBe(edited);
+  });
+
   it("open+save without edits keeps the exact stored text (bytes preserved)", () => {
     const raw = '{"name":"\\u5f20","nested":{"list":[1,2],"note":"\\u4e2d"}}';
     expect(formatJsonSource(mapDisplayToRaw(raw, decodeJsonUnicodeEscapes(raw)))).toBe(formatJsonSource(raw));

@@ -650,6 +650,25 @@ class KafkaAgentTest {
     }
 
     @Test
+    void resolvePeekPartitionsRejectsMissingPartitionBeforeOffsetLookup() {
+        IllegalArgumentException error = assertThrows(IllegalArgumentException.class, () ->
+            KafkaAgent.resolvePeekPartitions("events", 5, List.of(0, 1, 2))
+        );
+
+        assertEquals(
+            "Kafka partition 5 does not exist for topic 'events'. Available partitions: 0, 1, 2",
+            error.getMessage()
+        );
+    }
+
+    @Test
+    void resolvePeekPartitionsKeepsRequestedPartitionAfterMetadataLookup() {
+        var partitions = KafkaAgent.resolvePeekPartitions("events", 1, List.of(0, 1, 2));
+
+        assertEquals(List.of(1), partitions.stream().map(TopicPartition::partition).toList());
+    }
+
+    @Test
     void resolvePeekPartitionsUsesAllPartitionsWhenUnspecified() {
         var partitions = KafkaAgent.resolvePeekPartitions("events", null, List.of(2, 0, 1));
         assertEquals(List.of(0, 1, 2), partitions.stream().map(org.apache.kafka.common.TopicPartition::partition).toList());

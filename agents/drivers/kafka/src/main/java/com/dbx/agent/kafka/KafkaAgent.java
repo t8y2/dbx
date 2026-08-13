@@ -1570,19 +1570,25 @@ public final class KafkaAgent {
         Integer partition,
         Duration timeout
     ) {
-        if (partition != null) {
-            return resolvePeekPartitions(topic, partition, Collections.emptyList());
-        }
         List<PartitionInfo> infos = consumer.partitionsFor(topic, timeout);
         if (infos == null || infos.isEmpty()) {
             return Collections.emptyList();
         }
         List<Integer> available = infos.stream().map(PartitionInfo::partition).collect(Collectors.toList());
-        return resolvePeekPartitions(topic, null, available);
+        return resolvePeekPartitions(topic, partition, available);
     }
 
     static List<TopicPartition> resolvePeekPartitions(String topic, Integer partition, List<Integer> availablePartitions) {
         if (partition != null) {
+            if (availablePartitions == null || !availablePartitions.contains(partition)) {
+                String available = availablePartitions == null || availablePartitions.isEmpty()
+                    ? "none"
+                    : availablePartitions.stream().sorted().map(String::valueOf).collect(Collectors.joining(", "));
+                throw new IllegalArgumentException(
+                    "Kafka partition " + partition + " does not exist for topic '" + topic
+                        + "'. Available partitions: " + available
+                );
+            }
             return Collections.singletonList(new TopicPartition(topic, partition));
         }
         if (availablePartitions == null || availablePartitions.isEmpty()) {

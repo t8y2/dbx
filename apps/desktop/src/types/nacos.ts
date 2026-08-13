@@ -215,6 +215,11 @@ export interface NacosNamespaceInfo {
   namespaceType?: number;
 }
 
+export interface NacosNamespaceSidebarSnapshot {
+  namespaces: NacosNamespaceInfo[];
+  accessControl: NacosAccessControlCapabilities;
+}
+
 export interface NacosNamespaceCreate {
   namespaceId?: string;
   namespaceName: string;

@@ -29,6 +29,7 @@ import (
 const protocolVersion = 1
 const multiSessionProtocolVersion = 2
 const defaultMaxRows = 1000
+const oracleDefaultPrefetchRows = "100"
 const oracleCharsetZHS32GB18030 = 854
 const legacyAgentSessionID = "__legacy__"
 const maxAgentSessions = 256
@@ -1159,10 +1160,18 @@ func (oracleGB18030Converter) Clone() converters.IStringConverter {
 func buildDSN(params connectParams) string {
 	connectionString := strings.TrimSpace(params.ConnectionString)
 	if strings.HasPrefix(strings.ToLower(connectionString), "oracle://") {
-		return connectionString
+		parsed, err := url.Parse(connectionString)
+		if err != nil {
+			return connectionString
+		}
+		values := parsed.Query()
+		setOracleDefaultPrefetchRows(values)
+		parsed.RawQuery = values.Encode()
+		return parsed.String()
 	}
 	username := params.Username
 	options := parseURLParams(params.URLParams)
+	setOracleDefaultPrefetchRowsMap(options)
 	if params.SysDBA {
 		options["AUTH TYPE"] = "SYSDBA"
 	}
@@ -1189,6 +1198,22 @@ func buildDSN(params connectParams) string {
 		port = 1521
 	}
 	return buildGoOraURL(params.Host, port, service, username, params.Password, options)
+}
+
+func setOracleDefaultPrefetchRows(values url.Values) {
+	if hasURLValueKey(values, "PREFETCH_ROWS") {
+		return
+	}
+	values.Set("PREFETCH_ROWS", oracleDefaultPrefetchRows)
+}
+
+func setOracleDefaultPrefetchRowsMap(options map[string]string) {
+	for key := range options {
+		if strings.EqualFold(strings.TrimSpace(key), "PREFETCH_ROWS") {
+			return
+		}
+	}
+	options["PREFETCH_ROWS"] = oracleDefaultPrefetchRows
 }
 
 func oracleConnectionDatabaseName(database string) string {

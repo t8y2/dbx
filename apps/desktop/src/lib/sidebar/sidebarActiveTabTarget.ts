@@ -77,6 +77,7 @@ export type ActiveTabSidebarTarget =
   | {
       type: "query-context";
       connectionId: string;
+      catalog?: string;
       database: string;
       schema?: string;
     }
@@ -195,6 +196,7 @@ export function activeTabSidebarTarget(tab: QueryTab | undefined | null): Active
     return {
       type: "query-context",
       connectionId: tab.connectionId,
+      catalog: tab.catalog,
       database: tab.database,
       schema: tab.schema,
     };
@@ -239,6 +241,7 @@ export function matchesTarget(node: TreeNode, target: ActiveTabSidebarTarget): b
   }
 
   if (target.type === "query-context") {
+    if ((node.catalog || undefined) !== (target.catalog || undefined)) return false;
     if (target.schema) {
       return node.type === "schema" && node.connectionId === target.connectionId && node.database === target.database && node.label === target.schema;
     }

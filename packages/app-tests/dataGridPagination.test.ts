@@ -100,6 +100,22 @@ test("unknown total falls back to full-page heuristic", () => {
   assert.equal(canGoNextDataGridPage({ rowCount: 0, pageSize: 1 }), false);
 });
 
+test("user LIMIT equal to the page size ends pagination instead of offering an empty page", () => {
+  // `select top 100 ...` at pageSize 100 fills the page exactly, so the
+  // full-page heuristic alone cannot tell "last page" from "more to come" and
+  // offers a next page that returns zero rows. The planner reports the user's
+  // own bound as the total, which resolves the ambiguity.
+  assert.equal(canGoNextDataGridPage({ rowCount: 100, pageSize: 100, pageOffset: 0 }), true);
+  assert.equal(canGoNextDataGridPage({ rowCount: 100, pageSize: 100, pageOffset: 0, totalRowCount: 100 }), false);
+});
+
+test("user LIMIT larger than the page size still pages up to the bound", () => {
+  // `select ... limit 500` at pageSize 100 must page normally and stop at 500.
+  assert.equal(canGoNextDataGridPage({ rowCount: 100, pageSize: 100, pageOffset: 0, totalRowCount: 500 }), true);
+  assert.equal(canGoNextDataGridPage({ rowCount: 100, pageSize: 100, pageOffset: 300, totalRowCount: 500 }), true);
+  assert.equal(canGoNextDataGridPage({ rowCount: 100, pageSize: 100, pageOffset: 400, totalRowCount: 500 }), false);
+});
+
 test("infinite scroll compares cumulative loaded rows with a known total", () => {
   assert.equal(canFetchNextDataGridSegment({ loadedRowCount: 1_000, pageSize: 1_000, totalRowCount: 2_000 }), true);
   assert.equal(canFetchNextDataGridSegment({ loadedRowCount: 2_000, pageSize: 1_000, totalRowCount: 2_000 }), false);
@@ -164,10 +180,13 @@ test("auto-redirect: total is undefined — guard prevents redirect attempt", ()
   assert.equal(!total || (total as any) <= 0, true, "guard should prevent redirect when total is unknown");
 });
 
-test("last-page COUNT shows grid busy overlay before executeQuery", () => {
+test("only an explicit last-page COUNT blocks the grid surface", () => {
   const source = readFileSync("apps/desktop/src/components/grid/DataGrid.vue", "utf8");
-  assert.match(source, /const gridSurfaceBusy = computed\(\(\) => isRefreshingData\.value \|\| props\.loading === true \|\| totalRowCountBusy\.value\)/);
+  assert.match(source, /const totalRowCountBusy = computed\(\(\) => props\.totalRowCountLoading === true \|\| manualTotalRowCountLoading\.value\)/);
+  assert.match(source, /const gridSurfaceBusy = computed\(\(\) => isRefreshingData\.value \|\| props\.loading === true \|\| manualTotalRowCountLoading\.value\)/);
+  assert.match(source, /const gridPaginationBusy = computed\(\(\) => gridSurfaceBusy\.value \|\| totalRowCountBusy\.value\)/);
   assert.match(source, /v-if="gridSurfaceBusy"/);
+  assert.match(source, /:loading="gridPaginationBusy"/);
   assert.match(source, /async function beginManualTotalRowCount/);
   assert.match(source, /await nextTick\(\);/);
   const lastPageFn = source.match(/async function lastPage\(\) \{[\s\S]*?\n\}/)?.[0] ?? "";

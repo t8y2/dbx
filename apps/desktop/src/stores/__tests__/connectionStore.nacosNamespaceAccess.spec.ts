@@ -31,11 +31,19 @@ describe("connectionStore Nacos namespace access", () => {
       database: "",
       visible_databases: ["aa", "bb", "cc", ""],
     } as ConnectionConfig;
-    const listedNamespaces = ["aa", "bb", "cc", ""].map((namespace) => ({
+    // The backend has already removed `bb` and `public`, which the restricted
+    // account cannot read even when the server's raw list endpoint exposes them.
+    const readableNamespaces = ["aa", "cc"].map((namespace) => ({
       namespace,
       namespaceShowName: namespace || "public",
     }));
     const nacosListConfigs = vi.fn();
+    const nacosSidebarSnapshot = vi.fn().mockResolvedValue({
+      namespaces: readableNamespaces,
+      accessControl: {
+        listUsers: { supported: listUsersSupported },
+      },
+    });
 
     vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
     vi.doMock("@/lib/backend/api", () => ({
@@ -44,14 +52,7 @@ describe("connectionStore Nacos namespace access", () => {
       listInstalledAgents: vi.fn().mockResolvedValue([]),
       loadSchemaCache: vi.fn().mockResolvedValue(null),
       nacosListConfigs,
-      nacosListNamespaces: vi.fn().mockResolvedValue(listedNamespaces),
-      nacosTestConnection: vi.fn().mockResolvedValue({
-        capabilities: {
-          accessControl: {
-            listUsers: { supported: listUsersSupported },
-          },
-        },
-      }),
+      nacosSidebarSnapshot,
       saveConnections: vi.fn().mockResolvedValue(undefined),
       saveSchemaCache: vi.fn().mockResolvedValue(undefined),
       saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
@@ -73,15 +74,16 @@ describe("connectionStore Nacos namespace access", () => {
 
     await store.loadNacosNamespaces(connection.id, { force: true });
 
-    return { root, store, nacosListConfigs };
+    return { root, store, nacosListConfigs, nacosSidebarSnapshot };
   }
 
-  it("loads the sidebar without probing every namespace", async () => {
-    const { root, store, nacosListConfigs } = await loadNacosTree(false);
+  it("hides unreadable namespaces without adding per-namespace sidebar requests", async () => {
+    const { root, store, nacosListConfigs, nacosSidebarSnapshot } = await loadNacosTree(false);
 
     expect(nacosListConfigs).not.toHaveBeenCalled();
-    expect(root.children?.filter((node) => node.type === "nacos-namespace").map((node) => node.label)).toEqual(["aa", "bb", "cc", "public"]);
-    expect(store.getSidebarVisibleFilterSummary("nacos-bb")).toEqual({ mode: "namespace", isActive: false, selected: 4, total: 4 });
+    expect(nacosSidebarSnapshot).toHaveBeenCalledTimes(1);
+    expect(root.children?.filter((node) => node.type === "nacos-namespace").map((node) => node.label)).toEqual(["aa", "cc"]);
+    expect(store.getSidebarVisibleFilterSummary("nacos-bb")).toEqual({ mode: "namespace", isActive: false, selected: 2, total: 2 });
     expect(root.children?.some((node) => node.type === "nacos-access-control")).toBe(false);
   });
 

@@ -16,6 +16,10 @@ test("single click navigation mode opens source-capable rows", () => {
   assert.equal(treeNodeRowAction("sequence", false), "open-source");
 });
 
+test("single click navigation mode opens saved SQL rows", () => {
+  assert.equal(treeNodeRowAction("saved-sql-file", false, "single"), "open-saved-sql");
+});
+
 test("extension rows open their metadata details", () => {
   assert.equal(treeNodeRowAction("extension", false, "single"), "open-extension-details");
   assert.equal(treeNodeRowAction("extension", false, "double"), "none");

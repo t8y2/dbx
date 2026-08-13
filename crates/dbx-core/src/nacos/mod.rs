@@ -11,6 +11,7 @@ pub mod archive;
 pub mod batch;
 pub mod config;
 pub mod http;
+pub mod namespace_access;
 pub mod port;
 mod prometheus;
 pub mod search;
@@ -118,6 +119,7 @@ impl NacosAdminRegistry {
         self.instances.write().await.remove(connection_id);
         self.build_locks.write().await.remove(connection_id);
         access_control::invalidate_operations(connection_id);
+        namespace_access::invalidate(connection_id);
     }
 
     async fn rnacos_console_session(&self, cfg: &NacosAdminConfig) -> RNacosConsoleSessionHandle {

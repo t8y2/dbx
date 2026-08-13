@@ -1,6 +1,15 @@
 import { strict as assert } from "node:assert";
 import { test, vi } from "vitest";
-import { defaultGeneratorParams, displayGeneratedValue, generateTableData, generateValue, supportsGeneratedMultiRowValues } from "../../apps/desktop/src/lib/dataGrid/dataGenerate.ts";
+import { defaultGeneratorParams, displayGeneratedValue, findGeneratorKey, generateTableData, generateValue, supportsGeneratedMultiRowValues } from "../../apps/desktop/src/lib/dataGrid/dataGenerate.ts";
+
+test("recognizes Oracle-compatible NUMBER column types as numeric", () => {
+  assert.equal(findGeneratorKey("value", "NUMBER"), "number");
+  assert.equal(findGeneratorKey("value", "NUMBER(10)"), "number");
+  assert.equal(findGeneratorKey("value", "NUMBER(18, 2)"), "number");
+  assert.equal(findGeneratorKey("value", "NUMBER(10)", true), "sequence");
+  assert.equal(findGeneratorKey("value", "serial_number_code"), "text");
+  assert.equal(findGeneratorKey("value", "NUMBER CODE"), "text");
+});
 
 test("enables default values for columns with schema defaults", () => {
   const params = defaultGeneratorParams(

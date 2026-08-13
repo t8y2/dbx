@@ -117,10 +117,17 @@ pub struct SortedQuerySqlOptions {
 pub fn build_query_pagination_execution_plan(
     options: QueryPaginationExecutionPlanOptions,
 ) -> QueryPaginationExecutionPlan {
-    let exact_query_row_bound = if options.database_type == Some(DatabaseType::SqlServer) {
-        top_level_top_row_count(&options.query_base_sql)
-    } else {
-        None
+    // Every page DBX generates for this query is derived from the same
+    // user-written statement, so a literal LIMIT/TOP the user already wrote
+    // bounds the query's total row count regardless of how large the
+    // underlying table is — a cheap, exact upper bound that needs no
+    // COUNT(*) execution. SQL Server's TOP is covered separately from the
+    // standard LIMIT/OFFSET dialects (MySQL, Postgres, etc.) since they use
+    // different clause syntax.
+    let exact_query_row_bound = match pagination_strategy(options.database_type, PaginationContext::UserQuery) {
+        TablePaginationStrategy::SqlServerTop => top_level_top_row_count(&options.query_base_sql),
+        TablePaginationStrategy::LimitOffset => top_level_limit_row_count(&options.query_base_sql),
+        _ => None,
     };
     let mut plan = QueryPaginationExecutionPlan {
         sql_to_execute: options.sql.clone(),
@@ -1169,19 +1176,34 @@ pub(crate) fn top_level_top_row_count(sql: &str) -> Option<usize> {
 }
 
 fn top_level_limit_row_count(sql: &str) -> Option<usize> {
-    let token = top_level_sql_tokens(sql).into_iter().find(|token| token.text == "LIMIT")?;
-    parse_standard_limit_row_count(sql, token.start + token.text.len())
+    let tokens = top_level_sql_tokens(sql);
+    let limit_index = tokens.iter().position(|token| token.text == "LIMIT")?;
+    let token = &tokens[limit_index];
+    let (count, suffix_start) = parse_standard_limit_row_count(sql, token.start + token.text.len())?;
+    let suffix_start = skip_sql_whitespace(sql, suffix_start);
+    if sql.get(suffix_start..)?.starts_with('%') {
+        return None;
+    }
+    if tokens[limit_index + 1..].iter().enumerate().any(|(offset, token)| {
+        token.text == "BY"
+            || token.text == "PERCENT"
+            || (token.text == "WITH" && tokens.get(limit_index + offset + 2).is_some_and(|next| next.text == "TIES"))
+    }) {
+        return None;
+    }
+    Some(count)
 }
 
-fn parse_standard_limit_row_count(sql: &str, start: usize) -> Option<usize> {
+fn parse_standard_limit_row_count(sql: &str, start: usize) -> Option<(usize, usize)> {
     let mut cursor = skip_sql_whitespace(sql, start);
     let first = parse_usize_literal(sql, &mut cursor)?;
     cursor = skip_sql_whitespace(sql, cursor);
     if sql.get(cursor..)?.starts_with(',') {
         cursor = skip_sql_whitespace(sql, cursor + 1);
-        return parse_usize_literal(sql, &mut cursor);
+        let count = parse_usize_literal(sql, &mut cursor)?;
+        return Some((count, cursor));
     }
-    Some(first)
+    Some((first, cursor))
 }
 
 fn parse_usize_literal(sql: &str, cursor: &mut usize) -> Option<usize> {
@@ -3324,7 +3346,7 @@ WHERE u.id = picked.id;
     }
 
     #[test]
-    fn sql_server_pagination_plan_exposes_only_safe_exact_top_bounds() {
+    fn pagination_plan_exposes_only_safe_exact_row_bounds() {
         for (database_type, sql, expected) in [
             (Some(DatabaseType::SqlServer), "SELECT TOP 100 * FROM events", Some(100)),
             (Some(DatabaseType::SqlServer), "SELECT TOP(50) * FROM events", Some(50)),
@@ -3337,6 +3359,19 @@ WHERE u.id = picked.id;
             (Some(DatabaseType::SqlServer), "SELECT * FROM events", None),
             (Some(DatabaseType::Postgres), "SELECT TOP 100 * FROM events", None),
             (Some(DatabaseType::Kingbase), "SELECT TOP 100 * FROM events", None),
+            // The standard LIMIT/OFFSET dialects (MySQL, Postgres, and every
+            // other database that isn't given its own pagination_strategy
+            // arm) bound the query the same way SQL Server's TOP does.
+            (Some(DatabaseType::Postgres), "SELECT * FROM events LIMIT 100", Some(100)),
+            (Some(DatabaseType::Mysql), "SELECT * FROM events LIMIT 50", Some(50)),
+            (Some(DatabaseType::Mysql), "SELECT * FROM events LIMIT 100 OFFSET 100", Some(100)),
+            (Some(DatabaseType::ClickHouse), "SELECT * FROM events LIMIT 10 BY user_id", None),
+            (Some(DatabaseType::ClickHouse), "SELECT * FROM events LIMIT 10 OFFSET 5 BY user_id", None),
+            (Some(DatabaseType::ClickHouse), "SELECT * FROM events LIMIT 10 WITH TIES", None),
+            (Some(DatabaseType::DuckDb), "SELECT * FROM events LIMIT 10%", None),
+            (Some(DatabaseType::DuckDb), "SELECT * FROM events LIMIT 10 PERCENT", None),
+            (None, "SELECT * FROM events LIMIT 100", Some(100)),
+            (Some(DatabaseType::Postgres), "SELECT * FROM events", None),
         ] {
             let plan = build_query_pagination_execution_plan(QueryPaginationExecutionPlanOptions {
                 sql: sql.to_string(),

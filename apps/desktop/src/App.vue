@@ -46,6 +46,7 @@ import { translateBackendError } from "@/i18n/backend-errors";
 import * as api from "@/lib/backend/api";
 import { connectionRedactedNameLabel } from "@/lib/connection/connectionPresentation";
 import { quickConnectionOpenTarget } from "@/lib/connection/connectionOpenTarget";
+import { parseRecentConnectionIds, rankRecentConnections, RECENT_CONNECTION_IDS_STORAGE_KEY, recordRecentConnection } from "@/lib/connection/recentConnections";
 import { resolveDefaultDatabase } from "@/lib/database/defaultDatabase";
 import { normalizeSqliteNamespace } from "@/lib/database/sqliteNamespace";
 import { findTreeNodeById, resolveNewQueryTarget, resolveNewQueryInitialSql } from "@/lib/sql/newQueryContext";
@@ -101,6 +102,7 @@ import { apiUrl, webPath } from "@/lib/common/webPath";
 import { shouldBlockAppNativeSelectAll } from "@/lib/common/clipboard";
 import { APP_FONT_SANS_CSS_VAR, DATA_GRID_FONT_FAMILY_CSS_VAR, DEFAULT_DATA_GRID_FONT_FAMILY, DEFAULT_UI_FONT_FAMILY } from "@/lib/app/appFonts";
 import { rankSavedSqlHistory } from "@/lib/savedSql/savedSqlHistory";
+import { savedSqlErrorMessage } from "@/lib/savedSql/savedSqlErrors";
 import { savedSqlDefaultTargetForWrite } from "@/lib/savedSql/savedSqlExecutionTarget";
 import { countActiveUpdateBlockingTasks } from "@/lib/app/appUpdateTaskGuard";
 import { initSavedSqlEditorPositions } from "@/lib/app/savedSqlEditorPosition";
@@ -142,6 +144,7 @@ const queryStore = useQueryStore();
 const settingsStore = useSettingsStore();
 const savedSqlStore = useSavedSqlStore();
 const promptTemplateStore = usePromptTemplateStore();
+const recentConnectionIds = ref<readonly string[]>(parseRecentConnectionIds(safeLocalStorageGet(RECENT_CONNECTION_IDS_STORAGE_KEY)));
 connectionStore.setBeforeConnectHandler(async (config) => {
   await ensureJdbcxRuntimeDrivers(config, api);
   const jdbcProductRuntimeBefore = JSON.stringify({
@@ -580,7 +583,18 @@ const connectionStats = computed(() => ({
   connected: connectionStore.connectedIds.size,
   types: new Set(connectionStore.connections.map((c) => c.driver_profile || c.db_type)).size,
 }));
-const recentConnections = computed(() => connectionStore.connections.slice(0, 5));
+const recentConnections = computed(() => rankRecentConnections(connectionStore.connections, recentConnectionIds.value));
+
+function rememberRecentConnection(connectionId: string | null) {
+  if (!connectionId) return;
+  const nextIds = recordRecentConnection(recentConnectionIds.value, connectionId);
+  if (nextIds === recentConnectionIds.value) return;
+  recentConnectionIds.value = nextIds;
+  safeLocalStorageSet(RECENT_CONNECTION_IDS_STORAGE_KEY, JSON.stringify(nextIds));
+}
+
+watch(() => connectionStore.activeConnectionId, rememberRecentConnection);
+
 const savedSqlHistoryItems = computed(() => {
   const folderById = new Map(savedSqlStore.allFolders.map((folder) => [folder.id, folder]));
   const folderPath = (folderId?: string): string | undefined => {
@@ -1088,7 +1102,7 @@ async function saveTabForCloseAll(tabId: string): Promise<boolean> {
     queryStore.markTabClean(tab);
     return true;
   } catch (e: any) {
-    toast(t("savedSql.saveFailed", { message: e?.message || String(e) }), 5000);
+    toast(t("savedSql.saveFailed", { message: savedSqlErrorMessage(e, t) }), 5000);
     return false;
   }
 }
@@ -1140,21 +1154,26 @@ async function handleSaveTab(tabId: string) {
   }
   const existing = tab.savedSqlId ? savedSqlStore.getFile(tab.savedSqlId) : undefined;
   if (existing) {
-    const target = savedSqlTargetForSave(tab);
-    const updated = await savedSqlStore.saveFile({
-      id: existing.id,
-      connectionId: target.connectionId,
-      folderId: existing.folderId,
-      name: existing.name,
-      database: target.database,
-      catalog: target.catalog,
-      schema: target.schema,
-      sql: tab.sql,
-    });
-    queryStore.linkSavedSql(tab.id, updated.id, updated.name);
-    queryStore.markTabClean(tab);
-    notifySqlLibrarySaved();
-    completePendingTabSave(tabId);
+    try {
+      const target = savedSqlTargetForSave(tab);
+      const updated = await savedSqlStore.saveFile({
+        id: existing.id,
+        connectionId: target.connectionId,
+        folderId: existing.folderId,
+        name: existing.name,
+        database: target.database,
+        catalog: target.catalog,
+        schema: target.schema,
+        sql: tab.sql,
+      });
+      queryStore.linkSavedSql(tab.id, updated.id, updated.name);
+      queryStore.markTabClean(tab);
+      notifySqlLibrarySaved();
+      completePendingTabSave(tabId);
+    } catch (error) {
+      toast(t("savedSql.saveFailed", { message: savedSqlErrorMessage(error, t) }), 5000);
+      queryStore.resumeCloseConfirm();
+    }
     return;
   }
   // No existing saved SQL — open save dialog, then close after save
@@ -1177,20 +1196,24 @@ async function openSaveSqlDialog() {
   if (await saveExternalSqlPath(tab)) return;
   const existing = tab.savedSqlId ? savedSqlStore.getFile(tab.savedSqlId) : undefined;
   if (existing) {
-    const target = savedSqlTargetForSave(tab);
-    const updated = await savedSqlStore.saveFile({
-      id: existing.id,
-      connectionId: target.connectionId,
-      folderId: existing.folderId,
-      name: existing.name,
-      database: target.database,
-      catalog: target.catalog,
-      schema: target.schema,
-      sql: tab.sql,
-    });
-    queryStore.linkSavedSql(tab.id, updated.id, updated.name);
-    queryStore.markTabClean(tab);
-    notifySqlLibrarySaved();
+    try {
+      const target = savedSqlTargetForSave(tab);
+      const updated = await savedSqlStore.saveFile({
+        id: existing.id,
+        connectionId: target.connectionId,
+        folderId: existing.folderId,
+        name: existing.name,
+        database: target.database,
+        catalog: target.catalog,
+        schema: target.schema,
+        sql: tab.sql,
+      });
+      queryStore.linkSavedSql(tab.id, updated.id, updated.name);
+      queryStore.markTabClean(tab);
+      notifySqlLibrarySaved();
+    } catch (error) {
+      toast(t("savedSql.saveFailed", { message: savedSqlErrorMessage(error, t) }), 5000);
+    }
     return;
   }
 
@@ -1290,7 +1313,7 @@ async function confirmSaveSqlToLibrary() {
     closePendingSavedTab();
     void notifyNewSqlLibrarySaved(flyOrigin);
   } catch (e: any) {
-    toast(t("savedSql.saveFailed", { message: e?.message || String(e) }), 5000);
+    toast(t("savedSql.saveFailed", { message: savedSqlErrorMessage(e, t) }), 5000);
   }
 }
 
@@ -1592,6 +1615,7 @@ async function newQuery() {
 async function openConnectionQuery(connectionId: string) {
   const connection = connectionStore.getConfig(connectionId);
   if (!connection) return;
+  rememberRecentConnection(connectionId);
   connectionStore.activeConnectionId = connectionId;
   const initialTarget = quickConnectionOpenTarget(connection);
   if (initialTarget.kind === "mq-admin") {

@@ -72,6 +72,35 @@ final class DbxJdbcPluginTest {
     }
 
     @Test
+    void executeQuerySkipsRowsBeforeCollectingThePage() throws Exception {
+        request("executeQuery", """
+            {
+              "connection": %s,
+              "sql": "CREATE TABLE IF NOT EXISTS page_rows(id INT PRIMARY KEY)"
+            }
+            """.formatted(CONNECTION));
+        request("executeQuery", """
+            {
+              "connection": %s,
+              "sql": "MERGE INTO page_rows KEY(id) VALUES (1), (2), (3)"
+            }
+            """.formatted(CONNECTION));
+
+        JsonNode response = request("executeQuery", """
+            {
+              "connection": %s,
+              "sql": "SELECT id FROM page_rows ORDER BY id",
+              "rowOffset": 1,
+              "maxRows": 1
+            }
+            """.formatted(CONNECTION));
+
+        assertFalse(response.has("error"), response.toString());
+        assertEquals(2, response.path("result").path("rows").path(0).path(0).asInt());
+        assertEquals(1, response.path("result").path("rows").size());
+    }
+
+    @Test
     void reportsDriverLinkageErrorsWithoutTerminatingThePlugin() throws Exception {
         JsonNode response = request("testConnection", """
             {
@@ -766,51 +795,24 @@ final class DbxJdbcPluginTest {
     }
 
     @Test
-    void mysqlPagedQueriesEnableConnectorCursorFetchingByDefault() throws Exception {
-        Method method = DbxJdbcPlugin.class.getDeclaredMethod(
-            "applyPagedFetchProperties",
-            JsonNode.class,
-            String.class,
-            Properties.class
-        );
-        method.setAccessible(true);
-        Properties properties = new Properties();
-        JsonNode connection = MAPPER.readTree("""
-            {
-              "connection_string": "jdbc:mysql://127.0.0.1:3306/app",
-              "jdbc_driver_class": "com.mysql.cj.jdbc.Driver"
-            }
-            """);
+    void mysqlConnectionsDoNotForceCursorFetch() throws Exception {
+        RecordingConnectDriver driver = new RecordingConnectDriver("jdbc:mysql:dbx-capture:");
+        DriverManager.registerDriver(driver);
+        try {
+            JsonNode response = request("testConnection", """
+                {
+                  "connection": {
+                    "connection_string": "jdbc:mysql:dbx-capture:demo",
+                    "connect_timeout_secs": 30
+                  }
+                }
+                """);
 
-        method.invoke(null, connection, "jdbc:mysql://127.0.0.1:3306/app", properties);
-
-        assertEquals("true", properties.getProperty("useCursorFetch"));
-    }
-
-    @Test
-    void mysqlPagedQueriesPreserveExplicitCursorFetchSetting() throws Exception {
-        Method method = DbxJdbcPlugin.class.getDeclaredMethod(
-            "applyPagedFetchProperties",
-            JsonNode.class,
-            String.class,
-            Properties.class
-        );
-        method.setAccessible(true);
-        Properties properties = new Properties();
-        JsonNode connection = MAPPER.readTree("""
-            {
-              "connection_string": "jdbc:mysql://127.0.0.1:3306/app?useCursorFetch=false"
-            }
-            """);
-
-        method.invoke(
-            null,
-            connection,
-            "jdbc:mysql://127.0.0.1:3306/app?useCursorFetch=false",
-            properties
-        );
-
-        assertFalse(properties.containsKey("useCursorFetch"));
+            assertFalse(response.has("error"), response.toString());
+            assertFalse(driver.properties.get(0).containsKey("useCursorFetch"));
+        } finally {
+            DriverManager.deregisterDriver(driver);
+        }
     }
 
     @Test

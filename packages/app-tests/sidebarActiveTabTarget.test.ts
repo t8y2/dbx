@@ -381,10 +381,37 @@ test("saved SQL tabs target the matching visible saved SQL file node", () => {
     isExecuting: false,
     mode: "query",
   };
-  const file: TreeNode = { id: "file-node", label: "report.sql", type: "saved-sql-file", savedSqlId: "sql-1" };
+  const file: TreeNode = { id: "file-node", label: "report.sql", type: "saved-sql-file", connectionId: "conn-1", database: "app", savedSqlId: "sql-1" };
+  const queries: TreeNode = {
+    id: "queries-node",
+    label: "tree.queries",
+    type: "saved-sql-root",
+    connectionId: "conn-1",
+    database: "app",
+    children: [file],
+  };
+  const database: TreeNode = {
+    id: "database-node",
+    label: "app",
+    type: "database",
+    connectionId: "conn-1",
+    database: "app",
+    children: [queries],
+  };
+  const connection: TreeNode = {
+    id: "conn-1",
+    label: "Local",
+    type: "connection",
+    connectionId: "conn-1",
+    children: [database],
+  };
 
   assert.deepEqual(activeTabSidebarTarget(tab), { type: "saved-sql-file", savedSqlId: "sql-1" });
   assert.equal(findSidebarNodeForActiveTab(tab, [flat(file)])?.id, "file-node");
+  assert.deepEqual(
+    findNodePathForTarget(activeTabSidebarTarget(tab)!, [connection])?.map((node) => node.id),
+    ["conn-1", "database-node", "queries-node", "file-node"],
+  );
 });
 
 test("query tabs target their database node in the sidebar", () => {
@@ -401,6 +428,7 @@ test("query tabs target their database node in the sidebar", () => {
   assert.deepEqual(activeTabSidebarTarget(tab), {
     type: "query-context",
     connectionId: "conn-1",
+    catalog: undefined,
     database: "app",
     schema: undefined,
   });

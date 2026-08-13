@@ -24,6 +24,37 @@ func TestBuildDSNForConnectResolvesTNSAlias(t *testing.T) {
 	if !strings.Contains(dsn, "connStr=") || !strings.Contains(dsn, "db1.example.com") || !strings.Contains(dsn, "db2.example.com") {
 		t.Fatalf("TNS descriptor should preserve all failover addresses, got: %s", dsn)
 	}
+	parsed, err := url.Parse(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.Query().Get("PREFETCH_ROWS") != oracleDefaultPrefetchRows {
+		t.Fatalf("TNS Oracle DSN should use the DBX prefetch default, got: %s", dsn)
+	}
+}
+
+func TestBuildDSNForConnectPreservesTNSPrefetchRows(t *testing.T) {
+	tnsAdmin := t.TempDir()
+	writeTNSNames(t, tnsAdmin, "DBX = (DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=db.example.com)(PORT=1521))(CONNECT_DATA=(SERVICE_NAME=XE)))")
+	dsn, err := buildDSNForConnect(connectParams{
+		ConnectionString: oracleTNSJDBCURL("DBX", tnsAdmin),
+		Username:         "scott",
+		Password:         "tiger",
+		URLParams:        "prefetch_rows=20",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := url.Parse(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.Query().Get("prefetch_rows") != "20" {
+		t.Fatalf("configured TNS prefetch rows should be preserved, got: %s", dsn)
+	}
+	if parsed.Query().Get("PREFETCH_ROWS") != "" {
+		t.Fatalf("default prefetch rows should not be added beside a configured TNS value, got: %s", dsn)
+	}
 }
 
 func TestBuildDSNForConnectRejectsMissingTNSAdmin(t *testing.T) {

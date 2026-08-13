@@ -1925,6 +1925,7 @@ pub fn run() {
             commands::consul_cmd::consul_mesh_exported_services_apply,
             commands::nacos_cmd::nacos_test_connection,
             commands::nacos_cmd::nacos_list_namespaces,
+            commands::nacos_cmd::nacos_sidebar_snapshot,
             commands::nacos_cmd::nacos_create_namespace,
             commands::nacos_cmd::nacos_update_namespace,
             commands::nacos_cmd::nacos_list_configs,

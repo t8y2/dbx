@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { transferObjectFamily, transferObjectKindsForDatabase, isSameTransferFamily, crossFamilyTransferableKinds, TransferObjectFamily } from "@/lib/database/transferObjectKinds";
+import { manifestDatabaseTypes } from "@/lib/database/databaseDriverManifest";
+import { supportsTransfer } from "@/lib/database/databaseFeatureSupport";
+import type { DatabaseType } from "@/types/database";
+
+const TABLE_ONLY_TRANSFER_DATABASES: DatabaseType[] = ["sqlite", "rqlite", "cloudflare-d1", "duckdb", "clickhouse", "mongodb", "questdb", "hive", "spark"];
 
 describe("transferObjectKinds", () => {
   it("groups databases into transfer families", () => {
@@ -12,10 +17,22 @@ describe("transferObjectKinds", () => {
 
   it("returns per-family object kinds", () => {
     expect(transferObjectKindsForDatabase("mysql")).toEqual(["TABLE", "VIEW", "PROCEDURE", "FUNCTION", "TRIGGER", "EVENT"]);
-    expect(transferObjectKindsForDatabase("postgres")).toContain("SEQUENCE");
-    expect(transferObjectKindsForDatabase("dameng")).toContain("TRIGGER");
+    expect(transferObjectKindsForDatabase("postgres")).toEqual(["TABLE", "VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION", "TRIGGER", "SEQUENCE"]);
+    expect(transferObjectKindsForDatabase("oracle")).toEqual(["TABLE", "VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION", "TRIGGER", "SEQUENCE"]);
     expect(transferObjectKindsForDatabase("sqlserver")).toEqual(["TABLE", "VIEW", "PROCEDURE", "FUNCTION", "TRIGGER", "SEQUENCE"]);
-    expect(transferObjectKindsForDatabase("sqlite")).toEqual([]);
+  });
+
+  it.each(TABLE_ONLY_TRANSFER_DATABASES)("falls back to tables for transfer-capable %s databases", (dbType) => {
+    expect(transferObjectKindsForDatabase(dbType)).toEqual(["TABLE"]);
+  });
+
+  it("covers every transfer-capable database outside the richer object families", () => {
+    expect(manifestDatabaseTypes().filter((dbType) => supportsTransfer(dbType) && !transferObjectFamily(dbType))).toEqual(TABLE_ONLY_TRANSFER_DATABASES);
+  });
+
+  it("does not expose objects for databases without transfer support", () => {
+    expect(transferObjectKindsForDatabase("redis")).toEqual([]);
+    expect(transferObjectKindsForDatabase(undefined)).toEqual([]);
   });
 
   it("detects same-family transfers", () => {
@@ -40,7 +57,7 @@ describe("transferObjectKinds", () => {
     const same = crossFamilyTransferableKinds("mysql", "mysql");
     expect(same).toContain("TRIGGER");
     expect(same).toContain("EVENT");
-    // unsupported db
+    // transfer-capable database without a modeled cross-family executor
     expect(crossFamilyTransferableKinds("sqlite", "mysql")).toEqual([]);
   });
 });

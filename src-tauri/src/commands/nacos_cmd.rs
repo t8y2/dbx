@@ -23,6 +23,14 @@ pub async fn nacos_list_namespaces(
 }
 
 #[tauri::command]
+pub async fn nacos_sidebar_snapshot(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+) -> Result<dbx_core::nacos::NacosNamespaceSidebarSnapshot, String> {
+    dbx_core::nacos::service::nacos_sidebar_snapshot_core(&state, &connection_id).await
+}
+
+#[tauri::command]
 pub async fn nacos_create_namespace(
     state: State<'_, Arc<AppState>>,
     connection_id: String,

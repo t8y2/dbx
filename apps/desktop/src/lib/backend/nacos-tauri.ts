@@ -38,6 +38,7 @@ import type {
   NacosInstanceUpdateRequest,
   NacosNamespaceCreate,
   NacosNamespaceInfo,
+  NacosNamespaceSidebarSnapshot,
   NacosNamespaceUpdate,
   NacosRawRequest,
   NacosRawResponse,
@@ -54,6 +55,10 @@ export async function nacosTestConnection(connectionId: string): Promise<NacosCo
 
 export async function nacosListNamespaces(connectionId: string): Promise<NacosNamespaceInfo[]> {
   return invoke("nacos_list_namespaces", { connectionId });
+}
+
+export async function nacosSidebarSnapshot(connectionId: string): Promise<NacosNamespaceSidebarSnapshot> {
+  return invoke("nacos_sidebar_snapshot", { connectionId });
 }
 
 export async function nacosCreateNamespace(connectionId: string, req: NacosNamespaceCreate): Promise<void> {

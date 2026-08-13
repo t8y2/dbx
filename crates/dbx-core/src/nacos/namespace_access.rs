@@ -1,0 +1,699 @@
+use std::collections::{BTreeSet, HashMap};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
+
+use sha2::{Digest, Sha256};
+
+use crate::nacos::port::NacosAdmin;
+use crate::nacos::types::*;
+
+const AUTH_PAGE_SIZE: u32 = 500;
+const CACHE_TTL: Duration = Duration::from_secs(60);
+const CACHE_MAX_CONNECTIONS: usize = 64;
+const ADMIN_ROLE: &str = "ROLE_ADMIN";
+
+#[derive(Clone)]
+struct NamespaceAccessCacheEntry {
+    connection_fingerprint: String,
+    namespace_signature: [u8; 32],
+    readable_ids: BTreeSet<String>,
+    access_control: NacosAccessControlCapabilities,
+    expires_at: Instant,
+}
+
+struct ReadableNamespaces {
+    namespaces: Vec<NacosNamespaceInfo>,
+    access_control: NacosAccessControlCapabilities,
+}
+
+fn cache() -> &'static Mutex<HashMap<String, NamespaceAccessCacheEntry>> {
+    static CACHE: OnceLock<Mutex<HashMap<String, NamespaceAccessCacheEntry>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+pub fn invalidate(connection_id: &str) {
+    cache().lock().unwrap_or_else(|error| error.into_inner()).remove(connection_id);
+}
+
+/// Access-control changes can affect a different DBX connection that targets
+/// the same server with the edited account, so invalidate every cached account.
+pub fn invalidate_all() {
+    cache().lock().unwrap_or_else(|error| error.into_inner()).clear();
+}
+
+pub async fn list_readable_namespaces(
+    connection_id: &str,
+    connection_fingerprint: String,
+    admin: Arc<dyn NacosAdmin>,
+) -> Result<Vec<NacosNamespaceInfo>, String> {
+    Ok(load_readable_namespaces(connection_id, connection_fingerprint, admin).await?.namespaces)
+}
+
+pub async fn sidebar_snapshot(
+    connection_id: &str,
+    connection_fingerprint: String,
+    admin: Arc<dyn NacosAdmin>,
+) -> Result<NacosNamespaceSidebarSnapshot, String> {
+    let result = load_readable_namespaces(connection_id, connection_fingerprint, admin).await?;
+    Ok(NacosNamespaceSidebarSnapshot { namespaces: result.namespaces, access_control: result.access_control })
+}
+
+async fn load_readable_namespaces(
+    connection_id: &str,
+    connection_fingerprint: String,
+    admin: Arc<dyn NacosAdmin>,
+) -> Result<ReadableNamespaces, String> {
+    let namespaces = admin.list_namespaces().await?;
+    let access_control = admin.access_control_capabilities();
+    let Some(username) =
+        admin.current_username().map(|value| value.trim().to_string()).filter(|value| !value.is_empty())
+    else {
+        return Ok(ReadableNamespaces { namespaces, access_control });
+    };
+    if let Some(explicit_scope) = admin.explicitly_scoped_namespace_ids() {
+        let readable = explicit_scope.iter().map(|namespace| namespace_identity(namespace)).collect();
+        return Ok(ReadableNamespaces {
+            namespaces: filter_namespaces(namespaces, &readable),
+            access_control: NacosAccessControlCapabilities::unavailable(NacosCapabilityReason::PermissionDenied),
+        });
+    }
+    let signature = namespace_signature(&namespaces);
+    if let Some((readable, cached_access_control)) =
+        cached_readable_ids(connection_id, &connection_fingerprint, signature)
+    {
+        return Ok(ReadableNamespaces {
+            namespaces: filter_namespaces(namespaces, &readable),
+            access_control: cached_access_control,
+        });
+    }
+
+    let readable = readable_ids_from_authorization(admin, &username, &namespaces).await?;
+    cache_readable_ids(connection_id, connection_fingerprint, signature, readable.clone(), access_control.clone());
+    Ok(ReadableNamespaces { namespaces: filter_namespaces(namespaces, &readable), access_control })
+}
+
+async fn readable_ids_from_authorization(
+    admin: Arc<dyn NacosAdmin>,
+    username: &str,
+    namespaces: &[NacosNamespaceInfo],
+) -> Result<BTreeSet<String>, String> {
+    match admin.access_control_capabilities().mode {
+        NacosAccessControlMode::EmbeddedRoles => readable_ids_from_embedded_user(admin, username, namespaces).await,
+        NacosAccessControlMode::RoleBindings => readable_ids_from_role_bindings(admin, username, namespaces).await,
+        NacosAccessControlMode::Unavailable => {
+            Err(namespace_authorization_unavailable("this connection does not expose account authorization data"))
+        }
+    }
+}
+
+async fn readable_ids_from_embedded_user(
+    admin: Arc<dyn NacosAdmin>,
+    username: &str,
+    namespaces: &[NacosNamespaceInfo],
+) -> Result<BTreeSet<String>, String> {
+    let users = admin
+        .list_users(NacosUserQuery { username: Some(username.to_string()), page_no: Some(1), page_size: Some(2) })
+        .await
+        .map_err(|error| namespace_authorization_unavailable(&error))?;
+    let user = users.items.into_iter().find(|user| user.username == username).ok_or_else(|| {
+        namespace_authorization_unavailable("the current r-nacos account was absent from the authorization response")
+    })?;
+    Ok(readable_ids_from_namespace_privilege(user.enabled, user.namespace_privilege.as_ref(), namespaces))
+}
+
+async fn readable_ids_from_role_bindings(
+    admin: Arc<dyn NacosAdmin>,
+    username: &str,
+    namespaces: &[NacosNamespaceInfo],
+) -> Result<BTreeSet<String>, String> {
+    let roles = list_current_roles(admin.clone(), username)
+        .await
+        .map_err(|error| namespace_authorization_unavailable(&error))?;
+    if roles.contains(ADMIN_ROLE) {
+        return Ok(all_namespace_ids(namespaces));
+    }
+    if roles.is_empty() {
+        return Ok(BTreeSet::new());
+    }
+
+    let permissions = list_all_permissions(admin).await.map_err(|error| namespace_authorization_unavailable(&error))?;
+    readable_ids_from_permissions(&roles, &permissions, namespaces)
+        .ok_or_else(|| namespace_authorization_unavailable("the server returned an unsupported permission resource"))
+}
+
+fn namespace_authorization_unavailable(detail: &str) -> String {
+    format!(
+        "NACOS_ERROR[namespaceAuthorizationUnavailable]: DBX cannot safely determine readable namespaces without per-namespace probes: {detail}"
+    )
+}
+
+async fn list_current_roles(admin: Arc<dyn NacosAdmin>, username: &str) -> Result<BTreeSet<String>, String> {
+    let mut roles = BTreeSet::new();
+    let mut page_no = 1;
+    loop {
+        let page = admin
+            .list_role_bindings(NacosRoleQuery {
+                username: Some(username.to_string()),
+                role: None,
+                page_no: Some(page_no),
+                page_size: Some(AUTH_PAGE_SIZE),
+            })
+            .await?;
+        let count = page.items.len();
+        roles.extend(page.items.into_iter().filter(|binding| binding.username == username).map(|binding| binding.role));
+        if count < AUTH_PAGE_SIZE as usize || roles.len() as u64 >= page.total_count {
+            break;
+        }
+        page_no += 1;
+    }
+    Ok(roles)
+}
+
+async fn list_all_permissions(admin: Arc<dyn NacosAdmin>) -> Result<Vec<NacosPermissionInfo>, String> {
+    let mut permissions = Vec::new();
+    let mut page_no = 1;
+    loop {
+        let page = admin
+            .list_permissions(NacosPermissionQuery {
+                role: None,
+                resource: None,
+                page_no: Some(page_no),
+                page_size: Some(AUTH_PAGE_SIZE),
+            })
+            .await?;
+        let count = page.items.len();
+        permissions.extend(page.items);
+        if count < AUTH_PAGE_SIZE as usize || permissions.len() as u64 >= page.total_count {
+            break;
+        }
+        page_no += 1;
+    }
+    Ok(permissions)
+}
+
+fn readable_ids_from_namespace_privilege(
+    enabled: Option<bool>,
+    privilege: Option<&NacosNamespacePrivilege>,
+    namespaces: &[NacosNamespaceInfo],
+) -> BTreeSet<String> {
+    let Some(privilege) = privilege.filter(|_| enabled != Some(false)) else {
+        return if enabled == Some(false) { BTreeSet::new() } else { all_namespace_ids(namespaces) };
+    };
+    if !privilege.enabled {
+        return all_namespace_ids(namespaces);
+    }
+    let mut readable = if privilege.whitelist_is_all {
+        all_namespace_ids(namespaces)
+    } else {
+        privilege.whitelist.iter().map(|namespace| namespace_identity(namespace)).collect()
+    };
+    if privilege.blacklist_is_all {
+        readable.clear();
+    } else {
+        for namespace in &privilege.blacklist {
+            readable.remove(&namespace_identity(namespace));
+        }
+    }
+    readable
+}
+
+fn readable_ids_from_permissions(
+    roles: &BTreeSet<String>,
+    permissions: &[NacosPermissionInfo],
+    namespaces: &[NacosNamespaceInfo],
+) -> Option<BTreeSet<String>> {
+    let mut readable = BTreeSet::new();
+    for permission in permissions.iter().filter(|permission| roles.contains(&permission.role)) {
+        if !matches!(permission.action_raw.trim().to_ascii_lowercase().as_str(), "r" | "rw") {
+            continue;
+        }
+        match permission.parsed_scope.as_ref().map(|scope| scope.kind) {
+            Some(NacosPermissionScopeKind::Global) => return Some(all_namespace_ids(namespaces)),
+            Some(NacosPermissionScopeKind::Namespace) => {
+                if let Some(namespace) =
+                    permission.parsed_scope.as_ref().and_then(|scope| scope.namespace_id.as_deref())
+                {
+                    readable.insert(namespace_identity(namespace));
+                }
+            }
+            _ => {
+                let namespace = permission.resource_raw.split(':').next().unwrap_or_default();
+                if namespace == "*" {
+                    return Some(all_namespace_ids(namespaces));
+                }
+                if permission.resource_raw.contains(':') {
+                    readable.insert(namespace_identity(namespace));
+                } else {
+                    return None;
+                }
+            }
+        }
+    }
+    Some(readable)
+}
+
+fn namespace_identity(namespace: &str) -> String {
+    if namespace.is_empty() || namespace == "public" {
+        "public".to_string()
+    } else {
+        namespace.to_string()
+    }
+}
+
+fn all_namespace_ids(namespaces: &[NacosNamespaceInfo]) -> BTreeSet<String> {
+    namespaces.iter().map(|namespace| namespace_identity(&namespace.namespace)).collect()
+}
+
+fn filter_namespaces(namespaces: Vec<NacosNamespaceInfo>, readable: &BTreeSet<String>) -> Vec<NacosNamespaceInfo> {
+    namespaces.into_iter().filter(|namespace| readable.contains(&namespace_identity(&namespace.namespace))).collect()
+}
+
+fn namespace_signature(namespaces: &[NacosNamespaceInfo]) -> [u8; 32] {
+    let mut identities =
+        namespaces.iter().map(|namespace| namespace_identity(&namespace.namespace)).collect::<Vec<_>>();
+    identities.sort();
+    identities.dedup();
+    let mut hasher = Sha256::new();
+    for identity in identities {
+        hasher.update((identity.len() as u64).to_le_bytes());
+        hasher.update(identity.as_bytes());
+    }
+    hasher.finalize().into()
+}
+
+fn cached_readable_ids(
+    connection_id: &str,
+    connection_fingerprint: &str,
+    namespace_signature: [u8; 32],
+) -> Option<(BTreeSet<String>, NacosAccessControlCapabilities)> {
+    let mut entries = cache().lock().unwrap_or_else(|error| error.into_inner());
+    let now = Instant::now();
+    entries.retain(|_, entry| entry.expires_at > now);
+    entries.get(connection_id).and_then(|entry| {
+        (entry.connection_fingerprint == connection_fingerprint && entry.namespace_signature == namespace_signature)
+            .then(|| (entry.readable_ids.clone(), entry.access_control.clone()))
+    })
+}
+
+fn cache_readable_ids(
+    connection_id: &str,
+    connection_fingerprint: String,
+    namespace_signature: [u8; 32],
+    readable_ids: BTreeSet<String>,
+    access_control: NacosAccessControlCapabilities,
+) {
+    let mut entries = cache().lock().unwrap_or_else(|error| error.into_inner());
+    let now = Instant::now();
+    entries.retain(|_, entry| entry.expires_at > now);
+    if !entries.contains_key(connection_id) && entries.len() >= CACHE_MAX_CONNECTIONS {
+        if let Some(oldest) = entries.iter().min_by_key(|(_, entry)| entry.expires_at).map(|(id, _)| id.clone()) {
+            entries.remove(&oldest);
+        }
+    }
+    entries.insert(
+        connection_id.to_string(),
+        NamespaceAccessCacheEntry {
+            connection_fingerprint,
+            namespace_signature,
+            readable_ids,
+            access_control,
+            expires_at: now + CACHE_TTL,
+        },
+    );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_trait::async_trait;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn namespace(id: &str) -> NacosNamespaceInfo {
+        NacosNamespaceInfo {
+            namespace: id.to_string(),
+            namespace_show_name: id.to_string(),
+            namespace_desc: None,
+            config_count: None,
+            quota: None,
+            namespace_type: None,
+        }
+    }
+
+    fn role_binding_capabilities() -> NacosAccessControlCapabilities {
+        NacosAccessControlCapabilities {
+            mode: NacosAccessControlMode::RoleBindings,
+            list_users: NacosOperationCapability::supported(),
+            create_user: NacosOperationCapability::supported(),
+            update_user: NacosOperationCapability::supported(),
+            delete_user: NacosOperationCapability::supported(),
+            list_role_bindings: NacosOperationCapability::supported(),
+            assign_role: NacosOperationCapability::supported(),
+            remove_role: NacosOperationCapability::supported(),
+            list_permissions: NacosOperationCapability::supported(),
+            grant_permission: NacosOperationCapability::supported(),
+            revoke_permission: NacosOperationCapability::supported(),
+            enhanced_workspace: true,
+            supports_namespace_privileges: false,
+        }
+    }
+
+    struct CountingAdmin {
+        namespaces: Vec<NacosNamespaceInfo>,
+        readable_ids: BTreeSet<String>,
+        permission_error: bool,
+        explicitly_scoped: bool,
+        namespace_calls: AtomicUsize,
+        role_calls: AtomicUsize,
+        permission_calls: AtomicUsize,
+        config_calls: AtomicUsize,
+    }
+
+    impl CountingAdmin {
+        fn restricted(namespace_count: usize) -> Self {
+            let namespaces = (0..namespace_count).map(|index| namespace(&format!("team-{index}"))).collect::<Vec<_>>();
+            let readable_ids = namespaces
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| index % 2 == 0)
+                .map(|(_, namespace)| namespace.namespace.clone())
+                .collect();
+            Self {
+                namespaces,
+                readable_ids,
+                permission_error: false,
+                explicitly_scoped: false,
+                namespace_calls: AtomicUsize::new(0),
+                role_calls: AtomicUsize::new(0),
+                permission_calls: AtomicUsize::new(0),
+                config_calls: AtomicUsize::new(0),
+            }
+        }
+
+        fn total_authorization_calls(&self) -> usize {
+            self.namespace_calls.load(Ordering::SeqCst)
+                + self.role_calls.load(Ordering::SeqCst)
+                + self.permission_calls.load(Ordering::SeqCst)
+                + self.config_calls.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait]
+    impl NacosAdmin for CountingAdmin {
+        fn access_control_capabilities(&self) -> NacosAccessControlCapabilities {
+            role_binding_capabilities()
+        }
+
+        fn current_username(&self) -> Option<String> {
+            Some("reader".to_string())
+        }
+
+        fn explicitly_scoped_namespace_ids(&self) -> Option<Vec<String>> {
+            self.explicitly_scoped
+                .then(|| self.namespaces.iter().map(|namespace| namespace.namespace.clone()).collect())
+        }
+
+        async fn test_connection(&self) -> Result<NacosConnectionInfo, String> {
+            Err("unused".to_string())
+        }
+
+        async fn list_namespaces(&self) -> Result<Vec<NacosNamespaceInfo>, String> {
+            self.namespace_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(self.namespaces.clone())
+        }
+
+        async fn create_namespace(&self, _: NacosNamespaceCreate) -> Result<(), String> {
+            Err("unused".to_string())
+        }
+
+        async fn update_namespace(&self, _: NacosNamespaceUpdate) -> Result<(), String> {
+            Err("unused".to_string())
+        }
+
+        async fn list_configs(&self, _: NacosConfigQuery) -> Result<NacosConfigList, String> {
+            self.config_calls.fetch_add(1, Ordering::SeqCst);
+            Err("per-namespace probes are forbidden in the sidebar path".to_string())
+        }
+
+        async fn search_config_content_page(
+            &self,
+            _: &str,
+            _: &str,
+            _: u32,
+            _: u32,
+        ) -> Result<Option<NacosConfigList>, String> {
+            Err("unused".to_string())
+        }
+
+        async fn get_config(&self, _: NacosConfigKey) -> Result<NacosConfigItem, String> {
+            Err("unused".to_string())
+        }
+
+        async fn publish_config(&self, _: NacosConfigUpsert) -> Result<(), String> {
+            Err("unused".to_string())
+        }
+
+        async fn delete_config(&self, _: NacosConfigKey) -> Result<(), String> {
+            Err("unused".to_string())
+        }
+
+        async fn list_config_history(&self, _: NacosConfigHistoryQuery) -> Result<NacosConfigHistoryList, String> {
+            Err("unused".to_string())
+        }
+
+        async fn get_config_history(&self, _: NacosConfigHistoryKey) -> Result<NacosConfigItem, String> {
+            Err("unused".to_string())
+        }
+
+        async fn rollback_config(&self, _: NacosConfigRollbackRequest) -> Result<(), String> {
+            Err("unused".to_string())
+        }
+
+        async fn get_rnacos_console_captcha(&self) -> Result<NacosRNacosConsoleCaptcha, String> {
+            Err("unused".to_string())
+        }
+
+        async fn login_rnacos_console(&self, _: Option<String>) -> Result<(), String> {
+            Err("unused".to_string())
+        }
+
+        async fn list_role_bindings(&self, _: NacosRoleQuery) -> Result<NacosRoleList, String> {
+            self.role_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(NacosRoleList {
+                page_no: 1,
+                page_size: AUTH_PAGE_SIZE,
+                total_count: 1,
+                items: vec![NacosRoleBinding { username: "reader".to_string(), role: "reader-role".to_string() }],
+            })
+        }
+
+        async fn list_permissions(&self, _: NacosPermissionQuery) -> Result<NacosPermissionList, String> {
+            self.permission_calls.fetch_add(1, Ordering::SeqCst);
+            if self.permission_error {
+                return Err("403 Forbidden".to_string());
+            }
+            let items = self
+                .readable_ids
+                .iter()
+                .map(|namespace| NacosPermissionInfo {
+                    role: "reader-role".to_string(),
+                    resource_raw: format!("{namespace}:*:*"),
+                    action_raw: "r".to_string(),
+                    parsed_scope: Some(NacosPermissionScope {
+                        kind: NacosPermissionScopeKind::Namespace,
+                        namespace_id: Some(namespace.clone()),
+                    }),
+                })
+                .collect::<Vec<_>>();
+            Ok(NacosPermissionList { page_no: 1, page_size: AUTH_PAGE_SIZE, total_count: items.len() as u64, items })
+        }
+
+        async fn list_services(&self, _: NacosServiceQuery) -> Result<NacosServiceList, String> {
+            Err("unused".to_string())
+        }
+
+        async fn get_service(&self, _: NacosServiceQuery) -> Result<NacosServiceDetail, String> {
+            Err("unused".to_string())
+        }
+
+        async fn create_service(&self, _: NacosServiceUpsert) -> Result<(), String> {
+            Err("unused".to_string())
+        }
+
+        async fn update_service(&self, _: NacosServiceUpsert) -> Result<(), String> {
+            Err("unused".to_string())
+        }
+
+        async fn delete_service(&self, _: NacosServiceQuery) -> Result<(), String> {
+            Err("unused".to_string())
+        }
+
+        async fn list_instances(&self, _: NacosInstanceQuery) -> Result<Vec<NacosInstanceInfo>, String> {
+            Err("unused".to_string())
+        }
+
+        async fn update_instance(&self, _: NacosInstanceUpdateRequest) -> Result<(), String> {
+            Err("unused".to_string())
+        }
+
+        async fn register_instance(&self, _: NacosInstanceRegistration) -> Result<(), String> {
+            Err("unused".to_string())
+        }
+
+        async fn deregister_instance(&self, _: NacosInstanceRef) -> Result<(), String> {
+            Err("unused".to_string())
+        }
+
+        async fn get_dashboard(&self, _: NacosDashboardQuery) -> Result<NacosDashboardSnapshot, String> {
+            Err("unused".to_string())
+        }
+
+        async fn raw_request(&self, _: NacosRawRequest) -> Result<NacosRawResponse, String> {
+            Err("unused".to_string())
+        }
+    }
+
+    #[test]
+    fn role_permissions_keep_only_readable_namespaces() {
+        let namespaces = vec![namespace("public"), namespace("team-a"), namespace("team-b")];
+        let roles = BTreeSet::from(["reader".to_string()]);
+        let permissions = vec![
+            NacosPermissionInfo {
+                role: "reader".to_string(),
+                resource_raw: "team-a:*:*".to_string(),
+                action_raw: "r".to_string(),
+                parsed_scope: Some(NacosPermissionScope {
+                    kind: NacosPermissionScopeKind::Namespace,
+                    namespace_id: Some("team-a".to_string()),
+                }),
+            },
+            NacosPermissionInfo {
+                role: "reader".to_string(),
+                resource_raw: "team-b:*:*".to_string(),
+                action_raw: "w".to_string(),
+                parsed_scope: Some(NacosPermissionScope {
+                    kind: NacosPermissionScopeKind::Namespace,
+                    namespace_id: Some("team-b".to_string()),
+                }),
+            },
+        ];
+
+        assert_eq!(
+            readable_ids_from_permissions(&roles, &permissions, &namespaces),
+            Some(BTreeSet::from(["team-a".to_string()]))
+        );
+    }
+
+    #[test]
+    fn embedded_privileges_apply_whitelist_and_blacklist() {
+        let namespaces = vec![namespace("public"), namespace("team-a"), namespace("team-b")];
+        let privilege = NacosNamespacePrivilege {
+            enabled: true,
+            whitelist_is_all: false,
+            whitelist: vec!["team-a".to_string(), "team-b".to_string()],
+            blacklist_is_all: false,
+            blacklist: vec!["team-b".to_string()],
+        };
+
+        assert_eq!(
+            readable_ids_from_namespace_privilege(Some(true), Some(&privilege), &namespaces),
+            BTreeSet::from(["team-a".to_string()])
+        );
+    }
+
+    #[tokio::test]
+    async fn restricted_sidebar_filtering_has_constant_request_count() {
+        let mut request_counts = Vec::new();
+        for namespace_count in [1, 100] {
+            let connection_id = format!("constant-sidebar-requests-{namespace_count}");
+            invalidate(&connection_id);
+            let admin = Arc::new(CountingAdmin::restricted(namespace_count));
+
+            let snapshot = sidebar_snapshot(&connection_id, "server-a".to_string(), admin.clone()).await.unwrap();
+
+            assert_eq!(snapshot.namespaces.len(), namespace_count.div_ceil(2));
+            assert!(snapshot.namespaces.iter().all(|namespace| namespace
+                .namespace
+                .trim_start_matches("team-")
+                .parse::<usize>()
+                .unwrap()
+                % 2
+                == 0));
+            assert_eq!(admin.config_calls.load(Ordering::SeqCst), 0);
+            request_counts.push(admin.total_authorization_calls());
+        }
+
+        assert_eq!(request_counts, vec![3, 3]);
+    }
+
+    #[tokio::test]
+    async fn unavailable_authorization_fails_closed_without_namespace_probes() {
+        let connection_id = "unavailable-sidebar-authorization";
+        invalidate(connection_id);
+        let mut admin = CountingAdmin::restricted(100);
+        admin.permission_error = true;
+        let admin = Arc::new(admin);
+
+        let error = sidebar_snapshot(connection_id, "server-a".to_string(), admin.clone()).await.unwrap_err();
+
+        assert!(error.contains("NACOS_ERROR[namespaceAuthorizationUnavailable]"));
+        assert_eq!(admin.config_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(admin.total_authorization_calls(), 3);
+    }
+
+    #[tokio::test]
+    async fn explicitly_scoped_namespace_list_skips_authorization_queries() {
+        let connection_id = "explicit-sidebar-scope";
+        invalidate(connection_id);
+        let mut admin = CountingAdmin::restricted(100);
+        admin.explicitly_scoped = true;
+        let admin = Arc::new(admin);
+
+        let snapshot = sidebar_snapshot(connection_id, "server-a".to_string(), admin.clone()).await.unwrap();
+
+        assert_eq!(snapshot.namespaces.len(), 100);
+        assert_eq!(admin.total_authorization_calls(), 1);
+        assert!(!snapshot.access_control.list_users.supported);
+    }
+
+    #[test]
+    fn cache_is_bound_to_connection_fingerprint_and_namespace_set() {
+        let connection_id = "namespace-cache-test";
+        invalidate(connection_id);
+        let first_namespaces = vec![namespace("public"), namespace("team-a")];
+        let first_signature = namespace_signature(&first_namespaces);
+        cache_readable_ids(
+            connection_id,
+            "server-a".to_string(),
+            first_signature,
+            BTreeSet::from(["team-a".to_string()]),
+            role_binding_capabilities(),
+        );
+
+        assert_eq!(
+            cached_readable_ids(connection_id, "server-a", first_signature).map(|(ids, _)| ids),
+            Some(BTreeSet::from(["team-a".to_string()]))
+        );
+        assert_eq!(cached_readable_ids(connection_id, "server-b", first_signature), None);
+        assert_eq!(cached_readable_ids(connection_id, "server-a", namespace_signature(&[namespace("team-b")])), None);
+        invalidate(connection_id);
+        assert_eq!(cached_readable_ids(connection_id, "server-a", first_signature), None);
+
+        cache_readable_ids(
+            connection_id,
+            "server-a".to_string(),
+            first_signature,
+            BTreeSet::new(),
+            role_binding_capabilities(),
+        );
+        cache_readable_ids(
+            "other-connection",
+            "server-a".to_string(),
+            first_signature,
+            BTreeSet::new(),
+            role_binding_capabilities(),
+        );
+        invalidate_all();
+        assert_eq!(cached_readable_ids(connection_id, "server-a", first_signature), None);
+        assert_eq!(cached_readable_ids("other-connection", "server-a", first_signature), None);
+    }
+}

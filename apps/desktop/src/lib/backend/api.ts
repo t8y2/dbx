@@ -351,6 +351,7 @@ export const listSqlFilesInFolder = forward("listSqlFilesInFolder");
 // Nacos
 export const nacosTestConnection = forward("nacosTestConnection");
 export const nacosListNamespaces = forward("nacosListNamespaces");
+export const nacosSidebarSnapshot = forward("nacosSidebarSnapshot");
 export const nacosCreateNamespace = forward("nacosCreateNamespace");
 export const nacosUpdateNamespace = forward("nacosUpdateNamespace");
 export const nacosListConfigs = forward("nacosListConfigs");

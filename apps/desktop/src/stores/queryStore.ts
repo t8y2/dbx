@@ -35,7 +35,7 @@ import { nextRedisCommandDb } from "@/lib/redis/redisCommandSession";
 import { isRedisMutatingCommand } from "@/lib/redis/redisCommandTable";
 import { usesAgentCursorForQuery } from "@/lib/database/databaseDriverManifest";
 import { supportsClearableQuerySchema } from "@/lib/database/databaseFeatureSupport";
-import { canUseKeylessRowPredicate, DBX_ROWID_COLUMN, editablePrimaryKeys, usesSyntheticRowIdKey } from "@/lib/table/tableEditing";
+import { canInsertTableRows, canUseKeylessRowPredicate, DBX_ROWID_COLUMN, editablePrimaryKeys, usesSyntheticRowIdKey } from "@/lib/table/tableEditing";
 import { TABLE_DATA_EXPORT_PAGE_SIZE } from "@/lib/table/tableDataExport";
 import { tableMetaForDataTab } from "@/lib/table/tableDataTabMeta";
 import { dataTabExecutionDatabase } from "@/lib/table/dataTabExecutionDatabase";
@@ -46,7 +46,7 @@ import { connectionObjectTreeNodeSchema, connectionQueryExecutionSchema, connect
 import { frontendQueryTimeoutDelayMs, frontendQueryTimeoutSecsForSql, queryTimeoutSecsForConnection } from "@/lib/sql/queryTimeout";
 import { queryResultNameFromPreamble, queryResultSourceLabel } from "@/lib/sql/queryResultSource";
 import { beginDataGridNativeSelectionBlock, finishDataGridNativeSelectionBlock } from "@/lib/dataGrid/dataGridNativeSelection";
-import { appendLargeValueCells, remapLargeValueCells, TABLE_DATA_RESULT_MAX_BYTES } from "@/lib/dataGrid/dataGridLargeValues";
+import { appendLargeValueCells, canUseTableDataLargeValuePreview, remapLargeValueCells, tableDataLargeValuePreviewOptions, TABLE_DATA_RESULT_MAX_BYTES } from "@/lib/dataGrid/dataGridLargeValues";
 import { simpleDataGridOrderByReferencesMissingColumn, sortDataGridRowIndexes, type DataGridSortDirection } from "@/lib/dataGrid/dataGridSort";
 import { normalizeResultPageSize } from "@/lib/dataGrid/paginationPageSize";
 import { agentProtocolQueryResultMaxRows, capQueryResultTotal, effectiveQueryResultMaxRows, limitQueryPagination, queryResultLimitReached } from "@/lib/dataGrid/queryResultRowLimit";
@@ -1607,7 +1607,7 @@ export const useQueryStore = defineStore("query", () => {
     return tabs.value.find((tab) => tab.connectionId === connectionId && tab.database === database && tab.title === title && tab.mode === mode && (tab.schema || "") === (schema || "") && (tab.catalog || "") === (catalog || ""));
   }
 
-  function createTab(connectionId: string, database: string, title?: string, mode: QueryTab["mode"] = "query", schema?: string, initialSql?: string, catalog?: string, options: { forceNew?: boolean; activate?: boolean } = {}) {
+  function createTab(connectionId: string, database: string, title?: string, mode: QueryTab["mode"] = "query", schema?: string, initialSql?: string, catalog?: string, options: { forceNew?: boolean; activate?: boolean; forceWordWrap?: boolean } = {}) {
     if (title && !options.forceNew) {
       const existing = findTabByIdentity(connectionId, database, title, mode, schema, catalog);
       if (existing) {
@@ -1621,6 +1621,7 @@ export const useQueryStore = defineStore("query", () => {
       id,
       title: title || `query_${tabs.value.length + 1}`,
       customTitle: mode === "query" && !!title ? true : undefined,
+      forceWordWrap: options.forceWordWrap,
       connectionId,
       database,
       schema,
@@ -2765,6 +2766,7 @@ export const useQueryStore = defineStore("query", () => {
     const orderBy = tab.orderByInput?.trim() || sortOrder;
     const limit = tab.resultPageLimit ?? tableOpenPageLimit(settingsStore.editorSettings.tableOpenPageSize);
     const offset = tab.resultPageOffset ?? 0;
+    const useDriverRowOffset = conn?.db_type === "jdbc" && effectiveDbType === "iris";
     const refreshPreparationId = uuid();
 
     // Reserve the tab synchronously before SQL construction yields so repeated
@@ -2782,11 +2784,13 @@ export const useQueryStore = defineStore("query", () => {
         catalog: tableMeta.catalog,
         columns: tableMeta.columns.map((column) => column.name),
         primaryKeys,
+        ...tableDataLargeValuePreviewOptions(effectiveDbType, tableMeta.columns, primaryKeys, limit),
         includeRowId: usesSyntheticRowIdKey(effectiveDbType, primaryKeys, tableMeta.tableType),
         whereInput: tab.whereInput,
         orderBy,
         limit,
         offset,
+        ...(useDriverRowOffset ? { useDriverRowOffset: true } : {}),
       });
       if (!sql.trim()) throw new Error("Failed to build table refresh SQL");
       const current = tabs.value.find((candidate) => candidate.id === id);
@@ -3376,6 +3380,16 @@ export const useQueryStore = defineStore("query", () => {
     writeSchema?: string;
   };
 
+  function canInsertIntoEditableQuerySource(tab: QueryTab, databaseType: DatabaseType | undefined, loaded: LoadedEditableSource, sourceColumns: readonly (string | undefined)[] | undefined): boolean {
+    if (!canInsertTableRows(databaseType) || !sourceColumns?.length || !sourceColumns.every(Boolean)) return false;
+    const knownTableType =
+      loaded.tableMeta.tableType ??
+      useConnectionStore()
+        .lookupLocalCompletionTables(tab.connectionId!, loaded.tableMeta.database ?? tab.database, loaded.tableMeta.tableName, 20, loaded.tableMeta.schema, loaded.tableMeta.catalog)
+        .find((table) => table.name.toLowerCase() === loaded.tableMeta.tableName.toLowerCase())?.type;
+    return !knownTableType?.toUpperCase().includes("VIEW");
+  }
+
   interface EditableQueryExecutionPreparation {
     sql: string;
     metadataSql: string;
@@ -3695,7 +3709,7 @@ export const useQueryStore = defineStore("query", () => {
         }
 
         return {
-          queryAnalysis: metadataAnalysis,
+          queryAnalysis: metadataAnalysis.distinct && canInsertIntoEditableQuerySource(tab, dbType as DatabaseType, loaded, sourceColumns) ? { ...metadataAnalysis, allowInsert: true } : metadataAnalysis,
           querySourceColumns: sourceColumns,
           queryEditabilityReason: undefined,
           tableMeta: primaryKeys === loaded.tableMeta.primaryKeys ? loaded.tableMeta : { ...loaded.tableMeta, primaryKeys },
@@ -3723,6 +3737,7 @@ export const useQueryStore = defineStore("query", () => {
       const target = candidates[0]!;
       const queryAnalysis = {
         ...target.analysis,
+        ...(target.analysis.distinct && canInsertIntoEditableQuerySource(tab, dbType as DatabaseType, target, target.sourceColumns) ? { allowInsert: true } : {}),
         allowInsertDelete: false,
         multiSource: true,
       };
@@ -4573,6 +4588,9 @@ export const useQueryStore = defineStore("query", () => {
         queryExecutionLog("info", "execute-multi:start", { traceId, elapsed: elapsed() });
         // Query and data tabs use a tab-scoped pool so repeated executions keep
         // connection-local state and avoid MySQL pool resets on every refresh.
+        const dataTabMeta = tab.mode === "data" ? tableMetaForDataTab(tab) : undefined;
+        const useTableDataPreview = canUseTableDataLargeValuePreview(effectiveDbType, dataTabMeta?.columns ?? [], dataTabMeta?.primaryKeys ?? []);
+        const useJdbcDriverRowOffset = tab.mode === "data" && conn?.db_type === "jdbc" && effectiveDbType === "iris";
         const executionOptions = {
           ...(typeof pageLimit === "number"
             ? useAgentResultSession
@@ -4585,11 +4603,13 @@ export const useQueryStore = defineStore("query", () => {
                 }
               : { maxRows: pageLimit, fetchSize: pageLimit }
             : { maxRows: agentProtocolQueryResultMaxRows(queryResultMaxRows) }),
+          ...(useJdbcDriverRowOffset && typeof pageOffset === "number" && pageOffset > 0 ? { rowOffset: pageOffset } : {}),
           ...(executionClientSessionId ? { clientSessionId: executionClientSessionId } : {}),
-          ...(tab.mode === "data" && effectiveDbType === "mysql"
+          ...(tab.mode === "data" && (effectiveDbType === "mysql" || effectiveDbType === "postgres")
             ? {
                 maxResultBytes: TABLE_DATA_RESULT_MAX_BYTES,
-                resultKeyColumns: tableMetaForDataTab(tab)?.primaryKeys ?? [],
+                resultKeyColumns: dataTabMeta?.primaryKeys ?? [],
+                tableDataPreview: useTableDataPreview,
               }
             : {}),
           timeoutSecs: queryTimeoutSecs,
@@ -5327,6 +5347,8 @@ export const useQueryStore = defineStore("query", () => {
     tab.resultSortDirection = undefined;
     tab.resultSortMode = undefined;
     tab.resultSortedSql = undefined;
+    tab.resultTotalRowCount = undefined;
+    tab.resultTotalRowCountLoading = false;
     // results 数组未变，估算值与当前激活的 result 无关，可直接复用
     touchResult(tab, Date.now(), { reuseEstimatedBytes: true });
     tab.queryAnalysis = undefined;

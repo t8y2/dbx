@@ -4,12 +4,14 @@ import { createSidebarLabelMatcher, type SidebarLabelMatcher } from "@/lib/sideb
 const preserveMatchedSubtreeTypes = new Set(["connection", "database", "schema", "table", "view", "mongo-db", "mongo-collection"]);
 const hiddenSearchNodeTypes = new Set<TreeNodeType>(["user-admin", "dameng-job-admin"]);
 
-function bestMatch(matchLabel: SidebarLabelMatcher, label: string, comment?: string | null) {
-  const lm = matchLabel(label);
-  if (!comment) return lm;
-  const cm = matchLabel(comment);
-  if (lm && cm) return lm.score >= cm.score ? lm : cm;
-  return lm ?? cm;
+function bestMatch(matchLabel: SidebarLabelMatcher, label: string, comment?: string | null, aliases?: readonly string[]) {
+  let best = matchLabel(label);
+  for (const candidate of [comment, ...(aliases ?? [])]) {
+    if (!candidate) continue;
+    const match = matchLabel(candidate);
+    if (match && (!best || match.score > best.score)) best = match;
+  }
+  return best;
 }
 
 function normalizedLabel(node: TreeNode, resolveLabel?: (node: TreeNode) => string): string {
@@ -18,6 +20,36 @@ function normalizedLabel(node: TreeNode, resolveLabel?: (node: TreeNode) => stri
   // -> "camel" | "Case" | "Table") instead of treating them as one lowercase
   // blob.
   return resolveLabel?.(node) ?? node.label;
+}
+
+function findNodePath(nodes: readonly TreeNode[], targetNodeId: string, ancestors: readonly TreeNode[] = []): readonly TreeNode[] | undefined {
+  for (const node of nodes) {
+    const path = [...ancestors, node];
+    if (node.id === targetNodeId) return path;
+    if (node.children) {
+      const childPath = findNodePath(node.children, targetNodeId, path);
+      if (childPath) return childPath;
+    }
+  }
+  return undefined;
+}
+
+function nodePreservesSearchSubtree(node: TreeNode, matchLabel: SidebarLabelMatcher, searchableNodeTypes?: ReadonlySet<TreeNodeType>): boolean {
+  if (searchableNodeTypes && !searchableNodeTypes.has(node.type)) return false;
+  return preserveMatchedSubtreeTypes.has(node.type) && !!bestMatch(matchLabel, normalizedLabel(node), node.comment, node.searchAliases);
+}
+
+export function createSidebarSearchSubtreePreserver(query: string, searchableNodeTypes?: ReadonlySet<TreeNodeType>): (node: TreeNode) => boolean {
+  const matchLabel = query ? createSidebarLabelMatcher(query) : undefined;
+  return (node) => !!matchLabel && nodePreservesSearchSubtree(node, matchLabel, searchableNodeTypes);
+}
+
+export function resolveSidebarObjectSearchFilter(nodes: readonly TreeNode[], targetNodeId: string, query: string, searchableNodeTypes?: ReadonlySet<TreeNodeType>): string {
+  if (!query) return query;
+  const matchLabel = createSidebarLabelMatcher(query);
+  const path = findNodePath(nodes, targetNodeId);
+  const preservesSubtree = path?.some((node) => nodePreservesSearchSubtree(node, matchLabel, searchableNodeTypes));
+  return preservesSubtree ? "" : query;
 }
 
 export function filterSidebarTree(nodes: TreeNode[], query: string, collapsedIds: ReadonlySet<string>, searchableNodeTypes?: ReadonlySet<TreeNodeType>, resolveLabel?: (node: TreeNode) => string): TreeNode[] {
@@ -67,7 +99,7 @@ function filterSidebarTreeWithMatcher(nodes: TreeNode[], matchLabel: SidebarLabe
 
     const label = normalizedLabel(node, resolveLabel);
     const canSelfMatch = !searchableNodeTypes || searchableNodeTypes.has(node.type);
-    const selfMatch = canSelfMatch ? (matchLabel ? bestMatch(matchLabel, label, node.comment) : { score: 0 }) : null;
+    const selfMatch = canSelfMatch ? (matchLabel ? bestMatch(matchLabel, label, node.comment, node.searchAliases) : { score: 0 }) : null;
     // Type-only filtering keeps matching rows and their ancestor path, but not
     // unrelated descendants that would make the selected type appear ignored.
     const preservesSubtree = !!matchLabel && !!selfMatch && preserveMatchedSubtreeTypes.has(node.type);

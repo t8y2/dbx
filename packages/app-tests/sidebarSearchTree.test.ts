@@ -1,7 +1,7 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { filterSidebarSearchRootsByConnectionState, filterSidebarTree, reuseLiveSidebarTreeNodes } from "../../apps/desktop/src/lib/sidebar/sidebarSearchTree.ts";
-import type { TreeNode } from "../../apps/desktop/src/types/database.ts";
+import { filterSidebarSearchRootsByConnectionState, filterSidebarTree, resolveSidebarObjectSearchFilter, reuseLiveSidebarTreeNodes } from "../../apps/desktop/src/lib/sidebar/sidebarSearchTree.ts";
+import type { TreeNode, TreeNodeType } from "../../apps/desktop/src/types/database.ts";
 
 test("preserves loaded table children when the table itself matches search", () => {
   const nodes: TreeNode[] = [
@@ -210,6 +210,89 @@ test("preserves loaded children when the connection itself matches search", () =
   assert.equal(filtered[0]?.label, "192.168.0.200_3306");
   assert.equal(filtered[0]?.children?.[0]?.label, "inventory");
   assert.equal(filtered[0]?.children?.[0]?.children?.[0]?.label, "products");
+});
+
+test("does not treat a matching connection name as an object-name filter", () => {
+  const tablesGroup: TreeNode = {
+    id: "conn:1:basic:__tables",
+    label: "tree.tables",
+    type: "group-tables",
+    connectionId: "conn:1",
+    database: "basic",
+    isExpanded: true,
+    children: [],
+  };
+  const nodes: TreeNode[] = [
+    {
+      id: "conn:1",
+      label: "60307",
+      type: "connection",
+      connectionId: "conn:1",
+      isExpanded: true,
+      children: [
+        {
+          id: "conn:1:basic",
+          label: "basic",
+          type: "database",
+          connectionId: "conn:1",
+          database: "basic",
+          isExpanded: true,
+          children: [tablesGroup],
+        },
+      ],
+    },
+  ];
+
+  assert.equal(resolveSidebarObjectSearchFilter(nodes, tablesGroup.id, "60307"), "");
+  assert.equal(resolveSidebarObjectSearchFilter(nodes, tablesGroup.id, "orders"), "orders");
+  assert.equal(resolveSidebarObjectSearchFilter(nodes, "conn:1:basic", "basic"), "");
+});
+
+test("only lets searchable ancestor types suppress the object-name filter", () => {
+  const tablesGroup: TreeNode = {
+    id: "conn:1:basic:__tables",
+    label: "tree.tables",
+    type: "group-tables",
+    connectionId: "conn:1",
+    database: "basic",
+  };
+  const nodes: TreeNode[] = [
+    {
+      id: "conn:1",
+      label: "60307",
+      type: "connection",
+      connectionId: "conn:1",
+      children: [
+        {
+          id: "conn:1:basic",
+          label: "basic",
+          type: "database",
+          connectionId: "conn:1",
+          database: "basic",
+          children: [tablesGroup],
+        },
+      ],
+    },
+  ];
+
+  assert.equal(resolveSidebarObjectSearchFilter(nodes, tablesGroup.id, "60307", new Set<TreeNodeType>(["table"])), "60307");
+  assert.equal(resolveSidebarObjectSearchFilter(nodes, tablesGroup.id, "60307", new Set<TreeNodeType>(["connection", "table"])), "");
+});
+
+test("matches connections by host and username search aliases", () => {
+  const connection: TreeNode = {
+    id: "conn:1",
+    label: "Production reporting",
+    type: "connection",
+    connectionId: "conn:1",
+    searchAliases: ["192.168.0.27", "report_user"],
+    isExpanded: false,
+    children: [],
+  };
+
+  assert.equal(filterSidebarTree([connection], "192.168.0", new Set())[0]?.id, connection.id);
+  assert.equal(filterSidebarTree([connection], "report_user", new Set())[0]?.id, connection.id);
+  assert.deepEqual(filterSidebarTree([connection], "unrelated", new Set()), []);
 });
 
 test("omits synthetic connection management entries when the connection itself matches search", () => {

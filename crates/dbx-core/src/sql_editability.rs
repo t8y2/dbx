@@ -23,6 +23,8 @@ pub struct EditableQueryInfo {
     #[serde(default, skip_serializing_if = "is_false")]
     pub multi_source: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_insert: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allow_insert_delete: Option<bool>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub distinct: bool,
@@ -215,6 +217,7 @@ pub fn analyze_editable_query_editability(sql: &str) -> QueryEditability {
         multi_source: false,
         // Updating an identified base row is safe, but insert/delete semantics are
         // ambiguous when the displayed set is de-duplicated by the query.
+        allow_insert: distinct.then_some(false),
         allow_insert_delete: distinct.then_some(false),
         distinct,
     };
@@ -339,7 +342,11 @@ fn parse_star_select_column(column: &str, sources: &[FromSource]) -> Option<Edit
 }
 
 fn parse_computed_select_column(column: &str) -> Option<EditableQueryColumn> {
-    let alias = parse_expression_alias(column)?;
+    let alias = parse_expression_alias(column).or_else(|| {
+        let expression = column.trim();
+        looks_like_computed_expression(expression)
+            .then(|| ExpressionAlias { expression: expression.to_string(), result_name: expression.to_string() })
+    })?;
     Some(EditableQueryColumn {
         source_name: None,
         source_name_quoted: false,
@@ -384,21 +391,165 @@ fn parse_expression_alias(column: &str) -> Option<ExpressionAlias> {
         return Some(ExpressionAlias { expression, result_name: alias.value });
     }
 
-    for (index, _) in trimmed_end.match_indices('\'') {
-        if !previous_char(trimmed_end, index).is_some_and(char::is_whitespace) {
-            continue;
+    if let Some(index) = last_top_level_whitespace_start(trimmed_end) {
+        let alias_text = trimmed_end[index..].trim();
+        if let Some(alias) = read_select_alias(alias_text) {
+            let expression = trimmed_end[..index].trim();
+            // `a + b` has no alias: the prefix `a +` is incomplete, so the
+            // whole projection keeps the server's expression label.
+            if alias.end == alias_text.len()
+                && (alias.quoted || !is_reserved_implicit_alias(&alias.value))
+                && looks_like_computed_expression(expression)
+            {
+                return Some(ExpressionAlias { expression: expression.to_string(), result_name: alias.value });
+            }
         }
-        let alias = read_select_alias(&trimmed_end[index..])?;
-        if alias.end != trimmed_end.len() - index {
-            continue;
-        }
-        let expression = trimmed_end[..index].trim().to_string();
-        if expression.is_empty() {
-            return None;
-        }
-        return Some(ExpressionAlias { expression, result_name: alias.value });
     }
     None
+}
+
+fn last_top_level_whitespace_start(text: &str) -> Option<usize> {
+    let mut last = None;
+    let mut depth = 0i32;
+    let mut quote: Option<char> = None;
+    let mut in_whitespace = false;
+
+    for (index, ch) in text.char_indices() {
+        if let Some(close) = quote {
+            if ch == close {
+                quote = None;
+            }
+            continue;
+        }
+        match ch {
+            '\'' | '"' | '`' => quote = Some(ch),
+            '[' => quote = Some(']'),
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            _ => {}
+        }
+        let top_level_whitespace = depth == 0 && ch.is_whitespace();
+        if top_level_whitespace && !in_whitespace {
+            last = Some(index);
+        }
+        in_whitespace = top_level_whitespace;
+    }
+    last
+}
+
+fn looks_like_computed_expression(expression: &str) -> bool {
+    let expression = expression.trim();
+    if expression.is_empty() || !has_balanced_expression_delimiters(expression) {
+        return false;
+    }
+    if parse_qualified_identifier(expression).is_some_and(|identifier| identifier.end == expression.len()) {
+        return false;
+    }
+    if expression.chars().next_back().is_some_and(|ch| {
+        matches!(ch, '+' | '-' | '*' | '/' | '%' | '=' | '<' | '>' | '!' | '|' | '&' | '^' | ',' | '.' | ':')
+    }) {
+        return false;
+    }
+    let final_word = expression.split_whitespace().next_back().unwrap_or_default().to_ascii_uppercase();
+    if matches!(
+        final_word.as_str(),
+        "AND"
+            | "OR"
+            | "XOR"
+            | "NOT"
+            | "LIKE"
+            | "ILIKE"
+            | "IS"
+            | "IN"
+            | "BETWEEN"
+            | "WHEN"
+            | "THEN"
+            | "ELSE"
+            | "AS"
+            | "COLLATE"
+            | "AT"
+            | "DIV"
+            | "MOD"
+            | "REGEXP"
+            | "RLIKE"
+    ) {
+        return false;
+    }
+
+    let Some(source) = parse_qualified_identifier(expression) else {
+        return true;
+    };
+    if source.end == expression.len() {
+        return false;
+    }
+    let rest = expression[source.end..].trim_start();
+    matches!(
+        rest.chars().next(),
+        Some('(' | '+' | '-' | '*' | '/' | '%' | '=' | '<' | '>' | '!' | '|' | '&' | '^' | ':' | '?')
+    ) || ["IS", "IN", "LIKE", "ILIKE", "BETWEEN", "COLLATE", "AT", "DIV", "MOD", "REGEXP", "RLIKE"]
+        .iter()
+        .any(|keyword| starts_with_keyword(rest, keyword))
+        || starts_with_keyword(expression, "CASE")
+        || starts_with_keyword(expression, "NOT")
+}
+
+fn has_balanced_expression_delimiters(expression: &str) -> bool {
+    let mut depth = 0i32;
+    let mut quote: Option<char> = None;
+    for ch in expression.chars() {
+        if let Some(close) = quote {
+            if ch == close {
+                quote = None;
+            }
+            continue;
+        }
+        match ch {
+            '\'' | '"' | '`' => quote = Some(ch),
+            '[' => quote = Some(']'),
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth < 0 {
+                    return false;
+                }
+            }
+            _ => {}
+        }
+    }
+    depth == 0 && quote.is_none()
+}
+
+fn is_reserved_implicit_alias(alias: &str) -> bool {
+    matches!(
+        alias.to_ascii_uppercase().as_str(),
+        "ALL"
+            | "AND"
+            | "AS"
+            | "ASC"
+            | "BETWEEN"
+            | "CASE"
+            | "COLLATE"
+            | "DESC"
+            | "DISTINCT"
+            | "ELSE"
+            | "END"
+            | "FALSE"
+            | "FROM"
+            | "IN"
+            | "IS"
+            | "LIKE"
+            | "LIMIT"
+            | "NOT"
+            | "NULL"
+            | "OFFSET"
+            | "OR"
+            | "ORDER"
+            | "THEN"
+            | "TRUE"
+            | "WHEN"
+            | "WHERE"
+            | "XOR"
+    )
 }
 
 fn parse_column_alias(rest: &str) -> Option<Option<String>> {
@@ -1082,6 +1233,7 @@ mod tests {
         assert!(result.editable);
         let analysis = result.analysis.unwrap();
         assert!(analysis.distinct);
+        assert_eq!(analysis.allow_insert, Some(false));
         assert_eq!(analysis.allow_insert_delete, Some(false));
         assert_eq!(analysis.columns.len(), 2);
     }
@@ -1089,15 +1241,27 @@ mod tests {
     #[test]
     fn recognizes_distinct_qualified_star_from_join() {
         let result = analyze_editable_query_editability(
-            "select distinct u.* from users u left join orders o on o.user_id = u.id",
+            "select distinct t4.*
+             from TASK_CHECK_BASE t1
+             left join TASK_FORMULATE_EXECUTE t20 on t1.EXECUTE_UID = t20.EXECUTE_UID
+             left join TASK_FORMULATE_BASE t40 on t20.FORMULATE_UID = t40.FORMULATE_UID
+             left join TASK_EXECUTE_FORM t30 on t20.EXECUTE_UID = t30.EXECUTE_UID
+             left join TASK_CHECK_ORG t2 on t1.TASK_ID = t2.TASK_ID
+             left join TASK_CHECK_ORG_INNER_DEPT t3 on t2.TASK_ORG_ID = t3.TASK_ORG_ID
+             left join TASK_CHECK_ENT t4 on t1.TASK_ID = t4.TASK_ID
+             left join TASK_EXECUTE_OBJ_ENT t44 on t1.EXECUTE_UID = t44.EXECUTE_UID
+             left join TASK_CHECK_DEPT_RESULT t5 on t4.TASK_ID = t5.TASK_ID and t4.TASK_ENT_ID = t5.TASK_ENT_ID
+             left join TASK_EXECUTE_PERSON_AGENT t6 on t1.EXECUTE_UID = t6.EXECUTE_UID",
         );
 
         assert!(result.editable);
         let analysis = result.analysis.unwrap();
         assert!(analysis.distinct);
         assert!(analysis.multi_source);
+        assert_eq!(analysis.allow_insert, Some(false));
         assert_eq!(analysis.allow_insert_delete, Some(false));
-        assert_eq!(analysis.columns, vec![star_column(Some("u"), Some("u:0"), "u.*")]);
+        assert_eq!(analysis.sources.as_ref().map(Vec::len), Some(10));
+        assert_eq!(analysis.columns, vec![star_column(Some("t4"), Some("t4:6"), "t4.*")]);
     }
 
     #[test]
@@ -1180,6 +1344,68 @@ mod tests {
                 column(Some("year"), false, None, None, "year", "year"),
                 column(Some("country_name"), false, None, None, "country_name", "country_name"),
                 column(None, false, None, None, "score", "ihli / gdp_pc"),
+            ]
+        );
+    }
+
+    #[test]
+    fn keeps_mysql_json_expressions_read_only_with_or_without_aliases() {
+        for (sql, expected) in [
+            (
+                "select id, status, extra->>'$.mode' mode, extra->>'$.template' tmpl from jobs",
+                vec![
+                    column(Some("id"), false, None, None, "id", "id"),
+                    column(Some("status"), false, None, None, "status", "status"),
+                    column(None, false, None, None, "mode", "extra->>'$.mode'"),
+                    column(None, false, None, None, "tmpl", "extra->>'$.template'"),
+                ],
+            ),
+            (
+                "select id, status, extra->>'$.mode', extra->>'$.template' from jobs",
+                vec![
+                    column(Some("id"), false, None, None, "id", "id"),
+                    column(Some("status"), false, None, None, "status", "status"),
+                    column(None, false, None, None, "extra->>'$.mode'", "extra->>'$.mode'"),
+                    column(None, false, None, None, "extra->>'$.template'", "extra->>'$.template'"),
+                ],
+            ),
+        ] {
+            let result = analyze_editable_query_editability(sql);
+
+            assert!(result.editable, "{sql}: {:?}", result.reason);
+            assert_eq!(result.analysis.unwrap().columns, expected, "{sql}");
+        }
+    }
+
+    #[test]
+    fn keeps_computed_aliases_separate_from_writeable_source_columns() {
+        let result = analyze_editable_query_editability(
+            "select id, status as state, lower(name) normalized, count_value + 1 from jobs",
+        );
+
+        assert!(result.editable);
+        assert_eq!(
+            result.analysis.unwrap().columns,
+            vec![
+                column(Some("id"), false, None, None, "id", "id"),
+                column(Some("status"), false, None, None, "state", "status"),
+                column(None, false, None, None, "normalized", "lower(name)"),
+                column(None, false, None, None, "count_value + 1", "count_value + 1"),
+            ]
+        );
+    }
+
+    #[test]
+    fn keeps_unaliased_computed_result_labels_without_binding_them() {
+        let result = analyze_editable_query_editability("select id, id + status, lower(status) from jobs");
+
+        assert!(result.editable);
+        assert_eq!(
+            result.analysis.unwrap().columns,
+            vec![
+                column(Some("id"), false, None, None, "id", "id"),
+                column(None, false, None, None, "id + status", "id + status"),
+                column(None, false, None, None, "lower(status)", "lower(status)"),
             ]
         );
     }

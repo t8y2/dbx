@@ -534,9 +534,9 @@ pub async fn uninstall_agent_jre(am: &AgentManager, jre_key: &str) -> Result<(),
     let local_state = am.load_state();
     let dependents: Vec<&str> = local_state
         .installed_drivers
-        .iter()
-        .filter(|(_, driver)| driver.jre == jre_key)
-        .map(|(k, _)| k.as_str())
+        .keys()
+        .filter(|db_type| am.installed_driver_jre_dependency(&local_state, db_type) == Some(jre_key))
+        .map(|k| k.as_str())
         .collect();
     if !dependents.is_empty() {
         return Err(format!("JRE {jre_key} is in use by drivers: {}. Uninstall them first.", dependents.join(", ")));
@@ -818,13 +818,17 @@ async fn ensure_jre_from_registry(
     Ok(())
 }
 
-/// Stop daemons whose installed driver lists `jre_key` as its runtime.
+/// Stop daemons whose installed driver actually runs on `jre_key`.
 async fn stop_daemons_using_jre(am: &AgentManager, jre_key: &str) {
     let state = am.load_state();
-    for (db_type, driver) in &state.installed_drivers {
-        if driver.jre == jre_key {
-            am.stop_daemon_by_key(db_type).await;
-        }
+    let keys: Vec<String> = state
+        .installed_drivers
+        .keys()
+        .filter(|db_type| am.installed_driver_jre_dependency(&state, db_type) == Some(jre_key))
+        .cloned()
+        .collect();
+    for db_type in keys {
+        am.stop_daemon_by_key(&db_type).await;
     }
 }
 
@@ -2818,6 +2822,56 @@ mod agent_registry_install_tests {
         state.jre_versions.insert(DEFAULT_JRE_KEY.to_string(), "21.0.12+kerberos.ec.2".to_string());
         manager.save_state(&state).unwrap();
         assert!(!jre_needs_install(&manager, &registry, DEFAULT_JRE_KEY));
+    }
+
+    fn install_jre(manager: &AgentManager) {
+        let java_path = manager.jre_java_path(DEFAULT_JRE_KEY);
+        std::fs::create_dir_all(java_path.parent().unwrap()).unwrap();
+        std::fs::write(&java_path, b"java").unwrap();
+        let mut state = manager.load_state();
+        state.jre_versions.insert(DEFAULT_JRE_KEY.to_string(), "21.0.0".to_string());
+        manager.save_state(&state).unwrap();
+    }
+
+    fn record_driver(manager: &AgentManager, db_type: &str) {
+        let mut state = manager.load_state();
+        state.installed_drivers.insert(
+            db_type.to_string(),
+            InstalledDriver {
+                version: "1.0.0".to_string(),
+                installed_at: "2026-01-01T00:00:00Z".to_string(),
+                jre: DEFAULT_JRE_KEY.to_string(),
+            },
+        );
+        manager.save_state(&state).unwrap();
+    }
+
+    #[tokio::test]
+    async fn uninstall_jre_ignores_native_driver_dependents() {
+        // A native (non-Java) driver still records the JRE key in its state
+        // entry, but must not block uninstalling the JRE it never uses.
+        let manager = test_manager("jre-uninstall-native-dependent");
+        install_jre(&manager);
+        std::fs::create_dir_all(manager.driver_dir("kafka")).unwrap();
+        std::fs::write(manager.driver_native_path("kafka"), b"native-binary").unwrap();
+        record_driver(&manager, "kafka");
+
+        uninstall_agent_jre(&manager, DEFAULT_JRE_KEY).await.expect("native driver must not block JRE uninstall");
+    }
+
+    #[tokio::test]
+    async fn uninstall_jre_blocked_by_jar_driver_dependent() {
+        // A JAR (Java) driver genuinely depends on the JRE and must block the
+        // uninstall so the driver keeps a runtime.
+        let manager = test_manager("jre-uninstall-jar-dependent");
+        install_jre(&manager);
+        std::fs::create_dir_all(manager.driver_dir("mysql")).unwrap();
+        std::fs::write(manager.driver_jar_path("mysql"), test_agent_jar()).unwrap();
+        record_driver(&manager, "mysql");
+
+        let err = uninstall_agent_jre(&manager, DEFAULT_JRE_KEY).await.expect_err("jar driver must block uninstall");
+        assert!(err.contains("is in use by drivers"), "unexpected error: {err}");
+        assert!(err.contains("mysql"), "expected dependent driver in error: {err}");
     }
 
     fn registry_with_jre(jre_key: &str, version: &str, url: &str, size: u64) -> AgentRegistry {

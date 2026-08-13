@@ -1,5 +1,25 @@
 import { describe, expect, it } from "vitest";
-import { buildDataGridColumnLookupItems, filterDataGridColumnLookupItems } from "@/lib/dataGrid/dataGridColumnLookup";
+import { buildDataGridColumnLookupItems, dataGridColumnCommentFor, filterDataGridColumnLookupItems } from "@/lib/dataGrid/dataGridColumnLookup";
+
+describe("data grid column comment lookup", () => {
+  it("resolves comments through the physical source column before the result label", () => {
+    const comments = new Map([
+      ["minx", "Minimum X coordinate"],
+      ["MINX", "Result label comment"],
+    ]);
+
+    expect(dataGridColumnCommentFor(comments, "MINX", "minx")).toBe("Minimum X coordinate");
+  });
+
+  it("falls back past blank source comments and case-normalizes result labels", () => {
+    const comments = new Map([
+      ["physical_name", "   "],
+      ["result_name", "Result comment"],
+    ]);
+
+    expect(dataGridColumnCommentFor(comments, "RESULT_NAME", "physical_name")).toBe("Result comment");
+  });
+});
 
 describe("data grid column lookup search", () => {
   const items = buildDataGridColumnLookupItems({

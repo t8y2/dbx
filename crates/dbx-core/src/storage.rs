@@ -5680,6 +5680,71 @@ mod tests {
         assert_eq!(loaded.sql, "SELECT 1;");
     }
 
+    #[tokio::test]
+    async fn saved_sql_catalog_migration_keeps_legacy_rows_in_default_scope_across_restart() {
+        let path = temp_db_path("saved-sql-catalog-restart-migration");
+        {
+            let connection = Connection::open(&path).unwrap();
+            connection
+                .execute(
+                    "CREATE TABLE saved_sql_files (
+                        id TEXT PRIMARY KEY,
+                        connection_id TEXT NOT NULL,
+                        folder_id TEXT,
+                        name TEXT NOT NULL DEFAULT '',
+                        database_name TEXT NOT NULL DEFAULT '',
+                        schema_name TEXT,
+                        sql_text TEXT NOT NULL DEFAULT '',
+                        order_index INTEGER NOT NULL DEFAULT 0,
+                        open_count INTEGER NOT NULL DEFAULT 0,
+                        opened_at TEXT,
+                        created_at TEXT NOT NULL DEFAULT '',
+                        updated_at TEXT NOT NULL DEFAULT ''
+                    )",
+                    [],
+                )
+                .unwrap();
+            connection
+                .execute(
+                    "INSERT INTO saved_sql_files
+                     (id, connection_id, name, database_name, sql_text, created_at, updated_at)
+                     VALUES ('legacy', 'conn-1', 'legacy.sql', 'analytics', 'SELECT 1;', '2026-08-12', '2026-08-12')",
+                    [],
+                )
+                .unwrap();
+        }
+
+        let storage = Storage::open(&path).await.unwrap();
+        let legacy = storage.load_saved_sql_file("legacy").await.unwrap().unwrap();
+        assert_eq!(legacy.catalog, None);
+
+        let external = SavedSqlFile {
+            id: "external".to_string(),
+            connection_id: "conn-1".to_string(),
+            catalog: Some("iceberg_catalog".to_string()),
+            folder_id: None,
+            name: "external.sql".to_string(),
+            database: "analytics".to_string(),
+            schema: None,
+            sql: "SELECT 2;".to_string(),
+            sql_loaded: true,
+            order_index: 1,
+            open_count: 0,
+            opened_at: None,
+            created_at: "2026-08-12".to_string(),
+            updated_at: "2026-08-12".to_string(),
+        };
+        storage.save_saved_sql_file(&external).await.unwrap();
+        drop(storage);
+
+        let reopened = Storage::open(&path).await.unwrap();
+        assert_eq!(reopened.load_saved_sql_file("legacy").await.unwrap().unwrap().catalog, None);
+        assert_eq!(
+            reopened.load_saved_sql_file("external").await.unwrap().unwrap().catalog.as_deref(),
+            Some("iceberg_catalog")
+        );
+    }
+
     // ---- AI Config tests ----
 
     use crate::ai::{

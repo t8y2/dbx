@@ -26,6 +26,33 @@ describe("isQueryTimeoutErrorMessage", () => {
     expect(isQueryTimeoutErrorMessage("Agent RPC error (-1): Agent RPC call timed out (120s)")).toBe(true);
   });
 
+  it("detects structured query operation timeouts before localized text matching", () => {
+    const timeoutError = {
+      version: 1,
+      code: "DBX-JDBC-2002",
+      messageKey: "backendErrors.jdbc.operationTimedOut",
+      messageParams: { stage: "execute" },
+      source: "jdbcAgent",
+      operationOutcome: "unknown" as const,
+    } as const;
+
+    expect(isQueryTimeoutErrorMessage("数据库操作超时（阶段：execute）。", timeoutError)).toBe(true);
+    expect(isQueryTimeoutErrorMessage("Database operation timed out (stage: fetch).", { ...timeoutError, messageParams: { stage: "fetch" } })).toBe(true);
+  });
+
+  it("does not offer query timeout settings for structured infrastructure timeouts", () => {
+    const timeoutError = {
+      version: 1,
+      code: "DBX-JDBC-2001",
+      messageKey: "backendErrors.jdbc.operationTimedOut",
+      messageParams: { stage: "connect" },
+      source: "jdbcAgent",
+      operationOutcome: "not_started" as const,
+    } as const;
+
+    expect(isQueryTimeoutErrorMessage("Database operation timed out (stage: connect).", timeoutError)).toBe(false);
+  });
+
   it("does not classify unrelated errors as query timeouts", () => {
     expect(isQueryTimeoutErrorMessage('syntax error at or near "select"')).toBe(false);
     expect(isQueryTimeoutErrorMessage("Connection timed out while loading databases")).toBe(false);

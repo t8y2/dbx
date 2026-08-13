@@ -3094,6 +3094,22 @@ mod tests {
     }
 
     #[test]
+    fn iris_data_grid_count_queries_the_table_without_wrapping_top_sql() {
+        assert_eq!(
+            build_data_grid_count_sql(DataGridCountSqlOptions {
+                database_type: Some(DatabaseType::Iris),
+                identifier_quote: Some("\"".to_string()),
+                catalog: None,
+                database: None,
+                schema: Some("SS".to_string()),
+                table_name: "SS_User".to_string(),
+                where_input: Some("SSUSR_IsActive = 'Y'".to_string()),
+            }),
+            "SELECT COUNT(*) AS cnt FROM \"SS\".\"SS_User\" WHERE (SSUSR_IsActive = 'Y')"
+        );
+    }
+
+    #[test]
     fn postgres_keyless_update_preserves_jsonb_array_elements() {
         let endpoints =
             json!([r#"{"port":10031,"type":"admin_web"}"#, r#""quoted""#, r#"[1,true,{"nested":null}]"#, null]);

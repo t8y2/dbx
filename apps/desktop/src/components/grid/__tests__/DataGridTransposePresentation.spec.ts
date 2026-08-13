@@ -4,7 +4,11 @@ import { describe, expect, it } from "vitest";
 const dataGridSource = readFileSync(new URL("../DataGrid.vue", import.meta.url), "utf8");
 
 describe("DataGrid transpose presentation", () => {
-  it("renders field metadata and index indicator on separate lines in the pinned transpose column", () => {
+  it("shows field metadata only when the transpose setting is enabled", () => {
+    expect(dataGridSource).toContain("settingsStore.editorSettings.dataGridShowTransposeFieldMetadata");
+    expect(dataGridSource).toContain("showTransposeFieldMetadata.value && showColumnTypesInHeader.value");
+    expect(dataGridSource).toContain("showTransposeFieldMetadata.value && showColumnCommentsInHeader.value");
+    expect(dataGridSource).toContain("30 + (transposeReserveTypeLine.value ? 14 : 0) + (transposeReserveCommentLine.value ? 14 : 0)");
     expect(dataGridSource).toContain(':item-size="transposeRowHeight"');
     expect(dataGridSource).toContain("data-grid-transpose-type-line");
     expect(dataGridSource).toContain("data-grid-transpose-comment-line");

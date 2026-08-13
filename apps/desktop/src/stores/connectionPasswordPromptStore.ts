@@ -6,25 +6,30 @@ export interface ConnectionPasswordPromptRequest {
   connectionName: string;
 }
 
+export interface ConnectionPasswordPromptResult {
+  password: string;
+  rememberPassword: boolean;
+}
+
 interface QueuedPasswordPrompt {
   request: ConnectionPasswordPromptRequest;
-  resolve: (password: string | null) => void;
+  resolve: (result: ConnectionPasswordPromptResult | null) => void;
 }
 
 /**
- * Coordinates the single "enter password for a connection that is set to not
- * save it locally" dialog shared by every connect surface. Mirrors the
- * production-safety confirmation store: a request is transient, never
- * persisted, and concurrent connects are queued so each prompt is shown and
- * answered exactly once. A `null` resolution means the user cancelled.
+ * Coordinates the shared password dialog. The store only returns the password
+ * and the user's remember preference; the connection flow decides whether to
+ * persist it after authentication succeeds. Concurrent requests are queued so
+ * each prompt is shown and answered exactly once. A `null` result means the
+ * user cancelled.
  */
 export const useConnectionPasswordPromptStore = defineStore("connectionPasswordPrompt", () => {
   const pending = ref<ConnectionPasswordPromptRequest>();
   const queue: QueuedPasswordPrompt[] = [];
-  let resolvePending: ((password: string | null) => void) | undefined;
+  let resolvePending: ((result: ConnectionPasswordPromptResult | null) => void) | undefined;
 
-  function requestPassword(request: ConnectionPasswordPromptRequest): Promise<string | null> {
-    return new Promise<string | null>((resolve) => {
+  function requestPassword(request: ConnectionPasswordPromptRequest): Promise<ConnectionPasswordPromptResult | null> {
+    return new Promise<ConnectionPasswordPromptResult | null>((resolve) => {
       if (pending.value) {
         queue.push({ request, resolve });
         return;
@@ -33,23 +38,23 @@ export const useConnectionPasswordPromptStore = defineStore("connectionPasswordP
     });
   }
 
-  function beginRequest(request: ConnectionPasswordPromptRequest, resolve: (password: string | null) => void) {
+  function beginRequest(request: ConnectionPasswordPromptRequest, resolve: (result: ConnectionPasswordPromptResult | null) => void) {
     pending.value = request;
     resolvePending = resolve;
   }
 
-  function settle(password: string | null) {
+  function settle(result: ConnectionPasswordPromptResult | null) {
     const resolve = resolvePending;
     resolvePending = undefined;
     pending.value = undefined;
-    resolve?.(password);
+    resolve?.(result);
 
     const next = queue.shift();
     if (next) beginRequest(next.request, next.resolve);
   }
 
-  function submit(password: string) {
-    settle(password);
+  function submit(password: string, rememberPassword: boolean) {
+    settle({ password, rememberPassword });
   }
 
   function cancel() {

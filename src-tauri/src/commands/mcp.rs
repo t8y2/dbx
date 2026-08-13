@@ -9,8 +9,8 @@ use tauri::{AppHandle, Manager};
 
 const MCP_PACKAGE_NAME: &str = "@dbx-app/mcp-server";
 const MCP_LATEST_URL: &str = "https://registry.npmjs.org/@dbx-app%2fmcp-server/latest";
-const MCP_INSTALL_COMMAND: &str = "npm install -g @dbx-app/mcp-server@latest --registry=https://registry.npmjs.org";
-const MCP_PNPM_UPDATE_COMMAND: &str = "pnpm update -g @dbx-app/mcp-server --registry=https://registry.npmjs.org";
+const MCP_INSTALL_COMMAND: &str = "npm install -g @dbx-app/mcp-server@latest";
+const MCP_PNPM_UPDATE_COMMAND: &str = "pnpm update -g @dbx-app/mcp-server";
 const MCP_MIN_NODE_VERSION: NodeVersion = NodeVersion { major: 18, minor: 18, patch: 0 };
 const MCP_MIN_NODE_VERSION_REQUIREMENT: &str = ">=18.18.0";
 const SHELL_COMMAND_MARKER: &str = "__DBX_MCP_COMMAND_OUTPUT_START__";
@@ -157,17 +157,10 @@ impl NodeRuntime {
 
     fn install_or_update(&self) -> Result<CommandOutput, String> {
         match &self.package_manager {
-            McpPackageManager::Pnpm { command_path } if self.has_mcp_package() => run_package_manager_command(
-                command_path,
-                &["update", "-g", MCP_PACKAGE_NAME, "--registry=https://registry.npmjs.org"],
-                &self.node_launcher_path,
-            ),
-            _ => self.npm_output(&[
-                "install",
-                "-g",
-                "@dbx-app/mcp-server@latest",
-                "--registry=https://registry.npmjs.org",
-            ]),
+            McpPackageManager::Pnpm { command_path } if self.has_mcp_package() => {
+                run_package_manager_command(command_path, &["update", "-g", MCP_PACKAGE_NAME], &self.node_launcher_path)
+            }
+            _ => self.npm_output(&["install", "-g", "@dbx-app/mcp-server@latest"]),
         }
     }
 }
@@ -1410,6 +1403,7 @@ mod tests {
              elif [ \"$2\" = '--version' ]; then printf '10.9.2\\n'; \
              elif [ \"$2\" = 'root' ]; then printf '%s\\n' {}; \
              elif [ \"$2\" = 'prefix' ]; then printf '%s\\n' {}; \
+             elif [ \"$2\" = 'install' ]; then exit 0; \
              else exit 1; fi\n",
             shell_quote(log_path.to_string_lossy().as_ref()),
             shell_quote(log_path.to_string_lossy().as_ref()),
@@ -1428,9 +1422,15 @@ mod tests {
         assert_eq!(probed.npm_root, canonical_runtime_path(&npm_root).unwrap());
         assert_eq!(probed.node_version, "v24.16.0");
         assert_eq!(probed.mcp_script_path, canonical_runtime_path(&script_path));
+        let install_output = probed.install_or_update().unwrap();
+        assert!(install_output.success);
         let calls = std::fs::read_to_string(log_path).unwrap();
         assert!(calls.contains("npm root -g"));
         assert!(calls.contains("npm prefix -g"));
+        assert!(calls
+            .lines()
+            .any(|line| line == format!("{} install -g @dbx-app/mcp-server@latest", npm_cli_path.display())));
+        assert!(!calls.contains("--registry"));
         assert!(calls.contains(&format!("PATH={}", canonical_runtime_path(&dir).unwrap().display())));
 
         let _ = std::fs::remove_dir_all(dir);
@@ -1516,7 +1516,8 @@ mod tests {
         let update_output = probed.install_or_update().unwrap();
         assert!(update_output.success);
         let pnpm_log = std::fs::read_to_string(pnpm_log_path).unwrap();
-        assert!(pnpm_log.contains("ARGS=update -g @dbx-app/mcp-server --registry=https://registry.npmjs.org"));
+        assert!(pnpm_log.contains("ARGS=update -g @dbx-app/mcp-server\n"));
+        assert!(!pnpm_log.contains("--registry"));
         assert!(pnpm_log.contains(&format!("PNPM_HOME={}", dir.display())));
         assert!(pnpm_log.contains(&format!("PATH={}", bin_dir.display())));
 

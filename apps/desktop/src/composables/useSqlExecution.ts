@@ -274,8 +274,13 @@ export function useSqlExecution(deps: {
     });
     if (producedResult === false) return;
     const sqlServerMessageResultIndex = executionDatabaseType === "sqlserver" ? tab.results?.findIndex((result) => result.server_message === true) : undefined;
+    const activeSqlServerResult = tab.results && tab.activeResultIndex !== undefined ? tab.results[tab.activeResultIndex] : tab.result;
     if (sqlServerMessageResultIndex !== undefined && sqlServerMessageResultIndex >= 0) {
-      queryStore.setActiveResultIndex(tab.id, sqlServerMessageResultIndex);
+      if (activeSqlServerResult?.server_message === true) {
+        const sqlServerDataResultIndex = tab.results?.findIndex((result) => result.server_message !== true && !isQueryExecutionErrorResult(result) && result.columns.length > 0);
+        if (sqlServerDataResultIndex !== undefined && sqlServerDataResultIndex >= 0) queryStore.setActiveResultIndex(tab.id, sqlServerDataResultIndex);
+        else queryStore.setActiveResultIndex(tab.id, sqlServerMessageResultIndex);
+      }
       deps.activeOutputView.value = "result";
     } else if (executionDatabaseType === "sqlserver" && tab.result?.server_message === true) {
       deps.activeOutputView.value = "result";

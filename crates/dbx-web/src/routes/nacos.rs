@@ -280,6 +280,16 @@ pub async fn list_namespaces(
     Ok(Json(result))
 }
 
+pub async fn sidebar_snapshot(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<ConnReq>,
+) -> Result<Json<dbx_core::nacos::NacosNamespaceSidebarSnapshot>, AppError> {
+    let result = dbx_core::nacos::service::nacos_sidebar_snapshot_core(&state.app, &req.connection_id)
+        .await
+        .map_err(AppError::from)?;
+    Ok(Json(result))
+}
+
 pub async fn create_namespace(
     State(state): State<Arc<WebState>>,
     Json(req): Json<NamespaceCreateReq>,

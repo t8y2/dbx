@@ -40,3 +40,11 @@ test("applies a result grid font without overwriting editor or interface fonts",
   assert.equal(patch.tableFontFamily, tableFontFamily);
   assert.equal(store.editorSettings.tableFontFamily, tableFontFamily);
 });
+
+test("round-trips completion column ordering through the editor settings draft", () => {
+  const base = editorSettingsDraftFromSettings(DEFAULT_EDITOR_SETTINGS);
+  const patch = editorSettingsPatchFromDraft({ ...base, sortCompletionColumnsAlphabetically: false }, base);
+
+  assert.deepEqual(patch, { sortCompletionColumnsAlphabetically: false });
+  assert.equal(editorSettingsDraftFromSettings({ ...DEFAULT_EDITOR_SETTINGS, ...patch }).sortCompletionColumnsAlphabetically, false);
+});

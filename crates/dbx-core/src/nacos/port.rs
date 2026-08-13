@@ -16,6 +16,12 @@ pub trait NacosAdmin: Send + Sync {
         None
     }
 
+    /// Returns the user-configured namespace scope for accounts that cannot
+    /// safely rely on server-wide namespace discovery.
+    fn explicitly_scoped_namespace_ids(&self) -> Option<Vec<String>> {
+        None
+    }
+
     async fn test_connection(&self) -> Result<NacosConnectionInfo, String>;
     async fn list_namespaces(&self) -> Result<Vec<NacosNamespaceInfo>, String>;
     async fn create_namespace(&self, req: NacosNamespaceCreate) -> Result<(), String>;

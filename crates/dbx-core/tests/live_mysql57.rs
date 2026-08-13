@@ -630,30 +630,44 @@ END
 async fn live_mysql_splitter_executes_routine_without_delimiter() {
     let url = std::env::var("DBX_LIVE_MYSQL_PROCEDURE_URL").expect("DBX_LIVE_MYSQL_PROCEDURE_URL");
     let pool = dbx_core::db::mysql::connect(&url, std::time::Duration::from_secs(10)).await.unwrap();
-    let procedure = "dbx_issue_2695_proc";
+    let procedure = format!("dbx_routine_range_{}", uuid::Uuid::new_v4().simple());
 
     let sql = format!(
         "\
 DROP PROCEDURE IF EXISTS {procedure};
 CREATE PROCEDURE {procedure}()
 BEGIN
-    SET @dbx_issue_2695_value = 2695;
-    SELECT @dbx_issue_2695_value AS value;
+    SET @dbx_routine_range_value = CASE WHEN 1 = 1 THEN 2695 ELSE 0 END;
+    SELECT @dbx_routine_range_value AS value;
 END;
 CALL {procedure}();
 DROP PROCEDURE IF EXISTS {procedure};"
     );
     let statements = split_sql_statements_for_database(&sql, DatabaseType::Mysql);
     assert_eq!(statements.len(), 4);
-    assert!(statements[1].contains("SET @dbx_issue_2695_value = 2695;"));
-    assert!(statements[1].contains("SELECT @dbx_issue_2695_value AS value;"));
+    assert!(statements[1].contains("CASE WHEN 1 = 1 THEN 2695 ELSE 0 END;"));
+    assert!(statements[1].contains("SELECT @dbx_routine_range_value AS value;"));
     assert!(statements[1].ends_with("END"));
 
-    for statement in statements {
-        dbx_core::db::mysql::execute_query_with_max_rows(&pool, &statement, false, Some(10), Default::default())
-            .await
-            .unwrap();
+    let execution = async {
+        for statement in &statements[..3] {
+            dbx_core::db::mysql::execute_query_with_max_rows(&pool, statement, false, Some(10), Default::default())
+                .await?;
+        }
+        Ok::<(), String>(())
     }
+    .await;
+    let cleanup = dbx_core::db::mysql::execute_query_with_max_rows(
+        &pool,
+        statements.last().expect("cleanup statement"),
+        false,
+        Some(10),
+        Default::default(),
+    )
+    .await;
+
+    execution.unwrap();
+    cleanup.unwrap();
 }
 
 #[tokio::test]

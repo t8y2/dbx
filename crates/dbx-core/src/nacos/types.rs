@@ -577,6 +577,13 @@ pub struct NacosNamespaceInfo {
     pub namespace_type: Option<u64>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct NacosNamespaceSidebarSnapshot {
+    pub namespaces: Vec<NacosNamespaceInfo>,
+    pub access_control: NacosAccessControlCapabilities,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct NacosNamespaceCreate {

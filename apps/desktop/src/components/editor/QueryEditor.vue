@@ -101,7 +101,7 @@ import { EDITOR_FONT_FAMILY_CSS_VAR, EDITOR_FONT_SIZE_CSS_VAR, loadEditorTheme, 
 import { createStatementGutterMarkerDom, shouldShowStatementGutter } from "@/lib/editor/codemirrorStatementGutter";
 import { createQueryEditorSearchKeymap } from "@/lib/editor/queryEditorSearchKeymap";
 import { appendSqlCompletionSpace } from "@/lib/editor/sqlCompletionInsertion";
-import { completionLabelPresentation } from "@/lib/editor/sqlCompletionPresentation";
+import { compareSqlCompletions, completionLabelPresentation } from "@/lib/editor/sqlCompletionPresentation";
 import { clampEditorFontSize, createEditorZoomCommitScheduler, fontSizeFromGestureScale, fontSizeFromWheelDelta } from "@/lib/editor/editorZoom";
 import { normalizeShortcutSettings, shortcutToCodeMirrorKey } from "@/lib/editor/shortcutRegistry";
 import { trimmedSelectionLayer } from "@/lib/editor/codemirrorTrimmedSelectionLayer";
@@ -1778,7 +1778,7 @@ function runKeymapExtension(codeMirrorKeymap: (typeof import("@codemirror/view")
       codeMirrorKeymap.of([
         {
           key: "Enter",
-          run: codeMirrorInsertNewlineKeepIndent ?? undefined,
+          run: insertNewlineWithoutCompletion,
         },
         ...binding(shortcuts.find, openSearch),
         ...binding(shortcuts.replace, openReplace),
@@ -1840,6 +1840,14 @@ function runKeymapExtension(codeMirrorKeymap: (typeof import("@codemirror/view")
       })),
     ),
   ];
+}
+
+function insertNewlineWithoutCompletion(view: EditorViewType): boolean {
+  codeMirrorCloseCompletion?.(view);
+  suppressNextSqlCompletionAutoStartUntil = Date.now() + 750;
+  const handled = codeMirrorInsertNewlineKeepIndent?.(view) ?? false;
+  if (!handled) suppressNextSqlCompletionAutoStartUntil = 0;
+  return handled;
 }
 
 function extendQueryEditorSelectionForView(currentView: EditorViewType): boolean {
@@ -4587,6 +4595,7 @@ onMounted(async () => {
   buildSqlCompletionExtension = () =>
     autocompletion({
       activateOnTyping: true,
+      compareCompletions: (a, b) => compareSqlCompletions(a, b, settingsStore.editorSettings.sortCompletionColumnsAlphabetically),
       override: [async (context: CompletionContext) => provideSqlCompletions(context)],
     });
 
@@ -5400,7 +5409,7 @@ watch(
 );
 
 watch(
-  () => settingsStore.editorSettings.snippets,
+  () => [settingsStore.editorSettings.snippets, settingsStore.editorSettings.sortCompletionColumnsAlphabetically],
   () => {
     completionEpoch++;
     if (!view.value || !completionComp || !buildSqlCompletionExtension) return;

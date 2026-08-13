@@ -17,8 +17,16 @@ pub async fn nacos_test_connection_core(state: &AppState, conn_id: &str) -> Resu
 }
 
 pub async fn nacos_list_namespaces_core(state: &AppState, conn_id: &str) -> Result<Vec<NacosNamespaceInfo>, String> {
-    let admin = get_admin(state, conn_id).await?;
-    admin.list_namespaces().await
+    let (admin, fingerprint) = get_admin_with_operation_fingerprint(state, conn_id).await?;
+    crate::nacos::namespace_access::list_readable_namespaces(conn_id, fingerprint, admin).await
+}
+
+pub async fn nacos_sidebar_snapshot_core(
+    state: &AppState,
+    conn_id: &str,
+) -> Result<NacosNamespaceSidebarSnapshot, String> {
+    let (admin, fingerprint) = get_admin_with_operation_fingerprint(state, conn_id).await?;
+    crate::nacos::namespace_access::sidebar_snapshot(conn_id, fingerprint, admin).await
 }
 
 pub async fn nacos_create_namespace_core(
@@ -131,7 +139,9 @@ pub async fn nacos_login_rnacos_console_core(
     captcha: Option<String>,
 ) -> Result<(), String> {
     let admin = get_admin(state, conn_id).await?;
-    admin.login_rnacos_console(captcha).await
+    let result = admin.login_rnacos_console(captcha).await;
+    crate::nacos::namespace_access::invalidate(conn_id);
+    result
 }
 
 pub async fn nacos_list_users_core(
@@ -146,13 +156,17 @@ pub async fn nacos_list_users_core(
 pub async fn nacos_create_user_core(state: &AppState, conn_id: &str, req: NacosUserCreate) -> Result<(), String> {
     ensure_connection_writable(state, conn_id, "Create Nacos user").await?;
     let admin = get_admin(state, conn_id).await?;
-    admin.create_user(req).await
+    let result = admin.create_user(req).await;
+    crate::nacos::namespace_access::invalidate_all();
+    result
 }
 
 pub async fn nacos_update_user_core(state: &AppState, conn_id: &str, req: NacosUserUpdate) -> Result<(), String> {
     ensure_connection_writable(state, conn_id, "Update Nacos user").await?;
     let admin = get_admin(state, conn_id).await?;
-    admin.update_user(req).await
+    let result = admin.update_user(req).await;
+    crate::nacos::namespace_access::invalidate_all();
+    result
 }
 
 pub async fn nacos_delete_user_core(state: &AppState, conn_id: &str, username: String) -> Result<(), String> {
@@ -163,7 +177,9 @@ pub async fn nacos_delete_user_core(state: &AppState, conn_id: &str, username: S
             "Nacos users in the enhanced workspace must be deleted through the access-control workflow".to_string()
         );
     }
-    admin.delete_user(username).await
+    let result = admin.delete_user(username).await;
+    crate::nacos::namespace_access::invalidate_all();
+    result
 }
 
 pub async fn nacos_list_role_bindings_core(
@@ -183,7 +199,9 @@ pub async fn nacos_assign_role_core(state: &AppState, conn_id: &str, binding: Na
             "Nacos roles in the enhanced workspace must be changed through the access-control workflow".to_string()
         );
     }
-    admin.assign_role(binding).await
+    let result = admin.assign_role(binding).await;
+    crate::nacos::namespace_access::invalidate_all();
+    result
 }
 
 pub async fn nacos_remove_role_core(state: &AppState, conn_id: &str, binding: NacosRoleBinding) -> Result<(), String> {
@@ -197,7 +215,9 @@ pub async fn nacos_remove_role_core(state: &AppState, conn_id: &str, binding: Na
     if binding.role == "ROLE_ADMIN" {
         return Err("The Nacos administrator role cannot be removed through the legacy endpoint".to_string());
     }
-    admin.remove_role(binding).await
+    let result = admin.remove_role(binding).await;
+    crate::nacos::namespace_access::invalidate_all();
+    result
 }
 
 pub async fn nacos_access_snapshot_core(state: &AppState, conn_id: &str) -> Result<NacosAccessControlSnapshot, String> {
@@ -218,7 +238,9 @@ pub async fn nacos_start_access_operation_core(
     if !admin.access_control_capabilities().enhanced_workspace {
         return Err("The enhanced access-control workspace is unavailable for this Nacos connection".to_string());
     }
-    crate::nacos::access_control::start_operation(conn_id, fingerprint, admin, req).await
+    let result = crate::nacos::access_control::start_operation(conn_id, fingerprint, admin, req).await;
+    crate::nacos::namespace_access::invalidate_all();
+    result
 }
 
 pub async fn nacos_get_access_operation_core(
@@ -237,7 +259,9 @@ pub async fn nacos_retry_access_operation_core(
 ) -> Result<NacosAccessOperationResult, String> {
     ensure_connection_writable(state, conn_id, "Retry Nacos access-control operation").await?;
     let (admin, fingerprint) = get_admin_with_operation_fingerprint(state, conn_id).await?;
-    crate::nacos::access_control::retry_operation(conn_id, fingerprint, admin, retry).await
+    let result = crate::nacos::access_control::retry_operation(conn_id, fingerprint, admin, retry).await;
+    crate::nacos::namespace_access::invalidate_all();
+    result
 }
 
 pub async fn nacos_undo_access_operation_core(
@@ -247,7 +271,9 @@ pub async fn nacos_undo_access_operation_core(
 ) -> Result<NacosAccessOperationResult, String> {
     ensure_connection_writable(state, conn_id, "Undo Nacos access-control operation").await?;
     let (admin, fingerprint) = get_admin_with_operation_fingerprint(state, conn_id).await?;
-    crate::nacos::access_control::undo_operation(conn_id, fingerprint, admin, operation_id).await
+    let result = crate::nacos::access_control::undo_operation(conn_id, fingerprint, admin, operation_id).await;
+    crate::nacos::namespace_access::invalidate_all();
+    result
 }
 
 pub async fn nacos_list_services_core(

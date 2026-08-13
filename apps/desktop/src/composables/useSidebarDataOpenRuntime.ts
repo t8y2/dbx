@@ -13,6 +13,7 @@ import { hasTreeNodeDatabaseContext } from "@/lib/sidebar/treeNodeContext";
 import { buildTableSelectSql } from "@/lib/table/tableSelectSql";
 import { usesSyntheticRowIdKey } from "@/lib/table/tableEditing";
 import { tableOpenPageLimit } from "@/lib/table/tableOpenPageLimit";
+import { tableDataLargeValuePreviewOptions } from "@/lib/dataGrid/dataGridLargeValues";
 import { canActivateExistingDataTableTab } from "@/lib/tabs/dataTabActivation";
 import { beginDataTabNavigation, endDataTabNavigation, isCurrentDataTabNavigation } from "@/lib/tabs/dataTabNavigationGeneration";
 
@@ -293,8 +294,12 @@ export function useSidebarDataOpenRuntime() {
       } else if (deferTableMetaRefresh) {
         logPhase("metadata-deferred", { tabId });
       } else {
-        void refreshTableMetaInBackground(tabId);
         logPhase("metadata-started", { tabId });
+      }
+
+      const metadataRefresh = shouldRefreshTableMeta && !deferTableMetaRefresh ? refreshTableMetaInBackground(tabId) : undefined;
+      if (!cachedTableMeta && (effectiveDbType === "mysql" || effectiveDbType === "postgres")) {
+        await metadataRefresh;
       }
 
       // Check if superseded by a newer openData call
@@ -303,8 +308,9 @@ export function useSidebarDataOpenRuntime() {
         return;
       }
 
-      const columns = cachedTableMeta?.columns ?? [];
-      const primaryKeys = cachedTableMeta?.primaryKeys ?? [];
+      const loadedTableMeta = cachedTableMeta ?? queryStore.tabs.find((item) => item.id === tabId)?.tableMeta;
+      const columns = loadedTableMeta?.columns ?? [];
+      const primaryKeys = loadedTableMeta?.primaryKeys ?? [];
       const includeRowId = usesSyntheticRowIdKey(effectiveDbType, primaryKeys, tableType);
       const sql = await buildTableSelectSql({
         databaseType: effectiveDbType,
@@ -317,6 +323,7 @@ export function useSidebarDataOpenRuntime() {
         catalog: node.catalog,
         columns: columns.map((column) => column.name),
         primaryKeys,
+        ...tableDataLargeValuePreviewOptions(effectiveDbType, columns, primaryKeys, limit),
         limit,
         includeRowId,
       });

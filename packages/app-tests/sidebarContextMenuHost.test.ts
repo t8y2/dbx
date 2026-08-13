@@ -130,6 +130,39 @@ test("sidebar keyboard table copy uses the same normalized schema as the context
   assert.match(copySelectedSidebarNamesBody, /schema: connectionObjectTreeNodeSchema\(store\.getConfig\(node\.connectionId!\), node\.database!, node\.schema\)/);
 });
 
+test("saved SQL tree rows expose copy, paste, export, rename, and confirmed deletion through the shared runtime host", () => {
+  const runtimeHost = readFileSync("apps/desktop/src/components/sidebar/SidebarTreeRuntimeHost.vue", "utf8");
+  const connectionTree = readFileSync("apps/desktop/src/components/sidebar/ConnectionTree.vue", "utf8");
+  const treeItem = readFileSync("apps/desktop/src/components/sidebar/TreeItem.vue", "utf8");
+  const specialMenuBody = functionBody(runtimeHost, "buildSpecialSidebarMenu");
+  const pasteBody = functionBody(runtimeHost, "requestPasteTreeClipboard");
+  const savedSqlMenuStart = specialMenuBody.indexOf('if (node.type === "saved-sql-file")');
+  const savedSqlMenuEnd = specialMenuBody.indexOf("// 5. Redis DB / Mongo DB", savedSqlMenuStart);
+  const savedSqlMenuBody = specialMenuBody.slice(savedSqlMenuStart, savedSqlMenuEnd);
+
+  assert.match(specialMenuBody, /node\.type === "saved-sql-root"[\s\S]*?savedSql\.pasteFile/);
+  assert.match(savedSqlMenuBody, /savedSql\.copyFile[\s\S]*?savedSql\.pasteFile[\s\S]*?sqlLibrary\.exportFile[\s\S]*?savedSql\.renameFile[\s\S]*?savedSql\.deleteFile/);
+  assert.match(savedSqlMenuBody, /action: deleteSavedSqlFile[\s\S]*?variant: "destructive"/);
+  assert.doesNotMatch(savedSqlMenuBody, /contextMenu\.copyName/);
+  assert.match(pasteBody, /clipboard\?\.kind === "saved-sql-copy"[\s\S]*?copyFilesToDatabase/);
+  assert.match(runtimeHost, /activeNode\.value\.type === "saved-sql-file"[\s\S]*?request-saved-sql-rename/);
+  assert.match(connectionTree, /@request-saved-sql-rename="startRenamingSavedSqlNode"/);
+  assert.match(treeItem, /async function finishRenameSavedSql\(\)[\s\S]*?savedSqlStore\.renameFile/);
+  assert.match(runtimeHost, /routeDangerDialog\(showDeleteSavedSqlConfirm[\s\S]*?savedSql\.deleteFileConfirm[\s\S]*?confirmDeleteSavedSqlFile/);
+  assert.match(runtimeHost, /async function confirmDeleteSavedSqlFile\(\)[\s\S]*?savedSqlStore\.deleteFile[\s\S]*?connectionStore\.removeTreeNode/);
+  assert.match(functionBody(runtimeHost, "requestDeleteSelectedNode"), /saved-sql-file[\s\S]*?showDeleteSavedSqlConfirm\.value = true/);
+});
+
+test("explicit locate prioritizes the saved SQL row over SQL cursor table navigation", () => {
+  const connectionTree = readFileSync("apps/desktop/src/components/sidebar/ConnectionTree.vue", "utf8");
+  const locateBody = functionBody(connectionTree, "locateActiveTabInSidebar");
+
+  assert.match(locateBody, /const locatesSavedSql = tabTarget\?\.type === "saved-sql-file"/);
+  assert.match(locateBody, /const cursorCandidate = locatesSavedSql \? null : queryCursorTableCandidate/);
+  assert.match(locateBody, /locatesSavedSql && savedSqlFile\?\.connectionId && savedSqlFile\.database[\s\S]*?type: "query-context"/);
+  assert.match(locateBody, /findNodePathForTarget\(target, store\.treeNodes\)/);
+});
+
 test("batch table paste refreshes each object list after all tables are processed", () => {
   const runtimeHost = readFileSync("apps/desktop/src/components/sidebar/SidebarTreeRuntimeHost.vue", "utf8");
   const confirmPasteTableBody = functionBody(runtimeHost, "confirmPasteTable");

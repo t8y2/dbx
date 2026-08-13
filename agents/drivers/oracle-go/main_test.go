@@ -989,8 +989,58 @@ func TestOracleColumnTypeDDL(t *testing.T) {
 func TestBuildDSNUsesConnectionStringWhenProvided(t *testing.T) {
 	dsn := buildDSN(connectParams{ConnectionString: "oracle://scott:tiger@db.example.com:1521/ORCLPDB1"})
 
-	if dsn != "oracle://scott:tiger@db.example.com:1521/ORCLPDB1" {
-		t.Fatalf("unexpected dsn: %s", dsn)
+	parsed, err := url.Parse(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.Query().Get("PREFETCH_ROWS") != oracleDefaultPrefetchRows {
+		t.Fatalf("raw Oracle DSN should use the DBX prefetch default, got: %s", dsn)
+	}
+}
+
+func TestBuildDSNUsesStableDefaultPrefetchRows(t *testing.T) {
+	dsn := buildDSN(connectParams{
+		Host:     "db.example.com",
+		Port:     1521,
+		Database: "XE",
+		Username: "scott",
+		Password: "tiger",
+	})
+
+	parsed, err := url.Parse(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.Query().Get("PREFETCH_ROWS") != oracleDefaultPrefetchRows {
+		t.Fatalf("generated Oracle DSN should use the DBX prefetch default, got: %s", dsn)
+	}
+}
+
+func TestBuildDSNPreservesConfiguredPrefetchRows(t *testing.T) {
+	tests := []connectParams{
+		{
+			Host:      "db.example.com",
+			Port:      1521,
+			Database:  "XE",
+			Username:  "scott",
+			Password:  "tiger",
+			URLParams: "prefetch_rows=20",
+		},
+		{ConnectionString: "oracle://scott:tiger@db.example.com:1521/XE?prefetch_rows=50"},
+	}
+
+	for _, params := range tests {
+		dsn := buildDSN(params)
+		parsed, err := url.Parse(dsn)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if parsed.Query().Get("prefetch_rows") == "" {
+			t.Fatalf("configured prefetch rows should be preserved, got: %s", dsn)
+		}
+		if parsed.Query().Get("PREFETCH_ROWS") != "" {
+			t.Fatalf("default prefetch rows should not be added beside a configured value, got: %s", dsn)
+		}
 	}
 }
 

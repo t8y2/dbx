@@ -9,6 +9,30 @@ const backend = vi.hoisted(() => ({
   cancelQuery: vi.fn(),
   ensureConnected: vi.fn(),
   documentDeleteDocument: vi.fn(),
+  documentSaveMeilisearchBatch: vi.fn(),
+}));
+
+const documentJsonEditor = vi.hoisted(() => ({
+  openSearch: vi.fn().mockReturnValue(true),
+}));
+
+const dataGrid = vi.hoisted(() => ({
+  fullExportResult: undefined as
+    | ((onProgress?: (info: { rowsExported: number; totalRows: number | null }) => void) => Promise<
+        | {
+            columns: string[];
+            column_types?: string[];
+            rows: Array<Array<string | number | boolean | null>>;
+            mongo_copy_documents?: unknown[];
+          }
+        | undefined
+      >)
+    | undefined,
+  customSaveHandler: undefined as
+    | {
+        save: (changes: { dirtyRows: Map<number, Map<number, unknown>>; deletedRows: Set<number>; newRows: unknown[][]; newRowMeta: unknown[]; columns: string[]; rows: unknown[][] }) => Promise<void>;
+      }
+    | undefined,
 }));
 
 const settings = vi.hoisted(() => ({
@@ -21,6 +45,9 @@ const settings = vi.hoisted(() => ({
     tableFontSize: 12,
     numericColumnRightAlign: true,
     confirmDangerousSqlExecution: true,
+    exportBatchSize: 2,
+    exportRowLimitEnabled: false,
+    exportRowLimit: 100_000,
   },
   updateEditorSettings: vi.fn(),
 }));
@@ -35,6 +62,7 @@ vi.mock("@/lib/backend/api", () => ({
   documentFindDocuments: backend.documentFindDocuments,
   cancelQuery: backend.cancelQuery,
   documentDeleteDocument: backend.documentDeleteDocument,
+  documentSaveMeilisearchBatch: backend.documentSaveMeilisearchBatch,
 }));
 
 vi.mock("@/stores/connectionStore", () => ({
@@ -60,8 +88,12 @@ vi.mock("@/components/grid/DataGrid.vue", async () => {
         connectionId: { type: String, default: "" },
         database: { type: String, default: "" },
         columnLayoutScopeKey: { type: String, default: "" },
+        fullExportResult: { type: Function, default: undefined },
+        customSaveHandler: { type: Object, default: undefined },
       },
       setup(props, { expose, slots }) {
+        dataGrid.fullExportResult = props.fullExportResult as typeof dataGrid.fullExportResult;
+        dataGrid.customSaveHandler = props.customSaveHandler as typeof dataGrid.customSaveHandler;
         expose({
           visibleColumnCount: 2,
           displayableColumnCount: 2,
@@ -91,6 +123,7 @@ vi.mock("@/components/grid/DataGrid.vue", async () => {
               "data-column-layout-scope-key": props.columnLayoutScopeKey,
               "data-result-hidden-column-keys": JSON.stringify((props.result as { local_hidden_column_keys?: string[] }).local_hidden_column_keys ?? []),
               "data-result-column-types": JSON.stringify((props.result as { column_types?: string[] }).column_types ?? []),
+              "data-result-rows": JSON.stringify((props.result as { rows?: unknown[] }).rows ?? []),
             },
             [
               slots["search-bar"]?.({
@@ -101,6 +134,24 @@ vi.mock("@/components/grid/DataGrid.vue", async () => {
               }),
             ],
           );
+      },
+    }),
+  };
+});
+
+vi.mock("@/components/redis/RedisJsonEditor.vue", async () => {
+  const { defineComponent, h } = await import("vue");
+  return {
+    default: defineComponent({
+      props: {
+        modelValue: { type: String, required: true },
+        readOnly: { type: Boolean, default: false },
+        lineNumbers: { type: Boolean, default: true },
+        presentation: { type: String, default: "editor" },
+      },
+      setup(props, { expose }) {
+        expose({ openSearch: documentJsonEditor.openSearch });
+        return () => h("div", { "data-redis-json-editor-stub": "", "data-read-only": String(props.readOnly), "data-line-numbers": String(props.lineNumbers), "data-presentation": props.presentation }, [h("div", { class: "cm-line" }, h("span", { class: "json-string" }, props.modelValue))]);
       },
     }),
   };
@@ -236,7 +287,12 @@ beforeEach(async () => {
   backend.cancelQuery.mockReset();
   backend.ensureConnected.mockReset();
   backend.documentDeleteDocument.mockReset();
+  backend.documentSaveMeilisearchBatch.mockReset();
+  dataGrid.fullExportResult = undefined;
+  dataGrid.customSaveHandler = undefined;
+  documentJsonEditor.openSearch.mockClear();
   backend.documentDeleteDocument.mockResolvedValue(undefined);
+  backend.documentSaveMeilisearchBatch.mockResolvedValue(0);
   settings.editorSettings.mongoViewMode = "table";
   settings.editorSettings.columnWidthDensity = "standard";
   settings.editorSettings.dataGridRenderMode = "canvas";
@@ -244,6 +300,9 @@ beforeEach(async () => {
   settings.editorSettings.tableFontSize = 12;
   settings.editorSettings.numericColumnRightAlign = true;
   settings.editorSettings.confirmDangerousSqlExecution = true;
+  settings.editorSettings.exportBatchSize = 2;
+  settings.editorSettings.exportRowLimitEnabled = false;
+  settings.editorSettings.exportRowLimit = 100_000;
   settings.updateEditorSettings.mockReset();
   settings.updateEditorSettings.mockImplementation((partial: Partial<typeof settings.editorSettings>) => Object.assign(settings.editorSettings, partial));
   backend.ensureConnected.mockResolvedValue(undefined);
@@ -384,6 +443,105 @@ describe("DocumentBrowser Elasticsearch field search", () => {
 });
 
 describe("DocumentBrowser MongoDB filter value types", () => {
+  it("exports all matching MongoDB documents without changing the visible page", async () => {
+    app?.unmount();
+    settings.editorSettings.exportBatchSize = 2;
+    settings.editorSettings.exportRowLimitEnabled = true;
+    settings.editorSettings.exportRowLimit = 3;
+    backend.documentFindDocuments.mockReset();
+    backend.documentFindDocuments
+      .mockResolvedValueOnce({
+        documents: [{ _id: "visible", name: "Visible" }],
+        extended_documents: [{ _id: { $oid: "000000000000000000000001" }, name: "Visible" }],
+        total: 5,
+        total_is_exact: true,
+      })
+      .mockResolvedValueOnce({
+        documents: [
+          { _id: "one", name: "First" },
+          { _id: "two", name: "Second" },
+        ],
+        extended_documents: [
+          { _id: { $oid: "000000000000000000000002" }, name: "First" },
+          { _id: { $oid: "000000000000000000000003" }, name: "Second" },
+        ],
+        total: 5,
+        total_is_exact: true,
+      })
+      .mockResolvedValueOnce({
+        documents: [{ _id: "three", later: { $numberLong: "9007199254740993" } }],
+        extended_documents: [{ _id: { $oid: "000000000000000000000004" }, later: { $numberLong: "9007199254740993" } }],
+        total: 5,
+        total_is_exact: true,
+      });
+    app = createApp(DocumentBrowser, {
+      connectionId: "mongo-1",
+      database: "test",
+      collection: "orders",
+      databaseType: "mongodb",
+    });
+    app.mount(root!);
+    await flushUi();
+
+    const inputs = root!.querySelectorAll<HTMLTextAreaElement>("textarea");
+    inputs[0]!.value = '{"active":true}';
+    inputs[0]!.dispatchEvent(new Event("input", { bubbles: true }));
+    inputs[1]!.value = '{"createdAt":-1}';
+    inputs[1]!.dispatchEvent(new Event("input", { bubbles: true }));
+    await flushUi();
+
+    expect(dataGrid.fullExportResult).toBeTypeOf("function");
+    const progress = vi.fn();
+    const result = await dataGrid.fullExportResult!(progress);
+
+    expect(backend.documentFindDocuments.mock.calls.slice(1).map((call) => call.slice(0, 9))).toEqual([
+      ["mongo-1", "test", "orders", 0, 2, '{"active":true}', undefined, '{"createdAt":-1}', undefined],
+      ["mongo-1", "test", "orders", 2, 1, '{"active":true}', undefined, '{"createdAt":-1}', undefined],
+    ]);
+    expect(result?.columns).toEqual(["_id", "name", "later"]);
+    expect(result?.rows).toEqual([
+      ["one", "First", null],
+      ["two", "Second", null],
+      ["three", null, "9007199254740993"],
+    ]);
+    expect(result?.mongo_copy_documents).toEqual([
+      { _id: { $oid: "000000000000000000000002" }, name: "First" },
+      { _id: { $oid: "000000000000000000000003" }, name: "Second" },
+      { _id: { $oid: "000000000000000000000004" }, later: { $numberLong: "9007199254740993" } },
+    ]);
+    expect(progress).toHaveBeenLastCalledWith({ rowsExported: 3, totalRows: 3 });
+    const visibleGrid = root!.querySelector<HTMLElement>('[data-testid="data-grid"]')!;
+    expect(JSON.parse(visibleGrid.dataset.resultColumnTypes ?? "[]")).toEqual(["", ""]);
+    expect(JSON.parse(visibleGrid.dataset.resultRows ?? "[]")).toEqual([["visible", "Visible"]]);
+    expect(inputs[0]!.value).toBe('{"active":true}');
+    expect(inputs[1]!.value).toBe('{"createdAt":-1}');
+  });
+
+  it("stops MongoDB full export on a short page when the total is estimated", async () => {
+    app?.unmount();
+    backend.documentFindDocuments.mockReset();
+    backend.documentFindDocuments.mockResolvedValueOnce({ documents: [{ _id: "visible" }], total: 500, total_is_exact: false }).mockResolvedValueOnce({ documents: [{ _id: "only" }], total: 500, total_is_exact: false });
+    app = createApp(DocumentBrowser, {
+      connectionId: "mongo-1",
+      database: "test",
+      collection: "orders",
+      databaseType: "mongodb",
+    });
+    app.mount(root!);
+    await flushUi();
+
+    const progress = vi.fn();
+    const result = await dataGrid.fullExportResult!(progress);
+
+    expect(backend.documentFindDocuments).toHaveBeenCalledTimes(2);
+    expect(result?.rows).toEqual([["only"]]);
+    expect(progress).toHaveBeenLastCalledWith({ rowsExported: 1, totalRows: null });
+  });
+
+  it("does not offer the MongoDB full export callback to Elasticsearch viewers", () => {
+    expect(dataGrid.fullExportResult).toBeUndefined();
+  });
+
   it("identifies consistently numeric MongoDB columns for shared grid alignment", async () => {
     app?.unmount();
     backend.documentFindDocuments.mockReset();
@@ -532,7 +690,7 @@ describe("DocumentBrowser MongoDB filter value types", () => {
       collection: "typed_ids",
       databaseType: "mongodb",
     });
-    app.mount(root!);
+    const documentBrowser = app.mount(root!) as unknown as { focusSearch: () => boolean };
     await flushUi();
 
     const documentRow = [...root!.querySelectorAll<HTMLElement>(".group")].find((element) => element.textContent?.includes("document-1"))!;
@@ -540,7 +698,7 @@ describe("DocumentBrowser MongoDB filter value types", () => {
     await flushUi();
 
     const viewer = root!.querySelector<HTMLElement>("[data-document-json-viewer]")!;
-    const jsonText = viewer.querySelector<HTMLElement>(".json-string")!;
+    const jsonText = viewer.querySelector<HTMLElement>(".cm-line .json-string")!;
     const documentId = root!.querySelector<HTMLInputElement>('input[aria-label^="_id:"]')!;
     expect(root!.firstElementChild?.classList.contains("select-none")).toBe(true);
     expect(documentId.readOnly).toBe(true);
@@ -550,7 +708,9 @@ describe("DocumentBrowser MongoDB filter value types", () => {
     expect(documentIdBadge).not.toBeNull();
     expect(documentIdBadge?.classList.contains("rounded")).toBe(true);
     expect(documentIdBadge?.classList.contains("rounded-4xl")).toBe(false);
-    expect(viewer.querySelector(".json-viewer")?.classList.contains("select-text")).toBe(true);
+    expect(viewer.querySelector<HTMLElement>("[data-redis-json-editor-stub]")?.dataset.readOnly).toBe("true");
+    expect(viewer.querySelector<HTMLElement>("[data-redis-json-editor-stub]")?.dataset.lineNumbers).toBe("false");
+    expect(viewer.querySelector<HTMLElement>("[data-redis-json-editor-stub]")?.dataset.presentation).toBe("viewer");
 
     documentId.setSelectionRange(0, documentId.value.length);
     expect(documentId.selectionStart).toBe(0);
@@ -560,6 +720,10 @@ describe("DocumentBrowser MongoDB filter value types", () => {
     jsonText.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
     await flushUi();
     expect(buttonWithText("mongo.edit")).toBeDefined();
+
+    viewer.dispatchEvent(new Event("pointerdown", { bubbles: true }));
+    expect(documentBrowser.focusSearch()).toBe(true);
+    expect(documentJsonEditor.openSearch).toHaveBeenCalledOnce();
 
     viewer.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
     await flushUi();
@@ -604,5 +768,72 @@ describe("DocumentBrowser MongoDB filter value types", () => {
 
     expect(backend.documentDeleteDocument).not.toHaveBeenCalled();
     expect(document.body.textContent).toContain("dangerDialog.deleteMessage");
+  });
+
+  it("saves Meilisearch grid changes in one batch request", async () => {
+    app?.unmount();
+    backend.getColumns.mockResolvedValue([
+      { name: "id", data_type: "string", is_primary_key: true },
+      { name: "title", data_type: "string" },
+      { name: "rating", data_type: "number" },
+      { name: "obsolete", data_type: "boolean" },
+    ]);
+    backend.documentFindDocuments.mockResolvedValue({
+      documents: [
+        { _id: "001", title: "One", rating: 1, obsolete: true },
+        { _id: 2, title: "Two", rating: 2, obsolete: false },
+        { _id: 3, title: "Three", rating: 3, obsolete: false },
+      ],
+      raw_documents: [],
+      total: 3,
+      total_is_exact: true,
+    });
+    backend.documentSaveMeilisearchBatch.mockResolvedValue(4);
+    app = createApp(DocumentBrowser, {
+      connectionId: "meili-1",
+      database: "default",
+      collection: "movies",
+      databaseType: "meilisearch",
+    });
+    app.mount(root!);
+    await flushUi();
+
+    expect(dataGrid.customSaveHandler).toBeDefined();
+    await dataGrid.customSaveHandler!.save({
+      dirtyRows: new Map([
+        [
+          0,
+          new Map([
+            [1, "One revised"],
+            [3, null],
+          ]),
+        ],
+      ]),
+      deletedRows: new Set([2]),
+      newRows: [
+        ["004", "Four", 4, false],
+        [null, "Generated", 5, true],
+      ],
+      newRowMeta: [{}, {}],
+      columns: ["_id", "title", "rating", "obsolete"],
+      rows: [
+        ["001", "One", 1, true],
+        [2, "Two", 2, false],
+        [3, "Three", 3, false],
+      ],
+    });
+
+    expect(backend.documentSaveMeilisearchBatch).toHaveBeenCalledOnce();
+    const [connectionId, collection, updates, deleteIds, inserts] = backend.documentSaveMeilisearchBatch.mock.calls[0]!;
+    expect(connectionId).toBe("meili-1");
+    expect(collection).toBe("movies");
+    expect(updates).toHaveLength(1);
+    expect(updates[0].id).toBe('__dbx_meilisearch_string_id__"001"');
+    expect(JSON.parse(updates[0].docJson)).toEqual({ title: "One revised", rating: 1 });
+    expect(deleteIds).toEqual(["3"]);
+    expect(inserts.map((value: string) => JSON.parse(value))).toEqual([
+      { title: "Four", rating: 4, obsolete: false, _id: "004" },
+      { title: "Generated", rating: 5, obsolete: true },
+    ]);
   });
 });

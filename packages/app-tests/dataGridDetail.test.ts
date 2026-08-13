@@ -53,6 +53,25 @@ test("buildDataGridCellDetail preserves full value metadata", () => {
   });
 });
 
+test("buildDataGridCellDetail preserves a leading newline in the full value", () => {
+  const status = "\n=====================================\nINNODB MONITOR OUTPUT\nbody";
+  const detail = buildDataGridCellDetail({
+    rowIndex: 0,
+    rowId: 1,
+    row: [status],
+    columns: ["Status"],
+    columnIndex: 0,
+    displayValue: (value) => String(value),
+    isEditable: false,
+  });
+
+  assert.equal(detail?.value, status);
+  assert.equal(detail?.rawValue, status);
+  assert.equal(detail?.rawValuePreview, status);
+  assert.equal(detail?.displayValue, status);
+  assert.equal(detail?.displayValuePreview, status);
+});
+
 test("buildDataGridCellDetail reports image preview URLs", () => {
   const detail = buildDataGridCellDetail({
     rowIndex: 0,

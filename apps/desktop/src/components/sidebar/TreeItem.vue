@@ -59,7 +59,8 @@ import { connectionDisplayUrlScheme } from "@/lib/connection/connectionPresentat
 import { hexToRgba } from "@/lib/common/color";
 import { sidebarDisplayTableName } from "@/lib/sidebar/sidebarTableNameDisplay";
 import { shouldMeasureSidebarLabelOverflow } from "@/lib/sidebar/sidebarLabelTooltip";
-import { treeSelectionRangeIdsByIndex, treeSelectionRangeIds } from "@/lib/sidebar/sidebarTreeSelection";
+import { filterSidebarModifierSelectionIds, supportsSidebarModifierSelection, treeSelectionRangeIdsByIndex, treeSelectionRangeIds } from "@/lib/sidebar/sidebarTreeSelection";
+import { applyConnectionMultiSelection, applyTreeNodeSelection, connectionMultiSelectionAfterToggle } from "@/lib/sidebar/sidebarConnectionMultiSelect";
 import { isSidebarDatabaseOpenForVisual } from "@/lib/sidebar/sidebarDatabaseOpenState";
 import { sidebarTreeContextKey } from "@/lib/sidebar/sidebarTreeContext";
 import { connectionCanConfigureSidebarVisibleDatabases } from "@/lib/sidebar/sidebarVisibleFilterMenu";
@@ -229,6 +230,14 @@ function getIconInfo(node: TreeNode): { icon: any; colorClass: string } | null {
       } else {
         return { icon: Columns3, colorClass: "text-muted-foreground" };
       }
+    case "type-attribute":
+      return { icon: Columns3, colorClass: "text-muted-foreground" };
+    case "type-method":
+      return { icon: Braces, colorClass: "text-amber-500" };
+    case "type-attributes":
+      return { icon: ListTree, colorClass: "text-green-400" };
+    case "type-methods":
+      return { icon: Braces, colorClass: "text-amber-500" };
     case "group-columns":
       return { icon: ListTree, colorClass: "text-green-400" };
     case "group-indexes":
@@ -246,6 +255,10 @@ function getIconInfo(node: TreeNode): { icon: any; colorClass: string } | null {
       return { icon: TableProperties, colorClass: "text-primary" };
     case "user-admin":
       return { icon: UsersRound, colorClass: "text-primary" };
+    case "dameng-users":
+      return { icon: UsersRound, colorClass: "text-primary" };
+    case "dameng-roles":
+      return { icon: ShieldCheck, colorClass: "text-primary" };
     case "dameng-job-admin":
       return { icon: CalendarClock, colorClass: "text-primary" };
     case "index":
@@ -345,8 +358,9 @@ function displayLabel(node: TreeNode): string {
   // Use the canonical key for persisted trees created before this label was
   // internationalized; those nodes may still contain the old Chinese text.
   if (node.type === "nacos-access-control") return t("nacos.accessControlSidebarLabel");
-  if (node.type === "user-admin" || node.type === "dameng-job-admin") return t(node.label);
+  if (node.type === "user-admin" || node.type === "dameng-users" || node.type === "dameng-roles" || node.type === "dameng-job-admin") return t(node.label);
   if (node.type === "linked-server-root") return t(node.label);
+  if (node.type === "mqtt-topic" && node.id.endsWith(":mqtt-topic:__console__")) return t(node.label);
   if (node.label === "tree.defaultDatabase") return t(node.label);
   return isGroupLabel(node) ? t(node.label) : node.label;
 }
@@ -515,25 +529,45 @@ function selectSingleTreeNode(node: TreeNode) {
 }
 
 function toggleTreeNodeSelection(node: TreeNode) {
-  connectionStore.connectionMultiSelectActive = false;
+  if (!supportsSidebarModifierSelection(node)) {
+    selectSingleTreeNode(node);
+    return;
+  }
   const ids = new Set(connectionStore.selectedTreeNodeIds);
   if (ids.has(node.id)) ids.delete(node.id);
   else ids.add(node.id);
-  connectionStore.selectedTreeNodeIds = ids.size ? [...ids] : [node.id];
-  connectionStore.selectedTreeNodeId = node.id;
-  connectionStore.treeSelectionAnchorId = node.id;
+  const filteredIds = filterSidebarModifierSelectionIds(visibleTreeNodes(), [...ids]);
+  applyTreeNodeSelection(
+    connectionStore,
+    {
+      nodeIds: filteredIds.length ? filteredIds : [node.id],
+      activeNodeId: node.id,
+      anchorNodeId: node.id,
+    },
+    new Set(connectionStore.connections.map((connection) => connection.id)),
+  );
 }
 
 function selectTreeNodeRange(node: TreeNode) {
-  connectionStore.connectionMultiSelectActive = false;
+  if (!supportsSidebarModifierSelection(node)) {
+    selectSingleTreeNode(node);
+    return;
+  }
   const visible = visibleTreeNodes();
   const anchorId = connectionStore.treeSelectionAnchorId || connectionStore.selectedTreeNodeId || node.id;
   const currentIndex = sidebarTreeContext ? sidebarTreeContext.getVisibleNodeIndex(node.id) : -1;
   const anchorIndex = sidebarTreeContext ? sidebarTreeContext.getVisibleNodeIndex(anchorId) : -1;
 
   if (sidebarTreeContext && currentIndex >= 0 && anchorIndex >= 0) {
-    connectionStore.selectedTreeNodeIds = treeSelectionRangeIdsByIndex(visible, currentIndex, anchorIndex, node.id);
-    connectionStore.selectedTreeNodeId = node.id;
+    applyTreeNodeSelection(
+      connectionStore,
+      {
+        nodeIds: filterSidebarModifierSelectionIds(visible, treeSelectionRangeIdsByIndex(visible, currentIndex, anchorIndex, node.id)),
+        activeNodeId: node.id,
+        anchorNodeId: anchorId,
+      },
+      new Set(connectionStore.connections.map((connection) => connection.id)),
+    );
     return;
   }
 
@@ -542,9 +576,16 @@ function selectTreeNodeRange(node: TreeNode) {
     return;
   }
 
-  const rangeIds = treeSelectionRangeIds(visible, node.id, anchorId, connectionStore.selectedTreeNodeId);
-  connectionStore.selectedTreeNodeIds = rangeIds;
-  connectionStore.selectedTreeNodeId = node.id;
+  const rangeIds = filterSidebarModifierSelectionIds(visible, treeSelectionRangeIds(visible, node.id, anchorId, connectionStore.selectedTreeNodeId));
+  applyTreeNodeSelection(
+    connectionStore,
+    {
+      nodeIds: rangeIds,
+      activeNodeId: node.id,
+      anchorNodeId: anchorId,
+    },
+    new Set(connectionStore.connections.map((connection) => connection.id)),
+  );
 }
 
 function selectedConnectionIdsForAction(): string[] {
@@ -564,15 +605,8 @@ function toggleConnectionMultiSelection(event: MouseEvent) {
 
   // Keep connection-id normalization off the row render path; this handler only
   // runs when the checkbox is clicked, while the checked state updates often.
-  const next = new Set(connectionStore.connectionMultiSelectActive ? selectedConnectionIdsForAction() : []);
-  if (next.has(activeNode.value.connectionId)) next.delete(activeNode.value.connectionId);
-  else next.add(activeNode.value.connectionId);
-
-  const ids = [...next];
-  connectionStore.selectedTreeNodeIds = ids;
-  connectionStore.selectedTreeNodeId = ids.includes(activeNode.value.connectionId) ? activeNode.value.connectionId : (ids[0] ?? null);
-  connectionStore.treeSelectionAnchorId = activeNode.value.connectionId;
-  connectionStore.connectionMultiSelectActive = ids.length > 0;
+  const current = { connectionIds: selectedConnectionIdsForAction(), active: connectionStore.connectionMultiSelectActive };
+  applyConnectionMultiSelection(connectionStore, connectionMultiSelectionAfterToggle(current, activeNode.value.connectionId));
   rowRef.value?.focus({ preventScroll: true });
 }
 
@@ -615,7 +649,7 @@ function isNodeDefaultSchema(): boolean {
 
 const trailingComment = computed(() => {
   if (!settingsStore.editorSettings.sidebarObjectInfoMode.startsWith("comment-")) return null;
-  return sidebarTreeNodeComment(activeNode.value);
+  return sidebarTreeNodeComment(activeNode.value, settingsStore.editorSettings.sidebarShowConnectionNotes);
 });
 
 function isRightAlignedComment(): boolean {
@@ -1252,7 +1286,9 @@ function onKeydown(event: KeyboardEvent) {
                   node.type === 'group-synonyms' ||
                   node.type === 'group-packages' ||
                   node.type === 'group-types' ||
-                  node.type === 'group-partitions') &&
+                  node.type === 'group-partitions' ||
+                  node.type === 'type-attributes' ||
+                  node.type === 'type-methods') &&
                 node.objectCount != null
               "
               class="text-muted-foreground text-[10px] shrink-0"

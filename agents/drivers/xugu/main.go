@@ -28,11 +28,26 @@ const defaultMaxRows = 1000
 const defaultXuguPort = 5138
 const legacyAgentSessionID = "__legacy__"
 const maxAgentSessions = 256
+
+// xuguPublicSynonymScope is a protocol-only namespace for database-global
+// synonyms. It is deliberately not a real schema name (and must never be
+// interpreted as one by metadata queries).
+const xuguPublicSynonymScope = "\x00DBX_XUGU_PUBLIC_SYNONYMS"
 const xuguListDatabasesSQL = `
 SELECT DB_NAME
 FROM ALL_DATABASES
 ORDER BY DB_NAME`
 const xuguListSchemasSQL = `
+SELECT s.SCHEMA_NAME AS SCHEMA_NAME, FALSE AS IS_PUBLIC_SCOPE
+FROM ALL_SCHEMAS s
+WHERE s.DB_ID = CURRENT_DB_ID
+UNION
+SELECT '' AS SCHEMA_NAME, TRUE AS IS_PUBLIC_SCOPE
+FROM ALL_SYNONYMS y
+WHERE y.DB_ID = CURRENT_DB_ID
+  AND y.IS_PUBLIC = TRUE
+ORDER BY IS_PUBLIC_SCOPE, SCHEMA_NAME`
+const xuguListSchemasFallbackSQL = `
 SELECT SCHEMA_NAME
 FROM ALL_SCHEMAS
 WHERE DB_ID = CURRENT_DB_ID
@@ -48,12 +63,12 @@ JOIN ALL_SCHEMAS s ON s.DB_ID = q.DB_ID AND s.SCHEMA_ID = q.SCHEMA_ID
 WHERE s.DB_ID = CURRENT_DB_ID
   AND q.IS_SYS = FALSE`
 const xuguCatalogSynonymSelectSQL = `
-SELECT s.SCHEMA_NAME, y.SYNO_NAME, t.SCHEMA_NAME AS TARGET_SCHEMA, y.TARG_NAME
+SELECT s.SCHEMA_NAME,
+       y.SYNO_NAME, t.SCHEMA_NAME AS TARGET_SCHEMA, y.TARG_NAME, y.IS_PUBLIC
 FROM ALL_SYNONYMS y
-JOIN ALL_SCHEMAS s ON s.DB_ID = y.DB_ID AND s.SCHEMA_ID = y.SCHEMA_ID
+LEFT JOIN ALL_SCHEMAS s ON s.DB_ID = y.DB_ID AND s.SCHEMA_ID = y.SCHEMA_ID
 LEFT JOIN ALL_SCHEMAS t ON t.DB_ID = y.DB_ID AND t.SCHEMA_ID = y.TARG_SCHE_ID
-WHERE s.DB_ID = CURRENT_DB_ID
-  AND y.IS_PUBLIC = FALSE`
+WHERE y.DB_ID = CURRENT_DB_ID`
 const xuguPrimaryKeyColumnsSQL = `
 SELECT c.DEFINE
 FROM ALL_CONSTRAINTS c
@@ -208,11 +223,6 @@ type response struct {
 	ID      json.RawMessage `json:"id,omitempty"`
 	Result  any             `json:"result,omitempty"`
 	Error   *rpcError       `json:"error,omitempty"`
-}
-
-type rpcError struct {
-	Code    int    `json:"code"`
-	Message string `json:"message"`
 }
 
 type connectParams struct {
@@ -457,6 +467,7 @@ type xuguCatalogSynonym struct {
 	Name         string
 	TargetSchema sql.NullString
 	TargetName   string
+	Public       bool
 }
 
 // xuguIndexKey preserves the catalog spelling and SQL semantics of an index
@@ -523,6 +534,7 @@ type server struct {
 	activeRows        map[*sql.Rows]context.CancelFunc
 	activeTimer       *time.Timer
 	activeTimedOut    bool
+	activeCanceled    bool
 	// killSession, if non-nil, is called to force-kill the current
 	// statement on the database server. Tests may replace it with a
 	// stub. The real implementation is set during connectWithControl.
@@ -603,14 +615,14 @@ func newRuntimeServer() *runtimeServer {
 func (r *runtimeServer) handleLine(line string) (response, bool) {
 	var req request
 	if err := json.Unmarshal([]byte(line), &req); err != nil {
-		return errorResponse(nil, err), false
+		return errorResponse(nil, "", "", err), false
 	}
 	if len(req.ID) == 0 {
 		req.ID = json.RawMessage("1")
 	}
 	result, shutdown, err := r.dispatch(req.Method, req.Params)
 	if err != nil {
-		return errorResponse(req.ID, err), false
+		return errorResponse(req.ID, req.Method, stringParam(req.Params, "agentSessionId"), err), false
 	}
 	return response{JSONRPC: "2.0", ID: req.ID, Result: result}, shutdown
 }
@@ -621,7 +633,7 @@ func (r *runtimeServer) dispatch(method string, params map[string]json.RawMessag
 		return map[string]any{
 			"protocolVersion":      multiSessionProtocolVersion,
 			"agentProtocolVersion": multiSessionProtocolVersion,
-			"capabilities":         []string{"connect", "test_connection", "metadata", "query", "ddl", "multi_session"},
+			"capabilities":         []string{"connect", "test_connection", "metadata", "query", "ddl", "structured_error_v1", "multi_session"},
 		}, false, nil
 	case "open_session":
 		agentSessionID := stringParam(params, "agentSessionId")
@@ -695,7 +707,7 @@ func (r *runtimeServer) openSession(agentSessionID string, params connectParams)
 	}
 	if len(r.sessions) >= maxAgentSessions {
 		r.mu.Unlock()
-		return fmt.Errorf("agent session limit reached: %d", maxAgentSessions)
+		return fmt.Errorf("%w: %d", errAgentSessionLimit, maxAgentSessions)
 	}
 	r.mu.Unlock()
 
@@ -761,7 +773,7 @@ func (r *runtimeServer) registerSession(agentSessionID string, server *server, c
 	if len(r.sessions) >= maxAgentSessions {
 		_ = server.disconnect()
 		r.releaseControl(controlKey)
-		return fmt.Errorf("agent session limit reached: %d", maxAgentSessions)
+		return fmt.Errorf("%w: %d", errAgentSessionLimit, maxAgentSessions)
 	}
 	r.sessions[agentSessionID] = session
 	return nil
@@ -795,7 +807,7 @@ func (r *runtimeServer) session(agentSessionID string) (*agentSession, error) {
 	session := r.sessions[agentSessionID]
 	r.mu.RUnlock()
 	if session == nil {
-		return nil, fmt.Errorf("agent session not found: %s", agentSessionID)
+		return nil, fmt.Errorf("%w: %s", errAgentSessionNotFound, agentSessionID)
 	}
 	return session, nil
 }
@@ -881,14 +893,14 @@ func (r *runtimeServer) closeAllSessions() error {
 func (s *server) handleLine(line string) (response, bool) {
 	var req request
 	if err := json.Unmarshal([]byte(line), &req); err != nil {
-		return errorResponse(nil, err), false
+		return errorResponse(nil, "", "", err), false
 	}
 	if len(req.ID) == 0 {
 		req.ID = json.RawMessage("1")
 	}
 	result, shutdown, err := s.dispatch(req.Method, req.Params)
 	if err != nil {
-		return errorResponse(req.ID, err), false
+		return errorResponse(req.ID, req.Method, stringParam(req.Params, "agentSessionId"), err), false
 	}
 	return response{JSONRPC: "2.0", ID: req.ID, Result: result}, shutdown
 }
@@ -1689,21 +1701,60 @@ func xuguDSNValue(dsn string, key string) string {
 func (s *server) listSchemas() ([]string, error) {
 	rows, err := s.queryRows(xuguListSchemasSQL, nil)
 	if err != nil {
-		if fallback := strings.ToUpper(strings.TrimSpace(s.params.Username)); fallback != "" && isXuguMetadataUnavailableError(err) {
-			return []string{fallback}, nil
+		rows, err = s.queryRows(xuguListSchemasFallbackSQL, nil)
+		if err != nil {
+			if fallback := strings.ToUpper(strings.TrimSpace(s.params.Username)); fallback != "" && isXuguMetadataUnavailableError(err) {
+				return []string{fallback}, nil
+			}
+			return nil, err
 		}
-		return nil, err
+		return s.scanXuguSchemaRows(rows, false)
 	}
+	return s.scanXuguSchemaRows(rows, true)
+}
+
+func (s *server) scanXuguSchemaRows(rows *sql.Rows, includesPublicScope bool) ([]string, error) {
 	defer s.closeRows(rows)
 	var result []string
 	for rows.Next() {
-		var schema string
-		if err := rows.Scan(&schema); err != nil {
+		var schema sql.NullString
+		var publicScope bool
+		var err error
+		if includesPublicScope {
+			err = rows.Scan(&schema, &publicScope)
+		} else {
+			err = rows.Scan(&schema)
+		}
+		if err != nil {
 			return nil, err
 		}
-		result = append(result, schema)
+		if publicScope {
+			result = append(result, xuguPublicSynonymScope)
+		} else if schema.Valid && schema.String != "" {
+			result = append(result, schema.String)
+		}
 	}
-	return emptyIfNil(result), rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return dedupeXuguSchemaNames(result), nil
+}
+
+func dedupeXuguSchemaNames(names []string) []string {
+	seen := make(map[string]struct{}, len(names))
+	result := make([]string, 0, len(names))
+	for _, name := range names {
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		result = append(result, name)
+	}
+	return emptyIfNil(result)
+}
+
+func isXuguPublicSynonymScope(schema string) bool {
+	return strings.TrimSpace(schema) == xuguPublicSynonymScope
 }
 
 func (s *server) currentSchema() (string, error) {
@@ -2160,6 +2211,24 @@ WHERE s.DB_ID = CURRENT_DB_ID
 }
 
 func xuguListObjectsQuery(schema string, constraints metadataListConstraints) xuguMetadataListQuery {
+	// Public synonyms have no owning schema in Xugu. They are queried only
+	// through the reserved protocol scope; a real schema named GUEST remains
+	// a normal private-synonym namespace.
+	publicSynonymScope := isXuguPublicSynonymScope(schema)
+	synonymSQL := `
+SELECT y.SYNO_NAME AS OBJECT_NAME, 'SYNONYM' AS OBJECT_TYPE, NULL AS COMMENTS, y.VALID, NULL AS XUGU_TYPE_MEMBERS_EXPANDABLE
+FROM ALL_SYNONYMS y
+WHERE y.DB_ID = CURRENT_DB_ID
+  AND y.IS_PUBLIC = TRUE`
+	if !publicSynonymScope {
+		synonymSQL = `
+SELECT y.SYNO_NAME AS OBJECT_NAME, 'SYNONYM' AS OBJECT_TYPE, NULL AS COMMENTS, y.VALID, NULL AS XUGU_TYPE_MEMBERS_EXPANDABLE
+FROM ALL_SYNONYMS y
+JOIN ALL_SCHEMAS s ON s.DB_ID = y.DB_ID AND s.SCHEMA_ID = y.SCHEMA_ID
+WHERE y.DB_ID = CURRENT_DB_ID
+  AND UPPER(s.SCHEMA_NAME) = UPPER(?)
+  AND y.IS_PUBLIC = FALSE`
+	}
 	type objectSource struct {
 		objectTypes []string
 		sql         string
@@ -2211,13 +2280,7 @@ JOIN ALL_SCHEMAS s ON s.DB_ID = q.DB_ID AND s.SCHEMA_ID = q.SCHEMA_ID
 WHERE s.DB_ID = CURRENT_DB_ID
   AND UPPER(s.SCHEMA_NAME) = UPPER(?)
   AND q.IS_SYS = FALSE`},
-		{objectTypes: []string{"SYNONYM"}, sql: `
-SELECT y.SYNO_NAME AS OBJECT_NAME, 'SYNONYM' AS OBJECT_TYPE, NULL AS COMMENTS, y.VALID, NULL AS XUGU_TYPE_MEMBERS_EXPANDABLE
-FROM ALL_SYNONYMS y
-JOIN ALL_SCHEMAS s ON s.DB_ID = y.DB_ID AND s.SCHEMA_ID = y.SCHEMA_ID
-WHERE s.DB_ID = CURRENT_DB_ID
-  AND UPPER(s.SCHEMA_NAME) = UPPER(?)
-	AND y.IS_PUBLIC = FALSE`},
+		{objectTypes: []string{"SYNONYM"}, sql: synonymSQL},
 		{objectTypes: []string{"TYPE"}, sql: `
 SELECT u.TYPE_NAME AS OBJECT_NAME, 'TYPE' AS OBJECT_TYPE, u.COMMENTS, u.VALID,
 	       CASE WHEN u.UDT_TYPE = 1001 THEN TRUE ELSE FALSE END AS XUGU_TYPE_MEMBERS_EXPANDABLE
@@ -2263,7 +2326,9 @@ WHERE s.DB_ID = CURRENT_DB_ID
 	baseArgs := make([]any, 0, len(baseSources))
 	for _, source := range baseSources {
 		baseSQLParts = append(baseSQLParts, source.sql)
-		baseArgs = append(baseArgs, schema)
+		if !(publicSynonymScope && len(source.objectTypes) == 1 && source.objectTypes[0] == "SYNONYM") {
+			baseArgs = append(baseArgs, schema)
+		}
 	}
 	return xuguConstrainedMetadataListQuery(
 		strings.Join(baseSQLParts, "\nUNION ALL\n"),
@@ -2929,9 +2994,9 @@ func renderXuguSequenceDDL(sequence xuguSequenceMetadata) string {
 	return builder.String()
 }
 
-// getSynonymSource reconstructs private synonym DDL from ALL_SYNONYMS. Public
-// synonyms deliberately remain outside schema groups: their catalog rows have
-// no owning schema and showing them in every schema would duplicate objects.
+// getSynonymSource reconstructs synonym DDL from ALL_SYNONYMS. Public
+// synonyms are exposed in the reserved database-global scope and therefore
+// use PUBLIC syntax without a schema qualifier.
 func (s *server) getSynonymSource(schema, name string) (map[string]any, error) {
 	synonym, err := s.resolveCatalogSynonym(schema, name)
 	if err != nil {
@@ -2942,10 +3007,15 @@ func (s *server) getSynonymSource(schema, name string) (map[string]any, error) {
 	}
 
 	var builder strings.Builder
-	builder.WriteString("CREATE SYNONYM ")
-	builder.WriteString(quoteIdentifier(synonym.Schema))
-	builder.WriteByte('.')
-	builder.WriteString(quoteIdentifier(synonym.Name))
+	if synonym.Public {
+		builder.WriteString("CREATE PUBLIC SYNONYM ")
+		builder.WriteString(quoteIdentifier(synonym.Name))
+	} else {
+		builder.WriteString("CREATE SYNONYM ")
+		builder.WriteString(quoteIdentifier(synonym.Schema))
+		builder.WriteByte('.')
+		builder.WriteString(quoteIdentifier(synonym.Name))
+	}
 	builder.WriteString("\nFOR ")
 	if targetSchema := strings.TrimSpace(synonym.TargetSchema.String); targetSchema != "" {
 		builder.WriteString(quoteIdentifier(targetSchema))
@@ -2996,13 +3066,20 @@ func (s *server) resolveCatalogSynonym(schema, name string) (xuguCatalogSynonym,
 func xuguCatalogSynonymQuery(schema, name string, caseInsensitive bool) string {
 	schemaExpr := quoteStringLiteral(schema)
 	nameExpr := quoteStringLiteral(name)
+	publicScope := isXuguPublicSynonymScope(schema)
 	if caseInsensitive {
-		schemaExpr = quoteStringLiteral(strings.ToUpper(schema))
 		nameExpr = quoteStringLiteral(strings.ToUpper(name))
-		return xuguCatalogSynonymSelectSQL + "\n  AND UPPER(s.SCHEMA_NAME) = " + schemaExpr +
+		if publicScope {
+			return xuguCatalogSynonymSelectSQL + "\n  AND y.IS_PUBLIC = TRUE\n  AND UPPER(y.SYNO_NAME) = " + nameExpr
+		}
+		schemaExpr = quoteStringLiteral(strings.ToUpper(schema))
+		return xuguCatalogSynonymSelectSQL + "\n  AND y.IS_PUBLIC = FALSE\n  AND UPPER(s.SCHEMA_NAME) = " + schemaExpr +
 			"\n  AND UPPER(y.SYNO_NAME) = " + nameExpr
 	}
-	return xuguCatalogSynonymSelectSQL + "\n  AND s.SCHEMA_NAME = " + schemaExpr +
+	if publicScope {
+		return xuguCatalogSynonymSelectSQL + "\n  AND y.IS_PUBLIC = TRUE\n  AND y.SYNO_NAME = " + nameExpr
+	}
+	return xuguCatalogSynonymSelectSQL + "\n  AND y.IS_PUBLIC = FALSE\n  AND s.SCHEMA_NAME = " + schemaExpr +
 		"\n  AND y.SYNO_NAME = " + nameExpr
 }
 
@@ -3016,8 +3093,14 @@ func (s *server) catalogSynonymCandidates(query string) ([]xuguCatalogSynonym, e
 	var candidates []xuguCatalogSynonym
 	for rows.Next() {
 		var candidate xuguCatalogSynonym
-		if err := rows.Scan(&candidate.Schema, &candidate.Name, &candidate.TargetSchema, &candidate.TargetName); err != nil {
+		var schema sql.NullString
+		if err := rows.Scan(&schema, &candidate.Name, &candidate.TargetSchema, &candidate.TargetName, &candidate.Public); err != nil {
 			return nil, err
+		}
+		if candidate.Public {
+			candidate.Schema = xuguPublicSynonymScope
+		} else {
+			candidate.Schema = schema.String
 		}
 		candidates = append(candidates, candidate)
 	}
@@ -3224,7 +3307,7 @@ func (s *server) getExplainInfo(sqlText string) (string, error) {
 	return strings.TrimSpace(builder.String()), rows.Err()
 }
 
-func (s *server) executeTransaction(params map[string]json.RawMessage) (queryResult, error) {
+func (s *server) executeTransaction(params map[string]json.RawMessage) (result queryResult, err error) {
 	var payload struct {
 		Statements []string `json:"statements"`
 		Schema     string   `json:"schema"`
@@ -3237,7 +3320,9 @@ func (s *server) executeTransaction(params map[string]json.RawMessage) (queryRes
 		return queryResult{}, err
 	}
 	ctx, cancel := s.beginActiveOperation()
-	defer s.endActiveOperation(cancel)
+	defer func() {
+		err = s.finishActiveOperation(cancel, 0, err)
+	}()
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return queryResult{}, err
@@ -3255,12 +3340,12 @@ func (s *server) executeTransaction(params map[string]json.RawMessage) (queryRes
 		if statement == "" {
 			continue
 		}
-		result, err := tx.ExecContext(ctx, statement)
+		execResult, err := tx.ExecContext(ctx, statement)
 		if err != nil {
 			tx.Rollback()
 			return queryResult{}, err
 		}
-		count, _ := result.RowsAffected()
+		count, _ := execResult.RowsAffected()
 		affected += count
 	}
 	if err := tx.Commit(); err != nil {
@@ -3433,8 +3518,8 @@ func (s *server) executeQuery(opts queryOptions) (queryResult, error) {
 		return queryResult{}, err
 	}
 	ctx, cancel := s.beginActiveOperationWithTimeout(opts.TimeoutSecs)
-	defer s.endActiveOperation(cancel)
 	execResult, err := db.ExecContext(ctx, sqlText)
+	err = s.finishActiveOperation(cancel, opts.TimeoutSecs, err)
 	if err != nil {
 		return queryResult{}, err
 	}
@@ -3531,18 +3616,20 @@ func (s *server) queryRowsWithTimeoutOnce(sqlText string, args []any, timeoutSec
 		s.activeTimer = nil
 	}
 	timedOut := s.activeTimedOut
-	if queryErr != nil {
-		cancel()
-	} else if timedOut {
-		cancel()
-		if rows != nil {
-			rows.Close()
-		}
-		queryErr = fmt.Errorf("query timed out after %ds", timeoutSecs)
-	} else {
+	canceled := s.activeCanceled
+	s.activeTimedOut = false
+	s.activeCanceled = false
+	if queryErr == nil && !timedOut && !canceled {
 		s.activeRows[rows] = cancel
 	}
 	s.activeCancelMu.Unlock()
+	if queryErr != nil || timedOut || canceled {
+		cancel()
+		if rows != nil {
+			_ = rows.Close()
+		}
+		queryErr = xuguOperationResultError(timedOut, canceled, timeoutSecs, queryErr)
+	}
 	return rows, queryErr
 }
 
@@ -3572,7 +3659,7 @@ func (s *server) execWithReconnect(statement string) error {
 	}
 	ctx, cancel := s.beginActiveOperation()
 	_, execErr := db.ExecContext(ctx, statement)
-	s.endActiveOperation(cancel)
+	execErr = s.finishActiveOperation(cancel, 0, execErr)
 	if execErr == nil || !isXuguConnectionClosedError(execErr) {
 		return execErr
 	}
@@ -3585,7 +3672,7 @@ func (s *server) execWithReconnect(statement string) error {
 	}
 	ctx, cancel = s.beginActiveOperation()
 	_, execErr = db.ExecContext(ctx, statement)
-	s.endActiveOperation(cancel)
+	execErr = s.finishActiveOperation(cancel, 0, execErr)
 	return execErr
 }
 
@@ -3615,25 +3702,60 @@ func (s *server) beginActiveOperationWithTimeout(timeoutSecs int) (context.Conte
 	s.activeCancel = cancel
 	s.activeTimer = timer
 	s.activeTimedOut = false
+	s.activeCanceled = false
 	s.activeCancelMu.Unlock()
 	return ctx, cancel
 }
 
 func (s *server) endActiveOperation(cancel context.CancelFunc) {
-	cancel()
+	_ = s.finishActiveOperation(cancel, 0, nil)
+}
+
+func (s *server) finishActiveOperation(cancel context.CancelFunc, timeoutSecs int, operationErr error) error {
 	s.activeCancelMu.Lock()
 	s.activeCancel = nil
 	if s.activeTimer != nil {
 		s.activeTimer.Stop()
 		s.activeTimer = nil
 	}
+	timedOut := s.activeTimedOut
+	canceled := s.activeCanceled
+	s.activeTimedOut = false
+	s.activeCanceled = false
 	s.activeCancelMu.Unlock()
+	cancel()
+	return xuguOperationResultError(timedOut, canceled, timeoutSecs, operationErr)
+}
+
+func xuguOperationResultError(timedOut, canceled bool, timeoutSecs int, operationErr error) error {
+	if timedOut {
+		if operationErr != nil {
+			return fmt.Errorf("%w after %ds: %v", errXuguOperationTimeout, timeoutSecs, operationErr)
+		}
+		return fmt.Errorf("%w after %ds", errXuguOperationTimeout, timeoutSecs)
+	}
+	if canceled {
+		if operationErr != nil {
+			return fmt.Errorf("%w: %v", errXuguOperationCanceled, operationErr)
+		}
+		return errXuguOperationCanceled
+	}
+	return operationErr
 }
 
 func (s *server) cancelActiveQuery() {
 	s.activeCancelMu.Lock()
 	cancels := make([]context.CancelFunc, 0, len(s.activeRows)+1)
 	if s.activeCancel != nil {
+		if !s.activeTimedOut {
+			s.activeCanceled = true
+			// Explicit cancellation won the race. Disable the watchdog so a
+			// slow driver return cannot relabel this operation as a timeout.
+			if s.activeTimer != nil {
+				s.activeTimer.Stop()
+				s.activeTimer = nil
+			}
+		}
 		cancels = append(cancels, s.activeCancel)
 	}
 	for _, cancel := range s.activeRows {
@@ -5018,8 +5140,8 @@ func stringSliceParam(params map[string]json.RawMessage, key string) []string {
 	return nil
 }
 
-func errorResponse(id json.RawMessage, err error) response {
-	return response{JSONRPC: "2.0", ID: id, Error: &rpcError{Code: -1, Message: err.Error()}}
+func errorResponse(id json.RawMessage, method, agentSessionID string, err error) response {
+	return response{JSONRPC: "2.0", ID: id, Error: classifyRPCError(method, agentSessionID, err)}
 }
 
 func trimStatementSQL(sqlText string) string {

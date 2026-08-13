@@ -113,7 +113,7 @@ function resetPerFileState() {
   currentFileName.value = "";
 }
 
-const sqlConnections = computed(() => store.connections.filter((c) => !["redis", "mongodb", "elasticsearch", "easysearch", "qdrant", "milvus", "weaviate", "chromadb", "etcd", "zookeeper", "consul", "mq", "nacos"].includes(c.db_type)));
+const sqlConnections = computed(() => store.connections.filter((c) => !["redis", "mongodb", "elasticsearch", "easysearch", "meilisearch", "qdrant", "milvus", "weaviate", "chromadb", "etcd", "zookeeper", "consul", "mq", "nacos"].includes(c.db_type)));
 
 const selectedConnection = computed(() => sqlConnections.value.find((c) => c.id === connectionId.value));
 
@@ -196,6 +196,7 @@ function resolveInitialConnectionId() {
   if (props.prefillConnectionId && sqlConnections.value.some((c) => c.id === props.prefillConnectionId)) {
     return props.prefillConnectionId;
   }
+  if (props.prefillFilePath) return "";
   return sqlConnections.value[0]?.id ?? "";
 }
 

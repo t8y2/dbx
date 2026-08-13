@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, nextTick, onBeforeUnmount, watch } from "vue";
 import { useI18n } from "vue-i18n";
-import type { EditorView } from "@codemirror/view";
+import { EditorView } from "@codemirror/view";
 import { EditorSelection } from "@codemirror/state";
 import { setSearchQuery, openSearchPanel as cmOpenSearchPanel, findNext as cmFindNext, findPrevious as cmFindPrevious, replaceNext as cmReplaceNext, replaceAll as cmReplaceAll } from "@codemirror/search";
 import { ChevronUp, ChevronDown, ChevronRight, TextSelect, X } from "@lucide/vue";
@@ -171,7 +171,10 @@ function findInScope(direction: "next" | "prev"): boolean {
   if (target) {
     v.dispatch({
       selection: EditorSelection.range(target.from, target.to),
-      scrollIntoView: true,
+      // Center the match instead of the default "nearest" alignment, which
+      // often lands the match flush against the viewport edge and makes an
+      // immediate drag-select there trigger CodeMirror's edge autoscroll.
+      effects: EditorView.scrollIntoView(target.from, { y: "center" }),
     });
     return true;
   }

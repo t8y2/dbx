@@ -4,9 +4,11 @@ import { createApp, nextTick, type App } from "vue";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import i18n from "@/i18n";
 import ScheduledDatabaseBackupSettings from "@/components/backup/ScheduledDatabaseBackupSettings.vue";
+import type { DatabaseBackupSchedule } from "@/lib/backup/scheduledDatabaseBackup";
 
 const mocks = vi.hoisted(() => ({
   connections: [] as Array<{ id: string; name: string; db_type: string }>,
+  schedules: [] as DatabaseBackupSchedule[],
   ensureConnected: vi.fn(async () => {}),
   listDatabases: vi.fn(async () => [{ name: "app" }]),
   toast: vi.fn(),
@@ -29,7 +31,7 @@ vi.mock("@/stores/connectionStore", () => ({
 
 vi.mock("@/composables/useScheduledDatabaseBackups", () => ({
   useScheduledDatabaseBackups: () => ({
-    schedules: { __v_isRef: true, value: [] },
+    schedules: { __v_isRef: true, value: mocks.schedules },
     runs: { __v_isRef: true, value: [] },
     activeScheduleIds: new Set<string>(),
     activeRunIds: new Set<string>(),
@@ -78,13 +80,55 @@ function addScheduleButton(): HTMLButtonElement {
   return button;
 }
 
+function schedule(overrides: Partial<DatabaseBackupSchedule> = {}): DatabaseBackupSchedule {
+  return {
+    id: "schedule-1",
+    name: "Nightly backup",
+    enabled: true,
+    connectionId: "mysql-1",
+    databases: ["app"],
+    tableFilterMode: "all",
+    tablePatterns: [],
+    destinationDirectory: "/backups",
+    frequency: "daily",
+    intervalHours: 6,
+    timeOfDay: "02:00",
+    weekday: 1,
+    includeStructure: true,
+    includeData: true,
+    includeObjects: true,
+    dropTableIfExists: false,
+    retentionCount: 10,
+    createdAt: "2026-08-12T00:00:00.000Z",
+    updatedAt: "2026-08-12T00:00:00.000Z",
+    nextRunAt: "2026-08-13T02:00:00.000Z",
+    ...overrides,
+  };
+}
+
+function buttonWithTitle(title: string): HTMLButtonElement {
+  const button = Array.from(document.body.querySelectorAll("button")).find((item) => item.title === title);
+  if (!button) throw new Error(`Button not found: ${title}`);
+  return button;
+}
+
+function saveScheduleButton(): HTMLButtonElement {
+  const dialog = document.body.querySelector('[data-slot="dialog-content"]');
+  const label = String(i18n.global.t("common.save"));
+  const button = Array.from(dialog?.querySelectorAll("button") ?? []).find((item) => item.textContent?.trim() === label);
+  if (!button) throw new Error("Save schedule button not found");
+  return button;
+}
+
 afterEach(() => {
   for (const app of mountedApps.splice(0)) app.unmount();
   document.body.innerHTML = "";
   mocks.connections.splice(0);
+  mocks.schedules.splice(0);
   mocks.ensureConnected.mockClear();
   mocks.listDatabases.mockClear();
   mocks.toast.mockClear();
+  mocks.saveSchedule.mockClear();
 });
 
 describe("ScheduledDatabaseBackupSettings schedule dialog", () => {
@@ -111,5 +155,46 @@ describe("ScheduledDatabaseBackupSettings schedule dialog", () => {
 
     expect(addScheduleButton().disabled).toBe(true);
     expect(document.body.textContent).toContain(String(i18n.global.t("databaseBackup.noSupportedConnections")));
+  });
+
+  it("removes unavailable databases from an edited schedule before saving", async () => {
+    mocks.connections.push({ id: "mysql-1", name: "Local MySQL", db_type: "mysql" });
+    mocks.schedules.push(schedule({ databases: ["app", "deleted"] }));
+    mocks.listDatabases.mockResolvedValueOnce([{ name: "app" }]);
+    await mountSettings();
+
+    buttonWithTitle(String(i18n.global.t("databaseBackup.edit"))).click();
+    await flush();
+    saveScheduleButton().click();
+    await flush();
+
+    expect(mocks.saveSchedule).toHaveBeenCalledWith(expect.objectContaining({ databases: ["app"] }));
+  });
+
+  it("does not allow saving when every selected database is unavailable", async () => {
+    mocks.connections.push({ id: "mysql-1", name: "Local MySQL", db_type: "mysql" });
+    mocks.schedules.push(schedule({ databases: ["deleted"] }));
+    mocks.listDatabases.mockResolvedValueOnce([{ name: "app" }]);
+    await mountSettings();
+
+    buttonWithTitle(String(i18n.global.t("databaseBackup.edit"))).click();
+    await flush();
+
+    expect(saveScheduleButton().disabled).toBe(true);
+    expect(mocks.saveSchedule).not.toHaveBeenCalled();
+  });
+
+  it("preserves configured databases when refreshing the list fails", async () => {
+    mocks.connections.push({ id: "mysql-1", name: "Local MySQL", db_type: "mysql" });
+    mocks.schedules.push(schedule({ databases: ["app", "archive"] }));
+    mocks.listDatabases.mockRejectedValueOnce(new Error("database list failed"));
+    await mountSettings();
+
+    buttonWithTitle(String(i18n.global.t("databaseBackup.edit"))).click();
+    await flush();
+    saveScheduleButton().click();
+    await flush();
+
+    expect(mocks.saveSchedule).toHaveBeenCalledWith(expect.objectContaining({ databases: ["app", "archive"] }));
   });
 });

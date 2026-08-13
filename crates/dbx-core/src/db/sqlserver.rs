@@ -72,6 +72,7 @@ const SQLSERVER_RESULT_TYPE_PROBE_SQL: &str = "\
         END CATCH \
     END";
 const SIMPLE_QUERY_MODULE_KEYWORDS: &[&str] = &["FUNCTION", "PROC", "PROCEDURE", "TRIGGER", "VIEW"];
+const SQLSERVER_INTERNAL_HEALTH_CHECK_SQL: &str = "/* DBX_INTERNAL_TRACE */ SELECT 1";
 // Match JDBC/tiberius `encrypt=false`: encrypt only login, then drop back to raw TDS.
 const SQLSERVER_LEGACY_ENCRYPTION_LEVEL: tiberius::EncryptionLevel = tiberius::EncryptionLevel::Off;
 // Some very old SQL Server setups only accepted DBX <= 0.5.48 because the fallback
@@ -354,6 +355,19 @@ fn restore_sqlserver_spatial_column_types(column_types: &mut [String], spatial_c
     }
 }
 
+fn restore_sqlserver_column_types(column_types: &mut [String], restored_columns: &[SqlServerRestoredColumn]) {
+    for restored_column in restored_columns {
+        if let Some(column_type) = column_types.get_mut(restored_column.column_index) {
+            column_type.clone_from(&restored_column.column_type);
+        }
+    }
+}
+
+fn restore_sqlserver_unsafe_column_types(column_types: &mut [String], query: &SqlServerUnsafeTypeQuery) {
+    restore_sqlserver_spatial_column_types(column_types, &query.spatial_columns);
+    restore_sqlserver_column_types(column_types, &query.restored_columns);
+}
+
 fn columns_from_metadata(metadata: &tiberius::ResultMetadata) -> Vec<String> {
     metadata.columns().iter().map(|c| c.name().to_string()).collect()
 }
@@ -557,7 +571,7 @@ async fn collect_first_result_limited(
     start: Instant,
     max_rows: Option<usize>,
     result_offset: usize,
-    spatial_columns: &[SqlServerSpatialColumn],
+    query: &SqlServerUnsafeTypeQuery,
 ) -> Result<QueryResult, String> {
     let row_limit = query_result_row_limit(max_rows);
     let mut remaining_offset = result_offset;
@@ -566,7 +580,7 @@ async fn collect_first_result_limited(
     let mut rows: Vec<Vec<serde_json::Value>> = Vec::new();
     let mut spatial_values: Vec<Vec<Option<u32>>> = Vec::new();
     let mut spatial_values_builder =
-        SpatialColumnBuilder::new(spatial_columns.iter().map(|column| column.column_index));
+        SpatialColumnBuilder::new(query.spatial_columns.iter().map(|column| column.column_index));
     let mut truncated = false;
 
     while let Some(item) = stream.try_next().await.map_err(|e| e.to_string())? {
@@ -574,7 +588,7 @@ async fn collect_first_result_limited(
             QueryItem::Metadata(metadata) if metadata.result_index() == 0 => {
                 columns = columns_from_metadata(&metadata);
                 column_types = column_types_from_metadata(&metadata);
-                restore_sqlserver_spatial_column_types(&mut column_types, spatial_columns);
+                restore_sqlserver_unsafe_column_types(&mut column_types, query);
             }
             QueryItem::Metadata(_) => {}
             QueryItem::Row(row) if row.result_index() == 0 => {
@@ -584,7 +598,7 @@ async fn collect_first_result_limited(
                 }
                 if rows.len() < row_limit {
                     let (values, srids) =
-                        row_to_json_with_spatial_metadata(&row, spatial_columns, |column_index, srid| {
+                        row_to_json_with_spatial_metadata(&row, &query.spatial_columns, |column_index, srid| {
                             spatial_values_builder.observe(column_index, srid);
                         });
                     rows.push(values);
@@ -597,7 +611,7 @@ async fn collect_first_result_limited(
         }
     }
 
-    restore_sqlserver_spatial_column_types(&mut column_types, spatial_columns);
+    restore_sqlserver_unsafe_column_types(&mut column_types, query);
 
     Ok(QueryResult {
         columns,
@@ -649,14 +663,21 @@ struct SqlServerSpatialColumn {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+struct SqlServerRestoredColumn {
+    column_index: usize,
+    column_type: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct SqlServerUnsafeTypeQuery {
     sql: String,
     spatial_columns: Vec<SqlServerSpatialColumn>,
+    restored_columns: Vec<SqlServerRestoredColumn>,
 }
 
 impl SqlServerUnsafeTypeQuery {
     fn plain(sql: &str) -> Self {
-        Self { sql: sql.to_string(), spatial_columns: Vec::new() }
+        Self { sql: sql.to_string(), spatial_columns: Vec::new(), restored_columns: Vec::new() }
     }
 }
 
@@ -1032,6 +1053,8 @@ fn build_sqlserver_unsafe_type_query(
                 format!(
                     "{quoted_output} = CASE WHEN {value_ref} IS NULL THEN NULL ELSE N'SRID=' + CONVERT(nvarchar(20), {value_ref}.STSrid) + N';' + {value_ref}.AsTextZM() END"
                 )
+            } else if is_sqlserver_hierarchyid_column(column) {
+                format!("{quoted_output} = CASE WHEN {value_ref} IS NULL THEN NULL ELSE {value_ref}.ToString() END")
             } else if is_sqlserver_variant_column(column) {
                 format!("{quoted_output} = CAST({value_ref} AS NVARCHAR(MAX))")
             } else {
@@ -1048,6 +1071,12 @@ fn build_sqlserver_unsafe_type_query(
             sqlserver_spatial_column_type(column)
                 .map(|column_type| SqlServerSpatialColumn { column_index, column_type: column_type.to_string() })
         })
+        .collect();
+    let restored_columns = columns
+        .iter()
+        .enumerate()
+        .filter(|(_, column)| is_sqlserver_hierarchyid_column(column))
+        .map(|(column_index, _)| SqlServerRestoredColumn { column_index, column_type: "hierarchyid".to_string() })
         .collect();
 
     // Re-apply the original ORDER BY / OFFSET / FETCH on the outer query so
@@ -1068,11 +1097,14 @@ fn build_sqlserver_unsafe_type_query(
             statement.inner
         ),
         spatial_columns,
+        restored_columns,
     })
 }
 
 fn is_sqlserver_unsafe_column(column: &SqlServerDescribedColumn) -> bool {
-    is_sqlserver_spatial_column(column) || is_sqlserver_variant_column(column)
+    is_sqlserver_spatial_column(column)
+        || is_sqlserver_hierarchyid_column(column)
+        || is_sqlserver_variant_column(column)
 }
 
 fn is_sqlserver_spatial_column(column: &SqlServerDescribedColumn) -> bool {
@@ -1089,6 +1121,13 @@ fn sqlserver_spatial_column_type(column: &SqlServerDescribedColumn) -> Option<&'
         } else {
             None
         }
+    })
+}
+
+fn is_sqlserver_hierarchyid_column(column: &SqlServerDescribedColumn) -> bool {
+    [&column.system_type_name, &column.user_type_name].into_iter().flatten().any(|name| {
+        let normalized = name.trim().trim_matches(['[', ']']).to_ascii_lowercase();
+        normalized == "hierarchyid" || normalized.ends_with(".hierarchyid")
     })
 }
 
@@ -1145,9 +1184,9 @@ fn normalized_sqlserver_select_statement(sql: &str) -> Option<SqlServerNormalize
 /// into an equivalent clause for the outer rewrite, or return `None` when the
 /// ordering cannot be guaranteed on the outer query. `None` covers ORDER BY keys
 /// that reference columns absent from the projection, non-trivial expressions,
-/// and keys targeting columns the rewrite transforms (spatial/variant); callers
-/// must then fall back to executing the plain statement rather than silently
-/// dropping order and pagination semantics.
+/// and keys targeting transformed columns whose original ordering cannot be
+/// preserved; callers must then fall back to executing the plain statement
+/// rather than silently dropping order and pagination semantics.
 fn sqlserver_outer_order_by(order_by: &str, columns: &[SqlServerDescribedColumn]) -> Option<String> {
     // OFFSET/FETCH carry no column references, so keep that tail verbatim and
     // rebuild only the sort-key list against the outer projection.
@@ -1173,8 +1212,7 @@ fn sqlserver_outer_order_by(order_by: &str, columns: &[SqlServerDescribedColumn]
 
     let mut parts = Vec::with_capacity(order_exprs.len());
     for order_expr in order_exprs {
-        let output_name = sqlserver_order_by_output_name(columns, &order_expr.expr)?;
-        let mut part = quote_sqlserver_identifier(&output_name);
+        let mut part = sqlserver_outer_order_by_expression(columns, &order_expr.expr)?;
         if order_expr.options.asc == Some(false) {
             part.push_str(" DESC");
         }
@@ -1192,11 +1230,10 @@ fn sqlserver_outer_order_by(order_by: &str, columns: &[SqlServerDescribedColumn]
     Some(outer)
 }
 
-/// Map an ORDER BY sort key to the outer rewrite's output column name. Returns
-/// `None` for keys that do not resolve to a projection column, keys targeting a
-/// column the rewrite transforms (spatial/variant), and any non-trivial
-/// expression, none of which can be safely re-applied on the outer query.
-fn sqlserver_order_by_output_name(columns: &[SqlServerDescribedColumn], expr: &Expr) -> Option<String> {
+/// Map an ORDER BY sort key to an expression on the outer rewrite. hierarchyid
+/// uses the untouched derived-table value so converting its displayed value to
+/// a logical path never changes SQL Server's native depth-first ordering.
+fn sqlserver_outer_order_by_expression(columns: &[SqlServerDescribedColumn], expr: &Expr) -> Option<String> {
     let index = match expr {
         Expr::Identifier(identifier) => sqlserver_projection_column_index(columns, &identifier.value)?,
         Expr::CompoundIdentifier(identifiers) => {
@@ -1212,10 +1249,15 @@ fn sqlserver_order_by_output_name(columns: &[SqlServerDescribedColumn], expr: &E
         _ => return None,
     };
     let column = columns.get(index)?;
+    if is_sqlserver_hierarchyid_column(column) {
+        let source_alias = quote_sqlserver_identifier("dbx_unsafe_source");
+        let source_column = quote_sqlserver_identifier(&sqlserver_source_column_name(index));
+        return Some(format!("{source_alias}.{source_column}"));
+    }
     if is_sqlserver_unsafe_column(column) {
         return None;
     }
-    Some(sqlserver_output_column_name(column, index))
+    Some(quote_sqlserver_identifier(&sqlserver_output_column_name(column, index)))
 }
 
 fn sqlserver_projection_column_index(columns: &[SqlServerDescribedColumn], name: &str) -> Option<usize> {
@@ -1597,7 +1639,7 @@ pub async fn stream_first_result_set(
                     active_result_index = Some(metadata.result_index());
                     columns = columns_from_metadata(&metadata);
                     column_types = column_types_from_metadata(&metadata);
-                    restore_sqlserver_spatial_column_types(&mut column_types, &query.spatial_columns);
+                    restore_sqlserver_unsafe_column_types(&mut column_types, &query);
                     on_item(SqlServerStreamItem::Columns { columns: &columns, column_types: &column_types })?;
                     columns_emitted = true;
                 }
@@ -1607,7 +1649,7 @@ pub async fn stream_first_result_set(
                     active_result_index = Some(row.result_index());
                     columns = row.columns().iter().map(|c| c.name().to_string()).collect();
                     column_types = row.columns().iter().map(sqlserver_column_type_name).collect();
-                    restore_sqlserver_spatial_column_types(&mut column_types, &query.spatial_columns);
+                    restore_sqlserver_unsafe_column_types(&mut column_types, &query);
                     on_item(SqlServerStreamItem::Columns { columns: &columns, column_types: &column_types })?;
                     columns_emitted = true;
                 }
@@ -1722,7 +1764,47 @@ pub async fn list_databases(client: &mut SqlServerClient) -> Result<Vec<Database
         .await
         .map_err(|e| e.to_string())?;
     let rows = stream.into_first_result().await.map_err(|e| e.to_string())?;
-    Ok(rows.iter().map(|row| DatabaseInfo { name: row.get::<&str, _>(0).unwrap_or("").to_string() }).collect())
+    Ok(rows
+        .iter()
+        .map(|row| DatabaseInfo { name: row.get::<&str, _>(0).unwrap_or("").to_string(), ..Default::default() })
+        .collect())
+}
+
+pub async fn list_database_metadata(client: &mut SqlServerClient) -> Result<Vec<DatabaseInfo>, String> {
+    let rows = match list_database_metadata_rows(client).await {
+        Ok(rows) => rows,
+        Err(error) => {
+            log::debug!("Falling back to database names after metadata query failed: {error}");
+            return list_databases(client).await;
+        }
+    };
+    Ok(rows
+        .iter()
+        .map(|row| DatabaseInfo {
+            name: row.get::<&str, _>(0).unwrap_or("").to_string(),
+            created_at: row.get::<chrono::NaiveDateTime, _>(1).map(|value| value.to_string()),
+            default_collation: row.get::<&str, _>(2).map(str::to_string).filter(|value| !value.trim().is_empty()),
+            size_bytes: row.get::<i64, _>(3),
+            ..Default::default()
+        })
+        .collect())
+}
+
+async fn list_database_metadata_rows(client: &mut SqlServerClient) -> Result<Vec<Row>, String> {
+    let stream = client
+        .query(
+            "SELECT d.name, d.create_date, d.collation_name, \
+                    SUM(COALESCE(CONVERT(bigint, f.size), 0)) * 8192 AS size_bytes \
+             FROM sys.databases d \
+             LEFT JOIN sys.master_files f ON f.database_id = d.database_id \
+             WHERE d.state = 0 \
+             GROUP BY d.name, d.create_date, d.collation_name \
+             ORDER BY d.name",
+            &[],
+        )
+        .await;
+    let stream = stream.map_err(|error| error.to_string())?;
+    stream.into_first_result().await.map_err(|error| error.to_string())
 }
 
 pub async fn get_completion_context(client: &mut SqlServerClient) -> Result<SqlServerCompletionContext, String> {
@@ -1736,7 +1818,7 @@ pub async fn get_completion_context(client: &mut SqlServerClient) -> Result<SqlS
 
 pub async fn test_connection(client: &mut SqlServerClient) -> Result<(), String> {
     crate::db::with_connection_timeout("SQL Server", crate::db::connection_timeout(), async {
-        let stream = client.simple_query("SELECT 1").await.map_err(|e| e.to_string())?;
+        let stream = client.simple_query(SQLSERVER_INTERNAL_HEALTH_CHECK_SQL).await.map_err(|e| e.to_string())?;
         let _ = stream.into_first_result().await.map_err(|e| e.to_string())?;
         Ok(())
     })
@@ -1776,7 +1858,7 @@ pub async fn list_linked_server_catalogs(
     Ok(rows
         .iter()
         .filter_map(|row| row.get::<&str, _>(0).map(str::trim).filter(|name| !name.is_empty()))
-        .map(|name| DatabaseInfo { name: name.to_string() })
+        .map(|name| DatabaseInfo { name: name.to_string(), ..Default::default() })
         .collect())
 }
 
@@ -2799,14 +2881,7 @@ pub async fn execute_query_with_max_rows(
         };
         let (result, messages) = capture_sqlserver_messages(async {
             let stream = sqlserver_driver_result(client.query(query.sql.as_str(), &[])).await?;
-            sqlserver_driver_result(collect_first_result_limited(
-                stream,
-                start,
-                max_rows,
-                result_offset,
-                &query.spatial_columns,
-            ))
-            .await
+            sqlserver_driver_result(collect_first_result_limited(stream, start, max_rows, result_offset, &query)).await
         })
         .await;
         let mut result = query_result_with_server_messages(result?, messages);
@@ -2892,7 +2967,7 @@ pub(crate) async fn execute_batch_with_max_rows_metadata(
                         start,
                         max_rows,
                         result_offset,
-                        &query.spatial_columns,
+                        &query,
                     ))
                     .await
                 })
@@ -2979,7 +3054,8 @@ async fn execute_simple_batch_first_result_with_max_rows(
     let result_offset = crate::query_result_sql::sqlserver_result_offset(sql);
     let (result, messages) = capture_sqlserver_messages(async {
         let stream = sqlserver_driver_result(client.simple_query(sql)).await?;
-        sqlserver_driver_result(collect_first_result_limited(stream, start, max_rows, result_offset, &[])).await
+        let query = SqlServerUnsafeTypeQuery::plain(sql);
+        sqlserver_driver_result(collect_first_result_limited(stream, start, max_rows, result_offset, &query)).await
     })
     .await;
     let mut result = query_result_with_server_messages(result?, messages);
@@ -3231,16 +3307,17 @@ mod tests {
         is_sqlserver_legacy_duplicate_probe_error, is_sqlserver_spatial_column, is_sqlserver_variant_column,
         push_sqlserver_ordered_events, query_result_with_server_messages, query_result_with_server_messages_metadata,
         requires_simple_query_batch, restore_sqlserver_legacy_probe_output_names,
-        restore_sqlserver_spatial_column_types, server_messages_query_result, sqlserver_batch_can_use_execute,
-        sqlserver_bulk_token_row, sqlserver_cell_to_json, sqlserver_columns_sql, sqlserver_completion_assistant_sql,
-        sqlserver_dml_output_returns_rows, sqlserver_done_trace_event, sqlserver_filter_definition_error,
-        sqlserver_hidden_schema_names, sqlserver_indexes_sql, sqlserver_legacy_indexes_sql, sqlserver_legacy_probe,
-        sqlserver_legacy_probe_with_nonce, sqlserver_legacy_wildcard_metadata_query, sqlserver_list_objects_sql,
-        sqlserver_list_schemas_sql, sqlserver_list_tables_sql, sqlserver_probe_explicit_alias,
-        sqlserver_query_messages, sqlserver_schema_name_predicate, sqlserver_spatial_marker,
-        sqlserver_supports_session_database_switch, sqlserver_table_comment_sql, sqlserver_triggers_sql,
-        sqlserver_visible_object_predicate, strip_dbx_sqlserver_row_number_column, SqlServerDescribedColumn,
-        SqlServerProbeOutputNameOverride, SqlServerResultSet, SqlServerSpatialColumn, SqlServerTdsEvent,
+        restore_sqlserver_spatial_column_types, restore_sqlserver_unsafe_column_types, server_messages_query_result,
+        sqlserver_batch_can_use_execute, sqlserver_bulk_token_row, sqlserver_cell_to_json, sqlserver_columns_sql,
+        sqlserver_completion_assistant_sql, sqlserver_dml_output_returns_rows, sqlserver_done_trace_event,
+        sqlserver_filter_definition_error, sqlserver_hidden_schema_names, sqlserver_indexes_sql,
+        sqlserver_legacy_indexes_sql, sqlserver_legacy_probe, sqlserver_legacy_probe_with_nonce,
+        sqlserver_legacy_wildcard_metadata_query, sqlserver_list_objects_sql, sqlserver_list_schemas_sql,
+        sqlserver_list_tables_sql, sqlserver_probe_explicit_alias, sqlserver_query_messages,
+        sqlserver_schema_name_predicate, sqlserver_spatial_marker, sqlserver_supports_session_database_switch,
+        sqlserver_table_comment_sql, sqlserver_triggers_sql, sqlserver_visible_object_predicate,
+        strip_dbx_sqlserver_row_number_column, SqlServerDescribedColumn, SqlServerProbeOutputNameOverride,
+        SqlServerRestoredColumn, SqlServerResultSet, SqlServerSpatialColumn, SqlServerTdsEvent,
         SQLSERVER_COMPLETION_CONTEXT_SQL, SQLSERVER_RESULT_TYPE_PROBE_SQL,
     };
     use crate::types::{
@@ -3850,7 +3927,7 @@ mod tests {
 
         let first_result = source.split("async fn execute_simple_batch_first_result_with_max_rows").nth(1).unwrap();
         let first_result = first_result.split("fn strip_dbx_sqlserver_row_number_column").next().unwrap();
-        assert!(first_result.contains("collect_first_result_limited(stream, start, max_rows, result_offset, &[])"));
+        assert!(first_result.contains("collect_first_result_limited(stream, start, max_rows, result_offset, &query)"));
         assert!(!first_result.contains("collect_result_sets_limited"));
     }
 
@@ -4435,6 +4512,74 @@ mod tests {
             rewritten.spatial_columns,
             vec![SqlServerSpatialColumn { column_index: 1, column_type: "geometry".to_string() }]
         );
+        assert!(rewritten.restored_columns.is_empty());
+    }
+
+    #[test]
+    fn sqlserver_wraps_hierarchyid_columns_as_logical_paths() {
+        let rewritten = build_sqlserver_unsafe_type_query(
+            "SELECT id, path, label FROM dbo.nodes ORDER BY id",
+            &[
+                SqlServerDescribedColumn {
+                    name: Some("id".to_string()),
+                    system_type_name: Some("int".to_string()),
+                    user_type_schema: None,
+                    user_type_name: None,
+                },
+                SqlServerDescribedColumn {
+                    name: Some("path".to_string()),
+                    system_type_name: Some("hierarchyid".to_string()),
+                    user_type_schema: Some("sys".to_string()),
+                    user_type_name: Some("hierarchyid".to_string()),
+                },
+                SqlServerDescribedColumn {
+                    name: Some("label".to_string()),
+                    system_type_name: Some("nvarchar(40)".to_string()),
+                    user_type_schema: None,
+                    user_type_name: None,
+                },
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(
+            rewritten.sql,
+            "SELECT [id] = [dbx_unsafe_source].[dbx_col_1], [path] = CASE WHEN [dbx_unsafe_source].[dbx_col_2] IS NULL THEN NULL ELSE [dbx_unsafe_source].[dbx_col_2].ToString() END, [label] = [dbx_unsafe_source].[dbx_col_3] FROM (SELECT id, path, label FROM dbo.nodes) AS [dbx_unsafe_source]([dbx_col_1], [dbx_col_2], [dbx_col_3]) ORDER BY [id]"
+        );
+        assert!(rewritten.spatial_columns.is_empty());
+        assert_eq!(
+            rewritten.restored_columns,
+            vec![SqlServerRestoredColumn { column_index: 1, column_type: "hierarchyid".to_string() }]
+        );
+
+        let mut column_types = vec!["int".to_string(), "nvarchar".to_string(), "nvarchar".to_string()];
+        restore_sqlserver_unsafe_column_types(&mut column_types, &rewritten);
+        assert_eq!(column_types, vec!["int", "hierarchyid", "nvarchar"]);
+    }
+
+    #[test]
+    fn sqlserver_orders_hierarchyid_by_the_original_server_value() {
+        let rewritten = build_sqlserver_unsafe_type_query(
+            "SELECT id, path FROM dbo.nodes ORDER BY path",
+            &[
+                SqlServerDescribedColumn {
+                    name: Some("id".to_string()),
+                    system_type_name: Some("int".to_string()),
+                    user_type_schema: None,
+                    user_type_name: None,
+                },
+                SqlServerDescribedColumn {
+                    name: Some("path".to_string()),
+                    system_type_name: Some("sys.hierarchyid".to_string()),
+                    user_type_schema: Some("sys".to_string()),
+                    user_type_name: Some("hierarchyid".to_string()),
+                },
+            ],
+        )
+        .unwrap();
+
+        assert!(rewritten.sql.contains("[path] = CASE WHEN"));
+        assert!(rewritten.sql.ends_with("ORDER BY [dbx_unsafe_source].[dbx_col_2]"));
     }
 
     #[test]

@@ -6,6 +6,11 @@ export const MAX_EXTERNAL_SQL_FILE_TARGETS = 200;
 export interface ExternalSqlFileTarget {
   connectionId: string;
   database: string;
+  catalog?: string;
+}
+
+export function unassociatedExternalSqlFileTarget(): ExternalSqlFileTarget {
+  return { connectionId: "", database: "", catalog: undefined };
 }
 
 interface StoredExternalSqlFileTarget extends ExternalSqlFileTarget {
@@ -17,7 +22,9 @@ function loadExternalSqlFileTargets(): StoredExternalSqlFileTarget[] {
   try {
     const parsed = JSON.parse(localStorage.getItem(EXTERNAL_SQL_FILE_TARGETS_STORAGE_KEY) || "[]");
     if (!Array.isArray(parsed)) return [];
-    return parsed.filter((item): item is StoredExternalSqlFileTarget => typeof item?.path === "string" && typeof item?.connectionId === "string" && typeof item?.database === "string" && typeof item?.updatedAt === "number");
+    return parsed
+      .filter((item) => typeof item?.path === "string" && typeof item?.connectionId === "string" && typeof item?.database === "string" && (item?.catalog === undefined || typeof item.catalog === "string") && typeof item?.updatedAt === "number")
+      .map((item) => ({ ...item, catalog: item.catalog })) as StoredExternalSqlFileTarget[];
   } catch {
     return [];
   }
@@ -44,5 +51,5 @@ export function resolveExternalSqlFileTarget(path: string, connectionExists: (co
   const normalizedPath = normalizeExternalSqlPath(path);
   const saved = loadExternalSqlFileTargets().find((item) => item.path === normalizedPath);
   if (!saved || !connectionExists(saved.connectionId)) return fallback;
-  return { connectionId: saved.connectionId, database: saved.database };
+  return { connectionId: saved.connectionId, database: saved.database, catalog: saved.catalog };
 }

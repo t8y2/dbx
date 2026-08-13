@@ -22,7 +22,8 @@ export function agentProtocolQueryResultMaxRows(maxRows: number | undefined): nu
 
 export function limitQueryPagination<T extends { limit: number; offset: number }>(pagination: T, maxRows: number | undefined): T {
   if (maxRows === undefined) return pagination;
-  const offset = Math.min(Math.max(0, pagination.offset), maxRows - 1);
+  const requestedOffset = Math.max(0, pagination.offset);
+  const offset = requestedOffset < maxRows ? requestedOffset : Math.floor((maxRows - 1) / pagination.limit) * pagination.limit;
   const remaining = maxRows - offset;
   return { ...pagination, limit: Math.min(pagination.limit, remaining), offset };
 }

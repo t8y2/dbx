@@ -124,6 +124,15 @@ describe("SshHostKeyPromptDialog web bridge", () => {
     expect(dialogSource).not.toContain(':dismissible="false"');
   });
 
+  it("stacks above dialogs that mount later than it does", () => {
+    // Dialog portals teleport into <body> when their component mounts, so paint
+    // order at the shared z-50 follows mount order. This prompt mounts once at
+    // app start, so an on-demand dialog (e.g. the connection editor) would bury
+    // it and block the whole window. It must opt out of the default layer.
+    expect(dialogSource).toContain('overlay-class="z-[200]"');
+    expect(dialogSource).toContain('portal-class="z-[200]"');
+  });
+
   it("shows an SSE host-key prompt and posts the user's acceptance", async () => {
     await mountDialog();
 

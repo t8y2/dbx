@@ -96,6 +96,7 @@ const showNamespaceColumn = computed(() => isRabbitMqCluster.value && isAllVhost
 // RabbitMQ splits the topics tab into Queues (topics table) and Exchanges views.
 const showRabbitMqSubTabs = computed(() => isRabbitMqCluster.value && props.supportsExchanges === true);
 const rabbitMqSubTab = ref<"queues" | "exchanges">("queues");
+const rabbitMqMessageSort = ref<"asc" | "desc" | null>(null);
 const rocketMqTopicTypeOptions = ROCKETMQ_TOPIC_MESSAGE_TYPES;
 const rocketMqCreatableTopicTypes = ROCKETMQ_CREATABLE_TOPIC_MESSAGE_TYPES;
 const rocketMqClusterName = computed(() => clusterInfo.value?.clusterId ?? "-");
@@ -120,9 +121,18 @@ const filteredTopics = computed(() => {
   });
 });
 
+const displayedTopics = computed(() => {
+  if (!isRabbitMqCluster.value || !rabbitMqMessageSort.value) return filteredTopics.value;
+  const direction = rabbitMqMessageSort.value === "asc" ? 1 : -1;
+  return [...filteredTopics.value].sort((left, right) => {
+    const countDifference = (rabbitMqReadyMessageCount(left) - rabbitMqReadyMessageCount(right)) * direction;
+    return countDifference || left.shortName.localeCompare(right.shortName);
+  });
+});
+
 /** Stable ids for RecycleScroller; avoids mounting all topic rows at once. */
 const virtualTopicRows = computed<VirtualTopicRow[]>(() =>
-  filteredTopics.value.map((topic) => ({
+  displayedTopics.value.map((topic) => ({
     id: showNamespaceColumn.value ? `${topic.namespace ?? ""}:${topic.name}` : topic.name,
     topic,
   })),
@@ -161,6 +171,14 @@ const userTopicCount = computed(() => {
 
 function topicRowSelected(topic: TopicInfo): boolean {
   return selectedTopic.value?.name === topic.name && selectedTopic.value?.namespace === topic.namespace;
+}
+
+function rabbitMqReadyMessageCount(topic: TopicInfo): number {
+  return topic.messagesReady ?? topic.messageCount ?? 0;
+}
+
+function toggleRabbitMqMessageSort() {
+  rabbitMqMessageSort.value = rabbitMqMessageSort.value === "desc" ? "asc" : "desc";
 }
 
 function topicTypeLabel(topic: TopicInfo): string {
@@ -534,7 +552,13 @@ watch(newPartitions, () => {
             <div class="topics-col">{{ t("mqTopics.name") }}</div>
             <div v-if="showNamespaceColumn" class="topics-col">{{ t("mqAdmin.namespace") }}</div>
             <div class="topics-col">{{ t("mqTopics.type") }}</div>
-            <div v-if="!isRocketMqCluster" class="topics-col">{{ t("mqTopics.partitions") }}</div>
+            <div v-if="isRabbitMqCluster" class="topics-col">
+              <button type="button" class="topics-sort-button" data-testid="rabbitmq-message-sort" @click="toggleRabbitMqMessageSort">
+                {{ t("mqTopics.messageCount") }}
+                <span v-if="rabbitMqMessageSort" aria-hidden="true">{{ rabbitMqMessageSort === "desc" ? "↓" : "↑" }}</span>
+              </button>
+            </div>
+            <div v-else-if="!isRocketMqCluster" class="topics-col">{{ t("mqTopics.partitions") }}</div>
             <div class="topics-col">{{ t("mqTopics.actions") }}</div>
           </div>
           <RecycleScroller class="topics-scroller" :items="virtualTopicRows" :item-size="TOPIC_ROW_HEIGHT" :buffer="200" key-field="id">
@@ -552,7 +576,10 @@ watch(newPartitions, () => {
                     {{ topicTypeLabel(row.topic) }}
                   </span>
                 </div>
-                <div v-if="!isRocketMqCluster" class="topics-col">
+                <div v-if="isRabbitMqCluster" class="topics-col" data-testid="rabbitmq-message-count" :title="`${t('mqRabbitMqMonitoring.messagesReady')}: ${rabbitMqReadyMessageCount(row.topic)} · ${t('mqRabbitMqMonitoring.messagesUnacked')}: ${row.topic.messagesUnacked ?? 0}`">
+                  {{ rabbitMqReadyMessageCount(row.topic) }}
+                </div>
+                <div v-else-if="!isRocketMqCluster" class="topics-col">
                   <span v-if="row.topic.partitioned">{{ row.topic.partitions ? t("mqTopics.partitionCount", { count: row.topic.partitions }) : t("mqTopics.partitionsUnknown") }}</span>
                   <span v-else class="text-muted">-</span>
                 </div>
@@ -920,6 +947,18 @@ watch(newPartitions, () => {
   font-weight: 600;
   font-size: 13px;
   color: var(--color-text-secondary);
+}
+
+.topics-sort-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
 }
 
 .topics-scroller {

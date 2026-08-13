@@ -67,6 +67,10 @@ export interface MongoCreateUserCommand {
   writeConcernJson?: string;
 }
 
+export interface MongoRunCommand {
+  commandJson: string;
+}
+
 export type MongoCollectionStatsMetric = "stats" | "dataSize" | "storageSize" | "totalIndexSize";
 
 export interface MongoCollectionStatsCommand {
@@ -81,7 +85,7 @@ export interface MongoDistinctCommand {
   filter?: string;
 }
 
-type MongoWriteKind = "insert" | "update" | "delete" | "createIndex" | "createUser" | "dropIndex" | "dropIndexes" | "dropCollection" | "findOneAndUpdate" | "findOneAndReplace" | "findOneAndDelete";
+type MongoWriteKind = "runCommand" | "insert" | "update" | "delete" | "createIndex" | "createUser" | "dropIndex" | "dropIndexes" | "dropCollection" | "findOneAndUpdate" | "findOneAndReplace" | "findOneAndDelete";
 
 export type MongoCommand =
   | ({ kind: "find" } & MongoFindCommand)
@@ -94,6 +98,7 @@ export type MongoCommand =
   | ({ kind: "collectionStats" } & MongoCollectionStatsCommand)
   | ({ kind: "use" } & MongoUseCommand)
   | ({ kind: "createUser" } & MongoCreateUserCommand)
+  | ({ kind: "runCommand" } & MongoRunCommand)
   | { kind: "insert"; collection: string; docsJson: string }
   | { kind: "update"; collection: string; filter: string; update: string; options?: string; many: boolean }
   | { kind: "delete"; collection: string; filter: string; many: boolean }
@@ -499,6 +504,21 @@ export function parseMongoCreateUserCommand(input: string): MongoCreateUserComma
   };
 }
 
+export function parseMongoRunCommand(input: string): MongoRunCommand | null {
+  const source = input.trim().replace(/;$/, "").trim();
+  const match = /^db\s*\.\s*runCommand\s*\(/i.exec(source);
+  if (!match) return null;
+  const openIndex = source.indexOf("(", match.index);
+  const closeIndex = findMatchingParen(source, openIndex);
+  if (closeIndex < 0 || source.slice(closeIndex + 1).trim()) return null;
+  const args = splitTopLevel(source.slice(openIndex + 1, closeIndex));
+  if (args.length !== 1) return null;
+  const commandJson = parseMongoObjectArgument(args[0]);
+  if (!commandJson) return null;
+  const command = JSON.parse(commandJson) as Record<string, unknown>;
+  return Object.keys(command).length > 0 ? { commandJson: JSON.stringify(command) } : null;
+}
+
 export function parseMongoWriteCommand(input: string): MongoWriteCommand | null {
   const source = input.trim().replace(/;$/, "").trim();
   const insertOne = parseCollectionMethodTarget(source, "insertOne");
@@ -606,6 +626,10 @@ export function parseMongoCommand(input: string): ParsedMongoCommand | null {
     (source) => {
       const createUser = parseMongoCreateUserCommand(source);
       return createUser ? { kind: "createUser", ...createUser } : null;
+    },
+    (source) => {
+      const runCommand = parseMongoRunCommand(source);
+      return runCommand ? { kind: "runCommand", ...runCommand } : null;
     },
     (source) => {
       // Legacy Mongo shell uses count()/find().count(); keep accepting it

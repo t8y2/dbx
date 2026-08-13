@@ -32,6 +32,11 @@ function makeSettings(overrides: Partial<EditorSettings> = {}): EditorSettings {
 }
 
 describe("EDITOR_SETTINGS_DRAFT_KEYS", () => {
+  it("keeps connection and query timeout ownership outside editor settings", () => {
+    expect(EDITOR_SETTINGS_DRAFT_KEYS).not.toContain("globalConnectTimeoutSecs");
+    expect(EDITOR_SETTINGS_DRAFT_KEYS).not.toContain("globalQueryTimeoutSecs");
+  });
+
   it("includes continueOnErrorOnBatch", () => {
     expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("continueOnErrorOnBatch");
   });
@@ -55,12 +60,26 @@ describe("EDITOR_SETTINGS_DRAFT_KEYS", () => {
     expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("dataTabReuseMode");
   });
 
+  it("includes data grid type colors", () => {
+    expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("colorizeDataGridCellTypes");
+  });
+
   it("includes completionTriggerMode", () => {
     expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("completionTriggerMode");
   });
 });
 
 describe("editorSettingsDraftFromSettings", () => {
+  it("does not include persisted global timeout values in editor drafts", () => {
+    const settings = makeSettings({ globalConnectTimeoutSecs: 17, globalQueryTimeoutSecs: 43 });
+    const draft = editorSettingsDraftFromSettings(settings);
+
+    expect(draft).not.toHaveProperty("globalConnectTimeoutSecs");
+    expect(draft).not.toHaveProperty("globalQueryTimeoutSecs");
+    expect(editorSettingsPatchFromDraft(draft, draft)).not.toHaveProperty("globalConnectTimeoutSecs");
+    expect(editorSettingsPatchFromDraft(draft, draft)).not.toHaveProperty("globalQueryTimeoutSecs");
+  });
+
   it("maps continueOnErrorOnBatch from settings", () => {
     const draft = editorSettingsDraftFromSettings(makeSettings({ continueOnErrorOnBatch: true }));
     expect(draft.continueOnErrorOnBatch).toBe(true);
@@ -69,6 +88,10 @@ describe("editorSettingsDraftFromSettings", () => {
   it("maps continueOnErrorOnBatch=false from settings", () => {
     const draft = editorSettingsDraftFromSettings(makeSettings({ continueOnErrorOnBatch: false }));
     expect(draft.continueOnErrorOnBatch).toBe(false);
+  });
+
+  it("maps the data grid type color preference from settings", () => {
+    expect(editorSettingsDraftFromSettings(makeSettings({ colorizeDataGridCellTypes: false })).colorizeDataGridCellTypes).toBe(false);
   });
 
   it("preserves the table-open default for legacy settings", () => {

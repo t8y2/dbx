@@ -1620,7 +1620,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -1646,6 +1646,20 @@ name = "fast-float2"
 version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8eb564c5c7423d25c886fb561d1e4ee69f72354d16918afa32c08811f6b6a55"
+
+[[package]]
+name = "fast-socks5"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d09fe4a491909a716088083eeb5bcc25427330fdbcd4ecd3dfa5469b3da795df"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "log",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-stream",
+]
 
 [[package]]
 name = "fastrand"
@@ -2241,7 +2255,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core 0.62.2",
+ "windows-core 0.57.0",
 ]
 
 [[package]]
@@ -3032,6 +3046,7 @@ dependencies = [
  "bson",
  "derive-where",
  "derive_more",
+ "fast-socks5",
  "futures-core",
  "futures-io",
  "futures-util",
@@ -3082,7 +3097,7 @@ dependencies = [
 [[package]]
 name = "mysql-common-derive"
 version = "0.32.2"
-source = "git+https://github.com/t8y2/rust_mysql_common.git?rev=77085e91e5081309d585153e3b656ce33bc1fe74#77085e91e5081309d585153e3b656ce33bc1fe74"
+source = "git+https://github.com/t8y2/rust_mysql_common.git?rev=47740d85a8277167a5717afac785d37b46a36296#47740d85a8277167a5717afac785d37b46a36296"
 dependencies = [
  "darling",
  "heck",
@@ -3099,7 +3114,7 @@ dependencies = [
 [[package]]
 name = "mysql_async"
 version = "0.37.0"
-source = "git+https://github.com/t8y2/mysql_async.git?rev=2be6e392eb9b06d20dcd2d8ed8eae748d413c9ec#2be6e392eb9b06d20dcd2d8ed8eae748d413c9ec"
+source = "git+https://github.com/t8y2/mysql_async.git?rev=b615bb0b10b5975182a4aa069cabc3d09021f6ab#b615bb0b10b5975182a4aa069cabc3d09021f6ab"
 dependencies = [
  "bytes",
  "crossbeam-queue",
@@ -3128,7 +3143,7 @@ dependencies = [
 [[package]]
 name = "mysql_common"
 version = "0.38.0"
-source = "git+https://github.com/t8y2/rust_mysql_common.git?rev=77085e91e5081309d585153e3b656ce33bc1fe74#77085e91e5081309d585153e3b656ce33bc1fe74"
+source = "git+https://github.com/t8y2/rust_mysql_common.git?rev=47740d85a8277167a5717afac785d37b46a36296#47740d85a8277167a5717afac785d37b46a36296"
 dependencies = [
  "base64 0.22.1",
  "bitflags 2.13.1",
@@ -3215,7 +3230,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3894,7 +3909,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -4451,7 +4466,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -5256,7 +5271,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.4",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -5517,6 +5532,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1729aa945f29d91ba541258c8df89027d5792d85a8841fb65e8bf0f4ede4ef61"
 dependencies = [
  "rustls 0.23.42",
+ "tokio",
+]
+
+[[package]]
+name = "tokio-stream"
+version = "0.1.19"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a3d06f0b082ba57c26b79407372e57cf2a1e28124f78e9479fe80322cf53420b"
+dependencies = [
+ "futures-core",
+ "pin-project-lite",
  "tokio",
 ]
 
@@ -6078,7 +6104,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

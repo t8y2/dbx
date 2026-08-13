@@ -27,7 +27,7 @@ The actual hierarchy follows the database model:
 | Doris / StarRocks | Catalog → database → table when multiple catalogs exist; flat when only `internal` exists |
 | Redis | Connection → Redis DB, with paged keys in the dedicated browser |
 | MongoDB | Connection → database → collections, indexes, and GridFS buckets |
-| Elasticsearch / Easysearch | Connection → indexes and other document objects |
+| Elasticsearch / Easysearch / Meilisearch | Connection → indexes and other document objects |
 | HBase, vector, message queue, etcd, ZooKeeper, Nacos | System-specific objects that open [Specialized Workspaces](/en/docs/specialized-workspaces) |
 
 ## Connection Groups and Bulk Management
@@ -125,7 +125,7 @@ DBX does not force every system into a relational tree. For example:
 - SQL Server can expose linked servers and database objects
 - Doris / StarRocks support external catalogs and three-part names for external tables
 - MongoDB exposes collections, indexes, and GridFS
-- Elasticsearch / Easysearch model indexes as first-class objects
+- Elasticsearch / Easysearch / Meilisearch model indexes as first-class objects
 - Dameng, Oracle, PostgreSQL, and others can expose routines, jobs, extensions, or administration objects
 - etcd, Nacos, message queues, and vector databases open dedicated workspaces from tree nodes
 

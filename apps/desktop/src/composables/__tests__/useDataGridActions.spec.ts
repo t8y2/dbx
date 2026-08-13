@@ -15,6 +15,9 @@ const mocks = vi.hoisted(() => ({
   listIndexes: vi.fn(),
   ensureConnected: vi.fn(),
   tableOpenPageSize: 100,
+  infiniteScroll: true,
+  queryResultMaxRowsEnabled: true,
+  queryResultMaxRows: 10_000,
   tabs: [] as QueryTab[],
   setTableMeta: vi.fn(),
   clearInvalidDataTabSort: vi.fn(),
@@ -80,7 +83,14 @@ vi.mock("@/stores/queryStore", () => ({
 }));
 
 vi.mock("@/stores/settingsStore", () => ({
-  useSettingsStore: () => ({ editorSettings: { tableOpenPageSize: mocks.tableOpenPageSize } }),
+  useSettingsStore: () => ({
+    editorSettings: {
+      tableOpenPageSize: mocks.tableOpenPageSize,
+      infiniteScroll: mocks.infiniteScroll,
+      queryResultMaxRowsEnabled: mocks.queryResultMaxRowsEnabled,
+      queryResultMaxRows: mocks.queryResultMaxRows,
+    },
+  }),
 }));
 
 vi.mock("@/composables/useToast", () => ({
@@ -118,6 +128,9 @@ describe("useDataGridActions", () => {
     vi.clearAllMocks();
     mocks.tabs.length = 0;
     mocks.tableOpenPageSize = 100;
+    mocks.infiniteScroll = true;
+    mocks.queryResultMaxRowsEnabled = true;
+    mocks.queryResultMaxRows = 10_000;
     mocks.getConfig.mockReturnValue({ id: "postgres-1", db_type: "postgres" });
     mocks.buildTableSelectSql.mockResolvedValue("SELECT * FROM public.users LIMIT 100 OFFSET 0");
     mocks.buildSortedQuerySql.mockResolvedValue({ ok: true, sql: "SELECT sorted" });
@@ -158,6 +171,23 @@ describe("useDataGridActions", () => {
     expect(mocks.buildTableSelectSql).toHaveBeenCalledWith(expect.objectContaining({ limit: 25, offset: 50 }));
     expect(mocks.executeTabSql).toHaveBeenCalledWith("tab-1", "SELECT * FROM public.users LIMIT 25 OFFSET 50", expect.objectContaining({ pagination: { limit: 25, offset: 50 } }));
     expect(mocks.executeTabSql.mock.calls[0]?.[2]).not.toHaveProperty("preserveTotalRowCountDuringExecution");
+  });
+
+  it("keeps infinite-scroll appends for ordinary table-data pages", async () => {
+    const tab = tableDataTab({
+      result: {
+        columns: ["id"],
+        rows: Array.from({ length: 100 }, (_, index) => [index + 1]),
+        affected_rows: 0,
+        execution_time_ms: 1,
+      },
+    });
+    mocks.buildTableSelectSql.mockResolvedValueOnce("SELECT * FROM public.users LIMIT 100 OFFSET 100");
+    const actions = useDataGridActions(computed(() => tab));
+
+    await actions.onPaginate(100, 100);
+
+    expect(mocks.executeTabSql).toHaveBeenCalledWith("tab-1", "SELECT * FROM public.users LIMIT 100 OFFSET 100", expect.objectContaining({ appendResult: { maxRows: 10_000 } }));
   });
 
   it("ignores a stale structured order when its column was renamed", async () => {

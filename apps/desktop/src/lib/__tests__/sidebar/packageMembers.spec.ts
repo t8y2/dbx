@@ -32,15 +32,25 @@ describe("package member tree", () => {
       { name: "lookup", kind: "function", signature: null, data_type: "VARCHAR" },
       { name: "ignored_table", kind: "table" },
     ];
-    const result = buildPackageMemberNodes(packageNode(), candidates);
+    const result = buildPackageMemberNodes(packageNode(), candidates, "xugu");
 
-    expect(result.map((node) => [node.type, node.label])).toEqual([
-      ["procedure", "calculate(p_value IN INT)"],
-      ["procedure", "calculate(p_value IN VARCHAR)"],
-      ["function", "lookup"],
+    expect(result.map((node) => [node.type, node.label, node.objectCount])).toEqual([
+      ["group-procedures", "tree.procedures", 2],
+      ["group-functions", "tree.functions", 1],
     ]);
-    expect(result.every((node) => node.parentName === "business_api" && node.parentSchema === "app_schema" && node.parentType === "package" && node.valid === false)).toBe(true);
-    expect(new Set(result.map((node) => node.id)).size).toBe(3);
+    expect(result[0]?.children?.map((node) => node.label)).toEqual(["calculate(p_value IN INT)", "calculate(p_value IN VARCHAR)"]);
+    expect(result[1]?.children?.map((node) => node.label)).toEqual(["lookup"]);
+    expect(result.flatMap((node) => node.children ?? []).every((node) => node.parentName === "business_api" && node.parentSchema === "app_schema" && node.parentType === "package" && node.valid === false)).toBe(true);
+    expect(new Set(result.flatMap((node) => node.children ?? []).map((node) => node.id)).size).toBe(3);
+  });
+
+  it("keeps package body source metadata on the package without adding a duplicate body node", () => {
+    const node = { ...packageNode(), xuguPackageBodyAvailable: true, xuguPackageBodyValid: false };
+    const result = buildPackageMemberNodes(node, [{ name: "calculate", kind: "procedure", signature: null }], "xugu");
+
+    expect(result.map((child) => [child.type, child.label])).toEqual([["group-procedures", "tree.procedures"]]);
+    expect(result[0]?.children).toHaveLength(1);
+    expect(result.some((child) => child.type === "package-body")).toBe(false);
   });
 
   it("deduplicates exact duplicate metadata without merging case-distinct members", () => {
@@ -50,8 +60,24 @@ describe("package member tree", () => {
       { name: "MIXEDCASE", kind: "function", signature: "p INT" },
       { name: "", kind: "procedure" },
     ];
-    const result = buildPackageMemberNodes(packageNode(), candidates);
+    const result = buildPackageMemberNodes(packageNode(), candidates, "xugu");
 
-    expect(result.map((node) => node.objectName)).toEqual(["MixedCase", "MIXEDCASE"]);
+    expect(result.flatMap((node) => node.children ?? []).map((node) => node.objectName)).toEqual(["MixedCase", "MIXEDCASE"]);
+  });
+
+  it("keeps non-Xugu package members flat", () => {
+    const result = buildPackageMemberNodes(
+      packageNode(),
+      [
+        { name: "calculate", kind: "procedure", signature: null },
+        { name: "lookup", kind: "function", signature: null },
+      ],
+      "oracle",
+    );
+
+    expect(result.map((node) => [node.type, node.label])).toEqual([
+      ["procedure", "calculate"],
+      ["function", "lookup"],
+    ]);
   });
 });

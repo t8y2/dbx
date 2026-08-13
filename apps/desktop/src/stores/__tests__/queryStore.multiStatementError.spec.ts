@@ -13,6 +13,8 @@ const mocks = vi.hoisted(() => ({
   getConnectionConfig: vi.fn(),
   prepareQueryPaginationExecutionPlan: vi.fn(),
   saveOpenTabsState: vi.fn(),
+  clearDataGridPendingSnapshot: vi.fn(),
+  clearDataGridPendingSnapshotsForTab: vi.fn(),
   tabResultSnapshots: new Map<string, unknown>(),
 }));
 
@@ -40,6 +42,11 @@ vi.mock("@/stores/settingsStore", () => ({
   useSettingsStore: () => ({
     editorSettings: { autoCalculateTotalRows: false, pageSize: 100, continueOnErrorOnBatch: false },
   }),
+}));
+
+vi.mock("@/composables/useDataGridEditor", () => ({
+  clearDataGridPendingSnapshot: mocks.clearDataGridPendingSnapshot,
+  clearDataGridPendingSnapshotsForTab: mocks.clearDataGridPendingSnapshotsForTab,
 }));
 
 vi.mock("@/lib/tabs/tabResultCache", async (importOriginal) => {
@@ -630,6 +637,12 @@ describe("queryStore multi-statement errors", () => {
     expect(tab.resultAutoSave).toBeUndefined();
     expect(tab.resultRuns).toHaveLength(2);
     expect(tab.activeResultRunId).toBe(tab.resultRuns?.[1]?.id);
+    const firstRunRevision = tab.resultRuns?.[0]?.resultGridRevision;
+    const secondRunRevision = tab.resultRuns?.[1]?.resultGridRevision;
+    expect(firstRunRevision).toBeTruthy();
+    expect(secondRunRevision).toBeTruthy();
+    expect(secondRunRevision).not.toBe(firstRunRevision);
+    expect(mocks.clearDataGridPendingSnapshot).toHaveBeenCalledTimes(1);
 
     expect(await store.setActiveResultRun(tabId, tab.resultRuns![0]!.id)).toBe(true);
     expect(tab.result?.rows[0]?.[0]).toBe(1);
@@ -640,6 +653,9 @@ describe("queryStore multi-statement errors", () => {
 
     expect(tab.resultRuns).toHaveLength(2);
     expect(tab.activeResultRunId).toBe(tab.resultRuns?.[1]?.id);
+    expect(tab.resultGridRevision).toBe(tab.resultRuns?.[1]?.resultGridRevision);
+    expect(tab.resultGridRevision).not.toBe(secondRunRevision);
+    expect(mocks.clearDataGridPendingSnapshot).toHaveBeenCalledTimes(2);
     expect(await store.setActiveResultRun(tabId, tab.resultRuns![0]!.id)).toBe(true);
     expect(tab.result?.rows[0]?.[0]).toBe(1);
     expect(await store.setActiveResultRun(tabId, tab.resultRuns![1]!.id)).toBe(true);

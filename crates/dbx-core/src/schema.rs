@@ -174,6 +174,16 @@ pub async fn list_databases_core(state: &AppState, connection_id: &str) -> Resul
     retry_metadata_connection(state, connection_id, None, || list_databases_once(state, connection_id)).await
 }
 
+/// Loads the more expensive database-level properties needed only by the
+/// connection resource browser. General metadata paths keep using
+/// `list_databases_core`, which only enumerates names.
+pub async fn list_database_metadata_core(
+    state: &AppState,
+    connection_id: &str,
+) -> Result<Vec<db::DatabaseInfo>, String> {
+    retry_metadata_connection(state, connection_id, None, || list_database_metadata_once(state, connection_id)).await
+}
+
 pub async fn list_database_storage_core(
     state: &AppState,
     connection_id: &str,
@@ -592,7 +602,7 @@ async fn list_databases_once(state: &AppState, connection_id: &str) -> Result<Ve
             if is_mongo {
                 drop(connections);
                 let dbs = crate::mongo_ops::mongo_list_databases_core(state, connection_id).await?;
-                return Ok(dbs.into_iter().map(|name| db::DatabaseInfo { name }).collect());
+                return Ok(dbs.into_iter().map(|name| db::DatabaseInfo { name, ..Default::default() }).collect());
             }
             drop(connections);
             let mut client = client.lock().await;
@@ -630,6 +640,35 @@ async fn list_databases_once(state: &AppState, connection_id: &str) -> Result<Ve
         PoolKind::CloudflareD1(client) => db::cloudflare_d1_driver::list_databases(client).await,
         _ => Ok(vec![]),
     }
+}
+
+async fn list_database_metadata_once(state: &AppState, connection_id: &str) -> Result<Vec<db::DatabaseInfo>, String> {
+    let config = connection_config(state, connection_id).await;
+    if config.as_ref().is_some_and(|config| db::dolt::is_config(config) || is_doris_family_config(config)) {
+        return list_databases_once(state, connection_id).await;
+    }
+    let connections = state.connections.read().await;
+    if let Some(client) = extract_pool!(&connections, connection_id, SqlServer) {
+        drop(connections);
+        let mut client = client.lock().await;
+        return db::sqlserver::list_database_metadata(&mut client).await;
+    }
+    if let Some(PoolKind::Mysql(pool, mode)) = connections.get(connection_id) {
+        let pool = pool.clone();
+        let mode = *mode;
+        drop(connections);
+        return if mode == MysqlMode::OceanBaseOracle {
+            db::ob_oracle::list_databases(&pool).await
+        } else {
+            db::mysql::list_database_metadata(&pool).await
+        };
+    }
+    if let Some(pool) = extract_pool!(&connections, connection_id, Postgres) {
+        drop(connections);
+        return db::postgres::list_database_metadata(&pool).await;
+    }
+    drop(connections);
+    list_databases_once(state, connection_id).await
 }
 
 pub async fn list_schemas_core(state: &AppState, connection_id: &str, database: &str) -> Result<Vec<String>, String> {
@@ -2124,6 +2163,10 @@ async fn list_tables_once(
             if *mode == MysqlMode::OceanBaseOracle {
                 let tables = db::ob_oracle::list_tables(p, schema).await?;
                 Ok(filter_table_infos(tables, filter, limit, offset, object_types, table_name_filter))
+            } else if mysql_table_list_source_for_config(db_config.as_ref()) == MysqlTableListSource::ShowFullTables {
+                db::mysql::list_shardingsphere_tables(p, mysql_table_metadata_catalog(database, schema))
+                    .await
+                    .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types, table_name_filter))
             } else {
                 db::mysql::list_tables_filtered(
                     p,
@@ -2179,6 +2222,10 @@ async fn list_tables_once(
             .map(|names| collection_names_to_tables(names, "INDEX"))
             .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types, table_name_filter)),
         PoolKind::Easysearch(client) => db::easysearch_driver::list_indices(client)
+            .await
+            .map(|names| collection_names_to_tables(names, "INDEX"))
+            .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types, table_name_filter)),
+        PoolKind::Meilisearch(client) => db::meilisearch_driver::list_indexes(client)
             .await
             .map(|names| collection_names_to_tables(names, "INDEX"))
             .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types, table_name_filter)),
@@ -2566,6 +2613,29 @@ fn mysql_table_metadata_catalog<'a>(database: &'a str, schema: &'a str) -> &'a s
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MysqlTableListSource {
+    InformationSchema,
+    ShowFullTables,
+}
+
+fn is_shardingsphere_proxy_version(version: &str) -> bool {
+    const MARKER: &[u8] = b"shardingsphere-proxy";
+    version.as_bytes().windows(MARKER.len()).any(|window| window.eq_ignore_ascii_case(MARKER))
+}
+
+fn mysql_table_list_source_for_config(config: Option<&ConnectionConfig>) -> MysqlTableListSource {
+    if config
+        .and_then(|config| config.database_info.as_ref())
+        .and_then(|info| info.product_version.as_deref())
+        .is_some_and(is_shardingsphere_proxy_version)
+    {
+        MysqlTableListSource::ShowFullTables
+    } else {
+        MysqlTableListSource::InformationSchema
+    }
+}
+
 fn quote_presto_like_identifier(identifier: &str) -> String {
     format!("\"{}\"", identifier.replace('"', "\"\""))
 }
@@ -2586,20 +2656,20 @@ mod tests {
         dameng_object_statistics_rows_only_sql, dameng_object_statistics_user_segments_sql, deduplicate_column_infos,
         ephemeral_agent_metadata_session_id, external_driver_uses_mysql_ddl, filter_mongodb_agent_collections,
         filter_mysql_system_databases_for_config, filter_object_infos, filter_table_infos, filter_visible_schema_names,
-        gbase8a_object_statistics_sql, is_agent_postgres_metadata_fallback_config, is_mysql_external_driver_config,
-        is_retryable_metadata_error, metadata_error_action, metadata_name_or_comment_matches,
-        mysql_external_driver_ddl_from_query_result, mysql_external_driver_ddl_sql,
-        mysql_object_source_ddl_column_index, mysql_object_source_sql, mysql_table_metadata_catalog,
-        normalize_information_schema_table_type, oracle_columns_from_query_result, oracle_columns_sql,
-        oracle_object_statistics_dba_segments_sql, oracle_object_statistics_from_query_result,
+        gaussdb_m_view_object_source_sql, gbase8a_object_statistics_sql, is_agent_postgres_metadata_fallback_config,
+        is_mysql_external_driver_config, is_retryable_metadata_error, metadata_error_action,
+        metadata_name_or_comment_matches, mysql_external_driver_ddl_from_query_result, mysql_external_driver_ddl_sql,
+        mysql_object_source_ddl_column_index, mysql_object_source_sql, mysql_table_list_source_for_config,
+        mysql_table_metadata_catalog, normalize_information_schema_table_type, oracle_columns_from_query_result,
+        oracle_columns_sql, oracle_object_statistics_dba_segments_sql, oracle_object_statistics_from_query_result,
         oracle_object_statistics_rows_only_sql, oracle_object_statistics_sql,
         oracle_object_statistics_user_segments_sql, oracle_table_comment_from_query_result, oracle_table_comment_sql,
         oracle_table_comments_sql, presto_like_columns_from_query_result, presto_like_information_schema_columns_sql,
         presto_like_information_schema_tables_sql, presto_like_tables_from_query_result, replace_metadata_runtime,
         should_query_oracle_columns_via_sql_first, table_comments_from_query_result, table_name_filter_matches,
         tdengine_table_comment_like_pattern, tdengine_table_comment_sql, tdengine_table_comments_sql,
-        uses_mongodb_agent_collection_listing, visible_schema_filter, MetadataErrorAction, TableNameFilter,
-        TDENGINE_COMMENT_SEARCH_TIMEOUT, TDENGINE_LIKE_PATTERN_MAX_BYTES,
+        uses_mongodb_agent_collection_listing, visible_schema_filter, MetadataErrorAction, MysqlTableListSource,
+        TableNameFilter, TDENGINE_COMMENT_SEARCH_TIMEOUT, TDENGINE_LIKE_PATTERN_MAX_BYTES,
     };
     use super::{list_databases_core, list_tables_core};
     use super::{
@@ -2607,7 +2677,7 @@ mod tests {
         object_types_only_custom_types, supports_custom_type_details, supports_pg_custom_type_objects,
     };
     use crate::connection::{AppState, PoolKind};
-    use crate::models::connection::{ConnectionConfig, DatabaseType};
+    use crate::models::connection::{ConnectionConfig, DatabaseConnectionInfo, DatabaseType};
     use crate::storage::Storage;
     use std::collections::HashMap;
     use std::time::Duration;
@@ -2753,6 +2823,7 @@ mod tests {
             jdbc_driver_class: None,
             jdbc_driver_paths: Vec::new(),
             one_time: false,
+            save_password: true,
             read_only: false,
             is_production: false,
             production_databases: vec![],
@@ -2922,6 +2993,32 @@ mod tests {
     }
 
     #[test]
+    fn gaussdb_m_view_object_source_sql_is_qualified_and_gated() {
+        let mut config = test_connection_config(DatabaseType::Gaussdb);
+        config.driver_profile = Some("gaussdb-m".to_string());
+
+        assert_eq!(
+            gaussdb_m_view_object_source_sql(&config, "tenant`db", "active`users", &db::ObjectSourceKind::View)
+                .as_deref(),
+            Some("SHOW CREATE VIEW `tenant``db`.`active``users`")
+        );
+        assert_eq!(
+            gaussdb_m_view_object_source_sql(&config, "", "active`users", &db::ObjectSourceKind::View).as_deref(),
+            Some("SHOW CREATE VIEW `active``users`")
+        );
+        assert_eq!(
+            gaussdb_m_view_object_source_sql(&config, "tenant_db", "refresh_users", &db::ObjectSourceKind::Function),
+            None
+        );
+
+        config.driver_profile = Some("gaussdb".to_string());
+        assert_eq!(
+            gaussdb_m_view_object_source_sql(&config, "tenant_db", "active_users", &db::ObjectSourceKind::View),
+            None
+        );
+    }
+
+    #[test]
     fn mysql_external_driver_ddl_sql_uses_catalog_and_escaped_identifiers() {
         assert_eq!(
             mysql_external_driver_ddl_sql("app_db", "tenant`db", "user`events"),
@@ -2955,7 +3052,10 @@ mod tests {
             messages: Vec::new(),
         };
 
-        assert_eq!(mysql_external_driver_ddl_from_query_result(result).unwrap(), "CREATE TABLE `users` (`id` bigint);");
+        assert_eq!(
+            mysql_external_driver_ddl_from_query_result(result, "Create Table").unwrap(),
+            "CREATE TABLE `users` (`id` bigint);"
+        );
     }
 
     #[test]
@@ -2977,8 +3077,63 @@ mod tests {
         };
 
         assert_eq!(
-            mysql_external_driver_ddl_from_query_result(result).unwrap(),
+            mysql_external_driver_ddl_from_query_result(result, "Create Table").unwrap(),
             "CREATE TABLE `users` (`id` bigint);\n"
+        );
+    }
+
+    #[test]
+    fn mysql_external_driver_view_ddl_reads_named_column_case_insensitively() {
+        let result = db::QueryResult {
+            columns: vec!["View".to_string(), "Extra".to_string(), "CREATE VIEW".to_string()],
+            column_types: Vec::new(),
+            column_sortables: Vec::new(),
+            spatial_columns: vec![],
+            spatial_values: vec![],
+            rows: vec![vec![
+                serde_json::json!("active_users"),
+                serde_json::json!("ignored"),
+                serde_json::json!("CREATE VIEW `active_users` AS SELECT 1"),
+            ]],
+            affected_rows: 0,
+            execution_time_ms: 0,
+            truncated: false,
+            session_id: None,
+            has_more: false,
+            elasticsearch_raw_body: None,
+            messages: Vec::new(),
+        };
+
+        assert_eq!(
+            mysql_external_driver_ddl_from_query_result(result, "Create View").unwrap(),
+            "CREATE VIEW `active_users` AS SELECT 1;"
+        );
+    }
+
+    #[test]
+    fn mysql_external_driver_view_ddl_falls_back_to_second_column() {
+        let result = db::QueryResult {
+            columns: vec!["name".to_string(), "definition".to_string()],
+            column_types: Vec::new(),
+            column_sortables: Vec::new(),
+            spatial_columns: vec![],
+            spatial_values: vec![],
+            rows: vec![vec![
+                serde_json::json!("active_users"),
+                serde_json::json!("CREATE VIEW `active_users` AS SELECT 1;\n"),
+            ]],
+            affected_rows: 0,
+            execution_time_ms: 0,
+            truncated: false,
+            session_id: None,
+            has_more: false,
+            elasticsearch_raw_body: None,
+            messages: Vec::new(),
+        };
+
+        assert_eq!(
+            mysql_external_driver_ddl_from_query_result(result, "Create View").unwrap(),
+            "CREATE VIEW `active_users` AS SELECT 1;\n"
         );
     }
 
@@ -3319,6 +3474,9 @@ for line in sys.stdin:
             internal: false,
             message_type: None,
             namespace: Some("default".to_string()),
+            message_count: None,
+            messages_ready: None,
+            messages_unacked: None,
         }]);
 
         assert_eq!(tables.len(), 1);
@@ -3347,7 +3505,7 @@ for line in sys.stdin:
     }
 
     fn test_database_info(name: &str) -> super::db::DatabaseInfo {
-        super::db::DatabaseInfo { name: name.to_string() }
+        super::db::DatabaseInfo { name: name.to_string(), ..Default::default() }
     }
 
     #[test]
@@ -3406,6 +3564,55 @@ for line in sys.stdin:
 
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].name, "audit_record");
+    }
+
+    #[test]
+    fn shardingsphere_proxy_marker_is_ascii_case_insensitive_and_exact() {
+        assert!(super::is_shardingsphere_proxy_version("5.7.22-ShardingSphere-Proxy 5.5.2"));
+        assert!(super::is_shardingsphere_proxy_version("8.0.36-SHARDINGSPHERE-PROXY 5.5.2"));
+        assert!(!super::is_shardingsphere_proxy_version("8.0.36-ShardingSphere Proxy 5.5.2"));
+        assert!(!super::is_shardingsphere_proxy_version("8.0.36-MySQL Community Server"));
+    }
+
+    #[test]
+    fn mysql_table_list_source_uses_only_saved_shardingsphere_version() {
+        let mut config = test_connection_config(DatabaseType::Mysql);
+        assert_eq!(mysql_table_list_source_for_config(Some(&config)), MysqlTableListSource::InformationSchema);
+
+        config.database_info = Some(DatabaseConnectionInfo {
+            product_version: Some("5.7.22-ShardingSphere-Proxy 5.5.2".to_string()),
+            ..DatabaseConnectionInfo::default()
+        });
+        assert_eq!(mysql_table_list_source_for_config(Some(&config)), MysqlTableListSource::ShowFullTables);
+
+        config.database_info.as_mut().unwrap().product_version = Some("8.0.36-MySQL Community Server".to_string());
+        assert_eq!(mysql_table_list_source_for_config(Some(&config)), MysqlTableListSource::InformationSchema);
+        assert_eq!(mysql_table_list_source_for_config(None), MysqlTableListSource::InformationSchema);
+    }
+
+    #[test]
+    fn shardingsphere_logical_tables_keep_local_constraints() {
+        let tables = vec![
+            test_table_info("normal_table"),
+            test_table_info("t_order"),
+            test_table_info("t_order_archive"),
+            super::db::TableInfo {
+                name: "t_order_view".to_string(),
+                table_type: "VIEW".to_string(),
+                comment: None,
+                parent_schema: None,
+                parent_name: None,
+            },
+            test_table_info("t_user"),
+        ];
+        let table_types = vec!["TABLE".to_string()];
+        let name_filter =
+            TableNameFilter { include_patterns: vec!["t_%".to_string()], exclude_patterns: vec!["%user%".to_string()] };
+
+        let filtered =
+            filter_table_infos(tables, Some("order"), Some(1), Some(1), Some(&table_types), Some(&name_filter));
+
+        assert_eq!(filtered.into_iter().map(|table| table.name).collect::<Vec<_>>(), vec!["t_order_archive"]);
     }
 
     #[test]
@@ -5627,6 +5834,9 @@ async fn get_columns_core_for_session_inner(
             PoolKind::Easysearch(client) => {
                 db::easysearch_driver::get_columns(client, table).await.map(deduplicate_column_infos)
             }
+            PoolKind::Meilisearch(client) => {
+                db::meilisearch_driver::get_columns(client, table).await.map(deduplicate_column_infos)
+            }
             PoolKind::HBase(client) => {
                 db::hbase_driver::get_columns(client, database, table).await.map(deduplicate_column_infos)
             }
@@ -6187,11 +6397,16 @@ async fn get_table_ddl_core_with_options(
         )
         .await?;
         let database_type = connection_config(state, connection_id).await.map(|config| config.db_type);
+        // Kingbase MySQL compatibility mode reports a backtick identifier
+        // quote; thread it through so the view DDL wraps hyphenated schema
+        // names in backticks instead of double quotes the server rejects.
+        let identifier_quote = state.connection_identifier_quote(connection_id, Some(database)).await.ok().flatten();
         return Ok(crate::object_source_sql::build_view_ddl_sql(crate::object_source_sql::BuildViewDdlInput {
             database_type,
             schema: if schema.trim().is_empty() { None } else { Some(schema.to_string()) },
             name: table.to_string(),
             source: source.source,
+            identifier_quote,
         }));
     }
     if matches!(object_type, Some(db::ObjectSourceKind::MaterializedView)) {
@@ -6539,13 +6754,26 @@ fn external_driver_uses_mysql_ddl(config: &ConnectionConfig) -> bool {
     is_mysql_external_driver_config(config) || gaussdb_uses_m_jdbc_driver(config)
 }
 
+fn gaussdb_m_view_object_source_sql(
+    config: &ConnectionConfig,
+    database: &str,
+    name: &str,
+    kind: &db::ObjectSourceKind,
+) -> Option<String> {
+    (gaussdb_uses_m_jdbc_driver(config) && matches!(kind, db::ObjectSourceKind::View))
+        .then(|| mysql_object_source_sql(database, name, kind))
+}
+
 fn mysql_external_driver_ddl_sql(database: &str, schema: &str, table: &str) -> String {
     format!("SHOW CREATE TABLE {}", mysql_qualified_name(mysql_table_metadata_catalog(database, schema), table))
 }
 
-fn mysql_external_driver_ddl_from_query_result(result: db::QueryResult) -> Result<String, String> {
+fn mysql_external_driver_ddl_from_query_result(
+    result: db::QueryResult,
+    named_ddl_column: &str,
+) -> Result<String, String> {
     let row = result.rows.first().ok_or_else(|| "DDL not found".to_string())?;
-    let named_index = result.columns.iter().position(|column| column.trim().eq_ignore_ascii_case("Create Table"));
+    let named_index = result.columns.iter().position(|column| column.trim().eq_ignore_ascii_case(named_ddl_column));
     let ddl = named_index
         .into_iter()
         .chain(std::iter::once(1))
@@ -7168,6 +7396,29 @@ async fn get_object_source_once(
             let config = config.clone();
             let session = session.clone();
             drop(connections);
+            if let Some(sql) = gaussdb_m_view_object_source_sql(config.as_ref(), database, name, &object_type) {
+                let result: db::QueryResult = session
+                    .invoke_with_timeout(
+                        "executeQuery",
+                        serde_json::json!({
+                            "connection": config.as_ref(),
+                            "database": database,
+                            "schema": schema,
+                            "sql": sql,
+                            "maxRows": 1,
+                        }),
+                        agent_metadata_timeout(Some(config.as_ref())),
+                    )
+                    .await?;
+                let source = mysql_external_driver_ddl_from_query_result(result, "Create View")?;
+                return Ok(db::ObjectSource {
+                    name: name.to_string(),
+                    object_type,
+                    schema: if schema.is_empty() { None } else { Some(schema.to_string()) },
+                    source,
+                    editable: None,
+                });
+            }
             let result: db::ObjectSource = session
                 .invoke_with_timeout(
                     "getObjectSource",
@@ -8478,30 +8729,201 @@ mod ddl_tests {
 
         assert_eq!(ensure_display_ddl_terminated(ddl.to_string()), ddl);
     }
+
+    struct FakeMysqlDdlExecutor {
+        outcomes: std::collections::VecDeque<Result<String, MysqlDdlQueryError>>,
+        executed: Vec<String>,
+    }
+
+    impl MysqlDdlQueryExecutor for FakeMysqlDdlExecutor {
+        async fn execute(&mut self, sql: &str) -> Result<String, MysqlDdlQueryError> {
+            self.executed.push(sql.to_string());
+            self.outcomes.pop_front().expect("test outcome for DDL query")
+        }
+    }
+
+    fn mysql_server_error(code: u16, message: &str) -> MysqlDdlQueryError {
+        MysqlDdlQueryError::Query(mysql_async::Error::Server(mysql_async::ServerError {
+            code,
+            message: message.to_string(),
+            state: "HY000".to_string(),
+        }))
+    }
+
+    #[tokio::test]
+    async fn mysql_ddl_uses_one_qualified_query_on_success() {
+        let mut executor = FakeMysqlDdlExecutor {
+            outcomes: [Ok("CREATE TABLE `users` (`id` int)".to_string())].into(),
+            executed: Vec::new(),
+        };
+
+        let ddl = mysql_ddl_with_executor(&mut executor, "app", "users").await.unwrap();
+
+        assert_eq!(ddl, "CREATE TABLE `users` (`id` int);");
+        assert_eq!(executor.executed, ["SHOW CREATE TABLE `app`.`users`"]);
+    }
+
+    #[tokio::test]
+    async fn mysql_ddl_retries_unqualified_after_no_such_table() {
+        let mut executor = FakeMysqlDdlExecutor {
+            outcomes: [
+                Err(mysql_server_error(1146, "Table 'retail`fas.account`details' doesn't exist")),
+                Ok("CREATE TABLE `account``details` (`id` int)".to_string()),
+            ]
+            .into(),
+            executed: Vec::new(),
+        };
+
+        let ddl = mysql_ddl_with_executor(&mut executor, "retail`fas", "account`details").await.unwrap();
+
+        assert_eq!(ddl, "CREATE TABLE `account``details` (`id` int);");
+        assert_eq!(
+            executor.executed,
+            ["SHOW CREATE TABLE `retail``fas`.`account``details`", "SHOW CREATE TABLE `account``details`",]
+        );
+    }
+
+    #[tokio::test]
+    async fn mysql_ddl_preserves_qualified_error_when_fallback_fails() {
+        let first_error = mysql_server_error(1146, "qualified table doesn't exist");
+        let expected = first_error.to_string();
+        let mut executor = FakeMysqlDdlExecutor {
+            outcomes: [Err(first_error), Err(mysql_server_error(1146, "unqualified table doesn't exist"))].into(),
+            executed: Vec::new(),
+        };
+
+        let error = mysql_ddl_with_executor(&mut executor, "app", "missing").await.unwrap_err();
+
+        assert_eq!(error, expected);
+        assert_eq!(executor.executed, ["SHOW CREATE TABLE `app`.`missing`", "SHOW CREATE TABLE `missing`"]);
+    }
+
+    #[tokio::test]
+    async fn mysql_ddl_does_not_retry_other_server_errors() {
+        let first_error = mysql_server_error(1044, "access denied");
+        let expected = first_error.to_string();
+        let mut executor = FakeMysqlDdlExecutor {
+            outcomes: [Err(first_error), Ok("unexpected fallback".to_string())].into(),
+            executed: Vec::new(),
+        };
+
+        let error = mysql_ddl_with_executor(&mut executor, "app", "users").await.unwrap_err();
+
+        assert_eq!(error, expected);
+        assert_eq!(executor.executed, ["SHOW CREATE TABLE `app`.`users`"]);
+    }
+
+    #[tokio::test]
+    async fn mysql_ddl_does_not_retry_without_a_database() {
+        let first_error = mysql_server_error(1146, "table doesn't exist");
+        let expected = first_error.to_string();
+        let mut executor = FakeMysqlDdlExecutor {
+            outcomes: [Err(first_error), Ok("unexpected fallback".to_string())].into(),
+            executed: Vec::new(),
+        };
+
+        let error = mysql_ddl_with_executor(&mut executor, "", "missing").await.unwrap_err();
+
+        assert_eq!(error, expected);
+        assert_eq!(executor.executed, ["SHOW CREATE TABLE `missing`"]);
+    }
+
+    #[tokio::test]
+    async fn mysql_ddl_does_not_retry_result_parsing_errors() {
+        let mut executor = FakeMysqlDdlExecutor {
+            outcomes: [
+                Err(MysqlDdlQueryError::Result("DDL not found".to_string())),
+                Ok("unexpected fallback".to_string()),
+            ]
+            .into(),
+            executed: Vec::new(),
+        };
+
+        let error = mysql_ddl_with_executor(&mut executor, "app", "users").await.unwrap_err();
+
+        assert_eq!(error, "DDL not found");
+        assert_eq!(executor.executed, ["SHOW CREATE TABLE `app`.`users`"]);
+    }
+}
+
+#[derive(Debug)]
+enum MysqlDdlQueryError {
+    Query(mysql_async::Error),
+    Result(String),
+}
+
+impl MysqlDdlQueryError {
+    fn is_no_such_table(&self) -> bool {
+        matches!(self, Self::Query(mysql_async::Error::Server(error)) if error.code == 1146)
+    }
+}
+
+impl std::fmt::Display for MysqlDdlQueryError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Query(error) => error.fmt(formatter),
+            Self::Result(error) => error.fmt(formatter),
+        }
+    }
+}
+
+trait MysqlDdlQueryExecutor {
+    async fn execute(&mut self, sql: &str) -> Result<String, MysqlDdlQueryError>;
+}
+
+struct MysqlDdlConnection<'a> {
+    conn: &'a mut mysql_async::Conn,
+}
+
+impl MysqlDdlQueryExecutor for MysqlDdlConnection<'_> {
+    async fn execute(&mut self, sql: &str) -> Result<String, MysqlDdlQueryError> {
+        use mysql_async::prelude::*;
+
+        let result = self.conn.query_iter(sql).await.map_err(MysqlDdlQueryError::Query)?;
+        let rows: Vec<mysql_async::Row> = result.collect_and_drop().await.map_err(MysqlDdlQueryError::Query)?;
+        let row = rows.first().ok_or_else(|| MysqlDdlQueryError::Result("DDL not found".to_string()))?;
+        row.get_opt::<String, usize>(1)
+            .and_then(|result| result.ok())
+            .or_else(|| {
+                row.get_opt::<Vec<u8>, usize>(1)
+                    .and_then(|result| result.ok())
+                    .map(|bytes| String::from_utf8_lossy(&bytes).to_string())
+            })
+            .ok_or_else(|| MysqlDdlQueryError::Result("Failed to read DDL".to_string()))
+    }
+}
+
+async fn mysql_ddl_with_executor(
+    executor: &mut impl MysqlDdlQueryExecutor,
+    database: &str,
+    table: &str,
+) -> Result<String, String> {
+    let sql = format!("SHOW CREATE TABLE {}", mysql_qualified_name(database, table));
+    let qualified_error = match executor.execute(&sql).await {
+        Ok(ddl) => return Ok(ensure_display_ddl_terminated(ddl)),
+        Err(error) => error,
+    };
+    if database.trim().is_empty() || !qualified_error.is_no_such_table() {
+        return Err(qualified_error.to_string());
+    }
+
+    // Mycat 1.x routes by the logical qualifier but forwards it unchanged to a
+    // physical schema; the metadata pool has already selected the logical database.
+    let fallback_sql = format!("SHOW CREATE TABLE {}", mysql_ident(table));
+    match executor.execute(&fallback_sql).await {
+        Ok(ddl) => Ok(ensure_display_ddl_terminated(ddl)),
+        Err(_) => Err(qualified_error.to_string()),
+    }
 }
 
 pub async fn mysql_ddl(pool: &db::mysql::MySqlPool, database: &str, table: &str) -> Result<String, String> {
-    use mysql_async::prelude::*;
-    let sql = format!("SHOW CREATE TABLE {}", mysql_qualified_name(database, table));
     // Use the health-checked getter so a stale pooled connection (server closed
     // it after an idle timeout, NAT/firewall dropped the TCP state, etc.) is
     // detected and replaced before issuing the query. Without this, the first
     // DDL request after a period of inactivity could surface a low-level
     // connection error that a manual refresh would have masked.
     let mut conn = db::mysql::get_conn_with_health_check(pool).await?;
-    let result = conn.query_iter(&sql).await.map_err(|e| e.to_string())?;
-    let rows: Vec<mysql_async::Row> = result.collect_and_drop().await.map_err(|e| e.to_string())?;
-    let row = rows.first().ok_or("DDL not found")?;
-    let ddl = row
-        .get_opt::<String, usize>(1)
-        .and_then(|result| result.ok())
-        .or_else(|| {
-            row.get_opt::<Vec<u8>, usize>(1)
-                .and_then(|result| result.ok())
-                .map(|b| String::from_utf8_lossy(&b).to_string())
-        })
-        .ok_or_else(|| "Failed to read DDL".to_string())?;
-    Ok(ensure_display_ddl_terminated(ddl))
+    mysql_ddl_with_executor(&mut MysqlDdlConnection { conn: &mut conn }, database, table).await
 }
 
 async fn external_driver_mysql_ddl(
@@ -8524,7 +8946,7 @@ async fn external_driver_mysql_ddl(
             agent_metadata_timeout(Some(config)),
         )
         .await?;
-    mysql_external_driver_ddl_from_query_result(result)
+    mysql_external_driver_ddl_from_query_result(result, "Create Table")
 }
 
 fn ensure_display_ddl_terminated(sql: String) -> String {

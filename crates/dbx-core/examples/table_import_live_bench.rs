@@ -204,6 +204,7 @@ fn connection_config(id: &str, database: BenchDatabase) -> Result<ConnectionConf
         jdbc_driver_class: None,
         jdbc_driver_paths: Vec::new(),
         one_time: false,
+        save_password: true,
         read_only: false,
         is_production: false,
         production_databases: Vec::new(),

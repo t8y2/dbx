@@ -170,6 +170,14 @@ pub struct ConnectionConfig {
     pub jdbc_driver_paths: Vec<String>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub one_time: bool,
+    /// Whether the database password may be persisted locally (SQLite
+    /// `connection_secrets`). When false, the `"password"` secret is never
+    /// written (or is deleted) and the user must type it on every connect.
+    /// Defaults to `true` so pre-existing saved connections keep current
+    /// behavior; a bare `#[serde(default)]` would upgrade them to "don't save"
+    /// and delete every stored password on the next save.
+    #[serde(default = "default_true")]
+    pub save_password: bool,
     #[serde(default, skip_serializing_if = "is_false")]
     pub read_only: bool,
     /// Explicitly marks every database reachable through this connection as production.
@@ -509,6 +517,8 @@ pub enum DatabaseType {
     Elasticsearch,
     #[serde(rename = "easysearch")]
     Easysearch,
+    #[serde(rename = "meilisearch")]
+    Meilisearch,
     Hbase,
     #[serde(rename = "qdrant")]
     Qdrant,
@@ -691,6 +701,8 @@ struct ConnectionConfigData {
     pub jdbc_driver_paths: Vec<String>,
     #[serde(default)]
     pub one_time: bool,
+    #[serde(default = "default_true")]
+    pub save_password: bool,
     #[serde(default)]
     pub read_only: bool,
     #[serde(default)]
@@ -754,6 +766,7 @@ impl From<ConnectionConfigData> for ConnectionConfig {
             jdbc_driver_class: data.jdbc_driver_class,
             jdbc_driver_paths: data.jdbc_driver_paths,
             one_time: data.one_time,
+            save_password: data.save_password,
             read_only: data.read_only,
             is_production: data.is_production,
             production_databases: data.production_databases,
@@ -1081,6 +1094,7 @@ impl ConnectionConfig {
             DatabaseType::Oracle => format!("oracle://{host}:{port}{db_part}"),
             DatabaseType::Elasticsearch
             | DatabaseType::Easysearch
+            | DatabaseType::Meilisearch
             | DatabaseType::Hbase
             | DatabaseType::Qdrant
             | DatabaseType::Milvus
@@ -1245,6 +1259,7 @@ impl ConnectionConfig {
             }
             DatabaseType::Elasticsearch
             | DatabaseType::Easysearch
+            | DatabaseType::Meilisearch
             | DatabaseType::Hbase
             | DatabaseType::Qdrant
             | DatabaseType::Milvus
@@ -1514,7 +1529,9 @@ impl ConnectionConfig {
     }
 
     pub fn clickhouse_uses_tls(&self) -> bool {
-        self.ssl || url_params_contains_flag(self.url_params.as_deref(), "secure", "true")
+        self.ssl
+            || clickhouse_url_params_contains_flag(self.url_params.as_deref(), "secure", "true")
+            || clickhouse_url_params_contains_flag(self.url_params.as_deref(), "ssl", "true")
     }
 
     pub fn mysql_uses_tls(&self) -> bool {
@@ -1609,10 +1626,18 @@ fn without_sqlserver_legacy_compatibility_param(params: Option<&str>) -> Option<
     Some(output)
 }
 
-fn url_params_contains_flag(params: Option<&str>, key: &str, expected: &str) -> bool {
-    params.unwrap_or("").trim().trim_start_matches('?').split(['&', ';']).filter_map(|part| part.split_once('=')).any(
-        |(part_key, value)| part_key.trim().eq_ignore_ascii_case(key) && value.trim().eq_ignore_ascii_case(expected),
-    )
+fn clickhouse_url_params_contains_flag(params: Option<&str>, key: &str, expected: &str) -> bool {
+    params
+        .unwrap_or("")
+        .trim()
+        .trim_start_matches(['?', '&', ';'])
+        .split(['&', ';'])
+        .filter_map(|part| part.split_once('='))
+        .any(|(part_key, value)| {
+            let part_key = percent_encoding::percent_decode_str(part_key.trim()).decode_utf8_lossy();
+            let value = percent_encoding::percent_decode_str(value.trim()).decode_utf8_lossy();
+            part_key.eq_ignore_ascii_case(key) && value.eq_ignore_ascii_case(expected)
+        })
 }
 
 fn mysql_tls_file_param_is(key: &str, target: &str) -> bool {
@@ -2307,6 +2332,12 @@ mod tests {
     }
 
     #[test]
+    fn meilisearch_database_type_serializes_stably() {
+        assert_eq!(serde_json::to_string(&DatabaseType::Meilisearch).unwrap(), "\"meilisearch\"");
+        assert_eq!(serde_json::from_str::<DatabaseType>("\"meilisearch\"").unwrap(), DatabaseType::Meilisearch);
+    }
+
+    #[test]
     fn connection_test_result_uses_camel_case_and_omits_missing_details() {
         let result =
             ConnectionTestResult::success("Connection successful").with_database_info(Some(DatabaseConnectionInfo {
@@ -2415,6 +2446,7 @@ mod tests {
             jdbc_driver_class: None,
             jdbc_driver_paths: Vec::new(),
             one_time: false,
+            save_password: true,
             read_only: false,
             is_production: false,
             production_databases: vec![],
@@ -3025,6 +3057,15 @@ mod tests {
 
         config.ssl = false;
         config.url_params = Some("secure=true".to_string());
+        assert_eq!(config.connection_url(), "https://10.1.2.3:8443");
+
+        config.url_params = Some("SSL=TrUe&dialect_type=ANSI".to_string());
+        assert_eq!(config.connection_url(), "https://10.1.2.3:8443");
+
+        config.url_params = Some("ssl=false&dialect_type=ANSI".to_string());
+        assert_eq!(config.connection_url(), "http://10.1.2.3:8443");
+
+        config.url_params = Some("?%53SL=Tr%75e;dialect_type=ANSI".to_string());
         assert_eq!(config.connection_url(), "https://10.1.2.3:8443");
     }
 

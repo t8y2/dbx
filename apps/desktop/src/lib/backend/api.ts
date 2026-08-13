@@ -137,6 +137,7 @@ export const syncSavedSqlDirectory = forward("syncSavedSqlDirectory");
 
 // Schema
 export const listDatabases = forward("listDatabases");
+export const listDatabaseMetadata = forward("listDatabaseMetadata");
 export const listDatabaseStorage = forward("listDatabaseStorage");
 export const getSqlServerCompletionContext = forward("getSqlServerCompletionContext");
 export const listDorisCatalogs = forward("listDorisCatalogs");
@@ -701,6 +702,7 @@ export const mongoDistinct = forward("mongoDistinct");
 export const mongoCollectionStats = forward("mongoCollectionStats");
 export const mongoCreateIndex = forward("mongoCreateIndex");
 export const mongoCreateUser = forward("mongoCreateUser");
+export const mongoRunCommand = forward("mongoRunCommand");
 export const mongoDropIndexes = forward("mongoDropIndexes");
 export const documentInsertDocument = forward("documentInsertDocument");
 export const mongoInsertDocument = forward("mongoInsertDocument");
@@ -709,6 +711,7 @@ export const documentUpdateDocument = forward("documentUpdateDocument");
 export const mongoUpdateDocument = forward("mongoUpdateDocument");
 export const mongoUpdateDocuments = forward("mongoUpdateDocuments");
 export const documentDeleteDocument = forward("documentDeleteDocument");
+export const documentSaveMeilisearchBatch = forward("documentSaveMeilisearchBatch");
 export const mongoDeleteDocument = forward("mongoDeleteDocument");
 export const mongoDeleteDocuments = forward("mongoDeleteDocuments");
 export const mongoFindOneAndUpdate = forward("mongoFindOneAndUpdate");

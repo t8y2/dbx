@@ -20,6 +20,62 @@ afterEach(() => {
 });
 
 describe("CustomContextMenu lifecycle", () => {
+  it("exposes the open state and closes only the active target", async () => {
+    const firstOpen = vi.fn();
+    const firstClose = vi.fn();
+    const secondOpen = vi.fn();
+    const secondClose = vi.fn();
+    const root = defineComponent({
+      setup() {
+        const menu = (id: string, onOpen: () => void, onClose: () => void) =>
+          h(
+            CustomContextMenu,
+            { items: [{ label: `Inspect ${id}` }], onOpen, onClose },
+            {
+              default: ({ onContextMenu, isOpen }: { onContextMenu: (event: MouseEvent) => void; isOpen: boolean }) => h("div", { id, "data-context-open": String(isOpen), onContextmenu: onContextMenu }, id),
+            },
+          );
+        return () => [menu("first-target", firstOpen, firstClose), menu("second-target", secondOpen, secondClose)];
+      },
+    });
+    const container = document.createElement("div");
+    mountedContainers.push(container);
+    document.body.append(container);
+    const app = createApp(root);
+    app.mount(container);
+
+    const firstTarget = container.querySelector("#first-target");
+    const secondTarget = container.querySelector("#second-target");
+    firstTarget?.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true }));
+    await nextTick();
+    expect(firstTarget?.getAttribute("data-context-open")).toBe("true");
+    expect(secondTarget?.getAttribute("data-context-open")).toBe("false");
+    expect(firstOpen).toHaveBeenCalledTimes(1);
+    expect(firstClose).not.toHaveBeenCalled();
+
+    firstTarget?.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true }));
+    await nextTick();
+    expect(firstTarget?.getAttribute("data-context-open")).toBe("true");
+    expect(secondTarget?.getAttribute("data-context-open")).toBe("false");
+    expect(firstOpen).toHaveBeenCalledTimes(2);
+    expect(firstClose).toHaveBeenCalledTimes(1);
+
+    secondTarget?.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true }));
+    await nextTick();
+    expect(firstTarget?.getAttribute("data-context-open")).toBe("false");
+    expect(secondTarget?.getAttribute("data-context-open")).toBe("true");
+    expect(firstClose).toHaveBeenCalledTimes(2);
+    expect(secondOpen).toHaveBeenCalledTimes(1);
+
+    window.dispatchEvent(new Event("resize"));
+    window.dispatchEvent(new Event("resize"));
+    await nextTick();
+    expect(secondTarget?.getAttribute("data-context-open")).toBe("false");
+    expect(secondClose).toHaveBeenCalledTimes(1);
+
+    app.unmount();
+  });
+
   it("removes the capture keydown listener when unmounted while open", async () => {
     const documentAdd = vi.spyOn(document, "addEventListener");
     const documentRemove = vi.spyOn(document, "removeEventListener");

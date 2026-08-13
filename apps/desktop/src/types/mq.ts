@@ -156,6 +156,12 @@ export interface TopicInfo {
   messageType?: RocketMqTopicMessageType | string;
   /** RabbitMQ: owning virtual host, present when listing across all vhosts. */
   namespace?: string;
+  /** RabbitMQ total queue messages, including ready and unacknowledged messages. */
+  messageCount?: number;
+  /** RabbitMQ messages ready for delivery. */
+  messagesReady?: number;
+  /** RabbitMQ messages delivered but not yet acknowledged. */
+  messagesUnacked?: number;
 }
 
 export interface ListTopicsOpts {
@@ -226,7 +232,7 @@ export interface ProducerInfo {
   clientVersion: string;
 }
 
-export type ResetPosition = { kind: "earliest" } | { kind: "latest" } | { kind: "timestamp"; timestampMs: number } | { kind: "messageId"; ledgerId: number; entryId: number };
+export type ResetPosition = { kind: "earliest" } | { kind: "latest" } | { kind: "timestamp"; timestampMs: number } | { kind: "partitionOffset"; partition: number; offset: number } | { kind: "messageId"; ledgerId: number; entryId: number };
 
 export type SkipCount = { kind: "all" } | { kind: "count"; count: number };
 

@@ -138,6 +138,12 @@ SELECT o.OBJECT_NAME,
 FROM ALL_OBJECTS o
 WHERE o.OWNER = :2
   AND o.OBJECT_TYPE IN ('VIEW', 'PROCEDURE', 'FUNCTION', 'PACKAGE', 'PACKAGE BODY')
+UNION ALL
+SELECT s.SYNONYM_NAME AS OBJECT_NAME,
+       'SYNONYM' AS OBJECT_TYPE,
+       CAST(NULL AS VARCHAR2(4000)) AS COMMENTS
+FROM ALL_SYNONYMS s
+WHERE s.OWNER = :3
 )`
 const oracleListObjectsSessionUserBaseSQL = `
 SELECT OBJECT_NAME, OBJECT_TYPE, COMMENTS
@@ -153,14 +159,20 @@ SELECT o.OBJECT_NAME,
        CAST(NULL AS VARCHAR2(4000)) AS COMMENTS
 FROM USER_OBJECTS o
 WHERE o.OBJECT_TYPE IN ('VIEW', 'PROCEDURE', 'FUNCTION', 'PACKAGE', 'PACKAGE BODY')
+UNION ALL
+SELECT s.SYNONYM_NAME AS OBJECT_NAME,
+       'SYNONYM' AS OBJECT_TYPE,
+       CAST(NULL AS VARCHAR2(4000)) AS COMMENTS
+FROM USER_SYNONYMS s
 )`
 const oracleListObjectsOrderSQL = `ORDER BY CASE OBJECT_TYPE
   WHEN 'TABLE' THEN 0
   WHEN 'VIEW' THEN 1
   WHEN 'PROCEDURE' THEN 2
   WHEN 'FUNCTION' THEN 3
-  WHEN 'PACKAGE' THEN 4
-  ELSE 5
+  WHEN 'SYNONYM' THEN 4
+  WHEN 'PACKAGE' THEN 5
+  ELSE 6
 END, OBJECT_NAME`
 const oracleListObjectsSQL = oracleListObjectsBaseSQL + "\n" + oracleListObjectsOrderSQL
 const oracleListTriggersSQL = `
@@ -394,6 +406,7 @@ type columnInfo struct {
 	NumericPrecision       *int    `json:"numeric_precision"`
 	NumericScale           *int    `json:"numeric_scale"`
 	CharacterMaximumLength *int    `json:"character_maximum_length"`
+	CharacterLengthUnit    *string `json:"-"`
 }
 
 type indexInfo struct {
@@ -1511,7 +1524,7 @@ func oracleListObjectsQuery(schema string, constraints metadataListConstraints) 
 		"OBJECT_NAME, OBJECT_TYPE, COMMENTS",
 		"OBJECT_TYPE",
 		oracleListObjectsOrderSQL,
-		[]any{schema, schema},
+		[]any{schema, schema, schema},
 		constraints,
 	)
 }
@@ -2297,7 +2310,8 @@ SELECT c.COLUMN_NAME,
        cc.COMMENTS,
        c.DATA_PRECISION,
        c.DATA_SCALE,
-       c.CHAR_LENGTH
+       c.CHAR_LENGTH,
+       c.CHAR_USED
 FROM ALL_TAB_COLUMNS c
 LEFT JOIN (
   SELECT acc.OWNER, acc.TABLE_NAME, acc.COLUMN_NAME
@@ -2327,6 +2341,7 @@ ORDER BY c.COLUMN_ID`, []any{schema, table})
 			&item.NumericPrecision,
 			&item.NumericScale,
 			&item.CharacterMaximumLength,
+			&item.CharacterLengthUnit,
 		); err != nil {
 			return nil, err
 		}
@@ -2597,6 +2612,9 @@ func (s *server) getObjectSource(schema, name, objectType string) (map[string]an
 		}
 		return map[string]any{"name": name, "object_type": objectType, "schema": schema, "source": source}, nil
 	}
+	if upperType == "SYNONYM" {
+		return s.getMetadataObjectSource(schema, name, upperType)
+	}
 
 	// Unquoted Oracle identifiers are stored uppercase; quoted mixed-case names must stay exact.
 	// Try caller-provided identity first, then uppercase fallback (same pattern as column metadata).
@@ -2610,6 +2628,22 @@ func (s *server) getObjectSource(schema, name, objectType string) (map[string]an
 		}
 	}
 	return map[string]any{"name": name, "object_type": objectType, "schema": schema, "source": ""}, nil
+}
+
+func (s *server) getMetadataObjectSource(schema, name, objectType string) (map[string]any, error) {
+	db, err := s.requireDB()
+	if err != nil {
+		return nil, err
+	}
+	var lastErr error
+	for _, candidate := range oracleObjectIdentityNameCandidates(name) {
+		var source string
+		lastErr = db.QueryRow("SELECT DBMS_METADATA.GET_DDL(:1, :2, :3) FROM DUAL", objectType, candidate, schema).Scan(&source)
+		if lastErr == nil {
+			return map[string]any{"name": candidate, "object_type": objectType, "schema": schema, "source": source}, nil
+		}
+	}
+	return nil, lastErr
 }
 
 func (s *server) loadObjectSourceText(schema, name, objectType string) (string, bool, error) {
@@ -3007,6 +3041,9 @@ func oracleColumnTypeDDL(column columnInfo) string {
 		return dataType
 	}
 	if isOracleCharacterType(dataType) && column.CharacterMaximumLength != nil && *column.CharacterMaximumLength > 0 {
+		if unit := oracleCharacterLengthUnit(dataType, column.CharacterLengthUnit); unit != "" {
+			return fmt.Sprintf("%s(%d %s)", dataType, *column.CharacterMaximumLength, unit)
+		}
 		return fmt.Sprintf("%s(%d)", dataType, *column.CharacterMaximumLength)
 	}
 	if dataType == "NUMBER" {
@@ -3023,6 +3060,25 @@ func oracleColumnTypeDDL(column columnInfo) string {
 		return fmt.Sprintf("%s(%d)", dataType, *column.NumericPrecision)
 	}
 	return dataType
+}
+
+func oracleCharacterLengthUnit(dataType string, charUsed *string) string {
+	switch dataType {
+	case "CHAR", "VARCHAR", "VARCHAR2":
+	default:
+		return ""
+	}
+	if charUsed == nil {
+		return ""
+	}
+	switch strings.ToUpper(strings.TrimSpace(*charUsed)) {
+	case "B":
+		return "BYTE"
+	case "C":
+		return "CHAR"
+	default:
+		return ""
+	}
 }
 
 func isOracleCharacterType(dataType string) bool {

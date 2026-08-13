@@ -215,10 +215,9 @@ func parseConnectionConfig(params connectParams) (connectionConfig, error) {
 func newSessionClient(config connectionConfig) (*sessionClient, error) {
 	var session client.Session
 	var err error
-	database := config.Database
-	if config.Dialect == client.TableSqlDialect {
-		database = ""
-	}
+	// DBX applies a table database with USE after switching dialects. Do not
+	// include a tree database in openSession: IoTDB 2.x rejects it there, while
+	// DBX still retains it for metadata and path qualification.
 	if len(config.NodeURLs) > 1 {
 		session, err = client.NewClusterSession(&client.ClusterConfig{
 			NodeUrls:        config.NodeURLs,
@@ -227,7 +226,6 @@ func newSessionClient(config connectionConfig) (*sessionClient, error) {
 			FetchSize:       config.FetchSize,
 			TimeZone:        config.TimeZone,
 			ConnectRetryMax: config.ConnectRetryMax,
-			Database:        database,
 			TLSConfig:       config.TLSConfig,
 		})
 		if err == nil {
@@ -242,7 +240,6 @@ func newSessionClient(config connectionConfig) (*sessionClient, error) {
 			FetchSize:       config.FetchSize,
 			TimeZone:        config.TimeZone,
 			ConnectRetryMax: config.ConnectRetryMax,
-			Database:        database,
 			TLSConfig:       config.TLSConfig,
 		})
 		err = session.Open(config.EnableCompression, config.ConnectTimeoutMS)

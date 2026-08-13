@@ -603,6 +603,7 @@ const SIDE_EFFECT_SELECT_FUNCTIONS: &[&str] = &[
     "pg_try_advisory_lock",
     "pg_try_advisory_xact_lock",
     "setval",
+    "sys_cancel_backend",
 ];
 
 fn query_is_write_capable(query: &Query, detect_select_into: bool) -> bool {
@@ -1017,6 +1018,24 @@ mod tests {
                 "expected write-capable SQL: {sql}"
             );
             assert!(is_dangerous_sql_for_database(sql, DatabaseType::Postgres), "expected high-risk SQL: {sql}");
+        }
+    }
+
+    #[test]
+    fn classify_backend_query_cancellation_as_a_side_effect() {
+        for (sql, database_type) in [
+            ("SELECT pg_cancel_backend(42)", DatabaseType::Postgres),
+            ("SELECT sys_cancel_backend(42)", DatabaseType::Kingbase),
+        ] {
+            assert_eq!(
+                classify_sql_risk_for_database(sql, database_type).unwrap(),
+                SqlRisk::Write,
+                "expected query cancellation to be write-capable: {sql}"
+            );
+            assert!(
+                is_dangerous_sql_for_database(sql, database_type),
+                "expected query cancellation to require production protection: {sql}"
+            );
         }
     }
 

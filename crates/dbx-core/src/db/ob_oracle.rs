@@ -53,7 +53,7 @@ pub async fn list_databases(pool: &mysql_async::Pool) -> Result<Vec<DatabaseInfo
     let result = conn.query_iter(list_user_schemas_sql()).await.map_err(|e| e.to_string())?;
     let rows: Vec<mysql_async::Row> = result.collect_and_drop().await.map_err(|e| e.to_string())?;
 
-    Ok(rows.iter().map(|row| DatabaseInfo { name: get_str(row, 0) }).collect())
+    Ok(rows.iter().map(|row| DatabaseInfo { name: get_str(row, 0), ..Default::default() }).collect())
 }
 
 pub async fn list_schemas(pool: &mysql_async::Pool) -> Result<Vec<String>, String> {

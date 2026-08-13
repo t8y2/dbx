@@ -114,6 +114,16 @@ pub struct DocumentDeleteRequest {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct MeilisearchBatchSaveRequest {
+    pub connection_id: String,
+    pub collection: String,
+    pub updates: Vec<dbx_core::db::meilisearch_driver::MeilisearchDocumentUpdate>,
+    pub delete_ids: Vec<String>,
+    pub inserts: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct GridFsBucketRequest {
     pub connection_id: String,
     pub database: String,
@@ -280,6 +290,24 @@ pub async fn delete_document(
         &req.id,
         req.routing.as_deref(),
         req.document_type.as_deref(),
+    )
+    .await
+    .map_err(AppError::from)?;
+    Ok(Json(result))
+}
+
+pub async fn save_meilisearch_batch(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<MeilisearchBatchSaveRequest>,
+) -> Result<Json<u64>, AppError> {
+    ensure_writable(&state.app, &req.connection_id, "Save").await?;
+    let result = dbx_core::document_ops::save_meilisearch_document_batch_core(
+        &state.app,
+        &req.connection_id,
+        &req.collection,
+        &req.updates,
+        &req.delete_ids,
+        &req.inserts,
     )
     .await
     .map_err(AppError::from)?;

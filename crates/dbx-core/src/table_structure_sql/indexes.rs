@@ -47,13 +47,17 @@ pub(super) fn build_index_sql(options: &TableStructureSqlOptions, warnings: &mut
                 warnings.push(format!("Primary index \"{}\" cannot be edited from this editor.", original.name));
                 continue;
             }
-            statements.push(build_drop_index_sql(
-                options.database_type,
-                dialect,
-                &table,
-                options.schema.as_deref(),
-                &original.name,
-            ));
+            let or_replace =
+                options.database_type == Some(DatabaseType::Dameng) && clean(&index.name) == clean(&original.name);
+            if !or_replace {
+                statements.push(build_drop_index_sql(
+                    options.database_type,
+                    dialect,
+                    &table,
+                    options.schema.as_deref(),
+                    &original.name,
+                ));
+            }
             statements.extend(build_create_index_statements(
                 dialect,
                 &table,
@@ -61,6 +65,7 @@ pub(super) fn build_index_sql(options: &TableStructureSqlOptions, warnings: &mut
                 warnings,
                 options.schema.as_deref(),
                 &options.table_name,
+                or_replace,
             ));
             continue;
         }
@@ -76,6 +81,7 @@ pub(super) fn build_index_sql(options: &TableStructureSqlOptions, warnings: &mut
             warnings,
             options.schema.as_deref(),
             &options.table_name,
+            false,
         ));
     }
 
@@ -161,6 +167,7 @@ pub(super) fn build_create_index_statements(
     warnings: &mut Vec<String>,
     schema: Option<&str>,
     table_name: &str,
+    or_replace: bool,
 ) -> Vec<String> {
     let capabilities = capabilities_for(database_type_for_dialect(dialect));
     let name = clean(&index.name);
@@ -171,6 +178,7 @@ pub(super) fn build_create_index_statements(
     }
 
     let unique = if index.is_unique { "UNIQUE " } else { "" };
+    let replace = if or_replace { "OR REPLACE " } else { "" };
     let cols = columns
         .iter()
         .map(|column| {
@@ -236,11 +244,11 @@ pub(super) fn build_create_index_statements(
         if dialect == StructureDialect::Sqlite { quote_ident(dialect, table_name) } else { table.to_string() };
     let create_sql = if dialect == StructureDialect::Postgres {
         format!(
-            "CREATE {unique}{type_prefix}INDEX {index_name} ON {create_table}{using_clause} ({cols}){include_clause}{where_clause};"
+            "CREATE {replace}{unique}{type_prefix}INDEX {index_name} ON {create_table}{using_clause} ({cols}){include_clause}{where_clause};"
         )
     } else {
         format!(
-            "CREATE {unique}{type_prefix}INDEX {index_name}{using_clause} ON {create_table} ({cols}){include_clause}{where_clause}{comment_clause};"
+            "CREATE {replace}{unique}{type_prefix}INDEX {index_name}{using_clause} ON {create_table} ({cols}){include_clause}{where_clause}{comment_clause};"
         )
     };
     let mut statements = vec![create_sql];

@@ -144,7 +144,10 @@ async function loadDatabases(connectionId: string, preserveSelection: boolean) {
     const config = connectionStore.getConfig(connectionId);
     const names = config?.db_type === "dameng" ? await fetchNamespaceOptionsForConnection(connectionId, config) : (await api.listDatabases(connectionId)).map((database) => database.name);
     databaseOptions.value = names;
-    if (!preserveSelection) {
+    if (preserveSelection) {
+      const selected = new Set(selectedDatabases.value);
+      selectedDatabases.value = names.filter((database) => selected.has(database));
+    } else {
       selectedDatabases.value = [];
       allDatabases.value = true;
       draft.value.tableFilterMode = "all";

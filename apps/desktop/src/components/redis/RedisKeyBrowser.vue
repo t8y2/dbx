@@ -43,6 +43,8 @@ import {
 import { classifyRedisCommandSafety } from "@/lib/redis/redisCommandSafety";
 import { isRedisMutatingCommand } from "@/lib/redis/redisCommandTable";
 import { isRedisClearScreenCommand, nextRedisCommandDb, redisKeyTextToRaw } from "@/lib/redis/redisCommandSession";
+import { buildRedisCompletionItemsFromContext, getRedisCompletionContext, takesKeyArgument, type RedisCompletionItem } from "@/lib/redis/redisCompletion";
+import type { RedisCommandDocumentation } from "@/lib/redis/redisCommandDocs";
 import { formatRedisConsoleValue, redisValuePreview, redisValueSize } from "@/lib/redis/redisValuePresentation";
 import { isCancelSearchShortcut } from "@/lib/editor/keyboardShortcuts";
 import { copyToClipboard } from "@/lib/common/clipboard";
@@ -100,6 +102,7 @@ const isFetchingAll = ref(false);
 const fetchAllStopRequested = ref(false);
 const fetchAllLoadedCount = ref(0);
 const rootRef = ref<HTMLElement>();
+const keyPaneRef = ref<HTMLElement>();
 const valueViewerRef = ref<{ focusSearch: () => boolean } | null>(null);
 const commandTerminalRef = ref<HTMLElement>();
 const searchPattern = ref("");
@@ -110,6 +113,9 @@ const hasMore = ref(false);
 const scanCursor = ref(0);
 const expandedGroupIds = ref<Set<string>>(new Set());
 const checkedKeys = ref<Set<string>>(new Set());
+/** Bumped when selection or tree counts change so virtualized rows re-evaluate state. */
+const selectionEpoch = ref(0);
+const selectionAnchorRowId = ref<string | null>(null);
 const selectedGroupLeafCounts = shallowRef<Map<string, number>>(new Map());
 const deletingKeys = ref(false);
 const pendingDanger = ref<{ kind: "delete-keys"; title: string; keyRaws: string[]; loadedSearchResults: boolean } | { kind: "command"; command: string } | null>(null);
@@ -119,6 +125,15 @@ const commandRunning = ref(false);
 const commandDb = ref(props.db);
 const commandHistory = ref<RedisCommandHistoryEntry[]>([]);
 const commandHistoryIndex = ref(-1);
+const commandCompletionItems = ref<RedisCompletionItem[]>([]);
+const commandCompletionSelectedIndex = ref(0);
+const commandCompletionLoading = ref(false);
+const commandCompletionListboxId = `redis-command-completions-${uuid()}`;
+const commandCompletionSelectedItem = computed(() => commandCompletionItems.value[commandCompletionSelectedIndex.value]);
+const commandCompletionActiveDescendant = computed(() => (commandCompletionSelectedItem.value ? `${commandCompletionListboxId}-option-${commandCompletionSelectedIndex.value}` : undefined));
+const commandDocumentationLoading = ref(false);
+const commandCompletionOpen = computed(() => commandDocumentationLoading.value || commandCompletionLoading.value || commandCompletionItems.value.length > 0);
+const commandDocumentation = shallowRef<RedisCommandDocumentation[]>([]);
 const activeSidePanel = ref<RedisSidePanel>("detail");
 const showCreateKeyDialog = ref(false);
 const creatingKey = ref(false);
@@ -152,6 +167,10 @@ let redisDbFlushedListenerRegistered = false;
 let redisInfiniteScrollFrame = 0;
 const loadedKeyRaws = new Set<string>();
 let treeIndex: RedisKeyTreeIndex | null = null;
+const REDIS_COMMAND_COMPLETION_MENU_LIMIT = 12;
+let commandCompletionRequestId = 0;
+let commandDocumentationConnectionId: string | null = null;
+let commandDocumentationRequestId = 0;
 
 const valueQuery = computed(() => searchPattern.value.trim());
 const isValueSearchMode = computed(() => searchMode.value === "value" || searchMode.value === "all");
@@ -164,6 +183,9 @@ const fuzzyTreeLimitReached = computed(() => isFuzzyKeySearch.value && !canBuild
 const useFlatKeySearchRows = computed(() => (searchMode.value === "key" && isSearchMode.value && !fuzzyKeySearch.value) || fuzzyTreeLimitReached.value);
 const isFuzzyHierarchyView = computed(() => isFuzzyKeySearch.value && !fuzzyTreeLimitReached.value);
 const selectionBusy = computed(() => deletingKeys.value || loading.value || loadingMore.value || isFetchingAll.value || searchPending.value);
+// checkedKeys is always a subset of loaded keys, so size equality is enough.
+const allLoadedKeysSelected = computed(() => flatKeys.value.length > 0 && checkedKeys.value.size === flatKeys.value.length);
+const allKeysSelected = computed(() => allLoadedKeysSelected.value && !hasMore.value);
 const searchPlaceholder = computed(() => {
   if (searchMode.value === "key") return fuzzyKeySearch.value ? t("redis.fuzzyPattern") : t("redis.pattern");
   return searchMode.value === "all" ? t("redis.allSearchPlaceholder") : t("redis.valueSearchPlaceholder");
@@ -296,64 +318,145 @@ let commandHistoryId = 0;
 function resetCheckedKeys() {
   checkedKeys.value = new Set();
   selectedGroupLeafCounts.value = new Map();
+  selectionAnchorRowId.value = null;
+  selectionEpoch.value++;
+}
+
+/** Parent folder selected-count derived only from currently checked leaves. */
+function groupLeafCountsFromChecked(checked: ReadonlySet<string>): Map<string, number> {
+  const nextCounts = new Map<string, number>();
+  const ancestors = treeIndex?.ancestorGroupIdsByKeyRaw;
+  if (!ancestors) return nextCounts;
+  for (const keyRaw of checked) {
+    for (const groupId of ancestors.get(keyRaw) ?? []) {
+      nextCounts.set(groupId, (nextCounts.get(groupId) ?? 0) + 1);
+    }
+  }
+  return nextCounts;
 }
 
 function refreshSelectedGroupLeafCounts() {
   const nextChecked = new Set<string>();
-  const nextCounts = new Map<string, number>();
   for (const keyRaw of checkedKeys.value) {
-    if (!loadedKeyRaws.has(keyRaw)) continue;
-    nextChecked.add(keyRaw);
-    for (const groupId of treeIndex?.ancestorGroupIdsByKeyRaw.get(keyRaw) ?? []) {
-      nextCounts.set(groupId, (nextCounts.get(groupId) ?? 0) + 1);
-    }
+    if (loadedKeyRaws.has(keyRaw)) nextChecked.add(keyRaw);
   }
   checkedKeys.value = nextChecked;
-  selectedGroupLeafCounts.value = nextCounts;
+  selectedGroupLeafCounts.value = groupLeafCountsFromChecked(nextChecked);
+  selectionEpoch.value++;
 }
 
 function setKeysChecked(keyRaws: Iterable<string>, checked: boolean) {
   const nextChecked = new Set(checkedKeys.value);
-  const nextCounts = new Map(selectedGroupLeafCounts.value);
   let changed = false;
 
   for (const keyRaw of keyRaws) {
-    if (!loadedKeyRaws.has(keyRaw)) continue;
-    const wasChecked = nextChecked.has(keyRaw);
-    if (wasChecked === checked) continue;
-
+    if (!loadedKeyRaws.has(keyRaw) && !nextChecked.has(keyRaw)) continue;
+    if (nextChecked.has(keyRaw) === checked) continue;
     if (checked) nextChecked.add(keyRaw);
     else nextChecked.delete(keyRaw);
-
-    const delta = checked ? 1 : -1;
-    for (const groupId of treeIndex?.ancestorGroupIdsByKeyRaw.get(keyRaw) ?? []) {
-      const nextCount = (nextCounts.get(groupId) ?? 0) + delta;
-      if (nextCount > 0) nextCounts.set(groupId, nextCount);
-      else nextCounts.delete(groupId);
-    }
     changed = true;
   }
-
   if (!changed) return;
+
   checkedKeys.value = nextChecked;
-  selectedGroupLeafCounts.value = nextCounts;
+  // Always recompute parent counts from the full leaf set so parent/child never drift.
+  selectedGroupLeafCounts.value = groupLeafCountsFromChecked(nextChecked);
+  selectionEpoch.value++;
 }
 
-function setKeyChecked(keyRaw: string, checked: boolean) {
-  setKeysChecked([keyRaw], checked);
+function nodeKeyRaws(node: RedisKeyTreeNode): string[] {
+  return node.kind === "leaf" ? [node.keyRaw] : collectRedisGroupKeyRaws(node);
 }
 
-function isGroupFullyChecked(group: RedisKeyTreeGroupNode): boolean {
-  return group.loadedLeafCount > 0 && selectedGroupLeafCounts.value.get(group.id) === group.loadedLeafCount;
+function focusKeyPane() {
+  keyPaneRef.value?.focus({ preventScroll: true });
+}
+
+function groupSelectedCount(group: RedisKeyTreeGroupNode): number {
+  void selectionEpoch.value;
+  return selectedGroupLeafCounts.value.get(group.id) ?? 0;
+}
+
+function isNodeChecked(node: RedisKeyTreeNode): boolean {
+  void selectionEpoch.value;
+  if (node.kind === "leaf") return checkedKeys.value.has(node.keyRaw);
+  return node.loadedLeafCount > 0 && groupSelectedCount(node) === node.loadedLeafCount;
 }
 
 function isGroupPartiallyChecked(group: RedisKeyTreeGroupNode): boolean {
-  const selectedCount = selectedGroupLeafCounts.value.get(group.id) ?? 0;
+  void selectionEpoch.value;
+  const selectedCount = groupSelectedCount(group);
   return selectedCount > 0 && selectedCount < group.loadedLeafCount;
 }
 
-function setGroupChecked(group: RedisKeyTreeGroupNode, checked: boolean) {
-  setKeysChecked(collectRedisGroupKeyRaws(group), checked);
+function isLeafChecked(keyRaw: string): boolean {
+  void selectionEpoch.value;
+  return checkedKeys.value.has(keyRaw);
+}
+
+/** Check/uncheck a leaf or folder; Shift expands an inclusive visible-row range. */
+function toggleNodeCheck(node: RedisKeyTreeNode, event: MouseEvent) {
+  // Let the native checkbox handle ordinary clicks; custom range selection owns Shift clicks.
+  if (event.shiftKey) event.preventDefault();
+  event.stopPropagation();
+  if (selectionBusy.value) return;
+  focusKeyPane();
+
+  if (event.shiftKey) {
+    const rows = visibleRows.value;
+    const to = rows.findIndex((row) => row.node.id === node.id);
+    if (to < 0) return;
+    let from = selectionAnchorRowId.value ? rows.findIndex((row) => row.id === selectionAnchorRowId.value) : to;
+    if (from < 0) from = to;
+    const keyRaws: string[] = [];
+    for (let i = Math.min(from, to); i <= Math.max(from, to); i++) keyRaws.push(...nodeKeyRaws(rows[i].node));
+    setKeysChecked(keyRaws, true);
+    if (!selectionAnchorRowId.value) selectionAnchorRowId.value = node.id;
+    return;
+  }
+
+  setKeysChecked(nodeKeyRaws(node), !isNodeChecked(node));
+  selectionAnchorRowId.value = node.id;
+}
+
+function selectAllLoadedKeys() {
+  if (selectionBusy.value || loadedKeyRaws.size === 0) return;
+  focusKeyPane();
+  setKeysChecked(loadedKeyRaws, true);
+  selectionAnchorRowId.value = visibleRows.value[0]?.id ?? null;
+}
+
+async function selectAllKeys() {
+  if (selectionBusy.value || (loadedKeyRaws.size === 0 && !hasMore.value)) return;
+  const requestId = searchRequestId;
+  if (hasMore.value) {
+    let fetchedAll = false;
+    try {
+      fetchedAll = await fetchAll();
+    } catch (error) {
+      toast(errorMessage(error), 5000);
+      return;
+    }
+    // A search or scope change may have replaced the result while SCAN was running.
+    // If the user stopped the scan, do not silently downgrade Ctrl+A to a partial selection.
+    if (!fetchedAll || requestId !== searchRequestId || !redisBrowserIsActive) return;
+  }
+  selectAllLoadedKeys();
+}
+
+function clearAllCheckedKeys() {
+  if (selectionBusy.value || checkedKeys.value.size === 0) return;
+  focusKeyPane();
+  resetCheckedKeys();
+}
+
+function onKeyPaneKeydown(event: KeyboardEvent) {
+  if (selectionBusy.value || event.isComposing) return;
+  if ((event.target as HTMLElement | null)?.closest("input, textarea, select, [contenteditable='true']")) return;
+  if (!(event.ctrlKey || event.metaKey) || event.altKey || event.shiftKey || event.key.toLowerCase() !== "a") return;
+  event.preventDefault();
+  if (allKeysSelected.value) clearAllCheckedKeys();
+  else void selectAllKeys();
 }
 
 function rebuildTree(expandAll = false) {
@@ -403,6 +506,8 @@ function mergeTree(newKeys: RedisKeyInfo[]) {
     for (const id of addedGroupIds) nextExpanded.add(id);
   }
   expandedGroupIds.value = nextExpanded;
+  // loadedLeafCount changed — re-evaluate parent checked/partial state in the UI.
+  if (checkedKeys.value.size > 0) selectionEpoch.value++;
 }
 
 function invalidateScanRequests(): number {
@@ -592,14 +697,15 @@ function onRedisKeyScroll(event: Event) {
 const FETCH_ALL_SCAN_COUNT = 50000;
 const FETCH_ALL_BATCH_ITERATIONS = 8;
 
-async function fetchAll() {
-  if (!hasMore.value || isFetchingAll.value) return;
+async function fetchAll(): Promise<boolean> {
+  if (!hasMore.value || isFetchingAll.value) return false;
   const requestId = searchRequestId;
   const bufferedKeys: RedisKeyInfo[] = [];
   isFetchingAll.value = true;
   fetchAllStopRequested.value = false;
   fetchAllLoadedCount.value = flatKeys.value.length;
   let changed = false;
+  let completed = false;
   try {
     while (requestId === searchRequestId && !fetchAllStopRequested.value && hasMore.value) {
       const result = await fetchScanBatchPage(FETCH_ALL_BATCH_ITERATIONS, {
@@ -610,6 +716,7 @@ async function fetchAll() {
       changed = appendScanResult(result, { updateTree: false, buffer: bufferedKeys }) > 0 || changed;
       fetchAllLoadedCount.value = flatKeys.value.length + bufferedKeys.length;
     }
+    completed = requestId === searchRequestId && !fetchAllStopRequested.value && !hasMore.value;
   } finally {
     if (requestId === searchRequestId) {
       if (bufferedKeys.length > 0) flatKeys.value = [...flatKeys.value, ...bufferedKeys];
@@ -627,6 +734,7 @@ async function fetchAll() {
       fetchAllLoadedCount.value = 0;
     }
   }
+  return completed;
 }
 
 function stopFetchAll() {
@@ -640,12 +748,21 @@ function toggleGroup(groupId: string) {
   expandedGroupIds.value = next;
 }
 
-function onRowClick(node: RedisKeyTreeNode) {
+function onRowClick(node: RedisKeyTreeNode, event?: MouseEvent) {
+  if (event && !selectionBusy.value && (event.shiftKey || event.ctrlKey || event.metaKey)) {
+    toggleNodeCheck(node, event);
+    if (node.kind === "leaf") {
+      focusKeyPane();
+      selectedKeyRaw.value = node.keyRaw;
+      activeSidePanel.value = "detail";
+    }
+    return;
+  }
   if (node.kind === "group") {
     toggleGroup(node.id);
     return;
   }
-
+  focusKeyPane();
   selectedKeyRaw.value = node.keyRaw;
   activeSidePanel.value = "detail";
 }
@@ -700,12 +817,6 @@ function onKeyLoaded(value: RedisValue) {
   } else {
     rebuildTree(false);
   }
-}
-
-function toggleCheck(keyRaw: string, event: Event) {
-  event.stopPropagation();
-  if (selectionBusy.value) return;
-  setKeyChecked(keyRaw, !checkedKeys.value.has(keyRaw));
 }
 
 function requestBatchDelete() {
@@ -909,6 +1020,7 @@ async function openCommandPanel() {
   activeSidePanel.value = "command";
   await nextTick();
   getCommandInput()?.focus();
+  requestCommandDocumentation();
 }
 
 function makeEntry(): CreateKeyEntry {
@@ -1209,6 +1321,7 @@ async function createRedisKey() {
 
 async function executeCommand() {
   const command = commandText.value.trim();
+  dismissCommandCompletions();
   if (!command) {
     // 空命令显示提示但不记入历史
     appendCommandOutput({
@@ -1345,6 +1458,147 @@ function getCommandInput(): HTMLInputElement | null {
   return rootRef.value?.querySelector<HTMLInputElement>("[data-redis-command-input]") ?? null;
 }
 
+function resetCommandDocumentation() {
+  commandDocumentationRequestId++;
+  commandDocumentationConnectionId = null;
+  commandDocumentationLoading.value = false;
+  commandDocumentation.value = [];
+}
+
+function requestCommandDocumentation() {
+  if (commandDocumentationLoading.value || commandDocumentationConnectionId === props.connectionId) return;
+  const requestId = ++commandDocumentationRequestId;
+  const connectionId = props.connectionId;
+  const database = String(commandDb.value);
+  commandDocumentationLoading.value = true;
+  void connectionStore
+    .listRedisCompletionCommandDocs(connectionId, database)
+    .then((docs) => {
+      if (requestId !== commandDocumentationRequestId || connectionId !== props.connectionId) return;
+      commandDocumentation.value = docs;
+      commandDocumentationConnectionId = connectionId;
+      if (commandText.value) void refreshCommandCompletions();
+    })
+    .catch(() => {
+      if (requestId !== commandDocumentationRequestId || connectionId !== props.connectionId) return;
+      // Do not offer guessed commands when the instance's metadata is unavailable.
+      commandDocumentation.value = [];
+      commandDocumentationConnectionId = connectionId;
+    })
+    .finally(() => {
+      if (requestId === commandDocumentationRequestId) commandDocumentationLoading.value = false;
+    });
+}
+
+function dismissCommandCompletions() {
+  commandCompletionRequestId++;
+  commandCompletionItems.value = [];
+  commandCompletionSelectedIndex.value = 0;
+  commandCompletionLoading.value = false;
+}
+
+async function refreshCommandCompletions(options: { force?: boolean } = {}) {
+  const input = getCommandInput();
+  const text = commandText.value;
+  if (!options.force && !text) {
+    dismissCommandCompletions();
+    return;
+  }
+
+  const cursor = input?.selectionStart ?? text.length;
+  requestCommandDocumentation();
+  const completionInput = { commands: commandDocumentation.value };
+  const context = getRedisCompletionContext(text, cursor, completionInput);
+  const requestId = ++commandCompletionRequestId;
+  commandCompletionItems.value = [];
+  commandCompletionSelectedIndex.value = 0;
+
+  let keys: string[] = [];
+  const needsKeys = context.mode === "argument" && takesKeyArgument(context.commandName, completionInput, context.argumentIndex, context.argumentValues);
+  commandCompletionLoading.value = needsKeys;
+  if (needsKeys) {
+    try {
+      keys = await connectionStore.listRedisCompletionKeys(props.connectionId, String(commandDb.value));
+    } catch {
+      keys = [];
+    }
+  }
+
+  if (requestId !== commandCompletionRequestId) return;
+  commandCompletionItems.value = buildRedisCompletionItemsFromContext(context, { keys, ...completionInput }).slice(0, REDIS_COMMAND_COMPLETION_MENU_LIMIT);
+  commandCompletionLoading.value = false;
+}
+
+function onCommandInput() {
+  void refreshCommandCompletions();
+}
+
+function onCommandInputClick() {
+  void refreshCommandCompletions();
+}
+
+function selectCommandCompletion(index: number) {
+  if (index < 0 || index >= commandCompletionItems.value.length) return;
+  commandCompletionSelectedIndex.value = index;
+  void nextTick(() => {
+    const listbox = document.getElementById(commandCompletionListboxId);
+    const option = document.getElementById(`${commandCompletionListboxId}-option-${index}`);
+    if (!listbox || !option) return;
+    const listboxRect = listbox.getBoundingClientRect();
+    const optionRect = option.getBoundingClientRect();
+    if (optionRect.top < listboxRect.top) listbox.scrollTop -= listboxRect.top - optionRect.top;
+    else if (optionRect.bottom > listboxRect.bottom) listbox.scrollTop += optionRect.bottom - listboxRect.bottom;
+  });
+}
+
+function moveCommandCompletionSelection(direction: 1 | -1): boolean {
+  const count = commandCompletionItems.value.length;
+  if (count === 0) return false;
+  const nextIndex = Math.min(Math.max(commandCompletionSelectedIndex.value + direction, 0), count - 1);
+  if (nextIndex !== commandCompletionSelectedIndex.value) selectCommandCompletion(nextIndex);
+  return true;
+}
+
+function commandCompletionInsertion(index = commandCompletionSelectedIndex.value) {
+  const item = commandCompletionItems.value[index];
+  const input = getCommandInput();
+  if (!item || !input) return null;
+
+  const text = commandText.value;
+  const context = getRedisCompletionContext(text, input.selectionStart ?? text.length, { commands: commandDocumentation.value });
+  const from = context.from;
+  const to = input.selectionEnd ?? text.length;
+  const insert = item.apply ?? item.label;
+  const commandHead = context.mode === "command" || context.mode === "subcommand";
+  const appendSpace = (commandHead || item.appendSpace === true) && !/^\s/.test(text.slice(to));
+  return { text, from, to, insert, replacement: `${insert}${appendSpace ? " " : ""}`, appendSpace, commandHead };
+}
+
+function selectedCompletionMatchesInput(): boolean {
+  const completion = commandCompletionInsertion();
+  if (!completion) return false;
+  const current = completion.text.slice(completion.from, completion.to);
+  return completion.commandHead ? current.toUpperCase() === completion.insert.toUpperCase() : current === completion.insert;
+}
+
+function acceptCommandCompletion(index = commandCompletionSelectedIndex.value): boolean {
+  const completion = commandCompletionInsertion(index);
+  if (!completion) return false;
+
+  commandText.value = `${completion.text.slice(0, completion.from)}${completion.replacement}${completion.text.slice(completion.to)}`;
+  dismissCommandCompletions();
+
+  void nextTick(() => {
+    const nextInput = getCommandInput();
+    if (!nextInput) return;
+    const cursor = completion.from + completion.replacement.length;
+    nextInput.focus();
+    nextInput.setSelectionRange(cursor, cursor);
+    if (completion.appendSpace) void refreshCommandCompletions({ force: true });
+  });
+  return true;
+}
+
 function focusSearch(): boolean {
   if (activeSidePanel.value === "detail" && valueViewerRef.value?.focusSearch()) {
     return true;
@@ -1425,6 +1679,38 @@ function onCommandAreaClick() {
 }
 
 function onCommandInputKeydown(event: KeyboardEvent) {
+  if ((event.ctrlKey || event.metaKey) && event.code === "Space") {
+    event.preventDefault();
+    void refreshCommandCompletions({ force: true });
+    return;
+  }
+  if (event.key === "Tab" && !event.shiftKey && acceptCommandCompletion()) {
+    event.preventDefault();
+    return;
+  }
+  if (event.key === "Escape" && commandCompletionOpen.value) {
+    event.preventDefault();
+    dismissCommandCompletions();
+    return;
+  }
+  if (event.key === "ArrowUp" && moveCommandCompletionSelection(-1)) {
+    event.preventDefault();
+    return;
+  }
+  if (event.key === "ArrowDown" && moveCommandCompletionSelection(1)) {
+    event.preventDefault();
+    return;
+  }
+  // Do not execute a partial command before instance metadata can resolve it.
+  if (event.key === "Enter" && commandDocumentationLoading.value) {
+    event.preventDefault();
+    return;
+  }
+  if (event.key === "Enter" && !selectedCompletionMatchesInput() && acceptCommandCompletion()) {
+    event.preventDefault();
+    return;
+  }
+
   // 上下键切换历史命令
   if (event.key === "ArrowUp") {
     event.preventDefault();
@@ -1438,6 +1724,7 @@ function onCommandInputKeydown(event: KeyboardEvent) {
       commandHistoryIndex.value--;
     }
     commandText.value = commandHistory.value[commandHistoryIndex.value].command;
+    dismissCommandCompletions();
   } else if (event.key === "ArrowDown") {
     event.preventDefault();
     if (commandHistoryIndex.value === -1) return;
@@ -1451,9 +1738,10 @@ function onCommandInputKeydown(event: KeyboardEvent) {
       commandHistoryIndex.value = -1;
       commandText.value = "";
     }
+    dismissCommandCompletions();
   } else if (event.key === "Enter") {
     event.preventDefault();
-    executeCommand();
+    void executeCommand();
   }
 }
 
@@ -1499,6 +1787,7 @@ watch(
     // ContentArea remounts this browser for scope changes; keep embedded uses
     // in sync as well so an old scan cannot populate the new scope.
     commandDb.value = db;
+    resetCommandDocumentation();
     resetLoadedKeys();
     try {
       await connectionStore.ensureConnected(connectionId);
@@ -1536,7 +1825,7 @@ defineExpose({ focusSearch, insertCommand, executeCommand: executeAiCommand });
     <Splitpanes class="redis-workspace-splitpanes h-full">
       <!-- Key tree (left) -->
       <Pane :size="36" :min-size="24">
-        <div class="redis-key-pane relative h-full flex flex-col overflow-hidden">
+        <div ref="keyPaneRef" class="redis-key-pane relative h-full flex flex-col overflow-hidden outline-none" tabindex="0" @keydown="onKeyPaneKeydown">
           <!-- Toolbar -->
           <div class="border-b px-2 py-2 shrink-0">
             <div class="redis-key-toolbar-header">
@@ -1553,7 +1842,9 @@ defineExpose({ focusSearch, insertCommand, executeCommand: executeAiCommand });
               </div>
               <span class="redis-key-count truncate text-xs text-muted-foreground" :title="keyCountText">{{ keyCountText }}</span>
               <div class="redis-key-toolbar-actions flex items-center justify-end gap-1">
-                <Button v-if="checkedKeys.size > 0" variant="ghost" size="sm" class="h-6 shrink-0 text-xs text-destructive" :disabled="selectionBusy" @click="requestBatchDelete"> <Trash2 class="w-3 h-3 mr-1" />{{ checkedKeys.size }} </Button>
+                <Button v-if="(flatKeys.length > 0 || hasMore) && !allKeysSelected" variant="ghost" size="sm" class="h-6 shrink-0 px-1.5 text-xs" :disabled="selectionBusy" :title="t('redis.selectAllLoadedTitle')" data-redis-select-all @click="selectAllKeys">{{ t("redis.selectAllLoaded") }}</Button>
+                <Button v-if="checkedKeys.size > 0" variant="ghost" size="sm" class="h-6 shrink-0 px-1.5 text-xs" :disabled="selectionBusy" data-redis-deselect-all @click="clearAllCheckedKeys">{{ t("redis.deselectAll") }}</Button>
+                <Button v-if="checkedKeys.size > 0" variant="ghost" size="sm" class="h-6 shrink-0 text-xs text-destructive" :disabled="selectionBusy" data-redis-batch-delete @click="requestBatchDelete"><Trash2 class="w-3 h-3 mr-1" />{{ checkedKeys.size }}</Button>
                 <Button variant="ghost" size="icon" class="h-6 w-6 shrink-0" :disabled="deletingKeys" @click="loadKeys">
                   <Loader2 v-if="loading" class="h-3 w-3 animate-spin" />
                   <RefreshCw v-else class="h-3 w-3" />
@@ -1609,48 +1900,50 @@ defineExpose({ focusSearch, insertCommand, executeCommand: executeAiCommand });
           </div>
           <RecycleScroller v-else class="redis-key-scroller flex-1" :items="visibleRows" :item-size="30" :buffer="600" :skip-hover="true" key-field="id" @scroll="onRedisKeyScroll">
             <template #default="{ item: row }">
-              <CustomContextMenu :items="redisKeyContextMenuItems(row.node)" v-slot="{ onContextMenu }">
+              <CustomContextMenu :items="redisKeyContextMenuItems(row.node)" v-slot="{ onContextMenu, isOpen }">
                 <div
-                  class="flex items-center gap-2 border-b px-3 text-[13px] cursor-pointer hover:bg-accent/50 group"
-                  :class="{ 'bg-accent': row.node.kind === 'leaf' && selectedKeyRaw === row.node.keyRaw }"
+                  class="flex items-center gap-2 border-b px-3 text-[13px] cursor-pointer group"
+                  :class="[
+                    isOpen || (row.node.kind === 'leaf' && selectedKeyRaw === row.node.keyRaw) ? 'bg-accent text-accent-foreground' : 'hover:bg-accent/40',
+                    row.node.kind === 'leaf' ? (isLeafChecked(row.node.keyRaw) && selectedKeyRaw !== row.node.keyRaw ? 'bg-primary/10' : undefined) : groupSelectedCount(row.node) > 0 ? 'bg-primary/10' : undefined,
+                  ]"
                   :style="{ height: '30px' }"
-                  @click="onRowClick(row.node)"
+                  @click="onRowClick(row.node, $event)"
                   @contextmenu="(event) => onRedisRowContextMenu(event, row.node, onContextMenu)"
                 >
                   <div class="min-w-0 flex flex-1 items-center gap-1 overflow-hidden" :style="{ paddingLeft: `${12 + row.depth * 16}px` }">
                     <template v-if="row.node.kind === 'group'">
                       <input
-                        v-if="isFuzzyHierarchyView"
                         type="checkbox"
                         class="h-3.5 w-3.5 shrink-0 accent-primary cursor-pointer"
-                        :checked="isGroupFullyChecked(row.node)"
+                        :checked="isNodeChecked(row.node)"
                         :indeterminate="isGroupPartiallyChecked(row.node)"
-                        :disabled="selectionBusy"
                         :aria-label="t('redis.selectLoadedGroupKeys', { count: row.node.loadedLeafCount })"
-                        @click.stop
-                        @change="setGroupChecked(row.node, ($event.target as HTMLInputElement).checked)"
+                        :disabled="selectionBusy"
+                        :data-redis-group="row.node.id"
+                        @click="toggleNodeCheck(row.node, $event)"
                       />
                       <component :is="expandedGroupIds.has(row.node.id) ? ChevronDown : ChevronRight" class="w-3 h-3 shrink-0 text-muted-foreground" />
-                      <component :is="expandedGroupIds.has(row.node.id) ? FolderOpen : FolderClosed" class="w-3 h-3 shrink-0 text-amber-500" />
+                      <component :is="expandedGroupIds.has(row.node.id) ? FolderOpen : FolderClosed" class="h-3.5 w-3.5 shrink-0 text-amber-500" />
                       <span class="dbx-editor-font-family truncate">{{ row.node.label }}</span>
                       <span class="text-muted-foreground ml-1" :title="isFuzzyHierarchyView ? t('redis.loadedMatchingKeys', { count: row.node.loadedLeafCount }) : undefined">({{ row.node.loadedLeafCount }})</span>
                     </template>
                     <template v-else>
                       <span class="relative flex h-4 w-4 shrink-0 items-center justify-center">
-                        <KeyRound class="h-3.5 w-3.5 text-muted-foreground/70 transition-opacity group-hover:opacity-0" :class="{ 'opacity-0': checkedKeys.has(row.node.keyRaw) }" />
+                        <KeyRound class="h-3.5 w-3.5 text-muted-foreground/70 transition-opacity group-hover:opacity-0" :class="{ 'opacity-0': isLeafChecked(row.node.keyRaw) }" />
                         <input
                           type="checkbox"
                           class="absolute h-3.5 w-3.5 accent-primary cursor-pointer opacity-0 group-hover:opacity-100"
-                          :class="{ 'opacity-100': checkedKeys.has(row.node.keyRaw) }"
-                          :checked="checkedKeys.has(row.node.keyRaw)"
+                          :class="{ 'opacity-100': isLeafChecked(row.node.keyRaw) }"
                           :disabled="selectionBusy"
-                          @click="toggleCheck(row.node.keyRaw, $event)"
+                          :checked="isLeafChecked(row.node.keyRaw)"
+                          :data-redis-leaf="row.node.keyRaw"
+                          @click="toggleNodeCheck(row.node, $event)"
                         />
                       </span>
                       <span class="dbx-editor-font-family truncate">{{ row.node.label }}</span>
                     </template>
                   </div>
-
                   <div class="flex shrink-0 items-center justify-end gap-1">
                     <Badge v-if="row.node.kind === 'leaf' && row.node.keyType" variant="outline" class="text-xs px-1.5 py-0" :class="typeColor(row.node.keyType)">{{ row.node.keyType }}</Badge>
                     <Button v-if="row.node.kind === 'group' && !isFuzzyHierarchyView" variant="ghost" size="icon" class="h-5 w-5 shrink-0 text-destructive opacity-0 group-hover:opacity-100" :title="t('redis.deleteGroup')" :disabled="selectionBusy" @click="requestGroupDelete(row.node, $event)">
@@ -1737,17 +2030,53 @@ defineExpose({ focusSearch, insertCommand, executeCommand: executeAiCommand });
 
                 <form class="flex shrink-0 items-center gap-2 border-t border-white/10 bg-[#171b21] px-4 py-2" @submit.prevent="executeCommand">
                   <span class="shrink-0 text-[#d7ba7d]">{{ commandPrompt }}</span>
-                  <input
-                    v-model="commandText"
-                    data-redis-command-input
-                    class="dbx-editor-font-family min-w-0 flex-1 border-0 bg-transparent p-0 text-[13px] text-slate-200 caret-[#d7ba7d] outline-none placeholder:text-slate-500"
-                    :class="{ 'opacity-50': commandRunning }"
-                    :readonly="commandRunning"
-                    autocomplete="off"
-                    autocapitalize="off"
-                    spellcheck="false"
-                    @keydown="onCommandInputKeydown"
-                  />
+                  <div class="relative min-w-0 flex-1">
+                    <div v-if="commandCompletionOpen" class="absolute bottom-[calc(100%+0.5rem)] left-0 z-20 w-full overflow-hidden rounded-md border border-white/15 bg-[#20262f] py-1 shadow-xl">
+                      <div v-if="commandDocumentationLoading || commandCompletionLoading" class="flex items-center justify-center px-3 py-2 text-slate-400">
+                        <Loader2 class="h-3.5 w-3.5 animate-spin" />
+                      </div>
+                      <div v-else :id="commandCompletionListboxId" role="listbox" aria-label="Redis command completions" class="max-h-60 overflow-y-auto">
+                        <button
+                          v-for="(item, index) in commandCompletionItems"
+                          :id="`${commandCompletionListboxId}-option-${index}`"
+                          :key="`${item.type}:${item.label}:${index}`"
+                          type="button"
+                          role="option"
+                          class="flex w-full items-center gap-3 px-3 py-1.5 text-left text-xs transition-colors"
+                          :class="commandCompletionSelectedIndex === index ? 'bg-[#2b3440] text-white' : 'text-slate-200 hover:text-white'"
+                          :aria-selected="commandCompletionSelectedIndex === index"
+                          :aria-description="item.info"
+                          @pointerenter="selectCommandCompletion(index)"
+                          @mousedown.prevent
+                          @click.stop="acceptCommandCompletion(index)"
+                        >
+                          <span class="min-w-0 flex-1">
+                            <span class="block truncate font-mono">{{ item.label }}</span>
+                            <span v-if="item.summary" class="block truncate text-[11px] text-slate-400">{{ item.summary }}</span>
+                          </span>
+                          <span v-if="item.detail" class="shrink-0 text-slate-400">{{ item.detail }}</span>
+                        </button>
+                      </div>
+                    </div>
+                    <input
+                      v-model="commandText"
+                      data-redis-command-input
+                      class="dbx-editor-font-family min-w-0 w-full border-0 bg-transparent p-0 text-[13px] text-slate-200 caret-[#d7ba7d] outline-none placeholder:text-slate-500"
+                      :class="{ 'opacity-50': commandRunning }"
+                      :readonly="commandRunning"
+                      autocomplete="off"
+                      autocapitalize="off"
+                      spellcheck="false"
+                      aria-autocomplete="list"
+                      aria-haspopup="listbox"
+                      :aria-controls="commandCompletionOpen ? commandCompletionListboxId : undefined"
+                      :aria-activedescendant="commandCompletionOpen ? commandCompletionActiveDescendant : undefined"
+                      :aria-expanded="commandCompletionOpen"
+                      @click.stop="onCommandInputClick"
+                      @input="onCommandInput"
+                      @keydown="onCommandInputKeydown"
+                    />
+                  </div>
                   <Loader2 v-if="commandRunning" class="h-3.5 w-3.5 shrink-0 animate-spin text-slate-500" />
                 </form>
               </div>

@@ -18,6 +18,7 @@ const props = defineProps<{
   updateDownloaded: boolean;
   isInstallingUpdate: boolean;
   updateReady: boolean;
+  isIgnoringUpdate: boolean;
   activeTaskCount: number;
 }>();
 
@@ -27,6 +28,7 @@ const emit = defineEmits<{
   "cancel-download": [];
   "install-downloaded": [];
   restart: [];
+  "ignore-version": [];
 }>();
 
 const { t } = useI18n();
@@ -35,6 +37,7 @@ const isDesktop = isTauriRuntime();
 const renderedNotes = ref("");
 // Only active file replacement (installation) must trap the dialog.
 const isCloseBlocked = computed(() => props.isInstallingUpdate);
+const canIgnoreVersion = computed(() => props.updateInfo?.update_available === true && !props.updateDownloaded && !props.isDownloadingUpdate && !props.isInstallingUpdate && !props.updateReady);
 
 function handleCancel() {
   handleOpenChange(false);
@@ -136,6 +139,10 @@ watch(
       </div>
       <DialogFooter>
         <Button v-if="!isCloseBlocked" variant="outline" @click="handleCancel">{{ t("dangerDialog.cancel") }}</Button>
+        <Button v-if="canIgnoreVersion" variant="ghost" :disabled="isIgnoringUpdate" @click="emit('ignore-version')">
+          <Loader2 v-if="isIgnoringUpdate" class="h-4 w-4 animate-spin" />
+          {{ t("updates.ignoreVersion") }}
+        </Button>
         <template v-if="updateInfo?.update_available">
           <Button variant="outline" @click="emit('open-latest-release')">{{ t("updates.openRelease") }}</Button>
           <template v-if="canDownloadAndInstallUpdate(updateInfo, isDesktop)">

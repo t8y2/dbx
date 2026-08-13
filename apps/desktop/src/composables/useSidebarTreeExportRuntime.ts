@@ -9,6 +9,7 @@ import * as api from "@/lib/backend/api";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
+import { gaussdbMTypeDisplayName } from "@/lib/table/postgresDataTypeHelp";
 import { joinExportedDdls } from "@/lib/export/ddlExport";
 import { translateBackendError } from "@/i18n/backend-errors";
 import { sidebarStructureExportTargets } from "@/lib/sidebar/sidebarExportRuntime";
@@ -107,8 +108,12 @@ export function useSidebarTreeExportRuntime(options: SidebarTreeExportRuntimeOpt
     return includeTable ? [t("contextMenu.structureDocTable"), ...headers] : headers;
   }
 
-  function columnDocCells(target: TreeNode, column: ColumnInfo, includeTable: boolean): unknown[] {
-    const cells = [column.name, column.data_type, column.is_primary_key ? t("contextMenu.structureDocYes") : t("contextMenu.structureDocNo"), column.is_nullable ? t("contextMenu.structureDocYes") : t("contextMenu.structureDocNo"), column.column_default, column.comment];
+  function columnDocCells(target: TreeNode & { connectionId: string }, column: ColumnInfo, includeTable: boolean): unknown[] {
+    const config = connectionStore.getConfig(target.connectionId);
+    const isGaussdbM = effectiveDatabaseTypeForConnection(config) === "gaussdb" && config?.driver_profile?.toLowerCase() === "gaussdb-m";
+    const sourceDataType = column.data_type;
+    const dataType = isGaussdbM && sourceDataType ? gaussdbMTypeDisplayName(sourceDataType) : sourceDataType;
+    const cells = [column.name, dataType, column.is_primary_key ? t("contextMenu.structureDocYes") : t("contextMenu.structureDocNo"), column.is_nullable ? t("contextMenu.structureDocYes") : t("contextMenu.structureDocNo"), column.column_default, column.comment];
     return includeTable ? [structureTargetName(target), ...cells] : cells;
   }
 

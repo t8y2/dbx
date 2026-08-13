@@ -37,6 +37,11 @@ describe("settings search", () => {
     { id: "desktop", category: "about", titleKey: "hidden", visible: ({ isWeb }) => !isWeb },
   ];
 
+  it("does not index connection or query timeout under editor settings", () => {
+    expect(SETTINGS_SEARCH_DEFINITIONS.map((definition) => definition.id)).not.toContain("editor-global-connect-timeout");
+    expect(SETTINGS_SEARCH_DEFINITIONS.map((definition) => definition.id)).not.toContain("editor-global-query-timeout");
+  });
+
   it("matches translated title, description, and category without changing declared order", () => {
     const entries = resolveSettingsSearchEntries(definitions, { isWeb: false, visibleCategories: allCategories }, translate, categoryLabels);
     expect(searchSettings(entries, "TYPEFACE", "en").map((entry) => entry.id)).toEqual(["font"]);
@@ -132,6 +137,7 @@ describe("settings search", () => {
       { titleKey: "settings.confirmDangerousSqlExecution", category: "editor", targetId: "editor" },
       { titleKey: "settings.continueOnErrorOnBatch", category: "editor", targetId: "editor" },
       { titleKey: "settings.dataGridQuickEntry", category: "data", targetId: "data" },
+      { titleKey: "settings.colorizeDataGridCellTypes", category: "data", targetId: "data" },
       { titleKey: "transfer.dataTransfer", category: "appearance", targetId: "appearance" },
       { titleKey: "toolbar.driverManager", category: "appearance", targetId: "appearance" },
       { titleKey: "toolbar.theme", category: "appearance", targetId: "appearance" },

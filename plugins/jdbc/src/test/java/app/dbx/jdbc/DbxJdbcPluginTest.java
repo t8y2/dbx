@@ -21,6 +21,7 @@ import java.sql.ResultSetMetaData;
 import java.sql.SQLException;
 import java.sql.SQLFeatureNotSupportedException;
 import java.sql.Statement;
+import java.sql.Time;
 import java.sql.Timestamp;
 import java.sql.Types;
 import java.util.ArrayList;
@@ -250,21 +251,199 @@ final class DbxJdbcPluginTest {
 
     @Test
     void readValueFormatsDateColumnsWithoutMidnightTime() throws Exception {
-        Method method = DbxJdbcPlugin.class.getDeclaredMethod("readValue", ResultSet.class, ResultSetMetaData.class, int.class);
+        Method method = DbxJdbcPlugin.class.getDeclaredMethod(
+            "readValue",
+            ResultSet.class,
+            ResultSetMetaData.class,
+            int.class,
+            boolean.class
+        );
         method.setAccessible(true);
-        ResultSet rs = temporalResultSet(Timestamp.valueOf("2026-06-10 00:00:00"), Date.valueOf("2026-06-10"));
+        List<String> calls = new ArrayList<>();
+        ResultSet rs = temporalResultSet(
+            Timestamp.valueOf("2026-06-10 00:00:00"),
+            Date.valueOf("2026-06-10"),
+            calls
+        );
 
-        assertEquals("2026-06-10", method.invoke(null, rs, columnMeta(Types.DATE), 1));
+        assertEquals("2026-06-10", method.invoke(null, rs, columnMeta(Types.DATE), 1, false));
+        assertEquals(List.of("getObject", "getDate"), calls);
+    }
+
+    @Test
+    void readValuePreservesOracleDateTimeComponent() throws Exception {
+        Method method = DbxJdbcPlugin.class.getDeclaredMethod(
+            "readValue",
+            ResultSet.class,
+            ResultSetMetaData.class,
+            int.class,
+            boolean.class
+        );
+        method.setAccessible(true);
+        List<String> calls = new ArrayList<>();
+        Timestamp timestamp = Timestamp.valueOf("2026-06-10 12:34:56");
+        ResultSet rs = temporalResultSet(timestamp, Date.valueOf("2026-06-10"), calls);
+
+        assertEquals("2026-06-10 12:34:56.0", method.invoke(null, rs, columnMeta(Types.DATE), 1, true));
+        assertEquals(List.of("getObject", "getTimestamp"), calls);
+    }
+
+    @Test
+    void readValuePreservesOracleDateAtMidnight() throws Exception {
+        Method method = DbxJdbcPlugin.class.getDeclaredMethod(
+            "readValue",
+            ResultSet.class,
+            ResultSetMetaData.class,
+            int.class,
+            boolean.class
+        );
+        method.setAccessible(true);
+        List<String> calls = new ArrayList<>();
+        Timestamp timestamp = Timestamp.valueOf("2026-06-10 00:00:00");
+        ResultSet rs = temporalResultSet(timestamp, Date.valueOf("2026-06-10"), calls);
+
+        assertEquals("2026-06-10 00:00:00.0", method.invoke(null, rs, columnMeta(Types.DATE), 1, true));
+        assertEquals(List.of("getObject", "getTimestamp"), calls);
     }
 
     @Test
     void readValueKeepsTimestampTimeComponent() throws Exception {
-        Method method = DbxJdbcPlugin.class.getDeclaredMethod("readValue", ResultSet.class, ResultSetMetaData.class, int.class);
+        Method method = DbxJdbcPlugin.class.getDeclaredMethod(
+            "readValue",
+            ResultSet.class,
+            ResultSetMetaData.class,
+            int.class,
+            boolean.class
+        );
         method.setAccessible(true);
+        List<String> calls = new ArrayList<>();
         Timestamp timestamp = Timestamp.valueOf("2026-06-10 12:34:56");
-        ResultSet rs = temporalResultSet(timestamp, Date.valueOf("2026-06-10"));
+        ResultSet rs = temporalResultSet(timestamp, Date.valueOf("2026-06-10"), calls);
 
-        assertEquals("2026-06-10 12:34:56.0", method.invoke(null, rs, columnMeta(Types.TIMESTAMP), 1));
+        assertEquals("2026-06-10 12:34:56.0", method.invoke(null, rs, columnMeta(Types.TIMESTAMP), 1, false));
+        assertEquals(List.of("getObject", "getTimestamp"), calls);
+    }
+
+    @Test
+    void readValueKeepsTimeColumnsUnchanged() throws Exception {
+        Method method = DbxJdbcPlugin.class.getDeclaredMethod(
+            "readValue",
+            ResultSet.class,
+            ResultSetMetaData.class,
+            int.class,
+            boolean.class
+        );
+        method.setAccessible(true);
+        Time time = Time.valueOf("12:34:56");
+        ResultSet rs = (ResultSet) Proxy.newProxyInstance(
+            DbxJdbcPluginTest.class.getClassLoader(),
+            new Class<?>[] { ResultSet.class },
+            (proxy, invokedMethod, args) -> switch (invokedMethod.getName()) {
+                case "getObject", "getTime" -> time;
+                default -> defaultValue(invokedMethod.getReturnType());
+            }
+        );
+
+        assertEquals("12:34:56", method.invoke(null, rs, columnMeta(Types.TIME), 1, true));
+    }
+
+    @Test
+    void readValueKeepsNullTemporalValues() throws Exception {
+        Method method = DbxJdbcPlugin.class.getDeclaredMethod(
+            "readValue",
+            ResultSet.class,
+            ResultSetMetaData.class,
+            int.class,
+            boolean.class
+        );
+        method.setAccessible(true);
+        List<String> calls = new ArrayList<>();
+        ResultSet rs = temporalResultSet(null, null, calls);
+
+        assertEquals(null, method.invoke(null, rs, columnMeta(Types.DATE), 1, true));
+        assertEquals(List.of("getObject"), calls);
+    }
+
+    @Test
+    void executeQueryPreservesOracleDateTimeComponent() throws Exception {
+        List<String> calls = new ArrayList<>();
+        Driver driver = new OracleDateDriver(
+            new Timestamp[] { Timestamp.valueOf("2026-08-12 10:30:03") },
+            calls
+        );
+        DriverManager.registerDriver(driver);
+        String connection = """
+            { "connection_string": "jdbc:oracle:dbx-date:single" }
+            """;
+        try {
+            JsonNode response = request("executeQuery", """
+                {
+                  "connection": %s,
+                  "sql": "SELECT created_at FROM events"
+                }
+                """.formatted(connection));
+
+            assertFalse(response.has("error"), response.toString());
+            assertEquals("2026-08-12 10:30:03.0", response.path("result").path("rows").path(0).path(0).asText());
+            assertEquals(List.of("getTimestamp"), calls);
+        } finally {
+            closeAndDeregister(connection, driver);
+        }
+    }
+
+    @Test
+    void pagedQueryPreservesOracleDateTimeAcrossPages() throws Exception {
+        List<String> calls = new ArrayList<>();
+        Driver driver = new OracleDateDriver(
+            new Timestamp[] {
+                Timestamp.valueOf("2026-08-12 10:30:01"),
+                Timestamp.valueOf("2026-08-12 10:30:02"),
+                Timestamp.valueOf("2026-08-12 10:30:03")
+            },
+            calls
+        );
+        DriverManager.registerDriver(driver);
+        String connection = """
+            { "connection_string": "jdbc:oracle:dbx-date:paged" }
+            """;
+        try {
+            JsonNode first = request("executeQueryPage", """
+                {
+                  "connection": %s,
+                  "sql": "SELECT created_at FROM events",
+                  "pageSize": 1,
+                  "maxRows": 10
+                }
+                """.formatted(connection));
+
+            assertFalse(first.has("error"), first.toString());
+            assertEquals("2026-08-12 10:30:01.0", first.path("result").path("rows").path(0).path(0).asText());
+            String sessionId = first.path("result").path("session_id").asText();
+
+            JsonNode second = request("fetchQueryPage", """
+                {
+                  "connection": %s,
+                  "sessionId": "%s",
+                  "pageSize": 1
+                }
+                """.formatted(connection, sessionId));
+            assertFalse(second.has("error"), second.toString());
+            assertEquals("2026-08-12 10:30:02.0", second.path("result").path("rows").path(0).path(0).asText());
+
+            JsonNode third = request("fetchQueryPage", """
+                {
+                  "connection": %s,
+                  "sessionId": "%s",
+                  "pageSize": 1
+                }
+                """.formatted(connection, second.path("result").path("session_id").asText()));
+            assertFalse(third.has("error"), third.toString());
+            assertEquals("2026-08-12 10:30:03.0", third.path("result").path("rows").path(0).path(0).asText());
+            assertEquals(false, third.path("result").path("has_more").asBoolean());
+            assertEquals(List.of("getTimestamp", "getTimestamp", "getTimestamp"), calls);
+        } finally {
+            closeAndDeregister(connection, driver);
+        }
     }
 
     @Test
@@ -905,6 +1084,11 @@ final class DbxJdbcPluginTest {
               "connection_string": "jdbc:mysql://127.0.0.1:9030/demo"
             }
             """);
+        JsonNode hive = MAPPER.readTree("""
+            {
+              "connection_string": "jdbc:hive2://127.0.0.1:10000/default"
+            }
+            """);
         JsonNode kingbase = MAPPER.readTree("""
             {
               "connection_string": "jdbc:kingbase8://127.0.0.1:54321/demo"
@@ -943,8 +1127,10 @@ final class DbxJdbcPluginTest {
             DbxJdbcPlugin.driverQuirks(cache).statementMaxRowsMode()
         );
         assertEquals(true, DbxJdbcPlugin.driverQuirks(mysql).useCatalogFallbackSql());
+        assertEquals(true, DbxJdbcPlugin.driverQuirks(hive).schemasAsDatabasesFallback());
         assertEquals(true, DbxJdbcPlugin.driverQuirks(kingbase).ignoreCatalogForSchemaMetadata());
         assertEquals(true, DbxJdbcPlugin.driverQuirks(kyuubi).useCatalogFallbackSql());
+        assertEquals(true, DbxJdbcPlugin.driverQuirks(kyuubi).schemasAsDatabasesFallback());
         assertEquals(true, DbxJdbcPlugin.driverQuirks(taos).preferExecuteQueryForResultSetSql());
     }
 
@@ -996,6 +1182,47 @@ final class DbxJdbcPluginTest {
         assertFalse(calls.contains("setMaxRows"), calls.toString());
         assertEquals(true, calls.contains("setFetchSize"));
         assertEquals(true, calls.contains("setQueryTimeout"));
+    }
+
+    @Test
+    void oracleExplainUsesPlanTableOnTheSharedConnectionAndCleansUp() throws Exception {
+        List<String> calls = new ArrayList<>();
+        OracleExplainDriver driver = new OracleExplainDriver(calls);
+        DriverManager.registerDriver(driver);
+        String connection = """
+            {
+              "connection_string": "jdbc:oracle:dbx-explain:test",
+              "username": "system",
+              "query_timeout_secs": 30
+            }
+            """;
+        try {
+            JsonNode response = request("getExplainInfo", """
+                {
+                  "connection": %s,
+                  "sql": "SELECT * FROM DUAL",
+                  "timeoutSecs": 30,
+                  "mode": "explain"
+                }
+                """.formatted(connection));
+
+            assertFalse(response.has("error"), response.toString());
+            assertEquals("Plan hash value: 123\nTABLE ACCESS FULL DUAL", response.path("result").path("plan").asText());
+            assertEquals(1, calls.stream().filter(call -> call.equals("connect")).count());
+            String explainCall = calls.stream()
+                .filter(call -> call.startsWith("prepare:EXPLAIN PLAN SET STATEMENT_ID = 'DBX_"))
+                .findFirst()
+                .orElseThrow();
+            String statementId = explainCall.substring(
+                explainCall.indexOf("'") + 1,
+                explainCall.indexOf("'", explainCall.indexOf("'") + 1)
+            );
+            assertEquals(1, calls.stream().filter(call -> call.startsWith("prepare:SELECT PLAN_TABLE_OUTPUT FROM TABLE(DBMS_XPLAN.DISPLAY")).count());
+            assertEquals(1, calls.stream().filter(call -> call.equals("prepare:DELETE FROM PLAN_TABLE WHERE STATEMENT_ID = ?")).count());
+            assertEquals(2, calls.stream().filter(call -> call.equals("bind:1:" + statementId)).count());
+        } finally {
+            closeAndDeregister(connection, driver);
+        }
     }
 
     @Test
@@ -1164,6 +1391,34 @@ final class DbxJdbcPluginTest {
     }
 
     @Test
+    void listDatabasesFallsBackToSchemasForHiveJdbc() throws Exception {
+        List<String> calls = new ArrayList<>();
+        Driver driver = new HiveMetadataDriver(calls);
+        DriverManager.registerDriver(driver);
+        String connection = """
+            {
+              "connection_string": "jdbc:hive2:dbx-schema-fallback"
+            }
+            """;
+        try {
+            JsonNode response = request("listDatabases", """
+                { "connection": %s }
+                """.formatted(connection));
+
+            assertFalse(response.has("error"), response.toString());
+            assertEquals(2, response.path("result").size());
+            assertEquals("default", response.path("result").path(0).path("name").asText());
+            assertEquals("warehouse", response.path("result").path(1).path("name").asText());
+            assertEquals(List.of("getCatalogs", "getSchemas"), calls);
+        } finally {
+            request("close", """
+                { "connection": %s }
+                """.formatted(connection));
+            DriverManager.deregisterDriver(driver);
+        }
+    }
+
+    @Test
     void listDataTypesUsesJdbcTypeInfo() throws Exception {
         JsonNode response = request("listDataTypes", """
             { "connection": %s }
@@ -1236,6 +1491,136 @@ final class DbxJdbcPluginTest {
         assertFalse(response.has("error"), response.toString());
         assertEquals(1, response.path("result").size());
         assertEquals("PEOPLE_ARCHIVE", response.path("result").path(0).path("name").asText());
+    }
+
+    @Test
+    void listObjectsTreatsNullRoutineMetadataAsUnsupported() throws Exception {
+        RoutineMetadataResponse metadata = requestRoutineObjects(
+            "null-routines",
+            RoutineMetadataBehavior.NULL,
+            RoutineMetadataBehavior.NULL,
+            false
+        );
+
+        assertFalse(metadata.response().has("error"), metadata.response().toString());
+        assertEquals(1, metadata.response().path("result").size());
+        assertEquals("meters", metadata.response().path("result").path(0).path("name").asText());
+        assertEquals(List.of("getTableTypes", "getTables", "getProcedures", "getFunctions"), metadata.calls());
+    }
+
+    @Test
+    void listObjectsKeepsFunctionsWhenProcedureMetadataIsNull() throws Exception {
+        JsonNode response = requestRoutineObjects(
+            "null-procedures",
+            RoutineMetadataBehavior.NULL,
+            RoutineMetadataBehavior.ROWS,
+            false
+        ).response();
+
+        assertFalse(response.has("error"), response.toString());
+        assertEquals(3, response.path("result").size());
+        assertEquals("FUNCTION", response.path("result").path(1).path("object_type").asText());
+        assertEquals("shared_routine", response.path("result").path(1).path("name").asText());
+        assertEquals("unique_function", response.path("result").path(2).path("name").asText());
+    }
+
+    @Test
+    void listObjectsKeepsProceduresWhenFunctionMetadataIsNull() throws Exception {
+        JsonNode response = requestRoutineObjects(
+            "null-functions",
+            RoutineMetadataBehavior.ROWS,
+            RoutineMetadataBehavior.NULL,
+            false
+        ).response();
+
+        assertFalse(response.has("error"), response.toString());
+        assertEquals(2, response.path("result").size());
+        assertEquals("PROCEDURE", response.path("result").path(1).path("object_type").asText());
+        assertEquals("shared_routine", response.path("result").path(1).path("name").asText());
+    }
+
+    @Test
+    void listObjectsPreservesNonNullRoutineMetadataAndDeduplication() throws Exception {
+        JsonNode response = requestRoutineObjects(
+            "routine-rows",
+            RoutineMetadataBehavior.ROWS,
+            RoutineMetadataBehavior.ROWS,
+            false
+        ).response();
+
+        assertFalse(response.has("error"), response.toString());
+        assertEquals(3, response.path("result").size());
+        assertEquals("PROCEDURE", response.path("result").path(1).path("object_type").asText());
+        assertEquals("shared_routine", response.path("result").path(1).path("name").asText());
+        assertEquals("FUNCTION", response.path("result").path(2).path("object_type").asText());
+        assertEquals("unique_function", response.path("result").path(2).path("name").asText());
+    }
+
+    @Test
+    void listObjectsSkipsRoutineMetadataWhenOnlyTablesAreRequested() throws Exception {
+        RoutineMetadataResponse metadata = requestRoutineObjects(
+            "table-only",
+            RoutineMetadataBehavior.NULL,
+            RoutineMetadataBehavior.NULL,
+            false,
+            "TABLE"
+        );
+
+        assertFalse(metadata.response().has("error"), metadata.response().toString());
+        assertEquals(1, metadata.response().path("result").size());
+        assertEquals(List.of("getTableTypes", "getTables"), metadata.calls());
+    }
+
+    @Test
+    void listObjectsOnlyQueriesRequestedRoutineMetadata() throws Exception {
+        RoutineMetadataResponse procedures = requestRoutineObjects(
+            "procedure-only",
+            RoutineMetadataBehavior.ROWS,
+            RoutineMetadataBehavior.SQL_EXCEPTION,
+            false,
+            "PROCEDURE"
+        );
+        assertFalse(procedures.response().has("error"), procedures.response().toString());
+        assertEquals(1, procedures.response().path("result").size());
+        assertEquals(List.of("getTableTypes", "getProcedures"), procedures.calls());
+
+        RoutineMetadataResponse functions = requestRoutineObjects(
+            "function-only",
+            RoutineMetadataBehavior.SQL_EXCEPTION,
+            RoutineMetadataBehavior.ROWS,
+            false,
+            "FUNCTION"
+        );
+        assertFalse(functions.response().has("error"), functions.response().toString());
+        assertEquals(2, functions.response().path("result").size());
+        assertEquals(List.of("getTableTypes", "getFunctions"), functions.calls());
+    }
+
+    @Test
+    void listObjectsKeepsExistingOptionalRoutineSqlExceptionFallback() throws Exception {
+        RoutineMetadataResponse metadata = requestRoutineObjects(
+            "routine-errors",
+            RoutineMetadataBehavior.SQL_EXCEPTION,
+            RoutineMetadataBehavior.SQL_EXCEPTION,
+            false
+        );
+
+        assertFalse(metadata.response().has("error"), metadata.response().toString());
+        assertEquals(1, metadata.response().path("result").size());
+        assertEquals(List.of("getTableTypes", "getTables", "getProcedures", "getFunctions"), metadata.calls());
+    }
+
+    @Test
+    void listObjectsStillPropagatesRequiredTableMetadataFailures() throws Exception {
+        RoutineMetadataResponse metadata = requestRoutineObjects(
+            "table-error",
+            RoutineMetadataBehavior.NULL,
+            RoutineMetadataBehavior.NULL,
+            true
+        );
+
+        assertEquals("required table metadata failed", metadata.response().path("error").path("message").asText());
+        assertEquals(List.of("getTableTypes", "getTables"), metadata.calls());
     }
 
     @Test
@@ -1740,15 +2125,20 @@ final class DbxJdbcPluginTest {
         );
     }
 
-    private static ResultSet temporalResultSet(Object objectValue, Date dateValue) {
+    private static ResultSet temporalResultSet(Object objectValue, Date dateValue, List<String> calls) {
         return (ResultSet) Proxy.newProxyInstance(
             DbxJdbcPluginTest.class.getClassLoader(),
             new Class<?>[] { ResultSet.class },
-            (proxy, method, args) -> switch (method.getName()) {
-                case "getObject", "getTimestamp" -> objectValue;
-                case "getDate" -> dateValue;
-                case "getBytes" -> null;
-                default -> null;
+            (proxy, method, args) -> {
+                if ("getObject".equals(method.getName()) || "getTimestamp".equals(method.getName()) || "getDate".equals(method.getName())) {
+                    calls.add(method.getName());
+                }
+                return switch (method.getName()) {
+                    case "getObject", "getTimestamp" -> objectValue;
+                    case "getDate" -> dateValue;
+                    case "getBytes" -> null;
+                    default -> null;
+                };
             }
         );
     }
@@ -1758,10 +2148,12 @@ final class DbxJdbcPluginTest {
             DbxJdbcPluginTest.class.getClassLoader(),
             new Class<?>[] { ResultSetMetaData.class },
             (proxy, method, args) -> {
-                if ("getColumnType".equals(method.getName())) {
-                    return columnType;
-                }
-                return null;
+                return switch (method.getName()) {
+                    case "getColumnCount" -> 1;
+                    case "getColumnLabel", "getColumnName" -> "CREATED_AT";
+                    case "getColumnType" -> columnType;
+                    default -> defaultValue(method.getReturnType());
+                };
             }
         );
     }
@@ -2281,6 +2673,241 @@ final class DbxJdbcPluginTest {
         }
     }
 
+    private static final class HiveMetadataDriver implements Driver {
+        private final List<String> calls;
+
+        private HiveMetadataDriver(List<String> calls) {
+            this.calls = calls;
+        }
+
+        @Override
+        public Connection connect(String url, Properties info) {
+            return acceptsURL(url) ? hiveMetadataConnection(calls) : null;
+        }
+
+        @Override
+        public boolean acceptsURL(String url) {
+            return url != null && url.startsWith("jdbc:hive2:dbx-schema-fallback");
+        }
+
+        @Override
+        public DriverPropertyInfo[] getPropertyInfo(String url, Properties info) {
+            return new DriverPropertyInfo[0];
+        }
+
+        @Override
+        public int getMajorVersion() {
+            return 1;
+        }
+
+        @Override
+        public int getMinorVersion() {
+            return 0;
+        }
+
+        @Override
+        public boolean jdbcCompliant() {
+            return false;
+        }
+
+        @Override
+        public java.util.logging.Logger getParentLogger() {
+            return java.util.logging.Logger.getGlobal();
+        }
+    }
+
+    private static Connection hiveMetadataConnection(List<String> calls) {
+        DatabaseMetaData metadata = (DatabaseMetaData) Proxy.newProxyInstance(
+            DbxJdbcPluginTest.class.getClassLoader(),
+            new Class<?>[] { DatabaseMetaData.class },
+            (proxy, method, args) -> switch (method.getName()) {
+                case "getCatalogs" -> {
+                    calls.add("getCatalogs");
+                    yield rowsResultSet(new String[] { "TABLE_CAT" }, new Object[0][]);
+                }
+                case "getSchemas" -> {
+                    calls.add("getSchemas");
+                    yield rowsResultSet(
+                        new String[] { "TABLE_SCHEM" },
+                        new Object[][] { { "default" }, { "warehouse" }, { "default" } }
+                    );
+                }
+                default -> defaultValue(method.getReturnType());
+            }
+        );
+        return (Connection) Proxy.newProxyInstance(
+            DbxJdbcPluginTest.class.getClassLoader(),
+            new Class<?>[] { Connection.class },
+            (proxy, method, args) -> switch (method.getName()) {
+                case "getMetaData" -> metadata;
+                case "isClosed" -> false;
+                case "isValid" -> true;
+                case "getCatalog" -> null;
+                case "close" -> null;
+                default -> defaultValue(method.getReturnType());
+            }
+        );
+    }
+
+    private enum RoutineMetadataBehavior {
+        NULL,
+        ROWS,
+        SQL_EXCEPTION
+    }
+
+    private record RoutineMetadataResponse(JsonNode response, List<String> calls) {}
+
+    private static RoutineMetadataResponse requestRoutineObjects(
+        String id,
+        RoutineMetadataBehavior procedures,
+        RoutineMetadataBehavior functions,
+        boolean failTables,
+        String... objectTypes
+    ) throws Exception {
+        List<String> calls = new ArrayList<>();
+        String url = "jdbc:dbx-" + id + ":";
+        Driver driver = new RoutineMetadataDriver(url, procedures, functions, failTables, calls);
+        DriverManager.registerDriver(driver);
+        String connection = """
+            { "connection_string": "%sdemo" }
+            """.formatted(url);
+        String objectTypeParams = objectTypes.length == 0
+            ? ""
+            : ", \"object_types\": [\"" + String.join("\", \"", objectTypes) + "\"]";
+        try {
+            JsonNode response = request("listObjects", """
+                { "connection": %s, "schema": "PUBLIC"%s }
+                """.formatted(connection, objectTypeParams));
+            return new RoutineMetadataResponse(response, calls);
+        } finally {
+            closeAndDeregister(connection, driver);
+        }
+    }
+
+    private static final class RoutineMetadataDriver implements Driver {
+        private final String urlPrefix;
+        private final RoutineMetadataBehavior procedures;
+        private final RoutineMetadataBehavior functions;
+        private final boolean failTables;
+        private final List<String> calls;
+
+        private RoutineMetadataDriver(
+            String urlPrefix,
+            RoutineMetadataBehavior procedures,
+            RoutineMetadataBehavior functions,
+            boolean failTables,
+            List<String> calls
+        ) {
+            this.urlPrefix = urlPrefix;
+            this.procedures = procedures;
+            this.functions = functions;
+            this.failTables = failTables;
+            this.calls = calls;
+        }
+
+        @Override
+        public Connection connect(String url, Properties info) {
+            return acceptsURL(url) ? routineMetadataConnection(procedures, functions, failTables, calls) : null;
+        }
+
+        @Override
+        public boolean acceptsURL(String url) {
+            return url != null && url.startsWith(urlPrefix);
+        }
+
+        @Override
+        public DriverPropertyInfo[] getPropertyInfo(String url, Properties info) {
+            return new DriverPropertyInfo[0];
+        }
+
+        @Override
+        public int getMajorVersion() {
+            return 1;
+        }
+
+        @Override
+        public int getMinorVersion() {
+            return 0;
+        }
+
+        @Override
+        public boolean jdbcCompliant() {
+            return false;
+        }
+
+        @Override
+        public java.util.logging.Logger getParentLogger() {
+            return java.util.logging.Logger.getGlobal();
+        }
+    }
+
+    private static Connection routineMetadataConnection(
+        RoutineMetadataBehavior procedures,
+        RoutineMetadataBehavior functions,
+        boolean failTables,
+        List<String> calls
+    ) {
+        DatabaseMetaData metadata = (DatabaseMetaData) Proxy.newProxyInstance(
+            DbxJdbcPluginTest.class.getClassLoader(),
+            new Class<?>[] { DatabaseMetaData.class },
+            (proxy, method, args) -> switch (method.getName()) {
+                case "getTableTypes" -> {
+                    calls.add("getTableTypes");
+                    yield rowsResultSet(new String[] { "TABLE_TYPE" }, new Object[][] { { "TABLE" } });
+                }
+                case "getTables" -> {
+                    calls.add("getTables");
+                    if (failTables) {
+                        throw new SQLException("required table metadata failed");
+                    }
+                    yield rowsResultSet(
+                        new String[] { "TABLE_NAME", "TABLE_TYPE", "REMARKS" },
+                        new Object[][] { { "meters", "TABLE", "TDengine table" } }
+                    );
+                }
+                case "getProcedures" -> {
+                    calls.add("getProcedures");
+                    yield routineMetadataResult(procedures, true);
+                }
+                case "getFunctions" -> {
+                    calls.add("getFunctions");
+                    yield routineMetadataResult(functions, false);
+                }
+                default -> defaultValue(method.getReturnType());
+            }
+        );
+        return (Connection) Proxy.newProxyInstance(
+            DbxJdbcPluginTest.class.getClassLoader(),
+            new Class<?>[] { Connection.class },
+            (proxy, method, args) -> switch (method.getName()) {
+                case "getMetaData" -> metadata;
+                case "isClosed" -> false;
+                case "isValid" -> true;
+                case "getCatalog", "getSchema", "close", "setCatalog", "setSchema" -> null;
+                default -> defaultValue(method.getReturnType());
+            }
+        );
+    }
+
+    private static ResultSet routineMetadataResult(RoutineMetadataBehavior behavior, boolean procedures)
+        throws SQLException {
+        if (behavior == RoutineMetadataBehavior.NULL) {
+            return null;
+        }
+        if (behavior == RoutineMetadataBehavior.SQL_EXCEPTION) {
+            throw new SQLException("optional routine metadata failed");
+        }
+        return procedures
+            ? rowsResultSet(
+                new String[] { "PROCEDURE_NAME", "REMARKS" },
+                new Object[][] { { "shared_routine", "procedure" } }
+            )
+            : rowsResultSet(
+                new String[] { "FUNCTION_NAME", "REMARKS" },
+                new Object[][] { { "shared_routine", "duplicate" }, { "unique_function", "function" } }
+            );
+    }
+
     private static final class GaussDbMetadataDriver implements Driver {
         private final List<String> calls;
 
@@ -2378,6 +3005,16 @@ final class DbxJdbcPluginTest {
         return value == null ? "<null>" : String.valueOf(value);
     }
 
+    private static void closeAndDeregister(String connection, Driver driver) throws Exception {
+        try {
+            request("close", """
+                { "connection": %s }
+                """.formatted(connection));
+        } finally {
+            DriverManager.deregisterDriver(driver);
+        }
+    }
+
     private static Connection recordingConnection() {
         return (Connection) Proxy.newProxyInstance(
             DbxJdbcPluginTest.class.getClassLoader(),
@@ -2387,6 +3024,169 @@ final class DbxJdbcPluginTest {
                 case "isValid" -> true;
                 case "close" -> null;
                 default -> defaultValue(method.getReturnType());
+            }
+        );
+    }
+
+    private static final class OracleExplainDriver implements Driver {
+        private final List<String> calls;
+
+        private OracleExplainDriver(List<String> calls) {
+            this.calls = calls;
+        }
+
+        @Override
+        public Connection connect(String url, Properties info) {
+            if (!acceptsURL(url)) return null;
+            calls.add("connect");
+            return oracleExplainConnection(calls);
+        }
+
+        @Override
+        public boolean acceptsURL(String url) {
+            return url != null && url.startsWith("jdbc:oracle:dbx-explain:");
+        }
+
+        @Override public DriverPropertyInfo[] getPropertyInfo(String url, Properties info) { return new DriverPropertyInfo[0]; }
+        @Override public int getMajorVersion() { return 1; }
+        @Override public int getMinorVersion() { return 0; }
+        @Override public boolean jdbcCompliant() { return false; }
+        @Override public java.util.logging.Logger getParentLogger() { return java.util.logging.Logger.getGlobal(); }
+    }
+
+    private static Connection oracleExplainConnection(List<String> calls) {
+        return (Connection) Proxy.newProxyInstance(
+            DbxJdbcPluginTest.class.getClassLoader(),
+            new Class<?>[] { Connection.class },
+            (proxy, method, args) -> switch (method.getName()) {
+                case "prepareStatement" -> oracleExplainStatement(String.valueOf(args[0]), calls);
+                case "isClosed" -> false;
+                case "close" -> null;
+                default -> defaultValue(method.getReturnType());
+            }
+        );
+    }
+
+    private static PreparedStatement oracleExplainStatement(String sql, List<String> calls) {
+        calls.add("prepare:" + sql);
+        return (PreparedStatement) Proxy.newProxyInstance(
+            DbxJdbcPluginTest.class.getClassLoader(),
+            new Class<?>[] { PreparedStatement.class },
+            (proxy, method, args) -> switch (method.getName()) {
+                case "setString" -> {
+                    calls.add("bind:" + args[0] + ":" + args[1]);
+                    yield null;
+                }
+                case "setQueryTimeout", "close" -> null;
+                case "execute" -> true;
+                case "executeUpdate" -> 1;
+                case "executeQuery" -> rowsResultSet(
+                    new String[] { "PLAN_TABLE_OUTPUT" },
+                    new Object[][] { { "Plan hash value: 123" }, { "TABLE ACCESS FULL DUAL" } }
+                );
+                default -> defaultValue(method.getReturnType());
+            }
+        );
+    }
+
+    private static final class OracleDateDriver implements Driver {
+        private final Timestamp[] values;
+        private final List<String> calls;
+
+        private OracleDateDriver(Timestamp[] values, List<String> calls) {
+            this.values = values;
+            this.calls = calls;
+        }
+
+        @Override
+        public Connection connect(String url, Properties info) {
+            return acceptsURL(url) ? oracleDateConnection(values, calls) : null;
+        }
+
+        @Override
+        public boolean acceptsURL(String url) {
+            return url != null && url.startsWith("jdbc:oracle:dbx-date:");
+        }
+
+        @Override
+        public DriverPropertyInfo[] getPropertyInfo(String url, Properties info) {
+            return new DriverPropertyInfo[0];
+        }
+
+        @Override
+        public int getMajorVersion() {
+            return 1;
+        }
+
+        @Override
+        public int getMinorVersion() {
+            return 0;
+        }
+
+        @Override
+        public boolean jdbcCompliant() {
+            return false;
+        }
+
+        @Override
+        public java.util.logging.Logger getParentLogger() {
+            return java.util.logging.Logger.getGlobal();
+        }
+    }
+
+    private static Connection oracleDateConnection(Timestamp[] values, List<String> calls) {
+        return (Connection) Proxy.newProxyInstance(
+            DbxJdbcPluginTest.class.getClassLoader(),
+            new Class<?>[] { Connection.class },
+            (proxy, method, args) -> switch (method.getName()) {
+                case "createStatement" -> oracleDateStatement(values, calls);
+                case "isClosed" -> false;
+                case "close", "setCatalog", "setSchema" -> null;
+                default -> defaultValue(method.getReturnType());
+            }
+        );
+    }
+
+    private static Statement oracleDateStatement(Timestamp[] values, List<String> calls) {
+        ResultSet resultSet = oracleDateResultSet(values, calls);
+        return (Statement) Proxy.newProxyInstance(
+            DbxJdbcPluginTest.class.getClassLoader(),
+            new Class<?>[] { Statement.class },
+            (proxy, method, args) -> switch (method.getName()) {
+                case "execute" -> true;
+                case "getResultSet" -> resultSet;
+                case "getUpdateCount" -> -1;
+                case "setMaxRows", "setFetchSize", "setQueryTimeout", "close" -> null;
+                default -> defaultValue(method.getReturnType());
+            }
+        );
+    }
+
+    private static ResultSet oracleDateResultSet(Timestamp[] values, List<String> calls) {
+        return (ResultSet) Proxy.newProxyInstance(
+            DbxJdbcPluginTest.class.getClassLoader(),
+            new Class<?>[] { ResultSet.class },
+            new java.lang.reflect.InvocationHandler() {
+                private int index = -1;
+
+                @Override
+                public Object invoke(Object proxy, Method method, Object[] args) {
+                    return switch (method.getName()) {
+                        case "next" -> ++index < values.length;
+                        case "getMetaData" -> columnMeta(Types.DATE);
+                        case "getObject" -> values[index];
+                        case "getDate" -> {
+                            calls.add("getDate");
+                            yield Date.valueOf(values[index].toLocalDateTime().toLocalDate());
+                        }
+                        case "getTimestamp" -> {
+                            calls.add("getTimestamp");
+                            yield values[index];
+                        }
+                        case "close" -> null;
+                        default -> defaultValue(method.getReturnType());
+                    };
+                }
             }
         );
     }

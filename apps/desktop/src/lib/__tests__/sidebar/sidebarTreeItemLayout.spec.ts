@@ -1,10 +1,17 @@
 import { describe, expect, it } from "vitest";
-import { alignedCommentLeadingWidth, alignedSidebarCommentLabelWidths, canTreeNodeShowExpander, sidebarTreeNaturalContentWidth, trailingCommentAvailableWidth, treeLabelWidthClass, usesFullWidthTreeLabel } from "@/lib/sidebar/sidebarTreeItemLayout";
+import { alignedCommentLeadingWidth, alignedSidebarCommentLabelWidths, canTreeNodeShowExpander, sidebarTreeNaturalContentWidth, sidebarTreeNodeComment, trailingCommentAvailableWidth, treeLabelWidthClass, usesFullWidthTreeLabel } from "@/lib/sidebar/sidebarTreeItemLayout";
+import type { TreeNode } from "@/types/database";
 
 describe("sidebar tree item layout", () => {
   it("keeps a table row constrained when it displays a comment", () => {
     expect(usesFullWidthTreeLabel("table", true)).toBe(true);
     expect(usesFullWidthTreeLabel("table", true, true)).toBe(false);
+  });
+
+  it("shows connection notes only after the user opts in", () => {
+    const connection: TreeNode = { id: "connection-1", label: "MySQL", type: "connection", comment: "Production" };
+    expect(sidebarTreeNodeComment(connection, false)).toBeNull();
+    expect(sidebarTreeNodeComment(connection, true)).toBe("Production");
   });
 
   it("lets a table name consume the available row width before truncating when aligned", () => {

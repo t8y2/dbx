@@ -8,6 +8,11 @@ pub enum MongoCommand {
     Version,
     #[serde(rename = "use")]
     Use { database: String },
+    #[serde(rename = "runCommand")]
+    RunCommand {
+        #[serde(rename = "commandJson")]
+        command_json: String,
+    },
     #[serde(rename = "createUser")]
     CreateUser {
         #[serde(rename = "userJson")]
@@ -84,7 +89,8 @@ impl MongoCommand {
     pub fn is_mutating(&self) -> bool {
         matches!(
             self,
-            Self::CreateUser { .. }
+            Self::RunCommand { .. }
+                | Self::CreateUser { .. }
                 | Self::Insert { .. }
                 | Self::Update { .. }
                 | Self::Delete { .. }
@@ -98,7 +104,7 @@ impl MongoCommand {
     }
 
     pub fn is_dangerous(&self) -> bool {
-        matches!(self, Self::CreateUser { .. } | Self::DropCollection { .. })
+        matches!(self, Self::RunCommand { .. } | Self::CreateUser { .. } | Self::DropCollection { .. })
             || matches!(self, Self::DropIndexes { indexes: None, single: false, .. })
             || matches!(self, Self::Aggregate { pipeline, .. } if aggregate_writes(pipeline))
     }
@@ -355,6 +361,19 @@ pub fn parse(input: &str) -> Result<MongoCommand, String> {
     }
     if let Some(database) = parse_use_database(source) {
         return Ok(MongoCommand::Use { database });
+    }
+    if let Some((args, tail)) = database_method_call(source, "runCommand") {
+        if !tail.is_empty() || args.len() != 1 {
+            return Err("MongoDB runCommand() requires exactly one command document.".to_string());
+        }
+        let command_json = normalized_json(&args[0])?;
+        let command = parse_json_value(&command_json)
+            .and_then(|value| value.as_object().cloned())
+            .ok_or("MongoDB runCommand() requires a command document.")?;
+        if command.is_empty() {
+            return Err("MongoDB runCommand() requires a non-empty command document.".to_string());
+        }
+        return Ok(MongoCommand::RunCommand { command_json });
     }
     if let Some((args, tail)) = database_method_call(source, "createUser") {
         if !tail.is_empty() || !(1..=2).contains(&args.len()) {
@@ -1023,6 +1042,43 @@ mod tests {
     }
 
     #[test]
+    fn parses_run_command_as_a_dangerous_write() {
+        let command = parse(
+            r#"db.runCommand({
+                find: "orders",
+                filter: {_id: ObjectId("507f1f77bcf86cd799439011")},
+                createdAt: ISODate("2025-01-01T00:00:00Z")
+            })"#,
+        )
+        .unwrap();
+        assert_eq!(
+            command,
+            MongoCommand::RunCommand {
+                command_json: r#"{"find":"orders","filter":{"_id":{"$oid":"507f1f77bcf86cd799439011"}},"createdAt":{"$date":"2025-01-01T00:00:00Z"}}"#.to_string(),
+            }
+        );
+        assert!(command.is_mutating());
+        assert!(command.is_dangerous());
+        assert_eq!(validate_safety(&command, false, false, false), Err(MongoSafetyError::WritesDisabled));
+        assert_eq!(validate_safety(&command, true, false, false), Err(MongoSafetyError::Dangerous));
+        assert_eq!(validate_safety(&command, true, true, false), Ok(()));
+    }
+
+    #[test]
+    fn rejects_unsupported_run_command_shapes() {
+        for source in [
+            "db.runCommand()",
+            "db.runCommand({})",
+            "db.runCommand('ping')",
+            "db.runCommand({ping: 1}, {readPreference: 'primary'})",
+            "db.runCommand({ping: 1}).valueOf()",
+            "db.runCommand([1, 2, 3])",
+        ] {
+            assert!(parse(source).unwrap_err().contains("runCommand"), "{source}");
+        }
+    }
+
+    #[test]
     fn treats_effectively_unbounded_write_filters_as_dangerous() {
         for command in [
             r#"db.items.deleteMany({_id: {$exists: true}})"#,
@@ -1171,6 +1227,9 @@ mod tests {
             serde_json::to_value(parse(r#"db.createUser({user: "app", pwd: "secret", roles: []})"#).unwrap()).unwrap();
         assert_eq!(create_user["kind"], "createUser");
         assert_eq!(create_user["userJson"], r#"{"user":"app","pwd":"secret","roles":[]}"#);
+        let run_command = serde_json::to_value(parse("db.runCommand({ping: 1})").unwrap()).unwrap();
+        assert_eq!(run_command["kind"], "runCommand");
+        assert_eq!(run_command["commandJson"], r#"{"ping":1}"#);
     }
 
     #[test]

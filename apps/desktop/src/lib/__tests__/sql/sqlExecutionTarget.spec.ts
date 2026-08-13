@@ -13,6 +13,12 @@ describe("resolveExecutableSql", () => {
 
     expect(resolveExecutableSql(sql, selectedSql, { mode: "current", cursorPos: cursorAfterFirstSemicolon })).toBe("select 2;");
   });
+
+  it("keeps a manually selected proxy directive unchanged", () => {
+    const selectedSql = "/*proxy*/\nSHOW PROXY STATUS";
+
+    expect(resolveExecutableSql("SELECT 1;", selectedSql, { mode: "current", cursorPos: 0 })).toBe(selectedSql);
+  });
 });
 
 describe("executionCandidateForMode", () => {

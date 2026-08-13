@@ -4,7 +4,7 @@ import { useI18n } from "vue-i18n";
 import { useConnectionStore } from "@/stores/connectionStore";
 import * as api from "@/lib/backend/api";
 import type { GenerateResult, TableGenerateConfig } from "@/lib/dataGrid/dataGenerate";
-import { displayGeneratedValue, findGeneratorKey, formatGeneratedValue, generateTableData, defaultGeneratorParams, supportsGeneratedMultiRowValues } from "@/lib/dataGrid/dataGenerate";
+import { displayGeneratedValue, findGeneratorKey, formatGeneratedValue, generateTableData, defaultGeneratorParams, supportsGeneratedMultiRowValues, UniqueValueGenerationError } from "@/lib/dataGrid/dataGenerate";
 import { qualifiedTableName, quoteTableIdentifier } from "@/lib/table/tableSelectSql";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
@@ -61,6 +61,7 @@ interface GeneratedTableResult extends GenerateResult {
   schema: string;
 }
 const generatedResults = ref<GeneratedTableResult[]>([]);
+const generationError = ref("");
 
 const connectionName = computed(() => (props.prefillConnectionId ? store.getConfig(props.prefillConnectionId)?.name : ""));
 
@@ -396,25 +397,31 @@ async function fetchMaxValues(cfg: TableGenerateConfig): Promise<Record<string, 
 
 async function doGenerate() {
   if (!Object.values(checkedTables).some(Boolean)) return;
+  generationError.value = "";
   const results: GeneratedTableResult[] = [];
-  const order = tableOrder.value.length > 0 ? tableOrder.value : Object.keys(configs);
-  for (const key of order) {
-    if (!checkedTables[key]) continue;
-    const cfg = configs[key];
-    let columns = cfg.columns.filter((col) => checkedColumns[colKey(cfg.schema, cfg.tableName, col.columnName)] !== false);
-    if (columns.length === 0) continue;
-    const aiStarts = await fetchMaxValues(cfg);
-    if (Object.keys(aiStarts).length > 0) {
-      columns = columns.map((col) => {
-        const start = aiStarts[col.columnName];
-        if (start !== undefined) {
-          return { ...col, generatorKey: "sequence", generatorParams: { startValue: start, increment: 1 } };
-        }
-        return col;
-      });
+  try {
+    const order = tableOrder.value.length > 0 ? tableOrder.value : Object.keys(configs);
+    for (const key of order) {
+      if (!checkedTables[key]) continue;
+      const cfg = configs[key];
+      let columns = cfg.columns.filter((col) => checkedColumns[colKey(cfg.schema, cfg.tableName, col.columnName)] !== false);
+      if (columns.length === 0) continue;
+      const aiStarts = await fetchMaxValues(cfg);
+      if (Object.keys(aiStarts).length > 0) {
+        columns = columns.map((col) => {
+          const start = aiStarts[col.columnName];
+          if (start !== undefined) {
+            return { ...col, generatorKey: "sequence", generatorParams: { startValue: start, increment: 1 } };
+          }
+          return col;
+        });
+      }
+      const result = generateTableData({ ...cfg, columns }, dbType.value);
+      results.push({ tableName: cfg.tableName, schema: cfg.schema, ...result });
     }
-    const result = generateTableData({ ...cfg, columns }, dbType.value);
-    results.push({ tableName: cfg.tableName, schema: cfg.schema, ...result });
+  } catch (error) {
+    generationError.value = generationErrorMessage(error);
+    return;
   }
   generatedResults.value = results;
   previewTableIndex.value = 0;
@@ -438,8 +445,20 @@ async function regenerate() {
       return col;
     });
   }
-  const result = generateTableData({ ...cfg, columns }, dbType.value);
-  generatedResults.value[previewTableIndex.value] = { tableName: cfg.tableName, schema: cfg.schema, ...result };
+  generationError.value = "";
+  try {
+    const result = generateTableData({ ...cfg, columns }, dbType.value);
+    generatedResults.value[previewTableIndex.value] = { tableName: cfg.tableName, schema: cfg.schema, ...result };
+  } catch (error) {
+    generationError.value = generationErrorMessage(error);
+  }
+}
+
+function generationErrorMessage(error: unknown): string {
+  if (error instanceof UniqueValueGenerationError) {
+    return t("dataGenerate.uniqueExhausted", { table: error.tableName, column: error.columnName, attempts: error.attempts });
+  }
+  return error instanceof Error ? error.message : String(error);
 }
 
 function copyAllSql() {
@@ -498,7 +517,7 @@ function allSqlStatements(): string[] {
 }
 
 async function startInsert() {
-  if (executing.value) return;
+  if (executing.value || generationError.value) return;
   const cid = props.prefillConnectionId;
   const db = props.prefillDatabase;
   if (!cid || !db) return;
@@ -807,6 +826,8 @@ async function onFileSelected(event: Event) {
         <span class="ml-1 font-medium">{{ connectionName || props.prefillDatabase }}</span>
       </div>
 
+      <div v-if="generationError" class="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive" role="alert">{{ generationError }}</div>
+
       <template v-if="currentStep === 'config'">
         <div class="flex gap-4 min-h-[400px]">
           <!-- left: schema tree -->
@@ -1024,7 +1045,7 @@ async function onFileSelected(event: Event) {
           </template>
           <template v-else-if="currentStep === 'preview'">
             <Button variant="outline" size="sm" class="h-7 text-xs" @click="currentStep = 'config'">{{ t("dataGenerate.prevStep") }}</Button>
-            <Button variant="default" size="sm" class="h-7 text-xs" :disabled="executing" @click="startInsert">
+            <Button variant="default" size="sm" class="h-7 text-xs" :disabled="executing || !!generationError" @click="startInsert">
               <Loader2 v-if="executing" class="mr-1 h-3 w-3 animate-spin" />
               {{ t("dataGenerate.startInsert") }}
             </Button>

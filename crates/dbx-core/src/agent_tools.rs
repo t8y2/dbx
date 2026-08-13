@@ -1291,6 +1291,7 @@ for line in sys.stdin:
             jdbc_driver_class: None,
             jdbc_driver_paths: Vec::new(),
             one_time: false,
+            save_password: true,
             read_only: false,
             is_production: false,
             production_databases: vec![],
@@ -1386,6 +1387,7 @@ for line in sys.stdin:
             "db.items.updateMany({tenant: 7}, {$set: {active: false}})",
             "db.items.deleteMany({tenant: 7})",
             "db.items.createIndex({tenant: 1})",
+            "db.runCommand({compact: 'items'})",
             r#"db.items.aggregate([{"$out":"items_backup"}])"#,
         ]
         .into_iter()
@@ -1881,6 +1883,40 @@ for line in sys.stdin:
             assert!(!permissions.allow_writes);
             assert!(!permissions.allow_dangerous);
             assert_eq!(permissions.confirmed_write_sql, None);
+        }
+    }
+
+    #[test]
+    fn confirmed_write_target_binding_rejects_replay_to_another_scope() {
+        let confirmed_sql = Some("DELETE FROM sessions WHERE id = 7".to_string());
+        let matching = verify_confirmed_target(
+            Some(true),
+            confirmed_sql.clone(),
+            Some("connection-1".to_string()),
+            Some("app".to_string()),
+            Some("public".to_string()),
+            "connection-1",
+            "app",
+            Some("public"),
+        );
+        assert_eq!(matching, (Some(true), confirmed_sql.clone()));
+
+        for (connection_id, database, schema) in [
+            ("connection-2", "app", Some("public")),
+            ("connection-1", "audit", Some("public")),
+            ("connection-1", "app", Some("private")),
+        ] {
+            let rejected = verify_confirmed_target(
+                Some(true),
+                confirmed_sql.clone(),
+                Some("connection-1".to_string()),
+                Some("app".to_string()),
+                Some("public".to_string()),
+                connection_id,
+                database,
+                schema,
+            );
+            assert_eq!(rejected, (Some(false), None));
         }
     }
 

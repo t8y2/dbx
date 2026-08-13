@@ -40,6 +40,8 @@ const XLSX_CANCELLABLE_READ_CHUNK_BYTES: usize = 64 * 1024;
 const XLSX_CANCEL_POLL_INTERVAL: Duration = Duration::from_millis(25);
 // INSERT ALL has a practical statement-size limit on Oracle, even when the requested batch is larger.
 const MAX_ORACLE_IMPORT_BATCH_ROWS: usize = 500;
+const SQLITE_APPEND_COMMIT_ROWS: usize = 10_000;
+const SQLITE_APPEND_COMMIT_SQL_BYTES: usize = 8 * 1024 * 1024;
 const POSTGRES_COPY_TARGET_BYTES: usize = 8 * 1024 * 1024;
 const POSTGRES_COPY_MAX_ROWS: usize = 50_000;
 // Bound the additional memory used while converting one source row into owned
@@ -3266,6 +3268,7 @@ fn effective_import_batch_size(db_type: &DatabaseType, requested: usize) -> usiz
         DatabaseType::OceanbaseOracle | DatabaseType::Iris => 1,
         DatabaseType::CloudflareD1 => 100,
         DatabaseType::SqlServer => 1000,
+        DatabaseType::Sqlite => SQLITE_APPEND_COMMIT_ROWS,
         _ => usize::MAX,
     };
     requested.max(1).min(max_rows)
@@ -4146,6 +4149,61 @@ struct ImportBatchExecutionPolicy {
     allow_postgres_copy: bool,
 }
 
+#[derive(Debug)]
+struct SqliteAppendTransaction {
+    statements: Vec<String>,
+    rows: usize,
+    sql_bytes: usize,
+    max_rows: usize,
+    max_sql_bytes: usize,
+}
+
+impl SqliteAppendTransaction {
+    fn new() -> Self {
+        Self::with_limits(SQLITE_APPEND_COMMIT_ROWS, SQLITE_APPEND_COMMIT_SQL_BYTES)
+    }
+
+    fn with_limits(max_rows: usize, max_sql_bytes: usize) -> Self {
+        Self {
+            statements: Vec::new(),
+            rows: 0,
+            sql_bytes: 0,
+            max_rows: max_rows.max(1),
+            max_sql_bytes: max_sql_bytes.max(1),
+        }
+    }
+
+    fn should_flush_before(&self, batch: &ImportSqlBatch) -> bool {
+        !self.statements.is_empty()
+            && (self.rows.saturating_add(batch.row_count) > self.max_rows
+                || self.sql_bytes.saturating_add(batch.sql.len()) > self.max_sql_bytes)
+    }
+
+    fn push(&mut self, batch: ImportSqlBatch) {
+        self.rows = self.rows.saturating_add(batch.row_count);
+        self.sql_bytes = self.sql_bytes.saturating_add(batch.sql.len());
+        self.statements.push(batch.sql);
+    }
+
+    fn is_ready(&self) -> bool {
+        self.rows >= self.max_rows || self.sql_bytes >= self.max_sql_bytes
+    }
+
+    fn take(&mut self) -> (Vec<String>, usize) {
+        let statements = std::mem::take(&mut self.statements);
+        let rows = std::mem::take(&mut self.rows);
+        self.sql_bytes = 0;
+        (statements, rows)
+    }
+}
+
+fn sqlite_append_transaction_for_import(
+    mode: &TableImportMode,
+    db_type: &DatabaseType,
+) -> Option<SqliteAppendTransaction> {
+    (matches!(mode, TableImportMode::Append) && *db_type == DatabaseType::Sqlite).then(SqliteAppendTransaction::new)
+}
+
 fn supports_transactional_import_truncate(db_type: &DatabaseType) -> bool {
     matches!(
         db_type,
@@ -4205,6 +4263,93 @@ async fn execute_import_transaction(
 }
 
 #[allow(clippy::too_many_arguments)]
+async fn flush_sqlite_append_transaction(
+    state: &AppState,
+    pool_key: &str,
+    import_id: &str,
+    is_cancelled: &impl Fn(&str) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + '_>>,
+    connection_id: &str,
+    database: &str,
+    schema: &str,
+    transaction: &mut SqliteAppendTransaction,
+    rows_imported: usize,
+    db_write_ms: &mut u128,
+    statement_count: &mut usize,
+) -> Result<usize, ImportRowsBatchError> {
+    if transaction.statements.is_empty() {
+        return Ok(rows_imported);
+    }
+    ensure_import_write_allowed(import_id, is_cancelled, rows_imported).await?;
+    let (statements, rows) = transaction.take();
+    execute_import_transaction(
+        state,
+        pool_key,
+        connection_id,
+        database,
+        schema,
+        &statements,
+        db_write_ms,
+        statement_count,
+    )
+    .await
+    .map_err(|message| ImportRowsBatchError::with_rows_imported(rows_imported, message))?;
+    Ok(rows_imported.saturating_add(rows))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn finish_sqlite_append_transaction<F>(
+    state: &AppState,
+    pool_key: &str,
+    request: &TableImportRequest,
+    is_cancelled: &impl Fn(&str) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + '_>>,
+    transaction: &mut Option<SqliteAppendTransaction>,
+    rows_imported: usize,
+    total_rows: usize,
+    started_at: Instant,
+    db_write_ms: &mut u128,
+    statement_count: &mut usize,
+    progress_callback: &mut F,
+) -> Result<usize, String>
+where
+    F: FnMut(TableImportProgress),
+{
+    let Some(transaction) = transaction.as_mut() else {
+        return Ok(rows_imported);
+    };
+    match flush_sqlite_append_transaction(
+        state,
+        pool_key,
+        &request.import_id,
+        is_cancelled,
+        &request.connection_id,
+        &request.database,
+        &request.schema,
+        transaction,
+        rows_imported,
+        db_write_ms,
+        statement_count,
+    )
+    .await
+    {
+        Ok(rows) => Ok(rows),
+        Err(error) if error.cancelled => {
+            progress_callback(import_progress(
+                &request.import_id,
+                TableImportStatus::Cancelled,
+                rows_imported,
+                total_rows,
+                started_at,
+                None,
+            ));
+            Err(error.message)
+        }
+        Err(error) => {
+            Err(emit_import_error(progress_callback, request, rows_imported, total_rows, started_at, error.message))
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn execute_import_rows_batch(
     state: &AppState,
     pool_key: &str,
@@ -4224,6 +4369,7 @@ async fn execute_import_rows_batch(
     mode: &TableImportMode,
     pending_truncate: bool,
     postgres_copy_accumulator: &mut Option<PostgresCopyAccumulator>,
+    sqlite_append_transaction: &mut Option<SqliteAppendTransaction>,
     kingbase_oracle_mode: bool,
     date_time_format: Option<&str>,
     hard_sql_bytes: Option<usize>,
@@ -4296,6 +4442,45 @@ async fn execute_import_rows_batch(
         hard_sql_bytes,
     )
     .map_err(|message| ImportRowsBatchError::with_rows_imported(rows_imported, message))?;
+    if let Some(transaction) = sqlite_append_transaction.as_mut() {
+        for batch in batches {
+            ensure_import_write_allowed(import_id, is_cancelled, rows_imported).await?;
+            if transaction.should_flush_before(&batch) {
+                rows_imported = flush_sqlite_append_transaction(
+                    state,
+                    pool_key,
+                    import_id,
+                    is_cancelled,
+                    connection_id,
+                    database,
+                    schema,
+                    transaction,
+                    rows_imported,
+                    db_write_ms,
+                    statement_count,
+                )
+                .await?;
+            }
+            transaction.push(batch);
+            if transaction.is_ready() {
+                rows_imported = flush_sqlite_append_transaction(
+                    state,
+                    pool_key,
+                    import_id,
+                    is_cancelled,
+                    connection_id,
+                    database,
+                    schema,
+                    transaction,
+                    rows_imported,
+                    db_write_ms,
+                    statement_count,
+                )
+                .await?;
+            }
+        }
+        return Ok(rows_imported);
+    }
     if execution_policy.transactional {
         ensure_import_write_allowed(import_id, is_cancelled, rows_imported).await?;
         let mut statements = Vec::with_capacity(batches.len() + usize::from(execution_policy.include_truncate));
@@ -5367,6 +5552,7 @@ where
             &request.table,
             &request.schema,
         );
+        let mut sqlite_append_transaction = sqlite_append_transaction_for_import(&request.mode, db_type);
         let mut pending_truncate =
             matches!(request.mode, TableImportMode::Truncate) && supports_transactional_import_truncate(db_type);
         if matches!(request.mode, TableImportMode::Truncate) && !pending_truncate {
@@ -5427,6 +5613,7 @@ where
                         &request.mode,
                         pending_truncate,
                         &mut postgres_copy_accumulator,
+                        &mut sqlite_append_transaction,
                         kingbase_oracle_mode,
                         request.date_time_format.as_deref(),
                         import_sql_hard_limit,
@@ -5524,6 +5711,20 @@ where
                 ));
             }
         }
+        rows_imported = finish_sqlite_append_transaction(
+            state,
+            pool_key,
+            request,
+            &is_cancelled,
+            &mut sqlite_append_transaction,
+            rows_imported,
+            total_rows,
+            started_at,
+            &mut db_write_ms,
+            &mut statement_count,
+            &mut progress_callback,
+        )
+        .await?;
         let flushed_rows = match flush_pending_postgres_copy(
             state,
             pool_key,
@@ -5830,6 +6031,7 @@ where
             &request.table,
             &request.schema,
         );
+        let mut sqlite_append_transaction = sqlite_append_transaction_for_import(&request.mode, db_type);
         let mut pending_truncate =
             matches!(request.mode, TableImportMode::Truncate) && supports_transactional_import_truncate(db_type);
         if matches!(request.mode, TableImportMode::Truncate) && !pending_truncate {
@@ -5913,6 +6115,7 @@ where
                         &request.mode,
                         pending_truncate,
                         &mut postgres_copy_accumulator,
+                        &mut sqlite_append_transaction,
                         kingbase_oracle_mode,
                         request.date_time_format.as_deref(),
                         import_sql_hard_limit,
@@ -6015,6 +6218,20 @@ where
                 ));
             }
         }
+        rows_imported = finish_sqlite_append_transaction(
+            state,
+            pool_key,
+            request,
+            &is_cancelled,
+            &mut sqlite_append_transaction,
+            rows_imported,
+            0,
+            started_at,
+            &mut db_write_ms,
+            &mut statement_count,
+            &mut progress_callback,
+        )
+        .await?;
         let flushed_rows = match flush_pending_postgres_copy(
             state,
             pool_key,
@@ -6162,6 +6379,7 @@ where
         &request.table,
         &request.schema,
     );
+    let mut sqlite_append_transaction = sqlite_append_transaction_for_import(&request.mode, db_type);
 
     let mut pending_truncate =
         matches!(request.mode, TableImportMode::Truncate) && supports_transactional_import_truncate(db_type);
@@ -6207,6 +6425,7 @@ where
             &request.mode,
             pending_truncate,
             &mut postgres_copy_accumulator,
+            &mut sqlite_append_transaction,
             kingbase_oracle_mode,
             request.date_time_format.as_deref(),
             import_sql_hard_limit,
@@ -6253,6 +6472,22 @@ where
             last_progress_emit = Instant::now();
         }
     }
+
+    rows_imported = finish_sqlite_append_transaction(
+        state,
+        pool_key,
+        request,
+        &is_cancelled,
+        &mut sqlite_append_transaction,
+        rows_imported,
+        total_rows,
+        started_at,
+        &mut db_write_ms,
+        &mut statement_count,
+        &mut progress_callback,
+    )
+    .await?
+    .min(total_rows);
 
     let flushed_rows = flush_pending_postgres_copy(
         state,
@@ -9251,6 +9486,7 @@ mod tests {
         let cancellation_checks = Arc::new(AtomicUsize::new(0));
         let checks_for_import = cancellation_checks.clone();
         let mut postgres_copy_accumulator = None;
+        let mut sqlite_append_transaction = None;
         let mut db_write_ms = 0;
         let mut statement_count = 0;
 
@@ -9276,6 +9512,7 @@ mod tests {
             &TableImportMode::Append,
             false,
             &mut postgres_copy_accumulator,
+            &mut sqlite_append_transaction,
             false,
             None,
             None,
@@ -9421,6 +9658,220 @@ mod tests {
         assert!(!policy.transactional);
         assert!(!policy.include_truncate);
         assert!(!policy.allow_postgres_copy);
+    }
+
+    fn sqlite_append_test_plan() -> CompiledImportPlan {
+        CompiledImportPlan {
+            mapped_source_indexes: vec![0],
+            target_columns: vec!["id".to_string()],
+            column_types: vec![Some("integer".to_string())],
+        }
+    }
+
+    struct SqliteAppendTestContext {
+        _dir: tempfile::TempDir,
+        state: AppState,
+        sqlite: crate::db::sqlite::SqliteHandle,
+        pool_key: String,
+        plan: CompiledImportPlan,
+        postgres_copy_accumulator: Option<PostgresCopyAccumulator>,
+        transaction: Option<SqliteAppendTransaction>,
+        db_write_ms: u128,
+        statement_count: usize,
+    }
+
+    impl SqliteAppendTestContext {
+        async fn new(test_name: &str, max_rows: usize) -> Self {
+            let dir = tempfile::tempdir().unwrap();
+            let storage = Storage::open(&dir.path().join("storage.db")).await.unwrap();
+            let state = AppState::new(storage);
+            let pool_key = format!("{test_name}:session:import");
+            let database_path = dir.path().join("target.db");
+            let sqlite =
+                crate::db::sqlite::connect_path_create_if_missing(database_path.to_str().unwrap()).await.unwrap();
+            crate::db::sqlite::execute_query(&sqlite, "CREATE TABLE items (id INTEGER PRIMARY KEY)").await.unwrap();
+            state.connections.write().await.insert(pool_key.clone(), PoolKind::Sqlite(sqlite.clone()));
+            Self {
+                _dir: dir,
+                state,
+                sqlite,
+                pool_key,
+                plan: sqlite_append_test_plan(),
+                postgres_copy_accumulator: None,
+                transaction: Some(SqliteAppendTransaction::with_limits(max_rows, usize::MAX)),
+                db_write_ms: 0,
+                statement_count: 0,
+            }
+        }
+
+        async fn append(&mut self, ids: &[i64]) -> Result<usize, ImportRowsBatchError> {
+            let rows = ids.iter().map(|id| vec![serde_json::json!(id)]).collect::<Vec<_>>();
+            execute_import_rows_batch(
+                &self.state,
+                &self.pool_key,
+                &self.pool_key,
+                &|_| Box::pin(async { false }),
+                &self.pool_key,
+                "",
+                &rows,
+                Some(&self.plan),
+                None,
+                &[],
+                &[],
+                &[],
+                "items",
+                "",
+                &DatabaseType::Sqlite,
+                &TableImportMode::Append,
+                false,
+                &mut self.postgres_copy_accumulator,
+                &mut self.transaction,
+                false,
+                None,
+                None,
+                &mut self.db_write_ms,
+                &mut self.statement_count,
+            )
+            .await
+        }
+
+        async fn ids(&self) -> Vec<Vec<serde_json::Value>> {
+            crate::db::sqlite::execute_query(&self.sqlite, "SELECT id FROM items ORDER BY id").await.unwrap().rows
+        }
+    }
+
+    #[tokio::test]
+    async fn sqlite_append_commits_only_bounded_row_windows() {
+        let mut context = SqliteAppendTestContext::new("sqlite-append-window", 3).await;
+        let first = context.append(&[1, 2]).await.unwrap();
+        assert_eq!(first, 0);
+        assert!(context.ids().await.is_empty());
+
+        let second = context.append(&[3]).await.unwrap();
+        assert_eq!(second, 3);
+        assert_eq!(context.ids().await.len(), 3);
+        assert_eq!(context.statement_count, 2);
+    }
+
+    #[tokio::test]
+    async fn sqlite_append_failure_keeps_prior_window_and_rolls_back_current_window() {
+        let mut context = SqliteAppendTestContext::new("sqlite-append-failure", 2).await;
+        let committed = context.append(&[1, 2]).await.unwrap();
+        assert_eq!(committed, 2);
+        context.transaction.as_mut().unwrap().max_rows = 4;
+
+        let pending = context.append(&[3, 4]).await.unwrap();
+        assert_eq!(pending, 0);
+        let error = context.append(&[5, 1]).await.unwrap_err();
+        assert_eq!(error.rows_imported, 0);
+        assert_eq!(context.ids().await, vec![vec![serde_json::json!(1)], vec![serde_json::json!(2)]]);
+    }
+
+    #[tokio::test]
+    async fn sqlite_append_cancellation_drops_the_uncommitted_window() {
+        let mut context = SqliteAppendTestContext::new("sqlite-append-cancel", 10).await;
+        context.append(&[1, 2]).await.unwrap();
+
+        let error = flush_sqlite_append_transaction(
+            &context.state,
+            &context.pool_key,
+            "sqlite-append-cancel",
+            &|_| Box::pin(async { true }),
+            "sqlite-append-cancel",
+            "",
+            "",
+            context.transaction.as_mut().unwrap(),
+            0,
+            &mut context.db_write_ms,
+            &mut context.statement_count,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.cancelled);
+        assert_eq!(error.rows_imported, 0);
+        assert!(context.ids().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn delimited_sqlite_append_import_flushes_the_final_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(&dir.path().join("storage.db")).await.unwrap();
+        let state = AppState::new(storage);
+        let connection_id = "sqlite-delimited-append";
+        let pool_key = format!("{connection_id}:session:import");
+        let database_path = dir.path().join("target.db");
+        let sqlite = crate::db::sqlite::connect_path_create_if_missing(database_path.to_str().unwrap()).await.unwrap();
+        crate::db::sqlite::execute_query(&sqlite, "CREATE TABLE items (id INTEGER, name TEXT)").await.unwrap();
+        state.connections.write().await.insert(pool_key.clone(), PoolKind::Sqlite(sqlite.clone()));
+        let config: ConnectionConfig = serde_json::from_value(serde_json::json!({
+            "id": connection_id,
+            "name": "SQLite delimited append test",
+            "db_type": "sqlite",
+            "host": "",
+            "port": 0,
+            "username": "",
+            "password": "",
+            "database": database_path.to_string_lossy()
+        }))
+        .unwrap();
+        state.configs.write().await.insert(connection_id.to_string(), config);
+        let data_path = dir.path().join("rows.txt");
+        std::fs::write(&data_path, b"id%name\n1%Ada\n2%Grace\n3%Linus\n").unwrap();
+        let request = TableImportRequest {
+            import_id: "sqlite-delimited-append".to_string(),
+            connection_id: connection_id.to_string(),
+            database: String::new(),
+            schema: String::new(),
+            table: "items".to_string(),
+            file_path: data_path.to_string_lossy().to_string(),
+            source_ref: None,
+            source_format: Some(TableImportSourceFormat::Delimited),
+            parse_options: TableImportParseOptions {
+                delimiter: Some("%".to_string()),
+                ..TableImportParseOptions::default()
+            },
+            mappings: vec![
+                TableImportColumnMapping {
+                    source_column: "id".to_string(),
+                    target_column: "id".to_string(),
+                    target_data_type: None,
+                },
+                TableImportColumnMapping {
+                    source_column: "name".to_string(),
+                    target_column: "name".to_string(),
+                    target_data_type: None,
+                },
+            ],
+            mode: TableImportMode::Append,
+            create_table: false,
+            batch_size: 2,
+            date_time_format: None,
+            prepared_source: None,
+            retain_source: false,
+        };
+
+        let summary = import_table_file_core(
+            &state,
+            &request,
+            &DatabaseType::Sqlite,
+            &pool_key,
+            |_| Box::pin(async { false }),
+            |_| {},
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(summary.rows_imported, 3);
+        let rows =
+            crate::db::sqlite::execute_query(&sqlite, "SELECT id, name FROM items ORDER BY id").await.unwrap().rows;
+        assert_eq!(
+            rows,
+            vec![
+                vec![serde_json::json!(1), serde_json::json!("Ada")],
+                vec![serde_json::json!(2), serde_json::json!("Grace")],
+                vec![serde_json::json!(3), serde_json::json!("Linus")]
+            ]
+        );
     }
 
     #[tokio::test]

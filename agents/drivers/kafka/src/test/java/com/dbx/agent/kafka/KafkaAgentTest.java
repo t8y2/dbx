@@ -55,6 +55,40 @@ class KafkaAgentTest {
     Path tempDir;
 
     @Test
+    void explicitConsumerGroupOffsetsAcceptOneBoundedPartitionOffset() {
+        JsonObject params = JsonParser.parseString("""
+            {"offsets":[{"partition":1,"offset":42}]}
+            """).getAsJsonObject();
+
+        assertEquals(
+            Map.of(new TopicPartition("events", 1), new org.apache.kafka.clients.consumer.OffsetAndMetadata(42L)),
+            KafkaAgent.explicitConsumerGroupOffsets(params, "events")
+        );
+    }
+
+    @Test
+    void explicitConsumerGroupOffsetsRejectMalformedOrNegativeValues() {
+        for (String json : List.of(
+            "{\"offsets\":[{\"partition\":-1,\"offset\":42}]}",
+            "{\"offsets\":[{\"partition\":1,\"offset\":-1}]}",
+            "{\"offsets\":[{\"partition\":1.5,\"offset\":42}]}",
+            "{\"offsets\":[{\"partition\":1,\"offset\":42.5}]}",
+            "{\"offsets\":[{\"partition\":\"1\",\"offset\":42}]}",
+            "{\"offsets\":[{\"partition\":1,\"offset\":\"42\"}]}",
+            "{\"offsets\":[{\"partition\":1}]}",
+            "{\"offsets\":[42]}",
+            "{\"offsets\":[{\"partition\":2147483648,\"offset\":42}]}",
+            "{\"offsets\":[{\"partition\":1,\"offset\":9223372036854775808}]}",
+            "{\"offsets\":[{\"partition\":1,\"offset\":42},{\"partition\":1,\"offset\":43}]}",
+            "{\"offsets\":[]}",
+            "{\"offsets\":{}}"
+        )) {
+            JsonObject params = JsonParser.parseString(json).getAsJsonObject();
+            assertThrows(IllegalArgumentException.class, () -> KafkaAgent.explicitConsumerGroupOffsets(params, "events"), json);
+        }
+    }
+
+    @Test
     void topicListingFallsBackWhenDescriptionsAreUnsupported() throws Exception {
         Object result = KafkaAgent.topicListResult(
             Arrays.asList(

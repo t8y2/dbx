@@ -137,6 +137,7 @@ type server struct {
 	usePgViewDefinition        bool
 	usePgFunctionDefinition    bool
 	catalogIdentityUnsupported bool
+	catalogOIDUnsupported      bool
 	infoColumnTypeUnsupported  bool
 	infoUdtNameUnsupported     bool
 	currentSchema              string
@@ -464,6 +465,7 @@ func (s *server) connect(cp connectParams) error {
 	s.usePgViewDefinition = false
 	s.usePgFunctionDefinition = false
 	s.catalogIdentityUnsupported = false
+	s.catalogOIDUnsupported = false
 	s.infoColumnTypeUnsupported = false
 	s.infoUdtNameUnsupported = false
 	return nil
@@ -530,6 +532,7 @@ func (s *server) disconnect() error {
 	s.usePgViewDefinition = false
 	s.usePgFunctionDefinition = false
 	s.catalogIdentityUnsupported = false
+	s.catalogOIDUnsupported = false
 	s.infoColumnTypeUnsupported = false
 	s.infoUdtNameUnsupported = false
 	s.currentSchema = ""

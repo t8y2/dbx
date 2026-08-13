@@ -21,6 +21,9 @@ pub struct ExecuteQueryRequest {
     pub max_rows: Option<usize>,
     pub fetch_size: Option<usize>,
     pub page_size: Option<usize>,
+    pub max_result_bytes: Option<usize>,
+    #[serde(default)]
+    pub result_key_columns: Vec<String>,
     pub result_session_id: Option<String>,
     pub client_session_id: Option<String>,
     pub timeout_secs: Option<u64>,
@@ -63,6 +66,7 @@ pub struct ExecuteBatchRequest {
     pub schema: Option<String>,
     pub catalog: Option<String>,
     pub timeout_secs: Option<u64>,
+    pub destructive_confirmed: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -357,6 +361,8 @@ pub async fn execute_query(
             max_rows: req.max_rows,
             fetch_size: req.fetch_size,
             page_size: req.page_size,
+            max_result_bytes: req.max_result_bytes,
+            result_key_columns: req.result_key_columns,
             catalog: req.catalog,
             result_session_id: req.result_session_id,
             client_session_id: req.client_session_id,
@@ -403,6 +409,8 @@ pub async fn execute_multi(
             max_rows: req.max_rows,
             fetch_size: req.fetch_size,
             page_size: req.page_size,
+            max_result_bytes: req.max_result_bytes,
+            result_key_columns: req.result_key_columns,
             catalog: req.catalog,
             result_session_id: req.result_session_id,
             client_session_id: req.client_session_id,
@@ -553,6 +561,7 @@ pub async fn execute_script_with_2pc(
         &req.database,
         &req.statements,
         req.schema.as_deref(),
+        req.destructive_confirmed.unwrap_or(false),
     )
     .await;
     Ok(Json(result))
@@ -955,6 +964,7 @@ mod tests {
             schema: None,
             catalog: None,
             timeout_secs: None,
+            destructive_confirmed: None,
         };
 
         let result = execute_script_with_2pc(AxumState(state), Json(req))
@@ -979,6 +989,7 @@ mod tests {
             schema: None,
             catalog: None,
             timeout_secs: None,
+            destructive_confirmed: None,
         };
 
         let result = execute_script_with_2pc(AxumState(state), Json(req)).await.expect("empty deploy should succeed");
@@ -1000,6 +1011,7 @@ mod tests {
             schema: None,
             catalog: None,
             timeout_secs: None,
+            destructive_confirmed: None,
         };
 
         let result = execute_script_with_2pc(AxumState(state), Json(req))
@@ -1011,6 +1023,28 @@ mod tests {
         assert!(log.error.as_ref().is_some_and(|e| !e.is_empty()));
         // Missing connection cannot have applied statements.
         assert_eq!(log.executed_count, 0);
+    }
+
+    #[tokio::test]
+    async fn execute_script_with_2pc_blocks_unconfirmed_destructive_sql() {
+        let (state, _dir) = test_web_state().await;
+        let req = ExecuteBatchRequest {
+            connection_id: "missing-conn".to_string(),
+            database: "testdb".to_string(),
+            statements: vec!["DROP INDEX idx_old ON users".to_string()],
+            schema: None,
+            catalog: None,
+            timeout_secs: None,
+            destructive_confirmed: None,
+        };
+
+        let result = execute_script_with_2pc(AxumState(state), Json(req))
+            .await
+            .expect("destructive deploy should return a structured block result");
+        let log = result.0;
+        assert_eq!(log.status, "rolled_back");
+        assert_eq!(log.executed_count, 0);
+        assert_eq!(log.metadata["blocked"], "destructive_confirmation_required");
     }
 
     #[test]
@@ -1031,6 +1065,7 @@ mod tests {
                 elasticsearch_raw_body: None,
                 messages: Vec::new(),
             },
+            large_value_cells: Vec::new(),
             execution_error: true,
             statement_index: Some(1),
             error: Some(dbx_core::backend_error::BackendError::from_sql_detail(

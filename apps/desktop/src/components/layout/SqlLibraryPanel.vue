@@ -19,7 +19,10 @@ import { focusSidebarRenameInput } from "@/lib/sidebar/sidebarRenameFocus";
 import { savedSqlFolderBranchFileCount } from "@/lib/savedSql/savedSqlFolderCounts";
 import { collectSavedSqlDirectoryImportFiles } from "@/lib/savedSql/savedSqlDirectoryImport";
 import { ensureSqlExtension, stripSqlExtension } from "@/lib/savedSql/savedSqlFileName";
+import { savedSqlImportTarget } from "@/lib/savedSql/savedSqlImportTarget";
 import { savedSqlExecutionTargetFromTab, type SavedSqlOpenTargetMode } from "@/lib/savedSql/savedSqlExecutionTarget";
+import { orderedListRangeAnchorIndex, orderedListSelectionIntent } from "@/lib/selection/orderedListSelection";
+import { resolveExternalSqlFileTarget, unassociatedExternalSqlFileTarget } from "@/lib/sql/externalSqlFileTarget";
 import type { SavedSqlFile, SavedSqlFolder } from "@/types/database";
 
 const { t } = useI18n();
@@ -63,14 +66,6 @@ function folderPath(folder: SavedSqlFolder) {
     current = current.parentFolderId ? folderById.get(current.parentFolderId) : undefined;
   }
   return parts.join(" / ");
-}
-
-function activeImportConnectionId() {
-  return connectionStore.activeConnectionId || connectionStore.connections[0]?.id || "";
-}
-
-function importConnectionIdForFolder(folder?: SavedSqlFolder) {
-  return folder?.connectionId || activeImportConnectionId();
 }
 
 function sanitizeFileSystemSegment(name: string) {
@@ -223,12 +218,6 @@ async function importDirectoryIntoLibrary(targetFolder?: SavedSqlFolder) {
     return;
   }
 
-  const connectionId = importConnectionIdForFolder(targetFolder);
-  if (!connectionId) {
-    toast(t("sqlLibrary.noConnection"), 4000);
-    return;
-  }
-
   try {
     const { open } = await import("@tauri-apps/plugin-dialog");
     const selected = await open({
@@ -247,23 +236,27 @@ async function importDirectoryIntoLibrary(targetFolder?: SavedSqlFolder) {
 
     const folderCache = new Map<string, SavedSqlFolder>();
     const takenNamesByFolder = new Map<string, Set<string>>();
+    const folderConnectionId = targetFolder?.connectionId ?? "";
 
     for (const file of importFiles) {
-      const folderId = await resolveImportedFolder(connectionId, targetFolder?.id, file.folderNames, folderCache);
+      const sourceTarget = resolveExternalSqlFileTarget(file.path, (connectionId) => !!connectionStore.getConfig(connectionId), unassociatedExternalSqlFileTarget());
+      const importTarget = savedSqlImportTarget(sourceTarget, targetFolder);
+      const folderId = await resolveImportedFolder(folderConnectionId, targetFolder?.id, file.folderNames, folderCache);
       const folderKey = folderId || "";
       let takenNames = takenNamesByFolder.get(folderKey);
       if (!takenNames) {
-        takenNames = new Set(savedSqlStore.listFiles(connectionId, folderId).map((savedFile) => savedFile.name));
+        takenNames = new Set((folderId ? savedSqlStore.filesInFolder(folderId) : savedSqlStore.filesWithoutFolder()).map((savedFile) => savedFile.name));
         takenNamesByFolder.set(folderKey, takenNames);
       }
       const path = file.path;
       const content = await api.readExternalSqlFile(path);
       const displayName = uniqueImportedName(file.name, takenNames);
       await savedSqlStore.saveFile({
-        connectionId,
+        connectionId: importTarget.connectionId,
         folderId,
         name: displayName,
-        database: "",
+        database: importTarget.database,
+        catalog: importTarget.catalog,
         sql: content,
       });
     }
@@ -496,6 +489,40 @@ function clearSelection() {
   lastClickedItemIndex.value = null;
 }
 
+function clearPanelSelection() {
+  clearSelection();
+  activeItemId.value = null;
+  activeItemType.value = null;
+}
+
+function rangeAnchorIndex() {
+  const activeItem = activeItemId.value && activeItemType.value ? { id: activeItemId.value, type: activeItemType.value } : null;
+  return orderedListRangeAnchorIndex(allSelectableItems.value, lastClickedItemIndex.value, activeItem);
+}
+
+function selectRangeTo(currentIndex: number) {
+  const anchorIndex = rangeAnchorIndex();
+  if (anchorIndex === null) {
+    const current = allSelectableItems.value[currentIndex];
+    selectedFileIds.value = new Set(current?.type === "file" ? [current.id] : []);
+    selectedFolderIds.value = new Set(current?.type === "folder" ? [current.id] : []);
+    lastClickedItemIndex.value = currentIndex;
+    return;
+  }
+
+  const start = Math.min(anchorIndex, currentIndex);
+  const end = Math.max(anchorIndex, currentIndex);
+  const nextFiles = new Set(selectedFileIds.value);
+  const nextFolders = new Set(selectedFolderIds.value);
+  for (let i = start; i <= end; i++) {
+    const item = allSelectableItems.value[i];
+    if (item?.type === "file") nextFiles.add(item.id);
+    else if (item?.type === "folder") nextFolders.add(item.id);
+  }
+  selectedFileIds.value = nextFiles;
+  selectedFolderIds.value = nextFolders;
+}
+
 function setActiveItem(id: string, type: "file" | "folder") {
   activeItemId.value = id;
   activeItemType.value = type;
@@ -517,22 +544,21 @@ function isFolderActive(folderId: string): boolean {
   return activeItemType.value === "folder" && activeItemId.value === folderId;
 }
 
-function selectionRowClass(selected: boolean, active: boolean): string {
-  if (selected) return "bg-primary/10 text-foreground";
-  if (active) return "bg-primary/12 text-foreground";
-  return "hover:bg-accent";
+function selectionRowClass(selected: boolean, active: boolean, contextOpen: boolean): string {
+  if (selected || active || contextOpen) return "bg-accent text-accent-foreground";
+  return "hover:bg-accent/40";
 }
 
 function fileRowClass(fileId: string): string {
-  return selectionRowClass(isFileSelected(fileId), isFileActive(fileId));
+  return selectionRowClass(isFileSelected(fileId), isFileActive(fileId), isContextFile(fileId));
 }
 
 function folderRowClass(folderId: string): string {
-  return selectionRowClass(isFolderSelected(folderId), isFolderActive(folderId));
+  return selectionRowClass(isFolderSelected(folderId), isFolderActive(folderId), isContextFolder(folderId));
 }
 
 function fileMetaClass(fileId: string): string {
-  return isFileSelected(fileId) || isFileActive(fileId) ? "text-foreground/70" : "text-muted-foreground";
+  return isFileSelected(fileId) || isFileActive(fileId) || isContextFile(fileId) ? "text-accent-foreground" : "text-muted-foreground";
 }
 
 function isFileDirty(file: SavedSqlFile): boolean {
@@ -672,21 +698,25 @@ async function openFile(file: SavedSqlFile, targetMode?: SavedSqlOpenTargetMode)
   const loadedFile = await savedSqlStore.ensureFileContent(file.id);
   if (!loadedFile) return;
   const tabId = queryStore.openSavedSql(loadedFile, { targetMode });
-  connectionStore.activeConnectionId = queryStore.tabs.find((tab) => tab.id === tabId)?.connectionId ?? loadedFile.connectionId;
+  const openedConnectionId = queryStore.tabs.find((tab) => tab.id === tabId)?.connectionId ?? loadedFile.connectionId;
+  if (openedConnectionId) connectionStore.activeConnectionId = openedConnectionId;
   void savedSqlStore.recordFileUsage(loadedFile.id);
 }
 
 function handleFileClick(file: SavedSqlFile, event: MouseEvent) {
   if (suppressNextRowClick.value) return;
 
-  const isMeta = event.metaKey || event.ctrlKey;
-  const isShift = event.shiftKey;
+  const selectionIntent = orderedListSelectionIntent(event);
 
   // Find current file index in unified list
   const currentIndex = allSelectableItems.value.findIndex((item) => item.type === "file" && item.id === file.id);
   if (currentIndex < 0) return;
 
-  if (isMeta) {
+  if (selectionIntent === "range") {
+    event.preventDefault();
+    event.stopPropagation();
+    selectRangeTo(currentIndex);
+  } else if (selectionIntent === "toggle") {
     // Toggle selection
     event.preventDefault();
     event.stopPropagation();
@@ -698,55 +728,29 @@ function handleFileClick(file: SavedSqlFile, event: MouseEvent) {
     }
     selectedFileIds.value = next;
     lastClickedItemIndex.value = currentIndex;
-  } else if (isShift) {
-    // Range selection - additive mode (add to existing selection)
-    event.preventDefault();
-    event.stopPropagation();
-
-    const startIndex = lastClickedItemIndex.value ?? 0;
-    const start = Math.min(startIndex, currentIndex);
-    const end = Math.max(startIndex, currentIndex);
-
-    // Add to existing selection (additive mode)
-    const nextFiles = new Set(selectedFileIds.value);
-    const nextFolders = new Set(selectedFolderIds.value);
-    for (let i = start; i <= end; i++) {
-      const item = allSelectableItems.value[i];
-      if (item) {
-        if (item.type === "file") {
-          nextFiles.add(item.id);
-        } else {
-          nextFolders.add(item.id);
-        }
-      }
-    }
-    selectedFileIds.value = nextFiles;
-    selectedFolderIds.value = nextFolders;
-    lastClickedItemIndex.value = currentIndex;
   } else {
-    // Normal click - open file, clear selection but keep anchor, and set active
-    const hadSelection = hasSelection.value;
+    // A plain click exits batch selection and makes this the single active item.
     clearSelection();
+    lastClickedItemIndex.value = currentIndex;
     setActiveItem(file.id, "file");
     openFile(file);
-    // Set anchor for future shift-click even when not selecting
-    if (!hadSelection) {
-      lastClickedItemIndex.value = currentIndex;
-    }
   }
 }
 
 function handleFolderClick(folder: SavedSqlFolder, event: MouseEvent) {
   if (suppressNextRowClick.value) return;
 
-  const isMeta = event.metaKey || event.ctrlKey;
-  const isShift = event.shiftKey;
+  const selectionIntent = orderedListSelectionIntent(event);
 
   // Find current folder index in unified list
   const currentIndex = allSelectableItems.value.findIndex((item) => item.type === "folder" && item.id === folder.id);
   if (currentIndex < 0) return;
 
-  if (isMeta) {
+  if (selectionIntent === "range") {
+    event.preventDefault();
+    event.stopPropagation();
+    selectRangeTo(currentIndex);
+  } else if (selectionIntent === "toggle") {
     // Toggle selection
     event.preventDefault();
     event.stopPropagation();
@@ -758,45 +762,24 @@ function handleFolderClick(folder: SavedSqlFolder, event: MouseEvent) {
     }
     selectedFolderIds.value = next;
     lastClickedItemIndex.value = currentIndex;
-  } else if (isShift) {
-    // Range selection - additive mode (add to existing selection)
-    event.preventDefault();
-    event.stopPropagation();
-
-    const startIndex = lastClickedItemIndex.value ?? 0;
-    const start = Math.min(startIndex, currentIndex);
-    const end = Math.max(startIndex, currentIndex);
-
-    // Add to existing selection (additive mode)
-    const nextFiles = new Set(selectedFileIds.value);
-    const nextFolders = new Set(selectedFolderIds.value);
-    for (let i = start; i <= end; i++) {
-      const item = allSelectableItems.value[i];
-      if (item) {
-        if (item.type === "file") {
-          nextFiles.add(item.id);
-        } else {
-          nextFolders.add(item.id);
-        }
-      }
-    }
-    selectedFileIds.value = nextFiles;
-    selectedFolderIds.value = nextFolders;
-    lastClickedItemIndex.value = currentIndex;
   } else {
-    // Normal click - toggle folder expansion, clear selection but keep anchor, and set active
-    const hadSelection = hasSelection.value;
+    // A plain click exits batch selection and makes this the single active item.
     clearSelection();
+    lastClickedItemIndex.value = currentIndex;
     setActiveItem(folder.id, "folder");
     toggleFolder(folder.id);
-    // Set anchor for future shift-click even when not selecting
-    if (!hadSelection) {
-      lastClickedItemIndex.value = currentIndex;
-    }
   }
 }
 
 const contextTarget = ref<SavedSqlFolder | SavedSqlFile | "panel" | null>(null);
+
+function isContextFile(fileId: string): boolean {
+  return contextTarget.value !== null && contextTarget.value !== "panel" && "sql" in contextTarget.value && contextTarget.value.id === fileId;
+}
+
+function isContextFolder(folderId: string): boolean {
+  return contextTarget.value !== null && contextTarget.value !== "panel" && !("sql" in contextTarget.value) && contextTarget.value.id === folderId;
+}
 
 function folderMoveMenuItems(fileIds: string[]): CtxMenuItem[] {
   const files = [...new Set(fileIds)].map((id) => savedSqlStore.getFile(id)).filter((file): file is SavedSqlFile => Boolean(file));
@@ -1077,8 +1060,9 @@ onBeforeUnmount(() => {
 
 function handleDragMouseDown(event: MouseEvent, id: string, type: Extract<DragItemType, "folder" | "file">) {
   if (event.button !== 0) return;
-  // Skip drag when modifier keys are pressed (for selection)
-  if (event.shiftKey || event.metaKey || event.ctrlKey) return;
+  // Batch actions use the context menu. Starting a single-item drag here can
+  // suppress the plain click that is supposed to exit batch selection.
+  if (hasSelection.value || event.shiftKey || event.metaKey || event.ctrlKey) return;
   const target = event.target as HTMLElement | null;
   if (target?.closest("[data-no-drag='true']")) return;
   pendingDrag = {
@@ -1187,6 +1171,7 @@ function showDropInside(targetId: string) {
         <template #default="{ onContextMenu }">
           <div
             class="h-full"
+            @click.self="clearPanelSelection"
             @contextmenu.capture="contextTarget = 'panel'"
             @contextmenu.prevent="
               contextTarget = 'panel';

@@ -76,6 +76,68 @@
  */
 @import "./tokens.css";
 
+:root {
+  --data-grid-type-integer-fg: #1d4ed8;
+  --data-grid-type-numeric-fg: #0e7490;
+  --data-grid-type-string-fg: #166534;
+  --data-grid-type-boolean-fg: #c2410c;
+  --data-grid-type-temporal-fg: #7e22ce;
+  --data-grid-type-structured-fg: #be185d;
+  --data-grid-type-identifier-fg: #92400e;
+  --data-grid-type-binary-fg: #b91c1c;
+  --data-grid-type-spatial-fg: #047857;
+}
+
+:root.dark {
+  --data-grid-type-integer-fg: #93c5fd;
+  --data-grid-type-numeric-fg: #67e8f9;
+  --data-grid-type-string-fg: #86efac;
+  --data-grid-type-boolean-fg: #fdba74;
+  --data-grid-type-temporal-fg: #d8b4fe;
+  --data-grid-type-structured-fg: #f9a8d4;
+  --data-grid-type-identifier-fg: #fcd34d;
+  --data-grid-type-binary-fg: #fca5a5;
+  --data-grid-type-spatial-fg: #6ee7b7;
+}
+
+@layer components {
+  .data-grid-type-integer {
+    color: var(--data-grid-type-integer-fg);
+  }
+
+  .data-grid-type-numeric {
+    color: var(--data-grid-type-numeric-fg);
+  }
+
+  .data-grid-type-string {
+    color: var(--data-grid-type-string-fg);
+  }
+
+  .data-grid-type-boolean {
+    color: var(--data-grid-type-boolean-fg);
+  }
+
+  .data-grid-type-temporal {
+    color: var(--data-grid-type-temporal-fg);
+  }
+
+  .data-grid-type-structured {
+    color: var(--data-grid-type-structured-fg);
+  }
+
+  .data-grid-type-identifier {
+    color: var(--data-grid-type-identifier-fg);
+  }
+
+  .data-grid-type-binary {
+    color: var(--data-grid-type-binary-fg);
+  }
+
+  .data-grid-type-spatial {
+    color: var(--data-grid-type-spatial-fg);
+  }
+}
+
 :root[data-corner-style="large"] {
   --dbx-radius-default: 6px;
   --dbx-radius-sm: 6px;

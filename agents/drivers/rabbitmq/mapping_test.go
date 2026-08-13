@@ -117,6 +117,25 @@ func TestOverviewAndNodeMappings(t *testing.T) {
 	}
 }
 
+func TestTopicInfoMappingIncludesQueueMessageCounts(t *testing.T) {
+	topic := topicInfoFromJSON(mustObject(t, `{
+      "name":"orders","durable":true,"messages":12,
+      "messages_ready":10,"messages_unacknowledged":2,"consumers":3
+    }`))
+
+	if topic["messages"] != int64(12) || topic["messagesReady"] != int64(10) || topic["messagesUnacked"] != int64(2) {
+		t.Fatalf("unexpected topic counts %#v", topic)
+	}
+
+	minimal := topicInfoFromJSON(mustObject(t, `{"name":"empty"}`))
+	if _, ok := minimal["messagesReady"]; ok {
+		t.Fatalf("unexpected ready count %#v", minimal)
+	}
+	if _, ok := minimal["messagesUnacked"]; ok {
+		t.Fatalf("unexpected unacked count %#v", minimal)
+	}
+}
+
 func TestAttachVhost(t *testing.T) {
 	info := jsonObject{"name": "q"}
 	attachVhost(info, mustObject(t, `{"vhost":"orders"}`))

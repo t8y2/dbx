@@ -394,6 +394,7 @@ const SCHEMA_STATEMENTS: &[&str] = &[
         folder_id TEXT,
         name TEXT NOT NULL DEFAULT '',
         database_name TEXT NOT NULL DEFAULT '',
+        catalog_name TEXT,
         schema_name TEXT,
         sql_text TEXT NOT NULL DEFAULT '',
         order_index INTEGER NOT NULL DEFAULT 0,
@@ -555,6 +556,7 @@ fn ensure_saved_sql_columns_sync(conn: &Connection) -> Result<(), String> {
     const FOLDER_COLUMNS: &[(&str, &str)] =
         &[("parent_folder_id", "TEXT"), ("order_index", "INTEGER NOT NULL DEFAULT 0")];
     const FILE_COLUMNS: &[(&str, &str)] = &[
+        ("catalog_name", "TEXT"),
         ("order_index", "INTEGER NOT NULL DEFAULT 0"),
         ("open_count", "INTEGER NOT NULL DEFAULT 0"),
         ("opened_at", "TEXT"),
@@ -2222,7 +2224,14 @@ fn persist_connection_in_tx(tx: &rusqlite::Transaction<'_>, config: &ConnectionC
     tx.execute("INSERT INTO connections (id, config_json) VALUES (?1, ?2)", params![config_id, json])
         .map_err(|e| e.to_string())?;
 
-    persist_secret_in_tx(tx, &config.id, "password", &config.password)?;
+    if config.save_password {
+        persist_secret_in_tx(tx, &config.id, "password", &config.password)?;
+    } else {
+        // "Don't save password": write an empty value, which persist_secret_in_tx
+        // turns into a DELETE — the password secret is never persisted (and any
+        // previously stored secret is removed on this save).
+        persist_secret_in_tx(tx, &config.id, "password", "")?;
+    }
     delete_secret_prefix_in_tx(tx, &config.id, TRANSPORT_LAYER_SECRET_PREFIX)?;
     for (index, layer) in config.transport_layers.iter().enumerate() {
         match layer {
@@ -2279,6 +2288,60 @@ fn persist_connection_in_tx(tx: &rusqlite::Transaction<'_>, config: &ConnectionC
     persist_mq_auth_secrets_in_tx(tx, &config)?;
     persist_mq_token_signing_secret_in_tx(tx, &config)?;
     persist_nacos_auth_secrets_in_tx(tx, &config)
+}
+
+fn insert_connection_copy_next_to_source(entries: &mut Vec<serde_json::Value>, source_id: &str, copy_id: &str) -> bool {
+    let mut index = 0;
+    while index < entries.len() {
+        let entry_type = entries[index].get("type").and_then(serde_json::Value::as_str);
+        if entry_type == Some("connection")
+            && entries[index].get("id").and_then(serde_json::Value::as_str) == Some(source_id)
+        {
+            entries.insert(index + 1, serde_json::json!({ "type": "connection", "id": copy_id }));
+            return true;
+        }
+        if entry_type == Some("group") {
+            if let Some(children) = entries[index].get_mut("children").and_then(serde_json::Value::as_array_mut) {
+                if insert_connection_copy_next_to_source(children, source_id, copy_id) {
+                    return true;
+                }
+            } else if let Some(connection_ids) =
+                entries[index].get_mut("connectionIds").and_then(serde_json::Value::as_array_mut)
+            {
+                if let Some(source_index) = connection_ids.iter().position(|id| id.as_str() == Some(source_id)) {
+                    connection_ids.insert(source_index + 1, serde_json::Value::String(copy_id.to_string()));
+                    return true;
+                }
+            }
+        }
+        index += 1;
+    }
+    false
+}
+
+fn copy_sidebar_layout_entry_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    source_id: &str,
+    copy_id: &str,
+) -> Result<(), String> {
+    let Some(layout_json) = tx
+        .query_row("SELECT layout_json FROM sidebar_layout WHERE id = 1", [], |row| row.get::<_, String>(0))
+        .optional()
+        .map_err(|error| error.to_string())?
+    else {
+        return Ok(());
+    };
+    let mut layout: serde_json::Value = serde_json::from_str(&layout_json).map_err(|error| error.to_string())?;
+    let Some(order) = layout.get_mut("order").and_then(serde_json::Value::as_array_mut) else {
+        return Err("INVALID_SIDEBAR_LAYOUT: sidebar order is not an array".to_string());
+    };
+    if !insert_connection_copy_next_to_source(order, source_id, copy_id) {
+        order.push(serde_json::json!({ "type": "connection", "id": copy_id }));
+    }
+    let updated = serde_json::to_string(&layout).map_err(|error| error.to_string())?;
+    tx.execute("UPDATE sidebar_layout SET layout_json = ?1 WHERE id = 1", [updated])
+        .map(|_| ())
+        .map_err(|error| error.to_string())
 }
 
 fn preserve_unreadable_connections_for_replacement(
@@ -2343,6 +2406,12 @@ impl Storage {
             for config in &configs {
                 let config = config.canonicalized();
                 let config_id = config.id.clone();
+                if !config.save_password {
+                    // Metadata-only imports/sync preserve existing secrets by default.
+                    // This preference is an exception: retaining the old password would
+                    // make a no-save connection silently authenticate without prompting.
+                    persist_secret_in_tx(&tx, &config.id, "password", "")?;
+                }
                 let mut sanitized = config;
                 sanitized.password = String::new();
                 scrub_transport_layer_secrets(&mut sanitized);
@@ -2395,6 +2464,62 @@ impl Storage {
             Ok(config)
         })
         .await
+    }
+
+    pub async fn duplicate_connection_for_mcp(
+        &self,
+        source_id: &str,
+        copy_id: &str,
+        copy_name: &str,
+    ) -> Result<ConnectionConfig, String> {
+        let source_id = source_id.to_string();
+        let copy_id = copy_id.to_string();
+        let copied_id = copy_id.clone();
+        let copy_name = copy_name.to_string();
+        self.with_conn(move |conn| {
+            let tx = conn.transaction().map_err(|error| error.to_string())?;
+            ensure_mcp_connection_change_allowed_in_tx(&tx, Some(&source_id))?;
+            let copy_name_lower = copy_name.to_lowercase();
+            let mut names = tx.prepare("SELECT config_json FROM connections").map_err(|error| error.to_string())?;
+            let duplicate_name = names
+                .query_map([], |row| row.get::<_, String>(0))
+                .map_err(|error| error.to_string())?
+                .filter_map(Result::ok)
+                .filter_map(|json| serde_json::from_str::<ConnectionConfig>(&json).ok())
+                .any(|connection| connection.name.to_lowercase() == copy_name_lower);
+            drop(names);
+            if duplicate_name {
+                return Err(format!("CONNECTION_ALREADY_EXISTS: connection '{copy_name}' already exists"));
+            }
+            let source_json = tx
+                .query_row("SELECT config_json FROM connections WHERE id = ?1", [&source_id], |row| {
+                    row.get::<_, String>(0)
+                })
+                .optional()
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| format!("CONNECTION_NOT_FOUND: connection '{source_id}' was not found"))?;
+            let mut copy: ConnectionConfig = serde_json::from_str(&source_json).map_err(|error| error.to_string())?;
+            copy.id = copy_id.clone();
+            copy.name = copy_name;
+            let copy_json = serde_json::to_string(&copy).map_err(|error| error.to_string())?;
+            tx.execute("INSERT INTO connections (id, config_json) VALUES (?1, ?2)", params![copy_id, copy_json])
+                .map_err(|error| error.to_string())?;
+            tx.execute(
+                "INSERT INTO connection_secrets (connection_id, key, secret) \
+                 SELECT ?1, key, secret FROM connection_secrets WHERE connection_id = ?2",
+                params![copy.id, source_id],
+            )
+            .map_err(|error| error.to_string())?;
+            copy_sidebar_layout_entry_in_tx(&tx, &source_id, &copy.id)?;
+            tx.commit().map_err(|error| error.to_string())?;
+            Ok(copy)
+        })
+        .await?;
+        self.load_connections()
+            .await?
+            .into_iter()
+            .find(|connection| connection.id == copied_id)
+            .ok_or_else(|| "CONNECTION_SAVE_ERROR: copied connection could not be reloaded".to_string())
     }
 
     pub async fn remove_connection_for_mcp(&self, connection_id: &str) -> Result<bool, String> {
@@ -2740,14 +2865,15 @@ impl Storage {
             for file in &library.files {
                 tx.execute(
                     "INSERT INTO saved_sql_files \
-                     (id, connection_id, folder_id, name, database_name, schema_name, sql_text, order_index, open_count, opened_at, created_at, updated_at) \
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                     (id, connection_id, folder_id, name, database_name, catalog_name, schema_name, sql_text, order_index, open_count, opened_at, created_at, updated_at) \
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     params![
                         file.id,
                         file.connection_id,
                         file.folder_id,
                         file.name,
                         file.database,
+                        file.catalog,
                         file.schema,
                         file.sql,
                         file.order_index,
@@ -2791,7 +2917,7 @@ impl Storage {
 
             let mut file_stmt = conn
                 .prepare(
-                    "SELECT id, connection_id, folder_id, name, database_name, schema_name, sql_text, order_index, open_count, opened_at, created_at, updated_at \
+                    "SELECT id, connection_id, folder_id, name, database_name, catalog_name, schema_name, sql_text, order_index, open_count, opened_at, created_at, updated_at \
                      FROM saved_sql_files ORDER BY COALESCE(folder_id, ''), order_index, connection_id, name COLLATE NOCASE",
                 )
                 .map_err(|e| e.to_string())?;
@@ -2803,14 +2929,15 @@ impl Storage {
                         folder_id: row.get(2)?,
                         name: row.get(3)?,
                         database: row.get(4)?,
-                        schema: row.get(5)?,
-                        sql: row.get(6)?,
+                        catalog: row.get(5)?,
+                        schema: row.get(6)?,
+                        sql: row.get(7)?,
                         sql_loaded: true,
-                        order_index: row.get(7)?,
-                        open_count: row.get(8)?,
-                        opened_at: row.get(9)?,
-                        created_at: row.get(10)?,
-                        updated_at: row.get(11)?,
+                        order_index: row.get(8)?,
+                        open_count: row.get(9)?,
+                        opened_at: row.get(10)?,
+                        created_at: row.get(11)?,
+                        updated_at: row.get(12)?,
                     })
                 })
                 .map_err(|e| e.to_string())?
@@ -2848,7 +2975,7 @@ impl Storage {
 
             let mut file_stmt = conn
                 .prepare(
-                    "SELECT id, connection_id, folder_id, name, database_name, schema_name, order_index, open_count, opened_at, created_at, updated_at \
+                    "SELECT id, connection_id, folder_id, name, database_name, catalog_name, schema_name, order_index, open_count, opened_at, created_at, updated_at \
                      FROM saved_sql_files ORDER BY COALESCE(folder_id, ''), order_index, connection_id, name COLLATE NOCASE",
                 )
                 .map_err(|e| e.to_string())?;
@@ -2860,14 +2987,15 @@ impl Storage {
                         folder_id: row.get(2)?,
                         name: row.get(3)?,
                         database: row.get(4)?,
-                        schema: row.get(5)?,
+                        catalog: row.get(5)?,
+                        schema: row.get(6)?,
                         sql: String::new(),
                         sql_loaded: false,
-                        order_index: row.get(6)?,
-                        open_count: row.get(7)?,
-                        opened_at: row.get(8)?,
-                        created_at: row.get(9)?,
-                        updated_at: row.get(10)?,
+                        order_index: row.get(7)?,
+                        open_count: row.get(8)?,
+                        opened_at: row.get(9)?,
+                        created_at: row.get(10)?,
+                        updated_at: row.get(11)?,
                     })
                 })
                 .map_err(|e| e.to_string())?
@@ -2884,7 +3012,7 @@ impl Storage {
         self.with_conn(move |conn| {
             let mut stmt = conn
                 .prepare(
-                    "SELECT id, connection_id, folder_id, name, database_name, schema_name, sql_text, order_index, open_count, opened_at, created_at, updated_at \
+                    "SELECT id, connection_id, folder_id, name, database_name, catalog_name, schema_name, sql_text, order_index, open_count, opened_at, created_at, updated_at \
                      FROM saved_sql_files WHERE id = ?1",
                 )
                 .map_err(|e| e.to_string())?;
@@ -2895,14 +3023,15 @@ impl Storage {
                     folder_id: row.get(2)?,
                     name: row.get(3)?,
                     database: row.get(4)?,
-                    schema: row.get(5)?,
-                    sql: row.get(6)?,
+                    catalog: row.get(5)?,
+                    schema: row.get(6)?,
+                    sql: row.get(7)?,
                     sql_loaded: true,
-                    order_index: row.get(7)?,
-                    open_count: row.get(8)?,
-                    opened_at: row.get(9)?,
-                    created_at: row.get(10)?,
-                    updated_at: row.get(11)?,
+                    order_index: row.get(8)?,
+                    open_count: row.get(9)?,
+                    opened_at: row.get(10)?,
+                    created_at: row.get(11)?,
+                    updated_at: row.get(12)?,
                 })
             }) {
                 Ok(file) => Ok(Some(file)),
@@ -2976,15 +3105,16 @@ impl Storage {
         self.with_conn(move |conn| {
             conn.execute(
                 "INSERT INTO saved_sql_files \
-                 (id, connection_id, folder_id, name, database_name, schema_name, sql_text, order_index, open_count, opened_at, created_at, updated_at) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+                 (id, connection_id, folder_id, name, database_name, catalog_name, schema_name, sql_text, order_index, open_count, opened_at, created_at, updated_at) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
                  ON CONFLICT(id) DO UPDATE SET \
                  connection_id = excluded.connection_id, \
                  folder_id = excluded.folder_id, \
                  name = excluded.name, \
                  database_name = excluded.database_name, \
+                 catalog_name = excluded.catalog_name, \
                  schema_name = excluded.schema_name, \
-                 sql_text = CASE WHEN ?13 THEN excluded.sql_text ELSE saved_sql_files.sql_text END, \
+                 sql_text = CASE WHEN ?14 THEN excluded.sql_text ELSE saved_sql_files.sql_text END, \
                  order_index = excluded.order_index, \
                  open_count = excluded.open_count, \
                  opened_at = excluded.opened_at, \
@@ -2995,6 +3125,7 @@ impl Storage {
                     file.folder_id,
                     file.name,
                     file.database,
+                    file.catalog,
                     file.schema,
                     file.sql,
                     file.order_index,
@@ -4181,6 +4312,73 @@ mod tests {
         let _ = std::fs::remove_file(path);
     }
 
+    fn plain_connection(id: &str, password: &str) -> ConnectionConfig {
+        serde_json::from_value::<ConnectionConfig>(serde_json::json!({
+            "id": id,
+            "name": format!("conn {id}"),
+            "db_type": "postgres",
+            "host": "127.0.0.1",
+            "port": 5432,
+            "username": "postgres",
+            "password": password,
+            "database": "app"
+        }))
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn save_connections_does_not_persist_password_when_save_password_false() {
+        let path = temp_db_path("save-password-false");
+        let storage = Storage::open(&path).await.unwrap();
+
+        let mut config = plain_connection("no-save", "hunter2");
+        config.save_password = false;
+        storage.save_connections(std::slice::from_ref(&config)).await.unwrap();
+
+        assert_eq!(storage.get_secret(&config.id, "password").await.unwrap(), None);
+        let loaded = storage.load_connections().await.unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].password, "");
+        assert!(!loaded[0].save_password);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn save_connections_persists_password_when_save_password_true() {
+        let path = temp_db_path("save-password-true");
+        let storage = Storage::open(&path).await.unwrap();
+
+        let config = plain_connection("save-yes", "hunter2");
+        storage.save_connections(std::slice::from_ref(&config)).await.unwrap();
+
+        assert_eq!(storage.get_secret(&config.id, "password").await.unwrap().as_deref(), Some("hunter2"));
+        let loaded = storage.load_connections().await.unwrap();
+        assert_eq!(loaded[0].password, "hunter2");
+        assert!(loaded[0].save_password);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn switching_save_password_off_removes_stored_password() {
+        let path = temp_db_path("save-password-switch-off");
+        let storage = Storage::open(&path).await.unwrap();
+
+        let mut config = plain_connection("switch", "hunter2");
+        storage.save_connections(std::slice::from_ref(&config)).await.unwrap();
+        assert_eq!(storage.get_secret(&config.id, "password").await.unwrap().as_deref(), Some("hunter2"));
+
+        config.save_password = false;
+        storage.save_connections(std::slice::from_ref(&config)).await.unwrap();
+        assert_eq!(storage.get_secret(&config.id, "password").await.unwrap(), None);
+        let loaded = storage.load_connections().await.unwrap();
+        assert_eq!(loaded[0].password, "");
+        assert!(!loaded[0].save_password);
+
+        let _ = std::fs::remove_file(path);
+    }
+
     fn mq_connection(id: &str, token: &str) -> ConnectionConfig {
         ConnectionConfig {
             docs_notes_path: None,
@@ -4240,6 +4438,7 @@ mod tests {
             jdbc_driver_class: None,
             jdbc_driver_paths: Vec::new(),
             one_time: false,
+            save_password: true,
             read_only: false,
             is_production: false,
             production_databases: vec![],
@@ -4307,6 +4506,7 @@ mod tests {
             jdbc_driver_class: None,
             jdbc_driver_paths: Vec::new(),
             one_time: false,
+            save_password: true,
             read_only: false,
             is_production: false,
             production_databases: vec![],
@@ -5376,6 +5576,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn saved_sql_catalog_column_migrates_legacy_database() {
+        let path = temp_db_path("saved-sql-catalog-migration");
+        {
+            let connection = Connection::open(&path).unwrap();
+            connection
+                .execute_batch(
+                    "CREATE TABLE saved_sql_files (
+                        id TEXT PRIMARY KEY,
+                        connection_id TEXT NOT NULL,
+                        folder_id TEXT,
+                        name TEXT NOT NULL DEFAULT '',
+                        database_name TEXT NOT NULL DEFAULT '',
+                        schema_name TEXT,
+                        sql_text TEXT NOT NULL DEFAULT '',
+                        order_index INTEGER NOT NULL DEFAULT 0,
+                        open_count INTEGER NOT NULL DEFAULT 0,
+                        opened_at TEXT,
+                        created_at TEXT NOT NULL DEFAULT '',
+                        updated_at TEXT NOT NULL DEFAULT ''
+                    );
+                    INSERT INTO saved_sql_files
+                        (id, connection_id, name, database_name, sql_text, created_at, updated_at)
+                    VALUES
+                        ('legacy-sql', 'conn-1', 'legacy.sql', 'sales', 'SELECT 1;', '2026-01-01', '2026-01-01');",
+                )
+                .unwrap();
+        }
+
+        let storage = Storage::open(&path).await.unwrap();
+        let loaded = storage.load_saved_sql_file("legacy-sql").await.unwrap().unwrap();
+
+        assert_eq!(loaded.database, "sales");
+        assert_eq!(loaded.catalog, None);
+    }
+
+    #[tokio::test]
     async fn saved_sql_summary_omits_sql_text_and_loads_file_on_demand() {
         let path = temp_db_path("saved-sql-summary");
         let storage = Storage::open(&path).await.unwrap();
@@ -5385,6 +5621,7 @@ mod tests {
             folder_id: None,
             name: "large.sql".to_string(),
             database: "main".to_string(),
+            catalog: Some("hive".to_string()),
             schema: None,
             sql: "SELECT * FROM very_large_table;".repeat(100),
             sql_loaded: true,
@@ -5400,10 +5637,12 @@ mod tests {
         let summary = storage.load_saved_sql_library_summary().await.unwrap();
         assert_eq!(summary.files.len(), 1);
         assert_eq!(summary.files[0].sql, "");
+        assert_eq!(summary.files[0].catalog.as_deref(), Some("hive"));
         assert!(!summary.files[0].sql_loaded);
 
         let loaded = storage.load_saved_sql_file("sql-1").await.unwrap().unwrap();
         assert_eq!(loaded.sql, file.sql);
+        assert_eq!(loaded.catalog.as_deref(), Some("hive"));
         assert!(loaded.sql_loaded);
     }
 
@@ -5417,6 +5656,7 @@ mod tests {
             folder_id: None,
             name: "query.sql".to_string(),
             database: "main".to_string(),
+            catalog: None,
             schema: None,
             sql: "SELECT 1;".to_string(),
             sql_loaded: true,
@@ -5480,6 +5720,8 @@ mod tests {
                 grok_cli_env: std::collections::HashMap::new(),
                 codebuddy_cli_path: None,
                 codebuddy_cli_env: std::collections::HashMap::new(),
+                qoder_cli_path: None,
+                qoder_cli_env: Default::default(),
             },
         }
     }

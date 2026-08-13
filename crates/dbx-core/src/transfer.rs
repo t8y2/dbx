@@ -9,7 +9,7 @@ use crate::db::mongo_driver::MongoDocumentResult;
 use crate::models::connection::DatabaseType;
 use crate::object_source_sql::{build_executable_object_source_statements, EditableObjectSourceSqlInput};
 use crate::query::{agent_execute_query_params, pool_error_action, PoolErrorAction, QueryExecutionOptions};
-use crate::sql::split_sql_statements;
+use crate::sql::{split_sql_statements, split_sql_statements_for_database};
 use crate::sql_dialect::{qualified_transfer_table, quote_transfer_identifier};
 
 static CANCELLED: std::sync::LazyLock<RwLock<HashSet<String>>> =
@@ -17,6 +17,9 @@ static CANCELLED: std::sync::LazyLock<RwLock<HashSet<String>>> =
 static OCEANBASE_MYSQL_TABLE_OPTION_RE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
     Regex::new(r"(?i)\b(?:AUTO_INCREMENT_MODE|REPLICA_NUM|USE_BLOOM_FILTER|TABLET_SIZE|PCTFREE)\s*=")
         .expect("valid OceanBase MySQL table option regex")
+});
+static MYSQL_COLLATE_CLAUSE_RE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
+    Regex::new(r"(?i)\bCOLLATE\s*=?\s*([A-Za-z0-9_]+)\b").expect("valid MySQL COLLATE clause regex")
 });
 
 const MAX_TRANSFER_WRITE_SQL_BYTES: usize = 512 * 1024;
@@ -445,7 +448,11 @@ pub fn convert_cross_family_object_ddl(
 /// (with `''` and backslash escapes), MySQL double-quoted strings when
 /// `double_quote_is_string` is set, `--`/`#` line comments and `/* */`
 /// block comments. Returns byte ranges `(start, end)` of those spans.
-fn sql_non_code_spans(sql: &str, double_quote_is_string: bool) -> Vec<(usize, usize)> {
+fn sql_non_code_spans_with_mysql_identifiers(
+    sql: &str,
+    double_quote_is_string: bool,
+    backtick_is_identifier: bool,
+) -> Vec<(usize, usize)> {
     let bytes = sql.as_bytes();
     let mut spans = Vec::new();
     let mut i = 0;
@@ -454,6 +461,7 @@ fn sql_non_code_spans(sql: &str, double_quote_is_string: bool) -> Vec<(usize, us
         let starts_non_code = match b {
             b'\'' => true,
             b'"' if double_quote_is_string => true,
+            b'`' if backtick_is_identifier => true,
             b'-' if i + 1 < bytes.len() && bytes[i + 1] == b'-' => true,
             b'#' => true, // MySQL line comment
             b'/' if i + 1 < bytes.len() && bytes[i + 1] == b'*' => true,
@@ -465,7 +473,7 @@ fn sql_non_code_spans(sql: &str, double_quote_is_string: bool) -> Vec<(usize, us
         }
         let start = i;
         i = match b {
-            b'\'' | b'"' => {
+            b'\'' | b'"' | b'`' => {
                 i += 1;
                 while i < bytes.len() {
                     if bytes[i] == b'\\' && i + 1 < bytes.len() {
@@ -503,6 +511,10 @@ fn sql_non_code_spans(sql: &str, double_quote_is_string: bool) -> Vec<(usize, us
     spans
 }
 
+fn sql_non_code_spans(sql: &str, double_quote_is_string: bool) -> Vec<(usize, usize)> {
+    sql_non_code_spans_with_mysql_identifiers(sql, double_quote_is_string, false)
+}
+
 /// Applies `f` to every code span of `sql`; string literals and comments
 /// (see `sql_non_code_spans`) pass through verbatim so rewrites never touch
 /// text inside them.
@@ -511,6 +523,26 @@ where
     F: FnMut(&str) -> String,
 {
     let spans = sql_non_code_spans(sql, double_quote_is_string);
+    let mut out = String::with_capacity(sql.len());
+    let mut prev = 0;
+    for (start, end) in spans {
+        if start > prev {
+            out.push_str(&f(&sql[prev..start]));
+        }
+        out.push_str(&sql[start..end]);
+        prev = end;
+    }
+    if prev < sql.len() {
+        out.push_str(&f(&sql[prev..]));
+    }
+    out
+}
+
+fn map_mysql_ddl_code_spans<F>(sql: &str, mut f: F) -> String
+where
+    F: FnMut(&str) -> String,
+{
+    let spans = sql_non_code_spans_with_mysql_identifiers(sql, true, true);
     let mut out = String::with_capacity(sql.len());
     let mut prev = 0;
     for (start, end) in spans {
@@ -1275,6 +1307,16 @@ fn is_postgres_identity_extra(extra: Option<&str>) -> bool {
     })
 }
 
+fn is_postgres_generated_always_identity_extra(extra: Option<&str>) -> bool {
+    extra.is_some_and(|value| {
+        let mut parts = value.split_whitespace();
+        parts.next().is_some_and(|part| part.eq_ignore_ascii_case("generated"))
+            && parts.next().is_some_and(|part| part.eq_ignore_ascii_case("always"))
+            && parts.next().is_some_and(|part| part.eq_ignore_ascii_case("as"))
+            && parts.next().is_some_and(|part| part.eq_ignore_ascii_case("identity"))
+    })
+}
+
 pub(crate) fn is_identity_column_extra(extra: Option<&str>) -> bool {
     extra.is_some_and(|value| {
         let normalized = value.trim().to_ascii_lowercase();
@@ -1307,6 +1349,16 @@ fn selected_columns_include_identity_extras(columns: &[String], column_extras: &
 fn selected_columns_include_identity_columns(columns: &[String], all_columns: &[db::ColumnInfo]) -> bool {
     all_columns.iter().any(|column| {
         is_identity_column_extra(column.extra.as_deref())
+            && columns.iter().any(|name| name.eq_ignore_ascii_case(&column.name))
+    })
+}
+
+fn selected_columns_include_postgres_generated_always_identity_columns(
+    columns: &[String],
+    all_columns: &[db::ColumnInfo],
+) -> bool {
+    all_columns.iter().any(|column| {
+        is_postgres_generated_always_identity_extra(column.extra.as_deref())
             && columns.iter().any(|name| name.eq_ignore_ascii_case(&column.name))
     })
 }
@@ -2951,8 +3003,8 @@ pub fn generate_insert_typed(
         return String::new();
     }
 
-    let template = InsertSqlTemplate::new(columns, table, schema, db_type, catalog);
-    let value_rows = value_rows_sql(rows, column_types, db_type);
+    let template = InsertSqlTemplate::new(columns, table, schema, db_type, catalog, false);
+    let value_rows = value_rows_sql(rows, column_types, db_type, false);
     template.build(&value_rows)
 }
 
@@ -2963,11 +3015,23 @@ struct InsertSqlTemplate {
 }
 
 impl InsertSqlTemplate {
-    fn new(columns: &[String], table: &str, schema: &str, db_type: &DatabaseType, catalog: Option<&str>) -> Self {
+    fn new(
+        columns: &[String],
+        table: &str,
+        schema: &str,
+        db_type: &DatabaseType,
+        catalog: Option<&str>,
+        overrides_postgres_system_values: bool,
+    ) -> Self {
         let full_table = qualified_table(table, schema, db_type, catalog);
         let col_list = columns.iter().map(|column| quote_identifier(column, db_type)).collect::<Vec<_>>().join(", ");
+        let overriding = if overrides_postgres_system_values && matches!(db_type, DatabaseType::Postgres) {
+            " OVERRIDING SYSTEM VALUE"
+        } else {
+            ""
+        };
         Self {
-            standard_prefix: format!("INSERT INTO {full_table} ({col_list}) VALUES\n"),
+            standard_prefix: format!("INSERT INTO {full_table} ({col_list}){overriding} VALUES\n"),
             oracle_into_prefix: matches!(db_type, DatabaseType::Oracle)
                 .then(|| format!("INTO {full_table} ({col_list}) VALUES ")),
         }
@@ -3022,12 +3086,20 @@ fn value_rows_sql(
     rows: &[Vec<serde_json::Value>],
     column_types: &[Option<String>],
     db_type: &DatabaseType,
+    mysql_spatial_markers: bool,
 ) -> Vec<String> {
     let mut out = Vec::with_capacity(rows.len());
     for row in rows {
         let mut vals = Vec::with_capacity(row.len());
         for (index, v) in row.iter().enumerate() {
-            vals.push(escape_value_typed(v, db_type, column_types.get(index).and_then(|value| value.as_deref())));
+            let column_type = column_types.get(index).and_then(|value| value.as_deref());
+            let value = if mysql_spatial_markers {
+                crate::database_export::format_mysql_spatial_export_literal(v, Some(*db_type), column_type)
+            } else {
+                None
+            }
+            .unwrap_or_else(|| escape_value_typed(v, db_type, column_type));
+            vals.push(value);
         }
         out.push(format!("({})", vals.join(", ")));
     }
@@ -3055,6 +3127,33 @@ pub fn generate_upsert_typed(
     pk_columns: &[String],
     catalog: Option<&str>,
 ) -> String {
+    generate_upsert_typed_for_transfer(
+        columns,
+        column_types,
+        rows,
+        table,
+        schema,
+        db_type,
+        pk_columns,
+        catalog,
+        false,
+        false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn generate_upsert_typed_for_transfer(
+    columns: &[String],
+    column_types: &[Option<String>],
+    rows: &[Vec<serde_json::Value>],
+    table: &str,
+    schema: &str,
+    db_type: &DatabaseType,
+    pk_columns: &[String],
+    catalog: Option<&str>,
+    overrides_postgres_system_values: bool,
+    mysql_spatial_markers: bool,
+) -> String {
     if rows.is_empty() || pk_columns.is_empty() {
         return String::new();
     }
@@ -3062,7 +3161,7 @@ pub fn generate_upsert_typed(
     let full_table = qualified_table(table, schema, db_type, catalog);
     let col_list = columns.iter().map(|c| quote_identifier(c, db_type)).collect::<Vec<_>>().join(", ");
 
-    let value_rows = value_rows_sql(rows, column_types, db_type);
+    let value_rows = value_rows_sql(rows, column_types, db_type, mysql_spatial_markers);
 
     let mut non_pk_columns = Vec::with_capacity(columns.len().saturating_sub(pk_columns.len()));
     for c in columns {
@@ -3077,7 +3176,13 @@ pub fn generate_upsert_typed(
                 || matches!(db_type, DatabaseType::Sqlite | DatabaseType::CloudflareD1 | DatabaseType::DuckDb) =>
         {
             let pk_list = pk_columns.iter().map(|c| quote_identifier(c, db_type)).collect::<Vec<_>>().join(", ");
-            let mut sql = format!("INSERT INTO {full_table} ({col_list}) VALUES\n{}", value_rows.join(",\n"));
+            let overriding = if overrides_postgres_system_values && matches!(db_type, DatabaseType::Postgres) {
+                " OVERRIDING SYSTEM VALUE"
+            } else {
+                ""
+            };
+            let mut sql =
+                format!("INSERT INTO {full_table} ({col_list}){overriding} VALUES\n{}", value_rows.join(",\n"));
             if non_pk_columns.is_empty() {
                 sql.push_str(&format!("\nON CONFLICT ({pk_list}) DO NOTHING"));
             } else {
@@ -3190,7 +3295,10 @@ pub fn generate_upsert_typed(
             sql.push_str(&format!("\nWHEN NOT MATCHED THEN INSERT ({insert_cols}) VALUES ({insert_vals})"));
             sql
         }
-        _ => generate_insert_typed(columns, column_types, rows, table, schema, db_type, catalog),
+        _ => {
+            let template = InsertSqlTemplate::new(columns, table, schema, db_type, catalog, false);
+            template.build(&value_rows_sql(rows, column_types, db_type, mysql_spatial_markers))
+        }
     }
 }
 
@@ -3212,6 +3320,52 @@ fn is_oceanbase_mysql_profile(db_type: &DatabaseType, driver_profile: Option<&st
 fn contains_oceanbase_mysql_table_options(sql: &str) -> bool {
     let (sql_without_literals_or_comments, _) = protect_sql_literals(sql, true);
     OCEANBASE_MYSQL_TABLE_OPTION_RE.is_match(&sql_without_literals_or_comments)
+}
+
+fn mysql_ddl_collation_names(sql: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    map_mysql_ddl_code_spans(sql, |code| {
+        for captures in MYSQL_COLLATE_CLAUSE_RE.captures_iter(code) {
+            let name = captures[1].to_string();
+            if !names.iter().any(|existing: &String| existing.eq_ignore_ascii_case(&name)) {
+                names.push(name);
+            }
+        }
+        String::new()
+    });
+    names
+}
+
+fn remove_unsupported_mysql_collations(sql: &str, supported: &HashSet<String>) -> String {
+    let supported = supported.iter().map(|name| name.to_ascii_lowercase()).collect::<HashSet<_>>();
+    map_mysql_ddl_code_spans(sql, |code| {
+        MYSQL_COLLATE_CLAUSE_RE
+            .replace_all(code, |captures: &regex::Captures| {
+                if supported.contains(&captures[1].to_ascii_lowercase()) {
+                    captures[0].to_string()
+                } else {
+                    String::new()
+                }
+            })
+            .to_string()
+    })
+}
+
+fn mysql_collations_for_transfer_ddl_recovery(
+    sql: &str,
+    error: &str,
+    target_db_type: &DatabaseType,
+    reused_source_ddl: bool,
+) -> Option<Vec<String>> {
+    if !reused_source_ddl
+        || !matches!(target_db_type, DatabaseType::Mysql)
+        || !error.to_ascii_lowercase().contains("unknown collation")
+        || !sql.trim_start().to_ascii_uppercase().starts_with("CREATE TABLE ")
+    {
+        return None;
+    }
+    let names = mysql_ddl_collation_names(sql);
+    (!names.is_empty()).then_some(names)
 }
 
 fn can_reuse_source_table_ddl(
@@ -3248,6 +3402,22 @@ fn rewrite_transfer_source_table_ddl(
     }
 }
 
+fn mysql_spatial_transfer_select_sql(
+    sql: String,
+    columns: &[String],
+    column_types: &[Option<String>],
+    source_db_type: &DatabaseType,
+    target_db_type: &DatabaseType,
+) -> (String, bool) {
+    let has_spatial_columns = column_types
+        .iter()
+        .any(|column_type| column_type.as_deref().is_some_and(crate::database_export::is_mysql_spatial_export_type));
+    if !matches!((source_db_type, target_db_type), (DatabaseType::Mysql, DatabaseType::Mysql)) || !has_spatial_columns {
+        return (sql, false);
+    }
+    (crate::database_export::replace_database_export_select_list(sql, columns, column_types, source_db_type), true)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn generate_transfer_write_sql(
     mode: &TransferMode,
@@ -3259,12 +3429,30 @@ fn generate_transfer_write_sql(
     db_type: &DatabaseType,
     pk_columns: &[String],
     catalog: Option<&str>,
+    overrides_postgres_system_values: bool,
+    mysql_spatial_markers: bool,
 ) -> String {
     match mode {
-        TransferMode::Upsert => {
-            generate_upsert_typed(columns, column_types, rows, table, schema, db_type, pk_columns, catalog)
+        TransferMode::Upsert => generate_upsert_typed_for_transfer(
+            columns,
+            column_types,
+            rows,
+            table,
+            schema,
+            db_type,
+            pk_columns,
+            catalog,
+            overrides_postgres_system_values,
+            mysql_spatial_markers,
+        ),
+        _ => {
+            if rows.is_empty() {
+                return String::new();
+            }
+            let template =
+                InsertSqlTemplate::new(columns, table, schema, db_type, catalog, overrides_postgres_system_values);
+            template.build(&value_rows_sql(rows, column_types, db_type, mysql_spatial_markers))
         }
-        _ => generate_insert_typed(columns, column_types, rows, table, schema, db_type, catalog),
     }
 }
 
@@ -3279,6 +3467,33 @@ pub(crate) fn generate_insert_typed_sql_batches(
     catalog: Option<&str>,
     limits: SqlBatchLimits,
 ) -> Result<Vec<(String, usize)>, String> {
+    generate_insert_typed_sql_batches_for_transfer(
+        columns,
+        column_types,
+        rows,
+        table,
+        schema,
+        db_type,
+        catalog,
+        limits,
+        false,
+        false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn generate_insert_typed_sql_batches_for_transfer(
+    columns: &[String],
+    column_types: &[Option<String>],
+    rows: &[Vec<serde_json::Value>],
+    table: &str,
+    schema: &str,
+    db_type: &DatabaseType,
+    catalog: Option<&str>,
+    limits: SqlBatchLimits,
+    overrides_postgres_system_values: bool,
+    mysql_spatial_markers: bool,
+) -> Result<Vec<(String, usize)>, String> {
     if rows.is_empty() {
         return Ok(Vec::new());
     }
@@ -3290,8 +3505,8 @@ pub(crate) fn generate_insert_typed_sql_batches(
     });
     let target_sql_bytes = limits.target_sql_bytes.max(1);
     let batch_sql_bytes = limits.hard_sql_bytes.map_or(target_sql_bytes, |hard| target_sql_bytes.min(hard));
-    let template = InsertSqlTemplate::new(columns, table, schema, db_type, catalog);
-    let value_rows = value_rows_sql(rows, column_types, db_type);
+    let template = InsertSqlTemplate::new(columns, table, schema, db_type, catalog, overrides_postgres_system_values);
+    let value_rows = value_rows_sql(rows, column_types, db_type, mysql_spatial_markers);
     let value_row_bytes = value_rows.iter().map(|row| sql_text_bytes(row, db_type)).collect::<Vec<_>>();
     let mut statements = Vec::new();
     let mut start = 0usize;
@@ -3339,13 +3554,15 @@ fn generate_transfer_write_sql_batches(
     db_type: &DatabaseType,
     pk_columns: &[String],
     catalog: Option<&str>,
+    overrides_postgres_system_values: bool,
+    mysql_spatial_markers: bool,
 ) -> Result<Vec<String>, String> {
     if rows.is_empty() {
         return Ok(Vec::new());
     }
 
     if matches!(mode, TransferMode::Append | TransferMode::Overwrite) {
-        return Ok(generate_insert_typed_sql_batches(
+        return Ok(generate_insert_typed_sql_batches_for_transfer(
             columns,
             column_types,
             rows,
@@ -3354,6 +3571,8 @@ fn generate_transfer_write_sql_batches(
             db_type,
             catalog,
             SqlBatchLimits::for_database(db_type, max_transfer_write_rows(db_type, mode)),
+            overrides_postgres_system_values,
+            mysql_spatial_markers,
         )?
         .into_iter()
         .map(|(sql, _)| sql)
@@ -3380,6 +3599,8 @@ fn generate_transfer_write_sql_batches(
             db_type,
             pk_columns,
             catalog,
+            overrides_postgres_system_values,
+            mysql_spatial_markers,
         );
 
         while end < rows.len() && end - start < max_rows {
@@ -3393,6 +3614,8 @@ fn generate_transfer_write_sql_batches(
                 db_type,
                 pk_columns,
                 catalog,
+                overrides_postgres_system_values,
+                mysql_spatial_markers,
             );
             if candidate.len() > max_sql_bytes && !accepted.is_empty() {
                 break;
@@ -3922,6 +4145,48 @@ async fn execute_transfer_ddl_on_pool(
     Ok(())
 }
 
+async fn supported_mysql_transfer_collations(
+    state: &AppState,
+    pool_key: &str,
+    names: &[String],
+) -> Result<HashSet<String>, String> {
+    let names = names.iter().map(|name| quote_string_literal(name)).collect::<Vec<_>>().join(", ");
+    let sql = format!("SELECT COLLATION_NAME FROM information_schema.COLLATIONS WHERE COLLATION_NAME IN ({names})");
+    let result = execute_on_pool(state, pool_key, &sql).await?;
+    Ok(result.rows.iter().filter_map(|row| json_string_cell(row, 0)).map(|name| name.to_ascii_lowercase()).collect())
+}
+
+async fn execute_transfer_create_table_ddl_on_pool(
+    state: &AppState,
+    pool_key: &str,
+    sql: &str,
+    db_type: &DatabaseType,
+    reused_source_ddl: bool,
+) -> Result<(), String> {
+    let original_error = match execute_transfer_ddl_on_pool(state, pool_key, sql, db_type).await {
+        Ok(()) => return Ok(()),
+        Err(error) => error,
+    };
+    let Some(collations) = mysql_collations_for_transfer_ddl_recovery(sql, &original_error, db_type, reused_source_ddl)
+    else {
+        return Err(original_error);
+    };
+    let supported = supported_mysql_transfer_collations(state, pool_key, &collations)
+        .await
+        .map_err(|error| format!("{original_error}; failed to inspect target MySQL collations: {error}"))?;
+    let rewritten = remove_unsupported_mysql_collations(sql, &supported);
+    if rewritten == sql {
+        return Err(format!("{original_error}; target MySQL reports all referenced collations as supported"));
+    }
+
+    let unsupported =
+        collations.iter().filter(|name| !supported.contains(&name.to_ascii_lowercase())).cloned().collect::<Vec<_>>();
+    log::warn!("[transfer] retrying target table DDL without unsupported MySQL collations: {}", unsupported.join(", "));
+    execute_transfer_ddl_on_pool(state, pool_key, &rewritten, db_type)
+        .await
+        .map_err(|error| format!("{original_error}; retry without unsupported MySQL collations failed: {error}"))
+}
+
 fn transfer_table_already_exists_error(error: &str) -> bool {
     let lower = error.to_ascii_lowercase();
     lower.contains("already exists")
@@ -3951,6 +4216,13 @@ fn transfer_ddl_statements(sql: &str, db_type: &DatabaseType) -> Vec<String> {
                 .map(|statement| sanitize_postgres_transfer_ddl_statement(&statement))
                 .filter(|statement| !is_postgres_post_table_index_statement(statement))
                 .collect()
+        }
+    } else if matches!(db_type, DatabaseType::Dameng) {
+        let statements = split_sql_statements_for_database(sql, *db_type);
+        if statements.is_empty() {
+            vec![sql.trim().to_string()]
+        } else {
+            statements
         }
     } else {
         vec![sql.to_string()]
@@ -5060,10 +5332,51 @@ where
     }
     Ok(outcome)
 }
+fn postgres_transfer_routine_catalog_capability_sql() -> &'static str {
+    "SELECT EXISTS ( \
+       SELECT 1 \
+       FROM pg_catalog.pg_attribute \
+       WHERE attrelid = 'pg_catalog.pg_proc'::regclass \
+         AND attname = 'prokind' \
+         AND NOT attisdropped \
+     )"
+}
+
+async fn postgres_transfer_has_prokind(state: &AppState, pool_key: &str) -> Result<bool, String> {
+    let result = execute_read_on_pool(state, pool_key, postgres_transfer_routine_catalog_capability_sql()).await?;
+    result
+        .rows
+        .first()
+        .and_then(|row| row.first())
+        .and_then(|value| value.as_bool().or_else(|| value.as_str().and_then(|value| value.parse().ok())))
+        .ok_or_else(|| "Failed to inspect PostgreSQL routine catalog capabilities".to_string())
+}
+
+fn postgres_transfer_routine_catalog_sql(has_prokind: bool) -> (&'static str, &'static str) {
+    if has_prokind {
+        ("CASE p.prokind WHEN 'p' THEN 'PROCEDURE' ELSE 'FUNCTION' END", "p.prokind IN ('p','f')")
+    } else {
+        ("'FUNCTION'", "NOT p.proisagg AND NOT p.proiswindow")
+    }
+}
+
+fn postgres_transfer_routines_sql(schema: &str, has_prokind: bool) -> String {
+    let (routine_kind, routine_filter) = postgres_transfer_routine_catalog_sql(has_prokind);
+    format!(
+        "SELECT p.proname, {routine_kind}, pg_get_functiondef(p.oid) \
+         FROM pg_catalog.pg_proc p \
+         JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace \
+         WHERE n.nspname = {schema} AND {routine_filter} \
+         ORDER BY CASE WHEN {routine_kind} = 'PROCEDURE' THEN 0 ELSE 1 END, p.proname, p.oid",
+        schema = quote_string_literal(schema),
+    )
+}
+
 async fn get_postgres_schema_object_sources_for_transfer(
     state: &AppState,
     pool_key: &str,
     schema: &str,
+    has_prokind: bool,
 ) -> Result<Vec<db::ObjectSource>, String> {
     let views_sql = format!(
         "SELECT c.relname, pg_get_viewdef(c.oid, true) \
@@ -5073,14 +5386,7 @@ async fn get_postgres_schema_object_sources_for_transfer(
          ORDER BY c.relname",
         quote_string_literal(schema)
     );
-    let routines_sql = format!(
-        "SELECT p.proname, CASE p.prokind WHEN 'p' THEN 'PROCEDURE' ELSE 'FUNCTION' END, pg_get_functiondef(p.oid) \
-         FROM pg_catalog.pg_proc p \
-         JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace \
-         WHERE n.nspname = {} AND p.prokind IN ('p', 'f') \
-         ORDER BY CASE p.prokind WHEN 'p' THEN 0 ELSE 1 END, p.proname, p.oid",
-        quote_string_literal(schema)
-    );
+    let routines_sql = postgres_transfer_routines_sql(schema, has_prokind);
 
     let mut sources = Vec::new();
     for row in execute_on_pool(state, pool_key, &views_sql).await?.rows {
@@ -5317,16 +5623,16 @@ async fn get_postgres_policy_statements_for_transfer(
     Ok(result_rows_to_string_statements(execute_on_pool(state, pool_key, &sql).await?.rows))
 }
 
-async fn get_postgres_ownership_statements_for_transfer(
-    state: &AppState,
-    pool_key: &str,
+fn postgres_transfer_ownership_statements_sql(
     source_schema: &str,
     target_schema: &str,
     tables: &[String],
-) -> Result<Vec<PostgresOwnershipStatement>, String> {
+    has_prokind: bool,
+) -> String {
     let table_list = tables.iter().map(|table| quote_string_literal(table)).collect::<Vec<_>>().join(", ");
     let table_filter = if tables.is_empty() { "FALSE".to_string() } else { format!("c.relname IN ({table_list})") };
-    let sql = format!(
+    let (routine_kind, routine_filter) = postgres_transfer_routine_catalog_sql(has_prokind);
+    format!(
         "WITH relation_owners AS ( \
              SELECT CASE c.relkind \
                       WHEN 'm' THEN format('ALTER MATERIALIZED VIEW %I.%I OWNER TO ', {target_schema}, c.relname) \
@@ -5342,12 +5648,11 @@ async fn get_postgres_ownership_statements_for_transfer(
          ), \
          routine_owners AS ( \
              SELECT format('ALTER %s %I.%I(%s) OWNER TO ', \
-                           CASE p.prokind WHEN 'p' THEN 'PROCEDURE' ELSE 'FUNCTION' END, \
-                           {target_schema}, p.proname, pg_get_function_identity_arguments(p.oid)) AS stmt_prefix, \
+                           {routine_kind}, {target_schema}, p.proname, pg_get_function_identity_arguments(p.oid)) AS stmt_prefix, \
                     pg_get_userbyid(p.proowner) AS owner_name \
              FROM pg_catalog.pg_proc p \
              JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace \
-             WHERE n.nspname = {source_schema} AND p.prokind IN ('p','f') \
+             WHERE n.nspname = {source_schema} AND {routine_filter} \
          ), \
          type_owners AS ( \
              SELECT format('ALTER %s %I.%I OWNER TO ', \
@@ -5370,7 +5675,18 @@ async fn get_postgres_ownership_statements_for_transfer(
         source_schema = quote_string_literal(source_schema),
         target_schema = quote_string_literal(target_schema),
         table_filter = table_filter,
-    );
+    )
+}
+
+async fn get_postgres_ownership_statements_for_transfer(
+    state: &AppState,
+    pool_key: &str,
+    source_schema: &str,
+    target_schema: &str,
+    tables: &[String],
+    has_prokind: bool,
+) -> Result<Vec<PostgresOwnershipStatement>, String> {
+    let sql = postgres_transfer_ownership_statements_sql(source_schema, target_schema, tables, has_prokind);
     Ok(result_rows_to_postgres_ownership_statements(execute_on_pool(state, pool_key, &sql).await?.rows))
 }
 
@@ -5419,6 +5735,7 @@ pub async fn preview_transfer_ownership(
         return Ok(TransferOwnershipPreview { missing_owners: Vec::new(), target_owner: String::new() });
     }
 
+    let has_prokind = postgres_transfer_has_prokind(state, source_pool_key).await?;
     let relation_names = postgres_transfer_relation_names(request);
     let statements = get_postgres_ownership_statements_for_transfer(
         state,
@@ -5426,6 +5743,7 @@ pub async fn preview_transfer_ownership(
         &request.source_schema,
         &request.target_schema,
         &relation_names,
+        has_prokind,
     )
     .await?;
     let roles = distinct_postgres_ownership_roles(&statements);
@@ -5440,16 +5758,16 @@ pub async fn preview_transfer_ownership(
     Ok(TransferOwnershipPreview { missing_owners, target_owner })
 }
 
-async fn get_postgres_grant_statements_for_transfer(
-    state: &AppState,
-    pool_key: &str,
+fn postgres_transfer_grant_statements_sql(
     source_schema: &str,
     target_schema: &str,
     tables: &[String],
-) -> Result<Vec<String>, String> {
+    has_prokind: bool,
+) -> String {
     let table_list = tables.iter().map(|table| quote_string_literal(table)).collect::<Vec<_>>().join(", ");
     let table_filter = if tables.is_empty() { "FALSE".to_string() } else { format!("c.relname IN ({table_list})") };
-    let sql = format!(
+    let (routine_kind, routine_filter) = postgres_transfer_routine_catalog_sql(has_prokind);
+    format!(
         "WITH schema_grants AS ( \
              SELECT format( \
                  'GRANT %s ON SCHEMA %I TO %s%s', \
@@ -5487,20 +5805,22 @@ async fn get_postgres_grant_statements_for_transfer(
              SELECT format( \
                  'GRANT %s ON %s %I.%I(%s) TO %s%s', \
                  string_agg(privilege_type, ', ' ORDER BY privilege_type), \
-                 CASE WHEN prokind = 'p' THEN 'PROCEDURE' ELSE 'FUNCTION' END, \
+                 routine_kind, \
                  {target_schema}, proname, identity_args, \
                  CASE WHEN grantee = 0 THEN 'PUBLIC' ELSE quote_ident(rolname) END, \
                  CASE WHEN bool_or(is_grantable) THEN ' WITH GRANT OPTION' ELSE '' END \
              ) AS stmt \
              FROM ( \
-                 SELECT p.proname, p.prokind, pg_get_function_identity_arguments(p.oid) AS identity_args, a.grantee, a.privilege_type, a.is_grantable, grantee.rolname \
+                 SELECT p.proname, {routine_kind} AS routine_kind, \
+                        pg_get_function_identity_arguments(p.oid) AS identity_args, a.grantee, a.privilege_type, \
+                        a.is_grantable, grantee.rolname \
                  FROM pg_catalog.pg_proc p \
                  JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace \
                  JOIN LATERAL aclexplode(p.proacl) a ON true \
                  LEFT JOIN pg_roles grantee ON grantee.oid = a.grantee \
-                 WHERE n.nspname = {source_schema} AND p.prokind IN ('p','f') \
+                 WHERE n.nspname = {source_schema} AND {routine_filter} \
              ) routines \
-             GROUP BY proname, prokind, identity_args, grantee, rolname \
+             GROUP BY proname, routine_kind, identity_args, grantee, rolname \
          ) \
          SELECT stmt FROM ( \
              SELECT stmt FROM schema_grants \
@@ -5511,7 +5831,18 @@ async fn get_postgres_grant_statements_for_transfer(
         source_schema = quote_string_literal(source_schema),
         target_schema = quote_string_literal(target_schema),
         table_filter = table_filter,
-    );
+    )
+}
+
+async fn get_postgres_grant_statements_for_transfer(
+    state: &AppState,
+    pool_key: &str,
+    source_schema: &str,
+    target_schema: &str,
+    tables: &[String],
+    has_prokind: bool,
+) -> Result<Vec<String>, String> {
+    let sql = postgres_transfer_grant_statements_sql(source_schema, target_schema, tables, has_prokind);
     Ok(result_rows_to_string_statements(execute_on_pool(state, pool_key, &sql).await?.rows))
 }
 
@@ -5891,6 +6222,8 @@ where
                 target_db_type,
                 &[],
                 request.target_catalog.as_deref(),
+                false,
+                false,
             )?;
             for (statement_index, batch_sql) in write_statements.iter().enumerate() {
                 execute_on_pool(state, target_pool_key, batch_sql).await.map_err(|e| {
@@ -6125,8 +6458,9 @@ where
                 target_driver_profile.as_deref(),
                 preserves_target_table_name,
             );
+            let mut reused_source_ddl = false;
             let ddl = if can_reuse_source_ddl {
-                let source_ddl = if let Some(catalog) =
+                let (source_ddl, source_ddl_was_read) = if let Some(catalog) =
                     resolve_external_transfer_catalog(request.source_catalog.as_deref(), source_db_type)
                 {
                     // Doris/StarRocks external catalog: read DDL directly via
@@ -6141,9 +6475,38 @@ where
                         };
                         p.clone()
                     };
-                    db::doris::get_catalog_table_ddl(&pool, catalog, &request.source_database, table).await
-                        .unwrap_or_else(|err| {
+                    match db::doris::get_catalog_table_ddl(&pool, catalog, &request.source_database, table).await {
+                        Ok(ddl) => (ddl, true),
+                        Err(err) => {
                             log::warn!("[transfer] catalog DDL read failed for {table} in catalog '{catalog}': {err}; falling back to generated DDL");
+                            (
+                                generate_create_table_ddl(
+                                    &columns,
+                                    &target_table,
+                                    &request.source_schema,
+                                    &request.target_schema,
+                                    target_db_type,
+                                    source_db_type,
+                                    table_comment.as_deref(),
+                                    request.target_catalog.as_deref(),
+                                ),
+                                false,
+                            )
+                        }
+                    }
+                } else {
+                    match crate::schema::get_table_ddl_core(
+                        state,
+                        &request.source_connection_id,
+                        &request.source_database,
+                        &request.source_schema,
+                        table,
+                        None,
+                    )
+                    .await
+                    {
+                        Ok(ddl) => (ddl, true),
+                        Err(_) => (
                             generate_create_table_ddl(
                                 &columns,
                                 &target_table,
@@ -6153,30 +6516,10 @@ where
                                 source_db_type,
                                 table_comment.as_deref(),
                                 request.target_catalog.as_deref(),
-                            )
-                        })
-                } else {
-                    crate::schema::get_table_ddl_core(
-                        state,
-                        &request.source_connection_id,
-                        &request.source_database,
-                        &request.source_schema,
-                        table,
-                        None,
-                    )
-                    .await
-                    .unwrap_or_else(|_| {
-                        generate_create_table_ddl(
-                            &columns,
-                            &target_table,
-                            &request.source_schema,
-                            &request.target_schema,
-                            target_db_type,
-                            source_db_type,
-                            table_comment.as_deref(),
-                            request.target_catalog.as_deref(),
-                        )
-                    })
+                            ),
+                            false,
+                        ),
+                    }
                 };
                 if contains_oceanbase_mysql_table_options(&source_ddl)
                     && !is_oceanbase_mysql_profile(target_db_type, target_driver_profile.as_deref())
@@ -6192,6 +6535,7 @@ where
                         request.target_catalog.as_deref(),
                     )
                 } else {
+                    reused_source_ddl = source_ddl_was_read;
                     rewrite_transfer_source_table_ddl(
                         &source_ddl,
                         &request.source_schema,
@@ -6214,7 +6558,14 @@ where
             };
             log::info!("[transfer] creating target table: {}", ddl.chars().take(200).collect::<String>());
             let target_table_created = transfer_create_table_created(
-                execute_transfer_ddl_on_pool(state, target_pool_key, &ddl, target_db_type).await,
+                execute_transfer_create_table_ddl_on_pool(
+                    state,
+                    target_pool_key,
+                    &ddl,
+                    target_db_type,
+                    reused_source_ddl,
+                )
+                .await,
                 "Failed to create table",
             )?;
             if target_table_created {
@@ -6265,23 +6616,31 @@ where
         execute_on_pool(state, target_pool_key, &truncate_sql).await.map_err(|e| format!("Failed to truncate: {e}"))?;
     }
 
+    let target_columns = if (request.mode == TransferMode::Upsert
+        && !matches!(target_db_type, DatabaseType::ClickHouse | DatabaseType::Hive))
+        || matches!(target_db_type, DatabaseType::Postgres | DatabaseType::Dameng)
+    {
+        get_columns_for_transfer(
+            state,
+            target_pool_key,
+            &request.target_connection_id,
+            &request.target_database,
+            &request.target_schema,
+            &target_table,
+            request.target_catalog.as_deref(),
+        )
+        .await
+        .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+
     // Determine effective mode and PK columns for upsert
     let (effective_mode, pk_columns) = if request.mode == TransferMode::Upsert {
         if matches!(target_db_type, DatabaseType::ClickHouse | DatabaseType::Hive) {
             log::warn!("[transfer] upsert not supported for {:?}, falling back to append", target_db_type);
             (TransferMode::Append, vec![])
         } else {
-            let target_columns = get_columns_for_transfer(
-                state,
-                target_pool_key,
-                &request.target_connection_id,
-                &request.target_database,
-                &request.target_schema,
-                &target_table,
-                request.target_catalog.as_deref(),
-            )
-            .await
-            .unwrap_or_default();
             let pks: Vec<String> = transfer_key_columns(&target_columns, target_db_type)
                 .into_iter()
                 .filter(|name| col_names.iter().any(|column_name| column_name.eq_ignore_ascii_case(name)))
@@ -6297,23 +6656,10 @@ where
         (request.mode.clone(), vec![])
     };
 
-    let writes_dameng_identity_columns = if matches!(target_db_type, DatabaseType::Dameng) {
-        let target_columns = get_columns_for_transfer(
-            state,
-            target_pool_key,
-            &request.target_connection_id,
-            &request.target_database,
-            &request.target_schema,
-            &target_table,
-            request.target_catalog.as_deref(),
-        )
-        .await
-        .unwrap_or_default();
-        selected_columns_include_identity_columns(&col_names, &target_columns)
-    } else {
-        false
-    };
-
+    let writes_dameng_identity_columns = matches!(target_db_type, DatabaseType::Dameng)
+        && selected_columns_include_identity_columns(&col_names, &target_columns);
+    let overrides_postgres_system_values = matches!(target_db_type, DatabaseType::Postgres)
+        && selected_columns_include_postgres_generated_always_identity_columns(&col_names, &target_columns);
     // Transfer data in batches
     let batch_size = if request.batch_size == 0 { 1000 } else { request.batch_size };
     let mut offset: u64 = 0;
@@ -6334,6 +6680,8 @@ where
             &primary_key_columns,
             request.source_catalog.as_deref(),
         );
+        let (sql, mysql_spatial_markers) =
+            mysql_spatial_transfer_select_sql(sql, &col_names, &col_types, source_db_type, target_db_type);
         let result = execute_on_pool(state, source_pool_key, &sql).await?;
         let row_count = result.rows.len();
 
@@ -6351,6 +6699,8 @@ where
             target_db_type,
             &pk_columns,
             request.target_catalog.as_deref(),
+            overrides_postgres_system_values,
+            mysql_spatial_markers,
         )?;
         for (statement_index, batch_sql) in write_statements.iter().enumerate() {
             execute_transfer_write_statement(
@@ -6601,9 +6951,11 @@ where
         return Ok(TransferObjectOutcome::default());
     }
 
+    let has_prokind = postgres_transfer_has_prokind(state, source_pool_key).await?;
     let mut outcome = TransferObjectOutcome::default();
     let object_sources = filter_object_sources_by_selection(
-        get_postgres_schema_object_sources_for_transfer(state, source_pool_key, &request.source_schema).await?,
+        get_postgres_schema_object_sources_for_transfer(state, source_pool_key, &request.source_schema, has_prokind)
+            .await?,
         &request.objects,
     );
     let materialized_views =
@@ -6644,6 +6996,7 @@ where
             &request.source_schema,
             &request.target_schema,
             &relation_names,
+            has_prokind,
         )
         .await?
     };
@@ -6666,6 +7019,7 @@ where
         &request.source_schema,
         &request.target_schema,
         &relation_names,
+        has_prokind,
     )
     .await?;
     let materialized_view_step_count = materialized_views
@@ -7781,6 +8135,55 @@ mod tests {
         use super::*;
 
         #[test]
+        fn postgres_transfer_routine_catalog_probe_checks_prokind() {
+            let sql = postgres_transfer_routine_catalog_capability_sql();
+
+            assert!(sql.contains("attrelid = 'pg_catalog.pg_proc'::regclass"));
+            assert!(sql.contains("attname = 'prokind'"));
+            assert!(sql.contains("NOT attisdropped"));
+        }
+
+        #[test]
+        fn postgres_transfer_routine_sources_support_legacy_catalogs() {
+            let modern = postgres_transfer_routines_sql("public", true);
+            assert!(modern.contains("CASE p.prokind WHEN 'p' THEN 'PROCEDURE' ELSE 'FUNCTION' END"));
+            assert!(modern.contains("p.prokind IN ('p','f')"));
+            assert!(!modern.contains("p.proisagg"));
+
+            let legacy = postgres_transfer_routines_sql("public", false);
+            assert!(!legacy.contains("prokind"));
+            assert!(legacy.contains("'FUNCTION'"));
+            assert!(legacy.contains("NOT p.proisagg"));
+            assert!(legacy.contains("NOT p.proiswindow"));
+        }
+
+        #[test]
+        fn postgres_transfer_ownership_supports_legacy_catalogs() {
+            let modern = postgres_transfer_ownership_statements_sql("public", "archive", &["items".into()], true);
+            assert!(modern.contains("CASE p.prokind WHEN 'p' THEN 'PROCEDURE' ELSE 'FUNCTION' END"));
+            assert!(modern.contains("p.prokind IN ('p','f')"));
+
+            let legacy = postgres_transfer_ownership_statements_sql("public", "archive", &["items".into()], false);
+            assert!(!legacy.contains("prokind"));
+            assert!(legacy.contains("'FUNCTION'"));
+            assert!(legacy.contains("NOT p.proisagg"));
+            assert!(legacy.contains("NOT p.proiswindow"));
+        }
+
+        #[test]
+        fn postgres_transfer_grants_support_legacy_catalogs() {
+            let modern = postgres_transfer_grant_statements_sql("public", "archive", &["items".into()], true);
+            assert!(modern.contains("CASE p.prokind WHEN 'p' THEN 'PROCEDURE' ELSE 'FUNCTION' END"));
+            assert!(modern.contains("p.prokind IN ('p','f')"));
+
+            let legacy = postgres_transfer_grant_statements_sql("public", "archive", &["items".into()], false);
+            assert!(!legacy.contains("prokind"));
+            assert!(legacy.contains("'FUNCTION' AS routine_kind"));
+            assert!(legacy.contains("NOT p.proisagg"));
+            assert!(legacy.contains("NOT p.proiswindow"));
+        }
+
+        #[test]
         fn filters_postgres_object_sources_by_selection() {
             let sources = vec![
                 db::ObjectSource {
@@ -7983,6 +8386,43 @@ mod tests {
 
         assert!(selected_columns_include_identity_columns(&[String::from("id")], &target_columns));
         assert!(!selected_columns_include_identity_columns(&[String::from("name")], &target_columns));
+    }
+
+    #[test]
+    fn detects_selected_postgres_generated_always_identity_columns() {
+        let target_columns = vec![
+            db::ColumnInfo {
+                name: "ID".to_string(),
+                extra: Some("  GeNeRaTeD\tALWAYS  AS\nIDENTITY (start with 1 increment by 1)".to_string()),
+                ..test_column("ID", "bigint")
+            },
+            db::ColumnInfo {
+                extra: Some("generated by default as identity".to_string()),
+                ..test_column("by_default_id", "bigint")
+            },
+            db::ColumnInfo {
+                extra: Some("generated always as (quantity * 2) stored".to_string()),
+                ..test_column("total", "bigint")
+            },
+            test_column("name", "text"),
+        ];
+
+        assert!(selected_columns_include_postgres_generated_always_identity_columns(
+            &[String::from("id")],
+            &target_columns
+        ));
+        assert!(!selected_columns_include_postgres_generated_always_identity_columns(
+            &[String::from("by_default_id")],
+            &target_columns
+        ));
+        assert!(!selected_columns_include_postgres_generated_always_identity_columns(
+            &[String::from("total")],
+            &target_columns
+        ));
+        assert!(!selected_columns_include_postgres_generated_always_identity_columns(
+            &[String::from("name")],
+            &target_columns
+        ));
     }
 
     #[test]
@@ -8322,6 +8762,51 @@ mod tests {
     }
 
     #[test]
+    fn dameng_transfer_ddl_splits_reused_table_comments() {
+        let ddl = "CREATE TABLE \"APP\".\"ITEMS\" (\n\
+                     \"ID\" INTEGER,\n\
+                     \"NOTE\" VARCHAR(100)\n\
+                   );\n\
+                   COMMENT ON TABLE \"APP\".\"ITEMS\" IS 'owner''s; items';\n\
+                   COMMENT ON COLUMN \"APP\".\"ITEMS\".\"NOTE\" IS 'line; two';";
+
+        let statements = transfer_ddl_statements(ddl, &DatabaseType::Dameng);
+
+        assert_eq!(
+            statements,
+            vec![
+                "CREATE TABLE \"APP\".\"ITEMS\" (\n\
+                   \"ID\" INTEGER,\n\
+                   \"NOTE\" VARCHAR(100)\n\
+                 )"
+                .to_string(),
+                "COMMENT ON TABLE \"APP\".\"ITEMS\" IS 'owner''s; items'".to_string(),
+                "COMMENT ON COLUMN \"APP\".\"ITEMS\".\"NOTE\" IS 'line; two'".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn dameng_transfer_ddl_preserves_plsql_blocks_and_single_statements() {
+        let script = "BEGIN\n\
+                        EXECUTE IMMEDIATE 'CREATE TABLE \"APP\".\"AUDIT\" (\"ID\" INTEGER)';\n\
+                      END;\n\
+                      /\n\
+                      COMMENT ON TABLE \"APP\".\"AUDIT\" IS 'audit';";
+
+        let statements = transfer_ddl_statements(script, &DatabaseType::Dameng);
+
+        assert_eq!(statements.len(), 2);
+        assert!(statements[0].starts_with("BEGIN\n"));
+        assert!(statements[0].contains("EXECUTE IMMEDIATE 'CREATE TABLE"));
+        assert!(statements[0].ends_with("END;"));
+        assert_eq!(statements[1], "COMMENT ON TABLE \"APP\".\"AUDIT\" IS 'audit'");
+
+        let single = "CREATE TABLE \"APP\".\"SINGLE_ITEM\" (\"ID\" INTEGER)";
+        assert_eq!(transfer_ddl_statements(single, &DatabaseType::Dameng), vec![single.to_string()]);
+    }
+
+    #[test]
     fn postgres_transfer_ddl_skips_reused_index_statements() {
         let ddl = "CREATE TABLE \"public\".\"items\" (\"id\" integer);\n\
                    CREATE INDEX \"items_lower_idx\" ON \"public\".\"items\" USING btree (\"lower(name)\");\n\
@@ -8486,6 +8971,82 @@ mod tests {
             true,
         ));
         assert!(can_reuse_source_table_ddl(&DatabaseType::Mysql, &DatabaseType::Mysql, None, None, true,));
+    }
+
+    #[test]
+    fn mysql_transfer_collation_recovery_only_reads_ddl_code() {
+        let ddl = r#"CREATE TABLE `COLLATE utf8mb4_identifier_ci` (
+  `id` bigint NOT NULL,
+  `note` varchar(255) COMMENT 'COLLATE utf8mb4_literal_ci',
+  `name` varchar(64) COLLATE utf8mb4_0900_ai_ci,
+  `legacy` varchar(64) collate = utf8mb4_unicode_ci
+) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+/* COLLATE utf8mb4_comment_ci */"#;
+
+        assert_eq!(
+            mysql_ddl_collation_names(ddl),
+            vec!["utf8mb4_0900_ai_ci".to_string(), "utf8mb4_unicode_ci".to_string()]
+        );
+    }
+
+    #[test]
+    fn mysql_transfer_collation_recovery_removes_only_unsupported_clauses() {
+        let ddl = r#"CREATE TABLE `items` (
+  `name` varchar(64) COLLATE utf8mb4_0900_ai_ci COMMENT 'COLLATE utf8mb4_0900_ai_ci',
+  `legacy` varchar(64) COLLATE utf8mb4_unicode_ci
+) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='items'"#;
+        let supported = HashSet::from(["utf8mb4_unicode_ci".to_string()]);
+
+        let rewritten = remove_unsupported_mysql_collations(ddl, &supported);
+
+        assert!(!rewritten.contains("varchar(64) COLLATE utf8mb4_0900_ai_ci"));
+        assert!(!rewritten.contains("utf8mb4 COLLATE=utf8mb4_0900_ai_ci"));
+        assert!(rewritten.contains("COLLATE utf8mb4_unicode_ci"));
+        assert!(rewritten.contains("COMMENT 'COLLATE utf8mb4_0900_ai_ci'"));
+        assert!(rewritten.contains("DEFAULT CHARSET=utf8mb4"));
+        assert!(rewritten.contains("COMMENT='items'"));
+    }
+
+    #[test]
+    fn mysql_transfer_collation_recovery_has_a_narrow_error_gate() {
+        let ddl = "CREATE TABLE `items` (`name` varchar(64) COLLATE utf8mb4_0900_ai_ci)";
+
+        assert_eq!(
+            mysql_collations_for_transfer_ddl_recovery(
+                ddl,
+                "ERROR 1273 (HY000): Unknown collation: 'utf8mb4_0900_ai_ci'",
+                &DatabaseType::Mysql,
+                true,
+            ),
+            Some(vec!["utf8mb4_0900_ai_ci".to_string()])
+        );
+        assert_eq!(
+            mysql_collations_for_transfer_ddl_recovery(
+                ddl,
+                "ERROR 1064 (42000): syntax error",
+                &DatabaseType::Mysql,
+                true,
+            ),
+            None
+        );
+        assert_eq!(
+            mysql_collations_for_transfer_ddl_recovery(
+                ddl,
+                "ERROR 1273 (HY000): Unknown collation",
+                &DatabaseType::Mysql,
+                false,
+            ),
+            None
+        );
+        assert_eq!(
+            mysql_collations_for_transfer_ddl_recovery(
+                ddl,
+                "ERROR 1273 (HY000): Unknown collation",
+                &DatabaseType::Postgres,
+                true,
+            ),
+            None
+        );
     }
 
     #[test]
@@ -9680,6 +10241,8 @@ SELECT 1 FROM dual"#
             &DatabaseType::Oracle,
             &[],
             None,
+            false,
+            false,
         )
         .unwrap();
 
@@ -9702,6 +10265,8 @@ SELECT 1 FROM dual"#
             &DatabaseType::Mysql,
             &[],
             None,
+            false,
+            false,
         )
         .unwrap();
 
@@ -9807,11 +10372,220 @@ SELECT 1 FROM dual"#
             &DatabaseType::Mysql,
             &[String::from("id")],
             None,
+            false,
+            false,
         )
         .unwrap();
 
         assert_eq!(statements.len(), 1);
         assert!(statements[0].contains("ON DUPLICATE KEY UPDATE"));
+    }
+
+    #[test]
+    fn mysql_spatial_transfer_reuses_validated_wkb_markers_for_all_modes() {
+        let columns = [String::from("id"), String::from("location"), String::from("name")];
+        let column_types = [Some(String::from("int")), Some(String::from("point")), Some(String::from("varchar(32)"))];
+        let rows = [vec![json!(1), json!("DBX_WKB:4326:0101000000000000000000F03F0000000000000040"), json!("alpha")]];
+
+        for mode in [TransferMode::Append, TransferMode::Overwrite, TransferMode::Upsert] {
+            let statements = generate_transfer_write_sql_batches(
+                &mode,
+                &columns,
+                &column_types,
+                &rows,
+                "places",
+                "",
+                &DatabaseType::Mysql,
+                &[String::from("id")],
+                None,
+                false,
+                true,
+            )
+            .unwrap();
+
+            assert_eq!(statements.len(), 1);
+            assert!(statements[0].contains("ST_GeomFromWKB(0x0101000000000000000000F03F0000000000000040, 4326)"));
+            assert!(statements[0].contains("'alpha'"));
+            if mode == TransferMode::Upsert {
+                assert!(statements[0].contains("ON DUPLICATE KEY UPDATE"));
+            }
+        }
+    }
+
+    #[test]
+    fn mysql_spatial_transfer_rejects_invalid_markers_and_keeps_public_insert_shape() {
+        let invalid = json!("DBX_WKB:4326:0101000000");
+        let transfer = generate_transfer_write_sql_batches(
+            &TransferMode::Append,
+            &[String::from("location")],
+            &[Some(String::from("point"))],
+            &[vec![invalid.clone()]],
+            "places",
+            "",
+            &DatabaseType::Mysql,
+            &[],
+            None,
+            false,
+            true,
+        )
+        .unwrap();
+        let public = generate_insert_typed(
+            &[String::from("location")],
+            &[Some(String::from("point"))],
+            &[vec![invalid]],
+            "places",
+            "",
+            &DatabaseType::Mysql,
+            None,
+        );
+
+        assert_eq!(transfer, vec!["INSERT INTO `places` (`location`) VALUES\n('DBX_WKB:4326:0101000000')"]);
+        assert_eq!(public, transfer[0]);
+        assert!(!transfer[0].contains("ST_GeomFromWKB"));
+    }
+
+    #[test]
+    fn mysql_spatial_transfer_projection_is_native_mysql_to_mysql_only() {
+        let sql = "SELECT `id`, `location` FROM `places` ORDER BY `id` LIMIT 2 OFFSET 0".to_string();
+        let columns = [String::from("id"), String::from("location")];
+        let column_types = [Some(String::from("int")), Some(String::from("point"))];
+
+        let (native_sql, native_markers) = mysql_spatial_transfer_select_sql(
+            sql.clone(),
+            &columns,
+            &column_types,
+            &DatabaseType::Mysql,
+            &DatabaseType::Mysql,
+        );
+        assert!(native_markers);
+        assert!(native_sql.contains("CONCAT('DBX_WKB:', ST_SRID(`location`), ':', HEX(ST_AsWKB(`location`)))"));
+        assert!(native_sql.ends_with("ORDER BY `id` LIMIT 2 OFFSET 0"));
+
+        let nonspatial_types = [Some(String::from("int")), Some(String::from("varchar(32)"))];
+        assert_eq!(
+            mysql_spatial_transfer_select_sql(
+                sql.clone(),
+                &columns,
+                &nonspatial_types,
+                &DatabaseType::Mysql,
+                &DatabaseType::Mysql,
+            ),
+            (sql.clone(), false)
+        );
+
+        for (source, target) in [
+            (DatabaseType::Mysql, DatabaseType::Postgres),
+            (DatabaseType::Postgres, DatabaseType::Mysql),
+            (DatabaseType::Doris, DatabaseType::Mysql),
+        ] {
+            assert_eq!(
+                mysql_spatial_transfer_select_sql(sql.clone(), &columns, &column_types, &source, &target),
+                (sql.clone(), false)
+            );
+        }
+    }
+
+    #[test]
+    fn postgres_transfer_insert_overrides_generated_always_identity_values() {
+        for mode in [TransferMode::Append, TransferMode::Overwrite] {
+            let statements = generate_transfer_write_sql_batches(
+                &mode,
+                &[String::from("id"), String::from("name")],
+                &[Some(String::from("bigint")), Some(String::from("text"))],
+                &[vec![json!(42), json!("Ada")]],
+                "users",
+                "public",
+                &DatabaseType::Postgres,
+                &[],
+                None,
+                true,
+                false,
+            )
+            .unwrap();
+
+            assert_eq!(statements.len(), 1);
+            assert_eq!(
+                statements[0],
+                "INSERT INTO \"public\".\"users\" (\"id\", \"name\") OVERRIDING SYSTEM VALUE VALUES\n(42, 'Ada')"
+            );
+        }
+    }
+
+    #[test]
+    fn postgres_transfer_upsert_overrides_generated_always_identity_values() {
+        let statements = generate_transfer_write_sql_batches(
+            &TransferMode::Upsert,
+            &[String::from("id"), String::from("name")],
+            &[Some(String::from("bigint")), Some(String::from("text"))],
+            &[vec![json!(42), json!("Ada")]],
+            "users",
+            "public",
+            &DatabaseType::Postgres,
+            &[String::from("id")],
+            None,
+            true,
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(statements.len(), 1);
+        assert_eq!(
+            statements[0],
+            "INSERT INTO \"public\".\"users\" (\"id\", \"name\") OVERRIDING SYSTEM VALUE VALUES\n(42, 'Ada')\nON CONFLICT (\"id\") DO UPDATE SET \"name\" = EXCLUDED.\"name\""
+        );
+    }
+
+    #[test]
+    fn postgres_transfer_without_generated_always_identity_keeps_sql_shape() {
+        let statements = generate_transfer_write_sql_batches(
+            &TransferMode::Append,
+            &[String::from("name")],
+            &[Some(String::from("text"))],
+            &[vec![json!("Ada")]],
+            "users",
+            "public",
+            &DatabaseType::Postgres,
+            &[],
+            None,
+            false,
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(statements, vec!["INSERT INTO \"public\".\"users\" (\"name\") VALUES\n('Ada')"]);
+    }
+
+    #[test]
+    fn postgres_system_value_override_is_not_applied_to_other_dialects() {
+        let statements = generate_transfer_write_sql_batches(
+            &TransferMode::Append,
+            &[String::from("id")],
+            &[Some(String::from("bigint"))],
+            &[vec![json!(42)]],
+            "users",
+            "public",
+            &DatabaseType::Kingbase,
+            &[],
+            None,
+            true,
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(statements, vec!["INSERT INTO \"public\".\"users\" (\"id\") VALUES\n(42)"]);
+    }
+
+    #[test]
+    fn postgres_non_transfer_insert_keeps_existing_sql_shape() {
+        let sql = generate_insert(
+            &[String::from("id"), String::from("name")],
+            &[vec![json!(42), json!("Ada")]],
+            "users",
+            "public",
+            &DatabaseType::Postgres,
+        );
+
+        assert_eq!(sql, "INSERT INTO \"public\".\"users\" (\"id\", \"name\") VALUES\n(42, 'Ada')");
     }
 
     #[test]
@@ -9890,6 +10664,7 @@ SELECT 1 FROM dual"#
             jdbc_driver_class: None,
             jdbc_driver_paths: Vec::new(),
             one_time: false,
+            save_password: true,
             read_only: false,
             is_production: false,
             production_databases: vec![],

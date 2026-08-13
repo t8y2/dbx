@@ -60,15 +60,18 @@ test("tree host owns sidebar data-open generations", () => {
   assert.match(connectionTree, /createSidebarActionTarget\(node\)/);
 });
 
-test("query-tab object source opens clean isolated tabs and honors backend editability", () => {
+test("query-tab object source uses canonical identity and honors backend editability", () => {
   const runtimeHost = readFileSync("apps/desktop/src/components/sidebar/SidebarTreeRuntimeHost.vue", "utf8");
   const openObjectSourceBody = functionBody(runtimeHost, "openObjectSourceDialog");
 
-  assert.match(openObjectSourceBody, /createTab\(connectionId, database, `Source - \$\{node\.label\}`, "query", schema, editableSource, node\.catalog, \{ forceNew: true \}\)/);
+  assert.match(openObjectSourceBody, /queryStore\.openObjectSourceTab\(\{/);
   assert.match(openObjectSourceBody, /raw\.editable !== false/);
   assert.match(openObjectSourceBody, /!\["SEQUENCE", "TRIGGER", "TYPE", "TYPE_BODY"\]\.includes\(resolvedType\)/);
+  assert.match(openObjectSourceBody, /objectType: resolvedType/);
   assert.match(openObjectSourceBody, /signature: node\.signature/);
+  assert.match(openObjectSourceBody, /createTab\(connectionId, database, `Source - \$\{node\.label\}`, "query", schema, editableSource, node\.catalog, \{ forceNew: true \}\)/);
   assert.doesNotMatch(openObjectSourceBody, /queryStore\.updateSql/);
+  assert.doesNotMatch(openObjectSourceBody, /queryStore\.markTabClean/);
 });
 
 test("table copy menu uses the shared single and multi-selection clipboard path", () => {

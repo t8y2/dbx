@@ -56,7 +56,15 @@ pub struct QueryPaginationExecutionPlan {
     pub page_offset: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub count_sql: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exact_query_row_bound: Option<usize>,
     pub use_agent_result_session: bool,
+    /// True when the statement cannot be paginated server-side and must be
+    /// executed once with the whole result streamed back (single execution).
+    /// Only meaningful to in-process callers (query-result export); never
+    /// serialized to the frontend.
+    #[serde(skip)]
+    pub single_execution: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -109,13 +117,20 @@ pub struct SortedQuerySqlOptions {
 pub fn build_query_pagination_execution_plan(
     options: QueryPaginationExecutionPlanOptions,
 ) -> QueryPaginationExecutionPlan {
+    let exact_query_row_bound = if options.database_type == Some(DatabaseType::SqlServer) {
+        top_level_top_row_count(&options.query_base_sql)
+    } else {
+        None
+    };
     let mut plan = QueryPaginationExecutionPlan {
         sql_to_execute: options.sql.clone(),
         page_sql: None,
         page_limit: None,
         page_offset: None,
         count_sql: None,
+        exact_query_row_bound,
         use_agent_result_session: false,
+        single_execution: false,
     };
 
     let counted = build_count_query_sql(CountQuerySqlOptions {
@@ -171,6 +186,17 @@ pub fn build_query_pagination_execution_plan(
         plan.page_limit = Some(options.pagination.limit);
         plan.page_offset = Some(options.pagination.offset);
         plan.use_agent_result_session = true;
+    } else if options.database_type == Some(DatabaseType::Kingbase)
+        && single_selectable_statement(&options.sql).is_ok()
+        && has_top_level_top(&options.sql)
+    {
+        // Kingbase SQL Server compatibility mode rejects a statement that mixes a
+        // top-level TOP with a sibling LIMIT/OFFSET. Without an Agent cursor the
+        // query-result export executes the statement once and streams the whole
+        // result; the TOP clause already bounds the row count.
+        plan.page_limit = Some(options.pagination.limit);
+        plan.page_offset = Some(options.pagination.offset);
+        plan.single_execution = true;
     }
     plan
 }
@@ -212,6 +238,13 @@ pub fn build_paginated_query_sql(options: PaginatedQuerySqlOptions) -> QuerySqlB
         TablePaginationStrategy::AgentMaxRows | TablePaginationStrategy::Unbounded => ok(format!("{statement};")),
         TablePaginationStrategy::IrisTop => ok(add_iris_top_limit(&statement, safe_limit)),
         TablePaginationStrategy::LimitOffset => {
+            // Kingbase SQL Server compatibility mode accepts TOP as a real clause.
+            // Appending LIMIT/OFFSET alongside a top-level TOP would be rejected by
+            // the server ("multiple TOP/LIMIT clauses not allowed"), so fall back to
+            // the Agent cursor / client-side row cap for such statements.
+            if options.database_type == Some(DatabaseType::Kingbase) && has_top_level_top(&statement) {
+                return err("unsupported");
+            }
             let dedup_count = dedup_projection_count_without_order_by(&options.original_sql);
             ok(add_standard_limit(&statement, options.database_type, safe_limit, safe_offset, dedup_count))
         }
@@ -1079,6 +1112,60 @@ fn add_questdb_limit(statement: &str, limit: usize, offset: usize) -> String {
 
 fn has_top_level_limit(sql: &str) -> bool {
     top_level_sql_tokens(sql).iter().any(|token| token.text == "LIMIT")
+}
+
+/// True when the statement has a top-level `TOP` clause (SQL Server dialect).
+/// Kingbase's SQL Server compatibility mode treats TOP as a real clause, so a
+/// statement that already bounds rows with TOP must not receive a sibling LIMIT.
+pub(crate) fn has_top_level_top(sql: &str) -> bool {
+    top_level_sql_tokens(sql).iter().any(|token| token.text == "TOP")
+}
+
+/// Concrete row-count bound of a top-level `TOP` clause when written as a
+/// literal (`TOP n`, `TOP(n)`, `TOP (n)`). Returns `None` for percentage TOP
+/// (`TOP n PERCENT`), `WITH TIES` (the server may return more than `n` rows),
+/// parenthesized expressions (`TOP (100 + 1)`, `TOP (100 * 2)`), or when the
+/// TOP clause has no literal at all. A parenthesized form is only accepted when
+/// it is exactly one integer literal followed by `)`, so the returned bound is
+/// always exact — never a silent under-count.
+pub(crate) fn top_level_top_row_count(sql: &str) -> Option<usize> {
+    let tokens = top_level_sql_tokens(sql);
+    let top_index = tokens.iter().position(|token| token.text == "TOP")?;
+    let top_token = &tokens[top_index];
+    // A modifier keyword directly after TOP (ALL / DISTINCT) means the following
+    // literal is not a plain row-count bound. PERCENT / WITH TIES come after the
+    // literal and are handled by the check below.
+    if tokens.get(top_index + 1).is_some_and(|token| matches!(token.text.as_str(), "ALL" | "DISTINCT")) {
+        return None;
+    }
+    let mut cursor = skip_sql_whitespace(sql, top_token.start + top_token.text.len());
+    let parenthesized = sql.get(cursor..)?.starts_with('(');
+    if parenthesized {
+        cursor = skip_sql_whitespace(sql, cursor + 1);
+    }
+    let count = parse_usize_literal(sql, &mut cursor)?;
+    let after = skip_sql_whitespace(sql, cursor);
+    if parenthesized {
+        // The parenthesized form must be exactly one integer literal followed by
+        // `)`. Anything else is an expression whose real bound we cannot know
+        // (e.g. TOP (100 + 1) returns 101 rows, not 100), so refuse to treat it
+        // as a bound.
+        if !sql.get(after..)?.starts_with(')') {
+            return None;
+        }
+    }
+    // `TOP n PERCENT` and `TOP n WITH TIES` (parenthesized or not) do not bound
+    // the row count to the literal, so reject those adjacent modifiers. A later
+    // table hint such as `FROM events WITH (NOLOCK)` is unrelated to TOP.
+    let after_paren = if parenthesized { skip_sql_whitespace(sql, after + 1) } else { after };
+    let modifier_index = tokens.iter().position(|token| token.start >= after_paren);
+    if modifier_index.is_some_and(|index| {
+        tokens[index].text == "PERCENT"
+            || (tokens[index].text == "WITH" && tokens.get(index + 1).is_some_and(|token| token.text == "TIES"))
+    }) {
+        return None;
+    }
+    Some(count)
 }
 
 fn top_level_limit_row_count(sql: &str) -> Option<usize> {
@@ -3104,6 +3191,190 @@ WHERE u.id = picked.id;
         assert_eq!(plan.page_limit, Some(500));
         assert_eq!(plan.page_offset, Some(0));
         assert!(plan.use_agent_result_session);
+    }
+
+    #[test]
+    fn kingbase_top_clause_falls_back_to_agent_cursor() {
+        for sql in [
+            "SELECT TOP 100 * FROM events",
+            "SELECT TOP(100) * FROM events",
+            "SELECT TOP (100) * FROM events",
+            "SELECT TOP 10 PERCENT * FROM events",
+            "SELECT TOP (2) WITH TIES * FROM events",
+            "SELECT TOP 100 events.name FROM events ORDER BY events.name",
+        ] {
+            let plan = build_query_pagination_execution_plan(QueryPaginationExecutionPlanOptions {
+                sql: sql.to_string(),
+                query_base_sql: sql.to_string(),
+                database_type: Some(DatabaseType::Kingbase),
+                pagination: QueryPagination { limit: 500, offset: 0, session_id: None },
+                use_agent_cursor: true,
+                first_page_uses_actual_sql: false,
+            });
+
+            assert_eq!(plan.sql_to_execute, sql, "sql_to_execute should stay untouched for {sql}");
+            assert!(plan.page_sql.is_none(), "no LIMIT rewrite for {sql}");
+            assert_eq!(plan.page_limit, Some(500));
+            assert_eq!(plan.page_offset, Some(0));
+            assert!(plan.use_agent_result_session, "Agent cursor fallback for {sql}");
+        }
+    }
+
+    #[test]
+    fn kingbase_subquery_top_still_uses_server_pagination() {
+        // A TOP inside a derived table is not a top-level clause, so the outer
+        // statement can still be paginated with LIMIT/OFFSET.
+        let plan = build_query_pagination_execution_plan(QueryPaginationExecutionPlanOptions {
+            sql: "SELECT * FROM (SELECT TOP 100 * FROM events) t".to_string(),
+            query_base_sql: "SELECT * FROM (SELECT TOP 100 * FROM events) t".to_string(),
+            database_type: Some(DatabaseType::Kingbase),
+            pagination: QueryPagination { limit: 500, offset: 0, session_id: None },
+            use_agent_cursor: true,
+            first_page_uses_actual_sql: false,
+        });
+
+        assert_eq!(plan.sql_to_execute, "SELECT * FROM (SELECT TOP 100 * FROM events) t LIMIT 500;");
+        assert_eq!(plan.page_sql, Some(plan.sql_to_execute.clone()));
+        assert_eq!(plan.page_limit, Some(500));
+        assert_eq!(plan.page_offset, Some(0));
+        assert!(!plan.use_agent_result_session);
+    }
+
+    #[test]
+    fn kingbase_top_clause_without_agent_uses_single_execution() {
+        // Non-agent callers (query-result export with use_agent_cursor=false)
+        // cannot open an Agent result session, so the Kingbase-TOP plan must
+        // mark the query single-execution instead: original SQL unchanged, no
+        // page_sql, but bounded page limits the export loop can stream once.
+        for sql in [
+            "SELECT TOP 100 * FROM events",
+            "SELECT TOP(100) * FROM events",
+            "SELECT TOP 10 PERCENT * FROM events",
+            "SELECT TOP (2) WITH TIES * FROM events",
+            "SELECT TOP 100 events.name FROM events JOIN users ON users.id = events.id",
+        ] {
+            let plan = build_query_pagination_execution_plan(QueryPaginationExecutionPlanOptions {
+                sql: sql.to_string(),
+                query_base_sql: sql.to_string(),
+                database_type: Some(DatabaseType::Kingbase),
+                pagination: QueryPagination { limit: 500, offset: 0, session_id: None },
+                use_agent_cursor: false,
+                first_page_uses_actual_sql: true,
+            });
+
+            assert_eq!(plan.sql_to_execute, sql, "sql_to_execute should stay untouched for {sql}");
+            assert!(plan.page_sql.is_none(), "no LIMIT rewrite for {sql}");
+            assert_eq!(plan.page_limit, Some(500));
+            assert_eq!(plan.page_offset, Some(0));
+            assert!(!plan.use_agent_result_session);
+            assert!(plan.single_execution, "single-execution fallback for {sql}");
+        }
+    }
+
+    #[test]
+    fn kingbase_top_with_agent_still_uses_agent_session() {
+        // Grid/query path: with an Agent cursor available the Kingbase-TOP query
+        // keeps the existing bounded Agent-session fallback (not single-execution).
+        let plan = build_query_pagination_execution_plan(QueryPaginationExecutionPlanOptions {
+            sql: "SELECT TOP 100 * FROM events".to_string(),
+            query_base_sql: "SELECT TOP 100 * FROM events".to_string(),
+            database_type: Some(DatabaseType::Kingbase),
+            pagination: QueryPagination { limit: 500, offset: 0, session_id: None },
+            use_agent_cursor: true,
+            first_page_uses_actual_sql: false,
+        });
+
+        assert_eq!(plan.sql_to_execute, "SELECT TOP 100 * FROM events");
+        assert!(plan.page_sql.is_none());
+        assert_eq!(plan.page_limit, Some(500));
+        assert_eq!(plan.page_offset, Some(0));
+        assert!(plan.use_agent_result_session);
+        assert!(!plan.single_execution);
+    }
+
+    #[test]
+    fn top_level_top_row_count_extracts_only_concrete_bounds() {
+        assert_eq!(top_level_top_row_count("SELECT TOP 100 * FROM events"), Some(100));
+        assert_eq!(top_level_top_row_count("SELECT TOP(100) * FROM events"), Some(100));
+        assert_eq!(top_level_top_row_count("SELECT TOP (100) * FROM events"), Some(100));
+        // Whitespace-only inside the parens is still a single literal bound.
+        assert_eq!(top_level_top_row_count("SELECT TOP ( 100 ) * FROM events"), Some(100));
+        assert_eq!(top_level_top_row_count("SELECT TOP 100 events.name FROM events ORDER BY events.name"), Some(100));
+        assert_eq!(top_level_top_row_count("SELECT TOP 100 * FROM events LIMIT 5"), Some(100));
+
+        // Parenthesized expressions have a real bound different from the leading
+        // digits; refusing them (None) beats silently under-counting the export.
+        assert_eq!(top_level_top_row_count("SELECT TOP (100 + 1) * FROM events"), None);
+        assert_eq!(top_level_top_row_count("SELECT TOP (100 * 2) * FROM events"), None);
+        assert_eq!(top_level_top_row_count("SELECT TOP (100 - 1) * FROM events"), None);
+        assert_eq!(top_level_top_row_count("SELECT TOP (len(events.name)) * FROM events"), None);
+
+        // Percentage TOP and WITH TIES are not concrete row-count bounds, with or
+        // without parentheses.
+        assert_eq!(top_level_top_row_count("SELECT TOP 10 PERCENT * FROM events"), None);
+        assert_eq!(top_level_top_row_count("SELECT TOP (10) PERCENT * FROM events"), None);
+        assert_eq!(top_level_top_row_count("SELECT TOP (2) WITH TIES * FROM events"), None);
+        assert_eq!(top_level_top_row_count("SELECT TOP 2 WITH TIES * FROM events"), None);
+        assert_eq!(top_level_top_row_count("SELECT TOP 2 * FROM events WITH (NOLOCK)"), Some(2));
+
+        // No TOP clause at all.
+        assert_eq!(top_level_top_row_count("SELECT * FROM events"), None);
+        // TOP only inside a subquery is not a top-level clause.
+        assert_eq!(top_level_top_row_count("SELECT * FROM (SELECT TOP 5 * FROM events) t"), None);
+    }
+
+    #[test]
+    fn sql_server_pagination_plan_exposes_only_safe_exact_top_bounds() {
+        for (database_type, sql, expected) in [
+            (Some(DatabaseType::SqlServer), "SELECT TOP 100 * FROM events", Some(100)),
+            (Some(DatabaseType::SqlServer), "SELECT TOP(50) * FROM events", Some(50)),
+            (Some(DatabaseType::SqlServer), "SELECT TOP (250) * FROM events", Some(250)),
+            (Some(DatabaseType::SqlServer), "SELECT TOP 10 PERCENT * FROM events", None),
+            (Some(DatabaseType::SqlServer), "SELECT TOP (2) WITH TIES * FROM events", None),
+            (Some(DatabaseType::SqlServer), "SELECT TOP (100 + 1) * FROM events", None),
+            (Some(DatabaseType::SqlServer), "SELECT TOP (@row_count) * FROM events", None),
+            (Some(DatabaseType::SqlServer), "SELECT * FROM (SELECT TOP 5 * FROM events) t", None),
+            (Some(DatabaseType::SqlServer), "SELECT * FROM events", None),
+            (Some(DatabaseType::Postgres), "SELECT TOP 100 * FROM events", None),
+            (Some(DatabaseType::Kingbase), "SELECT TOP 100 * FROM events", None),
+        ] {
+            let plan = build_query_pagination_execution_plan(QueryPaginationExecutionPlanOptions {
+                sql: sql.to_string(),
+                query_base_sql: sql.to_string(),
+                database_type,
+                pagination: QueryPagination { limit: 100, offset: 0, session_id: None },
+                use_agent_cursor: false,
+                first_page_uses_actual_sql: false,
+            });
+
+            assert_eq!(plan.exact_query_row_bound, expected, "unexpected bound for {database_type:?}: {sql}");
+            let serialized = serde_json::to_value(&plan).unwrap();
+            assert_eq!(
+                serialized.get("exactQueryRowBound").and_then(serde_json::Value::as_u64),
+                expected.map(|value| value as u64)
+            );
+        }
+    }
+
+    #[test]
+    fn non_kingbase_limit_offset_is_unaffected_by_top_keyword() {
+        // A column literally named `top` must not be mistaken for a TOP clause
+        // on dialects where TOP is not a clause keyword. Force the server-side
+        // LimitOffset path (no Agent cursor) to exercise the rewrite.
+        let plan = build_query_pagination_execution_plan(QueryPaginationExecutionPlanOptions {
+            sql: "SELECT top, name FROM users".to_string(),
+            query_base_sql: "SELECT top, name FROM users".to_string(),
+            database_type: Some(DatabaseType::Postgres),
+            pagination: QueryPagination { limit: 500, offset: 0, session_id: None },
+            use_agent_cursor: false,
+            first_page_uses_actual_sql: false,
+        });
+
+        assert_eq!(plan.sql_to_execute, "SELECT top, name FROM users LIMIT 500;");
+        assert_eq!(plan.page_sql, Some(plan.sql_to_execute.clone()));
+        assert_eq!(plan.page_limit, Some(500));
+        assert_eq!(plan.page_offset, Some(0));
+        assert!(!plan.use_agent_result_session);
     }
 
     #[test]

@@ -125,7 +125,8 @@ function estimateColumnWidths(columns: readonly string[], rows: readonly (readon
 function safeExcelNumber(value: string): string | undefined {
   const trimmed = value.trim();
   if (!trimmed || !Number.isFinite(Number(trimmed))) return undefined;
-  const significantDigits = (trimmed.split(/[eE]/, 1)[0].match(/\d/g) || []).join("").replace(/^0+/, "").length;
+  const [integerPart, fractionPart = ""] = trimmed.split(/[eE]/, 1)[0].split(".", 2);
+  const significantDigits = `${integerPart}${fractionPart.replace(/0+$/, "")}`.replace(/\D/g, "").replace(/^0+/, "").length;
   return significantDigits <= 15 ? trimmed : undefined;
 }
 

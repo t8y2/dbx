@@ -14,6 +14,10 @@ describe("sqlFormatter", () => {
     }
   });
 
+  it("maps Dameng to its scoped formatter dialect", () => {
+    expect(sqlFormatDialectForDbType("dameng")).toBe("dameng");
+  });
+
   it("preserves ClickHouse lambda arrows when formatting issue #3573 SQL", async () => {
     const sql = `
       WITH industry_code_donghua_id_RYCzfD AS (SELECT id
@@ -50,10 +54,46 @@ describe("sqlFormatter", () => {
     expect(formatted).toContain("AS id");
   });
 
+  it("formats Dameng SQL with a standalone trailing dot without changing the invalid token", async () => {
+    const sql = `SELECT JS1.REC_CREATOR as "recCreator", JS1.REC_CREATOR_JOB_ID as "recCreatorJobId" FROM APSSC.TMPJS01 JS1 WHERE 1=1 AND JS1.SUBSTR(REC_CREATE_TIME,1,8) = ? ORDER BY DECODE(JS1.STATUS,'DRAFT',1,'PENDING_APPROVAL',2,'APPROVED',3,'POSTED',4,'REJECTED',5,'DELETED',6), JS1.REC_CREATE_TIME DESC .`;
+
+    const formatted = await formatSqlForEditing(sql, sqlFormatDialectForDbType("dameng"));
+
+    expect(formatted).toContain('JS1.REC_CREATOR AS "recCreator"');
+    expect(formatted).toContain("DECODE (");
+    expect(formatted.endsWith("JS1.REC_CREATE_TIME DESC .")).toBe(true);
+  });
+
+  it("only recovers a whitespace-separated final dot", async () => {
+    await expect(formatSqlText("SELECT schema.", "dameng")).rejects.toThrow();
+    await expect(formatSqlText("SELECT 1..", "dameng")).rejects.toThrow();
+    await expect(formatSqlText("SELECT 'value .'", "dameng")).resolves.toContain("'value .'");
+  });
+
+  it("preserves whitespace after a recovered trailing dot", async () => {
+    await expect(formatSqlForEditing("SELECT 1 .\n", "dameng")).resolves.toBe("SELECT\n  1 .\n");
+  });
+
+  it("preserves the newline before a trailing dot after a line comment", async () => {
+    await expect(formatSqlForEditing("DELETE FROM accounts -- comment\n .", "dameng")).resolves.toBe("DELETE FROM accounts -- comment\n .");
+  });
+
+  it("does not change trailing-dot formatting for other databases", async () => {
+    await expect(formatSqlText("SELECT 1 .", "generic")).rejects.toThrow();
+    await expect(formatSqlForEditing("SELECT 1 .", "generic")).resolves.toBe("SELECT 1 .");
+  });
+
   it("keeps incomplete editor SQL unchanged when the formatter cannot parse it", async () => {
     const sql = "select *\nfrom dbname.\n;";
 
     await expect(formatSqlText(sql, "mysql")).rejects.toThrow("Parse error at token:");
+    await expect(formatSqlForEditing(sql, "mysql")).resolves.toBe(sql);
+  });
+
+  it("keeps editor SQL unchanged when it contains full-width characters the tokenizer can't parse", async () => {
+    const sql = "update t set a=concat(t.入池时间（审核通过时间）,' 00:00:00') where t.入池时间（审核通过时间） ≠ '';";
+
+    await expect(formatSqlText(sql, "mysql")).rejects.toThrow("Parse error: Unexpected");
     await expect(formatSqlForEditing(sql, "mysql")).resolves.toBe(sql);
   });
 

@@ -1,6 +1,6 @@
 import { computed, ref } from "vue";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { DATA_GRID_QUICK_ENTRY_DRAFT_ROW_ID, useDataGridEditor } from "@/composables/useDataGridEditor";
+import { clearDataGridPendingSnapshot, DATA_GRID_QUICK_ENTRY_DRAFT_ROW_ID, useDataGridEditor } from "@/composables/useDataGridEditor";
 import type { CellValue } from "@/lib/dataGrid/cellValue";
 
 const mocks = vi.hoisted(() => ({
@@ -18,7 +18,7 @@ vi.mock("@/stores/productionSafetyStore", () => ({
   useProductionSafetyStore: () => ({}),
 }));
 
-function createEditor(sourceColumns?: Array<string | undefined>, confirmDangerousRowDeletion = true) {
+function createEditor(sourceColumns?: Array<string | undefined>, confirmDangerousRowDeletion = true, cacheKey?: string) {
   let editor: ReturnType<typeof useDataGridEditor>;
   const result = ref<{ columns: string[]; rows: CellValue[][] }>({
     columns: ["first", "hidden", "last"],
@@ -51,6 +51,7 @@ function createEditor(sourceColumns?: Array<string | undefined>, confirmDangerou
     confirmDangerousRowDeletion: computed(() => confirmDangerousRowDeletion),
     pageSize: ref(100),
     currentPage: ref(1),
+    cacheKey: computed(() => cacheKey),
     getRowItem: (rowId) => {
       if (rowId === DATA_GRID_QUICK_ENTRY_DRAFT_ROW_ID) {
         return {
@@ -82,6 +83,46 @@ function createEditor(sourceColumns?: Array<string | undefined>, confirmDangerou
   editor.newRows.value = [[null, null, null]];
   return editor;
 }
+
+describe("useDataGridEditor result snapshots", () => {
+  it("does not restore scroll or editing state into a replacement result identity", () => {
+    class TestScroller {
+      scrollTop = 0;
+      scrollLeft = 0;
+      scrollTo({ top, left }: ScrollToOptions) {
+        if (typeof top === "number") this.scrollTop = top;
+        if (typeof left === "number") this.scrollLeft = left;
+      }
+    }
+    vi.stubGlobal("HTMLElement", TestScroller);
+    const oldKey = "tab-current-0-execution-1";
+    const previous = createEditor(undefined, true, oldKey);
+    const previousScroller = new TestScroller();
+    previousScroller.scrollTop = 6_400;
+    previousScroller.scrollLeft = 24;
+    previous.scrollerRef.value = previousScroller as unknown as NonNullable<typeof previous.scrollerRef.value>;
+    previous.editingCell.value = { rowId: -1, col: 0 };
+    previous.editValue.value = "Ada";
+    previous.savePendingSnapshot(true, true);
+
+    const replacement = createEditor(undefined, true, "tab-current-0-execution-2");
+    const replacementScroller = new TestScroller();
+    replacement.scrollerRef.value = replacementScroller as unknown as NonNullable<typeof replacement.scrollerRef.value>;
+    replacement.restorePendingSnapshotFocus();
+    expect(replacement.editingCell.value).toBeNull();
+    expect(replacementScroller.scrollTop).toBe(0);
+    expect(replacementScroller.scrollLeft).toBe(0);
+
+    clearDataGridPendingSnapshot(oldKey);
+    const oldIdentity = createEditor(undefined, true, oldKey);
+    const oldIdentityScroller = new TestScroller();
+    oldIdentity.scrollerRef.value = oldIdentityScroller as unknown as NonNullable<typeof oldIdentity.scrollerRef.value>;
+    oldIdentity.restorePendingSnapshotFocus();
+    expect(oldIdentity.editingCell.value).toBeNull();
+    expect(oldIdentityScroller.scrollTop).toBe(0);
+    expect(oldIdentityScroller.scrollLeft).toBe(0);
+  });
+});
 
 describe("useDataGridEditor row deletion confirmation", () => {
   it("keeps the row pending until confirmation when confirmation is enabled", () => {
@@ -242,5 +283,14 @@ describe("useDataGridEditor appendPastedRowsToNewRow", () => {
       ["Ada", null, null],
       ["Grace", null, null],
     ]);
+  });
+
+  it("uses resolved full values instead of preview values when cloning", () => {
+    const editor = createEditor();
+    editor.newRows.value = [["Ada", "preview...", "Lovelace"]];
+
+    editor.cloneRow(-1, new Map([[1, "full payload"]]));
+
+    expect(editor.newRows.value[1]).toEqual(["Ada", "full payload", "Lovelace"]);
   });
 });

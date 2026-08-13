@@ -126,6 +126,8 @@ class MongoAgentTest {
         assertTrue(containsCapability(result.getAsJsonArray("capabilities"), AgentProtocol.CAPABILITY_METADATA));
         assertTrue(containsCapability(result.getAsJsonArray("capabilities"), AgentProtocol.CAPABILITY_MONGO_DROP_DATABASE));
         assertTrue(containsCapability(result.getAsJsonArray("capabilities"), AgentProtocol.CAPABILITY_MONGO_CLONE_COLLECTION));
+        assertTrue(containsCapability(result.getAsJsonArray("capabilities"), AgentProtocol.CAPABILITY_MONGO_RUN_COMMAND));
+        assertTrue(containsCapability(result.getAsJsonArray("capabilities"), AgentProtocol.CAPABILITY_MONGO_INSERT_DOCUMENTS));
     }
 
     @Test
@@ -146,6 +148,8 @@ class MongoAgentTest {
         assertTrue(containsCapability(result.getAsJsonArray("capabilities"), AgentProtocol.CAPABILITY_MULTI_SESSION));
         assertTrue(containsCapability(result.getAsJsonArray("capabilities"), AgentProtocol.CAPABILITY_MONGO_DROP_DATABASE));
         assertTrue(containsCapability(result.getAsJsonArray("capabilities"), AgentProtocol.CAPABILITY_MONGO_CLONE_COLLECTION));
+        assertTrue(containsCapability(result.getAsJsonArray("capabilities"), AgentProtocol.CAPABILITY_MONGO_RUN_COMMAND));
+        assertTrue(containsCapability(result.getAsJsonArray("capabilities"), AgentProtocol.CAPABILITY_MONGO_INSERT_DOCUMENTS));
     }
 
     @Test
@@ -537,6 +541,67 @@ class MongoAgentTest {
     }
 
     @Test
+    void runCommandExecutesTheCommandDocumentAndPreservesNestedExtendedJson() {
+        List<Document> commands = new ArrayList<>();
+        MongoDatabase database = (MongoDatabase) Proxy.newProxyInstance(
+            MongoDatabase.class.getClassLoader(),
+            new Class<?>[] {MongoDatabase.class},
+            (proxy, method, args) -> {
+                if ("runCommand".equals(method.getName())) {
+                    commands.add(new Document((Document) args[0]));
+                    return new Document("ok", 1)
+                        .append("cursor", new Document("firstBatch", List.of(
+                            new Document("_id", new ObjectId("507f1f77bcf86cd799439011"))
+                                .append("counter", 9_007_199_254_740_992L)
+                        )));
+                }
+                throw new UnsupportedOperationException(method.getName());
+            }
+        );
+        MongoClient client = (MongoClient) Proxy.newProxyInstance(
+            MongoClient.class.getClassLoader(),
+            new Class<?>[] {MongoClient.class},
+            (proxy, method, args) -> {
+                if ("getDatabase".equals(method.getName())) {
+                    assertEquals("app", args[0]);
+                    return database;
+                }
+                throw new UnsupportedOperationException(method.getName());
+            }
+        );
+        JsonObject params = new JsonObject();
+        params.addProperty("database", "app");
+        params.addProperty("command_json", "{\"find\":\"orders\",\"filter\":{\"active\":true}}");
+        JsonObject request = new JsonObject();
+        request.addProperty("jsonrpc", "2.0");
+        request.addProperty("id", 10);
+        request.addProperty("method", "run_command");
+        request.add("params", params);
+
+        JsonObject json = JsonParser.parseString(MongoAgent.handleRequest(request.toString(), client)).getAsJsonObject();
+
+        assertFalse(json.has("error"), json.toString());
+        assertEquals(
+            new Document("find", "orders").append("filter", new Document("active", true)),
+            commands.get(0)
+        );
+        JsonObject result = json.getAsJsonObject("result");
+        assertEquals(1, result.get("total").getAsInt());
+        assertEquals(1, result.getAsJsonArray("documents").get(0).getAsJsonObject().get("ok").getAsInt());
+        JsonObject copiedId = result.getAsJsonArray("extended_documents")
+            .get(0).getAsJsonObject()
+            .getAsJsonObject("cursor").getAsJsonArray("firstBatch")
+            .get(0).getAsJsonObject().getAsJsonObject("_id");
+        assertEquals("507f1f77bcf86cd799439011", copiedId.get("$oid").getAsString());
+        JsonObject copiedCounter = result.getAsJsonArray("extended_documents")
+            .get(0).getAsJsonObject()
+            .getAsJsonObject("cursor").getAsJsonArray("firstBatch")
+            .get(0).getAsJsonObject().getAsJsonObject("counter");
+        assertEquals("9007199254740992", copiedCounter.get("$numberLong").getAsString());
+        assertTrue(AgentProtocol.MONGO_LEGACY_METHODS.contains(AgentProtocol.MONGO_METHOD_RUN_COMMAND));
+    }
+
+    @Test
     void createIndexMethodIsRecognizedOverJsonRpc() {
         String response = MongoAgent.handleRequest(
             "{\"jsonrpc\":\"2.0\",\"id\":12,\"method\":\"create_index\","
@@ -809,6 +874,69 @@ class MongoAgentTest {
         assertEquals(10, json.get("id").getAsInt());
         assertEquals("Not connected", json.getAsJsonObject("error").get("message").getAsString());
         assertFalse(json.getAsJsonObject("error").get("message").getAsString().contains("Unknown method"));
+    }
+
+    @Test
+    void insertDocumentsRpcInsertsTheReportedArrayInOneRequest() {
+        List<List<Document>> batches = new ArrayList<>();
+        List<String> calls = new ArrayList<>();
+        MongoClient client = recordingInsertMongoClient(calls, batches);
+        String documents = "[{\"type\":999,\"refid\":\"11\",\"externalId\":\"67ab71a2a5d1c681530dc61c\",\"__v\":0},"
+            + "{\"type\":999,\"refid\":\"12\",\"externalId\":\"67fd678f595634e3a3094f5b\",\"__v\":0}]";
+
+        JsonObject response = insertDocumentsRpc(client, 40, "user", documents);
+
+        assertFalse(response.has("error"), response.toString());
+        assertEquals(2, response.getAsJsonObject("result").get("affected_rows").getAsInt());
+        assertEquals(List.of("getDatabase:app", "getCollection:user", "insertMany:2"), calls);
+        assertEquals(1, batches.size());
+        assertEquals("11", batches.get(0).get(0).getString("refid"));
+        assertEquals("12", batches.get(0).get(1).getString("refid"));
+        assertTrue(AgentProtocol.MONGO_LEGACY_METHODS.contains(AgentProtocol.MONGO_METHOD_INSERT_DOCUMENTS));
+        assertTrue(AgentProtocol.MONGO_LEGACY_CAPABILITIES.contains(AgentProtocol.CAPABILITY_MONGO_INSERT_DOCUMENTS));
+    }
+
+    @Test
+    void insertDocumentsRpcUsesInsertManyForOneDocument() {
+        List<List<Document>> batches = new ArrayList<>();
+        List<String> calls = new ArrayList<>();
+        MongoClient client = recordingInsertMongoClient(calls, batches);
+
+        JsonObject response = insertDocumentsRpc(client, 41, "users", "[{\"name\":\"Ada\"}]");
+
+        assertFalse(response.has("error"), response.toString());
+        assertEquals(1, response.getAsJsonObject("result").get("affected_rows").getAsInt());
+        assertEquals(List.of("getDatabase:app", "getCollection:users", "insertMany:1"), calls);
+        assertEquals(new Document("name", "Ada"), batches.get(0).get(0));
+    }
+
+    @Test
+    void insertDocumentsRpcTreatsAnEmptyArrayAsANoOp() {
+        List<List<Document>> batches = new ArrayList<>();
+        List<String> calls = new ArrayList<>();
+        MongoClient client = recordingInsertMongoClient(calls, batches);
+
+        JsonObject response = insertDocumentsRpc(client, 42, "users", "[]");
+
+        assertFalse(response.has("error"), response.toString());
+        assertEquals(0, response.getAsJsonObject("result").get("affected_rows").getAsInt());
+        assertTrue(calls.isEmpty());
+        assertTrue(batches.isEmpty());
+    }
+
+    @Test
+    void insertDocumentsRpcRejectsInvalidBatchesBeforeDatabaseAccess() {
+        for (String documents : List.of("{", "{\"name\":\"Ada\"}", "[1]", "[{\"name\":\"Ada\"},null]")) {
+            List<List<Document>> batches = new ArrayList<>();
+            List<String> calls = new ArrayList<>();
+            MongoClient client = recordingInsertMongoClient(calls, batches);
+
+            JsonObject response = insertDocumentsRpc(client, 43, "users", documents);
+
+            assertTrue(response.has("error"), documents + ": " + response);
+            assertTrue(calls.isEmpty(), documents + ": " + calls);
+            assertTrue(batches.isEmpty(), documents + ": " + batches);
+        }
     }
 
     @Test
@@ -1242,6 +1370,63 @@ class MongoAgentTest {
         JsonObject response = JsonParser.parseString(MongoAgent.handleRequest(request.toString(), client)).getAsJsonObject();
         assertFalse(response.has("error"), response.toString());
         assertEquals(1, response.getAsJsonObject("result").get("modified_count").getAsLong());
+    }
+
+    private static JsonObject insertDocumentsRpc(
+        MongoClient client, int id, String collection, String documents
+    ) {
+        JsonObject params = new JsonObject();
+        params.addProperty("database", "app");
+        params.addProperty("collection", collection);
+        params.addProperty("docs_json", documents);
+
+        JsonObject request = new JsonObject();
+        request.addProperty("jsonrpc", "2.0");
+        request.addProperty("id", id);
+        request.addProperty("method", "insert_documents");
+        request.add("params", params);
+        return JsonParser.parseString(MongoAgent.handleRequest(request.toString(), client)).getAsJsonObject();
+    }
+
+    @SuppressWarnings("unchecked")
+    private static MongoClient recordingInsertMongoClient(
+        List<String> calls, List<List<Document>> batches
+    ) {
+        MongoCollection<Document> collection = (MongoCollection<Document>) Proxy.newProxyInstance(
+            MongoCollection.class.getClassLoader(),
+            new Class<?>[] {MongoCollection.class},
+            (proxy, method, args) -> {
+                if ("insertMany".equals(method.getName())) {
+                    List<Document> batch = ((List<Document>) args[0]).stream().map(Document::new).toList();
+                    batches.add(batch);
+                    calls.add("insertMany:" + batch.size());
+                    return null;
+                }
+                throw new UnsupportedOperationException(method.getName());
+            }
+        );
+        MongoDatabase database = (MongoDatabase) Proxy.newProxyInstance(
+            MongoDatabase.class.getClassLoader(),
+            new Class<?>[] {MongoDatabase.class},
+            (proxy, method, args) -> {
+                if ("getCollection".equals(method.getName())) {
+                    calls.add("getCollection:" + args[0]);
+                    return collection;
+                }
+                throw new UnsupportedOperationException(method.getName());
+            }
+        );
+        return (MongoClient) Proxy.newProxyInstance(
+            MongoClient.class.getClassLoader(),
+            new Class<?>[] {MongoClient.class},
+            (proxy, method, args) -> {
+                if ("getDatabase".equals(method.getName())) {
+                    calls.add("getDatabase:" + args[0]);
+                    return database;
+                }
+                throw new UnsupportedOperationException(method.getName());
+            }
+        );
     }
 
     @SuppressWarnings("unchecked")

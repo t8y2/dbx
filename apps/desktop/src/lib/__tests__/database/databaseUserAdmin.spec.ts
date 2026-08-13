@@ -1,9 +1,34 @@
 import { describe, expect, it } from "vitest";
-import { dorisGrantPrivilegesSql, dorisGrantsResult, dorisPrivilegeTargetSql, dorisUsersResult, getDatabaseUserAdminProvider, kingbaseShowGrantsSql, mysqlPrivilegeSelectionFromGrants } from "@/lib/database/databaseUserAdmin";
-import type { QueryResult } from "@/types/database";
+import {
+  dorisGrantPrivilegesSql,
+  dorisGrantsResult,
+  dorisPrivilegeTargetSql,
+  dorisUsersResult,
+  gaussdbMUserAdminProvider,
+  getDatabaseUserAdminProvider,
+  kingbaseShowGrantsSql,
+  kingbaseUserAdminProvider,
+  mysqlPrivilegeSelectionFromGrants,
+  postgresUserAdminProvider,
+  resolveDatabaseUserAdminProviderForConnection,
+} from "@/lib/database/databaseUserAdmin";
+import type { ConnectionConfig, QueryResult } from "@/types/database";
 
 function result(columns: string[], rows: QueryResult["rows"]): QueryResult {
   return { columns, rows, affected_rows: 0, execution_time_ms: 1 };
+}
+
+function connection(dbType: ConnectionConfig["db_type"], driverProfile?: string): ConnectionConfig {
+  return {
+    id: `${dbType}-connection`,
+    name: dbType,
+    db_type: dbType,
+    driver_profile: driverProfile,
+    host: "localhost",
+    port: 5432,
+    username: "tester",
+    password: "",
+  };
 }
 
 describe("MySQL grant privilege selection", () => {
@@ -55,6 +80,48 @@ describe("MySQL grant privilege selection", () => {
 });
 
 describe("database user admin providers", () => {
+  it("selects the dedicated provider for GaussDB M-mode connections", () => {
+    const provider = resolveDatabaseUserAdminProviderForConnection(connection("gaussdb", "GAUSSDB-M"));
+
+    expect(provider).toBe(gaussdbMUserAdminProvider);
+  });
+
+  it("quotes role result aliases for M-mode and PostgreSQL-compatible providers", () => {
+    const gaussdbMSql = gaussdbMUserAdminProvider.listUsersSql();
+    const postgresSql = postgresUserAdminProvider.listUsersSql();
+    const kingbaseSql = kingbaseUserAdminProvider.listUsersSql();
+
+    expect(gaussdbMSql).toContain("r.rolname AS `user`");
+    expect(gaussdbMSql).toContain("END AS `host`");
+    expect(gaussdbMSql).toContain(") AS `plugin`");
+    for (const sql of [postgresSql, kingbaseSql]) {
+      expect(sql).toContain('r.rolname AS "user"');
+      expect(sql).toContain('END AS "host"');
+      expect(sql).toContain(') AS "plugin"');
+    }
+  });
+
+  it("uses M-mode-compatible table grant SQL", () => {
+    const sql = gaussdbMUserAdminProvider.showGrantsSql({ user: "role'o", host: "LOGIN" });
+
+    expect(sql).toContain("FROM information_schema.table_privileges");
+    expect(sql).toContain("concat('Role: '");
+    expect(sql).toContain("AS `rolbypassrls`");
+    expect(sql).toContain("AS `sort`");
+    expect(sql).toContain("AS `line`");
+    expect(sql).toContain("ORDER BY `sort`, `line`");
+    expect(sql).toContain("WHERE r.rolname = 'role''o'");
+    expect(sql).not.toContain("role_table_grants");
+    expect(sql).not.toContain(" || ");
+  });
+
+  it("keeps native GaussDB, PostgreSQL, and Kingbase providers unchanged", () => {
+    expect(resolveDatabaseUserAdminProviderForConnection(connection("gaussdb"))).toBe(postgresUserAdminProvider);
+    expect(resolveDatabaseUserAdminProviderForConnection(connection("postgres"))).toBe(postgresUserAdminProvider);
+    expect(resolveDatabaseUserAdminProviderForConnection(connection("kingbase"))).toBe(kingbaseUserAdminProvider);
+    expect(getDatabaseUserAdminProvider("gaussdb")).toBe(postgresUserAdminProvider);
+  });
+
   it("uses Doris 2.x user and privilege syntax", () => {
     const provider = getDatabaseUserAdminProvider("doris");
 

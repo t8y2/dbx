@@ -212,6 +212,89 @@ test("preserves loaded children when the connection itself matches search", () =
   assert.equal(filtered[0]?.children?.[0]?.children?.[0]?.label, "products");
 });
 
+test("omits synthetic connection management entries when the connection itself matches search", () => {
+  const nodes: TreeNode[] = [
+    {
+      id: "conn:1",
+      label: "1000-test",
+      type: "connection",
+      connectionId: "conn:1",
+      isExpanded: false,
+      children: [
+        {
+          id: "conn:1:inventory",
+          label: "inventory",
+          type: "database",
+          connectionId: "conn:1",
+          database: "inventory",
+        },
+        {
+          id: "conn:1:__user_admin",
+          label: "tree.userAdmin",
+          type: "user-admin",
+          connectionId: "conn:1",
+          database: "",
+        },
+        {
+          id: "conn:1:__dameng_jobs",
+          label: "tree.damengJobAdmin",
+          type: "dameng-job-admin",
+          connectionId: "conn:1",
+          database: "",
+        },
+      ],
+    },
+  ];
+
+  const filtered = filterSidebarTree(nodes, "1000", new Set());
+
+  assert.deepEqual(
+    filtered[0]?.children?.map((child) => child.type),
+    ["database"],
+  );
+  assert.equal(filtered[0]?.isExpanded, true);
+});
+
+test("keeps a disconnected connection search result collapsed when it only has synthetic management entries", () => {
+  const nodes: TreeNode[] = [
+    {
+      id: "conn:1",
+      label: "1000",
+      type: "connection",
+      connectionId: "conn:1",
+      isExpanded: false,
+      children: [
+        {
+          id: "conn:1:__user_admin",
+          label: "tree.userAdmin",
+          type: "user-admin",
+          connectionId: "conn:1",
+          database: "",
+        },
+      ],
+    },
+  ];
+
+  const filtered = filterSidebarTree(nodes, "1000", new Set());
+
+  assert.deepEqual(filtered[0]?.children, []);
+  assert.equal(filtered[0]?.isExpanded, false);
+});
+
+test("does not return synthetic connection management entries as direct text matches", () => {
+  const nodes: TreeNode[] = [
+    {
+      id: "conn:1:__user_admin",
+      label: "tree.userAdmin",
+      type: "user-admin",
+      connectionId: "conn:1",
+      database: "",
+    },
+  ];
+
+  assert.deepEqual(filterSidebarTree(nodes, "userAdmin", new Set()), []);
+});
+
 test("temporarily collapses an empty object group within a preserved search subtree", () => {
   const tablesGroup: TreeNode = {
     id: "conn:1:inventory:__tables",

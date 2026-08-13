@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { useI18n } from "vue-i18n";
 import type { SchemaDiffObject, DiffOperationType, DiffObjectKind } from "@/lib/schema/schemaDiff";
-import { Table, Eye, FunctionSquare, ListOrdered, ScrollText, UserCog, ListTree, Link2, Zap, ChevronDown, ChevronRight, ArrowRightLeft, PlusCircle, XCircle, MinusCircle } from "@lucide/vue";
+import { Table, Eye, FunctionSquare, ListOrdered, ScrollText, UserCog, Columns3, ListTree, Link2, Zap, ChevronDown, ChevronRight, ArrowRightLeft, PlusCircle, XCircle, MinusCircle } from "@lucide/vue";
 
 const { t } = useI18n();
 
@@ -70,6 +70,8 @@ function getObjectIcon(kind: DiffObjectKind) {
       return ScrollText;
     case "owner":
       return UserCog;
+    case "column":
+      return Columns3;
     case "index":
       return ListTree;
     case "foreignKey":
@@ -95,6 +97,8 @@ function getObjectIconColor(kind: DiffObjectKind): string {
       return "text-pink-500";
     case "owner":
       return "text-indigo-500";
+    case "column":
+      return "text-sky-500";
     case "index":
       return "text-teal-500";
     case "foreignKey":
@@ -120,6 +124,8 @@ function getObjectTypeLabel(kind: DiffObjectKind): string {
       return "diff.objectKindLabel.rule";
     case "owner":
       return "diff.objectKindLabel.owner";
+    case "column":
+      return "diff.objectKindLabel.column";
     case "index":
       return "diff.objectKindLabel.index";
     case "foreignKey":
@@ -164,10 +170,11 @@ function onObjectCheckboxChange(obj: SchemaDiffObject, event: Event) {
 }
 
 function formatObjectName(obj: SchemaDiffObject): string {
+  const name = obj.parentName ? `${obj.parentName}.${obj.name}` : obj.name;
   if (obj.objectKind === "function" && obj.arguments) {
-    return `${obj.name}(${obj.arguments})`;
+    return `${name}(${obj.arguments})`;
   }
-  return obj.name;
+  return name;
 }
 </script>
 
@@ -217,7 +224,7 @@ function formatObjectName(obj: SchemaDiffObject): string {
                 <input type="checkbox" class="accent-primary shrink-0" :checked="obj.selected" @click.stop @change="onObjectCheckboxChange(obj, $event)" />
                 <component :is="getObjectIcon(obj.objectKind)" class="w-3.5 h-3.5 shrink-0" :class="getObjectIconColor(obj.objectKind)" />
                 <span class="text-xs truncate" :class="obj.operationType === 'create' ? 'text-green-500' : ''">
-                  {{ obj.sourceName ? (obj.objectKind === "function" && obj.arguments ? `${obj.sourceName}(${obj.arguments})` : obj.sourceName) : formatObjectName(obj) }}
+                  {{ obj.sourceName ? (obj.parentName ? `${obj.parentName}.${obj.sourceName}` : obj.objectKind === "function" && obj.arguments ? `${obj.sourceName}(${obj.arguments})` : obj.sourceName) : formatObjectName(obj) }}
                 </span>
               </div>
               <div v-else></div>
@@ -232,7 +239,7 @@ function formatObjectName(obj: SchemaDiffObject): string {
                 <input v-if="obj.operationType === 'delete'" type="checkbox" class="accent-primary shrink-0" :checked="obj.selected" @click.stop @change="onObjectCheckboxChange(obj, $event)" />
                 <component :is="getObjectIcon(obj.objectKind)" class="w-3.5 h-3.5 shrink-0" :class="getObjectIconColor(obj.objectKind)" />
                 <span class="text-xs truncate" :class="obj.operationType === 'delete' ? 'text-red-500 line-through' : ''">
-                  {{ obj.targetName ? (obj.objectKind === "function" && obj.arguments ? `${obj.targetName}(${obj.arguments})` : obj.targetName) : formatObjectName(obj) }}
+                  {{ obj.targetName ? (obj.parentName ? `${obj.parentName}.${obj.targetName}` : obj.objectKind === "function" && obj.arguments ? `${obj.targetName}(${obj.arguments})` : obj.targetName) : formatObjectName(obj) }}
                 </span>
               </div>
               <div v-else></div>

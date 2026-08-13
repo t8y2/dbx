@@ -13,7 +13,9 @@ use argon2::password_hash::rand_core::OsRng;
 use argon2::password_hash::SaltString;
 use argon2::{Argon2, PasswordHasher};
 use axum::extract::DefaultBodyLimit;
+use axum::http::Uri;
 use axum::middleware;
+use axum::response::Redirect;
 use axum::routing::{delete, get, post};
 use axum::Router;
 use dbx_core::connection::AppState;
@@ -65,12 +67,13 @@ fn web_compression_predicate() -> impl Predicate {
 }
 
 fn web_body_limit_bytes() -> usize {
+    let value = std::env::var("DBX_MAX_UPLOAD_MB").ok();
+    web_body_limit_bytes_from_value(value.as_deref())
+}
+
+fn web_body_limit_bytes_from_value(value: Option<&str>) -> usize {
     const DEFAULT_MB: usize = 1024;
-    let mb = std::env::var("DBX_MAX_UPLOAD_MB")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .filter(|value| *value > 0)
-        .unwrap_or(DEFAULT_MB);
+    let mb = value.and_then(|value| value.parse::<usize>().ok()).filter(|value| *value > 0).unwrap_or(DEFAULT_MB);
     mb.saturating_mul(1024 * 1024)
 }
 
@@ -99,6 +102,49 @@ fn normalize_public_base_path(value: Option<String>) -> String {
     } else {
         format!("/{trimmed}")
     }
+}
+
+fn add_public_base_path_redirect<S>(app: Router<S>, public_base_path: &str) -> Router<S>
+where
+    S: Clone + Send + Sync + 'static,
+{
+    if public_base_path == "/" {
+        return app;
+    }
+
+    // Derive the target from the configured base path so single- and multi-segment prefixes both work.
+    let redirect_target = format!("{public_base_path}/");
+    app.route(
+        public_base_path,
+        get(move |uri: Uri| {
+            let redirect_target = redirect_target.clone();
+            async move {
+                let location = uri.query().map(|query| format!("{redirect_target}?{query}")).unwrap_or(redirect_target);
+                Redirect::permanent(&location)
+            }
+        }),
+    )
+}
+
+fn mount_public_base_path(mut app: Router, public_base_path: &str, static_dir: Option<&std::path::Path>) -> Router {
+    if let Some(static_dir) = static_dir {
+        use tower_http::services::{ServeDir, ServeFile};
+        let index_path = static_dir.join("index.html");
+        let serve_dir = ServeDir::new(static_dir).not_found_service(ServeFile::new(index_path));
+        app = app.fallback_service(serve_dir);
+    }
+
+    if public_base_path == "/" {
+        return app;
+    }
+
+    app = Router::new().nest(public_base_path, app);
+    app = add_public_base_path_redirect(app, public_base_path);
+    if let Some(static_dir) = static_dir {
+        use tower_http::services::ServeFile;
+        app = app.route_service(&format!("{public_base_path}/"), ServeFile::new(static_dir.join("index.html")));
+    }
+    app
 }
 
 #[cfg(feature = "mq-admin")]
@@ -292,6 +338,7 @@ async fn main() {
         .route("/connection/save", post(routes::connection::save_connections))
         .route("/connection/list", get(routes::connection::load_connections))
         .route("/connection/mcp/add", post(routes::connection::mcp_add_connection))
+        .route("/connection/mcp/duplicate", post(routes::connection::mcp_duplicate_connection))
         .route("/connection/mcp/remove", post(routes::connection::mcp_remove_connection))
         .route("/plugins", get(routes::plugins::list_plugins))
         // JDBC
@@ -345,6 +392,7 @@ async fn main() {
         .route("/agents/progress/{operationId}", get(routes::agents::agent_progress))
         // Schema
         .route("/schema/databases", get(routes::schema::list_databases))
+        .route("/schema/database-metadata", get(routes::schema::list_database_metadata))
         .route("/schema/database-storage", post(routes::schema::list_database_storage))
         .route("/schema/sqlserver/completion-context", get(routes::schema::get_sqlserver_completion_context))
         .route("/schema/doris/catalogs", get(routes::schema::list_doris_catalogs))
@@ -739,6 +787,7 @@ async fn main() {
         .route("/document-store/insert-document", post(routes::document_store::insert_document))
         .route("/document-store/update-document", post(routes::document_store::update_document))
         .route("/document-store/delete-document", post(routes::document_store::delete_document))
+        .route("/document-store/save-meilisearch-batch", post(routes::document_store::save_meilisearch_batch))
         .route("/mongo/find-documents", post(routes::mongo::find_documents))
         .route("/mongo/parse-shell-command", post(routes::mongo::parse_shell_command))
         .route("/mongo/explain-find", post(routes::mongo::explain_find))
@@ -750,6 +799,7 @@ async fn main() {
         .route("/mongo/distinct", post(routes::mongo::distinct))
         .route("/mongo/create-index", post(routes::mongo::create_index))
         .route("/mongo/create-user", post(routes::mongo::create_user))
+        .route("/mongo/run-command", post(routes::mongo::run_command))
         .route("/mongo/drop-indexes", post(routes::mongo::drop_indexes))
         .route("/mongo/insert-document", post(routes::mongo::insert_document))
         .route("/mongo/insert-documents", post(routes::mongo::insert_documents))
@@ -843,7 +893,12 @@ async fn main() {
         .route("/sql-file/progress/{executionId}", get(routes::sql_file::sql_file_progress))
         .route("/sql-file/cancel", post(routes::sql_file::cancel_sql_file))
         // Table import
-        .route("/import/preview", post(routes::table_import::preview_import))
+        .route(
+            "/import/preview",
+            post(routes::table_import::preview_import).layer(DefaultBodyLimit::max(
+                routes::table_import::import_request_body_limit_for_upload(web_body_limit_bytes()),
+            )),
+        )
         .route("/import/preview-source", post(routes::table_import::preview_uploaded_import))
         .route("/import/source/release", post(routes::table_import::release_import_source))
         .route("/import/execute", post(routes::table_import::execute_import))
@@ -915,25 +970,8 @@ async fn main() {
         .layer(CompressionLayer::new().compress_when(web_compression_predicate()))
         .layer(tower_http::trace::TraceLayer::new_for_http());
 
-    // Static file serving
-    if let Ok(static_dir) = std::env::var("DBX_STATIC_DIR") {
-        use tower_http::services::{ServeDir, ServeFile};
-        let index_path = format!("{}/index.html", static_dir);
-        let serve_dir = ServeDir::new(&static_dir).not_found_service(ServeFile::new(&index_path));
-        app = app.fallback_service(serve_dir);
-    }
-
-    if public_base_path != "/" {
-        app = Router::new().nest(&public_base_path, app);
-        // axum 的 nest 不匹配“子路径根目录”(带尾斜杠,如 /dbx/),导致子路径部署时首页 404。
-        // 在 nest 外层显式把根目录挂到 index.html,浏览器地址栏保持 /dbx/ 不变,
-        // 相对资源与前端路径推断都依赖这个 URL 形态。见 issue #5518。
-        if let Ok(static_dir) = std::env::var("DBX_STATIC_DIR") {
-            use tower_http::services::ServeFile;
-            let index_path = format!("{static_dir}/index.html");
-            app = app.route_service(&format!("{public_base_path}/"), ServeFile::new(index_path));
-        }
-    }
+    let static_dir = std::env::var_os("DBX_STATIC_DIR").map(std::path::PathBuf::from);
+    app = mount_public_base_path(app, &public_base_path, static_dir.as_deref());
 
     // Bind address
     let port: u16 = std::env::var("DBX_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(4224);
@@ -964,10 +1002,17 @@ async fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_public_base_path, web_agent_dir_from_env, web_compression_predicate, XLSX_CONTENT_TYPE};
+    use super::{
+        mount_public_base_path, normalize_public_base_path, web_agent_dir_from_env, web_body_limit_bytes_from_value,
+        web_compression_predicate, XLSX_CONTENT_TYPE,
+    };
+    use crate::routes::table_import;
     use axum::body::Body;
+    use axum::extract::{DefaultBodyLimit, Multipart};
     use axum::http::header::CONTENT_TYPE;
-    use axum::http::Response;
+    use axum::http::{Response, StatusCode};
+    use axum::routing::{get, post};
+    use axum::Router;
     use tower_http::compression::predicate::Predicate;
 
     fn compression_response(content_type: &str) -> Response<Body> {
@@ -1016,5 +1061,164 @@ mod tests {
             web_agent_dir_from_env(&data_dir, Some("/custom/agents".to_string())),
             std::path::PathBuf::from("/custom/agents")
         );
+    }
+
+    #[test]
+    fn web_upload_limit_parses_valid_values_and_preserves_safe_fallbacks() {
+        const MIB: usize = 1024 * 1024;
+
+        assert_eq!(web_body_limit_bytes_from_value(None), 1024 * MIB);
+        assert_eq!(web_body_limit_bytes_from_value(Some("")), 1024 * MIB);
+        assert_eq!(web_body_limit_bytes_from_value(Some("0")), 1024 * MIB);
+        assert_eq!(web_body_limit_bytes_from_value(Some("invalid")), 1024 * MIB);
+        assert_eq!(web_body_limit_bytes_from_value(Some("4096")), 4096usize.saturating_mul(MIB));
+        assert_eq!(web_body_limit_bytes_from_value(Some(&usize::MAX.to_string())), usize::MAX);
+    }
+
+    #[tokio::test]
+    async fn import_route_reserves_multipart_framing_above_the_file_limit() {
+        const FILE_LIMIT: usize = 8;
+
+        async fn uploaded_file_size(mut multipart: Multipart) -> Result<String, StatusCode> {
+            let field =
+                multipart.next_field().await.map_err(|_| StatusCode::BAD_REQUEST)?.ok_or(StatusCode::BAD_REQUEST)?;
+            let bytes = field.bytes().await.map_err(|_| StatusCode::BAD_REQUEST)?;
+            Ok(bytes.len().to_string())
+        }
+
+        let router = Router::new()
+            .route("/general", post(uploaded_file_size))
+            .route(
+                "/import",
+                post(uploaded_file_size)
+                    .layer(DefaultBodyLimit::max(table_import::import_request_body_limit_for_upload(FILE_LIMIT))),
+            )
+            .layer(DefaultBodyLimit::max(FILE_LIMIT));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind test listener");
+        let address = listener.local_addr().expect("test listener address");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router).await.expect("serve test router");
+        });
+        let boundary = "dbx-import-boundary";
+        let body = format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"data.csv\"\r\n\r\n12345678\r\n--{boundary}--\r\n"
+        );
+        let client = reqwest::Client::new();
+
+        let general_response = client
+            .post(format!("http://{address}/general"))
+            .header(CONTENT_TYPE, format!("multipart/form-data; boundary={boundary}"))
+            .body(body.clone())
+            .send()
+            .await
+            .expect("send request through general limit");
+        assert_eq!(general_response.status(), reqwest::StatusCode::BAD_REQUEST);
+
+        let import_response = client
+            .post(format!("http://{address}/import"))
+            .header(CONTENT_TYPE, format!("multipart/form-data; boundary={boundary}"))
+            .body(body)
+            .send()
+            .await
+            .expect("send request through import limit");
+        assert_eq!(import_response.status(), reqwest::StatusCode::OK);
+        assert_eq!(import_response.text().await.expect("read import response"), FILE_LIMIT.to_string());
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn public_base_path_routes_preserve_redirect_query_static_files_and_api() {
+        let client =
+            reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).build().expect("build test client");
+        let static_dir = std::env::temp_dir().join(format!("dbx-web-public-base-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&static_dir).expect("create static directory");
+        std::fs::write(static_dir.join("index.html"), "subpath index").expect("write index");
+        std::fs::write(static_dir.join("app.js"), "subpath asset").expect("write asset");
+
+        for public_base_path in ["/dbx", "/xxxx/rsu"] {
+            let router = mount_public_base_path(
+                Router::new().route("/api/ping", get(|| async { "pong" })),
+                public_base_path,
+                Some(&static_dir),
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind test listener");
+            let address = listener.local_addr().expect("test listener address");
+            let server = tokio::spawn(async move {
+                axum::serve(listener, router).await.expect("serve test router");
+            });
+
+            let expected_target = format!("{public_base_path}/");
+            let response =
+                client.get(format!("http://{address}{public_base_path}")).send().await.expect("GET bare base path");
+
+            assert_eq!(response.status(), reqwest::StatusCode::PERMANENT_REDIRECT);
+            assert_eq!(
+                response.headers().get(reqwest::header::LOCATION).and_then(|value| value.to_str().ok()),
+                Some(expected_target.as_str())
+            );
+
+            let response = client
+                .get(format!("http://{address}{public_base_path}?next=%2Fworkspace&theme=dark"))
+                .send()
+                .await
+                .expect("GET bare base path with query");
+            let expected_target_with_query = format!("{public_base_path}/?next=%2Fworkspace&theme=dark");
+            assert_eq!(response.status(), reqwest::StatusCode::PERMANENT_REDIRECT);
+            assert_eq!(
+                response.headers().get(reqwest::header::LOCATION).and_then(|value| value.to_str().ok()),
+                Some(expected_target_with_query.as_str())
+            );
+
+            let response = client
+                .get(format!("http://{address}{public_base_path}/?next=%2Fworkspace"))
+                .send()
+                .await
+                .expect("GET trailing slash base path");
+            assert_eq!(response.status(), reqwest::StatusCode::OK);
+            assert_eq!(response.text().await.expect("read index response"), "subpath index");
+
+            let response = client
+                .get(format!("http://{address}{public_base_path}/app.js"))
+                .send()
+                .await
+                .expect("GET static asset");
+            assert_eq!(response.status(), reqwest::StatusCode::OK);
+            assert_eq!(response.text().await.expect("read asset response"), "subpath asset");
+
+            let response =
+                client.get(format!("http://{address}{public_base_path}/api/ping")).send().await.expect("GET API route");
+            assert_eq!(response.status(), reqwest::StatusCode::OK);
+            assert_eq!(response.text().await.expect("read API response"), "pong");
+
+            server.abort();
+        }
+
+        std::fs::remove_dir_all(static_dir).expect("remove static directory");
+    }
+
+    #[tokio::test]
+    async fn root_public_base_path_preserves_static_files_and_api() {
+        let static_dir = std::env::temp_dir().join(format!("dbx-web-root-base-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&static_dir).expect("create static directory");
+        std::fs::write(static_dir.join("index.html"), "root index").expect("write index");
+        std::fs::write(static_dir.join("app.js"), "root asset").expect("write asset");
+        let router =
+            mount_public_base_path(Router::new().route("/api/ping", get(|| async { "pong" })), "/", Some(&static_dir));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind test listener");
+        let address = listener.local_addr().expect("test listener address");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router).await.expect("serve test router");
+        });
+        let client = reqwest::Client::new();
+
+        for (request_path, expected_body) in [("/", "root index"), ("/app.js", "root asset"), ("/api/ping", "pong")] {
+            let response = client.get(format!("http://{address}{request_path}")).send().await.expect("GET root route");
+            assert_eq!(response.status(), reqwest::StatusCode::OK);
+            assert_eq!(response.text().await.expect("read root response"), expected_body);
+        }
+
+        server.abort();
+        std::fs::remove_dir_all(static_dir).expect("remove static directory");
     }
 }

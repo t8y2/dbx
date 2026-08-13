@@ -26,6 +26,7 @@ export function isContextMenuInternalScroll(event: Event): boolean {
 }
 
 export interface ContextMenuRegistration {
+  activate(): void;
   setOpen(open: boolean): void;
   dispose(): void;
 }
@@ -75,6 +76,15 @@ export function createContextMenuRegistry(documentTarget: EventTarget, windowTar
       let disposed = false;
 
       return {
+        activate() {
+          if (disposed) return;
+          const closers = [...openMenus];
+          openMenus.clear();
+          for (const activeClose of closers) {
+            if (activeClose !== close) activeClose();
+          }
+          openMenus.add(close);
+        },
         setOpen(open) {
           if (disposed) return;
           if (open) openMenus.add(close);

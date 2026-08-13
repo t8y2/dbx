@@ -78,6 +78,40 @@ fn index(name: &str, columns: &[&str]) -> EditableStructureIndex {
     }
 }
 
+fn existing_index(name: &str, columns: &[&str], is_unique: bool) -> EditableStructureIndex {
+    let mut index = index(name, columns);
+    index.is_unique = is_unique;
+    index.original = Some(IndexInfo {
+        name: name.to_string(),
+        columns: columns.iter().map(|column| column.to_string()).collect(),
+        is_unique,
+        is_primary: false,
+        filter: None,
+        index_type: None,
+        included_columns: None,
+        comment: None,
+    });
+    index
+}
+
+fn index_change_options(
+    database_type: DatabaseType,
+    schema: Option<&str>,
+    index: EditableStructureIndex,
+) -> TableStructureSqlOptions {
+    TableStructureSqlOptions {
+        database_type: Some(database_type),
+        schema: schema.map(str::to_string),
+        table_name: "USERS".to_string(),
+        columns: Vec::new(),
+        indexes: vec![index],
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
+        table_comment: None,
+        original_table_comment: None,
+    }
+}
+
 fn foreign_key(name: &str, column: &str, ref_table: &str, ref_column: &str) -> EditableStructureForeignKey {
     EditableStructureForeignKey {
         id: name.to_string(),
@@ -161,6 +195,158 @@ fn builds_mysql_column_and_index_changes() {
             "CREATE UNIQUE INDEX `uniq_users_email` ON `users` (`email`);",
         ]
     );
+}
+
+#[test]
+fn dameng_replaces_same_name_index_before_validating_uniqueness() {
+    let mut changed = existing_index("IDX_USERS_EMAIL", &["EMAIL"], false);
+    changed.name = "  IDX_USERS_EMAIL  ".to_string();
+    changed.is_unique = true;
+
+    let mut options = index_change_options(DatabaseType::Dameng, Some("SYSDBA"), changed);
+    options.table_name = "DBX_6002_USERS".to_string();
+    let result = build_table_structure_change_sql(options);
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec!["CREATE OR REPLACE UNIQUE INDEX \"IDX_USERS_EMAIL\" ON \"SYSDBA\".\"DBX_6002_USERS\" (\"EMAIL\");"]
+    );
+}
+
+#[test]
+fn dameng_replaces_same_name_unique_index_with_normal_index() {
+    let mut changed = existing_index("IDX_USERS_EMAIL", &["EMAIL"], true);
+    changed.is_unique = false;
+
+    let result = build_table_structure_change_sql(index_change_options(DatabaseType::Dameng, Some("APP"), changed));
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec!["CREATE OR REPLACE INDEX \"IDX_USERS_EMAIL\" ON \"APP\".\"USERS\" (\"EMAIL\");"]
+    );
+}
+
+#[test]
+fn dameng_replaces_same_name_index_when_columns_change() {
+    let mut changed = existing_index("IDX_USERS_EMAIL", &["EMAIL"], false);
+    changed.columns = vec!["LOGIN".to_string(), "EMAIL".to_string()];
+
+    let result = build_table_structure_change_sql(index_change_options(DatabaseType::Dameng, Some("APP"), changed));
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec!["CREATE OR REPLACE INDEX \"IDX_USERS_EMAIL\" ON \"APP\".\"USERS\" (\"LOGIN\", \"EMAIL\");"]
+    );
+}
+
+#[test]
+fn dameng_replaces_same_name_index_when_type_changes_to_bitmap() {
+    let mut changed = existing_index("IDX_USERS_EMAIL", &["EMAIL"], false);
+    changed.index_type = "bitmap".to_string();
+
+    let result = build_table_structure_change_sql(index_change_options(DatabaseType::Dameng, Some("APP"), changed));
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec!["CREATE OR REPLACE BITMAP INDEX \"IDX_USERS_EMAIL\" ON \"APP\".\"USERS\" (\"EMAIL\");"]
+    );
+}
+
+#[test]
+fn dameng_replaces_same_name_index_without_unsupported_comment_clause() {
+    let mut changed = existing_index("IDX_USERS_EMAIL", &["EMAIL"], false);
+    changed.comment = "New comment".to_string();
+    changed.original.as_mut().unwrap().comment = Some("Old comment".to_string());
+
+    let result = build_table_structure_change_sql(index_change_options(DatabaseType::Dameng, Some("APP"), changed));
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec!["CREATE OR REPLACE INDEX \"IDX_USERS_EMAIL\" ON \"APP\".\"USERS\" (\"EMAIL\");"]
+    );
+}
+
+#[test]
+fn dameng_renamed_index_keeps_drop_then_create_path() {
+    let mut changed = existing_index("IDX_USERS_EMAIL", &["EMAIL"], false);
+    changed.name = "IDX_USERS_LOGIN".to_string();
+
+    let result = build_table_structure_change_sql(index_change_options(DatabaseType::Dameng, Some("APP"), changed));
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec![
+            "DROP INDEX \"APP\".\"IDX_USERS_EMAIL\";",
+            "CREATE INDEX \"IDX_USERS_LOGIN\" ON \"APP\".\"USERS\" (\"EMAIL\");",
+        ]
+    );
+}
+
+#[test]
+fn dameng_primary_and_unchanged_indexes_keep_existing_behavior() {
+    let unchanged = existing_index("IDX_USERS_EMAIL", &["EMAIL"], false);
+    let unchanged_result =
+        build_table_structure_change_sql(index_change_options(DatabaseType::Dameng, Some("APP"), unchanged));
+    assert_eq!(unchanged_result.warnings, Vec::<String>::new());
+    assert!(unchanged_result.statements.is_empty());
+
+    let mut primary = existing_index("PK_USERS", &["ID"], true);
+    primary.columns.push("TENANT_ID".to_string());
+    primary.original.as_mut().unwrap().is_primary = true;
+    let primary_result =
+        build_table_structure_change_sql(index_change_options(DatabaseType::Dameng, Some("APP"), primary));
+    assert!(primary_result.statements.is_empty());
+    assert_eq!(primary_result.warnings, vec!["Primary index \"PK_USERS\" cannot be edited from this editor."]);
+}
+
+#[test]
+fn dameng_new_and_dropped_indexes_do_not_use_or_replace() {
+    let new_index = index("IDX_USERS_LOGIN", &["LOGIN"]);
+    let new_result =
+        build_table_structure_change_sql(index_change_options(DatabaseType::Dameng, Some("APP"), new_index));
+    assert_eq!(new_result.warnings, Vec::<String>::new());
+    assert_eq!(new_result.statements, vec!["CREATE INDEX \"IDX_USERS_LOGIN\" ON \"APP\".\"USERS\" (\"LOGIN\");"]);
+
+    let mut dropped = existing_index("IDX_USERS_EMAIL", &["EMAIL"], false);
+    dropped.marked_for_drop = true;
+    let drop_result =
+        build_table_structure_change_sql(index_change_options(DatabaseType::Dameng, Some("APP"), dropped));
+    assert_eq!(drop_result.warnings, Vec::<String>::new());
+    assert_eq!(drop_result.statements, vec!["DROP INDEX \"APP\".\"IDX_USERS_EMAIL\";"]);
+}
+
+#[test]
+fn non_dameng_index_rebuilds_do_not_use_or_replace() {
+    for database_type in [
+        DatabaseType::Mysql,
+        DatabaseType::Postgres,
+        DatabaseType::Sqlite,
+        DatabaseType::SqlServer,
+        DatabaseType::Oracle,
+        DatabaseType::Oscar,
+        DatabaseType::H2,
+        DatabaseType::Informix,
+        DatabaseType::Iris,
+    ] {
+        let mut changed = existing_index("IDX_USERS_EMAIL", &["EMAIL"], false);
+        changed.is_unique = true;
+        let result = build_table_structure_change_sql(index_change_options(database_type, None, changed));
+
+        assert_eq!(result.warnings, Vec::<String>::new(), "database type: {database_type:?}");
+        assert_eq!(result.statements.len(), 2, "database type: {database_type:?}");
+        assert!(result.statements[0].starts_with("DROP INDEX "), "database type: {database_type:?}");
+        assert!(result.statements[1].starts_with("CREATE UNIQUE INDEX "), "database type: {database_type:?}");
+        assert!(
+            result.statements.iter().all(|statement| !statement.contains("OR REPLACE")),
+            "database type: {database_type:?}"
+        );
+    }
 }
 
 #[test]
@@ -660,6 +846,57 @@ fn oracle_timestamp_default_precedes_nullability_in_modify_sql() {
     assert_eq!(
         result.statements,
         vec!["ALTER TABLE \"DBX_TEST\".\"test\" MODIFY (\"time\" TIMESTAMP(6) DEFAULT CURRENT_TIMESTAMP);"]
+    );
+}
+
+#[test]
+fn oracle_create_table_preserves_character_length_units() {
+    let mut byte_col = column("BYTE_COL");
+    byte_col.data_type = "VARCHAR2(12 BYTE)".to_string();
+    let mut char_col = column("CHAR_COL");
+    char_col.data_type = "VARCHAR2(12 CHAR)".to_string();
+
+    let result = build_create_table_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::Oracle),
+        schema: Some("DBX_APP".to_string()),
+        table_name: "DBX_ISSUE_4739".to_string(),
+        columns: vec![byte_col, char_col],
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
+        table_comment: None,
+        original_table_comment: None,
+    });
+
+    assert!(result.statements[0].contains("\"BYTE_COL\" VARCHAR2(12 BYTE)"));
+    assert!(result.statements[0].contains("\"CHAR_COL\" VARCHAR2(12 CHAR)"));
+}
+
+#[test]
+fn oracle_alter_column_preserves_character_length_unit() {
+    let mut column = column("DISPLAY_NAME");
+    column.data_type = "VARCHAR2(64 CHAR)".to_string();
+    column.original = Some(ColumnInfo {
+        name: "DISPLAY_NAME".to_string(),
+        data_type: "VARCHAR2(64 BYTE)".to_string(),
+        is_nullable: true,
+        column_default: None,
+        is_primary_key: false,
+        extra: None,
+        comment: None,
+        ..Default::default()
+    });
+
+    let result = build_single_column_alter_sql(SingleColumnAlterSqlOptions {
+        database_type: Some(DatabaseType::Oracle),
+        schema: Some("DBX_APP".to_string()),
+        table_name: "DBX_ISSUE_4739".to_string(),
+        column,
+    });
+
+    assert_eq!(
+        result.statements,
+        vec!["ALTER TABLE \"DBX_APP\".\"DBX_ISSUE_4739\" MODIFY (\"DISPLAY_NAME\" VARCHAR2(64 CHAR));"]
     );
 }
 

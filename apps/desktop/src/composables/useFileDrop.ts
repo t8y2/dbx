@@ -8,6 +8,7 @@ import * as api from "@/lib/backend/api";
 import type { ConnectionConfig, ExternalSqlFileVersion } from "@/types/database";
 import { detectDatabaseFileType } from "@/lib/database/databaseFileDetection";
 import { externalSqlFileOpenErrorMessage, readBrowserSqlFile } from "@/lib/sql/sqlFileOpen";
+import { resolveExternalSqlFileTarget, unassociatedExternalSqlFileTarget } from "@/lib/sql/externalSqlFileTarget";
 
 function isSqlFilePath(path: string): boolean {
   return /\.sql$/i.test(path);
@@ -24,12 +25,13 @@ export function useFileDrop() {
   const { toast } = useToast();
 
   async function openDroppedSqlFile(name: string, content: string, path?: string, version?: ExternalSqlFileVersion) {
-    const connectionId = connectionStore.activeConnectionId || connectionStore.connections[0]?.id || "";
-    const connection = connectionId ? connectionStore.getConfig(connectionId) : undefined;
-    const database = connection?.database || "";
     if (path) {
-      queryStore.openExternalSqlFile(connectionId, database, path, content, version);
+      const target = resolveExternalSqlFileTarget(path, (savedConnectionId) => !!connectionStore.getConfig(savedConnectionId), unassociatedExternalSqlFileTarget());
+      queryStore.openExternalSqlFile(target.connectionId, target.database, path, content, version, target.catalog);
     } else {
+      const connectionId = connectionStore.activeConnectionId || connectionStore.connections[0]?.id || "";
+      const connection = connectionId ? connectionStore.getConfig(connectionId) : undefined;
+      const database = connection?.database || "";
       const tabId = queryStore.createTab(connectionId, database, name, "query");
       queryStore.updateSql(tabId, content);
     }

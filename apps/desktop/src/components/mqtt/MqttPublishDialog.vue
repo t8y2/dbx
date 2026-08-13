@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { mqttPublish } from "@/lib/backend/api";
 import { Button } from "@/components/ui/button";
@@ -24,6 +24,18 @@ const encoding = ref<PayloadEncoding>("plaintext");
 const loading = ref(false);
 const error = ref<string | null>(null);
 const success = ref(false);
+const publishPanelRef = ref<HTMLElement | null>(null);
+const payloadTextareaRef = ref<HTMLTextAreaElement | null>(null);
+const payloadHeight = ref(80);
+const resizing = ref(false);
+
+const MQTT_PAYLOAD_MIN_HEIGHT_PX = 60;
+const MQTT_PAYLOAD_MAX_PANEL_RATIO = 0.5;
+const MQTT_PAYLOAD_KEYBOARD_STEP_PX = 10;
+const MQTT_PAYLOAD_HEIGHT_STORAGE_KEY = "dbx-mqtt-payload-height";
+let resizeStartY = 0;
+let resizeStartHeight = 0;
+let panelResizeObserver: ResizeObserver | undefined;
 
 const qosLabels = ["QoS 0", "QoS 1", "QoS 2"];
 const qosHints = computed(() => [t("connection.mqttQosAtMostOnce"), t("connection.mqttQosAtLeastOnce"), t("connection.mqttQosExactlyOnce")]);
@@ -54,6 +66,89 @@ watch(
     }
   },
 );
+
+/** 计算消息输入框允许使用的最大高度，避免挤占全部消息列表区域 */
+function maxPayloadHeight() {
+  const containerHeight = publishPanelRef.value?.parentElement?.clientHeight || window.innerHeight || 0;
+  const panelHeight = publishPanelRef.value?.offsetHeight || 0;
+  const currentTextareaHeight = payloadTextareaRef.value?.offsetHeight || payloadHeight.value;
+  const panelChromeHeight = Math.max(0, panelHeight - currentTextareaHeight);
+  return Math.max(MQTT_PAYLOAD_MIN_HEIGHT_PX, Math.floor(containerHeight * MQTT_PAYLOAD_MAX_PANEL_RATIO - panelChromeHeight));
+}
+
+/** 将消息输入框高度限制在可用区域内 */
+function clampPayloadHeight(height: number) {
+  return Math.max(MQTT_PAYLOAD_MIN_HEIGHT_PX, Math.min(maxPayloadHeight(), Math.round(height)));
+}
+
+function persistPayloadHeight(height: number) {
+  payloadHeight.value = clampPayloadHeight(height);
+  localStorage.setItem(MQTT_PAYLOAD_HEIGHT_STORAGE_KEY, payloadHeight.value.toString());
+}
+
+/** 容器尺寸变化时同步收缩输入框，保证消息列表仍可见 */
+function handlePanelResize() {
+  payloadHeight.value = clampPayloadHeight(payloadHeight.value);
+}
+
+/** 开始拖动消息输入框顶部的高度调节条 */
+function startResize(event: MouseEvent) {
+  event.preventDefault();
+  resizing.value = true;
+  resizeStartY = event.clientY;
+  resizeStartHeight = payloadHeight.value;
+
+  document.addEventListener("mousemove", handleResize);
+  document.addEventListener("mouseup", stopResize);
+  document.body.style.userSelect = "none";
+  document.body.style.cursor = "ns-resize";
+}
+
+/** 根据向上拖动的距离实时调整消息输入框高度 */
+function handleResize(event: MouseEvent) {
+  if (!resizing.value) return;
+  payloadHeight.value = clampPayloadHeight(resizeStartHeight + resizeStartY - event.clientY);
+}
+
+function handleResizeKeydown(event: KeyboardEvent) {
+  const direction = event.key === "ArrowUp" ? 1 : event.key === "ArrowDown" ? -1 : 0;
+  if (direction === 0) return;
+  event.preventDefault();
+  persistPayloadHeight(payloadHeight.value + direction * MQTT_PAYLOAD_KEYBOARD_STEP_PX);
+}
+
+/** 结束拖动并记住用户设置的高度 */
+function stopResize() {
+  if (!resizing.value) return;
+  resizing.value = false;
+  document.removeEventListener("mousemove", handleResize);
+  document.removeEventListener("mouseup", stopResize);
+  document.body.style.userSelect = "";
+  document.body.style.cursor = "";
+  persistPayloadHeight(payloadHeight.value);
+}
+
+onMounted(() => {
+  const savedHeight = Number.parseInt(localStorage.getItem(MQTT_PAYLOAD_HEIGHT_STORAGE_KEY) ?? "", 10);
+  if (Number.isFinite(savedHeight)) payloadHeight.value = clampPayloadHeight(savedHeight);
+
+  window.addEventListener("resize", handlePanelResize);
+  if (typeof ResizeObserver !== "undefined" && publishPanelRef.value?.parentElement) {
+    panelResizeObserver = new ResizeObserver(handlePanelResize);
+    panelResizeObserver.observe(publishPanelRef.value.parentElement);
+  }
+});
+
+onUnmounted(() => {
+  document.removeEventListener("mousemove", handleResize);
+  document.removeEventListener("mouseup", stopResize);
+  window.removeEventListener("resize", handlePanelResize);
+  panelResizeObserver?.disconnect();
+  if (resizing.value) {
+    document.body.style.userSelect = "";
+    document.body.style.cursor = "";
+  }
+});
 
 async function publish() {
   const publishTopic = topic.value.trim();
@@ -102,7 +197,20 @@ function clearForm() {
 </script>
 
 <template>
-  <div class="publish-panel">
+  <div ref="publishPanelRef" class="publish-panel">
+    <div
+      class="payload-resize-handle"
+      role="separator"
+      tabindex="0"
+      aria-orientation="horizontal"
+      :aria-label="t('connection.mqttResizePayload')"
+      :aria-valuemin="MQTT_PAYLOAD_MIN_HEIGHT_PX"
+      :aria-valuemax="maxPayloadHeight()"
+      :aria-valuenow="payloadHeight"
+      :title="t('connection.mqttResizePayload')"
+      @mousedown="startResize"
+      @keydown="handleResizeKeydown"
+    />
     <div class="panel-header">
       <span class="panel-title">{{ t("connection.mqttPublish") }}</span>
       <Button size="sm" variant="ghost" class="h-6 text-xs" @click="clearForm">{{ t("common.clear") }}</Button>
@@ -150,7 +258,7 @@ function clearForm() {
     <!-- Payload -->
     <div class="form-group flex-1 flex flex-col min-h-0">
       <label class="form-label">{{ t("connection.mqttPayload") }}</label>
-      <textarea v-model="payloadText" class="form-textarea flex-1 font-mono text-xs" :placeholder="payloadPlaceholder" rows="4" @keydown.ctrl.enter="publish()" />
+      <textarea ref="payloadTextareaRef" v-model="payloadText" class="form-textarea font-mono text-xs" :style="{ height: `${payloadHeight}px`, maxHeight: `${maxPayloadHeight()}px` }" :placeholder="payloadPlaceholder" @keydown.ctrl.enter="publish()" />
       <span class="form-hint">{{ t("connection.mqttPublishShortcut") }}</span>
     </div>
 
@@ -169,12 +277,44 @@ function clearForm() {
 
 <style scoped>
 .publish-panel {
+  position: relative;
   display: flex;
   flex-direction: column;
   gap: 8px;
   padding: 10px 12px;
   border-top: 1px solid var(--color-border);
   background: var(--color-background);
+}
+
+.payload-resize-handle {
+  position: absolute;
+  top: -4px;
+  left: 0;
+  right: 0;
+  z-index: 1;
+  height: 9px;
+  cursor: ns-resize;
+}
+
+.payload-resize-handle::before {
+  content: "";
+  position: absolute;
+  top: 3px;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background-color: var(--color-border);
+  transition: background-color 0.15s ease;
+}
+
+.payload-resize-handle:hover::before,
+.payload-resize-handle:focus-visible::before {
+  background-color: color-mix(in srgb, var(--color-text) 20%, transparent);
+}
+
+.payload-resize-handle:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: -2px;
 }
 
 .panel-header {
@@ -240,7 +380,7 @@ function clearForm() {
   background: var(--color-background);
   color: var(--color-text);
   outline: none;
-  resize: vertical;
+  resize: none;
   min-height: 60px;
   box-sizing: border-box;
   line-height: 1.4;

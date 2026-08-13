@@ -9,6 +9,7 @@ interface FormatState {
   indentLevel: number;
   atLineStart: boolean;
   pendingSpace: boolean;
+  pendingStatementBreak: boolean;
   chainIndent: boolean;
   pendingChainCall: boolean;
   stack: Array<{ char: string; expanded: boolean; chainCall?: boolean }>;
@@ -23,11 +24,36 @@ export function formatMongoShellText(text: string, settings: Partial<SqlFormatte
   }
 
   const indentUnit = settings.useTabs ? "\t" : " ".repeat(settings.tabWidth ?? DEFAULT_SQL_FORMATTER_SETTINGS.tabWidth);
-  const state: FormatState = { out: [], lastChar: "", lastNonWhitespace: "", indentLevel: 0, atLineStart: true, pendingSpace: false, chainIndent: false, pendingChainCall: false, stack: [] };
+  const state: FormatState = { out: [], lastChar: "", lastNonWhitespace: "", indentLevel: 0, atLineStart: true, pendingSpace: false, pendingStatementBreak: false, chainIndent: false, pendingChainCall: false, stack: [] };
 
   for (let index = 0; index < text.length; index++) {
     const char = text[index] ?? "";
     const next = text[index + 1] ?? "";
+
+    if (state.pendingStatementBreak) {
+      if (/\s/.test(char)) {
+        if (char === "\n" || char === "\r") separateStatements(state, indentUnit);
+        else state.pendingSpace = !state.atLineStart;
+        continue;
+      }
+
+      if (char === "/" && next === "/") {
+        const comment = readLineComment(text, index);
+        appendToken(state, comment.value, indentUnit);
+        if (comment.hasLineBreak) newline(state, indentUnit);
+        index = comment.end;
+        continue;
+      }
+
+      if (char === "/" && next === "*") {
+        const comment = readBlockComment(text, index);
+        appendToken(state, comment.value, indentUnit);
+        index = comment.end;
+        continue;
+      }
+
+      separateStatements(state, indentUnit);
+    }
 
     if (char === '"' || char === "'" || char === "`") {
       const literal = readQuotedLiteral(text, index, char);
@@ -39,6 +65,7 @@ export function formatMongoShellText(text: string, settings: Partial<SqlFormatte
     if (char === "/" && next === "/") {
       const comment = readLineComment(text, index);
       appendToken(state, comment.value, indentUnit);
+      if (comment.hasLineBreak) newline(state, indentUnit);
       index = comment.end;
       continue;
     }
@@ -110,6 +137,12 @@ export function formatMongoShellText(text: string, settings: Partial<SqlFormatte
       continue;
     }
 
+    if (char === ";" && state.stack.length === 0) {
+      appendToken(state, char, indentUnit);
+      state.pendingStatementBreak = true;
+      continue;
+    }
+
     appendToken(state, char, indentUnit);
   }
 
@@ -146,6 +179,12 @@ function newline(state: FormatState, indentUnit: string, indentDelta = 0) {
   state.pendingSpace = false;
   state.chainIndent = false;
   void indentUnit;
+}
+
+function separateStatements(state: FormatState, indentUnit: string) {
+  newline(state, indentUnit);
+  appendOutput(state, "\n");
+  state.pendingStatementBreak = false;
 }
 
 function shouldInsertPendingSpace(previous: string, token: string): boolean {
@@ -194,10 +233,11 @@ function readQuotedLiteral(text: string, start: number, quote: string): { value:
   return { value: text.slice(start), end: text.length - 1 };
 }
 
-function readLineComment(text: string, start: number): { value: string; end: number } {
-  const end = text.indexOf("\n", start);
-  if (end < 0) return { value: text.slice(start), end: text.length - 1 };
-  return { value: text.slice(start, end), end: end - 1 };
+function readLineComment(text: string, start: number): { value: string; end: number; hasLineBreak: boolean } {
+  let end = start + 2;
+  while (end < text.length && text[end] !== "\n" && text[end] !== "\r") end++;
+  if (end === text.length) return { value: text.slice(start), end: text.length - 1, hasLineBreak: false };
+  return { value: text.slice(start, end), end: end - 1, hasLineBreak: true };
 }
 
 function readBlockComment(text: string, start: number): { value: string; end: number } {

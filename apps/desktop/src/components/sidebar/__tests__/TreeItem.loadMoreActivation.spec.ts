@@ -4,6 +4,7 @@ import { createApp, defineComponent, h, nextTick, type App } from "vue";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import i18n from "@/i18n";
 import TreeItem from "@/components/sidebar/TreeItem.vue";
+import { filterSidebarTree } from "@/lib/sidebar/sidebarSearchTree";
 import { createSidebarTreeRuntime, sidebarTreeRuntimeKey, type SidebarTreeRuntimeHost } from "@/lib/sidebar/sidebarTreeRuntime";
 import type { TreeNode } from "@/types/database";
 
@@ -11,9 +12,12 @@ const connectionStore = {
   activeConnectionId: "connection-1",
   connectedIds: new Set(["connection-1"]),
   connectingIds: new Set<string>(),
+  connectionErrors: {},
   connectionMultiSelectActive: false,
   connections: [],
   getConfig: () => ({ id: "connection-1", db_type: "sqlserver" }),
+  getSidebarVisibleFilterSummary: () => null,
+  clearConnectionError: vi.fn(),
   isDefaultDatabase: () => false,
   isDefaultSchema: () => false,
   isPinnedTreeNodeReorderTarget: () => false,
@@ -97,6 +101,7 @@ afterEach(() => {
   connectionStore.selectedTreeNodeId = null;
   connectionStore.selectedTreeNodeIds = [];
   connectionStore.selectedTreeNodeIdsSet = new Set<string>();
+  connectionStore.treeNodes = [];
   connectionStore.treeSelectionAnchorId = null;
   settingsStore.editorSettings.sidebarActivation = "double";
   vi.restoreAllMocks();
@@ -140,6 +145,37 @@ describe("TreeItem load-more activation", () => {
     expect(host.handleRowClick).not.toHaveBeenCalled();
   });
 
+  it("drops a selected object group when modifier-selecting a real table", async () => {
+    const group: TreeNode = {
+      id: "connection-1:app:dbo:__tables",
+      label: "tree.tables",
+      type: "group-tables",
+      connectionId: "connection-1",
+      database: "app",
+      schema: "dbo",
+    };
+    const table: TreeNode = {
+      id: "connection-1:app:dbo:orders",
+      label: "orders",
+      type: "table",
+      connectionId: "connection-1",
+      database: "app",
+      schema: "dbo",
+    };
+    connectionStore.treeNodes = [{ ...group, children: [table] }];
+    connectionStore.selectedTreeNodeId = group.id;
+    connectionStore.selectedTreeNodeIds = [group.id];
+    connectionStore.selectedTreeNodeIdsSet = new Set([group.id]);
+    connectionStore.treeSelectionAnchorId = group.id;
+    const { row } = await mountTreeItem(table);
+
+    row.dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 1, metaKey: true }));
+
+    expect(connectionStore.selectedTreeNodeIds).toEqual([table.id]);
+    expect(connectionStore.selectedTreeNodeId).toBe(table.id);
+    expect(connectionStore.treeSelectionAnchorId).toBe(table.id);
+  });
+
   it("shows the invalid marker for objects reported as invalid", async () => {
     const node: TreeNode = {
       id: "connection-1:app:dbo:broken_proc",
@@ -180,5 +216,60 @@ describe("TreeItem load-more activation", () => {
     const unknown = await mountTreeItem(unknownNode);
     expect(unknown.row.textContent).not.toContain("INVALID");
     expect(unknown.row.querySelector('[data-invalid-object-indicator="true"]')).toBeNull();
+  });
+});
+
+describe("TreeItem searched connection activation", () => {
+  function searchedConnection(): TreeNode {
+    const filtered = filterSidebarTree(
+      [
+        {
+          id: "connection-1",
+          label: "1000",
+          type: "connection",
+          connectionId: "connection-1",
+          isExpanded: false,
+          children: [
+            {
+              id: "connection-1:__user_admin",
+              label: "tree.userAdmin",
+              type: "user-admin",
+              connectionId: "connection-1",
+              database: "",
+            },
+          ],
+        },
+      ],
+      "1000",
+      new Set(),
+    )[0];
+    if (!filtered) throw new Error("Expected the matching connection search result");
+    return filtered;
+  }
+
+  it("activates a connection search result on one click in single-click mode", async () => {
+    settingsStore.editorSettings.sidebarActivation = "single";
+    const node = searchedConnection();
+    const { row, host } = await mountTreeItem(node);
+
+    row.dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 1 }));
+
+    expect(node.children).toEqual([]);
+    expect(node.isExpanded).toBe(false);
+    expect(host.handleRowClick).toHaveBeenCalledWith(node, 1);
+    expect(host.handleRowDoubleClick).not.toHaveBeenCalled();
+  });
+
+  it("waits for a double click before activating a connection search result in double-click mode", async () => {
+    settingsStore.editorSettings.sidebarActivation = "double";
+    const node = searchedConnection();
+    const { row, host } = await mountTreeItem(node);
+
+    row.dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 1 }));
+    expect(host.handleRowClick).not.toHaveBeenCalled();
+
+    row.dispatchEvent(new MouseEvent("dblclick", { bubbles: true, detail: 2 }));
+
+    expect(host.handleRowDoubleClick).toHaveBeenCalledWith(node, expect.any(MouseEvent));
   });
 });

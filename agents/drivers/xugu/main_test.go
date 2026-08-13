@@ -71,7 +71,8 @@ func TestRuntimeHandshakeAdvertisesMultiSessionProtocol(t *testing.T) {
 	if err := json.Unmarshal(data, &result); err != nil {
 		t.Fatal(err)
 	}
-	if result.ProtocolVersion != multiSessionProtocolVersion || !contains(result.Capabilities, "multi_session") {
+	if result.ProtocolVersion != multiSessionProtocolVersion || !contains(result.Capabilities, "multi_session") ||
+		!contains(result.Capabilities, "structured_error_v1") {
 		t.Fatalf("unexpected runtime handshake: %+v", result)
 	}
 }
@@ -711,8 +712,91 @@ func TestSchemaListingSQLUsesLowPrivilegeDictionary(t *testing.T) {
 	if !strings.Contains(sqlText, "ALL_SCHEMAS") || strings.Contains(sqlText, "SYS_SCHEMAS") {
 		t.Fatalf("schema listing should query low-privilege ALL_SCHEMAS, got: %s", xuguListSchemasSQL)
 	}
+	if !strings.Contains(sqlText, "ALL_SYNONYMS") || !strings.Contains(sqlText, "IS_PUBLIC_SCOPE") {
+		t.Fatalf("schema listing should expose public synonyms in the same query: %s", xuguListSchemasSQL)
+	}
 	if !strings.Contains(sqlText, "DB_ID = CURRENT_DB_ID") {
 		t.Fatalf("schema listing must be scoped to the selected database: %s", xuguListSchemasSQL)
+	}
+}
+
+func TestXuguListSchemasExposesPublicScopeWithoutGUESTCollision(t *testing.T) {
+	db, err := sql.Open("xugu-test-schema-listing", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	cases := []struct {
+		name         string
+		realGuest    bool
+		realReserved bool
+		public       bool
+		want         []string
+	}{
+		{name: "private only", want: []string{"APP_TEST", "SYSDBA"}},
+		{name: "public without real guest", public: true, want: []string{"APP_TEST", "SYSDBA", xuguPublicSynonymScope}},
+		{name: "public with real guest", realGuest: true, public: true, want: []string{"APP_TEST", "GUEST", "SYSDBA", xuguPublicSynonymScope}},
+		{name: "public with former reserved schema", realReserved: true, public: true, want: []string{"APP_TEST", "__DBX_XUGU_PUBLIC_SYNONYMS__", "SYSDBA", xuguPublicSynonymScope}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			xuguSchemaListingState.Lock()
+			xuguSchemaListingState.realGuest = tc.realGuest
+			xuguSchemaListingState.realReserved = tc.realReserved
+			xuguSchemaListingState.public = tc.public
+			xuguSchemaListingState.combinedUnavailable = false
+			xuguSchemaListingState.queryCount = 0
+			xuguSchemaListingState.Unlock()
+
+			s := newServer()
+			s.db = db
+			got, err := s.listSchemas()
+			if err != nil {
+				t.Fatalf("listSchemas() error: %v", err)
+			}
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("listSchemas() = %v, want %v", got, tc.want)
+			}
+			xuguSchemaListingState.Lock()
+			queryCount := xuguSchemaListingState.queryCount
+			xuguSchemaListingState.Unlock()
+			if queryCount != 1 {
+				t.Fatalf("listSchemas() made %d metadata requests, want 1", queryCount)
+			}
+		})
+	}
+}
+
+func TestXuguListSchemasFallsBackWhenCombinedQueryIsUnavailable(t *testing.T) {
+	db, err := sql.Open("xugu-test-schema-listing", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	xuguSchemaListingState.Lock()
+	xuguSchemaListingState.realGuest = true
+	xuguSchemaListingState.realReserved = false
+	xuguSchemaListingState.public = true
+	xuguSchemaListingState.combinedUnavailable = true
+	xuguSchemaListingState.queryCount = 0
+	xuguSchemaListingState.Unlock()
+
+	s := newServer()
+	s.db = db
+	got, err := s.listSchemas()
+	if err != nil {
+		t.Fatalf("listSchemas() error: %v", err)
+	}
+	if want := []string{"APP_TEST", "GUEST", "SYSDBA"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("listSchemas() = %v, want %v", got, want)
+	}
+	xuguSchemaListingState.Lock()
+	queryCount := xuguSchemaListingState.queryCount
+	xuguSchemaListingState.Unlock()
+	if queryCount != 2 {
+		t.Fatalf("fallback listSchemas() made %d metadata requests, want 2", queryCount)
 	}
 }
 
@@ -1131,6 +1215,46 @@ func TestAvailableXuguObjectTypesRespectsConstraints(t *testing.T) {
 	}
 }
 
+func TestXuguListObjectsQueryExposesPublicSynonymsOnlyInReservedScope(t *testing.T) {
+	query := xuguListObjectsQuery(xuguPublicSynonymScope, metadataListConstraints{ObjectTypes: []string{"SYNONYM"}})
+	upper := strings.ToUpper(query.SQL)
+	for _, want := range []string{"FROM ALL_SYNONYMS Y", "Y.IS_PUBLIC = TRUE", "OBJECT_TYPE IN (?)"} {
+		if !strings.Contains(upper, want) {
+			t.Fatalf("public synonym query is missing %q:\n%s", want, query.SQL)
+		}
+	}
+	synonymStart := strings.Index(upper, "SELECT Y.SYNO_NAME")
+	synonymEnd := strings.Index(upper[synonymStart:], "UNION ALL")
+	if synonymStart < 0 {
+		t.Fatalf("public synonym branch could not be isolated:\n%s", query.SQL)
+	}
+	if synonymEnd < 0 {
+		synonymEnd = len(upper) - synonymStart
+	}
+	synonymBranch := upper[synonymStart : synonymStart+synonymEnd]
+	if strings.Contains(synonymBranch, "JOIN ALL_SCHEMAS") || strings.Contains(synonymBranch, "UPPER(S.SCHEMA_NAME)") {
+		t.Fatalf("public synonym query must not require an owning schema:\n%s", query.SQL)
+	}
+	assertArgs(t, query.Args, []any{"SYNONYM"})
+
+	private := xuguListObjectsQuery("SYSDBA", metadataListConstraints{ObjectTypes: []string{"SYNONYM"}})
+	privateUpper := strings.ToUpper(private.SQL)
+	if !strings.Contains(privateUpper, "Y.IS_PUBLIC = FALSE") || !strings.Contains(privateUpper, "JOIN ALL_SCHEMAS") {
+		t.Fatalf("private synonym query must remain schema-scoped:\n%s", private.SQL)
+	}
+}
+
+func TestXuguListObjectsQueryKeepsRealGuestSchemaPrivate(t *testing.T) {
+	query := xuguListObjectsQuery("GUEST", metadataListConstraints{ObjectTypes: []string{"SYNONYM"}})
+	upper := strings.ToUpper(query.SQL)
+	if !strings.Contains(upper, "Y.IS_PUBLIC = FALSE") || !strings.Contains(upper, "JOIN ALL_SCHEMAS") {
+		t.Fatalf("real GUEST schema must use the private synonym query: %s", query.SQL)
+	}
+	if strings.Contains(upper, "Y.IS_PUBLIC = TRUE") {
+		t.Fatalf("real GUEST schema must not use the public synonym scope: %s", query.SQL)
+	}
+}
+
 func TestXuguListObjectsQueryExcludesSystemSequences(t *testing.T) {
 	query := xuguListObjectsQuery("APP", metadataListConstraints{
 		ObjectTypes: []string{"sequence"},
@@ -1205,6 +1329,72 @@ func TestGetSynonymSourceReconstructsPrivateQuotedDDL(t *testing.T) {
 	want := "CREATE SYNONYM \"SYSDBA\".\"dbxSynonymReplayCase\"\nFOR \"AppSchema\".\"tbUserProfile\";"
 	if ddl != want {
 		t.Fatalf("synonym DDL = %q, want %q", ddl, want)
+	}
+}
+
+func TestGetSynonymSourceReconstructsPublicDDLWithoutSyntheticSchema(t *testing.T) {
+	db, err := sql.Open("xugu-test-public-synonym-source", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	s := newServer()
+	s.db = db
+	source, err := s.getObjectSource(xuguPublicSynonymScope, "DbxPublicMixed", "SYNONYM")
+	if err != nil {
+		t.Fatalf("get public synonym source: %v", err)
+	}
+	if source["schema"] != xuguPublicSynonymScope || source["name"] != "DbxPublicMixed" {
+		t.Fatalf("public synonym source must preserve synthetic scope and catalog spelling: %#v", source)
+	}
+	ddl, _ := source["source"].(string)
+	want := "CREATE PUBLIC SYNONYM \"DbxPublicMixed\"\nFOR \"SYSDBA\".\"SHOP_USERS\";"
+	if ddl != want {
+		t.Fatalf("public synonym DDL = %q, want %q", ddl, want)
+	}
+}
+
+func TestXuguCatalogSynonymQueryUsesReservedPublicScope(t *testing.T) {
+	exact := strings.ToUpper(xuguCatalogSynonymQuery(xuguPublicSynonymScope, "DbxPublicMixed", false))
+	if !strings.Contains(exact, "Y.IS_PUBLIC = TRUE") || !strings.Contains(exact, "Y.SYNO_NAME = 'DBXPUBLICMIXED'") {
+		t.Fatalf("exact public synonym lookup must be global and exact:\n%s", exact)
+	}
+	if strings.Contains(exact, "S.SCHEMA_NAME =") {
+		t.Fatalf("exact public synonym lookup must not require an owning schema:\n%s", exact)
+	}
+
+	folded := strings.ToUpper(xuguCatalogSynonymQuery(xuguPublicSynonymScope, "dbxpublicmixed", true))
+	if !strings.Contains(folded, "Y.IS_PUBLIC = TRUE") || !strings.Contains(folded, "UPPER(Y.SYNO_NAME) = 'DBXPUBLICMIXED'") {
+		t.Fatalf("case-insensitive public synonym lookup must remain global:\n%s", folded)
+	}
+	if strings.Contains(folded, "S.SCHEMA_NAME =") {
+		t.Fatalf("case-insensitive public synonym lookup must not require an owning schema:\n%s", folded)
+	}
+}
+
+func TestXuguCatalogSynonymQueryTreatsRealGuestAsPrivate(t *testing.T) {
+	query := strings.ToUpper(xuguCatalogSynonymQuery("GUEST", "DbxPrivateMixed", false))
+	if !strings.Contains(query, "Y.IS_PUBLIC = FALSE") || !strings.Contains(query, "S.SCHEMA_NAME = 'GUEST'") {
+		t.Fatalf("real GUEST schema must use private exact lookup: %s", query)
+	}
+	if strings.Contains(query, "AND Y.IS_PUBLIC = TRUE") {
+		t.Fatalf("real GUEST schema must not use public lookup: %s", query)
+	}
+}
+
+func TestSelectXuguCatalogSynonymDisambiguatesPrivateAndPublicSameName(t *testing.T) {
+	candidates := []xuguCatalogSynonym{
+		{Schema: "GUEST", Name: "SharedAlias", TargetSchema: sql.NullString{String: "GUEST", Valid: true}, TargetName: "PRIVATE_TARGET", Public: false},
+		{Schema: xuguPublicSynonymScope, Name: "SharedAlias", TargetSchema: sql.NullString{String: "SYSDBA", Valid: true}, TargetName: "PUBLIC_TARGET", Public: true},
+	}
+	private, err := selectXuguCatalogSynonym("GUEST", "SharedAlias", candidates)
+	if err != nil || private.Public || private.TargetName != "PRIVATE_TARGET" {
+		t.Fatalf("private same-name synonym resolved incorrectly: %#v, err=%v", private, err)
+	}
+	public, err := selectXuguCatalogSynonym(xuguPublicSynonymScope, "SharedAlias", candidates)
+	if err != nil || !public.Public || public.TargetName != "PUBLIC_TARGET" {
+		t.Fatalf("public same-name synonym resolved incorrectly: %#v, err=%v", public, err)
 	}
 }
 
@@ -2204,10 +2394,77 @@ func init() {
 	sql.Register("xugu-test-show-result", &xuguShowResultDriver{})
 	sql.Register("xugu-test-sequence-source", &xuguSequenceSourceDriver{})
 	sql.Register("xugu-test-synonym-source", &xuguSynonymSourceDriver{})
+	sql.Register("xugu-test-public-synonym-source", &xuguPublicSynonymSourceDriver{})
 	sql.Register("xugu-test-permission-metadata", &xuguPermissionMetadataDriver{})
 	sql.Register("xugu-test-fallback-errors", &xuguFallbackErrorDriver{})
 	sql.Register("xugu-test-eof", &xuguEOFDriver{})
 	sql.Register("xugu-test-trigger-details", &xuguTriggerDetailsDriver{})
+	sql.Register("xugu-test-schema-listing", &xuguSchemaListingDriver{})
+}
+
+var xuguSchemaListingState struct {
+	sync.Mutex
+	realGuest           bool
+	realReserved        bool
+	public              bool
+	combinedUnavailable bool
+	queryCount          int
+}
+
+type xuguSchemaListingDriver struct{}
+
+func (d *xuguSchemaListingDriver) Open(name string) (driver.Conn, error) {
+	return &xuguSchemaListingConn{}, nil
+}
+
+type xuguSchemaListingConn struct{}
+
+func (c *xuguSchemaListingConn) Prepare(query string) (driver.Stmt, error) {
+	return nil, errors.New("not supported")
+}
+func (c *xuguSchemaListingConn) Close() error              { return nil }
+func (c *xuguSchemaListingConn) Begin() (driver.Tx, error) { return nil, errors.New("not supported") }
+func (c *xuguSchemaListingConn) QueryContext(_ context.Context, query string, _ []driver.NamedValue) (driver.Rows, error) {
+	upper := strings.ToUpper(query)
+	xuguSchemaListingState.Lock()
+	realGuest, realReserved := xuguSchemaListingState.realGuest, xuguSchemaListingState.realReserved
+	public, combinedUnavailable := xuguSchemaListingState.public, xuguSchemaListingState.combinedUnavailable
+	xuguSchemaListingState.queryCount++
+	xuguSchemaListingState.Unlock()
+	switch {
+	case strings.Contains(upper, "FROM ALL_SCHEMAS") && strings.Contains(upper, "FROM ALL_SYNONYMS"):
+		if combinedUnavailable {
+			return nil, errors.New("combined public synonym scope query is unavailable")
+		}
+		values := [][]driver.Value{{"APP_TEST"}}
+		if realGuest {
+			values = append(values, []driver.Value{"GUEST"})
+		}
+		if realReserved {
+			values = append(values, []driver.Value{"__DBX_XUGU_PUBLIC_SYNONYMS__"})
+		}
+		values = append(values, []driver.Value{"SYSDBA"})
+		combinedValues := make([][]driver.Value, 0, len(values)+1)
+		for _, value := range values {
+			combinedValues = append(combinedValues, []driver.Value{value[0], false})
+		}
+		if public {
+			combinedValues = append(combinedValues, []driver.Value{"", true})
+		}
+		return &xuguStaticRows{columns: []string{"SCHEMA_NAME", "IS_PUBLIC_SCOPE"}, values: combinedValues}, nil
+	case strings.Contains(upper, "FROM ALL_SCHEMAS"):
+		values := [][]driver.Value{{"APP_TEST"}}
+		if realGuest {
+			values = append(values, []driver.Value{"GUEST"})
+		}
+		if realReserved {
+			values = append(values, []driver.Value{"__DBX_XUGU_PUBLIC_SYNONYMS__"})
+		}
+		values = append(values, []driver.Value{"SYSDBA"})
+		return &xuguStaticRows{columns: []string{"SCHEMA_NAME"}, values: values}, nil
+	default:
+		return nil, fmt.Errorf("unexpected schema listing query: %s", query)
+	}
 }
 
 type xuguEOFDriver struct{}
@@ -2656,8 +2913,37 @@ func (c *xuguSynonymSourceConn) QueryContext(_ context.Context, query string, _ 
 		return nil, fmt.Errorf("synonym resolution must prioritize exact catalog identifiers: %s", query)
 	}
 	return &xuguStaticRows{
-		columns: []string{"SCHEMA_NAME", "SYNO_NAME", "TARGET_SCHEMA", "TARG_NAME"},
-		values:  [][]driver.Value{{"SYSDBA", "dbxSynonymReplayCase", "AppSchema", "tbUserProfile"}},
+		columns: []string{"SCHEMA_NAME", "SYNO_NAME", "TARGET_SCHEMA", "TARG_NAME", "IS_PUBLIC"},
+		values:  [][]driver.Value{{"SYSDBA", "dbxSynonymReplayCase", "AppSchema", "tbUserProfile", false}},
+	}, nil
+}
+
+type xuguPublicSynonymSourceDriver struct{}
+
+func (d *xuguPublicSynonymSourceDriver) Open(name string) (driver.Conn, error) {
+	return &xuguPublicSynonymSourceConn{}, nil
+}
+
+type xuguPublicSynonymSourceConn struct{}
+
+func (c *xuguPublicSynonymSourceConn) Prepare(query string) (driver.Stmt, error) {
+	return nil, errors.New("not supported")
+}
+func (c *xuguPublicSynonymSourceConn) Close() error { return nil }
+func (c *xuguPublicSynonymSourceConn) Begin() (driver.Tx, error) {
+	return nil, errors.New("not supported")
+}
+func (c *xuguPublicSynonymSourceConn) QueryContext(_ context.Context, query string, _ []driver.NamedValue) (driver.Rows, error) {
+	upper := strings.ToUpper(query)
+	if !strings.Contains(upper, "FROM ALL_SYNONYMS") || !strings.Contains(upper, "Y.IS_PUBLIC = TRUE") {
+		return nil, fmt.Errorf("unexpected public synonym source query: %s", query)
+	}
+	if strings.Contains(upper, "S.SCHEMA_NAME =") || strings.Contains(upper, "UPPER(") || !strings.Contains(query, "y.SYNO_NAME = 'DbxPublicMixed'") {
+		return nil, fmt.Errorf("public synonym resolution must use the global exact lookup: %s", query)
+	}
+	return &xuguStaticRows{
+		columns: []string{"SCHEMA_NAME", "SYNO_NAME", "TARGET_SCHEMA", "TARG_NAME", "IS_PUBLIC"},
+		values:  [][]driver.Value{{nil, "DbxPublicMixed", "SYSDBA", "SHOP_USERS", true}},
 	}, nil
 }
 
@@ -3117,13 +3403,176 @@ func TestXuguWatchdogCallsKillOnBlockingQuery(t *testing.T) {
 
 	select {
 	case err := <-errCh:
-		if err == nil {
-			t.Fatal("expected non-nil error after kill")
+		if !errors.Is(err, errXuguOperationTimeout) || !strings.Contains(err.Error(), "killed") {
+			t.Fatalf("expected recorded timeout preserving the driver error, got: %v", err)
 		}
-		if !strings.Contains(err.Error(), "killed") && !strings.Contains(err.Error(), "timed out") {
-			t.Fatalf("expected killed or timeout error, got: %v", err)
+		rpcErr := classifyRPCError("execute_query", "watchdog-query", err)
+		if rpcErr.Data.Category != "timeout" || rpcErr.Data.SessionDisposition != "quarantine" {
+			t.Fatalf("unexpected query timeout contract: %+v", rpcErr.Data)
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("query did not return after unblocking driver")
 	}
+}
+
+func TestXuguWatchdogClassifiesBlockingExecAsTimeout(t *testing.T) {
+	resetXuguBlockingDriver()
+	s := newServer()
+	killCh := make(chan struct{})
+	s.killSession = func() { close(killCh) }
+	db, err := sql.Open("xugu-test-blocking", "dsn")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	s.db = db
+
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := s.executeQuery(queryOptions{SQL: "UPDATE DBX_TIMEOUT_TEST SET VALUE = 1", TimeoutSecs: 1})
+		errCh <- err
+	}()
+
+	select {
+	case <-killCh:
+	case <-time.After(3 * time.Second):
+		t.Fatal("killSession was not called for the blocking exec")
+	}
+	close(xuguBlockingUnblock)
+
+	select {
+	case err := <-errCh:
+		if !errors.Is(err, errXuguOperationTimeout) || !strings.Contains(err.Error(), "killed") {
+			t.Fatalf("expected recorded exec timeout preserving the driver error, got: %v", err)
+		}
+		rpcErr := classifyRPCError("execute_query", "watchdog-exec", err)
+		if rpcErr.Data.Category != "timeout" || rpcErr.Data.SessionDisposition != "quarantine" {
+			t.Fatalf("unexpected exec timeout contract: %+v", rpcErr.Data)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("exec did not return after unblocking driver")
+	}
+}
+
+func TestXuguExplicitCancelClassifiesBlockingQueryAndExec(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		run  func(*server) error
+	}{
+		{
+			name: "query",
+			run: func(s *server) error {
+				rows, err := s.queryRowsWithTimeout("SELECT 1", nil, 0)
+				if rows != nil {
+					_ = rows.Close()
+				}
+				return err
+			},
+		},
+		{
+			name: "exec",
+			run: func(s *server) error {
+				_, err := s.executeQuery(queryOptions{SQL: "UPDATE DBX_CANCEL_TEST SET VALUE = 1"})
+				return err
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			resetXuguBlockingDriver()
+			s := newServer()
+			killCh := make(chan struct{})
+			s.killSession = func() { close(killCh) }
+			db, err := sql.Open("xugu-test-blocking", "dsn")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			s.db = db
+
+			errCh := make(chan error, 1)
+			go func() { errCh <- test.run(s) }()
+			waitForXuguActiveOperation(t, s)
+			s.cancelActiveQuery()
+			select {
+			case <-killCh:
+			case <-time.After(time.Second):
+				t.Fatal("killSession was not called for explicit cancellation")
+			}
+			close(xuguBlockingUnblock)
+
+			select {
+			case err := <-errCh:
+				if !errors.Is(err, errXuguOperationCanceled) || !strings.Contains(err.Error(), "killed") {
+					t.Fatalf("expected recorded cancellation preserving the driver error, got: %v", err)
+				}
+				rpcErr := classifyRPCError("execute_query", "explicit-cancel", err)
+				if rpcErr.Data.Category != "canceled" || rpcErr.Data.SessionDisposition != "quarantine" {
+					t.Fatalf("unexpected cancellation contract: %+v", rpcErr.Data)
+				}
+			case <-time.After(3 * time.Second):
+				t.Fatal("operation did not return after explicit cancellation")
+			}
+		})
+	}
+}
+
+func TestXuguExplicitCancelWinsWatchdogRace(t *testing.T) {
+	resetXuguBlockingDriver()
+	s := newServer()
+	var killMu sync.Mutex
+	killCount := 0
+	s.killSession = func() {
+		killMu.Lock()
+		killCount++
+		killMu.Unlock()
+	}
+	db, err := sql.Open("xugu-test-blocking", "dsn")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	s.db = db
+
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := s.queryRowsWithTimeout("SELECT 1", nil, 1)
+		errCh <- err
+	}()
+	waitForXuguActiveOperation(t, s)
+	s.cancelActiveQuery()
+
+	// Keep the driver blocked beyond the original watchdog deadline. The
+	// explicit cancel happened first, so the timer must not fire or relabel it.
+	time.Sleep(1200 * time.Millisecond)
+	killMu.Lock()
+	gotKillCount := killCount
+	killMu.Unlock()
+	if gotKillCount != 1 {
+		t.Fatalf("expected exactly one kill from explicit cancel, got %d", gotKillCount)
+	}
+	close(xuguBlockingUnblock)
+
+	select {
+	case err := <-errCh:
+		if !errors.Is(err, errXuguOperationCanceled) || errors.Is(err, errXuguOperationTimeout) {
+			t.Fatalf("explicit cancel was relabeled after its watchdog deadline: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("query did not return after unblocking driver")
+	}
+}
+
+func waitForXuguActiveOperation(t *testing.T, s *server) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		s.activeCancelMu.Lock()
+		active := s.activeCancel != nil
+		s.activeCancelMu.Unlock()
+		if active {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("operation did not become active")
 }

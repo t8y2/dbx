@@ -30,7 +30,7 @@ Desktop 的文件路径属于本机。Docker/Web 的文件路径属于服务器�
 ### 专用数据模型和服务
 
 - Redis、MongoDB
-- Elasticsearch、Easysearch、Manticore Search
+- Elasticsearch、Easysearch、Meilisearch、Manticore Search
 - Qdrant、Milvus、Weaviate、ChromaDB
 - HBase
 - Pulsar、Kafka、RocketMQ、RabbitMQ
@@ -94,7 +94,7 @@ Redis、MongoDB、搜索、向量、HBase、配置中心和消息队列工作区
 
 ## 默认端口和连接 URL
 
-连接 profile 会填入常见默认端口，例如 MySQL `3306`、PostgreSQL `5432`、Redis `6379`、MongoDB `27017`、SQL Server `1433`、Oracle `1521`、Elasticsearch `9200`、RabbitMQ AMQP `5672`。这些只是默认值，可以按部署修改。
+连接 profile 会填入常见默认端口，例如 MySQL `3306`、PostgreSQL `5432`、Redis `6379`、MongoDB `27017`、SQL Server `1433`、Oracle `1521`、Elasticsearch `9200`、Meilisearch `7700`、RabbitMQ AMQP `5672`。这些只是默认值，可以按部署修改。
 
 RabbitMQ 等服务可能同时有业务端口和管理 API 端口；自定义 AMQP 端口不能用于推断 Management API 端口。SSH 隧道、HTTP 代理、TLS SNI 和实际拨号目标也应分别确认。
 

@@ -444,6 +444,56 @@ test("selects complete SQL statements intersecting the visible viewport for diag
   assert.equal(ranges[0]?.to, sql.indexOf(";\nSELECT * FROM third"));
 });
 
+test("analyzes SQL Server control flow as complete GO batches", () => {
+  const sql = `IF SCHEMA_ID(N'dev') IS NULL
+    EXEC(N'CREATE SCHEMA dev AUTHORIZATION dbo');
+GO
+
+DECLARE @schema SYSNAME;
+DECLARE @sql NVARCHAR(MAX);
+DECLARE schema_cursor CURSOR LOCAL FAST_FORWARD FOR
+    SELECT N'dbo' UNION ALL SELECT N'dev';
+OPEN schema_cursor;
+FETCH NEXT FROM schema_cursor INTO @schema;
+WHILE @@FETCH_STATUS = 0
+BEGIN
+    IF OBJECT_ID(QUOTENAME(@schema) + N'.dashboard', N'U') IS NULL
+    BEGIN
+        SET @sql = N'CREATE TABLE dbo.dashboard (id INT);';
+        EXEC sys.sp_executesql @sql;
+    END;
+    FETCH NEXT FROM schema_cursor INTO @schema;
+END;
+CLOSE schema_cursor;
+DEALLOCATE schema_cursor;
+GO`;
+
+  const ranges = sqlSemanticDiagnosticRangesForViewport(sql, [{ from: 0, to: sql.length }], "sqlserver");
+
+  assert.equal(ranges.length, 2);
+  assert.equal(ranges[0]?.sql, "IF SCHEMA_ID(N'dev') IS NULL\n    EXEC(N'CREATE SCHEMA dev AUTHORIZATION dbo')");
+  assert.equal(ranges[1]?.from, sql.indexOf("DECLARE @schema"));
+  assert.equal(ranges[1]?.to, sql.lastIndexOf(";\nGO"));
+  assert.match(ranges[1]?.sql ?? "", /DECLARE schema_cursor CURSOR LOCAL FAST_FORWARD/);
+  assert.match(ranges[1]?.sql ?? "", /WHILE @@FETCH_STATUS = 0[\s\S]*FETCH NEXT FROM schema_cursor INTO @schema;\nEND/);
+  assert.doesNotMatch(ranges[1]?.sql ?? "", /^\s*GO\s*$/m);
+
+  const commentedGo = "DECLARE c CURSOR LOCAL FAST_FORWARD FOR SELECT 1;\n/*\nGO\n*/\nOPEN c;";
+  assert.equal(sqlSemanticDiagnosticRangesForViewport(commentedGo, [{ from: 0, to: commentedGo.length }], "sqlserver").length, 1);
+});
+
+test("keeps ordinary SQL Server statements viewport-local", () => {
+  const sql = "SELECT id FROM first;\nSELECT id, missing_field FROM second;\nSELECT id FROM third;";
+  const visibleFrom = sql.indexOf("missing_field");
+
+  const ranges = sqlSemanticDiagnosticRangesForViewport(sql, [{ from: visibleFrom, to: visibleFrom + 1 }], "sqlserver");
+
+  assert.deepEqual(
+    ranges.map((range) => range.sql),
+    ["SELECT id, missing_field FROM second"],
+  );
+});
+
 test("skips Oracle PL/SQL blocks when selecting semantic diagnostic ranges", () => {
   const sql = `DECLARE
   v_order_count NUMBER;

@@ -88,35 +88,38 @@ const { syncScroll: rollbackSyncScroll, measureHunks: rollbackMeasureHunks } = u
   hunks: rollbackHunks,
 });
 
-// Cache char-level diff segments so we don't recompute on every render
-const modifySegments = computed(() => {
+function collectModifySegments(diffHunks: ReturnType<typeof buildHunks>) {
   const map = new Map<string, { leftSegments: Segment[]; rightSegments: Segment[] }>();
-  for (const hunk of hunks.value) {
-    if (hunk.type !== "modify") continue;
+  for (const hunk of diffHunks) {
     for (let i = 0; i < hunk.leftLines.length; i++) {
       const left = hunk.leftLines[i];
       const right = hunk.rightLines[i];
-      if (left.isPadding || right.isPadding) continue;
       const key = `${hunk.id}:${i}`;
-      map.set(key, renderModifyLine(left, right));
+      if (left.type === "modify" && !left.isPadding && right.type === "modify" && !right.isPadding) {
+        map.set(key, renderModifyLine(left, right));
+      } else if (left.type === "modify" && !left.isPadding && left.comparisonContent !== undefined) {
+        map.set(key, {
+          leftSegments: renderModifyContent(left.content, left.comparisonContent).sourceSegments,
+          rightSegments: [],
+        });
+      } else if (right.type === "modify" && !right.isPadding && right.comparisonContent !== undefined) {
+        map.set(key, {
+          leftSegments: [],
+          rightSegments: renderModifyContent(right.comparisonContent, right.content).targetSegments,
+        });
+      }
     }
   }
   return map;
+}
+
+// Cache char-level diff segments so we don't recompute on every render
+const modifySegments = computed(() => {
+  return collectModifySegments(hunks.value);
 });
 
 const rollbackModifySegments = computed(() => {
-  const map = new Map<string, { leftSegments: Segment[]; rightSegments: Segment[] }>();
-  for (const hunk of rollbackHunks.value) {
-    if (hunk.type !== "modify") continue;
-    for (let i = 0; i < hunk.leftLines.length; i++) {
-      const left = hunk.leftLines[i];
-      const right = hunk.rightLines[i];
-      if (left.isPadding || right.isPadding) continue;
-      const key = `${hunk.id}:${i}`;
-      map.set(key, renderModifyLine(left, right));
-    }
-  }
-  return map;
+  return collectModifySegments(rollbackHunks.value);
 });
 
 let measureRaf: number | null = null;
@@ -277,7 +280,12 @@ function computeCharDiffs(source: string, target: string): { source: string; tar
 }
 
 function renderModifyLine(leftLine: DiffLine, rightLine: DiffLine): { leftSegments: Segment[]; rightSegments: Segment[] } {
-  const charDiffs = computeCharDiffs(leftLine.content, rightLine.content);
+  const { sourceSegments, targetSegments } = renderModifyContent(leftLine.content, rightLine.content);
+  return { leftSegments: sourceSegments, rightSegments: targetSegments };
+}
+
+function renderModifyContent(source: string, target: string): { sourceSegments: Segment[]; targetSegments: Segment[] } {
+  const charDiffs = computeCharDiffs(source, target);
   const leftSegments: Segment[] = [];
   const rightSegments: Segment[] = [];
   for (const cd of charDiffs) {
@@ -289,7 +297,7 @@ function renderModifyLine(leftLine: DiffLine, rightLine: DiffLine): { leftSegmen
       if (cd.target) rightSegments.push({ text: cd.target, changed: true });
     }
   }
-  return { leftSegments, rightSegments };
+  return { sourceSegments: leftSegments, targetSegments: rightSegments };
 }
 
 interface Segment {
@@ -387,9 +395,7 @@ function copyDeploySqlAll() {
                   :key="`l-${hunk.id}-${idx}`"
                   class="flex min-h-[1.5em]"
                   :class="{
-                    'border-l border-r border-yellow-500/40': hunk.type === 'modify',
-                    'border-t rounded-t-sm': hunk.type === 'modify' && idx === 0,
-                    'border-b rounded-b-sm': hunk.type === 'modify' && idx === hunk.leftLines.length - 1,
+                    'border rounded-sm border-yellow-500/40': line.type === 'modify',
                   }"
                   :style="{ backgroundColor: lineBackground(line) }"
                 >
@@ -421,9 +427,7 @@ function copyDeploySqlAll() {
                   :key="`r-${hunk.id}-${idx}`"
                   class="flex min-h-[1.5em]"
                   :class="{
-                    'border-l border-r border-yellow-500/40': hunk.type === 'modify',
-                    'border-t rounded-t-sm': hunk.type === 'modify' && idx === 0,
-                    'border-b rounded-b-sm': hunk.type === 'modify' && idx === hunk.rightLines.length - 1,
+                    'border rounded-sm border-yellow-500/40': line.type === 'modify',
                   }"
                   :style="{ backgroundColor: lineBackground(line) }"
                 >
@@ -467,9 +471,7 @@ function copyDeploySqlAll() {
                   :key="`l-${hunk.id}-${idx}`"
                   class="flex min-h-[1.5em]"
                   :class="{
-                    'border-l border-r border-yellow-500/40': hunk.type === 'modify',
-                    'border-t rounded-t-sm': hunk.type === 'modify' && idx === 0,
-                    'border-b rounded-b-sm': hunk.type === 'modify' && idx === hunk.leftLines.length - 1,
+                    'border rounded-sm border-yellow-500/40': line.type === 'modify',
                   }"
                   :style="{ backgroundColor: lineBackground(line) }"
                 >
@@ -499,9 +501,7 @@ function copyDeploySqlAll() {
                   :key="`r-${hunk.id}-${idx}`"
                   class="flex min-h-[1.5em]"
                   :class="{
-                    'border-l border-r border-yellow-500/40': hunk.type === 'modify',
-                    'border-t rounded-t-sm': hunk.type === 'modify' && idx === 0,
-                    'border-b rounded-b-sm': hunk.type === 'modify' && idx === hunk.rightLines.length - 1,
+                    'border rounded-sm border-yellow-500/40': line.type === 'modify',
                   }"
                   :style="{ backgroundColor: lineBackground(line) }"
                 >

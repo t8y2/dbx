@@ -272,11 +272,14 @@ function parseComputedSelectColumn(col: string): EditableQueryColumn | null {
 }
 
 function parseExpressionAlias(col: string): { expression: string; resultName: string } | null {
-  const asMatch = col.match(/\bAS\s+((?:"[^"]+")|(?:`[^`]+`)|(?:\[[^\]]+\])|(?:[\p{ID_Start}_][\p{ID_Continue}$]*))\s*$/iu);
-  if (asMatch?.index === undefined) return null;
-  const alias = readIdentifier(asMatch[1], 0);
-  if (!alias || alias.end !== asMatch[1].length) return null;
-  const expression = col.slice(0, asMatch.index).trim();
+  const asMatch = col.match(/\bAS\s+((?:"[^"]+")|(?:`[^`]+`)|(?:\[[^\]]+\])|(?:'(?:''|[^'])*')|(?:[\p{ID_Start}_][\p{ID_Continue}$]*))\s*$/iu);
+  const implicitStringMatch = asMatch ? undefined : col.match(/\s+('(?:''|[^'])*')\s*$/u);
+  const aliasText = asMatch?.[1] ?? implicitStringMatch?.[1];
+  const expressionEnd = asMatch?.index ?? implicitStringMatch?.index;
+  if (!aliasText || expressionEnd === undefined) return null;
+  const alias = readSelectAlias(aliasText);
+  if (!alias || alias.end !== aliasText.length) return null;
+  const expression = col.slice(0, expressionEnd).trim();
   return expression ? { expression, resultName: alias.value } : null;
 }
 
@@ -285,9 +288,29 @@ function parseColumnAlias(rest: string): string | undefined | null {
   if (!trimmed) return undefined;
   const asMatch = trimmed.match(/^AS\s+/i);
   const aliasText = asMatch ? trimmed.slice(asMatch[0].length).trim() : trimmed;
-  const alias = readIdentifier(aliasText, 0);
+  const alias = readSelectAlias(aliasText);
   if (!alias || alias.end !== aliasText.length) return null;
   return alias.value;
+}
+
+function readSelectAlias(text: string): { value: string; quoted: boolean; end: number } | null {
+  const pos = skipWhitespace(text, 0);
+  if (text[pos] !== "'") return readIdentifier(text, pos);
+
+  let value = "";
+  for (let i = pos + 1; i < text.length; i++) {
+    if (text[i] !== "'") {
+      value += text[i];
+      continue;
+    }
+    if (text[i + 1] === "'") {
+      value += "'";
+      i++;
+      continue;
+    }
+    return { value, quoted: true, end: i + 1 };
+  }
+  return null;
 }
 
 function isSelectStar(body: string, alias: string | undefined): boolean {

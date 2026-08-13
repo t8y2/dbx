@@ -247,6 +247,15 @@ export function useDataGridSelection(options: UseDataGridSelectionOptions) {
     lastClickedColumnIndex.value = colIndex;
   }
 
+  function remapColumnSelection(previousColumnIndexes: readonly number[], nextColumnIndexes: readonly number[]) {
+    const selectedColumns = new Set([...selectedColumnIndexes.value].map((index) => previousColumnIndexes[index]).filter((index): index is number => index !== undefined));
+    selectedColumnIndexes.value = new Set(nextColumnIndexes.flatMap((columnIndex, index) => (selectedColumns.has(columnIndex) ? [index] : [])));
+
+    const lastClickedColumn = lastClickedColumnIndex.value === null ? undefined : previousColumnIndexes[lastClickedColumnIndex.value];
+    const nextLastClickedColumnIndex = lastClickedColumn === undefined ? -1 : nextColumnIndexes.indexOf(lastClickedColumn);
+    lastClickedColumnIndex.value = nextLastClickedColumnIndex >= 0 ? nextLastClickedColumnIndex : null;
+  }
+
   function selectAllCells() {
     const range = allCellsSelectionRange(displayItems.value.length, columns.value.length);
     if (!range) return;
@@ -579,6 +588,7 @@ export function useDataGridSelection(options: UseDataGridSelectionOptions) {
     selectRow,
     selectColumn,
     selectColumns,
+    remapColumnSelection,
     selectAllCells,
     extendCellSelectionTo,
     finishCellSelection,

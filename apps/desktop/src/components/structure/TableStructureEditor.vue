@@ -32,7 +32,7 @@ import { invalidateTableMetadataCache } from "@/lib/metadata/tableMetadataCache"
 import { type BuildTableStructureChangeSqlOptions, type EditableStructureColumn, type EditableStructureForeignKey, type EditableStructureIndex, type EditableStructureTrigger } from "@/lib/table/tableStructureEditorSql";
 import { PRESET_FIELDS_TEMPLATE_ID, createTableColumnTemplateDrafts } from "@/lib/table/tableColumnTemplates";
 import { getMysqlDataTypeHelp } from "@/lib/table/mysqlDataTypeHelp";
-import { getPostgresDataTypeHelp } from "@/lib/table/postgresDataTypeHelp";
+import { getPostgresDataTypeHelp, gaussdbMTypeDisplayName } from "@/lib/table/postgresDataTypeHelp";
 import { getSqliteDataTypeHelp } from "@/lib/table/sqliteDataTypeHelp";
 import { getTableMetadataCapabilities, firstStructureMetadataTab, isStructureMetadataTabSupported } from "@/lib/table/tableMetadataCapabilities";
 import { hasTableStructureRefreshWork, unloadedTableStructureRefreshScope, visibleTableStructureRefreshScope, type TableStructureRefreshScope } from "@/lib/table/tableStructureMetadataLoading";
@@ -73,7 +73,7 @@ import {
   parseExtraToColumnExtra,
   rehydrateColumnDraftsFromMetadata,
   resolveInsertColumnIndex,
-  restoreDamengLengthUnitsAfterSave,
+  restoreCharacterLengthUnitsAfterSave,
   sameStructureIndexType,
   splitDataType,
   toColumnNames,
@@ -100,6 +100,7 @@ const ddlScrollerRef = ref<StructureScrollerRef>();
 const dynamicDataTypeOptionsCache = new Map<string, string[]>();
 
 const sqlHighlighter = ref<SqlHighlighter>();
+const SQL_PREVIEW_DEBOUNCE_MS = 300;
 onMounted(async () => {
   sqlHighlighter.value = await createShikiSqlHighlighter({
     appearance: () => (isDark.value ? "dark" : "light"),
@@ -137,6 +138,7 @@ const loading = ref(false);
 const saving = ref(false);
 const postSaveRefreshing = ref(false);
 const sqlPreviewLoading = ref(false);
+const sqlPreviewPending = ref(false);
 const indexesLoading = ref(false);
 const foreignKeysLoading = ref(false);
 const triggersLoading = ref(false);
@@ -466,7 +468,7 @@ const structureDensityStyle = computed(() => {
     "--structure-line-height": String(metric.lineHeight),
   };
 });
-const structureControlClass = "h-[var(--structure-control-height)] min-w-0 rounded-[6px] px-[var(--structure-control-px)] py-0 text-[length:var(--structure-font-size)] focus-visible:border-ring/50 focus-visible:ring-1 focus-visible:ring-ring/25";
+const structureControlClass = "structure-grid-control h-[var(--structure-control-height)] min-w-0 rounded-[6px] px-[var(--structure-control-px)] py-0 text-[length:var(--structure-font-size)] focus-visible:border-ring/50 focus-visible:ring-1 focus-visible:ring-ring/25";
 const structureMonoControlClass = `${structureControlClass} font-mono`;
 const structureToolbarButtonClass = "h-[var(--structure-control-height)] gap-1 px-[var(--structure-control-px)] text-[length:var(--structure-font-size)]";
 const structureIconButtonClass = "h-[var(--structure-control-height)] w-[var(--structure-control-height)]";
@@ -581,7 +583,7 @@ watch(localStructureDensity, (density, previousDensity) => {
 function onColResize(e: MouseEvent, col: number) {
   e.preventDefault();
   const widthIndex = columnWidthIndex(col);
-  const minimumWidth = widthIndex === 3 && databaseType.value === "dameng" ? structureDensityMetric.value.minLengthColumnWidth : structureDensityMetric.value.minColumnWidth;
+  const minimumWidth = widthIndex === 3 && supportsCharacterLengthUnits.value ? structureDensityMetric.value.minLengthColumnWidth : structureDensityMetric.value.minColumnWidth;
   colResizing.value = { col: widthIndex, startX: e.clientX, startW: Math.max(colWidths.value[widthIndex] ?? minimumWidth, minimumWidth) };
   const onMove = (ev: MouseEvent) => {
     if (!colResizing.value) return;
@@ -620,6 +622,7 @@ function onIndexColResize(e: MouseEvent, col: number) {
 
 const connection = computed(() => (props.connectionId ? store.getConfig(props.connectionId) : undefined));
 const databaseType = computed(() => tableStructureDatabaseTypeForConnection(connection.value));
+const supportsCharacterLengthUnits = computed(() => databaseType.value === "dameng" || databaseType.value === "oracle");
 const usesMysql8SafeDefaults = computed(() => databaseType.value === "mysql" && connection.value?.db_type === "mysql" && connection.value.driver_profile === "mysql");
 const structureCapabilities = computed(() => getTableStructureCapabilities(databaseType.value, connection.value?.db_type, connection.value?.database_info?.productVersion));
 const tableMetadataCapabilities = computed(() => getTableMetadataCapabilities(databaseType.value));
@@ -770,7 +773,7 @@ const visibleColWidths = computed(() =>
   colLabels.value.map((column) => {
     if (column.key === "actions") return columnActionsWidth.value;
     const width = colWidths.value[column.widthIndex] ?? structureDensityMetric.value.minColumnWidth;
-    return column.key === "length" && databaseType.value === "dameng" ? Math.max(width, structureDensityMetric.value.minLengthColumnWidth) : width;
+    return column.key === "length" && supportsCharacterLengthUnits.value ? Math.max(width, structureDensityMetric.value.minLengthColumnWidth) : width;
   }),
 );
 
@@ -1030,6 +1033,7 @@ function clearSqlPreviewState() {
   sqlPreviewRequestId++;
   deferredSqlPreviewRefresh = false;
   sqlPreviewLoading.value = false;
+  sqlPreviewPending.value = false;
   pendingStatements.value = [];
   warnings.value = [];
   sqliteSchemaRevision.value = undefined;
@@ -1079,6 +1083,16 @@ function dataTypeTooltip(option: string): string | undefined {
   return undefined;
 }
 
+function gaussdbMDataTypeDisplayName(option: string): string {
+  if (databaseType.value === "gaussdb") {
+    const conn = connection.value;
+    if (conn?.driver_profile?.toLowerCase() === "gaussdb-m") {
+      return gaussdbMTypeDisplayName(option);
+    }
+  }
+  return option;
+}
+
 async function loadDynamicDataTypeOptions() {
   const requestId = ++dataTypeOptionsRequestId;
   const connectionId = props.connectionId;
@@ -1119,14 +1133,15 @@ function scheduleSqlPreviewRefresh() {
   }
   sqlPreviewRequestId++;
   deferredSqlPreviewRefresh = false;
-  pendingStatements.value = [];
-  warnings.value = [];
-  sqliteSchemaRevision.value = undefined;
   if (!hasPendingStructureChanges()) {
+    pendingStatements.value = [];
+    warnings.value = [];
+    sqliteSchemaRevision.value = undefined;
     sqlPreviewLoading.value = false;
+    sqlPreviewPending.value = false;
     return;
   }
-  sqlPreviewLoading.value = true;
+  sqlPreviewPending.value = true;
   if (hydratingRestoredDraft || needsColumnDraftMetadataHydration()) return;
   if (!isCreateMode.value && secondaryMetadataLoading.value) {
     deferredSqlPreviewRefresh = true;
@@ -1135,7 +1150,7 @@ function scheduleSqlPreviewRefresh() {
   sqlPreviewDebounceTimer = setTimeout(() => {
     sqlPreviewDebounceTimer = undefined;
     void refreshSqlPreview();
-  }, 80);
+  }, SQL_PREVIEW_DEBOUNCE_MS);
 }
 
 function structureChangeOptions(): BuildTableStructureChangeSqlOptions {
@@ -1159,6 +1174,7 @@ async function refreshSqlPreview() {
     warnings.value = [];
     sqliteSchemaRevision.value = undefined;
     sqlPreviewLoading.value = false;
+    sqlPreviewPending.value = false;
     return;
   }
   sqlPreviewLoading.value = true;
@@ -1175,7 +1191,10 @@ async function refreshSqlPreview() {
     warnings.value = [e?.message || String(e)];
     sqliteSchemaRevision.value = undefined;
   } finally {
-    if (requestId === sqlPreviewRequestId) sqlPreviewLoading.value = false;
+    if (requestId === sqlPreviewRequestId) {
+      sqlPreviewLoading.value = false;
+      sqlPreviewPending.value = false;
+    }
   }
 }
 
@@ -1186,6 +1205,7 @@ const canApply = computed(
     !postSaveRefreshing.value &&
     !secondaryMetadataLoading.value &&
     !sqlPreviewLoading.value &&
+    !sqlPreviewPending.value &&
     pendingStatements.value.length > 0 &&
     warnings.value.length === 0 &&
     (!hasSqliteTypeChange.value || !!sqliteSchemaRevision.value) &&
@@ -1203,6 +1223,7 @@ function resetState() {
   saving.value = false;
   postSaveRefreshing.value = false;
   sqlPreviewLoading.value = false;
+  sqlPreviewPending.value = false;
   indexesLoading.value = false;
   foreignKeysLoading.value = false;
   triggersLoading.value = false;
@@ -1279,7 +1300,7 @@ async function loadStructure(
   silent = false,
   scope: TableStructureRefreshScope = visibleTableStructureRefreshScope(activeTab.value),
   showErrors = true,
-  options: { blockSecondaryMetadata?: boolean; preserveDraft?: boolean; damengLengthUnitsAfterSave?: ReadonlyMap<string, string>; forceDdl?: boolean; forceMetadata?: boolean } = {},
+  options: { blockSecondaryMetadata?: boolean; preserveDraft?: boolean; characterLengthUnitsAfterSave?: ReadonlyMap<string, string>; forceDdl?: boolean; forceMetadata?: boolean } = {},
 ) {
   const connectionId = props.connectionId;
   const database = props.database;
@@ -1332,7 +1353,7 @@ async function loadStructure(
       // editor shows the correct options for the server version.
       void loadCharsetMetadata();
       const nextColumnDrafts = createColumnDrafts(nextColumns, databaseType.value);
-      const hydratedColumnDrafts = databaseType.value === "dameng" && options.damengLengthUnitsAfterSave ? restoreDamengLengthUnitsAfterSave(nextColumnDrafts, options.damengLengthUnitsAfterSave) : nextColumnDrafts;
+      const hydratedColumnDrafts = supportsCharacterLengthUnits.value && options.characterLengthUnitsAfterSave ? restoreCharacterLengthUnitsAfterSave(databaseType.value, nextColumnDrafts, options.characterLengthUnitsAfterSave) : nextColumnDrafts;
       columns.value = applyStoredLocalColumnOrder(hydratedColumnDrafts);
       loadedMetadataFacets.add("columns");
       if (!options.preserveDraft) selectedColumnId.value = null;
@@ -1391,9 +1412,9 @@ async function loadStructure(
   }
 }
 
-async function refreshStructureAfterSave(scope: TableStructureRefreshScope, damengLengthUnitsAfterSave: ReadonlyMap<string, string>) {
+async function refreshStructureAfterSave(scope: TableStructureRefreshScope, characterLengthUnitsAfterSave: ReadonlyMap<string, string>) {
   try {
-    await loadStructure(true, scope, false, { blockSecondaryMetadata: true, damengLengthUnitsAfterSave });
+    await loadStructure(true, scope, false, { blockSecondaryMetadata: true, characterLengthUnitsAfterSave });
   } catch (e) {
     console.warn("[DBX][structure-editor:post-save-refresh-failed]", e);
   } finally {
@@ -2263,7 +2284,7 @@ async function recordStructureHistory(sql: string, start: number, success: boole
 }
 
 async function copyPreviewSql() {
-  if (!previewSqlText.value.trim()) return;
+  if (sqlPreviewPending.value || sqlPreviewLoading.value || !previewSqlText.value.trim()) return;
   try {
     await copyToClipboard(previewSqlText.value);
     toast(t("grid.copied"));
@@ -2305,11 +2326,11 @@ async function applyChanges() {
   saving.value = true;
   errorMessage.value = "";
   const refreshScope = captureStructureRefreshScope();
-  const damengLengthUnitsAfterSave = new Map<string, string>();
-  if (databaseType.value === "dameng") {
+  const characterLengthUnitsAfterSave = new Map<string, string>();
+  if (supportsCharacterLengthUnits.value) {
     for (const column of columns.value) {
-      if (!column.markedForDrop && dataTypeLengthUnitValue("dameng", column.dataType)) {
-        damengLengthUnitsAfterSave.set(column.name.trim().toLowerCase(), column.dataType);
+      if (!column.markedForDrop && dataTypeLengthUnitValue(databaseType.value, column.dataType)) {
+        characterLengthUnitsAfterSave.set(column.name.trim().toLowerCase(), column.dataType);
       }
     }
   }
@@ -2325,6 +2346,8 @@ async function applyChanges() {
       loadedMetadataFacets.clear();
     }
     toast(t("structureEditor.saved"), 2500);
+    sqlPreviewPending.value = false;
+    sqlPreviewLoading.value = false;
     pendingStatements.value = [];
     warnings.value = [];
     sqliteSchemaRevision.value = undefined;
@@ -2341,7 +2364,7 @@ async function applyChanges() {
       postSaveRefreshing.value = true;
       skipNextRefreshVersion = true;
       emit("saved", tableComment.value !== originalTableComment.value);
-      await refreshStructureAfterSave(refreshScope, damengLengthUnitsAfterSave);
+      await refreshStructureAfterSave(refreshScope, characterLengthUnitsAfterSave);
     }
     return true;
   } catch (e: any) {
@@ -2751,7 +2774,7 @@ watch([activeTab, ddlLoading], ([tab, loading]) => {
           </div>
 
           <TabsContent ref="columnsScrollerRef" v-if="tableMetadataCapabilities.columns" value="columns" class="m-0 min-h-0 flex-1 overflow-auto p-0" @scroll.passive="onStructureContentScroll('columns', $event)">
-            <table class="border-separate border-spacing-0 text-[length:var(--structure-font-size)] leading-[var(--structure-line-height)]" :style="{ minWidth: visibleColWidths.reduce((a, w) => a + w, 0) + 'px' }">
+            <table class="structure-edit-grid border-separate border-spacing-0 text-[length:var(--structure-font-size)] leading-[var(--structure-line-height)]" :style="{ minWidth: visibleColWidths.reduce((a, w) => a + w, 0) + 'px' }">
               <thead class="sticky top-0 z-10 bg-background">
                 <tr>
                   <th
@@ -2801,10 +2824,11 @@ watch([activeTab, ddlLoading], ([tab, loading]) => {
                       :loading-text="t('common.loading')"
                       :allow-custom="true"
                       :option-tooltip="dataTypeTooltip"
+                      :display-name="gaussdbMDataTypeDisplayName"
                       :trigger-class="[structureMonoControlClass, 'w-full']"
                       @update:model-value="(v: string) => updateColumnDataType(column, v)"
                     />
-                    <Input v-else :model-value="splitDataType(column.dataType).baseType" :class="[structureMonoControlClass, 'w-full']" disabled />
+                    <Input v-else :model-value="gaussdbMDataTypeDisplayName(splitDataType(column.dataType).baseType)" :class="[structureMonoControlClass, 'w-full']" disabled />
                   </td>
                   <td v-if="columnEditorControls.length" :class="structureCellClass">
                     <Popover v-if="isMysqlEnumDataType(databaseType, column.dataType)">
@@ -2838,7 +2862,7 @@ watch([activeTab, ddlLoading], ([tab, loading]) => {
                         <SelectTrigger
                           :aria-label="t('structureEditor.lengthUnit')"
                           :title="t('structureEditor.lengthUnit')"
-                          class="h-[var(--structure-control-height)] w-16 shrink-0 rounded-[6px] px-[var(--structure-control-px)] font-mono text-[length:var(--structure-font-size)] focus-visible:border-ring/50 focus-visible:ring-1 focus-visible:ring-ring/25"
+                          class="structure-grid-control h-[var(--structure-control-height)] w-16 shrink-0 rounded-[6px] px-[var(--structure-control-px)] font-mono text-[length:var(--structure-font-size)] focus-visible:border-ring/50 focus-visible:ring-1 focus-visible:ring-ring/25"
                         >
                           <SelectValue :placeholder="t('structureEditor.unitPlaceholder')" />
                         </SelectTrigger>
@@ -3018,7 +3042,7 @@ watch([activeTab, ddlLoading], ([tab, loading]) => {
                             }
                           "
                         >
-                          <SelectTrigger class="h-[var(--structure-control-height)] w-28 rounded-[6px] px-[var(--structure-control-px)] text-[length:var(--structure-font-size)] focus-visible:border-ring/50 focus-visible:ring-1 focus-visible:ring-ring/25">
+                          <SelectTrigger class="structure-grid-control h-[var(--structure-control-height)] w-28 rounded-[6px] px-[var(--structure-control-px)] text-[length:var(--structure-font-size)] focus-visible:border-ring/50 focus-visible:ring-1 focus-visible:ring-ring/25">
                             <SelectValue />
                           </SelectTrigger>
                           <SelectContent>
@@ -3129,7 +3153,7 @@ watch([activeTab, ddlLoading], ([tab, loading]) => {
               <Loader2 class="h-4 w-4 animate-spin" />
               {{ t("common.loading") }}
             </div>
-            <table v-else class="border-separate border-spacing-0 text-[length:var(--structure-font-size)] leading-[var(--structure-line-height)]" :style="{ minWidth: indexColWidths.reduce((a, w) => a + w, 0) + 'px' }">
+            <table v-else class="structure-edit-grid border-separate border-spacing-0 text-[length:var(--structure-font-size)] leading-[var(--structure-line-height)]" :style="{ minWidth: indexColWidths.reduce((a, w) => a + w, 0) + 'px' }">
               <thead class="sticky top-0 z-10 bg-background">
                 <tr>
                   <th
@@ -3178,7 +3202,7 @@ watch([activeTab, ddlLoading], ([tab, loading]) => {
                   </td>
                   <td :class="structureCellClass">
                     <Select v-if="indexTypeOptions.length > 0" :model-value="index.indexType || 'BTREE'" :disabled="!canEditIndexDraft(index)" @update:model-value="(v: any) => (index.indexType = String(v ?? ''))">
-                      <SelectTrigger class="h-[var(--structure-control-height)] w-full rounded-[6px] px-[var(--structure-control-px)] font-mono text-[length:var(--structure-font-size)] focus-visible:border-ring/50 focus-visible:ring-1 focus-visible:ring-ring/25">
+                      <SelectTrigger class="structure-grid-control h-[var(--structure-control-height)] w-full rounded-[6px] px-[var(--structure-control-px)] font-mono text-[length:var(--structure-font-size)] focus-visible:border-ring/50 focus-visible:ring-1 focus-visible:ring-ring/25">
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
@@ -3349,7 +3373,7 @@ watch([activeTab, ddlLoading], ([tab, loading]) => {
         <div class="flex shrink-0 items-center justify-between border-b px-[var(--structure-cell-px)] py-[var(--structure-header-py)] text-[length:var(--structure-font-size)] font-medium">
           <div class="flex items-center gap-1.5">
             <span>{{ t("structureEditor.sqlPreview") }}</span>
-            <Badge v-if="!saving && pendingStatements.length && warnings.length === 0" variant="outline" class="h-4 px-1 text-[10px]">
+            <Badge v-if="!saving && pendingStatements.length && warnings.length === 0" variant="outline" :class="['h-4 px-1 text-[10px]', sqlPreviewPending || sqlPreviewLoading ? 'invisible' : '']" :aria-hidden="sqlPreviewPending || sqlPreviewLoading">
               <Check class="h-3 w-3" />
               {{ t("structureEditor.ready") }}
             </Badge>
@@ -3365,17 +3389,17 @@ watch([activeTab, ddlLoading], ([tab, loading]) => {
               <ChevronUp v-if="sqlPreviewCollapsed" :class="structureIconClass" />
               <ChevronDown v-else :class="structureIconClass" />
             </Button>
-            <Button variant="ghost" :class="structureToolbarButtonClass" :disabled="!previewSqlText.trim()" @click="copyPreviewSql">
+            <Button variant="ghost" :class="structureToolbarButtonClass" :disabled="sqlPreviewPending || sqlPreviewLoading || !previewSqlText.trim()" @click="copyPreviewSql">
               <Copy :class="[structureIconClass, 'mr-1']" />
               {{ t("structureEditor.copySql") }}
             </Button>
-            <Badge variant="secondary">
-              <Loader2 v-if="sqlPreviewLoading" class="h-3 w-3 animate-spin" />
+            <Badge variant="secondary" class="min-w-6 justify-center tabular-nums">
+              <Loader2 v-if="(sqlPreviewPending || sqlPreviewLoading) && !pendingStatements.length" class="h-3 w-3 animate-spin" />
               <span v-else>{{ pendingStatements.length }}</span>
             </Badge>
           </div>
         </div>
-        <div v-if="!sqlPreviewCollapsed" class="min-h-0 flex-1 overflow-auto p-2.5">
+        <div v-if="!sqlPreviewCollapsed" class="min-h-0 flex-1 overflow-auto p-2.5" :aria-busy="sqlPreviewPending || sqlPreviewLoading">
           <div v-if="hasSqliteTypeChange" class="mb-2 flex gap-1.5 rounded-md border border-primary/40 bg-primary/10 px-[var(--structure-cell-px)] py-[var(--structure-cell-py)] text-[length:var(--structure-font-size)] text-primary">
             <Info :class="[structureIconClass, 'mt-0.5 shrink-0']" />
             <span>{{ t("structureEditor.sqliteRebuildNotice") }}</span>
@@ -3387,6 +3411,9 @@ watch([activeTab, ddlLoading], ([tab, loading]) => {
             </div>
           </div>
           <pre v-if="pendingStatements.length" class="select-text whitespace-pre-wrap break-words rounded-md bg-muted/40 p-2.5 font-mono text-[calc(var(--structure-font-size)+1px)] leading-5" v-html="highlightedSql" />
+          <div v-else-if="sqlPreviewPending || sqlPreviewLoading" class="flex h-full items-center justify-center text-muted-foreground">
+            <Loader2 class="h-4 w-4 animate-spin" />
+          </div>
           <div v-else class="flex h-full items-center justify-center text-[length:var(--structure-font-size)] text-muted-foreground">
             {{ t("structureEditor.noChanges") }}
           </div>
@@ -3409,6 +3436,30 @@ watch([activeTab, ddlLoading], ([tab, loading]) => {
 </template>
 
 <style scoped>
+/* Editable values behave like grid cells, not a row of independent pill controls. */
+.structure-edit-grid :deep(.structure-grid-control) {
+  border-color: transparent;
+  border-radius: 0;
+  background-color: transparent;
+  box-shadow: none;
+}
+
+.structure-edit-grid > tbody > tr > td:hover {
+  background-color: color-mix(in oklab, var(--muted) 36%, transparent);
+}
+
+.structure-edit-grid > tbody > tr > td:focus-within {
+  background-color: color-mix(in oklab, var(--primary) 7%, transparent);
+  outline: 1px solid color-mix(in oklab, var(--primary) 55%, transparent);
+  outline-offset: -1px;
+}
+
+.structure-edit-grid > tbody > tr > td:focus-within :deep(.structure-grid-control) {
+  border-color: transparent;
+  background-color: transparent;
+  box-shadow: none;
+}
+
 /* --primary is rgb/oklch; use color-mix like DataGrid, not channel-based hsl wrappers. */
 .structure-column-search-match > td:first-child {
   box-shadow: inset 3px 0 0 color-mix(in oklab, var(--primary) 55%, transparent);

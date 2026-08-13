@@ -73,7 +73,9 @@ import { shouldMarkDisconnected } from "@/lib/connection/connectionHealth";
 import { connectionAttemptOriginalErrorMessage, connectionAttemptTimeoutMessage, connectionAttemptTimeoutMs } from "@/lib/connection/connectionAttemptTimeout";
 import { loadTimeoutInheritanceBackup, saveTimeoutInheritanceBackup } from "@/lib/connection/timeoutInheritanceBackup";
 import { migrateSqlServerLegacyCompatibilityConfig, requiresSqlServerLegacyCompatibilityComponent, SQLSERVER_LEGACY_COMPATIBILITY_DRIVER_KEY } from "@/lib/connection/sqlServerLegacyCompatibility";
+import { gaussdbMTypeDisplayName } from "@/lib/table/postgresDataTypeHelp";
 import { deleteTabResultSnapshotsForOwner } from "@/lib/tabs/tabResultCache";
+import { disposeSqlServerActivityTracesForConnection, hasSqlServerActivityTraceForConnection } from "@/lib/sqlserver/sqlServerActivityTraceRuntime";
 import { connectionUsesVisibleSchemaFilter, filterDatabaseNamesForConnection, filterSchemaNamesForConnection, filterVisibleDatabaseNames, normalizeVisibleDatabaseSelection } from "@/lib/database/visibleDatabases";
 import {
   buildObjectGroupPlaceholderNodes,
@@ -98,6 +100,7 @@ import { decodeSchemaTreeCache, encodeSchemaTreeCache } from "@/lib/metadata/sch
 import { sortSidebarTreeChildrenForParent } from "@/lib/sidebar/sidebarNodeOrdering";
 import { connectionSupportsDatabaseUserAdmin } from "@/lib/database/databaseUserAdmin";
 import { getTableMetadataCapabilities } from "@/lib/table/tableMetadataCapabilities";
+import { mergeRedisCommandDocumentation, parseRedisCommandCatalog, parseRedisCommandDocumentation, type RedisCommandDocumentation } from "@/lib/redis/redisCommandDocs";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { encodeSqlServerLinkedSchema, parseSqlServerLinkedSchema } from "@/lib/database/sqlServerLinkedServers";
 import { inferMongoCompletionFields, type MongoCompletionField } from "@/lib/mongo/mongoCompletion";
@@ -111,6 +114,7 @@ import { appendAgentDriverUpdateHint, hasAgentDriverUpdate, hasInstalledAgentVer
 import { appendConnectionErrorHints } from "@/lib/connection/connectionErrorHints";
 import { appendVisibleDatabaseSelection } from "@/lib/connection/connectionVisibleDatabases";
 import { buildXuguTypeMemberNodes, isXuguTypeMemberContainer } from "@/lib/sidebar/xuguTypeMembers";
+import { isXuguPublicSynonymScope, xuguSchemaDisplayName, XUGU_PUBLIC_SYNONYM_SCOPE } from "@/lib/sidebar/xuguPublicSynonyms";
 import { filterNacosNamespacesForSidebar, loadReadableNacosNamespaces } from "@/lib/nacos/nacosNamespaceVisibility";
 import { buildPackageMemberNodes, markPackageNodesExpandable } from "@/lib/sidebar/packageMembers";
 import { configuredDatabaseProductName, connectionConfigFingerprint, normalizeDatabaseConnectionInfo } from "@/lib/connection/connectionDatabaseInfo";
@@ -299,6 +303,8 @@ type MetadataListPageResult = TableInfo[] | ObjectInfo[];
 type BeforeConnectHandler = (config: ConnectionConfig) => Promise<void>;
 
 export const CONNECTION_ATTEMPT_CANCELLED_MESSAGE = "Connection attempt was cancelled";
+/** Thrown when a no-save-password connection is connected without a typed password. */
+export const CONNECTION_PASSWORD_REQUIRED_MESSAGE = "Password is required for this connection";
 
 function metadataDriverProfile(config?: ConnectionConfig): string | undefined {
   return config?.driver_profile || config?.db_type;
@@ -355,6 +361,8 @@ export const useConnectionStore = defineStore("connection", () => {
   const sqlServerCompletionContextCache = ref<Record<string, SqlServerCompletionContext>>({});
   const elasticsearchCompletionIndicesCache = ref<Record<string, string[]>>({});
   const redisCompletionKeysCache = ref<Record<string, string[]>>({});
+  const redisCommandDocsCache = ref<Record<string, RedisCommandDocumentation[]>>({});
+  const redisCommandDocsCacheGeneration = new Map<string, number>();
   const mongoCompletionCollectionsCache = ref<Record<string, string[]>>({});
   const mongoCompletionFieldsCache = ref<Record<string, MongoCompletionField[]>>({});
   const schemaListCache = ref<Record<string, string[]>>({});
@@ -997,6 +1005,7 @@ export const useConnectionStore = defineStore("connection", () => {
       "mongodb-legacy": MONGO_LEGACY_DRIVER_LABEL,
       elasticsearch: "Elasticsearch",
       easysearch: "Easysearch",
+      meilisearch: "Meilisearch",
       qdrant: "Qdrant",
       milvus: "Milvus",
       weaviate: "Weaviate",
@@ -1376,6 +1385,34 @@ export const useConnectionStore = defineStore("connection", () => {
     };
   }
 
+  function buildDamengUserNode(connectionId: string, existingConnectionNode?: TreeNode): TreeNode | undefined {
+    const config = getConfig(connectionId);
+    if (effectiveDatabaseTypeForConnection(config) !== "dameng") return undefined;
+    const existing = existingConnectionNode?.children?.find((child) => child.type === "dameng-users");
+    return {
+      id: `${connectionId}:__dameng_users`,
+      label: "tree.damengUsers",
+      type: "dameng-users",
+      connectionId,
+      database: "",
+      isExpanded: existing?.isExpanded ?? false,
+    };
+  }
+
+  function buildDamengRoleNode(connectionId: string, existingConnectionNode?: TreeNode): TreeNode | undefined {
+    const config = getConfig(connectionId);
+    if (effectiveDatabaseTypeForConnection(config) !== "dameng") return undefined;
+    const existing = existingConnectionNode?.children?.find((child) => child.type === "dameng-roles");
+    return {
+      id: `${connectionId}:__dameng_roles`,
+      label: "tree.damengRoles",
+      type: "dameng-roles",
+      connectionId,
+      database: "",
+      isExpanded: existing?.isExpanded ?? false,
+    };
+  }
+
   function buildDamengJobAdminNode(connectionId: string, existingConnectionNode?: TreeNode): TreeNode | undefined {
     const config = getConfig(connectionId);
     if (effectiveDatabaseTypeForConnection(config) !== "dameng") return undefined;
@@ -1393,8 +1430,10 @@ export const useConnectionStore = defineStore("connection", () => {
   function withConnectionUtilityNodes(connectionId: string, children: TreeNode[], existingConnectionNode?: TreeNode): TreeNode[] {
     const nonUtilityChildren = connectionMetadataChildren(children);
     const userAdminNode = buildUserAdminNode(connectionId, existingConnectionNode);
+    const damengUserNode = buildDamengUserNode(connectionId, existingConnectionNode);
+    const damengRoleNode = buildDamengRoleNode(connectionId, existingConnectionNode);
     const damengJobAdminNode = buildDamengJobAdminNode(connectionId, existingConnectionNode);
-    return [...nonUtilityChildren, userAdminNode, damengJobAdminNode].filter(Boolean) as TreeNode[];
+    return [...nonUtilityChildren, userAdminNode, damengUserNode, damengRoleNode, damengJobAdminNode].filter(Boolean) as TreeNode[];
   }
 
   function withSavedSqlRoot(connectionId: string, children: TreeNode[], existingConnectionNode?: TreeNode): TreeNode[] {
@@ -1601,16 +1640,17 @@ export const useConnectionStore = defineStore("connection", () => {
   }
 
   function objectGroupChildrenFromObjects(options: { node: TreeNode; parentNodeId: string; effectiveSchema?: string; objectTypes: DatabaseObjectTreeKind[]; objects: ObjectInfo[] }): TreeNode[] {
+    const databaseType = options.node.connectionId ? effectiveDatabaseTypeForConnection(getConfig(options.node.connectionId)) : undefined;
     const grouped = buildGroupedObjectTreeNodes({
       nodeId: options.parentNodeId,
       connectionId: options.node.connectionId || "",
       database: options.node.database || "",
       schema: options.effectiveSchema,
       objects: options.objects.filter((object) => options.objectTypes.includes(normalizedObjectTreeKind(object.object_type))),
+      databaseType,
     });
     const refreshedGroup = grouped.find((group) => group.type === options.node.type);
     const children = refreshedGroup?.children ?? [];
-    const databaseType = options.node.connectionId ? effectiveDatabaseTypeForConnection(getConfig(options.node.connectionId)) : undefined;
     return supportsPackageMemberExpansion(databaseType) ? markPackageNodesExpandable(children) : children;
   }
 
@@ -1640,12 +1680,20 @@ export const useConnectionStore = defineStore("connection", () => {
     const tableChildren = pageChildren.filter((child) => child.type === "table");
     const nonTableChildren = pageChildren.filter((child) => child.type !== "table");
     let merged = tableChildren.length ? mergeTableTreePageChildren(currentChildren, tableChildren, connectionId, database) : [...currentChildren];
-    const existing = new Set(merged.map(treeNodeObjectIdentity));
+    const existing = new Map(merged.map((node) => [treeNodeObjectIdentity(node), node]));
     for (const child of nonTableChildren) {
       const key = treeNodeObjectIdentity(child);
-      if (existing.has(key)) continue;
+      const existingNode = existing.get(key);
+      if (existingNode) {
+        if (child.type === "package" && child.xuguPackageBodyAvailable === true) {
+          existingNode.xuguPackageBodyAvailable = true;
+          existingNode.xuguPackageBodyValid = child.xuguPackageBodyValid;
+          existingNode.valid = existingNode.valid === false || child.valid === false ? false : (existingNode.valid ?? child.valid ?? null);
+        }
+        continue;
+      }
       merged.push(child);
-      existing.add(key);
+      existing.set(key, child);
     }
     const config = parent.connectionId ? getConfig(parent.connectionId) : undefined;
     return sortSidebarTreeChildrenForParent(
@@ -1868,14 +1916,15 @@ export const useConnectionStore = defineStore("connection", () => {
       );
       const supplementalObjects = filterSimpleSidebarSupplementalObjects(objects);
       if (supplementalObjects.length === 0) return;
+      const databaseType = effectiveDatabaseTypeForConnection(getConfig(options.connectionId));
       let supplementalChildren = buildSimpleObjectTreeNodes({
         nodeId: options.nodeId,
         connectionId: options.connectionId,
         database: options.database,
         schema: options.effectiveSchema,
         objects: supplementalObjects,
+        databaseType,
       });
-      const databaseType = effectiveDatabaseTypeForConnection(getConfig(options.connectionId));
       if (supportsPackageMemberExpansion(databaseType)) {
         supplementalChildren = markPackageNodesExpandable(supplementalChildren);
       }
@@ -2294,6 +2343,7 @@ export const useConnectionStore = defineStore("connection", () => {
 
   async function addConnection(config: ConnectionConfig, targetGroupId?: string | null) {
     const normalized = normalizeConnection(config);
+    if (normalized.save_password === false) normalized.password = "";
     await persistTimeoutInheritance(normalized.id, normalized.connect_timeout_inherit === true, normalized.query_timeout_inherit === true);
     const existing = connections.value.findIndex((c) => c.id === normalized.id);
     const nextConnections = [...connections.value];
@@ -2378,6 +2428,10 @@ export const useConnectionStore = defineStore("connection", () => {
     for (const key of Object.keys(redisCompletionKeysCache.value)) {
       if (key === exactCacheKey || key.startsWith(cachePrefix)) delete redisCompletionKeysCache.value[key];
     }
+    if (database == null) {
+      delete redisCommandDocsCache.value[connectionId];
+      redisCommandDocsCacheGeneration.set(connectionId, (redisCommandDocsCacheGeneration.get(connectionId) ?? 0) + 1);
+    }
     for (const key of Object.keys(mongoCompletionCollectionsCache.value)) {
       if (key === exactCacheKey || key.startsWith(cachePrefix)) delete mongoCompletionCollectionsCache.value[key];
     }
@@ -2453,6 +2507,7 @@ export const useConnectionStore = defineStore("connection", () => {
 
   async function updateConnection(config: ConnectionConfig) {
     config = normalizeConnection(config);
+    if (config.save_password === false) config.password = "";
     const idx = connections.value.findIndex((c) => c.id === config.id);
     if (idx < 0) return;
     const runtimeConfigChanged = connectionConfigFingerprint(connections.value[idx]) !== connectionConfigFingerprint(config);
@@ -2575,7 +2630,7 @@ export const useConnectionStore = defineStore("connection", () => {
   async function setDefaultSchema(connectionId: string, schema: string) {
     const config = getConfig(connectionId);
     const defaultSchema = schema.trim();
-    if (!config || !defaultSchema || config.default_schema === defaultSchema) return;
+    if (!config || !defaultSchema || config.default_schema === defaultSchema || (config.db_type === "xugu" && isXuguPublicSynonymScope(defaultSchema))) return;
     await updateConnection({
       ...config,
       default_schema: defaultSchema,
@@ -2760,7 +2815,7 @@ export const useConnectionStore = defineStore("connection", () => {
       await loadConsulRoot(connectionId);
     } else if (config.db_type === "mongodb") {
       await loadMongoDatabases(connectionId);
-    } else if (config.db_type === "elasticsearch" || config.db_type === "easysearch") {
+    } else if (config.db_type === "elasticsearch" || config.db_type === "easysearch" || config.db_type === "meilisearch") {
       // Reload: list indices.
       await loadElasticsearchIndices(connectionId);
     } else if (config.db_type === "milvus") {
@@ -2778,11 +2833,32 @@ export const useConnectionStore = defineStore("connection", () => {
     }
   }
 
+  /**
+   * For a connection configured with `save_password === false` (password not
+   * persisted), prompt the user for the password and return a copy of the
+   * config carrying the typed value. The returned config is used only for the
+   * immediate `connectDb` call — it is never written back to the store, so the
+   * typed password is not persisted and the next connect prompts again.
+   */
+  async function ensureConnectionPassword(config: ConnectionConfig): Promise<ConnectionConfig> {
+    if (config.save_password !== false || config.password) return config;
+    const { useConnectionPasswordPromptStore } = await import("@/stores/connectionPasswordPromptStore");
+    const password = await useConnectionPasswordPromptStore().requestPassword({
+      connectionId: config.id,
+      connectionName: config.name,
+    });
+    if (!password) throw new Error(CONNECTION_PASSWORD_REQUIRED_MESSAGE);
+    return { ...config, password };
+  }
+
   async function connect(config: ConnectionConfig) {
     config = normalizeConnection(config);
     if (getBlockingDisconnectInFlight(config.id)) await waitForBlockingDisconnectInFlight(config.id);
     const localAttempt = beginLocalConnectionAttempt(config.id);
     try {
+      if (config.save_password === false && !config.password) {
+        config = await ensureConnectionPassword(config);
+      }
       await beforeConnectHandler?.(config);
       if (config.db_type === "sqlserver") {
         await ensureSqlServerLegacyCompatibilityComponentInstalled(config);
@@ -2856,9 +2932,10 @@ export const useConnectionStore = defineStore("connection", () => {
 
   async function disconnect(connectionId: string) {
     const stateRevision = bumpConnectionStateRevision(connectionId);
+    const shouldRemoveOneTimeConnection = getConfig(connectionId)?.one_time === true;
+    if (hasSqlServerActivityTraceForConnection(connectionId)) await disposeSqlServerActivityTracesForConnection(connectionId);
     const disconnectRequest = startDisconnectRequest(connectionId);
     cancelLocalConnectionAttempt(connectionId);
-    const shouldRemoveOneTimeConnection = getConfig(connectionId)?.one_time === true;
 
     connectedIds.value.delete(connectionId);
     clearPrimaryVisibleObjectNames(connectionId);
@@ -2903,6 +2980,7 @@ export const useConnectionStore = defineStore("connection", () => {
   }
 
   async function closeDatabaseConnection(connectionId: string, database: string) {
+    if (hasSqlServerActivityTraceForConnection(connectionId, database)) await disposeSqlServerActivityTracesForConnection(connectionId, database);
     await api.closeDatabaseConnection(connectionId, database);
     const { useQueryStore } = await import("@/stores/queryStore");
     const queryStore = useQueryStore();
@@ -2966,6 +3044,12 @@ export const useConnectionStore = defineStore("connection", () => {
     }
     const localAttempt = beginLocalConnectionAttempt(connectionId);
     const connectPromise = (async () => {
+      // Fast-path the common case (password saved or no password needed) so the
+      // in-flight dedup above keeps its exact microtask cadence; only await the
+      // interactive prompt when the connection actually needs a typed password.
+      if (config.save_password === false && !config.password) {
+        config = await ensureConnectionPassword(config);
+      }
       await beforeConnectHandler?.(config);
       if (config.db_type === "sqlserver") {
         await ensureSqlServerLegacyCompatibilityComponentInstalled(config);
@@ -3309,7 +3393,7 @@ export const useConnectionStore = defineStore("connection", () => {
   async function loadConnectedConnectionRootForSidebarSearch(connectionId: string) {
     if (!connectedIds.value.has(connectionId)) return;
     const config = getConfig(connectionId);
-    if (!config || ["redis", "etcd", "zookeeper", "consul", "mongodb", "elasticsearch", "easysearch", "milvus", "qdrant", "weaviate", "chromadb", "mq", "nacos"].includes(config.db_type)) return;
+    if (!config || ["redis", "etcd", "zookeeper", "consul", "mongodb", "elasticsearch", "easysearch", "meilisearch", "milvus", "qdrant", "weaviate", "chromadb", "mq", "nacos"].includes(config.db_type)) return;
     const node = findConnectionNode(connectionId);
     if (!node || node.type !== "connection" || node.isLoading || hasConnectionMetadataChildren(node.children)) return;
     const scope = { kind: "connection-databases" as const, connectionId, driverProfile: metadataDriverProfile(config) };
@@ -3525,7 +3609,7 @@ export const useConnectionStore = defineStore("connection", () => {
       // exposes a single navigation entry and must not keep a second topic tree.
       const consoleNode: TreeNode = {
         id: `${connectionId}:mqtt-topic:__console__`,
-        label: "MQTT 控制台",
+        label: "connection.mqttConsoleTitle",
         type: "mqtt-topic" as const,
         connectionId,
         children: [],
@@ -3914,7 +3998,7 @@ export const useConnectionStore = defineStore("connection", () => {
           if (useCachedChildren(node, options, load)) return;
           const config = getConfig(connectionId);
           const showSystemSchemas = config?.show_system_schemas === true;
-          const cacheVersion = ownerAwareMetadataCacheVersion(config, "schemas-v3");
+          const cacheVersion = ownerAwareMetadataCacheVersion(config, config?.db_type === "xugu" ? "schemas-v4" : "schemas-v3");
           const cacheKey = schemaCacheKey(connectionId, database, cacheVersion, showSystemSchemas ? "show-system" : "hide-system");
           if (!options?.force) {
             const cached = await loadPersistedTreeChildren(node, cacheKey, load);
@@ -3933,13 +4017,19 @@ export const useConnectionStore = defineStore("connection", () => {
               { showSystemSchemas },
             ),
           );
+          // The public-synonym scope is a protocol namespace, not a user
+          // schema. Keep it discoverable even when a visible-schema filter is
+          // configured, while preserving the raw key for object routing.
+          if (config?.db_type === "xugu" && schemas.some((schema) => isXuguPublicSynonymScope(schema.name))) {
+            visibleSchemaNames.add(XUGU_PUBLIC_SYNONYM_SCOPE);
+          }
           const children: TreeNode[] = schemas
             .filter((schema) => visibleSchemaNames.has(schema.name))
             .map((schema) => {
               const s = schema.name;
               return {
                 id: `${connectionId}:${database}:${s}`,
-                label: s,
+                label: config?.db_type === "xugu" ? xuguSchemaDisplayName(s) : s,
                 type: "schema" as const,
                 connectionId,
                 database,
@@ -5074,11 +5164,13 @@ export const useConnectionStore = defineStore("connection", () => {
       const columns = await api.getColumns(connectionId, database, querySchema, table, catalog);
       const targetNode = treeNodeLoadTarget(load);
       if (!targetNode) return;
+      const connConfig = getConfig(connectionId);
+      const isGaussdbM = effectiveDatabaseTypeForConnection(connConfig) === "gaussdb" && connConfig?.driver_profile?.toLowerCase() === "gaussdb-m";
       setChildren(
         targetNode,
         columns.map((col) => ({
           id: `${parentId}:${col.name}`,
-          label: `${col.name} (${col.data_type})`,
+          label: `${col.name} (${isGaussdbM ? gaussdbMTypeDisplayName(col.data_type) : col.data_type})`,
           type: "column" as const,
           connectionId,
           database,
@@ -5347,7 +5439,7 @@ export const useConnectionStore = defineStore("connection", () => {
         await loadConsulRoot(node.connectionId);
       } else if (config?.db_type === "mongodb") {
         await loadMongoDatabases(node.connectionId);
-      } else if (config?.db_type === "elasticsearch" || config?.db_type === "easysearch") {
+      } else if (config?.db_type === "elasticsearch" || config?.db_type === "easysearch" || config?.db_type === "meilisearch") {
         await loadElasticsearchIndices(node.connectionId);
       } else if (config?.db_type === "milvus") {
         await loadMilvusDatabases(node.connectionId);
@@ -5713,7 +5805,7 @@ export const useConnectionStore = defineStore("connection", () => {
           });
           const targetNode = treeNodeLoadTarget(load);
           if (!targetNode) return;
-          setChildren(targetNode, buildPackageMemberNodes(targetNode, response.candidates));
+          setChildren(targetNode, buildPackageMemberNodes(targetNode, response.candidates, databaseType));
           targetNode.isExpanded = true;
         },
         options,
@@ -5743,40 +5835,64 @@ export const useConnectionStore = defineStore("connection", () => {
 
     const schema = node.schema || "";
     const parentName = node.objectName || node.label;
-    node.isLoading = true;
+    let load = beginTreeNodeLoad(node);
     try {
-      const [attributes, methods] = await Promise.all([
-        completionAssistantSearch({
-          connection_id: connectionId,
+      await runTreeMetadataLoad(
+        {
+          kind: "xugu-type-members",
+          connectionId,
           database,
           schema,
-          object_kinds: ["column"],
-          mask: "",
-          max_results: 500,
-          global_search: false,
-          parent_schema: schema,
-          parent_name: parentName,
-          parent_type: "type",
-          match_mode: "prefix",
-        }),
-        completionAssistantSearch({
-          connection_id: connectionId,
-          database,
-          schema,
-          object_kinds: ["routine"],
-          mask: "",
-          max_results: 500,
-          global_search: false,
-          parent_schema: schema,
-          parent_name: parentName,
-          parent_type: "type",
-          match_mode: "prefix",
-        }),
-      ]);
-      node.children = buildXuguTypeMemberNodes(node, [...attributes.candidates, ...methods.candidates]);
-      node.isExpanded = true;
+          nodeKind: node.type,
+          extra: { typeName: parentName },
+        },
+        async () => {
+          await ensureConnected(connectionId);
+          load = reclaimTreeNodeLoad(load, node);
+          const [attributes, methods] = await Promise.all([
+            completionAssistantSearch({
+              connection_id: connectionId,
+              database,
+              schema,
+              object_kinds: ["column"],
+              mask: "",
+              max_results: 500,
+              global_search: false,
+              parent_schema: schema,
+              parent_name: parentName,
+              parent_type: "type",
+              match_mode: "prefix",
+            }),
+            completionAssistantSearch({
+              connection_id: connectionId,
+              database,
+              schema,
+              object_kinds: ["routine"],
+              mask: "",
+              max_results: 500,
+              global_search: false,
+              parent_schema: schema,
+              parent_name: parentName,
+              parent_type: "type",
+              match_mode: "prefix",
+            }),
+          ]);
+          const targetNode = treeNodeLoadTarget(load);
+          if (!targetNode) return;
+          const children = buildXuguTypeMemberNodes(targetNode, [...attributes.candidates, ...methods.candidates], {
+            attributes: "tree.attributes",
+            methods: "tree.methods",
+          });
+          setChildren(targetNode, children);
+          targetNode.isExpanded = children.length > 0;
+          if (children.length === 0) targetNode.xuguTypeMembersExpandable = false;
+        },
+      );
+    } catch (error) {
+      recordMetadataLoadError(connectionId, error, load);
+      throw error;
     } finally {
-      node.isLoading = false;
+      finishTreeNodeLoad(load);
     }
   }
 
@@ -5823,7 +5939,7 @@ export const useConnectionStore = defineStore("connection", () => {
     return candidates
       .map((candidate): SqlCompletionObject | null => {
         const candidateType = candidate.data_type?.toUpperCase();
-        const type = candidate.kind === "procedure" ? "procedure" : candidate.kind === "function" ? "function" : candidate.kind === "object" && candidateType === "PACKAGE" ? "package" : null;
+        const type = candidate.kind === "procedure" ? "procedure" : candidate.kind === "function" ? "function" : candidate.kind === "sequence" ? "sequence" : candidate.kind === "object" && candidateType === "PACKAGE" ? "package" : null;
         if (!type) return null;
         const dataType = candidate.data_type && !["FUNCTION", "PROCEDURE", "PACKAGE"].includes(candidateType ?? "") ? candidate.data_type : undefined;
         return {
@@ -5902,20 +6018,23 @@ export const useConnectionStore = defineStore("connection", () => {
     globalSearch: boolean,
     currentSchema: string | undefined,
     objectKinds: CompletionAssistantObjectKind[],
+    caseSensitive: boolean,
   ): Promise<SqlCompletionObject[]> {
     const databaseType = getConfig(connectionId)?.db_type;
     const oracleAssistant = databaseType === "oracle";
     const requestedSchema = schema?.trim() || currentSchema?.trim() || undefined;
-    const preferredSchema = oracleAssistant ? completionPreferredSchema(connectionId, currentSchema) : requestedSchema || (databaseType === "postgres" ? "public" : databaseType === "mysql" ? database : undefined);
+    const sequenceOnly = objectKinds.length === 1 && objectKinds[0] === "sequence";
+    const preferredSchema = oracleAssistant ? completionPreferredSchema(connectionId, currentSchema) : requestedSchema || (!sequenceOnly && databaseType === "postgres" ? "public" : databaseType === "mysql" ? database : undefined);
     const response = await completionAssistantSearch({
       connection_id: connectionId,
       database,
       schema: oracleAssistant ? (preferredSchema ?? null) : (requestedSchema ?? null),
       object_kinds: objectKinds,
       mask: filter.trim(),
+      case_sensitive: caseSensitive,
       max_results: limit ?? 200,
       global_search: globalSearch,
-      parent_schema: globalSearch ? null : (schema ?? null),
+      parent_schema: globalSearch || sequenceOnly ? null : (schema ?? null),
       parent_name: parentName ?? null,
       match_mode: "prefix",
     });
@@ -6205,6 +6324,8 @@ export const useConnectionStore = defineStore("connection", () => {
   // Upper bound on cached key names per db, to keep completion memory bounded
   // (Redis can hold far more keys than we ever want resident for autocomplete).
   const REDIS_COMPLETION_KEYS_MAX = 1000;
+  // `\\xNN` is binary only when it has an even number of preceding slashes.
+  const BINARY_REDIS_KEY_ESCAPE = /(^|[^\\])(?:\\\\)*\\x[0-9a-f]{2}/i;
 
   async function listRedisCompletionKeys(connectionId: string, database: string): Promise<string[]> {
     if (!database) return [];
@@ -6216,10 +6337,48 @@ export const useConnectionStore = defineStore("connection", () => {
       const pageSize = getConfig(connectionId)?.redis_scan_page_size ?? REDIS_SCAN_PAGE_SIZE_DEFAULT;
       // Bounded multi-round SCAN: trade coverage for latency/memory safety.
       const result = await api.redisScanKeysBatch(connectionId, Number(database), 0, "*", pageSize, 6, false);
-      const keys = result.keys.map((key) => key.key_display).slice(0, REDIS_COMPLETION_KEYS_MAX);
+      const keys = result.keys
+        .map((key) => key.key_display)
+        .filter((key) => !BINARY_REDIS_KEY_ESCAPE.test(key))
+        .slice(0, REDIS_COMPLETION_KEYS_MAX);
       redisCompletionKeysCache.value[cacheKey] = keys;
       evictOldestCacheEntries(redisCompletionKeysCache.value, COMPLETION_CACHE_MAX);
       return keys;
+    });
+  }
+
+  async function listRedisCompletionCommandDocs(connectionId: string, database: string): Promise<RedisCommandDocumentation[]> {
+    const cached = redisCommandDocsCache.value[connectionId];
+    if (cached) return cached;
+    return withCompletionInFlight(`${connectionId}:redis-command-docs`, async () => {
+      const generation = redisCommandDocsCacheGeneration.get(connectionId) ?? 0;
+      await ensureConnected(connectionId);
+      const db = Number.parseInt(database, 10) || 0;
+      let docs: RedisCommandDocumentation[];
+      try {
+        // Redis recommends COMMAND DOCS for complete, version-aware client metadata.
+        const docsResult = await api.redisExecuteCommand(connectionId, db, "COMMAND DOCS");
+        docs = parseRedisCommandDocumentation(docsResult.value);
+        try {
+          const catalogResult = await api.redisExecuteCommand(connectionId, db, "COMMAND");
+          docs = mergeRedisCommandDocumentation(docs, parseRedisCommandCatalog(catalogResult.value));
+        } catch {
+          // Documentation still provides useful grammar when COMMAND is restricted.
+        }
+      } catch (docsError) {
+        // Redis before 7.0 lacks COMMAND DOCS; COMMAND still reports its actual command inventory.
+        try {
+          const result = await api.redisExecuteCommand(connectionId, db, "COMMAND");
+          docs = parseRedisCommandCatalog(result.value);
+        } catch {
+          throw docsError;
+        }
+      }
+      if ((redisCommandDocsCacheGeneration.get(connectionId) ?? 0) === generation) {
+        redisCommandDocsCache.value[connectionId] = docs;
+        evictOldestCacheEntries(redisCommandDocsCache.value, COMPLETION_CACHE_MAX);
+      }
+      return docs;
     });
   }
 
@@ -6390,11 +6549,25 @@ export const useConnectionStore = defineStore("connection", () => {
     return deduped;
   }
 
-  async function listCompletionObjects(connectionId: string, database: string, filter = "", limit?: number, schema?: string, parentName?: string, globalSearch = false, currentSchema?: string, objectKinds: CompletionAssistantObjectKind[] = ["routine"]): Promise<SqlCompletionObject[]> {
+  async function listCompletionObjects(
+    connectionId: string,
+    database: string,
+    filter = "",
+    limit?: number,
+    schema?: string,
+    parentName?: string,
+    globalSearch = false,
+    currentSchema?: string,
+    objectKinds: CompletionAssistantObjectKind[] = ["routine"],
+    caseSensitive = false,
+  ): Promise<SqlCompletionObject[]> {
     const normalizedFilter = filter.trim().toLowerCase();
+    const cacheFilter = caseSensitive ? filter.trim() : normalizedFilter;
     const databaseType = getConfig(connectionId)?.db_type;
     const filteredRoutineAssistant = !!databaseType && FILTERED_ROUTINE_COMPLETION_DATABASES.has(databaseType) && (!!normalizedFilter || typeof limit === "number" || !!parentName || globalSearch);
-    const cacheKey = filteredRoutineAssistant ? `${connectionId}:${database}:${schema ?? ""}:${parentName ?? ""}:${normalizedFilter}:${limit ?? ""}:${globalSearch ? "global" : "scoped"}:${currentSchema ?? ""}:${[...objectKinds].sort().join(",")}` : `${connectionId}:${database}:${schema ?? ""}`;
+    const cacheKey = filteredRoutineAssistant
+      ? `${connectionId}:${database}:${schema ?? ""}:${parentName ?? ""}:${cacheFilter}:${limit ?? ""}:${globalSearch ? "global" : "scoped"}:${currentSchema ?? ""}:${[...objectKinds].sort().join(",")}:${caseSensitive ? "case-sensitive" : "case-insensitive"}`
+      : `${connectionId}:${database}:${schema ?? ""}`;
     if (!completionObjectsCache.value[cacheKey]) {
       await withCompletionInFlight(
         `${cacheKey}:objects`,
@@ -6402,10 +6575,14 @@ export const useConnectionStore = defineStore("connection", () => {
           await ensureConnected(connectionId);
           if (filteredRoutineAssistant) {
             try {
-              completionObjectsCache.value[cacheKey] = dedupeCompletionObjects(await listCompletionAssistantObjects(connectionId, database, filter, limit, schema, parentName, globalSearch, currentSchema, objectKinds));
+              completionObjectsCache.value[cacheKey] = dedupeCompletionObjects(await listCompletionAssistantObjects(connectionId, database, filter, limit, schema, parentName, globalSearch, currentSchema, objectKinds, caseSensitive));
             } catch {
-              const objects = isSchemaAwareDatabase(connectionId) ? await listSchemaAwareCompletionObjects(connectionId, database, schema) : await api.listCompletionObjects(connectionId, database, schema || database);
-              completionObjectsCache.value[cacheKey] = dedupeCompletionObjects(objects.map(toSqlCompletionObject).filter((object): object is SqlCompletionObject => object != null));
+              if (objectKinds.length === 1 && objectKinds[0] === "sequence") {
+                completionObjectsCache.value[cacheKey] = [];
+              } else {
+                const objects = isSchemaAwareDatabase(connectionId) ? await listSchemaAwareCompletionObjects(connectionId, database, schema) : await api.listCompletionObjects(connectionId, database, schema || database);
+                completionObjectsCache.value[cacheKey] = dedupeCompletionObjects(objects.map(toSqlCompletionObject).filter((object): object is SqlCompletionObject => object != null));
+              }
             }
           } else {
             const objects = isSchemaAwareDatabase(connectionId) ? await listSchemaAwareCompletionObjects(connectionId, database, schema) : await api.listCompletionObjects(connectionId, database, schema || database);
@@ -6754,6 +6931,7 @@ export const useConnectionStore = defineStore("connection", () => {
           return inheritNaturalTreeNodeOrder(node, {
             ...existing,
             label: node.label,
+            comment: node.comment,
             pinned: node.pinned,
             children: withSavedSqlRoot(node.connectionId!, existing.children || [], existing),
           });
@@ -7426,6 +7604,7 @@ export const useConnectionStore = defineStore("connection", () => {
     refreshCompletionDatabases,
     listElasticsearchCompletionIndices,
     listRedisCompletionKeys,
+    listRedisCompletionCommandDocs,
     listMongoCompletionCollections,
     listMongoCompletionFields,
     invalidateCompletionCache,

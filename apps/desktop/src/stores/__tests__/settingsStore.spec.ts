@@ -5,6 +5,12 @@ import { DEFAULT_EDITOR_SETTINGS, EXECUTE_MODE_CURRENT_DEFAULT_VERSION, enforceR
 import type { AiConfigItem } from "@/types/ai";
 
 describe("normalizeEditorSettings", () => {
+  it("keeps data type colors disabled by default and preserves an explicit opt-in", () => {
+    expect(normalizeEditorSettings({}).colorizeDataGridCellTypes).toBe(false);
+    expect(normalizeEditorSettings({ colorizeDataGridCellTypes: true }).colorizeDataGridCellTypes).toBe(true);
+    expect(normalizeEditorSettings({ colorizeDataGridCellTypes: false }).colorizeDataGridCellTypes).toBe(false);
+  });
+
   it("defaults and migrates the data-tab reuse mode", () => {
     expect(normalizeEditorSettings({}).dataTabReuseMode).toBe("same-table");
     expect(normalizeEditorSettings({ dataTabReuseMode: "always-new" }).dataTabReuseMode).toBe("always-new");
@@ -39,6 +45,12 @@ describe("normalizeEditorSettings", () => {
     ).toBe("hidden");
     expect(normalizeEditorSettings({ sidebarShowDatabaseSizes: true } as any).sidebarObjectInfoMode).toBe("size");
     expect(normalizeEditorSettings({ sidebarObjectInfoMode: "invalid" } as any).sidebarObjectInfoMode).toBe("comment-inline");
+  });
+
+  it("hides connection notes by default and preserves an explicit opt-in", () => {
+    expect(normalizeEditorSettings({}).sidebarShowConnectionNotes).toBe(false);
+    expect(normalizeEditorSettings({ sidebarShowConnectionNotes: true }).sidebarShowConnectionNotes).toBe(true);
+    expect(normalizeEditorSettings({ sidebarShowConnectionNotes: false }).sidebarShowConnectionNotes).toBe(false);
   });
 
   it("defaults SQL execution to the current statement and migrates legacy execute-all settings", () => {
@@ -232,7 +244,9 @@ describe("normalizeEditorSettings", () => {
     expect(normalizeEditorSettings({}).globalQueryTimeoutSecs).toBe(30);
     expect(normalizeEditorSettings({ queryTimeoutSecs: 45 } as any).globalQueryTimeoutSecs).toBe(45);
     expect(normalizeEditorSettings({ globalQueryTimeoutSecs: -1 }).globalQueryTimeoutSecs).toBe(0);
-    expect(normalizeEditorSettings({ globalQueryTimeoutSecs: 301 }).globalQueryTimeoutSecs).toBe(300);
+    expect(normalizeEditorSettings({ globalQueryTimeoutSecs: 301 }).globalQueryTimeoutSecs).toBe(301);
+    expect(normalizeEditorSettings({ globalQueryTimeoutSecs: 3600 }).globalQueryTimeoutSecs).toBe(3600);
+    expect(normalizeEditorSettings({ globalQueryTimeoutSecs: 3601 }).globalQueryTimeoutSecs).toBe(3600);
     expect(normalizeEditorSettings({ connectTimeoutInheritConnectionIds: ["one", "one", " ", "two"] }).connectTimeoutInheritConnectionIds).toEqual(["one", "two"]);
     expect(normalizeEditorSettings({ queryTimeoutInheritConnectionIds: ["one", "one", " ", "two"] }).queryTimeoutInheritConnectionIds).toEqual(["one", "two"]);
     expect(normalizeEditorSettings({}).timeoutInheritanceMigrationVersion).toBe(0);
@@ -504,6 +518,22 @@ describe("settingsStore AI API key normalization", () => {
       codebuddyCliEnv: { HTTPS_PROXY: "http://127.0.0.1:7890", EMPTY: "" },
     });
   });
+
+  it("normalizes Qoder CLI path and environment settings", () => {
+    expect(
+      normalizeAiConfig({
+        provider: "qoder-cli",
+        qoderCliPath: "  ~/.local/bin/qodercli  ",
+        qoderCliEnv: { QODER_PERSONAL_ACCESS_TOKEN: "token", EMPTY: null as unknown as string },
+      }),
+    ).toMatchObject({
+      provider: "qoder-cli",
+      endpoint: "",
+      model: "default",
+      qoderCliPath: "~/.local/bin/qodercli",
+      qoderCliEnv: { QODER_PERSONAL_ACCESS_TOKEN: "token", EMPTY: "" },
+    });
+  });
 });
 
 describe("settingsStore MCP policy persistence", () => {
@@ -648,6 +678,144 @@ describe("settingsStore persisted settings initialization", () => {
         snippets: [expect.objectContaining({ id: "persisted", body: "SELECT 42" })],
       }),
     );
+  });
+
+  it("atomically updates connection note visibility and supports retry", async () => {
+    const loadEditorSettings = vi.fn().mockResolvedValue({ sidebarShowConnectionNotes: false });
+    const saveEditorSettings = vi.fn().mockResolvedValue(undefined);
+    vi.doMock("@/lib/backend/api", () => ({ loadEditorSettings, saveEditorSettings }));
+
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const store = useSettingsStore();
+    await store.initEditorSettings();
+    saveEditorSettings.mockClear();
+    saveEditorSettings.mockRejectedValueOnce(new Error("storage unavailable")).mockResolvedValueOnce(undefined);
+
+    await expect(store.updateEditorSettingsAndPersist({ sidebarShowConnectionNotes: true })).rejects.toThrow("storage unavailable");
+    expect(store.editorSettings.sidebarShowConnectionNotes).toBe(false);
+
+    await store.updateEditorSettingsAndPersist({ sidebarShowConnectionNotes: true });
+    expect(store.editorSettings.sidebarShowConnectionNotes).toBe(true);
+    expect(saveEditorSettings).toHaveBeenCalledTimes(2);
+    expect(saveEditorSettings).toHaveBeenLastCalledWith(expect.objectContaining({ sidebarShowConnectionNotes: true }));
+  });
+});
+
+describe("settingsStore editor settings persistence", () => {
+  beforeEach(() => {
+    vi.resetModules();
+    setActivePinia(createPinia());
+  });
+
+  it("rolls back a failed atomic update and allows retry", async () => {
+    const loadEditorSettings = vi.fn().mockResolvedValue({
+      ignoredUpdateVersion: "",
+      executeModeDefaultVersion: EXECUTE_MODE_CURRENT_DEFAULT_VERSION,
+    });
+    const saveEditorSettings = vi.fn().mockRejectedValueOnce(new Error("save failed")).mockResolvedValueOnce(undefined);
+    vi.doMock("@/lib/backend/api", () => ({ loadEditorSettings, saveEditorSettings }));
+
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const store = useSettingsStore();
+    await store.initEditorSettings();
+
+    await expect(store.updateEditorSettingsAndPersist({ ignoredUpdateVersion: "0.5.70" })).rejects.toThrow("save failed");
+    expect(store.editorSettings.ignoredUpdateVersion).toBe("");
+
+    await store.updateEditorSettingsAndPersist({ ignoredUpdateVersion: "0.5.70" });
+
+    expect(store.editorSettings.ignoredUpdateVersion).toBe("0.5.70");
+    expect(saveEditorSettings).toHaveBeenCalledTimes(2);
+    expect(saveEditorSettings).toHaveBeenLastCalledWith(expect.objectContaining({ ignoredUpdateVersion: "0.5.70" }));
+  });
+
+  it("loads the persisted ignored version in a new store instance", async () => {
+    let persistedSettings: Record<string, unknown> = {
+      ignoredUpdateVersion: "",
+      executeModeDefaultVersion: EXECUTE_MODE_CURRENT_DEFAULT_VERSION,
+    };
+    const loadEditorSettings = vi.fn(async () => JSON.parse(JSON.stringify(persistedSettings)));
+    const saveEditorSettings = vi.fn(async (settings: Record<string, unknown>) => {
+      persistedSettings = JSON.parse(JSON.stringify(settings));
+    });
+    vi.doMock("@/lib/backend/api", () => ({ loadEditorSettings, saveEditorSettings }));
+
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const firstStore = useSettingsStore();
+    await firstStore.initEditorSettings();
+    await firstStore.updateEditorSettingsAndPersist({ ignoredUpdateVersion: "0.5.70" });
+
+    setActivePinia(createPinia());
+    const restartedStore = useSettingsStore();
+    await restartedStore.initEditorSettings();
+
+    expect(restartedStore.editorSettings.ignoredUpdateVersion).toBe("0.5.70");
+  });
+
+  it("serializes overlapping saves so an older snapshot cannot finish last", async () => {
+    let resolveFirstSave!: () => void;
+    const loadEditorSettings = vi.fn().mockResolvedValue({
+      ignoredUpdateVersion: "",
+      executeModeDefaultVersion: EXECUTE_MODE_CURRENT_DEFAULT_VERSION,
+    });
+    const saveEditorSettings = vi.fn().mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveFirstSave = resolve;
+        }),
+    );
+    saveEditorSettings.mockResolvedValueOnce(undefined);
+    vi.doMock("@/lib/backend/api", () => ({ loadEditorSettings, saveEditorSettings }));
+
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const store = useSettingsStore();
+    await store.initEditorSettings();
+
+    const firstSave = store.updateEditorSettingsAndPersist({ ignoredUpdateVersion: "0.5.70" });
+    await vi.waitFor(() => expect(saveEditorSettings).toHaveBeenCalledOnce());
+    const secondSave = store.updateEditorSettingsAndPersist({ ignoredUpdateVersion: "0.5.71" });
+
+    expect(saveEditorSettings).toHaveBeenCalledOnce();
+    expect(store.editorSettings.ignoredUpdateVersion).toBe("0.5.70");
+    resolveFirstSave();
+    await Promise.all([firstSave, secondSave]);
+
+    expect(store.editorSettings.ignoredUpdateVersion).toBe("0.5.71");
+    expect(saveEditorSettings).toHaveBeenCalledTimes(2);
+    expect(saveEditorSettings.mock.calls[0][0]).toEqual(expect.objectContaining({ ignoredUpdateVersion: "0.5.70" }));
+    expect(saveEditorSettings.mock.calls[1][0]).toEqual(expect.objectContaining({ ignoredUpdateVersion: "0.5.71" }));
+  });
+
+  it("does not carry a failed atomic value into an already queued unrelated save", async () => {
+    let rejectFirstSave!: (error: Error) => void;
+    const loadEditorSettings = vi.fn().mockResolvedValue({
+      ignoredUpdateVersion: "",
+      theme: "system",
+      executeModeDefaultVersion: EXECUTE_MODE_CURRENT_DEFAULT_VERSION,
+    });
+    const saveEditorSettings = vi.fn().mockImplementationOnce(
+      () =>
+        new Promise<void>((_resolve, reject) => {
+          rejectFirstSave = reject;
+        }),
+    );
+    saveEditorSettings.mockResolvedValueOnce(undefined);
+    vi.doMock("@/lib/backend/api", () => ({ loadEditorSettings, saveEditorSettings }));
+
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const store = useSettingsStore();
+    await store.initEditorSettings();
+
+    const ignoredVersionSave = store.updateEditorSettingsAndPersist({ ignoredUpdateVersion: "0.5.70" });
+    await vi.waitFor(() => expect(saveEditorSettings).toHaveBeenCalledOnce());
+    store.updateEditorSettings({ theme: "xcode-dark" });
+    rejectFirstSave(new Error("save failed"));
+
+    await expect(ignoredVersionSave).rejects.toThrow("save failed");
+    await vi.waitFor(() => expect(saveEditorSettings).toHaveBeenCalledTimes(2));
+
+    expect(store.editorSettings).toMatchObject({ ignoredUpdateVersion: "", theme: "xcode-dark" });
+    expect(saveEditorSettings.mock.calls[1][0]).toEqual(expect.objectContaining({ ignoredUpdateVersion: "", theme: "xcode-dark" }));
   });
 });
 

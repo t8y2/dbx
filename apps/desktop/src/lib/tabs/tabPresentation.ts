@@ -131,6 +131,13 @@ export function tabDisplayTitle(tab: QueryTab, t: Translate): string {
     if (compact) return connectionDisplayName(tab.connectionId);
     return `${connectionDisplayName(tab.connectionId)}@${t("consul.ui.overview")}`;
   }
+  if (tab.mode === "mqtt") {
+    return `${connectionDisplayName(tab.connectionId)} - ${t("connection.mqttConsoleTitle")}`;
+  }
+  if (tab.mode === "databases") {
+    if (compact) return t("tabs.databases");
+    return `${t("tabs.databases")}@${connectionDisplayName(tab.connectionId)}`;
+  }
   if (tab.mode === "objects") {
     const schema = tab.objectBrowser?.schema;
     if (compact) return schema || tab.title;
@@ -346,6 +353,10 @@ export function resultGridCacheKey(tab: Pick<QueryTab, "id" | "activeResultRunId
   return `${tab.id}-${tab.activeResultRunId ?? "current"}-${tab.activeResultIndex ?? 0}`;
 }
 
+export function resultGridInstanceKey(tab: Pick<QueryTab, "id" | "activeResultRunId" | "activeResultIndex" | "resultGridRevision">): string {
+  return `${resultGridCacheKey(tab)}-${tab.resultGridRevision ?? "initial"}`;
+}
+
 export function nextExecutionSummaryView(currentView: OutputView, canShowResult: boolean): OutputView {
   if (currentView === "summary" && canShowResult) return "result";
   return "summary";
@@ -438,6 +449,7 @@ export function tabModeLabel(tab: QueryTab, t: Translate): string {
   if (tab.mode === "consul") return t("tabs.consul");
   if (tab.mode === "consul-overview") return t("consul.ui.overview");
   if (tab.mode === "nacos") return "Nacos";
+  if (tab.mode === "databases") return t("tabs.databases");
   if (tab.mode === "objects") return t("tabs.objects");
   if (tab.mode === "users") return t("tabs.users");
   return tab.mode;

@@ -14,9 +14,11 @@ import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { revealPathInFileManager } from "@/lib/backend/tauri";
 import { canConfigureVisibleSchemasForTreeNode } from "@/lib/database/databaseFeatureSupport";
 import { canCloseSidebarDatabaseConnection } from "@/lib/sidebar/sidebarDatabaseOpenState";
-import { selectedConnectionDeleteTargets, selectedConnectionDuplicateTargets } from "@/lib/sidebar/sidebarConnectionSelection";
+import { selectedConnectionDeleteTargets, selectedConnectionDisconnectTargets, selectedConnectionDuplicateTargets } from "@/lib/sidebar/sidebarConnectionSelection";
+import { releaseConnectionFromMultiSelection } from "@/lib/sidebar/sidebarConnectionMultiSelect";
 import { connectionDeleteTargetSnapshot, showDeleteConfirm, showDeleteGroupConfirm, sidebarFormTarget } from "@/components/sidebar/sidebarTreeDialogState";
 import { connectionCanConfigureSidebarVisibleDatabases } from "@/lib/sidebar/sidebarVisibleFilterMenu";
+import { disconnectSidebarConnections } from "@/lib/sidebar/sidebarConnectionDisconnect";
 
 interface SidebarConnectionMutationRuntimeOptions {
   activeNode: ShallowRef<TreeNode>;
@@ -211,16 +213,37 @@ export function useSidebarConnectionMutationRuntime(options: SidebarConnectionMu
   }
 
   async function disconnectConnection() {
-    const node = activeNode.value;
-    if (!node.connectionId) return;
-    try {
-      await connectionStore.disconnect(node.connectionId);
-      node.isExpanded = false;
-      node.children = [];
-      toast(t("connection.disconnected"), 2000);
-    } catch (error: any) {
-      toast(t("connection.saveFailed", { message: error?.message || String(error) }), 5000);
+    const targets = selectedConnectionDisconnectTargets(activeNode.value, selectedTreeNodesInVisibleOrder()).filter((target) => connectionStore.connectedIds.has(target.connectionId));
+    if (!targets.length) return;
+
+    const result = await disconnectSidebarConnections(
+      targets.map((target) => target.connectionId),
+      (connectionId) => connectionStore.disconnect(connectionId),
+    );
+    if (!result.failed) {
+      toast(targets.length > 1 ? t("connection.disconnectedSelected", { count: targets.length }) : t("connection.disconnected"), 2000);
+      return;
     }
+    if (result.succeeded > 0) {
+      toast(t("connection.disconnectSelectedPartial", { succeeded: result.succeeded, failed: result.failed }), 5000);
+      return;
+    }
+    const message = result.firstError instanceof Error ? result.firstError.message : String(result.firstError);
+    toast(t("connection.saveFailed", { message }), 5000);
+  }
+
+  function connectionDisconnectTargets() {
+    return selectedConnectionDisconnectTargets(activeNode.value, selectedTreeNodesInVisibleOrder());
+  }
+
+  function connectionDisconnectMenuLabel(): string {
+    const targets = connectionDisconnectTargets();
+    const connectedCount = targets.filter((target) => connectionStore.connectedIds.has(target.connectionId)).length;
+    return targets.length > 1 ? t("contextMenu.closeSelectedConnections", { count: connectedCount }) : t("contextMenu.closeConnection");
+  }
+
+  function canDisconnectConnection(): boolean {
+    return connectionDisconnectTargets().some((target) => connectionStore.connectedIds.has(target.connectionId));
   }
 
   async function cancelConnectionAttempt() {
@@ -305,7 +328,19 @@ export function useSidebarConnectionMutationRuntime(options: SidebarConnectionMu
 
   function moveToGroup(groupId: string | null) {
     const connectionId = activeNode.value.connectionId;
-    if (connectionId) connectionStore.moveConnectionToGroup(connectionId, groupId);
+    if (!connectionId) return;
+    connectionStore.moveConnectionToGroup(connectionId, groupId);
+    releaseConnectionFromMultiSelection(connectionStore, connectionId);
+  }
+
+  function createGroupAndMoveConnection(name: string): boolean {
+    const node = sidebarFormTarget.value ?? activeNode.value;
+    const normalizedName = name.trim();
+    if (!normalizedName || !node.connectionId) return false;
+    const groupId = connectionStore.createConnectionGroup(normalizedName);
+    connectionStore.moveConnectionToGroup(node.connectionId, groupId);
+    releaseConnectionFromMultiSelection(connectionStore, node.connectionId);
+    return true;
   }
 
   return {
@@ -329,6 +364,8 @@ export function useSidebarConnectionMutationRuntime(options: SidebarConnectionMu
     canBackupSqliteDatabase,
     backupSqliteDatabase,
     disconnectConnection,
+    connectionDisconnectMenuLabel,
+    canDisconnectConnection,
     cancelConnectionAttempt,
     closeDatabaseConnection,
     isPinned,
@@ -349,5 +386,6 @@ export function useSidebarConnectionMutationRuntime(options: SidebarConnectionMu
     newSubgroup,
     confirmDeleteGroup,
     moveToGroup,
+    createGroupAndMoveConnection,
   };
 }

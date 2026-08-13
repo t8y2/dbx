@@ -88,6 +88,8 @@ pub async fn execute_multi(
     max_rows: Option<usize>,
     fetch_size: Option<usize>,
     page_size: Option<usize>,
+    max_result_bytes: Option<usize>,
+    result_key_columns: Option<Vec<String>>,
     result_session_id: Option<String>,
     client_session_id: Option<String>,
     timeout_secs: Option<u64>,
@@ -144,6 +146,8 @@ pub async fn execute_multi(
             max_rows,
             fetch_size,
             page_size,
+            max_result_bytes,
+            result_key_columns: result_key_columns.unwrap_or_default(),
             catalog,
             result_session_id,
             client_session_id,
@@ -291,8 +295,17 @@ pub async fn execute_script_with_2pc_core(
     database: String,
     statements: Vec<String>,
     schema: Option<String>,
+    destructive_confirmed: bool,
 ) -> dbx_core::query::SchemaDiffDeployResult {
-    dbx_core::query::execute_schema_diff_deploy(&app, &connection_id, &database, &statements, schema.as_deref()).await
+    dbx_core::query::execute_schema_diff_deploy(
+        &app,
+        &connection_id,
+        &database,
+        &statements,
+        schema.as_deref(),
+        destructive_confirmed,
+    )
+    .await
 }
 
 #[tauri::command]
@@ -302,9 +315,18 @@ pub async fn execute_script_with_2pc(
     database: String,
     statements: Vec<String>,
     schema: Option<String>,
+    destructive_confirmed: Option<bool>,
 ) -> Result<dbx_core::query::SchemaDiffDeployResult, String> {
     let app: Arc<AppState> = (*state).clone();
-    Ok(execute_script_with_2pc_core(app, connection_id, database, statements, schema).await)
+    Ok(execute_script_with_2pc_core(
+        app,
+        connection_id,
+        database,
+        statements,
+        schema,
+        destructive_confirmed.unwrap_or(false),
+    )
+    .await)
 }
 
 #[tauri::command]
@@ -768,6 +790,7 @@ mod tests {
             "testdb".to_string(),
             vec!["SELECT 1".to_string()],
             None,
+            false,
         )
         .await;
 
@@ -784,7 +807,8 @@ mod tests {
     async fn execute_script_with_2pc_empty_statements_succeeds() {
         let state = test_app_state().await;
         let result =
-            execute_script_with_2pc_core(state, "conn-empty".to_string(), "testdb".to_string(), vec![], None).await;
+            execute_script_with_2pc_core(state, "conn-empty".to_string(), "testdb".to_string(), vec![], None, false)
+                .await;
 
         assert_eq!(result.status, "committed");
         assert_eq!(result.statement_count, 0);
@@ -802,6 +826,7 @@ mod tests {
             "testdb".to_string(),
             vec!["-- WARNING: incomplete\n-- manual only".to_string()],
             None,
+            false,
         )
         .await;
 
@@ -819,6 +844,7 @@ mod tests {
             "testdb".to_string(),
             vec!["CREATE TABLE t1 (id INT)".to_string(), "CREATE TABLE t2 (id INT)".to_string()],
             None,
+            false,
         )
         .await;
 
@@ -826,5 +852,64 @@ mod tests {
         assert_eq!(result.statement_count, 2);
         assert!(result.error.as_ref().is_some_and(|e| !e.is_empty()));
         assert_eq!(result.executed_count, 0);
+    }
+
+    #[tokio::test]
+    async fn execute_script_with_2pc_blocks_unconfirmed_destructive_sql() {
+        let state = test_app_state().await;
+        let result = execute_script_with_2pc_core(
+            state,
+            "missing-conn".to_string(),
+            "testdb".to_string(),
+            vec!["DROP INDEX idx_old ON users".to_string()],
+            None,
+            false,
+        )
+        .await;
+
+        assert_eq!(result.status, "rolled_back");
+        assert_eq!(result.executed_count, 0);
+        assert_eq!(result.metadata["blocked"], "destructive_confirmation_required");
+        assert_eq!(result.metadata["destructive_statement_count"], 1);
+    }
+
+    #[tokio::test]
+    async fn execute_script_with_2pc_allows_confirmed_destructive_sql_to_reach_execution() {
+        let state = test_app_state().await;
+        let result = execute_script_with_2pc_core(
+            state,
+            "missing-conn".to_string(),
+            "testdb".to_string(),
+            vec!["DROP INDEX idx_old ON users".to_string()],
+            None,
+            true,
+        )
+        .await;
+
+        assert_ne!(
+            result.metadata.get("blocked").and_then(|value| value.as_str()),
+            Some("destructive_confirmation_required")
+        );
+        assert!(result.error.as_ref().is_some_and(|error| !error.is_empty()));
+    }
+
+    #[tokio::test]
+    async fn execute_script_with_2pc_does_not_block_drop_text_in_comments() {
+        let state = test_app_state().await;
+        let result = execute_script_with_2pc_core(
+            state,
+            "missing-conn".to_string(),
+            "testdb".to_string(),
+            vec!["-- DROP INDEX idx_fake\nSELECT 1".to_string()],
+            None,
+            false,
+        )
+        .await;
+
+        assert_ne!(
+            result.metadata.get("blocked").and_then(|value| value.as_str()),
+            Some("destructive_confirmation_required")
+        );
+        assert!(result.error.as_ref().is_some_and(|error| !error.is_empty()));
     }
 }

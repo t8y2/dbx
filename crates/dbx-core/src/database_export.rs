@@ -809,7 +809,7 @@ pub(crate) fn is_mysql_spatial_export_type(column_type: &str) -> bool {
 /// Database exports encode MySQL spatial cells as `DBX_WKB:<srid>:<hex>` while
 /// reading them. Keeping this marker internal lets the normal JSON row shape
 /// and all non-export query paths continue to expose readable WKT values.
-fn format_mysql_spatial_export_literal(
+pub(crate) fn format_mysql_spatial_export_literal(
     value: &Value,
     database_type: Option<DatabaseType>,
     column_type: Option<&str>,
@@ -1487,7 +1487,7 @@ fn database_export_select_list(columns: &[String], column_types: &[Option<String
         .join(", ")
 }
 
-fn replace_database_export_select_list(
+pub(crate) fn replace_database_export_select_list(
     sql: String,
     columns: &[String],
     column_types: &[Option<String>],

@@ -2,7 +2,7 @@ import type { SqlExecutionCandidate } from "@/lib/sql/sqlExecutionTarget";
 import { cursorBelongsToTrailingStatementDelimiter } from "@/lib/sql/statementDelimiter";
 import { splitMongoCommandRanges } from "@/lib/mongo/mongoShellCommand";
 import { readSqlBracedParameterAt, type SqlParameterOptions } from "@/lib/sql/sqlParameters";
-import { isElasticsearchCompatibleDatabaseType, type DatabaseType } from "@/types/database";
+import { isElasticsearchCompatibleDatabaseType, isMeilisearchDatabaseType, type DatabaseType } from "@/types/database";
 
 /**
  * A contiguous range of SQL text expressed as document offsets plus the
@@ -14,18 +14,22 @@ export interface SqlTextRange {
   sql: string;
 }
 
-const ELASTICSEARCH_REST_REQUEST = /^(?:GET|POST|PUT|DELETE|HEAD)\s+\S+/i;
+const ELASTICSEARCH_REST_REQUEST = /^(?:GET|POST|PUT|PATCH|DELETE|HEAD)\s+\S+/i;
+
+function isHttpJsonRestDatabaseType(databaseType?: DatabaseType): boolean {
+  return isElasticsearchCompatibleDatabaseType(databaseType) || isMeilisearchDatabaseType(databaseType);
+}
 
 export function elasticsearchRestRequestRanges(sql: string, databaseType?: DatabaseType): SqlTextRange[] {
-  if (!isElasticsearchCompatibleDatabaseType(databaseType)) return [];
+  if (!isHttpJsonRestDatabaseType(databaseType)) return [];
   const requests = splitSqlStatementRanges(sql, databaseType);
   return requests.length > 0 && requests.every((request) => ELASTICSEARCH_REST_REQUEST.test(request.sql)) ? requests : [];
 }
 
-const NON_SQL_EXECUTION_TARGET_TYPES: ReadonlySet<DatabaseType> = new Set(["mongodb", "elasticsearch", "easysearch", "qdrant", "milvus", "weaviate", "chromadb", "etcd", "zookeeper", "consul", "mq", "neo4j", "victoriametrics"]);
+const NON_SQL_EXECUTION_TARGET_TYPES: ReadonlySet<DatabaseType> = new Set(["mongodb", "elasticsearch", "easysearch", "meilisearch", "qdrant", "milvus", "weaviate", "chromadb", "etcd", "zookeeper", "consul", "mq", "neo4j", "victoriametrics"]);
 
 export function supportsExecutionTargetPicker(databaseType?: DatabaseType): boolean {
-  return !!databaseType && (databaseType === "redis" || isElasticsearchCompatibleDatabaseType(databaseType) || !NON_SQL_EXECUTION_TARGET_TYPES.has(databaseType));
+  return !!databaseType && (databaseType === "redis" || isHttpJsonRestDatabaseType(databaseType) || !NON_SQL_EXECUTION_TARGET_TYPES.has(databaseType));
 }
 
 export function hasMultipleExecutionTargets(sql: string, databaseType?: DatabaseType, parameterOptions?: SqlParameterOptions): boolean {
@@ -58,11 +62,11 @@ interface ElasticsearchRequestLineCandidate {
 }
 
 export interface ElasticsearchRestRequestTarget {
-  method: "GET" | "POST" | "PUT" | "DELETE" | "HEAD";
+  method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE" | "HEAD";
   path: string;
 }
 
-const ELASTICSEARCH_REST_REQUEST_LINE = /^\s*(?:GET|POST|PUT|DELETE|HEAD)\s+\S+/i;
+const ELASTICSEARCH_REST_REQUEST_LINE = /^\s*(?:GET|POST|PUT|PATCH|DELETE|HEAD)\s+\S+/i;
 
 function leadingElasticsearchPreambleEnd(value: string): number {
   let offset = 0;
@@ -145,7 +149,7 @@ function elasticsearchRequestLineCandidates(lines: ElasticsearchRequestLine[]): 
 
 export function parseElasticsearchRestRequestTarget(value: string): ElasticsearchRestRequestTarget | null {
   const requestLine = stripLeadingElasticsearchComments(value).split("\n", 1)[0]?.trim() ?? "";
-  const match = requestLine.match(/^(GET|POST|PUT|DELETE|HEAD)\s+(\S+)/i);
+  const match = requestLine.match(/^(GET|POST|PUT|PATCH|DELETE|HEAD)\s+(\S+)/i);
   if (!match) return null;
   return {
     method: match[1].toUpperCase() as ElasticsearchRestRequestTarget["method"],
@@ -284,7 +288,7 @@ const SAP_HANA_SCRIPT_BLOCK_TERMINATORS = new Set(["IF", "FOR", "WHILE"]);
  * whitespace are excluded so editor highlights stay tight).
  */
 export function splitSqlStatementRanges(sql: string, databaseType?: DatabaseType, parameterOptions?: SqlParameterOptions): RawStatement[] {
-  if (isElasticsearchCompatibleDatabaseType(databaseType)) {
+  if (isHttpJsonRestDatabaseType(databaseType)) {
     const requests = splitElasticsearchRestRequestRanges(sql);
     if (requests) return requests;
   }
@@ -297,6 +301,7 @@ export function splitSqlStatementRanges(sql: string, databaseType?: DatabaseType
   let statementEnd = -1;
   let statementHitStart = 0;
   let pendingHintStart = -1;
+  let pendingProxyDirectiveStart = -1;
   let customDelimiter: string | null = null;
   let state: QuoteState = "none";
   let dollarTag = "";
@@ -308,8 +313,9 @@ export function splitSqlStatementRanges(sql: string, databaseType?: DatabaseType
 
   const markContent = (pos: number) => {
     if (statementStart === -1) {
-      statementStart = pendingHintStart === -1 ? pos : pendingHintStart;
+      statementStart = pendingProxyDirectiveStart !== -1 ? pendingProxyDirectiveStart : pendingHintStart === -1 ? pos : pendingHintStart;
       pendingHintStart = -1;
+      pendingProxyDirectiveStart = -1;
     }
     statementEnd = pos + 1;
   };
@@ -318,6 +324,7 @@ export function splitSqlStatementRanges(sql: string, databaseType?: DatabaseType
     if (statementStart === -1) {
       statementEnd = -1;
       pendingHintStart = -1;
+      pendingProxyDirectiveStart = -1;
       postgresDollarQuotedRoutine = false;
       oraclePlSqlStatementEnd = undefined;
       return;
@@ -329,6 +336,7 @@ export function splitSqlStatementRanges(sql: string, databaseType?: DatabaseType
     statementStart = -1;
     statementEnd = -1;
     pendingHintStart = -1;
+    pendingProxyDirectiveStart = -1;
     postgresDollarQuotedRoutine = false;
     oraclePlSqlStatementEnd = undefined;
   };
@@ -433,11 +441,13 @@ export function splitSqlStatementRanges(sql: string, databaseType?: DatabaseType
 
     // Line comments consume up to (and including) the newline.
     if (ch === "-" && next === "-") {
+      pendingProxyDirectiveStart = -1;
       const newline = sql.indexOf("\n", i);
       i = newline === -1 ? len : newline + 1;
       continue;
     }
     if (startsHashLineComment(sql, i, databaseType, parameterOptions)) {
+      pendingProxyDirectiveStart = -1;
       const newline = sql.indexOf("\n", i);
       i = newline === -1 ? len : newline + 1;
       continue;
@@ -447,6 +457,9 @@ export function splitSqlStatementRanges(sql: string, databaseType?: DatabaseType
       const hintMarker = sql[i + 2];
       if (statementStart === -1 && pendingHintStart === -1 && (hintMarker === "+" || hintMarker === "@" || hintMarker === "&")) pendingHintStart = i;
       const close = sql.indexOf("*/", i + 2);
+      if (statementStart === -1) {
+        pendingProxyDirectiveStart = databaseType === "mysql" && sql.startsWith("/*proxy*/", i) ? i : -1;
+      }
       i = close === -1 ? len : close + 2;
       continue;
     }
@@ -585,7 +598,7 @@ export function statementRangeAtCursor(sql: string, cursorPos: number, databaseT
     // Cursor in indentation or inter-statement whitespace immediately before
     // the statement should still target that statement, while the returned
     // execution range remains tight around the SQL text itself.
-    if (pos >= statement.hitFrom && pos < statement.from && (sql.slice(pos, statement.from).trim() === "" || (isElasticsearchCompatibleDatabaseType(databaseType) && isElasticsearchRequestPreamble(sql.slice(statement.hitFrom, statement.from))))) {
+    if (pos >= statement.hitFrom && pos < statement.from && (sql.slice(pos, statement.from).trim() === "" || (isHttpJsonRestDatabaseType(databaseType) && isElasticsearchRequestPreamble(sql.slice(statement.hitFrom, statement.from))))) {
       const previous = statements[index - 1];
       if (previous && isCursorInTrailingDelimiterGap(sql, previous.to, pos)) {
         const previousSoftRanges = splitStatementRangeAtSoftStarts(sql, previous, databaseType, parameterOptions);

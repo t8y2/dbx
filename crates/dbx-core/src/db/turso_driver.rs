@@ -140,7 +140,7 @@ pub async fn test_connection(client: &TursoClient, timeout: Duration) -> Result<
 }
 
 pub async fn list_databases(_client: &TursoClient) -> Result<Vec<DatabaseInfo>, String> {
-    Ok(vec![DatabaseInfo { name: "main".to_string() }])
+    Ok(vec![DatabaseInfo { name: "main".to_string(), ..Default::default() }])
 }
 
 pub async fn list_tables(client: &TursoClient, _schema: &str) -> Result<Vec<TableInfo>, String> {

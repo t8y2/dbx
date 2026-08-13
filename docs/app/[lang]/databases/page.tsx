@@ -21,6 +21,7 @@ const databaseSupport = [
   { name: "Oracle", icon: "/icons/database/oracle.svg", tone: "#f80000" },
   { name: "Elasticsearch", icon: "/icons/database/elasticsearch.svg", tone: "#00bfb3" },
   { name: "Easysearch", icon: "/icons/database/easysearch.svg", tone: "#836eff" },
+  { name: "Meilisearch", icon: "/icons/database/meilisearch.svg", tone: "#ff5caa" },
   { name: "Qdrant", icon: "/icons/database/qdrant.svg", tone: "#dc244c" },
   { name: "Milvus", icon: "/icons/database/milvus.png", tone: "#00a1ea" },
   { name: "Weaviate", icon: "/icons/database/weaviate.svg", tone: "#00b894" },
@@ -151,22 +152,22 @@ export default async function DatabasesPage({ params }: { params: Promise<{ lang
             const isCta = "href" in db && db.href;
             const CardTag = isCta ? "a" : "div";
             return (
-            <CardTag
-              className={`landing-db-card grid place-items-center aspect-square rounded-[10px] px-2.5 py-[18px] max-[760px]:px-1.5 max-[760px]:py-2.5 ${isCta ? "border-2 border-dashed border-[color-mix(in_srgb,var(--color-landing-blue)_40%,transparent)] hover:border-[color-mix(in_srgb,var(--color-landing-blue)_70%,transparent)] transition-colors cursor-pointer" : ""}`}
-              key={db.name}
-              {...(isCta ? { href: db.href, target: "_blank", rel: "noopener noreferrer" } : {})}
-              style={{ "--db-tone": db.tone } as CSSProperties}
-              data-stagger
-            >
-              <div className="landing-db-icon grid place-items-center w-12 h-12 mb-[15px] max-[760px]:size-8 max-[760px]:mb-2">
-                {isCta ? (
-                  <span className="grid place-items-center w-10 h-10 rounded-full border-2 border-dashed text-landing-blue border-landing-blue text-2xl leading-none">+</span>
-                ) : (
-                  <img src={db.icon} alt="" width={38} height={38} loading="lazy" decoding="async" className="block w-[38px] h-[38px] object-contain max-[760px]:size-7" />
-                )}
-              </div>
-              <strong className={`text-sm font-[650] leading-[1.2] text-center max-[760px]:text-[11px] ${isCta ? "text-landing-blue" : "text-[color-mix(in_srgb,var(--color-landing-ink)_92%,var(--color-landing-muted))]"}`}>{db.name}</strong>
-            </CardTag>
+              <CardTag
+                className={`landing-db-card grid place-items-center aspect-square rounded-[10px] px-2.5 py-[18px] max-[760px]:px-1.5 max-[760px]:py-2.5 ${isCta ? "border-2 border-dashed border-[color-mix(in_srgb,var(--color-landing-blue)_40%,transparent)] hover:border-[color-mix(in_srgb,var(--color-landing-blue)_70%,transparent)] transition-colors cursor-pointer" : ""}`}
+                key={db.name}
+                {...(isCta ? { href: db.href, target: "_blank", rel: "noopener noreferrer" } : {})}
+                style={{ "--db-tone": db.tone } as CSSProperties}
+                data-stagger
+              >
+                <div className="landing-db-icon grid place-items-center w-12 h-12 mb-[15px] max-[760px]:size-8 max-[760px]:mb-2">
+                  {isCta ? (
+                    <span className="grid place-items-center w-10 h-10 rounded-full border-2 border-dashed text-landing-blue border-landing-blue text-2xl leading-none">+</span>
+                  ) : (
+                    <img src={db.icon} alt="" width={38} height={38} loading="lazy" decoding="async" className="block w-[38px] h-[38px] object-contain max-[760px]:size-7" />
+                  )}
+                </div>
+                <strong className={`text-sm font-[650] leading-[1.2] text-center max-[760px]:text-[11px] ${isCta ? "text-landing-blue" : "text-[color-mix(in_srgb,var(--color-landing-ink)_92%,var(--color-landing-muted))]"}`}>{db.name}</strong>
+              </CardTag>
             );
           })}
         </ExpandableDatabaseGrid>
@@ -177,11 +178,7 @@ export default async function DatabasesPage({ params }: { params: Promise<{ lang
         <div className="landing-glass-card rounded-[10px] p-8 text-center max-w-[640px] mx-auto">
           <h2 className="text-[21px] font-[720]">{t.ctaTitle}</h2>
           <p className="mt-2 text-landing-muted text-sm leading-[1.65]">{t.ctaDesc}</p>
-          <Link
-            href="https://github.com/t8y2/dbx/discussions"
-            target="_blank"
-            className="landing-final-link inline-flex items-center justify-center min-h-[42px] rounded-[7px] px-5 mt-5 text-sm font-[650]"
-          >
+          <Link href="https://github.com/t8y2/dbx/discussions" target="_blank" className="landing-final-link inline-flex items-center justify-center min-h-[42px] rounded-[7px] px-5 mt-5 text-sm font-[650]">
             {t.ctaLink}
           </Link>
         </div>
@@ -191,7 +188,9 @@ export default async function DatabasesPage({ params }: { params: Promise<{ lang
       <div className="max-w-[1180px] mx-auto px-7 pb-20 text-center max-[760px]:px-[18px]">
         <Link href={`/${l}/docs/databases`} className="landing-inline-link inline-flex items-center gap-[7px] text-sm font-[650]">
           {t.footerLink}
-          <svg width={15} height={15} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+          <svg width={15} height={15} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+            <path d="M5 12h14M12 5l7 7-7 7" />
+          </svg>
         </Link>
       </div>
 

@@ -40,14 +40,7 @@ func (s *server) listTopics(params jsonObject) (any, error) {
 		if !ok {
 			continue
 		}
-		info := jsonObject{
-			"name":       stringOrEmpty(jsonObject(queue), "name"),
-			"durable":    boolOrDefault(jsonObject(queue), "durable", false),
-			"autoDelete": boolOrDefault(jsonObject(queue), "auto_delete", false),
-			"state":      stringOrEmpty(jsonObject(queue), "state"),
-			"messages":   longOrDefault(jsonObject(queue), "messages", 0),
-			"consumers":  longOrDefault(jsonObject(queue), "consumers", 0),
-		}
+		info := topicInfoFromJSON(jsonObject(queue))
 		if allVhosts {
 			attachVhost(info, jsonObject(queue))
 		}
@@ -57,6 +50,20 @@ func (s *server) listTopics(params jsonObject) (any, error) {
 		return stringOrEmpty(topics[left], "name") < stringOrEmpty(topics[right], "name")
 	})
 	return jsonObject{"topics": topics}, nil
+}
+
+func topicInfoFromJSON(queue jsonObject) jsonObject {
+	info := jsonObject{
+		"name":       stringOrEmpty(queue, "name"),
+		"durable":    boolOrDefault(queue, "durable", false),
+		"autoDelete": boolOrDefault(queue, "auto_delete", false),
+		"state":      stringOrEmpty(queue, "state"),
+		"messages":   longOrDefault(queue, "messages", 0),
+		"consumers":  longOrDefault(queue, "consumers", 0),
+	}
+	putIfPresent(info, "messagesReady", longOrNull(queue, "messages_ready"))
+	putIfPresent(info, "messagesUnacked", longOrNull(queue, "messages_unacknowledged"))
+	return info
 }
 
 func (s *server) createTopic(params jsonObject) (any, error) {

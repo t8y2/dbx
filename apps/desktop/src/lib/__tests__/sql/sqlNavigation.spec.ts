@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
+import { quoteIdentifier } from "@/lib/editor/hoverTableSql";
 import {
   extractIdentifierAt,
   extractIdentifierDetailsAt,
+  extractQualifiedIdentifierAt,
   isSqlCallSiteIdentifierAt,
   isSqlKeyword,
   isSqlObjectNavigationRoutineType,
@@ -72,6 +74,25 @@ describe("splitQualifiedIdentifier", () => {
   it("splits quoted and multi-part identifiers", () => {
     expect(splitQualifiedIdentifier('catalog."MAAC00".Accounts')).toEqual(["catalog", "MAAC00", "Accounts"]);
     expect(splitQualifiedIdentifier("`MAAC00`.Accounts")).toEqual(["MAAC00", "Accounts"]);
+  });
+});
+
+describe("extractQualifiedIdentifierAt", () => {
+  it("keeps the full quoted segment when it contains a hyphen", () => {
+    const sql = 'select * from log."public-rate_kingdee"';
+
+    const located = extractQualifiedIdentifierAt(sql, sql.indexOf("rate_kingdee"));
+
+    expect(located?.parts.map((part) => part.value)).toEqual(["log", "public-rate_kingdee"]);
+  });
+
+  it("re-quoting each part before rejoining survives a splitQualifiedIdentifier round trip", () => {
+    const sql = 'select * from log."public-rate_kingdee"';
+    const located = extractQualifiedIdentifierAt(sql, sql.indexOf("rate_kingdee"));
+
+    const requoted = located!.parts.map((part) => quoteIdentifier(part.value)).join(".");
+
+    expect(splitQualifiedIdentifier(requoted)).toEqual(["log", "public-rate_kingdee"]);
   });
 });
 

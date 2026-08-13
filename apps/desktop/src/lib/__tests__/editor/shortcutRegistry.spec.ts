@@ -50,6 +50,16 @@ describe("shortcutRegistry editor actions", () => {
     expect(findShortcutConflict("expandSelectStar", DEFAULT_SHORTCUT_SETTINGS.expandSelectStar, DEFAULT_SHORTCUT_SETTINGS)).toBeNull();
   });
 
+  it("keeps current-view search and editor find contextual on Mod+F", () => {
+    const focusSearch = SHORTCUT_DEFINITIONS.find((item) => item.id === "focusSearch");
+    const find = SHORTCUT_DEFINITIONS.find((item) => item.id === "find");
+
+    expect(focusSearch).toMatchObject({ scope: "global", defaultShortcut: "Mod+F" });
+    expect(find).toMatchObject({ scope: "editor", defaultShortcut: "Mod+F" });
+    expect(findShortcutConflict("focusSearch", DEFAULT_SHORTCUT_SETTINGS.focusSearch, DEFAULT_SHORTCUT_SETTINGS)).toBeNull();
+    expect(findShortcutConflict("find", DEFAULT_SHORTCUT_SETTINGS.find, DEFAULT_SHORTCUT_SETTINGS)).toBeNull();
+  });
+
   it("uses Shift+Enter for inserting a complete line below", () => {
     const definition = SHORTCUT_DEFINITIONS.find((item) => item.id === "insertLineBelow");
 

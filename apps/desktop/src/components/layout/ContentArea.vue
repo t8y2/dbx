@@ -1060,6 +1060,7 @@ defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, hand
               :statement-execution-markers="activeStatementExecutionMarkers"
               :initial-viewport="activeTab.editorViewport"
               :initial-selection="activeTab.editorSelection"
+              :force-word-wrap="activeTab.forceWordWrap"
               @update:model-value="emit('editorUpdate', activeTab.id, $event)"
               @selection-change="emit('editorSelectionChange', $event)"
               @send-selection-to-ai="emit('sendSelectionToAi', $event)"

@@ -1529,7 +1529,7 @@ async function loadTemplateContext(allowView = false) {
 }
 
 function openSqlTemplateTab(connectionId: string, database: string, schema: string | undefined, catalog: string | undefined, sql: string, title?: string) {
-  const tabId = queryStore.createTab(connectionId, database, title, "query", schema, undefined, catalog);
+  const tabId = queryStore.createTab(connectionId, database, title, "query", schema, undefined, catalog, { forceWordWrap: true });
   queryStore.updateSql(tabId, sql);
 }
 

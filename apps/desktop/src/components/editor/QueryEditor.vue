@@ -4930,6 +4930,7 @@ onMounted(async () => {
         },
         mousedown: (event: MouseEvent) => {
           clearTableNavigationHover();
+          dismissHoverTooltip();
           const currentView = view.value;
           if (currentView && startEditorSelectionDrag(currentView, event)) {
             return true;
@@ -5603,7 +5604,7 @@ function scrollCursorIntoView() {
   });
 }
 
-function closeHoverOnContextMenu() {
+function dismissHoverTooltip() {
   if (!view.value || !hoverCloseEffect) return;
   view.value.dispatch({ effects: hoverCloseEffect });
 }
@@ -5632,7 +5633,7 @@ defineExpose({
           (e: MouseEvent) => {
             if (view) {
               syncContextMenuStateAtEvent(view, e);
-              closeHoverOnContextMenu();
+              dismissHoverTooltip();
             }
             onContextMenu(e);
             contextMenuOpen = true;

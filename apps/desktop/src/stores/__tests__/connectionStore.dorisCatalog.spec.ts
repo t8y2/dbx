@@ -121,6 +121,9 @@ describe("connectionStore Doris catalog tree", () => {
     expect(listTables).toHaveBeenCalledTimes(1);
     expect(listTables.mock.calls[0]?.[7]).toBe("iceberg");
     expect(hiveDatabase.children).toEqual([]);
-    expect(icebergDatabase.children?.map((node) => [node.catalog, node.database, node.label])).toEqual([["iceberg", "sales", "orders"]]);
+    expect(icebergDatabase.children?.map((node) => [node.catalog, node.database, node.label])).toEqual([
+      ["iceberg", "sales", "orders"],
+      ["iceberg", "sales", "tree.queries"],
+    ]);
   });
 });

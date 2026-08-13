@@ -224,6 +224,47 @@ test("accepts unquoted Unicode aliases in editable MySQL and SQL Server queries"
   });
 });
 
+test("accepts MySQL string-quoted column aliases", () => {
+  for (const [sql, resultName] of [
+    ["SELECT id, report_type '计划类型' FROM biz_work_log", "计划类型"],
+    ["SELECT id, report_type AS '计划类型' FROM biz_work_log", "计划类型"],
+    ["SELECT id, report_type '计划''类型' FROM biz_work_log", "计划'类型"],
+    ["SELECT id, report_type AS '计划''类型' FROM biz_work_log", "计划'类型"],
+  ] as const) {
+    const result = analyzeEditableQueryEditability(sql);
+
+    assert.equal(result.editable, true, sql);
+    assert.deepEqual(result.analysis.columns, [
+      { sourceName: "id", sourceNameQuoted: false, resultName: "id", expression: "id" },
+      { sourceName: "report_type", sourceNameQuoted: false, resultName, expression: "report_type" },
+    ]);
+    assert.deepEqual(sourceColumnsForResult(result.analysis, ["id", resultName]), ["id", "report_type"], sql);
+    assert.equal(allPrimaryKeysPresent(["id"], ["id", resultName], result.analysis), true, sql);
+    assert.equal(allEditableColumnsWriteable(result.analysis, ["id", resultName]), true, sql);
+  }
+});
+
+test("keeps string literals computed and rejects malformed string aliases", () => {
+  for (const sql of ["SELECT id, report_type '计划类型 FROM biz_work_log", "SELECT id, report_type '计划类型' trailing FROM biz_work_log"]) {
+    assert.equal(analyzeEditableQueryEditability(sql).editable, false, sql);
+  }
+
+  for (const sql of ["SELECT id, 'constant' '固定值' FROM biz_work_log", "SELECT id, 'constant' AS '固定值' FROM biz_work_log"]) {
+    const computed = analyzeEditableQueryEditability(sql);
+    assert.equal(computed.editable, true, sql);
+    assert.deepEqual(computed.analysis.columns[1], {
+      sourceName: undefined,
+      sourceNameQuoted: false,
+      resultName: "固定值",
+      expression: "'constant'",
+    });
+  }
+
+  for (const sql of ["SELECT id, report_type AS 计划类型 FROM biz_work_log", "SELECT id, report_type AS `计划类型` FROM biz_work_log", 'SELECT id, report_type AS "计划类型" FROM biz_work_log']) {
+    assert.equal(analyzeEditableQueryEditability(sql).editable, true, sql);
+  }
+});
+
 test("resolves metadata columns with dialect and quote aware identifier rules", () => {
   const postgresColumns = ["id", "ID", "name"];
   assert.equal(resolveMetadataColumnName("postgres", "ID", false, postgresColumns), "id");

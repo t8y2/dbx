@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildSelectStarExpansion, buildSqlCompletionItems, getSqlCompletionContext, selectStarResultColumnsMatch, shouldAutoOpenSqlCompletion } from "@/lib/sql/sqlCompletion";
+import { buildPostgresSequenceLiteralCompletionItems, buildSelectStarExpansion, buildSqlCompletionItems, getPostgresSequenceLiteralCompletionContext, getSqlCompletionContext, selectStarResultColumnsMatch, shouldAutoOpenSqlCompletion } from "@/lib/sql/sqlCompletion";
 import { sqlCompletionContextFromSemantic } from "@/lib/sql/semantic/completion";
 import { buildSqlSemanticModel } from "@/lib/sql/semantic/model";
 import { originForSqlCompletionProvider, originForTypedSqlCompletionStart, shouldAllowSqlCompletionTrigger, type SqlCompletionTriggerFacts } from "@/lib/sql/sqlCompletionTriggerPolicy";
@@ -14,6 +14,96 @@ describe("sqlCompletion keyword snippets", () => {
 
     expect(shouldAutoOpenSqlCompletion(sql, sql.length)).toBe(true);
     expect(items).toEqual(expect.arrayContaining([expect.objectContaining({ label: "select *", type: "snippet" }), expect.objectContaining({ label: "SELECT", type: "keyword" })]));
+  });
+});
+
+describe("PostgreSQL sequence literal completion", () => {
+  it.each(["nextval", "currval", "setval"])("recognizes the first %s regclass literal", (functionName) => {
+    const sql = `SELECT ${functionName}('public.order_`;
+    const context = getPostgresSequenceLiteralCompletionContext(sql, sql.length, "postgres");
+
+    expect(context).toEqual(
+      expect.objectContaining({
+        prefix: "order_",
+        schema: "public",
+        schemaQuoted: false,
+        nameQuoted: false,
+      }),
+    );
+    expect(context?.from).toBe(sql.lastIndexOf("order_"));
+    expect(shouldAutoOpenSqlCompletion(sql, sql.length, { databaseType: "postgres" })).toBe(true);
+  });
+
+  it("preserves quoted mixed-case schema and sequence identifiers", () => {
+    const sql = `SELECT pg_catalog.nextval('"App"."Order`;
+    const context = getPostgresSequenceLiteralCompletionContext(sql, sql.length, "postgres");
+
+    expect(context).toEqual(
+      expect.objectContaining({
+        prefix: "Order",
+        schema: "App",
+        schemaQuoted: true,
+        nameQuoted: true,
+        nameQuoteClosed: false,
+      }),
+    );
+    expect(
+      buildPostgresSequenceLiteralCompletionItems(context!, [
+        { name: "OrderSequence", schema: "App", type: "sequence" },
+        { name: "order_sequence", schema: "App", type: "sequence" },
+      ]),
+    ).toEqual([
+      expect.objectContaining({
+        label: "OrderSequence",
+        apply: 'OrderSequence"',
+        replaceClosingQuote: '"',
+        detail: "sequence in App",
+      }),
+    ]);
+  });
+
+  it("keeps doubled apostrophes inside the sequence identifier and escapes insertion", () => {
+    const sql = `SELECT nextval('"customer''s_`;
+    const context = getPostgresSequenceLiteralCompletionContext(sql, sql.length, "postgres");
+
+    expect(context).toEqual(expect.objectContaining({ prefix: "customer's_", nameQuoted: true }));
+    expect(buildPostgresSequenceLiteralCompletionItems(context!, [{ name: "customer's_seq", schema: "public", type: "sequence" }])).toEqual([expect.objectContaining({ label: "customer's_seq", apply: `customer''s_seq"` })]);
+  });
+
+  it("quotes an accepted mixed-case identifier in an unquoted literal", () => {
+    const sql = "SELECT nextval('mix";
+    const context = getPostgresSequenceLiteralCompletionContext(sql, sql.length, "postgres");
+
+    expect(buildPostgresSequenceLiteralCompletionItems(context!, [{ name: "MixedSequence", schema: "public", type: "sequence" }])).toEqual([expect.objectContaining({ label: "MixedSequence", filterText: "MixedSequence", apply: '"MixedSequence"' })]);
+  });
+
+  it("does not expose sequence metadata through ordinary SQL object completion", () => {
+    const sql = "SELECT order_";
+    const items = buildSqlCompletionItems(sql, sql.length, {
+      tables: [],
+      objects: [{ name: "order_seq", schema: "public", type: "sequence" }],
+      columnsByTable: new Map(),
+      databaseType: "postgres",
+      dialect: "postgres",
+    });
+
+    expect(items.some((item) => item.label === "order_seq")).toBe(false);
+  });
+
+  it.each([
+    ["SELECT 'order_", "postgres"],
+    ["SELECT nextval('order_", "mysql"],
+    ["SELECT nextval('order_') || 'suffix", "postgres"],
+    ["SELECT setval(42, 'order_", "postgres"],
+    ["SELECT app.nextval('order_", "postgres"],
+    ["SELECT app. nextval('order_", "postgres"],
+    ["SELECT app.pg_catalog.nextval('order_", "postgres"],
+    [`SELECT "PG_CATALOG".nextval('order_`, "postgres"],
+    ["SELECT $$ nextval('order_", "postgres"],
+    ["SELECT $body$ nextval('order_", "postgres"],
+  ] as const)("does not enable sequence completion for unrelated literals: %s (%s)", (sql, databaseType) => {
+    expect(getPostgresSequenceLiteralCompletionContext(sql, sql.length, databaseType)).toBeNull();
+    expect(shouldAutoOpenSqlCompletion(sql, sql.length, { databaseType })).toBe(false);
   });
 });
 

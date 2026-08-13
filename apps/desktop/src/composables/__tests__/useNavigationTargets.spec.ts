@@ -6,6 +6,7 @@ import type { QueryTab } from "@/types/database";
 const mocks = vi.hoisted(() => ({
   tabs: [] as QueryTab[],
   activeTabId: "",
+  buildTableSelectSql: vi.fn(),
   databaseType: "postgres" as string,
   ensureConnected: vi.fn(),
   executeTabSql: vi.fn(),
@@ -83,7 +84,7 @@ vi.mock("@/stores/settingsStore", () => ({
 }));
 
 vi.mock("@/lib/table/tableSelectSql", () => ({
-  buildTableSelectSql: async ({ tableName }: { tableName: string }) => `SELECT * FROM ${tableName}`,
+  buildTableSelectSql: mocks.buildTableSelectSql,
 }));
 
 const dialogs = {
@@ -103,12 +104,13 @@ describe("useNavigationTargets openTableTarget", () => {
     mocks.tabs.length = 0;
     mocks.databaseType = "postgres";
     mocks.ensureConnected.mockResolvedValue(undefined);
+    mocks.buildTableSelectSql.mockImplementation(async ({ tableName }: { tableName: string }) => `SELECT * FROM ${tableName}`);
     mocks.executeTabSql.mockResolvedValue(undefined);
     mocks.getColumns.mockResolvedValue([column("id")]);
     mocks.listIndexes.mockResolvedValue([]);
   });
 
-  it("marks row identity pending until real metadata lands", async () => {
+  it("loads stable row identity before the first PostgreSQL table query", async () => {
     let releaseColumns: (columns: unknown[]) => void = () => {};
     mocks.getColumns.mockReturnValueOnce(
       new Promise((resolve) => {
@@ -124,10 +126,15 @@ describe("useNavigationTargets openTableTarget", () => {
     releaseColumns([column("id")]);
     await open;
 
-    // 数据查询执行期间元数据未落地：行标识等待必须已挂起
-    expect(pendingDuringQuery).toBe(true);
+    expect(pendingDuringQuery).toBe(false);
     expect(mocks.tabs[0]?.tableMeta?.primaryKeys).toEqual(["id"]);
     expect(mocks.tabs[0]?.tableMetaPending).toBe(false);
+    expect(mocks.buildTableSelectSql).toHaveBeenCalledWith(
+      expect.objectContaining({
+        columns: ["id"],
+        primaryKeys: ["id"],
+      }),
+    );
   });
 
   it("reuses cached metadata and force-refreshes it once per catalog after a structure save", async () => {

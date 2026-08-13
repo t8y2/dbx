@@ -90,6 +90,7 @@ export interface ResolveNewQueryInitialSqlInput extends ResolveNewQueryTableInpu
   targetConnectionId: string;
   targetDatabase: string;
   databaseType?: DatabaseType;
+  identifierQuote?: string;
 }
 
 // Database types whose "table" view does not use standard SQL `SELECT * FROM <table>`
@@ -145,9 +146,9 @@ export function resolveNewQueryTable(input: ResolveNewQueryTableInput): NewQuery
  * the same per-dialect identifier quoting and schema/catalog qualification used
  * by the table-data view.
  */
-export function buildSelectAllSql(databaseType: DatabaseType | undefined, table: Pick<NewQueryTable, "schema" | "catalog" | "tableName"> & Partial<Pick<NewQueryTable, "database">>): string {
+export function buildSelectAllSql(databaseType: DatabaseType | undefined, table: Pick<NewQueryTable, "schema" | "catalog" | "tableName"> & Partial<Pick<NewQueryTable, "database">>, identifierQuote?: string): string {
   if (databaseType === "victoriametrics") return metricRangeQuery(table.tableName);
-  const ref = qualifiedTableName({ databaseType, database: table.database, schema: table.schema, catalog: table.catalog, tableName: table.tableName });
+  const ref = qualifiedTableName({ databaseType, identifierQuote, database: table.database, schema: table.schema, catalog: table.catalog, tableName: table.tableName });
   return `SELECT * FROM ${ref}`;
 }
 
@@ -162,5 +163,5 @@ export function resolveNewQueryInitialSql(input: ResolveNewQueryInitialSqlInput)
   const table = resolveNewQueryTable(input);
   if (!table || table.connectionId !== input.targetConnectionId || table.database !== input.targetDatabase) return undefined;
 
-  return buildSelectAllSql(input.databaseType, table);
+  return buildSelectAllSql(input.databaseType, table, input.identifierQuote);
 }

@@ -71,7 +71,8 @@ func TestRuntimeHandshakeAdvertisesMultiSessionProtocol(t *testing.T) {
 	if err := json.Unmarshal(data, &result); err != nil {
 		t.Fatal(err)
 	}
-	if result.ProtocolVersion != multiSessionProtocolVersion || !contains(result.Capabilities, "multi_session") {
+	if result.ProtocolVersion != multiSessionProtocolVersion || !contains(result.Capabilities, "multi_session") ||
+		!contains(result.Capabilities, "structured_error_v1") {
 		t.Fatalf("unexpected runtime handshake: %+v", result)
 	}
 }
@@ -3402,13 +3403,176 @@ func TestXuguWatchdogCallsKillOnBlockingQuery(t *testing.T) {
 
 	select {
 	case err := <-errCh:
-		if err == nil {
-			t.Fatal("expected non-nil error after kill")
+		if !errors.Is(err, errXuguOperationTimeout) || !strings.Contains(err.Error(), "killed") {
+			t.Fatalf("expected recorded timeout preserving the driver error, got: %v", err)
 		}
-		if !strings.Contains(err.Error(), "killed") && !strings.Contains(err.Error(), "timed out") {
-			t.Fatalf("expected killed or timeout error, got: %v", err)
+		rpcErr := classifyRPCError("execute_query", "watchdog-query", err)
+		if rpcErr.Data.Category != "timeout" || rpcErr.Data.SessionDisposition != "quarantine" {
+			t.Fatalf("unexpected query timeout contract: %+v", rpcErr.Data)
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("query did not return after unblocking driver")
 	}
+}
+
+func TestXuguWatchdogClassifiesBlockingExecAsTimeout(t *testing.T) {
+	resetXuguBlockingDriver()
+	s := newServer()
+	killCh := make(chan struct{})
+	s.killSession = func() { close(killCh) }
+	db, err := sql.Open("xugu-test-blocking", "dsn")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	s.db = db
+
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := s.executeQuery(queryOptions{SQL: "UPDATE DBX_TIMEOUT_TEST SET VALUE = 1", TimeoutSecs: 1})
+		errCh <- err
+	}()
+
+	select {
+	case <-killCh:
+	case <-time.After(3 * time.Second):
+		t.Fatal("killSession was not called for the blocking exec")
+	}
+	close(xuguBlockingUnblock)
+
+	select {
+	case err := <-errCh:
+		if !errors.Is(err, errXuguOperationTimeout) || !strings.Contains(err.Error(), "killed") {
+			t.Fatalf("expected recorded exec timeout preserving the driver error, got: %v", err)
+		}
+		rpcErr := classifyRPCError("execute_query", "watchdog-exec", err)
+		if rpcErr.Data.Category != "timeout" || rpcErr.Data.SessionDisposition != "quarantine" {
+			t.Fatalf("unexpected exec timeout contract: %+v", rpcErr.Data)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("exec did not return after unblocking driver")
+	}
+}
+
+func TestXuguExplicitCancelClassifiesBlockingQueryAndExec(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		run  func(*server) error
+	}{
+		{
+			name: "query",
+			run: func(s *server) error {
+				rows, err := s.queryRowsWithTimeout("SELECT 1", nil, 0)
+				if rows != nil {
+					_ = rows.Close()
+				}
+				return err
+			},
+		},
+		{
+			name: "exec",
+			run: func(s *server) error {
+				_, err := s.executeQuery(queryOptions{SQL: "UPDATE DBX_CANCEL_TEST SET VALUE = 1"})
+				return err
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			resetXuguBlockingDriver()
+			s := newServer()
+			killCh := make(chan struct{})
+			s.killSession = func() { close(killCh) }
+			db, err := sql.Open("xugu-test-blocking", "dsn")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			s.db = db
+
+			errCh := make(chan error, 1)
+			go func() { errCh <- test.run(s) }()
+			waitForXuguActiveOperation(t, s)
+			s.cancelActiveQuery()
+			select {
+			case <-killCh:
+			case <-time.After(time.Second):
+				t.Fatal("killSession was not called for explicit cancellation")
+			}
+			close(xuguBlockingUnblock)
+
+			select {
+			case err := <-errCh:
+				if !errors.Is(err, errXuguOperationCanceled) || !strings.Contains(err.Error(), "killed") {
+					t.Fatalf("expected recorded cancellation preserving the driver error, got: %v", err)
+				}
+				rpcErr := classifyRPCError("execute_query", "explicit-cancel", err)
+				if rpcErr.Data.Category != "canceled" || rpcErr.Data.SessionDisposition != "quarantine" {
+					t.Fatalf("unexpected cancellation contract: %+v", rpcErr.Data)
+				}
+			case <-time.After(3 * time.Second):
+				t.Fatal("operation did not return after explicit cancellation")
+			}
+		})
+	}
+}
+
+func TestXuguExplicitCancelWinsWatchdogRace(t *testing.T) {
+	resetXuguBlockingDriver()
+	s := newServer()
+	var killMu sync.Mutex
+	killCount := 0
+	s.killSession = func() {
+		killMu.Lock()
+		killCount++
+		killMu.Unlock()
+	}
+	db, err := sql.Open("xugu-test-blocking", "dsn")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	s.db = db
+
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := s.queryRowsWithTimeout("SELECT 1", nil, 1)
+		errCh <- err
+	}()
+	waitForXuguActiveOperation(t, s)
+	s.cancelActiveQuery()
+
+	// Keep the driver blocked beyond the original watchdog deadline. The
+	// explicit cancel happened first, so the timer must not fire or relabel it.
+	time.Sleep(1200 * time.Millisecond)
+	killMu.Lock()
+	gotKillCount := killCount
+	killMu.Unlock()
+	if gotKillCount != 1 {
+		t.Fatalf("expected exactly one kill from explicit cancel, got %d", gotKillCount)
+	}
+	close(xuguBlockingUnblock)
+
+	select {
+	case err := <-errCh:
+		if !errors.Is(err, errXuguOperationCanceled) || errors.Is(err, errXuguOperationTimeout) {
+			t.Fatalf("explicit cancel was relabeled after its watchdog deadline: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("query did not return after unblocking driver")
+	}
+}
+
+func waitForXuguActiveOperation(t *testing.T, s *server) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		s.activeCancelMu.Lock()
+		active := s.activeCancel != nil
+		s.activeCancelMu.Unlock()
+		if active {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("operation did not become active")
 }

@@ -1076,6 +1076,11 @@ public final class DbxJdbcPlugin {
         String planText = null;
         String dmMethod = null;
 
+        if (!autotrace && isOracleConnection(connection)) {
+            planText = getOracleExplainInfo(conn, sql, timeoutSecs);
+            dmMethod = "oracle-plan-table";
+        }
+
         if (autotrace) {
             if (!isSafeAutotraceSql(sql)) {
                 throw new IllegalArgumentException("unsafe");
@@ -1118,7 +1123,7 @@ public final class DbxJdbcPlugin {
                     } catch (Exception ignored) {}
                 }
             }
-        } else {
+        } else if (planText == null) {
             // ── Explain mode: direct plan via getExplainInfo(sqlStr), no execution ──
             try {
                 Class<?> dmConnClass = Class.forName("dm.jdbc.driver.DmdbConnection");
@@ -1151,6 +1156,53 @@ public final class DbxJdbcPlugin {
         result.put("has_actual_stats", "getExplainInfo(stmt)".equals(dmMethod));
         result.put("mode", autotrace ? "autotrace" : "explain");
         return result;
+    }
+
+    private static boolean isOracleConnection(JsonNode connection) {
+        String url = optionalText(connection, "connection_string");
+        return url != null && url.regionMatches(true, 0, "jdbc:oracle:", 0, "jdbc:oracle:".length());
+    }
+
+    private static String getOracleExplainInfo(Connection connection, String sql, int timeoutSecs) throws SQLException {
+        String statementId = "DBX_" + UUID.randomUUID().toString().replace("-", "").substring(0, 26);
+        StringBuilder plan = new StringBuilder();
+        try {
+            try (PreparedStatement explain = connection.prepareStatement(
+                "EXPLAIN PLAN SET STATEMENT_ID = '" + statementId + "' FOR " + trimStatementSql(sql)
+            )) {
+                applyExplainTimeout(explain, timeoutSecs);
+                explain.execute();
+            }
+            try (PreparedStatement read = connection.prepareStatement(
+                "SELECT PLAN_TABLE_OUTPUT FROM TABLE(DBMS_XPLAN.DISPLAY('PLAN_TABLE', ?, 'TYPICAL +PREDICATE'))"
+            )) {
+                applyExplainTimeout(read, timeoutSecs);
+                read.setString(1, statementId);
+                try (ResultSet rows = read.executeQuery()) {
+                    while (rows.next()) {
+                        if (plan.length() > 0) plan.append('\n');
+                        plan.append(rows.getString(1));
+                    }
+                }
+            }
+            return plan.toString();
+        } finally {
+            try (PreparedStatement cleanup = connection.prepareStatement(
+                "DELETE FROM PLAN_TABLE WHERE STATEMENT_ID = ?"
+            )) {
+                applyExplainTimeout(cleanup, timeoutSecs);
+                cleanup.setString(1, statementId);
+                cleanup.executeUpdate();
+            } catch (SQLException ignored) {}
+        }
+    }
+
+    private static void applyExplainTimeout(Statement statement, int timeoutSecs) throws SQLException {
+        if (timeoutSecs >= 0) {
+            try {
+                statement.setQueryTimeout(timeoutSecs);
+            } catch (SQLFeatureNotSupportedException | UnsupportedOperationException ignored) {}
+        }
     }
 
     private static void applyStatementOptions(

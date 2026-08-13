@@ -401,7 +401,7 @@ fn format_export_sql_literal_typed(
             return format_ch_array_sql_literal(arr);
         }
     }
-    if let Some(literal) = format_oracle_export_date_literal(value, database_type, column_type) {
+    if let Some(literal) = format_oracle_export_temporal_literal(value, database_type, column_type) {
         return literal;
     }
     if let Some(literal) = format_export_temporal_literal(value, database_type, column_type) {
@@ -523,7 +523,7 @@ fn is_mysql_compatible_export_literal_target(database_type: Option<DatabaseType>
     )
 }
 
-fn format_oracle_export_date_literal(
+fn format_oracle_export_temporal_literal(
     value: &Value,
     database_type: Option<DatabaseType>,
     column_type: Option<&str>,
@@ -531,16 +531,27 @@ fn format_oracle_export_date_literal(
     if !matches!(database_type, Some(DatabaseType::Oracle | DatabaseType::OceanbaseOracle)) {
         return None;
     }
-    if export_temporal_column_kind(database_type, column_type?)? != ExportTemporalKind::DateTime {
-        return None;
-    }
-    let lower = column_type?.trim().trim_matches('"').to_ascii_lowercase();
+    let column_type = column_type?;
+    let lower = column_type.trim().trim_matches('"').to_ascii_lowercase();
     let base = lower.split(['(', ' ', '\t', '\n']).next().unwrap_or("");
-    if base != "date" {
-        return None;
-    }
+    let kind = match base {
+        "timestampdty" => ExportTemporalKind::DateTime,
+        "timestamptz_dty" => ExportTemporalKind::DateTimeWithTimeZone,
+        _ => export_temporal_column_kind(database_type, column_type)?,
+    };
     let parts = parse_export_date_parts(value.as_str()?)?;
-    Some(format_oracle_export_date_parts_literal(&parts))
+    if base == "date" {
+        return Some(format_oracle_export_date_parts_literal(&parts));
+    }
+
+    let fraction = parts.fraction.as_deref().unwrap_or_default();
+    let datetime = format!("{} {}{fraction}", parts.date, parts.time);
+    let mask = if fraction.is_empty() { "YYYY-MM-DD HH24:MI:SS" } else { "YYYY-MM-DD HH24:MI:SS.FF" };
+    if kind == ExportTemporalKind::DateTimeWithTimeZone && !parts.zone.is_empty() {
+        let zone = normalize_export_timezone(&parts.zone);
+        return Some(format!("TO_TIMESTAMP_TZ('{datetime} {zone}', '{mask} TZH:TZM')"));
+    }
+    Some(format!("TO_TIMESTAMP('{datetime}', '{mask}')"))
 }
 
 fn format_oracle_export_date_parts_literal(parts: &ExportRfc3339Parts) -> String {
@@ -689,6 +700,11 @@ fn parse_export_rfc3339_parts(text: &str) -> Option<ExportRfc3339Parts> {
     }
     let date = &text[0..10];
     let time = &text[11..19];
+    if !date.as_bytes().iter().enumerate().all(|(index, byte)| matches!(index, 4 | 7) || byte.is_ascii_digit())
+        || !time.as_bytes().iter().enumerate().all(|(index, byte)| matches!(index, 2 | 5) || byte.is_ascii_digit())
+    {
+        return None;
+    }
     let rest = &text[19..];
     let (fraction, zone) = if let Some(rest) = rest.strip_prefix('.') {
         let digit_count = rest.chars().take_while(|ch| ch.is_ascii_digit()).count();
@@ -3282,6 +3298,102 @@ mod tests {
                 "INSERT INTO \"APP\".\"EVENTS\" (\"ID\", \"CREATED_ON\", \"RAW_TEXT\") VALUES (1, TO_DATE('2022-08-25 09:58:43', 'YYYY-MM-DD HH24:MI:SS'), '2022-08-25T09:58:43Z');",
                 "INSERT INTO \"APP\".\"EVENTS\" (\"ID\", \"CREATED_ON\", \"RAW_TEXT\") VALUES (2, DATE '2022-08-25', '2022-08-25T00:00:00Z');",
             ]
+        );
+    }
+
+    #[test]
+    fn oracle_timestamp_columns_export_as_explicit_literals() {
+        for database_type in [DatabaseType::Oracle, DatabaseType::OceanbaseOracle] {
+            let statements = build_export_insert_statements(BuildExportInsertStatementsOptions {
+                database_type: Some(database_type),
+                schema: Some("APP".to_string()),
+                table_name: Some("EVENTS".to_string()),
+                qualified_table_name: None,
+                columns: vec![
+                    "CREATED_AT".to_string(),
+                    "UPDATED_AT".to_string(),
+                    "RECORDED_AT".to_string(),
+                    "LOCAL_RECORDED_AT".to_string(),
+                    "DRIVER_CREATED_AT".to_string(),
+                    "DRIVER_RECORDED_AT".to_string(),
+                    "RAW_TEXT".to_string(),
+                    "UNTYPED".to_string(),
+                    "INVALID_AT".to_string(),
+                    "SHAPED_INVALID_AT".to_string(),
+                    "NULL_AT".to_string(),
+                ],
+                column_types: vec![
+                    Some("TIMESTAMP(6)".to_string()),
+                    Some("TIMESTAMP(6)".to_string()),
+                    Some("TIMESTAMP(9) WITH TIME ZONE".to_string()),
+                    Some("TIMESTAMP(6) WITH LOCAL TIME ZONE".to_string()),
+                    Some("TimeStampDTY".to_string()),
+                    Some("TimeStampTZ_DTY".to_string()),
+                    Some("VARCHAR2(64)".to_string()),
+                    None,
+                    Some("TIMESTAMP(6)".to_string()),
+                    Some("TIMESTAMP(6)".to_string()),
+                    Some("TIMESTAMP".to_string()),
+                ],
+                column_extras: Vec::new(),
+                rows: vec![vec![
+                    json!("2022-08-25 09:58:43.123456"),
+                    json!("2022-08-26T10:59:44Z"),
+                    json!("2022-08-27T11:00:45.123456789+08:00"),
+                    json!("2022-08-28T12:01:46Z"),
+                    json!("2022-08-29T13:02:47.123456"),
+                    json!("2022-08-30T14:03:48-05:30"),
+                    json!("2022-08-31T15:04:49Z"),
+                    json!("2022-09-01T16:05:50Z"),
+                    json!("not-a-timestamp"),
+                    json!("2022-0'-25T09:58:43Z"),
+                    Value::Null,
+                ]],
+                batch_size: Some(100),
+            })
+            .unwrap();
+
+            assert_eq!(
+                statements,
+                vec![concat!(
+                    "INSERT INTO \"APP\".\"EVENTS\" (\"CREATED_AT\", \"UPDATED_AT\", \"RECORDED_AT\", ",
+                    "\"LOCAL_RECORDED_AT\", \"DRIVER_CREATED_AT\", \"DRIVER_RECORDED_AT\", \"RAW_TEXT\", ",
+                    "\"UNTYPED\", \"INVALID_AT\", \"SHAPED_INVALID_AT\", \"NULL_AT\") VALUES ",
+                    "(TO_TIMESTAMP('2022-08-25 09:58:43.123456', 'YYYY-MM-DD HH24:MI:SS.FF'), ",
+                    "TO_TIMESTAMP('2022-08-26 10:59:44', 'YYYY-MM-DD HH24:MI:SS'), ",
+                    "TO_TIMESTAMP_TZ('2022-08-27 11:00:45.123456789 +08:00', ",
+                    "'YYYY-MM-DD HH24:MI:SS.FF TZH:TZM'), ",
+                    "TO_TIMESTAMP_TZ('2022-08-28 12:01:46 +00:00', 'YYYY-MM-DD HH24:MI:SS TZH:TZM'), ",
+                    "TO_TIMESTAMP('2022-08-29 13:02:47.123456', 'YYYY-MM-DD HH24:MI:SS.FF'), ",
+                    "TO_TIMESTAMP_TZ('2022-08-30 14:03:48 -05:30', 'YYYY-MM-DD HH24:MI:SS TZH:TZM'), ",
+                    "'2022-08-31T15:04:49Z', '2022-09-01T16:05:50Z', 'not-a-timestamp', ",
+                    "'2022-0''-25T09:58:43Z', NULL);"
+                )]
+            );
+        }
+    }
+
+    #[test]
+    fn non_oracle_timestamp_exports_keep_existing_literals() {
+        let statements = build_export_insert_statements(BuildExportInsertStatementsOptions {
+            database_type: Some(DatabaseType::Postgres),
+            schema: Some("public".to_string()),
+            table_name: Some("events".to_string()),
+            qualified_table_name: None,
+            columns: vec!["created_at".to_string(), "recorded_at".to_string()],
+            column_types: vec![Some("timestamp".to_string()), Some("timestamp with time zone".to_string())],
+            column_extras: Vec::new(),
+            rows: vec![vec![json!("2022-08-25T09:58:43.123456Z"), json!("2022-08-26T10:59:44+08:00")]],
+            batch_size: Some(100),
+        })
+        .unwrap();
+
+        assert_eq!(
+            statements,
+            vec![concat!(
+                "INSERT INTO \"public\".\"events\" (\"created_at\", \"recorded_at\") VALUES ",
+                "('2022-08-25 09:58:43.123456', '2022-08-26 10:59:44+08:00');"
+            )]
         );
     }
 

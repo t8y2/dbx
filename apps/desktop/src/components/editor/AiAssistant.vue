@@ -92,6 +92,7 @@ import { visibleToActualIndex } from "@/lib/ai/aiMessageEdit";
 import { shouldShowReasoningCharCount, reasoningCharCountClass } from "@/lib/ai/aiReasoningPresentation";
 import { saveTextFile } from "@/lib/export/saveTextFile";
 import { buildAiAnalysisExport } from "@/lib/export/aiAnalysisExport";
+import { buildAiConversationSearchIndex, filterAiConversationSearchIndex } from "@/lib/ai/aiConversationSearch";
 
 const { t } = useI18n();
 const settings = useSettingsStore();
@@ -178,6 +179,10 @@ watch(
 const currentSessionId = ref("");
 const conversationId = ref("");
 const conversations = ref<AiConversation[]>([]);
+const conversationSearchQuery = ref("");
+const conversationSearchInput = ref<HTMLInputElement | null>(null);
+const conversationSearchIndex = computed(() => buildAiConversationSearchIndex(conversations.value));
+const filteredConversations = computed(() => filterAiConversationSearchIndex(conversationSearchIndex.value, conversationSearchQuery.value));
 const showConversationList = ref(false);
 const showTemplateSelector = ref(false);
 const modeActionOpen = ref(false);
@@ -2021,7 +2026,12 @@ async function persistConversation() {
 
 async function setConversationListOpen(open: boolean) {
   showConversationList.value = open;
-  if (open) conversations.value = await loadAiConversations().catch(() => []);
+  if (open) {
+    conversationSearchQuery.value = "";
+    await nextTick();
+    conversationSearchInput.value?.focus();
+    conversations.value = await loadAiConversations().catch(() => []);
+  }
 }
 
 function selectConversation(conv: AiConversation) {
@@ -2220,11 +2230,29 @@ async function openExternalUrl(url: string) {
               <MessageSquarePlus class="h-3.5 w-3.5" />
             </Button>
           </div>
+          <div class="relative flex items-center border-b px-2 py-1">
+            <Search class="pointer-events-none absolute left-3 h-3 w-3 text-muted-foreground" />
+            <input
+              ref="conversationSearchInput"
+              v-model="conversationSearchQuery"
+              type="search"
+              :aria-label="t('history.conversationSearch')"
+              autocapitalize="off"
+              autocomplete="off"
+              autocorrect="off"
+              spellcheck="false"
+              class="h-5 w-full rounded border bg-transparent pl-5 pr-1 text-xs outline-none placeholder:text-muted-foreground"
+              :placeholder="t('history.conversationSearch')"
+            />
+          </div>
           <div v-if="!conversations.length" class="p-3 text-center text-xs text-muted-foreground">
             {{ t("history.empty") }}
           </div>
+          <div v-else-if="!filteredConversations.length" class="p-3 text-center text-xs text-muted-foreground">
+            {{ t("history.emptyConversationSearch") }}
+          </div>
           <div v-else class="max-h-64 overflow-auto p-1">
-            <div v-for="conv in conversations" :key="conv.id" class="flex min-w-0 cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-xs hover:bg-muted" :class="{ 'bg-muted': conv.id === conversationId }" @click="selectConversation(conv)">
+            <div v-for="conv in filteredConversations" :key="conv.id" class="flex min-w-0 cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-xs hover:bg-muted" :class="{ 'bg-muted': conv.id === conversationId }" @click="selectConversation(conv)">
               <span class="min-w-0 flex-1 truncate">{{ conv.title }}</span>
               <button class="shrink-0 rounded p-0.5 text-muted-foreground hover:bg-background hover:text-destructive" @click.stop="deleteConversation(conv.id)">
                 <X class="h-3 w-3" />

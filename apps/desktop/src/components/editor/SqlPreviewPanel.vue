@@ -67,6 +67,7 @@ async function highlightSql() {
     highlightedHtml.value = highlighter.codeToHtml(displaySql.value, {
       lang: "sql",
       theme,
+      structure: "inline",
     });
   } catch {
     // fallback to plain text
@@ -202,7 +203,7 @@ onBeforeUnmount(() => {
       </div>
 
       <!-- Shiki highlighted SQL -->
-      <div v-else-if="highlightedHtml" data-native-clipboard class="p-3 text-xs leading-relaxed [&_pre]:!bg-transparent [&_pre]:!p-0 [&_code]:!font-mono [&_code]:text-xs" v-html="highlightedHtml" />
+      <pre v-else-if="highlightedHtml" data-native-clipboard class="m-0 p-3 text-xs font-mono leading-relaxed whitespace-pre-wrap break-words select-text" v-html="highlightedHtml"></pre>
 
       <!-- Plain text fallback -->
       <pre v-else data-native-clipboard class="p-3 text-xs font-mono whitespace-pre-wrap select-text">{{ displaySql }}</pre>

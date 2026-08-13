@@ -6397,11 +6397,16 @@ async fn get_table_ddl_core_with_options(
         )
         .await?;
         let database_type = connection_config(state, connection_id).await.map(|config| config.db_type);
+        // Kingbase MySQL compatibility mode reports a backtick identifier
+        // quote; thread it through so the view DDL wraps hyphenated schema
+        // names in backticks instead of double quotes the server rejects.
+        let identifier_quote = state.connection_identifier_quote(connection_id, Some(database)).await.ok().flatten();
         return Ok(crate::object_source_sql::build_view_ddl_sql(crate::object_source_sql::BuildViewDdlInput {
             database_type,
             schema: if schema.trim().is_empty() { None } else { Some(schema.to_string()) },
             name: table.to_string(),
             source: source.source,
+            identifier_quote,
         }));
     }
     if matches!(object_type, Some(db::ObjectSourceKind::MaterializedView)) {

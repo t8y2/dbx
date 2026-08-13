@@ -20,9 +20,11 @@ const props = withDefaults(
   defineProps<{
     grid?: DataGridColumnLayoutHandle;
     triggerClass?: string;
+    compact?: boolean;
   }>(),
   {
     triggerClass: "",
+    compact: false,
   },
 );
 
@@ -299,14 +301,14 @@ onBeforeUnmount(resetColumnDragState);
         variant="ghost"
         size="sm"
         class="h-5 shrink-0 gap-1 px-1.5 text-xs text-foreground hover:bg-accent"
-        :class="[triggerClass, { 'bg-accent text-foreground': (grid?.hiddenColumnCount ?? 0) > 0 }]"
+        :class="[triggerClass, compact ? 'w-6 gap-0 px-0' : '', { 'bg-accent text-foreground': (grid?.hiddenColumnCount ?? 0) > 0 }]"
         :disabled="!grid"
         :title="t('grid.columnVisibility')"
         :aria-label="t('grid.columnVisibility')"
       >
         <Columns3 class="h-3.5 w-3.5" />
-        {{ t("grid.columnVisibility") }}
-        <span v-if="(grid?.hiddenColumnCount ?? 0) > 0" class="tabular-nums"> {{ grid?.visibleColumnCount }}/{{ grid?.displayableColumnCount }} </span>
+        <span v-if="!compact">{{ t("grid.columnVisibility") }}</span>
+        <span v-if="!compact && (grid?.hiddenColumnCount ?? 0) > 0" class="tabular-nums"> {{ grid?.visibleColumnCount }}/{{ grid?.displayableColumnCount }} </span>
       </Button>
     </PopoverTrigger>
     <PopoverContent align="end" class="w-72 max-w-[calc(100vw-2rem)] gap-0 overflow-hidden rounded-md border bg-popover p-0 text-popover-foreground shadow-xl" @click.stop @keydown.stop>

@@ -13,6 +13,8 @@ export interface BuildTableSelectSqlOptions {
   tableType?: string;
   primaryKeys?: string[];
   columns?: string[];
+  columnTypes?: string[];
+  largeValuePreviewSize?: number;
   fallbackOrderColumns?: string[];
   orderBy?: string;
   limit?: number;

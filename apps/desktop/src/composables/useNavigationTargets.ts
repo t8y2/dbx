@@ -4,6 +4,7 @@ import { invalidateTableMetadataCache, loadTableMetadata } from "@/lib/metadata/
 import { canApplyDataTabMetadata } from "@/lib/sidebar/dataTabOpenPolicy";
 import { isNoSnapshotErrorResult, isQueryExecutionErrorResult } from "@/lib/query/queryResultError";
 import { buildTableSelectSql } from "@/lib/table/tableSelectSql";
+import { tableDataLargeValuePreviewOptions } from "@/lib/dataGrid/dataGridLargeValues";
 import { editableRowIdentifierColumns, usesSyntheticRowIdKey } from "@/lib/table/tableEditing";
 import { tableOpenPageLimit } from "@/lib/table/tableOpenPageLimit";
 import { uuid } from "@/lib/common/utils";
@@ -136,6 +137,21 @@ async function openTableTarget(target: NavigationTarget, options: { tableInfoTab
       await queryStore.executeTabSql(tabId, sql, { pagination: { limit: pageLimit, offset: 0 } });
       return;
     }
+    const eagerMetadata =
+      effectiveDbType === "mysql" || effectiveDbType === "postgres"
+        ? await loadTableMetadata({
+            connectionId: target.connectionId,
+            database: target.database,
+            schema: querySchema,
+            tableName: target.tableName,
+            tableType: targetTableType,
+            databaseType: effectiveDbType,
+            driverProfile: config.driver_profile || config.db_type,
+            catalog: target.catalog,
+          })
+        : undefined;
+    const eagerColumns = eagerMetadata?.metadata.columns ?? [];
+    const eagerPrimaryKeys = eagerMetadata?.metadata.primaryKeys ?? [];
     const sql = await buildTableSelectSql({
       databaseType: effectiveDbType,
       driverProfile: config.driver_profile,
@@ -145,6 +161,9 @@ async function openTableTarget(target: NavigationTarget, options: { tableInfoTab
       database: target.database,
       tableName: target.tableName,
       tableType: targetTableType,
+      columns: eagerColumns.map((column) => column.name),
+      primaryKeys: eagerPrimaryKeys,
+      ...tableDataLargeValuePreviewOptions(effectiveDbType, eagerColumns, eagerPrimaryKeys, pageLimit),
       whereInput: target.whereInput,
       limit: pageLimit,
     });
@@ -156,8 +175,8 @@ async function openTableTarget(target: NavigationTarget, options: { tableInfoTab
       database: target.database,
       tableName: target.tableName,
       tableType: targetTableType,
-      columns: [],
-      primaryKeys: [],
+      columns: eagerColumns,
+      primaryKeys: eagerPrimaryKeys,
     });
     firstExecuteStarted = true;
     // 取消计数快照：isCancelling 是瞬态的（取消失败/查询先完成会被清掉），

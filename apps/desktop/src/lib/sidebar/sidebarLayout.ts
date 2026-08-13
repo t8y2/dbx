@@ -121,11 +121,16 @@ export function remapSidebarLayoutConnectionIds(layout: SidebarLayout, connectio
   };
 }
 
+export function connectionSidebarSearchAliases(config: Pick<ConnectionConfig, "host" | "username">): string[] {
+  return [config.host, config.username].filter((value) => value.trim().length > 0);
+}
+
 function makeConnectionNode(config: ConnectionConfig, pinned: boolean): TreeNode {
   return {
     id: config.id,
     label: config.name,
     type: "connection",
+    searchAliases: connectionSidebarSearchAliases(config),
     connectionId: config.id,
     isExpanded: false,
     children: [],

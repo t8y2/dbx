@@ -1,4 +1,5 @@
 import type { ColumnInfo, IndexInfo, ForeignKeyInfo, TriggerInfo, FunctionInfo, SequenceInfo, RuleInfo, OwnerInfo, DatabaseType, TableInfo } from "@/types/database";
+import { splitSqlStatementRanges } from "@/lib/sql/sqlStatementRanges";
 
 const DIALECT_KIND_MAP: Record<string, string> = {
   mysql: "mysql",
@@ -304,7 +305,7 @@ export function schemaDiffDeployTargetSchema(databaseType: DatabaseType | undefi
 
 // Unified object type for UI display
 export type DiffOperationType = "modify" | "create" | "delete" | "none";
-export type DiffObjectKind = "table" | "view" | "function" | "sequence" | "rule" | "owner" | "index" | "trigger" | "foreignKey";
+export type DiffObjectKind = "table" | "view" | "function" | "sequence" | "rule" | "owner" | "column" | "index" | "trigger" | "foreignKey";
 
 export interface SchemaDiffObject {
   id: string;
@@ -320,6 +321,8 @@ export interface SchemaDiffObject {
   rollbackDdl?: string;
   changes?: string[];
   children?: SchemaDiffObject[];
+  parentId?: string;
+  parentName?: string;
   /** Function arguments signature (for PostgreSQL overloaded functions) */
   arguments?: string;
   renameMetadata?: {
@@ -337,6 +340,148 @@ export interface SchemaDiffGroup {
   selectedCount: number;
   expanded: boolean;
   objects: SchemaDiffObject[];
+}
+
+export interface DestructiveSchemaDiffStatement {
+  action: "drop" | "truncate";
+  objectType: string;
+  statement: string;
+}
+
+function stripSqlCommentsAndStringLiterals(sql: string): string {
+  let result = "";
+  let index = 0;
+  let state: "plain" | "single" | "double" | "backtick" | "bracket" | "line" | "block" = "plain";
+
+  while (index < sql.length) {
+    const current = sql[index];
+    const next = sql[index + 1];
+
+    if (state === "line") {
+      if (current === "\n") {
+        state = "plain";
+        result += "\n";
+      } else {
+        result += " ";
+      }
+      index++;
+      continue;
+    }
+
+    if (state === "block") {
+      if (current === "*" && next === "/") {
+        result += "  ";
+        state = "plain";
+        index += 2;
+      } else {
+        result += current === "\n" ? "\n" : " ";
+        index++;
+      }
+      continue;
+    }
+
+    if (state === "single" || state === "double" || state === "backtick") {
+      result += current === "\n" ? "\n" : " ";
+      const delimiter = state === "single" ? "'" : state === "double" ? '"' : "`";
+      if (current === delimiter && next === delimiter) {
+        result += " ";
+        index += 2;
+      } else {
+        if (current === delimiter) state = "plain";
+        index++;
+      }
+      continue;
+    }
+
+    if (state === "bracket") {
+      result += current === "\n" ? "\n" : " ";
+      if (current === "]" && next === "]") {
+        result += " ";
+        index += 2;
+      } else {
+        if (current === "]") state = "plain";
+        index++;
+      }
+      continue;
+    }
+
+    if (current === "-" && next === "-") {
+      result += "  ";
+      state = "line";
+      index += 2;
+      continue;
+    }
+    if (current === "#") {
+      result += " ";
+      state = "line";
+      index++;
+      continue;
+    }
+    if (current === "/" && next === "*") {
+      result += "  ";
+      state = "block";
+      index += 2;
+      continue;
+    }
+    if (current === "'") {
+      result += " ";
+      state = "single";
+      index++;
+      continue;
+    }
+    if (current === '"') {
+      result += " ";
+      state = "double";
+      index++;
+      continue;
+    }
+    if (current === "`") {
+      result += " ";
+      state = "backtick";
+      index++;
+      continue;
+    }
+    if (current === "[") {
+      result += " ";
+      state = "bracket";
+      index++;
+      continue;
+    }
+
+    result += current;
+    index++;
+  }
+
+  return result;
+}
+
+export function detectDestructiveSchemaDiffStatements(sql: string, databaseType?: DatabaseType): DestructiveSchemaDiffStatement[] {
+  const statements = splitSqlStatementRanges(sql, databaseType);
+  const destructive: DestructiveSchemaDiffStatement[] = [];
+
+  for (const range of statements) {
+    const statement = range.sql.trim().replace(/;\s*$/, "");
+    const normalized = stripSqlCommentsAndStringLiterals(statement).trim();
+    const topLevel = normalized.match(/^DROP\s+(?:TEMPORARY\s+)?(MATERIALIZED\s+VIEW|FOREIGN\s+TABLE|EVENT\s+TRIGGER|USER\s+MAPPING|OWNED\s+BY|[A-Z_]+)\b/i);
+    if (topLevel) {
+      destructive.push({ action: "drop", objectType: topLevel[1].toUpperCase(), statement });
+      continue;
+    }
+
+    if (/^TRUNCATE\b/i.test(normalized)) {
+      destructive.push({ action: "truncate", objectType: "TABLE", statement });
+      continue;
+    }
+
+    if (/^ALTER\b/i.test(normalized)) {
+      const dropClauses = normalized.matchAll(/\bDROP\s+(COLUMN|CONSTRAINT|INDEX|KEY|PRIMARY\s+KEY|FOREIGN\s+KEY|PARTITION|DEFAULT)\b/gi);
+      for (const match of dropClauses) {
+        destructive.push({ action: "drop", objectType: match[1].toUpperCase(), statement });
+      }
+    }
+  }
+
+  return destructive;
 }
 
 export function getOperationType(diffType: string): DiffOperationType {
@@ -407,32 +552,41 @@ export function convertToSchemaDiffObjects(tableDiffs: TableDiff[], functionDiff
         ...(diff.columns?.map((c) => ({
           id: `col-${diff.name}-${c.name}`,
           operationType: getOperationType(c.type),
-          objectKind: "table" as DiffObjectKind,
+          objectKind: "column" as DiffObjectKind,
           name: c.name,
           sourceName: c.type === "added" ? undefined : c.name,
           targetName: c.type === "removed" ? undefined : c.name,
           selected: opType !== "none",
           changes: c.changes,
+          parentId: `table-${diff.name}`,
+          parentName: diff.name,
         })) || []),
         ...(diff.indexes?.map((i) => ({
           id: `idx-${diff.name}-${i.name}`,
-          operationType: getOperationType(i.type),
+          // A modified index is implemented as DROP + CREATE by the backend.
+          // Surface the destructive half in the delete group instead of hiding it under table modification.
+          operationType: i.type === "modified" ? ("delete" as DiffOperationType) : getOperationType(i.type),
           objectKind: "index" as DiffObjectKind,
           name: i.name,
           sourceName: i.type === "added" ? undefined : i.name,
           targetName: i.type === "removed" ? undefined : i.name,
           selected: opType !== "none",
           changes: i.changes,
+          parentId: `table-${diff.name}`,
+          parentName: diff.name,
         })) || []),
         ...(diff.foreignKeys?.map((f) => ({
           id: `fk-${diff.name}-${f.name}`,
-          operationType: getOperationType(f.type),
+          // Modified foreign keys are also dropped before they are recreated.
+          operationType: f.type === "modified" ? ("delete" as DiffOperationType) : getOperationType(f.type),
           objectKind: "foreignKey" as DiffObjectKind,
           name: f.name,
           sourceName: f.type === "added" ? undefined : f.name,
           targetName: f.type === "removed" ? undefined : f.name,
           selected: opType !== "none",
           changes: f.changes,
+          parentId: `table-${diff.name}`,
+          parentName: diff.name,
         })) || []),
         ...(diff.triggers?.map((t) => ({
           id: `trg-${diff.name}-${t.name}`,
@@ -443,6 +597,8 @@ export function convertToSchemaDiffObjects(tableDiffs: TableDiff[], functionDiff
           targetName: t.type === "removed" ? undefined : t.name,
           selected: opType !== "none",
           changes: t.changes,
+          parentId: `table-${diff.name}`,
+          parentName: diff.name,
         })) || []),
       ],
     };
@@ -530,8 +686,7 @@ export function convertToSchemaDiffObjects(tableDiffs: TableDiff[], functionDiff
 
 export function buildDeploySqlForObjects(objects: SchemaDiffObject[]): string {
   const selected = objects.filter((o) => {
-    const isTopLevel = !o.id.startsWith("col-") && !o.id.startsWith("idx-") && !o.id.startsWith("fk-") && !o.id.startsWith("trg-");
-    return o.selected && o.operationType !== "none" && isTopLevel;
+    return o.selected && o.operationType !== "none" && !o.parentId;
   });
 
   if (selected.length === 0) {
@@ -727,6 +882,55 @@ export interface OperationGroup {
   typeGroups: ObjectTypeGroup[];
 }
 
+export function flattenSchemaDiffObjects(objects: SchemaDiffObject[]): SchemaDiffObject[] {
+  return objects.flatMap((object) => [object, ...flattenSchemaDiffObjects(object.children ?? [])]);
+}
+
+export function findSchemaDiffObject(objects: SchemaDiffObject[], objectId: string): SchemaDiffObject | undefined {
+  return flattenSchemaDiffObjects(objects).find((object) => object.id === objectId);
+}
+
+export function setSchemaDiffObjectSelected(objects: SchemaDiffObject[], objectId: string, selected: boolean): boolean {
+  const object = findSchemaDiffObject(objects, objectId);
+  if (!object) return false;
+
+  // Table sync SQL is generated as one deploy unit. A child toggle therefore
+  // selects or clears its whole table so hidden sibling DDL cannot still run.
+  const selectionOwner = object.parentId ? findSchemaDiffObject(objects, object.parentId) : object;
+  if (!selectionOwner) return false;
+
+  const applySelection = (target: SchemaDiffObject) => {
+    target.selected = selected;
+    for (const child of target.children ?? []) applySelection(child);
+  };
+  applySelection(selectionOwner);
+  return true;
+}
+
+export function selectedSchemaDiffObjects(objects: SchemaDiffObject[]): SchemaDiffObject[] {
+  return objects.filter((object) => object.selected && object.operationType !== "none");
+}
+
+export function schemaDiffSelectionOwnerId(object: SchemaDiffObject): string {
+  return object.parentId ?? object.id;
+}
+
+export function summarizeSchemaDiffOperations(objects: SchemaDiffObject[]): Record<DiffOperationType, number> {
+  const counts: Record<DiffOperationType, number> = { create: 0, modify: 0, delete: 0, none: 0 };
+  for (const object of schemaDiffReviewObjects(objects)) {
+    if (object.selected && object.operationType !== "none") counts[object.operationType]++;
+  }
+  return counts;
+}
+
+export type SchemaDiffReviewAlert = "destructive" | "compatibility" | null;
+
+export function schemaDiffReviewAlert(destructiveStatementCount: number, compatibilityWarningCount: number): SchemaDiffReviewAlert {
+  if (destructiveStatementCount > 0) return "destructive";
+  if (compatibilityWarningCount > 0) return "compatibility";
+  return null;
+}
+
 export function groupDiffObjects(objects: SchemaDiffObject[]): OperationGroup[] {
   const groups: Record<DiffOperationType, Record<DiffObjectKind, SchemaDiffObject[]>> = {
     modify: {
@@ -736,6 +940,7 @@ export function groupDiffObjects(objects: SchemaDiffObject[]): OperationGroup[] 
       sequence: [],
       rule: [],
       owner: [],
+      column: [],
       index: [],
       foreignKey: [],
       trigger: [],
@@ -747,6 +952,7 @@ export function groupDiffObjects(objects: SchemaDiffObject[]): OperationGroup[] 
       sequence: [],
       rule: [],
       owner: [],
+      column: [],
       index: [],
       foreignKey: [],
       trigger: [],
@@ -758,6 +964,7 @@ export function groupDiffObjects(objects: SchemaDiffObject[]): OperationGroup[] 
       sequence: [],
       rule: [],
       owner: [],
+      column: [],
       index: [],
       foreignKey: [],
       trigger: [],
@@ -769,20 +976,21 @@ export function groupDiffObjects(objects: SchemaDiffObject[]): OperationGroup[] 
       sequence: [],
       rule: [],
       owner: [],
+      column: [],
       index: [],
       foreignKey: [],
       trigger: [],
     },
   };
 
-  for (const obj of objects) {
+  for (const obj of schemaDiffReviewObjects(objects)) {
     groups[obj.operationType][obj.objectKind].push(obj);
   }
 
   const order: DiffOperationType[] = ["modify", "create", "delete", "none"];
   return order.map((opType) => {
     const typeGroups: ObjectTypeGroup[] = [];
-    const kinds: DiffObjectKind[] = ["table", "view", "function", "sequence", "rule", "owner", "index", "foreignKey", "trigger"];
+    const kinds: DiffObjectKind[] = ["table", "view", "function", "sequence", "rule", "owner", "column", "index", "foreignKey", "trigger"];
 
     for (const kind of kinds) {
       const objs = groups[opType][kind];
@@ -809,6 +1017,27 @@ export function groupDiffObjects(objects: SchemaDiffObject[]): OperationGroup[] 
   });
 }
 
+function schemaDiffReviewObjects(objects: SchemaDiffObject[]): SchemaDiffObject[] {
+  return objects.flatMap((object) => {
+    if (object.operationType !== "modify") return [object];
+
+    const destructiveChildren = flattenSchemaDiffObjects(object.children ?? []).filter((child) => child.operationType === "delete");
+    if (destructiveChildren.length === 0) return [object];
+
+    const deleteReviewObject: SchemaDiffObject = {
+      ...object,
+      id: `delete-risk-${object.id}`,
+      operationType: "delete",
+      sourceName: undefined,
+      targetName: object.targetName ?? object.name,
+      children: undefined,
+      parentId: object.id,
+      changes: destructiveChildren.flatMap((child) => child.changes ?? []),
+    };
+    return [object, deleteReviewObject];
+  });
+}
+
 function getObjectTypeLabel(kind: DiffObjectKind): string {
   switch (kind) {
     case "table":
@@ -823,6 +1052,8 @@ function getObjectTypeLabel(kind: DiffObjectKind): string {
       return "diff.objectKindLabel.rule";
     case "owner":
       return "diff.objectKindLabel.owner";
+    case "column":
+      return "diff.objectKindLabel.column";
     case "index":
       return "diff.objectKindLabel.index";
     case "foreignKey":

@@ -1185,6 +1185,47 @@ final class DbxJdbcPluginTest {
     }
 
     @Test
+    void oracleExplainUsesPlanTableOnTheSharedConnectionAndCleansUp() throws Exception {
+        List<String> calls = new ArrayList<>();
+        OracleExplainDriver driver = new OracleExplainDriver(calls);
+        DriverManager.registerDriver(driver);
+        String connection = """
+            {
+              "connection_string": "jdbc:oracle:dbx-explain:test",
+              "username": "system",
+              "query_timeout_secs": 30
+            }
+            """;
+        try {
+            JsonNode response = request("getExplainInfo", """
+                {
+                  "connection": %s,
+                  "sql": "SELECT * FROM DUAL",
+                  "timeoutSecs": 30,
+                  "mode": "explain"
+                }
+                """.formatted(connection));
+
+            assertFalse(response.has("error"), response.toString());
+            assertEquals("Plan hash value: 123\nTABLE ACCESS FULL DUAL", response.path("result").path("plan").asText());
+            assertEquals(1, calls.stream().filter(call -> call.equals("connect")).count());
+            String explainCall = calls.stream()
+                .filter(call -> call.startsWith("prepare:EXPLAIN PLAN SET STATEMENT_ID = 'DBX_"))
+                .findFirst()
+                .orElseThrow();
+            String statementId = explainCall.substring(
+                explainCall.indexOf("'") + 1,
+                explainCall.indexOf("'", explainCall.indexOf("'") + 1)
+            );
+            assertEquals(1, calls.stream().filter(call -> call.startsWith("prepare:SELECT PLAN_TABLE_OUTPUT FROM TABLE(DBMS_XPLAN.DISPLAY")).count());
+            assertEquals(1, calls.stream().filter(call -> call.equals("prepare:DELETE FROM PLAN_TABLE WHERE STATEMENT_ID = ?")).count());
+            assertEquals(2, calls.stream().filter(call -> call.equals("bind:1:" + statementId)).count());
+        } finally {
+            closeAndDeregister(connection, driver);
+        }
+    }
+
+    @Test
     void optInStatementOptionsCanApplyDriverMaxRowsProtection() throws Exception {
         Method method = DbxJdbcPlugin.class.getDeclaredMethod(
             "applyStatementOptions",
@@ -2982,6 +3023,67 @@ final class DbxJdbcPluginTest {
                 case "isClosed" -> false;
                 case "isValid" -> true;
                 case "close" -> null;
+                default -> defaultValue(method.getReturnType());
+            }
+        );
+    }
+
+    private static final class OracleExplainDriver implements Driver {
+        private final List<String> calls;
+
+        private OracleExplainDriver(List<String> calls) {
+            this.calls = calls;
+        }
+
+        @Override
+        public Connection connect(String url, Properties info) {
+            if (!acceptsURL(url)) return null;
+            calls.add("connect");
+            return oracleExplainConnection(calls);
+        }
+
+        @Override
+        public boolean acceptsURL(String url) {
+            return url != null && url.startsWith("jdbc:oracle:dbx-explain:");
+        }
+
+        @Override public DriverPropertyInfo[] getPropertyInfo(String url, Properties info) { return new DriverPropertyInfo[0]; }
+        @Override public int getMajorVersion() { return 1; }
+        @Override public int getMinorVersion() { return 0; }
+        @Override public boolean jdbcCompliant() { return false; }
+        @Override public java.util.logging.Logger getParentLogger() { return java.util.logging.Logger.getGlobal(); }
+    }
+
+    private static Connection oracleExplainConnection(List<String> calls) {
+        return (Connection) Proxy.newProxyInstance(
+            DbxJdbcPluginTest.class.getClassLoader(),
+            new Class<?>[] { Connection.class },
+            (proxy, method, args) -> switch (method.getName()) {
+                case "prepareStatement" -> oracleExplainStatement(String.valueOf(args[0]), calls);
+                case "isClosed" -> false;
+                case "close" -> null;
+                default -> defaultValue(method.getReturnType());
+            }
+        );
+    }
+
+    private static PreparedStatement oracleExplainStatement(String sql, List<String> calls) {
+        calls.add("prepare:" + sql);
+        return (PreparedStatement) Proxy.newProxyInstance(
+            DbxJdbcPluginTest.class.getClassLoader(),
+            new Class<?>[] { PreparedStatement.class },
+            (proxy, method, args) -> switch (method.getName()) {
+                case "setString" -> {
+                    calls.add("bind:" + args[0] + ":" + args[1]);
+                    yield null;
+                }
+                case "setQueryTimeout", "close" -> null;
+                case "execute" -> true;
+                case "executeUpdate" -> 1;
+                case "executeQuery" -> rowsResultSet(
+                    new String[] { "PLAN_TABLE_OUTPUT" },
+                    new Object[][] { { "Plan hash value: 123" }, { "TABLE ACCESS FULL DUAL" } }
+                );
                 default -> defaultValue(method.getReturnType());
             }
         );

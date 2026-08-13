@@ -99,6 +99,29 @@ test("numericColumnRightAlign defaults to true and round-trips through normalize
   assert.equal(normalizeEditorSettings({ numericColumnRightAlign: "false" as unknown as boolean }).numericColumnRightAlign, true);
 });
 
+test("completion column sorting defaults to alphabetical and normalizes saved booleans", () => {
+  assert.equal(DEFAULT_EDITOR_SETTINGS.sortCompletionColumnsAlphabetically, true);
+  assert.equal(normalizeEditorSettings({}).sortCompletionColumnsAlphabetically, true);
+  assert.equal(normalizeEditorSettings({ sortCompletionColumnsAlphabetically: false }).sortCompletionColumnsAlphabetically, false);
+  assert.equal(normalizeEditorSettings({ sortCompletionColumnsAlphabetically: true }).sortCompletionColumnsAlphabetically, true);
+  assert.equal(normalizeEditorSettings({ sortCompletionColumnsAlphabetically: "false" as unknown as boolean }).sortCompletionColumnsAlphabetically, true);
+});
+
+test("updateEditorSettings persists completion column sort toggles", async () => {
+  await withMockLocalStorage({}, async () => {
+    setActivePinia(createPinia());
+    const store = useSettingsStore();
+    await store.initEditorSettings();
+
+    store.updateEditorSettings({ sortCompletionColumnsAlphabetically: false });
+    assert.equal(store.editorSettings.sortCompletionColumnsAlphabetically, false);
+    await vi.waitFor(() => {
+      const saved = saveEditorSettingsMock.mock.calls.at(-1)?.[0] as { sortCompletionColumnsAlphabetically?: boolean } | undefined;
+      assert.equal(saved?.sortCompletionColumnsAlphabetically, false);
+    });
+  });
+});
+
 test("updateEditorSettings persists numericColumnRightAlign toggles", async () => {
   await withMockLocalStorage({}, async () => {
     setActivePinia(createPinia());
@@ -383,18 +406,22 @@ test("defaults sidebar horizontal scroll to off", () => {
 
 test("defaults data grid header display settings", () => {
   assert.equal(DEFAULT_EDITOR_SETTINGS.showColumnCommentsInHeader, true);
+  assert.equal(DEFAULT_EDITOR_SETTINGS.dataGridShowTransposeFieldMetadata, false);
   assert.equal(DEFAULT_EDITOR_SETTINGS.compactColumnHeaderActions, true);
   assert.equal(normalizeEditorSettings({}).showColumnCommentsInHeader, true);
+  assert.equal(normalizeEditorSettings({}).dataGridShowTransposeFieldMetadata, false);
   assert.equal(normalizeEditorSettings({}).compactColumnHeaderActions, true);
 });
 
 test("keeps saved data grid header display settings", () => {
   const settings = normalizeEditorSettings({
     showColumnCommentsInHeader: true,
+    dataGridShowTransposeFieldMetadata: true,
     compactColumnHeaderActions: false,
   } as any);
 
   assert.equal(settings.showColumnCommentsInHeader, true);
+  assert.equal(settings.dataGridShowTransposeFieldMetadata, true);
   assert.equal(settings.compactColumnHeaderActions, false);
 });
 

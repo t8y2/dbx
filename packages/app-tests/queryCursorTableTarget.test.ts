@@ -273,6 +273,7 @@ test("falls back to the candidate database and schema when no table is loaded", 
   assert.deepEqual(queryContextTargetFromCandidate(tab, candidate), {
     type: "query-context",
     connectionId: "conn-1",
+    catalog: undefined,
     database: "app",
     schema: "reporting",
   });

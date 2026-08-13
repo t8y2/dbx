@@ -138,6 +138,42 @@ describe("queryStore hidden primary key editing", () => {
     expect(tab.queryEditabilityReason).toBeUndefined();
   });
 
+  it("keeps MySQL expression columns read-only without disabling direct columns", async () => {
+    const sql = "SELECT id, status, extra->>'$.mode' mode, extra->>'$.template' tmpl FROM items";
+    getColumns.mockResolvedValue([
+      { name: "id", data_type: "int", is_nullable: false, column_default: null, is_primary_key: true, extra: null },
+      { name: "status", data_type: "varchar", is_nullable: false, column_default: null, is_primary_key: false, extra: null },
+      { name: "extra", data_type: "json", is_nullable: true, column_default: null, is_primary_key: false, extra: null },
+    ]);
+    analyzeEditableQueryEditability.mockResolvedValue({
+      editable: true,
+      analysis: {
+        schema: undefined,
+        tableName: "items",
+        selectStar: false,
+        columns: [
+          { sourceName: "id", resultName: "id", expression: "id" },
+          { sourceName: "status", resultName: "status", expression: "status" },
+          { sourceName: undefined, resultName: "mode", expression: "extra->>'$.mode'" },
+          { sourceName: undefined, resultName: "tmpl", expression: "extra->>'$.template'" },
+        ],
+      },
+    });
+    executeMulti.mockResolvedValue([{ columns: ["id", "status", "mode", "tmpl"], rows: [[1, "ok", "fast", "base"]], affected_rows: 0, execution_time_ms: 1 }]);
+
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("mysql-1", "app", "Query");
+
+    await store.executeTabSql(tabId, sql);
+
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    await vi.waitFor(() => expect(tab.querySourceColumns).toEqual(["id", "status", undefined, undefined]));
+    expect(tab.queryEditabilityReason).toBeUndefined();
+    expect(getColumns).toHaveBeenCalledTimes(1);
+    expect(listObjects).not.toHaveBeenCalled();
+  });
+
   it("starts a qualified MySQL star query before slow column metadata finishes", async () => {
     const columnsGate = deferred<Awaited<ReturnType<typeof getColumns>>>();
     getColumns.mockReturnValue(columnsGate.promise);

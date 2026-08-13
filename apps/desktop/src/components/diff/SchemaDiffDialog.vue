@@ -25,9 +25,14 @@ import type { ObjectSourceKind, TableInfo } from "@/types/database";
 import {
   buildDeploySqlForObjects,
   convertToSchemaDiffObjects,
+  detectDestructiveSchemaDiffStatements,
   groupDiffObjects,
   injectColumnRenameSql,
   schemaDiffDeployTargetSchema,
+  schemaDiffSelectionOwnerId,
+  selectedSchemaDiffObjects,
+  setSchemaDiffObjectSelected,
+  summarizeSchemaDiffOperations,
   databaseTypeToDialectKind,
   normalizeDialectKind,
   type OperationGroup,
@@ -536,57 +541,41 @@ function handleToggleTypeGroup(operationType: DiffOperationType, kind: DiffObjec
 }
 
 function handleToggleGroupSelection(operationType: DiffOperationType, selected: boolean) {
-  diffGroups.value = diffGroups.value.map((g) => {
-    if (g.operationType !== operationType) return g;
-    return {
-      ...g,
-      selectedCount: selected ? g.count : 0,
-      typeGroups: g.typeGroups.map((tg) => {
-        for (const obj of tg.objects) {
-          obj.selected = selected;
-        }
-        return { ...tg, selectedCount: selected ? tg.objects.length : 0 };
-      }),
-    };
-  });
+  const group = diffGroups.value.find((candidate) => candidate.operationType === operationType);
+  for (const object of group?.typeGroups.flatMap((typeGroup) => typeGroup.objects) ?? []) {
+    setSchemaDiffObjectSelected(diffObjects.value, schemaDiffSelectionOwnerId(object), selected);
+  }
+  rebuildDiffGroups();
   regenerateDeploySql();
 }
 
 function handleToggleTypeSelection(operationType: DiffOperationType, kind: DiffObjectKind, selected: boolean) {
-  diffGroups.value = diffGroups.value.map((g) => {
-    if (g.operationType !== operationType) return g;
-    const newTypeGroups = g.typeGroups.map((tg) => {
-      if (tg.kind !== kind) return tg;
-      for (const obj of tg.objects) {
-        obj.selected = selected;
-      }
-      return { ...tg, selectedCount: selected ? tg.objects.length : 0 };
-    });
-    const newSelectedCount = newTypeGroups.reduce((sum, tg) => sum + tg.selectedCount, 0);
-    return { ...g, selectedCount: newSelectedCount, typeGroups: newTypeGroups };
-  });
+  const typeGroup = diffGroups.value.find((group) => group.operationType === operationType)?.typeGroups.find((candidate) => candidate.kind === kind);
+  for (const object of typeGroup?.objects ?? []) {
+    setSchemaDiffObjectSelected(diffObjects.value, schemaDiffSelectionOwnerId(object), selected);
+  }
+  rebuildDiffGroups();
   regenerateDeploySql();
 }
 
 function handleToggleObjectSelection(objectId: string, selected: boolean) {
-  const obj = diffObjects.value.find((o) => o.id === objectId);
-  if (!obj) return;
-
-  obj.selected = selected;
-
-  // Update diffGroups with new references to trigger reactivity
-  diffGroups.value = diffGroups.value.map((g) => {
-    if (g.operationType !== obj.operationType) return g;
-    const newTypeGroups = g.typeGroups.map((tg) => {
-      if (tg.kind !== obj.objectKind) return tg;
-      const newSelectedCount = tg.objects.filter((o) => o.selected).length;
-      return { ...tg, selectedCount: newSelectedCount };
-    });
-    const newSelectedCount = newTypeGroups.reduce((sum, tg) => sum + tg.selectedCount, 0);
-    return { ...g, selectedCount: newSelectedCount, typeGroups: newTypeGroups };
-  });
-
+  const reviewObject = diffGroups.value.flatMap((group) => group.typeGroups.flatMap((typeGroup) => typeGroup.objects)).find((object) => object.id === objectId);
+  if (!setSchemaDiffObjectSelected(diffObjects.value, reviewObject ? schemaDiffSelectionOwnerId(reviewObject) : objectId, selected)) return;
+  rebuildDiffGroups();
   regenerateDeploySql();
+}
+
+function rebuildDiffGroups() {
+  const expanded = new Map(diffGroups.value.map((group) => [group.operationType, group.expanded]));
+  const typeExpanded = new Map(diffGroups.value.flatMap((group) => group.typeGroups.map((typeGroup) => [`${group.operationType}:${typeGroup.kind}`, typeGroup.expanded] as const)));
+  diffGroups.value = groupDiffObjects(diffObjects.value).map((group) => ({
+    ...group,
+    expanded: expanded.get(group.operationType) ?? group.expanded,
+    typeGroups: group.typeGroups.map((typeGroup) => ({
+      ...typeGroup,
+      expanded: typeExpanded.get(`${group.operationType}:${typeGroup.kind}`) ?? typeGroup.expanded,
+    })),
+  }));
 }
 
 function regenerateDeploySql() {
@@ -611,6 +600,11 @@ const canExecuteDeploy = computed(() => {
     return false;
   }
   return true;
+});
+
+const destructiveStatements = computed(() => {
+  const databaseType = store.getConfig(targetConnectionId.value)?.db_type;
+  return detectDestructiveSchemaDiffStatements(deploySql.value, databaseType);
 });
 
 function applyRename(rc: RenameCandidate) {
@@ -665,7 +659,7 @@ async function handleExecuteScript() {
     return;
   }
 
-  await executeDeploySql();
+  await handleDeploy();
 }
 
 async function executeDeploySql() {
@@ -678,7 +672,7 @@ async function executeDeploySql() {
       sql: deploySql.value,
       source: t("production.sourceSchemaDiff"),
       execute: async () => {
-        const txLog = await api.executeScriptWith2pc(targetConnectionId.value, targetDatabase.value, [deploySql.value], targetSchema.value);
+        const txLog = await api.executeScriptWith2pc(targetConnectionId.value, targetDatabase.value, [deploySql.value], targetSchema.value, destructiveStatements.value.length > 0);
         return txLog;
       },
     });
@@ -827,14 +821,12 @@ async function onConfirmDeploy() {
 }
 
 const deployStats = computed(() => {
-  const selected = diffObjects.value.filter((o) => o.selected && o.operationType !== "none");
-  const isTopLevel = (o: SchemaDiffObject) => !o.id.startsWith("col-") && !o.id.startsWith("idx-") && !o.id.startsWith("fk-") && !o.id.startsWith("trg-");
-  const topLevel = selected.filter(isTopLevel);
+  const counts = summarizeSchemaDiffOperations(diffObjects.value);
   return {
-    create: topLevel.filter((o) => o.operationType === "create").length,
-    modify: topLevel.filter((o) => o.operationType === "modify").length,
-    delete: topLevel.filter((o) => o.operationType === "delete").length,
-    total: topLevel.length,
+    create: counts.create,
+    modify: counts.modify,
+    delete: counts.delete,
+    total: selectedSchemaDiffObjects(diffObjects.value).length,
   };
 });
 
@@ -993,6 +985,7 @@ const targetConnectionInfo = computed(() => {
             :rollback-completeness="rollbackCompleteness"
             :missing-rollback-objects="missingRollbackObjects"
             :can-execute="canExecuteDeploy"
+            :destructive-statement-count="destructiveStatements.length"
             @update:deploy-sql-mode="switchDeploySqlMode"
             @back="step = 'result'"
             @deploy="handleDeploy"
@@ -1056,6 +1049,13 @@ const targetConnectionInfo = computed(() => {
               <span class="text-green-600">{{ t("diff.create") }}: {{ deployStats.create }}</span>
               <span class="text-blue-600">{{ t("diff.modify") }}: {{ deployStats.modify }}</span>
               <span class="text-red-600">{{ t("diff.delete") }}: {{ deployStats.delete }}</span>
+            </div>
+
+            <div v-if="destructiveStatements.length > 0" class="rounded border border-red-300 bg-red-50 p-3 text-xs text-red-800 dark:border-red-800 dark:bg-red-950/30 dark:text-red-200">
+              <div class="font-semibold">{{ t("diff.destructiveSqlDetected", { count: destructiveStatements.length }) }}</div>
+              <ul class="mt-2 max-h-32 space-y-1 overflow-auto font-mono">
+                <li v-for="(item, index) in destructiveStatements" :key="`${item.objectType}-${index}`" class="truncate" :title="item.statement">{{ item.action.toUpperCase() }} {{ item.objectType }}: {{ item.statement }}</li>
+              </ul>
             </div>
           </div>
 

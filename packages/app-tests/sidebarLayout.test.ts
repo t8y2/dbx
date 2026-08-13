@@ -164,6 +164,16 @@ test("buildTreeNodesFromLayout creates group nodes with connection children", ()
   assert.equal(nodes[1].id, "c");
 });
 
+test("buildTreeNodesFromLayout adds connection host and username as search aliases", () => {
+  const connection = conn("a", "Production reporting");
+  connection.host = "192.168.0.27";
+  connection.username = "report_user";
+
+  const nodes = buildTreeNodesFromLayout({ groups: [], order: [{ type: "connection", id: "a" }] }, [connection], new Set());
+
+  assert.deepEqual(nodes[0]?.searchAliases, ["192.168.0.27", "report_user"]);
+});
+
 test("buildTreeNodesFromLayout respects collapsed groups", () => {
   const layout: SidebarLayout = {
     groups: [{ id: "g1", name: "G", collapsed: true }],

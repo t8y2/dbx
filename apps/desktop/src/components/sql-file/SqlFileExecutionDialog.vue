@@ -196,6 +196,7 @@ function resolveInitialConnectionId() {
   if (props.prefillConnectionId && sqlConnections.value.some((c) => c.id === props.prefillConnectionId)) {
     return props.prefillConnectionId;
   }
+  if (props.prefillFilePath) return "";
   return sqlConnections.value[0]?.id ?? "";
 }
 

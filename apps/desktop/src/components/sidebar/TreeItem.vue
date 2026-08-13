@@ -68,6 +68,9 @@ import { isWindows } from "@/lib/backend/platform";
 import { flattenTree } from "@/composables/useFlatTree";
 import { productionContextForDatabase } from "@/lib/database/productionSafety";
 import { focusSidebarRenameInput } from "@/lib/sidebar/sidebarRenameFocus";
+import { ensureSqlExtension, stripSqlExtension } from "@/lib/savedSql/savedSqlFileName";
+import { savedSqlErrorMessage } from "@/lib/savedSql/savedSqlErrors";
+import { useSavedSqlStore } from "@/stores/savedSqlStore";
 // --- Drag and Drop ---
 import { useDragSort } from "@/composables/useDragSort";
 import { sidebarTreeRuntimeKey } from "@/lib/sidebar/sidebarTreeRuntime";
@@ -261,6 +264,12 @@ function getIconInfo(node: TreeNode): { icon: any; colorClass: string } | null {
       return { icon: ShieldCheck, colorClass: "text-primary" };
     case "dameng-job-admin":
       return { icon: CalendarClock, colorClass: "text-primary" };
+    case "saved-sql-root":
+      return { icon: node.isExpanded ? FolderOpen : FolderClosed, colorClass: "text-blue-500" };
+    case "saved-sql-folder":
+      return { icon: node.isExpanded ? FolderOpen : FolderClosed, colorClass: "text-blue-400" };
+    case "saved-sql-file":
+      return { icon: FileCode, colorClass: "text-blue-400" };
     case "index":
       return { icon: Key, colorClass: "text-amber-400" };
     case "fkey":
@@ -355,6 +364,7 @@ function displayLabel(node: TreeNode): string {
   if (node.type === "object-browser") return t(node.label, { count: node.objectCount ?? 0 });
   if (node.type === "user-admin" || node.type === "dameng-users" || node.type === "dameng-roles" || node.type === "dameng-job-admin") return t(node.label);
   if (node.type === "linked-server-root") return t(node.label);
+  if (node.type === "saved-sql-root") return t(node.label);
   if (node.type === "mqtt-topic" && node.id.endsWith(":mqtt-topic:__console__")) return t(node.label);
   if (node.label === "tree.defaultDatabase") return t(node.label);
   return isGroupLabel(node) ? t(node.label) : node.label;
@@ -828,6 +838,8 @@ function clearTableSearchQuery() {
 // --- Connection Group Management ---
 const isRenamingGroup = ref(false);
 
+const isRenamingSavedSql = ref(false);
+
 const renameInput = ref("");
 
 const renameInputRef = ref<HTMLInputElement>();
@@ -839,10 +851,20 @@ function startRenameGroup() {
   focusSidebarRenameInput(() => (isRenamingGroup.value ? renameInputRef.value : undefined));
 }
 
+function startRenameSavedSql() {
+  if (activeNode.value.type !== "saved-sql-file" || !activeNode.value.savedSqlId) return;
+  renameInput.value = stripSqlExtension(activeNode.value.label);
+  isRenamingSavedSql.value = true;
+  emit("rename-started");
+  focusSidebarRenameInput(() => (isRenamingSavedSql.value ? renameInputRef.value : undefined));
+}
+
 watch(
   () => props.pendingRename,
   (pending) => {
-    if (pending && activeNode.value.type === "connection-group") startRenameGroup();
+    if (!pending) return;
+    if (activeNode.value.type === "connection-group") startRenameGroup();
+    else if (activeNode.value.type === "saved-sql-file") startRenameSavedSql();
   },
   { immediate: true },
 );
@@ -850,7 +872,7 @@ watch(
 function shouldMeasureLabelOverflow(): boolean {
   return shouldMeasureSidebarLabelOverflow({
     hasDetailTooltip: !!detailTooltip.value?.rows.length,
-    isRenaming: isRenamingGroup.value,
+    isRenaming: isRenamingGroup.value || isRenamingSavedSql.value,
     usesFullWidthLabel: usesFullWidthLabel.value,
   });
 }
@@ -868,6 +890,30 @@ function finishRenameGroup() {
   // here. Deleting a group is done explicitly via the context menu (issue #681).
   if (!trimmed || trimmed === activeNode.value.label) return;
   connectionStore.renameConnectionGroup(activeNode.value.id, trimmed);
+}
+
+async function finishRenameSavedSql() {
+  if (!isRenamingSavedSql.value) return;
+  isRenamingSavedSql.value = false;
+  const fileId = activeNode.value.savedSqlId;
+  const trimmed = renameInput.value.trim();
+  if (!fileId || !trimmed || ensureSqlExtension(trimmed) === activeNode.value.label) return;
+  try {
+    const savedSqlStore = useSavedSqlStore();
+    await savedSqlStore.renameFile(fileId, ensureSqlExtension(trimmed));
+  } catch (e: any) {
+    toast(t("savedSql.renameFailed", { message: savedSqlErrorMessage(e, t) }), 5000);
+  }
+}
+
+function finishRename() {
+  if (isRenamingSavedSql.value) void finishRenameSavedSql();
+  else finishRenameGroup();
+}
+
+function cancelRename() {
+  isRenamingGroup.value = false;
+  isRenamingSavedSql.value = false;
 }
 
 const PINNED_TREE_NODE_DRAG_TYPE = "__pinned-tree-node__";
@@ -1081,6 +1127,7 @@ watch(
     // Virtual rows are recycled; transient DOM and pointer state must not leak
     // from the previously rendered node into the new row.
     isRenamingGroup.value = false;
+    isRenamingSavedSql.value = false;
     renameInput.value = "";
     labelOverflowing.value = false;
     suppressNextTableReferenceClick = false;
@@ -1244,13 +1291,13 @@ function onKeydown(event: KeyboardEvent) {
         <div ref="trailingCommentLayoutRef" :class="hasTrailingMetadata() ? 'flex flex-1 min-w-0 items-center' : 'contents'">
           <div ref="trailingCommentLeadingRef" :class="trailingComment ? 'flex max-w-full min-w-0 shrink-0 items-center gap-2' : formattedObjectStorage() ? 'flex min-w-0 flex-1 items-center gap-2' : 'contents'" :style="alignedCommentLeadingStyle()">
             <input
-              v-if="isRenamingGroup"
+              v-if="isRenamingGroup || isRenamingSavedSql"
               ref="renameInputRef"
               v-model="renameInput"
               class="min-w-0 flex-1 truncate bg-transparent border border-primary/50 rounded px-1 outline-none"
-              @blur="finishRenameGroup"
-              @keydown.enter.prevent="finishRenameGroup"
-              @keydown.escape.prevent="isRenamingGroup = false"
+              @blur="finishRename"
+              @keydown.enter.prevent="finishRename"
+              @keydown.escape.prevent="cancelRename"
               @click.stop
             />
             <span v-else ref="labelRef" :class="[labelWidthClass, { 'flex-1': node.type === 'connection' && !trailingComment }]">{{ visibleLabel(node) }}</span>

@@ -4,6 +4,7 @@ import { useI18n } from "vue-i18n";
 import { Search, X, ListFilter, ListOrdered, ArrowDownAZ, ArrowUpZA, CircleDot, Crosshair, Server, Database, FolderTree, Table2, Eye, RotateCcw, Loader2, Unplug } from "@lucide/vue";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
+import { useSavedSqlStore } from "@/stores/savedSqlStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useToast } from "@/composables/useToast";
 import type { ObjectSourceKind, TableInfo, TableNameFilter, TreeNode, TreeNodeType } from "@/types/database";
@@ -17,7 +18,7 @@ import { supportsTypeObjectSource } from "@/lib/database/databaseObjectCapabilit
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { connectionPasteTargetGroupId, copySelectedConnectionsToClipboards, selectedConnectionEditTarget } from "@/lib/sidebar/sidebarConnectionSelection";
 import { isEditableSidebarTypeSearchTarget, sidebarTypeSearchNextQuery } from "@/lib/sidebar/sidebarTypeSearch";
-import { usesTreeSchemaMode } from "@/lib/database/databaseFeatureSupport";
+import { isInternalDorisCatalog, usesTreeSchemaMode } from "@/lib/database/databaseFeatureSupport";
 import { connectionObjectTreeNodeSchema, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { activeTabSidebarTarget, findSidebarNodeForActiveTab, findSidebarNodeForTarget, findNodePathForTarget, scrollTopForSidebarNode, shouldScrollActiveSidebarSelection, type ActiveTabSidebarTarget, type SidebarNodeScrollAlign } from "@/lib/sidebar/sidebarActiveTabTarget";
 import { findLoadedTableTargetForCandidate, queryContextTargetFromCandidate, queryCursorTableCandidate, type QueryCursorTableCandidate } from "@/lib/sql/queryCursorTableTarget";
@@ -57,6 +58,7 @@ import { disconnectSidebarConnections } from "@/lib/sidebar/sidebarConnectionDis
 const { t } = useI18n();
 const store = useConnectionStore();
 const queryStore = useQueryStore();
+const savedSqlStore = useSavedSqlStore();
 const settingsStore = useSettingsStore();
 const { toast } = useToast();
 const searchQuery = ref("");
@@ -961,7 +963,7 @@ function bindSidebarTreeRuntimeHost(host: Element | ComponentPublicInstance | nu
   sidebarTreeRuntime.bindHost(runtimeHost);
 }
 
-const pendingRenameGroupId = ref<string | null>(null);
+const pendingRenameNodeId = ref<string | null>(null);
 const highlightedNodeId = ref<string | null>(null);
 let highlightTimer: number | undefined;
 
@@ -1026,7 +1028,7 @@ async function createNewGroup() {
 }
 
 async function startRenamingCreatedGroup(groupId: string) {
-  pendingRenameGroupId.value = groupId;
+  pendingRenameNodeId.value = groupId;
   store.selectedTreeNodeId = groupId;
   if (isRootListPartial.value) {
     searchQuery.value = "";
@@ -1039,11 +1041,22 @@ async function startRenamingCreatedGroup(groupId: string) {
   store.selectedTreeNodeId = groupId;
 }
 
+async function startRenamingSavedSqlNode(nodeId: string) {
+  pendingRenameNodeId.value = nodeId;
+  store.selectedTreeNodeId = nodeId;
+  store.selectedTreeNodeIds = [nodeId];
+  await scrollToSidebarNode(nodeId);
+  store.selectedTreeNodeId = nodeId;
+}
+
 async function locateActiveTabInSidebar() {
   const tab = activeTab.value;
   if (!tab) return;
 
-  const connId = tab.connectionId;
+  const tabTarget = activeTabSidebarTarget(tab);
+  const locatesSavedSql = tabTarget?.type === "saved-sql-file";
+  const savedSqlFile = locatesSavedSql ? savedSqlStore.getFile(tabTarget.savedSqlId) : undefined;
+  const connId = savedSqlFile?.connectionId ?? tab.connectionId;
 
   // Reconnect if the connection was disconnected (children are cleared on disconnect)
   if (connId && !store.connectedIds.has(connId)) {
@@ -1057,13 +1070,24 @@ async function locateActiveTabInSidebar() {
   }
 
   const config = connId ? store.getConfig(connId) : undefined;
-  const cursorCandidate = queryCursorTableCandidate(tab, effectiveDatabaseTypeForConnection(config));
-  const fallbackTarget = queryContextTargetFromCandidate(tab, cursorCandidate) ?? activeTabSidebarTarget(tab);
+  const cursorCandidate = locatesSavedSql ? null : queryCursorTableCandidate(tab, effectiveDatabaseTypeForConnection(config));
+  const fallbackTarget = locatesSavedSql ? tabTarget : (queryContextTargetFromCandidate(tab, cursorCandidate) ?? tabTarget);
   const initialTarget = cursorCandidate ? tableTargetFromCandidate(cursorCandidate) : fallbackTarget;
   if (!initialTarget) return;
 
   // Ensure the tree is loaded deep enough to contain the preferred target.
-  await ensureTreeLoadedForTarget(initialTarget);
+  // Saved SQL rows live below their database's runtime Queries node. Loading
+  // the database context first also makes explicit locate work after reconnect.
+  const treeLoadTarget: ActiveTabSidebarTarget =
+    locatesSavedSql && savedSqlFile?.connectionId && savedSqlFile.database
+      ? {
+          type: "query-context",
+          connectionId: savedSqlFile.connectionId,
+          catalog: savedSqlFile.catalog,
+          database: savedSqlFile.database,
+        }
+      : initialTarget;
+  await ensureTreeLoadedForTarget(treeLoadTarget);
 
   // Clear any active search filter so the node is visible
   if (isRootListPartial.value) {
@@ -1075,12 +1099,12 @@ async function locateActiveTabInSidebar() {
 
   let target = resolveLoadedLocateTarget(initialTarget, cursorCandidate);
   let nodePath = target ? findNodePathForTarget(target, store.treeNodes) : null;
-  if (!nodePath) {
+  if (!nodePath && !locatesSavedSql) {
     // The first load may have served a stale schema cache whose async refresh
     // replaced the database node before its tables finished loading, so the
     // table isn't in the tree yet. Force a synchronous reload and retry once so
     // locate reaches the table, not just the database (issue #715).
-    await ensureTreeLoadedForTarget(initialTarget, { force: true });
+    await ensureTreeLoadedForTarget(treeLoadTarget, { force: true });
     target = resolveLoadedLocateTarget(initialTarget, cursorCandidate);
     nodePath = target ? findNodePathForTarget(target, store.treeNodes) : null;
   }
@@ -1180,8 +1204,21 @@ async function ensureTreeLoadedForTarget(target: ActiveTabSidebarTarget, opts?: 
   if (config.db_type === "mq" || config.db_type === "nacos" || config.db_type === "consul") return;
   if (!("database" in target) || !target.database) return;
 
+  const usesExactCatalogScope = target.type === "query-context";
+  const targetCatalog = usesExactCatalogScope ? target.catalog : undefined;
+  if (usesExactCatalogScope) {
+    const catalogNode = findDorisCatalogNode(store.treeNodes, connId, targetCatalog);
+    if (catalogNode && (force || !catalogNode.children || catalogNode.children.length === 0)) {
+      try {
+        await store.loadDorisCatalogDatabases(catalogNode, loadOptions);
+      } catch {
+        return;
+      }
+    }
+  }
+
   // Find the database node
-  const dbNode = findDatabaseNode(store.treeNodes, connId, target.database);
+  const dbNode = findDatabaseNode(store.treeNodes, connId, target.database, targetCatalog, usesExactCatalogScope);
   if (!dbNode) return;
   const targetSchema = "schema" in target ? target.schema : undefined;
   const databaseChildrenLoaded = !!dbNode.children && dbNode.children.length > 0;
@@ -1250,13 +1287,28 @@ function sameTreeName(left: string | undefined, right: string | undefined): bool
   return (left || "").toLowerCase() === (right || "").toLowerCase();
 }
 
-function findDatabaseNode(nodes: TreeNode[], connId: string, database: string): TreeNode | null {
+function findDorisCatalogNode(nodes: TreeNode[], connId: string, catalog: string | undefined): TreeNode | null {
   for (const node of nodes) {
-    if (node.type === "database" && node.connectionId === connId && sameTreeName(node.database, database)) {
+    if (node.type === "doris-catalog" && node.connectionId === connId) {
+      const matches = catalog ? sameTreeName(node.catalog, catalog) : isInternalDorisCatalog(node.catalogType, node.catalog);
+      if (matches) return node;
+    }
+    if (node.children) {
+      const found = findDorisCatalogNode(node.children, connId, catalog);
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
+function findDatabaseNode(nodes: TreeNode[], connId: string, database: string, catalog?: string, exactCatalog = false): TreeNode | null {
+  for (const node of nodes) {
+    const catalogMatches = !exactCatalog || (catalog ? sameTreeName(node.catalog, catalog) : !node.catalog);
+    if (node.type === "database" && node.connectionId === connId && sameTreeName(node.database, database) && catalogMatches) {
       return node;
     }
     if (node.children) {
-      const found = findDatabaseNode(node.children, connId, database);
+      const found = findDatabaseNode(node.children, connId, database, catalog, exactCatalog);
       if (found) return found;
     }
   }
@@ -1822,6 +1874,7 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes });
       @open-visible-nacos-namespaces="openSidebarVisibleNacosNamespaces"
       @open-table-name-filters="openSidebarTableNameFilters"
       @request-group-rename="startRenamingCreatedGroup"
+      @request-saved-sql-rename="startRenamingSavedSqlNode"
       @open-danger-dialog="openSidebarDangerDialog"
       @open-dialog-controller="updateSidebarTreeItemDialogController"
       @open-install-extension="openSidebarInstallExtension"
@@ -1933,11 +1986,11 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes });
               :node="item.node"
               :depth="item.depth"
               :reorder-disabled="isRootListPartial || isConnectionListAlphabeticallySorted"
-              :pending-rename="pendingRenameGroupId === item.node.id"
+              :pending-rename="pendingRenameNodeId === item.node.id"
               :highlighted="highlightedNodeId === item.node.id"
               :comment-label-width="sidebarCommentLabelWidths.get(item.node.id)"
               @context-menu="(event, node) => openSidebarContextMenu(event, node, contextMenuSlot.onContextMenu)"
-              @rename-started="pendingRenameGroupId = null"
+              @rename-started="pendingRenameNodeId = null"
               @group-created="startRenamingCreatedGroup"
             />
           </template>
@@ -1980,11 +2033,11 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes });
               :node="item.node"
               :depth="item.depth"
               :reorder-disabled="isRootListPartial || isConnectionListAlphabeticallySorted"
-              :pending-rename="pendingRenameGroupId === item.node.id"
+              :pending-rename="pendingRenameNodeId === item.node.id"
               :highlighted="highlightedNodeId === item.id"
               :comment-label-width="sidebarCommentLabelWidths.get(item.node.id)"
               @context-menu="(event, node) => openSidebarContextMenu(event, node, contextMenuSlot.onContextMenu)"
-              @rename-started="pendingRenameGroupId = null"
+              @rename-started="pendingRenameNodeId = null"
               @group-created="startRenamingCreatedGroup"
             />
           </div>

@@ -10,13 +10,13 @@ import { useConnectionStore } from "@/stores/connectionStore";
 import { useToast } from "@/composables/useToast";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { translateBackendError } from "@/i18n/backend-errors";
-import { resolveDefaultDatabase } from "@/lib/database/defaultDatabase";
 import { copyToClipboard } from "@/lib/common/clipboard";
-import { resolveExternalSqlFileTarget } from "@/lib/sql/externalSqlFileTarget";
+import { resolveExternalSqlFileTarget, unassociatedExternalSqlFileTarget } from "@/lib/sql/externalSqlFileTarget";
 import { externalSqlFileOpenErrorMessage, formatSqlFileSize, isExternalSqlFileTooLargeError } from "@/lib/sql/sqlFileOpen";
 import * as api from "@/lib/backend/api";
 import type { SqlFileEntry } from "@/lib/backend/api";
 import { getSqlFileFolderPaths, saveSqlFileFolderPaths, notifySqlFileFoldersChanged } from "@/lib/sqlFile/sqlFileFolders";
+import { orderedListRangeAnchorIndex, orderedListSelectionIntent, type OrderedListSelectionItem } from "@/lib/selection/orderedListSelection";
 
 const emit = defineEmits<{
   close: [];
@@ -44,12 +44,18 @@ type ContextTarget = { kind: "panel" } | { kind: "folderHeader"; folderPath: str
 
 const contextTarget = ref<ContextTarget | null>(null);
 
-// The currently highlighted tree row (file or folder path). Set on click or
-// right-click so the user sees which item an opened context menu refers to.
-const selectedPath = ref<string | null>(null);
+const selectedPaths = ref<Set<string>>(new Set());
+const activePath = ref<string | null>(null);
+const selectionAnchorIndex = ref<number | null>(null);
 
-function selectPath(path: string | null) {
-  selectedPath.value = path;
+function clearSelection() {
+  selectedPaths.value = new Set();
+  activePath.value = null;
+  selectionAnchorIndex.value = null;
+}
+
+function isPathHighlighted(path: string) {
+  return activePath.value === path || selectedPaths.value.has(path);
 }
 
 function loadSavedFolders(): string[] {
@@ -209,11 +215,8 @@ async function openFile(path: string) {
   if (!isTauriRuntime()) return;
   try {
     const snapshot = await api.readExternalSqlFileSnapshot(path);
-    const connectionId = connectionStore.activeConnectionId || connectionStore.connections[0]?.id || "";
-    const connection = connectionId ? connectionStore.getConfig(connectionId) : undefined;
-    const database = connection ? resolveDefaultDatabase(connection, []) : "";
-    const target = resolveExternalSqlFileTarget(path, (savedConnectionId) => !!connectionStore.getConfig(savedConnectionId), { connectionId, database });
-    queryStore.openExternalSqlFile(target.connectionId, target.database, path, snapshot.content, snapshot.version);
+    const target = resolveExternalSqlFileTarget(path, (savedConnectionId) => !!connectionStore.getConfig(savedConnectionId), unassociatedExternalSqlFileTarget());
+    queryStore.openExternalSqlFile(target.connectionId, target.database, path, snapshot.content, snapshot.version, target.catalog);
   } catch (e: any) {
     if (isExternalSqlFileTooLargeError(e)) {
       executeFile(path);
@@ -227,9 +230,10 @@ async function openFile(path: string) {
 // Open the App-level SQL file execution dialog with this file pre-selected so
 // the user can review its statements and pick a connection/database before run.
 function executeFile(path: string) {
+  const target = resolveExternalSqlFileTarget(path, (savedConnectionId) => !!connectionStore.getConfig(savedConnectionId), unassociatedExternalSqlFileTarget());
   connectionStore.sqlFileSource = {
-    connectionId: connectionStore.activeConnectionId || connectionStore.connections[0]?.id || "",
-    database: "",
+    connectionId: target.connectionId,
+    database: target.database,
     filePath: path,
   };
 }
@@ -260,6 +264,75 @@ function flatTree(entries: SqlFileEntry[], expanded: Set<string>): TreeEntry[] {
   }
   walk(entries, 0);
   return result;
+}
+
+const visibleItems = computed<OrderedListSelectionItem[]>(() => {
+  const items: OrderedListSelectionItem[] = [];
+  for (const folder of folders.value) {
+    items.push({ type: "folderHeader", id: folder.path });
+    if (folder.collapsed) continue;
+    for (const { entry } of flatTree(folder.entries, folder.expanded)) {
+      items.push({ type: entry.is_dir ? "dir" : "file", id: entry.path });
+    }
+  }
+  return items;
+});
+
+function selectedRangeAnchorIndex() {
+  const activeItem = activePath.value ? (visibleItems.value.find((item) => item.id === activePath.value) ?? null) : null;
+  return orderedListRangeAnchorIndex(visibleItems.value, selectionAnchorIndex.value, activeItem);
+}
+
+function selectRangeTo(currentIndex: number) {
+  const anchorIndex = selectedRangeAnchorIndex();
+  if (anchorIndex === null) {
+    const current = visibleItems.value[currentIndex];
+    selectedPaths.value = new Set(current ? [current.id] : []);
+    selectionAnchorIndex.value = currentIndex;
+    return;
+  }
+
+  const start = Math.min(anchorIndex, currentIndex);
+  const end = Math.max(anchorIndex, currentIndex);
+  const next = new Set(selectedPaths.value);
+  for (let i = start; i <= end; i++) {
+    const item = visibleItems.value[i];
+    if (item) next.add(item.id);
+  }
+  selectedPaths.value = next;
+}
+
+function handlePathClick(path: string, type: OrderedListSelectionItem["type"], event: MouseEvent, activate: () => void) {
+  const currentIndex = visibleItems.value.findIndex((item) => item.id === path && item.type === type);
+  if (currentIndex < 0) return;
+
+  const selectionIntent = orderedListSelectionIntent(event);
+  if (selectionIntent === "range") {
+    event.preventDefault();
+    event.stopPropagation();
+    selectRangeTo(currentIndex);
+    return;
+  }
+  if (selectionIntent === "toggle") {
+    event.preventDefault();
+    event.stopPropagation();
+    const next = new Set(selectedPaths.value);
+    if (next.has(path)) next.delete(path);
+    else next.add(path);
+    selectedPaths.value = next;
+    selectionAnchorIndex.value = currentIndex;
+    return;
+  }
+
+  selectedPaths.value = new Set();
+  activePath.value = path;
+  selectionAnchorIndex.value = currentIndex;
+  activate();
+}
+
+function handlePanelClick(event: MouseEvent) {
+  const target = event.target as HTMLElement | null;
+  if (!target?.closest("[data-sql-file-row='true']")) clearSelection();
 }
 
 // ---- context menu ----
@@ -365,12 +438,12 @@ function clearContextTarget() {
       <template #default="{ onContextMenu }">
         <div
           class="flex-1 overflow-y-auto"
+          @click="handlePanelClick"
           @contextmenu.capture="contextTarget = { kind: 'panel' }"
           @contextmenu.prevent="
             contextTarget = { kind: 'panel' };
             onContextMenu($event);
           "
-          @click.self="selectPath(null)"
         >
           <div v-if="folders.length === 0" class="flex-1 flex flex-col items-center justify-center gap-2 p-4 text-xs text-muted-foreground">
             <FolderOpen class="h-8 w-8 text-muted-foreground/40" />
@@ -381,19 +454,17 @@ function clearContextTarget() {
           <div v-else>
             <div v-for="(folder, fi) in folders" :key="folder.path" class="border-b last:border-b-0">
               <div
+                data-sql-file-row="true"
                 class="flex cursor-default items-center gap-1 px-2 py-1.5 text-[11px] font-medium text-muted-foreground bg-muted/10 sticky top-0 select-none"
-                :class="selectedPath === folder.path ? 'bg-accent text-accent-foreground' : 'hover:bg-accent/40'"
-                @click="
-                  toggleFolderCollapse(folder);
-                  selectPath(folder.path);
-                "
+                :class="isPathHighlighted(folder.path) ? 'bg-accent text-accent-foreground' : 'hover:bg-accent/40'"
+                @click.stop="handlePathClick(folder.path, 'folderHeader', $event, () => toggleFolderCollapse(folder))"
                 @contextmenu.capture="
                   contextTarget = { kind: 'folderHeader', folderPath: folder.path };
-                  selectPath(folder.path);
+                  activePath = folder.path;
                 "
                 @contextmenu.prevent="
                   contextTarget = { kind: 'folderHeader', folderPath: folder.path };
-                  selectPath(folder.path);
+                  activePath = folder.path;
                   onContextMenu($event);
                 "
               >
@@ -427,22 +498,20 @@ function clearContextTarget() {
                 </div>
                 <div v-else>
                   <div
+                    data-sql-file-row="true"
                     v-for="{ entry, depth } in flatTree(folder.entries, folder.expanded)"
                     :key="entry.path"
                     class="flex cursor-default select-none items-center gap-1 px-2 py-1 text-sm"
-                    :class="[entry.is_dir ? 'rounded-sm' : 'rounded-none', selectedPath === entry.path ? 'bg-accent text-accent-foreground' : 'hover:bg-accent/40']"
+                    :class="[entry.is_dir ? 'rounded-sm' : 'rounded-none', isPathHighlighted(entry.path) ? 'bg-accent text-accent-foreground' : 'hover:bg-accent/40']"
                     :style="{ paddingLeft: depth * 16 + 8 + 'px' }"
-                    @click="
-                      selectPath(entry.path);
-                      entry.is_dir ? toggleExpand(folder, entry.path) : openFile(entry.path);
-                    "
+                    @click.stop="handlePathClick(entry.path, entry.is_dir ? 'dir' : 'file', $event, () => (entry.is_dir ? toggleExpand(folder, entry.path) : openFile(entry.path)))"
                     @contextmenu.capture="
                       contextTarget = entry.is_dir ? { kind: 'dir', folderPath: folder.path, entry } : { kind: 'file', folderPath: folder.path, entry };
-                      selectPath(entry.path);
+                      activePath = entry.path;
                     "
                     @contextmenu.prevent="
                       contextTarget = entry.is_dir ? { kind: 'dir', folderPath: folder.path, entry } : { kind: 'file', folderPath: folder.path, entry };
-                      selectPath(entry.path);
+                      activePath = entry.path;
                       onContextMenu($event);
                     "
                   >

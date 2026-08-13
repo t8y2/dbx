@@ -389,13 +389,6 @@ The installer will be in `src-tauri/target/release/bundle/`.
 - [Web API reference](docs/content/docs/web-api.mdx) — HTTP API for Docker/Web deployments
 - [Examples](examples/) — CLI, MCP, Docker, and API samples
 
-## Community
-
-<a href="https://discord.gg/W7NyVDRt6a" target="_blank"><img src="https://img.shields.io/badge/Discord-Join-5865F2?logo=discord&logoColor=white" alt="Discord" /></a>
-<a href="https://qm.qq.com/q/1087880322" target="_blank"><img src="https://img.shields.io/badge/QQ%20群-1087880322-EB1923?logo=tencentqq&logoColor=white" alt="QQ Group" /></a>
-<a href="https://docs.qq.com/doc/DVVhMY0h1ekJqc0tz" target="_blank"><img src="https://img.shields.io/badge/微信群-Join-07C160?logo=wechat&logoColor=white" alt="WeChat Group" /></a>
-[![LINUX DO](https://img.shields.io/badge/LINUX%20DO-Community-blue)](https://linux.do)
-
 ## Support DBX
 
 DBX is free and open source, but ongoing maintenance, database compatibility testing, infrastructure, and release work require sustained time and resources.
@@ -460,43 +453,18 @@ DBX is free and open source, but ongoing maintenance, database compatibility tes
 - [Support DBX](https://my.feishu.cn/wiki/WMTkwdATDiiu4rk14JMcoyhTnoh) — voluntary donations via WeChat or Alipay
 - [Sponsors & Partners](https://my.feishu.cn/wiki/CgOWwwTzzify79k9Oq8cXpUNn6e) — sponsorship, infrastructure, tools, and community collaboration
 
-## FAQ
-
-<details>
-<summary><strong>Is DBX free?</strong></summary>
-Yes. DBX is open source under Apache-2.0. All features are free.
-</details>
-
-<details>
-<summary><strong>Does DBX phone home?</strong></summary>
-No. DBX does not collect telemetry. The auto-update feature checks GitHub Releases for new versions — you can disable it in settings.
-</details>
-
-<details>
-<summary><strong>Can I use DBX without an internet connection?</strong></summary>
-Yes. The desktop app works fully offline. For air-gapped driver installs, download offline driver packages from the [Offline Drivers page](https://dbxio.com/en/drivers) on an internet-connected machine, transfer them to the offline machine, then import them in DBX from Settings > Driver Manager. AI features need network access to the model endpoint (or a local model via Ollama).
-</details>
-
-<details>
-<summary><strong>How is DBX different from DBeaver / TablePlus / Beekeeper Studio?</strong></summary>
-DBX is 20 MB with no runtime dependencies for its native database features (no system Java or Python required). AI is built into the application, while MCP is provided as a separately installed Rust companion package or native binary. It supports 70+ databases across desktop, Docker, and web from a shared Rust core.
-</details>
-
-<details>
-<summary><strong>What databases are supported?</strong></summary>
-MySQL, PostgreSQL, SQLite, Cloudflare D1, Redis, MongoDB, DuckDB, ClickHouse, SQL Server, Oracle, Elasticsearch, Easysearch, Meilisearch, Qdrant, Milvus, Weaviate, MariaDB, TiDB, OceanBase, openGauss, GaussDB, KWDB, KingBase, Vastbase, GoldenDB, Doris, SelectDB, StarRocks, Manticore Search, Redshift, DM, TDengine, XuguDB, CockroachDB, Access, HighGo, UXDB, and more. Agent-based profiles extend support to H2, Snowflake, Trino, PrestoSQL, Hive, DB2, Informix, Neo4j, Cassandra, BigQuery, Kylin, SunDB, JDBCX, Databricks, SAP HANA, Teradata, Vertica, Firebird, Exasol, YashanDB, GBase 8a/8s, Databend, RQLite, Turso, InfluxDB, QuestDB, IoTDB, etcd, ZooKeeper, Nacos, Consul KV, IRIS, and custom JDBC connections. Message queue admin (Pulsar, Kafka, RocketMQ) is also supported.
-</details>
-
-<details>
-<summary><strong>How do I report a bug or request a feature?</strong></summary>
-Open an issue on <a href="https://github.com/t8y2/dbx/issues">GitHub Issues</a>.
-</details>
-
 ## Contributors
 
 <a href="https://github.com/t8y2/dbx/graphs/contributors">
   <img src="https://contrib.rocks/image?repo=t8y2/dbx" />
 </a>
+
+## Community
+
+<a href="https://discord.gg/W7NyVDRt6a" target="_blank"><img src="https://img.shields.io/badge/Discord-Join-5865F2?logo=discord&logoColor=white" alt="Discord" /></a>
+<a href="https://qm.qq.com/q/1087880322" target="_blank"><img src="https://img.shields.io/badge/QQ%20群-1087880322-EB1923?logo=tencentqq&logoColor=white" alt="QQ Group" /></a>
+<a href="https://docs.qq.com/doc/DVVhMY0h1ekJqc0tz" target="_blank"><img src="https://img.shields.io/badge/微信群-Join-07C160?logo=wechat&logoColor=white" alt="WeChat Group" /></a>
+[![LINUX DO](https://img.shields.io/badge/LINUX%20DO-Community-blue)](https://linux.do)
 
 ## Star History
 

@@ -883,6 +883,86 @@ describe("connectionStore completion assistant", () => {
     ]);
   });
 
+  it("loads PostgreSQL sequences without falling back to routine metadata", async () => {
+    const completionAssistantSearch = vi.fn().mockResolvedValue({
+      candidates: [{ name: "OrderSequence", kind: "sequence", schema: "App" }],
+      incomplete: false,
+      fallback_used: false,
+    });
+    const listCompletionObjects = vi.fn().mockResolvedValue([{ name: "not_a_sequence", object_type: "FUNCTION" }]);
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      completionAssistantSearch,
+      listCompletionObjects,
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.connections = [postgresConnection()];
+    store.connectedIds.add("pg-1");
+
+    const objects = await store.listCompletionObjects("pg-1", "app", "Order", 20, "App", undefined, false, undefined, ["sequence"], true);
+    await store.listCompletionObjects("pg-1", "app", "Order", 20, undefined, undefined, false, undefined, ["sequence"]);
+    await store.listCompletionObjects("pg-1", "app", "order", 20, "App", undefined, false, undefined, ["sequence"], true);
+
+    expect(completionAssistantSearch).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({
+        object_kinds: ["sequence"],
+        mask: "Order",
+        case_sensitive: true,
+        schema: "App",
+        parent_schema: null,
+      }),
+    );
+    expect(completionAssistantSearch).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        object_kinds: ["sequence"],
+        mask: "Order",
+        case_sensitive: false,
+        schema: null,
+        parent_schema: null,
+      }),
+    );
+    expect(completionAssistantSearch).toHaveBeenNthCalledWith(
+      3,
+      expect.objectContaining({
+        object_kinds: ["sequence"],
+        mask: "order",
+        case_sensitive: true,
+        schema: "App",
+        parent_schema: null,
+      }),
+    );
+    expect(listCompletionObjects).not.toHaveBeenCalled();
+    expect(objects).toEqual([expect.objectContaining({ name: "OrderSequence", schema: "App", type: "sequence" })]);
+  });
+
+  it.each([
+    ["empty", vi.fn().mockResolvedValue({ candidates: [], incomplete: false, fallback_used: false })],
+    ["permission error", vi.fn().mockRejectedValue(new Error("permission denied for sequence"))],
+  ])("returns an empty sequence fallback for %s metadata", async (_caseName, completionAssistantSearch) => {
+    const listCompletionObjects = vi.fn().mockResolvedValue([{ name: "not_a_sequence", object_type: "FUNCTION" }]);
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      completionAssistantSearch,
+      listCompletionObjects,
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.connections = [postgresConnection()];
+    store.connectedIds.add("pg-1");
+
+    await expect(store.listCompletionObjects("pg-1", "app", "missing", 20, undefined, undefined, false, undefined, ["sequence"])).resolves.toEqual([]);
+    expect(listCompletionObjects).not.toHaveBeenCalled();
+  });
+
   it("searches the server-reported SQL Server default schema without treating the username as a schema", async () => {
     const completionAssistantSearch = vi.fn().mockResolvedValue({
       candidates: [{ name: "st_area", kind: "function", schema: "app_user", data_type: "float" }],

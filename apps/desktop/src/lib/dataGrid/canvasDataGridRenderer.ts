@@ -95,6 +95,7 @@ export interface DrawCanvasDataGridOptions {
   colorizeDataTypes?: boolean;
   rightAlignedActionCell?: CanvasRightAlignedActionCell | null;
   booleanDisplayMode?: "checkbox" | "dropdown";
+  flatteningMultiLineEnabled: boolean;
 }
 
 type NumericCanvasContext = CanvasRenderingContext2D & {
@@ -353,6 +354,7 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
     rightAlignedActionCell,
     columnIsBoolean,
     booleanDisplayMode = "dropdown",
+    flatteningMultiLineEnabled,
   } = options;
   // 框选热路径：整次绘制只判断一次。常见情况（单矩形 / 多列且每段都是多格）可跳过逐格 kind 查询
   const paintSelectionOuterFrame = dataGridSelectionUsesOuterFrame(selectionFrames);
@@ -575,7 +577,7 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
         }
       } else {
         const rawDisplayText = item.isDraft && value === null ? (draftCellPlaceholder ?? "") : formatCell(value, actualColIdx);
-        const displayText = isEditingThisCell ? "" : firstLineCellDisplayValue(rawDisplayText);
+        const displayText = isEditingThisCell ? "" : firstLineCellDisplayValue(rawDisplayText, flatteningMultiLineEnabled);
         const text = isEditingThisCell ? displayText : fitCanvasText(ctx, displayText, cellMaxWidth, isBooleanNullCell ? "left" : isRightAlign ? "right" : "left");
         const anchorX = isBooleanNullCell ? alignCanvasPixel(drawX + colWidth / 2, scaleX) : textAnchorX;
         ctx.fillText(text, anchorX, textY);

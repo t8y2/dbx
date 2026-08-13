@@ -43,6 +43,7 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "infiniteScroll",
   "regexMaxMatchCount",
   "autoCalculateTotalRows",
+  "flatteningMultiLineText",
   "tableColumnTemplateFields",
   "shortcuts",
   "sqlFormatter",

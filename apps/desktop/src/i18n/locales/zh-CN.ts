@@ -5543,6 +5543,8 @@ export default withEnglishFallback({
     autoCalculateTotalRows: "自动统计总行数",
     autoCalculateTotalRowsDescription: "每次查询后自动执行 COUNT(*) 显示匹配的总行数。默认关闭以保证大查询速度 —— 可在结果栏按需手动统计。",
     infiniteScrollDescription: "滚动到底部时自动加载下一批数据，无需手动翻页或加载。",
+    flatteningMultiLineText: "扁平化多行文本",
+    flatteningMultiLineTextDescription: "多行文本合并为单行显示，换行符显示为 ¶ 。",
     regexMaxMatchCount: "全部选中最大数量",
     regexMaxMatchCountDescription: "限制“全部选中”一次创建的选区数量；搜索匹配仍完整统计（100–10000）。",
     tableColumnTemplateFields: "新建表预设字段",

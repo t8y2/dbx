@@ -557,6 +557,7 @@ const dataGridSearchMode = computed(() => settingsStore.editorSettings.dataGridS
 const compactDataGridToolbar = computed(() => isDataGridToolbarCompact(dataGridTopbarWidth.value, dataGridViewportWidth.value, DATA_GRID_CONDITION_TOOLBAR_MIN_WIDTH));
 const infiniteScrollEnabled = computed(() => props.paginationEnabled && settingsStore.editorSettings.infiniteScroll);
 const infiniteScrollMaxRows = computed(() => continuousQueryResultMaxRows(settingsStore.editorSettings.queryResultMaxRowsEnabled, settingsStore.editorSettings.queryResultMaxRows));
+const flatteningMultiLineEnabled = computed(() => settingsStore.editorSettings.flatteningMultiLineText);
 const expandedCellEditor = ref<{ rowId: number; col: number } | null>(null);
 
 function headerColumnComment(column: string): string {
@@ -5840,7 +5841,7 @@ function booleanNullTextHitFromCanvasEvent(item: RowItem, hit: { rowIndex: numbe
   const canvasRect = canvas?.getBoundingClientRect();
   const cellRect = canvasCellViewportRect(hit.rowIndex, hit.visibleColIdx);
   if (!canvasRect || !cellRect) return false;
-  const text = firstLineCellDisplayValue(formatCellCached(item.data[actualColIdx], actualColIdx));
+  const text = firstLineCellDisplayValue(formatCellCached(item.data[actualColIdx], actualColIdx), flatteningMultiLineEnabled.value);
   if (!text) return false;
   const textWidth = measureCellTextWidthCached(text, `italic 400 ${tableFontSize.value}px ${tableFontFamily.value}`);
   if (textWidth <= 0) return false;
@@ -6105,6 +6106,7 @@ function drawCanvasGrid() {
     rightAlignedActionCell: canvasRightAlignedActionCell.value,
     columnIsBoolean: isBooleanGridColumn,
     booleanDisplayMode: booleanDisplayMode.value,
+    flatteningMultiLineEnabled: flatteningMultiLineEnabled.value,
   });
 }
 
@@ -10284,7 +10286,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                         <template v-if="draftCellPlaceholder(displayItems[cell.recordIndex], cell.valueIndex)">
                           <span class="text-muted-foreground/70 italic">{{ draftCellPlaceholder(displayItems[cell.recordIndex], cell.valueIndex) }}</span>
                         </template>
-                        <template v-else>{{ firstLineCellDisplayValue(cell.display) }}</template>
+                        <template v-else>{{ firstLineCellDisplayValue(cell.display, flatteningMultiLineEnabled) }}</template>
                         <div v-if="cellDetailButtonVisible(cell.recordIndex, cell.valueIndex)" class="absolute right-2 top-1/2 flex -translate-y-1/2 items-center gap-1">
                           <LightDropdownMenu
                             v-if="canQuickDownloadCellValue(cell.recordIndex, cell.valueIndex)"
@@ -11051,13 +11053,13 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                           </div>
                         </template>
                         <template v-else-if="booleanCellsUseCheckbox && isBooleanGridCell(item, col.actualColIdx) && item.data[col.actualColIdx] === null && canEditCellItem(item, col.actualColIdx)">
-                          <span class="italic text-muted-foreground cursor-pointer select-none" @click.stop="cycleBooleanGridCell(item, col.actualColIdx, $event)">{{ firstLineCellDisplayValue(formatCellCached(item.data[col.actualColIdx], col.actualColIdx)) }}</span>
+                          <span class="italic text-muted-foreground cursor-pointer select-none" @click.stop="cycleBooleanGridCell(item, col.actualColIdx, $event)">{{ firstLineCellDisplayValue(formatCellCached(item.data[col.actualColIdx], col.actualColIdx), flatteningMultiLineEnabled) }}</span>
                         </template>
                         <template v-else>
                           <template v-if="draftCellPlaceholder(item, col.actualColIdx)">
                             <span class="text-muted-foreground/70 italic">{{ draftCellPlaceholder(item, col.actualColIdx) }}</span>
                           </template>
-                          <template v-else>{{ firstLineCellDisplayValue(formatCellCached(item.data[col.actualColIdx], col.actualColIdx)) }}</template>
+                          <template v-else>{{ firstLineCellDisplayValue(formatCellCached(item.data[col.actualColIdx], col.actualColIdx), flatteningMultiLineEnabled) }}</template>
                           <div v-if="cellDetailButtonVisible(item.displayIndex, col.actualColIdx)" class="absolute right-2 top-1/2 flex -translate-y-1/2 items-center gap-1">
                             <LightDropdownMenu
                               v-if="canQuickDownloadCellValue(item.displayIndex, col.actualColIdx)"

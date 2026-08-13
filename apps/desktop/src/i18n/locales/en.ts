@@ -5621,6 +5621,8 @@ export default {
     autoCalculateTotalRows: "Auto-calculate total row count",
     autoCalculateTotalRowsDescription: "Run COUNT(*) automatically after each query to show the total matching rows. Off by default to keep large queries fast — calculate it on demand from the result footer.",
     infiniteScrollDescription: "Automatically load the next batch when scrolling to the bottom.",
+    flatteningMultiLineText: "Flattening Multi-line Text",
+    flatteningMultiLineTextDescription: "Multi-line text merged into single line display, with line breaks shown as ¶ .",
     regexMaxMatchCount: "Maximum select-all matches",
     regexMaxMatchCountDescription: "Limits the number of selections created by Select All Matches; search counting remains complete (100–10000).",
     tableColumnTemplateFields: "New Table Preset Fields",

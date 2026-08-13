@@ -5801,6 +5801,8 @@ export default withEnglishFallback({
     autoCalculateTotalRows: "総行数を自動計算",
     autoCalculateTotalRowsDescription: "クエリごとに COUNT(*) を自動実行し、一致する総行数を表示します。大きなクエリを高速に保つため既定はオフです。結果フッターから必要に応じて計算できます。",
     infiniteScrollDescription: "末尾までスクロールしたときに、次のデータを自動的に読み込みます。",
+    flatteningMultiLineText: "多行テキストを展開",
+    flatteningMultiLineTextDescription: "複数行のテキストを1行に結合して表示し、改行文字は¶として表示する。",
     regexMaxMatchCount: "すべての一致を選択する最大数",
     regexMaxMatchCountDescription: "「すべての一致を選択」で一度に作成する選択範囲の数を制限します。検索の一致数は完全に集計されます（100〜10000）。",
     exportRowLimitEnabled: "エクスポート行数を制限",

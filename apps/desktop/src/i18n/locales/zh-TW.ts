@@ -4716,6 +4716,8 @@ export default withEnglishFallback({
     autoCalculateTotalRows: "自動統計總筆數",
     autoCalculateTotalRowsDescription: "每次查詢後自動執行 COUNT(*) 顯示符合的總筆數。預設關閉以確保大型查詢速度 —— 可在結果列按需手動統計。",
     infiniteScrollDescription: "滾動到底部時自動載入下一批資料，無需手動翻頁或載入。",
+    flatteningMultiLineText: "扁平多行文本",
+    flatteningMultiLineTextDescription: "多行文本合併為單行顯示，換行符顯示為 ¶ 。",
     regexMaxMatchCount: "全部選取最大數量",
     regexMaxMatchCountDescription: "限制「全部選取」一次建立的選取範圍數量；搜尋符合結果仍會完整統計（100–10000）。",
     tableColumnTemplateFields: "新建表預設欄位",

@@ -5378,6 +5378,8 @@ export default withEnglishFallback({
     autoCalculateTotalRows: "Calcular automaticamente o total de linhas",
     autoCalculateTotalRowsDescription: "Executa COUNT(*) automaticamente após cada consulta para mostrar o total de linhas correspondentes. Desativado por padrão para manter consultas grandes rápidas; você pode calculá-lo quando quiser no rodapé dos resultados.",
     infiniteScrollDescription: "Carregar automaticamente o próximo lote ao rolar até o final.",
+    flatteningMultiLineText: "Achatar texto multilinha",
+    flatteningMultiLineTextDescription: "Exibir texto multilinha em uma única linha.",
     regexMaxMatchCount: "Máximo de correspondências para selecionar todas",
     regexMaxMatchCountDescription: "Limita o número de seleções criadas por Selecionar todas as correspondências; a contagem da pesquisa permanece completa (100–10000).",
     tableColumnTemplateFields: "Campos predefinidos para novas tabelas",

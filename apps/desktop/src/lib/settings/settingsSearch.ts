@@ -180,6 +180,7 @@ export const SETTINGS_SEARCH_DEFINITIONS: readonly SettingsSearchDefinition[] = 
   { id: "data-grid-infinite-scroll", category: "data", titleKey: "settings.infiniteScroll", descriptionKey: "settings.infiniteScrollDescription", targetId: "data" },
   { id: "data-grid-auto-transpose", category: "data", titleKey: "settings.dataGridAutoTransposeSingleRow", descriptionKey: "settings.dataGridAutoTransposeSingleRowDescription", targetId: "data" },
   { id: "data-grid-quick-entry", category: "data", titleKey: "settings.dataGridQuickEntry", descriptionKey: "settings.dataGridQuickEntryDescription", targetId: "data" },
+  { id: "data-grid-flattening-multi-line", category: "data", titleKey: "settings.flatteningMultiLineText", descriptionKey: "settings.flatteningMultiLineTextDescription", targetId: "data" },
   { id: "appearance-toolbar", category: "appearance", titleKey: "settings.toolbarTitle", descriptionKey: "settings.toolbarHiddenHint", targetId: "appearance" },
   { id: "appearance-exclusive-sidebar-panels", category: "appearance", titleKey: "settings.exclusiveRightSidebarPanels", descriptionKey: "settings.exclusiveRightSidebarPanelsDescription", targetId: "appearance" },
   ...createToolbarVisibilitySettingsSearchDefinitions(),

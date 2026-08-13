@@ -5376,6 +5376,8 @@ export default withEnglishFallback({
     autoCalculateTotalRows: "Calcular automáticamente el total de filas",
     autoCalculateTotalRowsDescription: "Ejecuta COUNT(*) automáticamente tras cada consulta para mostrar el total de filas coincidentes. Desactivado por defecto para mantener rápidas las consultas grandes; puedes calcularlo cuando quieras desde el pie de resultados.",
     infiniteScrollDescription: "Carga automáticamente el siguiente lote al desplazarse hasta el final.",
+    flatteningMultiLineText: "Aplastar texto multilínea",
+    flatteningMultiLineTextDescription: "El texto multilínea se fusiona en una sola línea de visualización, con los saltos de línea mostrados como ¶ .",
     regexMaxMatchCount: "Máximo de coincidencias al seleccionar todas",
     regexMaxMatchCountDescription: "Limita el número de selecciones creadas por Seleccionar todas las coincidencias; el conteo de búsqueda permanece completo (100–10000).",
     tableColumnTemplateFields: "Campos predefinidos para tablas nuevas",

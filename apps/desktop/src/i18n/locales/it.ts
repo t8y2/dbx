@@ -5376,6 +5376,8 @@ export default withEnglishFallback({
     autoCalculateTotalRows: "Calcola automaticamente il totale delle righe",
     autoCalculateTotalRowsDescription: "Esegue COUNT(*) automaticamente dopo ogni query per mostrare il totale delle righe corrispondenti. Disattivato per impostazione predefinita per mantenere veloci le query grandi; puoi calcolarlo all'occorrenza dal piè di pagina dei risultati.",
     infiniteScrollDescription: "Carica automaticamente il blocco successivo quando scorri fino in fondo.",
+    flatteningMultiLineText: "Pianifica automaticamente i testi multi-riga",
+    flatteningMultiLineTextDescription: "Se attivo, i testi multi-riga nei risultati vengono automaticamente pianificati in una singola colonna.",
     regexMaxMatchCount: "Numero massimo di corrispondenze per Seleziona tutte",
     regexMaxMatchCountDescription: "Limita il numero di selezioni create da Seleziona tutte le corrispondenze; il conteggio della ricerca rimane completo (100–10000).",
     tableColumnTemplateFields: "Campi predefiniti per nuove tabelle",

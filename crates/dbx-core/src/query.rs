@@ -1685,6 +1685,7 @@ async fn do_execute_typed(
                     max_result_bytes,
                     &options.result_key_columns,
                     mysql_dialect,
+                    options.execution_id.as_deref(),
                 ),
             )
             .await
@@ -2732,6 +2733,7 @@ struct MysqlBatchConnection<'a> {
     result_key_columns: &'a [String],
     table_data_preview: bool,
     dialect: db::mysql::MySqlQueryDialect,
+    diagnostic_trace_id: Option<&'a str>,
 }
 
 impl MysqlBatchStatementExecutor for MysqlBatchConnection<'_> {
@@ -2751,6 +2753,7 @@ impl MysqlBatchStatementExecutor for MysqlBatchConnection<'_> {
                 self.max_result_bytes,
                 self.result_key_columns,
                 self.dialect,
+                self.diagnostic_trace_id,
             ),
         )
         .await
@@ -2948,6 +2951,8 @@ async fn execute_multi_mysql(
     options: QueryExecutionOptions,
     progress: Option<&ExecuteMultiProgressCallback>,
 ) -> Result<Vec<ExecuteMultiResult>, String> {
+    let trace_id = options.execution_id.as_deref().unwrap_or("none");
+    let total_started_at = std::time::Instant::now();
     let query_timeout = resolve_query_timeout(options.timeout_secs);
     let operation_budget = operation_budget_for_pool_key(state, pool_key, query_timeout).await;
     let bare = mode == crate::connection::MysqlMode::Bare;
@@ -2955,6 +2960,7 @@ async fn execute_multi_mysql(
     let max_result_bytes = options.max_result_bytes.filter(|value| *value > 0);
     let pipeline_non_result_statements =
         mysql_non_result_pipeline_enabled(statements.len(), options.continue_on_error, mode);
+    let checkout_started_at = std::time::Instant::now();
     let mut conn = match db::mysql::get_conn_with_health_check_with_cancel(
         pool,
         operation_budget.checkout_timeout,
@@ -2973,13 +2979,16 @@ async fn execute_multi_mysql(
             return Ok(vec![ExecuteMultiResult::execution_error(error_query_result(err))]);
         }
     };
+    let checkout_ms = checkout_started_at.elapsed().as_millis();
     apply_oceanbase_mysql_session_timeout(state, pool_key, &mut conn, options.timeout_secs).await?;
+    let catalog_started_at = std::time::Instant::now();
     wait_for_result_opt(
         cancel_token.clone(),
         query_timeout,
         db::mysql::apply_catalog_database_context(&mut conn, catalog_dialect, options.catalog.as_deref(), database),
     )
     .await?;
+    let catalog_ms = catalog_started_at.elapsed().as_millis();
     let pipeline_non_result_max_bytes = if pipeline_non_result_statements {
         db::mysql::max_allowed_packet_on_conn(&mut conn)
             .await
@@ -3000,7 +3009,9 @@ async fn execute_multi_mysql(
         result_key_columns: &options.result_key_columns,
         table_data_preview: options.table_data_preview,
         dialect,
+        diagnostic_trace_id: options.execution_id.as_deref(),
     };
+    let statements_started_at = std::time::Instant::now();
     let (results, error_action) = execute_mysql_batch_statements(
         &mut executor,
         statements,
@@ -3012,7 +3023,19 @@ async fn execute_multi_mysql(
         progress,
     )
     .await;
+    let statements_ms = statements_started_at.elapsed().as_millis();
     drop(executor);
+
+    log::info!(
+        "[query][mysql-batch] trace_id={} checkout_ms={} catalog_ms={} statements_ms={} total_ms={} result_count={} row_counts={:?}",
+        trace_id,
+        checkout_ms,
+        catalog_ms,
+        statements_ms,
+        total_started_at.elapsed().as_millis(),
+        results.len(),
+        results.iter().map(|result| result.result.rows.len()).collect::<Vec<_>>()
+    );
 
     if matches!(error_action, Some(PoolErrorAction::Discard | PoolErrorAction::ReconnectAndRetry)) {
         state.remove_pool_by_key(pool_key).await;

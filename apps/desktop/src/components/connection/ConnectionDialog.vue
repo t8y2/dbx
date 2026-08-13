@@ -108,7 +108,15 @@ import { oceanbaseModeConnectionPatch, oceanbaseSubModeFromConfig } from "@/lib/
 import { translateBackendError } from "@/i18n/backend-errors";
 import { applyHiveKerberosSubmitConfig, hiveKerberosFormConfig, type HiveKerberosAuthMode } from "@/lib/database/hiveKerberosOptions";
 import { hasCloudflareD1Credentials, isCloudflareD1Connection, normalizeCloudflareD1Connection } from "@/lib/connection/cloudflareD1";
-import { buildElasticsearchExternalConfig, elasticsearchConnectionModeFromConfig, elasticsearchConnectivityCheckPathFromConfig, elasticsearchIndexGroupingPatternFromConfig, elasticsearchKibanaBasePathFromConfig, type ElasticsearchConnectionMode } from "@/lib/connection/elasticsearchKibanaProxy";
+import {
+  buildElasticsearchExternalConfig,
+  elasticsearchConnectionModeFromConfig,
+  elasticsearchConnectivityCheckDisabledFromConfig,
+  elasticsearchConnectivityCheckPathFromConfig,
+  elasticsearchIndexGroupingPatternFromConfig,
+  elasticsearchKibanaBasePathFromConfig,
+  type ElasticsearchConnectionMode,
+} from "@/lib/connection/elasticsearchKibanaProxy";
 import { GAUSSDB_M_JDBC_DRIVER_CLASS, gaussdbConnectionMode, gaussdbIdentifierQuoteStyle, setGaussdbConnectionMode, setGaussdbIdentifierQuoteStyle, supportsGaussdbIdentifierQuoteStyle, type GaussdbConnectionMode, type GaussdbIdentifierQuoteStyle } from "@/lib/database/jdbcDialect";
 import { normalizeStoredConnectionDatabase } from "@/lib/database/sqliteNamespace";
 import {
@@ -327,6 +335,7 @@ const defaultForm = (): ConnectionForm => ({
 const elasticsearchConnectionMode = ref<ElasticsearchConnectionMode>("direct");
 const elasticsearchKibanaBasePath = ref("");
 const elasticsearchConnectivityCheckPath = ref("");
+const elasticsearchConnectivityCheckDisabled = ref(false);
 const elasticsearchIndexGroupingPattern = ref("");
 const elasticsearchConnectionPorts = ref<Record<ElasticsearchConnectionMode, number>>({
   direct: 9200,
@@ -338,6 +347,7 @@ function resetElasticsearchProxyFields(externalConfig?: unknown) {
   elasticsearchConnectionMode.value = mode;
   elasticsearchKibanaBasePath.value = elasticsearchKibanaBasePathFromConfig(externalConfig);
   elasticsearchConnectivityCheckPath.value = elasticsearchConnectivityCheckPathFromConfig(externalConfig);
+  elasticsearchConnectivityCheckDisabled.value = elasticsearchConnectivityCheckDisabledFromConfig(externalConfig);
   elasticsearchIndexGroupingPattern.value = elasticsearchIndexGroupingPatternFromConfig(externalConfig);
   elasticsearchConnectionPorts.value = {
     direct: mode === "direct" ? form.value.port : 9200,
@@ -3837,7 +3847,7 @@ function connectionConfigForSubmit(id: string, generatedName = ""): ConnectionCo
     config.database = "metrics";
     config.username = config.username.trim();
   } else if (config.db_type === "elasticsearch") {
-    config.external_config = buildElasticsearchExternalConfig(elasticsearchConnectionMode.value, elasticsearchKibanaBasePath.value, elasticsearchConnectivityCheckPath.value, elasticsearchIndexGroupingPattern.value);
+    config.external_config = buildElasticsearchExternalConfig(elasticsearchConnectionMode.value, elasticsearchKibanaBasePath.value, elasticsearchConnectivityCheckPath.value, elasticsearchIndexGroupingPattern.value, elasticsearchConnectivityCheckDisabled.value);
   } else if (config.db_type === "meilisearch") {
     config.username = "";
     config.password = config.password.trim();
@@ -6917,11 +6927,18 @@ function openExternalUrl(url: string) {
                   </div>
 
                   <div v-if="form.db_type === 'elasticsearch'" class="grid grid-cols-4 items-center gap-4">
-                    <Label :class="connectionLabelSmallClass">{{ t("connection.elasticsearchIndexGroupingPattern") }}</Label>
-                    <div class="col-span-3 space-y-1">
-                      <Input v-model="elasticsearchIndexGroupingPattern" :placeholder="t('connection.elasticsearchIndexGroupingPatternPlaceholder')" @input="resetTestState" />
-                      <p class="text-xs text-muted-foreground">{{ t("connection.elasticsearchIndexGroupingPatternHint") }}</p>
+                    <div class="flex items-center gap-1">
+                      <Label :class="connectionLabelSmallClass">{{ t("connection.elasticsearchIndexGroupingPattern") }}</Label>
+                      <Tooltip>
+                        <TooltipTrigger as-child>
+                          <CircleHelp class="h-3.5 w-3.5 cursor-help text-muted-foreground hover:text-foreground" />
+                        </TooltipTrigger>
+                        <TooltipContent side="top" align="center" class="max-w-[280px] text-xs leading-relaxed">
+                          {{ t("connection.elasticsearchIndexGroupingPatternHint") }}
+                        </TooltipContent>
+                      </Tooltip>
                     </div>
+                    <Input v-model="elasticsearchIndexGroupingPattern" class="col-span-3" :placeholder="t('connection.elasticsearchIndexGroupingPatternPlaceholder')" @input="resetTestState" />
                   </div>
 
                   <div v-if="form.driver_profile === 'gbase8s'" class="grid grid-cols-4 items-center gap-4">
@@ -7582,6 +7599,23 @@ function openExternalUrl(url: string) {
 
             <TabsContent value="advanced" class="m-0 flex min-h-0 flex-1 flex-col overflow-hidden">
               <div class="connection-form-body grid min-h-0 flex-1 scroll-pb-6 gap-4 overflow-y-auto pt-4 pr-2 pb-6">
+                <div v-if="form.db_type === 'elasticsearch'" class="grid grid-cols-4 items-center gap-4">
+                  <div class="flex items-center gap-1">
+                    <Label :class="connectionLabelSmallClass">{{ t("connection.elasticsearchConnectivityCheckDisabled") }}</Label>
+                    <Tooltip>
+                      <TooltipTrigger as-child>
+                        <CircleHelp class="h-3.5 w-3.5 cursor-help text-muted-foreground hover:text-foreground" />
+                      </TooltipTrigger>
+                      <TooltipContent side="top" align="center" class="max-w-[280px] text-xs leading-relaxed">
+                        {{ t("connection.elasticsearchConnectivityCheckDisabledHint") }}
+                      </TooltipContent>
+                    </Tooltip>
+                  </div>
+                  <div class="col-span-3">
+                    <Switch v-model="elasticsearchConnectivityCheckDisabled" @update:model-value="resetTestState" />
+                  </div>
+                </div>
+
                 <section v-if="form.db_type === 'nacos'" data-nacos-advanced-settings class="overflow-hidden rounded-lg border">
                   <div class="border-b bg-muted/20 px-4 py-3">
                     <div class="text-sm font-medium">{{ t("nacos.nacosAdvancedTitle") }}</div>

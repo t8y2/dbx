@@ -47,6 +47,22 @@ describe("DataTransferDialog transfer prefill", () => {
     expect(dialogSource).toContain("groups[kind] = objects.map((o) => o.name)");
   });
 
+  it("routes table-only database kinds through the table-list request", () => {
+    expect(dialogSource).toContain("const kinds = transferObjectKindsForDatabase(config?.db_type)");
+    expect(dialogSource).toContain("for (const kind of kinds)");
+    expect(dialogSource).toContain('if (kind === "TABLE")');
+    expect(dialogSource).toContain("await api.listTables(sourceConnectionId.value, sourceDatabase.value, schema");
+  });
+
+  it("keeps MongoDB collection loading ahead of the generic object-kind path", () => {
+    const mongoCollectionBranch = dialogSource.indexOf("if (isMongoConnection(sourceConnectionId.value))");
+    const genericObjectKinds = dialogSource.indexOf("const kinds = transferObjectKindsForDatabase(config?.db_type)");
+
+    expect(mongoCollectionBranch).toBeGreaterThan(-1);
+    expect(dialogSource).toContain("await api.mongoListCollections(sourceConnectionId.value, sourceDatabase.value)");
+    expect(mongoCollectionBranch).toBeLessThan(genericObjectKinds);
+  });
+
   it("disables non-table groups for data-only and cross-family transfers", () => {
     expect(dialogSource).toContain("treeDisabledGroups");
     expect(dialogSource).toContain('transferContent.value === "dataOnly"');

@@ -885,6 +885,7 @@ pub struct QueryExecutionOptions {
     pub max_rows: Option<usize>,
     pub fetch_size: Option<usize>,
     pub page_size: Option<usize>,
+    pub row_offset: Option<usize>,
     pub max_result_bytes: Option<usize>,
     /// Result columns that must stay exact because clients use them as stable
     /// row identifiers when fetching full large-cell values on demand.
@@ -975,6 +976,9 @@ pub fn agent_execute_query_params(
     if let Some(fetch_size) = options.fetch_size {
         params["fetchSize"] = serde_json::json!(agent_protocol_row_count(fetch_size));
     }
+    if let Some(row_offset) = options.row_offset {
+        params["rowOffset"] = serde_json::json!(agent_protocol_row_offset(row_offset));
+    }
     if let Some(timeout_secs) = options.timeout_secs {
         params["timeoutSecs"] = serde_json::json!(timeout_secs);
     }
@@ -1001,6 +1005,9 @@ pub fn agent_execute_query_page_params(
     if let Some(fetch_size) = options.fetch_size {
         params["fetchSize"] = serde_json::json!(agent_protocol_row_count(fetch_size));
     }
+    if let Some(row_offset) = options.row_offset {
+        params["rowOffset"] = serde_json::json!(agent_protocol_row_offset(row_offset));
+    }
     if let Some(timeout_secs) = options.timeout_secs {
         params["timeoutSecs"] = serde_json::json!(timeout_secs);
     }
@@ -1016,6 +1023,10 @@ pub fn agent_fetch_query_page_params(session_id: &str, page_size: usize) -> serd
 
 fn agent_protocol_row_count(value: usize) -> usize {
     value.clamp(1, AGENT_PROTOCOL_MAX_ROWS)
+}
+
+fn agent_protocol_row_offset(value: usize) -> usize {
+    value.min(AGENT_PROTOCOL_MAX_ROWS)
 }
 
 pub fn agent_close_query_session_params(session_id: &str) -> serde_json::Value {
@@ -2099,6 +2110,9 @@ fn external_driver_query_params(
     });
     if let Some(fetch_size) = options.fetch_size {
         params["fetchSize"] = serde_json::json!(fetch_size);
+    }
+    if let Some(row_offset) = options.row_offset {
+        params["rowOffset"] = serde_json::json!(agent_protocol_row_offset(row_offset));
     }
     if let Some(timeout_secs) = options.timeout_secs {
         params["timeoutSecs"] = serde_json::json!(timeout_secs);
@@ -6800,6 +6814,7 @@ for line in sys.stdin:
             &QueryExecutionOptions {
                 max_rows: Some(500),
                 fetch_size: Some(250),
+                row_offset: Some(100),
                 timeout_secs: Some(600),
                 ..Default::default()
             },
@@ -6811,6 +6826,7 @@ for line in sys.stdin:
         assert_eq!(params["schema"], "app");
         assert_eq!(params["maxRows"], 500);
         assert_eq!(params["fetchSize"], 250);
+        assert_eq!(params["rowOffset"], 100);
         assert_eq!(params["timeoutSecs"], 600);
     }
 
@@ -6823,6 +6839,7 @@ for line in sys.stdin:
             QueryExecutionOptions {
                 max_rows: Some(500),
                 fetch_size: Some(250),
+                row_offset: Some(100),
                 timeout_secs: Some(600),
                 ..Default::default()
             },
@@ -6833,6 +6850,7 @@ for line in sys.stdin:
         assert_eq!(params["schema"], "app");
         assert_eq!(params["maxRows"], 500);
         assert_eq!(params["fetchSize"], 250);
+        assert_eq!(params["rowOffset"], 100);
         assert_eq!(params["timeoutSecs"], 600);
     }
 
@@ -6988,6 +7006,7 @@ for line in sys.stdin:
         assert!(params.get("schema").is_none());
         assert_eq!(params["maxRows"], MAX_ROWS);
         assert!(params.get("fetchSize").is_none());
+        assert!(params.get("rowOffset").is_none());
         assert!(params.get("timeoutSecs").is_none());
     }
 
@@ -7000,6 +7019,7 @@ for line in sys.stdin:
             QueryExecutionOptions {
                 page_size: Some(500),
                 fetch_size: Some(250),
+                row_offset: Some(100),
                 timeout_secs: Some(600),
                 ..Default::default()
             },
@@ -7010,6 +7030,7 @@ for line in sys.stdin:
         assert_eq!(params["schema"], "app");
         assert_eq!(params["pageSize"], 500);
         assert_eq!(params["fetchSize"], 250);
+        assert_eq!(params["rowOffset"], 100);
         assert_eq!(params["timeoutSecs"], 600);
         assert_eq!(params["maxRows"], MAX_ROWS);
     }
@@ -7025,6 +7046,7 @@ for line in sys.stdin:
                 page_size: Some(oversized),
                 fetch_size: Some(oversized),
                 max_rows: Some(oversized),
+                row_offset: Some(oversized),
                 ..Default::default()
             },
         );
@@ -7032,6 +7054,7 @@ for line in sys.stdin:
         assert_eq!(params["pageSize"], AGENT_PROTOCOL_MAX_ROWS);
         assert_eq!(params["fetchSize"], AGENT_PROTOCOL_MAX_ROWS);
         assert_eq!(params["maxRows"], AGENT_PROTOCOL_MAX_ROWS);
+        assert_eq!(params["rowOffset"], AGENT_PROTOCOL_MAX_ROWS);
         assert_eq!(agent_fetch_query_page_params("session-1", oversized)["pageSize"], AGENT_PROTOCOL_MAX_ROWS);
     }
 

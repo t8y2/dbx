@@ -37,6 +37,24 @@ describe("executableStatementRangeCacheForDoc", () => {
     expect(executableStatementRangeStartingAt(cache, secondStatementLine.from)?.sql).toBe("SELECT *\nFROM menus AS mn\nLIMIT 100");
   });
 
+  it("only exposes the routine start as executable when a MySQL procedure contains a CASE expression", () => {
+    const sql = [
+      "CREATE PROCEDURE p_case()",
+      "BEGIN",
+      "  INSERT INTO audit_log (status_text)",
+      "  SELECT CASE WHEN active = 1 THEN 'active' ELSE 'inactive' END;",
+      "  CASE WHEN active = 1 THEN SET @status_code = 1; ELSE SET @status_code = 0; END CASE;",
+      "  DELETE FROM stale_rows WHERE expires_at < NOW();",
+      "END;",
+    ].join("\n");
+    const doc = Text.of(sql.split("\n"));
+    const cache = executableStatementRangeCacheForDoc(null, doc, "mysql");
+
+    expect(executableStatementRangeStartingAt(cache, doc.line(1).from)?.sql).toBe(sql.slice(0, -1));
+    expect(executableStatementRangeStartingAt(cache, doc.line(6).from)).toBeNull();
+    expect(executableStatementRangeAtCursor(cache, doc.line(6).from + 4)?.sql).toBe(sql.slice(0, -1));
+  });
+
   it("keeps MyBatis parameters in a Kingbase gutter execution range", () => {
     const sql = ["SELECT sum(nvl(a.medfee_sumamt, 0)) AS medfee_sumamt, a.insutype", "FROM yd_org_decla_detail a", "WHERE a.busin_type = '1' AND a.clr_ym = #{ym}", "GROUP BY a.clr_ym, a.insutype;"].join("\n");
     const doc = Text.of(sql.split("\n"));

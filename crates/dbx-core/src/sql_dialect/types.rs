@@ -61,6 +61,11 @@ pub struct TableDataSelectSqlOptions {
     pub limit: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub offset: Option<usize>,
+    /// The JDBC driver advances the ResultSet before collecting the page.
+    /// This keeps database-specific identifier rules while avoiding SQL
+    /// pagination syntax that the selected driver does not support.
+    #[serde(default)]
+    pub use_driver_row_offset: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub where_input: Option<String>,
     #[serde(default)]

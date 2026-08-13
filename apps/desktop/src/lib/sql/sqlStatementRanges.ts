@@ -1520,7 +1520,7 @@ function mysqlRoutineBlockIsComplete(sql: string, parameterOptions?: SqlParamete
   if (!startsWithMysqlRoutineBlock(sql, parameterOptions)) return false;
 
   const tokens = mysqlRoutineTokens(sql, parameterOptions);
-  let beginDepth = 0;
+  const blockStack: Array<"BEGIN" | "CASE"> = [];
   let sawBegin = false;
 
   for (let index = 0; index < tokens.length; index += 1) {
@@ -1529,16 +1529,26 @@ function mysqlRoutineBlockIsComplete(sql: string, parameterOptions?: SqlParamete
     if (token.value === "BEGIN") {
       if (previousWordToken(tokens, index) === "END") continue;
       sawBegin = true;
-      beginDepth += 1;
+      blockStack.push("BEGIN");
+      continue;
+    }
+    if (token.value === "CASE") {
+      if (previousWordToken(tokens, index) === "END") continue;
+      blockStack.push("CASE");
       continue;
     }
     if (token.value === "END" && sawBegin) {
-      if (MYSQL_CONTROL_BLOCK_SUFFIXES.has(nextWordToken(tokens, index) ?? "")) continue;
-      beginDepth = Math.max(0, beginDepth - 1);
+      const suffix = nextWordToken(tokens, index) ?? "";
+      if (suffix === "CASE") {
+        if (blockStack[blockStack.length - 1] === "CASE") blockStack.pop();
+        continue;
+      }
+      if (MYSQL_CONTROL_BLOCK_SUFFIXES.has(suffix)) continue;
+      blockStack.pop();
     }
   }
 
-  return sawBegin && beginDepth === 0 && tokens[tokens.length - 1]?.kind === "semicolon";
+  return sawBegin && blockStack.length === 0 && tokens[tokens.length - 1]?.kind === "semicolon";
 }
 
 function mysqlRoutineWords(sql: string, parameterOptions?: SqlParameterOptions): string[] {

@@ -21,6 +21,7 @@ pub struct ExecuteQueryRequest {
     pub max_rows: Option<usize>,
     pub fetch_size: Option<usize>,
     pub page_size: Option<usize>,
+    pub row_offset: Option<usize>,
     pub max_result_bytes: Option<usize>,
     #[serde(default)]
     pub result_key_columns: Vec<String>,
@@ -363,6 +364,7 @@ pub async fn execute_query(
             max_rows: req.max_rows,
             fetch_size: req.fetch_size,
             page_size: req.page_size,
+            row_offset: req.row_offset,
             max_result_bytes: req.max_result_bytes,
             result_key_columns: req.result_key_columns,
             table_data_preview: req.table_data_preview,
@@ -412,6 +414,7 @@ pub async fn execute_multi(
             max_rows: req.max_rows,
             fetch_size: req.fetch_size,
             page_size: req.page_size,
+            row_offset: req.row_offset,
             max_result_bytes: req.max_result_bytes,
             result_key_columns: req.result_key_columns,
             table_data_preview: req.table_data_preview,

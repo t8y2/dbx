@@ -132,6 +132,7 @@ test("treats DISTINCT single-table projections as update-only", () => {
 
   assert.equal(result.editable, true);
   assert.equal(result.analysis.distinct, true);
+  assert.equal(result.analysis.allowInsert, false);
   assert.equal(result.analysis.allowInsertDelete, false);
   assert.deepEqual(result.analysis.columns, [
     { sourceName: "id", sourceNameQuoted: false, resultName: "id", expression: "id" },
@@ -140,13 +141,25 @@ test("treats DISTINCT single-table projections as update-only", () => {
 });
 
 test("maps a DISTINCT qualified star to one joined source", () => {
-  const result = analyzeEditableQueryEditability("select distinct u.* from users u left join orders o on o.user_id = u.id");
+  const result = analyzeEditableQueryEditability(`select distinct t4.*
+    from TASK_CHECK_BASE t1
+    left join TASK_FORMULATE_EXECUTE t20 on t1.EXECUTE_UID = t20.EXECUTE_UID
+    left join TASK_FORMULATE_BASE t40 on t20.FORMULATE_UID = t40.FORMULATE_UID
+    left join TASK_EXECUTE_FORM t30 on t20.EXECUTE_UID = t30.EXECUTE_UID
+    left join TASK_CHECK_ORG t2 on t1.TASK_ID = t2.TASK_ID
+    left join TASK_CHECK_ORG_INNER_DEPT t3 on t2.TASK_ORG_ID = t3.TASK_ORG_ID
+    left join TASK_CHECK_ENT t4 on t1.TASK_ID = t4.TASK_ID
+    left join TASK_EXECUTE_OBJ_ENT t44 on t1.EXECUTE_UID = t44.EXECUTE_UID
+    left join TASK_CHECK_DEPT_RESULT t5 on t4.TASK_ID = t5.TASK_ID and t4.TASK_ENT_ID = t5.TASK_ENT_ID
+    left join TASK_EXECUTE_PERSON_AGENT t6 on t1.EXECUTE_UID = t6.EXECUTE_UID`);
 
   assert.equal(result.editable, true);
   assert.equal(result.analysis.distinct, true);
   assert.equal(result.analysis.multiSource, true);
+  assert.equal(result.analysis.allowInsert, false);
   assert.equal(result.analysis.allowInsertDelete, false);
-  assert.deepEqual(result.analysis.columns, [{ star: true, sourceQualifier: "u", sourceKey: "u:0", resultName: "*", expression: "u.*" }]);
+  assert.equal(result.analysis.sources?.length, 10);
+  assert.deepEqual(result.analysis.columns, [{ star: true, sourceQualifier: "t4", sourceKey: "t4:6", resultName: "*", expression: "t4.*" }]);
 });
 
 test("keeps ambiguous DISTINCT projections read-only", () => {

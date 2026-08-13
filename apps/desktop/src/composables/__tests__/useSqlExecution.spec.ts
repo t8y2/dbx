@@ -209,7 +209,7 @@ GO`;
     expect(activeTab.value?.result?.rows).toEqual([["x"]]);
   });
 
-  it("selects a trailing SQL Server PRINT result after a data result", async () => {
+  it("keeps a SQL Server data result selected when a trailing message result exists", async () => {
     const sql = "SELECT 1 AS value; PRINT N'x';";
     const activeTab = ref<QueryTab | undefined>({ ...queryTab("dbx_sqlserver_demo"), sql });
     const activeConnection = ref<ConnectionConfig | undefined>(connection("sqlserver"));
@@ -240,10 +240,108 @@ GO`;
     await execution.tryExecute();
 
     expect(activeOutputView.value).toBe("result");
+    expect(setActiveResultIndex).not.toHaveBeenCalled();
+    expect(activeTab.value?.activeResultIndex).toBe(0);
+    expect(activeTab.value?.result?.server_message).toBeUndefined();
+    expect(activeTab.value?.result?.rows).toEqual([[1]]);
+  });
+
+  it("selects a SQL Server data result after an earlier message result", async () => {
+    const sql = "PRINT N'x'; SELECT 1 AS value;";
+    const activeTab = ref<QueryTab | undefined>({ ...queryTab("dbx_sqlserver_demo"), sql });
+    const activeConnection = ref<ConnectionConfig | undefined>(connection("sqlserver"));
+    const activeOutputView = ref<"result" | "summary" | "explain" | "chart">("result");
+    const queryStore = useQueryStore();
+    const setActiveResultIndex = vi.spyOn(queryStore, "setActiveResultIndex").mockImplementation((_id, index) => {
+      if (!activeTab.value?.results) return;
+      activeTab.value.activeResultIndex = index;
+      activeTab.value.result = activeTab.value.results[index];
+    });
+    vi.spyOn(queryStore, "executeCurrentSql").mockImplementation(async () => {
+      if (!activeTab.value) return;
+      const messageResult = { columns: ["Message"], column_types: ["nvarchar"], rows: [["x"]], affected_rows: 0, execution_time_ms: 1, server_message: true } as const;
+      const dataResult = { columns: ["value"], column_types: ["int"], rows: [[1]], affected_rows: 0, execution_time_ms: 1 };
+      activeTab.value.results = [messageResult, dataResult];
+      activeTab.value.activeResultIndex = 0;
+      activeTab.value.result = messageResult;
+    });
+    vi.spyOn(useHistoryStore(), "add").mockResolvedValue(undefined);
+
+    const execution = useSqlExecution({
+      activeTab: computed(() => activeTab.value),
+      activeConnection: computed(() => activeConnection.value),
+      executableSql: computed(() => sql),
+      activeOutputView,
+    });
+
+    await execution.tryExecute();
+
+    expect(activeOutputView.value).toBe("result");
     expect(setActiveResultIndex).toHaveBeenCalledWith("tab-1", 1);
     expect(activeTab.value?.activeResultIndex).toBe(1);
-    expect(activeTab.value?.result?.server_message).toBe(true);
-    expect(activeTab.value?.result?.rows).toEqual([["x"]]);
+    expect(activeTab.value?.result?.rows).toEqual([[1]]);
+  });
+
+  it("keeps a SQL Server execution error selected when a message result also exists", async () => {
+    const sql = "SELECT missing_column FROM demo;";
+    const activeTab = ref<QueryTab | undefined>({ ...queryTab("dbx_sqlserver_demo"), sql });
+    const activeConnection = ref<ConnectionConfig | undefined>(connection("sqlserver"));
+    const activeOutputView = ref<"result" | "summary" | "explain" | "chart">("result");
+    const queryStore = useQueryStore();
+    const setActiveResultIndex = vi.spyOn(queryStore, "setActiveResultIndex");
+    vi.spyOn(queryStore, "executeCurrentSql").mockImplementation(async () => {
+      if (!activeTab.value) return;
+      const messageResult = { columns: ["Message"], column_types: ["nvarchar"], rows: [["before error"]], affected_rows: 0, execution_time_ms: 1, server_message: true };
+      const errorResult = { columns: ["Error"], column_types: ["string"], rows: [["Invalid column name"]], affected_rows: 0, execution_time_ms: 1, execution_error: true };
+      activeTab.value.results = [messageResult, errorResult];
+      activeTab.value.activeResultIndex = 1;
+      activeTab.value.result = errorResult;
+    });
+    vi.spyOn(useHistoryStore(), "add").mockResolvedValue(undefined);
+
+    const execution = useSqlExecution({
+      activeTab: computed(() => activeTab.value),
+      activeConnection: computed(() => activeConnection.value),
+      executableSql: computed(() => sql),
+      activeOutputView,
+    });
+
+    await execution.tryExecute();
+
+    expect(setActiveResultIndex).not.toHaveBeenCalled();
+    expect(activeTab.value?.activeResultIndex).toBe(1);
+    expect(activeTab.value?.result?.execution_error).toBe(true);
+  });
+
+  it("keeps ordinary SQL Server multi-result batches on their summary", async () => {
+    const sql = "SELECT 1 AS first_value; SELECT 2 AS second_value;";
+    const activeTab = ref<QueryTab | undefined>({ ...queryTab("dbx_sqlserver_demo"), sql });
+    const activeConnection = ref<ConnectionConfig | undefined>(connection("sqlserver"));
+    const activeOutputView = ref<"result" | "summary" | "explain" | "chart">("result");
+    const queryStore = useQueryStore();
+    const setActiveResultIndex = vi.spyOn(queryStore, "setActiveResultIndex");
+    vi.spyOn(queryStore, "executeCurrentSql").mockImplementation(async () => {
+      if (!activeTab.value) return;
+      const firstResult = { columns: ["first_value"], column_types: ["int"], rows: [[1]], affected_rows: 0, execution_time_ms: 1 };
+      const secondResult = { columns: ["second_value"], column_types: ["int"], rows: [[2]], affected_rows: 0, execution_time_ms: 1 };
+      activeTab.value.results = [firstResult, secondResult];
+      activeTab.value.activeResultIndex = 0;
+      activeTab.value.result = firstResult;
+    });
+    vi.spyOn(useHistoryStore(), "add").mockResolvedValue(undefined);
+
+    const execution = useSqlExecution({
+      activeTab: computed(() => activeTab.value),
+      activeConnection: computed(() => activeConnection.value),
+      executableSql: computed(() => sql),
+      activeOutputView,
+    });
+
+    await execution.tryExecute();
+
+    expect(activeOutputView.value).toBe("summary");
+    expect(setActiveResultIndex).not.toHaveBeenCalled();
+    expect(activeTab.value?.result?.rows).toEqual([[1]]);
   });
 
   it("keeps the summary for ordinary SQL Server data aliased as Message", async () => {

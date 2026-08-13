@@ -160,7 +160,7 @@ export function analyzeEditableQueryEditability(sql: string): QueryEditability {
     tableAlias: source.alias,
     selectStar,
     columns,
-    ...(distinct ? { distinct: true, allowInsertDelete: false } : {}),
+    ...(distinct ? { distinct: true, allowInsert: false, allowInsertDelete: false } : {}),
   };
   if (sources.length > 1) {
     analysis.sources = sources;

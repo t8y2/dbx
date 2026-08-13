@@ -128,6 +128,44 @@ describe("queryStore table data refresh", () => {
     expect(store.tabs.find((tab) => tab.id === archiveTabId)?.result).toBeUndefined();
   });
 
+  it("uses JDBC ResultSet offset pagination for Caché data tabs", async () => {
+    mocks.getConnectionConfig.mockReturnValue({
+      id: "cache-1",
+      name: "Caché 2016",
+      db_type: "jdbc",
+      database: "USER",
+      connection_string: "jdbc:Cache://localhost:1972/USER",
+      query_timeout_secs: 30,
+    });
+    mocks.buildTableSelectSql.mockResolvedValue('SELECT * FROM "SS"."SS_User" ORDER BY "ID" ASC');
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("cache-1", "USER", "SS_User", "data", "SS");
+    store.setTableMeta(tabId, {
+      schema: "SS",
+      tableName: "SS_User",
+      tableType: "TABLE",
+      columns: [{ name: "ID", data_type: "%Library.Integer", is_nullable: false, column_default: null, is_primary_key: true, extra: null }],
+      primaryKeys: ["ID"],
+    });
+    const tab = store.tabs.find((candidate) => candidate.id === tabId)!;
+    tab.orderByInput = '"ID" ASC';
+    tab.resultPageLimit = 100;
+    tab.resultPageOffset = 100;
+
+    await store.refreshDataTab(tabId);
+
+    expect(mocks.buildTableSelectSql).toHaveBeenCalledWith(
+      expect.objectContaining({
+        databaseType: "iris",
+        limit: 100,
+        offset: 100,
+        useDriverRowOffset: true,
+      }),
+    );
+    expect(mocks.executeMulti).toHaveBeenCalledWith("cache-1", "USER", 'SELECT * FROM "SS"."SS_User" ORDER BY "ID" ASC', undefined, expect.any(String), expect.objectContaining({ maxRows: 100, fetchSize: 100, rowOffset: 100 }));
+  });
+
   it("refreshes one targeted tab while preserving its query context", async () => {
     const { useQueryStore } = await import("@/stores/queryStore");
     const store = useQueryStore();

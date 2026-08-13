@@ -5,6 +5,8 @@ export interface ElasticsearchExternalConfig {
   kibanaBasePath?: string;
   /** GET path for connect/test/health. Empty means GET /. */
   connectivityCheckPath?: string;
+  /** When true, skip the connectivity check entirely (test/open never probes). */
+  connectivityCheckDisabled?: boolean;
   /** Regex collapsing rolling/time-series index suffixes into a `*` pattern. Empty → default; "off" → no grouping. */
   indexGroupingPattern?: string;
 }
@@ -46,19 +48,28 @@ export function elasticsearchConnectivityCheckPathFromConfig(value: unknown): st
   return typeof path === "string" ? normalizeElasticsearchConnectivityCheckPath(path) : "";
 }
 
+export function elasticsearchConnectivityCheckDisabledFromConfig(value: unknown): boolean {
+  const disabled = externalConfigRecord(value).connectivityCheckDisabled;
+  if (disabled === true) return true;
+  if (typeof disabled !== "string") return false;
+  const normalized = disabled.trim().toLowerCase();
+  return normalized === "true" || normalized === "1" || normalized === "yes" || normalized === "on";
+}
+
 export function elasticsearchIndexGroupingPatternFromConfig(value: unknown): string {
   const config = externalConfigRecord(value);
   const pattern = config.indexGroupingPattern;
   return typeof pattern === "string" ? pattern.trim() : "";
 }
 
-export function buildElasticsearchExternalConfig(mode: ElasticsearchConnectionMode, kibanaBasePath: string, connectivityCheckPath = "", indexGroupingPattern = ""): ElasticsearchExternalConfig | undefined {
+export function buildElasticsearchExternalConfig(mode: ElasticsearchConnectionMode, kibanaBasePath: string, connectivityCheckPath = "", indexGroupingPattern = "", connectivityCheckDisabled = false): ElasticsearchExternalConfig | undefined {
   const checkPath = normalizeElasticsearchConnectivityCheckPath(connectivityCheckPath);
   const grouping = indexGroupingPattern.trim();
   if (mode !== "kibana") {
-    if (!checkPath && !grouping) return undefined;
+    if (!checkPath && !grouping && !connectivityCheckDisabled) return undefined;
     const config: ElasticsearchExternalConfig = {};
     if (checkPath) config.connectivityCheckPath = checkPath;
+    if (connectivityCheckDisabled) config.connectivityCheckDisabled = true;
     if (grouping) config.indexGroupingPattern = grouping;
     return config;
   }
@@ -66,6 +77,7 @@ export function buildElasticsearchExternalConfig(mode: ElasticsearchConnectionMo
   const config: ElasticsearchExternalConfig = { mode: "kibana" };
   if (normalizedPath) config.kibanaBasePath = normalizedPath;
   if (checkPath) config.connectivityCheckPath = checkPath;
+  if (connectivityCheckDisabled) config.connectivityCheckDisabled = true;
   if (grouping) config.indexGroupingPattern = grouping;
   return config;
 }

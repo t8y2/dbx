@@ -573,55 +573,54 @@ impl NacosOpenApiAdmin {
         .await
     }
 
-    /// r-nacos's Nacos-compatible configuration API returns the raw content
-    /// only. The independent console keeps the user-facing metadata such as
-    /// `configType` and `desc`, so enrich that compatibility response when a
-    /// console has been configured. Metadata is deliberately best-effort for
-    /// network/version failures. A CAPTCHA requirement is propagated so the UI
-    /// can authenticate once and retry the interrupted list/detail request.
-    async fn enrich_rnacos_config_metadata(&self, mut config: NacosConfigItem) -> Result<NacosConfigItem, String> {
-        if !self.is_explicit_rnacos()
-            || (config.config_type.is_some() && config.desc.is_some())
-            || self.cfg.rnacos_console_addr.is_empty()
-        {
-            return Ok(config);
-        }
-
-        let metadata = self
+    /// r-nacos stores detail (`value`, `configType`, `desc`, `md5`) on the console.
+    async fn get_rnacos_console_config(
+        &self,
+        data_id: &str,
+        group: &str,
+        namespace: &str,
+    ) -> Result<NacosConfigItem, String> {
+        let value = self
             .get_rnacos_console_metadata_json(
                 "/rnacos/api/console/v2/config/info",
                 vec![
-                    ("tenant".to_string(), config.namespace.clone()),
-                    ("dataId".to_string(), config.data_id.clone()),
-                    ("group".to_string(), config.group.clone()),
+                    ("tenant".to_string(), namespace.to_string()),
+                    ("dataId".to_string(), data_id.to_string()),
+                    ("group".to_string(), group.to_string()),
                 ],
             )
-            .await
-            .map(|value| {
-                parse_config_detail(value, config.data_id.clone(), config.group.clone(), config.namespace.clone())
-            });
+            .await?;
+        Ok(parse_config_detail(value, data_id.to_string(), group.to_string(), namespace.to_string()))
+    }
 
-        let metadata = match metadata {
-            Ok(metadata) => metadata,
-            Err(error) if error.contains("[rnacosConsoleCaptchaRequired]") => return Err(error),
-            // Metadata remains optional. Network, permission, or version
-            // mismatches must not hide configuration content obtained from
-            // the compatible OpenAPI.
-            Err(_) => return Ok(config),
-        };
-        if config.desc.is_none() {
-            config.desc = metadata.desc;
-        }
-        if config.config_type.is_none() {
-            config.config_type = metadata.config_type;
-        }
-        if config.md5.is_none() {
-            config.md5 = metadata.md5;
-        }
-        if config.content.is_none() {
-            config.content = metadata.content;
-        }
-        Ok(config)
+    /// OpenAPI default GET: response body is the configuration text only.
+    async fn get_openapi_raw_config(
+        &self,
+        data_id: &str,
+        group: &str,
+        namespace: &str,
+    ) -> Result<NacosConfigItem, String> {
+        let query = vec![
+            ("dataId".to_string(), data_id.to_string()),
+            ("group".to_string(), group.to_string()),
+            ("tenant".to_string(), namespace.to_string()),
+        ];
+        let resp = self.request(reqwest::Method::GET, "/v1/cs/configs", query, None, None).await?;
+        let resp = error_for_status(resp, "/v1/cs/configs").await?;
+        let text = resp.text().await.map_err(|e| format!("Failed to read Nacos config response: {e}"))?;
+        // Never JSON-parse this body as a detail document: valid JSON configs are content (#6131).
+        Ok(NacosConfigItem {
+            data_id: data_id.to_string(),
+            group: group.to_string(),
+            namespace: namespace.to_string(),
+            app_name: None,
+            desc: None,
+            tags: None,
+            config_type: None,
+            md5: None,
+            encrypted_data_key: None,
+            content: Some(text),
+        })
     }
 
     async fn get_server_state(&self) -> Result<NacosServerStateProbe, String> {
@@ -985,9 +984,11 @@ impl NacosOpenApiAdmin {
             // Normal Nacos lists already carry descriptions when available.
             // r-nacos's compatibility list does not carry either the type or
             // description, and its configured console can supply both.
-            let needs_rnacos_description =
-                self.is_explicit_rnacos() && item.desc.is_none() && !self.cfg.rnacos_console_addr.is_empty();
-            if item.config_type.is_some() && !needs_rnacos_description {
+            // r-nacos list rows lack type/desc; load detail when a console is configured.
+            let needs_rnacos_metadata = self.is_rnacos_compatible()
+                && !self.cfg.rnacos_console_addr.is_empty()
+                && (item.config_type.is_none() || item.desc.is_none());
+            if item.config_type.is_some() && !needs_rnacos_metadata {
                 continue;
             }
             let detail = self
@@ -1525,6 +1526,20 @@ impl NacosAdmin for NacosOpenApiAdmin {
 
     async fn get_config(&self, key: NacosConfigKey) -> Result<NacosConfigItem, String> {
         let namespace = self.namespace(key.namespace.as_deref());
+
+        // r-nacos: console owns detail (content + type). OpenAPI is body-only fallback.
+        if self.is_rnacos_compatible() {
+            if !self.cfg.rnacos_console_addr.is_empty() {
+                match self.get_rnacos_console_config(&key.data_id, &key.group, &namespace).await {
+                    Ok(config) => return Ok(config),
+                    Err(error) if error.contains("[rnacosConsoleCaptchaRequired]") => return Err(error),
+                    Err(_) => {}
+                }
+            }
+            return self.get_openapi_raw_config(&key.data_id, &key.group, &namespace).await;
+        }
+
+        // Official Nacos Open API.
         let v3_params = vec![
             ("dataId".to_string(), key.data_id.clone()),
             ("groupName".to_string(), key.group.clone()),
@@ -1537,6 +1552,7 @@ impl NacosAdmin for NacosOpenApiAdmin {
         ];
         let mut v1_detail_params = v1_params.clone();
         v1_detail_params.push(("show".to_string(), "all".to_string()));
+
         let mut errors = Vec::new();
         for (path, query) in
             [("/v3/admin/cs/config", v3_params), ("/v1/cs/configs", v1_detail_params), ("/v1/cs/configs", v1_params)]
@@ -1544,16 +1560,20 @@ impl NacosAdmin for NacosOpenApiAdmin {
             if !self.api_path_allowed(path) {
                 continue;
             }
+            let show_all =
+                path == "/v1/cs/configs" && query.iter().any(|(name, value)| name == "show" && value == "all");
             match self.request(reqwest::Method::GET, path, query, None, None).await {
                 Ok(resp) => match error_for_status(resp, path).await {
                     Ok(resp) if path == "/v1/cs/configs" => {
                         let text =
                             resp.text().await.map_err(|e| format!("Failed to read Nacos config response: {e}"))?;
-                        if let Ok(value) = serde_json::from_str::<Value>(&text) {
-                            let detail = parse_config_detail(value, key.data_id, key.group, namespace);
-                            return self.enrich_rnacos_config_metadata(detail).await;
+                        // show=all → detail JSON; default GET → opaque content text.
+                        if show_all {
+                            if let Ok(value) = serde_json::from_str::<Value>(&text) {
+                                return Ok(parse_config_detail(value, key.data_id, key.group, namespace));
+                            }
                         }
-                        let detail = NacosConfigItem {
+                        return Ok(NacosConfigItem {
                             data_id: key.data_id,
                             group: key.group,
                             namespace,
@@ -1564,13 +1584,11 @@ impl NacosAdmin for NacosOpenApiAdmin {
                             md5: None,
                             encrypted_data_key: None,
                             content: Some(text),
-                        };
-                        return self.enrich_rnacos_config_metadata(detail).await;
+                        });
                     }
                     Ok(resp) => {
                         let value = response_json_or_text(resp).await?;
-                        let detail = parse_config_detail(value, key.data_id, key.group, namespace);
-                        return self.enrich_rnacos_config_metadata(detail).await;
+                        return Ok(parse_config_detail(value, key.data_id, key.group, namespace));
                     }
                     Err(err) => errors.push(err),
                 },
@@ -2646,7 +2664,10 @@ fn parse_config_detail(value: Value, data_id: String, group: String, namespace: 
         config_type: config_format_for_item(data).or_else(|| infer_config_format(&data_id)),
         md5: optional_string_field(data, &["md5"]),
         encrypted_data_key: optional_string_field(data, &["encryptedDataKey"]),
-        content: optional_string_field(data, &["content", "value", "configValue", "config_value"])
+        // Prefer string fields only. Try each key so null `content` does not hide `value`.
+        content: ["content", "value", "configValue", "config_value"]
+            .iter()
+            .find_map(|key| data.get(*key).and_then(Value::as_str).map(str::to_string))
             .or_else(|| value.as_str().map(str::to_string)),
     }
 }
@@ -4303,14 +4324,247 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rnacos_config_detail_enriches_raw_openapi_content_with_console_metadata() {
+    async fn rnacos_get_config_uses_console_for_content_and_type() {
+        // r-nacos console is the source of truth for content + configType.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let body = "{\n  \"Name\": \"Hello\"\n}";
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_http_request(&mut socket).await;
+            assert!(request.split_whitespace().nth(1).unwrap().starts_with("/rnacos/api/console/v2/config/info?"));
+            assert!(request.contains("dataId=hello.json"));
+            write_json_response(
+                &mut socket,
+                r#"{"success":true,"data":{"value":"{\n  \"Name\": \"Hello\"\n}","configType":"JSON","desc":"from-console","md5":"abc"}}"#,
+            )
+            .await;
+        });
+        let mut config = test_admin_config(format!("http://{address}"));
+        config.implementation = Some(NacosImplementation::RNacos);
+        config.rnacos_console_addr = format!("http://{address}");
+        let admin = NacosOpenApiAdmin::new(config).unwrap();
+
+        let detail = admin
+            .get_config(NacosConfigKey {
+                namespace: Some("public".to_string()),
+                data_id: "hello.json".to_string(),
+                group: "DEFAULT_GROUP".to_string(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(detail.content.as_deref(), Some(body));
+        assert_eq!(detail.config_type.as_deref(), Some("json"));
+        assert_eq!(detail.desc.as_deref(), Some("from-console"));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn rnacos_get_config_falls_back_to_openapi_without_console() {
+        // Without a console URL, OpenAPI body text is the only available content.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let body = "{\n  \"Name\": \"Hello\"\n}";
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let target = read_request_target(&mut socket).await;
+            assert!(target.starts_with("/v1/cs/configs?"));
+            assert!(!target.contains("show=all"));
+            write_json_response(&mut socket, "{\n  \"Name\": \"Hello\"\n}").await;
+        });
+        let mut config = test_admin_config(format!("http://{address}"));
+        config.implementation = Some(NacosImplementation::RNacos);
+        let admin = NacosOpenApiAdmin::new(config).unwrap();
+
+        let detail = admin
+            .get_config(NacosConfigKey {
+                namespace: Some("public".to_string()),
+                data_id: "hello.json".to_string(),
+                group: "DEFAULT_GROUP".to_string(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(detail.content.as_deref(), Some(body));
+        assert_eq!(detail.config_type, None);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn rnacos_get_config_falls_back_to_openapi_when_console_is_unavailable() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let body = "{\n  \"Name\": \"Hello\"\n}";
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_http_request(&mut socket).await;
+            assert!(request.split_whitespace().nth(1).unwrap().starts_with("/rnacos/api/console/v2/config/info?"));
+            write_json_response(&mut socket, r#"{"success":false,"message":"console unavailable"}"#).await;
+
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let target = read_request_target(&mut socket).await;
+            assert!(target.starts_with("/v1/cs/configs?"));
+            assert!(!target.contains("show=all"));
+            write_json_response(&mut socket, body).await;
+        });
+        let mut config = test_admin_config(format!("http://{address}"));
+        config.implementation = Some(NacosImplementation::RNacos);
+        config.rnacos_console_addr = format!("http://{address}");
+        let admin = NacosOpenApiAdmin::new(config).unwrap();
+
+        let detail = admin
+            .get_config(NacosConfigKey {
+                namespace: Some("public".to_string()),
+                data_id: "hello.json".to_string(),
+                group: "DEFAULT_GROUP".to_string(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(detail.content.as_deref(), Some(body));
+        assert_eq!(detail.config_type, None);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn rnacos_get_config_preserves_invalid_json_via_console_value() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let body = "{\n  \"Name\": \"Hello\",\n}";
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_http_request(&mut socket).await;
+            assert!(request.split_whitespace().nth(1).unwrap().starts_with("/rnacos/api/console/v2/config/info?"));
+            write_json_response(
+                &mut socket,
+                r#"{"success":true,"data":{"value":"{\n  \"Name\": \"Hello\",\n}","configType":"JSON"}}"#,
+            )
+            .await;
+        });
+        let mut config = test_admin_config(format!("http://{address}"));
+        config.implementation = Some(NacosImplementation::RNacos);
+        config.rnacos_console_addr = format!("http://{address}");
+        let admin = NacosOpenApiAdmin::new(config).unwrap();
+
+        let detail = admin
+            .get_config(NacosConfigKey {
+                namespace: Some("public".to_string()),
+                data_id: "hello.json".to_string(),
+                group: "DEFAULT_GROUP".to_string(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(detail.content.as_deref(), Some(body));
+        assert_eq!(detail.config_type.as_deref(), Some("json"));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn official_nacos_uses_show_all_detail_document() {
+        // Official Nacos implements show=all as a JSON detail document.
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
-            assert!(read_request_target(&mut socket).await.starts_with("/v1/cs/configs?"));
-            write_text_response(&mut socket, "cloud_providers: {}\n").await;
+            let target = read_request_target(&mut socket).await;
+            assert!(target.starts_with("/v1/cs/configs?"));
+            assert!(target.contains("show=all"));
+            write_json_response(
+                &mut socket,
+                r#"{"dataId":"app.json","group":"DEFAULT_GROUP","tenant":"ops","type":"json","content":"{\"Name\":\"Hello\"}"}"#,
+            )
+            .await;
+        });
+        let mut config = test_admin_config(format!("http://{address}"));
+        config.implementation = Some(NacosImplementation::Nacos);
+        config.version_mode = Some(NacosVersionMode::V2);
+        let admin = NacosOpenApiAdmin::new(config).unwrap();
 
+        let detail = admin
+            .get_config(NacosConfigKey {
+                namespace: Some("ops".to_string()),
+                data_id: "app.json".to_string(),
+                group: "DEFAULT_GROUP".to_string(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(detail.data_id, "app.json");
+        assert_eq!(detail.namespace, "ops");
+        assert_eq!(detail.config_type.as_deref(), Some("json"));
+        assert_eq!(detail.content.as_deref(), Some(r#"{"Name":"Hello"}"#));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn detected_rnacos_uses_console_when_configured() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let body = r#"{"Name":"Hello"}"#;
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_http_request(&mut socket).await;
+            assert!(request.split_whitespace().nth(1).unwrap().starts_with("/rnacos/api/console/v2/config/info?"));
+            write_json_response(
+                &mut socket,
+                r#"{"success":true,"data":{"value":"{\"Name\":\"Hello\"}","configType":"JSON"}}"#,
+            )
+            .await;
+        });
+        let mut config = test_admin_config(format!("http://{address}"));
+        config.rnacos_console_addr = format!("http://{address}");
+        let admin = NacosOpenApiAdmin::new(config).unwrap();
+        admin.detected_rnacos.store(true, Ordering::Relaxed);
+
+        let detail = admin
+            .get_config(NacosConfigKey {
+                namespace: Some("public".to_string()),
+                data_id: "hello.json".to_string(),
+                group: "DEFAULT_GROUP".to_string(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(detail.content.as_deref(), Some(body));
+        assert_eq!(detail.config_type.as_deref(), Some("json"));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn rnacos_console_detail_keeps_json_with_data_id_field_as_text() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let body = r#"{"dataId":"nested-key","enabled":true}"#;
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_http_request(&mut socket).await;
+            assert!(request.split_whitespace().nth(1).unwrap().starts_with("/rnacos/api/console/v2/config/info?"));
+            write_json_response(
+                &mut socket,
+                r#"{"success":true,"data":{"value":"{\"dataId\":\"nested-key\",\"enabled\":true}","configType":"JSON"}}"#,
+            )
+            .await;
+        });
+        let mut config = test_admin_config(format!("http://{address}"));
+        config.implementation = Some(NacosImplementation::RNacos);
+        config.rnacos_console_addr = format!("http://{address}");
+        let admin = NacosOpenApiAdmin::new(config).unwrap();
+
+        let detail = admin
+            .get_config(NacosConfigKey {
+                namespace: Some("public".to_string()),
+                data_id: "settings.json".to_string(),
+                group: "DEFAULT_GROUP".to_string(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(detail.content.as_deref(), Some(body));
+        assert_eq!(detail.data_id, "settings.json");
+        assert_eq!(detail.config_type.as_deref(), Some("json"));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn rnacos_config_detail_loads_from_console_with_session_token() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
             let request = read_http_request(&mut socket).await;
             assert!(request.split_whitespace().nth(1).unwrap().starts_with("/rnacos/api/console/v2/config/info?"));
@@ -4358,16 +4612,12 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
-            assert!(read_request_target(&mut socket).await.starts_with("/v1/cs/configs?"));
-            write_text_response(&mut socket, "cloud_providers: {}\n").await;
-
-            let (mut socket, _) = listener.accept().await.unwrap();
             let request = read_http_request(&mut socket).await;
             assert!(request.split_whitespace().nth(1).unwrap().starts_with("/rnacos/api/console/v2/config/info?"));
             assert!(!request.to_ascii_lowercase().contains("\ntoken:"));
             write_json_response(
                 &mut socket,
-                r#"{"success":true,"data":{"configType":"YAML","desc":"anonymous console metadata"}}"#,
+                r#"{"success":true,"data":{"value":"cloud_providers: {}\n","configType":"YAML","desc":"anonymous console metadata"}}"#,
             )
             .await;
         });
@@ -4384,6 +4634,7 @@ mod tests {
             })
             .await
             .unwrap();
+        assert_eq!(detail.content.as_deref(), Some("cloud_providers: {}\n"));
         assert_eq!(detail.config_type.as_deref(), Some("yaml"));
         assert_eq!(detail.desc.as_deref(), Some("anonymous console metadata"));
         server.await.unwrap();
@@ -4394,10 +4645,7 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.unwrap();
-            assert!(read_request_target(&mut socket).await.starts_with("/v1/cs/configs?"));
-            write_text_response(&mut socket, "cloud_providers: {}\n").await;
-
+            // Anonymous console detail fails and triggers captcha login flow.
             let (mut socket, _) = listener.accept().await.unwrap();
             assert!(read_request_target(&mut socket).await.starts_with("/rnacos/api/console/v2/config/info?"));
             write_text_response(&mut socket, "<html><body>login required</body></html>").await;
@@ -4440,16 +4688,14 @@ mod tests {
             )
             .await;
 
-            let (mut socket, _) = listener.accept().await.unwrap();
-            assert!(read_request_target(&mut socket).await.starts_with("/v1/cs/configs?"));
-            write_text_response(&mut socket, "cloud_providers: {}\n").await;
-
+            // list enrichment loads each item through console detail.
             let (mut socket, _) = listener.accept().await.unwrap();
             let request = read_http_request(&mut socket).await;
             assert!(request.split_whitespace().nth(1).unwrap().starts_with("/rnacos/api/console/v2/config/info?"));
+            assert!(request.to_ascii_lowercase().contains("token: console-token"));
             write_json_response(
                 &mut socket,
-                r#"{"success":true,"data":{"configType":"YAML","desc":"r-nacos description"}}"#,
+                r#"{"success":true,"data":{"value":"cloud_providers: {}\n","configType":"YAML","desc":"r-nacos description"}}"#,
             )
             .await;
         });
@@ -4499,16 +4745,12 @@ mod tests {
             .await;
 
             let (mut socket, _) = listener.accept().await.unwrap();
-            assert!(read_request_target(&mut socket).await.starts_with("/v1/cs/configs?"));
-            write_text_response(&mut socket, "server:\n  port: 8848\n").await;
-
-            let (mut socket, _) = listener.accept().await.unwrap();
             let request = read_http_request(&mut socket).await;
             assert!(request.split_whitespace().nth(1).unwrap().starts_with("/rnacos/api/console/v2/config/info?"));
             assert!(!request.to_ascii_lowercase().contains("\ntoken:"));
             write_json_response(
                 &mut socket,
-                r#"{"success":true,"data":{"configType":"YAML","desc":"anonymous list description"}}"#,
+                r#"{"success":true,"data":{"value":"server:\n  port: 8848\n","configType":"YAML","desc":"anonymous list description"}}"#,
             )
             .await;
         });
@@ -5239,6 +5481,42 @@ mod tests {
         assert_eq!(parsed.config_type.as_deref(), Some("yaml"));
         assert_eq!(parsed.tags.as_deref(), Some("prod,gray"));
         assert_eq!(parsed.content.as_deref(), Some("cloud_providers:\n  aliyun: {}\n"));
+    }
+
+    #[test]
+    fn console_detail_reads_value_and_config_type() {
+        let parsed = parse_config_detail(
+            serde_json::json!({
+                "success": true,
+                "data": {
+                    "value": "{\n  \"Name\": \"Hello\"\n}",
+                    "configType": "JSON",
+                    "desc": "from-console"
+                }
+            }),
+            "3432".to_string(),
+            "DEFAULT_GROUP".to_string(),
+            "public".to_string(),
+        );
+        assert_eq!(parsed.content.as_deref(), Some("{\n  \"Name\": \"Hello\"\n}"));
+        assert_eq!(parsed.config_type.as_deref(), Some("json"));
+        assert_eq!(parsed.desc.as_deref(), Some("from-console"));
+    }
+
+    #[test]
+    fn content_field_falls_back_to_value_when_content_is_null() {
+        let parsed = parse_config_detail(
+            serde_json::json!({
+                "dataId": "app.json",
+                "group": "DEFAULT_GROUP",
+                "content": null,
+                "value": "from-value-field"
+            }),
+            "fallback".to_string(),
+            "DEFAULT_GROUP".to_string(),
+            "public".to_string(),
+        );
+        assert_eq!(parsed.content.as_deref(), Some("from-value-field"));
     }
 
     #[test]

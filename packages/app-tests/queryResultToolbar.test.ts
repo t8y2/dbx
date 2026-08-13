@@ -28,6 +28,13 @@ test("query result toolbar SFCs compile", () => {
   for (const path of [contentAreaPath, dataGridPath, viewSwitcherPath, toolbarActionsPath]) assertSfcCompiles(path);
 });
 
+test("ContentArea keeps DISTINCT inserts separate from result-row deletes", () => {
+  const contentArea = source(contentAreaPath);
+
+  assert.match(contentArea, /:allow-insert-rows="activeTab\.queryAnalysis\?\.allowInsert \?\? activeTab\.queryAnalysis\?\.allowInsertDelete !== false"/);
+  assert.match(contentArea, /:allow-delete-rows="activeTab\.queryAnalysis\?\.allowInsertDelete !== false"/);
+});
+
 test("query result toolbar reuses the production icon contract", () => {
   const contentArea = source(contentAreaPath);
   const viewSwitcher = source(viewSwitcherPath);

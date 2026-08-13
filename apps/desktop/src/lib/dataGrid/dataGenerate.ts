@@ -1166,7 +1166,7 @@ const KnownColumnPatterns: Array<{ pattern: RegExp; generatorKey: string }> = [
 export function findGeneratorKey(columnName: string, dataType: string, isAutoIncrement?: boolean): string {
   if (isAutoIncrement) return "sequence";
   const type = dataType.toLowerCase();
-  const isNumeric = type.includes("int") || type === "smallint" || type === "bigint" || type.includes("bool") || type.includes("decimal") || type.includes("numeric") || type.includes("float") || type.includes("double") || type === "real";
+  const isNumeric = /^number(?:\s*\([^)]*\))?$/.test(type.trim()) || type.includes("int") || type === "smallint" || type === "bigint" || type.includes("bool") || type.includes("decimal") || type.includes("numeric") || type.includes("float") || type.includes("double") || type === "real";
   const isDateTime = type.includes("date") || type.includes("timestamp") || type === "time";
   const isBinary = type.includes("binary") || type.includes("blob") || type.includes("bytea");
   const isBoolType = type === "bool" || type === "boolean" || type === "bit" || type === "tinyint(1)";

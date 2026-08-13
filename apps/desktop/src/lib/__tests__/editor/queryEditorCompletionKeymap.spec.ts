@@ -46,29 +46,52 @@ interface MockView {
 
 interface TabHarness {
   handleTab: (view: MockView) => boolean;
+  insertNewlineWithoutCompletion: (view: MockView) => boolean;
   acceptCompletionOrNextSnippetField: (view: MockView) => boolean;
   clearPendingCompletionTab: () => void;
+  consumeSqlCompletionAutoStartSuppression: () => boolean;
 }
 
-function createHarness(options: { completionStatus: (state: MockState) => "active" | "pending" | null; acceptCompletion?: (view: MockView) => boolean; nextSnippetField?: (view: MockView) => boolean; indentMore?: (view: MockView) => boolean }): TabHarness {
+function createHarness(options: {
+  completionStatus: (state: MockState) => "active" | "pending" | null;
+  acceptCompletion?: (view: MockView) => boolean;
+  closeCompletion?: (view: MockView) => boolean;
+  insertNewlineKeepIndent?: (view: MockView) => boolean;
+  nextSnippetField?: (view: MockView) => boolean;
+  indentMore?: (view: MockView) => boolean;
+}): TabHarness {
   const source = [
     extractDeclaration(/const COMPLETION_REMOTE_LATENCY_BUDGET_MS = \d+;/, "remote completion latency budget"),
     extractDeclaration(/const COMPLETION_DEBOUNCE_DELAY_MS = \d+;/, "completion debounce delay"),
     extractDeclaration(/const COMPLETION_TAB_RETRY_DELAY_MS = \d+;/, "completion retry delay"),
     extractDeclaration(/const COMPLETION_TAB_MAX_WAIT_MS = [^;]+;/, "completion wait timeout"),
     "let pendingCompletionTabTimer: ReturnType<typeof setTimeout> | null = null;",
+    "let suppressNextSqlCompletionAutoStartUntil = 0;",
     extractFunction("editorIndentUnit"),
     extractFunction("handleTab"),
     extractFunction("performNormalTab"),
+    extractFunction("insertNewlineWithoutCompletion"),
     extractFunction("acceptCompletionOrNextSnippetField"),
     extractFunction("clearPendingCompletionTab"),
     extractFunction("waitForCompletionTab"),
+    extractFunction("consumeSqlCompletionAutoStartSuppression"),
   ].join("\n");
   const javascript = ts.transpileModule(source, {
     compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 },
   }).outputText;
-  const factory = new Function("codeMirrorCompletionStatus", "codeMirrorAcceptCompletion", "codeMirrorNextSnippetField", "codeMirrorIndentMore", "settingsStore", `${javascript}\nreturn { handleTab, acceptCompletionOrNextSnippetField, clearPendingCompletionTab };`);
-  return factory(options.completionStatus, options.acceptCompletion ?? (() => false), options.nextSnippetField ?? (() => false), options.indentMore ?? (() => false), { editorSettings: { sqlFormatter: { useTabs: false, tabWidth: 2 } } }) as TabHarness;
+  const factory = new Function(
+    "codeMirrorCompletionStatus",
+    "codeMirrorAcceptCompletion",
+    "codeMirrorCloseCompletion",
+    "codeMirrorInsertNewlineKeepIndent",
+    "codeMirrorNextSnippetField",
+    "codeMirrorIndentMore",
+    "settingsStore",
+    `${javascript}\nreturn { handleTab, insertNewlineWithoutCompletion, acceptCompletionOrNextSnippetField, clearPendingCompletionTab, consumeSqlCompletionAutoStartSuppression };`,
+  );
+  return factory(options.completionStatus, options.acceptCompletion ?? (() => false), options.closeCompletion ?? (() => false), options.insertNewlineKeepIndent ?? (() => false), options.nextSnippetField ?? (() => false), options.indentMore ?? (() => false), {
+    editorSettings: { sqlFormatter: { useTabs: false, tabWidth: 2 } },
+  }) as TabHarness;
 }
 
 function createView(text = "SELECT", position = text.length): MockView {
@@ -89,6 +112,26 @@ afterEach(() => {
 });
 
 describe("QueryEditor completion Tab keymap", () => {
+  it("closes completion and suppresses its restart for the Enter newline", () => {
+    const closeCompletion = vi.fn(() => true);
+    let harness: TabHarness;
+    const insertNewlineKeepIndent = vi.fn(() => harness.consumeSqlCompletionAutoStartSuppression());
+    harness = createHarness({ completionStatus: () => "active", closeCompletion, insertNewlineKeepIndent });
+    const view = createView("SELECT * FROM demo WHERE id IN ()", 32);
+
+    expect(harness.insertNewlineWithoutCompletion(view)).toBe(true);
+    expect(closeCompletion).toHaveBeenCalledWith(view);
+    expect(insertNewlineKeepIndent).toHaveBeenCalledWith(view);
+    expect(harness.consumeSqlCompletionAutoStartSuppression()).toBe(false);
+  });
+
+  it("does not suppress later completion when Enter cannot insert a newline", () => {
+    const harness = createHarness({ completionStatus: () => null, insertNewlineKeepIndent: () => false });
+
+    expect(harness.insertNewlineWithoutCompletion(createView())).toBe(false);
+    expect(harness.consumeSqlCompletionAutoStartSuppression()).toBe(false);
+  });
+
   it("keeps CodeMirror prefix filtering enabled for SQL completion results", () => {
     const javascript = ts.transpileModule(extractFunction("buildCompletionResult"), {
       compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 },

@@ -79,9 +79,9 @@ impl MySqlQueryDialect {
             supports_admin_show_results: matches!(
                 db_type,
                 DatabaseType::Doris | DatabaseType::StarRocks | DatabaseType::ManticoreSearch
-            ) || profile
-                .as_deref()
-                .is_some_and(|profile| matches!(profile, "doris" | "selectdb" | "starrocks" | "manticoresearch")),
+            ) || profile.as_deref().is_some_and(|profile| {
+                matches!(profile, "doris" | "selectdb" | "starrocks" | "manticoresearch" | "tidb")
+            }),
         }
     }
 }
@@ -3573,7 +3573,7 @@ fn normalize_mysql_column_charset_metadata(columns: &mut [ColumnInfo], table_col
 /// Example: "主键" → UTF-8 bytes [E4 B8 BB E9 94 AE]
 ///   → each byte → CP1252 char → UTF-8 re-encoded → garbled text
 ///   → reversal: map each char back to its CP1252 byte, decode as UTF-8
-pub(super) fn fix_potential_double_encoding(s: &str) -> String {
+pub(crate) fn fix_potential_double_encoding(s: &str) -> String {
     // Map each character to its CP1252 byte value
     let mut bytes = Vec::with_capacity(s.len());
     for c in s.chars() {
@@ -6083,12 +6083,55 @@ mod tests {
     }
 
     #[test]
+    fn tidb_admin_show_queries_are_treated_as_result_sets() {
+        let dialect = MySqlQueryDialect::for_connection(DatabaseType::Mysql, Some("tidb"));
+
+        for sql in [
+            "ADMIN SHOW DDL",
+            "ADMIN SHOW DDL JOBS 20",
+            "-- inspect DDL\nadmin /* TiDB */ show ddl jobs 20",
+            "ADMIN SHOW DDL JOB QUERIES 1",
+        ] {
+            assert!(is_result_set_query(sql, dialect), "{sql}");
+            assert!(requires_text_protocol_query(sql, dialect), "{sql}");
+        }
+    }
+
+    #[test]
+    fn tidb_non_show_admin_statements_are_not_treated_as_result_sets() {
+        let dialect = MySqlQueryDialect::for_connection(DatabaseType::Mysql, Some("tidb"));
+
+        for sql in [
+            "ADMIN SET BDR ROLE PRIMARY",
+            "ADMIN CANCEL DDL JOBS 1",
+            "ADMIN PAUSE DDL JOBS 1",
+            "ADMIN RESUME DDL JOBS 1",
+            "ADMIN ALTER DDL JOBS 1 THREAD = 8",
+        ] {
+            assert!(!is_result_set_query(sql, dialect), "{sql}");
+            assert!(!requires_text_protocol_query(sql, dialect), "{sql}");
+        }
+    }
+
+    #[test]
     fn mysql_admin_show_queries_are_not_treated_as_result_sets() {
         let sql = "ADMIN SHOW FRONTEND CONFIG LIKE '%default_replication_num%'";
         let dialect = MySqlQueryDialect::for_connection(DatabaseType::Mysql, None);
 
         assert!(!is_result_set_query(sql, dialect));
         assert!(!requires_text_protocol_query(sql, dialect));
+    }
+
+    #[test]
+    fn unrelated_mysql_profiles_do_not_enable_admin_show_results() {
+        let sql = "ADMIN SHOW DDL JOBS 20";
+
+        for profile in ["mariadb", "oceanbase", "tdsql", "polardb", "greatsql", "custom"] {
+            let dialect = MySqlQueryDialect::for_connection(DatabaseType::Mysql, Some(profile));
+
+            assert!(!is_result_set_query(sql, dialect), "{profile}");
+            assert!(!requires_text_protocol_query(sql, dialect), "{profile}");
+        }
     }
 
     #[test]

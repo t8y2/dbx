@@ -623,6 +623,25 @@ fn builds_table_data_where_and_schema_queries() {
     );
     assert_eq!(
         build_table_data_select_sql(TableDataSelectSqlOptions {
+            database_type: Some(DatabaseType::Iris),
+            schema: Some("Ens".to_string()),
+            table_name: "AlarmResponse".to_string(),
+            table_type: None,
+            primary_keys: Vec::new(),
+            columns: Vec::new(),
+            fallback_order_columns: Vec::new(),
+            order_by: Some("\"ID\" ASC".to_string()),
+            limit: Some(100),
+            offset: Some(100),
+            use_driver_row_offset: true,
+            where_input: Some("Status = 'Open'".to_string()),
+            include_row_id: false,
+            ..Default::default()
+        }),
+        "SELECT * FROM \"Ens\".\"AlarmResponse\" WHERE (Status = 'Open') ORDER BY \"ID\" ASC"
+    );
+    assert_eq!(
+        build_table_data_select_sql(TableDataSelectSqlOptions {
             database_type: Some(DatabaseType::Iotdb),
             schema: Some("root.test".to_string()),
             table_name: "device2".to_string(),

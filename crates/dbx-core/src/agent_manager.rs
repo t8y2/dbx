@@ -715,6 +715,23 @@ impl AgentManager {
             && !self.driver_launch_config_path(db_type).exists()
     }
 
+    /// The JRE key an installed driver actually depends on, or `None` when the
+    /// installed artifact runs without a managed JRE (native binary or custom
+    /// launch config).
+    ///
+    /// The on-disk artifact is the source of truth. The persisted `jre` string
+    /// is only consulted for genuine Java (jar) drivers, because it is written
+    /// unconditionally at install time and goes stale when a driver is
+    /// refactored from Java to a native language. Every "is this JRE still in
+    /// use?" question must route through here rather than reading `driver.jre`
+    /// directly, so stale metadata can never manufacture a false dependency.
+    pub fn installed_driver_jre_dependency<'a>(&self, state: &'a AgentState, db_type: &str) -> Option<&'a str> {
+        if !self.driver_requires_java_runtime(db_type) {
+            return None;
+        }
+        state.installed_drivers.get(db_type).map(|driver| driver.jre.as_str())
+    }
+
     pub fn resolve_agent_launch_spec(
         &self,
         state: &AgentState,

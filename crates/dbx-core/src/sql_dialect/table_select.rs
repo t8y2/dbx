@@ -225,7 +225,11 @@ pub fn build_table_data_select_sql(options: TableDataSelectSqlOptions) -> String
 
     match table_pagination_strategy(database_type) {
         TablePaginationStrategy::IrisTop => {
-            format!("SELECT TOP {limit} {select_columns} FROM {table_alias}{where_clause}{order}")
+            if options.use_driver_row_offset {
+                format!("SELECT {select_columns} FROM {table_alias}{where_clause}{order}")
+            } else {
+                format!("SELECT TOP {limit} {select_columns} FROM {table_alias}{where_clause}{order}")
+            }
         }
         TablePaginationStrategy::InformixFirst => {
             let row_limit = informix_row_limit_clause(limit, options.offset.unwrap_or(0));
@@ -654,6 +658,7 @@ mod tests {
             order_by: None,
             limit: Some(10),
             offset: None,
+            use_driver_row_offset: false,
             where_input: None,
             include_row_id: false,
         }

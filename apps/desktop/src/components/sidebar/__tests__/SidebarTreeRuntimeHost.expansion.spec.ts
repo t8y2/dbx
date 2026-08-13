@@ -1,10 +1,11 @@
 // @vitest-environment happy-dom
 
-import { createApp, defineComponent, h, nextTick, ref, type App } from "vue";
+import { createApp, defineComponent, h, nextTick, provide, ref, type App } from "vue";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import i18n from "@/i18n";
 import type { TreeNode } from "@/types/database";
 import { syncSidebarTreeNodeExpansion } from "@/lib/sidebar/sidebarTreeExpansion";
+import { sidebarTreeContextKey } from "@/lib/sidebar/sidebarTreeContext";
 import SidebarTreeRuntimeHost from "@/components/sidebar/SidebarTreeRuntimeHost.vue";
 
 const connectionStore = {
@@ -14,6 +15,9 @@ const connectionStore = {
   releaseCollapsedTreeNodeChildren: vi.fn(),
   getConfig: vi.fn(() => ({ db_type: "mysql" })),
   loadPackageMembers: vi.fn(async (node: TreeNode) => {
+    node.isExpanded = true;
+  }),
+  loadObjectGroupChildren: vi.fn(async (node: TreeNode) => {
     node.isExpanded = true;
   }),
 };
@@ -44,6 +48,7 @@ afterEach(() => {
   connectionStore.treeNodes = [];
   connectionStore.sidebarSearchQuery = "";
   vi.clearAllMocks();
+  connectionStore.canUseLoadedTreeNodeToggle.mockReturnValue(true);
   connectionStore.getConfig.mockReturnValue({ db_type: "mysql" });
 });
 
@@ -115,5 +120,48 @@ describe("SidebarTreeRuntimeHost expansion", () => {
 
     expect(packageNode.isExpanded).toBe(true);
     expect(toggled).toHaveBeenCalledWith(packageNode, true);
+  });
+
+  it("expands an unloaded object group without leaking a matching connection name", async () => {
+    const group: TreeNode = {
+      id: "mysql:basic:__tables",
+      label: "tree.tables",
+      type: "group-tables",
+      connectionId: "mysql",
+      database: "basic",
+      isExpanded: false,
+      children: [],
+    };
+    connectionStore.sidebarSearchQuery = "60307";
+    connectionStore.canUseLoadedTreeNodeToggle.mockReturnValue(false);
+
+    const host = ref<InstanceType<typeof SidebarTreeRuntimeHost> | null>(null);
+    const app = createApp(
+      defineComponent({
+        setup() {
+          provide(sidebarTreeContextKey, {
+            getVisibleNodes: () => [group],
+            getVisibleNodeIndex: () => 0,
+            getTreeLoadSearchOptions: () => ({ searchFilter: "", allowGlobalSearchMismatch: true, expectedSidebarSearchQuery: "60307" }),
+          });
+          return () => h(SidebarTreeRuntimeHost, { ref: host, node: group, depth: 0 });
+        },
+      }),
+    );
+    mountedApps.push(app);
+    const container = document.createElement("div");
+    document.body.append(container);
+    app.use(i18n);
+    app.mount(container);
+
+    host.value?.toggleNode(group);
+
+    await vi.waitFor(() =>
+      expect(connectionStore.loadObjectGroupChildren).toHaveBeenCalledWith(group, {
+        searchFilter: "",
+        allowGlobalSearchMismatch: true,
+        expectedSidebarSearchQuery: "60307",
+      }),
+    );
   });
 });

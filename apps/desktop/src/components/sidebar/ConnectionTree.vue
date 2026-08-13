@@ -8,7 +8,7 @@ import { useSavedSqlStore } from "@/stores/savedSqlStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useToast } from "@/composables/useToast";
 import type { ObjectSourceKind, TableInfo, TableNameFilter, TreeNode, TreeNodeType } from "@/types/database";
-import { filterSidebarSearchRootsByConnectionState, filterSidebarTree, filterSidebarTreeToConnectedConnections, resolveSidebarFilterGuards, reuseLiveSidebarTreeNodes } from "@/lib/sidebar/sidebarSearchTree";
+import { createSidebarSearchSubtreePreserver, filterSidebarSearchRootsByConnectionState, filterSidebarTree, filterSidebarTreeToConnectedConnections, resolveSidebarFilterGuards, resolveSidebarObjectSearchFilter, reuseLiveSidebarTreeNodes } from "@/lib/sidebar/sidebarSearchTree";
 import { matchSidebarLabel } from "@/lib/sidebar/sidebarSearch";
 import { buildTableTreeNodes } from "@/lib/table/tableTree";
 import { isCancelSearchShortcut, isCopySidebarSelectionShortcut, isEditSidebarConnectionShortcut, isPasteSidebarSelectionShortcut, isViewTableDdlShortcut } from "@/lib/editor/keyboardShortcuts";
@@ -229,8 +229,9 @@ watch(deferredSearchQuery, (newQuery, oldQuery) => {
     return;
   }
   const tasks: Promise<void>[] = [];
+  const preservesSearchSubtree = newQuery ? createSidebarSearchSubtreePreserver(newQuery, searchableNodeTypes.value) : undefined;
   for (const root of store.treeNodes) {
-    collectExpandedObjectSearchTargets(root, tasks, newQuery ? searchRefreshedNodeIds : undefined);
+    collectExpandedObjectSearchTargets(root, tasks, newQuery ? searchRefreshedNodeIds : undefined, preservesSearchSubtree);
   }
   if (!newQuery && oldQuery) {
     searchRefreshedNodeIds.clear();
@@ -250,7 +251,8 @@ function isSimpleObjectSearchParent(node: TreeNode): boolean {
   return settingsStore.editorSettings.sidebarObjectDisplay === "simple" && simpleObjectParentTypes.has(node.type) && node.isExpanded === true && (!!node.children?.some((child) => simpleObjectChildTypes.has(child.type)) || !!store.sidebarTableSearchQueries[node.id]?.trim());
 }
 
-function collectExpandedObjectSearchTargets(node: TreeNode, tasks: Promise<void>[], refreshedNodeIds?: Set<string>) {
+function collectExpandedObjectSearchTargets(node: TreeNode, tasks: Promise<void>[], refreshedNodeIds?: Set<string>, preservesNodeSubtree?: (node: TreeNode) => boolean, ancestorPreservesSearchSubtree = false) {
+  const preservesSearchSubtree = ancestorPreservesSearchSubtree || (!!refreshedNodeIds && !!preservesNodeSubtree?.(node));
   if (refreshedNodeIds && node.type === "connection" && node.connectionId) {
     if (store.connectedIds.has(node.connectionId)) {
       tasks.push(store.loadConnectedConnectionRootForSidebarSearch(node.connectionId));
@@ -258,15 +260,27 @@ function collectExpandedObjectSearchTargets(node: TreeNode, tasks: Promise<void>
     if (node.connectionId !== store.activeConnectionId) return;
   }
   if (refreshedNodeIds && isSimpleObjectSearchParent(node)) {
-    refreshedNodeIds.add(node.id);
-    tasks.push(store.refreshTreeNode(node));
+    if (preservesSearchSubtree) {
+      if (refreshedNodeIds.delete(node.id)) {
+        tasks.push(store.loadTreeNodeChildren(node, { force: true, searchFilter: "", allowGlobalSearchMismatch: true, expectedSidebarSearchQuery: store.sidebarSearchQuery }));
+      }
+    } else {
+      refreshedNodeIds.add(node.id);
+      tasks.push(store.refreshTreeNode(node));
+    }
     return;
   }
   if (refreshedNodeIds && node.isExpanded && node.children) {
     for (const child of node.children) {
       if (child.connectionId && searchableObjectGroupTypes.has(child.type)) {
-        refreshedNodeIds.add(child.id);
-        tasks.push(store.loadObjectGroupChildren(child, { force: true }));
+        if (preservesSearchSubtree) {
+          if (refreshedNodeIds.delete(child.id)) {
+            tasks.push(store.loadObjectGroupChildren(child, { force: true, searchFilter: "", allowGlobalSearchMismatch: true, expectedSidebarSearchQuery: store.sidebarSearchQuery }));
+          }
+        } else {
+          refreshedNodeIds.add(child.id);
+          tasks.push(store.loadObjectGroupChildren(child, { force: true }));
+        }
       }
     }
   } else if (!refreshedNodeIds && searchRefreshedNodeIds.has(node.id)) {
@@ -278,7 +292,7 @@ function collectExpandedObjectSearchTargets(node: TreeNode, tasks: Promise<void>
   }
   if (node.children) {
     for (const child of node.children) {
-      collectExpandedObjectSearchTargets(child, tasks, refreshedNodeIds);
+      collectExpandedObjectSearchTargets(child, tasks, refreshedNodeIds, preservesNodeSubtree, preservesSearchSubtree);
     }
   }
 }
@@ -938,6 +952,12 @@ const pasteHandlerRegistry = createSidebarPasteHandlerRegistry();
 provide(sidebarTreeContextKey, {
   getVisibleNodes: () => selectableVisibleNodes.value,
   getVisibleNodeIndex: (id: string) => selectableVisibleNodeIndexById.value.get(id) ?? -1,
+  getTreeLoadSearchOptions: (node) => {
+    const query = deferredSearchQuery.value;
+    if (!query) return undefined;
+    const searchFilter = resolveSidebarObjectSearchFilter(store.treeNodes, node.id, query, searchableNodeTypes.value);
+    return searchFilter ? undefined : { searchFilter: "", allowGlobalSearchMismatch: true, expectedSidebarSearchQuery: query };
+  },
   setTableSearchQuery: (parentNodeId, query, local) => {
     const focusRestore = captureTableSearchFocus(parentNodeId);
     latestTableSearchInteractionParentId = parentNodeId;

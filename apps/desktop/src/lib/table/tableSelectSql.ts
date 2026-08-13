@@ -19,6 +19,7 @@ export interface BuildTableSelectSqlOptions {
   orderBy?: string;
   limit?: number;
   offset?: number;
+  useDriverRowOffset?: boolean;
   whereInput?: string;
   includeRowId?: boolean;
   catalog?: string;

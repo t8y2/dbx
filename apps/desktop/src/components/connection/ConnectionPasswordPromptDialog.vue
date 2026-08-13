@@ -11,6 +11,7 @@ const { t } = useI18n();
 const promptStore = useConnectionPasswordPromptStore();
 
 const password = ref("");
+const rememberPassword = ref(false);
 const resolving = ref(false);
 const open = computed({
   get: () => !!promptStore.pending,
@@ -24,6 +25,7 @@ watch(
   () => promptStore.pending,
   () => {
     password.value = "";
+    rememberPassword.value = false;
     resolving.value = false;
   },
 );
@@ -31,7 +33,7 @@ watch(
 function submit() {
   if (resolving.value || !password.value) return;
   resolving.value = true;
-  promptStore.submit(password.value);
+  promptStore.submit(password.value, rememberPassword.value);
 }
 
 function cancel() {
@@ -55,6 +57,10 @@ function cancel() {
 
       <div class="py-1">
         <PasswordInput v-model="password" autofocus :placeholder="t('connection.promptPasswordPlaceholder')" :disabled="resolving" @keydown.enter.prevent="submit" />
+        <label class="mt-3 flex cursor-pointer items-center gap-2 text-sm text-foreground">
+          <input v-model="rememberPassword" type="checkbox" class="h-4 w-4 rounded border-border accent-primary" :disabled="resolving" />
+          <span>{{ t("connection.promptRememberPassword") }}</span>
+        </label>
       </div>
 
       <DialogFooter>

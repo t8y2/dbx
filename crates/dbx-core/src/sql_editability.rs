@@ -23,6 +23,8 @@ pub struct EditableQueryInfo {
     #[serde(default, skip_serializing_if = "is_false")]
     pub multi_source: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_insert: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allow_insert_delete: Option<bool>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub distinct: bool,
@@ -215,6 +217,7 @@ pub fn analyze_editable_query_editability(sql: &str) -> QueryEditability {
         multi_source: false,
         // Updating an identified base row is safe, but insert/delete semantics are
         // ambiguous when the displayed set is de-duplicated by the query.
+        allow_insert: distinct.then_some(false),
         allow_insert_delete: distinct.then_some(false),
         distinct,
     };
@@ -1230,6 +1233,7 @@ mod tests {
         assert!(result.editable);
         let analysis = result.analysis.unwrap();
         assert!(analysis.distinct);
+        assert_eq!(analysis.allow_insert, Some(false));
         assert_eq!(analysis.allow_insert_delete, Some(false));
         assert_eq!(analysis.columns.len(), 2);
     }
@@ -1237,15 +1241,27 @@ mod tests {
     #[test]
     fn recognizes_distinct_qualified_star_from_join() {
         let result = analyze_editable_query_editability(
-            "select distinct u.* from users u left join orders o on o.user_id = u.id",
+            "select distinct t4.*
+             from TASK_CHECK_BASE t1
+             left join TASK_FORMULATE_EXECUTE t20 on t1.EXECUTE_UID = t20.EXECUTE_UID
+             left join TASK_FORMULATE_BASE t40 on t20.FORMULATE_UID = t40.FORMULATE_UID
+             left join TASK_EXECUTE_FORM t30 on t20.EXECUTE_UID = t30.EXECUTE_UID
+             left join TASK_CHECK_ORG t2 on t1.TASK_ID = t2.TASK_ID
+             left join TASK_CHECK_ORG_INNER_DEPT t3 on t2.TASK_ORG_ID = t3.TASK_ORG_ID
+             left join TASK_CHECK_ENT t4 on t1.TASK_ID = t4.TASK_ID
+             left join TASK_EXECUTE_OBJ_ENT t44 on t1.EXECUTE_UID = t44.EXECUTE_UID
+             left join TASK_CHECK_DEPT_RESULT t5 on t4.TASK_ID = t5.TASK_ID and t4.TASK_ENT_ID = t5.TASK_ENT_ID
+             left join TASK_EXECUTE_PERSON_AGENT t6 on t1.EXECUTE_UID = t6.EXECUTE_UID",
         );
 
         assert!(result.editable);
         let analysis = result.analysis.unwrap();
         assert!(analysis.distinct);
         assert!(analysis.multi_source);
+        assert_eq!(analysis.allow_insert, Some(false));
         assert_eq!(analysis.allow_insert_delete, Some(false));
-        assert_eq!(analysis.columns, vec![star_column(Some("u"), Some("u:0"), "u.*")]);
+        assert_eq!(analysis.sources.as_ref().map(Vec::len), Some(10));
+        assert_eq!(analysis.columns, vec![star_column(Some("t4"), Some("t4:6"), "t4.*")]);
     }
 
     #[test]

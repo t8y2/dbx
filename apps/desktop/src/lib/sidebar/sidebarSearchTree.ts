@@ -22,6 +22,36 @@ function normalizedLabel(node: TreeNode): string {
   return node.label;
 }
 
+function findNodePath(nodes: readonly TreeNode[], targetNodeId: string, ancestors: readonly TreeNode[] = []): readonly TreeNode[] | undefined {
+  for (const node of nodes) {
+    const path = [...ancestors, node];
+    if (node.id === targetNodeId) return path;
+    if (node.children) {
+      const childPath = findNodePath(node.children, targetNodeId, path);
+      if (childPath) return childPath;
+    }
+  }
+  return undefined;
+}
+
+function nodePreservesSearchSubtree(node: TreeNode, matchLabel: SidebarLabelMatcher, searchableNodeTypes?: ReadonlySet<TreeNodeType>): boolean {
+  if (searchableNodeTypes && !searchableNodeTypes.has(node.type)) return false;
+  return preserveMatchedSubtreeTypes.has(node.type) && !!bestMatch(matchLabel, normalizedLabel(node), node.comment, node.searchAliases);
+}
+
+export function createSidebarSearchSubtreePreserver(query: string, searchableNodeTypes?: ReadonlySet<TreeNodeType>): (node: TreeNode) => boolean {
+  const matchLabel = query ? createSidebarLabelMatcher(query) : undefined;
+  return (node) => !!matchLabel && nodePreservesSearchSubtree(node, matchLabel, searchableNodeTypes);
+}
+
+export function resolveSidebarObjectSearchFilter(nodes: readonly TreeNode[], targetNodeId: string, query: string, searchableNodeTypes?: ReadonlySet<TreeNodeType>): string {
+  if (!query) return query;
+  const matchLabel = createSidebarLabelMatcher(query);
+  const path = findNodePath(nodes, targetNodeId);
+  const preservesSubtree = path?.some((node) => nodePreservesSearchSubtree(node, matchLabel, searchableNodeTypes));
+  return preservesSubtree ? "" : query;
+}
+
 export function filterSidebarTree(nodes: TreeNode[], query: string, collapsedIds: ReadonlySet<string>, searchableNodeTypes?: ReadonlySet<TreeNodeType>): TreeNode[] {
   const matchLabel = query ? createSidebarLabelMatcher(query) : undefined;
   if (!matchLabel && searchableNodeTypes === undefined) return nodes;

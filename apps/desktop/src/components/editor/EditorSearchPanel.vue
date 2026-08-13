@@ -276,7 +276,7 @@ function openSearch(): boolean {
     cmOpenSearchPanel(v);
     const sel = v.state.selection.main;
     const selText = v.state.sliceDoc(sel.from, sel.to);
-    if (selText && !selText.includes("\n")) {
+    if (selText) {
       searchText.value = selText;
     }
     // Set scope when there's a multi-line selection

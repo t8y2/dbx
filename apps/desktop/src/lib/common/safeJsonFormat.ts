@@ -243,36 +243,62 @@ const MAX_DIFF_UNITS = 200_000;
 const MAX_DIFF_DISTANCE = 2000;
 
 function diffText(a: string, b: string): DisplayDiffOp[] {
+  const source = splitCodePoints(a);
+  const target = splitCodePoints(b);
   let prefix = 0;
-  while (prefix < a.length && prefix < b.length && a.charCodeAt(prefix) === b.charCodeAt(prefix)) prefix += 1;
+  while (prefix < source.units.length && prefix < target.units.length && source.units[prefix] === target.units[prefix]) prefix += 1;
   let suffix = 0;
-  while (suffix < a.length - prefix && suffix < b.length - prefix && a.charCodeAt(a.length - 1 - suffix) === b.charCodeAt(b.length - 1 - suffix)) suffix += 1;
-  const midA = a.slice(prefix, a.length - suffix);
-  const midB = b.slice(prefix, b.length - suffix);
+  while (suffix < source.units.length - prefix && suffix < target.units.length - prefix && source.units[source.units.length - 1 - suffix] === target.units[target.units.length - 1 - suffix]) {
+    suffix += 1;
+  }
+  const sourceMiddleEnd = source.units.length - suffix;
+  const targetMiddleEnd = target.units.length - suffix;
+  const midA = source.units.slice(prefix, sourceMiddleEnd);
+  const midB = target.units.slice(prefix, targetMiddleEnd);
 
   const ops: DisplayDiffOp[] = [];
-  if (prefix > 0) ops.push({ kind: "equal", aFrom: 0, aTo: prefix, bFrom: 0, bTo: prefix });
+  if (prefix > 0) ops.push({ kind: "equal", aFrom: 0, aTo: source.offsets[prefix], bFrom: 0, bTo: target.offsets[prefix] });
   if (midA.length > 0 || midB.length > 0) {
     const replace = (): DisplayDiffOp[] => [
-      { kind: "delete", aFrom: prefix, aTo: a.length - suffix, bFrom: prefix, bTo: prefix },
-      { kind: "insert", aFrom: prefix, aTo: prefix, bFrom: prefix, bTo: b.length - suffix },
+      { kind: "delete", aFrom: source.offsets[prefix], aTo: source.offsets[sourceMiddleEnd], bFrom: target.offsets[prefix], bTo: target.offsets[prefix] },
+      { kind: "insert", aFrom: source.offsets[prefix], aTo: source.offsets[prefix], bFrom: target.offsets[prefix], bTo: target.offsets[targetMiddleEnd] },
     ];
     const middle = midA.length + midB.length <= MAX_DIFF_UNITS ? myersDiff(midA, midB) : null;
     if (!middle) {
       ops.push(...replace());
     } else {
       for (const op of middle) {
-        ops.push({ kind: op.kind, aFrom: prefix + op.aFrom, aTo: prefix + op.aTo, bFrom: prefix + op.bFrom, bTo: prefix + op.bTo });
+        ops.push({
+          kind: op.kind,
+          aFrom: source.offsets[prefix + op.aFrom],
+          aTo: source.offsets[prefix + op.aTo],
+          bFrom: target.offsets[prefix + op.bFrom],
+          bTo: target.offsets[prefix + op.bTo],
+        });
       }
     }
   }
-  if (suffix > 0) ops.push({ kind: "equal", aFrom: a.length - suffix, aTo: a.length, bFrom: b.length - suffix, bTo: b.length });
+  if (suffix > 0) {
+    ops.push({ kind: "equal", aFrom: source.offsets[sourceMiddleEnd], aTo: a.length, bFrom: target.offsets[targetMiddleEnd], bTo: b.length });
+  }
   return ops;
+}
+
+function splitCodePoints(text: string): { units: string[]; offsets: number[] } {
+  const units: string[] = [];
+  const offsets = [0];
+  let offset = 0;
+  for (const unit of text) {
+    units.push(unit);
+    offset += unit.length;
+    offsets.push(offset);
+  }
+  return { units, offsets };
 }
 
 type MidDiffOp = { kind: "equal" | "delete" | "insert"; aFrom: number; aTo: number; bFrom: number; bTo: number };
 
-function myersDiff(a: string, b: string): MidDiffOp[] | null {
+function myersDiff(a: readonly string[], b: readonly string[]): MidDiffOp[] | null {
   const n = a.length;
   const m = b.length;
   if (n === 0 && m === 0) return [];
@@ -291,7 +317,7 @@ function myersDiff(a: string, b: string): MidDiffOp[] | null {
       const fromDown = k === -d || (k !== d && v[k - 1 + offset] < v[k + 1 + offset]);
       let x = fromDown ? v[k + 1 + offset] : v[k - 1 + offset] + 1;
       let y = x - k;
-      while (x < n && y < m && a.charCodeAt(x) === b.charCodeAt(y)) {
+      while (x < n && y < m && a[x] === b[y]) {
         x += 1;
         y += 1;
       }

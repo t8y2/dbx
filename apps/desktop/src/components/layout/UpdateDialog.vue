@@ -37,6 +37,9 @@ const isDesktop = isTauriRuntime();
 const renderedNotes = ref("");
 // Only active file replacement (installation) must trap the dialog.
 const isCloseBlocked = computed(() => props.isInstallingUpdate);
+// Accidental dismiss gestures (outside click, Escape) must not cancel a running download;
+// only the explicit close/cancel buttons should.
+const blocksImplicitDismiss = computed(() => props.isInstallingUpdate || props.isDownloadingUpdate);
 const canIgnoreVersion = computed(() => props.updateInfo?.update_available === true && !props.updateDownloaded && !props.isDownloadingUpdate && !props.isInstallingUpdate && !props.updateReady);
 
 function handleCancel() {
@@ -91,12 +94,12 @@ watch(
       :show-close-button="!isCloseBlocked"
       @interact-outside="
         (e: Event) => {
-          if (isCloseBlocked) e.preventDefault();
+          if (blocksImplicitDismiss) e.preventDefault();
         }
       "
       @escape-key-down="
         (e: Event) => {
-          if (isCloseBlocked) e.preventDefault();
+          if (blocksImplicitDismiss) e.preventDefault();
         }
       "
     >

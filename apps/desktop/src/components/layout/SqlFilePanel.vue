@@ -15,14 +15,16 @@ import { useToast } from "@/composables/useToast";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { translateBackendError } from "@/i18n/backend-errors";
 import { copyToClipboard } from "@/lib/common/clipboard";
-import { resolveExternalSqlFileTarget, unassociatedExternalSqlFileTarget } from "@/lib/sql/externalSqlFileTarget";
+import { resolveDefaultDatabase } from "@/lib/database/defaultDatabase";
+import { resolveExternalSqlFileTarget } from "@/lib/sql/externalSqlFileTarget";
 import { externalSqlFileOpenErrorMessage, formatSqlFileSize, isExternalSqlFileTooLargeError } from "@/lib/sql/sqlFileOpen";
 import { focusSidebarRenameInput } from "@/lib/sidebar/sidebarRenameFocus";
 import * as api from "@/lib/backend/api";
 import type { SqlFileEntry } from "@/lib/backend/api";
 import type { SqlProject } from "@/lib/backend/tauri";
-import { getSqlFileFolderPaths, saveSqlFileFolderPaths, notifySqlFileFoldersChanged } from "@/lib/sqlFile/sqlFileFolders";
+import { notifySqlFileFoldersChanged } from "@/lib/sqlFile/sqlFileFolders";
 import { orderedListRangeAnchorIndex, orderedListSelectionIntent, type OrderedListSelectionItem } from "@/lib/selection/orderedListSelection";
+import { useFolderWatcherLifecycle } from "@/composables/useFolderWatcherLifecycle";
 
 const emit = defineEmits<{
   close: [];
@@ -60,6 +62,17 @@ function clearSelection() {
   selectedPaths.value = new Set();
   activePath.value = null;
   selectionAnchorIndex.value = null;
+}
+
+function selectPath(path: string | null) {
+  if (path === null) {
+    clearSelection();
+    return;
+  }
+  selectedPaths.value = new Set([path]);
+  activePath.value = path;
+  const index = visibleItems.value.findIndex((item) => item.id === path);
+  selectionAnchorIndex.value = index >= 0 ? index : null;
 }
 
 function isPathHighlighted(path: string) {
@@ -110,7 +123,7 @@ function syncFromProjects() {
     if (!folders.value.some((folder) => folder.project.id === project.id)) {
       folders.value.push(createFolderState(project));
       void loadFolderEntries(project.rootPath);
-      void ensureFolderWatcher(project.rootPath);
+      // watcher 由 useFolderWatcherLifecycle 管理仅激活项目
     }
   }
   folders.value.sort((a, b) => wanted.findIndex((p) => p.id === a.project.id) - wanted.findIndex((p) => p.id === b.project.id));
@@ -287,9 +300,15 @@ function dropFolderWatcher(folderPath: string) {
   folderWatchers.delete(folderPath);
 }
 
-function stopAllFolderWatchers() {
-  for (const path of [...folderWatchers.keys()]) dropFolderWatcher(path);
-}
+// ---- watcher 生命周期：仅激活项目 watch，切换时自动拆除/创建 ----
+const activeFolderPath = computed(() => activeFolder.value?.path ?? null);
+const watcherLifecycle = useFolderWatcherLifecycle({
+  activeFolderPath,
+  ensureWatcher: (path) => void ensureFolderWatcher(path),
+  dropWatcher: (path) => dropFolderWatcher(path),
+  rescan: (path) => void loadFolderEntries(path, { silent: true }),
+  isEnabled: () => isTauriRuntime(),
+});
 
 // ---- trust flow ----
 
@@ -366,6 +385,7 @@ async function openFile(folder: FolderState, path: string) {
     const database = connection ? resolveDefaultDatabase(connection, []) : "";
     const target = resolveExternalSqlFileTarget(path, (savedConnectionId) => !!connectionStore.getConfig(savedConnectionId), { connectionId, database });
     queryStore.openExternalSqlFile(target.connectionId, target.database, path, snapshot.content, snapshot.version, {
+      catalog: target.catalog,
       projectId: folder.project.id,
       fileEncoding: snapshot.encoding,
       fileLineEnding: snapshot.lineEnding,
@@ -673,7 +693,7 @@ async function revealActiveFile() {
     toast(t("sqlFileTree.noFileToReveal"), 3000);
     return;
   }
-  selectedPath.value = path;
+  activePath.value = path;
   await nextTick();
   document.querySelector(`[data-sql-file-row="${CSS.escape(path)}"]`)?.scrollIntoView({ block: "center" });
 }
@@ -734,6 +754,21 @@ function rowsFor(folder: FolderState): TreeRow[] {
   return result;
 }
 
+type TreeEntry = { entry: SqlFileEntry; depth: number };
+function flatTree(entries: SqlFileEntry[], expanded: Set<string>): TreeEntry[] {
+  const result: TreeEntry[] = [];
+  function walk(items: SqlFileEntry[], depth: number) {
+    for (const item of items) {
+      result.push({ entry: item, depth });
+      if (item.is_dir && expanded.has(item.path)) {
+        walk(item.children, depth + 1);
+      }
+    }
+  }
+  walk(entries, 0);
+  return result;
+}
+
 function projectConnectionLabel(folder: FolderState): string {
   const id = folder.project.connectionId;
   if (!id) return t("sqlFileTree.noBoundConnection");
@@ -746,21 +781,20 @@ onMounted(async () => {
   try {
     await projectStore.loadProjects();
     syncFromProjects();
+    watcherLifecycle.init();
   } catch {
     /* startup load errors surface via toast on later interactions */
   }
 });
 
-// Silently rescan open projects when the window regains focus so files edited
-// by external tools become visible without a manual refresh.
+// 窗口聚焦时仅重扫激活项目（非全项目），减少后台 I/O。
 function handleWindowFocus() {
-  if (!isTauriRuntime() || folders.value.length === 0) return;
-  void Promise.all(folders.value.map((folder) => loadFolderEntries(folder.path, { silent: true })));
+  watcherLifecycle.handleFocus();
 }
 
 onBeforeUnmount(() => {
   window.removeEventListener("focus", handleWindowFocus);
-  stopAllFolderWatchers();
+  watcherLifecycle.cleanup();
 });
 
 watch(
@@ -1115,7 +1149,7 @@ function clearContextTarget() {
                     <div
                       v-else
                       class="flex cursor-default items-center gap-1 px-2 py-1 hover:bg-muted/60 text-sm"
-                      :class="[row.entry.is_dir ? 'rounded-sm' : 'rounded-none', selectedPath === row.entry.path ? 'bg-accent text-accent-foreground' : '']"
+                      :class="[row.entry.is_dir ? 'rounded-sm' : 'rounded-none', isPathHighlighted(row.entry.path) ? 'bg-accent text-accent-foreground' : '']"
                       :style="{ paddingLeft: row.depth * 16 + 8 + 'px' }"
                       :data-sql-file-row="row.entry.path"
                       @click="

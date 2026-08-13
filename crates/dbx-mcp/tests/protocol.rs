@@ -42,6 +42,15 @@ impl DbxBackend for EmptyBackend {
         Ok(config)
     }
 
+    async fn duplicate_connection_for_mcp(
+        &self,
+        _source_id: &str,
+        _copy_id: &str,
+        _copy_name: &str,
+    ) -> Result<ConnectionConfig, String> {
+        Err("not exercised".to_string())
+    }
+
     async fn remove_connection_for_mcp(&self, _connection_id: &str) -> Result<bool, String> {
         Ok(true)
     }
@@ -88,6 +97,15 @@ impl DbxBackend for PolicyBackend {
         Ok(config)
     }
 
+    async fn duplicate_connection_for_mcp(
+        &self,
+        _source_id: &str,
+        _copy_id: &str,
+        _copy_name: &str,
+    ) -> Result<ConnectionConfig, String> {
+        Err("not exercised".to_string())
+    }
+
     async fn remove_connection_for_mcp(&self, _connection_id: &str) -> Result<bool, String> {
         Ok(true)
     }
@@ -117,8 +135,9 @@ async fn initializes_lists_tools_and_calls_a_tool() {
 
     let tools = client.peer().list_tools(None).await.expect("list tools");
     let names = tools.tools.iter().map(|tool| tool.name.as_ref()).collect::<Vec<_>>();
-    assert_eq!(names.len(), 12);
+    assert_eq!(names.len(), 13);
     assert!(names.contains(&"dbx_list_connections"));
+    assert!(names.contains(&"dbx_duplicate_connection"));
     assert!(names.contains(&"dbx_execute_redis_command"));
     assert!(names.contains(&"dbx_execute_and_show"));
     assert!(names.contains(&"dbx_open_session"));
@@ -190,6 +209,30 @@ async fn enforces_global_connection_scope_and_read_only_policy() {
     assert_eq!(read_only.is_error, Some(true));
     assert!(read_only.content[0].as_text().expect("read-only result").text.contains("MCP_READ_ONLY"));
 
+    client.cancel().await.expect("close MCP client");
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn duplicate_connection_rejects_ambiguous_source_names() {
+    let backend = PolicyBackend {
+        policy: McpGlobalPolicy::default(),
+        connections: vec![test_connection("first", "shared"), test_connection("second", "shared")],
+        group_paths: Ok(HashMap::new()),
+    };
+    let (server_transport, client_transport) = tokio::io::duplex(16 * 1024);
+    let server = DbxMcpServer::with_runtime_options(Arc::new(backend), McpScope::default(), false);
+    let server_task = tokio::spawn(async move { server.serve(server_transport).await });
+    let client = ().serve(client_transport).await.expect("initialize MCP client");
+    let result = client
+        .peer()
+        .call_tool(CallToolRequestParams::new("dbx_duplicate_connection").with_arguments(
+            json!({ "connection_name": "shared", "new_name": "copy" }).as_object().cloned().unwrap_or_else(Map::new),
+        ))
+        .await
+        .expect("call duplicate connection");
+    assert_eq!(result.is_error, Some(true));
+    assert!(result.content[0].as_text().expect("ambiguous result").text.contains("AMBIGUOUS_CONNECTION"));
     client.cancel().await.expect("close MCP client");
     server_task.abort();
 }

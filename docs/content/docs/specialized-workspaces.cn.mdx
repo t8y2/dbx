@@ -12,7 +12,7 @@ description: 使用 DBX 管理 Redis、MongoDB、搜索与向量数据库、HBas
 | 类别 | 连接类型 | 主要入口 |
 | --- | --- | --- |
 | 键值与文档 | Redis、MongoDB | Key/文档浏览、筛选、编辑、命令或聚合流程 |
-| 搜索与文档索引 | Elasticsearch、Easysearch、Manticore Search | 索引/文档浏览和对应请求入口 |
+| 搜索与文档索引 | Elasticsearch、Easysearch、Meilisearch、Manticore Search | 索引/文档浏览和对应请求入口 |
 | 向量数据库 | Qdrant、Milvus、Weaviate、ChromaDB | Collection 浏览、向量检索、Upsert、删除和请求预览 |
 | 宽表与列族 | HBase | Namespace、表结构、Column Family 和行数据浏览 |
 | 消息队列 | Pulsar、Kafka、RocketMQ、RabbitMQ | Topic、订阅/消费者、消息、监控、权限、策略和管理 API |
@@ -36,11 +36,12 @@ Redis 和 MongoDB 有独立的详细文档：
 
 ## 搜索与文档索引
 
-Elasticsearch、Easysearch 和 Manticore Search 使用面向索引与文档的浏览方式。DBX 会根据驱动返回的对象结构展示索引或集合，并提供浏览、查询和查看文档的入口。
+Elasticsearch、Easysearch、Meilisearch 和 Manticore Search 使用面向索引与文档的浏览方式。DBX 会根据驱动返回的对象结构展示索引或集合，并提供浏览、查询和查看文档的入口。
 
 使用时需要注意：
 
-- Elasticsearch 和 Easysearch 的地址通常是 HTTP/HTTPS 服务端点，不是传统数据库 TCP 端口
+- Elasticsearch、Easysearch 和 Meilisearch 使用 HTTP/HTTPS 服务端点，不是传统数据库 TCP 端口
+- Meilisearch 使用 DBX 内置的 Rust HTTP 驱动；API Key 填在连接密码字段，默认端口为 `7700`
 - TLS、代理和认证方式取决于连接类型及服务端配置
 - 文档查询和写入能力会随驱动、服务端版本和账号权限变化
 - 结构对比、SQL 文件执行等 SQL 工作流只在对应引擎确实支持时开放

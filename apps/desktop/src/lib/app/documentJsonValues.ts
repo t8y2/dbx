@@ -29,17 +29,20 @@ export function parseDocumentStoreInputValue(raw: MongoInputValue, kind: Documen
 }
 
 export function stringifyDocumentStoreValue(value: unknown, kind: DocumentStoreKind, indent?: number): string {
-  return kind === "elasticsearch" ? stringifyJsonPreservingLargeNumbers(value, indent) : JSON.stringify(value, null, indent ?? undefined);
+  return kind === "mongodb" ? JSON.stringify(value, null, indent ?? undefined) : stringifyJsonPreservingLargeNumbers(value, indent);
 }
 
 export function documentStoreValueForGrid(value: unknown, kind: DocumentStoreKind): MongoInputValue {
-  if (kind === "elasticsearch" && isLosslessJsonNumber(value)) return value.raw;
+  if (kind !== "mongodb" && isLosslessJsonNumber(value)) return value.raw;
   if (value === null || typeof value === "string" || typeof value === "number" || typeof value === "boolean") return value;
   return stringifyDocumentStoreValue(value, kind);
 }
 
 export function serializeDocumentStoreId(value: unknown, kind: DocumentStoreKind): string {
-  return kind === "elasticsearch" ? String(value) : serializeMongoDocumentId(value);
+  if (kind !== "mongodb" && isLosslessJsonNumber(value)) return value.raw;
+  if (kind === "elasticsearch") return String(value);
+  if (kind === "meilisearch") return typeof value === "string" ? `__dbx_meilisearch_string_id__${JSON.stringify(value)}` : String(value);
+  return serializeMongoDocumentId(value);
 }
 
 /**

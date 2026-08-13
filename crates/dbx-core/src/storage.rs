@@ -2288,6 +2288,60 @@ fn persist_connection_in_tx(tx: &rusqlite::Transaction<'_>, config: &ConnectionC
     persist_nacos_auth_secrets_in_tx(tx, &config)
 }
 
+fn insert_connection_copy_next_to_source(entries: &mut Vec<serde_json::Value>, source_id: &str, copy_id: &str) -> bool {
+    let mut index = 0;
+    while index < entries.len() {
+        let entry_type = entries[index].get("type").and_then(serde_json::Value::as_str);
+        if entry_type == Some("connection")
+            && entries[index].get("id").and_then(serde_json::Value::as_str) == Some(source_id)
+        {
+            entries.insert(index + 1, serde_json::json!({ "type": "connection", "id": copy_id }));
+            return true;
+        }
+        if entry_type == Some("group") {
+            if let Some(children) = entries[index].get_mut("children").and_then(serde_json::Value::as_array_mut) {
+                if insert_connection_copy_next_to_source(children, source_id, copy_id) {
+                    return true;
+                }
+            } else if let Some(connection_ids) =
+                entries[index].get_mut("connectionIds").and_then(serde_json::Value::as_array_mut)
+            {
+                if let Some(source_index) = connection_ids.iter().position(|id| id.as_str() == Some(source_id)) {
+                    connection_ids.insert(source_index + 1, serde_json::Value::String(copy_id.to_string()));
+                    return true;
+                }
+            }
+        }
+        index += 1;
+    }
+    false
+}
+
+fn copy_sidebar_layout_entry_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    source_id: &str,
+    copy_id: &str,
+) -> Result<(), String> {
+    let Some(layout_json) = tx
+        .query_row("SELECT layout_json FROM sidebar_layout WHERE id = 1", [], |row| row.get::<_, String>(0))
+        .optional()
+        .map_err(|error| error.to_string())?
+    else {
+        return Ok(());
+    };
+    let mut layout: serde_json::Value = serde_json::from_str(&layout_json).map_err(|error| error.to_string())?;
+    let Some(order) = layout.get_mut("order").and_then(serde_json::Value::as_array_mut) else {
+        return Err("INVALID_SIDEBAR_LAYOUT: sidebar order is not an array".to_string());
+    };
+    if !insert_connection_copy_next_to_source(order, source_id, copy_id) {
+        order.push(serde_json::json!({ "type": "connection", "id": copy_id }));
+    }
+    let updated = serde_json::to_string(&layout).map_err(|error| error.to_string())?;
+    tx.execute("UPDATE sidebar_layout SET layout_json = ?1 WHERE id = 1", [updated])
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
 fn preserve_unreadable_connections_for_replacement(
     tx: &rusqlite::Transaction<'_>,
     replacement_ids: &HashSet<String>,
@@ -2408,6 +2462,62 @@ impl Storage {
             Ok(config)
         })
         .await
+    }
+
+    pub async fn duplicate_connection_for_mcp(
+        &self,
+        source_id: &str,
+        copy_id: &str,
+        copy_name: &str,
+    ) -> Result<ConnectionConfig, String> {
+        let source_id = source_id.to_string();
+        let copy_id = copy_id.to_string();
+        let copied_id = copy_id.clone();
+        let copy_name = copy_name.to_string();
+        self.with_conn(move |conn| {
+            let tx = conn.transaction().map_err(|error| error.to_string())?;
+            ensure_mcp_connection_change_allowed_in_tx(&tx, Some(&source_id))?;
+            let copy_name_lower = copy_name.to_lowercase();
+            let mut names = tx.prepare("SELECT config_json FROM connections").map_err(|error| error.to_string())?;
+            let duplicate_name = names
+                .query_map([], |row| row.get::<_, String>(0))
+                .map_err(|error| error.to_string())?
+                .filter_map(Result::ok)
+                .filter_map(|json| serde_json::from_str::<ConnectionConfig>(&json).ok())
+                .any(|connection| connection.name.to_lowercase() == copy_name_lower);
+            drop(names);
+            if duplicate_name {
+                return Err(format!("CONNECTION_ALREADY_EXISTS: connection '{copy_name}' already exists"));
+            }
+            let source_json = tx
+                .query_row("SELECT config_json FROM connections WHERE id = ?1", [&source_id], |row| {
+                    row.get::<_, String>(0)
+                })
+                .optional()
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| format!("CONNECTION_NOT_FOUND: connection '{source_id}' was not found"))?;
+            let mut copy: ConnectionConfig = serde_json::from_str(&source_json).map_err(|error| error.to_string())?;
+            copy.id = copy_id.clone();
+            copy.name = copy_name;
+            let copy_json = serde_json::to_string(&copy).map_err(|error| error.to_string())?;
+            tx.execute("INSERT INTO connections (id, config_json) VALUES (?1, ?2)", params![copy_id, copy_json])
+                .map_err(|error| error.to_string())?;
+            tx.execute(
+                "INSERT INTO connection_secrets (connection_id, key, secret) \
+                 SELECT ?1, key, secret FROM connection_secrets WHERE connection_id = ?2",
+                params![copy.id, source_id],
+            )
+            .map_err(|error| error.to_string())?;
+            copy_sidebar_layout_entry_in_tx(&tx, &source_id, &copy.id)?;
+            tx.commit().map_err(|error| error.to_string())?;
+            Ok(copy)
+        })
+        .await?;
+        self.load_connections()
+            .await?
+            .into_iter()
+            .find(|connection| connection.id == copied_id)
+            .ok_or_else(|| "CONNECTION_SAVE_ERROR: copied connection could not be reloaded".to_string())
     }
 
     pub async fn remove_connection_for_mcp(&self, connection_id: &str) -> Result<bool, String> {

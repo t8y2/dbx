@@ -9,6 +9,7 @@ const backend = vi.hoisted(() => ({
   cancelQuery: vi.fn(),
   ensureConnected: vi.fn(),
   documentDeleteDocument: vi.fn(),
+  documentSaveMeilisearchBatch: vi.fn(),
 }));
 
 const documentJsonEditor = vi.hoisted(() => ({
@@ -26,6 +27,11 @@ const dataGrid = vi.hoisted(() => ({
           }
         | undefined
       >)
+    | undefined,
+  customSaveHandler: undefined as
+    | {
+        save: (changes: { dirtyRows: Map<number, Map<number, unknown>>; deletedRows: Set<number>; newRows: unknown[][]; newRowMeta: unknown[]; columns: string[]; rows: unknown[][] }) => Promise<void>;
+      }
     | undefined,
 }));
 
@@ -56,6 +62,7 @@ vi.mock("@/lib/backend/api", () => ({
   documentFindDocuments: backend.documentFindDocuments,
   cancelQuery: backend.cancelQuery,
   documentDeleteDocument: backend.documentDeleteDocument,
+  documentSaveMeilisearchBatch: backend.documentSaveMeilisearchBatch,
 }));
 
 vi.mock("@/stores/connectionStore", () => ({
@@ -82,9 +89,11 @@ vi.mock("@/components/grid/DataGrid.vue", async () => {
         database: { type: String, default: "" },
         columnLayoutScopeKey: { type: String, default: "" },
         fullExportResult: { type: Function, default: undefined },
+        customSaveHandler: { type: Object, default: undefined },
       },
       setup(props, { expose, slots }) {
         dataGrid.fullExportResult = props.fullExportResult as typeof dataGrid.fullExportResult;
+        dataGrid.customSaveHandler = props.customSaveHandler as typeof dataGrid.customSaveHandler;
         expose({
           visibleColumnCount: 2,
           displayableColumnCount: 2,
@@ -278,9 +287,12 @@ beforeEach(async () => {
   backend.cancelQuery.mockReset();
   backend.ensureConnected.mockReset();
   backend.documentDeleteDocument.mockReset();
+  backend.documentSaveMeilisearchBatch.mockReset();
   dataGrid.fullExportResult = undefined;
+  dataGrid.customSaveHandler = undefined;
   documentJsonEditor.openSearch.mockClear();
   backend.documentDeleteDocument.mockResolvedValue(undefined);
+  backend.documentSaveMeilisearchBatch.mockResolvedValue(0);
   settings.editorSettings.mongoViewMode = "table";
   settings.editorSettings.columnWidthDensity = "standard";
   settings.editorSettings.dataGridRenderMode = "canvas";
@@ -756,5 +768,72 @@ describe("DocumentBrowser MongoDB filter value types", () => {
 
     expect(backend.documentDeleteDocument).not.toHaveBeenCalled();
     expect(document.body.textContent).toContain("dangerDialog.deleteMessage");
+  });
+
+  it("saves Meilisearch grid changes in one batch request", async () => {
+    app?.unmount();
+    backend.getColumns.mockResolvedValue([
+      { name: "id", data_type: "string", is_primary_key: true },
+      { name: "title", data_type: "string" },
+      { name: "rating", data_type: "number" },
+      { name: "obsolete", data_type: "boolean" },
+    ]);
+    backend.documentFindDocuments.mockResolvedValue({
+      documents: [
+        { _id: "001", title: "One", rating: 1, obsolete: true },
+        { _id: 2, title: "Two", rating: 2, obsolete: false },
+        { _id: 3, title: "Three", rating: 3, obsolete: false },
+      ],
+      raw_documents: [],
+      total: 3,
+      total_is_exact: true,
+    });
+    backend.documentSaveMeilisearchBatch.mockResolvedValue(4);
+    app = createApp(DocumentBrowser, {
+      connectionId: "meili-1",
+      database: "default",
+      collection: "movies",
+      databaseType: "meilisearch",
+    });
+    app.mount(root!);
+    await flushUi();
+
+    expect(dataGrid.customSaveHandler).toBeDefined();
+    await dataGrid.customSaveHandler!.save({
+      dirtyRows: new Map([
+        [
+          0,
+          new Map([
+            [1, "One revised"],
+            [3, null],
+          ]),
+        ],
+      ]),
+      deletedRows: new Set([2]),
+      newRows: [
+        ["004", "Four", 4, false],
+        [null, "Generated", 5, true],
+      ],
+      newRowMeta: [{}, {}],
+      columns: ["_id", "title", "rating", "obsolete"],
+      rows: [
+        ["001", "One", 1, true],
+        [2, "Two", 2, false],
+        [3, "Three", 3, false],
+      ],
+    });
+
+    expect(backend.documentSaveMeilisearchBatch).toHaveBeenCalledOnce();
+    const [connectionId, collection, updates, deleteIds, inserts] = backend.documentSaveMeilisearchBatch.mock.calls[0]!;
+    expect(connectionId).toBe("meili-1");
+    expect(collection).toBe("movies");
+    expect(updates).toHaveLength(1);
+    expect(updates[0].id).toBe('__dbx_meilisearch_string_id__"001"');
+    expect(JSON.parse(updates[0].docJson)).toEqual({ title: "One revised", rating: 1 });
+    expect(deleteIds).toEqual(["3"]);
+    expect(inserts.map((value: string) => JSON.parse(value))).toEqual([
+      { title: "Four", rating: 4, obsolete: false, _id: "004" },
+      { title: "Generated", rating: 5, obsolete: true },
+    ]);
   });
 });

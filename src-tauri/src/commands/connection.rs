@@ -1001,6 +1001,18 @@ async fn test_connection_with_info_inner(
                     .await
                     .map(|_| "Connection successful".to_string())
             }
+            DatabaseType::Meilisearch => {
+                let client = db::meilisearch_driver::MeilisearchClient::new(
+                    &url,
+                    Some(&config.password),
+                    config.ssl,
+                    config.url_params.as_deref(),
+                    connect_timeout,
+                )?;
+                db::meilisearch_driver::test_connection(&client, connect_timeout)
+                    .await
+                    .map(|_| "Connection successful".to_string())
+            }
             DatabaseType::Hbase => {
                 let client = db::hbase_driver::HBaseClient::new(
                     &url,
@@ -1370,6 +1382,17 @@ pub async fn connect_db(
             );
             db::easysearch_driver::test_connection(&mut client, connect_timeout).await?;
             PoolKind::Easysearch(client)
+        }
+        DatabaseType::Meilisearch => {
+            let client = db::meilisearch_driver::MeilisearchClient::new(
+                &url,
+                Some(&db_config.password),
+                db_config.ssl,
+                db_config.url_params.as_deref(),
+                connect_timeout,
+            )?;
+            db::meilisearch_driver::test_connection(&client, connect_timeout).await?;
+            PoolKind::Meilisearch(client)
         }
         DatabaseType::Hbase => {
             let client = db::hbase_driver::HBaseClient::new(

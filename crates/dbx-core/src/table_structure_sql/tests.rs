@@ -850,6 +850,57 @@ fn oracle_timestamp_default_precedes_nullability_in_modify_sql() {
 }
 
 #[test]
+fn oracle_create_table_preserves_character_length_units() {
+    let mut byte_col = column("BYTE_COL");
+    byte_col.data_type = "VARCHAR2(12 BYTE)".to_string();
+    let mut char_col = column("CHAR_COL");
+    char_col.data_type = "VARCHAR2(12 CHAR)".to_string();
+
+    let result = build_create_table_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::Oracle),
+        schema: Some("DBX_APP".to_string()),
+        table_name: "DBX_ISSUE_4739".to_string(),
+        columns: vec![byte_col, char_col],
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
+        table_comment: None,
+        original_table_comment: None,
+    });
+
+    assert!(result.statements[0].contains("\"BYTE_COL\" VARCHAR2(12 BYTE)"));
+    assert!(result.statements[0].contains("\"CHAR_COL\" VARCHAR2(12 CHAR)"));
+}
+
+#[test]
+fn oracle_alter_column_preserves_character_length_unit() {
+    let mut column = column("DISPLAY_NAME");
+    column.data_type = "VARCHAR2(64 CHAR)".to_string();
+    column.original = Some(ColumnInfo {
+        name: "DISPLAY_NAME".to_string(),
+        data_type: "VARCHAR2(64 BYTE)".to_string(),
+        is_nullable: true,
+        column_default: None,
+        is_primary_key: false,
+        extra: None,
+        comment: None,
+        ..Default::default()
+    });
+
+    let result = build_single_column_alter_sql(SingleColumnAlterSqlOptions {
+        database_type: Some(DatabaseType::Oracle),
+        schema: Some("DBX_APP".to_string()),
+        table_name: "DBX_ISSUE_4739".to_string(),
+        column,
+    });
+
+    assert_eq!(
+        result.statements,
+        vec!["ALTER TABLE \"DBX_APP\".\"DBX_ISSUE_4739\" MODIFY (\"DISPLAY_NAME\" VARCHAR2(64 CHAR));"]
+    );
+}
+
+#[test]
 fn oracle_timestamp_precision_change_does_not_repeat_unchanged_nullability() {
     let mut col = column("time");
     col.data_type = "TIMESTAMP(9)".to_string();

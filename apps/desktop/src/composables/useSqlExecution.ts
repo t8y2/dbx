@@ -60,19 +60,28 @@ export function stripSqlComments(sql: string): string {
 const ELASTICSEARCH_TRANSIENT_DELETE_PATHS = [/^\/_search\/scroll\/?$/i, /^\/_pit\/?$/i, /^\/_async_search\/[^/?]+\/?$/i];
 const ELASTICSEARCH_DESTRUCTIVE_POST_PATHS = [/(?:^|\/)_(?:delete_by_query|update_by_query|bulk)(?:\/|$)/i, /^\/_reindex(?:\/|$)/i, /^\/_aliases(?:\/|$)/i, /\/_restore(?:\/|$)/i];
 
-function isDangerousElasticsearchRequest(method: "GET" | "POST" | "PUT" | "DELETE" | "HEAD", path: string): boolean {
+function isDangerousElasticsearchRequest(method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE" | "HEAD", path: string): boolean {
   const pathname = path.split("?", 1)[0].replace(/\/+$/, "") || "/";
   if (method === "DELETE") return !ELASTICSEARCH_TRANSIENT_DELETE_PATHS.some((pattern) => pattern.test(pathname));
-  if (method === "PUT") return true;
+  if (method === "PUT" || method === "PATCH") return true;
   return method === "POST" && ELASTICSEARCH_DESTRUCTIVE_POST_PATHS.some((pattern) => pattern.test(pathname));
 }
 
+function isDangerousMeilisearchRequest(method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE" | "HEAD", path: string): boolean {
+  if (method === "GET" || method === "HEAD") return false;
+  if (method === "DELETE" || method === "PUT" || method === "PATCH") return true;
+  const pathname = path.split("?", 1)[0].replace(/\/+$/, "") || "/";
+  return !(pathname === "/multi-search" || /\/search$/i.test(pathname) || /\/facet-search$/i.test(pathname) || /\/similar$/i.test(pathname) || /\/documents\/fetch$/i.test(pathname));
+}
+
 export function isDangerousSql(sql: string, databaseType?: DatabaseType): boolean {
-  if (databaseType === "elasticsearch" || databaseType === "easysearch") {
+  if (databaseType === "elasticsearch" || databaseType === "easysearch" || databaseType === "meilisearch") {
     const requests = splitSqlStatementRanges(sql, databaseType)
       .map((statement) => parseElasticsearchRestRequestTarget(statement.sql))
       .filter((request): request is NonNullable<typeof request> => request !== null);
-    if (requests.length > 0) return requests.some((request) => isDangerousElasticsearchRequest(request.method, request.path));
+    if (requests.length > 0) {
+      return requests.some((request) => (databaseType === "meilisearch" ? isDangerousMeilisearchRequest(request.method, request.path) : isDangerousElasticsearchRequest(request.method, request.path)));
+    }
   }
   const cleaned = stripSqlComments(sql);
   return cleaned.split(";").some((stmt) => DANGER_RE.test(stmt));
@@ -562,6 +571,7 @@ export function useSqlExecution(deps: {
 
 export function supportsSqlTemplateParameters(connection: Pick<ConnectionConfig, "db_type"> | undefined, sql = ""): boolean {
   if (!connection) return false;
+  if (connection.db_type === "meilisearch") return false;
   if (connection.db_type === "elasticsearch" || connection.db_type === "easysearch") return !isElasticsearchRestRequestText(sql);
   return connection.db_type !== "redis" && connection.db_type !== "mongodb" && connection.db_type !== "victoriametrics";
 }

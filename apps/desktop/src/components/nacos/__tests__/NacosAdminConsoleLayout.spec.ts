@@ -123,6 +123,13 @@ describe("NacosAdminConsole config workbench layout", () => {
     expect(source).toContain("configEditorZoomCommitScheduler.dispose()");
   });
 
+  it("keeps the configuration editor word wrapping aligned with the global editor setting", () => {
+    expect(source).toContain("const configEditorWordWrap = new Compartment()");
+    expect(source).toContain("configEditorWordWrap.of(editorSettings.wordWrap ? EditorView.lineWrapping : [])");
+    expect(source).toContain("configEditorWordWrap.reconfigure(settings.wordWrap ? EditorView.lineWrapping : [])");
+    expect(source).not.toContain("\n        EditorView.lineWrapping,\n");
+  });
+
   it("allows optional configuration columns to be hidden without hiding the data ID", () => {
     const configListHeader = source.indexOf('class="sticky top-0 z-20 grid border-b bg-muted');
     const columnVisibility = source.indexOf("nacos.visibleColumns");

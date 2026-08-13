@@ -3617,6 +3617,16 @@ export async function documentDeleteDocument(connectionId: string, database: str
   });
 }
 
+export async function documentSaveMeilisearchBatch(connectionId: string, collection: string, updates: Array<{ id: string; docJson: string }>, deleteIds: string[], inserts: string[]): Promise<number> {
+  return invoke("document_save_meilisearch_batch", {
+    connectionId,
+    collection,
+    updates,
+    deleteIds,
+    inserts,
+  });
+}
+
 export async function mongoDeleteDocuments(connectionId: string, database: string, collection: string, filterJson: string, many: boolean): Promise<{ affected_rows: number }> {
   const affectedRows = await invoke<number>("mongo_delete_documents", {
     connectionId,

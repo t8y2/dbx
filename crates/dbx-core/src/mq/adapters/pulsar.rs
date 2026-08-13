@@ -406,9 +406,12 @@ impl MessageQueueAdmin for PulsarAdmin {
     }
 
     async fn create_subscription(&self, topic: &TopicRef, sub: &str, pos: ResetPosition) -> Result<(), String> {
+        if matches!(pos, ResetPosition::PartitionOffset { .. }) {
+            return Err("Pulsar does not support cursor reset by Kafka partition offset".to_string());
+        }
         // PUT .../subscription/{sub} with the desired message id in the body.
         let path = self.profile.subscription_path(topic.domain(), &topic.path(), sub);
-        let body = reset_position_message_id(&pos);
+        let body = reset_position_message_id(&pos)?;
         self.send_empty(reqwest::Method::PUT, &path, Some(&body), None).await
     }
 
@@ -442,8 +445,11 @@ impl MessageQueueAdmin for PulsarAdmin {
             ResetPosition::MessageId { .. } | ResetPosition::Earliest | ResetPosition::Latest => {
                 // POST .../resetcursor with a message id body.
                 let path = self.profile.subscription_reset_cursor_path(topic.domain(), &topic.path(), sub);
-                let body = reset_position_message_id(&pos);
+                let body = reset_position_message_id(&pos)?;
                 self.send_empty(reqwest::Method::POST, &path, Some(&body), None).await
+            }
+            ResetPosition::PartitionOffset { .. } => {
+                Err("Pulsar does not support cursor reset by Kafka partition offset".to_string())
             }
         }
     }
@@ -1001,15 +1007,18 @@ fn is_partition_member(full: &str, partitioned: &std::collections::HashSet<Strin
 /// Build a message-id body for reset-cursor / create-subscription based on the
 /// requested position. Earliest/latest use the sentinel ledger/entry ids Pulsar
 /// recognises.
-fn reset_position_message_id(pos: &ResetPosition) -> serde_json::Value {
+fn reset_position_message_id(pos: &ResetPosition) -> Result<serde_json::Value, String> {
     match pos {
-        ResetPosition::Earliest => serde_json::json!({ "ledgerId": -1, "entryId": -1 }),
-        ResetPosition::Latest => serde_json::json!({ "ledgerId": i64::MAX, "entryId": i64::MAX }),
+        ResetPosition::Earliest => Ok(serde_json::json!({ "ledgerId": -1, "entryId": -1 })),
+        ResetPosition::Latest => Ok(serde_json::json!({ "ledgerId": i64::MAX, "entryId": i64::MAX })),
         ResetPosition::MessageId { ledger_id, entry_id } => {
-            serde_json::json!({ "ledgerId": ledger_id, "entryId": entry_id })
+            Ok(serde_json::json!({ "ledgerId": ledger_id, "entryId": entry_id }))
+        }
+        ResetPosition::PartitionOffset { .. } => {
+            Err("Pulsar does not support cursor reset by Kafka partition offset".to_string())
         }
         // Timestamp is handled by a dedicated path; default to latest here.
-        ResetPosition::Timestamp { .. } => serde_json::json!({ "ledgerId": i64::MAX, "entryId": i64::MAX }),
+        ResetPosition::Timestamp { .. } => Ok(serde_json::json!({ "ledgerId": i64::MAX, "entryId": i64::MAX })),
     }
 }
 
@@ -1614,11 +1623,12 @@ mod tests {
     #[test]
     fn reset_position_message_ids() {
         assert_eq!(
-            reset_position_message_id(&ResetPosition::Earliest),
+            reset_position_message_id(&ResetPosition::Earliest).unwrap(),
             serde_json::json!({"ledgerId": -1, "entryId": -1})
         );
-        let mid = reset_position_message_id(&ResetPosition::MessageId { ledger_id: 5, entry_id: 9 });
+        let mid = reset_position_message_id(&ResetPosition::MessageId { ledger_id: 5, entry_id: 9 }).unwrap();
         assert_eq!(mid, serde_json::json!({"ledgerId": 5, "entryId": 9}));
+        assert!(reset_position_message_id(&ResetPosition::PartitionOffset { partition: 0, offset: 9 }).is_err());
     }
 
     #[test]

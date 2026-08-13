@@ -197,6 +197,7 @@ const importSource = shallowRef<string | File | null>(null);
 const importSourceName = ref("");
 const configEditorTheme = new Compartment();
 const configEditorFontTheme = new Compartment();
+const configEditorWordWrap = new Compartment();
 const configEditorLanguage = new Compartment();
 const configListRequestGuard = createNacosLatestRequestGuard();
 const configDetailRequestGuard = createNacosLatestRequestGuard();
@@ -553,7 +554,7 @@ async function mountConfigEditor() {
         configEditorLanguage.of(language),
         configEditorTheme.of(theme),
         configEditorFontTheme.of(editorFontTheme(EditorView, editorSettings.fontSize, editorSettings.fontFamily, { fixedHeight: true, scrollable: true })),
-        EditorView.lineWrapping,
+        configEditorWordWrap.of(editorSettings.wordWrap ? EditorView.lineWrapping : []),
         EditorState.readOnly.of(!!props.readOnly),
         EditorView.editable.of(!props.readOnly),
         EditorView.updateListener.of((update) => {
@@ -2314,7 +2315,7 @@ watch(
     if (configEditorView.value !== view) return;
     configEditorFontSize.value = clampEditorFontSize(settings.fontSize);
     view.dispatch({
-      effects: [configEditorTheme.reconfigure(theme), configEditorFontTheme.reconfigure(editorFontTheme(EditorView, settings.fontSize, settings.fontFamily, { fixedHeight: true, scrollable: true }))],
+      effects: [configEditorTheme.reconfigure(theme), configEditorFontTheme.reconfigure(editorFontTheme(EditorView, settings.fontSize, settings.fontFamily, { fixedHeight: true, scrollable: true })), configEditorWordWrap.reconfigure(settings.wordWrap ? EditorView.lineWrapping : [])],
     });
   },
   { deep: true },

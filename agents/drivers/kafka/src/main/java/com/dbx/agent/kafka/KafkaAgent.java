@@ -973,16 +973,7 @@ public final class KafkaAgent {
         String groupId = stringOrEmpty(params, "groupId");
         String topic = stringOrEmpty(params, "topic");
 
-        Map<TopicPartition, OffsetAndMetadata> offsets = new HashMap<>();
-        JsonArray offsetArray = params.has("offsets") && params.get("offsets").isJsonArray()
-            ? params.getAsJsonArray("offsets") : new JsonArray();
-
-        for (JsonElement el : offsetArray) {
-            JsonObject offsetObj = el.getAsJsonObject();
-            int partition = offsetObj.get("partition").getAsInt();
-            long offset = offsetObj.get("offset").getAsLong();
-            offsets.put(new TopicPartition(topic, partition), new OffsetAndMetadata(offset));
-        }
+        Map<TopicPartition, OffsetAndMetadata> offsets = explicitConsumerGroupOffsets(params, topic);
 
         // If no explicit offsets, check for a "position" parameter.
         if (offsets.isEmpty()) {
@@ -1024,6 +1015,58 @@ public final class KafkaAgent {
         admin.alterConsumerGroupOffsets(groupId, offsets)
             .all().get(timeout, TimeUnit.MILLISECONDS);
         return Collections.singletonMap("ok", true);
+    }
+
+    static Map<TopicPartition, OffsetAndMetadata> explicitConsumerGroupOffsets(JsonObject params, String topic) {
+        Map<TopicPartition, OffsetAndMetadata> offsets = new HashMap<>();
+        if (!params.has("offsets")) {
+            return offsets;
+        }
+        JsonElement offsetsElement = params.get("offsets");
+        if (!offsetsElement.isJsonArray()) {
+            throw new IllegalArgumentException("offsets must be an array");
+        }
+        JsonArray offsetArray = offsetsElement.getAsJsonArray();
+        if (offsetArray.isEmpty()) {
+            throw new IllegalArgumentException("offsets must contain at least one partition offset");
+        }
+        for (JsonElement element : offsetArray) {
+            if (!element.isJsonObject()) {
+                throw new IllegalArgumentException("each offset must be an object");
+            }
+            JsonObject value = element.getAsJsonObject();
+            int partition = nonNegativeExactInt(value, "partition");
+            long offset = nonNegativeExactLong(value, "offset");
+            TopicPartition topicPartition = new TopicPartition(topic, partition);
+            if (offsets.put(topicPartition, new OffsetAndMetadata(offset)) != null) {
+                throw new IllegalArgumentException("duplicate partition in offsets: " + partition);
+            }
+        }
+        return offsets;
+    }
+
+    private static int nonNegativeExactInt(JsonObject object, String name) {
+        long value = nonNegativeExactLong(object, name);
+        if (value > Integer.MAX_VALUE) {
+            throw new IllegalArgumentException(name + " is outside the supported integer range");
+        }
+        return (int) value;
+    }
+
+    private static long nonNegativeExactLong(JsonObject object, String name) {
+        JsonElement element = object.get(name);
+        if (element == null || !element.isJsonPrimitive() || !element.getAsJsonPrimitive().isNumber()) {
+            throw new IllegalArgumentException(name + " must be a non-negative integer");
+        }
+        try {
+            java.math.BigDecimal decimal = element.getAsBigDecimal();
+            if (decimal.signum() < 0 || decimal.stripTrailingZeros().scale() > 0) {
+                throw new IllegalArgumentException(name + " must be a non-negative integer");
+            }
+            return decimal.longValueExact();
+        } catch (ArithmeticException error) {
+            throw new IllegalArgumentException(name + " is outside the supported integer range", error);
+        }
     }
 
     static OffsetSpec offsetSpecForPosition(String position, Long timestampMs) {

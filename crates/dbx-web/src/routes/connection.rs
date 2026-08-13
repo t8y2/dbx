@@ -62,6 +62,14 @@ pub struct McpAddConnectionRequest {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct McpDuplicateConnectionRequest {
+    pub source_id: String,
+    pub copy_id: String,
+    pub copy_name: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct McpRemoveConnectionRequest {
     pub connection_id: String,
 }
@@ -412,6 +420,20 @@ pub async fn mcp_add_connection(
     Ok(Json(saved))
 }
 
+pub async fn mcp_duplicate_connection(
+    State(state): State<Arc<WebState>>,
+    Json(body): Json<McpDuplicateConnectionRequest>,
+) -> Result<Json<ConnectionConfig>, AppError> {
+    let saved = state
+        .app
+        .storage
+        .duplicate_connection_for_mcp(&body.source_id, &body.copy_id, &body.copy_name)
+        .await
+        .map_err(AppError::from)?;
+    state.app.configs.write().await.insert(saved.id.clone(), saved.clone());
+    Ok(Json(saved))
+}
+
 pub async fn mcp_remove_connection(
     State(state): State<Arc<WebState>>,
     Json(body): Json<McpRemoveConnectionRequest>,
@@ -519,9 +541,10 @@ async fn remove_connection_pools_for_connection_ids(state: &WebState, connection
 mod tests {
     use super::{
         apply_mongo_legacy_driver_profile, connect_db, connection_final_proxy_port, disconnect_db, load_connections,
-        mark_mongo_legacy_driver, mcp_add_connection, mcp_remove_connection, run_temporary_connection_test,
-        save_connection_database_info, save_connections, test_connection, test_connection_with_info, ConnectRequest,
-        DisconnectRequest, McpAddConnectionRequest, McpRemoveConnectionRequest, SaveConnectionDatabaseInfoRequest,
+        mark_mongo_legacy_driver, mcp_add_connection, mcp_duplicate_connection, mcp_remove_connection,
+        run_temporary_connection_test, save_connection_database_info, save_connections, test_connection,
+        test_connection_with_info, ConnectRequest, DisconnectRequest, McpAddConnectionRequest,
+        McpDuplicateConnectionRequest, McpRemoveConnectionRequest, SaveConnectionDatabaseInfoRequest,
         SaveConnectionsRequest,
     };
     use crate::state::WebState;
@@ -929,6 +952,41 @@ mod tests {
         );
         assert!(persisted.iter().any(|config| config.id == added.id));
         assert!(state.app.configs.read().await.contains_key(&added.id));
+
+        state
+            .app
+            .storage
+            .save_sidebar_layout(&serde_json::json!({
+                "groups": [{ "id": "group", "name": "Group" }],
+                "order": [{
+                    "type": "group",
+                    "id": "group",
+                    "children": [{ "type": "connection", "id": "existing" }]
+                }, { "type": "connection", "id": "added" }],
+                "concurrentField": "keep"
+            }))
+            .await
+            .unwrap();
+        let copied = mcp_duplicate_connection(
+            State(state.clone()),
+            Json(McpDuplicateConnectionRequest {
+                source_id: existing.id.clone(),
+                copy_id: "copy".to_string(),
+                copy_name: "Existing Copy".to_string(),
+            }),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{}", error.message))
+        .0;
+        assert_eq!(state.app.configs.read().await.get(&copied.id), Some(&copied));
+        let persisted = state.app.storage.load_connections().await.unwrap();
+        assert_eq!(persisted.iter().find(|config| config.id == existing.id).unwrap().host, existing.host);
+        assert!(persisted.iter().any(|config| config.id == added.id));
+        let layout = state.app.storage.load_sidebar_layout().await.unwrap().unwrap();
+        assert_eq!(layout["concurrentField"], "keep");
+        assert_eq!(layout["order"][0]["children"][0]["id"], existing.id);
+        assert_eq!(layout["order"][0]["children"][1]["id"], copied.id);
+        assert_eq!(layout["order"][1]["id"], added.id);
 
         let _ = std::fs::remove_dir_all(dir);
     }

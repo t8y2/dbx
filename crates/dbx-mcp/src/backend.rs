@@ -184,6 +184,12 @@ pub trait DbxBackend: Send + Sync {
         Err("SQL queries are not supported by this backend.".to_string())
     }
     async fn add_connection_for_mcp(&self, config: ConnectionConfig) -> Result<ConnectionConfig, String>;
+    async fn duplicate_connection_for_mcp(
+        &self,
+        source_id: &str,
+        copy_id: &str,
+        copy_name: &str,
+    ) -> Result<ConnectionConfig, String>;
     async fn remove_connection_for_mcp(&self, connection_id: &str) -> Result<bool, String>;
     async fn list_tables(
         &self,
@@ -532,6 +538,17 @@ impl DbxBackend for LocalBackend {
         Ok(config)
     }
 
+    async fn duplicate_connection_for_mcp(
+        &self,
+        source_id: &str,
+        copy_id: &str,
+        copy_name: &str,
+    ) -> Result<ConnectionConfig, String> {
+        let config = self.state.storage.duplicate_connection_for_mcp(source_id, copy_id, copy_name).await?;
+        self.state.configs.write().await.insert(config.id.clone(), config.clone());
+        Ok(config)
+    }
+
     async fn remove_connection_for_mcp(&self, connection_id: &str) -> Result<bool, String> {
         let removed = self.state.storage.remove_connection_for_mcp(connection_id).await?;
         if removed {
@@ -782,6 +799,23 @@ impl DbxBackend for WebBackend {
             .json()
             .await
             .map_err(|error| format!("Invalid MCP connection response: {error}"))
+    }
+
+    async fn duplicate_connection_for_mcp(
+        &self,
+        source_id: &str,
+        copy_id: &str,
+        copy_name: &str,
+    ) -> Result<ConnectionConfig, String> {
+        self.request(
+            reqwest::Method::POST,
+            "/api/connection/mcp/duplicate",
+            Some(json!({ "sourceId": source_id, "copyId": copy_id, "copyName": copy_name })),
+        )
+        .await?
+        .json()
+        .await
+        .map_err(|error| format!("Invalid MCP connection response: {error}"))
     }
 
     async fn remove_connection_for_mcp(&self, connection_id: &str) -> Result<bool, String> {
@@ -2017,6 +2051,14 @@ mod tests {
         }
         async fn add_connection_for_mcp(&self, config: ConnectionConfig) -> Result<ConnectionConfig, String> {
             Ok(config)
+        }
+        async fn duplicate_connection_for_mcp(
+            &self,
+            _source_id: &str,
+            _copy_id: &str,
+            _copy_name: &str,
+        ) -> Result<ConnectionConfig, String> {
+            Err("unused".to_string())
         }
         async fn remove_connection_for_mcp(&self, _connection_id: &str) -> Result<bool, String> {
             Ok(false)

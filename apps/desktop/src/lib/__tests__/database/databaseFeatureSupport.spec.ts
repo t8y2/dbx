@@ -107,6 +107,7 @@ describe("supportsSqlInListPaste", () => {
     expect(supportsSqlInListPaste("mongodb")).toBe(false);
     expect(supportsSqlInListPaste("elasticsearch")).toBe(false);
     expect(supportsSqlInListPaste("easysearch")).toBe(false);
+    expect(supportsSqlInListPaste("meilisearch")).toBe(false);
     expect(supportsSqlInListPaste("qdrant")).toBe(false);
     expect(supportsSqlInListPaste("milvus")).toBe(false);
     expect(supportsSqlInListPaste("weaviate")).toBe(false);

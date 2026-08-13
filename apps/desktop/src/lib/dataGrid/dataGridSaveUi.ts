@@ -1,6 +1,6 @@
 import type { DatabaseType } from "@/types/database";
 
-const NON_SQL_PREVIEW_DATABASE_TYPES: ReadonlySet<DatabaseType> = new Set<DatabaseType>(["mongodb", "elasticsearch", "easysearch"]);
+const NON_SQL_PREVIEW_DATABASE_TYPES: ReadonlySet<DatabaseType> = new Set<DatabaseType>(["mongodb", "elasticsearch", "easysearch", "meilisearch"]);
 
 export function dataGridPreviewLabelKey(databaseType?: DatabaseType): "toolbar.previewQuery" | "toolbar.previewSql" {
   return databaseType && NON_SQL_PREVIEW_DATABASE_TYPES.has(databaseType) ? "toolbar.previewQuery" : "toolbar.previewSql";

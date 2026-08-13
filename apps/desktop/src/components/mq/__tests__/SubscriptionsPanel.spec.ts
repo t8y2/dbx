@@ -58,6 +58,12 @@ function buttonByText(container: ParentNode, text: string): HTMLButtonElement {
   return button;
 }
 
+function buttonWithExactText(container: ParentNode, text: string): HTMLButtonElement {
+  const button = [...container.querySelectorAll<HTMLButtonElement>("button")].find((item) => item.textContent?.trim() === text);
+  if (!button) throw new Error(`Button not found: ${text}`);
+  return button;
+}
+
 function deferred<T>() {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>((resolvePromise) => {
@@ -75,6 +81,7 @@ async function mountPanel(overrides: Record<string, unknown> = {}) {
     tenant: "_kafka",
     namespace: "default",
     mqSystemKind: "kafka",
+    supportsResetCursor: true,
     supportsPeekMessages: true,
     ...overrides,
   });
@@ -195,6 +202,77 @@ describe("SubscriptionsPanel message peek", () => {
 
     expect(panel.textContent).toContain("payments message");
     expect(panel.textContent).not.toContain("orders message");
+  });
+});
+
+describe("SubscriptionsPanel Kafka absolute offset reset", () => {
+  async function openAbsoluteReset(panel: HTMLDivElement) {
+    await vi.waitFor(() => {
+      expect([...panel.querySelectorAll("button")].some((button) => button.textContent?.includes("mqSubscriptions.resetCursor"))).toBe(true);
+    });
+    buttonByText(panel, "mqSubscriptions.resetCursor").click();
+    await flushUi();
+    const absolute = panel.querySelector<HTMLInputElement>('input[value="partitionOffset"]');
+    expect(absolute).toBeTruthy();
+    absolute!.checked = true;
+    absolute!.dispatchEvent(new Event("change", { bubbles: true }));
+    await vi.waitFor(() => {
+      expect(panel.querySelector('[data-testid="reset-partition"]')).toBeTruthy();
+    });
+  }
+
+  it("shows Kafka-only partition fields and dispatches one exact absolute offset", async () => {
+    backend.mqResetCursor.mockResolvedValue(undefined);
+    const panel = await mountPanel();
+    await openAbsoluteReset(panel);
+
+    const partition = panel.querySelector<HTMLInputElement>('[data-testid="reset-partition"]');
+    const offset = panel.querySelector<HTMLInputElement>('[data-testid="reset-offset"]');
+    expect(partition).toBeTruthy();
+    expect(offset).toBeTruthy();
+    partition!.value = "1";
+    partition!.dispatchEvent(new Event("input", { bubbles: true }));
+    offset!.value = "42";
+    offset!.dispatchEvent(new Event("input", { bubbles: true }));
+
+    buttonWithExactText(panel, "mqSubscriptions.reset").click();
+    await flushUi();
+
+    expect(backend.mqResetCursor).toHaveBeenCalledWith(
+      "mq-1",
+      expect.objectContaining({ topic: "events" }),
+      "orders-consumer",
+      { kind: "partitionOffset", partition: 1, offset: 42 },
+    );
+  });
+
+  it.each([
+    ["partition", "-1"],
+    ["partition", "1.5"],
+    ["offset", "-1"],
+    ["offset", "42.5"],
+    ["offset", "9007199254740992"],
+  ])("rejects invalid %s value %s", async (field, value) => {
+    const panel = await mountPanel();
+    await openAbsoluteReset(panel);
+    const input = panel.querySelector<HTMLInputElement>(`[data-testid="reset-${field}"]`)!;
+    input.value = value;
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    buttonWithExactText(panel, "mqSubscriptions.reset").click();
+    await vi.waitFor(() => {
+      expect(panel.textContent).toContain("mqSubscriptions.nonNegativeIntegerRequired");
+    });
+    expect(backend.mqResetCursor).not.toHaveBeenCalled();
+  });
+
+  it("hides the absolute offset option outside Kafka", async () => {
+    const pulsarPanel = await mountPanel({ mqSystemKind: "pulsar", tenant: "public" });
+    await vi.waitFor(() => {
+      expect([...pulsarPanel.querySelectorAll("button")].some((button) => button.textContent?.includes("mqSubscriptions.resetCursor"))).toBe(true);
+    });
+    buttonByText(pulsarPanel, "mqSubscriptions.resetCursor").click();
+    await flushUi();
+    expect(pulsarPanel.querySelector('input[value="partitionOffset"]')).toBeNull();
   });
 });
 

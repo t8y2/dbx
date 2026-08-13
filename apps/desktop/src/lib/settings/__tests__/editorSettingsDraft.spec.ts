@@ -60,6 +60,10 @@ describe("EDITOR_SETTINGS_DRAFT_KEYS", () => {
     expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("dataTabReuseMode");
   });
 
+  it("includes data grid type colors", () => {
+    expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("colorizeDataGridCellTypes");
+  });
+
   it("includes completionTriggerMode", () => {
     expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("completionTriggerMode");
   });
@@ -84,6 +88,10 @@ describe("editorSettingsDraftFromSettings", () => {
   it("maps continueOnErrorOnBatch=false from settings", () => {
     const draft = editorSettingsDraftFromSettings(makeSettings({ continueOnErrorOnBatch: false }));
     expect(draft.continueOnErrorOnBatch).toBe(false);
+  });
+
+  it("maps the data grid type color preference from settings", () => {
+    expect(editorSettingsDraftFromSettings(makeSettings({ colorizeDataGridCellTypes: false })).colorizeDataGridCellTypes).toBe(false);
   });
 
   it("preserves the table-open default for legacy settings", () => {

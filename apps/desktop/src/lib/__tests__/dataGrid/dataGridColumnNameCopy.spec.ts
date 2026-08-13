@@ -41,6 +41,7 @@ describe("dataGridColumnNameCopy", () => {
     expect(supportsColumnNameQuoting("redis")).toBe(false);
     expect(supportsColumnNameQuoting("elasticsearch")).toBe(false);
     expect(supportsColumnNameQuoting("easysearch")).toBe(false);
+    expect(supportsColumnNameQuoting("meilisearch")).toBe(false);
     expect(supportsColumnNameQuoting("qdrant")).toBe(false);
     expect(supportsColumnNameQuoting("jdbc")).toBe(false);
     expect(supportsColumnNameQuoting("iotdb")).toBe(false);

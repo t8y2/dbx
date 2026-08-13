@@ -871,6 +871,9 @@ fn reset_cursor_params(topic: &TopicRef, sub: &str, pos: ResetPosition) -> Resul
             "position": "timestamp",
             "timestampMs": timestamp_ms,
         })),
+        ResetPosition::PartitionOffset { .. } => {
+            Err("RocketMQ does not support cursor reset by Kafka partition offset".to_string())
+        }
         ResetPosition::MessageId { .. } => {
             Err("RocketMQ does not support cursor reset by Pulsar message id".to_string())
         }
@@ -1290,6 +1293,23 @@ mod tests {
 
         assert_eq!(params.get("groupId").and_then(|v| v.as_str()), Some("group-a"));
         assert_eq!(params.get("position").and_then(|v| v.as_str()), Some("timestamp"));
+    }
+
+    #[test]
+    fn reset_cursor_params_rejects_kafka_partition_offsets() {
+        let topic = TopicRef {
+            tenant: "_rocketmq".to_string(),
+            namespace: "default".to_string(),
+            topic: "events".to_string(),
+            persistent: true,
+            partitioned: None,
+            message_type: None,
+            ..TopicRef::default()
+        };
+
+        let error = reset_cursor_params(&topic, "group-a", ResetPosition::PartitionOffset { partition: 0, offset: 9 })
+            .expect_err("RocketMQ must not reinterpret Kafka partition offsets");
+        assert!(error.contains("Kafka partition offset"));
     }
 
     #[test]

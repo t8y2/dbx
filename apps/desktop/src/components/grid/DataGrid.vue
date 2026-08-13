@@ -8348,6 +8348,7 @@ watch(
       clearResetScrollAfterResult();
       resetGridVerticalScroll();
     }
+    closeReadonlyCellTextSelection();
     clearCellSelection();
     clearRowSelection();
     invalidateSyntheticContextSelection();

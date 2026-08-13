@@ -15,6 +15,7 @@ import {
   isRenamableMongoCollection,
   mongoCollectionKindFromNode,
   mongoCloneCollectionPreview,
+  mongoCreateIndexFormFromRow,
   mongoCreateIndexPreview,
   mongoDropAllIndexesPreview,
   mongoDropCollectionPreview,
@@ -22,6 +23,7 @@ import {
   mongoDropDatabasePreview,
   mongoDropIndexPreview,
   mongoRenameCollectionPreview,
+  mongoReplaceIndexPreview,
   toMongoIndexRow,
   type MongoCreateIndexRequest,
 } from "@/lib/sidebar/mongoCollectionMutation";
@@ -74,6 +76,7 @@ import {
   mongoIndexManagerError,
   mongoIndexManagerSelectedName,
   mongoIndexManagerMode,
+  mongoEditIndexOriginalName,
   resetMongoIndexManager,
 } from "@/components/sidebar/sidebarTreeDialogState";
 
@@ -354,7 +357,7 @@ export function useSidebarDatabaseSpecificMutationRuntime(options: SidebarDataba
   const mongoIndexManagerCollectionName = computed(() => mongoIndexPanelCollectionName(sidebarFormTarget.value ?? activeNode.value));
 
   function selectMongoIndexRow(name: string) {
-    if (mongoIndexManagerMode.value === "create") return;
+    if (mongoIndexManagerMode.value === "create" || mongoIndexManagerMode.value === "edit") return;
     mongoIndexManagerSelectedName.value = name;
   }
 
@@ -379,15 +382,44 @@ export function useSidebarDatabaseSpecificMutationRuntime(options: SidebarDataba
 
   function cancelMongoIndexDraft() {
     mongoIndexManagerMode.value = "view";
+    mongoEditIndexOriginalName.value = "";
     resetMongoCreateIndexForm();
   }
 
   /** The default _id index is never droppable, so the panel must not offer it. */
   const canDropSelectedMongoIndexRow = computed(() => {
-    if (mongoIndexManagerMode.value === "create") return false;
+    if (mongoIndexManagerMode.value === "create" || mongoIndexManagerMode.value === "edit") return false;
     const row = mongoIndexManagerSelected.value;
     return !!row && !row.isProtected;
   });
+
+  /** An existing index is editable unless it is the protected _id index or a draft is open. */
+  const canEditSelectedMongoIndexRow = computed(() => {
+    if (mongoIndexManagerMode.value === "create" || mongoIndexManagerMode.value === "edit") return false;
+    const row = mongoIndexManagerSelected.value;
+    return !!row && !row.isProtected;
+  });
+
+  /** Prefill the create form from the selected index row and enter edit mode. */
+  function startEditMongoIndexDraft() {
+    const node = sidebarFormTarget.value ?? activeNode.value;
+    const row = mongoIndexManagerSelected.value;
+    if (!canEditSelectedMongoIndexRow.value || !row || !node.connectionId || !node.database) return;
+    mongoCreateIndexForm.value = mongoCreateIndexFormFromRow(row);
+    mongoEditIndexOriginalName.value = row.name;
+    mongoIndexManagerMode.value = "edit";
+    mongoIndexManagerError.value = "";
+    const collection = mongoIndexPanelCollectionName(node);
+    if (!collection) return;
+    void connectionStore
+      .listMongoCompletionFields(node.connectionId, node.database, collection)
+      .then((fields) => {
+        if (showMongoIndexManagerDialog.value) mongoCreateIndexFieldOptions.value = fields.map((field) => field.name);
+      })
+      .catch(() => {
+        // MongoDB is schemaless; a field that was never sampled is still valid.
+      });
+  }
 
   async function dropSelectedMongoIndexRow() {
     const node = sidebarFormTarget.value ?? activeNode.value;
@@ -484,6 +516,56 @@ export function useSidebarDatabaseSpecificMutationRuntime(options: SidebarDataba
           resetMongoCreateIndexForm();
           await loadMongoIndexManagerRows();
         }
+        await refreshMongoIndexTreeAfterMutation({ ...node, tableName: collectionName });
+      },
+      onError: (error) => {
+        mongoCreateIndexError.value = translateBackendError(t, errorMessage(error));
+      },
+    });
+  }
+
+  /**
+   * Edit an existing index by drop + recreate. The form was prefilled by
+   * {@link startEditMongoIndexDraft}; this runs the two backend calls in
+   * sequence inside the production-gated mutation shell.
+   */
+  async function confirmEditMongoIndex() {
+    const node = sidebarFormTarget.value ?? activeNode.value;
+    const connectionId = node.connectionId;
+    const database = node.database;
+    const collectionName = showMongoIndexManagerDialog.value ? mongoIndexPanelCollectionName(node) : mongoIndexCollectionName(node);
+    const originalName = mongoEditIndexOriginalName.value;
+    if (!connectionId || !database || !collectionName || !originalName || mongoIndexManagerMode.value !== "edit") return;
+
+    const request = buildMongoCreateIndexRequest(mongoCreateIndexForm.value);
+    if (!request.valid) {
+      mongoCreateIndexError.value = mongoCreateIndexRequestErrorText(request);
+      return;
+    }
+
+    mongoCreateIndexError.value = "";
+    await runMongoSidebarMutation({
+      connection: connectionStore.getConfig(connectionId),
+      database,
+      // Review text shows both commands so production confirmation is explicit.
+      reviewText: mongoReplaceIndexPreview(database, collectionName, originalName, request.keysJson, request.optionsJson),
+      source: t("production.sourceSidebar"),
+      loading: mongoCreateIndexLoading,
+      beforeExecute: () => connectionStore.ensureConnected(connectionId),
+      execute: async () => {
+        // Drop first: if create fails the old index is gone, which is the
+        // documented MongoDB limitation. The confirm dialog warns the user.
+        await api.mongoDropIndexes(connectionId, database, collectionName, JSON.stringify(originalName), true);
+        const created = await api.mongoCreateIndex(connectionId, database, collectionName, request.keysJson, request.optionsJson);
+        return created;
+      },
+      onSuccess: async (created) => {
+        toast(t("contextMenu.mongoEditIndexSuccess", { oldName: originalName, newName: created.name, collection: collectionName }), 3000);
+        mongoIndexManagerMode.value = "view";
+        mongoEditIndexOriginalName.value = "";
+        mongoIndexManagerSelectedName.value = created.name;
+        resetMongoCreateIndexForm();
+        await loadMongoIndexManagerRows();
         await refreshMongoIndexTreeAfterMutation({ ...node, tableName: collectionName });
       },
       onError: (error) => {
@@ -816,9 +898,12 @@ export function useSidebarDatabaseSpecificMutationRuntime(options: SidebarDataba
     mongoIndexManagerCollectionName,
     selectMongoIndexRow,
     startCreateMongoIndexDraft,
+    startEditMongoIndexDraft,
     cancelMongoIndexDraft,
     dropSelectedMongoIndexRow,
     canDropSelectedMongoIndexRow,
+    canEditSelectedMongoIndexRow,
+    confirmEditMongoIndex,
     openCreateNacosNamespaceDialog,
     confirmCreateNacosNamespace,
     openEditNacosNamespaceDialog,

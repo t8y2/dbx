@@ -7,6 +7,7 @@ import {
   mongoCollectionKindFromNode,
   mongoCollectionTableTypeFromNode,
   mongoCloneCollectionPreview,
+  mongoCreateIndexFormFromRow,
   mongoCreateIndexPreview,
   mongoDropCollectionPreview,
   mongoDropAllIndexesPreview,
@@ -14,6 +15,7 @@ import {
   mongoDropIndexPreview,
   mongoIndexKeyLabel,
   mongoRenameCollectionPreview,
+  mongoReplaceIndexPreview,
   toMongoCollectionKind,
   toMongoIndexRow,
   type MongoCreateIndexForm,
@@ -282,5 +284,71 @@ describe("toMongoIndexRow", () => {
     expect(row.propertiesComplete).toBe(false);
     expect(row.isSparse).toBe(false);
     expect(row.expireAfterSeconds).toBeUndefined();
+  });
+});
+
+describe("mongoCreateIndexFormFromRow", () => {
+  it("parses compound keys back into form fields with directions", () => {
+    const row = toMongoIndexRow({
+      name: "account_created",
+      keys: [
+        { field: "account", direction: "1" },
+        { field: "createTime", direction: "-1" },
+      ],
+    });
+    const form = mongoCreateIndexFormFromRow(row);
+
+    expect(form.name).toBe("account_created");
+    expect(form.fields).toEqual([
+      { id: 1, path: "account", type: "1" },
+      { id: 2, path: "createTime", type: "-1" },
+    ]);
+  });
+
+  it("round-trips non-numeric key types through the label parser", () => {
+    const row = toMongoIndexRow({ name: "content_text", keys: [{ field: "content", direction: "text" }] });
+    const form = mongoCreateIndexFormFromRow(row);
+
+    expect(form.fields).toEqual([{ id: 1, path: "content", type: "text" }]);
+  });
+
+  it("maps every option field back onto the form", () => {
+    const row = toMongoIndexRow({
+      name: "ttl_idx",
+      keys: [{ field: "createdAt", direction: "1" }],
+      is_unique: true,
+      is_sparse: true,
+      expire_after_seconds: 3600,
+      partial_filter_expression: '{"archived":false}',
+      background: true,
+      bucket_size: 32,
+    });
+    const form = mongoCreateIndexFormFromRow(row);
+
+    expect(form.unique).toBe(true);
+    expect(form.sparse).toBe(true);
+    expect(form.expireAfterSeconds).toBe("3600");
+    expect(form.partialFilterExpression).toBe('{"archived":false}');
+    expect(form.background).toBe(true);
+    expect(form.bucketSize).toBe("32");
+  });
+
+  it("falls back to one ascending field when the keys description is empty", () => {
+    const row = toMongoIndexRow({ name: "empty" });
+    const form = mongoCreateIndexFormFromRow(row);
+
+    expect(form.fields).toEqual([{ id: 1, path: "", type: "1" }]);
+  });
+});
+
+describe("mongoReplaceIndexPreview", () => {
+  it("joins the drop and create commands for review", () => {
+    const preview = mongoReplaceIndexPreview("app", "users", "email_1", '{"email":1}', '{"unique":true}');
+    const drop = mongoDropIndexPreview("app", "users", "email_1");
+    const create = mongoCreateIndexPreview("app", "users", '{"email":1}', '{"unique":true}');
+
+    expect(preview).toBe(`${drop}\n${create}`);
+    expect(preview).toContain('dropIndex("email_1")');
+    expect(preview).toContain('createIndex({"email":1}, {"unique":true})');
   });
 });

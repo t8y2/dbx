@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { toRefs, watch } from "vue";
-import { Loader2, Plus, RefreshCw, Trash2 } from "@lucide/vue";
+import { Loader2, Pencil, Plus, RefreshCw, Trash2 } from "@lucide/vue";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -23,9 +23,12 @@ const {
   loadMongoIndexManagerRows,
   selectMongoIndexRow,
   startCreateMongoIndexDraft,
+  startEditMongoIndexDraft,
   cancelMongoIndexDraft,
   dropSelectedMongoIndexRow,
   canDropSelectedMongoIndexRow,
+  canEditSelectedMongoIndexRow,
+  confirmEditMongoIndex,
   mongoCreateIndexForm,
   mongoCreateIndexFieldOptions,
   mongoCreateIndexError,
@@ -59,15 +62,28 @@ watch(showMongoIndexManagerDialog, (open) => {
       </DialogHeader>
 
       <div class="flex items-center gap-2 border-b px-5 py-2">
-        <Button type="button" variant="outline" size="sm" :disabled="mongoIndexManagerLoading || mongoCreateIndexLoading || mongoIndexManagerMode === 'create'" @click="startCreateMongoIndexDraft">
+        <Button type="button" variant="outline" size="sm" :disabled="mongoIndexManagerLoading || mongoCreateIndexLoading || mongoIndexManagerMode === 'create' || mongoIndexManagerMode === 'edit'" @click="startCreateMongoIndexDraft">
           <Plus class="mr-1 h-4 w-4" />
           {{ t("contextMenu.createMongoIndex") }}
+        </Button>
+        <Button type="button" variant="outline" size="sm" :disabled="mongoIndexManagerLoading || mongoCreateIndexLoading || !canEditSelectedMongoIndexRow" @click="startEditMongoIndexDraft">
+          <Pencil class="mr-1 h-4 w-4" />
+          {{ t("contextMenu.editMongoIndex") }}
         </Button>
         <Button type="button" variant="outline" size="sm" class="text-destructive hover:text-destructive" :disabled="mongoIndexManagerLoading || mongoCreateIndexLoading || !canDropSelectedMongoIndexRow" @click="dropSelectedMongoIndexRow">
           <Trash2 class="mr-1 h-4 w-4" />
           {{ t("contextMenu.dropIndex") }}
         </Button>
-        <Button type="button" variant="ghost" size="sm" class="ml-auto" :disabled="mongoIndexManagerLoading || mongoCreateIndexLoading || mongoIndexManagerMode === 'create'" :title="t('contextMenu.refreshChildren')" :aria-label="t('contextMenu.refreshChildren')" @click="loadMongoIndexManagerRows">
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          class="ml-auto"
+          :disabled="mongoIndexManagerLoading || mongoCreateIndexLoading || mongoIndexManagerMode === 'create' || mongoIndexManagerMode === 'edit'"
+          :title="t('contextMenu.refreshChildren')"
+          :aria-label="t('contextMenu.refreshChildren')"
+          @click="loadMongoIndexManagerRows"
+        >
           <RefreshCw class="h-4 w-4" :class="mongoIndexManagerLoading ? 'animate-spin' : ''" />
         </Button>
       </div>
@@ -91,7 +107,7 @@ watch(showMongoIndexManagerDialog, (open) => {
             type="button"
             class="flex w-full min-w-0 gap-2 px-5 py-1.5 text-left text-sm hover:bg-muted/60"
             :class="row.name === mongoIndexManagerSelectedName ? 'bg-primary/10' : ''"
-            :disabled="mongoIndexManagerMode === 'create'"
+            :disabled="mongoIndexManagerMode === 'create' || mongoIndexManagerMode === 'edit'"
             @click="selectMongoIndexRow(row.name)"
           >
             <span class="min-w-0 flex-1 truncate font-mono">{{ row.name }}</span>
@@ -101,7 +117,7 @@ watch(showMongoIndexManagerDialog, (open) => {
       </section>
 
       <section class="min-w-0 border-t bg-muted/20 px-5 py-4">
-        <div v-if="mongoIndexManagerMode === 'create'" class="grid min-w-0 gap-4">
+        <div v-if="mongoIndexManagerMode === 'create' || mongoIndexManagerMode === 'edit'" class="grid min-w-0 gap-4">
           <div class="grid min-w-0 gap-2">
             <div class="flex items-center justify-between gap-3">
               <span class="text-sm font-medium">{{ t("contextMenu.createMongoIndexFields") }}</span>
@@ -168,13 +184,14 @@ watch(showMongoIndexManagerDialog, (open) => {
             </div>
           </details>
 
+          <p v-if="mongoIndexManagerMode === 'edit'" class="text-xs text-muted-foreground">{{ t("contextMenu.mongoIndexRebuildHint") }}</p>
           <p v-if="mongoCreateIndexError" class="min-w-0 max-w-full whitespace-pre-wrap break-all text-sm text-destructive">{{ mongoCreateIndexError }}</p>
 
           <div class="flex items-center justify-end gap-2">
             <Button variant="outline" size="sm" :disabled="mongoCreateIndexLoading" @click="cancelMongoIndexDraft">{{ t("dangerDialog.cancel") }}</Button>
-            <Button size="sm" :disabled="mongoCreateIndexLoading || !mongoCreateIndexCanSubmit" @click="confirmCreateMongoIndex">
+            <Button size="sm" :disabled="mongoCreateIndexLoading || !mongoCreateIndexCanSubmit" @click="mongoIndexManagerMode === 'edit' ? confirmEditMongoIndex() : confirmCreateMongoIndex()">
               <Loader2 v-if="mongoCreateIndexLoading" class="mr-2 h-4 w-4 animate-spin" />
-              {{ t("contextMenu.createMongoIndex") }}
+              {{ mongoIndexManagerMode === "edit" ? t("contextMenu.saveMongoIndex") : t("contextMenu.createMongoIndex") }}
             </Button>
           </div>
         </div>
@@ -190,7 +207,7 @@ watch(showMongoIndexManagerDialog, (open) => {
               <span class="min-w-0 break-all font-mono text-sm">{{ mongoIndexManagerSelected.keys }}</span>
             </div>
             <!-- MongoDB has no ALTER INDEX, so existing properties stay read-only. -->
-            <div class="flex min-w-0 flex-wrap gap-x-6 gap-y-2">
+            <div v-if="mongoIndexManagerMode !== 'edit'" class="flex min-w-0 flex-wrap gap-x-6 gap-y-2">
               <label class="flex w-fit items-center gap-2 text-sm text-muted-foreground">
                 <Switch :model-value="mongoIndexManagerSelected.isUnique" disabled :aria-label="t('structureEditor.unique')" />
                 {{ t("structureEditor.unique") }}
@@ -231,7 +248,7 @@ watch(showMongoIndexManagerDialog, (open) => {
             <!-- The Legacy driver cannot report sparse/TTL/background, so say so
                  instead of rendering the defaults as if the server had sent them. -->
             <p v-if="!mongoIndexManagerSelected.propertiesComplete" class="text-xs text-muted-foreground">{{ t("mongo.indexPropertiesUnavailable") }}</p>
-            <p class="text-xs text-muted-foreground">{{ t("contextMenu.mongoIndexReadOnlyHint") }}</p>
+            <p v-if="mongoIndexManagerMode !== 'edit'" class="text-xs text-muted-foreground">{{ t("contextMenu.mongoIndexReadOnlyHint") }}</p>
           </template>
         </div>
       </section>

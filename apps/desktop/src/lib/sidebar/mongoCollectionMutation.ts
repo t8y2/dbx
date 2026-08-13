@@ -188,6 +188,40 @@ export function mongoIndexKeyLabel(value: unknown): string {
   return String(value ?? "");
 }
 
+/**
+ * Reverse {@link mongoIndexKeyLabel} so an edited index can re-enter the form
+ * with the same direction the server reported. Anything that is not ASC/DESC
+ * (text, 2dsphere, hashed, …) is kept verbatim.
+ */
+function mongoIndexKeyTypeFromLabel(label: string): MongoIndexKeyType {
+  if (label === "ASC") return "1";
+  if (label === "DESC") return "-1";
+  // Non-numeric key types (text, 2dsphere, hashed, 2d) round-trip as-is when
+  // they are part of the known set, otherwise default to ascending.
+  return (MONGO_INDEX_KEY_TYPES as readonly string[]).includes(label) ? (label as MongoIndexKeyType) : "1";
+}
+
+/**
+ * Parse the human-readable keys description produced by {@link mongoIndexKeyDescription}
+ * back into the visual form's field rows. Each comma-separated segment is
+ * `field DIRECTION`; a segment with no direction defaults to ascending.
+ */
+function parseMongoIndexKeyDescription(description: string): { field: string; type: MongoIndexKeyType }[] {
+  return description
+    .split(",")
+    .map((segment) => segment.trim())
+    .filter((segment) => segment.length > 0)
+    .map((segment) => {
+      const spaceIndex = segment.lastIndexOf(" ");
+      // Segments like `account ASC` split into field + label; a bare field name
+      // (no direction) falls back to ascending.
+      if (spaceIndex <= 0) return { field: segment, type: "1" as MongoIndexKeyType };
+      const field = segment.slice(0, spaceIndex).trim();
+      const label = segment.slice(spaceIndex + 1).trim();
+      return { field, type: mongoIndexKeyTypeFromLabel(label) };
+    });
+}
+
 /** One row of the index management panel. */
 export interface MongoIndexRow {
   name: string;
@@ -252,4 +286,35 @@ export function toMongoIndexRow(source: MongoIndexSpecSource): MongoIndexRow {
     propertiesComplete: source.properties_complete !== false,
     extraOptions: source.extra_options?.trim() || undefined,
   };
+}
+
+/**
+ * Prefill the create-index form from an existing index row so the user can
+ * edit it as a drop + recreate. The keys description is parsed back into the
+ * visual field rows; options map one-to-one.
+ */
+export function mongoCreateIndexFormFromRow(row: MongoIndexRow): MongoCreateIndexForm {
+  const parsed = parseMongoIndexKeyDescription(row.keys);
+  const fields = parsed.length > 0 ? parsed.map((entry, index) => ({ id: index + 1, path: entry.field, type: entry.type })) : [{ id: 1, path: "", type: "1" as MongoIndexKeyType }];
+  return {
+    name: row.name,
+    fields,
+    unique: row.isUnique,
+    sparse: row.isSparse,
+    expireAfterSeconds: row.expireAfterSeconds === undefined ? "" : String(row.expireAfterSeconds),
+    partialFilterExpression: row.partialFilterExpression ?? "",
+    background: row.background,
+    bucketSize: row.bucketSize === undefined ? "" : String(row.bucketSize),
+  };
+}
+
+/**
+ * Build the review/preview text for an index edit (drop + recreate).
+ * Mirrors the two-step shell commands the backend runs, so production
+ * confirmation shows exactly what happens.
+ */
+export function mongoReplaceIndexPreview(database: string, collection: string, oldName: string, keysJson: string, optionsJson?: string): string {
+  const drop = mongoDropIndexPreview(database, collection, oldName);
+  const create = mongoCreateIndexPreview(database, collection, keysJson, optionsJson);
+  return `${drop}\n${create}`;
 }

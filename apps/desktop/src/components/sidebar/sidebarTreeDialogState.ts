@@ -133,7 +133,9 @@ export const mongoIndexManagerRows = ref<MongoIndexRow[]>([]);
 export const mongoIndexManagerLoading = ref(false);
 export const mongoIndexManagerError = ref("");
 export const mongoIndexManagerSelectedName = ref("");
-export const mongoIndexManagerMode = ref<"view" | "create">("view");
+export const mongoIndexManagerMode = ref<"view" | "create" | "edit">("view");
+/** Name of the index being edited, so the confirm step knows which one to drop. */
+export const mongoEditIndexOriginalName = ref("");
 
 export function resetMongoIndexManager() {
   mongoIndexManagerRows.value = [];
@@ -141,6 +143,7 @@ export function resetMongoIndexManager() {
   mongoIndexManagerError.value = "";
   mongoIndexManagerSelectedName.value = "";
   mongoIndexManagerMode.value = "view";
+  mongoEditIndexOriginalName.value = "";
 }
 export const showFlushRedisDbConfirm = ref(false);
 export const showRedisDatabaseAliasDialog = ref(false);

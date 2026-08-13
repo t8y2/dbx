@@ -8,6 +8,7 @@ import {
   cloneMongoCollectionName,
   mongoCreateIndexError,
   mongoCreateIndexForm,
+  mongoEditIndexOriginalName,
   mongoIndexManagerError,
   mongoIndexManagerLoading,
   mongoIndexManagerMode,
@@ -462,6 +463,56 @@ describe("MongoDB sidebar mutation runtime", () => {
     await feature.dropSelectedMongoIndexRow();
 
     expect(mocks.mongoDropIndexes).not.toHaveBeenCalled();
+  });
+
+  it("edits the selected index by dropping then creating and returns to view mode", async () => {
+    const node = mongoCollectionNode();
+    const feature = runtime(node);
+    sidebarFormTarget.value = node;
+
+    feature.prepareMongoIndexManagerDialog();
+    await flush();
+
+    feature.selectMongoIndexRow("email_1");
+    expect(feature.canEditSelectedMongoIndexRow.value).toBe(true);
+
+    feature.startEditMongoIndexDraft();
+    expect(mongoIndexManagerMode.value).toBe("edit");
+    expect(mongoEditIndexOriginalName.value).toBe("email_1");
+    // The form is prefilled from the selected row.
+    expect(mongoCreateIndexForm.value.name).toBe("email_1");
+    expect(mongoCreateIndexForm.value.fields).toEqual([{ id: 1, path: "email", type: "1" }]);
+    expect(mongoCreateIndexForm.value.sparse).toBe(true);
+    expect(mongoCreateIndexForm.value.expireAfterSeconds).toBe("3600");
+
+    // Edit the name and submit.
+    mongoCreateIndexForm.value.name = "email_renamed";
+    await feature.confirmEditMongoIndex();
+    await flush();
+
+    // Drop runs before create so the old index is gone before the new one is built.
+    expect(mocks.mongoDropIndexes).toHaveBeenCalledWith("conn-1", "app", "users", '"email_1"', true);
+    expect(mocks.mongoCreateIndex).toHaveBeenCalledWith("conn-1", "app", "users", '{"email":1}', '{"name":"email_renamed","sparse":true,"expireAfterSeconds":3600,"partialFilterExpression":{"archived":false}}');
+    expect(mongoIndexManagerMode.value).toBe("view");
+    expect(mongoEditIndexOriginalName.value).toBe("");
+    expect(mongoIndexManagerSelectedName.value).toBe("email_1");
+  });
+
+  it("does not edit the protected _id index", async () => {
+    const node = mongoCollectionNode();
+    const feature = runtime(node);
+    sidebarFormTarget.value = node;
+
+    feature.prepareMongoIndexManagerDialog();
+    await flush();
+
+    feature.selectMongoIndexRow("_id_");
+    expect(feature.canEditSelectedMongoIndexRow.value).toBe(false);
+
+    feature.startEditMongoIndexDraft();
+    expect(mongoIndexManagerMode.value).toBe("view");
+    expect(mocks.mongoDropIndexes).not.toHaveBeenCalled();
+    expect(mocks.mongoCreateIndex).not.toHaveBeenCalled();
   });
 
   it("surfaces an index-list failure in the panel instead of showing a stale list", async () => {

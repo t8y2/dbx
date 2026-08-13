@@ -1082,15 +1082,6 @@ mod tests {
             Ok(config)
         }
 
-        async fn duplicate_connection_for_mcp(
-            &self,
-            _source_id: &str,
-            _copy_id: &str,
-            _copy_name: &str,
-        ) -> Result<ConnectionConfig, String> {
-            Err("not exercised".to_string())
-        }
-
         async fn remove_connection_for_mcp(&self, _connection_id: &str) -> Result<bool, String> {
             Ok(true)
         }

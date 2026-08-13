@@ -1778,7 +1778,7 @@ function runKeymapExtension(codeMirrorKeymap: (typeof import("@codemirror/view")
       codeMirrorKeymap.of([
         {
           key: "Enter",
-          run: codeMirrorInsertNewlineKeepIndent ?? undefined,
+          run: insertNewlineWithoutCompletion,
         },
         ...binding(shortcuts.find, openSearch),
         ...binding(shortcuts.replace, openReplace),
@@ -1840,6 +1840,14 @@ function runKeymapExtension(codeMirrorKeymap: (typeof import("@codemirror/view")
       })),
     ),
   ];
+}
+
+function insertNewlineWithoutCompletion(view: EditorViewType): boolean {
+  codeMirrorCloseCompletion?.(view);
+  suppressNextSqlCompletionAutoStartUntil = Date.now() + 750;
+  const handled = codeMirrorInsertNewlineKeepIndent?.(view) ?? false;
+  if (!handled) suppressNextSqlCompletionAutoStartUntil = 0;
+  return handled;
 }
 
 function extendQueryEditorSelectionForView(currentView: EditorViewType): boolean {

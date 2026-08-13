@@ -2850,13 +2850,18 @@ export const useConnectionStore = defineStore("connection", () => {
     return { config: { ...config, password: result.password }, rememberPassword: result.rememberPassword };
   }
 
-  async function persistRememberedConnectionPassword(config: ConnectionConfig, rememberPassword: boolean): Promise<void> {
+  async function persistRememberedConnectionPassword(config: ConnectionConfig, rememberPassword: boolean, expectedConfigFingerprint: string): Promise<void> {
     if (!rememberPassword || !config.password) return;
     const index = connections.value.findIndex((connection) => connection.id === config.id);
     if (index < 0) return;
+    if (connectionConfigFingerprint(connections.value[index]) !== expectedConfigFingerprint) return;
     const nextConnections = [...connections.value];
     nextConnections[index] = { ...nextConnections[index], password: config.password, save_password: true };
     await persistConnections(nextConnections);
+    if (connectionConfigFingerprint(connections.value[index]) !== expectedConfigFingerprint) {
+      await persistConnections();
+      return;
+    }
     connections.value = nextConnections;
     rebuildTreeNodes();
   }
@@ -2877,6 +2882,7 @@ export const useConnectionStore = defineStore("connection", () => {
 
   async function connect(config: ConnectionConfig) {
     config = normalizeConnection(config);
+    const expectedConfigFingerprint = connectionConfigFingerprint(getConfig(config.id) ?? config);
     if (getBlockingDisconnectInFlight(config.id)) await waitForBlockingDisconnectInFlight(config.id);
     const localAttempt = beginLocalConnectionAttempt(config.id);
     try {
@@ -2896,7 +2902,6 @@ export const useConnectionStore = defineStore("connection", () => {
       rememberPassword ||= connection.rememberPassword;
       const id = connection.id;
       await ensureLocalConnectionAttemptActiveAfterConnectResult(config.id, localAttempt, id);
-      await persistRememberedConnectionPassword(config, rememberPassword);
       await syncMongoLegacyDriverFallback(id, config);
       await ensureLocalConnectionAttemptActiveAfterConnectResult(config.id, localAttempt, id);
       activeConnectionId.value = id;
@@ -2926,6 +2931,11 @@ export const useConnectionStore = defineStore("connection", () => {
           children: [],
           comment: config.note || null,
         });
+      }
+      try {
+        await persistRememberedConnectionPassword(config, rememberPassword, expectedConfigFingerprint);
+      } catch (error) {
+        setConnectionError(id, i18n.global.t("connection.rememberPasswordSaveFailed", { message: connectionErrorMessage(error) }));
       }
       return id;
     } catch (e) {
@@ -3062,6 +3072,7 @@ export const useConnectionStore = defineStore("connection", () => {
       recordConnectionError(connectionId, error);
       throw error;
     }
+    const expectedConfigFingerprint = connectionConfigFingerprint(config);
     if (getBlockingDisconnectInFlight(connectionId)) await waitForBlockingDisconnectInFlight(connectionId);
     const existingConnect = connectInFlight.get(connectionId);
     if (existingConnect) {
@@ -3090,7 +3101,6 @@ export const useConnectionStore = defineStore("connection", () => {
       rememberPassword ||= connection.rememberPassword;
       const id = connection.id;
       await ensureLocalConnectionAttemptActiveAfterConnectResult(connectionId, localAttempt, id);
-      await persistRememberedConnectionPassword(config, rememberPassword);
       await syncMongoLegacyDriverFallback(connectionId, config);
       await ensureLocalConnectionAttemptActiveAfterConnectResult(connectionId, localAttempt, id);
       connectedIds.value.add(connectionId);
@@ -3099,6 +3109,11 @@ export const useConnectionStore = defineStore("connection", () => {
       markSuccessfulLocalConnectionAttempt(connectionId, localAttempt);
       markConnectionHealthChecked(connectionId);
       clearConnectionError(connectionId);
+      try {
+        await persistRememberedConnectionPassword(config, rememberPassword, expectedConfigFingerprint);
+      } catch (error) {
+        setConnectionError(connectionId, i18n.global.t("connection.rememberPasswordSaveFailed", { message: connectionErrorMessage(error) }));
+      }
     })();
     connectInFlight.set(connectionId, connectPromise);
     try {

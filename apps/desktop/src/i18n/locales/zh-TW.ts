@@ -441,6 +441,7 @@ export default withEnglishFallback({
     promptPasswordSubmit: "連線",
     promptPasswordCancel: "取消",
     promptRememberPassword: "記住密碼",
+    rememberPasswordSaveFailed: "連線成功，但 DBX 無法記住密碼：{message}",
     mysqlMissingPasswordHint: "本次連線沒有攜帶資料庫密碼，請填寫密碼後重試。",
     database: "資料庫",
     databasePlaceholder: "可選",

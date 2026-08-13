@@ -434,6 +434,7 @@ export default withEnglishFallback({
     promptPasswordSubmit: "연결",
     promptPasswordCancel: "취소",
     promptRememberPassword: "비밀번호 기억",
+    rememberPasswordSaveFailed: "연결되었지만 DBX가 비밀번호를 저장하지 못했습니다: {message}",
     mysqlMissingPasswordHint: "데이터베이스 비밀번호가 전송되지 않았습니다. 비밀번호를 입력한 후 다시 시도하세요.",
     database: "데이터베이스",
     databasePlaceholder: "선택",

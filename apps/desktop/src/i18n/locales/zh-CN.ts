@@ -365,6 +365,7 @@ export default withEnglishFallback({
     promptPasswordSubmit: "连接",
     promptPasswordCancel: "取消",
     promptRememberPassword: "记住密码",
+    rememberPasswordSaveFailed: "连接成功，但 DBX 无法记住密码：{message}",
     mysqlMissingPasswordHint: "本次连接没有携带数据库密码，请填写密码后重试。",
     database: "数据库",
     databasePlaceholder: "可选",

@@ -440,6 +440,7 @@ export default {
     promptPasswordSubmit: "Connect",
     promptPasswordCancel: "Cancel",
     promptRememberPassword: "Remember password",
+    rememberPasswordSaveFailed: "Connected, but DBX could not remember the password: {message}",
     mysqlMissingPasswordHint: "No database password was sent. Enter the password and try again.",
     database: "Database",
     databasePlaceholder: "Optional",

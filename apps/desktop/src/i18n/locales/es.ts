@@ -441,6 +441,7 @@ export default withEnglishFallback({
     promptPasswordSubmit: "Conectar",
     promptPasswordCancel: "Cancelar",
     promptRememberPassword: "Recordar contraseña",
+    rememberPasswordSaveFailed: "Conectado, pero DBX no pudo recordar la contraseña: {message}",
     mysqlMissingPasswordHint: "No se envió ninguna contraseña de base de datos. Introduzca la contraseña y vuelva a intentarlo.",
     database: "Base de datos",
     databasePlaceholder: "Opcional",

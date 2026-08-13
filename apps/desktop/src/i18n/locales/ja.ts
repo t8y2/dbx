@@ -440,6 +440,7 @@ export default withEnglishFallback({
     promptPasswordSubmit: "接続",
     promptPasswordCancel: "キャンセル",
     promptRememberPassword: "パスワードを保存",
+    rememberPasswordSaveFailed: "接続しましたが、DBX はパスワードを保存できませんでした: {message}",
     mysqlMissingPasswordHint: "データベースのパスワードが送信されていません。パスワードを入力して再試行してください。",
     database: "データベース",
     databasePlaceholder: "任意",

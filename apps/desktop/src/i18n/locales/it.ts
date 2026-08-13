@@ -440,6 +440,7 @@ export default withEnglishFallback({
     promptPasswordSubmit: "Connetti",
     promptPasswordCancel: "Annulla",
     promptRememberPassword: "Ricorda password",
+    rememberPasswordSaveFailed: "Connessione riuscita, ma DBX non ha potuto memorizzare la password: {message}",
     mysqlMissingPasswordHint: "Non è stata inviata alcuna password del database. Inserisci la password e riprova.",
     database: "Database",
     databasePlaceholder: "Opzionale",

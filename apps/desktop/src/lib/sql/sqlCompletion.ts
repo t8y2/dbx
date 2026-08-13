@@ -1172,7 +1172,7 @@ export interface SqlCompletionTable {
 export interface SqlCompletionObject {
   name: string;
   schema?: string;
-  type: "procedure" | "function" | "trigger" | "package";
+  type: "procedure" | "function" | "trigger" | "package" | "sequence";
   parentSchema?: string;
   parentName?: string;
   dataType?: string;
@@ -1208,6 +1208,7 @@ export interface SqlCompletionItem {
   detail?: string;
   info?: string;
   apply?: string;
+  replaceClosingQuote?: '"' | "'";
   boost: number;
   exactMatch?: boolean;
   dedupeKey?: string;
@@ -1269,6 +1270,15 @@ export interface SqlCompletionContext {
   openingParenAfterCursor: boolean;
   contextKind: SqlCompletionContextKind;
   dataTypeContext: boolean;
+}
+
+export interface PostgresSequenceLiteralCompletionContext {
+  from: number;
+  prefix: string;
+  schema?: string;
+  schemaQuoted: boolean;
+  nameQuoted: boolean;
+  nameQuoteClosed: boolean;
 }
 
 export interface SqlFunctionSignatureHelpOverload {
@@ -1478,6 +1488,7 @@ class SqlCompletionProvider {
 }
 
 export function shouldAutoOpenSqlCompletion(sql: string, cursor: number, options: SqlSemanticBuildOptions = {}): boolean {
+  if (getPostgresSequenceLiteralCompletionContext(sql, cursor, options.databaseType)) return true;
   if (isSqlCompletionSuppressedContext(sql, cursor)) return false;
   const previousChar = sql[cursor - 1];
   if (!previousChar) return false;
@@ -1509,6 +1520,209 @@ function isColumnCompletionExpressionStart(beforeCursor: string): boolean {
 export function isSqlCompletionSuppressedContext(sql: string, cursor: number): boolean {
   const context = getSqlLexicalContext(sql, cursor);
   return context.inLineComment || context.inBlockComment || context.inStringLiteral;
+}
+
+export function getPostgresSequenceLiteralCompletionContext(sql: string, cursor: number, databaseType?: DatabaseType): PostgresSequenceLiteralCompletionContext | null {
+  if (databaseType !== "postgres") return null;
+  const position = Math.max(0, Math.min(cursor, sql.length));
+  const literalStart = activeSingleQuotedLiteralStart(sql, position);
+  if (literalStart == null) return null;
+
+  const beforeLiteral = sql.slice(0, literalStart);
+  if (!isPostgresSequenceFunctionCall(beforeLiteral)) return null;
+
+  const rawLiteral = sql.slice(literalStart + 1, position);
+  const parsed = parsePostgresRegclassPrefix(rawLiteral);
+  if (!parsed) return null;
+  return {
+    from: literalStart + 1 + parsed.nameStart,
+    prefix: parsed.name,
+    schema: parsed.schema,
+    schemaQuoted: parsed.schemaQuoted,
+    nameQuoted: parsed.nameQuoted,
+    nameQuoteClosed: parsed.nameQuoteClosed,
+  };
+}
+
+export function buildPostgresSequenceLiteralCompletionItems(context: PostgresSequenceLiteralCompletionContext, objects: SqlCompletionObject[]): SqlCompletionItem[] {
+  return objects
+    .filter((object) => object.type === "sequence")
+    .filter((object) => {
+      if (context.schema) {
+        if (!object.schema) return false;
+        const schemaMatches = context.schemaQuoted ? object.schema === context.schema : object.schema.toLowerCase() === context.schema.toLowerCase();
+        if (!schemaMatches) return false;
+      }
+      return context.nameQuoted ? object.name.startsWith(context.prefix) : object.name.toLowerCase().startsWith(context.prefix.toLowerCase());
+    })
+    .map((object) => {
+      const identifier = context.nameQuoted ? `${escapePostgresSequenceLiteralQuotedIdentifier(object.name)}"` : escapePostgresSequenceLiteralIdentifier(quoteSqlIdentifier(object.name, "postgres"));
+      return {
+        label: object.name,
+        filterText: context.nameQuoted ? identifier.slice(0, -1) : escapePostgresSequenceLiteralIdentifier(object.name),
+        type: "variable" as const,
+        detail: object.schema ? `sequence in ${object.schema}` : "sequence",
+        info: object.comment?.trim() || undefined,
+        apply: identifier,
+        replaceClosingQuote: context.nameQuoted && !context.nameQuoteClosed ? ('"' as const) : undefined,
+        boost: computeBoost(object.name, context.prefix) + 1_200,
+      };
+    })
+    .sort(compareCompletionItems)
+    .slice(0, MAX_TABLE_COMPLETION_ITEMS);
+}
+
+function escapePostgresSequenceLiteralIdentifier(value: string): string {
+  return value.replaceAll("'", "''");
+}
+
+function escapePostgresSequenceLiteralQuotedIdentifier(value: string): string {
+  return escapePostgresSequenceLiteralIdentifier(value.replaceAll('"', '""'));
+}
+
+function isPostgresSequenceFunctionCall(beforeLiteral: string): boolean {
+  const call = /(?:nextval|currval|setval)\s*\(\s*$/i.exec(beforeLiteral);
+  if (!call) return false;
+
+  const beforeFunction = beforeLiteral.slice(0, call.index);
+  const beforeFunctionTrimmed = beforeFunction.trimEnd();
+  if (!beforeFunctionTrimmed.endsWith(".")) {
+    return !beforeFunction || /\s$/.test(beforeFunction) || !/[\w$."`]$/.test(beforeFunction);
+  }
+
+  const beforeDot = beforeFunctionTrimmed.slice(0, -1).trimEnd();
+  const qualifier = /(?:"((?:""|[^"])*)"|([A-Za-z_][\w$]*))$/.exec(beforeDot);
+  if (!qualifier) return false;
+  const quotedQualifier = qualifier[1];
+  const qualifierName = (quotedQualifier ?? qualifier[2] ?? "").replaceAll('""', '"');
+  if (quotedQualifier != null ? qualifierName !== "pg_catalog" : qualifierName.toLowerCase() !== "pg_catalog") return false;
+  const beforeQualifier = beforeDot.slice(0, qualifier.index);
+  return !beforeQualifier || /\s$/.test(beforeQualifier) || !/[\w$."`]$/.test(beforeQualifier);
+}
+
+function activeSingleQuotedLiteralStart(sql: string, cursor: number): number | null {
+  let literalStart: number | null = null;
+  let dollarQuoteDelimiter: string | null = null;
+  let inDoubleQuote = false;
+  let inLineComment = false;
+  let inBlockComment = false;
+  for (let index = 0; index < cursor; index += 1) {
+    const char = sql[index] ?? "";
+    const next = sql[index + 1] ?? "";
+    if (dollarQuoteDelimiter) {
+      if (sql.startsWith(dollarQuoteDelimiter, index)) {
+        index += dollarQuoteDelimiter.length - 1;
+        dollarQuoteDelimiter = null;
+      }
+      continue;
+    }
+    if (inLineComment) {
+      if (char === "\n" || char === "\r") inLineComment = false;
+      continue;
+    }
+    if (inBlockComment) {
+      if (char === "*" && next === "/") {
+        inBlockComment = false;
+        index++;
+      }
+      continue;
+    }
+    if (literalStart != null) {
+      if (char === "'" && next === "'") {
+        index++;
+      } else if (char === "'") {
+        literalStart = null;
+      }
+      continue;
+    }
+    if (inDoubleQuote) {
+      if (char === '"' && next === '"') index++;
+      else if (char === '"') inDoubleQuote = false;
+      continue;
+    }
+    if (char === "-" && next === "-") {
+      inLineComment = true;
+      index++;
+    } else if (char === "/" && next === "*") {
+      inBlockComment = true;
+      index++;
+    } else if (char === '"') {
+      inDoubleQuote = true;
+    } else if (char === "$") {
+      const delimiter = /^\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$/.exec(sql.slice(index, cursor))?.[0];
+      if (delimiter) {
+        dollarQuoteDelimiter = delimiter;
+        index += delimiter.length - 1;
+      }
+    } else if (char === "'") {
+      literalStart = index;
+    }
+  }
+  return literalStart;
+}
+
+function parsePostgresRegclassPrefix(raw: string): { nameStart: number; name: string; schema?: string; schemaQuoted: boolean; nameQuoted: boolean; nameQuoteClosed: boolean } | null {
+  const parts: Array<{ start: number; value: string; quoted: boolean; quoteClosed: boolean }> = [];
+  let index = 0;
+  while (index < raw.length && /\s/.test(raw[index] ?? "")) index++;
+  while (index <= raw.length && parts.length < 2) {
+    const start = index;
+    let quoted = false;
+    let quoteClosed = false;
+    let value = "";
+    if (raw[index] === '"') {
+      quoted = true;
+      index++;
+      const valueStart = index;
+      while (index < raw.length) {
+        const char = raw[index] ?? "";
+        if (char === '"' && raw[index + 1] === '"') {
+          value += '"';
+          index += 2;
+        } else if (char === '"') {
+          quoteClosed = true;
+          index++;
+          break;
+        } else if (char === "'" && raw[index + 1] === "'") {
+          value += "'";
+          index += 2;
+        } else {
+          value += char;
+          index++;
+        }
+      }
+      parts.push({ start: valueStart, value, quoted, quoteClosed });
+    } else {
+      while (index < raw.length && raw[index] !== ".") {
+        const char = raw[index] ?? "";
+        if (char === "'" && raw[index + 1] === "'") {
+          value += "'";
+          index += 2;
+        } else if (/\s/.test(char) || char === '"') {
+          return null;
+        } else {
+          value += char;
+          index++;
+        }
+      }
+      parts.push({ start, value, quoted, quoteClosed });
+    }
+    if (index >= raw.length) break;
+    if (raw[index] !== "." || (!quoteClosed && quoted)) return null;
+    index++;
+    if (index >= raw.length) parts.push({ start: index, value: "", quoted: false, quoteClosed: false });
+  }
+  if (index < raw.length || parts.length === 0 || parts.length > 2) return null;
+  const name = parts[parts.length - 1]!;
+  const schema = parts.length === 2 ? parts[0] : undefined;
+  return {
+    nameStart: name.start,
+    name: name.value,
+    schema: schema?.value ? (schema.quoted ? schema.value : schema.value.toLowerCase()) : undefined,
+    schemaQuoted: schema?.quoted ?? false,
+    nameQuoted: name.quoted,
+    nameQuoteClosed: name.quoteClosed,
+  };
 }
 
 export function isSqlStringLiteralContext(sql: string, cursor: number): boolean {
@@ -3057,7 +3271,7 @@ function buildObjectItems(context: SqlCompletionContext, objects: SqlCompletionO
   const onlyFunctions = context.suggestColumns && context.referencedTables.length > 0 && !context.qualifier;
   const prioritizeOracleFunctions = databaseType === "oracle" && context.statementKind === "select";
   return objects
-    .filter((object) => (!onlyProcedures || object.type === "procedure") && (!onlyFunctions || (object.type === "function" && object.name.toLowerCase().startsWith(context.prefix.toLowerCase()))) && objectMatchesCompletionContext(object, context))
+    .filter((object) => object.type !== "sequence" && (!onlyProcedures || object.type === "procedure") && (!onlyFunctions || (object.type === "function" && object.name.toLowerCase().startsWith(context.prefix.toLowerCase()))) && objectMatchesCompletionContext(object, context))
     .map((object) => {
       const qualifiedByContext = objectIsQualifiedByContext(object, context);
       const objectInCurrentSchema = !!currentSchema && !!object.schema && normalizeIdentifierPart(object.schema) === normalizeIdentifierPart(currentSchema);

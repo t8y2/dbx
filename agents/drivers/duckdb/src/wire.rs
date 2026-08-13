@@ -60,6 +60,7 @@ pub enum CompletionAssistantObjectKind {
     Procedure,
     Function,
     Column,
+    Sequence,
 }
 
 impl CompletionAssistantObjectKind {
@@ -78,6 +79,7 @@ pub enum CompletionAssistantCandidateKind {
     Procedure,
     Function,
     Column,
+    Sequence,
     Object,
 }
 

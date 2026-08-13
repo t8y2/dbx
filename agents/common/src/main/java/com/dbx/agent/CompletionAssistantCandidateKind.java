@@ -17,6 +17,8 @@ public enum CompletionAssistantCandidateKind {
     FUNCTION,
     @SerializedName("column")
     COLUMN,
+    @SerializedName("sequence")
+    SEQUENCE,
     @SerializedName("object")
     OBJECT
 }

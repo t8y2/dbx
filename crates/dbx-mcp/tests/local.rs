@@ -1,4 +1,6 @@
-use std::{ffi::OsString, sync::Arc};
+#[cfg(feature = "duckdb-sidecar")]
+use std::ffi::OsString;
+use std::sync::Arc;
 
 use dbx_core::{models::connection::ConnectionConfig, storage::Storage};
 use dbx_mcp::{DbxBackend, DbxMcpServer, LocalBackend, McpScope};
@@ -6,11 +8,13 @@ use rmcp::{model::CallToolRequestParams, ServiceExt};
 use serde_json::{json, Map, Value};
 use tempfile::tempdir;
 
+#[cfg(feature = "duckdb-sidecar")]
 struct EnvVarGuard {
     name: &'static str,
     original: Option<OsString>,
 }
 
+#[cfg(feature = "duckdb-sidecar")]
 impl EnvVarGuard {
     fn set(name: &'static str, value: &str) -> Self {
         let original = std::env::var_os(name);
@@ -19,6 +23,7 @@ impl EnvVarGuard {
     }
 }
 
+#[cfg(feature = "duckdb-sidecar")]
 impl Drop for EnvVarGuard {
     fn drop(&mut self) {
         if let Some(value) = self.original.take() {
@@ -378,6 +383,18 @@ async fn local_backend_uses_the_installed_duckdb_sidecar() {
 
 #[tokio::test]
 async fn legacy_read_only_config_applies_before_settings_are_opened() {
+    const CHILD_ENV: &str = "DBX_MCP_LEGACY_READ_ONLY_TEST_CHILD";
+    if std::env::var_os(CHILD_ENV).is_none() {
+        let status = std::process::Command::new(std::env::current_exe().expect("locate test executable"))
+            .args(["--exact", "legacy_read_only_config_applies_before_settings_are_opened", "--nocapture"])
+            .env(CHILD_ENV, "1")
+            .env("DBX_MCP_ALLOW_WRITES", "0")
+            .status()
+            .expect("run legacy read-only test in an isolated process");
+        assert!(status.success(), "isolated legacy read-only test failed");
+        return;
+    }
+
     let directory = tempdir().expect("temporary data directory");
     let db_path = directory.path().join("dbx.db");
     let storage = Storage::open(&db_path).await.expect("open storage");
@@ -395,8 +412,6 @@ async fn legacy_read_only_config_applies_before_settings_are_opened() {
     }))
     .expect("minimal connection config");
     storage.save_connections(&[connection]).await.expect("save connection");
-    let _allow_writes = EnvVarGuard::set("DBX_MCP_ALLOW_WRITES", "0");
-
     let backend = Arc::new(LocalBackend::open(&db_path).await.expect("open local backend"));
     let server = DbxMcpServer::with_runtime_options(backend, McpScope::default(), false);
     let (server_transport, client_transport) = tokio::io::duplex(16 * 1024);

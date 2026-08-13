@@ -18,5 +18,7 @@ public enum CompletionAssistantObjectKind {
     @SerializedName("function")
     FUNCTION,
     @SerializedName("column")
-    COLUMN
+    COLUMN,
+    @SerializedName("sequence")
+    SEQUENCE
 }

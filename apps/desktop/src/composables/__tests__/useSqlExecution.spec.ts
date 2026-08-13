@@ -734,6 +734,30 @@ SELECT @value AS Message;`;
     expect(activeTab.value?.result).toEqual(result);
   });
 
+  it("uses the inferred Oracle dialect when explaining through custom JDBC", async () => {
+    const sql = "SELECT * FROM DUAL";
+    const activeTab = ref<QueryTab | undefined>({ ...queryTab("ORCL"), sql });
+    const activeConnection = ref<ConnectionConfig | undefined>({
+      ...connection("jdbc"),
+      connection_string: "jdbc:oracle:thin:@127.0.0.1:1521:ORCL",
+      jdbc_driver_class: "oracle.jdbc.OracleDriver",
+    });
+    const activeOutputView = ref<"result" | "summary" | "explain" | "chart">("result");
+    const queryStore = useQueryStore();
+    const explainTabSql = vi.spyOn(queryStore, "explainTabSql").mockResolvedValue({ ok: true, sql });
+
+    const execution = useSqlExecution({
+      activeTab: computed(() => activeTab.value),
+      activeConnection: computed(() => activeConnection.value),
+      executableSql: computed(() => sql),
+      activeOutputView,
+    });
+
+    await execution.tryExplain();
+
+    expect(explainTabSql).toHaveBeenCalledWith("tab-1", sql, "oracle", "explain");
+  });
+
   it("keeps the new-result-tab intent through Redis command confirmation", async () => {
     const sql = "DEL user:1";
     const activeTab = ref<QueryTab | undefined>({ ...queryTab("0"), sql });

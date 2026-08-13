@@ -50,8 +50,8 @@ mod tests {
         let con = duckdb::Connection::open_in_memory().expect("connect in-memory DuckDB");
         con.execute_batch("CREATE TABLE users (id INTEGER, name VARCHAR)").expect("create table");
 
-        let inserted = duckdb_execute(&con, "INSERT INTO users VALUES (1, 'Ada') RETURNING id, name")
-            .expect("insert returning");
+        let inserted =
+            duckdb_execute(&con, "INSERT INTO users VALUES (1, 'Ada') RETURNING id, name").expect("insert returning");
         let updated = duckdb_execute(&con, "UPDATE users SET name = 'Ada Lovelace' RETURNING id, name")
             .expect("update returning");
         let deleted = duckdb_execute(&con, "DELETE FROM users RETURNING id, name").expect("delete returning");

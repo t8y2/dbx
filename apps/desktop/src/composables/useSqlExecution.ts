@@ -484,7 +484,9 @@ export function useSqlExecution(deps: {
     }
 
     deps.activeOutputView.value = "explain";
-    const result = await queryStore.explainTabSql(tab.id, sql, deps.activeConnection.value?.db_type, explainMode.value);
+    const connection = deps.activeConnection.value;
+    const databaseType = effectiveDatabaseTypeForConnection(connection) ?? connection?.db_type;
+    const result = await queryStore.explainTabSql(tab.id, sql, databaseType, explainMode.value);
     if (!result.ok) {
       toast(explainReasonMessage(result.reason), 5000);
       return;

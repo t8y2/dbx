@@ -1415,6 +1415,8 @@ pub fn shard_diff(options: &SchemaDiffPreparationOptions, shard_strategy: &Shard
                 ignore_comments: options.ignore_comments,
                 cascade_delete: options.cascade_delete,
                 compare_column_order: options.compare_column_order,
+                source_dialect: options.source_dialect,
+                target_dialect: options.target_dialect,
                 ..Default::default()
             };
             diff_schema(&shard_options)
@@ -1939,7 +1941,7 @@ fn diff_schema(options: &SchemaDiffPreparationOptions) -> Vec<TableDiff> {
         .collect();
 
     let (added, removed, common) = diff_names(&source_table_names, &target_table_names);
-    let (added_views, removed_views, _) = diff_names(&source_view_names, &target_view_names);
+    let (added_views, removed_views, common_views) = diff_names(&source_view_names, &target_view_names);
     let mut result = Vec::new();
 
     for name in added {
@@ -2121,6 +2123,33 @@ fn diff_schema(options: &SchemaDiffPreparationOptions) -> Vec<TableDiff> {
         });
     }
 
+    for name in common_views {
+        let Some(source_ddl) = source_details.get(name.as_str()).and_then(|detail| detail.ddl.as_ref()) else {
+            continue;
+        };
+        let Some(target_ddl) = target_details.get(name.as_str()).and_then(|detail| detail.ddl.as_ref()) else {
+            continue;
+        };
+        if !mysql_view_definitions_differ(source_ddl, target_ddl, options.source_dialect, options.target_dialect) {
+            continue;
+        }
+
+        result.push(TableDiff {
+            diff_type: "modified".to_string(),
+            object_type: Some("view".to_string()),
+            name,
+            columns: None,
+            indexes: None,
+            foreign_keys: None,
+            triggers: None,
+            ddl: Some(source_ddl.clone()),
+            target_ddl: Some(target_ddl.clone()),
+            source_table_comment: None,
+            target_table_comment: None,
+            sync_sql: None,
+        });
+    }
+
     for name in common {
         let Some(source) = source_details.get(name.as_str()) else { continue };
         let Some(target) = target_details.get(name.as_str()) else { continue };
@@ -2175,6 +2204,261 @@ fn diff_names(source: &[String], target: &[String]) -> (Vec<String>, Vec<String>
         target.iter().filter(|name| !source_set.contains(name.as_str())).cloned().collect(),
         source.iter().filter(|name| target_set.contains(name.as_str())).cloned().collect(),
     )
+}
+
+fn mysql_view_definitions_differ(
+    source_ddl: &str,
+    target_ddl: &str,
+    source_dialect: Option<DialectKind>,
+    target_dialect: Option<DialectKind>,
+) -> bool {
+    if source_dialect != Some(DialectKind::Mysql) || target_dialect != Some(DialectKind::Mysql) {
+        return false;
+    }
+
+    normalize_mysql_view_ddl(source_ddl) != normalize_mysql_view_ddl(target_ddl)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MysqlViewTokenKind {
+    Atom,
+    Symbol,
+}
+
+fn normalize_mysql_view_ddl(ddl: &str) -> String {
+    let ddl = strip_mysql_view_definer(ddl);
+    let schema = mysql_view_schema(&ddl);
+    let mut normalized = String::with_capacity(ddl.len());
+    let mut previous = None;
+    let mut pending_whitespace = false;
+    let bytes = ddl.as_bytes();
+    let mut index = 0;
+
+    while index < bytes.len() {
+        if bytes[index].is_ascii_whitespace() {
+            pending_whitespace = true;
+            index += 1;
+            continue;
+        }
+
+        let (end, kind, replacement) = match bytes[index] {
+            b'\'' | b'"' => {
+                let end = mysql_quoted_token_end(&ddl, index);
+                (end, MysqlViewTokenKind::Atom, None)
+            }
+            b'`' => {
+                let end = mysql_quoted_token_end(&ddl, index);
+                let identifier = decode_mysql_quoted_identifier(&ddl[index..end]);
+                let is_schema_qualifier =
+                    schema.as_deref() == Some(identifier.as_str()) && ddl[end..].trim_start().starts_with('.');
+                (end, MysqlViewTokenKind::Atom, is_schema_qualifier.then_some("`__dbx_schema__`"))
+            }
+            b'#' => {
+                let end = ddl[index..].find('\n').map_or(bytes.len(), |offset| index + offset);
+                (end, MysqlViewTokenKind::Atom, None)
+            }
+            b'-' if bytes.get(index + 1) == Some(&b'-')
+                && bytes.get(index + 2).is_some_and(|next| next.is_ascii_whitespace()) =>
+            {
+                let end = ddl[index..].find('\n').map_or(bytes.len(), |offset| index + offset);
+                (end, MysqlViewTokenKind::Atom, None)
+            }
+            b'/' if bytes.get(index + 1) == Some(&b'*') => {
+                let end = ddl[index + 2..].find("*/").map_or(bytes.len(), |offset| index + 2 + offset + 2);
+                (end, MysqlViewTokenKind::Atom, None)
+            }
+            byte if mysql_view_symbol(byte) => (index + 1, MysqlViewTokenKind::Symbol, None),
+            _ => {
+                let mut end = index + 1;
+                while end < bytes.len()
+                    && !bytes[end].is_ascii_whitespace()
+                    && !matches!(bytes[end], b'\'' | b'"' | b'`' | b'#')
+                    && !mysql_view_symbol(bytes[end])
+                {
+                    end += 1;
+                }
+                (end, MysqlViewTokenKind::Atom, None)
+            }
+        };
+
+        if pending_whitespace && previous == Some(kind) {
+            normalized.push(' ');
+        }
+        normalized.push_str(replacement.unwrap_or(&ddl[index..end]));
+        previous = Some(kind);
+        pending_whitespace = false;
+        index = end;
+    }
+
+    normalized
+}
+
+fn mysql_view_symbol(byte: u8) -> bool {
+    matches!(
+        byte,
+        b'(' | b')'
+            | b'['
+            | b']'
+            | b'{'
+            | b'}'
+            | b','
+            | b'.'
+            | b';'
+            | b'+'
+            | b'-'
+            | b'*'
+            | b'/'
+            | b'%'
+            | b'<'
+            | b'>'
+            | b'='
+            | b'!'
+            | b'|'
+            | b'&'
+            | b'^'
+            | b'~'
+            | b'?'
+            | b':'
+            | b'@'
+    )
+}
+
+fn mysql_view_schema(ddl: &str) -> Option<String> {
+    let view = find_mysql_header_keyword(ddl, "VIEW", ddl.len())?;
+    let mut index = skip_ascii_whitespace(ddl, view + "VIEW".len());
+    let (identifier, end) = parse_mysql_identifier(ddl, index)?;
+    index = skip_ascii_whitespace(ddl, end);
+    (ddl.as_bytes().get(index) == Some(&b'.')).then_some(identifier)
+}
+
+fn strip_mysql_view_definer(ddl: &str) -> String {
+    let Some(view) = find_mysql_header_keyword(ddl, "VIEW", ddl.len()) else {
+        return ddl.to_string();
+    };
+    let Some(definer) = find_mysql_header_keyword(ddl, "DEFINER", view) else {
+        return ddl.to_string();
+    };
+    let mut index = skip_ascii_whitespace(ddl, definer + "DEFINER".len());
+    if ddl.as_bytes().get(index) != Some(&b'=') {
+        return ddl.to_string();
+    }
+    index = skip_ascii_whitespace(ddl, index + 1);
+
+    let Some(mut end) = parse_mysql_definer_principal(ddl, index) else {
+        return ddl.to_string();
+    };
+    end = skip_ascii_whitespace(ddl, end);
+    if ddl.as_bytes().get(end) == Some(&b'@') {
+        end = skip_ascii_whitespace(ddl, end + 1);
+        let Some(host_end) = parse_mysql_definer_principal(ddl, end) else {
+            return ddl.to_string();
+        };
+        end = host_end;
+    } else if ddl[index..end].eq_ignore_ascii_case("CURRENT_USER") {
+        let open = skip_ascii_whitespace(ddl, end);
+        if ddl.as_bytes().get(open) == Some(&b'(') {
+            let close = skip_ascii_whitespace(ddl, open + 1);
+            if ddl.as_bytes().get(close) == Some(&b')') {
+                end = close + 1;
+            }
+        }
+    } else {
+        return ddl.to_string();
+    }
+
+    end = skip_ascii_whitespace(ddl, end);
+    let mut stripped = String::with_capacity(ddl.len() - (end - definer));
+    stripped.push_str(&ddl[..definer]);
+    stripped.push_str(&ddl[end..]);
+    stripped
+}
+
+fn parse_mysql_definer_principal(ddl: &str, index: usize) -> Option<usize> {
+    match *ddl.as_bytes().get(index)? {
+        b'`' | b'\'' | b'"' => Some(mysql_quoted_token_end(ddl, index)),
+        _ => {
+            let mut end = index;
+            while let Some(byte) = ddl.as_bytes().get(end) {
+                if byte.is_ascii_whitespace() || matches!(byte, b'@' | b'(' | b')') {
+                    break;
+                }
+                end += 1;
+            }
+            (end > index).then_some(end)
+        }
+    }
+}
+
+fn parse_mysql_identifier(ddl: &str, index: usize) -> Option<(String, usize)> {
+    if ddl.as_bytes().get(index) == Some(&b'`') {
+        let end = mysql_quoted_token_end(ddl, index);
+        return Some((decode_mysql_quoted_identifier(&ddl[index..end]), end));
+    }
+
+    let mut end = index;
+    while let Some(byte) = ddl.as_bytes().get(end) {
+        if byte.is_ascii_whitespace() || mysql_view_symbol(*byte) {
+            break;
+        }
+        end += 1;
+    }
+    (end > index).then(|| (ddl[index..end].to_string(), end))
+}
+
+fn decode_mysql_quoted_identifier(identifier: &str) -> String {
+    identifier.strip_prefix('`').and_then(|value| value.strip_suffix('`')).unwrap_or(identifier).replace("``", "`")
+}
+
+fn find_mysql_header_keyword(ddl: &str, keyword: &str, limit: usize) -> Option<usize> {
+    let bytes = ddl.as_bytes();
+    let mut index = 0;
+    while index < limit {
+        match bytes[index] {
+            b'\'' | b'"' | b'`' => {
+                index = mysql_quoted_token_end(ddl, index);
+            }
+            byte if byte.is_ascii_alphabetic() || byte == b'_' => {
+                let start = index;
+                index += 1;
+                while index < limit && (bytes[index].is_ascii_alphanumeric() || matches!(bytes[index], b'_' | b'$')) {
+                    index += 1;
+                }
+                if ddl[start..index].eq_ignore_ascii_case(keyword) {
+                    return Some(start);
+                }
+            }
+            _ => index += 1,
+        }
+    }
+    None
+}
+
+fn mysql_quoted_token_end(ddl: &str, start: usize) -> usize {
+    let bytes = ddl.as_bytes();
+    let quote = bytes[start];
+    let mut index = start + 1;
+    while index < bytes.len() {
+        if bytes[index] == b'\\' && quote != b'`' {
+            index = (index + 2).min(bytes.len());
+            continue;
+        }
+        if bytes[index] == quote {
+            if bytes.get(index + 1) == Some(&quote) {
+                index += 2;
+                continue;
+            }
+            return index + 1;
+        }
+        index += 1;
+    }
+    bytes.len()
+}
+
+fn skip_ascii_whitespace(input: &str, mut index: usize) -> usize {
+    while input.as_bytes().get(index).is_some_and(|byte| byte.is_ascii_whitespace()) {
+        index += 1;
+    }
+    index
 }
 
 pub fn diff_columns(source: &[ColumnInfo], target: &[ColumnInfo]) -> Vec<ColumnDiff> {
@@ -3950,6 +4234,40 @@ mod tests {
             enum_values: None,
             character_set: None,
             collation: None,
+        }
+    }
+
+    fn table_info(name: &str, table_type: &str) -> TableInfo {
+        TableInfo {
+            name: name.to_string(),
+            table_type: table_type.to_string(),
+            comment: None,
+            parent_schema: None,
+            parent_name: None,
+        }
+    }
+
+    fn schema_detail(name: &str, ddl: Option<&str>) -> TableSchemaDetail {
+        TableSchemaDetail {
+            name: name.to_string(),
+            columns: vec![],
+            indexes: vec![],
+            foreign_keys: vec![],
+            triggers: vec![],
+            ddl: ddl.map(str::to_string),
+        }
+    }
+
+    fn common_mysql_view_options(source_ddl: Option<&str>, target_ddl: Option<&str>) -> SchemaDiffPreparationOptions {
+        SchemaDiffPreparationOptions {
+            source_tables: vec![table_info("active_orders", "VIEW")],
+            target_tables: vec![table_info("active_orders", "VIEW")],
+            source_details: vec![schema_detail("active_orders", source_ddl)],
+            target_details: vec![schema_detail("active_orders", target_ddl)],
+            database_type: DatabaseType::Mysql,
+            source_dialect: Some(DialectKind::Mysql),
+            target_dialect: Some(DialectKind::Mysql),
+            ..Default::default()
         }
     }
 
@@ -8706,6 +9024,146 @@ mod tests {
         );
 
         assert!(sql.contains("ALTER COLUMN \"created_at\" TYPE timestamp(0)"), "{sql}");
+    }
+
+    #[test]
+    fn detects_changed_common_mysql_view_definitions() {
+        let options = common_mysql_view_options(
+            Some("CREATE ALGORITHM=UNDEFINED DEFINER=`viewer_a`@`%` SQL SECURITY DEFINER VIEW `source_db`.`active_orders` AS select `source_db`.`orders`.`id` AS `id` from `source_db`.`orders` where (`source_db`.`orders`.`active` = 1)"),
+            Some("CREATE ALGORITHM=UNDEFINED DEFINER=`viewer_b`@`%` SQL SECURITY DEFINER VIEW `target_db`.`active_orders` AS select `target_db`.`orders`.`id` AS `id` from `target_db`.`orders` where (`target_db`.`orders`.`active` = 0)"),
+        );
+
+        let result = prepare_schema_diff(options);
+
+        assert_eq!(result.diffs.len(), 1);
+        let diff = &result.diffs[0];
+        assert_eq!(diff.diff_type, "modified");
+        assert_eq!(diff.object_type.as_deref(), Some("view"));
+        assert!(diff.ddl.as_deref().is_some_and(|ddl| ddl.contains("active` = 1")));
+        assert!(diff.target_ddl.as_deref().is_some_and(|ddl| ddl.contains("active` = 0")));
+        assert!(diff.sync_sql.is_none());
+        assert!(result.sync_sql.is_empty());
+    }
+
+    #[test]
+    fn ignores_mysql_view_environment_and_formatting_differences() {
+        let result = prepare_schema_diff(common_mysql_view_options(
+            Some("CREATE  ALGORITHM = UNDEFINED DEFINER = `viewer_a` @ `%` SQL SECURITY DEFINER VIEW `source_db` . `active_orders` AS select `source_db` . `orders` . `id` from `source_db` . `orders` where ( `source_db` . `orders` . `active` = 1 )"),
+            Some("CREATE ALGORITHM=UNDEFINED DEFINER=`viewer_b`@`localhost` SQL SECURITY DEFINER VIEW `target_db`.`active_orders` AS select `target_db`.`orders`.`id` from `target_db`.`orders` where(`target_db`.`orders`.`active`=1)"),
+        ));
+
+        assert!(result.diffs.is_empty());
+        assert!(result.sync_sql.is_empty());
+    }
+
+    #[test]
+    fn preserves_mysql_view_literal_contents_during_comparison() {
+        let common =
+            "CREATE VIEW `source_db`.`active_orders` AS SELECT 'source_db.orders', 'a b' FROM `source_db`.`orders`";
+        let changed_schema_literal =
+            "CREATE VIEW `target_db`.`active_orders` AS SELECT 'target_db.orders', 'a b' FROM `target_db`.`orders`";
+        let changed_literal_whitespace =
+            "CREATE VIEW `target_db`.`active_orders` AS SELECT 'source_db.orders', 'a  b' FROM `target_db`.`orders`";
+
+        assert!(mysql_view_definitions_differ(
+            common,
+            changed_schema_literal,
+            Some(DialectKind::Mysql),
+            Some(DialectKind::Mysql)
+        ));
+        assert!(mysql_view_definitions_differ(
+            common,
+            changed_literal_whitespace,
+            Some(DialectKind::Mysql),
+            Some(DialectKind::Mysql)
+        ));
+    }
+
+    #[test]
+    fn preserves_mysql_view_compound_operator_semantics() {
+        let compact = "CREATE VIEW `app`.`active_orders` AS SELECT 1 <=> 1, 1 <= 2, 1 != 2";
+        let split = "CREATE VIEW `app`.`active_orders` AS SELECT 1 < = > 1, 1 < = 2, 1 ! = 2";
+
+        assert!(mysql_view_definitions_differ(compact, split, Some(DialectKind::Mysql), Some(DialectKind::Mysql)));
+    }
+
+    #[test]
+    fn preserves_mysql_view_options_and_identifier_case() {
+        let ddl = "CREATE ALGORITHM=MERGE SQL SECURITY INVOKER VIEW `app`.`active_orders` AS SELECT `OrderId` FROM `app`.`orders` WITH CASCADED CHECK OPTION";
+
+        for changed in [
+            ddl.replace("ALGORITHM=MERGE", "ALGORITHM=TEMPTABLE"),
+            ddl.replace("SECURITY INVOKER", "SECURITY DEFINER"),
+            ddl.replace("`OrderId`", "`orderid`"),
+            ddl.replace("CASCADED", "LOCAL"),
+        ] {
+            assert!(mysql_view_definitions_differ(ddl, &changed, Some(DialectKind::Mysql), Some(DialectKind::Mysql)));
+        }
+    }
+
+    #[test]
+    fn common_view_comparison_requires_two_ddls_and_matching_mysql_dialects() {
+        for (source, target) in [(None, Some("CREATE VIEW v AS SELECT 1")), (Some("CREATE VIEW v AS SELECT 1"), None)] {
+            assert!(prepare_schema_diff(common_mysql_view_options(source, target)).diffs.is_empty());
+        }
+
+        let mut cross_dialect = common_mysql_view_options(
+            Some("CREATE VIEW `app`.`active_orders` AS SELECT 1"),
+            Some("CREATE VIEW active_orders AS SELECT 2"),
+        );
+        cross_dialect.target_dialect = Some(DialectKind::Postgres);
+        assert!(prepare_schema_diff(cross_dialect).diffs.is_empty());
+    }
+
+    #[test]
+    fn sharded_diff_keeps_common_mysql_view_comparison() {
+        let source_ddl = "CREATE VIEW `source_db`.`active_orders` AS SELECT 1";
+        let target_ddl = "CREATE VIEW `target_db`.`active_orders` AS SELECT 2";
+        let mut options = common_mysql_view_options(Some(source_ddl), Some(target_ddl));
+        options.source_tables.push(table_info("other_view", "VIEW"));
+        options.target_tables.push(table_info("other_view", "VIEW"));
+        options.source_details.push(schema_detail("other_view", Some("CREATE VIEW other_view AS SELECT 1")));
+        options.target_details.push(schema_detail("other_view", Some("CREATE VIEW other_view AS SELECT 1")));
+        options.shard_strategy = Some(ShardStrategy { shard_count: 2, shard_by: ShardBy::RoundRobin });
+
+        let result = prepare_schema_diff(options);
+
+        assert_eq!(result.diffs.len(), 1);
+        assert_eq!(result.diffs[0].name, "active_orders");
+        assert_eq!(result.diffs[0].diff_type, "modified");
+    }
+
+    #[test]
+    fn keeps_added_removed_views_and_table_view_name_boundaries() {
+        let result = prepare_schema_diff(SchemaDiffPreparationOptions {
+            source_tables: vec![table_info("source_view", "VIEW"), table_info("same_name", "BASE TABLE")],
+            target_tables: vec![table_info("target_view", "VIEW"), table_info("same_name", "VIEW")],
+            source_details: vec![
+                schema_detail("source_view", Some("CREATE VIEW source_view AS SELECT 1")),
+                schema_detail("same_name", Some("CREATE TABLE same_name (id int)")),
+            ],
+            target_details: vec![
+                schema_detail("target_view", Some("CREATE VIEW target_view AS SELECT 1")),
+                schema_detail("same_name", Some("CREATE VIEW same_name AS SELECT 1")),
+            ],
+            database_type: DatabaseType::Mysql,
+            source_dialect: Some(DialectKind::Mysql),
+            target_dialect: Some(DialectKind::Mysql),
+            ..Default::default()
+        });
+
+        assert!(result.diffs.iter().any(|diff| diff.name == "source_view"
+            && diff.diff_type == "added"
+            && diff.object_type.as_deref() == Some("view")));
+        assert!(result.diffs.iter().any(|diff| diff.name == "target_view"
+            && diff.diff_type == "removed"
+            && diff.object_type.as_deref() == Some("view")));
+        assert!(result.diffs.iter().any(|diff| diff.name == "same_name"
+            && diff.diff_type == "added"
+            && diff.object_type.as_deref() == Some("table")));
+        assert!(result.diffs.iter().any(|diff| diff.name == "same_name"
+            && diff.diff_type == "removed"
+            && diff.object_type.as_deref() == Some("view")));
     }
 
     #[test]

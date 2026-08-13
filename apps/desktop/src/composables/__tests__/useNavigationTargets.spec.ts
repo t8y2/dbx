@@ -129,10 +129,12 @@ describe("useNavigationTargets openTableTarget", () => {
     expect(pendingDuringQuery).toBe(false);
     expect(mocks.tabs[0]?.tableMeta?.primaryKeys).toEqual(["id"]);
     expect(mocks.tabs[0]?.tableMetaPending).toBe(false);
-    expect(mocks.buildTableSelectSql).toHaveBeenCalledWith(expect.objectContaining({
-      columns: ["id"],
-      primaryKeys: ["id"],
-    }));
+    expect(mocks.buildTableSelectSql).toHaveBeenCalledWith(
+      expect.objectContaining({
+        columns: ["id"],
+        primaryKeys: ["id"],
+      }),
+    );
   });
 
   it("reuses cached metadata and force-refreshes it once per catalog after a structure save", async () => {

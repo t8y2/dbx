@@ -137,18 +137,19 @@ async function openTableTarget(target: NavigationTarget, options: { tableInfoTab
       await queryStore.executeTabSql(tabId, sql, { pagination: { limit: pageLimit, offset: 0 } });
       return;
     }
-    const eagerMetadata = effectiveDbType === "mysql" || effectiveDbType === "postgres"
-      ? await loadTableMetadata({
-          connectionId: target.connectionId,
-          database: target.database,
-          schema: querySchema,
-          tableName: target.tableName,
-          tableType: targetTableType,
-          databaseType: effectiveDbType,
-          driverProfile: config.driver_profile || config.db_type,
-          catalog: target.catalog,
-        })
-      : undefined;
+    const eagerMetadata =
+      effectiveDbType === "mysql" || effectiveDbType === "postgres"
+        ? await loadTableMetadata({
+            connectionId: target.connectionId,
+            database: target.database,
+            schema: querySchema,
+            tableName: target.tableName,
+            tableType: targetTableType,
+            databaseType: effectiveDbType,
+            driverProfile: config.driver_profile || config.db_type,
+            catalog: target.catalog,
+          })
+        : undefined;
     const eagerColumns = eagerMetadata?.metadata.columns ?? [];
     const eagerPrimaryKeys = eagerMetadata?.metadata.primaryKeys ?? [];
     const sql = await buildTableSelectSql({

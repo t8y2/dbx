@@ -4544,11 +4544,7 @@ export const useQueryStore = defineStore("query", () => {
         // Query and data tabs use a tab-scoped pool so repeated executions keep
         // connection-local state and avoid MySQL pool resets on every refresh.
         const dataTabMeta = tab.mode === "data" ? tableMetaForDataTab(tab) : undefined;
-        const useTableDataPreview = canUseTableDataLargeValuePreview(
-          effectiveDbType,
-          dataTabMeta?.columns ?? [],
-          dataTabMeta?.primaryKeys ?? [],
-        );
+        const useTableDataPreview = canUseTableDataLargeValuePreview(effectiveDbType, dataTabMeta?.columns ?? [], dataTabMeta?.primaryKeys ?? []);
         const executionOptions = {
           ...(typeof pageLimit === "number"
             ? useAgentResultSession

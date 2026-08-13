@@ -5,23 +5,11 @@ export const TABLE_DATA_CELL_PREVIEW_MIN_SIZE = 256;
 export const TABLE_DATA_CELL_PREVIEW_SIZE = 8 * 1024;
 const TABLE_DATA_LARGE_VALUE_MARKER_PREFIX = "__DBX_LARGE_VALUE_BYTES_";
 
-export function canUseTableDataLargeValuePreview(
-  databaseType: DatabaseType | undefined,
-  columns: readonly ColumnInfo[],
-  primaryKeys: readonly string[],
-): boolean {
-  return (databaseType === "mysql" || databaseType === "postgres")
-    && columns.length > 0
-    && primaryKeys.length > 0
-    && !columns.some((column) => column.name.toLocaleUpperCase().startsWith(TABLE_DATA_LARGE_VALUE_MARKER_PREFIX));
+export function canUseTableDataLargeValuePreview(databaseType: DatabaseType | undefined, columns: readonly ColumnInfo[], primaryKeys: readonly string[]): boolean {
+  return (databaseType === "mysql" || databaseType === "postgres") && columns.length > 0 && primaryKeys.length > 0 && !columns.some((column) => column.name.toLocaleUpperCase().startsWith(TABLE_DATA_LARGE_VALUE_MARKER_PREFIX));
 }
 
-export function tableDataLargeValuePreviewOptions(
-  databaseType: DatabaseType | undefined,
-  columns: readonly ColumnInfo[],
-  primaryKeys: readonly string[],
-  pageSize?: number,
-): { columnTypes: string[]; largeValuePreviewSize: number } | Record<string, never> {
+export function tableDataLargeValuePreviewOptions(databaseType: DatabaseType | undefined, columns: readonly ColumnInfo[], primaryKeys: readonly string[], pageSize?: number): { columnTypes: string[]; largeValuePreviewSize: number } | Record<string, never> {
   if (!canUseTableDataLargeValuePreview(databaseType, columns, primaryKeys)) return {};
   const keyColumns = new Set(primaryKeys.map((column) => column.toLocaleLowerCase()));
   const previewColumnCount = columns.filter((column) => !keyColumns.has(column.name.toLocaleLowerCase())).length;

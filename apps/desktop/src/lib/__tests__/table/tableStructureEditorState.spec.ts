@@ -271,10 +271,7 @@ describe("tableStructureEditorState", () => {
   });
 
   it("keeps a saved Oracle length unit when refreshed metadata omits it", () => {
-    const [legacyAgentDraft] = createColumnDrafts(
-      [{ name: "DISPLAY_NAME", data_type: "VARCHAR2(255)", is_nullable: true, column_default: null, is_primary_key: false, extra: null }],
-      "oracle",
-    );
+    const [legacyAgentDraft] = createColumnDrafts([{ name: "DISPLAY_NAME", data_type: "VARCHAR2(255)", is_nullable: true, column_default: null, is_primary_key: false, extra: null }], "oracle");
 
     const [restored] = restoreCharacterLengthUnitsAfterSave("oracle", [legacyAgentDraft!], new Map([["display_name", "VARCHAR2(255 CHAR)"]]));
 

@@ -1692,7 +1692,7 @@ export const useQueryStore = defineStore("query", () => {
     });
   }
 
-  function openExternalSqlFile(connectionId: string, database: string, path: string, sql: string, version?: QueryTab["externalSqlFileVersion"]) {
+  function openExternalSqlFile(connectionId: string, database: string, path: string, sql: string, version?: QueryTab["externalSqlFileVersion"], catalog?: string) {
     const normalizedPath = normalizeExternalSqlPath(path);
     const existing = tabs.value.find((tab) => tab.mode === "query" && tab.externalSqlPath && normalizeExternalSqlPath(tab.externalSqlPath) === normalizedPath);
     if (existing) {
@@ -1709,6 +1709,7 @@ export const useQueryStore = defineStore("query", () => {
       customTitle: true,
       connectionId,
       database,
+      catalog,
       sql,
       originalSql: sql,
       externalSqlPath: path,
@@ -3081,6 +3082,7 @@ export const useQueryStore = defineStore("query", () => {
       .updateFileExecutionTarget(tab.savedSqlId, {
         connectionId: tab.connectionId,
         database: tab.database,
+        catalog: tab.catalog,
         schema: tab.schema,
       })
       .catch((error) => console.warn("[DBX][saved-sql:target:error]", error));

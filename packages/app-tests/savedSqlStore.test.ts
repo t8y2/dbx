@@ -142,6 +142,7 @@ test("changing a saved SQL execution target persists the latest target", async (
     connectionId: "conn-1",
     name: "query.sql",
     database: "db-1",
+    catalog: "hive",
     schema: "public",
     sql: "SELECT 1;",
     sqlLoaded: true,
@@ -156,12 +157,14 @@ test("changing a saved SQL execution target persists the latest target", async (
   await store.updateFileExecutionTarget("sql-target", {
     connectionId: "conn-2",
     database: "db-2",
+    catalog: "iceberg",
     schema: "app",
   });
 
   const saved = apiMock.saveSavedSqlFile.mock.calls.at(-1)?.[0];
   assert.equal(saved?.connectionId, "conn-2");
   assert.equal(saved?.database, "db-2");
+  assert.equal(saved?.catalog, "iceberg");
   assert.equal(saved?.schema, "app");
   assert.equal(saved?.sql, file.sql);
   assert.equal(saved?.name, file.name);
@@ -169,9 +172,10 @@ test("changing a saved SQL execution target persists the latest target", async (
     {
       connectionId: store.getFile("sql-target")?.connectionId,
       database: store.getFile("sql-target")?.database,
+      catalog: store.getFile("sql-target")?.catalog,
       schema: store.getFile("sql-target")?.schema,
     },
-    { connectionId: "conn-2", database: "db-2", schema: "app" },
+    { connectionId: "conn-2", database: "db-2", catalog: "iceberg", schema: "app" },
   );
 });
 
@@ -200,6 +204,32 @@ test("rapid saved SQL target changes persist only the latest target", async () =
   assert.equal(apiMock.saveSavedSqlFile.mock.calls.at(-1)?.[0].connectionId, "conn-3");
   assert.equal(apiMock.saveSavedSqlFile.mock.calls.at(-1)?.[0].database, "db-3");
   assert.equal(store.getFile("sql-target")?.connectionId, "conn-3");
+});
+
+test("changing only the saved SQL catalog persists the new catalog", async () => {
+  const file: SavedSqlFile = {
+    id: "sql-catalog-target",
+    connectionId: "conn-1",
+    name: "query.sql",
+    database: "sales",
+    catalog: "hive",
+    sql: "SELECT 1;",
+    sqlLoaded: true,
+    createdAt: "2026-06-27T00:00:00.000Z",
+    updatedAt: "2026-06-27T00:00:00.000Z",
+  };
+  apiMock.loadSavedSqlLibrary.mockResolvedValue({ folders: [], files: [file] });
+
+  const store = useSavedSqlStore();
+  await store.initFromStorage();
+  await store.updateFileExecutionTarget("sql-catalog-target", {
+    connectionId: "conn-1",
+    database: "sales",
+    catalog: "iceberg",
+  });
+
+  assert.equal(apiMock.saveSavedSqlFile.mock.calls.at(-1)?.[0].catalog, "iceberg");
+  assert.equal(store.getFile("sql-catalog-target")?.catalog, "iceberg");
 });
 
 test("saved SQL target changes roll back when persistence fails", async () => {

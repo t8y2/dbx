@@ -1015,7 +1015,7 @@ async function writeExternalSqlTab(tab: QueryTab, options: { closeAfterSave?: bo
       expectedMissing: options.expectedMissing,
     });
     if (result.kind !== "written") return "retry";
-    rememberExternalSqlFileTarget(tab.externalSqlPath, { connectionId: tab.connectionId, database: tab.database });
+    rememberExternalSqlFileTarget(tab.externalSqlPath, { connectionId: tab.connectionId, database: tab.database, catalog: tab.catalog });
     queryStore.markExternalSqlFileSaved(tab.id, result.version);
     toast(t("savedSql.saved"), 2000);
     if (options.closeAfterSave) queryStore.closeTab(tab.id, { force: true });
@@ -1080,6 +1080,7 @@ async function saveTabForCloseAll(tabId: string): Promise<boolean> {
       folderId: existing?.folderId,
       name: existing?.name || defaultSavedSqlName(tab.title),
       database: target.database,
+      catalog: target.catalog,
       schema: target.schema,
       sql: tab.sql,
     });
@@ -1146,6 +1147,7 @@ async function handleSaveTab(tabId: string) {
       folderId: existing.folderId,
       name: existing.name,
       database: target.database,
+      catalog: target.catalog,
       schema: target.schema,
       sql: tab.sql,
     });
@@ -1182,6 +1184,7 @@ async function openSaveSqlDialog() {
       folderId: existing.folderId,
       name: existing.name,
       database: target.database,
+      catalog: target.catalog,
       schema: target.schema,
       sql: tab.sql,
     });
@@ -1277,6 +1280,7 @@ async function confirmSaveSqlToLibrary() {
       folderId: saveSqlFolderId.value === ROOT_SAVED_SQL_FOLDER ? undefined : saveSqlFolderId.value,
       name: defaultSavedSqlName(name),
       database: target.database,
+      catalog: target.catalog,
       schema: target.schema,
       sql: tab.sql,
     });
@@ -1296,7 +1300,7 @@ async function saveExternalSqlTabAs(tab: QueryTab): Promise<boolean> {
     const saved = await api.saveExternalSqlFile(defaultSavedSqlName(tab.title), tab.sql);
     if (!saved) return false;
     queryStore.linkExternalSqlPath(tab.id, saved.path, sqlFileTitleFromPath(saved.path), saved.version);
-    rememberExternalSqlFileTarget(saved.path, { connectionId: tab.connectionId, database: tab.database });
+    rememberExternalSqlFileTarget(saved.path, { connectionId: tab.connectionId, database: tab.database, catalog: tab.catalog });
     invalidateSaveSqlFolderSelection();
     showSaveSqlDialog.value = false;
     closePendingSavedTab();
@@ -1317,8 +1321,10 @@ function applyExternalSqlFileTarget(tab: QueryTab, path: string) {
   const target = resolveExternalSqlFileTarget(path, (savedConnectionId) => !!connectionStore.getConfig(savedConnectionId), unassociatedExternalSqlFileTarget());
   if (target.connectionId !== tab.connectionId) {
     queryStore.updateConnection(tab.id, target.connectionId, target.database);
-  } else if (target.database !== tab.database) {
-    queryStore.updateDatabase(tab.id, target.database);
+  }
+  if (target.catalog !== tab.catalog || target.database !== tab.database) {
+    if (target.catalog !== undefined || tab.catalog !== undefined) queryStore.updateCatalog(tab.id, target.catalog, target.database);
+    else queryStore.updateDatabase(tab.id, target.database);
   }
 }
 
@@ -1390,7 +1396,7 @@ async function openSqlFilePath(path: string) {
     await desktopOpenTabsRestorationBarrier?.settled;
     const snapshot = await api.readExternalSqlFileSnapshot(path);
     const target = resolveExternalSqlFileTarget(path, (savedConnectionId) => !!connectionStore.getConfig(savedConnectionId), unassociatedExternalSqlFileTarget());
-    queryStore.openExternalSqlFile(target.connectionId, target.database, path, snapshot.content, snapshot.version);
+    queryStore.openExternalSqlFile(target.connectionId, target.database, path, snapshot.content, snapshot.version, target.catalog);
   } catch (e: any) {
     toast(t("toolbar.sqlOpenFailed", { message: externalSqlFileOpenErrorMessage(e, (key, params) => t(key, params)) }), 5000);
   }
@@ -1814,14 +1820,14 @@ async function changeActiveConnection(connectionId: string) {
   if (!connection) return;
   const initialDatabase = resolveDefaultDatabase(connection, []);
   queryStore.updateConnection(tab.id, connectionId, initialDatabase);
-  if (tab.externalSqlPath) rememberExternalSqlFileTarget(tab.externalSqlPath, { connectionId, database: initialDatabase });
+  if (tab.externalSqlPath) rememberExternalSqlFileTarget(tab.externalSqlPath, { connectionId, database: initialDatabase, catalog: undefined });
   connectionStore.activeConnectionId = connectionId;
   try {
     await connectionStore.ensureConnected(connectionId);
     const options = await getDatabaseOptions(connectionId);
     const database = resolveDefaultDatabase(connection, options);
     queryStore.updateDatabase(tab.id, database);
-    if (tab.externalSqlPath) rememberExternalSqlFileTarget(tab.externalSqlPath, { connectionId, database });
+    if (tab.externalSqlPath) rememberExternalSqlFileTarget(tab.externalSqlPath, { connectionId, database, catalog: undefined });
     if (connection.default_schema || connection.db_type === "oracle") {
       try {
         // A configured default wins. Otherwise Oracle returns the session's current schema first.
@@ -1848,7 +1854,7 @@ function changeActiveDatabase(database: string) {
   const tab = activeTab.value;
   if (tab) {
     queryStore.updateDatabase(tab.id, database);
-    if (tab.externalSqlPath) rememberExternalSqlFileTarget(tab.externalSqlPath, { connectionId: tab.connectionId, database });
+    if (tab.externalSqlPath) rememberExternalSqlFileTarget(tab.externalSqlPath, { connectionId: tab.connectionId, database, catalog: tab.catalog });
     if (databaseRequiredTabId.value === tab.id && database) {
       databaseRequiredTabId.value = null;
     }
@@ -1857,7 +1863,10 @@ function changeActiveDatabase(database: string) {
 
 function changeActiveCatalog(catalog: string | undefined, database: string) {
   const tab = activeTab.value;
-  if (tab) queryStore.updateCatalog(tab.id, catalog, database);
+  if (tab) {
+    queryStore.updateCatalog(tab.id, catalog, database);
+    if (tab.externalSqlPath) rememberExternalSqlFileTarget(tab.externalSqlPath, { connectionId: tab.connectionId, database, catalog });
+  }
 }
 
 async function setActiveDatabaseAsDefault() {
@@ -1987,7 +1996,7 @@ async function handleQuickOpenSelect(item: any) {
     try {
       const snapshot = await api.readExternalSqlFileSnapshot(item.filePath);
       const target = resolveExternalSqlFileTarget(item.filePath, (savedConnectionId) => !!connectionStore.getConfig(savedConnectionId), unassociatedExternalSqlFileTarget());
-      queryStore.openExternalSqlFile(target.connectionId, target.database, item.filePath, snapshot.content, snapshot.version);
+      queryStore.openExternalSqlFile(target.connectionId, target.database, item.filePath, snapshot.content, snapshot.version, target.catalog);
     } catch (e: any) {
       toast(
         externalSqlFileOpenErrorMessage(e, (key, params) => t(key, params)),

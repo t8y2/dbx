@@ -27,7 +27,7 @@ export function useFileDrop() {
   async function openDroppedSqlFile(name: string, content: string, path?: string, version?: ExternalSqlFileVersion) {
     if (path) {
       const target = resolveExternalSqlFileTarget(path, (savedConnectionId) => !!connectionStore.getConfig(savedConnectionId), unassociatedExternalSqlFileTarget());
-      queryStore.openExternalSqlFile(target.connectionId, target.database, path, content, version);
+      queryStore.openExternalSqlFile(target.connectionId, target.database, path, content, version, target.catalog);
     } else {
       const connectionId = connectionStore.activeConnectionId || connectionStore.connections[0]?.id || "";
       const connection = connectionId ? connectionStore.getConfig(connectionId) : undefined;

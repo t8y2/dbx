@@ -25,6 +25,8 @@ pub struct SavedSqlFile {
     pub folder_id: Option<String>,
     pub name: String,
     pub database: String,
+    #[serde(default)]
+    pub catalog: Option<String>,
     pub schema: Option<String>,
     pub sql: String,
     #[serde(default = "default_sql_loaded")]

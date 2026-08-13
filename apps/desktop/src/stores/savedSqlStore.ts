@@ -21,6 +21,7 @@ interface SaveFileInput {
   folderId?: string;
   name: string;
   database: string;
+  catalog?: string;
   schema?: string;
   sql: string;
 }
@@ -28,6 +29,7 @@ interface SaveFileInput {
 interface SavedSqlExecutionTargetInput {
   connectionId: string;
   database: string;
+  catalog?: string;
   schema?: string;
 }
 
@@ -239,6 +241,7 @@ export const useSavedSqlStore = defineStore("savedSql", () => {
           folderId: hasFolderIdInput ? input.folderId || undefined : existing.folderId,
           name: input.name,
           database: input.database,
+          catalog: input.catalog,
           schema: input.schema,
           sql: input.sql,
           sqlLoaded: true,
@@ -251,6 +254,7 @@ export const useSavedSqlStore = defineStore("savedSql", () => {
           folderId: input.folderId || undefined,
           name: input.name,
           database: input.database,
+          catalog: input.catalog,
           schema: input.schema,
           sql: input.sql,
           sqlLoaded: true,
@@ -268,7 +272,7 @@ export const useSavedSqlStore = defineStore("savedSql", () => {
   function updateFileExecutionTarget(id: string, target: SavedSqlExecutionTargetInput): Promise<SavedSqlFile | undefined> {
     const existing = getFile(id);
     if (!existing) return Promise.resolve(undefined);
-    if (existing.connectionId === target.connectionId && existing.database === target.database && existing.schema === target.schema) {
+    if (existing.connectionId === target.connectionId && existing.database === target.database && existing.catalog === target.catalog && existing.schema === target.schema) {
       return Promise.resolve(existing);
     }
 
@@ -276,6 +280,7 @@ export const useSavedSqlStore = defineStore("savedSql", () => {
       persistedFileTargets.set(id, {
         connectionId: existing.connectionId,
         database: existing.database,
+        catalog: existing.catalog,
         schema: existing.schema,
         updatedAt: existing.updatedAt,
       });
@@ -308,6 +313,7 @@ export const useSavedSqlStore = defineStore("savedSql", () => {
           persistedFileTargets.set(id, {
             connectionId: saved.connectionId,
             database: saved.database,
+            catalog: saved.catalog,
             schema: saved.schema,
             updatedAt: saved.updatedAt,
           });

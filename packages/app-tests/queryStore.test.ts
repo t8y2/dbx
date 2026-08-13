@@ -225,18 +225,30 @@ test("external SQL files use full paths as tab identity", () => {
   assert.equal(store.tabs.find((tab) => tab.id === learnId)?.sql, "select 'learn';");
 });
 
+test("external SQL files restore same-named databases in different catalogs", () => {
+  setActivePinia(createPinia());
+  const store = useQueryStore();
+
+  const hiveId = store.openExternalSqlFile("conn-1", "sales", "/work/hive.sql", "select 1;", undefined, "hive");
+  const icebergId = store.openExternalSqlFile("conn-1", "sales", "/work/iceberg.sql", "select 2;", undefined, "iceberg");
+
+  assert.equal(store.tabs.find((tab) => tab.id === hiveId)?.catalog, "hive");
+  assert.equal(store.tabs.find((tab) => tab.id === icebergId)?.catalog, "iceberg");
+});
+
 test("reopening an external SQL path preserves unsaved editor content", () => {
   setActivePinia(createPinia());
   const store = useQueryStore();
   const tabId = store.openExternalSqlFile("conn-1", "db", "C:\\work\\draft.sql", "select 1;");
   store.updateSql(tabId, "select 2;");
 
-  const reopenedId = store.openExternalSqlFile("conn-2", "other", "C:/work/draft.sql", "select 3;");
+  const reopenedId = store.openExternalSqlFile("conn-2", "other", "C:/work/draft.sql", "select 3;", undefined, "iceberg");
 
   assert.equal(reopenedId, tabId);
   assert.equal(store.tabs.length, 1);
   assert.equal(store.tabs[0].sql, "select 2;");
   assert.equal(store.tabs[0].connectionId, "conn-1");
+  assert.equal(store.tabs[0].catalog, undefined);
 });
 
 test("external SQL titles collapse after a duplicate filename tab closes", () => {
@@ -324,6 +336,7 @@ test("saved SQL opens with its saved execution target by default", async () => {
       name: "saved.sql",
       database: "saved_database",
       schema: "saved_schema",
+      catalog: "saved_catalog",
       sql: "SELECT 1;",
       sqlLoaded: true,
       createdAt: "2026-07-30T00:00:00.000Z",
@@ -334,7 +347,7 @@ test("saved SQL opens with its saved execution target by default", async () => {
     assert.equal(tab?.connectionId, "saved-connection");
     assert.equal(tab?.database, "saved_database");
     assert.equal(tab?.schema, "saved_schema");
-    assert.equal(tab?.catalog, undefined);
+    assert.equal(tab?.catalog, "saved_catalog");
   } finally {
     await nextTick();
     restoreStorage();

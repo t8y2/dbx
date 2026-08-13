@@ -3,9 +3,10 @@ import { savedSqlImportTarget } from "@/lib/savedSql/savedSqlImportTarget";
 
 describe("savedSqlImportTarget", () => {
   it("inherits an explicitly associated local file target at the library root", () => {
-    expect(savedSqlImportTarget({ connectionId: "conn-1", database: "analytics" })).toEqual({
+    expect(savedSqlImportTarget({ connectionId: "conn-1", database: "sales", catalog: "hive" })).toEqual({
       connectionId: "conn-1",
-      database: "analytics",
+      database: "sales",
+      catalog: "hive",
     });
   });
 
@@ -14,9 +15,10 @@ describe("savedSqlImportTarget", () => {
   });
 
   it("keeps the destination folder connection and inherits a matching database", () => {
-    expect(savedSqlImportTarget({ connectionId: "conn-1", database: "analytics" }, { connectionId: "conn-1" })).toEqual({
+    expect(savedSqlImportTarget({ connectionId: "conn-1", database: "sales", catalog: "iceberg" }, { connectionId: "conn-1" })).toEqual({
       connectionId: "conn-1",
-      database: "analytics",
+      database: "sales",
+      catalog: "iceberg",
     });
   });
 
@@ -24,6 +26,7 @@ describe("savedSqlImportTarget", () => {
     expect(savedSqlImportTarget({ connectionId: "conn-2", database: "analytics" }, { connectionId: "conn-1" })).toEqual({
       connectionId: "conn-1",
       database: "",
+      catalog: undefined,
     });
   });
 
@@ -31,6 +34,7 @@ describe("savedSqlImportTarget", () => {
     expect(savedSqlImportTarget({ connectionId: "", database: "" }, { connectionId: "conn-1" })).toEqual({
       connectionId: "conn-1",
       database: "",
+      catalog: undefined,
     });
   });
 });

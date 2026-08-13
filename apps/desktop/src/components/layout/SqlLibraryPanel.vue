@@ -256,6 +256,7 @@ async function importDirectoryIntoLibrary(targetFolder?: SavedSqlFolder) {
         folderId,
         name: displayName,
         database: importTarget.database,
+        catalog: importTarget.catalog,
         sql: content,
       });
     }

@@ -5,6 +5,7 @@ const savedTarget = {
   connectionId: "saved-connection",
   database: "saved_database",
   schema: "saved_schema",
+  catalog: "saved_catalog",
 };
 
 describe("saved SQL execution targets", () => {
@@ -46,11 +47,13 @@ describe("saved SQL execution targets", () => {
         connectionId: "runtime-connection",
         database: "runtime_database",
         schema: "runtime_schema",
+        catalog: "runtime_catalog",
       }),
     ).toEqual({
       connectionId: "runtime-connection",
       database: "runtime_database",
       schema: "runtime_schema",
+      catalog: "runtime_catalog",
     });
   });
 });

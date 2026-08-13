@@ -1299,6 +1299,7 @@ export interface SavedSqlFile {
   folderId?: string;
   name: string;
   database: string;
+  catalog?: string;
   schema?: string;
   sql: string;
   sqlLoaded?: boolean;

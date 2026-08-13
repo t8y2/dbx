@@ -765,9 +765,40 @@ export async function pendingOpenConnectionLinks(): Promise<string[]> {
   return invoke("pending_open_connection_links");
 }
 
+/** SQL 文件编码：读取时识别，保存时按原编码写回，避免 GBK 等文件被静默转码。 */
+export type SqlFileEncoding = "utf8" | "utf8-bom" | "utf16-le" | "utf16-be" | "gbk";
+export type SqlFileLineEnding = "lf" | "crlf";
+
+/**
+ * 将快照中存储的编码标签归一化为 writeExternalSqlFile 接受的 serde 格式。
+ * 兼容历史快照中可能存储的 "utf-8"/"utf-16le" 等旧格式标签。
+ */
+export function normalizeSqlFileEncoding(encoding: string | null | undefined): SqlFileEncoding {
+  switch (encoding) {
+    case "utf8":
+    case "utf-8":
+      return "utf8";
+    case "utf8-bom":
+    case "utf-8-bom":
+      return "utf8-bom";
+    case "utf16-le":
+    case "utf-16le":
+      return "utf16-le";
+    case "utf16-be":
+    case "utf-16be":
+      return "utf16-be";
+    case "gbk":
+      return "gbk";
+    default:
+      return "utf8";
+  }
+}
+
 export interface ExternalSqlFileSnapshot {
   content: string;
   version: ExternalSqlFileVersion;
+  encoding: SqlFileEncoding;
+  lineEnding: SqlFileLineEnding;
 }
 
 export type ExternalSqlFileStatus = { kind: "present"; sizeBytes: number; modifiedNs: string } | { kind: "missing" };
@@ -775,11 +806,11 @@ export type ExternalSqlFileStatus = { kind: "present"; sizeBytes: number; modifi
 export type ExternalSqlFileWriteResult = { kind: "written"; version: ExternalSqlFileVersion } | { kind: "conflict"; currentVersion: ExternalSqlFileVersion } | { kind: "missing" };
 
 export async function readExternalSqlFileSnapshot(path: string): Promise<ExternalSqlFileSnapshot> {
-  const result = await invoke<{ kind: "content"; content: string; version: ExternalSqlFileVersion } | { kind: "tooLarge"; sizeBytes: number; maxSizeBytes: number }>("read_external_sql_file", { path });
+  const result = await invoke<{ kind: "content"; content: string; version: ExternalSqlFileVersion; encoding: SqlFileEncoding; lineEnding: SqlFileLineEnding } | { kind: "tooLarge"; sizeBytes: number; maxSizeBytes: number }>("read_external_sql_file", { path });
   if (result.kind === "tooLarge") {
     throw new ExternalSqlFileTooLargeError(result.sizeBytes, result.maxSizeBytes);
   }
-  return { content: result.content, version: result.version };
+  return { content: result.content, version: result.version, encoding: result.encoding, lineEnding: result.lineEnding };
 }
 
 export async function readExternalSqlFile(path: string): Promise<string> {
@@ -790,12 +821,14 @@ export async function inspectExternalSqlFile(path: string): Promise<ExternalSqlF
   return invoke("inspect_external_sql_file", { path });
 }
 
-export async function writeExternalSqlFile(path: string, content: string, options: { expectedContentHash?: string; expectedMissing?: boolean } = {}): Promise<ExternalSqlFileWriteResult> {
+export async function writeExternalSqlFile(path: string, content: string, options: { expectedContentHash?: string; expectedMissing?: boolean; encoding?: SqlFileEncoding; lineEnding?: SqlFileLineEnding } = {}): Promise<ExternalSqlFileWriteResult> {
   return invoke("write_external_sql_file", {
     path,
     content,
     expectedContentHash: options.expectedContentHash ?? null,
     expectedMissing: options.expectedMissing ?? false,
+    encoding: options.encoding ?? null,
+    lineEnding: options.lineEnding ?? null,
   });
 }
 
@@ -812,6 +845,80 @@ export interface SqlFileEntry {
 
 export async function listSqlFilesInFolder(folderPath: string): Promise<SqlFileEntry[]> {
   return invoke("list_sql_files_in_folder", { folderPath });
+}
+
+// --- SQL Projects（SQL 文件项目管理） ---
+
+export interface SqlProject {
+  id: string;
+  name: string;
+  rootPath: string;
+  connectionId: string | null;
+  defaultSchema: string | null;
+  trusted: boolean;
+  createdAt: string;
+  lastOpenedAt: string;
+}
+
+/** 保存前写入的旧版本快照（Local History）。 */
+export interface SqlFileSnapshot {
+  id: string;
+  projectId: string;
+  path: string;
+  content: string;
+  encoding: string;
+  savedAt: string;
+}
+
+export async function pendingOpenSqlProjects(): Promise<string[]> {
+  return invoke("pending_open_sql_projects");
+}
+
+export async function listSqlProjects(): Promise<SqlProject[]> {
+  return invoke("list_sql_projects");
+}
+
+/** 按路径打开项目：canonicalize 归一，已存在则 touch，不存在则创建（trusted=false）。 */
+export async function openSqlProjectByPath(rootPath: string): Promise<SqlProject> {
+  return invoke("open_sql_project_by_path", { rootPath });
+}
+
+export async function saveSqlProject(project: SqlProject): Promise<SqlProject> {
+  return invoke("save_sql_project", { project });
+}
+
+export async function deleteSqlProject(id: string): Promise<void> {
+  return invoke("delete_sql_project", { id });
+}
+
+/** 保存文件前调用：把磁盘当前内容写入快照（Local History 保底）。 */
+export async function snapshotSqlFileBeforeSave(projectId: string, path: string): Promise<void> {
+  return invoke("snapshot_sql_file_before_save", { projectId, path });
+}
+
+export async function createProjectFile(rootPath: string, relativePath: string, content: string): Promise<{ path: string }> {
+  return invoke("create_project_file", { rootPath, relativePath, content });
+}
+
+export async function createProjectFolder(rootPath: string, relativePath: string): Promise<{ path: string }> {
+  return invoke("create_project_folder", { rootPath, relativePath });
+}
+
+export async function renameProjectEntry(rootPath: string, relativePath: string, newName: string): Promise<{ path: string }> {
+  return invoke("rename_project_entry", { rootPath, relativePath, newName });
+}
+
+export async function countProjectEntryFiles(rootPath: string, relativePath: string): Promise<number> {
+  return invoke("count_project_entry_files", { rootPath, relativePath });
+}
+
+export async function deleteProjectEntryToTrash(rootPath: string, relativePath: string): Promise<void> {
+  return invoke("delete_project_entry_to_trash", { rootPath, relativePath });
+}
+
+/** 查询某文件的本地历史快照列表（按保存时间倒序）。 */
+export async function listSqlFileSnapshots(projectId: string, path: string, limit: number): Promise<SqlFileSnapshot[]> {
+  return invoke("list_sql_file_snapshots", { projectId, path, limit });
 }
 
 // --- AI Conversations ---

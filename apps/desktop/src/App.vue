@@ -18,6 +18,7 @@ import { useProductionSafetyStore } from "@/stores/productionSafetyStore";
 import { enforceRightSidebarPanelExclusivity, RIGHT_SIDEBAR_PANEL_IDS, transitionRightSidebarPanels, useSettingsStore, type RightSidebarPanelId, type RightSidebarPanelState } from "@/stores/settingsStore";
 import { useSavedSqlStore } from "@/stores/savedSqlStore";
 import { usePromptTemplateStore } from "@/stores/promptTemplateStore";
+import { useProjectStore } from "@/stores/projectStore";
 import { useToast } from "@/composables/useToast";
 import { useTheme } from "@/composables/useTheme";
 import { useAppUpdater } from "@/composables/useAppUpdater";
@@ -145,6 +146,7 @@ const settingsStore = useSettingsStore();
 const savedSqlStore = useSavedSqlStore();
 const promptTemplateStore = usePromptTemplateStore();
 const recentConnectionIds = ref<readonly string[]>(parseRecentConnectionIds(safeLocalStorageGet(RECENT_CONNECTION_IDS_STORAGE_KEY)));
+const projectStore = useProjectStore();
 connectionStore.setBeforeConnectHandler(async (config) => {
   await ensureJdbcxRuntimeDrivers(config, api);
   const jdbcProductRuntimeBefore = JSON.stringify({
@@ -493,6 +495,7 @@ const { setupTauriListeners, cleanupTauriListeners } = useTauriEvents({
   openSqlFilePath,
   openDbFilePath,
   openConnectionDeepLink,
+  openSqlProjectPaths,
 });
 const { showCloseActionPrompt, chooseQuit, chooseMinimize, cancelCloseActionPrompt, performCloseAction, setupCloseActionPromptListener, cleanupCloseActionPromptListener } = useCloseActionPrompt({ requestClose: requestAppClose });
 useVisibilityChange();
@@ -1024,9 +1027,19 @@ function handleCloseActionPromptOpenChange(open: boolean) {
 async function writeExternalSqlTab(tab: QueryTab, options: { closeAfterSave?: boolean; expectedContentHash?: string; expectedMissing?: boolean } = {}): Promise<"saved" | "retry" | "failed"> {
   if (!tab.externalSqlPath || !isTauriRuntime()) return "failed";
   try {
+    // Local History 保底：写回前把磁盘当前内容记入项目快照（仅项目内文件）。
+    if (tab.projectId) {
+      try {
+        await api.snapshotSqlFileBeforeSave(tab.projectId, tab.externalSqlPath);
+      } catch {
+        // 快照失败不阻断保存（快照仅为保底，非关键路径）
+      }
+    }
     const result = await api.writeExternalSqlFile(tab.externalSqlPath, tab.sql, {
       expectedContentHash: options.expectedContentHash,
       expectedMissing: options.expectedMissing,
+      encoding: tab.fileEncoding,
+      lineEnding: tab.fileLineEnding,
     });
     if (result.kind !== "written") return "retry";
     rememberExternalSqlFileTarget(tab.externalSqlPath, { connectionId: tab.connectionId, database: tab.database, catalog: tab.catalog });
@@ -1419,7 +1432,19 @@ async function openSqlFilePath(path: string) {
     await desktopOpenTabsRestorationBarrier?.settled;
     const snapshot = await api.readExternalSqlFileSnapshot(path);
     const target = resolveExternalSqlFileTarget(path, (savedConnectionId) => !!connectionStore.getConfig(savedConnectionId), unassociatedExternalSqlFileTarget());
-    queryStore.openExternalSqlFile(target.connectionId, target.database, path, snapshot.content, snapshot.version, target.catalog);
+    let projectId: string | undefined;
+    try {
+      await projectStore.ensureLoaded();
+      projectId = projectStore.projectForFilePath(path)?.id ?? undefined;
+    } catch {
+      projectId = undefined;
+    }
+    queryStore.openExternalSqlFile(target.connectionId, target.database, path, snapshot.content, snapshot.version, {
+      catalog: target.catalog,
+      projectId,
+      fileEncoding: snapshot.encoding,
+      fileLineEnding: snapshot.lineEnding,
+    });
   } catch (e: any) {
     toast(t("toolbar.sqlOpenFailed", { message: externalSqlFileOpenErrorMessage(e, (key, params) => t(key, params)) }), 5000);
   }
@@ -1434,6 +1459,32 @@ async function openPendingSqlFiles() {
     }
   } catch {
     /* ignore startup file-open probing errors */
+  }
+}
+
+async function openSqlProjectPaths(paths: string[]) {
+  if (!isTauriRuntime() || paths.length === 0) return;
+  try {
+    const opened = await projectStore.openProjects(paths);
+    if (opened.length === 0) return;
+    openRightSidebarPanel("sqlFile");
+    if (opened.length === 1) {
+      toast(t("toolbar.sqlProjectOpened", { name: opened[0].name }));
+    } else {
+      toast(t("toolbar.sqlProjectsOpened", { name: opened[0].name, count: opened.length - 1 }));
+    }
+  } catch (e: any) {
+    toast(t("toolbar.sqlOpenFailed", { message: e?.message || String(e) }), 5000);
+  }
+}
+
+async function openPendingSqlProjects() {
+  if (!isTauriRuntime()) return;
+  try {
+    const paths = await api.pendingOpenSqlProjects();
+    await openSqlProjectPaths(paths);
+  } catch {
+    /* ignore startup project-open probing errors */
   }
 }
 
@@ -2021,7 +2072,19 @@ async function handleQuickOpenSelect(item: any) {
     try {
       const snapshot = await api.readExternalSqlFileSnapshot(item.filePath);
       const target = resolveExternalSqlFileTarget(item.filePath, (savedConnectionId) => !!connectionStore.getConfig(savedConnectionId), unassociatedExternalSqlFileTarget());
-      queryStore.openExternalSqlFile(target.connectionId, target.database, item.filePath, snapshot.content, snapshot.version, target.catalog);
+      let projectId: string | undefined;
+      try {
+        await projectStore.ensureLoaded();
+        projectId = projectStore.projectForFilePath(item.filePath)?.id ?? undefined;
+      } catch {
+        projectId = undefined;
+      }
+      queryStore.openExternalSqlFile(target.connectionId, target.database, item.filePath, snapshot.content, snapshot.version, {
+        catalog: target.catalog,
+        projectId,
+        fileEncoding: snapshot.encoding,
+        fileLineEnding: snapshot.lineEnding,
+      });
     } catch (e: any) {
       toast(
         externalSqlFileOpenErrorMessage(e, (key, params) => t(key, params)),
@@ -2455,6 +2518,10 @@ function openDriverStoreFromEvent(event: Event) {
   openDriverStorePage(((event as CustomEvent).detail as DriverStoreFocus | undefined) ?? null);
 }
 
+function showSqlFilePanelFromEvent() {
+  openRightSidebarPanel("sqlFile");
+}
+
 function runUpdateNotificationChecks() {
   if (!updateNotificationsEnabled.value) return;
   checkUpdates({ silent: true });
@@ -2489,6 +2556,7 @@ onMounted(async () => {
   window.addEventListener("keydown", handleNativeSelectAll, true);
   window.addEventListener("keydown", handleKeydown);
   window.addEventListener("dbx-open-driver-store", openDriverStoreFromEvent);
+  window.addEventListener("dbx-show-sql-file-panel", showSqlFilePanelFromEvent);
   window.addEventListener("dbx-mcp-status-changed", handleMcpStatusChanged);
   if (isDesktop) {
     document.addEventListener("contextmenu", handleContextMenu);
@@ -2545,6 +2613,7 @@ onMounted(async () => {
   void openPendingSqlFiles();
   void openPendingDbFiles();
   void openPendingConnectionLinks();
+  void openPendingSqlProjects();
   console.log(`[STARTUP] onMounted sync done: ${(performance.now() - mountStart).toFixed(0)}ms`);
 });
 
@@ -2557,6 +2626,7 @@ onUnmounted(() => {
   window.removeEventListener("keydown", handleNativeSelectAll, true);
   window.removeEventListener("keydown", handleKeydown);
   window.removeEventListener("dbx-open-driver-store", openDriverStoreFromEvent);
+  window.removeEventListener("dbx-show-sql-file-panel", showSqlFilePanelFromEvent);
   window.removeEventListener("dbx-mcp-status-changed", handleMcpStatusChanged);
   document.removeEventListener("contextmenu", handleContextMenu);
   window.clearTimeout(sqlLibraryFlyAnimationTimer);

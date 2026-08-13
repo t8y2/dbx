@@ -51,6 +51,8 @@ describe("external SQL file API", () => {
       content: "select 2;",
       expectedContentHash: "abc123",
       expectedMissing: false,
+      encoding: null,
+      lineEnding: null,
     });
   });
 
@@ -63,6 +65,8 @@ describe("external SQL file API", () => {
       content: "select 2;",
       expectedContentHash: null,
       expectedMissing: true,
+      encoding: null,
+      lineEnding: null,
     });
   });
 

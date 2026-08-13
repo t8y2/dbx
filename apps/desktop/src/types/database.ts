@@ -1092,6 +1092,12 @@ export interface QueryTab {
   externalSqlFileVersion?: ExternalSqlFileVersion;
   externalSqlIgnoredFileVersion?: ExternalSqlFileVersion;
   externalSqlFileMissing?: boolean;
+  /** Owning SQL project (enables snapshot-before-save for file-backed tabs). */
+  projectId?: string;
+  /** Original file encoding detected at load; preserved on save. */
+  fileEncoding?: import("@/lib/backend/tauri").SqlFileEncoding;
+  /** Original line ending detected at load; preserved on save. */
+  fileLineEnding?: import("@/lib/backend/tauri").SqlFileLineEnding;
   originalSql?: string;
   lastExecutedSql?: string;
   resultBaseSql?: string;

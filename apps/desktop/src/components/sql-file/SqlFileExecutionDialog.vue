@@ -33,6 +33,7 @@ const props = defineProps<{
   prefillConnectionId?: string;
   prefillDatabase?: string;
   prefillFilePath?: string;
+  prefillFilePaths?: string[];
 }>();
 
 const store = useConnectionStore();
@@ -537,7 +538,9 @@ watch(
     }
     // When opened from the SQL Files panel with a pre-selected file, load its
     // preview automatically so the user can review statements before running.
-    if (props.prefillFilePath) {
+    if (props.prefillFilePaths && props.prefillFilePaths.length > 0) {
+      void loadPreviews([...props.prefillFilePaths]);
+    } else if (props.prefillFilePath) {
       void loadPreviews([props.prefillFilePath]);
     }
   },

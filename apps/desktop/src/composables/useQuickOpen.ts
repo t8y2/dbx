@@ -4,6 +4,7 @@ import type { SqlCompletionTable } from "@/lib/sql/sqlCompletion";
 import { resolveDefaultDatabase } from "@/lib/database/defaultDatabase";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useSavedSqlStore } from "@/stores/savedSqlStore";
+import { useProjectStore } from "@/stores/projectStore";
 import * as api from "@/lib/backend/api";
 import type { SqlFileEntry } from "@/lib/backend/api";
 import { getSqlFileFolderPaths, sqlFileFoldersVersion } from "@/lib/sqlFile/sqlFileFolders";
@@ -202,6 +203,9 @@ function collectSqlFileEntries(entries: SqlFileEntry[], results: SqlFileEntry[])
 export function useQuickOpen() {
   const connectionStore = useConnectionStore();
   const savedSqlStore = useSavedSqlStore();
+  const projectStore = useProjectStore();
+  // SQL projects feed the external SQL file source; make sure they are loaded.
+  void projectStore.ensureLoaded();
   const searchQuery = ref("");
   const selectedIndex = ref(0);
   const remoteItems = ref<QuickOpenItem[]>([]);
@@ -250,7 +254,10 @@ export function useQuickOpen() {
     const generation = sqlFilesLoadGeneration;
     const loadingPromise = (async () => {
       try {
-        const folderPaths = loadSavedSqlFileFolderPaths();
+        // Merge legacy localStorage folders with SQL project roots (deduped).
+        const legacyPaths = loadSavedSqlFileFolderPaths();
+        const projectRoots = projectStore.projects.map((project) => project.rootPath);
+        const folderPaths = [...new Set([...legacyPaths, ...projectRoots])];
         if (folderPaths.length === 0) {
           if (generation === sqlFilesLoadGeneration) sqlFilesLoaded = true;
           return;
@@ -658,14 +665,18 @@ export function useQuickOpen() {
 
   /**
    * Reload external SQL files when folder paths or folder contents change.
-   * `sqlFileFoldersVersion` is bumped by SqlFilePanel on add/remove/refresh.
+   * `sqlFileFoldersVersion` is bumped by SqlFilePanel on add/remove/refresh;
+   * SQL project changes (open/remove) also invalidate the snapshot.
    */
-  watch(sqlFileFoldersVersion, () => {
+  function invalidateExternalSqlFiles(): void {
     sqlFilesLoadGeneration++;
     sqlFilesLoaded = false;
     sqlFileItems.value = [];
     void loadExternalSqlFiles();
-  });
+  }
+
+  watch(sqlFileFoldersVersion, invalidateExternalSqlFiles);
+  watch(() => projectStore.projects, invalidateExternalSqlFiles, { deep: true });
 
   watch(
     searchQuery,

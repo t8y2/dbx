@@ -1982,9 +1982,15 @@ export async function inspectExternalSqlFile(_path: string): Promise<import("@/l
   throw new Error("Inspecting external SQL file paths is only available in the desktop app");
 }
 
-export async function writeExternalSqlFile(_path: string, _content: string, _options: { expectedContentHash?: string; expectedMissing?: boolean } = {}): Promise<import("@/lib/backend/tauri").ExternalSqlFileWriteResult> {
+export async function writeExternalSqlFile(
+  _path: string,
+  _content: string,
+  _options: { expectedContentHash?: string; expectedMissing?: boolean; encoding?: import("@/lib/backend/tauri").SqlFileEncoding; lineEnding?: import("@/lib/backend/tauri").SqlFileLineEnding } = {},
+): Promise<import("@/lib/backend/tauri").ExternalSqlFileWriteResult> {
   throw new Error("Saving external SQL file paths is only available in the desktop app");
 }
+
+export { normalizeSqlFileEncoding } from "@/lib/backend/tauri";
 
 export async function saveExternalSqlFile(_defaultFileName: string, _content: string): Promise<{ path: string; version: import("@/types/database").ExternalSqlFileVersion } | null> {
   throw new Error("Saving SQL files locally is only available in the desktop app");
@@ -1999,6 +2005,58 @@ export interface SqlFileEntry {
 
 export async function listSqlFilesInFolder(_folderPath: string): Promise<SqlFileEntry[]> {
   throw new Error("Listing SQL files in a folder is only available in the desktop app");
+}
+
+// ---------------------------------------------------------------------------
+// SQL Projects (desktop only)
+// ---------------------------------------------------------------------------
+
+export async function pendingOpenSqlProjects(): Promise<string[]> {
+  return [];
+}
+
+export async function listSqlProjects(): Promise<import("@/lib/backend/tauri").SqlProject[]> {
+  throw new Error("SQL projects are only available in the desktop app");
+}
+
+export async function openSqlProjectByPath(_rootPath: string): Promise<import("@/lib/backend/tauri").SqlProject> {
+  throw new Error("SQL projects are only available in the desktop app");
+}
+
+export async function saveSqlProject(_project: import("@/lib/backend/tauri").SqlProject): Promise<import("@/lib/backend/tauri").SqlProject> {
+  throw new Error("SQL projects are only available in the desktop app");
+}
+
+export async function deleteSqlProject(_id: string): Promise<void> {
+  throw new Error("SQL projects are only available in the desktop app");
+}
+
+export async function snapshotSqlFileBeforeSave(_projectId: string, _path: string): Promise<void> {
+  throw new Error("SQL projects are only available in the desktop app");
+}
+
+export async function listSqlFileSnapshots(_projectId: string, _path: string, _limit: number): Promise<import("@/lib/backend/tauri").SqlFileSnapshot[]> {
+  throw new Error("SQL projects are only available in the desktop app");
+}
+
+export async function createProjectFile(_rootPath: string, _relativePath: string, _content: string): Promise<{ path: string }> {
+  throw new Error("SQL projects are only available in the desktop app");
+}
+
+export async function createProjectFolder(_rootPath: string, _relativePath: string): Promise<{ path: string }> {
+  throw new Error("SQL projects are only available in the desktop app");
+}
+
+export async function renameProjectEntry(_rootPath: string, _relativePath: string, _newName: string): Promise<{ path: string }> {
+  throw new Error("SQL projects are only available in the desktop app");
+}
+
+export async function countProjectEntryFiles(_rootPath: string, _relativePath: string): Promise<number> {
+  throw new Error("SQL projects are only available in the desktop app");
+}
+
+export async function deleteProjectEntryToTrash(_rootPath: string, _relativePath: string): Promise<void> {
+  throw new Error("SQL projects are only available in the desktop app");
 }
 
 // ---------------------------------------------------------------------------

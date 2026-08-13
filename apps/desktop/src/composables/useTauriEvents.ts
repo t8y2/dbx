@@ -3,7 +3,13 @@ import { useQueryStore } from "@/stores/queryStore";
 import type { NavigationTarget } from "@/composables/useNavigationTargets";
 import type { QueryResult } from "@/types/database";
 
-export function useTauriEvents(deps: { openTableTarget: (target: NavigationTarget) => Promise<void>; openSqlFilePath: (path: string) => Promise<void>; openDbFilePath: (path: string) => Promise<void>; openConnectionDeepLink: (url: string) => Promise<void> }) {
+export function useTauriEvents(deps: {
+  openTableTarget: (target: NavigationTarget) => Promise<void>;
+  openSqlFilePath: (path: string) => Promise<void>;
+  openDbFilePath: (path: string) => Promise<void>;
+  openConnectionDeepLink: (url: string) => Promise<void>;
+  openSqlProjectPaths: (paths: string[]) => Promise<void>;
+}) {
   const connectionStore = useConnectionStore();
   const queryStore = useQueryStore();
   const unlistenHandles: Array<() => void> = [];
@@ -75,6 +81,15 @@ export function useTauriEvents(deps: { openTableTarget: (target: NavigationTarge
             focusCurrentWindow();
           } catch (e) {
             console.error("[DBX] dbx-open-sql-files error:", e);
+          }
+        }).then((unlisten) => unlistenHandles.push(unlisten));
+
+        listen<string[]>("dbx-open-sql-project", async (event) => {
+          try {
+            await deps.openSqlProjectPaths(event.payload);
+            focusCurrentWindow();
+          } catch (e) {
+            console.error("[DBX] dbx-open-sql-project error:", e);
           }
         }).then((unlisten) => unlistenHandles.push(unlisten));
 

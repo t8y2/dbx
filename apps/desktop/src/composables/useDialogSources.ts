@@ -40,6 +40,7 @@ const dataComparePrefillTable = ref("");
 const sqlFilePrefillConnectionId = ref("");
 const sqlFilePrefillDatabase = ref("");
 const sqlFilePrefillFilePath = ref("");
+const sqlFilePrefillFilePaths = ref<string[]>([]);
 const diagramPrefillConnectionId = ref("");
 const diagramPrefillDatabase = ref("");
 const diagramPrefillSchema = ref("");
@@ -148,6 +149,7 @@ export function useDialogSources() {
           sqlFilePrefillConnectionId.value = v.connectionId;
           sqlFilePrefillDatabase.value = v.database;
           sqlFilePrefillFilePath.value = v.filePath ?? "";
+          sqlFilePrefillFilePaths.value = v.filePaths ?? [];
           showSqlFileDialog.value = true;
           connectionStore.sqlFileSource = null;
         }
@@ -160,7 +162,10 @@ export function useDialogSources() {
     // when stale (they only preselect dropdowns), but a stale path triggers an
     // async file read + preview render — a visible side effect.
     watch(showSqlFileDialog, (open) => {
-      if (!open) sqlFilePrefillFilePath.value = "";
+      if (!open) {
+        sqlFilePrefillFilePath.value = "";
+        sqlFilePrefillFilePaths.value = [];
+      }
     });
 
     watch(
@@ -370,6 +375,7 @@ export function useDialogSources() {
     sqlFilePrefillConnectionId,
     sqlFilePrefillDatabase,
     sqlFilePrefillFilePath,
+    sqlFilePrefillFilePaths,
     diagramPrefillConnectionId,
     diagramPrefillDatabase,
     diagramPrefillSchema,

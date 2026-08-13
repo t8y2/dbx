@@ -1695,10 +1695,14 @@ export const useQueryStore = defineStore("query", () => {
     });
   }
 
-  function openExternalSqlFile(connectionId: string, database: string, path: string, sql: string, version?: QueryTab["externalSqlFileVersion"], catalog?: string) {
+  function openExternalSqlFile(connectionId: string, database: string, path: string, sql: string, version?: QueryTab["externalSqlFileVersion"], meta?: { projectId?: string; fileEncoding?: QueryTab["fileEncoding"]; fileLineEnding?: QueryTab["fileLineEnding"]; catalog?: string }) {
     const normalizedPath = normalizeExternalSqlPath(path);
     const existing = tabs.value.find((tab) => tab.mode === "query" && tab.externalSqlPath && normalizeExternalSqlPath(tab.externalSqlPath) === normalizedPath);
     if (existing) {
+      // Backfill project/encoding metadata for tabs created before the project existed.
+      if (meta?.projectId && !existing.projectId) existing.projectId = meta.projectId;
+      if (meta?.fileEncoding && !existing.fileEncoding) existing.fileEncoding = meta.fileEncoding;
+      if (meta?.fileLineEnding && !existing.fileLineEnding) existing.fileLineEnding = meta.fileLineEnding;
       switchTab(existing.id);
       return existing.id;
     }
@@ -1712,11 +1716,14 @@ export const useQueryStore = defineStore("query", () => {
       customTitle: true,
       connectionId,
       database,
-      catalog,
+      catalog: meta?.catalog,
       sql,
       originalSql: sql,
       externalSqlPath: path,
       externalSqlFileVersion: version,
+      projectId: meta?.projectId,
+      fileEncoding: meta?.fileEncoding,
+      fileLineEnding: meta?.fileLineEnding,
       isExecuting: false,
       isCancelling: false,
       isExplaining: false,
@@ -1726,6 +1733,66 @@ export const useQueryStore = defineStore("query", () => {
     activeTabId.value = id;
     refreshExternalSqlFileTitles();
     return id;
+  }
+
+  /** 文件重命名后同步已打开 tab 的路径与标题。 */
+  function syncExternalSqlFilePath(oldPath: string, newPath: string) {
+    const normalizedOld = normalizeExternalSqlPath(oldPath);
+    let changed = false;
+    for (const tab of tabs.value) {
+      if (tab.mode === "query" && tab.externalSqlPath && normalizeExternalSqlPath(tab.externalSqlPath) === normalizedOld) {
+        tab.externalSqlPath = newPath;
+        changed = true;
+      }
+    }
+    if (changed) refreshExternalSqlFileTitles();
+  }
+
+  /** 目录重命名后同步其下所有已打开 tab 的路径前缀与标题。 */
+  function syncExternalSqlFolderPrefix(oldDirPath: string, newDirPath: string) {
+    const normalizedOldDir = normalizeExternalSqlPath(oldDirPath);
+    let changed = false;
+    for (const tab of tabs.value) {
+      if (tab.mode !== "query" || !tab.externalSqlPath) continue;
+      const normalizedPath = normalizeExternalSqlPath(tab.externalSqlPath);
+      if (!normalizedPath.startsWith(`${normalizedOldDir}/`)) continue;
+      // 用原始路径切片保留 OS 原生分隔符，避免 \ 与 / 混用。
+      tab.externalSqlPath = newDirPath + tab.externalSqlPath.slice(oldDirPath.length);
+      changed = true;
+    }
+    if (changed) refreshExternalSqlFileTitles();
+  }
+
+  /** 目录删除后标记其下所有已打开 tab 为"文件缺失"，保留原始路径与内容。 */
+  function markExternalSqlFilesUnderDirMissing(dirPath: string) {
+    const normalizedDir = normalizeExternalSqlPath(dirPath);
+    let changed = false;
+    for (const tab of tabs.value) {
+      if (tab.mode !== "query" || !tab.externalSqlPath) continue;
+      if (tab.externalSqlFileMissing) continue;
+      const normalizedPath = normalizeExternalSqlPath(tab.externalSqlPath);
+      if (normalizedPath.startsWith(`${normalizedDir}/`)) {
+        tab.externalSqlFileMissing = true;
+        changed = true;
+      }
+    }
+    if (changed) refreshExternalSqlFileTitles();
+  }
+
+  /** Local History 还原后：用还原内容覆盖已打开 tab 的编辑器内容并标记为已保存。返回是否命中已打开的 tab。 */
+  function reloadExternalSqlFileContent(path: string, sql: string, version: NonNullable<QueryTab["externalSqlFileVersion"]>, encoding?: QueryTab["fileEncoding"], lineEnding?: QueryTab["fileLineEnding"]): boolean {
+    const normalizedPath = normalizeExternalSqlPath(path);
+    const tab = tabs.value.find((candidate) => candidate.mode === "query" && candidate.externalSqlPath && normalizeExternalSqlPath(candidate.externalSqlPath) === normalizedPath);
+    if (!tab) return false;
+    tab.sql = sql;
+    tab.originalSql = sql;
+    tab.externalSqlFileVersion = version;
+    tab.externalSqlIgnoredFileVersion = undefined;
+    tab.externalSqlFileMissing = undefined;
+    if (encoding) tab.fileEncoding = encoding;
+    if (lineEnding) tab.fileLineEnding = lineEnding;
+    refreshExternalSqlFileTitles();
+    return true;
   }
 
   function openObjectBrowser(connectionId: string, database: string, schema?: string, catalog?: string) {
@@ -5997,6 +6064,10 @@ export const useQueryStore = defineStore("query", () => {
     linkSavedSql,
     linkExternalSqlPath,
     openExternalSqlFile,
+    syncExternalSqlFilePath,
+    syncExternalSqlFolderPrefix,
+    markExternalSqlFilesUnderDirMissing,
+    reloadExternalSqlFileContent,
     openSavedSql,
     hydrateSavedSqlTabs,
     togglePinnedTab,

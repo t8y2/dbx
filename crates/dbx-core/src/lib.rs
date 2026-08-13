@@ -81,6 +81,7 @@ pub mod sql_dialect;
 pub mod sql_editability;
 pub mod sql_file_import;
 pub mod sql_parser;
+pub mod sql_project;
 pub mod sql_risk;
 pub mod sqlite_backup;
 pub(crate) mod sqlserver_temporal;

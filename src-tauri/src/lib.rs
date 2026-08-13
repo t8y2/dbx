@@ -1298,6 +1298,16 @@ pub fn run() {
                 let _ = app.emit("dbx-open-sql-files", paths);
             }
 
+            // 目录参数视为"打开为 SQL 项目"（拖文件夹到图标/命令行打开）。
+            let project_paths =
+                commands::sql_project::project_dir_paths_from_args(args.clone(), std::path::Path::new(&cwd));
+            if !project_paths.is_empty() {
+                if let Some(state) = app.try_state::<commands::sql_project::PendingOpenSqlProjects>() {
+                    state.push(project_paths.clone());
+                }
+                let _ = app.emit("dbx-open-sql-project", project_paths);
+            }
+
             let db_paths = commands::external_db::db_file_paths_from_args(args, std::path::Path::new(&cwd));
             if !db_paths.is_empty() {
                 if let Some(state) = app.try_state::<commands::external_db::ExternalDbOpenState>() {
@@ -1470,6 +1480,7 @@ pub fn run() {
             app.manage(commands::external_sql::ExternalSqlOpenState::default());
             app.manage(commands::external_db::ExternalDbOpenState::default());
             app.manage(commands::deep_link::DeepLinkOpenState::default());
+            app.manage(commands::sql_project::PendingOpenSqlProjects::default());
             app.manage(commands::update::PendingUpdateState::default());
             app.manage(commands::ssh_prompt::SshPromptState::new());
             commands::ssh_prompt::install_ssh_prompt_bridge(app.handle());
@@ -1755,6 +1766,18 @@ pub fn run() {
             commands::external_sql::write_external_sql_file,
             commands::external_sql::save_external_sql_file,
             commands::list_sql_files::list_sql_files_in_folder,
+            commands::sql_project::pending_open_sql_projects,
+            commands::sql_project::list_sql_projects,
+            commands::sql_project::open_sql_project_by_path,
+            commands::sql_project::save_sql_project,
+            commands::sql_project::delete_sql_project,
+            commands::sql_project::snapshot_sql_file_before_save,
+            commands::sql_project::list_sql_file_snapshots,
+            commands::sql_project::create_project_file,
+            commands::sql_project::create_project_folder,
+            commands::sql_project::rename_project_entry,
+            commands::sql_project::count_project_entry_files,
+            commands::sql_project::delete_project_entry_to_trash,
             commands::external_db::pending_open_db_files,
             commands::keychain::read_keychain_password,
             commands::keychain::read_keychain_passwords,
@@ -2304,6 +2327,23 @@ pub fn run() {
                         state.push(paths.clone());
                     }
                     let _ = app_handle.emit("dbx-open-sql-files", paths);
+                    if let Some(window) = app_handle.get_webview_window("main") {
+                        let _ = window.show();
+                        let _ = window.set_focus();
+                    }
+                }
+
+                let project_paths: Vec<String> = urls
+                    .iter()
+                    .filter_map(|url| url.to_file_path().ok())
+                    .filter(|path| path.is_dir())
+                    .map(|path| path.to_string_lossy().to_string())
+                    .collect();
+                if !project_paths.is_empty() {
+                    if let Some(state) = app_handle.try_state::<commands::sql_project::PendingOpenSqlProjects>() {
+                        state.push(project_paths.clone());
+                    }
+                    let _ = app_handle.emit("dbx-open-sql-project", project_paths);
                     if let Some(window) = app_handle.get_webview_window("main") {
                         let _ = window.show();
                         let _ = window.set_focus();

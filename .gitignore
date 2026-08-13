@@ -6,6 +6,7 @@ node_modules
 .superpowers/
 .trellis/
 .worktrees/
+.trae/
 openspec/
 .mcp.json
 AGENTS.md

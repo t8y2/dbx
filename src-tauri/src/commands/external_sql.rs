@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::UNIX_EPOCH;
 
-use dbx_core::sql::decode_sql_file_bytes;
+use dbx_core::sql::{decode_sql_file_bytes_with_meta, encode_sql_file_content, SqlFileEncoding, SqlFileLineEnding};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncReadExt;
@@ -16,8 +16,18 @@ fn exceeds_external_sql_editor_limit(size_bytes: u64) -> bool {
 #[derive(Debug, Serialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum ExternalSqlFileReadResult {
-    Content { content: String, version: ExternalSqlFileVersion },
-    TooLarge { size_bytes: u64, max_size_bytes: u64 },
+    Content {
+        content: String,
+        version: ExternalSqlFileVersion,
+        /// 文件原始编码，保存时应按此编码写回，避免静默转码。
+        encoding: SqlFileEncoding,
+        /// 文件原始换行符风格。
+        line_ending: SqlFileLineEnding,
+    },
+    TooLarge {
+        size_bytes: u64,
+        max_size_bytes: u64,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
@@ -75,9 +85,19 @@ pub async fn write_external_sql_file(
     content: String,
     expected_content_hash: Option<String>,
     expected_missing: bool,
+    encoding: Option<SqlFileEncoding>,
+    line_ending: Option<SqlFileLineEnding>,
 ) -> Result<ExternalSqlFileWriteResult, String> {
-    write_external_sql_file_checked_async(PathBuf::from(path), content, expected_content_hash, expected_missing, false)
-        .await
+    write_external_sql_file_checked_async(
+        PathBuf::from(path),
+        content,
+        expected_content_hash,
+        expected_missing,
+        false,
+        encoding,
+        line_ending,
+    )
+    .await
 }
 
 #[tauri::command]
@@ -183,7 +203,12 @@ fn read_external_sql_file_content(path: &Path) -> Result<ExternalSqlFileReadResu
     }
     let bytes = std::fs::read(path).map_err(|e| format!("Failed to read SQL file: {e}"))?;
     let version = external_sql_file_version(&metadata, &bytes);
-    decode_sql_file_bytes(&bytes).map(|content| ExternalSqlFileReadResult::Content { content, version })
+    decode_sql_file_bytes_with_meta(&bytes).map(|decoded| ExternalSqlFileReadResult::Content {
+        content: decoded.content,
+        version,
+        encoding: decoded.encoding,
+        line_ending: decoded.line_ending,
+    })
 }
 
 async fn read_external_sql_file_content_async(path: PathBuf) -> Result<ExternalSqlFileReadResult, String> {
@@ -210,7 +235,12 @@ async fn read_external_sql_file_content_async(path: PathBuf) -> Result<ExternalS
         });
     }
     let version = external_sql_file_version(&metadata, &bytes);
-    decode_sql_file_bytes(&bytes).map(|content| ExternalSqlFileReadResult::Content { content, version })
+    decode_sql_file_bytes_with_meta(&bytes).map(|decoded| ExternalSqlFileReadResult::Content {
+        content: decoded.content,
+        version,
+        encoding: decoded.encoding,
+        line_ending: decoded.line_ending,
+    })
 }
 
 async fn inspect_external_sql_file_async(path: PathBuf) -> Result<ExternalSqlFileStatus, String> {
@@ -265,6 +295,8 @@ async fn write_external_sql_file_checked_async(
     expected_content_hash: Option<String>,
     expected_missing: bool,
     force: bool,
+    encoding: Option<SqlFileEncoding>,
+    line_ending: Option<SqlFileLineEnding>,
 ) -> Result<ExternalSqlFileWriteResult, String> {
     if !is_sql_file_path(&path) {
         return Err("Only .sql files can be saved this way".to_string());
@@ -284,8 +316,13 @@ async fn write_external_sql_file_checked_async(
         }
     }
 
-    let hash = content_hash(content.as_bytes());
-    tokio::fs::write(&path, content).await.map_err(|error| format!("Failed to save SQL file: {error}"))?;
+    // 按原编码写回（GBK/UTF-16 等不被静默转成 UTF-8）；未提供编码信息时维持 UTF-8。
+    let bytes = match (encoding, line_ending) {
+        (Some(encoding), Some(line_ending)) => encode_sql_file_content(&content, encoding, line_ending)?,
+        _ => content.as_bytes().to_vec(),
+    };
+    let hash = content_hash(&bytes);
+    tokio::fs::write(&path, &bytes).await.map_err(|error| format!("Failed to save SQL file: {error}"))?;
     let metadata =
         tokio::fs::metadata(&path).await.map_err(|error| format!("Failed to inspect saved SQL file: {error}"))?;
     Ok(ExternalSqlFileWriteResult::Written {
@@ -304,7 +341,7 @@ async fn save_external_sql_file_content_async(
     let Some(path) = path else {
         return Ok(None);
     };
-    let result = write_external_sql_file_checked_async(path.clone(), content, None, false, true).await?;
+    let result = write_external_sql_file_checked_async(path.clone(), content, None, false, true, None, None).await?;
     let ExternalSqlFileWriteResult::Written { version } = result else {
         return Err("Failed to save SQL file".to_string());
     };
@@ -373,12 +410,14 @@ mod tests {
         let result = read_external_sql_file_content(&path);
 
         let _ = std::fs::remove_file(&path);
-        let ExternalSqlFileReadResult::Content { content, version } = result.unwrap() else {
+        let ExternalSqlFileReadResult::Content { content, version, encoding, line_ending } = result.unwrap() else {
             panic!("expected SQL file content");
         };
         assert_eq!(content, "select 1;");
         assert_eq!(version.size_bytes, 9);
         assert_eq!(version.content_hash, content_hash(b"select 1;"));
+        assert_eq!(encoding, SqlFileEncoding::Utf8);
+        assert_eq!(line_ending, SqlFileLineEnding::Lf);
     }
 
     #[test]
@@ -389,11 +428,13 @@ mod tests {
         let result = read_external_sql_file_content(&path);
 
         let _ = std::fs::remove_file(&path);
-        let ExternalSqlFileReadResult::Content { content, version } = result.unwrap() else {
+        let ExternalSqlFileReadResult::Content { content, version, encoding, line_ending } = result.unwrap() else {
             panic!("expected SQL file content");
         };
         assert_eq!(content, "select '中文';");
         assert_eq!(version.content_hash, content_hash(b"select '\xD6\xD0\xCE\xC4';"));
+        assert_eq!(encoding, SqlFileEncoding::Gbk);
+        assert_eq!(line_ending, SqlFileLineEnding::Lf);
     }
 
     #[test]
@@ -496,6 +537,8 @@ mod tests {
             Some(content_hash(b"select 1;")),
             false,
             false,
+            None,
+            None,
         )
         .await
         .unwrap();
@@ -515,14 +558,17 @@ mod tests {
             Some(content_hash(b"select 1;")),
             false,
             false,
+            None,
+            None,
         )
         .await
         .unwrap();
         assert_eq!(missing, ExternalSqlFileWriteResult::Missing);
 
-        let recreated = write_external_sql_file_checked_async(path.clone(), "select 2;".to_string(), None, true, false)
-            .await
-            .unwrap();
+        let recreated =
+            write_external_sql_file_checked_async(path.clone(), "select 2;".to_string(), None, true, false, None, None)
+                .await
+                .unwrap();
         assert!(matches!(recreated, ExternalSqlFileWriteResult::Written { .. }));
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "select 2;");
         let _ = std::fs::remove_file(&path);
@@ -533,10 +579,17 @@ mod tests {
         let path = std::env::temp_dir().join(format!("dbx-test-{}.sql", uuid::Uuid::new_v4()));
         std::fs::write(&path, "select external;").unwrap();
 
-        let result =
-            write_external_sql_file_checked_async(path.clone(), "select editor;".to_string(), None, true, false)
-                .await
-                .unwrap();
+        let result = write_external_sql_file_checked_async(
+            path.clone(),
+            "select editor;".to_string(),
+            None,
+            true,
+            false,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
 
         assert!(matches!(result, ExternalSqlFileWriteResult::Conflict { .. }));
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "select external;");
@@ -590,5 +643,82 @@ mod tests {
 
         assert!(result.unwrap_err().contains(".sql"));
         assert!(!path.exists());
+    }
+
+    #[tokio::test]
+    async fn writes_back_gbk_sql_file_in_gbk_encoding() {
+        let path = std::env::temp_dir().join(format!("dbx-test-{}.sql", uuid::Uuid::new_v4()));
+        std::fs::write(&path, b"select '\xD6\xD0\xCE\xC4';").unwrap();
+
+        // 读出（识别为 GBK）→ 原样写回 → 字节不变。
+        let read = read_external_sql_file_content_async(path.clone()).await.unwrap();
+        let ExternalSqlFileReadResult::Content { content, encoding, line_ending, .. } = read else {
+            panic!("expected SQL file content");
+        };
+        assert_eq!(encoding, SqlFileEncoding::Gbk);
+
+        let result = write_external_sql_file_checked_async(
+            path.clone(),
+            content,
+            None,
+            false,
+            true,
+            Some(encoding),
+            Some(line_ending),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(result, ExternalSqlFileWriteResult::Written { .. }));
+        assert_eq!(std::fs::read(&path).unwrap(), b"select '\xD6\xD0\xCE\xC4';");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn write_back_keeps_crlf_line_endings() {
+        let path = std::env::temp_dir().join(format!("dbx-test-{}.sql", uuid::Uuid::new_v4()));
+        std::fs::write(&path, b"select 1;\r\nselect 2;\r\n").unwrap();
+
+        let read = read_external_sql_file_content_async(path.clone()).await.unwrap();
+        let ExternalSqlFileReadResult::Content { content, encoding, line_ending, .. } = read else {
+            panic!("expected SQL file content");
+        };
+        assert_eq!(line_ending, SqlFileLineEnding::Crlf);
+
+        let result = write_external_sql_file_checked_async(
+            path.clone(),
+            content,
+            None,
+            false,
+            true,
+            Some(encoding),
+            Some(line_ending),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(result, ExternalSqlFileWriteResult::Written { .. }));
+        assert_eq!(std::fs::read(&path).unwrap(), b"select 1;\r\nselect 2;\r\n");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn rejects_gbk_write_when_content_has_unmappable_chars() {
+        let path = std::env::temp_dir().join(format!("dbx-test-{}.sql", uuid::Uuid::new_v4()));
+        std::fs::write(&path, b"select 1;").unwrap();
+
+        // emoji 无法用 GBK 表示，应报错而非静默降级。
+        let result = write_external_sql_file_checked_async(
+            path.clone(),
+            "select '😀';".to_string(),
+            None,
+            false,
+            true,
+            Some(SqlFileEncoding::Gbk),
+            Some(SqlFileLineEnding::Lf),
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"select 1;");
+        let _ = std::fs::remove_file(&path);
     }
 }

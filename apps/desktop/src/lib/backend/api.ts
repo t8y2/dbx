@@ -348,6 +348,20 @@ export const writeExternalSqlFile = forward("writeExternalSqlFile");
 export const saveExternalSqlFile = forward("saveExternalSqlFile");
 export const listSqlFilesInFolder = forward("listSqlFilesInFolder");
 
+// SQL projects（SQL 文件项目管理）
+export const pendingOpenSqlProjects = forward("pendingOpenSqlProjects");
+export const listSqlProjects = forward("listSqlProjects");
+export const openSqlProjectByPath = forward("openSqlProjectByPath");
+export const saveSqlProject = forward("saveSqlProject");
+export const deleteSqlProject = forward("deleteSqlProject");
+export const snapshotSqlFileBeforeSave = forward("snapshotSqlFileBeforeSave");
+export const listSqlFileSnapshots = forward("listSqlFileSnapshots");
+export const createProjectFile = forward("createProjectFile");
+export const createProjectFolder = forward("createProjectFolder");
+export const renameProjectEntry = forward("renameProjectEntry");
+export const countProjectEntryFiles = forward("countProjectEntryFiles");
+export const deleteProjectEntryToTrash = forward("deleteProjectEntryToTrash");
+
 // Nacos
 export const nacosTestConnection = forward("nacosTestConnection");
 export const nacosListNamespaces = forward("nacosListNamespaces");

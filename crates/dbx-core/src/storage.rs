@@ -21,6 +21,7 @@ use crate::history::{
 use crate::models::connection::{ConnectionConfig, DatabaseConnectionInfo, DatabaseType, TransportLayerConfig};
 use crate::prompt_template::PromptTemplate;
 use crate::saved_sql::{SavedSqlFile, SavedSqlFolder, SavedSqlLibrary};
+use crate::sql_project::{SqlFileSnapshot, SqlProject, MAX_SQL_FILE_SNAPSHOTS_PER_FILE};
 
 const SSH_TUNNEL_SECRET_PREFIX: &str = "ssh_tunnels.";
 const TRANSPORT_LAYER_SECRET_PREFIX: &str = "transport_layers.";
@@ -42,6 +43,8 @@ const USER_DATA_TABLES: &[&str] = &[
     "mq_token_records",
     "saved_sql_folders",
     "saved_sql_files",
+    "sql_projects",
+    "sql_file_snapshots",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -425,6 +428,25 @@ const SCHEMA_STATEMENTS: &[&str] = &[
         created_at TEXT NOT NULL DEFAULT '',
         updated_at TEXT NOT NULL DEFAULT ''
     )",
+    "CREATE TABLE IF NOT EXISTS sql_projects (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL DEFAULT '',
+        root_path TEXT NOT NULL UNIQUE,
+        connection_id TEXT,
+        default_schema TEXT,
+        trusted INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL DEFAULT '',
+        last_opened_at TEXT NOT NULL DEFAULT ''
+    )",
+    "CREATE TABLE IF NOT EXISTS sql_file_snapshots (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL,
+        path TEXT NOT NULL,
+        content TEXT NOT NULL DEFAULT '',
+        encoding TEXT NOT NULL DEFAULT 'utf-8',
+        saved_at TEXT NOT NULL DEFAULT ''
+    )",
+    "CREATE INDEX IF NOT EXISTS idx_sql_file_snapshots_project_path ON sql_file_snapshots (project_id, path, saved_at)",
 ];
 
 impl Storage {
@@ -3146,6 +3168,162 @@ impl Storage {
         let id = id.to_string();
         self.with_conn(move |conn| {
             conn.execute("DELETE FROM saved_sql_files WHERE id = ?1", [id]).map(|_| ()).map_err(|e| e.to_string())
+        })
+        .await
+    }
+}
+
+// SQL projects (SQL 文件项目管理)
+
+impl Storage {
+    fn row_to_sql_project(row: &rusqlite::Row) -> rusqlite::Result<SqlProject> {
+        Ok(SqlProject {
+            id: row.get("id")?,
+            name: row.get("name")?,
+            root_path: row.get("root_path")?,
+            connection_id: row.get("connection_id")?,
+            default_schema: row.get("default_schema")?,
+            trusted: row.get::<_, i64>("trusted")? != 0,
+            created_at: row.get("created_at")?,
+            last_opened_at: row.get("last_opened_at")?,
+        })
+    }
+
+    pub async fn list_sql_projects(&self) -> Result<Vec<SqlProject>, String> {
+        self.with_conn(|conn| {
+            let mut stmt = conn
+                .prepare("SELECT id, name, root_path, connection_id, default_schema, trusted, created_at, last_opened_at FROM sql_projects ORDER BY last_opened_at DESC, created_at DESC")
+                .map_err(|e| e.to_string())?;
+            let rows = stmt
+                .query_map([], Self::row_to_sql_project)
+                .map_err(|e| e.to_string())?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| e.to_string())?;
+            Ok(rows)
+        })
+        .await
+    }
+
+    pub async fn save_sql_project(&self, project: &SqlProject) -> Result<(), String> {
+        let project = project.clone();
+        self.with_conn(move |conn| {
+            conn.execute(
+                "INSERT INTO sql_projects (id, name, root_path, connection_id, default_schema, trusted, created_at, last_opened_at) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?) \
+                 ON CONFLICT(id) DO UPDATE SET \
+                 name = excluded.name, \
+                 root_path = excluded.root_path, \
+                 connection_id = excluded.connection_id, \
+                 default_schema = excluded.default_schema, \
+                 trusted = excluded.trusted, \
+                 last_opened_at = excluded.last_opened_at",
+                params![
+                    project.id,
+                    project.name,
+                    project.root_path,
+                    project.connection_id,
+                    project.default_schema,
+                    if project.trusted { 1 } else { 0 },
+                    project.created_at,
+                    project.last_opened_at
+                ],
+            )
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+        })
+        .await
+    }
+
+    pub async fn find_sql_project_by_root_path(&self, root_path: &str) -> Result<Option<SqlProject>, String> {
+        let root_path = root_path.to_string();
+        self.with_conn(move |conn| {
+            conn.query_row(
+                "SELECT id, name, root_path, connection_id, default_schema, trusted, created_at, last_opened_at FROM sql_projects WHERE root_path = ?1",
+                params![root_path],
+                Self::row_to_sql_project,
+            )
+            .optional()
+            .map_err(|e| e.to_string())
+        })
+        .await
+    }
+
+    pub async fn touch_sql_project(&self, id: &str, last_opened_at: &str) -> Result<(), String> {
+        let id = id.to_string();
+        let last_opened_at = last_opened_at.to_string();
+        self.with_conn(move |conn| {
+            conn.execute("UPDATE sql_projects SET last_opened_at = ?2 WHERE id = ?1", params![id, last_opened_at])
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        })
+        .await
+    }
+
+    /// 删除项目记录及其全部文件快照（磁盘文件不受影响）。
+    pub async fn delete_sql_project(&self, id: &str) -> Result<(), String> {
+        let id = id.to_string();
+        self.with_conn(move |conn| {
+            let tx = conn.transaction().map_err(|e| e.to_string())?;
+            tx.execute("DELETE FROM sql_file_snapshots WHERE project_id = ?1", params![id])
+                .map_err(|e| e.to_string())?;
+            tx.execute("DELETE FROM sql_projects WHERE id = ?1", params![id]).map_err(|e| e.to_string())?;
+            tx.commit().map_err(|e| e.to_string())?;
+            Ok(())
+        })
+        .await
+    }
+
+    /// 保存文件前写入旧版本快照；同一文件保留最近 N 份，超限删除最旧的。
+    pub async fn insert_sql_file_snapshot(&self, snapshot: &SqlFileSnapshot) -> Result<(), String> {
+        let snapshot = snapshot.clone();
+        self.with_conn(move |conn| {
+            let tx = conn.transaction().map_err(|e| e.to_string())?;
+            tx.execute(
+                "INSERT INTO sql_file_snapshots (id, project_id, path, content, encoding, saved_at) VALUES (?, ?, ?, ?, ?, ?)",
+                params![snapshot.id, snapshot.project_id, snapshot.path, snapshot.content, snapshot.encoding, snapshot.saved_at],
+            )
+            .map_err(|e| e.to_string())?;
+            let keep_from = MAX_SQL_FILE_SNAPSHOTS_PER_FILE;
+            tx.execute(
+                "DELETE FROM sql_file_snapshots WHERE project_id = ?1 AND path = ?2 AND id NOT IN (
+                    SELECT id FROM sql_file_snapshots WHERE project_id = ?1 AND path = ?2 ORDER BY saved_at DESC, id DESC LIMIT ?3
+                )",
+                params![snapshot.project_id, snapshot.path, keep_from as i64],
+            )
+            .map_err(|e| e.to_string())?;
+            tx.commit().map_err(|e| e.to_string())?;
+            Ok(())
+        })
+        .await
+    }
+
+    pub async fn list_sql_file_snapshots(
+        &self,
+        project_id: &str,
+        path: &str,
+        limit: usize,
+    ) -> Result<Vec<SqlFileSnapshot>, String> {
+        let project_id = project_id.to_string();
+        let path = path.to_string();
+        self.with_conn(move |conn| {
+            let mut stmt = conn
+                .prepare("SELECT id, project_id, path, content, encoding, saved_at FROM sql_file_snapshots WHERE project_id = ?1 AND path = ?2 ORDER BY saved_at DESC, id DESC LIMIT ?3")
+                .map_err(|e| e.to_string())?;
+            let rows = stmt
+                .query_map(params![project_id, path, limit as i64], |row| {
+                    Ok(SqlFileSnapshot {
+                        id: row.get("id")?,
+                        project_id: row.get("project_id")?,
+                        path: row.get("path")?,
+                        content: row.get("content")?,
+                        encoding: row.get("encoding")?,
+                        saved_at: row.get("saved_at")?,
+                    })
+                })
+                .map_err(|e| e.to_string())?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| e.to_string())?;
+            Ok(rows)
         })
         .await
     }

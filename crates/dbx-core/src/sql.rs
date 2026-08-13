@@ -256,23 +256,108 @@ pub struct SqlFileProgress {
 }
 
 pub fn decode_sql_file_bytes(bytes: &[u8]) -> Result<String, String> {
-    if bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {
-        return std::str::from_utf8(&bytes[3..]).map(|text| text.to_string()).map_err(|_| sql_file_encoding_error());
-    }
+    decode_sql_file_bytes_with_meta(bytes).map(|result| result.content)
+}
 
-    if bytes.starts_with(&[0xFF, 0xFE]) {
-        return decode_sql_file_with_encoding(&bytes[2..], encoding_rs::UTF_16LE);
-    }
+/// SQL 文件编码：读取时识别，保存时按原编码写回，避免 GBK 等文件被静默转成 UTF-8。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SqlFileEncoding {
+    Utf8,
+    Utf8Bom,
+    Utf16Le,
+    Utf16Be,
+    Gbk,
+}
 
-    if bytes.starts_with(&[0xFE, 0xFF]) {
-        return decode_sql_file_with_encoding(&bytes[2..], encoding_rs::UTF_16BE);
-    }
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SqlFileLineEnding {
+    Lf,
+    Crlf,
+}
 
-    if let Ok(text) = std::str::from_utf8(bytes) {
-        return Ok(text.strip_prefix('\u{feff}').unwrap_or(text).to_string());
-    }
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SqlFileDecodeResult {
+    pub content: String,
+    pub encoding: SqlFileEncoding,
+    pub line_ending: SqlFileLineEnding,
+}
 
-    decode_sql_file_with_encoding(bytes, encoding_rs::GBK)
+pub fn decode_sql_file_bytes_with_meta(bytes: &[u8]) -> Result<SqlFileDecodeResult, String> {
+    let (content, encoding) = if bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {
+        let text =
+            std::str::from_utf8(&bytes[3..]).map(|text| text.to_string()).map_err(|_| sql_file_encoding_error())?;
+        (text, SqlFileEncoding::Utf8Bom)
+    } else if bytes.starts_with(&[0xFF, 0xFE]) {
+        (decode_sql_file_with_encoding(&bytes[2..], encoding_rs::UTF_16LE)?, SqlFileEncoding::Utf16Le)
+    } else if bytes.starts_with(&[0xFE, 0xFF]) {
+        (decode_sql_file_with_encoding(&bytes[2..], encoding_rs::UTF_16BE)?, SqlFileEncoding::Utf16Be)
+    } else if let Ok(text) = std::str::from_utf8(bytes) {
+        (text.strip_prefix('\u{feff}').unwrap_or(text).to_string(), SqlFileEncoding::Utf8)
+    } else {
+        (decode_sql_file_with_encoding(bytes, encoding_rs::GBK)?, SqlFileEncoding::Gbk)
+    };
+
+    let line_ending = if content.contains("\r\n") { SqlFileLineEnding::Crlf } else { SqlFileLineEnding::Lf };
+    Ok(SqlFileDecodeResult { content, encoding, line_ending })
+}
+
+/// 按原编码把文本编码为文件字节；保留 BOM 与换行符风格。
+/// 目标编码无法表示某些字符时返回错误（不静默降级，防止乱码写入）。
+pub fn encode_sql_file_content(
+    content: &str,
+    encoding: SqlFileEncoding,
+    line_ending: SqlFileLineEnding,
+) -> Result<Vec<u8>, String> {
+    // 先归一化换行符，再转成目标风格，避免混合换行。
+    let normalized = content.replace("\r\n", "\n");
+    let text = match line_ending {
+        SqlFileLineEnding::Lf => normalized,
+        SqlFileLineEnding::Crlf => normalized.replace('\n', "\r\n"),
+    };
+
+    match encoding {
+        SqlFileEncoding::Utf8 => Ok(text.into_bytes()),
+        SqlFileEncoding::Utf8Bom => {
+            let mut bytes = Vec::with_capacity(3 + text.len());
+            bytes.extend_from_slice(&[0xEF, 0xBB, 0xBF]);
+            bytes.extend_from_slice(text.as_bytes());
+            Ok(bytes)
+        }
+        SqlFileEncoding::Utf16Le => {
+            let mut bytes = vec![0xFF, 0xFE];
+            let (encoded, _, had_errors) = encoding_rs::UTF_16LE.encode(&text);
+            if had_errors {
+                return Err(sql_file_encode_unmappable_error("UTF-16LE"));
+            }
+            bytes.extend_from_slice(&encoded);
+            Ok(bytes)
+        }
+        SqlFileEncoding::Utf16Be => {
+            let mut bytes = vec![0xFE, 0xFF];
+            let (encoded, _, had_errors) = encoding_rs::UTF_16BE.encode(&text);
+            if had_errors {
+                return Err(sql_file_encode_unmappable_error("UTF-16BE"));
+            }
+            bytes.extend_from_slice(&encoded);
+            Ok(bytes)
+        }
+        SqlFileEncoding::Gbk => {
+            let (encoded, _, had_errors) = encoding_rs::GBK.encode(&text);
+            if had_errors {
+                return Err(sql_file_encode_unmappable_error("GBK"));
+            }
+            Ok(encoded.into_owned())
+        }
+    }
+}
+
+fn sql_file_encode_unmappable_error(encoding_name: &str) -> String {
+    format!(
+        "The SQL content contains characters that cannot be represented in {encoding_name}. \
+         Save the file as UTF-8 first, then try again."
+    )
 }
 
 fn decode_sql_file_with_encoding(bytes: &[u8], encoding: &'static encoding_rs::Encoding) -> Result<String, String> {

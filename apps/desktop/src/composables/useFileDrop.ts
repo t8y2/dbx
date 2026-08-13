@@ -3,9 +3,11 @@ import { uuid } from "@/lib/common/utils";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
+import { useProjectStore } from "@/stores/projectStore";
 import { useToast } from "@/composables/useToast";
 import * as api from "@/lib/backend/api";
 import type { ConnectionConfig, ExternalSqlFileVersion } from "@/types/database";
+import type { SqlFileEncoding, SqlFileLineEnding } from "@/lib/backend/tauri";
 import { detectDatabaseFileType } from "@/lib/database/databaseFileDetection";
 import { externalSqlFileOpenErrorMessage, readBrowserSqlFile } from "@/lib/sql/sqlFileOpen";
 import { resolveExternalSqlFileTarget, unassociatedExternalSqlFileTarget } from "@/lib/sql/externalSqlFileTarget";
@@ -22,12 +24,13 @@ export function useFileDrop() {
   const { t } = useI18n();
   const connectionStore = useConnectionStore();
   const queryStore = useQueryStore();
+  const projectStore = useProjectStore();
   const { toast } = useToast();
 
-  async function openDroppedSqlFile(name: string, content: string, path?: string, version?: ExternalSqlFileVersion) {
+  async function openDroppedSqlFile(name: string, content: string, path?: string, version?: ExternalSqlFileVersion, meta?: { projectId?: string; fileEncoding?: SqlFileEncoding; fileLineEnding?: SqlFileLineEnding }) {
     if (path) {
       const target = resolveExternalSqlFileTarget(path, (savedConnectionId) => !!connectionStore.getConfig(savedConnectionId), unassociatedExternalSqlFileTarget());
-      queryStore.openExternalSqlFile(target.connectionId, target.database, path, content, version, target.catalog);
+      queryStore.openExternalSqlFile(target.connectionId, target.database, path, content, version, { catalog: target.catalog, ...meta });
     } else {
       const connectionId = connectionStore.activeConnectionId || connectionStore.connections[0]?.id || "";
       const connection = connectionId ? connectionStore.getConfig(connectionId) : undefined;
@@ -44,8 +47,21 @@ export function useFileDrop() {
       const webview = getCurrentWebview();
       await webview.onDragDropEvent(async (event) => {
         if (event.payload.type !== "drop") return;
+        const { stat } = await import("@tauri-apps/plugin-fs");
+        const directoryPaths: string[] = [];
         for (const path of event.payload.paths) {
           const name = path.split("/").pop()?.split("\\").pop() || path;
+
+          // 目录 → 作为 SQL 项目打开（多目录时第一个为激活项目）
+          try {
+            const info = await stat(path);
+            if (info.isDirectory) {
+              directoryPaths.push(path);
+              continue;
+            }
+          } catch {
+            // stat 失败时走原有文件处理流程
+          }
 
           const dataQuery = await getDataFileQuery(path);
           if (dataQuery) {
@@ -73,7 +89,12 @@ export function useFileDrop() {
           if (isSqlFilePath(path)) {
             try {
               const snapshot = await api.readExternalSqlFileSnapshot(path);
-              await openDroppedSqlFile(name, snapshot.content, path, snapshot.version);
+              const projectId = projectStore.projectForFilePath(path)?.id ?? undefined;
+              await openDroppedSqlFile(name, snapshot.content, path, snapshot.version, {
+                projectId,
+                fileEncoding: snapshot.encoding,
+                fileLineEnding: snapshot.lineEnding,
+              });
             } catch (e: any) {
               toast(t("toolbar.sqlOpenFailed", { message: externalSqlFileOpenErrorMessage(e, (key, params) => t(key, params)) }), 5000);
             }
@@ -100,6 +121,22 @@ export function useFileDrop() {
             toast(t("welcome.fileOpened", { name }));
           } catch (e: any) {
             toast(t("connection.saveFailed", { message: e?.message || String(e) }), 5000);
+          }
+        }
+
+        if (directoryPaths.length > 0) {
+          try {
+            const opened = await projectStore.openProjects(directoryPaths);
+            if (opened.length > 0) {
+              window.dispatchEvent(new CustomEvent("dbx-show-sql-file-panel"));
+              if (opened.length === 1) {
+                toast(t("toolbar.sqlProjectOpened", { name: opened[0].name }));
+              } else {
+                toast(t("toolbar.sqlProjectsOpened", { name: opened[0].name, count: opened.length - 1 }));
+              }
+            }
+          } catch (e: any) {
+            toast(t("toolbar.sqlOpenFailed", { message: e?.message || String(e) }), 5000);
           }
         }
       });

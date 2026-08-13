@@ -4,6 +4,7 @@ import { matchQuickOpenText, useQuickOpen } from "@/composables/useQuickOpen";
 import * as api from "@/lib/backend/api";
 import { getSqlFileFolderPaths, sqlFileFoldersVersion } from "@/lib/sqlFile/sqlFileFolders";
 import { useConnectionStore } from "@/stores/connectionStore";
+import { useProjectStore } from "@/stores/projectStore";
 import { useSavedSqlStore } from "@/stores/savedSqlStore";
 
 vi.mock("@/stores/connectionStore", () => ({
@@ -12,6 +13,10 @@ vi.mock("@/stores/connectionStore", () => ({
 
 vi.mock("@/stores/savedSqlStore", () => ({
   useSavedSqlStore: vi.fn(),
+}));
+
+vi.mock("@/stores/projectStore", () => ({
+  useProjectStore: vi.fn(),
 }));
 
 vi.mock("@/lib/backend/api", () => ({
@@ -53,6 +58,7 @@ async function flushAsyncWork(): Promise<void> {
 describe("useQuickOpen", () => {
   beforeEach(() => {
     vi.mocked(useSavedSqlStore).mockReturnValue(emptySavedSqlStore() as any);
+    vi.mocked(useProjectStore).mockReturnValue({ projects: [], ensureLoaded: vi.fn().mockResolvedValue(undefined) } as any);
     vi.mocked(getSqlFileFolderPaths).mockReturnValue([]);
   });
 

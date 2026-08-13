@@ -1,6 +1,7 @@
 // @vitest-environment happy-dom
 
 import { readFileSync } from "node:fs";
+import path from "node:path";
 import { createApp, nextTick, type App } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import i18n from "@/i18n";
@@ -40,7 +41,7 @@ vi.mock("@/components/ui/button", async () => {
 
 import DataGridColumnLayoutPopover from "../DataGridColumnLayoutPopover.vue";
 
-const contentAreaSource = readFileSync(new URL("../../layout/ContentArea.vue", import.meta.url), "utf8");
+const contentAreaSource = readFileSync(path.resolve(process.cwd(), "apps/desktop/src/components/layout/ContentArea.vue"), "utf8");
 
 const mountedApps: Array<{ app: App; host: HTMLElement }> = [];
 
@@ -152,7 +153,7 @@ describe("data grid column layout popover", () => {
     mountedApps.push({ app, host });
     await nextTick();
 
-    const trigger = host.querySelector<HTMLButtonElement>('[aria-label="Column visibility"]');
+    const trigger = [...host.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.getAttribute("aria-label") === i18n.global.t("grid.columnVisibility"));
     expect(trigger?.className).toContain("w-6");
     expect(trigger?.textContent?.trim()).toBe("");
   });

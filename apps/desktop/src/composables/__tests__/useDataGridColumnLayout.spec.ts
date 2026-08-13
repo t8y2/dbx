@@ -16,7 +16,11 @@ describe("useDataGridColumnLayout", () => {
       removeItem: (key: string) => values.delete(key),
     });
   });
-  afterEach(() => vi.unstubAllGlobals());
+  afterEach(() => {
+    window.dispatchEvent(new Event("blur"));
+    document.querySelectorAll("[data-column-header-drag-preview]").forEach((element) => element.remove());
+    vi.unstubAllGlobals();
+  });
   it("builds cumulative offsets", () => {
     expect(dataGridColumnOffsets([80, 120, 60])).toEqual([0, 80, 200, 260]);
   });
@@ -295,7 +299,7 @@ describe("useDataGridColumnLayout", () => {
       "requestAnimationFrame",
       vi.fn((callback: FrameRequestCallback) => {
         callback(0);
-        return 1;
+        return 0;
       }),
     );
     vi.stubGlobal("cancelAnimationFrame", vi.fn());
@@ -344,7 +348,7 @@ describe("useDataGridColumnLayout", () => {
       "requestAnimationFrame",
       vi.fn((callback: FrameRequestCallback) => {
         callback(0);
-        return 1;
+        return 0;
       }),
     );
     vi.stubGlobal("cancelAnimationFrame", vi.fn());
@@ -396,7 +400,7 @@ describe("useDataGridColumnLayout", () => {
       "requestAnimationFrame",
       vi.fn((callback: FrameRequestCallback) => {
         callback(0);
-        return 1;
+        return 0;
       }),
     );
     vi.stubGlobal("cancelAnimationFrame", vi.fn());

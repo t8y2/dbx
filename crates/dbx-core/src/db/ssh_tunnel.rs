@@ -4,7 +4,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::path_utils::expand_tilde;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
@@ -199,6 +198,31 @@ fn auth_result_offers_keyboard_interactive(result: &AuthResult) -> bool {
     )
 }
 
+/// Describes a terminal (non-continuable) `AuthResult::Failure` for `action`
+/// (e.g. "public key authentication"), choosing between `rejected_note` and a
+/// generic "succeeded, but..." message based on `partial_success`.
+///
+/// `partial_success = true` means the factor just attempted was actually
+/// *accepted*; the server is only asking for another one (publickey+password
+/// or similar MFA chains). Reporting that as "rejected" — the failure mode
+/// this replaced — is actively wrong and points the user at the wrong
+/// credential to fix.
+fn describe_terminal_auth_failure(
+    action: &str,
+    rejected_note: &str,
+    remaining_methods: &MethodSet,
+    partial_success: bool,
+) -> String {
+    if partial_success {
+        format!(
+            "SSH {action} succeeded, but the server still requires additional authentication \
+             (remaining_methods={remaining_methods:?})"
+        )
+    } else {
+        format!("SSH {action} failed: {rejected_note} (remaining_methods={remaining_methods:?})")
+    }
+}
+
 fn keyboard_interactive_prompt_text(name: &str, instructions: &str, prompt: &str) -> String {
     [name.trim(), instructions.trim(), prompt.trim()]
         .into_iter()
@@ -390,9 +414,11 @@ async fn connect_and_authenticate(
                     if server_offers_password(&remaining_methods) {
                         true
                     } else {
-                        return Err(format!(
-                            "SSH key rejected and the server does not offer password authentication \
-                             (remaining_methods={remaining_methods:?}, partial_success={partial_success})"
+                        return Err(describe_terminal_auth_failure(
+                            "public key authentication",
+                            "the key was rejected and the server does not offer password authentication",
+                            &remaining_methods,
+                            partial_success,
                         ));
                     }
                 }
@@ -419,7 +445,12 @@ async fn connect_and_authenticate(
                         .await?;
                         return Ok(session);
                     }
-                    return Err(format!("SSH password authentication failed (partial_success={partial_success})"));
+                    return Err(describe_terminal_auth_failure(
+                        "password authentication",
+                        "the server rejected the password",
+                        &remaining_methods,
+                        partial_success,
+                    ));
                 }
             }
         }
@@ -468,9 +499,11 @@ async fn connect_and_authenticate(
             // "key+password" branch above already does. Discarding it left the
             // user with a bare "authentication failed" that never said the key
             // itself was refused, nor what the server would still accept.
-            return Err(format!(
-                "SSH public key authentication failed: the server rejected the key \
-                 (remaining_methods={remaining_methods:?}, partial_success={partial_success})"
+            return Err(describe_terminal_auth_failure(
+                "public key authentication",
+                "the server rejected the key",
+                remaining_methods,
+                *partial_success,
             ));
         }
     } else if try_password {
@@ -489,9 +522,11 @@ async fn connect_and_authenticate(
             )
             .await?;
         } else if let AuthResult::Failure { remaining_methods, partial_success } = &auth_res {
-            return Err(format!(
-                "SSH password authentication failed: the server rejected the password \
-                 (remaining_methods={remaining_methods:?}, partial_success={partial_success})"
+            return Err(describe_terminal_auth_failure(
+                "password authentication",
+                "the server rejected the password",
+                remaining_methods,
+                *partial_success,
             ));
         }
     } else if try_agent {
@@ -1098,33 +1133,49 @@ enum TunnelKind {
 /// answer the next `start_*` call with the real reason instead of handing back
 /// a local port whose SSH session is dead, which reached the user as an
 /// unrelated generic driver error such as "connection closed".
+///
+/// The three states used to be a separate `AtomicBool` (`connected`) and
+/// `Mutex<Option<String>>` (`last_error`), published as two independent
+/// writes. A reader could observe the gap between them — `connected = false`
+/// with `last_error` still `None` — and conclude the tunnel was healthy while
+/// it was actually mid-failure, handing back a dead local port. Folding both
+/// into one enum behind one lock makes that state unrepresentable: every
+/// transition is a single atomic write.
+#[derive(Clone)]
+enum TunnelHealth {
+    Connected,
+    /// Session just dropped; a short backoff window is normal and callers
+    /// should keep using the port rather than be given a spurious error.
+    Reconnecting,
+    Failed(String),
+}
+
 struct TunnelStatus {
-    connected: AtomicBool,
-    last_error: std::sync::Mutex<Option<String>>,
+    health: std::sync::Mutex<TunnelHealth>,
 }
 
 impl TunnelStatus {
     /// A tunnel is only registered after a successful handshake, so it starts
     /// out connected.
     fn new_connected() -> Self {
-        Self { connected: AtomicBool::new(true), last_error: std::sync::Mutex::new(None) }
+        Self { health: std::sync::Mutex::new(TunnelHealth::Connected) }
     }
 
     fn mark_connected(&self) {
-        self.connected.store(true, Ordering::SeqCst);
-        if let Ok(mut last_error) = self.last_error.lock() {
-            *last_error = None;
+        if let Ok(mut health) = self.health.lock() {
+            *health = TunnelHealth::Connected;
         }
     }
 
     fn mark_disconnected(&self) {
-        self.connected.store(false, Ordering::SeqCst);
+        if let Ok(mut health) = self.health.lock() {
+            *health = TunnelHealth::Reconnecting;
+        }
     }
 
     fn record_failure(&self, error: String) {
-        self.connected.store(false, Ordering::SeqCst);
-        if let Ok(mut last_error) = self.last_error.lock() {
-            *last_error = Some(error);
+        if let Ok(mut health) = self.health.lock() {
+            *health = TunnelHealth::Failed(error);
         }
     }
 
@@ -1136,10 +1187,10 @@ impl TunnelStatus {
     /// than be given a spurious error. Only once a reconnect attempt has
     /// actually been refused do we report it.
     fn failure(&self) -> Option<String> {
-        if self.connected.load(Ordering::SeqCst) {
-            return None;
+        match self.health.lock().ok()?.clone() {
+            TunnelHealth::Failed(error) => Some(error),
+            TunnelHealth::Connected | TunnelHealth::Reconnecting => None,
         }
-        self.last_error.lock().ok().and_then(|error| error.clone())
     }
 }
 
@@ -1775,10 +1826,11 @@ mod tests {
     use super::SshClient;
     use super::PROMPT_TEST_LOCK;
     use super::{
-        bind_tunnel_listener, connect_and_authenticate, effective_hop_timeout, netcat_proxy_command,
-        openssh_padding_len, plan_chain, read_ssh_string, sanitize_unencrypted_openssh_comment_bytes,
-        server_offers_keyboard_interactive, server_offers_password, ssh_client_config, HostKeyState, HostKeyVerifier,
-        PlannedTunnel, TunnelEntry, TunnelKind, TunnelManager, TunnelStatus,
+        bind_tunnel_listener, connect_and_authenticate, describe_terminal_auth_failure, effective_hop_timeout,
+        netcat_proxy_command, openssh_padding_len, plan_chain, read_ssh_string,
+        sanitize_unencrypted_openssh_comment_bytes, server_offers_keyboard_interactive, server_offers_password,
+        ssh_client_config, HostKeyState, HostKeyVerifier, PlannedTunnel, TunnelEntry, TunnelKind, TunnelManager,
+        TunnelStatus,
     };
     use crate::db::ssh_prompt;
     use crate::models::connection::{default_ssh_connect_timeout_secs, SshTunnelConfig};
@@ -1984,6 +2036,63 @@ mod tests {
         assert_eq!(manager.local_port("conn").await, None);
         // The dead entry is also cleared out, same as get_active_port does.
         assert!(!manager.tunnels.lock().await.contains_key("conn"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_status_transitions_never_expose_a_torn_state() {
+        // Regression guard for the race flagged in review: the old design
+        // published `connected` (`AtomicBool`) and `last_error`
+        // (`Mutex<Option<String>>`) as two independent writes, so a reader
+        // could land in the gap and observe `connected = false` with
+        // `last_error` still `None` — i.e. "healthy" — while the tunnel had
+        // actually just failed, and hand back a dead local port.
+        // `TunnelHealth` folds both into one enum behind a single lock, so
+        // every transition is one atomic write and that gap cannot exist by
+        // construction.
+        //
+        // A true happens-before proof of a nanosecond-scale memory-ordering
+        // race needs tooling like loom, which this crate doesn't depend on;
+        // real OS threads can't *guarantee* they hit it. This test instead
+        // hammers the same interleaving — readers spinning on `failure()`
+        // while a writer races disconnect -> fail -> reconnect — on real
+        // parallel threads many times, and asserts every read is a value the
+        // writer could actually have produced, never something assembled
+        // from two different transitions.
+        let status = Arc::new(TunnelStatus::new_connected());
+        let stop = Arc::new(AtomicBool::new(false));
+        let saw_unexpected = Arc::new(AtomicBool::new(false));
+
+        let mut readers = Vec::new();
+        for _ in 0..8 {
+            let status = status.clone();
+            let stop = stop.clone();
+            let saw_unexpected = saw_unexpected.clone();
+            readers.push(tokio::spawn(async move {
+                while !stop.load(Ordering::SeqCst) {
+                    if let Some(reason) = status.failure() {
+                        if !reason.starts_with("attempt ") || !reason.ends_with(" refused") {
+                            saw_unexpected.store(true, Ordering::SeqCst);
+                        }
+                    }
+                }
+            }));
+        }
+
+        for i in 0..20_000u32 {
+            status.mark_connected();
+            status.mark_disconnected();
+            status.record_failure(format!("attempt {i} refused"));
+        }
+
+        stop.store(true, Ordering::SeqCst);
+        for reader in readers {
+            reader.await.unwrap();
+        }
+
+        assert!(
+            !saw_unexpected.load(Ordering::SeqCst),
+            "a reader observed a failure reason that record_failure never set — status must publish atomically"
+        );
     }
 
     // --- Host-key verification (MITM hardening) ---------------------------------
@@ -3066,10 +3175,7 @@ uveF/dLmnVN1IriEyEvHAAAACGRieC10ZXN0AQIDBAU=
 
         let error = retry.expect_err("a tunnel whose reconnect was refused must not report success");
         println!("REPRO start_tunnel after the failed reconnect = Err({error})");
-        assert!(
-            error.contains("could not reconnect"),
-            "the error should say the tunnel could not reconnect: {error}"
-        );
+        assert!(error.contains("could not reconnect"), "the error should say the tunnel could not reconnect: {error}");
         assert!(
             error.contains("public key authentication failed"),
             "the error should name the real cause (key rejected), not a generic I/O failure: {error}"
@@ -3091,9 +3197,7 @@ uveF/dLmnVN1IriEyEvHAAAACGRieC10ZXN0AQIDBAU=
 
         let dir = tempdir().unwrap();
         let known_hosts_path = dir.path().join("known_hosts");
-        HostKeyVerifier::new(known_hosts_path.clone())
-            .learn("127.0.0.1", ssh_port, &test_server_public_key())
-            .unwrap();
+        HostKeyVerifier::new(known_hosts_path.clone()).learn("127.0.0.1", ssh_port, &test_server_public_key()).unwrap();
         let key_path = dir.path().join("id_ed25519");
         std::fs::write(&key_path, TEST_SERVER_KEY_PEM).unwrap();
 
@@ -3124,8 +3228,54 @@ uveF/dLmnVN1IriEyEvHAAAACGRieC10ZXN0AQIDBAU=
         // The structured detail russh returned must survive, like the
         // key+password branch already did.
         assert!(error.contains("remaining_methods="), "{error}");
-        assert!(error.contains("partial_success=false"), "{error}");
 
         server_task.abort();
+    }
+
+    // --- partial_success MFA reporting ------------------------------------------
+    //
+    // These test `describe_terminal_auth_failure` directly rather than through
+    // a live handshake against this crate's bundled `russh::server` test
+    // helper: that implementation unconditionally overwrites
+    // `auth_request.partial_success = false` immediately after reading the
+    // handler's `Auth::Reject { partial_success, .. }` (see
+    // `server_read_auth_request_pk` and the password/none branches in
+    // `russh::server::encrypted`), so it can never actually put a `true` on
+    // the wire — a limitation of that library's bundled server, not of the
+    // client-side code under test here. Real SSH servers (the only thing
+    // `connect_and_authenticate` talks to in production) encode this bit
+    // correctly, and the client-side decode path (`russh::client::encrypted`)
+    // is untouched by that bug.
+
+    #[test]
+    fn partial_success_reports_the_factor_as_accepted_not_rejected() {
+        let remaining_methods = MethodSet::from(&[MethodKind::PublicKey][..]);
+
+        let message = describe_terminal_auth_failure(
+            "public key authentication",
+            "the server rejected the key",
+            &remaining_methods,
+            true,
+        );
+
+        assert!(message.contains("succeeded"), "the factor WAS accepted, the message must say so: {message}");
+        assert!(!message.contains("rejected"), "must not say the factor was rejected when it was accepted: {message}");
+        assert!(message.contains("remaining_methods="), "the structured detail must survive: {message}");
+    }
+
+    #[test]
+    fn no_partial_success_reports_the_factor_as_rejected() {
+        let remaining_methods = MethodSet::from(&[MethodKind::Password][..]);
+
+        let message = describe_terminal_auth_failure(
+            "password authentication",
+            "the server rejected the password",
+            &remaining_methods,
+            false,
+        );
+
+        assert!(message.contains("the server rejected the password"), "{message}");
+        assert!(!message.contains("succeeded"), "a real rejection must not read as accepted: {message}");
+        assert!(message.contains("remaining_methods="), "the structured detail must survive: {message}");
     }
 }

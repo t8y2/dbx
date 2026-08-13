@@ -323,7 +323,8 @@ function looksLikeComputedExpression(expression: string): boolean {
   const identifier = parseQualifiedIdentifier(trimmed);
   if (identifier?.end === trimmed.length) return false;
   if (/[+\-*/%=<>!|&^,.:]$/u.test(trimmed)) return false;
-  const finalWord = trimmed.split(/\s+/u).at(-1)?.toUpperCase() ?? "";
+  const words = trimmed.split(/\s+/u);
+  const finalWord = words[words.length - 1]?.toUpperCase() ?? "";
   if (new Set(["AND", "OR", "XOR", "NOT", "LIKE", "ILIKE", "IS", "IN", "BETWEEN", "WHEN", "THEN", "ELSE", "AS", "COLLATE", "AT", "DIV", "MOD", "REGEXP", "RLIKE"]).has(finalWord)) return false;
 
   const source = parseQualifiedIdentifier(trimmed);

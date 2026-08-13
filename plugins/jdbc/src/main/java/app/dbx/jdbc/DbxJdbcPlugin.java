@@ -7,8 +7,10 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 
 import java.io.BufferedReader;
 import java.io.BufferedWriter;
+import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.OutputStreamWriter;
+import java.io.Reader;
 import java.net.URLDecoder;
 import java.net.URLEncoder;
 import java.math.BigDecimal;
@@ -17,6 +19,7 @@ import java.net.URLClassLoader;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.sql.Connection;
+import java.sql.Clob;
 import java.sql.DatabaseMetaData;
 import java.sql.Date;
 import java.sql.Driver;
@@ -3030,6 +3033,9 @@ public final class DbxJdbcPlugin {
         if (value instanceof byte[] bytes) {
             return binaryToHex(bytes);
         }
+        if (value instanceof Clob clob) {
+            return clobToString(clob);
+        }
         if (isBinaryColumn(meta, index)) {
             byte[] bytes = rs.getBytes(index);
             return bytes == null ? null : binaryToHex(bytes);
@@ -3048,6 +3054,20 @@ public final class DbxJdbcPlugin {
             return value;
         }
         return value.toString();
+    }
+
+    private static String clobToString(Clob clob) throws SQLException {
+        try (Reader reader = clob.getCharacterStream()) {
+            StringBuilder out = new StringBuilder();
+            char[] buffer = new char[8192];
+            int count;
+            while ((count = reader.read(buffer)) != -1) {
+                out.append(buffer, 0, count);
+            }
+            return out.toString();
+        } catch (IOException error) {
+            throw new SQLException("Failed to read CLOB value", error);
+        }
     }
 
     private static Object readTemporalValue(

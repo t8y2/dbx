@@ -2631,6 +2631,8 @@ export default {
     closeAllRegularTabs: "Close All Regular Tabs",
     closeAllFixedTabs: "Close All Fixed Tabs",
     copyName: "Copy Name",
+    name: "Name",
+    fullPath: "Full Path",
     copyFinalProxyPort: "Copy Final Proxy Port",
     finalProxyPortCopied: "Final proxy port {port} copied",
     setDefaultDatabase: "Set as Default Database",

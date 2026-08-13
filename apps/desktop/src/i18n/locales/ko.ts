@@ -2483,6 +2483,8 @@ export default withEnglishFallback({
     closeAllRegularTabs: "모든 일반 탭 닫기",
     closeAllFixedTabs: "모든 고정 탭 닫기",
     copyName: "이름 복사",
+    name: "이름",
+    fullPath: "전체 경로",
     copyFinalProxyPort: "최종 프록시 포트 복사",
     finalProxyPortCopied: "최종 프록시 포트 {port} 복사됨",
     setDefaultDatabase: "기본 데이터베이스로 설정",

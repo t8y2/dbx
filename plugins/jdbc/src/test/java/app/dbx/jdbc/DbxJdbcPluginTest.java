@@ -10,6 +10,7 @@ import org.junit.jupiter.api.Test;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
 import java.sql.Connection;
+import java.sql.Clob;
 import java.sql.DatabaseMetaData;
 import java.sql.Date;
 import java.sql.Driver;
@@ -391,6 +392,37 @@ final class DbxJdbcPluginTest {
 
         assertEquals(null, method.invoke(null, rs, columnMeta(Types.DATE), 1, true));
         assertEquals(List.of("getObject"), calls);
+    }
+
+    @Test
+    void readValueReadsVendorClobImplementationsAsText() throws Exception {
+        Method method = DbxJdbcPlugin.class.getDeclaredMethod(
+            "readValue",
+            ResultSet.class,
+            ResultSetMetaData.class,
+            int.class,
+            boolean.class
+        );
+        method.setAccessible(true);
+        Clob clob = (Clob) Proxy.newProxyInstance(
+            DbxJdbcPluginTest.class.getClassLoader(),
+            new Class<?>[] { Clob.class },
+            (proxy, invokedMethod, args) -> switch (invokedMethod.getName()) {
+                case "getCharacterStream" -> new java.io.StringReader("GaussDB CLOB 中文内容");
+                case "toString" -> "com.huawei.gauss.jdbc.inner.GaussClobImpl@4c1909a3";
+                default -> defaultValue(invokedMethod.getReturnType());
+            }
+        );
+        ResultSet rs = (ResultSet) Proxy.newProxyInstance(
+            DbxJdbcPluginTest.class.getClassLoader(),
+            new Class<?>[] { ResultSet.class },
+            (proxy, invokedMethod, args) -> switch (invokedMethod.getName()) {
+                case "getObject" -> clob;
+                default -> defaultValue(invokedMethod.getReturnType());
+            }
+        );
+
+        assertEquals("GaussDB CLOB 中文内容", method.invoke(null, rs, columnMeta(Types.CLOB), 1, false));
     }
 
     @Test

@@ -2561,6 +2561,8 @@ export default withEnglishFallback({
     closeAllRegularTabs: "關閉全部普通分頁",
     closeAllFixedTabs: "關閉全部固定分頁",
     copyName: "複製名稱",
+    name: "名稱",
+    fullPath: "完整路徑",
     copyFinalProxyPort: "複製最終代理連接埠",
     finalProxyPortCopied: "最終代理連接埠 {port} 已複製",
     setDefaultDatabase: "設為預設資料庫",

@@ -2562,6 +2562,8 @@ export default withEnglishFallback({
     closeAllRegularTabs: "Cerrar todas las pestañas normales",
     closeAllFixedTabs: "Cerrar todas las pestañas fijadas",
     copyName: "Copiar nombre",
+    name: "Nombre",
+    fullPath: "Ruta completa",
     copyFinalProxyPort: "Copiar puerto proxy final",
     finalProxyPortCopied: "Puerto proxy final {port} copiado",
     setDefaultDatabase: "Establecer como base de datos predeterminada",

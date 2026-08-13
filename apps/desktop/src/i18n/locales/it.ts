@@ -2560,6 +2560,8 @@ export default withEnglishFallback({
     closeAllRegularTabs: "Chiudi Tutte le Schede Normali",
     closeAllFixedTabs: "Chiudi Tutte le Schede Fisse",
     copyName: "Copia Nome",
+    name: "Nome",
+    fullPath: "Percorso completo",
     copyFinalProxyPort: "Copia porta proxy finale",
     finalProxyPortCopied: "Porta proxy finale {port} copiata",
     setDefaultDatabase: "Imposta come Database Predefinito",

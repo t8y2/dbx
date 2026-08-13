@@ -3332,7 +3332,7 @@ fn default_literal(default: &str, data_type: &str, source: DialectKind, extra: O
 
     // Before 8.0.13 there is no `EXTRA` marker and a temporal column was the
     // only place an expression default could appear.
-    if takes_temporal_literal && TEMPORAL_DEFAULT_KEYWORDS.iter().any(|kw| trimmed.eq_ignore_ascii_case(kw)) {
+    if takes_temporal_literal && is_temporal_keyword_default(trimmed) {
         return trimmed.to_string();
     }
     // A binary default is commonly reported as a hex literal, which is already
@@ -3347,6 +3347,21 @@ fn default_literal(default: &str, data_type: &str, source: DialectKind, extra: O
         return format!("'{}'", trimmed.replace('\'', "''"));
     }
     trimmed.to_string()
+}
+
+/// A bare temporal default, with or without a precision argument, so
+/// `CURRENT_TIMESTAMP(6)` and `LOCALTIME(3)` are recognised alongside the bare
+/// keywords. `transfer::is_mysql_function_default` already accepts the
+/// parenthesised forms and this mirrors it.
+///
+/// Deliberately keyed on the known keywords rather than on the presence of a
+/// parenthesis, so a string default such as `a(b)` is still quoted.
+fn is_temporal_keyword_default(value: &str) -> bool {
+    let upper = value.to_ascii_uppercase();
+    TEMPORAL_DEFAULT_KEYWORDS.iter().any(|keyword| {
+        let keyword = keyword.to_ascii_uppercase();
+        upper == keyword || upper.strip_prefix(&keyword).is_some_and(|rest| rest.starts_with('('))
+    })
 }
 
 /// `0x61`, the shape MySQL reports a binary default in.
@@ -6965,6 +6980,26 @@ mod tests {
         // Before 8.0.13 there is no marker, and a temporal column was the only
         // place an expression default could appear.
         assert_eq!(default_literal("CURRENT_TIMESTAMP", "datetime", Mysql, None), "CURRENT_TIMESTAMP");
+    }
+
+    #[test]
+    fn default_literal_keeps_temporal_defaults_that_carry_a_precision() {
+        use DialectKind::Mysql;
+
+        // `TIMESTAMP(6) DEFAULT CURRENT_TIMESTAMP(6)` is valid MySQL. On a server
+        // older than 8.0.13 it arrives with no EXTRA marker, so the fallback has
+        // to accept the precision argument or the column is deployed with a
+        // quoted string where an expression belongs.
+        assert_eq!(default_literal("CURRENT_TIMESTAMP(6)", "timestamp(6)", Mysql, None), "CURRENT_TIMESTAMP(6)");
+        assert_eq!(default_literal("NOW()", "datetime", Mysql, None), "NOW()");
+        assert_eq!(default_literal("LOCALTIME(3)", "datetime(3)", Mysql, None), "LOCALTIME(3)");
+        assert_eq!(default_literal("LOCALTIMESTAMP(3)", "timestamp(3)", Mysql, None), "LOCALTIMESTAMP(3)");
+        assert_eq!(default_literal("current_timestamp(6)", "timestamp(6)", Mysql, None), "current_timestamp(6)");
+
+        // The precision form must not become a general "contains a parenthesis"
+        // rule again: a string default keeps its quotes.
+        assert_eq!(default_literal("a(b)", "varchar(32)", Mysql, None), "'a(b)'");
+        assert_eq!(default_literal("CURRENT_TIMESTAMPX(6)", "varchar(64)", Mysql, None), "'CURRENT_TIMESTAMPX(6)'");
     }
 
     #[test]

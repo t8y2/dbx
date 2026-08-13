@@ -1176,19 +1176,34 @@ pub(crate) fn top_level_top_row_count(sql: &str) -> Option<usize> {
 }
 
 fn top_level_limit_row_count(sql: &str) -> Option<usize> {
-    let token = top_level_sql_tokens(sql).into_iter().find(|token| token.text == "LIMIT")?;
-    parse_standard_limit_row_count(sql, token.start + token.text.len())
+    let tokens = top_level_sql_tokens(sql);
+    let limit_index = tokens.iter().position(|token| token.text == "LIMIT")?;
+    let token = &tokens[limit_index];
+    let (count, suffix_start) = parse_standard_limit_row_count(sql, token.start + token.text.len())?;
+    let suffix_start = skip_sql_whitespace(sql, suffix_start);
+    if sql.get(suffix_start..)?.starts_with('%') {
+        return None;
+    }
+    if tokens[limit_index + 1..].iter().enumerate().any(|(offset, token)| {
+        token.text == "BY"
+            || token.text == "PERCENT"
+            || (token.text == "WITH" && tokens.get(limit_index + offset + 2).is_some_and(|next| next.text == "TIES"))
+    }) {
+        return None;
+    }
+    Some(count)
 }
 
-fn parse_standard_limit_row_count(sql: &str, start: usize) -> Option<usize> {
+fn parse_standard_limit_row_count(sql: &str, start: usize) -> Option<(usize, usize)> {
     let mut cursor = skip_sql_whitespace(sql, start);
     let first = parse_usize_literal(sql, &mut cursor)?;
     cursor = skip_sql_whitespace(sql, cursor);
     if sql.get(cursor..)?.starts_with(',') {
         cursor = skip_sql_whitespace(sql, cursor + 1);
-        return parse_usize_literal(sql, &mut cursor);
+        let count = parse_usize_literal(sql, &mut cursor)?;
+        return Some((count, cursor));
     }
-    Some(first)
+    Some((first, cursor))
 }
 
 fn parse_usize_literal(sql: &str, cursor: &mut usize) -> Option<usize> {
@@ -3350,6 +3365,11 @@ WHERE u.id = picked.id;
             (Some(DatabaseType::Postgres), "SELECT * FROM events LIMIT 100", Some(100)),
             (Some(DatabaseType::Mysql), "SELECT * FROM events LIMIT 50", Some(50)),
             (Some(DatabaseType::Mysql), "SELECT * FROM events LIMIT 100 OFFSET 100", Some(100)),
+            (Some(DatabaseType::ClickHouse), "SELECT * FROM events LIMIT 10 BY user_id", None),
+            (Some(DatabaseType::ClickHouse), "SELECT * FROM events LIMIT 10 OFFSET 5 BY user_id", None),
+            (Some(DatabaseType::ClickHouse), "SELECT * FROM events LIMIT 10 WITH TIES", None),
+            (Some(DatabaseType::DuckDb), "SELECT * FROM events LIMIT 10%", None),
+            (Some(DatabaseType::DuckDb), "SELECT * FROM events LIMIT 10 PERCENT", None),
             (None, "SELECT * FROM events LIMIT 100", Some(100)),
             (Some(DatabaseType::Postgres), "SELECT * FROM events", None),
         ] {

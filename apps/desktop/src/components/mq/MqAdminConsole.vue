@@ -513,7 +513,16 @@ onMounted(async () => {
         :prefer-dlq-topic="preferDlqTopic"
       />
       <MessageTracePanel v-else-if="activeTab === 'trace' && isRocketMqCluster && canMessageTrace" :connection-id="connectionId" :tenant="effectiveTenant" :namespace="effectiveNamespace" :topic="selectedTopic" :read-only="readOnly" :mq-system-kind="mqSystemKind" />
-      <KafkaMessagesPanel v-else-if="activeTab === 'messages' && canBrowseKafkaMessages" :connection-id="connectionId" :tenant="effectiveTenant" :namespace="effectiveNamespace" :topic="selectedTopic" />
+      <KafkaMessagesPanel
+        v-else-if="activeTab === 'messages' && canBrowseKafkaMessages"
+        :connection-id="connectionId"
+        :tenant="effectiveTenant"
+        :namespace="effectiveNamespace"
+        :topic="selectedTopic"
+        :read-only="readOnly"
+        :can-send-message="canSendMessage"
+        @topic-selected="handleProducerTopicSelected"
+      />
       <MessageQueryPanel v-else-if="activeTab === 'messages' && canMessageQuery && !isRocketMqCluster" :connection-id="connectionId" :tenant="effectiveTenant" :namespace="effectiveNamespace" :topic="selectedTopic" :read-only="readOnly" :mq-system-kind="mqSystemKind" />
       <SendMessagePanel
         v-else-if="activeTab === 'messages' && canSendMessage && !isRocketMqCluster && !canMessageQuery"

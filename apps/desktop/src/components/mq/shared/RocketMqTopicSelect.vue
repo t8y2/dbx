@@ -184,6 +184,7 @@ async function loadTopics() {
   const requestVersion = ++loadRequestVersion;
   if (!props.tenant || !props.namespace) {
     topics.value = [];
+    loading.value = false;
     emit("loaded", []);
     return;
   }

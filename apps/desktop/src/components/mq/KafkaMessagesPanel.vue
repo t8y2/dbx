@@ -7,15 +7,21 @@ import { formatError } from "@/lib/backend/errorUtils";
 import { extractKafkaPartitionRows } from "@/lib/mq/kafkaTopicStats";
 import RocketMqTopicSelect from "./shared/RocketMqTopicSelect.vue";
 import MessageBrowser from "./MessageBrowser.vue";
+import SendMessagePanel from "./SendMessagePanel.vue";
 
 interface Props {
   connectionId: string;
   tenant?: string;
   namespace?: string;
   topic?: TopicInfo;
+  readOnly?: boolean;
+  canSendMessage?: boolean;
 }
 
 const props = defineProps<Props>();
+const emit = defineEmits<{
+  topicSelected: [topic: TopicInfo | undefined];
+}>();
 const { t } = useI18n();
 
 const topicSelectRef = ref<InstanceType<typeof RocketMqTopicSelect>>();
@@ -82,6 +88,7 @@ watch(
     if (name) topicName.value = name;
   },
 );
+watch(selectedTopic, (topic) => emit("topicSelected", topic));
 </script>
 
 <template>
@@ -133,6 +140,7 @@ watch(
       </section>
 
       <MessageBrowser :connection-id="connectionId" :topic="selectedTopicRef" mq-system-kind="kafka" />
+      <SendMessagePanel v-if="canSendMessage && selectedTopic" :connection-id="connectionId" :tenant="tenant" :namespace="namespace" :topic="selectedTopic" :read-only="readOnly" mq-system-kind="kafka" is-flat-mq-cluster :supports-peek-messages="false" fixed-topic embedded />
     </div>
   </div>
 </template>

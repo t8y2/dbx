@@ -7,12 +7,16 @@ const backend = vi.hoisted(() => ({
   mqListTopics: vi.fn(),
   mqGetTopicStats: vi.fn(),
   mqPeekMessages: vi.fn(),
+  mqSendMessage: vi.fn(),
 }));
 
 vi.mock("vue-i18n", () => ({
   useI18n: () => ({ t: (key: string) => key }),
 }));
 vi.mock("@/lib/backend/api", () => backend);
+vi.mock("@/composables/useMqMutationGuard", () => ({
+  useMqMutationGuard: () => ({ confirmMqWrite: vi.fn().mockResolvedValue(true) }),
+}));
 vi.mock("@/components/ui/select", async () => (await import("./selectStub")).createSelectStub());
 vi.mock("@lucide/vue", async () => {
   const { defineComponent, h } = await import("vue");
@@ -51,7 +55,7 @@ async function flushUi() {
   await nextTick();
 }
 
-async function mountPanel() {
+async function mountPanel(onTopicSelected = vi.fn()) {
   root = document.createElement("div");
   document.body.appendChild(root);
   app = createApp(KafkaMessagesPanel, {
@@ -59,6 +63,8 @@ async function mountPanel() {
     tenant: "_flat_mq",
     namespace: "_flat_mq",
     topic: TOPIC,
+    canSendMessage: true,
+    onTopicSelected,
   });
   app.mount(root);
   await flushUi();
@@ -80,6 +86,7 @@ beforeEach(() => {
   backend.mqListTopics.mockReset().mockResolvedValue([TOPIC, { ...TOPIC, name: "payments", shortName: "payments" }]);
   backend.mqGetTopicStats.mockReset().mockResolvedValue(STATS);
   backend.mqPeekMessages.mockReset().mockResolvedValue([]);
+  backend.mqSendMessage.mockReset().mockResolvedValue({ topic: TOPIC.shortName, partition: 0, offset: 1 });
 });
 
 afterEach(() => {
@@ -101,6 +108,9 @@ describe("KafkaMessagesPanel", () => {
     expect(overview?.textContent).toContain("mqMonitoring.tableLogEndOffset");
     expect(overview?.textContent).toContain("10");
     expect(panel.querySelector('[data-testid="message-browser"]')).not.toBeNull();
+    expect(panel.querySelector(".send-message-panel")).not.toBeNull();
+    expect(panel.querySelector<HTMLInputElement>(".send-message-panel .topic-input")?.value).toBe("events");
+    expect(backend.mqListTopics).toHaveBeenCalledTimes(1);
 
     const loadButton = [...panel.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.includes("mqMessages.loadMessages"));
     if (!loadButton) throw new Error("Load messages button not found");
@@ -119,10 +129,14 @@ describe("KafkaMessagesPanel", () => {
   });
 
   it("keeps the user's selected topic across list refreshes and refresh failures", async () => {
-    const panel = await mountPanel();
+    const onTopicSelected = vi.fn();
+    const panel = await mountPanel(onTopicSelected);
     await expect.poll(() => backend.mqListTopics.mock.calls.length).toBe(1);
     await selectTopic(panel, "payments");
     await expect.poll(() => backend.mqGetTopicStats.mock.calls.some((call) => call[1]?.topic === "payments")).toBe(true);
+    await expect.poll(() => onTopicSelected.mock.calls.some((call) => call[0]?.shortName === "payments")).toBe(true);
+    expect(panel.querySelector<HTMLInputElement>(".send-message-panel .topic-input")?.value).toBe("payments");
+    expect(backend.mqListTopics).toHaveBeenCalledTimes(1);
 
     const refreshButton = panel.querySelector<HTMLButtonElement>(".panel-toolbar .btn-secondary");
     if (!refreshButton) throw new Error("Topic refresh button not found");

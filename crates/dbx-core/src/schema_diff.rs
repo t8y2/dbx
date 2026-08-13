@@ -3115,6 +3115,7 @@ fn column_def(col: &ColumnInfo, db_type: DatabaseType) -> String {
         definition.push_str(" NOT NULL");
     }
     if let Some(default) = &col.column_default {
+        let default = profile.format_default(&col.data_type, default);
         definition.push_str(&format!(" DEFAULT {default}"));
     }
     if profile.inline_column_comment {
@@ -3356,6 +3357,7 @@ fn generate_create_table_sql(
                 }
                 if !skip_default {
                     if let Some(default) = &col.column_default {
+                        let default = profile.format_default(&mapped_type, default);
                         def.push_str(&format!(" DEFAULT {default}"));
                     }
                 }
@@ -3383,6 +3385,7 @@ fn generate_create_table_sql(
                 }
                 if !skip_default {
                     if let Some(default) = &col.column_default {
+                        let default = profile.format_default(&mapped_type, default);
                         def.push_str(&format!(" DEFAULT {default}"));
                     }
                 }
@@ -3889,6 +3892,7 @@ fn generate_schema_sync_sql_inner(
                                 }
                                 if column.changes.iter().any(|change| change.starts_with("default:")) {
                                     parts.push(if let Some(default) = &source.column_default {
+                                        let default = profile.format_default(&mapped.data_type, default);
                                         format!("  ALTER COLUMN {name} SET DEFAULT {default}")
                                     } else {
                                         format!("  ALTER COLUMN {name} DROP DEFAULT")
@@ -6769,6 +6773,130 @@ mod tests {
         let diffs = diff_columns_with_options(&source, &target, false, false, false, 0.5);
         let sql = gen_sql(wrap_table_diff("t", diffs), DatabaseType::Postgres, None);
         assert!(sql.contains("DROP DEFAULT"), "default drop: {sql}");
+    }
+
+    // -- 34b. Regression: https://github.com/t8y2/dbx/issues/6139 (dup of #5482) --
+    // MySQL's INFORMATION_SCHEMA.COLUMNS.COLUMN_DEFAULT / SHOW COLUMNS returns
+    // string/enum/set default literals *without* surrounding quotes, unlike Postgres
+    // (which already returns e.g. `'new'::text`). schema_diff.rs must add quoting
+    // itself instead of splicing the raw value into the generated DDL.
+
+    fn added_column_diff(col: ColumnInfo) -> ColumnDiff {
+        ColumnDiff {
+            diff_type: "added".to_string(),
+            name: col.name.clone(),
+            source: Some(col),
+            target: None,
+            changes: Vec::new(),
+            add_position: None,
+        }
+    }
+
+    #[test]
+    fn mysql_create_table_quotes_unquoted_varchar_default() {
+        let columns = vec![added_column_diff(ColumnInfo {
+            column_default: Some("active".into()),
+            ..column("status", "varchar(20)", None)
+        })];
+        let (sql, missing) =
+            generate_create_table_sql("t", &columns, &[], &[], None, DatabaseType::Mysql, None, None, &[], &[]);
+        assert!(missing.is_empty(), "{missing:?}");
+        assert!(sql.contains("DEFAULT 'active'"), "varchar default must be quoted: {sql}");
+        assert!(!sql.contains("DEFAULT active"), "must not emit bare unquoted default: {sql}");
+    }
+
+    #[test]
+    fn mysql_create_table_quotes_unquoted_enum_default() {
+        let columns = vec![added_column_diff(ColumnInfo {
+            column_default: Some("pending".into()),
+            ..column("state", "enum('pending','active')", None)
+        })];
+        let (sql, missing) =
+            generate_create_table_sql("t", &columns, &[], &[], None, DatabaseType::Mysql, None, None, &[], &[]);
+        assert!(missing.is_empty(), "{missing:?}");
+        assert!(sql.contains("DEFAULT 'pending'"), "enum default must be quoted: {sql}");
+    }
+
+    #[test]
+    fn mysql_create_table_escapes_embedded_quote_in_default() {
+        let columns = vec![added_column_diff(ColumnInfo {
+            column_default: Some("it's".into()),
+            ..column("note", "varchar(50)", None)
+        })];
+        let (sql, missing) =
+            generate_create_table_sql("t", &columns, &[], &[], None, DatabaseType::Mysql, None, None, &[], &[]);
+        assert!(missing.is_empty(), "{missing:?}");
+        assert!(sql.contains("DEFAULT 'it''s'"), "embedded quote must be escaped: {sql}");
+    }
+
+    #[test]
+    fn mysql_create_table_leaves_function_call_default_unquoted() {
+        let columns = vec![added_column_diff(ColumnInfo {
+            column_default: Some("uuid()".into()),
+            ..column("id", "varchar(36)", None)
+        })];
+        let (sql, missing) =
+            generate_create_table_sql("t", &columns, &[], &[], None, DatabaseType::Mysql, None, None, &[], &[]);
+        assert!(missing.is_empty(), "{missing:?}");
+        assert!(sql.contains("DEFAULT uuid()"), "function-call default must stay unquoted: {sql}");
+    }
+
+    #[test]
+    fn mysql_create_table_leaves_current_timestamp_default_unquoted() {
+        let columns = vec![added_column_diff(ColumnInfo {
+            column_default: Some("CURRENT_TIMESTAMP".into()),
+            ..column("created_at", "datetime", None)
+        })];
+        let (sql, missing) =
+            generate_create_table_sql("t", &columns, &[], &[], None, DatabaseType::Mysql, None, None, &[], &[]);
+        assert!(missing.is_empty(), "{missing:?}");
+        assert!(sql.contains("DEFAULT CURRENT_TIMESTAMP"), "keyword default must stay unquoted: {sql}");
+    }
+
+    #[test]
+    fn mysql_create_table_quotes_unquoted_date_literal_default() {
+        let columns = vec![added_column_diff(ColumnInfo {
+            column_default: Some("2024-01-01".into()),
+            ..column("start_date", "date", None)
+        })];
+        let (sql, missing) =
+            generate_create_table_sql("t", &columns, &[], &[], None, DatabaseType::Mysql, None, None, &[], &[]);
+        assert!(missing.is_empty(), "{missing:?}");
+        assert!(sql.contains("DEFAULT '2024-01-01'"), "bare date literal default must be quoted: {sql}");
+    }
+
+    #[test]
+    fn mysql_create_table_does_not_quote_numeric_default() {
+        let columns =
+            vec![added_column_diff(ColumnInfo { column_default: Some("0".into()), ..column("retries", "int", None) })];
+        let (sql, missing) =
+            generate_create_table_sql("t", &columns, &[], &[], None, DatabaseType::Mysql, None, None, &[], &[]);
+        assert!(missing.is_empty(), "{missing:?}");
+        assert!(sql.contains("DEFAULT 0"), "numeric default must be untouched: {sql}");
+    }
+
+    #[test]
+    fn mysql_modify_column_quotes_unquoted_varchar_default() {
+        let source =
+            vec![ColumnInfo { column_default: Some("active".into()), ..column("status", "varchar(20)", None) }];
+        let target = vec![ColumnInfo { column_default: None, ..column("status", "varchar(20)", None) }];
+        let diffs = diff_columns_with_options(&source, &target, false, false, false, 0.5);
+        let sql = gen_sql(wrap_table_diff("t", diffs), DatabaseType::Mysql, None);
+        assert!(sql.contains("DEFAULT 'active'"), "MODIFY COLUMN default must be quoted: {sql}");
+    }
+
+    #[test]
+    fn postgres_default_already_quoted_by_introspection_is_untouched() {
+        // Postgres pg_get_expr() already returns a fully-quoted/cast literal; format_default
+        // must be a no-op outside the MySQL family so this must not become double-quoted.
+        let columns = vec![added_column_diff(ColumnInfo {
+            column_default: Some("'active'::text".into()),
+            ..column("status", "text", None)
+        })];
+        let (sql, missing) =
+            generate_create_table_sql("t", &columns, &[], &[], None, DatabaseType::Postgres, None, None, &[], &[]);
+        assert!(missing.is_empty(), "{missing:?}");
+        assert!(sql.contains("DEFAULT 'active'::text"), "postgres default must pass through: {sql}");
     }
 
     // -- 35. Column order changes --

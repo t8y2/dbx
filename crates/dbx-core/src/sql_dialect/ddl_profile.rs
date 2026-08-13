@@ -143,6 +143,7 @@ pub struct DdlDialectProfile {
     pub owner_alter_template: Option<&'static str>,
     /// Optional session lock-timeout preamble for generated scripts.
     pub lock_timeout_sql: Option<&'static str>,
+    pub quote_unquoted_string_defaults: bool,
     /// Data-driven base-type rewrites for this target (empty → rely on matrix / normalize only).
     pub type_map: &'static [TypeMapEntry],
 }
@@ -174,6 +175,21 @@ impl DdlDialectProfile {
                 }
             }
         }
+    }
+
+    /// Format a raw `column_default` value for embedding in generated DDL.
+    ///
+    /// Some engines (MySQL family) return string/enum/temporal literal defaults from
+    /// introspection *without* the surrounding quotes (e.g. `active` instead of `'active'`),
+    /// unlike Postgres/SQL Server/Oracle/SQLite which already include them. When
+    /// `quote_unquoted_string_defaults` is set, add quoting (with `'` escaping) for those
+    /// bare literals while leaving expressions/keywords like `CURRENT_TIMESTAMP` or
+    /// `uuid()` untouched.
+    pub fn format_default(&self, data_type: &str, default_value: &str) -> String {
+        if self.quote_unquoted_string_defaults && mysql_default_needs_quoting(data_type, default_value) {
+            return format!("'{}'", default_value.replace('\'', "''"));
+        }
+        default_value.to_string()
     }
 
     /// Replace `{key}` placeholders. Unknown keys are left unchanged.
@@ -286,6 +302,49 @@ const SQLITE_TYPE_MAP: &[TypeMapEntry] = &[
 // Profile families (shared shapes; registration is the only DatabaseType match)
 // ---------------------------------------------------------------------------
 
+/// True when `default_value` is a bare MySQL literal that `INFORMATION_SCHEMA.COLUMNS` /
+/// `SHOW COLUMNS` returned without quotes and that needs quoting for the given column's
+/// base type before being embedded in generated DDL. Function-call expressions
+/// (`uuid()`, `CURRENT_TIMESTAMP()`) and bare keyword expressions (`CURRENT_TIMESTAMP`)
+/// are left alone since they are not string/date literals.
+fn mysql_default_needs_quoting(data_type: &str, default_value: &str) -> bool {
+    const STRING_TYPES: &[&str] = &[
+        "char",
+        "varchar",
+        "tinytext",
+        "text",
+        "mediumtext",
+        "longtext",
+        "binary",
+        "varbinary",
+        "tinyblob",
+        "blob",
+        "mediumblob",
+        "longblob",
+        "enum",
+        "set",
+        "json",
+        "nvarchar",
+        "nchar",
+    ];
+    const TEMPORAL_TYPES: &[&str] = &["date", "datetime", "timestamp", "time", "year"];
+
+    let trimmed = default_value.trim();
+    if trimmed.is_empty() || trimmed.starts_with('\'') || trimmed.contains('(') {
+        return false;
+    }
+    let base_type = data_type.split('(').next().unwrap_or(data_type).trim().to_ascii_lowercase();
+    if STRING_TYPES.contains(&base_type.as_str()) {
+        return true;
+    }
+    if TEMPORAL_TYPES.contains(&base_type.as_str()) {
+        // Bare keyword expressions (CURRENT_TIMESTAMP, CURRENT_DATE, …) stay unquoted;
+        // anything else (digits/punctuation like `2024-01-01 00:00:00`) is a literal.
+        return !trimmed.chars().all(|c| c.is_ascii_alphabetic() || c == '_');
+    }
+    false
+}
+
 fn mysql_family(db: DatabaseType) -> DdlDialectProfile {
     DdlDialectProfile {
         database_type: db,
@@ -325,6 +384,7 @@ fn mysql_family(db: DatabaseType) -> DdlDialectProfile {
         rule_drop_template: None,
         owner_alter_template: None,
         lock_timeout_sql: Some("SET SESSION lock_wait_timeout = 3;"),
+        quote_unquoted_string_defaults: true,
         type_map: &[],
     }
 }
@@ -368,6 +428,7 @@ fn postgres_family(db: DatabaseType) -> DdlDialectProfile {
         rule_drop_template: Some(RULE_DROP),
         owner_alter_template: Some(OWNER_ALTER),
         lock_timeout_sql: Some("SET lock_timeout = '3s';"),
+        quote_unquoted_string_defaults: false,
         type_map: &[],
     }
 }
@@ -412,6 +473,7 @@ fn oracle_family(db: DatabaseType) -> DdlDialectProfile {
         rule_drop_template: None,
         owner_alter_template: None,
         lock_timeout_sql: Some("ALTER SESSION SET DDL_LOCK_TIMEOUT = 3;"),
+        quote_unquoted_string_defaults: false,
         type_map: &[],
     }
 }
@@ -455,6 +517,7 @@ fn sqlserver_family(db: DatabaseType) -> DdlDialectProfile {
         rule_drop_template: None,
         owner_alter_template: None,
         lock_timeout_sql: Some("SET LOCK_TIMEOUT 3000;"),
+        quote_unquoted_string_defaults: false,
         type_map: &[],
     }
 }
@@ -498,6 +561,7 @@ fn sqlite_family(db: DatabaseType) -> DdlDialectProfile {
         rule_drop_template: None,
         owner_alter_template: None,
         lock_timeout_sql: None,
+        quote_unquoted_string_defaults: false,
         type_map: SQLITE_TYPE_MAP,
     }
 }
@@ -541,6 +605,7 @@ fn access_profile() -> DdlDialectProfile {
         rule_drop_template: None,
         owner_alter_template: None,
         lock_timeout_sql: None,
+        quote_unquoted_string_defaults: false,
         type_map: ACCESS_TYPE_MAP,
     }
 }
@@ -584,6 +649,7 @@ fn h2_profile() -> DdlDialectProfile {
         rule_drop_template: None,
         owner_alter_template: None,
         lock_timeout_sql: None,
+        quote_unquoted_string_defaults: false,
         type_map: &[],
     }
 }
@@ -627,6 +693,7 @@ fn conservative_ansi(db: DatabaseType) -> DdlDialectProfile {
         rule_drop_template: None,
         owner_alter_template: None,
         lock_timeout_sql: None,
+        quote_unquoted_string_defaults: false,
         type_map: &[],
     }
 }

@@ -36,6 +36,18 @@ lib/dbx-jdbc-plugin.jar
 
 DBX does not bundle Java or JDBC drivers. Install Java locally and add database-specific driver JAR paths in the DBX JDBC connection form.
 
+## MySQL-compatible cursor fetching
+
+DBX uses standard JDBC result-set paging, but does not automatically set Connector/J's `useCursorFetch` property.
+That property enables a MySQL-specific server cursor protocol; it is not part of JDBC and may be unsupported by
+MySQL-compatible servers. If a server and driver are known to support it, opt in explicitly in the connection URL:
+
+```text
+jdbc:mysql://host:3306/database?useCursorFetch=true
+```
+
+Leave the property unset for generic JDBC or compatibility drivers that need to shield non-standard server behavior.
+
 The first-class JDBCX profile uses `io.github.jdbcx.WrappedDriver` and
 `jdbcx:[extension:][vendor://host:port/database]` URLs. Install a JDBCX Maven bundle such as
 `io.github.jdbcx:jdbcx-driver:0.8.0` in the DBX JDBC driver store, together with the database vendor's JDBC driver.

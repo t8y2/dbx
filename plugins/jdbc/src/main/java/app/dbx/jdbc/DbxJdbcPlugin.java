@@ -535,7 +535,6 @@ public final class DbxJdbcPlugin {
             properties.setProperty("password", password);
         }
         applyConnectTimeout(connection, properties);
-        applyPagedFetchProperties(connection, url, properties);
         applyJdbcxExtensionSecurity(connection, url, properties);
         if (isOracleUrl(url)) {
             applyOracleProperties(connection, properties);
@@ -624,25 +623,6 @@ public final class DbxJdbcPlugin {
         return normalized.equals("com.mysql.cj.jdbc.driver") ||
             normalized.equals("com.mysql.jdbc.driver") ||
             normalized.equals("org.mariadb.jdbc.driver");
-    }
-
-    private static void applyPagedFetchProperties(JsonNode connection, String url, Properties properties) {
-        if (!isMysqlConnection(connection, url) || jdbcUrlHasParameter(url, "useCursorFetch")) {
-            return;
-        }
-        properties.putIfAbsent("useCursorFetch", "true");
-    }
-
-    private static boolean isMysqlConnection(JsonNode connection, String url) {
-        if (urlMatchesPrefix(url, "jdbc:mysql:")) {
-            return true;
-        }
-        String driverClass = optionalText(connection, "jdbc_driver_class");
-        if (driverClass == null) {
-            return false;
-        }
-        String normalized = driverClass.toLowerCase(Locale.ROOT);
-        return normalized.equals("com.mysql.cj.jdbc.driver") || normalized.equals("com.mysql.jdbc.driver");
     }
 
     private static boolean isPostgresConnection(JsonNode connection) {

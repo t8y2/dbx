@@ -766,51 +766,24 @@ final class DbxJdbcPluginTest {
     }
 
     @Test
-    void mysqlPagedQueriesEnableConnectorCursorFetchingByDefault() throws Exception {
-        Method method = DbxJdbcPlugin.class.getDeclaredMethod(
-            "applyPagedFetchProperties",
-            JsonNode.class,
-            String.class,
-            Properties.class
-        );
-        method.setAccessible(true);
-        Properties properties = new Properties();
-        JsonNode connection = MAPPER.readTree("""
-            {
-              "connection_string": "jdbc:mysql://127.0.0.1:3306/app",
-              "jdbc_driver_class": "com.mysql.cj.jdbc.Driver"
-            }
-            """);
+    void mysqlConnectionsDoNotForceCursorFetch() throws Exception {
+        RecordingConnectDriver driver = new RecordingConnectDriver("jdbc:mysql:dbx-capture:");
+        DriverManager.registerDriver(driver);
+        try {
+            JsonNode response = request("testConnection", """
+                {
+                  "connection": {
+                    "connection_string": "jdbc:mysql:dbx-capture:demo",
+                    "connect_timeout_secs": 30
+                  }
+                }
+                """);
 
-        method.invoke(null, connection, "jdbc:mysql://127.0.0.1:3306/app", properties);
-
-        assertEquals("true", properties.getProperty("useCursorFetch"));
-    }
-
-    @Test
-    void mysqlPagedQueriesPreserveExplicitCursorFetchSetting() throws Exception {
-        Method method = DbxJdbcPlugin.class.getDeclaredMethod(
-            "applyPagedFetchProperties",
-            JsonNode.class,
-            String.class,
-            Properties.class
-        );
-        method.setAccessible(true);
-        Properties properties = new Properties();
-        JsonNode connection = MAPPER.readTree("""
-            {
-              "connection_string": "jdbc:mysql://127.0.0.1:3306/app?useCursorFetch=false"
-            }
-            """);
-
-        method.invoke(
-            null,
-            connection,
-            "jdbc:mysql://127.0.0.1:3306/app?useCursorFetch=false",
-            properties
-        );
-
-        assertFalse(properties.containsKey("useCursorFetch"));
+            assertFalse(response.has("error"), response.toString());
+            assertFalse(driver.properties.get(0).containsKey("useCursorFetch"));
+        } finally {
+            DriverManager.deregisterDriver(driver);
+        }
     }
 
     @Test

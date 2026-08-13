@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { objectBrowserTableSelectionRange } from "@/lib/table/objectBrowserSelection";
+import { objectBrowserTableSelectionAnchor, objectBrowserTableSelectionRange } from "@/lib/table/objectBrowserSelection";
 import type { ObjectBrowserRow } from "@/lib/table/objectBrowserRows";
 
 function row(type: ObjectBrowserRow["type"], name: string): ObjectBrowserRow {
@@ -35,5 +35,18 @@ describe("objectBrowserTableSelectionRange", () => {
   it("collapses to a single row when anchor and current are the same table", () => {
     const rows = [row("TABLE", "a"), row("TABLE", "b")];
     expect(objectBrowserTableSelectionRange(rows, "TABLE-a", "TABLE-a")).toEqual(["TABLE-a"]);
+  });
+});
+
+describe("objectBrowserTableSelectionAnchor", () => {
+  it("keeps a visible table anchor", () => {
+    const rows = [row("TABLE", "a"), row("TABLE", "b")];
+    expect(objectBrowserTableSelectionAnchor(rows, "TABLE-a", "TABLE-b")).toBe("TABLE-a");
+  });
+
+  it("uses the current table when the anchor is missing or no longer visible", () => {
+    const rows = [row("TABLE", "a"), row("TABLE", "b")];
+    expect(objectBrowserTableSelectionAnchor(rows, null, "TABLE-b")).toBe("TABLE-b");
+    expect(objectBrowserTableSelectionAnchor(rows, "TABLE-filtered-out", "TABLE-b")).toBe("TABLE-b");
   });
 });

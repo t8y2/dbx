@@ -1,5 +1,10 @@
 import type { ObjectBrowserRow } from "@/lib/table/objectBrowserRows";
 
+export function objectBrowserTableSelectionAnchor(rows: readonly ObjectBrowserRow[], anchorId: string | null, currentId: string): string {
+  if (anchorId && rows.some((row) => row.id === anchorId && row.type === "TABLE")) return anchorId;
+  return currentId;
+}
+
 /**
  * Compute the contiguous table-id range for a shift-click in the object
  * browser, mirroring the sidebar tree's range-select behavior

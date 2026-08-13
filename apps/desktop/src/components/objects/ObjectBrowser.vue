@@ -120,7 +120,7 @@ import {
   type ObjectBrowserSortKey,
 } from "@/lib/table/objectBrowserRows";
 import { isSourceOnlyObjectBrowserRow, resolveRowClickAction, shouldDeferSingleClick, type ObjectBrowserRowAction } from "@/lib/table/objectBrowserRowAction";
-import { objectBrowserTableSelectionRange } from "@/lib/table/objectBrowserSelection";
+import { objectBrowserTableSelectionAnchor, objectBrowserTableSelectionRange } from "@/lib/table/objectBrowserSelection";
 import { customTypeCapabilities, supportsTypeObjectSource } from "@/lib/database/databaseObjectCapabilities";
 import { filterObjectBrowserTableColumns } from "@/lib/table/objectBrowserTableInfo";
 import { createSidePanelRequestGuard } from "@/lib/table/sidePanelRequestGuard";
@@ -860,7 +860,8 @@ function toggleTableSelectionWithAnchor(row: ObjectBrowserRow) {
 }
 
 function selectTableRangeFromAnchor(row: ObjectBrowserRow) {
-  const anchorId = tableSelectionAnchorId.value ?? row.id;
+  const anchorId = objectBrowserTableSelectionAnchor(filteredRows.value, tableSelectionAnchorId.value, row.id);
+  tableSelectionAnchorId.value = anchorId;
   setSelectedTableIds(new Set(objectBrowserTableSelectionRange(filteredRows.value, anchorId, row.id)));
 }
 

@@ -1521,6 +1521,7 @@ function mysqlRoutineBlockIsComplete(sql: string, parameterOptions?: SqlParamete
 
   const tokens = mysqlRoutineTokens(sql, parameterOptions);
   let beginDepth = 0;
+  let caseDepth = 0;
   let sawBegin = false;
 
   for (let index = 0; index < tokens.length; index += 1) {
@@ -1532,13 +1533,27 @@ function mysqlRoutineBlockIsComplete(sql: string, parameterOptions?: SqlParamete
       beginDepth += 1;
       continue;
     }
+    if (token.value === "CASE") {
+      if (previousWordToken(tokens, index) === "END") continue;
+      caseDepth += 1;
+      continue;
+    }
     if (token.value === "END" && sawBegin) {
-      if (MYSQL_CONTROL_BLOCK_SUFFIXES.has(nextWordToken(tokens, index) ?? "")) continue;
+      const suffix = nextWordToken(tokens, index) ?? "";
+      if (suffix === "CASE") {
+        caseDepth = Math.max(0, caseDepth - 1);
+        continue;
+      }
+      if (MYSQL_CONTROL_BLOCK_SUFFIXES.has(suffix)) continue;
+      if (caseDepth > 0) {
+        caseDepth -= 1;
+        continue;
+      }
       beginDepth = Math.max(0, beginDepth - 1);
     }
   }
 
-  return sawBegin && beginDepth === 0 && tokens[tokens.length - 1]?.kind === "semicolon";
+  return sawBegin && beginDepth === 0 && caseDepth === 0 && tokens[tokens.length - 1]?.kind === "semicolon";
 }
 
 function mysqlRoutineWords(sql: string, parameterOptions?: SqlParameterOptions): string[] {

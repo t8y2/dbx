@@ -1171,6 +1171,7 @@ fn mysql_routine_block_is_complete(sql: &str) -> bool {
 
     let tokens = mysql_routine_tokens(sql);
     let mut begin_depth = 0usize;
+    let mut case_depth = 0usize;
     let mut saw_begin = false;
 
     for (index, token) in tokens.iter().enumerate() {
@@ -1186,15 +1187,32 @@ fn mysql_routine_block_is_complete(sql: &str) -> bool {
             begin_depth += 1;
             continue;
         }
+        if token.eq_ignore_ascii_case("CASE") {
+            if previous_mysql_routine_word(&tokens, index).is_some_and(|previous| previous.eq_ignore_ascii_case("END"))
+            {
+                continue;
+            }
+            case_depth += 1;
+            continue;
+        }
         if token.eq_ignore_ascii_case("END") && saw_begin {
-            if next_mysql_routine_word(&tokens, index).is_some_and(is_mysql_control_block_suffix) {
+            let suffix = next_mysql_routine_word(&tokens, index);
+            if suffix.is_some_and(|next| next.eq_ignore_ascii_case("CASE")) {
+                case_depth = case_depth.saturating_sub(1);
+                continue;
+            }
+            if suffix.is_some_and(is_mysql_control_block_suffix) {
+                continue;
+            }
+            if case_depth > 0 {
+                case_depth -= 1;
                 continue;
             }
             begin_depth = begin_depth.saturating_sub(1);
         }
     }
 
-    saw_begin && begin_depth == 0 && tokens.last().is_some_and(|token| token == ";")
+    saw_begin && begin_depth == 0 && case_depth == 0 && tokens.last().is_some_and(|token| token == ";")
 }
 
 fn is_mysql_control_block_suffix(token: &str) -> bool {
@@ -3184,6 +3202,40 @@ SELECT 2;";
             split_sql_statements_for_database(sql, DatabaseType::Mysql),
             vec![
                 "CREATE PROCEDURE p_loop()\nBEGIN\n  WHILE 1 = 0 DO\n    SELECT 'while; still body';\n  END WHILE;\n  REPEAT\n    SELECT 'repeat; still body';\n  UNTIL 1 = 1 END REPEAT;\nEND",
+                "SELECT 2",
+            ]
+        );
+    }
+
+    #[test]
+    fn mysql_routine_without_delimiter_handles_case_endings() {
+        let expression = "\
+CREATE PROCEDURE p_case()
+BEGIN
+  INSERT INTO audit_log (status_text)
+  SELECT CASE WHEN active = 1 THEN 'active' ELSE 'inactive' END;
+  DELETE FROM stale_rows WHERE expires_at < NOW();
+END;
+SELECT 2;";
+        assert_eq!(
+            split_sql_statements_for_database(expression, DatabaseType::Mysql),
+            vec![
+                "CREATE PROCEDURE p_case()\nBEGIN\n  INSERT INTO audit_log (status_text)\n  SELECT CASE WHEN active = 1 THEN 'active' ELSE 'inactive' END;\n  DELETE FROM stale_rows WHERE expires_at < NOW();\nEND",
+                "SELECT 2",
+            ]
+        );
+
+        let statement = "\
+CREATE PROCEDURE p_case_statement()
+BEGIN
+  CASE WHEN active = 1 THEN SELECT 1; ELSE SELECT 0; END CASE;
+  DELETE FROM stale_rows WHERE expires_at < NOW();
+END;
+SELECT 2;";
+        assert_eq!(
+            split_sql_statements_for_database(statement, DatabaseType::Mysql),
+            vec![
+                "CREATE PROCEDURE p_case_statement()\nBEGIN\n  CASE WHEN active = 1 THEN SELECT 1; ELSE SELECT 0; END CASE;\n  DELETE FROM stale_rows WHERE expires_at < NOW();\nEND",
                 "SELECT 2",
             ]
         );

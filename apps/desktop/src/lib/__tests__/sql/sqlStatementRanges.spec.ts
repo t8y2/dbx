@@ -230,6 +230,24 @@ BEGIN
 END;
 SELECT 2;`;
 
+const mysqlRoutineWithCaseExpressionFixture = `CREATE PROCEDURE p_case()
+BEGIN
+  INSERT INTO audit_log (status_text)
+  SELECT CASE
+    WHEN active = 1 THEN 'active'
+    ELSE 'inactive'
+  END;
+
+  CASE
+    WHEN active = 1 THEN SET @status_code = 1;
+    ELSE SET @status_code = 0;
+  END CASE;
+
+  DELETE FROM stale_rows
+  WHERE expires_at < NOW();
+END;
+SELECT 2;`;
+
 const mysqlDelimitedRoutineFixture = `DELIMITER //
 CREATE PROCEDURE sp_insert_random_users(IN p_count INT)
 BEGIN
@@ -1103,6 +1121,10 @@ describe("executableStatementRanges", () => {
 
   it("does not split executable MySQL routine ranges at WHILE and REPEAT endings", () => {
     expect(rangeSqlTexts(executableStatementRanges(mysqlRoutineWithLoopsFixture, "mysql"))).toEqual([mysqlRoutineWithLoopsFixture.slice(0, mysqlRoutineWithLoopsFixture.indexOf("\nSELECT 2;")).replace(/;$/, "").trim(), "SELECT 2"]);
+  });
+
+  it("does not treat a CASE expression ending as the end of a MySQL routine", () => {
+    expect(rangeSqlTexts(executableStatementRanges(mysqlRoutineWithCaseExpressionFixture, "mysql"))).toEqual([mysqlRoutineWithCaseExpressionFixture.slice(0, mysqlRoutineWithCaseExpressionFixture.indexOf("\nSELECT 2;")).replace(/;$/, "").trim(), "SELECT 2"]);
   });
 
   it("does not expose run targets for statements inside a delimited MySQL routine", () => {

@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { createPinia, setActivePinia } from "pinia";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -10,6 +11,8 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock("@/lib/sqlserver/sqlServerActivityTraceRuntime", () => mocks);
+
+const connectionStoreSource = readFileSync(new URL("../connectionStore.ts", import.meta.url), "utf8");
 
 describe("queryStore SQL Server trace lifecycle", () => {
   beforeEach(() => {
@@ -32,5 +35,9 @@ describe("queryStore SQL Server trace lifecycle", () => {
 
     store.closeTab(tabId);
     expect(mocks.disposeSqlServerActivityTrace).toHaveBeenCalledWith(tabId);
+  });
+
+  it("does not scan trace sessions on ordinary connection success", () => {
+    expect(connectionStoreSource).not.toContain("cleanupStaleSqlServerTraceSessions");
   });
 });

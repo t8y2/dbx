@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { appendLargeValueCells, canUseTableDataLargeValuePreview, largeValueCellMap, remapLargeValueCells, TABLE_DATA_CELL_PREVIEW_MIN_SIZE, TABLE_DATA_CELL_PREVIEW_SIZE, tableDataLargeValuePreviewOptions } from "@/lib/dataGrid/dataGridLargeValues";
+import { appendLargeValueCells, canUseTableDataLargeValuePreview, largeValueCellMap, remapLargeValueCells, TABLE_DATA_CELL_PREVIEW_SIZE, TABLE_DATA_PREVIEW_CONTENT_MAX_BYTES, tableDataLargeValuePreviewOptions } from "@/lib/dataGrid/dataGridLargeValues";
 import { buildDataGridCellDetail } from "@/lib/dataGrid/dataGridDetail";
 import type { ColumnInfo } from "@/types/database";
 
@@ -38,13 +38,24 @@ describe("data grid large-value metadata", () => {
     expect(tableDataLargeValuePreviewOptions("postgres", columns, ["id"], 100)).toEqual({});
   });
 
-  it("shrinks each cell preview to fit many columns and rows without changing page size", () => {
+  it("shrinks each cell preview by serialized byte budget without changing page size", () => {
     const columns = [column("id", "bigint", true), ...Array.from({ length: 256 }, (_, index) => column(`payload_${index}`, "text"))];
+    const options = tableDataLargeValuePreviewOptions("postgres", columns, ["ID"], 1_000);
 
-    expect(tableDataLargeValuePreviewOptions("postgres", columns, ["ID"], 1_000)).toEqual({
+    expect(options).toEqual({
       columnTypes: columns.map((item) => item.data_type),
-      largeValuePreviewSize: TABLE_DATA_CELL_PREVIEW_MIN_SIZE,
+      largeValuePreviewSize: 16,
     });
+
+    if (!("largeValuePreviewSize" in options)) throw new Error("expected preview options");
+    const previewSize = options.largeValuePreviewSize;
+    const previewCellCount = 1_000 * 256;
+    const serializedSamples = ["中".repeat(previewSize), "😀".repeat(previewSize), "\u0000".repeat(previewSize)];
+    for (const sample of serializedSamples) {
+      const serializedContent = JSON.stringify(sample).slice(1, -1);
+      const serializedBytes = new TextEncoder().encode(serializedContent).byteLength * previewCellCount;
+      expect(serializedBytes).toBeLessThanOrEqual(TABLE_DATA_PREVIEW_CONTENT_MAX_BYTES);
+    }
   });
 
   it("offsets appended segment rows and discards metadata beyond the append cap", () => {

@@ -1,8 +1,10 @@
 import type { ColumnInfo, DatabaseType, QueryResult } from "@/types/database";
 
 export const TABLE_DATA_RESULT_MAX_BYTES = 32 * 1024 * 1024;
-export const TABLE_DATA_CELL_PREVIEW_MIN_SIZE = 256;
+export const TABLE_DATA_CELL_PREVIEW_MIN_SIZE = 1;
 export const TABLE_DATA_CELL_PREVIEW_SIZE = 8 * 1024;
+export const TABLE_DATA_PREVIEW_CONTENT_MAX_BYTES = 24 * 1024 * 1024;
+export const TABLE_DATA_TEXT_SERIALIZED_BYTES_PER_CHARACTER = 6;
 const TABLE_DATA_LARGE_VALUE_MARKER_PREFIX = "__DBX_LARGE_VALUE_BYTES_";
 
 export function canUseTableDataLargeValuePreview(databaseType: DatabaseType | undefined, columns: readonly ColumnInfo[], primaryKeys: readonly string[]): boolean {
@@ -14,7 +16,7 @@ export function tableDataLargeValuePreviewOptions(databaseType: DatabaseType | u
   const keyColumns = new Set(primaryKeys.map((column) => column.toLocaleLowerCase()));
   const previewColumnCount = columns.filter((column) => !keyColumns.has(column.name.toLocaleLowerCase())).length;
   if (previewColumnCount === 0) return {};
-  const budgetedSize = Math.floor(TABLE_DATA_RESULT_MAX_BYTES / Math.max(1, pageSize ?? 1) / previewColumnCount);
+  const budgetedSize = Math.floor(TABLE_DATA_PREVIEW_CONTENT_MAX_BYTES / Math.max(1, pageSize ?? 1) / previewColumnCount / TABLE_DATA_TEXT_SERIALIZED_BYTES_PER_CHARACTER);
   return {
     columnTypes: columns.map((column) => column.data_type),
     largeValuePreviewSize: Math.max(TABLE_DATA_CELL_PREVIEW_MIN_SIZE, Math.min(TABLE_DATA_CELL_PREVIEW_SIZE, budgetedSize)),

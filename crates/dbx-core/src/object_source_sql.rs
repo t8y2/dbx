@@ -36,6 +36,11 @@ pub struct BuildViewDdlInput {
     pub schema: Option<String>,
     pub name: String,
     pub source: String,
+    /// Driver-reported identifier quote (e.g. `` ` `` for Kingbase MySQL
+    /// compatibility mode). When set, overrides the database_type-based quote
+    /// selection so hyphenated schemas render as valid identifiers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identifier_quote: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -224,7 +229,13 @@ pub fn build_view_ddl_sql(input: BuildViewDdlInput) -> String {
         return ensure_semicolon(source);
     }
 
-    let qualified_name = if matches!(input.database_type, Some(DatabaseType::Mysql | DatabaseType::Goldendb)) {
+    // Backtick-quoting is used for MySQL-family engines and for connections
+    // whose driver reports a backtick identifier quote (Kingbase MySQL
+    // compatibility mode); everything else keeps the PostgreSQL double quote.
+    let use_backtick = input.identifier_quote.as_deref() == Some("`")
+        || (input.identifier_quote.is_none()
+            && matches!(input.database_type, Some(DatabaseType::Mysql | DatabaseType::Goldendb)));
+    let qualified_name = if use_backtick {
         mysql_qualified_name(input.schema.as_deref(), &input.name)
     } else {
         postgres_qualified_name(input.schema.as_deref(), &input.name)
@@ -1582,6 +1593,7 @@ mod tests {
             schema: Some("public".to_string()),
             name: "active users".to_string(),
             source: " SELECT id, name FROM users WHERE active ".to_string(),
+            identifier_quote: None,
         });
 
         assert_eq!(
@@ -1597,6 +1609,7 @@ mod tests {
             schema: Some("reporting".to_string()),
             name: "active_users".to_string(),
             source: "CREATE ALGORITHM=UNDEFINED VIEW `active_users` AS SELECT `id` FROM `users`".to_string(),
+            identifier_quote: None,
         });
 
         assert_eq!(sql, "CREATE ALGORITHM=UNDEFINED VIEW `active_users` AS SELECT `id` FROM `users`;");
@@ -1609,9 +1622,36 @@ mod tests {
             schema: Some("reporting".to_string()),
             name: "active_users".to_string(),
             source: "SELECT id FROM users".to_string(),
+            identifier_quote: None,
         });
 
         assert_eq!(sql, "CREATE VIEW `reporting`.`active_users` AS\nSELECT id FROM users;");
+    }
+
+    #[test]
+    fn view_ddl_uses_backtick_quote_when_identifier_quote_reports_mysql_compat() {
+        let sql = build_view_ddl_sql(BuildViewDdlInput {
+            database_type: Some(DatabaseType::Kingbase),
+            schema: Some("audit-schema".to_string()),
+            name: "active_users".to_string(),
+            source: "SELECT id FROM users".to_string(),
+            identifier_quote: Some("`".to_string()),
+        });
+
+        assert_eq!(sql, "CREATE OR REPLACE VIEW `audit-schema`.`active_users` AS\nSELECT id FROM users;");
+    }
+
+    #[test]
+    fn view_ddl_keeps_double_quote_without_mysql_compat_identifier_quote() {
+        let sql = build_view_ddl_sql(BuildViewDdlInput {
+            database_type: Some(DatabaseType::Kingbase),
+            schema: Some("audit-schema".to_string()),
+            name: "active_users".to_string(),
+            source: "SELECT id FROM users".to_string(),
+            identifier_quote: None,
+        });
+
+        assert_eq!(sql, "CREATE OR REPLACE VIEW \"audit-schema\".\"active_users\" AS\nSELECT id FROM users;");
     }
 
     #[test]

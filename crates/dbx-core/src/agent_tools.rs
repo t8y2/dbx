@@ -1291,6 +1291,7 @@ for line in sys.stdin:
             jdbc_driver_class: None,
             jdbc_driver_paths: Vec::new(),
             one_time: false,
+            save_password: true,
             read_only: false,
             is_production: false,
             production_databases: vec![],
@@ -1386,6 +1387,7 @@ for line in sys.stdin:
             "db.items.updateMany({tenant: 7}, {$set: {active: false}})",
             "db.items.deleteMany({tenant: 7})",
             "db.items.createIndex({tenant: 1})",
+            "db.runCommand({compact: 'items'})",
             r#"db.items.aggregate([{"$out":"items_backup"}])"#,
         ]
         .into_iter()

@@ -29,6 +29,7 @@ import (
 const protocolVersion = 1
 const multiSessionProtocolVersion = 2
 const defaultMaxRows = 1000
+const oracleDefaultPrefetchRows = "100"
 const oracleCharsetZHS32GB18030 = 854
 const legacyAgentSessionID = "__legacy__"
 const maxAgentSessions = 256
@@ -406,6 +407,7 @@ type columnInfo struct {
 	NumericPrecision       *int    `json:"numeric_precision"`
 	NumericScale           *int    `json:"numeric_scale"`
 	CharacterMaximumLength *int    `json:"character_maximum_length"`
+	CharacterLengthUnit    *string `json:"-"`
 }
 
 type indexInfo struct {
@@ -1158,10 +1160,18 @@ func (oracleGB18030Converter) Clone() converters.IStringConverter {
 func buildDSN(params connectParams) string {
 	connectionString := strings.TrimSpace(params.ConnectionString)
 	if strings.HasPrefix(strings.ToLower(connectionString), "oracle://") {
-		return connectionString
+		parsed, err := url.Parse(connectionString)
+		if err != nil {
+			return connectionString
+		}
+		values := parsed.Query()
+		setOracleDefaultPrefetchRows(values)
+		parsed.RawQuery = values.Encode()
+		return parsed.String()
 	}
 	username := params.Username
 	options := parseURLParams(params.URLParams)
+	setOracleDefaultPrefetchRowsMap(options)
 	if params.SysDBA {
 		options["AUTH TYPE"] = "SYSDBA"
 	}
@@ -1188,6 +1198,22 @@ func buildDSN(params connectParams) string {
 		port = 1521
 	}
 	return buildGoOraURL(params.Host, port, service, username, params.Password, options)
+}
+
+func setOracleDefaultPrefetchRows(values url.Values) {
+	if hasURLValueKey(values, "PREFETCH_ROWS") {
+		return
+	}
+	values.Set("PREFETCH_ROWS", oracleDefaultPrefetchRows)
+}
+
+func setOracleDefaultPrefetchRowsMap(options map[string]string) {
+	for key := range options {
+		if strings.EqualFold(strings.TrimSpace(key), "PREFETCH_ROWS") {
+			return
+		}
+	}
+	options["PREFETCH_ROWS"] = oracleDefaultPrefetchRows
 }
 
 func oracleConnectionDatabaseName(database string) string {
@@ -2309,7 +2335,8 @@ SELECT c.COLUMN_NAME,
        cc.COMMENTS,
        c.DATA_PRECISION,
        c.DATA_SCALE,
-       c.CHAR_LENGTH
+       c.CHAR_LENGTH,
+       c.CHAR_USED
 FROM ALL_TAB_COLUMNS c
 LEFT JOIN (
   SELECT acc.OWNER, acc.TABLE_NAME, acc.COLUMN_NAME
@@ -2339,6 +2366,7 @@ ORDER BY c.COLUMN_ID`, []any{schema, table})
 			&item.NumericPrecision,
 			&item.NumericScale,
 			&item.CharacterMaximumLength,
+			&item.CharacterLengthUnit,
 		); err != nil {
 			return nil, err
 		}
@@ -3038,6 +3066,9 @@ func oracleColumnTypeDDL(column columnInfo) string {
 		return dataType
 	}
 	if isOracleCharacterType(dataType) && column.CharacterMaximumLength != nil && *column.CharacterMaximumLength > 0 {
+		if unit := oracleCharacterLengthUnit(dataType, column.CharacterLengthUnit); unit != "" {
+			return fmt.Sprintf("%s(%d %s)", dataType, *column.CharacterMaximumLength, unit)
+		}
 		return fmt.Sprintf("%s(%d)", dataType, *column.CharacterMaximumLength)
 	}
 	if dataType == "NUMBER" {
@@ -3054,6 +3085,25 @@ func oracleColumnTypeDDL(column columnInfo) string {
 		return fmt.Sprintf("%s(%d)", dataType, *column.NumericPrecision)
 	}
 	return dataType
+}
+
+func oracleCharacterLengthUnit(dataType string, charUsed *string) string {
+	switch dataType {
+	case "CHAR", "VARCHAR", "VARCHAR2":
+	default:
+		return ""
+	}
+	if charUsed == nil {
+		return ""
+	}
+	switch strings.ToUpper(strings.TrimSpace(*charUsed)) {
+	case "B":
+		return "BYTE"
+	case "C":
+		return "CHAR"
+	default:
+		return ""
+	}
 }
 
 func isOracleCharacterType(dataType string) bool {

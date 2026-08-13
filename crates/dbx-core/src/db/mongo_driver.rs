@@ -173,6 +173,25 @@ pub async fn server_version(client: &Client, database: &str) -> Result<String, S
     server_version_from_build_info(&result)
 }
 
+pub async fn run_command(client: &Client, database: &str, command_json: &str) -> Result<MongoDocumentResult, String> {
+    let value: serde_json::Value =
+        serde_json::from_str(command_json).map_err(|error| format!("Invalid MongoDB command JSON: {error}"))?;
+    let command = json_object_to_document_extended_json(&value)
+        .map_err(|error| format!("Invalid MongoDB command document: {error}"))?;
+    if command.is_empty() {
+        return Err("MongoDB runCommand requires a non-empty command document".to_string());
+    }
+    let result = client.database(database).run_command(command).await.map_err(|error| error.to_string())?;
+    let (document, extended_document) = document_json_views(result);
+    Ok(MongoDocumentResult {
+        documents: vec![document],
+        raw_documents: None,
+        extended_documents: Some(vec![extended_document]),
+        total: 1,
+        total_is_exact: true,
+    })
+}
+
 fn server_version_from_build_info(result: &Document) -> Result<String, String> {
     result.get_str("version").map(str::to_string).map_err(|e| format!("MongoDB server version not found: {e}"))
 }

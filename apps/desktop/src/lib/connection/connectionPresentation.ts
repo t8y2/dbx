@@ -129,6 +129,7 @@ export function connectionDisplayUrlScheme(connection: Pick<ConnectionConfig, "d
       return "mssql";
     case "elasticsearch":
     case "easysearch":
+    case "meilisearch":
     case "qdrant":
     case "milvus":
     case "weaviate":
@@ -207,6 +208,7 @@ export function connectionUrlPlaceholder(dbType: DatabaseType): string {
 
     case "elasticsearch":
     case "easysearch":
+    case "meilisearch":
     case "qdrant":
     case "milvus":
     case "weaviate":

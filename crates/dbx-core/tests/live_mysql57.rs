@@ -4,7 +4,9 @@ use std::time::{Duration, Instant};
 
 use dbx_core::connection::AppState;
 use dbx_core::models::connection::{ConnectionConfig, DatabaseType};
-use dbx_core::query::{execute_multi_core, execute_sql_statement};
+use dbx_core::query::{
+    execute_multi_core, execute_multi_core_with_options_for_client_typed, execute_sql_statement, QueryExecutionOptions,
+};
 use dbx_core::query_result_export::{export_query_result_core, ExportStatus, QueryResultExportRequest};
 use dbx_core::sql::{split_sql_statements_for_database, SqlFileRequest};
 use dbx_core::sql_file_import::execute_sql_file_path;
@@ -130,6 +132,249 @@ async fn live_mysql_stored_procedure_preserves_all_result_sets() {
         results.iter().map(|result| result.rows[0][0].clone()).collect::<Vec<_>>(),
         vec![serde_json::json!("1"), serde_json::json!("2"), serde_json::json!("3")]
     );
+}
+
+#[tokio::test]
+#[ignore = "requires a writable MySQL endpoint for stored procedure creation"]
+async fn live_mysql_single_call_public_route_preserves_all_result_sets() {
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let connection_id = format!("live-mysql-multi-result-{suffix}");
+    let database = std::env::var("DBX_LIVE_SQL_FILE_MYSQL_DATABASE").expect("DBX_LIVE_SQL_FILE_MYSQL_DATABASE");
+    let config = live_mysql_sql_file_config(&connection_id);
+    let (state, db_path) = app_state_with_config(config).await;
+    let procedure = format!("dbx_issue_5560_{}", &suffix[..8]);
+    let empty_procedure = format!("dbx_issue_5560_empty_{}", &suffix[..8]);
+    let slow_procedure = format!("dbx_issue_5560_slow_{}", &suffix[..8]);
+    let table = format!("dbx_issue_5560_{}", &suffix[..8]);
+    let session_id = format!("dbx-issue-5560-{suffix}");
+    let create_sql = format!(
+        "CREATE PROCEDURE `{procedure}`() BEGIN \
+         SET @dbx_issue_5560_session = 'kept'; \
+         SELECT 11 AS value UNION ALL SELECT 12 AS value; \
+         SELECT 21 AS value UNION ALL SELECT 22 AS value; \
+         SELECT 31 AS value UNION ALL SELECT 32 AS value; \
+         END"
+    );
+
+    execute_sql_statement(&state, &connection_id, &database, &create_sql, None, None)
+        .await
+        .expect("create live multi-result procedure");
+    execute_sql_statement(
+        &state,
+        &connection_id,
+        &database,
+        &format!("CREATE PROCEDURE `{empty_procedure}`() BEGIN SET @dbx_issue_5560_empty = 1; END"),
+        None,
+        None,
+    )
+    .await
+    .expect("create live no-result procedure");
+    execute_sql_statement(
+        &state,
+        &connection_id,
+        &database,
+        &format!("CREATE PROCEDURE `{slow_procedure}`() BEGIN SELECT SLEEP(5) AS slept; END"),
+        None,
+        None,
+    )
+    .await
+    .expect("create live slow procedure");
+    execute_sql_statement(
+        &state,
+        &connection_id,
+        &database,
+        &format!("CREATE TABLE `{table}` (id INT PRIMARY KEY, value INT NOT NULL)"),
+        None,
+        None,
+    )
+    .await
+    .expect("create live DML table");
+    execute_sql_statement(
+        &state,
+        &connection_id,
+        &database,
+        &format!("INSERT INTO `{table}` (id, value) VALUES (1, 1)"),
+        None,
+        None,
+    )
+    .await
+    .expect("seed live DML table");
+
+    let options =
+        QueryExecutionOptions { max_rows: Some(1), client_session_id: Some(session_id.clone()), ..Default::default() };
+    let results = execute_multi_core_with_options_for_client_typed(
+        &state,
+        &connection_id,
+        &database,
+        &format!("CALL `{procedure}`()"),
+        None,
+        None,
+        options.clone(),
+    )
+    .await
+    .expect("execute single CALL through the public multi-result route");
+    let ordinary_select = execute_multi_core_with_options_for_client_typed(
+        &state,
+        &connection_id,
+        &database,
+        "SELECT 42 AS value",
+        None,
+        None,
+        options.clone(),
+    )
+    .await
+    .expect("execute ordinary SELECT through the public route");
+    let ordinary_dml = execute_multi_core_with_options_for_client_typed(
+        &state,
+        &connection_id,
+        &database,
+        &format!("UPDATE `{table}` SET value = value + 1 WHERE id = 1"),
+        None,
+        None,
+        options.clone(),
+    )
+    .await
+    .expect("execute ordinary DML through the public route");
+    let session_result = execute_multi_core_with_options_for_client_typed(
+        &state,
+        &connection_id,
+        &database,
+        "SELECT @dbx_issue_5560_session AS session_value",
+        None,
+        None,
+        options.clone(),
+    )
+    .await
+    .expect("reuse the CALL client session");
+    let empty_results = execute_multi_core_with_options_for_client_typed(
+        &state,
+        &connection_id,
+        &database,
+        &format!("CALL `{empty_procedure}`()"),
+        None,
+        None,
+        options.clone(),
+    )
+    .await
+    .expect("execute no-result CALL through the public route");
+    let sql_error = execute_multi_core_with_options_for_client_typed(
+        &state,
+        &connection_id,
+        &database,
+        &format!("CALL `dbx_issue_5560_missing_{}`()", &suffix[..8]),
+        None,
+        None,
+        options.clone(),
+    )
+    .await
+    .expect("return a structured execution result for a missing procedure");
+
+    state.configs.write().await.get_mut(&connection_id).expect("live config").read_only = true;
+    let read_only_error = execute_multi_core_with_options_for_client_typed(
+        &state,
+        &connection_id,
+        &database,
+        &format!("CALL `{procedure}`()"),
+        None,
+        None,
+        options.clone(),
+    )
+    .await
+    .expect_err("read-only mode must reject CALL before dispatch");
+    state.configs.write().await.get_mut(&connection_id).expect("live config").read_only = false;
+
+    let timeout_results = execute_multi_core_with_options_for_client_typed(
+        &state,
+        &connection_id,
+        &database,
+        &format!("CALL `{slow_procedure}`()"),
+        None,
+        None,
+        QueryExecutionOptions { timeout_secs: Some(1), ..options.clone() },
+    )
+    .await
+    .expect("return a structured timeout result");
+    let cancel_token = CancellationToken::new();
+    let cancel_task = {
+        let cancel_token = cancel_token.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            cancel_token.cancel();
+        })
+    };
+    let canceled_results = execute_multi_core_with_options_for_client_typed(
+        &state,
+        &connection_id,
+        &database,
+        &format!("CALL `{slow_procedure}`()"),
+        None,
+        Some(cancel_token),
+        options.clone(),
+    )
+    .await
+    .expect("return a structured cancellation result");
+    cancel_task.await.unwrap();
+    let recovery_result = execute_multi_core_with_options_for_client_typed(
+        &state,
+        &connection_id,
+        &database,
+        "SELECT 7 AS recovered",
+        None,
+        None,
+        options,
+    )
+    .await
+    .expect("recreate the discarded session pool after timeout and cancellation");
+
+    for cleanup_sql in [
+        format!("DROP PROCEDURE `{procedure}`"),
+        format!("DROP PROCEDURE `{empty_procedure}`"),
+        format!("DROP PROCEDURE `{slow_procedure}`"),
+        format!("DROP TABLE `{table}`"),
+    ] {
+        execute_sql_statement(&state, &connection_id, &database, &cleanup_sql, None, None)
+            .await
+            .expect("clean up live issue fixture");
+    }
+    let _ = std::fs::remove_file(db_path);
+
+    assert_eq!(results.len(), 3);
+    assert_eq!(results.iter().map(|result| result.statement_index).collect::<Vec<_>>(), vec![Some(0); 3]);
+    assert_eq!(
+        results.iter().map(|result| result.result.rows[0][0].clone()).collect::<Vec<_>>(),
+        vec![serde_json::json!("11"), serde_json::json!("21"), serde_json::json!("31")]
+    );
+    assert!(results.iter().all(|result| result.result.truncated));
+    assert_eq!(ordinary_select.len(), 1);
+    assert_eq!(ordinary_select[0].statement_index, None);
+    assert_eq!(ordinary_select[0].result.rows, vec![vec![serde_json::json!("42")]]);
+    assert_eq!(ordinary_dml.len(), 1);
+    assert_eq!(ordinary_dml[0].statement_index, None);
+    assert_eq!(ordinary_dml[0].result.affected_rows, 1);
+    assert_eq!(session_result[0].result.rows, vec![vec![serde_json::json!("kept")]]);
+    assert_eq!(empty_results.len(), 1);
+    assert_eq!(empty_results[0].statement_index, Some(0));
+    assert!(empty_results[0].result.columns.is_empty());
+    assert!(empty_results[0].result.rows.is_empty());
+    assert_eq!(sql_error.len(), 1);
+    assert_eq!(sql_error[0].statement_index, Some(0));
+    assert!(sql_error[0].execution_error);
+    let sql_error_message = sql_error[0].result.rows[0][0].as_str().expect("missing procedure error message");
+    assert!(sql_error_message.contains("does not exist"), "unexpected SQL error: {sql_error_message}");
+    assert_eq!(sql_error[0].error.as_ref().map(|error| error.code()), Some("DBX-LEGACY-0001"));
+    assert!(read_only_error.into_legacy_string().to_ascii_lowercase().contains("read-only"));
+    assert_eq!(timeout_results.len(), 1);
+    assert!(timeout_results[0].execution_error);
+    assert_eq!(timeout_results[0].statement_index, Some(0));
+    let timeout_message = timeout_results[0].result.rows[0][0].as_str().expect("timeout error message");
+    assert_eq!(timeout_message, "Query timed out after 1 seconds");
+    assert_eq!(timeout_results[0].error.as_ref().map(|error| error.code()), Some("DBX-LEGACY-0001"));
+    assert_eq!(canceled_results.len(), 1);
+    assert!(canceled_results[0].execution_error);
+    assert_eq!(canceled_results[0].statement_index, Some(0));
+    assert_eq!(canceled_results[0].result.rows[0][0], serde_json::json!("Query canceled"));
+    assert_eq!(canceled_results[0].error.as_ref().map(|error| error.code()), Some("DBX-JDBC-2003"));
+    assert_eq!(recovery_result[0].result.rows, vec![vec![serde_json::json!("7")]]);
 }
 
 #[tokio::test]

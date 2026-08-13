@@ -178,6 +178,27 @@ pub async fn document_delete_document(
 }
 
 #[tauri::command]
+pub async fn document_save_meilisearch_batch(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    collection: String,
+    updates: Vec<dbx_core::db::meilisearch_driver::MeilisearchDocumentUpdate>,
+    delete_ids: Vec<String>,
+    inserts: Vec<String>,
+) -> Result<u64, String> {
+    ensure_connection_writable(&state, &connection_id, "Save").await?;
+    dbx_core::document_ops::save_meilisearch_document_batch_core(
+        &state,
+        &connection_id,
+        &collection,
+        &updates,
+        &delete_ids,
+        &inserts,
+    )
+    .await
+}
+
+#[tauri::command]
 pub async fn document_list_gridfs_buckets(
     state: State<'_, Arc<AppState>>,
     connection_id: String,

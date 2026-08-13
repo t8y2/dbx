@@ -23,8 +23,8 @@ use crate::database_capabilities;
 use crate::db;
 use crate::db::agent_driver::{AgentCallError, AgentErrorStage, AgentOperationOutcome};
 use crate::models::connection::{ConnectionConfig, DatabaseType};
-use crate::query_execution_sql::is_write_sql;
-use crate::sql::{split_sql_batches, split_sql_statements};
+use crate::query_execution_sql::{is_write_sql, strip_sql_comments_and_literals};
+use crate::sql::{split_sql_batches, split_sql_statements, starts_with_executable_sql_keyword_for_database};
 use crate::sql_dialect::{resolve_for_db, CAP_TRANSACTIONAL_DDL};
 use crate::sql_risk::{classify_sql_risk_for_database, SqlRisk};
 
@@ -266,15 +266,43 @@ impl ExecuteMultiResult {
     }
 
     fn success_with_index_and_large_values(
+        mut result: db::QueryResult,
+        statement_index: usize,
+        mut large_value_cells: Vec<db::LargeValueCell>,
+        table_data_preview: bool,
+    ) -> Self {
+        let server_cells = if table_data_preview {
+            remap_large_value_cells_around_server_markers(&result, &mut large_value_cells);
+            extract_server_large_value_markers(&mut result)
+        } else {
+            Vec::new()
+        };
+        Self {
+            result,
+            large_value_cells: merge_large_value_cells(large_value_cells, server_cells),
+            execution_error: false,
+            statement_index: Some(statement_index),
+            error: None,
+            server_message: false,
+        }
+    }
+
+    fn success_with_index_and_optional_server_large_values(
         result: db::QueryResult,
         statement_index: usize,
-        large_value_cells: Vec<db::LargeValueCell>,
+        table_data_preview: bool,
     ) -> Self {
+        Self::success_with_index_and_large_values(result, statement_index, Vec::new(), table_data_preview)
+    }
+
+    fn success_with_optional_server_large_values(mut result: db::QueryResult, table_data_preview: bool) -> Self {
+        let large_value_cells =
+            if table_data_preview { extract_server_large_value_markers(&mut result) } else { Vec::new() };
         Self {
             result,
             large_value_cells,
             execution_error: false,
-            statement_index: Some(statement_index),
+            statement_index: None,
             error: None,
             server_message: false,
         }
@@ -288,6 +316,228 @@ impl ExecuteMultiResult {
     fn into_query_result(self) -> db::QueryResult {
         self.result
     }
+}
+
+const SERVER_LARGE_VALUE_UNKNOWN_BYTES: usize = 64 * 1024 * 1024;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ServerLargeValuePreviewKind {
+    Text,
+    Binary,
+    Vector,
+}
+
+#[derive(Clone, Copy)]
+struct ServerLargeValueMarker {
+    result_index: usize,
+    source_index: usize,
+    preview_kind: Option<ServerLargeValuePreviewKind>,
+    source_type: Option<&'static str>,
+}
+
+fn server_large_value_alias(
+    suffix: &str,
+) -> Option<(usize, Option<ServerLargeValuePreviewKind>, Option<&'static str>)> {
+    if let Ok(source_index) = suffix.parse::<usize>() {
+        return Some((source_index, None, None));
+    }
+    let (kind, source_index) = suffix.split_once('_')?;
+    let source_index = source_index.parse::<usize>().ok()?;
+    let (preview_kind, source_type) = match kind {
+        "T" => (ServerLargeValuePreviewKind::Text, None),
+        "B" => (ServerLargeValuePreviewKind::Binary, None),
+        "V" => (ServerLargeValuePreviewKind::Vector, Some("vector")),
+        "J" => (ServerLargeValuePreviewKind::Text, Some("json")),
+        "K" => (ServerLargeValuePreviewKind::Text, Some("jsonb")),
+        "S" => (ServerLargeValuePreviewKind::Text, Some("tsvector")),
+        _ => return None,
+    };
+    Some((source_index, Some(preview_kind), source_type))
+}
+
+fn server_large_value_marker(value: &serde_json::Value) -> Option<(ServerLargeValuePreviewKind, usize)> {
+    let (kind, preview_size) = value.as_str()?.split_once(':')?;
+    let kind = match kind {
+        "T" => ServerLargeValuePreviewKind::Text,
+        "B" => ServerLargeValuePreviewKind::Binary,
+        "V" => ServerLargeValuePreviewKind::Vector,
+        _ => return None,
+    };
+    Some((kind, preview_size.parse::<usize>().ok()?.max(1)))
+}
+
+fn truncate_server_large_value_preview(
+    value: &mut serde_json::Value,
+    kind: ServerLargeValuePreviewKind,
+    preview_size: usize,
+) -> bool {
+    let serde_json::Value::String(text) = value else {
+        return false;
+    };
+    if matches!(kind, ServerLargeValuePreviewKind::Vector) {
+        let truncated = text.chars().count() > preview_size;
+        let vector_text = if truncated {
+            let prefix: String = text.chars().take(preview_size).collect();
+            let Some(last_separator) = prefix.rfind(',') else {
+                return false;
+            };
+            format!("{}]", &prefix[..last_separator])
+        } else {
+            text.clone()
+        };
+        let Ok(vector) = serde_json::from_str::<Vec<serde_json::Value>>(&vector_text) else {
+            return false;
+        };
+        *value = serde_json::Value::Array(vector);
+        return truncated;
+    }
+    let truncate_at = match kind {
+        ServerLargeValuePreviewKind::Text => text.char_indices().nth(preview_size).map(|(index, _)| index),
+        ServerLargeValuePreviewKind::Binary => text
+            .strip_prefix("0x")
+            .filter(|hex| hex.len() > preview_size.saturating_mul(2))
+            .map(|_| 2usize.saturating_add(preview_size.saturating_mul(2))),
+        ServerLargeValuePreviewKind::Vector => unreachable!(),
+    };
+    let Some(truncate_at) = truncate_at else {
+        return false;
+    };
+    text.truncate(truncate_at);
+    text.push_str("...");
+    true
+}
+
+fn server_large_value_markers(result: &db::QueryResult) -> Vec<ServerLargeValueMarker> {
+    let mut markers = Vec::new();
+    for (result_index, column) in result.columns.iter().enumerate() {
+        let Some((source_index, preview_kind, source_type)) = column
+            .strip_prefix(crate::sql_dialect::DBX_LARGE_VALUE_BYTES_COLUMN_PREFIX)
+            .and_then(server_large_value_alias)
+        else {
+            continue;
+        };
+        let expected_source_index = result_index.checked_sub(markers.len() + 1);
+        if expected_source_index == Some(source_index) {
+            markers.push(ServerLargeValueMarker { result_index, source_index, preview_kind, source_type });
+        }
+    }
+    markers
+}
+
+fn extract_server_large_value_markers(result: &mut db::QueryResult) -> Vec<db::LargeValueCell> {
+    let markers = server_large_value_markers(result);
+    if markers.is_empty() {
+        return Vec::new();
+    }
+
+    let mut large_value_cells = Vec::new();
+    for marker in &markers {
+        let source_result_index = marker.result_index.saturating_sub(1);
+        let row_kind = result
+            .rows
+            .iter()
+            .find_map(|row| row.get(marker.result_index).and_then(server_large_value_marker).map(|value| value.0));
+        let source_type = marker.source_type.or_else(|| {
+            (marker.preview_kind.or(row_kind) == Some(ServerLargeValuePreviewKind::Vector)).then_some("vector")
+        });
+        if let (Some(source_type), Some(column_type)) = (source_type, result.column_types.get_mut(source_result_index))
+        {
+            *column_type = source_type.to_string();
+        }
+    }
+    for (row_index, row) in result.rows.iter_mut().enumerate() {
+        for marker in &markers {
+            let marker_value = row.get(marker.result_index).and_then(server_large_value_marker);
+            let source_result_index = marker.result_index.saturating_sub(1);
+            if marker_value.is_some_and(|(kind, preview_size)| {
+                row.get_mut(source_result_index)
+                    .is_some_and(|value| truncate_server_large_value_preview(value, kind, preview_size))
+            }) {
+                large_value_cells.push(db::LargeValueCell {
+                    row_index,
+                    column_index: marker.source_index,
+                    original_bytes: SERVER_LARGE_VALUE_UNKNOWN_BYTES,
+                });
+            }
+        }
+    }
+
+    let removed: std::collections::HashSet<usize> = markers.iter().map(|marker| marker.result_index).collect();
+    let retained_index = |index: usize| index - removed.iter().filter(|removed_index| **removed_index < index).count();
+    result.spatial_columns.retain_mut(|column| {
+        if removed.contains(&column.column_index) {
+            return false;
+        }
+        column.column_index = retained_index(column.column_index);
+        true
+    });
+    for row in &mut result.rows {
+        let mut index = 0;
+        row.retain(|_| {
+            let keep = !removed.contains(&index);
+            index += 1;
+            keep
+        });
+    }
+    for row in &mut result.spatial_values {
+        let mut index = 0;
+        row.retain(|_| {
+            let keep = !removed.contains(&index);
+            index += 1;
+            keep
+        });
+    }
+    let mut index = 0;
+    result.columns.retain(|_| {
+        let keep = !removed.contains(&index);
+        index += 1;
+        keep
+    });
+    let mut index = 0;
+    result.column_types.retain(|_| {
+        let keep = !removed.contains(&index);
+        index += 1;
+        keep
+    });
+    let mut index = 0;
+    result.column_sortables.retain(|_| {
+        let keep = !removed.contains(&index);
+        index += 1;
+        keep
+    });
+    large_value_cells
+}
+
+fn remap_large_value_cells_around_server_markers(result: &db::QueryResult, cells: &mut Vec<db::LargeValueCell>) {
+    let removed: std::collections::HashSet<usize> =
+        server_large_value_markers(result).into_iter().map(|marker| marker.result_index).collect();
+    if removed.is_empty() {
+        return;
+    }
+    cells.retain_mut(|cell| {
+        if removed.contains(&cell.column_index) {
+            return false;
+        }
+        cell.column_index -= removed.iter().filter(|index| **index < cell.column_index).count();
+        true
+    });
+}
+
+fn merge_large_value_cells(
+    mut driver_cells: Vec<db::LargeValueCell>,
+    server_cells: Vec<db::LargeValueCell>,
+) -> Vec<db::LargeValueCell> {
+    for server_cell in server_cells {
+        if let Some(driver_cell) = driver_cells
+            .iter_mut()
+            .find(|cell| cell.row_index == server_cell.row_index && cell.column_index == server_cell.column_index)
+        {
+            *driver_cell = server_cell;
+        } else {
+            driver_cells.push(server_cell);
+        }
+    }
+    driver_cells
 }
 
 impl From<db::QueryResult> for ExecuteMultiResult {
@@ -639,6 +889,9 @@ pub struct QueryExecutionOptions {
     /// Result columns that must stay exact because clients use them as stable
     /// row identifiers when fetching full large-cell values on demand.
     pub result_key_columns: Vec<String>,
+    /// Enables extraction of hidden server-side preview metadata. This must be
+    /// set only for generated table-data preview SQL, never arbitrary queries.
+    pub table_data_preview: bool,
     /// Doris / StarRocks catalog selected for this query tab.
     pub catalog: Option<String>,
     pub result_session_id: Option<String>,
@@ -1592,6 +1845,23 @@ async fn do_execute_typed(
             }
             result
         }
+        PoolKind::Meilisearch(client) => {
+            let client = client.clone();
+            let sql = sql.to_string();
+            let max_rows = options.max_rows;
+            drop(connections);
+            let result = wait_for_query_opt(
+                cancel_token,
+                query_timeout,
+                db::meilisearch_driver::execute_rest_query(&client, &sql),
+            )
+            .await
+            .map(|result| truncate_result_with_max_rows(result, max_rows));
+            if matches!(result.as_ref(), Err(err) if should_discard_pool_after_error(pool_db_type, err)) {
+                state.remove_pool_by_key(pool_key).await;
+            }
+            result
+        }
         PoolKind::VectorDb(client) => {
             let client = client.clone();
             let sql = sql.to_string();
@@ -2235,6 +2505,7 @@ pub async fn execute_multi_core_with_options_for_client_and_progress_typed(
     // HTTP SQLite providers send all statements in one request so the provider
     // can preserve batch ordering and atomicity.
     if is_http_sqlite {
+        let table_data_preview = options.table_data_preview;
         return single_statement_multi_result(
             execute_sql_statement_with_options_typed(
                 state,
@@ -2246,6 +2517,7 @@ pub async fn execute_multi_core_with_options_for_client_and_progress_typed(
                 options,
             )
             .await,
+            table_data_preview,
         );
     }
 
@@ -2280,8 +2552,16 @@ pub async fn execute_multi_core_with_options_for_client_and_progress_typed(
         }
     };
 
-    if statements.len() <= 1 && !(mysql_pool.is_some() && options.max_result_bytes.is_some_and(|value| value > 0)) {
+    if statements.len() == 1
+        && !mysql_single_statement_uses_batch_route(
+            db_type,
+            mysql_pool.is_some(),
+            &statements[0],
+            options.max_result_bytes,
+        )
+    {
         let single_sql = statements.into_iter().next().unwrap_or_default();
+        let table_data_preview = options.table_data_preview;
         return single_statement_multi_result(
             execute_sql_statement_with_options_typed(
                 state,
@@ -2293,6 +2573,7 @@ pub async fn execute_multi_core_with_options_for_client_and_progress_typed(
                 options,
             )
             .await,
+            table_data_preview,
         );
     }
 
@@ -2348,7 +2629,11 @@ pub async fn execute_multi_core_with_options_for_client_and_progress_typed(
         {
             Ok(r) => {
                 report_execute_multi_progress(progress.as_ref(), statement_index, statements.len(), &r, true, None);
-                results.push(ExecuteMultiResult::success_with_index(r, statement_index));
+                results.push(ExecuteMultiResult::success_with_index_and_optional_server_large_values(
+                    r,
+                    statement_index,
+                    options.table_data_preview,
+                ));
             }
             Err(error) => {
                 let action = query_execution_error_action(db_type, stmt, &error);
@@ -2379,11 +2664,28 @@ pub async fn execute_multi_core_with_options_for_client_and_progress_typed(
 
 fn single_statement_multi_result(
     result: Result<db::QueryResult, QueryExecutionError>,
+    table_data_preview: bool,
 ) -> Result<Vec<ExecuteMultiResult>, QueryExecutionError> {
-    result.map(|result| vec![result.into()])
+    result.map(|result| vec![ExecuteMultiResult::success_with_optional_server_large_values(result, table_data_preview)])
+}
+
+fn mysql_single_statement_uses_batch_route(
+    db_type: Option<DatabaseType>,
+    has_mysql_pool: bool,
+    sql: &str,
+    max_result_bytes: Option<usize>,
+) -> bool {
+    has_mysql_pool
+        && (max_result_bytes.is_some_and(|value| value > 0)
+            || (db_type == Some(DatabaseType::Mysql)
+                && starts_with_executable_sql_keyword_for_database(sql, &["CALL"], DatabaseType::Mysql)))
 }
 
 trait MysqlBatchStatementExecutor {
+    fn table_data_preview(&self) -> bool {
+        false
+    }
+
     async fn execute_statement(&mut self, statement: &str) -> Result<Vec<db::mysql::MySqlQueryResult>, String>;
 
     async fn execute_non_result_batch(&mut self, statements: &[String]) -> db::mysql::MySqlNonResultBatchOutcome {
@@ -2414,10 +2716,15 @@ struct MysqlBatchConnection<'a> {
     max_rows: Option<usize>,
     max_result_bytes: Option<usize>,
     result_key_columns: &'a [String],
+    table_data_preview: bool,
     dialect: db::mysql::MySqlQueryDialect,
 }
 
 impl MysqlBatchStatementExecutor for MysqlBatchConnection<'_> {
+    fn table_data_preview(&self) -> bool {
+        self.table_data_preview
+    }
+
     async fn execute_statement(&mut self, statement: &str) -> Result<Vec<db::mysql::MySqlQueryResult>, String> {
         wait_for_result_opt(
             self.cancel_token.clone(),
@@ -2494,6 +2801,14 @@ fn mysql_non_result_batch_end(
     end.max(start + 1)
 }
 
+fn mysql_non_result_pipeline_enabled(
+    statement_count: usize,
+    continue_on_error: bool,
+    mode: crate::connection::MysqlMode,
+) -> bool {
+    statement_count > 1 && !continue_on_error && mode == crate::connection::MysqlMode::Normal
+}
+
 async fn execute_mysql_batch_statements<E>(
     executor: &mut E,
     statements: &[String],
@@ -2509,6 +2824,7 @@ where
 {
     let mut results = Vec::with_capacity(statements.len());
     let mut statement_index = 0usize;
+    let table_data_preview = executor.table_data_preview();
     while statement_index < statements.len() {
         if is_canceled(&cancel_token) {
             results.push(ExecuteMultiResult::execution_error(error_query_result(canceled_error())));
@@ -2574,6 +2890,7 @@ where
                         result.result,
                         statement_index,
                         result.large_value_cells,
+                        table_data_preview,
                     )
                 }));
             }
@@ -2622,7 +2939,8 @@ async fn execute_multi_mysql(
     let bare = mode == crate::connection::MysqlMode::Bare;
     let max_rows = options.max_rows;
     let max_result_bytes = options.max_result_bytes.filter(|value| *value > 0);
-    let pipeline_non_result_statements = !options.continue_on_error && mode == crate::connection::MysqlMode::Normal;
+    let pipeline_non_result_statements =
+        mysql_non_result_pipeline_enabled(statements.len(), options.continue_on_error, mode);
     let mut conn = match db::mysql::get_conn_with_health_check_with_cancel(
         pool,
         operation_budget.checkout_timeout,
@@ -2666,6 +2984,7 @@ async fn execute_multi_mysql(
         max_rows,
         max_result_bytes,
         result_key_columns: &options.result_key_columns,
+        table_data_preview: options.table_data_preview,
         dialect,
     };
     let (results, error_action) = execute_mysql_batch_statements(
@@ -3044,6 +3363,19 @@ fn executed_count_before_error(error: &str, statement_count: usize) -> usize {
     statement_number.saturating_sub(1).min(statement_count)
 }
 
+fn is_destructive_schema_diff_statement(statement: &str) -> bool {
+    let normalized = strip_sql_comments_and_literals(statement).to_ascii_uppercase();
+    let tokens = normalized
+        .split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
+        .filter(|token| !token.is_empty())
+        .collect::<Vec<_>>();
+    match tokens.first().copied() {
+        Some("DROP" | "TRUNCATE") => true,
+        Some("ALTER") => tokens.iter().skip(1).any(|token| *token == "DROP"),
+        _ => false,
+    }
+}
+
 /// Pure failure mapping used by deploy and unit tests.
 fn schema_diff_failure_outcome(
     atomicity: SchemaDiffAtomicity,
@@ -3077,6 +3409,7 @@ fn pool_kind_has_transactional_path(pool: &PoolKind) -> bool {
         | PoolKind::MongoDb(_)
         | PoolKind::Elasticsearch(_)
         | PoolKind::Easysearch(_)
+        | PoolKind::Meilisearch(_)
         | PoolKind::VectorDb(_)
         | PoolKind::InfluxDb(_)
         | PoolKind::VictoriaMetrics(_)
@@ -3101,6 +3434,7 @@ pub async fn execute_schema_diff_deploy(
     database: &str,
     statements: &[String],
     schema: Option<&str>,
+    destructive_confirmed: bool,
 ) -> SchemaDiffDeployResult {
     let tx_id = format!("deploy_{}", uuid::Uuid::new_v4());
     let now = chrono::Utc::now().to_rfc3339();
@@ -3126,6 +3460,27 @@ pub async fn execute_schema_diff_deploy(
         name: format!("{connection_id}/{database}"),
         role: "database".to_string(),
     };
+
+    let destructive_statement_count =
+        parsed.iter().filter(|statement| is_destructive_schema_diff_statement(statement)).count();
+    if destructive_statement_count > 0 && !destructive_confirmed {
+        return SchemaDiffDeployResult {
+            transaction_id: tx_id,
+            status: crate::two_phase_commit::TransactionStatus::RolledBack.as_str().to_string(),
+            participants: vec![participant],
+            created_at: now.clone(),
+            updated_at: now,
+            executed_count: 0,
+            statement_count: parsed.len(),
+            error: Some("Destructive schema diff SQL requires explicit confirmation".to_string()),
+            metadata: serde_json::json!({
+                "source": "schema_diff_deploy",
+                "mode": "single_connection_tx",
+                "blocked": "destructive_confirmation_required",
+                "destructive_statement_count": destructive_statement_count,
+            }),
+        };
+    }
 
     if parsed.is_empty() {
         return SchemaDiffDeployResult {
@@ -3322,6 +3677,7 @@ pub async fn execute_statements_in_transaction_on_pool_typed(
             | PoolKind::MongoDb(_)
             | PoolKind::Elasticsearch(_)
             | PoolKind::Easysearch(_)
+            | PoolKind::Meilisearch(_)
             | PoolKind::VectorDb(_)
             | PoolKind::InfluxDb(_)
             | PoolKind::VictoriaMetrics(_)
@@ -4428,6 +4784,22 @@ mod tests {
         assert!(!postgres_prefers_text_protocol(Some(DatabaseType::Postgres)));
         assert!(!postgres_prefers_text_protocol(None));
     }
+
+    #[test]
+    fn schema_diff_destructive_detection_covers_drop_and_alter_drop() {
+        assert!(is_destructive_schema_diff_statement("DROP INDEX idx_users_email ON users"));
+        assert!(is_destructive_schema_diff_statement("TRUNCATE TABLE audit_log"));
+        assert!(is_destructive_schema_diff_statement(
+            "ALTER TABLE users DROP COLUMN legacy_code, DROP INDEX idx_legacy"
+        ));
+    }
+
+    #[test]
+    fn schema_diff_destructive_detection_ignores_comments_literals_and_identifiers() {
+        assert!(!is_destructive_schema_diff_statement("-- DROP INDEX idx_fake\nSELECT 1"));
+        assert!(!is_destructive_schema_diff_statement("SELECT 'DROP TABLE users'"));
+        assert!(!is_destructive_schema_diff_statement("ALTER TABLE \"DROP INDEX audit\" ADD COLUMN note TEXT"));
+    }
     #[cfg(unix)]
     use crate::db::agent_driver::{AgentDriverClient, AgentLaunchSpec};
     use crate::models::connection::{default_redis_key_separator, ConnectionConfig, DatabaseType};
@@ -4760,6 +5132,7 @@ for line in sys.stdin:
             jdbc_driver_class: None,
             jdbc_driver_paths: Vec::new(),
             one_time: false,
+            save_password: true,
             read_only: false,
             is_production: false,
             production_databases: vec![],
@@ -5400,6 +5773,53 @@ for line in sys.stdin:
         );
     }
 
+    #[test]
+    fn mysql_single_call_uses_multi_result_route() {
+        assert!(mysql_single_statement_uses_batch_route(
+            Some(DatabaseType::Mysql),
+            true,
+            "# generated call\nCALL testA()",
+            None,
+        ));
+    }
+
+    #[test]
+    fn ordinary_mysql_single_statements_keep_singular_route() {
+        for sql in ["SELECT 1", "SHOW TABLES", "UPDATE users SET active = 1"] {
+            assert!(!mysql_single_statement_uses_batch_route(Some(DatabaseType::Mysql), true, sql, None));
+        }
+    }
+
+    #[test]
+    fn mysql_call_route_requires_native_mysql_type_and_pool() {
+        assert!(!mysql_single_statement_uses_batch_route(Some(DatabaseType::Doris), true, "CALL testA()", None,));
+        assert!(!mysql_single_statement_uses_batch_route(Some(DatabaseType::Mysql), false, "CALL testA()", None,));
+    }
+
+    #[test]
+    fn mysql_result_byte_limit_keeps_existing_batch_route() {
+        assert!(mysql_single_statement_uses_batch_route(
+            Some(DatabaseType::Mysql),
+            true,
+            "SELECT * FROM users",
+            Some(1024),
+        ));
+        assert!(!mysql_single_statement_uses_batch_route(
+            Some(DatabaseType::Mysql),
+            true,
+            "SELECT * FROM users",
+            Some(0),
+        ));
+    }
+
+    #[test]
+    fn single_mysql_batch_route_never_probes_non_result_pipeline_limits() {
+        assert!(!mysql_non_result_pipeline_enabled(1, false, crate::connection::MysqlMode::Normal));
+        assert!(mysql_non_result_pipeline_enabled(2, false, crate::connection::MysqlMode::Normal));
+        assert!(!mysql_non_result_pipeline_enabled(2, true, crate::connection::MysqlMode::Normal));
+        assert!(!mysql_non_result_pipeline_enabled(2, false, crate::connection::MysqlMode::Bare));
+    }
+
     #[tokio::test]
     async fn mysql_batch_preserves_multiple_result_sets_from_one_statement() {
         let statements = vec!["CALL testA()".to_string(), "UPDATE users SET active = 1".to_string()];
@@ -5620,6 +6040,7 @@ for line in sys.stdin:
             empty_query_result(1),
             0,
             vec![db::LargeValueCell { row_index: 2, column_index: 3, original_bytes: 65_536 }],
+            false,
         );
 
         let serialized = serde_json::to_value(result).unwrap();
@@ -5755,7 +6176,7 @@ for line in sys.stdin:
         )
         .with_omitted_sql_context("SELECT * FROM dbx_table_that_does_not_exist");
 
-        let error = single_statement_multi_result(Err(error)).unwrap_err();
+        let error = single_statement_multi_result(Err(error), false).unwrap_err();
         let backend_error = error.into_backend_error();
 
         assert_eq!(backend_error.code(), "DBX-JDBC-4001");
@@ -6364,6 +6785,7 @@ for line in sys.stdin:
             jdbc_driver_class: None,
             jdbc_driver_paths: Vec::new(),
             one_time: false,
+            save_password: true,
             read_only: false,
             is_production: false,
             production_databases: vec![],
@@ -6751,6 +7173,168 @@ for line in sys.stdin:
 
         assert_eq!(normalized.rows[0][0], serde_json::json!("2041797190226354178"));
         assert_eq!(normalized.rows[0][1], serde_json::json!([1, "2041797190226354178"]));
+    }
+
+    #[test]
+    fn extracts_server_large_value_markers_and_restores_source_columns() {
+        let mut result = db::QueryResult {
+            columns: vec![
+                "id".to_string(),
+                "payload".to_string(),
+                format!("{}T_1", crate::sql_dialect::DBX_LARGE_VALUE_BYTES_COLUMN_PREFIX),
+                "note".to_string(),
+            ],
+            column_types: vec!["integer".to_string(), "text".to_string(), "bigint".to_string(), "text".to_string()],
+            column_sortables: vec![true, true, true, true],
+            spatial_columns: Vec::new(),
+            spatial_values: Vec::new(),
+            rows: vec![
+                vec![
+                    serde_json::json!(1),
+                    serde_json::json!("预览文本多"),
+                    serde_json::json!("T:4"),
+                    serde_json::json!("a"),
+                ],
+                vec![serde_json::json!(2), serde_json::json!("短值"), serde_json::json!("T:4"), serde_json::json!("b")],
+            ],
+            affected_rows: 0,
+            execution_time_ms: 0,
+            truncated: false,
+            session_id: None,
+            has_more: false,
+            elasticsearch_raw_body: None,
+            messages: Vec::new(),
+        };
+
+        let cells = extract_server_large_value_markers(&mut result);
+
+        assert_eq!(result.columns, vec!["id", "payload", "note"]);
+        assert_eq!(result.column_types, vec!["integer", "text", "text"]);
+        assert_eq!(
+            result.rows[0],
+            vec![serde_json::json!(1), serde_json::json!("预览文本..."), serde_json::json!("a")]
+        );
+        assert_eq!(result.rows[1], vec![serde_json::json!(2), serde_json::json!("短值"), serde_json::json!("b")]);
+        assert_eq!(
+            cells,
+            vec![db::LargeValueCell {
+                row_index: 0,
+                column_index: 1,
+                original_bytes: SERVER_LARGE_VALUE_UNKNOWN_BYTES,
+            }]
+        );
+    }
+
+    #[test]
+    fn truncates_server_binary_preview_after_the_configured_byte_count() {
+        let mut result = db::QueryResult {
+            columns: vec![
+                "raw_value".to_string(),
+                format!("{}B_0", crate::sql_dialect::DBX_LARGE_VALUE_BYTES_COLUMN_PREFIX),
+            ],
+            column_types: vec!["bytea".to_string(), "text".to_string()],
+            column_sortables: vec![true, true],
+            spatial_columns: Vec::new(),
+            spatial_values: Vec::new(),
+            rows: vec![vec![serde_json::json!("0x0102030405"), serde_json::json!("B:4")]],
+            affected_rows: 0,
+            execution_time_ms: 0,
+            truncated: false,
+            session_id: None,
+            has_more: false,
+            elasticsearch_raw_body: None,
+            messages: Vec::new(),
+        };
+
+        let cells = extract_server_large_value_markers(&mut result);
+
+        assert_eq!(result.rows, vec![vec![serde_json::json!("0x01020304...")]]);
+        assert_eq!(cells.len(), 1);
+    }
+
+    #[test]
+    fn restores_pgvector_previews_as_arrays_and_marks_only_truncated_values() {
+        let marker = format!("{}V_0", crate::sql_dialect::DBX_LARGE_VALUE_BYTES_COLUMN_PREFIX);
+        let mut result = db::QueryResult {
+            columns: vec!["embedding".to_string(), marker],
+            column_types: vec!["text".to_string(), "text".to_string()],
+            column_sortables: vec![true, true],
+            spatial_columns: Vec::new(),
+            spatial_values: Vec::new(),
+            rows: vec![
+                vec![serde_json::json!("[0.1,0.2,0.3]"), serde_json::json!("V:9")],
+                vec![serde_json::json!("[0.1,0.2]"), serde_json::json!("V:20")],
+            ],
+            affected_rows: 0,
+            execution_time_ms: 0,
+            truncated: false,
+            session_id: None,
+            has_more: false,
+            elasticsearch_raw_body: None,
+            messages: Vec::new(),
+        };
+
+        let cells = extract_server_large_value_markers(&mut result);
+
+        assert_eq!(result.column_types, vec!["vector"]);
+        assert_eq!(result.rows[0][0], serde_json::json!([0.1, 0.2]));
+        assert_eq!(result.rows[1][0], serde_json::json!([0.1, 0.2]));
+        assert_eq!(cells.len(), 1);
+        assert_eq!(cells[0].row_index, 0);
+    }
+
+    #[test]
+    fn restores_server_preview_types_without_rows() {
+        let mut result = db::QueryResult {
+            columns: vec![
+                "embedding".to_string(),
+                format!("{}V_0", crate::sql_dialect::DBX_LARGE_VALUE_BYTES_COLUMN_PREFIX),
+                "metadata".to_string(),
+                format!("{}K_1", crate::sql_dialect::DBX_LARGE_VALUE_BYTES_COLUMN_PREFIX),
+            ],
+            column_types: vec!["text".to_string(), "text".to_string(), "text".to_string(), "text".to_string()],
+            column_sortables: vec![true; 4],
+            spatial_columns: Vec::new(),
+            spatial_values: Vec::new(),
+            rows: Vec::new(),
+            affected_rows: 0,
+            execution_time_ms: 0,
+            truncated: false,
+            session_id: None,
+            has_more: false,
+            elasticsearch_raw_body: None,
+            messages: Vec::new(),
+        };
+
+        let cells = extract_server_large_value_markers(&mut result);
+
+        assert_eq!(result.columns, vec!["embedding", "metadata"]);
+        assert_eq!(result.column_types, vec!["vector", "jsonb"]);
+        assert!(cells.is_empty());
+    }
+
+    #[test]
+    fn ordinary_queries_preserve_columns_that_resemble_preview_markers() {
+        let marker = format!("{}0", crate::sql_dialect::DBX_LARGE_VALUE_BYTES_COLUMN_PREFIX);
+        let mut result = empty_query_result(1);
+        result.columns = vec!["payload".to_string(), marker.clone()];
+        result.column_types = vec!["text".to_string(), "bigint".to_string()];
+        result.column_sortables = vec![true, true];
+        result.rows = vec![vec![serde_json::json!("value"), serde_json::json!(123)]];
+
+        let ordinary = ExecuteMultiResult::success_with_index_and_optional_server_large_values(result, 0, false);
+
+        assert_eq!(ordinary.result.columns, vec!["payload".to_string(), marker]);
+        assert_eq!(ordinary.result.rows[0], vec![serde_json::json!("value"), serde_json::json!(123)]);
+        assert!(ordinary.large_value_cells.is_empty());
+    }
+
+    #[test]
+    fn single_statement_preview_preserves_absent_statement_index() {
+        let result = single_statement_multi_result(Ok(empty_query_result(1)), true).unwrap();
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].statement_index, None);
     }
 
     #[test]

@@ -1,4 +1,12 @@
-export function isQueryTimeoutErrorMessage(message: string): boolean {
+import type { BackendError } from "@/lib/backend/errorUtils";
+
+const QUERY_TIMEOUT_STAGES = new Set(["execute", "fetch"]);
+
+export function isQueryTimeoutErrorMessage(message: string, backendError?: BackendError): boolean {
+  if (backendError?.messageKey === "backendErrors.jdbc.operationTimedOut") {
+    const stage = String(backendError.messageParams.stage ?? "").toLowerCase();
+    return QUERY_TIMEOUT_STAGES.has(stage);
+  }
   const lower = message.toLowerCase();
   if (lower.includes("query timed out") || lower.includes("查询超时") || lower.includes("查詢逾時")) return true;
   // Agent RPC client-side timeout (tokio::time::timeout in agent_driver.rs). This is the

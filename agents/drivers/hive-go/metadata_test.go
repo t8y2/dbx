@@ -135,7 +135,7 @@ func TestGetColumnsUsesHiveServerMetadataFields(t *testing.T) {
 			}
 			return metadataResult(
 				[]string{"COLUMN_NAME", "TYPE_NAME", "COLUMN_SIZE", "DECIMAL_DIGITS", "NULLABLE", "REMARKS", "COLUMN_DEF"},
-				[]driver.Value{"name", "string", int64(255), nil, int64(1), "display name", "unknown"},
+				[]driver.Value{"name", "string", int64(255), nil, int64(1), "显示名称", "unknown"},
 				[]driver.Value{"amount", "decimal(18,2)", int64(18), int64(2), int64(0), nil, nil},
 			), nil
 		},
@@ -149,11 +149,38 @@ func TestGetColumnsUsesHiveServerMetadataFields(t *testing.T) {
 	if len(values) != 2 {
 		t.Fatalf("unexpected columns: %#v", values)
 	}
-	if values[0].Name != "name" || !values[0].IsNullable || values[0].CharacterMaximumLength == nil || *values[0].CharacterMaximumLength != 255 || values[0].ColumnDefault == nil || *values[0].ColumnDefault != "unknown" {
+	if values[0].Name != "name" || !values[0].IsNullable || values[0].CharacterMaximumLength == nil || *values[0].CharacterMaximumLength != 255 || values[0].ColumnDefault == nil || *values[0].ColumnDefault != "unknown" || values[0].Comment == nil || *values[0].Comment != "显示名称" {
 		t.Fatalf("unexpected string column: %#v", values[0])
 	}
 	if values[1].Name != "amount" || values[1].IsNullable || values[1].NumericPrecision == nil || *values[1].NumericPrecision != 18 || values[1].NumericScale == nil || *values[1].NumericScale != 2 || values[1].CharacterMaximumLength != nil {
 		t.Fatalf("unexpected decimal column: %#v", values[1])
+	}
+}
+
+func TestGetColumnsPreservesChineseDescribeFallbackComments(t *testing.T) {
+	behavior := &scriptedBehavior{
+		getColumns: func(context.Context, string, string, string) (gohive.MetadataResult, error) {
+			return gohive.MetadataResult{}, errors.New("metadata unavailable")
+		},
+		query: func(ctx context.Context, query string) (driver.Rows, error) {
+			if query != "DESCRIBE `analytics`.`events`" {
+				t.Fatalf("unexpected DESCRIBE query: %q", query)
+			}
+			return newScriptedRows(
+				ctx,
+				[]string{"col_name", "data_type", "comment"},
+				[]string{"STRING", "STRING", "STRING"},
+				[][]driver.Value{{"name", "string", "显示名称"}, {"amount", "decimal(18,2)", "含税金额"}},
+			), nil
+		},
+	}
+	server := newScriptedServer(t, behavior)
+	values, err := server.getColumns("analytics", "events")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(values) != 2 || values[0].Comment == nil || *values[0].Comment != "显示名称" || values[1].Comment == nil || *values[1].Comment != "含税金额" {
+		t.Fatalf("DESCRIBE comments changed: %#v", values)
 	}
 }
 

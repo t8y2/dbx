@@ -40,6 +40,19 @@ function rowEvent(options: { meta?: boolean; shift?: boolean } = {}): MouseEvent
 }
 
 describe("useDataGridSelection", () => {
+  it("keeps selected columns and the range anchor attached to their columns after reordering", () => {
+    const selection = createSelection();
+
+    selection.selectColumn(0);
+    selection.selectColumn(2, rowEvent({ meta: true }));
+    selection.remapColumnSelection([0, 1, 2], [1, 2, 0]);
+
+    expect(selection.selectedColumnIndexes.value).toEqual(new Set([1, 2]));
+
+    selection.selectColumn(0, rowEvent({ shift: true }));
+    expect(selection.selectedColumnIndexes.value).toEqual(new Set([0, 1, 2]));
+  });
+
   it("invalidates synthetic context state for ordinary, Ctrl, and Cmd cell selection", () => {
     const originalDocument = globalThis.document;
     const fakeDocument = {

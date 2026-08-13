@@ -54,6 +54,11 @@ test("MQTT JSON publishing sends canonical bytes instead of the original text", 
   assert.match(source, /payloadText:\s*encoding\.value === "plaintext" \? payloadText\.value : null/);
   assert.doesNotMatch(source, /encoding\.value === "plaintext" \|\| encoding\.value === "json"/);
 });
+
+test("MQTT 中文 JSON Payload 保留 UTF-8 文本且不添加换行符", () => {
+  const encoded = encodePayload('{\n  "消息": "温度正常",\n  "设备": "客厅传感器"\n}', "json");
+  assert.equal(decodePayload(encoded, "plaintext"), '{"消息":"温度正常","设备":"客厅传感器"}');
+});
 test("MQTT JSON placeholder uses a named interpolation for literal braces", () => {
   const source = readFileSync("apps/desktop/src/components/mqtt/MqttPublishDialog.vue", "utf8");
   assert.match(source, /mqttPayloadPlaceholderJson", \{ example:/);

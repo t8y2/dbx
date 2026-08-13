@@ -44,6 +44,15 @@ pub struct TableDataSelectSqlOptions {
     pub primary_keys: Vec<String>,
     #[serde(default)]
     pub columns: Vec<String>,
+    /// Database type names parallel to `columns`. Table-data callers can use
+    /// these to request bounded server-side projections for variable-length
+    /// values without changing arbitrary query execution.
+    #[serde(default)]
+    pub column_types: Vec<String>,
+    /// Maximum characters (text-like values) or bytes (binary values) kept in
+    /// a table-data preview. Omitted for exports and ordinary SQL queries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub large_value_preview_size: Option<usize>,
     #[serde(default)]
     pub fallback_order_columns: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -231,6 +231,42 @@ test("suggests database-specific data types and functions", () => {
   assert.ok(mysqlCreateViewItems.some((item) => item.type === "function" && item.label === "DATE"));
 });
 
+test("suggests MySQL VERSION and REVERSE without broadening other dialects", () => {
+  const buildFunctionItems = (prefix: string, databaseType?: "mysql" | "postgres" | "sqlserver") =>
+    buildSqlCompletionItems(`select ${prefix}`, `select ${prefix}`.length, {
+      tables: [],
+      columnsByTable: new Map(),
+      databaseType,
+    }).filter((item) => item.type === "function");
+
+  const mysqlVersionItems = buildFunctionItems("ver", "mysql");
+  const mysqlReverseItems = buildFunctionItems("reve", "mysql");
+
+  assert.equal(mysqlVersionItems.find((item) => item.label === "VERSION")?.apply, "VERSION()");
+  assert.equal(mysqlReverseItems.find((item) => item.label === "REVERSE")?.apply, "REVERSE(${string})");
+  assert.deepEqual(getSqlFunctionSignatureHelp("select version(", "select version(".length, "mysql")?.parameters, []);
+  assert.deepEqual(getSqlFunctionSignatureHelp("select reverse(", "select reverse(".length, "mysql")?.parameters, ["string"]);
+
+  for (const databaseType of ["postgres", "sqlserver"] as const) {
+    assert.equal(
+      buildFunctionItems("ver", databaseType).some((item) => item.label === "VERSION"),
+      false,
+    );
+    assert.equal(
+      buildFunctionItems("reve", databaseType).some((item) => item.label === "REVERSE"),
+      false,
+    );
+    assert.equal(getSqlFunctionSignatureHelp("select version(", "select version(".length, databaseType), null);
+    assert.equal(getSqlFunctionSignatureHelp("select reverse(", "select reverse(".length, databaseType), null);
+  }
+
+  assert.equal(
+    buildFunctionItems("ver").some((item) => item.label === "VERSION"),
+    false,
+  );
+  assert.equal(buildFunctionItems("reve").find((item) => item.label === "REVERSE")?.apply, "REVERSE(${string})");
+});
+
 test("suggests Oracle SQL, PL/SQL, and data type keywords", () => {
   const keywordCases = [
     ["tru", "TRUNCATE"],

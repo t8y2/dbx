@@ -170,6 +170,14 @@ pub struct ConnectionConfig {
     pub jdbc_driver_paths: Vec<String>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub one_time: bool,
+    /// Whether the database password may be persisted locally (SQLite
+    /// `connection_secrets`). When false, the `"password"` secret is never
+    /// written (or is deleted) and the user must type it on every connect.
+    /// Defaults to `true` so pre-existing saved connections keep current
+    /// behavior; a bare `#[serde(default)]` would upgrade them to "don't save"
+    /// and delete every stored password on the next save.
+    #[serde(default = "default_true")]
+    pub save_password: bool,
     #[serde(default, skip_serializing_if = "is_false")]
     pub read_only: bool,
     /// Explicitly marks every database reachable through this connection as production.
@@ -509,6 +517,8 @@ pub enum DatabaseType {
     Elasticsearch,
     #[serde(rename = "easysearch")]
     Easysearch,
+    #[serde(rename = "meilisearch")]
+    Meilisearch,
     Hbase,
     #[serde(rename = "qdrant")]
     Qdrant,
@@ -691,6 +701,8 @@ struct ConnectionConfigData {
     pub jdbc_driver_paths: Vec<String>,
     #[serde(default)]
     pub one_time: bool,
+    #[serde(default = "default_true")]
+    pub save_password: bool,
     #[serde(default)]
     pub read_only: bool,
     #[serde(default)]
@@ -754,6 +766,7 @@ impl From<ConnectionConfigData> for ConnectionConfig {
             jdbc_driver_class: data.jdbc_driver_class,
             jdbc_driver_paths: data.jdbc_driver_paths,
             one_time: data.one_time,
+            save_password: data.save_password,
             read_only: data.read_only,
             is_production: data.is_production,
             production_databases: data.production_databases,
@@ -1081,6 +1094,7 @@ impl ConnectionConfig {
             DatabaseType::Oracle => format!("oracle://{host}:{port}{db_part}"),
             DatabaseType::Elasticsearch
             | DatabaseType::Easysearch
+            | DatabaseType::Meilisearch
             | DatabaseType::Hbase
             | DatabaseType::Qdrant
             | DatabaseType::Milvus
@@ -1245,6 +1259,7 @@ impl ConnectionConfig {
             }
             DatabaseType::Elasticsearch
             | DatabaseType::Easysearch
+            | DatabaseType::Meilisearch
             | DatabaseType::Hbase
             | DatabaseType::Qdrant
             | DatabaseType::Milvus
@@ -2317,6 +2332,12 @@ mod tests {
     }
 
     #[test]
+    fn meilisearch_database_type_serializes_stably() {
+        assert_eq!(serde_json::to_string(&DatabaseType::Meilisearch).unwrap(), "\"meilisearch\"");
+        assert_eq!(serde_json::from_str::<DatabaseType>("\"meilisearch\"").unwrap(), DatabaseType::Meilisearch);
+    }
+
+    #[test]
     fn connection_test_result_uses_camel_case_and_omits_missing_details() {
         let result =
             ConnectionTestResult::success("Connection successful").with_database_info(Some(DatabaseConnectionInfo {
@@ -2425,6 +2446,7 @@ mod tests {
             jdbc_driver_class: None,
             jdbc_driver_paths: Vec::new(),
             one_time: false,
+            save_password: true,
             read_only: false,
             is_production: false,
             production_databases: vec![],

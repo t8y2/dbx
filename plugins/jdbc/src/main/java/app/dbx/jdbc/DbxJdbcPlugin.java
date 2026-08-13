@@ -691,6 +691,7 @@ public final class DbxJdbcPlugin {
         Connection conn = openConnection(connection);
         applyExecutionContext(connection, conn, database, schema);
         JdbcDriverQuirks quirks = driverQuirks(connection);
+        boolean preserveOracleDateTime = isOracleUrl(jdbcUrl(connection));
         try (Statement statement = conn.createStatement()) {
             applyStatementOptions(statement, maxRows, fetchSize, timeoutSecs, quirks);
             String trimmedSql = trimStatementSql(sql);
@@ -715,7 +716,7 @@ public final class DbxJdbcPlugin {
                         }
                         ArrayNode row = MAPPER.createArrayNode();
                         for (int i = 1; i <= columnCount; i++) {
-                            row.add(MAPPER.valueToTree(readValue(rs, meta, i)));
+                            row.add(MAPPER.valueToTree(readValue(rs, meta, i, preserveOracleDateTime)));
                         }
                         rows.add(row);
                     }
@@ -744,6 +745,7 @@ public final class DbxJdbcPlugin {
         private final long startNanos;
         private final Connection connection;
         private final boolean restoreAutoCommit;
+        private final boolean preserveOracleDateTime;
         private int rowsReturned;
         private ArrayNode pendingRow;
 
@@ -756,7 +758,8 @@ public final class DbxJdbcPlugin {
             int maxRows,
             long startNanos,
             Connection connection,
-            boolean restoreAutoCommit
+            boolean restoreAutoCommit,
+            boolean preserveOracleDateTime
         ) {
             this.id = id;
             this.statement = statement;
@@ -767,6 +770,7 @@ public final class DbxJdbcPlugin {
             this.startNanos = startNanos;
             this.connection = connection;
             this.restoreAutoCommit = restoreAutoCommit;
+            this.preserveOracleDateTime = preserveOracleDateTime;
         }
     }
 
@@ -784,6 +788,7 @@ public final class DbxJdbcPlugin {
         Connection conn = openConnection(connection);
         applyExecutionContext(connection, conn, database, schema);
         JdbcDriverQuirks quirks = driverQuirks(connection);
+        boolean preserveOracleDateTime = isOracleUrl(jdbcUrl(connection));
         boolean restoreAutoCommit = beginPagedQueryTransaction(connection, conn);
         Statement statement;
         try {
@@ -828,7 +833,8 @@ public final class DbxJdbcPlugin {
                 maxRows,
                 start,
                 conn,
-                restoreAutoCommit
+                restoreAutoCommit,
+                preserveOracleDateTime
             );
             QUERY_SESSIONS.put(sessionId, session);
             try {
@@ -901,7 +907,7 @@ public final class DbxJdbcPlugin {
                     closeQuerySession(session.id);
                     return queryPageResult(session, rows, false, false);
                 }
-                row = readRow(session.resultSet, session.meta);
+                row = readRow(session.resultSet, session.meta, session.preserveOracleDateTime);
             }
             rows.add(row);
             session.rowsReturned++;
@@ -919,7 +925,7 @@ public final class DbxJdbcPlugin {
             return queryPageResult(session, rows, false, false);
         }
 
-        session.pendingRow = readRow(session.resultSet, session.meta);
+        session.pendingRow = readRow(session.resultSet, session.meta, session.preserveOracleDateTime);
         return queryPageResult(session, rows, false, true);
     }
 
@@ -969,10 +975,14 @@ public final class DbxJdbcPlugin {
         }
     }
 
-    private static ArrayNode readRow(ResultSet rs, ResultSetMetaData meta) throws SQLException {
+    private static ArrayNode readRow(
+        ResultSet rs,
+        ResultSetMetaData meta,
+        boolean preserveOracleDateTime
+    ) throws SQLException {
         ArrayNode row = MAPPER.createArrayNode();
         for (int i = 1; i <= meta.getColumnCount(); i++) {
-            row.add(MAPPER.valueToTree(readValue(rs, meta, i)));
+            row.add(MAPPER.valueToTree(readValue(rs, meta, i, preserveOracleDateTime)));
         }
         return row;
     }
@@ -1066,6 +1076,11 @@ public final class DbxJdbcPlugin {
         String planText = null;
         String dmMethod = null;
 
+        if (!autotrace && isOracleConnection(connection)) {
+            planText = getOracleExplainInfo(conn, sql, timeoutSecs);
+            dmMethod = "oracle-plan-table";
+        }
+
         if (autotrace) {
             if (!isSafeAutotraceSql(sql)) {
                 throw new IllegalArgumentException("unsafe");
@@ -1108,7 +1123,7 @@ public final class DbxJdbcPlugin {
                     } catch (Exception ignored) {}
                 }
             }
-        } else {
+        } else if (planText == null) {
             // ── Explain mode: direct plan via getExplainInfo(sqlStr), no execution ──
             try {
                 Class<?> dmConnClass = Class.forName("dm.jdbc.driver.DmdbConnection");
@@ -1141,6 +1156,53 @@ public final class DbxJdbcPlugin {
         result.put("has_actual_stats", "getExplainInfo(stmt)".equals(dmMethod));
         result.put("mode", autotrace ? "autotrace" : "explain");
         return result;
+    }
+
+    private static boolean isOracleConnection(JsonNode connection) {
+        String url = optionalText(connection, "connection_string");
+        return url != null && url.regionMatches(true, 0, "jdbc:oracle:", 0, "jdbc:oracle:".length());
+    }
+
+    private static String getOracleExplainInfo(Connection connection, String sql, int timeoutSecs) throws SQLException {
+        String statementId = "DBX_" + UUID.randomUUID().toString().replace("-", "").substring(0, 26);
+        StringBuilder plan = new StringBuilder();
+        try {
+            try (PreparedStatement explain = connection.prepareStatement(
+                "EXPLAIN PLAN SET STATEMENT_ID = '" + statementId + "' FOR " + trimStatementSql(sql)
+            )) {
+                applyExplainTimeout(explain, timeoutSecs);
+                explain.execute();
+            }
+            try (PreparedStatement read = connection.prepareStatement(
+                "SELECT PLAN_TABLE_OUTPUT FROM TABLE(DBMS_XPLAN.DISPLAY('PLAN_TABLE', ?, 'TYPICAL +PREDICATE'))"
+            )) {
+                applyExplainTimeout(read, timeoutSecs);
+                read.setString(1, statementId);
+                try (ResultSet rows = read.executeQuery()) {
+                    while (rows.next()) {
+                        if (plan.length() > 0) plan.append('\n');
+                        plan.append(rows.getString(1));
+                    }
+                }
+            }
+            return plan.toString();
+        } finally {
+            try (PreparedStatement cleanup = connection.prepareStatement(
+                "DELETE FROM PLAN_TABLE WHERE STATEMENT_ID = ?"
+            )) {
+                applyExplainTimeout(cleanup, timeoutSecs);
+                cleanup.setString(1, statementId);
+                cleanup.executeUpdate();
+            } catch (SQLException ignored) {}
+        }
+    }
+
+    private static void applyExplainTimeout(Statement statement, int timeoutSecs) throws SQLException {
+        if (timeoutSecs >= 0) {
+            try {
+                statement.setQueryTimeout(timeoutSecs);
+            } catch (SQLFeatureNotSupportedException | UnsupportedOperationException ignored) {}
+        }
     }
 
     private static void applyStatementOptions(
@@ -2969,7 +3031,12 @@ public final class DbxJdbcPlugin {
         return keys;
     }
 
-    private static Object readValue(ResultSet rs, ResultSetMetaData meta, int index) throws SQLException {
+    private static Object readValue(
+        ResultSet rs,
+        ResultSetMetaData meta,
+        int index,
+        boolean preserveOracleDateTime
+    ) throws SQLException {
         Object value = rs.getObject(index);
         if (value == null) {
             return null;
@@ -2981,7 +3048,7 @@ public final class DbxJdbcPlugin {
             byte[] bytes = rs.getBytes(index);
             return bytes == null ? null : binaryToHex(bytes);
         }
-        Object temporalValue = readTemporalValue(rs, meta, index);
+        Object temporalValue = readTemporalValue(rs, meta, index, preserveOracleDateTime);
         if (temporalValue != null) {
             return temporalValue;
         }
@@ -2997,9 +3064,18 @@ public final class DbxJdbcPlugin {
         return value.toString();
     }
 
-    private static Object readTemporalValue(ResultSet rs, ResultSetMetaData meta, int index) throws SQLException {
+    private static Object readTemporalValue(
+        ResultSet rs,
+        ResultSetMetaData meta,
+        int index,
+        boolean preserveOracleDateTime
+    ) throws SQLException {
         return switch (meta.getColumnType(index)) {
             case Types.DATE -> {
+                if (preserveOracleDateTime) {
+                    Timestamp timestamp = rs.getTimestamp(index);
+                    yield timestamp == null ? null : timestamp.toString();
+                }
                 Date date = rs.getDate(index);
                 yield date == null ? null : date.toString();
             }

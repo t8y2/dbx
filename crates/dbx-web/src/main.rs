@@ -338,6 +338,7 @@ async fn main() {
         .route("/connection/save", post(routes::connection::save_connections))
         .route("/connection/list", get(routes::connection::load_connections))
         .route("/connection/mcp/add", post(routes::connection::mcp_add_connection))
+        .route("/connection/mcp/duplicate", post(routes::connection::mcp_duplicate_connection))
         .route("/connection/mcp/remove", post(routes::connection::mcp_remove_connection))
         .route("/plugins", get(routes::plugins::list_plugins))
         // JDBC
@@ -774,6 +775,7 @@ async fn main() {
         .route("/document-store/insert-document", post(routes::document_store::insert_document))
         .route("/document-store/update-document", post(routes::document_store::update_document))
         .route("/document-store/delete-document", post(routes::document_store::delete_document))
+        .route("/document-store/save-meilisearch-batch", post(routes::document_store::save_meilisearch_batch))
         .route("/mongo/find-documents", post(routes::mongo::find_documents))
         .route("/mongo/parse-shell-command", post(routes::mongo::parse_shell_command))
         .route("/mongo/explain-find", post(routes::mongo::explain_find))
@@ -785,6 +787,7 @@ async fn main() {
         .route("/mongo/distinct", post(routes::mongo::distinct))
         .route("/mongo/create-index", post(routes::mongo::create_index))
         .route("/mongo/create-user", post(routes::mongo::create_user))
+        .route("/mongo/run-command", post(routes::mongo::run_command))
         .route("/mongo/drop-indexes", post(routes::mongo::drop_indexes))
         .route("/mongo/insert-document", post(routes::mongo::insert_document))
         .route("/mongo/insert-documents", post(routes::mongo::insert_documents))

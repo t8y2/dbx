@@ -1,7 +1,7 @@
 import { DEFAULT_SQL_FORMATTER_SETTINGS, normalizeSqlFormatterSettings, sqlFormatterOptions, type SqlFormatterSettings } from "@/lib/sql/sqlFormatterConfig";
 import { looksLikeXml } from "@/lib/sql/autoFormat";
 
-export type SqlFormatDialect = "mysql" | "postgres" | "sqlite" | "sqlserver" | "clickhouse" | "generic";
+export type SqlFormatDialect = "mysql" | "postgres" | "sqlite" | "sqlserver" | "clickhouse" | "dameng" | "generic";
 
 export const MAX_SQL_FORMAT_CHARS = 1_000_000;
 
@@ -53,6 +53,8 @@ export function sqlFormatDialectForDbType(dbType: string | null | undefined): Sq
       return "sqlserver";
     case "clickhouse":
       return "clickhouse";
+    case "dameng":
+      return "dameng";
     default:
       return "generic";
   }
@@ -75,6 +77,16 @@ function formatterLanguage(dialect: SqlFormatDialect) {
   }
 }
 
+function splitTrailingStandaloneDot(sql: string): { body: string; suffix: string } | null {
+  const match = /\s+\.(\s*)$/.exec(sql);
+  if (!match || match.index === 0) return null;
+
+  return {
+    body: sql.slice(0, match.index),
+    suffix: match[0],
+  };
+}
+
 export async function formatSqlText(sql: string, dialect: SqlFormatDialect = "generic", settings: Partial<SqlFormatterSettings> = DEFAULT_SQL_FORMATTER_SETTINGS): Promise<string> {
   if (!sql.trim()) return sql;
   if (sql.length > MAX_SQL_FORMAT_CHARS) {
@@ -89,23 +101,37 @@ export async function formatSqlText(sql: string, dialect: SqlFormatDialect = "ge
   const normalizedSettings = normalizeSqlFormatterSettings(settings);
   const options = sqlFormatterOptions(normalizedSettings);
   const language = formatterLanguage(dialect);
-  try {
-    const formatted = format(sql, { language, ...options });
-    return applySqlFormatterLayout(formatted, normalizedSettings, dialect);
-  } catch (err) {
-    // The generic "sql" dialect can't parse many real-world constructs (PostgreSQL
-    // `::` casts, GaussDB/openGauss materialized-view DDL, T-SQL specifics, ...).
-    // Retry once with the more permissive PostgreSQL grammar, which is a superset
-    // that tolerates most of these, before surfacing the failure.
-    if (language !== "postgresql") {
-      try {
-        const formatted = format(sql, { language: "postgresql", ...options });
-        return applySqlFormatterLayout(formatted, normalizedSettings, dialect);
-      } catch {
-        // fall through to the original error below
+  const formatWithFallback = (input: string): string => {
+    try {
+      return format(input, { language, ...options });
+    } catch (err) {
+      // The generic "sql" dialect can't parse many real-world constructs (PostgreSQL
+      // `::` casts, GaussDB/openGauss materialized-view DDL, T-SQL specifics, ...).
+      // Retry once with the more permissive PostgreSQL grammar, which is a superset
+      // that tolerates most of these, before surfacing the failure.
+      if (language !== "postgresql") {
+        try {
+          return format(input, { language: "postgresql", ...options });
+        } catch {
+          // fall through to the original error below
+        }
       }
+      throw err;
     }
-    throw err;
+  };
+
+  try {
+    return applySqlFormatterLayout(formatWithFallback(sql), normalizedSettings, dialect);
+  } catch (err) {
+    const trailingDot = dialect === "dameng" ? splitTrailingStandaloneDot(sql) : null;
+    if (!trailingDot) throw err;
+
+    try {
+      const formatted = applySqlFormatterLayout(formatWithFallback(trailingDot.body), normalizedSettings, dialect);
+      return `${formatted}${trailingDot.suffix}`;
+    } catch {
+      throw err;
+    }
   }
 }
 
@@ -339,8 +365,21 @@ function applySqlFormatterLayout(sql: string, settings: SqlFormatterSettings, di
   return formatted;
 }
 
+/**
+ * sql-formatter throws two distinct shapes when it can't parse the input:
+ * - Grammar-level (nearley parser): `Parse error at token: ... ` with `.offset`/`.token`
+ *   set on the error, e.g. valid tokens in an unexpected position (mid-edit SQL).
+ * - Lexer-level (TokenizerEngine): a plain `Parse error: Unexpected "..." at line ...`
+ *   when a character sequence doesn't match any token rule at all — e.g. full-width
+ *   punctuation (`≠`, `（`, `）`) that MySQL accepts in identifiers/expressions but
+ *   sql-formatter's tokenizer doesn't recognize.
+ * Both mean "sql-formatter can't handle this text", so both should fall back to the
+ * original SQL instead of surfacing a failure.
+ */
 function isSqlFormatterParseError(error: unknown): boolean {
-  if (!(error instanceof Error) || !error.message.startsWith("Parse error at token:")) return false;
+  if (!(error instanceof Error)) return false;
+  if (error.message.startsWith("Parse error: Unexpected ")) return true;
+  if (!error.message.startsWith("Parse error at token:")) return false;
   const candidate = error as Error & { offset?: unknown; token?: unknown };
   return typeof candidate.offset === "number" && candidate.token !== undefined;
 }

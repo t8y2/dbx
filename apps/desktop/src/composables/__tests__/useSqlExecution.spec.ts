@@ -1,7 +1,7 @@
 import { computed, ref } from "vue";
 import { createPinia, setActivePinia } from "pinia";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { requiresDatabaseSelection, useSqlExecution } from "../useSqlExecution";
+import { isDangerousSql, requiresDatabaseSelection, supportsSqlTemplateParameters, useSqlExecution } from "../useSqlExecution";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useHistoryStore } from "@/stores/historyStore";
 import { useQueryStore } from "@/stores/queryStore";
@@ -112,6 +112,13 @@ describe("requiresDatabaseSelection", () => {
 
   it("allows PostgreSQL with default database (empty string) to execute queries", () => {
     expect(requiresDatabaseSelection(queryTab(""), connection("postgres"), "SELECT * FROM public.users")).toBe(false);
+  });
+});
+
+describe("supportsSqlTemplateParameters", () => {
+  it("disables SQL parameter prompts for Meilisearch input", () => {
+    expect(supportsSqlTemplateParameters(connection("meilisearch"), "GET /indexes/:uid")).toBe(false);
+    expect(supportsSqlTemplateParameters(connection("meilisearch"), "plain :value")).toBe(false);
   });
 });
 
@@ -727,6 +734,30 @@ SELECT @value AS Message;`;
     expect(activeTab.value?.result).toEqual(result);
   });
 
+  it("uses the inferred Oracle dialect when explaining through custom JDBC", async () => {
+    const sql = "SELECT * FROM DUAL";
+    const activeTab = ref<QueryTab | undefined>({ ...queryTab("ORCL"), sql });
+    const activeConnection = ref<ConnectionConfig | undefined>({
+      ...connection("jdbc"),
+      connection_string: "jdbc:oracle:thin:@127.0.0.1:1521:ORCL",
+      jdbc_driver_class: "oracle.jdbc.OracleDriver",
+    });
+    const activeOutputView = ref<"result" | "summary" | "explain" | "chart">("result");
+    const queryStore = useQueryStore();
+    const explainTabSql = vi.spyOn(queryStore, "explainTabSql").mockResolvedValue({ ok: true, sql });
+
+    const execution = useSqlExecution({
+      activeTab: computed(() => activeTab.value),
+      activeConnection: computed(() => activeConnection.value),
+      executableSql: computed(() => sql),
+      activeOutputView,
+    });
+
+    await execution.tryExplain();
+
+    expect(explainTabSql).toHaveBeenCalledWith("tab-1", sql, "oracle", "explain");
+  });
+
   it("keeps the new-result-tab intent through Redis command confirmation", async () => {
     const sql = "DEL user:1";
     const activeTab = ref<QueryTab | undefined>({ ...queryTab("0"), sql });
@@ -754,6 +785,20 @@ SELECT @value AS Message;`;
     await execution.onDangerConfirm();
 
     expect(executeCurrentSql).toHaveBeenCalledWith(sql, { skipRedisSafetyCheck: false, openInNewResultTab: true });
+  });
+
+  it("distinguishes read-only and mutating Meilisearch REST requests", () => {
+    expect(isDangerousSql("GET /health", "meilisearch")).toBe(false);
+    expect(isDangerousSql('POST /indexes/movies/documents/fetch\n{"limit":10}', "meilisearch")).toBe(false);
+    expect(isDangerousSql('POST /indexes/movies/search\n{"q":"space"}', "meilisearch")).toBe(false);
+    expect(isDangerousSql('POST /indexes\n{"uid":"movies"}', "meilisearch")).toBe(true);
+    expect(isDangerousSql("PUT /indexes/movies/settings", "meilisearch")).toBe(true);
+    expect(isDangerousSql("DELETE /indexes/movies/documents/001", "meilisearch")).toBe(true);
+  });
+
+  it("treats Elasticsearch PATCH requests as mutating", () => {
+    expect(isDangerousSql('PATCH /products/_settings\n{"index":{"refresh_interval":"5s"}}', "elasticsearch")).toBe(true);
+    expect(isDangerousSql('PATCH /products/_settings\n{"index":{"refresh_interval":"5s"}}', "easysearch")).toBe(true);
   });
 
   it("requires production confirmation even when ordinary danger prompts are disabled", async () => {

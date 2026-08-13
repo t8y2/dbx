@@ -2540,6 +2540,29 @@ pub async fn completion_assistant_search(
         }
     }
 
+    if candidates.len() < limit && kinds.iter().any(|kind| matches!(kind, CompletionAssistantObjectKind::Sequence)) {
+        let rows = postgres_query_cached(
+            &client,
+            postgres_completion_sequences_sql(),
+            &[&schema, &pattern, &request.case_sensitive, &((limit - candidates.len()) as i64)],
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+        for row in rows {
+            candidates.push(CompletionAssistantCandidate {
+                name: pg_row_try_string(&row, 0),
+                kind: CompletionAssistantCandidateKind::Sequence,
+                database: Some(request.database.clone()),
+                schema: Some(pg_row_try_string(&row, 1)),
+                parent_schema: None,
+                parent_name: None,
+                comment: row.try_get::<_, Option<String>>(2).ok().flatten(),
+                data_type: None,
+                signature: None,
+            });
+        }
+    }
+
     if candidates.len() < limit && kinds.iter().any(|kind| matches!(kind, CompletionAssistantObjectKind::Column)) {
         let table = request.parent_name.as_deref().unwrap_or("");
         if !table.is_empty() {
@@ -2609,6 +2632,22 @@ fn postgres_completion_routines_sql() -> &'static str {
      WHERE n.nspname = $1 AND p.prokind::text = ANY($3::text[]) \
        AND ($2 = '%%' OR p.proname ILIKE $2 ESCAPE '~') \
      ORDER BY p.proname LIMIT $4"
+}
+
+fn postgres_completion_sequences_sql() -> &'static str {
+    "SELECT c.relname, n.nspname, obj_description(c.oid) AS sequence_comment \
+     FROM pg_catalog.pg_class c \
+     JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+     WHERE ($1::text IS NOT NULL AND n.nspname = $1 \
+            OR $1::text IS NULL AND pg_catalog.pg_table_is_visible(c.oid)) \
+       AND c.relkind = 'S' \
+       AND pg_catalog.has_schema_privilege(n.oid, 'USAGE') \
+       AND CASE WHEN c.relkind = 'S' \
+                THEN pg_catalog.has_sequence_privilege(c.oid, 'USAGE, SELECT, UPDATE') \
+                ELSE FALSE END \
+       AND ($2 = '%%' OR CASE WHEN $3 THEN c.relname LIKE $2 ESCAPE '~' \
+                              ELSE c.relname ILIKE $2 ESCAPE '~' END) \
+     ORDER BY c.relname LIMIT $4"
 }
 
 fn postgres_completion_columns_sql() -> &'static str {
@@ -9121,6 +9160,90 @@ mod tests {
             .expect("drop live table fixtures");
     }
 
+    #[tokio::test]
+    #[ignore = "requires DBX_TEST_POSTGRES_URL pointing at a writable PostgreSQL database"]
+    async fn completion_assistant_searches_visible_and_qualified_sequences() {
+        let url = std::env::var("DBX_TEST_POSTGRES_URL").expect("DBX_TEST_POSTGRES_URL");
+        let pool = connect_with_local_timezone(&url, Duration::from_secs(5), "UTC")
+            .await
+            .expect("connect PostgreSQL database");
+        let client = pool.get().await.expect("checkout postgres");
+        client
+            .batch_execute(
+                r#"DROP SCHEMA IF EXISTS dbx_issue_4005_visible CASCADE;
+                   DROP SCHEMA IF EXISTS dbx_issue_4005_shadowed CASCADE;
+                   CREATE SCHEMA dbx_issue_4005_visible;
+                   CREATE SCHEMA dbx_issue_4005_shadowed;
+                   CREATE SEQUENCE dbx_issue_4005_visible.order_seq;
+                   CREATE SEQUENCE dbx_issue_4005_shadowed.order_seq;
+                   CREATE SEQUENCE dbx_issue_4005_visible."OrderSequence";
+                   SET search_path = dbx_issue_4005_visible, dbx_issue_4005_shadowed, public;"#,
+            )
+            .await
+            .expect("create live sequence fixtures");
+        drop(client);
+
+        let visible = completion_assistant_search(
+            &pool,
+            &CompletionAssistantRequest {
+                connection_id: "live".into(),
+                database: "postgres".into(),
+                schema: None,
+                object_kinds: vec![CompletionAssistantObjectKind::Sequence],
+                mask: "order_".into(),
+                case_sensitive: false,
+                global_search: false,
+                max_results: Some(20),
+                search_in_comments: false,
+                search_in_definitions: false,
+                parent_schema: None,
+                parent_name: None,
+                match_mode: Some(CompletionAssistantMatchMode::Prefix),
+            },
+        )
+        .await
+        .expect("complete visible sequence");
+        assert_eq!(
+            visible
+                .candidates
+                .iter()
+                .map(|candidate| (candidate.name.as_str(), candidate.schema.as_deref()))
+                .collect::<Vec<_>>(),
+            [("order_seq", Some("dbx_issue_4005_visible"))]
+        );
+
+        let qualified = completion_assistant_search(
+            &pool,
+            &CompletionAssistantRequest {
+                connection_id: "live".into(),
+                database: "postgres".into(),
+                schema: Some("dbx_issue_4005_visible".into()),
+                object_kinds: vec![CompletionAssistantObjectKind::Sequence],
+                mask: "OrderS".into(),
+                case_sensitive: true,
+                global_search: false,
+                max_results: Some(20),
+                search_in_comments: false,
+                search_in_definitions: false,
+                parent_schema: None,
+                parent_name: None,
+                match_mode: Some(CompletionAssistantMatchMode::Prefix),
+            },
+        )
+        .await
+        .expect("complete qualified mixed-case sequence");
+        assert_eq!(qualified.candidates[0].name, "OrderSequence");
+
+        let client = pool.get().await.expect("checkout postgres for cleanup");
+        client
+            .batch_execute(
+                r#"DROP SCHEMA IF EXISTS dbx_issue_4005_visible CASCADE;
+                   DROP SCHEMA IF EXISTS dbx_issue_4005_shadowed CASCADE;"#,
+            )
+            .await
+            .expect("drop live sequence fixtures");
+    }
+
     #[test]
     fn like_contains_pattern_escapes_wildcards() {
         assert_eq!(like_contains_pattern(""), "%%");
@@ -9174,6 +9297,15 @@ mod tests {
         assert!(postgres_completion_routines_sql().contains("p.prokind::text = ANY($3::text[])"));
         assert!(postgres_completion_routines_sql().contains("pg_get_function_identity_arguments(p.oid) AS signature"));
         assert!(postgres_completion_routines_sql().contains("ORDER BY p.proname LIMIT $4"));
+        assert!(postgres_completion_sequences_sql().contains("c.relkind = 'S'"));
+        assert!(postgres_completion_sequences_sql().contains("has_schema_privilege(n.oid, 'USAGE')"));
+        assert!(postgres_completion_sequences_sql().contains("pg_catalog.pg_table_is_visible(c.oid)"));
+        assert!(postgres_completion_sequences_sql().contains("CASE WHEN c.relkind = 'S'"));
+        assert!(postgres_completion_sequences_sql()
+            .contains("THEN pg_catalog.has_sequence_privilege(c.oid, 'USAGE, SELECT, UPDATE')"));
+        assert!(postgres_completion_sequences_sql().contains("CASE WHEN $3 THEN c.relname LIKE $2 ESCAPE '~'"));
+        assert!(postgres_completion_sequences_sql().contains("ELSE c.relname ILIKE $2 ESCAPE '~' END"));
+        assert!(postgres_completion_sequences_sql().contains("ORDER BY c.relname LIMIT $4"));
         assert!(postgres_completion_columns_sql().contains("a.attname ILIKE $3 ESCAPE '~'"));
         assert!(postgres_visible_table_schema_sql().contains("pg_catalog.pg_table_is_visible(c.oid)"));
     }

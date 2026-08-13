@@ -1,6 +1,6 @@
 # Hive JDBC to Go migration parity
 
-Status date: 2026-08-11.
+Status date: 2026-08-12.
 
 The migration is not complete until a capability is implemented, covered by
 automated tests, validated against a real compatible server, and included in
@@ -14,8 +14,10 @@ production parity.
   JDBC profiles. The Go migration must not infer Hive 2 support from Hive 3/4.
 - DBX protocol baseline: the Go Agent implements the same stdin/stdout JSON-RPC
   methods used by the Java Agent.
-- HS2 client protocol: Go requests `HIVE_CLI_SERVICE_PROTOCOL_V10`; Hive 3.1.3
-  and Hive 4.2.0 accepted it in live validation.
+- HS2 client protocol: Go requests `HIVE_CLI_SERVICE_PROTOCOL_V6`, matching the
+  upstream GoHive compatibility baseline. Hive 3.1.3 and Hive 4.2.0 accepted
+  the newer V10 request in earlier live validation, but older Hive-compatible
+  servers can reject that unknown enum value during `OpenSession` decoding.
 - The current completion pass validates the Go Agent only. JDBC is retained as
   a historical behavior reference, not as a candidate in the secure discovery
   or Kerberos validation path.

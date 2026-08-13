@@ -51,3 +51,22 @@ func TestCursorAffectedRowsNormalizesMissingAndNegativeValues(t *testing.T) {
 		}
 	}
 }
+
+func TestOpenSessionRequestUsesLegacyCompatibleProtocol(t *testing.T) {
+	configuration := &connectConfiguration{
+		Username:          "admin",
+		Password:          "secret",
+		HiveConfiguration: map[string]string{"use:database": "default"},
+	}
+	request := newOpenSessionRequest(configuration)
+
+	if request.ClientProtocol != hiveserver.TProtocolVersion_HIVE_CLI_SERVICE_PROTOCOL_V6 {
+		t.Fatalf("unexpected HiveServer2 client protocol: %s", request.ClientProtocol)
+	}
+	if request.GetUsername() != configuration.Username || request.GetPassword() != configuration.Password {
+		t.Fatalf("unexpected OpenSession credentials: %#v", request)
+	}
+	if request.Configuration["use:database"] != "default" {
+		t.Fatalf("unexpected OpenSession configuration: %#v", request.Configuration)
+	}
+}

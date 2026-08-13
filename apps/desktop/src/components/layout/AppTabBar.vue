@@ -534,7 +534,7 @@ function tabMenuIcon(tab: QueryTab) {
   if (tab.mode === "objects") return TableProperties;
   if (tab.mode === "structure") return PencilRuler;
   if (tab.mode === "dameng-jobs") return CalendarClock;
-  if (tab.mode === "processlist") return Activity;
+  if (tab.mode === "processlist" || tab.mode === "sqlserver-trace") return Activity;
   if (tab.mode === "mysql-dashboard" || tab.mode === "postgres-dashboard" || tab.mode === "nacos-dashboard") return Gauge;
   return Code2;
 }
@@ -682,7 +682,7 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
                       <TableProperties v-else-if="tab.mode === 'objects'" class="h-3.5 w-3.5" />
                       <PencilRuler v-else-if="tab.mode === 'structure'" class="h-3.5 w-3.5" />
                       <CalendarClock v-else-if="tab.mode === 'dameng-jobs'" class="h-3.5 w-3.5" />
-                      <Activity v-else-if="tab.mode === 'processlist'" class="h-3.5 w-3.5" />
+                      <Activity v-else-if="tab.mode === 'processlist' || tab.mode === 'sqlserver-trace'" class="h-3.5 w-3.5" />
                       <Gauge v-else-if="tab.mode === 'mysql-dashboard' || tab.mode === 'postgres-dashboard' || tab.mode === 'nacos-dashboard'" class="h-3.5 w-3.5" />
                       <Code2 v-else class="h-3.5 w-3.5" />
                     </span>
@@ -880,7 +880,7 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
                       <TableProperties v-else-if="tab.mode === 'objects'" class="h-3.5 w-3.5" />
                       <PencilRuler v-else-if="tab.mode === 'structure'" class="h-3.5 w-3.5" />
                       <CalendarClock v-else-if="tab.mode === 'dameng-jobs'" class="h-3.5 w-3.5" />
-                      <Activity v-else-if="tab.mode === 'processlist'" class="h-3.5 w-3.5" />
+                      <Activity v-else-if="tab.mode === 'processlist' || tab.mode === 'sqlserver-trace'" class="h-3.5 w-3.5" />
                       <Gauge v-else-if="tab.mode === 'mysql-dashboard' || tab.mode === 'postgres-dashboard' || tab.mode === 'nacos-dashboard'" class="h-3.5 w-3.5" />
                       <Code2 v-else class="h-3.5 w-3.5" />
                     </span>

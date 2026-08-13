@@ -8,7 +8,9 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock("vue-i18n", () => ({
-  useI18n: () => ({ t: (key: string) => key }),
+  useI18n: () => ({
+    t: (key: string, params?: Record<string, unknown>) => (params ? `${key}:${JSON.stringify(params)}` : key),
+  }),
 }));
 
 vi.mock("@/composables/useToast", () => ({
@@ -39,16 +41,17 @@ function connectionStore(selectedTreeNodeIds: string[]) {
     createConnectionGroup: vi.fn(() => "group-new"),
     connectedIds: new Set<string>(),
     connectingIds: new Set<string>(),
+    disconnect: vi.fn().mockResolvedValue(undefined),
     isTreeNodeChildrenLoaded: vi.fn(() => false),
     getConfig: vi.fn(() => undefined),
   };
 }
 
-function runtime(activeNode: TreeNode, store: ReturnType<typeof connectionStore>) {
+function runtime(activeNode: TreeNode, store: ReturnType<typeof connectionStore>, selectedNodes: TreeNode[] = []) {
   return useSidebarConnectionMutationRuntime({
     activeNode: shallowRef(activeNode),
     releaseActiveNodeReference: vi.fn(),
-    selectedTreeNodesInVisibleOrder: () => [],
+    selectedTreeNodesInVisibleOrder: () => selectedNodes,
     connectionStore: store as any,
     queryStore: { openDatabaseKeys: new Set<string>() } as any,
     requestGroupRename: vi.fn(),
@@ -125,5 +128,66 @@ describe("sidebar connection move selection", () => {
     expect(() => moveToGroup("group-a")).toThrow("move failed");
     expect(store.selectedTreeNodeIds).toEqual(["conn-active", "conn-hidden"]);
     expect(store.connectionMultiSelectActive).toBe(true);
+  });
+});
+
+describe("sidebar connection disconnect selection", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    sidebarFormTarget.value = null;
+  });
+
+  it("disconnects every connected connection in the right-clicked selection", async () => {
+    const nodes = [connectionNode("conn-1"), connectionNode("conn-2"), connectionNode("conn-3")];
+    const store = connectionStore(nodes.map((node) => node.id));
+    store.connectedIds = new Set(["conn-1", "conn-3"]);
+    const { disconnectConnection, connectionDisconnectMenuLabel } = runtime(nodes[1], store, nodes);
+
+    expect(connectionDisconnectMenuLabel()).toBe('contextMenu.closeSelectedConnections:{"count":2}');
+    await disconnectConnection();
+
+    expect(store.disconnect.mock.calls).toEqual([["conn-1"], ["conn-3"]]);
+    expect(mocks.toast).toHaveBeenCalledWith('connection.disconnectedSelected:{"count":2}', 2000);
+  });
+
+  it("recomputes disconnect availability when the selected connections change", () => {
+    const nodes = [connectionNode("conn-1"), connectionNode("conn-2")];
+    const selected = [nodes[0]];
+    const store = connectionStore(selected.map((node) => node.id));
+    store.connectedIds = new Set(["conn-2"]);
+    const { canDisconnectConnection, connectionDisconnectMenuLabel } = runtime(nodes[0], store, selected);
+
+    expect(canDisconnectConnection()).toBe(false);
+
+    selected.push(nodes[1]);
+
+    expect(canDisconnectConnection()).toBe(true);
+    expect(connectionDisconnectMenuLabel()).toBe('contextMenu.closeSelectedConnections:{"count":1}');
+  });
+
+  it("continues disconnecting after one selected connection fails", async () => {
+    const nodes = [connectionNode("conn-1"), connectionNode("conn-2")];
+    const store = connectionStore(nodes.map((node) => node.id));
+    store.connectedIds = new Set(nodes.map((node) => node.connectionId!));
+    store.disconnect.mockRejectedValueOnce(new Error("failed")).mockResolvedValueOnce(undefined);
+    const { disconnectConnection } = runtime(nodes[0], store, nodes);
+
+    await disconnectConnection();
+
+    expect(store.disconnect).toHaveBeenCalledTimes(2);
+    expect(mocks.toast).toHaveBeenCalledWith('connection.disconnectSelectedPartial:{"succeeded":1,"failed":1}', 5000);
+  });
+
+  it("disconnects only the right-clicked connection outside the current selection", async () => {
+    const selected = [connectionNode("conn-1"), connectionNode("conn-2")];
+    const current = connectionNode("conn-3");
+    const store = connectionStore(selected.map((node) => node.id));
+    store.connectedIds = new Set(["conn-1", "conn-2", "conn-3"]);
+    const { disconnectConnection } = runtime(current, store, selected);
+
+    await disconnectConnection();
+
+    expect(store.disconnect).toHaveBeenCalledWith("conn-3");
+    expect(store.disconnect).toHaveBeenCalledTimes(1);
   });
 });

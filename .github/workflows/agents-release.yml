@@ -289,6 +289,46 @@ jobs:
           name: rabbitmq-native
           path: "release-native/dbx-agent-rabbitmq-*"
 
+  build-rocketmq-native:
+    needs: [bump-versions]
+    if: ${{ contains(fromJSON(needs.bump-versions.outputs.native_modules), 'rocketmq') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.x"
+      - name: Test RocketMQ native agent
+        working-directory: agents/drivers/rocketmq
+        run: go test -race ./...
+      - name: Cross-compile RocketMQ native agent
+        shell: bash
+        run: |
+          mkdir -p release-native
+          cd agents/drivers/rocketmq
+          declare -A TARGETS=(
+            ["macos-aarch64"]="darwin/arm64"
+            ["macos-x64"]="darwin/amd64"
+            ["linux-aarch64"]="linux/arm64"
+            ["linux-x64"]="linux/amd64"
+            ["windows-aarch64"]="windows/arm64"
+            ["windows-x64"]="windows/amd64"
+          )
+          for platform in "${!TARGETS[@]}"; do
+            IFS=/ read -r goos goarch <<< "${TARGETS[$platform]}"
+            output="../../../release-native/dbx-agent-rocketmq-${platform}"
+            if [[ "$goos" == "windows" ]]; then
+              output="${output}.exe"
+            fi
+            echo "Building $platform ($goos/$goarch)"
+            CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" go build -trimpath -ldflags="-s -w" -o "$output" .
+          done
+          ls -lh ../../../release-native
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rocketmq-native
+          path: "release-native/dbx-agent-rocketmq-*"
+
   build-cassandra-native:
     needs: [bump-versions]
     if: ${{ contains(fromJSON(needs.bump-versions.outputs.native_modules), 'cassandra') }}
@@ -868,7 +908,7 @@ jobs:
           retention-days: 1
 
   release:
-    needs: [bump-versions, commit-versions, build-agents, build-oracle-native, build-xugu-native, build-rabbitmq-native, build-cassandra-native, build-hive-native, build-kingbase-native, build-vastbase-native, build-neo4j-native, build-iotdb-native, build-duckdb-native, build-tdengine-native, build-jre, reuse-previous-assets]
+    needs: [bump-versions, commit-versions, build-agents, build-oracle-native, build-xugu-native, build-rabbitmq-native, build-rocketmq-native, build-cassandra-native, build-hive-native, build-kingbase-native, build-vastbase-native, build-neo4j-native, build-iotdb-native, build-duckdb-native, build-tdengine-native, build-jre, reuse-previous-assets]
     if: ${{ always() && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') }}
     runs-on: ubuntu-latest
     steps:
@@ -990,6 +1030,7 @@ jobs:
               duckdb) echo "DuckDB" ;;
               xugu) echo "虚谷 XuguDB" ;;
               rabbitmq) echo "RabbitMQ" ;;
+              rocketmq) echo "Apache RocketMQ" ;;
               cassandra) echo "Apache Cassandra" ;;
               hive) echo "Apache Hive" ;;
               neo4j) echo "Neo4j" ;;
@@ -1058,7 +1099,7 @@ jobs:
             [ -n "$DRIVERS" ] && DRIVERS="${DRIVERS},"$'\n'
             DRIVERS="${DRIVERS}$(generate_jar_entry "$name" "$label" "$f" "$jre_key" "$version" "$external_driver" "$native_json")"
           done
-          for name in oracle xugu kingbase vastbase neo4j iotdb duckdb rabbitmq cassandra hive tdengine; do
+          for name in oracle xugu kingbase vastbase neo4j iotdb duckdb rabbitmq rocketmq cassandra hive tdengine; do
             version=$(get_module_version "$name")
             [ -f "release/dbx-agent-${name}-${version}.jar" ] && continue
             native_json=$(generate_native_platforms "$name" "$version")
@@ -1128,6 +1169,7 @@ jobs:
               oracle) echo "Oracle" ;;
               xugu) echo "虚谷 XuguDB" ;;
               rabbitmq) echo "RabbitMQ" ;;
+              rocketmq) echo "Apache RocketMQ" ;;
               cassandra) echo "Apache Cassandra" ;;
               hive) echo "Apache Hive" ;;
               neo4j) echo "Neo4j" ;;

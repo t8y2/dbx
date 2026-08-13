@@ -340,7 +340,7 @@ pub async fn apply_sync_snapshot(
     storage.save_desktop_settings(&snapshot.desktop_settings).await?;
     if let Some(payload) = &sensitive_payload {
         clear_connection_secrets(storage, &connections).await?;
-        apply_sensitive_payload(storage, payload).await?;
+        apply_sensitive_payload(storage, payload, &connections).await?;
     }
     Ok(ApplySnapshotSummary { encrypted_secrets_present, secrets_applied: sensitive_payload.is_some() })
 }
@@ -999,7 +999,10 @@ async fn build_sensitive_payload(
 ) -> Result<SensitiveSyncPayload, String> {
     let mut connection_secrets = Vec::new();
     for config in connections {
-        push_secret(&mut connection_secrets, &config.id, "password", &config.password);
+        // A transient password must not become durable through a sync snapshot.
+        if config.save_password {
+            push_secret(&mut connection_secrets, &config.id, "password", &config.password);
+        }
         push_secret(&mut connection_secrets, &config.id, "init_script", config.init_script.as_deref().unwrap_or(""));
         for (index, layer) in config.transport_layers.iter().enumerate() {
             match layer {
@@ -1173,11 +1176,22 @@ fn scrub_json_secret(object: &mut serde_json::Map<String, serde_json::Value>, fi
     }
 }
 
-async fn apply_sensitive_payload(storage: &Storage, payload: &SensitiveSyncPayload) -> Result<(), String> {
+async fn apply_sensitive_payload(
+    storage: &Storage,
+    payload: &SensitiveSyncPayload,
+    connections: &[ConnectionConfig],
+) -> Result<(), String> {
     for secret in &payload.connection_secrets {
         if !SECRET_KEYS.contains(&secret.key.as_str())
             && !secret.key.starts_with(SSH_TUNNEL_SECRET_PREFIX)
             && !secret.key.starts_with(TRANSPORT_LAYER_SECRET_PREFIX)
+        {
+            continue;
+        }
+        // Metadata is applied before secrets. Never let an older encrypted snapshot
+        // restore a password after the user chose not to retain it locally.
+        if secret.key == "password"
+            && connections.iter().any(|config| config.id == secret.connection_id && !config.save_password)
         {
             continue;
         }
@@ -1744,6 +1758,7 @@ mod tests {
             jdbc_driver_class: None,
             jdbc_driver_paths: Vec::new(),
             one_time: false,
+            save_password: true,
             read_only: false,
             is_production: false,
             production_databases: vec![],
@@ -1811,6 +1826,7 @@ mod tests {
             jdbc_driver_class: None,
             jdbc_driver_paths: Vec::new(),
             one_time: false,
+            save_password: true,
             read_only: false,
             is_production: false,
             production_databases: vec![],
@@ -1962,6 +1978,7 @@ mod tests {
             jdbc_driver_class: None,
             jdbc_driver_paths: Vec::new(),
             one_time: false,
+            save_password: true,
             read_only: false,
             is_production: false,
             production_databases: vec![],
@@ -2397,6 +2414,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sync_restore_does_not_revive_password_when_connection_disables_saving() {
+        let source = Storage::open(&temp_db_path("sync-no-save-password-source")).await.unwrap();
+        source.save_connections(&[postgres_connection("pg", "remote-secret")]).await.unwrap();
+        let mut snapshot = build_sync_snapshot(&source, "test-version", None, Some("sync-pass")).await.unwrap();
+        snapshot.connections[0].save_password = false;
+
+        let target = Storage::open(&temp_db_path("sync-no-save-password-target")).await.unwrap();
+        apply_sync_snapshot(
+            &target,
+            &snapshot,
+            ApplySnapshotOptions { secrets_passphrase: Some("sync-pass"), restore_secrets: true },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(target.get_secret("pg", "password").await.unwrap(), None);
+        assert!(target.load_connections().await.unwrap()[0].password.is_empty());
+    }
+
+    #[tokio::test]
+    async fn metadata_only_sync_removes_existing_password_when_connection_disables_saving() {
+        let source = Storage::open(&temp_db_path("sync-no-save-password-metadata-source")).await.unwrap();
+        let mut source_connection = postgres_connection("pg", "unused");
+        source_connection.save_password = false;
+        source.save_connections(&[source_connection]).await.unwrap();
+        let snapshot = build_sync_snapshot(&source, "test-version", None, None).await.unwrap();
+
+        let target = Storage::open(&temp_db_path("sync-no-save-password-metadata-target")).await.unwrap();
+        target.save_connections(&[postgres_connection("pg", "local-secret")]).await.unwrap();
+        apply_sync_snapshot(&target, &snapshot, ApplySnapshotOptions::default()).await.unwrap();
+
+        assert_eq!(target.get_secret("pg", "password").await.unwrap(), None);
+        assert!(target.load_connections().await.unwrap()[0].password.is_empty());
+    }
+
+    #[tokio::test]
     async fn saved_sync_passphrase_encrypts_nacos_auth_password_without_exposing_it() {
         let storage = Storage::open(&temp_db_path("saved-sync-nacos-snapshot")).await.unwrap();
         storage.save_connections(&[nacos_connection("nacos", "nacos-secret")]).await.unwrap();
@@ -2470,7 +2523,7 @@ mod tests {
             ai_config: None,
             tunnel_profiles: None,
         };
-        apply_sensitive_payload(&storage, &payload).await.unwrap();
+        apply_sensitive_payload(&storage, &payload, &[]).await.unwrap();
         let loaded = storage.load_ai_configs().await.unwrap();
         assert!(loaded.is_empty(), "None → no configs written");
     }
@@ -2490,7 +2543,7 @@ mod tests {
             ai_config: None,
             tunnel_profiles: None,
         };
-        apply_sensitive_payload(&storage, &payload).await.unwrap();
+        apply_sensitive_payload(&storage, &payload, &[]).await.unwrap();
         let loaded = storage.load_ai_configs().await.unwrap();
         assert!(loaded.is_empty(), "Some([]) → table cleared");
     }
@@ -2515,7 +2568,7 @@ mod tests {
             ai_config: None,
             tunnel_profiles: None,
         };
-        apply_sensitive_payload(&storage, &payload).await.unwrap();
+        apply_sensitive_payload(&storage, &payload, &[]).await.unwrap();
         let loaded = storage.load_ai_configs().await.unwrap();
         assert_eq!(loaded.len(), 2);
         let opencode = loaded.iter().find(|item| item.name == "synced").unwrap();
@@ -2548,9 +2601,9 @@ mod tests {
             tunnel_profiles: None,
         };
 
-        apply_sensitive_payload(&storage, &payload).await.unwrap();
+        apply_sensitive_payload(&storage, &payload, &[]).await.unwrap();
         // Reapplying the same old snapshot must not collide with the generated ID.
-        apply_sensitive_payload(&storage, &payload).await.unwrap();
+        apply_sensitive_payload(&storage, &payload, &[]).await.unwrap();
 
         let loaded = storage.load_ai_configs().await.unwrap();
         assert_eq!(loaded.len(), 1);

@@ -2225,6 +2225,10 @@ async fn list_tables_once(
             .await
             .map(|names| collection_names_to_tables(names, "INDEX"))
             .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types, table_name_filter)),
+        PoolKind::Meilisearch(client) => db::meilisearch_driver::list_indexes(client)
+            .await
+            .map(|names| collection_names_to_tables(names, "INDEX"))
+            .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types, table_name_filter)),
         PoolKind::HBase(client) => db::hbase_driver::list_tables(client, database)
             .await
             .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types, table_name_filter)),
@@ -2652,9 +2656,9 @@ mod tests {
         dameng_object_statistics_rows_only_sql, dameng_object_statistics_user_segments_sql, deduplicate_column_infos,
         ephemeral_agent_metadata_session_id, external_driver_uses_mysql_ddl, filter_mongodb_agent_collections,
         filter_mysql_system_databases_for_config, filter_object_infos, filter_table_infos, filter_visible_schema_names,
-        gbase8a_object_statistics_sql, is_agent_postgres_metadata_fallback_config, is_mysql_external_driver_config,
-        is_retryable_metadata_error, metadata_error_action, metadata_name_or_comment_matches,
-        mysql_external_driver_ddl_from_query_result, mysql_external_driver_ddl_sql,
+        gaussdb_m_view_object_source_sql, gbase8a_object_statistics_sql, is_agent_postgres_metadata_fallback_config,
+        is_mysql_external_driver_config, is_retryable_metadata_error, metadata_error_action,
+        metadata_name_or_comment_matches, mysql_external_driver_ddl_from_query_result, mysql_external_driver_ddl_sql,
         mysql_object_source_ddl_column_index, mysql_object_source_sql, mysql_table_list_source_for_config,
         mysql_table_metadata_catalog, normalize_information_schema_table_type, oracle_columns_from_query_result,
         oracle_columns_sql, oracle_object_statistics_dba_segments_sql, oracle_object_statistics_from_query_result,
@@ -2819,6 +2823,7 @@ mod tests {
             jdbc_driver_class: None,
             jdbc_driver_paths: Vec::new(),
             one_time: false,
+            save_password: true,
             read_only: false,
             is_production: false,
             production_databases: vec![],
@@ -2988,6 +2993,32 @@ mod tests {
     }
 
     #[test]
+    fn gaussdb_m_view_object_source_sql_is_qualified_and_gated() {
+        let mut config = test_connection_config(DatabaseType::Gaussdb);
+        config.driver_profile = Some("gaussdb-m".to_string());
+
+        assert_eq!(
+            gaussdb_m_view_object_source_sql(&config, "tenant`db", "active`users", &db::ObjectSourceKind::View)
+                .as_deref(),
+            Some("SHOW CREATE VIEW `tenant``db`.`active``users`")
+        );
+        assert_eq!(
+            gaussdb_m_view_object_source_sql(&config, "", "active`users", &db::ObjectSourceKind::View).as_deref(),
+            Some("SHOW CREATE VIEW `active``users`")
+        );
+        assert_eq!(
+            gaussdb_m_view_object_source_sql(&config, "tenant_db", "refresh_users", &db::ObjectSourceKind::Function),
+            None
+        );
+
+        config.driver_profile = Some("gaussdb".to_string());
+        assert_eq!(
+            gaussdb_m_view_object_source_sql(&config, "tenant_db", "active_users", &db::ObjectSourceKind::View),
+            None
+        );
+    }
+
+    #[test]
     fn mysql_external_driver_ddl_sql_uses_catalog_and_escaped_identifiers() {
         assert_eq!(
             mysql_external_driver_ddl_sql("app_db", "tenant`db", "user`events"),
@@ -3021,7 +3052,10 @@ mod tests {
             messages: Vec::new(),
         };
 
-        assert_eq!(mysql_external_driver_ddl_from_query_result(result).unwrap(), "CREATE TABLE `users` (`id` bigint);");
+        assert_eq!(
+            mysql_external_driver_ddl_from_query_result(result, "Create Table").unwrap(),
+            "CREATE TABLE `users` (`id` bigint);"
+        );
     }
 
     #[test]
@@ -3043,8 +3077,63 @@ mod tests {
         };
 
         assert_eq!(
-            mysql_external_driver_ddl_from_query_result(result).unwrap(),
+            mysql_external_driver_ddl_from_query_result(result, "Create Table").unwrap(),
             "CREATE TABLE `users` (`id` bigint);\n"
+        );
+    }
+
+    #[test]
+    fn mysql_external_driver_view_ddl_reads_named_column_case_insensitively() {
+        let result = db::QueryResult {
+            columns: vec!["View".to_string(), "Extra".to_string(), "CREATE VIEW".to_string()],
+            column_types: Vec::new(),
+            column_sortables: Vec::new(),
+            spatial_columns: vec![],
+            spatial_values: vec![],
+            rows: vec![vec![
+                serde_json::json!("active_users"),
+                serde_json::json!("ignored"),
+                serde_json::json!("CREATE VIEW `active_users` AS SELECT 1"),
+            ]],
+            affected_rows: 0,
+            execution_time_ms: 0,
+            truncated: false,
+            session_id: None,
+            has_more: false,
+            elasticsearch_raw_body: None,
+            messages: Vec::new(),
+        };
+
+        assert_eq!(
+            mysql_external_driver_ddl_from_query_result(result, "Create View").unwrap(),
+            "CREATE VIEW `active_users` AS SELECT 1;"
+        );
+    }
+
+    #[test]
+    fn mysql_external_driver_view_ddl_falls_back_to_second_column() {
+        let result = db::QueryResult {
+            columns: vec!["name".to_string(), "definition".to_string()],
+            column_types: Vec::new(),
+            column_sortables: Vec::new(),
+            spatial_columns: vec![],
+            spatial_values: vec![],
+            rows: vec![vec![
+                serde_json::json!("active_users"),
+                serde_json::json!("CREATE VIEW `active_users` AS SELECT 1;\n"),
+            ]],
+            affected_rows: 0,
+            execution_time_ms: 0,
+            truncated: false,
+            session_id: None,
+            has_more: false,
+            elasticsearch_raw_body: None,
+            messages: Vec::new(),
+        };
+
+        assert_eq!(
+            mysql_external_driver_ddl_from_query_result(result, "Create View").unwrap(),
+            "CREATE VIEW `active_users` AS SELECT 1;\n"
         );
     }
 
@@ -5745,6 +5834,9 @@ async fn get_columns_core_for_session_inner(
             PoolKind::Easysearch(client) => {
                 db::easysearch_driver::get_columns(client, table).await.map(deduplicate_column_infos)
             }
+            PoolKind::Meilisearch(client) => {
+                db::meilisearch_driver::get_columns(client, table).await.map(deduplicate_column_infos)
+            }
             PoolKind::HBase(client) => {
                 db::hbase_driver::get_columns(client, database, table).await.map(deduplicate_column_infos)
             }
@@ -6305,11 +6397,16 @@ async fn get_table_ddl_core_with_options(
         )
         .await?;
         let database_type = connection_config(state, connection_id).await.map(|config| config.db_type);
+        // Kingbase MySQL compatibility mode reports a backtick identifier
+        // quote; thread it through so the view DDL wraps hyphenated schema
+        // names in backticks instead of double quotes the server rejects.
+        let identifier_quote = state.connection_identifier_quote(connection_id, Some(database)).await.ok().flatten();
         return Ok(crate::object_source_sql::build_view_ddl_sql(crate::object_source_sql::BuildViewDdlInput {
             database_type,
             schema: if schema.trim().is_empty() { None } else { Some(schema.to_string()) },
             name: table.to_string(),
             source: source.source,
+            identifier_quote,
         }));
     }
     if matches!(object_type, Some(db::ObjectSourceKind::MaterializedView)) {
@@ -6657,13 +6754,26 @@ fn external_driver_uses_mysql_ddl(config: &ConnectionConfig) -> bool {
     is_mysql_external_driver_config(config) || gaussdb_uses_m_jdbc_driver(config)
 }
 
+fn gaussdb_m_view_object_source_sql(
+    config: &ConnectionConfig,
+    database: &str,
+    name: &str,
+    kind: &db::ObjectSourceKind,
+) -> Option<String> {
+    (gaussdb_uses_m_jdbc_driver(config) && matches!(kind, db::ObjectSourceKind::View))
+        .then(|| mysql_object_source_sql(database, name, kind))
+}
+
 fn mysql_external_driver_ddl_sql(database: &str, schema: &str, table: &str) -> String {
     format!("SHOW CREATE TABLE {}", mysql_qualified_name(mysql_table_metadata_catalog(database, schema), table))
 }
 
-fn mysql_external_driver_ddl_from_query_result(result: db::QueryResult) -> Result<String, String> {
+fn mysql_external_driver_ddl_from_query_result(
+    result: db::QueryResult,
+    named_ddl_column: &str,
+) -> Result<String, String> {
     let row = result.rows.first().ok_or_else(|| "DDL not found".to_string())?;
-    let named_index = result.columns.iter().position(|column| column.trim().eq_ignore_ascii_case("Create Table"));
+    let named_index = result.columns.iter().position(|column| column.trim().eq_ignore_ascii_case(named_ddl_column));
     let ddl = named_index
         .into_iter()
         .chain(std::iter::once(1))
@@ -7286,6 +7396,29 @@ async fn get_object_source_once(
             let config = config.clone();
             let session = session.clone();
             drop(connections);
+            if let Some(sql) = gaussdb_m_view_object_source_sql(config.as_ref(), database, name, &object_type) {
+                let result: db::QueryResult = session
+                    .invoke_with_timeout(
+                        "executeQuery",
+                        serde_json::json!({
+                            "connection": config.as_ref(),
+                            "database": database,
+                            "schema": schema,
+                            "sql": sql,
+                            "maxRows": 1,
+                        }),
+                        agent_metadata_timeout(Some(config.as_ref())),
+                    )
+                    .await?;
+                let source = mysql_external_driver_ddl_from_query_result(result, "Create View")?;
+                return Ok(db::ObjectSource {
+                    name: name.to_string(),
+                    object_type,
+                    schema: if schema.is_empty() { None } else { Some(schema.to_string()) },
+                    source,
+                    editable: None,
+                });
+            }
             let result: db::ObjectSource = session
                 .invoke_with_timeout(
                     "getObjectSource",
@@ -8813,7 +8946,7 @@ async fn external_driver_mysql_ddl(
             agent_metadata_timeout(Some(config)),
         )
         .await?;
-    mysql_external_driver_ddl_from_query_result(result)
+    mysql_external_driver_ddl_from_query_result(result, "Create Table")
 }
 
 fn ensure_display_ddl_terminated(sql: String) -> String {

@@ -12,7 +12,7 @@ In addition to the SQL editor and data grid, DBX opens specialized workspaces fo
 | Category | Connection types | Main entry points |
 | --- | --- | --- |
 | Key/value and document | Redis, MongoDB | Key or document browsing, filtering, editing, commands, and aggregation workflows |
-| Search and document indexes | Elasticsearch, Easysearch, Manticore Search | Index/document browsing and engine-specific requests |
+| Search and document indexes | Elasticsearch, Easysearch, Meilisearch, Manticore Search | Index/document browsing and engine-specific requests |
 | Vector databases | Qdrant, Milvus, Weaviate, ChromaDB | Collection browsing, vector search, upsert, delete, and request preview |
 | Wide-column and column family | HBase | Namespaces, table structure, column families, and row data |
 | Message queues | Pulsar, Kafka, RocketMQ, RabbitMQ | Topics, subscriptions or consumers, messages, monitoring, permissions, policies, and admin APIs |
@@ -36,11 +36,12 @@ When a connection is read-only, DBX disables or rejects mutations in Redis, Mong
 
 ## Search and Document Indexes
 
-Elasticsearch, Easysearch, and Manticore Search use index- and document-oriented browsing. DBX displays indexes or collections from driver metadata and provides entry points for browsing, querying, and inspecting documents.
+Elasticsearch, Easysearch, Meilisearch, and Manticore Search use index- and document-oriented browsing. DBX displays indexes or collections from driver metadata and provides entry points for browsing, querying, and inspecting documents.
 
 Keep these boundaries in mind:
 
-- Elasticsearch and Easysearch usually connect to HTTP/HTTPS endpoints rather than traditional database TCP ports
+- Elasticsearch, Easysearch, and Meilisearch connect to HTTP/HTTPS endpoints rather than traditional database TCP ports
+- Meilisearch uses DBX's built-in Rust HTTP driver; its API key is stored in the connection password field and the default port is `7700`
 - TLS, proxying, and authentication depend on the connection type and server configuration
 - Document queries and mutations vary by driver, server version, and account privileges
 - SQL workflows such as schema diff or SQL file execution only appear when the engine reliably supports them

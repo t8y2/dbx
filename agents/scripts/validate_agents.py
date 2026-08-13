@@ -24,6 +24,7 @@ NATIVE_ONLY_AGENT_MODULES = {
     "tdengine": "drivers/tdengine",
     "xugu": "drivers/xugu",
     "rabbitmq": "drivers/rabbitmq",
+    "rocketmq": "drivers/rocketmq",
 }
 AUTO_VERSIONED_NATIVE_MODULES = {"duckdb"}
 JDBC_ARCHITECTURE_ALLOWLIST = {

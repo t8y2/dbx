@@ -49,7 +49,7 @@ tiberius = { version = "0.12.3", default-features = false, features = ["tds73", 
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls", "socks"] }
 prometheus-parse = "=0.2.5"
 futures = "0.3"
-mongodb = "3.2.5"
+mongodb = { version = "3.2.5", features = ["socks5-proxy"] }
 rumqttc = { version = "0.24", features = ["websocket"], optional = true }
 russh = "0.60"
 pageant = "0.2"

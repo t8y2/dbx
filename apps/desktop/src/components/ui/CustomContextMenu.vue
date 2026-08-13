@@ -13,11 +13,12 @@ const props = defineProps<{
 }>();
 
 const emit = defineEmits<{
+  open: [];
   close: [];
 }>();
 
 defineSlots<{
-  default(props: { onContextMenu: (event: MouseEvent) => void }): any;
+  default(props: { onContextMenu: (event: MouseEvent) => void; isOpen: boolean }): any;
 }>();
 
 const show = ref(false);
@@ -36,6 +37,7 @@ let subAnchorRect: { left: number; right: number; top: number; bottom: number } 
 let contextMenuRegistration: ContextMenuRegistration | null = null;
 
 function close() {
+  if (!show.value) return;
   activeSubIndex.value = null;
   subAnchorRect = null;
   activeItems.value = [];
@@ -125,7 +127,9 @@ function onContextMenu(event: MouseEvent, itemsOverride?: ContextMenuItem[]) {
   event.stopPropagation();
   x.value = event.clientX;
   y.value = event.clientY;
+  contextMenuRegistration?.activate();
   show.value = true;
+  emit("open");
   nextTick(() => {
     if (!menuRef.value) return;
     const rect = menuRef.value.getBoundingClientRect();
@@ -258,7 +262,7 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <slot :onContextMenu="onContextMenu" />
+  <slot :onContextMenu="onContextMenu" :isOpen="show" />
   <!-- Main menu -->
   <Teleport to="body">
     <div v-if="show" ref="menuRef" data-dbx-context-menu :style="{ position: 'fixed', left: x + 'px', top: y + 'px', zIndex: 9999 }" class="bg-popover text-popover-foreground min-w-40 w-max max-w-[calc(100vw-16px)] rounded-md p-1 overflow-y-auto ring-1 ring-foreground/10 shadow-lg">

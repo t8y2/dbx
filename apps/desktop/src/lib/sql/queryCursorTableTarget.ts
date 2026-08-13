@@ -142,6 +142,7 @@ export function queryContextTargetFromCandidate(tab: QueryTab | undefined | null
   return {
     type: "query-context",
     connectionId: tab.connectionId,
+    catalog: tab.catalog,
     database: candidate?.database || tab.database,
     schema: candidate?.schema ?? tab.schema,
   };

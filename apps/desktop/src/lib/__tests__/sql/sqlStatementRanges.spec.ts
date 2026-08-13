@@ -309,6 +309,11 @@ describe("splitSqlStatementRanges", () => {
     expect(rangeSqlTexts(splitSqlStatementRanges(sql, "kingbase"))).toEqual(["SELECT * FROM yd_org_decla_detail WHERE clr_ym = #{ym}", "SELECT 2"]);
   });
 
+  it("keeps dotted MyBatis placeholders instead of treating them as hash comments", () => {
+    const sql = "SELECT * FROM users WHERE id = #{params.user.id};\nSELECT 2";
+    expect(rangeSqlTexts(splitSqlStatementRanges(sql, "mysql"))).toEqual(["SELECT * FROM users WHERE id = #{params.user.id}", "SELECT 2"]);
+  });
+
   it("treats malformed or disabled MyBatis prefixes as hash comments", () => {
     expect(rangeSqlTexts(splitSqlStatementRanges("SELECT 1; #{1ym};\nSELECT 2", "kingbase"))).toEqual(["SELECT 1", "SELECT 2"]);
     expect(rangeSqlTexts(splitSqlStatementRanges("SELECT 1; #{ym};\nSELECT 2", "kingbase", { enabledSyntaxes: ["shell"] }))).toEqual(["SELECT 1", "SELECT 2"]);
@@ -469,7 +474,7 @@ POST /orders/_search
 
 HEAD /orders`;
 
-    for (const databaseType of ["elasticsearch", "easysearch"] as const) {
+    for (const databaseType of ["elasticsearch", "easysearch", "meilisearch"] as const) {
       expect(rangeSqlTexts(splitSqlStatementRanges(sql, databaseType))).toEqual(["GET /_nodes/stats/jvm?pretty", 'POST /orders/_search\n{\n  "query": { "match_all": {} }\n}', "HEAD /orders"]);
       expect(hasMultipleExecutionTargets(sql, databaseType)).toBe(true);
     }
@@ -1194,6 +1199,44 @@ describe("buildExecutionCandidates", () => {
     expect(splitSqlStatementRanges("/*&tenant:mctest*/", "mysql")).toEqual([]);
   });
 
+  it("preserves only the exact TDSQL proxy directive for the current statement", () => {
+    const directedSql = "/*proxy*/ \n\tSHOW PROXY STATUS";
+    const sql = `SELECT 1;\n${directedSql};\nSELECT 2;`;
+    const candidates = buildExecutionCandidates(sql, indexOf(sql, "STATUS"), "mysql");
+
+    expect(executionCandidateForMode(candidates, "current")?.sql).toBe(directedSql);
+    expect(executionCandidateForMode(candidates, "all")?.sql).toBe(sql);
+    expect(rangeSqlTexts(executableStatementRanges(sql, "mysql"))).toEqual(["SELECT 1", directedSql, "SELECT 2"]);
+    expect(splitSqlStatementRanges("/*proxy*/SHOW PROXY STATUS", "mysql")[0]?.sql).toBe("/*proxy*/SHOW PROXY STATUS");
+    expect(splitSqlStatementRanges("/* ordinary */\n/*proxy*/SHOW PROXY STATUS", "mysql")[0]?.sql).toBe("/*proxy*/SHOW PROXY STATUS");
+    expect(splitSqlStatementRanges("/*proxy*/", "mysql")).toEqual([]);
+  });
+
+  it.each(["/* ordinary */", "/*unknown*/", "/* proxy */", "/*PROXY*/"])("keeps %s as a non-executable leading comment", (comment) => {
+    const sql = `${comment}\nSHOW PROXY STATUS`;
+    const candidates = buildExecutionCandidates(sql, indexOf(sql, "STATUS"), "mysql");
+
+    expect(executionCandidateForMode(candidates, "current")?.sql).toBe("SHOW PROXY STATUS");
+  });
+
+  it.each(["/*proxy*/\n/* audit */\nSHOW PROXY STATUS", "/*proxy*/\n-- audit\nSHOW PROXY STATUS"])("does not preserve a proxy directive separated from SQL by another comment", (sql) => {
+    const candidates = buildExecutionCandidates(sql, indexOf(sql, "STATUS"), "mysql");
+
+    expect(executionCandidateForMode(candidates, "current")?.sql).toBe("SHOW PROXY STATUS");
+  });
+
+  it("does not preserve the proxy directive for other database types", () => {
+    const sql = "/*proxy*/\nSHOW PROXY STATUS";
+    const candidates = buildExecutionCandidates(sql, indexOf(sql, "STATUS"), "postgres");
+
+    expect(executionCandidateForMode(candidates, "current")?.sql).toBe("SHOW PROXY STATUS");
+  });
+
+  it("keeps existing hints without allowing them between the proxy directive and SQL", () => {
+    expect(splitSqlStatementRanges("/*+ route */\n/*proxy*/SHOW PROXY STATUS", "mysql")[0]?.sql).toBe("/*proxy*/SHOW PROXY STATUS");
+    expect(splitSqlStatementRanges("/*proxy*/\n/*+ route */\nSHOW PROXY STATUS", "mysql")[0]?.sql).toBe("/*+ route */\nSHOW PROXY STATUS");
+  });
+
   it("uses the cursor statement for the first candidate when there is no selection", () => {
     const sql = "SELECT *\nFROM users\nWHERE active = 1";
     const candidates = buildExecutionCandidates(sql, indexOf(sql, "users"));
@@ -1404,6 +1447,7 @@ describe("supportsExecutionTargetPicker", () => {
     expect(supportsExecutionTargetPicker("mongodb")).toBe(false);
     expect(supportsExecutionTargetPicker("elasticsearch")).toBe(true);
     expect(supportsExecutionTargetPicker("easysearch")).toBe(true);
+    expect(supportsExecutionTargetPicker("meilisearch")).toBe(true);
     expect(supportsExecutionTargetPicker("qdrant")).toBe(false);
     expect(supportsExecutionTargetPicker("milvus")).toBe(false);
     expect(supportsExecutionTargetPicker("weaviate")).toBe(false);

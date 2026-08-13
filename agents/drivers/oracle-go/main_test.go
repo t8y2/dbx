@@ -536,9 +536,9 @@ func TestGetTableDDLFallbackPreservesQuotedColumnNames(t *testing.T) {
 			args:          []driver.Value{schema, table},
 			columns: []string{
 				"COLUMN_NAME", "DATA_TYPE", "NULLABLE", "DATA_DEFAULT", "IS_PRIMARY_KEY",
-				"COMMENTS", "DATA_PRECISION", "DATA_SCALE", "CHAR_LENGTH",
+				"COMMENTS", "DATA_PRECISION", "DATA_SCALE", "CHAR_LENGTH", "CHAR_USED",
 			},
-			rows: [][]driver.Value{{"FlowId", "VARCHAR2", "N", nil, int64(1), nil, nil, nil, int64(50)}},
+			rows: [][]driver.Value{{"FlowId", "VARCHAR2", "N", nil, int64(1), nil, nil, nil, int64(50), "C"}},
 		},
 	})
 	s := newServer()
@@ -549,7 +549,7 @@ func TestGetTableDDLFallbackPreservesQuotedColumnNames(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := `CREATE TABLE "ZTZS_ERP2"."ZGJ_FlowSealTemplate" (
-  "FlowId" VARCHAR2(50) NOT NULL,
+  "FlowId" VARCHAR2(50 CHAR) NOT NULL,
   PRIMARY KEY ("FlowId")
 )`
 	if got != want {
@@ -961,6 +961,8 @@ func TestOracleColumnTypeDDL(t *testing.T) {
 	precision := 10
 	scale := 2
 	zeroScale := 0
+	byteUnit := "B"
+	charUnit := "C"
 
 	tests := []struct {
 		name   string
@@ -968,6 +970,9 @@ func TestOracleColumnTypeDDL(t *testing.T) {
 		want   string
 	}{
 		{name: "varchar", column: columnInfo{DataType: "VARCHAR2", CharacterMaximumLength: &charLen}, want: "VARCHAR2(64)"},
+		{name: "varchar byte semantics", column: columnInfo{DataType: "VARCHAR2", CharacterMaximumLength: &charLen, CharacterLengthUnit: &byteUnit}, want: "VARCHAR2(64 BYTE)"},
+		{name: "varchar char semantics", column: columnInfo{DataType: "VARCHAR2", CharacterMaximumLength: &charLen, CharacterLengthUnit: &charUnit}, want: "VARCHAR2(64 CHAR)"},
+		{name: "national character type ignores unit", column: columnInfo{DataType: "NVARCHAR2", CharacterMaximumLength: &charLen, CharacterLengthUnit: &charUnit}, want: "NVARCHAR2(64)"},
 		{name: "number scale", column: columnInfo{DataType: "NUMBER", NumericPrecision: &precision, NumericScale: &scale}, want: "NUMBER(10,2)"},
 		{name: "number zero scale", column: columnInfo{DataType: "NUMBER", NumericPrecision: &precision, NumericScale: &zeroScale}, want: "NUMBER(10)"},
 		{name: "timestamp preserves precision", column: columnInfo{DataType: "TIMESTAMP(6)"}, want: "TIMESTAMP(6)"},
@@ -984,8 +989,58 @@ func TestOracleColumnTypeDDL(t *testing.T) {
 func TestBuildDSNUsesConnectionStringWhenProvided(t *testing.T) {
 	dsn := buildDSN(connectParams{ConnectionString: "oracle://scott:tiger@db.example.com:1521/ORCLPDB1"})
 
-	if dsn != "oracle://scott:tiger@db.example.com:1521/ORCLPDB1" {
-		t.Fatalf("unexpected dsn: %s", dsn)
+	parsed, err := url.Parse(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.Query().Get("PREFETCH_ROWS") != oracleDefaultPrefetchRows {
+		t.Fatalf("raw Oracle DSN should use the DBX prefetch default, got: %s", dsn)
+	}
+}
+
+func TestBuildDSNUsesStableDefaultPrefetchRows(t *testing.T) {
+	dsn := buildDSN(connectParams{
+		Host:     "db.example.com",
+		Port:     1521,
+		Database: "XE",
+		Username: "scott",
+		Password: "tiger",
+	})
+
+	parsed, err := url.Parse(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.Query().Get("PREFETCH_ROWS") != oracleDefaultPrefetchRows {
+		t.Fatalf("generated Oracle DSN should use the DBX prefetch default, got: %s", dsn)
+	}
+}
+
+func TestBuildDSNPreservesConfiguredPrefetchRows(t *testing.T) {
+	tests := []connectParams{
+		{
+			Host:      "db.example.com",
+			Port:      1521,
+			Database:  "XE",
+			Username:  "scott",
+			Password:  "tiger",
+			URLParams: "prefetch_rows=20",
+		},
+		{ConnectionString: "oracle://scott:tiger@db.example.com:1521/XE?prefetch_rows=50"},
+	}
+
+	for _, params := range tests {
+		dsn := buildDSN(params)
+		parsed, err := url.Parse(dsn)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if parsed.Query().Get("prefetch_rows") == "" {
+			t.Fatalf("configured prefetch rows should be preserved, got: %s", dsn)
+		}
+		if parsed.Query().Get("PREFETCH_ROWS") != "" {
+			t.Fatalf("default prefetch rows should not be added beside a configured value, got: %s", dsn)
+		}
 	}
 }
 

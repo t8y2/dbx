@@ -40,7 +40,7 @@ export function sortSidebarTreeChildrenForParent(parent: Pick<TreeNode, "type">,
     const regularChildren = normalized.filter((child) => child.type !== "user-admin" && child.type !== "dameng-users" && child.type !== "dameng-roles" && child.type !== "saved-sql-root");
     const withConnectionUtilityOrder = (children: TreeNode[]) => [...savedSqlNodes, ...children, ...userAdminNodes];
 
-    if (databaseType === "mongodb" || databaseType === "elasticsearch" || databaseType === "easysearch" || databaseType === "qdrant" || databaseType === "milvus" || databaseType === "weaviate" || databaseType === "chromadb") {
+    if (databaseType === "mongodb" || databaseType === "elasticsearch" || databaseType === "easysearch" || databaseType === "meilisearch" || databaseType === "qdrant" || databaseType === "milvus" || databaseType === "weaviate" || databaseType === "chromadb") {
       return withConnectionUtilityOrder(sortByLabel(regularChildren));
     }
 

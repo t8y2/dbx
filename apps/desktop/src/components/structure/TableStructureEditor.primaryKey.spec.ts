@@ -68,10 +68,16 @@ vi.mock("@/components/ui/input", async () => {
     Input: defineComponent({
       name: "Input",
       inheritAttrs: false,
+      props: { modelValue: { type: [String, Number], default: "" } },
+      emits: ["update:modelValue"],
       setup:
-        (_props, { attrs }) =>
+        (props, { attrs, emit }) =>
         () =>
-          h("input", attrs),
+          h("input", {
+            ...attrs,
+            value: props.modelValue,
+            onInput: (event: Event) => emit("update:modelValue", (event.target as HTMLInputElement).value),
+          }),
     }),
   };
 });
@@ -152,10 +158,24 @@ vi.mock("@/components/ui/searchable-select", async () => {
     SearchableSelect: defineComponent({
       name: "SearchableSelect",
       inheritAttrs: false,
+      props: {
+        modelValue: { type: String, default: "" },
+        options: { type: Array, default: () => [] },
+        allowCustom: { type: Boolean, default: false },
+      },
+      emits: ["update:modelValue"],
       setup:
-        (_props, { attrs }) =>
+        (props, { attrs, emit }) =>
         () =>
-          h("div", attrs),
+          h("button", {
+            ...attrs,
+            type: "button",
+            "data-searchable-select": "true",
+            "data-model-value": props.modelValue,
+            "data-options": JSON.stringify(props.options),
+            "data-allow-custom": String(props.allowCustom),
+            onClick: () => emit("update:modelValue", "custom_domain"),
+          }),
     }),
   };
 });
@@ -240,19 +260,19 @@ function draft(isPrimaryKey = false) {
   };
 }
 
-async function mountEditor(databaseType: "sqlserver" | "postgres" | "sqlite" | "oracle" | "dameng" | "duckdb" | "informix", isPrimaryKey = false) {
+async function mountEditor(databaseType: "sqlserver" | "postgres" | "sqlite" | "oracle" | "dameng" | "duckdb" | "informix", isPrimaryKey = false, options: { database?: string; dynamicTypes?: string[] } = {}) {
   mocks.connection.db_type = databaseType;
   mocks.connection.name = databaseType;
   mocks.connection.driver_label = databaseType;
   mocks.ensureConnected.mockResolvedValue(undefined);
-  mocks.listDataTypes.mockResolvedValue([]);
+  mocks.listDataTypes.mockResolvedValue(options.dynamicTypes ?? []);
   mocks.buildTableStructureChangeSql.mockResolvedValue({ statements: [], warnings: [] });
 
   const root = document.createElement("div");
   document.body.append(root);
   const app = createApp(TableStructureEditor, {
     connectionId: mocks.connection.id,
-    database: "test",
+    database: options.database ?? "test",
     schema: "SYSDBA",
     tableName: "users",
     draft: draft(isPrimaryKey),
@@ -302,6 +322,12 @@ function columnCheckbox(root: HTMLElement, header: string): HTMLInputElement {
   return checkbox;
 }
 
+function buttonWithText(root: HTMLElement, text: string): HTMLButtonElement {
+  const button = Array.from(root.querySelectorAll("button")).find((item) => item.textContent?.includes(text));
+  if (!button) throw new Error(`Missing ${text} button`);
+  return button;
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   mocks.loadObjectDdl.mockResolvedValue({ ddl: "CREATE TABLE users (id bigint)", cacheStatus: "remote" });
@@ -310,6 +336,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   for (const app of mountedApps.splice(0)) app.unmount();
   document.body.innerHTML = "";
 });
@@ -384,6 +411,10 @@ describe("TableStructureEditor primary key editing", () => {
     );
     nullable.checked = true;
     nullable.dispatchEvent(new Event("change", { bubbles: true }));
+    await nextTick();
+
+    expect(buttonWithText(root, "structureEditor.copySql").disabled).toBe(true);
+    expect(buttonWithText(root, "structureEditor.apply").disabled).toBe(true);
 
     await vi.waitFor(() => expect(mocks.buildTableStructureChangeSql).toHaveBeenCalledTimes(2));
     expect(root.textContent).toContain(firstSql);
@@ -391,6 +422,65 @@ describe("TableStructureEditor primary key editing", () => {
 
     resolveLatestPreview({ statements: ["ALTER TABLE users ALTER COLUMN id DROP NOT NULL;"], warnings: [] });
     await vi.waitFor(() => expect(root.textContent).toContain("ALTER TABLE users ALTER COLUMN id DROP NOT NULL;"));
+    expect(buttonWithText(root, "structureEditor.copySql").disabled).toBe(false);
+    expect(buttonWithText(root, "structureEditor.apply").disabled).toBe(false);
+  });
+
+  it("debounces SQL preview generation while editing a column name", async () => {
+    vi.useFakeTimers();
+    const root = await mountEditor("dameng");
+    const nameInput = root.querySelector<HTMLInputElement>("[data-column-name-input]");
+    if (!nameInput) throw new Error("Missing column name input");
+
+    nameInput.value = "user";
+    nameInput.dispatchEvent(new Event("input", { bubbles: true }));
+    await nextTick();
+    await vi.advanceTimersByTimeAsync(200);
+
+    nameInput.value = "user_id";
+    nameInput.dispatchEvent(new Event("input", { bubbles: true }));
+    await nextTick();
+    await vi.advanceTimersByTimeAsync(299);
+
+    expect(mocks.buildTableStructureChangeSql).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(1);
+    await Promise.resolve();
+    await nextTick();
+
+    expect(mocks.buildTableStructureChangeSql).toHaveBeenCalledTimes(1);
+    expect(mocks.buildTableStructureChangeSql).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        columns: [expect.objectContaining({ name: "user_id" })],
+      }),
+    );
+  });
+});
+
+describe("TableStructureEditor data type options", () => {
+  it("keeps dynamic Dameng types first and deduplicates fallback types case-insensitively", async () => {
+    const root = await mountEditor("dameng", false, {
+      database: "dynamic-types-5275",
+      dynamicTypes: ["VARCHAR", "CUSTOM_DM_TYPE", "NUMBER"],
+    });
+    const picker = root.querySelector<HTMLElement>('[data-searchable-select="true"]');
+    if (!picker) throw new Error("Missing data type picker");
+
+    await vi.waitFor(() => expect(JSON.parse(picker.dataset.options ?? "[]").slice(0, 3)).toEqual(["VARCHAR", "CUSTOM_DM_TYPE", "NUMBER"]));
+    const options = JSON.parse(picker.dataset.options ?? "[]") as string[];
+    expect(options.filter((option) => option.toLowerCase() === "varchar")).toEqual(["VARCHAR"]);
+    expect(options.filter((option) => option.toLowerCase() === "number")).toEqual(["NUMBER"]);
+    expect(options).toContain("longvarchar");
+  });
+
+  it("continues to accept manually entered Dameng data types", async () => {
+    const root = await mountEditor("dameng", false, { database: "manual-type-5275" });
+    const picker = root.querySelector<HTMLButtonElement>('[data-searchable-select="true"]');
+    if (!picker) throw new Error("Missing data type picker");
+
+    expect(picker.dataset.allowCustom).toBe("true");
+    picker.click();
+    await vi.waitFor(() => expect(mocks.buildTableStructureChangeSql).toHaveBeenLastCalledWith(expect.objectContaining({ columns: [expect.objectContaining({ dataType: "custom_domain" })] })));
   });
 });
 

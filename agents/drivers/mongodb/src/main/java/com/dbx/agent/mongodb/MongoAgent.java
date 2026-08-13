@@ -940,6 +940,21 @@ public final class MongoAgent {
         return serverVersionFromBuildInfo(buildInfo);
     }
 
+    private static Object runCommand(JsonObject params) {
+        MongoClient c = requireClient();
+        String database = params.get("database").getAsString();
+        Document command = documentOrNull(params, "command_json");
+        if (command == null || command.isEmpty()) {
+            throw new IllegalArgumentException("runCommand requires a non-empty command document");
+        }
+        Document response = c.getDatabase(database).runCommand(command);
+        List<Map<String, Object>> documents = new ArrayList<>();
+        documents.add(bsonToJson(response));
+        List<JsonObject> extendedDocuments = new ArrayList<>();
+        extendedDocuments.add(bsonToExtendedJson(response));
+        return documentQueryResultWithExtended(documents, extendedDocuments, 1);
+    }
+
     static String serverVersionFromBuildInfo(Document buildInfo) {
         String version = buildInfo.getString("version");
         if (version == null || version.isBlank()) {
@@ -1452,6 +1467,31 @@ public final class MongoAgent {
         return Collections.singletonMap("inserted_id", insertedId);
     }
 
+    private static Object insertDocuments(JsonObject params) {
+        String docsJson = params.get("docs_json").getAsString();
+        JsonElement parsed = JsonParser.parseString(docsJson);
+        if (!parsed.isJsonArray()) {
+            throw new IllegalArgumentException("MongoDB insertMany documents must be a JSON array");
+        }
+
+        List<Document> documents = new ArrayList<>();
+        for (JsonElement item : parsed.getAsJsonArray()) {
+            if (!item.isJsonObject()) {
+                throw new IllegalArgumentException("Each MongoDB insertMany document must be an object");
+            }
+            documents.add(documentForWrite(item.toString()));
+        }
+        if (documents.isEmpty()) {
+            return Collections.singletonMap("affected_rows", 0);
+        }
+
+        MongoClient client = requireClient();
+        String database = params.get("database").getAsString();
+        String collection = params.get("collection").getAsString();
+        client.getDatabase(database).getCollection(collection).insertMany(documents);
+        return Collections.singletonMap("affected_rows", documents.size());
+    }
+
     static Object parseId(String id) {
         String stringId = decodeStringDocumentId(id);
         if (stringId != null) {
@@ -1815,10 +1855,12 @@ public final class MongoAgent {
             case AgentProtocol.MONGO_METHOD_CLONE_COLLECTION -> cloneCollection(params);
             case AgentProtocol.MONGO_METHOD_DROP_DATABASE -> dropDatabase(params);
             case AgentProtocol.MONGO_METHOD_INSERT_DOCUMENT -> insertDocument(params);
+            case AgentProtocol.MONGO_METHOD_INSERT_DOCUMENTS -> insertDocuments(params);
             case AgentProtocol.MONGO_METHOD_UPDATE_DOCUMENT -> updateDocument(params);
             case AgentProtocol.MONGO_METHOD_UPDATE_DOCUMENTS -> updateDocuments(params);
             case AgentProtocol.MONGO_METHOD_DELETE_DOCUMENT -> deleteDocument(params);
             case AgentProtocol.MONGO_METHOD_DELETE_DOCUMENTS -> deleteDocuments(params);
+            case AgentProtocol.MONGO_METHOD_RUN_COMMAND -> runCommand(params);
             case AgentProtocol.METHOD_DISCONNECT, AgentProtocol.METHOD_SHUTDOWN -> {
                 closeLegacyClient();
                 if (AgentProtocol.METHOD_SHUTDOWN.equals(method)) {

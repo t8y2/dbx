@@ -515,6 +515,7 @@ export interface EditorSettings {
   showInsertValueHints: boolean;
   autoAliasTables: boolean;
   insertSpaceAfterCompletion: boolean;
+  sortCompletionColumnsAlphabetically: boolean;
   wordWrap: boolean;
   vimModeEnabled: boolean;
   autoCloseBrackets: boolean;
@@ -533,11 +534,14 @@ export interface EditorSettings {
   infiniteScroll: boolean;
   /** Preserved for downgrade compatibility; current clients use queryResultMaxRows. */
   infiniteScrollMaxRows: number;
+  flatteningMultiLineText: boolean;
   regexMaxMatchCount: number;
   autoCalculateTotalRows: boolean;
   mongoViewMode: "document" | "table";
   showColumnCommentsInHeader: boolean;
   showColumnTypesInHeader: boolean;
+  dataGridShowTransposeFieldMetadata: boolean;
+  colorizeDataGridCellTypes: boolean;
   showIndexIndicatorsInHeader: boolean;
   compactColumnHeaderActions: boolean;
   columnWidthDensity: ColumnWidthDensity;
@@ -707,6 +711,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   showInsertValueHints: true,
   autoAliasTables: true,
   insertSpaceAfterCompletion: true,
+  sortCompletionColumnsAlphabetically: true,
   wordWrap: false,
   vimModeEnabled: false,
   autoCloseBrackets: true,
@@ -724,11 +729,14 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   queryResultMaxRows: DEFAULT_QUERY_RESULT_MAX_ROWS,
   infiniteScroll: false,
   infiniteScrollMaxRows: 5000,
+  flatteningMultiLineText: false,
   regexMaxMatchCount: 1000,
   autoCalculateTotalRows: false,
   mongoViewMode: "document",
   showColumnCommentsInHeader: true,
   showColumnTypesInHeader: true,
+  dataGridShowTransposeFieldMetadata: false,
+  colorizeDataGridCellTypes: false,
   showIndexIndicatorsInHeader: true,
   compactColumnHeaderActions: true,
   columnWidthDensity: "standard",
@@ -1043,6 +1051,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     showInsertValueHints: typeof settings.showInsertValueHints === "boolean" ? settings.showInsertValueHints : DEFAULT_EDITOR_SETTINGS.showInsertValueHints,
     autoAliasTables: settings.autoAliasTables ?? DEFAULT_EDITOR_SETTINGS.autoAliasTables,
     insertSpaceAfterCompletion: typeof settings.insertSpaceAfterCompletion === "boolean" ? settings.insertSpaceAfterCompletion : DEFAULT_EDITOR_SETTINGS.insertSpaceAfterCompletion,
+    sortCompletionColumnsAlphabetically: typeof settings.sortCompletionColumnsAlphabetically === "boolean" ? settings.sortCompletionColumnsAlphabetically : DEFAULT_EDITOR_SETTINGS.sortCompletionColumnsAlphabetically,
     wordWrap: settings.wordWrap ?? DEFAULT_EDITOR_SETTINGS.wordWrap,
     vimModeEnabled: typeof settings.vimModeEnabled === "boolean" ? settings.vimModeEnabled : DEFAULT_EDITOR_SETTINGS.vimModeEnabled,
     autoCloseBrackets: typeof settings.autoCloseBrackets === "boolean" ? settings.autoCloseBrackets : DEFAULT_EDITOR_SETTINGS.autoCloseBrackets,
@@ -1060,11 +1069,14 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     queryResultMaxRows: normalizeQueryResultMaxRows(settings.queryResultMaxRows),
     infiniteScroll: settings.infiniteScroll ?? DEFAULT_EDITOR_SETTINGS.infiniteScroll,
     infiniteScrollMaxRows: typeof settings.infiniteScrollMaxRows === "number" && settings.infiniteScrollMaxRows >= 1000 && settings.infiniteScrollMaxRows <= 50000 ? Math.round(settings.infiniteScrollMaxRows) : DEFAULT_EDITOR_SETTINGS.infiniteScrollMaxRows,
+    flatteningMultiLineText: settings.flatteningMultiLineText ?? DEFAULT_EDITOR_SETTINGS.flatteningMultiLineText,
     regexMaxMatchCount: typeof settings.regexMaxMatchCount === "number" && Number.isFinite(settings.regexMaxMatchCount) && settings.regexMaxMatchCount >= 100 && settings.regexMaxMatchCount <= 10000 ? Math.round(settings.regexMaxMatchCount) : DEFAULT_EDITOR_SETTINGS.regexMaxMatchCount,
     autoCalculateTotalRows: settings.autoCalculateTotalRows ?? DEFAULT_EDITOR_SETTINGS.autoCalculateTotalRows,
     mongoViewMode: settings.mongoViewMode === "table" ? "table" : DEFAULT_EDITOR_SETTINGS.mongoViewMode,
     showColumnCommentsInHeader: settings.showColumnCommentsInHeader ?? DEFAULT_EDITOR_SETTINGS.showColumnCommentsInHeader,
     showColumnTypesInHeader: settings.showColumnTypesInHeader ?? DEFAULT_EDITOR_SETTINGS.showColumnTypesInHeader,
+    dataGridShowTransposeFieldMetadata: settings.dataGridShowTransposeFieldMetadata === true,
+    colorizeDataGridCellTypes: settings.colorizeDataGridCellTypes ?? DEFAULT_EDITOR_SETTINGS.colorizeDataGridCellTypes,
     showIndexIndicatorsInHeader: settings.showIndexIndicatorsInHeader ?? DEFAULT_EDITOR_SETTINGS.showIndexIndicatorsInHeader,
     compactColumnHeaderActions: settings.compactColumnHeaderActions ?? DEFAULT_EDITOR_SETTINGS.compactColumnHeaderActions,
     columnWidthDensity: normalizeColumnWidthDensity(settings.columnWidthDensity),
@@ -1612,6 +1624,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.showInsertValueHints !== undefined) editorSettings.value.showInsertValueHints = partial.showInsertValueHints === true;
     if (partial.autoAliasTables !== undefined) editorSettings.value.autoAliasTables = partial.autoAliasTables;
     if (partial.insertSpaceAfterCompletion !== undefined) editorSettings.value.insertSpaceAfterCompletion = partial.insertSpaceAfterCompletion === true;
+    if (partial.sortCompletionColumnsAlphabetically !== undefined) editorSettings.value.sortCompletionColumnsAlphabetically = partial.sortCompletionColumnsAlphabetically === true;
     if (partial.wordWrap !== undefined) editorSettings.value.wordWrap = partial.wordWrap;
     if (partial.vimModeEnabled !== undefined) editorSettings.value.vimModeEnabled = partial.vimModeEnabled === true;
     if (partial.autoCloseBrackets !== undefined) editorSettings.value.autoCloseBrackets = partial.autoCloseBrackets === true;
@@ -1640,6 +1653,8 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.mongoViewMode !== undefined) editorSettings.value.mongoViewMode = partial.mongoViewMode;
     if (partial.showColumnCommentsInHeader !== undefined) editorSettings.value.showColumnCommentsInHeader = partial.showColumnCommentsInHeader;
     if (partial.showColumnTypesInHeader !== undefined) editorSettings.value.showColumnTypesInHeader = partial.showColumnTypesInHeader;
+    if (partial.dataGridShowTransposeFieldMetadata !== undefined) editorSettings.value.dataGridShowTransposeFieldMetadata = partial.dataGridShowTransposeFieldMetadata === true;
+    if (partial.colorizeDataGridCellTypes !== undefined) editorSettings.value.colorizeDataGridCellTypes = partial.colorizeDataGridCellTypes === true;
     if (partial.showIndexIndicatorsInHeader !== undefined) editorSettings.value.showIndexIndicatorsInHeader = partial.showIndexIndicatorsInHeader;
     if (partial.compactColumnHeaderActions !== undefined) editorSettings.value.compactColumnHeaderActions = partial.compactColumnHeaderActions;
     if (partial.columnWidthDensity !== undefined) editorSettings.value.columnWidthDensity = normalizeColumnWidthDensity(partial.columnWidthDensity);
@@ -1702,6 +1717,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.continueOnErrorOnBatch !== undefined) editorSettings.value.continueOnErrorOnBatch = partial.continueOnErrorOnBatch === true;
     if (partial.clickTableNavigationTarget !== undefined) editorSettings.value.clickTableNavigationTarget = normalizeClickTableNavigationTarget(partial.clickTableNavigationTarget);
     if (partial.completionTriggerMode !== undefined) editorSettings.value.completionTriggerMode = normalizeCompletionTriggerMode(partial.completionTriggerMode);
+    if (partial.flatteningMultiLineText !== undefined) editorSettings.value.flatteningMultiLineText = partial.flatteningMultiLineText;
   }
 
   function updateEditorSettings(partial: Partial<EditorSettings>) {

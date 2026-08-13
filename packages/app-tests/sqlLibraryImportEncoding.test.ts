@@ -27,7 +27,7 @@ test("SQL library directory imports preserve nested folder paths", () => {
   const end = source.indexOf("async function chooseSyncDirectory", start);
   const handler = start >= 0 && end > start ? source.slice(start, end) : "";
 
-  assert.match(handler, /resolveImportedFolder\(connectionId, targetFolder\?\.id, file\.folderNames, folderCache\)/);
+  assert.match(handler, /resolveImportedFolder\(folderConnectionId, targetFolder\?\.id, file\.folderNames, folderCache\)/);
   assert.match(handler, /uniqueImportedName\(file\.name, takenNames\)/);
   assert.doesNotMatch(handler, /relativeImportName/);
 });

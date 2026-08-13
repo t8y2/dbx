@@ -4,12 +4,18 @@ import { describe, expect, it } from "vitest";
 const dataGridSource = readFileSync(new URL("../DataGrid.vue", import.meta.url), "utf8");
 
 describe("DataGrid transpose presentation", () => {
-  it("keeps field metadata in one compact row", () => {
-    expect(dataGridSource).toContain(':item-size="30"');
-    expect(dataGridSource).not.toContain("data-grid-transpose-field-info");
-    expect(dataGridSource).not.toContain("data-grid-transpose-comment-inline");
-    expect(dataGridSource).not.toContain("data-grid-transpose-comment-line");
-    expect(dataGridSource).not.toContain("data-grid-transpose-type-line");
+  it("shows field metadata only when the transpose setting is enabled", () => {
+    expect(dataGridSource).toContain("settingsStore.editorSettings.dataGridShowTransposeFieldMetadata");
+    expect(dataGridSource).toContain("showTransposeFieldMetadata.value && showColumnTypesInHeader.value");
+    expect(dataGridSource).toContain("showTransposeFieldMetadata.value && showColumnCommentsInHeader.value");
+    expect(dataGridSource).toContain("30 + (transposeReserveTypeLine.value ? 14 : 0) + (transposeReserveCommentLine.value ? 14 : 0)");
+    expect(dataGridSource).toContain(':item-size="transposeRowHeight"');
+    expect(dataGridSource).toContain("data-grid-transpose-type-line");
+    expect(dataGridSource).toContain("data-grid-transpose-comment-line");
+    expect(dataGridSource).toContain("data-grid-transpose-index-indicator");
+    expect(dataGridSource).toContain("showColumnTypesInHeader && item.type");
+    expect(dataGridSource).toContain("showColumnCommentsInHeader && item.comment");
+    expect(dataGridSource).toContain("transposeColumnIndexKind(item.column)");
   });
 
   it("shows complete long metadata in a hoverable, bounded tooltip", () => {

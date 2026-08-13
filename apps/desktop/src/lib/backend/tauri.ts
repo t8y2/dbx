@@ -308,6 +308,7 @@ export interface QueryPaginationExecutionPlan {
   pageLimit?: number;
   pageOffset?: number;
   countSql?: string;
+  exactQueryRowBound?: number;
   useAgentResultSession: boolean;
 }
 
@@ -1147,6 +1148,7 @@ export async function executeMulti(
     pageSize?: number;
     maxResultBytes?: number;
     resultKeyColumns?: string[];
+    tableDataPreview?: boolean;
     resultSessionId?: string;
     clientSessionId?: string;
     timeoutSecs?: number;
@@ -1193,6 +1195,7 @@ export async function executeMultiWithProgress(
     pageSize?: number;
     maxResultBytes?: number;
     resultKeyColumns?: string[];
+    tableDataPreview?: boolean;
     resultSessionId?: string;
     clientSessionId?: string;
     timeoutSecs?: number;
@@ -1257,12 +1260,13 @@ export async function executeScript(connectionId: string, database: string, sql:
   return invoke("execute_script", { connectionId, database, sql, schema });
 }
 
-export async function executeScriptWith2pc(connectionId: string, database: string, statements: string[], schema?: string): Promise<TransactionLog> {
+export async function executeScriptWith2pc(connectionId: string, database: string, statements: string[], schema?: string, destructiveConfirmed = false): Promise<TransactionLog> {
   return invoke("execute_script_with_2pc", {
     connectionId,
     database,
     statements,
     schema,
+    destructiveConfirmed,
   });
 }
 
@@ -3527,6 +3531,15 @@ export async function mongoCreateUser(connectionId: string, database: string, us
   });
 }
 
+export async function mongoRunCommand(connectionId: string, database: string, commandJson: string, executionId?: string): Promise<MongoDocumentResult> {
+  return invoke("mongo_run_command", {
+    connectionId,
+    database,
+    commandJson,
+    executionId,
+  });
+}
+
 export async function mongoDropIndexes(connectionId: string, database: string, collection: string, indexesJson?: string, single = false): Promise<MongoDropIndexesResult> {
   return invoke("mongo_drop_indexes", {
     connectionId,
@@ -3602,6 +3615,16 @@ export async function documentDeleteDocument(connectionId: string, database: str
     id,
     routing,
     documentType,
+  });
+}
+
+export async function documentSaveMeilisearchBatch(connectionId: string, collection: string, updates: Array<{ id: string; docJson: string }>, deleteIds: string[], inserts: string[]): Promise<number> {
+  return invoke("document_save_meilisearch_batch", {
+    connectionId,
+    collection,
+    updates,
+    deleteIds,
+    inserts,
   });
 }
 

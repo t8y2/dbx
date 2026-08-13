@@ -45,11 +45,12 @@ Each agent runs as a standalone process and communicates with DBX via stdin/stdo
 | etcd | etcd | jetcd |
 | zookeeper | Apache ZooKeeper | Apache Curator |
 | rabbitmq | RabbitMQ | amqp091-go native agent |
+| rocketmq | Apache RocketMQ | rocketmq-admin-go native agent |
 
 
 ## Multi-JRE Support
 
-Most Java agents target JRE 21. Native agents, such as `cassandra`, `duckdb`, `hive`, `iotdb`, `oracle`, `kingbase`, `tdengine`, `xugu`, and `rabbitmq`, do not require a JRE. DBX downloads and manages the JRE 21 installation automatically for Java agents.
+Most Java agents target JRE 21. Native agents, such as `cassandra`, `duckdb`, `hive`, `iotdb`, `oracle`, `kingbase`, `tdengine`, `xugu`, `rabbitmq`, and `rocketmq`, do not require a JRE. DBX downloads and manages the JRE 21 installation automatically for Java agents.
 
 ## JDBC Connection Pooling
 
@@ -75,7 +76,7 @@ Set `DBX_AGENT_JDBC_POOL_ENABLED=false` for a runtime-level compatibility fallba
 
 For new agents, prefer a **native (Go or Rust) driver** over a Java/JDBC agent whenever a mature, license-compatible native driver is available. Native agents ship as a single self-contained executable with no JRE, which significantly reduces memory footprint and startup time — the JVM baseline that every Java agent pays even when idle is avoided entirely.
 
-- **Native (C++/Go/Rust)** — preferred when a usable native driver exists. See `drivers/cassandra-go` (Apache cassandra-gocql-driver), `drivers/duckdb`, `drivers/hive-go` (native HS2), `drivers/iotdb` (Apache IoTDB Go Client), `drivers/oracle-go` (go-ora), `drivers/kingbase-go` (gokb), `drivers/vastbase-go` (openGauss connector), `drivers/tdengine` (taos-connector-rust), `drivers/xugu`, and `drivers/rabbitmq` (amqp091-go) as reference implementations. No JRE download or management is needed.
+- **Native (C++/Go/Rust)** — preferred when a usable native driver exists. See `drivers/cassandra-go` (Apache cassandra-gocql-driver), `drivers/duckdb`, `drivers/hive-go` (native HS2), `drivers/iotdb` (Apache IoTDB Go Client), `drivers/oracle-go` (go-ora), `drivers/kingbase-go` (gokb), `drivers/vastbase-go` (openGauss connector), `drivers/tdengine` (taos-connector-rust), `drivers/xugu`, `drivers/rabbitmq` (amqp091-go), and `drivers/rocketmq` (rocketmq-admin-go) as reference implementations. No JRE download or management is needed.
 - **Java/JDBC** — the default fallback when only a JDBC driver exists for the database, or when the native driver is immature or unmaintained. Most agents still fall in this category.
 
 Native agents implement the same JSON-RPC contract and `versions.json` registration as Java agents; they ship an `agent` executable instead of `agent.jar`. If both native and Java source implementations exist for the same database, publish only the native artifact unless the Java variant has a separately registered compatibility profile, such as `oracle-legacy` / `oracle-10g`.
@@ -95,9 +96,10 @@ Requires JDK 21 (Gradle toolchain auto-downloads if needed).
 (cargo build --manifest-path drivers/tdengine/Cargo.toml --release --locked)
 (cd drivers/xugu && go build -o agent .)
 (cd drivers/rabbitmq && go build -o agent .)
+(cd drivers/rocketmq && go build -o agent .)
 ```
 
-Output JARs are in `drivers/{module}/build/libs/`. Native agents build from `drivers/cassandra-go`, `drivers/duckdb`, `drivers/hive-go`, `drivers/iotdb`, `drivers/oracle-go`, `drivers/kingbase-go`, `drivers/vastbase-go`, `drivers/tdengine`, `drivers/xugu`, and `drivers/rabbitmq`.
+Output JARs are in `drivers/{module}/build/libs/`. Native agents build from `drivers/cassandra-go`, `drivers/duckdb`, `drivers/hive-go`, `drivers/iotdb`, `drivers/oracle-go`, `drivers/kingbase-go`, `drivers/vastbase-go`, `drivers/tdengine`, `drivers/xugu`, `drivers/rabbitmq`, and `drivers/rocketmq`.
 
 ### Local DBX Runtime Test
 
@@ -111,7 +113,7 @@ cp agents/drivers/<db_type>/build/libs/*-all.jar ~/.dbx/agents/drivers/<db_type>
 
 Restart DBX or disconnect and reconnect the database so the new agent process loads the replacement JAR.
 
-Native agents such as `cassandra`, `hive`, `iotdb`, `oracle`, `kingbase`, `tdengine`, `xugu`, and `rabbitmq` use an `agent` executable instead of `agent.jar`. TDengine builds `target/release/dbx-tdengine-driver` from `drivers/tdengine/Cargo.toml`.
+Native agents such as `cassandra`, `hive`, `iotdb`, `oracle`, `kingbase`, `tdengine`, `xugu`, `rabbitmq`, and `rocketmq` use an `agent` executable instead of `agent.jar`. TDengine builds `target/release/dbx-tdengine-driver` from `drivers/tdengine/Cargo.toml`.
 
 ## Versioning
 

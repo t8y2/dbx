@@ -148,6 +148,35 @@ pub async fn mongo_server_version_core(
     }
 }
 
+pub async fn mongo_run_command_core(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    command_json: &str,
+) -> Result<MongoDocumentResult, String> {
+    ensure_document_pool(state, connection_id).await?;
+    let connections = state.connections.read().await;
+    match connections.get(connection_id).ok_or("Not found")? {
+        PoolKind::MongoDb(client) => mongo_driver::run_command(client, database, command_json).await,
+        PoolKind::Agent(client) => {
+            let mut client = client.lock().await;
+            if !client.supports_capability(AgentCapability::MongoRunCommand) {
+                return Err(
+                    "MongoDB Legacy Agent does not support runCommand; upgrade or reinstall the MongoDB Legacy driver"
+                        .to_string(),
+                );
+            }
+            client
+                .mongo_run_command(serde_json::json!({
+                    "database": database,
+                    "command_json": command_json,
+                }))
+                .await
+        }
+        _ => Err("Not a MongoDB connection".to_string()),
+    }
+}
+
 pub async fn mongo_collection_stats_core(
     state: &AppState,
     connection_id: &str,
@@ -628,7 +657,38 @@ pub async fn mongo_insert_documents_core(
     let connections = state.connections.read().await;
     match connections.get(connection_id).ok_or("Not found")? {
         PoolKind::MongoDb(client) => mongo_driver::insert_documents(client, database, collection, docs_json).await,
-        PoolKind::Agent(_) => Err("MongoDB legacy agent does not support bulk insertMany/insertOne writes".to_string()),
+        PoolKind::Agent(client) => {
+            let documents: serde_json::Value =
+                serde_json::from_str(docs_json).map_err(|error| format!("Invalid JSON: {error}"))?;
+            let documents = documents.as_array().ok_or_else(|| {
+                "MongoDB legacy agent does not support bulk insertMany/insertOne writes; insertMany requires an array"
+                    .to_string()
+            })?;
+            if documents.iter().any(|document| !document.is_object()) {
+                return Err("Each MongoDB insertMany document must be an object".to_string());
+            }
+            if documents.is_empty() {
+                return Ok(0);
+            }
+            let mut client = client.lock().await;
+            if !client.supports_capability(AgentCapability::MongoInsertDocuments) {
+                return Err(
+                    "MongoDB Legacy Agent does not support insertMany; upgrade or reinstall the MongoDB Legacy driver"
+                        .to_string(),
+                );
+            }
+            let result: serde_json::Value = client
+                .mongo_insert_documents(serde_json::json!({
+                    "database": database,
+                    "collection": collection,
+                    "docs_json": docs_json,
+                }))
+                .await?;
+            result
+                .get("affected_rows")
+                .and_then(serde_json::Value::as_u64)
+                .ok_or_else(|| "MongoDB Legacy Agent returned an invalid insertMany result".to_string())
+        }
         _ => Err("Not a MongoDB connection".to_string()),
     }
 }
@@ -821,6 +881,10 @@ pub async fn execute_mongo_command_core(
             .await
             .map(|version| scalar_query_result("version", Value::String(version))),
         MongoCommand::Use { database } => Ok(scalar_query_result("database", Value::String(database.clone()))),
+        MongoCommand::RunCommand { command_json } => {
+            let result = mongo_run_command_core(state, connection_id, database, command_json).await?;
+            Ok(mongo_documents_query_result(result.documents))
+        }
         MongoCommand::Find { collection, filter, projection, sort, collation, skip, limit } => {
             let limit = bounded_mongo_find_limit(*limit, max_rows);
             let result = mongo_find_documents_without_total_core(
@@ -1345,6 +1409,146 @@ for line in sys.stdin:
 
         assert!(error.contains("upgrade or reinstall"), "{error}");
         assert!(!error.contains("Unknown method"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn mongo_run_command_routes_legacy_connections_to_the_agent() {
+        let expected_result = serde_json::json!({
+            "documents": [{"ok": 1, "cursor": {"firstBatch": [{"_id": {"$oid": "507f1f77bcf86cd799439011"}}]}}],
+            "extended_documents": [{"ok": 1, "cursor": {"firstBatch": [{"_id": {"$oid": "507f1f77bcf86cd799439011"}}]}}],
+            "total": 1,
+        });
+        let (state, _directory) = legacy_mongo_state_with_capabilities(
+            "run_command",
+            serde_json::json!({
+                "database": "app",
+                "command_json": "{\"ping\":1}",
+            }),
+            expected_result,
+            &[AgentCapability::MongoRunCommand.as_str()],
+        )
+        .await;
+
+        let result = mongo_run_command_core(&state, "legacy", "app", "{\"ping\":1}").await.unwrap();
+
+        assert_eq!(result.total, 1);
+        assert_eq!(result.documents[0]["ok"], 1);
+        assert_eq!(
+            result.extended_documents.as_ref().unwrap()[0]["cursor"]["firstBatch"][0]["_id"],
+            serde_json::json!({"$oid": "507f1f77bcf86cd799439011"})
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn mongo_run_command_requires_an_explicit_legacy_agent_capability() {
+        let (state, _directory) = legacy_mongo_state_with_capabilities(
+            "run_command",
+            serde_json::json!({
+                "database": "app",
+                "command_json": "{\"ping\":1}",
+            }),
+            serde_json::json!({"documents": [{"ok": 1}], "total": 1}),
+            &[],
+        )
+        .await;
+
+        let error = mongo_run_command_core(&state, "legacy", "app", "{\"ping\":1}").await.unwrap_err();
+
+        assert!(error.contains("upgrade or reinstall"), "{error}");
+        assert!(!error.contains("Unknown method"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn mongo_insert_many_routes_legacy_connections_to_one_agent_call() {
+        let documents = r#"[{"type":999,"refid":"11"},{"type":999,"refid":"12"}]"#;
+        let (state, _directory) = legacy_mongo_state_with_capabilities(
+            "insert_documents",
+            serde_json::json!({
+                "database": "app",
+                "collection": "user",
+                "docs_json": documents,
+            }),
+            serde_json::json!({ "affected_rows": 2 }),
+            &["mongo_insert_documents"],
+        )
+        .await;
+
+        let affected = mongo_insert_documents_core(&state, "legacy", "app", "user", documents).await.unwrap();
+
+        assert_eq!(affected, 2);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn mongo_insert_many_requires_an_explicit_legacy_agent_capability() {
+        let documents = r#"[{"name":"Ada"}]"#;
+        let (state, _directory) = legacy_mongo_state_with_capabilities(
+            "insert_documents",
+            serde_json::json!({
+                "database": "app",
+                "collection": "users",
+                "docs_json": documents,
+            }),
+            serde_json::json!({ "affected_rows": 1 }),
+            &[],
+        )
+        .await;
+
+        let error = mongo_insert_documents_core(&state, "legacy", "app", "users", documents).await.unwrap_err();
+
+        assert!(error.contains("upgrade or reinstall"), "{error}");
+        assert!(!error.contains("unexpected MongoDB RPC"), "{error}");
+        assert!(!error.contains("Unknown method"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn mongo_insert_many_rejects_invalid_batches_and_skips_empty_batches_before_dispatch() {
+        let (state, _directory) = legacy_mongo_state_with_capabilities(
+            "insert_documents",
+            serde_json::json!({
+                "database": "app",
+                "collection": "users",
+                "docs_json": [],
+            }),
+            serde_json::json!({ "affected_rows": 1 }),
+            &[AgentCapability::MongoInsertDocuments.as_str()],
+        )
+        .await;
+
+        let affected = mongo_insert_documents_core(&state, "legacy", "app", "users", "[]").await.unwrap();
+        let error = mongo_insert_documents_core(&state, "legacy", "app", "users", r#"[{"name":"Ada"},null]"#)
+            .await
+            .unwrap_err();
+
+        assert_eq!(affected, 0);
+        assert!(error.contains("must be an object"), "{error}");
+        assert!(!error.contains("unexpected MongoDB RPC"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn mongo_insert_one_keeps_the_existing_legacy_agent_behavior() {
+        let document = r#"{"name":"Ada"}"#;
+        let (state, _directory) = legacy_mongo_state_with_capabilities(
+            "insert_documents",
+            serde_json::json!({
+                "database": "app",
+                "collection": "users",
+                "docs_json": document,
+            }),
+            serde_json::json!({ "affected_rows": 1 }),
+            &[AgentCapability::MongoInsertDocuments.as_str()],
+        )
+        .await;
+
+        let error = mongo_insert_documents_core(&state, "legacy", "app", "users", document).await.unwrap_err();
+
+        assert!(error.contains("insertMany/insertOne"), "{error}");
+        assert!(!error.contains("unexpected MongoDB RPC"), "{error}");
     }
 
     #[cfg(unix)]

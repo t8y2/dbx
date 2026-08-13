@@ -373,8 +373,23 @@ fn parse_expression_alias(column: &str) -> Option<ExpressionAlias> {
             continue;
         }
         let alias_text = after_as.trim();
-        let alias = read_identifier(alias_text, 0)?;
+        let alias = read_select_alias(alias_text)?;
         if alias.end != alias_text.len() {
+            continue;
+        }
+        let expression = trimmed_end[..index].trim().to_string();
+        if expression.is_empty() {
+            return None;
+        }
+        return Some(ExpressionAlias { expression, result_name: alias.value });
+    }
+
+    for (index, _) in trimmed_end.match_indices('\'') {
+        if !previous_char(trimmed_end, index).is_some_and(char::is_whitespace) {
+            continue;
+        }
+        let alias = read_select_alias(&trimmed_end[index..])?;
+        if alias.end != trimmed_end.len() - index {
             continue;
         }
         let expression = trimmed_end[..index].trim().to_string();
@@ -392,11 +407,34 @@ fn parse_column_alias(rest: &str) -> Option<Option<String>> {
         return Some(None);
     }
     let alias_text = strip_leading_as(trimmed).unwrap_or(trimmed).trim();
-    let alias = read_identifier(alias_text, 0)?;
+    let alias = read_select_alias(alias_text)?;
     if alias.end != alias_text.len() {
         return None;
     }
     Some(Some(alias.value))
+}
+
+fn read_select_alias(text: &str) -> Option<Identifier> {
+    let pos = skip_whitespace(text, 0);
+    if !text[pos..].starts_with('\'') {
+        return read_identifier(text, pos);
+    }
+
+    let mut value = String::new();
+    let mut chars = text[pos + 1..].char_indices().peekable();
+    while let Some((offset, ch)) = chars.next() {
+        if ch != '\'' {
+            value.push(ch);
+            continue;
+        }
+        if chars.peek().is_some_and(|(_, next)| *next == '\'') {
+            chars.next();
+            value.push('\'');
+            continue;
+        }
+        return Some(Identifier { value, quoted: true, end: pos + 1 + offset + ch.len_utf8() });
+    }
+    None
 }
 
 fn strip_leading_as(text: &str) -> Option<&str> {
@@ -1173,6 +1211,59 @@ mod tests {
             computed.analysis.unwrap().columns[2],
             column(None, false, None, None, "审核状态", "CASE WHEN IsAuditing = 1 THEN 1 ELSE 0 END",)
         );
+    }
+
+    #[test]
+    fn accepts_mysql_string_quoted_column_aliases() {
+        for (sql, result_name) in [
+            ("SELECT id, report_type '计划类型' FROM biz_work_log", "计划类型"),
+            ("SELECT id, report_type AS '计划类型' FROM biz_work_log", "计划类型"),
+            ("SELECT id, report_type '计划''类型' FROM biz_work_log", "计划'类型"),
+            ("SELECT id, report_type AS '计划''类型' FROM biz_work_log", "计划'类型"),
+        ] {
+            let result = analyze_editable_query_editability(sql);
+
+            assert!(result.editable, "{sql}: {:?}", result.reason);
+            assert_eq!(
+                result.analysis.unwrap().columns,
+                vec![
+                    column(Some("id"), false, None, None, "id", "id"),
+                    column(Some("report_type"), false, None, None, result_name, "report_type"),
+                ],
+                "{sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn keeps_string_literals_computed_and_rejects_malformed_string_aliases() {
+        for sql in [
+            "SELECT id, report_type '计划类型 FROM biz_work_log",
+            "SELECT id, report_type '计划类型' trailing FROM biz_work_log",
+        ] {
+            let result = analyze_editable_query_editability(sql);
+            assert!(!result.editable, "{sql}");
+        }
+
+        for sql in
+            ["SELECT id, 'constant' '固定值' FROM biz_work_log", "SELECT id, 'constant' AS '固定值' FROM biz_work_log"]
+        {
+            let computed = analyze_editable_query_editability(sql);
+            assert!(computed.editable, "{sql}");
+            assert_eq!(
+                computed.analysis.unwrap().columns[1],
+                column(None, false, None, None, "固定值", "'constant'"),
+                "{sql}"
+            );
+        }
+
+        for sql in [
+            "SELECT id, report_type AS 计划类型 FROM biz_work_log",
+            "SELECT id, report_type AS `计划类型` FROM biz_work_log",
+            "SELECT id, report_type AS \"计划类型\" FROM biz_work_log",
+        ] {
+            assert!(analyze_editable_query_editability(sql).editable, "{sql}");
+        }
     }
 
     #[test]

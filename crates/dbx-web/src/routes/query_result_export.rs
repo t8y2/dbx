@@ -18,7 +18,8 @@ use futures::stream::Stream;
 use serde::Deserialize;
 
 use crate::error::AppError;
-use crate::state::WebState;
+use crate::routes::export_download::{attachment_content_disposition, export_download_filename};
+use crate::state::{WebExportFile, WebState};
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -49,9 +50,14 @@ pub async fn start_query_result_export(
     std::fs::create_dir_all(&tmp_dir).map_err(|e| AppError::from(e.to_string()))?;
     let tmp_file = tmp_dir.join(format!("query_result_export_{export_id}.{ext}"));
     let file_path = tmp_file.to_string_lossy().to_string();
+    let download_filename = export_download_filename(&req.file_path, "query-result", ext);
     req.file_path = file_path.clone();
 
-    state.export_files.write().await.insert(export_id.clone(), (file_path, req.format.clone()));
+    state
+        .export_files
+        .write()
+        .await
+        .insert(export_id.clone(), WebExportFile { file_path, download_filename, format: req.format.clone() });
 
     let tx = {
         let mut channels = state.sse_channels.write().await;
@@ -141,28 +147,67 @@ pub async fn query_result_export_download(
     State(state): State<Arc<WebState>>,
     Path(export_id): Path<String>,
 ) -> Result<Response, AppError> {
-    let (file_path, format) = state
+    let export_file = state
         .export_files
         .write()
         .await
         .remove(&export_id)
         .ok_or_else(|| AppError::from("Export file not found".to_string()))?;
 
-    let data = tokio::fs::read(&file_path).await.map_err(|e| AppError::from(e.to_string()))?;
-    let _ = tokio::fs::remove_file(&file_path).await;
+    let data = tokio::fs::read(&export_file.file_path).await.map_err(|e| AppError::from(e.to_string()))?;
+    let _ = tokio::fs::remove_file(&export_file.file_path).await;
 
-    let (content_type, file_ext) = match format.as_str() {
-        "csv" => ("text/csv; charset=utf-8", "csv"),
-        "xlsx" => ("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "xlsx"),
-        _ => return Err(AppError::from(format!("Unknown format: {format}"))),
+    let content_type = match export_file.format.as_str() {
+        "csv" => "text/csv; charset=utf-8",
+        "xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        format => return Err(AppError::from(format!("Unknown format: {format}"))),
     };
-
-    let filename = format!("query_result_export_{export_id}.{file_ext}");
 
     Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, content_type)
-        .header(header::CONTENT_DISPOSITION, format!("attachment; filename=\"{filename}\""))
+        .header(header::CONTENT_DISPOSITION, attachment_content_disposition(&export_file.download_filename))
         .body(Body::from(data))
         .map_err(|e| AppError::from(e.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::to_bytes;
+    use dbx_core::connection::AppState;
+    use dbx_core::storage::Storage;
+
+    use crate::state::WebExportFile;
+
+    #[tokio::test]
+    async fn query_result_export_download_uses_the_requested_web_filename() {
+        let dir = std::env::temp_dir().join(format!("dbx-web-query-export-download-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let app = Arc::new(AppState::new_with_plugin_dir(storage, dir.join("plugins")));
+        let state = Arc::new(WebState::for_tests(app, dir.clone()));
+        let file_path = dir.join("query-export.csv");
+        tokio::fs::write(&file_path, b"id,name\n1,test").await.unwrap();
+        state.export_files.write().await.insert(
+            "query-export-id".to_string(),
+            WebExportFile {
+                file_path: file_path.to_string_lossy().to_string(),
+                download_filename: "agents_260812161843.csv".to_string(),
+                format: "csv".to_string(),
+            },
+        );
+
+        let response =
+            query_result_export_download(State(state.clone()), Path("query-export-id".to_string())).await.unwrap();
+
+        assert_eq!(
+            response.headers().get(header::CONTENT_DISPOSITION).unwrap().to_str().unwrap(),
+            "attachment; filename=\"agents_260812161843.csv\"; filename*=UTF-8''agents_260812161843.csv"
+        );
+        assert_eq!(to_bytes(response.into_body(), usize::MAX).await.unwrap().as_ref(), b"id,name\n1,test");
+        assert!(!file_path.exists());
+        assert!(!state.export_files.read().await.contains_key("query-export-id"));
+        std::fs::remove_dir_all(dir).ok();
+    }
 }

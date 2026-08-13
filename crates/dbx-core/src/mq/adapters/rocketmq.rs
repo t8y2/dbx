@@ -1,10 +1,9 @@
-//! Apache RocketMQ admin adapter. Communicates with a Java agent process
-//! (`RocketMqAgent.java`) via JSON-RPC over stdin/stdout. The Java agent uses
-//! `DefaultMQAdminExt` for admin operations and `DefaultMQProducer` for
-//! message production.
+//! Apache RocketMQ admin adapter. Communicates with the Go native agent via
+//! JSON-RPC over stdin/stdout. The agent uses `rocketmq-admin-go` plus direct
+//! remoting calls for compatibility gaps in the upstream admin API.
 //!
-//! This adapter follows the same pattern as the ZooKeeper/Etcd agents:
-//! 1. Spawn a Java agent process via `AgentDriverClient`
+//! This adapter follows the same process-agent pattern as the other drivers:
+//! 1. Spawn the native agent process via `AgentDriverClient`
 //! 2. Perform JSON-RPC handshake + connect
 //! 3. Delegate all `MessageQueueAdmin` trait methods to JSON-RPC calls
 
@@ -97,10 +96,10 @@ fn cluster_info_from_agent_result(result: &serde_json::Value) -> MqClusterInfo {
 }
 
 impl RocketMqAdmin {
-    /// Spawn the RocketMQ Java agent, perform handshake, and connect.
+    /// Spawn the RocketMQ native agent, perform handshake, and connect.
     ///
     /// Callers must probe NameServer reachability before invoking this so the
-    /// connect-timeout wall covers only JVM spawn + handshake + connect.
+    /// connect-timeout wall covers only process spawn + handshake + connect.
     pub async fn new(cfg: MqAdminConfig, launch: AgentLaunchSpec) -> Result<Self, String> {
         let mut client = AgentDriverClient::spawn(launch).await?;
 
@@ -814,7 +813,7 @@ fn rocketmq_topic_admin_params(topic: &TopicRef, partitions: Option<u32>) -> ser
     params
 }
 
-/// Build the connection params JSON from MqAdminConfig for the Java agent.
+/// Build the connection params JSON from MqAdminConfig for the native agent.
 fn build_connection_params(cfg: &MqAdminConfig) -> serde_json::Value {
     let extra = &cfg.extra;
     let access_key = extra_str(extra, "accessKey")
@@ -872,6 +871,9 @@ fn reset_cursor_params(topic: &TopicRef, sub: &str, pos: ResetPosition) -> Resul
             "position": "timestamp",
             "timestampMs": timestamp_ms,
         })),
+        ResetPosition::PartitionOffset { .. } => {
+            Err("RocketMQ does not support cursor reset by Kafka partition offset".to_string())
+        }
         ResetPosition::MessageId { .. } => {
             Err("RocketMQ does not support cursor reset by Pulsar message id".to_string())
         }
@@ -1291,6 +1293,23 @@ mod tests {
 
         assert_eq!(params.get("groupId").and_then(|v| v.as_str()), Some("group-a"));
         assert_eq!(params.get("position").and_then(|v| v.as_str()), Some("timestamp"));
+    }
+
+    #[test]
+    fn reset_cursor_params_rejects_kafka_partition_offsets() {
+        let topic = TopicRef {
+            tenant: "_rocketmq".to_string(),
+            namespace: "default".to_string(),
+            topic: "events".to_string(),
+            persistent: true,
+            partitioned: None,
+            message_type: None,
+            ..TopicRef::default()
+        };
+
+        let error = reset_cursor_params(&topic, "group-a", ResetPosition::PartitionOffset { partition: 0, offset: 9 })
+            .expect_err("RocketMQ must not reinterpret Kafka partition offsets");
+        assert!(error.contains("Kafka partition offset"));
     }
 
     #[test]

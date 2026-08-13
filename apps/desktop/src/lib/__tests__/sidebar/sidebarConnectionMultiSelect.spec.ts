@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { applyConnectionMultiSelection, connectionMultiSelectionAfterToggle, emptyConnectionMultiSelection, releaseConnectionFromMultiSelection } from "@/lib/sidebar/sidebarConnectionMultiSelect";
+import { applyConnectionMultiSelection, applyTreeNodeSelection, connectionMultiSelectionAfterToggle, emptyConnectionMultiSelection, isExitConnectionMultiSelectionShortcut, releaseConnectionFromMultiSelection } from "@/lib/sidebar/sidebarConnectionMultiSelect";
 import type { ConnectionMultiSelection, ConnectionMultiSelectionTarget } from "@/lib/sidebar/sidebarConnectionMultiSelect";
 
 function tick(selection: ConnectionMultiSelection, ...connectionIds: string[]): ConnectionMultiSelection {
@@ -11,6 +11,21 @@ function target(): ConnectionMultiSelectionTarget {
 }
 
 describe("connection multi-selection", () => {
+  it("uses plain Escape to exit connection multi-select", () => {
+    const event = (key: string, modifiers: Partial<Pick<KeyboardEvent, "metaKey" | "ctrlKey" | "altKey" | "shiftKey">> = {}) => ({
+      key,
+      metaKey: false,
+      ctrlKey: false,
+      altKey: false,
+      shiftKey: false,
+      ...modifiers,
+    });
+
+    expect(isExitConnectionMultiSelectionShortcut(event("Escape"))).toBe(true);
+    expect(isExitConnectionMultiSelectionShortcut(event("Escape", { metaKey: true }))).toBe(false);
+    expect(isExitConnectionMultiSelectionShortcut(event("Enter"))).toBe(false);
+  });
+
   it("adds each ticked connection to the running selection", () => {
     const selection = tick(emptyConnectionMultiSelection(), "conn-1", "conn-2", "conn-3");
 
@@ -47,6 +62,24 @@ describe("connection multi-selection", () => {
       treeSelectionAnchorId: "conn-2",
       connectionMultiSelectActive: true,
     });
+  });
+
+  it("enables checkbox mode for a modifier-key selection containing only connections", () => {
+    const store = target();
+
+    applyTreeNodeSelection(store, { nodeIds: ["conn-1", "conn-2"], activeNodeId: "conn-2", anchorNodeId: "conn-2" }, new Set(["conn-1", "conn-2"]));
+
+    expect(store.selectedTreeNodeIds).toEqual(["conn-1", "conn-2"]);
+    expect(store.connectionMultiSelectActive).toBe(true);
+  });
+
+  it("keeps mixed modifier-key selections out of connection checkbox mode", () => {
+    const store = target();
+
+    applyTreeNodeSelection(store, { nodeIds: ["conn-1", "database-1"], activeNodeId: "database-1", anchorNodeId: "conn-1" }, new Set(["conn-1", "conn-2"]));
+
+    expect(store.selectedTreeNodeIds).toEqual(["conn-1", "database-1"]);
+    expect(store.connectionMultiSelectActive).toBe(false);
   });
 
   it("clears every tree selection field when the selection is released", () => {

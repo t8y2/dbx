@@ -9,7 +9,7 @@ import { Input } from "@/components/ui/input";
 import LightDropdown from "@/components/ui/LightDropdown.vue";
 import LightTooltip from "@/components/ui/LightTooltip.vue";
 import ConnectionTree from "@/components/sidebar/ConnectionTree.vue";
-import { applyConnectionMultiSelection, emptyConnectionMultiSelection } from "@/lib/sidebar/sidebarConnectionMultiSelect";
+import { applyConnectionMultiSelection, emptyConnectionMultiSelection, isExitConnectionMultiSelectionShortcut } from "@/lib/sidebar/sidebarConnectionMultiSelect";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useToast } from "@/composables/useToast";
 
@@ -90,6 +90,18 @@ function clearConnectionMultiSelection() {
   applyConnectionMultiSelection(connectionStore, emptyConnectionMultiSelection());
 }
 
+function isEditableSidebarTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  return target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target instanceof HTMLSelectElement || target.isContentEditable || !!target.closest("[contenteditable='true'], [role='textbox']");
+}
+
+function onSidebarKeydown(event: KeyboardEvent) {
+  if (event.defaultPrevented || !connectionStore.connectionMultiSelectActive || !isExitConnectionMultiSelectionShortcut(event) || isEditableSidebarTarget(event.target)) return;
+  event.preventDefault();
+  event.stopPropagation();
+  clearConnectionMultiSelection();
+}
+
 function toggleAllConnectionsSelected() {
   if (allConnectionsSelected.value) {
     clearConnectionMultiSelection();
@@ -153,13 +165,17 @@ defineExpose({ focusSearch });
 </script>
 
 <template>
-  <div class="app-sidebar-panel h-full shrink-0 relative select-none" :class="classicLayout ? '' : 'rounded-md border border-border/80 bg-background'" :style="{ width: sidebarWidth + 'px' }">
+  <div class="app-sidebar-panel h-full shrink-0 relative select-none" :class="classicLayout ? '' : 'rounded-md border border-border/80 bg-background'" :style="{ width: sidebarWidth + 'px' }" @keydown="onSidebarKeydown">
     <div class="h-full flex flex-col overflow-hidden">
       <div class="app-sidebar-toolbar flex items-center gap-px px-3 text-xs font-medium text-muted-foreground border-b bg-muted/20" :class="classicLayout ? 'h-9' : 'h-10'">
-        <span class="flex self-stretch items-center truncate" data-tauri-drag-region>{{ t("sidebar.connections") }}</span>
+        <span class="flex min-w-0 self-stretch items-center" data-tauri-drag-region>
+          <span class="truncate" data-tauri-drag-region>{{ t("sidebar.connections") }}</span>
+          <span v-if="showConnectionMultiSelectToolbar" class="ml-1.5 shrink-0 text-[11px] font-normal text-muted-foreground/80" data-connection-selection-count>
+            {{ t("connectionGroup.selectedConnections", { count: selectedConnectionCount }) }}
+          </span>
+        </span>
         <span class="flex-1 self-stretch" data-tauri-drag-region />
         <template v-if="showConnectionMultiSelectToolbar">
-          <span class="mr-1 text-[11px] font-medium text-muted-foreground">{{ selectedConnectionCount }}</span>
           <LightTooltip :text="t('connectionGroup.createGroup')" side="bottom" :delay="0" :close-delay="0" nowrap>
             <Button variant="ghost" size="icon" class="h-5 w-5" @click="openCreateSelectedGroupDialog">
               <FolderPlus class="h-3 w-3" />

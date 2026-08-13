@@ -30,6 +30,7 @@ func buildDSNForConnect(params connectParams) (string, error) {
 		return "", err
 	}
 	options := parseURLParams(params.URLParams)
+	setOracleDefaultPrefetchRowsMap(options)
 	if params.SysDBA {
 		options["AUTH TYPE"] = "SYSDBA"
 	}

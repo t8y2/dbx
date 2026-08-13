@@ -302,6 +302,42 @@ func TestExecuteQueryUsesHiveServerResultSetSignal(t *testing.T) {
 	}
 }
 
+func TestQueryResultsPreserveHiveServerLabelsWithoutDotSplitting(t *testing.T) {
+	columns := []string{"id", "customer.id", "total + 1", "id"}
+	columnTypes := []string{"BIGINT", "BIGINT", "DOUBLE", "BIGINT"}
+	behavior := &scriptedBehavior{}
+	behavior.query = func(ctx context.Context, _ string) (driver.Rows, error) {
+		return newScriptedRows(ctx, columns, columnTypes, [][]driver.Value{{int64(1), int64(2), float64(3), int64(4)}, {int64(5), int64(6), float64(7), int64(8)}}), nil
+	}
+	server := newScriptedServer(t, behavior)
+
+	ordinary, err := server.executeQuery(queryOptions{SQL: "SELECT * FROM labels"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(ordinary.Columns, columns) || !reflect.DeepEqual(ordinary.ColumnTypes, []string{"bigint", "bigint", "double", "bigint"}) {
+		t.Fatalf("ordinary metadata changed: %#v", ordinary)
+	}
+	if len(ordinary.Rows) != 2 || ordinary.Rows[0][0] != "1" || ordinary.Rows[0][3] != "4" {
+		t.Fatalf("ordinary values changed: %#v", ordinary.Rows)
+	}
+
+	first, err := server.executeQueryPage(queryOptions{SQL: "SELECT * FROM labels", MaxRows: 2}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.SessionID == nil || !first.HasMore || !reflect.DeepEqual(first.Columns, columns) {
+		t.Fatalf("first page metadata changed: %#v", first)
+	}
+	second, err := server.fetchQueryPage(*first.SessionID, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.HasMore || second.SessionID != nil || !reflect.DeepEqual(second.Columns, columns) {
+		t.Fatalf("cached page metadata changed: %#v", second)
+	}
+}
+
 func TestPagedQueryTruncatesAndPreservesLegacyJDBCValueSemantics(t *testing.T) {
 	largeValue := strings.Repeat("x", 256*1024)
 	createdAt := time.Date(2026, time.August, 11, 10, 11, 12, 345000000, time.UTC)

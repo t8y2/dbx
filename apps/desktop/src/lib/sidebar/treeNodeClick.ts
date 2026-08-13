@@ -2,7 +2,7 @@ import type { DatabaseType, ObjectSourceKind, TreeNode, TreeNodeType } from "@/t
 import { customTypeCapabilities, supportsTypeObjectSource } from "@/lib/database/databaseObjectCapabilities";
 import { matchesShortcut, type ShortcutLikeEvent } from "@/lib/editor/keyboardShortcuts";
 
-export type TreeNodeRowAction = "open-data" | "open-source" | "open-extension-details" | "toggle" | "none";
+export type TreeNodeRowAction = "open-data" | "open-source" | "open-extension-details" | "open-saved-sql" | "toggle" | "none";
 export type TreeNodeRowDoubleClickAction = "open-data" | "activate-data" | "open-database-browser" | "open-object-browser" | "open-object-browser-and-expand" | "open-source" | "open-extension-details" | "open-saved-sql" | "toggle" | "none";
 export type SidebarSelectionCopyAction = "copy-name" | "none";
 export type SidebarActivation = "single" | "double";
@@ -104,6 +104,7 @@ function canOpenTreeNodeSource(type: TreeNodeType, dbType?: DatabaseType): boole
 export function treeNodeRowAction(type: TreeNodeType, canExpand: boolean, activation: SidebarActivation = "single", dbType?: DatabaseType): TreeNodeRowAction {
   if (!shouldActivateTreeNodeOnSingleClick(type, activation)) return "none";
   if (type === "extension") return "open-extension-details";
+  if (savedSqlNodeTypes.has(type)) return "open-saved-sql";
   if (dataNodeTypes.has(type)) return "open-data";
   // PostgreSQL-family custom types: open read-only details (toggle when expandable).
   if (type === "type" && customTypeCapabilities(dbType).details) return canExpand ? "toggle" : "none";

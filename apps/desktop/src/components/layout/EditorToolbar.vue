@@ -103,6 +103,7 @@ const supportsExplain = computed(() => {
     dbType !== "mongodb" &&
     dbType !== "elasticsearch" &&
     dbType !== "easysearch" &&
+    dbType !== "meilisearch" &&
     dbType !== "qdrant" &&
     dbType !== "milvus" &&
     dbType !== "weaviate" &&
@@ -486,6 +487,7 @@ async function changeCatalog(selectedCatalog: string) {
         v-if="
           activeConnection?.db_type !== 'elasticsearch' &&
           activeConnection?.db_type !== 'easysearch' &&
+          activeConnection?.db_type !== 'meilisearch' &&
           activeConnection?.db_type !== 'qdrant' &&
           activeConnection?.db_type !== 'milvus' &&
           activeConnection?.db_type !== 'weaviate' &&

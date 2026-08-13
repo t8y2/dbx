@@ -5,6 +5,7 @@ import { useQueryStore } from "@/stores/queryStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { buildTableSelectSql, quoteTableDataIdentifier } from "@/lib/table/tableSelectSql";
 import { tableOpenPageLimit } from "@/lib/table/tableOpenPageLimit";
+import { tableDataLargeValuePreviewOptions } from "@/lib/dataGrid/dataGridLargeValues";
 import { usesSyntheticRowIdKey } from "@/lib/table/tableEditing";
 import { tableMetaForDataTab } from "@/lib/table/tableDataTabMeta";
 import * as api from "@/lib/backend/api";
@@ -65,6 +66,7 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
     // 结果（可能是失败结果的 ["Error"]），进入 SQL 会生成非法投影；
     // 真实列缺失时省略 columns 让 builder 生成 SELECT *
     const realColumns = tab.tableMeta?.columns.length ? tab.tableMeta.columns : undefined;
+    const limit = options.limit ?? tab.resultPageLimit ?? tableOpenPageLimit(settingsStore.editorSettings.tableOpenPageSize);
     return buildTableSelectSql({
       databaseType: effectiveDbType,
       driverProfile: config?.driver_profile,
@@ -76,8 +78,9 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
       catalog: tableMeta?.catalog,
       columns: realColumns?.map((column) => column.name),
       primaryKeys,
+      ...tableDataLargeValuePreviewOptions(effectiveDbType, realColumns ?? [], primaryKeys, limit),
       includeRowId: useRowId,
-      limit: options.limit ?? tab.resultPageLimit ?? tableOpenPageLimit(settingsStore.editorSettings.tableOpenPageSize),
+      limit,
       ...options,
     });
   }

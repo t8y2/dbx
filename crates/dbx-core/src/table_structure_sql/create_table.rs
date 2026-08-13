@@ -182,6 +182,7 @@ pub fn build_create_table_sql(mut options: TableStructureSqlOptions) -> TableStr
             &mut warnings,
             options.schema.as_deref(),
             &options.table_name,
+            false,
         ));
     }
 

@@ -59,6 +59,18 @@ test("bumps the native RabbitMQ agent from its Go directory", () => {
   assert.equal(result.versions.rabbitmq, "0.1.1");
 });
 
+test("bumps the native RocketMQ agent from its Go directory", () => {
+  const result = evaluateAgentVersionBump({
+    versions: { rocketmq: "0.1.0" },
+    changedFiles: ["agents/drivers/rocketmq/main.go"],
+    moduleExists: (path) => path === "agents/drivers/rocketmq",
+    readModuleFile: () => "",
+  });
+
+  assert.equal(result.versions.rocketmq, "0.1.1");
+  assert.deepEqual(result.nativeModules, ["rocketmq"]);
+});
+
 test("bumps the native Vastbase agent from its independent Go directory", () => {
   const result = evaluateAgentVersionBump({
     versions: { vastbase: "0.1.37" },

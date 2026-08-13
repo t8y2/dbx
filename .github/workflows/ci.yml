@@ -740,6 +740,10 @@ jobs:
         run: go test ./...
         working-directory: agents/drivers/rabbitmq
 
+      - name: RocketMQ native agent tests
+        run: go test -race ./...
+        working-directory: agents/drivers/rocketmq
+
       - name: Cassandra native agent tests
         run: go test ./...
         working-directory: agents/drivers/cassandra-go
@@ -771,6 +775,19 @@ jobs:
       - name: RabbitMQ native agent build
         run: CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o /tmp/dbx-agent-rabbitmq-linux-x64 .
         working-directory: agents/drivers/rabbitmq
+
+      - name: RocketMQ native agent build
+        run: CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o /tmp/dbx-agent-rocketmq-linux-x64 .
+        working-directory: agents/drivers/rocketmq
+
+      - name: RocketMQ native agent integration tests
+        shell: bash
+        working-directory: agents/drivers/rocketmq
+        run: |
+          set -euo pipefail
+          for version in 4.9.8 5.3.1; do
+            ./scripts/run-integration.sh "$version"
+          done
 
       - name: Cassandra native agent build
         run: CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o /tmp/dbx-agent-cassandra-linux-x64 .

@@ -193,8 +193,9 @@ func TestParseStandardJDBCURLSectionsAndCredentials(t *testing.T) {
 		t.Fatalf("deprecated Hive conf transport settings were not applied: %#v", config)
 	}
 	want := map[string]string{
-		"set:hiveconf:hive.exec.dynamic.partition": "false",
-		"set:hivevar:SourceTable":                  "override",
+		"set:hiveconf:hive.resultset.use.unique.column.names": "false",
+		"set:hiveconf:hive.exec.dynamic.partition":            "false",
+		"set:hivevar:SourceTable":                             "override",
 	}
 	if !reflect.DeepEqual(config.HiveConfiguration, want) {
 		t.Fatalf("unexpected OpenSession configuration: %#v", config.HiveConfiguration)
@@ -210,14 +211,92 @@ func TestOpenSessionCompatibilityVariablesFromSessionParams(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := map[string]string{
-		"hive.server2.proxy.user":                     "alice",
-		"set:hiveconf:hive.create.as.external.legacy": "true",
-		"set:hiveconf:hive.exec.compress.output":      "true",
-		"set:hivevar:source":                          "events",
-		"set:hivevar:wmpool":                          "etl",
+		"hive.server2.proxy.user":                             "alice",
+		"set:hiveconf:hive.create.as.external.legacy":         "true",
+		"set:hiveconf:hive.exec.compress.output":              "true",
+		"set:hiveconf:hive.resultset.use.unique.column.names": "false",
+		"set:hivevar:source":                                  "events",
+		"set:hivevar:wmpool":                                  "etl",
 	}
 	if !reflect.DeepEqual(config.HiveConfiguration, want) {
 		t.Fatalf("unexpected OpenSession compatibility variables: %#v", config.HiveConfiguration)
+	}
+}
+
+func TestOpenSessionUsesLeafResultLabelsUnlessExplicitlyOverridden(t *testing.T) {
+	tests := []struct {
+		name       string
+		connection string
+		urlParams  string
+		want       string
+	}{
+		{name: "default", want: "false"},
+		{
+			name:       "JDBC hiveconf override",
+			connection: "jdbc:hive2://hs2.example.com:10000/default?hive.resultset.use.unique.column.names=true",
+			want:       "true",
+		},
+		{
+			name:      "URL hiveconf override",
+			urlParams: "?HIVE.RESULTSET.USE.UNIQUE.COLUMN.NAMES=true",
+			want:      "true",
+		},
+		{
+			name:       "URL hiveconf wins over JDBC hiveconf",
+			connection: "jdbc:hive2://hs2.example.com:10000/default?hive.resultset.use.unique.column.names=true",
+			urlParams:  "?hive.resultset.use.unique.column.names=false",
+			want:       "false",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			params := connectParams{Host: "hs2.example.com", ConnectionString: test.connection, URLParams: test.urlParams}
+			if test.connection != "" {
+				params.Host = ""
+			}
+			config, err := parseConnectionConfig(params)
+			if err != nil {
+				t.Fatal(err)
+			}
+			const key = "set:hiveconf:hive.resultset.use.unique.column.names"
+			if got := config.HiveConfiguration[key]; got != test.want {
+				t.Fatalf("%s = %q, want %q; config=%#v", key, got, test.want, config.HiveConfiguration)
+			}
+			matches := 0
+			for candidate := range config.HiveConfiguration {
+				if strings.EqualFold(candidate, key) {
+					matches++
+				}
+			}
+			if matches != 1 {
+				t.Fatalf("result label hiveconf must appear exactly once: %#v", config.HiveConfiguration)
+			}
+		})
+	}
+}
+
+func TestHiveAssignmentMergeCanonicalizesOnlyResultLabelSetting(t *testing.T) {
+	first := map[string]string{
+		"CaseSensitive":                          "first",
+		"HIVE.RESULTSET.USE.UNIQUE.COLUMN.NAMES": "true",
+	}
+	second := map[string]string{
+		"casesensitive":                          "second",
+		"hive.resultset.use.unique.column.names": "false",
+	}
+
+	hiveConfs := mergeHiveConfAssignments(first, second)
+	if got := hiveConfs[resultSetUniqueColumnNames]; got != "false" {
+		t.Fatalf("result-label setting override = %q, want false; values=%#v", got, hiveConfs)
+	}
+	if got := len(hiveConfs); got != 3 {
+		t.Fatalf("unrelated case-distinct Hive confs were collapsed: %#v", hiveConfs)
+	}
+
+	hiveVars := mergeHiveAssignments(first, second)
+	if got := len(hiveVars); got != 4 {
+		t.Fatalf("case-distinct Hive variables were collapsed: %#v", hiveVars)
 	}
 }
 

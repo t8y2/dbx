@@ -100,6 +100,22 @@ test("unknown total falls back to full-page heuristic", () => {
   assert.equal(canGoNextDataGridPage({ rowCount: 0, pageSize: 1 }), false);
 });
 
+test("user LIMIT equal to the page size ends pagination instead of offering an empty page", () => {
+  // `select top 100 ...` at pageSize 100 fills the page exactly, so the
+  // full-page heuristic alone cannot tell "last page" from "more to come" and
+  // offers a next page that returns zero rows. The planner reports the user's
+  // own bound as the total, which resolves the ambiguity.
+  assert.equal(canGoNextDataGridPage({ rowCount: 100, pageSize: 100, pageOffset: 0 }), true);
+  assert.equal(canGoNextDataGridPage({ rowCount: 100, pageSize: 100, pageOffset: 0, totalRowCount: 100 }), false);
+});
+
+test("user LIMIT larger than the page size still pages up to the bound", () => {
+  // `select ... limit 500` at pageSize 100 must page normally and stop at 500.
+  assert.equal(canGoNextDataGridPage({ rowCount: 100, pageSize: 100, pageOffset: 0, totalRowCount: 500 }), true);
+  assert.equal(canGoNextDataGridPage({ rowCount: 100, pageSize: 100, pageOffset: 300, totalRowCount: 500 }), true);
+  assert.equal(canGoNextDataGridPage({ rowCount: 100, pageSize: 100, pageOffset: 400, totalRowCount: 500 }), false);
+});
+
 test("infinite scroll compares cumulative loaded rows with a known total", () => {
   assert.equal(canFetchNextDataGridSegment({ loadedRowCount: 1_000, pageSize: 1_000, totalRowCount: 2_000 }), true);
   assert.equal(canFetchNextDataGridSegment({ loadedRowCount: 2_000, pageSize: 1_000, totalRowCount: 2_000 }), false);

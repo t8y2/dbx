@@ -384,6 +384,34 @@ pub async fn mongo_create_user(
 }
 
 #[tauri::command]
+pub async fn mongo_run_command(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: String,
+    command_json: String,
+    execution_id: Option<String>,
+    mcp_request: Option<bool>,
+) -> Result<MongoDocumentResult, String> {
+    if mcp_request == Some(true) {
+        crate::commands::mcp_bridge::ensure_mcp_dangerous_write_allowed_by_id(
+            state.inner(),
+            &connection_id,
+            &database,
+            "Run MongoDB command",
+        )
+        .await?;
+    }
+    ensure_connection_writable(&state, &connection_id, "Run MongoDB command").await?;
+    let app = state.inner().clone();
+    run_cancellable(
+        &app,
+        execution_id,
+        dbx_core::mongo_ops::mongo_run_command_core(&app, &connection_id, &database, &command_json),
+    )
+    .await
+}
+
+#[tauri::command]
 pub async fn mongo_drop_indexes(
     state: State<'_, Arc<AppState>>,
     connection_id: String,

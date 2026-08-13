@@ -216,6 +216,15 @@ describe("buildSelectAllSql", () => {
   it("qualifies a StarRocks external-catalog table with catalog and database", () => {
     expect(buildSelectAllSql("starrocks", { catalog: "paimon_catalog", database: "bi", tableName: "events" })).toBe("SELECT * FROM `paimon_catalog`.`bi`.`events`");
   });
+  it("uses the driver-reported identifier quote for Kingbase MySQL compat mode", () => {
+    expect(buildSelectAllSql("kingbase", { schema: "audit_schema", tableName: "events" }, "`")).toBe("SELECT * FROM `audit_schema`.`events`");
+  });
+  it("uses the driver-reported identifier quote for Kingbase PostgreSQL mode", () => {
+    expect(buildSelectAllSql("kingbase", { schema: "audit_schema", tableName: "events" }, '"')).toBe('SELECT * FROM "audit_schema"."events"');
+  });
+  it("falls back to double quotes for Kingbase when no identifier quote is reported", () => {
+    expect(buildSelectAllSql("kingbase", { schema: "audit_schema", tableName: "events" })).toBe('SELECT * FROM "audit_schema"."events"');
+  });
 });
 
 describe("isNewQueryPrefillSupported", () => {

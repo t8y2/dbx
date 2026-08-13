@@ -3114,6 +3114,26 @@ fn list_routines_sql(
     limit: Option<usize>,
     offset: Option<usize>,
 ) -> String {
+    list_routines_sql_for_query(database, object_types, limit, offset, RoutineMetadataQuery::Timestamps)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RoutineMetadataQuery {
+    Timestamps,
+    Legacy,
+}
+
+fn routine_metadata_queries() -> [RoutineMetadataQuery; 2] {
+    [RoutineMetadataQuery::Timestamps, RoutineMetadataQuery::Legacy]
+}
+
+fn list_routines_sql_for_query(
+    database: &str,
+    object_types: Option<&[String]>,
+    limit: Option<usize>,
+    offset: Option<usize>,
+    query: RoutineMetadataQuery,
+) -> String {
     let routine_types = [
         ("PROCEDURE", requested_object_type(object_types, "PROCEDURE")),
         ("FUNCTION", requested_object_type(object_types, "FUNCTION")),
@@ -3122,9 +3142,13 @@ fn list_routines_sql(
     .filter_map(|(routine_type, requested)| requested.then_some(format!("'{}'", routine_type)))
     .collect::<Vec<_>>()
     .join(", ");
+    let timestamps = match query {
+        RoutineMetadataQuery::Timestamps => "CREATED AS created_at, LAST_ALTERED AS updated_at",
+        RoutineMetadataQuery::Legacy => "NULL AS created_at, NULL AS updated_at",
+    };
     format!(
         "SELECT ROUTINE_NAME AS object_name, ROUTINE_TYPE AS object_type, NULL AS object_comment, \
-           NULL AS created_at, NULL AS updated_at, \
+           {timestamps}, \
            NULL AS parent_schema, NULL AS parent_name, \
            CASE WHEN ROUTINE_TYPE = 'PROCEDURE' THEN 2 ELSE 3 END AS sort_order \
          FROM information_schema.ROUTINES \
@@ -3133,6 +3157,40 @@ fn list_routines_sql(
         db = quote_value(database),
         pagination = sql_pagination(limit, offset),
     )
+}
+
+async fn query_routine_rows(
+    conn: &mut mysql_async::Conn,
+    database: &str,
+    object_types: Option<&[String]>,
+    limit: Option<usize>,
+    offset: Option<usize>,
+) -> Result<Vec<mysql_async::Row>, String> {
+    let mut last_error = None;
+    for query in routine_metadata_queries() {
+        let sql = match query {
+            RoutineMetadataQuery::Timestamps => list_routines_sql(database, object_types, limit, offset),
+            RoutineMetadataQuery::Legacy => {
+                list_routines_sql_for_query(database, object_types, limit, offset, RoutineMetadataQuery::Legacy)
+            }
+        };
+        let result = match conn.query_iter(&sql).await {
+            Ok(result) => result.collect_and_drop::<mysql_async::Row>().await,
+            Err(error) => Err(error),
+        };
+        match result {
+            Ok(rows) => return Ok(rows),
+            Err(error) => {
+                if query == RoutineMetadataQuery::Timestamps {
+                    log::debug!(
+                        "Routine timestamps are unavailable for database `{database}`; retrying legacy metadata: {error}"
+                    );
+                }
+                last_error = Some(error.to_string());
+            }
+        }
+    }
+    Err(last_error.unwrap_or_else(|| "Routine metadata returned no result".to_string()))
 }
 
 fn list_completion_triggers_sql(database: &str) -> String {
@@ -3276,16 +3334,10 @@ pub async fn list_objects(
     // OceanBase/TiDB variants, restricted accounts) reject information_schema.ROUTINES with
     // ER_UNKNOWN_ERROR (1105). Degrading gracefully keeps tables/views usable.
     if wants_routines {
-        let routines_sql = list_routines_sql(database, object_types, query_limit, query_offset);
-        match conn.query_iter(&routines_sql).await {
-            Ok(result) => match result.collect_and_drop::<mysql_async::Row>().await {
-                Ok(routine_rows) => {
-                    objects.extend(routine_rows.iter().map(|row| row_to_object(row, database)));
-                }
-                Err(e) => {
-                    log::warn!("Skipping routines for database `{}` in object browser: {}", database, e);
-                }
-            },
+        match query_routine_rows(&mut conn, database, object_types, query_limit, query_offset).await {
+            Ok(routine_rows) => {
+                objects.extend(routine_rows.iter().map(|row| row_to_object(row, database)));
+            }
             Err(e) => {
                 log::warn!("Skipping routines for database `{}` in object browser: {}", database, e);
             }
@@ -3447,9 +3499,7 @@ fn table_infos_to_objects(
 
 async fn list_routine_objects(pool: &MySqlPool, database: &str) -> Result<Vec<ObjectInfo>, String> {
     let mut conn = get_conn_with_timeout(pool, super::connection_timeout()).await?;
-    let routines_sql = list_routines_sql(database, None, None, None);
-    let result = conn.query_iter(&routines_sql).await.map_err(|e| e.to_string())?;
-    let rows: Vec<mysql_async::Row> = result.collect_and_drop().await.map_err(|e| e.to_string())?;
+    let rows = query_routine_rows(&mut conn, database, None, None, None).await?;
     Ok(rows.iter().map(|row| row_to_object(row, database)).collect())
 }
 
@@ -3457,12 +3507,8 @@ pub async fn list_completion_objects(pool: &MySqlPool, database: &str) -> Result
     let mut conn = get_conn_with_timeout(pool, super::connection_timeout()).await?;
     let mut objects = Vec::new();
 
-    let routines_sql = list_routines_sql(database, None, None, None);
-    match conn.query_iter(&routines_sql).await {
-        Ok(result) => match result.collect_and_drop::<mysql_async::Row>().await {
-            Ok(rows) => objects.extend(rows.iter().map(|row| row_to_object(row, database))),
-            Err(e) => log::warn!("Skipping routines for completion in database `{}`: {}", database, e),
-        },
+    match query_routine_rows(&mut conn, database, None, None, None).await {
+        Ok(rows) => objects.extend(rows.iter().map(|row| row_to_object(row, database))),
         Err(e) => log::warn!("Skipping routines for completion in database `{}`: {}", database, e),
     }
 
@@ -6547,8 +6593,8 @@ mod tests {
         assert!(!sql.contains("UNION"));
         assert!(sql.contains("'PROCEDURE'"));
         assert!(sql.contains("'FUNCTION'"));
-        assert!(!sql.contains("LAST_ALTERED"));
-        assert!(!sql.contains("CREATED AS created_at"));
+        assert!(sql.contains("CREATED AS created_at"));
+        assert!(sql.contains("LAST_ALTERED AS updated_at"));
     }
 
     #[test]
@@ -6559,6 +6605,59 @@ mod tests {
         assert!(sql.contains("ROUTINE_TYPE IN ('PROCEDURE')"));
         assert!(!sql.contains("'FUNCTION'"));
         assert!(sql.ends_with("LIMIT 101 OFFSET 200"));
+    }
+
+    #[test]
+    fn mysql_list_routines_legacy_sql_preserves_filtering_and_paging() {
+        let object_types = vec!["FUNCTION".to_string()];
+        let sql =
+            list_routines_sql_for_query("app", Some(&object_types), Some(101), Some(200), RoutineMetadataQuery::Legacy);
+
+        assert!(sql.contains("NULL AS created_at, NULL AS updated_at"));
+        assert!(!sql.contains("CREATED AS created_at"));
+        assert!(sql.contains("ROUTINE_TYPE IN ('FUNCTION')"));
+        assert!(!sql.contains("ROUTINE_TYPE IN ('PROCEDURE')"));
+        assert!(sql.ends_with("LIMIT 101 OFFSET 200"));
+    }
+
+    #[test]
+    fn mysql_routine_metadata_queries_are_bounded_to_one_fallback() {
+        assert_eq!(routine_metadata_queries(), [RoutineMetadataQuery::Timestamps, RoutineMetadataQuery::Legacy]);
+    }
+
+    #[test]
+    fn mysql_routine_row_preserves_creation_and_update_times() {
+        let columns = [
+            "object_name",
+            "object_type",
+            "object_comment",
+            "created_at",
+            "updated_at",
+            "parent_schema",
+            "parent_name",
+            "sort_order",
+        ]
+        .into_iter()
+        .map(|name| Column::new(ColumnType::MYSQL_TYPE_VAR_STRING).with_name(name.as_bytes()))
+        .collect();
+        let row = mysql_test_row_with_columns(
+            vec![
+                Value::Bytes(b"refresh_orders".to_vec()),
+                Value::Bytes(b"PROCEDURE".to_vec()),
+                Value::NULL,
+                Value::Bytes(b"2026-08-13 04:00:00".to_vec()),
+                Value::Bytes(b"2026-08-13 04:05:00".to_vec()),
+                Value::NULL,
+                Value::NULL,
+                Value::Int(2),
+            ],
+            columns,
+        );
+
+        let object = row_to_object(&row, "app");
+
+        assert_eq!(object.created_at.as_deref(), Some("2026-08-13 04:00:00"));
+        assert_eq!(object.updated_at.as_deref(), Some("2026-08-13 04:05:00"));
     }
 
     #[test]

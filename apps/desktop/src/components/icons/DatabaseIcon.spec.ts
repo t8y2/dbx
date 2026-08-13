@@ -30,4 +30,27 @@ describe("DatabaseIcon", () => {
     expect(container.querySelector("img")?.getAttribute("src")).toBe("/icons/database/phoenix.svg");
     app.unmount();
   });
+
+  it("uses the Meilisearch asset", async () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const app = createApp(DatabaseIcon, { dbType: "meilisearch" });
+    app.mount(container);
+    await nextTick();
+
+    expect(container.querySelector("img")?.getAttribute("src")).toBe("/icons/database/meilisearch.svg");
+    app.unmount();
+  });
+
+  it("falls back to the generic icon when the database type is missing", async () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const app = createApp(DatabaseIcon);
+    app.mount(container);
+    await nextTick();
+
+    expect(container.querySelector("img")).toBeNull();
+    expect(container.querySelector("svg")).not.toBeNull();
+    app.unmount();
+  });
 });

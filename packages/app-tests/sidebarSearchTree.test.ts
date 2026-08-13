@@ -212,6 +212,22 @@ test("preserves loaded children when the connection itself matches search", () =
   assert.equal(filtered[0]?.children?.[0]?.children?.[0]?.label, "products");
 });
 
+test("matches connections by host and username search aliases", () => {
+  const connection: TreeNode = {
+    id: "conn:1",
+    label: "Production reporting",
+    type: "connection",
+    connectionId: "conn:1",
+    searchAliases: ["192.168.0.27", "report_user"],
+    isExpanded: false,
+    children: [],
+  };
+
+  assert.equal(filterSidebarTree([connection], "192.168.0", new Set())[0]?.id, connection.id);
+  assert.equal(filterSidebarTree([connection], "report_user", new Set())[0]?.id, connection.id);
+  assert.deepEqual(filterSidebarTree([connection], "unrelated", new Set()), []);
+});
+
 test("omits synthetic connection management entries when the connection itself matches search", () => {
   const nodes: TreeNode[] = [
     {

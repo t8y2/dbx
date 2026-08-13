@@ -615,11 +615,7 @@ func innerConnect(ctx context.Context, host string, port int, auth string,
 	protocolFactory := thrift.NewTBinaryProtocolFactoryConf(&thrift.TConfiguration{MaxMessageSize: configuration.MaxMessageSize})
 	client := hiveserver.NewTCLIServiceClientFactory(transport, protocolFactory)
 
-	openSession := hiveserver.NewTOpenSessionReq()
-	openSession.ClientProtocol = hiveserver.TProtocolVersion_HIVE_CLI_SERVICE_PROTOCOL_V10
-	openSession.Configuration = configuration.HiveConfiguration
-	openSession.Username = &configuration.Username
-	openSession.Password = &configuration.Password
+	openSession := newOpenSessionRequest(configuration)
 	// Context is ignored
 	response, err := client.OpenSession(ctx, openSession)
 	if auth == "BROWSER" && browserClient != nil && err != nil && browserClient.HasRedirect() {
@@ -671,6 +667,15 @@ func innerConnect(ctx context.Context, host string, port int, auth string,
 	}
 
 	return conn, nil
+}
+
+func newOpenSessionRequest(configuration *connectConfiguration) *hiveserver.TOpenSessionReq {
+	request := hiveserver.NewTOpenSessionReq()
+	request.ClientProtocol = hiveserver.TProtocolVersion_HIVE_CLI_SERVICE_PROTOCOL_V6
+	request.Configuration = configuration.HiveConfiguration
+	request.Username = &configuration.Username
+	request.Password = &configuration.Password
+	return request
 }
 
 type cookieDedupTransport struct {

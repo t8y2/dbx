@@ -2968,15 +2968,17 @@ describe("connectionStore metadata loading", () => {
     }));
     let resolveSearchClearReload!: (tables: TableInfo[]) => void;
     let unfilteredFirstPageCalls = 0;
-    const listTables = vi.fn((_connectionId: string, _database: string, _schema: string, searchFilter?: string, limit?: number, offset?: number) => {
-      if (searchFilter) return Promise.resolve(tables.filter((table) => table.name.includes(searchFilter)));
-      if ((offset ?? 0) === 0 && ++unfilteredFirstPageCalls === 1) {
-        return new Promise<TableInfo[]>((resolve) => {
-          resolveSearchClearReload = resolve;
-        });
-      }
-      return Promise.resolve(tables.slice(offset ?? 0, (offset ?? 0) + (limit ?? tables.length)));
-    });
+    const listTables = vi.fn(
+      (_connectionId: string, _database: string, _schema: string, searchFilter?: string, limit?: number, offset?: number) => {
+        if (searchFilter) return Promise.resolve(tables.filter((table) => table.name.includes(searchFilter)));
+        if ((offset ?? 0) === 0 && ++unfilteredFirstPageCalls === 1) {
+          return new Promise<TableInfo[]>((resolve) => {
+            resolveSearchClearReload = resolve;
+          });
+        }
+        return Promise.resolve(tables.slice(offset ?? 0, (offset ?? 0) + (limit ?? tables.length)));
+      },
+    );
 
     vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
     vi.doMock("@/lib/backend/api", () => ({

@@ -6,6 +6,7 @@
 //! still supports an older Rust toolchain. A future SDK adapter can implement
 //! the same port without changing commands, routes, or frontend contracts.
 
+pub mod access_control;
 pub mod archive;
 pub mod batch;
 pub mod config;
@@ -176,6 +177,7 @@ mod tests {
             display_server_addr: "http://127.0.0.1:8848".to_string(),
             namespace: "public".to_string(),
             context_path: "/nacos".to_string(),
+            managed_namespaces: Vec::new(),
             rnacos_console_addr: "http://127.0.0.1:10848".to_string(),
             rnacos_history_enabled: Some(true),
             rnacos_console_auth: NacosRNacosConsoleAuth::UsernamePassword {

@@ -20,7 +20,9 @@ describe("sidebar tree item layout", () => {
     expect(alignedCommentLeadingWidth(undefined, true)).toBeUndefined();
   });
 
-  it("renders etcd leaf actions without expanders", () => {
+  it("renders navigation leaf actions without expanders", () => {
+    expect(canTreeNodeShowExpander({ type: "nacos-namespace", childCount: 0 })).toBe(false);
+    expect(canTreeNodeShowExpander({ type: "nacos-access-control", childCount: 0 })).toBe(false);
     expect(canTreeNodeShowExpander({ type: "etcd-root", childCount: 0 })).toBe(false);
     expect(canTreeNodeShowExpander({ type: "etcd-dashboard", childCount: 0 })).toBe(false);
     expect(canTreeNodeShowExpander({ type: "etcd-access-control", childCount: 0 })).toBe(false);

@@ -1,6 +1,7 @@
 import { withEnglishFallback } from "./fallback";
 import docs from "./docs/zh-TW";
 import { consulUiMessages } from "./consulUi";
+import { nacosAccessControlMessages, nacosAccessControlTabs } from "./nacosAccessControl";
 
 const consul = {
   ...consulUiMessages,
@@ -1314,6 +1315,7 @@ export default withEnglishFallback({
     gridfs: "GridFS",
     etcdDashboard: "etcd 儀表板",
     etcdAccessControl: "etcd 存取控制",
+    ...nacosAccessControlTabs,
   },
   executionSummary: {
     empty: "無摘要",
@@ -5310,6 +5312,8 @@ export default withEnglishFallback({
     runInBackground: "背景執行",
   },
   nacos: {
+    ...nacosAccessControlMessages,
+    accessControlSidebarLabel: "使用者和角色",
     dashboard: "儀表板",
     dashboardTitle: "運行儀表板",
     dashboardUpdatedAt: "更新於 {time}",
@@ -5612,6 +5616,15 @@ export default withEnglishFallback({
     nacosConnectionPlanDescription: "選擇服務實作與 API 版本。",
     nacosServiceAddress: "服務位址",
     nacosServiceAddressHint: "填寫服務位址即可，預設連接埠為 8848，例如 http://host:8848/nacos。",
+    nacosManagedNamespaces: "可管理命名空間 ID",
+    nacosManagedNamespacesPlaceholder: "例如：public, team-a",
+    nacosManagedNamespacesHint: "填寫該一般使用者有權存取的命名空間 ID，支援逗號或換行分隔；連線測試會逐項驗證設定與服務讀取權限。",
+    nacosOrdinaryAccount: "一般使用者",
+    nacosOrdinaryAccountHint: "如果上方填寫的是一般使用者，請開啟此選項並指定該使用者有權限的命名空間，否則連線後將無法正常使用。",
+    nacosManagedNamespacesSeparator: "以逗號或換行分隔",
+    nacosOrdinaryNamespacesRequired: "一般使用者至少需要填寫一個有權管理的命名空間 ID。",
+    nacosManagedNamespacesRequired: "目前的 Nacos 3 一般使用者無權取得命名空間目錄，請填寫至少一個有權管理的命名空間 ID 後重試。",
+    nacosManagedNamespaceAccessDenied: "以下命名空間未通過設定或服務讀取權限驗證：{detail}",
     nacosAuth: "驗證",
     nacosAuthHint: "這些驗證資訊會用於連線測試與日常管理。",
     nacosUsernamePassword: "使用者名稱 / 密碼",

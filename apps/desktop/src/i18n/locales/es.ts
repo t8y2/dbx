@@ -1,6 +1,7 @@
 import { withEnglishFallback } from "./fallback";
 import docs from "./docs/es";
 import { consulUiMessages } from "./consulUi";
+import { nacosAccessControlMessages, nacosAccessControlTabs } from "./nacosAccessControl";
 
 const consul = {
   ...consulUiMessages,
@@ -1315,6 +1316,7 @@ export default withEnglishFallback({
     gridfs: "GridFS",
     etcdDashboard: "Panel de etcd",
     etcdAccessControl: "Control de acceso de etcd",
+    ...nacosAccessControlTabs,
   },
   executionSummary: {
     empty: "Sin resumen",
@@ -5862,6 +5864,7 @@ export default withEnglishFallback({
     runInBackground: "Ejecutar en segundo plano",
   },
   nacos: {
+    ...nacosAccessControlMessages,
     dashboard: "Panel",
     dashboardTitle: "Panel de operaciones",
     dashboardUpdatedAt: "Actualizado {time}",
@@ -6164,6 +6167,15 @@ export default withEnglishFallback({
     nacosConnectionPlanDescription: "Elige la implementación del servicio y la versión de la API.",
     nacosServiceAddress: "Dirección del servicio",
     nacosServiceAddressHint: "Introduce la dirección del servicio. El puerto predeterminado es 8848, por ejemplo http://host:8848/nacos.",
+    nacosManagedNamespaces: "ID de espacios administrados",
+    nacosManagedNamespacesPlaceholder: "Por ejemplo: public, team-a",
+    nacosManagedNamespacesHint: "Introduzca los ID accesibles para este usuario normal, separados por comas o líneas. La prueba de conexión valida la lectura de configuraciones y servicios para cada ID.",
+    nacosOrdinaryAccount: "Usuario normal",
+    nacosOrdinaryAccountHint: "Si la cuenta anterior es un usuario normal, active esta opción y seleccione sus espacios autorizados; de lo contrario, la conexión no funcionará correctamente.",
+    nacosManagedNamespacesSeparator: "Separados por comas o líneas",
+    nacosOrdinaryNamespacesRequired: "Introduzca al menos un ID de espacio que este usuario normal pueda administrar.",
+    nacosManagedNamespacesRequired: "Este usuario normal de Nacos 3 no puede listar los espacios. Introduzca al menos un ID que tenga permiso para administrar y vuelva a intentarlo.",
+    nacosManagedNamespaceAccessDenied: "Estos espacios no superaron la comprobación de lectura de configuraciones o servicios: {detail}",
     nacosAuth: "Autenticación",
     nacosAuthHint: "Estas credenciales se usan para probar la conexión y para la administración diaria.",
     nacosUsernamePassword: "Usuario / contraseña",

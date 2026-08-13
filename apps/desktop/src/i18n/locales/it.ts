@@ -1,6 +1,7 @@
 import { withEnglishFallback } from "./fallback";
 import docs from "./docs/it";
 import { consulUiMessages } from "./consulUi";
+import { nacosAccessControlMessages, nacosAccessControlTabs } from "./nacosAccessControl";
 const consul = {
   ...consulUiMessages,
   prefixPlaceholder: "Key prefix, e.g. app/ or services/",
@@ -1313,6 +1314,7 @@ export default withEnglishFallback({
     gridfs: "GridFS",
     etcdDashboard: "etcd dashboard",
     etcdAccessControl: "controllo accessi etcd",
+    ...nacosAccessControlTabs,
   },
   executionSummary: {
     empty: "Nessun riepilogo",
@@ -5862,6 +5864,7 @@ export default withEnglishFallback({
     runInBackground: "Esegui in background",
   },
   nacos: {
+    ...nacosAccessControlMessages,
     dashboard: "Dashboard",
     dashboardTitle: "Dashboard operativa",
     dashboardUpdatedAt: "Aggiornato {time}",
@@ -6164,6 +6167,15 @@ export default withEnglishFallback({
     nacosConnectionPlanDescription: "Scegli l'implementazione del servizio e la versione API.",
     nacosServiceAddress: "Indirizzo del servizio",
     nacosServiceAddressHint: "Inserisci l'indirizzo del servizio. La porta predefinita è 8848, ad esempio http://host:8848/nacos.",
+    nacosManagedNamespaces: "ID namespace gestiti",
+    nacosManagedNamespacesPlaceholder: "Ad esempio: public, team-a",
+    nacosManagedNamespacesHint: "Inserire gli ID accessibili a questo utente normale, separati da virgole o righe. Il test di connessione verifica la lettura di configurazioni e servizi per ogni ID.",
+    nacosOrdinaryAccount: "Utente normale",
+    nacosOrdinaryAccountHint: "Se l'account sopra è un utente normale, attivare questa opzione e selezionare i namespace autorizzati; altrimenti la connessione non funzionerà correttamente.",
+    nacosManagedNamespacesSeparator: "Separati da virgole o righe",
+    nacosOrdinaryNamespacesRequired: "Inserire almeno un ID namespace che questo utente normale può gestire.",
+    nacosManagedNamespacesRequired: "Questo utente normale Nacos 3 non può elencare i namespace. Inserire almeno un ID che è autorizzato a gestire e riprovare.",
+    nacosManagedNamespaceAccessDenied: "Questi namespace non hanno superato il controllo di lettura di configurazioni o servizi: {detail}",
     nacosAuth: "Autenticazione",
     nacosAuthHint: "Queste credenziali vengono usate per i test di connessione e la gestione quotidiana.",
     nacosUsernamePassword: "Nome utente / password",

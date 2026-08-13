@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { filterNacosNamespacesForSidebar, normalizeNacosNamespaceSelection, normalizeNacosNamespacesForDisplay } from "@/lib/nacos/nacosNamespaceVisibility";
+import { describe, expect, it, vi } from "vitest";
+import { filterNacosNamespacesForSidebar, filterReadableNacosNamespaces, isNacosNamespaceAccessDenied, normalizeNacosNamespaceSelection, normalizeNacosNamespacesForDisplay } from "@/lib/nacos/nacosNamespaceVisibility";
 import { nacosVisibleNamespaceSummary } from "@/lib/sidebar/sidebarVisibleFilterSummary";
 
 const namespaces = [
@@ -39,5 +39,38 @@ describe("filterNacosNamespacesForSidebar", () => {
       selected: 2,
       total: 3,
     });
+  });
+});
+
+describe("filterReadableNacosNamespaces", () => {
+  it("removes namespaces that explicitly reject config reads with 403", async () => {
+    const denied = new Error('NACOS_ERROR[authFailed]: Nacos admin /v1/cs/configs returned 403 Forbidden: {"message":"authorization failed!"}');
+    const probe = vi.fn(async (namespace: string) => {
+      if (namespace !== "dev") throw denied;
+    });
+
+    await expect(filterReadableNacosNamespaces(namespaces, probe)).resolves.toEqual([namespaces[1]]);
+    expect(probe).toHaveBeenCalledTimes(3);
+  });
+
+  it("does not hide authentication, transport, or unexpected failures", async () => {
+    const unauthorized = new Error("NACOS_ERROR[authFailed]: returned 401 Unauthorized");
+    await expect(filterReadableNacosNamespaces(namespaces, async () => Promise.reject(unauthorized))).rejects.toBe(unauthorized);
+    expect(isNacosNamespaceAccessDenied(unauthorized)).toBe(false);
+    expect(isNacosNamespaceAccessDenied({ detail: "NACOS_ERROR[authFailed]: 403 Forbidden" })).toBe(true);
+  });
+
+  it("limits concurrent probes while preserving namespace order", async () => {
+    let active = 0;
+    let peak = 0;
+    const probe = vi.fn(async () => {
+      active += 1;
+      peak = Math.max(peak, active);
+      await Promise.resolve();
+      active -= 1;
+    });
+
+    await expect(filterReadableNacosNamespaces(namespaces, probe, 2)).resolves.toEqual(namespaces);
+    expect(peak).toBe(2);
   });
 });

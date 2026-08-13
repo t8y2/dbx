@@ -134,6 +134,120 @@ pub async fn nacos_login_rnacos_console_core(
     admin.login_rnacos_console(captcha).await
 }
 
+pub async fn nacos_list_users_core(
+    state: &AppState,
+    conn_id: &str,
+    query: NacosUserQuery,
+) -> Result<NacosUserList, String> {
+    let admin = get_admin(state, conn_id).await?;
+    admin.list_users(query).await
+}
+
+pub async fn nacos_create_user_core(state: &AppState, conn_id: &str, req: NacosUserCreate) -> Result<(), String> {
+    ensure_connection_writable(state, conn_id, "Create Nacos user").await?;
+    let admin = get_admin(state, conn_id).await?;
+    admin.create_user(req).await
+}
+
+pub async fn nacos_update_user_core(state: &AppState, conn_id: &str, req: NacosUserUpdate) -> Result<(), String> {
+    ensure_connection_writable(state, conn_id, "Update Nacos user").await?;
+    let admin = get_admin(state, conn_id).await?;
+    admin.update_user(req).await
+}
+
+pub async fn nacos_delete_user_core(state: &AppState, conn_id: &str, username: String) -> Result<(), String> {
+    ensure_connection_writable(state, conn_id, "Delete Nacos user").await?;
+    let admin = get_admin(state, conn_id).await?;
+    if admin.access_control_capabilities().enhanced_workspace {
+        return Err(
+            "Nacos users in the enhanced workspace must be deleted through the access-control workflow".to_string()
+        );
+    }
+    admin.delete_user(username).await
+}
+
+pub async fn nacos_list_role_bindings_core(
+    state: &AppState,
+    conn_id: &str,
+    query: NacosRoleQuery,
+) -> Result<NacosRoleList, String> {
+    let admin = get_admin(state, conn_id).await?;
+    admin.list_role_bindings(query).await
+}
+
+pub async fn nacos_assign_role_core(state: &AppState, conn_id: &str, binding: NacosRoleBinding) -> Result<(), String> {
+    ensure_connection_writable(state, conn_id, "Assign Nacos role").await?;
+    let admin = get_admin(state, conn_id).await?;
+    if admin.access_control_capabilities().enhanced_workspace {
+        return Err(
+            "Nacos roles in the enhanced workspace must be changed through the access-control workflow".to_string()
+        );
+    }
+    admin.assign_role(binding).await
+}
+
+pub async fn nacos_remove_role_core(state: &AppState, conn_id: &str, binding: NacosRoleBinding) -> Result<(), String> {
+    ensure_connection_writable(state, conn_id, "Remove Nacos role").await?;
+    let admin = get_admin(state, conn_id).await?;
+    if admin.access_control_capabilities().enhanced_workspace {
+        return Err(
+            "Nacos roles in the enhanced workspace must be changed through the access-control workflow".to_string()
+        );
+    }
+    if binding.role == "ROLE_ADMIN" {
+        return Err("The Nacos administrator role cannot be removed through the legacy endpoint".to_string());
+    }
+    admin.remove_role(binding).await
+}
+
+pub async fn nacos_access_snapshot_core(state: &AppState, conn_id: &str) -> Result<NacosAccessControlSnapshot, String> {
+    let admin = get_admin(state, conn_id).await?;
+    if !admin.access_control_capabilities().enhanced_workspace {
+        return Err("The enhanced access-control workspace is unavailable for this Nacos connection".to_string());
+    }
+    crate::nacos::access_control::load_snapshot(admin).await
+}
+
+pub async fn nacos_start_access_operation_core(
+    state: &AppState,
+    conn_id: &str,
+    req: NacosAccessOperationRequest,
+) -> Result<NacosAccessOperationResult, String> {
+    ensure_connection_writable(state, conn_id, "Manage Nacos access control").await?;
+    let admin = get_admin(state, conn_id).await?;
+    if !admin.access_control_capabilities().enhanced_workspace {
+        return Err("The enhanced access-control workspace is unavailable for this Nacos connection".to_string());
+    }
+    crate::nacos::access_control::start_operation(conn_id, admin, req).await
+}
+
+pub fn nacos_get_access_operation_core(
+    conn_id: &str,
+    operation_id: &str,
+) -> Result<NacosAccessOperationResult, String> {
+    crate::nacos::access_control::get_operation(conn_id, operation_id)
+}
+
+pub async fn nacos_retry_access_operation_core(
+    state: &AppState,
+    conn_id: &str,
+    retry: NacosAccessOperationRetry,
+) -> Result<NacosAccessOperationResult, String> {
+    ensure_connection_writable(state, conn_id, "Retry Nacos access-control operation").await?;
+    let admin = get_admin(state, conn_id).await?;
+    crate::nacos::access_control::retry_operation(conn_id, admin, retry).await
+}
+
+pub async fn nacos_undo_access_operation_core(
+    state: &AppState,
+    conn_id: &str,
+    operation_id: &str,
+) -> Result<NacosAccessOperationResult, String> {
+    ensure_connection_writable(state, conn_id, "Undo Nacos access-control operation").await?;
+    let admin = get_admin(state, conn_id).await?;
+    crate::nacos::access_control::undo_operation(conn_id, admin, operation_id).await
+}
+
 pub async fn nacos_list_services_core(
     state: &AppState,
     conn_id: &str,
@@ -302,6 +416,7 @@ fn ensure_service_operation(
         Some(NacosCapabilityReason::EndpointUnavailable) => "endpointUnavailable",
         Some(NacosCapabilityReason::NotVerified) => "notVerified",
         Some(NacosCapabilityReason::ConnectionReadOnly) => "connectionReadOnly",
+        Some(NacosCapabilityReason::PermissionDenied) => "permissionDenied",
         None => "notVerified",
     };
     Err(format!("NACOS_ERROR[unsupportedOperation]: Nacos service operation {operation:?} is unavailable ({reason})"))
@@ -327,6 +442,7 @@ mod tests {
             namespace: "public".to_string(),
             version_mode: Some(NacosVersionMode::Auto),
             context_path: "/nacos".to_string(),
+            managed_namespaces: Vec::new(),
             rnacos_console_addr: String::new(),
             rnacos_history_enabled: Some(false),
             rnacos_console_auth: NacosRNacosConsoleAuth::Inherit,

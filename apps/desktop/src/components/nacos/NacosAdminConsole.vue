@@ -42,7 +42,7 @@ import {
 } from "@/lib/nacos/nacosAdmin";
 import { createNacosNamespaceRequestGuard, subscribeNacosNamespacesChanged, type NacosNamespacesChangedDetail } from "@/lib/nacos/nacosNamespaceCache";
 import { nacosInstanceMatchesPatch, nacosInstanceRefIdentity, nacosIpAddressIsValid, nacosServiceDetailMatches } from "@/lib/nacos/nacosServiceManagement";
-import { nacosNamespaceIdentity, normalizeNacosNamespacesForDisplay } from "@/lib/nacos/nacosNamespaceVisibility";
+import { loadReadableNacosNamespaces, nacosNamespaceIdentity } from "@/lib/nacos/nacosNamespaceVisibility";
 import { copyToClipboard, readTextFromClipboard } from "@/lib/common/clipboard";
 import { trimmedSelectionLayer } from "@/lib/editor/codemirrorTrimmedSelectionLayer";
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
@@ -1041,9 +1041,9 @@ async function loadBatchNamespaces(options: { force?: boolean } = {}) {
   const connectionId = props.connectionId;
   const requestId = batchNamespacesRequestGuard.start(connectionId);
   try {
-    const namespaces = await api.nacosListNamespaces(connectionId);
+    const namespaces = await loadReadableNacosNamespaces(connectionId, api);
     if (!batchNamespacesRequestGuard.isCurrent(requestId, props.connectionId)) return;
-    batchNamespaces.value = normalizeNacosNamespacesForDisplay(namespaces);
+    batchNamespaces.value = namespaces;
   } catch (error) {
     if (!batchNamespacesRequestGuard.isCurrent(requestId, props.connectionId)) return;
     batchError.value = error instanceof Error ? error.message : String(error);
@@ -1055,9 +1055,9 @@ async function loadBatchTargetNamespaces(connectionId: string, options: { force?
   if (!options.force && batchTargetConnectionId.value === connectionId && batchTargetNamespaces.value.length) return;
   const requestId = batchTargetNamespacesRequestGuard.start(connectionId);
   try {
-    const namespaces = await api.nacosListNamespaces(connectionId);
+    const namespaces = await loadReadableNacosNamespaces(connectionId, api);
     if (!batchTargetNamespacesRequestGuard.isCurrent(requestId, connectionId) || batchTargetConnectionId.value !== connectionId) return;
-    batchTargetNamespaces.value = normalizeNacosNamespacesForDisplay(namespaces);
+    batchTargetNamespaces.value = namespaces;
   } catch (error) {
     if (!batchTargetNamespacesRequestGuard.isCurrent(requestId, connectionId) || batchTargetConnectionId.value !== connectionId) return;
     batchError.value = error instanceof Error ? error.message : String(error);

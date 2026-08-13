@@ -111,7 +111,7 @@ import { appendAgentDriverUpdateHint, hasAgentDriverUpdate, hasInstalledAgentVer
 import { appendConnectionErrorHints } from "@/lib/connection/connectionErrorHints";
 import { appendVisibleDatabaseSelection } from "@/lib/connection/connectionVisibleDatabases";
 import { buildXuguTypeMemberNodes, isXuguTypeMemberContainer } from "@/lib/sidebar/xuguTypeMembers";
-import { filterNacosNamespacesForSidebar, normalizeNacosNamespacesForDisplay } from "@/lib/nacos/nacosNamespaceVisibility";
+import { filterNacosNamespacesForSidebar, loadReadableNacosNamespaces } from "@/lib/nacos/nacosNamespaceVisibility";
 import { buildPackageMemberNodes, markPackageNodesExpandable } from "@/lib/sidebar/packageMembers";
 import { configuredDatabaseProductName, connectionConfigFingerprint, normalizeDatabaseConnectionInfo } from "@/lib/connection/connectionDatabaseInfo";
 import { createMetadataLoadTrace, logMetadataLoadTrace, MetadataLoadCoordinator, type MetadataLoadTraceLogger } from "@/lib/metadata/metadataLoadCoordinator";
@@ -2927,8 +2927,12 @@ export const useConnectionStore = defineStore("connection", () => {
     invalidateObjectBrowserRowsCache({ connectionId, database });
   }
 
-  async function ensureConnected(connectionId: string, options: { activate?: boolean } = {}) {
+  async function ensureConnected(connectionId: string, options: { activate?: boolean; verifyHealth?: boolean } = {}) {
     if (connectedIds.value.has(connectionId)) {
+      // Pure navigation can safely trust the existing connected state. Its
+      // destination will perform the real API request, while blocking here on
+      // a health probe makes an otherwise local tab switch take up to 5s.
+      if (options.verifyHealth === false) return;
       if (hasRecentConnectionHealthCheck(connectionId)) return;
       // Optimistic: verify backend pool is actually healthy
       try {
@@ -3601,7 +3605,7 @@ export const useConnectionStore = defineStore("connection", () => {
       load = reclaimTreeNodeLoad(load, node);
       if (useCachedChildren(node, options, load)) return;
 
-      const namespaces = normalizeNacosNamespacesForDisplay(await api.nacosListNamespaces(connectionId));
+      const [namespaces, connectionInfo] = await Promise.all([loadReadableNacosNamespaces(connectionId, api), api.nacosTestConnection(connectionId)]);
       const visibleNamespaces = filterNacosNamespacesForSidebar(namespaces, getConfig(connectionId)?.visible_databases);
       const sorted = [...visibleNamespaces].sort((left, right) => {
         const leftLabel = left.namespaceShowName || left.namespace || "public";
@@ -3614,9 +3618,8 @@ export const useConnectionStore = defineStore("connection", () => {
         connectionId,
         namespaces.map((namespace) => namespace.namespace),
       );
-      setChildren(
-        targetNode,
-        sorted.map((namespace) => {
+      const children: TreeNode[] = [
+        ...sorted.map((namespace) => {
           const value = namespace.namespace || "";
           const label = namespace.namespaceShowName || value || "public";
           return {
@@ -3630,7 +3633,19 @@ export const useConnectionStore = defineStore("connection", () => {
             objectCount: namespace.configCount,
           };
         }),
-      );
+      ];
+      if (connectionInfo.capabilities?.accessControl?.listUsers?.supported === true) {
+        children.push({
+          id: `${connectionId}:nacos-access-control`,
+          label: "nacos.accessControlSidebarLabel",
+          type: "nacos-access-control" as const,
+          connectionId,
+          database: "",
+          isExpanded: false,
+          children: [],
+        });
+      }
+      setChildren(targetNode, children);
       targetNode.isExpanded = true;
     } catch (e) {
       recordMetadataLoadError(connectionId, e, load);

@@ -66,6 +66,11 @@ pub struct NacosAdminConfig {
     pub namespace: String,
     #[serde(default)]
     pub context_path: String,
+    /// Namespace IDs supplied for a Nacos 3 ordinary user that cannot call the
+    /// Admin namespace-list API. They are only used as a discovery fallback;
+    /// Nacos still authorizes every configuration and naming request.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub managed_namespaces: Vec<String>,
     /// Optional r-nacos authenticated-console address. This is separate from
     /// the OpenAPI server address because r-nacos exposes console-only APIs
     /// (including config history plus config type and description metadata) on
@@ -117,6 +122,7 @@ impl NacosAdminConfig {
                 display_server_addr: String::new(),
                 namespace: cfg.database.clone().unwrap_or_default(),
                 context_path: String::new(),
+                managed_namespaces: Vec::new(),
                 rnacos_console_addr: String::new(),
                 rnacos_history_enabled: None,
                 rnacos_console_auth: NacosRNacosConsoleAuth::Inherit,
@@ -157,6 +163,14 @@ impl NacosAdminConfig {
         {
             self.context_path = "/nacos".to_string();
         }
+        let mut managed_namespaces = Vec::new();
+        for namespace in std::mem::take(&mut self.managed_namespaces) {
+            let namespace = namespace.trim().to_string();
+            if !namespace.is_empty() && !managed_namespaces.contains(&namespace) {
+                managed_namespaces.push(namespace);
+            }
+        }
+        self.managed_namespaces = managed_namespaces;
         self.rnacos_console_addr = if self.rnacos_console_addr.trim().is_empty() {
             String::new()
         } else {
@@ -366,6 +380,19 @@ mod tests {
 
         let parsed = NacosAdminConfig::from_connection(&cfg).unwrap();
         assert_eq!(parsed.rnacos_console_addr, "http://127.0.0.1:10848");
+    }
+
+    #[test]
+    fn normalizes_managed_namespaces() {
+        let cfg = connection_with_external(serde_json::json!({
+            "implementation": "nacos",
+            "versionMode": "v3",
+            "serverAddr": "http://127.0.0.1:8818",
+            "managedNamespaces": [" public ", "team-a", "team-a", ""],
+        }));
+
+        let parsed = NacosAdminConfig::from_connection(&cfg).unwrap();
+        assert_eq!(parsed.managed_namespaces, vec!["public", "team-a"]);
     }
 
     #[test]

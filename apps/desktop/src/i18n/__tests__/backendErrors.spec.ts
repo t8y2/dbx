@@ -56,6 +56,17 @@ const WINDOWS_JRE_REMOVE_ERROR = [
 // key and params it must resolve to.
 const CASES: { name: string; message: string; key: string; params?: Record<string, string> }[] = [
   {
+    name: "Nacos 3 ordinary user must configure managed namespaces",
+    message: "Failed to list Nacos namespaces: NACOS_ERROR[v3ManagedNamespacesRequired]: access denied",
+    key: "nacos.nacosManagedNamespacesRequired",
+  },
+  {
+    name: "Nacos 3 managed namespace permission check failed",
+    message: 'NACOS_ERROR[managedNamespaceAccessDenied]: One or more configured namespace IDs are not readable: namespace "team-a" naming: forbidden',
+    key: "nacos.nacosManagedNamespaceAccessDenied",
+    params: { detail: 'namespace "team-a" naming: forbidden' },
+  },
+  {
     name: "Apache Phoenix JDBC driver missing",
     message: PHOENIX_DRIVER_NOT_INSTALLED_ERROR,
     key: "connection.phoenixDriverNotInstalled",

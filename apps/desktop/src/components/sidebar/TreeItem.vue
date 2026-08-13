@@ -260,6 +260,8 @@ function getIconInfo(node: TreeNode): { icon: any; colorClass: string } | null {
       return { icon: FolderOpen, colorClass: "text-sky-400" };
     case "nacos-namespace":
       return { icon: FolderOpen, colorClass: "text-sky-500" };
+    case "nacos-access-control":
+      return { icon: ShieldCheck, colorClass: "text-sky-500" };
     case "etcd-root":
       return { icon: Database, colorClass: "text-sky-500" };
     case "etcd-dashboard":
@@ -340,6 +342,9 @@ function isGroupLabel(node: TreeNode): boolean {
 function displayLabel(node: TreeNode): string {
   if (node.type === "load-more") return t(node.label);
   if (node.type === "object-browser") return t(node.label, { count: node.objectCount ?? 0 });
+  // Use the canonical key for persisted trees created before this label was
+  // internationalized; those nodes may still contain the old Chinese text.
+  if (node.type === "nacos-access-control") return t("nacos.accessControlSidebarLabel");
   if (node.type === "user-admin" || node.type === "dameng-job-admin") return t(node.label);
   if (node.type === "linked-server-root") return t(node.label);
   if (node.label === "tree.defaultDatabase") return t(node.label);

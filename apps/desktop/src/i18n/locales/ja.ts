@@ -1,6 +1,7 @@
 import { withEnglishFallback } from "./fallback";
 import docs from "./docs/ja";
 import { consulUiMessages } from "./consulUi";
+import { nacosAccessControlMessages, nacosAccessControlTabs } from "./nacosAccessControl";
 
 const consul = {
   ...consulUiMessages,
@@ -1335,6 +1336,7 @@ export default withEnglishFallback({
     gridfs: "GridFS",
     etcdDashboard: "etcd ダッシュボード",
     etcdAccessControl: "etcd アクセス制御",
+    ...nacosAccessControlTabs,
   },
   executionSummary: {
     empty: "サマリーはありません",
@@ -5917,6 +5919,7 @@ export default withEnglishFallback({
     exportCancelled: "エクスポートがキャンセルされました",
   },
   nacos: {
+    ...nacosAccessControlMessages,
     dashboard: "ダッシュボード",
     dashboardTitle: "運用ダッシュボード",
     dashboardUpdatedAt: "更新 {time}",
@@ -6219,6 +6222,15 @@ export default withEnglishFallback({
     nacosConnectionPlanDescription: "サービス実装と API バージョンを選択します。",
     nacosServiceAddress: "サービスアドレス",
     nacosServiceAddressHint: "サービスアドレスを入力してください。既定のポートは 8848 です（例: http://host:8848/nacos）。",
+    nacosManagedNamespaces: "管理対象の名前空間 ID",
+    nacosManagedNamespacesPlaceholder: "例: public, team-a",
+    nacosManagedNamespacesHint: "この一般ユーザーがアクセスできる名前空間 ID をカンマまたは改行区切りで入力してください。接続テストで各 ID の設定・サービス読み取り権限を確認します。",
+    nacosOrdinaryAccount: "一般ユーザー",
+    nacosOrdinaryAccountHint: "上記のアカウントが一般ユーザーの場合、この項目を有効にしてアクセス権のある名前空間を指定してください。指定しないと接続後に正常に使用できません。",
+    nacosManagedNamespacesSeparator: "カンマまたは改行区切り",
+    nacosOrdinaryNamespacesRequired: "一般ユーザーが管理を許可された名前空間 ID を 1 つ以上入力してください。",
+    nacosManagedNamespacesRequired: "この Nacos 3 一般ユーザーは名前空間を一覧表示できません。管理を許可された名前空間 ID を 1 つ以上入力して再試行してください。",
+    nacosManagedNamespaceAccessDenied: "次の名前空間は設定またはサービスの読み取り権限チェックに失敗しました: {detail}",
     nacosAuth: "認証",
     nacosAuthHint: "接続テストと日常の管理に使用する認証情報です。",
     nacosUsernamePassword: "ユーザー名 / パスワード",

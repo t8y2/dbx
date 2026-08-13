@@ -65,8 +65,8 @@ import { normalizeRabbitmqAddresses } from "@/lib/connection/rabbitmqAddresses";
 import { detectMqUiAuthKind, isMqAuthKindAllowedForSystem, type MqUiAuthKind } from "@/lib/connection/mqAuth";
 import { driverInstallProgressChannel, driverInstallProgressPercent, isDriverInstallProgressForOperation, type DriverInstallProgress } from "@/lib/connection/driverInstallProgressUi";
 import { requiresSqlServerLegacyCompatibilityComponent, setSqlServerLegacyCompatibilityConfig, sqlServerUsesLegacyCompatibility, SQLSERVER_LEGACY_COMPATIBILITY_DRIVER_KEY } from "@/lib/connection/sqlServerLegacyCompatibility";
-import { normalizeNacosEndpoint, normalizeNacosMetricsUrl } from "@/lib/nacos/nacosAdmin";
-import { nacosNamespaceIdentity, normalizeNacosNamespaceSelection, normalizeNacosNamespacesForDisplay } from "@/lib/nacos/nacosNamespaceVisibility";
+import { normalizeNacosEndpoint, normalizeNacosMetricsUrl, parseNacosManagedNamespaces } from "@/lib/nacos/nacosAdmin";
+import { loadReadableNacosNamespaces, nacosNamespaceIdentity, normalizeNacosNamespaceSelection } from "@/lib/nacos/nacosNamespaceVisibility";
 import {
   ArrowLeft,
   ArrowDown,
@@ -795,11 +795,12 @@ const mqKafkaSaslMechanismOptions = [
   { value: "SCRAM-SHA-512", label: "SCRAM-SHA-512" },
 ];
 const nacosImplementation = ref<NacosImplementation>("nacos");
-// Nacos 2 and 3 expose different API planes (and Nacos 3 commonly needs a
-// separate Console address). New connections must therefore choose an
-// explicit version instead of relying on endpoint-shape guessing.
+// Nacos 2 and 3 expose different API planes. New connections must therefore
+// choose an explicit version instead of relying on endpoint-shape guessing.
 const nacosVersionMode = ref<NacosVersionMode>("v2");
 const nacosServerAddr = ref("");
+const nacosOrdinaryAccount = ref(false);
+const nacosManagedNamespacesText = ref("");
 const nacosRNacosConsoleAddr = ref("");
 const nacosHistoryEnabled = ref(false);
 const nacosConsoleAuthKind = ref<NacosRNacosConsoleAuth["kind"]>("inherit");
@@ -1347,6 +1348,8 @@ function resetNacosFields(config?: Partial<NacosAdminConfig>) {
   const serverAddr = config?.serverAddr?.trim() || "";
   const contextPath = config?.contextPath?.trim() || "";
   nacosServerAddr.value = serverAddr && contextPath && contextPath !== "/" && !serverAddr.endsWith(contextPath) ? `${serverAddr.replace(/\/+$/, "")}/${contextPath.replace(/^\/+/, "")}` : serverAddr;
+  nacosOrdinaryAccount.value = !!config?.managedNamespaces?.length;
+  nacosManagedNamespacesText.value = (config?.managedNamespaces || []).join("\n");
   nacosRNacosConsoleAddr.value = config?.rnacosConsoleAddr?.trim() || "";
   nacosHistoryEnabled.value = config?.rnacosHistoryEnabled ?? !!config?.rnacosConsoleAddr;
   const consoleAuth = config?.rnacosConsoleAuth || { kind: "inherit" };
@@ -1688,12 +1691,16 @@ function buildNacosAdminConfig(): NacosAdminConfig {
   if (nacosImplementation.value === "rnacos" && normalized.warnings.length) {
     throw new Error(t("connection.nacosRNacosOpenApiRequired"));
   }
-  const rnacosExtensionsEnabled = nacosImplementation.value === "rnacos" && nacosHistoryEnabled.value;
-  const rnacosConsoleConfigured = rnacosExtensionsEnabled && !!nacosRNacosConsoleAddr.value.trim();
-  if (rnacosExtensionsEnabled && !rnacosConsoleConfigured) {
+  const rnacosConsoleConfigured = nacosImplementation.value === "rnacos" && !!nacosRNacosConsoleAddr.value.trim();
+  if (nacosImplementation.value === "rnacos" && nacosHistoryEnabled.value && !rnacosConsoleConfigured) {
     throw new Error(t("connection.nacosRNacosConsoleUrlRequired"));
   }
   let rnacosConsoleAuth: NacosRNacosConsoleAuth | undefined;
+  const usesManagedNamespaces = nacosImplementation.value === "nacos" && nacosVersionMode.value === "v3" && nacosAuthKind.value === "usernamePassword" && nacosOrdinaryAccount.value;
+  const managedNamespaces = usesManagedNamespaces ? parseNacosManagedNamespaces(nacosManagedNamespacesText.value) : [];
+  if (usesManagedNamespaces && managedNamespaces.length === 0) {
+    throw new Error(t("nacos.nacosOrdinaryNamespacesRequired"));
+  }
   let metricsUrl: string | undefined;
   if (nacosMetricsMode.value === "custom") {
     try {
@@ -1719,7 +1726,8 @@ function buildNacosAdminConfig(): NacosAdminConfig {
     versionMode: nacosImplementation.value === "nacos" ? nacosVersionMode.value : undefined,
     serverAddr: normalized.serverAddr,
     contextPath: normalized.contextPath || undefined,
-    rnacosConsoleAddr: rnacosExtensionsEnabled ? nacosRNacosConsoleAddr.value.trim() || undefined : undefined,
+    managedNamespaces: managedNamespaces.length ? managedNamespaces : undefined,
+    rnacosConsoleAddr: rnacosConsoleConfigured ? nacosRNacosConsoleAddr.value.trim() : undefined,
     rnacosHistoryEnabled: nacosImplementation.value === "rnacos" ? nacosHistoryEnabled.value : undefined,
     rnacosConsoleAuth,
     auth: buildNacosAuth(),
@@ -4353,7 +4361,7 @@ async function openVisibleNacosNamespacesPicker() {
       one_time: true,
     };
     await api.connectDb(draftConfig);
-    const namespaces = normalizeNacosNamespacesForDisplay(await api.nacosListNamespaces(draftId));
+    const namespaces = await loadReadableNacosNamespaces(draftId, api);
     visibleNacosNamespaces.value = [...namespaces].sort((left, right) => nacosNamespaceLabel(left).localeCompare(nacosNamespaceLabel(right)));
     const configured = form.value.visible_databases;
     const initialSelection = Array.isArray(configured) ? normalizeVisibleNacosNamespaceSelection(configured, visibleNacosNamespaces.value) : visibleNacosNamespaces.value.map(nacosNamespaceValue);
@@ -4437,7 +4445,7 @@ function initialProductionDatabaseSelection(databaseNames: string[]): string[] {
 
 async function loadProductionDatabaseNames(connectionId: string, config: ConnectionConfig): Promise<string[]> {
   if (config.db_type === "nacos") {
-    return normalizeNacosNamespacesForDisplay(await api.nacosListNamespaces(connectionId)).map((namespace) => namespace.namespace);
+    return (await loadReadableNacosNamespaces(connectionId, api)).map((namespace) => namespace.namespace);
   }
   if (config.db_type === "redis") {
     return (await api.redisListDatabases(connectionId)).map((database) => String(database.db));
@@ -6225,6 +6233,29 @@ function openExternalUrl(url: string) {
                         <PasswordInput v-model="nacosPassword" />
                       </div>
                     </div>
+                    <div v-if="nacosImplementation === 'nacos' && nacosVersionMode === 'v3' && nacosAuthKind === 'usernamePassword'" data-nacos-ordinary-user-toggle class="mt-4 border-t pt-4">
+                      <div class="flex items-start justify-between gap-4">
+                        <span class="min-w-0">
+                          <span class="block text-sm font-medium">{{ t("nacos.nacosOrdinaryAccount") }}</span>
+                          <span class="mt-0.5 block text-xs leading-5 text-muted-foreground">{{ t("nacos.nacosOrdinaryAccountHint") }}</span>
+                        </span>
+                        <Switch v-model="nacosOrdinaryAccount" class="mt-0.5 shrink-0" />
+                      </div>
+                      <div v-if="nacosOrdinaryAccount" class="mt-3 grid gap-1.5 pl-0 sm:pl-4">
+                        <div class="flex items-center justify-between gap-3">
+                          <Label>{{ t("nacos.nacosManagedNamespaces") }}</Label>
+                          <span class="text-[11px] text-muted-foreground">{{ t("nacos.nacosManagedNamespacesSeparator") }}</span>
+                        </div>
+                        <textarea
+                          v-model="nacosManagedNamespacesText"
+                          data-nacos-managed-namespaces
+                          rows="2"
+                          class="min-h-14 resize-y rounded-md border border-input bg-background px-3 py-2 text-sm shadow-sm outline-none placeholder:text-muted-foreground focus-visible:ring-1 focus-visible:ring-ring"
+                          :placeholder="t('nacos.nacosManagedNamespacesPlaceholder')"
+                        />
+                        <p class="text-[11px] leading-4 text-muted-foreground">{{ t("nacos.nacosManagedNamespacesHint") }}</p>
+                      </div>
+                    </div>
                   </section>
 
                   <section data-nacos-advanced-hint class="flex items-start gap-3 rounded-lg border border-dashed bg-muted/20 px-4 py-3">
@@ -7565,38 +7596,35 @@ function openExternalUrl(url: string) {
                           <span class="text-xs text-muted-foreground">{{ t("nacos.nacosEnabled") }}</span>
                         </label>
                       </div>
-                      <template v-if="nacosHistoryEnabled">
+                      <div class="grid gap-1.5">
+                        <Label>{{ t("connection.nacosRNacosConsoleUrl") }}</Label>
+                        <Input v-model="nacosRNacosConsoleAddr" :placeholder="t('connection.nacosRNacosConsoleUrlPlaceholder')" />
+                        <p class="text-[11px] leading-4 text-muted-foreground">{{ t("nacos.nacosRnacosConsoleUrlHint") }}</p>
+                      </div>
+                      <template v-if="nacosRNacosConsoleAddr.trim()">
                         <div class="grid gap-1.5">
-                          <Label>{{ t("connection.nacosRNacosConsoleUrl") }}</Label>
-                          <Input v-model="nacosRNacosConsoleAddr" :placeholder="t('connection.nacosRNacosConsoleUrlPlaceholder')" />
-                          <p class="text-[11px] leading-4 text-muted-foreground">{{ t("nacos.nacosRnacosConsoleUrlHint") }}</p>
+                          <Label>{{ t("connection.nacosConsoleAuthentication") }}</Label>
+                          <div class="flex items-center gap-1 rounded-md border bg-muted/20 p-0.5">
+                            <Button type="button" size="sm" class="h-8 flex-1" :variant="nacosConsoleAuthKind === 'inherit' ? 'default' : 'ghost'" :disabled="nacosAuthKind === 'none'" @click="nacosConsoleAuthKind = 'inherit'">
+                              {{ t("connection.nacosConsoleAuthInherit") }}
+                            </Button>
+                            <Button type="button" size="sm" class="h-8 flex-1" :variant="nacosConsoleAuthKind === 'usernamePassword' ? 'default' : 'ghost'" @click="nacosConsoleAuthKind = 'usernamePassword'">
+                              {{ t("connection.nacosConsoleAuthSeparate") }}
+                            </Button>
+                          </div>
+                          <p v-if="nacosConsoleAuthKind === 'inherit' && nacosAuthKind === 'none'" class="text-xs text-destructive">{{ t("connection.nacosConsoleAuthPrimaryNone") }}</p>
                         </div>
-                        <template v-if="nacosRNacosConsoleAddr.trim()">
+                        <div v-if="nacosConsoleAuthKind === 'usernamePassword'" class="grid gap-4 sm:grid-cols-2">
                           <div class="grid gap-1.5">
-                            <Label>{{ t("connection.nacosConsoleAuthentication") }}</Label>
-                            <div class="flex items-center gap-1 rounded-md border bg-muted/20 p-0.5">
-                              <Button type="button" size="sm" class="h-8 flex-1" :variant="nacosConsoleAuthKind === 'inherit' ? 'default' : 'ghost'" :disabled="nacosAuthKind === 'none'" @click="nacosConsoleAuthKind = 'inherit'">
-                                {{ t("connection.nacosConsoleAuthInherit") }}
-                              </Button>
-                              <Button type="button" size="sm" class="h-8 flex-1" :variant="nacosConsoleAuthKind === 'usernamePassword' ? 'default' : 'ghost'" @click="nacosConsoleAuthKind = 'usernamePassword'">
-                                {{ t("connection.nacosConsoleAuthSeparate") }}
-                              </Button>
-                            </div>
-                            <p v-if="nacosConsoleAuthKind === 'inherit' && nacosAuthKind === 'none'" class="text-xs text-destructive">{{ t("connection.nacosConsoleAuthPrimaryNone") }}</p>
+                            <Label>{{ t("connection.nacosConsoleUser") }}</Label>
+                            <Input v-model="nacosConsoleUsername" />
                           </div>
-                          <div v-if="nacosConsoleAuthKind === 'usernamePassword'" class="grid gap-4 sm:grid-cols-2">
-                            <div class="grid gap-1.5">
-                              <Label>{{ t("connection.nacosConsoleUser") }}</Label>
-                              <Input v-model="nacosConsoleUsername" />
-                            </div>
-                            <div class="grid gap-1.5">
-                              <Label>{{ t("connection.nacosConsolePassword") }}</Label>
-                              <PasswordInput v-model="nacosConsolePassword" />
-                            </div>
+                          <div class="grid gap-1.5">
+                            <Label>{{ t("connection.nacosConsolePassword") }}</Label>
+                            <PasswordInput v-model="nacosConsolePassword" />
                           </div>
-                        </template>
+                        </div>
                       </template>
-                      <p v-else class="text-[11px] leading-4 text-muted-foreground">{{ t("nacos.nacosRnacosDisabledHint") }}</p>
                     </div>
 
                     <label class="flex items-start justify-between gap-4 border-t pt-4">

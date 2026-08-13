@@ -465,7 +465,7 @@ const filteredNodes = computed(() => {
   nodes = filterLocallySearchedTables(nodes);
 
   const q = deferredSearchQuery.value;
-  nodes = filterSidebarTree(nodes, q, searchCollapsedIds.value, searchableNodeTypes.value);
+  nodes = filterSidebarTree(nodes, q, searchCollapsedIds.value, searchableNodeTypes.value, (node) => (node.type === "nacos-access-control" ? t("nacos.accessControlSidebarLabel") : node.label));
   if (q) {
     nodes = filterSidebarSearchRootsByConnectionState(nodes, store.connectedIds);
   }

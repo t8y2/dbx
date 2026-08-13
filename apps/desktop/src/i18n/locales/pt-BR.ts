@@ -1,6 +1,7 @@
 import { withEnglishFallback } from "./fallback";
 import docs from "./docs/pt-BR";
 import { consulUiMessages } from "./consulUi";
+import { nacosAccessControlMessages, nacosAccessControlTabs } from "./nacosAccessControl";
 
 const consul = {
   ...consulUiMessages,
@@ -1315,6 +1316,7 @@ export default withEnglishFallback({
     gridfs: "GridFS",
     etcdDashboard: "painel etcd",
     etcdAccessControl: "controle de acesso do etcd",
+    ...nacosAccessControlTabs,
   },
   executionSummary: {
     empty: "Nenhum resumo",
@@ -5864,6 +5866,7 @@ export default withEnglishFallback({
     exportCancelled: "Exportação cancelada",
   },
   nacos: {
+    ...nacosAccessControlMessages,
     dashboard: "Painel",
     dashboardTitle: "Painel de operações",
     dashboardUpdatedAt: "Atualizado {time}",
@@ -6166,6 +6169,15 @@ export default withEnglishFallback({
     nacosConnectionPlanDescription: "Escolha a implementação do serviço e a versão da API.",
     nacosServiceAddress: "Endereço do serviço",
     nacosServiceAddressHint: "Informe o endereço do serviço. A porta padrão é 8848, por exemplo http://host:8848/nacos.",
+    nacosManagedNamespaces: "IDs de namespaces gerenciados",
+    nacosManagedNamespacesPlaceholder: "Por exemplo: public, team-a",
+    nacosManagedNamespacesHint: "Informe os IDs acessíveis para este usuário comum, separados por vírgulas ou linhas. O teste de conexão valida a leitura de configurações e serviços para cada ID.",
+    nacosOrdinaryAccount: "Usuário comum",
+    nacosOrdinaryAccountHint: "Se a conta acima for um usuário comum, ative esta opção e selecione os namespaces autorizados; caso contrário, a conexão não funcionará corretamente.",
+    nacosManagedNamespacesSeparator: "Separados por vírgulas ou linhas",
+    nacosOrdinaryNamespacesRequired: "Informe pelo menos um ID de namespace que este usuário comum pode gerenciar.",
+    nacosManagedNamespacesRequired: "Este usuário comum do Nacos 3 não pode listar namespaces. Informe pelo menos um ID que ele tenha permissão para gerenciar e tente novamente.",
+    nacosManagedNamespaceAccessDenied: "Estes namespaces falharam na verificação de leitura de configurações ou serviços: {detail}",
     nacosAuth: "Autenticação",
     nacosAuthHint: "Essas credenciais são usadas nos testes de conexão e no gerenciamento diário.",
     nacosUsernamePassword: "Usuário / senha",

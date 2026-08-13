@@ -24,7 +24,11 @@ describe("Nacos connection dialog layout", () => {
     expect(main).toContain('t("nacos.nacosAdvancedHint")');
     expect(main).toContain("@click=\"configTab = 'advanced'\"");
     expect(main).toContain('v-model="nacosServerAddr"');
-    expect(main).not.toContain('v-model="nacosV3ConsoleAddr"');
+    expect(main).toContain('v-model="nacosManagedNamespacesText"');
+    expect(main).toContain('t("nacos.nacosManagedNamespacesHint")');
+    expect(main).toContain("data-nacos-ordinary-user-toggle");
+    expect(main).toContain('v-model="nacosOrdinaryAccount"');
+    expect(main).toContain("nacosAuthKind === 'usernamePassword'");
     expect(main).not.toContain('v-model="nacosNamespace"');
     expect(main).toContain('t("nacos.nacosAuthHint")');
     expect(main).not.toContain('v-model="nacosMetricsMode"');
@@ -40,8 +44,8 @@ describe("Nacos connection dialog layout", () => {
     expect(advanced).not.toContain("配置上下文路径");
     expect(advanced).toContain('v-model="nacosMetricsMode"');
     expect(advanced).toContain('v-model="nacosRNacosConsoleAddr"');
-    expect(advanced).toContain('v-if="nacosHistoryEnabled"');
-    expect(advanced).toContain('t("nacos.nacosRnacosDisabledHint")');
+    expect(advanced).toContain('v-if="nacosRNacosConsoleAddr.trim()"');
+    expect(advanced).toContain('v-model="nacosHistoryEnabled"');
     expect(advanced).toContain('v-model="nacosTlsSkipVerify"');
     expect(advanced).toContain('v-model.number="nacosPageSize"');
   });
@@ -52,6 +56,7 @@ describe("Nacos connection dialog layout", () => {
     expect(source).not.toContain("DBX 不需要配置该地址");
     const mainStart = source.indexOf("data-nacos-profile-selector");
     const mainEnd = source.indexOf("<!-- Redis: host, port, user, password, ssl -->", mainStart);
+    expect(source.slice(mainStart, mainEnd)).toContain("data-nacos-managed-namespaces");
     expect(source.slice(mainStart, mainEnd)).not.toContain('placeholder="http://127.0.0.1:8080"');
     expect(source).not.toContain("http://127.0.0.1:8010");
     expect(source).not.toContain("http://127.0.0.1:8818");
@@ -60,7 +65,7 @@ describe("Nacos connection dialog layout", () => {
   it("uses a dedicated namespace selector instead of the database selector", () => {
     expect(source).toContain('t("nacos.nacosVisibleNamespacesTitle")');
     expect(source).toContain("openVisibleNacosNamespacesPicker");
-    expect(source).toContain("api.nacosListNamespaces(draftId)");
+    expect(source).toContain("loadReadableNacosNamespaces(draftId, api)");
     expect(source).toContain("showVisibleNacosNamespacesDialog");
   });
 
@@ -68,7 +73,7 @@ describe("Nacos connection dialog layout", () => {
     expect(source).toContain('form.value.db_type === "nacos"');
     expect(source).toContain("production.allNamespaces");
     expect(source).toContain("production.namespacePickerTitle");
-    expect(source).toContain("api.nacosListNamespaces(connectionId)");
+    expect(source).toContain("loadReadableNacosNamespaces(connectionId, api)");
     expect(source).toContain("nacosNamespaceIdentity(name)");
   });
 });

@@ -18,6 +18,8 @@ const leafTypes: Set<TreeNodeType> = new Set([
   "etcd-root",
   "etcd-dashboard",
   "etcd-access-control",
+  "nacos-namespace",
+  "nacos-access-control",
   "zookeeper-root",
   "consul-root",
   "consul-overview",

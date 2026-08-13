@@ -33,6 +33,7 @@ export function getTreeNodeIconInfo(node: TreeNode): TreeNodeIconInfo | null {
       return { icon: FolderOpen, colorClass: "text-sky-500" };
     case "etcd-dashboard":
       return { icon: Gauge, colorClass: "text-sky-500" };
+    case "nacos-access-control":
     case "etcd-access-control":
       return { icon: ShieldCheck, colorClass: "text-sky-500" };
     case "zookeeper-root":

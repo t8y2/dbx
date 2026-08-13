@@ -2848,6 +2848,11 @@ impl AppState {
 
         let (host, port) = self.connection_host_port(connection_id, config).await?;
         let nacos_config = nacos_config.with_server_endpoint(&host, port)?;
+        let transport_layers = self.resolved_transport_layers(config).await?;
+        if transport_layers.is_empty() {
+            return Ok(nacos_config);
+        }
+
         if nacos_config.rnacos_console_addr.is_empty() {
             return Ok(nacos_config);
         }
@@ -2861,10 +2866,6 @@ impl AppState {
         let console_port = console_url
             .port_or_known_default()
             .ok_or_else(|| "r-nacos console address does not include a port".to_string())?;
-        let transport_layers = self.resolved_transport_layers(config).await?;
-        if transport_layers.is_empty() {
-            return Ok(nacos_config);
-        }
         let console_transport_id = rnacos_console_transport_id(connection_id);
         let local_port = match db::transport_layer_tunnel::start_transport_layers(
             &console_transport_id,

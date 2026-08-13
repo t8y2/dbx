@@ -177,7 +177,7 @@ export function resolveAvailableMqTabs(options: { systemKind?: MqSystemKind; cap
   if (capabilities.supportsSubscriptions) tabs.push("subscriptions");
   tabs.push("monitoring");
   tabs.push("clients");
-  if (capabilities.supportsSendMessage) tabs.push("messages");
+  if (capabilities.supportsSendMessage || (systemKind === "kafka" && capabilities.supportsPeekMessages)) tabs.push("messages");
   tabs.push("broker");
   // RabbitMQ lights this tab via virtual-host policies instead of Pulsar rates/quotas.
   if (capabilities.supportsRateLimits || capabilities.supportsBacklogQuota || capabilities.supportsRetention || capabilities.supportsPolicies) {

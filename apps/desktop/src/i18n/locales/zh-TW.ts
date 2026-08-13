@@ -6712,7 +6712,7 @@ export default withEnglishFallback({
     kafkaLatest: "最近 N 則（預設）",
     kafkaEarliest: "最早訊息",
     kafkaOffset: "從指定 Offset 讀取",
-    kafkaLatestHint: "從各分區末尾附近平均讀取，依時間倒序合併。",
+    kafkaLatestHint: "每個分區最多讀取 N 筆候選訊息，再依時間全域倒序回傳最新 N 筆。",
     kafkaEarliestHint: "從每個選定分區最早可讀的訊息開始正序讀取。",
     kafkaOffsetHint: "從指定 Offset 開始正序讀取；填寫分區時只讀該分區，留空則對全部分區分別讀取。",
     messagesLoading: "訊息載入中...",

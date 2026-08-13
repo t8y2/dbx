@@ -6779,7 +6779,7 @@ export default {
     kafkaLatest: "Recent N messages (default)",
     kafkaEarliest: "Earliest messages",
     kafkaOffset: "From offset",
-    kafkaLatestHint: "Reads a balanced window near the end of each partition and merges by timestamp newest first.",
+    kafkaLatestHint: "Reads up to N candidates from each partition, then returns the newest N by timestamp across the topic.",
     kafkaEarliestHint: "Reads history forward from each selected partition.",
     kafkaOffsetHint: "Reads forward from the specified offset in the chosen partition, or every partition when left empty.",
     messagesLoading: "Loading messages...",

@@ -1140,8 +1140,10 @@ public final class KafkaAgent {
                 return peekMessagesResult(Collections.emptyList(), false);
             }
 
-            int messagesPerPartition = peekMessagesPerPartition(count, readablePartitions.size());
-            int scanLimit = peekScanLimit(count, readablePartitions.size());
+            int messagesPerPartition = startPosition == PeekStartPosition.LATEST
+                ? count
+                : peekMessagesPerPartition(count, readablePartitions.size());
+            int scanLimit = peekScanLimit(count, readablePartitions.size(), startPosition);
             Map<TopicPartition, Long> snapshotEndOffsets = new LinkedHashMap<>();
             if (startPosition == PeekStartPosition.LATEST) {
                 for (TopicPartition tp : readablePartitions) {
@@ -1657,12 +1659,18 @@ public final class KafkaAgent {
     }
 
     static int peekScanLimit(int count, int readablePartitionCount) {
-        int fetchCount = recentPeekFetchCount(
-            peekMessagesPerPartition(count, readablePartitionCount), readablePartitionCount
-        );
+        return peekScanLimit(count, readablePartitionCount, PeekStartPosition.EARLIEST);
+    }
+
+    static int peekScanLimit(int count, int readablePartitionCount, PeekStartPosition startPosition) {
+        int messagesPerPartition = startPosition == PeekStartPosition.LATEST
+            ? count
+            : peekMessagesPerPartition(count, readablePartitionCount);
+        int fetchCount = recentPeekFetchCount(messagesPerPartition, readablePartitionCount);
         if (fetchCount > MAX_PEEK_SCAN_RECORDS) {
             throw new IllegalArgumentException(
-                "Kafka message browse would scan more than " + MAX_PEEK_SCAN_RECORDS + " records"
+                "Kafka message browse would scan more than " + MAX_PEEK_SCAN_RECORDS
+                    + " records; reduce the message count or select a partition"
             );
         }
         return MAX_PEEK_SCAN_RECORDS;
@@ -1698,7 +1706,9 @@ public final class KafkaAgent {
             }
             long leftOffset = ((Number) left.getOrDefault("offset", 0L)).longValue();
             long rightOffset = ((Number) right.getOrDefault("offset", 0L)).longValue();
-            return Long.compare(leftOffset, rightOffset);
+            return startPosition == PeekStartPosition.LATEST
+                ? Long.compare(rightOffset, leftOffset)
+                : Long.compare(leftOffset, rightOffset);
         };
         messages.sort(comparator);
     }

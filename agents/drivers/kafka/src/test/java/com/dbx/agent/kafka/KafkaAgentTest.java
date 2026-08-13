@@ -575,8 +575,9 @@ class KafkaAgentTest {
 
     @Test
     void peekRejectsAWindowThatExceedsTheScanLimit() {
-        assertThrows(IllegalArgumentException.class, () ->
-            KafkaAgent.peekScanLimit(100, 1_001));
+        IllegalArgumentException error = assertThrows(IllegalArgumentException.class, () ->
+            KafkaAgent.peekScanLimit(100, 11, KafkaAgent.PeekStartPosition.LATEST));
+        assertTrue(error.getMessage().contains("select a partition"));
     }
 
     @Test
@@ -680,9 +681,19 @@ class KafkaAgentTest {
 
         assertEquals(20L, messages.get(0).get("timestamp"));
         assertEquals(0, messages.get(1).get("partition"));
-        assertEquals(2L, messages.get(1).get("offset"));
-        assertEquals(5L, messages.get(2).get("offset"));
+        assertEquals(5L, messages.get(1).get("offset"));
+        assertEquals(2L, messages.get(2).get("offset"));
         assertEquals(1, messages.get(3).get("partition"));
+    }
+
+    @Test
+    void latestPeekBudgetsTheFullRequestedCountForEveryPartition() {
+        assertEquals(1_000, KafkaAgent.peekScanLimit(
+            100, 10, KafkaAgent.PeekStartPosition.LATEST
+        ));
+        assertThrows(IllegalArgumentException.class, () -> KafkaAgent.peekScanLimit(
+            100, 11, KafkaAgent.PeekStartPosition.LATEST
+        ));
     }
 
     @Test

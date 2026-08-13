@@ -6766,7 +6766,7 @@ export default withEnglishFallback({
     kafkaLatest: "最近 N 条（默认）",
     kafkaEarliest: "最早消息",
     kafkaOffset: "从指定 Offset 读取",
-    kafkaLatestHint: "从各分区末尾附近均衡读取，按时间倒序合并。",
+    kafkaLatestHint: "每个分区最多读取 N 条候选消息，再按时间全局倒序返回最新 N 条。",
     kafkaEarliestHint: "从每个选定分区的最早可读消息开始正序读取。",
     kafkaOffsetHint: "从指定 Offset 开始正序读取；填写分区时仅读该分区，留空则对全部分区分别读取。",
     messagesLoading: "消息加载中...",

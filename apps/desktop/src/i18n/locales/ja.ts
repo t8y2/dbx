@@ -6772,7 +6772,7 @@ export default withEnglishFallback({
     kafkaLatest: "最新 N 件（デフォルト）",
     kafkaEarliest: "最も古いメッセージ",
     kafkaOffset: "Offset から読み取る",
-    kafkaLatestHint: "各パーティションの末尾付近から均等に読み取り、タイムスタンプの新しい順に統合します。",
+    kafkaLatestHint: "各パーティションから最大 N 件の候補を読み取り、トピック全体でタイムスタンプが新しい N 件を返します。",
     kafkaEarliestHint: "選択した各パーティションの先頭から昇順に読み取ります。",
     kafkaOffsetHint: "指定 Offset から、選択したパーティション（空欄ならすべて）を昇順に読み取ります。",
     messagesLoading: "メッセージを読み込み中...",

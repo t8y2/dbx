@@ -6719,7 +6719,7 @@ export default withEnglishFallback({
     kafkaLatest: "Ultimi N messaggi (predefinito)",
     kafkaEarliest: "Primi messaggi",
     kafkaOffset: "Da offset",
-    kafkaLatestHint: "Legge una finestra bilanciata vicino alla fine di ogni partizione e unisce per timestamp con i più recenti prima.",
+    kafkaLatestHint: "Legge fino a N candidati per partizione e restituisce i N messaggi più recenti del topic in base al timestamp.",
     kafkaEarliestHint: "Legge la cronologia in avanti da ogni partizione selezionata.",
     kafkaOffsetHint: "Legge in avanti dall'offset indicato nella partizione scelta, o in tutte se lasciata vuota.",
     messagesLoading: "Caricamento messaggi...",

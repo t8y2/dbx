@@ -10,6 +10,7 @@ import VChart from "vue-echarts";
 import { Activity, AlertTriangle, BarChart3, Boxes, CheckCircle2, Database, Download, Gauge, Hash, HardDrive, Layers3, Loader2, Package, RadioTower, RefreshCw, Send, ShieldCheck, Table2, Upload, Users } from "@lucide/vue";
 import type { MqSystemKind, TopicRef, TopicInfo, TopicStats, BacklogStats } from "@/types/mq";
 import { mqGetTopicStats, mqGetBacklog } from "@/lib/backend/api";
+import { extractKafkaPartitionRows, isKafkaStatsPayload, type KafkaPartitionStatsRow } from "@/lib/mq/kafkaTopicStats";
 import MessageBrowser from "./MessageBrowser.vue";
 
 use([CanvasRenderer, LineChart, GridComponent, LegendComponent, TooltipComponent]);
@@ -54,17 +55,10 @@ interface RocketMqPartitionStatsRow {
   messageCount: number;
 }
 
-interface KafkaPartitionStatsRow {
-  partition: number;
-  beginOffset: number;
-  endOffset: number;
-  messageCount: number;
-  leader: number;
-  replicas: number[];
-  isr: number[];
-}
-
 const props = defineProps<Props>();
+const emit = defineEmits<{
+  "navigate-tab": [payload: { tab: "messages"; topic?: TopicInfo }];
+}>();
 const { t } = useI18n();
 
 const stats = ref<TopicStats>();
@@ -281,26 +275,6 @@ function extractRocketMqPartitionRows(raw: unknown): RocketMqPartitionStatsRow[]
     .sort((a, b) => a.partition - b.partition || a.brokerName.localeCompare(b.brokerName));
 }
 
-function extractKafkaPartitionRows(raw: unknown): KafkaPartitionStatsRow[] {
-  return arrayObjects(objectRecord(raw).partitionStats)
-    .map((body) => ({
-      partition: numberField(body.partition) ?? 0,
-      beginOffset: numberField(body.beginOffset) ?? 0,
-      endOffset: numberField(body.endOffset) ?? 0,
-      messageCount: numberField(body.messageCount) ?? 0,
-      leader: numberField(body.leader) ?? -1,
-      replicas: numberArrayField(body.replicas),
-      isr: numberArrayField(body.isr),
-    }))
-    .sort((a, b) => a.partition - b.partition);
-}
-
-function isKafkaStatsPayload(raw: unknown): boolean {
-  if (props.mqSystemKind === "rocketmq") return false;
-  const root = objectRecord(raw);
-  return Array.isArray(root.partitionStats) || (numberField(root.partitions) !== undefined && numberField(root.replicationFactor) !== undefined && numberField(root.totalMessages) !== undefined);
-}
-
 function isKafkaPartitionHealthy(row: KafkaPartitionStatsRow): boolean {
   return row.leader >= 0 && (row.replicas.length === 0 || row.isr.length >= row.replicas.length);
 }
@@ -334,10 +308,6 @@ function arrayObjects(value: unknown): Record<string, unknown>[] {
 
 function numberField(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
-}
-
-function numberArrayField(value: unknown): number[] {
-  return Array.isArray(value) ? value.map(numberField).filter((item): item is number => item !== undefined) : [];
 }
 
 function stringField(value: unknown): string {
@@ -629,6 +599,9 @@ onUnmounted(() => {
       </div>
 
       <div class="stats-section">
+        <div class="monitoring-message-heading">
+          <button type="button" class="btn-sm" @click="emit('navigate-tab', { tab: 'messages', topic })">{{ t("mqMessages.queryTitle") }}</button>
+        </div>
         <MessageBrowser :connection-id="connectionId" :topic="getTopicRef()" mq-system-kind="kafka" appearance="monitoring" />
       </div>
     </div>
@@ -1492,6 +1465,14 @@ onUnmounted(() => {
 .health-badge.idle {
   background: color-mix(in srgb, var(--monitor-muted) 12%, transparent);
   color: var(--monitor-muted);
+}
+
+.monitoring-message-heading {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+  margin-bottom: 12px;
 }
 
 @keyframes monitor-spin {

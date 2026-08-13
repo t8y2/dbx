@@ -6255,7 +6255,7 @@ export default withEnglishFallback({
     kafkaLatest: "최근 N개 메시지(기본값)",
     kafkaEarliest: "가장 이른 메시지",
     kafkaOffset: "오프셋부터 읽기",
-    kafkaLatestHint: "각 파티션 끝 부근에서 균등하게 읽고 타임스탬프 내림차순으로 병합합니다.",
+    kafkaLatestHint: "파티션마다 최대 N개의 후보를 읽은 뒤 토픽 전체에서 타임스탬프가 가장 최신인 N개를 반환합니다.",
     kafkaEarliestHint: "선택한 각 파티션의 처음부터 오름차순으로 읽습니다.",
     kafkaOffsetHint: "지정한 오프셋부터 선택한 파티션(비워 두면 전체)을 오름차순으로 읽습니다.",
     messagesLoading: "메시지를 불러오는 중...",

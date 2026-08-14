@@ -137,7 +137,16 @@ impl NatsConnectionConfig {
     }
 
     pub fn is_nats_connection(connection: &ConnectionConfig) -> bool {
-        Self::from_connection(connection).is_ok()
+        if connection.db_type != DatabaseType::MessageQueue {
+            return false;
+        }
+        connection
+            .external_config
+            .as_ref()
+            .and_then(Value::as_object)
+            .and_then(|object| object.get("systemKind").or_else(|| object.get("system_kind")))
+            .and_then(Value::as_str)
+            .is_some_and(|kind| kind.eq_ignore_ascii_case("nats"))
     }
 }
 
@@ -153,6 +162,20 @@ mod tests {
             "external_config":{"systemKind":"rabbitmq"}
         }))
         .unwrap();
+        assert!(NatsConnectionConfig::from_connection(&connection).is_err());
+    }
+
+    #[test]
+    fn identifies_nats_profiles_before_validating_connection_fields() {
+        let connection: ConnectionConfig = serde_json::from_value(json!({
+            "id":"c1","name":"nats","db_type":"mq","host":"localhost","port":4222,
+            "username":"","password":"",
+            "ssl":true,
+            "external_config":{"systemKind":"nats","serverUrl":"nats://localhost:4222"}
+        }))
+        .unwrap();
+
+        assert!(NatsConnectionConfig::is_nats_connection(&connection));
         assert!(NatsConnectionConfig::from_connection(&connection).is_err());
     }
 

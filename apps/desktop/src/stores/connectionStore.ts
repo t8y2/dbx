@@ -198,9 +198,9 @@ function sidebarObjectGroupPageSize(): number {
 
 function isFlatMqConnection(config: ConnectionConfig | undefined): boolean {
   if (!config || config.db_type !== "mq") return false;
-  if (config.driver_profile === "kafka" || config.driver_profile === "rocketmq" || config.driver_profile === "rabbitmq") return true;
+  if (config.driver_profile === "kafka" || config.driver_profile === "rocketmq" || config.driver_profile === "rabbitmq" || config.driver_profile === "nats") return true;
   const kind = (config.external_config as Partial<MqAdminConfig> | undefined)?.systemKind;
-  return kind === "kafka" || kind === "rocketmq" || kind === "rabbitmq";
+  return kind === "kafka" || kind === "rocketmq" || kind === "rabbitmq" || kind === "nats";
 }
 
 type ImportSource = "dbx" | "navicat" | "dbeaver" | "datagrip";

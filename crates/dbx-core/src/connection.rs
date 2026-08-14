@@ -2497,6 +2497,10 @@ impl AppState {
 
         #[cfg(feature = "mq-admin")]
         if config.db_type == DatabaseType::MessageQueue
+            // NATS has its own native Agent path and is not represented by
+            // MqAdminConfig. Do not let the RocketMQ transport special case
+            // parse a NATS profile through the legacy MQ enum.
+            && !crate::nats::NatsConnectionConfig::is_nats_connection(config)
             && crate::mq::config::MqAdminConfig::from_connection(config)?.system_kind
                 == crate::mq::types::MqSystemKind::RocketMq
         {
@@ -7900,6 +7904,25 @@ for line in sys.stdin:
         }));
 
         assert_eq!(connection_remote_endpoint(&config), ("broker.internal".to_string(), 8443));
+    }
+
+    #[tokio::test]
+    async fn nats_connection_host_port_does_not_parse_legacy_mq_admin_config() {
+        let (state, dir) = test_app_state().await;
+        let mut config = mysql_config(None);
+        config.id = "nats".to_string();
+        config.db_type = DatabaseType::MessageQueue;
+        config.host = "127.0.0.1".to_string();
+        config.port = 4222;
+        config.external_config = Some(serde_json::json!({
+            "systemKind": "nats",
+            "serverUrl": "nats://127.0.0.1:4222"
+        }));
+
+        let endpoint = state.connection_host_port(&config.id, &config).await.unwrap();
+
+        assert_eq!(endpoint, ("127.0.0.1".to_string(), 4222));
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

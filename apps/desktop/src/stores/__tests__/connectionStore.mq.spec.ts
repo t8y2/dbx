@@ -55,6 +55,23 @@ function kafkaExternalConfigOnlyConnection(): ConnectionConfig {
   return connection;
 }
 
+function natsConnection(): ConnectionConfig {
+  return {
+    ...mqConnection(),
+    name: "NATS",
+    host: "127.0.0.1",
+    port: 4222,
+    driver_profile: "nats",
+    driver_label: "NATS",
+    external_config: {
+      systemKind: "nats",
+      adminUrl: "",
+      auth: { kind: "none" },
+      serverUrl: "nats://127.0.0.1:4222",
+    },
+  } as ConnectionConfig;
+}
+
 describe("connectionStore MQ sidebar tree", () => {
   beforeEach(() => {
     vi.resetModules();
@@ -134,6 +151,40 @@ describe("connectionStore MQ sidebar tree", () => {
 
     await store.refreshTreeNode(node);
 
+    expect(node.children?.map((child) => ({ label: child.label, tenant: child.mqTenant, initialTab: child.mqInitialTab }))).toEqual([{ label: "Topics", tenant: "_flat_mq", initialTab: "topics" }]);
+  });
+
+  it("adds a NATS topics child without calling the legacy tenant API", async () => {
+    const mqListTenants = vi.fn();
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+      listDatabases: vi.fn().mockResolvedValue([]),
+      loadSchemaCache: vi.fn().mockResolvedValue(null),
+      mqListTenants,
+      saveSchemaCache: vi.fn().mockResolvedValue(undefined),
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    const connection = natsConnection();
+    const node: TreeNode = {
+      id: connection.id,
+      label: connection.name,
+      type: "connection",
+      connectionId: connection.id,
+      isExpanded: false,
+      children: [],
+    };
+
+    store.connections = [connection];
+    store.connectedIds.add(connection.id);
+    store.treeNodes = [node];
+
+    await store.refreshTreeNode(node);
+
+    expect(mqListTenants).not.toHaveBeenCalled();
     expect(node.children?.map((child) => ({ label: child.label, tenant: child.mqTenant, initialTab: child.mqInitialTab }))).toEqual([{ label: "Topics", tenant: "_flat_mq", initialTab: "topics" }]);
   });
 

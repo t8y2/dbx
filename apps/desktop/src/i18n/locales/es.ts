@@ -1116,6 +1116,8 @@ export default withEnglishFallback({
     mqttClientCertPath: "Ruta del certificado de cliente",
     mqttClientKeyPath: "Ruta de la clave privada del cliente",
     mqttNoLocal: "Prohibir reenvío local",
+    doltShowSystemTables: "Mostrar tablas integradas de Dolt",
+    doltShowSystemTablesHint: "Muestra las tablas integradas de control de versiones de Dolt en la lista de tablas de la conexión actual.",
   },
   editor: {
     duckdbDraining: "La consulta anterior de DuckDB aún se está deteniendo. Vuelva a intentarlo en breve.",
@@ -2922,6 +2924,7 @@ export default withEnglishFallback({
     types: "tipo",
     gridfs: "GridFS",
     buckets: "Buckets",
+    doltSystemTables: "Tablas del sistema de Dolt",
   },
   userAdmin: {
     title: "Usuarios y Privilegios",
@@ -5711,6 +5714,7 @@ export default withEnglishFallback({
     shortcutIndentMore: "Aumentar sangría",
     shortcutIndentLess: "Reducir sangría",
     shortcutInsertLineBelow: "Insertar una línea debajo",
+    shortcutJoinLines: "Unir líneas",
     shortcutDuplicateLine: "Duplicar línea actual",
     shortcutDeleteLine: "Eliminar línea actual",
     shortcutMoveLineUp: "Mover línea arriba",

@@ -123,6 +123,7 @@ import { isXuguPublicSynonymScope, xuguSchemaDisplayName, XUGU_PUBLIC_SYNONYM_SC
 import { filterNacosNamespacesForSidebar, normalizeNacosNamespacesForDisplay } from "@/lib/nacos/nacosNamespaceVisibility";
 import { buildPackageMemberNodes, markPackageNodesExpandable } from "@/lib/sidebar/packageMembers";
 import { configuredDatabaseProductName, connectionConfigFingerprint, normalizeDatabaseConnectionInfo } from "@/lib/connection/connectionDatabaseInfo";
+import { driverProfileObjectTreeProfileForConnection } from "@/lib/database/driverProfileExtensions";
 import { createMetadataLoadTrace, logMetadataLoadTrace, MetadataLoadCoordinator, type MetadataLoadTraceLogger } from "@/lib/metadata/metadataLoadCoordinator";
 import type { MetadataScopeInput } from "@/lib/metadata/metadataLoadScope";
 import { MetadataResultCache, type MetadataCacheInvalidation } from "@/lib/metadata/metadataResultCache";
@@ -1527,9 +1528,11 @@ export const useConnectionStore = defineStore("connection", () => {
 
   function objectGroupCacheKey(node: TreeNode): string {
     const config = node.connectionId ? getConfig(node.connectionId) : undefined;
+    const objectTreeProfileCacheKey = driverProfileObjectTreeProfileForConnection(config)?.cacheKey;
     // objects-v8: object-group listing SQL gained a pg_type branch for
     // PostgreSQL-family user-defined types; older cached lists miss TYPE nodes.
-    const cacheVersion = ownerAwareMetadataCacheVersion(config, config?.db_type === "oracle" ? "objects-v7" : "objects-v8");
+    const baseCacheVersion = ownerAwareMetadataCacheVersion(config, config?.db_type === "oracle" ? "objects-v7" : "objects-v8");
+    const cacheVersion = objectTreeProfileCacheKey ? `${baseCacheVersion}:${objectTreeProfileCacheKey}` : baseCacheVersion;
     return schemaCacheKey(node.connectionId || "", node.database || "", node.schema || "", node.type, cacheVersion);
   }
 
@@ -1544,6 +1547,19 @@ export const useConnectionStore = defineStore("connection", () => {
   function activeTableNameFilterForScope(parts: { connectionId?: string | null; database?: string | null; schema?: string | null; nodeKind?: string | null; catalog?: string | null }): TableNameFilter | undefined {
     const filter = tableNameFilterForScope(parts);
     return tableNameFilterIsEmpty(filter) ? undefined : filter;
+  }
+
+  function effectiveTableNameFilterForNode(node: TreeNode, userFilter?: TableNameFilter): TableNameFilter | undefined {
+    const config = node.connectionId ? getConfig(node.connectionId) : undefined;
+    const profileFilter = driverProfileObjectTreeProfileForConnection(config)?.groupOverrides.find((group) => group.nodeType === node.type)?.tableNameFilter;
+    if (!profileFilter) return userFilter;
+    if (!userFilter) return profileFilter;
+    return normalizeTableNameFilter({
+      // Dedicated groups own their include range. User-defined include patterns
+      // continue to apply to the default tables group, whose profile rule is an exclusion.
+      includePatterns: profileFilter.includePatterns.length > 0 ? profileFilter.includePatterns : userFilter.includePatterns,
+      excludePatterns: [...profileFilter.excludePatterns, ...userFilter.excludePatterns],
+    });
   }
 
   function tableNameFilterMetadataExtra(filter: TableNameFilter | undefined): MetadataScopeInput["extra"] {
@@ -1698,6 +1714,7 @@ export const useConnectionStore = defineStore("connection", () => {
       schema: options.effectiveSchema,
       objects: options.objects.filter((object) => options.objectTypes.includes(normalizedObjectTreeKind(object.object_type))),
       databaseType,
+      groupNodeType: options.node.type,
     });
     const refreshedGroup = grouped.find((group) => group.type === options.node.type);
     const children = refreshedGroup?.children ?? [];
@@ -1779,13 +1796,14 @@ export const useConnectionStore = defineStore("connection", () => {
       return { children: [], objectCount: 0, hasMore: false, nextOffset: options.offset };
     }
     const searchFilter = (options.searchFilter ?? sidebarSearchQuery.value) || undefined;
-    const tableNameFilter = activeTableNameFilterForScope({
+    const userTableNameFilter = activeTableNameFilterForScope({
       connectionId: options.node.connectionId,
       database: options.node.database,
       schema: options.node.schema,
       nodeKind: options.node.type,
       catalog: options.node.catalog,
     });
+    const tableNameFilter = effectiveTableNameFilterForNode(options.node, userTableNameFilter);
     const fetchLimit = searchFilter ? options.pageSize : options.pageSize + 1;
     const fetchOffset = searchFilter ? undefined : options.offset;
     const tables = await loadCachedMetadataListPage<TableInfo[]>(
@@ -4703,7 +4721,9 @@ export const useConnectionStore = defineStore("connection", () => {
           const simpleObjectDisplay = useSettingsStore().editorSettings.sidebarObjectDisplay === "simple";
           const searchFilter = activeTreeLoadSearchFilter(options);
           const config = getConfig(connectionId);
-          const cacheVersion = ownerAwareMetadataCacheVersion(config, simpleObjectDisplay ? "objects-simple-v8" : "objects-grouped-v8");
+          const objectTreeProfile = driverProfileObjectTreeProfileForConnection(config);
+          const baseCacheVersion = ownerAwareMetadataCacheVersion(config, simpleObjectDisplay ? "objects-simple-v8" : "objects-grouped-v8");
+          const cacheVersion = !simpleObjectDisplay && objectTreeProfile?.cacheKey ? `${baseCacheVersion}:${objectTreeProfile.cacheKey}` : baseCacheVersion;
           const cacheKey = schemaCacheKey(connectionId, database, schema || "", cacheVersion);
           const querySchema = connectionObjectTreeQuerySchema(config, database, schema);
           const effectiveSchema = connectionObjectTreeNodeSchema(config, database, schema);
@@ -4748,6 +4768,7 @@ export const useConnectionStore = defineStore("connection", () => {
               database,
               schema: effectiveSchema,
               objectTypes: supportedSidebarObjectTypes(config),
+              groupOverrides: objectTreeProfile?.groupOverrides,
             });
             if (!schema && isPostgresLikeForExtensions(config?.db_type)) {
               children.push(buildExtensionManagementNode(connectionId, database));
@@ -5165,7 +5186,12 @@ export const useConnectionStore = defineStore("connection", () => {
         }
 
         const matchingGroups = findTreeNodes(treeNodes.value, (node) => {
-          return (node.type === "group-tables" || node.type === "group-views" || node.type === "group-materialized-views") && node.connectionId === target.connectionId && sameSidebarObjectName(node.database, target.database) && (!target.schema || sameSidebarObjectName(node.schema, target.schema));
+          return (
+            (node.type === "group-tables" || node.type === "group-dolt-system-tables" || node.type === "group-views" || node.type === "group-materialized-views") &&
+            node.connectionId === target.connectionId &&
+            sameSidebarObjectName(node.database, target.database) &&
+            (!target.schema || sameSidebarObjectName(node.schema, target.schema))
+          );
         });
 
         for (const group of matchingGroups) {

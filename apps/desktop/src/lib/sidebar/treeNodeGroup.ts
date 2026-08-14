@@ -9,6 +9,7 @@ const treeGroupNodeTypes = new Set<TreeNodeType>([
   "group-table-partitions",
   "group-table-subpartitions",
   "group-tables",
+  "group-dolt-system-tables",
   "group-views",
   "group-materialized-views",
   "group-procedures",

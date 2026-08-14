@@ -34,5 +34,8 @@ describe("ClickHouse signature help", () => {
     expect(help?.name).toBe("DOLT_MERGE_BASE");
     expect(help?.parameters).toEqual(["revision_a", "revision_b"]);
     expect(help?.activeParameter).toBe(1);
+
+    const procedureSql = "CALL DOLT_COMMIT_HASH_OUT(";
+    expect(getSqlFunctionSignatureHelp(procedureSql, procedureSql.length, "mysql", "dolt")?.parameters).toEqual(["out_hash", "arguments"]);
   });
 });

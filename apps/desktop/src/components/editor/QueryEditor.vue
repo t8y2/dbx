@@ -22,6 +22,7 @@ import { canFormatSqlForDatabaseType, formatSqlForEditing, compressSqlText, type
 import { detectAndFormatStructured } from "@/lib/sql/autoFormat";
 import { enabledSqlParameterSyntaxes, resolveSqlVariableSyntaxToggles } from "@/lib/sql/sqlVariableSyntax";
 import { blankLineDeletionChanges, replaceSelectedEditorText } from "@/lib/editor/queryEditorTextEdits";
+import { joinQueryEditorLines } from "@/lib/editor/queryEditorJoinLines";
 import { createSqlSignatureTooltipDom } from "@/lib/editor/sqlSignatureTooltip";
 import { buildSqlInConditionFromPasteSource, insertTextForSqlInCondition } from "@/lib/sql/sqlInListPaste";
 import { resolveSqlSingleQuoteKeyAction } from "@/lib/sql/sqlQuoteCaret";
@@ -49,6 +50,7 @@ import {
   extractCteDefinitions,
 } from "@/lib/sql/sqlCompletion";
 import { originForSqlCompletionProvider, originForTypedSqlCompletionStart, shouldAllowSqlCompletionTrigger, type SqlCompletionTriggerFacts, type SqlCompletionTriggerOrigin } from "@/lib/sql/sqlCompletionTriggerPolicy";
+import { driverProfileHasCompletionCandidates } from "@/lib/database/driverProfileExtensions";
 import { sqlCompletionContextFromSemantic, sqlSemanticSelectStarIsOnlyProjection, sqlSemanticSelectStarQualifierSql, sqlSemanticSelectStarTableSources } from "@/lib/sql/semantic/completion";
 import { buildSqlSemanticModel } from "@/lib/sql/semantic/model";
 import { mergeSqlSemanticReferenceAnalysis, resolveSqlSemanticNavigationTarget } from "@/lib/sql/semantic/references";
@@ -1829,6 +1831,7 @@ function runKeymapExtension(codeMirrorKeymap: (typeof import("@codemirror/view")
         ...binding(shortcuts.indentMore, (view) => codeMirrorIndentMore?.(view) ?? false),
         ...binding(shortcuts.indentLess, (view) => codeMirrorIndentLess?.(view) ?? false),
         ...binding(shortcuts.insertLineBelow, insertLineBelow),
+        ...binding(shortcuts.joinLines, joinQueryEditorLines),
         ...binding(shortcuts.duplicateLine, (view) => codeMirrorCopyLineDown?.(view) ?? false),
         ...binding(shortcuts.deleteLine, (view) => codeMirrorDeleteLine?.(view) ?? false),
         ...binding(shortcuts.moveLineUp, (view) => codeMirrorMoveLineUp?.(view) ?? false),
@@ -3763,7 +3766,14 @@ function buildLocalSqlCompletionResult(completionContext: ReturnType<typeof getS
     }
   }
 
-  if (tables.length === 0 && completionObjects.length === 0 && schemaNames.length === 0 && columnsByTable.size === 0 && (completionContext.exclusiveTableSuggestions || completionContext.exclusiveColumnSuggestions || completionContext.exclusiveRoutineSuggestions)) {
+  if (
+    tables.length === 0 &&
+    completionObjects.length === 0 &&
+    schemaNames.length === 0 &&
+    columnsByTable.size === 0 &&
+    !driverProfileHasCompletionCandidates(sqlDriverProfile.value, completionContext) &&
+    (completionContext.exclusiveTableSuggestions || completionContext.exclusiveColumnSuggestions || completionContext.exclusiveRoutineSuggestions)
+  ) {
     return null;
   }
 

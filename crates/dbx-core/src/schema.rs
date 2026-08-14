@@ -2162,6 +2162,16 @@ async fn list_tables_once(
                 .await
                 .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types, table_name_filter))
         }
+        PoolKind::Mysql(p, _)
+            if db_config.as_ref().is_some_and(db::dolt::system_tables_visible)
+                && db::dolt::requests_system_tables(
+                    table_name_filter.map(|filter| filter.include_patterns.as_slice()),
+                ) =>
+        {
+            db::dolt::list_system_tables(p, mysql_table_metadata_catalog(database, schema), filter)
+                .await
+                .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types, table_name_filter))
+        }
         PoolKind::Mysql(p, mode) => {
             if *mode == MysqlMode::OceanBaseOracle {
                 let tables = db::ob_oracle::list_tables(p, schema).await?;

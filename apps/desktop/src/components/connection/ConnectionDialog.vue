@@ -48,6 +48,7 @@ import { mongodbAuthFailureHint, mongoUrlParam, mongoUrlParamIsTrue, normalizeMo
 import { isMongoLegacyDriverProfile } from "@/lib/mongo/mongoCapabilities";
 import { mysqlCleartextPasswordAuthEnabled, setMysqlCleartextPasswordAuthEnabled } from "@/lib/database/mysqlConnectionOptions";
 import { applyDamengSslUrlParams, damengSslFormConfig } from "@/lib/database/damengSslOptions";
+import { doltSystemTablesVisible, isDoltDriverProfile, setDoltSystemTablesVisible } from "@/lib/database/doltProfile";
 import { DamengJvmSystemPropertyError, damengJvmSystemPropertiesText, parseDamengJvmSystemProperties } from "@/lib/database/damengJvmOptions";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { configuredDatabaseProductName, connectionConfigFingerprint, databaseInfoCopyText, databaseInfoRows, normalizeDatabaseConnectionInfo, type DatabaseInfoField } from "@/lib/connection/connectionDatabaseInfo";
@@ -3085,6 +3086,11 @@ const showGenericUrlParamsHint = computed(() => form.value.db_type === "mysql" |
 const bareMysqlProfiles = new Set(["doris", "selectdb", "oceanbase"]);
 const supportsMysqlTlsOptions = computed(() => form.value.db_type === "starrocks" || (form.value.db_type === "mysql" && !bareMysqlProfiles.has(selectedType.value)));
 const supportsMysqlCleartextPasswordAuth = computed(() => form.value.db_type === "mysql" && !bareMysqlProfiles.has(selectedType.value));
+const supportsDoltSystemTables = computed(() => isDoltDriverProfile(form.value.driver_profile));
+const showDoltSystemTables = computed({
+  get: () => doltSystemTablesVisible(form.value),
+  set: (visible: boolean) => setDoltSystemTablesVisible(form.value, visible),
+});
 const mysqlCleartextPasswordAuth = computed({
   get: () => mysqlCleartextPasswordAuthEnabled(form.value.url_params),
   set: (value: boolean) => {
@@ -3884,7 +3890,7 @@ function connectionConfigForSubmit(id: string, generatedName = ""): ConnectionCo
     config.external_config = undefined;
     setGaussdbIdentifierQuoteStyle(config, style);
     setGaussdbTargetServerType(config, targetServerType);
-  } else {
+  } else if (!isDoltDriverProfile(config.driver_profile)) {
     config.external_config = undefined;
   }
   if (config.db_type === "mongodb" && !mongoUseUrl.value) {
@@ -7908,6 +7914,13 @@ function openExternalUrl(url: string) {
                     <Switch v-model="keepaliveEnabled" />
                     <Input v-model.number="form.keepalive_interval_secs" type="number" min="1" max="3600" step="1" class="flex-1" :disabled="!keepaliveEnabled" />
                   </div>
+                </div>
+                <div v-if="supportsDoltSystemTables" class="grid grid-cols-4 items-center gap-4">
+                  <Label :class="connectionLabelSmallClass">{{ t("connection.doltShowSystemTables") }}</Label>
+                  <label class="col-span-3 flex items-center gap-2 cursor-pointer">
+                    <input v-model="showDoltSystemTables" type="checkbox" class="mr-0" />
+                    <span class="text-xs text-muted-foreground">{{ t("connection.doltShowSystemTablesHint") }}</span>
+                  </label>
                 </div>
                 <div class="grid grid-cols-4 items-center gap-4">
                   <Label :class="connectionLabelSmallClass">{{ t("connection.readOnly") }}</Label>

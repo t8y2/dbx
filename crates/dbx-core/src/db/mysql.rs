@@ -2764,6 +2764,15 @@ async fn list_table_names_show_filtered(
     exact_names: &[String],
 ) -> Result<Vec<TableInfo>, String> {
     let mut conn = get_conn_with_timeout(pool, super::connection_timeout()).await?;
+    list_table_names_show_filtered_with_conn(&mut conn, database, filter, exact_names).await
+}
+
+pub(super) async fn list_table_names_show_filtered_with_conn(
+    conn: &mut mysql_async::Conn,
+    database: &str,
+    filter: Option<&str>,
+    exact_names: &[String],
+) -> Result<Vec<TableInfo>, String> {
     let mut last_error = None;
     let mut rows = None;
     for attempt in show_tables_query_attempts(database, filter, exact_names) {

@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 288 288">
+  <title>NATS</title>
+  <rect x="8.1" y="5.3" width="134.7" height="109.2" fill="#27aae1"/>
+  <rect x="142.8" y="5.3" width="134.7" height="109.2" fill="#34a574"/>
+  <rect x="8.1" y="114.6" width="134.7" height="109.2" fill="#375c93"/>
+  <rect x="142.8" y="114.6" width="134.7" height="109.2" fill="#8dc63f"/>
+  <polygon points="123,223.2 188.9,284.2 188.9,223.2" fill="#8dc63f"/>
+  <polygon points="142.8,223.2 143.5,242.4 122.4,222.7" fill="#375c93"/>
+  <path d="M198.6 146.5V56.1h32.2V173H182L83.5 81v92.1H51.2V56.1h50.5z" fill="#fff"/>
+</svg>

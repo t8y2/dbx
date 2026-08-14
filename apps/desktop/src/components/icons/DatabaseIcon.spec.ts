@@ -42,6 +42,17 @@ describe("DatabaseIcon", () => {
     app.unmount();
   });
 
+  it("uses the NATS asset", async () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const app = createApp(DatabaseIcon, { dbType: "nats" });
+    app.mount(container);
+    await nextTick();
+
+    expect(container.querySelector("img")?.getAttribute("src")).toBe("/icons/database/nats.svg");
+    app.unmount();
+  });
+
   it("falls back to the generic icon when the database type is missing", async () => {
     const container = document.createElement("div");
     document.body.appendChild(container);

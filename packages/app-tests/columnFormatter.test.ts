@@ -85,6 +85,14 @@ test("formats Oracle timestamp fractional precision in the data grid", () => {
   assert.equal(applyColumnFormatter("2024-02-25 13:02:15.123456", { kind: "datetime", unit: "auto", pattern: "YYYY/MM/DD HH:mm:ss.SSS", timezone: undefined }), "2024/02/25 13:02:15.123");
 });
 
+test("formats Mongo shell dates with the selected pattern and timezone", () => {
+  const formatter: ColumnFormatterConfig = { kind: "datetime", unit: "seconds", pattern: "YYYY-MM-DD HH:mm:ss.SSSZ", timezone: "Asia/Shanghai" };
+
+  assert.equal(applyColumnFormatter('ISODate("2024-06-28T09:15:36.439Z")', formatter), "2024-06-28 17:15:36.439+08:00");
+  assert.equal(applyColumnFormatter("new Date('2024-06-28T09:15:36.439Z')", formatter), "2024-06-28 17:15:36.439+08:00");
+  assert.equal(applyColumnFormatter('ISODate("not-a-date")', formatter), 'ISODate("not-a-date")');
+});
+
 test("does not treat compact date strings as unix timestamps", () => {
   dayjs.extend(utc);
   dayjs.extend(timezone);

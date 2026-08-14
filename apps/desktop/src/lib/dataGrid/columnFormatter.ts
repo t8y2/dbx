@@ -51,6 +51,7 @@ const STRICT_LOCAL_DATETIME_INPUT_PATTERNS = [
 ];
 const ISO_OFFSET_DATETIME_PATTERN = /^(\d{4})([-/])(\d{2})\2(\d{2})T(\d{2}):(\d{2}):(\d{2})(\.\d{1,9})?(Z|[+-]\d{2}:\d{2})$/;
 const FRACTIONAL_LOCAL_DATETIME_PATTERN = /^(\d{4})([-/])(\d{1,2})\2(\d{1,2})([ T])(\d{1,2}):(\d{1,2}):(\d{1,2})\.(\d{1,9})$/;
+const MONGO_SHELL_DATE_PATTERN = /^(?:ISODate|new Date)\(\s*(["'])(.+)\1\s*\)$/;
 
 export interface CustomColumnFormatterConfig {
   id: string;
@@ -262,14 +263,15 @@ function resolveDateTimeValue(value: string | number, unit: DateTimeFormatterUni
     if (!trimmed) {
       return undefined;
     }
-    const timestamp = parseTimestampMilliseconds(trimmed, unit);
+    const normalized = unwrapMongoShellDate(trimmed) ?? trimmed;
+    const timestamp = parseTimestampMilliseconds(normalized, unit);
     if (timestamp !== undefined) {
       const parsedTimestamp = dayjs(timestamp);
       return parsedTimestamp.isValid() ? parsedTimestamp : undefined;
     }
-    if (isIntegerString(trimmed)) return undefined;
+    if (isIntegerString(normalized)) return undefined;
 
-    return parseStrictDateTimeString(trimmed);
+    return parseStrictDateTimeString(normalized);
   }
 
   const timestamp = parseTimestampMilliseconds(value, unit);
@@ -277,6 +279,10 @@ function resolveDateTimeValue(value: string | number, unit: DateTimeFormatterUni
 
   const parsedTimestamp = dayjs(timestamp);
   return parsedTimestamp.isValid() ? parsedTimestamp : undefined;
+}
+
+function unwrapMongoShellDate(value: string): string | undefined {
+  return value.match(MONGO_SHELL_DATE_PATTERN)?.[2];
 }
 
 function normalizeDateTimePattern(pattern: unknown): string {

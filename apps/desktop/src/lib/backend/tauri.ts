@@ -896,24 +896,24 @@ export async function snapshotSqlFileBeforeSave(projectId: string, path: string)
   return invoke("snapshot_sql_file_before_save", { projectId, path });
 }
 
-export async function createProjectFile(rootPath: string, relativePath: string, content: string): Promise<{ path: string }> {
-  return invoke("create_project_file", { rootPath, relativePath, content });
+export async function createProjectFile(projectId: string, relativePath: string, content: string): Promise<{ path: string }> {
+  return invoke("create_project_file", { projectId, relativePath, content });
 }
 
-export async function createProjectFolder(rootPath: string, relativePath: string): Promise<{ path: string }> {
-  return invoke("create_project_folder", { rootPath, relativePath });
+export async function createProjectFolder(projectId: string, relativePath: string): Promise<{ path: string }> {
+  return invoke("create_project_folder", { projectId, relativePath });
 }
 
-export async function renameProjectEntry(rootPath: string, relativePath: string, newName: string): Promise<{ path: string }> {
-  return invoke("rename_project_entry", { rootPath, relativePath, newName });
+export async function renameProjectEntry(projectId: string, relativePath: string, newName: string): Promise<{ path: string }> {
+  return invoke("rename_project_entry", { projectId, relativePath, newName });
 }
 
-export async function countProjectEntryFiles(rootPath: string, relativePath: string): Promise<number> {
-  return invoke("count_project_entry_files", { rootPath, relativePath });
+export async function countProjectEntryFiles(projectId: string, relativePath: string): Promise<number> {
+  return invoke("count_project_entry_files", { projectId, relativePath });
 }
 
-export async function deleteProjectEntryToTrash(rootPath: string, relativePath: string): Promise<void> {
-  return invoke("delete_project_entry_to_trash", { rootPath, relativePath });
+export async function deleteProjectEntryToTrash(projectId: string, relativePath: string): Promise<void> {
+  return invoke("delete_project_entry_to_trash", { projectId, relativePath });
 }
 
 /** 查询某文件的本地历史快照列表（按保存时间倒序）。 */

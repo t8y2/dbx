@@ -2039,23 +2039,23 @@ export async function listSqlFileSnapshots(_projectId: string, _path: string, _l
   throw new Error("SQL projects are only available in the desktop app");
 }
 
-export async function createProjectFile(_rootPath: string, _relativePath: string, _content: string): Promise<{ path: string }> {
+export async function createProjectFile(_projectId: string, _relativePath: string, _content: string): Promise<{ path: string }> {
   throw new Error("SQL projects are only available in the desktop app");
 }
 
-export async function createProjectFolder(_rootPath: string, _relativePath: string): Promise<{ path: string }> {
+export async function createProjectFolder(_projectId: string, _relativePath: string): Promise<{ path: string }> {
   throw new Error("SQL projects are only available in the desktop app");
 }
 
-export async function renameProjectEntry(_rootPath: string, _relativePath: string, _newName: string): Promise<{ path: string }> {
+export async function renameProjectEntry(_projectId: string, _relativePath: string, _newName: string): Promise<{ path: string }> {
   throw new Error("SQL projects are only available in the desktop app");
 }
 
-export async function countProjectEntryFiles(_rootPath: string, _relativePath: string): Promise<number> {
+export async function countProjectEntryFiles(_projectId: string, _relativePath: string): Promise<number> {
   throw new Error("SQL projects are only available in the desktop app");
 }
 
-export async function deleteProjectEntryToTrash(_rootPath: string, _relativePath: string): Promise<void> {
+export async function deleteProjectEntryToTrash(_projectId: string, _relativePath: string): Promise<void> {
   throw new Error("SQL projects are only available in the desktop app");
 }
 

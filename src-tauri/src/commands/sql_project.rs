@@ -1,3 +1,4 @@
+use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Mutex;
 
@@ -141,6 +142,10 @@ pub async fn snapshot_sql_file_before_save(
     project_id: String,
     path: String,
 ) -> Result<(), String> {
+    let (root, _project) = resolve_trusted_root(&state, &project_id).await?;
+    let target = PathBuf::from(&path);
+    validate_within_root(&root, &target)?;
+
     let bytes = match tokio::fs::read(&path).await {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -259,17 +264,29 @@ fn canonical_root(root_path: &str) -> Result<PathBuf, String> {
     std::fs::canonicalize(&root).map_err(|e| format!("Failed to resolve project root: {e}"))
 }
 
-/// 对 resolve_within_root 的结果做真实路径校验：
-/// 1. canonicalize 目标路径（若目标不存在，canonicalize 最近存在的父目录）
-/// 2. 确认 canonicalize 后的路径仍在 canonicalize 后的 root 内
-/// 防止 symlink 越界：root/evil → /external，词法上 evil/x.sql 在 root 内但实际指向外部。
-fn canonicalize_within_root(root: &Path, target: &Path) -> Result<PathBuf, String> {
-    let canonical_root = std::fs::canonicalize(root)
-        .map_err(|e| format!("Failed to canonicalize project root: {e}"))?;
+/// 根据 project_id 查询已保存的项目记录，返回 (canonical_root, project)。
+/// 若项目不存在或未信任则返回 Err。
+async fn resolve_trusted_root(
+    state: &std::sync::Arc<AppState>,
+    project_id: &str,
+) -> Result<(PathBuf, SqlProject), String> {
+    let project =
+        state.storage.find_sql_project_by_id(project_id).await?.ok_or_else(|| "Project not found".to_string())?;
+    if !project.trusted {
+        return Err("Project is not trusted".to_string());
+    }
+    let root = canonical_root(&project.root_path)?;
+    Ok((root, project))
+}
+
+/// 校验 target 的真实路径位于 root 内（防 symlink 越界）。
+/// 仅用于边界验证，不返回 canonical path —— 文件操作应使用 lexical path。
+fn validate_within_root(root: &Path, target: &Path) -> Result<(), String> {
+    let canonical_root =
+        std::fs::canonicalize(root).map_err(|e| format!("Failed to canonicalize project root: {e}"))?;
 
     let canonical_target = if target.exists() {
-        std::fs::canonicalize(target)
-            .map_err(|e| format!("Failed to canonicalize target: {e}"))?
+        std::fs::canonicalize(target).map_err(|e| format!("Failed to canonicalize target: {e}"))?
     } else {
         // 目标可能尚不存在（create 场景），回溯到最近存在的父目录
         let mut existing = target.to_path_buf();
@@ -277,16 +294,13 @@ fn canonicalize_within_root(root: &Path, target: &Path) -> Result<PathBuf, Strin
         while !existing.exists() {
             if let Some(name) = existing.file_name() {
                 tail.push(name.to_os_string());
-                existing = existing
-                    .parent()
-                    .ok_or_else(|| "Invalid path".to_string())?
-                    .to_path_buf();
+                existing = existing.parent().ok_or_else(|| "Invalid path".to_string())?.to_path_buf();
             } else {
                 return Err("Cannot resolve target path".to_string());
             }
         }
-        let mut canonical = std::fs::canonicalize(&existing)
-            .map_err(|e| format!("Failed to canonicalize parent: {e}"))?;
+        let mut canonical =
+            std::fs::canonicalize(&existing).map_err(|e| format!("Failed to canonicalize parent: {e}"))?;
         for name in tail.into_iter().rev() {
             canonical.push(name);
         }
@@ -296,7 +310,7 @@ fn canonicalize_within_root(root: &Path, target: &Path) -> Result<PathBuf, Strin
     if !canonical_target.starts_with(&canonical_root) {
         return Err("Path escapes the project root (symlink traversal detected)".to_string());
     }
-    Ok(canonical_target)
+    Ok(())
 }
 
 #[derive(Serialize)]
@@ -307,26 +321,33 @@ pub struct ProjectEntryOpResult {
 
 #[tauri::command]
 pub async fn create_project_file(
-    root_path: String,
+    state: State<'_, std::sync::Arc<AppState>>,
+    project_id: String,
     relative_path: String,
     content: String,
 ) -> Result<ProjectEntryOpResult, String> {
+    let (root, _project) = resolve_trusted_root(&state, &project_id).await?;
     tokio::task::spawn_blocking(move || {
-        let root = canonical_root(&root_path)?;
         let target = resolve_within_root(&root, &relative_path)?;
-        let target = canonicalize_within_root(&root, &target)?;
+        validate_within_root(&root, &target)?;
         let name = target.file_name().and_then(|n| n.to_str()).unwrap_or_default().to_string();
         validate_entry_name(&name)?;
         if !is_sql_file_path(&target) {
             return Err("Only .sql files can be created here".to_string());
         }
-        if target.exists() {
-            return Err(format!("File already exists: {name}"));
-        }
         if let Some(parent) = target.parent() {
             std::fs::create_dir_all(parent).map_err(|e| format!("Failed to create parent directory: {e}"))?;
         }
-        std::fs::write(&target, content).map_err(|e| format!("Failed to create file: {e}"))?;
+        // create_new (O_CREAT|O_EXCL) 原子创建文件，不跟随最终路径组件的 symlink，
+        // 关闭 validate_within_root 与文件写入之间的 TOCTOU 窗口。
+        let mut file = std::fs::OpenOptions::new().create_new(true).write(true).open(&target).map_err(|e| {
+            if e.kind() == std::io::ErrorKind::AlreadyExists {
+                format!("File already exists: {name}")
+            } else {
+                format!("Failed to create file: {e}")
+            }
+        })?;
+        file.write_all(content.as_bytes()).map_err(|e| format!("Failed to write file: {e}"))?;
         Ok(ProjectEntryOpResult { path: target.to_string_lossy().to_string() })
     })
     .await
@@ -334,17 +355,29 @@ pub async fn create_project_file(
 }
 
 #[tauri::command]
-pub async fn create_project_folder(root_path: String, relative_path: String) -> Result<ProjectEntryOpResult, String> {
+pub async fn create_project_folder(
+    state: State<'_, std::sync::Arc<AppState>>,
+    project_id: String,
+    relative_path: String,
+) -> Result<ProjectEntryOpResult, String> {
+    let (root, _project) = resolve_trusted_root(&state, &project_id).await?;
     tokio::task::spawn_blocking(move || {
-        let root = canonical_root(&root_path)?;
         let target = resolve_within_root(&root, &relative_path)?;
-        let target = canonicalize_within_root(&root, &target)?;
+        validate_within_root(&root, &target)?;
         let name = target.file_name().and_then(|n| n.to_str()).unwrap_or_default().to_string();
         validate_entry_name(&name)?;
-        if target.exists() {
-            return Err(format!("Folder already exists: {name}"));
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| format!("Failed to create parent directory: {e}"))?;
         }
-        std::fs::create_dir_all(&target).map_err(|e| format!("Failed to create folder: {e}"))?;
+        // create_dir 只创建叶子目录，不跟随最终路径组件的 symlink（mkdir 若最终组件是
+        // symlink 会返回 EEXIST），关闭 exists() 检查与创建之间的 TOCTOU 窗口。
+        std::fs::create_dir(&target).map_err(|e| {
+            if e.kind() == std::io::ErrorKind::AlreadyExists {
+                format!("Folder already exists: {name}")
+            } else {
+                format!("Failed to create folder: {e}")
+            }
+        })?;
         Ok(ProjectEntryOpResult { path: target.to_string_lossy().to_string() })
     })
     .await
@@ -353,21 +386,22 @@ pub async fn create_project_folder(root_path: String, relative_path: String) -> 
 
 #[tauri::command]
 pub async fn rename_project_entry(
-    root_path: String,
+    state: State<'_, std::sync::Arc<AppState>>,
+    project_id: String,
     relative_path: String,
     new_name: String,
 ) -> Result<ProjectEntryOpResult, String> {
+    let (root, _project) = resolve_trusted_root(&state, &project_id).await?;
     tokio::task::spawn_blocking(move || {
-        let root = canonical_root(&root_path)?;
         let source = resolve_within_root(&root, &relative_path)?;
-        let source = canonicalize_within_root(&root, &source)?;
+        validate_within_root(&root, &source)?;
         validate_entry_name(&new_name)?;
         if !source.exists() {
             return Err("The file or folder no longer exists".to_string());
         }
         let parent = source.parent().ok_or_else(|| "Invalid path".to_string())?;
         let target = parent.join(&new_name);
-        let target = canonicalize_within_root(&root, &target)?;
+        validate_within_root(&root, &target)?;
         if source == target {
             return Ok(ProjectEntryOpResult { path: source.to_string_lossy().to_string() });
         }
@@ -403,11 +437,15 @@ fn count_files_recursive(path: &Path, depth: usize) -> u64 {
 
 /// 目录内文件数量（删除确认对话框展示影响范围用）。
 #[tauri::command]
-pub async fn count_project_entry_files(root_path: String, relative_path: String) -> Result<u64, String> {
+pub async fn count_project_entry_files(
+    state: State<'_, std::sync::Arc<AppState>>,
+    project_id: String,
+    relative_path: String,
+) -> Result<u64, String> {
+    let (root, _project) = resolve_trusted_root(&state, &project_id).await?;
     tokio::task::spawn_blocking(move || {
-        let root = canonical_root(&root_path)?;
         let target = resolve_within_root(&root, &relative_path)?;
-        let target = canonicalize_within_root(&root, &target)?;
+        validate_within_root(&root, &target)?;
         if target.is_file() {
             return Ok(1);
         }
@@ -419,11 +457,15 @@ pub async fn count_project_entry_files(root_path: String, relative_path: String)
 
 /// 删除文件/文件夹到回收站（可恢复）。
 #[tauri::command]
-pub async fn delete_project_entry_to_trash(root_path: String, relative_path: String) -> Result<(), String> {
+pub async fn delete_project_entry_to_trash(
+    state: State<'_, std::sync::Arc<AppState>>,
+    project_id: String,
+    relative_path: String,
+) -> Result<(), String> {
+    let (root, _project) = resolve_trusted_root(&state, &project_id).await?;
     tokio::task::spawn_blocking(move || {
-        let root = canonical_root(&root_path)?;
         let target = resolve_within_root(&root, &relative_path)?;
-        let target = canonicalize_within_root(&root, &target)?;
+        validate_within_root(&root, &target)?;
         if !target.exists() {
             return Err("The file or folder no longer exists".to_string());
         }
@@ -503,7 +545,7 @@ mod tests {
         }
     }
 
-    /// symlink 指向外部目录时，resolve_within_root 词法通过但 canonicalize_within_root 应拒绝。
+    /// symlink 指向外部目录时，resolve_within_root 词法通过但 validate_within_root 应拒绝。
     #[test]
     fn rejects_symlink_traversal_on_create() {
         let (root, outside) = setup_symlink_test_dirs();
@@ -525,7 +567,7 @@ mod tests {
         // 词法校验通过（evil/test.sql 在 root 内）
         let resolved = resolve_within_root(&root_canonical, "evil/test.sql").unwrap();
         // 真实路径校验应拒绝（evil 是指向外部的 symlink）
-        assert!(canonicalize_within_root(&root_canonical, &resolved).is_err());
+        assert!(validate_within_root(&root_canonical, &resolved).is_err());
 
         cleanup_dirs(&[&root, &outside]);
     }
@@ -553,7 +595,7 @@ mod tests {
 
         // evil/secret.sql 通过 symlink 实际指向 outside/secret.sql
         let resolved = resolve_within_root(&root_canonical, "evil/secret.sql").unwrap();
-        let result = canonicalize_within_root(&root_canonical, &resolved);
+        let result = validate_within_root(&root_canonical, &resolved);
         assert!(result.is_err(), "Should reject access to file via symlink outside root");
 
         cleanup_dirs(&[&root, &outside]);
@@ -579,8 +621,8 @@ mod tests {
         // 尝试 rename evil → evil_renamed
         // resolve_within_root 对 "evil" 词法通过
         let source = resolve_within_root(&root_canonical, "evil").unwrap();
-        // canonicalize_within_root 应检测到 evil 是指向外部的 symlink
-        assert!(canonicalize_within_root(&root_canonical, &source).is_err());
+        // validate_within_root 应检测到 evil 是指向外部的 symlink
+        assert!(validate_within_root(&root_canonical, &source).is_err());
 
         // 即使 source 通过了，rename 的目标 evil_renamed 的父目录是 root（安全），
         // 但 source 已被拒绝，rename 不应继续
@@ -609,7 +651,7 @@ mod tests {
 
         // evil/victim.sql 通过 symlink 指向 outside/victim.sql
         let resolved = resolve_within_root(&root_canonical, "evil/victim.sql").unwrap();
-        assert!(canonicalize_within_root(&root_canonical, &resolved).is_err());
+        assert!(validate_within_root(&root_canonical, &resolved).is_err());
 
         // 确认 outside/victim.sql 仍然存在（未被删除）
         assert!(outside.join("victim.sql").exists());
@@ -617,7 +659,7 @@ mod tests {
         cleanup_dirs(&[&root, &outside]);
     }
 
-    /// 正常路径（非 symlink）应通过 canonicalize_within_root。
+    /// 正常路径（非 symlink）应通过 validate_within_root。
     #[test]
     fn accepts_normal_path_within_root() {
         let (root, _outside) = setup_symlink_test_dirs();
@@ -628,7 +670,7 @@ mod tests {
         std::fs::write(root.join("subdir").join("normal.sql"), "SELECT 1;").unwrap();
 
         let resolved = resolve_within_root(&root_canonical, "subdir/normal.sql").unwrap();
-        assert!(canonicalize_within_root(&root_canonical, &resolved).is_ok());
+        assert!(validate_within_root(&root_canonical, &resolved).is_ok());
 
         cleanup_dirs(&[&root]);
     }
@@ -642,7 +684,7 @@ mod tests {
         // subdir 存在但 new_file.sql 不存在
         std::fs::create_dir_all(root.join("subdir")).unwrap();
         let resolved = resolve_within_root(&root_canonical, "subdir/new_file.sql").unwrap();
-        assert!(canonicalize_within_root(&root_canonical, &resolved).is_ok());
+        assert!(validate_within_root(&root_canonical, &resolved).is_ok());
 
         cleanup_dirs(&[&root]);
     }
@@ -668,8 +710,77 @@ mod tests {
 
         // a/b/deep.sql 词法上在 root 内，实际指向 outside/deep.sql
         let resolved = resolve_within_root(&root_canonical, "a/b/deep.sql").unwrap();
-        assert!(canonicalize_within_root(&root_canonical, &resolved).is_err());
+        assert!(validate_within_root(&root_canonical, &resolved).is_err());
 
         cleanup_dirs(&[&root, &outside]);
+    }
+
+    // ---- 内部 symlink 测试：项目内 symlink 指向项目内文件 ----
+
+    /// 项目内 symlink 指向项目内文件：validate_within_root 应通过（边界内），
+    /// 但文件操作使用 lexical path，不会跟随 symlink 影响 target。
+    #[test]
+    fn internal_symlink_passes_validation() {
+        let (root, _outside) = setup_symlink_test_dirs();
+        let root_canonical = std::fs::canonicalize(&root).unwrap();
+
+        // 创建真实文件
+        std::fs::write(root.join("real.sql"), "SELECT 1;").unwrap();
+
+        // root/link.sql → root/real.sql（项目内 symlink）
+        #[cfg(unix)]
+        std::os::unix::symlink(root.join("real.sql"), root.join("link.sql")).unwrap();
+        #[cfg(windows)]
+        {
+            if std::os::windows::fs::symlink_file(root.join("real.sql"), root.join("link.sql")).is_err() {
+                eprintln!("Skipping symlink test: cannot create symlink on Windows without privileges");
+                cleanup_dirs(&[&root]);
+                return;
+            }
+        }
+
+        // validate_within_root 对项目内 symlink 应通过
+        let resolved = resolve_within_root(&root_canonical, "link.sql").unwrap();
+        assert!(validate_within_root(&root_canonical, &resolved).is_ok());
+
+        // 文件操作使用 lexical path（root/link.sql），不是 canonical path（root/real.sql）
+        // 删除 link.sql 不应删除 real.sql
+        let _ = std::fs::remove_file(&resolved);
+        assert!(root.join("real.sql").exists(), "real.sql should still exist after removing link.sql");
+
+        cleanup_dirs(&[&root]);
+    }
+
+    /// 项目内 symlink 指向项目内文件：rename symlink 不应 rename target。
+    #[test]
+    fn internal_symlink_rename_uses_lexical_path() {
+        let (root, _outside) = setup_symlink_test_dirs();
+        let root_canonical = std::fs::canonicalize(&root).unwrap();
+
+        std::fs::write(root.join("real.sql"), "SELECT 1;").unwrap();
+
+        #[cfg(unix)]
+        std::os::unix::symlink(root.join("real.sql"), root.join("link.sql")).unwrap();
+        #[cfg(windows)]
+        {
+            if std::os::windows::fs::symlink_file(root.join("real.sql"), root.join("link.sql")).is_err() {
+                eprintln!("Skipping symlink test: cannot create symlink on Windows without privileges");
+                cleanup_dirs(&[&root]);
+                return;
+            }
+        }
+
+        // lexical path: root/link.sql
+        let source = resolve_within_root(&root_canonical, "link.sql").unwrap();
+        assert!(validate_within_root(&root_canonical, &source).is_ok());
+
+        // rename link.sql → link_renamed.sql（使用 lexical path）
+        let target = source.parent().unwrap().join("link_renamed.sql");
+        std::fs::rename(&source, &target).unwrap();
+
+        // real.sql 应仍然存在且未被重命名
+        assert!(root.join("real.sql").exists(), "real.sql should still exist after renaming link.sql");
+
+        cleanup_dirs(&[&root]);
     }
 }

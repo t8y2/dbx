@@ -3,6 +3,7 @@ import { computed, ref } from "vue";
 import * as api from "@/lib/backend/api";
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
+import { isWindows } from "@/lib/backend/platform";
 import { getSqlFileFolderPaths, saveSqlFileFolderPaths } from "@/lib/sqlFile/sqlFileFolders";
 import type { SqlProject } from "@/lib/backend/tauri";
 
@@ -20,7 +21,10 @@ function compareRecentFirst(a: SqlProject, b: SqlProject): number {
 }
 
 function normalizeRootForCompare(path: string): string {
-  let normalized = path.trim().toLowerCase().replace(/\//g, "\\");
+  let normalized = path.trim().replace(/\//g, "\\");
+  if (isWindows()) {
+    normalized = normalized.toLowerCase();
+  }
   while (normalized.endsWith("\\") && normalized.length > 3) {
     normalized = normalized.slice(0, -1);
   }
@@ -211,12 +215,14 @@ export const useProjectStore = defineStore("sqlProject", () => {
 
   /** 按文件绝对路径找所属项目（最长根前缀匹配）。 */
   function projectForFilePath(filePath: string): SqlProject | null {
-    const lower = filePath.toLowerCase().replace(/\//g, "\\");
+    const normalized = filePath.replace(/\//g, "\\");
+    const cmp = isWindows() ? normalized.toLowerCase() : normalized;
     let best: SqlProject | null = null;
     for (const project of projects.value) {
-      let root = project.rootPath.toLowerCase().replace(/\//g, "\\");
+      let root = project.rootPath.replace(/\//g, "\\");
+      if (isWindows()) root = root.toLowerCase();
       if (!root.endsWith("\\")) root += "\\";
-      if (lower.startsWith(root) && (!best || project.rootPath.length > best.rootPath.length)) {
+      if (cmp.startsWith(root) && (!best || project.rootPath.length > best.rootPath.length)) {
         best = project;
       }
     }

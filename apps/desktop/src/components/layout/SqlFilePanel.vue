@@ -269,10 +269,12 @@ function openFileHistory(folder: FolderState, entry: SqlFileEntry) {
 // 每个项目根目录一个 watcher；插件自带 delayMs 防抖。自身保存触发的重扫是
 // 只读操作，不会再次写盘，因此不会形成循环，无需额外抑制回显。
 const folderWatchers = new Map<string, () => void>();
+const pendingWatchers = new Set<string>();
 let watchModulePromise: Promise<typeof import("@tauri-apps/plugin-fs")> | null = null;
 
 async function ensureFolderWatcher(folderPath: string) {
-  if (!isTauriRuntime() || folderWatchers.has(folderPath)) return;
+  if (!isTauriRuntime() || folderWatchers.has(folderPath) || pendingWatchers.has(folderPath)) return;
+  pendingWatchers.add(folderPath);
   try {
     watchModulePromise = watchModulePromise ?? import("@tauri-apps/plugin-fs");
     const { watch } = await watchModulePromise;
@@ -283,13 +285,25 @@ async function ensureFolderWatcher(folderPath: string) {
       },
       { recursive: true, delayMs: 400 },
     );
+    // watch 完成后检查：如果在此期间已被 drop，立即拆除刚创建的 watcher
+    if (!pendingWatchers.has(folderPath)) {
+      try {
+        unwatch();
+      } catch {
+        /* ignore */
+      }
+      return;
+    }
     folderWatchers.set(folderPath, unwatch);
   } catch {
     // 监听不可用时退回"窗口聚焦刷新"，不影响面板基本使用
+  } finally {
+    pendingWatchers.delete(folderPath);
   }
 }
 
 function dropFolderWatcher(folderPath: string) {
+  pendingWatchers.delete(folderPath);
   const unwatch = folderWatchers.get(folderPath);
   if (!unwatch) return;
   try {
@@ -507,12 +521,12 @@ async function confirmCreate() {
     if (creating.kind === "file") {
       const name = /\.sql$/i.test(rawName) ? rawName : `${rawName}.sql`;
       const relativePath = parentRelative ? `${parentRelative}/${name}` : name;
-      const result = await api.createProjectFile(folder.project.rootPath, relativePath, "");
+      const result = await api.createProjectFile(folder.project.id, relativePath, "");
       await loadFolderEntries(folder.path);
       void openFile(folder, result.path);
     } else {
       const relativePath = parentRelative ? `${parentRelative}/${rawName}` : rawName;
-      await api.createProjectFolder(folder.project.rootPath, relativePath);
+      await api.createProjectFolder(folder.project.id, relativePath);
       await loadFolderEntries(folder.path);
     }
     notifySqlFileFoldersChanged();
@@ -556,7 +570,7 @@ async function confirmRename() {
   renameValue.value = "";
   if (!folder || !newName) return;
   try {
-    const result = await api.renameProjectEntry(folder.project.rootPath, relativeToRoot(folder.project.rootPath, renaming.entryPath), newName);
+    const result = await api.renameProjectEntry(folder.project.id, relativeToRoot(folder.project.rootPath, renaming.entryPath), newName);
     if (renaming.isDir) {
       queryStore.syncExternalSqlFolderPrefix(renaming.entryPath, result.path);
     } else {
@@ -578,7 +592,7 @@ async function requestDelete(folder: FolderState, entry: SqlFileEntry) {
   let fileCount = 0;
   if (entry.is_dir) {
     try {
-      fileCount = await api.countProjectEntryFiles(folder.project.rootPath, relativeToRoot(folder.project.rootPath, entry.path));
+      fileCount = await api.countProjectEntryFiles(folder.project.id, relativeToRoot(folder.project.rootPath, entry.path));
     } catch {
       fileCount = 0;
     }
@@ -592,7 +606,7 @@ async function executeDelete() {
   if (!target || deletingEntry.value) return;
   deletingEntry.value = true;
   try {
-    await api.deleteProjectEntryToTrash(target.folder.project.rootPath, relativeToRoot(target.folder.project.rootPath, target.entryPath));
+    await api.deleteProjectEntryToTrash(target.folder.project.id, relativeToRoot(target.folder.project.rootPath, target.entryPath));
     if (target.isDir) {
       queryStore.markExternalSqlFilesUnderDirMissing(target.entryPath);
     } else {

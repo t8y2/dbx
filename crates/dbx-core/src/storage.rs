@@ -3248,6 +3248,20 @@ impl Storage {
         .await
     }
 
+    pub async fn find_sql_project_by_id(&self, id: &str) -> Result<Option<SqlProject>, String> {
+        let id = id.to_string();
+        self.with_conn(move |conn| {
+            conn.query_row(
+                "SELECT id, name, root_path, connection_id, default_schema, trusted, created_at, last_opened_at FROM sql_projects WHERE id = ?1",
+                params![id],
+                Self::row_to_sql_project,
+            )
+            .optional()
+            .map_err(|e| e.to_string())
+        })
+        .await
+    }
+
     pub async fn touch_sql_project(&self, id: &str, last_opened_at: &str) -> Result<(), String> {
         let id = id.to_string();
         let last_opened_at = last_opened_at.to_string();

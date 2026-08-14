@@ -237,4 +237,42 @@ describe("useFolderWatcherLifecycle", () => {
     lifecycle.cleanup();
     expect(mocks.dropWatcher).toHaveBeenLastCalledWith("/projects/A");
   });
+
+  // ---- 竞态场景：切换发生在 ensureWatcher 完成前 ----
+
+  it("rapid A→B→A switch does not leak watchers", async () => {
+    const mocks = createMocks();
+    const activePath = ref<string | null>("/projects/A");
+    const lifecycle = createLifecycle(activePath, mocks);
+
+    lifecycle.init();
+    // 快速切换 A→B→A，不等 ensureWatcher 完成
+    activePath.value = "/projects/B";
+    activePath.value = "/projects/A";
+    await nextTick();
+
+    // 最终应只剩 A 的 watcher
+    lifecycle.cleanup();
+    // dropWatcher 应被调用（至少拆除最终 watcher）
+    expect(mocks.dropWatcher).toHaveBeenCalled();
+    // 最后一次 cleanup 拆除的应该是 A
+    expect(mocks.dropWatcher).toHaveBeenLastCalledWith("/projects/A");
+  });
+
+  it("switching to null then back to a project does not leak", async () => {
+    const mocks = createMocks();
+    const activePath = ref<string | null>("/projects/A");
+    const lifecycle = createLifecycle(activePath, mocks);
+
+    lifecycle.init();
+    activePath.value = null;
+    await nextTick();
+    activePath.value = "/projects/A";
+    await nextTick();
+
+    // 应重新创建 A 的 watcher
+    expect(mocks.ensureWatcher).toHaveBeenCalledWith("/projects/A");
+    lifecycle.cleanup();
+    expect(mocks.dropWatcher).toHaveBeenLastCalledWith("/projects/A");
+  });
 });

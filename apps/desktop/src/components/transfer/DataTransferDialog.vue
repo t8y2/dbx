@@ -5,6 +5,7 @@ import { useI18n } from "vue-i18n";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { buildTransferObjectSelections } from "./transferSelections";
+import { createTaskLoadTracker } from "./taskLoadTracker";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -161,6 +162,7 @@ const activeTaskId = ref<string | null>(null);
 const savedConfigSnapshot = ref("");
 const showUnsavedConfirm = ref(false);
 let pendingDiscardAction: (() => void) | null = null;
+const taskLoadTracker = createTaskLoadTracker();
 
 function connectionType(id: string): DatabaseType | undefined {
   return store.connections.find((c) => c.id === id)?.db_type;
@@ -195,7 +197,7 @@ const canStart = computed(() => {
   );
 });
 
-async function loadCatalogs(connectionId: string, side: "source" | "target") {
+async function loadCatalogs(connectionId: string, side: "source" | "target", isCancelled: () => boolean = () => false) {
   if (!connectionId || !isCatalogCapable(connectionId)) {
     if (side === "source") {
       sourceCatalogs.value = [];
@@ -208,7 +210,7 @@ async function loadCatalogs(connectionId: string, side: "source" | "target") {
   }
   // 竞态防护：请求发出后若用户切换了连接，旧连接的回调必须丢弃，
   // 不允许过期结果覆盖新选择（一切以最新选择的连接为准）。
-  const isStale = () => (side === "source" ? sourceConnectionId.value !== connectionId : targetConnectionId.value !== connectionId);
+  const isStale = () => isCancelled() || (side === "source" ? sourceConnectionId.value !== connectionId : targetConnectionId.value !== connectionId);
   try {
     const catalogs = await api.listDorisCatalogs(connectionId);
     if (isStale()) return;
@@ -231,10 +233,10 @@ async function loadCatalogs(connectionId: string, side: "source" | "target") {
   }
 }
 
-async function loadDatabases(connectionId: string, target: "source" | "target") {
+async function loadDatabases(connectionId: string, target: "source" | "target", isCancelled: () => boolean = () => false) {
   if (!connectionId) return;
   // 竞态防护：连接切换后，旧连接的数据库列表回调直接丢弃。
-  const isStale = () => (target === "source" ? sourceConnectionId.value !== connectionId : targetConnectionId.value !== connectionId);
+  const isStale = () => isCancelled() || (target === "source" ? sourceConnectionId.value !== connectionId : targetConnectionId.value !== connectionId);
   try {
     await store.ensureConnected(connectionId);
     const config = store.getConfig(connectionId);
@@ -255,13 +257,13 @@ async function loadDatabases(connectionId: string, target: "source" | "target") 
   }
 }
 
-async function loadDatabasesForCatalog(connectionId: string, catalog: string, target: "source" | "target") {
+async function loadDatabasesForCatalog(connectionId: string, catalog: string, target: "source" | "target", isCancelled: () => boolean = () => false) {
   if (!connectionId || !catalog) return;
   // 竞态防护：连接或 catalog 切换后，旧请求的数据库列表回调直接丢弃。
   const isStale = () => {
     const currentConnection = target === "source" ? sourceConnectionId.value : targetConnectionId.value;
     const currentCatalog = target === "source" ? sourceCatalog.value : targetCatalog.value;
-    return currentConnection !== connectionId || currentCatalog !== catalog;
+    return isCancelled() || currentConnection !== connectionId || currentCatalog !== catalog;
   };
   try {
     await store.ensureConnected(connectionId);
@@ -283,13 +285,13 @@ async function loadDatabasesForCatalog(connectionId: string, catalog: string, ta
   }
 }
 
-async function loadSchemas(connectionId: string, database: string, side: "source" | "target", preferredSchema = "") {
+async function loadSchemas(connectionId: string, database: string, side: "source" | "target", preferredSchema = "", isCancelled: () => boolean = () => false) {
   if (!connectionId || !database) return;
   // 竞态防护：连接或数据库切换后，旧请求的 schema 列表回调直接丢弃。
   const isStale = () => {
     const currentConnection = side === "source" ? sourceConnectionId.value : targetConnectionId.value;
     const currentDatabase = side === "source" ? sourceDatabase.value : targetDatabase.value;
-    return currentConnection !== connectionId || currentDatabase !== database;
+    return isCancelled() || currentConnection !== connectionId || currentDatabase !== database;
   };
   if (isMongoConnection(connectionId)) {
     if (isStale()) return;
@@ -351,7 +353,7 @@ function applyPendingObjectSelection() {
   pendingSelectedObjectsPrefill.value = null;
 }
 
-async function loadObjects() {
+async function loadObjects(isCancelled: () => boolean = () => false) {
   const connectionId = sourceConnectionId.value;
   const database = sourceDatabase.value;
   if (!connectionId || !database) {
@@ -362,7 +364,7 @@ async function loadObjects() {
   // 旧请求的对象列表回调直接丢弃，不覆盖新选择对应的状态。
   const catalog = sourceCatalog.value || undefined;
   const schemaValue = sourceSchema.value;
-  const isStale = () => sourceConnectionId.value !== connectionId || sourceDatabase.value !== database || (sourceCatalog.value || undefined) !== catalog || sourceSchema.value !== schemaValue;
+  const isStale = () => isCancelled() || sourceConnectionId.value !== connectionId || sourceDatabase.value !== database || (sourceCatalog.value || undefined) !== catalog || sourceSchema.value !== schemaValue;
   loadingObjects.value = true;
   try {
     if (isMongoConnection(connectionId)) {
@@ -398,7 +400,7 @@ async function loadObjects() {
   } catch {
     if (!isStale()) objectGroups.value = {};
   } finally {
-    loadingObjects.value = false;
+    if (!isStale()) loadingObjects.value = false;
   }
 }
 
@@ -579,7 +581,8 @@ watch(
   { immediate: true },
 );
 
-function resetState() {
+function resetState(cancelTaskLoad = true) {
+  if (cancelTaskLoad) taskLoadTracker.cancel();
   sourceConnectionId.value = "";
   sourceCatalog.value = "";
   sourceCatalogs.value = [];
@@ -589,6 +592,7 @@ function resetState() {
   sourceSchema.value = "";
   objectGroups.value = {};
   selectedObjects.value = {};
+  loadingObjects.value = false;
   pendingSourceSchemaPrefill.value = "";
   pendingSelectedTablesPrefill.value = null;
   objectSearch.value = "";
@@ -748,8 +752,10 @@ const canSaveConfig = computed(() => !!sourceConnectionId.value && !!sourceDatab
 
 /** Applies a saved task to the form, loading catalogs/databases/schemas/objects with explicit awaits. */
 async function loadTaskIntoForm(task: TransferTask) {
+  const taskLoadToken = taskLoadTracker.begin(task.id);
+  const isTaskLoadStale = () => !taskLoadTracker.isCurrent(taskLoadToken, activeTaskId.value);
   const config = task.config;
-  resetState();
+  resetState(false);
   activeTaskId.value = task.id;
   transferContent.value = config.content;
   transferMode.value = config.mode;
@@ -760,16 +766,19 @@ async function loadTaskIntoForm(task: TransferTask) {
   skipSourceWatch.value = true;
   sourceConnectionId.value = config.sourceConnectionId;
   if (isCatalogCapable(config.sourceConnectionId)) {
-    await loadCatalogs(config.sourceConnectionId, "source");
+    await loadCatalogs(config.sourceConnectionId, "source", isTaskLoadStale);
+    if (isTaskLoadStale()) return;
     if (config.sourceCatalog && sourceCatalog.value !== config.sourceCatalog) {
       skipSourceCatalogWatch.value = true;
       sourceCatalog.value = config.sourceCatalog;
     }
     if (sourceCatalog.value) {
-      await loadDatabasesForCatalog(config.sourceConnectionId, sourceCatalog.value, "source");
+      await loadDatabasesForCatalog(config.sourceConnectionId, sourceCatalog.value, "source", isTaskLoadStale);
+      if (isTaskLoadStale()) return;
     }
   } else {
-    await loadDatabases(config.sourceConnectionId, "source");
+    await loadDatabases(config.sourceConnectionId, "source", isTaskLoadStale);
+    if (isTaskLoadStale()) return;
   }
   if (sourceDatabase.value !== config.sourceDatabase) {
     skipSourceDatabaseWatch.value = true;
@@ -780,27 +789,32 @@ async function loadTaskIntoForm(task: TransferTask) {
     sourceSchemas.value = [];
     sourceSchema.value = config.sourceDatabase;
   } else if (isSchemaAware(sourceConfig?.db_type)) {
-    await loadSchemas(config.sourceConnectionId, config.sourceDatabase, "source", config.sourceSchema ?? "");
+    await loadSchemas(config.sourceConnectionId, config.sourceDatabase, "source", config.sourceSchema ?? "", isTaskLoadStale);
+    if (isTaskLoadStale()) return;
   } else {
     sourceSchema.value = config.sourceDatabase;
   }
   // The schema watcher may trigger a concurrent loadObjects; both converge on
   // the same groups and the pending selection is consumed by the first one.
-  await loadObjects();
+  await loadObjects(isTaskLoadStale);
+  if (isTaskLoadStale()) return;
 
   skipTargetWatch.value = true;
   targetConnectionId.value = config.targetConnectionId;
   if (isCatalogCapable(config.targetConnectionId)) {
-    await loadCatalogs(config.targetConnectionId, "target");
+    await loadCatalogs(config.targetConnectionId, "target", isTaskLoadStale);
+    if (isTaskLoadStale()) return;
     if (config.targetCatalog && targetCatalog.value !== config.targetCatalog) {
       skipTargetCatalogWatch.value = true;
       targetCatalog.value = config.targetCatalog;
     }
     if (targetCatalog.value) {
-      await loadDatabasesForCatalog(config.targetConnectionId, targetCatalog.value, "target");
+      await loadDatabasesForCatalog(config.targetConnectionId, targetCatalog.value, "target", isTaskLoadStale);
+      if (isTaskLoadStale()) return;
     }
   } else {
-    await loadDatabases(config.targetConnectionId, "target");
+    await loadDatabases(config.targetConnectionId, "target", isTaskLoadStale);
+    if (isTaskLoadStale()) return;
   }
   if (targetDatabase.value !== config.targetDatabase) {
     skipTargetDatabaseWatch.value = true;
@@ -811,11 +825,13 @@ async function loadTaskIntoForm(task: TransferTask) {
     targetSchemas.value = [];
     targetSchema.value = config.targetDatabase;
   } else if (isSchemaAware(targetConfig?.db_type)) {
-    await loadSchemas(config.targetConnectionId, config.targetDatabase, "target", config.targetSchema ?? "");
+    await loadSchemas(config.targetConnectionId, config.targetDatabase, "target", config.targetSchema ?? "", isTaskLoadStale);
+    if (isTaskLoadStale()) return;
   } else {
     targetSchema.value = config.targetDatabase;
   }
 
+  if (isTaskLoadStale()) return;
   savedConfigSnapshot.value = configSnapshot(currentConfig());
 }
 

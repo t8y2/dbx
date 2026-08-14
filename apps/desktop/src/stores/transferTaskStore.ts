@@ -96,6 +96,31 @@ function normalizeTask(raw: unknown): TransferTask | null {
   };
 }
 
+function normalizeLibrary(raw: unknown): TransferTaskLibrary {
+  if (raw === null || raw === undefined) return { version: 1, folders: [], tasks: [] };
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("Invalid transfer task library");
+
+  const candidate = raw as { version?: unknown; folders?: unknown; tasks?: unknown };
+  if (candidate.version !== undefined && candidate.version !== 1) {
+    throw new Error(`Unsupported transfer task library version: ${String(candidate.version)}`);
+  }
+  if (!Array.isArray(candidate.folders) || !Array.isArray(candidate.tasks)) {
+    throw new Error("Invalid transfer task library");
+  }
+
+  const normalizedFolders = candidate.folders.map(normalizeFolder);
+  const normalizedTasks = candidate.tasks.map(normalizeTask);
+  if (normalizedFolders.some((folder) => !folder) || normalizedTasks.some((task) => !task)) {
+    throw new Error("Invalid transfer task library entry");
+  }
+
+  return {
+    version: 1,
+    folders: normalizedFolders as TransferTaskFolder[],
+    tasks: normalizedTasks as TransferTask[],
+  };
+}
+
 /** Copy name for duplicated tasks: "name_copy1", "name_copy2", ... */
 export function nextTransferTaskCopyName(sourceName: string, takenNames: ReadonlySet<string>): string {
   const copyBase = sourceName.replace(/_copy\d+$/i, "") || sourceName;
@@ -110,19 +135,22 @@ export const useTransferTaskStore = defineStore("transferTasks", () => {
   const tasks = ref<TransferTask[]>([]);
   const isLoaded = ref(false);
   let initPromise: Promise<void> | null = null;
+  let initError: unknown = null;
+  let mutationQueue: Promise<void> = Promise.resolve();
 
   async function initFromStorage() {
     if (isLoaded.value) return;
     if (!initPromise) {
       initPromise = (async () => {
         try {
-          const raw = await api.loadTransferTaskLibrary();
-          const library = (raw ?? null) as Partial<TransferTaskLibrary> | null;
-          folders.value = Array.isArray(library?.folders) ? library.folders.map(normalizeFolder).filter((f): f is TransferTaskFolder => !!f) : [];
-          tasks.value = Array.isArray(library?.tasks) ? library.tasks.map(normalizeTask).filter((t): t is TransferTask => !!t) : [];
+          const library = normalizeLibrary(await api.loadTransferTaskLibrary());
+          folders.value = library.folders;
+          tasks.value = library.tasks;
+          initError = null;
           isLoaded.value = true;
-        } catch {
-          // Backend unavailable: keep empty state and retry on next init.
+        } catch (error) {
+          initError = error;
+          // Backend unavailable or persisted data is invalid: keep empty state and retry on next init.
         }
       })().finally(() => {
         initPromise = null;
@@ -131,14 +159,35 @@ export const useTransferTaskStore = defineStore("transferTasks", () => {
     await initPromise;
   }
 
-  /** Optimistic whole-library persistence with rollback on failure. */
+  async function ensureInitialized() {
+    await initFromStorage();
+    if (!isLoaded.value) {
+      throw initError instanceof Error ? initError : new Error("Failed to load transfer task library");
+    }
+  }
+
+  function queueMutation<Args extends unknown[], Result>(mutation: (...args: Args) => Promise<Result>) {
+    return (...args: Args): Promise<Result> => {
+      const result = mutationQueue.then(async () => {
+        await ensureInitialized();
+        return mutation(...args);
+      });
+      mutationQueue = result.then(
+        () => undefined,
+        () => undefined,
+      );
+      return result;
+    };
+  }
+
+  /** Whole-library persistence with rollback; public mutations run serially. */
   async function persist(nextFolders: TransferTaskFolder[], nextTasks: TransferTask[]) {
     const previousFolders = folders.value;
     const previousTasks = tasks.value;
     folders.value = nextFolders;
     tasks.value = nextTasks;
     try {
-      const library: TransferTaskLibrary = { folders: nextFolders, tasks: nextTasks };
+      const library: TransferTaskLibrary = { version: 1, folders: nextFolders, tasks: nextTasks };
       await api.saveTransferTaskLibrary(JSON.parse(JSON.stringify(library)));
     } catch (error) {
       folders.value = previousFolders;
@@ -381,17 +430,17 @@ export const useTransferTaskStore = defineStore("transferTasks", () => {
     listChildFolders,
     listTasks,
     getTask,
-    createFolder,
-    renameFolder,
-    deleteFolder,
-    saveTask,
-    renameTask,
-    duplicateTask,
-    deleteTask,
-    moveTaskToFolder,
-    moveFolderToFolder,
-    reorderFolders,
-    reorderTasks,
+    createFolder: queueMutation(createFolder),
+    renameFolder: queueMutation(renameFolder),
+    deleteFolder: queueMutation(deleteFolder),
+    saveTask: queueMutation(saveTask),
+    renameTask: queueMutation(renameTask),
+    duplicateTask: queueMutation(duplicateTask),
+    deleteTask: queueMutation(deleteTask),
+    moveTaskToFolder: queueMutation(moveTaskToFolder),
+    moveFolderToFolder: queueMutation(moveFolderToFolder),
+    reorderFolders: queueMutation(reorderFolders),
+    reorderTasks: queueMutation(reorderTasks),
     allFolders,
     allTasks,
   };

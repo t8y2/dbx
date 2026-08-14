@@ -1362,6 +1362,7 @@ export interface TransferTaskFolder {
 }
 
 export interface TransferTaskLibrary {
+  version: 1;
   folders: TransferTaskFolder[];
   tasks: TransferTask[];
 }

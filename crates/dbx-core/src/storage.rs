@@ -5424,6 +5424,8 @@ mod tests {
             .save_saved_sql_editor_positions(&serde_json::json!([{ "savedSqlId": "file-1", "updatedAt": 1 }]))
             .await
             .unwrap();
+        let transfer_task_library = serde_json::json!({ "version": 1, "folders": [], "tasks": [] });
+        storage.save_transfer_task_library(&transfer_task_library).await.unwrap();
 
         assert_eq!(
             storage.load_editor_settings().await.unwrap(),
@@ -5461,6 +5463,7 @@ mod tests {
             storage.load_saved_sql_editor_positions().await.unwrap(),
             Some(serde_json::json!([{ "savedSqlId": "file-1", "updatedAt": 1 }]))
         );
+        assert_eq!(storage.load_transfer_task_library().await.unwrap(), Some(transfer_task_library));
         assert_eq!(storage.load_password_hash().await.unwrap(), Some("hash-4".to_string()));
         assert_eq!(
             storage.load_desktop_settings().await.unwrap(),

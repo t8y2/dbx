@@ -9,6 +9,16 @@ vi.mock("@/lib/backend/api", () => ({
   saveTransferTaskLibrary: vi.fn(),
 }));
 
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
 function makeConfig(overrides: Partial<TransferTaskConfig> = {}): TransferTaskConfig {
   return {
     sourceConnectionId: "conn-a",
@@ -42,6 +52,7 @@ describe("transferTaskStore", () => {
 
   it("loads and normalizes the persisted library", async () => {
     const library: TransferTaskLibrary = {
+      version: 1,
       folders: [{ id: "folder-1", name: "ETL", orderIndex: 0, createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z" }],
       tasks: [{ id: "task-1", folderId: "folder-1", name: "daily sync", orderIndex: 0, config: makeConfig(), createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z" }],
     };
@@ -55,20 +66,100 @@ describe("transferTaskStore", () => {
     expect(store.listTasks("folder-1").map((task) => task.id)).toEqual(["task-1"]);
   });
 
-  it("drops invalid entries when normalizing the persisted library", async () => {
+  it("refuses to overwrite a persisted library with invalid entries", async () => {
     vi.mocked(api.loadTransferTaskLibrary).mockResolvedValue({
+      version: 1,
       folders: [{ id: "folder-1", name: "ETL" }, { name: "missing id" }],
-      tasks: [
-        { id: "task-1", name: "ok", config: makeConfig() },
-        { id: "task-2", name: "no config" },
-        { id: "task-3", name: "no target", config: makeConfig({ targetDatabase: "" }) },
-      ],
+      tasks: [{ id: "task-1", name: "ok", config: makeConfig() }],
     });
     const store = useTransferTaskStore();
     await store.initFromStorage();
 
-    expect(store.folders.map((folder) => folder.id)).toEqual(["folder-1"]);
-    expect(store.tasks.map((task) => task.id)).toEqual(["task-1"]);
+    expect(store.isLoaded).toBe(false);
+    await expect(store.createFolder("new folder")).rejects.toThrow("Invalid transfer task library entry");
+    expect(api.saveTransferTaskLibrary).not.toHaveBeenCalled();
+  });
+
+  it("refuses unknown persisted versions without replacing them", async () => {
+    vi.mocked(api.loadTransferTaskLibrary).mockResolvedValue({ version: 2, folders: [], tasks: [] });
+    const store = useTransferTaskStore();
+
+    await expect(store.createFolder("new folder")).rejects.toThrow("Unsupported transfer task library version: 2");
+    expect(store.isLoaded).toBe(false);
+    expect(api.saveTransferTaskLibrary).not.toHaveBeenCalled();
+  });
+
+  it("loads the legacy unversioned shape and migrates it on the next save", async () => {
+    vi.mocked(api.loadTransferTaskLibrary).mockResolvedValue({
+      folders: [{ id: "folder-1", name: "ETL", createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z" }],
+      tasks: [],
+    });
+    const store = useTransferTaskStore();
+
+    await store.createFolder("reporting");
+
+    expect(api.saveTransferTaskLibrary).toHaveBeenCalledWith(
+      expect.objectContaining({
+        version: 1,
+        folders: expect.arrayContaining([expect.objectContaining({ name: "ETL" }), expect.objectContaining({ name: "reporting" })]),
+      }),
+    );
+  });
+
+  it("waits for delayed initialization before applying an immediate mutation", async () => {
+    const loadGate = deferred<TransferTaskLibrary>();
+    vi.mocked(api.loadTransferTaskLibrary).mockReturnValue(loadGate.promise);
+    const store = useTransferTaskStore();
+    const initialization = store.initFromStorage();
+    const creation = store.createFolder("reporting");
+
+    await Promise.resolve();
+    expect(api.saveTransferTaskLibrary).not.toHaveBeenCalled();
+
+    loadGate.resolve({
+      version: 1,
+      folders: [{ id: "folder-1", name: "ETL", createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z" }],
+      tasks: [],
+    });
+    await initialization;
+    await creation;
+
+    expect(store.folders.map((folder) => folder.name)).toEqual(["ETL", "reporting"]);
+    expect(api.saveTransferTaskLibrary).toHaveBeenCalledWith(expect.objectContaining({ version: 1 }));
+  });
+
+  it("serializes whole-library saves so later mutations cannot finish first", async () => {
+    const firstSave = deferred<void>();
+    vi.mocked(api.saveTransferTaskLibrary)
+      .mockImplementationOnce(() => firstSave.promise)
+      .mockResolvedValueOnce(undefined);
+    const store = useTransferTaskStore();
+    const first = store.createFolder("first");
+
+    await vi.waitFor(() => expect(api.saveTransferTaskLibrary).toHaveBeenCalledTimes(1));
+    const second = store.createFolder("second");
+    await Promise.resolve();
+    expect(api.saveTransferTaskLibrary).toHaveBeenCalledTimes(1);
+
+    firstSave.resolve();
+    await Promise.all([first, second]);
+
+    const secondPayload = vi.mocked(api.saveTransferTaskLibrary).mock.calls[1]?.[0] as TransferTaskLibrary;
+    expect(secondPayload.folders.map((folder) => folder.name)).toEqual(["first", "second"]);
+  });
+
+  it("keeps a later successful mutation when the first queued save fails", async () => {
+    vi.mocked(api.saveTransferTaskLibrary).mockRejectedValueOnce(new Error("disk full")).mockResolvedValueOnce(undefined);
+    const store = useTransferTaskStore();
+    const first = store.createFolder("first");
+    const second = store.createFolder("second");
+
+    await expect(first).rejects.toThrow("disk full");
+    await expect(second).resolves.toEqual(expect.objectContaining({ name: "second" }));
+
+    expect(store.folders.map((folder) => folder.name)).toEqual(["second"]);
+    const secondPayload = vi.mocked(api.saveTransferTaskLibrary).mock.calls[1]?.[0] as TransferTaskLibrary;
+    expect(secondPayload.folders.map((folder) => folder.name)).toEqual(["second"]);
   });
 
   it("creates folders and rejects duplicate names within the same parent", async () => {

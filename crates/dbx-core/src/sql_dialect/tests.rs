@@ -705,12 +705,47 @@ fn builds_mysql_table_data_large_value_previews_without_truncating_keys() {
     });
 
     assert!(sql.starts_with("SELECT `id`, LEFT(`payload`, 4097) AS `payload`"));
-    assert!(sql.contains("'T:4096' AS `__DBX_LARGE_VALUE_BYTES_T_1`"));
+    assert!(sql.contains("CONCAT('T:4096:', OCTET_LENGTH(`payload`)) AS `__DBX_LARGE_VALUE_BYTES_T_1`"));
     assert!(sql.contains("LEFT(`raw_value`, 4097) AS `raw_value`"));
-    assert!(sql.contains("'B:4096' AS `__DBX_LARGE_VALUE_BYTES_B_2`"));
+    assert!(sql.contains("CONCAT('B:4096:', OCTET_LENGTH(`raw_value`)) AS `__DBX_LARGE_VALUE_BYTES_B_2`"));
     assert!(sql.contains("LEFT(`metadata`, 4097) AS `metadata`"));
-    assert!(sql.contains("'T:4096' AS `__DBX_LARGE_VALUE_BYTES_J_3`"));
+    assert!(sql.contains("CONCAT('T:4096:', OCTET_LENGTH(`metadata`)) AS `__DBX_LARGE_VALUE_BYTES_J_3`"));
     assert!(!sql.contains("__DBX_LARGE_VALUE_BYTES_0"));
+}
+
+#[test]
+fn leaves_bounded_mysql_string_columns_out_of_large_value_previews() {
+    let sql = build_table_data_select_sql(TableDataSelectSqlOptions {
+        database_type: Some(DatabaseType::Mysql),
+        table_name: "t_0001".to_string(),
+        primary_keys: vec!["id".to_string()],
+        columns: vec![
+            "id".to_string(),
+            "image_mime".to_string(),
+            "image_data".to_string(),
+            "image_url".to_string(),
+            "large_note".to_string(),
+            "large_binary".to_string(),
+        ],
+        column_types: vec![
+            "int".to_string(),
+            "varchar(64)".to_string(),
+            "longblob".to_string(),
+            "varchar(512)".to_string(),
+            "varchar(10000)".to_string(),
+            "varbinary(10000)".to_string(),
+        ],
+        large_value_preview_size: Some(419),
+        limit: Some(10_000),
+        ..Default::default()
+    });
+
+    assert!(sql.starts_with("SELECT `id`, `image_mime`, LEFT(`image_data`, 420) AS `image_data`"));
+    assert!(sql.contains("CONCAT('B:419:', OCTET_LENGTH(`image_data`)) AS `__DBX_LARGE_VALUE_BYTES_B_2`, `image_url`, LEFT(`large_note`, 420)"));
+    assert!(sql.contains("CONCAT('T:419:', OCTET_LENGTH(`large_note`)) AS `__DBX_LARGE_VALUE_BYTES_T_4`"));
+    assert!(sql.contains("LEFT(`large_binary`, 420) AS `large_binary`"));
+    assert!(!sql.contains("LEFT(`image_mime`"));
+    assert!(!sql.contains("LEFT(`image_url`"));
 }
 
 #[test]

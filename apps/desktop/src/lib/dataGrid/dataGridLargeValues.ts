@@ -7,6 +7,28 @@ export const TABLE_DATA_PREVIEW_CONTENT_MAX_BYTES = 24 * 1024 * 1024;
 export const TABLE_DATA_TEXT_SERIALIZED_BYTES_PER_CHARACTER = 6;
 const TABLE_DATA_LARGE_VALUE_MARKER_PREFIX = "__DBX_LARGE_VALUE_BYTES_";
 
+function normalizedDataTypeBase(dataType: string): string {
+  return dataType.trim().split(/[([]/, 1)[0]?.trim().toLocaleLowerCase() ?? "";
+}
+
+function declaredDataTypeLength(dataType: string): number | undefined {
+  const match = dataType.match(/\(\s*(\d+)/);
+  if (!match?.[1]) return undefined;
+  const length = Number.parseInt(match[1], 10);
+  return Number.isSafeInteger(length) ? length : undefined;
+}
+
+function mysqlColumnNeedsLargeValuePreview(column: ColumnInfo): boolean {
+  const base = normalizedDataTypeBase(column.data_type);
+  if (matchesMysqlUnboundedLargeValueType(base)) return true;
+  if (base !== "varchar" && base !== "varbinary") return false;
+  return (declaredDataTypeLength(column.data_type) ?? 0) > TABLE_DATA_CELL_PREVIEW_SIZE;
+}
+
+function matchesMysqlUnboundedLargeValueType(base: string): boolean {
+  return base === "blob" || base === "mediumblob" || base === "longblob" || base === "text" || base === "mediumtext" || base === "longtext" || base === "json";
+}
+
 export function canUseTableDataLargeValuePreview(databaseType: DatabaseType | undefined, columns: readonly ColumnInfo[], primaryKeys: readonly string[]): boolean {
   return (databaseType === "mysql" || databaseType === "postgres") && columns.length > 0 && primaryKeys.length > 0 && !columns.some((column) => column.name.toLocaleUpperCase().startsWith(TABLE_DATA_LARGE_VALUE_MARKER_PREFIX));
 }
@@ -14,7 +36,7 @@ export function canUseTableDataLargeValuePreview(databaseType: DatabaseType | un
 export function tableDataLargeValuePreviewOptions(databaseType: DatabaseType | undefined, columns: readonly ColumnInfo[], primaryKeys: readonly string[], pageSize?: number): { columnTypes: string[]; largeValuePreviewSize: number } | Record<string, never> {
   if (!canUseTableDataLargeValuePreview(databaseType, columns, primaryKeys)) return {};
   const keyColumns = new Set(primaryKeys.map((column) => column.toLocaleLowerCase()));
-  const previewColumnCount = columns.filter((column) => !keyColumns.has(column.name.toLocaleLowerCase())).length;
+  const previewColumnCount = columns.filter((column) => !keyColumns.has(column.name.toLocaleLowerCase()) && (databaseType !== "mysql" || mysqlColumnNeedsLargeValuePreview(column))).length;
   if (previewColumnCount === 0) return {};
   const budgetedSize = Math.floor(TABLE_DATA_PREVIEW_CONTENT_MAX_BYTES / Math.max(1, pageSize ?? 1) / previewColumnCount / TABLE_DATA_TEXT_SERIALIZED_BYTES_PER_CHARACTER);
   return {

@@ -605,17 +605,17 @@ fn mysql_result_cell_preview_bytes(
 }
 
 fn mysql_column_can_use_bounded_preview(column: &mysql_async::Column) -> bool {
-    matches!(
-        column.column_type(),
+    match column.column_type() {
         ColumnType::MYSQL_TYPE_JSON
-            | ColumnType::MYSQL_TYPE_BLOB
-            | ColumnType::MYSQL_TYPE_LONG_BLOB
-            | ColumnType::MYSQL_TYPE_MEDIUM_BLOB
-            | ColumnType::MYSQL_TYPE_TINY_BLOB
-            | ColumnType::MYSQL_TYPE_STRING
-            | ColumnType::MYSQL_TYPE_VAR_STRING
-            | ColumnType::MYSQL_TYPE_VARCHAR
-    )
+        | ColumnType::MYSQL_TYPE_BLOB
+        | ColumnType::MYSQL_TYPE_LONG_BLOB
+        | ColumnType::MYSQL_TYPE_MEDIUM_BLOB => true,
+        ColumnType::MYSQL_TYPE_TINY_BLOB => false,
+        ColumnType::MYSQL_TYPE_STRING | ColumnType::MYSQL_TYPE_VAR_STRING | ColumnType::MYSQL_TYPE_VARCHAR => {
+            column.column_length() > 8 * 1024
+        }
+        _ => false,
+    }
 }
 
 fn mysql_bounded_value_preview(
@@ -664,7 +664,7 @@ fn mysql_result_protected_column_indexes(
     protected_columns: &[String],
 ) -> HashSet<usize> {
     let protected: HashSet<String> = protected_columns.iter().map(|column| column.to_ascii_lowercase()).collect();
-    columns
+    let mut indexes = columns
         .iter()
         .enumerate()
         .filter_map(|(index, column)| {
@@ -672,7 +672,16 @@ fn mysql_result_protected_column_indexes(
                 || protected.contains(&column.name_str().to_ascii_lowercase()))
             .then_some(index)
         })
-        .collect()
+        .collect::<HashSet<_>>();
+    for (index, column) in columns.iter().enumerate() {
+        if column.name_str().to_ascii_uppercase().starts_with(crate::sql_dialect::DBX_LARGE_VALUE_BYTES_COLUMN_PREFIX) {
+            indexes.insert(index);
+            if index > 0 {
+                indexes.insert(index - 1);
+            }
+        }
+    }
+    indexes
 }
 
 fn mysql_row_to_json_with_srids(
@@ -6363,6 +6372,46 @@ mod tests {
 
         assert_eq!(values[0], serde_json::json!("k".repeat(2048)));
         assert_eq!(cells, vec![LargeValueCell { row_index: 0, column_index: 1, original_bytes: 4096 }]);
+    }
+
+    #[test]
+    fn mysql_large_value_preview_skips_bounded_strings_and_server_preview_columns() {
+        let ordinary_column = Column::new(ColumnType::MYSQL_TYPE_VAR_STRING)
+            .with_name(b"image_url")
+            .with_character_set(45)
+            .with_column_length(2048);
+        let large_column = Column::new(ColumnType::MYSQL_TYPE_VAR_STRING)
+            .with_name(b"large_note")
+            .with_character_set(45)
+            .with_column_length(40_000);
+        let server_preview_column = Column::new(ColumnType::MYSQL_TYPE_VAR_STRING)
+            .with_name(b"image_data")
+            .with_character_set(63)
+            .with_column_length(1680);
+        let marker_column = Column::new(ColumnType::MYSQL_TYPE_VAR_STRING)
+            .with_name(format!("{}B_2", crate::sql_dialect::DBX_LARGE_VALUE_BYTES_COLUMN_PREFIX).as_bytes())
+            .with_character_set(45)
+            .with_column_length(64);
+        let row = mysql_test_row_with_columns(
+            vec![
+                Value::Bytes(vec![b'u'; 500]),
+                Value::Bytes(vec![b'n'; 10_000]),
+                Value::Bytes(vec![0xab; 420]),
+                Value::Bytes(b"B:419:25143".to_vec()),
+            ],
+            vec![ordinary_column, large_column, server_preview_column, marker_column],
+        );
+        let protected = mysql_result_protected_column_indexes(row.columns_ref(), &[]);
+        let mut spatial_columns = mysql_spatial_column_builder(row.columns_ref());
+
+        let (values, _srids, cells) =
+            mysql_row_to_json_with_srids_and_previews(&row, &mut spatial_columns, 0, Some(256), &protected);
+
+        assert_eq!(values[0].as_str().map(str::len), Some(500));
+        assert!(values[1].as_str().is_some_and(|value| value.ends_with("...")));
+        assert_eq!(values[2].as_str().map(str::len), Some(2 + 420 * 2));
+        assert_eq!(values[3], serde_json::json!("B:419:25143"));
+        assert_eq!(cells, vec![LargeValueCell { row_index: 0, column_index: 1, original_bytes: 10_000 }]);
     }
 
     #[test]

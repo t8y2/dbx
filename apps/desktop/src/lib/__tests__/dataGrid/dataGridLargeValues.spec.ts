@@ -66,6 +66,23 @@ describe("data grid large-value metadata", () => {
     }
   });
 
+  it("does not spend the MySQL preview budget on ordinary bounded columns", () => {
+    const columns = [column("id", "int", true), column("image_mime", "varchar(64)"), column("image_data", "longblob"), column("image_url", "varchar(512)"), column("image_note", "varchar(255)")];
+
+    expect(tableDataLargeValuePreviewOptions("mysql", columns, ["id"], 10_000)).toEqual({
+      columnTypes: columns.map((item) => item.data_type),
+      largeValuePreviewSize: 419,
+    });
+    expect(
+      tableDataLargeValuePreviewOptions(
+        "mysql",
+        columns.filter((item) => item.name !== "image_data"),
+        ["id"],
+        10_000,
+      ),
+    ).toEqual({});
+  });
+
   it("offsets appended segment rows and discards metadata beyond the append cap", () => {
     expect(
       appendLargeValueCells(

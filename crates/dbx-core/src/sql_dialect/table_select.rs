@@ -13,6 +13,7 @@ use super::types::{
 };
 
 pub const DBX_LARGE_VALUE_BYTES_COLUMN_PREFIX: &str = "__DBX_LARGE_VALUE_BYTES_";
+const MYSQL_LARGE_VALUE_PREVIEW_THRESHOLD: usize = 8 * 1024;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum LargeValuePreviewKind {
@@ -40,16 +41,30 @@ fn normalized_data_type_base(data_type: &str) -> String {
     data_type.trim().split(['(', '[']).next().unwrap_or_default().trim().to_ascii_lowercase()
 }
 
+fn declared_data_type_length(data_type: &str) -> Option<usize> {
+    let parameters = data_type.split_once('(')?.1;
+    let digits = parameters.trim_start().chars().take_while(char::is_ascii_digit).collect::<String>();
+    (!digits.is_empty()).then(|| digits.parse::<usize>().ok()).flatten()
+}
+
 fn large_value_preview_kind(database_type: Option<DatabaseType>, data_type: &str) -> Option<LargeValuePreviewKind> {
     let normalized = data_type.trim().to_ascii_lowercase();
     let base = normalized_data_type_base(data_type);
     match database_type {
         Some(DatabaseType::Mysql) => {
-            if matches!(base.as_str(), "binary" | "varbinary" | "tinyblob" | "blob" | "mediumblob" | "longblob") {
+            if matches!(base.as_str(), "blob" | "mediumblob" | "longblob")
+                || (base == "varbinary"
+                    && declared_data_type_length(data_type)
+                        .is_some_and(|length| length > MYSQL_LARGE_VALUE_PREVIEW_THRESHOLD))
+            {
                 Some(LargeValuePreviewKind::Binary)
             } else if base == "json" {
                 Some(LargeValuePreviewKind::TextCast)
-            } else if matches!(base.as_str(), "char" | "varchar" | "tinytext" | "text" | "mediumtext" | "longtext") {
+            } else if matches!(base.as_str(), "text" | "mediumtext" | "longtext")
+                || (base == "varchar"
+                    && declared_data_type_length(data_type)
+                        .is_some_and(|length| length > MYSQL_LARGE_VALUE_PREVIEW_THRESHOLD))
+            {
                 Some(LargeValuePreviewKind::Text)
             } else {
                 None
@@ -131,7 +146,11 @@ fn build_large_value_preview_columns(options: &TableDataSelectSqlOptions) -> Opt
             Some(DatabaseType::Postgres) => (format!("left({quoted}, {prefix_size}) AS {quoted}"), "T"),
             _ => return None,
         };
-        let marker = format!("'{marker_kind}:{preview_size}' AS {marker_alias}");
+        let marker = if database_type == Some(DatabaseType::Mysql) {
+            format!("CONCAT('{marker_kind}:{preview_size}:', OCTET_LENGTH({quoted})) AS {marker_alias}")
+        } else {
+            format!("'{marker_kind}:{preview_size}' AS {marker_alias}")
+        };
         projections.push(preview);
         projections.push(marker);
         marker_count += 1;

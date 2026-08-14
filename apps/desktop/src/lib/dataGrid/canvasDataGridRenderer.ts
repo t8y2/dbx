@@ -26,6 +26,7 @@ export interface CanvasDataGridRow {
   isDeleted: boolean;
   isDirtyCol: boolean[];
   status: RowStatus;
+  sourceIndex?: number;
 }
 
 export interface CanvasHoverCell {
@@ -77,7 +78,7 @@ export interface DrawCanvasDataGridOptions {
   editingCell: CanvasEditingCell | null;
   searchMatchKeys: ReadonlySet<number>;
   currentSearchMatch: CanvasSearchMatch | null;
-  formatCell: (value: CellValue, columnIndex: number) => string;
+  formatCell: (value: CellValue, columnIndex: number, row: CanvasDataGridRow) => string;
   columnIsBoolean?: (columnIndex: number) => boolean;
   draftCellPlaceholder?: string;
   isRowActive: (rowIndex: number) => boolean;
@@ -576,7 +577,7 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
           ctx.stroke();
         }
       } else {
-        const rawDisplayText = item.isDraft && value === null ? (draftCellPlaceholder ?? "") : formatCell(value, actualColIdx);
+        const rawDisplayText = item.isDraft && value === null ? (draftCellPlaceholder ?? "") : formatCell(value, actualColIdx, item);
         const displayText = isEditingThisCell ? "" : firstLineCellDisplayValue(rawDisplayText, flatteningMultiLineEnabled);
         const text = isEditingThisCell ? displayText : fitCanvasText(ctx, displayText, cellMaxWidth, isBooleanNullCell ? "left" : isRightAlign ? "right" : "left");
         const anchorX = isBooleanNullCell ? alignCanvasPixel(drawX + colWidth / 2, scaleX) : textAnchorX;

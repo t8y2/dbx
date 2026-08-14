@@ -4097,6 +4097,15 @@ function isLargeValuePreview(item: RowItem | undefined, columnIndex: number): bo
   return largeValueCellsByKey.value.has(largeValueCellKey(item.sourceIndex, columnIndex));
 }
 
+function largeValueOriginalBytes(item: Pick<RowItem, "sourceIndex" | "isNew" | "isDraft" | "isDirtyCol"> | undefined, columnIndex: number): number | undefined {
+  if (resolvedDatabaseType.value !== "mysql" || !item || item.isNew || item.isDraft || item.sourceIndex === undefined || item.isDirtyCol[columnIndex]) return undefined;
+  return largeValueCellsByKey.value.get(largeValueCellKey(item.sourceIndex, columnIndex))?.original_bytes;
+}
+
+function formatGridItemCell(item: RowItem, columnIndex: number): string {
+  return formatCellCached(item.data[columnIndex], columnIndex, largeValueOriginalBytes(item, columnIndex));
+}
+
 function normalizedLargeValueIdentityPart(value: CellValue): string {
   if (value === null) return "null";
   return `${typeof value}:${JSON.stringify(value)}`;
@@ -5385,7 +5394,7 @@ function primitiveCellFormatKey(value: CellValue, columnIndex?: number): string 
   return `${columnIndex ?? -1}\u0000${typeof value}\u0000${String(value)}`;
 }
 
-function formatCell(value: CellValue, columnIndex?: number): string {
+function formatCell(value: CellValue, columnIndex?: number, originalBytes?: number): string {
   const formatter = columnIndex === undefined ? undefined : resolvedColumnFormatters.value[columnIndex];
   const columnInfo = columnIndex === undefined ? undefined : tableColumnForGridColumn(columnIndex);
   const displayColumnInfo = columnInfo ?? (columnIndex === undefined ? undefined : resultColumnInfoForGridColumn(columnIndex));
@@ -5397,14 +5406,14 @@ function formatCell(value: CellValue, columnIndex?: number): string {
         columnInfo: displayColumnInfo,
       });
   if (arrayDisplay !== undefined) return arrayDisplay;
-  const binaryDisplay = formatter ? null : binaryCellDisplayText(value, columnIndex === undefined ? undefined : allColumnTypes.value[columnIndex]);
+  const binaryDisplay = formatter ? null : binaryCellDisplayText(value, columnIndex === undefined ? undefined : allColumnTypes.value[columnIndex], originalBytes);
   if (binaryDisplay !== null) return binaryDisplay;
   const s = applyColumnFormatter(value, formatter);
   return limitDataGridCellDisplay(s, resolvedDatabaseType.value === "sqlserver" ? SQLSERVER_DATA_GRID_CELL_DISPLAY_MAX_LENGTH : undefined);
 }
 
-function formatCellCached(value: CellValue, columnIndex?: number): string {
-  if (value !== null && typeof (value as unknown) === "object") {
+function formatCellCached(value: CellValue, columnIndex?: number, originalBytes?: number): string {
+  if (originalBytes === undefined && value !== null && typeof (value as unknown) === "object") {
     const objectValue = value as unknown as object;
     const cacheColumn = columnIndex ?? -1;
     const columnCache = objectCellFormatCache.get(objectValue);
@@ -5424,13 +5433,13 @@ function formatCellCached(value: CellValue, columnIndex?: number): string {
   // values are truncated for display anyway, so formatting them on demand is
   // cheaper than keeping the full source string in the primitive cache.
   if (typeof value === "string" && value.length > CELL_FORMAT_CACHE_STRING_KEY_MAX_LENGTH) {
-    return formatCell(value, columnIndex);
+    return formatCell(value, columnIndex, originalBytes);
   }
 
-  const key = primitiveCellFormatKey(value, columnIndex);
+  const key = `${primitiveCellFormatKey(value, columnIndex)}\u0000${originalBytes ?? ""}`;
   const cached = primitiveCellFormatCache.get(key);
   if (cached !== undefined) return cached;
-  return rememberPrimitiveCellFormat(key, formatCell(value, columnIndex));
+  return rememberPrimitiveCellFormat(key, formatCell(value, columnIndex, originalBytes));
 }
 
 function rowNumberPageOffset(): number {
@@ -6207,7 +6216,7 @@ function drawCanvasGrid() {
     editingCell: editingCell.value,
     searchMatchKeys: searchMatchSet.value,
     currentSearchMatch: currentSearchMatch.value,
-    formatCell: formatCellCached,
+    formatCell: (value, columnIndex, row) => formatCellCached(value, columnIndex, largeValueOriginalBytes(row, columnIndex)),
     draftCellPlaceholder: t("grid.quickEntryDraftPlaceholder"),
     isRowActive,
     rowCellsUseSelectionVisual,
@@ -6394,6 +6403,45 @@ async function cancelActiveExport() {
   await exportCancelHandler.value?.();
 }
 
+const userFacingSql = ref("");
+let userFacingSqlGeneration = 0;
+
+async function syncUserFacingSql() {
+  const generation = ++userFacingSqlGeneration;
+  const executionSql = props.sql?.trim() ?? "";
+  if (props.context !== "table-data" || !executionSql.includes("__DBX_LARGE_VALUE_BYTES_") || !props.tableMeta?.tableName) {
+    userFacingSql.value = executionSql;
+    return;
+  }
+
+  try {
+    const config = props.connectionId ? connectionStore.getConfig(props.connectionId) : undefined;
+    const sql = await buildTableSelectSql({
+      databaseType: resolvedDatabaseType.value,
+      driverProfile: config?.driver_profile,
+      identifierQuote: props.connectionId ? connectionStore.connectionIdentifierQuote?.(props.connectionId) : undefined,
+      catalog: props.tableMeta.catalog,
+      database: props.tableMeta.database,
+      schema: props.tableMeta.schema,
+      tableName: props.tableMeta.tableName,
+      tableType: props.tableMeta.tableType,
+      whereInput: currentWhereInput(),
+      orderBy: currentOrderBy(),
+      limit: props.pageLimit ?? pageSize.value,
+      offset: props.pageOffset ?? Math.max(0, currentPage.value - 1) * pageSize.value,
+    });
+    if (generation === userFacingSqlGeneration) userFacingSql.value = sql;
+  } catch {
+    if (generation === userFacingSqlGeneration) userFacingSql.value = executionSql;
+  }
+}
+
+watch(
+  () => [props.sql, props.context, props.tableMeta, props.pageLimit, props.pageOffset, currentWhereInput(), currentOrderBy()],
+  () => void syncUserFacingSql(),
+  { immediate: true },
+);
+
 // --- Export composable ---
 const {
   copyText,
@@ -6422,7 +6470,6 @@ const {
   exportCurrentPageSql,
   exportTxt,
   exportCurrentPageTxt,
-  copySql,
 } = useDataGridExport({
   columns: visibleColumns,
   displayItems: visibleDisplayItems,
@@ -8665,7 +8712,11 @@ function onRowContext(rowId: number, rowIndex: number) {
   }
 }
 
-const sqlOneLiner = computed(() => props.sql?.replace(/\s+/g, " ").trim() || "");
+const sqlOneLiner = computed(() => userFacingSql.value.replace(/\s+/g, " ").trim());
+
+async function copyUserFacingSql() {
+  if (userFacingSql.value) await copyText(userFacingSql.value);
+}
 
 type TableInfoTabItem = {
   id: TableInfoTab;
@@ -11195,7 +11246,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                           <template v-if="draftCellPlaceholder(item, col.actualColIdx)">
                             <span class="text-muted-foreground/70 italic">{{ draftCellPlaceholder(item, col.actualColIdx) }}</span>
                           </template>
-                          <template v-else>{{ firstLineCellDisplayValue(formatCellCached(item.data[col.actualColIdx], col.actualColIdx), flatteningMultiLineEnabled) }}</template>
+                          <template v-else>{{ firstLineCellDisplayValue(formatGridItemCell(item, col.actualColIdx), flatteningMultiLineEnabled) }}</template>
                           <div v-if="cellDetailButtonVisible(item.displayIndex, col.actualColIdx)" class="absolute right-2 top-1/2 flex -translate-y-1/2 items-center gap-1">
                             <LightDropdownMenu
                               v-if="canQuickDownloadCellValue(item.displayIndex, col.actualColIdx)"
@@ -11699,12 +11750,12 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
 
       <Tooltip v-if="sqlOneLiner">
         <TooltipTrigger as-child>
-          <span class="min-w-0 max-w-full justify-self-center truncate opacity-60 cursor-pointer hover:opacity-100" @click="copySql">
+          <span class="min-w-0 max-w-full justify-self-center truncate opacity-60 cursor-pointer hover:opacity-100" @click="copyUserFacingSql">
             {{ sqlOneLiner }}
           </span>
         </TooltipTrigger>
         <TooltipContent side="top" class="max-w-md">
-          <pre class="text-xs font-mono whitespace-pre-wrap">{{ props.sql }}</pre>
+          <pre class="text-xs font-mono whitespace-pre-wrap">{{ userFacingSql }}</pre>
         </TooltipContent>
       </Tooltip>
       <span v-else class="min-w-0" />

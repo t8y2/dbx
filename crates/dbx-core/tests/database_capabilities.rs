@@ -97,6 +97,7 @@ fn driver_manifest() -> DriverManifest {
 fn maps_agent_database_types_to_driver_keys() {
     assert_eq!(agent_key(&DatabaseType::Trino, None), Some("trino"));
     assert_eq!(agent_key(&DatabaseType::Hive, None), Some("hive"));
+    assert_eq!(agent_key(&DatabaseType::Impala, None), Some("hive"));
     assert_eq!(agent_key(&DatabaseType::Tdengine, None), Some("tdengine"));
     assert_eq!(agent_key(&DatabaseType::Iotdb, None), Some("iotdb"));
     assert_eq!(agent_key(&DatabaseType::Yashandb, None), Some("yashandb"));
@@ -139,6 +140,7 @@ fn classifies_agent_database_types() {
     assert!(is_agent_type(&DatabaseType::Oracle));
     assert!(is_agent_type(&DatabaseType::Trino));
     assert!(is_agent_type(&DatabaseType::Hive));
+    assert!(is_agent_type(&DatabaseType::Impala));
     assert!(is_agent_type(&DatabaseType::Tdengine));
     assert!(is_agent_type(&DatabaseType::Iotdb));
     assert!(is_agent_type(&DatabaseType::Yashandb));
@@ -352,6 +354,25 @@ fn driver_manifest_declares_expected_product_capabilities() {
 
     let starrocks = find_driver(DatabaseType::StarRocks);
     assert!(starrocks.capabilities.user_admin);
+
+    let impala = find_driver(DatabaseType::Impala);
+    assert_eq!(impala.label, "Apache Impala");
+    assert_eq!(impala.runtime_mode, "agent");
+    assert_eq!(impala.agent_key.as_deref(), Some("hive"));
+    assert_eq!(impala.support_level, "operate");
+    assert!(impala.capabilities.query_execution);
+    assert!(impala.capabilities.metadata_browse);
+    assert!(impala.capabilities.object_browser);
+    assert!(impala.capabilities.object_source);
+    assert!(impala.capabilities.schema_search);
+    assert!(impala.capabilities.sql_explain);
+    assert!(impala.capabilities.data_transfer);
+    assert!(impala.capabilities.sql_file_execution);
+    assert!(!impala.capabilities.table_data_edit);
+    assert!(!impala.capabilities.table_structure_edit);
+    assert!(!impala.capabilities.table_import);
+    assert!(!impala.capabilities.diagram);
+    assert!(!impala.capabilities.user_admin);
 }
 
 #[test]

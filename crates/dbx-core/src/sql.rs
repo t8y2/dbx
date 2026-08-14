@@ -143,7 +143,12 @@ impl Default for SqlDialectProfile {
 impl SqlDialectProfile {
     fn for_database_type(db_type: DatabaseType) -> Self {
         if matches!(db_type, DatabaseType::Mysql) {
-            return Self::mysql();
+            return Self {
+                preserves_tdsql_proxy_directive: crate::db::tdsql_mysql::preserves_proxy_directive_for_database_type(
+                    db_type,
+                ),
+                ..Self::mysql_compatible()
+            };
         }
 
         if matches!(db_type, DatabaseType::Gaussdb) {
@@ -176,10 +181,6 @@ impl SqlDialectProfile {
             requires_whitespace_after_line_comment_dashes: true,
             ..Self::default()
         }
-    }
-
-    fn mysql() -> Self {
-        Self { preserves_tdsql_proxy_directive: true, ..Self::mysql_compatible() }
     }
 
     fn oracle_like() -> Self {
@@ -2530,16 +2531,11 @@ fn executable_sql_bounds(statement: &str, options: SqlParsingOptions) -> Option<
     }
     let executable_start = trimmed.len() - executable.len();
     let start = if options.profile.preserves_tdsql_proxy_directive {
-        tdsql_proxy_directive_start(trimmed, executable_start).unwrap_or(executable_start)
+        crate::db::tdsql_mysql::proxy_directive_start(trimmed, executable_start).unwrap_or(executable_start)
     } else {
         executable_start
     };
     Some((start, trimmed_end))
-}
-
-fn tdsql_proxy_directive_start(statement: &str, executable_start: usize) -> Option<usize> {
-    let prefix = statement.get(..executable_start)?.trim_end();
-    prefix.strip_suffix("/*proxy*/").map(|before| before.len())
 }
 
 fn has_executable_sql_with_options(statement: &str, options: SqlParsingOptions) -> bool {
@@ -2700,7 +2696,7 @@ mod tests {
 
     #[test]
     fn dash_dash_requires_space_only_for_mysql_compatible_profiles() {
-        let mysql_profile = SqlDialectProfile::mysql();
+        let mysql_profile = SqlDialectProfile::for_database_type(DatabaseType::Mysql);
         assert!(dash_dash_starts_line_comment(mysql_profile, Some(' ')));
         assert!(dash_dash_starts_line_comment(mysql_profile, Some('\n')));
         assert!(dash_dash_starts_line_comment(mysql_profile, Some('\u{1}')));
@@ -3391,7 +3387,6 @@ SELECT 2;";
         assert!(!default.preserves_tdsql_proxy_directive);
 
         let mysql = SqlDialectProfile::for_database_type(DatabaseType::Mysql);
-        assert_eq!(mysql, SqlDialectProfile::mysql());
         assert!(mysql.supports_hash_line_comments);
         assert!(mysql.supports_mysql_routine_blocks);
         assert!(mysql.preserves_tdsql_proxy_directive);

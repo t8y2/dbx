@@ -28,6 +28,7 @@ const documentedDoltProcedures = [
   "DOLT_COMMIT",
   "DOLT_COMMIT_HASH_OUT",
   "DOLT_CONFLICTS_RESOLVE",
+  "DOLT_COUNT_COMMITS",
   "DOLT_FETCH",
   "DOLT_GC",
   "DOLT_MERGE",
@@ -42,6 +43,7 @@ const documentedDoltProcedures = [
   "DOLT_SQUASH_HISTORY",
   "DOLT_STASH",
   "DOLT_TAG",
+  "DOLT_THREAD_DUMP",
   "DOLT_UNDROP",
   "DOLT_UPDATE_COLUMN_TAG",
   "DOLT_VERIFY_CONSTRAINTS",
@@ -53,9 +55,10 @@ const documentedDoltProcedures = [
   "DOLT_STATS_FLUSH",
   "DOLT_STATS_GC",
   "DOLT_STATS_INFO",
+  "DOLT_STATS_TIMERS",
 ];
 
-const documentedDoltScalarFunctions = ["ACTIVE_BRANCH", "DOLT_MERGE_BASE", "DOLT_HASHOF", "DOLT_HASHOF_DB", "DOLT_HASHOF_TABLE", "DOLT_VERSION", "HAS_ANCESTOR", "LAST_INSERT_UUID", "DOLT_JOIN_COST"];
+const documentedDoltScalarFunctions = ["ACTIVE_BRANCH", "DOLT_MERGE_BASE", "DOLT_HASHOF", "DOLT_HASHOF_DB", "DOLT_HASHOF_TABLE", "DOLT_STORAGE_FORMAT", "DOLT_VERSION", "HAS_ANCESTOR", "DOLT_JOIN_COST"];
 
 const documentedDoltTableFunctions = ["DOLT_DIFF", "DOLT_DIFF_STAT", "DOLT_DIFF_SUMMARY", "DOLT_JSON_DIFF", "DOLT_LOG", "DOLT_PATCH", "DOLT_PREVIEW_MERGE_CONFLICTS_SUMMARY", "DOLT_PREVIEW_MERGE_CONFLICTS", "DOLT_REFLOG", "DOLT_SCHEMA_DIFF", "DOLT_QUERY_DIFF", "DOLT_BRANCH_STATUS", "DOLT_TEST_RUN"];
 
@@ -117,5 +120,15 @@ describe("doltProfile", () => {
   it("uses a separate hidden cache scope without changing ordinary MySQL", () => {
     expect(doltObjectTreeProfileForConnection(doltConfig())).toEqual({ cacheKey: "dolt-system-tables-v1:hidden", groupOverrides: [] });
     expect(doltObjectTreeProfileForConnection({ ...doltConfig(), driver_profile: "mysql" })).toBeUndefined();
+  });
+
+  it("tracks the current Dolt procedure and scalar-function registries", () => {
+    const routines = new Map(DOLT_SQL_ROUTINES.map((routine) => [routine.name, routine.type]));
+
+    expect(routines.get("DOLT_COUNT_COMMITS")).toBe("procedure");
+    expect(routines.get("DOLT_THREAD_DUMP")).toBe("procedure");
+    expect(routines.get("DOLT_STATS_TIMERS")).toBe("procedure");
+    expect(routines.get("DOLT_STORAGE_FORMAT")).toBe("scalar-function");
+    expect(routines.has("LAST_INSERT_UUID")).toBe(false);
   });
 });

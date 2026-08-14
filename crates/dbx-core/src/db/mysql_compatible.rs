@@ -1,6 +1,7 @@
 use mysql_async::prelude::*;
 use std::collections::HashSet;
 
+use crate::models::connection::ConnectionConfig;
 use crate::types::{ColumnInfo, DatabaseInfo, IndexInfo, TableInfo};
 
 use super::mysql::{
@@ -8,6 +9,14 @@ use super::mysql::{
     get_conn_with_health_check, get_conn_with_timeout, get_opt_str, get_str, get_str_by_name, is_mysql_identifier_byte,
     list_indexes, mysql_keyword_at, quote_identifier, show_create_table_ddl, skip_mysql_quoted, MySqlPool,
 };
+
+pub fn uses_show_metadata(config: &ConnectionConfig) -> bool {
+    super::doris::is_config(config) || super::starrocks::is_config(config) || super::manticoresearch::is_config(config)
+}
+
+pub fn supports_external_catalogs(config: &ConnectionConfig) -> bool {
+    super::doris::is_config(config) || super::starrocks::is_config(config)
+}
 
 // Doris and StarRocks reuse the MySQL wire protocol, but catalog addressing and DDL/index
 // metadata semantics are MySQL-compatible distributed behavior and stay isolated in this module.

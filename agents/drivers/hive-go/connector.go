@@ -89,6 +89,7 @@ func newDiscoveryConnector(config connectionConfig) *discoveryConnector {
 				BrowserResponsePort:        config.BrowserResponsePort,
 				BrowserResponseTimeout:     config.BrowserResponseTimeout,
 				BrowserDisableSSLCheck:     config.BrowserDisableSSLCheck,
+				WaitForNonQueryCompletion:  strings.EqualFold(config.DatabaseType, "impala"),
 			})
 		},
 		driver:        &gohive.Driver{},

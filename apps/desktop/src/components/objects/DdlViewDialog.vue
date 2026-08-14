@@ -51,6 +51,10 @@ const ddlEditorContainer = ref<HTMLDivElement>();
 const ddlSearchPanelRef = ref<InstanceType<typeof EditorSearchPanel>>();
 const ddlEditorView = shallowRef<EditorView | null>(null);
 
+// The CodeMirror editor (if any) that was focused when this dialog opened, so focus can be
+// restored to it on close. Not a ref: read/written outside of render, never needs reactivity.
+let editorRootToRestoreFocus: HTMLElement | null = null;
+
 async function loadDdl(force = false) {
   ddlError.value = "";
   ddlLoading.value = true;
@@ -81,11 +85,33 @@ watch(
   () => props.open,
   async (open) => {
     if (!open) return;
+    const active = document.activeElement;
+    editorRootToRestoreFocus = active instanceof HTMLElement ? active.closest(".cm-editor") : null;
     ddlContent.value = "";
     await loadDdl();
   },
   { immediate: true },
 );
+
+/**
+ * Restores focus through CodeMirror's own `EditorView.focus()` instead of the browser default.
+ *
+ * Radix's default close-auto-focus calls the plain DOM `.focus()` on whatever was focused before
+ * the dialog opened. In WebKit (the desktop app's webview on macOS), refocusing a contenteditable
+ * this way resets its caret to the very start of the document; CodeMirror then treats that as a
+ * real selection change and scrolls to follow it, snapping a long query editor to the top (#6067).
+ * `EditorView.focus()` avoids this by suppressing its own selection observer while it restores the
+ * DOM selection to match its actual (unmoved) internal state.
+ */
+function onDdlDialogCloseAutoFocus(event: Event) {
+  const target = editorRootToRestoreFocus;
+  editorRootToRestoreFocus = null;
+  if (!target || !target.isConnected) return;
+  event.preventDefault();
+  void import("@codemirror/view").then(({ EditorView }) => {
+    EditorView.findFromDOM(target)?.focus();
+  });
+}
 
 /**
  * Creates a lightweight read-only CodeMirror editor inside the dialog.
@@ -198,7 +224,7 @@ function onClose() {
 
 <template>
   <Dialog :open="props.open" @update:open="onClose">
-    <DialogContent class="sm:max-w-190">
+    <DialogContent class="sm:max-w-190" @close-auto-focus="onDdlDialogCloseAutoFocus">
       <DialogHeader>
         <DialogTitle>DDL - {{ props.tableName }}</DialogTitle>
       </DialogHeader>

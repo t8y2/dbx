@@ -2500,7 +2500,7 @@ onBeforeUnmount(() => {
             </Button>
           </div>
           <div v-if="configError" class="border-b px-3 py-2 text-xs text-destructive">{{ configError }}</div>
-          <div ref="configListViewport" class="min-h-0 flex-1 overflow-auto">
+          <div ref="configListViewport" class="nacos-config-list-viewport min-h-0 flex-1 overflow-auto">
             <div class="w-max min-w-full" :style="{ minWidth: configListMinWidth }">
               <div class="sticky top-0 z-20 grid border-b bg-muted px-3 py-2 text-[11px] font-medium uppercase tracking-wide text-muted-foreground shadow-sm" :style="{ gridTemplateColumns: configListGridTemplate }">
                 <div v-for="(column, columnIndex) in configListColumns" :key="column" class="relative min-w-0" :class="column === 'dataId' ? 'pr-3' : columnIndex === configListColumns.length - 1 ? 'pl-3 pr-10' : 'px-3'">
@@ -3396,5 +3396,9 @@ onBeforeUnmount(() => {
 
 .nacos-admin-splitpanes :deep(.splitpanes__splitter:hover) {
   background: oklch(0.6 0.15 250) !important;
+}
+
+.nacos-config-list-viewport {
+  scrollbar-gutter: stable;
 }
 </style>

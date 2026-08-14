@@ -49,6 +49,7 @@ type Config struct {
 	BrowserResponsePort        int
 	BrowserResponseTimeout     time.Duration
 	BrowserDisableSSLCheck     bool
+	WaitForNonQueryCompletion  bool
 }
 
 var _ driver.Connector = (*HiveConnector)(nil)
@@ -110,6 +111,7 @@ func (c *HiveConnector) Connect(ctx context.Context) (driver.Conn, error) {
 	connCfg.BrowserResponsePort = c.cfg.BrowserResponsePort
 	connCfg.BrowserResponseTimeout = c.cfg.BrowserResponseTimeout
 	connCfg.BrowserDisableSSLCheck = c.cfg.BrowserDisableSSLCheck
+	connCfg.WaitForNonQueryCompletion = c.cfg.WaitForNonQueryCompletion
 
 	// Fallback: build TLS config from cert/key files if TLSConfig not provided directly
 	if connCfg.TLSConfig == nil {

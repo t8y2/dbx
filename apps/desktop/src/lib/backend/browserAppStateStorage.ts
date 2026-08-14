@@ -16,6 +16,14 @@ function requestToPromise<T>(request: IDBRequest<T>): Promise<T> {
   });
 }
 
+function transactionToPromise(transaction: IDBTransaction): Promise<void> {
+  return new Promise((resolve, reject) => {
+    transaction.oncomplete = () => resolve();
+    transaction.onabort = () => reject(transaction.error ?? new Error("IndexedDB transaction aborted"));
+    transaction.onerror = () => reject(transaction.error ?? new Error("IndexedDB transaction failed"));
+  });
+}
+
 let dbPromise: Promise<IDBDatabase | null> | undefined;
 
 function openDb(): Promise<IDBDatabase | null> {
@@ -44,7 +52,13 @@ async function withStore<T>(mode: IDBTransactionMode, run: (store: IDBObjectStor
   const db = await openDb();
   if (!db) return null;
   try {
-    return await requestToPromise(run(db.transaction(STORE_NAME, mode).objectStore(STORE_NAME)));
+    const transaction = db.transaction(STORE_NAME, mode);
+    const request = requestToPromise(run(transaction.objectStore(STORE_NAME)));
+    if (mode === "readwrite") {
+      const [result] = await Promise.all([request, transactionToPromise(transaction)]);
+      return result;
+    }
+    return await request;
   } catch {
     return null;
   }
@@ -66,5 +80,6 @@ export async function loadBrowserAppState(key: string): Promise<unknown | null> 
 export async function saveBrowserAppState(key: string, value: unknown): Promise<void> {
   const result = await withStore("readwrite", (store) => store.put(value, key));
   if (result !== null) return;
-  safeLocalStorageSet(fallbackKey(key), JSON.stringify(value));
+  if (safeLocalStorageSet(fallbackKey(key), JSON.stringify(value))) return;
+  throw new Error(`Failed to persist browser app state: ${key}`);
 }

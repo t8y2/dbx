@@ -41,14 +41,12 @@ pub(crate) fn mysql_catalog_dialect(
     db_type: DatabaseType,
     driver_profile: Option<&str>,
 ) -> Option<MySqlCatalogDialect> {
-    match db_type {
-        DatabaseType::Doris => Some(MySqlCatalogDialect::Doris),
-        DatabaseType::StarRocks => Some(MySqlCatalogDialect::StarRocks),
-        _ => match driver_profile.map(str::to_ascii_lowercase).as_deref() {
-            Some("doris" | "selectdb") => Some(MySqlCatalogDialect::Doris),
-            Some("starrocks") => Some(MySqlCatalogDialect::StarRocks),
-            _ => None,
-        },
+    if super::doris::is_profile(&db_type, driver_profile) {
+        Some(MySqlCatalogDialect::Doris)
+    } else if super::starrocks::is_profile(&db_type, driver_profile) {
+        Some(MySqlCatalogDialect::StarRocks)
+    } else {
+        None
     }
 }
 
@@ -74,14 +72,11 @@ const MYSQL_RESULT_CELL_PREVIEW_MAX_BYTES: usize = 8 * 1024;
 
 impl MySqlQueryDialect {
     pub fn for_connection(db_type: DatabaseType, driver_profile: Option<&str>) -> Self {
-        let profile = driver_profile.map(str::to_ascii_lowercase);
         Self {
-            supports_admin_show_results: matches!(
-                db_type,
-                DatabaseType::Doris | DatabaseType::StarRocks | DatabaseType::ManticoreSearch
-            ) || profile.as_deref().is_some_and(|profile| {
-                matches!(profile, "doris" | "selectdb" | "starrocks" | "manticoresearch" | "tidb")
-            }),
+            supports_admin_show_results: super::doris::is_profile(&db_type, driver_profile)
+                || super::starrocks::is_profile(&db_type, driver_profile)
+                || super::manticoresearch::is_profile(&db_type, driver_profile)
+                || super::tidb::is_profile(&db_type, driver_profile),
         }
     }
 }
@@ -91,7 +86,7 @@ pub enum MySqlQueryStreamItem {
     Row(Vec<serde_json::Value>),
 }
 
-fn quote_value(s: &str) -> String {
+pub(super) fn quote_value(s: &str) -> String {
     format!("'{}'", s.replace('\\', "\\\\").replace('\'', "\\'"))
 }
 
@@ -2655,7 +2650,7 @@ pub async fn get_table_comment(pool: &MySqlPool, database: &str, table: &str) ->
 }
 
 #[derive(Clone, Debug, Default)]
-struct TableStatusMeta {
+pub(super) struct TableStatusMeta {
     comment: Option<String>,
     created_at: Option<String>,
     updated_at: Option<String>,
@@ -2898,7 +2893,7 @@ fn mysql_fallback_like_patterns(filter: &str) -> Vec<String> {
     patterns
 }
 
-async fn list_tables_show_with_status(
+pub(super) async fn list_tables_show_with_status(
     pool: &MySqlPool,
     database: &str,
 ) -> Result<(Vec<TableInfo>, HashMap<String, TableStatusMeta>), String> {
@@ -2950,116 +2945,6 @@ async fn list_tables_show_filtered(
 
 pub async fn list_tables_show(pool: &MySqlPool, database: &str) -> Result<Vec<TableInfo>, String> {
     list_tables_show_with_status(pool, database).await.map(|(tables, _)| tables)
-}
-
-fn starrocks_materialized_views_sql(database: &str) -> String {
-    format!(
-        "SELECT TABLE_NAME FROM information_schema.materialized_views WHERE TABLE_SCHEMA = {}",
-        quote_value(database)
-    )
-}
-
-/// Fallback DDL source for StarRocks materialized views when `SHOW CREATE
-/// MATERIALIZED VIEW` fails (e.g. on versions predating starrocks/starrocks#73396,
-/// merged 2026-05-19, which reject the statement for sync MVs with "Table not
-/// found" because sync MVs are not registered as separate Tables).
-///
-/// `information_schema.materialized_views` is documented as the authoritative
-/// list of all materialized views, with a column distinguishing SYNC from
-/// ASYNC. See
-/// https://docs.starrocks.io/docs/sql-reference/information_schema/materialized_views/.
-///
-/// Made `pub(super)` so the dispatch site in `schema::mysql_object_source` can
-/// rely on it without rewriting the escape convention.
-pub(crate) fn mysql_materialized_view_definition_sql(database: &str, name: &str) -> String {
-    format!(
-        "SELECT MATERIALIZED_VIEW_DEFINITION \
-         FROM information_schema.materialized_views \
-         WHERE TABLE_SCHEMA = {} AND TABLE_NAME = {} \
-         LIMIT 1",
-        quote_value(database),
-        quote_value(name)
-    )
-}
-
-async fn list_starrocks_materialized_view_names(pool: &MySqlPool, database: &str) -> Result<HashSet<String>, String> {
-    let sql = starrocks_materialized_views_sql(database);
-    let mut conn = get_conn_with_timeout(pool, super::connection_timeout()).await?;
-    let result = conn.query_iter(&sql).await.map_err(|e| e.to_string())?;
-    let rows: Vec<mysql_async::Row> = result.collect_and_drop().await.map_err(|e| e.to_string())?;
-    Ok(rows
-        .iter()
-        .filter_map(|row| {
-            let name = get_str_by_name(row, "TABLE_NAME").trim().to_string();
-            (!name.is_empty()).then_some(name)
-        })
-        .collect())
-}
-
-fn merge_starrocks_materialized_views(
-    tables: &mut Vec<TableInfo>,
-    materialized_view_names: Result<HashSet<String>, String>,
-    database: &str,
-) {
-    let materialized_view_names = match materialized_view_names {
-        Ok(names) => names,
-        Err(err) => {
-            // Older StarRocks versions and restricted accounts may not expose this
-            // information_schema view; keep the base SHOW TABLES result usable.
-            log::warn!("Skipping materialized view classification for StarRocks database `{database}`: {err}");
-            return;
-        }
-    };
-
-    // Snapshot the names already returned by SHOW FULL TABLES so the second pass can
-    // append MVs that are absent from SHOW FULL TABLES without duplicating rows.
-    let known_names: HashSet<String> = tables.iter().map(|table| table.name.clone()).collect();
-
-    // Step 1 — reclassify: rows whose name appears in `information_schema.materialized_views`
-    // are MVs even when SHOW FULL TABLES labeled them as VIEW (sync MVs) or BASE TABLE
-    // (async MVs). See https://docs.starrocks.io/docs/sql-reference/information_schema/materialized_views/
-    // for the authoritative distinction between the two MV kinds.
-    for table in tables.iter_mut() {
-        if materialized_view_names.contains(&table.name) {
-            table.table_type = "MATERIALIZED_VIEW".to_string();
-        }
-    }
-
-    // Step 2 — union: on StarRocks versions predating starrocks/starrocks#73396 (merged
-    // 2026-05-19), sync MVs "are not registered as separate Tables" so SHOW FULL TABLES
-    // omits them entirely. Append those rows from the system view so they appear in the
-    // sidebar and the DDL source path has something to resolve. Sort names so that
-    // the resulting table order is deterministic across runs.
-    let mut materialized_view_names_sorted: Vec<&String> = materialized_view_names.iter().collect();
-    materialized_view_names_sorted.sort();
-    for name in materialized_view_names_sorted {
-        if !known_names.contains(name.as_str()) {
-            tables.push(TableInfo {
-                name: name.clone(),
-                table_type: "MATERIALIZED_VIEW".to_string(),
-                comment: None,
-                parent_schema: None,
-                parent_name: None,
-            });
-        }
-    }
-}
-
-async fn list_starrocks_tables_with_status(
-    pool: &MySqlPool,
-    database: &str,
-) -> Result<(Vec<TableInfo>, HashMap<String, TableStatusMeta>), String> {
-    let (tables, materialized_view_names) = tokio::join!(
-        list_tables_show_with_status(pool, database),
-        list_starrocks_materialized_view_names(pool, database)
-    );
-    let (mut tables, status) = tables?;
-    merge_starrocks_materialized_views(&mut tables, materialized_view_names, database);
-    Ok((tables, status))
-}
-
-pub async fn list_starrocks_tables(pool: &MySqlPool, database: &str) -> Result<Vec<TableInfo>, String> {
-    list_starrocks_tables_with_status(pool, database).await.map(|(tables, _)| tables)
 }
 
 fn requested_object_type(object_types: Option<&[String]>, object_type: &str) -> bool {
@@ -3456,21 +3341,7 @@ fn filter_table_objects_fallback(
         .collect()
 }
 
-pub async fn list_starrocks_table_objects(pool: &MySqlPool, database: &str) -> Result<Vec<ObjectInfo>, String> {
-    let (tables, routines) =
-        tokio::join!(list_starrocks_tables_with_status(pool, database), list_routine_objects(pool, database));
-    let (tables, status) = tables?;
-    let mut objects = table_infos_to_objects(tables, &status, database);
-
-    match routines {
-        Ok(routines) => objects.extend(routines),
-        Err(err) => log::warn!("Skipping routines for database `{}` in object browser: {}", database, err),
-    }
-
-    Ok(objects)
-}
-
-fn table_infos_to_objects(
+pub(super) fn table_infos_to_objects(
     tables: Vec<TableInfo>,
     status: &HashMap<String, TableStatusMeta>,
     database: &str,
@@ -3506,7 +3377,7 @@ fn table_infos_to_objects(
         .collect()
 }
 
-async fn list_routine_objects(pool: &MySqlPool, database: &str) -> Result<Vec<ObjectInfo>, String> {
+pub(super) async fn list_routine_objects(pool: &MySqlPool, database: &str) -> Result<Vec<ObjectInfo>, String> {
     let mut conn = get_conn_with_timeout(pool, super::connection_timeout()).await?;
     let rows = query_routine_rows(&mut conn, database, None, None, None).await?;
     Ok(rows.iter().map(|row| row_to_object(row, database)).collect())
@@ -5311,438 +5182,6 @@ pub async fn show_create_table_ddl(pool: &MySqlPool, database: &str, table: &str
         .ok_or_else(|| "Failed to read DDL".to_string())
 }
 
-// ---------------------------------------------------------------------------
-// Doris / StarRocks multi-catalog support.
-//
-// These engines expose external catalogs (iceberg, hive, jdbc, ...) alongside
-// the native `internal` catalog via `SHOW CATALOGS`. The functions below address
-// objects in a specific catalog using 3-part qualified names
-// (`<catalog>.<database>.<table>`), which the engines accept directly without
-// needing to `SWITCH` the session catalog.
-// ---------------------------------------------------------------------------
-
-/// Build a 2-part qualified identifier `` `<catalog>`.`<database>` ``.
-fn doris_catalog_database_ref(catalog: &str, database: &str) -> String {
-    format!("{}.{}", quote_identifier(catalog), quote_identifier(database))
-}
-
-/// Build a 3-part qualified identifier `` `<catalog>`.`<database>`.`<table>` ``.
-fn doris_catalog_table_ref(catalog: &str, database: &str, table: &str) -> String {
-    format!("{}.{}.{}", quote_identifier(catalog), quote_identifier(database), quote_identifier(table))
-}
-
-/// `SHOW CATALOGS` → list of catalogs visible to the current user.
-///
-/// Column layouts differ between engines: Doris exposes `CatalogName` (with
-/// `CatalogId`/`IsCurrent`/`CreateTime`/`LastUpdateTime`), while StarRocks
-/// exposes `Catalog` (only `Type`/`Comment`, no `IsCurrent`). The name is read
-/// from either column; missing trailing columns degrade gracefully to
-/// empty/None. The built-in catalog is named `internal` in Doris and
-/// `default_catalog` in StarRocks (both with `Type=internal`); detection is
-/// type-based (see `CatalogInfo::is_internal`), not name-based.
-pub async fn list_doris_catalogs(pool: &MySqlPool) -> Result<Vec<crate::db::CatalogInfo>, String> {
-    let mut conn = get_conn_with_timeout(pool, super::connection_timeout()).await?;
-    let result = conn.query_iter("SHOW CATALOGS").await.map_err(|e| e.to_string())?;
-    let rows: Vec<mysql_async::Row> = result.collect_and_drop().await.map_err(|e| e.to_string())?;
-    let catalogs: Vec<crate::db::CatalogInfo> = rows
-        .iter()
-        .filter_map(|row| {
-            // Doris column is `CatalogName`; StarRocks column is `Catalog`.
-            let name = first_nonempty_str_by_name(row, &["CatalogName", "Catalog"]).trim().to_string();
-            if name.is_empty() {
-                return None;
-            }
-            let catalog_type = get_str_by_name(row, "Type").trim().to_string();
-            let is_current = {
-                let value = get_str_by_name(row, "IsCurrent").trim().to_ascii_lowercase();
-                !value.is_empty() && value != "no" && value != "false" && value != "0"
-            };
-            let comment = get_opt_str(row, "Comment").map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
-            Some(crate::db::CatalogInfo { name, catalog_type, is_current, comment })
-        })
-        .collect();
-    Ok(normalize_doris_catalogs(catalogs))
-}
-
-/// Sort with the built-in catalog first, then the rest alphabetically by name.
-/// The built-in catalog is identified by `CatalogInfo::is_internal` (type-based)
-/// rather than by name, so StarRocks `default_catalog` sorts first just like
-/// Doris `internal`. No synthetic catalog is injected: `SHOW CATALOGS` always
-/// lists the built-in catalog on both engines, and a single-catalog result is
-/// handled by the flat-sidebar fallback in the caller.
-fn normalize_doris_catalogs(mut catalogs: Vec<crate::db::CatalogInfo>) -> Vec<crate::db::CatalogInfo> {
-    catalogs.sort_by(|a, b| match (a.is_internal(), b.is_internal()) {
-        (true, false) => std::cmp::Ordering::Less,
-        (false, true) => std::cmp::Ordering::Greater,
-        _ => a.name.cmp(&b.name),
-    });
-    catalogs
-}
-
-/// `SHOW DATABASES FROM <catalog>` → databases in the given catalog.
-pub async fn list_databases_show_from(pool: &MySqlPool, catalog: &str) -> Result<Vec<DatabaseInfo>, String> {
-    let mut conn = get_conn_with_timeout(pool, super::connection_timeout()).await?;
-    let sql = format!("SHOW DATABASES FROM {}", quote_identifier(catalog));
-    let result = conn.query_iter(&sql).await.map_err(|e| e.to_string())?;
-    let rows: Vec<mysql_async::Row> = result.collect_and_drop().await.map_err(|e| e.to_string())?;
-    Ok(database_infos_from_names(rows.iter().map(|row| get_str(row, 0)), false))
-}
-
-/// `SHOW TABLES FROM <catalog>.<database>` → tables in an external catalog.
-///
-/// External catalogs do not support `SHOW TABLE STATUS`, so comments/status are
-/// not fetched (the caller only needs names + types for browsing).
-pub async fn list_tables_show_from(pool: &MySqlPool, catalog: &str, database: &str) -> Result<Vec<TableInfo>, String> {
-    let sql = format!("SHOW TABLES FROM {}", doris_catalog_database_ref(catalog, database));
-    let mut conn = get_conn_with_timeout(pool, super::connection_timeout()).await?;
-    let result = conn.query_iter(&sql).await.map_err(|e| e.to_string())?;
-    let rows: Vec<mysql_async::Row> = result.collect_and_drop().await.map_err(|e| e.to_string())?;
-    let mut tables: Vec<TableInfo> = rows
-        .iter()
-        .filter_map(|row| {
-            let name = get_str(row, 0).trim().to_string();
-            if name.is_empty() {
-                return None;
-            }
-            // SHOW FULL TABLES exposes a type column; plain SHOW TABLES does not.
-            let table_type = get_str(row, 1);
-            Some(TableInfo {
-                name,
-                table_type: if table_type.trim().is_empty() { "TABLE".to_string() } else { table_type },
-                comment: None,
-                parent_schema: None,
-                parent_name: None,
-            })
-        })
-        .collect();
-    tables.sort_by(|a, b| a.name.cmp(&b.name));
-    Ok(tables)
-}
-
-/// `SHOW COLUMNS FROM <catalog>.<database>.<table>` → columns of an external
-/// catalog table. Falls back to `DESCRIBE` if `SHOW COLUMNS` is rejected.
-pub async fn get_columns_show_from(
-    pool: &MySqlPool,
-    catalog: &str,
-    database: &str,
-    table: &str,
-) -> Result<Vec<ColumnInfo>, String> {
-    let qualified = doris_catalog_table_ref(catalog, database, table);
-    let full_sql = format!("SHOW FULL COLUMNS FROM {qualified}");
-    let plain_sql = format!("SHOW COLUMNS FROM {qualified}");
-    let describe_sql = format!("DESCRIBE {qualified}");
-    let mut conn = get_conn_with_health_check(pool).await?;
-    let rows: Vec<mysql_async::Row> = match conn.query_iter(&full_sql).await {
-        Ok(result) => result.collect_and_drop().await.map_err(|e| e.to_string())?,
-        Err(_) => match conn.query_iter(&plain_sql).await {
-            Ok(result) => result.collect_and_drop().await.map_err(|e| e.to_string())?,
-            Err(_) => {
-                let result = conn.query_iter(&describe_sql).await.map_err(|e| e.to_string())?;
-                result.collect_and_drop().await.map_err(|e| e.to_string())?
-            }
-        },
-    };
-    Ok(rows
-        .iter()
-        .filter_map(|row| {
-            let name = get_str_by_name(row, "Field").trim().to_string();
-            if name.is_empty() {
-                return None;
-            }
-            let key = get_str_by_name(row, "Key");
-            let collation = get_opt_str(row, "Collation").filter(|s| !s.is_empty());
-            Some(ColumnInfo {
-                name,
-                data_type: get_str_by_name(row, "Type"),
-                is_nullable: get_str_by_name(row, "Null").eq_ignore_ascii_case("YES"),
-                column_default: get_opt_str(row, "Default"),
-                is_primary_key: key.eq_ignore_ascii_case("PRI"),
-                is_unique: key.eq_ignore_ascii_case("UNI"),
-                extra: get_opt_str(row, "Extra"),
-                comment: get_opt_str(row, "Comment")
-                    .map(|s| fix_potential_double_encoding(&s))
-                    .filter(|s| !s.is_empty()),
-                numeric_precision: None,
-                numeric_scale: None,
-                character_maximum_length: None,
-                enum_values: None,
-                character_set: collation
-                    .as_deref()
-                    .and_then(|c| c.split_once('_').map(|(charset, _)| charset.to_string()))
-                    .filter(|s| !s.is_empty()),
-                collation,
-            })
-        })
-        .collect())
-}
-
-/// `SHOW CREATE TABLE <catalog>.<database>.<table>` → DDL for an external
-/// catalog table.
-pub async fn show_create_table_ddl_from(
-    pool: &MySqlPool,
-    catalog: &str,
-    database: &str,
-    table: &str,
-) -> Result<String, String> {
-    let sql = format!("SHOW CREATE TABLE {}", doris_catalog_table_ref(catalog, database, table));
-    let mut conn = get_conn_with_health_check(pool).await?;
-    let result = conn.query_iter(&sql).await.map_err(|e| e.to_string())?;
-    let rows: Vec<mysql_async::Row> = result.collect_and_drop().await.map_err(|e| e.to_string())?;
-    let row = rows.first().ok_or("DDL not found")?;
-    row.get_opt::<String, usize>(1)
-        .and_then(|result| result.ok())
-        .or_else(|| {
-            row.get_opt::<Vec<u8>, usize>(1)
-                .and_then(|result| result.ok())
-                .map(|b| String::from_utf8_lossy(&b).to_string())
-        })
-        .ok_or_else(|| "Failed to read DDL".to_string())
-}
-
-/// Best-effort index listing for an external catalog table. External catalogs
-/// generally do not expose MySQL-style index metadata via `information_schema`
-/// (that view is scoped to the internal catalog), so indexes are derived from
-/// `SHOW CREATE TABLE` parsing. Returns empty on failure (graceful degradation
-/// — indexes are informational for external tables).
-pub async fn list_doris_catalog_indexes(
-    pool: &MySqlPool,
-    catalog: &str,
-    database: &str,
-    table: &str,
-) -> Result<Vec<IndexInfo>, String> {
-    let ddl = show_create_table_ddl_from(pool, catalog, database, table).await?;
-    Ok(doris_indexes_from_create_table_ddl(&ddl))
-}
-
-fn doris_indexes_from_create_table_ddl(ddl: &str) -> Vec<IndexInfo> {
-    let mut indexes = Vec::new();
-    for raw_line in ddl.lines() {
-        let line = trim_ddl_definition_line(raw_line);
-        if line.is_empty() {
-            continue;
-        }
-        let upper = line.to_ascii_uppercase();
-        if upper.starts_with("PRIMARY KEY") {
-            if let Some(index) = doris_table_key_index("PRIMARY", line, true, true, "PRIMARY KEY") {
-                indexes.push(index);
-            }
-        } else if upper.starts_with("UNIQUE KEY") {
-            if let Some(index) = doris_table_key_index("UNIQUE KEY", line, true, false, "UNIQUE KEY") {
-                indexes.push(index);
-            }
-        } else if upper.starts_with("INDEX ") {
-            if let Some(index) = doris_secondary_index(line) {
-                indexes.push(index);
-            }
-        }
-    }
-    indexes
-}
-
-fn trim_ddl_definition_line(line: &str) -> &str {
-    let mut trimmed = line.trim();
-    if let Some(rest) = trimmed.strip_prefix(',') {
-        trimmed = rest.trim_start();
-    }
-    while let Some(rest) = trimmed.strip_suffix(',') {
-        trimmed = rest.trim_end();
-    }
-    trimmed
-}
-
-fn doris_table_key_index(
-    name: &str,
-    line: &str,
-    is_unique: bool,
-    is_primary: bool,
-    index_type: &str,
-) -> Option<IndexInfo> {
-    let columns = parse_mysql_index_columns(first_parenthesized_content(line)?);
-    if columns.is_empty() {
-        return None;
-    }
-    Some(IndexInfo {
-        name: name.to_string(),
-        columns,
-        is_unique,
-        is_primary,
-        filter: None,
-        index_type: Some(index_type.to_string()),
-        included_columns: None,
-        comment: None,
-    })
-}
-
-fn doris_secondary_index(line: &str) -> Option<IndexInfo> {
-    let (_, rest) = split_keyword_prefix(line, "INDEX")?;
-    let (name, after_name) = read_mysql_identifier(rest.trim_start())?;
-    let columns = parse_mysql_index_columns(first_parenthesized_content(after_name)?);
-    if columns.is_empty() {
-        return None;
-    }
-    Some(IndexInfo {
-        name,
-        columns,
-        is_unique: false,
-        is_primary: false,
-        filter: None,
-        index_type: mysql_keyword_argument(after_name, "USING").or_else(|| Some("INDEX".to_string())),
-        included_columns: None,
-        comment: mysql_quoted_string_argument(after_name, "COMMENT"),
-    })
-}
-
-fn split_keyword_prefix<'a>(line: &'a str, keyword: &str) -> Option<(&'a str, &'a str)> {
-    if line.len() < keyword.len() || !line[..keyword.len()].eq_ignore_ascii_case(keyword) {
-        return None;
-    }
-    let rest = &line[keyword.len()..];
-    if !rest.is_empty() && is_mysql_identifier_byte(rest.as_bytes()[0]) {
-        return None;
-    }
-    Some((&line[..keyword.len()], rest))
-}
-
-fn read_mysql_identifier(input: &str) -> Option<(String, &str)> {
-    let input = input.trim_start();
-    if input.is_empty() {
-        return None;
-    }
-    let bytes = input.as_bytes();
-    if bytes[0] == b'`' {
-        let mut i = 1;
-        let mut value = String::new();
-        while i < bytes.len() {
-            if bytes[i] == b'`' {
-                if i + 1 < bytes.len() && bytes[i + 1] == b'`' {
-                    value.push('`');
-                    i += 2;
-                    continue;
-                }
-                return Some((value, &input[i + 1..]));
-            }
-            let ch = input[i..].chars().next()?;
-            value.push(ch);
-            i += ch.len_utf8();
-        }
-        return None;
-    }
-
-    let end = input.find(|ch: char| ch.is_whitespace() || matches!(ch, '(' | ')' | ',')).unwrap_or(input.len());
-    if end == 0 {
-        return None;
-    }
-    Some((input[..end].to_string(), &input[end..]))
-}
-
-fn first_parenthesized_content(input: &str) -> Option<&str> {
-    let bytes = input.as_bytes();
-    let mut depth = 0usize;
-    let mut start = None;
-    let mut i = 0usize;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'\'' | b'"' | b'`' => {
-                i = skip_mysql_quoted(input, i, bytes[i]);
-                continue;
-            }
-            b'(' => {
-                if depth == 0 {
-                    start = Some(i + 1);
-                }
-                depth += 1;
-            }
-            b')' if depth > 0 => {
-                depth -= 1;
-                if depth == 0 {
-                    return start.map(|start| &input[start..i]);
-                }
-            }
-            _ => {}
-        }
-        i += 1;
-    }
-    None
-}
-
-fn split_top_level_csv(input: &str) -> Vec<&str> {
-    let bytes = input.as_bytes();
-    let mut parts = Vec::new();
-    let mut depth = 0usize;
-    let mut start = 0usize;
-    let mut i = 0usize;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'\'' | b'"' | b'`' => {
-                i = skip_mysql_quoted(input, i, bytes[i]);
-                continue;
-            }
-            b'(' => depth += 1,
-            b')' if depth > 0 => depth -= 1,
-            b',' if depth == 0 => {
-                parts.push(input[start..i].trim());
-                start = i + 1;
-            }
-            _ => {}
-        }
-        i += 1;
-    }
-    parts.push(input[start..].trim());
-    parts
-}
-
-fn parse_mysql_index_columns(input: &str) -> Vec<String> {
-    split_top_level_csv(input)
-        .into_iter()
-        .filter_map(|part| read_mysql_identifier(part).map(|(column, _)| column))
-        .filter(|column| !column.is_empty())
-        .collect()
-}
-
-fn mysql_keyword_argument(input: &str, keyword: &str) -> Option<String> {
-    let bytes = input.as_bytes();
-    let mut i = 0usize;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'\'' | b'"' | b'`' => {
-                i = skip_mysql_quoted(input, i, bytes[i]);
-                continue;
-            }
-            _ if mysql_keyword_at(input, i, keyword) => {
-                return read_mysql_identifier(&input[i + keyword.len()..]).map(|(value, _)| value);
-            }
-            _ => i += 1,
-        }
-    }
-    None
-}
-
-fn mysql_quoted_string_argument(input: &str, keyword: &str) -> Option<String> {
-    let bytes = input.as_bytes();
-    let mut i = 0usize;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'\'' | b'"' | b'`' => {
-                i = skip_mysql_quoted(input, i, bytes[i]);
-                continue;
-            }
-            _ if mysql_keyword_at(input, i, keyword) => {
-                let rest = input[i + keyword.len()..].trim_start();
-                if rest.as_bytes().first().copied() != Some(b'\'') {
-                    return None;
-                }
-                let end = skip_mysql_quoted(rest, 0, b'\'');
-                if end <= 1 || end > rest.len() {
-                    return None;
-                }
-                return Some(rest[1..end - 1].replace("\\'", "'").replace("''", "'"));
-            }
-            _ => i += 1,
-        }
-    }
-    None
-}
-
 pub async fn list_foreign_keys(pool: &MySqlPool, database: &str, table: &str) -> Result<Vec<ForeignKeyInfo>, String> {
     let column_sql = format!(
         "SELECT CONSTRAINT_NAME, COLUMN_NAME, REFERENCED_TABLE_SCHEMA, \
@@ -6547,182 +5986,6 @@ mod tests {
         let filtered = filter_table_objects_fallback(objects, Some(&object_types), Some(1), Some(1));
 
         assert_eq!(filtered.iter().map(|object| object.name.as_str()).collect::<Vec<_>>(), vec!["c_table"]);
-    }
-
-    #[test]
-    fn starrocks_materialized_views_are_classified_without_duplicating_tables() {
-        let mut tables = vec![
-            TableInfo {
-                name: "orders".to_string(),
-                table_type: "BASE TABLE".to_string(),
-                comment: None,
-                parent_schema: None,
-                parent_name: None,
-            },
-            TableInfo {
-                name: "orders_view".to_string(),
-                table_type: "VIEW".to_string(),
-                comment: None,
-                parent_schema: None,
-                parent_name: None,
-            },
-            TableInfo {
-                name: "orders_mv".to_string(),
-                table_type: "VIEW".to_string(),
-                comment: None,
-                parent_schema: None,
-                parent_name: None,
-            },
-        ];
-        let materialized_views = HashSet::from(["orders_mv".to_string(), "orders_mv".to_string()]);
-
-        merge_starrocks_materialized_views(&mut tables, Ok(materialized_views), "analytics");
-
-        assert_eq!(tables.len(), 3);
-        assert_eq!(
-            tables.iter().map(|table| (table.name.as_str(), table.table_type.as_str())).collect::<Vec<_>>(),
-            vec![("orders", "BASE TABLE"), ("orders_view", "VIEW"), ("orders_mv", "MATERIALIZED_VIEW")]
-        );
-    }
-
-    #[test]
-    fn starrocks_async_materialized_views_reported_as_base_table_are_reclassified() {
-        // Async materialized views (StarRocks >= 2.5) appear as `BASE TABLE` in
-        // `SHOW FULL TABLES`. Classification must trust the
-        // `information_schema.materialized_views` source.
-        let mut tables = vec![
-            TableInfo {
-                name: "orders".to_string(),
-                table_type: "BASE TABLE".to_string(),
-                comment: None,
-                parent_schema: None,
-                parent_name: None,
-            },
-            TableInfo {
-                name: "orders_async_mv".to_string(),
-                table_type: "BASE TABLE".to_string(),
-                comment: None,
-                parent_schema: None,
-                parent_name: None,
-            },
-        ];
-        let materialized_views = HashSet::from(["orders_async_mv".to_string()]);
-
-        merge_starrocks_materialized_views(&mut tables, Ok(materialized_views), "analytics");
-
-        assert_eq!(
-            tables.iter().map(|table| (table.name.as_str(), table.table_type.as_str())).collect::<Vec<_>>(),
-            vec![("orders", "BASE TABLE"), ("orders_async_mv", "MATERIALIZED_VIEW")]
-        );
-    }
-
-    #[test]
-    fn starrocks_materialized_view_lookup_failure_keeps_base_types() {
-        let mut tables = vec![TableInfo {
-            name: "orders_mv".to_string(),
-            table_type: "VIEW".to_string(),
-            comment: None,
-            parent_schema: None,
-            parent_name: None,
-        }];
-
-        merge_starrocks_materialized_views(&mut tables, Err("permission denied".to_string()), "analytics");
-
-        assert_eq!(tables[0].table_type, "VIEW");
-    }
-
-    #[test]
-    fn starrocks_sync_mv_absent_from_show_full_tables_is_appended_from_information_schema() {
-        // StarRocks versions predating starrocks/starrocks#73396 (merged
-        // 2026-05-19) report sync MVs as "not registered as separate Tables",
-        // so SHOW FULL TABLES omits them. The merger must union names from
-        // information_schema.materialized_views so the sidebar and DDL path
-        // still resolve them.
-        let mut tables = vec![TableInfo {
-            name: "orders".to_string(),
-            table_type: "BASE TABLE".to_string(),
-            comment: None,
-            parent_schema: None,
-            parent_name: None,
-        }];
-        let materialized_views = HashSet::from([
-            "orders_mv".to_string(),       // already present (reclassify path)
-            "daily_orders_mv".to_string(), // absent from SHOW FULL TABLES (union path)
-        ]);
-
-        merge_starrocks_materialized_views(&mut tables, Ok(materialized_views), "analytics");
-
-        assert_eq!(tables.len(), 3);
-        assert_eq!(
-            tables.iter().map(|table| (table.name.as_str(), table.table_type.as_str())).collect::<Vec<_>>(),
-            vec![
-                ("orders", "BASE TABLE"),
-                ("daily_orders_mv", "MATERIALIZED_VIEW"),
-                ("orders_mv", "MATERIALIZED_VIEW"),
-            ]
-        );
-    }
-
-    #[test]
-    fn starrocks_materialized_view_query_is_scoped_to_database() {
-        let sql = starrocks_materialized_views_sql("tenant's analytics");
-
-        assert_eq!(
-            sql,
-            "SELECT TABLE_NAME FROM information_schema.materialized_views WHERE TABLE_SCHEMA = 'tenant\\'s analytics'"
-        );
-    }
-
-    #[test]
-    fn mysql_materialized_view_definition_fallback_is_scoped_to_db_and_name() {
-        // StarRocks predating PR 73396 (merged 2026-05-19) rejects
-        // `SHOW CREATE MATERIALIZED VIEW` for sync MVs with "Table not found"
-        // because sync MVs are not registered as separate Tables. The fallback
-        // path queries information_schema.materialized_views directly. The
-        // regression guards the SQL shape and the value escaping used by that
-        // fallback so the wire format isn't accidentally regressed.
-        assert_eq!(
-            mysql_materialized_view_definition_sql("shop", "daily_sales_mv"),
-            "SELECT MATERIALIZED_VIEW_DEFINITION FROM information_schema.materialized_views WHERE TABLE_SCHEMA = 'shop' AND TABLE_NAME = 'daily_sales_mv' LIMIT 1"
-        );
-        assert_eq!(
-            mysql_materialized_view_definition_sql("tenant's analytics", "weird'name"),
-            "SELECT MATERIALIZED_VIEW_DEFINITION FROM information_schema.materialized_views WHERE TABLE_SCHEMA = 'tenant\\'s analytics' AND TABLE_NAME = 'weird\\'name' LIMIT 1"
-        );
-    }
-
-    #[test]
-    fn starrocks_object_conversion_preserves_table_view_and_materialized_view_types() {
-        let tables = vec![
-            TableInfo {
-                name: "orders".to_string(),
-                table_type: "BASE TABLE".to_string(),
-                comment: None,
-                parent_schema: None,
-                parent_name: None,
-            },
-            TableInfo {
-                name: "orders_view".to_string(),
-                table_type: "VIEW".to_string(),
-                comment: None,
-                parent_schema: None,
-                parent_name: None,
-            },
-            TableInfo {
-                name: "orders_mv".to_string(),
-                table_type: "MATERIALIZED_VIEW".to_string(),
-                comment: None,
-                parent_schema: None,
-                parent_name: None,
-            },
-        ];
-
-        let objects = table_infos_to_objects(tables, &HashMap::new(), "analytics");
-
-        assert_eq!(
-            objects.iter().map(|object| (object.name.as_str(), object.object_type.as_str())).collect::<Vec<_>>(),
-            vec![("orders", "TABLE"), ("orders_view", "VIEW"), ("orders_mv", "MATERIALIZED_VIEW")]
-        );
     }
 
     #[test]

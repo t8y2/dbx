@@ -196,6 +196,8 @@ pub async fn change_password(
 pub async fn logout(State(state): State<Arc<WebState>>, req: Request<axum::body::Body>) -> Response {
     if let Some(token) = extract_session_token(&req) {
         state.sessions.write().await.remove(&token);
+        // 登出只清除当前登录会话的临时密码，不影响其他会话与桌面端凭据。
+        state.app.session_credentials.clear_owner(&token);
     }
     let cookie = format!("dbx_session=; Path={}; HttpOnly; Max-Age=0", session_cookie_path(&state));
     (StatusCode::OK, [("set-cookie", cookie.as_str())], Json(serde_json::json!({"ok": true}))).into_response()
@@ -243,9 +245,17 @@ pub async fn auth_middleware(
     }
 
     // Check session token
-    if let Some(token) = extract_session_token(&req) {
-        if state.sessions.read().await.contains(&token) {
-            return next.run(req).await;
+    let token = extract_session_token(&req);
+    if let Some(ref token) = token {
+        if state.sessions.read().await.contains(token) {
+            // 在下游处理器及其 await 到的池创建路径上注入当前登录会话的 owner 作用域，
+            // 使 save_password=false 连接的临时密码按会话隔离（见 SessionCredentialStore）。
+            let owner = token.clone();
+            return dbx_core::session_credentials::with_credential_owner(
+                Some(owner),
+                async move { next.run(req).await },
+            )
+            .await;
         }
     }
 

@@ -180,6 +180,12 @@ func (c *sqlConnection) QueryContext(ctx context.Context, query string, args []d
 		return nil, fmt.Errorf("HiveServer2 returned no operation handle")
 	}
 	if !cursor.operationHandle.HasResultSet {
+		if cursor.conn.configuration.WaitForNonQueryCompletion {
+			if err := cursor.waitForCompletion(ctx); err != nil {
+				_ = closeCursor(cursor)
+				return nil, err
+			}
+		}
 		result := &NonQueryResult{AffectedRows: cursorAffectedRows(cursor)}
 		if err := closeCursor(cursor); err != nil {
 			return nil, err

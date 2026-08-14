@@ -15,6 +15,7 @@ const SHOW_DATABASES_SQL: &str = "SHOW DATABASES";
 const ENABLE_SYSTEM_TABLES_SQL: &str = "SET @@dolt_show_system_tables = 1";
 const DISABLE_SYSTEM_TABLES_SQL: &str = "SET @@dolt_show_system_tables = 0";
 const SHOW_SYSTEM_TABLES_CONFIG_KEY: &str = "doltShowSystemTables";
+const SYSTEM_TABLE_PREFIX: &str = "dolt";
 
 pub fn is_config(config: &ConnectionConfig) -> bool {
     is_profile(&config.db_type, config.driver_profile.as_deref())
@@ -28,6 +29,10 @@ pub fn system_tables_visible(config: &ConnectionConfig) -> bool {
             .and_then(|value| value.get(SHOW_SYSTEM_TABLES_CONFIG_KEY))
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(false)
+}
+
+pub fn requests_system_tables(include_patterns: Option<&[String]>) -> bool {
+    include_patterns.is_some_and(|patterns| patterns.iter().any(|pattern| pattern.trim().eq_ignore_ascii_case("dolt%")))
 }
 
 fn is_profile(db_type: &DatabaseType, driver_profile: Option<&str>) -> bool {
@@ -49,15 +54,27 @@ pub async fn list_databases(pool: &MySqlPool) -> Result<Vec<DatabaseInfo>, Strin
     Ok(database_infos(databases))
 }
 
-pub async fn list_tables(pool: &MySqlPool, database: &str, filter: Option<&str>) -> Result<Vec<TableInfo>, String> {
+pub async fn list_system_tables(
+    pool: &MySqlPool,
+    database: &str,
+    filter: Option<&str>,
+) -> Result<Vec<TableInfo>, String> {
     // The visibility flag is session-scoped, so setup, metadata lookup, and
     // cleanup must use the same pooled connection.
     let mut conn = get_conn_with_timeout(pool, super::connection_timeout()).await?;
     conn.query_drop(ENABLE_SYSTEM_TABLES_SQL).await.map_err(|error| error.to_string())?;
-    let tables = list_table_names_show_filtered_with_conn(&mut conn, database, filter, &[]).await;
+    let server_filter = filter.map(str::trim).filter(|filter| !filter.is_empty()).unwrap_or(SYSTEM_TABLE_PREFIX);
+    let tables = list_table_names_show_filtered_with_conn(&mut conn, database, Some(server_filter), &[])
+        .await
+        .map(retain_system_tables);
     if let Err(error) = conn.query_drop(DISABLE_SYSTEM_TABLES_SQL).await {
         log::warn!("Failed to reset Dolt system table session variable before returning connection: {error}");
     }
+    tables
+}
+
+fn retain_system_tables(mut tables: Vec<TableInfo>) -> Vec<TableInfo> {
+    tables.retain(|table| table.name.to_ascii_lowercase().starts_with(SYSTEM_TABLE_PREFIX));
     tables
 }
 
@@ -155,6 +172,47 @@ mod tests {
 
         config.driver_profile = Some("mysql".to_string());
         assert!(!system_tables_visible(&config));
+    }
+
+    #[test]
+    fn system_table_requests_require_the_dedicated_include_pattern() {
+        assert!(requests_system_tables(Some(&["dolt%".to_string()])));
+        assert!(requests_system_tables(Some(&[" DOLT% ".to_string()])));
+        assert!(!requests_system_tables(Some(&["%dolt%".to_string()])));
+        assert!(!requests_system_tables(Some(&[])));
+        assert!(!requests_system_tables(None));
+    }
+
+    #[test]
+    fn system_table_results_exclude_ordinary_tables_after_show_fallbacks() {
+        let tables = vec![
+            TableInfo {
+                name: "dolt_log".to_string(),
+                table_type: "BASE TABLE".to_string(),
+                comment: None,
+                parent_schema: None,
+                parent_name: None,
+            },
+            TableInfo {
+                name: "DOLT_BRANCHES".to_string(),
+                table_type: "BASE TABLE".to_string(),
+                comment: None,
+                parent_schema: None,
+                parent_name: None,
+            },
+            TableInfo {
+                name: "orders".to_string(),
+                table_type: "BASE TABLE".to_string(),
+                comment: Some("ordinary".to_string()),
+                parent_schema: None,
+                parent_name: None,
+            },
+        ];
+
+        assert_eq!(
+            retain_system_tables(tables).into_iter().map(|table| table.name).collect::<Vec<_>>(),
+            vec!["dolt_log", "DOLT_BRANCHES"]
+        );
     }
 
     #[test]

@@ -44,12 +44,15 @@ function installApiMocks(extra: Record<string, unknown> = {}) {
   vi.doMock("@/lib/backend/api", () => ({
     checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
     connectDb: vi.fn().mockResolvedValue("pg-1"),
+    disconnectDb: vi.fn().mockResolvedValue(undefined),
     deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
     loadSchemaCache: vi.fn().mockResolvedValue(null),
     saveConnections: vi.fn().mockResolvedValue(undefined),
     saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
     connectionDatabaseInfo: vi.fn().mockResolvedValue(undefined),
     listInstalledAgents: vi.fn().mockResolvedValue([]),
+    sessionCredentialStatus: vi.fn().mockResolvedValue(false),
+    forgetSessionCredential: vi.fn().mockResolvedValue(undefined),
     ...extra,
   }));
 }
@@ -127,6 +130,62 @@ describe("connectionStore save_password opt-out", () => {
     expect(store.getConfig("pg-1")?.password).toBe("");
   });
 
+  it("connects with an explicitly submitted empty password", async () => {
+    installApiMocks();
+    installPasswordPromptMock();
+    requestPassword.mockResolvedValue({ password: "", rememberPassword: false });
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    const connection = postgresConnection({ id: "pg-1", save_password: false, password: "" });
+    store.connections = [connection];
+
+    await store.connect(connection);
+
+    const { connectDb } = await import("@/lib/backend/api");
+    expect(connectDb).toHaveBeenCalledWith(expect.objectContaining({ id: "pg-1", password: "" }), expect.any(Number));
+    expect(store.getConfig("pg-1")).toEqual(expect.objectContaining({ password: "", save_password: false }));
+  });
+
+  it("connects to NOSASL Impala without prompting for an empty password", async () => {
+    installApiMocks();
+    installPasswordPromptMock();
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    const connection = postgresConnection({
+      id: "impala-1",
+      name: "Impala",
+      db_type: "impala",
+      port: 21050,
+      username: "",
+      password: "",
+      save_password: false,
+      url_params: "auth=noSasl",
+    });
+    store.connections = [connection];
+
+    await store.connect(connection);
+
+    expect(requestPassword).not.toHaveBeenCalled();
+    const { connectDb } = await import("@/lib/backend/api");
+    expect(connectDb).toHaveBeenCalledWith(expect.objectContaining({ id: "impala-1", password: "", save_password: false }), expect.any(Number));
+  });
+
+  it("remembers an explicitly submitted empty password", async () => {
+    installApiMocks();
+    installPasswordPromptMock();
+    requestPassword.mockResolvedValue({ password: "", rememberPassword: true });
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    const connection = postgresConnection({ id: "pg-1", save_password: false, password: "" });
+    store.connections = [connection];
+
+    await store.connect(connection);
+
+    const { saveConnections } = await import("@/lib/backend/api");
+    expect(saveConnections).toHaveBeenLastCalledWith(expect.arrayContaining([expect.objectContaining({ id: "pg-1", password: "", save_password: true })]));
+    expect(store.getConfig("pg-1")).toEqual(expect.objectContaining({ password: "", save_password: true }));
+  });
+
   it("connect cancels when the prompt is dismissed", async () => {
     installApiMocks();
     installPasswordPromptMock();
@@ -155,6 +214,58 @@ describe("connectionStore save_password opt-out", () => {
     await store.connect(fresh);
 
     expect(requestPassword).not.toHaveBeenCalled();
+  });
+
+  it("connect skips the prompt when the backend already has a session credential", async () => {
+    installApiMocks({ sessionCredentialStatus: vi.fn().mockResolvedValue(true) });
+    installPasswordPromptMock();
+    requestPassword.mockResolvedValue({ password: "never-used", rememberPassword: false });
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    const connection = postgresConnection({ id: "pg-1", save_password: false, password: "" });
+    store.connections = [connection];
+
+    await store.connect(connection);
+
+    // 本次运行期已输入过密码：不再弹窗，直接以空密码 connectDb（后端补主密码）。
+    expect(requestPassword).not.toHaveBeenCalled();
+    const { connectDb } = await import("@/lib/backend/api");
+    expect(connectDb).toHaveBeenCalledWith(expect.objectContaining({ id: "pg-1", password: "" }), expect.any(Number));
+  });
+
+  it("disconnectAndForgetConnectionPassword clears the backend session credential", async () => {
+    const forgetSessionCredential = vi.fn().mockResolvedValue(undefined);
+    installApiMocks({
+      forgetSessionCredential,
+      sessionCredentialStatus: vi.fn().mockResolvedValue(true),
+    });
+    installPasswordPromptMock();
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    const connection = postgresConnection({ id: "pg-1", save_password: false, password: "" });
+    store.connections = [connection];
+    store.connectedIds.add("pg-1");
+
+    await store.disconnectAndForgetConnectionPassword("pg-1");
+
+    expect(forgetSessionCredential).toHaveBeenCalledWith("pg-1");
+    expect(store.connectedIds.has("pg-1")).toBe(false);
+  });
+
+  it("disconnectAndForgetConnectionPassword propagates forget failures", async () => {
+    const forgetSessionCredential = vi.fn().mockRejectedValue(new Error("no session credential"));
+    installApiMocks({
+      forgetSessionCredential,
+      sessionCredentialStatus: vi.fn().mockResolvedValue(true),
+    });
+    installPasswordPromptMock();
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    const connection = postgresConnection({ id: "pg-1", save_password: false, password: "" });
+    store.connections = [connection];
+    store.connectedIds.add("pg-1");
+
+    await expect(store.disconnectAndForgetConnectionPassword("pg-1")).rejects.toThrow("no session credential");
   });
 
   it("prompts and retries when MySQL rejects a synced connection that sent no password", async () => {

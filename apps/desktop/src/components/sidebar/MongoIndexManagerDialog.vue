@@ -158,6 +158,10 @@ watch(showMongoIndexManagerDialog, (open) => {
               <Switch v-model="mongoCreateIndexForm.sparse" :disabled="mongoCreateIndexLoading" :aria-label="t('contextMenu.createMongoIndexSparse')" />
               {{ t("contextMenu.createMongoIndexSparse") }}
             </label>
+            <label v-if="mongoIndexManagerMode === 'edit' || mongoCreateIndexForm.hidden" class="flex w-fit cursor-pointer items-center gap-2 text-sm">
+              <Switch v-model="mongoCreateIndexForm.hidden" :disabled="mongoCreateIndexLoading" :aria-label="t('mongo.indexHidden')" />
+              {{ t("mongo.indexHidden") }}
+            </label>
             <label class="grid min-w-0 gap-1.5 text-sm">
               {{ t("mongo.indexExpireAfterSeconds") }}
               <Input v-model="mongoCreateIndexForm.expireAfterSeconds" :disabled="mongoCreateIndexLoading" inputmode="numeric" :placeholder="t('mongo.indexExpireAfterSecondsPlaceholder')" :aria-label="t('mongo.indexExpireAfterSeconds')" class="h-8 max-w-[260px]" />
@@ -184,6 +188,7 @@ watch(showMongoIndexManagerDialog, (open) => {
             </div>
           </details>
 
+          <p v-if="mongoIndexManagerMode === 'edit' && mongoIndexManagerSelected?.extraOptions" class="text-xs text-muted-foreground">{{ t("contextMenu.mongoIndexExtraOptionsPreserved") }}</p>
           <p v-if="mongoIndexManagerMode === 'edit'" class="text-xs text-muted-foreground">{{ t("contextMenu.mongoIndexRebuildHint") }}</p>
           <p v-if="mongoCreateIndexError" class="min-w-0 max-w-full whitespace-pre-wrap break-all text-sm text-destructive">{{ mongoCreateIndexError }}</p>
 

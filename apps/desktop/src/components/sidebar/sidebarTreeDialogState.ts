@@ -113,6 +113,7 @@ function emptyMongoCreateIndexForm(): MongoCreateIndexForm {
     partialFilterExpression: "",
     background: false,
     bucketSize: "",
+    hidden: false,
   };
 }
 

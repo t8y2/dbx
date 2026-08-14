@@ -23,6 +23,8 @@ export interface MongoCreateIndexForm {
   background: boolean;
   /** Only meaningful for geoHaystack indexes, removed in MongoDB 4.4+. */
   bucketSize: string;
+  /** Hide the index from the query planner (MongoDB 4.4+). */
+  hidden: boolean;
 }
 
 export type MongoCreateIndexRequest =
@@ -166,9 +168,53 @@ export function buildMongoCreateIndexRequest(form: MongoCreateIndexForm): MongoC
     ...(partialFilterExpression === undefined ? {} : { partialFilterExpression }),
     ...(form.background ? { background: true } : {}),
     ...(bucketSize === undefined ? {} : { bucketSize }),
+    ...(form.hidden ? { hidden: true } : {}),
   };
   const optionsJson = Object.keys(options).length ? JSON.stringify(options) : undefined;
   return { valid: true, keysJson, optionsJson };
+}
+
+/**
+ * Merge the server-reported `extraOptions` (collation, wildcardProjection,
+ * weights, text defaults, geo options, …) into the form-built request so the
+ * drop + recreate preserves every option the form does not model. Form values
+ * take precedence: if the user explicitly set `unique` in the form, that wins
+ * over any `unique` in `extraOptions` (which shouldn't appear there anyway
+ * since it's modeled, but the principle holds for overlapping future fields).
+ */
+export function mergeExtraOptionsIntoRequest(request: Extract<MongoCreateIndexRequest, { valid: true }>, extraOptions?: string): { keysJson: string; optionsJson?: string } {
+  if (!extraOptions?.trim()) return { keysJson: request.keysJson, optionsJson: request.optionsJson };
+  let extra: Record<string, unknown>;
+  try {
+    const parsed = JSON.parse(extraOptions);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return request;
+    extra = parsed as Record<string, unknown>;
+  } catch {
+    // Malformed extra options should not block the edit; fall back to form-only.
+    return request;
+  }
+  // `key` is the index key spec, never an option — filter it defensively.
+  delete extra.key;
+  const formOptions = request.optionsJson ? (JSON.parse(request.optionsJson) as Record<string, unknown>) : {};
+  // Form values take precedence over extraOptions for the same key.
+  const merged = { ...extra, ...formOptions };
+  const optionsJson = Object.keys(merged).length ? JSON.stringify(merged) : undefined;
+  return { keysJson: request.keysJson, optionsJson };
+}
+
+/**
+ * Preflight check before a destructive edit: verify the index still exists
+ * on the server and that its keys have not changed since the dialog was
+ * opened. Returns `{ safe: true }` when the edit can proceed; otherwise
+ * `{ safe: false, reason }` with a human-readable explanation.
+ */
+export function preflightEditIndexSpec(currentSpecs: readonly { name: string; keys?: readonly { field: string; direction: string }[] | null; properties_complete?: boolean }[], originalName: string, originalKeyDescription: string): { safe: boolean; reason?: string } {
+  const current = currentSpecs.find((spec) => spec.name === originalName);
+  if (!current) return { safe: false, reason: "not-found" };
+  if (current.properties_complete === false) return { safe: true };
+  const currentKeyDescription = mongoIndexKeyDescription(current.keys ?? []);
+  if (currentKeyDescription !== originalKeyDescription) return { safe: false, reason: "stale" };
+  return { safe: true };
 }
 
 /**
@@ -305,6 +351,7 @@ export function mongoCreateIndexFormFromRow(row: MongoIndexRow): MongoCreateInde
     partialFilterExpression: row.partialFilterExpression ?? "",
     background: row.background,
     bucketSize: row.bucketSize === undefined ? "" : String(row.bucketSize),
+    hidden: row.hidden,
   };
 }
 

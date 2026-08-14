@@ -4,6 +4,7 @@ import {
   isCloneableMongoCollection,
   isProtectedMongoIndex,
   isRenamableMongoCollection,
+  mergeExtraOptionsIntoRequest,
   mongoCollectionKindFromNode,
   mongoCollectionTableTypeFromNode,
   mongoCloneCollectionPreview,
@@ -16,6 +17,7 @@ import {
   mongoIndexKeyLabel,
   mongoRenameCollectionPreview,
   mongoReplaceIndexPreview,
+  preflightEditIndexSpec,
   toMongoCollectionKind,
   toMongoIndexRow,
   type MongoCreateIndexForm,
@@ -350,5 +352,95 @@ describe("mongoReplaceIndexPreview", () => {
     expect(preview).toBe(`${drop}\n${create}`);
     expect(preview).toContain('dropIndex("email_1")');
     expect(preview).toContain('createIndex({"email":1}, {"unique":true})');
+  });
+});
+
+describe("mongoCreateIndexFormFromRow hidden", () => {
+  it("preserves the hidden flag from the row", () => {
+    const row = toMongoIndexRow({ name: "hidden_idx", keys: [{ field: "x", direction: "1" }], hidden: true });
+    const form = mongoCreateIndexFormFromRow(row);
+    expect(form.hidden).toBe(true);
+  });
+
+  it("defaults hidden to false when the row does not report it", () => {
+    const row = toMongoIndexRow({ name: "visible_idx", keys: [{ field: "x", direction: "1" }] });
+    const form = mongoCreateIndexFormFromRow(row);
+    expect(form.hidden).toBe(false);
+  });
+});
+
+describe("buildMongoCreateIndexRequest hidden", () => {
+  it("emits hidden:true when the form sets it", () => {
+    const request = buildMongoCreateIndexRequest(indexForm([{ id: 1, path: "x", type: "1" }], { hidden: true }));
+    expect(request).toEqual({ valid: true, keysJson: '{"x":1}', optionsJson: '{"hidden":true}' });
+  });
+
+  it("omits hidden when the form leaves it false", () => {
+    const request = buildMongoCreateIndexRequest(indexForm([{ id: 1, path: "x", type: "1" }], { hidden: false }));
+    expect(request).toEqual({ valid: true, keysJson: '{"x":1}', optionsJson: undefined });
+  });
+});
+
+describe("mergeExtraOptionsIntoRequest", () => {
+  it("merges collation and wildcardProjection from extraOptions into the request", () => {
+    const request = { valid: true as const, keysJson: '{"x":1}', optionsJson: '{"name":"x_1"}' };
+    const extra = '{"collation":{"locale":"en"},"wildcardProjection":{"x":1}}';
+    const merged = mergeExtraOptionsIntoRequest(request, extra);
+    const parsed = JSON.parse(merged.optionsJson!);
+    expect(parsed.collation).toEqual({ locale: "en" });
+    expect(parsed.wildcardProjection).toEqual({ x: 1 });
+    expect(parsed.name).toBe("x_1");
+  });
+
+  it("form options take precedence over extraOptions for the same key", () => {
+    const request = { valid: true as const, keysJson: '{"x":1}', optionsJson: '{"name":"renamed"}' };
+    const extra = '{"name":"original","weights":{"content":2}}';
+    const merged = mergeExtraOptionsIntoRequest(request, extra);
+    const parsed = JSON.parse(merged.optionsJson!);
+    expect(parsed.name).toBe("renamed");
+    expect(parsed.weights).toEqual({ content: 2 });
+  });
+
+  it("filters out a stray key field from extraOptions", () => {
+    const request = { valid: true as const, keysJson: '{"x":1}', optionsJson: undefined };
+    const extra = '{"key":{"y":1},"collation":{"locale":"ja"}}';
+    const merged = mergeExtraOptionsIntoRequest(request, extra);
+    const parsed = JSON.parse(merged.optionsJson!);
+    expect(parsed.key).toBeUndefined();
+    expect(parsed.collation).toEqual({ locale: "ja" });
+  });
+
+  it("falls back to the form-only request when extraOptions is malformed", () => {
+    const request = { valid: true as const, keysJson: '{"x":1}', optionsJson: '{"unique":true}' };
+    const merged = mergeExtraOptionsIntoRequest(request, "{not valid json");
+    expect(merged.optionsJson).toBe('{"unique":true}');
+  });
+
+  it("returns the form request unchanged when extraOptions is empty", () => {
+    const request = { valid: true as const, keysJson: '{"x":1}', optionsJson: '{"unique":true}' };
+    const merged = mergeExtraOptionsIntoRequest(request, "");
+    expect(merged.optionsJson).toBe('{"unique":true}');
+  });
+});
+
+describe("preflightEditIndexSpec", () => {
+  it("reports safe when the index exists with matching keys", () => {
+    const specs = [{ name: "email_1", keys: [{ field: "email", direction: "1" }] }];
+    expect(preflightEditIndexSpec(specs, "email_1", "email ASC")).toEqual({ safe: true });
+  });
+
+  it("reports not-found when the index no longer exists", () => {
+    const specs = [{ name: "other", keys: [{ field: "x", direction: "1" }] }];
+    expect(preflightEditIndexSpec(specs, "email_1", "email ASC")).toEqual({ safe: false, reason: "not-found" });
+  });
+
+  it("reports stale when the keys have changed since the dialog was opened", () => {
+    const specs = [{ name: "email_1", keys: [{ field: "email", direction: "-1" }] }];
+    expect(preflightEditIndexSpec(specs, "email_1", "email ASC")).toEqual({ safe: false, reason: "stale" });
+  });
+
+  it("skips the key comparison when properties_complete is false (Legacy Agent)", () => {
+    const specs = [{ name: "email_1", keys: [{ field: "email", direction: "-1" }], properties_complete: false }];
+    expect(preflightEditIndexSpec(specs, "email_1", "email ASC")).toEqual({ safe: true });
   });
 });

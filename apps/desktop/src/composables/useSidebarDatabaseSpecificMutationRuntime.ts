@@ -13,6 +13,7 @@ import {
   isCloneableMongoCollection,
   isProtectedMongoIndex,
   isRenamableMongoCollection,
+  mergeExtraOptionsIntoRequest,
   mongoCollectionKindFromNode,
   mongoCloneCollectionPreview,
   mongoCreateIndexFormFromRow,
@@ -24,6 +25,7 @@ import {
   mongoDropIndexPreview,
   mongoRenameCollectionPreview,
   mongoReplaceIndexPreview,
+  preflightEditIndexSpec,
   toMongoIndexRow,
   type MongoCreateIndexRequest,
 } from "@/lib/sidebar/mongoCollectionMutation";
@@ -528,6 +530,17 @@ export function useSidebarDatabaseSpecificMutationRuntime(options: SidebarDataba
    * Edit an existing index by drop + recreate. The form was prefilled by
    * {@link startEditMongoIndexDraft}; this runs the two backend calls in
    * sequence inside the production-gated mutation shell.
+   *
+   * Safety strategy:
+   * 1. Merge `extraOptions` (collation, wildcardProjection, weights, …) back
+   *    into the create request so no server-reported option is silently lost.
+   * 2. Re-read the current index spec from the server before any destructive
+   *    operation and verify the index still exists with the expected keys.
+   * 3. When the user renamed the index, create the new one first, then drop
+   *    the old one — if create fails the original index is untouched.
+   * 4. When the name is unchanged (same-name rebuild), drop then create is
+   *    unavoidable; a create failure is surfaced with a clear message that
+   *    the original index has been removed.
    */
   async function confirmEditMongoIndex() {
     const node = sidebarFormTarget.value ?? activeNode.value;
@@ -543,21 +556,53 @@ export function useSidebarDatabaseSpecificMutationRuntime(options: SidebarDataba
       return;
     }
 
+    // Preserve server-reported options the form does not model (collation,
+    // wildcardProjection, weights, text defaults, geo options, …).
+    const row = mongoIndexManagerSelected.value;
+    const merged = mergeExtraOptionsIntoRequest(request, row?.extraOptions);
+
+    const newName = mongoCreateIndexForm.value.name.trim();
+    const isRename = newName && newName !== originalName;
+
     mongoCreateIndexError.value = "";
     await runMongoSidebarMutation({
       connection: connectionStore.getConfig(connectionId),
       database,
       // Review text shows both commands so production confirmation is explicit.
-      reviewText: mongoReplaceIndexPreview(database, collectionName, originalName, request.keysJson, request.optionsJson),
+      reviewText: mongoReplaceIndexPreview(database, collectionName, originalName, merged.keysJson, merged.optionsJson),
       source: t("production.sourceSidebar"),
       loading: mongoCreateIndexLoading,
       beforeExecute: () => connectionStore.ensureConnected(connectionId),
       execute: async () => {
-        // Drop first: if create fails the old index is gone, which is the
-        // documented MongoDB limitation. The confirm dialog warns the user.
+        // Re-read the current spec from the server to guard against concurrent
+        // modifications between when the dialog was opened and when the user
+        // confirmed the edit.
+        const originalKeyDescription = row?.keys ?? "";
+        const specs = await api.mongoListIndexSpecs(connectionId, database, collectionName);
+        const preflight = preflightEditIndexSpec(specs, originalName, originalKeyDescription);
+        if (!preflight.safe) {
+          throw new Error(preflight.reason === "not-found" ? t("contextMenu.mongoEditIndexNotFound", { name: originalName }) : t("contextMenu.mongoEditIndexStale", { name: originalName }));
+        }
+
+        if (isRename) {
+          // Safe rename: create the new index first. If create fails, the
+          // original index is untouched and the error surfaces cleanly.
+          const created = await api.mongoCreateIndex(connectionId, database, collectionName, merged.keysJson, merged.optionsJson);
+          await api.mongoDropIndexes(connectionId, database, collectionName, JSON.stringify(originalName), true);
+          return created;
+        }
+
+        // Same-name rebuild: drop then create is unavoidable. If create
+        // fails the original index is gone — surface a clear error.
         await api.mongoDropIndexes(connectionId, database, collectionName, JSON.stringify(originalName), true);
-        const created = await api.mongoCreateIndex(connectionId, database, collectionName, request.keysJson, request.optionsJson);
-        return created;
+        try {
+          return await api.mongoCreateIndex(connectionId, database, collectionName, merged.keysJson, merged.optionsJson);
+        } catch (createError) {
+          // Wrap the error so the user knows the original index was already
+          // dropped and the new one could not be created.
+          const baseMessage = errorMessage(createError);
+          throw new Error(t("contextMenu.mongoEditIndexCreateFailedAfterDrop", { name: originalName, error: baseMessage }));
+        }
       },
       onSuccess: async (created) => {
         toast(t("contextMenu.mongoEditIndexSuccess", { oldName: originalName, newName: created.name, collection: collectionName }), 3000);

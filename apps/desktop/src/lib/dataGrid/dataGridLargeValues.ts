@@ -31,6 +31,27 @@ export function largeValueCellMap(result: Pick<QueryResult, "large_value_cells">
   return new Map((result.large_value_cells ?? []).map((cell) => [largeValueCellKey(cell.row_index, cell.column_index), cell]));
 }
 
+export function createResultScopedPendingRequests<T>() {
+  const pending = new Map<string, { result: object; promise: Promise<T> }>();
+
+  return {
+    run(key: string, result: object, request: () => Promise<T>): Promise<T> {
+      const current = pending.get(key);
+      if (current?.result === result) return current.promise;
+
+      let entry: { result: object; promise: Promise<T> };
+      const promise = Promise.resolve()
+        .then(request)
+        .finally(() => {
+          if (pending.get(key) === entry) pending.delete(key);
+        });
+      entry = { result, promise };
+      pending.set(key, entry);
+      return promise;
+    },
+  };
+}
+
 export function appendLargeValueCells(previous: QueryResult["large_value_cells"], segment: QueryResult["large_value_cells"], rowOffset: number, appendedRowCount: number): QueryResult["large_value_cells"] {
   const appended = (segment ?? []).filter((cell) => cell.row_index < appendedRowCount).map((cell) => ({ ...cell, row_index: cell.row_index + rowOffset }));
   const combined = [...(previous ?? []), ...appended];

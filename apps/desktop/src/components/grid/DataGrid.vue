@@ -152,7 +152,7 @@ import { isCancelSearchShortcut, isCopyCurrentRowShortcut, isDeleteCurrentRowSho
 import { dataGridHeaderContentWidth, scrollbarGutterWidth } from "@/lib/dataGrid/dataGridScrollGutter";
 import { canFetchNextDataGridSegment, canGoNextDataGridPage, dataGridTotalRowCountLabelKey, dataGridTruncationHintKey, hasCompleteLocalDataGridResult, resolveDataGridPaginationTotal, type DataGridInexactTotalRowCountMode } from "@/lib/dataGrid/dataGridPagination";
 import { dataGridCountQueryOptions } from "@/lib/dataGrid/dataGridQueryOptions";
-import { largeValueCellKey, largeValueCellMap, tableDataLargeValuePreviewOptions } from "@/lib/dataGrid/dataGridLargeValues";
+import { createResultScopedPendingRequests, largeValueCellKey, largeValueCellMap, tableDataLargeValuePreviewOptions } from "@/lib/dataGrid/dataGridLargeValues";
 import { dataGridBottomScrollTop, dataGridScrollPosition, isDataGridAtScrollBottom, isDataGridNearScrollBottom, isDataGridPrefixAppend, shouldCheckInfiniteScrollAfterScroll, type DataGridScrollPosition } from "@/lib/dataGrid/dataGridInfiniteScroll";
 import { CANVAS_DATA_GRID_ROW_HEIGHT, MAX_CANVAS_DATA_GRID_PIXEL_RATIO, canvasDataGridActionOverlayWidth, canvasDataGridActionReservedWidth, dataGridSearchMatchKey, drawCanvasDataGrid, type CanvasDevicePixelSize } from "@/lib/dataGrid/canvasDataGridRenderer";
 import { DATA_GRID_DARK_STRIPED_ROW_BG, DATA_GRID_LIGHT_STRIPED_ROW_BG, dataGridActiveRowBackground } from "@/lib/dataGrid/dataGridPaintTheme";
@@ -4055,7 +4055,7 @@ type LargeValueCellRequest = {
 
 const LARGE_VALUE_FETCH_MAX_ROWS = 200;
 const LARGE_VALUE_FETCH_TARGET_BYTES = 64 * 1024 * 1024;
-const pendingLargeValueHydrations = new Map<string, Promise<boolean>>();
+const pendingLargeValueHydrations = createResultScopedPendingRequests<boolean>();
 const largeValueCellsByKey = computed(() => largeValueCellMap(props.result));
 
 function isLargeValuePreview(item: RowItem | undefined, columnIndex: number): boolean {
@@ -4224,33 +4224,30 @@ async function cloneRows(rowIds: number[]) {
 async function hydrateLargeValueCell(rowId: number, columnIndex: number): Promise<boolean> {
   const item = getRowItem(rowId);
   if (!isLargeValuePreview(item, columnIndex) || item?.sourceIndex === undefined) return true;
+  const sourceResult = props.result;
   const hydrationKey = largeValueCellKey(item.sourceIndex, columnIndex);
-  const pending = pendingLargeValueHydrations.get(hydrationKey);
-  if (pending) return pending;
-  const hydration = (async () => {
+  const operation = dataGridResultLifecycle.beginOperation();
+  return pendingLargeValueHydrations.run(hydrationKey, sourceResult, async () => {
     try {
       const resolved = await resolveLargeValueCells([rowId], [columnIndex]);
+      if (!dataGridResultLifecycle.isCurrent(operation) || props.result !== sourceResult) return false;
       const value = resolved.get(rowId)?.get(columnIndex);
       if (value === undefined && !resolved.get(rowId)?.has(columnIndex)) return false;
-      const row = [...(props.result.rows[item.sourceIndex!] ?? [])];
+      const row = [...(sourceResult.rows[item.sourceIndex!] ?? [])];
       row[columnIndex] = value ?? null;
-      const rows = props.result.rows.slice();
+      const rows = sourceResult.rows.slice();
       rows[item.sourceIndex!] = row;
-      props.result.rows = rows;
-      props.result.large_value_cells = props.result.large_value_cells?.filter((cell) => cell.row_index !== item.sourceIndex || cell.column_index !== columnIndex);
+      sourceResult.rows = rows;
+      sourceResult.large_value_cells = sourceResult.large_value_cells?.filter((cell) => cell.row_index !== item.sourceIndex || cell.column_index !== columnIndex);
       largeValueResolutionVersion.value += 1;
       clearCellFormatCache();
-      queryStore.invalidateResultEstimateForPayload(props.result);
+      queryStore.invalidateResultEstimateForPayload(sourceResult);
       return true;
     } catch (error) {
-      reportLargeValueLoadError(error);
+      if (dataGridResultLifecycle.isCurrent(operation) && props.result === sourceResult) reportLargeValueLoadError(error);
       return false;
-    } finally {
-      pendingLargeValueHydrations.delete(hydrationKey);
     }
-  })();
-  pendingLargeValueHydrations.set(hydrationKey, hydration);
-  return hydration;
+  });
 }
 
 const exportContextCell = computed(() => {

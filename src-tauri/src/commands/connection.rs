@@ -605,7 +605,7 @@ mod tests {
         initial.id = "conn-a".to_string();
         initial.save_password = false;
         initial.password = "session-secret".to_string();
-        state.session_credentials.set("", "conn-a", "session-secret");
+        let _ = state.session_credentials.set("", "conn-a", "session-secret");
         state.configs.write().await.insert(initial.id.clone(), initial.clone());
 
         // 持久化同步的空密码 config 覆盖运行态：save_password=false 连接仅密码
@@ -670,7 +670,7 @@ async fn sync_connection_configs(state: &AppState, configs: &[ConnectionConfig])
         } else {
             connection_pool_ids_to_drop.insert(id.clone());
             // 连接已被删除：同步清理本次运行期会话凭据。
-            state.session_credentials.remove("", id);
+            state.session_credentials.clear_connection(id);
             if existing.db_type == DatabaseType::Nacos {
                 nacos_adapter_ids_to_drop.insert(id.clone());
             }
@@ -699,7 +699,7 @@ async fn sync_connection_configs(state: &AppState, configs: &[ConnectionConfig])
             if !connection_configs_pool_equivalent(&previous, config) {
                 // 连接端点/认证参数已变：旧会话凭据不再适配，清除以便下次重新输入，
                 // 避免复用旧密码去连新端点而直接认证失败。
-                state.session_credentials.remove("", &config.id);
+                state.session_credentials.clear_connection(&config.id);
                 connection_pool_ids_to_drop.insert(config.id.clone());
             }
         }
@@ -1242,7 +1242,7 @@ async fn test_connection_with_info_inner(
 /// 供本次运行内 AI / 元数据 / 池重建复用（进程退出即丢，绝不落盘）。
 fn record_session_credential(state: &AppState, config: &ConnectionConfig, connection_id: &str) {
     if !config.save_password && !config.password.is_empty() {
-        state.session_credentials.set("", connection_id, &config.password);
+        let _ = state.session_credentials.set("", connection_id, &config.password);
     }
 }
 

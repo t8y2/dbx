@@ -230,9 +230,6 @@ pub struct AppState {
     /// Web 端 owner 为已认证会话 token，不同登录会话互不可见。建池/池重建/
     /// AI/元数据从它读取，前端通过状态接口查询。
     pub session_credentials: SessionCredentialStore,
-    /// 记录 no-save 连接池由哪个 owner 创建，用于在多会话场景下避免复用其他会话
-    /// 的池（见 `get_or_create_pool_for_session_inner` 的复用判定）。
-    pool_credential_owners: Arc<RwLock<HashMap<String, String>>>,
     #[cfg(feature = "mq-admin")]
     pub mq_registry: crate::mq::MqAdminRegistry,
 }
@@ -1003,12 +1000,7 @@ impl AppState {
             // 桌面端/未注入 owner：单用户场景，按既有逻辑复用。
             return false;
         }
-        match self.pool_credential_owners.read().await.get(pool_key) {
-            Some(recorded) => recorded != &owner,
-            // 旧版本/桌面端创建的池未记录 owner：视为可复用（同库同账号，风险等同
-            // 已保存密码连接，且为罕见迁移场景）。
-            None => false,
-        }
+        self.session_credentials.pool_owner_mismatch(pool_key, &owner)
     }
 
     async fn handle_shared_connection_open_error(
@@ -1093,7 +1085,6 @@ impl AppState {
             postgres_cancel_contexts: Arc::new(RwLock::new(HashMap::new())),
             transaction_sessions: Arc::new(RwLock::new(HashMap::new())),
             session_credentials: SessionCredentialStore::new(),
-            pool_credential_owners: Arc::new(RwLock::new(HashMap::new())),
             #[cfg(feature = "mq-admin")]
             mq_registry: crate::mq::MqAdminRegistry::new(),
         }
@@ -1403,7 +1394,7 @@ impl AppState {
         if !config.save_password {
             let owner = crate::session_credentials::current_credential_owner().unwrap_or_default();
             if !owner.is_empty() {
-                self.pool_credential_owners.write().await.insert(pool_key, owner);
+                self.session_credentials.record_pool_owner(&pool_key, &owner);
             }
         }
         Ok(())
@@ -4259,7 +4250,7 @@ impl AppState {
         let pool_keys = self.connections.read().await.keys().cloned().collect::<Vec<_>>();
         self.stop_keepalive_tasks(&pool_keys).await;
         self.pool_activity.write().await.clear();
-        self.pool_credential_owners.write().await.clear();
+        self.session_credentials.clear_pool_owners();
         self.postgres_cancel_contexts.write().await.clear();
         self.draining_pools.lock().unwrap_or_else(|error| error.into_inner()).clear();
         self.connections.write().await.drain().collect()
@@ -4293,13 +4284,12 @@ impl AppState {
         {
             let mut activity = self.pool_activity.write().await;
             let mut cancel_contexts = self.postgres_cancel_contexts.write().await;
-            let mut pool_owners = self.pool_credential_owners.write().await;
             for key in &keys_to_remove {
                 activity.remove(key);
                 cancel_contexts.remove(key);
-                pool_owners.remove(key);
             }
         }
+        self.session_credentials.remove_pool_owners(&keys_to_remove);
         let mut conns = self.connections.write().await;
         let mut removed = Vec::with_capacity(keys_to_remove.len());
         for key in keys_to_remove {
@@ -5431,7 +5421,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
         let state = AppState::new_with_plugin_dir(storage, dir.join("plugins"));
-        state.session_credentials.set("", "conn-a", "s3cret");
+        let _ = state.session_credentials.set("", "conn-a", "s3cret");
 
         let mut config = mysql_config(None);
         config.id = "conn-a".to_string();
@@ -5472,7 +5462,7 @@ mod tests {
         config.password.clear();
 
         // 会话 X 输入了密码，会话 Y 未输入：Y 的请求（owner=token-y）不得注入 X 的密码。
-        state.session_credentials.set("token-x", "conn-a", "x-secret");
+        let _ = state.session_credentials.set("token-x", "conn-a", "x-secret");
         crate::session_credentials::with_credential_owner(Some("token-y".to_string()), async {
             let mut db_config = metadata_connection_config(&config);
             state.apply_session_credential(&config, &mut db_config, &config.id);
@@ -5503,7 +5493,7 @@ mod tests {
         config.save_password = false;
 
         // 模拟会话 X 创建的 no-save 池。
-        state.pool_credential_owners.write().await.insert("conn-a".to_string(), "token-x".to_string());
+        state.session_credentials.record_pool_owner("conn-a", "token-x");
 
         // 同一会话 X 复用 → 无冲突。
         crate::session_credentials::with_credential_owner(Some("token-x".to_string()), async {
@@ -5513,6 +5503,13 @@ mod tests {
 
         // 另一会话 Y 请求同一 no-save 池 → 冲突，需以 Y 的凭据重建，避免复用 X 的密码。
         crate::session_credentials::with_credential_owner(Some("token-y".to_string()), async {
+            assert!(state.pool_credential_owner_mismatch(&config, "conn-a").await);
+        })
+        .await;
+
+        // owner 标记缺失时按不可信处理，避免全局配置失效与异步移除旧池之间复用旧池。
+        state.session_credentials.clear_connection("conn-a");
+        crate::session_credentials::with_credential_owner(Some("token-x".to_string()), async {
             assert!(state.pool_credential_owner_mismatch(&config, "conn-a").await);
         })
         .await;

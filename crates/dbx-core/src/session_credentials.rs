@@ -11,7 +11,7 @@
 //! 约束：
 //! - 只在 Rust 进程内存中存在，进程退出自然丢失；
 //! - 不写 SQLite、云同步导出、日志或任何磁盘存储；
-//! - [`fmt::Debug`] 只暴露连接 ID 集合，不输出密码值，避免调试日志与异常文本泄露。
+//! - [`fmt::Debug`] 只暴露凭据数量，不输出 owner、连接 ID 或密码值，避免调试日志与异常文本泄露。
 //!
 //! # 多会话隔离（Web）
 //!
@@ -33,8 +33,33 @@ use std::sync::RwLock;
 /// 桌面端（Tauri）使用的 owner 作用域：无认证会话概念，单用户。
 pub const DESKTOP_OWNER: &str = "";
 
-fn credential_key(owner_scope: &str, connection_id: &str) -> String {
-    format!("{owner_scope}::{connection_id}")
+#[derive(Clone, Eq, Hash, PartialEq)]
+struct CredentialKey {
+    owner_scope: String,
+    connection_id: String,
+}
+
+impl CredentialKey {
+    fn new(owner_scope: &str, connection_id: &str) -> Self {
+        Self { owner_scope: owner_scope.to_string(), connection_id: connection_id.to_string() }
+    }
+}
+
+struct SessionCredential {
+    password: String,
+    generation: u64,
+}
+
+#[derive(Default)]
+struct SessionCredentialState {
+    credentials: HashMap<CredentialKey, SessionCredential>,
+    pool_credential_owners: HashMap<String, String>,
+    next_generation: u64,
+}
+
+pub struct SessionCredentialWriteToken {
+    key: CredentialKey,
+    generation: u64,
 }
 
 /// 当前请求的认证会话作用域（Web 会话 token / 桌面端空串）。
@@ -64,7 +89,7 @@ tokio::task_local! {
 /// 内存会话凭据仓库：`(owner_scope, connection_id) -> password`。
 #[derive(Default)]
 pub struct SessionCredentialStore {
-    credentials: RwLock<HashMap<String, String>>,
+    state: RwLock<SessionCredentialState>,
 }
 
 impl SessionCredentialStore {
@@ -77,18 +102,22 @@ impl SessionCredentialStore {
     /// 空密码是 no-op（不覆盖已有凭据，也不删除），删除只能通过 [`Self::remove`]
     /// 显式触发（"断开并忘记本次密码"）。这样连接成功后以空密码 config 建池
     /// 不会误清已记录的凭据。
-    pub fn set(&self, owner_scope: &str, connection_id: &str, password: &str) {
+    pub fn set(&self, owner_scope: &str, connection_id: &str, password: &str) -> Option<SessionCredentialWriteToken> {
         if password.is_empty() {
-            return;
+            return None;
         }
-        let mut credentials = self.credentials.write().unwrap_or_else(|error| error.into_inner());
-        credentials.insert(credential_key(owner_scope, connection_id), password.to_string());
+        let mut state = self.state.write().unwrap_or_else(|error| error.into_inner());
+        state.next_generation = state.next_generation.checked_add(1).expect("session credential generation overflow");
+        let key = CredentialKey::new(owner_scope, connection_id);
+        let generation = state.next_generation;
+        state.credentials.insert(key.clone(), SessionCredential { password: password.to_string(), generation });
+        Some(SessionCredentialWriteToken { key, generation })
     }
 
     /// 读取某个 owner 作用域下的本次运行期临时密码；不存在则返回 `None`。
     pub fn get(&self, owner_scope: &str, connection_id: &str) -> Option<String> {
-        let credentials = self.credentials.read().unwrap_or_else(|error| error.into_inner());
-        credentials.get(&credential_key(owner_scope, connection_id)).cloned()
+        let state = self.state.read().unwrap_or_else(|error| error.into_inner());
+        state.credentials.get(&CredentialKey::new(owner_scope, connection_id)).map(|entry| entry.password.clone())
     }
 
     /// 某个 owner 作用域下是否存在本次运行期临时密码。
@@ -98,42 +127,88 @@ impl SessionCredentialStore {
 
     /// 清除某个 owner 作用域下的临时密码（连接删除 / "断开并忘记本次密码"）。
     pub fn remove(&self, owner_scope: &str, connection_id: &str) {
-        let mut credentials = self.credentials.write().unwrap_or_else(|error| error.into_inner());
-        credentials.remove(&credential_key(owner_scope, connection_id));
+        let mut state = self.state.write().unwrap_or_else(|error| error.into_inner());
+        state.credentials.remove(&CredentialKey::new(owner_scope, connection_id));
+    }
+
+    /// 仅当指定写入仍是当前值时删除，用于连接失败回滚，避免旧 attempt 删除更新密码。
+    pub fn remove_if_current(&self, token: &SessionCredentialWriteToken) -> bool {
+        let mut state = self.state.write().unwrap_or_else(|error| error.into_inner());
+        let is_current =
+            state.credentials.get(&token.key).is_some_and(|credential| credential.generation == token.generation);
+        if is_current {
+            state.credentials.remove(&token.key);
+        }
+        is_current
     }
 
     /// 清除某个 owner 作用域下的全部凭据（Web 登出 / 登录会话失效），不影响其他
     /// 登录会话的凭据。
     pub fn clear_owner(&self, owner_scope: &str) {
-        let mut credentials = self.credentials.write().unwrap_or_else(|error| error.into_inner());
-        let prefix = format!("{owner_scope}::");
-        credentials.retain(|key, _| !key.starts_with(&prefix));
+        let mut state = self.state.write().unwrap_or_else(|error| error.into_inner());
+        state.credentials.retain(|key, _| key.owner_scope != owner_scope);
+    }
+
+    /// 全局连接配置被编辑、删除或复用 ID 时，原子清除所有 owner 的临时凭据和
+    /// 该连接的全部池 owner 标记，防止旧密码或旧池流入新的连接定义。
+    pub fn clear_connection(&self, connection_id: &str) {
+        let mut state = self.state.write().unwrap_or_else(|error| error.into_inner());
+        state.credentials.retain(|key, _| key.connection_id != connection_id);
+        let pool_prefix = format!("{connection_id}:");
+        state
+            .pool_credential_owners
+            .retain(|pool_key, _| pool_key != connection_id && !pool_key.starts_with(&pool_prefix));
     }
 
     /// 清空全部会话凭据（桌面端退出前兜底；Web 全实例重置）。
     pub fn clear(&self) {
-        let mut credentials = self.credentials.write().unwrap_or_else(|error| error.into_inner());
-        credentials.clear();
+        let mut state = self.state.write().unwrap_or_else(|error| error.into_inner());
+        state.credentials.clear();
     }
 
-    /// 当前持有凭据的键集合（仅用于诊断，不泄露密码值）。
-    fn credential_keys(&self) -> Vec<String> {
-        let credentials = self.credentials.read().unwrap_or_else(|error| error.into_inner());
-        let mut keys: Vec<String> = credentials.keys().cloned().collect();
-        keys.sort();
-        keys
+    pub fn record_pool_owner(&self, pool_key: &str, owner_scope: &str) {
+        let mut state = self.state.write().unwrap_or_else(|error| error.into_inner());
+        state.pool_credential_owners.insert(pool_key.to_string(), owner_scope.to_string());
+    }
+
+    pub fn pool_owner_mismatch(&self, pool_key: &str, owner_scope: &str) -> bool {
+        let state = self.state.read().unwrap_or_else(|error| error.into_inner());
+        state.pool_credential_owners.get(pool_key).is_none_or(|recorded| recorded != owner_scope)
+    }
+
+    pub fn has_pool_owner(&self, pool_key: &str) -> bool {
+        let state = self.state.read().unwrap_or_else(|error| error.into_inner());
+        state.pool_credential_owners.contains_key(pool_key)
+    }
+
+    pub fn remove_pool_owners(&self, pool_keys: &[String]) {
+        let mut state = self.state.write().unwrap_or_else(|error| error.into_inner());
+        for pool_key in pool_keys {
+            state.pool_credential_owners.remove(pool_key);
+        }
+    }
+
+    pub fn clear_pool_owners(&self) {
+        let mut state = self.state.write().unwrap_or_else(|error| error.into_inner());
+        state.pool_credential_owners.clear();
+    }
+
+    fn credential_count(&self) -> usize {
+        let state = self.state.read().unwrap_or_else(|error| error.into_inner());
+        state.credentials.len()
     }
 }
 
 impl fmt::Debug for SessionCredentialStore {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("SessionCredentialStore").field("credential_keys", &self.credential_keys()).finish()
+        f.debug_struct("SessionCredentialStore").field("credential_count", &self.credential_count()).finish()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::SessionCredentialStore;
+    use std::sync::{Arc, Barrier};
 
     #[test]
     fn set_get_has_round_trip() {
@@ -141,7 +216,7 @@ mod tests {
         assert!(!store.has("", "conn-a"));
         assert_eq!(store.get("", "conn-a"), None);
 
-        store.set("", "conn-a", "s3cret");
+        let _ = store.set("", "conn-a", "s3cret");
         assert!(store.has("", "conn-a"));
         assert_eq!(store.get("", "conn-a").as_deref(), Some("s3cret"));
     }
@@ -149,15 +224,16 @@ mod tests {
     #[test]
     fn set_with_empty_password_is_noop_and_keeps_existing() {
         let store = SessionCredentialStore::new();
-        store.set("", "conn-a", "s3cret");
-        store.set("", "conn-a", "");
+        let _ = store.set("", "conn-a", "s3cret");
+        let empty_write = store.set("", "conn-a", "");
+        assert!(empty_write.is_none());
         assert_eq!(store.get("", "conn-a").as_deref(), Some("s3cret"));
     }
 
     #[test]
     fn remove_clears_credential() {
         let store = SessionCredentialStore::new();
-        store.set("", "conn-a", "s3cret");
+        let _ = store.set("", "conn-a", "s3cret");
         store.remove("", "conn-a");
         assert!(!store.has("", "conn-a"));
         assert_eq!(store.get("", "conn-a"), None);
@@ -166,8 +242,8 @@ mod tests {
     #[test]
     fn clear_removes_all_credentials() {
         let store = SessionCredentialStore::new();
-        store.set("", "conn-a", "secret-a");
-        store.set("", "conn-b", "secret-b");
+        let _ = store.set("", "conn-a", "secret-a");
+        let _ = store.set("", "conn-b", "secret-b");
         store.clear();
         assert!(!store.has("", "conn-a"));
         assert!(!store.has("", "conn-b"));
@@ -177,8 +253,8 @@ mod tests {
     #[test]
     fn credentials_are_isolated_by_connection_id() {
         let store = SessionCredentialStore::new();
-        store.set("", "conn-a", "secret-a");
-        store.set("", "conn-b", "secret-b");
+        let _ = store.set("", "conn-a", "secret-a");
+        let _ = store.set("", "conn-b", "secret-b");
         assert_eq!(store.get("", "conn-a").as_deref(), Some("secret-a"));
         assert_eq!(store.get("", "conn-b").as_deref(), Some("secret-b"));
         store.remove("", "conn-a");
@@ -189,8 +265,8 @@ mod tests {
     #[test]
     fn credentials_are_isolated_by_owner_scope() {
         let store = SessionCredentialStore::new();
-        store.set("token-x", "conn-a", "x-secret");
-        store.set("token-y", "conn-a", "y-secret");
+        let _ = store.set("token-x", "conn-a", "x-secret");
+        let _ = store.set("token-y", "conn-a", "y-secret");
         // 同一连接在不同登录会话下互不可见。
         assert_eq!(store.get("token-x", "conn-a").as_deref(), Some("x-secret"));
         assert_eq!(store.get("token-y", "conn-a").as_deref(), Some("y-secret"));
@@ -202,9 +278,9 @@ mod tests {
     #[test]
     fn clear_owner_only_removes_that_sessions_credentials() {
         let store = SessionCredentialStore::new();
-        store.set("token-x", "conn-a", "x-secret");
-        store.set("token-y", "conn-a", "y-secret");
-        store.set("token-y", "conn-b", "y2-secret");
+        let _ = store.set("token-x", "conn-a", "x-secret");
+        let _ = store.set("token-y", "conn-a", "y-secret");
+        let _ = store.set("token-y", "conn-b", "y2-secret");
         store.clear_owner("token-y");
         // Y 登出只清除 Y 的凭据，X 与桌面端不受影响。
         assert!(!store.has("token-y", "conn-a"));
@@ -215,10 +291,58 @@ mod tests {
     #[test]
     fn debug_output_hides_password_values() {
         let store = SessionCredentialStore::new();
-        store.set("token-x", "conn-a", "super-secret-value");
+        let _ = store.set("session-token-sensitive", "connection-sensitive", "super-secret-value");
         let debug = format!("{store:?}");
-        assert!(debug.contains("conn-a"));
+        assert!(debug.contains("credential_count: 1"));
+        assert!(!debug.contains("session-token-sensitive"));
+        assert!(!debug.contains("connection-sensitive"));
         assert!(!debug.contains("super-secret-value"));
-        assert!(debug.contains("***") || !debug.contains("secret"));
+    }
+
+    #[test]
+    fn clear_connection_removes_all_owners_and_pool_owner_state() {
+        let store = SessionCredentialStore::new();
+        let _ = store.set("token-x", "conn-a", "x-secret");
+        let _ = store.set("token-y", "conn-a", "y-secret");
+        let _ = store.set("token-y", "conn-b", "other-secret");
+        store.record_pool_owner("conn-a", "token-x");
+        store.record_pool_owner("conn-a:analytics", "token-y");
+        store.record_pool_owner("conn-b", "token-y");
+
+        store.clear_connection("conn-a");
+
+        assert!(!store.has("token-x", "conn-a"));
+        assert!(!store.has("token-y", "conn-a"));
+        assert!(store.has("token-y", "conn-b"));
+        assert!(!store.has_pool_owner("conn-a"));
+        assert!(!store.has_pool_owner("conn-a:analytics"));
+        assert!(store.pool_owner_mismatch("conn-a", "token-z"));
+        assert!(store.pool_owner_mismatch("conn-a:analytics", "token-z"));
+        assert!(store.has_pool_owner("conn-b"));
+        assert!(store.pool_owner_mismatch("conn-b", "token-z"));
+    }
+
+    #[test]
+    fn stale_write_token_cannot_remove_newer_credential() {
+        let store = Arc::new(SessionCredentialStore::new());
+        let first_write_done = Arc::new(Barrier::new(2));
+        let second_write_done = Arc::new(Barrier::new(2));
+        let attempt_store = store.clone();
+        let attempt_first_write_done = first_write_done.clone();
+        let attempt_second_write_done = second_write_done.clone();
+
+        let attempt_a = std::thread::spawn(move || {
+            let token = attempt_store.set("token-x", "conn-a", "attempt-a-password").unwrap();
+            attempt_first_write_done.wait();
+            attempt_second_write_done.wait();
+            assert!(!attempt_store.remove_if_current(&token));
+        });
+
+        first_write_done.wait();
+        let _attempt_b_token = store.set("token-x", "conn-a", "attempt-b-password").unwrap();
+        second_write_done.wait();
+        attempt_a.join().unwrap();
+
+        assert_eq!(store.get("token-x", "conn-a").as_deref(), Some("attempt-b-password"));
     }
 }

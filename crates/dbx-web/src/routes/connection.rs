@@ -286,16 +286,10 @@ pub async fn connect_db(
     // 只有本次请求确实写入/替换了会话凭据（输入了非空密码）时，才需要在连接
     // 失败时回滚它；无密码重连复用的是既有有效凭据，失败不应清掉它，否则瞬时的
     // 数据库/网络抖动就会让"本次会话内记住密码"失效、下次又弹窗。
-    let mut inserted_session_credential = false;
-    let no_save_password = if !config.save_password {
-        if !config.password.is_empty() {
-            app.session_credentials.set(&owner, &connection_id, &config.password);
-            inserted_session_credential = true;
-        }
-        true
-    } else {
-        false
-    };
+    let session_credential_write = (!config.save_password)
+        .then(|| app.session_credentials.set(&owner, &connection_id, &config.password))
+        .flatten();
+    let no_save_password = !config.save_password;
     let mut runtime_config = config.clone();
     if no_save_password {
         runtime_config.password.clear();
@@ -308,16 +302,16 @@ pub async fn connect_db(
     if let Err(error) = app.get_or_create_pool_for_connection_attempt(&connection_id, None, attempt).await {
         // 连接失败：仅回滚本次请求刚写入的会话凭据，避免前端误判"已记住密码"而用
         // 失败密码免弹窗重试；无密码重连复用的既有凭据不受瞬时失败影响。
-        if inserted_session_credential {
-            app.session_credentials.remove(&owner, &connection_id);
+        if let Some(token) = session_credential_write.as_ref() {
+            app.session_credentials.remove_if_current(token);
         }
         return Err(AppError::from(error));
     }
     if let Err(error) = sync_mongo_legacy_driver_fallback(&state, &config).await {
         app.remove_connection_pools_detached(&connection_id).await;
         app.reset_connection_transport_for_config(&connection_id, &config).await;
-        if inserted_session_credential {
-            app.session_credentials.remove(&owner, &connection_id);
+        if let Some(token) = session_credential_write.as_ref() {
+            app.session_credentials.remove_if_current(token);
         }
         return Err(error);
     }
@@ -381,7 +375,7 @@ pub async fn connection_final_proxy_port(
     let (_, port) = app.connection_host_port(&connection_id, &db_config).await.map_err(AppError::from)?;
     if !runtime_config.save_password && !runtime_config.password.is_empty() {
         let owner = session_token_from_headers(&headers).unwrap_or_default();
-        app.session_credentials.set(&owner, &connection_id, &runtime_config.password);
+        let _ = app.session_credentials.set(&owner, &connection_id, &runtime_config.password);
     }
     Ok(Json(port))
 }
@@ -475,7 +469,7 @@ pub async fn close_database_connection(
 
 pub async fn save_connections(
     State(state): State<Arc<WebState>>,
-    headers: HeaderMap,
+    _headers: HeaderMap,
     Json(body): Json<SaveConnectionsRequest>,
 ) -> Result<Json<()>, AppError> {
     for config in &body.configs {
@@ -488,9 +482,8 @@ pub async fn save_connections(
             .map_err(AppError::from)?;
         }
     }
-    let owner = session_token_from_headers(&headers).unwrap_or_default();
     state.app.storage.save_connections(&body.configs).await.map_err(AppError::from)?;
-    let sync = sync_connection_configs(&state, &body.configs, &owner).await;
+    let sync = sync_connection_configs(&state, &body.configs).await;
     remove_connection_pools_for_connection_ids(&state, &sync.connection_pool_ids_to_drop).await;
     drop_nacos_adapters_for_connection_ids(&state, &sync.nacos_adapter_ids_to_drop).await;
     drop_mq_adapters_for_connection_ids(&state, &sync.mq_adapter_ids_to_drop).await;
@@ -502,6 +495,8 @@ pub async fn mcp_add_connection(
     Json(body): Json<McpAddConnectionRequest>,
 ) -> Result<Json<ConnectionConfig>, AppError> {
     let saved = state.app.storage.add_connection_for_mcp(body.config).await.map_err(AppError::from)?;
+    state.app.session_credentials.clear_connection(&saved.id);
+    state.app.remove_connection_pools_detached(&saved.id).await;
     state.app.configs.write().await.insert(saved.id.clone(), saved.clone());
     Ok(Json(saved))
 }
@@ -516,21 +511,22 @@ pub async fn mcp_duplicate_connection(
         .duplicate_connection_for_mcp(&body.source_id, &body.copy_id, &body.copy_name)
         .await
         .map_err(AppError::from)?;
+    state.app.session_credentials.clear_connection(&saved.id);
+    state.app.remove_connection_pools_detached(&saved.id).await;
     state.app.configs.write().await.insert(saved.id.clone(), saved.clone());
     Ok(Json(saved))
 }
 
 pub async fn mcp_remove_connection(
     State(state): State<Arc<WebState>>,
-    headers: HeaderMap,
+    _headers: HeaderMap,
     Json(body): Json<McpRemoveConnectionRequest>,
 ) -> Result<Json<bool>, AppError> {
     let connection_id = body.connection_id;
     let removed = state.app.storage.remove_connection_for_mcp(&connection_id).await.map_err(AppError::from)?;
     if removed {
         state.app.configs.write().await.remove(&connection_id);
-        let owner = session_token_from_headers(&headers).unwrap_or_default();
-        state.app.session_credentials.remove(&owner, &connection_id);
+        state.app.session_credentials.clear_connection(&connection_id);
         state.app.remove_connection_pools_detached(&connection_id).await;
         state.app.nacos_registry.drop_connection(&connection_id).await;
         #[cfg(feature = "mq-admin")]
@@ -541,11 +537,10 @@ pub async fn mcp_remove_connection(
 
 pub async fn load_connections(
     State(state): State<Arc<WebState>>,
-    headers: HeaderMap,
+    _headers: HeaderMap,
 ) -> Result<Json<Vec<ConnectionConfig>>, AppError> {
     let configs = state.app.storage.load_connections().await.map_err(AppError::from)?;
-    let owner = session_token_from_headers(&headers).unwrap_or_default();
-    let sync = sync_connection_configs(&state, &configs, &owner).await;
+    let sync = sync_connection_configs(&state, &configs).await;
     remove_connection_pools_for_connection_ids(&state, &sync.connection_pool_ids_to_drop).await;
     drop_nacos_adapters_for_connection_ids(&state, &sync.nacos_adapter_ids_to_drop).await;
     drop_mq_adapters_for_connection_ids(&state, &sync.mq_adapter_ids_to_drop).await;
@@ -558,7 +553,7 @@ struct ConnectionConfigSync {
     connection_pool_ids_to_drop: Vec<String>,
 }
 
-async fn sync_connection_configs(state: &WebState, configs: &[ConnectionConfig], owner: &str) -> ConnectionConfigSync {
+async fn sync_connection_configs(state: &WebState, configs: &[ConnectionConfig]) -> ConnectionConfigSync {
     let saved_ids: HashSet<&str> = configs.iter().map(|config| config.id.as_str()).collect();
     let mut nacos_adapter_ids_to_drop = HashSet::new();
     let mut mq_adapter_ids_to_drop = HashSet::new();
@@ -569,8 +564,8 @@ async fn sync_connection_configs(state: &WebState, configs: &[ConnectionConfig],
             true
         } else {
             connection_pool_ids_to_drop.insert(id.clone());
-            // 连接已被删除：同步清理当前会话的临时凭据（仅本 owner，不影响其他会话）。
-            state.app.session_credentials.remove(owner, id);
+            // 连接已被全局删除：清除所有 Web owner 的临时凭据与池 owner。
+            state.app.session_credentials.clear_connection(id);
             if existing.db_type == dbx_core::models::connection::DatabaseType::Nacos {
                 nacos_adapter_ids_to_drop.insert(id.clone());
             }
@@ -597,9 +592,9 @@ async fn sync_connection_configs(state: &WebState, configs: &[ConnectionConfig],
             // 仅在真实连接参数变化时销毁池；save_password=false 连接因持久化
             // 空密码与运行态密码产生的差异被忽略（见 connection_configs_pool_equivalent）。
             if !connection_configs_pool_equivalent(&previous, config) {
-                // 连接端点/认证参数已变：清除当前会话的旧凭据以便下次重新输入，
-                // 避免复用旧密码去连新端点而直接认证失败（仅本 owner）。
-                state.app.session_credentials.remove(owner, &config.id);
+                // 连接端点/认证参数已全局变化：清除所有 owner 的旧凭据与池 owner，
+                // 避免其他登录会话把旧密码或旧池复用到新的连接定义。
+                state.app.session_credentials.clear_connection(&config.id);
                 connection_pool_ids_to_drop.insert(config.id.clone());
             }
         }
@@ -1357,7 +1352,7 @@ mod tests {
         config.password.clear();
 
         // 会话 A 已持有该连接的有效会话凭据。
-        state.app.session_credentials.set("token-a", "conn-a", "hunter2");
+        let _ = state.app.session_credentials.set("token-a", "conn-a", "hunter2");
         assert!(state.app.session_credentials.has("token-a", "conn-a"));
 
         // 无密码重连（配置里没带密码，应复用既有凭据）因目标文件缺失而失败。
@@ -1406,14 +1401,14 @@ mod tests {
         let mut initial = sqlite_config("conn-a", &dir.join("a.db").to_string_lossy());
         initial.save_password = false;
         initial.password = "session-secret".to_string();
-        state.app.session_credentials.set("", "conn-a", "session-secret");
+        let _ = state.app.session_credentials.set("", "conn-a", "session-secret");
         state.app.configs.write().await.insert(initial.id.clone(), initial.clone());
 
         // 持久化同步的空密码 config 覆盖运行态：save_password=false 连接仅密码
         // 差异不应销毁池（会话密码由内存仓库提供，与运行态 config 无关）。
         let mut updated = initial.clone();
         updated.password.clear();
-        let sync = sync_connection_configs(&state, std::slice::from_ref(&updated), "").await;
+        let sync = sync_connection_configs(&state, std::slice::from_ref(&updated)).await;
         assert!(sync.connection_pool_ids_to_drop.is_empty());
         assert_eq!(state.app.configs.read().await.get("conn-a").map(|c| c.password.as_str()), Some(""));
         assert!(state.app.session_credentials.has("", "conn-a"));
@@ -1421,9 +1416,69 @@ mod tests {
         // 真实连接参数（host）变化应销毁池，并清除旧会话凭据以便重新输入。
         let mut host_changed = updated.clone();
         host_changed.host = "other-host.db".to_string();
-        let sync2 = sync_connection_configs(&state, std::slice::from_ref(&host_changed), "").await;
+        let sync2 = sync_connection_configs(&state, std::slice::from_ref(&host_changed)).await;
         assert_eq!(sync2.connection_pool_ids_to_drop.as_slice(), &["conn-a".to_string()]);
         assert!(!state.app.session_credentials.has("", "conn-a"));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn sync_connection_configs_clears_all_owner_credentials_on_global_edit() {
+        let (state, dir) = test_web_state().await;
+        let mut initial = sqlite_config("conn-a", &dir.join("a.db").to_string_lossy());
+        initial.save_password = false;
+        state.app.configs.write().await.insert(initial.id.clone(), initial.clone());
+        let _ = state.app.session_credentials.set("token-a", "conn-a", "owner-a-secret");
+        let _ = state.app.session_credentials.set("token-b", "conn-a", "owner-b-secret");
+        state.app.session_credentials.record_pool_owner("conn-a", "token-a");
+        assert!(state.app.session_credentials.pool_owner_mismatch("conn-a", "token-b"));
+
+        let mut updated = initial;
+        updated.host = dir.join("updated.db").to_string_lossy().to_string();
+        let sync = sync_connection_configs(&state, std::slice::from_ref(&updated)).await;
+
+        assert_eq!(sync.connection_pool_ids_to_drop.as_slice(), &["conn-a".to_string()]);
+        assert!(!state.app.session_credentials.has("token-a", "conn-a"));
+        assert!(!state.app.session_credentials.has("token-b", "conn-a"));
+        assert!(!state.app.session_credentials.has_pool_owner("conn-a"));
+        assert!(state.app.session_credentials.pool_owner_mismatch("conn-a", "token-b"));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn sync_connection_configs_clears_all_owner_credentials_on_delete_and_id_reuse() {
+        let (state, dir) = test_web_state().await;
+        let mut initial = sqlite_config("conn-a", &dir.join("old.db").to_string_lossy());
+        initial.save_password = false;
+        state.app.configs.write().await.insert(initial.id.clone(), initial.clone());
+        let _ = state.app.session_credentials.set("token-a", "conn-a", "owner-a-secret");
+        let _ = state.app.session_credentials.set("token-b", "conn-a", "owner-b-secret");
+        state.app.session_credentials.record_pool_owner("conn-a", "token-a");
+
+        let deleted = sync_connection_configs(&state, &[]).await;
+        assert_eq!(deleted.connection_pool_ids_to_drop.as_slice(), &["conn-a".to_string()]);
+        assert!(!state.app.session_credentials.has("token-a", "conn-a"));
+        assert!(!state.app.session_credentials.has("token-b", "conn-a"));
+        assert!(!state.app.session_credentials.has_pool_owner("conn-a"));
+        assert!(state.app.session_credentials.pool_owner_mismatch("conn-a", "token-b"));
+
+        let _ = state.app.session_credentials.set("token-a", "conn-a", "stale-owner-a-secret");
+        let _ = state.app.session_credentials.set("token-b", "conn-a", "stale-owner-b-secret");
+        state.app.session_credentials.record_pool_owner("conn-a", "token-a");
+        let mut recreated = sqlite_config("conn-a", &dir.join("new.db").to_string_lossy());
+        recreated.save_password = false;
+
+        let reused =
+            mcp_add_connection(State(state.clone()), Json(McpAddConnectionRequest { config: recreated.clone() }))
+                .await
+                .unwrap_or_else(|error| panic!("{}", error.message));
+        assert_eq!(reused.0.host, recreated.host);
+        assert!(!state.app.session_credentials.has("token-a", "conn-a"));
+        assert!(!state.app.session_credentials.has("token-b", "conn-a"));
+        assert!(!state.app.session_credentials.has_pool_owner("conn-a"));
+        assert!(state.app.session_credentials.pool_owner_mismatch("conn-a", "token-b"));
 
         let _ = std::fs::remove_dir_all(dir);
     }

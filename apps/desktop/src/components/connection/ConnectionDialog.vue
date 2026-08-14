@@ -3065,10 +3065,8 @@ const supportsMysqlTlsOptions = computed(() => form.value.db_type === "starrocks
 const supportsMysqlCleartextPasswordAuth = computed(() => form.value.db_type === "mysql" && !bareMysqlProfiles.has(selectedType.value));
 const supportsDoltSystemTables = computed(() => isDoltDriverProfile(form.value.driver_profile));
 const showDoltSystemTables = computed({
-  get: () => doltSystemTablesVisible(form.value.driver_profile, form.value.url_params),
-  set: (visible: boolean) => {
-    form.value.url_params = setDoltSystemTablesVisible(form.value.driver_profile, form.value.url_params, visible);
-  },
+  get: () => doltSystemTablesVisible(form.value),
+  set: (visible: boolean) => setDoltSystemTablesVisible(form.value, visible),
 });
 const mysqlCleartextPasswordAuth = computed({
   get: () => mysqlCleartextPasswordAuthEnabled(form.value.url_params),
@@ -3867,7 +3865,7 @@ function connectionConfigForSubmit(id: string, generatedName = ""): ConnectionCo
     const style = gaussdbIdentifierQuoteStyle(config);
     config.external_config = undefined;
     setGaussdbIdentifierQuoteStyle(config, style);
-  } else {
+  } else if (!isDoltDriverProfile(config.driver_profile)) {
     config.external_config = undefined;
   }
   if (config.db_type === "mongodb" && !mongoUseUrl.value) {

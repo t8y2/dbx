@@ -44,7 +44,7 @@ function doltConnection(): ConnectionConfig {
     id: "dolt-1",
     name: "Dolt",
     driver_profile: "dolt",
-    url_params: "sessionVariables=dolt_show_system_tables%3D1",
+    external_config: { doltShowSystemTables: true },
   } as ConnectionConfig;
 }
 

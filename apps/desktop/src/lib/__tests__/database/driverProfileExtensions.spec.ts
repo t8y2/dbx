@@ -22,7 +22,7 @@ function connection(driverProfile: string): ConnectionConfig {
     username: "root",
     password: "",
     database: "app",
-    url_params: "sessionVariables=dolt_show_system_tables%3D1",
+    external_config: { doltShowSystemTables: true },
   };
 }
 

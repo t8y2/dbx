@@ -2,9 +2,9 @@ use mysql_async::prelude::Queryable;
 use std::collections::HashSet;
 
 use crate::models::connection::{ConnectionConfig, DatabaseType};
-use crate::types::DatabaseInfo;
+use crate::types::{DatabaseInfo, TableInfo};
 
-use super::mysql::{get_conn_with_timeout, quote_identifier, MySqlPool};
+use super::mysql::{get_conn_with_timeout, list_table_names_show_filtered_with_conn, quote_identifier, MySqlPool};
 
 const ENABLE_BRANCH_DATABASES_SQL: &str = "SET @@dolt_show_branch_databases = 1";
 // 与设置对称地复位 session 变量：连接从池中取出后是单条会被复用的 session 连接，
@@ -12,9 +12,22 @@ const ENABLE_BRANCH_DATABASES_SQL: &str = "SET @@dolt_show_branch_databases = 1"
 // 会意外看到 branch 数据库。复位是 best-effort，失败不应让 list_databases 整体失败。
 const DISABLE_BRANCH_DATABASES_SQL: &str = "SET @@dolt_show_branch_databases = 0";
 const SHOW_DATABASES_SQL: &str = "SHOW DATABASES";
+const ENABLE_SYSTEM_TABLES_SQL: &str = "SET @@dolt_show_system_tables = 1";
+const DISABLE_SYSTEM_TABLES_SQL: &str = "SET @@dolt_show_system_tables = 0";
+const SHOW_SYSTEM_TABLES_CONFIG_KEY: &str = "doltShowSystemTables";
 
 pub fn is_config(config: &ConnectionConfig) -> bool {
     is_profile(&config.db_type, config.driver_profile.as_deref())
+}
+
+pub fn system_tables_visible(config: &ConnectionConfig) -> bool {
+    is_config(config)
+        && config
+            .external_config
+            .as_ref()
+            .and_then(|value| value.get(SHOW_SYSTEM_TABLES_CONFIG_KEY))
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
 }
 
 fn is_profile(db_type: &DatabaseType, driver_profile: Option<&str>) -> bool {
@@ -34,6 +47,18 @@ pub async fn list_databases(pool: &MySqlPool) -> Result<Vec<DatabaseInfo>, Strin
         log::warn!("Failed to reset Dolt branch database session variable before returning connection: {error}");
     }
     Ok(database_infos(databases))
+}
+
+pub async fn list_tables(pool: &MySqlPool, database: &str, filter: Option<&str>) -> Result<Vec<TableInfo>, String> {
+    // The visibility flag is session-scoped, so setup, metadata lookup, and
+    // cleanup must use the same pooled connection.
+    let mut conn = get_conn_with_timeout(pool, super::connection_timeout()).await?;
+    conn.query_drop(ENABLE_SYSTEM_TABLES_SQL).await.map_err(|error| error.to_string())?;
+    let tables = list_table_names_show_filtered_with_conn(&mut conn, database, filter, &[]).await;
+    if let Err(error) = conn.query_drop(DISABLE_SYSTEM_TABLES_SQL).await {
+        log::warn!("Failed to reset Dolt system table session variable before returning connection: {error}");
+    }
+    tables
 }
 
 async fn list_databases_from_branches(conn: &mut mysql_async::Conn) -> Result<Vec<DatabaseInfo>, String> {
@@ -98,11 +123,38 @@ fn list_branches_sql(database: &str) -> String {
 mod tests {
     use super::*;
 
+    fn dolt_config() -> ConnectionConfig {
+        serde_json::from_value(serde_json::json!({
+            "id": "dolt",
+            "name": "Dolt",
+            "db_type": "mysql",
+            "driver_profile": "dolt",
+            "host": "127.0.0.1",
+            "port": 3306,
+            "username": "root",
+            "password": "",
+            "database": "app"
+        }))
+        .unwrap()
+    }
+
     #[test]
     fn profile_is_isolated_from_standard_mysql() {
         assert!(is_profile(&DatabaseType::Mysql, Some("Dolt")));
         assert!(!is_profile(&DatabaseType::Mysql, None));
         assert!(!is_profile(&DatabaseType::Postgres, Some("dolt")));
+    }
+
+    #[test]
+    fn system_table_visibility_uses_dolt_profile_config_only() {
+        let mut config = dolt_config();
+        assert!(!system_tables_visible(&config));
+
+        config.external_config = Some(serde_json::json!({ "doltShowSystemTables": true }));
+        assert!(system_tables_visible(&config));
+
+        config.driver_profile = Some("mysql".to_string());
+        assert!(!system_tables_visible(&config));
     }
 
     #[test]

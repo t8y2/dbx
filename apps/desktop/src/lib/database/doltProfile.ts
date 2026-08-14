@@ -2,12 +2,10 @@ import type { ConnectionConfig } from "@/types/database";
 import type { DriverProfileExtensionDefinition, DriverProfileObjectTreeProfile, DriverProfileSqlCompletionContext } from "@/lib/database/driverProfileExtensions";
 
 export const DOLT_DRIVER_PROFILE = "dolt";
-export const DOLT_SHOW_SYSTEM_TABLES_VARIABLE = "dolt_show_system_tables";
+const DOLT_SHOW_SYSTEM_TABLES_CONFIG_KEY = "doltShowSystemTables";
 // Mirrors Dolt's IsSystemTable / HasDoltPrefix implementation. The reserved
 // namespace comparison is case-insensitive and currently checks the "dolt" prefix.
 export const DOLT_SYSTEM_TABLE_NAME_PATTERN = "dolt%";
-
-const MYSQL_SESSION_VARIABLES_PARAM = "sessionVariables";
 
 export type DoltSqlRoutineDefinition = {
   name: string;
@@ -121,9 +119,28 @@ export function isDoltDriverProfile(driverProfile?: string): boolean {
   return driverProfile?.toLowerCase() === DOLT_DRIVER_PROFILE;
 }
 
+type DoltConnectionConfig = Pick<ConnectionConfig, "driver_profile"> & Partial<Pick<ConnectionConfig, "external_config">>;
+
+function externalConfigRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? { ...(value as Record<string, unknown>) } : {};
+}
+
+export function doltSystemTablesVisible(config?: DoltConnectionConfig): boolean {
+  if (!config || !isDoltDriverProfile(config.driver_profile)) return false;
+  return externalConfigRecord(config.external_config)[DOLT_SHOW_SYSTEM_TABLES_CONFIG_KEY] === true;
+}
+
+export function setDoltSystemTablesVisible(config: DoltConnectionConfig, visible: boolean): void {
+  if (!isDoltDriverProfile(config.driver_profile)) return;
+  const external = externalConfigRecord(config.external_config);
+  if (visible) external[DOLT_SHOW_SYSTEM_TABLES_CONFIG_KEY] = true;
+  else delete external[DOLT_SHOW_SYSTEM_TABLES_CONFIG_KEY];
+  config.external_config = Object.keys(external).length > 0 ? external : undefined;
+}
+
 export function doltObjectTreeProfileForConnection(config?: ConnectionConfig): DriverProfileObjectTreeProfile | undefined {
   if (!config || !isDoltDriverProfile(config.driver_profile)) return undefined;
-  const systemTablesVisible = doltSystemTablesVisible(config.driver_profile, config.url_params);
+  const systemTablesVisible = doltSystemTablesVisible(config);
   return {
     cacheKey: `dolt-system-tables-v1:${systemTablesVisible ? "shown" : "hidden"}`,
     groupOverrides: systemTablesVisible
@@ -140,102 +157,6 @@ export function doltObjectTreeProfileForConnection(config?: ConnectionConfig): D
         ]
       : [],
   };
-}
-
-function splitMysqlSessionVariables(value: string): string[] {
-  const assignments: string[] = [];
-  let current = "";
-  let quote = "";
-  let escaped = false;
-  let parenthesisDepth = 0;
-
-  for (let index = 0; index < value.length; index += 1) {
-    const character = value[index];
-    if (quote) {
-      current += character;
-      if (escaped) {
-        escaped = false;
-      } else if (character === "\\") {
-        escaped = true;
-      } else if (character === quote) {
-        if (value[index + 1] === quote) {
-          current += quote;
-          index += 1;
-        } else {
-          quote = "";
-        }
-      }
-      continue;
-    }
-
-    if (character === "'" || character === '"' || character === "`") {
-      quote = character;
-      current += character;
-    } else if (character === "(") {
-      parenthesisDepth += 1;
-      current += character;
-    } else if (character === ")") {
-      parenthesisDepth = Math.max(0, parenthesisDepth - 1);
-      current += character;
-    } else if ((character === "," || character === ";") && parenthesisDepth === 0) {
-      if (current.trim()) assignments.push(current.trim());
-      current = "";
-    } else {
-      current += character;
-    }
-  }
-
-  if (current.trim()) assignments.push(current.trim());
-  return assignments;
-}
-
-function sessionVariableName(assignment: string): string {
-  const separator = assignment.indexOf("=");
-  if (separator < 0) return "";
-  return assignment
-    .slice(0, separator)
-    .trim()
-    .replace(/^@@(?:session\.)?/i, "")
-    .toLowerCase();
-}
-
-function sessionVariableValue(assignment: string): string {
-  const separator = assignment.indexOf("=");
-  return separator < 0
-    ? ""
-    : assignment
-        .slice(separator + 1)
-        .trim()
-        .toLowerCase();
-}
-
-function mysqlSessionVariableAssignments(params: URLSearchParams): string[] {
-  const assignments: string[] = [];
-  for (const [key, value] of params) {
-    if (key.toLowerCase() === MYSQL_SESSION_VARIABLES_PARAM.toLowerCase()) {
-      assignments.push(...splitMysqlSessionVariables(value));
-    }
-  }
-  return assignments;
-}
-
-export function doltSystemTablesVisible(driverProfile?: string, urlParams?: string): boolean {
-  if (!isDoltDriverProfile(driverProfile)) return false;
-  const params = new URLSearchParams((urlParams || "").trim().replace(/^\?/, ""));
-  return mysqlSessionVariableAssignments(params).some((assignment) => sessionVariableName(assignment) === DOLT_SHOW_SYSTEM_TABLES_VARIABLE && ["1", "true", "on"].includes(sessionVariableValue(assignment)));
-}
-
-export function setDoltSystemTablesVisible(driverProfile: string | undefined, urlParams: string | undefined, visible: boolean): string {
-  if (!isDoltDriverProfile(driverProfile)) return urlParams || "";
-
-  const params = new URLSearchParams((urlParams || "").trim().replace(/^\?/, ""));
-  const assignments = mysqlSessionVariableAssignments(params).filter((assignment) => sessionVariableName(assignment) !== DOLT_SHOW_SYSTEM_TABLES_VARIABLE);
-  if (visible) assignments.push(`${DOLT_SHOW_SYSTEM_TABLES_VARIABLE}=1`);
-
-  const sessionVariableParamKeys = Array.from(params.keys()).filter((key) => key.toLowerCase() === MYSQL_SESSION_VARIABLES_PARAM.toLowerCase());
-  for (const key of sessionVariableParamKeys) params.delete(key);
-  if (assignments.length > 0) params.set(MYSQL_SESSION_VARIABLES_PARAM, assignments.join(","));
-  return params.toString();
 }
 
 export function doltSqlBuiltinTerms(driverProfile?: string): string {

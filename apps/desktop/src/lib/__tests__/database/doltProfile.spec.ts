@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { DOLT_SQL_ROUTINES, doltObjectTreeProfileForConnection, doltSqlBuiltinTerms, doltSqlRoutineSignatures, doltSystemTablesVisible, isDoltDriverProfile, setDoltSystemTablesVisible } from "@/lib/database/doltProfile";
 import type { ConnectionConfig } from "@/types/database";
 
-function doltConfig(urlParams = ""): ConnectionConfig {
+function doltConfig(showDoltSystemTables = false): ConnectionConfig {
   return {
     id: "dolt-1",
     name: "Dolt",
@@ -13,7 +13,7 @@ function doltConfig(urlParams = ""): ConnectionConfig {
     username: "root",
     password: "",
     database: "app",
-    url_params: urlParams,
+    external_config: showDoltSystemTables ? { doltShowSystemTables: true } : undefined,
   };
 }
 
@@ -86,32 +86,19 @@ describe("doltProfile", () => {
     expect(DOLT_SQL_ROUTINES.filter((routine) => routine.type === "table-function").map((routine) => routine.name)).toEqual(documentedDoltTableFunctions);
   });
 
-  it("maps the system-table switch to the MySQL sessionVariables parameter", () => {
-    const enabled = setDoltSystemTablesVisible("dolt", "charset=utf8mb4", true);
+  it("stores system-table visibility in the existing profile config slot", () => {
+    const config = { ...doltConfig(), external_config: { retained: true } };
+    setDoltSystemTablesVisible(config, true);
+    expect(config.external_config).toEqual({ retained: true, doltShowSystemTables: true });
+    expect(doltSystemTablesVisible(config)).toBe(true);
 
-    expect(enabled).toBe("charset=utf8mb4&sessionVariables=dolt_show_system_tables%3D1");
-    expect(doltSystemTablesVisible("dolt", enabled)).toBe(true);
-    expect(doltSystemTablesVisible("mysql", enabled)).toBe(false);
-    expect(setDoltSystemTablesVisible("dolt", enabled, false)).toBe("charset=utf8mb4");
-  });
-
-  it("preserves unrelated session variables and replaces legacy casing", () => {
-    const params = "sessionvariables=sql_mode%3D%27STRICT%2CTRADITIONAL%27%3BDOLT_SHOW_SYSTEM_TABLES%3D0&connect_timeout=10";
-    const enabled = setDoltSystemTablesVisible("DOLT", params, true);
-    const parsed = new URLSearchParams(enabled);
-
-    expect(parsed.get("sessionVariables")).toBe("sql_mode='STRICT,TRADITIONAL',dolt_show_system_tables=1");
-    expect(parsed.get("connect_timeout")).toBe("10");
-    expect(doltSystemTablesVisible("dolt", enabled)).toBe(true);
-  });
-
-  it("leaves non-Dolt profiles untouched", () => {
-    const params = "sessionVariables=sql_mode%3DANSI";
-    expect(setDoltSystemTablesVisible("mysql", params, true)).toBe(params);
+    setDoltSystemTablesVisible(config, false);
+    expect(config.external_config).toEqual({ retained: true });
+    expect(doltSystemTablesVisible(config)).toBe(false);
   });
 
   it("defines independent table ranges while Dolt system tables are visible", () => {
-    expect(doltObjectTreeProfileForConnection(doltConfig("sessionVariables=dolt_show_system_tables%3D1"))).toEqual({
+    expect(doltObjectTreeProfileForConnection(doltConfig(true))).toEqual({
       cacheKey: "dolt-system-tables-v1:shown",
       groupOverrides: [
         {

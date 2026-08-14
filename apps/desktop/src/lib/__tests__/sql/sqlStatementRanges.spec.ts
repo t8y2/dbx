@@ -1272,6 +1272,13 @@ describe("buildExecutionCandidates", () => {
     expect(rangeSqlTexts(executableStatementRanges(sql, "mysql"))).toEqual(["SELECT 1", directedSql, "SELECT 2"]);
   });
 
+  it("handles long same-line directive chains without rescanning growing prefixes", () => {
+    const prefix = "/**/".repeat(80_000);
+    const sql = `${prefix} SELECT 1`;
+
+    expect(splitSqlStatementRanges(sql, "mysql")[0]?.sql).toBe(sql);
+  });
+
   it("does not preserve a generic TDSQL-style directive on a separate line", () => {
     const sql = "/*sets:allsets */\nSELECT count(*) FROM tenant_table";
     const candidates = buildExecutionCandidates(sql, indexOf(sql, "tenant_table"), "mysql");

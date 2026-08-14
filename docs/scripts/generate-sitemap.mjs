@@ -4,6 +4,7 @@ import { resolve, relative } from "path";
 const OUT_DIR = resolve(import.meta.dirname, "../out");
 const SITE_URL = "https://dbxio.com";
 const EXCLUDE = new Set(["index.html", "404.html", "_not-found.html"]);
+const EXCLUDE_PATHS = new Set(["/en/issue", "/cn/issue"]);
 
 function* walkDir(dir) {
   const entries = readdirSync(dir, { withFileTypes: true });
@@ -24,7 +25,7 @@ function pathToUrl(filePath) {
 
 const htmlFiles = [...walkDir(OUT_DIR)].filter((f) => {
   const basename = f.split("/").pop() ?? "";
-  return !EXCLUDE.has(basename);
+  return !EXCLUDE.has(basename) && !EXCLUDE_PATHS.has(pathToUrl(f));
 });
 
 const pagesByPath = new Map();

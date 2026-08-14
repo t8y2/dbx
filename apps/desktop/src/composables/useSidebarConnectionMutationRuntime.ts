@@ -246,6 +246,26 @@ export function useSidebarConnectionMutationRuntime(options: SidebarConnectionMu
     return connectionDisconnectTargets().some((target) => connectionStore.connectedIds.has(target.connectionId));
   }
 
+  /** "断开并忘记本次密码"是否可用：save_password=false 且当前已连接（本次运行期必已输入密码）。 */
+  function canForgetSessionCredential(): boolean {
+    const node = activeNode.value;
+    if (!node?.connectionId) return false;
+    const config = connectionStore.getConfig(node.connectionId);
+    return config?.save_password === false && connectionStore.connectedIds.has(node.connectionId);
+  }
+
+  /** "断开并忘记本次密码"：关闭连接池并清除该连接本次运行期的会话密码。 */
+  async function disconnectAndForgetConnectionPassword() {
+    const node = activeNode.value;
+    if (!node?.connectionId) return;
+    try {
+      await connectionStore.disconnectAndForgetConnectionPassword(node.connectionId);
+      toast(t("connection.passwordForgotten"), 2000);
+    } catch (error: any) {
+      toast(t("connection.saveFailed", { message: error?.message || String(error) }), 5000);
+    }
+  }
+
   async function cancelConnectionAttempt() {
     const connectionId = activeNode.value.connectionId;
     if (!connectionId) return;
@@ -366,6 +386,8 @@ export function useSidebarConnectionMutationRuntime(options: SidebarConnectionMu
     disconnectConnection,
     connectionDisconnectMenuLabel,
     canDisconnectConnection,
+    canForgetSessionCredential,
+    disconnectAndForgetConnectionPassword,
     cancelConnectionAttempt,
     closeDatabaseConnection,
     isPinned,

@@ -143,7 +143,11 @@ impl Default for SqlDialectProfile {
 impl SqlDialectProfile {
     fn for_database_type(db_type: DatabaseType) -> Self {
         if matches!(db_type, DatabaseType::Mysql) {
-            return Self::mysql();
+            return Self {
+                preserves_tdsql_leading_directives:
+                    crate::db::tdsql_mysql::preserves_leading_directives_for_database_type(db_type),
+                ..Self::mysql_compatible()
+            };
         }
 
         if matches!(db_type, DatabaseType::Gaussdb) {
@@ -176,10 +180,6 @@ impl SqlDialectProfile {
             requires_whitespace_after_line_comment_dashes: true,
             ..Self::default()
         }
-    }
-
-    fn mysql() -> Self {
-        Self { preserves_tdsql_leading_directives: true, ..Self::mysql_compatible() }
     }
 
     fn oracle_like() -> Self {
@@ -2530,26 +2530,11 @@ fn executable_sql_bounds(statement: &str, options: SqlParsingOptions) -> Option<
     }
     let executable_start = trimmed.len() - executable.len();
     let start = if options.profile.preserves_tdsql_leading_directives {
-        tdsql_leading_directive_start(trimmed, executable_start).unwrap_or(executable_start)
+        crate::db::tdsql_mysql::leading_directive_start(trimmed, executable_start).unwrap_or(executable_start)
     } else {
         executable_start
     };
     Some((start, trimmed_end))
-}
-
-fn tdsql_leading_directive_start(statement: &str, executable_start: usize) -> Option<usize> {
-    let prefix = statement.get(..executable_start)?;
-    let line_start = prefix.rfind(|ch| ch == '\r' || ch == '\n').map_or(0, |index| index + 1);
-    let line_prefix = &prefix[line_start..];
-    let trimmed_line_start = line_prefix.trim_start();
-    if trimmed_line_start.starts_with("/*") && trimmed_line_start.trim_end().ends_with("*/") {
-        return Some(line_start + line_prefix.len() - trimmed_line_start.len());
-    }
-
-    // Keep the multiline behavior introduced for #6043; arbitrary TDSQL
-    // directives only attach when they share the executable SQL line.
-    let trimmed_prefix = prefix.trim_end();
-    trimmed_prefix.strip_suffix("/*proxy*/").map(|before| before.len())
 }
 
 fn has_executable_sql_with_options(statement: &str, options: SqlParsingOptions) -> bool {
@@ -2710,7 +2695,7 @@ mod tests {
 
     #[test]
     fn dash_dash_requires_space_only_for_mysql_compatible_profiles() {
-        let mysql_profile = SqlDialectProfile::mysql();
+        let mysql_profile = SqlDialectProfile::for_database_type(DatabaseType::Mysql);
         assert!(dash_dash_starts_line_comment(mysql_profile, Some(' ')));
         assert!(dash_dash_starts_line_comment(mysql_profile, Some('\n')));
         assert!(dash_dash_starts_line_comment(mysql_profile, Some('\u{1}')));
@@ -3401,7 +3386,6 @@ SELECT 2;";
         assert!(!default.preserves_tdsql_leading_directives);
 
         let mysql = SqlDialectProfile::for_database_type(DatabaseType::Mysql);
-        assert_eq!(mysql, SqlDialectProfile::mysql());
         assert!(mysql.supports_hash_line_comments);
         assert!(mysql.supports_mysql_routine_blocks);
         assert!(mysql.preserves_tdsql_leading_directives);

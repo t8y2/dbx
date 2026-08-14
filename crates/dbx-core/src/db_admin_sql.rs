@@ -645,7 +645,7 @@ pub fn build_duplicate_table_structure_sql(options: DuplicateTableStructureSqlOp
     let source = qualified_name(options.database_type, options.schema.as_deref(), &options.source_name);
     let target =
         qualified_duplicate_target_name(options.database_type, options.schema.as_deref(), &options.target_name);
-    let structure_sql = if options.database_type == Some(DatabaseType::Mysql) {
+    let structure_sql = if matches!(options.database_type, Some(DatabaseType::Mysql | DatabaseType::Impala)) {
         format!("CREATE TABLE {target} LIKE {source};")
     } else if options.database_type == Some(DatabaseType::Questdb) {
         format!("CREATE TABLE {target} (LIKE {source});")
@@ -1683,6 +1683,17 @@ mod tests {
                 column_comments: vec![],
             }),
             "CREATE TABLE \"public\".\"users_copy\" (LIKE \"public\".\"users\" INCLUDING ALL);"
+        );
+        assert_eq!(
+            build_duplicate_table_structure_sql(DuplicateTableStructureSqlOptions {
+                database_type: Some(DatabaseType::Impala),
+                schema: Some("dbx_demo".to_string()),
+                source_name: "connection_test".to_string(),
+                target_name: "connection_test_copy".to_string(),
+                table_comment: None,
+                column_comments: vec![],
+            }),
+            "CREATE TABLE `dbx_demo`.`connection_test_copy` LIKE `dbx_demo`.`connection_test`;"
         );
         assert_eq!(
             build_duplicate_table_structure_sql(DuplicateTableStructureSqlOptions {

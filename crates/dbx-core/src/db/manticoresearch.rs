@@ -1,9 +1,20 @@
 use mysql_async::prelude::*;
 use std::collections::HashMap;
 
+use crate::models::connection::{ConnectionConfig, DatabaseType};
 use crate::types::{ColumnInfo, IndexInfo, ObjectInfo};
 
 use super::mysql::{self, MySqlPool};
+
+pub fn is_config(config: &ConnectionConfig) -> bool {
+    is_profile(&config.db_type, config.driver_profile.as_deref())
+}
+
+pub fn is_profile(db_type: &DatabaseType, driver_profile: Option<&str>) -> bool {
+    *db_type == DatabaseType::ManticoreSearch
+        || (*db_type == DatabaseType::Mysql
+            && driver_profile.is_some_and(|profile| profile.eq_ignore_ascii_case("manticoresearch")))
+}
 
 fn quote_identifier(value: &str) -> String {
     format!("`{}`", value.replace('`', "``"))
@@ -204,6 +215,14 @@ fn index_info_from_row(row: &mysql_async::Row) -> IndexInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn profile_matches_native_and_mysql_profile_connections() {
+        assert!(is_profile(&DatabaseType::ManticoreSearch, None));
+        assert!(is_profile(&DatabaseType::Mysql, Some("MANTICORESEARCH")));
+        assert!(!is_profile(&DatabaseType::Mysql, None));
+        assert!(!is_profile(&DatabaseType::Postgres, Some("manticoresearch")));
+    }
 
     #[test]
     fn show_metadata_uses_unqualified_table_names_when_database_is_empty() {

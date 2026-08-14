@@ -167,6 +167,19 @@ pub async fn save_saved_sql_editor_positions(
 }
 
 #[tauri::command]
+pub async fn load_transfer_task_library(state: State<'_, Arc<AppState>>) -> Result<Option<serde_json::Value>, String> {
+    state.storage.load_transfer_task_library().await
+}
+
+#[tauri::command]
+pub async fn save_transfer_task_library(
+    state: State<'_, Arc<AppState>>,
+    library: serde_json::Value,
+) -> Result<(), String> {
+    state.storage.save_transfer_task_library(&library).await
+}
+
+#[tauri::command]
 pub async fn load_native_debug_logs(app: AppHandle) -> Result<String, String> {
     let log_dir = app.path().app_log_dir().map_err(|e| e.to_string())?;
     tauri::async_runtime::spawn_blocking(move || load_native_debug_logs_from_dir(log_dir))

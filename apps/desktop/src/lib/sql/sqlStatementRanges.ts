@@ -302,6 +302,7 @@ export function splitSqlStatementRanges(sql: string, databaseType?: DatabaseType
   let statementHitStart = 0;
   let pendingHintStart = -1;
   let pendingMysqlDirectiveStart = -1;
+  let pendingMysqlDirectiveLineEnd = -1;
   let customDelimiter: string | null = null;
   let state: QuoteState = "none";
   let dollarTag = "";
@@ -310,16 +311,27 @@ export function splitSqlStatementRanges(sql: string, databaseType?: DatabaseType
   let i = 0;
 
   const isWhitespace = (ch: string) => ch === " " || ch === "\t" || ch === "\r" || ch === "\n";
-  const crossesLine = (from: number, to: number) => /[\r\n]/.test(sql.slice(from, to));
+  const nextLineBreak = (from: number) => {
+    const carriageReturn = sql.indexOf("\r", from);
+    const lineFeed = sql.indexOf("\n", from);
+    if (carriageReturn === -1) return lineFeed === -1 ? len : lineFeed;
+    if (lineFeed === -1) return carriageReturn;
+    return Math.min(carriageReturn, lineFeed);
+  };
 
   const markContent = (pos: number) => {
     if (statementStart === -1) {
       // TDSQL accepts arbitrary leading block directives on the SQL line. The
       // exact /*proxy*/ directive also keeps its historical multiline support.
-      const directiveStart = pendingMysqlDirectiveStart !== -1 && (sql.startsWith("/*proxy*/", pendingMysqlDirectiveStart) || !crossesLine(pendingMysqlDirectiveStart, pos)) ? pendingMysqlDirectiveStart : -1;
+      const directiveStart =
+        pendingMysqlDirectiveStart !== -1 &&
+        (sql.startsWith("/*proxy*/", pendingMysqlDirectiveStart) || pos < pendingMysqlDirectiveLineEnd)
+          ? pendingMysqlDirectiveStart
+          : -1;
       statementStart = directiveStart !== -1 ? directiveStart : pendingHintStart === -1 ? pos : pendingHintStart;
       pendingHintStart = -1;
       pendingMysqlDirectiveStart = -1;
+      pendingMysqlDirectiveLineEnd = -1;
     }
     statementEnd = pos + 1;
   };
@@ -329,6 +341,7 @@ export function splitSqlStatementRanges(sql: string, databaseType?: DatabaseType
       statementEnd = -1;
       pendingHintStart = -1;
       pendingMysqlDirectiveStart = -1;
+      pendingMysqlDirectiveLineEnd = -1;
       postgresDollarQuotedRoutine = false;
       oraclePlSqlStatementEnd = undefined;
       return;
@@ -341,6 +354,7 @@ export function splitSqlStatementRanges(sql: string, databaseType?: DatabaseType
     statementEnd = -1;
     pendingHintStart = -1;
     pendingMysqlDirectiveStart = -1;
+    pendingMysqlDirectiveLineEnd = -1;
     postgresDollarQuotedRoutine = false;
     oraclePlSqlStatementEnd = undefined;
   };
@@ -446,12 +460,14 @@ export function splitSqlStatementRanges(sql: string, databaseType?: DatabaseType
     // Line comments consume up to (and including) the newline.
     if (ch === "-" && next === "-") {
       pendingMysqlDirectiveStart = -1;
+      pendingMysqlDirectiveLineEnd = -1;
       const newline = sql.indexOf("\n", i);
       i = newline === -1 ? len : newline + 1;
       continue;
     }
     if (startsHashLineComment(sql, i, databaseType, parameterOptions)) {
       pendingMysqlDirectiveStart = -1;
+      pendingMysqlDirectiveLineEnd = -1;
       const newline = sql.indexOf("\n", i);
       i = newline === -1 ? len : newline + 1;
       continue;
@@ -463,9 +479,13 @@ export function splitSqlStatementRanges(sql: string, databaseType?: DatabaseType
       const close = sql.indexOf("*/", i + 2);
       if (statementStart === -1) {
         if (databaseType === "mysql") {
-          if (pendingMysqlDirectiveStart === -1 || crossesLine(pendingMysqlDirectiveStart, i)) pendingMysqlDirectiveStart = i;
+          if (pendingMysqlDirectiveStart === -1 || i > pendingMysqlDirectiveLineEnd) {
+            pendingMysqlDirectiveStart = i;
+            pendingMysqlDirectiveLineEnd = nextLineBreak(i);
+          }
         } else {
           pendingMysqlDirectiveStart = -1;
+          pendingMysqlDirectiveLineEnd = -1;
         }
       }
       i = close === -1 ? len : close + 2;

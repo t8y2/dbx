@@ -29,6 +29,7 @@ use crate::models::connection::{
 use crate::path_utils::expand_tilde;
 use crate::plugins::{PluginDriverSession, PluginRegistry, PluginRuntimeEnv};
 use crate::query_cancel::RunningQueries;
+use crate::session_credentials::SessionCredentialStore;
 use crate::storage::{normalize_duckdb_worker_max_processes, Storage, DUCKDB_WORKER_MAX_PROCESSES_DEFAULT};
 use crate::task_supervisor::TaskSupervisor;
 
@@ -62,21 +63,8 @@ pub enum MysqlMode {
     OceanBaseOracle,
 }
 
-fn is_oceanbase_mysql_config(config: &ConnectionConfig) -> bool {
-    config.db_type == DatabaseType::Mysql
-        && config.driver_profile.as_deref().is_some_and(|profile| profile.eq_ignore_ascii_case("oceanbase"))
-}
-
-pub(crate) fn oceanbase_mysql_query_timeout_sql(config: &ConnectionConfig, timeout_secs: u64) -> Option<String> {
-    if !is_oceanbase_mysql_config(config) || timeout_secs == 0 {
-        return None;
-    }
-    let timeout_us = timeout_secs.saturating_mul(1_000_000);
-    Some(format!("SET ob_query_timeout = {timeout_us}"))
-}
-
 fn oceanbase_mysql_setup_queries(config: &ConnectionConfig) -> Vec<String> {
-    oceanbase_mysql_query_timeout_sql(config, config.query_timeout_secs).into_iter().collect()
+    db::oceanbase_mysql::query_timeout_sql(config, config.query_timeout_secs).into_iter().collect()
 }
 
 fn mysql_pool_setup_queries(config: &ConnectionConfig, url: &str) -> Vec<String> {
@@ -184,6 +172,7 @@ macro_rules! agent_connection_pool_database_type {
             | DatabaseType::Snowflake
             | DatabaseType::Trino
             | DatabaseType::Hive
+            | DatabaseType::Impala
             | DatabaseType::Spark
             | DatabaseType::Db2
             | DatabaseType::Informix
@@ -224,6 +213,11 @@ pub struct AppState {
     /// Used to reconstruct a TLS connector compatible with the original connection when cancelling.
     postgres_cancel_contexts: Arc<RwLock<HashMap<String, db::postgres::PostgresCancelContext>>>,
     pub transaction_sessions: Arc<RwLock<HashMap<String, TransactionSession>>>,
+    /// `save_password=false` 连接本次运行期的临时密码（内存，进程退出即丢，
+    /// 绝不落盘）。键为 `(owner_scope, connection_id)`：桌面端 owner 为空串，
+    /// Web 端 owner 为已认证会话 token，不同登录会话互不可见。建池/池重建/
+    /// AI/元数据从它读取，前端通过状态接口查询。
+    pub session_credentials: SessionCredentialStore,
     #[cfg(feature = "mq-admin")]
     pub mq_registry: crate::mq::MqAdminRegistry,
 }
@@ -960,6 +954,43 @@ impl AppState {
         }
     }
 
+    /// save_password=false 连接：持久化/运行态 config 的 password 恒为空，从本次
+    /// 运行期会话凭据仓库补主密码，使手动/编辑器/AI/元数据/池重建复用首次输入，
+    /// 不再反复弹窗。会话凭据只在内存中，进程退出即丢；"断开并忘记"后仓库为空，
+    /// 此处自然回到空密码（需重新输入）。
+    ///
+    /// owner 作用域取自 [`crate::session_credentials::current_credential_owner`]：
+    /// Web 请求由鉴权中间件注入会话 token，桌面端/后台任务为空串。这样不同登录
+    /// 会话只会读取各自输入的密码，不会跨会话复用。
+    pub fn apply_session_credential(
+        &self,
+        config: &ConnectionConfig,
+        db_config: &mut ConnectionConfig,
+        connection_id: &str,
+    ) {
+        if !config.save_password && db_config.password.is_empty() {
+            let owner = crate::session_credentials::current_credential_owner().unwrap_or_default();
+            if let Some(session_password) = self.session_credentials.get(&owner, connection_id) {
+                db_config.password = session_password;
+            }
+        }
+    }
+
+    /// no-save 连接复用已有池时，若该池由"另一个 owner 会话"创建，则不应复用
+    /// （否则会话 B 会直接使用会话 A 输入的临时密码建立的连接）。返回 `true`
+    /// 表示需要销毁旧池、以当前 owner 的凭据重建。
+    async fn pool_credential_owner_mismatch(&self, config: &ConnectionConfig, pool_key: &str) -> bool {
+        if config.save_password {
+            return false;
+        }
+        let owner = crate::session_credentials::current_credential_owner().unwrap_or_default();
+        if owner.is_empty() {
+            // 桌面端/未注入 owner：单用户场景，按既有逻辑复用。
+            return false;
+        }
+        self.session_credentials.pool_owner_mismatch(pool_key, &owner)
+    }
+
     async fn handle_shared_connection_open_error(
         &self,
         error: crate::agent_runtime::SharedConnectionOpenError,
@@ -1041,6 +1072,7 @@ impl AppState {
             duckdb_worker_max_processes: AtomicUsize::new(DUCKDB_WORKER_MAX_PROCESSES_DEFAULT),
             postgres_cancel_contexts: Arc::new(RwLock::new(HashMap::new())),
             transaction_sessions: Arc::new(RwLock::new(HashMap::new())),
+            session_credentials: SessionCredentialStore::new(),
             #[cfg(feature = "mq-admin")]
             mq_registry: crate::mq::MqAdminRegistry::new(),
         }
@@ -1344,6 +1376,14 @@ impl AppState {
         if !route_is_available {
             routing.detach_pool_by_key(&pool_key, true).await;
             return Err("Agent runtime is unavailable while publishing the connection pool".to_string());
+        }
+        // 记录 no-save 池由哪个 owner 会话创建，供多会话复用判定使用
+        // （见 pool_credential_owner_mismatch）。已保存密码连接始终共享池，不记录。
+        if !config.save_password {
+            let owner = crate::session_credentials::current_credential_owner().unwrap_or_default();
+            if !owner.is_empty() {
+                self.session_credentials.record_pool_owner(&pool_key, &owner);
+            }
         }
         Ok(())
     }
@@ -1735,6 +1775,11 @@ impl AppState {
                 drop(conns);
                 if self.remove_pool_if_duckdb_isolation_mismatch(&pool_key).await {
                     // Recreate below using the current DuckDB isolation mode.
+                } else if self.pool_credential_owner_mismatch(&config, &pool_key).await {
+                    // 创建该 no-save 池的是另一个登录会话：销毁旧池，用当前会话的
+                    // 凭据重建，避免跨会话复用他人输入的临时密码。
+                    self.remove_stale_connection_pool(&pool_key).await;
+                    break;
                 } else if !validate_existing_pool || !self.remove_stale_connection_pool(&pool_key).await {
                     self.touch_pool_activity(&pool_key).await;
                     return Ok(pool_key);
@@ -1752,7 +1797,8 @@ impl AppState {
             break;
         }
 
-        let db_config = database_connection_config_with_catalog(&config, database, catalog);
+        let mut db_config = database_connection_config_with_catalog(&config, database, catalog);
+        self.apply_session_credential(&config, &mut db_config, connection_id);
 
         validate_h2_file_connection(&db_config)?;
         self.ensure_current_connection_attempt(connection_id, connection_attempt).await?;
@@ -4192,6 +4238,7 @@ impl AppState {
         let pool_keys = self.connections.read().await.keys().cloned().collect::<Vec<_>>();
         self.stop_keepalive_tasks(&pool_keys).await;
         self.pool_activity.write().await.clear();
+        self.session_credentials.clear_pool_owners();
         self.postgres_cancel_contexts.write().await.clear();
         self.draining_pools.lock().unwrap_or_else(|error| error.into_inner()).clear();
         self.connections.write().await.drain().collect()
@@ -4230,6 +4277,7 @@ impl AppState {
                 cancel_contexts.remove(key);
             }
         }
+        self.session_credentials.remove_pool_owners(&keys_to_remove);
         let mut conns = self.connections.write().await;
         let mut removed = Vec::with_capacity(keys_to_remove.len());
         for key in keys_to_remove {
@@ -4718,6 +4766,26 @@ fn session_scoped_pool_key_for(
     session_scoped_pool_key(base_pool_key, client_session_id)
 }
 
+/// 两个运行态连接配置是否视为同一连接（用于决定是否销毁连接池）。
+///
+/// 仅当双方都是 `save_password=false` 时才忽略 `password` 字段的差异：这类连接
+/// 在 connect 时运行态配置可能携带会话密码，持久化同步后为空，这种空值差异不应
+/// 触发池重建。若任一方 `save_password=true`，密码是真实的连接参数，任何密码变更
+/// （包括用户保存了新密码）都必须销毁旧池，否则旧池会继续用旧密码认证。
+pub fn connection_configs_pool_equivalent(a: &ConnectionConfig, b: &ConnectionConfig) -> bool {
+    if a == b {
+        return true;
+    }
+    if !a.save_password && !b.save_password {
+        let mut a = a.clone();
+        a.password.clear();
+        let mut b = b.clone();
+        b.password.clear();
+        return a == b;
+    }
+    false
+}
+
 fn pool_key_for_session_role(
     config: Option<&ConnectionConfig>,
     base_pool_key: String,
@@ -5161,16 +5229,17 @@ async fn detect_ob_oracle_mode(config: &ConnectionConfig, pool: &db::mysql::MySq
 #[cfg(test)]
 mod tests {
     use super::{
-        agent_connect_timeout, connection_probe_endpoints, connection_remote_endpoint, connection_url_for_endpoint,
-        database_connection_config, database_connection_config_with_catalog,
-        gaussdb_identifier_quote_from_query_result, gaussdb_m_jdbc_config_for_endpoint, gaussdb_uses_m_jdbc_driver,
-        kafka_single_loopback_bootstrap_endpoint, metadata_connection_config, mysql_metadata_fallback_url,
-        mysql_pool_setup_queries, oceanbase_mysql_query_timeout_sql, oceanbase_mysql_setup_queries,
-        prestosql_jdbc_config_for_endpoint, redacted_connection_url_for_endpoint, redis_sentinel_transport_id,
-        redis_sentinel_transport_prefix, sqlserver_legacy_agent_config, sqlserver_legacy_driver_error,
-        sqlserver_uses_legacy_driver, task_client_session_id, upsert_connection_url_param, uses_bare_mysql_pool,
-        uses_tcp_probe, validate_connection_url_params, validate_h2_database_path, AppState, MysqlMode, PoolKind,
-        GAUSSDB_M_JDBC_DRIVER_CLASS, GAUSSDB_M_JDBC_DRIVER_PROFILE, PRESTOSQL_JDBC_DRIVER_CLASS,
+        agent_connect_timeout, connection_configs_pool_equivalent, connection_probe_endpoints,
+        connection_remote_endpoint, connection_url_for_endpoint, database_connection_config,
+        database_connection_config_with_catalog, gaussdb_identifier_quote_from_query_result,
+        gaussdb_m_jdbc_config_for_endpoint, gaussdb_uses_m_jdbc_driver, kafka_single_loopback_bootstrap_endpoint,
+        metadata_connection_config, mysql_metadata_fallback_url, mysql_pool_setup_queries,
+        oceanbase_mysql_setup_queries, prestosql_jdbc_config_for_endpoint, redacted_connection_url_for_endpoint,
+        redis_sentinel_transport_id, redis_sentinel_transport_prefix, sqlserver_legacy_agent_config,
+        sqlserver_legacy_driver_error, sqlserver_uses_legacy_driver, task_client_session_id,
+        upsert_connection_url_param, uses_bare_mysql_pool, uses_tcp_probe, validate_connection_url_params,
+        validate_h2_database_path, AppState, MysqlMode, PoolKind, GAUSSDB_M_JDBC_DRIVER_CLASS,
+        GAUSSDB_M_JDBC_DRIVER_PROFILE, PRESTOSQL_JDBC_DRIVER_CLASS,
     };
     use crate::agent_connection::{
         agent_connect_params, mongo_legacy_error_with_auth_hint, mongo_uses_legacy_driver,
@@ -5278,6 +5347,172 @@ mod tests {
         let mut config = mysql_config(Some("ads"));
         config.db_type = DatabaseType::StarRocks;
         assert_eq!(metadata_connection_config(&config).database, None);
+    }
+
+    #[test]
+    fn connection_configs_pool_equivalent_ignores_password_differences() {
+        let mut a = mysql_config(None);
+        a.save_password = false;
+        a.password = "session-secret".to_string();
+        // 持久化同步后 password 为空（save_password=false）：视为同一连接，不销毁池。
+        let mut b = a.clone();
+        b.password.clear();
+        assert!(connection_configs_pool_equivalent(&a, &b));
+        assert!(connection_configs_pool_equivalent(&b, &a));
+
+        // 两个非空但不同的密码：同样忽略（密码不应触发池重建）。
+        let mut c = a.clone();
+        c.password = "changed-secret".to_string();
+        assert!(connection_configs_pool_equivalent(&a, &c));
+    }
+
+    #[test]
+    fn connection_configs_pool_equivalent_detects_saved_password_change() {
+        let mut a = mysql_config(None);
+        a.save_password = true;
+        a.password = "old-secret".to_string();
+        let mut b = a.clone();
+        b.password = "new-secret".to_string();
+        // save_password=true：密码是真实连接参数，保存新密码后旧池不得继续用旧密码认证。
+        assert!(!connection_configs_pool_equivalent(&a, &b));
+        assert!(!connection_configs_pool_equivalent(&b, &a));
+    }
+
+    #[test]
+    fn connection_configs_pool_equivalent_detects_real_parameter_changes() {
+        let mut a = mysql_config(None);
+        a.password = "secret".to_string();
+        // host / port / username / database 等真实连接参数变化应视为不同连接（销毁池）。
+        let mut host = a.clone();
+        host.host = "other-host".to_string();
+        assert!(!connection_configs_pool_equivalent(&a, &host));
+
+        let mut port = a.clone();
+        port.port = 5433;
+        assert!(!connection_configs_pool_equivalent(&a, &port));
+
+        let mut user = a.clone();
+        user.username = "other-user".to_string();
+        assert!(!connection_configs_pool_equivalent(&a, &user));
+
+        let mut ssl = a.clone();
+        ssl.ssl = true;
+        assert!(!connection_configs_pool_equivalent(&a, &ssl));
+
+        // 完全相等（含相同密码）→ true。
+        assert!(connection_configs_pool_equivalent(&a, &a.clone()));
+    }
+
+    #[tokio::test]
+    async fn apply_session_credential_injects_saved_password_only_for_no_save_connections() {
+        let dir = std::env::temp_dir().join(format!("dbx-core-session-cred-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let state = AppState::new_with_plugin_dir(storage, dir.join("plugins"));
+        let _ = state.session_credentials.set("", "conn-a", "s3cret");
+
+        let mut config = mysql_config(None);
+        config.id = "conn-a".to_string();
+        config.save_password = false;
+        config.password.clear();
+
+        // save_password=false + db_config 密码为空 → 从会话凭据仓库注入。
+        let mut db_config = metadata_connection_config(&config);
+        state.apply_session_credential(&config, &mut db_config, &config.id);
+        assert_eq!(db_config.password, "s3cret");
+
+        // save_password=true → 不注入（走持久化水合的密码，若为空则保持空）。
+        config.save_password = true;
+        let mut db_config = metadata_connection_config(&config);
+        state.apply_session_credential(&config, &mut db_config, &config.id);
+        assert_eq!(db_config.password, "");
+
+        // 无会话凭据 → 保持空密码（"断开并忘记"后重新输入）。
+        state.session_credentials.remove("", "conn-a");
+        config.save_password = false;
+        let mut db_config = metadata_connection_config(&config);
+        state.apply_session_credential(&config, &mut db_config, &config.id);
+        assert_eq!(db_config.password, "");
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn apply_session_credential_reads_owner_scoped_credentials_only() {
+        let dir = std::env::temp_dir().join(format!("dbx-core-session-cred-owner-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let state = AppState::new_with_plugin_dir(storage, dir.join("plugins"));
+
+        let mut config = mysql_config(None);
+        config.id = "conn-a".to_string();
+        config.save_password = false;
+        config.password.clear();
+
+        // 会话 X 输入了密码，会话 Y 未输入：Y 的请求（owner=token-y）不得注入 X 的密码。
+        let _ = state.session_credentials.set("token-x", "conn-a", "x-secret");
+        crate::session_credentials::with_credential_owner(Some("token-y".to_string()), async {
+            let mut db_config = metadata_connection_config(&config);
+            state.apply_session_credential(&config, &mut db_config, &config.id);
+            assert_eq!(db_config.password, "");
+        })
+        .await;
+
+        // 会话 X 自身能读到自己的密码。
+        crate::session_credentials::with_credential_owner(Some("token-x".to_string()), async {
+            let mut db_config = metadata_connection_config(&config);
+            state.apply_session_credential(&config, &mut db_config, &config.id);
+            assert_eq!(db_config.password, "x-secret");
+        })
+        .await;
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn pool_credential_owner_mismatch_prevents_cross_session_pool_reuse() {
+        let dir = std::env::temp_dir().join(format!("dbx-core-pool-owner-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let state = AppState::new_with_plugin_dir(storage, dir.join("plugins"));
+
+        let mut config = mysql_config(None);
+        config.id = "conn-a".to_string();
+        config.save_password = false;
+
+        // 模拟会话 X 创建的 no-save 池。
+        state.session_credentials.record_pool_owner("conn-a", "token-x");
+
+        // 同一会话 X 复用 → 无冲突。
+        crate::session_credentials::with_credential_owner(Some("token-x".to_string()), async {
+            assert!(!state.pool_credential_owner_mismatch(&config, "conn-a").await);
+        })
+        .await;
+
+        // 另一会话 Y 请求同一 no-save 池 → 冲突，需以 Y 的凭据重建，避免复用 X 的密码。
+        crate::session_credentials::with_credential_owner(Some("token-y".to_string()), async {
+            assert!(state.pool_credential_owner_mismatch(&config, "conn-a").await);
+        })
+        .await;
+
+        // owner 标记缺失时按不可信处理，避免全局配置失效与异步移除旧池之间复用旧池。
+        state.session_credentials.clear_connection("conn-a");
+        crate::session_credentials::with_credential_owner(Some("token-x".to_string()), async {
+            assert!(state.pool_credential_owner_mismatch(&config, "conn-a").await);
+        })
+        .await;
+
+        // 桌面端（无 owner）单用户 → 不冲突，按既有逻辑复用。
+        assert!(!state.pool_credential_owner_mismatch(&config, "conn-a").await);
+
+        // 已保存密码连接始终共享池 → 不冲突。
+        config.save_password = true;
+        crate::session_credentials::with_credential_owner(Some("token-y".to_string()), async {
+            assert!(!state.pool_credential_owner_mismatch(&config, "conn-a").await);
+        })
+        .await;
+
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -5610,7 +5845,7 @@ mod tests {
         config.driver_profile = Some("oceanbase".to_string());
 
         assert_eq!(
-            oceanbase_mysql_query_timeout_sql(&config, 300_000),
+            db::oceanbase_mysql::query_timeout_sql(&config, 300_000),
             Some("SET ob_query_timeout = 300000000000".to_string())
         );
     }

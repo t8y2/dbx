@@ -205,8 +205,12 @@ async function loadCatalogs(connectionId: string, side: "source" | "target") {
     }
     return;
   }
+  // 竞态防护：请求发出后若用户切换了连接，旧连接的回调必须丢弃，
+  // 不允许过期结果覆盖新选择（一切以最新选择的连接为准）。
+  const isStale = () => (side === "source" ? sourceConnectionId.value !== connectionId : targetConnectionId.value !== connectionId);
   try {
     const catalogs = await api.listDorisCatalogs(connectionId);
+    if (isStale()) return;
     if (side === "source") {
       sourceCatalogs.value = catalogs;
       sourceCatalog.value = catalogs.length === 1 ? catalogs[0].name : "";
@@ -215,6 +219,7 @@ async function loadCatalogs(connectionId: string, side: "source" | "target") {
       targetCatalog.value = catalogs.length === 1 ? catalogs[0].name : "";
     }
   } catch {
+    if (isStale()) return;
     if (side === "source") {
       sourceCatalogs.value = [];
       sourceCatalog.value = "";
@@ -227,11 +232,14 @@ async function loadCatalogs(connectionId: string, side: "source" | "target") {
 
 async function loadDatabases(connectionId: string, target: "source" | "target") {
   if (!connectionId) return;
+  // 竞态防护：连接切换后，旧连接的数据库列表回调直接丢弃。
+  const isStale = () => (target === "source" ? sourceConnectionId.value !== connectionId : targetConnectionId.value !== connectionId);
   try {
     await store.ensureConnected(connectionId);
     const config = store.getConfig(connectionId);
     if (!config) return;
     const names = isMongoConnection(connectionId) ? databaseOptionsForConnection(await api.mongoListDatabases(connectionId), config) : await fetchNamespaceOptionsForConnection(connectionId, config);
+    if (isStale()) return;
     if (target === "source") {
       sourceDatabases.value = names;
       sourceDatabase.value = names.length === 1 ? names[0] : "";
@@ -240,6 +248,7 @@ async function loadDatabases(connectionId: string, target: "source" | "target") 
       targetDatabase.value = names.length === 1 ? names[0] : "";
     }
   } catch {
+    if (isStale()) return;
     if (target === "source") sourceDatabases.value = [];
     else targetDatabases.value = [];
   }
@@ -247,11 +256,18 @@ async function loadDatabases(connectionId: string, target: "source" | "target") 
 
 async function loadDatabasesForCatalog(connectionId: string, catalog: string, target: "source" | "target") {
   if (!connectionId || !catalog) return;
+  // 竞态防护：连接或 catalog 切换后，旧请求的数据库列表回调直接丢弃。
+  const isStale = () => {
+    const currentConnection = target === "source" ? sourceConnectionId.value : targetConnectionId.value;
+    const currentCatalog = target === "source" ? sourceCatalog.value : targetCatalog.value;
+    return currentConnection !== connectionId || currentCatalog !== catalog;
+  };
   try {
     await store.ensureConnected(connectionId);
     const config = store.getConfig(connectionId);
     if (!config) return;
     const names = await fetchCatalogNamespaceOptions(connectionId, catalog, config);
+    if (isStale()) return;
     if (target === "source") {
       sourceDatabases.value = names;
       sourceDatabase.value = names.length === 1 ? names[0] : "";
@@ -260,6 +276,7 @@ async function loadDatabasesForCatalog(connectionId: string, catalog: string, ta
       targetDatabase.value = names.length === 1 ? names[0] : "";
     }
   } catch {
+    if (isStale()) return;
     if (target === "source") sourceDatabases.value = [];
     else targetDatabases.value = [];
   }
@@ -267,7 +284,14 @@ async function loadDatabasesForCatalog(connectionId: string, catalog: string, ta
 
 async function loadSchemas(connectionId: string, database: string, side: "source" | "target", preferredSchema = "") {
   if (!connectionId || !database) return;
+  // 竞态防护：连接或数据库切换后，旧请求的 schema 列表回调直接丢弃。
+  const isStale = () => {
+    const currentConnection = side === "source" ? sourceConnectionId.value : targetConnectionId.value;
+    const currentDatabase = side === "source" ? sourceDatabase.value : targetDatabase.value;
+    return currentConnection !== connectionId || currentDatabase !== database;
+  };
   if (isMongoConnection(connectionId)) {
+    if (isStale()) return;
     if (side === "source") {
       sourceSchemas.value = [];
       sourceSchema.value = database;
@@ -279,6 +303,7 @@ async function loadSchemas(connectionId: string, database: string, side: "source
   }
   try {
     const schemas = await api.listSchemas(connectionId, database);
+    if (isStale()) return;
     const selected = preferredSchema && schemas.includes(preferredSchema) ? preferredSchema : schemas.includes("public") ? "public" : (schemas[0] ?? "");
     if (side === "source") {
       sourceSchemas.value = schemas;
@@ -288,6 +313,7 @@ async function loadSchemas(connectionId: string, database: string, side: "source
       targetSchema.value = selected;
     }
   } catch {
+    if (isStale()) return;
     if (side === "source") {
       sourceSchemas.value = [];
       sourceSchema.value = "";
@@ -325,43 +351,51 @@ function applyPendingObjectSelection() {
 }
 
 async function loadObjects() {
-  if (!sourceConnectionId.value || !sourceDatabase.value) {
+  const connectionId = sourceConnectionId.value;
+  const database = sourceDatabase.value;
+  if (!connectionId || !database) {
     objectGroups.value = {};
     return;
   }
+  // 竞态防护：捕获发起时的上下文快照，加载期间用户切换连接/数据库/Schema 后，
+  // 旧请求的对象列表回调直接丢弃，不覆盖新选择对应的状态。
+  const catalog = sourceCatalog.value || undefined;
+  const schemaValue = sourceSchema.value;
+  const isStale = () => sourceConnectionId.value !== connectionId || sourceDatabase.value !== database || (sourceCatalog.value || undefined) !== catalog || sourceSchema.value !== schemaValue;
   loadingObjects.value = true;
   try {
-    if (isMongoConnection(sourceConnectionId.value)) {
-      const collections = await api.mongoListCollections(sourceConnectionId.value, sourceDatabase.value);
+    if (isMongoConnection(connectionId)) {
+      const collections = await api.mongoListCollections(connectionId, database);
+      if (isStale()) return;
       objectGroups.value = { TABLE: collections.map((c) => c.name) };
       applyPendingTableSelection();
       applyPendingObjectSelection();
       return;
     }
-    const config = store.getConfig(sourceConnectionId.value);
+    const config = store.getConfig(connectionId);
     const needsSchema = isSchemaAware(config?.db_type);
-    const schema = needsSchema && sourceSchema.value ? sourceSchema.value : sourceDatabase.value;
-    const catalog = sourceCatalog.value || undefined;
+    const schema = needsSchema && schemaValue ? schemaValue : database;
     const kinds = transferObjectKindsForDatabase(config?.db_type);
     const groups: Partial<Record<TransferObjectKind, string[]>> = {};
     for (const kind of kinds) {
       try {
         if (kind === "TABLE") {
-          const tables = await api.listTables(sourceConnectionId.value, sourceDatabase.value, schema, undefined, undefined, undefined, undefined, catalog);
+          const tables = await api.listTables(connectionId, database, schema, undefined, undefined, undefined, undefined, catalog);
           groups.TABLE = tables.filter((t) => t.table_type === "TABLE" || t.table_type === "BASE TABLE").map((t) => t.name);
         } else {
-          const objects = await api.listObjects(sourceConnectionId.value, sourceDatabase.value, schema, [kind], undefined, undefined, undefined, catalog);
+          const objects = await api.listObjects(connectionId, database, schema, [kind], undefined, undefined, undefined, catalog);
           groups[kind] = objects.map((o) => o.name);
         }
       } catch {
         groups[kind] = [];
       }
     }
+    if (isStale()) return;
     objectGroups.value = groups;
     applyPendingTableSelection();
     applyPendingObjectSelection();
   } catch {
-    objectGroups.value = {};
+    if (!isStale()) objectGroups.value = {};
   } finally {
     loadingObjects.value = false;
   }
@@ -392,6 +426,8 @@ watch(sourceConnectionId, async (id) => {
   pendingSelectedTablesPrefill.value = null;
   if (isCatalogCapable(id)) {
     await loadCatalogs(id, "source");
+    // await 期间连接可能已被切换，旧链直接放弃，后续加载由新连接的 watcher 负责
+    if (sourceConnectionId.value !== id) return;
     if (sourceCatalog.value) {
       await loadDatabasesForCatalog(id, sourceCatalog.value, "source");
     }
@@ -456,6 +492,8 @@ watch(targetConnectionId, async (id) => {
   pendingTargetSchemaPrefill.value = "";
   if (isCatalogCapable(id)) {
     await loadCatalogs(id, "target");
+    // await 期间连接可能已被切换，旧链直接放弃，后续加载由新连接的 watcher 负责
+    if (targetConnectionId.value !== id) return;
     if (targetCatalog.value) {
       await loadDatabasesForCatalog(id, targetCatalog.value, "target");
     }
@@ -863,7 +901,7 @@ async function saveConfigTask() {
 
       <div class="flex min-h-0 flex-1 -ml-4">
         <TransferTaskTree ref="taskTreeRef" :selected-task-id="activeTaskId" class="w-60 shrink-0 border-r border-border" @update:selected-task-id="activeTaskId = $event" @select="onSelectTask" @run="onRunTask" @new-blank="onNewBlank" />
-        <div class="min-h-0 flex-1 overflow-y-auto pr-1 scrollbar-thin">
+        <div class="min-h-0 flex-1 overflow-y-auto pl-4 pr-1 scrollbar-thin">
           <div class="flex flex-col gap-5 py-3">
             <!-- Source / Target Side by Side -->
             <div class="grid grid-cols-[1fr_auto_1fr] gap-4 items-start">

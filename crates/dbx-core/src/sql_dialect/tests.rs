@@ -714,7 +714,7 @@ fn builds_mysql_table_data_large_value_previews_without_truncating_keys() {
 }
 
 #[test]
-fn leaves_bounded_mysql_string_columns_out_of_large_value_previews() {
+fn previews_mysql_bounded_string_columns_only_above_the_active_budget() {
     let sql = build_table_data_select_sql(TableDataSelectSqlOptions {
         database_type: Some(DatabaseType::Mysql),
         table_name: "t_0001".to_string(),
@@ -741,11 +741,12 @@ fn leaves_bounded_mysql_string_columns_out_of_large_value_previews() {
     });
 
     assert!(sql.starts_with("SELECT `id`, `image_mime`, LEFT(`image_data`, 420) AS `image_data`"));
-    assert!(sql.contains("CONCAT('B:419:', OCTET_LENGTH(`image_data`)) AS `__DBX_LARGE_VALUE_BYTES_B_2`, `image_url`, LEFT(`large_note`, 420)"));
+    assert!(sql.contains("CONCAT('B:419:', OCTET_LENGTH(`image_data`)) AS `__DBX_LARGE_VALUE_BYTES_B_2`, LEFT(`image_url`, 420) AS `image_url`"));
+    assert!(sql.contains("CONCAT('T:419:', OCTET_LENGTH(`image_url`)) AS `__DBX_LARGE_VALUE_BYTES_T_3`"));
+    assert!(sql.contains("LEFT(`large_note`, 420) AS `large_note`"));
     assert!(sql.contains("CONCAT('T:419:', OCTET_LENGTH(`large_note`)) AS `__DBX_LARGE_VALUE_BYTES_T_4`"));
     assert!(sql.contains("LEFT(`large_binary`, 420) AS `large_binary`"));
     assert!(!sql.contains("LEFT(`image_mime`"));
-    assert!(!sql.contains("LEFT(`image_url`"));
 }
 
 #[test]

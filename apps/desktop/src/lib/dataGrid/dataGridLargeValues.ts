@@ -18,11 +18,29 @@ function declaredDataTypeLength(dataType: string): number | undefined {
   return Number.isSafeInteger(length) ? length : undefined;
 }
 
-function mysqlColumnNeedsLargeValuePreview(column: ColumnInfo): boolean {
+function mysqlColumnNeedsLargeValuePreview(column: ColumnInfo, previewSize: number): boolean {
   const base = normalizedDataTypeBase(column.data_type);
   if (matchesMysqlUnboundedLargeValueType(base)) return true;
   if (base !== "varchar" && base !== "varbinary") return false;
-  return (declaredDataTypeLength(column.data_type) ?? 0) > TABLE_DATA_CELL_PREVIEW_SIZE;
+  return (declaredDataTypeLength(column.data_type) ?? 0) > previewSize;
+}
+
+function previewSizeForColumnCount(pageSize: number | undefined, previewColumnCount: number): number {
+  const budgetedSize = Math.floor(TABLE_DATA_PREVIEW_CONTENT_MAX_BYTES / Math.max(1, pageSize ?? 1) / previewColumnCount / TABLE_DATA_TEXT_SERIALIZED_BYTES_PER_CHARACTER);
+  return Math.max(TABLE_DATA_CELL_PREVIEW_MIN_SIZE, Math.min(TABLE_DATA_CELL_PREVIEW_SIZE, budgetedSize));
+}
+
+function mysqlPreviewBudget(columns: readonly ColumnInfo[], keyColumns: ReadonlySet<string>, pageSize: number | undefined): { previewColumnCount: number; previewSize: number } | null {
+  let previewColumnCount = 1;
+  let previewSize = previewSizeForColumnCount(pageSize, previewColumnCount);
+  for (;;) {
+    const nextCount = columns.filter((column) => !keyColumns.has(column.name.toLocaleLowerCase()) && mysqlColumnNeedsLargeValuePreview(column, previewSize)).length;
+    if (nextCount === 0) return null;
+    const nextSize = previewSizeForColumnCount(pageSize, nextCount);
+    if (nextCount === previewColumnCount && nextSize === previewSize) return { previewColumnCount: nextCount, previewSize: nextSize };
+    previewColumnCount = nextCount;
+    previewSize = nextSize;
+  }
 }
 
 function matchesMysqlUnboundedLargeValueType(base: string): boolean {
@@ -36,12 +54,12 @@ export function canUseTableDataLargeValuePreview(databaseType: DatabaseType | un
 export function tableDataLargeValuePreviewOptions(databaseType: DatabaseType | undefined, columns: readonly ColumnInfo[], primaryKeys: readonly string[], pageSize?: number): { columnTypes: string[]; largeValuePreviewSize: number } | Record<string, never> {
   if (!canUseTableDataLargeValuePreview(databaseType, columns, primaryKeys)) return {};
   const keyColumns = new Set(primaryKeys.map((column) => column.toLocaleLowerCase()));
-  const previewColumnCount = columns.filter((column) => !keyColumns.has(column.name.toLocaleLowerCase()) && (databaseType !== "mysql" || mysqlColumnNeedsLargeValuePreview(column))).length;
+  const mysqlBudget = databaseType === "mysql" ? mysqlPreviewBudget(columns, keyColumns, pageSize) : null;
+  const previewColumnCount = databaseType === "mysql" ? (mysqlBudget?.previewColumnCount ?? 0) : columns.filter((column) => !keyColumns.has(column.name.toLocaleLowerCase())).length;
   if (previewColumnCount === 0) return {};
-  const budgetedSize = Math.floor(TABLE_DATA_PREVIEW_CONTENT_MAX_BYTES / Math.max(1, pageSize ?? 1) / previewColumnCount / TABLE_DATA_TEXT_SERIALIZED_BYTES_PER_CHARACTER);
   return {
     columnTypes: columns.map((column) => column.data_type),
-    largeValuePreviewSize: Math.max(TABLE_DATA_CELL_PREVIEW_MIN_SIZE, Math.min(TABLE_DATA_CELL_PREVIEW_SIZE, budgetedSize)),
+    largeValuePreviewSize: mysqlBudget?.previewSize ?? previewSizeForColumnCount(pageSize, previewColumnCount),
   };
 }
 

@@ -323,11 +323,7 @@ export function splitSqlStatementRanges(sql: string, databaseType?: DatabaseType
     if (statementStart === -1) {
       // TDSQL accepts arbitrary leading block directives on the SQL line. The
       // exact /*proxy*/ directive also keeps its historical multiline support.
-      const directiveStart =
-        pendingMysqlDirectiveStart !== -1 &&
-        (sql.startsWith("/*proxy*/", pendingMysqlDirectiveStart) || pos < pendingMysqlDirectiveLineEnd)
-          ? pendingMysqlDirectiveStart
-          : -1;
+      const directiveStart = pendingMysqlDirectiveStart !== -1 && (sql.startsWith("/*proxy*/", pendingMysqlDirectiveStart) || pos < pendingMysqlDirectiveLineEnd) ? pendingMysqlDirectiveStart : -1;
       statementStart = directiveStart !== -1 ? directiveStart : pendingHintStart === -1 ? pos : pendingHintStart;
       pendingHintStart = -1;
       pendingMysqlDirectiveStart = -1;

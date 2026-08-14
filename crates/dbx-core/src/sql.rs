@@ -118,6 +118,7 @@ struct SqlDialectProfile {
     supports_go_batch_separator: bool,
     keeps_sqlserver_module_batch_at_cursor: bool,
     preserves_tdsql_proxy_directive: bool,
+    requires_whitespace_after_line_comment_dashes: bool,
 }
 
 impl Default for SqlDialectProfile {
@@ -134,6 +135,7 @@ impl Default for SqlDialectProfile {
             supports_go_batch_separator: false,
             keeps_sqlserver_module_batch_at_cursor: false,
             preserves_tdsql_proxy_directive: false,
+            requires_whitespace_after_line_comment_dashes: false,
         }
     }
 }
@@ -168,7 +170,12 @@ impl SqlDialectProfile {
     }
 
     fn mysql_compatible() -> Self {
-        Self { supports_hash_line_comments: true, supports_mysql_routine_blocks: true, ..Self::default() }
+        Self {
+            supports_hash_line_comments: true,
+            supports_mysql_routine_blocks: true,
+            requires_whitespace_after_line_comment_dashes: true,
+            ..Self::default()
+        }
     }
 
     fn mysql() -> Self {
@@ -288,6 +295,17 @@ fn sql_file_encoding_error() -> String {
         .to_string()
 }
 
+/// Whether a `--` sequence starts a line comment. MySQL (and MySQL-wire-compatible
+/// dialects) requires the second dash to be followed by whitespace or end-of-input —
+/// `5--1` is subtraction (`5 - -1`), not a comment. Other dialects (Postgres, Oracle/DM,
+/// SQL Server, ...) treat `--` as a comment opener unconditionally.
+fn dash_dash_starts_line_comment(profile: SqlDialectProfile, char_after_dashes: Option<char>) -> bool {
+    if !profile.requires_whitespace_after_line_comment_dashes {
+        return true;
+    }
+    char_after_dashes.is_none_or(|ch| ch.is_whitespace())
+}
+
 #[derive(Default)]
 pub struct SqlStatementSplitter {
     buffer: String,
@@ -357,7 +375,8 @@ impl SqlStatementSplitter {
             }
 
             if !self.in_single_quote && !self.in_double_quote && !self.in_backtick {
-                if self.previous == Some('-') && ch == '-' {
+                if self.previous == Some('-') && ch == '-' && dash_dash_starts_line_comment(self.options.profile, next)
+                {
                     self.in_line_comment = true;
                     self.buffer.push(ch);
                     self.previous = Some(ch);
@@ -366,13 +385,6 @@ impl SqlStatementSplitter {
                 }
                 if self.previous == Some('/') && ch == '*' {
                     self.in_block_comment = true;
-                    self.buffer.push(ch);
-                    self.previous = Some(ch);
-                    i += 1;
-                    continue;
-                }
-                if ch == '-' && next == Some('-') {
-                    self.in_line_comment = true;
                     self.buffer.push(ch);
                     self.previous = Some(ch);
                     i += 1;
@@ -2589,10 +2601,10 @@ mod tests {
     use crate::models::connection::DatabaseType;
 
     use super::{
-        contains_or_fuzzy_match, decode_sql_file_bytes, find_statement_at_cursor_for_database, fuzzy_filter_enabled,
-        fuzzy_like_pattern_with_escape, fuzzy_subsequence_match, optimize_sql_file_import_statements,
-        prepare_sql_file_statement, split_sql_script, split_sql_statement_ranges_with_options,
-        split_sql_statements_for_database, starts_with_executable_sql_keyword,
+        contains_or_fuzzy_match, dash_dash_starts_line_comment, decode_sql_file_bytes,
+        find_statement_at_cursor_for_database, fuzzy_filter_enabled, fuzzy_like_pattern_with_escape,
+        fuzzy_subsequence_match, optimize_sql_file_import_statements, prepare_sql_file_statement, split_sql_script,
+        split_sql_statement_ranges_with_options, split_sql_statements_for_database, starts_with_executable_sql_keyword,
         starts_with_executable_sql_keyword_for_database, SqlDialectProfile, SqlFileStatementAction, SqlParsingOptions,
         SqlStatementSplitter,
     };
@@ -2631,6 +2643,60 @@ mod tests {
     fn mysql_split_skips_comment_only_statement() {
         assert!(split_sql_statements_for_database("-- DBX SQL preview crash reproducer\n\n;", DatabaseType::Mysql)
             .is_empty());
+    }
+
+    #[test]
+    fn mysql_dash_dash_without_trailing_space_is_not_a_comment_per_issue_5382() {
+        // MySQL requires `--` to be followed by whitespace to start a line comment;
+        // `5--1` is subtraction (5 - -1), not a comment.
+        assert_eq!(split_sql_statements_for_database("SELECT 5--1;", DatabaseType::Mysql), vec!["SELECT 5--1"]);
+    }
+
+    #[test]
+    fn mysql_dash_dash_without_trailing_space_does_not_merge_following_statements_per_issue_5382() {
+        let statements = split_sql_statements_for_database(
+            "INSERT INTO t VALUES (1, 5--1);\nINSERT INTO t VALUES (2, 10);",
+            DatabaseType::Mysql,
+        );
+        assert_eq!(statements, vec!["INSERT INTO t VALUES (1, 5--1)", "INSERT INTO t VALUES (2, 10)"]);
+    }
+
+    #[test]
+    fn mysql_dash_dash_with_trailing_space_still_starts_a_line_comment() {
+        // The comment text itself is preserved verbatim in the following statement's
+        // buffer (comments are never stripped, just protected from delimiter parsing) —
+        // this only asserts the embedded `;` inside the comment doesn't split early.
+        let statements = split_sql_statements_for_database(
+            "INSERT INTO t VALUES (1); -- trailing comment; with semicolon\nINSERT INTO t VALUES (2);",
+            DatabaseType::Mysql,
+        );
+        assert_eq!(
+            statements,
+            vec!["INSERT INTO t VALUES (1)", "-- trailing comment; with semicolon\nINSERT INTO t VALUES (2)"]
+        );
+    }
+
+    #[test]
+    fn dash_dash_requires_space_only_for_mysql_compatible_profiles() {
+        let mysql_profile = SqlDialectProfile::mysql();
+        assert!(dash_dash_starts_line_comment(mysql_profile, Some(' ')));
+        assert!(dash_dash_starts_line_comment(mysql_profile, Some('\n')));
+        assert!(dash_dash_starts_line_comment(mysql_profile, None));
+        assert!(!dash_dash_starts_line_comment(mysql_profile, Some('1')));
+
+        // Postgres, Oracle/DM, SQL Server, ... treat `--` as a comment opener unconditionally.
+        let default_profile = SqlDialectProfile::default();
+        assert!(dash_dash_starts_line_comment(default_profile, Some('1')));
+        assert!(dash_dash_starts_line_comment(default_profile, None));
+    }
+
+    #[test]
+    fn mysql_dash_dash_opener_without_space_can_span_chunks() {
+        let mut splitter = SqlStatementSplitter::with_options(SqlParsingOptions::mysql_compatible());
+
+        assert_eq!(splitter.push_chunk("SELECT 5-"), Vec::<String>::new());
+        assert_eq!(splitter.push_chunk("-1;"), vec!["SELECT 5--1"]);
+        assert_eq!(splitter.finish(), Vec::<String>::new());
     }
 
     #[test]

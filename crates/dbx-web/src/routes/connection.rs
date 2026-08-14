@@ -351,6 +351,7 @@ pub async fn save_connection_database_info(
 
 pub async fn connection_final_proxy_port(
     State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
     Json(body): Json<ConnectRequest>,
 ) -> Result<Json<u16>, AppError> {
     let runtime_config = body.config.canonicalized();
@@ -369,9 +370,19 @@ pub async fn connection_final_proxy_port(
     let app = &state.app;
     let connection_id = runtime_config.id.clone();
     let db_config = dbx_core::connection::metadata_connection_config(&runtime_config);
-    app.configs.write().await.insert(connection_id.clone(), runtime_config);
+    // Tunnel resolution needs a runtime config lookup, but a no-save password
+    // must never enter the shared Web config cache and bypass owner isolation.
+    let mut stored_config = runtime_config.clone();
+    if !stored_config.save_password {
+        stored_config.password.clear();
+    }
+    app.configs.write().await.insert(connection_id.clone(), stored_config);
 
     let (_, port) = app.connection_host_port(&connection_id, &db_config).await.map_err(AppError::from)?;
+    if !runtime_config.save_password && !runtime_config.password.is_empty() {
+        let owner = session_token_from_headers(&headers).unwrap_or_default();
+        app.session_credentials.set(&owner, &connection_id, &runtime_config.password);
+    }
     Ok(Json(port))
 }
 
@@ -951,6 +962,7 @@ mod tests {
         }));
         let proxy_error = connection_final_proxy_port(
             State(state.clone()),
+            HeaderMap::new(),
             Json(ConnectRequest { config: invalid, client_attempt: None }),
         )
         .await
@@ -1294,6 +1306,42 @@ mod tests {
         })
         .await;
 
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn connection_final_proxy_port_sanitizes_no_save_passwords() {
+        let (state, dir) = test_web_state().await;
+        let mut config = sqlite_config("conn-a", "127.0.0.1");
+        config.port = 3306;
+        config.save_password = false;
+        config.password = "session-secret".to_string();
+        config.transport_layers.push(TransportLayerConfig::Proxy(ProxyTunnelConfig {
+            id: "proxy".to_string(),
+            name: "Proxy".to_string(),
+            enabled: true,
+            proxy_type: ProxyType::Socks5,
+            host: "127.0.0.1".to_string(),
+            port: 65000,
+            username: String::new(),
+            password: String::new(),
+            test_target: None,
+            profile_id: String::new(),
+        }));
+
+        let result = connection_final_proxy_port(
+            State(state.clone()),
+            cookie_headers("token-a"),
+            Json(ConnectRequest { config, client_attempt: None }),
+        )
+        .await;
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(state.app.configs.read().await["conn-a"].password, "");
+        assert!(state.app.session_credentials.has("token-a", "conn-a"));
+        assert!(!state.app.session_credentials.has("token-b", "conn-a"));
+
+        state.app.reset_connection_transport("conn-a").await;
+        drop(state);
         let _ = std::fs::remove_dir_all(dir);
     }
 

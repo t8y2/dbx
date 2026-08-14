@@ -1636,9 +1636,16 @@ pub async fn connection_final_proxy_port(
 
     let connection_id = runtime_config.id.clone();
     let db_config = metadata_connection_config(&runtime_config);
-    state.configs.write().await.insert(connection_id.clone(), runtime_config);
+    // This pre-connect path caches the configuration for tunnel resolution. Keep
+    // no-save passwords out of that shared runtime cache just like connect_db.
+    let mut stored_config = runtime_config.clone();
+    if !stored_config.save_password {
+        stored_config.password.clear();
+    }
+    state.configs.write().await.insert(connection_id.clone(), stored_config);
 
     let (_, port) = state.connection_host_port(&connection_id, &db_config).await?;
+    record_session_credential(state.inner(), &runtime_config, &connection_id);
     Ok(port)
 }
 

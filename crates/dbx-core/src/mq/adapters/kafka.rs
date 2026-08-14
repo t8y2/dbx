@@ -197,7 +197,10 @@ impl MessageQueueAdmin for KafkaAdmin {
                 TopicInfo {
                     name: name.clone(),
                     short_name: name,
-                    partitioned: partitions.map(|p| p > 1).unwrap_or(false),
+                    // Kafka topics always have partitions; mark as partitioned so the
+                    // "Adjust Partitions" UI button is available even for single-partition
+                    // topics (fixes t8y2/dbx#6208).
+                    partitioned: partitions.map(|p| p > 0).unwrap_or(false),
                     partitions,
                     persistent: true,
                     internal: t.get("internal").and_then(|v| v.as_bool()).unwrap_or(false),
@@ -1200,4 +1203,22 @@ mod tests {
 
         assert!(kafka_subscription_for_topic("billing-service", "orders", &desc, Some(&lag)).is_none());
     }
+
+    #[test]
+    fn kafka_topic_partitioned_flag_true_for_any_partition_count() {
+        // Single-partition topics must still be marked as partitioned so the
+        // frontend "Adjust Partitions" button is available (t8y2/dbx#6208).
+        let single = serde_json::json!({ "name": "orders", "partitions": 1 });
+        let partitions = single.get("partitions").and_then(|v| v.as_u64()).map(|v| v as u32);
+        assert_eq!(partitions.map(|p| p > 0).unwrap_or(false), true);
+
+        let multi = serde_json::json!({ "name": "events", "partitions": 3 });
+        let partitions = multi.get("partitions").and_then(|v| v.as_u64()).map(|v| v as u32);
+        assert_eq!(partitions.map(|p| p > 0).unwrap_or(false), true);
+
+        let missing = serde_json::json!({ "name": "unknown" });
+        let partitions = missing.get("partitions").and_then(|v| v.as_u64()).map(|v| v as u32);
+        assert_eq!(partitions.map(|p| p > 0).unwrap_or(false), false);
+    }
+
 }

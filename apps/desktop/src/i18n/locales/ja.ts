@@ -1128,6 +1128,8 @@ export default withEnglishFallback({
     mqttClientCertPath: "クライアント証明書パス",
     mqttClientKeyPath: "クライアント秘密鍵パス",
     mqttNoLocal: "ローカル転送禁止",
+    doltShowSystemTables: "Dolt 組み込みテーブルを表示",
+    doltShowSystemTablesHint: "現在の接続のテーブルリストに Dolt 組み込みのバージョン管理テーブルを表示します。",
   },
   editor: {
     duckdbDraining: "前回の DuckDB クエリはまだ停止処理中です。しばらくしてから再試行してください。",
@@ -2927,6 +2929,7 @@ export default withEnglishFallback({
     types: "タイプ",
     gridfs: "GridFS",
     buckets: "バケット",
+    doltSystemTables: "Dolt システムテーブル",
   },
   consul,
   sqlServerTrace,

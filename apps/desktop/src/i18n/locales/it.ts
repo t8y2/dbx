@@ -1107,6 +1107,8 @@ export default withEnglishFallback({
     mqttClientCertPath: "Percorso del certificato client",
     mqttClientKeyPath: "Percorso della chiave privata client",
     mqttNoLocal: "Disabilita inoltro locale",
+    doltShowSystemTables: "Mostra le tabelle integrate di Dolt",
+    doltShowSystemTablesHint: "Mostra le tabelle di controllo versione integrate di Dolt nell'elenco delle tabelle della connessione corrente.",
   },
   editor: {
     duckdbDraining: "La query DuckDB precedente è ancora in fase di arresto. Riprova a breve.",
@@ -2900,6 +2902,7 @@ export default withEnglishFallback({
     types: "Tipi",
     gridfs: "GridFS",
     buckets: "Buckets",
+    doltSystemTables: "Tabelle di sistema di Dolt",
   },
   userAdmin: {
     title: "Utenti e Privilegi",

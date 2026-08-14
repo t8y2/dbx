@@ -1108,6 +1108,8 @@ export default withEnglishFallback({
     mqttClientCertPath: "Caminho do certificado do cliente",
     mqttClientKeyPath: "Caminho da chave privada do cliente",
     mqttNoLocal: "Proibir encaminhamento local",
+    doltShowSystemTables: "Exibir tabelas internas do Dolt",
+    doltShowSystemTablesHint: "Exibir as tabelas de controle de versão internas do Dolt na lista de tabelas da conexão atual.",
   },
   editor: {
     duckdbDraining: "A consulta anterior do DuckDB ainda está sendo interrompida. Tente novamente em breve.",
@@ -2902,6 +2904,7 @@ export default withEnglishFallback({
     types: "Tipos",
     gridfs: "GridFS",
     buckets: "Buckets",
+    doltSystemTables: "Tabelas de sistema do Dolt",
   },
   userAdmin: {
     title: "Usuários e Privilégios",

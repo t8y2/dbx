@@ -289,6 +289,47 @@ describe("connectionStore metadata loading", () => {
     expect(typeNode.children?.every((child) => child.parentName === "ADDRESS_T")).toBe(true);
   }, 15000);
 
+  it("routes generic tree restoration for Xugu types through the member loader", async () => {
+    const completionAssistantSearch = vi.fn(async (request: { object_kinds?: string[] }) => ({
+      candidates: request.object_kinds?.includes("column") ? [{ name: "street", kind: "column", data_type: "VARCHAR(120)" }] : [],
+      incomplete: false,
+      fallback_used: false,
+    }));
+    const getCustomTypeDetails = vi.fn().mockRejectedValue(new Error("custom type loader must not be called for Xugu types"));
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      completionAssistantSearch,
+      getCustomTypeDetails,
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    const connection = xuguConnection();
+    const typeNode: TreeNode = {
+      id: "xugu-1:app_db:app_schema:type:address_t",
+      label: "ADDRESS_T",
+      type: "type",
+      objectName: "ADDRESS_T",
+      connectionId: connection.id,
+      database: "app_db",
+      schema: "app_schema",
+      xuguTypeMembersExpandable: true,
+      children: [],
+      isExpanded: false,
+    };
+    store.connections = [connection];
+    store.connectedIds = new Set([connection.id]);
+    store.treeNodes = [typeNode];
+
+    await store.loadTreeNodeChildren(typeNode);
+
+    expect(getCustomTypeDetails).not.toHaveBeenCalled();
+    expect(completionAssistantSearch).toHaveBeenCalledTimes(2);
+    expect(typeNode.children?.map((child) => [child.type, child.objectCount])).toEqual([["type-attributes", 1]]);
+    expect(typeNode.isExpanded).toBe(true);
+  }, 15000);
+
   it("hides the Xugu type expander after loading no members", async () => {
     const completionAssistantSearch = vi.fn().mockResolvedValue({ candidates: [], incomplete: false, fallback_used: false });
     vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));

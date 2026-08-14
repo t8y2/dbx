@@ -296,14 +296,15 @@ fn sql_file_encoding_error() -> String {
 }
 
 /// Whether a `--` sequence starts a line comment. MySQL (and MySQL-wire-compatible
-/// dialects) requires the second dash to be followed by whitespace or end-of-input —
+/// dialects) requires the second dash to be followed by whitespace, a control character,
+/// or end-of-input —
 /// `5--1` is subtraction (`5 - -1`), not a comment. Other dialects (Postgres, Oracle/DM,
 /// SQL Server, ...) treat `--` as a comment opener unconditionally.
 fn dash_dash_starts_line_comment(profile: SqlDialectProfile, char_after_dashes: Option<char>) -> bool {
     if !profile.requires_whitespace_after_line_comment_dashes {
         return true;
     }
-    char_after_dashes.is_none_or(|ch| ch.is_whitespace())
+    char_after_dashes.is_none_or(|ch| ch.is_whitespace() || ch.is_control())
 }
 
 #[derive(Default)]
@@ -317,6 +318,7 @@ pub struct SqlStatementSplitter {
     dollar_quote_tag: Option<String>,
     postgres_dollar_quoted_routine: bool,
     previous: Option<char>,
+    pending_mysql_line_comment_dashes: bool,
     custom_delimiter: Option<String>,
     options: SqlParsingOptions,
 }
@@ -330,6 +332,13 @@ impl SqlStatementSplitter {
         let mut statements = Vec::new();
         let chars = chunk.chars().collect::<Vec<_>>();
         let mut i = 0;
+
+        if self.pending_mysql_line_comment_dashes {
+            if let Some(first) = chars.first().copied() {
+                self.in_line_comment = dash_dash_starts_line_comment(self.options.profile, Some(first));
+                self.pending_mysql_line_comment_dashes = false;
+            }
+        }
 
         while i < chars.len() {
             if let Some(tag) = &self.dollar_quote_tag {
@@ -375,13 +384,21 @@ impl SqlStatementSplitter {
             }
 
             if !self.in_single_quote && !self.in_double_quote && !self.in_backtick {
-                if self.previous == Some('-') && ch == '-' && dash_dash_starts_line_comment(self.options.profile, next)
-                {
-                    self.in_line_comment = true;
-                    self.buffer.push(ch);
-                    self.previous = Some(ch);
-                    i += 1;
-                    continue;
+                if self.previous == Some('-') && ch == '-' {
+                    if self.options.profile.requires_whitespace_after_line_comment_dashes && next.is_none() {
+                        self.pending_mysql_line_comment_dashes = true;
+                        self.buffer.push(ch);
+                        self.previous = Some(ch);
+                        i += 1;
+                        continue;
+                    }
+                    if dash_dash_starts_line_comment(self.options.profile, next) {
+                        self.in_line_comment = true;
+                        self.buffer.push(ch);
+                        self.previous = Some(ch);
+                        i += 1;
+                        continue;
+                    }
                 }
                 if self.previous == Some('/') && ch == '*' {
                     self.in_block_comment = true;
@@ -533,6 +550,10 @@ impl SqlStatementSplitter {
 
     pub fn finish(mut self) -> Vec<String> {
         let mut statements = Vec::new();
+        if self.pending_mysql_line_comment_dashes {
+            self.in_line_comment = true;
+            self.pending_mysql_line_comment_dashes = false;
+        }
         let trimmed = self.buffer.trim();
         let last_line = trimmed.rsplit('\n').next().unwrap_or(trimmed).trim();
         if self.options.profile.supports_custom_delimiter_commands && parse_delimiter_command(last_line).is_some() {
@@ -564,6 +585,7 @@ impl SqlStatementSplitter {
         self.buffer.clear();
         self.postgres_dollar_quoted_routine = false;
         self.previous = None;
+        self.pending_mysql_line_comment_dashes = false;
     }
 
     fn on_delimiter_line(&self) -> bool {
@@ -2681,6 +2703,7 @@ mod tests {
         let mysql_profile = SqlDialectProfile::mysql();
         assert!(dash_dash_starts_line_comment(mysql_profile, Some(' ')));
         assert!(dash_dash_starts_line_comment(mysql_profile, Some('\n')));
+        assert!(dash_dash_starts_line_comment(mysql_profile, Some('\u{1}')));
         assert!(dash_dash_starts_line_comment(mysql_profile, None));
         assert!(!dash_dash_starts_line_comment(mysql_profile, Some('1')));
 
@@ -2697,6 +2720,22 @@ mod tests {
         assert_eq!(splitter.push_chunk("SELECT 5-"), Vec::<String>::new());
         assert_eq!(splitter.push_chunk("-1;"), vec!["SELECT 5--1"]);
         assert_eq!(splitter.finish(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn mysql_complete_dash_dash_sequence_waits_for_the_next_chunk() {
+        let mut splitter = SqlStatementSplitter::with_options(SqlParsingOptions::mysql_compatible());
+
+        assert_eq!(splitter.push_chunk("SELECT 5--"), Vec::<String>::new());
+        assert_eq!(splitter.push_chunk("1;\nSELECT 2;"), vec!["SELECT 5--1", "SELECT 2"]);
+        assert_eq!(splitter.finish(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn mysql_control_character_after_dashes_starts_a_line_comment() {
+        let statements = split_sql_statements_for_database("SELECT 1--\u{1}; hidden\nSELECT 2;", DatabaseType::Mysql);
+
+        assert_eq!(statements, vec!["SELECT 1--\u{1}; hidden\nSELECT 2"]);
     }
 
     #[test]

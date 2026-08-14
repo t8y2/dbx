@@ -3877,8 +3877,10 @@ function connectionConfigForSubmit(id: string, generatedName = ""): ConnectionCo
     config.external_config = sqlServerPortExplicitFromConfig(config) ? { portExplicit: true } : undefined;
   } else if (supportsGaussdbIdentifierQuoteStyle(config)) {
     const style = gaussdbIdentifierQuoteStyle(config);
+    const targetServerType = gaussdbTargetServerType(config);
     config.external_config = undefined;
     setGaussdbIdentifierQuoteStyle(config, style);
+    setGaussdbTargetServerType(config, targetServerType);
   } else {
     config.external_config = undefined;
   }

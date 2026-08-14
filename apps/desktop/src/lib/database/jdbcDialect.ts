@@ -135,11 +135,7 @@ export function gaussdbTargetServerType(connection: JdbcDialectConnection | unde
 
 export function setGaussdbTargetServerType(connection: Pick<ConnectionConfig, "db_type"> & Partial<Pick<ConnectionConfig, "driver_profile" | "driver_label" | "connection_string" | "jdbc_driver_class" | "jdbc_driver_paths" | "database_info" | "external_config">>, value: GaussdbTargetServerType) {
   const external = externalConfigRecord(connection.external_config);
-  if (value === "master") {
-    delete external[GAUSSDB_TARGET_SERVER_TYPE_KEY];
-  } else {
-    external[GAUSSDB_TARGET_SERVER_TYPE_KEY] = value;
-  }
+  external[GAUSSDB_TARGET_SERVER_TYPE_KEY] = value;
   connection.external_config = Object.keys(external).length > 0 ? external : undefined;
 }
 

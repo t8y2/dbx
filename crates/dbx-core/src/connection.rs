@@ -8,6 +8,8 @@ use tokio::sync::{watch, Mutex, RwLock};
 use mysql_async::prelude::Queryable;
 use mysql_async::Row as MysqlRow;
 
+use log::debug;
+
 use crate::agent_connection::{
     agent_connect_params, agent_connect_params_with_role, h2_file_path_from_jdbc_url, is_h2_file_connection,
     mongo_legacy_error_with_auth_hint, mongo_uses_legacy_driver, oracle_alternate_connect_config_labels,
@@ -669,7 +671,7 @@ pub fn gaussdb_m_jdbc_config_for_endpoint(config: &ConnectionConfig, host: &str,
         .as_ref()
         .and_then(|ext| ext.get("gaussdbTargetServerType"))
         .and_then(|v| v.as_str())
-        .filter(|v| *v == "slave" || *v == "any");
+        .filter(|v| *v == "master" || *v == "slave" || *v == "any");
     let params = if let Some(value) = target_server_type {
         upsert_connection_url_param(Some(&params), "targetServerType", value)
     } else {
@@ -681,6 +683,7 @@ pub fn gaussdb_m_jdbc_config_for_endpoint(config: &ConnectionConfig, host: &str,
     }
     jdbc_config.connection_string = Some(jdbc_url);
     jdbc_config.jdbc_driver_class = Some(GAUSSDB_M_JDBC_DRIVER_CLASS.to_string());
+    debug!("GaussDB M-JDBC connection string: {:?}", jdbc_config.connection_string);
     jdbc_config
 }
 
@@ -5183,6 +5186,8 @@ mod tests {
         uses_tcp_probe, validate_connection_url_params, validate_h2_database_path, AppState, MysqlMode, PoolKind,
         GAUSSDB_M_JDBC_DRIVER_CLASS, GAUSSDB_M_JDBC_DRIVER_PROFILE, PRESTOSQL_JDBC_DRIVER_CLASS,
     };
+    use log::debug;
+
     use crate::agent_connection::{
         agent_connect_params, mongo_legacy_error_with_auth_hint, mongo_uses_legacy_driver,
         oracle_alternate_connect_config, should_retry_mongo_with_legacy_driver,

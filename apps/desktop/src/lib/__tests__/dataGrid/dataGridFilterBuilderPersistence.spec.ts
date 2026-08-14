@@ -12,19 +12,17 @@ describe("data grid structured filter persistence", () => {
       rules: [{ id: "r1", columnName: "status", mode: "equals", rawValue: "open", rawEndValue: "", conjunction: "AND" }],
       appliedWhereInput: "status = 'open'",
       serverColumnFilters: {},
-      editorView: "conditions",
     });
   });
 
-  it("restores the selected editor view with the filter rules", () => {
+  it("restores the filter rules and manual condition", () => {
     expect(loadDataGridStructuredFilterState(cacheKey, scopeKey)).toMatchObject({
       manualWhereInput: "tenant_id = 7",
-      editorView: "conditions",
       rules: [{ columnName: "status", rawValue: "open" }],
     });
   });
 
-  it("does not leak the selected view into another table scope", () => {
+  it("does not leak filters into another table scope", () => {
     expect(loadDataGridStructuredFilterState(cacheKey, `${scopeKey}\0archive`)).toBeUndefined();
   });
 
@@ -36,7 +34,6 @@ describe("data grid structured filter persistence", () => {
     expect(loadDataGridStructuredFilterState(cacheKey, scopeKey)).toMatchObject({
       rules: [{ rawValue: "open" }],
       serverColumnFilters: {},
-      editorView: "conditions",
     });
   });
 });

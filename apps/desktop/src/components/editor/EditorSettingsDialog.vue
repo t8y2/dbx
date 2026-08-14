@@ -38,6 +38,7 @@ import {
   type InterfaceLayout,
   type DisconnectTabHandlingMode,
   type DataTabReuseMode,
+  type DataGridFilterEditorView,
   type OpenTabsRestoreMode,
   type SidebarObjectInfoMode,
   type SqlSemanticDiagnosticsMode,
@@ -321,6 +322,8 @@ const editColorizeDataGridCellTypes = ref(settingsStore.editorSettings.colorizeD
 const editShowIndexIndicatorsInHeader = ref(settingsStore.editorSettings.showIndexIndicatorsInHeader);
 const editCompactColumnHeaderActions = ref(settingsStore.editorSettings.compactColumnHeaderActions);
 const editDataGridQuickEntry = ref(settingsStore.editorSettings.dataGridQuickEntry);
+const editDataGridFilterEditorView = ref<DataGridFilterEditorView>(settingsStore.editorSettings.dataGridFilterEditorView);
+const editDataGridTextFilterPanelHeight = ref(settingsStore.editorSettings.dataGridTextFilterPanelHeight);
 const editDataGridAutoTransposeSingleRow = ref(settingsStore.editorSettings.dataGridAutoTransposeSingleRow);
 const editPageSize = ref(settingsStore.editorSettings.pageSize);
 const editTableOpenPageSize = ref(settingsStore.editorSettings.tableOpenPageSize);
@@ -500,6 +503,8 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     showIndexIndicatorsInHeader: editShowIndexIndicatorsInHeader.value,
     compactColumnHeaderActions: editCompactColumnHeaderActions.value,
     dataGridQuickEntry: editDataGridQuickEntry.value,
+    dataGridFilterEditorView: editDataGridFilterEditorView.value,
+    dataGridTextFilterPanelHeight: editDataGridTextFilterPanelHeight.value,
     dataGridAutoTransposeSingleRow: editDataGridAutoTransposeSingleRow.value,
     flatteningMultiLineText: editFlatteningMultiLineText.value,
     pageSize: editPageSize.value,
@@ -779,6 +784,8 @@ function syncEditorSettingsDraftFromStore() {
   editShowIndexIndicatorsInHeader.value = settingsStore.editorSettings.showIndexIndicatorsInHeader;
   editCompactColumnHeaderActions.value = settingsStore.editorSettings.compactColumnHeaderActions;
   editDataGridQuickEntry.value = settingsStore.editorSettings.dataGridQuickEntry;
+  editDataGridFilterEditorView.value = settingsStore.editorSettings.dataGridFilterEditorView;
+  editDataGridTextFilterPanelHeight.value = settingsStore.editorSettings.dataGridTextFilterPanelHeight;
   editDataGridAutoTransposeSingleRow.value = settingsStore.editorSettings.dataGridAutoTransposeSingleRow;
   editFlatteningMultiLineText.value = settingsStore.editorSettings.flatteningMultiLineText;
   editPageSize.value = settingsStore.editorSettings.pageSize;
@@ -1033,6 +1040,8 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editShowIndexIndicatorsInHeader.value = DEFAULT_EDITOR_SETTINGS.showIndexIndicatorsInHeader;
     editCompactColumnHeaderActions.value = DEFAULT_EDITOR_SETTINGS.compactColumnHeaderActions;
     editDataGridQuickEntry.value = DEFAULT_EDITOR_SETTINGS.dataGridQuickEntry;
+    editDataGridFilterEditorView.value = DEFAULT_EDITOR_SETTINGS.dataGridFilterEditorView;
+    editDataGridTextFilterPanelHeight.value = DEFAULT_EDITOR_SETTINGS.dataGridTextFilterPanelHeight;
     editDataGridAutoTransposeSingleRow.value = DEFAULT_EDITOR_SETTINGS.dataGridAutoTransposeSingleRow;
     editFlatteningMultiLineText.value = DEFAULT_EDITOR_SETTINGS.flatteningMultiLineText;
     editPageSize.value = DEFAULT_EDITOR_SETTINGS.pageSize;
@@ -1105,6 +1114,8 @@ function resetAllDefaults() {
   editShowIndexIndicatorsInHeader.value = DEFAULT_EDITOR_SETTINGS.showIndexIndicatorsInHeader;
   editCompactColumnHeaderActions.value = DEFAULT_EDITOR_SETTINGS.compactColumnHeaderActions;
   editDataGridQuickEntry.value = DEFAULT_EDITOR_SETTINGS.dataGridQuickEntry;
+  editDataGridFilterEditorView.value = DEFAULT_EDITOR_SETTINGS.dataGridFilterEditorView;
+  editDataGridTextFilterPanelHeight.value = DEFAULT_EDITOR_SETTINGS.dataGridTextFilterPanelHeight;
   editDataGridAutoTransposeSingleRow.value = DEFAULT_EDITOR_SETTINGS.dataGridAutoTransposeSingleRow;
   editFlatteningMultiLineText.value = DEFAULT_EDITOR_SETTINGS.flatteningMultiLineText;
   editPageSize.value = DEFAULT_EDITOR_SETTINGS.pageSize;
@@ -4793,6 +4804,26 @@ onUnmounted(() => {
               <div class="space-y-3">
                 <div class="text-sm font-medium text-muted-foreground">
                   {{ t("settings.dataGridDisplay") }}
+                </div>
+                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                  <div class="space-y-1">
+                    <Label for="data-grid-filter-view">
+                      {{ t("settings.dataGridFilterView") }}
+                    </Label>
+                    <p class="text-xs text-muted-foreground">
+                      {{ t("settings.dataGridFilterViewDescription") }}
+                    </p>
+                  </div>
+                  <Select v-model="editDataGridFilterEditorView">
+                    <SelectTrigger id="data-grid-filter-view" class="h-8 w-44 shrink-0">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="quick">{{ t("grid.filterQuickView") }}</SelectItem>
+                      <SelectItem value="conditions">{{ t("grid.filterConditionView") }}</SelectItem>
+                      <SelectItem value="text">{{ t("grid.filterTextView") }}</SelectItem>
+                    </SelectContent>
+                  </Select>
                 </div>
                 <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                   <div class="space-y-1">

@@ -37,6 +37,8 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "showIndexIndicatorsInHeader",
   "compactColumnHeaderActions",
   "dataGridQuickEntry",
+  "dataGridFilterEditorView",
+  "dataGridTextFilterPanelHeight",
   "dataGridAutoTransposeSingleRow",
   "pageSize",
   "tableOpenPageSize",

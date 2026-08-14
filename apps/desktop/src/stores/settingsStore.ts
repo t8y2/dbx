@@ -7,6 +7,7 @@ import { setDebugLoggingEnabled } from "@/lib/backend/debugLog";
 import { safeLocalStorageGet, safeLocalStorageRemove } from "@/lib/backend/safeStorage";
 import { type ColumnFormatterConfig, type CustomColumnFormatterConfig, normalizeColumnFormatter, normalizeCustomColumnFormatter, normalizeGlobalDateTimePattern } from "@/lib/dataGrid/columnFormatter";
 import { type DataGridCopyPreference, type DataGridExtractorOptions, DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS, normalizeDataGridCopyPreference, normalizeDataGridExtractorOptions } from "@/lib/dataGrid/dataGridCopyExtractor";
+import { DATA_GRID_TEXT_FILTER_PANEL_HEIGHT_DEFAULT, normalizeDataGridTextFilterPanelHeight } from "@/lib/dataGrid/dataGridTextFilterPanel";
 import { normalizeResultPageSize } from "@/lib/dataGrid/paginationPageSize";
 import { DEFAULT_QUERY_RESULT_MAX_ROWS, normalizeQueryResultMaxRows } from "@/lib/dataGrid/queryResultRowLimit";
 import { normalizeConnectTimeoutSecs, normalizeQueryTimeoutSecs } from "@/lib/connection/timeoutLimits";
@@ -413,6 +414,7 @@ const DATA_GRID_RENDER_MODES = ["dom", "canvas"] as const;
 export type DataGridRenderMode = (typeof DATA_GRID_RENDER_MODES)[number];
 const DATA_GRID_SEARCH_MODES = ["filter", "highlight"] as const;
 export type DataGridSearchMode = (typeof DATA_GRID_SEARCH_MODES)[number];
+export type DataGridFilterEditorView = "quick" | "conditions" | "text";
 const RESULT_RUN_DISPLAY_MODES = ["tabs", "list"] as const;
 export type ResultRunDisplayMode = (typeof RESULT_RUN_DISPLAY_MODES)[number];
 export const TABLE_FONT_SIZE_MIN = 8;
@@ -547,6 +549,8 @@ export interface EditorSettings {
   compactColumnHeaderActions: boolean;
   columnWidthDensity: ColumnWidthDensity;
   dataGridQuickEntry: boolean;
+  dataGridFilterEditorView: DataGridFilterEditorView;
+  dataGridTextFilterPanelHeight: number;
   dataGridRenderMode: DataGridRenderMode;
   dataGridSearchMode: DataGridSearchMode;
   dataGridCopyExtractor: DataGridCopyPreference;
@@ -746,6 +750,8 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   compactColumnHeaderActions: true,
   columnWidthDensity: "standard",
   dataGridQuickEntry: false,
+  dataGridFilterEditorView: "quick",
+  dataGridTextFilterPanelHeight: DATA_GRID_TEXT_FILTER_PANEL_HEIGHT_DEFAULT,
   dataGridRenderMode: "canvas",
   dataGridSearchMode: "filter",
   dataGridCopyExtractor: "smart",
@@ -861,6 +867,10 @@ function normalizeDataGridRenderMode(value: unknown): DataGridRenderMode {
 
 function normalizeDataGridSearchMode(value: unknown): DataGridSearchMode {
   return DATA_GRID_SEARCH_MODES.includes(value as DataGridSearchMode) ? (value as DataGridSearchMode) : DEFAULT_EDITOR_SETTINGS.dataGridSearchMode;
+}
+
+function normalizeDataGridFilterEditorView(value: unknown): DataGridFilterEditorView {
+  return value === "conditions" || value === "text" ? value : DEFAULT_EDITOR_SETTINGS.dataGridFilterEditorView;
 }
 
 function normalizeResultRunDisplayMode(value: unknown): ResultRunDisplayMode {
@@ -1090,6 +1100,8 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     compactColumnHeaderActions: settings.compactColumnHeaderActions ?? DEFAULT_EDITOR_SETTINGS.compactColumnHeaderActions,
     columnWidthDensity: normalizeColumnWidthDensity(settings.columnWidthDensity),
     dataGridQuickEntry: settings.dataGridQuickEntry ?? DEFAULT_EDITOR_SETTINGS.dataGridQuickEntry,
+    dataGridFilterEditorView: normalizeDataGridFilterEditorView(settings.dataGridFilterEditorView),
+    dataGridTextFilterPanelHeight: normalizeDataGridTextFilterPanelHeight(settings.dataGridTextFilterPanelHeight),
     dataGridRenderMode: normalizeDataGridRenderMode(settings.dataGridRenderMode),
     dataGridSearchMode: normalizeDataGridSearchMode(settings.dataGridSearchMode),
     dataGridCopyExtractor: normalizeDataGridCopyPreference(settings.dataGridCopyExtractor),
@@ -1672,6 +1684,8 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.compactColumnHeaderActions !== undefined) editorSettings.value.compactColumnHeaderActions = partial.compactColumnHeaderActions;
     if (partial.columnWidthDensity !== undefined) editorSettings.value.columnWidthDensity = normalizeColumnWidthDensity(partial.columnWidthDensity);
     if (partial.dataGridQuickEntry !== undefined) editorSettings.value.dataGridQuickEntry = partial.dataGridQuickEntry;
+    if (partial.dataGridFilterEditorView !== undefined) editorSettings.value.dataGridFilterEditorView = normalizeDataGridFilterEditorView(partial.dataGridFilterEditorView);
+    if (partial.dataGridTextFilterPanelHeight !== undefined) editorSettings.value.dataGridTextFilterPanelHeight = normalizeDataGridTextFilterPanelHeight(partial.dataGridTextFilterPanelHeight);
     if (partial.dataGridRenderMode !== undefined) editorSettings.value.dataGridRenderMode = normalizeDataGridRenderMode(partial.dataGridRenderMode);
     if (partial.dataGridSearchMode !== undefined) editorSettings.value.dataGridSearchMode = normalizeDataGridSearchMode(partial.dataGridSearchMode);
     if (partial.dataGridCopyExtractor !== undefined) editorSettings.value.dataGridCopyExtractor = normalizeDataGridCopyPreference(partial.dataGridCopyExtractor);

@@ -67,6 +67,7 @@ import DataGridExtractorDialog from "@/components/grid/DataGridExtractorDialog.v
 import DataGridColumnHeader from "@/components/grid/DataGridColumnHeader.vue";
 import DataGridQueryControls from "@/components/grid/DataGridQueryControls.vue";
 import DataGridFilterWorkbench from "@/components/grid/DataGridFilterWorkbench.vue";
+import DataGridTextFilterWorkbench from "@/components/grid/DataGridTextFilterWorkbench.vue";
 import TemporalCellEditor from "@/components/grid/TemporalCellEditor.vue";
 import EnumCellEditor from "@/components/grid/EnumCellEditor.vue";
 import DataGridReadonlyTextSelection from "@/components/grid/DataGridReadonlyTextSelection.vue";
@@ -224,7 +225,7 @@ import { useDataGridResultLifecycle } from "@/composables/useDataGridResultLifec
 import { useDataGridAutoRefresh } from "@/composables/useDataGridAutoRefresh";
 import { useDataGridAsyncSurface } from "@/composables/useDataGridAsyncSurface";
 import { useDataGridFilterBuilder, type DataGridStructuredFilterRule } from "@/composables/useDataGridFilterBuilder";
-import { cloneDataGridStructuredFilterRules, loadDataGridStructuredFilterState, saveDataGridStructuredFilterState, type DataGridCachedServerColumnFilter, type DataGridFilterEditorView, type DataGridStructuredFilterCacheState } from "@/lib/dataGrid/dataGridFilterBuilderPersistence";
+import { cloneDataGridStructuredFilterRules, loadDataGridStructuredFilterState, saveDataGridStructuredFilterState, type DataGridCachedServerColumnFilter, type DataGridStructuredFilterCacheState } from "@/lib/dataGrid/dataGridFilterBuilderPersistence";
 import { useSqlHighlighter } from "@/composables/useSqlHighlighter";
 import { useCellDetailEditor, type UseCellDetailEditorReturn } from "@/composables/useCellDetailEditor";
 import { useTheme } from "@/composables/useTheme";
@@ -849,7 +850,7 @@ const filterBuilderColumnSearch = filterBuilder.columnSearch;
 const filteredFilterBuilderColumnOptions = filterBuilder.filteredColumns;
 const appliedStructuredWhereInput = filterBuilder.appliedWhereInput;
 const draftStructuredWhereInput = ref("");
-const filterEditorView = ref<DataGridFilterEditorView>("quick");
+const filterEditorView = computed(() => settingsStore.editorSettings.dataGridFilterEditorView);
 const structuredFilterCount = computed(() => structuredFilterRules.value.filter((rule) => !rule.disabled && !!rule.columnName && filterModeHasCompleteValue(rule.mode, rule.rawValue, rule.rawEndValue)).length);
 const hasStructuredFilters = computed(() => !!combineWhereInputs(undefined, appliedStructuredWhereInput.value));
 const formatterOpenColumn = ref<number | null>(null);
@@ -1584,7 +1585,6 @@ function persistStructuredFilterState() {
     appliedWhereInput: appliedStructuredWhereInput.value,
     // Vue wraps ref-held objects in proxies; structuredClone cannot clone those proxies.
     serverColumnFilters: structuredClone(toRaw(serverColumnFilters.value)),
-    editorView: filterEditorView.value,
   });
 }
 
@@ -1594,7 +1594,6 @@ function loadStructuredFilterStateForScope() {
     const cacheKey = structuredFilterCacheKey.value;
     const scopeKey = structuredFilterScopeKey.value;
     structuredFilterRules.value = cloneDataGridStructuredFilterRules(cached.rules);
-    filterEditorView.value = cached.editorView ?? "quick";
     whereFilterInput.value = cached.manualWhereInput;
     serverColumnFilters.value = structuredClone(cached.serverColumnFilters ?? {});
     appliedStructuredWhereInput.value = "";
@@ -1606,7 +1605,6 @@ function loadStructuredFilterStateForScope() {
     return;
   }
   appliedStructuredWhereInput.value = "";
-  filterEditorView.value = "quick";
   serverColumnFilters.value = {};
   structuredFilterRules.value = filterBuilderColumnOptions.value.length > 0 ? [defaultStructuredFilterRule()] : [];
   persistStructuredFilterState();
@@ -1626,6 +1624,10 @@ function removeStructuredFilterRule(ruleId: string) {
 
 function updateStructuredFilterRule(ruleId: string, patch: Partial<StructuredFilterRule>) {
   filterBuilder.updateRule(ruleId, patch);
+}
+
+function updateTextFilterPanelHeight(height: number) {
+  settingsStore.updateEditorSettings({ dataGridTextFilterPanelHeight: height });
 }
 
 function resetStructuredFilters() {
@@ -1693,13 +1695,6 @@ const filterSqlPreview = computed(() => {
   return condition ? `WHERE ${condition}` : "";
 });
 
-function setFilterEditorView(view: DataGridFilterEditorView) {
-  filterEditorView.value = view;
-  filterBuilderOpen.value = false;
-  if (view === "conditions") ensureStructuredFilterRule();
-  persistStructuredFilterState();
-}
-
 function copyFilterSqlPreview() {
   if (!filterSqlPreview.value) return;
   void copyText(filterSqlPreview.value);
@@ -1707,6 +1702,11 @@ function copyFilterSqlPreview() {
 }
 
 watch([structuredFilterCacheKey, structuredFilterScopeKey], loadStructuredFilterStateForScope, { immediate: true });
+
+watch(filterEditorView, (view) => {
+  filterBuilderOpen.value = false;
+  if (view === "conditions" || view === "text") ensureStructuredFilterRule();
+});
 
 watch(structuredFilterRules, () => void refreshStructuredFilterPreview(), { deep: true, immediate: true });
 
@@ -10085,7 +10085,6 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                   :apply-order-by="applyOrderBySearch"
                   :clear-order-by="clearOrderByInput"
                   @update:column-search="filterBuilderColumnSearch = $event"
-                  @update:filter-editor-view="setFilterEditorView"
                   @ensure-rule="ensureStructuredFilterRule"
                   @add-rule="addStructuredFilterRule"
                   @apply-filters="applyStructuredFilters"
@@ -10204,20 +10203,35 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
         </div>
         <DataGridFilterWorkbench
           v-if="canUseWhereSearch && filterEditorView === 'conditions'"
-          v-model:where-input="whereFilterInput"
           :sql-preview="filterSqlPreview"
           :rules="structuredFilterRules"
           :columns="filterBuilderColumnOptions"
           :filtered-columns="filteredFilterBuilderColumnOptions"
           :mode-options="filterModeOptions"
           :column-search="filterBuilderColumnSearch"
-          :condition-columns="conditionColumns"
-          :identifier-quote="conditionIdentifierQuote"
-          :history-scope="conditionHistoryScope"
-          :active-rule-count="structuredFilterCount"
           :disabled="!canUseWhereSearch"
           @update:column-search="filterBuilderColumnSearch = $event"
-          @update:view="setFilterEditorView"
+          @ensure-rule="ensureStructuredFilterRule"
+          @add-rule="addStructuredFilterRule"
+          @apply="applyStructuredFilters"
+          @reset="resetStructuredFilters"
+          @clear="clearAllFilters"
+          @copy-sql="copyFilterSqlPreview"
+          @remove-rule="removeStructuredFilterRule"
+          @update-rule="updateStructuredFilterRule"
+        />
+        <DataGridTextFilterWorkbench
+          v-if="canUseWhereSearch && filterEditorView === 'text'"
+          :height="settingsStore.editorSettings.dataGridTextFilterPanelHeight"
+          :sql-preview="filterSqlPreview"
+          :rules="structuredFilterRules"
+          :columns="filterBuilderColumnOptions"
+          :filtered-columns="filteredFilterBuilderColumnOptions"
+          :mode-options="filterModeOptions"
+          :column-search="filterBuilderColumnSearch"
+          :disabled="!canUseWhereSearch"
+          @update:height="updateTextFilterPanelHeight"
+          @update:column-search="filterBuilderColumnSearch = $event"
           @ensure-rule="ensureStructuredFilterRule"
           @add-rule="addStructuredFilterRule"
           @apply="applyStructuredFilters"

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from "vue";
-import { Eye, EyeOff, Plus, Search, Trash2, X } from "@lucide/vue";
+import { Check, Eye, EyeOff, Plus, Search, Trash2, X } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -30,7 +30,7 @@ const props = withDefaults(
     disabled?: boolean;
     showHeader?: boolean;
     showFooter?: boolean;
-    layout?: "popover" | "panel";
+    layout?: "popover" | "panel" | "text";
   }>(),
   { showHeader: true, showFooter: true, layout: "popover" },
 );
@@ -283,7 +283,10 @@ function handleValueEditorKeydown(event: KeyboardEvent, editorKey: string) {
     return;
   }
   event.stopPropagation();
-  if (!event.repeat) addRuleAndOpenColumnSelect();
+  if (!event.repeat) {
+    if (props.layout === "text") emit("add");
+    else addRuleAndOpenColumnSelect();
+  }
 }
 
 function focusValueRule(id: string, index: number, mode: DataGridContextFilterMode) {
@@ -307,24 +310,42 @@ function blurValueRule(id: string) {
 </script>
 
 <template>
-  <div class="w-fit max-w-full space-y-2" :class="props.layout === 'panel' ? '!w-full' : ''" :style="filterBuilderStyle">
+  <div class="w-fit max-w-full" :class="props.layout === 'text' ? 'w-full space-y-0' : [props.layout === 'panel' ? '!w-full' : '', 'space-y-2']" :style="filterBuilderStyle">
     <div v-if="props.showHeader !== false" class="flex items-center justify-between gap-2">
       <div class="text-xs font-medium text-foreground">{{ t("grid.filter") }}</div>
       <Button variant="ghost" size="sm" class="h-7 px-2 text-xs" @click="emit('clear')"> <Trash2 class="mr-1 h-3.5 w-3.5" />{{ t("grid.clearFilter") }} </Button>
     </div>
 
-    <div v-if="props.rules.length" class="space-y-1.5">
+    <div v-if="props.rules.length" :class="props.layout === 'text' ? 'space-y-0' : props.layout === 'panel' ? 'space-y-1' : 'space-y-1.5'">
       <template v-for="(rule, index) in props.rules" :key="rule.id">
-        <div v-if="index > 0" class="flex justify-center">
-          <Button variant="ghost" size="sm" class="h-5 px-2 text-[11px]" @click="emit('updateRule', rule.id, { conjunction: rule.conjunction === 'AND' ? 'OR' : 'AND' })">{{ rule.conjunction }}</Button>
+        <div v-if="index > 0 && (props.layout === 'popover' || rule.conjunction === 'OR')" class="flex" :class="props.layout === 'popover' ? 'justify-center' : props.layout === 'text' ? 'justify-start pl-7' : 'justify-start pl-1'">
+          <Button variant="ghost" size="sm" :class="props.layout === 'text' ? 'h-4 px-1 text-[10px]' : 'h-5 px-2 text-[11px]'" @click="emit('updateRule', rule.id, { conjunction: rule.conjunction === 'AND' ? 'OR' : 'AND' })">{{ rule.conjunction }}</Button>
         </div>
         <div
           :ref="(element) => setFilterRuleElement(rule.id, element)"
           class="grid items-center justify-start gap-1.5"
-          :class="props.layout === 'panel' ? 'grid-cols-[minmax(128px,1fr)_132px_minmax(158px,1.35fr)_auto]' : 'grid-cols-[var(--filter-builder-column-width)_92px_var(--filter-builder-value-width)_auto]'"
+          :class="
+            props.layout === 'text'
+              ? 'min-h-7 grid-cols-[22px_var(--filter-builder-column-width)_92px_minmax(140px,1fr)_auto] gap-0.5 border-b border-border/45 px-1 hover:bg-muted/25'
+              : props.layout === 'panel'
+                ? 'grid-cols-[minmax(128px,1fr)_132px_minmax(158px,1.35fr)_auto]'
+                : 'grid-cols-[var(--filter-builder-column-width)_92px_var(--filter-builder-value-width)_auto]'
+          "
         >
+          <button
+            v-if="props.layout === 'text'"
+            type="button"
+            role="checkbox"
+            :aria-checked="!rule.disabled"
+            :aria-label="rule.disabled ? t('grid.filterBuilderEnableRule') : t('grid.filterBuilderDisableRule')"
+            class="flex h-4 w-4 items-center justify-center justify-self-center border text-primary transition-colors hover:border-primary"
+            :class="rule.disabled ? 'border-muted-foreground/40 bg-background' : 'border-primary bg-primary/10'"
+            @click="emit('updateRule', rule.id, { disabled: !rule.disabled })"
+          >
+            <Check v-if="!rule.disabled" class="h-3 w-3" />
+          </button>
           <Select :model-value="rule.columnName" :open="openColumnSelectIds.has(rule.id)" :disabled="rule.disabled" @update:model-value="(value: any) => updateRuleColumn(rule, value)" @update:open="(open: boolean) => handleColumnSelectOpen(rule, open)">
-            <SelectTrigger size="sm" class="h-7 w-full min-w-0 overflow-hidden text-xs [&_[data-slot=select-value]]:min-w-0 [&_[data-slot=select-value]]:truncate">
+            <SelectTrigger size="sm" class="w-full min-w-0 overflow-hidden text-xs [&_[data-slot=select-value]]:min-w-0 [&_[data-slot=select-value]]:truncate" :class="props.layout === 'text' ? 'h-6 rounded-none border-0 bg-transparent px-1 shadow-none focus-visible:ring-0' : 'h-7'">
               <SelectValue v-if="rule.columnName">{{ rule.columnName }}</SelectValue>
               <SelectValue v-else :placeholder="t('grid.filterBuilderColumn')" />
             </SelectTrigger>
@@ -361,12 +382,57 @@ function blurValueRule(id: string) {
             </SelectContent>
           </Select>
           <Select :model-value="rule.mode" :disabled="rule.disabled" @update:model-value="(value: any) => emit('updateRule', rule.id, { mode: value as DataGridContextFilterMode })">
-            <SelectTrigger size="sm" class="h-7 w-full min-w-0 overflow-hidden text-xs [&_[data-slot=select-value]]:min-w-0 [&_[data-slot=select-value]]:truncate"><SelectValue /></SelectTrigger>
+            <SelectTrigger size="sm" class="w-full min-w-0 overflow-hidden text-xs [&_[data-slot=select-value]]:min-w-0 [&_[data-slot=select-value]]:truncate" :class="props.layout === 'text' ? 'h-6 rounded-none border-0 bg-transparent px-1 shadow-none focus-visible:ring-0' : 'h-7'"
+              ><SelectValue
+            /></SelectTrigger>
             <SelectContent
               ><SelectItem v-for="option in props.modeOptions" :key="option.value" :value="option.value" class="rounded-none">{{ t(option.labelKey) }}</SelectItem></SelectContent
             >
           </Select>
-          <div v-if="filterModeUsesRange(rule.mode)" class="col-span-3 flex gap-1.5">
+          <div v-if="props.layout === 'text'" class="flex min-w-0 items-center gap-1" :class="rule.disabled ? 'text-muted-foreground' : ''">
+            <template v-if="filterModeUsesRange(rule.mode)">
+              <Input
+                data-filter-value-editor
+                :model-value="rule.rawValue"
+                class="h-6 min-w-0 flex-1 rounded-none border-0 border-b border-transparent bg-transparent px-1 text-xs shadow-none focus-visible:border-primary focus-visible:ring-0"
+                :disabled="rule.disabled"
+                :placeholder="t('grid.filterBuilderRangeStart')"
+                @update:model-value="(value) => emit('updateRule', rule.id, { rawValue: String(value ?? '') })"
+                @keydown="handleValueEditorKeydown($event, `value-start:${rule.id}`)"
+              />
+              <span class="shrink-0 text-[10px] text-muted-foreground">—</span>
+              <Input
+                :model-value="rule.rawEndValue"
+                class="h-6 min-w-0 flex-1 rounded-none border-0 border-b border-transparent bg-transparent px-1 text-xs shadow-none focus-visible:border-primary focus-visible:ring-0"
+                :disabled="rule.disabled"
+                :placeholder="t('grid.filterBuilderRangeEnd')"
+                @update:model-value="(value) => emit('updateRule', rule.id, { rawEndValue: String(value ?? '') })"
+                @keydown="handleValueEditorKeydown($event, `value-end:${rule.id}`)"
+              />
+            </template>
+            <Input
+              v-else-if="filterModeUsesList(rule.mode)"
+              data-filter-value-editor
+              :model-value="rule.rawValue"
+              class="h-6 min-w-0 flex-1 rounded-none border-0 border-b border-transparent bg-transparent px-1 text-xs shadow-none focus-visible:border-primary focus-visible:ring-0"
+              :disabled="rule.disabled"
+              :placeholder="t('grid.filterBuilderValues')"
+              @update:model-value="(value) => emit('updateRule', rule.id, { rawValue: String(value ?? '') })"
+              @keydown="handleValueEditorKeydown($event, `value-list:${rule.id}`)"
+            />
+            <Input
+              v-else-if="filterModeNeedsValue(rule.mode)"
+              data-filter-value-editor
+              :model-value="rule.rawValue"
+              class="h-6 min-w-0 flex-1 rounded-none border-0 border-b border-transparent bg-transparent px-1 text-xs shadow-none focus-visible:border-primary focus-visible:ring-0"
+              :disabled="rule.disabled"
+              :placeholder="t('grid.filterBuilderTextValue')"
+              @update:model-value="(value) => emit('updateRule', rule.id, { rawValue: String(value ?? '') })"
+              @keydown="handleValueEditorKeydown($event, `value:${rule.id}`)"
+            />
+            <span v-else class="px-1 text-xs text-muted-foreground">{{ t("grid.filterBuilderNoValue") }}</span>
+          </div>
+          <div v-else-if="filterModeUsesRange(rule.mode)" class="col-span-3 flex gap-1.5">
             <Input
               data-filter-value-editor
               :model-value="rule.rawValue"
@@ -420,12 +486,18 @@ function blurValueRule(id: string) {
             @keydown="handleValueEditorKeydown($event, `value:${rule.id}`)"
           />
           <div v-else class="flex h-7 items-center rounded-md border border-dashed px-2 text-xs text-muted-foreground">{{ t("grid.filterBuilderNoValue") }}</div>
-          <div v-if="shouldShowValueShortcutHint(rule, index)" class="text-[11px] leading-none text-muted-foreground" :class="usesExpandedLayout(rule.mode) ? 'col-span-3 -mt-0.5' : 'col-start-3 row-start-2 -mt-0.5'">
+          <div v-if="props.layout !== 'text' && shouldShowValueShortcutHint(rule, index)" class="text-[11px] leading-none text-muted-foreground" :class="usesExpandedLayout(rule.mode) ? 'col-span-3 -mt-0.5' : 'col-start-3 row-start-2 -mt-0.5'">
             {{ t("grid.filterBuilderValueShortcutHint") }}
           </div>
-          <div class="flex items-center gap-0.5" :class="usesExpandedLayout(rule.mode) ? 'col-start-4 row-start-1 row-span-2' : 'col-start-4 row-start-1'">
-            <Button variant="ghost" size="icon" class="h-7 w-7" @click="emit('updateRule', rule.id, { disabled: !rule.disabled })"><EyeOff v-if="rule.disabled" class="h-3.5 w-3.5" /><Eye v-else class="h-3.5 w-3.5" /></Button>
-            <Button variant="ghost" size="icon" class="h-7 w-7" :disabled="props.rules.length === 1" @click="emit('remove', rule.id)"><X class="h-3.5 w-3.5" /></Button>
+          <div class="flex items-center gap-0.5" :class="props.layout === 'text' ? 'col-start-5 row-start-1' : usesExpandedLayout(rule.mode) ? 'col-start-4 row-start-1 row-span-2' : 'col-start-4 row-start-1'">
+            <template v-if="props.layout === 'text'">
+              <Button variant="ghost" size="icon" class="h-6 w-6" :aria-label="t('grid.filterBuilderAddRule')" @click="emit('add')"><Plus class="h-3.5 w-3.5" /></Button>
+              <Button variant="ghost" size="icon" class="h-6 w-6" :disabled="props.rules.length === 1" @click="emit('remove', rule.id)"><X class="h-3.5 w-3.5" /></Button>
+            </template>
+            <template v-else>
+              <Button variant="ghost" size="icon" class="h-7 w-7" @click="emit('updateRule', rule.id, { disabled: !rule.disabled })"><EyeOff v-if="rule.disabled" class="h-3.5 w-3.5" /><Eye v-else class="h-3.5 w-3.5" /></Button>
+              <Button variant="ghost" size="icon" class="h-7 w-7" :disabled="props.rules.length === 1" @click="emit('remove', rule.id)"><X class="h-3.5 w-3.5" /></Button>
+            </template>
           </div>
         </div>
       </template>

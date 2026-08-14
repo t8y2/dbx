@@ -69,6 +69,11 @@ describe("EDITOR_SETTINGS_DRAFT_KEYS", () => {
     expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("colorizeDataGridCellTypes");
   });
 
+  it("includes the data grid filter view", () => {
+    expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("dataGridFilterEditorView");
+    expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("dataGridTextFilterPanelHeight");
+  });
+
   it("includes completionTriggerMode", () => {
     expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("completionTriggerMode");
   });
@@ -122,6 +127,12 @@ describe("editorSettingsDraftFromSettings", () => {
 
   it("maps the data grid type color preference from settings", () => {
     expect(editorSettingsDraftFromSettings(makeSettings({ colorizeDataGridCellTypes: false })).colorizeDataGridCellTypes).toBe(false);
+  });
+
+  it("maps the data grid filter view from settings", () => {
+    const draft = editorSettingsDraftFromSettings(makeSettings({ dataGridFilterEditorView: "text", dataGridTextFilterPanelHeight: 224 }));
+    expect(draft.dataGridFilterEditorView).toBe("text");
+    expect(draft.dataGridTextFilterPanelHeight).toBe(224);
   });
 
   it("preserves the table-open default for legacy settings", () => {

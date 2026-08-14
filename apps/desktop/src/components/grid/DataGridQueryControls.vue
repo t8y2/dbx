@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onUnmounted, ref, watch } from "vue";
-import { Code2, Filter, Trash2, X } from "@lucide/vue";
+import { Filter, Trash2, X } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
 import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
@@ -10,7 +10,7 @@ import type { DataGridConditionColumnOption } from "@/composables/useDataGridCon
 import type { DataGridStructuredFilterRule } from "@/composables/useDataGridFilterBuilder";
 import type { DataGridConditionHistoryScope } from "@/lib/dataGrid/dataGridConditionHistory";
 import type { DataGridContextFilterMode } from "@/lib/dataGrid/dataGridSql";
-import type { DataGridFilterEditorView } from "@/lib/dataGrid/dataGridFilterBuilderPersistence";
+import type { DataGridFilterEditorView } from "@/stores/settingsStore";
 import { clampSearchSplitWidth } from "@/lib/dataGrid/dataGridSearchSplit";
 
 type LocalFilterSummary = {
@@ -50,7 +50,6 @@ const emit = defineEmits<{
   "update:whereInput": [value: string];
   "update:orderByInput": [value: string];
   "update:filterBuilderOpen": [value: boolean];
-  "update:filterEditorView": [value: DataGridFilterEditorView];
   "update:columnSearch": [value: string];
   ensureRule: [];
   addRule: [];
@@ -118,11 +117,6 @@ function clearWhere() {
   emit("clearFilters");
 }
 
-function selectFilterEditorView(view: DataGridFilterEditorView) {
-  emit("update:filterEditorView", view);
-  if (view === "conditions") emit("update:filterBuilderOpen", false);
-}
-
 async function openPendingFirstEmptyRuleColumnSearch() {
   if (openingFirstEmptyRuleColumnSearch || !pendingFirstEmptyRuleColumnSearch.value || !props.filterBuilderOpen || !filterBuilderRef.value) return;
   if (!props.rules.some((rule) => !rule.columnName && !rule.disabled)) return;
@@ -155,14 +149,7 @@ onUnmounted(onResizeEnd);
 <template>
   <div ref="containerRef" class="flex flex-1 min-w-0">
     <div class="flex flex-1 items-center gap-1 px-2 py-0.5 min-w-0 relative" :class="{ 'border-l': leadingBorder }" :style="wherePaneStyle">
-      <template v-if="filterEditorView === 'conditions'">
-        <button type="button" class="flex h-5 min-w-0 items-center gap-1.5 px-1 text-xs font-medium text-primary hover:bg-primary/10" :aria-label="t('grid.filterConditionPanel')" @click="selectFilterEditorView('quick')">
-          <Filter class="h-3 w-3 shrink-0" />
-          <span class="truncate">{{ t("grid.filterConditionPanel") }}</span>
-          <span v-if="filterButtonCount" class="rounded bg-primary/10 px-1 text-[10px] leading-4">{{ filterButtonCount }}</span>
-        </button>
-      </template>
-      <template v-else>
+      <template v-if="filterEditorView === 'quick'">
         <Popover :open="filterBuilderOpen" @update:open="emit('update:filterBuilderOpen', $event)">
           <PopoverTrigger as-child>
             <button
@@ -179,10 +166,6 @@ onUnmounted(onResizeEnd);
           <PopoverContent align="start" class="w-fit max-w-[calc(100vw-16px)] gap-2 p-2.5">
             <div class="flex items-center justify-between gap-2">
               <div class="text-xs font-medium text-foreground">{{ t("grid.filter") }}</div>
-              <div class="flex h-6 items-center border bg-muted/20 p-0.5" role="group" :aria-label="t('grid.filterView')">
-                <button type="button" class="flex h-5 items-center gap-1 bg-background px-2 text-[11px] font-medium text-foreground shadow-sm" @click="selectFilterEditorView('quick')"><Code2 class="h-3 w-3" />{{ t("grid.filterQuickView") }}</button>
-                <button type="button" class="flex h-5 items-center gap-1 px-2 text-[11px] text-muted-foreground hover:text-foreground" @click="selectFilterEditorView('conditions')"><Filter class="h-3 w-3" />{{ t("grid.filterConditionView") }}</button>
-              </div>
               <Button variant="ghost" size="sm" class="h-6 px-2 text-xs" @click="emit('clearFilters')"><Trash2 class="mr-1 h-3.5 w-3.5" />{{ t("grid.clearFilter") }}</Button>
             </div>
 
@@ -226,22 +209,22 @@ onUnmounted(onResizeEnd);
             />
           </PopoverContent>
         </Popover>
-        <DataGridConditionEditor
-          :model-value="whereInput"
-          kind="where"
-          :columns="conditionColumns"
-          :identifier-quote="identifierQuote"
-          :history-scope="historyScope"
-          placeholder="WHERE"
-          :history-empty-text="t('grid.conditionHistoryEmpty')"
-          :history-no-matches-text="t('grid.conditionHistoryNoMatches')"
-          :disabled="!canUseWhereSearch"
-          :compact="compact"
-          :apply="applyWhere"
-          :clear="clearWhere"
-          @update:model-value="emit('update:whereInput', $event)"
-        />
       </template>
+      <DataGridConditionEditor
+        :model-value="whereInput"
+        kind="where"
+        :columns="conditionColumns"
+        :identifier-quote="identifierQuote"
+        :history-scope="historyScope"
+        placeholder="WHERE"
+        :history-empty-text="t('grid.conditionHistoryEmpty')"
+        :history-no-matches-text="t('grid.conditionHistoryNoMatches')"
+        :disabled="!canUseWhereSearch"
+        :compact="compact"
+        :apply="applyWhere"
+        :clear="clearWhere"
+        @update:model-value="emit('update:whereInput', $event)"
+      />
     </div>
     <button
       type="button"

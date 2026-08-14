@@ -13,6 +13,20 @@ describe("normalizeEditorSettings", () => {
     expect(normalizeEditorSettings({ sqlVariableSubstitutionEnabled: null } as any).sqlVariableSubstitutionEnabled).toBe(true);
   });
 
+  it("keeps the quick filter view by default and preserves fixed filter views", () => {
+    expect(normalizeEditorSettings({}).dataGridFilterEditorView).toBe("quick");
+    expect(normalizeEditorSettings({ dataGridFilterEditorView: "conditions" }).dataGridFilterEditorView).toBe("conditions");
+    expect(normalizeEditorSettings({ dataGridFilterEditorView: "text" }).dataGridFilterEditorView).toBe("text");
+    expect(normalizeEditorSettings({ dataGridFilterEditorView: "invalid" } as any).dataGridFilterEditorView).toBe("quick");
+  });
+
+  it("defaults and bounds the persisted text filter panel height", () => {
+    expect(normalizeEditorSettings({}).dataGridTextFilterPanelHeight).toBe(168);
+    expect(normalizeEditorSettings({ dataGridTextFilterPanelHeight: 236.4 }).dataGridTextFilterPanelHeight).toBe(236);
+    expect(normalizeEditorSettings({ dataGridTextFilterPanelHeight: 20 }).dataGridTextFilterPanelHeight).toBe(96);
+    expect(normalizeEditorSettings({ dataGridTextFilterPanelHeight: 900 }).dataGridTextFilterPanelHeight).toBe(420);
+  });
+
   it("keeps data type colors disabled by default and preserves an explicit opt-in", () => {
     expect(normalizeEditorSettings({}).colorizeDataGridCellTypes).toBe(false);
     expect(normalizeEditorSettings({ colorizeDataGridCellTypes: true }).colorizeDataGridCellTypes).toBe(true);

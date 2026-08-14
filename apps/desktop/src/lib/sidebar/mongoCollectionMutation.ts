@@ -202,19 +202,126 @@ export function mergeExtraOptionsIntoRequest(request: Extract<MongoCreateIndexRe
   return { keysJson: request.keysJson, optionsJson };
 }
 
+export type MongoIndexSpecSource = {
+  name: string;
+  keys?: readonly { field: string; direction: string }[] | null;
+  is_unique?: boolean;
+  is_primary?: boolean;
+  is_sparse?: boolean;
+  expire_after_seconds?: number | null;
+  partial_filter_expression?: string | null;
+  background?: boolean;
+  bucket_size?: number | null;
+  hidden?: boolean;
+  properties_complete?: boolean;
+  extra_options?: string | null;
+};
+
+/** Immutable, normalized server specification captured when index editing starts. */
+export interface MongoIndexSpecSnapshot {
+  name: string;
+  keys: { field: string; direction: string }[];
+  isUnique: boolean;
+  isPrimary: boolean;
+  isSparse: boolean;
+  expireAfterSeconds: number | null;
+  partialFilterExpression?: string;
+  background: boolean;
+  bucketSize: number | null;
+  hidden: boolean;
+  propertiesComplete: boolean;
+  extraOptions?: string;
+}
+
+/** Copy a server result into the stable shape used by preflight and rollback. */
+export function snapshotMongoIndexSpec(source: MongoIndexSpecSource): MongoIndexSpecSnapshot {
+  return {
+    name: source.name,
+    keys: (source.keys ?? []).map((key) => ({ field: key.field, direction: String(key.direction) })),
+    isUnique: !!source.is_unique,
+    isPrimary: !!source.is_primary,
+    isSparse: !!source.is_sparse,
+    expireAfterSeconds: source.expire_after_seconds ?? null,
+    partialFilterExpression: source.partial_filter_expression?.trim() || undefined,
+    background: !!source.background,
+    bucketSize: source.bucket_size ?? null,
+    hidden: !!source.hidden,
+    propertiesComplete: source.properties_complete !== false,
+    extraOptions: source.extra_options?.trim() || undefined,
+  };
+}
+
+function canonicalJsonValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalJsonValue);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, child]) => [key, canonicalJsonValue(child)]),
+  );
+}
+
+function canonicalJsonText(raw?: string): string | undefined {
+  if (!raw) return undefined;
+  try {
+    return JSON.stringify(canonicalJsonValue(JSON.parse(raw)));
+  } catch {
+    return raw.trim() || undefined;
+  }
+}
+
+function comparableMongoIndexSpec(spec: MongoIndexSpecSnapshot): unknown {
+  return {
+    ...spec,
+    partialFilterExpression: canonicalJsonText(spec.partialFilterExpression),
+    extraOptions: canonicalJsonText(spec.extraOptions),
+  };
+}
+
 /**
- * Preflight check before a destructive edit: verify the index still exists
- * on the server and that its keys have not changed since the dialog was
- * opened. Returns `{ safe: true }` when the edit can proceed; otherwise
- * `{ safe: false, reason }` with a human-readable explanation.
+ * Preflight check before a destructive edit: verify the complete normalized
+ * server specification still matches the immutable snapshot captured when the
+ * editor opened.
  */
-export function preflightEditIndexSpec(currentSpecs: readonly { name: string; keys?: readonly { field: string; direction: string }[] | null; properties_complete?: boolean }[], originalName: string, originalKeyDescription: string): { safe: boolean; reason?: string } {
-  const current = currentSpecs.find((spec) => spec.name === originalName);
+export function preflightEditIndexSpec(currentSpecs: readonly MongoIndexSpecSource[], originalSpec: MongoIndexSpecSnapshot): { safe: boolean; reason?: string } {
+  const current = currentSpecs.find((spec) => spec.name === originalSpec.name);
   if (!current) return { safe: false, reason: "not-found" };
-  if (current.properties_complete === false) return { safe: true };
-  const currentKeyDescription = mongoIndexKeyDescription(current.keys ?? []);
-  if (currentKeyDescription !== originalKeyDescription) return { safe: false, reason: "stale" };
+  const currentSnapshot = snapshotMongoIndexSpec(current);
+  if (JSON.stringify(comparableMongoIndexSpec(currentSnapshot)) !== JSON.stringify(comparableMongoIndexSpec(originalSpec))) {
+    return { safe: false, reason: "stale" };
+  }
   return { safe: true };
+}
+
+function parseIndexOptionObject(raw: string | undefined, label: string): Record<string, unknown> {
+  if (!raw) return {};
+  const parsed = JSON.parse(raw);
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error(`${label} must be a JSON object`);
+  }
+  return parsed as Record<string, unknown>;
+}
+
+/** Rebuild the exact create-index transport request used to restore an original index. */
+export function mongoCreateIndexRequestFromSpec(spec: MongoIndexSpecSnapshot): { keysJson: string; optionsJson: string } {
+  const keysJson = `{${spec.keys.map((key) => `${JSON.stringify(key.field)}:${JSON.stringify(key.direction === "1" ? 1 : key.direction === "-1" ? -1 : key.direction)}`).join(",")}}`;
+  const extraOptions = parseIndexOptionObject(spec.extraOptions, "Index extra options");
+  for (const modeledField of ["key", "name", "unique", "sparse", "expireAfterSeconds", "partialFilterExpression", "background", "bucketSize", "hidden"]) {
+    delete extraOptions[modeledField];
+  }
+  const partialFilterExpression = spec.partialFilterExpression ? parseIndexOptionObject(spec.partialFilterExpression, "Partial filter expression") : undefined;
+  const options = {
+    ...extraOptions,
+    name: spec.name,
+    ...(spec.isUnique ? { unique: true } : {}),
+    ...(spec.isSparse ? { sparse: true } : {}),
+    ...(spec.expireAfterSeconds === null ? {} : { expireAfterSeconds: spec.expireAfterSeconds }),
+    ...(partialFilterExpression ? { partialFilterExpression } : {}),
+    ...(spec.background ? { background: true } : {}),
+    ...(spec.bucketSize === null ? {} : { bucketSize: spec.bucketSize }),
+    ...(spec.hidden ? { hidden: true } : {}),
+  };
+  return { keysJson, optionsJson: JSON.stringify(options) };
 }
 
 /**
@@ -289,21 +396,6 @@ export interface MongoIndexRow {
   propertiesComplete: boolean;
   extraOptions?: string;
 }
-
-type MongoIndexSpecSource = {
-  name: string;
-  keys?: readonly { field: string; direction: string }[] | null;
-  is_unique?: boolean;
-  is_primary?: boolean;
-  is_sparse?: boolean;
-  expire_after_seconds?: number | null;
-  partial_filter_expression?: string | null;
-  background?: boolean;
-  bucket_size?: number | null;
-  hidden?: boolean;
-  properties_complete?: boolean;
-  extra_options?: string | null;
-};
 
 /** Describe every key as `field LABEL`, e.g. `account ASC, createTime DESC`. */
 function mongoIndexKeyDescription(keys: readonly { field: string; direction: string }[]): string {

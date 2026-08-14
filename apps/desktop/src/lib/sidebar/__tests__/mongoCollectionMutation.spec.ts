@@ -9,6 +9,7 @@ import {
   mongoCollectionTableTypeFromNode,
   mongoCloneCollectionPreview,
   mongoCreateIndexFormFromRow,
+  mongoCreateIndexRequestFromSpec,
   mongoCreateIndexPreview,
   mongoDropCollectionPreview,
   mongoDropAllIndexesPreview,
@@ -18,13 +19,33 @@ import {
   mongoRenameCollectionPreview,
   mongoReplaceIndexPreview,
   preflightEditIndexSpec,
+  snapshotMongoIndexSpec,
   toMongoCollectionKind,
   toMongoIndexRow,
   type MongoCreateIndexForm,
+  type MongoIndexSpecSource,
 } from "../mongoCollectionMutation";
 
 function indexForm(fields: MongoCreateIndexForm["fields"], options: Partial<Omit<MongoCreateIndexForm, "fields">> = {}): MongoCreateIndexForm {
   return { name: "", unique: false, sparse: false, expireAfterSeconds: "", partialFilterExpression: "", background: false, bucketSize: "", ...options, fields };
+}
+
+function serverIndexSpec(overrides: Partial<MongoIndexSpecSource> = {}): MongoIndexSpecSource {
+  return {
+    name: "email_1",
+    keys: [{ field: "email", direction: "1" }],
+    is_unique: false,
+    is_primary: false,
+    is_sparse: true,
+    expire_after_seconds: 3600,
+    partial_filter_expression: '{"archived":false}',
+    background: false,
+    bucket_size: null,
+    hidden: false,
+    properties_complete: true,
+    extra_options: '{"collation":{"locale":"en"}}',
+    ...overrides,
+  };
 }
 
 describe("isRenamableMongoCollection", () => {
@@ -424,23 +445,57 @@ describe("mergeExtraOptionsIntoRequest", () => {
 });
 
 describe("preflightEditIndexSpec", () => {
-  it("reports safe when the index exists with matching keys", () => {
-    const specs = [{ name: "email_1", keys: [{ field: "email", direction: "1" }] }];
-    expect(preflightEditIndexSpec(specs, "email_1", "email ASC")).toEqual({ safe: true });
+  it("reports safe when the complete normalized specification matches", () => {
+    const original = snapshotMongoIndexSpec(serverIndexSpec());
+    const current = serverIndexSpec({
+      partial_filter_expression: '{ "archived": false }',
+      extra_options: '{"collation":{"locale":"en"}}',
+    });
+    expect(preflightEditIndexSpec([current], original)).toEqual({ safe: true });
   });
 
   it("reports not-found when the index no longer exists", () => {
-    const specs = [{ name: "other", keys: [{ field: "x", direction: "1" }] }];
-    expect(preflightEditIndexSpec(specs, "email_1", "email ASC")).toEqual({ safe: false, reason: "not-found" });
+    const original = snapshotMongoIndexSpec(serverIndexSpec());
+    expect(preflightEditIndexSpec([serverIndexSpec({ name: "other" })], original)).toEqual({ safe: false, reason: "not-found" });
   });
 
   it("reports stale when the keys have changed since the dialog was opened", () => {
-    const specs = [{ name: "email_1", keys: [{ field: "email", direction: "-1" }] }];
-    expect(preflightEditIndexSpec(specs, "email_1", "email ASC")).toEqual({ safe: false, reason: "stale" });
+    const original = snapshotMongoIndexSpec(serverIndexSpec());
+    expect(preflightEditIndexSpec([serverIndexSpec({ keys: [{ field: "email", direction: "-1" }] })], original)).toEqual({ safe: false, reason: "stale" });
   });
 
-  it("skips the key comparison when properties_complete is false (Legacy Agent)", () => {
-    const specs = [{ name: "email_1", keys: [{ field: "email", direction: "-1" }], properties_complete: false }];
-    expect(preflightEditIndexSpec(specs, "email_1", "email ASC")).toEqual({ safe: true });
+  it("reports stale when the keys match but any complete option changed", () => {
+    const original = snapshotMongoIndexSpec(serverIndexSpec());
+    expect(preflightEditIndexSpec([serverIndexSpec({ is_unique: true, hidden: true })], original)).toEqual({ safe: false, reason: "stale" });
+    expect(preflightEditIndexSpec([serverIndexSpec({ extra_options: '{"collation":{"locale":"fr"}}' })], original)).toEqual({ safe: false, reason: "stale" });
+  });
+});
+
+describe("mongoCreateIndexRequestFromSpec", () => {
+  it("builds a complete rollback request from the opening server specification", () => {
+    const snapshot = snapshotMongoIndexSpec(
+      serverIndexSpec({
+        is_unique: true,
+        background: true,
+        bucket_size: 16,
+        hidden: true,
+        extra_options: '{"collation":{"locale":"en"},"wildcardProjection":{"email":1}}',
+      }),
+    );
+
+    const request = mongoCreateIndexRequestFromSpec(snapshot);
+    expect(request.keysJson).toBe('{"email":1}');
+    expect(JSON.parse(request.optionsJson)).toEqual({
+      collation: { locale: "en" },
+      wildcardProjection: { email: 1 },
+      name: "email_1",
+      unique: true,
+      sparse: true,
+      expireAfterSeconds: 3600,
+      partialFilterExpression: { archived: false },
+      background: true,
+      bucketSize: 16,
+      hidden: true,
+    });
   });
 });

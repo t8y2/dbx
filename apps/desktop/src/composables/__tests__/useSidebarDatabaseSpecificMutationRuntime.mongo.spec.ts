@@ -540,7 +540,7 @@ describe("MongoDB sidebar mutation runtime", () => {
     expect(mongoCreateIndexError.value).toContain("duplicate key");
   });
 
-  it("drops then creates for a same-name rebuild, surfacing a clear error when create fails", async () => {
+  it("restores the complete original specification when a same-name rebuild fails", async () => {
     const node = mongoCollectionNode();
     const feature = runtime(node);
     sidebarFormTarget.value = node;
@@ -550,18 +550,38 @@ describe("MongoDB sidebar mutation runtime", () => {
 
     feature.selectMongoIndexRow("email_1");
     feature.startEditMongoIndexDraft();
-    // Keep the same name — forces drop+create order.
+    mongoCreateIndexForm.value.unique = true;
 
-    mocks.mongoCreateIndex.mockRejectedValueOnce(new Error("index build failed"));
+    mocks.mongoCreateIndex.mockRejectedValueOnce(new Error("index build failed")).mockResolvedValueOnce({ name: "email_1" });
     await feature.confirmEditMongoIndex();
     await flush();
 
-    // Drop ran, then create failed.
     expect(mocks.mongoDropIndexes).toHaveBeenCalledWith("conn-1", "app", "users", '"email_1"', true);
-    expect(mocks.mongoCreateIndex).toHaveBeenCalled();
-    // The error message makes it clear the original was already dropped.
+    expect(mocks.mongoCreateIndex).toHaveBeenNthCalledWith(1, "conn-1", "app", "users", '{"email":1}', '{"name":"email_1","unique":true,"sparse":true,"expireAfterSeconds":3600,"partialFilterExpression":{"archived":false}}');
+    expect(mocks.mongoCreateIndex).toHaveBeenNthCalledWith(2, "conn-1", "app", "users", '{"email":1}', '{"name":"email_1","sparse":true,"expireAfterSeconds":3600,"partialFilterExpression":{"archived":false}}');
     expect(mongoCreateIndexError.value).toContain("email_1");
     expect(mongoCreateIndexError.value).toContain("index build failed");
+    expect(mongoCreateIndexError.value).toContain("mongoEditIndexCreateFailedRolledBack");
+  });
+
+  it("reports both replacement and rollback errors when restoring a same-name index fails", async () => {
+    const node = mongoCollectionNode();
+    const feature = runtime(node);
+    sidebarFormTarget.value = node;
+
+    feature.prepareMongoIndexManagerDialog();
+    await flush();
+    feature.selectMongoIndexRow("email_1");
+    feature.startEditMongoIndexDraft();
+    mongoCreateIndexForm.value.unique = true;
+
+    mocks.mongoCreateIndex.mockRejectedValueOnce(new Error("replacement failed")).mockRejectedValueOnce(new Error("rollback failed"));
+    await feature.confirmEditMongoIndex();
+    await flush();
+
+    expect(mocks.mongoCreateIndex).toHaveBeenCalledTimes(2);
+    expect(mongoCreateIndexError.value).toContain("replacement failed");
+    expect(mongoCreateIndexError.value).toContain("rollback failed");
   });
 
   it("aborts the edit when the index no longer exists on the server", async () => {
@@ -609,6 +629,95 @@ describe("MongoDB sidebar mutation runtime", () => {
     expect(mocks.mongoDropIndexes).not.toHaveBeenCalled();
     expect(mocks.mongoCreateIndex).not.toHaveBeenCalled();
     expect(mongoCreateIndexError.value).toContain("email_1");
+  });
+
+  it("aborts the edit when the keys match but the complete server options changed", async () => {
+    const node = mongoCollectionNode();
+    const feature = runtime(node);
+    sidebarFormTarget.value = node;
+
+    feature.prepareMongoIndexManagerDialog();
+    await flush();
+    feature.selectMongoIndexRow("email_1");
+    feature.startEditMongoIndexDraft();
+
+    mocks.mongoListIndexSpecs.mockResolvedValueOnce([
+      { name: "_id_", keys: [{ field: "_id", direction: "1" }], is_unique: true, is_primary: true, is_sparse: false, expire_after_seconds: null, partial_filter_expression: null, background: false, bucket_size: null, hidden: false, properties_complete: true, extra_options: null },
+      {
+        name: "email_1",
+        keys: [{ field: "email", direction: "1" }],
+        is_unique: true,
+        is_primary: false,
+        is_sparse: true,
+        expire_after_seconds: 3600,
+        partial_filter_expression: '{"archived":false}',
+        background: false,
+        bucket_size: null,
+        hidden: true,
+        properties_complete: true,
+        extra_options: '{"collation":{"locale":"fr"}}',
+      },
+    ]);
+    await feature.confirmEditMongoIndex();
+    await flush();
+
+    expect(mocks.mongoDropIndexes).not.toHaveBeenCalled();
+    expect(mocks.mongoCreateIndex).not.toHaveBeenCalled();
+    expect(mongoCreateIndexError.value).toContain("mongoEditIndexStale");
+  });
+
+  it("does not report a rename as successful when drop returns structured failures", async () => {
+    const node = mongoCollectionNode();
+    const feature = runtime(node);
+    sidebarFormTarget.value = node;
+
+    feature.prepareMongoIndexManagerDialog();
+    await flush();
+    feature.selectMongoIndexRow("email_1");
+    feature.startEditMongoIndexDraft();
+    mongoCreateIndexForm.value.name = "email_v2";
+    mocks.mongoCreateIndex.mockResolvedValueOnce({ name: "email_v2" });
+    mocks.mongoDropIndexes.mockResolvedValueOnce({
+      dropped_names: [],
+      affected_rows: 0,
+      failures: [{ name: "email_1", message: "not authorized" }],
+    });
+
+    await feature.confirmEditMongoIndex();
+    await flush();
+
+    expect(mocks.mongoCreateIndex).toHaveBeenCalledOnce();
+    expect(mocks.mongoDropIndexes).toHaveBeenCalledOnce();
+    expect(mongoIndexManagerMode.value).toBe("edit");
+    expect(mongoCreateIndexError.value).toContain("not authorized");
+    expect(mongoCreateIndexError.value).toContain("mongoEditIndexDropFailedAfterCreate");
+    expect(mocks.toast).not.toHaveBeenCalledWith(expect.stringContaining("mongoEditIndexSuccess"), 3000);
+  });
+
+  it("does not create or report rollback when a same-name drop returns structured failures", async () => {
+    const node = mongoCollectionNode();
+    const feature = runtime(node);
+    sidebarFormTarget.value = node;
+
+    feature.prepareMongoIndexManagerDialog();
+    await flush();
+    feature.selectMongoIndexRow("email_1");
+    feature.startEditMongoIndexDraft();
+    mongoCreateIndexForm.value.unique = true;
+    mocks.mongoDropIndexes.mockResolvedValueOnce({
+      dropped_names: [],
+      affected_rows: 0,
+      failures: [{ name: "email_1", message: "index is busy" }],
+    });
+
+    await feature.confirmEditMongoIndex();
+    await flush();
+
+    expect(mocks.mongoCreateIndex).not.toHaveBeenCalled();
+    expect(mongoIndexManagerMode.value).toBe("edit");
+    expect(mongoCreateIndexError.value).toContain("index is busy");
+    expect(mongoCreateIndexError.value).toContain("mongoEditIndexDropFailed");
+    expect(mongoCreateIndexError.value).not.toContain("mongoEditIndexCreateFailedRolledBack");
   });
 
   it("preserves extra options (collation, wildcardProjection) through the edit", async () => {

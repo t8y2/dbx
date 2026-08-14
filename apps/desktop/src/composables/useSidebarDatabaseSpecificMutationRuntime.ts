@@ -16,6 +16,7 @@ import {
   mergeExtraOptionsIntoRequest,
   mongoCollectionKindFromNode,
   mongoCloneCollectionPreview,
+  mongoCreateIndexRequestFromSpec,
   mongoCreateIndexFormFromRow,
   mongoCreateIndexPreview,
   mongoDropAllIndexesPreview,
@@ -26,8 +27,10 @@ import {
   mongoRenameCollectionPreview,
   mongoReplaceIndexPreview,
   preflightEditIndexSpec,
+  snapshotMongoIndexSpec,
   toMongoIndexRow,
   type MongoCreateIndexRequest,
+  type MongoIndexSpecSnapshot,
 } from "@/lib/sidebar/mongoCollectionMutation";
 import { supportsMongoAllDriverMutations, supportsMongoIndexMutations, supportsNativeMongoDriverMutations } from "@/lib/mongo/mongoCapabilities";
 import { runMongoSidebarMutation } from "@/lib/sidebar/runMongoSidebarMutation";
@@ -98,6 +101,8 @@ export function useSidebarDatabaseSpecificMutationRuntime(options: SidebarDataba
   const { t } = useI18n();
   const { toast } = useToast();
   const { activeNode, connectionStore } = options;
+  let mongoIndexSpecsByName = new Map<string, MongoIndexSpecSnapshot>();
+  let mongoEditIndexOriginalSpec: MongoIndexSpecSnapshot | undefined;
 
   function usesAnyMongoDriver(node: Pick<TreeNode, "connectionId">): boolean {
     return !!node.connectionId && supportsMongoAllDriverMutations(connectionStore.getConfig(node.connectionId));
@@ -330,12 +335,14 @@ export function useSidebarDatabaseSpecificMutationRuntime(options: SidebarDataba
       // TTL, background or bucketSize. The backend degrades to the generic
       // listing for Legacy Agent connections and flags it there.
       const specs = await api.mongoListIndexSpecs(connectionId, database, collection);
+      mongoIndexSpecsByName = new Map(specs.map((spec) => [spec.name, snapshotMongoIndexSpec(spec)] as const));
       mongoIndexManagerRows.value = specs.map(toMongoIndexRow);
       const selected = mongoIndexManagerSelectedName.value;
       if (!selected || !mongoIndexManagerRows.value.some((row) => row.name === selected)) {
         mongoIndexManagerSelectedName.value = mongoIndexManagerRows.value[0]?.name ?? "";
       }
     } catch (error) {
+      mongoIndexSpecsByName.clear();
       mongoIndexManagerRows.value = [];
       mongoIndexManagerSelectedName.value = "";
       mongoIndexManagerError.value = translateBackendError(t, errorMessage(error));
@@ -349,6 +356,8 @@ export function useSidebarDatabaseSpecificMutationRuntime(options: SidebarDataba
     if (!canManageMongoIndexPanelNode(node) || !node.connectionId || !node.database) return;
     resetMongoIndexManager();
     resetMongoCreateIndexForm();
+    mongoIndexSpecsByName.clear();
+    mongoEditIndexOriginalSpec = undefined;
     showMongoIndexManagerDialog.value = true;
     void loadMongoIndexManagerRows();
   }
@@ -385,6 +394,7 @@ export function useSidebarDatabaseSpecificMutationRuntime(options: SidebarDataba
   function cancelMongoIndexDraft() {
     mongoIndexManagerMode.value = "view";
     mongoEditIndexOriginalName.value = "";
+    mongoEditIndexOriginalSpec = undefined;
     resetMongoCreateIndexForm();
   }
 
@@ -407,8 +417,11 @@ export function useSidebarDatabaseSpecificMutationRuntime(options: SidebarDataba
     const node = sidebarFormTarget.value ?? activeNode.value;
     const row = mongoIndexManagerSelected.value;
     if (!canEditSelectedMongoIndexRow.value || !row || !node.connectionId || !node.database) return;
+    const originalSpec = mongoIndexSpecsByName.get(row.name);
+    if (!originalSpec) return;
     mongoCreateIndexForm.value = mongoCreateIndexFormFromRow(row);
     mongoEditIndexOriginalName.value = row.name;
+    mongoEditIndexOriginalSpec = originalSpec;
     mongoIndexManagerMode.value = "edit";
     mongoIndexManagerError.value = "";
     const collection = mongoIndexPanelCollectionName(node);
@@ -535,12 +548,11 @@ export function useSidebarDatabaseSpecificMutationRuntime(options: SidebarDataba
    * 1. Merge `extraOptions` (collation, wildcardProjection, weights, …) back
    *    into the create request so no server-reported option is silently lost.
    * 2. Re-read the current index spec from the server before any destructive
-   *    operation and verify the index still exists with the expected keys.
+   *    operation and compare it with the complete immutable opening snapshot.
    * 3. When the user renamed the index, create the new one first, then drop
    *    the old one — if create fails the original index is untouched.
-   * 4. When the name is unchanged (same-name rebuild), drop then create is
-   *    unavoidable; a create failure is surfaced with a clear message that
-   *    the original index has been removed.
+   * 4. When the name is unchanged (same-name rebuild), preserve a complete
+   *    rollback request and recreate the original index if the new build fails.
    */
   async function confirmEditMongoIndex() {
     const node = sidebarFormTarget.value ?? activeNode.value;
@@ -548,7 +560,8 @@ export function useSidebarDatabaseSpecificMutationRuntime(options: SidebarDataba
     const database = node.database;
     const collectionName = showMongoIndexManagerDialog.value ? mongoIndexPanelCollectionName(node) : mongoIndexCollectionName(node);
     const originalName = mongoEditIndexOriginalName.value;
-    if (!connectionId || !database || !collectionName || !originalName || mongoIndexManagerMode.value !== "edit") return;
+    const originalSpec = mongoEditIndexOriginalSpec;
+    if (!connectionId || !database || !collectionName || !originalName || !originalSpec || mongoIndexManagerMode.value !== "edit") return;
 
     const request = buildMongoCreateIndexRequest(mongoCreateIndexForm.value);
     if (!request.valid) {
@@ -558,11 +571,14 @@ export function useSidebarDatabaseSpecificMutationRuntime(options: SidebarDataba
 
     // Preserve server-reported options the form does not model (collation,
     // wildcardProjection, weights, text defaults, geo options, …).
-    const row = mongoIndexManagerSelected.value;
-    const merged = mergeExtraOptionsIntoRequest(request, row?.extraOptions);
+    const merged = mergeExtraOptionsIntoRequest(request, originalSpec.extraOptions);
 
     const newName = mongoCreateIndexForm.value.name.trim();
     const isRename = newName && newName !== originalName;
+    if (!isRename && !originalSpec.propertiesComplete) {
+      mongoCreateIndexError.value = t("contextMenu.mongoEditIndexIncompleteSameName", { name: originalName });
+      return;
+    }
 
     mongoCreateIndexError.value = "";
     await runMongoSidebarMutation({
@@ -577,9 +593,8 @@ export function useSidebarDatabaseSpecificMutationRuntime(options: SidebarDataba
         // Re-read the current spec from the server to guard against concurrent
         // modifications between when the dialog was opened and when the user
         // confirmed the edit.
-        const originalKeyDescription = row?.keys ?? "";
         const specs = await api.mongoListIndexSpecs(connectionId, database, collectionName);
-        const preflight = preflightEditIndexSpec(specs, originalName, originalKeyDescription);
+        const preflight = preflightEditIndexSpec(specs, originalSpec);
         if (!preflight.safe) {
           throw new Error(preflight.reason === "not-found" ? t("contextMenu.mongoEditIndexNotFound", { name: originalName }) : t("contextMenu.mongoEditIndexStale", { name: originalName }));
         }
@@ -588,26 +603,43 @@ export function useSidebarDatabaseSpecificMutationRuntime(options: SidebarDataba
           // Safe rename: create the new index first. If create fails, the
           // original index is untouched and the error surfaces cleanly.
           const created = await api.mongoCreateIndex(connectionId, database, collectionName, merged.keysJson, merged.optionsJson);
-          await api.mongoDropIndexes(connectionId, database, collectionName, JSON.stringify(originalName), true);
+          const dropResult = await api.mongoDropIndexes(connectionId, database, collectionName, JSON.stringify(originalName), true);
+          if (mongoDropIndexFailureCount(dropResult) > 0) {
+            const error = dropResult.failures?.map((failure) => `${failure.name}: ${failure.message}`).join("; ") || originalName;
+            throw new Error(t("contextMenu.mongoEditIndexDropFailedAfterCreate", { oldName: originalName, newName: created.name, error }));
+          }
           return created;
         }
 
-        // Same-name rebuild: drop then create is unavoidable. If create
-        // fails the original index is gone — surface a clear error.
-        await api.mongoDropIndexes(connectionId, database, collectionName, JSON.stringify(originalName), true);
+        const rollbackRequest = mongoCreateIndexRequestFromSpec(originalSpec);
+        const dropResult = await api.mongoDropIndexes(connectionId, database, collectionName, JSON.stringify(originalName), true);
+        if (mongoDropIndexFailureCount(dropResult) > 0) {
+          const error = dropResult.failures?.map((failure) => `${failure.name}: ${failure.message}`).join("; ") || originalName;
+          throw new Error(t("contextMenu.mongoEditIndexDropFailed", { name: originalName, error }));
+        }
         try {
           return await api.mongoCreateIndex(connectionId, database, collectionName, merged.keysJson, merged.optionsJson);
         } catch (createError) {
-          // Wrap the error so the user knows the original index was already
-          // dropped and the new one could not be created.
-          const baseMessage = errorMessage(createError);
-          throw new Error(t("contextMenu.mongoEditIndexCreateFailedAfterDrop", { name: originalName, error: baseMessage }));
+          const createErrorMessage = errorMessage(createError);
+          try {
+            await api.mongoCreateIndex(connectionId, database, collectionName, rollbackRequest.keysJson, rollbackRequest.optionsJson);
+          } catch (rollbackError) {
+            throw new Error(
+              t("contextMenu.mongoEditIndexCreateAndRollbackFailed", {
+                name: originalName,
+                createError: createErrorMessage,
+                rollbackError: errorMessage(rollbackError),
+              }),
+            );
+          }
+          throw new Error(t("contextMenu.mongoEditIndexCreateFailedRolledBack", { name: originalName, error: createErrorMessage }));
         }
       },
       onSuccess: async (created) => {
         toast(t("contextMenu.mongoEditIndexSuccess", { oldName: originalName, newName: created.name, collection: collectionName }), 3000);
         mongoIndexManagerMode.value = "view";
         mongoEditIndexOriginalName.value = "";
+        mongoEditIndexOriginalSpec = undefined;
         mongoIndexManagerSelectedName.value = created.name;
         resetMongoCreateIndexForm();
         await loadMongoIndexManagerRows();

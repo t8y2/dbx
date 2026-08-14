@@ -322,6 +322,14 @@ export async function disconnectDb(connectionId: string, clientAttempt?: number)
   return post("/api/connection/disconnect", { connectionId, clientAttempt });
 }
 
+export async function sessionCredentialStatus(connectionId: string): Promise<boolean> {
+  return post("/api/connection/session-credential-status", { connectionId });
+}
+
+export async function forgetSessionCredential(connectionId: string): Promise<void> {
+  return post("/api/connection/forget-session-credential", { connectionId });
+}
+
 export async function checkConnectionHealth(connectionId: string): Promise<void> {
   return post("/api/connection/check-health", { connectionId });
 }

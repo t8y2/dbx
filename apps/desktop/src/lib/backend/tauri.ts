@@ -915,6 +915,14 @@ export async function disconnectDb(connectionId: string, clientAttempt?: number)
   return invokeBackend("disconnect_db", { connectionId, clientAttempt });
 }
 
+export async function sessionCredentialStatus(connectionId: string): Promise<boolean> {
+  return invokeBackend("session_credential_status", { connectionId });
+}
+
+export async function forgetSessionCredential(connectionId: string): Promise<void> {
+  return invokeBackend("forget_session_credential", { connectionId });
+}
+
 export async function checkConnectionHealth(connectionId: string): Promise<void> {
   return invokeBackend("check_connection_health", { connectionId });
 }

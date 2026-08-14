@@ -375,6 +375,8 @@ const {
   disconnectConnection,
   connectionDisconnectMenuLabel,
   canDisconnectConnection,
+  canForgetSessionCredential,
+  disconnectAndForgetConnectionPassword,
   cancelConnectionAttempt,
   closeDatabaseConnection,
   isPinned,
@@ -4298,6 +4300,15 @@ function buildConnectionSidebarMenu(context: SidebarMenuFactoryContext): boolean
       items.push({ label: t("connection.cancelConnecting"), action: cancelConnectionAttempt, icon: X });
     } else if (canDisconnectConnection()) {
       items.push({ label: connectionDisconnectMenuLabel(), action: disconnectConnection, icon: Unplug });
+      // save_password=false 且本次运行期已输入密码：提供"断开并忘记本次密码"，
+      // 清除会话凭据后下次连接需重新输入。
+      if (canForgetSessionCredential()) {
+        items.push({
+          label: t("connection.disconnectAndForgetPassword"),
+          action: disconnectAndForgetConnectionPassword,
+          icon: Unplug,
+        });
+      }
     } else if (!isConnected.value) {
       items.push({ label: t("contextMenu.openConnection"), action: toggle, icon: Plug });
     }

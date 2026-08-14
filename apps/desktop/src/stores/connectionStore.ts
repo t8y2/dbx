@@ -2878,6 +2878,23 @@ export const useConnectionStore = defineStore("connection", () => {
   }
 
   /**
+   * Query whether this connection already has a transient password stored in the
+   * backend session-credential store (a `save_password === false` connection that
+   * was connected once this run). Used to skip the interactive password prompt on
+   * later connects. Only returns a boolean — the password itself never leaves the
+   * backend process memory.
+   */
+  async function hasSessionCredential(connectionId: string): Promise<boolean> {
+    try {
+      return await api.sessionCredentialStatus(connectionId);
+    } catch {
+      // Status query failure is treated as "no credential": falling back to the
+      // interactive prompt is the safe, well-known path.
+      return false;
+    }
+  }
+
+  /**
    * Prompt for a transient password when saving is disabled, or when a server
    * confirms that a metadata-only synced connection sent no password. The
    * password is used for the immediate `connectDb` call and is persisted only
@@ -2932,9 +2949,13 @@ export const useConnectionStore = defineStore("connection", () => {
     try {
       let rememberPassword = false;
       if (config.save_password === false && !config.password) {
-        const prompted = await ensureConnectionPassword(config);
-        config = prompted.config;
-        rememberPassword = prompted.rememberPassword;
+        // 本次运行期已在会话凭据仓库暂存密码（save_password=false）：免弹窗，
+        // 直接以空密码 connectDb，后端会从会话凭据仓库补主密码。
+        if (!(await hasSessionCredential(config.id))) {
+          const prompted = await ensureConnectionPassword(config);
+          config = prompted.config;
+          rememberPassword = prompted.rememberPassword;
+        }
       }
       await beforeConnectHandler?.(config);
       if (config.db_type === "sqlserver") {
@@ -3066,6 +3087,16 @@ export const useConnectionStore = defineStore("connection", () => {
     }
   }
 
+  /**
+   * "断开并忘记本次密码"：关闭连接池（保留其它已保存连接的凭据），并清除该
+   * `save_password === false` 连接本次运行期的会话密码，使下一次连接必须重新输入。
+   * 若该连接本无会话凭据，后端会返回错误并在此抛出（不静默吞掉），避免误报成功。
+   */
+  async function disconnectAndForgetConnectionPassword(connectionId: string) {
+    await disconnect(connectionId);
+    await api.forgetSessionCredential(connectionId);
+  }
+
   async function closeDatabaseConnection(connectionId: string, database: string) {
     if (hasSqlServerActivityTraceForConnection(connectionId, database)) await disposeSqlServerActivityTracesForConnection(connectionId, database);
     await api.closeDatabaseConnection(connectionId, database);
@@ -3133,9 +3164,13 @@ export const useConnectionStore = defineStore("connection", () => {
       // in-flight dedup above keeps its exact microtask cadence; only await the
       // interactive prompt when the connection actually needs a typed password.
       if (config.save_password === false && !config.password) {
-        const prompted = await ensureConnectionPassword(config);
-        config = prompted.config;
-        rememberPassword = prompted.rememberPassword;
+        // 本次运行期已在会话凭据仓库暂存密码（save_password=false）：免弹窗，
+        // 直接以空密码 connectDb，后端会从会话凭据仓库补主密码。
+        if (!(await hasSessionCredential(connectionId))) {
+          const prompted = await ensureConnectionPassword(config);
+          config = prompted.config;
+          rememberPassword = prompted.rememberPassword;
+        }
       }
       await beforeConnectHandler?.(config);
       if (config.db_type === "sqlserver") {
@@ -7639,6 +7674,8 @@ export const useConnectionStore = defineStore("connection", () => {
     connect,
     cancelConnecting,
     disconnect,
+    disconnectAndForgetConnectionPassword,
+    hasSessionCredential,
     closeDatabaseConnection,
     ensureConnected,
     loadConnectedConnectionRootForSidebarSearch,

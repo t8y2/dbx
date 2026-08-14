@@ -1190,6 +1190,9 @@ jobs:
       - name: Build offline ZIP bundles
         run: bash agents/scripts/build_offline_zip.sh release
 
+      - name: Verify managed JDBC assets in all offline ZIPs
+        run: node agents/scripts/verify_offline_jdbc_release.mjs release
+
       - name: Build single-driver packages
         run: |
           python3 agents/scripts/build_driver_zips.py release --cleanup-sources

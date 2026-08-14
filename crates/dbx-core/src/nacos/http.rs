@@ -724,6 +724,13 @@ impl NacosOpenApiAdmin {
         matches!(self.cfg.implementation, Some(NacosImplementation::RNacos))
     }
 
+    fn permission_probe_requires_managed_namespaces(&self, error: &str) -> bool {
+        !self.is_explicit_rnacos()
+            && matches!(self.cfg.auth, NacosAuthConfig::UsernamePassword { .. })
+            && self.cfg.managed_namespaces.is_empty()
+            && classify_nacos_error(error) == "authFailed"
+    }
+
     fn is_rnacos_compatible(&self) -> bool {
         self.is_explicit_rnacos() || self.detected_rnacos.load(Ordering::Relaxed)
     }
@@ -1448,6 +1455,14 @@ impl NacosAdmin for NacosOpenApiAdmin {
                 })
                 .await
             {
+                if self.permission_probe_requires_managed_namespaces(&error) {
+                    return Err(classified_error(
+                        "managedNamespacesRequired",
+                        &format!(
+                            "{error}. This Nacos account cannot read authorization management data. Enable the ordinary-user option and enter at least one namespace ID that the account is allowed to manage"
+                        ),
+                    ));
+                }
                 access_control = downgrade_access_control_after_permission_probe(access_control, &error);
             }
         }
@@ -5149,6 +5164,166 @@ mod tests {
 
         let info = admin.test_connection().await.unwrap();
         assert_eq!(info.server_version.as_deref(), Some("3.1.0"));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn v2_connection_check_requires_managed_namespaces_when_permission_probe_is_forbidden() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            assert_eq!(read_request_target(&mut socket).await, "/nacos/v1/ns/operator/servers");
+            write_json_response(&mut socket, "{}").await;
+
+            let (mut socket, _) = listener.accept().await.unwrap();
+            assert_eq!(read_request_target(&mut socket).await, "/nacos/v1/auth/users/login");
+            write_json_response(&mut socket, r#"{"accessToken":"ordinary-token","tokenTtl":18000}"#).await;
+
+            let (mut socket, _) = listener.accept().await.unwrap();
+            assert!(read_request_target(&mut socket).await.starts_with("/nacos/v1/console/namespaces?"));
+            write_json_response(&mut socket, r#"[{"namespace":"public","namespaceShowName":"public"}]"#).await;
+
+            let (mut socket, _) = listener.accept().await.unwrap();
+            assert!(read_request_target(&mut socket).await.starts_with("/nacos/v1/auth/permissions?"));
+            write_forbidden_response(&mut socket).await;
+        });
+        let mut config = test_admin_config(format!("http://{address}"));
+        config.implementation = Some(NacosImplementation::Nacos);
+        config.version_mode = Some(NacosVersionMode::V2);
+        config.context_path = "/nacos".to_string();
+        config.auth =
+            NacosAuthConfig::UsernamePassword { username: "ordinary".to_string(), password: "secret".to_string() };
+
+        let error = NacosOpenApiAdmin::new(config).unwrap().test_connection().await.unwrap_err();
+
+        assert!(error.contains("NACOS_ERROR[managedNamespacesRequired]"));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn v3_connection_check_requires_managed_namespaces_when_permission_probe_is_forbidden() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            assert_eq!(read_request_target(&mut socket).await, "/nacos/v3/admin/core/state");
+            write_json_response(&mut socket, r#"{"version":"3.1.0"}"#).await;
+
+            let (mut socket, _) = listener.accept().await.unwrap();
+            assert_eq!(read_request_target(&mut socket).await, "/nacos/v3/auth/user/login");
+            write_json_response(&mut socket, r#"{"code":0,"data":{"accessToken":"ordinary-token","tokenTtl":18000}}"#)
+                .await;
+
+            let (mut socket, _) = listener.accept().await.unwrap();
+            assert_eq!(read_request_target(&mut socket).await, "/nacos/v3/admin/core/namespace/list");
+            write_json_response(
+                &mut socket,
+                r#"{"code":0,"message":"success","data":[{"namespace":"public","namespaceShowName":"public"}]}"#,
+            )
+            .await;
+
+            let (mut socket, _) = listener.accept().await.unwrap();
+            assert!(read_request_target(&mut socket).await.starts_with("/nacos/v3/auth/permission/list?"));
+            write_forbidden_response(&mut socket).await;
+        });
+        let mut config = test_admin_config(format!("http://{address}"));
+        config.implementation = Some(NacosImplementation::Nacos);
+        config.version_mode = Some(NacosVersionMode::V3);
+        config.context_path = "/nacos".to_string();
+        config.auth =
+            NacosAuthConfig::UsernamePassword { username: "ordinary".to_string(), password: "secret".to_string() };
+
+        let error = NacosOpenApiAdmin::new(config).unwrap().test_connection().await.unwrap_err();
+
+        assert!(error.contains("NACOS_ERROR[managedNamespacesRequired]"));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn v2_connection_check_with_explicit_scope_skips_permission_probe() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            assert_eq!(read_request_target(&mut socket).await, "/nacos/v1/ns/operator/servers");
+            write_json_response(&mut socket, "{}").await;
+
+            let (mut socket, _) = listener.accept().await.unwrap();
+            assert_eq!(read_request_target(&mut socket).await, "/nacos/v1/auth/users/login");
+            write_json_response(&mut socket, r#"{"accessToken":"ordinary-token","tokenTtl":18000}"#).await;
+
+            let (mut socket, _) = listener.accept().await.unwrap();
+            assert!(read_request_target(&mut socket).await.starts_with("/nacos/v1/console/namespaces?"));
+            write_json_response(&mut socket, r#"[{"namespace":"public","namespaceShowName":"public"}]"#).await;
+
+            assert!(tokio::time::timeout(Duration::from_millis(100), listener.accept()).await.is_err());
+        });
+        let mut config = test_admin_config(format!("http://{address}"));
+        config.implementation = Some(NacosImplementation::Nacos);
+        config.version_mode = Some(NacosVersionMode::V2);
+        config.context_path = "/nacos".to_string();
+        config.auth =
+            NacosAuthConfig::UsernamePassword { username: "ordinary".to_string(), password: "secret".to_string() };
+        config.managed_namespaces = vec!["team-a".to_string()];
+
+        let info = NacosOpenApiAdmin::new(config).unwrap().test_connection().await.unwrap();
+
+        assert!(!info.capabilities.access_control.enhanced_workspace);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn v3_connection_check_with_explicit_scope_skips_permission_probe() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            assert_eq!(read_request_target(&mut socket).await, "/nacos/v3/admin/core/state");
+            write_json_response(&mut socket, r#"{"version":"3.1.0"}"#).await;
+
+            let (mut socket, _) = listener.accept().await.unwrap();
+            assert_eq!(read_request_target(&mut socket).await, "/nacos/v3/auth/user/login");
+            write_json_response(&mut socket, r#"{"code":0,"data":{"accessToken":"ordinary-token","tokenTtl":18000}}"#)
+                .await;
+
+            let (mut socket, _) = listener.accept().await.unwrap();
+            assert_eq!(read_request_target(&mut socket).await, "/nacos/v3/admin/core/namespace/list");
+            write_json_response(
+                &mut socket,
+                r#"{"code":10001,"message":"access denied","data":"Code: 403, Message: authorization failed!."}"#,
+            )
+            .await;
+
+            let (mut socket, _) = listener.accept().await.unwrap();
+            assert!(read_request_target(&mut socket).await.starts_with("/nacos/v3/admin/ns/service/list?"));
+            write_json_response(
+                &mut socket,
+                r#"{"code":0,"message":"success","data":{"totalCount":0,"pageItems":[]}}"#,
+            )
+            .await;
+
+            let (mut socket, _) = listener.accept().await.unwrap();
+            assert!(read_request_target(&mut socket).await.starts_with("/nacos/v3/admin/cs/config/list?"));
+            write_json_response(
+                &mut socket,
+                r#"{"code":0,"message":"success","data":{"totalCount":0,"pageItems":[]}}"#,
+            )
+            .await;
+
+            assert!(tokio::time::timeout(Duration::from_millis(100), listener.accept()).await.is_err());
+        });
+        let mut config = test_admin_config(format!("http://{address}"));
+        config.implementation = Some(NacosImplementation::Nacos);
+        config.version_mode = Some(NacosVersionMode::V3);
+        config.context_path = "/nacos".to_string();
+        config.auth =
+            NacosAuthConfig::UsernamePassword { username: "ordinary".to_string(), password: "secret".to_string() };
+        config.managed_namespaces = vec!["team-a".to_string()];
+
+        let info = NacosOpenApiAdmin::new(config).unwrap().test_connection().await.unwrap();
+
+        assert!(!info.capabilities.access_control.enhanced_workspace);
         server.await.unwrap();
     }
 

@@ -33,10 +33,22 @@ describe("mqConsoleDefaults", () => {
     expect(resolveInitialMqTab({ systemKind: "pulsar", initialTenant: "public" })).toBe("namespaces");
   });
 
-  it("opens NATS on the messages tab without Kafka-style topic chrome", () => {
+  it("opens NATS on the publish tab without Kafka-style topic chrome", () => {
     const caps = defaultMqCapabilitiesForSystemKind("nats");
-    expect(resolveInitialMqTab({ systemKind: "nats" })).toBe("messages");
-    expect(resolveAvailableMqTabs({ systemKind: "nats", capabilities: caps })).toEqual(["messages"]);
+    expect(resolveInitialMqTab({ systemKind: "nats" })).toBe("publish");
+    expect(resolveAvailableMqTabs({ systemKind: "nats", capabilities: caps })).toEqual(["publish", "messages"]);
+  });
+
+  it("adds a single JetStream workspace tab for NATS only when enabled", () => {
+    const caps = defaultMqCapabilitiesForSystemKind("nats");
+    expect(resolveAvailableMqTabs({ systemKind: "nats", capabilities: { ...caps, supportsJetStream: true } })).toEqual(["publish", "messages", "streams"]);
+    expect(resolveAvailableMqTabs({ systemKind: "nats", capabilities: { ...caps, supportsJetStream: false } })).toEqual(["publish", "messages"]);
+  });
+
+  it("normalizes legacy NATS JetStream child tabs into streams", () => {
+    expect(normalizeMqTabForSystemKind("streammessages", "nats")).toBe("streams");
+    expect(normalizeMqTabForSystemKind("consumers", "nats")).toBe("streams");
+    expect(normalizeMqTabForSystemKind("streams", "nats")).toBe("streams");
   });
 
   it("falls back dlq tab to messages for RocketMQ", () => {

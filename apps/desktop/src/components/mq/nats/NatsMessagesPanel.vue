@@ -1,18 +1,17 @@
 <script setup lang="ts">
 /**
- * NATS Messages tab — mirrors Kafka/RocketMQ Messages panel interaction:
- * choose target → browse/receive → send. Domain fields are subject-based.
+ * NATS Subscribe tab — multi-subscription inbox with a dedicated toolbar header.
+ * Feed chips switch the active buffer; publish lives on its own tab.
  */
 import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
-import { useMqMutationGuard } from "@/composables/useMqMutationGuard";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import * as api from "@/lib/backend/api";
 import { formatError } from "@/lib/backend/errorUtils";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
-import { buildNatsPublishRequest, type NatsPayloadMode } from "@/lib/nats/messagePresentation";
-import type { NatsCaptureResult, NatsMessage, NatsSubscriptionErrorEvent, NatsSubscriptionInfo, NatsSubscriptionMessageEvent, NatsSubscriptionStateEvent } from "@/types/nats";
-import NatsSubjectWorkbench from "./NatsSubjectWorkbench.vue";
-import NatsPublishPanel from "./NatsPublishPanel.vue";
+import type { NatsSubscriptionErrorEvent, NatsSubscriptionMessageEvent, NatsSubscriptionStateEvent } from "@/types/nats";
+import { FEED_BUFFER_LIMIT, type NatsFeed } from "./feed";
+import NatsSubscriptionRail from "./NatsSubscriptionRail.vue";
 import NatsMessageList from "./NatsMessageList.vue";
 
 const props = defineProps<{
@@ -21,165 +20,135 @@ const props = defineProps<{
 }>();
 
 const { t } = useI18n();
-const { confirmMqWrite } = useMqMutationGuard(() => props.connectionId);
 
-const subject = ref("orders.>");
-const publishSubject = ref("orders.created");
+const receiveMode = ref<"subscribe" | "capture">("subscribe");
+const subject = ref("");
 const durationMs = ref(5000);
 const maxMessages = ref(100);
-const capture = ref<NatsCaptureResult>();
-const payload = ref("");
-const payloadMode = ref<NatsPayloadMode>("text");
-const replyTo = ref("");
-const headerText = ref("");
-const liveSubscription = ref<NatsSubscriptionInfo>();
-const liveMessages = ref<NatsMessage[]>([]);
+
+const feeds = ref<NatsFeed[]>([]);
+const activeFeedId = ref<string>();
 const busy = ref(false);
 const error = ref("");
-const publishOk = ref("");
 
-const isLiveActive = computed(() => liveSubscription.value?.state === "active" || liveSubscription.value?.state === "starting");
+const listeners = new Map<string, () => void>();
 
-const displayMessages = computed(() => {
-  if (liveSubscription.value) return liveMessages.value;
-  return capture.value?.messages || [];
-});
+const activeFeed = computed(() => feeds.value.find((feed) => feed.id === activeFeedId.value));
+const activeMessages = computed(() => activeFeed.value?.messages ?? []);
 
-const displaySummary = computed(() => {
-  if (liveSubscription.value) {
-    const stateKey = `nats.state.${liveSubscription.value.state}`;
-    const translated = t(stateKey);
-    const state = translated === stateKey ? liveSubscription.value.state : translated;
-    return t("nats.messages.liveSummary", {
-      received: liveSubscription.value.receivedCount,
-      dropped: liveSubscription.value.droppedCount,
-      state,
-    });
+const activeSummary = computed(() => {
+  const feed = activeFeed.value;
+  if (!feed) return "";
+  if (feed.kind === "capture") {
+    const reasonKey = `nats.captureReason.${feed.stopReason}`;
+    const translated = t(reasonKey);
+    const reason = translated === reasonKey ? (feed.stopReason ?? "") : translated;
+    return t("nats.messages.captureSummary", { received: feed.receivedCount, reason });
   }
-  if (capture.value) {
-    return t("nats.messages.captureSummary", {
-      received: capture.value.receivedCount,
-      reason: capture.value.stopReason,
-    });
-  }
-  return "";
+  const stateKey = `nats.state.${feed.state}`;
+  const translatedState = t(stateKey);
+  const state = translatedState === stateKey ? feed.state : translatedState;
+  return t("nats.messages.liveSummary", { received: feed.receivedCount, dropped: feed.droppedCount, state });
 });
-
-const showMessagePanel = computed(() => !!capture.value || !!liveSubscription.value || liveMessages.value.length > 0);
-
-let stopListening: (() => void) | undefined;
 
 function nextSubscriptionId() {
   return globalThis.crypto?.randomUUID?.() || `nats-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 
-async function installLiveListeners(subscriptionId: string) {
-  stopListening?.();
-  stopListening = await api.natsListenSubscription(props.connectionId, subscriptionId, {
-    onMessage(event: NatsSubscriptionMessageEvent) {
-      if (event.connectionId !== props.connectionId || event.subscriptionId !== liveSubscription.value?.subscriptionId) return;
-      liveMessages.value = [...liveMessages.value.slice(-999), event.message];
-      if (liveSubscription.value) liveSubscription.value.receivedCount += 1;
-    },
-    onState(event: NatsSubscriptionStateEvent) {
-      if (event.connectionId !== props.connectionId || event.subscriptionId !== liveSubscription.value?.subscriptionId) return;
-      if (liveSubscription.value) liveSubscription.value.state = event.state;
-    },
-    onError(event: NatsSubscriptionErrorEvent) {
-      if (event.connectionId !== props.connectionId || event.subscriptionId !== liveSubscription.value?.subscriptionId) return;
-      error.value = event.message;
-      if (liveSubscription.value) liveSubscription.value.state = "error";
-    },
-  });
+function selectFeed(id: string) {
+  activeFeedId.value = id;
 }
 
-async function captureMessages() {
+async function installFeedListener(feedId: string) {
+  const stop = await api.natsListenSubscription(props.connectionId, feedId, {
+    onMessage(event: NatsSubscriptionMessageEvent) {
+      if (event.connectionId !== props.connectionId || event.subscriptionId !== feedId) return;
+      const feed = feeds.value.find((item) => item.id === feedId);
+      if (!feed) return;
+      feed.messages = [...feed.messages.slice(-(FEED_BUFFER_LIMIT - 1)), event.message];
+      feed.receivedCount += 1;
+    },
+    onState(event: NatsSubscriptionStateEvent) {
+      if (event.connectionId !== props.connectionId || event.subscriptionId !== feedId) return;
+      const feed = feeds.value.find((item) => item.id === feedId);
+      if (feed) feed.state = event.state;
+    },
+    onError(event: NatsSubscriptionErrorEvent) {
+      if (event.connectionId !== props.connectionId || event.subscriptionId !== feedId) return;
+      error.value = event.message;
+      const feed = feeds.value.find((item) => item.id === feedId);
+      if (feed) feed.state = "error";
+    },
+  });
+  listeners.set(feedId, stop);
+}
+
+function stopListener(feedId: string) {
+  listeners.get(feedId)?.();
+  listeners.delete(feedId);
+}
+
+async function subscribe() {
+  const value = subject.value.trim();
+  if (!value || busy.value) return;
+  const existing = feeds.value.find((feed) => feed.kind === "live" && feed.subject === value && feed.state !== "stopped");
+  if (existing) {
+    selectFeed(existing.id);
+    subject.value = "";
+    return;
+  }
+  busy.value = true;
+  error.value = "";
+  const id = nextSubscriptionId();
+  const feed: NatsFeed = { id, subject: value, kind: "live", state: "starting", messages: [], receivedCount: 0, droppedCount: 0 };
+  feeds.value = [...feeds.value, feed];
+  selectFeed(id);
+  try {
+    if (isTauriRuntime()) await installFeedListener(id);
+    const started = await api.natsStartSubscription(props.connectionId, { subscriptionId: id, subject: value });
+    const current = feeds.value.find((item) => item.id === id);
+    if (current) {
+      current.state = started.state;
+      current.receivedCount = Math.max(started.receivedCount, current.receivedCount);
+      current.droppedCount = Math.max(started.droppedCount, current.droppedCount);
+    }
+    if (!isTauriRuntime()) await installFeedListener(id);
+    subject.value = "";
+  } catch (e) {
+    stopListener(id);
+    feeds.value = feeds.value.filter((item) => item.id !== id);
+    if (activeFeedId.value === id) activeFeedId.value = feeds.value[feeds.value.length - 1]?.id;
+    error.value = formatError(e);
+  } finally {
+    busy.value = false;
+  }
+}
+
+async function capture() {
+  const value = subject.value.trim();
+  if (!value || busy.value) return;
   busy.value = true;
   error.value = "";
   try {
-    if (liveSubscription.value) await stopLiveSubscription({ keepMessages: false });
-    capture.value = await api.natsCapture(props.connectionId, {
-      subject: subject.value.trim(),
+    const result = await api.natsCapture(props.connectionId, {
+      subject: value,
       durationMs: durationMs.value,
       maxMessages: maxMessages.value,
       includeHeaders: true,
     });
-    liveMessages.value = [];
-  } catch (e) {
-    error.value = formatError(e);
-  } finally {
-    busy.value = false;
-  }
-}
-
-async function startLiveSubscription() {
-  if (busy.value) return;
-  await stopLiveSubscription({ keepMessages: false });
-  busy.value = true;
-  error.value = "";
-  capture.value = undefined;
-  try {
-    const subscriptionId = nextSubscriptionId();
-    liveMessages.value = [];
-    liveSubscription.value = {
-      subscriptionId,
-      subject: subject.value.trim(),
-      state: "starting",
-      receivedCount: 0,
-      droppedCount: 0,
+    const feed: NatsFeed = {
+      id: `capture-${nextSubscriptionId()}`,
+      subject: value,
+      kind: "capture",
+      state: "stopped",
+      messages: result.messages,
+      receivedCount: result.receivedCount,
+      droppedCount: result.droppedCount,
+      stopReason: result.stopReason,
     };
-    if (isTauriRuntime()) await installLiveListeners(subscriptionId);
-    const started = await api.natsStartSubscription(props.connectionId, {
-      subscriptionId,
-      subject: subject.value.trim(),
-    });
-    started.receivedCount = Math.max(started.receivedCount, liveSubscription.value?.receivedCount || 0);
-    started.droppedCount = Math.max(started.droppedCount, liveSubscription.value?.droppedCount || 0);
-    liveSubscription.value = started;
-    if (!isTauriRuntime()) await installLiveListeners(subscriptionId);
-  } catch (e) {
-    liveSubscription.value = undefined;
-    stopListening?.();
-    stopListening = undefined;
-    error.value = formatError(e);
-  } finally {
-    busy.value = false;
-  }
-}
-
-async function stopLiveSubscription(options: { keepMessages?: boolean } = {}) {
-  const { keepMessages = true } = options;
-  const subscriptionId = liveSubscription.value?.subscriptionId;
-  if (!subscriptionId) return;
-  try {
-    await api.natsStopSubscription(props.connectionId, subscriptionId);
-  } catch (e) {
-    error.value = formatError(e);
-  } finally {
-    if (liveSubscription.value) {
-      liveSubscription.value = { ...liveSubscription.value, state: "stopped" };
-    }
-    if (!keepMessages) {
-      liveSubscription.value = undefined;
-      liveMessages.value = [];
-    } else if (liveSubscription.value && liveMessages.value.length === 0) {
-      liveSubscription.value = undefined;
-    }
-    stopListening?.();
-    stopListening = undefined;
-  }
-}
-
-async function publish() {
-  publishOk.value = "";
-  if (props.readOnly || !payload.value.trim() || !publishSubject.value.trim() || /[*]|>/.test(publishSubject.value)) return;
-  if (!(await confirmMqWrite(t("nats.publish.confirm", { subject: publishSubject.value.trim() })))) return;
-  busy.value = true;
-  error.value = "";
-  try {
-    const result = await api.natsPublish(props.connectionId, buildNatsPublishRequest(publishSubject.value, replyTo.value, headerText.value, payload.value, payloadMode.value));
-    publishOk.value = t("nats.publish.success", { bytes: result.payloadBytes, subject: publishSubject.value.trim() });
-    payload.value = "";
+    feeds.value = [...feeds.value, feed];
+    selectFeed(feed.id);
+    subject.value = "";
   } catch (e) {
     error.value = formatError(e);
   } finally {
@@ -187,53 +156,103 @@ async function publish() {
   }
 }
 
-function clearLocalMessages() {
-  capture.value = undefined;
-  liveMessages.value = [];
-  if (liveSubscription.value?.state === "stopped") liveSubscription.value = undefined;
+async function removeFeed(id: string) {
+  const feed = feeds.value.find((item) => item.id === id);
+  if (!feed) return;
+  if (feed.kind === "live" && feed.state !== "stopped") {
+    try {
+      await api.natsStopSubscription(props.connectionId, id);
+    } catch (e) {
+      error.value = formatError(e);
+    }
+  }
+  stopListener(id);
+  feeds.value = feeds.value.filter((item) => item.id !== id);
+  if (activeFeedId.value === id) {
+    activeFeedId.value = feeds.value[feeds.value.length - 1]?.id;
+  }
+}
+
+function clearActiveMessages() {
+  const feed = activeFeed.value;
+  if (!feed) return;
+  feed.messages = [];
+  feed.receivedCount = 0;
+}
+
+function runReceiveAction() {
+  if (receiveMode.value === "subscribe") void subscribe();
+  else void capture();
+}
+
+async function stopAllFeeds() {
+  const live = feeds.value.filter((feed) => feed.kind === "live" && feed.state !== "stopped");
+  await Promise.all(
+    live.map((feed) =>
+      api.natsStopSubscription(props.connectionId, feed.id).catch(() => {
+        /* best-effort teardown */
+      }),
+    ),
+  );
+  listeners.forEach((stop) => stop());
+  listeners.clear();
+  feeds.value = [];
+  activeFeedId.value = undefined;
 }
 
 watch(
   () => props.connectionId,
   async () => {
-    await stopLiveSubscription({ keepMessages: false });
-    capture.value = undefined;
+    await stopAllFeeds();
     error.value = "";
-    publishOk.value = "";
   },
 );
 
 onBeforeUnmount(() => {
-  void stopLiveSubscription({ keepMessages: false });
-  stopListening?.();
-  stopListening = undefined;
+  void stopAllFeeds();
 });
 
-defineExpose({
-  stopLiveSubscription,
-  clearLocalMessages,
-});
+defineExpose({ stopAllFeeds, clearActiveMessages });
 </script>
 
 <template>
-  <div class="nats-messages-panel">
-    <div class="panel-toolbar">
-      <h3>{{ t("mqAdmin.tabMessages") }}</h3>
-      <div class="panel-toolbar-actions">
-        <button type="button" class="btn-sm" :disabled="busy || (!displayMessages.length && !showMessagePanel)" @click="clearLocalMessages">
+  <div class="nats-page nats-subscribe-page">
+    <!-- Dedicated toolbar header: title + subject composer + actions -->
+    <header class="nats-page-header nats-sub-header" data-testid="nats-receive-controls">
+      <h3 class="nats-page-title">{{ t("nats.messages.subscriptions") }}</h3>
+
+      <div class="nats-sub-composer">
+        <input class="nats-header-subject sub-subject" type="text" v-model="subject" :placeholder="t('nats.subjectWorkbench.subjectPlaceholder')" :aria-label="t('nats.subjectWorkbench.subjectFilter')" @keydown.enter="subject.trim() && runReceiveAction()" />
+        <Select :model-value="receiveMode" @update:model-value="receiveMode = String($event) === 'capture' ? 'capture' : 'subscribe'">
+          <SelectTrigger class="nats-header-mode" :aria-label="t('nats.messages.receiveMode')">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent position="popper">
+            <SelectItem value="subscribe">{{ t("nats.subjectWorkbench.subscribe") }}</SelectItem>
+            <SelectItem value="capture">{{ t("nats.subjectWorkbench.capture") }}</SelectItem>
+          </SelectContent>
+        </Select>
+        <template v-if="receiveMode === 'capture'">
+          <input class="nats-header-num" type="number" min="1" max="60000" v-model.number="durationMs" :aria-label="t('nats.subjectWorkbench.captureMs')" :title="t('nats.subjectWorkbench.captureMs')" />
+          <input class="nats-header-num" type="number" min="1" max="1000" v-model.number="maxMessages" :aria-label="t('nats.subjectWorkbench.maxMessages')" :title="t('nats.subjectWorkbench.maxMessages')" />
+        </template>
+        <button type="button" class="mq-btn-primary" data-testid="nats-receive-action" :disabled="busy || !subject.trim()" @click="runReceiveAction">
+          {{ receiveMode === "subscribe" ? t("nats.subjectWorkbench.subscribe") : t("nats.subjectWorkbench.capture") }}
+        </button>
+      </div>
+
+      <div class="nats-sub-header-actions">
+        <span v-if="activeSummary" class="msg-summary status-text">{{ activeSummary }}</span>
+        <button type="button" class="mq-btn-sm" :disabled="busy || !activeMessages.length" @click="clearActiveMessages">
           {{ t("nats.messages.clear") }}
         </button>
       </div>
-    </div>
+    </header>
 
-    <div v-if="error" class="panel-error">{{ error }}</div>
-
-    <div class="nats-messages-content">
-      <NatsSubjectWorkbench v-model:subject="subject" v-model:duration-ms="durationMs" v-model:max-messages="maxMessages" :busy="busy" :live-active="isLiveActive" @capture="captureMessages" @subscribe="startLiveSubscription" @stop="stopLiveSubscription()" />
-
-      <NatsMessageList v-if="showMessagePanel" :messages="displayMessages" :summary="displaySummary" />
-
-      <NatsPublishPanel v-model:subject="publishSubject" v-model:reply-to="replyTo" v-model:header-text="headerText" v-model:payload="payload" v-model:payload-mode="payloadMode" :busy="busy" :read-only="readOnly" :success="publishOk" @publish="publish" />
+    <div class="nats-page-body nats-sub-body">
+      <div v-if="error" class="panel-error">{{ error }}</div>
+      <NatsSubscriptionRail :feeds="feeds" :active-id="activeFeedId" @select="selectFeed" @remove="removeFeed" />
+      <NatsMessageList :messages="activeMessages" :empty-text="feeds.length ? t('nats.messages.empty') : t('nats.messages.noSubscriptions')" />
     </div>
   </div>
 </template>
@@ -241,52 +260,4 @@ defineExpose({
 <style scoped>
 @import "../shared/mqPanel.css";
 @import "./natsPanel.css";
-
-.nats-messages-panel {
-  height: 100%;
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-}
-
-.panel-toolbar {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 12px;
-  padding: 12px 16px;
-  border-bottom: 1px solid var(--color-border);
-  flex-shrink: 0;
-}
-
-.panel-toolbar h3 {
-  margin: 0;
-  font-size: 16px;
-  font-weight: 600;
-}
-
-.panel-toolbar-actions {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.nats-messages-content {
-  flex: 1;
-  min-height: 0;
-  overflow: auto;
-  padding: 14px 16px;
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-}
-
-.panel-error {
-  margin: 0;
-  padding: 10px 14px;
-  border-radius: var(--dbx-radius-fixed-6);
-  background: var(--color-error-bg);
-  color: var(--color-error);
-  font-size: 13px;
-}
 </style>

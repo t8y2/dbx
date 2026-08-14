@@ -170,7 +170,7 @@ export function resolveRabbitMqDefaultVhost(config: ConnectionConfig | undefined
   return typeof vhost === "string" && vhost.trim() ? vhost.trim() : "/";
 }
 
-export type MqTab = "tenants" | "namespaces" | "topics" | "subscriptions" | "monitoring" | "clients" | "producers" | "policies" | "permissions" | "messages" | "raw" | "broker" | "dlq" | "trace";
+export type MqTab = "tenants" | "namespaces" | "topics" | "subscriptions" | "monitoring" | "clients" | "producers" | "policies" | "permissions" | "messages" | "publish" | "raw" | "broker" | "dlq" | "trace" | "streams" | "streammessages" | "consumers";
 
 export function resolveAvailableMqTabs(options: { systemKind?: MqSystemKind; capabilities: MqCapabilities }): MqTab[] {
   const { systemKind, capabilities } = options;
@@ -181,10 +181,12 @@ export function resolveAvailableMqTabs(options: { systemKind?: MqSystemKind; cap
     if (capabilities.supportsPermissions) tabs.push("permissions");
     return tabs;
   }
-  // NATS uses a dedicated console shell; if tab resolution is consulted it
-  // must not fall through to Kafka-style Topics/Subscriptions chrome.
+  // NATS: Publish + Subscribe for Core; one JetStream workspace (list → detail
+  // with messages/consumers subviews) when enabled — matches NUI / nats-dashboard.
   if (systemKind === "nats") {
-    return ["messages"];
+    const tabs: MqTab[] = ["publish", "messages"];
+    if (capabilities.supportsJetStream) tabs.push("streams");
+    return tabs;
   }
 
   const tabs: MqTab[] = [];
@@ -210,6 +212,10 @@ export function normalizeMqTabForSystemKind(tab: MqTab, systemKind?: MqSystemKin
   if (systemKind === "rocketmq" && tab === "dlq") {
     return "messages";
   }
+  // Legacy flat JetStream tabs collapse into the single streams workspace.
+  if (systemKind === "nats" && (tab === "streammessages" || tab === "consumers")) {
+    return "streams";
+  }
   return tab;
 }
 
@@ -217,7 +223,7 @@ export function resolveInitialMqTab(options: { initialTab?: MqTab; initialTenant
   if (options.initialTab) {
     return normalizeMqTabForSystemKind(options.initialTab, options.systemKind);
   }
-  if (options.systemKind === "nats") return "messages";
+  if (options.systemKind === "nats") return "publish";
   if (isFlatMqSystemKind(options.systemKind)) return "topics";
   if (options.initialTenant) return "namespaces";
   return "tenants";

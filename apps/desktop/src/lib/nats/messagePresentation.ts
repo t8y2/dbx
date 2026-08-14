@@ -2,6 +2,22 @@ import type { NatsHeader, NatsMessage, NatsPublishRequest } from "@/types/nats";
 
 export type NatsPayloadMode = "text" | "json" | "base64";
 
+/**
+ * Payloads larger than this render collapsed by default so a single large
+ * message cannot block Vue rendering of the live list (design §4.2).
+ */
+export const LARGE_PAYLOAD_BYTES = 16 * 1024;
+
+/** A subject usable for publishing must not contain NATS wildcards (`*` or `>`). */
+export function isWildcardSubject(subject: string): boolean {
+  return /[*]|>/.test(subject);
+}
+
+/** Serialize headers for clipboard copy as one `Key: Value` line each. */
+export function formatHeadersForCopy(headers: NatsHeader[]): string {
+  return headers.map((header) => `${header.key}: ${header.value}`).join("\n");
+}
+
 export interface NatsMessagePresentation {
   payload: string;
   mode: NatsPayloadMode;
@@ -66,28 +82,34 @@ export function buildNatsPublishRequest(subject: string, reply: string, headerTe
   };
 }
 
-export function presentNatsMessage(message: NatsMessage): NatsMessagePresentation {
-  if (message.payloadText === undefined) {
-    return {
-      payload: message.payloadBase64,
-      mode: "base64",
-      receivedAt: new Date(message.receivedAtMs).toISOString(),
-      sizeLabel: `${message.sizeBytes} B`,
-    };
+/** How the viewer should decode a message payload (mainstream NATS GUIs offer this toggle). */
+export type NatsViewMode = "auto" | NatsPayloadMode;
+
+/**
+ * Which decode modes make sense for a message: Base64 is always possible; JSON
+ * and plain text are only offered when the payload is valid UTF-8 (has text).
+ */
+export function availableViewModes(message: NatsMessage): NatsViewMode[] {
+  if (message.payloadText === undefined) return ["base64"];
+  return ["auto", "json", "text", "base64"];
+}
+
+export function presentNatsMessage(message: NatsMessage, mode: NatsViewMode = "auto"): NatsMessagePresentation {
+  const receivedAt = new Date(message.receivedAtMs).toISOString();
+  const sizeLabel = `${message.sizeBytes} B`;
+
+  // No decodable text (invalid UTF-8) or explicit base64 request → raw Base64.
+  if (message.payloadText === undefined || mode === "base64") {
+    return { payload: message.payloadBase64, mode: "base64", receivedAt, sizeLabel };
   }
+  if (mode === "text") {
+    return { payload: message.payloadText, mode: "text", receivedAt, sizeLabel };
+  }
+  // "auto" and "json" both try to pretty-print JSON; invalid JSON falls back to
+  // the raw text without ever mutating the original payload.
   try {
-    return {
-      payload: JSON.stringify(JSON.parse(message.payloadText), null, 2),
-      mode: "json",
-      receivedAt: new Date(message.receivedAtMs).toISOString(),
-      sizeLabel: `${message.sizeBytes} B`,
-    };
+    return { payload: JSON.stringify(JSON.parse(message.payloadText), null, 2), mode: "json", receivedAt, sizeLabel };
   } catch {
-    return {
-      payload: message.payloadText,
-      mode: "text",
-      receivedAt: new Date(message.receivedAtMs).toISOString(),
-      sizeLabel: `${message.sizeBytes} B`,
-    };
+    return { payload: message.payloadText, mode: "text", receivedAt, sizeLabel };
   }
 }

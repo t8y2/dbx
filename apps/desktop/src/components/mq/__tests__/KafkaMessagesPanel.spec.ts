@@ -55,7 +55,7 @@ async function flushUi() {
   await nextTick();
 }
 
-async function mountPanel(onTopicSelected = vi.fn()) {
+async function mountPanel(options: { canSendMessage?: boolean; onTopicSelected?: ReturnType<typeof vi.fn> } = {}) {
   root = document.createElement("div");
   document.body.appendChild(root);
   app = createApp(KafkaMessagesPanel, {
@@ -63,9 +63,10 @@ async function mountPanel(onTopicSelected = vi.fn()) {
     tenant: "_flat_mq",
     namespace: "_flat_mq",
     topic: TOPIC,
-    canSendMessage: true,
-    onTopicSelected,
+    canSendMessage: options.canSendMessage ?? true,
+    onTopicSelected: options.onTopicSelected,
   });
+  app.config.globalProperties.$t = (key: string) => key;
   app.mount(root);
   await flushUi();
   return root;
@@ -97,8 +98,29 @@ afterEach(() => {
 });
 
 describe("KafkaMessagesPanel", () => {
-  it("keeps topic selection, partition offsets, and newest-message browsing together", async () => {
-    const panel = await mountPanel();
+  it("uses the classic send-first layout when sending is available", async () => {
+    const panel = await mountPanel({ canSendMessage: true });
+    await expect.poll(() => backend.mqListTopics.mock.calls.length).toBe(1);
+    await flushUi();
+
+    // Send form chrome first (title + clear), then the integrated message browser.
+    expect(panel.querySelector(".send-message-panel")).not.toBeNull();
+    expect(panel.querySelector(".send-message-panel .panel-toolbar")?.textContent).toContain("mqMessages.title");
+    expect(panel.querySelector('[data-testid="message-browser"]')).not.toBeNull();
+    // Partition overview belongs to the peek-only path, not the send-first layout.
+    expect(panel.querySelector('[data-testid="kafka-partition-overview"]')).toBeNull();
+    expect(panel.querySelector<HTMLInputElement>(".send-message-panel .topic-input")?.value).toBe("events");
+
+    const loadButton = [...panel.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.includes("mqMessages.loadMessages"));
+    if (!loadButton) throw new Error("Load messages button not found");
+    loadButton.click();
+    await flushUi();
+
+    expect(backend.mqPeekMessages).toHaveBeenCalledWith("mq-1", expect.objectContaining({ topic: "events" }), "__dbx_kafka_viewer__", 20, { startPosition: "latest" });
+  });
+
+  it("keeps topic selection, partition offsets, and newest-message browsing together when send is unavailable", async () => {
+    const panel = await mountPanel({ canSendMessage: false });
     await expect.poll(() => backend.mqListTopics.mock.calls.length).toBe(1);
     await expect.poll(() => backend.mqGetTopicStats.mock.calls.length).toBeGreaterThan(0);
     await flushUi();
@@ -108,9 +130,7 @@ describe("KafkaMessagesPanel", () => {
     expect(overview?.textContent).toContain("mqMonitoring.tableLogEndOffset");
     expect(overview?.textContent).toContain("10");
     expect(panel.querySelector('[data-testid="message-browser"]')).not.toBeNull();
-    expect(panel.querySelector(".send-message-panel")).not.toBeNull();
-    expect(panel.querySelector<HTMLInputElement>(".send-message-panel .topic-input")?.value).toBe("events");
-    expect(backend.mqListTopics).toHaveBeenCalledTimes(1);
+    expect(panel.querySelector(".send-message-panel")).toBeNull();
 
     const loadButton = [...panel.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.includes("mqMessages.loadMessages"));
     if (!loadButton) throw new Error("Load messages button not found");
@@ -122,7 +142,7 @@ describe("KafkaMessagesPanel", () => {
 
   it("keeps message browsing available when partition stats fail", async () => {
     backend.mqGetTopicStats.mockRejectedValueOnce(new Error("stats unavailable"));
-    const panel = await mountPanel();
+    const panel = await mountPanel({ canSendMessage: false });
     await expect.poll(() => panel.textContent).toContain("stats unavailable");
 
     expect(panel.querySelector('[data-testid="message-browser"]')).not.toBeNull();
@@ -130,12 +150,11 @@ describe("KafkaMessagesPanel", () => {
 
   it("keeps the user's selected topic across list refreshes and refresh failures", async () => {
     const onTopicSelected = vi.fn();
-    const panel = await mountPanel(onTopicSelected);
+    const panel = await mountPanel({ canSendMessage: false, onTopicSelected });
     await expect.poll(() => backend.mqListTopics.mock.calls.length).toBe(1);
     await selectTopic(panel, "payments");
     await expect.poll(() => backend.mqGetTopicStats.mock.calls.some((call) => call[1]?.topic === "payments")).toBe(true);
     await expect.poll(() => onTopicSelected.mock.calls.some((call) => call[0]?.shortName === "payments")).toBe(true);
-    expect(panel.querySelector<HTMLInputElement>(".send-message-panel .topic-input")?.value).toBe("payments");
     expect(backend.mqListTopics).toHaveBeenCalledTimes(1);
 
     const refreshButton = panel.querySelector<HTMLButtonElement>(".panel-toolbar .btn-secondary");

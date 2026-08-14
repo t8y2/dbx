@@ -32,6 +32,8 @@ export interface MqCapabilities {
   supportsPolicies?: boolean;
   /** RabbitMQ: cluster overview & node monitoring via the management API. */
   supportsClusterMonitoring?: boolean;
+  /** NATS: JetStream is enabled on the server (gates Streams/Consumers tabs). */
+  supportsJetStream?: boolean;
 }
 
 export interface MqClusterInfo {

@@ -1,121 +1,220 @@
 <script setup lang="ts">
+/**
+ * JetStream workspace (NUI-style): stream list → stream detail with
+ * overview / messages / consumers subviews. Not three top-level tabs.
+ */
+import { computed, onMounted, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
-import { presentNatsMessage } from "@/lib/nats/messagePresentation";
-import type { NatsConsumerInfo, NatsConsumerList, NatsHistoryResult, NatsJetStreamInfo, NatsStreamInfo, NatsStreamList } from "@/types/nats";
+import * as api from "@/lib/backend/api";
+import { formatError } from "@/lib/backend/errorUtils";
+import type { NatsJetStreamInfo, NatsStreamInfo, NatsStreamList } from "@/types/nats";
+import NatsStreamMessagesPanel from "./NatsStreamMessagesPanel.vue";
+import NatsConsumersPanel from "./NatsConsumersPanel.vue";
 
-defineProps<{
-  jetstream?: NatsJetStreamInfo;
-  streamList?: NatsStreamList;
-  selectedStream?: NatsStreamInfo;
-  consumerList?: NatsConsumerList;
-  selectedConsumer?: NatsConsumerInfo;
-  history?: NatsHistoryResult;
-  historyStartSequence?: number;
-  historyMaxMessages: number;
-  busy?: boolean;
-}>();
+type DetailTab = "overview" | "messages" | "consumers";
 
-const emit = defineEmits<{
-  load: [];
-  selectStream: [name: string];
-  selectConsumer: [name: string];
-  fetchHistory: [];
-  "update:historyStartSequence": [value: number | undefined];
-  "update:historyMaxMessages": [value: number];
+const props = defineProps<{
+  connectionId: string;
+  readOnly?: boolean;
 }>();
 
 const { t } = useI18n();
 
-function onStartSequenceInput(event: Event) {
-  const raw = (event.target as HTMLInputElement).value;
-  emit("update:historyStartSequence", raw === "" ? undefined : Number(raw));
+const info = ref<NatsJetStreamInfo>();
+const streamList = ref<NatsStreamList>();
+const search = ref("");
+const busy = ref(false);
+const error = ref("");
+const selectedStream = ref<NatsStreamInfo>();
+const detailTab = ref<DetailTab>("messages");
+
+const filtered = computed(() => {
+  const list = streamList.value?.streams ?? [];
+  const query = search.value.trim().toLowerCase();
+  if (!query) return list;
+  return list.filter((s) => s.name.toLowerCase().includes(query) || s.subjects.some((sub) => sub.toLowerCase().includes(query)));
+});
+
+const inDetail = computed(() => !!selectedStream.value);
+
+async function loadStreams() {
+  busy.value = true;
+  error.value = "";
+  try {
+    const [js, streams] = await Promise.all([api.natsJetstreamInfo(props.connectionId), api.natsListStreams(props.connectionId)]);
+    info.value = js;
+    streamList.value = streams;
+    // Refresh selected stream stats if still present.
+    const name = selectedStream.value?.name;
+    if (name && streams.streams.some((s) => s.name === name)) {
+      selectedStream.value = await api.natsGetStream(props.connectionId, name);
+    } else if (name) {
+      selectedStream.value = undefined;
+    }
+  } catch (e) {
+    error.value = formatError(e);
+  } finally {
+    busy.value = false;
+  }
 }
+
+async function openStream(name: string) {
+  busy.value = true;
+  error.value = "";
+  try {
+    selectedStream.value = await api.natsGetStream(props.connectionId, name);
+    detailTab.value = "messages";
+  } catch (e) {
+    error.value = formatError(e);
+  } finally {
+    busy.value = false;
+  }
+}
+
+function backToList() {
+  selectedStream.value = undefined;
+  detailTab.value = "messages";
+}
+
+function setDetailTab(tab: DetailTab) {
+  detailTab.value = tab;
+}
+
+function formatBytes(n: number): string {
+  if (!Number.isFinite(n) || n < 0) return "—";
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 ** 2) return `${(n / 1024).toFixed(1)} KB`;
+  if (n < 1024 ** 3) return `${(n / 1024 ** 2).toFixed(1)} MB`;
+  return `${(n / 1024 ** 3).toFixed(2)} GB`;
+}
+
+onMounted(loadStreams);
+
+watch(
+  () => props.connectionId,
+  () => {
+    info.value = undefined;
+    streamList.value = undefined;
+    search.value = "";
+    selectedStream.value = undefined;
+    detailTab.value = "messages";
+    void loadStreams();
+  },
+);
 </script>
 
 <template>
-  <section class="nats-panel">
-    <div class="jetstream-header">
-      <div class="section-title">{{ t("nats.jetstream.title") }}</div>
-      <span v-if="jetstream" class="status-text">
-        {{ t("nats.jetstream.summary", { streams: jetstream.streams, consumers: jetstream.consumers, bytes: jetstream.storageBytes }) }}
-      </span>
-      <button type="button" class="btn-sm" :disabled="busy" @click="emit('load')">{{ t("nats.jetstream.loadStreams") }}</button>
-    </div>
-    <p class="form-hint">{{ t("nats.jetstream.hint") }}</p>
-    <div v-if="streamList" class="jetstream-layout">
-      <div class="stream-list">
-        <button v-for="stream in streamList.streams" :key="stream.name" type="button" class="stream-item" :class="{ active: selectedStream?.name === stream.name }" :disabled="busy" @click="emit('selectStream', stream.name)">
-          <div class="stream-name">{{ stream.name }}</div>
-          <div class="status-text">{{ t("nats.jetstream.streamStats", { messages: stream.messages, consumers: stream.consumers }) }}</div>
-        </button>
-        <div v-if="!streamList.streams.length" class="panel-placeholder compact">{{ t("nats.jetstream.noStreams") }}</div>
-        <div v-if="streamList.truncated" class="field-warning">{{ t("nats.jetstream.streamsTruncated") }}</div>
-      </div>
-      <div v-if="selectedStream" class="stream-detail">
-        <div class="detail-box">
-          <div class="stream-name">{{ selectedStream.name }} · {{ selectedStream.storage }} · {{ selectedStream.retention }}</div>
-          <div class="status-text break-all">{{ selectedStream.subjects.join(", ") || t("nats.jetstream.noSubjects") }}</div>
-          <div class="status-text">
-            {{
-              t("nats.jetstream.sequences", {
-                first: selectedStream.firstSequence,
-                last: selectedStream.lastSequence,
-                bytes: selectedStream.bytes,
-              })
-            }}
-          </div>
+  <div class="nats-page nats-js-page" data-testid="nats-jetstream-panel">
+    <!-- ---- Stream list ---- -->
+    <template v-if="!inDetail">
+      <header class="nats-page-header">
+        <h3 class="nats-page-title">{{ t("mqAdmin.tabJetStream") }}</h3>
+        <input class="nats-header-subject nats-stream-search" type="text" :value="search" :placeholder="t('nats.jetstream.searchStreams')" :aria-label="t('nats.jetstream.searchStreams')" @input="search = ($event.target as HTMLInputElement).value" />
+        <span class="mq-result-count">{{ filtered.length }} / {{ streamList?.streams.length ?? 0 }}</span>
+        <div class="nats-sub-header-actions">
+          <button type="button" class="mq-btn-sm" :disabled="busy" @click="loadStreams">{{ t("nats.refresh") }}</button>
         </div>
-        <div class="toolbar-row">
-          <div class="field narrow">
-            <label for="nats-history-start">{{ t("nats.jetstream.startSequence") }}</label>
-            <input id="nats-history-start" type="number" min="1" :value="historyStartSequence" :aria-label="t('nats.jetstream.startSequence')" @input="onStartSequenceInput" />
-          </div>
-          <div class="field narrow">
-            <label for="nats-history-max">{{ t("nats.jetstream.maxMessages") }}</label>
-            <input id="nats-history-max" type="number" min="1" max="1000" :value="historyMaxMessages" :aria-label="t('nats.jetstream.maxMessages')" @input="emit('update:historyMaxMessages', Number(($event.target as HTMLInputElement).value))" />
-          </div>
-          <div class="field actions">
-            <label class="invisible">{{ t("nats.jetstream.fetchHistory") }}</label>
-            <div class="action-row">
-              <button type="button" class="btn-secondary" :disabled="busy" @click="emit('fetchHistory')">{{ t("nats.jetstream.fetchHistory") }}</button>
-              <span v-if="history" class="status-text">
-                {{ t("nats.jetstream.historySummary", { count: history.receivedCount, mode: history.ackMode }) }}
-              </span>
-            </div>
-          </div>
+      </header>
+
+      <div class="nats-page-body">
+        <div v-if="error" class="panel-error">{{ error }}</div>
+        <div v-else-if="busy && !streamList" class="panel-placeholder">{{ t("common.loading") }}</div>
+        <div v-else-if="!streamList || !filtered.length" class="panel-placeholder">{{ t("nats.jetstream.noStreams") }}</div>
+        <div v-else class="nats-table-wrap grow">
+          <table class="nats-table">
+            <thead>
+              <tr>
+                <th>{{ t("nats.jetstream.columns.name") }}</th>
+                <th>{{ t("nats.jetstream.columns.subjects") }}</th>
+                <th class="num">{{ t("nats.jetstream.columns.messages") }}</th>
+                <th class="num">{{ t("nats.jetstream.columns.bytes") }}</th>
+                <th class="num">{{ t("nats.jetstream.consumerCount") }}</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="item in filtered" :key="item.name" data-testid="nats-stream-row" @click="openStream(item.name)">
+                <td class="cell-name">{{ item.name }}</td>
+                <td class="cell-ellipsis">{{ item.subjects.join(", ") || t("nats.jetstream.noSubjects") }}</td>
+                <td class="num">{{ item.messages }}</td>
+                <td class="num">{{ item.bytes }}</td>
+                <td class="num">{{ item.consumers }}</td>
+              </tr>
+            </tbody>
+          </table>
         </div>
-        <div v-if="history" class="message-list history-list">
-          <div v-for="(message, index) in history.messages" :key="`${message.receivedAtMs}-${index}`" class="message-item">
-            <div class="message-meta">{{ message.subject }} · {{ presentNatsMessage(message).sizeLabel }}</div>
-            <pre class="message-payload">{{ presentNatsMessage(message).payload }}</pre>
-          </div>
-          <div v-if="!history.messages.length" class="panel-placeholder compact">{{ t("nats.jetstream.noHistory") }}</div>
-          <div v-if="history.truncated" class="field-warning">{{ t("nats.jetstream.historyTruncated", { next: history.nextSequence }) }}</div>
-        </div>
-        <div v-if="consumerList" class="consumer-list">
-          <div class="messages-summary">
-            {{ t("nats.jetstream.consumers") }}
-            <span v-if="consumerList.truncated">{{ t("nats.jetstream.consumersTruncated") }}</span>
-          </div>
-          <button v-for="consumer in consumerList.consumers" :key="consumer.name" type="button" class="consumer-item" :disabled="busy" @click="emit('selectConsumer', consumer.name)">
-            {{ t("nats.jetstream.consumerRow", { name: consumer.name, ackPolicy: consumer.ackPolicy, pending: consumer.pending }) }}
-          </button>
-          <div v-if="!consumerList.consumers.length" class="panel-placeholder compact">{{ t("nats.jetstream.noConsumers") }}</div>
-        </div>
-        <div v-if="selectedConsumer" class="detail-box">
+        <div v-if="streamList?.truncated" class="field-warning">{{ t("nats.jetstream.streamsTruncated") }}</div>
+        <p v-if="info" class="form-hint">
           {{
-            t("nats.jetstream.consumerDetail", {
-              name: selectedConsumer.name,
-              delivered: selectedConsumer.deliveredStreamSequence,
-              ackFloor: selectedConsumer.ackFloorStreamSequence,
-              ackPending: selectedConsumer.ackPending,
-              redelivered: selectedConsumer.redelivered,
+            t("nats.jetstream.summary", {
+              streams: info.streams,
+              consumers: info.consumers,
+              bytes: formatBytes(info.storageBytes + info.memoryBytes),
             })
           }}
-        </div>
+        </p>
       </div>
-    </div>
-  </section>
+    </template>
+
+    <!-- ---- Stream detail (overview | messages | consumers) ---- -->
+    <template v-else>
+      <header class="nats-page-header nats-js-detail-header">
+        <button type="button" class="mq-btn-sm nats-back-btn" data-testid="nats-js-back" @click="backToList">← {{ t("nats.jetstream.backToStreams") }}</button>
+        <span class="nats-stream-badge" :title="selectedStream?.name">{{ selectedStream?.name }}</span>
+
+        <nav class="nats-js-subnav" role="tablist" :aria-label="t('mqAdmin.tabJetStream')">
+          <button type="button" role="tab" class="nats-js-subnav-btn" :class="{ active: detailTab === 'overview' }" :aria-selected="detailTab === 'overview'" data-testid="nats-js-tab-overview" @click="setDetailTab('overview')">
+            {{ t("nats.jetstream.subOverview") }}
+          </button>
+          <button type="button" role="tab" class="nats-js-subnav-btn" :class="{ active: detailTab === 'messages' }" :aria-selected="detailTab === 'messages'" data-testid="nats-js-tab-messages" @click="setDetailTab('messages')">
+            {{ t("nats.jetstream.subMessages") }}
+          </button>
+          <button type="button" role="tab" class="nats-js-subnav-btn" :class="{ active: detailTab === 'consumers' }" :aria-selected="detailTab === 'consumers'" data-testid="nats-js-tab-consumers" @click="setDetailTab('consumers')">
+            {{ t("nats.jetstream.subConsumers") }}
+          </button>
+        </nav>
+
+        <div class="nats-sub-header-actions">
+          <button type="button" class="mq-btn-sm" :disabled="busy" @click="loadStreams">{{ t("nats.refresh") }}</button>
+        </div>
+      </header>
+
+      <div class="nats-page-body nats-js-detail-body">
+        <div v-if="error" class="panel-error">{{ error }}</div>
+
+        <section v-else-if="detailTab === 'overview' && selectedStream" class="js-overview" data-testid="nats-js-overview">
+          <div class="consumer-stat-grid">
+            <div class="consumer-stat">
+              <span class="consumer-stat-label">{{ t("nats.jetstream.columns.messages") }}</span>
+              <span class="consumer-stat-value">{{ selectedStream.messages.toLocaleString() }}</span>
+            </div>
+            <div class="consumer-stat">
+              <span class="consumer-stat-label">{{ t("nats.jetstream.columns.bytes") }}</span>
+              <span class="consumer-stat-value">{{ formatBytes(selectedStream.bytes) }}</span>
+            </div>
+            <div class="consumer-stat">
+              <span class="consumer-stat-label">{{ t("nats.jetstream.consumerCount") }}</span>
+              <span class="consumer-stat-value">{{ selectedStream.consumers }}</span>
+            </div>
+            <div class="consumer-stat">
+              <span class="consumer-stat-label">{{ t("nats.jetstream.storage") }}</span>
+              <span class="consumer-stat-value consumer-stat-value-sm">{{ selectedStream.storage || "—" }}</span>
+            </div>
+            <div class="consumer-stat">
+              <span class="consumer-stat-label">{{ t("nats.jetstream.retention") }}</span>
+              <span class="consumer-stat-value consumer-stat-value-sm">{{ selectedStream.retention || "—" }}</span>
+            </div>
+            <div class="consumer-stat">
+              <span class="consumer-stat-label">{{ t("nats.jetstream.sequenceRange") }}</span>
+              <span class="consumer-stat-value consumer-stat-value-sm"> {{ selectedStream.firstSequence }} – {{ selectedStream.lastSequence }} </span>
+            </div>
+          </div>
+        </section>
+
+        <NatsStreamMessagesPanel v-else-if="detailTab === 'messages'" embedded :connection-id="connectionId" :read-only="readOnly" :stream="selectedStream" />
+        <NatsConsumersPanel v-else-if="detailTab === 'consumers'" embedded :connection-id="connectionId" :read-only="readOnly" :stream="selectedStream" />
+      </div>
+    </template>
+  </div>
 </template>
 
 <style scoped>

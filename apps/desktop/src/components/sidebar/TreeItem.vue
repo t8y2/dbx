@@ -326,6 +326,8 @@ function getIconInfo(node: TreeNode): { icon: any; colorClass: string } | null {
       return { icon: Columns3, colorClass: "text-muted-foreground" };
     case "group-tables":
       return { icon: Table, colorClass: "text-green-500" };
+    case "group-dolt-system-tables":
+      return { icon: Table, colorClass: "text-slate-500" };
     case "group-views":
       return { icon: Eye, colorClass: "text-purple-500" };
     case "group-materialized-views":
@@ -1323,6 +1325,7 @@ function onKeydown(event: KeyboardEvent) {
             <span
               v-if="
                 (node.type === 'group-tables' ||
+                  node.type === 'group-dolt-system-tables' ||
                   node.type === 'group-views' ||
                   node.type === 'group-materialized-views' ||
                   node.type === 'group-procedures' ||

@@ -275,7 +275,7 @@ watch([deferredSearchQuery, regexMode], ([newQuery, isRegexMode], [oldQuery, was
     .catch(() => {});
 });
 
-const searchableObjectGroupTypes = new Set<TreeNodeType>(["group-tables", "group-views", "group-materialized-views", "group-procedures", "group-functions", "group-triggers", "group-sequences", "group-synonyms", "group-packages", "group-types"]);
+const searchableObjectGroupTypes = new Set<TreeNodeType>(["group-tables", "group-dolt-system-tables", "group-views", "group-materialized-views", "group-procedures", "group-functions", "group-triggers", "group-sequences", "group-synonyms", "group-packages", "group-types"]);
 const simpleObjectParentTypes = new Set<TreeNodeType>(["database", "schema", "linked-server-schema"]);
 const simpleObjectChildTypes = new Set<TreeNodeType>(["table", "view", "materialized_view", "procedure", "function", "trigger", "sequence", "synonym", "package", "package-body", "type", "type-body", "load-more"]);
 
@@ -1358,7 +1358,12 @@ async function ensureTableObjectGroupsLoaded(target: Extract<ActiveTabSidebarTar
 function findTableObjectGroupNodes(nodes: TreeNode[], target: Extract<ActiveTabSidebarTarget, { type: "table" }>): TreeNode[] {
   const matches: TreeNode[] = [];
   for (const node of nodes) {
-    if ((node.type === "group-tables" || node.type === "group-views" || node.type === "group-materialized-views") && node.connectionId === target.connectionId && sameTreeName(node.database, target.database) && (!target.schema || sameTreeName(node.schema, target.schema))) {
+    if (
+      (node.type === "group-tables" || node.type === "group-dolt-system-tables" || node.type === "group-views" || node.type === "group-materialized-views") &&
+      node.connectionId === target.connectionId &&
+      sameTreeName(node.database, target.database) &&
+      (!target.schema || sameTreeName(node.schema, target.schema))
+    ) {
       matches.push(node);
     }
     if (node.children) {

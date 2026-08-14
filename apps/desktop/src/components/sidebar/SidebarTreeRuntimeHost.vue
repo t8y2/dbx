@@ -5207,7 +5207,7 @@ function buildObjectGroupSidebarMenu(context: SidebarMenuFactoryContext): boolea
     const hasMongoCreateIndexAction = node.type === "group-indexes" && canCreateMongoIndex.value;
     const hasMongoDropAllIndexesAction = node.type === "group-indexes" && canDropAllMongoIndexes.value;
     const hasGroupAction = (node.type === "group-tables" && canCreateTable.value) || (node.type === "group-views" && !!node.connectionId && !!node.database) || !!mysqlObjectTemplate || hasMongoCreateIndexAction || hasMongoDropAllIndexesAction;
-    const canLoadAllObjectGroup = node.type === "group-tables" || node.type === "group-views" || node.type === "group-materialized-views";
+    const canLoadAllObjectGroup = node.type === "group-tables" || node.type === "group-dolt-system-tables" || node.type === "group-views" || node.type === "group-materialized-views";
     if (node.type === "group-tables" && canCreateTable.value) {
       items.push({ label: t("contextMenu.createTable"), action: createTable, icon: Plus });
       if (canOpenTableImport.value) {

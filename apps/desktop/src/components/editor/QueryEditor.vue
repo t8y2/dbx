@@ -48,6 +48,7 @@ import {
   extractCteDefinitions,
 } from "@/lib/sql/sqlCompletion";
 import { originForSqlCompletionProvider, originForTypedSqlCompletionStart, shouldAllowSqlCompletionTrigger, type SqlCompletionTriggerFacts, type SqlCompletionTriggerOrigin } from "@/lib/sql/sqlCompletionTriggerPolicy";
+import { driverProfileHasCompletionCandidates } from "@/lib/database/driverProfileExtensions";
 import { sqlCompletionContextFromSemantic, sqlSemanticSelectStarIsOnlyProjection, sqlSemanticSelectStarQualifierSql, sqlSemanticSelectStarTableSources } from "@/lib/sql/semantic/completion";
 import { buildSqlSemanticModel } from "@/lib/sql/semantic/model";
 import { mergeSqlSemanticReferenceAnalysis, resolveSqlSemanticNavigationTarget } from "@/lib/sql/semantic/references";
@@ -3754,7 +3755,14 @@ function buildLocalSqlCompletionResult(completionContext: ReturnType<typeof getS
     }
   }
 
-  if (tables.length === 0 && completionObjects.length === 0 && schemaNames.length === 0 && columnsByTable.size === 0 && (completionContext.exclusiveTableSuggestions || completionContext.exclusiveColumnSuggestions || completionContext.exclusiveRoutineSuggestions)) {
+  if (
+    tables.length === 0 &&
+    completionObjects.length === 0 &&
+    schemaNames.length === 0 &&
+    columnsByTable.size === 0 &&
+    !driverProfileHasCompletionCandidates(sqlDriverProfile.value, completionContext) &&
+    (completionContext.exclusiveTableSuggestions || completionContext.exclusiveColumnSuggestions || completionContext.exclusiveRoutineSuggestions)
+  ) {
     return null;
   }
 

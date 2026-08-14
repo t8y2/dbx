@@ -1,0 +1,45 @@
+import { describe, expect, it } from "vitest";
+import { driverProfileCompletionObjects, driverProfileCompletionTableMetadata, driverProfileCompletionTables, driverProfileExtension, driverProfileObjectTreeProfileForConnection } from "@/lib/database/driverProfileExtensions";
+import type { ConnectionConfig } from "@/types/database";
+
+const completionContext = {
+  statementKind: "select" as const,
+  suggestTables: false,
+  suggestRoutines: true,
+  exclusiveRoutineSuggestions: false,
+  prefix: "DOLT_",
+  openingParenAfterCursor: false,
+};
+
+function connection(driverProfile: string): ConnectionConfig {
+  return {
+    id: driverProfile,
+    name: driverProfile,
+    db_type: "mysql",
+    driver_profile: driverProfile,
+    host: "127.0.0.1",
+    port: 3306,
+    username: "root",
+    password: "",
+    database: "app",
+    url_params: "sessionVariables=dolt_show_system_tables%3D1",
+  };
+}
+
+describe("driverProfileExtensions", () => {
+  it("resolves Dolt capabilities through the generic registry", () => {
+    expect(driverProfileExtension("DOLT")?.id).toBe("dolt");
+    expect(driverProfileObjectTreeProfileForConnection(connection("dolt"))?.groupOverrides.map((group) => group.nodeType)).toEqual(["group-tables", "group-dolt-system-tables"]);
+    expect(driverProfileCompletionObjects("dolt", completionContext).map((object) => object.name)).toContain("DOLT_HASHOF");
+    expect(driverProfileCompletionTables("dolt", { ...completionContext, suggestTables: true }).map((table) => table.name)).toContain("DOLT_LOG");
+    expect(driverProfileCompletionTableMetadata("dolt", "dolt_log")).toEqual({ detail: "Dolt system table", boost: -1200 });
+  });
+
+  it("leaves ordinary MySQL without profile capabilities", () => {
+    expect(driverProfileExtension("mysql")).toBeUndefined();
+    expect(driverProfileObjectTreeProfileForConnection(connection("mysql"))).toBeUndefined();
+    expect(driverProfileCompletionObjects("mysql", completionContext)).toEqual([]);
+    expect(driverProfileCompletionTables("mysql", { ...completionContext, suggestTables: true })).toEqual([]);
+    expect(driverProfileCompletionTableMetadata("mysql", "dolt_log")).toBeUndefined();
+  });
+});

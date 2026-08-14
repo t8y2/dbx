@@ -613,6 +613,14 @@ export async function saveSavedSqlEditorPositions(positions: unknown[]): Promise
   return invoke("save_saved_sql_editor_positions", { positions });
 }
 
+export async function loadTransferTaskLibrary(): Promise<unknown | null> {
+  return invoke("load_transfer_task_library");
+}
+
+export async function saveTransferTaskLibrary(library: unknown): Promise<void> {
+  return invoke("save_transfer_task_library", { library });
+}
+
 export async function completeAppClose(action: "quit" | "hide"): Promise<void> {
   return invoke("complete_app_close", { action });
 }

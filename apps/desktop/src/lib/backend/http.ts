@@ -1673,6 +1673,14 @@ export async function saveSavedSqlEditorPositions(positions: unknown[]): Promise
   await saveBrowserAppState("saved_sql_editor_positions", positions);
 }
 
+export async function loadTransferTaskLibrary(): Promise<unknown | null> {
+  return loadBrowserAppState("transfer_task_library");
+}
+
+export async function saveTransferTaskLibrary(library: unknown): Promise<void> {
+  await saveBrowserAppState("transfer_task_library", library);
+}
+
 export async function completeAppClose(_action: "quit" | "hide"): Promise<void> {
   return undefined;
 }

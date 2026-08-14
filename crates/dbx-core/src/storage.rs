@@ -28,6 +28,7 @@ const STORAGE_DB_FILE_NAME: &str = "dbx.db";
 const APP_STATE_EDITOR_SETTINGS_KEY: &str = "editor_settings";
 const APP_STATE_OPEN_TABS_KEY: &str = "open_tabs";
 const APP_STATE_SAVED_SQL_EDITOR_POSITIONS_KEY: &str = "saved_sql_editor_positions";
+const APP_STATE_TRANSFER_TASK_LIBRARY_KEY: &str = "transfer_task_library";
 const MCP_GLOBAL_POLICY_KEY: &str = "mcp_global_policy";
 const MAX_RETRIES_KEY: &str = "max_retries";
 const APP_STATE_AI_GLOBAL_INSTRUCTIONS_KEY: &str = "ai_global_custom_instructions";
@@ -1725,6 +1726,16 @@ impl Storage {
 
     pub async fn load_saved_sql_editor_positions(&self) -> Result<Option<serde_json::Value>, String> {
         self.load_app_state_value(APP_STATE_SAVED_SQL_EDITOR_POSITIONS_KEY).await
+    }
+
+    /// Persist the saved data-transfer task library (folders + task configs) as
+    /// one JSON document, mirroring the editor-settings app-state pattern.
+    pub async fn save_transfer_task_library(&self, library: &serde_json::Value) -> Result<(), String> {
+        self.save_app_state_value(APP_STATE_TRANSFER_TASK_LIBRARY_KEY, library).await
+    }
+
+    pub async fn load_transfer_task_library(&self) -> Result<Option<serde_json::Value>, String> {
+        self.load_app_state_value(APP_STATE_TRANSFER_TASK_LIBRARY_KEY).await
     }
 
     pub async fn save_ai_global_custom_instructions(&self, content: &str) -> Result<(), String> {

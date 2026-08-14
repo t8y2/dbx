@@ -1579,6 +1579,8 @@ pub fn run() {
             commands::app_settings::save_open_tabs_state,
             commands::app_settings::load_saved_sql_editor_positions,
             commands::app_settings::save_saved_sql_editor_positions,
+            commands::app_settings::load_transfer_task_library,
+            commands::app_settings::save_transfer_task_library,
             commands::app_settings::load_native_debug_logs,
             commands::support_info::get_app_support_info,
             commands::cloud_sync::webdav_sync_test,

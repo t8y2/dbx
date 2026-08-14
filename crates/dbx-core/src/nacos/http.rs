@@ -1401,8 +1401,10 @@ impl NacosAdmin for NacosOpenApiAdmin {
     }
 
     fn explicitly_scoped_namespace_ids(&self) -> Option<Vec<String>> {
-        (matches!(self.cfg.version_mode, Some(NacosVersionMode::V3)) && !self.cfg.managed_namespaces.is_empty())
-            .then(|| self.cfg.managed_namespaces.clone())
+        (!self.is_explicit_rnacos()
+            && matches!(self.cfg.auth, NacosAuthConfig::UsernamePassword { .. })
+            && !self.cfg.managed_namespaces.is_empty())
+        .then(|| self.cfg.managed_namespaces.clone())
     }
 
     async fn test_connection(&self) -> Result<NacosConnectionInfo, String> {
@@ -1434,7 +1436,9 @@ impl NacosAdmin for NacosOpenApiAdmin {
             }
         }
         let mut access_control = self.access_control_capabilities();
-        if access_control.enhanced_workspace {
+        if self.explicitly_scoped_namespace_ids().is_some() {
+            access_control = NacosAccessControlCapabilities::unavailable(NacosCapabilityReason::PermissionDenied);
+        } else if access_control.enhanced_workspace {
             if let Err(error) = self
                 .list_permissions(NacosPermissionQuery {
                     role: None,
@@ -1853,32 +1857,27 @@ impl NacosAdmin for NacosOpenApiAdmin {
                 self.managed_namespace_fallback_used.store(false, Ordering::Relaxed);
                 Ok(parse_namespaces(value))
             }
-            Err(error)
-                if matches!(self.cfg.version_mode, Some(NacosVersionMode::V3))
-                    && classify_nacos_error(&error) == "authFailed" =>
-            {
-                if self.cfg.managed_namespaces.is_empty() {
-                    return Err(classified_error(
-                        "v3ManagedNamespacesRequired",
-                        &format!(
-                            "{error}. This Nacos 3 account cannot list namespaces. Enter at least one namespace ID that the account is allowed to manage"
-                        ),
-                    ));
+            Err(error) if classify_nacos_error(&error) == "authFailed" => {
+                if let Some(managed_namespaces) = self.explicitly_scoped_namespace_ids() {
+                    self.managed_namespace_fallback_used.store(true, Ordering::Relaxed);
+                    return Ok(managed_namespaces
+                        .into_iter()
+                        .map(|namespace| NacosNamespaceInfo {
+                            namespace: namespace.clone(),
+                            namespace_show_name: namespace,
+                            namespace_desc: None,
+                            config_count: None,
+                            quota: None,
+                            namespace_type: None,
+                        })
+                        .collect());
                 }
-                self.managed_namespace_fallback_used.store(true, Ordering::Relaxed);
-                Ok(self
-                    .cfg
-                    .managed_namespaces
-                    .iter()
-                    .map(|namespace| NacosNamespaceInfo {
-                        namespace: namespace.clone(),
-                        namespace_show_name: namespace.clone(),
-                        namespace_desc: None,
-                        config_count: None,
-                        quota: None,
-                        namespace_type: None,
-                    })
-                    .collect())
+                Err(classified_error(
+                    "managedNamespacesRequired",
+                    &format!(
+                        "{error}. This Nacos account cannot list namespaces. Enable the ordinary-user option and enter at least one namespace ID that the account is allowed to manage"
+                    ),
+                ))
             }
             Err(error) => Err(error),
         }
@@ -4164,8 +4163,81 @@ mod tests {
             NacosAuthConfig::UsernamePassword { username: "ordinary".to_string(), password: "secret".to_string() };
         let error = NacosOpenApiAdmin::new(config).unwrap().list_namespaces().await.unwrap_err();
 
-        assert!(error.contains("NACOS_ERROR[v3ManagedNamespacesRequired]"));
+        assert!(error.contains("NACOS_ERROR[managedNamespacesRequired]"));
         server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn v2_namespace_list_requires_managed_namespaces_after_admin_denial() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            assert_eq!(read_request_target(&mut socket).await, "/nacos/v1/auth/users/login");
+            write_json_response(&mut socket, r#"{"accessToken":"ordinary-token","tokenTtl":18000}"#).await;
+            let (mut socket, _) = listener.accept().await.unwrap();
+            assert!(read_request_target(&mut socket).await.starts_with("/nacos/v1/console/namespaces?"));
+            write_json_response(&mut socket, r#"{"code":403,"message":"authorization failed","data":"access denied"}"#)
+                .await;
+        });
+
+        let mut config = test_admin_config(format!("http://{address}"));
+        config.implementation = Some(NacosImplementation::Nacos);
+        config.version_mode = Some(NacosVersionMode::V2);
+        config.context_path = "/nacos".to_string();
+        config.auth =
+            NacosAuthConfig::UsernamePassword { username: "ordinary".to_string(), password: "secret".to_string() };
+        let error = NacosOpenApiAdmin::new(config).unwrap().list_namespaces().await.unwrap_err();
+
+        assert!(error.contains("NACOS_ERROR[managedNamespacesRequired]"));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn v2_namespace_list_uses_explicit_scope_after_admin_denial() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            assert_eq!(read_request_target(&mut socket).await, "/nacos/v1/auth/users/login");
+            write_json_response(&mut socket, r#"{"accessToken":"ordinary-token","tokenTtl":18000}"#).await;
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let target = read_request_target(&mut socket).await;
+            assert!(target.starts_with("/nacos/v1/console/namespaces?"));
+            assert!(target.contains("accessToken=ordinary-token"));
+            write_json_response(&mut socket, r#"{"code":403,"message":"authorization failed","data":"access denied"}"#)
+                .await;
+        });
+
+        let mut config = test_admin_config(format!("http://{address}"));
+        config.implementation = Some(NacosImplementation::Nacos);
+        config.version_mode = Some(NacosVersionMode::V2);
+        config.context_path = "/nacos".to_string();
+        config.auth =
+            NacosAuthConfig::UsernamePassword { username: "ordinary".to_string(), password: "secret".to_string() };
+        config.managed_namespaces = vec!["team-a".to_string(), "public".to_string()];
+
+        let namespaces = NacosOpenApiAdmin::new(config).unwrap().list_namespaces().await.unwrap();
+        assert_eq!(
+            namespaces.into_iter().map(|namespace| namespace.namespace).collect::<Vec<_>>(),
+            vec!["team-a".to_string(), "public".to_string()]
+        );
+        server.await.unwrap();
+    }
+
+    #[test]
+    fn official_nacos_v2_ordinary_users_can_define_an_explicit_namespace_scope() {
+        let mut config = test_admin_config("http://127.0.0.1:8848".to_string());
+        config.implementation = Some(NacosImplementation::Nacos);
+        config.version_mode = Some(NacosVersionMode::V2);
+        config.auth =
+            NacosAuthConfig::UsernamePassword { username: "ordinary".to_string(), password: "secret".to_string() };
+        config.managed_namespaces = vec!["team-a".to_string(), "public".to_string()];
+
+        assert_eq!(
+            NacosOpenApiAdmin::new(config).unwrap().explicitly_scoped_namespace_ids(),
+            Some(vec!["team-a".to_string(), "public".to_string()])
+        );
     }
 
     #[test]
@@ -7086,6 +7158,7 @@ mod tests {
         );
         assert_eq!(parse_permission_scope("*:*:*").unwrap().kind, NacosPermissionScopeKind::Global);
         assert_eq!(parse_permission_scope("team-a:group:data").unwrap().kind, NacosPermissionScopeKind::Custom);
+        assert_eq!(parse_permission_scope("team-a:GROUP_A:*").unwrap().kind, NacosPermissionScopeKind::Custom);
     }
 
     #[test]

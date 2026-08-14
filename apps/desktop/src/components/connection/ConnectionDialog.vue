@@ -1708,7 +1708,7 @@ function buildNacosAdminConfig(): NacosAdminConfig {
     throw new Error(t("connection.nacosRNacosConsoleUrlRequired"));
   }
   let rnacosConsoleAuth: NacosRNacosConsoleAuth | undefined;
-  const usesManagedNamespaces = nacosImplementation.value === "nacos" && nacosVersionMode.value === "v3" && nacosAuthKind.value === "usernamePassword" && nacosOrdinaryAccount.value;
+  const usesManagedNamespaces = nacosImplementation.value === "nacos" && nacosAuthKind.value === "usernamePassword" && nacosOrdinaryAccount.value;
   const managedNamespaces = usesManagedNamespaces ? parseNacosManagedNamespaces(nacosManagedNamespacesText.value) : [];
   if (usesManagedNamespaces && managedNamespaces.length === 0) {
     throw new Error(t("nacos.nacosOrdinaryNamespacesRequired"));
@@ -6280,7 +6280,7 @@ function openExternalUrl(url: string) {
                         <PasswordInput v-model="nacosPassword" />
                       </div>
                     </div>
-                    <div v-if="nacosImplementation === 'nacos' && nacosVersionMode === 'v3' && nacosAuthKind === 'usernamePassword'" data-nacos-ordinary-user-toggle class="mt-4 border-t pt-4">
+                    <div v-if="nacosImplementation === 'nacos' && nacosAuthKind === 'usernamePassword'" data-nacos-ordinary-user-toggle class="mt-4 border-t pt-4">
                       <div class="flex items-start justify-between gap-4">
                         <span class="min-w-0">
                           <span class="block text-sm font-medium">{{ t("nacos.nacosOrdinaryAccount") }}</span>

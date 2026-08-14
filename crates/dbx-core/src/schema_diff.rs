@@ -3108,14 +3108,22 @@ fn quote_id(name: &str, db_type: DatabaseType) -> String {
     profile_for(db_type).quote_ident(name)
 }
 
-fn column_def(col: &ColumnInfo, db_type: DatabaseType) -> String {
+fn column_def(col: &ColumnInfo, db_type: DatabaseType, source_dialect: Option<DialectKind>) -> String {
     let profile = profile_for(db_type);
     let mut definition = format!("{} {}", quote_id(&col.name, db_type), col.data_type);
     if !col.is_nullable {
         definition.push_str(" NOT NULL");
     }
     if let Some(default) = &col.column_default {
-        definition.push_str(&format!(" DEFAULT {default}"));
+        definition.push_str(&format!(
+            " DEFAULT {}",
+            default_literal(
+                default,
+                &col.data_type,
+                effective_source_dialect(source_dialect, db_type),
+                col.extra.as_deref()
+            )
+        ));
     }
     if profile.inline_column_comment {
         if let Some(comment) = &col.comment {
@@ -3247,6 +3255,120 @@ fn comment_literal(comment: &str) -> String {
     format!("'{}'", comment.replace('\'', "''"))
 }
 
+/// Bare temporal keywords that are defaults in their own right and must not be quoted.
+const TEMPORAL_DEFAULT_KEYWORDS: [&str; 8] =
+    ["current_timestamp", "current_date", "current_time", "now", "localtime", "localtimestamp", "getdate", "sysdate"];
+
+/// Prefixes that introduce an already-quoted literal: SQL Server / Sybase `N'x'`,
+/// MySQL `b'1'` and `x'1f'`, Postgres `e'\n'`.
+const QUOTED_LITERAL_PREFIXES: [&str; 4] = ["n'", "b'", "x'", "e'"];
+
+/// The dialect the column metadata came from.
+///
+/// The caller does not always declare one. When it does not, the comparison is
+/// same-dialect, so the target database is also the source.
+fn effective_source_dialect(source_dialect: Option<DialectKind>, db_type: DatabaseType) -> DialectKind {
+    source_dialect.unwrap_or_else(|| DialectKind::from_database_type(db_type))
+}
+
+/// Render a column default as a SQL literal.
+///
+/// Drivers hand `column_default` back verbatim and they do not agree on its
+/// shape, so the rule has to be bound to the dialect the value came from rather
+/// than guessed from the value itself. The same bare token means different
+/// things in different databases: `CURRENT_USER` is an expression on Postgres
+/// and Oracle, while on MySQL a bare `CURRENT_USER` on a text column is the
+/// literal string.
+///
+/// Only MySQL-family metadata strips the quotes from a string default, so it is
+/// the only source that needs any repair here. Everywhere else the value already
+/// arrives quoted, cast or wrapped, and is passed through untouched.
+///
+/// `table_structure_sql::util::format_default_for_sql` and
+/// `transfer::format_mysql_default_literal` do the same job on their own paths;
+/// both are private to their modules.
+fn default_literal(default: &str, data_type: &str, source: DialectKind, extra: Option<&str>) -> String {
+    let normalized = default.trim();
+
+    // Every dialect except MySQL returns a string default already quoted, cast
+    // or wrapped, so a bare token there is an expression and rewriting it would
+    // change its meaning: Postgres `text DEFAULT CURRENT_USER`, Oracle
+    // `varchar2 DEFAULT USER`, SQL Server `('x')`.
+    if source != DialectKind::Mysql {
+        return normalized.to_string();
+    }
+
+    // MySQL 8.0.13 and later flag an expression default in `EXTRA`. That marker
+    // is authoritative, so consult it before looking at the value at all: a
+    // default is a literal unless the server says it was generated.
+    if extra.is_some_and(|value| value.to_ascii_uppercase().contains("DEFAULT_GENERATED")) {
+        return normalized.to_string();
+    }
+
+    // MySQL writes an expression default wrapped in parentheses, `DEFAULT
+    // (uuid())`, and reports it that way. The wrapping is the syntax, so it is
+    // a reliable marker even when `EXTRA` is not populated. Note this asks
+    // whether the value *is* parenthesised, not whether it merely contains a
+    // parenthesis: the string default `a(b)` is not wrapped and is still
+    // quoted.
+    if normalized.starts_with('(') && normalized.ends_with(')') {
+        return normalized.to_string();
+    }
+
+    // Already a literal: `'x'` or a prefixed form like `x'1f'`.
+    let lowered = normalized.to_ascii_lowercase();
+    if normalized.starts_with('\'') || QUOTED_LITERAL_PREFIXES.iter().any(|prefix| lowered.starts_with(prefix)) {
+        return normalized.to_string();
+    }
+
+    let base_type = data_type.split('(').next().unwrap_or(data_type).trim().to_ascii_lowercase();
+    let takes_text_literal =
+        ["char", "text", "string", "clob", "enum", "set"].iter().any(|kind| base_type.contains(kind));
+    let takes_binary_literal = ["binary", "blob", "bytea"].iter().any(|kind| base_type.contains(kind));
+    let takes_temporal_literal = base_type.contains("date") || base_type.contains("time");
+
+    // Before 8.0.13 there is no `EXTRA` marker and a temporal column was the
+    // only place an expression default could appear.
+    if takes_temporal_literal && is_temporal_keyword_default(normalized) {
+        return normalized.to_string();
+    }
+    // A binary default is commonly reported as a hex literal, which is already
+    // valid unquoted; a bare string on the same column still needs quoting.
+    if takes_binary_literal && is_hex_literal(normalized) {
+        return normalized.to_string();
+    }
+    if takes_text_literal || takes_binary_literal || takes_temporal_literal {
+        // Deliberately no parenthesis check. MySQL reports the string default
+        // `'a(b)'` as the bare value `a(b)`, and treating a parenthesis as proof
+        // of a function call is what produced invalid `DEFAULT a(b)`.
+        return format!("'{}'", default.replace('\'', "''"));
+    }
+    normalized.to_string()
+}
+
+/// A bare temporal default, with or without a precision argument, so
+/// `CURRENT_TIMESTAMP(6)` and `LOCALTIME(3)` are recognised alongside the bare
+/// keywords. `transfer::is_mysql_function_default` already accepts the
+/// parenthesised forms and this mirrors it.
+///
+/// Deliberately keyed on the known keywords rather than on the presence of a
+/// parenthesis, so a string default such as `a(b)` is still quoted.
+fn is_temporal_keyword_default(value: &str) -> bool {
+    let upper = value.to_ascii_uppercase();
+    TEMPORAL_DEFAULT_KEYWORDS.iter().any(|keyword| {
+        let keyword = keyword.to_ascii_uppercase();
+        upper == keyword || upper.strip_prefix(&keyword).is_some_and(|rest| rest.starts_with('('))
+    })
+}
+
+/// `0x61`, the shape MySQL reports a binary default in.
+fn is_hex_literal(value: &str) -> bool {
+    let Some(digits) = value.strip_prefix("0x").or_else(|| value.strip_prefix("0X")) else {
+        return false;
+    };
+    !digits.is_empty() && digits.chars().all(|c| c.is_ascii_hexdigit())
+}
+
 fn column_comment_sql(
     table_name: &str,
     column_name: &str,
@@ -3356,7 +3478,15 @@ fn generate_create_table_sql(
                 }
                 if !skip_default {
                     if let Some(default) = &col.column_default {
-                        def.push_str(&format!(" DEFAULT {default}"));
+                        def.push_str(&format!(
+                            " DEFAULT {}",
+                            default_literal(
+                                default,
+                                &mapped_type,
+                                effective_source_dialect(source_dialect, db_type),
+                                col.extra.as_deref()
+                            )
+                        ));
                     }
                 }
                 if profile.inline_column_comment {
@@ -3383,7 +3513,15 @@ fn generate_create_table_sql(
                 }
                 if !skip_default {
                     if let Some(default) = &col.column_default {
-                        def.push_str(&format!(" DEFAULT {default}"));
+                        def.push_str(&format!(
+                            " DEFAULT {}",
+                            default_literal(
+                                default,
+                                &mapped_type,
+                                effective_source_dialect(source_dialect, db_type),
+                                col.extra.as_deref()
+                            )
+                        ));
                     }
                 }
                 if profile.inline_column_comment {
@@ -3860,7 +3998,7 @@ fn generate_schema_sync_sql_inner(
                             };
                             parts.push(format!(
                                 "  ADD COLUMN {}{}",
-                                column_def(&convert_col(source), db_type),
+                                column_def(&convert_col(source), db_type, source_dialect),
                                 position
                             ));
                         }
@@ -3873,7 +4011,10 @@ fn generate_schema_sync_sql_inner(
                             let mapped = convert_col(source);
                             if profile.alter_uses_modify_column {
                                 if column.changes.iter().any(|change| !change.starts_with("order:")) {
-                                    parts.push(format!("  MODIFY COLUMN {}", column_def(&mapped, db_type)));
+                                    parts.push(format!(
+                                        "  MODIFY COLUMN {}",
+                                        column_def(&mapped, db_type, source_dialect)
+                                    ));
                                 }
                             } else {
                                 let name = quote_id(&column.name, db_type);
@@ -3889,7 +4030,15 @@ fn generate_schema_sync_sql_inner(
                                 }
                                 if column.changes.iter().any(|change| change.starts_with("default:")) {
                                     parts.push(if let Some(default) = &source.column_default {
-                                        format!("  ALTER COLUMN {name} SET DEFAULT {default}")
+                                        format!(
+                                            "  ALTER COLUMN {name} SET DEFAULT {}",
+                                            default_literal(
+                                                default,
+                                                &mapped.data_type,
+                                                effective_source_dialect(source_dialect, db_type),
+                                                source.extra.as_deref()
+                                            )
+                                        )
                                     } else {
                                         format!("  ALTER COLUMN {name} DROP DEFAULT")
                                     });
@@ -3907,7 +4056,7 @@ fn generate_schema_sync_sql_inner(
                                     parts.push(format!(
                                         "  CHANGE COLUMN {} {}",
                                         old_name,
-                                        column_def(&mapped, db_type)
+                                        column_def(&mapped, db_type, source_dialect)
                                     ));
                                 }
                                 RenameColumnSyntax::RenameColumn => {
@@ -6769,6 +6918,122 @@ mod tests {
         let diffs = diff_columns_with_options(&source, &target, false, false, false, 0.5);
         let sql = gen_sql(wrap_table_diff("t", diffs), DatabaseType::Postgres, None);
         assert!(sql.contains("DROP DEFAULT"), "default drop: {sql}");
+    }
+
+    #[test]
+    fn added_varchar_column_quotes_a_bare_default_mysql() {
+        // MySQL's information_schema returns a string default unquoted, so the
+        // generated DDL read `DEFAULT THE_VALUE` and the deploy failed.
+        let source =
+            vec![ColumnInfo { column_default: Some("THE_VALUE".into()), ..column("menu_type", "varchar(64)", None) }];
+        let target: Vec<ColumnInfo> = vec![];
+        let diffs = diff_columns_with_options(&source, &target, false, false, false, 0.5);
+        let sql = gen_sql(wrap_table_diff("t", diffs), DatabaseType::Mysql, None);
+        assert!(sql.contains("DEFAULT 'THE_VALUE'"), "bare default must be quoted: {sql}");
+    }
+
+    #[test]
+    fn default_literal_only_quotes_bare_values_that_need_it() {
+        use DialectKind::Mysql;
+
+        // MySQL strips the quotes from a string default, which is the whole
+        // reason this function exists.
+        assert_eq!(default_literal("THE_VALUE", "varchar(64)", Mysql, None), "'THE_VALUE'");
+        assert_eq!(default_literal("it's", "text", Mysql, None), "'it''s'");
+        assert_eq!(default_literal("2024-01-01", "date", Mysql, None), "'2024-01-01'");
+        // `DEFAULT ''` previously emitted a bare `DEFAULT `.
+        assert_eq!(default_literal("", "varchar(20)", Mysql, None), "''");
+        // Untouched on MySQL: already quoted and numeric values.
+        assert_eq!(default_literal("'guest'", "varchar(50)", Mysql, None), "'guest'");
+        assert_eq!(default_literal("0", "bigint", Mysql, None), "0");
+        assert_eq!(default_literal("NULL", "varchar(10)", Mysql, None), "'NULL'");
+        assert_eq!(default_literal("null", "text", Mysql, None), "'null'");
+        assert_eq!(default_literal("  spaced  ", "varchar(32)", Mysql, None), "'  spaced  '");
+    }
+
+    #[test]
+    fn default_literal_uses_mysql_extra_to_tell_an_expression_from_a_string() {
+        use DialectKind::Mysql;
+
+        // 8.0.13+ marks an expression default in EXTRA, and that marker decides
+        // it. Without the marker the value is a string, parentheses and all,
+        // so a column declared `DEFAULT 'a(b)'` stops emitting invalid
+        // `DEFAULT a(b)`.
+        assert_eq!(default_literal("a(b)", "varchar(32)", Mysql, None), "'a(b)'");
+        assert_eq!(default_literal("uuid()", "varchar(36)", Mysql, Some("DEFAULT_GENERATED")), "uuid()");
+        // MySQL wraps an expression default in parentheses and reports it that
+        // way, so the wrapping identifies it even when EXTRA is missing. That is
+        // a different question from whether the value contains a parenthesis,
+        // which is what `a(b)` above turns on.
+        assert_eq!(default_literal("(uuid())", "varchar(36)", Mysql, None), "(uuid())");
+        assert_eq!(default_literal("(now())", "datetime", Mysql, None), "(now())");
+        assert_eq!(
+            default_literal(
+                "CURRENT_TIMESTAMP",
+                "datetime",
+                Mysql,
+                Some("DEFAULT_GENERATED on update CURRENT_TIMESTAMP")
+            ),
+            "CURRENT_TIMESTAMP"
+        );
+        // Before 8.0.13 there is no marker, and a temporal column was the only
+        // place an expression default could appear.
+        assert_eq!(default_literal("CURRENT_TIMESTAMP", "datetime", Mysql, None), "CURRENT_TIMESTAMP");
+    }
+
+    #[test]
+    fn default_literal_keeps_temporal_defaults_that_carry_a_precision() {
+        use DialectKind::Mysql;
+
+        // `TIMESTAMP(6) DEFAULT CURRENT_TIMESTAMP(6)` is valid MySQL. On a server
+        // older than 8.0.13 it arrives with no EXTRA marker, so the fallback has
+        // to accept the precision argument or the column is deployed with a
+        // quoted string where an expression belongs.
+        assert_eq!(default_literal("CURRENT_TIMESTAMP(6)", "timestamp(6)", Mysql, None), "CURRENT_TIMESTAMP(6)");
+        assert_eq!(default_literal("NOW()", "datetime", Mysql, None), "NOW()");
+        assert_eq!(default_literal("LOCALTIME(3)", "datetime(3)", Mysql, None), "LOCALTIME(3)");
+        assert_eq!(default_literal("LOCALTIMESTAMP(3)", "timestamp(3)", Mysql, None), "LOCALTIMESTAMP(3)");
+        assert_eq!(default_literal("current_timestamp(6)", "timestamp(6)", Mysql, None), "current_timestamp(6)");
+
+        // The precision form must not become a general "contains a parenthesis"
+        // rule again: a string default keeps its quotes.
+        assert_eq!(default_literal("a(b)", "varchar(32)", Mysql, None), "'a(b)'");
+        assert_eq!(default_literal("CURRENT_TIMESTAMPX(6)", "varchar(64)", Mysql, None), "'CURRENT_TIMESTAMPX(6)'");
+    }
+
+    #[test]
+    fn default_literal_leaves_non_mysql_expressions_alone() {
+        use DialectKind::{Oracle, Postgres, SqlServer};
+
+        // These dialects return a string default already quoted, so a bare token
+        // is an expression. Quoting it would silently turn a per-row value into
+        // a fixed string.
+        assert_eq!(default_literal("CURRENT_USER", "text", Postgres, None), "CURRENT_USER");
+        assert_eq!(default_literal("USER", "varchar2(30)", Oracle, None), "USER");
+        assert_eq!(default_literal("'new'::text", "text", Postgres, None), "'new'::text");
+        assert_eq!(default_literal("nextval('s'::regclass)", "integer", Postgres, None), "nextval('s'::regclass)");
+        assert_eq!(default_literal("N'guest'", "nvarchar(50)", SqlServer, None), "N'guest'");
+        assert_eq!(default_literal("('x')", "varchar(10)", SqlServer, None), "('x')");
+        assert_eq!(default_literal("NULL", "text", Postgres, None), "NULL");
+        // The same bare token on MySQL is a string, which is why the rule has to
+        // follow the source dialect rather than the value.
+        assert_eq!(default_literal("CURRENT_USER", "text", DialectKind::Mysql, None), "'CURRENT_USER'");
+    }
+
+    #[test]
+    fn default_literal_handles_set_and_binary_boundaries() {
+        use DialectKind::Mysql;
+
+        // A SET default is a bare comma-separated string.
+        assert_eq!(default_literal("a,b", "set('a','b')", Mysql, None), "'a,b'");
+        assert_eq!(default_literal("", "set('a','b')", Mysql, None), "''");
+        // Binary defaults arrive as a hex literal, which is already valid
+        // unquoted; a bare string on the same column still needs quoting.
+        assert_eq!(default_literal("0x61", "varbinary(16)", Mysql, None), "0x61");
+        assert_eq!(default_literal("abc", "binary(3)", Mysql, None), "'abc'");
+        assert_eq!(default_literal("x'1f'", "blob", Mysql, None), "x'1f'");
+        // Not hex, so not a hex literal.
+        assert_eq!(default_literal("0xzz", "varbinary(8)", Mysql, None), "'0xzz'");
     }
 
     // -- 35. Column order changes --

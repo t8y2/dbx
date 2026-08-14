@@ -89,6 +89,7 @@ pub struct VectorClient {
     http: HttpClient,
     base_url: String,
     auth: Option<VectorAuth>,
+    tenant: Option<String>,
     database: Option<String>,
 }
 
@@ -111,9 +112,14 @@ impl VectorClient {
     ) -> Self {
         let base_url = url.trim_end_matches('/').to_string();
         let auth = vector_auth(kind, username, password);
+        let tenant = if kind == VectorDbKind::ChromaDb {
+            username.map(str::trim).filter(|tenant| !tenant.is_empty()).map(str::to_string)
+        } else {
+            None
+        };
         let builder = http_client_builder(timeout).danger_accept_invalid_certs(accept_invalid_certs);
         let http = builder.build().unwrap_or_else(|_| HttpClient::new());
-        Self { kind, http, base_url, auth, database: None }
+        Self { kind, http, base_url, auth, tenant, database: None }
     }
 
     pub fn with_database(mut self, database: Option<&str>) -> Self {
@@ -123,6 +129,22 @@ impl VectorClient {
 
     fn database_or_default(&self) -> &str {
         self.database.as_deref().unwrap_or("default")
+    }
+
+    fn chroma_tenant(&self) -> &str {
+        self.tenant.as_deref().unwrap_or("default_tenant")
+    }
+
+    fn chroma_database(&self) -> &str {
+        self.database.as_deref().unwrap_or("default_database")
+    }
+
+    fn chroma_collections_path(&self) -> String {
+        chroma_collections_path(self.chroma_tenant(), self.chroma_database())
+    }
+
+    fn chroma_collection_path(&self, collection: &str, operation: Option<&str>) -> String {
+        chroma_collection_path(self.chroma_tenant(), self.chroma_database(), collection, operation)
     }
 
     fn get(&self, path: &str) -> reqwest::RequestBuilder {
@@ -153,17 +175,13 @@ impl VectorClient {
 }
 
 fn test_connection_request(client: &VectorClient) -> reqwest::RequestBuilder {
-    let path = match client.kind {
-        VectorDbKind::Qdrant => "/collections",
-        VectorDbKind::Milvus => "/v2/vectordb/collections/list",
-        VectorDbKind::Weaviate => "/v1/meta",
-        VectorDbKind::ChromaDb => "/api/v2/heartbeat",
-    };
     match client.kind {
-        VectorDbKind::Qdrant => client.get(path),
-        VectorDbKind::Milvus => client.post(path).json(&serde_json::json!({ "dbName": client.database_or_default() })),
-        VectorDbKind::Weaviate => client.get(path),
-        VectorDbKind::ChromaDb => client.get(path),
+        VectorDbKind::Qdrant => client.get("/collections"),
+        VectorDbKind::Milvus => client
+            .post("/v2/vectordb/collections/list")
+            .json(&serde_json::json!({ "dbName": client.database_or_default() })),
+        VectorDbKind::Weaviate => client.get("/v1/meta"),
+        VectorDbKind::ChromaDb => client.get(&client.chroma_collections_path()),
     }
 }
 
@@ -310,9 +328,7 @@ async fn list_weaviate_collections(client: &VectorClient) -> Result<Vec<Collecti
 }
 
 async fn list_chroma_collections(client: &VectorClient) -> Result<Vec<CollectionInfo>, String> {
-    let body =
-        send_json(client.get("/api/v2/tenants/default_tenant/databases/default_database/collections"), client.kind)
-            .await?;
+    let body = send_json(client.get(&client.chroma_collections_path()), client.kind).await?;
     let mut infos: Vec<CollectionInfo> = body
         .as_array()
         .into_iter()
@@ -473,14 +489,7 @@ async fn get_milvus_collection_detail(
 }
 
 async fn get_chroma_collection_detail(client: &VectorClient, collection: &str) -> Result<CollectionInfo, String> {
-    let body = send_json(
-        client.get(&format!(
-            "/api/v2/tenants/default_tenant/databases/default_database/collections/{}",
-            path_segment(collection)
-        )),
-        client.kind,
-    )
-    .await?;
+    let body = send_json(client.get(&client.chroma_collection_path(collection, None)), client.kind).await?;
     let name = body.get("name").and_then(Value::as_str).unwrap_or(collection);
     let id = body.get("id").and_then(Value::as_str).unwrap_or(collection);
     let dimension = body.get("dimension").and_then(|v| v.as_u64()).map(|d| d as u32);
@@ -577,13 +586,8 @@ pub async fn find_documents(
 ) -> Result<crate::db::document_result::DocumentQueryResult, String> {
     if client.kind == VectorDbKind::ChromaDb {
         let start = std::time::Instant::now();
-        let url = format!(
-            "{}/api/v2/tenants/default_tenant/databases/default_database/collections/{}/get",
-            client.base_url,
-            path_segment(collection),
-        );
         let resp = client
-            .with_auth(client.http.post(&url))
+            .post(&client.chroma_collection_path(collection, Some("get")))
             .json(&serde_json::json!({
                 "limit": limit.max(1) as u64,
                 "offset": skip,
@@ -753,10 +757,7 @@ fn default_collection_query(client: &VectorClient, collection: &str) -> Result<r
         }))),
         VectorDbKind::Weaviate => Ok(client.get(&format!("/v1/objects?class={}&limit=100", query_value(collection)))),
         VectorDbKind::ChromaDb => Ok(client
-            .post(&format!(
-                "/api/v2/tenants/default_tenant/databases/default_database/collections/{}/get",
-                path_segment(collection)
-            ))
+            .post(&client.chroma_collection_path(collection, Some("get")))
             .json(&serde_json::json!({"limit": 100, "include": ["documents", "metadatas"]}))),
     }
 }
@@ -767,6 +768,30 @@ fn starts_with_http_method(input: &str) -> bool {
 
 pub(crate) fn path_segment(value: &str) -> String {
     utf8_percent_encode(value, PATH_SEGMENT_ENCODE_SET).to_string()
+}
+
+pub(crate) fn chroma_collections_path(tenant: &str, database: &str) -> String {
+    let tenant = tenant.trim();
+    let database = database.trim();
+    format!(
+        "/api/v2/tenants/{}/databases/{}/collections",
+        path_segment(if tenant.is_empty() { "default_tenant" } else { tenant }),
+        path_segment(if database.is_empty() { "default_database" } else { database })
+    )
+}
+
+pub(crate) fn chroma_collection_path(
+    tenant: &str,
+    database: &str,
+    collection: &str,
+    operation: Option<&str>,
+) -> String {
+    let mut path = format!("{}/{}", chroma_collections_path(tenant, database), path_segment(collection));
+    if let Some(operation) = operation {
+        path.push('/');
+        path.push_str(&path_segment(operation));
+    }
+    path
 }
 
 pub(crate) fn query_value(value: &str) -> String {
@@ -909,10 +934,10 @@ fn format_reqwest_error(err: &reqwest::Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        chroma_get_response_to_rows, milvus_collection_schema, milvus_database_names, rest_query_result,
-        starts_with_http_method, test_connection, test_connection_request, values_to_query_result, vector_auth,
-        weaviate_collection_names_from_schema, weaviate_vector_dimension_from_graphql, CollectionInfo, VectorAuth,
-        VectorClient, VectorDbKind,
+        chroma_get_response_to_rows, default_collection_query, milvus_collection_schema, milvus_database_names,
+        rest_query_result, starts_with_http_method, test_connection, test_connection_request, values_to_query_result,
+        vector_auth, weaviate_collection_names_from_schema, weaviate_vector_dimension_from_graphql, CollectionInfo,
+        VectorAuth, VectorClient, VectorDbKind,
     };
     use serde_json::{json, Value};
     use std::time::{Duration, Instant};
@@ -937,6 +962,28 @@ mod tests {
             stream.write_all(response.as_bytes()).await.unwrap();
         });
         (format!("http://{address}"), server)
+    }
+
+    async fn spawn_recording_json_response_server(
+        body: Value,
+    ) -> (String, tokio::sync::oneshot::Receiver<String>, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let body = body.to_string();
+        let (request_tx, request_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0_u8; 8192];
+            let read = stream.read(&mut request).await.unwrap();
+            request_tx.send(String::from_utf8_lossy(&request[..read]).into_owned()).unwrap();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+        });
+        (format!("http://{address}"), request_rx, server)
     }
 
     #[test]
@@ -1175,6 +1222,71 @@ mod tests {
     #[test]
     fn chroma_db_no_auth_when_no_password() {
         assert_eq!(vector_auth(VectorDbKind::ChromaDb, None, None), None);
+    }
+
+    #[tokio::test]
+    async fn chroma_cloud_connection_test_uses_configured_namespace_and_token() {
+        let (url, request_rx, server) = spawn_recording_json_response_server(json!([])).await;
+        let client = VectorClient::new(
+            VectorDbKind::ChromaDb,
+            &url,
+            Some("tenant /eu"),
+            Some("cloud-api-key"),
+            false,
+            Duration::from_secs(1),
+        )
+        .with_database(Some("support/kb"));
+
+        test_connection(&client, Duration::from_secs(1)).await.unwrap();
+        let request = request_rx.await.unwrap();
+
+        assert!(
+            request.starts_with("GET /api/v2/tenants/tenant%20%2Feu/databases/support%2Fkb/collections HTTP/1.1\r\n")
+        );
+        assert!(request.to_ascii_lowercase().contains("\r\nx-chroma-token: cloud-api-key\r\n"));
+        server.await.unwrap();
+    }
+
+    #[test]
+    fn chroma_local_connection_test_keeps_default_namespace() {
+        let client = VectorClient::new(
+            VectorDbKind::ChromaDb,
+            "http://localhost:8000",
+            None,
+            None,
+            false,
+            Duration::from_secs(1),
+        );
+
+        let request = test_connection_request(&client).build().unwrap();
+
+        assert_eq!(
+            request.url().as_str(),
+            "http://localhost:8000/api/v2/tenants/default_tenant/databases/default_database/collections"
+        );
+        assert!(request.headers().get("x-chroma-token").is_none());
+    }
+
+    #[test]
+    fn chroma_collection_paths_encode_every_dynamic_segment() {
+        let client = VectorClient::new(
+            VectorDbKind::ChromaDb,
+            "https://api.trychroma.com",
+            Some("tenant /eu"),
+            None,
+            false,
+            Duration::from_secs(1),
+        )
+        .with_database(Some("support/kb"));
+
+        assert_eq!(
+            client.chroma_collection_path("collection/id", Some("get/by-id")),
+            "/api/v2/tenants/tenant%20%2Feu/databases/support%2Fkb/collections/collection%2Fid/get%2Fby-id"
+        );
+        assert_eq!(
+            default_collection_query(&client, "collection/id").unwrap().build().unwrap().url().path(),
+            "/api/v2/tenants/tenant%20%2Feu/databases/support%2Fkb/collections/collection%2Fid/get"
+        );
     }
 
     #[test]

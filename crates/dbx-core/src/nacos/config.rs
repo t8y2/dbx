@@ -67,9 +67,10 @@ pub struct NacosAdminConfig {
     pub namespace: String,
     #[serde(default)]
     pub context_path: String,
-    /// Namespace IDs supplied for a Nacos 3 ordinary user that cannot call the
-    /// Admin namespace-list API. They are only used as a discovery fallback;
-    /// Nacos still authorizes every configuration and naming request.
+    /// Namespace IDs supplied for an official Nacos ordinary user that cannot
+    /// call the namespace or authorization management APIs. They define the
+    /// discoverable scope; Nacos still authorizes every configuration and
+    /// naming request.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub managed_namespaces: Vec<String>,
     /// Optional r-nacos authenticated-console address. This is separate from

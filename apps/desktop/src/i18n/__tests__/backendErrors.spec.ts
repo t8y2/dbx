@@ -56,8 +56,13 @@ const WINDOWS_JRE_REMOVE_ERROR = [
 // key and params it must resolve to.
 const CASES: { name: string; message: string; key: string; params?: Record<string, string> }[] = [
   {
-    name: "Nacos 3 ordinary user must configure managed namespaces",
+    name: "Nacos ordinary user must configure managed namespaces when namespace discovery is forbidden",
     message: "Failed to list Nacos namespaces: NACOS_ERROR[v3ManagedNamespacesRequired]: access denied",
+    key: "nacos.nacosManagedNamespacesRequired",
+  },
+  {
+    name: "Nacos ordinary user must configure managed namespaces when authorization management is forbidden",
+    message: "NACOS_ERROR[managedNamespacesRequired]: 403 Forbidden",
     key: "nacos.nacosManagedNamespacesRequired",
   },
   {

@@ -142,8 +142,18 @@ async fn readable_ids_from_role_bindings(
 }
 
 fn namespace_authorization_unavailable(detail: &str) -> String {
+    let detail_lowercase = detail.to_ascii_lowercase();
+    let error_code = if detail_lowercase.contains("403")
+        || detail_lowercase.contains("forbidden")
+        || detail_lowercase.contains("access denied")
+        || detail_lowercase.contains("authorization failed")
+    {
+        "managedNamespacesRequired"
+    } else {
+        "namespaceAuthorizationUnavailable"
+    };
     format!(
-        "NACOS_ERROR[namespaceAuthorizationUnavailable]: DBX cannot safely determine readable namespaces without per-namespace probes: {detail}"
+        "NACOS_ERROR[{error_code}]: DBX cannot safely determine readable namespaces without per-namespace probes: {detail}"
     )
 }
 
@@ -236,17 +246,11 @@ fn readable_ids_from_permissions(
                     readable.insert(namespace_identity(namespace));
                 }
             }
-            _ => {
-                let namespace = permission.resource_raw.split(':').next().unwrap_or_default();
-                if namespace == "*" {
-                    return Some(all_namespace_ids(namespaces));
-                }
-                if permission.resource_raw.contains(':') {
-                    readable.insert(namespace_identity(namespace));
-                } else {
-                    return None;
-                }
-            }
+            // A custom resource can grant access to an individual group or
+            // data ID, but it cannot prove namespace-wide read access. Ignore
+            // it rather than widening the sidebar's visible namespace scope.
+            Some(NacosPermissionScopeKind::Custom | NacosPermissionScopeKind::Unknown) => {}
+            None => return None,
         }
     }
     Some(readable)
@@ -361,7 +365,7 @@ mod tests {
         namespaces: Vec<NacosNamespaceInfo>,
         readable_ids: BTreeSet<String>,
         permission_error: bool,
-        explicitly_scoped: bool,
+        explicitly_scoped_ids: Option<Vec<String>>,
         namespace_calls: AtomicUsize,
         role_calls: AtomicUsize,
         permission_calls: AtomicUsize,
@@ -381,7 +385,7 @@ mod tests {
                 namespaces,
                 readable_ids,
                 permission_error: false,
-                explicitly_scoped: false,
+                explicitly_scoped_ids: None,
                 namespace_calls: AtomicUsize::new(0),
                 role_calls: AtomicUsize::new(0),
                 permission_calls: AtomicUsize::new(0),
@@ -408,8 +412,7 @@ mod tests {
         }
 
         fn explicitly_scoped_namespace_ids(&self) -> Option<Vec<String>> {
-            self.explicitly_scoped
-                .then(|| self.namespaces.iter().map(|namespace| namespace.namespace.clone()).collect())
+            self.explicitly_scoped_ids.clone()
         }
 
         async fn test_connection(&self) -> Result<NacosConnectionInfo, String> {
@@ -584,6 +587,23 @@ mod tests {
     }
 
     #[test]
+    fn custom_permissions_do_not_grant_namespace_wide_visibility() {
+        let namespaces = vec![namespace("public"), namespace("team-a"), namespace("team-b")];
+        let roles = BTreeSet::from(["reader".to_string()]);
+        let permissions = vec![NacosPermissionInfo {
+            role: "reader".to_string(),
+            resource_raw: "team-a:GROUP_A:*".to_string(),
+            action_raw: "r".to_string(),
+            parsed_scope: Some(NacosPermissionScope {
+                kind: NacosPermissionScopeKind::Custom,
+                namespace_id: Some("team-a".to_string()),
+            }),
+        }];
+
+        assert_eq!(readable_ids_from_permissions(&roles, &permissions, &namespaces), Some(BTreeSet::new()));
+    }
+
+    #[test]
     fn embedded_privileges_apply_whitelist_and_blacklist() {
         let namespaces = vec![namespace("public"), namespace("team-a"), namespace("team-b")];
         let privilege = NacosNamespacePrivilege {
@@ -635,7 +655,7 @@ mod tests {
 
         let error = sidebar_snapshot(connection_id, "server-a".to_string(), admin.clone()).await.unwrap_err();
 
-        assert!(error.contains("NACOS_ERROR[namespaceAuthorizationUnavailable]"));
+        assert!(error.contains("NACOS_ERROR[managedNamespacesRequired]"));
         assert_eq!(admin.config_calls.load(Ordering::SeqCst), 0);
         assert_eq!(admin.total_authorization_calls(), 3);
     }
@@ -645,12 +665,16 @@ mod tests {
         let connection_id = "explicit-sidebar-scope";
         invalidate(connection_id);
         let mut admin = CountingAdmin::restricted(100);
-        admin.explicitly_scoped = true;
+        admin.permission_error = true;
+        admin.explicitly_scoped_ids = Some(vec!["team-2".to_string(), "team-78".to_string()]);
         let admin = Arc::new(admin);
 
         let snapshot = sidebar_snapshot(connection_id, "server-a".to_string(), admin.clone()).await.unwrap();
 
-        assert_eq!(snapshot.namespaces.len(), 100);
+        assert_eq!(
+            snapshot.namespaces.iter().map(|namespace| namespace.namespace.as_str()).collect::<Vec<_>>(),
+            vec!["team-2", "team-78"]
+        );
         assert_eq!(admin.total_authorization_calls(), 1);
         assert!(!snapshot.access_control.list_users.supported);
     }

@@ -1,4 +1,4 @@
-import { parseSlashDelimitedRegexQuery } from "@/lib/common/searchPattern";
+import { compileSearchRegex, parseSlashDelimitedRegexQuery } from "@/lib/common/searchPattern";
 
 export type SidebarSearchMatchKind = "exact" | "prefix" | "word-prefix" | "substring" | "abbreviation" | "fuzzy" | "regex";
 
@@ -130,10 +130,22 @@ function matchesWordPrefixConcatenation(label: string, query: string): boolean {
   return dp[queryLength] !== INF && dp[queryLength] >= 2;
 }
 
-function matchSidebarLabelWithRegex(label: string, query: string, regex: RegExp | null): SidebarSearchMatch | null {
+function testRegex(regex: RegExp, value: string): boolean {
+  // Global and sticky expressions retain lastIndex between calls.  Search
+  // candidates are independent values, so every candidate must start from a
+  // deterministic index (and leave no state for the next tree row).
+  regex.lastIndex = 0;
+  const matched = regex.test(value);
+  regex.lastIndex = 0;
+  return matched;
+}
+
+function matchSidebarLabelWithRegex(label: string, query: string, regex: RegExp | null, invalidRegex = false): SidebarSearchMatch | null {
   if (!query) return null;
 
-  if (regex) return regex.test(label) ? { kind: "regex", score: 95 } : null;
+  if (invalidRegex) return null;
+
+  if (regex) return testRegex(regex, label) ? { kind: "regex", score: 95 } : null;
 
   // Case-insensitive comparison is centralized here so callers can pass the
   // original label and query. The original label is what the boundary-aware
@@ -169,11 +181,27 @@ function matchSidebarLabelWithRegex(label: string, query: string, regex: RegExp 
   return null;
 }
 
-export function createSidebarLabelMatcher(query: string): SidebarLabelMatcher {
-  const regex = parseSlashDelimitedRegexQuery(query);
-  return (label) => matchSidebarLabelWithRegex(label, query, regex);
+export interface SidebarSearchMatcherOptions {
+  regexMode?: boolean;
 }
 
-export function matchSidebarLabel(label: string, query: string): SidebarSearchMatch | null {
-  return matchSidebarLabelWithRegex(label, query, parseSlashDelimitedRegexQuery(query));
+function slashDelimitedCandidate(query: string): boolean {
+  return query.startsWith("/") && query.lastIndexOf("/") > 0;
+}
+
+export function createSidebarLabelMatcher(query: string, options: SidebarSearchMatcherOptions = {}): SidebarLabelMatcher {
+  if (options.regexMode) {
+    const compiled = compileSearchRegex(query);
+    return (label) => matchSidebarLabelWithRegex(label, query, compiled.regex, compiled.invalid);
+  }
+
+  const regex = parseSlashDelimitedRegexQuery(query);
+  // A slash-delimited expression is an explicit regex request even when it is
+  // malformed.  Do not silently reinterpret an invalid pattern as fuzzy text.
+  const invalidRegex = slashDelimitedCandidate(query) && !regex;
+  return (label) => matchSidebarLabelWithRegex(label, query, regex, invalidRegex);
+}
+
+export function matchSidebarLabel(label: string, query: string, options: SidebarSearchMatcherOptions = {}): SidebarSearchMatch | null {
+  return createSidebarLabelMatcher(query, options)(label);
 }

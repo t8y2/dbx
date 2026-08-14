@@ -513,6 +513,10 @@ function routeTreeItemDialogController() {
 
 const sidebarTreeContext = inject(sidebarTreeContextKey, null);
 
+function shouldReleaseCollapsedTreeNodeChildren(): boolean {
+  return !connectionStore.sidebarSearchQuery && !sidebarTreeContext?.isSearchProjectionActive?.();
+}
+
 function currentDatabaseType(): DatabaseType | undefined {
   return activeNode.value.connectionId ? effectiveDatabaseTypeForConnection(connectionStore.getConfig(activeNode.value.connectionId)) : undefined;
 }
@@ -601,7 +605,7 @@ async function toggle(requestId = beginNavigationRequest()) {
   if (node.isLoading) {
     if (node.isExpanded) {
       node.isExpanded = false;
-      if (!connectionStore.sidebarSearchQuery) connectionStore.releaseCollapsedTreeNodeChildren(node.id);
+      if (shouldReleaseCollapsedTreeNodeChildren()) connectionStore.releaseCollapsedTreeNodeChildren(node.id);
       connectionStore.cancelTreeNodeLoad(node.id);
       emitNodeToggled(node, true, false);
     } else {
@@ -638,7 +642,7 @@ async function toggle(requestId = beginNavigationRequest()) {
   const databaseObjectGroup = !!objectTypesForGroupNode(node.type);
   if (databaseObjectGroup && connectionStore.canUseLoadedTreeNodeToggle(node)) {
     node.isExpanded = !node.isExpanded;
-    if (wasExpanded && !connectionStore.sidebarSearchQuery) connectionStore.releaseCollapsedTreeNodeChildren(node.id);
+    if (wasExpanded && shouldReleaseCollapsedTreeNodeChildren()) connectionStore.releaseCollapsedTreeNodeChildren(node.id);
     emitNodeToggled(node, wasExpanded);
     return;
   }
@@ -657,20 +661,20 @@ async function toggle(requestId = beginNavigationRequest()) {
 
   if (node.type === "group-extensions" && connectionStore.canUseLoadedTreeNodeToggle(node)) {
     node.isExpanded = !node.isExpanded;
-    if (wasExpanded && !connectionStore.sidebarSearchQuery) connectionStore.releaseCollapsedTreeNodeChildren(node.id);
+    if (wasExpanded && shouldReleaseCollapsedTreeNodeChildren()) connectionStore.releaseCollapsedTreeNodeChildren(node.id);
     emitNodeToggled(node, wasExpanded);
     return;
   }
 
   if (isXuguTypeMemberContainer(node, connectionStore.getConfig(node.connectionId || "")?.db_type)) {
-    await connectionStore.loadXuguTypeMembers(node);
+    await connectionStore.loadXuguTypeMembers(node, { preserveCollapsedChildren: !shouldReleaseCollapsedTreeNodeChildren() });
     emitNodeToggled(node, wasExpanded);
     return;
   }
 
   if (node.isExpanded) {
     node.isExpanded = false;
-    if (!connectionStore.sidebarSearchQuery) connectionStore.releaseCollapsedTreeNodeChildren(node.id);
+    if (shouldReleaseCollapsedTreeNodeChildren()) connectionStore.releaseCollapsedTreeNodeChildren(node.id);
     emitNodeToggled(node, wasExpanded, false);
     return;
   }

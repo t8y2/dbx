@@ -674,12 +674,20 @@ function zookeeperConnectStringFromUrl(parsed: URL, defaultPort: number): string
   return `${host}:${port}${chroot}`;
 }
 
+function shouldPreserveCredentialFreeUrlCredentials(config: Omit<ConnectionConfig, "id">, parsed: ParsedConnectionUrl): boolean {
+  const currentProfile = config.driver_profile?.trim();
+  return parsed.dbType === config.db_type && (!currentProfile || parsed.driverProfile === currentProfile) && !parsed.username && !parsed.password;
+}
+
 function applyParsedUsername(config: Omit<ConnectionConfig, "id">, parsed: ParsedConnectionUrl): string {
   if (parsed.dbType === "h2" && config.db_type === "h2" && !h2JdbcUrlHasUserParam(parsed.connectionString)) {
     return config.username || parsed.username;
   }
   if (parsed.dbType === "kingbase" && config.db_type === "kingbase" && !parsed.username) {
     return config.username;
+  }
+  if (shouldPreserveCredentialFreeUrlCredentials(config, parsed)) {
+    return config.username || parsed.username;
   }
   return parsed.username;
 }
@@ -690,6 +698,9 @@ function applyParsedPassword(config: Omit<ConnectionConfig, "id">, parsed: Parse
   }
   if (parsed.dbType === "kingbase" && config.db_type === "kingbase" && !parsed.password) {
     return config.password;
+  }
+  if (shouldPreserveCredentialFreeUrlCredentials(config, parsed)) {
+    return config.password || parsed.password;
   }
   return parsed.password;
 }

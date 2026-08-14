@@ -8723,7 +8723,6 @@ const ddlLoading = ref(false);
 const ddlWidth = ref(settingsStore.editorSettings.tableInfoDrawerWidth);
 const detailPanelHeight = ref(settingsStore.editorSettings.cellDetailDrawerWidth);
 const mongoJsonPreviewWidth = ref(MONGO_JSON_PREVIEW_DEFAULT_WIDTH);
-const ddlWrap = ref(true);
 const isResizingDdl = ref(false);
 const isResizingMongoJsonPreview = ref(false);
 let ddlResizeStartX = 0;
@@ -9245,7 +9244,9 @@ function openTableStructureEditor() {
 }
 
 function toggleDdlWrap() {
-  ddlWrap.value = !ddlWrap.value;
+  settingsStore.updateEditorSettings({
+    tableDdlWordWrap: !settingsStore.editorSettings.tableDdlWordWrap,
+  });
 }
 
 function onDataGridTopbarFixedActionWheel(event: WheelEvent) {
@@ -11231,7 +11232,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                   <Copy class="w-3 h-3" />
                   <span class="table-info-action-label">{{ t("grid.copyDdl") }}</span>
                 </Button>
-                <Button variant="ghost" size="icon" class="h-6 w-6" :class="{ 'bg-accent': ddlWrap }" @click="toggleDdlWrap">
+                <Button variant="ghost" size="icon" class="h-6 w-6" :class="{ 'bg-accent': settingsStore.editorSettings.tableDdlWordWrap }" @click="toggleDdlWrap">
                   <WrapText class="w-3 h-3" />
                 </Button>
               </div>
@@ -11437,7 +11438,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
               data-native-clipboard
               tabindex="0"
               class="flex-1 min-w-0 text-xs font-mono p-3 overflow-auto ddl-code leading-5 select-text outline-none"
-              :class="ddlWrap ? 'whitespace-pre-wrap break-words' : 'whitespace-pre'"
+              :class="settingsStore.editorSettings.tableDdlWordWrap ? 'whitespace-pre-wrap break-words' : 'whitespace-pre'"
               v-html="filteredDdlContent"
               @keydown="onDdlKeydown"
             ></pre>

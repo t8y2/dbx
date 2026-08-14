@@ -3657,6 +3657,13 @@ pub fn pagination_sql(
             let base_sql = format!("SELECT {col_list} FROM {full_table}");
             oracle_rownum_page_sql(&col_list, base_sql, offset, limit)
         }
+        DatabaseType::Informix => {
+            if offset == 0 {
+                format!("SELECT FIRST {limit} {col_list} FROM {full_table}")
+            } else {
+                format!("SELECT SKIP {offset} FIRST {limit} {col_list} FROM {full_table}")
+            }
+        }
         DatabaseType::SqlServer | DatabaseType::Dameng => {
             format!(
                 "SELECT {col_list} FROM {full_table} ORDER BY (SELECT NULL) OFFSET {offset} ROWS FETCH NEXT {limit} ROWS ONLY"
@@ -3691,6 +3698,14 @@ pub fn pagination_sql_with_order(
             let order_by = order_expression.map(|value| format!(" ORDER BY {value}")).unwrap_or_default();
             let base_sql = format!("SELECT {col_list} FROM {full_table}{order_by}");
             oracle_rownum_page_sql(&col_list, base_sql, offset, limit)
+        }
+        DatabaseType::Informix => {
+            let order_by = order_expression.map(|value| format!(" ORDER BY {value}")).unwrap_or_default();
+            if offset == 0 {
+                format!("SELECT FIRST {limit} {col_list} FROM {full_table}{order_by}")
+            } else {
+                format!("SELECT SKIP {offset} FIRST {limit} {col_list} FROM {full_table}{order_by}")
+            }
         }
         DatabaseType::SqlServer | DatabaseType::Dameng => {
             let order_by = order_expression.unwrap_or_else(|| "(SELECT NULL)".to_string());
@@ -3767,6 +3782,14 @@ pub fn pagination_sql_with_filter_order_and_identifier_quote(
             let order_by = order_expression.map(|value| format!(" ORDER BY {value}")).unwrap_or_default();
             let base_sql = format!("SELECT {col_list} FROM {full_table}{where_clause}{order_by}");
             oracle_rownum_page_sql(&col_list, base_sql, offset, limit)
+        }
+        DatabaseType::Informix => {
+            let order_by = order_expression.map(|value| format!(" ORDER BY {value}")).unwrap_or_default();
+            if offset == 0 {
+                format!("SELECT FIRST {limit} {col_list} FROM {full_table}{where_clause}{order_by}")
+            } else {
+                format!("SELECT SKIP {offset} FIRST {limit} {col_list} FROM {full_table}{where_clause}{order_by}")
+            }
         }
         DatabaseType::SqlServer | DatabaseType::Dameng => {
             let order_by = order_expression.unwrap_or_else(|| "(SELECT NULL)".to_string());
@@ -3864,6 +3887,9 @@ pub fn keyset_pagination_sql_with_identifier_quote(
         DatabaseType::Oracle => {
             let base_sql = format!("SELECT {col_list} FROM {full_table}{where_clause} ORDER BY {order}");
             oracle_rownum_page_sql(&col_list, base_sql, 0, limit)
+        }
+        DatabaseType::Informix => {
+            format!("SELECT FIRST {limit} {col_list} FROM {full_table}{where_clause} ORDER BY {order}")
         }
         DatabaseType::SqlServer | DatabaseType::Dameng => {
             format!(
@@ -9282,6 +9308,72 @@ mod tests {
         );
 
         assert_eq!(sql, "SELECT `id`, `name` FROM `users` ORDER BY `id` LIMIT 200, 300");
+    }
+
+    #[test]
+    fn informix_pagination_uses_first_and_optional_skip() {
+        let columns = [String::from("id"), String::from("name")];
+
+        assert_eq!(
+            pagination_sql(&columns, "users", "app", &DatabaseType::Informix, 0, 100),
+            "SELECT FIRST 100 \"id\", \"name\" FROM \"app\".\"users\""
+        );
+        assert_eq!(
+            pagination_sql(&columns, "users", "app", &DatabaseType::Informix, 200, 100),
+            "SELECT SKIP 200 FIRST 100 \"id\", \"name\" FROM \"app\".\"users\""
+        );
+    }
+
+    #[test]
+    fn informix_ordered_pagination_uses_first_and_optional_skip() {
+        let columns = [String::from("id"), String::from("name")];
+        let order = [String::from("id")];
+
+        assert_eq!(
+            pagination_sql_with_order(&columns, "users", "app", &DatabaseType::Informix, 0, 100, &order, None),
+            "SELECT FIRST 100 \"id\", \"name\" FROM \"app\".\"users\" ORDER BY id"
+        );
+        assert_eq!(
+            pagination_sql_with_order(&columns, "users", "app", &DatabaseType::Informix, 200, 100, &order, None),
+            "SELECT SKIP 200 FIRST 100 \"id\", \"name\" FROM \"app\".\"users\" ORDER BY id"
+        );
+    }
+
+    #[test]
+    fn informix_filtered_pagination_preserves_filter_and_order() {
+        let columns = [String::from("id"), String::from("status")];
+        let default_order = [String::from("id")];
+
+        assert_eq!(
+            pagination_sql_with_filter_order(
+                &columns,
+                "users",
+                "app",
+                &DatabaseType::Informix,
+                200,
+                100,
+                Some("WHERE status = 'active'"),
+                Some("id DESC"),
+                &default_order,
+            ),
+            "SELECT SKIP 200 FIRST 100 id, status FROM \"app\".\"users\" WHERE (status = 'active') ORDER BY id DESC"
+        );
+    }
+
+    #[test]
+    fn informix_keyset_pagination_uses_first() {
+        assert_eq!(
+            keyset_pagination_sql(
+                &[String::from("id"), String::from("name")],
+                "users",
+                "app",
+                &DatabaseType::Informix,
+                &[String::from("id")],
+                &[json!(25)],
+                100,
+            ),
+            "SELECT FIRST 100 id, name FROM \"app\".\"users\" WHERE id > 25 ORDER BY id ASC"
+        );
     }
 
     #[test]

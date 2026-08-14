@@ -77,6 +77,13 @@ describe("mqConsoleDefaults", () => {
     expect(defaultMqCapabilitiesForSystemKind("pulsar").supportsClientConnections).toBeFalsy();
   });
 
+  it("exposes Kafka message browsing through peek capability without query capability", () => {
+    const caps = { ...defaultMqCapabilitiesForSystemKind("kafka"), supportsSendMessage: false };
+    expect(caps.supportsPeekMessages).toBe(true);
+    expect(caps.supportsMessageQuery).toBe(false);
+    expect(resolveAvailableMqTabs({ systemKind: "kafka", capabilities: caps })).toContain("messages");
+  });
+
   it("exposes the namespaces tab for RabbitMQ vhost management", () => {
     const caps = defaultMqCapabilitiesForSystemKind("rabbitmq");
     expect(resolveAvailableMqTabs({ systemKind: "rabbitmq", capabilities: caps })).toEqual(["namespaces", "topics", "subscriptions", "monitoring", "clients", "messages", "broker", "policies", "permissions"]);

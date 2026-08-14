@@ -248,7 +248,7 @@ export interface NacosAdminConfig {
   versionMode?: NacosVersionMode;
   serverAddr: string;
   contextPath?: string;
-  /** Namespace IDs used when a Nacos 3 ordinary user cannot enumerate namespaces through the Admin API. */
+  /** Namespace IDs used when an official Nacos ordinary user cannot enumerate namespaces or authorization data. */
   managedNamespaces?: string[];
   rnacosConsoleAddr?: string;
   /** Undefined keeps the legacy behaviour: history is enabled when a console address exists. */

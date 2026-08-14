@@ -3026,11 +3026,24 @@ public final class DbxJdbcPlugin {
         int index,
         boolean preserveOracleDateTime
     ) throws SQLException {
+        int columnType = meta.getColumnType(index);
+
+        if (columnType == Types.BOOLEAN) {
+            boolean boolValue = rs.getBoolean(index);
+            if (!rs.wasNull()) {
+                return boolValue;
+            }
+            return null;
+        }
+
         Object value = rs.getObject(index);
         if (value == null) {
             return null;
         }
         if (value instanceof byte[] bytes) {
+            if (columnType == Types.BIT && bytes.length == 1 && (bytes[0] == 't' || bytes[0] == 'f')) {
+                return bytes[0] == 't';
+            }
             return binaryToHex(bytes);
         }
         if (value instanceof Clob clob) {

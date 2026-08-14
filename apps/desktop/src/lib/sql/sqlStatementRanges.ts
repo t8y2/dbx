@@ -237,7 +237,7 @@ const DATABASE_SOFT_STATEMENT_KEYWORDS: Partial<Record<DatabaseType, readonly st
   sqlite: ["ATTACH", "DETACH", "REINDEX"],
   duckdb: ["ATTACH", "DETACH", "EXPORT", "IMPORT", "INSTALL", "LOAD"],
   clickhouse: ["ATTACH", "CHECK", "DETACH", "EXCHANGE", "KILL", "OPTIMIZE", "SYSTEM"],
-  sqlserver: ["BACKUP", "DBCC", "DENY", "RESTORE"],
+  sqlserver: ["BACKUP", "DBCC", "DENY", "KILL", "RESTORE"],
   saphana: ["DO"],
   oracle: ["FLASHBACK", "LOCK", "PURGE"],
   dameng: ["FLASHBACK", "LOCK", "PURGE"],

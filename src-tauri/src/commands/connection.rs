@@ -1040,7 +1040,8 @@ async fn test_connection_with_info_inner(
                     Some(&config.password),
                     config.ssl,
                     connect_timeout,
-                );
+                )
+                .with_database(config.database.as_deref());
                 db::vector_driver::test_connection(&client, connect_timeout)
                     .await
                     .map(|_| "Connection successful".to_string())
@@ -1421,7 +1422,8 @@ pub async fn connect_db(
                 Some(&db_config.password),
                 db_config.ssl,
                 connect_timeout,
-            );
+            )
+            .with_database(db_config.database.as_deref());
             db::vector_driver::test_connection(&client, connect_timeout).await?;
             PoolKind::VectorDb(client)
         }

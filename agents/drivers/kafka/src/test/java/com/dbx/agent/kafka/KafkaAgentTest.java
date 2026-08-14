@@ -568,15 +568,23 @@ class KafkaAgentTest {
     }
 
     @Test
-    void boundsThePerPartitionMessageQuotaBeforeTrimmingTheResult() {
-        assertEquals(12, KafkaAgent.recentPeekFetchCount(4, 3));
+    void latestPeekReportsWhetherTheGlobalBudgetCanCoverEveryPartitionQuota() {
+        assertFalse(KafkaAgent.latestPeekBudgetLimited(20, 50));
+        assertTrue(KafkaAgent.latestPeekBudgetLimited(20, 51));
+        assertTrue(KafkaAgent.latestPeekBudgetLimited(100, 11));
         assertEquals(4, KafkaAgent.peekMessagesPerPartition(10, 3));
     }
 
     @Test
-    void peekRejectsAWindowThatExceedsTheScanLimit() {
-        assertThrows(IllegalArgumentException.class, () ->
-            KafkaAgent.peekScanLimit(100, 1_001));
+    void latestPeekSharesTheGlobalScanBudgetAcrossManyPartitions() {
+        assertEquals(20, KafkaAgent.latestPeekMessagesPerPartition(20, 3));
+        assertEquals(19, KafkaAgent.latestPeekMessagesPerPartition(20, 51));
+        assertEquals(16, KafkaAgent.latestPeekMessagesPerPartition(20, 60));
+        assertEquals(10, KafkaAgent.latestPeekMessagesPerPartition(20, 100));
+        assertEquals(90, KafkaAgent.latestPeekMessagesPerPartition(100, 11));
+        assertEquals(1_000, KafkaAgent.peekScanLimit(
+            100, 11, KafkaAgent.PeekStartPosition.LATEST
+        ));
     }
 
     @Test
@@ -649,6 +657,25 @@ class KafkaAgentTest {
     }
 
     @Test
+    void resolvePeekPartitionsRejectsMissingPartitionBeforeOffsetLookup() {
+        IllegalArgumentException error = assertThrows(IllegalArgumentException.class, () ->
+            KafkaAgent.resolvePeekPartitions("events", 5, List.of(0, 1, 2))
+        );
+
+        assertEquals(
+            "Kafka partition 5 does not exist for topic 'events'. Available partitions: 0, 1, 2",
+            error.getMessage()
+        );
+    }
+
+    @Test
+    void resolvePeekPartitionsKeepsRequestedPartitionAfterMetadataLookup() {
+        var partitions = KafkaAgent.resolvePeekPartitions("events", 1, List.of(0, 1, 2));
+
+        assertEquals(List.of(1), partitions.stream().map(TopicPartition::partition).toList());
+    }
+
+    @Test
     void resolvePeekPartitionsUsesAllPartitionsWhenUnspecified() {
         var partitions = KafkaAgent.resolvePeekPartitions("events", null, List.of(2, 0, 1));
         assertEquals(List.of(0, 1, 2), partitions.stream().map(org.apache.kafka.common.TopicPartition::partition).toList());
@@ -680,9 +707,45 @@ class KafkaAgentTest {
 
         assertEquals(20L, messages.get(0).get("timestamp"));
         assertEquals(0, messages.get(1).get("partition"));
-        assertEquals(2L, messages.get(1).get("offset"));
-        assertEquals(5L, messages.get(2).get("offset"));
+        assertEquals(5L, messages.get(1).get("offset"));
+        assertEquals(2L, messages.get(2).get("offset"));
         assertEquals(1, messages.get(3).get("partition"));
+    }
+
+    @Test
+    void latestPeekKeepsTheFullQuotaWhenItFitsTheGlobalScanBudget() {
+        assertEquals(1_000, KafkaAgent.peekScanLimit(
+            100, 10, KafkaAgent.PeekStartPosition.LATEST
+        ));
+        assertEquals(100, KafkaAgent.latestPeekMessagesPerPartition(100, 10));
+        assertEquals(20, KafkaAgent.latestPeekMessagesPerPartition(20, 50));
+    }
+
+    @Test
+    void latestPeekRejectsTopicsWhosePartitionCountAloneExceedsTheScanBudget() {
+        IllegalArgumentException error = assertThrows(IllegalArgumentException.class, () ->
+            KafkaAgent.latestPeekMessagesPerPartition(20, 1_001)
+        );
+
+        assertTrue(error.getMessage().contains("select a partition"));
+    }
+
+    @Test
+    void latestPeekGloballyMergesInterleavedPartitionTimelinesBeforeLimiting() {
+        var messages = new java.util.ArrayList<Map<String, Object>>();
+        messages.add(Map.of("timestamp", 101L, "partition", 0, "offset", 8L));
+        messages.add(Map.of("timestamp", 105L, "partition", 1, "offset", 3L));
+        messages.add(Map.of("timestamp", 103L, "partition", 2, "offset", 9L));
+        messages.add(Map.of("timestamp", 104L, "partition", 0, "offset", 9L));
+        messages.add(Map.of("timestamp", 102L, "partition", 1, "offset", 2L));
+
+        List<Map<String, Object>> latest = KafkaAgent.sortAndLimitPeekedMessages(
+            messages, 3, KafkaAgent.PeekStartPosition.LATEST
+        );
+
+        assertEquals(List.of(105L, 104L, 103L), latest.stream()
+            .map(message -> ((Number) message.get("timestamp")).longValue())
+            .toList());
     }
 
     @Test

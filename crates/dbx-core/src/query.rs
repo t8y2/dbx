@@ -6,7 +6,7 @@ use sqlparser::ast::{
 };
 use sqlparser::dialect::{GenericDialect, PostgreSqlDialect};
 use sqlparser::parser::Parser;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::ops::ControlFlow;
 use std::sync::{
@@ -527,13 +527,23 @@ fn merge_large_value_cells(
     mut driver_cells: Vec<db::LargeValueCell>,
     server_cells: Vec<db::LargeValueCell>,
 ) -> Vec<db::LargeValueCell> {
+    if driver_cells.is_empty() {
+        return server_cells;
+    }
+    if server_cells.is_empty() {
+        return driver_cells;
+    }
+    let mut driver_indexes = driver_cells
+        .iter()
+        .enumerate()
+        .map(|(index, cell)| ((cell.row_index, cell.column_index), index))
+        .collect::<HashMap<_, _>>();
     for server_cell in server_cells {
-        if let Some(driver_cell) = driver_cells
-            .iter_mut()
-            .find(|cell| cell.row_index == server_cell.row_index && cell.column_index == server_cell.column_index)
-        {
-            *driver_cell = server_cell;
+        let key = (server_cell.row_index, server_cell.column_index);
+        if let Some(index) = driver_indexes.get(&key).copied() {
+            driver_cells[index] = server_cell;
         } else {
+            driver_indexes.insert(key, driver_cells.len());
             driver_cells.push(server_cell);
         }
     }
@@ -1685,6 +1695,7 @@ async fn do_execute_typed(
                     max_result_bytes,
                     &options.result_key_columns,
                     mysql_dialect,
+                    options.execution_id.as_deref(),
                 ),
             )
             .await
@@ -2732,6 +2743,7 @@ struct MysqlBatchConnection<'a> {
     result_key_columns: &'a [String],
     table_data_preview: bool,
     dialect: db::mysql::MySqlQueryDialect,
+    diagnostic_trace_id: Option<&'a str>,
 }
 
 impl MysqlBatchStatementExecutor for MysqlBatchConnection<'_> {
@@ -2751,6 +2763,7 @@ impl MysqlBatchStatementExecutor for MysqlBatchConnection<'_> {
                 self.max_result_bytes,
                 self.result_key_columns,
                 self.dialect,
+                self.diagnostic_trace_id,
             ),
         )
         .await
@@ -2948,6 +2961,8 @@ async fn execute_multi_mysql(
     options: QueryExecutionOptions,
     progress: Option<&ExecuteMultiProgressCallback>,
 ) -> Result<Vec<ExecuteMultiResult>, String> {
+    let trace_id = options.execution_id.as_deref().unwrap_or("none");
+    let total_started_at = std::time::Instant::now();
     let query_timeout = resolve_query_timeout(options.timeout_secs);
     let operation_budget = operation_budget_for_pool_key(state, pool_key, query_timeout).await;
     let bare = mode == crate::connection::MysqlMode::Bare;
@@ -2955,6 +2970,7 @@ async fn execute_multi_mysql(
     let max_result_bytes = options.max_result_bytes.filter(|value| *value > 0);
     let pipeline_non_result_statements =
         mysql_non_result_pipeline_enabled(statements.len(), options.continue_on_error, mode);
+    let checkout_started_at = std::time::Instant::now();
     let mut conn = match db::mysql::get_conn_with_health_check_with_cancel(
         pool,
         operation_budget.checkout_timeout,
@@ -2973,13 +2989,16 @@ async fn execute_multi_mysql(
             return Ok(vec![ExecuteMultiResult::execution_error(error_query_result(err))]);
         }
     };
+    let checkout_ms = checkout_started_at.elapsed().as_millis();
     apply_oceanbase_mysql_session_timeout(state, pool_key, &mut conn, options.timeout_secs).await?;
+    let catalog_started_at = std::time::Instant::now();
     wait_for_result_opt(
         cancel_token.clone(),
         query_timeout,
         db::mysql::apply_catalog_database_context(&mut conn, catalog_dialect, options.catalog.as_deref(), database),
     )
     .await?;
+    let catalog_ms = catalog_started_at.elapsed().as_millis();
     let pipeline_non_result_max_bytes = if pipeline_non_result_statements {
         db::mysql::max_allowed_packet_on_conn(&mut conn)
             .await
@@ -3000,7 +3019,9 @@ async fn execute_multi_mysql(
         result_key_columns: &options.result_key_columns,
         table_data_preview: options.table_data_preview,
         dialect,
+        diagnostic_trace_id: options.execution_id.as_deref(),
     };
+    let statements_started_at = std::time::Instant::now();
     let (results, error_action) = execute_mysql_batch_statements(
         &mut executor,
         statements,
@@ -3012,7 +3033,19 @@ async fn execute_multi_mysql(
         progress,
     )
     .await;
+    let statements_ms = statements_started_at.elapsed().as_millis();
     drop(executor);
+
+    log::info!(
+        "[query][mysql-batch] trace_id={} checkout_ms={} catalog_ms={} statements_ms={} total_ms={} result_count={} row_counts={:?}",
+        trace_id,
+        checkout_ms,
+        catalog_ms,
+        statements_ms,
+        total_started_at.elapsed().as_millis(),
+        results.len(),
+        results.iter().map(|result| result.result.rows.len()).collect::<Vec<_>>()
+    );
 
     if matches!(error_action, Some(PoolErrorAction::Discard | PoolErrorAction::ReconnectAndRetry)) {
         state.remove_pool_by_key(pool_key).await;
@@ -6062,6 +6095,53 @@ for line in sys.stdin:
             serialized.get("large_value_cells"),
             Some(&serde_json::json!([{"row_index": 2, "column_index": 3, "original_bytes": 65_536}]))
         );
+    }
+
+    #[test]
+    fn large_value_cell_merge_replaces_driver_entries_and_appends_server_entries() {
+        let driver_cells = vec![
+            db::LargeValueCell { row_index: 1, column_index: 2, original_bytes: 10 },
+            db::LargeValueCell { row_index: 3, column_index: 4, original_bytes: 20 },
+        ];
+        let server_cells = vec![
+            db::LargeValueCell { row_index: 1, column_index: 2, original_bytes: 100 },
+            db::LargeValueCell { row_index: 5, column_index: 6, original_bytes: 200 },
+        ];
+
+        assert_eq!(
+            merge_large_value_cells(driver_cells, server_cells),
+            vec![
+                db::LargeValueCell { row_index: 1, column_index: 2, original_bytes: 100 },
+                db::LargeValueCell { row_index: 3, column_index: 4, original_bytes: 20 },
+                db::LargeValueCell { row_index: 5, column_index: 6, original_bytes: 200 },
+            ]
+        );
+    }
+
+    #[test]
+    fn large_value_cell_merge_preserves_single_source_inputs() {
+        let driver_cell = db::LargeValueCell { row_index: 1, column_index: 2, original_bytes: 10 };
+        let server_cell = db::LargeValueCell { row_index: 3, column_index: 4, original_bytes: 20 };
+
+        assert_eq!(merge_large_value_cells(vec![driver_cell.clone()], Vec::new()), vec![driver_cell]);
+        assert_eq!(merge_large_value_cells(Vec::new(), vec![server_cell.clone()]), vec![server_cell]);
+    }
+
+    #[test]
+    fn large_value_cell_merge_handles_large_disjoint_inputs() {
+        const CELL_COUNT: usize = 100_000;
+        let driver_cells = (0..CELL_COUNT)
+            .map(|row_index| db::LargeValueCell { row_index, column_index: 0, original_bytes: 10 })
+            .collect();
+        let server_cells = (0..CELL_COUNT)
+            .map(|row_index| db::LargeValueCell { row_index, column_index: 1, original_bytes: 20 })
+            .collect();
+
+        let merged = merge_large_value_cells(driver_cells, server_cells);
+
+        assert_eq!(merged.len(), CELL_COUNT * 2);
+        assert_eq!(merged[CELL_COUNT].row_index, 0);
+        assert_eq!(merged[CELL_COUNT * 2 - 1].row_index, CELL_COUNT - 1);
     }
 
     #[test]

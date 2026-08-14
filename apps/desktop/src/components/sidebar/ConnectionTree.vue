@@ -8,8 +8,19 @@ import { useSavedSqlStore } from "@/stores/savedSqlStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useToast } from "@/composables/useToast";
 import type { ObjectSourceKind, TableInfo, TableNameFilter, TreeNode, TreeNodeType } from "@/types/database";
-import { createSidebarSearchSubtreePreserver, filterSidebarSearchRootsByConnectionState, filterSidebarTree, filterSidebarTreeToConnectedConnections, resolveSidebarFilterGuards, resolveSidebarObjectSearchFilter, reuseLiveSidebarTreeNodes } from "@/lib/sidebar/sidebarSearchTree";
-import { matchSidebarLabel } from "@/lib/sidebar/sidebarSearch";
+import {
+  createSidebarSearchSubtreePreserver,
+  filterSidebarSearchRootsByConnectionState,
+  filterSidebarTree,
+  filterSidebarTreeToConnectedConnections,
+  mergeSidebarRegexIndexScopes,
+  resolveSidebarFilterGuards,
+  resolveSidebarObjectSearchFilter,
+  reuseLiveSidebarTreeNodes,
+  type SidebarRegexIndexScope,
+} from "@/lib/sidebar/sidebarSearchTree";
+import { createSidebarLabelMatcher, matchSidebarLabel } from "@/lib/sidebar/sidebarSearch";
+import { collectSidebarRegexIndexScopes, resolveSidebarRemoteSearchQuery, resolveSidebarSearchDispatchMode } from "@/lib/sidebar/sidebarRegexSearchIndex";
 import { buildTableTreeNodes } from "@/lib/table/tableTree";
 import { isCancelSearchShortcut, isCopySidebarSelectionShortcut, isEditSidebarConnectionShortcut, isPasteSidebarSelectionShortcut, isViewTableDdlShortcut } from "@/lib/editor/keyboardShortcuts";
 import { sidebarNodeSupportsDdlView } from "@/lib/sidebar/sidebarTreeDdlShortcut";
@@ -54,6 +65,7 @@ import { alignedSidebarCommentLabelWidths, isSidebarCommentAlignableNode, sideba
 import { formatSidebarObjectStorage, sidebarTableStorageScopes, supportsSidebarTableStorage } from "@/lib/sidebar/sidebarDatabaseStorage";
 import { sidebarScrollbarGeometry as calculateSidebarScrollbarGeometry } from "@/lib/sidebar/sidebarScrollbar";
 import { disconnectSidebarConnections } from "@/lib/sidebar/sidebarConnectionDisconnect";
+import { compileSearchRegex } from "@/lib/common/searchPattern";
 
 const { t } = useI18n();
 const store = useConnectionStore();
@@ -63,6 +75,7 @@ const settingsStore = useSettingsStore();
 const { toast } = useToast();
 const searchQuery = ref("");
 const deferredSearchQuery = ref("");
+const regexMode = ref(false);
 const showConnectedConnectionsOnly = ref(false);
 const isDisconnectingAllActiveConnections = ref(false);
 const searchInputRef = ref<HTMLInputElement>();
@@ -148,7 +161,7 @@ type TableSearchFocusRestore = {
 watch(
   searchQuery,
   (value) => {
-    const normalized = value.trim().toLowerCase();
+    const normalized = regexMode.value ? value.trim() : value.trim().toLowerCase();
     window.clearTimeout(searchTimer);
 
     if (!normalized) {
@@ -162,6 +175,14 @@ watch(
   },
   { flush: "sync" },
 );
+
+watch(regexMode, (enabled) => {
+  window.clearTimeout(searchTimer);
+  searchTimer = undefined;
+  // Re-evaluate immediately so a pending ordinary-search debounce cannot
+  // overwrite a case-sensitive regular expression after the mode changes.
+  deferredSearchQuery.value = enabled ? searchQuery.value.trim() : searchQuery.value.trim().toLowerCase();
+});
 
 watch(
   [showConnectedConnectionsOnly, () => store.connectedIds.size],
@@ -222,10 +243,20 @@ watch(
   },
 );
 
-watch(deferredSearchQuery, (newQuery, oldQuery) => {
-  store.sidebarSearchQuery = newQuery;
-  if (settingsStore.editorSettings.sidebarGlobalSearchLocal) {
-    if (!newQuery && oldQuery) searchRefreshedNodeIds.clear();
+watch([deferredSearchQuery, regexMode], ([newQuery, isRegexMode], [oldQuery, wasRegexMode]) => {
+  // The regex source is a client-side projection; the remote tree-loading
+  // search state must never carry it, or explicit node expansion would leak
+  // the expression as a remote searchFilter.
+  store.sidebarSearchQuery = resolveSidebarRemoteSearchQuery(isRegexMode, newQuery);
+  const dispatchMode = resolveSidebarSearchDispatchMode({ query: newQuery, regexMode: isRegexMode, wasRegexMode }, { localSearchEnabled: settingsStore.editorSettings.sidebarGlobalSearchLocal });
+  if (dispatchMode === "regex") {
+    // Regex search is a read-only projection over live nodes and the local
+    // table index. It must never trigger ensureConnected/listTables.
+    void loadRegexTableSearchIndexes();
+    return;
+  }
+  if (dispatchMode === "none") {
+    if (!wasRegexMode && !newQuery && oldQuery) searchRefreshedNodeIds.clear();
     return;
   }
   const tasks: Promise<void>[] = [];
@@ -475,6 +506,7 @@ function restoreTableSearchInput(focusRestore: TableSearchFocusRestore) {
 
 const displayedTreeNodes = computed(() => sortConnectionListForDisplay(store.treeNodes, settingsStore.editorSettings.sidebarConnectionSortMode));
 const localTableSearchResults = ref<Record<string, TableInfo[] | null>>({});
+const regexTableSearchScopes = shallowRef<SidebarRegexIndexScope[]>([]);
 
 const localTableSearchParentTypes = new Set<TreeNodeType>(["database", "schema", "linked-server-schema", "group-tables"]);
 const localTableSearchChildTypes = new Set<TreeNodeType>(["table", "view", "materialized_view"]);
@@ -498,6 +530,28 @@ function filterLocallySearchedTables(nodes: TreeNode[]): TreeNode[] {
   });
 }
 
+async function loadRegexTableSearchIndexes() {
+  if (!regexMode.value || !deferredSearchQuery.value) return;
+  const loadedScopes = await collectSidebarRegexIndexScopes(
+    {
+      loadSidebarTableSearchIndexScopes: () => store.loadSidebarTableSearchIndexScopes(),
+      loadSidebarTableSearchIndex: (parent) => store.loadSidebarTableSearchIndex(parent.parentNodeId, parent),
+    },
+    store.treeNodes,
+    () => !regexMode.value || deferredSearchQuery.value === "",
+  );
+  if (regexMode.value) {
+    regexTableSearchScopes.value = loadedScopes;
+  }
+}
+
+function filterGloballyIndexedRegexTables(nodes: TreeNode[]): TreeNode[] {
+  if (!regexMode.value || !deferredSearchQuery.value) return nodes;
+  const matcher = createSidebarLabelMatcher(deferredSearchQuery.value, { regexMode: true });
+  const matchingScopes = regexTableSearchScopes.value.map((scope) => ({ ...scope, entries: scope.entries.filter((entry) => !!matcher(entry.name) || !!matcher(entry.comment || "")) })).filter((scope) => scope.entries.length > 0);
+  return mergeSidebarRegexIndexScopes(nodes, matchingScopes);
+}
+
 async function loadLocalTableSearchResults(parentNodeId: string, refresh = false, focusRestore?: TableSearchFocusRestore) {
   try {
     const entries = refresh ? await store.refreshSidebarTableSearchIndex(parentNodeId) : await store.loadSidebarTableSearchIndex(parentNodeId);
@@ -514,10 +568,14 @@ const filteredNodes = computed(() => {
   }
 
   nodes = filterLocallySearchedTables(nodes);
+  nodes = filterGloballyIndexedRegexTables(nodes);
 
   const q = deferredSearchQuery.value;
-  nodes = filterSidebarTree(nodes, q, searchCollapsedIds.value, searchableNodeTypes.value, (node) => (node.type === "nacos-access-control" ? t("nacos.accessControlSidebarLabel") : node.label));
-  if (q) {
+  nodes = filterSidebarTree(nodes, q, searchCollapsedIds.value, searchableNodeTypes.value, {
+    regexMode: regexMode.value,
+    resolveLabel: (node) => (node.type === "nacos-access-control" ? t("nacos.accessControlSidebarLabel") : node.label),
+  });
+  if (q && !regexMode.value) {
     nodes = filterSidebarSearchRootsByConnectionState(nodes, store.connectedIds);
   }
 
@@ -952,8 +1010,17 @@ const pasteHandlerRegistry = createSidebarPasteHandlerRegistry();
 provide(sidebarTreeContextKey, {
   getVisibleNodes: () => selectableVisibleNodes.value,
   getVisibleNodeIndex: (id: string) => selectableVisibleNodeIndexById.value.get(id) ?? -1,
+  // Cover both sides of the input debounce: the immediate query prevents a
+  // collapse while a projection is about to start, and the deferred query
+  // keeps the currently rendered projection alive while clearing settles.
+  isSearchProjectionActive: () => isTreeSearchFiltering.value || !!deferredSearchQuery.value,
   getTreeLoadSearchOptions: (node) => {
     const query = deferredSearchQuery.value;
+    if (regexMode.value) {
+      // Explicit expansion stays allowed and may connect, but must never send
+      // the regex expression as a remote search filter.
+      return { searchFilter: "", allowGlobalSearchMismatch: true, expectedSidebarSearchQuery: "" };
+    }
     if (!query) return undefined;
     const searchFilter = resolveSidebarObjectSearchFilter(store.treeNodes, node.id, query, searchableNodeTypes.value);
     return searchFilter ? undefined : { searchFilter: "", allowGlobalSearchMismatch: true, expectedSidebarSearchQuery: query };
@@ -1910,7 +1977,9 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes });
             autocapitalize="off"
             autocorrect="off"
             spellcheck="false"
-            class="w-full h-6 pl-7 pr-6 text-xs rounded border border-border bg-background focus:outline-none focus:ring-1 focus:ring-ring"
+            class="w-full h-6 pl-7 pr-6 text-xs rounded border bg-background focus:outline-none focus:ring-1 focus:ring-ring"
+            :class="regexMode && compileSearchRegex(searchQuery).invalid ? 'border-destructive focus:ring-destructive' : 'border-border'"
+            :aria-invalid="regexMode && compileSearchRegex(searchQuery).invalid ? 'true' : 'false'"
             :placeholder="t('grid.search')"
             @keydown="onSearchKeydown"
           />
@@ -1919,7 +1988,19 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes });
           </button>
         </div>
         <LightTooltip :text="t('sidebar.globalLocalSearchTooltip')" side="top" :delay="300">
-          <Switch size="sm" :model-value="settingsStore.editorSettings.sidebarGlobalSearchLocal" :aria-label="t('sidebar.globalLocalSearch')" @update:model-value="settingsStore.updateEditorSettings({ sidebarGlobalSearchLocal: Boolean($event) })" />
+          <Switch size="sm" :model-value="settingsStore.editorSettings.sidebarGlobalSearchLocal" :disabled="regexMode" :aria-label="t('sidebar.globalLocalSearch')" @update:model-value="settingsStore.updateEditorSettings({ sidebarGlobalSearchLocal: Boolean($event) })" />
+        </LightTooltip>
+        <LightTooltip :text="t('sidebar.regexSearchTooltip')" side="top" :delay="300">
+          <button
+            type="button"
+            class="shrink-0 h-6 min-w-6 px-1 flex items-center justify-center rounded border border-border text-[10px] font-mono hover:bg-accent"
+            :class="{ 'text-primary bg-primary/10 border-primary/30': regexMode, 'text-destructive border-destructive/60': regexMode && compileSearchRegex(searchQuery).invalid }"
+            :aria-label="t('sidebar.regexSearch')"
+            :aria-pressed="regexMode"
+            @click="regexMode = !regexMode"
+          >
+            .*
+          </button>
         </LightTooltip>
         <LightTooltip :text="t('sidebar.locateActiveTab')" side="top" :delay="300" nowrap>
           <button type="button" class="shrink-0 h-6 w-6 flex items-center justify-center rounded border border-border text-muted-foreground hover:bg-accent hover:text-foreground" :aria-label="t('sidebar.locateActiveTab')" @click="locateActiveTabInSidebar">

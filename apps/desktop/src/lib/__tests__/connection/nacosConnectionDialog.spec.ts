@@ -29,6 +29,8 @@ describe("Nacos connection dialog layout", () => {
     expect(main).toContain("data-nacos-ordinary-user-toggle");
     expect(main).toContain('v-model="nacosOrdinaryAccount"');
     expect(main).toContain("nacosAuthKind === 'usernamePassword'");
+    expect(main).toContain("nacosImplementation === 'nacos' && nacosAuthKind === 'usernamePassword'");
+    expect(main).not.toContain("nacosVersionMode === 'v3' && nacosAuthKind === 'usernamePassword'");
     expect(main).not.toContain('v-model="nacosNamespace"');
     expect(main).toContain('t("nacos.nacosAuthHint")');
     expect(main).not.toContain('v-model="nacosMetricsMode"');

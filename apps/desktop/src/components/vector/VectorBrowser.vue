@@ -21,6 +21,7 @@ const props = defineProps<{
   collectionLabel?: string;
   databaseType?: DatabaseType;
   dimension?: number;
+  tenant?: string;
 }>();
 
 const loading = ref(false);
@@ -248,16 +249,19 @@ function defaultRequestText(databaseType: DatabaseType | undefined, database: st
   }
   if (databaseType === "chromadb") {
     const collectionId = collection || "collection-id";
+    const tenant = encodeURIComponent(props.tenant?.trim() || "default_tenant");
+    const chromaDatabase = encodeURIComponent(database.trim() || "default_database");
+    const collectionPath = `/api/v2/tenants/${tenant}/databases/${chromaDatabase}/collections/${encodeURIComponent(collectionId)}`;
     if (mode === "delete") {
-      return `POST /api/v2/tenants/default_tenant/databases/default_database/collections/${encodeURIComponent(collectionId)}/delete\n${JSON.stringify({ ids: ["id1"] }, null, 2)}`;
+      return `POST ${collectionPath}/delete\n${JSON.stringify({ ids: ["id1"] }, null, 2)}`;
     }
     if (mode === "upsert") {
-      return `POST /api/v2/tenants/default_tenant/databases/default_database/collections/${encodeURIComponent(collectionId)}/upsert\n${JSON.stringify({ ids: ["id1"], embeddings: [sampleVector()], documents: ["sample document"], metadatas: [{}] }, null, 2)}`;
+      return `POST ${collectionPath}/upsert\n${JSON.stringify({ ids: ["id1"], embeddings: [sampleVector()], documents: ["sample document"], metadatas: [{}] }, null, 2)}`;
     }
     if (mode === "search") {
-      return `POST /api/v2/tenants/default_tenant/databases/default_database/collections/${encodeURIComponent(collectionId)}/query\n${JSON.stringify({ query_embeddings: [tryParseVector(searchVector.value)], n_results: searchTopK.value, include: ["documents", "metadatas", "distances"] }, null, 2)}`;
+      return `POST ${collectionPath}/query\n${JSON.stringify({ query_embeddings: [tryParseVector(searchVector.value)], n_results: searchTopK.value, include: ["documents", "metadatas", "distances"] }, null, 2)}`;
     }
-    return `POST /api/v2/tenants/default_tenant/databases/default_database/collections/${encodeURIComponent(collectionId)}/get\n${JSON.stringify({ limit: 100, include: ["documents", "metadatas"] }, null, 2)}`;
+    return `POST ${collectionPath}/get\n${JSON.stringify({ limit: 100, include: ["documents", "metadatas"] }, null, 2)}`;
   }
   const collectionPath = pathSegment(collection);
   if (mode === "delete") {

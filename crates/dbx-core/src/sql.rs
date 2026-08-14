@@ -117,7 +117,7 @@ struct SqlDialectProfile {
     supports_hana_do_blocks: bool,
     supports_go_batch_separator: bool,
     keeps_sqlserver_module_batch_at_cursor: bool,
-    preserves_tdsql_proxy_directive: bool,
+    preserves_tdsql_leading_directives: bool,
     requires_whitespace_after_line_comment_dashes: bool,
 }
 
@@ -134,7 +134,7 @@ impl Default for SqlDialectProfile {
             supports_hana_do_blocks: false,
             supports_go_batch_separator: false,
             keeps_sqlserver_module_batch_at_cursor: false,
-            preserves_tdsql_proxy_directive: false,
+            preserves_tdsql_leading_directives: false,
             requires_whitespace_after_line_comment_dashes: false,
         }
     }
@@ -144,9 +144,8 @@ impl SqlDialectProfile {
     fn for_database_type(db_type: DatabaseType) -> Self {
         if matches!(db_type, DatabaseType::Mysql) {
             return Self {
-                preserves_tdsql_proxy_directive: crate::db::tdsql_mysql::preserves_proxy_directive_for_database_type(
-                    db_type,
-                ),
+                preserves_tdsql_leading_directives:
+                    crate::db::tdsql_mysql::preserves_leading_directives_for_database_type(db_type),
                 ..Self::mysql_compatible()
             };
         }
@@ -2530,8 +2529,8 @@ fn executable_sql_bounds(statement: &str, options: SqlParsingOptions) -> Option<
         return None;
     }
     let executable_start = trimmed.len() - executable.len();
-    let start = if options.profile.preserves_tdsql_proxy_directive {
-        crate::db::tdsql_mysql::proxy_directive_start(trimmed, executable_start).unwrap_or(executable_start)
+    let start = if options.profile.preserves_tdsql_leading_directives {
+        crate::db::tdsql_mysql::leading_directive_start(trimmed, executable_start).unwrap_or(executable_start)
     } else {
         executable_start
     };
@@ -3384,14 +3383,14 @@ SELECT 2;";
         assert!(!default.supports_slash_line_block_delimiter);
         assert!(!default.supports_go_batch_separator);
         assert!(!default.keeps_sqlserver_module_batch_at_cursor);
-        assert!(!default.preserves_tdsql_proxy_directive);
+        assert!(!default.preserves_tdsql_leading_directives);
 
         let mysql = SqlDialectProfile::for_database_type(DatabaseType::Mysql);
         assert!(mysql.supports_hash_line_comments);
         assert!(mysql.supports_mysql_routine_blocks);
-        assert!(mysql.preserves_tdsql_proxy_directive);
+        assert!(mysql.preserves_tdsql_leading_directives);
         assert!(SqlDialectProfile::for_database_type(DatabaseType::Doris).supports_hash_line_comments);
-        assert!(!SqlDialectProfile::for_database_type(DatabaseType::Doris).preserves_tdsql_proxy_directive);
+        assert!(!SqlDialectProfile::for_database_type(DatabaseType::Doris).preserves_tdsql_leading_directives);
         assert!(SqlDialectProfile::for_database_type(DatabaseType::StarRocks).supports_hash_line_comments);
         assert!(SqlDialectProfile::for_database_type(DatabaseType::ManticoreSearch).supports_hash_line_comments);
         assert!(SqlDialectProfile::for_database_type(DatabaseType::Goldendb).supports_hash_line_comments);
@@ -4290,6 +4289,40 @@ delimiter ;";
             );
         }
         assert!(split_sql_statements_for_database("/*proxy*/", DatabaseType::Mysql).is_empty());
+    }
+
+    #[test]
+    fn mysql_current_statement_preserves_same_line_tdsql_directives_without_an_allowlist() {
+        for directive in ["/*sets:allsets */", "/*master*/", "/*slave:set_1781591902_7*/", "/*future-route:anywhere*/"]
+        {
+            let sql = format!("{directive} SELECT count(*) FROM tenant_table");
+            let cursor = sql[..sql.find("tenant_table").unwrap()].encode_utf16().count();
+
+            assert_eq!(find_statement_at_cursor_for_database(&sql, cursor, DatabaseType::Mysql), sql);
+            assert_eq!(split_sql_statements_for_database(&sql, DatabaseType::Mysql), vec![sql]);
+        }
+    }
+
+    #[test]
+    fn mysql_current_statement_strips_generic_tdsql_style_directive_on_a_separate_line() {
+        let sql = "/*sets:allsets */\nSELECT count(*) FROM tenant_table";
+        let cursor = sql[..sql.find("tenant_table").unwrap()].encode_utf16().count();
+
+        assert_eq!(
+            find_statement_at_cursor_for_database(sql, cursor, DatabaseType::Mysql),
+            "SELECT count(*) FROM tenant_table"
+        );
+    }
+
+    #[test]
+    fn other_databases_strip_same_line_tdsql_style_directives() {
+        let sql = "/*sets:allsets */ SELECT count(*) FROM tenant_table";
+        let cursor = sql[..sql.find("tenant_table").unwrap()].encode_utf16().count();
+
+        assert_eq!(
+            find_statement_at_cursor_for_database(sql, cursor, DatabaseType::Postgres),
+            "SELECT count(*) FROM tenant_table"
+        );
     }
 
     #[test]

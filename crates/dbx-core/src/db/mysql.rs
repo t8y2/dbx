@@ -9,6 +9,7 @@ use sqlparser::dialect::MySqlDialect;
 use sqlparser::parser::Parser;
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
+use std::future::Future;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
@@ -2144,12 +2145,16 @@ const DATABASE_LIST_QUERY_PLAN: [(&str, bool); 2] =
     [(SHOW_DATABASES_SQL, true), (INFORMATION_SCHEMA_DATABASES_SQL, false)];
 
 pub async fn list_databases(pool: &MySqlPool) -> Result<Vec<DatabaseInfo>, String> {
+    list_databases_with_timeout(pool, super::connection_timeout()).await
+}
+
+pub async fn list_databases_with_timeout(pool: &MySqlPool, timeout: Duration) -> Result<Vec<DatabaseInfo>, String> {
     let [(primary_sql, primary_catalogless), (fallback_sql, fallback_catalogless)] = DATABASE_LIST_QUERY_PLAN;
-    match list_databases_with_query(pool, primary_sql, primary_catalogless).await {
+    match list_databases_with_query(pool, primary_sql, primary_catalogless, timeout).await {
         Ok(databases) => Ok(databases),
         Err(err) => {
             log::debug!("Falling back to information_schema.SCHEMATA after SHOW DATABASES failed: {err}");
-            list_databases_with_query(pool, fallback_sql, fallback_catalogless).await
+            list_databases_with_query(pool, fallback_sql, fallback_catalogless, timeout).await
         }
     }
 }
@@ -2192,15 +2197,23 @@ async fn list_databases_with_query(
     pool: &MySqlPool,
     sql: &str,
     include_catalogless_when_blank: bool,
+    timeout: Duration,
 ) -> Result<Vec<DatabaseInfo>, String> {
-    let mut conn = get_conn_with_timeout(pool, super::connection_timeout()).await?;
+    let mut conn = get_conn_with_timeout(pool, timeout).await?;
     let result = conn.query_iter(sql).await.map_err(|e| e.to_string())?;
     let rows: Vec<mysql_async::Row> = result.collect_and_drop().await.map_err(|e| e.to_string())?;
     Ok(database_infos_from_names(rows.iter().map(|row| get_str(row, 0)), include_catalogless_when_blank))
 }
 
 pub async fn list_databases_show(pool: &MySqlPool) -> Result<Vec<DatabaseInfo>, String> {
-    list_databases_with_query(pool, SHOW_DATABASES_SQL, true).await
+    list_databases_show_with_timeout(pool, super::connection_timeout()).await
+}
+
+pub async fn list_databases_show_with_timeout(
+    pool: &MySqlPool,
+    timeout: Duration,
+) -> Result<Vec<DatabaseInfo>, String> {
+    list_databases_with_query(pool, SHOW_DATABASES_SQL, true, timeout).await
 }
 
 pub(super) fn database_infos_from_names(
@@ -3885,12 +3898,8 @@ async fn get_conn_with_timeout_and_cancel(
     timeout: Duration,
     cancel_token: Option<&CancellationToken>,
 ) -> Result<mysql_async::Conn, String> {
-    let get_future = async {
-        tokio::time::timeout(timeout, pool.get_conn())
-            .await
-            .map_err(|_| "MySQL get connection timed out".to_string())?
-            .map_err(|e| e.to_string())
-    };
+    let get_future =
+        connection_result_with_timeout(timeout, async { pool.get_conn().await.map_err(|error| error.to_string()) });
 
     match cancel_token {
         Some(token) => {
@@ -3905,10 +3914,14 @@ async fn get_conn_with_timeout_and_cancel(
 }
 
 pub async fn get_conn_with_timeout(pool: &MySqlPool, timeout: Duration) -> Result<mysql_async::Conn, String> {
-    tokio::time::timeout(timeout, pool.get_conn())
-        .await
-        .map_err(|_| "MySQL get connection timed out".to_string())?
-        .map_err(|e| e.to_string())
+    connection_result_with_timeout(timeout, async { pool.get_conn().await.map_err(|error| error.to_string()) }).await
+}
+
+async fn connection_result_with_timeout<T, F>(timeout: Duration, future: F) -> Result<T, String>
+where
+    F: Future<Output = Result<T, String>>,
+{
+    tokio::time::timeout(timeout, future).await.map_err(|_| "MySQL get connection timed out".to_string())?
 }
 
 async fn ping_conn_with_timeout_and_cancel(
@@ -5309,6 +5322,38 @@ mod tests {
         ]));
 
         assert_eq!(first_column_value::<String>(&row), Some(String::new()));
+    }
+
+    #[tokio::test]
+    async fn mysql_database_list_timeout_controls_checkout_deadline() {
+        let exact = connection_result_with_timeout(Duration::from_millis(100), async {
+            tokio::time::sleep(Duration::from_millis(60)).await;
+            Ok::<_, String>("connection")
+        });
+        let adjacent = connection_result_with_timeout(Duration::from_millis(50), async {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            Ok::<_, String>("connection")
+        });
+        let configured_five = connection_result_with_timeout(Duration::from_millis(50), async {
+            tokio::time::sleep(Duration::from_millis(60)).await;
+            Ok::<_, String>("connection")
+        });
+
+        let (exact, adjacent, configured_five) = tokio::join!(exact, adjacent, configured_five);
+
+        assert_eq!(exact, Ok("connection"));
+        assert_eq!(adjacent, Ok("connection"));
+        assert_eq!(configured_five, Err("MySQL get connection timed out".to_string()));
+    }
+
+    #[tokio::test]
+    async fn mysql_database_list_timeout_preserves_immediate_errors_and_fallback_plan() {
+        let error =
+            connection_result_with_timeout(Duration::from_secs(10), async { Err::<(), _>("driver error".to_string()) })
+                .await;
+
+        assert_eq!(error, Err("driver error".to_string()));
+        assert_eq!(DATABASE_LIST_QUERY_PLAN, [(SHOW_DATABASES_SQL, true), (INFORMATION_SCHEMA_DATABASES_SQL, false)]);
     }
 
     #[test]

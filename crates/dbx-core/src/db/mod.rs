@@ -25,6 +25,7 @@ pub mod mysql;
 pub mod mysql_compatible;
 pub mod ob_oracle;
 pub mod oceanbase_mysql;
+pub mod opentenbase;
 pub mod postgres;
 pub mod proxy_tunnel;
 pub mod questdb;

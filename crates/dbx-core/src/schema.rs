@@ -170,6 +170,12 @@ fn agent_metadata_timeout(config: Option<&ConnectionConfig>) -> Option<Duration>
     }
 }
 
+fn mysql_database_list_timeout(config: Option<&ConnectionConfig>) -> Duration {
+    config
+        .map(|config| Duration::from_secs(config.effective_connect_timeout_secs()))
+        .unwrap_or_else(db::connection_timeout)
+}
+
 pub async fn list_databases_core(state: &AppState, connection_id: &str) -> Result<Vec<db::DatabaseInfo>, String> {
     retry_metadata_connection(state, connection_id, None, || list_databases_once(state, connection_id)).await
 }
@@ -611,6 +617,7 @@ async fn list_databases_once(state: &AppState, connection_id: &str) -> Result<Ve
     }
 
     let db_config = connection_config(state, connection_id).await;
+    let mysql_database_list_timeout = mysql_database_list_timeout(db_config.as_ref());
     let connections = state.connections.read().await;
     let pool = connections.get(connection_id).ok_or("Connection not found")?;
 
@@ -621,11 +628,12 @@ async fn list_databases_once(state: &AppState, connection_id: &str) -> Result<Ve
             db::dolt::list_databases(p).await
         }
         PoolKind::Mysql(p, _) if db_config.as_ref().is_some_and(db::mysql_compatible::uses_show_metadata) => {
-            db::mysql::list_databases_show(p)
+            db::mysql::list_databases_show_with_timeout(p, mysql_database_list_timeout)
                 .await
                 .map(|databases| filter_mysql_system_databases_for_config(databases, db_config.as_ref()))
         }
-        PoolKind::Mysql(p, mode) => dispatch_mysql!(p, mode, db::mysql::list_databases, db::ob_oracle::list_databases),
+        PoolKind::Mysql(p, mode) if *mode == MysqlMode::OceanBaseOracle => db::ob_oracle::list_databases(p).await,
+        PoolKind::Mysql(p, _) => db::mysql::list_databases_with_timeout(p, mysql_database_list_timeout).await,
         PoolKind::Postgres(p) => db::postgres::list_databases(p).await,
         PoolKind::Sqlite(p) => db::sqlite::list_databases(p).await,
         PoolKind::Rqlite(client) => db::rqlite_driver::list_databases(client).await,
@@ -2671,13 +2679,14 @@ mod tests {
         filter_mysql_system_databases_for_config, filter_object_infos, filter_table_infos, filter_visible_schema_names,
         gaussdb_m_view_object_source_sql, gbase8a_object_statistics_sql, is_agent_postgres_metadata_fallback_config,
         is_mysql_external_driver_config, is_retryable_metadata_error, metadata_error_action,
-        metadata_name_or_comment_matches, mysql_external_driver_ddl_from_query_result, mysql_external_driver_ddl_sql,
-        mysql_object_source_ddl_column_index, mysql_object_source_sql, mysql_table_list_source_for_config,
-        mysql_table_metadata_catalog, normalize_information_schema_table_type, oracle_columns_from_query_result,
-        oracle_columns_sql, oracle_object_statistics_dba_segments_sql, oracle_object_statistics_from_query_result,
-        oracle_object_statistics_rows_only_sql, oracle_object_statistics_sql,
-        oracle_object_statistics_user_segments_sql, oracle_table_comment_from_query_result, oracle_table_comment_sql,
-        oracle_table_comments_sql, presto_like_columns_from_query_result, presto_like_information_schema_columns_sql,
+        metadata_name_or_comment_matches, mysql_database_list_timeout, mysql_external_driver_ddl_from_query_result,
+        mysql_external_driver_ddl_sql, mysql_object_source_ddl_column_index, mysql_object_source_sql,
+        mysql_table_list_source_for_config, mysql_table_metadata_catalog, normalize_information_schema_table_type,
+        oracle_columns_from_query_result, oracle_columns_sql, oracle_object_statistics_dba_segments_sql,
+        oracle_object_statistics_from_query_result, oracle_object_statistics_rows_only_sql,
+        oracle_object_statistics_sql, oracle_object_statistics_user_segments_sql,
+        oracle_table_comment_from_query_result, oracle_table_comment_sql, oracle_table_comments_sql,
+        presto_like_columns_from_query_result, presto_like_information_schema_columns_sql,
         presto_like_information_schema_tables_sql, presto_like_tables_from_query_result, replace_metadata_runtime,
         should_query_oracle_columns_via_sql_first, table_comments_from_query_result, table_name_filter_matches,
         tdengine_table_comment_like_pattern, tdengine_table_comment_sql, tdengine_table_comments_sql,
@@ -2842,6 +2851,24 @@ mod tests {
             production_databases: vec![],
             database_info: None,
         }
+    }
+
+    #[test]
+    fn mysql_database_list_timeout_uses_configured_and_effective_bounds() {
+        let mut config = test_connection_config(DatabaseType::Mysql);
+
+        config.connect_timeout_secs = 10;
+        assert_eq!(mysql_database_list_timeout(Some(&config)), Duration::from_secs(10));
+
+        config.connect_timeout_secs = 0;
+        assert_eq!(
+            mysql_database_list_timeout(Some(&config)),
+            Duration::from_secs(crate::models::connection::default_connect_timeout_secs())
+        );
+
+        config.connect_timeout_secs = 500;
+        assert_eq!(mysql_database_list_timeout(Some(&config)), Duration::from_secs(300));
+        assert_eq!(mysql_database_list_timeout(None), db::connection_timeout());
     }
 
     #[tokio::test]
@@ -6616,6 +6643,9 @@ async fn get_table_ddl_once(
         PoolKind::Postgres(p) if db_config.as_ref().is_some_and(is_cloudberry_config) => {
             cloudberry_ddl(p, schema, table).await
         }
+        PoolKind::Postgres(p) if db_config.as_ref().is_some_and(db::opentenbase::is_config) => {
+            opentenbase_ddl(p, schema, table).await
+        }
         PoolKind::Postgres(p)
             if include_postgres_access && db_config.as_ref().is_some_and(is_native_postgres_config) =>
         {
@@ -9447,6 +9477,34 @@ pub async fn cloudberry_ddl(pool: &deadpool_postgres::Pool, schema: &str, table:
                     "Cloudberry pg_get_tabledef failed: {native_error}; DDL rendering fallback failed: {fallback_error}"
                 )
             })
+        }
+    }
+}
+
+pub async fn opentenbase_ddl(pool: &deadpool_postgres::Pool, schema: &str, table: &str) -> Result<String, String> {
+    let ddl = pg_ddl(pool, schema, table).await?;
+    match db::opentenbase::table_distribution(pool, schema, table).await {
+        Ok(Some(distribution)) => match db::opentenbase::append_distribution_clause(&ddl, &distribution) {
+            Ok(ddl) => Ok(ddl),
+            Err(error) => {
+                log::warn!(
+                    "[schema][opentenbase:table-ddl-distribution-render-fallback] schema={} table={} error={}",
+                    schema,
+                    table,
+                    error
+                );
+                Ok(ddl)
+            }
+        },
+        Ok(None) => Ok(ddl),
+        Err(error) => {
+            log::warn!(
+                "[schema][opentenbase:table-ddl-distribution-query-fallback] schema={} table={} error={}",
+                schema,
+                table,
+                error
+            );
+            Ok(ddl)
         }
     }
 }

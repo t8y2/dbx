@@ -140,3 +140,36 @@ describe("DBeaver Cloudberry import", () => {
     });
   });
 });
+
+describe("DBeaver OpenTenBase import", () => {
+  it("preserves OpenTenBase while reusing the PostgreSQL backend", async () => {
+    const connections = await parseDbeaverConnections(
+      payload({
+        connections: {
+          opentenbase: {
+            id: "opentenbase",
+            name: "distributed-postgres",
+            provider: "opentenbase",
+            driver: "opentenbase-postgresql",
+            configuration: {
+              host: "cn.example.com",
+              port: 11000,
+              database: "postgres",
+              user: "opentenbase",
+            },
+          },
+        },
+      }),
+    );
+
+    expect(connections[0]).toMatchObject({
+      db_type: "postgres",
+      driver_profile: "opentenbase",
+      driver_label: "OpenTenBase",
+      host: "cn.example.com",
+      port: 11000,
+      database: "postgres",
+      username: "opentenbase",
+    });
+  });
+});

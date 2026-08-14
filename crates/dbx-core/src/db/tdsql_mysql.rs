@@ -11,13 +11,21 @@ pub fn is_profile(db_type: &DatabaseType, driver_profile: Option<&str>) -> bool 
         && driver_profile.is_some_and(|profile| profile.eq_ignore_ascii_case(DRIVER_PROFILE))
 }
 
-pub(crate) fn preserves_proxy_directive_for_database_type(db_type: DatabaseType) -> bool {
+pub(crate) fn preserves_leading_directives_for_database_type(db_type: DatabaseType) -> bool {
     db_type == DatabaseType::Mysql
 }
 
-pub(crate) fn proxy_directive_start(statement: &str, executable_start: usize) -> Option<usize> {
-    let prefix = statement.get(..executable_start)?.trim_end();
-    prefix.strip_suffix("/*proxy*/").map(|before| before.len())
+pub(crate) fn leading_directive_start(statement: &str, executable_start: usize) -> Option<usize> {
+    let prefix = statement.get(..executable_start)?;
+    let line_start = prefix.rfind(['\r', '\n']).map_or(0, |index| index + 1);
+    let line_prefix = &prefix[line_start..];
+    let trimmed_line_start = line_prefix.trim_start();
+    if trimmed_line_start.starts_with("/*") && trimmed_line_start.trim_end().ends_with("*/") {
+        return Some(line_start + line_prefix.len() - trimmed_line_start.len());
+    }
+
+    let trimmed_prefix = prefix.trim_end();
+    trimmed_prefix.strip_suffix("/*proxy*/").map(|before| before.len())
 }
 
 #[cfg(test)]
@@ -32,23 +40,27 @@ mod tests {
     }
 
     #[test]
-    fn proxy_directive_is_available_only_to_mysql_parsing() {
-        assert!(preserves_proxy_directive_for_database_type(DatabaseType::Mysql));
-        assert!(!preserves_proxy_directive_for_database_type(DatabaseType::Postgres));
+    fn leading_directives_are_available_only_to_mysql_parsing() {
+        assert!(preserves_leading_directives_for_database_type(DatabaseType::Mysql));
+        assert!(!preserves_leading_directives_for_database_type(DatabaseType::Postgres));
     }
 
     #[test]
-    fn proxy_directive_must_be_exact_and_adjacent_to_executable_sql() {
+    fn leading_directives_preserve_same_line_and_exact_proxy_behavior() {
         let exact = "/*proxy*/ \n\tSHOW PROXY STATUS";
         let executable_start = exact.find("SHOW").unwrap();
-        assert_eq!(proxy_directive_start(exact, executable_start), Some(0));
+        assert_eq!(leading_directive_start(exact, executable_start), Some(0));
 
-        let ordinary = "/* proxy */\nSHOW PROXY STATUS";
-        let executable_start = ordinary.find("SHOW").unwrap();
-        assert_eq!(proxy_directive_start(ordinary, executable_start), None);
+        let same_line = "  /*sets:allsets */ SELECT 1";
+        let executable_start = same_line.find("SELECT").unwrap();
+        assert_eq!(leading_directive_start(same_line, executable_start), Some(2));
+
+        let separate_line = "/*sets:allsets */\nSELECT 1";
+        let executable_start = separate_line.find("SELECT").unwrap();
+        assert_eq!(leading_directive_start(separate_line, executable_start), None);
 
         let separated = "/*proxy*/\n/* audit */\nSHOW PROXY STATUS";
         let executable_start = separated.find("SHOW").unwrap();
-        assert_eq!(proxy_directive_start(separated, executable_start), None);
+        assert_eq!(leading_directive_start(separated, executable_start), None);
     }
 }

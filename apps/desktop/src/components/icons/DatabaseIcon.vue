@@ -14,6 +14,7 @@ const assetIcons: Record<string, string> = {
   postgres: "postgres",
   postgresql: "postgres",
   cloudberry: "cloudberry",
+  opentenbase: "opentenbase",
   sqlite: "sqlite",
   rqlite: "rqlite.png",
   turso: "turso.png",

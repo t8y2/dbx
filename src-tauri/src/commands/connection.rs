@@ -14,7 +14,7 @@ pub use dbx_core::connection::{
 };
 use dbx_core::database_capabilities;
 use dbx_core::db;
-use dbx_core::db::agent_driver::AgentMethod;
+use dbx_core::db::agent_driver::{AgentDriverClient, AgentMethod};
 use dbx_core::models::connection::{
     database_info_from_protocol_value, rewrite_jdbc_url_host, ConnectionConfig, ConnectionTestResult,
     DatabaseConnectionInfo, DatabaseType,
@@ -31,6 +31,36 @@ fn gaussdb_m_jdbc_command_config(config: &ConnectionConfig, host: &str, port: u1
 fn mongo_legacy_connect_params(config: &ConnectionConfig, host: &str, port: u16) -> serde_json::Value {
     serde_json::json!({
         "connection": agent_connect_params(config, host, port, config.effective_database().unwrap_or(""))
+    })
+}
+
+fn mongo_legacy_fallback_error(native_error: &str, stage: &str, fallback_error: &str) -> String {
+    format!("{native_error}\n\n{stage}: {fallback_error}")
+}
+
+async fn spawn_mongo_legacy_fallback_agent(
+    state: &AppState,
+    db_type: &DatabaseType,
+    native_error: &str,
+) -> Result<AgentDriverClient, String> {
+    let agent_key =
+        dbx_core::agent_manager::AgentManager::db_type_to_agent_key(db_type, Some(MONGO_LEGACY_DRIVER_PROFILE))
+            .ok_or_else(|| {
+                mongo_legacy_fallback_error(
+                    native_error,
+                    "Failed to prepare MongoDB (Legacy) fallback driver",
+                    "Agent mapping is unavailable",
+                )
+            })?;
+    dbx_core::agent_service::ensure_agent_driver_ready(&state.agent_manager, agent_key).await.map_err(|error| {
+        mongo_legacy_fallback_error(native_error, "Failed to prepare MongoDB (Legacy) fallback driver", &error)
+    })?;
+    state.agent_manager.spawn(db_type, Some(MONGO_LEGACY_DRIVER_PROFILE)).await.map_err(|error| {
+        mongo_legacy_fallback_error(
+            native_error,
+            "Fallback with MongoDB (Legacy) driver failed",
+            &mongo_legacy_error_with_auth_hint(&error),
+        )
     })
 }
 
@@ -169,8 +199,8 @@ mod tests {
     use super::load_connection_configs;
     use super::{
         connect_sqlite_from_config, gaussdb_m_jdbc_command_config, mark_mongo_legacy_driver,
-        mongo_legacy_connect_params, persist_mongo_legacy_driver_profile, save_connection_configs,
-        sync_connection_configs, MONGO_LEGACY_DRIVER_LABEL, MONGO_LEGACY_DRIVER_PROFILE,
+        mongo_legacy_connect_params, mongo_legacy_fallback_error, persist_mongo_legacy_driver_profile,
+        save_connection_configs, sync_connection_configs, MONGO_LEGACY_DRIVER_LABEL, MONGO_LEGACY_DRIVER_PROFILE,
     };
     use dbx_core::connection::{AppState, PoolKind};
     use dbx_core::models::connection::{AttachedDatabaseConfig, ConnectionConfig, DatabaseType};
@@ -408,6 +438,30 @@ mod tests {
         assert_eq!(config.driver_profile.as_deref(), Some(MONGO_LEGACY_DRIVER_PROFILE));
         assert_eq!(config.driver_label.as_deref(), Some(MONGO_LEGACY_DRIVER_LABEL));
         assert!(!mark_mongo_legacy_driver(&mut config));
+    }
+
+    #[test]
+    fn automatic_mongo_desktop_paths_share_the_ensure_helper() {
+        let source = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/commands/connection.rs"));
+        let helper_call = ["spawn_mongo_legacy_fallback_", "agent("].concat();
+        let ensure_call = ["ensure_agent_driver_", "ready("].concat();
+
+        assert_eq!(source.matches(&helper_call).count(), 3);
+        assert_eq!(source.matches(&ensure_call).count(), 1);
+    }
+
+    #[test]
+    fn mongo_legacy_fallback_error_preserves_native_and_agent_errors() {
+        let error = mongo_legacy_fallback_error(
+            "native wire version error",
+            "Failed to prepare MongoDB (Legacy) fallback driver",
+            "registry unavailable",
+        );
+
+        assert_eq!(
+            error,
+            "native wire version error\n\nFailed to prepare MongoDB (Legacy) fallback driver: registry unavailable"
+        );
     }
 
     #[tokio::test]
@@ -975,12 +1029,13 @@ async fn test_connection_with_info_inner(
                     Err(e) => e,
                 };
                 if should_retry_mongo_with_legacy_driver(&native_err) {
-                    let am = &state.agent_manager;
-                    let mut client = am.spawn(&config.db_type, Some("mongodb-legacy")).await?;
+                    let mut client =
+                        spawn_mongo_legacy_fallback_agent(state.as_ref(), &config.db_type, &native_err).await?;
                     client.connect(mongo_legacy_connect_params(&config, &host, port)).await.map_err(|err| {
-                        format!(
-                            "{native_err}\n\nFallback with MongoDB (Legacy) driver failed: {}",
-                            mongo_legacy_error_with_auth_hint(&err)
+                        mongo_legacy_fallback_error(
+                            &native_err,
+                            "Fallback with MongoDB (Legacy) driver failed",
+                            &mongo_legacy_error_with_auth_hint(&err),
                         )
                     })?;
                     client.disconnect().await.ok();
@@ -1380,12 +1435,14 @@ pub async fn connect_db(
                 if should_retry_mongo_with_legacy_driver(&native_err) {
                     log::info!("Native MongoDB driver failed ({native_err}), falling back to agent driver");
                     let mut client =
-                        state.agent_manager.spawn(&db_config.db_type, Some(MONGO_LEGACY_DRIVER_PROFILE)).await?;
+                        spawn_mongo_legacy_fallback_agent(state.inner().as_ref(), &db_config.db_type, &native_err)
+                            .await?;
                     state.ensure_current_connection_attempt(&id, Some(attempt)).await?;
                     client.connect(mongo_legacy_connect_params(&db_config, &host, port)).await.map_err(|err| {
-                        format!(
-                            "{native_err}\n\nFallback with MongoDB (Legacy) driver failed: {}",
-                            mongo_legacy_error_with_auth_hint(&err)
+                        mongo_legacy_fallback_error(
+                            &native_err,
+                            "Fallback with MongoDB (Legacy) driver failed",
+                            &mongo_legacy_error_with_auth_hint(&err),
                         )
                     })?;
                     state.ensure_current_connection_attempt(&id, Some(attempt)).await?;

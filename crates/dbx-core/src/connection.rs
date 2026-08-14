@@ -14,7 +14,7 @@ use crate::agent_connection::{
     oracle_alternate_connect_configs, oracle_error_with_driver_hint, should_retry_mongo_with_legacy_driver,
     trino_like_jdbc_connection_string, AgentSessionRole,
 };
-use crate::agent_manager::{JavaRuntimeMode, DEFAULT_JRE_KEY};
+use crate::agent_manager::{AgentManager, JavaRuntimeMode, DEFAULT_JRE_KEY};
 use crate::agent_recovery::{RecoveryDecision, RecoveryPolicy, RecoveryScope};
 use crate::database_capabilities;
 use crate::db;
@@ -658,6 +658,17 @@ pub fn gaussdb_m_jdbc_config_for_endpoint(config: &ConnectionConfig, host: &str,
     });
     let params = upsert_connection_url_param(Some(raw_params), "sslmode", &sslmode);
     let params = upsert_connection_url_param(Some(&params), "ssl", if sslmode == "disable" { "false" } else { "true" });
+    let target_server_type = config
+        .external_config
+        .as_ref()
+        .and_then(|ext| ext.get("gaussdbTargetServerType"))
+        .and_then(|v| v.as_str())
+        .filter(|v| *v == "master" || *v == "slave" || *v == "any");
+    let params = if let Some(value) = target_server_type {
+        upsert_connection_url_param(Some(&params), "targetServerType", value)
+    } else {
+        params
+    };
     if !params.is_empty() {
         jdbc_url.push('?');
         jdbc_url.push_str(&params);
@@ -1981,8 +1992,23 @@ impl AppState {
                     if should_retry_mongo_with_legacy_driver(&native_err) {
                         log::info!("Native MongoDB driver failed ({native_err}), falling back to agent driver");
                         let connect_params = serde_json::json!({ "connection": agent_connect_params(&db_config, &host, port, db_config.effective_database().unwrap_or("")) });
+                        let legacy_agent_key =
+                            AgentManager::db_type_to_agent_key(&DatabaseType::MongoDb, Some("mongodb-legacy"))
+                                .ok_or_else(|| "MongoDB (Legacy) Agent mapping is unavailable".to_string())?;
+                        crate::agent_service::ensure_agent_driver_ready(&self.agent_manager, legacy_agent_key)
+                            .await
+                            .map_err(|err| {
+                                format!("{native_err}\n\nFailed to prepare MongoDB (Legacy) fallback driver: {err}")
+                            })?;
                         let mut client =
-                            self.agent_manager.spawn(&DatabaseType::MongoDb, Some("mongodb-legacy")).await?;
+                            self.agent_manager.spawn(&DatabaseType::MongoDb, Some("mongodb-legacy")).await.map_err(
+                                |err| {
+                                    format!(
+                                        "{native_err}\n\nFallback with MongoDB (Legacy) driver failed: {}",
+                                        mongo_legacy_error_with_auth_hint(&err)
+                                    )
+                                },
+                            )?;
                         client.connect(connect_params).await.map_err(|err| {
                             format!(
                                 "{native_err}\n\nFallback with MongoDB (Legacy) driver failed: {}",
@@ -5637,6 +5663,32 @@ mod tests {
         assert_eq!(
             gaussdb_m_jdbc_config_for_endpoint(&config, "db.internal", 8000).connection_string.as_deref(),
             Some("jdbc:gaussdb://db.internal:8000/postgres?currentSchema=legacy&sslmode=prefer&ssl=true")
+        );
+    }
+
+    #[test]
+    fn gaussdb_m_jdbc_target_server_type_preserves_url_params_and_allows_explicit_override() {
+        let mut config = mysql_config(Some("postgres"));
+        config.db_type = DatabaseType::Gaussdb;
+        config.driver_profile = Some(GAUSSDB_M_JDBC_DRIVER_PROFILE.to_string());
+
+        let default_url = gaussdb_m_jdbc_config_for_endpoint(&config, "db.internal", 8000).connection_string.unwrap();
+        assert!(!default_url.to_ascii_lowercase().contains("targetservertype="));
+
+        config.url_params = Some("targetServerType=slave&currentSchema=app".to_string());
+        assert_eq!(
+            gaussdb_m_jdbc_config_for_endpoint(&config, "db.internal", 8000).connection_string.as_deref(),
+            Some(
+                "jdbc:gaussdb://db.internal:8000/postgres?targetServerType=slave&currentSchema=app&sslmode=prefer&ssl=true"
+            )
+        );
+
+        config.external_config = Some(serde_json::json!({ "gaussdbTargetServerType": "master" }));
+        assert_eq!(
+            gaussdb_m_jdbc_config_for_endpoint(&config, "db.internal", 8000).connection_string.as_deref(),
+            Some(
+                "jdbc:gaussdb://db.internal:8000/postgres?currentSchema=app&sslmode=prefer&ssl=true&targetServerType=master"
+            )
         );
     }
 

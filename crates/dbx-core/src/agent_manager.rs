@@ -696,7 +696,7 @@ impl AgentManager {
     }
 
     pub fn is_jre_installed(&self, jre_key: &str) -> bool {
-        self.jre_java_path(jre_key).exists()
+        std::fs::metadata(self.jre_java_path(jre_key)).is_ok_and(|metadata| metadata.is_file() && metadata.len() > 0)
     }
 
     pub fn is_driver_installed(&self, db_type: &str) -> bool {

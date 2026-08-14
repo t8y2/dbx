@@ -405,11 +405,11 @@ export function useSidebarDatabaseSpecificMutationRuntime(options: SidebarDataba
     return !!row && !row.isProtected;
   });
 
-  /** An existing index is editable unless it is the protected _id index or a draft is open. */
+  /** Editing requires a complete server specification so no unmodeled options are lost. */
   const canEditSelectedMongoIndexRow = computed(() => {
     if (mongoIndexManagerMode.value === "create" || mongoIndexManagerMode.value === "edit") return false;
     const row = mongoIndexManagerSelected.value;
-    return !!row && !row.isProtected;
+    return !!row && !row.isProtected && row.propertiesComplete;
   });
 
   /** Prefill the create form from the selected index row and enter edit mode. */

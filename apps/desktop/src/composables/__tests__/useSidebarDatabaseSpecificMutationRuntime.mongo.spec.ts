@@ -517,6 +517,39 @@ describe("MongoDB sidebar mutation runtime", () => {
     expect(mocks.mongoCreateIndex).not.toHaveBeenCalled();
   });
 
+  it("does not edit or rename an index without a complete server specification", async () => {
+    mocks.mongoListIndexSpecs.mockResolvedValueOnce([
+      { name: "_id_", keys: [{ field: "_id", direction: "1" }], is_unique: true, is_primary: true, is_sparse: false, expire_after_seconds: null, partial_filter_expression: null, background: false, bucket_size: null, hidden: false, properties_complete: true, extra_options: null },
+      {
+        name: "email_1",
+        keys: [{ field: "email", direction: "1" }],
+        is_unique: false,
+        is_primary: false,
+        is_sparse: false,
+        expire_after_seconds: null,
+        partial_filter_expression: null,
+        background: false,
+        bucket_size: null,
+        hidden: false,
+        properties_complete: false,
+        extra_options: null,
+      },
+    ]);
+    const node = mongoCollectionNode();
+    const feature = runtime(node);
+    sidebarFormTarget.value = node;
+
+    feature.prepareMongoIndexManagerDialog();
+    await flush();
+    feature.selectMongoIndexRow("email_1");
+
+    expect(feature.canEditSelectedMongoIndexRow.value).toBe(false);
+    feature.startEditMongoIndexDraft();
+    expect(mongoIndexManagerMode.value).toBe("view");
+    expect(mocks.mongoCreateIndex).not.toHaveBeenCalled();
+    expect(mocks.mongoDropIndexes).not.toHaveBeenCalled();
+  });
+
   it("creates the new index first when renaming and does not drop if create fails", async () => {
     const node = mongoCollectionNode();
     const feature = runtime(node);

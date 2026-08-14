@@ -18,7 +18,7 @@ import { executableStatementRangeAtCursor, executableStatementRangeCacheForDoc, 
 import { currentStatementFrameRangeTo } from "@/lib/sql/currentStatementFrame";
 import { expandToSqlStatementWindow } from "@/lib/sql/insertValueHints";
 import { insertValueHintColumnNames } from "@/lib/sql/insertValueHintColumns";
-import { formatSqlForEditing, compressSqlText, type SqlFormatDialect } from "@/lib/sql/sqlFormatter";
+import { canFormatSqlForDatabaseType, formatSqlForEditing, compressSqlText, type SqlFormatDialect } from "@/lib/sql/sqlFormatter";
 import { detectAndFormatStructured } from "@/lib/sql/autoFormat";
 import { enabledSqlParameterSyntaxes, resolveSqlVariableSyntaxToggles } from "@/lib/sql/sqlVariableSyntax";
 import { blankLineDeletionChanges, replaceSelectedEditorText } from "@/lib/editor/queryEditorTextEdits";
@@ -1674,7 +1674,7 @@ const contextMenuItems = computed<ContextMenuItem[]>(() => {
     {
       label: t("editor.contextMenu.formatSelectionSql"),
       action: () => void formatCurrentSql(),
-      disabled: props.readOnly || !canCopySelectedSql.value,
+      disabled: props.readOnly || !canCopySelectedSql.value || !canFormatSqlForDatabaseType(props.databaseType),
       icon: AlignLeft,
       shortcut: shortcuts.formatSql,
     },
@@ -2915,7 +2915,7 @@ function scheduleSemanticDiagnostics(delay = 500, options: { preserveOutsideRang
 
 async function formatCurrentSql() {
   if (props.readOnly) return;
-  if (props.databaseType === "victoriametrics") return;
+  if (!canFormatSqlForDatabaseType(props.databaseType)) return;
   const currentView = view.value;
   if (!currentView) return;
 

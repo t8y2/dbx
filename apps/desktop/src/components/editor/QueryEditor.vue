@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, onMounted, onBeforeUnmount, onActivated, onDeactivated, watch, shallowRef, computed, nextTick } from "vue";
-import { CaseLower, CaseUpper, ClipboardPaste, Code2, Download, FileCode, Pencil, PencilRuler, Play, Copy, List, Scissors, Search, Sparkles, Table2, TextSelect, Trash2 } from "@lucide/vue";
+import { AlignLeft, CaseLower, CaseUpper, ClipboardPaste, Code2, Download, FileCode, MessageSquareText, Minimize2, Pencil, PencilRuler, Play, Copy, List, Scissors, Search, Sparkles, Table2, TextSelect, Trash2 } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
 import type { CompletionContext } from "@codemirror/autocomplete";
 import { Transaction, StateEffect } from "@codemirror/state";
@@ -1371,6 +1371,13 @@ async function pasteClipboardSqlFromContextMenu() {
   }
 }
 
+function toggleCommentFromContextMenu() {
+  const currentView = view.value;
+  if (!currentView || props.readOnly) return;
+  codeMirrorToggleLineComment?.(currentView);
+  focusEditor();
+}
+
 function selectAllSqlFromContextMenu() {
   const currentView = view.value;
   if (!currentView) return;
@@ -1657,6 +1664,26 @@ const contextMenuItems = computed<ContextMenuItem[]>(() => {
       shortcut: shortcuts.expandSelectStar,
     },
     { label: "", separator: true },
+    {
+      label: t("editor.contextMenu.commentSelection"),
+      action: toggleCommentFromContextMenu,
+      disabled: props.readOnly || !canCopySelectedSql.value,
+      icon: MessageSquareText,
+      shortcut: shortcuts.toggleLineComment,
+    },
+    {
+      label: t("editor.contextMenu.formatSelectionSql"),
+      action: () => void formatCurrentSql(),
+      disabled: props.readOnly || !canCopySelectedSql.value,
+      icon: AlignLeft,
+      shortcut: shortcuts.formatSql,
+    },
+    {
+      label: t("editor.contextMenu.compressSelectionSql"),
+      action: compressCurrentSql,
+      disabled: props.readOnly || !canCopySelectedSql.value,
+      icon: Minimize2,
+    },
     {
       label: t("editor.contextMenu.copySelection"),
       action: copySelectedSqlFromContextMenu,

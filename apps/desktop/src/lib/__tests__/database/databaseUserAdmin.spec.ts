@@ -91,9 +91,7 @@ describe("database user admin providers", () => {
     expect(blankLegacyNative).toBe(nativeMysqlUserAdminProvider);
     expect(native).toBe(nativeMysqlUserAdminProvider);
     expect(normalizedNative).toBe(nativeMysqlUserAdminProvider);
-    expect(native?.renameUserSql?.({ user: "app'user", host: "old\\host" }, "new'\\host")).toBe(
-      "RENAME USER 'app''user'@'old\\\\host' TO 'app''user'@'new''\\\\host';",
-    );
+    expect(native?.renameUserSql?.({ user: "app'user", host: "old\\host" }, "new'\\host")).toBe("RENAME USER 'app''user'@'old\\\\host' TO 'app''user'@'new''\\\\host';");
   });
 
   it("does not expose account Host changes to MySQL-compatible providers", () => {

@@ -259,10 +259,7 @@ describe("DatabaseUserAdmin MySQL account Host changes", () => {
     await vi.waitFor(() => expect(mocks.executeQuery.mock.calls.some((call) => call[2] === "SHOW GRANTS FOR 'same-user'@'new-host';")).toBe(true));
     expect(mocks.executeMulti.mock.calls[0][2]).toBe("RENAME USER 'same-user'@'old-host' TO 'same-user'@'new-host';");
     expect(mocks.productionGuard).toHaveBeenCalledWith(expect.objectContaining({ connection: nativeMysqlConnection, sql: "RENAME USER 'same-user'@'old-host' TO 'same-user'@'new-host';" }));
-    expect(mocks.executeQuery.mock.calls.slice(2).map((call) => call[2])).toEqual([
-      "SELECT User AS user, Host AS host, plugin AS plugin FROM mysql.user ORDER BY User, Host;",
-      "SHOW GRANTS FOR 'same-user'@'new-host';",
-    ]);
+    expect(mocks.executeQuery.mock.calls.slice(2).map((call) => call[2])).toEqual(["SELECT User AS user, Host AS host, plugin AS plugin FROM mysql.user ORDER BY User, Host;", "SHOW GRANTS FOR 'same-user'@'new-host';"]);
     expect(root?.textContent).toContain("same-user@new-host");
     expect(root?.querySelector('input[placeholder="userAdmin.newHost"]')).toBeNull();
   });

@@ -26,6 +26,8 @@ class DriverReleasePackagesTest(unittest.TestCase):
             rabbitmq_source.write_bytes(b"\x7fELFtest-rabbitmq-agent")
             rocketmq_source = release_dir / "dbx-agent-rocketmq-windows-x64.exe"
             rocketmq_source.write_bytes(b"MZtest-rocketmq-agent")
+            nats_source = release_dir / "dbx-agent-nats-linux-x64"
+            nats_source.write_bytes(b"\x7fELFtest-nats-agent")
             cassandra_source = release_dir / "dbx-agent-cassandra-linux-x64"
             cassandra_source.write_bytes(b"\x7fELFtest-cassandra-agent")
             tdengine_source = release_dir / "dbx-agent-tdengine-windows-aarch64.exe"
@@ -43,6 +45,7 @@ class DriverReleasePackagesTest(unittest.TestCase):
                 "duckdb": "0.1.0",
                 "rabbitmq": "0.1.0",
                 "rocketmq": "0.1.0",
+                "nats": "0.1.0",
                 "cassandra": "0.1.37",
                 "hive": "0.1.43",
                 "tdengine": "0.1.0",
@@ -55,6 +58,7 @@ class DriverReleasePackagesTest(unittest.TestCase):
             versioned_duckdb = release_dir / "dbx-agent-duckdb-0.1.0-macos-aarch64"
             versioned_rabbitmq = release_dir / "dbx-agent-rabbitmq-0.1.0-linux-x64"
             versioned_rocketmq = release_dir / "dbx-agent-rocketmq-0.1.0-windows-x64.exe"
+            versioned_nats = release_dir / "dbx-agent-nats-0.1.0-linux-x64"
             versioned_cassandra = release_dir / "dbx-agent-cassandra-0.1.37-linux-x64"
             versioned_tdengine = release_dir / "dbx-agent-tdengine-0.1.0-windows-aarch64.exe"
             self.assertEqual(
@@ -67,6 +71,7 @@ class DriverReleasePackagesTest(unittest.TestCase):
                     versioned_duckdb,
                     versioned_rabbitmq,
                     versioned_rocketmq,
+                    versioned_nats,
                     versioned_tdengine,
                 ],
             )
@@ -159,6 +164,19 @@ class DriverReleasePackagesTest(unittest.TestCase):
                             }
                         },
                     },
+                    "nats": {
+                        "version": "0.1.0",
+                        "label": "NATS",
+                        "min_app_version": "0.6.0",
+                        "jre": "21",
+                        "jar": {"url": "https://example.com/legacy-placeholder.jar", "size": 0},
+                        "native": {
+                            "linux-x64": {
+                                "url": f"https://example.com/{versioned_nats.name}",
+                                "size": versioned_nats.stat().st_size,
+                            }
+                        },
+                    },
                     "tdengine": {
                         "version": "0.1.0",
                         "label": "TDengine",
@@ -188,6 +206,7 @@ class DriverReleasePackagesTest(unittest.TestCase):
                     release_dir / "dbx-agent-duckdb-0.1.0-macos-aarch64.tar.zst",
                     release_dir / "dbx-agent-rabbitmq-0.1.0-linux-x64.tar.zst",
                     release_dir / "dbx-agent-rocketmq-0.1.0-windows-x64.tar.zst",
+                    release_dir / "dbx-agent-nats-0.1.0-linux-x64.tar.zst",
                     release_dir / "dbx-agent-tdengine-0.1.0-windows-aarch64.tar.zst",
                 ],
             )
@@ -199,7 +218,8 @@ class DriverReleasePackagesTest(unittest.TestCase):
                 (outputs[4], "duckdb", versioned_duckdb, "native", "macos-aarch64"),
                 (outputs[5], "rabbitmq", versioned_rabbitmq, "native", "linux-x64"),
                 (outputs[6], "rocketmq", versioned_rocketmq, "native", "windows-x64"),
-                (outputs[7], "tdengine", versioned_tdengine, "native", "windows-aarch64"),
+                (outputs[7], "nats", versioned_nats, "native", "linux-x64"),
+                (outputs[8], "tdengine", versioned_tdengine, "native", "windows-aarch64"),
             ]
             for output, driver_name, source, artifact_type, platform in package_cases:
                 tar_bytes = subprocess.run(
@@ -230,7 +250,8 @@ class DriverReleasePackagesTest(unittest.TestCase):
                 (final_registry["drivers"]["duckdb"]["native"]["macos-aarch64"], outputs[4]),
                 (final_registry["drivers"]["rabbitmq"]["native"]["linux-x64"], outputs[5]),
                 (final_registry["drivers"]["rocketmq"]["native"]["windows-x64"], outputs[6]),
-                (final_registry["drivers"]["tdengine"]["native"]["windows-aarch64"], outputs[7]),
+                (final_registry["drivers"]["nats"]["native"]["linux-x64"], outputs[7]),
+                (final_registry["drivers"]["tdengine"]["native"]["windows-aarch64"], outputs[8]),
             ]
             for artifact, output in release_artifacts:
                 self.assertEqual(artifact["url"], f"https://example.com/{output.name}")
@@ -246,6 +267,7 @@ class DriverReleasePackagesTest(unittest.TestCase):
                     versioned_duckdb,
                     versioned_java,
                     versioned_native,
+                    versioned_nats,
                     versioned_rabbitmq,
                     versioned_rocketmq,
                     versioned_tdengine,

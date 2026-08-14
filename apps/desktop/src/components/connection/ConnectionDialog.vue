@@ -65,6 +65,7 @@ import { assertCompleteDatabaseCategories, databaseSelectionForCategory } from "
 import { loadConnectionPickerView, saveConnectionPickerView, type DbPickerView } from "@/lib/connection/connectionPickerViewPreference";
 import { normalizeRocketmqNamesrvAddr } from "@/lib/connection/rocketmqNamesrv";
 import { normalizeRabbitmqAddresses } from "@/lib/connection/rabbitmqAddresses";
+import { NATS_DEFAULT_SERVER_URL, natsConnectionTarget, natsServerUrlIsValid } from "@/lib/connection/natsConnection";
 import { detectMqUiAuthKind, isMqAuthKindAllowedForSystem, type MqUiAuthKind } from "@/lib/connection/mqAuth";
 import { driverInstallProgressChannel, driverInstallProgressPercent, isDriverInstallProgressForOperation, type DriverInstallProgress } from "@/lib/connection/driverInstallProgressUi";
 import { requiresSqlServerLegacyCompatibilityComponent, setSqlServerLegacyCompatibilityConfig, sqlServerUsesLegacyCompatibility, SQLSERVER_LEGACY_COMPATIBILITY_DRIVER_KEY } from "@/lib/connection/sqlServerLegacyCompatibility";
@@ -735,6 +736,7 @@ const mqRocketmqNamesrvAddr = ref("127.0.0.1:9876");
 const mqRocketmqClusterName = ref("");
 const mqRabbitmqAddresses = ref("127.0.0.1:5672");
 const mqRabbitmqVirtualHost = ref("/");
+const mqNatsServerUrl = ref(NATS_DEFAULT_SERVER_URL);
 const mqKafkaBootstrapServers = ref("127.0.0.1:9092");
 const mqKafkaZooKeeperServers = ref("");
 const mqKafkaSecurityProtocol = ref(MQ_KAFKA_SECURITY_PROTOCOL_AUTO);
@@ -763,12 +765,14 @@ const MQ_DRIVER_LABELS: Record<MqSystemKind, string> = {
   kafka: "Apache Kafka",
   rocketmq: "Apache RocketMQ",
   rabbitmq: "RabbitMQ",
+  nats: "NATS",
 };
 
 function mqSystemKindFromProfile(profile: string): MqSystemKind {
   if (profile === "kafka") return "kafka";
   if (profile === "rocketmq") return "rocketmq";
   if (profile === "rabbitmq") return "rabbitmq";
+  if (profile === "nats") return "nats";
   return "pulsar";
 }
 
@@ -778,7 +782,7 @@ function syncMqSystemKindFromSelectedType() {
 }
 
 function resolveMqSystemKind(config?: Partial<MqAdminConfig>): MqSystemKind {
-  if (config?.systemKind === "kafka" || config?.systemKind === "rocketmq" || config?.systemKind === "rabbitmq" || config?.systemKind === "pulsar") {
+  if (config?.systemKind === "kafka" || config?.systemKind === "rocketmq" || config?.systemKind === "rabbitmq" || config?.systemKind === "pulsar" || config?.systemKind === "nats") {
     return config.systemKind;
   }
   return mqSystemKindFromProfile(selectedType.value);
@@ -1161,6 +1165,7 @@ const driverProfiles: Record<
   kafka: { type: "mq", port: 9092, user: "", label: "Apache Kafka", icon: "kafka", host: "127.0.0.1" },
   rocketmq: { type: "mq", port: 9876, user: "", label: "Apache RocketMQ", icon: "rocketmq", host: "127.0.0.1" },
   rabbitmq: { type: "mq", port: 5672, user: "", label: "RabbitMQ", icon: "rabbitmq", host: "127.0.0.1" },
+  nats: { type: "mq", port: 4222, user: "", label: "NATS", icon: "nats", host: "127.0.0.1" },
   nacos: { type: "nacos", port: 8848, user: "nacos", label: "Nacos", icon: "nacos", host: "127.0.0.1" },
   consul: { type: "consul", port: 8500, user: "", label: "Consul", icon: "consul", host: "127.0.0.1" },
   mqtt: { type: "mqtt", port: 1883, user: "", label: "MQTT", icon: "mqtt", host: "127.0.0.1" },
@@ -1198,6 +1203,7 @@ function profileForConfig(config: ConnectionConfig) {
     if (kind === "kafka") return "kafka";
     if (kind === "rocketmq") return "rocketmq";
     if (kind === "rabbitmq") return "rabbitmq";
+    if (kind === "nats") return "nats";
     return "mq";
   }
   if (config.db_type === "dameng") return "dm";
@@ -1247,7 +1253,7 @@ function resetMqFields(config?: Partial<MqAdminConfig>) {
   const jaasConfig = mqExtraPropertyString(extra, "sasl.jaas.config");
   mqSystemKind.value = systemKind;
   const storedAdminUrl = config?.adminUrl?.trim() || (config ? mqExtraString(config as Record<string, unknown>, "admin_url").trim() : "");
-  mqAdminUrl.value = storedAdminUrl || (systemKind === "kafka" || systemKind === "rocketmq" || systemKind === "rabbitmq" ? "" : "http://127.0.0.1:8080");
+  mqAdminUrl.value = storedAdminUrl || (systemKind === "kafka" || systemKind === "rocketmq" || systemKind === "rabbitmq" || systemKind === "nats" ? "" : "http://127.0.0.1:8080");
   mqKafkaConnectionSource.value = resolveMqKafkaConnectionSource(extra);
   mqKafkaBootstrapServers.value = mqExtraString(extra, "bootstrapServers") || "127.0.0.1:9092";
   mqKafkaZooKeeperServers.value = mqExtraString(extra, "zookeeperServers");
@@ -1255,6 +1261,7 @@ function resetMqFields(config?: Partial<MqAdminConfig>) {
   mqRocketmqClusterName.value = mqExtraString(extra, "clusterName") || mqExtraString(extra, "cluster_name");
   mqRabbitmqAddresses.value = mqExtraString(extra, "addresses") || "127.0.0.1:5672";
   mqRabbitmqVirtualHost.value = mqExtraString(extra, "virtualHost") || "/";
+  mqNatsServerUrl.value = config?.serverUrl?.trim() || NATS_DEFAULT_SERVER_URL;
   mqKafkaSecurityProtocol.value = mqExtraString(extra, "securityProtocol") || MQ_KAFKA_SECURITY_PROTOCOL_AUTO;
   mqKafkaSaslMechanism.value = mqExtraString(extra, "saslMechanism") || "PLAIN";
   mqKafkaKerberosPrincipal.value = parseJaasStringProperty(jaasConfig, "principal");
@@ -1264,15 +1271,25 @@ function resetMqFields(config?: Partial<MqAdminConfig>) {
   mqTlsSkipVerify.value = !!config?.tlsSkipVerify;
   mqPinnedVersion.value = pinnedVersionToSelection(config?.pinnedVersion);
   const auth = (config?.auth || { kind: "none" }) as MqAuth;
-  mqAuthKind.value = detectMqUiAuthKind({
-    systemKind,
-    authKind: auth.kind,
-    saslMechanism: mqKafkaSaslMechanism.value,
-    jaasConfig,
-  });
-  mqToken.value = auth.token || "";
-  mqBasicUsername.value = auth.username || "";
-  mqBasicPassword.value = auth.password || "";
+  if (systemKind === "nats") {
+    const token = config?.token || auth.token || "";
+    const username = config?.username || auth.username || "";
+    const password = config?.password || auth.password || "";
+    mqAuthKind.value = token ? "token" : username || auth.kind === "basic" ? "basic" : "none";
+    mqToken.value = token;
+    mqBasicUsername.value = username;
+    mqBasicPassword.value = password;
+  } else {
+    mqAuthKind.value = detectMqUiAuthKind({
+      systemKind,
+      authKind: auth.kind,
+      saslMechanism: mqKafkaSaslMechanism.value,
+      jaasConfig,
+    });
+    mqToken.value = auth.token || "";
+    mqBasicUsername.value = auth.username || "";
+    mqBasicPassword.value = auth.password || "";
+  }
   mqApiKeyHeader.value = auth.header || "Authorization";
   mqApiKeyValue.value = auth.value || "";
   mqOauthIssuerUrl.value = auth.issuerUrl || "";
@@ -1310,6 +1327,14 @@ function defaultMqFieldsForProfile(profile: string): Partial<MqAdminConfig> | un
       extra: { addresses: "127.0.0.1:5672", virtualHost: "/" },
     };
   }
+  if (profile === "nats") {
+    return {
+      systemKind: "nats",
+      adminUrl: "",
+      auth: { kind: "none" },
+      serverUrl: NATS_DEFAULT_SERVER_URL,
+    };
+  }
   return undefined;
 }
 
@@ -1339,6 +1364,11 @@ watch(mqSystemKind, (kind) => {
   if (kind === "rabbitmq") {
     if (!mqRabbitmqAddresses.value.trim()) mqRabbitmqAddresses.value = "127.0.0.1:5672";
     if (!mqRabbitmqVirtualHost.value.trim()) mqRabbitmqVirtualHost.value = "/";
+    if (!isMqAuthKindAllowedForSystem(kind, mqAuthKind.value)) mqAuthKind.value = "none";
+    return;
+  }
+  if (kind === "nats") {
+    if (!mqNatsServerUrl.value.trim()) mqNatsServerUrl.value = NATS_DEFAULT_SERVER_URL;
     if (!isMqAuthKindAllowedForSystem(kind, mqAuthKind.value)) mqAuthKind.value = "none";
     return;
   }
@@ -1651,6 +1681,40 @@ function buildMqAdminConfig(): MqAdminConfig {
       auth: buildMqAuth(),
       tlsSkipVerify: mqTlsSkipVerify.value || undefined,
       extra,
+    };
+  }
+
+  if (systemKind === "nats") {
+    const target = natsConnectionTarget(mqNatsServerUrl.value);
+    if (mqAuthKind.value === "basic") {
+      return {
+        systemKind: "nats",
+        adminUrl: "",
+        // `auth.kind` is non-secret metadata used by the secret store to
+        // restore the canonical top-level NATS credentials after restart.
+        auth: { kind: "basic" },
+        serverUrl: target.serverUrl,
+        username: requireMqField(mqBasicUsername.value, "NATS password auth requires a username"),
+        password: requireMqField(mqBasicPassword.value, "NATS password auth requires a password"),
+        tlsSkipVerify: mqTlsSkipVerify.value || undefined,
+      };
+    }
+    if (mqAuthKind.value === "token") {
+      return {
+        systemKind: "nats",
+        adminUrl: "",
+        auth: { kind: "token" },
+        serverUrl: target.serverUrl,
+        token: requireMqField(mqToken.value, "NATS token auth requires a token"),
+        tlsSkipVerify: mqTlsSkipVerify.value || undefined,
+      };
+    }
+    return {
+      systemKind: "nats",
+      adminUrl: "",
+      auth: { kind: "none" },
+      serverUrl: target.serverUrl,
+      tlsSkipVerify: mqTlsSkipVerify.value || undefined,
     };
   }
 
@@ -2863,6 +2927,7 @@ const dbOptions: DbOption[] = [
   { value: "kafka", label: "Apache Kafka" },
   { value: "rocketmq", label: "Apache RocketMQ" },
   { value: "rabbitmq", label: "RabbitMQ" },
+  { value: "nats", label: "NATS" },
   { value: "mqtt", label: "MQTT" },
   { value: "nacos", label: "Nacos" },
   { value: "consul", label: "Consul" },
@@ -2921,7 +2986,7 @@ const dbCategoryDefinitions: Array<{
   {
     key: "mq",
     titleKey: "connection.databaseCategoryMq",
-    optionValues: ["mq", "kafka", "rocketmq", "rabbitmq", "mqtt"],
+    optionValues: ["mq", "kafka", "rocketmq", "rabbitmq", "nats", "mqtt"],
   },
   {
     key: "registry_config",
@@ -3398,6 +3463,7 @@ const hasRequiredConnectionTarget = computed(() => {
     if (mqSystemKind.value === "kafka") return mqKafkaConnectionSource.value === "zookeeper" ? !!mqKafkaZooKeeperServers.value.trim() : !!mqKafkaBootstrapServers.value.trim();
     if (mqSystemKind.value === "rocketmq") return !!mqRocketmqNamesrvAddr.value.trim();
     if (mqSystemKind.value === "rabbitmq") return !!mqRabbitmqAddresses.value.trim();
+    if (mqSystemKind.value === "nats") return natsServerUrlIsValid(mqNatsServerUrl.value);
     return !!mqAdminUrl.value.trim();
   }
   if (form.value.db_type === "zookeeper") return !!(form.value.host || form.value.connection_string || connectionUrlInput.value.trim());
@@ -3789,6 +3855,11 @@ function connectionConfigForSubmit(id: string, generatedName = ""): ConnectionCo
     } else if (mqConfig.systemKind === "rabbitmq") {
       const extra = mqExtraRecord(mqConfig);
       applyMqRabbitmqAddresses(config, mqExtraString(extra, "addresses"));
+    } else if (mqConfig.systemKind === "nats") {
+      const target = natsConnectionTarget(mqConfig.serverUrl || NATS_DEFAULT_SERVER_URL);
+      config.host = target.host;
+      config.port = target.port;
+      config.ssl = target.tls;
     } else {
       applyMqAdminUrl(config, mqConfig.adminUrl);
     }
@@ -6039,6 +6110,15 @@ function openExternalUrl(url: string) {
                       </div>
                     </div>
                   </template>
+                  <template v-else-if="mqSystemKind === 'nats'">
+                    <div class="grid grid-cols-4 items-start gap-4">
+                      <Label :class="connectionLabelClass">NATS Server URL</Label>
+                      <div class="col-span-3 space-y-1">
+                        <Input v-model="mqNatsServerUrl" placeholder="nats://127.0.0.1:4222" autocomplete="url" />
+                        <p class="text-xs text-muted-foreground">Use <code>nats://</code> for TCP or <code>tls://</code> for TLS. Credentials belong in the fields below, not in the URL.</p>
+                      </div>
+                    </div>
+                  </template>
                   <template v-else>
                     <div class="grid grid-cols-4 items-center gap-4">
                       <Label :class="connectionLabelClass">{{ t("connection.mqAdminUrl") }}</Label>
@@ -6049,8 +6129,9 @@ function openExternalUrl(url: string) {
                     <Label :class="connectionLabelClass">{{ t("connection.mqAuth") }}</Label>
                     <div class="col-span-3 flex flex-wrap gap-2">
                       <Button size="sm" :variant="mqAuthKind === 'none' ? 'default' : 'outline'" @click="mqAuthKind = 'none'">{{ t("connection.mqAuthNone") }}</Button>
-                      <Button v-if="mqSystemKind === 'pulsar'" size="sm" :variant="mqAuthKind === 'token' ? 'default' : 'outline'" @click="mqAuthKind = 'token'">{{ t("connection.mqAuthToken") }}</Button>
-                      <Button size="sm" :variant="mqAuthKind === 'basic' ? 'default' : 'outline'" @click="mqAuthKind = 'basic'">{{ mqSystemKind === "rocketmq" ? t("connection.rocketmqAclAuth") : t("connection.mqAuthBasic") }}</Button>
+                      <Button v-if="mqSystemKind === 'pulsar' || mqSystemKind === 'nats'" size="sm" :variant="mqAuthKind === 'token' ? 'default' : 'outline'" @click="mqAuthKind = 'token'">{{ t("connection.mqAuthToken") }}</Button>
+                      <Button v-if="mqSystemKind !== 'nats'" size="sm" :variant="mqAuthKind === 'basic' ? 'default' : 'outline'" @click="mqAuthKind = 'basic'">{{ mqSystemKind === "rocketmq" ? t("connection.rocketmqAclAuth") : t("connection.mqAuthBasic") }}</Button>
+                      <Button v-else size="sm" :variant="mqAuthKind === 'basic' ? 'default' : 'outline'" @click="mqAuthKind = 'basic'">Password</Button>
                       <Button v-if="mqSystemKind === 'kafka'" size="sm" :variant="mqAuthKind === 'kerberos' ? 'default' : 'outline'" @click="mqAuthKind = 'kerberos'">{{ t("connection.mqAuthKerberos") }}</Button>
                       <Button v-if="mqSystemKind === 'pulsar'" size="sm" :variant="mqAuthKind === 'apiKey' ? 'default' : 'outline'" @click="mqAuthKind = 'apiKey'">{{ t("connection.mqAuthApiKey") }}</Button>
                       <Button v-if="mqSystemKind === 'pulsar'" size="sm" :variant="mqAuthKind === 'oauth2' ? 'default' : 'outline'" @click="mqAuthKind = 'oauth2'">{{ t("connection.mqAuthOauth2") }}</Button>

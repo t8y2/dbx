@@ -44,6 +44,7 @@ const EXTRA_AGENT_LABELS: &[(&str, &str)] = &[
     ("kafka", "Apache Kafka"),
     ("rocketmq", "Apache RocketMQ"),
     ("rabbitmq", "RabbitMQ"),
+    ("nats", "NATS"),
     ("sqlserver-legacy", "SQL Server legacy compatibility component"),
 ];
 const EXTRA_DRIVER_STORE_ENTRIES: &[(&str, &str)] = &[
@@ -51,6 +52,7 @@ const EXTRA_DRIVER_STORE_ENTRIES: &[(&str, &str)] = &[
     ("kafka", "Apache Kafka"),
     ("rocketmq", "Apache RocketMQ"),
     ("rabbitmq", "RabbitMQ"),
+    ("nats", "NATS"),
     ("sqlserver-legacy", "SQL Server legacy compatibility component"),
 ];
 
@@ -322,6 +324,7 @@ pub fn agent_key(db_type: &DatabaseType, driver_profile: Option<&str>) -> Option
             Some("kafka") => Some("kafka"),
             Some("rocketmq") => Some("rocketmq"),
             Some("rabbitmq") => Some("rabbitmq"),
+            Some("nats") => Some("nats"),
             _ => None,
         };
     }

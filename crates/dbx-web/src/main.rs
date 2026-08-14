@@ -309,6 +309,7 @@ async fn main() {
         table_import_channels: RwLock::new(HashMap::new()),
         sql_file_executions: RwLock::new(HashMap::new()),
         nacos_imports: RwLock::new(HashMap::new()),
+        nats: state::NatsWebRuntime::default(),
         login_rate_limit: tokio::sync::Mutex::new(state::LoginRateLimit { fail_count: 0, locked_until: None }),
         export_files: RwLock::new(HashMap::new()),
         ssh_prompts: Arc::new(ssh_prompt::SshPromptHub::new()),
@@ -340,6 +341,20 @@ async fn main() {
         .route("/connection/mcp/add", post(routes::connection::mcp_add_connection))
         .route("/connection/mcp/duplicate", post(routes::connection::mcp_duplicate_connection))
         .route("/connection/mcp/remove", post(routes::connection::mcp_remove_connection))
+        // NATS MCP routes load the authoritative profile server-side.
+        .route("/nats/mcp/test-connection", post(routes::nats::test_connection))
+        .route("/nats/mcp/capture", post(routes::nats::capture))
+        .route("/nats/mcp/publish", post(routes::nats::publish))
+        .route("/nats/mcp/jetstream/info", post(routes::nats::jetstream_info))
+        .route("/nats/mcp/jetstream/streams", post(routes::nats::list_streams))
+        .route("/nats/mcp/jetstream/stream", post(routes::nats::get_stream))
+        .route("/nats/mcp/jetstream/consumers", post(routes::nats::list_consumers))
+        .route("/nats/mcp/jetstream/consumer", post(routes::nats::get_consumer))
+        .route("/nats/mcp/jetstream/history", post(routes::nats::fetch_history))
+        .route("/nats/subscriptions/start", post(routes::nats::start_subscription))
+        .route("/nats/subscriptions/stop", post(routes::nats::stop_subscription))
+        .route("/nats/subscriptions/list", post(routes::nats::list_subscriptions))
+        .route("/nats/subscriptions/{subscription_id}/events", get(routes::nats::subscription_events))
         .route("/plugins", get(routes::plugins::list_plugins))
         // JDBC
         .route("/jdbc/drivers", get(routes::jdbc::list_jdbc_drivers).post(routes::jdbc::import_jdbc_drivers))

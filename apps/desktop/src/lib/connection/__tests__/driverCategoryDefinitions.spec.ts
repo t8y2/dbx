@@ -127,6 +127,7 @@ describe("AGENT_DRIVER_CATEGORY_MAP integrity", () => {
       "tdengine",
       // mq
       "kafka",
+      "nats",
       "rabbitmq",
       "rocketmq",
       // registry_config

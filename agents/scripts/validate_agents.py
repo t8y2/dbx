@@ -11,7 +11,7 @@ SOURCE_GLOBS = ("*/src/main/**/*.java", "drivers/*/src/main/**/*.java")
 KOTLIN_FILE_SUFFIXES = (".kt", ".kts")
 KOTLIN_SCAN_EXCLUDED_PARTS = {".git", ".gradle", "build"}
 DEFAULT_AGENT_JRE_KEY = "21"
-NON_JDBC_AGENT_MODULES = {"mongodb", "etcd", "zookeeper", "kafka", "rocketmq", "rabbitmq"}
+NON_JDBC_AGENT_MODULES = {"mongodb", "etcd", "zookeeper", "kafka", "rocketmq", "rabbitmq", "nats"}
 NATIVE_ONLY_AGENT_MODULES = {
     "cassandra": "drivers/cassandra-go",
     "duckdb": "drivers/duckdb",
@@ -25,6 +25,7 @@ NATIVE_ONLY_AGENT_MODULES = {
     "xugu": "drivers/xugu",
     "rabbitmq": "drivers/rabbitmq",
     "rocketmq": "drivers/rocketmq",
+    "nats": "drivers/nats",
 }
 AUTO_VERSIONED_NATIVE_MODULES = {"duckdb"}
 JDBC_ARCHITECTURE_ALLOWLIST = {

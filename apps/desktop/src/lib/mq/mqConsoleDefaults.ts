@@ -54,17 +54,17 @@ const PULSAR_DEFAULT_CAPABILITIES: MqCapabilities = {
 export function resolveMqSystemKindFromConnection(config: ConnectionConfig | undefined): MqSystemKind | undefined {
   if (!config || config.db_type !== "mq") return undefined;
   const external = config.external_config as Partial<MqAdminConfig> | undefined;
-  if (external?.systemKind === "kafka" || external?.systemKind === "rocketmq" || external?.systemKind === "rabbitmq" || external?.systemKind === "pulsar") {
+  if (external?.systemKind === "kafka" || external?.systemKind === "rocketmq" || external?.systemKind === "rabbitmq" || external?.systemKind === "pulsar" || external?.systemKind === "nats") {
     return external.systemKind;
   }
-  if (config.driver_profile === "kafka" || config.driver_profile === "rocketmq" || config.driver_profile === "rabbitmq" || config.driver_profile === "pulsar") {
+  if (config.driver_profile === "kafka" || config.driver_profile === "rocketmq" || config.driver_profile === "rabbitmq" || config.driver_profile === "pulsar" || config.driver_profile === "nats") {
     return config.driver_profile;
   }
   return "pulsar";
 }
 
 export function isFlatMqSystemKind(kind: MqSystemKind | undefined): boolean {
-  return kind === "kafka" || kind === "rocketmq" || kind === "rabbitmq";
+  return kind === "kafka" || kind === "rocketmq" || kind === "rabbitmq" || kind === "nats";
 }
 
 export function defaultMqCapabilitiesForSystemKind(kind: MqSystemKind | undefined): MqCapabilities {
@@ -103,6 +103,18 @@ export function defaultMqCapabilitiesForSystemKind(kind: MqSystemKind | undefine
       supportsPolicies: true,
       // Cluster overview & node stats come from the management API.
       supportsClusterMonitoring: true,
+    };
+  }
+  if (kind === "nats") {
+    return {
+      ...FLAT_MQ_BASE_CAPABILITIES,
+      supportsPartitionedTopics: false,
+      supportsSubscriptions: true,
+      supportsResetCursor: false,
+      supportsClearBacklog: false,
+      supportsPeekMessages: false,
+      supportsPermissions: false,
+      supportsSendMessage: true,
     };
   }
   return { ...PULSAR_DEFAULT_CAPABILITIES };

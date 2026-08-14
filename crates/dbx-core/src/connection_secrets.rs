@@ -19,6 +19,9 @@ pub const MQ_AUTH_API_KEY_VALUE_KEY: &str = "mq.auth.api_key_value";
 pub const MQ_AUTH_CLIENT_SECRET_KEY: &str = "mq.auth.client_secret";
 pub const MQ_TOKEN_SIGNING_SECRET_PREFIX: &str = "mq.token_signing.";
 pub const MQ_TOKEN_SIGNING_KEY: &str = "mq.token_signing.key";
+pub const NATS_AUTH_SECRET_PREFIX: &str = "nats.auth.";
+pub const NATS_AUTH_TOKEN_KEY: &str = "nats.auth.token";
+pub const NATS_AUTH_PASSWORD_KEY: &str = "nats.auth.password";
 pub const NACOS_AUTH_SECRET_PREFIX: &str = "nacos.auth.";
 pub const NACOS_AUTH_PASSWORD_KEY: &str = "nacos.auth.password";
 pub const NACOS_RNACOS_CONSOLE_PASSWORD_KEY: &str = "nacos.auth.rnacos_console_password";
@@ -110,6 +113,7 @@ pub fn save_connections_to_file(
         persist_optional_secret(store, &config.id, CONNECTION_STRING_KEY, config.connection_string.as_deref())?;
         persist_optional_secret(store, &config.id, INIT_SCRIPT_KEY, config.init_script.as_deref())?;
         persist_mq_auth_secrets(store, config)?;
+        persist_nats_auth_secrets(store, config)?;
         persist_mq_token_signing_secret(store, config)?;
         persist_mqtt_auth_secrets(store, config)?;
 
@@ -179,6 +183,7 @@ pub fn load_connections_from_file(
             }
         }
         hydrate_mq_auth_secrets(store, config, &mut needs_rewrite)?;
+        hydrate_nats_auth_secrets(store, config, &mut needs_rewrite)?;
         hydrate_mq_token_signing_secret(store, config, &mut needs_rewrite)?;
         hydrate_mqtt_auth_secrets(store, config, &mut needs_rewrite)?;
     }
@@ -358,6 +363,7 @@ fn delete_removed_connection_secrets(
         store.delete_secret(&config.id, CONNECTION_STRING_KEY)?;
         store.delete_secret(&config.id, INIT_SCRIPT_KEY)?;
         delete_secret_prefix(store, &config.id, MQ_AUTH_SECRET_PREFIX)?;
+        delete_secret_prefix(store, &config.id, NATS_AUTH_SECRET_PREFIX)?;
         delete_secret_prefix(store, &config.id, MQ_TOKEN_SIGNING_SECRET_PREFIX)?;
         delete_secret_prefix(store, &config.id, MQTT_AUTH_SECRET_PREFIX)?;
     }
@@ -402,6 +408,12 @@ fn persist_mq_auth_secrets(store: &dyn ConnectionSecretStore, config: &Connectio
         delete_secret_prefix(store, &config.id, MQ_AUTH_SECRET_PREFIX)?;
         return Ok(());
     }
+    if is_nats_config(config.external_config.as_ref()) {
+        // NATS persists its canonical top-level credentials under a distinct
+        // namespace. Do not let generic MQ auth delete those credentials.
+        delete_secret_prefix(store, &config.id, MQ_AUTH_SECRET_PREFIX)?;
+        return Ok(());
+    }
 
     let Some(auth) = mq_auth_object(config.external_config.as_ref()) else {
         delete_secret_prefix(store, &config.id, MQ_AUTH_SECRET_PREFIX)?;
@@ -420,6 +432,56 @@ fn persist_mq_auth_secrets(store: &dyn ConnectionSecretStore, config: &Connectio
     }
 
     Ok(())
+}
+
+fn persist_nats_auth_secrets(store: &dyn ConnectionSecretStore, config: &ConnectionConfig) -> Result<(), String> {
+    if config.db_type != DatabaseType::MessageQueue {
+        delete_secret_prefix(store, &config.id, NATS_AUTH_SECRET_PREFIX)?;
+        return Ok(());
+    }
+
+    let Some(nats) = nats_config_object(config.external_config.as_ref()) else {
+        delete_secret_prefix(store, &config.id, NATS_AUTH_SECRET_PREFIX)?;
+        return Ok(());
+    };
+
+    match nats_auth_kind(nats).as_deref() {
+        Some("token") => replace_nats_auth_secret(store, &config.id, NATS_AUTH_TOKEN_KEY, nats, "token")?,
+        Some("basic") | Some("password") => {
+            replace_nats_auth_secret(store, &config.id, NATS_AUTH_PASSWORD_KEY, nats, "password")?
+        }
+        _ => delete_secret_prefix(store, &config.id, NATS_AUTH_SECRET_PREFIX)?,
+    }
+
+    Ok(())
+}
+
+fn replace_nats_auth_secret(
+    store: &dyn ConnectionSecretStore,
+    connection_id: &str,
+    key: &str,
+    config: &serde_json::Map<String, serde_json::Value>,
+    field: &str,
+) -> Result<(), String> {
+    let current = config
+        .get(field)
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| {
+            config
+                .get("auth")
+                .and_then(serde_json::Value::as_object)
+                .and_then(|auth| auth.get(field).and_then(serde_json::Value::as_str))
+        })
+        .filter(|secret| !secret.is_empty());
+    let existing = if current.is_none() { store.get_secret(connection_id, key)? } else { None };
+    delete_secret_prefix(store, connection_id, NATS_AUTH_SECRET_PREFIX)?;
+    match current {
+        Some(secret) => store.set_secret(connection_id, key, secret),
+        None => match existing {
+            Some(secret) => store.set_secret(connection_id, key, &secret),
+            None => Ok(()),
+        },
+    }
 }
 
 fn replace_mq_auth_secret(
@@ -463,6 +525,9 @@ fn hydrate_mq_auth_secrets(
     if config.db_type != DatabaseType::MessageQueue {
         return Ok(());
     }
+    if is_nats_config(config.external_config.as_ref()) {
+        return Ok(());
+    }
 
     let Some(auth) = mq_auth_object_mut(config.external_config.as_mut()) else {
         return Ok(());
@@ -481,6 +546,57 @@ fn hydrate_mq_auth_secrets(
     }
 
     Ok(())
+}
+
+fn hydrate_nats_auth_secrets(
+    store: &dyn ConnectionSecretStore,
+    config: &mut ConnectionConfig,
+    needs_rewrite: &mut bool,
+) -> Result<(), String> {
+    if config.db_type != DatabaseType::MessageQueue {
+        return Ok(());
+    }
+
+    let Some(nats) = nats_config_object_mut(config.external_config.as_mut()) else {
+        return Ok(());
+    };
+
+    match nats_auth_kind(nats).as_deref() {
+        Some("token") => {
+            hydrate_nats_auth_secret(store, &config.id, NATS_AUTH_TOKEN_KEY, nats, "token", needs_rewrite)?
+        }
+        Some("basic") | Some("password") => {
+            hydrate_nats_auth_secret(store, &config.id, NATS_AUTH_PASSWORD_KEY, nats, "password", needs_rewrite)?
+        }
+        _ => {}
+    }
+
+    Ok(())
+}
+
+fn hydrate_nats_auth_secret(
+    store: &dyn ConnectionSecretStore,
+    connection_id: &str,
+    key: &str,
+    config: &mut serde_json::Map<String, serde_json::Value>,
+    field: &str,
+    needs_rewrite: &mut bool,
+) -> Result<(), String> {
+    let legacy_secret = config
+        .get("auth")
+        .and_then(serde_json::Value::as_object)
+        .and_then(|auth| auth.get(field))
+        .and_then(serde_json::Value::as_str)
+        .filter(|secret| !secret.is_empty())
+        .map(ToOwned::to_owned);
+    if config.get(field).and_then(serde_json::Value::as_str).filter(|secret| !secret.is_empty()).is_none() {
+        if let Some(secret) = legacy_secret {
+            config.insert(field.to_string(), serde_json::Value::String(secret.clone()));
+            store.set_secret(connection_id, key, &secret)?;
+            *needs_rewrite = true;
+        }
+    }
+    hydrate_json_secret(store, connection_id, key, config, field, needs_rewrite)
 }
 
 fn hydrate_mq_token_signing_secret(
@@ -545,6 +661,14 @@ fn scrub_mq_auth_secrets(config: &mut ConnectionConfig) {
         Some("oauth2") => scrub_json_secret(auth, "clientSecret"),
         _ => {}
     }
+}
+
+fn scrub_nats_auth_secrets(config: &mut ConnectionConfig) {
+    let Some(nats) = nats_config_object_mut(config.external_config.as_mut()) else {
+        return;
+    };
+    scrub_json_secret(nats, "password");
+    scrub_json_secret(nats, "token");
 }
 
 fn scrub_mq_token_signing_secret(config: &mut ConnectionConfig) {
@@ -657,6 +781,47 @@ fn mq_auth_object_mut(
     value?.get_mut("auth")?.as_object_mut()
 }
 
+fn is_nats_config(value: Option<&serde_json::Value>) -> bool {
+    nats_config_object(value).is_some()
+}
+
+fn nats_config_object(value: Option<&serde_json::Value>) -> Option<&serde_json::Map<String, serde_json::Value>> {
+    let config = value?.as_object()?;
+    config.get("systemKind").and_then(serde_json::Value::as_str).filter(|kind| kind.eq_ignore_ascii_case("nats"))?;
+    Some(config)
+}
+
+fn nats_config_object_mut(
+    value: Option<&mut serde_json::Value>,
+) -> Option<&mut serde_json::Map<String, serde_json::Value>> {
+    let config = value?.as_object_mut()?;
+    let is_nats = config
+        .get("systemKind")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|kind| kind.eq_ignore_ascii_case("nats"));
+    is_nats.then_some(config)
+}
+
+fn nats_auth_kind(config: &serde_json::Map<String, serde_json::Value>) -> Option<String> {
+    config
+        .get("auth")
+        .and_then(serde_json::Value::as_object)
+        .and_then(mq_auth_kind)
+        .or_else(|| {
+            config
+                .get("token")
+                .and_then(serde_json::Value::as_str)
+                .filter(|value| !value.is_empty())
+                .map(|_| "token".to_string())
+        })
+        .or_else(|| {
+            let has_username_or_password = ["username", "password"].into_iter().any(|field| {
+                config.get(field).and_then(serde_json::Value::as_str).is_some_and(|value| !value.is_empty())
+            });
+            has_username_or_password.then(|| "basic".to_string())
+        })
+}
+
 fn mq_token_signing_object(value: Option<&serde_json::Value>) -> Option<&serde_json::Map<String, serde_json::Value>> {
     value?.get("tokenSigning")?.as_object()
 }
@@ -743,6 +908,7 @@ fn sanitize_connections(configs: &[ConnectionConfig]) -> Vec<ConnectionConfig> {
             config.connection_string = None;
             config.init_script = None;
             scrub_mq_auth_secrets(&mut config);
+            scrub_nats_auth_secrets(&mut config);
             scrub_mq_token_signing_secret(&mut config);
             scrub_mqtt_auth_secrets(&mut config);
             config
@@ -759,7 +925,8 @@ mod tests {
     use super::{
         load_connections_from_file, save_connections_to_file, ConnectionSecretStore, CONNECTION_STRING_KEY,
         INIT_SCRIPT_KEY, MAIN_PASSWORD_KEY, MQTT_AUTH_PASSWORD_KEY, MQ_AUTH_PASSWORD_KEY, MQ_AUTH_TOKEN_KEY,
-        MQ_TOKEN_SIGNING_KEY, REDIS_SENTINEL_PASSWORD_KEY, SSH_PASSWORD_KEY,
+        MQ_TOKEN_SIGNING_KEY, NATS_AUTH_PASSWORD_KEY, NATS_AUTH_TOKEN_KEY, REDIS_SENTINEL_PASSWORD_KEY,
+        SSH_PASSWORD_KEY,
     };
     use crate::models::connection::{
         ConnectionConfig, DatabaseType, HttpTunnelConfig, SshTunnelConfig, TransportLayerConfig,
@@ -1239,6 +1406,69 @@ mod tests {
         let loaded = load_connections_from_file(&path, &store).unwrap();
         let signing = loaded[0].external_config.as_ref().and_then(|value| value.get("tokenSigning")).unwrap();
         assert_eq!(signing.get("key").and_then(serde_json::Value::as_str), Some("broker-signing-secret"));
+    }
+
+    // ── NATS 密钥持久化测试 ────────────────────────────────────────
+
+    #[test]
+    fn save_connections_moves_canonical_nats_credentials_to_secret_store_and_restores_them() {
+        let path = temp_connections_file("nats-auth");
+        let store = MemorySecretStore::default();
+        let mut password = connection("nats-password", "", "");
+        password.db_type = DatabaseType::MessageQueue;
+        password.external_config = Some(serde_json::json!({
+            "systemKind": "nats",
+            "serverUrl": "tls://nats.example.test:4222",
+            "auth": { "kind": "basic" },
+            "username": "alice",
+            "password": "nats-password-secret",
+            "tlsSkipVerify": true
+        }));
+        let mut token = connection("nats-token", "", "");
+        token.db_type = DatabaseType::MessageQueue;
+        token.external_config = Some(serde_json::json!({
+            "systemKind": "nats",
+            "serverUrl": "nats://nats.example.test:4222",
+            "auth": { "kind": "token" },
+            "token": "nats-token-secret"
+        }));
+
+        save_connections_to_file(&path, &[password, token], &store).unwrap();
+
+        assert_eq!(
+            store.get_existing("nats-password", NATS_AUTH_PASSWORD_KEY).as_deref(),
+            Some("nats-password-secret")
+        );
+        assert_eq!(store.get_existing("nats-token", NATS_AUTH_TOKEN_KEY).as_deref(), Some("nats-token-secret"));
+        let persisted_json = std::fs::read_to_string(&path).unwrap();
+        assert!(!persisted_json.contains("nats-password-secret"));
+        assert!(!persisted_json.contains("nats-token-secret"));
+
+        let loaded = load_connections_from_file(&path, &store).unwrap();
+        let password_config = loaded[0].external_config.as_ref().unwrap();
+        let token_config = loaded[1].external_config.as_ref().unwrap();
+        assert_eq!(password_config.get("password").and_then(serde_json::Value::as_str), Some("nats-password-secret"));
+        assert_eq!(token_config.get("token").and_then(serde_json::Value::as_str), Some("nats-token-secret"));
+    }
+
+    #[test]
+    fn nats_none_auth_clears_previous_token_and_password() {
+        let path = temp_connections_file("nats-none-auth");
+        let store = MemorySecretStore::default();
+        store.set_existing("nats-none", NATS_AUTH_PASSWORD_KEY, "old-password");
+        store.set_existing("nats-none", NATS_AUTH_TOKEN_KEY, "old-token");
+        let mut config = connection("nats-none", "", "");
+        config.db_type = DatabaseType::MessageQueue;
+        config.external_config = Some(serde_json::json!({
+            "systemKind": "nats",
+            "serverUrl": "nats://127.0.0.1:4222",
+            "auth": { "kind": "none" }
+        }));
+
+        save_connections_to_file(&path, &[config], &store).unwrap();
+
+        assert_eq!(store.get_existing("nats-none", NATS_AUTH_PASSWORD_KEY), None);
+        assert_eq!(store.get_existing("nats-none", NATS_AUTH_TOKEN_KEY), None);
     }
 
     // ── MQTT 密钥持久化测试 ────────────────────────────────────────

@@ -537,6 +537,63 @@ test("quotes MySQL reserved-word column identifiers with backticks when completi
   }
 });
 
+test("quotes MySQL-only reserved identifiers in schema, table, column, and join completions", () => {
+  const schemaSql = "select * from data";
+  const schemaItems = buildSqlCompletionItems(schemaSql, schemaSql.length, {
+    tables: [],
+    columnsByTable: new Map(),
+    schemas: ["database"],
+    dialect: "mysql",
+  });
+  assert.equal(schemaItems.find((item) => item.type === "schema" && item.label === "database")?.apply, "`database`.");
+
+  const tableSql = "select * from access";
+  const tableItems = buildSqlCompletionItems(tableSql, tableSql.length, {
+    tables: [{ name: "accessible", schema: "app", type: "table" }],
+    columnsByTable: new Map(),
+    dialect: "mysql",
+  });
+  assert.equal(tableItems.find((item) => item.type === "table" && item.label === "accessible")?.apply, "`accessible`");
+
+  const columnsByReservedTable = new Map<string, SqlCompletionColumn[]>([["app.accounts", [{ name: "use", table: "accounts", schema: "app", dataType: "text" }]]]);
+  const columnSql = "select us from accounts";
+  const columnItems = buildSqlCompletionItems(columnSql, "select us".length, {
+    tables: [{ name: "accounts", schema: "app", type: "table" }],
+    columnsByTable: columnsByReservedTable,
+    dialect: "mysql",
+  });
+  assert.equal(columnItems.find((item) => item.type === "column" && item.label === "use")?.apply, "`use`");
+
+  const joinColumns = new Map<string, SqlCompletionColumn[]>([
+    ["app.accounts", [{ name: "accessible", table: "accounts", schema: "app", dataType: "bigint" }]],
+    ["app.members", [{ name: "accessible", table: "members", schema: "app", dataType: "bigint" }]],
+  ]);
+  const joinSql = "select * from app.accounts a join app.members m on ";
+  const joinItems = buildSqlCompletionItems(joinSql, joinSql.length, {
+    tables: [
+      { name: "accounts", schema: "app", type: "table" },
+      { name: "members", schema: "app", type: "table" },
+    ],
+    columnsByTable: joinColumns,
+    foreignKeysByTable: new Map([
+      [
+        "app.accounts",
+        [
+          {
+            name: "accounts_members_accessible_fkey",
+            column: "accessible",
+            ref_schema: "app",
+            ref_table: "members",
+            ref_column: "accessible",
+          },
+        ],
+      ],
+    ]),
+    dialect: "mysql",
+  });
+  assert.equal(joinItems.find((item) => item.label === "a.accessible = m.accessible")?.apply, "a.`accessible` = m.`accessible`");
+});
+
 test("suggests matching table names after FROM", () => {
   const sql = "select * from us";
   const items = buildSqlCompletionItems(sql, sql.length, {
@@ -1905,6 +1962,50 @@ test("suggests stored procedures after CALL", () => {
     items.some((item) => item.label === "format_user_name"),
     false,
   );
+});
+
+test("quotes MySQL routine apply names for current and qualified databases", () => {
+  const currentItems = buildSqlCompletionItems("select us", "select us".length, {
+    tables: [],
+    columnsByTable: new Map(),
+    objects: [{ name: "use", schema: "app", type: "function", applyName: "use" }],
+    databaseType: "mysql",
+    dialect: "mysql",
+    currentSchema: "app",
+  });
+  assert.equal(currentItems.find((item) => item.type === "function" && item.label === "use")?.apply, "`use`()");
+
+  const qualifiedItems = buildSqlCompletionItems("select us", "select us".length, {
+    tables: [],
+    columnsByTable: new Map(),
+    objects: [{ name: "use", schema: "database", type: "function", applyName: "database.use" }],
+    databaseType: "mysql",
+    dialect: "mysql",
+    currentSchema: "app",
+  });
+  assert.equal(qualifiedItems.find((item) => item.type === "function" && item.label === "use")?.apply, "`database`.`use`()");
+});
+
+test("preserves already quoted routine apply names and non-MySQL spelling", () => {
+  const mysqlItems = buildSqlCompletionItems("select us", "select us".length, {
+    tables: [],
+    columnsByTable: new Map(),
+    objects: [{ name: "use", schema: "database", type: "function", applyName: "`database`.`use`" }],
+    databaseType: "mysql",
+    dialect: "mysql",
+    currentSchema: "app",
+  });
+  assert.equal(mysqlItems.find((item) => item.type === "function" && item.label === "use")?.apply, "`database`.`use`()");
+
+  const postgresItems = buildSqlCompletionItems("select ord", "select ord".length, {
+    tables: [],
+    columnsByTable: new Map(),
+    objects: [{ name: "order", schema: "app", type: "function", applyName: "app.order" }],
+    databaseType: "postgres",
+    dialect: "postgres",
+    currentSchema: "public",
+  });
+  assert.equal(postgresItems.find((item) => item.type === "function" && item.label === "order")?.apply, "app.order()");
 });
 
 test("prioritizes referenced table columns in WHERE field input", () => {

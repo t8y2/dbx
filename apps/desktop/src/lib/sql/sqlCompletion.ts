@@ -9,7 +9,7 @@ import { sqlSemanticDialectFor } from "@/lib/sql/semantic/dialect";
 import { findActiveSqlStatementSpan, tokenizeSqlSemantic } from "@/lib/sql/semantic/tokens";
 import type { SqlSemanticBuildOptions, SqlSemanticSpan } from "@/lib/sql/semantic/types";
 import { DEFAULT_SQL_SNIPPETS, MANTICORESEARCH_SQL_SNIPPETS, resolveSqlSnippetBodyForDatabase } from "@/lib/sql/sqlSnippetTemplates";
-import { requiresPostgresIdentifierQuote } from "@/lib/sql/sqlIdentifier";
+import { requiresMysqlIdentifierQuote, requiresPostgresIdentifierQuote } from "@/lib/sql/sqlIdentifier";
 import { identifierMatchScore, matchesIdentifierSearch } from "@/lib/sql/identifierSearch";
 import { containsHan, orderedSubsequenceSpan, pinyinFirstLetters } from "@/lib/common/pinyin";
 import { quoteTableIdentifier } from "@/lib/table/tableSelectSql";
@@ -3097,10 +3097,17 @@ const POSTGRES_IDENTIFIER_KEYWORDS = new Set(SQL_KEYWORDS.map((keyword) => keywo
 // baked in up front, so MySQL reserved-word identifiers get backtick-quoted here.
 function quoteCompletionApplyIdentifier(identifier: string, dialect?: "mysql" | "postgres" | "sqlserver"): string {
   if (dialect === "mysql") {
-    if (!requiresPostgresIdentifierQuote(identifier, POSTGRES_IDENTIFIER_KEYWORDS)) return identifier;
+    if (!requiresMysqlIdentifierQuote(identifier, POSTGRES_IDENTIFIER_KEYWORDS)) return identifier;
     return `\`${identifier.replaceAll("`", "``")}\``;
   }
   return quoteSqlIdentifier(identifier, dialect);
+}
+
+function quoteCompletionApplyName(applyName: string, dialect?: "mysql" | "postgres" | "sqlserver"): string {
+  if (dialect !== "mysql") return applyName;
+  const parts = splitQualifiedNameRawParts(applyName);
+  if (parts.length === 0) return applyName;
+  return parts.map((part) => (isQuotedIdentifier(part) ? part : quoteCompletionApplyIdentifier(part, dialect))).join(".");
 }
 
 function quoteSelectStarColumnIdentifier(identifier: string, dialect?: "mysql" | "postgres" | "sqlserver", databaseType?: DatabaseType): string {
@@ -3287,10 +3294,11 @@ function buildObjectItems(context: SqlCompletionContext, objects: SqlCompletionO
     .map((object) => {
       const qualifiedByContext = objectIsQualifiedByContext(object, context);
       const objectInCurrentSchema = !!currentSchema && !!object.schema && normalizeIdentifierPart(object.schema) === normalizeIdentifierPart(currentSchema);
+      const suppliedApplyName = object.applyName ? quoteCompletionApplyName(object.applyName, dialect) : undefined;
       const applyName =
         qualifiedByContext || (context.qualifier && object.schema?.toLowerCase() === context.qualifier.toLowerCase())
           ? quoteCompletionApplyIdentifier(object.name, dialect)
-          : (object.applyName ?? (object.schema && !objectInCurrentSchema ? `${quoteCompletionApplyIdentifier(object.schema, dialect)}.${quoteCompletionApplyIdentifier(object.name, dialect)}` : quoteCompletionApplyIdentifier(object.name, dialect)));
+          : (suppliedApplyName ?? (object.schema && !objectInCurrentSchema ? `${quoteCompletionApplyIdentifier(object.schema, dialect)}.${quoteCompletionApplyIdentifier(object.name, dialect)}` : quoteCompletionApplyIdentifier(object.name, dialect)));
       const locationDetail = object.type === "trigger" && object.parentName ? `trigger on ${object.parentName}` : object.parentName ? `${object.type} in ${object.parentName}` : object.schema ? `${object.type} in ${object.schema}` : object.type;
       const signature = object.signature?.trim();
       const detail = [locationDetail, signature ? `(${signature})` : undefined, object.dataType ? `[${object.dataType}]` : undefined].filter(Boolean).join("  ");

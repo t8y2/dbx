@@ -684,6 +684,18 @@ async function toggle(requestId = beginNavigationRequest()) {
     return;
   }
 
+  // Xugu package members are represented with the same visual group types as
+  // schema-level procedures/functions, but their children are already loaded
+  // from the owning package specification.  Keep this scoped group local:
+  // routing it through loadSidebarObjectGroup would query every routine in the
+  // schema and replace the package's member list with unrelated objects.
+  if (currentDatabaseType() === "xugu" && (node.type === "group-procedures" || node.type === "group-functions") && node.parentType === "package") {
+    node.isExpanded = !node.isExpanded;
+    if (wasExpanded && !connectionStore.sidebarSearchQuery) connectionStore.releaseCollapsedTreeNodeChildren(node.id);
+    emitNodeToggled(node, wasExpanded);
+    return;
+  }
+
   // Keep the click path aligned with every object-group definition. In
   // particular, schema-level trigger/type groups have no tableName, so they
   // must use the generic object loader rather than the table-trigger loader.

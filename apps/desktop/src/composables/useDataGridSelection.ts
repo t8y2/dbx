@@ -39,6 +39,11 @@ interface RestoredCellSelectionState {
 
 const AUTO_SCROLL_EDGE_SIZE = 40;
 const AUTO_SCROLL_MAX_SPEED = 28;
+// Trackpad/mouse jitter during a plain click can move the pointer a few pixels between
+// mousedown and mouseup. Without a minimum drag distance, that jitter reads as an
+// intentional drag and turns a single click into a multi-cell/row selection. Matches
+// TAB_DRAG_HORIZONTAL_THRESHOLD in useTabDrag.ts, which guards the same class of gesture.
+const GRID_SELECTION_DRAG_THRESHOLD_PX = 12;
 type RowSelectionOperation = "replace" | "add" | "remove";
 
 export function useDataGridSelection(options: UseDataGridSelectionOptions) {
@@ -50,6 +55,9 @@ export function useDataGridSelection(options: UseDataGridSelectionOptions) {
   const isSelectingRows = ref(false);
   let selectionPointerClientX = 0;
   let selectionPointerClientY = 0;
+  let selectionPointerDownClientX = 0;
+  let selectionPointerDownClientY = 0;
+  let selectionDragConfirmed = false;
   let selectionAutoScrollFrame = 0;
   let rowSelectionRangeAnchorIndex = -1;
   let rowSelectionFocusIndex = -1;
@@ -369,8 +377,17 @@ export function useDataGridSelection(options: UseDataGridSelectionOptions) {
     applyDraggedRowRange(rowIndex);
   }
 
+  function confirmSelectionDrag(clientX: number, clientY: number): boolean {
+    if (selectionDragConfirmed) return true;
+    const distance = Math.hypot(clientX - selectionPointerDownClientX, clientY - selectionPointerDownClientY);
+    if (distance < GRID_SELECTION_DRAG_THRESHOLD_PX) return false;
+    selectionDragConfirmed = true;
+    return true;
+  }
+
   function handleRowSelectionPointerMove(event: MouseEvent) {
     if (!isSelectingRows.value) return;
+    if (!confirmSelectionDrag(event.clientX, event.clientY)) return;
     selectionPointerClientX = event.clientX;
     selectionPointerClientY = event.clientY;
     if (!selectionAutoScrollFrame) selectionAutoScrollFrame = requestAnimationFrame(runSelectionAutoScroll);
@@ -378,11 +395,11 @@ export function useDataGridSelection(options: UseDataGridSelectionOptions) {
 
   function finishRowSelection(event?: MouseEvent) {
     if (!isSelectingRows.value) return;
-    if (event) {
+    if (event && confirmSelectionDrag(event.clientX, event.clientY)) {
       selectionPointerClientX = event.clientX;
       selectionPointerClientY = event.clientY;
+      updateRowSelectionFromPointer();
     }
-    updateRowSelectionFromPointer();
     isSelectingRows.value = false;
     // Keep the range origin stable across repeated Shift selections. For a
     // plain or meta selection this is the row where the gesture started; for
@@ -411,6 +428,9 @@ export function useDataGridSelection(options: UseDataGridSelectionOptions) {
     isSelectingRows.value = true;
     selectionPointerClientX = event.clientX;
     selectionPointerClientY = event.clientY;
+    selectionPointerDownClientX = event.clientX;
+    selectionPointerDownClientY = event.clientY;
+    selectionDragConfirmed = false;
     document.addEventListener("mouseup", finishRowSelection);
     document.addEventListener("mousemove", handleRowSelectionPointerMove);
   }
@@ -479,6 +499,7 @@ export function useDataGridSelection(options: UseDataGridSelectionOptions) {
 
   function handleSelectionPointerMove(event: MouseEvent) {
     if (!isSelectingCells.value) return;
+    if (!confirmSelectionDrag(event.clientX, event.clientY)) return;
     selectionPointerClientX = event.clientX;
     selectionPointerClientY = event.clientY;
     updateSelectionFromPointer();
@@ -499,6 +520,9 @@ export function useDataGridSelection(options: UseDataGridSelectionOptions) {
     isSelectingCells.value = true;
     selectionPointerClientX = event.clientX;
     selectionPointerClientY = event.clientY;
+    selectionPointerDownClientX = event.clientX;
+    selectionPointerDownClientY = event.clientY;
+    selectionDragConfirmed = false;
     lastClickedColumnIndex.value = colIndex;
     if (showTranspose.value) transposeRowIndex.value = rowIndex;
     document.addEventListener("mouseup", finishCellSelection);
@@ -512,6 +536,13 @@ export function useDataGridSelection(options: UseDataGridSelectionOptions) {
 
   if (options.runtimeScope) options.runtimeScope.addCleanup(finishSelection);
   else if (getCurrentScope()) onScopeDispose(finishSelection);
+
+  // Some callers extend the selection off native DOM hover events rather than the pointermove
+  // handler above, with no pixel-distance info of their own. They should check this first, so
+  // hovering into an adjacent cell during click jitter doesn't grow the selection.
+  function isCellSelectionDragConfirmed(): boolean {
+    return selectionDragConfirmed;
+  }
 
   function extendCellSelection(rowIndex: number, colIndex: number) {
     if (!isSelectingCells.value || !selectionAnchor.value) return;
@@ -595,6 +626,7 @@ export function useDataGridSelection(options: UseDataGridSelectionOptions) {
     restoreCellSelectionState,
     beginCellSelection,
     extendCellSelection,
+    isCellSelectionDragConfirmed,
     cellIsSelected,
     columnIsSelected,
     selectedRangeStart,

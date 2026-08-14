@@ -8,7 +8,7 @@ import { Popover, PopoverAnchor, PopoverContent } from "@/components/ui/popover"
 import { renderGeometryFeaturesIndependently } from "@/lib/dataGrid/geometryLayerPreview";
 import { prepareCoordsToLatLng, type CoordinateToLatLng } from "@/lib/dataGrid/geometryProjection";
 import { getSpatialReference, SHORTLIST_SRIDS } from "@/lib/dataGrid/spatialReferenceCatalog";
-import { loadCustomBasemapConfig, normalizeCustomBasemapConfig, saveCustomBasemapConfig, type CustomBasemapConfig } from "@/lib/dataGrid/customBasemap";
+import { escapeCustomBasemapAttribution, loadCustomBasemapConfig, loadSelectedBasemapId, normalizeCustomBasemapConfig, resolveSelectedBasemapId, saveCustomBasemapConfig, saveSelectedBasemapId, type CustomBasemapConfig } from "@/lib/dataGrid/customBasemap";
 import type { GeoJsonGeometry } from "@/lib/dataGrid/geometryPreview";
 import "leaflet/dist/leaflet.css";
 import type L from "leaflet";
@@ -205,9 +205,17 @@ function customBasemapOption(config: CustomBasemapConfig): BasemapOption {
   };
 }
 
-const storedCustomBasemap = loadCustomBasemapConfig(sessionStorageOrNull());
+const basemapStorage = sessionStorageOrNull();
+const storedCustomBasemap = loadCustomBasemapConfig(basemapStorage);
+const storedSelectedBasemapId = loadSelectedBasemapId(basemapStorage);
+const initialBasemapId = resolveSelectedBasemapId(
+  storedSelectedBasemapId,
+  basemaps.map((basemap) => basemap.id),
+  storedCustomBasemap !== null,
+);
+const initialBasemap = initialBasemapId === "custom" && storedCustomBasemap ? customBasemapOption(storedCustomBasemap) : (basemaps.find((basemap) => basemap.id === initialBasemapId) ?? basemaps[0]);
 const customBasemapConfig = ref<CustomBasemapConfig | null>(storedCustomBasemap);
-const selectedBasemap = ref<BasemapOption>(storedCustomBasemap ? customBasemapOption(storedCustomBasemap) : basemaps[0]);
+const selectedBasemap = ref<BasemapOption>(initialBasemap);
 const selectedBasemapId = ref(selectedBasemap.value.id);
 const customBasemapOpen = ref(false);
 const customBasemapName = ref(storedCustomBasemap?.name ?? "");
@@ -518,13 +526,14 @@ function onCustomSridSubmit() {
 function switchBasemap(basemap: BasemapOption) {
   selectedBasemap.value = basemap;
   selectedBasemapId.value = basemap.id;
+  saveSelectedBasemapId(basemapStorage, basemap.id);
   if (!map) return;
   removeBasemapLayers();
   addBasemapLayers(basemap);
 }
 
 function basemapAttribution(basemap: BasemapOption): string {
-  return basemap.custom ? escapeHtml(basemap.attribution) : basemap.attribution;
+  return basemap.custom ? escapeCustomBasemapAttribution(basemap.attribution) : basemap.attribution;
 }
 
 function addBasemapLayers(basemap: BasemapOption) {
@@ -579,7 +588,7 @@ function applyCustomBasemap() {
     customBasemapError.value = t("grid.layerPreviewCustomBasemapInvalid");
     return;
   }
-  saveCustomBasemapConfig(sessionStorageOrNull(), config);
+  saveCustomBasemapConfig(basemapStorage, config);
   customBasemapConfig.value = config;
   switchBasemap(customBasemapOption(config));
   customBasemapOpen.value = false;

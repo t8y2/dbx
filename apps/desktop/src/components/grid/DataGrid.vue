@@ -121,7 +121,7 @@ import {
 } from "@/lib/dataGrid/dataGridTranspose";
 import { canApplyGridSelectionValue, canDeleteGridRowItem, canEditGridCellDetail, matchesRowStatusFilter, shouldShowQuickEntryDraftRow, type RowStatus, type RowStatusFilter } from "@/lib/dataGrid/gridRowStatus";
 import { displayCellValue, firstLineCellDisplayValue, limitDataGridCellDisplay, SQLSERVER_DATA_GRID_CELL_DISPLAY_MAX_LENGTH, type CellValue } from "@/lib/dataGrid/cellValue";
-import { getApplicablePreviewActions } from "@/lib/dataGrid/resultPreviewRegistry";
+import { getApplicablePreviewActions, type PreviewAction } from "@/lib/dataGrid/resultPreviewRegistry";
 import "@/lib/dataGrid/geometryMapPreview";
 import {
   BINARY_CELL_DOWNLOAD_MODES,
@@ -4548,7 +4548,7 @@ function exportSelectedRowsTxt() {
   return exportTxt(rowIds);
 }
 
-function executePreviewAction(action: { execute: (ctx: any) => any }) {
+function executePreviewAction(action: PreviewAction) {
   const config = action.execute({
     result: props.result,
     selectedRowIds: affectedRowIds(),
@@ -4557,6 +4557,8 @@ function executePreviewAction(action: { execute: (ctx: any) => any }) {
   if (config) {
     previewDialogConfig.value = config;
     previewDialogOpen.value = true;
+  } else if (action.id === "geometry-map-preview") {
+    toast(t("grid.layerPreviewNoGeometryData"), 3000);
   }
 }
 

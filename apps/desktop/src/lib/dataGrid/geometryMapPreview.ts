@@ -22,7 +22,7 @@ registerPreviewAction({
   label: "grid.layerPreview",
   icon: MapIcon,
   isAvailable(result) {
-    return hasGeometryMapPreviewData(result);
+    return hasGeometryMapPreviewColumns(result);
   },
   execute(ctx) {
     const featureCollection = buildGeometryMapFeatureCollection(ctx);
@@ -37,20 +37,8 @@ registerPreviewAction({
   },
 });
 
-export function hasGeometryMapPreviewData(result: Pick<QueryResult, "column_types" | "rows">): boolean {
-  const geomIndices = geometryColumnIndices(result.column_types);
-  if (geomIndices.length === 0) return false;
-
-  for (const row of result.rows) {
-    for (const colIdx of geomIndices) {
-      const raw = row[colIdx];
-      if (raw === null || raw === undefined) continue;
-      const wkt = String(raw);
-      if (wkt.startsWith("0x")) continue;
-      if (wktToGeoJson(wkt)) return true;
-    }
-  }
-  return false;
+export function hasGeometryMapPreviewColumns(result: Pick<QueryResult, "column_types">): boolean {
+  return geometryColumnIndices(result.column_types).length > 0;
 }
 
 export function buildGeometryMapFeatureCollection(ctx: PreviewActionContext): GeometryMapFeatureCollection | null {

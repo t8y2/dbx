@@ -7,7 +7,27 @@ export interface CustomBasemapConfig {
 }
 
 export const CUSTOM_BASEMAP_SESSION_KEY = "dbx-layer-preview-custom-basemap";
+export const BASEMAP_SELECTION_SESSION_KEY = "dbx-layer-preview-selected-basemap";
 export const DEFAULT_CUSTOM_BASEMAP_NAME = "Custom basemap";
+
+const BASEMAP_ID_PATTERN = /^[a-z0-9-]{1,50}$/;
+
+export function escapeCustomBasemapAttribution(value: string): string {
+  return value.replace(/[&<>"']/g, (character) => {
+    switch (character) {
+      case "&":
+        return "&amp;";
+      case "<":
+        return "&lt;";
+      case ">":
+        return "&gt;";
+      case '"':
+        return "&quot;";
+      default:
+        return "&#39;";
+    }
+  });
+}
 
 export function isValidTileUrlTemplate(value: string): boolean {
   const trimmed = value.trim();
@@ -54,4 +74,30 @@ export function saveCustomBasemapConfig(storage: Pick<Storage, "setItem"> | null
   } catch {
     return false;
   }
+}
+
+export function loadSelectedBasemapId(storage: Pick<Storage, "getItem"> | null | undefined): string | null {
+  if (!storage) return null;
+  try {
+    const id = storage.getItem(BASEMAP_SELECTION_SESSION_KEY);
+    return id && BASEMAP_ID_PATTERN.test(id) ? id : null;
+  } catch {
+    return null;
+  }
+}
+
+export function saveSelectedBasemapId(storage: Pick<Storage, "setItem"> | null | undefined, id: string): boolean {
+  if (!storage || !BASEMAP_ID_PATTERN.test(id)) return false;
+  try {
+    storage.setItem(BASEMAP_SELECTION_SESSION_KEY, id);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function resolveSelectedBasemapId(selectedId: string | null, builtInIds: readonly string[], hasCustomBasemap: boolean): string | null {
+  if (selectedId === "custom" && hasCustomBasemap) return selectedId;
+  if (selectedId && builtInIds.includes(selectedId)) return selectedId;
+  return builtInIds[0] ?? null;
 }

@@ -8249,7 +8249,7 @@ function openExternalUrl(url: string) {
 
         <div v-if="agentInstallError" class="space-y-2">
           <div class="text-sm font-medium text-destructive">{{ t("connection.driverInstall.fullError") }}</div>
-          <pre class="max-h-56 overflow-auto whitespace-pre-wrap break-words rounded-md border bg-muted/30 p-3 text-xs leading-5 text-destructive">{{ agentInstallError }}</pre>
+          <pre class="max-h-56 min-w-0 max-w-full overflow-x-hidden overflow-y-auto whitespace-pre-wrap break-all [overflow-wrap:anywhere] rounded-md border bg-muted/30 p-3 text-xs leading-5 text-destructive">{{ agentInstallError }}</pre>
         </div>
       </div>
 
@@ -8266,14 +8266,14 @@ function openExternalUrl(url: string) {
   </Dialog>
 
   <Dialog v-model:open="showConnectionErrorDialog">
-    <DialogContent class="sm:max-w-[560px]">
+    <DialogContent class="min-w-0 sm:max-w-[680px]">
       <DialogHeader>
         <DialogTitle>{{ t("connection.connectFailedTitle") }}</DialogTitle>
       </DialogHeader>
 
-      <div class="space-y-2">
+      <div class="min-w-0 space-y-2">
         <div class="text-sm text-muted-foreground">{{ t("connection.fullErrorMessage") }}</div>
-        <pre class="max-h-72 overflow-auto whitespace-pre-wrap break-words rounded-md border bg-muted/30 p-3 text-xs leading-5 text-destructive">{{ connectionErrorDetail }}</pre>
+        <pre class="max-h-72 min-w-0 max-w-full overflow-x-hidden overflow-y-auto whitespace-pre-wrap break-all [overflow-wrap:anywhere] rounded-md border bg-muted/30 p-3 text-xs leading-5 text-destructive">{{ connectionErrorDetail }}</pre>
       </div>
 
       <DialogFooter class="gap-2">

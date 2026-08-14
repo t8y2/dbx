@@ -236,11 +236,14 @@ pub async fn import_agents_from_zip(
 
             let plan = inspect_offline_package(&package_path).map_err(AppError::from)?;
             ensure_no_offline_import_blockers(&state.app, &plan).await.map_err(AppError::from)?;
-            import_agents_from_package_core(&state.app.agent_manager, &package_path, |event| {
+            let import_result = import_agents_from_package_core(&state.app.agent_manager, &package_path, |event| {
                 send_progress_event(&tx, event.with_operation_id(&operation_id))
             })
             .await
-            .map_err(AppError::from)
+            .map_err(AppError::from)?;
+            dbx_core::jdbc::import_offline_jdbc_payload(state.app.plugins.root_dir(), &package_path)
+                .map_err(AppError::from)?;
+            Ok::<_, AppError>(import_result)
         }
         .await;
         let _ = std::fs::remove_file(&package_path);

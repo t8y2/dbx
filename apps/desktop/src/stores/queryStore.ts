@@ -5366,7 +5366,7 @@ export const useQueryStore = defineStore("query", () => {
   }
 
   function setActiveResultIndex(id: string, index: number) {
-    const tab = tabs.value.find((t) => t.id === id);
+    const tab = findExecutionTab(id);
     if (!tab?.results || index < 0 || index >= tab.results.length) return;
     tab.activeResultIndex = index;
     tab.result = tab.results[index];

@@ -252,6 +252,22 @@ export function useSqlExecution(deps: {
     return false;
   }
 
+  // SQL Server batches that end in PRINT/DBCC-style messages with no rows of their own get
+  // synthesized into a "Message" pseudo-result (server_message: true). The store's generic
+  // "first result with columns" pick can land on that pseudo-result instead of real data, so
+  // whenever it does, redirect focus to the first real data result (falling back to the
+  // message itself only if there is no data result to show). Shared by every SQL execution
+  // entry point so none of them can regress independently (see #6189).
+  function focusSqlServerDataResult(executionTabId: string, executionDatabaseType: DatabaseType | undefined, tab: Pick<QueryTab, "results" | "result" | "activeResultIndex">) {
+    if (executionDatabaseType !== "sqlserver") return;
+    const sqlServerMessageResultIndex = tab.results?.findIndex((result) => result.server_message === true);
+    if (sqlServerMessageResultIndex === undefined || sqlServerMessageResultIndex < 0) return;
+    const activeSqlServerResult = tab.results && tab.activeResultIndex !== undefined ? tab.results[tab.activeResultIndex] : tab.result;
+    if (activeSqlServerResult?.server_message !== true) return;
+    const sqlServerDataResultIndex = tab.results?.findIndex((result) => result.server_message !== true && !isQueryExecutionErrorResult(result) && result.columns.length > 0);
+    queryStore.setActiveResultIndex(executionTabId, sqlServerDataResultIndex !== undefined && sqlServerDataResultIndex >= 0 ? sqlServerDataResultIndex : sqlServerMessageResultIndex);
+  }
+
   async function doExecute(sql?: string, sourceOffset?: number, options: SqlExecutionOptions = {}) {
     if (sql === undefined) ({ sql, sourceOffset } = await resolvedExecutableSql());
     const tab = deps.activeTab.value;
@@ -274,13 +290,8 @@ export function useSqlExecution(deps: {
     });
     if (producedResult === false) return;
     const sqlServerMessageResultIndex = executionDatabaseType === "sqlserver" ? tab.results?.findIndex((result) => result.server_message === true) : undefined;
-    const activeSqlServerResult = tab.results && tab.activeResultIndex !== undefined ? tab.results[tab.activeResultIndex] : tab.result;
     if (sqlServerMessageResultIndex !== undefined && sqlServerMessageResultIndex >= 0) {
-      if (activeSqlServerResult?.server_message === true) {
-        const sqlServerDataResultIndex = tab.results?.findIndex((result) => result.server_message !== true && !isQueryExecutionErrorResult(result) && result.columns.length > 0);
-        if (sqlServerDataResultIndex !== undefined && sqlServerDataResultIndex >= 0) queryStore.setActiveResultIndex(tab.id, sqlServerDataResultIndex);
-        else queryStore.setActiveResultIndex(tab.id, sqlServerMessageResultIndex);
-      }
+      focusSqlServerDataResult(tab.id, executionDatabaseType, tab);
       deps.activeOutputView.value = "result";
     } else if (executionDatabaseType === "sqlserver" && tab.result?.server_message === true) {
       deps.activeOutputView.value = "result";
@@ -425,6 +436,7 @@ export function useSqlExecution(deps: {
       if (cancelRequested() || tabCancelRequested(cancelRequestCount)) {
         return finish({ status: "cancelled" });
       }
+      focusSqlServerDataResult(executionTabId, connection.db_type, latest);
       const failure = firstQueryExecutionError(latest);
       const errorMessage = failure ? String(failure.rows?.[0]?.[0] ?? t("common.failed")) : undefined;
       const success = !failure;

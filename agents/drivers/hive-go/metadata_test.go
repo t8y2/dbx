@@ -211,16 +211,31 @@ func TestTableCommentAndTypeInfoUseHiveServerMetadata(t *testing.T) {
 	}
 }
 
-func TestListTablesFallsBackToShowTables(t *testing.T) {
+func TestListTablesFallsBackToShowTablesAndViews(t *testing.T) {
 	behavior := &scriptedBehavior{
 		getTables: func(context.Context, string, string, []string) (gohive.MetadataResult, error) {
 			return gohive.MetadataResult{}, errors.New("metadata unsupported")
 		},
 		query: func(ctx context.Context, query string) (driver.Rows, error) {
-			if query != "SHOW TABLES IN `analytics`" {
+			switch query {
+			case "SHOW TABLES IN `analytics`":
+				return newScriptedRows(
+					ctx,
+					[]string{"tab_name"},
+					[]string{"STRING"},
+					[][]driver.Value{{"events"}, {"shared_name"}},
+				), nil
+			case "SHOW VIEWS IN `analytics`":
+				return newScriptedRows(
+					ctx,
+					[]string{"view_name"},
+					[]string{"STRING"},
+					[][]driver.Value{{"events_view"}, {"shared_name"}},
+				), nil
+			default:
 				t.Fatalf("unexpected fallback query: %q", query)
+				return nil, errors.New("unexpected fallback query")
 			}
-			return newScriptedRows(ctx, []string{"tab_name"}, []string{"STRING"}, [][]driver.Value{{"events"}}), nil
 		},
 	}
 	server := newScriptedServer(t, behavior)
@@ -229,7 +244,12 @@ func TestListTablesFallsBackToShowTables(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(values, []tableInfo{{Name: "events", TableType: "TABLE"}}) {
+	expected := []tableInfo{
+		{Name: "events", TableType: "TABLE"},
+		{Name: "events_view", TableType: "VIEW"},
+		{Name: "shared_name", TableType: "VIEW"},
+	}
+	if !reflect.DeepEqual(values, expected) {
 		t.Fatalf("unexpected fallback tables: %#v", values)
 	}
 }

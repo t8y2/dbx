@@ -313,28 +313,47 @@ func (server *server) listTables(schema string, constraints metadataListConstrai
 		sort.Slice(values, func(first, second int) bool { return values[first].Name < values[second].Name })
 		return applyMetadataWindow(values, constraints.Offset, constraints.Limit), nil
 	}
-	fallbackStatement := "SHOW TABLES IN " + quoteHiveIdentifier(schema)
-	fallbackOperation := "SHOW TABLES"
-	fallbackObjectType := "TABLE"
-	if len(requestedTypes) > 0 && !containsString(requestedTypes, "TABLE") {
-		fallbackStatement = "SHOW VIEWS IN " + quoteHiveIdentifier(schema)
-		fallbackOperation = "SHOW VIEWS"
-		fallbackObjectType = "VIEW"
+	type fallbackQuery struct {
+		operation  string
+		statement  string
+		objectType string
 	}
-	result, err := server.executeQuery(queryOptions{
-		SQL:     fallbackStatement,
-		MaxRows: metadataQueryLimit,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("HiveServer2 metadata failed (%v); %s fallback failed: %w", metadataErr, fallbackOperation, err)
+	fallbackQueries := make([]fallbackQuery, 0, 2)
+	if containsString(requestedTypes, "TABLE") {
+		fallbackQueries = append(fallbackQueries, fallbackQuery{
+			operation:  "SHOW TABLES",
+			statement:  "SHOW TABLES IN " + quoteHiveIdentifier(schema),
+			objectType: "TABLE",
+		})
 	}
-	values := make([]tableInfo, 0, len(result.Rows))
-	for _, row := range result.Rows {
-		name := showTablesRowName(result.Columns, row)
-		if name == "" || !metadataNameMatches(name, constraints.Filter) {
-			continue
+	if containsString(requestedTypes, "VIEW") || containsString(requestedTypes, "MATERIALIZED VIEW") {
+		fallbackQueries = append(fallbackQueries, fallbackQuery{
+			operation:  "SHOW VIEWS",
+			statement:  "SHOW VIEWS IN " + quoteHiveIdentifier(schema),
+			objectType: "VIEW",
+		})
+	}
+	objectsByName := make(map[string]tableInfo)
+	for _, fallback := range fallbackQueries {
+		result, err := server.executeQuery(queryOptions{SQL: fallback.statement, MaxRows: metadataQueryLimit})
+		if err != nil {
+			return nil, fmt.Errorf("HiveServer2 metadata failed (%v); %s fallback failed: %w", metadataErr, fallback.operation, err)
 		}
-		values = append(values, tableInfo{Name: name, TableType: fallbackObjectType, Comment: nil})
+		for _, row := range result.Rows {
+			name := showTablesRowName(result.Columns, row)
+			if name == "" || !metadataNameMatches(name, constraints.Filter) {
+				continue
+			}
+			candidate := tableInfo{Name: name, TableType: fallback.objectType, Comment: nil}
+			if existing, ok := objectsByName[name]; ok && existing.TableType == "VIEW" && candidate.TableType != "VIEW" {
+				continue
+			}
+			objectsByName[name] = candidate
+		}
+	}
+	values := make([]tableInfo, 0, len(objectsByName))
+	for _, value := range objectsByName {
+		values = append(values, value)
 	}
 	sort.Slice(values, func(first, second int) bool { return values[first].Name < values[second].Name })
 	return applyMetadataWindow(values, constraints.Offset, constraints.Limit), nil

@@ -5608,8 +5608,14 @@ function openReplace(): boolean {
 function scrollCursorIntoView() {
   if (!view.value || !editorViewModule || !editorIsActive) return;
   const pos = view.value.state.selection.main.head;
+  // Use "center" rather than "nearest": by the time this runs, the results pane has already
+  // opened/resized and shrunk the editor viewport, so the cursor's old position is often no
+  // longer visible. "nearest" then pins it right at the new viewport's edge (Fixes #5281: in a
+  // long multi-statement file, the just-executed statement lands flush against the results pane
+  // divider), which is exactly where it's hardest to see and re-click. Centering keeps it
+  // comfortably visible so the user doesn't have to scroll to find/re-run it.
   view.value.dispatch({
-    effects: editorViewModule.EditorView.scrollIntoView(pos, { y: "nearest" }),
+    effects: editorViewModule.EditorView.scrollIntoView(pos, { y: "center" }),
   });
 }
 

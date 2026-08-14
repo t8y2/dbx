@@ -2998,22 +2998,41 @@ mod tests {
         config.driver_profile = Some("gaussdb-m".to_string());
 
         assert_eq!(
-            gaussdb_m_view_object_source_sql(&config, "tenant`db", "active`users", &db::ObjectSourceKind::View)
-                .as_deref(),
-            Some("SHOW CREATE VIEW `tenant``db`.`active``users`")
+            gaussdb_m_view_object_source_sql(
+                &config,
+                "connection_db",
+                "tenant`schema",
+                "active`users",
+                &db::ObjectSourceKind::View,
+            )
+            .as_deref(),
+            Some("SHOW CREATE VIEW `tenant``schema`.`active``users`")
         );
         assert_eq!(
-            gaussdb_m_view_object_source_sql(&config, "", "active`users", &db::ObjectSourceKind::View).as_deref(),
+            gaussdb_m_view_object_source_sql(&config, "connection_db", "", "active`users", &db::ObjectSourceKind::View)
+                .as_deref(),
             Some("SHOW CREATE VIEW `active``users`")
         );
         assert_eq!(
-            gaussdb_m_view_object_source_sql(&config, "tenant_db", "refresh_users", &db::ObjectSourceKind::Function),
+            gaussdb_m_view_object_source_sql(
+                &config,
+                "connection_db",
+                "tenant_schema",
+                "refresh_users",
+                &db::ObjectSourceKind::Function,
+            ),
             None
         );
 
         config.driver_profile = Some("gaussdb".to_string());
         assert_eq!(
-            gaussdb_m_view_object_source_sql(&config, "tenant_db", "active_users", &db::ObjectSourceKind::View),
+            gaussdb_m_view_object_source_sql(
+                &config,
+                "connection_db",
+                "tenant_schema",
+                "active_users",
+                &db::ObjectSourceKind::View,
+            ),
             None
         );
     }
@@ -6783,12 +6802,13 @@ fn external_driver_uses_mysql_ddl(config: &ConnectionConfig) -> bool {
 
 fn gaussdb_m_view_object_source_sql(
     config: &ConnectionConfig,
-    database: &str,
+    _database: &str,
+    schema: &str,
     name: &str,
     kind: &db::ObjectSourceKind,
 ) -> Option<String> {
     (gaussdb_uses_m_jdbc_driver(config) && matches!(kind, db::ObjectSourceKind::View))
-        .then(|| mysql_object_source_sql(database, name, kind))
+        .then(|| mysql_object_source_sql(schema, name, kind))
 }
 
 fn mysql_external_driver_ddl_sql(database: &str, schema: &str, table: &str) -> String {
@@ -7427,7 +7447,7 @@ async fn get_object_source_once(
             let config = config.clone();
             let session = session.clone();
             drop(connections);
-            if let Some(sql) = gaussdb_m_view_object_source_sql(config.as_ref(), database, name, &object_type) {
+            if let Some(sql) = gaussdb_m_view_object_source_sql(config.as_ref(), database, schema, name, &object_type) {
                 let result: db::QueryResult = session
                     .invoke_with_timeout(
                         "executeQuery",

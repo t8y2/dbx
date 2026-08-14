@@ -159,7 +159,7 @@ import type { BuildEditableObjectSourceSqlInput, BuildRoutineRenameObjectSourceI
 import type { BuildViewDdlInput } from "@/lib/table/viewDdl";
 import type { BuildRenameObjectSqlOptions } from "@/lib/table/objectRenameSql";
 import type { CreateDatabaseSqlOptions } from "@/lib/database/createDatabaseSql";
-import type { DatabaseNameSqlOptions, DatabasePropertyEditSqlOptions, DropTableChildObjectSqlOptions, DropObjectSqlOptions, DuplicateTableStructureSqlOptions, CopyTableDataSqlOptions, SchemaNameSqlOptions, TableAdminSqlOptions } from "@/lib/database/dbAdminSql";
+import type { DatabaseNameSqlOptions, DatabasePropertyEditSqlOptions, DropTableChildObjectSqlOptions, DropObjectSqlOptions, DuplicateTableStructureSqlOptions, CopyTableDataSqlOptions, MysqlAutoIncrementSqlOptions, SchemaNameSqlOptions, TableAdminSqlOptions } from "@/lib/database/dbAdminSql";
 import type { BuildDatabaseSqlExportOptions, BuildExportInsertStatementsOptions } from "@/lib/export/databaseExport";
 import { loadBrowserAppState, saveBrowserAppState } from "@/lib/backend/browserAppStateStorage";
 import type { DataCompareFromTablesOptions, DataCompareFromTablesPreparation, DataCompareSyncPlan, DataCompareSyncPlanOptions, DataComparePreparation, DataComparePreparationOptions } from "@/lib/dataGrid/dataCompare";
@@ -203,6 +203,7 @@ import type {
   NacosSearchProgress,
 } from "@/types/nacos";
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
+import { appendDebugLog, isDebugLoggingEnabled } from "@/lib/backend/debugLog";
 import { normalizeConnectionTestResult } from "@/lib/connection/connectionDatabaseInfo";
 import type { AnnotationFile, SchemaSnapshot } from "@/docs/types";
 
@@ -234,6 +235,55 @@ async function post<T>(url: string, body: unknown): Promise<T> {
   });
   if (!res.ok) throw await backendResponseError(res);
   return res.json();
+}
+
+async function postQueryWithDiagnostics<T>(url: string, body: unknown, traceId?: string): Promise<T> {
+  if (!isDebugLoggingEnabled()) return post(url, body);
+
+  const startedAt = performance.now();
+  const serializedBody = JSON.stringify(body);
+  const response = await fetch(apiUrl(url), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: serializedBody,
+  });
+  const headersAt = performance.now();
+  const responseText = await response.text();
+  const bodyAt = performance.now();
+  if (!response.ok) {
+    appendDebugLog("warn", "[DBX][query-transport:http:error]", {
+      traceId: traceId?.slice(0, 8),
+      status: response.status,
+      requestBytes: new TextEncoder().encode(serializedBody).byteLength,
+      responseBytes: new TextEncoder().encode(responseText).byteLength,
+      responseHeadersMs: Math.round(headersAt - startedAt),
+      responseBodyMs: Math.round(bodyAt - headersAt),
+      totalMs: Math.round(bodyAt - startedAt),
+      backendCoreMs: response.headers.get("x-dbx-core-ms"),
+      backendSerializeMs: response.headers.get("x-dbx-serialize-ms"),
+    });
+    throw await backendResponseError(
+      new Response(responseText, {
+        status: response.status,
+        statusText: response.statusText,
+        headers: response.headers,
+      }),
+    );
+  }
+  const result = JSON.parse(responseText) as T;
+  const parsedAt = performance.now();
+  appendDebugLog("info", "[DBX][query-transport:http]", {
+    traceId: traceId?.slice(0, 8),
+    requestBytes: new TextEncoder().encode(serializedBody).byteLength,
+    responseBytes: new TextEncoder().encode(responseText).byteLength,
+    responseHeadersMs: Math.round(headersAt - startedAt),
+    responseBodyMs: Math.round(bodyAt - headersAt),
+    jsonParseMs: Math.round(parsedAt - bodyAt),
+    totalMs: Math.round(parsedAt - startedAt),
+    backendCoreMs: response.headers.get("x-dbx-core-ms"),
+    backendSerializeMs: response.headers.get("x-dbx-serialize-ms"),
+  });
+  return result;
 }
 
 async function get<T>(url: string): Promise<T> {
@@ -948,14 +998,18 @@ export async function executeMulti(
     executionMode?: "simple";
   },
 ): Promise<QueryResult[]> {
-  return post("/api/query/execute-multi", {
-    connectionId,
-    database,
-    sql,
-    schema,
+  return postQueryWithDiagnostics(
+    "/api/query/execute-multi",
+    {
+      connectionId,
+      database,
+      sql,
+      schema,
+      executionId,
+      ...options,
+    },
     executionId,
-    ...options,
-  });
+  );
 }
 
 export interface ExecuteMultiProgress {
@@ -1190,6 +1244,10 @@ export async function buildEmptyTableSql(options: TableAdminSqlOptions): Promise
 
 export async function buildTruncateTableSql(options: TableAdminSqlOptions): Promise<string> {
   return post("/api/query/build-truncate-table-sql", { options });
+}
+
+export async function buildMysqlAutoIncrementSql(options: MysqlAutoIncrementSqlOptions): Promise<string> {
+  return post("/api/query/build-mysql-auto-increment-sql", { options });
 }
 
 export async function buildDropDatabaseSql(options: DatabaseNameSqlOptions): Promise<string> {

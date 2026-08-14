@@ -31,6 +31,7 @@ pub enum DataGridExtractorId {
     SqlInList,
     SqlInserts,
     SqlUpdates,
+    SqlSelect,
     WhereClause,
     Markdown,
     Html,
@@ -147,6 +148,8 @@ pub struct DataGridExtractRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub database_type: Option<DatabaseType>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identifier_quote: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub table_meta: Option<DataGridTableMeta>,
     #[serde(default)]
     pub columns: Vec<DataGridExtractColumn>,
@@ -198,6 +201,7 @@ pub enum DataGridExtractErrorCode {
     UnsupportedVersion,
     EmptySelection,
     InvalidRawSelection,
+    InvalidSelectSelection,
     InvalidColumnIndex,
     InvalidColumnMapping,
     MissingTableMetadata,

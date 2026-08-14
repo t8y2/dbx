@@ -8,7 +8,9 @@ use crate::sql::find_statement_at_cursor;
 use crate::sql_dialect::{
     firebird_rows_clause, pagination_strategy, quote_table_identifier, PaginationContext, TablePaginationStrategy,
 };
-use sqlparser::ast::{visit_expressions, Expr, GroupByExpr, OrderByKind, Select, SelectItem, SetExpr, Statement};
+use sqlparser::ast::{
+    visit_expressions, Expr, GroupByExpr, OrderByKind, Select, SelectItem, SetExpr, Statement, Value, ValueWithSpan,
+};
 use sqlparser::dialect::{ClickHouseDialect, GenericDialect, MsSqlDialect};
 use sqlparser::parser::Parser;
 
@@ -602,7 +604,12 @@ pub(crate) fn sqlserver_result_offset(sql: &str) -> usize {
 }
 
 fn add_sql_server_existing_top_pagination(statement: &str, limit: usize, offset: usize) -> String {
-    let row_number_order = format!("ORDER BY {}", sql_server_default_pagination_order(statement));
+    // Prefer the user's own trailing ORDER BY so wrapping the query in a
+    // derived table does not silently override their requested ordering.
+    // Fall back to the first projection column when it cannot be mapped to
+    // the derived table's output columns (existing behavior).
+    let row_number_order = sql_server_derived_pagination_order(statement)
+        .unwrap_or_else(|| format!("ORDER BY {}", sql_server_default_pagination_order(statement)));
     if offset == 0 {
         return format!("SELECT TOP ({limit}) * FROM ({statement}) [dbx_page] {row_number_order};");
     }
@@ -611,6 +618,79 @@ fn add_sql_server_existing_top_pagination(statement: &str, limit: usize, offset:
     format!(
         "SELECT * FROM (SELECT dbx_page_source.*, ROW_NUMBER() OVER ({row_number_order}) AS [__dbx_row_num] FROM ({statement}) dbx_page_source) dbx_page WHERE [__dbx_row_num] > {offset} AND [__dbx_row_num] <= {end} ORDER BY [__dbx_row_num];"
     )
+}
+
+/// Reuses the user's trailing ORDER BY as the pagination sort key when every
+/// expression can be expressed against the derived table's output columns.
+/// Returns None when the statement has no ORDER BY, cannot be parsed, or any
+/// sort expression is not an output column or ordinal, so callers keep their
+/// existing deterministic fallback ordering.
+fn sql_server_derived_pagination_order(statement: &str) -> Option<String> {
+    let dialect = MsSqlDialect {};
+    let Ok(statements) = Parser::parse_sql(&dialect, statement) else {
+        return None;
+    };
+    let [Statement::Query(query)] = statements.as_slice() else {
+        return None;
+    };
+    let SetExpr::Select(select) = query.body.as_ref() else {
+        return None;
+    };
+    let OrderByKind::Expressions(order_by_exprs) = &query.order_by.as_ref()?.kind else {
+        return None;
+    };
+    if order_by_exprs.is_empty() || !sql_server_derived_table_projection_safe(statement) {
+        return None;
+    }
+
+    let output_columns =
+        select.projection.iter().map(sql_server_derived_projection_name).collect::<Option<Vec<_>>>()?;
+    let column_names = output_columns.iter().map(|name| name.to_lowercase()).collect::<HashSet<_>>();
+
+    let mut parts = Vec::with_capacity(order_by_exprs.len());
+    for order_by in order_by_exprs {
+        let column = sql_server_order_expr_output_column(&order_by.expr, &output_columns, &column_names)?;
+        let direction = match order_by.options.asc {
+            Some(true) => " ASC",
+            Some(false) => " DESC",
+            None => "",
+        };
+        let mut part = column;
+        part.push_str(direction);
+        parts.push(part);
+    }
+    Some(format!("ORDER BY {}", parts.join(", ")))
+}
+
+/// Maps one ORDER BY expression to a reference that stays valid outside the
+/// derived table: output columns by name (case-insensitive, bracket/quoted
+/// identifiers already unquoted by the parser) or positional ordinals mapped
+/// to their corresponding output column.
+/// Anything else (functions, unprojected columns, ...) cannot be referenced
+/// from the wrapper and makes the caller fall back to its default ordering.
+fn sql_server_order_expr_output_column(
+    expr: &Expr,
+    output_columns: &[&str],
+    column_names: &HashSet<String>,
+) -> Option<String> {
+    match expr {
+        Expr::Identifier(identifier) => {
+            let name = identifier.value.to_lowercase();
+            column_names
+                .contains(&name)
+                .then(|| quote_table_identifier(Some(DatabaseType::SqlServer), &identifier.value))
+        }
+        Expr::CompoundIdentifier(identifiers) => {
+            let last = identifiers.last()?;
+            let name = last.value.to_lowercase();
+            column_names.contains(&name).then(|| quote_table_identifier(Some(DatabaseType::SqlServer), &last.value))
+        }
+        Expr::Value(ValueWithSpan { value: Value::Number(number, _), .. }) => {
+            let ordinal = number.parse::<usize>().ok()?.checked_sub(1)?;
+            output_columns.get(ordinal).map(|name| quote_table_identifier(Some(DatabaseType::SqlServer), name))
+        }
+        _ => None,
+    }
 }
 
 fn sql_server_default_pagination_order(statement: &str) -> String {
@@ -2006,6 +2086,118 @@ mod tests {
         assert_eq!(
             result.sql.unwrap(),
             "SELECT * FROM (SELECT dbx_page_source.*, ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) AS [__dbx_row_num] FROM (SELECT TOP 1000 * FROM TicketInfo) dbx_page_source) dbx_page WHERE [__dbx_row_num] > 100 AND [__dbx_row_num] <= 200 ORDER BY [__dbx_row_num];"
+        );
+    }
+
+    #[test]
+    fn paginates_existing_sqlserver_top_clause_keeping_user_order_by_desc() {
+        let sql = "SELECT top 10 [ID], [ProcInstID], [ActInstID], [ActInstDestID], [StartDate], [DestUser], [Status], [Data], [SerialNumber] FROM [dbo].[_WorkList] ORDER BY ID DESC";
+        let result = build_paginated_query_sql(PaginatedQuerySqlOptions {
+            original_sql: sql.to_string(),
+            database_type: Some(DatabaseType::SqlServer),
+            limit: 100,
+            offset: 0,
+        });
+        assert!(result.ok);
+        assert_eq!(
+            result.sql.unwrap(),
+            "SELECT TOP (100) * FROM (SELECT top 10 [ID], [ProcInstID], [ActInstID], [ActInstDestID], [StartDate], [DestUser], [Status], [Data], [SerialNumber] FROM [dbo].[_WorkList] ORDER BY ID DESC) [dbx_page] ORDER BY [ID] DESC;"
+        );
+    }
+
+    #[test]
+    fn paginates_existing_sqlserver_top_clause_later_page_keeping_user_order_by_desc() {
+        let sql = "SELECT top 10 [ID], [ProcInstID] FROM [dbo].[_WorkList] ORDER BY ID DESC";
+        let result = build_paginated_query_sql(PaginatedQuerySqlOptions {
+            original_sql: sql.to_string(),
+            database_type: Some(DatabaseType::SqlServer),
+            limit: 100,
+            offset: 100,
+        });
+        assert!(result.ok);
+        assert_eq!(
+            result.sql.unwrap(),
+            "SELECT * FROM (SELECT dbx_page_source.*, ROW_NUMBER() OVER (ORDER BY [ID] DESC) AS [__dbx_row_num] FROM (SELECT top 10 [ID], [ProcInstID] FROM [dbo].[_WorkList] ORDER BY ID DESC) dbx_page_source) dbx_page WHERE [__dbx_row_num] > 100 AND [__dbx_row_num] <= 200 ORDER BY [__dbx_row_num];"
+        );
+    }
+
+    #[test]
+    fn paginates_existing_sqlserver_top_clause_keeping_multi_column_user_order_by() {
+        let sql = "SELECT top 100 [ID], [StartDate] FROM [dbo].[_WorkList] ORDER BY [StartDate] DESC, ID";
+        let result = build_paginated_query_sql(PaginatedQuerySqlOptions {
+            original_sql: sql.to_string(),
+            database_type: Some(DatabaseType::SqlServer),
+            limit: 100,
+            offset: 0,
+        });
+        assert!(result.ok);
+        assert_eq!(
+            result.sql.unwrap(),
+            "SELECT TOP (100) * FROM (SELECT top 100 [ID], [StartDate] FROM [dbo].[_WorkList] ORDER BY [StartDate] DESC, ID) [dbx_page] ORDER BY [StartDate] DESC, [ID];"
+        );
+    }
+
+    #[test]
+    fn paginates_existing_sqlserver_top_clause_keeping_ordinal_order_by() {
+        let sql = "SELECT top 100 [ID], [Name] FROM [dbo].[_WorkList] ORDER BY 2 DESC";
+        let result = build_paginated_query_sql(PaginatedQuerySqlOptions {
+            original_sql: sql.to_string(),
+            database_type: Some(DatabaseType::SqlServer),
+            limit: 100,
+            offset: 0,
+        });
+        assert!(result.ok);
+        assert_eq!(
+            result.sql.unwrap(),
+            "SELECT TOP (100) * FROM (SELECT top 100 [ID], [Name] FROM [dbo].[_WorkList] ORDER BY 2 DESC) [dbx_page] ORDER BY [Name] DESC;"
+        );
+    }
+
+    #[test]
+    fn paginates_later_sqlserver_top_page_mapping_ordinal_order_to_output_column() {
+        let sql = "SELECT top 100 [ID], [Name] FROM [dbo].[_WorkList] ORDER BY 2 DESC";
+        let result = build_paginated_query_sql(PaginatedQuerySqlOptions {
+            original_sql: sql.to_string(),
+            database_type: Some(DatabaseType::SqlServer),
+            limit: 100,
+            offset: 100,
+        });
+        assert!(result.ok);
+        assert_eq!(
+            result.sql.unwrap(),
+            "SELECT * FROM (SELECT dbx_page_source.*, ROW_NUMBER() OVER (ORDER BY [Name] DESC) AS [__dbx_row_num] FROM (SELECT top 100 [ID], [Name] FROM [dbo].[_WorkList] ORDER BY 2 DESC) dbx_page_source) dbx_page WHERE [__dbx_row_num] > 100 AND [__dbx_row_num] <= 200 ORDER BY [__dbx_row_num];"
+        );
+    }
+
+    #[test]
+    fn paginates_sqlserver_top_clause_falling_back_for_out_of_range_ordinal() {
+        let sql = "SELECT top 100 [ID], [Name] FROM [dbo].[_WorkList] ORDER BY 3 DESC";
+        let result = build_paginated_query_sql(PaginatedQuerySqlOptions {
+            original_sql: sql.to_string(),
+            database_type: Some(DatabaseType::SqlServer),
+            limit: 100,
+            offset: 100,
+        });
+        assert!(result.ok);
+        assert_eq!(
+            result.sql.unwrap(),
+            "SELECT * FROM (SELECT dbx_page_source.*, ROW_NUMBER() OVER (ORDER BY [ID]) AS [__dbx_row_num] FROM (SELECT top 100 [ID], [Name] FROM [dbo].[_WorkList] ORDER BY 3 DESC) dbx_page_source) dbx_page WHERE [__dbx_row_num] > 100 AND [__dbx_row_num] <= 200 ORDER BY [__dbx_row_num];"
+        );
+    }
+
+    #[test]
+    fn paginates_existing_sqlserver_top_clause_falls_back_when_order_by_not_projected() {
+        let sql = "SELECT top 100 [ID] FROM [dbo].[_WorkList] ORDER BY [SerialNumber]";
+        let result = build_paginated_query_sql(PaginatedQuerySqlOptions {
+            original_sql: sql.to_string(),
+            database_type: Some(DatabaseType::SqlServer),
+            limit: 100,
+            offset: 0,
+        });
+        assert!(result.ok);
+        assert_eq!(
+            result.sql.unwrap(),
+            "SELECT TOP (100) * FROM (SELECT top 100 [ID] FROM [dbo].[_WorkList] ORDER BY [SerialNumber]) [dbx_page] ORDER BY [ID];"
         );
     }
 

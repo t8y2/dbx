@@ -152,7 +152,7 @@ import { isCancelSearchShortcut, isCopyCurrentRowShortcut, isDeleteCurrentRowSho
 import { dataGridHeaderContentWidth, scrollbarGutterWidth } from "@/lib/dataGrid/dataGridScrollGutter";
 import { canFetchNextDataGridSegment, canGoNextDataGridPage, dataGridTotalRowCountLabelKey, dataGridTruncationHintKey, hasCompleteLocalDataGridResult, resolveDataGridPaginationTotal, type DataGridInexactTotalRowCountMode } from "@/lib/dataGrid/dataGridPagination";
 import { dataGridCountQueryOptions } from "@/lib/dataGrid/dataGridQueryOptions";
-import { largeValueCellKey, largeValueCellMap, tableDataLargeValuePreviewOptions } from "@/lib/dataGrid/dataGridLargeValues";
+import { createResultScopedPendingRequests, largeValueCellKey, largeValueCellMap, tableDataLargeValuePreviewOptions } from "@/lib/dataGrid/dataGridLargeValues";
 import { dataGridBottomScrollTop, dataGridScrollPosition, isDataGridAtScrollBottom, isDataGridNearScrollBottom, isDataGridPrefixAppend, shouldCheckInfiniteScrollAfterScroll, type DataGridScrollPosition } from "@/lib/dataGrid/dataGridInfiniteScroll";
 import { CANVAS_DATA_GRID_ROW_HEIGHT, MAX_CANVAS_DATA_GRID_PIXEL_RATIO, canvasDataGridActionOverlayWidth, canvasDataGridActionReservedWidth, dataGridSearchMatchKey, drawCanvasDataGrid, type CanvasDevicePixelSize } from "@/lib/dataGrid/canvasDataGridRenderer";
 import { DATA_GRID_DARK_STRIPED_ROW_BG, DATA_GRID_LIGHT_STRIPED_ROW_BG, dataGridActiveRowBackground } from "@/lib/dataGrid/dataGridPaintTheme";
@@ -4055,7 +4055,7 @@ type LargeValueCellRequest = {
 
 const LARGE_VALUE_FETCH_MAX_ROWS = 200;
 const LARGE_VALUE_FETCH_TARGET_BYTES = 64 * 1024 * 1024;
-const pendingLargeValueHydrations = new Map<string, Promise<boolean>>();
+const pendingLargeValueHydrations = createResultScopedPendingRequests<boolean>();
 const largeValueCellsByKey = computed(() => largeValueCellMap(props.result));
 
 function isLargeValuePreview(item: RowItem | undefined, columnIndex: number): boolean {
@@ -4224,33 +4224,30 @@ async function cloneRows(rowIds: number[]) {
 async function hydrateLargeValueCell(rowId: number, columnIndex: number): Promise<boolean> {
   const item = getRowItem(rowId);
   if (!isLargeValuePreview(item, columnIndex) || item?.sourceIndex === undefined) return true;
+  const sourceResult = props.result;
   const hydrationKey = largeValueCellKey(item.sourceIndex, columnIndex);
-  const pending = pendingLargeValueHydrations.get(hydrationKey);
-  if (pending) return pending;
-  const hydration = (async () => {
+  const operation = dataGridResultLifecycle.beginOperation();
+  return pendingLargeValueHydrations.run(hydrationKey, sourceResult, async () => {
     try {
       const resolved = await resolveLargeValueCells([rowId], [columnIndex]);
+      if (!dataGridResultLifecycle.isCurrent(operation) || props.result !== sourceResult) return false;
       const value = resolved.get(rowId)?.get(columnIndex);
       if (value === undefined && !resolved.get(rowId)?.has(columnIndex)) return false;
-      const row = [...(props.result.rows[item.sourceIndex!] ?? [])];
+      const row = [...(sourceResult.rows[item.sourceIndex!] ?? [])];
       row[columnIndex] = value ?? null;
-      const rows = props.result.rows.slice();
+      const rows = sourceResult.rows.slice();
       rows[item.sourceIndex!] = row;
-      props.result.rows = rows;
-      props.result.large_value_cells = props.result.large_value_cells?.filter((cell) => cell.row_index !== item.sourceIndex || cell.column_index !== columnIndex);
+      sourceResult.rows = rows;
+      sourceResult.large_value_cells = sourceResult.large_value_cells?.filter((cell) => cell.row_index !== item.sourceIndex || cell.column_index !== columnIndex);
       largeValueResolutionVersion.value += 1;
       clearCellFormatCache();
-      queryStore.invalidateResultEstimateForPayload(props.result);
+      queryStore.invalidateResultEstimateForPayload(sourceResult);
       return true;
     } catch (error) {
-      reportLargeValueLoadError(error);
+      if (dataGridResultLifecycle.isCurrent(operation) && props.result === sourceResult) reportLargeValueLoadError(error);
       return false;
-    } finally {
-      pendingLargeValueHydrations.delete(hydrationKey);
     }
-  })();
-  pendingLargeValueHydrations.set(hydrationKey, hydration);
-  return hydration;
+  });
 }
 
 const exportContextCell = computed(() => {
@@ -6453,6 +6450,7 @@ function copyExtractorLabel(extractor: DataGridCopyExtractorId): string {
     "sql-in-list": t("grid.copyExtractorSqlInList"),
     "sql-inserts": t("grid.copyExtractorSqlInserts"),
     "sql-updates": t("grid.copyExtractorSqlUpdates"),
+    "sql-select": t("grid.copyExtractorSqlSelect"),
     "where-clause": t("grid.copyExtractorWhereClause"),
     markdown: "Markdown",
     html: "HTML",
@@ -6649,14 +6647,18 @@ function selectExportMenuItem(value: string) {
 }
 
 // --- Cell selection and detail ---
+function hydrateCellDetailTarget(target: { rowIndex: number; col: number }) {
+  const item = displayItemAt(target.rowIndex);
+  if (item && isLargeValuePreview(item, target.col)) void hydrateLargeValueCell(item.id, target.col);
+}
+
 function showCellDetails(rowIndex: number, colIndex: number) {
   closeMongoJsonPreview();
   resetDetailEdit();
   detailCell.value = { rowIndex, col: colIndex };
   activeCellDetailTab.value = defaultCellDetailTab();
   showCellDetail.value = true;
-  const item = displayItemAt(rowIndex);
-  if (item && isLargeValuePreview(item, colIndex)) void hydrateLargeValueCell(item.id, colIndex);
+  hydrateCellDetailTarget(detailCell.value);
 }
 
 function showCellDetailsForVisibleCell(rowIndex: number, visibleColIdx: number, actualColIdx: number) {
@@ -6669,8 +6671,7 @@ function showCellDetailsForVisibleCell(rowIndex: number, visibleColIdx: number, 
 function openCellDetailDialog(rowIndex: number, columnIndex: number) {
   cellDetailDialogTarget.value = { rowIndex, col: columnIndex };
   cellDetailDialogOpen.value = true;
-  const item = displayItemAt(rowIndex);
-  if (item && isLargeValuePreview(item, columnIndex)) void hydrateLargeValueCell(item.id, columnIndex);
+  hydrateCellDetailTarget(cellDetailDialogTarget.value);
 }
 
 function openColumnDetailDialog(columnIndex: number) {
@@ -6807,6 +6808,7 @@ watch([selectedRange, showCellDetail, isEditingDetail, isSelectingCells], () => 
   });
   if (!target) return;
   detailCell.value = target;
+  hydrateCellDetailTarget(target);
 });
 
 function openImagePreview(src: string, title: string) {
@@ -8723,7 +8725,6 @@ const ddlLoading = ref(false);
 const ddlWidth = ref(settingsStore.editorSettings.tableInfoDrawerWidth);
 const detailPanelHeight = ref(settingsStore.editorSettings.cellDetailDrawerWidth);
 const mongoJsonPreviewWidth = ref(MONGO_JSON_PREVIEW_DEFAULT_WIDTH);
-const ddlWrap = ref(true);
 const isResizingDdl = ref(false);
 const isResizingMongoJsonPreview = ref(false);
 let ddlResizeStartX = 0;
@@ -9245,7 +9246,9 @@ function openTableStructureEditor() {
 }
 
 function toggleDdlWrap() {
-  ddlWrap.value = !ddlWrap.value;
+  settingsStore.updateEditorSettings({
+    tableDdlWordWrap: !settingsStore.editorSettings.tableDdlWordWrap,
+  });
 }
 
 function onDataGridTopbarFixedActionWheel(event: WheelEvent) {
@@ -11231,7 +11234,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                   <Copy class="w-3 h-3" />
                   <span class="table-info-action-label">{{ t("grid.copyDdl") }}</span>
                 </Button>
-                <Button variant="ghost" size="icon" class="h-6 w-6" :class="{ 'bg-accent': ddlWrap }" @click="toggleDdlWrap">
+                <Button variant="ghost" size="icon" class="h-6 w-6" :class="{ 'bg-accent': settingsStore.editorSettings.tableDdlWordWrap }" @click="toggleDdlWrap">
                   <WrapText class="w-3 h-3" />
                 </Button>
               </div>
@@ -11437,7 +11440,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
               data-native-clipboard
               tabindex="0"
               class="flex-1 min-w-0 text-xs font-mono p-3 overflow-auto ddl-code leading-5 select-text outline-none"
-              :class="ddlWrap ? 'whitespace-pre-wrap break-words' : 'whitespace-pre'"
+              :class="settingsStore.editorSettings.tableDdlWordWrap ? 'whitespace-pre-wrap break-words' : 'whitespace-pre'"
               v-html="filteredDdlContent"
               @keydown="onDdlKeydown"
             ></pre>

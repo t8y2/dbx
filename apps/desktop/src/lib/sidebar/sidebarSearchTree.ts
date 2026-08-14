@@ -1,5 +1,6 @@
-import type { TreeNode, TreeNodeType } from "@/types/database";
-import { createSidebarLabelMatcher, type SidebarLabelMatcher } from "@/lib/sidebar/sidebarSearch";
+import type { TableInfo, TreeNode, TreeNodeType } from "@/types/database";
+import { createSidebarLabelMatcher, type SidebarLabelMatcher, type SidebarSearchMatcherOptions } from "@/lib/sidebar/sidebarSearch";
+import { buildTableTreeNodes } from "@/lib/table/tableTree";
 
 const preserveMatchedSubtreeTypes = new Set(["connection", "database", "schema", "table", "view", "mongo-db", "mongo-collection"]);
 const hiddenSearchNodeTypes = new Set<TreeNodeType>(["user-admin", "dameng-job-admin"]);
@@ -39,21 +40,21 @@ function nodePreservesSearchSubtree(node: TreeNode, matchLabel: SidebarLabelMatc
   return preserveMatchedSubtreeTypes.has(node.type) && !!bestMatch(matchLabel, normalizedLabel(node), node.comment, node.searchAliases);
 }
 
-export function createSidebarSearchSubtreePreserver(query: string, searchableNodeTypes?: ReadonlySet<TreeNodeType>): (node: TreeNode) => boolean {
-  const matchLabel = query ? createSidebarLabelMatcher(query) : undefined;
+export function createSidebarSearchSubtreePreserver(query: string, searchableNodeTypes?: ReadonlySet<TreeNodeType>, options?: SidebarSearchMatcherOptions): (node: TreeNode) => boolean {
+  const matchLabel = query ? createSidebarLabelMatcher(query, options) : undefined;
   return (node) => !!matchLabel && nodePreservesSearchSubtree(node, matchLabel, searchableNodeTypes);
 }
 
-export function resolveSidebarObjectSearchFilter(nodes: readonly TreeNode[], targetNodeId: string, query: string, searchableNodeTypes?: ReadonlySet<TreeNodeType>): string {
+export function resolveSidebarObjectSearchFilter(nodes: readonly TreeNode[], targetNodeId: string, query: string, searchableNodeTypes?: ReadonlySet<TreeNodeType>, options?: SidebarSearchMatcherOptions): string {
   if (!query) return query;
-  const matchLabel = createSidebarLabelMatcher(query);
+  const matchLabel = createSidebarLabelMatcher(query, options);
   const path = findNodePath(nodes, targetNodeId);
   const preservesSubtree = path?.some((node) => nodePreservesSearchSubtree(node, matchLabel, searchableNodeTypes));
   return preservesSubtree ? "" : query;
 }
 
-export function filterSidebarTree(nodes: TreeNode[], query: string, collapsedIds: ReadonlySet<string>, searchableNodeTypes?: ReadonlySet<TreeNodeType>): TreeNode[] {
-  const matchLabel = query ? createSidebarLabelMatcher(query) : undefined;
+export function filterSidebarTree(nodes: TreeNode[], query: string, collapsedIds: ReadonlySet<string>, searchableNodeTypes?: ReadonlySet<TreeNodeType>, options?: SidebarSearchMatcherOptions): TreeNode[] {
+  const matchLabel = query ? createSidebarLabelMatcher(query, options) : undefined;
   if (!matchLabel && searchableNodeTypes === undefined) return nodes;
   return filterSidebarTreeWithMatcher(nodes, matchLabel, collapsedIds, searchableNodeTypes);
 }
@@ -61,6 +62,236 @@ export function filterSidebarTree(nodes: TreeNode[], query: string, collapsedIds
 export function reuseLiveSidebarTreeNodes(indexedNodes: TreeNode[], liveNodes: readonly TreeNode[]): TreeNode[] {
   const liveNodesById = new Map(liveNodes.map((node) => [node.id, node]));
   return indexedNodes.map((node) => liveNodesById.get(node.id) ?? node);
+}
+
+export interface SidebarRegexIndexScope {
+  parentNodeId: string;
+  connectionId: string;
+  database: string;
+  schema?: string;
+  catalog?: string;
+  nodeType: string;
+  path?: Array<Pick<TreeNode, "id" | "label" | "type" | "connectionId" | "database" | "catalog" | "schema" | "linkedServer" | "linkedCatalog" | "linkedSchema">>;
+  entries: TableInfo[];
+}
+
+/**
+ * Composite identity of a regex index parent scope. TreeNode ids are not
+ * unique across the whole tree (a database named "a:b" and a schema "b" under
+ * a database "a" can both produce "connectionId:a:b"), so index lookups,
+ * manifest backfills, and result merging must match on id plus the full
+ * database context instead of the bare id.
+ */
+export interface SidebarRegexScopeIdentity {
+  connectionId: string;
+  database: string;
+  schema?: string;
+  catalog?: string;
+  nodeType: string;
+}
+
+function identityFieldMatches(nodeValue: string | undefined, expected: string | undefined): boolean {
+  return nodeValue === expected;
+}
+
+export function nodeMatchesRegexScopeIdentity(node: TreeNode, id: string, identity: SidebarRegexScopeIdentity): boolean {
+  if (node.id !== id) return false;
+  if (node.type !== identity.nodeType) return false;
+  if (node.connectionId !== identity.connectionId) return false;
+  // Connection roots deliberately carry no database scope; all actual index
+  // parents below them must match every database-context field strictly.
+  if (node.type === "connection") return true;
+  if (!identityFieldMatches(node.database, identity.database)) return false;
+  if (!identityFieldMatches(node.schema, identity.schema)) return false;
+  if (!identityFieldMatches(node.catalog, identity.catalog)) return false;
+  return true;
+}
+
+export function findNodePathByIdentity(nodes: readonly TreeNode[], id: string, identity: SidebarRegexScopeIdentity, ancestors: readonly TreeNode[] = []): readonly TreeNode[] | undefined {
+  for (const node of nodes) {
+    const path = [...ancestors, node];
+    if (node.id === id) {
+      // Same-id nodes can exist in different branches; only the one matching
+      // the full database context counts as the target parent.
+      if (nodeMatchesRegexScopeIdentity(node, id, identity)) return path;
+      continue;
+    }
+    if (node.children) {
+      const childPath = findNodePathByIdentity(node.children, id, identity, path);
+      if (childPath) return childPath;
+    }
+  }
+  return undefined;
+}
+
+function indexedTableChildren(scope: SidebarRegexIndexScope): TreeNode[] {
+  // Reuse the regular table-node builder so index hits share live-node id
+  // rules, normalized object types, name sorting, catalog/schema fields, and
+  // partition parent/child nesting instead of hand-rolled node literals.
+  return buildTableTreeNodes({
+    nodeId: scope.parentNodeId,
+    connectionId: scope.connectionId,
+    database: scope.database,
+    schema: scope.schema,
+    catalog: scope.catalog,
+    tables: scope.entries,
+  });
+}
+
+function syntheticRegexParent(scope: SidebarRegexIndexScope): TreeNode {
+  const snapshot = scope.path?.find((node) => node.id === scope.parentNodeId);
+  return {
+    id: scope.parentNodeId,
+    label: snapshot?.label || (scope.nodeType === "group-tables" ? "tree.tables" : scope.schema || scope.database),
+    type: (snapshot?.type || scope.nodeType) as TreeNodeType,
+    connectionId: scope.connectionId,
+    database: scope.database,
+    schema: scope.schema,
+    catalog: scope.catalog,
+    ...(snapshot?.linkedServer ? { linkedServer: snapshot.linkedServer } : {}),
+    ...(snapshot?.linkedCatalog ? { linkedCatalog: snapshot.linkedCatalog } : {}),
+    ...(snapshot?.linkedSchema ? { linkedSchema: snapshot.linkedSchema } : {}),
+    isExpanded: true,
+    children: indexedTableChildren(scope),
+  };
+}
+
+function pathNode(pathNode: NonNullable<SidebarRegexIndexScope["path"]>[number]): TreeNode {
+  return { ...pathNode, isExpanded: true, children: [] };
+}
+
+function mergeRegexTreeNode(live: TreeNode | undefined, indexed: TreeNode): TreeNode {
+  if (!live) return indexed;
+  const children = mergeRegexTreeNodes(live.children ?? [], indexed.children ?? []);
+  return children.length === (live.children ?? []).length && children.every((child, index) => child === live.children?.[index]) ? live : { ...live, children };
+}
+
+function mergeRegexTreeNodes(liveNodes: readonly TreeNode[], indexedNodes: readonly TreeNode[]): TreeNode[] {
+  const byId = new Map(liveNodes.map((node) => [node.id, node]));
+  const merged = [...liveNodes];
+  for (const indexed of indexedNodes) {
+    const existing = byId.get(indexed.id);
+    if (existing) {
+      const next = mergeRegexTreeNode(existing, indexed);
+      if (next !== existing) merged[merged.indexOf(existing)] = next;
+    } else {
+      merged.push(indexed);
+      byId.set(indexed.id, indexed);
+    }
+  }
+  return merged;
+}
+
+/**
+ * Add complete local-index results to a display-only tree. The live tree is
+ * never mutated; existing nodes win identity/state, while missing connection,
+ * database, schema, and table-group ancestors are synthesized from manifest
+ * scope metadata. Duplicate table identities prefer the narrowest scope.
+ */
+export function mergeSidebarRegexIndexScopes(liveNodes: readonly TreeNode[], scopes: readonly SidebarRegexIndexScope[]): TreeNode[] {
+  const selected = new Map<string, { rank: number; scope: SidebarRegexIndexScope; entry: TableInfo }>();
+  const rankFor = (scope: SidebarRegexIndexScope) => (scope.nodeType === "group-tables" ? 3 : scope.nodeType === "schema" ? 2 : 1);
+  for (const scope of scopes) {
+    for (const entry of scope.entries) {
+      const key = `${scope.connectionId}\0${scope.catalog || ""}\0${scope.database}\0${scope.schema || ""}\0${entry.table_type}\0${entry.name}`;
+      const rank = rankFor(scope);
+      if (!selected.has(key) || selected.get(key)!.rank < rank) selected.set(key, { rank, scope, entry });
+    }
+  }
+
+  const scopeIdentity = (scope: SidebarRegexIndexScope): SidebarRegexScopeIdentity => ({
+    connectionId: scope.connectionId,
+    database: scope.database,
+    schema: scope.schema,
+    catalog: scope.catalog,
+    nodeType: scope.nodeType,
+  });
+  const indexedRoots: TreeNode[] = [];
+  const indexedRootIdentities = new Map<string, SidebarRegexScopeIdentity>();
+  const anchoredParents: Array<{ node: TreeNode; identity: SidebarRegexScopeIdentity }> = [];
+  const rootsById = new Map<string, TreeNode>();
+  const ensureRoot = (id: string, label: string, type: TreeNodeType, scope: SidebarRegexIndexScope): TreeNode => {
+    const existing = rootsById.get(id);
+    if (existing) return existing;
+    const created: TreeNode = { id, label, type, connectionId: scope.connectionId, database: scope.database, catalog: scope.catalog, isExpanded: true, children: [] };
+    rootsById.set(id, created);
+    indexedRoots.push(created);
+    // The root is a connection: its database context does not apply to the
+    // live connection node itself (it has no database field), so identity
+    // matching compares id + type + connectionId.
+    indexedRootIdentities.set(id, { ...scopeIdentity(scope), nodeType: "connection" });
+    return created;
+  };
+
+  const grouped = new Map<string, SidebarRegexIndexScope>();
+  for (const { scope, entry } of selected.values()) {
+    const key = JSON.stringify([scope.parentNodeId, scope.connectionId, scope.database, scope.schema ?? null, scope.catalog ?? null, scope.nodeType]);
+    const previous = grouped.get(key);
+    if (previous) previous.entries.push(entry);
+    else grouped.set(key, { ...scope, entries: [entry] });
+  }
+
+  const liveScopeParentExists = (scope: SidebarRegexIndexScope): boolean => !!findNodePathByIdentity(liveNodes, scope.parentNodeId, scopeIdentity(scope));
+
+  for (const scope of grouped.values()) {
+    const path = scope.path;
+    if (!path) {
+      // First-time backfill of an index that predates the manifest: merge the
+      // entries directly into the live parent wherever the tree places it
+      // (connection groups, Oracle/Dameng connection->schema, Doris catalogs,
+      // SQL Server linked servers). Do not guess ancestors from the id.
+      if (!liveScopeParentExists(scope)) continue;
+      anchoredParents.push({ node: syntheticRegexParent(scope), identity: scopeIdentity(scope) });
+      continue;
+    }
+    const connectionPath = path.find((node) => node.type === "connection");
+    if (!connectionPath) continue;
+    // A removed connection must never come back as a ghost result: manifest
+    // scopes only render when their recorded connection is still in the tree.
+    // Same-id lookups are disambiguated by the database context.
+    if (!findNodePathByIdentity(liveNodes, connectionPath.id, { ...scopeIdentity(scope), nodeType: "connection" })) continue;
+    const connection = ensureRoot(connectionPath.id, connectionPath.label, "connection", scope);
+    let parent: TreeNode = connection;
+    const ancestors = path.slice(path.findIndex((node) => node.type === "connection") + 1);
+    for (const ancestor of ancestors) {
+      if (ancestor.id === scope.parentNodeId) break;
+      const next = (parent.children ?? []).find((child) => child.id === ancestor.id) ?? pathNode(ancestor);
+      if (!parent.children?.some((child) => child.id === next.id)) parent.children = [...(parent.children ?? []), next];
+      parent = next;
+    }
+    const scopeParent = syntheticRegexParent(scope);
+    const existing = (parent.children ?? []).find((child) => child.id === scope.parentNodeId);
+    parent.children = existing ? (parent.children ?? []).map((child) => (child.id === existing.id ? mergeRegexTreeNode(existing, scopeParent) : child)) : [...(parent.children ?? []), scopeParent];
+  }
+
+  let merged = [...liveNodes];
+  // Same-id nodes can live in different branches (database "a:b" vs schema
+  // "b" under database "a"), so every merge target is matched by id plus its
+  // composite database context, never by the bare id.
+  const mergeRoot = (nodes: readonly TreeNode[], indexed: TreeNode, identity: SidebarRegexScopeIdentity): { nodes: TreeNode[]; found: boolean } => {
+    const direct = nodes.findIndex((node) => nodeMatchesRegexScopeIdentity(node, indexed.id, identity));
+    if (direct >= 0) {
+      return { nodes: nodes.map((node, index) => (index === direct ? mergeRegexTreeNode(node, indexed) : node)), found: true };
+    }
+    for (let index = 0; index < nodes.length; index++) {
+      const node = nodes[index];
+      if (!node.children) continue;
+      const result = mergeRoot(node.children, indexed, identity);
+      if (!result.found) continue;
+      return { nodes: nodes.map((candidate, candidateIndex) => (candidateIndex === index ? { ...candidate, children: result.nodes } : candidate)), found: true };
+    }
+    return { nodes: [...nodes], found: false };
+  };
+  for (const indexed of indexedRoots) {
+    const identity = indexedRootIdentities.get(indexed.id);
+    const result = identity ? mergeRoot(merged, indexed, identity) : { nodes: merged, found: false };
+    merged = result.found ? result.nodes : mergeRegexTreeNodes(merged, [indexed]);
+  }
+  for (const { node, identity } of anchoredParents) {
+    const result = mergeRoot(merged, node, identity);
+    if (result.found) merged = result.nodes;
+  }
+  return merged;
 }
 
 function applySearchCollapsedState(node: TreeNode, collapsedIds: ReadonlySet<string>): TreeNode {

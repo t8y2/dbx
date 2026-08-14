@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { appendLargeValueCells, canUseTableDataLargeValuePreview, largeValueCellMap, remapLargeValueCells, TABLE_DATA_CELL_PREVIEW_SIZE, TABLE_DATA_PREVIEW_CONTENT_MAX_BYTES, tableDataLargeValuePreviewOptions } from "@/lib/dataGrid/dataGridLargeValues";
+import { describe, expect, it, vi } from "vitest";
+import { appendLargeValueCells, canUseTableDataLargeValuePreview, createResultScopedPendingRequests, largeValueCellMap, remapLargeValueCells, TABLE_DATA_CELL_PREVIEW_SIZE, TABLE_DATA_PREVIEW_CONTENT_MAX_BYTES, tableDataLargeValuePreviewOptions } from "@/lib/dataGrid/dataGridLargeValues";
 import { buildDataGridCellDetail } from "@/lib/dataGrid/dataGridDetail";
 import type { ColumnInfo } from "@/types/database";
 
@@ -12,6 +12,14 @@ function column(name: string, dataType: string, isPrimaryKey = false): ColumnInf
     is_primary_key: isPrimaryKey,
     extra: null,
   };
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
 }
 
 describe("data grid large-value metadata", () => {
@@ -95,6 +103,46 @@ describe("data grid large-value metadata", () => {
   it("indexes metadata by source row and column", () => {
     const result = { large_value_cells: [{ row_index: 4, column_index: 2, original_bytes: 65_536 }] };
     expect(largeValueCellMap(result).get("4:2")).toEqual(result.large_value_cells[0]);
+  });
+
+  it("deduplicates pending requests only within the same result", async () => {
+    const requests = createResultScopedPendingRequests<boolean>();
+    const result = {};
+    const load = deferred<boolean>();
+    const request = vi.fn(() => load.promise);
+
+    const first = requests.run("0:1", result, request);
+    const second = requests.run("0:1", result, request);
+    await Promise.resolve();
+
+    expect(second).toBe(first);
+    expect(request).toHaveBeenCalledOnce();
+
+    load.resolve(true);
+    await expect(first).resolves.toBe(true);
+  });
+
+  it("keeps the newer result request after the previous result settles", async () => {
+    const requests = createResultScopedPendingRequests<boolean>();
+    const previousLoad = deferred<boolean>();
+    const currentLoad = deferred<boolean>();
+    const previousResult = {};
+    const currentResult = {};
+    const currentRequest = vi.fn(() => currentLoad.promise);
+
+    const previous = requests.run("0:1", previousResult, () => previousLoad.promise);
+    const current = requests.run("0:1", currentResult, currentRequest);
+    await Promise.resolve();
+
+    previousLoad.resolve(false);
+    await expect(previous).resolves.toBe(false);
+
+    const deduplicatedCurrent = requests.run("0:1", currentResult, currentRequest);
+    expect(deduplicatedCurrent).toBe(current);
+    expect(currentRequest).toHaveBeenCalledOnce();
+
+    currentLoad.resolve(true);
+    await expect(current).resolves.toBe(true);
   });
 
   it("marks a backend-bounded value as truncated even when the preview is shorter than the UI limit", () => {

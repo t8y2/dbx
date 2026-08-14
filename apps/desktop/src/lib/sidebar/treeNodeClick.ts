@@ -45,6 +45,7 @@ const sourceNodeTypes = new Set<TreeNodeType>(["materialized_view", "procedure",
 const savedSqlNodeTypes = new Set<TreeNodeType>(["saved-sql-file"]);
 const tableChildGroupNodeTypes = new Set<TreeNodeType>(["group-columns", "group-indexes", "group-fkeys", "group-triggers", "group-constraints", "group-partitions", "group-table-partitions", "group-table-subpartitions"]);
 const databaseChildGroupNodeTypes = new Set<TreeNodeType>(["group-tables", "group-views", "group-materialized-views", "group-procedures", "group-functions", "group-triggers", "group-sequences", "group-synonyms", "group-packages", "group-types"]);
+const displayPathObjectNodeTypes = new Set<TreeNodeType>(["table", "view", "materialized_view", "procedure", "function", "trigger"]);
 
 export function objectSourceKindForTreeNode(type: TreeNodeType): ObjectSourceKind | null {
   if (type === "view") return "VIEW";
@@ -155,4 +156,14 @@ export function copyNameForTreeNode(node: TreeNode): string {
     return node.label.replace(/\s+\(.+\)$/, "");
   }
   return node.label;
+}
+
+export function copyDisplayPathForTreeNode(node: TreeNode, connectionName: string): string | null {
+  const connection = connectionName.trim();
+  const database = node.database?.trim();
+  if (!connection || !database) return null;
+  if (node.type === "database") return `${connection}.${database}`;
+  if (!displayPathObjectNodeTypes.has(node.type)) return null;
+  const objectName = (node.objectName || (node.type === "table" ? node.tableName : undefined) || node.label).trim();
+  return objectName ? `${connection}.${database}.${objectName}` : null;
 }

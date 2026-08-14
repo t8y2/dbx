@@ -313,6 +313,42 @@ describe("connectionStore metadata loading", () => {
     ).toBe(false);
   }, 15000);
 
+  it("preserves loaded Xugu type members when a search projection collapses the type", async () => {
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({ checkConnectionHealth: vi.fn().mockResolvedValue(undefined) }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    const connection = xuguConnection();
+    const typeNode: TreeNode = {
+      id: "xugu-1:app_db:app_schema:type:address_t",
+      label: "ADDRESS_T",
+      type: "type",
+      objectName: "ADDRESS_T",
+      connectionId: connection.id,
+      database: "app_db",
+      schema: "app_schema",
+      xuguTypeMembersExpandable: true,
+      isExpanded: true,
+      children: Array.from({ length: 400 }, (_, index) => ({
+        id: `xugu-1:app_db:app_schema:type:address_t:attribute:${index}`,
+        label: `attribute_${index}`,
+        type: "type-attribute" as const,
+        connectionId: connection.id,
+        database: "app_db",
+        schema: "app_schema",
+      })),
+    };
+    store.connections = [connection];
+    store.connectedIds = new Set([connection.id]);
+    store.treeNodes = [typeNode];
+
+    await store.loadXuguTypeMembers(typeNode, { preserveCollapsedChildren: true });
+
+    expect(typeNode.isExpanded).toBe(false);
+    expect(typeNode.children).toHaveLength(400);
+  });
+
   it("loads Oracle package overloads through the shared package member path", async () => {
     const completionAssistantSearch = vi.fn().mockResolvedValue({
       candidates: [
@@ -802,9 +838,12 @@ describe("connectionStore metadata loading", () => {
     const treeCache = decodeSchemaTreeCache<TreeNode[]>(cachedPayloads.get(treeCacheKey));
     const indexCache = decodeSchemaTreeCache<TreeNode[]>(cachedPayloads.get(indexCacheKey));
     expect(treeCache?.children.map((node) => node.label)).toEqual(["fresh_table"]);
-    expect(indexCache?.tableSearchIndex?.entries).toEqual([{ name: "indexed_table", tableType: "TABLE" }]);
-    await expect(store.loadSidebarTableSearchIndex(tablesGroup.id)).resolves.toEqual([{ name: "indexed_table", table_type: "TABLE" }]);
-    expect(loadSchemaCache).toHaveBeenLastCalledWith(indexCacheKey);
+    // The local table index preserves comments for regex search matching.
+    expect(indexCache?.tableSearchIndex?.entries).toEqual([{ name: "indexed_table", tableType: "TABLE", comment: null }]);
+    await expect(store.loadSidebarTableSearchIndex(tablesGroup.id)).resolves.toEqual([{ name: "indexed_table", table_type: "TABLE", comment: null }]);
+    // The refreshed index is served from the in-memory cache; refreshing
+    // additionally registers the scope by reading the sidebar index manifest.
+    expect(loadSchemaCache).toHaveBeenLastCalledWith("dbx:sidebar-table-search-index-manifest-v1");
   });
 
   it("bypasses Oracle object-group caches created before DIP visibility was fixed", async () => {

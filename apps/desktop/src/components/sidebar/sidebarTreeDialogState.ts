@@ -32,6 +32,7 @@ export const structureDocCopyTitle = ref("");
 export const isLoadingStructurePreview = ref(false);
 export const showEmptyTableConfirm = ref(false);
 export const showTruncateTableConfirm = ref(false);
+export const showMysqlAutoIncrementConfirm = ref(false);
 export const showRenameObjectDialog = ref(false);
 export const renameObjectName = ref("");
 export const renameObjectError = ref("");
@@ -42,6 +43,9 @@ export const batchDropCascade = ref(false);
 export const emptyTablePreviewSql = ref("");
 export const truncateTablePreviewSql = ref("");
 export const truncateTableCascade = ref(false);
+export const mysqlAutoIncrementValue = ref("1");
+export const mysqlAutoIncrementPreviewSql = ref("");
+export const mysqlAutoIncrementPreviewKey = ref("");
 export const dropObjectPreviewSql = ref("");
 export const showDropObjectConfirm = ref(false);
 export const dropTableChildObjectPreviewSql = ref("");
@@ -145,6 +149,7 @@ const openFlags = [
   showStructureDocCopyDialog,
   showEmptyTableConfirm,
   showTruncateTableConfirm,
+  showMysqlAutoIncrementConfirm,
   showDropObjectConfirm,
   showRenameObjectDialog,
   showDuplicateDialog,

@@ -46,6 +46,7 @@ function installApiMocks(extra: Record<string, unknown> = {}) {
     connectDb: vi.fn().mockResolvedValue("pg-1"),
     disconnectDb: vi.fn().mockResolvedValue(undefined),
     deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+    loadSchemaCache: vi.fn().mockResolvedValue(null),
     saveConnections: vi.fn().mockResolvedValue(undefined),
     saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
     connectionDatabaseInfo: vi.fn().mockResolvedValue(undefined),

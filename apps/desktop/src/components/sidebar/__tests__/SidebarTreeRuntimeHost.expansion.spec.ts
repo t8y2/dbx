@@ -122,6 +122,94 @@ describe("SidebarTreeRuntimeHost expansion", () => {
     expect(toggled).toHaveBeenCalledWith(packageNode, true);
   });
 
+  it("expands an unloaded object group without leaking the regex source as a search filter", async () => {
+    const group: TreeNode = {
+      id: "mysql:basic:__tables",
+      label: "tree.tables",
+      type: "group-tables",
+      connectionId: "mysql",
+      database: "basic",
+      isExpanded: false,
+      children: [],
+    };
+    // Regex mode keeps the store's remote-search state empty (ConnectionTree
+    // writes resolveSidebarRemoteSearchQuery(...) into sidebarSearchQuery).
+    connectionStore.sidebarSearchQuery = "";
+    connectionStore.canUseLoadedTreeNodeToggle.mockReturnValue(false);
+
+    const host = ref<InstanceType<typeof SidebarTreeRuntimeHost> | null>(null);
+    const app = createApp(
+      defineComponent({
+        setup() {
+          provide(sidebarTreeContextKey, {
+            getVisibleNodes: () => [group],
+            getVisibleNodeIndex: () => 0,
+            // ConnectionTree returns this explicit empty filter while regex
+            // mode is on: expansion may connect, but never with the regex.
+            getTreeLoadSearchOptions: () => ({ searchFilter: "", allowGlobalSearchMismatch: true, expectedSidebarSearchQuery: "" }),
+          });
+          return () => h(SidebarTreeRuntimeHost, { ref: host, node: group, depth: 0 });
+        },
+      }),
+    );
+    mountedApps.push(app);
+    const container = document.createElement("div");
+    document.body.append(container);
+    app.use(i18n);
+    app.mount(container);
+
+    host.value?.toggleNode(group);
+
+    await vi.waitFor(() =>
+      expect(connectionStore.loadObjectGroupChildren).toHaveBeenCalledWith(group, {
+        searchFilter: "",
+        allowGlobalSearchMismatch: true,
+        expectedSidebarSearchQuery: "",
+      }),
+    );
+    // The regex source never reaches the store options or the connection layer.
+    expect(JSON.stringify(connectionStore.loadObjectGroupChildren.mock.calls)).not.toContain("A|b");
+  });
+
+  it("preserves loaded group children while a local regex projection is active", async () => {
+    const group: TreeNode = {
+      id: "mysql:basic:__tables",
+      label: "tree.tables",
+      type: "group-tables",
+      connectionId: "mysql",
+      database: "basic",
+      isExpanded: true,
+      children: [{ id: "mysql:basic:__tables:orders", label: "orders", type: "table", connectionId: "mysql", database: "basic" }],
+    };
+    connectionStore.sidebarSearchQuery = "";
+    connectionStore.canUseLoadedTreeNodeToggle.mockReturnValue(true);
+
+    const host = ref<InstanceType<typeof SidebarTreeRuntimeHost> | null>(null);
+    const app = createApp(
+      defineComponent({
+        setup() {
+          provide(sidebarTreeContextKey, {
+            getVisibleNodes: () => [group],
+            getVisibleNodeIndex: () => 0,
+            isSearchProjectionActive: () => true,
+          });
+          return () => h(SidebarTreeRuntimeHost, { ref: host, node: group, depth: 0 });
+        },
+      }),
+    );
+    mountedApps.push(app);
+    const container = document.createElement("div");
+    document.body.append(container);
+    app.use(i18n);
+    app.mount(container);
+
+    host.value?.toggleNode(group);
+    await nextTick();
+
+    expect(group.isExpanded).toBe(false);
+    expect(connectionStore.releaseCollapsedTreeNodeChildren).not.toHaveBeenCalled();
+  });
+
   it("expands an unloaded object group without leaking a matching connection name", async () => {
     const group: TreeNode = {
       id: "mysql:basic:__tables",

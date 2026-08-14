@@ -18,28 +18,88 @@ DBX 可以从其他数据库工具导入连接，在切换工具时无需手动�
 ## 导入 Navicat 连接
 
 <Steps>
-  <Step>### 从 Navicat 导出 在 Navicat 中，选择要迁移的连接。使用**文件 → 导出连接**并保存 `.ncx` 文件。</Step>
-  <Step>### 打开导入对话框 在 DBX 中，前往**设置 → 导入连接**，或右键点击侧边栏分组标题选择**导入连接**。</Step>
-  <Step>### 选择 NCX 文件 选择从 Navicat 导出的 `.ncx` 文件。</Step>
-  <Step>### 检查并完成 DBX 解析文件并列出所有找到的连接。检查列表，在需要处重新输入密码并保存。</Step>
+  <Step>
+    ### 从 Navicat 导出
+
+    在 Navicat 中，选择要迁移的连接。使用**文件 → 导出连接**并保存 `.ncx` 文件。
+
+  </Step>
+  <Step>
+    ### 打开导入对话框
+
+    在 DBX 中，前往**设置 → 导入连接**，或右键点击侧边栏分组标题选择**导入连接**。
+
+  </Step>
+  <Step>
+    ### 选择 NCX 文件
+
+    选择从 Navicat 导出的 `.ncx` 文件。
+
+  </Step>
+  <Step>
+    ### 检查并完成
+
+    DBX 解析文件并列出所有找到的连接。检查列表，在需要处重新输入密码并保存。
+
+  </Step>
 </Steps>
 
 ## 导入 DBeaver 连接
 
 <Steps>
-  <Step>### 找到 DBeaver 配置 DBeaver 将连接存储在其工作区目录中。具体路径取决于操作系统和 DBeaver 版本。常见位置包括 `~/.local/share/DBeaverData/workspace6/General/.dbeaver/`。</Step>
-  <Step>### 打开导入对话框 在 DBX 中，前往**设置 → 导入连接**。</Step>
-  <Step>### 选择 DBeaver 文件 选择 DBeaver 连接配置文件（`.dbeaver-data-sources.xml` 或类似文件）。</Step>
-  <Step>### 检查并完成 DBX 从配置中提取连接信息。重新输入无法解密的密码。</Step>
+  <Step>
+    ### 找到 DBeaver 配置
+
+    DBeaver 将连接存储在其工作区目录中。具体路径取决于操作系统和 DBeaver 版本。常见位置包括 `~/.local/share/DBeaverData/workspace6/General/.dbeaver/`。
+
+  </Step>
+  <Step>
+    ### 打开导入对话框
+
+    在 DBX 中，前往**设置 → 导入连接**。
+
+  </Step>
+  <Step>
+    ### 选择 DBeaver 文件
+
+    选择 DBeaver 连接配置文件（`.dbeaver-data-sources.xml` 或类似文件）。
+
+  </Step>
+  <Step>
+    ### 检查并完成
+
+    DBX 从配置中提取连接信息。重新输入无法解密的密码。
+
+  </Step>
 </Steps>
 
 ## 导入 DataGrip 连接
 
 <Steps>
-  <Step>### 选择配置 在 DBX 中选择**导入 DataGrip**，再选择 DataGrip 项目或全局配置中的 `dataSources.xml`；同目录的 local 配置会用于补充字段。</Step>
-  <Step>### 检查类型识别 DBX 会结合 driver reference、数据库产品名、JDBC subprotocol 和驱动类识别数据库。KingBase 等数据库会映射到对应 DBX profile，未知驱动保留为通用 JDBC。</Step>
-  <Step>### 检查分组 DataGrip 的分组路径会导入为 DBX 连接分组，方便保留项目组织方式。</Step>
-  <Step>### 补充凭据 macOS 上 DBX 会在允许时读取 DataGrip 钥匙串密码；其它加密或不可访问的凭据仍需手动填写。</Step>
+  <Step>
+    ### 选择配置
+
+    在 DBX 中选择**导入 DataGrip**，再选择 DataGrip 项目或全局配置中的 `dataSources.xml`；同目录的 local 配置会用于补充字段。
+
+  </Step>
+  <Step>
+    ### 检查类型识别
+
+    DBX 会结合 driver reference、数据库产品名、JDBC subprotocol 和驱动类识别数据库。KingBase 等数据库会映射到对应 DBX profile，未知驱动保留为通用 JDBC。
+
+  </Step>
+  <Step>
+    ### 检查分组
+
+    DataGrip 的分组路径会导入为 DBX 连接分组，方便保留项目组织方式。
+
+  </Step>
+  <Step>
+    ### 补充凭据
+
+    macOS 上 DBX 会在允许时读取 DataGrip 钥匙串密码；其它加密或不可访问的凭据仍需手动填写。
+
+  </Step>
 </Steps>
 
 ## 导入后

@@ -144,9 +144,18 @@ function formatMessageTimestamp(value?: string): string {
   return new Date(numeric).toLocaleString();
 }
 
-watch([() => props.connectionId, () => props.mqSystemKind, () => JSON.stringify(props.topic ?? null)], () => {
+watch([() => props.connectionId, () => props.mqSystemKind], () => {
   invalidateMessageRequest();
 });
+
+watch(
+  () => JSON.stringify(props.topic ?? null),
+  () => {
+    partition.value = "";
+    offset.value = "";
+    invalidateMessageRequest();
+  },
+);
 
 watch(kafkaStartPosition, () => {
   // Keep offset values for switching back, but never retain results from another start mode.
@@ -184,7 +193,7 @@ watch(kafkaStartPosition, () => {
         <span>{{ t("mqMessages.count") }}</span>
         <input v-model.number="count" data-testid="peek-count" type="number" min="1" max="100" :disabled="loading" />
       </label>
-      <label v-if="isKafka">
+      <label v-if="isKafka && !isMonitoring">
         <span>{{ t("mqMessages.startPosition") }}</span>
         <Select v-model="kafkaStartPosition" :disabled="loading">
           <SelectTrigger data-testid="kafka-peek-start-position" class="message-browser-start-position">
@@ -201,7 +210,7 @@ watch(kafkaStartPosition, () => {
         <span>{{ t("mqMessages.partition") }}</span>
         <input v-model="partition" data-testid="kafka-peek-partition" type="number" min="0" :placeholder="t('mqMessages.partitionPlaceholderAll')" :disabled="loading" />
       </label>
-      <label v-if="isKafkaOffsetMode">
+      <label v-if="isKafkaOffsetMode && !isMonitoring">
         <span>{{ t("mqMessages.offset") }}</span>
         <input v-model="offset" data-testid="kafka-peek-offset" type="number" min="0" :placeholder="t('mqMessages.offsetPlaceholderRequired')" :disabled="loading" />
       </label>

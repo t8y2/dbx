@@ -4,6 +4,7 @@ import type { TreeNode } from "@/types/database";
 export interface SidebarTreeContext {
   getVisibleNodes: () => TreeNode[];
   getVisibleNodeIndex: (id: string) => number;
+  isSearchProjectionActive?: () => boolean;
   getTreeLoadSearchOptions?: (node: TreeNode) => { searchFilter: string; allowGlobalSearchMismatch: true; expectedSidebarSearchQuery: string } | undefined;
   setTableSearchQuery?: (parentNodeId: string, query: string, local: boolean) => void;
   refreshTableSearchIndex?: (parentNodeId: string) => void;

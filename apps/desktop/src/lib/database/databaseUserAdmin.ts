@@ -48,6 +48,7 @@ export interface DatabaseUserAdminProvider {
   showGrantsSql(user: DatabaseUserIdentity): string;
   parseGrants?(result: QueryResult): string[];
   createUserSql?(input: CreatePrincipalInput): string;
+  renameUserSql?(user: DatabaseUserIdentity, newHost: string): string;
   alterPasswordSql?(user: DatabaseUserIdentity, password: string): string;
   alterLoginSql?(user: DatabaseUserIdentity, enabled: boolean): string;
   dropUserSql?(user: DatabaseUserIdentity): string;
@@ -161,6 +162,10 @@ export function mysqlShowGrantsSql(user: DatabaseUserIdentity): string {
 
 export function mysqlCreateUserSql(input: CreatePrincipalInput): string {
   return `CREATE USER ${mysqlUserAccount(input)} IDENTIFIED BY ${quoteMySqlString(input.password)};`;
+}
+
+export function mysqlRenameUserHostSql(user: DatabaseUserIdentity, newHost: string): string {
+  return `RENAME USER ${mysqlUserAccount(user)} TO ${mysqlUserAccount({ ...user, host: newHost })};`;
 }
 
 export function mysqlAlterUserPasswordSql(user: DatabaseUserIdentity, password: string): string {
@@ -702,6 +707,11 @@ export const mysqlUserAdminProvider: DatabaseUserAdminProvider = {
   privilegeSelectionFromGrants: mysqlPrivilegeSelectionFromGrants,
 };
 
+export const nativeMysqlUserAdminProvider: DatabaseUserAdminProvider = {
+  ...mysqlUserAdminProvider,
+  renameUserSql: mysqlRenameUserHostSql,
+};
+
 export const postgresUserAdminProvider: DatabaseUserAdminProvider = {
   dialect: "postgres",
   defaultScope: "database",
@@ -787,6 +797,9 @@ const DATABASE_USER_ADMIN_PROVIDER_BY_TYPE = new Map<DatabaseType, DatabaseUserA
 
 export function getDatabaseUserAdminProvider(dbType: DatabaseType | undefined, connection?: ConnectionConfig): DatabaseUserAdminProvider | null {
   if (!dbType) return null;
+  if (dbType === "mysql" && connection?.db_type === "mysql" && (!connection.driver_profile?.trim() || connection.driver_profile.trim().toLowerCase() === "mysql")) {
+    return nativeMysqlUserAdminProvider;
+  }
   // GaussDB M mode (MySQL-compatible) uses backtick quoting and treats "user"
   // as a reserved keyword, so a dedicated provider with backtick-quoted aliases
   // is required.

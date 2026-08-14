@@ -94,7 +94,7 @@ import {
 } from "@/lib/backend/api";
 import { eventToModifierOnlyShortcut, eventToShortcut } from "@/lib/editor/keyboardShortcuts";
 import { SHORTCUT_DEFINITIONS, findShortcutConflict, normalizeShortcutSettings, type ShortcutActionId } from "@/lib/editor/shortcutRegistry";
-import { formatShortcutDisplay, isMacShortcutPlatform } from "@/lib/editor/shortcutDisplay";
+import { formatShortcutDisplay } from "@/lib/editor/shortcutDisplay";
 import { normalizeSidebarHiddenTablePrefixes } from "@/lib/sidebar/sidebarTableNameDisplay";
 import { currentStatementFrameRangeTo } from "@/lib/sql/currentStatementFrame";
 import { currentStatementFrameLayer } from "@/lib/editor/codemirrorCurrentStatementFrameLayer";
@@ -275,10 +275,11 @@ const editCustomThemes = ref<CustomTheme[]>([...settingsStore.editorSettings.cus
 const editActiveCustomThemeId = ref(settingsStore.editorSettings.activeCustomThemeId);
 const showThemeCustomizer = ref(false);
 const editExecuteMode = ref(settingsStore.editorSettings.executeMode);
-function translateWithShortcutMod(key: string): string {
-  return t(key, { mod: isMacShortcutPlatform() ? "Cmd" : "Ctrl" });
+const editShortcuts = ref(normalizeShortcutSettings(settingsStore.editorSettings.shortcuts));
+function translateWithExecuteShortcut(key: string): string {
+  return t(key, { shortcut: formatShortcutDisplay(editShortcuts.value.executeSql) });
 }
-const executeModeLabel = computed(() => translateWithShortcutMod("settings.executeMode"));
+const executeModeLabel = computed(() => translateWithExecuteShortcut("settings.executeMode"));
 const editExecuteAllOnBlankLine = ref(settingsStore.editorSettings.executeAllOnBlankLine);
 const editShowExecutionTargetPicker = ref(settingsStore.editorSettings.showExecutionTargetPicker);
 const editShowStatementRunButtons = ref(settingsStore.editorSettings.showStatementRunButtons);
@@ -383,7 +384,6 @@ function setSqlVariableSyntaxToggle(key: keyof SqlVariableSyntaxToggles, value: 
 const tableColumnTemplateSectionRef = ref<HTMLElement | null>(null);
 const draggedTableColumnTemplateRowId = ref<string | null>(null);
 let tableColumnTemplatePointerDragCleanup: (() => void) | null = null;
-const editShortcuts = ref(normalizeShortcutSettings(settingsStore.editorSettings.shortcuts));
 const editSqlFormatter = ref<SqlFormatterSettings>(normalizeSqlFormatterSettings(settingsStore.editorSettings.sqlFormatter));
 const sqlFormatterConfigValid = ref(true);
 const editingShortcutId = ref<ShortcutActionId | null>(null);
@@ -1478,7 +1478,7 @@ const settingsSearchEntries = computed(() =>
       isWeb,
       visibleCategories: new Set(settingsCategoryNav.value.map((category) => category.value)),
     },
-    translateWithShortcutMod,
+    translateWithExecuteShortcut,
     settingsSearchCategoryLabels.value,
   ),
 );

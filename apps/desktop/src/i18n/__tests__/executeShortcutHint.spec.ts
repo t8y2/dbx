@@ -1,46 +1,50 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import i18n, { setLocale } from "@/i18n";
+import { formatShortcutDisplay } from "@/lib/editor/shortcutDisplay";
 
 // https://github.com/t8y2/dbx/issues/6199
 // "设置为 Windows 但编辑器提示仍为 Mac" — the toolbar's Execute-button tooltip and the
 // Editor Settings "Execute Mode" label hardcode "(Cmd+Enter)" in every locale, including
-// English, so Windows/Linux users always see the Mac modifier regardless of their platform.
+// English, so the hints can disagree with both the current platform and a customized binding.
 
 const toolbarSource = readFileSync(new URL("../../components/layout/EditorToolbar.vue", import.meta.url), "utf8");
 const settingsDialogSource = readFileSync(new URL("../../components/editor/EditorSettingsDialog.vue", import.meta.url), "utf8");
 
-describe("execute-shortcut hint follows platform instead of hardcoding Mac", () => {
-  it("interpolates {mod} into the toolbar execute-button tooltip for both platforms", async () => {
+describe("execute-shortcut hints reflect the configured binding", () => {
+  it.each([
+    ["MacIntel", "Mod+Enter", "⌘ ↵"],
+    ["Win32", "Mod+Enter", "Ctrl + ↵"],
+    ["Linux x86_64", "Mod+Enter", "Ctrl + ↵"],
+    ["Win32", "Shift+Mod+Enter", "Ctrl + Shift + ↵"],
+  ])("formats %s shortcuts for the active platform", (platform, shortcut, expected) => {
+    expect(formatShortcutDisplay(shortcut, platform)).toBe(expected);
+  });
+
+  it("interpolates the formatted shortcut into toolbar and settings labels", async () => {
+    const shortcut = formatShortcutDisplay("Shift+Mod+Enter", "Win32");
+
     await setLocale("en");
-    expect(i18n.global.t("toolbar.executeShortcut", { mod: "Ctrl" })).toBe("Execute selection/query (Ctrl+Enter)");
-    expect(i18n.global.t("toolbar.executeShortcut", { mod: "Cmd" })).toBe("Execute selection/query (Cmd+Enter)");
+    expect(i18n.global.t("toolbar.executeShortcut", { shortcut })).toBe("Execute selection/query (Ctrl + Shift + ↵)");
+    expect(i18n.global.t("settings.executeMode", { shortcut })).toBe("Execute Mode (Ctrl + Shift + ↵)");
 
     await setLocale("zh-CN");
-    expect(i18n.global.t("toolbar.executeShortcut", { mod: "Ctrl" })).toBe("执行选中/全部 (Ctrl+Enter)");
+    expect(i18n.global.t("toolbar.executeShortcut", { shortcut })).toBe("执行选中/全部 (Ctrl + Shift + ↵)");
+    expect(i18n.global.t("settings.executeMode", { shortcut })).toBe("执行模式 (Ctrl + Shift + ↵)");
     await setLocale("en");
   });
 
-  it("interpolates {mod} into the Editor Settings execute-mode label for both platforms", async () => {
-    await setLocale("en");
-    expect(i18n.global.t("settings.executeMode", { mod: "Ctrl" })).toBe("Execute Mode (Ctrl+Enter)");
-    expect(i18n.global.t("settings.executeMode", { mod: "Cmd" })).toBe("Execute Mode (Cmd+Enter)");
-
-    await setLocale("zh-CN");
-    expect(i18n.global.t("settings.executeMode", { mod: "Ctrl" })).toBe("执行模式 (Ctrl+Enter)");
-    await setLocale("en");
+  it("EditorToolbar.vue uses the saved executeSql shortcut", () => {
+    expect(toolbarSource).toContain("formatShortcutDisplay(settingsStore.editorSettings.shortcuts.executeSql)");
+    expect(toolbarSource).toMatch(/t\(\s*"toolbar\.executeShortcut"\s*,\s*\{\s*shortcut:\s*executeShortcutDisplay\.value/);
   });
 
-  it("EditorToolbar.vue passes the platform-aware mod into the tooltip translation call", () => {
-    expect(toolbarSource).toMatch(/t\(\s*"toolbar\.executeShortcut"\s*,\s*\{\s*mod:/);
+  it("EditorSettingsDialog.vue uses the currently edited executeSql shortcut", () => {
+    expect(settingsDialogSource).toMatch(/function translateWithExecuteShortcut\([^)]*\)[^}]*formatShortcutDisplay\(editShortcuts\.value\.executeSql\)/);
+    expect(settingsDialogSource).toContain('translateWithExecuteShortcut("settings.executeMode")');
   });
 
-  it("EditorSettingsDialog.vue passes the platform-aware mod into the execute-mode label translation call", () => {
-    expect(settingsDialogSource).toMatch(/function translateWithShortcutMod\([^)]*\)[^}]*t\(\s*key\s*,\s*\{\s*mod:/);
-    expect(settingsDialogSource).toContain('translateWithShortcutMod("settings.executeMode")');
-  });
-
-  it("EditorSettingsDialog.vue routes the settings-search translate function through translateWithShortcutMod, not raw t, so {mod} in search-index labels also resolves", () => {
-    expect(settingsDialogSource).toMatch(/resolveSettingsSearchEntries\(\s*\[[^\]]*\]\s*,\s*\{[^}]*\}\s*,\s*translateWithShortcutMod\s*,/s);
+  it("EditorSettingsDialog.vue uses the same edited shortcut in settings search", () => {
+    expect(settingsDialogSource).toMatch(/resolveSettingsSearchEntries\(\s*\[[^\]]*\]\s*,\s*\{[^}]*\}\s*,\s*translateWithExecuteShortcut\s*,/s);
   });
 });

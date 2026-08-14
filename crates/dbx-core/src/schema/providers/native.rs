@@ -7,7 +7,7 @@ pub(in crate::schema) async fn list_databases(
     config: Option<&ConnectionConfig>,
 ) -> Result<Vec<db::DatabaseInfo>, String> {
     match pool {
-        PoolKind::Mysql(p, _) if config.is_some_and(is_doris_family_config) => db::mysql::list_databases_show(p)
+        PoolKind::Mysql(p, _) if config.is_some_and(db::mysql_compatible::uses_show_metadata) => db::mysql::list_databases_show(p)
             .await
             .map(|databases| filter_mysql_system_databases_for_config(databases, config)),
         PoolKind::Mysql(p, mode) if *mode == MysqlMode::OceanBaseOracle => db::ob_oracle::list_databases(p).await,
@@ -36,7 +36,7 @@ pub(in crate::schema) async fn list_tables(
     schema: &str,
 ) -> Result<Vec<db::TableInfo>, String> {
     match pool {
-        PoolKind::Mysql(p, _) if config.is_some_and(is_doris_family_config) => {
+        PoolKind::Mysql(p, _) if config.is_some_and(db::mysql_compatible::uses_show_metadata) => {
             db::mysql::list_tables_show(p, database).await
         }
         PoolKind::Mysql(p, mode) if *mode == MysqlMode::OceanBaseOracle => {
@@ -85,10 +85,10 @@ pub(in crate::schema) async fn list_objects(
         PoolKind::Mysql(p, mode) if *mode == MysqlMode::OceanBaseOracle => {
             db::ob_oracle::list_objects(p, schema).await.map(Some)
         }
-        PoolKind::Mysql(p, _) if config.is_some_and(is_manticoresearch_config) => {
+        PoolKind::Mysql(p, _) if config.is_some_and(db::manticoresearch::is_config) => {
             db::manticoresearch::list_objects(p, database).await.map(Some)
         }
-        PoolKind::Mysql(p, _) if config.is_some_and(is_doris_family_config) => {
+        PoolKind::Mysql(p, _) if config.is_some_and(db::mysql_compatible::uses_show_metadata) => {
             db::mysql::list_table_objects_show(p, database).await.map(Some)
         }
         PoolKind::Mysql(p, _) => {
@@ -137,11 +137,11 @@ pub(in crate::schema) async fn get_columns(
     table: &str,
 ) -> Result<Vec<db::ColumnInfo>, String> {
     match pool {
-        PoolKind::Mysql(p, _) if config.is_some_and(is_manticoresearch_config) => {
+        PoolKind::Mysql(p, _) if config.is_some_and(db::manticoresearch::is_config) => {
             let metadata_database = mysql_show_metadata_database_for_config(config, database);
             db::manticoresearch::get_columns(p, metadata_database, table).await
         }
-        PoolKind::Mysql(p, _) if config.is_some_and(is_doris_family_config) => {
+        PoolKind::Mysql(p, _) if config.is_some_and(db::mysql_compatible::uses_show_metadata) => {
             let metadata_database = mysql_show_metadata_database_for_config(config, database);
             db::mysql::get_columns(p, metadata_database, table).await
         }
@@ -176,13 +176,13 @@ pub(in crate::schema) async fn list_indexes(
         PoolKind::Mysql(p, mode) if *mode == MysqlMode::OceanBaseOracle => {
             db::ob_oracle::list_indexes(p, schema, table).await
         }
-        PoolKind::Mysql(p, _) if config.is_some_and(is_starrocks_config) => {
+        PoolKind::Mysql(p, _) if config.is_some_and(db::starrocks::is_config) => {
             db::starrocks::list_indexes(p, database, table).await
         }
-        PoolKind::Mysql(p, _) if config.is_some_and(is_doris_config) => {
+        PoolKind::Mysql(p, _) if config.is_some_and(db::doris::is_config) => {
             db::doris::list_indexes(p, database, table).await
         }
-        PoolKind::Mysql(p, _) if config.is_some_and(is_manticoresearch_config) => {
+        PoolKind::Mysql(p, _) if config.is_some_and(db::manticoresearch::is_config) => {
             db::mysql_compatible::list_indexes_with_ddl_fallback(p, database, table).await
         }
         PoolKind::Mysql(p, _) => db::mysql::list_indexes(p, schema, table).await,
@@ -343,26 +343,8 @@ fn is_cloudberry_config(config: &ConnectionConfig) -> bool {
     matches!(config.driver_profile.as_deref(), Some("cloudberry"))
 }
 
-fn is_doris_family_config(config: &ConnectionConfig) -> bool {
-    matches!(config.db_type, DatabaseType::Doris | DatabaseType::StarRocks | DatabaseType::ManticoreSearch)
-        || matches!(config.driver_profile.as_deref(), Some("doris" | "selectdb" | "starrocks" | "manticoresearch"))
-}
-
-fn is_doris_config(config: &ConnectionConfig) -> bool {
-    config.db_type == DatabaseType::Doris || matches!(config.driver_profile.as_deref(), Some("doris" | "selectdb"))
-}
-
-fn is_starrocks_config(config: &ConnectionConfig) -> bool {
-    config.db_type == DatabaseType::StarRocks || matches!(config.driver_profile.as_deref(), Some("starrocks"))
-}
-
-fn is_manticoresearch_config(config: &ConnectionConfig) -> bool {
-    matches!(config.db_type, DatabaseType::ManticoreSearch)
-        || matches!(config.driver_profile.as_deref(), Some("manticoresearch"))
-}
-
 fn mysql_show_metadata_database_for_config<'a>(config: Option<&ConnectionConfig>, database: &'a str) -> &'a str {
-    if config.is_some_and(is_manticoresearch_config) {
+    if config.is_some_and(db::manticoresearch::is_config) {
         ""
     } else {
         database
@@ -373,7 +355,7 @@ fn filter_mysql_system_databases_for_config(
     databases: Vec<db::DatabaseInfo>,
     config: Option<&ConnectionConfig>,
 ) -> Vec<db::DatabaseInfo> {
-    if !config.is_some_and(is_manticoresearch_config) {
+    if !config.is_some_and(db::manticoresearch::is_config) {
         return databases;
     }
 

@@ -844,6 +844,7 @@ jobs:
             user_dbx="dbx-secret";
           };
           EOF
+          chmod 0644 "$jaas_file"
           docker rm -fv "$name" >/dev/null 2>&1 || true
           docker run -d --name "$name" -p 2181:2181 \
             -v "$jaas_file:/conf/server-jaas.conf:ro" \

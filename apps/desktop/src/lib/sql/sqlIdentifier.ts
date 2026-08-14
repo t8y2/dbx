@@ -190,11 +190,15 @@ export function requiresPostgresIdentifierQuote(identifier: string, additionalKe
   return POSTGRES_RESERVED_IDENTIFIER_KEYWORDS.has(identifier) || additionalKeywords?.has(identifier) === true;
 }
 
+export function requiresMysqlIdentifierQuote(identifier: string, additionalKeywords?: ReadonlySet<string>): boolean {
+  return requiresPostgresIdentifierQuote(identifier, additionalKeywords) || MYSQL_ONLY_RESERVED_IDENTIFIER_KEYWORDS.has(identifier);
+}
+
 export function quoteGaussDbJdbcIdentifier(identifier: string, identifierQuote: string): string {
   if (isExplicitlyQuotedSqlIdentifier(identifier)) return identifier;
   const quote = identifierQuote.trim();
   if (!quote) return identifier;
-  const requiresQuote = !SIMPLE_LOWER_IDENTIFIER.test(identifier) || POSTGRES_RESERVED_IDENTIFIER_KEYWORDS.has(identifier) || (quote === "`" && MYSQL_ONLY_RESERVED_IDENTIFIER_KEYWORDS.has(identifier));
+  const requiresQuote = quote === "`" ? requiresMysqlIdentifierQuote(identifier) : requiresPostgresIdentifierQuote(identifier);
   if (!requiresQuote) return identifier;
   return `${quote}${identifier.replaceAll(quote, quote + quote)}${quote}`;
 }

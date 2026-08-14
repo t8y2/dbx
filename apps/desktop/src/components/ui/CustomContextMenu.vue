@@ -243,6 +243,11 @@ function itemButtonClass(variant?: "default" | "destructive") {
   ];
 }
 
+function activeSubmenuTriggerClass(item: ContextMenuItem, index: number) {
+  if (activeSubIndex.value !== index) return "";
+  return item.variant === "destructive" ? "bg-destructive/10 text-destructive" : "bg-accent text-accent-foreground";
+}
+
 function itemIsDisabled(item: ContextMenuItem): boolean {
   return typeof item.disabled === "function" ? item.disabled() : !!item.disabled;
 }
@@ -265,13 +270,19 @@ onBeforeUnmount(() => {
   <slot :onContextMenu="onContextMenu" :isOpen="show" />
   <!-- Main menu -->
   <Teleport to="body">
-    <div v-if="show" ref="menuRef" data-dbx-context-menu :style="{ position: 'fixed', left: x + 'px', top: y + 'px', zIndex: 9999 }" class="bg-popover text-popover-foreground min-w-40 w-max max-w-[calc(100vw-16px)] rounded-md p-1 overflow-y-auto ring-1 ring-foreground/10 shadow-lg">
+    <div
+      v-if="show"
+      ref="menuRef"
+      data-dbx-context-menu
+      :style="{ position: 'fixed', left: x + 'px', top: y + 'px', zIndex: 9999 }"
+      class="pointer-events-auto bg-popover text-popover-foreground min-w-40 w-max max-w-[calc(100vw-16px)] rounded-md p-1 overflow-y-auto ring-1 ring-foreground/10 shadow-lg"
+    >
       <template v-for="(item, index) in activeItems" :key="index">
         <template v-if="item.visible !== false">
           <div v-if="item.separator" class="-mx-1 my-1 flex items-center px-1">
             <div class="h-px flex-1 bg-border/70" />
           </div>
-          <button v-else :disabled="itemIsDisabled(item)" :class="[...itemButtonClass(item.variant), activeSubIndex === index ? 'bg-accent text-accent-foreground' : '']" @click="handleItemClick(item)" @mouseenter="(e) => onItemMouseEnter(index, e)" @mouseleave="onItemMouseLeave">
+          <button v-else :disabled="itemIsDisabled(item)" :class="[...itemButtonClass(item.variant), activeSubmenuTriggerClass(item, index)]" @click="handleItemClick(item)" @mouseenter="(e) => onItemMouseEnter(index, e)" @mouseleave="onItemMouseLeave">
             <span class="flex size-4 shrink-0 items-center justify-center">
               <Check v-if="item.checked" class="size-4 text-primary" />
               <component :is="item.icon" v-else-if="item.icon" :class="['size-4', item.iconClass]" />
@@ -280,7 +291,7 @@ onBeforeUnmount(() => {
             <span v-if="item.shortcut" class="ml-8 inline-flex shrink-0 items-center gap-1 text-muted-foreground">
               <kbd v-for="key in shortcutKeys(item.shortcut)" :key="key" class="min-w-4 rounded border border-border/70 bg-muted/60 px-1 py-0.5 text-center font-mono text-[10px] leading-none text-muted-foreground shadow-xs">{{ key }}</kbd>
             </span>
-            <ChevronRight v-if="item.children?.length" class="ml-auto size-4 text-muted-foreground/80" />
+            <ChevronRight v-if="item.children?.length" :class="['ml-auto size-4', item.variant === 'destructive' ? 'text-destructive' : 'text-muted-foreground/80']" />
           </button>
         </template>
       </template>
@@ -293,7 +304,7 @@ onBeforeUnmount(() => {
       ref="subRef"
       data-dbx-context-menu
       :style="{ position: 'fixed', left: subX + 'px', top: subY + 'px', zIndex: 10000, maxHeight: 'min(420px, calc(100vh - 16px))' }"
-      class="bg-popover text-popover-foreground min-w-56 w-max max-w-[calc(100vw-16px)] rounded-md p-1 overflow-y-auto ring-1 ring-foreground/10 shadow-lg"
+      class="pointer-events-auto bg-popover text-popover-foreground min-w-56 w-max max-w-[calc(100vw-16px)] rounded-md p-1 overflow-y-auto ring-1 ring-foreground/10 shadow-lg"
       @mouseenter="onSubMouseEnter"
       @mouseleave="onSubMouseLeave"
     >

@@ -365,7 +365,7 @@ pub async fn list_doris_catalogs_core(state: &AppState, connection_id: &str) -> 
     let db_config = connection_config(state, connection_id).await;
     let connections = state.connections.read().await;
     if let Some(PoolKind::Mysql(p, _)) = connections.get(&pool_key) {
-        return if db_config.as_ref().is_some_and(is_starrocks_config) {
+        return if db_config.as_ref().is_some_and(db::starrocks::is_config) {
             db::starrocks::list_catalogs(p).await
         } else {
             db::doris::list_catalogs(p).await
@@ -391,7 +391,7 @@ pub async fn list_doris_catalog_databases_core(
     let PoolKind::Mysql(p, _) = pool else {
         return Ok(vec![]);
     };
-    let databases = if db_config.as_ref().is_some_and(is_starrocks_config) {
+    let databases = if db_config.as_ref().is_some_and(db::starrocks::is_config) {
         db::starrocks::list_catalog_databases(p, catalog).await
     } else {
         db::doris::list_catalog_databases(p, catalog).await
@@ -435,7 +435,7 @@ pub async fn list_doris_catalog_tables_core(
     let PoolKind::Mysql(p, _) = pool else {
         return Ok(vec![]);
     };
-    let tables = if db_config.as_ref().is_some_and(is_starrocks_config) {
+    let tables = if db_config.as_ref().is_some_and(db::starrocks::is_config) {
         db::starrocks::list_catalog_tables(p, catalog, database).await
     } else {
         db::doris::list_catalog_tables(p, catalog, database).await
@@ -458,7 +458,7 @@ pub async fn get_doris_catalog_columns_core(
     let PoolKind::Mysql(p, _) = pool else {
         return Ok(vec![]);
     };
-    let columns = if db_config.as_ref().is_some_and(is_starrocks_config) {
+    let columns = if db_config.as_ref().is_some_and(db::starrocks::is_config) {
         db::starrocks::get_catalog_columns(p, catalog, database, table).await
     } else {
         db::doris::get_catalog_columns(p, catalog, database, table).await
@@ -481,7 +481,7 @@ pub async fn get_doris_catalog_table_ddl_core(
     let PoolKind::Mysql(p, _) = pool else {
         return Err("DDL not supported for this connection".to_string());
     };
-    if db_config.as_ref().is_some_and(is_starrocks_config) {
+    if db_config.as_ref().is_some_and(db::starrocks::is_config) {
         db::starrocks::get_catalog_table_ddl(p, catalog, database, table).await
     } else {
         db::doris::get_catalog_table_ddl(p, catalog, database, table).await
@@ -503,7 +503,7 @@ pub async fn list_doris_catalog_indexes_core(
     let PoolKind::Mysql(p, _) = pool else {
         return Ok(vec![]);
     };
-    if db_config.as_ref().is_some_and(is_starrocks_config) {
+    if db_config.as_ref().is_some_and(db::starrocks::is_config) {
         db::starrocks::list_catalog_indexes(p, catalog, database, table).await
     } else {
         db::doris::list_catalog_indexes(p, catalog, database, table).await
@@ -559,7 +559,7 @@ pub async fn resolve_external_doris_catalog(
         return None;
     }
     let config = connection_config(state, connection_id).await?;
-    if is_doris_family_catalog_capable_config(&config) {
+    if db::mysql_compatible::supports_external_catalogs(&config) {
         Some(catalog.to_string())
     } else {
         None
@@ -620,7 +620,7 @@ async fn list_databases_once(state: &AppState, connection_id: &str) -> Result<Ve
         {
             db::dolt::list_databases(p).await
         }
-        PoolKind::Mysql(p, _) if db_config.as_ref().is_some_and(is_doris_family_config) => {
+        PoolKind::Mysql(p, _) if db_config.as_ref().is_some_and(db::mysql_compatible::uses_show_metadata) => {
             db::mysql::list_databases_show(p)
                 .await
                 .map(|databases| filter_mysql_system_databases_for_config(databases, db_config.as_ref()))
@@ -644,7 +644,10 @@ async fn list_databases_once(state: &AppState, connection_id: &str) -> Result<Ve
 
 async fn list_database_metadata_once(state: &AppState, connection_id: &str) -> Result<Vec<db::DatabaseInfo>, String> {
     let config = connection_config(state, connection_id).await;
-    if config.as_ref().is_some_and(|config| db::dolt::is_config(config) || is_doris_family_config(config)) {
+    if config
+        .as_ref()
+        .is_some_and(|config| db::dolt::is_config(config) || db::mysql_compatible::uses_show_metadata(config))
+    {
         return list_databases_once(state, connection_id).await;
     }
     let connections = state.connections.read().await;
@@ -1080,8 +1083,8 @@ async fn get_table_comment_core_for_session(
         match pool {
             PoolKind::Mysql(p, mode)
                 if *mode != MysqlMode::OceanBaseOracle
-                    && !db_config.as_ref().is_some_and(is_doris_family_config)
-                    && !db_config.as_ref().is_some_and(is_manticoresearch_config) =>
+                    && !db_config.as_ref().is_some_and(db::mysql_compatible::uses_show_metadata)
+                    && !db_config.as_ref().is_some_and(db::manticoresearch::is_config) =>
             {
                 db::mysql::get_table_comment(p, database, table).await
             }
@@ -2149,12 +2152,12 @@ async fn list_tables_once(
     let pool = connections.get(&pool_key).ok_or("Pool not found")?;
 
     match pool {
-        PoolKind::Mysql(p, _) if db_config.as_ref().is_some_and(is_starrocks_config) => {
-            db::mysql::list_starrocks_tables(p, database)
+        PoolKind::Mysql(p, _) if db_config.as_ref().is_some_and(db::starrocks::is_config) => {
+            db::starrocks::list_tables(p, database)
                 .await
                 .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types, table_name_filter))
         }
-        PoolKind::Mysql(p, _) if db_config.as_ref().is_some_and(is_doris_family_config) => {
+        PoolKind::Mysql(p, _) if db_config.as_ref().is_some_and(db::mysql_compatible::uses_show_metadata) => {
             db::mysql::list_tables_show(p, database)
                 .await
                 .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types, table_name_filter))
@@ -4542,32 +4545,34 @@ for line in sys.stdin:
     #[test]
     fn doris_family_catalog_capable_matches_doris_and_starrocks_only() {
         // Doris and StarRocks expose multi-catalog federation.
-        assert!(super::is_doris_family_catalog_capable_config(&test_connection_config(DatabaseType::Doris)));
-        assert!(super::is_doris_family_catalog_capable_config(&test_connection_config(DatabaseType::StarRocks)));
+        assert!(db::mysql_compatible::supports_external_catalogs(&test_connection_config(DatabaseType::Doris)));
+        assert!(db::mysql_compatible::supports_external_catalogs(&test_connection_config(DatabaseType::StarRocks)));
 
         // Driver profiles for Doris/SelectDB/StarRocks also qualify.
         let mut doris = test_connection_config(DatabaseType::Mysql);
         doris.driver_profile = Some("doris".to_string());
-        assert!(super::is_doris_family_catalog_capable_config(&doris));
+        assert!(db::mysql_compatible::supports_external_catalogs(&doris));
 
         let mut selectdb = test_connection_config(DatabaseType::Mysql);
         selectdb.driver_profile = Some("selectdb".to_string());
-        assert!(super::is_doris_family_catalog_capable_config(&selectdb));
+        assert!(db::mysql_compatible::supports_external_catalogs(&selectdb));
 
         let mut starrocks = test_connection_config(DatabaseType::Mysql);
         starrocks.driver_profile = Some("starrocks".to_string());
-        assert!(super::is_doris_family_catalog_capable_config(&starrocks));
+        assert!(db::mysql_compatible::supports_external_catalogs(&starrocks));
 
         // ManticoreSearch shares the MySQL code path but has no catalog concept.
-        assert!(!super::is_doris_family_catalog_capable_config(&test_connection_config(DatabaseType::ManticoreSearch)));
+        assert!(!db::mysql_compatible::supports_external_catalogs(&test_connection_config(
+            DatabaseType::ManticoreSearch
+        )));
 
         let mut manticore = test_connection_config(DatabaseType::Mysql);
         manticore.driver_profile = Some("manticoresearch".to_string());
-        assert!(!super::is_doris_family_catalog_capable_config(&manticore));
+        assert!(!db::mysql_compatible::supports_external_catalogs(&manticore));
 
         // Plain MySQL / Postgres are not catalog-capable.
-        assert!(!super::is_doris_family_catalog_capable_config(&test_connection_config(DatabaseType::Mysql)));
-        assert!(!super::is_doris_family_catalog_capable_config(&test_connection_config(DatabaseType::Postgres)));
+        assert!(!db::mysql_compatible::supports_external_catalogs(&test_connection_config(DatabaseType::Mysql)));
+        assert!(!db::mysql_compatible::supports_external_catalogs(&test_connection_config(DatabaseType::Postgres)));
     }
 }
 
@@ -4991,7 +4996,7 @@ async fn list_object_statistics_once(
     let pool = connections.get(&pool_key).ok_or("Pool not found")?;
     match pool {
         PoolKind::Mysql(p, mode) => {
-            if *mode == MysqlMode::OceanBaseOracle || db_config.as_ref().is_some_and(is_manticoresearch_config) {
+            if *mode == MysqlMode::OceanBaseOracle || db_config.as_ref().is_some_and(db::manticoresearch::is_config) {
                 Ok(vec![])
             } else {
                 db::mysql::list_object_statistics(p, database).await
@@ -5191,11 +5196,11 @@ async fn list_objects_once(
             // Note: mysql and ob_oracle take different second args (database vs schema)
             if *mode == MysqlMode::OceanBaseOracle {
                 db::ob_oracle::list_objects(p, schema).await.map(unpaged_object_list)
-            } else if db_config.as_ref().is_some_and(is_manticoresearch_config) {
+            } else if db_config.as_ref().is_some_and(db::manticoresearch::is_config) {
                 db::manticoresearch::list_objects(p, database).await.map(unpaged_object_list)
-            } else if db_config.as_ref().is_some_and(is_starrocks_config) {
-                db::mysql::list_starrocks_table_objects(p, database).await.map(unpaged_object_list)
-            } else if db_config.as_ref().is_some_and(is_doris_family_config) {
+            } else if db_config.as_ref().is_some_and(db::starrocks::is_config) {
+                db::starrocks::list_table_objects(p, database).await.map(unpaged_object_list)
+            } else if db_config.as_ref().is_some_and(db::mysql_compatible::uses_show_metadata) {
                 db::mysql::list_table_objects_show(p, database).await.map(unpaged_object_list)
             } else {
                 db::mysql::list_objects(p, database, object_types, mysql_limit, mysql_offset)
@@ -5834,11 +5839,11 @@ async fn get_columns_core_for_session_inner(
         let pool = connections.get(&pool_key).ok_or("Pool not found")?;
 
         match pool {
-            PoolKind::Mysql(p, _) if db_config.as_ref().is_some_and(is_manticoresearch_config) => {
+            PoolKind::Mysql(p, _) if db_config.as_ref().is_some_and(db::manticoresearch::is_config) => {
                 let metadata_database = mysql_show_metadata_database_for_config(db_config.as_ref(), database);
                 db::manticoresearch::get_columns(p, metadata_database, table).await.map(deduplicate_column_infos)
             }
-            PoolKind::Mysql(p, _) if db_config.as_ref().is_some_and(is_doris_family_config) => {
+            PoolKind::Mysql(p, _) if db_config.as_ref().is_some_and(db::mysql_compatible::uses_show_metadata) => {
                 let metadata_database = mysql_show_metadata_database_for_config(db_config.as_ref(), database);
                 // Doris/StarRocks previously went straight to `SHOW COLUMNS` for
                 // speed (see perf(doris) commit), but `SHOW COLUMNS` reports the
@@ -6035,14 +6040,14 @@ async fn list_indexes_core_for_session(
 
         match pool {
             PoolKind::Mysql(p, mode) => {
-                if db_config.as_ref().is_some_and(is_manticoresearch_config) {
+                if db_config.as_ref().is_some_and(db::manticoresearch::is_config) {
                     return db::manticoresearch::list_indexes(p, table).await;
                 }
                 if *mode == MysqlMode::OceanBaseOracle {
                     db::ob_oracle::list_indexes(p, schema, table).await
-                } else if db_config.as_ref().is_some_and(is_starrocks_config) {
+                } else if db_config.as_ref().is_some_and(db::starrocks::is_config) {
                     db::starrocks::list_indexes(p, mysql_table_metadata_catalog(database, schema), table).await
-                } else if db_config.as_ref().is_some_and(is_doris_config) {
+                } else if db_config.as_ref().is_some_and(db::doris::is_config) {
                     db::doris::list_indexes(p, mysql_table_metadata_catalog(database, schema), table).await
                 } else {
                     db::mysql::list_indexes(p, mysql_table_metadata_catalog(database, schema), table).await
@@ -6693,34 +6698,8 @@ fn agent_paging_likely_applied(enabled: bool, limit: Option<usize>, returned_len
     enabled && limit.is_some_and(|limit| returned_len <= limit)
 }
 
-fn is_doris_family_config(config: &ConnectionConfig) -> bool {
-    matches!(config.db_type, DatabaseType::Doris | DatabaseType::StarRocks | DatabaseType::ManticoreSearch)
-        || matches!(config.driver_profile.as_deref(), Some("doris" | "selectdb" | "starrocks" | "manticoresearch"))
-}
-
-fn is_doris_config(config: &ConnectionConfig) -> bool {
-    config.db_type == DatabaseType::Doris || matches!(config.driver_profile.as_deref(), Some("doris" | "selectdb"))
-}
-
-fn is_starrocks_config(config: &ConnectionConfig) -> bool {
-    config.db_type == DatabaseType::StarRocks || matches!(config.driver_profile.as_deref(), Some("starrocks"))
-}
-
-/// Doris-family engines that support multi-catalog federation (`SHOW CATALOGS`).
-/// Manticore Search is excluded — it shares the MySQL code path but has no
-/// catalog concept.
-pub fn is_doris_family_catalog_capable_config(config: &ConnectionConfig) -> bool {
-    matches!(config.db_type, DatabaseType::Doris | DatabaseType::StarRocks)
-        || matches!(config.driver_profile.as_deref(), Some("doris" | "selectdb" | "starrocks"))
-}
-
-fn is_manticoresearch_config(config: &ConnectionConfig) -> bool {
-    matches!(config.db_type, DatabaseType::ManticoreSearch)
-        || matches!(config.driver_profile.as_deref(), Some("manticoresearch"))
-}
-
 fn mysql_show_metadata_database_for_config<'a>(config: Option<&ConnectionConfig>, database: &'a str) -> &'a str {
-    if config.is_some_and(is_manticoresearch_config) {
+    if config.is_some_and(db::manticoresearch::is_config) {
         ""
     } else {
         database
@@ -6731,7 +6710,7 @@ fn filter_mysql_system_databases_for_config(
     databases: Vec<db::DatabaseInfo>,
     config: Option<&ConnectionConfig>,
 ) -> Vec<db::DatabaseInfo> {
-    if !config.is_some_and(is_manticoresearch_config) {
+    if !config.is_some_and(db::manticoresearch::is_config) {
         return databases;
     }
 
@@ -7308,7 +7287,7 @@ async fn mysql_object_source(
             // sync MVs. Fall back to the persistent definition exposed by
             // information_schema.materialized_views. The fallback returns a single
             // column (MATERIALIZED_VIEW_DEFINITION) so the column index is always 0.
-            let fallback_sql = db::mysql::mysql_materialized_view_definition_sql(database, name);
+            let fallback_sql = db::starrocks::materialized_view_definition_sql(database, name);
             read_mysql_object_source_row(&mut conn, &fallback_sql, 0).await.map_err(|fallback_err| {
                 format!(
                     "SHOW CREATE MATERIALIZED VIEW failed ({primary_err}); \

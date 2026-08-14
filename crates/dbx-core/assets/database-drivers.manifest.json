@@ -1461,6 +1461,36 @@
       }
     },
     {
+      "dbType": "impala",
+      "label": "Apache Impala",
+      "runtimeMode": "agent",
+      "mcpMode": "bridge",
+      "agentKey": "hive",
+      "singleConnectionPool": false,
+      "metadataConnectionScoped": false,
+      "skipTcpProbe": true,
+      "defaultPort": 21050,
+      "supportLevel": "operate",
+      "capabilities": {
+        "queryExecution": true,
+        "metadataBrowse": true,
+        "objectBrowser": true,
+        "objectSource": true,
+        "schemaSearch": true,
+        "diagram": false,
+        "tableDataEdit": false,
+        "tableStructureEdit": false,
+        "tableImport": false,
+        "dataTransfer": true,
+        "sqlFileExecution": true,
+        "databaseCreate": false,
+        "fieldLineage": false,
+        "sqlExplain": true,
+        "userAdmin": false,
+        "driverManagement": true
+      }
+    },
+    {
       "dbType": "db2",
       "label": "IBM DB2",
       "runtimeMode": "agent",

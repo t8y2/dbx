@@ -2,7 +2,7 @@ import type { ConnectionConfig, DatabaseType } from "@/types/database";
 import { isSchemaAware, usesDatabaseObjectTreeMode, usesTreeSchemaMode } from "@/lib/database/databaseFeatureSupport";
 import type { CodeMirrorSqlDialectName } from "@/lib/editor/codemirrorSqlDialect";
 
-type JdbcDialectConnection = Partial<Pick<ConnectionConfig, "db_type" | "driver_profile" | "driver_label" | "connection_string" | "jdbc_driver_class" | "jdbc_driver_paths" | "database_info" | "external_config">>;
+type JdbcDialectConnection = Partial<Pick<ConnectionConfig, "db_type" | "driver_profile" | "driver_label" | "connection_string" | "url_params" | "jdbc_driver_class" | "jdbc_driver_paths" | "database_info" | "external_config">>;
 
 export type GaussdbIdentifierQuoteStyle = "auto" | "double" | "backtick";
 export type GaussdbConnectionMode = "native" | "m-jdbc";
@@ -13,7 +13,7 @@ const GAUSSDB_TARGET_SERVER_TYPE_KEY = "gaussdbTargetServerType";
 export const GAUSSDB_M_JDBC_DRIVER_PROFILE = "gaussdb-m";
 export const GAUSSDB_M_JDBC_DRIVER_CLASS = "com.huawei.gaussdb.jdbc.Driver";
 
-const DATABASE_AS_EXECUTION_SCHEMA_TYPES = new Set<DatabaseType>(["hive", "spark"]);
+const DATABASE_AS_EXECUTION_SCHEMA_TYPES = new Set<DatabaseType>(["hive", "impala", "spark"]);
 const CONNECTION_ROOT_SCHEMA_TYPES = new Set<DatabaseType>(["oracle", "dameng", "oceanbase-oracle"]);
 
 const JDBC_DIALECT_MATCHERS: Array<{ type: DatabaseType; patterns: RegExp[] }> = [
@@ -129,14 +129,32 @@ export function setGaussdbIdentifierQuoteStyle(
 
 export function gaussdbTargetServerType(connection: JdbcDialectConnection | undefined): GaussdbTargetServerType {
   const external = externalConfigRecord(connection?.external_config);
-  const value = external[GAUSSDB_TARGET_SERVER_TYPE_KEY];
-  return value === "slave" || value === "any" ? value : "master";
+  return normalizeGaussdbTargetServerType(external[GAUSSDB_TARGET_SERVER_TYPE_KEY]) ?? gaussdbTargetServerTypeFromUrl(connection) ?? "any";
 }
 
 export function setGaussdbTargetServerType(connection: Pick<ConnectionConfig, "db_type"> & Partial<Pick<ConnectionConfig, "driver_profile" | "driver_label" | "connection_string" | "jdbc_driver_class" | "jdbc_driver_paths" | "database_info" | "external_config">>, value: GaussdbTargetServerType) {
   const external = externalConfigRecord(connection.external_config);
   external[GAUSSDB_TARGET_SERVER_TYPE_KEY] = value;
   connection.external_config = Object.keys(external).length > 0 ? external : undefined;
+}
+
+function normalizeGaussdbTargetServerType(value: unknown): GaussdbTargetServerType | undefined {
+  if (typeof value !== "string") return undefined;
+  const normalized = value.trim().toLowerCase();
+  return normalized === "master" || normalized === "slave" || normalized === "any" ? normalized : undefined;
+}
+
+function gaussdbTargetServerTypeFromUrl(connection: JdbcDialectConnection | undefined): GaussdbTargetServerType | undefined {
+  const values = [connection?.url_params, connection?.connection_string?.split("?", 2)[1]?.split("#", 1)[0]];
+  for (const value of values) {
+    const params = new URLSearchParams((value || "").trim().replace(/^\?/, "").replace(/;/g, "&"));
+    for (const [key, paramValue] of params) {
+      if (key.toLowerCase() === "targetservertype") {
+        return normalizeGaussdbTargetServerType(paramValue);
+      }
+    }
+  }
+  return undefined;
 }
 
 export function sqlSnippetDatabaseTypeForConnection(connection?: JdbcDialectConnection): DatabaseType | undefined {

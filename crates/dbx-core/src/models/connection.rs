@@ -564,6 +564,7 @@ pub enum DatabaseType {
     #[serde(rename = "prestosql")]
     PrestoSql,
     Hive,
+    Impala,
     Spark,
     #[serde(rename = "db2")]
     Db2,
@@ -1141,6 +1142,7 @@ impl ConnectionConfig {
             DatabaseType::Trino => format!("trino://{host}:{port}{db_part}"),
             DatabaseType::PrestoSql => format!("prestosql://{host}:{port}{db_part}"),
             DatabaseType::Hive => format!("hive://{host}:{port}{db_part}"),
+            DatabaseType::Impala => format!("impala://{host}:{port}{db_part}"),
             DatabaseType::Spark => format!("spark://{host}:{port}{db_part}"),
             DatabaseType::Db2 => format!("db2://{host}:{port}{db_part}"),
             DatabaseType::Informix => format!("informix://{host}:{port}{db_part}"),
@@ -1350,6 +1352,13 @@ impl ConnectionConfig {
             }
             DatabaseType::Hive => {
                 format!("hive://{}:{}@{host}:{port}{db_part}", username, password)
+            }
+            DatabaseType::Impala => {
+                if self.username.is_empty() && self.password.is_empty() {
+                    format!("impala://{host}:{port}{db_part}")
+                } else {
+                    format!("impala://{}:{}@{host}:{port}{db_part}", username, password)
+                }
             }
             DatabaseType::Spark => {
                 format!("spark://{}:{}@{host}:{port}{db_part}", username, password)
@@ -2597,6 +2606,25 @@ mod tests {
     fn easysearch_database_type_uses_stable_wire_name() {
         assert_eq!(serde_json::to_string(&DatabaseType::Easysearch).unwrap(), "\"easysearch\"");
         assert_eq!(serde_json::from_str::<DatabaseType>("\"easysearch\"").unwrap(), DatabaseType::Easysearch);
+    }
+
+    #[test]
+    fn impala_database_type_and_connection_urls_are_stable() {
+        assert_eq!(serde_json::to_string(&DatabaseType::Impala).unwrap(), "\"impala\"");
+        assert_eq!(serde_json::from_str::<DatabaseType>("\"impala\"").unwrap(), DatabaseType::Impala);
+
+        let mut config = mysql_config("", "", Some("analytics"));
+        config.db_type = DatabaseType::Impala;
+        config.host = "impala.local".to_string();
+        config.port = 21050;
+        assert_eq!(config.connection_url(), "impala://impala.local:21050/analytics");
+
+        config.username = "analyst".to_string();
+        config.password = "secret".to_string();
+        assert_eq!(
+            config.connection_url_with_host(&config.host, config.port),
+            "impala://analyst:secret@impala.local:21050/analytics"
+        );
     }
 
     #[test]

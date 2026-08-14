@@ -122,7 +122,7 @@ import {
 } from "@/lib/dataGrid/dataGridTranspose";
 import { canApplyGridSelectionValue, canDeleteGridRowItem, canEditGridCellDetail, matchesRowStatusFilter, shouldShowQuickEntryDraftRow, type RowStatus, type RowStatusFilter } from "@/lib/dataGrid/gridRowStatus";
 import { displayCellValue, firstLineCellDisplayValue, limitDataGridCellDisplay, SQLSERVER_DATA_GRID_CELL_DISPLAY_MAX_LENGTH, type CellValue } from "@/lib/dataGrid/cellValue";
-import { getApplicablePreviewActions } from "@/lib/dataGrid/resultPreviewRegistry";
+import { getApplicablePreviewActions, type PreviewAction } from "@/lib/dataGrid/resultPreviewRegistry";
 import "@/lib/dataGrid/geometryMapPreview";
 import {
   BINARY_CELL_DOWNLOAD_MODES,
@@ -3781,6 +3781,17 @@ const previewToolbarCapability = computed<DataGridToolbarActionCapability>(() =>
   loading: isPreviewLoading.value,
   onTrigger: openSqlPreview,
 }));
+const layerPreviewToolbarCapability = computed<DataGridToolbarActionCapability>(() => {
+  const action = previewActions.value.find((candidate) => candidate.id === "geometry-map-preview");
+  return {
+    label: t("grid.layerPreview"),
+    visible: !!action,
+    disabled: props.loading || !action,
+    onTrigger: () => {
+      if (action) executePreviewAction(action);
+    },
+  };
+});
 const saveToolbarCapability = computed<DataGridToolbarSaveCapability>(() => ({
   label: t(saveActionMode.value.labelKey, { count: pendingChangeCount.value }),
   tooltip: t(saveActionMode.value.tooltipKey, {
@@ -4202,7 +4213,7 @@ async function resolveLargeValueCells(rowIds: number[], columnIndexes: number[])
     }
   }
   if (requestsByColumn.size === 0) return resolved;
-  if ((resolvedDatabaseType.value !== "mysql" && resolvedDatabaseType.value !== "postgres") || !props.connectionId || !props.tableMeta?.tableName || props.tableMeta.primaryKeys.length === 0) {
+  if ((resolvedDatabaseType.value !== "mysql" && resolvedDatabaseType.value !== "postgres" && resolvedDatabaseType.value !== "oracle") || !props.connectionId || !props.tableMeta?.tableName || props.tableMeta.primaryKeys.length === 0) {
     throw new Error(t("grid.largeValueNeedsStableKey"));
   }
   const primaryKeyIndexes = props.tableMeta.primaryKeys.map(largeValueSourceColumnIndex);
@@ -4596,7 +4607,7 @@ function exportSelectedRowsTxt() {
   return exportTxt(rowIds);
 }
 
-function executePreviewAction(action: { execute: (ctx: any) => any }) {
+function executePreviewAction(action: PreviewAction) {
   const config = action.execute({
     result: props.result,
     selectedRowIds: affectedRowIds(),
@@ -4605,6 +4616,8 @@ function executePreviewAction(action: { execute: (ctx: any) => any }) {
   if (config) {
     previewDialogConfig.value = config;
     previewDialogOpen.value = true;
+  } else if (action.id === "geometry-map-preview") {
+    toast(t("grid.layerPreviewNoGeometryData"), 3000);
   }
 }
 
@@ -10060,6 +10073,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
             :auto-refresh="autoRefreshToolbarCapability"
             :add-row="addRowToolbarCapability"
             :delete-row="deleteRowToolbarCapability"
+            :layer-preview="layerPreviewToolbarCapability"
             :preview="previewToolbarCapability"
             :save="saveToolbarCapability"
             :rollback="rollbackToolbarCapability"

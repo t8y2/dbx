@@ -116,6 +116,7 @@ import { REDIS_SCAN_PAGE_SIZE_DEFAULT } from "@/lib/redis/redisKeyPattern";
 import { normalizeRedisDatabaseAliases, redisDatabaseAlias, redisDatabaseLabel } from "@/lib/redis/redisDatabaseAlias";
 import { appendAgentDriverUpdateHint, hasAgentDriverUpdate, hasInstalledAgentVersion, type AgentDriverInstallState } from "@/lib/connection/agentDriverInstallHint";
 import { appendConnectionErrorHints, isMysqlMissingPasswordFailure } from "@/lib/connection/connectionErrorHints";
+import { connectionNeedsPasswordPrompt } from "@/lib/connection/connectionPassword";
 import { appendVisibleDatabaseSelection } from "@/lib/connection/connectionVisibleDatabases";
 import { buildXuguTypeMemberNodes, isXuguTypeMemberContainer } from "@/lib/sidebar/xuguTypeMembers";
 import { isXuguPublicSynonymScope, xuguSchemaDisplayName, XUGU_PUBLIC_SYNONYM_SCOPE } from "@/lib/sidebar/xuguPublicSynonyms";
@@ -1055,6 +1056,7 @@ export const useConnectionStore = defineStore("connection", () => {
       trino: "Trino",
       prestosql: "PrestoSQL",
       hive: "Hive",
+      impala: "Apache Impala",
       spark: "Apache Spark",
       db2: "DB2",
       informix: "Informix",
@@ -3055,6 +3057,23 @@ export const useConnectionStore = defineStore("connection", () => {
   }
 
   /**
+   * Query whether this connection already has a transient password stored in the
+   * backend session-credential store (a `save_password === false` connection that
+   * was connected once this run). Used to skip the interactive password prompt on
+   * later connects. Only returns a boolean — the password itself never leaves the
+   * backend process memory.
+   */
+  async function hasSessionCredential(connectionId: string): Promise<boolean> {
+    try {
+      return await api.sessionCredentialStatus(connectionId);
+    } catch {
+      // Status query failure is treated as "no credential": falling back to the
+      // interactive prompt is the safe, well-known path.
+      return false;
+    }
+  }
+
+  /**
    * Prompt for a transient password when saving is disabled, or when a server
    * confirms that a metadata-only synced connection sent no password. The
    * password is used for the immediate `connectDb` call and is persisted only
@@ -3067,12 +3086,12 @@ export const useConnectionStore = defineStore("connection", () => {
       connectionId: config.id,
       connectionName: config.name,
     });
-    if (!result?.password) throw new Error(CONNECTION_PASSWORD_REQUIRED_MESSAGE);
+    if (!result) throw new Error(CONNECTION_PASSWORD_REQUIRED_MESSAGE);
     return { config: { ...config, password: result.password }, rememberPassword: result.rememberPassword };
   }
 
   async function persistRememberedConnectionPassword(config: ConnectionConfig, rememberPassword: boolean, expectedConfigFingerprint: string): Promise<void> {
-    if (!rememberPassword || !config.password) return;
+    if (!rememberPassword) return;
     const index = connections.value.findIndex((connection) => connection.id === config.id);
     if (index < 0) return;
     if (connectionConfigFingerprint(connections.value[index]) !== expectedConfigFingerprint) return;
@@ -3108,7 +3127,7 @@ export const useConnectionStore = defineStore("connection", () => {
     const localAttempt = beginLocalConnectionAttempt(config.id);
     try {
       let rememberPassword = false;
-      if (config.save_password === false && !config.password) {
+      if (connectionNeedsPasswordPrompt(config) && !(await hasSessionCredential(config.id))) {
         const prompted = await ensureConnectionPassword(config);
         config = prompted.config;
         rememberPassword = prompted.rememberPassword;
@@ -3243,6 +3262,16 @@ export const useConnectionStore = defineStore("connection", () => {
     }
   }
 
+  /**
+   * "断开并忘记本次密码"：关闭连接池（保留其它已保存连接的凭据），并清除该
+   * `save_password === false` 连接本次运行期的会话密码，使下一次连接必须重新输入。
+   * 若该连接本无会话凭据，后端会返回错误并在此抛出（不静默吞掉），避免误报成功。
+   */
+  async function disconnectAndForgetConnectionPassword(connectionId: string) {
+    await disconnect(connectionId);
+    await api.forgetSessionCredential(connectionId);
+  }
+
   async function closeDatabaseConnection(connectionId: string, database: string) {
     if (hasSqlServerActivityTraceForConnection(connectionId, database)) await disposeSqlServerActivityTracesForConnection(connectionId, database);
     await api.closeDatabaseConnection(connectionId, database);
@@ -3309,7 +3338,7 @@ export const useConnectionStore = defineStore("connection", () => {
       // Fast-path the common case (password saved or no password needed) so the
       // in-flight dedup above keeps its exact microtask cadence; only await the
       // interactive prompt when the connection actually needs a typed password.
-      if (config.save_password === false && !config.password) {
+      if (connectionNeedsPasswordPrompt(config) && !(await hasSessionCredential(connectionId))) {
         const prompted = await ensureConnectionPassword(config);
         config = prompted.config;
         rememberPassword = prompted.rememberPassword;
@@ -7816,6 +7845,8 @@ export const useConnectionStore = defineStore("connection", () => {
     connect,
     cancelConnecting,
     disconnect,
+    disconnectAndForgetConnectionPassword,
+    hasSessionCredential,
     closeDatabaseConnection,
     ensureConnected,
     loadConnectedConnectionRootForSidebarSearch,

@@ -334,10 +334,19 @@ func (server *server) listTables(schema string, constraints metadataListConstrai
 		})
 	}
 	objectsByName := make(map[string]tableInfo)
+	tableFallbackSucceeded := false
 	for _, fallback := range fallbackQueries {
 		result, err := server.executeQuery(queryOptions{SQL: fallback.statement, MaxRows: metadataQueryLimit})
 		if err != nil {
+			// Older Hive and Impala versions can list tables but do not support SHOW VIEWS.
+			// Keep the usable table result for mixed requests; explicit view requests still fail.
+			if fallback.objectType == "VIEW" && tableFallbackSucceeded {
+				continue
+			}
 			return nil, fmt.Errorf("HiveServer2 metadata failed (%v); %s fallback failed: %w", metadataErr, fallback.operation, err)
+		}
+		if fallback.objectType == "TABLE" {
+			tableFallbackSucceeded = true
 		}
 		for _, row := range result.Rows {
 			name := showTablesRowName(result.Columns, row)

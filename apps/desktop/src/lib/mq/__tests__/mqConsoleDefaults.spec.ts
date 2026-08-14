@@ -33,6 +33,12 @@ describe("mqConsoleDefaults", () => {
     expect(resolveInitialMqTab({ systemKind: "pulsar", initialTenant: "public" })).toBe("namespaces");
   });
 
+  it("opens NATS on the messages tab without Kafka-style topic chrome", () => {
+    const caps = defaultMqCapabilitiesForSystemKind("nats");
+    expect(resolveInitialMqTab({ systemKind: "nats" })).toBe("messages");
+    expect(resolveAvailableMqTabs({ systemKind: "nats", capabilities: caps })).toEqual(["messages"]);
+  });
+
   it("falls back dlq tab to messages for RocketMQ", () => {
     expect(normalizeMqTabForSystemKind("dlq", "rocketmq")).toBe("messages");
     expect(normalizeMqTabForSystemKind("trace", "rocketmq")).toBe("trace");

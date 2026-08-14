@@ -3912,18 +3912,28 @@ export const useConnectionStore = defineStore("connection", () => {
         // Kafka/RocketMQ have no tenant/namespace concept; RabbitMQ pins a synthetic
         // tenant and exposes virtual hosts as namespaces inside the console. Create a
         // synthetic child that opens the MQ admin console directly when clicked.
-        const mqTenant = resolveMqSystemKindFromConnection(config) === "rabbitmq" ? RABBITMQ_MQ_TENANT : "_flat_mq";
+        // NATS is also flat, but it is subject/stream based — never label it "Topics".
+        const systemKind = resolveMqSystemKindFromConnection(config);
+        const mqTenant = systemKind === "rabbitmq" ? RABBITMQ_MQ_TENANT : "_flat_mq";
         const targetNode = treeNodeLoadTarget(load);
         if (!targetNode) return;
         setChildren(targetNode, [
-          {
-            id: schemaCacheKey(connectionId, "mq-tenant", mqTenant),
-            label: "Topics",
-            type: "mq-tenant" as const,
-            connectionId,
-            mqTenant,
-            mqInitialTab: "topics",
-          },
+          systemKind === "nats"
+            ? {
+                id: schemaCacheKey(connectionId, "mq-tenant", mqTenant),
+                label: "nats.consoleTitle",
+                type: "mq-tenant" as const,
+                connectionId,
+                mqTenant,
+              }
+            : {
+                id: schemaCacheKey(connectionId, "mq-tenant", mqTenant),
+                label: "Topics",
+                type: "mq-tenant" as const,
+                connectionId,
+                mqTenant,
+                mqInitialTab: "topics",
+              },
         ]);
       } else {
         const tenants = await withMetadataLoadTimeout(connectionId, api.mqListTenants(connectionId), "message queue tenants");

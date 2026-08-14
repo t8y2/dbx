@@ -39,7 +39,26 @@ NatsConsole.vue
 
 `NatsConsole.vue` 只负责组合和页面生命周期，不直接拼接 NATS wire/API 参数。Subject 校验、消息 payload 解码、JSON 格式化、订阅状态归并应放在 `apps/desktop/src/lib/nats/` 的纯函数中，以便单元测试和 Web/Desktop 共用。
 
-当前实现保留了独立 `NatsConsole.vue`，复用既有 backend adapter 结构、`useMqMutationGuard`、连接 store 和消息展示纯函数；没有把 NATS 塞进 Pulsar/Kafka 的 topic 树。JetStream 只读区域在 Agent capability 探测为 enabled 后显示，提供 Stream/Consumer 摘要和 bounded history；不显示 ack、purge 或管理按钮。
+当前实现（与 `MqAdminConsole` 同一交互壳层）：
+
+```text
+NatsConsole.vue                         # mq-admin-console: toolbar → tabs → content
+├── shared/mqConsoleShell.css           # 与 Kafka/Pulsar/RabbitMQ 共用壳层样式
+├── tab: messages → nats/NatsMessagesPanel.vue
+│   ├── NatsSubjectWorkbench.vue        # 订阅/抓取（领域字段 = Subject）
+│   ├── NatsMessageList.vue             # 消息列表 chrome；不调用 mqPeekMessages
+│   └── NatsPublishPanel.vue            # 发布（独立 concrete Subject）
+└── tab: jetstream → nats/NatsJetStreamPanel.vue   # capability 开启后显示
+```
+
+交互对齐：
+
+- 顶部工具栏：集群名/版本、RTT、PROD/只读徽章、错误、刷新（同 `MqAdminConsole`）；
+- Tab 切换内容区：默认 **Messages**；JetStream 仅在 server 探测 enabled 后出现；
+- Messages 面板顺序与 Kafka Messages 一致：选择目标 → 浏览/接收 → 发送；
+- 侧栏入口 `nats.consoleTitle`，不映射 Topics 树；
+- 文案：`mqAdmin.*`（只读/Messages tab）+ `nats.*` 领域文案；
+- JetStream 只读，不显示 ack/purge/管理写按钮。
 
 ## 4. Phase 1 交互契约
 

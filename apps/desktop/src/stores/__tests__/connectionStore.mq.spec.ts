@@ -154,7 +154,7 @@ describe("connectionStore MQ sidebar tree", () => {
     expect(node.children?.map((child) => ({ label: child.label, tenant: child.mqTenant, initialTab: child.mqInitialTab }))).toEqual([{ label: "Topics", tenant: "_flat_mq", initialTab: "topics" }]);
   });
 
-  it("adds a NATS topics child without calling the legacy tenant API", async () => {
+  it("adds a NATS console child without calling the legacy tenant API or labeling it Topics", async () => {
     const mqListTenants = vi.fn();
     vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
     vi.doMock("@/lib/backend/api", () => ({
@@ -185,7 +185,7 @@ describe("connectionStore MQ sidebar tree", () => {
     await store.refreshTreeNode(node);
 
     expect(mqListTenants).not.toHaveBeenCalled();
-    expect(node.children?.map((child) => ({ label: child.label, tenant: child.mqTenant, initialTab: child.mqInitialTab }))).toEqual([{ label: "Topics", tenant: "_flat_mq", initialTab: "topics" }]);
+    expect(node.children?.map((child) => ({ label: child.label, tenant: child.mqTenant, initialTab: child.mqInitialTab }))).toEqual([{ label: "nats.consoleTitle", tenant: "_flat_mq", initialTab: undefined }]);
   });
 
   it("adds a RocketMQ topics child with a topics initial tab", async () => {

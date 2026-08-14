@@ -181,6 +181,11 @@ export function resolveAvailableMqTabs(options: { systemKind?: MqSystemKind; cap
     if (capabilities.supportsPermissions) tabs.push("permissions");
     return tabs;
   }
+  // NATS uses a dedicated console shell; if tab resolution is consulted it
+  // must not fall through to Kafka-style Topics/Subscriptions chrome.
+  if (systemKind === "nats") {
+    return ["messages"];
+  }
 
   const tabs: MqTab[] = [];
   if (capabilities.supportsTenants) tabs.push("tenants");
@@ -212,6 +217,7 @@ export function resolveInitialMqTab(options: { initialTab?: MqTab; initialTenant
   if (options.initialTab) {
     return normalizeMqTabForSystemKind(options.initialTab, options.systemKind);
   }
+  if (options.systemKind === "nats") return "messages";
   if (isFlatMqSystemKind(options.systemKind)) return "topics";
   if (options.initialTenant) return "namespaces";
   return "tenants";

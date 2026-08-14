@@ -6112,10 +6112,10 @@ function openExternalUrl(url: string) {
                   </template>
                   <template v-else-if="mqSystemKind === 'nats'">
                     <div class="grid grid-cols-4 items-start gap-4">
-                      <Label :class="connectionLabelClass">NATS Server URL</Label>
+                      <Label :class="connectionLabelClass">{{ t("nats.connection.serverUrl") }}</Label>
                       <div class="col-span-3 space-y-1">
                         <Input v-model="mqNatsServerUrl" placeholder="nats://127.0.0.1:4222" autocomplete="url" />
-                        <p class="text-xs text-muted-foreground">Use <code>nats://</code> for TCP or <code>tls://</code> for TLS. Credentials belong in the fields below, not in the URL.</p>
+                        <p class="text-xs text-muted-foreground">{{ t("nats.connection.serverUrlHint") }}</p>
                       </div>
                     </div>
                   </template>
@@ -6131,7 +6131,7 @@ function openExternalUrl(url: string) {
                       <Button size="sm" :variant="mqAuthKind === 'none' ? 'default' : 'outline'" @click="mqAuthKind = 'none'">{{ t("connection.mqAuthNone") }}</Button>
                       <Button v-if="mqSystemKind === 'pulsar' || mqSystemKind === 'nats'" size="sm" :variant="mqAuthKind === 'token' ? 'default' : 'outline'" @click="mqAuthKind = 'token'">{{ t("connection.mqAuthToken") }}</Button>
                       <Button v-if="mqSystemKind !== 'nats'" size="sm" :variant="mqAuthKind === 'basic' ? 'default' : 'outline'" @click="mqAuthKind = 'basic'">{{ mqSystemKind === "rocketmq" ? t("connection.rocketmqAclAuth") : t("connection.mqAuthBasic") }}</Button>
-                      <Button v-else size="sm" :variant="mqAuthKind === 'basic' ? 'default' : 'outline'" @click="mqAuthKind = 'basic'">Password</Button>
+                      <Button v-else size="sm" :variant="mqAuthKind === 'basic' ? 'default' : 'outline'" @click="mqAuthKind = 'basic'">{{ t("connection.mqAuthBasic") }}</Button>
                       <Button v-if="mqSystemKind === 'kafka'" size="sm" :variant="mqAuthKind === 'kerberos' ? 'default' : 'outline'" @click="mqAuthKind = 'kerberos'">{{ t("connection.mqAuthKerberos") }}</Button>
                       <Button v-if="mqSystemKind === 'pulsar'" size="sm" :variant="mqAuthKind === 'apiKey' ? 'default' : 'outline'" @click="mqAuthKind = 'apiKey'">{{ t("connection.mqAuthApiKey") }}</Button>
                       <Button v-if="mqSystemKind === 'pulsar'" size="sm" :variant="mqAuthKind === 'oauth2' ? 'default' : 'outline'" @click="mqAuthKind = 'oauth2'">{{ t("connection.mqAuthOauth2") }}</Button>

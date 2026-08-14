@@ -366,6 +366,7 @@ function displayLabel(node: TreeNode): string {
   if (node.type === "linked-server-root") return t(node.label);
   if (node.type === "saved-sql-root") return t(node.label);
   if (node.type === "mqtt-topic" && node.id.endsWith(":mqtt-topic:__console__")) return t(node.label);
+  if (node.type === "mq-tenant" && node.label === "nats.consoleTitle") return t(node.label);
   if (node.label === "tree.defaultDatabase") return t(node.label);
   return isGroupLabel(node) ? t(node.label) : node.label;
 }

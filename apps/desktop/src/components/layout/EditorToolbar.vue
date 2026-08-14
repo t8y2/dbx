@@ -20,6 +20,7 @@ import { supportsQueryExecution } from "@/lib/database/databaseFeatureSupport";
 import { connectionIsDorisFamilyCatalogCapable } from "@/lib/database/databaseFeatureSupport";
 import { hexToRgba } from "@/lib/common/color";
 import { productionContextForDatabase } from "@/lib/database/productionSafety";
+import { isMacShortcutPlatform } from "@/lib/editor/shortcutDisplay";
 import type { QueryTab, ConnectionConfig } from "@/types/database";
 
 const props = defineProps<{
@@ -122,6 +123,8 @@ const supportsTransaction = computed(() => supportsTransactionFeature(props.acti
 const hasDefaultDatabaseOption = computed(() => activeDatabaseOptions.value.includes(""));
 const schemaDatabaseKey = computed(() => props.activeTab.database || (isSingleDb.value ? "_" : ""));
 const saveTooltip = computed(() => (props.activeTab.objectSource ? t("objects.saveSource") : t("toolbar.saveSql")));
+const executeShortcutMod = computed(() => (isMacShortcutPlatform() ? "Cmd" : "Ctrl"));
+const executeShortcutTooltip = computed(() => t("toolbar.executeShortcut", { mod: executeShortcutMod.value }));
 // DM calls it autotrace, Postgres EXPLAIN ANALYZE, SQL Server the actual execution
 // plan (SET STATISTICS XML); all three execute the statement.
 const supportsExplainAnalyze = computed(() => {
@@ -261,7 +264,7 @@ async function changeCatalog(selectedCatalog: string) {
             <Play v-else class="h-3.5 w-3.5" />
           </Button>
         </TooltipTrigger>
-        <TooltipContent>{{ activeTab.isExecuting ? t("toolbar.stopQuery") : t("toolbar.executeShortcut") }}</TooltipContent>
+        <TooltipContent>{{ activeTab.isExecuting ? t("toolbar.stopQuery") : executeShortcutTooltip }}</TooltipContent>
       </Tooltip>
       <Tooltip v-if="supportsExplain">
         <TooltipTrigger as-child>

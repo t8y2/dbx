@@ -40,60 +40,52 @@ fn is_pruned_dir(name: &str) -> bool {
 
 /// DataGrip-style name comparison for the file tree ("Sort by Name"):
 /// case-insensitive, with digit runs compared as numbers (natural order), so
-/// `proc2.sql` sorts before `proc10.sql` instead of after it.
+/// `proc2.sql` sorts before `proc10.sql` instead of after it. Comparing
+/// character-by-character keeps digit/non-digit boundaries aligned, so
+/// `proc.sql` sorts before `proc1.sql` (the `.` compares against the `1`).
 fn compare_entry_names(a: &str, b: &str) -> Ordering {
-    let mut a_tokens = tokenize_name(a).into_iter();
-    let mut b_tokens = tokenize_name(b).into_iter();
+    let mut a_chars = a.chars().peekable();
+    let mut b_chars = b.chars().peekable();
     loop {
-        match (a_tokens.next(), b_tokens.next()) {
-            (Some(a_token), Some(b_token)) => {
-                let ord = match (&a_token, &b_token) {
-                    (NameToken::Num(a_num), NameToken::Num(b_num)) => compare_numeric_runs(a_num, b_num),
-                    (NameToken::Text(a_text), NameToken::Text(b_text)) => {
-                        a_text.to_lowercase().cmp(&b_text.to_lowercase())
+        match (a_chars.peek(), b_chars.peek()) {
+            (Some(&a_char), Some(&b_char)) => {
+                if a_char.is_ascii_digit() && b_char.is_ascii_digit() {
+                    let ord = compare_numeric_runs(&take_digit_run(&mut a_chars), &take_digit_run(&mut b_chars));
+                    if ord != Ordering::Equal {
+                        return ord;
                     }
-                    // Digit-vs-non-digit falls back to character comparison
-                    // (e.g. '.' sorts before '1', so proc.sql < proc1.sql).
-                    (NameToken::Num(a_num), NameToken::Text(b_text)) => compare_mixed_chunk(a_num, b_text),
-                    (NameToken::Text(a_text), NameToken::Num(b_num)) => compare_mixed_chunk(b_num, a_text).reverse(),
-                };
-                if ord != Ordering::Equal {
-                    return ord;
+                } else {
+                    let a_lower: String = a_char.to_lowercase().collect();
+                    let b_lower: String = b_char.to_lowercase().collect();
+                    let ord = a_lower.cmp(&b_lower);
+                    if ord != Ordering::Equal {
+                        return ord;
+                    }
+                    a_chars.next();
+                    b_chars.next();
                 }
             }
-            (None, None) => break,
-            (None, Some(_)) => return Ordering::Less,
             (Some(_), None) => return Ordering::Greater,
+            (None, Some(_)) => return Ordering::Less,
+            (None, None) => break,
         }
     }
     // Deterministic tiebreak for names that differ only by case.
     a.cmp(b)
 }
 
-enum NameToken {
-    Num(String),
-    Text(String),
-}
-
-fn tokenize_name(name: &str) -> Vec<NameToken> {
-    let mut tokens = Vec::new();
-    let mut buf = String::new();
-    let mut prev_is_num: Option<bool> = None;
-    for c in name.chars() {
-        let is_num = c.is_ascii_digit();
-        if let Some(prev) = prev_is_num {
-            if prev != is_num {
-                let chunk = std::mem::take(&mut buf);
-                tokens.push(if prev { NameToken::Num(chunk) } else { NameToken::Text(chunk) });
-            }
+/// Reads a maximal run of ASCII digits from a char iterator.
+fn take_digit_run(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> String {
+    let mut run = String::new();
+    while let Some(&c) = chars.peek() {
+        if c.is_ascii_digit() {
+            run.push(c);
+            chars.next();
+        } else {
+            break;
         }
-        prev_is_num = Some(is_num);
-        buf.push(c);
     }
-    if let Some(prev) = prev_is_num {
-        tokens.push(if prev { NameToken::Num(buf) } else { NameToken::Text(buf) });
-    }
-    tokens
+    run
 }
 
 /// Numeric comparison without overflow risk: strip leading zeros, then the
@@ -105,15 +97,6 @@ fn compare_numeric_runs(a: &str, b: &str) -> Ordering {
         Ordering::Equal => a.cmp(b),
         ord => ord,
     }
-}
-
-/// When a digit run meets a non-digit chunk at the same position, compare the
-/// leading characters instead; a digit can never case-fold to a non-digit, so
-/// the result is decisive.
-fn compare_mixed_chunk(num_chunk: &str, text_chunk: &str) -> Ordering {
-    let num_first = num_chunk.chars().next().map(|c| c.to_lowercase().next().unwrap_or(c));
-    let text_first = text_chunk.chars().next().map(|c| c.to_lowercase().next().unwrap_or(c));
-    num_first.cmp(&text_first)
 }
 
 fn scan_sql_files(dir: &Path, depth: usize, visited: &mut HashSet<String>) -> Vec<SqlFileEntry> {

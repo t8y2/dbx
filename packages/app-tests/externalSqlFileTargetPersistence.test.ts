@@ -31,14 +31,14 @@ test("external SQL open entry points restore a saved data source", () => {
   const startupTabOpen = startupOpen.indexOf("queryStore.openExternalSqlFile");
   assert.ok(startupResolve >= 0);
   assert.ok(startupResolve < startupTabOpen);
-  assert.ok(startupOpen.includes("snapshot.version, target.catalog"));
+  assert.ok(startupOpen.includes("catalog: target.catalog"));
 
   const panelOpen = functionSource(sqlFilePanelSource, "async function openFile", "function executeFile");
   const panelResolve = panelOpen.indexOf("resolveExternalSqlFileTarget");
   const panelTabOpen = panelOpen.indexOf("queryStore.openExternalSqlFile");
   assert.ok(panelResolve >= 0);
   assert.ok(panelResolve < panelTabOpen);
-  assert.ok(panelOpen.includes("snapshot.version, target.catalog"));
+  assert.ok(panelOpen.includes("catalog: target.catalog"));
 
   const pickerOpen = functionSource(appSource, "async function openSqlFile()", "async function importResultArchive");
   assert.ok(pickerOpen.includes("applyExternalSqlFileTarget(tab, sqlPath)"));

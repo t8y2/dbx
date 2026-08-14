@@ -132,6 +132,24 @@ test("requires all RocketMQ native platforms when reusing a release", () => {
   );
 });
 
+test("requires all NATS native platforms when reusing a release", () => {
+  const native = Object.fromEntries(
+    platforms.slice(0, -1).map((platform, index) => [platform, artifact(`dbx-agent-nats-0.1.40-${platform}.tar.zst`, String(index + 1))]),
+  );
+  const registry = { drivers: { nats: { version: "0.1.40", native } }, jres: {} };
+
+  assert.throws(
+    () => collectReusableAssetPlan({
+      registry,
+      release: releaseFor(Object.values(native)),
+      versions: { nats: "0.1.40" },
+      modules: ["nats"],
+      reuseJre: false,
+    }),
+    /missing=windows-x64/,
+  );
+});
+
 test("ignores zero-size legacy JAR placeholders for native-only modules", () => {
   const native = Object.fromEntries(
     platforms.map((platform, index) => [platform, artifact(`dbx-agent-duckdb-0.1.2-${platform}.tar.zst`, String(index + 1))]),

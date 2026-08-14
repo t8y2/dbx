@@ -301,7 +301,7 @@ export function splitSqlStatementRanges(sql: string, databaseType?: DatabaseType
   let statementEnd = -1;
   let statementHitStart = 0;
   let pendingHintStart = -1;
-  let pendingProxyDirectiveStart = -1;
+  let pendingMysqlDirectiveStart = -1;
   let customDelimiter: string | null = null;
   let state: QuoteState = "none";
   let dollarTag = "";
@@ -310,12 +310,16 @@ export function splitSqlStatementRanges(sql: string, databaseType?: DatabaseType
   let i = 0;
 
   const isWhitespace = (ch: string) => ch === " " || ch === "\t" || ch === "\r" || ch === "\n";
+  const crossesLine = (from: number, to: number) => /[\r\n]/.test(sql.slice(from, to));
 
   const markContent = (pos: number) => {
     if (statementStart === -1) {
-      statementStart = pendingProxyDirectiveStart !== -1 ? pendingProxyDirectiveStart : pendingHintStart === -1 ? pos : pendingHintStart;
+      // TDSQL accepts arbitrary leading block directives on the SQL line. The
+      // exact /*proxy*/ directive also keeps its historical multiline support.
+      const directiveStart = pendingMysqlDirectiveStart !== -1 && (sql.startsWith("/*proxy*/", pendingMysqlDirectiveStart) || !crossesLine(pendingMysqlDirectiveStart, pos)) ? pendingMysqlDirectiveStart : -1;
+      statementStart = directiveStart !== -1 ? directiveStart : pendingHintStart === -1 ? pos : pendingHintStart;
       pendingHintStart = -1;
-      pendingProxyDirectiveStart = -1;
+      pendingMysqlDirectiveStart = -1;
     }
     statementEnd = pos + 1;
   };
@@ -324,7 +328,7 @@ export function splitSqlStatementRanges(sql: string, databaseType?: DatabaseType
     if (statementStart === -1) {
       statementEnd = -1;
       pendingHintStart = -1;
-      pendingProxyDirectiveStart = -1;
+      pendingMysqlDirectiveStart = -1;
       postgresDollarQuotedRoutine = false;
       oraclePlSqlStatementEnd = undefined;
       return;
@@ -336,7 +340,7 @@ export function splitSqlStatementRanges(sql: string, databaseType?: DatabaseType
     statementStart = -1;
     statementEnd = -1;
     pendingHintStart = -1;
-    pendingProxyDirectiveStart = -1;
+    pendingMysqlDirectiveStart = -1;
     postgresDollarQuotedRoutine = false;
     oraclePlSqlStatementEnd = undefined;
   };
@@ -441,13 +445,13 @@ export function splitSqlStatementRanges(sql: string, databaseType?: DatabaseType
 
     // Line comments consume up to (and including) the newline.
     if (ch === "-" && next === "-") {
-      pendingProxyDirectiveStart = -1;
+      pendingMysqlDirectiveStart = -1;
       const newline = sql.indexOf("\n", i);
       i = newline === -1 ? len : newline + 1;
       continue;
     }
     if (startsHashLineComment(sql, i, databaseType, parameterOptions)) {
-      pendingProxyDirectiveStart = -1;
+      pendingMysqlDirectiveStart = -1;
       const newline = sql.indexOf("\n", i);
       i = newline === -1 ? len : newline + 1;
       continue;
@@ -458,7 +462,11 @@ export function splitSqlStatementRanges(sql: string, databaseType?: DatabaseType
       if (statementStart === -1 && pendingHintStart === -1 && (hintMarker === "+" || hintMarker === "@" || hintMarker === "&")) pendingHintStart = i;
       const close = sql.indexOf("*/", i + 2);
       if (statementStart === -1) {
-        pendingProxyDirectiveStart = databaseType === "mysql" && sql.startsWith("/*proxy*/", i) ? i : -1;
+        if (databaseType === "mysql") {
+          if (pendingMysqlDirectiveStart === -1 || crossesLine(pendingMysqlDirectiveStart, i)) pendingMysqlDirectiveStart = i;
+        } else {
+          pendingMysqlDirectiveStart = -1;
+        }
       }
       i = close === -1 ? len : close + 2;
       continue;

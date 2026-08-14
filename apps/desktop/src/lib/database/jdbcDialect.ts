@@ -6,8 +6,10 @@ type JdbcDialectConnection = Partial<Pick<ConnectionConfig, "db_type" | "driver_
 
 export type GaussdbIdentifierQuoteStyle = "auto" | "double" | "backtick";
 export type GaussdbConnectionMode = "native" | "m-jdbc";
+export type GaussdbTargetServerType = "master" | "slave" | "any";
 
 const GAUSSDB_IDENTIFIER_QUOTE_STYLE_KEY = "gaussdbIdentifierQuoteStyle";
+const GAUSSDB_TARGET_SERVER_TYPE_KEY = "gaussdbTargetServerType";
 export const GAUSSDB_M_JDBC_DRIVER_PROFILE = "gaussdb-m";
 export const GAUSSDB_M_JDBC_DRIVER_CLASS = "com.huawei.gaussdb.jdbc.Driver";
 
@@ -121,6 +123,22 @@ export function setGaussdbIdentifierQuoteStyle(
     delete external[GAUSSDB_IDENTIFIER_QUOTE_STYLE_KEY];
   } else {
     external[GAUSSDB_IDENTIFIER_QUOTE_STYLE_KEY] = style;
+  }
+  connection.external_config = Object.keys(external).length > 0 ? external : undefined;
+}
+
+export function gaussdbTargetServerType(connection: JdbcDialectConnection | undefined): GaussdbTargetServerType {
+  const external = externalConfigRecord(connection?.external_config);
+  const value = external[GAUSSDB_TARGET_SERVER_TYPE_KEY];
+  return value === "slave" || value === "any" ? value : "master";
+}
+
+export function setGaussdbTargetServerType(connection: Pick<ConnectionConfig, "db_type"> & Partial<Pick<ConnectionConfig, "driver_profile" | "driver_label" | "connection_string" | "jdbc_driver_class" | "jdbc_driver_paths" | "database_info" | "external_config">>, value: GaussdbTargetServerType) {
+  const external = externalConfigRecord(connection.external_config);
+  if (value === "master") {
+    delete external[GAUSSDB_TARGET_SERVER_TYPE_KEY];
+  } else {
+    external[GAUSSDB_TARGET_SERVER_TYPE_KEY] = value;
   }
   connection.external_config = Object.keys(external).length > 0 ? external : undefined;
 }

@@ -261,7 +261,10 @@ type queryOptions struct {
 	MaxRows     int    `json:"maxRows"`
 	FetchSize   int    `json:"fetchSize"`
 	TimeoutSecs int    `json:"timeoutSecs"`
+	DeferLOBs   bool   `json:"deferLobs"`
 }
+
+const largeValueBytesColumnPrefix = "__DBX_LARGE_VALUE_BYTES_"
 
 type queryResult struct {
 	Columns         []string `json:"columns"`
@@ -3354,7 +3357,7 @@ func (s *server) executeQueryPage(opts queryOptions, pageSize int) (queryPageRes
 			HasMore:         false,
 		}, err
 	}
-	rows, err := s.queryRowsWithXMLTypeRewriteIfNeeded(sqlText, opts.TimeoutSecs)
+	rows, err := s.queryRowsWithOracleValueRewriteIfNeeded(sqlText, opts.TimeoutSecs, opts.DeferLOBs)
 	if err != nil {
 		return queryPageResult{}, err
 	}
@@ -3420,7 +3423,7 @@ func (s *server) startTableRead(opts queryOptions, pageSize int) (queryPageResul
 	if !isQuerySQL(sqlText) {
 		return queryPageResult{}, errors.New("table read requires a SELECT query")
 	}
-	rows, err := s.queryRowsWithXMLTypeRewriteIfNeeded(sqlText, opts.TimeoutSecs)
+	rows, err := s.queryRowsWithOracleValueRewriteIfNeeded(sqlText, opts.TimeoutSecs, opts.DeferLOBs)
 	if err != nil {
 		return queryPageResult{}, err
 	}
@@ -3555,7 +3558,7 @@ func (s *server) executeQuery(opts queryOptions) (queryResult, error) {
 		maxRows = defaultMaxRows
 	}
 	if isQuerySQL(sqlText) {
-		result, err := s.executeSelect(sqlText, maxRows, opts.TimeoutSecs)
+		result, err := s.executeSelect(sqlText, maxRows, opts.TimeoutSecs, opts.DeferLOBs)
 		result.ExecutionTimeMS = time.Since(start).Milliseconds()
 		return result, err
 	}
@@ -3598,11 +3601,11 @@ func (s *server) executeQuery(opts queryOptions) (queryResult, error) {
 	return queryResult{Columns: []string{}, ColumnTypes: []string{}, Rows: [][]any{}, AffectedRows: affected, ExecutionTimeMS: time.Since(start).Milliseconds()}, nil
 }
 
-func (s *server) executeSelect(sqlText string, maxRows int, timeoutSecs int) (queryResult, error) {
+func (s *server) executeSelect(sqlText string, maxRows int, timeoutSecs int, deferLOBs bool) (queryResult, error) {
 	return executeOracleSelectWithXMLTypeRetry(
 		sqlText,
 		func(query string) (queryResult, error) {
-			return s.executeSelectOnce(query, maxRows, timeoutSecs)
+			return s.executeSelectOnce(query, maxRows, timeoutSecs, deferLOBs)
 		},
 		s.rewriteXMLTypeSelectSQL,
 	)
@@ -3633,8 +3636,8 @@ func shouldRetryOracleXMLTypeRewrite(err error) bool {
 		strings.Contains(message, "TTC error: received code ")
 }
 
-func (s *server) executeSelectOnce(sqlText string, maxRows int, timeoutSecs int) (queryResult, error) {
-	rows, err := s.queryRowsWithXMLTypeRewriteIfNeeded(sqlText, timeoutSecs)
+func (s *server) executeSelectOnce(sqlText string, maxRows int, timeoutSecs int, deferLOBs bool) (queryResult, error) {
+	rows, err := s.queryRowsWithOracleValueRewriteIfNeeded(sqlText, timeoutSecs, deferLOBs)
 	if err != nil {
 		return queryResult{}, err
 	}
@@ -3693,15 +3696,22 @@ func columnTypeNames(rows *sql.Rows) []string {
 	return result
 }
 
-func (s *server) queryRowsWithXMLTypeRewriteIfNeeded(sqlText string, timeoutSecs int) (*sql.Rows, error) {
+func (s *server) queryRowsWithOracleValueRewriteIfNeeded(sqlText string, timeoutSecs int, deferLOBs bool) (*sql.Rows, error) {
+	if deferLOBs {
+		rewritten, err := rewriteOracleSelectSQL(sqlText, s.loadOracleColumnMeta, true)
+		if err == nil && rewritten != sqlText {
+			return s.queryRowsWithTimeout(rewritten, nil, timeoutSecs)
+		}
+	}
 	rows, err := s.queryRowsWithTimeout(sqlText, nil, timeoutSecs)
 	if err != nil {
 		return nil, err
 	}
-	if !rowsContainOracleXMLType(rows) {
+	typeNames := columnTypeNames(rows)
+	if !oracleColumnTypeNamesContainXMLType(typeNames) {
 		return rows, nil
 	}
-	rewritten, err := s.rewriteXMLTypeSelectSQL(sqlText)
+	rewritten, err := rewriteOracleSelectSQL(sqlText, s.loadOracleColumnMeta, false)
 	if err != nil {
 		s.closeRows(rows)
 		return nil, err
@@ -3709,22 +3719,10 @@ func (s *server) queryRowsWithXMLTypeRewriteIfNeeded(sqlText string, timeoutSecs
 	if rewritten == sqlText {
 		return rows, nil
 	}
-	// Only pay the ALL_TAB_COLUMNS rewrite cost when the result metadata shows
-	// XMLTYPE. Ordinary Oracle queries should not run dictionary probes first.
+	// XMLTYPE keeps its metadata-triggered fallback so ordinary non-preview
+	// queries do not run dictionary probes.
 	s.closeRows(rows)
 	return s.queryRowsWithTimeout(rewritten, nil, timeoutSecs)
-}
-
-func rowsContainOracleXMLType(rows *sql.Rows) bool {
-	types, err := rows.ColumnTypes()
-	if err != nil {
-		return false
-	}
-	typeNames := make([]string, 0, len(types))
-	for _, columnType := range types {
-		typeNames = append(typeNames, columnType.DatabaseTypeName())
-	}
-	return oracleColumnTypeNamesContainXMLType(typeNames)
 }
 
 func oracleColumnTypeNamesContainXMLType(typeNames []string) bool {
@@ -3741,22 +3739,84 @@ func (s *server) rewriteXMLTypeSelectSQL(sqlText string) (string, error) {
 }
 
 func rewriteOracleXMLTypeSelectSQL(sqlText string, loadColumns oracleColumnMetaLoader) (string, error) {
-	rewritten, _, err := rewriteOracleXMLTypeSelectSQLDepth(sqlText, loadColumns, 0)
+	return rewriteOracleSelectSQL(sqlText, loadColumns, false)
+}
+
+func rewriteOracleSelectSQL(sqlText string, loadColumns oracleColumnMetaLoader, deferLOBs bool) (string, error) {
+	rewritten, _, err := rewriteOracleSelectSQLDepth(sqlText, loadColumns, deferLOBs, 0)
 	return rewritten, err
 }
 
-func rewriteOracleXMLTypeSelectSQLDepth(sqlText string, loadColumns oracleColumnMetaLoader, depth int) (string, bool, error) {
+func rewriteOracleSelectSQLDepth(sqlText string, loadColumns oracleColumnMetaLoader, deferLOBs bool, depth int) (string, bool, error) {
 	if depth > 8 {
 		return sqlText, false, nil
 	}
-	if rewritten, changed, handled, err := rewriteDirectOracleXMLTypeSelectSQL(sqlText, loadColumns); handled || err != nil {
+	if rewritten, changed, handled, err := rewriteDirectOracleSelectSQL(sqlText, loadColumns, deferLOBs); handled || err != nil {
 		return rewritten, changed, err
 	}
-	rewritten, changed, err := rewriteNestedOracleSelects(sqlText, loadColumns, depth)
+	if deferLOBs {
+		return rewriteOracleFullPassthroughInnerSelect(sqlText, loadColumns, depth)
+	}
+	rewritten, changed, err := rewriteNestedOracleSelects(sqlText, loadColumns, deferLOBs, depth)
 	return rewritten, changed, err
 }
 
-func rewriteNestedOracleSelects(sqlText string, loadColumns oracleColumnMetaLoader, depth int) (string, bool, error) {
+func rewriteOracleFullPassthroughInnerSelect(sqlText string, loadColumns oracleColumnMetaLoader, depth int) (string, bool, error) {
+	innerStart, innerEnd, ok := oracleFullPassthroughInnerSelectRange(sqlText)
+	if !ok {
+		return sqlText, false, nil
+	}
+	inner := sqlText[innerStart:innerEnd]
+	rewritten, changed, err := rewriteOracleSelectSQLDepth(inner, loadColumns, true, depth+1)
+	if err != nil || !changed {
+		return sqlText, false, err
+	}
+	return sqlText[:innerStart] + rewritten + sqlText[innerEnd:], true, nil
+}
+
+func oracleFullPassthroughInnerSelectRange(sqlText string) (int, int, bool) {
+	selectStart := leadingSQLSelectListStart(sqlText)
+	if selectStart < 0 {
+		return 0, 0, false
+	}
+	fromIdx := findTopLevelSQLKeyword(sqlText, selectStart, "from")
+	if fromIdx < 0 {
+		return 0, 0, false
+	}
+	prefix, selectList := splitOracleSelectListModifier(sqlText[selectStart:fromIdx])
+	if strings.TrimSpace(prefix) != "" {
+		return 0, 0, false
+	}
+	items := splitTopLevelSQLList(selectList)
+	if len(items) != 1 {
+		return 0, 0, false
+	}
+	if _, ok := parseOracleStarSelectItem(items[0]); !ok {
+		return 0, 0, false
+	}
+	open := skipSQLWhitespace(sqlText, fromIdx+len("from"))
+	if open >= len(sqlText) || sqlText[open] != '(' {
+		return 0, 0, false
+	}
+	close := findMatchingSQLParen(sqlText, open)
+	if close < 0 || !startsWithSQLKeyword(trimLeadingSQLComments(sqlText[open+1:close]), "select") {
+		return 0, 0, false
+	}
+	pos := skipSQLWhitespace(sqlText, close+1)
+	if pos < len(sqlText) && sqlText[pos] != ';' && !nextKeywordIsOracleClause(sqlText[pos:]) {
+		_, afterAlias, aliasOK := readOracleIdentifierToken(sqlText, pos)
+		if !aliasOK {
+			return 0, 0, false
+		}
+		pos = skipSQLWhitespace(sqlText, afterAlias)
+	}
+	if pos < len(sqlText) && sqlText[pos] != ';' && !nextKeywordIsOracleClause(sqlText[pos:]) {
+		return 0, 0, false
+	}
+	return open + 1, close, true
+}
+
+func rewriteNestedOracleSelects(sqlText string, loadColumns oracleColumnMetaLoader, deferLOBs bool, depth int) (string, bool, error) {
 	var builder strings.Builder
 	changed := false
 	last := 0
@@ -3781,7 +3841,7 @@ func rewriteNestedOracleSelects(sqlText string, loadColumns oracleColumnMetaLoad
 			}
 			inner := sqlText[pos+1 : end]
 			if startsWithSQLKeyword(trimLeadingSQLComments(inner), "select") {
-				rewrittenInner, innerChanged, err := rewriteOracleXMLTypeSelectSQLDepth(inner, loadColumns, depth+1)
+				rewrittenInner, innerChanged, err := rewriteOracleSelectSQLDepth(inner, loadColumns, deferLOBs, depth+1)
 				if err != nil {
 					return "", false, err
 				}
@@ -3802,7 +3862,7 @@ func rewriteNestedOracleSelects(sqlText string, loadColumns oracleColumnMetaLoad
 	return builder.String(), true, nil
 }
 
-func rewriteDirectOracleXMLTypeSelectSQL(sqlText string, loadColumns oracleColumnMetaLoader) (string, bool, bool, error) {
+func rewriteDirectOracleSelectSQL(sqlText string, loadColumns oracleColumnMetaLoader, deferLOBs bool) (string, bool, bool, error) {
 	selectStart := leadingSQLSelectListStart(sqlText)
 	if selectStart < 0 {
 		return sqlText, false, false, nil
@@ -3811,23 +3871,30 @@ func rewriteDirectOracleXMLTypeSelectSQL(sqlText string, loadColumns oracleColum
 	if fromIdx < 0 {
 		return sqlText, false, false, nil
 	}
+	if deferLOBs && oracleSQLHasTopLevelSetOperator(sqlText, fromIdx+len("from")) {
+		return sqlText, false, false, nil
+	}
 	selectListPrefix, selectList := splitOracleSelectListModifier(sqlText[selectStart:fromIdx])
+	deferSelectLOBs := deferLOBs && !startsWithSQLKeyword(strings.TrimSpace(selectListPrefix), "distinct")
 	tableRef, ok := parseSingleOracleTableRef(sqlText[fromIdx+len("from"):])
 	if !ok {
 		return sqlText, false, false, nil
 	}
 	items := splitTopLevelSQLList(selectList)
-	if len(items) == 0 || !oracleSelectListMayReferenceXMLType(items) {
+	if len(items) == 0 || !oracleSelectListMayReferenceTableColumns(items) {
 		return sqlText, false, true, nil
 	}
 	columns, err := loadColumns(tableRef.Schema, tableRef.Table)
 	if err != nil {
 		return "", false, true, err
 	}
-	if !oracleColumnsHaveXMLType(columns) {
+	if deferSelectLOBs && oracleColumnsConflictWithLargeValueMarkers(columns) {
+		deferSelectLOBs = false
+	}
+	if !oracleColumnsNeedValueRewrite(columns, deferSelectLOBs) {
 		return sqlText, false, true, nil
 	}
-	rewrittenItems, changed := rewriteOracleSelectItemsForXMLType(items, columns, tableRef)
+	rewrittenItems, changed := rewriteOracleSelectItems(items, columns, tableRef, deferSelectLOBs)
 	if !changed {
 		return sqlText, false, true, nil
 	}
@@ -3922,7 +3989,16 @@ func splitOracleSelectListModifier(selectList string) (string, string) {
 	return selectList[:prefixLen], selectList[prefixLen:]
 }
 
-func oracleSelectListMayReferenceXMLType(items []string) bool {
+func oracleSQLHasTopLevelSetOperator(sqlText string, start int) bool {
+	for _, keyword := range []string{"union", "minus", "intersect"} {
+		if findTopLevelSQLKeyword(sqlText, start, keyword) >= 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func oracleSelectListMayReferenceTableColumns(items []string) bool {
 	for _, item := range items {
 		if _, ok := parseOracleStarSelectItem(item); ok {
 			return true
@@ -3934,49 +4010,89 @@ func oracleSelectListMayReferenceXMLType(items []string) bool {
 	return false
 }
 
-func rewriteOracleSelectItemsForXMLType(items []string, columns []oracleColumnMeta, tableRef oracleTableRef) ([]string, bool) {
-	xmlColumns := map[string]oracleColumnMeta{}
+func rewriteOracleSelectItems(items []string, columns []oracleColumnMeta, tableRef oracleTableRef, deferLOBs bool) ([]string, bool) {
+	columnsByName := map[string]oracleColumnMeta{}
 	for _, column := range columns {
-		if isOracleXMLType(column.DataType) {
-			xmlColumns[oracleIdentifierKey(column.Name)] = column
-		}
+		columnsByName[oracleIdentifierKey(column.Name)] = column
 	}
 	rewritten := make([]string, 0, len(items))
 	changed := false
+	sourceIndex := 0
 	for _, item := range items {
 		if qualifier, ok := parseOracleStarSelectItem(item); ok && oracleQualifierMatchesTable(qualifier, tableRef) {
 			for _, column := range columns {
-				rewritten = append(rewritten, oracleSelectExpressionForColumn(column, tableRef, xmlColumns))
+				columnRef := oracleColumnRef(tableRef.AliasText, column.Name)
+				outputAlias := quoteIdentifier(column.Name)
+				if isOracleXMLType(column.DataType) {
+					rewritten = append(rewritten, oracleXMLSerializeExpression(columnRef, outputAlias))
+				} else if deferLOBs {
+					if expressions, ok := oracleDeferredLOBExpressions(columnRef, outputAlias, sourceIndex, column.DataType); ok {
+						rewritten = append(rewritten, expressions...)
+					} else {
+						rewritten = append(rewritten, columnRef)
+					}
+				} else {
+					rewritten = append(rewritten, columnRef)
+				}
+				sourceIndex++
 			}
 			changed = true
 			continue
 		}
 		qualifier, column, alias, ok := parseOracleColumnSelectItem(item)
 		if ok && oracleQualifierMatchesTable(qualifier, tableRef) {
-			if meta, isXML := xmlColumns[oracleIdentifierKey(column.Name)]; isXML {
+			if meta, exists := columnsByName[oracleIdentifierKey(column.Name)]; exists {
 				outputAlias := alias
 				if outputAlias == "" {
 					outputAlias = quoteIdentifier(meta.Name)
 				}
-				rewritten = append(rewritten, oracleXMLSerializeExpression(oracleColumnRef(qualifier, meta.Name), outputAlias))
-				changed = true
-				continue
+				columnRef := oracleColumnRef(qualifier, meta.Name)
+				if isOracleXMLType(meta.DataType) {
+					rewritten = append(rewritten, oracleXMLSerializeExpression(columnRef, outputAlias))
+					changed = true
+					sourceIndex++
+					continue
+				}
+				if deferLOBs {
+					if expressions, isLOB := oracleDeferredLOBExpressions(columnRef, outputAlias, sourceIndex, meta.DataType); isLOB {
+						rewritten = append(rewritten, expressions...)
+						changed = true
+						sourceIndex++
+						continue
+					}
+				}
 			}
 		}
 		rewritten = append(rewritten, item)
+		sourceIndex++
 	}
 	return rewritten, changed
 }
 
-func oracleSelectExpressionForColumn(column oracleColumnMeta, tableRef oracleTableRef, xmlColumns map[string]oracleColumnMeta) string {
-	qualifier := ""
-	if tableRef.AliasText != "" {
-		qualifier = tableRef.AliasText
+func oracleDeferredLOBExpressions(columnRef, outputAlias string, sourceIndex int, dataType string) ([]string, bool) {
+	kind, placeholder, ok := oracleDeferredLOBKind(dataType)
+	if !ok {
+		return nil, false
 	}
-	if _, isXML := xmlColumns[oracleIdentifierKey(column.Name)]; isXML {
-		return oracleXMLSerializeExpression(oracleColumnRef(qualifier, column.Name), quoteIdentifier(column.Name))
+	valueExpression := fmt.Sprintf("CASE WHEN %s IS NULL THEN NULL ELSE '%s' END AS %s", columnRef, placeholder, outputAlias)
+	markerAlias := fmt.Sprintf("%s%s_%d", largeValueBytesColumnPrefix, kind, sourceIndex)
+	markerExpression := fmt.Sprintf("CASE WHEN %s IS NULL THEN NULL ELSE 'D:1' END AS %s", columnRef, quoteIdentifier(markerAlias))
+	return []string{valueExpression, markerExpression}, true
+}
+
+func oracleDeferredLOBKind(dataType string) (kind, placeholder string, ok bool) {
+	switch strings.ToUpper(strings.TrimSpace(dataType)) {
+	case "CLOB":
+		return "C", "<CLOB>", true
+	case "NCLOB":
+		return "N", "<NCLOB>", true
+	case "BLOB":
+		return "L", "<BLOB>", true
+	case "BFILE":
+		return "F", "<BFILE>", true
+	default:
+		return "", "", false
 	}
-	return oracleColumnRef(qualifier, column.Name)
 }
 
 func oracleXMLSerializeExpression(columnRef, alias string) string {
@@ -4057,13 +4173,27 @@ func oracleQualifierMatchesTable(qualifier string, tableRef oracleTableRef) bool
 	return key == oracleIdentifierKey(tableRef.Table)
 }
 
-func oracleColumnsHaveXMLType(columns []oracleColumnMeta) bool {
+func oracleColumnsNeedValueRewrite(columns []oracleColumnMeta, deferLOBs bool) bool {
 	for _, column := range columns {
-		if isOracleXMLType(column.DataType) {
+		if isOracleXMLType(column.DataType) || (deferLOBs && isOracleDeferredLOBType(column.DataType)) {
 			return true
 		}
 	}
 	return false
+}
+
+func oracleColumnsConflictWithLargeValueMarkers(columns []oracleColumnMeta) bool {
+	for _, column := range columns {
+		if strings.HasPrefix(strings.ToUpper(column.Name), largeValueBytesColumnPrefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func isOracleDeferredLOBType(dataType string) bool {
+	_, _, ok := oracleDeferredLOBKind(dataType)
+	return ok
 }
 
 func isOracleXMLType(dataType string) bool {
@@ -4224,7 +4354,7 @@ func oracleIdentifierKey(value string) string {
 
 func oracleIdentifierIsClause(value string) bool {
 	switch oracleIdentifierKey(value) {
-	case "WHERE", "GROUP", "ORDER", "HAVING", "CONNECT", "START", "MODEL", "FETCH", "OFFSET", "UNION", "MINUS", "INTERSECT":
+	case "WHERE", "GROUP", "ORDER", "HAVING", "CONNECT", "START", "MODEL", "FETCH", "OFFSET", "FOR", "AS", "UNION", "MINUS", "INTERSECT":
 		return true
 	default:
 		return false

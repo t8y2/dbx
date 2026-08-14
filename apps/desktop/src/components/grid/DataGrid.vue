@@ -152,7 +152,7 @@ import { isCancelSearchShortcut, isCopyCurrentRowShortcut, isDeleteCurrentRowSho
 import { dataGridHeaderContentWidth, scrollbarGutterWidth } from "@/lib/dataGrid/dataGridScrollGutter";
 import { canFetchNextDataGridSegment, canGoNextDataGridPage, dataGridTotalRowCountLabelKey, dataGridTruncationHintKey, hasCompleteLocalDataGridResult, resolveDataGridPaginationTotal, type DataGridInexactTotalRowCountMode } from "@/lib/dataGrid/dataGridPagination";
 import { dataGridCountQueryOptions } from "@/lib/dataGrid/dataGridQueryOptions";
-import { largeValueCellKey, largeValueCellMap, tableDataLargeValuePreviewOptions } from "@/lib/dataGrid/dataGridLargeValues";
+import { createResultScopedPendingRequests, largeValueCellKey, largeValueCellMap, tableDataLargeValuePreviewOptions } from "@/lib/dataGrid/dataGridLargeValues";
 import { dataGridBottomScrollTop, dataGridScrollPosition, isDataGridAtScrollBottom, isDataGridNearScrollBottom, isDataGridPrefixAppend, shouldCheckInfiniteScrollAfterScroll, type DataGridScrollPosition } from "@/lib/dataGrid/dataGridInfiniteScroll";
 import { CANVAS_DATA_GRID_ROW_HEIGHT, MAX_CANVAS_DATA_GRID_PIXEL_RATIO, canvasDataGridActionOverlayWidth, canvasDataGridActionReservedWidth, dataGridSearchMatchKey, drawCanvasDataGrid, type CanvasDevicePixelSize } from "@/lib/dataGrid/canvasDataGridRenderer";
 import { DATA_GRID_DARK_STRIPED_ROW_BG, DATA_GRID_LIGHT_STRIPED_ROW_BG, dataGridActiveRowBackground } from "@/lib/dataGrid/dataGridPaintTheme";
@@ -1910,15 +1910,15 @@ const {
   invertColumnVisibility,
   showColumn,
   persistColumnOrder,
-  moveDisplayableColumn,
-  resetColumnOrder,
+  moveDisplayableColumn: moveDisplayableColumnInLayout,
+  resetColumnOrder: resetColumnOrderInLayout,
   toggleAllNullColumns,
   resetColumnVisibility,
   onTableDataGridColumnOrderChanged,
   frozenColumnCount,
   freezeToColumn,
-  freezeSelectedColumns,
-  unfreezeAllColumns,
+  freezeSelectedColumns: freezeSelectedColumnsInLayout,
+  unfreezeAllColumns: unfreezeAllColumnsInLayout,
 } = useDataGridColumnLayoutState({
   columns: computed(() => props.result.columns),
   sourceColumns: computed(() => props.sourceColumns),
@@ -2136,13 +2136,36 @@ let gridScrollLeftBeforeTranspose = 0;
 let gridScrollTopBeforeKeyboardTranspose: number | null = null;
 let restoreGridScrollTopAfterTranspose = false;
 
-function persistDraggedColumnOrder(indexes: number[]) {
+function applyColumnOrderChange(change: () => void) {
   const previousVisibleColumnIndexes = [...visibleColumnIndexes.value];
-  persistColumnOrder(indexes);
-  selection.remapColumnSelection(
-    previousVisibleColumnIndexes,
-    indexes.filter((index) => !hiddenColumnIndexes.value.has(index)),
-  );
+  change();
+  const nextVisibleColumnIndexes = [...visibleColumnIndexes.value];
+  if (previousVisibleColumnIndexes.length === nextVisibleColumnIndexes.length && previousVisibleColumnIndexes.every((index, position) => index === nextVisibleColumnIndexes[position])) return;
+  selection.reconcileSelectionAfterColumnReorder(previousVisibleColumnIndexes, nextVisibleColumnIndexes);
+}
+
+function onSynchronizedTableDataGridColumnOrderChanged(event: Event) {
+  applyColumnOrderChange(() => onTableDataGridColumnOrderChanged(event));
+}
+
+function persistDraggedColumnOrder(indexes: number[]) {
+  applyColumnOrderChange(() => persistColumnOrder(indexes));
+}
+
+function moveDisplayableColumn(fromDisplayableIndex: number, toDisplayableIndex: number) {
+  applyColumnOrderChange(() => moveDisplayableColumnInLayout(fromDisplayableIndex, toDisplayableIndex));
+}
+
+function resetColumnOrder() {
+  applyColumnOrderChange(resetColumnOrderInLayout);
+}
+
+function freezeSelectedColumns(selectedVisibleColumnIndexes: number[]) {
+  applyColumnOrderChange(() => freezeSelectedColumnsInLayout(selectedVisibleColumnIndexes));
+}
+
+function unfreezeAllColumns() {
+  applyColumnOrderChange(unfreezeAllColumnsInLayout);
 }
 
 const {
@@ -4055,7 +4078,7 @@ type LargeValueCellRequest = {
 
 const LARGE_VALUE_FETCH_MAX_ROWS = 200;
 const LARGE_VALUE_FETCH_TARGET_BYTES = 64 * 1024 * 1024;
-const pendingLargeValueHydrations = new Map<string, Promise<boolean>>();
+const pendingLargeValueHydrations = createResultScopedPendingRequests<boolean>();
 const largeValueCellsByKey = computed(() => largeValueCellMap(props.result));
 
 function isLargeValuePreview(item: RowItem | undefined, columnIndex: number): boolean {
@@ -4224,33 +4247,30 @@ async function cloneRows(rowIds: number[]) {
 async function hydrateLargeValueCell(rowId: number, columnIndex: number): Promise<boolean> {
   const item = getRowItem(rowId);
   if (!isLargeValuePreview(item, columnIndex) || item?.sourceIndex === undefined) return true;
+  const sourceResult = props.result;
   const hydrationKey = largeValueCellKey(item.sourceIndex, columnIndex);
-  const pending = pendingLargeValueHydrations.get(hydrationKey);
-  if (pending) return pending;
-  const hydration = (async () => {
+  const operation = dataGridResultLifecycle.beginOperation();
+  return pendingLargeValueHydrations.run(hydrationKey, sourceResult, async () => {
     try {
       const resolved = await resolveLargeValueCells([rowId], [columnIndex]);
+      if (!dataGridResultLifecycle.isCurrent(operation) || props.result !== sourceResult) return false;
       const value = resolved.get(rowId)?.get(columnIndex);
       if (value === undefined && !resolved.get(rowId)?.has(columnIndex)) return false;
-      const row = [...(props.result.rows[item.sourceIndex!] ?? [])];
+      const row = [...(sourceResult.rows[item.sourceIndex!] ?? [])];
       row[columnIndex] = value ?? null;
-      const rows = props.result.rows.slice();
+      const rows = sourceResult.rows.slice();
       rows[item.sourceIndex!] = row;
-      props.result.rows = rows;
-      props.result.large_value_cells = props.result.large_value_cells?.filter((cell) => cell.row_index !== item.sourceIndex || cell.column_index !== columnIndex);
+      sourceResult.rows = rows;
+      sourceResult.large_value_cells = sourceResult.large_value_cells?.filter((cell) => cell.row_index !== item.sourceIndex || cell.column_index !== columnIndex);
       largeValueResolutionVersion.value += 1;
       clearCellFormatCache();
-      queryStore.invalidateResultEstimateForPayload(props.result);
+      queryStore.invalidateResultEstimateForPayload(sourceResult);
       return true;
     } catch (error) {
-      reportLargeValueLoadError(error);
+      if (dataGridResultLifecycle.isCurrent(operation) && props.result === sourceResult) reportLargeValueLoadError(error);
       return false;
-    } finally {
-      pendingLargeValueHydrations.delete(hydrationKey);
     }
-  })();
-  pendingLargeValueHydrations.set(hydrationKey, hydration);
-  return hydration;
+  });
 }
 
 const exportContextCell = computed(() => {
@@ -4308,6 +4328,7 @@ const {
   selectionFocus,
   finishCellSelection,
   extendCellSelection,
+  isCellSelectionDragConfirmed,
   restoreCellSelectionState,
   cellIsSelected,
   columnIsSelected,
@@ -4485,7 +4506,7 @@ function onCellMouseenter(rowIndex: number, visibleColIdx: number, actualColIdx:
     quickDownloadMenuCell.value = retainBinaryCellDownloadMenuForHover(quickDownloadMenuCell.value, { rowIndex, col: actualColIdx });
     if (!isScrolling.value) hoveredDetailCell.value = { rowIndex, col: actualColIdx };
   }
-  extendCellSelection(rowIndex, visibleColIdx);
+  if (isCellSelectionDragConfirmed()) extendCellSelection(rowIndex, visibleColIdx);
 }
 
 function onCellMouseleave(rowIndex: number, actualColIdx: number) {
@@ -6307,7 +6328,7 @@ onMounted(() => {
   window.addEventListener("resize", refreshDataGridViewportMetrics);
   window.visualViewport?.addEventListener("resize", refreshDataGridViewportMetrics);
   window.addEventListener("dbx:ui-scale-applied", refreshDataGridViewportMetrics);
-  window.addEventListener(TABLE_DATA_GRID_COLUMN_ORDER_CHANGED_EVENT, onTableDataGridColumnOrderChanged);
+  window.addEventListener(TABLE_DATA_GRID_COLUMN_ORDER_CHANGED_EVENT, onSynchronizedTableDataGridColumnOrderChanged);
   window.addEventListener("blur", clearInternalClipboardCopy);
   document.addEventListener("visibilitychange", clearInternalClipboardCopy);
 });
@@ -6329,7 +6350,7 @@ onUnmounted(() => {
   window.removeEventListener("resize", refreshDataGridViewportMetrics);
   window.visualViewport?.removeEventListener("resize", refreshDataGridViewportMetrics);
   window.removeEventListener("dbx:ui-scale-applied", refreshDataGridViewportMetrics);
-  window.removeEventListener(TABLE_DATA_GRID_COLUMN_ORDER_CHANGED_EVENT, onTableDataGridColumnOrderChanged);
+  window.removeEventListener(TABLE_DATA_GRID_COLUMN_ORDER_CHANGED_EVENT, onSynchronizedTableDataGridColumnOrderChanged);
   window.removeEventListener("blur", clearInternalClipboardCopy);
   document.removeEventListener("visibilitychange", clearInternalClipboardCopy);
 });
@@ -6453,6 +6474,7 @@ function copyExtractorLabel(extractor: DataGridCopyExtractorId): string {
     "sql-in-list": t("grid.copyExtractorSqlInList"),
     "sql-inserts": t("grid.copyExtractorSqlInserts"),
     "sql-updates": t("grid.copyExtractorSqlUpdates"),
+    "sql-select": t("grid.copyExtractorSqlSelect"),
     "where-clause": t("grid.copyExtractorWhereClause"),
     markdown: "Markdown",
     html: "HTML",
@@ -6649,14 +6671,18 @@ function selectExportMenuItem(value: string) {
 }
 
 // --- Cell selection and detail ---
+function hydrateCellDetailTarget(target: { rowIndex: number; col: number }) {
+  const item = displayItemAt(target.rowIndex);
+  if (item && isLargeValuePreview(item, target.col)) void hydrateLargeValueCell(item.id, target.col);
+}
+
 function showCellDetails(rowIndex: number, colIndex: number) {
   closeMongoJsonPreview();
   resetDetailEdit();
   detailCell.value = { rowIndex, col: colIndex };
   activeCellDetailTab.value = defaultCellDetailTab();
   showCellDetail.value = true;
-  const item = displayItemAt(rowIndex);
-  if (item && isLargeValuePreview(item, colIndex)) void hydrateLargeValueCell(item.id, colIndex);
+  hydrateCellDetailTarget(detailCell.value);
 }
 
 function showCellDetailsForVisibleCell(rowIndex: number, visibleColIdx: number, actualColIdx: number) {
@@ -6669,8 +6695,7 @@ function showCellDetailsForVisibleCell(rowIndex: number, visibleColIdx: number, 
 function openCellDetailDialog(rowIndex: number, columnIndex: number) {
   cellDetailDialogTarget.value = { rowIndex, col: columnIndex };
   cellDetailDialogOpen.value = true;
-  const item = displayItemAt(rowIndex);
-  if (item && isLargeValuePreview(item, columnIndex)) void hydrateLargeValueCell(item.id, columnIndex);
+  hydrateCellDetailTarget(cellDetailDialogTarget.value);
 }
 
 function openColumnDetailDialog(columnIndex: number) {
@@ -6807,6 +6832,7 @@ watch([selectedRange, showCellDetail, isEditingDetail, isSelectingCells], () => 
   });
   if (!target) return;
   detailCell.value = target;
+  hydrateCellDetailTarget(target);
 });
 
 function openImagePreview(src: string, title: string) {

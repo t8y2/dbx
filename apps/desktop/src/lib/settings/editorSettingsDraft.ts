@@ -54,6 +54,7 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "routineSourceOpenMode",
   "sidebarTableSearchEnabled",
   "autoSelectActiveSidebarNode",
+  "sidebarOpenDatabaseOnSingleClick",
   "openTabsRestoreMode",
   "disconnectTabHandlingMode",
   "dataTabReuseMode",

@@ -264,6 +264,106 @@ describe("useDataGridExport prepared row statements", () => {
     expect(copyToClipboard).toHaveBeenCalledWith("UPDATE users SET active = TRUE WHERE id = 7;");
   });
 
+  it("builds a SELECT request for exactly one explicitly selected cell", async () => {
+    const matrix: CellSelectionMatrix = {
+      rowIndexes: [0],
+      columnIndexes: [1],
+      columns: ["name"],
+      rows: [["Ada"]],
+    };
+    const state = createExportState(editableTable, ["id", "name"], matrix, [7, "Ada"]);
+    vi.mocked(extractDataGridSelection).mockResolvedValueOnce({ text: "SELECT * FROM users WHERE name = 'Ada';", mimeType: "application/sql", fileExtension: "sql", rowCount: 1, columnCount: 1 });
+
+    expect(state.canCopyWithExtractor("sql-select")).toBe(true);
+    await state.copyWithExtractor("sql-select");
+
+    expect(extractDataGridSelection).toHaveBeenCalledWith(
+      expect.objectContaining({
+        extractor: "sql-select",
+        columns: [expect.objectContaining({ sourceName: "name" })],
+        selectedColumnIndexes: [0],
+        rows: [["Ada"]],
+        selectionKind: "cells",
+      }),
+    );
+  });
+
+  it("includes hidden identity support columns in a selected-row SELECT request", async () => {
+    const item = row([7, "Ada"]);
+    const options: UseDataGridExportOptions = {
+      columns: computed(() => ["name"]),
+      displayItems: computed(() => [{ ...item, data: ["Ada"] }]),
+      allColumns: computed(() => ["id", "name"]),
+      allDisplayItems: computed(() => [item]),
+      allSourceColumns: computed(() => ["id", "name"]),
+      visibleColumnIndexes: computed(() => [1]),
+      sql: computed(() => undefined),
+      tableMeta: computed(() => editableTable),
+      databaseType: computed(() => "mysql"),
+      connectionId: computed(() => "connection-1"),
+      database: computed(() => "dbx"),
+      context: computed(() => "table-data"),
+      sourceColumns: computed(() => ["name"]),
+      columnTypes: computed(() => ["varchar"]),
+      whereInput: computed(() => undefined),
+      orderBy: computed(() => undefined),
+      exportBatchSize: computed(() => 1000),
+      hasCellSelection: computed(() => false),
+      selectedCells: computed(() => ({ columns: [], rows: [] })),
+      selectedCellMatrix: computed(() => null),
+      selectedRange: computed(() => null),
+      contextCell: ref(null),
+      contextSelectionIsSynthetic: ref(false),
+      getRowItem: (rowId) => (rowId === item.id ? item : undefined),
+      selectedRowIds: ref(new Set([item.id])),
+      hasRowSelection: computed(() => true),
+    };
+    const state = useDataGridExport(options);
+    vi.mocked(extractDataGridSelection).mockResolvedValueOnce({ text: "SELECT * FROM users WHERE id = 7;", mimeType: "application/sql", fileExtension: "sql", rowCount: 1, columnCount: 1 });
+
+    expect(state.canCopyWithExtractor("sql-select")).toBe(true);
+    await state.copyWithExtractor("sql-select");
+
+    expect(extractDataGridSelection).toHaveBeenCalledWith(
+      expect.objectContaining({
+        extractor: "sql-select",
+        columns: [expect.objectContaining({ sourceName: "id" })],
+        selectedColumnIndexes: [0],
+        rows: [[7]],
+        selectionKind: "rows",
+      }),
+    );
+  });
+
+  it("falls back to every source column when a selected-row identity is NULL", async () => {
+    const state = createExportState(editableTable, ["id", "name"], undefined, [null, "Ada"], undefined, undefined, [1]);
+    vi.mocked(extractDataGridSelection).mockResolvedValueOnce({ text: "SELECT * FROM users WHERE id IS NULL AND name = 'Ada';", mimeType: "application/sql", fileExtension: "sql", rowCount: 1, columnCount: 2 });
+
+    expect(state.canCopyWithExtractor("sql-select")).toBe(true);
+    await state.copyWithExtractor("sql-select");
+
+    expect(extractDataGridSelection).toHaveBeenCalledWith(
+      expect.objectContaining({
+        extractor: "sql-select",
+        columns: [expect.objectContaining({ sourceName: "id" }), expect.objectContaining({ sourceName: "name" })],
+        selectedColumnIndexes: [0, 1],
+        rows: [[null, "Ada"]],
+        selectionKind: "rows",
+      }),
+    );
+  });
+
+  it("disables SELECT copy for multiple cells or a missing table target", () => {
+    const matrix: CellSelectionMatrix = {
+      rowIndexes: [0],
+      columnIndexes: [0, 1],
+      columns: ["id", "name"],
+      rows: [[7, "Ada"]],
+    };
+    expect(createExportState(editableTable, ["id", "name"], matrix, [7, "Ada"]).canCopyWithExtractor("sql-select")).toBe(false);
+    expect(createExportState({ ...editableTable, tableName: "" }, ["id", "name"], { ...matrix, columnIndexes: [1], columns: ["name"], rows: [["Ada"]] }, [7, "Ada"]).canCopyWithExtractor("sql-select")).toBe(false);
+  });
+
   it("preserves drag-reordered visible column order when copying", async () => {
     vi.mocked(extractDataGridSelection).mockResolvedValue({ text: "x", mimeType: "text/csv", fileExtension: "csv", rowCount: 1, columnCount: 3 });
     const matrix: CellSelectionMatrix = {

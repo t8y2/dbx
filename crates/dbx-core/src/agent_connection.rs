@@ -260,9 +260,13 @@ pub fn mongo_legacy_error_with_auth_hint(err: &str) -> String {
         return err.to_string();
     };
     let source = &source[..source_end];
-    format!(
-        "{err}\n\nCurrent authentication database: {source}. If this user was created in admin, set Authentication database to admin or add authSource=admin to URL params."
-    )
+    let verification_hint = format!(
+        "Current authentication database: {source}. The server rejected these credentials. Verify the username and password, and confirm that the user was created in {source}."
+    );
+    if source.eq_ignore_ascii_case("admin") {
+        return format!("{err}\n\n{verification_hint}");
+    }
+    format!("{err}\n\n{verification_hint} If the user was created in admin, set Authentication database to admin or add authSource=admin to URL params.")
 }
 
 pub fn mongo_uses_legacy_driver(config: &ConnectionConfig) -> bool {
@@ -861,6 +865,8 @@ mod tests {
 
         assert!(hinted.starts_with(err));
         assert!(hinted.contains("Current authentication database: admin"));
+        assert!(hinted.contains("The server rejected these credentials"));
+        assert!(!hinted.contains("add authSource=admin"));
     }
 
     #[test]

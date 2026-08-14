@@ -250,6 +250,7 @@ const listRevision = ref<KvInt64 | null>(null);
 const listFilteredByAcls = ref(false);
 const loading = ref(false);
 const loadingMore = ref(false);
+const listError = ref("");
 const expandedGroupIds = ref<Set<string>>(new Set());
 const selectedKey = ref<string | null>(null);
 const selectedKeyIdentity = ref<string | null>(null);
@@ -592,6 +593,7 @@ async function loadKeys(reset = true, options: LoadKeysOptions = {}) {
   const keyIdentityToRestore = options.preserveSelection ? selectedKeyIdentity.value : null;
   if (reset) {
     loading.value = true;
+    listError.value = "";
     continuation.value = null;
     listRevision.value = null;
     listFilteredByAcls.value = false;
@@ -620,6 +622,10 @@ async function loadKeys(reset = true, options: LoadKeysOptions = {}) {
         clearSelectedKey();
       }
     }
+  } catch (error) {
+    if (reset && generation === keyLoadGeneration && props.connectionId === connectionId) {
+      listError.value = error instanceof Error ? error.message : String(error);
+    }
   } finally {
     if (generation === keyLoadGeneration && props.connectionId === connectionId) {
       loading.value = false;
@@ -642,6 +648,7 @@ async function loadLazyRoot(reset = true, options: LoadKeysOptions = {}) {
   };
   const previousExpanded = new Set(expandedGroupIds.value);
   loading.value = true;
+  listError.value = "";
   loadingMore.value = false;
   listFilteredByAcls.value = false;
   if (!options.preserveSelection) {
@@ -694,6 +701,10 @@ async function loadLazyRoot(reset = true, options: LoadKeysOptions = {}) {
       }
     } else {
       expandedGroupIds.value = focusedRootExpansion(rootPath);
+    }
+  } catch (error) {
+    if (lazyLoadContextValid(context)) {
+      listError.value = error instanceof Error ? error.message : String(error);
     }
   } finally {
     if (lazyLoadContextValid(context)) loading.value = false;
@@ -1866,6 +1877,9 @@ defineExpose({
           <div v-if="loading" class="flex h-full items-center justify-center text-sm text-muted-foreground">
             <Loader2 class="mr-2 h-4 w-4 animate-spin" />
             {{ labels.loadingKeys }}
+          </div>
+          <div v-else-if="listError" class="flex h-full items-center justify-center px-4 text-center text-sm text-destructive">
+            {{ listError }}
           </div>
           <div v-else-if="visibleRows.length === 0" class="flex h-full items-center justify-center text-sm text-muted-foreground">
             {{ labels.empty }}

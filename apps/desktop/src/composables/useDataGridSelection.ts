@@ -39,6 +39,11 @@ interface RestoredCellSelectionState {
 
 const AUTO_SCROLL_EDGE_SIZE = 40;
 const AUTO_SCROLL_MAX_SPEED = 28;
+// Trackpad/mouse jitter during a plain click can move the pointer a few pixels between
+// mousedown and mouseup. Without a minimum drag distance, that jitter reads as an
+// intentional drag and turns a single click into a multi-cell/row selection. Matches
+// TAB_DRAG_HORIZONTAL_THRESHOLD in useTabDrag.ts, which guards the same class of gesture.
+const GRID_SELECTION_DRAG_THRESHOLD_PX = 12;
 type RowSelectionOperation = "replace" | "add" | "remove";
 
 export function useDataGridSelection(options: UseDataGridSelectionOptions) {
@@ -50,6 +55,9 @@ export function useDataGridSelection(options: UseDataGridSelectionOptions) {
   const isSelectingRows = ref(false);
   let selectionPointerClientX = 0;
   let selectionPointerClientY = 0;
+  let selectionPointerDownClientX = 0;
+  let selectionPointerDownClientY = 0;
+  let selectionDragConfirmed = false;
   let selectionAutoScrollFrame = 0;
   let rowSelectionRangeAnchorIndex = -1;
   let rowSelectionFocusIndex = -1;
@@ -247,13 +255,63 @@ export function useDataGridSelection(options: UseDataGridSelectionOptions) {
     lastClickedColumnIndex.value = colIndex;
   }
 
-  function remapColumnSelection(previousColumnIndexes: readonly number[], nextColumnIndexes: readonly number[]) {
-    const selectedColumns = new Set([...selectedColumnIndexes.value].map((index) => previousColumnIndexes[index]).filter((index): index is number => index !== undefined));
-    selectedColumnIndexes.value = new Set(nextColumnIndexes.flatMap((columnIndex, index) => (selectedColumns.has(columnIndex) ? [index] : [])));
-
+  function reconcileSelectionAfterColumnReorder(previousColumnIndexes: readonly number[], nextColumnIndexes: readonly number[]) {
     const lastClickedColumn = lastClickedColumnIndex.value === null ? undefined : previousColumnIndexes[lastClickedColumnIndex.value];
     const nextLastClickedColumnIndex = lastClickedColumn === undefined ? -1 : nextColumnIndexes.indexOf(lastClickedColumn);
     lastClickedColumnIndex.value = nextLastClickedColumnIndex >= 0 ? nextLastClickedColumnIndex : null;
+
+    if (hasColumnSelection.value) {
+      const selectedColumns = new Set([...selectedColumnIndexes.value].map((index) => previousColumnIndexes[index]).filter((index): index is number => index !== undefined));
+      selectedColumnIndexes.value = new Set(nextColumnIndexes.flatMap((columnIndex, index) => (selectedColumns.has(columnIndex) ? [index] : [])));
+      return;
+    }
+
+    const selectedCellColumnIndexes = cellSelectionColumnIndexes();
+    const remappedCellColumnIndexes = selectedCellColumnIndexes.map((index) => {
+      const selectedColumn = previousColumnIndexes[index];
+      return selectedColumn === undefined ? -1 : nextColumnIndexes.indexOf(selectedColumn);
+    });
+    const sortedRemappedCellColumnIndexes = [...remappedCellColumnIndexes].sort((a, b) => a - b);
+    const selectionRemainsContiguous = sortedRemappedCellColumnIndexes.length > 0 && sortedRemappedCellColumnIndexes.every((index, position) => index >= 0 && index === sortedRemappedCellColumnIndexes[0]! + position);
+    if (selectionRemainsContiguous) {
+      const remappedColumnIndexByPreviousIndex = new Map(selectedCellColumnIndexes.map((index, position) => [index, remappedCellColumnIndexes[position]!]));
+      if (selectedCellKeys.value.size > 0) {
+        selectedCellKeys.value = new Set(
+          [...selectedCellKeys.value].map((key) => {
+            const position = parseCellKey(key)!;
+            return cellKey(position.rowIndex, remappedColumnIndexByPreviousIndex.get(position.colIndex)!);
+          }),
+        );
+        if (selectionAnchor.value) selectionAnchor.value = { ...selectionAnchor.value, colIndex: remappedColumnIndexByPreviousIndex.get(selectionAnchor.value.colIndex)! };
+        if (selectionFocus.value) selectionFocus.value = { ...selectionFocus.value, colIndex: remappedColumnIndexByPreviousIndex.get(selectionFocus.value.colIndex)! };
+      } else if (selectionAnchor.value && selectionFocus.value) {
+        const selectionStartsLeft = selectionAnchor.value.colIndex <= selectionFocus.value.colIndex;
+        const startCol = sortedRemappedCellColumnIndexes[0]!;
+        const endCol = sortedRemappedCellColumnIndexes[sortedRemappedCellColumnIndexes.length - 1]!;
+        selectionAnchor.value = { ...selectionAnchor.value, colIndex: selectionStartsLeft ? startCol : endCol };
+        selectionFocus.value = { ...selectionFocus.value, colIndex: selectionStartsLeft ? endCol : startCol };
+      }
+      return;
+    }
+
+    clearCellSelection();
+    lastClickedColumnIndex.value = null;
+  }
+
+  function cellSelectionColumnIndexes(): number[] {
+    if (selectedCellKeys.value.size > 0) {
+      const selectedColumnIndexes = new Set<number>();
+      for (const key of selectedCellKeys.value) {
+        const position = parseCellKey(key);
+        if (!position) return [];
+        selectedColumnIndexes.add(position.colIndex);
+      }
+      return [...selectedColumnIndexes];
+    }
+
+    const range = selectedRange.value;
+    if (!range) return [];
+    return Array.from({ length: range.endCol - range.startCol + 1 }, (_, index) => range.startCol + index);
   }
 
   function selectAllCells() {
@@ -369,8 +427,17 @@ export function useDataGridSelection(options: UseDataGridSelectionOptions) {
     applyDraggedRowRange(rowIndex);
   }
 
+  function confirmSelectionDrag(clientX: number, clientY: number): boolean {
+    if (selectionDragConfirmed) return true;
+    const distance = Math.hypot(clientX - selectionPointerDownClientX, clientY - selectionPointerDownClientY);
+    if (distance < GRID_SELECTION_DRAG_THRESHOLD_PX) return false;
+    selectionDragConfirmed = true;
+    return true;
+  }
+
   function handleRowSelectionPointerMove(event: MouseEvent) {
     if (!isSelectingRows.value) return;
+    if (!confirmSelectionDrag(event.clientX, event.clientY)) return;
     selectionPointerClientX = event.clientX;
     selectionPointerClientY = event.clientY;
     if (!selectionAutoScrollFrame) selectionAutoScrollFrame = requestAnimationFrame(runSelectionAutoScroll);
@@ -378,11 +445,11 @@ export function useDataGridSelection(options: UseDataGridSelectionOptions) {
 
   function finishRowSelection(event?: MouseEvent) {
     if (!isSelectingRows.value) return;
-    if (event) {
+    if (event && confirmSelectionDrag(event.clientX, event.clientY)) {
       selectionPointerClientX = event.clientX;
       selectionPointerClientY = event.clientY;
+      updateRowSelectionFromPointer();
     }
-    updateRowSelectionFromPointer();
     isSelectingRows.value = false;
     // Keep the range origin stable across repeated Shift selections. For a
     // plain or meta selection this is the row where the gesture started; for
@@ -411,6 +478,9 @@ export function useDataGridSelection(options: UseDataGridSelectionOptions) {
     isSelectingRows.value = true;
     selectionPointerClientX = event.clientX;
     selectionPointerClientY = event.clientY;
+    selectionPointerDownClientX = event.clientX;
+    selectionPointerDownClientY = event.clientY;
+    selectionDragConfirmed = false;
     document.addEventListener("mouseup", finishRowSelection);
     document.addEventListener("mousemove", handleRowSelectionPointerMove);
   }
@@ -479,6 +549,7 @@ export function useDataGridSelection(options: UseDataGridSelectionOptions) {
 
   function handleSelectionPointerMove(event: MouseEvent) {
     if (!isSelectingCells.value) return;
+    if (!confirmSelectionDrag(event.clientX, event.clientY)) return;
     selectionPointerClientX = event.clientX;
     selectionPointerClientY = event.clientY;
     updateSelectionFromPointer();
@@ -499,6 +570,9 @@ export function useDataGridSelection(options: UseDataGridSelectionOptions) {
     isSelectingCells.value = true;
     selectionPointerClientX = event.clientX;
     selectionPointerClientY = event.clientY;
+    selectionPointerDownClientX = event.clientX;
+    selectionPointerDownClientY = event.clientY;
+    selectionDragConfirmed = false;
     lastClickedColumnIndex.value = colIndex;
     if (showTranspose.value) transposeRowIndex.value = rowIndex;
     document.addEventListener("mouseup", finishCellSelection);
@@ -512,6 +586,13 @@ export function useDataGridSelection(options: UseDataGridSelectionOptions) {
 
   if (options.runtimeScope) options.runtimeScope.addCleanup(finishSelection);
   else if (getCurrentScope()) onScopeDispose(finishSelection);
+
+  // Some callers extend the selection off native DOM hover events rather than the pointermove
+  // handler above, with no pixel-distance info of their own. They should check this first, so
+  // hovering into an adjacent cell during click jitter doesn't grow the selection.
+  function isCellSelectionDragConfirmed(): boolean {
+    return selectionDragConfirmed;
+  }
 
   function extendCellSelection(rowIndex: number, colIndex: number) {
     if (!isSelectingCells.value || !selectionAnchor.value) return;
@@ -588,13 +669,14 @@ export function useDataGridSelection(options: UseDataGridSelectionOptions) {
     selectRow,
     selectColumn,
     selectColumns,
-    remapColumnSelection,
+    reconcileSelectionAfterColumnReorder,
     selectAllCells,
     extendCellSelectionTo,
     finishCellSelection,
     restoreCellSelectionState,
     beginCellSelection,
     extendCellSelection,
+    isCellSelectionDragConfirmed,
     cellIsSelected,
     columnIsSelected,
     selectedRangeStart,

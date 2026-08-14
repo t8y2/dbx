@@ -502,6 +502,13 @@ pub fn build_truncate_table_sql(options: dbx_core::db_admin_sql::TableAdminSqlOp
 }
 
 #[tauri::command]
+pub fn build_mysql_auto_increment_sql(
+    options: dbx_core::db_admin_sql::MysqlAutoIncrementSqlOptions,
+) -> Result<String, String> {
+    dbx_core::db_admin_sql::build_mysql_auto_increment_sql(options)
+}
+
+#[tauri::command]
 pub fn build_drop_database_sql(options: dbx_core::db_admin_sql::DatabaseNameSqlOptions) -> Result<String, String> {
     Ok(dbx_core::db_admin_sql::build_drop_database_sql(options))
 }

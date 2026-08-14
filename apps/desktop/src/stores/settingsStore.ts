@@ -576,6 +576,7 @@ export interface EditorSettings {
   sidebarTableSearchLocal: boolean;
   sidebarGlobalSearchLocal: boolean;
   autoSelectActiveSidebarNode: boolean;
+  sidebarOpenDatabaseOnSingleClick: boolean;
   openTabsRestoreMode: OpenTabsRestoreMode;
   disconnectTabHandlingMode: DisconnectTabHandlingMode;
   dataTabReuseMode: DataTabReuseMode;
@@ -772,6 +773,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   sidebarTableSearchLocal: true,
   sidebarGlobalSearchLocal: false,
   autoSelectActiveSidebarNode: false,
+  sidebarOpenDatabaseOnSingleClick: false,
   openTabsRestoreMode: "all",
   disconnectTabHandlingMode: "close-tabs",
   dataTabReuseMode: DEFAULT_DATA_TAB_REUSE_MODE,
@@ -1113,6 +1115,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     sidebarTableSearchLocal: typeof settings.sidebarTableSearchLocal === "boolean" ? settings.sidebarTableSearchLocal : DEFAULT_EDITOR_SETTINGS.sidebarTableSearchLocal,
     sidebarGlobalSearchLocal: typeof settings.sidebarGlobalSearchLocal === "boolean" ? settings.sidebarGlobalSearchLocal : DEFAULT_EDITOR_SETTINGS.sidebarGlobalSearchLocal,
     autoSelectActiveSidebarNode: settings.autoSelectActiveSidebarNode ?? DEFAULT_EDITOR_SETTINGS.autoSelectActiveSidebarNode,
+    sidebarOpenDatabaseOnSingleClick: typeof settings.sidebarOpenDatabaseOnSingleClick === "boolean" ? settings.sidebarOpenDatabaseOnSingleClick : DEFAULT_EDITOR_SETTINGS.sidebarOpenDatabaseOnSingleClick,
     openTabsRestoreMode: normalizeOpenTabsRestoreMode(
       (settings as Partial<EditorSettings>).openTabsRestoreMode,
       (
@@ -1692,6 +1695,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.sidebarTableSearchLocal !== undefined) editorSettings.value.sidebarTableSearchLocal = partial.sidebarTableSearchLocal;
     if (partial.sidebarGlobalSearchLocal !== undefined) editorSettings.value.sidebarGlobalSearchLocal = partial.sidebarGlobalSearchLocal;
     if (partial.autoSelectActiveSidebarNode !== undefined) editorSettings.value.autoSelectActiveSidebarNode = partial.autoSelectActiveSidebarNode;
+    if (partial.sidebarOpenDatabaseOnSingleClick !== undefined) editorSettings.value.sidebarOpenDatabaseOnSingleClick = partial.sidebarOpenDatabaseOnSingleClick === true;
     if (partial.openTabsRestoreMode !== undefined) editorSettings.value.openTabsRestoreMode = normalizeOpenTabsRestoreMode(partial.openTabsRestoreMode);
     if (partial.disconnectTabHandlingMode !== undefined) editorSettings.value.disconnectTabHandlingMode = normalizeDisconnectTabHandlingMode(partial.disconnectTabHandlingMode);
     if (partial.dataTabReuseMode !== undefined) editorSettings.value.dataTabReuseMode = normalizeDataTabReuseMode(partial.dataTabReuseMode);

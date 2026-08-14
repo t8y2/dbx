@@ -88,7 +88,7 @@ import type { BuildEditableObjectSourceSqlInput, BuildRoutineRenameObjectSourceI
 import type { BuildViewDdlInput } from "@/lib/table/viewDdl";
 import type { BuildRenameObjectSqlOptions } from "@/lib/table/objectRenameSql";
 import type { CreateDatabaseSqlOptions } from "@/lib/database/createDatabaseSql";
-import type { DatabaseNameSqlOptions, DatabasePropertyEditSqlOptions, DropTableChildObjectSqlOptions, DropObjectSqlOptions, DuplicateTableStructureSqlOptions, CopyTableDataSqlOptions, SchemaNameSqlOptions, TableAdminSqlOptions } from "@/lib/database/dbAdminSql";
+import type { DatabaseNameSqlOptions, DatabasePropertyEditSqlOptions, DropTableChildObjectSqlOptions, DropObjectSqlOptions, DuplicateTableStructureSqlOptions, CopyTableDataSqlOptions, MysqlAutoIncrementSqlOptions, SchemaNameSqlOptions, TableAdminSqlOptions } from "@/lib/database/dbAdminSql";
 import type { BuildDatabaseSqlExportOptions, BuildExportInsertStatementsOptions } from "@/lib/export/databaseExport";
 
 export interface SshPromptResolution {
@@ -1424,6 +1424,10 @@ export async function buildEmptyTableSql(options: TableAdminSqlOptions): Promise
 
 export async function buildTruncateTableSql(options: TableAdminSqlOptions): Promise<string> {
   return invoke("build_truncate_table_sql", { options });
+}
+
+export async function buildMysqlAutoIncrementSql(options: MysqlAutoIncrementSqlOptions): Promise<string> {
+  return invoke("build_mysql_auto_increment_sql", { options });
 }
 
 export async function buildDropDatabaseSql(options: DatabaseNameSqlOptions): Promise<string> {
@@ -3290,6 +3294,32 @@ export interface MongoDropIndexesResult {
   failures?: MongoDropIndexFailure[];
 }
 
+export interface MongoIndexKey {
+  field: string;
+  /** `1`, `-1`, or a MongoDB key type such as `text` / `2dsphere` / `hashed`. */
+  direction: string;
+}
+
+/** Full MongoDB index specification, carrying the options `IndexInfo` cannot hold. */
+export interface MongoIndexSpec {
+  name: string;
+  keys: MongoIndexKey[];
+  is_unique: boolean;
+  is_primary: boolean;
+  is_sparse: boolean;
+  /** TTL in seconds; null when the index does not expire. */
+  expire_after_seconds: number | null;
+  partial_filter_expression: string | null;
+  /** Ignored by MongoDB 4.2+, still reported by older servers. */
+  background: boolean;
+  /** Only meaningful for geoHaystack indexes, removed in MongoDB 4.4+. */
+  bucket_size: number | null;
+  hidden: boolean;
+  /** False when the driver could not report the properties above (Legacy Agent). */
+  properties_complete: boolean;
+  extra_options: string | null;
+}
+
 export interface MongoCloneCollectionResult {
   documents_copied: number;
   indexes_copied: number;
@@ -3539,6 +3569,14 @@ export async function mongoCollectionStats(connectionId: string, database: strin
     collection,
     scale,
     executionId,
+  });
+}
+
+export async function mongoListIndexSpecs(connectionId: string, database: string, collection: string): Promise<MongoIndexSpec[]> {
+  return invoke("mongo_list_index_specs", {
+    connectionId,
+    database,
+    collection,
   });
 }
 

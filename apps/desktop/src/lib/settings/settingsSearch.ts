@@ -163,6 +163,7 @@ export const SETTINGS_SEARCH_DEFINITIONS: readonly SettingsSearchDefinition[] = 
   { id: "navigation-object-info", category: "navigation", titleKey: "settings.sidebarObjectInfoMode", descriptionKey: "settings.sidebarObjectInfoModeDescription", targetId: "navigation" },
   { id: "navigation-table-search", category: "navigation", titleKey: "settings.sidebarTableSearchEnabled", descriptionKey: "settings.sidebarTableSearchEnabledDescription", targetId: "navigation" },
   { id: "navigation-active-node", category: "navigation", titleKey: "settings.autoSelectActiveSidebarNode", descriptionKey: "settings.autoSelectActiveSidebarNodeDescription", targetId: "navigation" },
+  { id: "navigation-open-database-on-single-click", category: "navigation", titleKey: "settings.sidebarOpenDatabaseOnSingleClick", descriptionKey: "settings.sidebarOpenDatabaseOnSingleClickDescription", targetId: "navigation" },
   { id: "navigation-tabs-restore", category: "navigation", titleKey: "settings.openTabsRestoreMode", descriptionKey: "settings.openTabsRestoreModeDescription", targetId: "navigation" },
   { id: "navigation-sidebar-scroll", category: "navigation", titleKey: "settings.sidebarAllowHorizontalScroll", descriptionKey: "settings.sidebarAllowHorizontalScrollDescription", targetId: "navigation" },
   { id: "navigation-hidden-tables", category: "navigation", titleKey: "settings.sidebarHiddenTablePrefixes", descriptionKey: "settings.sidebarHiddenTablePrefixesDescription", targetId: "navigation" },

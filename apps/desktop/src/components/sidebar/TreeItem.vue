@@ -77,7 +77,7 @@ import { sidebarTreeRuntimeKey } from "@/lib/sidebar/sidebarTreeRuntime";
 import { treeNodePinKey } from "@/lib/app/pinnedItems";
 import { isTreeGroupNodeType } from "@/lib/sidebar/treeNodeGroup";
 import { customTypeCapabilities } from "@/lib/database/databaseObjectCapabilities";
-import { shouldActivateTreeNodeOnSingleClick } from "@/lib/sidebar/treeNodeClick";
+import { shouldActivateTreeNodeOnSingleClick, shouldOpenObjectBrowserOnSingleClick } from "@/lib/sidebar/treeNodeClick";
 
 const { t } = useI18n();
 
@@ -1188,6 +1188,10 @@ function onClick(event: MouseEvent) {
   }
   selectSingleTreeNode(props.node);
   rowRef.value?.focus({ preventScroll: true });
+  if (shouldOpenObjectBrowserOnSingleClick(props.node.type, settingsStore.editorSettings.sidebarOpenDatabaseOnSingleClick)) {
+    treeRuntime.handleRowClick(props.node, event.detail);
+    return;
+  }
   if (!shouldActivateTreeNodeOnSingleClick(props.node.type, settingsStore.editorSettings.sidebarActivation) && props.node.type !== "load-more") return;
   treeRuntime.handleRowClick(props.node, event.detail);
 }

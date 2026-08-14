@@ -12,6 +12,7 @@ fn request(extractor: DataGridExtractorId) -> DataGridExtractRequest {
         version: DATA_GRID_EXTRACTOR_CONTRACT_VERSION,
         extractor,
         database_type: Some(DatabaseType::Postgres),
+        identifier_quote: None,
         table_meta: None,
         columns: vec![column("id", 0), column("name", 1)],
         selected_column_indexes: vec![0, 1],
@@ -356,6 +357,86 @@ fn builds_null_safe_where_clause_predicates() {
     request.rows = vec![vec![json!(1), Value::Null]];
     let result = extract_data_grid_selection(request).expect("WHERE extraction");
     assert_eq!(result.text, "\"name\" IS NULL");
+}
+
+#[test]
+fn builds_select_for_one_explicit_cell() {
+    let mut request = request(DataGridExtractorId::SqlSelect);
+    request.table_meta = Some(DataGridTableMeta {
+        catalog: None,
+        database: None,
+        schema: Some("public".to_string()),
+        table_name: "users".to_string(),
+        primary_keys: vec!["id".to_string()],
+        columns: None,
+    });
+    request.selected_column_indexes = vec![1];
+    request.rows = vec![vec![json!(7), json!("Ada")]];
+
+    let result = extract_data_grid_selection(request).expect("SELECT extraction");
+
+    assert_eq!(result.text, "SELECT * FROM \"public\".\"users\" WHERE \"name\" = 'Ada';");
+}
+
+#[test]
+fn select_row_uses_complete_identity_including_hidden_columns() {
+    let mut request = request(DataGridExtractorId::SqlSelect);
+    request.table_meta = Some(DataGridTableMeta {
+        catalog: None,
+        database: None,
+        schema: None,
+        table_name: "users".to_string(),
+        primary_keys: vec!["tenant_id".to_string(), "id".to_string()],
+        columns: None,
+    });
+    request.columns = vec![column("name", 0), column("id", 1), column("tenant_id", 2)];
+    request.selected_column_indexes = vec![0];
+    request.rows = vec![vec![json!("Ada"), json!(7), json!(9)]];
+    request.selection_kind = DataGridSelectionKind::Rows;
+
+    let result = extract_data_grid_selection(request).expect("SELECT extraction");
+
+    assert_eq!(result.text, "SELECT * FROM \"users\" WHERE \"tenant_id\" = 9 AND \"id\" = 7;");
+}
+
+#[test]
+fn select_row_falls_back_to_all_columns_without_usable_identity() {
+    for primary_keys in [Vec::new(), vec!["id".to_string()]] {
+        let mut request = request(DataGridExtractorId::SqlSelect);
+        request.table_meta = Some(DataGridTableMeta {
+            catalog: None,
+            database: None,
+            schema: None,
+            table_name: "users".to_string(),
+            primary_keys,
+            columns: None,
+        });
+        request.rows = vec![vec![Value::Null, json!("Ada")]];
+        request.selection_kind = DataGridSelectionKind::Rows;
+
+        let result = extract_data_grid_selection(request).expect("SELECT extraction");
+
+        assert_eq!(result.text, "SELECT * FROM \"users\" WHERE \"id\" IS NULL AND \"name\" = 'Ada';");
+    }
+}
+
+#[test]
+fn select_rejects_ambiguous_selection_and_missing_target() {
+    let error = extract_data_grid_selection(request(DataGridExtractorId::SqlSelect))
+        .expect_err("multiple cells without a table must fail");
+    assert_eq!(error.code, DataGridExtractErrorCode::MissingTableMetadata);
+
+    let mut request = request(DataGridExtractorId::SqlSelect);
+    request.table_meta = Some(DataGridTableMeta {
+        catalog: None,
+        database: None,
+        schema: None,
+        table_name: "users".to_string(),
+        primary_keys: Vec::new(),
+        columns: None,
+    });
+    let error = extract_data_grid_selection(request).expect_err("multiple cells must fail");
+    assert_eq!(error.code, DataGridExtractErrorCode::InvalidSelectSelection);
 }
 
 #[test]

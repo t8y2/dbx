@@ -5,9 +5,9 @@ use super::{
 };
 use crate::data_grid_sql::{
     build_column_predicate, build_data_grid_copy_insert_statement, build_data_grid_copy_update_statements,
-    format_grid_sql_literal, is_auto_generated_column, is_grid_insert_omitted_column, is_non_identity_generated_column,
-    supports_relational_copy_predicates, DataGridCopyInsertStatementOptions, DataGridCopyUpdateStatementOptions,
-    DataGridTableMeta,
+    data_grid_qualified_table_name, format_grid_sql_literal, is_auto_generated_column, is_grid_insert_omitted_column,
+    is_non_identity_generated_column, supports_relational_copy_predicates, DataGridCopyInsertStatementOptions,
+    DataGridCopyUpdateStatementOptions, DataGridTableMeta,
 };
 use serde_json::Value;
 use std::collections::HashSet;
@@ -310,6 +310,102 @@ pub(super) fn write_where_clause(
         }
     }
     Ok(())
+}
+
+pub(super) fn write_sql_select(
+    context: &ExtractContext<'_>,
+    output: &mut dyn Write,
+) -> Result<(), DataGridExtractError> {
+    ensure_sql_builder_budget(context)?;
+    if !supports_relational_copy_predicates(context.request.database_type) {
+        return Err(DataGridExtractError::new(
+            DataGridExtractErrorCode::UnsupportedDatabase,
+            "SELECT extraction is not supported for this database type.",
+        ));
+    }
+    let table_meta =
+        context.request.table_meta.as_ref().filter(|meta| !meta.table_name.trim().is_empty()).ok_or_else(|| {
+            DataGridExtractError::new(
+                DataGridExtractErrorCode::MissingTableMetadata,
+                "SELECT extraction requires one resolved table target.",
+            )
+        })?;
+    if context.request.rows.len() != 1
+        || matches!(context.request.selection_kind, super::DataGridSelectionKind::Columns)
+        || (context.request.selection_kind == super::DataGridSelectionKind::Cells
+            && context.selected_columns.len() != 1)
+    {
+        return Err(DataGridExtractError::new(
+            DataGridExtractErrorCode::InvalidSelectSelection,
+            "SELECT extraction supports exactly one selected cell or row.",
+        ));
+    }
+
+    let row = &context.request.rows[0];
+    let predicate_columns = if context.request.selection_kind == super::DataGridSelectionKind::Rows {
+        let identity = table_meta
+            .primary_keys
+            .iter()
+            .map(|primary_key| {
+                context
+                    .request
+                    .columns
+                    .iter()
+                    .find(|column| {
+                        normalized_name_eq(column.source_name.as_deref().unwrap_or(&column.display_name), primary_key)
+                    })
+                    .filter(|column| row.get(column.source_index).is_some_and(|value| !value.is_null()))
+            })
+            .collect::<Option<Vec<_>>>();
+        identity.filter(|columns| !columns.is_empty()).unwrap_or_else(|| context.request.columns.iter().collect())
+    } else {
+        context.selected_columns.clone()
+    };
+    if predicate_columns.is_empty() {
+        return Err(DataGridExtractError::new(
+            DataGridExtractErrorCode::InvalidColumnMapping,
+            "SELECT extraction has no source columns for its predicate.",
+        ));
+    }
+
+    let mut predicates = Vec::with_capacity(predicate_columns.len());
+    for column in predicate_columns {
+        let value = row.get(column.source_index).ok_or_else(|| {
+            DataGridExtractError::new(
+                DataGridExtractErrorCode::InvalidColumnMapping,
+                format!("Column '{}' maps to missing row index {}.", column.display_name, column.source_index),
+            )
+        })?;
+        let source_name = column.source_name.as_deref().filter(|name| !name.trim().is_empty()).ok_or_else(|| {
+            DataGridExtractError::new(
+                DataGridExtractErrorCode::InvalidColumnMapping,
+                format!("Column '{}' has no resolved source-column mapping.", column.display_name),
+            )
+        })?;
+        let column_info = table_meta
+            .columns
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .find(|info| normalized_name_eq(&info.name, source_name));
+        predicates.push(build_column_predicate(
+            context.request.database_type,
+            source_name,
+            value,
+            column_info,
+            true,
+            context.request.identifier_quote.as_deref(),
+        ));
+    }
+    let table = data_grid_qualified_table_name(
+        context.request.database_type,
+        table_meta.catalog.as_deref(),
+        table_meta.schema.as_deref(),
+        table_meta.database.as_deref(),
+        &table_meta.table_name,
+        context.request.identifier_quote.as_deref(),
+    );
+    write_bytes(output, format!("SELECT * FROM {table} WHERE {};", predicates.join(" AND ")).as_bytes())
 }
 
 fn sql_metadata(omitted_columns: Vec<String>) -> WriteMetadata {

@@ -2946,7 +2946,7 @@ watch([activeTab, ddlLoading], ([tab, loading]) => {
                       :empty-text="t('structureEditor.noMatchingType')"
                       :allow-custom="true"
                       :disabled="isColumnCharsetDisabled(column)"
-                      :trigger-class="[structureMonoControlClass, 'w-20']"
+                      :trigger-class="[structureMonoControlClass, 'w-full']"
                       @update:model-value="(v: string) => onCharsetChange(column, v)"
                     />
                   </td>
@@ -2959,7 +2959,7 @@ watch([activeTab, ddlLoading], ([tab, loading]) => {
                       :empty-text="t('structureEditor.noMatchingType')"
                       :allow-custom="true"
                       :disabled="isColumnCharsetDisabled(column)"
-                      :trigger-class="[structureMonoControlClass, 'w-28']"
+                      :trigger-class="[structureMonoControlClass, 'w-full']"
                       @update:model-value="(v: string) => (column.collation = v)"
                     />
                   </td>

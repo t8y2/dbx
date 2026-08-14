@@ -1,7 +1,7 @@
 import type { DatabaseType } from "@/types/database";
 import type { DataGridCopyInsertMode, DataGridTableMeta } from "@/lib/dataGrid/dataGridSql";
 
-export const DATA_GRID_COPY_EXTRACTOR_IDS = ["raw", "tsv", "tsv-with-headers", "csv", "csv-with-headers", "pipe-separated", "dsv", "json", "json-lines", "one-row", "sql-in-list", "sql-inserts", "sql-updates", "where-clause", "markdown", "html", "xml", "pretty"] as const;
+export const DATA_GRID_COPY_EXTRACTOR_IDS = ["raw", "tsv", "tsv-with-headers", "csv", "csv-with-headers", "pipe-separated", "dsv", "json", "json-lines", "one-row", "sql-in-list", "sql-inserts", "sql-updates", "sql-select", "where-clause", "markdown", "html", "xml", "pretty"] as const;
 
 export type DataGridCopyExtractorId = (typeof DATA_GRID_COPY_EXTRACTOR_IDS)[number];
 export type DataGridCopyPreference = "smart" | Exclude<DataGridCopyExtractorId, "raw">;
@@ -44,6 +44,7 @@ export const DATA_GRID_COPY_EXTRACTOR_DESCRIPTORS: Record<DataGridCopyExtractorI
   "sql-in-list": { category: "sql", separatorBefore: true },
   "sql-inserts": { category: "sql" },
   "sql-updates": { category: "sql" },
+  "sql-select": { category: "sql" },
   "where-clause": { category: "sql" },
   markdown: { category: "document", separatorBefore: true },
   html: { category: "document" },
@@ -65,7 +66,7 @@ const NO_WHERE_CLAUSE_DATABASE_TYPES: ReadonlyArray<string> = ["neo4j", "tdengin
 export function extractorUnavailableForDatabase(extractor: DataGridCopyExtractorId, databaseType: string | undefined | null): boolean {
   const db = databaseType ?? "";
   if (extractor === "sql-updates") return NO_SQL_UPDATE_DATABASE_TYPES.includes(db);
-  if (extractor === "where-clause") return NO_WHERE_CLAUSE_DATABASE_TYPES.includes(db);
+  if (extractor === "where-clause" || extractor === "sql-select") return NO_WHERE_CLAUSE_DATABASE_TYPES.includes(db);
   return false;
 }
 
@@ -100,6 +101,7 @@ export interface DataGridExtractRequest {
   version: typeof DATA_GRID_EXTRACTOR_CONTRACT_VERSION;
   extractor: DataGridCopyExtractorId;
   databaseType?: DatabaseType;
+  identifierQuote?: string;
   tableMeta?: DataGridTableMeta;
   columns: DataGridExtractColumn[];
   selectedColumnIndexes: number[];

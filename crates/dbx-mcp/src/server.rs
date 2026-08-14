@@ -142,6 +142,7 @@ pub struct SchemaContextRequest {
     pub database: Option<String>,
     pub schema: Option<String>,
     #[schemars(description = "Specific table names to include")]
+    #[schemars(extend("type" = "array"))]
     pub tables: Option<Vec<String>>,
     #[schemars(description = "Maximum number of tables to include, from 1 to 20")]
     pub max_tables: Option<usize>,
@@ -1475,6 +1476,44 @@ mod tests {
         assert!(names.contains(&"dbx_execute_and_show"));
         assert!(names.contains(&"dbx_open_session"));
         assert!(names.contains(&"dbx_close_session"));
+    }
+
+    #[test]
+    fn schema_context_tables_schema_is_gemini_compatible() {
+        let server = DbxMcpServer::with_runtime_options(Arc::new(FakeBackend::default()), McpScope::default(), false);
+        let tool = server
+            .tool_router
+            .list_all()
+            .into_iter()
+            .find(|tool| tool.name == "dbx_get_schema_context")
+            .expect("schema context tool should be registered");
+        let tables = tool
+            .input_schema
+            .get("properties")
+            .and_then(serde_json::Value::as_object)
+            .and_then(|properties| properties.get("tables"))
+            .expect("tables property should be published");
+
+        assert_eq!(tables.get("type"), Some(&serde_json::json!("array")));
+        assert_eq!(tables.pointer("/items/type"), Some(&serde_json::json!("string")));
+        assert!(!tool
+            .input_schema
+            .get("required")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|required| required.iter().any(|field| field == "tables")));
+    }
+
+    #[test]
+    fn schema_context_tables_preserve_optional_inputs() {
+        let omitted: SchemaContextRequest = serde_json::from_str("{}").unwrap();
+        let explicit_null: SchemaContextRequest = serde_json::from_str(r#"{"tables":null}"#).unwrap();
+        let empty: SchemaContextRequest = serde_json::from_str(r#"{"tables":[]}"#).unwrap();
+        let populated: SchemaContextRequest = serde_json::from_str(r#"{"tables":["users","orders"]}"#).unwrap();
+
+        assert_eq!(omitted.tables, None);
+        assert_eq!(explicit_null.tables, None);
+        assert_eq!(empty.tables, Some(Vec::new()));
+        assert_eq!(populated.tables, Some(vec!["users".to_string(), "orders".to_string()]));
     }
 
     #[test]

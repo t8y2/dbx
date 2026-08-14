@@ -37,15 +37,22 @@ export function agentDriverInstallKey(dbType: DatabaseType | undefined, driverPr
   return driverProfile && driverProfile !== dbType ? driverProfile : dbType;
 }
 
+function usesManagedAgentDriver(dbType: DatabaseType | undefined, driverProfile?: string): boolean {
+  if (supportsDriverManagement(dbType)) return true;
+  if (dbType !== "mongodb") return false;
+  const profile = driverProfile?.trim().toLowerCase();
+  return profile === "mongodb-legacy" || profile === "mongodb_legacy" || profile === "legacy";
+}
+
 export function showAgentDriverInstallHint(dbType: DatabaseType | undefined, drivers: readonly AgentDriverInstallState[], driverProfile?: string): boolean {
-  if (!supportsDriverManagement(dbType)) return false;
+  if (!usesManagedAgentDriver(dbType, driverProfile)) return false;
   const driverKey = agentDriverInstallKey(dbType, driverProfile);
   if (!driverKey) return false;
   return drivers.find((driver) => driver.db_type === driverKey)?.installed !== true;
 }
 
 export function hasAgentDriverUpdate(dbType: DatabaseType | undefined, drivers: readonly AgentDriverInstallState[], driverProfile?: string): boolean {
-  if (!supportsDriverManagement(dbType)) return false;
+  if (!usesManagedAgentDriver(dbType, driverProfile)) return false;
   const driverKey = agentDriverInstallKey(dbType, driverProfile);
   return drivers.find((driver) => driver.db_type === driverKey)?.update_available === true;
 }

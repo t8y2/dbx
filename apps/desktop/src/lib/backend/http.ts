@@ -102,6 +102,7 @@ import type {
   MongoCollectionStatsResult,
   MongoCloneCollectionResult,
   MongoDropIndexesResult,
+  MongoIndexSpec,
   MongoGridFsBucketInfo,
   HistoryEntry,
   HistorySearchRequest,
@@ -159,7 +160,7 @@ import type { BuildEditableObjectSourceSqlInput, BuildRoutineRenameObjectSourceI
 import type { BuildViewDdlInput } from "@/lib/table/viewDdl";
 import type { BuildRenameObjectSqlOptions } from "@/lib/table/objectRenameSql";
 import type { CreateDatabaseSqlOptions } from "@/lib/database/createDatabaseSql";
-import type { DatabaseNameSqlOptions, DatabasePropertyEditSqlOptions, DropTableChildObjectSqlOptions, DropObjectSqlOptions, DuplicateTableStructureSqlOptions, CopyTableDataSqlOptions, SchemaNameSqlOptions, TableAdminSqlOptions } from "@/lib/database/dbAdminSql";
+import type { DatabaseNameSqlOptions, DatabasePropertyEditSqlOptions, DropTableChildObjectSqlOptions, DropObjectSqlOptions, DuplicateTableStructureSqlOptions, CopyTableDataSqlOptions, MysqlAutoIncrementSqlOptions, SchemaNameSqlOptions, TableAdminSqlOptions } from "@/lib/database/dbAdminSql";
 import type { BuildDatabaseSqlExportOptions, BuildExportInsertStatementsOptions } from "@/lib/export/databaseExport";
 import { loadBrowserAppState, saveBrowserAppState } from "@/lib/backend/browserAppStateStorage";
 import type { DataCompareFromTablesOptions, DataCompareFromTablesPreparation, DataCompareSyncPlan, DataCompareSyncPlanOptions, DataComparePreparation, DataComparePreparationOptions } from "@/lib/dataGrid/dataCompare";
@@ -1236,6 +1237,10 @@ export async function buildEmptyTableSql(options: TableAdminSqlOptions): Promise
 
 export async function buildTruncateTableSql(options: TableAdminSqlOptions): Promise<string> {
   return post("/api/query/build-truncate-table-sql", { options });
+}
+
+export async function buildMysqlAutoIncrementSql(options: MysqlAutoIncrementSqlOptions): Promise<string> {
+  return post("/api/query/build-mysql-auto-increment-sql", { options });
 }
 
 export async function buildDropDatabaseSql(options: DatabaseNameSqlOptions): Promise<string> {
@@ -3626,6 +3631,14 @@ export async function mongoCollectionStats(connectionId: string, database: strin
     collection,
     scale,
     executionId,
+  });
+}
+
+export async function mongoListIndexSpecs(connectionId: string, database: string, collection: string): Promise<MongoIndexSpec[]> {
+  return post("/api/mongo/list-index-specs", {
+    connectionId,
+    database,
+    collection,
   });
 }
 

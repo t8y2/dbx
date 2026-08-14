@@ -744,6 +744,10 @@ jobs:
         run: go test -race ./...
         working-directory: agents/drivers/rocketmq
 
+      - name: ZooKeeper native agent tests
+        run: go test -race ./...
+        working-directory: agents/drivers/zookeeper
+
       - name: Cassandra native agent tests
         run: go test ./...
         working-directory: agents/drivers/cassandra-go
@@ -779,6 +783,94 @@ jobs:
       - name: RocketMQ native agent build
         run: CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o /tmp/dbx-agent-rocketmq-linux-x64 .
         working-directory: agents/drivers/rocketmq
+
+      - name: ZooKeeper native agent cross-builds
+        shell: bash
+        working-directory: agents/drivers/zookeeper
+        run: |
+          set -euo pipefail
+          for target in darwin/arm64 darwin/amd64 linux/arm64 linux/amd64 windows/arm64 windows/amd64; do
+            IFS=/ read -r goos goarch <<< "$target"
+            output="/tmp/dbx-agent-zookeeper-${goos}-${goarch}"
+            [ "$goos" = windows ] && output="${output}.exe"
+            CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" go build -trimpath -ldflags="-s -w" -o "$output" .
+          done
+
+      - name: ZooKeeper native agent integration tests
+        shell: bash
+        working-directory: agents/drivers/zookeeper
+        run: |
+          set -euo pipefail
+          for version in 3.4.14 3.5.5 3.7.0 3.9.5; do
+            name="dbx-zookeeper-${version//./-}"
+            docker rm -fv "$name" >/dev/null 2>&1 || true
+            docker run -d --name "$name" -p 2181:2181 "zookeeper:$version"
+            cleanup() {
+              docker rm -fv "$name" >/dev/null 2>&1 || true
+            }
+            trap cleanup EXIT
+            ready=false
+            for _ in $(seq 1 90); do
+              if timeout 1 bash -c '</dev/tcp/127.0.0.1/2181' >/dev/null 2>&1; then
+                ready=true
+                break
+              fi
+              sleep 2
+            done
+            if [ "$ready" != true ]; then
+              docker logs "$name"
+              exit 1
+            fi
+            DBX_ZOOKEEPER_TEST_CONNECT_STRING=127.0.0.1:2181 \
+              go test -run '^TestZooKeeperIntegration$' -count=1 ./...
+            if [ "$version" = "3.7.0" ]; then
+              DBX_ZOOKEEPER_TEST_CONNECT_STRING=127.0.0.1:2181 \
+                go test -run '^TestZooKeeperLargeChildrenIntegration$' -count=1 ./...
+            fi
+            cleanup
+            trap - EXIT
+          done
+
+      - name: ZooKeeper SASL DIGEST-MD5 integration test
+        shell: bash
+        working-directory: agents/drivers/zookeeper
+        run: |
+          set -euo pipefail
+          name="dbx-zookeeper-sasl-3-7-0"
+          jaas_file=$(mktemp)
+          cat > "$jaas_file" <<'EOF'
+          Server {
+            org.apache.zookeeper.server.auth.DigestLoginModule required
+            user_dbx="dbx-secret";
+          };
+          EOF
+          docker rm -fv "$name" >/dev/null 2>&1 || true
+          docker run -d --name "$name" -p 2181:2181 \
+            -v "$jaas_file:/conf/server-jaas.conf:ro" \
+            -e ZOO_CFG_EXTRA="authProvider.1=org.apache.zookeeper.server.auth.SASLAuthenticationProvider" \
+            -e JVMFLAGS="-Djava.security.auth.login.config=/conf/server-jaas.conf -Dzookeeper.sasl.serverconfig=Server -Dzookeeper.sessionRequireClientSASLAuth=true" \
+            zookeeper:3.7.0
+          cleanup() {
+            docker rm -fv "$name" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          ready=false
+          for _ in $(seq 1 90); do
+            if timeout 1 bash -c '</dev/tcp/127.0.0.1/2181' >/dev/null 2>&1; then
+              ready=true
+              break
+            fi
+            sleep 2
+          done
+          if [ "$ready" != true ]; then
+            docker logs "$name"
+            exit 1
+          fi
+          DBX_ZOOKEEPER_TEST_CONNECT_STRING=127.0.0.1:2181 \
+            DBX_ZOOKEEPER_TEST_AUTH_SCHEME=sasl_digest \
+            DBX_ZOOKEEPER_TEST_USERNAME=dbx \
+            DBX_ZOOKEEPER_TEST_PASSWORD=dbx-secret \
+            go test -run '^TestZooKeeperIntegration$' -count=1 ./...
 
       - name: RocketMQ native agent integration tests
         shell: bash

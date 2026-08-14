@@ -18,6 +18,13 @@ test("shows the agent driver install hint for Access when missing", () => {
   assert.equal(showAgentDriverInstallHint("access", [{ db_type: "access", installed: false }]), true);
 });
 
+test("installs the MongoDB Legacy agent before testing a legacy MongoDB connection", () => {
+  assert.equal(agentDriverInstallKey("mongodb", "mongodb-legacy"), "mongodb");
+  assert.equal(showAgentDriverInstallHint("mongodb", [{ db_type: "mongodb", installed: false }], "mongodb-legacy"), true);
+  assert.equal(showAgentDriverInstallHint("mongodb", [{ db_type: "mongodb", installed: true }], "mongodb-legacy"), false);
+  assert.equal(showAgentDriverInstallHint("mongodb", [{ db_type: "mongodb", installed: false }], "mongodb"), false);
+});
+
 test("does not show agent driver install hints for built-in database types", () => {
   assert.equal(showAgentDriverInstallHint("mysql", [{ db_type: "informix", installed: false }]), false);
 });

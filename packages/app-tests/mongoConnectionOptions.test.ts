@@ -56,8 +56,16 @@ test("adds a MongoDB authSource hint for legacy authentication failures", () => 
 
   assert.equal(
     mongodbAuthFailureHint(message),
-    "Agent RPC error: Exception authenticating MongoCredential{mechanism=SCRAM-SHA-1, userName='rwuser', source='gray_lite_twin_fat'}\n\nCurrent authentication database: gray_lite_twin_fat. If this user was created in admin, set Authentication database to admin or add authSource=admin to URL params.",
+    "Agent RPC error: Exception authenticating MongoCredential{mechanism=SCRAM-SHA-1, userName='rwuser', source='gray_lite_twin_fat'}\n\nCurrent authentication database: gray_lite_twin_fat. The server rejected these credentials. Verify the username and password, and confirm that the user was created in gray_lite_twin_fat. If the user was created in admin, set Authentication database to admin or add authSource=admin to URL params.",
   );
+});
+
+test("does not suggest authSource=admin when MongoDB already authenticated against admin", () => {
+  const message = "Agent RPC error: Exception authenticating MongoCredential{mechanism=SCRAM-SHA-1, userName='rwuser', source='admin'}";
+  const hinted = mongodbAuthFailureHint(message);
+
+  assert.match(hinted, /The server rejected these credentials/);
+  assert.doesNotMatch(hinted, /add authSource=admin/);
 });
 
 test("adds a MongoDB URL encoding hint for reserved password characters", () => {

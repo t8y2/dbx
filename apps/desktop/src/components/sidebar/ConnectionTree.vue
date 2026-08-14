@@ -51,6 +51,7 @@ import { Switch } from "@/components/ui/switch";
 import { cancelPendingSidebarDataOpen, runSidebarDataOpenImmediately, type SidebarDataOpenRequest } from "@/lib/sidebar/sidebarDataOpenCoordinator";
 import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { codeMirrorSqlDialect } from "@/lib/database/jdbcDialect";
 import { sqlFormatDialectForDbType } from "@/lib/sql/sqlFormatter";
@@ -1460,6 +1461,13 @@ function updateSidebarDangerDialogOption(event: Event) {
   void option.onChange?.(option.checked);
 }
 
+function updateSidebarDangerDialogTextInput(value: string | number) {
+  const input = sidebarDangerDialogRequest.value?.textInput;
+  if (!input) return;
+  input.value = String(value);
+  void input.onInput?.(input.value);
+}
+
 function updateSidebarTreeItemDialogController(controller: Record<string, any> | null) {
   sidebarTreeItemDialogController.value = controller;
 }
@@ -2286,6 +2294,10 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes });
             <span class="font-medium text-foreground">{{ sidebarDangerDialogRequest.option.label }}</span>
             <span class="text-xs leading-5 text-muted-foreground">{{ sidebarDangerDialogRequest.option.hint }}</span>
           </span>
+        </label>
+        <label v-if="sidebarDangerDialogRequest.textInput" class="mb-3 grid gap-1.5 rounded-md border bg-muted/20 px-3 py-2 text-sm">
+          <span class="font-medium text-foreground">{{ sidebarDangerDialogRequest.textInput.label }}</span>
+          <Input :model-value="sidebarDangerDialogRequest.textInput.value" :inputmode="sidebarDangerDialogRequest.textInput.inputMode" :placeholder="sidebarDangerDialogRequest.textInput.placeholder" @update:model-value="updateSidebarDangerDialogTextInput" />
         </label>
       </template>
     </SidebarDangerConfirmDialog>

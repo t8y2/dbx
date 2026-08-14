@@ -31,7 +31,7 @@ export interface PreviewAction {
   /** Optional icon component for the menu item. */
   icon?: Component;
   /** Check whether this action should be shown for the given query result. */
-  isAvailable(result: Pick<QueryResult, "columns" | "column_types">): boolean;
+  isAvailable(result: QueryResult): boolean;
   /**
    * Execute the action. Returns a dialog configuration to render, or null
    * if nothing to show (e.g. no applicable data in selected rows).
@@ -52,7 +52,7 @@ export function registerPreviewAction(action: PreviewAction): void {
 /**
  * Get all registered actions that are applicable for the given result.
  */
-export function getApplicablePreviewActions(result: Pick<QueryResult, "columns" | "column_types">): PreviewAction[] {
+export function getApplicablePreviewActions(result: QueryResult): PreviewAction[] {
   const applicable: PreviewAction[] = [];
   for (const action of actions.values()) {
     if (action.isAvailable(result)) {

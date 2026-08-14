@@ -27,6 +27,7 @@ import { buildSqlInConditionFromPasteSource, insertTextForSqlInCondition } from 
 import { resolveSqlSingleQuoteKeyAction } from "@/lib/sql/sqlQuoteCaret";
 import { convertSqlSelectionCase, type SqlSelectionCaseMode } from "@/lib/sql/sqlSelectionCase";
 import { formatMongoShellText } from "@/lib/mongo/mongoFormatter";
+import { detectAndFormatElasticsearchRequests } from "@/lib/elasticsearch/elasticsearchFormatter";
 import { useConnectionStore, COMPLETION_METADATA_CONCURRENCY } from "@/stores/connectionStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useTheme } from "@/composables/useTheme";
@@ -2932,19 +2933,27 @@ async function formatCurrentSql() {
     if (props.databaseType === "mongodb") {
       formatted = formatMongoShellText(source, settingsStore.editorSettings.sqlFormatter);
     } else {
-      const structured = detectAndFormatStructured(source, {
-        indentSize: settingsStore.editorSettings.sqlFormatter.tabWidth,
-        useTabs: settingsStore.editorSettings.sqlFormatter.useTabs,
-      });
-      if (structured.kind === "json" || structured.kind === "xml") {
-        formatted = structured.formatted;
-      } else if (structured.kind === "unsupported") {
-        // Keep invalid structured text untouched — the SQL formatter would
-        // silently corrupt XML-looking content.
+      const esRequest = detectAndFormatElasticsearchRequests(source, props.databaseType, settingsStore.editorSettings.sqlFormatter.tabWidth);
+      if (esRequest.kind === "elasticsearch") {
+        formatted = esRequest.formatted;
+      } else if (esRequest.kind === "unsupported") {
         toast(t("toolbar.formatAutoDetectFailed"), 3000);
         return;
       } else {
-        formatted = await formatSqlForEditing(source, props.formatDialect ?? props.dialect ?? "generic", settingsStore.editorSettings.sqlFormatter);
+        const structured = detectAndFormatStructured(source, {
+          indentSize: settingsStore.editorSettings.sqlFormatter.tabWidth,
+          useTabs: settingsStore.editorSettings.sqlFormatter.useTabs,
+        });
+        if (structured.kind === "json" || structured.kind === "xml") {
+          formatted = structured.formatted;
+        } else if (structured.kind === "unsupported") {
+          // Keep invalid structured text untouched — the SQL formatter would
+          // silently corrupt XML-looking content.
+          toast(t("toolbar.formatAutoDetectFailed"), 3000);
+          return;
+        } else {
+          formatted = await formatSqlForEditing(source, props.formatDialect ?? props.dialect ?? "generic", settingsStore.editorSettings.sqlFormatter);
+        }
       }
     }
     if (view.value !== currentView || currentView.state !== originalState || currentView.state.sliceDoc(from, to) !== source) {

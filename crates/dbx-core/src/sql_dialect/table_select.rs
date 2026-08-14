@@ -56,7 +56,9 @@ fn large_value_preview_kind(database_type: Option<DatabaseType>, data_type: &str
             }
         }
         Some(DatabaseType::Postgres) => {
-            if base == "bytea" {
+            if normalized.contains('[') {
+                None
+            } else if base == "bytea" {
                 Some(LargeValuePreviewKind::Binary)
             } else if matches!(base.as_str(), "char" | "character" | "varchar" | "text" | "citext" | "name" | "xml")
                 || normalized.starts_with("character varying")
@@ -186,6 +188,11 @@ pub fn build_table_data_select_sql(options: TableDataSelectSqlOptions) -> String
     let default_order_by = if database_type == Some(DatabaseType::InfluxDb) {
         // InfluxQL only allows sorting of timestamp column
         Some("time DESC".to_string())
+    } else if database_type == Some(DatabaseType::Impala) {
+        // Impala requires ORDER BY when OFFSET is present. Keeping the same
+        // fallback on the first page also prevents page boundaries from using
+        // different row orders when the table has no explicit key.
+        Some("1".to_string())
     } else {
         None
     };
@@ -502,7 +509,7 @@ pub(super) fn build_select_columns(
             .collect::<Vec<_>>()
             .join(", ");
     }
-    if database_type != Some(DatabaseType::Hive) {
+    if !matches!(database_type, Some(DatabaseType::Hive | DatabaseType::Impala)) {
         return "*".to_string();
     }
     columns

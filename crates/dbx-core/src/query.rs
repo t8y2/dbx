@@ -325,6 +325,7 @@ enum ServerLargeValuePreviewKind {
     Text,
     Binary,
     Vector,
+    Deferred,
 }
 
 #[derive(Clone, Copy)]
@@ -350,6 +351,10 @@ fn server_large_value_alias(
         "J" => (ServerLargeValuePreviewKind::Text, Some("json")),
         "K" => (ServerLargeValuePreviewKind::Text, Some("jsonb")),
         "S" => (ServerLargeValuePreviewKind::Text, Some("tsvector")),
+        "C" => (ServerLargeValuePreviewKind::Deferred, Some("clob")),
+        "N" => (ServerLargeValuePreviewKind::Deferred, Some("nclob")),
+        "L" => (ServerLargeValuePreviewKind::Deferred, Some("blob")),
+        "F" => (ServerLargeValuePreviewKind::Deferred, Some("bfile")),
         _ => return None,
     };
     Some((source_index, Some(preview_kind), source_type))
@@ -361,6 +366,7 @@ fn server_large_value_marker(value: &serde_json::Value) -> Option<(ServerLargeVa
         "T" => ServerLargeValuePreviewKind::Text,
         "B" => ServerLargeValuePreviewKind::Binary,
         "V" => ServerLargeValuePreviewKind::Vector,
+        "D" => ServerLargeValuePreviewKind::Deferred,
         _ => return None,
     };
     Some((kind, preview_size.parse::<usize>().ok()?.max(1)))
@@ -374,6 +380,9 @@ fn truncate_server_large_value_preview(
     let serde_json::Value::String(text) = value else {
         return false;
     };
+    if matches!(kind, ServerLargeValuePreviewKind::Deferred) {
+        return true;
+    }
     if matches!(kind, ServerLargeValuePreviewKind::Vector) {
         let truncated = text.chars().count() > preview_size;
         let vector_text = if truncated {
@@ -397,7 +406,7 @@ fn truncate_server_large_value_preview(
             .strip_prefix("0x")
             .filter(|hex| hex.len() > preview_size.saturating_mul(2))
             .map(|_| 2usize.saturating_add(preview_size.saturating_mul(2))),
-        ServerLargeValuePreviewKind::Vector => unreachable!(),
+        ServerLargeValuePreviewKind::Vector | ServerLargeValuePreviewKind::Deferred => unreachable!(),
     };
     let Some(truncate_at) = truncate_at else {
         return false;
@@ -976,6 +985,7 @@ pub fn agent_execute_query_params(
     let mut params = serde_json::json!({
         "sql": sql,
         "maxRows": agent_protocol_row_count(options.max_rows.unwrap_or(MAX_ROWS)),
+        "deferLobs": options.table_data_preview,
     });
     if let Some(database) = database.map(str::trim).filter(|database| !database.is_empty()) {
         params["database"] = serde_json::json!(database);
@@ -1005,6 +1015,7 @@ pub fn agent_execute_query_page_params(
         "sql": sql,
         "pageSize": agent_protocol_row_count(options.page_size.unwrap_or(MAX_ROWS)),
         "maxRows": agent_protocol_row_count(options.max_rows.unwrap_or(MAX_ROWS)),
+        "deferLobs": options.table_data_preview,
     });
     if let Some(database) = database.map(str::trim).filter(|database| !database.is_empty()) {
         params["database"] = serde_json::json!(database);
@@ -1547,7 +1558,7 @@ async fn configured_operation_budget_for_pool_key(state: &AppState, pool_key: &s
 fn oceanbase_mysql_session_timeout_sql(config: Option<&ConnectionConfig>, timeout_secs: Option<u64>) -> Option<String> {
     let config = config?;
     let timeout_secs = timeout_secs.unwrap_or(config.query_timeout_secs);
-    crate::connection::oceanbase_mysql_query_timeout_sql(config, timeout_secs)
+    crate::db::oceanbase_mysql::query_timeout_sql(config, timeout_secs)
 }
 
 async fn apply_oceanbase_mysql_session_timeout(
@@ -6921,6 +6932,7 @@ for line in sys.stdin:
                 fetch_size: Some(250),
                 row_offset: Some(100),
                 timeout_secs: Some(600),
+                table_data_preview: true,
                 ..Default::default()
             },
         );
@@ -6932,6 +6944,7 @@ for line in sys.stdin:
         assert_eq!(params["fetchSize"], 250);
         assert_eq!(params["rowOffset"], 100);
         assert_eq!(params["timeoutSecs"], 600);
+        assert_eq!(params["deferLobs"], true);
     }
 
     #[test]
@@ -7101,6 +7114,7 @@ for line in sys.stdin:
                 fetch_size: Some(250),
                 row_offset: Some(100),
                 timeout_secs: Some(600),
+                table_data_preview: true,
                 ..Default::default()
             },
         );
@@ -7113,6 +7127,7 @@ for line in sys.stdin:
         assert_eq!(params["rowOffset"], 100);
         assert_eq!(params["timeoutSecs"], 600);
         assert_eq!(params["maxRows"], MAX_ROWS);
+        assert_eq!(params["deferLobs"], true);
     }
 
     #[test]
@@ -7353,6 +7368,47 @@ for line in sys.stdin:
 
         assert_eq!(result.rows, vec![vec![serde_json::json!("0x01020304...")]]);
         assert_eq!(cells.len(), 1);
+    }
+
+    #[test]
+    fn extracts_deferred_oracle_clob_markers_without_changing_placeholder() {
+        let mut result = db::QueryResult {
+            columns: vec![
+                "id".to_string(),
+                "payload".to_string(),
+                format!("{}C_1", crate::sql_dialect::DBX_LARGE_VALUE_BYTES_COLUMN_PREFIX),
+            ],
+            column_types: vec!["number".to_string(), "varchar2".to_string(), "varchar2".to_string()],
+            column_sortables: vec![true; 3],
+            spatial_columns: Vec::new(),
+            spatial_values: Vec::new(),
+            rows: vec![
+                vec![serde_json::json!(1), serde_json::json!("<CLOB>"), serde_json::json!("D:1")],
+                vec![serde_json::json!(2), serde_json::Value::Null, serde_json::Value::Null],
+            ],
+            affected_rows: 0,
+            execution_time_ms: 0,
+            truncated: false,
+            session_id: None,
+            has_more: false,
+            elasticsearch_raw_body: None,
+            messages: Vec::new(),
+        };
+
+        let cells = extract_server_large_value_markers(&mut result);
+
+        assert_eq!(result.columns, vec!["id", "payload"]);
+        assert_eq!(result.column_types, vec!["number", "clob"]);
+        assert_eq!(result.rows[0], vec![serde_json::json!(1), serde_json::json!("<CLOB>")]);
+        assert_eq!(result.rows[1], vec![serde_json::json!(2), serde_json::Value::Null]);
+        assert_eq!(
+            cells,
+            vec![db::LargeValueCell {
+                row_index: 0,
+                column_index: 1,
+                original_bytes: SERVER_LARGE_VALUE_UNKNOWN_BYTES,
+            }]
+        );
     }
 
     #[test]

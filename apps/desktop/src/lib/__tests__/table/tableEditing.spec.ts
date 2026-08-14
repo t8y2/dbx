@@ -49,6 +49,12 @@ describe("tableEditing", () => {
     expect(isTableDataEditable("oracle", [DBX_ROWID_COLUMN], "VIEW")).toBe(false);
   });
 
+  it("keeps Impala table data readonly", () => {
+    expect(isTableDataEditable("impala", ["id"], "TABLE")).toBe(false);
+    expect(canEditExistingTableRows("impala", undefined, ["id"])).toBe(false);
+    expect(supportsDataGridTransaction("impala")).toBe(false);
+  });
+
   it("does not include Oracle ROWID for view data tabs", () => {
     expect(usesSyntheticRowIdKey("oracle", [DBX_ROWID_COLUMN], "VIEW")).toBe(false);
     expect(usesSyntheticRowIdKey("oracle", [DBX_ROWID_COLUMN], "MATERIALIZED_VIEW")).toBe(false);

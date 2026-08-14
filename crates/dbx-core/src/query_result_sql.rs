@@ -292,7 +292,13 @@ pub fn build_count_query_sql(options: CountQuerySqlOptions) -> QuerySqlBuildResu
             .unwrap_or_else(|| err("unsupported"));
     }
 
-    let alias = quote_table_identifier(options.database_type, "dbx_count");
+    let alias = if options.database_type == Some(DatabaseType::Iris) {
+        // With delimited identifiers disabled, Caché 2016 can parameterize a
+        // double-quoted alias as a string literal, leaving a trailing :%qpar.
+        "dbx_count".to_string()
+    } else {
+        quote_table_identifier(options.database_type, "dbx_count")
+    };
     let wrapped_sql = match options.database_type {
         Some(DatabaseType::Iris) => iris_statement_for_derived_table(&statement),
         _ => statement,
@@ -3321,7 +3327,7 @@ WHERE u.id = picked.id;
 
         assert_eq!(
             result.sql.unwrap(),
-            "SELECT COUNT(*) AS dbx_total_rows FROM (SELECT id, appointment_time FROM patients WHERE status = ?) \"dbx_count\";"
+            "SELECT COUNT(*) AS dbx_total_rows FROM (SELECT id, appointment_time FROM patients WHERE status = ?) dbx_count;"
         );
     }
 
@@ -3335,7 +3341,7 @@ WHERE u.id = picked.id;
 
         assert_eq!(
             result.sql.unwrap(),
-            "SELECT COUNT(*) AS dbx_total_rows FROM (SELECT * FROM (SELECT TOP ? id FROM visits WHERE status = ? ORDER BY created_at DESC) recent WHERE id > ?) \"dbx_count\";"
+            "SELECT COUNT(*) AS dbx_total_rows FROM (SELECT * FROM (SELECT TOP ? id FROM visits WHERE status = ? ORDER BY created_at DESC) recent WHERE id > ?) dbx_count;"
         );
     }
 
@@ -3348,7 +3354,20 @@ WHERE u.id = picked.id;
 
         assert_eq!(
             result.sql.unwrap(),
-            "SELECT COUNT(*) AS dbx_total_rows FROM (SELECT id FROM visits WHERE status = ?) \"dbx_count\";"
+            "SELECT COUNT(*) AS dbx_total_rows FROM (SELECT id FROM visits WHERE status = ?) dbx_count;"
+        );
+    }
+
+    #[test]
+    fn iris_count_query_uses_unquoted_alias_for_legacy_cache() {
+        let result = build_count_query_sql(CountQuerySqlOptions {
+            original_sql: "SELECT * FROM TATFY WHERE UpdateDate = '2026-07-30' AND UpdateTime > '08:00:00'".to_string(),
+            database_type: Some(DatabaseType::Iris),
+        });
+
+        assert_eq!(
+            result.sql.unwrap(),
+            "SELECT COUNT(*) AS dbx_total_rows FROM (SELECT * FROM TATFY WHERE UpdateDate = '2026-07-30' AND UpdateTime > '08:00:00') dbx_count;"
         );
     }
 

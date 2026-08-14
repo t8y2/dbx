@@ -314,15 +314,19 @@ func (server *server) listTables(schema string, constraints metadataListConstrai
 		return applyMetadataWindow(values, constraints.Offset, constraints.Limit), nil
 	}
 	fallbackStatement := "SHOW TABLES IN " + quoteHiveIdentifier(schema)
+	fallbackOperation := "SHOW TABLES"
+	fallbackObjectType := "TABLE"
 	if len(requestedTypes) > 0 && !containsString(requestedTypes, "TABLE") {
 		fallbackStatement = "SHOW VIEWS IN " + quoteHiveIdentifier(schema)
+		fallbackOperation = "SHOW VIEWS"
+		fallbackObjectType = "VIEW"
 	}
 	result, err := server.executeQuery(queryOptions{
 		SQL:     fallbackStatement,
 		MaxRows: metadataQueryLimit,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("HiveServer2 metadata failed (%v); SHOW TABLES fallback failed: %w", metadataErr, err)
+		return nil, fmt.Errorf("HiveServer2 metadata failed (%v); %s fallback failed: %w", metadataErr, fallbackOperation, err)
 	}
 	values := make([]tableInfo, 0, len(result.Rows))
 	for _, row := range result.Rows {
@@ -330,7 +334,7 @@ func (server *server) listTables(schema string, constraints metadataListConstrai
 		if name == "" || !metadataNameMatches(name, constraints.Filter) {
 			continue
 		}
-		values = append(values, tableInfo{Name: name, TableType: "TABLE", Comment: nil})
+		values = append(values, tableInfo{Name: name, TableType: fallbackObjectType, Comment: nil})
 	}
 	sort.Slice(values, func(first, second int) bool { return values[first].Name < values[second].Name })
 	return applyMetadataWindow(values, constraints.Offset, constraints.Limit), nil

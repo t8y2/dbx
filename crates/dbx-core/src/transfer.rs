@@ -3691,7 +3691,8 @@ pub fn pagination_sql_with_order(
 ) -> String {
     let full_table = qualified_table(table, schema, db_type, catalog);
     let col_list = columns.iter().map(|c| quote_identifier(c, db_type)).collect::<Vec<_>>().join(", ");
-    let order_expression = postgres_order_by_expression(order_by_columns, db_type);
+    let order_expression = postgres_order_by_expression(order_by_columns, db_type)
+        .or_else(|| matches!(db_type, DatabaseType::Impala).then(|| "1".to_string()));
 
     match db_type {
         DatabaseType::Oracle => {
@@ -9290,6 +9291,38 @@ mod tests {
         );
 
         assert_eq!(sql, "SELECT \"id\", \"name\" FROM \"public\".\"users\" ORDER BY \"id\" LIMIT 100 OFFSET 200");
+    }
+
+    #[test]
+    fn impala_transfer_without_primary_key_orders_each_page() {
+        let sql = pagination_sql_with_order(
+            &[String::from("id"), String::from("name")],
+            "events",
+            "analytics",
+            &DatabaseType::Impala,
+            1000,
+            1000,
+            &[],
+            None,
+        );
+
+        assert_eq!(sql, "SELECT `id`, `name` FROM `analytics`.`events` ORDER BY 1 LIMIT 1000 OFFSET 1000");
+    }
+
+    #[test]
+    fn impala_transfer_preserves_explicit_primary_key_order() {
+        let sql = pagination_sql_with_order(
+            &[String::from("id"), String::from("name")],
+            "events",
+            "analytics",
+            &DatabaseType::Impala,
+            1000,
+            1000,
+            &[String::from("id")],
+            None,
+        );
+
+        assert_eq!(sql, "SELECT `id`, `name` FROM `analytics`.`events` ORDER BY `id` LIMIT 1000 OFFSET 1000");
     }
 
     #[test]

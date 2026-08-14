@@ -234,6 +234,29 @@ func TestListTablesFallsBackToShowTables(t *testing.T) {
 	}
 }
 
+func TestListViewsFallsBackToShowViews(t *testing.T) {
+	behavior := &scriptedBehavior{
+		getTables: func(context.Context, string, string, []string) (gohive.MetadataResult, error) {
+			return gohive.MetadataResult{}, errors.New("metadata unsupported")
+		},
+		query: func(ctx context.Context, query string) (driver.Rows, error) {
+			if query != "SHOW VIEWS IN `analytics`" {
+				t.Fatalf("unexpected fallback query: %q", query)
+			}
+			return newScriptedRows(ctx, []string{"view_name"}, []string{"STRING"}, [][]driver.Value{{"events_view"}}), nil
+		},
+	}
+	server := newScriptedServer(t, behavior)
+	defer server.disconnect()
+	values, err := server.listTables("analytics", metadataListConstraints{ObjectTypes: []string{"VIEW"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(values, []tableInfo{{Name: "events_view", TableType: "VIEW"}}) {
+		t.Fatalf("unexpected fallback views: %#v", values)
+	}
+}
+
 func metadataResult(columns []string, rows ...[]driver.Value) gohive.MetadataResult {
 	return gohive.MetadataResult{Columns: columns, Rows: rows}
 }

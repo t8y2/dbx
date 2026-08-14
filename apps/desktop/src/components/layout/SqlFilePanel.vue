@@ -111,9 +111,8 @@ function createFolderState(project: SqlProject): FolderState {
 
 function syncFromProjects() {
   const wanted = projectStore.projects;
-  for (const folder of folders.value) {
-    if (!wanted.some((project) => project.id === folder.project.id)) dropFolderWatcher(folder.path);
-  }
+  // 移除项目的 watcher 由 useFolderWatcherLifecycle 监听 activeFolderPath 变化统一拆除，
+  // 此处不再按路径直接 drop，避免与 generation 机制形成两套取消逻辑。
   folders.value = folders.value.filter((folder) => wanted.some((project) => project.id === folder.project.id));
   for (const folder of folders.value) {
     const updated = wanted.find((project) => project.id === folder.project.id);
@@ -268,58 +267,33 @@ function openFileHistory(folder: FolderState, entry: SqlFileEntry) {
 
 // 每个项目根目录一个 watcher；插件自带 delayMs 防抖。自身保存触发的重扫是
 // 只读操作，不会再次写盘，因此不会形成循环，无需额外抑制回显。
-const folderWatchers = new Map<string, () => void>();
-const pendingWatchers = new Set<string>();
+// watcher 的创建/拆除统一由 useFolderWatcherLifecycle 通过返回的 handle 管理，
+// 因此这里保持无状态（不维护按路径索引的 watcher map），避免与 generation 冲突。
 let watchModulePromise: Promise<typeof import("@tauri-apps/plugin-fs")> | null = null;
 
-async function ensureFolderWatcher(folderPath: string) {
-  if (!isTauriRuntime() || folderWatchers.has(folderPath) || pendingWatchers.has(folderPath)) return;
-  pendingWatchers.add(folderPath);
+async function ensureFolderWatcher(folderPath: string): Promise<() => void> {
+  if (!isTauriRuntime()) return () => {};
   try {
     watchModulePromise = watchModulePromise ?? import("@tauri-apps/plugin-fs");
     const { watch } = await watchModulePromise;
-    const unwatch = await watch(
+    return await watch(
       folderPath,
       () => {
         void loadFolderEntries(folderPath, { silent: true });
       },
       { recursive: true, delayMs: 400 },
     );
-    // watch 完成后检查：如果在此期间已被 drop，立即拆除刚创建的 watcher
-    if (!pendingWatchers.has(folderPath)) {
-      try {
-        unwatch();
-      } catch {
-        /* ignore */
-      }
-      return;
-    }
-    folderWatchers.set(folderPath, unwatch);
   } catch {
     // 监听不可用时退回"窗口聚焦刷新"，不影响面板基本使用
-  } finally {
-    pendingWatchers.delete(folderPath);
+    return () => {};
   }
-}
-
-function dropFolderWatcher(folderPath: string) {
-  pendingWatchers.delete(folderPath);
-  const unwatch = folderWatchers.get(folderPath);
-  if (!unwatch) return;
-  try {
-    unwatch();
-  } catch {
-    // ignore
-  }
-  folderWatchers.delete(folderPath);
 }
 
 // ---- watcher 生命周期：仅激活项目 watch，切换时自动拆除/创建 ----
 const activeFolderPath = computed(() => activeFolder.value?.path ?? null);
 const watcherLifecycle = useFolderWatcherLifecycle({
   activeFolderPath,
-  ensureWatcher: (path) => void ensureFolderWatcher(path),
-  dropWatcher: (path) => dropFolderWatcher(path),
+  ensureWatcher: (path) => ensureFolderWatcher(path),
   rescan: (path) => void loadFolderEntries(path, { silent: true }),
   isEnabled: () => isTauriRuntime(),
 });

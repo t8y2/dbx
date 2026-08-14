@@ -229,8 +229,8 @@ test("external SQL files restore same-named databases in different catalogs", ()
   setActivePinia(createPinia());
   const store = useQueryStore();
 
-  const hiveId = store.openExternalSqlFile("conn-1", "sales", "/work/hive.sql", "select 1;", undefined, "hive");
-  const icebergId = store.openExternalSqlFile("conn-1", "sales", "/work/iceberg.sql", "select 2;", undefined, "iceberg");
+  const hiveId = store.openExternalSqlFile("conn-1", "sales", "/work/hive.sql", "select 1;", undefined, { catalog: "hive" });
+  const icebergId = store.openExternalSqlFile("conn-1", "sales", "/work/iceberg.sql", "select 2;", undefined, { catalog: "iceberg" });
 
   assert.equal(store.tabs.find((tab) => tab.id === hiveId)?.catalog, "hive");
   assert.equal(store.tabs.find((tab) => tab.id === icebergId)?.catalog, "iceberg");
@@ -242,7 +242,7 @@ test("reopening an external SQL path preserves unsaved editor content", () => {
   const tabId = store.openExternalSqlFile("conn-1", "db", "C:\\work\\draft.sql", "select 1;");
   store.updateSql(tabId, "select 2;");
 
-  const reopenedId = store.openExternalSqlFile("conn-2", "other", "C:/work/draft.sql", "select 3;", undefined, "iceberg");
+  const reopenedId = store.openExternalSqlFile("conn-2", "other", "C:/work/draft.sql", "select 3;", undefined, { catalog: "iceberg" });
 
   assert.equal(reopenedId, tabId);
   assert.equal(store.tabs.length, 1);

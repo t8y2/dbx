@@ -2023,7 +2023,11 @@ export async function openSqlProjectByPath(_rootPath: string): Promise<import("@
   throw new Error("SQL projects are only available in the desktop app");
 }
 
-export async function saveSqlProject(_project: import("@/lib/backend/tauri").SqlProject): Promise<import("@/lib/backend/tauri").SqlProject> {
+export async function updateSqlProject(_id: string, _name: string, _connectionId: string | null, _defaultSchema: string | null): Promise<import("@/lib/backend/tauri").SqlProject> {
+  throw new Error("SQL projects are only available in the desktop app");
+}
+
+export async function trustSqlProject(_id: string): Promise<import("@/lib/backend/tauri").SqlProject> {
   throw new Error("SQL projects are only available in the desktop app");
 }
 

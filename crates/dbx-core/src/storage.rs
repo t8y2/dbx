@@ -3204,19 +3204,13 @@ impl Storage {
         .await
     }
 
-    pub async fn save_sql_project(&self, project: &SqlProject) -> Result<(), String> {
+    /// 插入新项目记录（仅后端 open 流程使用；前端不得直接调用）。
+    pub async fn insert_sql_project(&self, project: &SqlProject) -> Result<(), String> {
         let project = project.clone();
         self.with_conn(move |conn| {
             conn.execute(
                 "INSERT INTO sql_projects (id, name, root_path, connection_id, default_schema, trusted, created_at, last_opened_at) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?) \
-                 ON CONFLICT(id) DO UPDATE SET \
-                 name = excluded.name, \
-                 root_path = excluded.root_path, \
-                 connection_id = excluded.connection_id, \
-                 default_schema = excluded.default_schema, \
-                 trusted = excluded.trusted, \
-                 last_opened_at = excluded.last_opened_at",
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 params![
                     project.id,
                     project.name,
@@ -3230,6 +3224,41 @@ impl Storage {
             )
             .map(|_| ())
             .map_err(|e| e.to_string())
+        })
+        .await
+    }
+
+    /// 更新项目可变元数据（名称/绑定连接/默认 schema）。
+    /// 刻意不触碰 id/root_path/trusted/created_at/last_opened_at，防止前端伪造可信项目。
+    pub async fn update_sql_project(
+        &self,
+        id: &str,
+        name: &str,
+        connection_id: Option<&str>,
+        default_schema: Option<&str>,
+    ) -> Result<(), String> {
+        let id = id.to_string();
+        let name = name.to_string();
+        let connection_id = connection_id.map(|s| s.to_string());
+        let default_schema = default_schema.map(|s| s.to_string());
+        self.with_conn(move |conn| {
+            conn.execute(
+                "UPDATE sql_projects SET name = ?2, connection_id = ?3, default_schema = ?4 WHERE id = ?1",
+                params![id, name, connection_id, default_schema],
+            )
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+        })
+        .await
+    }
+
+    /// 后端信任流程：仅将项目标记为 trusted，不修改其他字段。
+    pub async fn trust_sql_project(&self, id: &str) -> Result<(), String> {
+        let id = id.to_string();
+        self.with_conn(move |conn| {
+            conn.execute("UPDATE sql_projects SET trusted = 1 WHERE id = ?1", params![id])
+                .map(|_| ())
+                .map_err(|e| e.to_string())
         })
         .await
     }
@@ -4242,6 +4271,7 @@ mod tests {
         ConnectionConfig, DatabaseConnectionInfo, DatabaseType, SshTunnelConfig, TransportLayerConfig,
     };
     use crate::saved_sql::SavedSqlFile;
+    use crate::sql_project::SqlProject;
     use rusqlite::Connection;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -6611,6 +6641,66 @@ mod tests {
         assert!(storage.load_snippet_sync_state("github").await.unwrap().pending_cleanup.is_some());
         assert!(storage.clear_snippet_pending_cleanup_if_matches("github", &pending).await.unwrap());
         assert!(storage.load_snippet_sync_state("github").await.unwrap().pending_cleanup.is_none());
+
+        std::fs::remove_file(&db).ok();
+    }
+
+    // ---- SQL 项目元数据更新与信任流程回归测试 ----
+
+    fn sample_project(id: &str, root_path: &str) -> SqlProject {
+        SqlProject {
+            id: id.to_string(),
+            name: "original-name".to_string(),
+            root_path: root_path.to_string(),
+            connection_id: None,
+            default_schema: None,
+            trusted: false,
+            created_at: "2026-01-01T00:00:00.000Z".to_string(),
+            last_opened_at: "2026-01-01T00:00:00.000Z".to_string(),
+        }
+    }
+
+    /// 普通元数据更新不得修改 id/root_path/trusted/created_at，
+    /// 防止前端伪造任意可信项目绕过 resolve_trusted_root。
+    #[tokio::test]
+    async fn update_sql_project_cannot_forge_root_path_or_trusted() {
+        let db = temp_db_path("sql-project-forge-update");
+        let storage = Storage::open(&db).await.unwrap();
+        let project = sample_project("proj-1", "/safe/root");
+        storage.insert_sql_project(&project).await.unwrap();
+
+        // 前端只能传可变字段；即便构造包含伪造 root_path/trusted 的 payload，
+        // update 路径本身不写入这些列。
+        storage.update_sql_project("proj-1", "renamed", Some("conn-1"), Some("public")).await.unwrap();
+
+        let reloaded = storage.find_sql_project_by_id("proj-1").await.unwrap().unwrap();
+        assert_eq!(reloaded.name, "renamed");
+        assert_eq!(reloaded.connection_id.as_deref(), Some("conn-1"));
+        assert_eq!(reloaded.default_schema.as_deref(), Some("public"));
+        // 关键：root_path / trusted / created_at 保持不变
+        assert_eq!(reloaded.root_path, "/safe/root");
+        assert!(!reloaded.trusted);
+        assert_eq!(reloaded.created_at, "2026-01-01T00:00:00.000Z");
+        assert_eq!(reloaded.last_opened_at, "2026-01-01T00:00:00.000Z");
+
+        std::fs::remove_file(&db).ok();
+    }
+
+    /// 信任流程仅设置 trusted=1，不得改动 root_path 等其他字段。
+    #[tokio::test]
+    async fn trust_sql_project_only_flips_trusted_flag() {
+        let db = temp_db_path("sql-project-trust");
+        let storage = Storage::open(&db).await.unwrap();
+        let project = sample_project("proj-2", "/safe/root-2");
+        storage.insert_sql_project(&project).await.unwrap();
+
+        storage.trust_sql_project("proj-2").await.unwrap();
+
+        let reloaded = storage.find_sql_project_by_id("proj-2").await.unwrap().unwrap();
+        assert!(reloaded.trusted);
+        assert_eq!(reloaded.root_path, "/safe/root-2");
+        assert_eq!(reloaded.name, "original-name");
+        assert_eq!(reloaded.created_at, "2026-01-01T00:00:00.000Z");
 
         std::fs::remove_file(&db).ok();
     }

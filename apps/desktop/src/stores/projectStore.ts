@@ -105,7 +105,7 @@ export const useProjectStore = defineStore("sqlProject", () => {
         knownRoots.add(normalizeRootForCompare(project.rootPath));
         if (knownIds.has(project.id)) continue;
         knownIds.add(project.id);
-        const trustedProject = project.trusted ? project : await api.saveSqlProject({ ...project, trusted: true });
+        const trustedProject = project.trusted ? project : await api.trustSqlProject(project.id);
         projects.value.push(trustedProject);
         changed = true;
       } catch {
@@ -181,7 +181,7 @@ export const useProjectStore = defineStore("sqlProject", () => {
   /** 项目设置保存（名称/绑定连接/默认 schema）。 */
   async function updateProject(project: SqlProject): Promise<SqlProject> {
     desktopOnly();
-    const updated = await api.saveSqlProject(project);
+    const updated = await api.updateSqlProject(project.id, project.name, project.connectionId, project.defaultSchema);
     replaceOrInsertProject(updated);
     if (pendingSettingsProjectId.value === updated.id) {
       pendingSettingsProjectId.value = null;
@@ -189,9 +189,12 @@ export const useProjectStore = defineStore("sqlProject", () => {
     return updated;
   }
 
-  /** 信任确认：首次打开未信任项目，用户确认后持久化。 */
+  /** 信任确认：首次打开未信任项目，用户确认后持久化（仅后端设置 trusted）。 */
   async function markTrusted(project: SqlProject): Promise<SqlProject> {
-    return updateProject({ ...project, trusted: true });
+    desktopOnly();
+    const updated = await api.trustSqlProject(project.id);
+    replaceOrInsertProject(updated);
+    return updated;
   }
 
   /** 移除项目记录（不删除磁盘文件）；快照随项目一并清理。 */

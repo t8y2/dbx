@@ -883,8 +883,14 @@ export async function openSqlProjectByPath(rootPath: string): Promise<SqlProject
   return invoke("open_sql_project_by_path", { rootPath });
 }
 
-export async function saveSqlProject(project: SqlProject): Promise<SqlProject> {
-  return invoke("save_sql_project", { project });
+/** 更新项目可变元数据（名称/绑定连接/默认 schema），不修改 rootPath/trusted/createdAt。 */
+export async function updateSqlProject(id: string, name: string, connectionId: string | null, defaultSchema: string | null): Promise<SqlProject> {
+  return invoke("update_sql_project", { id, name, connectionId, defaultSchema });
+}
+
+/** 后端信任流程：仅将项目标记为 trusted，不接受前端传入的路径。 */
+export async function trustSqlProject(id: string): Promise<SqlProject> {
+  return invoke("trust_sql_project", { id });
 }
 
 export async function deleteSqlProject(id: string): Promise<void> {

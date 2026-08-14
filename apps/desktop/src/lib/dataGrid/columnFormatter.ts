@@ -263,15 +263,19 @@ function resolveDateTimeValue(value: string | number, unit: DateTimeFormatterUni
     if (!trimmed) {
       return undefined;
     }
-    const normalized = unwrapMongoShellDate(trimmed) ?? trimmed;
-    const timestamp = parseTimestampMilliseconds(normalized, unit);
+    const mongoShellDate = unwrapMongoShellDate(trimmed);
+    if (mongoShellDate !== undefined) {
+      return parseStrictDateTimeString(mongoShellDate);
+    }
+
+    const timestamp = parseTimestampMilliseconds(trimmed, unit);
     if (timestamp !== undefined) {
       const parsedTimestamp = dayjs(timestamp);
       return parsedTimestamp.isValid() ? parsedTimestamp : undefined;
     }
-    if (isIntegerString(normalized)) return undefined;
+    if (isIntegerString(trimmed)) return undefined;
 
-    return parseStrictDateTimeString(normalized);
+    return parseStrictDateTimeString(trimmed);
   }
 
   const timestamp = parseTimestampMilliseconds(value, unit);

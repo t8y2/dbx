@@ -256,7 +256,7 @@ test("explicit loads, last-page COUNTs, and page jumps block the grid surface; b
   assert.ok(!busyLine.includes("totalRowCountBusy"), "background counts must not block the grid surface");
   assert.match(source, /const gridPaginationBusy = computed\(\(\) => gridSurfaceBusy\.value \|\| totalRowCountBusy\.value\)/);
   assert.match(source, /v-if="gridSurfaceBusy"/);
-  assert.match(source, /:loading="gridPaginationBusy"/);
+  assert.match(source, /:loading="gridPaginationBusy \|\| infiniteScrollLoading"/);
   assert.match(source, /async function beginManualTotalRowCount/);
   assert.match(source, /await nextTick\(\);/);
   const lastPageFn = source.match(/async function lastPage\(\) \{[\s\S]*?\n\}/)?.[0] ?? "";

@@ -147,6 +147,7 @@ const transferMode = ref<TransferMode>("append");
 const targetTableNameCase = ref<TransferTableNameCase>("preserve");
 const batchSize = ref(1000);
 const isSubmitting = ref(false);
+const showStartConfirm = ref(false);
 const ownershipDialogOpen = ref(false);
 const ownershipMissingOwners = ref<string[]>([]);
 const ownershipTargetOwner = ref("");
@@ -604,6 +605,7 @@ function resetState() {
   targetTableNameCase.value = "preserve";
   batchSize.value = 1000;
   isSubmitting.value = false;
+  showStartConfirm.value = false;
   ownershipDialogOpen.value = false;
   ownershipMissingOwners.value = [];
   ownershipTargetOwner.value = "";
@@ -845,20 +847,33 @@ function onNewBlank() {
   requestDiscardableAction(() => resetState());
 }
 
-async function runSavedTask(task: TransferTask) {
-  if (isSubmitting.value) return;
-  await loadTaskIntoForm(task);
-  if (!canStart.value) {
-    toast(t("transfer.tasks.runNotReady"), 4000);
+/** Tree cleared the selection because the active task was deleted: reset the form so no stale config lingers as "unsaved changes". */
+function onSelectedTaskIdUpdate(id: string | null) {
+  if (id === null && activeTaskId.value) {
+    resetState();
     return;
   }
-  await startTransfer();
+  activeTaskId.value = id;
 }
 
-function onRunTask(task: TransferTask) {
-  requestDiscardableAction(() => {
-    void runSavedTask(task);
-  });
+// ---- start confirmation (guards the only run entry: the footer button) ----
+
+/** Number of objects currently selected across all kinds. */
+const selectedObjectCount = computed(() => Object.values(selectedObjects.value).reduce((total, names) => total + (names?.size ?? 0), 0));
+
+const startConfirmSource = computed(() => `${getConnectionName(sourceConnectionId.value)}.${sourceDatabase.value}`);
+const startConfirmTarget = computed(() => `${getConnectionName(targetConnectionId.value)}.${targetDatabase.value}`);
+
+/** Opens the confirmation dialog before starting a transfer. */
+function requestStartTransfer() {
+  if (!canStart.value || isSubmitting.value) return;
+  showStartConfirm.value = true;
+}
+
+/** Confirmed: close the prompt and run the normal start flow. */
+function confirmStartTransfer() {
+  showStartConfirm.value = false;
+  void startTransfer();
 }
 
 /** Saves the form into the active task, or creates a new one and starts its rename. */
@@ -900,7 +915,9 @@ async function saveConfigTask() {
       </DialogHeader>
 
       <div class="flex min-h-0 flex-1 -ml-4">
-        <TransferTaskTree ref="taskTreeRef" :selected-task-id="activeTaskId" class="w-60 shrink-0 border-r border-border" @update:selected-task-id="activeTaskId = $event" @select="onSelectTask" @run="onRunTask" @new-blank="onNewBlank" />
+        <div class="relative w-60 shrink-0 self-stretch border-r border-border">
+          <TransferTaskTree ref="taskTreeRef" :selected-task-id="activeTaskId" class="absolute inset-0" @update:selected-task-id="onSelectedTaskIdUpdate" @select="onSelectTask" @new-blank="onNewBlank" />
+        </div>
         <div class="min-h-0 flex-1 overflow-y-auto pl-4 pr-1 scrollbar-thin">
           <div class="flex flex-col gap-5 py-3">
             <!-- Source / Target Side by Side -->
@@ -1140,7 +1157,7 @@ async function saveConfigTask() {
         <Button variant="outline" size="sm" :disabled="!canSaveConfig || isSubmitting" @click="saveConfigTask">
           {{ activeTaskId ? t("transfer.saveConfig") : t("transfer.saveAsNewTask") }}
         </Button>
-        <Button size="sm" :disabled="!canStart || isSubmitting" @click="startTransfer">
+        <Button size="sm" :disabled="!canStart || isSubmitting" @click="requestStartTransfer">
           <Loader2 v-if="isSubmitting" class="w-3.5 h-3.5 mr-1.5 animate-spin" />
           <ArrowRightLeft v-else class="w-3.5 h-3.5 mr-1.5" />
           {{ t("transfer.start") }}
@@ -1163,6 +1180,25 @@ async function saveConfigTask() {
         </Button>
         <Button variant="destructive" size="sm" @click="confirmDiscardChanges">
           {{ t("transfer.unsavedDiscard") }}
+        </Button>
+      </DialogFooter>
+    </DialogContent>
+  </Dialog>
+
+  <Dialog v-model:open="showStartConfirm">
+    <DialogContent class="sm:max-w-[420px]" @interact-outside.prevent>
+      <DialogHeader>
+        <DialogTitle>{{ t("transfer.startConfirmTitle") }}</DialogTitle>
+        <DialogDescription>
+          {{ t("transfer.startConfirmMessage", { source: startConfirmSource, target: startConfirmTarget, count: selectedObjectCount }) }}
+        </DialogDescription>
+      </DialogHeader>
+      <DialogFooter class="gap-2">
+        <Button variant="outline" size="sm" @click="showStartConfirm = false">
+          {{ t("transfer.cancel") }}
+        </Button>
+        <Button size="sm" @click="confirmStartTransfer">
+          {{ t("transfer.start") }}
         </Button>
       </DialogFooter>
     </DialogContent>

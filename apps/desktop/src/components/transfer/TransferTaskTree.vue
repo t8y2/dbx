@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, reactive, ref } from "vue";
 import { useI18n } from "vue-i18n";
-import { ArrowRightLeft, ChevronRight, Copy, FolderClosed, FolderOpen, FolderPlus, Pencil, Play, Plus, Search, Trash2, X } from "@lucide/vue";
+import { ArrowRightLeft, ChevronRight, Copy, ExternalLink, FolderClosed, FolderOpen, FolderPlus, Pencil, Plus, Search, Trash2, X } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import CustomContextMenu, { type ContextMenuItem as CtxMenuItem } from "@/components/ui/CustomContextMenu.vue";
@@ -22,8 +22,6 @@ const props = defineProps<{
 const emit = defineEmits<{
   /** Request to load a task's config into the form (the dialog may veto when dirty). */
   select: [task: TransferTask];
-  /** Request to run a task from its saved config. */
-  run: [task: TransferTask];
   /** Request to clear the form and start a new unsaved configuration. */
   newBlank: [];
   "update:selectedTaskId": [id: string | null];
@@ -196,12 +194,22 @@ function cancelRename() {
   renameValue.value = "";
 }
 
+/** Default name for a new folder under the given parent: "新建文件夹", "新建文件夹1", ... avoiding sibling conflicts. */
+function nextFolderDefaultName(parentFolderId?: string) {
+  const base = t("transfer.tasks.newFolderDefault");
+  const taken = new Set(taskStore.allFolders.filter((folder) => (folder.parentFolderId || "") === (parentFolderId || "")).map((folder) => folder.name.trim().toLocaleLowerCase()));
+  if (!taken.has(base.toLocaleLowerCase())) return base;
+  let index = 1;
+  while (taken.has(`${base}${index}`.toLocaleLowerCase())) index++;
+  return `${base}${index}`;
+}
+
 async function openNewFolderInput(parentFolderId?: string) {
   if (parentFolderId) {
     collapsedFolders.value = new Set([...collapsedFolders.value].filter((id) => id !== parentFolderId));
   }
   try {
-    const folder = await taskStore.createFolder(t("transfer.tasks.newFolderDefault"), parentFolderId);
+    const folder = await taskStore.createFolder(nextFolderDefaultName(parentFolderId), parentFolderId);
     searchText.value = "";
     startRenameFolder(folder);
   } catch (error) {
@@ -310,7 +318,7 @@ const contextMenuItems = computed<CtxMenuItem[]>(() => {
   }
 
   return [
-    { label: t("transfer.tasks.run"), action: () => emit("run", target), icon: Play },
+    { label: t("transfer.tasks.open"), action: () => emit("select", target), icon: ExternalLink },
     { label: t("transfer.tasks.duplicate"), action: () => duplicateTask(target), icon: Copy },
     { label: t("transfer.tasks.moveToFolder"), icon: FolderClosed, children: taskMoveMenuItems(target) },
     { label: "", separator: true },
@@ -584,7 +592,7 @@ function taskRowClass(taskId: string) {
     </div>
 
     <div class="min-h-0 flex-1 overflow-y-auto py-1">
-      <CustomContextMenu :items="contextMenuItems" @close="clearContextTarget">
+      <CustomContextMenu :items="() => contextMenuItems" @close="clearContextTarget">
         <template #default="{ onContextMenu }">
           <div
             class="h-full"

@@ -137,6 +137,11 @@ type SearchScope = "connection" | "database" | "schema" | "table" | "view";
 const selectedSearchScopes = ref<SearchScope[]>([]);
 const searchCollapsedIds = ref<Set<string>>(new Set());
 const searchRefreshedNodeIds = new Set<string>();
+// Group nodes that search force-expanded on the user's behalf (they were
+// collapsed before the query started). Cleared alongside searchRefreshedNodeIds
+// so clearing the search box collapses them back instead of leaving every
+// touched group open and reloading it again.
+const searchAutoExpandedNodeIds = new Set<string>();
 let searchTimer: number | undefined;
 const tableSearchTimers = new Map<string, number>();
 const tableSearchFocusRestoreTokens = new Map<string, number>();
@@ -257,7 +262,10 @@ watch([deferredSearchQuery, regexMode], ([newQuery, isRegexMode], [oldQuery, was
     return;
   }
   if (dispatchMode === "none") {
-    if (!wasRegexMode && !newQuery && oldQuery) searchRefreshedNodeIds.clear();
+    if (!wasRegexMode && !newQuery && oldQuery) {
+      searchRefreshedNodeIds.clear();
+      searchAutoExpandedNodeIds.clear();
+    }
     return;
   }
   const tasks: Promise<void>[] = [];
@@ -267,6 +275,7 @@ watch([deferredSearchQuery, regexMode], ([newQuery, isRegexMode], [oldQuery, was
   }
   if (!newQuery && oldQuery) {
     searchRefreshedNodeIds.clear();
+    searchAutoExpandedNodeIds.clear();
   }
   Promise.all(tasks)
     .then(() => {
@@ -307,9 +316,11 @@ function collectExpandedObjectSearchTargets(node: TreeNode, tasks: Promise<void>
       if (child.connectionId && searchableObjectGroupTypes.has(child.type)) {
         if (preservesSearchSubtree) {
           if (refreshedNodeIds.delete(child.id)) {
+            searchAutoExpandedNodeIds.delete(child.id);
             tasks.push(store.loadObjectGroupChildren(child, { force: true, searchFilter: "", allowGlobalSearchMismatch: true, expectedSidebarSearchQuery: store.sidebarSearchQuery }));
           }
         } else {
+          if (!child.isExpanded) searchAutoExpandedNodeIds.add(child.id);
           refreshedNodeIds.add(child.id);
           tasks.push(store.loadObjectGroupChildren(child, { force: true }));
         }
@@ -317,7 +328,14 @@ function collectExpandedObjectSearchTargets(node: TreeNode, tasks: Promise<void>
     }
   } else if (!refreshedNodeIds && searchRefreshedNodeIds.has(node.id)) {
     if (searchableObjectGroupTypes.has(node.type)) {
-      tasks.push(store.loadObjectGroupChildren(node, { force: true }));
+      if (searchAutoExpandedNodeIds.has(node.id)) {
+        // Search opened this group on the user's behalf to check for matches;
+        // once the query is gone there is nothing to show, so collapse it back
+        // instead of reloading and leaving it open.
+        node.isExpanded = false;
+      } else {
+        tasks.push(store.loadObjectGroupChildren(node, { force: true }));
+      }
     } else if (simpleObjectParentTypes.has(node.type)) {
       tasks.push(store.refreshTreeNode(node));
     }

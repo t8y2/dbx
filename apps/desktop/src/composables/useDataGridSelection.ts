@@ -247,13 +247,63 @@ export function useDataGridSelection(options: UseDataGridSelectionOptions) {
     lastClickedColumnIndex.value = colIndex;
   }
 
-  function remapColumnSelection(previousColumnIndexes: readonly number[], nextColumnIndexes: readonly number[]) {
-    const selectedColumns = new Set([...selectedColumnIndexes.value].map((index) => previousColumnIndexes[index]).filter((index): index is number => index !== undefined));
-    selectedColumnIndexes.value = new Set(nextColumnIndexes.flatMap((columnIndex, index) => (selectedColumns.has(columnIndex) ? [index] : [])));
-
+  function reconcileSelectionAfterColumnReorder(previousColumnIndexes: readonly number[], nextColumnIndexes: readonly number[]) {
     const lastClickedColumn = lastClickedColumnIndex.value === null ? undefined : previousColumnIndexes[lastClickedColumnIndex.value];
     const nextLastClickedColumnIndex = lastClickedColumn === undefined ? -1 : nextColumnIndexes.indexOf(lastClickedColumn);
     lastClickedColumnIndex.value = nextLastClickedColumnIndex >= 0 ? nextLastClickedColumnIndex : null;
+
+    if (hasColumnSelection.value) {
+      const selectedColumns = new Set([...selectedColumnIndexes.value].map((index) => previousColumnIndexes[index]).filter((index): index is number => index !== undefined));
+      selectedColumnIndexes.value = new Set(nextColumnIndexes.flatMap((columnIndex, index) => (selectedColumns.has(columnIndex) ? [index] : [])));
+      return;
+    }
+
+    const selectedCellColumnIndexes = cellSelectionColumnIndexes();
+    const remappedCellColumnIndexes = selectedCellColumnIndexes.map((index) => {
+      const selectedColumn = previousColumnIndexes[index];
+      return selectedColumn === undefined ? -1 : nextColumnIndexes.indexOf(selectedColumn);
+    });
+    const sortedRemappedCellColumnIndexes = [...remappedCellColumnIndexes].sort((a, b) => a - b);
+    const selectionRemainsContiguous = sortedRemappedCellColumnIndexes.length > 0 && sortedRemappedCellColumnIndexes.every((index, position) => index >= 0 && index === sortedRemappedCellColumnIndexes[0]! + position);
+    if (selectionRemainsContiguous) {
+      const remappedColumnIndexByPreviousIndex = new Map(selectedCellColumnIndexes.map((index, position) => [index, remappedCellColumnIndexes[position]!]));
+      if (selectedCellKeys.value.size > 0) {
+        selectedCellKeys.value = new Set(
+          [...selectedCellKeys.value].map((key) => {
+            const position = parseCellKey(key)!;
+            return cellKey(position.rowIndex, remappedColumnIndexByPreviousIndex.get(position.colIndex)!);
+          }),
+        );
+        if (selectionAnchor.value) selectionAnchor.value = { ...selectionAnchor.value, colIndex: remappedColumnIndexByPreviousIndex.get(selectionAnchor.value.colIndex)! };
+        if (selectionFocus.value) selectionFocus.value = { ...selectionFocus.value, colIndex: remappedColumnIndexByPreviousIndex.get(selectionFocus.value.colIndex)! };
+      } else if (selectionAnchor.value && selectionFocus.value) {
+        const selectionStartsLeft = selectionAnchor.value.colIndex <= selectionFocus.value.colIndex;
+        const startCol = sortedRemappedCellColumnIndexes[0]!;
+        const endCol = sortedRemappedCellColumnIndexes[sortedRemappedCellColumnIndexes.length - 1]!;
+        selectionAnchor.value = { ...selectionAnchor.value, colIndex: selectionStartsLeft ? startCol : endCol };
+        selectionFocus.value = { ...selectionFocus.value, colIndex: selectionStartsLeft ? endCol : startCol };
+      }
+      return;
+    }
+
+    clearCellSelection();
+    lastClickedColumnIndex.value = null;
+  }
+
+  function cellSelectionColumnIndexes(): number[] {
+    if (selectedCellKeys.value.size > 0) {
+      const selectedColumnIndexes = new Set<number>();
+      for (const key of selectedCellKeys.value) {
+        const position = parseCellKey(key);
+        if (!position) return [];
+        selectedColumnIndexes.add(position.colIndex);
+      }
+      return [...selectedColumnIndexes];
+    }
+
+    const range = selectedRange.value;
+    if (!range) return [];
+    return Array.from({ length: range.endCol - range.startCol + 1 }, (_, index) => range.startCol + index);
   }
 
   function selectAllCells() {
@@ -588,7 +638,7 @@ export function useDataGridSelection(options: UseDataGridSelectionOptions) {
     selectRow,
     selectColumn,
     selectColumns,
-    remapColumnSelection,
+    reconcileSelectionAfterColumnReorder,
     selectAllCells,
     extendCellSelectionTo,
     finishCellSelection,

@@ -45,12 +45,98 @@ describe("useDataGridSelection", () => {
 
     selection.selectColumn(0);
     selection.selectColumn(2, rowEvent({ meta: true }));
-    selection.remapColumnSelection([0, 1, 2], [1, 2, 0]);
+    selection.reconcileSelectionAfterColumnReorder([0, 1, 2], [1, 2, 0]);
 
     expect(selection.selectedColumnIndexes.value).toEqual(new Set([1, 2]));
 
     selection.selectColumn(0, rowEvent({ shift: true }));
     expect(selection.selectedColumnIndexes.value).toEqual(new Set([0, 1, 2]));
+  });
+
+  it("moves a single-column rectangular cell selection with its column after reordering", () => {
+    const selection = createSelection();
+
+    selection.selectSingleCell(1, 0);
+    selection.extendCellSelectionTo(2, 0);
+    selection.reconcileSelectionAfterColumnReorder([0, 1, 2], [1, 2, 0]);
+
+    expect(selection.selectedRange.value).toEqual({ startRow: 1, endRow: 2, startCol: 2, endCol: 2 });
+    expect(selection.cellIsSelected(1, 2)).toBe(true);
+    expect(selection.cellIsSelected(2, 0)).toBe(false);
+  });
+
+  it("moves a discrete single-column cell selection with its column after reordering", () => {
+    const selection = createSelection();
+
+    selection.selectedCellKeys.value = new Set(["0:0", "2:0"]);
+    selection.reconcileSelectionAfterColumnReorder([0, 1, 2], [1, 2, 0]);
+
+    expect(selection.selectedCellKeys.value).toEqual(new Set(["0:2", "2:2"]));
+    expect(selection.cellIsSelected(0, 2)).toBe(true);
+    expect(selection.cellIsSelected(2, 0)).toBe(false);
+  });
+
+  it("keeps a multi-column rectangular cell selection when its columns remain contiguous", () => {
+    const selection = createSelection();
+
+    selection.selectSingleCell(1, 0);
+    selection.extendCellSelectionTo(2, 1);
+    selection.reconcileSelectionAfterColumnReorder([0, 1, 2], [2, 0, 1]);
+
+    expect(selection.selectedRange.value).toEqual({ startRow: 1, endRow: 2, startCol: 1, endCol: 2 });
+    expect(selection.cellIsSelected(1, 1)).toBe(true);
+    expect(selection.cellIsSelected(2, 2)).toBe(true);
+    expect(selection.cellIsSelected(1, 0)).toBe(false);
+  });
+
+  it.each([
+    { edge: "left", nextColumnIndexes: [1, 0, 2] },
+    { edge: "right", nextColumnIndexes: [0, 2, 1] },
+  ])("keeps the whole rectangular selection when an inner column moves to its $edge edge", ({ nextColumnIndexes }) => {
+    const selection = createSelection();
+
+    selection.selectSingleCell(1, 0);
+    selection.extendCellSelectionTo(2, 2);
+    selection.reconcileSelectionAfterColumnReorder([0, 1, 2], nextColumnIndexes);
+
+    expect(selection.selectedRange.value).toEqual({ startRow: 1, endRow: 2, startCol: 0, endCol: 2 });
+    expect(selection.cellIsSelected(1, nextColumnIndexes.indexOf(1))).toBe(true);
+    expect(selection.selectedCellCount.value).toBe(6);
+  });
+
+  it("clears a multi-column rectangular cell selection when its columns split apart", () => {
+    const selection = createSelection();
+
+    selection.selectSingleCell(1, 0);
+    selection.extendCellSelectionTo(2, 1);
+    selection.reconcileSelectionAfterColumnReorder([0, 1, 2], [1, 2, 0]);
+
+    expect(selection.selectedRange.value).toBeNull();
+    expect(selection.selectedCellKeys.value).toEqual(new Set());
+    expect(selection.hasCellSelection.value).toBe(false);
+  });
+
+  it("keeps a discrete multi-column cell selection when its columns become contiguous", () => {
+    const selection = createSelection();
+
+    selection.selectedCellKeys.value = new Set(["0:0", "0:2", "2:0", "2:2"]);
+    selection.reconcileSelectionAfterColumnReorder([0, 1, 2], [1, 2, 0]);
+
+    expect(selection.selectedCellKeys.value).toEqual(new Set(["0:2", "0:1", "2:2", "2:1"]));
+    expect(selection.cellIsSelected(0, 1)).toBe(true);
+    expect(selection.cellIsSelected(2, 2)).toBe(true);
+    expect(selection.cellIsSelected(0, 0)).toBe(false);
+  });
+
+  it("clears a discrete multi-column cell selection when its columns split apart", () => {
+    const selection = createSelection();
+
+    selection.selectedCellKeys.value = new Set(["0:0", "0:1", "2:0", "2:1"]);
+    selection.reconcileSelectionAfterColumnReorder([0, 1, 2], [1, 2, 0]);
+
+    expect(selection.selectedRange.value).toBeNull();
+    expect(selection.selectedCellKeys.value).toEqual(new Set());
+    expect(selection.hasCellSelection.value).toBe(false);
   });
 
   it("invalidates synthetic context state for ordinary, Ctrl, and Cmd cell selection", () => {

@@ -30,6 +30,7 @@ const emit = defineEmits<{
   clear: [];
   copySql: [];
   removeRule: [id: string];
+  moveRule: [id: string, targetIndex: number];
   updateRule: [id: string, patch: Partial<DataGridStructuredFilterRule>];
 }>();
 
@@ -156,6 +157,7 @@ watch(
         @reset="emit('reset')"
         @clear="emit('clear')"
         @remove="emit('removeRule', $event)"
+        @move="(id, targetIndex) => emit('moveRule', id, targetIndex)"
         @update-rule="(id, patch) => emit('updateRule', id, patch)"
         @update:column-search="emit('update:columnSearch', $event)"
       />

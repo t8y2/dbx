@@ -1623,6 +1623,7 @@ export default {
     filterBuilderAddRule: "Add rule",
     filterBuilderEnableRule: "Enable rule",
     filterBuilderDisableRule: "Disable rule",
+    filterBuilderReorderRule: "Drag or use arrow keys to reorder condition",
     filterBuilderColumn: "Column",
     filterBuilderSearchColumns: "Search columns...",
     filterBuilderNoMatchingColumns: "No matching columns",

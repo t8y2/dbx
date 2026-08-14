@@ -1524,6 +1524,7 @@ export default withEnglishFallback({
     filterBuilderAddRule: "ルールを追加",
     filterBuilderEnableRule: "条件を有効化",
     filterBuilderDisableRule: "条件を無効化",
+    filterBuilderReorderRule: "ドラッグまたは矢印キーで条件を並べ替え",
     filterBuilderColumn: "列",
     filterBuilderValue: "値",
     filterBuilderTextValue: "<?>",

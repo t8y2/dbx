@@ -36,6 +36,7 @@ vi.mock("@lucide/vue", async () => {
     Copy: icon,
     Eye: icon,
     EyeOff: icon,
+    GripVertical: icon,
     Info: icon,
     Pencil: icon,
     Plus: icon,
@@ -452,7 +453,7 @@ describe("DataGridFilterBuilder", () => {
       onUpdateRule: updateRule,
       onAdd: add,
     });
-    const ruleGrid = findOne(mounted.root, (node) => String(node.props.class).includes("grid-cols-[22px_var(--filter-builder-column-width)_92px_minmax(140px,1fr)_auto]"));
+    const ruleGrid = findOne(mounted.root, (node) => String(node.props.class).includes("grid-cols-[18px_22px_var(--filter-builder-column-width)_92px_minmax(140px,1fr)_auto]"));
     const enabledCheckbox = findOne(mounted.root, (node) => node.props.role === "checkbox");
     const triggers = findAll(mounted.root, (node) => node.props["data-stub"] === "SelectTrigger");
     const valueEditor = findOne(mounted.root, (node) => node.props["data-filter-value-editor"] === "");
@@ -508,7 +509,7 @@ describe("DataGridFilterBuilder", () => {
     const selectValues = findAll(mounted.root, (node) => node.props["data-stub"] === "SelectValue");
     const items = findAll(mounted.root, (node) => node.props["data-stub"] === "SelectItem");
     const filterBuilder = findOne(mounted.root, (node) => String(node.props.class).includes("w-fit max-w-full"));
-    const ruleGrid = findOne(mounted.root, (node) => String(node.props.class).includes("grid-cols-[var(--filter-builder-column-width)_92px_var(--filter-builder-value-width)_auto]"));
+    const ruleGrid = findOne(mounted.root, (node) => String(node.props.class).includes("grid-cols-[18px_var(--filter-builder-column-width)_92px_var(--filter-builder-value-width)_auto]"));
     const searchInput = findOne(mounted.root, (node) => node.type === "input" && node.props.placeholder === "grid.filterBuilderSearchColumns");
     const valueEditor = findOne(mounted.root, (node) => node.props["data-filter-value-editor"] === "");
 
@@ -523,7 +524,7 @@ describe("DataGridFilterBuilder", () => {
     expect(searchInput.props.placeholder).toBe("grid.filterBuilderSearchColumns");
     expect(valueEditor.props.placeholder).toBe("grid.filterBuilderValue");
     expect(filterBuilder.props.style).toEqual({ "--filter-builder-column-width": "178px", "--filter-builder-value-width": "178px" });
-    expect(String(ruleGrid.props.class)).toContain("grid-cols-[var(--filter-builder-column-width)_92px_var(--filter-builder-value-width)_auto]");
+    expect(String(ruleGrid.props.class)).toContain("grid-cols-[18px_var(--filter-builder-column-width)_92px_var(--filter-builder-value-width)_auto]");
     expect(String(ruleGrid.props.class)).toContain("justify-start");
     for (const trigger of triggers) {
       expect(String(trigger.props.class)).toContain("w-full");
@@ -544,6 +545,31 @@ describe("DataGridFilterBuilder", () => {
     const filterBuilder = findOne(mounted.root, (node) => String(node.props.class).includes("w-fit max-w-full"));
 
     expect(filterBuilder.props.style).toEqual({ "--filter-builder-column-width": "88px", "--filter-builder-value-width": "178px" });
+  });
+
+  it("renders reorder handles and supports keyboard condition moves", () => {
+    const move = vi.fn();
+    const mounted = mountComponent(DataGridFilterBuilder, {
+      rules: [
+        { id: "r1", columnName: "id", mode: "equals", rawValue: "1", rawEndValue: "", conjunction: "AND" },
+        { id: "r2", columnName: "name", mode: "equals", rawValue: "Alice", rawEndValue: "", conjunction: "AND", disabled: true },
+      ],
+      columns: ["id", "name"],
+      filteredColumns: ["id", "name"],
+      modeOptions: [{ value: "equals", labelKey: "equals" }],
+      columnSearch: "",
+      onMove: move,
+    });
+    const handles = findAll(mounted.root, (node) => node.props["data-filter-drag-handle"] === "");
+
+    expect(handles).toHaveLength(2);
+    expect(handles.every((handle) => handle.props.draggable === true)).toBe(true);
+    expect(handles[0].props["aria-label"]).toBe("grid.filterBuilderReorderRule");
+    const arrowDown = dispatch(handles[0], "keydown", { key: "ArrowDown" });
+    expect(arrowDown.defaultPrevented).toBe(true);
+    expect(move).toHaveBeenCalledWith("r1", 1);
+    dispatch(handles[1], "keydown", { key: "ArrowUp" });
+    expect(move).toHaveBeenLastCalledWith("r2", 0);
   });
 
   it("keeps search focus while navigating and selecting filtered columns", async () => {

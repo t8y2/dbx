@@ -1507,6 +1507,7 @@ export default withEnglishFallback({
     filterBuilderAddRule: "新增條件",
     filterBuilderEnableRule: "啟用條件",
     filterBuilderDisableRule: "停用條件",
+    filterBuilderReorderRule: "拖曳或使用方向鍵排序條件",
     filterBuilderColumn: "欄位",
     filterBuilderValue: "值",
     filterBuilderTextValue: "<?>",

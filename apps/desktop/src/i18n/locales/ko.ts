@@ -1503,6 +1503,7 @@ export default withEnglishFallback({
     filterBuilderAddRule: "규칙 추가",
     filterBuilderEnableRule: "조건 활성화",
     filterBuilderDisableRule: "조건 비활성화",
+    filterBuilderReorderRule: "드래그하거나 방향키로 조건 순서 변경",
     filterBuilderColumn: "컬럼",
     filterBuilderSearchColumns: "컬럼 검색...",
     filterBuilderNoMatchingColumns: "일치하는 컬럼이 없습니다",

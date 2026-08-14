@@ -1548,6 +1548,7 @@ export default withEnglishFallback({
     filterBuilderAddRule: "新增条件",
     filterBuilderEnableRule: "启用条件",
     filterBuilderDisableRule: "禁用条件",
+    filterBuilderReorderRule: "拖拽或使用方向键排序条件",
     filterBuilderColumn: "字段",
     filterBuilderSearchColumns: "搜索字段...",
     filterBuilderNoMatchingColumns: "没有匹配的字段",

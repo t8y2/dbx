@@ -57,6 +57,7 @@ const emit = defineEmits<{
   resetFilters: [];
   clearFilters: [];
   removeRule: [id: string];
+  moveRule: [id: string, targetIndex: number];
   updateRule: [id: string, patch: Partial<DataGridStructuredFilterRule>];
   clearLocalFilter: [columnIndex?: number];
 }>();
@@ -204,6 +205,7 @@ onUnmounted(onResizeEnd);
               @reset="emit('resetFilters')"
               @clear="emit('clearFilters')"
               @remove="emit('removeRule', $event)"
+              @move="(id, targetIndex) => emit('moveRule', id, targetIndex)"
               @update-rule="updateRule"
               @update:column-search="emit('update:columnSearch', $event)"
             />

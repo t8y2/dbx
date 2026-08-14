@@ -1508,6 +1508,7 @@ export default withEnglishFallback({
     filterBuilderAddRule: "Agregar regla",
     filterBuilderEnableRule: "Activar regla",
     filterBuilderDisableRule: "Desactivar regla",
+    filterBuilderReorderRule: "Arrastra o usa las flechas para reordenar la condición",
     filterBuilderColumn: "Columna",
     filterBuilderValue: "Valor",
     filterBuilderTextValue: "<?>",

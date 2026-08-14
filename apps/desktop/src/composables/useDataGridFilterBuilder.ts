@@ -29,6 +29,17 @@ export function buildDataGridStructuredWhere(items: Array<{ rule: DataGridStruct
   return result;
 }
 
+export function moveDataGridStructuredFilterRule(rules: readonly DataGridStructuredFilterRule[], ruleId: string, targetIndex: number): DataGridStructuredFilterRule[] {
+  const sourceIndex = rules.findIndex((rule) => rule.id === ruleId);
+  if (sourceIndex < 0 || rules.length < 2) return [...rules];
+  const nextIndex = Math.min(rules.length - 1, Math.max(0, Math.trunc(targetIndex)));
+  if (sourceIndex === nextIndex) return [...rules];
+  const nextRules = [...rules];
+  const [rule] = nextRules.splice(sourceIndex, 1);
+  nextRules.splice(nextIndex, 0, rule);
+  return nextRules;
+}
+
 export function useDataGridFilterBuilder(options: UseDataGridFilterBuilderOptions) {
   const rules = ref<DataGridStructuredFilterRule[]>([]);
   const open = ref(false);
@@ -63,6 +74,9 @@ export function useDataGridFilterBuilder(options: UseDataGridFilterBuilderOption
       return next;
     });
   }
+  function moveRule(id: string, targetIndex: number) {
+    rules.value = moveDataGridStructuredFilterRule(rules.value, id, targetIndex);
+  }
   function reset() {
     appliedWhereInput.value = "";
     rules.value = toValue(options.columns).length ? [defaultRule()] : [];
@@ -90,5 +104,5 @@ export function useDataGridFilterBuilder(options: UseDataGridFilterBuilderOption
     },
   );
 
-  return { rules, open, columnSearch, appliedWhereInput, filteredColumns, activeCount, defaultRule, ensureRule, addRule, removeRule, updateRule, reset, buildWhere, apply };
+  return { rules, open, columnSearch, appliedWhereInput, filteredColumns, activeCount, defaultRule, ensureRule, addRule, removeRule, updateRule, moveRule, reset, buildWhere, apply };
 }

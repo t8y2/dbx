@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildDataGridStructuredWhere, useDataGridFilterBuilder, type DataGridStructuredFilterRule } from "@/composables/useDataGridFilterBuilder";
+import { buildDataGridStructuredWhere, moveDataGridStructuredFilterRule, useDataGridFilterBuilder, type DataGridStructuredFilterRule } from "@/composables/useDataGridFilterBuilder";
 
 describe("useDataGridFilterBuilder", () => {
   it("searches columns by camel-case initials and any-position text", () => {
@@ -51,5 +51,36 @@ describe("useDataGridFilterBuilder", () => {
         { rule: rule("c", "OR"), condition: "c" },
       ]),
     ).toBe("((a) AND (b)) OR (c)");
+  });
+
+  it("moves complete and disabled rules while preserving their condition data", async () => {
+    let nextId = 0;
+    const builder = useDataGridFilterBuilder({
+      columns: ["a", "b", "c"],
+      createId: () => `rule-${++nextId}`,
+      isComplete: () => true,
+      buildCondition: async (rule) => `${rule.columnName} = ${rule.rawValue}`,
+    });
+    builder.ensureRule();
+    builder.updateRule("rule-1", { columnName: "a", rawValue: "1" });
+    builder.addRule();
+    builder.updateRule("rule-2", { columnName: "b", rawValue: "2", disabled: true });
+    builder.addRule();
+    builder.updateRule("rule-3", { columnName: "c", rawValue: "3" });
+
+    builder.moveRule("rule-3", 0);
+
+    expect(builder.rules.value.map((rule) => rule.id)).toEqual(["rule-3", "rule-1", "rule-2"]);
+    expect(builder.rules.value[2]).toMatchObject({ columnName: "b", rawValue: "2", disabled: true });
+    expect(await builder.buildWhere()).toBe("(c = 3) AND (a = 1)");
+  });
+
+  it("clamps rule moves and ignores unknown rule ids", () => {
+    const rule = (id: string): DataGridStructuredFilterRule => ({ id, columnName: id, mode: "equals", rawValue: id, rawEndValue: "", conjunction: "AND" });
+    const rules = [rule("a"), rule("b"), rule("c")];
+
+    expect(moveDataGridStructuredFilterRule(rules, "a", 99).map((item) => item.id)).toEqual(["b", "c", "a"]);
+    expect(moveDataGridStructuredFilterRule(rules, "c", -2).map((item) => item.id)).toEqual(["c", "a", "b"]);
+    expect(moveDataGridStructuredFilterRule(rules, "missing", 1)).toEqual(rules);
   });
 });

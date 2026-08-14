@@ -1626,6 +1626,10 @@ function updateStructuredFilterRule(ruleId: string, patch: Partial<StructuredFil
   filterBuilder.updateRule(ruleId, patch);
 }
 
+function moveStructuredFilterRule(ruleId: string, targetIndex: number) {
+  filterBuilder.moveRule(ruleId, targetIndex);
+}
+
 function updateTextFilterPanelHeight(height: number) {
   settingsStore.updateEditorSettings({ dataGridTextFilterPanelHeight: height });
 }
@@ -10091,6 +10095,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                   @reset-filters="resetStructuredFilters"
                   @clear-filters="clearAllFilters"
                   @remove-rule="removeStructuredFilterRule"
+                  @move-rule="moveStructuredFilterRule"
                   @update-rule="updateStructuredFilterRule"
                   @clear-local-filter="clearLocalFilter"
                 />
@@ -10218,6 +10223,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
           @clear="clearAllFilters"
           @copy-sql="copyFilterSqlPreview"
           @remove-rule="removeStructuredFilterRule"
+          @move-rule="moveStructuredFilterRule"
           @update-rule="updateStructuredFilterRule"
         />
         <DataGridTextFilterWorkbench
@@ -10239,6 +10245,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
           @clear="clearAllFilters"
           @copy-sql="copyFilterSqlPreview"
           @remove-rule="removeStructuredFilterRule"
+          @move-rule="moveStructuredFilterRule"
           @update-rule="updateStructuredFilterRule"
         />
         <!-- Truncation warning banner -->

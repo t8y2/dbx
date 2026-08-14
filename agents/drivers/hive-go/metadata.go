@@ -340,7 +340,7 @@ func (server *server) listTables(schema string, constraints metadataListConstrai
 		if err != nil {
 			// Older Hive and Impala versions can list tables but do not support SHOW VIEWS.
 			// Keep the usable table result for mixed requests; explicit view requests still fail.
-			if fallback.objectType == "VIEW" && tableFallbackSucceeded {
+			if fallback.objectType == "VIEW" && tableFallbackSucceeded && showViewsUnsupported(err) {
 				continue
 			}
 			return nil, fmt.Errorf("HiveServer2 metadata failed (%v); %s fallback failed: %w", metadataErr, fallback.operation, err)
@@ -366,6 +366,64 @@ func (server *server) listTables(schema string, constraints metadataListConstrai
 	}
 	sort.Slice(values, func(first, second int) bool { return values[first].Name < values[second].Name })
 	return applyMetadataWindow(values, constraints.Offset, constraints.Limit), nil
+}
+
+func showViewsUnsupported(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	operationalMarkers := []string{
+		"permission",
+		"access denied",
+		"not authorized",
+		"unauthorized",
+		"authentication",
+		"authorization",
+		"timeout",
+		"timed out",
+		"deadline exceeded",
+		"cancelled",
+		"canceled",
+		"transport",
+		"connection",
+		"broken pipe",
+		"network",
+	}
+	for _, marker := range operationalMarkers {
+		if strings.Contains(message, marker) {
+			return false
+		}
+	}
+	explicitMarkers := []string{
+		"unsupported",
+		"not supported",
+		"not implemented",
+		"unknown statement",
+		"unrecognized statement",
+	}
+	for _, marker := range explicitMarkers {
+		if strings.Contains(message, marker) {
+			return true
+		}
+	}
+	parseMarkers := []string{
+		"parseexception",
+		"parse error",
+		"syntax error",
+		"mismatched input",
+		"cannot recognize input",
+		"no viable alternative",
+	}
+	for _, marker := range parseMarkers {
+		if strings.Contains(message, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func (server *server) listObjects(schema string, constraints metadataListConstraints) ([]objectInfo, error) {

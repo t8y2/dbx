@@ -284,6 +284,58 @@ func TestListTablesKeepsShowTablesResultsWhenShowViewsIsUnsupported(t *testing.T
 	}
 }
 
+func TestListTablesReturnsNonCapabilityShowViewsError(t *testing.T) {
+	behavior := &scriptedBehavior{
+		getTables: func(context.Context, string, string, []string) (gohive.MetadataResult, error) {
+			return gohive.MetadataResult{}, errors.New("metadata unsupported")
+		},
+		query: func(ctx context.Context, query string) (driver.Rows, error) {
+			switch query {
+			case "SHOW TABLES IN `analytics`":
+				return newScriptedRows(ctx, []string{"tab_name"}, []string{"STRING"}, [][]driver.Value{{"events"}}), nil
+			case "SHOW VIEWS IN `analytics`":
+				return nil, errors.New("permission denied for SHOW VIEWS")
+			default:
+				t.Fatalf("unexpected fallback query: %q", query)
+				return nil, errors.New("unexpected fallback query")
+			}
+		},
+	}
+	server := newScriptedServer(t, behavior)
+	defer server.disconnect()
+
+	_, err := server.listTables("analytics", metadataListConstraints{})
+	if err == nil || !strings.Contains(err.Error(), "SHOW VIEWS fallback failed: permission denied") {
+		t.Fatalf("unexpected mixed fallback error: %v", err)
+	}
+}
+
+func TestShowViewsUnsupported(t *testing.T) {
+	tests := []struct {
+		name        string
+		err         error
+		unsupported bool
+	}{
+		{name: "explicit unsupported", err: errors.New("SHOW VIEWS is unsupported"), unsupported: true},
+		{name: "not supported", err: errors.New("SHOW VIEWS is not supported before Hive 2.2"), unsupported: true},
+		{name: "old parser", err: errors.New("ParseException: syntax error at or near VIEWS"), unsupported: true},
+		{name: "permission", err: errors.New("permission denied for SHOW VIEWS")},
+		{name: "timeout", err: context.DeadlineExceeded},
+		{name: "cancel", err: context.Canceled},
+		{name: "authentication", err: errors.New("authentication failed")},
+		{name: "unsupported authentication", err: errors.New("unsupported authentication mechanism")},
+		{name: "transport", err: errors.New("transport is closed")},
+		{name: "unsupported transport", err: errors.New("transport does not support SASL")},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if actual := showViewsUnsupported(test.err); actual != test.unsupported {
+				t.Fatalf("showViewsUnsupported(%v) = %v, want %v", test.err, actual, test.unsupported)
+			}
+		})
+	}
+}
+
 func TestListTablesFallbackHonorsExplicitTableType(t *testing.T) {
 	behavior := &scriptedBehavior{
 		getTables: func(context.Context, string, string, []string) (gohive.MetadataResult, error) {

@@ -93,6 +93,7 @@ pub(crate) fn model_is_assistant_compatible(provider: &AiProvider, model_id: &st
         | AiProvider::Deepseek
         | AiProvider::Ollama
         | AiProvider::OpenaiCompatible
+        | AiProvider::OrcaRouter
         | AiProvider::CodexCli
         | AiProvider::ClaudeCodeCli
         | AiProvider::PiAgentCli

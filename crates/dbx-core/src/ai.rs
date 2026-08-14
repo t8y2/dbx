@@ -73,6 +73,7 @@ pub enum AiProvider {
     Ollama,
     #[serde(rename = "openai-compatible")]
     OpenaiCompatible,
+    OrcaRouter,
     #[serde(rename = "codex-cli")]
     CodexCli,
     #[serde(rename = "claude-code-cli")]
@@ -104,6 +105,7 @@ impl AiProvider {
             AiProvider::MiniMax => "minimax",
             AiProvider::Ollama => "ollama",
             AiProvider::OpenaiCompatible => "openai-compatible",
+            AiProvider::OrcaRouter => "orcarouter",
             AiProvider::ClaudeCodeCli => "claude-code-cli",
             AiProvider::PiAgentCli => "pi-agent-cli",
             AiProvider::OpenCodeCli => "opencode-cli",
@@ -658,6 +660,7 @@ pub fn resolve_endpoint(config: &AiConfig) -> String {
         | AiProvider::MiniMax
         | AiProvider::Ollama
         | AiProvider::OpenaiCompatible
+        | AiProvider::OrcaRouter
         | AiProvider::Custom => {
             let base = ensure_openai_version_prefix(ep);
             if config.api_style == AiApiStyle::Responses {
@@ -1761,7 +1764,8 @@ pub async fn list_models_core(config: &AiConfig) -> Result<Vec<AiModelInfo>, Str
                 | AiProvider::Deepseek
                 | AiProvider::Qwen
                 | AiProvider::MiniMax
-                | AiProvider::OpenaiCompatible => list_openai_compatible_models(&client, config).await?,
+                | AiProvider::OpenaiCompatible
+                | AiProvider::OrcaRouter => list_openai_compatible_models(&client, config).await?,
                 AiProvider::Custom => {
                     if uses_anthropic_messages_api(config) {
                         list_claude_models(&client, config).await?
@@ -2802,7 +2806,8 @@ pub async fn complete(request: &AiCompletionRequest) -> Result<String, String> {
                 | AiProvider::Qwen
                 | AiProvider::MiniMax
                 | AiProvider::Ollama
-                | AiProvider::OpenaiCompatible => {
+                | AiProvider::OpenaiCompatible
+                | AiProvider::OrcaRouter => {
                     if request.config.api_style == AiApiStyle::Responses {
                         call_responses_api(&client, request).await
                     } else {
@@ -2863,7 +2868,8 @@ pub async fn stream(
         | AiProvider::Qwen
         | AiProvider::MiniMax
         | AiProvider::Ollama
-        | AiProvider::OpenaiCompatible => {
+        | AiProvider::OpenaiCompatible
+        | AiProvider::OrcaRouter => {
             if request.config.api_style == AiApiStyle::Responses {
                 stream_responses_api(&client, session_id, request, cancelled, &on_chunk).await
             } else {

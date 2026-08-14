@@ -215,6 +215,16 @@ export const AI_PROVIDER_PRESETS: Record<AiProvider, AiProviderPreset> = {
     authMethod: "bearer",
     requiresApiKey: false,
   },
+  orcarouter: {
+    label: "OrcaRouter",
+    iconSlug: "orcarouter",
+    provider: "orcarouter",
+    endpoint: "https://api.orcarouter.ai/v1",
+    model: "orcarouter/fusion-flash",
+    apiStyle: "completions",
+    authMethod: "bearer",
+    requiresApiKey: true,
+  },
   "claude-code-cli": {
     label: "Claude Code CLI",
     iconSlug: "claudecode",
@@ -370,6 +380,7 @@ function normalizeAiConfigItem(config: AiConfigItem): AiConfigItem {
 function inferAiProviderFromConfig(config: Partial<AiConfig> | null | undefined): AiProvider {
   const endpoint = config?.endpoint?.toLowerCase() ?? "";
   const model = config?.model?.toLowerCase() ?? "";
+  if (endpoint.includes("orcarouter") || model.includes("orcarouter")) return "orcarouter";
   if (endpoint.includes("deepseek") || model.includes("deepseek")) return "deepseek";
   if (endpoint.includes("dashscope") || endpoint.includes("aliyuncs") || model.includes("qwen")) return "qwen";
   if (endpoint.includes("generativelanguage.googleapis.com") || model.includes("gemini")) return "gemini";

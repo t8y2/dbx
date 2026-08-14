@@ -497,6 +497,46 @@ test("quotes PostgreSQL reserved-word table identifiers when completion inserts 
   assert.equal(table?.apply, '"order"');
 });
 
+test("quotes MySQL reserved-word table identifiers with backticks when completion inserts them", () => {
+  const sql = "select * from ord";
+  const items = buildSqlCompletionItems(sql, sql.length, {
+    tables: [{ name: "order", schema: "public", type: "table" }],
+    columnsByTable: new Map(),
+    dialect: "mysql",
+  });
+
+  const table = items.find((item) => item.type === "table" && item.label === "order");
+  assert.equal(table?.apply, "`order`");
+});
+
+test("leaves safe MySQL table identifiers unquoted when completion inserts them", () => {
+  const sql = "select * from article";
+  const items = buildSqlCompletionItems(sql, sql.length, {
+    tables: [{ name: "article", schema: "public", type: "table" }],
+    columnsByTable: new Map(),
+    dialect: "mysql",
+  });
+
+  const table = items.find((item) => item.type === "table" && item.label === "article");
+  assert.equal(table?.apply, "article");
+});
+
+test("quotes MySQL reserved-word column identifiers with backticks when completion inserts them", () => {
+  const reservedColumns = ["order", "do", "returning", "ilike", "window", "true"];
+  const reservedColumnsByTable = new Map<string, SqlCompletionColumn[]>([["public.bookings", reservedColumns.map((name) => ({ name, table: "bookings", schema: "public", dataType: "text" }))]]);
+  const sql = "select  from bookings";
+  const items = buildSqlCompletionItems(sql, "select ".length, {
+    tables: [{ name: "bookings", schema: "public", type: "table" }],
+    columnsByTable: reservedColumnsByTable,
+    dialect: "mysql",
+  });
+
+  for (const name of reservedColumns) {
+    const column = items.find((item) => item.type === "column" && item.label === name);
+    assert.equal(column?.apply, `\`${name}\``, `expected reserved column "${name}" to be quoted`);
+  }
+});
+
 test("suggests matching table names after FROM", () => {
   const sql = "select * from us";
   const items = buildSqlCompletionItems(sql, sql.length, {

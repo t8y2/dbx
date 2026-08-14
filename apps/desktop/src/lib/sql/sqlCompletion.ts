@@ -3091,6 +3091,18 @@ export function quoteSqlIdentifier(identifier: string, dialect?: "mysql" | "post
 
 const POSTGRES_IDENTIFIER_KEYWORDS = new Set(SQL_KEYWORDS.map((keyword) => keyword.toLowerCase()));
 
+// Unlike quoteSqlIdentifier (also used by the data grid condition editor, which
+// intentionally leaves MySQL identifiers unquoted and applies backticks itself
+// at insertion time), SQL editor completion apply/insertText needs the quoting
+// baked in up front, so MySQL reserved-word identifiers get backtick-quoted here.
+function quoteCompletionApplyIdentifier(identifier: string, dialect?: "mysql" | "postgres" | "sqlserver"): string {
+  if (dialect === "mysql") {
+    if (!requiresPostgresIdentifierQuote(identifier, POSTGRES_IDENTIFIER_KEYWORDS)) return identifier;
+    return `\`${identifier.replaceAll("`", "``")}\``;
+  }
+  return quoteSqlIdentifier(identifier, dialect);
+}
+
 function quoteSelectStarColumnIdentifier(identifier: string, dialect?: "mysql" | "postgres" | "sqlserver", databaseType?: DatabaseType): string {
   if (!requiresPostgresIdentifierQuote(identifier, POSTGRES_IDENTIFIER_KEYWORDS)) return identifier;
   if (databaseType) return quoteTableIdentifier(databaseType, identifier);
@@ -3138,7 +3150,7 @@ function resolveTableSchemaQualification(
   // Keep Oracle's current-schema behavior, but qualify the generic/PostgreSQL/SQL Server paths.
   const ambiguousTableName = databaseType !== "oracle" && (schemasByTableName.get(normalizeIdentifierPart(table.name))?.size ?? 0) > 1;
   const schemaQualification = !!table.schema && (oracleSchemaQualification || ambiguousTableName);
-  const defaultApplyName = schemaQualification ? `${quoteSqlIdentifier(table.schema!, dialect)}.${quoteSqlIdentifier(table.name, dialect)}` : quoteSqlIdentifier(table.name, dialect);
+  const defaultApplyName = schemaQualification ? `${quoteCompletionApplyIdentifier(table.schema!, dialect)}.${quoteCompletionApplyIdentifier(table.name, dialect)}` : quoteCompletionApplyIdentifier(table.name, dialect);
   return { ambiguousTableName, schemaQualification, defaultApplyName };
 }
 
@@ -3164,7 +3176,7 @@ function buildTableItems(
       const { ambiguousTableName, defaultApplyName } = resolveTableSchemaQualification(table, dialect, databaseType, currentSchema, schemasByTableName);
       const suppliedApplyName = table.applyName?.trim();
       const suppliedApplyNameIsQualified = suppliedApplyName?.includes(".") === true;
-      const applyName = qualifiedByContext ? quoteSqlIdentifier(table.name, dialect) : ambiguousTableName && !!table.schema && (!suppliedApplyName || !suppliedApplyNameIsQualified) ? defaultApplyName : (suppliedApplyName ?? defaultApplyName);
+      const applyName = qualifiedByContext ? quoteCompletionApplyIdentifier(table.name, dialect) : ambiguousTableName && !!table.schema && (!suppliedApplyName || !suppliedApplyNameIsQualified) ? defaultApplyName : (suppliedApplyName ?? defaultApplyName);
       const alias = autoAliasTables ? generateTableCompletionAlias(table.name, existingAliases) : "";
       return {
         label: table.name,
@@ -3260,7 +3272,7 @@ function buildSchemaItems(prefix: string, schemas: string[], dialect?: "mysql" |
       label: schema,
       type: "schema" as const,
       detail: "schema",
-      apply: `${quoteSqlIdentifier(schema, dialect)}.`,
+      apply: `${quoteCompletionApplyIdentifier(schema, dialect)}.`,
       boost: computeBoost(schema, prefix) + 700,
     }));
 }
@@ -3277,8 +3289,8 @@ function buildObjectItems(context: SqlCompletionContext, objects: SqlCompletionO
       const objectInCurrentSchema = !!currentSchema && !!object.schema && normalizeIdentifierPart(object.schema) === normalizeIdentifierPart(currentSchema);
       const applyName =
         qualifiedByContext || (context.qualifier && object.schema?.toLowerCase() === context.qualifier.toLowerCase())
-          ? quoteSqlIdentifier(object.name, dialect)
-          : (object.applyName ?? (object.schema && !objectInCurrentSchema ? `${quoteSqlIdentifier(object.schema, dialect)}.${quoteSqlIdentifier(object.name, dialect)}` : quoteSqlIdentifier(object.name, dialect)));
+          ? quoteCompletionApplyIdentifier(object.name, dialect)
+          : (object.applyName ?? (object.schema && !objectInCurrentSchema ? `${quoteCompletionApplyIdentifier(object.schema, dialect)}.${quoteCompletionApplyIdentifier(object.name, dialect)}` : quoteCompletionApplyIdentifier(object.name, dialect)));
       const locationDetail = object.type === "trigger" && object.parentName ? `trigger on ${object.parentName}` : object.parentName ? `${object.type} in ${object.parentName}` : object.schema ? `${object.type} in ${object.schema}` : object.type;
       const signature = object.signature?.trim();
       const detail = [locationDetail, signature ? `(${signature})` : undefined, object.dataType ? `[${object.dataType}]` : undefined].filter(Boolean).join("  ");
@@ -3492,7 +3504,7 @@ export function buildSelectStarExpansion(context: SqlCompletionContext, columnsB
 
   return references
     .flatMap((reference) => {
-      const qualifier = reference.aliasSql ?? (reference.alias ? quoteSqlIdentifier(reference.alias, dialect) : quoteSqlIdentifier(reference.name, dialect));
+      const qualifier = reference.aliasSql ?? (reference.alias ? quoteCompletionApplyIdentifier(reference.alias, dialect) : quoteCompletionApplyIdentifier(reference.name, dialect));
       return uniqueColumnsByName(columnsForSelectAllReferencedTable(reference, columnsByTable)).map((column) => `${qualifier}.${quoteSelectStarColumnIdentifier(column.name, dialect, databaseType)}`);
     })
     .join(", ");
@@ -3533,7 +3545,7 @@ function buildSelectAllColumnItems(context: SqlCompletionContext, columnsByTable
     const label = `${displayRef}.*`;
     if (!selectAllColumnItemMatchesPrefix(label, ref, columns, context.prefix)) continue;
 
-    const qualifier = context.qualifier || ref.alias || (shouldQualify ? quoteSqlIdentifier(ref.name, dialect) : undefined);
+    const qualifier = context.qualifier || ref.alias || (shouldQualify ? quoteCompletionApplyIdentifier(ref.name, dialect) : undefined);
     const expansion = buildSelectAllColumnExpansion(columns, qualifier, !!context.qualifier, dialect);
     const countText = (t?.starExpansionColumns ?? "{count} columns").replace("{count}", String(columns.length));
     items.push({
@@ -3556,7 +3568,7 @@ function buildInsertAllColumnItems(context: SqlCompletionContext, columnsByTable
   const label = `${context.insertTable}.*`;
   if (!selectAllColumnItemMatchesPrefix(label, { name: context.insertTable, schema: context.insertSchema }, columns, context.prefix)) return [];
 
-  const columnList = columns.map((column) => quoteSqlIdentifier(column.name, dialect)).join(", ");
+  const columnList = columns.map((column) => quoteCompletionApplyIdentifier(column.name, dialect)).join(", ");
   const valuesKeyword = applySqlKeywordCase("VALUES", keywordCase);
   const valueList = columns.map((_, index) => `\${${index + 1}:value}`).join(", ");
   const expansion = `${columnList}) ${valuesKeyword} (${valueList})`;
@@ -4042,10 +4054,10 @@ function normalizeCompletionKey(key: string): string {
 
 function buildColumnApply(column: SqlCompletionColumn & { displayLabel: string }, context: SqlCompletionContext, dialect?: "mysql" | "postgres" | "sqlserver"): string {
   if (context.qualifier || column.displayLabel === column.name || !column.displayLabel.includes(".")) {
-    return quoteSqlIdentifier(column.name, dialect);
+    return quoteCompletionApplyIdentifier(column.name, dialect);
   }
-  const qualifier = column.sourceQualifierSql ?? quoteSqlIdentifier(column.sourceAlias ?? column.table, dialect);
-  return `${qualifier}.${quoteSqlIdentifier(column.name, dialect)}`;
+  const qualifier = column.sourceQualifierSql ?? quoteCompletionApplyIdentifier(column.sourceAlias ?? column.table, dialect);
+  return `${qualifier}.${quoteCompletionApplyIdentifier(column.name, dialect)}`;
 }
 
 function isKeyColumn(name: string): boolean {
@@ -4146,11 +4158,11 @@ function buildDirectionalForeignKeyJoinConditionItems(owner: SqlCompletionRefere
 function buildJoinConditionPart(owner: SqlCompletionReferencedTable, ownerColumn: string, referenced: SqlCompletionReferencedTable, referencedColumn: string, dialect?: "mysql" | "postgres" | "sqlserver"): { label: string; apply: string } {
   const ownerRef = owner.alias || owner.name;
   const referencedRef = referenced.alias || referenced.name;
-  const ownerApplyRef = owner.alias ? owner.alias : quoteSqlIdentifier(owner.name, dialect);
-  const referencedApplyRef = referenced.alias ? referenced.alias : quoteSqlIdentifier(referenced.name, dialect);
+  const ownerApplyRef = owner.alias ? owner.alias : quoteCompletionApplyIdentifier(owner.name, dialect);
+  const referencedApplyRef = referenced.alias ? referenced.alias : quoteCompletionApplyIdentifier(referenced.name, dialect);
   return {
     label: `${ownerRef}.${ownerColumn} = ${referencedRef}.${referencedColumn}`,
-    apply: `${ownerApplyRef}.${quoteSqlIdentifier(ownerColumn, dialect)} = ${referencedApplyRef}.${quoteSqlIdentifier(referencedColumn, dialect)}`,
+    apply: `${ownerApplyRef}.${quoteCompletionApplyIdentifier(ownerColumn, dialect)} = ${referencedApplyRef}.${quoteCompletionApplyIdentifier(referencedColumn, dialect)}`,
   };
 }
 
@@ -4188,8 +4200,8 @@ function buildJoinConditionItemsForPair(left: SqlCompletionReferencedTable, left
   const items: SqlCompletionItem[] = [];
   const leftRef = left.alias || left.name;
   const rightRef = right.alias || right.name;
-  const leftApplyRef = left.alias ? left.alias : quoteSqlIdentifier(left.name, dialect);
-  const rightApplyRef = right.alias ? right.alias : quoteSqlIdentifier(right.name, dialect);
+  const leftApplyRef = left.alias ? left.alias : quoteCompletionApplyIdentifier(left.name, dialect);
+  const rightApplyRef = right.alias ? right.alias : quoteCompletionApplyIdentifier(right.name, dialect);
   const leftTableKey = singularTableName(left.name);
   const rightTableKey = singularTableName(right.name);
 
@@ -4204,7 +4216,7 @@ function buildJoinConditionItemsForPair(left: SqlCompletionReferencedTable, left
     emittedPairs.add(key);
     const label = `${leftRef}.${leftColumn.name} = ${rightRef}.${rightColumn.name}`;
     if (prefix && !matchesPrefix(label, prefix)) return;
-    const apply = `${leftApplyRef}.${quoteSqlIdentifier(leftColumn.name, dialect)} = ${rightApplyRef}.${quoteSqlIdentifier(rightColumn.name, dialect)}`;
+    const apply = `${leftApplyRef}.${quoteCompletionApplyIdentifier(leftColumn.name, dialect)} = ${rightApplyRef}.${quoteCompletionApplyIdentifier(rightColumn.name, dialect)}`;
     items.push({
       label,
       type: "snippet",
@@ -4308,8 +4320,8 @@ function buildCompositeHeuristicJoinConditionItems(
 
   const leftRef = left.alias || left.name;
   const rightRef = right.alias || right.name;
-  const leftApplyRef = left.alias ? left.alias : quoteSqlIdentifier(left.name, dialect);
-  const rightApplyRef = right.alias ? right.alias : quoteSqlIdentifier(right.name, dialect);
+  const leftApplyRef = left.alias ? left.alias : quoteCompletionApplyIdentifier(left.name, dialect);
+  const rightApplyRef = right.alias ? right.alias : quoteCompletionApplyIdentifier(right.name, dialect);
   const items: SqlCompletionItem[] = [];
 
   for (const candidate of candidates.slice(0, 2)) {
@@ -4337,7 +4349,7 @@ function buildCompositeHeuristicJoinConditionItems(
 function buildHeuristicJoinConditionPart(leftRef: string, leftApplyRef: string, leftColumn: SqlCompletionColumn, rightRef: string, rightApplyRef: string, rightColumn: SqlCompletionColumn, dialect?: "mysql" | "postgres" | "sqlserver"): { label: string; apply: string } {
   return {
     label: `${leftRef}.${leftColumn.name} = ${rightRef}.${rightColumn.name}`,
-    apply: `${leftApplyRef}.${quoteSqlIdentifier(leftColumn.name, dialect)} = ${rightApplyRef}.${quoteSqlIdentifier(rightColumn.name, dialect)}`,
+    apply: `${leftApplyRef}.${quoteCompletionApplyIdentifier(leftColumn.name, dialect)} = ${rightApplyRef}.${quoteCompletionApplyIdentifier(rightColumn.name, dialect)}`,
   };
 }
 
@@ -4568,7 +4580,7 @@ function buildNonAggregatedColumnItems(context: SqlCompletionContext, columnsByT
         label: col.name,
         type: "column" as const,
         detail: "non-aggregated column — required in GROUP BY",
-        apply: quoteSqlIdentifier(col.name, dialect),
+        apply: quoteCompletionApplyIdentifier(col.name, dialect),
         boost: 2800 - items.length,
       });
     }

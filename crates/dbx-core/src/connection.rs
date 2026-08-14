@@ -4790,18 +4790,22 @@ fn session_scoped_pool_key_for(
 
 /// 两个运行态连接配置是否视为同一连接（用于决定是否销毁连接池）。
 ///
-/// 忽略 `password` 字段的差异：`save_password=false` 的连接在 connect 时
-/// 运行态配置可能携带会话密码，持久化同步后为空，这种空值差异不应触发池重建；
-/// 仅当 host/port/user/database/SSL/SSH 等真实连接参数变化时才销毁池。
+/// 仅当双方都是 `save_password=false` 时才忽略 `password` 字段的差异：这类连接
+/// 在 connect 时运行态配置可能携带会话密码，持久化同步后为空，这种空值差异不应
+/// 触发池重建。若任一方 `save_password=true`，密码是真实的连接参数，任何密码变更
+/// （包括用户保存了新密码）都必须销毁旧池，否则旧池会继续用旧密码认证。
 pub fn connection_configs_pool_equivalent(a: &ConnectionConfig, b: &ConnectionConfig) -> bool {
     if a == b {
         return true;
     }
-    let mut a = a.clone();
-    a.password.clear();
-    let mut b = b.clone();
-    b.password.clear();
-    a == b
+    if !a.save_password && !b.save_password {
+        let mut a = a.clone();
+        a.password.clear();
+        let mut b = b.clone();
+        b.password.clear();
+        return a == b;
+    }
+    false
 }
 
 fn pool_key_for_session_role(
@@ -5382,6 +5386,18 @@ mod tests {
         let mut c = a.clone();
         c.password = "changed-secret".to_string();
         assert!(connection_configs_pool_equivalent(&a, &c));
+    }
+
+    #[test]
+    fn connection_configs_pool_equivalent_detects_saved_password_change() {
+        let mut a = mysql_config(None);
+        a.save_password = true;
+        a.password = "old-secret".to_string();
+        let mut b = a.clone();
+        b.password = "new-secret".to_string();
+        // save_password=true：密码是真实连接参数，保存新密码后旧池不得继续用旧密码认证。
+        assert!(!connection_configs_pool_equivalent(&a, &b));
+        assert!(!connection_configs_pool_equivalent(&b, &a));
     }
 
     #[test]

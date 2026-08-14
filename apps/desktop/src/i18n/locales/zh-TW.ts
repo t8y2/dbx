@@ -4985,6 +4985,7 @@ export default withEnglishFallback({
     shortcutIndentMore: "增加縮排",
     shortcutIndentLess: "減少縮排",
     shortcutInsertLineBelow: "在下方新增一行",
+    shortcutJoinLines: "合併行",
     shortcutDuplicateLine: "複製目前行",
     shortcutDeleteLine: "刪除目前行",
     shortcutMoveLineUp: "上移目前行",

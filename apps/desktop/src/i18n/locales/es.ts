@@ -5659,6 +5659,7 @@ export default withEnglishFallback({
     shortcutIndentMore: "Aumentar sangría",
     shortcutIndentLess: "Reducir sangría",
     shortcutInsertLineBelow: "Insertar una línea debajo",
+    shortcutJoinLines: "Unir líneas",
     shortcutDuplicateLine: "Duplicar línea actual",
     shortcutDeleteLine: "Eliminar línea actual",
     shortcutMoveLineUp: "Mover línea arriba",

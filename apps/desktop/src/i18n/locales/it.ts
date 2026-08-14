@@ -5659,6 +5659,7 @@ export default withEnglishFallback({
     shortcutIndentMore: "Aumenta rientro",
     shortcutIndentLess: "Riduci rientro",
     shortcutInsertLineBelow: "Inserisci una riga sotto",
+    shortcutJoinLines: "Unisci righe",
     shortcutDuplicateLine: "Duplica riga corrente",
     shortcutDeleteLine: "Elimina riga corrente",
     shortcutMoveLineUp: "Sposta riga su",

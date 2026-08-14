@@ -5674,6 +5674,7 @@ export default withEnglishFallback({
     shortcutIndentMore: "インデントを増やす",
     shortcutIndentLess: "インデントを減らす",
     shortcutInsertLineBelow: "下に行を挿入",
+    shortcutJoinLines: "行を結合",
     shortcutDuplicateLine: "現在行を複製",
     shortcutDeleteLine: "現在行を削除",
     shortcutMoveLineUp: "行を上に移動",

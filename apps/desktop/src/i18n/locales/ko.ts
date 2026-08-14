@@ -5429,6 +5429,7 @@ export default withEnglishFallback({
     shortcutIndentMore: "들여쓰기 늘리기",
     shortcutIndentLess: "들여쓰기 줄이기",
     shortcutInsertLineBelow: "아래에 줄 삽입",
+    shortcutJoinLines: "줄 합치기",
     shortcutDuplicateLine: "현재 줄 복제",
     shortcutDeleteLine: "현재 줄 삭제",
     shortcutMoveLineUp: "줄 위로 이동",

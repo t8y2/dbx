@@ -1146,6 +1146,7 @@ export default {
     pressToExecute: "Press {mod}+Enter to execute",
     pressToSaveSql: "Press {mod}+S to save SQL",
     queryTimeoutError: "Query timed out ({seconds}s). Check whether the database connection is healthy.",
+    changeConnectionTimeout: "Change connection timeout",
     changeQueryTimeout: "Change query timeout",
     connectionMayBeLost: "The connection may have been lost. Refresh data and try again.",
     showResultsPane: "Show results",

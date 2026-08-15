@@ -1122,6 +1122,7 @@ export default withEnglishFallback({
     pressToExecute: "Premi {mod}+Enter per eseguire",
     pressToSaveSql: "Premi {mod}+S per salvare SQL",
     queryTimeoutError: "Timeout della query ({seconds}s). Verifica se la connessione al database è integra.",
+    changeConnectionTimeout: "Modifica timeout connessione",
     changeQueryTimeout: "Modifica timeout query",
     connectionMayBeLost: "La connessione potrebbe essere andata perduta. Aggiorna i dati e riprova.",
     showResultsPane: "Mostra risultati",

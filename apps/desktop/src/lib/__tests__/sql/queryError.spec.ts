@@ -1,5 +1,43 @@
 import { describe, expect, it } from "vitest";
-import { isQueryTimeoutErrorMessage } from "@/lib/sql/queryError";
+import { isConnectionTimeoutErrorMessage, isQueryTimeoutErrorMessage } from "@/lib/sql/queryError";
+
+describe("isConnectionTimeoutErrorMessage", () => {
+  it("detects connection creation and handshake timeouts", () => {
+    expect(isConnectionTimeoutErrorMessage("PostgreSQL connection failed: Timeout occurred while creating a new object")).toBe(true);
+    expect(isConnectionTimeoutErrorMessage("MySQL connection failed: TLS handshake timed out after 10 seconds")).toBe(true);
+    expect(isConnectionTimeoutErrorMessage("The connection attempt timed out")).toBe(true);
+  });
+
+  it("detects structured connect-stage timeouts", () => {
+    const timeoutError = {
+      version: 1,
+      code: "DBX-JDBC-2001",
+      messageKey: "backendErrors.jdbc.operationTimedOut",
+      messageParams: { stage: "connect" },
+      source: "jdbcAgent",
+      operationOutcome: "not_started" as const,
+    } as const;
+
+    expect(isConnectionTimeoutErrorMessage("Database operation timed out (stage: connect).", timeoutError)).toBe(true);
+  });
+
+  it("does not classify query, pool checkout, cancellation, or syntax errors as connection timeouts", () => {
+    expect(isConnectionTimeoutErrorMessage("Query timed out after 30 seconds")).toBe(false);
+    expect(isConnectionTimeoutErrorMessage("PostgreSQL connection pool checkout timed out (5s)")).toBe(false);
+    expect(isConnectionTimeoutErrorMessage("Cancel request timed out after 10s.")).toBe(false);
+    expect(isConnectionTimeoutErrorMessage('syntax error at or near "select"')).toBe(false);
+    expect(
+      isConnectionTimeoutErrorMessage("Database operation timed out (stage: execute).", {
+        version: 1,
+        code: "DBX-JDBC-2002",
+        messageKey: "backendErrors.jdbc.operationTimedOut",
+        messageParams: { stage: "execute" },
+        source: "jdbcAgent",
+        operationOutcome: "unknown",
+      }),
+    ).toBe(false);
+  });
+});
 
 describe("isQueryTimeoutErrorMessage", () => {
   it("detects DBX query timeout messages", () => {

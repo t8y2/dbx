@@ -1,6 +1,20 @@
 import type { BackendError } from "@/lib/backend/errorUtils";
 
 const QUERY_TIMEOUT_STAGES = new Set(["execute", "fetch"]);
+const CONNECTION_TIMEOUT_STAGES = new Set(["connect", "connection"]);
+
+export function isConnectionTimeoutErrorMessage(message: string, backendError?: BackendError): boolean {
+  if (backendError?.messageKey === "backendErrors.jdbc.operationTimedOut") {
+    const stage = String(backendError.messageParams.stage ?? "").toLowerCase();
+    return CONNECTION_TIMEOUT_STAGES.has(stage);
+  }
+
+  const lower = message.toLowerCase();
+  if (/\btimeout occurred while creating a new object\b/.test(lower)) return true;
+  if (/\b(?:pool\s+checkout|checkout|metadata|loading|health check|cancel request)\b/.test(lower)) return false;
+  if (/\b(?:connection|connect|handshake)\b[\s\S]{0,80}\b(?:timed out|timeout expired|timeout exceeded|time-out)\b/.test(lower)) return true;
+  return /\b(?:timed out|timeout expired|timeout exceeded|time-out)\b[\s\S]{0,80}\b(?:connection attempt|connect|handshake)\b/.test(lower);
+}
 
 export function isQueryTimeoutErrorMessage(message: string, backendError?: BackendError): boolean {
   if (backendError?.messageKey === "backendErrors.jdbc.operationTimedOut") {

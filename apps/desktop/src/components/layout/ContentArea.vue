@@ -1640,6 +1640,7 @@ defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, hand
                     :error-message="String(errorMessage)"
                     :backend-error="activeTab.result.error"
                     :connection-id="activeResultConnectionId"
+                    @change-connection-timeout="activeResultConnectionId && emit('openConnectionSettings', activeResultConnectionId, 'advanced')"
                     @change-query-timeout="activeResultConnectionId && emit('openConnectionSettings', activeResultConnectionId, 'advanced')"
                     @fix-with-ai="(message) => emit('fixWithAi', message)"
                   />
@@ -1974,6 +1975,7 @@ defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, hand
               :error-message="String(errorMessage)"
               :backend-error="activeTab.result.error"
               :connection-id="activeResultConnectionId"
+              @change-connection-timeout="activeResultConnectionId && emit('openConnectionSettings', activeResultConnectionId, 'advanced')"
               @change-query-timeout="activeResultConnectionId && emit('openConnectionSettings', activeResultConnectionId, 'advanced')"
               @fix-with-ai="(message) => emit('fixWithAi', message)"
             />

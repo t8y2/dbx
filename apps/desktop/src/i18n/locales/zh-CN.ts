@@ -1070,6 +1070,7 @@ export default withEnglishFallback({
     pressToExecute: "按 {mod}+Enter 执行查询",
     pressToSaveSql: "按 {mod}+S 保存 SQL",
     queryTimeoutError: "查询超时 ({seconds}s)，请检查数据库连接是否正常",
+    changeConnectionTimeout: "修改超时时间",
     changeQueryTimeout: "修改查询超时时间",
     connectionMayBeLost: "连接可能已断开，请刷新数据重试",
     showResultsPane: "显示结果",

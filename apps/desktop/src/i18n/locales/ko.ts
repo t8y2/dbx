@@ -1038,6 +1038,7 @@ export default withEnglishFallback({
     pressToExecute: "{mod}+Enter를 눌러 실행",
     pressToSaveSql: "{mod}+S를 눌러 SQL 저장",
     queryTimeoutError: "쿼리 시간 초과 ({seconds}초). 데이터베이스 연결이 정상인지 확인하세요.",
+    changeConnectionTimeout: "연결 제한 시간 변경",
     changeQueryTimeout: "쿼리 제한 시간 변경",
     connectionMayBeLost: "연결이 끊어졌을 수 있습니다. 데이터를 새로고침하고 다시 시도하세요.",
     showResultsPane: "결과 표시",

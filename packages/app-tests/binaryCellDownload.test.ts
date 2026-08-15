@@ -75,6 +75,9 @@ test("binaryCellDisplayText previews printable binary strings without changing t
   assert.equal(binaryCellDisplayText("0xdeadbeef", "VARBINARY(4)"), "VARBINARY [4 bytes]");
   assert.equal(binaryCellDisplayText("0x89504e47", "BLOB"), "BLOB [4 bytes]");
   assert.equal(binaryCellDisplayText(`0x${"00".repeat(2048)}`, "VARBINARY(2048)"), "VARBINARY [2.0 KB]");
+  assert.equal(binaryCellDisplayText("0xffd8ffe000104a46...", "VARBINARY"), "VARBINARY [...]");
+  assert.equal(binaryCellDisplayText("0x89504e47...", "LONGBLOB"), "BLOB [...]");
+  assert.equal(binaryCellDisplayText("0xffd8ffe000104a46...", "VARBINARY", 25_143), "VARBINARY [25 KB]");
   assert.equal(binaryCellDisplayText("0x89504e47"), null);
   assert.equal(binaryCellDisplayText("0x", "VARBINARY(0)"), "");
 });
@@ -101,7 +104,7 @@ test("DataGrid binary preview prefers ResultSet column types when table metadata
   const source = readFileSync("apps/desktop/src/components/grid/DataGrid.vue", "utf8");
   const formatter = source.match(/function formatCell\([^]*?\n\}/)?.[0] ?? "";
 
-  assert.match(formatter, /binaryCellDisplayText\(value, columnIndex === undefined \? undefined : allColumnTypes\.value\[columnIndex\]\)/);
+  assert.match(formatter, /binaryCellDisplayText\(value, columnIndex === undefined \? undefined : allColumnTypes\.value\[columnIndex\], originalBytes\)/);
 });
 
 test("binaryCellDownloadPayload decodes GBK text bytes", () => {

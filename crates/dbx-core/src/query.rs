@@ -336,6 +336,13 @@ struct ServerLargeValueMarker {
     source_type: Option<&'static str>,
 }
 
+#[derive(Clone, Copy)]
+struct ServerLargeValueMarkerValue {
+    kind: ServerLargeValuePreviewKind,
+    preview_size: usize,
+    original_bytes: Option<usize>,
+}
+
 fn server_large_value_alias(
     suffix: &str,
 ) -> Option<(usize, Option<ServerLargeValuePreviewKind>, Option<&'static str>)> {
@@ -360,8 +367,10 @@ fn server_large_value_alias(
     Some((source_index, Some(preview_kind), source_type))
 }
 
-fn server_large_value_marker(value: &serde_json::Value) -> Option<(ServerLargeValuePreviewKind, usize)> {
-    let (kind, preview_size) = value.as_str()?.split_once(':')?;
+fn server_large_value_marker(value: &serde_json::Value) -> Option<ServerLargeValueMarkerValue> {
+    let mut parts = value.as_str()?.split(':');
+    let kind = parts.next()?;
+    let preview_size = parts.next()?;
     let kind = match kind {
         "T" => ServerLargeValuePreviewKind::Text,
         "B" => ServerLargeValuePreviewKind::Binary,
@@ -369,7 +378,8 @@ fn server_large_value_marker(value: &serde_json::Value) -> Option<(ServerLargeVa
         "D" => ServerLargeValuePreviewKind::Deferred,
         _ => return None,
     };
-    Some((kind, preview_size.parse::<usize>().ok()?.max(1)))
+    let original_bytes = parts.next().and_then(|value| value.parse::<usize>().ok());
+    Some(ServerLargeValueMarkerValue { kind, preview_size: preview_size.parse::<usize>().ok()?.max(1), original_bytes })
 }
 
 fn truncate_server_large_value_preview(
@@ -445,7 +455,7 @@ fn extract_server_large_value_markers(result: &mut db::QueryResult) -> Vec<db::L
         let row_kind = result
             .rows
             .iter()
-            .find_map(|row| row.get(marker.result_index).and_then(server_large_value_marker).map(|value| value.0));
+            .find_map(|row| row.get(marker.result_index).and_then(server_large_value_marker).map(|value| value.kind));
         let source_type = marker.source_type.or_else(|| {
             (marker.preview_kind.or(row_kind) == Some(ServerLargeValuePreviewKind::Vector)).then_some("vector")
         });
@@ -458,14 +468,16 @@ fn extract_server_large_value_markers(result: &mut db::QueryResult) -> Vec<db::L
         for marker in &markers {
             let marker_value = row.get(marker.result_index).and_then(server_large_value_marker);
             let source_result_index = marker.result_index.saturating_sub(1);
-            if marker_value.is_some_and(|(kind, preview_size)| {
+            if marker_value.is_some_and(|value| {
                 row.get_mut(source_result_index)
-                    .is_some_and(|value| truncate_server_large_value_preview(value, kind, preview_size))
+                    .is_some_and(|source| truncate_server_large_value_preview(source, value.kind, value.preview_size))
             }) {
                 large_value_cells.push(db::LargeValueCell {
                     row_index,
                     column_index: marker.source_index,
-                    original_bytes: SERVER_LARGE_VALUE_UNKNOWN_BYTES,
+                    original_bytes: marker_value
+                        .and_then(|value| value.original_bytes)
+                        .unwrap_or(SERVER_LARGE_VALUE_UNKNOWN_BYTES),
                 });
             }
         }
@@ -7354,7 +7366,7 @@ for line in sys.stdin:
             column_sortables: vec![true, true],
             spatial_columns: Vec::new(),
             spatial_values: Vec::new(),
-            rows: vec![vec![serde_json::json!("0x0102030405"), serde_json::json!("B:4")]],
+            rows: vec![vec![serde_json::json!("0x0102030405"), serde_json::json!("B:4:5")]],
             affected_rows: 0,
             execution_time_ms: 0,
             truncated: false,
@@ -7367,7 +7379,7 @@ for line in sys.stdin:
         let cells = extract_server_large_value_markers(&mut result);
 
         assert_eq!(result.rows, vec![vec![serde_json::json!("0x01020304...")]]);
-        assert_eq!(cells.len(), 1);
+        assert_eq!(cells, vec![db::LargeValueCell { row_index: 0, column_index: 0, original_bytes: 5 }]);
     }
 
     #[test]

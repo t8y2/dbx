@@ -334,23 +334,21 @@ describe("SidebarTreeRuntimeHost expansion", () => {
       connectionId: "xugu",
       database: "SHOP_DEMO",
       schema: "APP_TEST",
-      objectCount: 1,
+      objectCount: 401,
       isExpanded: false,
-      children: [
-        {
-          id: "xugu:SHOP_DEMO:APP_TEST:package:PKG_CUSTOMER:member:function:FUNC_GET_BALANCE:p_id BIGINT",
-          label: "FUNC_GET_BALANCE(p_id BIGINT)",
-          type: "function",
-          parentType: "package",
-          parentName: "PKG_CUSTOMER",
-          parentSchema: "APP_TEST",
-          connectionId: "xugu",
-          database: "SHOP_DEMO",
-          schema: "APP_TEST",
-          objectName: "FUNC_GET_BALANCE",
-          signature: "p_id BIGINT",
-        },
-      ],
+      children: Array.from({ length: 401 }, (_, index) => ({
+        id: `xugu:SHOP_DEMO:APP_TEST:package:PKG_CUSTOMER:member:function:FUNC_${index}`,
+        label: `FUNC_${index}()`,
+        type: "function" as const,
+        parentType: "package" as const,
+        parentName: "PKG_CUSTOMER",
+        parentSchema: "APP_TEST",
+        connectionId: "xugu",
+        database: "SHOP_DEMO",
+        schema: "APP_TEST",
+        objectName: `FUNC_${index}`,
+        signature: "",
+      })),
     };
     connectionStore.treeNodes = [packageFunctionGroup];
     connectionStore.getConfig.mockReturnValue({ db_type: "xugu" });
@@ -381,5 +379,14 @@ describe("SidebarTreeRuntimeHost expansion", () => {
 
     expect(packageFunctionGroup.isExpanded).toBe(false);
     expect(connectionStore.loadObjectGroupChildren).not.toHaveBeenCalled();
+
+    expect(connectionStore.releaseCollapsedTreeNodeChildren).not.toHaveBeenCalled();
+    expect(packageFunctionGroup.children).toHaveLength(401);
+
+    host.value?.toggleNode(packageFunctionGroup);
+    await nextTick();
+
+    expect(packageFunctionGroup.isExpanded).toBe(true);
+    expect(packageFunctionGroup.children).toHaveLength(401);
   });
 });

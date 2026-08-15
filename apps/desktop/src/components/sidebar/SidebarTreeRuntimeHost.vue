@@ -691,7 +691,9 @@ async function toggle(requestId = beginNavigationRequest()) {
   // schema and replace the package's member list with unrelated objects.
   if (currentDatabaseType() === "xugu" && (node.type === "group-procedures" || node.type === "group-functions") && node.parentType === "package") {
     node.isExpanded = !node.isExpanded;
-    if (wasExpanded && !connectionStore.sidebarSearchQuery) connectionStore.releaseCollapsedTreeNodeChildren(node.id);
+    // Package member groups have no group-level reload path: their children
+    // are hydrated together with the owning package. Releasing a large group
+    // here would leave it empty on the next local-only expand.
     emitNodeToggled(node, wasExpanded);
     return;
   }

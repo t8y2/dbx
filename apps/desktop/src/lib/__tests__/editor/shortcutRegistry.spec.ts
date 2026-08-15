@@ -7,6 +7,7 @@ describe("shortcutRegistry editor actions", () => {
     "toggleLineComment",
     "indentMore",
     "indentLess",
+    "joinLines",
     "duplicateLine",
     "deleteLine",
     "moveLineUp",
@@ -69,6 +70,17 @@ describe("shortcutRegistry editor actions", () => {
     expect(findShortcutConflict("insertLineBelow", DEFAULT_SHORTCUT_SETTINGS.insertLineBelow, DEFAULT_SHORTCUT_SETTINGS)).toBeNull();
   });
 
+  it("registers a conflict-free platform shortcut for joining lines", () => {
+    const definition = SHORTCUT_DEFINITIONS.find((item) => item.id === "joinLines");
+
+    expect(definition).toMatchObject({ scope: "editor", defaultShortcut: "Mod+J" });
+    expect(DEFAULT_SHORTCUT_SETTINGS.joinLines).toBe("Mod+J");
+    expect(formatShortcut(DEFAULT_SHORTCUT_SETTINGS.joinLines, "MacIntel")).toBe("Cmd+J");
+    expect(formatShortcut(DEFAULT_SHORTCUT_SETTINGS.joinLines, "Win32")).toBe("Ctrl+J");
+    expect(shortcutToCodeMirrorKey(DEFAULT_SHORTCUT_SETTINGS.joinLines)).toBe("Mod-j");
+    expect(findShortcutConflict("joinLines", DEFAULT_SHORTCUT_SETTINGS.joinLines, DEFAULT_SHORTCUT_SETTINGS)).toBeNull();
+  });
+
   it("resolves the close-other-tabs default per platform and heals cross-platform synced defaults", () => {
     // 本测试环境（darwin）：默认应为 macOS 组合
     expect(DEFAULT_SHORTCUT_SETTINGS.closeOtherTabs).toBe(closeOtherTabsDefaultShortcut());
@@ -116,6 +128,7 @@ describe("shortcutRegistry editor actions", () => {
     expect(shortcuts.toggleLineComment).toBe("Mod+/");
     expect(shortcuts.indentMore).toBe("");
     expect(shortcuts.indentLess).toBe("Shift+Tab");
+    expect(shortcuts.joinLines).toBe("Mod+J");
     expect(shortcuts.duplicateLine).toBe("Mod+D");
     expect(shortcuts.deleteLine).toBe("Shift+Mod+K");
     expect(shortcuts.moveLineUp).toBe("Alt+ArrowUp");

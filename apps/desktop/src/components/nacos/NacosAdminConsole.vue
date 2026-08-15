@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, useId, watch } from "vue";
 import { Compartment, type Extension } from "@codemirror/state";
-import { StreamLanguage } from "@codemirror/language";
+import { StreamLanguage, ensureSyntaxTree } from "@codemirror/language";
 import type { EditorView } from "@codemirror/view";
 import { Archive, ArrowLeftRight, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, Clipboard, Columns3, Download, FileClock, FileInput, FileText, Loader2, Network, Plus, RefreshCw, Save, Search, Send, Server, Trash2, X } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
@@ -518,69 +518,68 @@ async function mountConfigEditor() {
   configEditorFontSize.value = clampEditorFontSize(editorSettings.fontSize);
   const theme = await loadEditorTheme(editorSettings.theme, editorThemeAppearance(), currentCustomThemeColors(), themePalette.value);
   if (generation !== configEditorGeneration || editorSessionId !== configEditorSessionId || host !== configEditorHost.value || configEditorView.value || !selectedConfig.value) return;
-  const view = new EditorView({
-    parent: host,
-    state: EditorState.create({
-      doc: content,
-      extensions: [
-        cmSearch({
-          top: true,
-          createPanel: () => {
-            const dom = document.createElement("span");
-            dom.style.display = "none";
-            return { dom };
-          },
-        }),
-        basicSetup,
-        EditorState.allowMultipleSelections.of(true),
-        trimmedSelectionLayer(),
-        Prec.highest(keymap.of([{ key: "Mod-f", run: () => configSearchPanelRef.value?.openSearch() ?? false, preventDefault: true }, { key: "Mod-h", run: () => configSearchPanelRef.value?.openReplace() ?? false, preventDefault: true }, indentWithTab])),
-        keymap.of([...defaultKeymap, ...historyKeymap]),
-        EditorView.domEventHandlers({
-          wheel(event, eventView) {
-            if (!event.metaKey && !event.ctrlKey) return false;
-            event.preventDefault();
-            const next = fontSizeFromWheelDelta(configEditorFontSize.value, event.deltaY);
-            if (next !== configEditorFontSize.value) {
-              configEditorFontSize.value = next;
-              eventView.dispatch({
-                effects: configEditorFontTheme.reconfigure(editorFontTheme(EditorView, next, settingsStore.editorSettings.fontFamily, { fixedHeight: true, scrollable: true })),
-              });
-            }
-            configEditorZoomCommitScheduler.schedule(next);
-            return true;
-          },
-        }),
-        configEditorLanguage.of(language),
-        configEditorTheme.of(theme),
-        configEditorFontTheme.of(editorFontTheme(EditorView, editorSettings.fontSize, editorSettings.fontFamily, { fixedHeight: true, scrollable: true })),
-        configEditorWordWrap.of(editorSettings.wordWrap ? EditorView.lineWrapping : []),
-        EditorState.readOnly.of(!!props.readOnly),
-        EditorView.editable.of(!props.readOnly),
-        EditorView.updateListener.of((update) => {
-          if (!update.docChanged || generation !== configEditorGeneration || editorSessionId !== configEditorSessionId) return;
-          configContent.value = update.state.doc.toString();
-          configSaveNotice.value = "";
-        }),
-        EditorView.theme({
-          "&": {
-            height: "100%",
-          },
-          ".cm-scroller": {
-            overflow: "auto",
-          },
-          ".cm-content": {
-            minHeight: "100%",
-            userSelect: "text",
-            WebkitUserSelect: "text",
-          },
-          ".cm-lineNumbers .cm-gutterElement": {
-            padding: "0 10px 0 8px",
-          },
-        }),
-      ],
-    }),
+  const state = EditorState.create({
+    doc: content,
+    extensions: [
+      cmSearch({
+        top: true,
+        createPanel: () => {
+          const dom = document.createElement("span");
+          dom.style.display = "none";
+          return { dom };
+        },
+      }),
+      basicSetup,
+      EditorState.allowMultipleSelections.of(true),
+      trimmedSelectionLayer(),
+      Prec.highest(keymap.of([{ key: "Mod-f", run: () => configSearchPanelRef.value?.openSearch() ?? false, preventDefault: true }, { key: "Mod-h", run: () => configSearchPanelRef.value?.openReplace() ?? false, preventDefault: true }, indentWithTab])),
+      keymap.of([...defaultKeymap, ...historyKeymap]),
+      EditorView.domEventHandlers({
+        wheel(event, eventView) {
+          if (!event.metaKey && !event.ctrlKey) return false;
+          event.preventDefault();
+          const next = fontSizeFromWheelDelta(configEditorFontSize.value, event.deltaY);
+          if (next !== configEditorFontSize.value) {
+            configEditorFontSize.value = next;
+            eventView.dispatch({
+              effects: configEditorFontTheme.reconfigure(editorFontTheme(EditorView, next, settingsStore.editorSettings.fontFamily, { fixedHeight: true, scrollable: true })),
+            });
+          }
+          configEditorZoomCommitScheduler.schedule(next);
+          return true;
+        },
+      }),
+      configEditorLanguage.of(language),
+      configEditorTheme.of(theme),
+      configEditorFontTheme.of(editorFontTheme(EditorView, editorSettings.fontSize, editorSettings.fontFamily, { fixedHeight: true, scrollable: true })),
+      configEditorWordWrap.of(editorSettings.wordWrap ? EditorView.lineWrapping : []),
+      EditorState.readOnly.of(!!props.readOnly),
+      EditorView.editable.of(!props.readOnly),
+      EditorView.updateListener.of((update) => {
+        if (!update.docChanged || generation !== configEditorGeneration || editorSessionId !== configEditorSessionId) return;
+        configContent.value = update.state.doc.toString();
+        configSaveNotice.value = "";
+      }),
+      EditorView.theme({
+        "&": {
+          height: "100%",
+        },
+        ".cm-scroller": {
+          overflow: "auto",
+        },
+        ".cm-content": {
+          minHeight: "100%",
+          userSelect: "text",
+          WebkitUserSelect: "text",
+        },
+        ".cm-lineNumbers .cm-gutterElement": {
+          padding: "0 10px 0 8px",
+        },
+      }),
+    ],
   });
+  ensureSyntaxTree(state, content.length, 500);
+  const view = new EditorView({ parent: host, state });
   if (generation !== configEditorGeneration || editorSessionId !== configEditorSessionId || host !== configEditorHost.value) {
     view.destroy();
     return;
@@ -1245,7 +1244,7 @@ async function exportConfigArchive(scope: NacosConfigSelectionScope) {
 
 const batchTransferRequest = shallowRef<NacosConfigTransferRequest | null>(null);
 
-async function previewBatch(payload: { scope: NacosConfigSelectionScope; targetConnectionId: string; targetNamespace: string; policy: NacosConflictPolicy }) {
+async function previewBatch(payload: { scope: NacosConfigSelectionScope; targetConnectionId: string; targetNamespace: string; targetGroup: string; policy: NacosConflictPolicy }) {
   batchLoading.value = true;
   batchError.value = "";
   batchPreview.value = null;
@@ -1261,6 +1260,7 @@ async function previewBatch(payload: { scope: NacosConfigSelectionScope; targetC
         targetConnectionId: payload.targetConnectionId,
         source: buildConfigSelector(payload.scope),
         targetNamespace: payload.targetNamespace,
+        targetGroup: payload.targetGroup || undefined,
         conflictPolicy: payload.policy,
       };
       batchTransferRequest.value = req;
@@ -1273,7 +1273,7 @@ async function previewBatch(payload: { scope: NacosConfigSelectionScope; targetC
   }
 }
 
-async function applyBatch(payload: { scope: NacosConfigSelectionScope; targetConnectionId: string; targetNamespace: string; policy: NacosConflictPolicy }) {
+async function applyBatch(payload: { scope: NacosConfigSelectionScope; targetConnectionId: string; targetNamespace: string; targetGroup: string; policy: NacosConflictPolicy }) {
   if (batchLoading.value || batchReport.value || !batchPreview.value) return;
   if (payload.policy === "OVERWRITE" && !window.confirm(t("nacos.overwriteConfirm"))) return;
   const targetConnectionId = batchMode.value === "import" ? props.connectionId : payload.targetConnectionId;
@@ -2500,7 +2500,7 @@ onBeforeUnmount(() => {
             </Button>
           </div>
           <div v-if="configError" class="border-b px-3 py-2 text-xs text-destructive">{{ configError }}</div>
-          <div ref="configListViewport" class="min-h-0 flex-1 overflow-auto">
+          <div ref="configListViewport" class="nacos-config-list-viewport min-h-0 flex-1 overflow-auto">
             <div class="w-max min-w-full" :style="{ minWidth: configListMinWidth }">
               <div class="sticky top-0 z-20 grid border-b bg-muted px-3 py-2 text-[11px] font-medium uppercase tracking-wide text-muted-foreground shadow-sm" :style="{ gridTemplateColumns: configListGridTemplate }">
                 <div v-for="(column, columnIndex) in configListColumns" :key="column" class="relative min-w-0" :class="column === 'dataId' ? 'pr-3' : columnIndex === configListColumns.length - 1 ? 'pl-3 pr-10' : 'px-3'">
@@ -3396,5 +3396,9 @@ onBeforeUnmount(() => {
 
 .nacos-admin-splitpanes :deep(.splitpanes__splitter:hover) {
   background: oklch(0.6 0.15 250) !important;
+}
+
+.nacos-config-list-viewport {
+  scrollbar-gutter: stable;
 }
 </style>

@@ -19,7 +19,7 @@ describe("connectionStore Nacos namespace access", () => {
     setActivePinia(createPinia());
   });
 
-  async function loadNacosTree(listUsersSupported: boolean) {
+  async function loadNacosTree(listUsersSupported: boolean, listRoleBindingsSupported = false) {
     const connection = {
       id: "nacos-bb",
       name: "Nacos bb",
@@ -42,6 +42,7 @@ describe("connectionStore Nacos namespace access", () => {
       namespaces: readableNamespaces,
       accessControl: {
         listUsers: { supported: listUsersSupported },
+        listRoleBindings: { supported: listRoleBindingsSupported },
       },
     });
 
@@ -87,8 +88,14 @@ describe("connectionStore Nacos namespace access", () => {
     expect(root.children?.some((node) => node.type === "nacos-access-control")).toBe(false);
   });
 
-  it("shows user and role management only when the current account can list users", async () => {
+  it("shows access control when the current account can list users", async () => {
     const { root } = await loadNacosTree(true);
+
+    expect(root.children?.find((node) => node.type === "nacos-access-control")?.label).toBe("nacos.accessControlSidebarLabel");
+  });
+
+  it("shows access control for a roles-only account", async () => {
+    const { root } = await loadNacosTree(false, true);
 
     expect(root.children?.find((node) => node.type === "nacos-access-control")?.label).toBe("nacos.accessControlSidebarLabel");
   });

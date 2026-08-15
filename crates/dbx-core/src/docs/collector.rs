@@ -6,8 +6,8 @@ use futures::stream::{self, StreamExt};
 use crate::connection::AppState;
 use crate::docs::dbml::{enum_type_name, is_inline_enum_spelling};
 use crate::docs::{
-    build_relationships, DocEnum, DocTable, NoteSource, ProjectMeta, Relationship, SchemaSnapshot, SnapshotWarning,
-    TableKind,
+    build_relationships, ColumnNote, DocEnum, DocTable, NoteSource, ProjectMeta, Relationship, SchemaSnapshot,
+    SnapshotWarning, TableKind,
 };
 use crate::models::connection::ConnectionConfig;
 use crate::schema;
@@ -104,6 +104,19 @@ fn any_comment_collected(tables: &[DocTable]) -> bool {
                 .iter()
                 .any(|column| column.comment.as_deref().is_some_and(|comment| !comment.trim().is_empty()))
     })
+}
+
+fn database_column_notes(columns: &[ColumnInfo]) -> BTreeMap<String, ColumnNote> {
+    columns
+        .iter()
+        .filter_map(|column| {
+            let comment = column.comment.as_ref().filter(|value| !value.trim().is_empty())?;
+            Some((
+                column.name.clone(),
+                ColumnNote { note: comment.clone(), source: NoteSource::Database, shadowed: None },
+            ))
+        })
+        .collect()
 }
 
 /// True when the `CommentsUnsupported` warning belongs in the snapshot: the
@@ -210,6 +223,7 @@ pub async fn collect_snapshot(
                             table: format!("{schema_name}.{}", info.name),
                             reason: error,
                         })?;
+                    let column_notes = database_column_notes(&columns);
 
                     let mut table_warnings = Vec::new();
 
@@ -270,7 +284,7 @@ pub async fn collect_snapshot(
                                 NoteSource::None
                             },
                             shadowed_note: None,
-                            column_notes: BTreeMap::new(),
+                            column_notes,
                             estimated_rows: None,
                             view_definition: None,
                         },
@@ -476,6 +490,49 @@ mod tests {
             comment: Some(comment.to_string()),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn database_column_comments_become_database_notes() {
+        let columns = vec![
+            crate::types::ColumnInfo {
+                name: "customer_name".to_string(),
+                comment: Some("Customer-facing name".to_string()),
+                ..Default::default()
+            },
+            crate::types::ColumnInfo {
+                name: "status".to_string(),
+                comment: Some("Lifecycle state".to_string()),
+                ..Default::default()
+            },
+        ];
+
+        let notes = database_column_notes(&columns);
+
+        assert_eq!(notes.len(), 2);
+        let name = notes.get("customer_name").expect("customer name note");
+        assert_eq!(name.note, "Customer-facing name");
+        assert_eq!(name.source, NoteSource::Database);
+        assert_eq!(name.shadowed, None);
+        let status = notes.get("status").expect("status note");
+        assert_eq!(status.note, "Lifecycle state");
+        assert_eq!(status.source, NoteSource::Database);
+        assert_eq!(status.shadowed, None);
+    }
+
+    #[test]
+    fn database_column_notes_ignore_empty_and_whitespace_comments() {
+        let columns = vec![
+            crate::types::ColumnInfo { name: "empty".to_string(), comment: Some(String::new()), ..Default::default() },
+            crate::types::ColumnInfo {
+                name: "whitespace".to_string(),
+                comment: Some(" \t\n".to_string()),
+                ..Default::default()
+            },
+            crate::types::ColumnInfo { name: "missing".to_string(), comment: None, ..Default::default() },
+        ];
+
+        assert!(database_column_notes(&columns).is_empty());
     }
 
     fn sample_relationship() -> Relationship {

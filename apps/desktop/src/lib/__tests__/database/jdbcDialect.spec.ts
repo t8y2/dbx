@@ -13,9 +13,11 @@ import {
   gaussdbConnectionMode,
   gaussdbIdentifierQuoteOverride,
   gaussdbIdentifierQuoteStyle,
+  gaussdbTargetServerType,
   inferJdbcDialect,
   setGaussdbConnectionMode,
   setGaussdbIdentifierQuoteStyle,
+  setGaussdbTargetServerType,
   supportsGaussdbIdentifierQuoteStyle,
 } from "@/lib/database/jdbcDialect";
 
@@ -216,6 +218,23 @@ describe("GaussDB connection mode", () => {
     setGaussdbConnectionMode(connection, "native");
     expect(connection.driver_profile).toBe("gaussdb");
     expect(connection.jdbc_driver_class).toBeUndefined();
+  });
+
+  it("uses the driver default and preserves targetServerType from legacy URL fields", () => {
+    const connection = { db_type: "gaussdb", driver_profile: "gaussdb-m" } as ConnectionConfig;
+
+    expect(gaussdbTargetServerType(connection)).toBe("any");
+
+    connection.url_params = "currentSchema=app&targetServerType=slave";
+    expect(gaussdbTargetServerType(connection)).toBe("slave");
+
+    connection.url_params = undefined;
+    connection.connection_string = "jdbc:gaussdb://db.internal:8000/app?targetServerType=MASTER&ssl=true";
+    expect(gaussdbTargetServerType(connection)).toBe("master");
+
+    setGaussdbTargetServerType(connection, "any");
+    expect(gaussdbTargetServerType(connection)).toBe("any");
+    expect(connection.external_config).toEqual({ gaussdbTargetServerType: "any" });
   });
 });
 

@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
 
-use crate::nacos::port::NacosAdmin;
+use crate::nacos::port::{NacosAdmin, NacosNamespaceAuthorizationSnapshot};
 use crate::nacos::types::*;
 
 const AUTH_PAGE_SIZE: u32 = 500;
@@ -54,8 +54,30 @@ pub async fn sidebar_snapshot(
     connection_fingerprint: String,
     admin: Arc<dyn NacosAdmin>,
 ) -> Result<NacosNamespaceSidebarSnapshot, String> {
-    let result = load_readable_namespaces(connection_id, connection_fingerprint, admin).await?;
-    Ok(NacosNamespaceSidebarSnapshot { namespaces: result.namespaces, access_control: result.access_control })
+    match load_readable_namespaces(connection_id, connection_fingerprint, admin.clone()).await {
+        Ok(result) => {
+            Ok(NacosNamespaceSidebarSnapshot { namespaces: result.namespaces, access_control: result.access_control })
+        }
+        Err(error) if is_namespace_authorization_error(&error) => {
+            let access_control = admin.access_control_capabilities();
+            let has_access_control_reads = access_control.list_users.supported
+                || access_control.list_role_bindings.supported
+                || access_control.list_permissions.supported;
+            if has_access_control_reads {
+                // Namespace visibility remains fail-closed, while an account
+                // that can inspect access control can still open that workspace.
+                Ok(NacosNamespaceSidebarSnapshot { namespaces: Vec::new(), access_control })
+            } else {
+                Err(error)
+            }
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn is_namespace_authorization_error(error: &str) -> bool {
+    error.contains("NACOS_ERROR[managedNamespacesRequired]")
+        || error.contains("NACOS_ERROR[namespaceAuthorizationUnavailable]")
 }
 
 async fn load_readable_namespaces(
@@ -64,11 +86,10 @@ async fn load_readable_namespaces(
     admin: Arc<dyn NacosAdmin>,
 ) -> Result<ReadableNamespaces, String> {
     let namespaces = admin.list_namespaces().await?;
-    let access_control = admin.access_control_capabilities();
     let Some(username) =
         admin.current_username().map(|value| value.trim().to_string()).filter(|value| !value.is_empty())
     else {
-        return Ok(ReadableNamespaces { namespaces, access_control });
+        return Ok(ReadableNamespaces { namespaces, access_control: admin.access_control_capabilities() });
     };
     if let Some(explicit_scope) = admin.explicitly_scoped_namespace_ids() {
         let readable = explicit_scope.iter().map(|namespace| namespace_identity(namespace)).collect();
@@ -87,9 +108,36 @@ async fn load_readable_namespaces(
         });
     }
 
-    let readable = readable_ids_from_authorization(admin, &username, &namespaces).await?;
+    let (access_control, readable) = match admin.refresh_namespace_authorization(&username).await {
+        Ok(Some(authorization)) => {
+            let access_control = authorization.access_control.clone();
+            let readable = readable_ids_from_authorization_snapshot(authorization, &namespaces)?;
+            (access_control, readable)
+        }
+        Ok(None) => {
+            let access_control = admin.access_control_capabilities();
+            let readable = readable_ids_from_authorization(admin, &username, &namespaces).await?;
+            (access_control, readable)
+        }
+        Err(error) => return Err(namespace_authorization_unavailable(&error)),
+    };
     cache_readable_ids(connection_id, connection_fingerprint, signature, readable.clone(), access_control.clone());
     Ok(ReadableNamespaces { namespaces: filter_namespaces(namespaces, &readable), access_control })
+}
+
+fn readable_ids_from_authorization_snapshot(
+    authorization: NacosNamespaceAuthorizationSnapshot,
+    namespaces: &[NacosNamespaceInfo],
+) -> Result<BTreeSet<String>, String> {
+    if authorization.global_admin {
+        return Ok(all_namespace_ids(namespaces));
+    }
+    let roles = authorization.roles.into_iter().collect::<BTreeSet<_>>();
+    if roles.is_empty() {
+        return Ok(BTreeSet::new());
+    }
+    readable_ids_from_permissions(&roles, &authorization.permissions, namespaces)
+        .ok_or_else(|| namespace_authorization_unavailable("the server returned an unsupported permission resource"))
 }
 
 async fn readable_ids_from_authorization(
@@ -361,12 +409,21 @@ mod tests {
         }
     }
 
+    fn roles_only_capabilities() -> NacosAccessControlCapabilities {
+        let mut capabilities = NacosAccessControlCapabilities::unavailable(NacosCapabilityReason::PermissionDenied);
+        capabilities.mode = NacosAccessControlMode::RoleBindings;
+        capabilities.list_users = NacosOperationCapability::supported();
+        capabilities.list_role_bindings = NacosOperationCapability::supported();
+        capabilities
+    }
+
     struct CountingAdmin {
         namespaces: Vec<NacosNamespaceInfo>,
         readable_ids: BTreeSet<String>,
         permission_error: bool,
         explicitly_scoped_ids: Option<Vec<String>>,
         namespace_calls: AtomicUsize,
+        capability_calls: AtomicUsize,
         role_calls: AtomicUsize,
         permission_calls: AtomicUsize,
         config_calls: AtomicUsize,
@@ -387,6 +444,7 @@ mod tests {
                 permission_error: false,
                 explicitly_scoped_ids: None,
                 namespace_calls: AtomicUsize::new(0),
+                capability_calls: AtomicUsize::new(0),
                 role_calls: AtomicUsize::new(0),
                 permission_calls: AtomicUsize::new(0),
                 config_calls: AtomicUsize::new(0),
@@ -395,6 +453,7 @@ mod tests {
 
         fn total_authorization_calls(&self) -> usize {
             self.namespace_calls.load(Ordering::SeqCst)
+                + self.capability_calls.load(Ordering::SeqCst)
                 + self.role_calls.load(Ordering::SeqCst)
                 + self.permission_calls.load(Ordering::SeqCst)
                 + self.config_calls.load(Ordering::SeqCst)
@@ -404,7 +463,11 @@ mod tests {
     #[async_trait]
     impl NacosAdmin for CountingAdmin {
         fn access_control_capabilities(&self) -> NacosAccessControlCapabilities {
-            role_binding_capabilities()
+            if self.permission_error {
+                roles_only_capabilities()
+            } else {
+                role_binding_capabilities()
+            }
         }
 
         fn current_username(&self) -> Option<String> {
@@ -413,6 +476,35 @@ mod tests {
 
         fn explicitly_scoped_namespace_ids(&self) -> Option<Vec<String>> {
             self.explicitly_scoped_ids.clone()
+        }
+
+        async fn refresh_namespace_authorization(
+            &self,
+            username: &str,
+        ) -> Result<Option<NacosNamespaceAuthorizationSnapshot>, String> {
+            self.capability_calls.fetch_add(1, Ordering::SeqCst);
+            let role_bindings = self
+                .list_role_bindings(NacosRoleQuery {
+                    username: Some(username.to_string()),
+                    role: None,
+                    page_no: Some(1),
+                    page_size: Some(AUTH_PAGE_SIZE),
+                })
+                .await?;
+            let permissions = self
+                .list_permissions(NacosPermissionQuery {
+                    role: None,
+                    resource: None,
+                    page_no: Some(1),
+                    page_size: Some(AUTH_PAGE_SIZE),
+                })
+                .await?;
+            Ok(Some(NacosNamespaceAuthorizationSnapshot {
+                access_control: role_binding_capabilities(),
+                roles: role_bindings.items.into_iter().map(|binding| binding.role).collect(),
+                permissions: permissions.items,
+                global_admin: false,
+            }))
         }
 
         async fn test_connection(&self) -> Result<NacosConnectionInfo, String> {
@@ -639,10 +731,13 @@ mod tests {
                 % 2
                 == 0));
             assert_eq!(admin.config_calls.load(Ordering::SeqCst), 0);
+            assert_eq!(admin.capability_calls.load(Ordering::SeqCst), 1);
+            assert_eq!(admin.role_calls.load(Ordering::SeqCst), 1);
+            assert_eq!(admin.permission_calls.load(Ordering::SeqCst), 1);
             request_counts.push(admin.total_authorization_calls());
         }
 
-        assert_eq!(request_counts, vec![3, 3]);
+        assert_eq!(request_counts, vec![4, 4]);
     }
 
     #[tokio::test]
@@ -653,11 +748,28 @@ mod tests {
         admin.permission_error = true;
         let admin = Arc::new(admin);
 
-        let error = sidebar_snapshot(connection_id, "server-a".to_string(), admin.clone()).await.unwrap_err();
+        let error = list_readable_namespaces(connection_id, "server-a".to_string(), admin.clone()).await.unwrap_err();
 
         assert!(error.contains("NACOS_ERROR[managedNamespacesRequired]"));
         assert_eq!(admin.config_calls.load(Ordering::SeqCst), 0);
-        assert_eq!(admin.total_authorization_calls(), 3);
+        assert_eq!(admin.total_authorization_calls(), 4);
+    }
+
+    #[tokio::test]
+    async fn roles_only_sidebar_keeps_access_control_entry_without_widening_namespaces() {
+        let connection_id = "roles-only-sidebar-authorization";
+        invalidate(connection_id);
+        let mut admin = CountingAdmin::restricted(100);
+        admin.permission_error = true;
+        let admin = Arc::new(admin);
+
+        let snapshot = sidebar_snapshot(connection_id, "server-a".to_string(), admin.clone()).await.unwrap();
+
+        assert!(snapshot.namespaces.is_empty());
+        assert!(snapshot.access_control.list_role_bindings.supported);
+        assert!(!snapshot.access_control.list_permissions.supported);
+        assert_eq!(admin.config_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(admin.total_authorization_calls(), 4);
     }
 
     #[tokio::test]

@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::borrow::Cow;
 use std::io::{BufWriter, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -254,6 +255,45 @@ fn table_export_sql_context<'a>(
     }
 }
 
+fn table_export_query_columns<'a>(
+    request: &TableExportRequest,
+    sql_context: &TableExportSqlContext<'_>,
+    columns: &'a [String],
+) -> Result<Cow<'a, [String]>, String> {
+    if sql_context.database_type != DatabaseType::Iotdb {
+        return Ok(Cow::Borrowed(columns));
+    }
+
+    let full_table = crate::sql_dialect::table_data_qualified_table_name(
+        Some(sql_context.database_type),
+        sql_context.schema,
+        &request.table_name,
+        request.identifier_quote.as_deref(),
+    );
+    let measurement_prefix = format!("{full_table}.");
+    if !columns.iter().any(|column| column.eq_ignore_ascii_case("Time") || column.starts_with(&measurement_prefix)) {
+        return Ok(Cow::Borrowed(columns));
+    }
+
+    // IoTDB returns absolute timeseries labels, but its SELECT list accepts
+    // only paths relative to the queried device. Keep the labels unchanged
+    // for export output and normalize only the query projection here.
+    let query_columns = columns
+        .iter()
+        .filter_map(|column| {
+            if column.eq_ignore_ascii_case("Time") {
+                None
+            } else {
+                Some(column.strip_prefix(&measurement_prefix).unwrap_or(column).to_string())
+            }
+        })
+        .collect::<Vec<_>>();
+    if query_columns.is_empty() {
+        return Err("IoTDB table export requires at least one non-Time column".to_string());
+    }
+    Ok(Cow::Owned(query_columns))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn table_page_sql(
     request: &TableExportRequest,
@@ -461,14 +501,14 @@ async fn execute_external_driver_export_page(
     pool_key: &str,
     request: &TableExportRequest,
     sql_context: &TableExportSqlContext<'_>,
-    col_names: &[String],
+    query_col_names: &[String],
     column_types: &[Option<String>],
     primary_keys: &[String],
     active_batch_size: usize,
     result_session_id: Option<String>,
     cancel_token: CancellationToken,
 ) -> Result<QueryResult, String> {
-    let sql = table_cursor_sql(request, sql_context, col_names, column_types, primary_keys);
+    let sql = table_cursor_sql(request, sql_context, query_col_names, column_types, primary_keys);
     let max_rows = request.row_limit.unwrap_or(i32::MAX as usize).min(i32::MAX as usize).max(1);
     let timeout_secs = table_export_query_timeout_secs(state, pool_key).await;
     execute_sql_statement_with_options(
@@ -529,6 +569,7 @@ async fn fetch_table_export_batch(
     db_type: &DatabaseType,
     sql_context: &TableExportSqlContext<'_>,
     col_names: &[String],
+    query_col_names: &[String],
     column_types: &[Option<String>],
     primary_keys: &[String],
     use_keyset: bool,
@@ -585,7 +626,7 @@ async fn fetch_table_export_batch(
         match table_export_cursor_kind(state, pool_key).await {
             Some(TableExportCursorKind::Agent) => {
                 *table_read_attempted = true;
-                let sql = table_cursor_sql(request, sql_context, col_names, column_types, primary_keys);
+                let sql = table_cursor_sql(request, sql_context, query_col_names, column_types, primary_keys);
                 let max_rows = request.row_limit.unwrap_or(i32::MAX as usize);
                 let query_timeout = table_export_query_timeout_secs(state, pool_key).await;
                 let params = AgentTableReadStartParams {
@@ -625,7 +666,7 @@ async fn fetch_table_export_batch(
                     pool_key,
                     request,
                     sql_context,
-                    col_names,
+                    query_col_names,
                     column_types,
                     primary_keys,
                     active_batch_size,
@@ -681,7 +722,7 @@ async fn fetch_table_export_batch(
                     pool_key,
                     request,
                     sql_context,
-                    col_names,
+                    query_col_names,
                     column_types,
                     primary_keys,
                     active_batch_size,
@@ -718,7 +759,7 @@ async fn fetch_table_export_batch(
         pool_key,
         request,
         sql_context,
-        col_names,
+        query_col_names,
         column_types,
         primary_keys,
         use_keyset,
@@ -735,7 +776,7 @@ async fn fetch_paginated_table_export_batch(
     pool_key: &str,
     request: &TableExportRequest,
     sql_context: &TableExportSqlContext<'_>,
-    col_names: &[String],
+    query_col_names: &[String],
     column_types: &[Option<String>],
     primary_keys: &[String],
     use_keyset: bool,
@@ -746,7 +787,7 @@ async fn fetch_paginated_table_export_batch(
     let sql = table_page_sql(
         request,
         sql_context,
-        col_names,
+        query_col_names,
         column_types,
         primary_keys,
         use_keyset,
@@ -863,6 +904,7 @@ async fn try_export_native_table_stream(
     db_type: &DatabaseType,
     sql_context: &TableExportSqlContext<'_>,
     col_names: &[String],
+    query_col_names: &[String],
     column_types: &[Option<String>],
     column_extras: &[Option<String>],
     primary_keys: &[String],
@@ -873,7 +915,7 @@ async fn try_export_native_table_stream(
     cancelled: Arc<AtomicBool>,
     cancel_token: CancellationToken,
 ) -> Result<bool, String> {
-    let sql = table_cursor_sql(request, sql_context, col_names, column_types, primary_keys);
+    let sql = table_cursor_sql(request, sql_context, query_col_names, column_types, primary_keys);
     let mut rows_exported = 0_u64;
     let progress_interval = batch_size.max(1) as u64;
 
@@ -1347,6 +1389,7 @@ async fn export_table_data_core_inner(
     if col_names.is_empty() {
         return Err("No columns found for table".to_string());
     }
+    let query_col_names = table_export_query_columns(request, &sql_context, &col_names)?;
 
     // Use keyset pagination when all PKs are in the selected (filtered) columns.
     // This avoids the OFFSET performance penalty for large tables.
@@ -1410,6 +1453,7 @@ async fn export_table_data_core_inner(
         &db_type,
         &sql_context,
         &col_names,
+        query_col_names.as_ref(),
         &column_types,
         &column_extras,
         &primary_keys,
@@ -1471,6 +1515,7 @@ async fn export_table_data_core_inner(
                     &db_type,
                     &sql_context,
                     &col_names,
+                    query_col_names.as_ref(),
                     &column_types,
                     &primary_keys,
                     use_keyset,
@@ -1561,6 +1606,7 @@ async fn export_table_data_core_inner(
                     &db_type,
                     &sql_context,
                     &col_names,
+                    query_col_names.as_ref(),
                     &column_types,
                     &primary_keys,
                     use_keyset,
@@ -1662,6 +1708,7 @@ async fn export_table_data_core_inner(
                     &db_type,
                     &sql_context,
                     &col_names,
+                    query_col_names.as_ref(),
                     &column_types,
                     &primary_keys,
                     use_keyset,
@@ -1757,6 +1804,7 @@ async fn export_table_data_core_inner(
                     &db_type,
                     &sql_context,
                     &col_names,
+                    query_col_names.as_ref(),
                     &column_types,
                     &primary_keys,
                     use_keyset,
@@ -1841,6 +1889,7 @@ async fn export_table_data_core_inner(
                     &db_type,
                     &sql_context,
                     &col_names,
+                    query_col_names.as_ref(),
                     &column_types,
                     &primary_keys,
                     use_keyset,
@@ -1924,6 +1973,7 @@ async fn export_table_data_core_inner(
                     &db_type,
                     &sql_context,
                     &col_names,
+                    query_col_names.as_ref(),
                     &column_types,
                     &primary_keys,
                     use_keyset,
@@ -2262,6 +2312,206 @@ mod tests {
         assert_eq!(next_export_batch_size(Some(15_000), 0, 10_000), Some(10_000));
         assert_eq!(next_export_batch_size(Some(15_000), 10_000, 10_000), Some(5_000));
         assert_eq!(next_export_batch_size(Some(15_000), 15_000, 10_000), None);
+    }
+
+    #[test]
+    fn iotdb_table_export_omits_implicit_time_from_all_query_paths() {
+        let request = TableExportRequest {
+            export_id: "export-iotdb".to_string(),
+            connection_id: "conn-1".to_string(),
+            database: "root.test".to_string(),
+            schema: Some("root.test".to_string()),
+            identifier_quote: None,
+            table_name: "device2".to_string(),
+            file_path: "device2.csv".to_string(),
+            format: "csv".to_string(),
+            columns: None,
+            column_types: None,
+            primary_keys: None,
+            where_input: Some("WHERE temperature > 1".to_string()),
+            order_by: Some("Time DESC".to_string()),
+            skip_count: true,
+            batch_size: Some(50),
+            row_limit: None,
+            date_time_format: None,
+            numeric_column_right_align: false,
+            column_comments: None,
+        };
+        let context = table_export_sql_context(DatabaseType::Iotdb, None, request.schema.as_deref());
+        let columns = vec!["Time".to_string(), "root.test.device2.temperature".to_string()];
+        let query_columns = table_export_query_columns(&request, &context, &columns).unwrap();
+        assert_eq!(query_columns.as_ref(), &["temperature".to_string()]);
+
+        assert_eq!(
+            table_cursor_sql(&request, &context, query_columns.as_ref(), &[], &[]),
+            "SELECT temperature FROM root.test.device2 WHERE (temperature > 1) ORDER BY Time DESC"
+        );
+        assert_eq!(
+            table_page_sql(&request, &context, query_columns.as_ref(), &[], &[], false, &[], 100, 50),
+            "SELECT temperature FROM \"root.test\".\"device2\" WHERE (temperature > 1) ORDER BY Time DESC LIMIT 50 OFFSET 100"
+        );
+
+        let csv = format_csv(&columns, &[vec![json!(1_700_000_000_000_i64), json!(21.5)]]);
+        assert!(csv.starts_with("\"Time\",\"root.test.device2.temperature\"\n"));
+        assert!(csv.contains("\"1700000000000\",\"21.5\""));
+
+        let workbook = build_xlsx_workbook(&XlsxWorksheetData {
+            sheet_name: Some("device2".to_string()),
+            columns,
+            column_types: vec!["INT64".to_string(), "DOUBLE".to_string()],
+            column_comments: vec![],
+            rows: vec![vec![json!(1_700_000_000_000_i64), json!(21.5)]],
+            numeric_column_right_align: false,
+        })
+        .unwrap();
+        let sheet = read_zip_entry(&workbook, "xl/worksheets/sheet1.xml");
+        assert!(sheet.contains("Time"));
+        assert!(sheet.contains("root.test.device2.temperature"));
+    }
+
+    #[test]
+    fn iotdb_table_export_matches_time_case_insensitively() {
+        let request = TableExportRequest {
+            export_id: "export-iotdb-case".to_string(),
+            connection_id: "conn-1".to_string(),
+            database: "root.test".to_string(),
+            schema: Some("root.test".to_string()),
+            identifier_quote: None,
+            table_name: "device2".to_string(),
+            file_path: "device2.csv".to_string(),
+            format: "csv".to_string(),
+            columns: None,
+            column_types: None,
+            primary_keys: None,
+            where_input: None,
+            order_by: None,
+            skip_count: true,
+            batch_size: Some(50),
+            row_limit: None,
+            date_time_format: None,
+            numeric_column_right_align: false,
+            column_comments: None,
+        };
+        let context = table_export_sql_context(DatabaseType::Iotdb, None, request.schema.as_deref());
+        let columns = vec!["tImE".to_string(), "temperature".to_string()];
+        let query_columns = table_export_query_columns(&request, &context, &columns).unwrap();
+
+        assert_eq!(
+            table_cursor_sql(&request, &context, query_columns.as_ref(), &[], &[]),
+            "SELECT temperature FROM root.test.device2"
+        );
+    }
+
+    #[test]
+    fn iotdb_table_export_rejects_only_implicit_time() {
+        let request = TableExportRequest {
+            export_id: "export-iotdb-time".to_string(),
+            connection_id: "conn-1".to_string(),
+            database: "root.test".to_string(),
+            schema: Some("root.test".to_string()),
+            identifier_quote: None,
+            table_name: "device2".to_string(),
+            file_path: "device2.csv".to_string(),
+            format: "csv".to_string(),
+            columns: None,
+            column_types: None,
+            primary_keys: None,
+            where_input: None,
+            order_by: None,
+            skip_count: true,
+            batch_size: Some(50),
+            row_limit: None,
+            date_time_format: None,
+            numeric_column_right_align: false,
+            column_comments: None,
+        };
+        let context = table_export_sql_context(DatabaseType::Iotdb, None, request.schema.as_deref());
+        let error = table_export_query_columns(&request, &context, &["TIME".to_string()]).unwrap_err();
+        assert_eq!(error, "IoTDB table export requires at least one non-Time column");
+    }
+
+    #[test]
+    fn iotdb_table_export_does_not_guess_other_device_paths() {
+        let request = TableExportRequest {
+            export_id: "export-iotdb-other-device".to_string(),
+            connection_id: "conn-1".to_string(),
+            database: "root.test".to_string(),
+            schema: Some("root.test".to_string()),
+            identifier_quote: None,
+            table_name: "device2".to_string(),
+            file_path: "device2.csv".to_string(),
+            format: "csv".to_string(),
+            columns: None,
+            column_types: None,
+            primary_keys: None,
+            where_input: None,
+            order_by: None,
+            skip_count: true,
+            batch_size: Some(50),
+            row_limit: None,
+            date_time_format: None,
+            numeric_column_right_align: false,
+            column_comments: None,
+        };
+        let context = table_export_sql_context(DatabaseType::Iotdb, None, request.schema.as_deref());
+        let columns = vec![
+            "Time".to_string(),
+            "root.test.device2.temperature".to_string(),
+            "root.other.device.temperature".to_string(),
+        ];
+
+        assert_eq!(
+            table_export_query_columns(&request, &context, &columns).unwrap().as_ref(),
+            &["temperature".to_string(), "root.other.device.temperature".to_string()]
+        );
+    }
+
+    #[test]
+    fn non_iotdb_table_export_preserves_columns_named_time() {
+        let request = TableExportRequest {
+            export_id: "export-time-column".to_string(),
+            connection_id: "conn-1".to_string(),
+            database: "app".to_string(),
+            schema: None,
+            identifier_quote: None,
+            table_name: "samples".to_string(),
+            file_path: "samples.csv".to_string(),
+            format: "csv".to_string(),
+            columns: None,
+            column_types: None,
+            primary_keys: None,
+            where_input: None,
+            order_by: None,
+            skip_count: true,
+            batch_size: Some(25),
+            row_limit: None,
+            date_time_format: None,
+            numeric_column_right_align: false,
+            column_comments: None,
+        };
+        let columns = vec!["Time".to_string(), "value".to_string()];
+
+        for (database_type, cursor_sql, page_sql) in [
+            (
+                DatabaseType::Mysql,
+                "SELECT `Time`, `value` FROM `samples`",
+                "SELECT `Time`, `value` FROM `samples` LIMIT 25 OFFSET 10",
+            ),
+            (
+                DatabaseType::Postgres,
+                "SELECT \"Time\", \"value\" FROM \"samples\"",
+                "SELECT \"Time\", \"value\" FROM \"samples\" LIMIT 25 OFFSET 10",
+            ),
+        ] {
+            let context = table_export_sql_context(database_type, None, None);
+            let query_columns = table_export_query_columns(&request, &context, &columns).unwrap();
+            assert!(matches!(query_columns, Cow::Borrowed(_)));
+            assert_eq!(table_cursor_sql(&request, &context, query_columns.as_ref(), &[], &[]), cursor_sql);
+            assert_eq!(
+                table_page_sql(&request, &context, query_columns.as_ref(), &[], &[], false, &[], 10, 25),
+                page_sql
+            );
+        }
     }
 
     #[test]

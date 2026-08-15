@@ -704,8 +704,22 @@ public final class KafkaAgent {
         int timeout = requestTimeout(params);
         String name = stringOrEmpty(params, "name");
 
+        try {
+            return modernTopicStats(admin, name, timeout);
+        } catch (Exception error) {
+            if (!hasUnsupportedVersionException(error)) {
+                throw error;
+            }
+            return legacyTopicStats(name, timeout);
+        }
+    }
+
+    private static Object modernTopicStats(AdminClient admin, String name, int timeout) throws Exception {
         TopicDescription desc = admin.describeTopics(Collections.singletonList(name))
             .allTopicNames().get(timeout, TimeUnit.MILLISECONDS).get(name);
+        if (desc == null) {
+            throw new UnknownTopicOrPartitionException("Kafka topic does not exist: " + name);
+        }
 
         // Collect offsets for size estimation
         Map<TopicPartition, ListOffsetsResult.ListOffsetsResultInfo> endOffsets = new LinkedHashMap<>();
@@ -748,14 +762,101 @@ public final class KafkaAgent {
         return result;
     }
 
+    private static Object legacyTopicStats(String name, int timeout) {
+        Properties props = topicStatsConsumerProperties(activeConnection);
+        Duration requestTimeout = Duration.ofMillis(timeout);
+        try (KafkaConsumer<String, byte[]> consumer = new KafkaConsumer<>(props)) {
+            Map<String, List<PartitionInfo>> topics = consumer.listTopics(requestTimeout);
+            requireExistingTopic(topics.keySet(), name);
+            List<PartitionInfo> partitions = topics.get(name);
+            List<TopicPartition> topicPartitions = partitions.stream()
+                .map(partition -> new TopicPartition(name, partition.partition()))
+                .collect(Collectors.toList());
+            Map<TopicPartition, Long> beginningOffsets = consumer.beginningOffsets(topicPartitions, requestTimeout);
+            Map<TopicPartition, Long> endOffsets = consumer.endOffsets(topicPartitions, requestTimeout);
+            return legacyTopicStatsResult(name, partitions, beginningOffsets, endOffsets);
+        }
+    }
+
+    static void requireExistingTopic(Collection<String> topicNames, String name) {
+        if (!topicNames.contains(name)) {
+            throw new UnknownTopicOrPartitionException("Kafka topic does not exist: " + name);
+        }
+    }
+
+    static Properties topicStatsConsumerProperties(JsonObject conn) {
+        if (conn == null) {
+            throw new IllegalStateException("Kafka Agent is not connected");
+        }
+        Properties props = peekConsumerProperties(conn, 1);
+        // The fallback discovers the topic through all-topics metadata, which cannot create
+        // a topic, before issuing requests for its concrete partitions.
+        props.put(ConsumerConfig.ALLOW_AUTO_CREATE_TOPICS_CONFIG, "true");
+        return props;
+    }
+
+    static Object legacyTopicStatsResult(
+        String name,
+        List<PartitionInfo> partitions,
+        Map<TopicPartition, Long> beginningOffsets,
+        Map<TopicPartition, Long> endOffsets
+    ) {
+        long totalMessages = 0;
+        List<Map<String, Object>> partitionStats = new ArrayList<>();
+        for (PartitionInfo partition : partitions) {
+            TopicPartition topicPartition = new TopicPartition(name, partition.partition());
+            long begin = beginningOffsets.get(topicPartition);
+            long end = endOffsets.get(topicPartition);
+            long count = end - begin;
+            totalMessages += count;
+
+            Map<String, Object> stats = new LinkedHashMap<>();
+            stats.put("partition", partition.partition());
+            stats.put("leader", partition.leader() != null ? partition.leader().id() : -1);
+            stats.put("replicas", Arrays.stream(partition.replicas()).map(Node::id).collect(Collectors.toList()));
+            stats.put("isr", Arrays.stream(partition.inSyncReplicas()).map(Node::id).collect(Collectors.toList()));
+            stats.put("beginOffset", begin);
+            stats.put("endOffset", end);
+            stats.put("messageCount", count);
+            partitionStats.add(stats);
+        }
+
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("name", name);
+        result.put("partitions", partitions.size());
+        result.put("replicationFactor", partitions.isEmpty() ? 0 : partitions.get(0).replicas().length);
+        result.put("totalMessages", totalMessages);
+        result.put("partitionStats", partitionStats);
+        return result;
+    }
+
     private static Object getTopicConfig(JsonObject params) throws Exception {
         AdminClient admin = requireAdmin();
         int timeout = requestTimeout(params);
         String name = stringOrEmpty(params, "name");
 
         ConfigResource resource = new ConfigResource(ConfigResource.Type.TOPIC, name);
-        Config config = admin.describeConfigs(Collections.singletonList(resource))
-            .all().get(timeout, TimeUnit.MILLISECONDS).get(resource);
+        return topicConfigResult(() -> admin.describeConfigs(Collections.singletonList(resource))
+            .all().get(timeout, TimeUnit.MILLISECONDS).get(resource));
+    }
+
+    static Object topicConfigResult(TopicConfigLoader configLoader) throws Exception {
+        Config config;
+        try {
+            config = configLoader.load();
+        } catch (Exception error) {
+            if (!hasUnsupportedVersionException(error)) {
+                throw error;
+            }
+            Map<String, Object> unsupported = new LinkedHashMap<>();
+            unsupported.put("configs", Collections.emptyMap());
+            unsupported.put("configSupported", false);
+            unsupported.put(
+                "unsupportedReason",
+                "Topic configuration is unavailable because this Kafka broker does not support DescribeConfigs."
+            );
+            return unsupported;
+        }
 
         Map<String, Object> configs = new LinkedHashMap<>();
         for (ConfigEntry entry : config.entries()) {
@@ -768,6 +869,11 @@ public final class KafkaAgent {
             configs.put(entry.name(), entryMap);
         }
         return Collections.singletonMap("configs", configs);
+    }
+
+    @FunctionalInterface
+    interface TopicConfigLoader {
+        Config load() throws Exception;
     }
 
     private static Object alterTopicConfig(JsonObject params) throws Exception {
@@ -2096,6 +2202,10 @@ public final class KafkaAgent {
             }
         }
         return false;
+    }
+
+    static boolean hasUnsupportedVersionException(Throwable error) {
+        return causeChain(error).stream().anyMatch(UnsupportedVersionException.class::isInstance);
     }
 
     private static Throwable rootCause(Throwable error) {

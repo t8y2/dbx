@@ -1,4 +1,4 @@
-import type { ColumnInfo, DatabaseObjectType, DatabaseType, ForeignKeyInfo, IndexInfo, TriggerInfo } from "@/types/database";
+import type { ColumnInfo, ConnectionConfig, DatabaseObjectType, DatabaseType, ForeignKeyInfo, IndexInfo, TriggerInfo } from "@/types/database";
 import * as api from "@/lib/backend/api";
 import { createColumnDrafts, createForeignKeyDrafts, createIndexDrafts, createTriggerDrafts } from "@/lib/table/tableStructureEditorState";
 import type { BuildTableStructureChangeSqlOptions } from "@/lib/table/tableStructureEditorSql";
@@ -16,6 +16,14 @@ export interface TableAdminSqlOptions {
   schema?: string | null;
   tableName: string;
   cascade?: boolean;
+}
+
+export interface MysqlAutoIncrementSqlOptions {
+  databaseType: DatabaseType;
+  driverProfile?: string | null;
+  schema?: string | null;
+  tableName: string;
+  value: string;
 }
 
 export type TableChildObjectType = "COLUMN" | "INDEX" | "FOREIGN_KEY" | "TRIGGER";
@@ -276,6 +284,16 @@ export function buildEmptyTableSql(options: TableAdminSqlOptions): Promise<strin
 
 export function buildTruncateTableSql(options: TableAdminSqlOptions): Promise<string> {
   return api.buildTruncateTableSql(options);
+}
+
+export function buildMysqlAutoIncrementSql(options: MysqlAutoIncrementSqlOptions): Promise<string> {
+  return api.buildMysqlAutoIncrementSql(options);
+}
+
+export function supportsNativeMysqlAutoIncrement(connection: Pick<ConnectionConfig, "db_type" | "driver_profile"> | undefined): boolean {
+  if (connection?.db_type !== "mysql") return false;
+  const profile = connection.driver_profile?.trim().toLowerCase();
+  return !profile || profile === "mysql";
 }
 
 const DROP_TABLE_CASCADE_DATABASE_TYPES: readonly DatabaseType[] = ["postgres", "redshift", "gaussdb", "kwdb", "kingbase", "highgo", "uxdb", "vastbase", "opengauss"];

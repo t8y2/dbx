@@ -40,6 +40,12 @@ describe("KvKeyBrowser search and split layout", () => {
     expect(browserSource).toContain("keyLoadGeneration++;");
   });
 
+  it("shows list request errors instead of the empty-state message", () => {
+    expect(browserSource).toContain('const listError = ref("");');
+    expect(browserSource.match(/listError\.value = error instanceof Error \? error\.message : String\(error\);/g)).toHaveLength(2);
+    expect(browserSource.indexOf('v-else-if="listError"')).toBeLessThan(browserSource.indexOf('v-else-if="visibleRows.length === 0"'));
+  });
+
   it("highlights the matching search query only for the selected search result", () => {
     expect(browserSource).toContain("interface KvSearchHighlight");
     expect(browserSource).toMatch(/const activeSearchHighlight = computed\(\(\) => \(?props\.searchHighlight\?\.key === selectedKey\.value/);

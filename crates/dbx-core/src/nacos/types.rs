@@ -102,6 +102,8 @@ pub struct NacosAccessControlCapabilities {
     pub list_permissions: NacosOperationCapability,
     pub grant_permission: NacosOperationCapability,
     pub revoke_permission: NacosOperationCapability,
+    /// Whether all read endpoints required by the directory-detail workspace
+    /// are available. Write operations remain independently capability-gated.
     #[serde(default)]
     pub enhanced_workspace: bool,
     #[serde(default)]
@@ -819,6 +821,8 @@ pub struct NacosConfigTransferRequest {
     pub target_connection_id: String,
     pub source: NacosConfigSelector,
     pub target_namespace: String,
+    #[serde(default)]
+    pub target_group: Option<String>,
     #[serde(default)]
     pub conflict_policy: NacosConflictPolicy,
 }

@@ -11,6 +11,7 @@ export type ShortcutActionId =
   | "indentMore"
   | "indentLess"
   | "insertLineBelow"
+  | "joinLines"
   | "duplicateLine"
   | "deleteLine"
   | "moveLineUp"
@@ -147,6 +148,12 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
     labelKey: "settings.shortcutInsertLineBelow",
     scope: "editor",
     defaultShortcut: "Shift+Enter",
+  },
+  {
+    id: "joinLines",
+    labelKey: "settings.shortcutJoinLines",
+    scope: "editor",
+    defaultShortcut: "Mod+J",
   },
   {
     id: "duplicateLine",

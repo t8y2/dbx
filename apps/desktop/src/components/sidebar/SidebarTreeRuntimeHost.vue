@@ -190,6 +190,7 @@ import {
   isLoadingStructurePreview,
   showEmptyTableConfirm,
   showTruncateTableConfirm,
+  showMysqlAutoIncrementConfirm,
   showRenameObjectDialog,
   renameObjectName,
   renameObjectError,
@@ -200,6 +201,8 @@ import {
   emptyTablePreviewSql,
   truncateTablePreviewSql,
   truncateTableCascade,
+  mysqlAutoIncrementValue,
+  mysqlAutoIncrementPreviewSql,
   dropObjectPreviewSql,
   showDropObjectConfirm,
   dropTableChildObjectPreviewSql,
@@ -255,6 +258,13 @@ import {
   mongoCreateIndexFieldOptions,
   mongoCreateIndexError,
   mongoCreateIndexLoading,
+  showMongoIndexManagerDialog,
+  mongoIndexManagerRows,
+  mongoIndexManagerLoading,
+  mongoIndexManagerError,
+  mongoIndexManagerSelectedName,
+  mongoIndexManagerMode,
+  mongoEditIndexOriginalName,
   showFlushRedisDbConfirm,
   showCreateSchemaDialog,
   createSchemaName,
@@ -385,6 +395,8 @@ const {
   disconnectConnection,
   connectionDisconnectMenuLabel,
   canDisconnectConnection,
+  canForgetSessionCredential,
+  disconnectAndForgetConnectionPassword,
   cancelConnectionAttempt,
   closeDatabaseConnection,
   isPinned,
@@ -451,6 +463,19 @@ const {
   addMongoCreateIndexField,
   removeMongoCreateIndexField,
   confirmCreateMongoIndex,
+  canManageMongoIndexes,
+  prepareMongoIndexManagerDialog,
+  loadMongoIndexManagerRows,
+  mongoIndexManagerSelected,
+  mongoIndexManagerCollectionName,
+  selectMongoIndexRow,
+  startCreateMongoIndexDraft,
+  startEditMongoIndexDraft,
+  cancelMongoIndexDraft,
+  dropSelectedMongoIndexRow,
+  canDropSelectedMongoIndexRow,
+  canEditSelectedMongoIndexRow,
+  confirmEditMongoIndex,
   openCreateNacosNamespaceDialog,
   confirmCreateNacosNamespace,
   openEditNacosNamespaceDialog,
@@ -472,7 +497,25 @@ const {
   confirmDropAllMongoIndexes,
 } = useSidebarDatabaseSpecificMutationRuntime({ activeNode, connectionStore });
 
-const { isTableNotView, supportsTruncate, canDropTableCascade, canTruncateTableCascade, refreshDropTablePreviewSql, refreshTruncateTablePreviewSql, dropTable, refreshTableList, confirmDropTable, emptyTable, confirmEmptyTable, truncateTable, confirmTruncateTable } = useSidebarTableMutationRuntime({
+const {
+  isTableNotView,
+  supportsTruncate,
+  supportsMysqlAutoIncrement,
+  canDropTableCascade,
+  canTruncateTableCascade,
+  refreshDropTablePreviewSql,
+  refreshTruncateTablePreviewSql,
+  dropTable,
+  refreshTableList,
+  confirmDropTable,
+  emptyTable,
+  confirmEmptyTable,
+  truncateTable,
+  confirmTruncateTable,
+  mysqlAutoIncrement,
+  refreshMysqlAutoIncrementPreviewSql,
+  confirmMysqlAutoIncrement,
+} = useSidebarTableMutationRuntime({
   activeNode,
   releaseActiveNodeReference,
   connectionStore,
@@ -868,13 +911,18 @@ function runRowClickAction(clickDetail: number, requestId: number) {
     openMongoTreeData(node);
     return;
   }
-  const action = treeNodeRowAction(node.type, canExpand.value, settingsStore.editorSettings.sidebarActivation, currentDatabaseType());
+  const action = treeNodeRowAction(node.type, canExpand.value, settingsStore.editorSettings.sidebarActivation, currentDatabaseType(), settingsStore.editorSettings.sidebarOpenDatabaseOnSingleClick, canOpenObjectBrowser.value);
   // WebKit can keep incrementing click.detail while the pointer moves quickly
   // between adjacent rows. Nacos entries are idempotent navigation targets, so
   // do not mistake that rapid one-click switching for a double-click toggle.
   if (!shouldRunTreeNodeRowAction(action, clickDetail, isGroupLabel(node) || isRepeatableNavigationTreeNode(node.type))) return;
   if (action === "open-data") {
     scheduleOpenData(node);
+  } else if (action === "open-object-browser") {
+    void openObjectBrowser();
+  } else if (action === "open-object-browser-and-expand") {
+    void openObjectBrowser();
+    if (!node.isExpanded) void toggle();
   } else if (action === "open-source") {
     openObjectSourceDialog(false);
   } else if (action === "open-extension-details") {
@@ -1151,6 +1199,12 @@ function openCreateMongoIndexDialog() {
   prepareCreateMongoIndexDialog();
 }
 
+function openMongoIndexManagerDialog() {
+  claimTreeItemDialogOwnership();
+  routeTreeItemDialogController();
+  prepareMongoIndexManagerDialog();
+}
+
 function openRedisDatabaseAliasDialog() {
   claimTreeItemDialogOwnership();
   routeTreeItemDialogController();
@@ -1202,7 +1256,7 @@ function requestDeleteSelectedNode(): boolean {
 
 function onDoubleClick(event: MouseEvent) {
   if (dataTabOpenModeFromTreeClick(activeNode.value.type, event, settingsStore.editorSettings.shortcuts.openDataInNewTab) === "new-tab") return;
-  const action = treeNodeRowDoubleClickAction(activeNode.value.type, canOpenObjectBrowser.value, settingsStore.editorSettings.sidebarActivation, canExpand.value, currentDatabaseType(), canOpenConnectionDatabaseBrowser.value);
+  const action = treeNodeRowDoubleClickAction(activeNode.value.type, canOpenObjectBrowser.value, settingsStore.editorSettings.sidebarActivation, canExpand.value, currentDatabaseType(), canOpenConnectionDatabaseBrowser.value, settingsStore.editorSettings.sidebarOpenDatabaseOnSingleClick);
   if (action === "open-database-browser") {
     void openDatabaseBrowser();
   } else if (action === "open-object-browser") {
@@ -3795,6 +3849,13 @@ function dangerRequest(request: Omit<SidebarDangerDialogRequest, "target">): Sid
       await onChange(checked);
     };
   }
+  if (request.textInput?.onInput) {
+    const onInput = request.textInput.onInput;
+    request.textInput.onInput = async (value) => {
+      activateActionTarget(target);
+      await onInput(value);
+    };
+  }
   routedRequest.target = target;
   sidebarDangerTarget.value = routedRequest.target;
   return routedRequest;
@@ -3887,6 +3948,30 @@ routeDangerDialog(showTruncateTableConfirm, () =>
         }
       : undefined,
     confirm: confirmTruncateTable,
+  }),
+);
+
+routeDangerDialog(showMysqlAutoIncrementConfirm, () =>
+  dangerRequest({
+    title: t("contextMenu.mysqlAutoIncrementTitle"),
+    message: t("contextMenu.mysqlAutoIncrementMessage", { name: activeNode.value.label }),
+    detailsText: t("contextMenu.mysqlAutoIncrementNonemptyHint"),
+    get sql() {
+      return mysqlAutoIncrementPreviewSql.value;
+    },
+    confirmLabel: t("contextMenu.mysqlAutoIncrement"),
+    textInput: {
+      value: mysqlAutoIncrementValue.value,
+      label: t("contextMenu.mysqlAutoIncrementValue"),
+      placeholder: "1",
+      inputMode: "numeric",
+      async onInput(value) {
+        mysqlAutoIncrementValue.value = value;
+        if (sidebarDangerTarget.value) activateActionTarget(sidebarDangerTarget.value);
+        await refreshMysqlAutoIncrementPreviewSql();
+      },
+    },
+    confirm: confirmMysqlAutoIncrement,
   }),
 );
 
@@ -4174,6 +4259,24 @@ function databaseSpecificDialogCapabilities() {
     addMongoCreateIndexField,
     removeMongoCreateIndexField,
     confirmCreateMongoIndex,
+    showMongoIndexManagerDialog,
+    mongoIndexManagerRows,
+    mongoIndexManagerLoading,
+    mongoIndexManagerError,
+    mongoIndexManagerSelectedName,
+    mongoIndexManagerMode,
+    mongoIndexManagerSelected,
+    mongoIndexManagerCollectionName,
+    selectMongoIndexRow,
+    startCreateMongoIndexDraft,
+    startEditMongoIndexDraft,
+    cancelMongoIndexDraft,
+    dropSelectedMongoIndexRow,
+    canDropSelectedMongoIndexRow,
+    canEditSelectedMongoIndexRow,
+    confirmEditMongoIndex,
+    mongoEditIndexOriginalName,
+    loadMongoIndexManagerRows,
     showRedisDatabaseAliasDialog,
     redisDatabaseAliasInput,
     redisDatabaseAliasSaving,
@@ -4269,6 +4372,7 @@ function moreActionsSubmenu(children: ContextMenuItem[]): ContextMenuItem {
   return {
     label: t("common.more"),
     icon: ListTree,
+    variant: "destructive",
     children,
   };
 }
@@ -4349,6 +4453,15 @@ function buildConnectionSidebarMenu(context: SidebarMenuFactoryContext): boolean
       items.push({ label: t("connection.cancelConnecting"), action: cancelConnectionAttempt, icon: X });
     } else if (canDisconnectConnection()) {
       items.push({ label: connectionDisconnectMenuLabel(), action: disconnectConnection, icon: Unplug });
+      // save_password=false 且本次运行期已输入密码：提供"断开并忘记本次密码"，
+      // 清除会话凭据后下次连接需重新输入。
+      if (canForgetSessionCredential()) {
+        items.push({
+          label: t("connection.disconnectAndForgetPassword"),
+          action: disconnectAndForgetConnectionPassword,
+          icon: Unplug,
+        });
+      }
     } else if (!isConnected.value) {
       items.push({ label: t("contextMenu.openConnection"), action: toggle, icon: Plug });
     }
@@ -4781,6 +4894,11 @@ function buildSpecialSidebarMenu(context: SidebarMenuFactoryContext): boolean {
     items.push({ label: "", separator: true });
     items.push({ label: t("contextMenu.viewData"), action: toggle, icon: TableProperties });
     items.push({ label: t("contextMenu.newQuery"), action: newQuery, icon: TerminalSquare });
+    // Creating and dropping indexes stay on the Indexes group node; the collection
+    // only opens the manager panel, which offers creation from inside itself.
+    if (canManageMongoIndexes.value) {
+      items.push({ label: t("contextMenu.manageMongoIndexes"), action: openMongoIndexManagerDialog, icon: PencilRuler });
+    }
     if (canRenameMongoCollection.value) {
       items.push({
         label: t("contextMenu.renameObject"),
@@ -4916,6 +5034,9 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
       items.push({ label: t("contextMenu.duplicateStructure"), action: duplicateStructure, icon: CopyPlus });
       // Keep menu copy aligned with keyboard copy so frozen multi-selection and single-row fallback stay compatible.
       items.push(...treeTableClipboardMenuItems(node));
+      if (supportsMysqlAutoIncrement.value) {
+        items.push({ label: t("contextMenu.mysqlAutoIncrement"), action: mysqlAutoIncrement, icon: Gauge });
+      }
       if (supportsTruncate.value) {
         destructiveActions.push({
           label: truncateMenuLabel(t("contextMenu.truncateTable")),
@@ -5116,7 +5237,7 @@ function buildObjectGroupSidebarMenu(context: SidebarMenuFactoryContext): boolea
     const hasMongoCreateIndexAction = node.type === "group-indexes" && canCreateMongoIndex.value;
     const hasMongoDropAllIndexesAction = node.type === "group-indexes" && canDropAllMongoIndexes.value;
     const hasGroupAction = (node.type === "group-tables" && canCreateTable.value) || (node.type === "group-views" && !!node.connectionId && !!node.database) || !!mysqlObjectTemplate || hasMongoCreateIndexAction || hasMongoDropAllIndexesAction;
-    const canLoadAllObjectGroup = node.type === "group-tables" || node.type === "group-views" || node.type === "group-materialized-views";
+    const canLoadAllObjectGroup = node.type === "group-tables" || node.type === "group-dolt-system-tables" || node.type === "group-views" || node.type === "group-materialized-views";
     if (node.type === "group-tables" && canCreateTable.value) {
       items.push({ label: t("contextMenu.createTable"), action: createTable, icon: Plus });
       if (canOpenTableImport.value) {

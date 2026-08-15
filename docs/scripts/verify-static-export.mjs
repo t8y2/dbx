@@ -86,4 +86,17 @@ for (const localizedHome of ["https://dbxio.com/en", "https://dbxio.com/cn"]) {
   }
 }
 
+for (const privateRoute of ["https://dbxio.com/en/issue", "https://dbxio.com/cn/issue"]) {
+  if (sitemap.includes(`<loc>${privateRoute}</loc>`)) {
+    throw new Error(`sitemap.xml must not advertise direct-only route: ${privateRoute}`);
+  }
+}
+
+for (const issuePage of ["en/issue.html", "cn/issue.html"]) {
+  const content = await readFile(join(outputDirectory, issuePage), "utf8");
+  if (!content.includes('<meta name="robots" content="noindex, nofollow, nocache"')) {
+    throw new Error(`${issuePage} must remain excluded from search indexing.`);
+  }
+}
+
 console.log("Static export sitemap verified with independent English and Chinese URLs.");

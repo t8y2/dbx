@@ -156,7 +156,21 @@ watch(selectedTopic, (topic) => emit("topicSelected", topic));
 }
 
 .kafka-messages-panel {
+  height: 100%;
+  min-height: 0;
+  box-sizing: border-box;
+  overflow: hidden;
   padding: 16px;
+}
+
+.panel-toolbar {
+  flex-shrink: 0;
+}
+
+.kafka-messages-content {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
 }
 
 .kafka-topic-section,

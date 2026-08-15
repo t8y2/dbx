@@ -178,6 +178,65 @@ func TestURLParamsOverrideConnectionString(t *testing.T) {
 	}
 }
 
+func TestImpalaDefaultsToNoSASL(t *testing.T) {
+	config, err := parseConnectionConfig(connectParams{
+		DatabaseType: "impala",
+		Host:         "impala.example.com",
+		Port:         21050,
+		Database:     "analytics",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.Auth != "NOSASL" {
+		t.Fatalf("unexpected Impala auth mode: %q", config.Auth)
+	}
+	if config.Kerberos.Service != "impala" {
+		t.Fatalf("unexpected Impala Kerberos service: %q", config.Kerberos.Service)
+	}
+}
+
+func TestImpalaExplicitAuthenticationOverridesDefaults(t *testing.T) {
+	config, err := parseConnectionConfig(connectParams{
+		DatabaseType: "impala",
+		Host:         "impala.example.com",
+		Port:         21050,
+		URLParams:    "auth=NONE;service=custom",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.Auth != "NONE" || config.Kerberos.Service != "custom" {
+		t.Fatalf("explicit Impala authentication was not preserved: %#v", config.Kerberos)
+	}
+}
+
+func TestImpalaLDAPHTTPSSLConfiguration(t *testing.T) {
+	config, err := parseConnectionConfig(connectParams{
+		DatabaseType: "impala",
+		Host:         "impala.example.com",
+		Port:         21050,
+		Username:     "alice",
+		Password:     "secret",
+		URLParams:    "auth=LDAP;transportMode=http;httpPath=cliservice;ssl=true",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.Auth != "LDAP" || config.TransportMode != "http" || config.HTTPPath != "cliservice" {
+		t.Fatalf("unexpected Impala LDAP transport config: %#v", config)
+	}
+	if config.Username != "alice" || config.Password != "secret" {
+		t.Fatalf("Impala LDAP credentials were not preserved: %q / %q", config.Username, config.Password)
+	}
+	if config.TLSConfig == nil || config.TLSConfig.ServerName != "impala.example.com" {
+		t.Fatalf("unexpected Impala LDAP TLS config: %#v", config.TLSConfig)
+	}
+	if config.Kerberos.Service != defaultImpalaService {
+		t.Fatalf("unexpected Impala service default: %q", config.Kerberos.Service)
+	}
+}
+
 func TestParseStandardJDBCURLSectionsAndCredentials(t *testing.T) {
 	config, err := parseConnectionConfig(connectParams{
 		ConnectionString: "jdbc:hive2://hs2.example.com:10001/analytics;user=alice;password=p%40ss?hive.server2.transport.mode=http;hive.server2.thrift.http.path=proxy;hive.exec.dynamic.partition=true#SourceTable=events",

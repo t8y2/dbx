@@ -11,10 +11,11 @@ import * as api from "@/lib/backend/api";
 import { executeWithProductionContextGuard } from "@/lib/database/productionExecutionGuard";
 import { mergeNacosNamespacePermissionAssignments, type NacosNamespacePermissionAction } from "@/lib/nacos/nacosAdmin";
 import { useConnectionStore } from "@/stores/connectionStore";
-import type { NacosAccessControlSnapshot, NacosAccessOperationRequest, NacosAccessOperationResult, NacosPermissionDraft, NacosPermissionInfo, NacosUserInfo } from "@/types/nacos";
+import type { NacosAccessControlCapabilities, NacosAccessControlSnapshot, NacosAccessOperationRequest, NacosAccessOperationResult, NacosPermissionDraft, NacosPermissionInfo, NacosUserInfo } from "@/types/nacos";
 
 const props = defineProps<{
   connectionId: string;
+  capabilities: NacosAccessControlCapabilities;
   readOnly?: boolean;
   tab: "users" | "roles";
 }>();
@@ -110,6 +111,71 @@ const adminMembersChanged = computed(() => {
   const before = [...roleMembers.value].sort().join("\n");
   const after = [...roleForm.members].sort().join("\n");
   return before !== after || roleForm.newUsers.length > 0;
+});
+const canCreateUser = computed(() => !props.readOnly && props.capabilities.createUser.supported);
+const canUpdateUser = computed(() => !props.readOnly && props.capabilities.updateUser.supported);
+const canDeleteUser = computed(() => !props.readOnly && props.capabilities.deleteUser.supported);
+const canAssignRole = computed(() => !props.readOnly && props.capabilities.assignRole.supported);
+const canRemoveRole = computed(() => !props.readOnly && props.capabilities.removeRole.supported);
+const canGrantPermission = computed(() => !props.readOnly && props.capabilities.grantPermission.supported);
+const canRevokePermission = computed(() => !props.readOnly && props.capabilities.revokePermission.supported);
+const canCreateRole = computed(() => canAssignRole.value && canGrantPermission.value);
+const canEditUserRoles = computed(() => canAssignRole.value || canRemoveRole.value);
+const canEditRole = computed(() => canAssignRole.value || canRemoveRole.value || canGrantPermission.value || canRevokePermission.value || canCreateUser.value);
+
+function setHasAdded(before: Iterable<string>, after: Iterable<string>) {
+  const original = new Set(before);
+  return [...after].some((value) => !original.has(value));
+}
+
+function permissionActions(assignments: PermissionAssignment[]) {
+  return new Map(assignments.map((permission) => [permission.namespaceId, permission.action]));
+}
+
+const userOperationWritable = computed(() => {
+  if (props.readOnly) return false;
+  if (userDialog.value === "password") return canUpdateUser.value;
+  if (userDialog.value === "create") {
+    return canCreateUser.value && (!userForm.roles.length || canAssignRole.value);
+  }
+  if (userDialog.value === "roles") {
+    const original = selectedUser.value?.roles ?? [];
+    const addsRoles = setHasAdded(original, userForm.roles);
+    const removesRoles = setHasAdded(userForm.roles, original);
+    return (!addsRoles || canAssignRole.value) && (!removesRoles || canRemoveRole.value);
+  }
+  if (userDialog.value === "delete") {
+    return canDeleteUser.value && (!(selectedUser.value?.roles.length ?? 0) || canRemoveRole.value);
+  }
+  return false;
+});
+
+const roleOperationWritable = computed(() => {
+  if (props.readOnly) return false;
+  if (roleDialog.value === "create") {
+    return canAssignRole.value && canGrantPermission.value && (!roleForm.newUsers.length || canCreateUser.value);
+  }
+  if (roleDialog.value === "delete") {
+    return (!roleMembers.value.length || canRemoveRole.value) && (!rolePermissions.value.length || canRevokePermission.value);
+  }
+  if (roleDialog.value !== "edit") return false;
+
+  const nextMembers = [...roleForm.members, ...roleForm.newUsers.map((user) => user.username.trim()).filter(Boolean)];
+  const addsMembers = setHasAdded(roleMembers.value, nextMembers);
+  const removesMembers = setHasAdded(nextMembers, roleMembers.value);
+  const beforePermissions = permissionActions(mergeNacosNamespacePermissionAssignments(managedRolePermissions.value));
+  const afterPermissions = permissionActions(roleForm.permissions);
+  let grantsPermissions = false;
+  let revokesPermissions = false;
+  for (const [namespaceId, action] of afterPermissions) {
+    const previous = beforePermissions.get(namespaceId);
+    if (previous !== action) grantsPermissions = true;
+    if (previous && previous !== action) revokesPermissions = true;
+  }
+  for (const namespaceId of beforePermissions.keys()) {
+    if (!afterPermissions.has(namespaceId)) revokesPermissions = true;
+  }
+  return (!roleForm.newUsers.length || canCreateUser.value) && (!addsMembers || canAssignRole.value) && (!removesMembers || canRemoveRole.value) && (!grantsPermissions || canGrantPermission.value) && (!revokesPermissions || canRevokePermission.value);
 });
 
 async function loadSnapshot(preserveSelection = true) {
@@ -489,7 +555,7 @@ onMounted(() => void loadSnapshot(false));
       </div>
 
       <div class="shrink-0 space-y-2 border-t p-2">
-        <Button class="h-8 w-full" :disabled="readOnly" @click="tab === 'users' ? openCreateUser() : openCreateRole()"><Plus class="mr-1.5 h-3.5 w-3.5" />{{ tab === "users" ? t("nacos.createUser") : t("nacos.accessCreateRole") }}</Button>
+        <Button class="h-8 w-full" :disabled="tab === 'users' ? !canCreateUser : !canCreateRole" @click="tab === 'users' ? openCreateUser() : openCreateRole()"><Plus class="mr-1.5 h-3.5 w-3.5" />{{ tab === "users" ? t("nacos.createUser") : t("nacos.accessCreateRole") }}</Button>
         <div class="flex h-7 items-center justify-between px-1 text-xs text-muted-foreground">
           <span>{{ currentItems.length }}</span>
           <div class="flex items-center gap-1">
@@ -511,8 +577,8 @@ onMounted(() => void loadSnapshot(false));
             <h2 class="truncate text-base font-semibold">{{ selectedUser.username }}</h2>
             <p class="text-xs text-muted-foreground">{{ t("nacos.accessUserSubtitle") }}</p>
           </div>
-          <Button size="sm" variant="outline" :disabled="readOnly" @click="openUserPassword"><KeyRound class="mr-1.5 h-3.5 w-3.5" />{{ t("nacos.resetUserPassword") }}</Button>
-          <Button size="sm" variant="ghost" class="text-destructive hover:text-destructive" :disabled="readOnly" @click="openDeleteUser"
+          <Button size="sm" variant="outline" :disabled="!canUpdateUser" @click="openUserPassword"><KeyRound class="mr-1.5 h-3.5 w-3.5" />{{ t("nacos.resetUserPassword") }}</Button>
+          <Button size="sm" variant="ghost" class="text-destructive hover:text-destructive" :disabled="!canDeleteUser || (!!selectedUser.roles.length && !canRemoveRole)" @click="openDeleteUser"
             ><Trash2 class="h-4 w-4" /><span class="sr-only">{{ t("nacos.deleteUser") }}</span></Button
           >
         </header>
@@ -525,7 +591,7 @@ onMounted(() => void loadSnapshot(false));
               </div>
               <div class="flex shrink-0 items-center gap-2">
                 <Badge variant="secondary" class="font-normal">{{ selectedUser.roles.length }}</Badge>
-                <Button size="sm" variant="outline" :disabled="readOnly" @click="openUserRoles"><Pencil class="mr-1.5 h-3.5 w-3.5" />{{ t("nacos.edit") }}</Button>
+                <Button size="sm" variant="outline" :disabled="!canEditUserRoles" @click="openUserRoles"><Pencil class="mr-1.5 h-3.5 w-3.5" />{{ t("nacos.edit") }}</Button>
               </div>
             </div>
             <div v-if="selectedUser.roles.length" class="flex flex-wrap gap-1.5 rounded border bg-muted/20 p-1.5">
@@ -592,8 +658,8 @@ onMounted(() => void loadSnapshot(false));
             </div>
             <p class="text-xs text-muted-foreground">{{ t("nacos.accessRoleSubtitle", { members: selectedRole.memberCount }) }}</p>
           </div>
-          <Button size="sm" variant="outline" :disabled="readOnly" @click="openEditRole"><Pencil class="mr-1.5 h-3.5 w-3.5" />{{ t("nacos.edit") }}</Button>
-          <Button v-if="!selectedRole.administrator" size="sm" variant="ghost" class="text-destructive hover:text-destructive" :disabled="readOnly" @click="openDeleteRole"
+          <Button size="sm" variant="outline" :disabled="!canEditRole" @click="openEditRole"><Pencil class="mr-1.5 h-3.5 w-3.5" />{{ t("nacos.edit") }}</Button>
+          <Button v-if="!selectedRole.administrator" size="sm" variant="ghost" class="text-destructive hover:text-destructive" :disabled="readOnly || (!!roleMembers.length && !canRemoveRole) || (!!rolePermissions.length && !canRevokePermission)" @click="openDeleteRole"
             ><Trash2 class="h-4 w-4" /><span class="sr-only">{{ t("nacos.accessDeleteRole") }}</span></Button
           >
         </header>
@@ -671,7 +737,7 @@ onMounted(() => void loadSnapshot(false));
                   size="sm"
                   variant="ghost"
                   class="h-7 w-7 p-0 text-destructive hover:text-destructive"
-                  :disabled="readOnly"
+                  :disabled="!canRevokePermission"
                   :aria-label="t('nacos.accessRevokeRawPermission')"
                   @click="
                     pendingAdvancedPermission = permission;
@@ -709,9 +775,12 @@ onMounted(() => void loadSnapshot(false));
         <Label>{{ t("nacos.accessAssociatedRoles") }}</Label>
         <div class="max-h-52 overflow-auto rounded border p-2">
           <label v-for="role in assignableRoles" :key="role.role" class="flex min-h-9 items-center gap-2 rounded px-2 text-sm hover:bg-muted/60"
-            ><input type="checkbox" :checked="userForm.roles.includes(role.role)" @change="userForm.roles = toggle(userForm.roles, role.role, ($event.target as HTMLInputElement).checked)" /><Shield class="h-3.5 w-3.5 text-muted-foreground" /><span class="min-w-0 flex-1 truncate">{{
-              role.role
-            }}</span
+            ><input
+              type="checkbox"
+              :checked="userForm.roles.includes(role.role)"
+              :disabled="userDialog === 'roles' && (selectedUser?.roles.includes(role.role) ?? false) ? !canRemoveRole : !canAssignRole"
+              @change="userForm.roles = toggle(userForm.roles, role.role, ($event.target as HTMLInputElement).checked)"
+            /><Shield class="h-3.5 w-3.5 text-muted-foreground" /><span class="min-w-0 flex-1 truncate">{{ role.role }}</span
             ><span v-if="!role.complete" class="text-xs text-amber-600">{{ t("nacos.accessNeedsRepair") }}</span></label
           >
           <div v-if="!assignableRoles.length" class="p-3 text-center text-xs text-muted-foreground">{{ t("nacos.accessNoAssignableRoles") }}</div>
@@ -725,7 +794,7 @@ onMounted(() => void loadSnapshot(false));
       <p v-if="formError" class="text-sm text-destructive">{{ formError }}</p>
       <DialogFooter
         ><Button variant="outline" :disabled="saving" @click="userDialog = null">{{ t("nacos.cancel") }}</Button
-        ><Button :variant="userDialog === 'delete' ? 'destructive' : 'default'" :disabled="saving" @click="submitUser"><Loader2 v-if="saving" class="mr-2 h-4 w-4 animate-spin" />{{ userDialog === "delete" ? t("nacos.delete") : t("nacos.save") }}</Button></DialogFooter
+        ><Button :variant="userDialog === 'delete' ? 'destructive' : 'default'" :disabled="saving || !userOperationWritable" @click="submitUser"><Loader2 v-if="saving" class="mr-2 h-4 w-4 animate-spin" />{{ userDialog === "delete" ? t("nacos.delete") : t("nacos.save") }}</Button></DialogFooter
       >
     </DialogContent>
   </Dialog>
@@ -748,11 +817,16 @@ onMounted(() => void loadSnapshot(false));
                 <Label>{{ t("nacos.accessMembers") }}</Label>
                 <p class="mt-0.5 text-xs text-muted-foreground">{{ t("nacos.accessMembersRequiredHint") }}</p>
               </div>
-              <Button size="sm" variant="outline" @click="addNewUser"><Plus class="mr-1 h-3.5 w-3.5" />{{ t("nacos.accessInlineCreateUser") }}</Button>
+              <Button size="sm" variant="outline" :disabled="!canCreateUser || !canAssignRole" @click="addNewUser"><Plus class="mr-1 h-3.5 w-3.5" />{{ t("nacos.accessInlineCreateUser") }}</Button>
             </div>
             <div class="max-h-44 overflow-auto rounded border p-2">
               <label v-for="user in users" :key="user.username" class="flex min-h-9 items-center gap-2 rounded px-2 text-sm hover:bg-muted/60"
-                ><input type="checkbox" :checked="roleForm.members.includes(user.username)" @change="roleForm.members = toggle(roleForm.members, user.username, ($event.target as HTMLInputElement).checked)" /><UserRound class="h-3.5 w-3.5 text-muted-foreground" />{{ user.username }}</label
+                ><input
+                  type="checkbox"
+                  :checked="roleForm.members.includes(user.username)"
+                  :disabled="roleDialog === 'edit' && roleMembers.includes(user.username) ? !canRemoveRole : !canAssignRole"
+                  @change="roleForm.members = toggle(roleForm.members, user.username, ($event.target as HTMLInputElement).checked)"
+                /><UserRound class="h-3.5 w-3.5 text-muted-foreground" />{{ user.username }}</label
               >
             </div>
             <div v-for="(user, index) in roleForm.newUsers" :key="index" class="mt-2 grid grid-cols-[1fr_1fr_32px] gap-2">
@@ -785,8 +859,8 @@ onMounted(() => void loadSnapshot(false));
                 </div>
               </div>
               <div class="flex flex-col items-center justify-center gap-2">
-                <Button size="sm" variant="outline" class="h-8 w-8 p-0" :disabled="!selectedAvailableNamespaceIds.length" :aria-label="t('nacos.accessGrantNamespaces')" @click="moveNamespacesToGranted"><ChevronRight class="h-4 w-4" /></Button>
-                <Button size="sm" variant="outline" class="h-8 w-8 p-0" :disabled="!selectedGrantedNamespaceIds.length" :aria-label="t('nacos.accessRevokeNamespaces')" @click="removeGrantedNamespaces"><ChevronLeft class="h-4 w-4" /></Button>
+                <Button size="sm" variant="outline" class="h-8 w-8 p-0" :disabled="!selectedAvailableNamespaceIds.length || !canGrantPermission" :aria-label="t('nacos.accessGrantNamespaces')" @click="moveNamespacesToGranted"><ChevronRight class="h-4 w-4" /></Button>
+                <Button size="sm" variant="outline" class="h-8 w-8 p-0" :disabled="!selectedGrantedNamespaceIds.length || !canRevokePermission" :aria-label="t('nacos.accessRevokeNamespaces')" @click="removeGrantedNamespaces"><ChevronLeft class="h-4 w-4" /></Button>
               </div>
               <div class="flex min-h-0 flex-col overflow-hidden rounded border">
                 <div class="border-b bg-muted/30 px-3 py-2 text-sm font-medium">{{ t("nacos.accessGrantedNamespaces") }}</div>
@@ -804,7 +878,13 @@ onMounted(() => void loadSnapshot(false));
                         class="flex h-7 cursor-pointer items-center gap-1.5 rounded border px-2 text-xs transition-colors"
                         :class="namespace.action === action ? 'border-primary/40 bg-primary/5 font-medium text-foreground' : 'border-transparent text-muted-foreground hover:bg-muted'"
                       >
-                        <input type="checkbox" class="h-3.5 w-3.5 accent-primary" :checked="namespace.action === action" @change="setPermissionAction(namespace.namespaceId, action)" />
+                        <input
+                          type="checkbox"
+                          class="h-3.5 w-3.5 accent-primary"
+                          :checked="namespace.action === action"
+                          :disabled="!canGrantPermission || (roleDialog === 'edit' && managedRolePermissions.some((permission) => permission.parsedScope?.namespaceId === namespace.namespaceId) && !canRevokePermission)"
+                          @change="setPermissionAction(namespace.namespaceId, action)"
+                        />
                         {{ actionLabel(action) }}
                       </label>
                     </div>
@@ -829,7 +909,7 @@ onMounted(() => void loadSnapshot(false));
       <p v-if="formError" class="text-sm text-destructive">{{ formError }}</p>
       <DialogFooter
         ><Button variant="outline" :disabled="saving" @click="roleDialog = null">{{ t("nacos.cancel") }}</Button
-        ><Button :variant="roleDialog === 'delete' ? 'destructive' : 'default'" :disabled="saving" @click="submitRole"><Loader2 v-if="saving" class="mr-2 h-4 w-4 animate-spin" />{{ roleDialog === "delete" ? t("nacos.delete") : t("nacos.save") }}</Button></DialogFooter
+        ><Button :variant="roleDialog === 'delete' ? 'destructive' : 'default'" :disabled="saving || !roleOperationWritable" @click="submitRole"><Loader2 v-if="saving" class="mr-2 h-4 w-4 animate-spin" />{{ roleDialog === "delete" ? t("nacos.delete") : t("nacos.save") }}</Button></DialogFooter
       >
     </DialogContent>
   </Dialog>
@@ -880,7 +960,7 @@ onMounted(() => void loadSnapshot(false));
       <p v-if="formError" class="text-sm text-destructive">{{ formError }}</p>
       <DialogFooter
         ><Button variant="outline" :disabled="saving" @click="pendingAdvancedPermission = null">{{ t("nacos.cancel") }}</Button
-        ><Button variant="destructive" :disabled="saving" @click="revokeAdvancedPermission"><Loader2 v-if="saving" class="mr-2 h-4 w-4 animate-spin" />{{ t("nacos.accessRevokeRawPermission") }}</Button></DialogFooter
+        ><Button variant="destructive" :disabled="saving || !canRevokePermission" @click="revokeAdvancedPermission"><Loader2 v-if="saving" class="mr-2 h-4 w-4 animate-spin" />{{ t("nacos.accessRevokeRawPermission") }}</Button></DialogFooter
       ></DialogContent
     >
   </Dialog>

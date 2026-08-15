@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import ts from "typescript";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { DEFAULT_SHORTCUT_SETTINGS, normalizeShortcutSettings, shortcutToCodeMirrorKey } from "@/lib/editor/shortcutRegistry";
 
 const queryEditorSource = readFileSync(new URL("../../../components/editor/QueryEditor.vue", import.meta.url), "utf8");
 
@@ -59,6 +60,7 @@ function createHarness(options: {
   insertNewlineKeepIndent?: (view: MockView) => boolean;
   nextSnippetField?: (view: MockView) => boolean;
   indentMore?: (view: MockView) => boolean;
+  acceptCompletionShortcut?: string;
 }): TabHarness {
   const source = [
     extractDeclaration(/const COMPLETION_REMOTE_LATENCY_BUDGET_MS = \d+;/, "remote completion latency budget"),
@@ -69,6 +71,8 @@ function createHarness(options: {
     "let suppressNextSqlCompletionAutoStartUntil = 0;",
     extractFunction("editorIndentUnit"),
     extractFunction("handleTab"),
+    extractFunction("tabKeyAcceptsCompletion"),
+    extractFunction("handleTabWithoutAcceptingCompletion"),
     extractFunction("performNormalTab"),
     extractFunction("insertNewlineWithoutCompletion"),
     extractFunction("acceptCompletionOrNextSnippetField"),
@@ -87,11 +91,26 @@ function createHarness(options: {
     "codeMirrorNextSnippetField",
     "codeMirrorIndentMore",
     "settingsStore",
+    "normalizeShortcutSettings",
+    "shortcutToCodeMirrorKey",
     `${javascript}\nreturn { handleTab, insertNewlineWithoutCompletion, acceptCompletionOrNextSnippetField, clearPendingCompletionTab, consumeSqlCompletionAutoStartSuppression };`,
   );
-  return factory(options.completionStatus, options.acceptCompletion ?? (() => false), options.closeCompletion ?? (() => false), options.insertNewlineKeepIndent ?? (() => false), options.nextSnippetField ?? (() => false), options.indentMore ?? (() => false), {
-    editorSettings: { sqlFormatter: { useTabs: false, tabWidth: 2 } },
-  }) as TabHarness;
+  return factory(
+    options.completionStatus,
+    options.acceptCompletion ?? (() => false),
+    options.closeCompletion ?? (() => false),
+    options.insertNewlineKeepIndent ?? (() => false),
+    options.nextSnippetField ?? (() => false),
+    options.indentMore ?? (() => false),
+    {
+      editorSettings: {
+        sqlFormatter: { useTabs: false, tabWidth: 2 },
+        shortcuts: { ...DEFAULT_SHORTCUT_SETTINGS, acceptCompletion: options.acceptCompletionShortcut ?? DEFAULT_SHORTCUT_SETTINGS.acceptCompletion },
+      },
+    },
+    normalizeShortcutSettings,
+    shortcutToCodeMirrorKey,
+  ) as TabHarness;
 }
 
 function createView(text = "SELECT", position = text.length): MockView {
@@ -235,6 +254,27 @@ describe("QueryEditor completion Tab keymap", () => {
     expect(acceptCompletion).toHaveBeenCalledTimes(2);
     expect(acceptCompletion).toHaveBeenLastCalledWith(view);
     expect(view.dispatch).not.toHaveBeenCalled();
+  });
+
+  it("does not accept an open completion popup on Tab when the configured accept-completion shortcut is Enter (dbx#6236)", () => {
+    const acceptCompletion = vi.fn(() => true);
+    const nextSnippetField = vi.fn(() => true);
+    const harness = createHarness({ completionStatus: () => "active", acceptCompletion, nextSnippetField, acceptCompletionShortcut: "Enter" });
+    const view = createView();
+
+    expect(harness.handleTab(view)).toBe(true);
+    expect(acceptCompletion).not.toHaveBeenCalled();
+    expect(nextSnippetField).not.toHaveBeenCalled();
+    expect(view.state.replaceSelection).toHaveBeenCalledWith("  ");
+  });
+
+  it("still accepts an open completion popup on Tab when the configured shortcut is left at its Tab default", () => {
+    const acceptCompletion = vi.fn(() => true);
+    const harness = createHarness({ completionStatus: () => "active", acceptCompletion, acceptCompletionShortcut: "Tab" });
+    const view = createView();
+
+    expect(harness.handleTab(view)).toBe(true);
+    expect(acceptCompletion).toHaveBeenCalledWith(view);
   });
 
   it("falls back to normal Tab when pending completion has no candidate", async () => {

@@ -175,6 +175,12 @@ pub struct BuildTableAdminSqlRequest {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct BuildMysqlAutoIncrementSqlRequest {
+    pub options: dbx_core::db_admin_sql::MysqlAutoIncrementSqlOptions,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct BuildDropTableChildObjectSqlRequest {
     pub options: dbx_core::db_admin_sql::DropTableChildObjectSqlOptions,
 }
@@ -721,6 +727,12 @@ pub async fn build_empty_table_sql(Json(req): Json<BuildTableAdminSqlRequest>) -
 
 pub async fn build_truncate_table_sql(Json(req): Json<BuildTableAdminSqlRequest>) -> Json<String> {
     Json(dbx_core::db_admin_sql::build_truncate_table_sql(req.options))
+}
+
+pub async fn build_mysql_auto_increment_sql(
+    Json(req): Json<BuildMysqlAutoIncrementSqlRequest>,
+) -> Result<Json<String>, AppError> {
+    dbx_core::db_admin_sql::build_mysql_auto_increment_sql(req.options).map(Json).map_err(AppError::from)
 }
 
 pub async fn build_drop_database_sql(Json(req): Json<BuildDatabaseNameSqlRequest>) -> Json<String> {

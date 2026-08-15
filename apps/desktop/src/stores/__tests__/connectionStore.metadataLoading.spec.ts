@@ -38,6 +38,16 @@ function mysqlConnection(): ConnectionConfig {
   } as ConnectionConfig;
 }
 
+function doltConnection(): ConnectionConfig {
+  return {
+    ...mysqlConnection(),
+    id: "dolt-1",
+    name: "Dolt",
+    driver_profile: "dolt",
+    external_config: { doltShowSystemTables: true },
+  } as ConnectionConfig;
+}
+
 function dorisConnection(): ConnectionConfig {
   return {
     ...mysqlConnection(),
@@ -508,8 +518,16 @@ describe("connectionStore metadata loading", () => {
     store.treeNodes = [node];
 
     const normalLoad = store.loadDatabases(connection.id);
-    const searchLoad = store.loadConnectedConnectionRootForSidebarSearch(connection.id);
     await listStarted;
+    const searchLoad = store.loadConnectedConnectionRootForSidebarSearch(connection.id);
+    let searchLoadSettled = false;
+    void searchLoad.finally(() => {
+      searchLoadSettled = true;
+    });
+    await Promise.resolve();
+
+    expect(searchLoadSettled).toBe(false);
+
     resolveDatabases([{ name: "dajia", comment: null }]);
     await Promise.all([normalLoad, searchLoad]);
 
@@ -1084,6 +1102,67 @@ describe("connectionStore metadata loading", () => {
 
     expect(listTables).toHaveBeenCalledWith(connection.id, "warehouse", "warehouse", undefined, 1001, 0, ["TABLE"], undefined, { includePatterns: ["ads_pgc_%"], excludePatterns: [] });
     expect(tableGroup.children?.map((node) => node.label)).toEqual(["ads_pgc_report"]);
+  });
+
+  it("loads Dolt user and system table groups with independent pre-pagination filters", async () => {
+    const listTables = vi.fn(async (...args: unknown[]) => {
+      const tableNameFilter = args[8] as { includePatterns: string[]; excludePatterns: string[] } | undefined;
+      if (tableNameFilter?.includePatterns.includes("dolt%")) {
+        return [{ name: "dolt_log", table_type: "BASE TABLE", comment: null }];
+      }
+      return [{ name: "orders", table_type: "BASE TABLE", comment: null }];
+    });
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+      listTables,
+      loadSchemaCache: vi.fn().mockResolvedValue(null),
+      saveSchemaCache: vi.fn().mockResolvedValue(undefined),
+      saveConnections: vi.fn().mockResolvedValue(undefined),
+      saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const store = useConnectionStore();
+    useSettingsStore().editorSettings.sidebarObjectDisplay = "grouped";
+    const connection = doltConnection();
+    const databaseNode: TreeNode = {
+      id: `${connection.id}:app`,
+      label: "app",
+      type: "database",
+      connectionId: connection.id,
+      database: "app",
+      isExpanded: false,
+      children: [],
+    };
+    store.connections = [connection];
+    store.connectedIds.add(connection.id);
+    store.treeNodes = [
+      {
+        id: connection.id,
+        label: connection.name,
+        type: "connection",
+        connectionId: connection.id,
+        isExpanded: true,
+        children: [databaseNode],
+      },
+    ];
+
+    await store.loadTables(connection.id, "app", undefined, { force: true });
+    const userTables = databaseNode.children?.find((node) => node.type === "group-tables");
+    const systemTables = databaseNode.children?.find((node) => node.type === "group-dolt-system-tables");
+    expect(systemTables?.label).toBe("tree.doltSystemTables");
+
+    await store.loadObjectGroupChildren(userTables!, { force: true });
+    await store.loadObjectGroupChildren(systemTables!, { force: true });
+
+    expect(userTables?.children?.map((node) => node.label)).toEqual(["orders"]);
+    expect(systemTables?.children?.map((node) => node.label)).toEqual(["dolt_log"]);
+    expect(listTables).toHaveBeenCalledWith(connection.id, "app", "app", undefined, 1001, 0, ["TABLE"], undefined, { includePatterns: [], excludePatterns: ["dolt%"] });
+    expect(listTables).toHaveBeenCalledWith(connection.id, "app", "app", undefined, 1001, 0, ["TABLE"], undefined, { includePatterns: ["dolt%"], excludePatterns: [] });
   });
 
   it("clears a stale connection error after a schema metadata retry succeeds", async () => {

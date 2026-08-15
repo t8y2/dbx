@@ -59,6 +59,28 @@ describe("queryStore switchTab", () => {
     expect(queryStore.activeTabId).toBe(tab2Id);
   });
 
+  it("inserts a tab after the active tab only when explicitly requested", async () => {
+    const queryStore = useQueryStore();
+    const firstId = queryStore.createTab("pg-1", "app", "Query 1", "query");
+    const trailingId = queryStore.createTab("pg-1", "app", "Query 2", "query");
+    queryStore.switchTab(firstId);
+
+    const dataId = queryStore.createTab("pg-1", "app", "users", "data", "public", undefined, undefined, { forceNew: true, insertAfterActive: true });
+    const appendedId = queryStore.createTab("pg-1", "app", "Query 3", "query", undefined, undefined, undefined, { forceNew: true });
+
+    expect(queryStore.tabs.map((tab) => tab.id)).toEqual([firstId, dataId, trailingId, appendedId]);
+  });
+
+  it("appends when adjacent insertion has no valid active tab", async () => {
+    const queryStore = useQueryStore();
+    const firstId = queryStore.createTab("pg-1", "app", "Query 1", "query");
+    queryStore.activeTabId = "missing-tab";
+
+    const dataId = queryStore.createTab("pg-1", "app", "users", "data", "public", undefined, undefined, { forceNew: true, insertAfterActive: true });
+
+    expect(queryStore.tabs.map((tab) => tab.id)).toEqual([firstId, dataId]);
+  });
+
   it("deactivates settings page when reopening an existing special tab", async () => {
     const { useQueryStore } = await import("@/stores/queryStore");
     const { useSettingsStore } = await import("@/stores/settingsStore");

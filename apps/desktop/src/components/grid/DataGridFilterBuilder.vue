@@ -1,12 +1,13 @@
 <script setup lang="ts">
-import { computed, nextTick, ref, watch } from "vue";
-import { Eye, EyeOff, Plus, Search, Trash2, X } from "@lucide/vue";
+import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
+import { Check, Eye, EyeOff, GripVertical, Plus, Search, Trash2, X } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { filterModeNeedsValue, filterModeUsesList, filterModeUsesRange } from "@/lib/dataGrid/dataGridColumnFilter";
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
+import { resolveDataGridFilterRuleDropPlacement } from "@/lib/dataGrid/dataGridFilterRuleDrag";
 import type { DataGridContextFilterMode } from "@/lib/dataGrid/dataGridSql";
 import type { DataGridStructuredFilterRule } from "@/composables/useDataGridFilterBuilder";
 
@@ -19,6 +20,9 @@ const COLUMN_CONTROL_MIN_WIDTH = 88;
 const COLUMN_CONTROL_MAX_WIDTH = 178;
 const COLUMN_CONTROL_CHROME_WIDTH = 40;
 const COLUMN_CHARACTER_WIDTH = 6.5;
+const RULE_DROP_ZONE_EXTENSION = 36;
+const RULE_AUTO_SCROLL_EDGE_SIZE = 40;
+const RULE_AUTO_SCROLL_MAX_SPEED = 12;
 type ValueShortcutHintDay = { date: string; count: number };
 const props = withDefaults(
   defineProps<{
@@ -30,8 +34,9 @@ const props = withDefaults(
     disabled?: boolean;
     showHeader?: boolean;
     showFooter?: boolean;
+    layout?: "popover" | "panel" | "text";
   }>(),
-  { showHeader: true, showFooter: true },
+  { showHeader: true, showFooter: true, layout: "popover" },
 );
 const emit = defineEmits<{
   add: [];
@@ -39,11 +44,13 @@ const emit = defineEmits<{
   reset: [];
   clear: [];
   remove: [id: string];
+  move: [id: string, targetIndex: number];
   updateRule: [id: string, patch: Partial<DataGridStructuredFilterRule>];
   "update:columnSearch": [value: string];
 }>();
 const columnSearchInputs = new Map<string, HTMLInputElement>();
 const filterRuleElements = new Map<string, HTMLElement>();
+const filterBuilderRootRef = ref<HTMLElement>();
 const pendingValueFocus = new Set<string>();
 const pendingKeyboardAddFocus = new Set<string>();
 const openColumnSelectIds = ref(new Set<string>());
@@ -53,7 +60,14 @@ const valueShortcutHintRuleId = ref<string>();
 const valueShortcutHintShownDays = ref(readValueShortcutHintShownDays());
 const composingEditors = new Set<string>();
 const compositionEndedAt = new Map<string, number>();
+const draggingRuleId = ref<string>();
+const dropRuleId = ref<string>();
+const dropPosition = ref<"before" | "after">();
+const dropTargetIndex = ref<number>();
 let ruleIdsBeforeKeyboardAdd: Set<string> | undefined;
+let ruleDragContainer: HTMLElement | undefined;
+let ruleDragPointerY: number | undefined;
+let ruleAutoScrollFrame: number | undefined;
 
 function columnNameDisplayUnits(value: string) {
   return Array.from(value).reduce((total, character) => total + ((character.codePointAt(0) ?? 0) > 0xff ? 2 : 1), 0);
@@ -118,6 +132,141 @@ function setColumnSearchInput(id: string, element: unknown) {
 function setFilterRuleElement(id: string, element: unknown) {
   if (element instanceof HTMLElement) filterRuleElements.set(id, element);
   else filterRuleElements.delete(id);
+}
+
+function stopRuleAutoScroll() {
+  if (ruleAutoScrollFrame !== undefined) window.cancelAnimationFrame(ruleAutoScrollFrame);
+  ruleAutoScrollFrame = undefined;
+}
+
+function removeRuleDragListeners() {
+  window.removeEventListener("dragover", handleRuleContainerDragOver, true);
+  window.removeEventListener("drop", handleRuleContainerDrop, true);
+}
+
+function clearRuleDropTarget() {
+  dropRuleId.value = undefined;
+  dropPosition.value = undefined;
+  dropTargetIndex.value = undefined;
+}
+
+function clearRuleDragState() {
+  stopRuleAutoScroll();
+  removeRuleDragListeners();
+  draggingRuleId.value = undefined;
+  ruleDragContainer = undefined;
+  ruleDragPointerY = undefined;
+  clearRuleDropTarget();
+}
+
+function ruleDropZoneContains(event: DragEvent, bounds: DOMRect) {
+  return event.clientX >= bounds.left && event.clientX <= bounds.right && event.clientY >= bounds.top - RULE_DROP_ZONE_EXTENSION && event.clientY <= bounds.bottom + RULE_DROP_ZONE_EXTENSION;
+}
+
+function updateRuleDropTarget(clientY: number) {
+  if (!draggingRuleId.value) return;
+  const placement = resolveDataGridFilterRuleDropPlacement(
+    props.rules.map((rule) => rule.id),
+    draggingRuleId.value,
+    props.rules.flatMap((rule) => {
+      const element = filterRuleElements.get(rule.id);
+      if (!element) return [];
+      const bounds = element.getBoundingClientRect();
+      return [{ id: rule.id, top: bounds.top, bottom: bounds.bottom }];
+    }),
+    clientY,
+  );
+  if (!placement) {
+    clearRuleDropTarget();
+    return;
+  }
+  dropRuleId.value = placement.ruleId;
+  dropPosition.value = placement.position;
+  dropTargetIndex.value = placement.targetIndex;
+}
+
+function ruleAutoScrollSpeed(clientY: number, bounds: DOMRect) {
+  if (clientY < bounds.top + RULE_AUTO_SCROLL_EDGE_SIZE) {
+    const intensity = Math.min(1, Math.max(0, (bounds.top + RULE_AUTO_SCROLL_EDGE_SIZE - clientY) / RULE_AUTO_SCROLL_EDGE_SIZE));
+    return -Math.max(1, Math.ceil(intensity * RULE_AUTO_SCROLL_MAX_SPEED));
+  }
+  if (clientY > bounds.bottom - RULE_AUTO_SCROLL_EDGE_SIZE) {
+    const intensity = Math.min(1, Math.max(0, (clientY - (bounds.bottom - RULE_AUTO_SCROLL_EDGE_SIZE)) / RULE_AUTO_SCROLL_EDGE_SIZE));
+    return Math.max(1, Math.ceil(intensity * RULE_AUTO_SCROLL_MAX_SPEED));
+  }
+  return 0;
+}
+
+function runRuleAutoScroll() {
+  ruleAutoScrollFrame = undefined;
+  if (!draggingRuleId.value || !ruleDragContainer || ruleDragPointerY === undefined) return;
+  const bounds = ruleDragContainer.getBoundingClientRect();
+  const speed = ruleAutoScrollSpeed(ruleDragPointerY, bounds);
+  if (!speed) return;
+  const previousScrollTop = ruleDragContainer.scrollTop;
+  ruleDragContainer.scrollTop += speed;
+  if (ruleDragContainer.scrollTop === previousScrollTop) return;
+  updateRuleDropTarget(ruleDragPointerY);
+  ruleAutoScrollFrame = window.requestAnimationFrame(runRuleAutoScroll);
+}
+
+function scheduleRuleAutoScroll() {
+  if (ruleAutoScrollFrame === undefined) ruleAutoScrollFrame = window.requestAnimationFrame(runRuleAutoScroll);
+}
+
+function handleRuleContainerDragOver(event: DragEvent) {
+  if (!draggingRuleId.value || !ruleDragContainer) return;
+  const bounds = ruleDragContainer.getBoundingClientRect();
+  if (!ruleDropZoneContains(event, bounds)) {
+    stopRuleAutoScroll();
+    clearRuleDropTarget();
+    return;
+  }
+  event.preventDefault();
+  if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
+  ruleDragPointerY = event.clientY;
+  updateRuleDropTarget(event.clientY);
+  scheduleRuleAutoScroll();
+}
+
+function handleRuleContainerDrop(event: DragEvent) {
+  if (!draggingRuleId.value || !ruleDragContainer) return;
+  const bounds = ruleDragContainer.getBoundingClientRect();
+  if (!ruleDropZoneContains(event, bounds)) {
+    clearRuleDragState();
+    return;
+  }
+  event.preventDefault();
+  updateRuleDropTarget(event.clientY);
+  if (dropTargetIndex.value !== undefined) emit("move", draggingRuleId.value, dropTargetIndex.value);
+  clearRuleDragState();
+}
+
+function startRuleDrag(event: DragEvent, id: string) {
+  if (props.disabled || props.rules.length < 2 || !event.dataTransfer) {
+    event.preventDefault();
+    return;
+  }
+  const handle = event.currentTarget instanceof HTMLElement ? event.currentTarget : undefined;
+  ruleDragContainer = handle?.closest<HTMLElement>("[data-filter-rules-scroll]") ?? filterBuilderRootRef.value;
+  if (!ruleDragContainer) {
+    event.preventDefault();
+    return;
+  }
+  clearRuleDropTarget();
+  draggingRuleId.value = id;
+  window.addEventListener("dragover", handleRuleContainerDragOver, true);
+  window.addEventListener("drop", handleRuleContainerDrop, true);
+  event.dataTransfer.effectAllowed = "move";
+  event.dataTransfer.setData("text/plain", id);
+}
+
+function moveRuleByKeyboard(event: KeyboardEvent, id: string, offset: -1 | 1) {
+  const sourceIndex = props.rules.findIndex((rule) => rule.id === id);
+  const targetIndex = sourceIndex + offset;
+  if (props.disabled || sourceIndex < 0 || targetIndex < 0 || targetIndex >= props.rules.length) return;
+  event.preventDefault();
+  emit("move", id, targetIndex);
 }
 
 function activeColumnIndex(id: string): number {
@@ -241,6 +390,8 @@ watch(
   },
 );
 
+onBeforeUnmount(clearRuleDragState);
+
 function handleColumnSearchKeydown(event: KeyboardEvent, rule: DataGridStructuredFilterRule) {
   if (isImeCompositionKey(event, `column:${rule.id}`)) {
     event.stopPropagation();
@@ -282,7 +433,10 @@ function handleValueEditorKeydown(event: KeyboardEvent, editorKey: string) {
     return;
   }
   event.stopPropagation();
-  if (!event.repeat) addRuleAndOpenColumnSelect();
+  if (!event.repeat) {
+    if (props.layout === "text") emit("add");
+    else addRuleAndOpenColumnSelect();
+  }
 }
 
 function focusValueRule(id: string, index: number, mode: DataGridContextFilterMode) {
@@ -306,20 +460,59 @@ function blurValueRule(id: string) {
 </script>
 
 <template>
-  <div class="w-fit max-w-full space-y-2" :style="filterBuilderStyle">
+  <div ref="filterBuilderRootRef" class="w-fit max-w-full" :class="props.layout === 'text' ? 'w-full space-y-0' : [props.layout === 'panel' ? '!w-full' : '', 'space-y-2']" :style="filterBuilderStyle">
     <div v-if="props.showHeader !== false" class="flex items-center justify-between gap-2">
       <div class="text-xs font-medium text-foreground">{{ t("grid.filter") }}</div>
       <Button variant="ghost" size="sm" class="h-7 px-2 text-xs" @click="emit('clear')"> <Trash2 class="mr-1 h-3.5 w-3.5" />{{ t("grid.clearFilter") }} </Button>
     </div>
 
-    <div v-if="props.rules.length" class="space-y-1.5">
+    <div v-if="props.rules.length" :class="props.layout === 'text' ? 'space-y-0' : props.layout === 'panel' ? 'space-y-1' : 'space-y-1.5'">
       <template v-for="(rule, index) in props.rules" :key="rule.id">
-        <div v-if="index > 0" class="flex justify-center">
-          <Button variant="ghost" size="sm" class="h-5 px-2 text-[11px]" @click="emit('updateRule', rule.id, { conjunction: rule.conjunction === 'AND' ? 'OR' : 'AND' })">{{ rule.conjunction }}</Button>
+        <div v-if="index > 0 && (props.layout === 'popover' || rule.conjunction === 'OR')" class="flex" :class="props.layout === 'popover' ? 'justify-center' : props.layout === 'text' ? 'justify-start pl-11' : 'justify-start pl-6'">
+          <Button variant="ghost" size="sm" :class="props.layout === 'text' ? 'h-4 px-1 text-[10px]' : 'h-5 px-2 text-[11px]'" @click="emit('updateRule', rule.id, { conjunction: rule.conjunction === 'AND' ? 'OR' : 'AND' })">{{ rule.conjunction }}</Button>
         </div>
-        <div :ref="(element) => setFilterRuleElement(rule.id, element)" class="grid grid-cols-[var(--filter-builder-column-width)_92px_var(--filter-builder-value-width)_auto] items-center justify-start gap-1.5">
+        <div
+          :ref="(element) => setFilterRuleElement(rule.id, element)"
+          class="filter-rule-row relative grid items-center justify-start gap-1.5"
+          :data-dragging="draggingRuleId === rule.id ? '' : undefined"
+          :data-drop-position="dropRuleId === rule.id ? dropPosition : undefined"
+          :class="
+            props.layout === 'text'
+              ? 'min-h-7 grid-cols-[18px_22px_var(--filter-builder-column-width)_92px_minmax(140px,1fr)_auto] gap-0.5 border-b border-border/45 px-1 hover:bg-muted/25'
+              : props.layout === 'panel'
+                ? 'grid-cols-[18px_minmax(128px,1fr)_132px_minmax(158px,1.35fr)_auto]'
+                : 'grid-cols-[18px_var(--filter-builder-column-width)_92px_var(--filter-builder-value-width)_auto]'
+          "
+        >
+          <button
+            type="button"
+            data-filter-drag-handle
+            class="flex h-6 w-4 cursor-grab items-center justify-center justify-self-center text-muted-foreground/70 outline-none hover:text-foreground focus-visible:text-primary disabled:cursor-default disabled:opacity-30 active:cursor-grabbing"
+            :disabled="props.disabled || props.rules.length < 2"
+            :draggable="!props.disabled && props.rules.length > 1"
+            :aria-label="t('grid.filterBuilderReorderRule')"
+            :aria-grabbed="draggingRuleId === rule.id"
+            @dragstart="startRuleDrag($event, rule.id)"
+            @dragend="clearRuleDragState"
+            @keydown.up="moveRuleByKeyboard($event, rule.id, -1)"
+            @keydown.down="moveRuleByKeyboard($event, rule.id, 1)"
+          >
+            <GripVertical class="h-3.5 w-3.5" />
+          </button>
+          <button
+            v-if="props.layout === 'text'"
+            type="button"
+            role="checkbox"
+            :aria-checked="!rule.disabled"
+            :aria-label="rule.disabled ? t('grid.filterBuilderEnableRule') : t('grid.filterBuilderDisableRule')"
+            class="flex h-4 w-4 items-center justify-center justify-self-center border text-primary transition-colors hover:border-primary"
+            :class="rule.disabled ? 'border-muted-foreground/40 bg-background' : 'border-primary bg-primary/10'"
+            @click="emit('updateRule', rule.id, { disabled: !rule.disabled })"
+          >
+            <Check v-if="!rule.disabled" class="h-3 w-3" />
+          </button>
           <Select :model-value="rule.columnName" :open="openColumnSelectIds.has(rule.id)" :disabled="rule.disabled" @update:model-value="(value: any) => updateRuleColumn(rule, value)" @update:open="(open: boolean) => handleColumnSelectOpen(rule, open)">
-            <SelectTrigger size="sm" class="h-7 w-full min-w-0 overflow-hidden text-xs [&_[data-slot=select-value]]:min-w-0 [&_[data-slot=select-value]]:truncate">
+            <SelectTrigger size="sm" class="w-full min-w-0 overflow-hidden text-xs [&_[data-slot=select-value]]:min-w-0 [&_[data-slot=select-value]]:truncate" :class="props.layout === 'text' ? 'h-6 rounded-none border-0 bg-transparent px-1 shadow-none focus-visible:ring-0' : 'h-7'">
               <SelectValue v-if="rule.columnName">{{ rule.columnName }}</SelectValue>
               <SelectValue v-else :placeholder="t('grid.filterBuilderColumn')" />
             </SelectTrigger>
@@ -356,12 +549,57 @@ function blurValueRule(id: string) {
             </SelectContent>
           </Select>
           <Select :model-value="rule.mode" :disabled="rule.disabled" @update:model-value="(value: any) => emit('updateRule', rule.id, { mode: value as DataGridContextFilterMode })">
-            <SelectTrigger size="sm" class="h-7 w-full min-w-0 overflow-hidden text-xs [&_[data-slot=select-value]]:min-w-0 [&_[data-slot=select-value]]:truncate"><SelectValue /></SelectTrigger>
+            <SelectTrigger size="sm" class="w-full min-w-0 overflow-hidden text-xs [&_[data-slot=select-value]]:min-w-0 [&_[data-slot=select-value]]:truncate" :class="props.layout === 'text' ? 'h-6 rounded-none border-0 bg-transparent px-1 shadow-none focus-visible:ring-0' : 'h-7'"
+              ><SelectValue
+            /></SelectTrigger>
             <SelectContent
               ><SelectItem v-for="option in props.modeOptions" :key="option.value" :value="option.value" class="rounded-none">{{ t(option.labelKey) }}</SelectItem></SelectContent
             >
           </Select>
-          <div v-if="filterModeUsesRange(rule.mode)" class="col-span-3 flex gap-1.5">
+          <div v-if="props.layout === 'text'" class="flex min-w-0 items-center gap-1" :class="rule.disabled ? 'text-muted-foreground' : ''">
+            <template v-if="filterModeUsesRange(rule.mode)">
+              <Input
+                data-filter-value-editor
+                :model-value="rule.rawValue"
+                class="h-6 min-w-0 flex-1 rounded-none border-0 border-b border-transparent bg-transparent px-1 text-xs shadow-none focus-visible:border-primary focus-visible:ring-0"
+                :disabled="rule.disabled"
+                :placeholder="t('grid.filterBuilderRangeStart')"
+                @update:model-value="(value) => emit('updateRule', rule.id, { rawValue: String(value ?? '') })"
+                @keydown="handleValueEditorKeydown($event, `value-start:${rule.id}`)"
+              />
+              <span class="shrink-0 text-[10px] text-muted-foreground">—</span>
+              <Input
+                :model-value="rule.rawEndValue"
+                class="h-6 min-w-0 flex-1 rounded-none border-0 border-b border-transparent bg-transparent px-1 text-xs shadow-none focus-visible:border-primary focus-visible:ring-0"
+                :disabled="rule.disabled"
+                :placeholder="t('grid.filterBuilderRangeEnd')"
+                @update:model-value="(value) => emit('updateRule', rule.id, { rawEndValue: String(value ?? '') })"
+                @keydown="handleValueEditorKeydown($event, `value-end:${rule.id}`)"
+              />
+            </template>
+            <Input
+              v-else-if="filterModeUsesList(rule.mode)"
+              data-filter-value-editor
+              :model-value="rule.rawValue"
+              class="h-6 min-w-0 flex-1 rounded-none border-0 border-b border-transparent bg-transparent px-1 text-xs shadow-none focus-visible:border-primary focus-visible:ring-0"
+              :disabled="rule.disabled"
+              :placeholder="t('grid.filterBuilderValues')"
+              @update:model-value="(value) => emit('updateRule', rule.id, { rawValue: String(value ?? '') })"
+              @keydown="handleValueEditorKeydown($event, `value-list:${rule.id}`)"
+            />
+            <Input
+              v-else-if="filterModeNeedsValue(rule.mode)"
+              data-filter-value-editor
+              :model-value="rule.rawValue"
+              class="h-6 min-w-0 flex-1 rounded-none border-0 border-b border-transparent bg-transparent px-1 text-xs shadow-none focus-visible:border-primary focus-visible:ring-0"
+              :disabled="rule.disabled"
+              :placeholder="t('grid.filterBuilderTextValue')"
+              @update:model-value="(value) => emit('updateRule', rule.id, { rawValue: String(value ?? '') })"
+              @keydown="handleValueEditorKeydown($event, `value:${rule.id}`)"
+            />
+            <span v-else class="px-1 text-xs text-muted-foreground">{{ t("grid.filterBuilderNoValue") }}</span>
+          </div>
+          <div v-else-if="filterModeUsesRange(rule.mode)" class="col-start-2 col-span-3 flex gap-1.5">
             <Input
               data-filter-value-editor
               :model-value="rule.rawValue"
@@ -393,7 +631,7 @@ function blurValueRule(id: string) {
             data-filter-value-editor
             :value="rule.rawValue"
             rows="2"
-            class="col-span-3 min-h-12 resize-y rounded-md border bg-transparent px-2 py-1 text-xs outline-none"
+            class="col-start-2 col-span-3 min-h-12 resize-y rounded-md border bg-transparent px-2 py-1 text-xs outline-none"
             :disabled="rule.disabled"
             :placeholder="t('grid.filterBuilderValues')"
             @input="emit('updateRule', rule.id, { rawValue: ($event.target as HTMLTextAreaElement).value })"
@@ -415,12 +653,18 @@ function blurValueRule(id: string) {
             @keydown="handleValueEditorKeydown($event, `value:${rule.id}`)"
           />
           <div v-else class="flex h-7 items-center rounded-md border border-dashed px-2 text-xs text-muted-foreground">{{ t("grid.filterBuilderNoValue") }}</div>
-          <div v-if="shouldShowValueShortcutHint(rule, index)" class="text-[11px] leading-none text-muted-foreground" :class="usesExpandedLayout(rule.mode) ? 'col-span-3 -mt-0.5' : 'col-start-3 row-start-2 -mt-0.5'">
+          <div v-if="props.layout !== 'text' && shouldShowValueShortcutHint(rule, index)" class="text-[11px] leading-none text-muted-foreground" :class="usesExpandedLayout(rule.mode) ? 'col-start-2 col-span-3 -mt-0.5' : 'col-start-4 row-start-2 -mt-0.5'">
             {{ t("grid.filterBuilderValueShortcutHint") }}
           </div>
-          <div class="flex items-center gap-0.5" :class="usesExpandedLayout(rule.mode) ? 'col-start-4 row-start-1 row-span-2' : 'col-start-4 row-start-1'">
-            <Button variant="ghost" size="icon" class="h-7 w-7" @click="emit('updateRule', rule.id, { disabled: !rule.disabled })"><EyeOff v-if="rule.disabled" class="h-3.5 w-3.5" /><Eye v-else class="h-3.5 w-3.5" /></Button>
-            <Button variant="ghost" size="icon" class="h-7 w-7" :disabled="props.rules.length === 1" @click="emit('remove', rule.id)"><X class="h-3.5 w-3.5" /></Button>
+          <div class="flex items-center gap-0.5" :class="props.layout === 'text' ? 'col-start-6 row-start-1' : usesExpandedLayout(rule.mode) ? 'col-start-5 row-start-1 row-span-2' : 'col-start-5 row-start-1'">
+            <template v-if="props.layout === 'text'">
+              <Button variant="ghost" size="icon" class="h-6 w-6" :aria-label="t('grid.filterBuilderAddRule')" @click="emit('add')"><Plus class="h-3.5 w-3.5" /></Button>
+              <Button variant="ghost" size="icon" class="h-6 w-6" :disabled="props.rules.length === 1" @click="emit('remove', rule.id)"><X class="h-3.5 w-3.5" /></Button>
+            </template>
+            <template v-else>
+              <Button variant="ghost" size="icon" class="h-7 w-7" @click="emit('updateRule', rule.id, { disabled: !rule.disabled })"><EyeOff v-if="rule.disabled" class="h-3.5 w-3.5" /><Eye v-else class="h-3.5 w-3.5" /></Button>
+              <Button variant="ghost" size="icon" class="h-7 w-7" :disabled="props.rules.length === 1" @click="emit('remove', rule.id)"><X class="h-3.5 w-3.5" /></Button>
+            </template>
           </div>
         </div>
       </template>
@@ -435,3 +679,28 @@ function blurValueRule(id: string) {
     </div>
   </div>
 </template>
+
+<style scoped>
+.filter-rule-row[data-dragging] {
+  opacity: 0.45;
+}
+
+.filter-rule-row[data-drop-position]::before {
+  position: absolute;
+  z-index: 10;
+  right: 0;
+  left: 0;
+  height: 2px;
+  background: var(--primary);
+  content: "";
+  pointer-events: none;
+}
+
+.filter-rule-row[data-drop-position="before"]::before {
+  top: -1px;
+}
+
+.filter-rule-row[data-drop-position="after"]::before {
+  bottom: -1px;
+}
+</style>

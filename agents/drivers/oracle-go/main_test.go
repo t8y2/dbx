@@ -2046,6 +2046,123 @@ func TestRewriteOracleXMLTypeSkipsJoins(t *testing.T) {
 	}
 }
 
+func TestRewriteOracleLOBSelectStarAsDeferredValues(t *testing.T) {
+	sqlText, err := rewriteOracleSelectSQL(
+		`SELECT t.* FROM TEST_LOBS t ORDER BY t.ID DESC`,
+		fakeOracleColumnLoader([]oracleColumnMeta{
+			{Name: "ID", DataType: "NUMBER"},
+			{Name: "PAYLOAD", DataType: "CLOB"},
+			{Name: "NATIONAL_TEXT", DataType: "NCLOB"},
+			{Name: "BINARY_DATA", DataType: "BLOB"},
+			{Name: "FILE_DATA", DataType: "BFILE"},
+		}),
+		true,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `SELECT t."ID", CASE WHEN t."PAYLOAD" IS NULL THEN NULL ELSE '<CLOB>' END AS "PAYLOAD", CASE WHEN t."PAYLOAD" IS NULL THEN NULL ELSE 'D:1' END AS "__DBX_LARGE_VALUE_BYTES_C_1", CASE WHEN t."NATIONAL_TEXT" IS NULL THEN NULL ELSE '<NCLOB>' END AS "NATIONAL_TEXT", CASE WHEN t."NATIONAL_TEXT" IS NULL THEN NULL ELSE 'D:1' END AS "__DBX_LARGE_VALUE_BYTES_N_2", CASE WHEN t."BINARY_DATA" IS NULL THEN NULL ELSE '<BLOB>' END AS "BINARY_DATA", CASE WHEN t."BINARY_DATA" IS NULL THEN NULL ELSE 'D:1' END AS "__DBX_LARGE_VALUE_BYTES_L_3", CASE WHEN t."FILE_DATA" IS NULL THEN NULL ELSE '<BFILE>' END AS "FILE_DATA", CASE WHEN t."FILE_DATA" IS NULL THEN NULL ELSE 'D:1' END AS "__DBX_LARGE_VALUE_BYTES_F_4" FROM TEST_LOBS t ORDER BY t.ID DESC`
+	if sqlText != want {
+		t.Fatalf("rewriteOracleSelectSQL() = %s, want %s", sqlText, want)
+	}
+}
+
+func TestRewriteOracleLOBExplicitColumnUsesVisibleResultIndex(t *testing.T) {
+	sqlText, err := rewriteOracleSelectSQL(
+		`SELECT t.ID, t.PAYLOAD AS body, LENGTH(t.PAYLOAD) AS payload_length FROM TEST_LOBS t`,
+		fakeOracleColumnLoader([]oracleColumnMeta{
+			{Name: "ID", DataType: "NUMBER"},
+			{Name: "PAYLOAD", DataType: "CLOB"},
+		}),
+		true,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `SELECT t.ID, CASE WHEN t."PAYLOAD" IS NULL THEN NULL ELSE '<CLOB>' END AS body, CASE WHEN t."PAYLOAD" IS NULL THEN NULL ELSE 'D:1' END AS "__DBX_LARGE_VALUE_BYTES_C_1", LENGTH(t.PAYLOAD) AS payload_length FROM TEST_LOBS t`
+	if sqlText != want {
+		t.Fatalf("rewriteOracleSelectSQL() = %s, want %s", sqlText, want)
+	}
+}
+
+func TestRewriteOracleLOBNestedRownumQuery(t *testing.T) {
+	sqlText, err := rewriteOracleSelectSQL(
+		`SELECT * FROM (SELECT ID, PAYLOAD FROM TEST_LOBS ORDER BY ID DESC) WHERE ROWNUM <= 10`,
+		fakeOracleColumnLoader([]oracleColumnMeta{
+			{Name: "ID", DataType: "NUMBER"},
+			{Name: "PAYLOAD", DataType: "CLOB"},
+		}),
+		true,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(sqlText, `CASE WHEN "PAYLOAD" IS NULL THEN NULL ELSE '<CLOB>' END AS "PAYLOAD"`) ||
+		!strings.Contains(sqlText, `"__DBX_LARGE_VALUE_BYTES_C_1"`) {
+		t.Fatalf("expected nested CLOB column to be deferred, got: %s", sqlText)
+	}
+}
+
+func TestRewriteOracleLOBSkipsDerivedProjectionThatDropsMarkers(t *testing.T) {
+	called := false
+	input := `SELECT PAYLOAD FROM (SELECT PAYLOAD FROM TEST_LOBS)`
+	sqlText, err := rewriteOracleSelectSQL(
+		input,
+		func(schema, table string) ([]oracleColumnMeta, error) {
+			called = true
+			return []oracleColumnMeta{{Name: "PAYLOAD", DataType: "CLOB"}}, nil
+		},
+		true,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if called {
+		t.Fatal("derived projection should not load table metadata")
+	}
+	if sqlText != input {
+		t.Fatalf("derived projection should remain unchanged, got: %s", sqlText)
+	}
+}
+
+func TestRewriteOracleLOBPreservesUnsafeQueries(t *testing.T) {
+	columns := []oracleColumnMeta{{Name: "ID", DataType: "NUMBER"}, {Name: "PAYLOAD", DataType: "CLOB"}}
+	tests := []string{
+		`SELECT DISTINCT PAYLOAD FROM TEST_LOBS`,
+		`SELECT l.PAYLOAD FROM TEST_LOBS l JOIN OTHER_TABLE o ON o.ID = l.ID`,
+		`SELECT PAYLOAD FROM TEST_LOBS UNION ALL SELECT PAYLOAD FROM OTHER_TABLE`,
+	}
+	for _, input := range tests {
+		sqlText, err := rewriteOracleSelectSQL(input, fakeOracleColumnLoader(columns), true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if sqlText != input {
+			t.Fatalf("unsafe query should not be rewritten: %s", sqlText)
+		}
+	}
+}
+
+func TestRewriteOracleLOBRequiresDeferredModeAndSafeMarkerNames(t *testing.T) {
+	input := `SELECT * FROM TEST_LOBS`
+	tests := []struct {
+		deferLOBs bool
+		columns   []oracleColumnMeta
+	}{
+		{deferLOBs: false, columns: []oracleColumnMeta{{Name: "ID", DataType: "NUMBER"}, {Name: "PAYLOAD", DataType: "CLOB"}}},
+		{deferLOBs: true, columns: []oracleColumnMeta{{Name: "PAYLOAD", DataType: "CLOB"}, {Name: "__DBX_LARGE_VALUE_BYTES_C_0", DataType: "VARCHAR2"}}},
+	}
+	for _, test := range tests {
+		sqlText, err := rewriteOracleSelectSQL(input, fakeOracleColumnLoader(test.columns), test.deferLOBs)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if sqlText != input {
+			t.Fatalf("query should remain unchanged, got: %s", sqlText)
+		}
+	}
+}
+
 func TestOracleColumnTypeNamesContainXMLType(t *testing.T) {
 	tests := []struct {
 		name      string

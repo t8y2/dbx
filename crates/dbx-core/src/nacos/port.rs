@@ -2,6 +2,14 @@ use async_trait::async_trait;
 
 use crate::nacos::types::*;
 
+#[derive(Clone, Debug)]
+pub struct NacosNamespaceAuthorizationSnapshot {
+    pub access_control: NacosAccessControlCapabilities,
+    pub roles: Vec<String>,
+    pub permissions: Vec<NacosPermissionInfo>,
+    pub global_admin: bool,
+}
+
 #[async_trait]
 pub trait NacosAdmin: Send + Sync {
     fn service_capabilities(&self) -> NacosServiceCapabilities {
@@ -11,6 +19,8 @@ pub trait NacosAdmin: Send + Sync {
     fn access_control_capabilities(&self) -> NacosAccessControlCapabilities {
         NacosAccessControlCapabilities::default()
     }
+
+    fn invalidate_access_control_capabilities(&self) {}
 
     fn current_username(&self) -> Option<String> {
         None
@@ -23,6 +33,34 @@ pub trait NacosAdmin: Send + Sync {
     }
 
     async fn test_connection(&self) -> Result<NacosConnectionInfo, String>;
+    /// Runs the user-initiated connection check, including validation of every
+    /// explicitly configured namespace. Normal connection establishment must
+    /// remain bounded and should call `test_connection` instead.
+    async fn test_connection_with_scope_validation(&self) -> Result<NacosConnectionInfo, String> {
+        self.test_connection().await
+    }
+    /// Refreshes account capabilities from non-mutating authorization reads.
+    /// Implementations that cannot inspect permissions keep their conservative
+    /// configured capabilities.
+    async fn refresh_access_control_capabilities(&self) -> NacosAccessControlCapabilities {
+        self.access_control_capabilities()
+    }
+    /// Refreshes access-control capabilities and, when the adapter can do so
+    /// without another round trip, returns the authorization rows needed to
+    /// derive namespace visibility.
+    async fn refresh_namespace_authorization(
+        &self,
+        _username: &str,
+    ) -> Result<Option<NacosNamespaceAuthorizationSnapshot>, String> {
+        let _ = self.refresh_access_control_capabilities().await;
+        Ok(None)
+    }
+    /// Returns connection information for the Nacos management UI after
+    /// refreshing account capabilities, without re-running full namespace
+    /// scope validation on every tree or console refresh.
+    async fn inspect_connection(&self) -> Result<NacosConnectionInfo, String> {
+        self.test_connection().await
+    }
     async fn list_namespaces(&self) -> Result<Vec<NacosNamespaceInfo>, String>;
     async fn create_namespace(&self, req: NacosNamespaceCreate) -> Result<(), String>;
     async fn update_namespace(&self, req: NacosNamespaceUpdate) -> Result<(), String>;

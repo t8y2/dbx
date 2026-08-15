@@ -116,12 +116,14 @@ import { REDIS_SCAN_PAGE_SIZE_DEFAULT } from "@/lib/redis/redisKeyPattern";
 import { normalizeRedisDatabaseAliases, redisDatabaseAlias, redisDatabaseLabel } from "@/lib/redis/redisDatabaseAlias";
 import { appendAgentDriverUpdateHint, hasAgentDriverUpdate, hasInstalledAgentVersion, type AgentDriverInstallState } from "@/lib/connection/agentDriverInstallHint";
 import { appendConnectionErrorHints, isMysqlMissingPasswordFailure } from "@/lib/connection/connectionErrorHints";
+import { connectionNeedsPasswordPrompt } from "@/lib/connection/connectionPassword";
 import { appendVisibleDatabaseSelection } from "@/lib/connection/connectionVisibleDatabases";
 import { buildXuguTypeMemberNodes, isXuguTypeMemberContainer } from "@/lib/sidebar/xuguTypeMembers";
 import { isXuguPublicSynonymScope, xuguSchemaDisplayName, XUGU_PUBLIC_SYNONYM_SCOPE } from "@/lib/sidebar/xuguPublicSynonyms";
 import { filterNacosNamespacesForSidebar, normalizeNacosNamespacesForDisplay } from "@/lib/nacos/nacosNamespaceVisibility";
 import { buildPackageMemberNodes, markPackageNodesExpandable } from "@/lib/sidebar/packageMembers";
 import { configuredDatabaseProductName, connectionConfigFingerprint, normalizeDatabaseConnectionInfo } from "@/lib/connection/connectionDatabaseInfo";
+import { driverProfileObjectTreeProfileForConnection } from "@/lib/database/driverProfileExtensions";
 import { createMetadataLoadTrace, logMetadataLoadTrace, MetadataLoadCoordinator, type MetadataLoadTraceLogger } from "@/lib/metadata/metadataLoadCoordinator";
 import type { MetadataScopeInput } from "@/lib/metadata/metadataLoadScope";
 import { MetadataResultCache, type MetadataCacheInvalidation } from "@/lib/metadata/metadataResultCache";
@@ -709,6 +711,44 @@ export const useConnectionStore = defineStore("connection", () => {
     return trackDisconnectRequest(connectionId, request, clientAttempt != null);
   }
 
+  /**
+   * One-time connections are never persisted, so the backend's "not in the saved
+   * list, so reclaim it" branch in `sync_connection_configs` never fires for them
+   * (see dbx-core `should_retain_runtime_config`) and `disconnect_db` is the only
+   * reclaim point. Removing one must disconnect it explicitly, or its runtime
+   * config, pool, and tunnel live until the process exits.
+   *
+   * `clientAttempt` is deliberately omitted: removal is terminal, so a superseded
+   * attempt number must not skip the cleanup.
+   */
+  function releaseOneTimeRuntimeConnections(connectionIds: string[]) {
+    for (const connectionId of connectionIds) {
+      let request: Promise<void>;
+      try {
+        request = api.disconnectDb(connectionId);
+      } catch (error) {
+        request = Promise.reject(error);
+      }
+      void trackDisconnectRequest(connectionId, request, false).catch(() => {});
+    }
+  }
+
+  /**
+   * A one-time connection is deleted outright rather than left behind for a
+   * reconnect, so its tabs have nothing to point at once it is gone: executing in
+   * one would fail with "Connection config not found". Close them regardless of
+   * `disconnectTabHandlingMode`, which only makes sense for connections that can
+   * still be reconnected.
+   */
+  async function closeOneTimeConnectionTabs(connectionIds: string[]) {
+    if (!connectionIds.length) return;
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const queryStore = useQueryStore();
+    for (const connectionId of connectionIds) {
+      queryStore.closeConnectionTabs(connectionId);
+    }
+  }
+
   function cancelDisconnectKey(connectionId: string, attempt: number): string {
     return `${connectionId}:${attempt}`;
   }
@@ -1055,6 +1095,7 @@ export const useConnectionStore = defineStore("connection", () => {
       trino: "Trino",
       prestosql: "PrestoSQL",
       hive: "Hive",
+      impala: "Apache Impala",
       spark: "Apache Spark",
       db2: "DB2",
       informix: "Informix",
@@ -1525,9 +1566,11 @@ export const useConnectionStore = defineStore("connection", () => {
 
   function objectGroupCacheKey(node: TreeNode): string {
     const config = node.connectionId ? getConfig(node.connectionId) : undefined;
+    const objectTreeProfileCacheKey = driverProfileObjectTreeProfileForConnection(config)?.cacheKey;
     // objects-v8: object-group listing SQL gained a pg_type branch for
     // PostgreSQL-family user-defined types; older cached lists miss TYPE nodes.
-    const cacheVersion = ownerAwareMetadataCacheVersion(config, config?.db_type === "oracle" ? "objects-v7" : "objects-v8");
+    const baseCacheVersion = ownerAwareMetadataCacheVersion(config, config?.db_type === "oracle" ? "objects-v7" : "objects-v8");
+    const cacheVersion = objectTreeProfileCacheKey ? `${baseCacheVersion}:${objectTreeProfileCacheKey}` : baseCacheVersion;
     return schemaCacheKey(node.connectionId || "", node.database || "", node.schema || "", node.type, cacheVersion);
   }
 
@@ -1542,6 +1585,19 @@ export const useConnectionStore = defineStore("connection", () => {
   function activeTableNameFilterForScope(parts: { connectionId?: string | null; database?: string | null; schema?: string | null; nodeKind?: string | null; catalog?: string | null }): TableNameFilter | undefined {
     const filter = tableNameFilterForScope(parts);
     return tableNameFilterIsEmpty(filter) ? undefined : filter;
+  }
+
+  function effectiveTableNameFilterForNode(node: TreeNode, userFilter?: TableNameFilter): TableNameFilter | undefined {
+    const config = node.connectionId ? getConfig(node.connectionId) : undefined;
+    const profileFilter = driverProfileObjectTreeProfileForConnection(config)?.groupOverrides.find((group) => group.nodeType === node.type)?.tableNameFilter;
+    if (!profileFilter) return userFilter;
+    if (!userFilter) return profileFilter;
+    return normalizeTableNameFilter({
+      // Dedicated groups own their include range. User-defined include patterns
+      // continue to apply to the default tables group, whose profile rule is an exclusion.
+      includePatterns: profileFilter.includePatterns.length > 0 ? profileFilter.includePatterns : userFilter.includePatterns,
+      excludePatterns: [...profileFilter.excludePatterns, ...userFilter.excludePatterns],
+    });
   }
 
   function tableNameFilterMetadataExtra(filter: TableNameFilter | undefined): MetadataScopeInput["extra"] {
@@ -1696,6 +1752,7 @@ export const useConnectionStore = defineStore("connection", () => {
       schema: options.effectiveSchema,
       objects: options.objects.filter((object) => options.objectTypes.includes(normalizedObjectTreeKind(object.object_type))),
       databaseType,
+      groupNodeType: options.node.type,
     });
     const refreshedGroup = grouped.find((group) => group.type === options.node.type);
     const children = refreshedGroup?.children ?? [];
@@ -1777,13 +1834,14 @@ export const useConnectionStore = defineStore("connection", () => {
       return { children: [], objectCount: 0, hasMore: false, nextOffset: options.offset };
     }
     const searchFilter = (options.searchFilter ?? sidebarSearchQuery.value) || undefined;
-    const tableNameFilter = activeTableNameFilterForScope({
+    const userTableNameFilter = activeTableNameFilterForScope({
       connectionId: options.node.connectionId,
       database: options.node.database,
       schema: options.node.schema,
       nodeKind: options.node.type,
       catalog: options.node.catalog,
     });
+    const tableNameFilter = effectiveTableNameFilterForNode(options.node, userTableNameFilter);
     const fetchLimit = searchFilter ? options.pageSize : options.pageSize + 1;
     const fetchOffset = searchFilter ? undefined : options.offset;
     const tables = await loadCachedMetadataListPage<TableInfo[]>(
@@ -2680,8 +2738,11 @@ export const useConnectionStore = defineStore("connection", () => {
     if (!connectionIds.length) return;
 
     const removedIds = new Set(connectionIds);
+    const oneTimeIds = connectionIds.filter((id) => getConfig(id)?.one_time === true);
     const nextConnections = connections.value.filter((c) => !removedIds.has(c.id));
     await persistConnections(nextConnections);
+    await closeOneTimeConnectionTabs(oneTimeIds);
+    releaseOneTimeRuntimeConnections(oneTimeIds);
     await persistTimeoutInheritanceIds(
       settingsStore.editorSettings.connectTimeoutInheritConnectionIds.filter((id) => !removedIds.has(id)),
       settingsStore.editorSettings.queryTimeoutInheritConnectionIds.filter((id) => !removedIds.has(id)),
@@ -3055,6 +3116,23 @@ export const useConnectionStore = defineStore("connection", () => {
   }
 
   /**
+   * Query whether this connection already has a transient password stored in the
+   * backend session-credential store (a `save_password === false` connection that
+   * was connected once this run). Used to skip the interactive password prompt on
+   * later connects. Only returns a boolean — the password itself never leaves the
+   * backend process memory.
+   */
+  async function hasSessionCredential(connectionId: string): Promise<boolean> {
+    try {
+      return await api.sessionCredentialStatus(connectionId);
+    } catch {
+      // Status query failure is treated as "no credential": falling back to the
+      // interactive prompt is the safe, well-known path.
+      return false;
+    }
+  }
+
+  /**
    * Prompt for a transient password when saving is disabled, or when a server
    * confirms that a metadata-only synced connection sent no password. The
    * password is used for the immediate `connectDb` call and is persisted only
@@ -3067,12 +3145,12 @@ export const useConnectionStore = defineStore("connection", () => {
       connectionId: config.id,
       connectionName: config.name,
     });
-    if (!result?.password) throw new Error(CONNECTION_PASSWORD_REQUIRED_MESSAGE);
+    if (!result) throw new Error(CONNECTION_PASSWORD_REQUIRED_MESSAGE);
     return { config: { ...config, password: result.password }, rememberPassword: result.rememberPassword };
   }
 
   async function persistRememberedConnectionPassword(config: ConnectionConfig, rememberPassword: boolean, expectedConfigFingerprint: string): Promise<void> {
-    if (!rememberPassword || !config.password) return;
+    if (!rememberPassword) return;
     const index = connections.value.findIndex((connection) => connection.id === config.id);
     if (index < 0) return;
     if (connectionConfigFingerprint(connections.value[index]) !== expectedConfigFingerprint) return;
@@ -3108,7 +3186,7 @@ export const useConnectionStore = defineStore("connection", () => {
     const localAttempt = beginLocalConnectionAttempt(config.id);
     try {
       let rememberPassword = false;
-      if (config.save_password === false && !config.password) {
+      if (connectionNeedsPasswordPrompt(config) && !(await hasSessionCredential(config.id))) {
         const prompted = await ensureConnectionPassword(config);
         config = prompted.config;
         rememberPassword = prompted.rememberPassword;
@@ -3243,6 +3321,16 @@ export const useConnectionStore = defineStore("connection", () => {
     }
   }
 
+  /**
+   * "断开并忘记本次密码"：关闭连接池（保留其它已保存连接的凭据），并清除该
+   * `save_password === false` 连接本次运行期的会话密码，使下一次连接必须重新输入。
+   * 若该连接本无会话凭据，后端会返回错误并在此抛出（不静默吞掉），避免误报成功。
+   */
+  async function disconnectAndForgetConnectionPassword(connectionId: string) {
+    await disconnect(connectionId);
+    await api.forgetSessionCredential(connectionId);
+  }
+
   async function closeDatabaseConnection(connectionId: string, database: string) {
     if (hasSqlServerActivityTraceForConnection(connectionId, database)) await disposeSqlServerActivityTracesForConnection(connectionId, database);
     await api.closeDatabaseConnection(connectionId, database);
@@ -3313,7 +3401,7 @@ export const useConnectionStore = defineStore("connection", () => {
       // Fast-path the common case (password saved or no password needed) so the
       // in-flight dedup above keeps its exact microtask cadence; only await the
       // interactive prompt when the connection actually needs a typed password.
-      if (config.save_password === false && !config.password) {
+      if (connectionNeedsPasswordPrompt(config) && !(await hasSessionCredential(connectionId))) {
         const prompted = await ensureConnectionPassword(config);
         config = prompted.config;
         rememberPassword = prompted.rememberPassword;
@@ -3671,9 +3759,14 @@ export const useConnectionStore = defineStore("connection", () => {
     const config = getConfig(connectionId);
     if (!config || ["redis", "etcd", "zookeeper", "consul", "mongodb", "elasticsearch", "easysearch", "meilisearch", "milvus", "qdrant", "weaviate", "chromadb", "mq", "nacos"].includes(config.db_type)) return;
     const node = findConnectionNode(connectionId);
-    if (!node || node.type !== "connection" || node.isLoading || hasConnectionMetadataChildren(node.children)) return;
+    if (!node || node.type !== "connection" || hasConnectionMetadataChildren(node.children)) return;
     const scope = { kind: "connection-databases" as const, connectionId, driverProfile: metadataDriverProfile(config) };
-    if (metadataLoadCoordinator.has(scope)) return;
+    const inFlight = metadataLoadCoordinator.inFlightPromise<void>(scope);
+    if (inFlight) {
+      await inFlight;
+      return;
+    }
+    if (node.isLoading) return;
 
     const wasExpanded = !!node.isExpanded;
     const load = beginTreeNodeLoad(node);
@@ -3995,7 +4088,7 @@ export const useConnectionStore = defineStore("connection", () => {
           };
         }),
       ];
-      if (sidebarSnapshot.accessControl.listUsers.supported === true) {
+      if (sidebarSnapshot.accessControl.listUsers.supported === true || sidebarSnapshot.accessControl.listRoleBindings.supported === true) {
         children.push({
           id: `${connectionId}:nacos-access-control`,
           label: "nacos.accessControlSidebarLabel",
@@ -4690,7 +4783,9 @@ export const useConnectionStore = defineStore("connection", () => {
           const simpleObjectDisplay = useSettingsStore().editorSettings.sidebarObjectDisplay === "simple";
           const searchFilter = activeTreeLoadSearchFilter(options);
           const config = getConfig(connectionId);
-          const cacheVersion = ownerAwareMetadataCacheVersion(config, simpleObjectDisplay ? "objects-simple-v8" : "objects-grouped-v8");
+          const objectTreeProfile = driverProfileObjectTreeProfileForConnection(config);
+          const baseCacheVersion = ownerAwareMetadataCacheVersion(config, simpleObjectDisplay ? "objects-simple-v8" : "objects-grouped-v8");
+          const cacheVersion = !simpleObjectDisplay && objectTreeProfile?.cacheKey ? `${baseCacheVersion}:${objectTreeProfile.cacheKey}` : baseCacheVersion;
           const cacheKey = schemaCacheKey(connectionId, database, schema || "", cacheVersion);
           const querySchema = connectionObjectTreeQuerySchema(config, database, schema);
           const effectiveSchema = connectionObjectTreeNodeSchema(config, database, schema);
@@ -4735,6 +4830,7 @@ export const useConnectionStore = defineStore("connection", () => {
               database,
               schema: effectiveSchema,
               objectTypes: supportedSidebarObjectTypes(config),
+              groupOverrides: objectTreeProfile?.groupOverrides,
             });
             if (!schema && isPostgresLikeForExtensions(config?.db_type)) {
               children.push(buildExtensionManagementNode(connectionId, database));
@@ -5152,7 +5248,12 @@ export const useConnectionStore = defineStore("connection", () => {
         }
 
         const matchingGroups = findTreeNodes(treeNodes.value, (node) => {
-          return (node.type === "group-tables" || node.type === "group-views" || node.type === "group-materialized-views") && node.connectionId === target.connectionId && sameSidebarObjectName(node.database, target.database) && (!target.schema || sameSidebarObjectName(node.schema, target.schema));
+          return (
+            (node.type === "group-tables" || node.type === "group-dolt-system-tables" || node.type === "group-views" || node.type === "group-materialized-views") &&
+            node.connectionId === target.connectionId &&
+            sameSidebarObjectName(node.database, target.database) &&
+            (!target.schema || sameSidebarObjectName(node.schema, target.schema))
+          );
         });
 
         for (const group of matchingGroups) {
@@ -7832,6 +7933,8 @@ export const useConnectionStore = defineStore("connection", () => {
     connect,
     cancelConnecting,
     disconnect,
+    disconnectAndForgetConnectionPassword,
+    hasSessionCredential,
     closeDatabaseConnection,
     ensureConnected,
     loadConnectedConnectionRootForSidebarSearch,

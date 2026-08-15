@@ -12,6 +12,7 @@ fn request(extractor: DataGridExtractorId) -> DataGridExtractRequest {
         version: DATA_GRID_EXTRACTOR_CONTRACT_VERSION,
         extractor,
         database_type: Some(DatabaseType::Postgres),
+        identifier_quote: None,
         table_meta: None,
         columns: vec![column("id", 0), column("name", 1)],
         selected_column_indexes: vec![0, 1],
@@ -42,6 +43,7 @@ fn partially_deserialized_options_use_the_canonical_defaults() {
     assert_eq!(options.sql.insert_mode, crate::data_grid_sql::DataGridCopyInsertMode::Merged);
     assert!(!options.sql.exclude_primary_keys_from_insert);
     assert!(options.json.pretty);
+    assert!(!options.json.camel_case_field_names);
 }
 
 #[test]
@@ -350,12 +352,142 @@ fn extracts_compact_json_when_pretty_printing_is_disabled() {
 }
 
 #[test]
+fn converts_snake_case_json_field_names_only_when_enabled() {
+    let mut request = request(DataGridExtractorId::Json);
+    request.columns = vec![
+        column("user_id", 0),
+        column("ORDER_ITEM_ID", 1),
+        column("alreadyCamel", 2),
+        column("_display__name_", 3),
+        column("naïve_value", 4),
+    ];
+    request.selected_column_indexes = vec![0, 1, 2, 3, 4];
+    request.rows = vec![vec![json!(7), json!(9), json!("kept"), json!("Ada"), json!(true)]];
+
+    let unchanged = extract_data_grid_selection(request.clone()).expect("default JSON extraction");
+    assert_eq!(
+        serde_json::from_str::<Value>(&unchanged.text).expect("valid default JSON"),
+        json!([{"user_id": 7, "ORDER_ITEM_ID": 9, "alreadyCamel": "kept", "_display__name_": "Ada", "naïve_value": true}])
+    );
+
+    request.options.json.camel_case_field_names = true;
+    let converted = extract_data_grid_selection(request).expect("camel-case JSON extraction");
+    assert_eq!(
+        serde_json::from_str::<Value>(&converted.text).expect("valid converted JSON"),
+        json!([{"userId": 7, "orderItemId": 9, "alreadyCamel": "kept", "displayName": "Ada", "naïveValue": true}])
+    );
+}
+
+#[test]
+fn converts_json_lines_names_and_suffixes_post_conversion_collisions() {
+    let mut request = request(DataGridExtractorId::JsonLines);
+    request.columns = vec![column("user_id", 0), column("userId", 1), column("___", 2)];
+    request.selected_column_indexes = vec![0, 1, 2];
+    request.rows = vec![vec![json!(1), json!(2), json!(3)], vec![json!(4), json!(5), json!(6)]];
+    request.options.json.camel_case_field_names = true;
+
+    let result = extract_data_grid_selection(request).expect("camel-case JSON Lines extraction");
+    let rows = result
+        .text
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).expect("valid JSON Lines record"))
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        rows,
+        vec![json!({"userId": 1, "userId_2": 2, "___": 3}), json!({"userId": 4, "userId_2": 5, "___": 6})]
+    );
+    assert_eq!(result.warnings.len(), 1);
+    assert_eq!(result.warnings[0].code, DataGridExtractWarningCode::DuplicateJsonColumnNames);
+}
+
+#[test]
 fn builds_null_safe_where_clause_predicates() {
     let mut request = request(DataGridExtractorId::WhereClause);
     request.selected_column_indexes = vec![1];
     request.rows = vec![vec![json!(1), Value::Null]];
     let result = extract_data_grid_selection(request).expect("WHERE extraction");
     assert_eq!(result.text, "\"name\" IS NULL");
+}
+
+#[test]
+fn builds_select_for_one_explicit_cell() {
+    let mut request = request(DataGridExtractorId::SqlSelect);
+    request.table_meta = Some(DataGridTableMeta {
+        catalog: None,
+        database: None,
+        schema: Some("public".to_string()),
+        table_name: "users".to_string(),
+        primary_keys: vec!["id".to_string()],
+        columns: None,
+    });
+    request.selected_column_indexes = vec![1];
+    request.rows = vec![vec![json!(7), json!("Ada")]];
+
+    let result = extract_data_grid_selection(request).expect("SELECT extraction");
+
+    assert_eq!(result.text, "SELECT * FROM \"public\".\"users\" WHERE \"name\" = 'Ada';");
+}
+
+#[test]
+fn select_row_uses_complete_identity_including_hidden_columns() {
+    let mut request = request(DataGridExtractorId::SqlSelect);
+    request.table_meta = Some(DataGridTableMeta {
+        catalog: None,
+        database: None,
+        schema: None,
+        table_name: "users".to_string(),
+        primary_keys: vec!["tenant_id".to_string(), "id".to_string()],
+        columns: None,
+    });
+    request.columns = vec![column("name", 0), column("id", 1), column("tenant_id", 2)];
+    request.selected_column_indexes = vec![0];
+    request.rows = vec![vec![json!("Ada"), json!(7), json!(9)]];
+    request.selection_kind = DataGridSelectionKind::Rows;
+
+    let result = extract_data_grid_selection(request).expect("SELECT extraction");
+
+    assert_eq!(result.text, "SELECT * FROM \"users\" WHERE \"tenant_id\" = 9 AND \"id\" = 7;");
+}
+
+#[test]
+fn select_row_falls_back_to_all_columns_without_usable_identity() {
+    for primary_keys in [Vec::new(), vec!["id".to_string()]] {
+        let mut request = request(DataGridExtractorId::SqlSelect);
+        request.table_meta = Some(DataGridTableMeta {
+            catalog: None,
+            database: None,
+            schema: None,
+            table_name: "users".to_string(),
+            primary_keys,
+            columns: None,
+        });
+        request.rows = vec![vec![Value::Null, json!("Ada")]];
+        request.selection_kind = DataGridSelectionKind::Rows;
+
+        let result = extract_data_grid_selection(request).expect("SELECT extraction");
+
+        assert_eq!(result.text, "SELECT * FROM \"users\" WHERE \"id\" IS NULL AND \"name\" = 'Ada';");
+    }
+}
+
+#[test]
+fn select_rejects_ambiguous_selection_and_missing_target() {
+    let error = extract_data_grid_selection(request(DataGridExtractorId::SqlSelect))
+        .expect_err("multiple cells without a table must fail");
+    assert_eq!(error.code, DataGridExtractErrorCode::MissingTableMetadata);
+
+    let mut request = request(DataGridExtractorId::SqlSelect);
+    request.table_meta = Some(DataGridTableMeta {
+        catalog: None,
+        database: None,
+        schema: None,
+        table_name: "users".to_string(),
+        primary_keys: Vec::new(),
+        columns: None,
+    });
+    let error = extract_data_grid_selection(request).expect_err("multiple cells must fail");
+    assert_eq!(error.code, DataGridExtractErrorCode::InvalidSelectSelection);
 }
 
 #[test]
@@ -623,6 +755,7 @@ fn extractor_contract_uses_the_frontend_camel_case_wire_shape() {
     assert_eq!(value["selectedColumnIndexes"], json!([0, 1]));
     assert_eq!(value["selectionKind"], "cells");
     assert_eq!(value["options"]["dsv"]["includeColumnHeader"], false);
+    assert_eq!(value["options"]["json"]["camelCaseFieldNames"], false);
     assert!(value.get("selected_column_indexes").is_none());
 
     let decoded = serde_json::from_value::<DataGridExtractRequest>(value).expect("deserialize extractor request");

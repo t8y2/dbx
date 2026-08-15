@@ -68,12 +68,20 @@ const customThemeColors = {
   invalid: "#f38ba8", // 无效字符
 };
 
+export function resolveCustomThemeBackgrounds(colors?: Pick<CustomThemeColors, "background">, isDark: boolean = true): { background: string; gutterBackground: string } {
+  return {
+    background: colors?.background ?? (isDark ? "#1e1e2e" : "#fafafa"),
+    gutterBackground: colors?.background ?? customThemeColors.gutterBackground,
+  };
+}
+
 /** 创建自定义 CodeMirror 主题 */
 function createCustomTheme(EditorView: typeof import("@codemirror/view").EditorView, colors?: CustomThemeColors, isDark: boolean = true): Extension {
   // 根据系统主题设置默认背景色和前景色
-  const defaultColors = isDark ? { background: "#1e1e2e", foreground: "#cdd6f4" } : { background: "#fafafa", foreground: "#242424" };
+  const backgrounds = resolveCustomThemeBackgrounds(colors, isDark);
+  const defaultColors = { background: backgrounds.background, foreground: isDark ? "#cdd6f4" : "#242424" };
 
-  const c = { ...defaultColors, ...customThemeColors, ...colors };
+  const c = { ...defaultColors, ...customThemeColors, ...colors, gutterBackground: backgrounds.gutterBackground };
 
   // 映射用户自定义属性名到 CodeMirror 内部属性名
   if (colors) {

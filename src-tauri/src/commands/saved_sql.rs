@@ -1,6 +1,9 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::{collections::HashSet, io::ErrorKind};
+use std::{
+    collections::{HashMap, HashSet},
+    io::ErrorKind,
+};
 
 use sha2::{Digest, Sha256};
 use tauri::State;
@@ -59,6 +62,11 @@ struct PreviousSyncManifest {
 #[tauri::command]
 pub async fn load_saved_sql_library(state: State<'_, Arc<AppState>>) -> Result<SavedSqlLibrary, String> {
     state.storage.load_saved_sql_library_summary().await
+}
+
+#[tauri::command]
+pub async fn load_saved_sql_files_for_sync(state: State<'_, Arc<AppState>>) -> Result<Vec<SavedSqlFile>, String> {
+    state.storage.load_saved_sql_files_for_sync().await
 }
 
 #[tauri::command]
@@ -125,40 +133,91 @@ pub async fn sync_saved_sql_directory(request: SavedSqlSyncRequest) -> Result<()
 fn sync_saved_sql_directory_blocking(target_dir: &Path, entries: &[SavedSqlSyncEntry]) -> Result<(), String> {
     let sync_root = target_dir.join("dbx-sql-library");
     let previous_manifest = load_previous_sync_manifest(&sync_root)?;
-    verify_previous_sync_files(&sync_root, &previous_manifest.files)?;
 
-    std::fs::create_dir_all(&sync_root).map_err(|e| e.to_string())?;
-    if previous_manifest.exists {
-        std::fs::remove_file(sync_root.join(SYNC_MANIFEST_FILE)).map_err(|e| e.to_string())?;
-    }
-    remove_previous_sync_files(&sync_root, &previous_manifest.files)?;
-
-    let mut written_files = Vec::new();
+    let previous_by_path =
+        previous_manifest.files.iter().map(|file| (file.path.as_str(), file)).collect::<HashMap<_, _>>();
+    let reusable_paths = previous_by_path.keys().copied().collect::<HashSet<_>>();
+    let mut planned_paths = HashSet::new();
+    let mut planned_files = Vec::with_capacity(entries.len());
     for entry in entries {
-        let mut file_dir = sync_root.to_path_buf();
+        let mut relative_dir = PathBuf::new();
         if let Some(folder_name) = entry.folder_name.as_deref().map(str::trim).filter(|name| !name.is_empty()) {
             for segment in folder_name.split('/') {
                 let segment = segment.trim();
                 if !segment.is_empty() {
-                    file_dir.push(sanitize_file_segment(segment));
+                    relative_dir.push(sanitize_file_segment(segment));
                 }
             }
         }
-        std::fs::create_dir_all(&file_dir).map_err(|e| e.to_string())?;
 
         let file_name = ensure_sql_extension(&sanitize_file_segment(&entry.file_name));
-        let file_path = unique_file_path(&file_dir, &file_name);
-        std::fs::write(&file_path, &entry.sql).map_err(|e| e.to_string())?;
-        if let Ok(relative) = file_path.strip_prefix(&sync_root) {
-            written_files.push(SavedSqlSyncManifestFile {
-                path: relative.to_string_lossy().replace('\\', "/"),
-                sha256: sha256_hex(entry.sql.as_bytes()),
-            });
+        let relative =
+            unique_sync_relative_path(&sync_root, &relative_dir, &file_name, &reusable_paths, &planned_paths);
+        let path = relative.to_string_lossy().replace('\\', "/");
+        planned_paths.insert(path.clone());
+        planned_files
+            .push((SavedSqlSyncManifestFile { path, sha256: sha256_hex(entry.sql.as_bytes()) }, entry.sql.as_bytes()));
+    }
+
+    let unchanged = previous_manifest.exists
+        && previous_manifest.files.len() == planned_files.len()
+        && planned_files.iter().all(|(planned, _)| {
+            previous_by_path
+                .get(planned.path.as_str())
+                .is_some_and(|previous| previous.sha256.eq_ignore_ascii_case(&planned.sha256))
+        });
+    if unchanged {
+        return Ok(());
+    }
+
+    let planned_by_path = planned_files.iter().map(|(file, _)| (file.path.as_str(), file)).collect::<HashMap<_, _>>();
+    verify_previous_sync_files(
+        &sync_root,
+        previous_manifest.files.iter().filter(|previous| {
+            planned_by_path
+                .get(previous.path.as_str())
+                .is_none_or(|planned| !previous.sha256.eq_ignore_ascii_case(&planned.sha256))
+        }),
+    )?;
+
+    for (planned, _) in &planned_files {
+        if previous_by_path.contains_key(planned.path.as_str()) {
+            continue;
+        }
+        let relative = normalized_relative_path(&planned.path).expect("planned sync paths are normalized");
+        match std::fs::symlink_metadata(sync_root.join(relative)) {
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Ok(_) => return Err(sync_conflict(&planned.path, "an unmanaged path appeared during synchronization")),
+            Err(error) => {
+                return Err(sync_conflict(&planned.path, &format!("target path cannot be inspected: {error}")))
+            }
         }
     }
 
-    let manifest = SavedSqlSyncManifest { version: SYNC_MANIFEST_VERSION, files: written_files };
+    let manifest = SavedSqlSyncManifest {
+        version: SYNC_MANIFEST_VERSION,
+        files: planned_files
+            .iter()
+            .map(|(file, _)| SavedSqlSyncManifestFile { path: file.path.clone(), sha256: file.sha256.clone() })
+            .collect(),
+    };
     let manifest_json = serde_json::to_string_pretty(&manifest).map_err(|e| e.to_string())?;
+
+    std::fs::create_dir_all(&sync_root).map_err(|e| e.to_string())?;
+
+    for (planned, contents) in &planned_files {
+        if previous_by_path
+            .get(planned.path.as_str())
+            .is_some_and(|previous| previous.sha256.eq_ignore_ascii_case(&planned.sha256))
+        {
+            continue;
+        }
+        let relative = normalized_relative_path(&planned.path).expect("planned sync paths are normalized");
+        let file_path = sync_root.join(relative);
+        write_sync_file(&file_path, contents, previous_by_path.contains_key(planned.path.as_str()))?;
+    }
+
+    remove_stale_sync_files(&sync_root, &previous_manifest.files, &planned_paths)?;
     write_sync_manifest(&sync_root, manifest_json.as_bytes())
 }
 
@@ -207,7 +266,10 @@ fn validate_manifest_files(files: &[SavedSqlSyncManifestFile]) -> Result<(), Str
     Ok(())
 }
 
-fn verify_previous_sync_files(target_dir: &Path, files: &[SavedSqlSyncManifestFile]) -> Result<(), String> {
+fn verify_previous_sync_files<'a>(
+    target_dir: &Path,
+    files: impl IntoIterator<Item = &'a SavedSqlSyncManifestFile>,
+) -> Result<(), String> {
     for file in files {
         let relative = normalized_relative_path(&file.path).expect("manifest paths were validated");
         let file_path = target_dir.join(relative);
@@ -225,8 +287,15 @@ fn verify_previous_sync_files(target_dir: &Path, files: &[SavedSqlSyncManifestFi
     Ok(())
 }
 
-fn remove_previous_sync_files(target_dir: &Path, files: &[SavedSqlSyncManifestFile]) -> Result<(), String> {
+fn remove_stale_sync_files(
+    target_dir: &Path,
+    files: &[SavedSqlSyncManifestFile],
+    planned_paths: &HashSet<String>,
+) -> Result<(), String> {
     for file in files {
+        if planned_paths.contains(&file.path) {
+            continue;
+        }
         let relative = normalized_relative_path(&file.path).expect("manifest paths were validated");
         let file_path = target_dir.join(relative);
         std::fs::remove_file(&file_path).map_err(|e| e.to_string())?;
@@ -261,12 +330,47 @@ fn sync_conflict(path: &str, reason: &str) -> String {
     format!("Saved SQL sync conflict for '{path}': {reason}; no files were changed")
 }
 
+fn write_sync_file(file_path: &Path, contents: &[u8], replace: bool) -> Result<(), String> {
+    let parent = file_path.parent().ok_or_else(|| "Saved SQL sync target has no parent directory".to_string())?;
+    std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    let temporary_path = parent.join(format!(".dbx-sql-sync.{}.tmp", uuid::Uuid::new_v4()));
+    if let Err(error) = std::fs::write(&temporary_path, contents) {
+        return Err(error.to_string());
+    }
+
+    #[cfg(target_os = "windows")]
+    if replace {
+        if let Err(error) = std::fs::remove_file(file_path) {
+            let _ = std::fs::remove_file(&temporary_path);
+            return Err(error.to_string());
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    let _ = replace;
+
+    if let Err(error) = std::fs::rename(&temporary_path, file_path) {
+        let _ = std::fs::remove_file(temporary_path);
+        return Err(error.to_string());
+    }
+    Ok(())
+}
+
 fn write_sync_manifest(target_dir: &Path, contents: &[u8]) -> Result<(), String> {
     let manifest_path = target_dir.join(SYNC_MANIFEST_FILE);
     let temporary_path = target_dir.join(format!(".{SYNC_MANIFEST_FILE}.{}.tmp", uuid::Uuid::new_v4()));
     if let Err(error) = std::fs::write(&temporary_path, contents) {
         return Err(error.to_string());
     }
+
+    #[cfg(target_os = "windows")]
+    if manifest_path.exists() {
+        if let Err(error) = std::fs::remove_file(&manifest_path) {
+            let _ = std::fs::remove_file(&temporary_path);
+            return Err(error.to_string());
+        }
+    }
+
     if let Err(error) = std::fs::rename(&temporary_path, manifest_path) {
         let _ = std::fs::remove_file(temporary_path);
         return Err(error.to_string());
@@ -313,17 +417,25 @@ fn ensure_sql_extension(name: &str) -> String {
     }
 }
 
-fn unique_file_path(dir: &Path, file_name: &str) -> PathBuf {
-    let mut candidate = dir.join(file_name);
-    if !candidate.exists() {
-        return candidate;
-    }
-
+fn unique_sync_relative_path(
+    sync_root: &Path,
+    relative_dir: &Path,
+    file_name: &str,
+    reusable_paths: &HashSet<&str>,
+    planned_paths: &HashSet<String>,
+) -> PathBuf {
     let base = file_name.strip_suffix(".sql").unwrap_or(file_name);
-    let mut counter = 2;
+    let mut counter = 1;
     loop {
-        candidate = dir.join(format!("{base} ({counter}).sql"));
-        if !candidate.exists() {
+        let candidate = if counter == 1 {
+            relative_dir.join(file_name)
+        } else {
+            relative_dir.join(format!("{base} ({counter}).sql"))
+        };
+        let relative = candidate.to_string_lossy().replace('\\', "/");
+        if !planned_paths.contains(&relative)
+            && (reusable_paths.contains(relative.as_str()) || !sync_root.join(&candidate).exists())
+        {
             return candidate;
         }
         counter += 1;
@@ -415,6 +527,84 @@ mod tests {
     }
 
     #[test]
+    fn unchanged_large_sync_keeps_managed_file_identity() {
+        let target = TestDirectory::new("unchanged-identity");
+        let entries = (0..128)
+            .map(|index| named_entry(&format!("query-{index}"), &format!("SELECT {index};")))
+            .collect::<Vec<_>>();
+        sync_saved_sql_directory_blocking(&target.0, &entries).unwrap();
+
+        let managed_file = sync_root(&target).join("reports/query-64.sql");
+        let hard_link = target.0.join("daily-hard-link.sql");
+        std::fs::hard_link(&managed_file, &hard_link).unwrap();
+
+        sync_saved_sql_directory_blocking(&target.0, &entries).unwrap();
+        std::fs::write(&hard_link, "SELECT 'same inode';").unwrap();
+
+        assert_eq!(std::fs::read_to_string(managed_file).unwrap(), "SELECT 'same inode';");
+    }
+
+    #[test]
+    fn writes_only_new_and_changed_managed_files() {
+        let target = TestDirectory::new("incremental-write");
+        sync_saved_sql_directory_blocking(
+            &target.0,
+            &[named_entry("daily", "SELECT 1;"), named_entry("weekly", "SELECT 7;")],
+        )
+        .unwrap();
+
+        let root = sync_root(&target);
+        let unchanged_file = root.join("reports/weekly.sql");
+        let hard_link = target.0.join("weekly-hard-link.sql");
+        std::fs::hard_link(&unchanged_file, &hard_link).unwrap();
+
+        sync_saved_sql_directory_blocking(
+            &target.0,
+            &[
+                named_entry("daily", "SELECT 2;"),
+                named_entry("weekly", "SELECT 7;"),
+                named_entry("monthly", "SELECT 30;"),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(std::fs::read_to_string(root.join("reports/daily.sql")).unwrap(), "SELECT 2;");
+        assert_eq!(std::fs::read_to_string(root.join("reports/monthly.sql")).unwrap(), "SELECT 30;");
+        std::fs::write(&hard_link, "SELECT 'same weekly inode';").unwrap();
+        assert_eq!(std::fs::read_to_string(unchanged_file).unwrap(), "SELECT 'same weekly inode';");
+    }
+
+    #[test]
+    fn move_rename_and_delete_remove_only_stale_managed_paths() {
+        let target = TestDirectory::new("move-rename-delete");
+        sync_saved_sql_directory_blocking(
+            &target.0,
+            &[named_entry("daily", "SELECT 1;"), named_entry("weekly", "SELECT 7;")],
+        )
+        .unwrap();
+
+        let root = sync_root(&target);
+        let unmanaged_file = root.join("reports/notes.txt");
+        std::fs::write(&unmanaged_file, "keep me").unwrap();
+        let moved = SavedSqlSyncEntry {
+            folder_name: Some("archive".to_string()),
+            file_name: "renamed".to_string(),
+            sql: "SELECT 1;".to_string(),
+        };
+
+        sync_saved_sql_directory_blocking(&target.0, &[moved]).unwrap();
+
+        assert!(!root.join("reports/daily.sql").exists());
+        assert!(!root.join("reports/weekly.sql").exists());
+        assert_eq!(std::fs::read_to_string(root.join("archive/renamed.sql")).unwrap(), "SELECT 1;");
+        assert_eq!(std::fs::read_to_string(unmanaged_file).unwrap(), "keep me");
+        let manifest: SavedSqlSyncManifest =
+            serde_json::from_slice(&std::fs::read(root.join(SYNC_MANIFEST_FILE)).unwrap()).unwrap();
+        assert_eq!(manifest.files.len(), 1);
+        assert_eq!(manifest.files[0].path, "archive/renamed.sql");
+    }
+
+    #[test]
     fn rejects_external_edits_before_overwriting_managed_files() {
         let target = TestDirectory::new("external-edit");
         sync_saved_sql_directory_blocking(&target.0, &[entry("SELECT 1;")]).unwrap();
@@ -424,6 +614,22 @@ mod tests {
 
         let error = sync_saved_sql_directory_blocking(&target.0, &[entry("SELECT 2;")]).unwrap_err();
         assert!(error.contains("reports/daily.sql"), "unexpected error: {error}");
+        assert_eq!(std::fs::read_to_string(managed_file).unwrap(), "SELECT 'edited outside DBX';");
+    }
+
+    #[test]
+    fn unchanged_external_edit_is_left_untouched_until_dbx_needs_the_path() {
+        let target = TestDirectory::new("external-edit-unchanged");
+        sync_saved_sql_directory_blocking(&target.0, &[entry("SELECT 1;")]).unwrap();
+
+        let managed_file = target.0.join("dbx-sql-library/reports/daily.sql");
+        std::fs::write(&managed_file, "SELECT 'edited outside DBX';").unwrap();
+
+        sync_saved_sql_directory_blocking(&target.0, &[entry("SELECT 1;")]).unwrap();
+        assert_eq!(std::fs::read_to_string(&managed_file).unwrap(), "SELECT 'edited outside DBX';");
+
+        let error = sync_saved_sql_directory_blocking(&target.0, &[entry("SELECT 2;")]).unwrap_err();
+        assert!(error.contains("managed file was edited outside DBX"), "unexpected error: {error}");
         assert_eq!(std::fs::read_to_string(managed_file).unwrap(), "SELECT 'edited outside DBX';");
     }
 
@@ -525,6 +731,28 @@ mod tests {
             .unwrap()
             .filter_map(Result::ok)
             .filter(|entry| entry.file_name().to_string_lossy().ends_with(".tmp"))
+            .count();
+        assert_eq!(temporary_files, 0);
+    }
+
+    #[test]
+    fn failed_managed_file_publish_keeps_destination_and_cleans_temporary_file() {
+        let target = TestDirectory::new("managed-file-publish");
+        let destination = target.0.join("daily.sql");
+        std::fs::create_dir(&destination).unwrap();
+        std::fs::write(destination.join("keep.txt"), "keep me").unwrap();
+
+        let error = write_sync_file(&destination, b"SELECT 2;", true).unwrap_err();
+        assert!(!error.is_empty());
+        assert_eq!(std::fs::read_to_string(destination.join("keep.txt")).unwrap(), "keep me");
+        let temporary_files = std::fs::read_dir(&target.0)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                name.starts_with(".dbx-sql-sync.") && name.ends_with(".tmp")
+            })
             .count();
         assert_eq!(temporary_files, 0);
     }

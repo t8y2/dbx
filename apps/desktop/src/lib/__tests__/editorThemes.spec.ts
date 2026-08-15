@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildSqlCompletionThemeRules, resolveEditorTheme } from "@/lib/editor/editorThemes";
+import { buildSqlCompletionThemeRules, resolveCustomThemeBackgrounds, resolveEditorTheme } from "@/lib/editor/editorThemes";
 import type { AppThemePalette } from "@/lib/app/appTheme";
 import type { EditorTheme } from "@/stores/settingsStore";
 
@@ -41,6 +41,33 @@ describe("resolveEditorTheme", () => {
         expect(resolveEditorTheme(theme, "light", palette)).toBe(theme);
       }
     }
+  });
+});
+
+describe("custom editor theme backgrounds", () => {
+  it("uses an explicit dark background for the editor and gutter", () => {
+    expect(resolveCustomThemeBackgrounds({ background: "#10131a" }, true)).toEqual({
+      background: "#10131a",
+      gutterBackground: "#10131a",
+    });
+  });
+
+  it("uses an explicit light background for the editor and gutter", () => {
+    expect(resolveCustomThemeBackgrounds({ background: "#f5f3ee" }, false)).toEqual({
+      background: "#f5f3ee",
+      gutterBackground: "#f5f3ee",
+    });
+  });
+
+  it("keeps the existing custom defaults when background is omitted", () => {
+    expect(resolveCustomThemeBackgrounds(undefined, true)).toEqual({
+      background: "#1e1e2e",
+      gutterBackground: "#181825",
+    });
+    expect(resolveCustomThemeBackgrounds(undefined, false)).toEqual({
+      background: "#fafafa",
+      gutterBackground: "#181825",
+    });
   });
 });
 

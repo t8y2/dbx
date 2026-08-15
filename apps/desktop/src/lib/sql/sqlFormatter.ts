@@ -5,6 +5,10 @@ export type SqlFormatDialect = "mysql" | "postgres" | "sqlite" | "sqlserver" | "
 
 export const MAX_SQL_FORMAT_CHARS = 1_000_000;
 
+export function canFormatSqlForDatabaseType(dbType: string | null | undefined): boolean {
+  return dbType !== "victoriametrics";
+}
+
 /**
  * Thrown by {@link formatSqlText} when the input is XML-looking and must never
  * be run through the SQL formatter. sql-formatter silently rewrites well-formed

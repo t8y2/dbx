@@ -24,6 +24,26 @@ describe("managedJdbcDrivers", () => {
     expect(managedJdbcDriverRows([], pluginStatus()).map(({ db_type }) => db_type)).toEqual(["prestosql", "phoenix"]);
   });
 
+  it("marks both managed drivers installed when the offline payload contains every bundle", () => {
+    const coordinates = [PRESTOSQL_JDBC_DRIVER_COORDINATE, ...PHOENIX_MANAGED_MAVEN_COORDINATES];
+    const bundles = coordinates.map(
+      (coordinate): JdbcMavenBundleInfo => ({
+        id: coordinate.replace(/[^A-Za-z0-9.-]/g, "_"),
+        coordinate,
+        scope: "runtime",
+        repositories: ["https://repo.maven.apache.org/maven2/"],
+        installed_at: "2026-08-14T00:00:00Z",
+        path: `/plugins/jdbc/drivers/maven/${coordinate}`,
+        artifacts: [],
+      }),
+    );
+
+    expect(managedJdbcDriverRows(bundles, pluginStatus()).map(({ db_type, installed }) => ({ db_type, installed }))).toEqual([
+      { db_type: "prestosql", installed: true },
+      { db_type: "phoenix", installed: true },
+    ]);
+  });
+
   it("installs PrestoSQL through the generic Maven resolver", async () => {
     const installed: JdbcMavenBundleInfo = {
       id: "io.prestosql_presto-jdbc_350",

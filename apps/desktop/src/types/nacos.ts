@@ -25,6 +25,7 @@ export interface NacosAccessControlCapabilities {
   listPermissions: NacosOperationCapability;
   grantPermission: NacosOperationCapability;
   revokePermission: NacosOperationCapability;
+  /** All read endpoints required by the directory-detail workspace are available. */
   enhancedWorkspace: boolean;
   supportsNamespacePrivileges: boolean;
 }
@@ -399,6 +400,7 @@ export interface NacosConfigTransferRequest {
   targetConnectionId: string;
   source: NacosConfigSelector;
   targetNamespace: string;
+  targetGroup?: string;
   conflictPolicy: NacosConflictPolicy;
 }
 

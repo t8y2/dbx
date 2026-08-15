@@ -32,6 +32,36 @@ enum ExecutionStrategy {
     StopAfterFailure,
 }
 
+fn operation_for_command(command: &StepCommand) -> NacosAccessControlOperation {
+    match command {
+        StepCommand::CreateUser { .. } => NacosAccessControlOperation::CreateUser,
+        StepCommand::DeleteUser { .. } | StepCommand::DeleteCreatedUser { .. } => {
+            NacosAccessControlOperation::DeleteUser
+        }
+        StepCommand::AssignRole { .. } => NacosAccessControlOperation::AssignRole,
+        StepCommand::RemoveRole { .. } => NacosAccessControlOperation::RemoveRole,
+        StepCommand::GrantPermission(_) => NacosAccessControlOperation::GrantPermission,
+        StepCommand::RevokePermission(_) => NacosAccessControlOperation::RevokePermission,
+    }
+}
+
+fn ensure_commands_supported(
+    capabilities: &NacosAccessControlCapabilities,
+    commands: &[StepCommand],
+) -> Result<(), String> {
+    for command in commands {
+        let operation = operation_for_command(command);
+        let capability = capabilities.operation(operation);
+        if !capability.supported {
+            return Err(format!(
+                "NACOS_ERROR[unsupportedOperation]: Nacos access-control operation {operation:?} is unavailable ({:?})",
+                capability.reason.unwrap_or(NacosCapabilityReason::NotVerified)
+            ));
+        }
+    }
+    Ok(())
+}
+
 type OperationPlan = (Vec<StepCommand>, HashMap<String, String>, bool);
 type ValidatedMembers = (Vec<String>, HashMap<String, String>, Vec<StepCommand>);
 
@@ -257,12 +287,14 @@ pub async fn start_operation(
     connection_fingerprint: String,
     admin: Arc<dyn NacosAdmin>,
     request: NacosAccessOperationRequest,
-) -> Result<NacosAccessOperationResult, String> {
+) -> Result<(NacosAccessOperationResult, bool), String> {
     let operation_lock = connection_operation_lock(connection_id);
     let _operation_guard = operation_lock.lock().await;
     let snapshot = load_snapshot(admin.clone()).await?;
     let execution_strategy = execution_strategy_for_request(&request);
     let (commands, credentials, undoable) = plan_operation(&snapshot, request)?;
+    let capabilities = admin.refresh_access_control_capabilities().await;
+    ensure_commands_supported(&capabilities, &commands)?;
     let operation_id = uuid::Uuid::new_v4().to_string();
     let stored = execute_commands(
         connection_id,
@@ -275,11 +307,12 @@ pub async fn start_operation(
         execution_strategy,
     )
     .await;
+    let state_changed = stored.result.steps.iter().any(|step| step.status == NacosAccessOperationStepStatus::Succeeded);
     let result = stored.result.clone();
     let mut registry = operations().lock().unwrap_or_else(|error| error.into_inner());
     cleanup_operations(&mut registry);
     registry.insert(operation_id, stored);
-    Ok(result)
+    Ok((result, state_changed))
 }
 
 fn execution_strategy_for_request(request: &NacosAccessOperationRequest) -> ExecutionStrategy {
@@ -317,7 +350,7 @@ pub async fn retry_operation(
     connection_fingerprint: String,
     admin: Arc<dyn NacosAdmin>,
     retry: NacosAccessOperationRetry,
-) -> Result<NacosAccessOperationResult, String> {
+) -> Result<(NacosAccessOperationResult, bool), String> {
     let operation_lock = connection_operation_lock(connection_id);
     let _operation_guard = operation_lock.lock().await;
     let stored = {
@@ -332,7 +365,7 @@ pub async fn retry_operation(
             .ok_or_else(|| "Nacos access operation was not found or expired".to_string())?
     };
     if stored.failed.is_empty() {
-        return Ok(stored.result);
+        return Ok((stored.result, false));
     }
     let snapshot = load_snapshot(admin.clone()).await?;
     let credentials: HashMap<String, String> = retry
@@ -341,6 +374,8 @@ pub async fn retry_operation(
         .map(|credential| (credential.username.trim().to_string(), credential.password))
         .collect();
     let commands: Vec<StepCommand> = stored.failed.iter().map(|(_, command)| command.clone()).collect();
+    let capabilities = admin.refresh_access_control_capabilities().await;
+    ensure_commands_supported(&capabilities, &commands)?;
     validate_replayed_commands(&snapshot, &commands)?;
     let retried = execute_commands(
         connection_id,
@@ -353,6 +388,8 @@ pub async fn retry_operation(
         stored.execution_strategy,
     )
     .await;
+    let state_changed =
+        retried.result.steps.iter().any(|step| step.status == NacosAccessOperationStepStatus::Succeeded);
     let mut next = stored.clone();
     let original_failures = stored.failed;
     for ((original_index, _), retry_step) in original_failures.iter().zip(&retried.result.steps) {
@@ -377,7 +414,7 @@ pub async fn retry_operation(
     next.expires_at = Instant::now() + OPERATION_TTL;
     let result = next.result.clone();
     operations().lock().unwrap_or_else(|error| error.into_inner()).insert(retry.operation_id, next);
-    Ok(result)
+    Ok((result, state_changed))
 }
 
 pub async fn undo_operation(
@@ -385,7 +422,7 @@ pub async fn undo_operation(
     connection_fingerprint: String,
     admin: Arc<dyn NacosAdmin>,
     operation_id: &str,
-) -> Result<NacosAccessOperationResult, String> {
+) -> Result<(NacosAccessOperationResult, bool), String> {
     let operation_lock = connection_operation_lock(connection_id);
     let _operation_guard = operation_lock.lock().await;
     let stored = {
@@ -404,6 +441,8 @@ pub async fn undo_operation(
     }
     let commands: Vec<_> = stored.undo.into_iter().rev().collect();
     let snapshot = load_snapshot(admin.clone()).await?;
+    let capabilities = admin.refresh_access_control_capabilities().await;
+    ensure_commands_supported(&capabilities, &commands)?;
     validate_replayed_commands(&snapshot, &commands)?;
     let mut undone = execute_commands(
         connection_id,
@@ -416,6 +455,7 @@ pub async fn undo_operation(
         ExecutionStrategy::StopAfterFailure,
     )
     .await;
+    let state_changed = undone.result.steps.iter().any(|step| step.status == NacosAccessOperationStepStatus::Succeeded);
     for step in &mut undone.result.steps {
         if step.status == NacosAccessOperationStepStatus::Succeeded {
             step.status = NacosAccessOperationStepStatus::Compensated;
@@ -425,7 +465,7 @@ pub async fn undo_operation(
         if undone.failed.is_empty() { NacosAccessOperationStatus::Undone } else { NacosAccessOperationStatus::Partial };
     let result = undone.result.clone();
     operations().lock().unwrap_or_else(|error| error.into_inner()).insert(operation_id.to_string(), undone);
-    Ok(result)
+    Ok((result, state_changed))
 }
 
 fn validate_replayed_commands(snapshot: &NacosAccessControlSnapshot, commands: &[StepCommand]) -> Result<(), String> {
@@ -1094,6 +1134,25 @@ fn unique_strings(values: Vec<String>) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn command_capabilities_are_checked_per_mutation() {
+        let mut capabilities = NacosAccessControlCapabilities::unavailable(NacosCapabilityReason::PermissionDenied);
+        capabilities.grant_permission = NacosOperationCapability::supported();
+        let permission = NacosPermissionInfo {
+            role: "ops".to_string(),
+            resource_raw: "team-a:*:*".to_string(),
+            action_raw: "r".to_string(),
+            parsed_scope: None,
+        };
+
+        assert!(ensure_commands_supported(&capabilities, &[StepCommand::GrantPermission(permission)]).is_ok());
+        let error =
+            ensure_commands_supported(&capabilities, &[StepCommand::CreateUser { username: "alice".to_string() }])
+                .unwrap_err();
+        assert!(error.contains("CreateUser"));
+        assert!(error.contains("PermissionDenied"));
+    }
 
     #[test]
     fn combines_read_and_write_from_multiple_roles() {

@@ -12,6 +12,14 @@ export interface SidebarDangerDialogProgress {
   total: number;
 }
 
+export interface SidebarDangerDialogTextInput {
+  value: string;
+  label: string;
+  placeholder?: string;
+  inputMode?: "text" | "numeric";
+  onInput?: (value: string) => void | Promise<void>;
+}
+
 export interface SidebarDangerDialogRequest {
   target: SidebarActionTarget;
   title: string;
@@ -24,5 +32,6 @@ export interface SidebarDangerDialogRequest {
   closeOnConfirm?: boolean;
   progress?: SidebarDangerDialogProgress;
   option?: SidebarDangerDialogOption;
+  textInput?: SidebarDangerDialogTextInput;
   confirm: () => void | Promise<void>;
 }

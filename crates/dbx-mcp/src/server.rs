@@ -32,8 +32,10 @@ pub struct ListConnectionsRequest {}
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ConnectionSelector {
     #[schemars(description = "Unique ID of the DBX connection")]
+    #[schemars(extend("type" = "string"))]
     pub connection_id: Option<String>,
     #[schemars(description = "Name of the DBX connection")]
+    #[schemars(extend("type" = "string"))]
     pub connection_name: Option<String>,
 }
 
@@ -142,6 +144,7 @@ pub struct SchemaContextRequest {
     pub database: Option<String>,
     pub schema: Option<String>,
     #[schemars(description = "Specific table names to include")]
+    #[schemars(extend("type" = "array"))]
     pub tables: Option<Vec<String>>,
     #[schemars(description = "Maximum number of tables to include, from 1 to 20")]
     pub max_tables: Option<usize>,
@@ -1093,7 +1096,11 @@ fn validate_sql_policy(
     if risk == SqlRisk::Transaction {
         return Err(tool_error("SQL_BLOCKED", "Transaction statements are not supported by MCP."));
     }
-    let is_write = is_write_sql_for_database(sql, connection.db_type);
+    // The keyword scan alone misses write-capable SQL that the risk classifier
+    // does recognize (locking reads, side-effect functions, writable CTEs), and
+    // those statements would otherwise reach the database whenever high-risk SQL
+    // is permitted. Fail closed on either signal so read-only stays read-only.
+    let is_write = risk != SqlRisk::ReadOnly || is_write_sql_for_database(sql, connection.db_type);
     if policy.read_only && is_write {
         return Err(tool_error("MCP_READ_ONLY", "DBX global MCP read-only mode is enabled. SQL write blocked."));
     }
@@ -1475,6 +1482,97 @@ mod tests {
         assert!(names.contains(&"dbx_execute_and_show"));
         assert!(names.contains(&"dbx_open_session"));
         assert!(names.contains(&"dbx_close_session"));
+    }
+
+    #[test]
+    fn schema_context_tables_schema_is_gemini_compatible() {
+        let server = DbxMcpServer::with_runtime_options(Arc::new(FakeBackend::default()), McpScope::default(), false);
+        let tool = server
+            .tool_router
+            .list_all()
+            .into_iter()
+            .find(|tool| tool.name == "dbx_get_schema_context")
+            .expect("schema context tool should be registered");
+        let tables = tool
+            .input_schema
+            .get("properties")
+            .and_then(serde_json::Value::as_object)
+            .and_then(|properties| properties.get("tables"))
+            .expect("tables property should be published");
+
+        assert_eq!(tables.get("type"), Some(&serde_json::json!("array")));
+        assert_eq!(tables.pointer("/items/type"), Some(&serde_json::json!("string")));
+        assert!(!tool
+            .input_schema
+            .get("required")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|required| required.iter().any(|field| field == "tables")));
+    }
+
+    #[test]
+    fn connection_selector_schema_uses_optional_strings() {
+        let server = DbxMcpServer::with_runtime_options(Arc::new(FakeBackend::default()), McpScope::default(), false);
+        let tools = server.tool_router.list_all();
+
+        for tool_name in ["dbx_execute_query", "dbx_list_tables", "dbx_open_session"] {
+            let tool = tools.iter().find(|tool| tool.name == tool_name).expect("selector tool should be registered");
+            let properties = tool
+                .input_schema
+                .get("properties")
+                .and_then(serde_json::Value::as_object)
+                .expect("selector tool should publish object properties");
+            let required = tool
+                .input_schema
+                .get("required")
+                .and_then(serde_json::Value::as_array)
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>();
+
+            for field in ["connection_id", "connection_name"] {
+                let selector = properties.get(field).expect("selector field should be published");
+                assert_eq!(selector.get("type"), Some(&serde_json::json!("string")), "{tool_name}.{field}");
+                assert!(!required.iter().any(|required| *required == field), "{tool_name}.{field} must stay optional");
+            }
+        }
+    }
+
+    #[test]
+    fn execute_query_selector_preserves_serde_inputs() {
+        let omitted: ExecuteQueryRequest = serde_json::from_str(r#"{"sql":"SELECT 1"}"#).unwrap();
+        let explicit_nulls: ExecuteQueryRequest =
+            serde_json::from_str(r#"{"connection_id":null,"connection_name":null,"sql":"SELECT 1"}"#).unwrap();
+        let by_name: ExecuteQueryRequest =
+            serde_json::from_str(r#"{"connection_name":"test_conn","sql":"SELECT 1"}"#).unwrap();
+        let by_id: ExecuteQueryRequest =
+            serde_json::from_str(r#"{"connection_id":"123e4567-e89b-12d3-a456-426614174000","sql":"SELECT 1"}"#)
+                .unwrap();
+
+        assert!(omitted.selector.connection_id.is_none());
+        assert!(omitted.selector.connection_name.is_none());
+        assert!(explicit_nulls.selector.connection_id.is_none());
+        assert!(explicit_nulls.selector.connection_name.is_none());
+        assert_eq!(by_name.selector.connection_name.as_deref(), Some("test_conn"));
+        assert_eq!(by_id.selector.connection_id.as_deref(), Some("123e4567-e89b-12d3-a456-426614174000"));
+
+        let nested = serde_json::from_str::<ExecuteQueryRequest>(
+            r#"{"connection_name":{"tool":"dbx_dbx_execute_query","error":"Invalid input"},"sql":"SELECT 1"}"#,
+        )
+        .unwrap_err();
+        assert!(nested.to_string().contains("invalid type: map, expected a string"));
+    }
+
+    #[test]
+    fn schema_context_tables_preserve_optional_inputs() {
+        let omitted: SchemaContextRequest = serde_json::from_str("{}").unwrap();
+        let explicit_null: SchemaContextRequest = serde_json::from_str(r#"{"tables":null}"#).unwrap();
+        let empty: SchemaContextRequest = serde_json::from_str(r#"{"tables":[]}"#).unwrap();
+        let populated: SchemaContextRequest = serde_json::from_str(r#"{"tables":["users","orders"]}"#).unwrap();
+
+        assert_eq!(omitted.tables, None);
+        assert_eq!(explicit_null.tables, None);
+        assert_eq!(empty.tables, Some(Vec::new()));
+        assert_eq!(populated.tables, Some(vec!["users".to_string(), "orders".to_string()]));
     }
 
     #[test]

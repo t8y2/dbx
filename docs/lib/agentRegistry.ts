@@ -91,9 +91,6 @@ const GITHUB_RELEASE_DOWNLOAD_PREFIX = "https://github.com/t8y2/dbx/releases/dow
 const CNB_RELEASE_DOWNLOAD_PREFIX = "https://cnb.cool/dbxio.com/dbx/-/releases/download/";
 const MIN_APP_VERSION = "0.6.0";
 const driverVersionMap = driverVersions as Record<string, string>;
-const nativeDriverKeys = ["duckdb", "oracle", "kingbase", "xugu", "rabbitmq"] as const;
-const nativeDriverKeySet = new Set<string>(nativeDriverKeys);
-const nativeDriverKeyPattern = nativeDriverKeys.join("|");
 
 const platformLabels: Record<string, string> = {
   "macos-aarch64": "macOS (Apple Silicon)",
@@ -107,7 +104,7 @@ const platformLabels: Record<string, string> = {
 const driverLabels: Record<string, string> = {
   access: "Microsoft Access",
   bigquery: "BigQuery",
-  cassandra: "Cassandra",
+  cassandra: "Apache Cassandra",
   dameng: "Dameng",
   databend: "Databend",
   databricks: "Databricks",
@@ -121,7 +118,7 @@ const driverLabels: Record<string, string> = {
   goldendb: "GoldenDB",
   h2: "H2",
   highgo: "HighGo",
-  hive: "Hive",
+  hive: "Apache Hive",
   informix: "Informix",
   iotdb: "Apache IoTDB",
   iris: "InterSystems IRIS",
@@ -132,6 +129,7 @@ const driverLabels: Record<string, string> = {
   "oceanbase-oracle": "OceanBase Oracle Mode",
   oracle: "Oracle",
   rabbitmq: "RabbitMQ",
+  rocketmq: "Apache RocketMQ",
   saphana: "SAP HANA",
   snowflake: "Snowflake",
   sundb: "SunDB",
@@ -143,11 +141,14 @@ const driverLabels: Record<string, string> = {
   vertica: "Vertica",
   xugu: "虚谷 XuguDB",
   yashandb: "YashanDB",
-  zookeeper: "ZooKeeper",
+  zookeeper: "Apache ZooKeeper",
 };
 
 const currentDriverKeys = Object.keys(driverVersionMap).sort((a, b) => labelForDriver(a).localeCompare(labelForDriver(b)));
-const currentJavaDriverKeys = currentDriverKeys.filter((key) => !nativeDriverKeySet.has(key));
+const currentDriverKeyPattern = [...currentDriverKeys]
+  .sort((a, b) => b.length - a.length)
+  .map(escapeRegExp)
+  .join("|");
 
 const jreVersions: Record<string, string> = {
   "21": "21",
@@ -155,6 +156,10 @@ const jreVersions: Record<string, string> = {
 
 function labelForDriver(key: string): string {
   return driverLabels[key] ?? key.replace(/-/g, " ");
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function assetInfo(asset: GitHubReleaseAsset): ArtifactInfo {
@@ -281,7 +286,7 @@ export function buildJreEntries(assets: GitHubReleaseAsset[]): JreDisplayEntry[]
 export function buildDriverEntries(assets: GitHubReleaseAsset[]): DriverDisplayEntry[] {
   const byName = assetMap(assets);
 
-  return currentJavaDriverKeys
+  return currentDriverKeys
     .map((key) => {
       const version = driverVersionMap[key] ?? "";
       const asset = byName.get(`dbx-agent-${key}-${version}.tar.zst`) ?? byName.get(`dbx-agent-${key}-${version}.zip`) ?? byName.get(`dbx-agent-${key}-${version}.jar`) ?? byName.get(`dbx-agent-${key}.jar`);
@@ -303,7 +308,7 @@ function buildDriverEntriesFromRegistry(registry: AgentRegistry): DriverDisplayE
   return Object.entries(registry.drivers ?? {})
     .map(([key, driver]) => {
       const jar = driver.jar;
-      if (nativeDriverKeySet.has(key) || !jar?.url || jar.size <= 0) return null;
+      if (!jar?.url || jar.size <= 0) return null;
 
       return {
         key,
@@ -323,9 +328,9 @@ export function buildNativeAgentEntries(assets: GitHubReleaseAsset[]): NativeAge
   const platforms = "macos-aarch64|macos-x64|linux-aarch64|linux-x64|windows-aarch64|windows-x64";
 
   for (const asset of assets) {
-    const packageMatch = new RegExp(`^dbx-agent-(${nativeDriverKeyPattern})-(.+)-(${platforms})\\.(?:tar\\.zst|zip)$`).exec(asset.name);
-    const versionedMatch = new RegExp(`^dbx-agent-(${nativeDriverKeyPattern})-(.+)-(${platforms})(?:\\.exe)?$`).exec(asset.name);
-    const legacyMatch = new RegExp(`^dbx-agent-(${nativeDriverKeyPattern})-(${platforms})(?:\\.exe)?$`).exec(asset.name);
+    const packageMatch = new RegExp(`^dbx-agent-(${currentDriverKeyPattern})-(.+)-(${platforms})\\.(?:tar\\.zst|zip)$`).exec(asset.name);
+    const versionedMatch = new RegExp(`^dbx-agent-(${currentDriverKeyPattern})-(.+)-(${platforms})(?:\\.exe)?$`).exec(asset.name);
+    const legacyMatch = new RegExp(`^dbx-agent-(${currentDriverKeyPattern})-(${platforms})(?:\\.exe)?$`).exec(asset.name);
     const match = packageMatch ?? versionedMatch ?? legacyMatch;
     if (!match) continue;
 
@@ -333,7 +338,6 @@ export function buildNativeAgentEntries(assets: GitHubReleaseAsset[]): NativeAge
     const key = match[1];
     const version = legacyMatch ? (driverVersionMap[key] ?? "") : match[2];
     const platformKey = legacyMatch ? match[2] : match[3];
-    if (!nativeDriverKeySet.has(key)) continue;
     const entryKey = `${key}:${platformKey}`;
     const existing = entries.get(entryKey);
     if (existing?.packaged && !packaged) continue;

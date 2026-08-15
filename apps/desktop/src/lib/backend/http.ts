@@ -102,6 +102,7 @@ import type {
   MongoCollectionStatsResult,
   MongoCloneCollectionResult,
   MongoDropIndexesResult,
+  MongoIndexSpec,
   MongoGridFsBucketInfo,
   HistoryEntry,
   HistorySearchRequest,
@@ -159,7 +160,7 @@ import type { BuildEditableObjectSourceSqlInput, BuildRoutineRenameObjectSourceI
 import type { BuildViewDdlInput } from "@/lib/table/viewDdl";
 import type { BuildRenameObjectSqlOptions } from "@/lib/table/objectRenameSql";
 import type { CreateDatabaseSqlOptions } from "@/lib/database/createDatabaseSql";
-import type { DatabaseNameSqlOptions, DatabasePropertyEditSqlOptions, DropTableChildObjectSqlOptions, DropObjectSqlOptions, DuplicateTableStructureSqlOptions, CopyTableDataSqlOptions, SchemaNameSqlOptions, TableAdminSqlOptions } from "@/lib/database/dbAdminSql";
+import type { DatabaseNameSqlOptions, DatabasePropertyEditSqlOptions, DropTableChildObjectSqlOptions, DropObjectSqlOptions, DuplicateTableStructureSqlOptions, CopyTableDataSqlOptions, MysqlAutoIncrementSqlOptions, SchemaNameSqlOptions, TableAdminSqlOptions } from "@/lib/database/dbAdminSql";
 import type { BuildDatabaseSqlExportOptions, BuildExportInsertStatementsOptions } from "@/lib/export/databaseExport";
 import { loadBrowserAppState, saveBrowserAppState } from "@/lib/backend/browserAppStateStorage";
 import type { DataCompareFromTablesOptions, DataCompareFromTablesPreparation, DataCompareSyncPlan, DataCompareSyncPlanOptions, DataComparePreparation, DataComparePreparationOptions } from "@/lib/dataGrid/dataCompare";
@@ -382,6 +383,14 @@ export async function connectionFinalProxyPort(config: ConnectionConfig): Promis
 
 export async function disconnectDb(connectionId: string, clientAttempt?: number): Promise<void> {
   return post("/api/connection/disconnect", { connectionId, clientAttempt });
+}
+
+export async function sessionCredentialStatus(connectionId: string): Promise<boolean> {
+  return post("/api/connection/session-credential-status", { connectionId });
+}
+
+export async function forgetSessionCredential(connectionId: string): Promise<void> {
+  return post("/api/connection/forget-session-credential", { connectionId });
 }
 
 export async function checkConnectionHealth(connectionId: string): Promise<void> {
@@ -652,6 +661,10 @@ export async function listenAgentInstallProgress(handler: (progress: DriverInsta
 
 export async function loadSavedSqlLibrary(): Promise<SavedSqlLibrary> {
   return get("/api/saved-sql");
+}
+
+export async function loadSavedSqlFilesForSync(): Promise<SavedSqlFile[]> {
+  throw new Error("SQL directory sync is only available in the desktop app.");
 }
 
 export async function loadSavedSqlFile(id: string): Promise<SavedSqlFile | null> {
@@ -1250,6 +1263,10 @@ export async function buildTruncateTableSql(options: TableAdminSqlOptions): Prom
   return post("/api/query/build-truncate-table-sql", { options });
 }
 
+export async function buildMysqlAutoIncrementSql(options: MysqlAutoIncrementSqlOptions): Promise<string> {
+  return post("/api/query/build-mysql-auto-increment-sql", { options });
+}
+
 export async function buildDropDatabaseSql(options: DatabaseNameSqlOptions): Promise<string> {
   return post("/api/query/build-drop-database-sql", { options });
 }
@@ -1683,6 +1700,14 @@ export async function loadSavedSqlEditorPositions(): Promise<unknown[] | null> {
 
 export async function saveSavedSqlEditorPositions(positions: unknown[]): Promise<void> {
   await saveBrowserAppState("saved_sql_editor_positions", positions);
+}
+
+export async function loadTransferTaskLibrary(): Promise<unknown | null> {
+  return loadBrowserAppState("transfer_task_library");
+}
+
+export async function saveTransferTaskLibrary(library: unknown): Promise<void> {
+  await saveBrowserAppState("transfer_task_library", library);
 }
 
 export async function completeAppClose(_action: "quit" | "hide"): Promise<void> {
@@ -3685,6 +3710,14 @@ export async function mongoCollectionStats(connectionId: string, database: strin
   });
 }
 
+export async function mongoListIndexSpecs(connectionId: string, database: string, collection: string): Promise<MongoIndexSpec[]> {
+  return post("/api/mongo/list-index-specs", {
+    connectionId,
+    database,
+    collection,
+  });
+}
+
 export async function mongoCreateIndex(connectionId: string, database: string, collection: string, keysJson: string, optionsJson?: string): Promise<{ name: string }> {
   return post("/api/mongo/create-index", {
     connectionId,
@@ -3910,12 +3943,17 @@ export async function checkMcpServerStatus(): Promise<import("@/lib/backend/taur
     data_dir: null,
     install_command: "npm install -g @dbx-app/mcp-server@latest",
     update_command: "npm install -g @dbx-app/mcp-server@latest",
+    uninstall_command: "npm uninstall -g @dbx-app/mcp-server",
     error: "MCP Server status is only available in the desktop app.",
   };
 }
 
 export async function installMcpServer(): Promise<string> {
   throw new Error("MCP Server installation is only available in the desktop app.");
+}
+
+export async function uninstallMcpServer(): Promise<string> {
+  throw new Error("MCP Server uninstallation is only available in the desktop app.");
 }
 
 export async function getSystemProxyUrl(): Promise<string | null> {

@@ -14,9 +14,14 @@ test("applies the configured result grid font to DOM and canvas renderers", () =
 });
 
 test("invalidates grid measurements and canvas rendering when the result font changes", () => {
-  assert.match(dataGridSource, /columnHeaderMeasurementKey = computed\(\(\) => \[tableFontSize\.value, tableFontFamily\.value\]\)/);
+  assert.match(dataGridSource, /columnHeaderMeasurementKey = computed\(\(\) => \[tableFontSize\.value, tableFontFamily\.value, dataGridFontReadyTick\.value\]\)/);
   assert.match(dataGridSource, /columnHeaderMeasureContext\.font = `600 \$\{tableFontSize\.value\}px \$\{tableFontFamily\.value\}`/);
   assert.match(dataGridSource, /canvasRenderStyleKey = computed\(\(\) => `[^`]*\$\{tableFontFamily\.value\}:\$\{tableFontSize\.value\}:\$\{!!saveError\.value\}`\)/);
+});
+
+test("waits only for the configured result font before remeasuring headers", () => {
+  assert.match(dataGridSource, /document\.fonts\.load\(`600 \$\{fontSize\}px \$\{fontFamily\}`\)/);
+  assert.doesNotMatch(dataGridSource, /document\.fonts\.addEventListener\("loadingdone"/);
 });
 
 test("places the result grid font beside the interface font in appearance settings", () => {

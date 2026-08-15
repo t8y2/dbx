@@ -27,7 +27,7 @@ const activeTab = ref<AccessTab>("users");
 const accessControl = computed(() => connectionInfo.value?.capabilities.accessControl);
 const supportsUsers = computed(() => accessControl.value?.listUsers.supported === true);
 const supportsRoles = computed(() => accessControl.value?.mode === "roleBindings" && accessControl.value.listRoleBindings.supported === true);
-const enhancedWorkspace = computed(() => accessControl.value?.enhancedWorkspace === true && accessControl.value.listPermissions.supported === true);
+const enhancedWorkspace = computed(() => accessControl.value?.enhancedWorkspace === true);
 const permissionWorkspaceUnavailable = computed(() => accessControl.value?.mode === "roleBindings" && accessControl.value.listPermissions?.supported === false && accessControl.value.listPermissions.reason !== "versionUnsupported");
 
 async function loadConnectionInfo() {
@@ -80,15 +80,15 @@ watch(
       </Button>
     </header>
 
+    <div v-if="permissionWorkspaceUnavailable" class="border-b border-amber-300 bg-amber-50 px-4 py-2 text-xs text-amber-900 dark:bg-amber-950/20 dark:text-amber-200">{{ t("nacos.accessPermissionEndpointUnavailable") }}</div>
     <div v-if="connectionError" class="mx-4 mt-3 rounded border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">{{ connectionError }}</div>
-    <div v-else-if="permissionWorkspaceUnavailable" class="border-b border-amber-300 bg-amber-50 px-4 py-2 text-xs text-amber-900 dark:bg-amber-950/20 dark:text-amber-200">{{ t("nacos.accessPermissionEndpointUnavailable") }}</div>
     <div v-else-if="loading && !connectionInfo" class="flex min-h-0 flex-1 items-center justify-center text-sm text-muted-foreground">
       <Loader2 class="mr-2 h-4 w-4 animate-spin" />
       {{ t("nacos.loading") }}
     </div>
     <template v-else-if="connectionInfo">
-      <div v-if="!supportsUsers" class="m-4 rounded border bg-muted/40 px-3 py-2 text-sm text-muted-foreground">{{ t("nacos.accessControlUnavailable") }}</div>
-      <NacosRoleAccessControl v-if="enhancedWorkspace" :connection-id="connectionId" :read-only="readOnly" :tab="activeTab" @select-user="activeTab = 'users'" @select-role="activeTab = 'roles'" />
+      <div v-if="!supportsUsers && !supportsRoles" class="m-4 rounded border bg-muted/40 px-3 py-2 text-sm text-muted-foreground">{{ t("nacos.accessControlUnavailable") }}</div>
+      <NacosRoleAccessControl v-if="enhancedWorkspace && accessControl" :connection-id="connectionId" :capabilities="accessControl" :read-only="readOnly" :tab="activeTab" @select-user="activeTab = 'users'" @select-role="activeTab = 'roles'" />
       <NacosAccessControl v-else-if="supportsUsers || supportsRoles" :connection-id="connectionId" :connection-info="connectionInfo" :read-only="readOnly" :tab="activeTab" />
     </template>
   </section>

@@ -24,6 +24,16 @@ describe("NacosRoleAccessControl", () => {
     expect(source).toContain("mergeNacosNamespacePermissionAssignments(managedRolePermissions.value)");
   });
 
+  it("gates every mutation by its probed operation capability", () => {
+    expect(source).toContain("capabilities: NacosAccessControlCapabilities");
+    expect(source).toContain("const canCreateUser = computed");
+    expect(source).toContain("const canGrantPermission = computed");
+    expect(source).toContain("const userOperationWritable = computed");
+    expect(source).toContain("const roleOperationWritable = computed");
+    expect(source).toContain(':disabled="saving || !userOperationWritable"');
+    expect(source).toContain(':disabled="saving || !roleOperationWritable"');
+  });
+
   it("surfaces partial operations instead of hiding them in a toast", () => {
     expect(source).toContain("operationNeedsPasswords");
     expect(source).toContain("nacosRetryAccessOperation");

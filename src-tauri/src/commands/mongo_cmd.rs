@@ -321,6 +321,17 @@ pub async fn mongo_distinct(
     .await
 }
 
+/// Read-only listing of a collection's indexes with their full MongoDB options.
+#[tauri::command]
+pub async fn mongo_list_index_specs(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: String,
+    collection: String,
+) -> Result<Vec<dbx_core::db::mongo_driver::MongoIndexSpec>, String> {
+    dbx_core::mongo_ops::mongo_list_index_specs_core(&state, &connection_id, &database, &collection).await
+}
+
 #[tauri::command]
 pub async fn mongo_create_index(
     state: State<'_, Arc<AppState>>,

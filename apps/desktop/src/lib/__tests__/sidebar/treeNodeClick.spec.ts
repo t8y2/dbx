@@ -1,5 +1,15 @@
 import { describe, expect, it } from "vitest";
-import { isDirectNavigationTreeNode, isRepeatableNavigationTreeNode, objectSourceKindForTreeNode, objectSourceTargetForTreeNode, shouldActivateTreeNodeOnSingleClick, shouldRunTreeNodeRowAction, treeNodeRowAction, treeNodeRowDoubleClickAction } from "@/lib/sidebar/treeNodeClick";
+import {
+  isDirectNavigationTreeNode,
+  isRepeatableNavigationTreeNode,
+  objectSourceKindForTreeNode,
+  objectSourceTargetForTreeNode,
+  shouldActivateTreeNodeOnSingleClick,
+  shouldOpenObjectBrowserOnSingleClick,
+  shouldRunTreeNodeRowAction,
+  treeNodeRowAction,
+  treeNodeRowDoubleClickAction,
+} from "@/lib/sidebar/treeNodeClick";
 
 describe("treeNodeClick", () => {
   it("opens synonym nodes as synonym source", () => {
@@ -61,6 +71,45 @@ describe("treeNodeClick", () => {
   it("opens the connection database browser only when the capability is enabled", () => {
     expect(treeNodeRowDoubleClickAction("connection", false, "single", true, "postgres", true)).toBe("open-database-browser");
     expect(treeNodeRowDoubleClickAction("connection", false, "double", true, "postgres", false)).toBe("toggle");
+  });
+
+  it("opens the object browser on single click when the database single-click switch is on", () => {
+    expect(treeNodeRowAction("database", true, "single", "postgres", true, true)).toBe("open-object-browser-and-expand");
+    expect(treeNodeRowAction("database", false, "single", "postgres", true, true)).toBe("open-object-browser");
+    expect(treeNodeRowAction("schema", true, "single", "postgres", true, true)).toBe("open-object-browser-and-expand");
+    expect(treeNodeRowAction("object-browser", false, "single", "postgres", true, true)).toBe("open-object-browser");
+  });
+
+  it("lets the database single-click switch override double-click activation", () => {
+    expect(treeNodeRowAction("database", true, "double", "postgres", true, true)).toBe("open-object-browser-and-expand");
+    expect(treeNodeRowAction("schema", false, "double", "postgres", true, true)).toBe("open-object-browser");
+  });
+
+  it("does not reopen the object browser when the single-click switch already handled the gesture", () => {
+    expect(treeNodeRowDoubleClickAction("database", true, "single", true, "postgres", false, true)).toBe("none");
+    expect(treeNodeRowDoubleClickAction("schema", true, "double", true, "postgres", false, true)).toBe("none");
+    expect(treeNodeRowDoubleClickAction("object-browser", true, "single", false, "postgres", false, true)).toBe("none");
+  });
+
+  it("keeps the existing double-click fallback when single-click browsing is unavailable", () => {
+    expect(treeNodeRowDoubleClickAction("database", true, "single", true, "postgres", false, false)).toBe("open-object-browser");
+    expect(treeNodeRowDoubleClickAction("database", false, "double", true, "postgres", false, true)).toBe("toggle");
+  });
+
+  it("keeps the original single-click behavior when the database single-click switch is off or unsupported", () => {
+    expect(treeNodeRowAction("database", true, "single", "postgres", false, true)).toBe("toggle");
+    expect(treeNodeRowAction("database", true, "double", "postgres", false, true)).toBe("none");
+    // Capability off (e.g. unsupported database type) falls back to the previous behavior.
+    expect(treeNodeRowAction("database", true, "single", "postgres", true, false)).toBe("toggle");
+    expect(treeNodeRowAction("database", true, "double", "postgres", true, false)).toBe("none");
+  });
+
+  it("does not route non-database nodes through the database single-click switch", () => {
+    expect(treeNodeRowAction("table", false, "single", "postgres", true, true)).toBe("open-data");
+    expect(treeNodeRowAction("table", false, "double", "postgres", true, true)).toBe("none");
+    expect(shouldOpenObjectBrowserOnSingleClick("table", true)).toBe(false);
+    expect(shouldOpenObjectBrowserOnSingleClick("database", true)).toBe(true);
+    expect(shouldOpenObjectBrowserOnSingleClick("database", false)).toBe(false);
   });
 
   it("expands package containers while preserving source behavior for leaf packages", () => {

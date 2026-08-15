@@ -748,7 +748,25 @@ function editorIndentUnit(): string {
 }
 
 function handleTab(view: EditorViewType): boolean {
-  return acceptCompletionOrNextSnippetField(view) || performNormalTab(view);
+  if (tabKeyAcceptsCompletion()) {
+    return acceptCompletionOrNextSnippetField(view) || performNormalTab(view);
+  }
+  return handleTabWithoutAcceptingCompletion(view) || performNormalTab(view);
+}
+
+// The Tab key is always wired up for indentation and snippet-field navigation,
+// but it must only accept an open completion popup when the user's configured
+// "accept completion" shortcut is actually Tab — otherwise a user who remapped
+// that shortcut (e.g. to Enter) would find Tab silently accepting completions
+// anyway, ignoring their setting (dbx#6236).
+function tabKeyAcceptsCompletion(): boolean {
+  const shortcuts = normalizeShortcutSettings(settingsStore.editorSettings.shortcuts);
+  return shortcutToCodeMirrorKey(shortcuts.acceptCompletion) === "Tab";
+}
+
+function handleTabWithoutAcceptingCompletion(view: EditorViewType): boolean {
+  if (codeMirrorCompletionStatus?.(view.state)) return false;
+  return codeMirrorNextSnippetField?.(view) ?? false;
 }
 
 function performNormalTab(view: EditorViewType): boolean {

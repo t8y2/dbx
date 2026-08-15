@@ -108,6 +108,7 @@ afterEach(() => {
   backend.startReqs.length = 0;
   Object.keys(backend.handlers).forEach((k) => delete backend.handlers[k]);
   Object.keys(backend.stopFns).forEach((k) => delete backend.stopFns[k]);
+  vi.unstubAllGlobals();
   vi.clearAllMocks();
 });
 
@@ -157,5 +158,35 @@ describe("NatsMessagesPanel — multi-subscription explorer", () => {
     await subscribeTo(host, "orders.>");
     expect(feedChips(host).length).toBe(1);
     expect(backend.startReqs.length).toBe(1);
+  });
+
+  it("batches a busy subscription into one frame before updating its message list", async () => {
+    const frames: FrameRequestCallback[] = [];
+    const requestFrame = vi.fn((callback: FrameRequestCallback) => {
+      frames.push(callback);
+      return frames.length;
+    });
+    vi.stubGlobal("requestAnimationFrame", requestFrame);
+    vi.stubGlobal("cancelAnimationFrame", vi.fn());
+    const host = mount();
+
+    await subscribeTo(host, "orders.>");
+    const subscriptionId = backend.startReqs[0].subscriptionId;
+    for (let sequence = 1; sequence <= 3; sequence += 1) {
+      backend.handlers[subscriptionId].onMessage({
+        connectionId: "conn-1",
+        subscriptionId,
+        sequence,
+        message: { subject: "orders.created", headers: [], payloadBase64: "aGk=", payloadText: "hi", receivedAtMs: sequence, sizeBytes: 2 },
+      });
+    }
+
+    expect(requestFrame).toHaveBeenCalledTimes(1);
+    expect(host.querySelectorAll(".nats-msg-card")).toHaveLength(0);
+    frames[0](0);
+    await nextTick();
+
+    expect(host.querySelectorAll(".nats-msg-card")).toHaveLength(3);
+    expect(host.querySelector(".feed-chip-count")?.textContent).toBe("3");
   });
 });

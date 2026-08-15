@@ -9,7 +9,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import * as api from "@/lib/backend/api";
 import { formatError } from "@/lib/backend/errorUtils";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
-import type { NatsSubscriptionErrorEvent, NatsSubscriptionMessageEvent, NatsSubscriptionStateEvent } from "@/types/nats";
+import type { NatsMessage, NatsSubscriptionErrorEvent, NatsSubscriptionMessageEvent, NatsSubscriptionStateEvent } from "@/types/nats";
 import { FEED_BUFFER_LIMIT, type NatsFeed } from "./feed";
 import NatsSubscriptionRail from "./NatsSubscriptionRail.vue";
 import NatsMessageList from "./NatsMessageList.vue";
@@ -32,6 +32,19 @@ const busy = ref(false);
 const error = ref("");
 
 const listeners = new Map<string, () => void>();
+
+interface PendingFeedMessages {
+  messages: NatsMessage[];
+  start: number;
+  receivedCount: number;
+}
+
+// Native events can arrive much faster than Vue can render cards. Keep only the
+// newest pending messages and commit them together on the next browser frame.
+const pendingMessages = new Map<string, PendingFeedMessages>();
+let messageFlushScheduled = false;
+let messageFlushFrame: number | undefined;
+let messageFlushGeneration = 0;
 
 const activeFeed = computed(() => feeds.value.find((feed) => feed.id === activeFeedId.value));
 const activeMessages = computed(() => activeFeed.value?.messages ?? []);
@@ -59,14 +72,75 @@ function selectFeed(id: string) {
   activeFeedId.value = id;
 }
 
+function flushPendingMessages() {
+  messageFlushScheduled = false;
+  messageFlushFrame = undefined;
+  const batches = [...pendingMessages.entries()];
+  pendingMessages.clear();
+
+  for (const [feedId, pending] of batches) {
+    const feed = feeds.value.find((item) => item.id === feedId);
+    if (!feed) continue;
+    const messages = pending.start ? pending.messages.slice(pending.start) : pending.messages;
+    if (messages.length) feed.messages = [...feed.messages, ...messages].slice(-FEED_BUFFER_LIMIT);
+    feed.receivedCount += pending.receivedCount;
+  }
+}
+
+function scheduleMessageFlush() {
+  if (messageFlushScheduled) return;
+  messageFlushScheduled = true;
+  const generation = messageFlushGeneration;
+  const flush = () => {
+    if (generation !== messageFlushGeneration) return;
+    flushPendingMessages();
+  };
+
+  if (typeof requestAnimationFrame === "function") {
+    messageFlushFrame = requestAnimationFrame(flush);
+  } else {
+    queueMicrotask(flush);
+  }
+}
+
+function queueFeedMessage(feedId: string, message: NatsMessage) {
+  let pending = pendingMessages.get(feedId);
+  if (!pending) {
+    pending = { messages: [], start: 0, receivedCount: 0 };
+    pendingMessages.set(feedId, pending);
+  }
+  pending.messages.push(message);
+  pending.receivedCount += 1;
+
+  // A suspended window may not receive animation frames. Bound the queue until
+  // rendering resumes without losing the newest-message-wins buffer behaviour.
+  if (pending.messages.length - pending.start > FEED_BUFFER_LIMIT) pending.start = pending.messages.length - FEED_BUFFER_LIMIT;
+  if (pending.start >= FEED_BUFFER_LIMIT / 2) {
+    pending.messages = pending.messages.slice(pending.start);
+    pending.start = 0;
+  }
+  scheduleMessageFlush();
+}
+
+function discardPendingMessages(feedId?: string) {
+  if (feedId) {
+    pendingMessages.delete(feedId);
+    return;
+  }
+  pendingMessages.clear();
+  messageFlushGeneration += 1;
+  if (messageFlushFrame !== undefined && typeof cancelAnimationFrame === "function") cancelAnimationFrame(messageFlushFrame);
+  messageFlushFrame = undefined;
+  messageFlushScheduled = false;
+}
+
 async function installFeedListener(feedId: string) {
   const stop = await api.natsListenSubscription(props.connectionId, feedId, {
     onMessage(event: NatsSubscriptionMessageEvent) {
       if (event.connectionId !== props.connectionId || event.subscriptionId !== feedId) return;
       const feed = feeds.value.find((item) => item.id === feedId);
       if (!feed) return;
-      feed.messages = [...feed.messages.slice(-(FEED_BUFFER_LIMIT - 1)), event.message];
-      feed.receivedCount += 1;
+      queueFeedMessage(feedId, event.message);
     },
     onState(event: NatsSubscriptionStateEvent) {
       if (event.connectionId !== props.connectionId || event.subscriptionId !== feedId) return;
@@ -116,6 +190,7 @@ async function subscribe() {
     subject.value = "";
   } catch (e) {
     stopListener(id);
+    discardPendingMessages(id);
     feeds.value = feeds.value.filter((item) => item.id !== id);
     if (activeFeedId.value === id) activeFeedId.value = feeds.value[feeds.value.length - 1]?.id;
     error.value = formatError(e);
@@ -159,6 +234,8 @@ async function capture() {
 async function removeFeed(id: string) {
   const feed = feeds.value.find((item) => item.id === id);
   if (!feed) return;
+  stopListener(id);
+  discardPendingMessages(id);
   if (feed.kind === "live" && feed.state !== "stopped") {
     try {
       await api.natsStopSubscription(props.connectionId, id);
@@ -166,7 +243,6 @@ async function removeFeed(id: string) {
       error.value = formatError(e);
     }
   }
-  stopListener(id);
   feeds.value = feeds.value.filter((item) => item.id !== id);
   if (activeFeedId.value === id) {
     activeFeedId.value = feeds.value[feeds.value.length - 1]?.id;
@@ -176,6 +252,7 @@ async function removeFeed(id: string) {
 function clearActiveMessages() {
   const feed = activeFeed.value;
   if (!feed) return;
+  discardPendingMessages(feed.id);
   feed.messages = [];
   feed.receivedCount = 0;
 }
@@ -187,6 +264,9 @@ function runReceiveAction() {
 
 async function stopAllFeeds() {
   const live = feeds.value.filter((feed) => feed.kind === "live" && feed.state !== "stopped");
+  listeners.forEach((stop) => stop());
+  listeners.clear();
+  discardPendingMessages();
   await Promise.all(
     live.map((feed) =>
       api.natsStopSubscription(props.connectionId, feed.id).catch(() => {
@@ -194,8 +274,6 @@ async function stopAllFeeds() {
       }),
     ),
   );
-  listeners.forEach((stop) => stop());
-  listeners.clear();
   feeds.value = [];
   activeFeedId.value = undefined;
 }

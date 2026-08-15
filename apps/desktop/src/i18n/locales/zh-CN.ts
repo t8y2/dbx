@@ -1957,6 +1957,7 @@ export default withEnglishFallback({
     tipSidebar: "点击左侧表名查看数据",
     tipExecute: "执行查询",
     fileOpened: "已打开 {name}",
+    fileOpenFailed: "打开 {name} 失败：{message}",
     mcpTitle: "AI 编程助手集成",
     mcpDescription: "除了内置 AI 助手，还可以通过 MCP 让 Claude Code、Cursor 等编程助手直接使用这里的数据库连接。",
     mcpLearnMore: "了解更多",

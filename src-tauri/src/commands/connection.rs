@@ -20,6 +20,7 @@ use dbx_core::models::connection::{
     DatabaseConnectionInfo, DatabaseType,
 };
 pub use dbx_core::path_utils::expand_tilde;
+use dbx_core::runtime_config::{release_runtime_config_on_disconnect, should_retain_runtime_config};
 
 const MONGO_LEGACY_DRIVER_PROFILE: &str = "mongodb-legacy";
 const MONGO_LEGACY_DRIVER_LABEL: &str = "MongoDB (Legacy)";
@@ -625,6 +626,70 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// Dropped-file preview connection: in-memory DuckDB, `one_time`, never in the saved list.
+    fn duckdb_preview_config() -> ConnectionConfig {
+        ConnectionConfig {
+            id: "preview-duckdb".to_string(),
+            name: "[Preview] sales.parquet".to_string(),
+            db_type: DatabaseType::DuckDb,
+            driver_profile: Some("duckdb".to_string()),
+            driver_label: Some("DuckDB".to_string()),
+            url_params: Some(String::new()),
+            host: ":memory:".to_string(),
+            port: 0,
+            username: String::new(),
+            password: String::new(),
+            database: None,
+            one_time: true,
+            ..mongodb_config()
+        }
+    }
+
+    #[tokio::test]
+    async fn save_connection_configs_retains_one_time_runtime_config_and_its_pool() {
+        let dir = std::env::temp_dir().join(format!("dbx-tauri-conn-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let state = AppState::new_with_plugin_dir(storage, dir.join("plugins"));
+        let persisted = mongodb_config();
+        let preview = duckdb_preview_config();
+        state.configs.write().await.insert(preview.id.clone(), preview.clone());
+
+        let sync = sync_connection_configs(&state, std::slice::from_ref(&persisted)).await;
+
+        let configs = state.configs.read().await;
+        assert!(configs.contains_key(&persisted.id));
+        assert!(configs.contains_key(&preview.id), "one_time runtime config must survive save sync");
+        // The preview broke because the sync tore its pool down; asserting only that
+        // the config survives would miss the actual regression.
+        assert!(
+            !sync.connection_pool_ids_to_drop.contains(&preview.id),
+            "one_time connection pool must not be torn down by save sync"
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn save_connection_configs_keeps_session_credential_of_one_time_config() {
+        let dir = std::env::temp_dir().join(format!("dbx-tauri-conn-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let state = AppState::new_with_plugin_dir(storage, dir.join("plugins"));
+        let persisted = mongodb_config();
+        let preview = duckdb_preview_config();
+        state.configs.write().await.insert(preview.id.clone(), preview.clone());
+        state.session_credentials.set("", &preview.id, "secret").expect("session credential fixture");
+
+        save_connection_configs(&state, std::slice::from_ref(&persisted)).await.unwrap();
+
+        // If the config is retained the credential must be retained with it, or the
+        // next query re-prompts for a password that was already entered.
+        assert!(state.session_credentials.has("", &preview.id));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[cfg(feature = "mq-admin")]
     #[tokio::test]
     async fn save_connection_configs_removes_deleted_connection_pools() {
@@ -719,7 +784,7 @@ async fn sync_connection_configs(state: &AppState, configs: &[ConnectionConfig])
     let mut connection_pool_ids_to_drop = HashSet::new();
     let mut runtime_configs = state.configs.write().await;
     runtime_configs.retain(|id, existing| {
-        if saved_ids.contains(id.as_str()) || is_transient_runtime_config_id(id) {
+        if saved_ids.contains(id.as_str()) || should_retain_runtime_config(id, existing) {
             true
         } else {
             connection_pool_ids_to_drop.insert(id.clone());
@@ -763,10 +828,6 @@ async fn sync_connection_configs(state: &AppState, configs: &[ConnectionConfig])
         mq_adapter_ids_to_drop: mq_adapter_ids_to_drop.into_iter().collect(),
         connection_pool_ids_to_drop: connection_pool_ids_to_drop.into_iter().collect(),
     }
-}
-
-fn is_transient_runtime_config_id(id: &str) -> bool {
-    id.starts_with("__test_") || id.starts_with("__visible_draft_") || id.starts_with("__visible_schema_draft_")
 }
 
 async fn drop_nacos_adapters_for_connection_ids(state: &AppState, connection_ids: &[String]) {
@@ -1728,9 +1789,7 @@ pub async fn disconnect_db(
     drop_nacos_adapters_for_connection_ids(state.inner(), std::slice::from_ref(&connection_id)).await;
     drop_mq_adapters_for_connection_ids(state.inner(), std::slice::from_ref(&connection_id)).await;
     state.reset_connection_transport(&connection_id).await;
-    if connection_id.starts_with("__visible_draft_") || connection_id.starts_with("__visible_schema_draft_") {
-        state.configs.write().await.remove(&connection_id);
-    }
+    release_runtime_config_on_disconnect(state.inner(), &connection_id).await;
     Ok(())
 }
 

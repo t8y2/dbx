@@ -1992,6 +1992,7 @@ export default withEnglishFallback({
     tipSidebar: "左側のテーブルをクリックしてデータを表示",
     tipExecute: "でクエリを実行",
     fileOpened: "{name} を開きました",
+    fileOpenFailed: "{name} を開けませんでした：{message}",
     mcpTitle: "AIエージェント連携",
     mcpDescription: "内蔵AIアシスタントに加えて、Claude Code、Cursor、その他のコーディングエージェントをMCP経由でデータベースクエリに使用できます。",
     mcpLearnMore: "詳細を見る",

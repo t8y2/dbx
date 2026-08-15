@@ -6,6 +6,9 @@ use axum::http::HeaderMap;
 use axum::Json;
 use dbx_core::connection::{connection_configs_pool_equivalent, AppState, PoolKind};
 use dbx_core::models::connection::{ConnectionConfig, ConnectionTestResult, DatabaseConnectionInfo, DatabaseType};
+use dbx_core::runtime_config::{
+    release_runtime_config_on_disconnect, should_retain_runtime_config, TEST_PROBE_ID_PREFIX,
+};
 use serde::Deserialize;
 
 use crate::auth::session_token_from_headers;
@@ -173,7 +176,7 @@ async fn run_temporary_connection_test(
     config: ConnectionConfig,
     include_database_info: bool,
 ) -> Result<ConnectionTestResult, String> {
-    let temp_id = format!("__test_{}", uuid::Uuid::new_v4());
+    let temp_id = format!("{TEST_PROBE_ID_PREFIX}{}", uuid::Uuid::new_v4());
     app.configs.write().await.insert(temp_id.clone(), config.clone());
 
     let pool_result = app.get_or_create_pool(&temp_id, config.database.as_deref()).await;
@@ -401,9 +404,7 @@ pub async fn disconnect_db(
     #[cfg(feature = "mq-admin")]
     app.mq_registry.drop_connection(&body.connection_id).await;
     app.reset_connection_transport(&body.connection_id).await;
-    if body.connection_id.starts_with("__visible_draft_") || body.connection_id.starts_with("__visible_schema_draft_") {
-        app.configs.write().await.remove(&body.connection_id);
-    }
+    release_runtime_config_on_disconnect(app, &body.connection_id).await;
 
     Ok(Json(()))
 }
@@ -560,7 +561,7 @@ async fn sync_connection_configs(state: &WebState, configs: &[ConnectionConfig])
     let mut connection_pool_ids_to_drop = HashSet::new();
     let mut runtime_configs = state.app.configs.write().await;
     runtime_configs.retain(|id, existing| {
-        if saved_ids.contains(id.as_str()) || is_transient_runtime_config_id(id) {
+        if saved_ids.contains(id.as_str()) || should_retain_runtime_config(id, existing) {
             true
         } else {
             connection_pool_ids_to_drop.insert(id.clone());
@@ -604,10 +605,6 @@ async fn sync_connection_configs(state: &WebState, configs: &[ConnectionConfig])
         mq_adapter_ids_to_drop: mq_adapter_ids_to_drop.into_iter().collect(),
         connection_pool_ids_to_drop: connection_pool_ids_to_drop.into_iter().collect(),
     }
-}
-
-fn is_transient_runtime_config_id(id: &str) -> bool {
-    id.starts_with("__test_") || id.starts_with("__visible_draft_") || id.starts_with("__visible_schema_draft_")
 }
 
 async fn drop_nacos_adapters_for_connection_ids(state: &WebState, connection_ids: &[String]) {
@@ -1677,6 +1674,51 @@ mod tests {
 
         let configs = state.app.configs.read().await;
         assert!(!configs.contains_key(draft_id));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn sync_connection_configs_retains_one_time_runtime_config_and_its_pool() {
+        let (state, dir) = test_web_state().await;
+        let mut one_time = sqlite_config("preview-file", &dir.join("preview.db").to_string_lossy());
+        one_time.one_time = true;
+        state.app.configs.write().await.insert(one_time.id.clone(), one_time.clone());
+
+        // Any other browser tab saving any connection syncs a list that excludes
+        // one-time connections.
+        let sync = sync_connection_configs(&state, &[]).await;
+
+        assert!(state.app.configs.read().await.contains_key(&one_time.id));
+        assert!(
+            !sync.connection_pool_ids_to_drop.contains(&one_time.id),
+            "one_time connection pool must not be torn down by save sync"
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn disconnect_db_removes_one_time_config_and_its_session_credential() {
+        let (state, dir) = test_web_state().await;
+        let mut one_time = sqlite_config("preview-file", &dir.join("preview.db").to_string_lossy());
+        one_time.one_time = true;
+        one_time.save_password = false;
+        state.app.configs.write().await.insert(one_time.id.clone(), one_time.clone());
+        let _ = state.app.session_credentials.set("token-a", &one_time.id, "owner-a-secret");
+
+        let result = disconnect_db(
+            State(state.clone()),
+            Json(DisconnectRequest { connection_id: one_time.id.clone(), client_attempt: None }),
+        )
+        .await;
+        assert!(result.is_ok());
+
+        assert!(!state.app.configs.read().await.contains_key(&one_time.id));
+        assert!(
+            !state.app.session_credentials.has("token-a", &one_time.id),
+            "the plaintext session password must be cleared along with the config"
+        );
 
         let _ = std::fs::remove_dir_all(dir);
     }

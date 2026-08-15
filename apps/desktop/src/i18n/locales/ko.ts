@@ -1894,6 +1894,7 @@ export default withEnglishFallback({
     tipSidebar: "데이터를 보려면 왼쪽의 테이블을 클릭하세요",
     tipExecute: "쿼리를 실행하려면",
     fileOpened: "{name}을(를) 열었습니다",
+    fileOpenFailed: "{name}을(를) 열지 못했습니다: {message}",
     mcpTitle: "AI 에이전트 연동",
     mcpDescription: "내장된 AI 어시스턴트 외에도 Claude Code, Cursor 등의 코딩 에이전트를 MCP로 연결하여 데이터베이스를 쿼리할 수 있습니다.",
     mcpLearnMore: "더 알아보기",

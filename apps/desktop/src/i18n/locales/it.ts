@@ -1965,6 +1965,7 @@ export default withEnglishFallback({
     tipSidebar: "Fai clic su una tabella a sinistra per visualizzarne i dati",
     tipExecute: "per eseguire la query",
     fileOpened: "Aperto {name}",
+    fileOpenFailed: "Impossibile aprire {name}: {message}",
     mcpTitle: "Integrazione Agente AI",
     mcpDescription: "Oltre all'assistente AI integrato, puoi utilizzare Claude Code, Cursor e altri agenti di sviluppo per interrogare i tuoi database tramite MCP.",
     mcpLearnMore: "Scopri di più",

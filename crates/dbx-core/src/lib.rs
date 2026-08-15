@@ -70,6 +70,7 @@ pub mod query_result_export;
 pub mod query_result_sql;
 pub mod redis_ops;
 pub mod risk_metrics;
+pub mod runtime_config;
 pub mod saved_sql;
 pub mod schema;
 pub mod schema_diff;

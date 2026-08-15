@@ -1967,6 +1967,7 @@ export default withEnglishFallback({
     tipSidebar: "Haz clic en una tabla a la izquierda para ver los datos",
     tipExecute: "para ejecutar la consulta",
     fileOpened: "Abierto {name}",
+    fileOpenFailed: "No se pudo abrir {name}: {message}",
     mcpTitle: "Integración con agentes de IA",
     mcpDescription: "Además del asistente de IA integrado, puedes usar Claude Code, Cursor y otros agentes de programación para consultar tus bases de datos mediante MCP.",
     mcpLearnMore: "Más información",

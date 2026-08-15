@@ -2354,7 +2354,7 @@ impl AppState {
                 // Temporary "__test_*" probes must not retain agents in the registry.
                 // reconnect fast-path caching only applies to durable connection ids;
                 // drain_connection_pools no longer drops MQ adapters (reconnect reuse).
-                if connection_id.starts_with("__test_") {
+                if connection_id.starts_with(crate::runtime_config::TEST_PROBE_ID_PREFIX) {
                     let adapter = self.mq_registry.build_transient_config(mqc, agent_launch).await?;
                     adapter.test_connection().await?;
                     if let Err(err) = self.ensure_current_connection_attempt(connection_id, connection_attempt).await {

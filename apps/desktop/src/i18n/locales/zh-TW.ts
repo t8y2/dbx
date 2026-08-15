@@ -1966,6 +1966,7 @@ export default withEnglishFallback({
     tipSidebar: "點選左側資料表以檢視資料",
     tipExecute: "執行查詢",
     fileOpened: "已開啟 {name}",
+    fileOpenFailed: "開啟 {name} 失敗：{message}",
     mcpTitle: "AI 程式設計助理整合",
     mcpDescription: "除了內建 AI 助理，也可以藉由 MCP 讓 Claude Code、Cursor 等程式設計助理查詢你的資料庫。",
     mcpLearnMore: "了解更多",

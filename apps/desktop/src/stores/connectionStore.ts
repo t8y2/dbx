@@ -711,6 +711,44 @@ export const useConnectionStore = defineStore("connection", () => {
     return trackDisconnectRequest(connectionId, request, clientAttempt != null);
   }
 
+  /**
+   * One-time connections are never persisted, so the backend's "not in the saved
+   * list, so reclaim it" branch in `sync_connection_configs` never fires for them
+   * (see dbx-core `should_retain_runtime_config`) and `disconnect_db` is the only
+   * reclaim point. Removing one must disconnect it explicitly, or its runtime
+   * config, pool, and tunnel live until the process exits.
+   *
+   * `clientAttempt` is deliberately omitted: removal is terminal, so a superseded
+   * attempt number must not skip the cleanup.
+   */
+  function releaseOneTimeRuntimeConnections(connectionIds: string[]) {
+    for (const connectionId of connectionIds) {
+      let request: Promise<void>;
+      try {
+        request = api.disconnectDb(connectionId);
+      } catch (error) {
+        request = Promise.reject(error);
+      }
+      void trackDisconnectRequest(connectionId, request, false).catch(() => {});
+    }
+  }
+
+  /**
+   * A one-time connection is deleted outright rather than left behind for a
+   * reconnect, so its tabs have nothing to point at once it is gone: executing in
+   * one would fail with "Connection config not found". Close them regardless of
+   * `disconnectTabHandlingMode`, which only makes sense for connections that can
+   * still be reconnected.
+   */
+  async function closeOneTimeConnectionTabs(connectionIds: string[]) {
+    if (!connectionIds.length) return;
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const queryStore = useQueryStore();
+    for (const connectionId of connectionIds) {
+      queryStore.closeConnectionTabs(connectionId);
+    }
+  }
+
   function cancelDisconnectKey(connectionId: string, attempt: number): string {
     return `${connectionId}:${attempt}`;
   }
@@ -2700,8 +2738,11 @@ export const useConnectionStore = defineStore("connection", () => {
     if (!connectionIds.length) return;
 
     const removedIds = new Set(connectionIds);
+    const oneTimeIds = connectionIds.filter((id) => getConfig(id)?.one_time === true);
     const nextConnections = connections.value.filter((c) => !removedIds.has(c.id));
     await persistConnections(nextConnections);
+    await closeOneTimeConnectionTabs(oneTimeIds);
+    releaseOneTimeRuntimeConnections(oneTimeIds);
     await persistTimeoutInheritanceIds(
       settingsStore.editorSettings.connectTimeoutInheritConnectionIds.filter((id) => !removedIds.has(id)),
       settingsStore.editorSettings.queryTimeoutInheritConnectionIds.filter((id) => !removedIds.has(id)),

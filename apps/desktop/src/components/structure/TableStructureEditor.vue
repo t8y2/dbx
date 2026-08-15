@@ -97,9 +97,6 @@ const indexesScrollerRef = ref<StructureScrollerRef>();
 const foreignKeysScrollerRef = ref<StructureScrollerRef>();
 const triggersScrollerRef = ref<StructureScrollerRef>();
 const ddlScrollerRef = ref<StructureScrollerRef>();
-const structureHorizontalScrollbarTrackRef = ref<HTMLDivElement>();
-const structureHorizontalScrollbarThumbRef = ref<HTMLDivElement>();
-const hasStructureHorizontalOverflow = ref(false);
 const dynamicDataTypeOptionsCache = new Map<string, string[]>();
 
 const sqlHighlighter = ref<SqlHighlighter>();
@@ -863,15 +860,6 @@ let syncingDraft = false;
 let draftHydrated = false;
 let hydratingRestoredDraft = false;
 let structureScrollFrame = 0;
-let structureHorizontalScrollbarThumbLeftPercent = 0;
-let structureHorizontalScrollbarThumbWidthPercent = 100;
-let structureHorizontalScrollbarResizeObserver: ResizeObserver | null = null;
-let structureHorizontalScrollbarDragState: {
-  scroller: HTMLElement;
-  trackRect: DOMRect;
-  thumbOffsetPx: number;
-  maxScrollLeft: number;
-} | null = null;
 // A context-menu target may arrive before metadata rows render, so search text
 // and row scrolling are tracked separately for each request.
 let appliedInitialTargetSearchKey = "";
@@ -898,99 +886,6 @@ function structureScrollerForTab(tab: TableInfoTab): HTMLElement | undefined {
   return undefined;
 }
 
-function activeStructureHorizontalScroller(): HTMLElement | undefined {
-  if (activeTab.value !== "columns" && activeTab.value !== "indexes") return undefined;
-  return structureScrollerForTab(activeTab.value);
-}
-
-function applyStructureHorizontalScrollbarThumbStyle(): boolean {
-  const thumb = structureHorizontalScrollbarThumbRef.value;
-  if (!thumb) return false;
-  thumb.style.width = `${structureHorizontalScrollbarThumbWidthPercent}%`;
-  thumb.style.left = `${structureHorizontalScrollbarThumbLeftPercent}%`;
-  return true;
-}
-
-function updateStructureHorizontalScrollbar(scroller = activeStructureHorizontalScroller()) {
-  if (!scroller) {
-    hasStructureHorizontalOverflow.value = false;
-    return;
-  }
-  const maxScrollLeft = Math.max(0, scroller.scrollWidth - scroller.clientWidth);
-  const hasOverflow = maxScrollLeft > 1;
-  hasStructureHorizontalOverflow.value = hasOverflow;
-  const thumbWidth = scroller.scrollWidth > 0 ? Math.min(100, Math.max(6, (scroller.clientWidth / scroller.scrollWidth) * 100)) : 100;
-  structureHorizontalScrollbarThumbWidthPercent = thumbWidth;
-  structureHorizontalScrollbarThumbLeftPercent = maxScrollLeft > 0 ? (scroller.scrollLeft / maxScrollLeft) * Math.max(0, 100 - thumbWidth) : 0;
-  if (!applyStructureHorizontalScrollbarThumbStyle() && hasOverflow) void nextTick(applyStructureHorizontalScrollbarThumbStyle);
-}
-
-function observeStructureHorizontalScroller() {
-  structureHorizontalScrollbarResizeObserver?.disconnect();
-  structureHorizontalScrollbarResizeObserver = null;
-  const tab = activeTab.value;
-  void nextTick(() => {
-    if (tab !== activeTab.value) return;
-    const scroller = activeStructureHorizontalScroller();
-    updateStructureHorizontalScrollbar(scroller);
-    if (!scroller || typeof ResizeObserver === "undefined") return;
-    structureHorizontalScrollbarResizeObserver = new ResizeObserver(() => updateStructureHorizontalScrollbar(scroller));
-    structureHorizontalScrollbarResizeObserver.observe(scroller);
-    for (const child of Array.from(scroller.children)) structureHorizontalScrollbarResizeObserver.observe(child);
-  });
-}
-
-function applyStructureHorizontalScrollbarDrag(clientX: number) {
-  const dragState = structureHorizontalScrollbarDragState;
-  if (!dragState) return;
-  const thumbWidthPx = dragState.trackRect.width * (structureHorizontalScrollbarThumbWidthPercent / 100);
-  const maxThumbLeftPx = Math.max(1, dragState.trackRect.width - thumbWidthPx);
-  const thumbLeftPx = Math.min(maxThumbLeftPx, Math.max(0, clientX - dragState.trackRect.left - dragState.thumbOffsetPx));
-  dragState.scroller.scrollLeft = (thumbLeftPx / maxThumbLeftPx) * dragState.maxScrollLeft;
-  updateStructureHorizontalScrollbar(dragState.scroller);
-}
-
-function onStructureHorizontalScrollbarPointerMove(event: PointerEvent) {
-  if (!structureHorizontalScrollbarDragState) return;
-  event.preventDefault();
-  applyStructureHorizontalScrollbarDrag(event.clientX);
-}
-
-function stopStructureHorizontalScrollbarDrag() {
-  if (!structureHorizontalScrollbarDragState) return;
-  structureHorizontalScrollbarDragState = null;
-  structureHorizontalScrollbarTrackRef.value?.classList.remove("structure-horizontal-scrollbar--dragging");
-  window.removeEventListener("pointermove", onStructureHorizontalScrollbarPointerMove, true);
-  window.removeEventListener("pointerup", stopStructureHorizontalScrollbarDrag, true);
-  window.removeEventListener("pointercancel", stopStructureHorizontalScrollbarDrag, true);
-  document.body.style.userSelect = "";
-}
-
-function startStructureHorizontalScrollbarDrag(event: PointerEvent) {
-  const scroller = activeStructureHorizontalScroller();
-  const track = structureHorizontalScrollbarTrackRef.value;
-  if (!scroller || !track || !hasStructureHorizontalOverflow.value) return;
-  const maxScrollLeft = Math.max(0, scroller.scrollWidth - scroller.clientWidth);
-  if (maxScrollLeft <= 1) return;
-  const trackRect = track.getBoundingClientRect();
-  const thumbLeftPx = trackRect.width * (structureHorizontalScrollbarThumbLeftPercent / 100);
-  const thumbWidthPx = trackRect.width * (structureHorizontalScrollbarThumbWidthPercent / 100);
-  const pointerX = event.clientX - trackRect.left;
-  structureHorizontalScrollbarDragState = {
-    scroller,
-    trackRect,
-    thumbOffsetPx: pointerX >= thumbLeftPx && pointerX <= thumbLeftPx + thumbWidthPx ? pointerX - thumbLeftPx : thumbWidthPx / 2,
-    maxScrollLeft,
-  };
-  track.classList.add("structure-horizontal-scrollbar--dragging");
-  document.body.style.userSelect = "none";
-  window.addEventListener("pointermove", onStructureHorizontalScrollbarPointerMove, true);
-  window.addEventListener("pointerup", stopStructureHorizontalScrollbarDrag, true);
-  window.addEventListener("pointercancel", stopStructureHorizontalScrollbarDrag, true);
-  event.preventDefault();
-  applyStructureHorizontalScrollbarDrag(event.clientX);
-}
-
 function restoreStructureScrollPosition(tab = activeTab.value) {
   const position = structureScrollPositions.value[tab];
   if (!position) return;
@@ -999,14 +894,12 @@ function restoreStructureScrollPosition(tab = activeTab.value) {
     if (!scroller) return;
     scroller.scrollTop = Math.max(0, position.scrollTop);
     scroller.scrollLeft = Math.max(0, position.scrollLeft);
-    if (tab === "columns" || tab === "indexes") updateStructureHorizontalScrollbar(scroller);
   });
 }
 
 function onStructureContentScroll(tab: TableInfoTab, event: Event) {
   const target = event.currentTarget;
   if (!(target instanceof HTMLElement)) return;
-  if (tab === "columns" || tab === "indexes") updateStructureHorizontalScrollbar(target);
   const position: TableStructureEditorViewport = {
     scrollTop: Math.max(0, Math.round(target.scrollTop)),
     scrollLeft: Math.max(0, Math.round(target.scrollLeft)),
@@ -2552,7 +2445,6 @@ onMounted(() => {
     applyInitialStructureTarget();
   }
   structureEditorReady = true;
-  observeStructureHorizontalScroller();
   if (props.draft?.initialized) {
     void hydrateRestoredDraftFromDatabase().then(() => {
       applyInitialStructureTarget();
@@ -2569,7 +2461,6 @@ onMounted(() => {
 
 onActivated(() => {
   registerStructureEditorShortcuts();
-  observeStructureHorizontalScroller();
   void loadDynamicDataTypeOptions();
   if (props.draft?.initialized && !draftHydrated) {
     restoreDraft(props.draft);
@@ -2581,16 +2472,9 @@ onActivated(() => {
   }
   restoreStructureScrollPosition();
 });
-onDeactivated(() => {
-  unregisterStructureEditorShortcuts();
-  structureHorizontalScrollbarResizeObserver?.disconnect();
-  structureHorizontalScrollbarResizeObserver = null;
-  stopStructureHorizontalScrollbarDrag();
-});
+onDeactivated(unregisterStructureEditorShortcuts);
 onBeforeUnmount(() => {
   stopColumnDragTracking();
-  stopStructureHorizontalScrollbarDrag();
-  structureHorizontalScrollbarResizeObserver?.disconnect();
   unregisterStructureEditorShortcuts();
   clearSqlPreviewState();
   if (columnHighlightTimer) window.clearTimeout(columnHighlightTimer);
@@ -2683,15 +2567,12 @@ watch(
 );
 
 watch(activeTab, () => {
-  stopStructureHorizontalScrollbarDrag();
   selectedColumnId.value = null;
   highlightedColumnId.value = null;
   highlightedIndexId.value = null;
   restoreStructureScrollPosition();
   syncDraftToParent();
 });
-
-watch([activeTab, loading, indexesLoading, visibleColWidths, indexColWidths], observeStructureHorizontalScroller, { deep: true, flush: "post", immediate: true });
 
 watch(
   columns,
@@ -2892,7 +2773,7 @@ watch([activeTab, ddlLoading], ([tab, loading]) => {
             </div>
           </div>
 
-          <TabsContent ref="columnsScrollerRef" v-if="tableMetadataCapabilities.columns" value="columns" class="structure-table-scroller m-0 min-h-0 flex-1 overflow-auto p-0" @scroll.passive="onStructureContentScroll('columns', $event)">
+          <TabsContent ref="columnsScrollerRef" v-if="tableMetadataCapabilities.columns" value="columns" class="m-0 min-h-0 flex-1 overflow-auto p-0" @scroll.passive="onStructureContentScroll('columns', $event)">
             <table class="structure-edit-grid border-separate border-spacing-0 text-[length:var(--structure-font-size)] leading-[var(--structure-line-height)]" :style="{ minWidth: visibleColWidths.reduce((a, w) => a + w, 0) + 'px' }">
               <thead class="sticky top-0 z-10 bg-background">
                 <tr>
@@ -3267,7 +3148,7 @@ watch([activeTab, ddlLoading], ([tab, loading]) => {
             </table>
           </TabsContent>
 
-          <TabsContent ref="indexesScrollerRef" v-if="tableMetadataCapabilities.indexes" value="indexes" class="structure-table-scroller m-0 min-h-0 flex-1 overflow-auto p-0" @scroll.passive="onStructureContentScroll('indexes', $event)">
+          <TabsContent ref="indexesScrollerRef" v-if="tableMetadataCapabilities.indexes" value="indexes" class="m-0 min-h-0 flex-1 overflow-auto p-0" @scroll.passive="onStructureContentScroll('indexes', $event)">
             <div v-if="indexesLoading" class="flex items-center justify-center gap-2 py-10 text-muted-foreground">
               <Loader2 class="h-4 w-4 animate-spin" />
               {{ t("common.loading") }}
@@ -3370,10 +3251,6 @@ watch([activeTab, ddlLoading], ([tab, loading]) => {
               </tbody>
             </table>
           </TabsContent>
-
-          <div v-if="hasStructureHorizontalOverflow && (activeTab === 'columns' || activeTab === 'indexes')" ref="structureHorizontalScrollbarTrackRef" class="structure-horizontal-scrollbar" @pointerdown="startStructureHorizontalScrollbarDrag">
-            <div ref="structureHorizontalScrollbarThumbRef" class="structure-horizontal-scrollbar__thumb" />
-          </div>
 
           <TabsContent ref="foreignKeysScrollerRef" v-if="tableMetadataCapabilities.foreignKeys" value="foreignKeys" class="m-0 min-h-0 flex-1 overflow-auto p-[var(--structure-cell-px)]" @scroll.passive="onStructureContentScroll('foreignKeys', $event)">
             <div v-if="foreignKeysLoading" class="flex items-center justify-center gap-2 py-10 text-muted-foreground">
@@ -3559,40 +3436,6 @@ watch([activeTab, ddlLoading], ([tab, loading]) => {
 </template>
 
 <style scoped>
-.structure-table-scroller::-webkit-scrollbar {
-  width: 8px;
-  height: 0;
-}
-
-.structure-horizontal-scrollbar {
-  position: relative;
-  height: 10px;
-  flex-shrink: 0;
-  cursor: pointer;
-  touch-action: none;
-  background: var(--background);
-}
-
-.structure-horizontal-scrollbar__thumb {
-  position: absolute;
-  top: 3px;
-  height: 4px;
-  min-width: 24px;
-  border-radius: 999px;
-  background: color-mix(in oklab, var(--foreground) 30%, transparent);
-  transition:
-    top 120ms ease,
-    height 120ms ease,
-    background-color 120ms ease;
-}
-
-.structure-horizontal-scrollbar:hover .structure-horizontal-scrollbar__thumb,
-.structure-horizontal-scrollbar--dragging .structure-horizontal-scrollbar__thumb {
-  top: 2px;
-  height: 6px;
-  background: color-mix(in oklab, var(--foreground) 48%, transparent);
-}
-
 /* Editable values behave like grid cells, not a row of independent pill controls. */
 .structure-edit-grid :deep(.structure-grid-control) {
   border-color: transparent;

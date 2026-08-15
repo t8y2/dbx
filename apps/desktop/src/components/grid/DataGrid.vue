@@ -199,7 +199,17 @@ import {
   type DataGridColumnSortState,
 } from "@/lib/dataGrid/dataGridContextMenu";
 import { buildColumnForeignKeyMap, combineForeignKeyConditions, foreignKeyAssociationCells, foreignKeyMetadataRequestCurrent, foreignKeyNavigationTarget, foreignKeySourceColumnName, foreignKeyTableIdentity, type ForeignKeyAssociation } from "@/lib/dataGrid/dataGridForeignKeyNavigation";
-import { collectForeignKeyDisplayValues, foreignKeyDisplayConfigMatches, foreignKeyDisplayMapFromResult, formatForeignKeyDisplayValue, singleColumnForeignKey, splitForeignKeyDisplayValues, type ForeignKeyDisplayConfig } from "@/lib/dataGrid/dataGridForeignKeyDisplay";
+import {
+  collectForeignKeyDisplayValues,
+  createForeignKeyDisplayRequestCoordinator,
+  foreignKeyDisplayConfigMatches,
+  foreignKeyDisplayLookupRequestKey,
+  foreignKeyDisplayMapFromResult,
+  formatForeignKeyDisplayValue,
+  singleColumnForeignKey,
+  splitForeignKeyDisplayValues,
+  type ForeignKeyDisplayConfig,
+} from "@/lib/dataGrid/dataGridForeignKeyDisplay";
 
 import { useToast } from "@/composables/useToast";
 import { translateBackendError } from "@/i18n/backend-errors";
@@ -881,7 +891,7 @@ const formatterForeignKeyColumnsLoading = ref(false);
 const formatterForeignKeyColumnsError = ref("");
 let formatterForeignKeyColumnsRequest = 0;
 const foreignKeyDisplayLabels = shallowRef(new Map<number, Map<string, string>>());
-let foreignKeyDisplayRequestGeneration = 0;
+const foreignKeyDisplayRequests = createForeignKeyDisplayRequestCoordinator();
 
 const savedCustomFormatters = computed(() => {
   return Object.values(settingsStore.editorSettings.customColumnFormatters).sort((a, b) => a.name.localeCompare(b.name));
@@ -6506,6 +6516,7 @@ onMounted(() => {
 onDeactivated(pauseCanvasGridWork);
 onUnmounted(() => {
   dataGridRuntimeScope.dispose();
+  foreignKeyDisplayRequests.dispose();
   clearCellFormatCache();
   pauseCanvasGridWork();
   canvasRuntime.dispose();
@@ -9376,7 +9387,7 @@ function savedForeignKeyDisplayConfig(columnIndex: number): ForeignKeyDisplayCon
 }
 
 async function loadForeignKeyDisplayLabels() {
-  const requestGeneration = ++foreignKeyDisplayRequestGeneration;
+  const requestGeneration = foreignKeyDisplayRequests.beginGeneration();
   foreignKeyDisplayLabels.value = new Map();
   clearCellFormatCache();
   scheduleCanvasDraw();
@@ -9391,10 +9402,14 @@ async function loadForeignKeyDisplayLabels() {
       if (!values.length) return;
       const schema = config.refSchema || props.tableMeta?.schema || props.schema || props.database || "";
       try {
-        const columns = await api.getColumns(props.connectionId!, props.database || "", schema, config.refTable, props.tableMeta?.catalog);
+        const columns = await foreignKeyDisplayRequests.request(requestGeneration, JSON.stringify(["columns", props.connectionId, props.database || "", props.tableMeta?.catalog || "", schema, config.refTable]), () =>
+          api.getColumns(props.connectionId!, props.database || "", schema, config.refTable, props.tableMeta?.catalog),
+        );
+        if (!columns || !foreignKeyDisplayRequests.isCurrent(requestGeneration)) return;
         const refColumnInfo = columns.find((column) => column.name.toLowerCase() === config.refColumn.toLowerCase());
         const labels = new Map<string, string>();
         for (const batch of splitForeignKeyDisplayValues(values)) {
+          if (!foreignKeyDisplayRequests.isCurrent(requestGeneration)) return;
           const whereInput = await buildColumnValuesFilterCondition({
             databaseType: resolvedDatabaseType.value,
             identifierQuote: connectionStore.connectionIdentifierQuote?.(props.connectionId),
@@ -9415,19 +9430,33 @@ async function loadForeignKeyDisplayLabels() {
             whereInput,
             limit: batch.length,
           });
-          const result = await api.executeQuery(props.connectionId!, props.executionDatabase ?? props.database ?? "", sql, schema, undefined, {
-            maxRows: batch.length,
-            fetchSize: batch.length,
-            pageSize: batch.length,
+          if (!foreignKeyDisplayRequests.isCurrent(requestGeneration)) return;
+          const requestKey = foreignKeyDisplayLookupRequestKey({
+            connectionId: props.connectionId!,
+            database: props.executionDatabase ?? props.database ?? "",
+            catalog: props.tableMeta?.catalog,
+            schema,
+            table: config.refTable,
+            refColumn: config.refColumn,
+            displayColumn: config.displayColumn,
+            values: batch,
           });
+          const result = await foreignKeyDisplayRequests.request(requestGeneration, requestKey, () =>
+            api.executeQuery(props.connectionId!, props.executionDatabase ?? props.database ?? "", sql, schema, undefined, {
+              maxRows: batch.length,
+              fetchSize: batch.length,
+              pageSize: batch.length,
+            }),
+          );
+          if (!result || !foreignKeyDisplayRequests.isCurrent(requestGeneration)) return;
           for (const [key, label] of foreignKeyDisplayMapFromResult(result, config.refColumn, config.displayColumn)) if (!labels.has(key)) labels.set(key, label);
         }
-        if (requestGeneration !== foreignKeyDisplayRequestGeneration) return;
+        if (!foreignKeyDisplayRequests.isCurrent(requestGeneration)) return;
         const next = new Map(foreignKeyDisplayLabels.value);
         next.set(columnIndex, labels);
         foreignKeyDisplayLabels.value = next;
       } catch (error: any) {
-        if (requestGeneration !== foreignKeyDisplayRequestGeneration) return;
+        if (!foreignKeyDisplayRequests.isCurrent(requestGeneration)) return;
         appendDebugLog("warn", "[DBX][DataGrid:foreign-key-display:error]", {
           column: props.result.columns[columnIndex],
           message: String(error?.message || error),
@@ -9435,7 +9464,7 @@ async function loadForeignKeyDisplayLabels() {
       }
     }),
   );
-  if (requestGeneration !== foreignKeyDisplayRequestGeneration) return;
+  if (!foreignKeyDisplayRequests.isCurrent(requestGeneration)) return;
   clearCellFormatCache();
   scheduleCanvasDraw();
 }

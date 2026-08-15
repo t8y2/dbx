@@ -112,11 +112,12 @@ impl Default for DataGridSqlExtractorOptions {
 #[serde(rename_all = "camelCase", default, deny_unknown_fields)]
 pub struct DataGridJsonExtractorOptions {
     pub pretty: bool,
+    pub camel_case_field_names: bool,
 }
 
 impl Default for DataGridJsonExtractorOptions {
     fn default() -> Self {
-        Self { pretty: DEFAULT_JSON_PRETTY }
+        Self { pretty: DEFAULT_JSON_PRETTY, camel_case_field_names: false }
     }
 }
 

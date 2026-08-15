@@ -10,6 +10,7 @@ const mocks = vi.hoisted(() => ({
   activeTabId: null as string | null,
   cachedMetadata: undefined as unknown,
   dataTabReuseMode: "same-table" as DataTabReuseMode,
+  openDataTabsNextToActive: false,
   ensureConnected: vi.fn(),
   executeTabSql: vi.fn(),
   loadTableMetadata: vi.fn(),
@@ -32,7 +33,7 @@ vi.mock("@/stores/queryStore", () => ({
     get activeTabId() {
       return mocks.activeTabId;
     },
-    createTab: (connectionId: string, database: string, title: string, mode: QueryTab["mode"], schema?: string, _initialSql?: string, catalog?: string, options: { forceNew?: boolean } = {}) => {
+    createTab: (connectionId: string, database: string, title: string, mode: QueryTab["mode"], schema?: string, _initialSql?: string, catalog?: string, options: { forceNew?: boolean; insertAfterActive?: boolean } = {}) => {
       if (!options.forceNew) {
         const existing = mocks.tabs.find((tab) => tab.connectionId === connectionId && tab.database === database && tab.title === title && tab.mode === mode && (tab.schema || "") === (schema || "") && (tab.catalog || "") === (catalog || ""));
         if (existing) {
@@ -54,7 +55,9 @@ vi.mock("@/stores/queryStore", () => ({
         isCancelling: false,
         isExplaining: false,
       } as QueryTab;
-      mocks.tabs.push(tab);
+      const activeIndex = options.insertAfterActive ? mocks.tabs.findIndex((item) => item.id === mocks.activeTabId) : -1;
+      if (activeIndex >= 0) mocks.tabs.splice(activeIndex + 1, 0, tab);
+      else mocks.tabs.push(tab);
       mocks.activeTabId = tab.id;
       return tab.id;
     },
@@ -87,7 +90,7 @@ vi.mock("@/stores/queryStore", () => ({
 }));
 
 vi.mock("@/stores/settingsStore", () => ({
-  useSettingsStore: () => ({ editorSettings: { dataTabReuseMode: mocks.dataTabReuseMode, pageSize: 100 } }),
+  useSettingsStore: () => ({ editorSettings: { dataTabReuseMode: mocks.dataTabReuseMode, openDataTabsNextToActive: mocks.openDataTabsNextToActive, pageSize: 100 } }),
 }));
 
 vi.mock("@/lib/database/jdbcDialect", () => ({
@@ -141,6 +144,7 @@ describe("useSidebarDataOpenRuntime", () => {
     mocks.activeTabId = null;
     mocks.cachedMetadata = undefined;
     mocks.dataTabReuseMode = "same-table";
+    mocks.openDataTabsNextToActive = false;
     mocks.ensureConnected.mockResolvedValue(undefined);
     mocks.buildTableSelectSql.mockResolvedValue("SELECT * FROM users");
     mocks.executeTabSql.mockImplementation(async () => {
@@ -174,7 +178,24 @@ describe("useSidebarDataOpenRuntime", () => {
     expect(mocks.tabs).toHaveLength(2);
   });
 
+  it("keeps adjacent placement for every tab created in always-new mode", async () => {
+    mocks.dataTabReuseMode = "always-new";
+    mocks.openDataTabsNextToActive = true;
+    mocks.tabs.push(
+      { id: "query-1", connectionId: "connection-1", database: "app", title: "Query 1", mode: "query", sql: "", isExecuting: false, isCancelling: false, isExplaining: false } as QueryTab,
+      { id: "query-2", connectionId: "connection-1", database: "app", title: "Query 2", mode: "query", sql: "", isExecuting: false, isCancelling: false, isExplaining: false } as QueryTab,
+    );
+    mocks.activeTabId = "query-1";
+
+    await useSidebarDataOpenRuntime().openData(tableNode);
+    await useSidebarDataOpenRuntime().openData(tableNode);
+
+    expect(mocks.tabs.map((tab) => tab.title)).toEqual(["Query 1", "users", "users", "Query 2"]);
+  });
+
   it("reuses a sidebar tab for the same table in same-table mode", async () => {
+    mocks.openDataTabsNextToActive = true;
+
     await useSidebarDataOpenRuntime().openData(tableNode);
     await useSidebarDataOpenRuntime().openData(tableNode);
 
@@ -191,8 +212,34 @@ describe("useSidebarDataOpenRuntime", () => {
     expect(mocks.tabs.map((tab) => tab.title)).toEqual(["users", "orders"]);
   });
 
+  it("opens a new table data tab next to the active tab when enabled", async () => {
+    mocks.openDataTabsNextToActive = true;
+    mocks.tabs.push(
+      { id: "query-1", connectionId: "connection-1", database: "app", title: "Query 1", mode: "query", sql: "", isExecuting: false, isCancelling: false, isExplaining: false } as QueryTab,
+      { id: "query-2", connectionId: "connection-1", database: "app", title: "Query 2", mode: "query", sql: "", isExecuting: false, isCancelling: false, isExplaining: false } as QueryTab,
+    );
+    mocks.activeTabId = "query-1";
+
+    await useSidebarDataOpenRuntime().openData(tableNode);
+
+    expect(mocks.tabs.map((tab) => tab.title)).toEqual(["Query 1", "users", "Query 2"]);
+  });
+
+  it("keeps appending new table data tabs when adjacent opening is disabled", async () => {
+    mocks.tabs.push(
+      { id: "query-1", connectionId: "connection-1", database: "app", title: "Query 1", mode: "query", sql: "", isExecuting: false, isCancelling: false, isExplaining: false } as QueryTab,
+      { id: "query-2", connectionId: "connection-1", database: "app", title: "Query 2", mode: "query", sql: "", isExecuting: false, isCancelling: false, isExplaining: false } as QueryTab,
+    );
+    mocks.activeTabId = "query-1";
+
+    await useSidebarDataOpenRuntime().openData(tableNode);
+
+    expect(mocks.tabs.map((tab) => tab.title)).toEqual(["Query 1", "Query 2", "users"]);
+  });
+
   it("reuses the active safe data tab for a different table in active-tab mode", async () => {
     mocks.dataTabReuseMode = "active-tab";
+    mocks.openDataTabsNextToActive = true;
     const ordersNode = { ...tableNode, id: "table-orders", label: "orders" };
     mocks.loadTableMetadata.mockImplementation(async (request: { database: string; schema?: string; tableName: string; tableType?: string }) => ({
       metadata: {
@@ -270,6 +317,20 @@ describe("useSidebarDataOpenRuntime", () => {
     await useSidebarDataOpenRuntime().openData({ ...tableNode, id: "table-orders", label: "orders" });
 
     expect(mocks.tabs).toHaveLength(2);
+  });
+
+  it("opens a new HBase data tab next to the active tab when enabled", async () => {
+    mocks.databaseType = "hbase";
+    mocks.openDataTabsNextToActive = true;
+    mocks.tabs.push(
+      { id: "query-1", connectionId: "connection-1", database: "app", title: "Query 1", mode: "query", sql: "", isExecuting: false, isCancelling: false, isExplaining: false } as QueryTab,
+      { id: "query-2", connectionId: "connection-1", database: "app", title: "Query 2", mode: "query", sql: "", isExecuting: false, isCancelling: false, isExplaining: false } as QueryTab,
+    );
+    mocks.activeTabId = "query-1";
+
+    await useSidebarDataOpenRuntime().openData(tableNode);
+
+    expect(mocks.tabs.map((tab) => tab.title)).toEqual(["Query 1", "users", "Query 2"]);
   });
 
   it("starts cold-cache OceanBase metadata before the table query", async () => {

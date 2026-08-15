@@ -26,6 +26,33 @@ describe("resolveSqlVariableSyntaxToggles", () => {
       atSet: false,
     });
   });
+
+  it("disables every syntax when substitution is globally disabled", () => {
+    expect(resolveSqlVariableSyntaxToggles({ mysql: { shell: false } }, "mysql", false)).toEqual({
+      positional: false,
+      named: false,
+      shell: false,
+      mybatis: false,
+      sqlserver: false,
+      atSet: false,
+    });
+  });
+
+  it("restores per-database overrides when substitution is re-enabled", () => {
+    const overrides = { mysql: { shell: false as const, atSet: false as const } };
+
+    resolveSqlVariableSyntaxToggles(overrides, "mysql", false);
+
+    expect(resolveSqlVariableSyntaxToggles(overrides, "mysql", true)).toEqual({
+      positional: true,
+      named: true,
+      shell: false,
+      mybatis: true,
+      sqlserver: true,
+      atSet: false,
+    });
+    expect(overrides).toEqual({ mysql: { shell: false, atSet: false } });
+  });
 });
 
 describe("enabledSqlParameterSyntaxes", () => {

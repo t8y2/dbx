@@ -88,7 +88,10 @@ export interface DataGridExtractorOptions {
     insertMode: DataGridCopyInsertMode;
     excludePrimaryKeysFromInsert: boolean;
   };
-  json: { pretty: boolean };
+  json: {
+    pretty: boolean;
+    camelCaseFieldNames: boolean;
+  };
 }
 
 export interface DataGridExtractColumn {
@@ -145,7 +148,7 @@ export const DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS: DataGridExtractorOptions = {
     insertMode: "merged",
     excludePrimaryKeysFromInsert: false,
   },
-  json: { pretty: true },
+  json: { pretty: true, camelCaseFieldNames: false },
 };
 
 function unicodeCodePointLength(value: string): number {
@@ -175,7 +178,10 @@ export function normalizeDataGridExtractorOptions(value: unknown): DataGridExtra
       insertMode: sql.insertMode === "row-by-row" ? "row-by-row" : "merged",
       excludePrimaryKeysFromInsert: sql.excludePrimaryKeysFromInsert === true,
     },
-    json: { pretty: json.pretty !== false },
+    json: {
+      pretty: json.pretty !== false,
+      camelCaseFieldNames: json.camelCaseFieldNames === true,
+    },
   };
 }
 

@@ -25,6 +25,7 @@ function makeSettings(overrides: Partial<EditorSettings> = {}): EditorSettings {
     confirmUnsavedSqlClose: true,
     savedSqlOpenTargetMode: "saved",
     objectBrowserViewMode: "list",
+    sqlVariableSubstitutionEnabled: true,
     sqlVariableSyntaxOverrides: {},
     tabLayout: "scroll",
     ...overrides,
@@ -60,6 +61,10 @@ describe("EDITOR_SETTINGS_DRAFT_KEYS", () => {
     expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("dataTabReuseMode");
   });
 
+  it("includes adjacent data-tab opening", () => {
+    expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("openDataTabsNextToActive");
+  });
+
   it("includes data grid type colors", () => {
     expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("colorizeDataGridCellTypes");
   });
@@ -67,9 +72,34 @@ describe("EDITOR_SETTINGS_DRAFT_KEYS", () => {
   it("includes completionTriggerMode", () => {
     expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("completionTriggerMode");
   });
+
+  it("includes the SQL variable substitution master switch", () => {
+    expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("sqlVariableSubstitutionEnabled");
+  });
 });
 
 describe("editorSettingsDraftFromSettings", () => {
+  it("toggles substitution without discarding per-database overrides", () => {
+    const base = editorSettingsDraftFromSettings(
+      makeSettings({
+        sqlVariableSubstitutionEnabled: true,
+        sqlVariableSyntaxOverrides: { mysql: { shell: false } },
+      }),
+    );
+    const draft = editorSettingsDraftFromSettings(
+      makeSettings({
+        sqlVariableSubstitutionEnabled: true,
+        sqlVariableSyntaxOverrides: { mysql: { shell: false } },
+      }),
+    );
+
+    draft.sqlVariableSubstitutionEnabled = false;
+
+    expect(editorSettingsPatchFromDraft(draft, base)).toEqual({ sqlVariableSubstitutionEnabled: false });
+    expect(draft.sqlVariableSyntaxOverrides).toEqual({ mysql: { shell: false } });
+    expect(base.sqlVariableSyntaxOverrides).toEqual({ mysql: { shell: false } });
+  });
+
   it("does not include persisted global timeout values in editor drafts", () => {
     const settings = makeSettings({ globalConnectTimeoutSecs: 17, globalQueryTimeoutSecs: 43 });
     const draft = editorSettingsDraftFromSettings(settings);
@@ -182,6 +212,14 @@ describe("editorSettingsDraftChanged", () => {
     expect(editorSettingsDraftChanged(draft, base)).toBe(true);
   });
 
+  it("detects adjacent data-tab opening changes", () => {
+    const settings = makeSettings({ openDataTabsNextToActive: false });
+    const draft = editorSettingsDraftFromSettings(settings);
+    const base = editorSettingsDraftFromSettings(settings);
+    draft.openDataTabsNextToActive = true;
+    expect(editorSettingsDraftChanged(draft, base)).toBe(true);
+  });
+
   it("detects completionTriggerMode change", () => {
     const settings = makeSettings({ completionTriggerMode: "positional" } as Partial<EditorSettings>);
     const draft = editorSettingsDraftFromSettings(settings);
@@ -238,6 +276,14 @@ describe("editorSettingsPatchFromDraft", () => {
     const base = editorSettingsDraftFromSettings(settings);
     draft.dataTabReuseMode = "always-new";
     expect(editorSettingsPatchFromDraft(draft, base).dataTabReuseMode).toBe("always-new");
+  });
+
+  it("includes adjacent data-tab opening when changed", () => {
+    const settings = makeSettings({ openDataTabsNextToActive: false });
+    const draft = editorSettingsDraftFromSettings(settings);
+    const base = editorSettingsDraftFromSettings(settings);
+    draft.openDataTabsNextToActive = true;
+    expect(editorSettingsPatchFromDraft(draft, base).openDataTabsNextToActive).toBe(true);
   });
 
   it("includes completionTriggerMode in patch when changed", () => {

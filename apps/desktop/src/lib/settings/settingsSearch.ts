@@ -159,6 +159,7 @@ export const SETTINGS_SEARCH_DEFINITIONS: readonly SettingsSearchDefinition[] = 
   { id: "navigation-sidebar", category: "navigation", titleKey: "settings.sidebarActivation", targetId: "navigation" },
   { id: "navigation-routine-source", category: "navigation", titleKey: "settings.routineSourceOpenMode", descriptionKey: "settings.routineSourceOpenModeDescription", targetId: "navigation" },
   { id: "navigation-reuse-data-tab", category: "navigation", titleKey: "settings.reuseDataTab", descriptionKey: "settings.reuseDataTabDescription", targetId: "navigation" },
+  { id: "navigation-open-data-tabs-next-to-active", category: "navigation", titleKey: "settings.openDataTabsNextToActive", descriptionKey: "settings.openDataTabsNextToActiveDescription", targetId: "navigation" },
   { id: "navigation-object-display", category: "navigation", titleKey: "settings.sidebarObjectDisplay", targetId: "navigation" },
   { id: "navigation-object-info", category: "navigation", titleKey: "settings.sidebarObjectInfoMode", descriptionKey: "settings.sidebarObjectInfoModeDescription", targetId: "navigation" },
   { id: "navigation-table-search", category: "navigation", titleKey: "settings.sidebarTableSearchEnabled", descriptionKey: "settings.sidebarTableSearchEnabledDescription", targetId: "navigation" },

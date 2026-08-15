@@ -32,8 +32,10 @@ pub struct ListConnectionsRequest {}
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ConnectionSelector {
     #[schemars(description = "Unique ID of the DBX connection")]
+    #[schemars(extend("type" = "string"))]
     pub connection_id: Option<String>,
     #[schemars(description = "Name of the DBX connection")]
+    #[schemars(extend("type" = "string"))]
     pub connection_name: Option<String>,
 }
 
@@ -1501,6 +1503,59 @@ mod tests {
             .get("required")
             .and_then(serde_json::Value::as_array)
             .is_some_and(|required| required.iter().any(|field| field == "tables")));
+    }
+
+    #[test]
+    fn connection_selector_schema_uses_optional_strings() {
+        let server = DbxMcpServer::with_runtime_options(Arc::new(FakeBackend::default()), McpScope::default(), false);
+        let tools = server.tool_router.list_all();
+
+        for tool_name in ["dbx_execute_query", "dbx_list_tables", "dbx_open_session"] {
+            let tool = tools.iter().find(|tool| tool.name == tool_name).expect("selector tool should be registered");
+            let properties = tool
+                .input_schema
+                .get("properties")
+                .and_then(serde_json::Value::as_object)
+                .expect("selector tool should publish object properties");
+            let required = tool
+                .input_schema
+                .get("required")
+                .and_then(serde_json::Value::as_array)
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>();
+
+            for field in ["connection_id", "connection_name"] {
+                let selector = properties.get(field).expect("selector field should be published");
+                assert_eq!(selector.get("type"), Some(&serde_json::json!("string")), "{tool_name}.{field}");
+                assert!(!required.iter().any(|required| *required == field), "{tool_name}.{field} must stay optional");
+            }
+        }
+    }
+
+    #[test]
+    fn execute_query_selector_preserves_serde_inputs() {
+        let omitted: ExecuteQueryRequest = serde_json::from_str(r#"{"sql":"SELECT 1"}"#).unwrap();
+        let explicit_nulls: ExecuteQueryRequest =
+            serde_json::from_str(r#"{"connection_id":null,"connection_name":null,"sql":"SELECT 1"}"#).unwrap();
+        let by_name: ExecuteQueryRequest =
+            serde_json::from_str(r#"{"connection_name":"test_conn","sql":"SELECT 1"}"#).unwrap();
+        let by_id: ExecuteQueryRequest =
+            serde_json::from_str(r#"{"connection_id":"123e4567-e89b-12d3-a456-426614174000","sql":"SELECT 1"}"#)
+                .unwrap();
+
+        assert!(omitted.selector.connection_id.is_none());
+        assert!(omitted.selector.connection_name.is_none());
+        assert!(explicit_nulls.selector.connection_id.is_none());
+        assert!(explicit_nulls.selector.connection_name.is_none());
+        assert_eq!(by_name.selector.connection_name.as_deref(), Some("test_conn"));
+        assert_eq!(by_id.selector.connection_id.as_deref(), Some("123e4567-e89b-12d3-a456-426614174000"));
+
+        let nested = serde_json::from_str::<ExecuteQueryRequest>(
+            r#"{"connection_name":{"tool":"dbx_dbx_execute_query","error":"Invalid input"},"sql":"SELECT 1"}"#,
+        )
+        .unwrap_err();
+        assert!(nested.to_string().contains("invalid type: map, expected a string"));
     }
 
     #[test]

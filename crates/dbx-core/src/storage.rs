@@ -2960,6 +2960,41 @@ impl Storage {
         .await
     }
 
+    pub async fn load_saved_sql_files_for_sync(&self) -> Result<Vec<SavedSqlFile>, String> {
+        self.with_conn(|conn| {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT id, connection_id, folder_id, name, database_name, catalog_name, schema_name, sql_text, order_index, open_count, opened_at, created_at, updated_at \
+                     FROM saved_sql_files ORDER BY COALESCE(folder_id, ''), order_index, connection_id, name COLLATE NOCASE",
+                )
+                .map_err(|e| e.to_string())?;
+            let files = stmt
+                .query_map([], |row| {
+                    Ok(SavedSqlFile {
+                        id: row.get(0)?,
+                        connection_id: row.get(1)?,
+                        folder_id: row.get(2)?,
+                        name: row.get(3)?,
+                        database: row.get(4)?,
+                        catalog: row.get(5)?,
+                        schema: row.get(6)?,
+                        sql: row.get(7)?,
+                        sql_loaded: true,
+                        order_index: row.get(8)?,
+                        open_count: row.get(9)?,
+                        opened_at: row.get(10)?,
+                        created_at: row.get(11)?,
+                        updated_at: row.get(12)?,
+                    })
+                })
+                .map_err(|e| e.to_string())?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| e.to_string())?;
+            Ok(files)
+        })
+        .await
+    }
+
     pub async fn load_saved_sql_library_summary(&self) -> Result<SavedSqlLibrary, String> {
         self.with_conn(|conn| {
             let mut folder_stmt = conn
@@ -5658,6 +5693,12 @@ mod tests {
         assert_eq!(loaded.sql, file.sql);
         assert_eq!(loaded.catalog.as_deref(), Some("hive"));
         assert!(loaded.sql_loaded);
+
+        let sync_files = storage.load_saved_sql_files_for_sync().await.unwrap();
+        assert_eq!(sync_files.len(), 1);
+        assert_eq!(sync_files[0].id, file.id);
+        assert_eq!(sync_files[0].sql, file.sql);
+        assert!(sync_files[0].sql_loaded);
     }
 
     #[tokio::test]

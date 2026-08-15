@@ -1210,14 +1210,14 @@ mod tests {
         // frontend "Adjust Partitions" button is available (t8y2/dbx#6208).
         let single = serde_json::json!({ "name": "orders", "partitions": 1 });
         let partitions = single.get("partitions").and_then(|v| v.as_u64()).map(|v| v as u32);
-        assert_eq!(partitions.map(|p| p > 0).unwrap_or(false), true);
+        assert!(partitions.map(|p| p > 0).unwrap_or(false));
 
         let multi = serde_json::json!({ "name": "events", "partitions": 3 });
         let partitions = multi.get("partitions").and_then(|v| v.as_u64()).map(|v| v as u32);
-        assert_eq!(partitions.map(|p| p > 0).unwrap_or(false), true);
+        assert!(partitions.map(|p| p > 0).unwrap_or(false));
 
         let missing = serde_json::json!({ "name": "unknown" });
         let partitions = missing.get("partitions").and_then(|v| v.as_u64()).map(|v| v as u32);
-        assert_eq!(partitions.map(|p| p > 0).unwrap_or(false), false);
+        assert!(!partitions.map(|p| p > 0).unwrap_or(false));
     }
 }

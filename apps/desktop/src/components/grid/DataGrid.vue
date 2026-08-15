@@ -2097,8 +2097,19 @@ const columnWidthDensity = computed(() => settingsStore.editorSettings.columnWid
 const tableFontFamily = computed(() => settingsStore.editorSettings.tableFontFamily);
 const columnWidthCacheKey = computed(() => props.cacheKey?.trim() || undefined);
 const columnStructureSignature = computed(() => createDataGridColumnStructureSignature(props.result.columns, props.result.column_types));
-const columnHeaderMeasurementKey = computed(() => [tableFontSize.value, tableFontFamily.value]);
+// Bumped once a still-loading @font-face (e.g. the custom data grid font) finishes downloading, so
+// widths measured against a temporary fallback font before it loaded get re-measured with the real one.
+const dataGridFontsLoadedTick = ref(0);
+const columnHeaderMeasurementKey = computed(() => [tableFontSize.value, tableFontFamily.value, dataGridFontsLoadedTick.value]);
 let columnHeaderMeasureContext: CanvasRenderingContext2D | null | undefined;
+
+if (typeof document !== "undefined" && document.fonts) {
+  const onDataGridFontsLoadingDone = () => {
+    dataGridFontsLoadedTick.value++;
+  };
+  document.fonts.addEventListener("loadingdone", onDataGridFontsLoadingDone);
+  onUnmounted(() => document.fonts.removeEventListener("loadingdone", onDataGridFontsLoadingDone));
+}
 
 function measureColumnHeaderText(text: string): number | undefined {
   if (typeof document === "undefined") return undefined;

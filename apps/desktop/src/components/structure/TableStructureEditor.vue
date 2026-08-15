@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { AlertTriangle, Check, ChevronDown, ChevronUp, Copy, Database, Info, KeyRound, ListChevronsUpDown, Loader2, Maximize2, Plus, RefreshCw, Save, Search, Settings, SlidersHorizontal, Trash2, X } from "@lucide/vue";
 import { DropdownMenu, DropdownMenuCheckboxItem, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
@@ -40,14 +41,16 @@ import { canAddTableStructureColumn, getTableStructureCapabilities, hasLocalTabl
 import { orderedColumnIndexes, uniqueDataGridColumnOrderKeys } from "@/lib/dataGrid/dataGridColumnOrder";
 import { loadTableDataGridColumnOrder, notifyTableDataGridColumnOrderChanged, removeTableDataGridColumnOrder, saveTableDataGridColumnOrder, tableDataGridColumnOrderScopeKey } from "@/lib/dataGrid/dataGridColumnLayoutStorage";
 import { connectionObjectTreeQuerySchema, tableStructureDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
-import type { ConstraintInfo, TableInfoTab, TableStructureEditorDraft, TableStructureEditorTarget, TableStructureEditorViewport } from "@/types/database";
+import type { ColumnInfo, ConstraintInfo, TableInfo, TableInfoTab, TableStructureEditorDraft, TableStructureEditorTarget, TableStructureEditorViewport } from "@/types/database";
 import {
   applyManticoreDdlColumnExtras,
   buildStructureTargetLabel,
   canEditStructuredTriggerDraft,
   canEditManticoreColumnProperties,
+  cloneColumnDraftAsNew,
   combineDataTypeForDatabase,
   combineDataTypeForDatabaseWithLengthUnit,
+  createCopiedColumnDrafts,
   createColumnDrafts,
   createForeignKeyDrafts,
   createIndexDrafts,
@@ -192,6 +195,15 @@ async function fetchDdl(force = false) {
 }
 const errorMessage = ref("");
 const columns = ref<EditableStructureColumn[]>([]);
+const copyColumnsDialogOpen = ref(false);
+const copySourceTables = ref<TableInfo[]>([]);
+const copySourceTableName = ref("");
+const copySourceColumns = ref<ColumnInfo[]>([]);
+const selectedCopySourceColumnNames = ref<string[]>([]);
+const copySourceTablesLoading = ref(false);
+const copySourceColumnsLoading = ref(false);
+const copySourceError = ref("");
+let copySourceColumnsRequestId = 0;
 const indexes = ref<EditableStructureIndex[]>([]);
 const pendingStatements = ref<string[]>([]);
 const warnings = ref<string[]>([]);
@@ -1583,6 +1595,96 @@ function onColumnRowActivate(column: EditableStructureColumn) {
   selectedColumnId.value = column.id;
 }
 
+function normalizedColumnName(name: string): string {
+  return name.trim().toLowerCase();
+}
+
+const copyableSourceColumns = computed(() => {
+  const existingNames = new Set(columns.value.filter((column) => !column.markedForDrop).map((column) => normalizedColumnName(column.name)));
+  return copySourceColumns.value.map((column) => ({
+    column,
+    alreadyExists: existingNames.has(normalizedColumnName(column.name)),
+  }));
+});
+
+const copyableSourceColumnNames = computed(() => copyableSourceColumns.value.filter(({ alreadyExists }) => !alreadyExists).map(({ column }) => column.name));
+const selectedCopySourceColumns = computed(() => {
+  const selected = new Set(selectedCopySourceColumnNames.value);
+  return copyableSourceColumns.value.filter(({ column, alreadyExists }) => !alreadyExists && selected.has(column.name)).map(({ column }) => column);
+});
+const allCopyableSourceColumnsSelected = computed(() => copyableSourceColumnNames.value.length > 0 && copyableSourceColumnNames.value.every((name) => selectedCopySourceColumnNames.value.includes(name)));
+
+async function openCopyColumnsDialog() {
+  if (!canAddColumn.value || !props.connectionId || !props.database) return;
+  copyColumnsDialogOpen.value = true;
+  copySourceTableName.value = "";
+  copySourceColumns.value = [];
+  selectedCopySourceColumnNames.value = [];
+  copySourceError.value = "";
+  copySourceColumnsRequestId++;
+  copySourceColumnsLoading.value = false;
+  copySourceTables.value = [];
+  copySourceTablesLoading.value = true;
+  try {
+    await store.ensureConnected(props.connectionId);
+    copySourceTables.value = (await api.listTables(props.connectionId, props.database, metadataSchema.value, undefined, undefined, undefined, undefined, props.catalog)).filter((table) => {
+      const tableType = table.table_type.toUpperCase();
+      return tableType !== "VIEW" && tableType !== "MATERIALIZED_VIEW" && (isCreateMode.value || normalizedColumnName(table.name) !== normalizedColumnName(props.tableName));
+    });
+  } catch (error: any) {
+    copySourceTables.value = [];
+    copySourceError.value = error?.message || String(error);
+  } finally {
+    copySourceTablesLoading.value = false;
+  }
+}
+
+async function loadCopySourceColumns(tableName: string) {
+  copySourceTableName.value = tableName;
+  copySourceColumns.value = [];
+  selectedCopySourceColumnNames.value = [];
+  copySourceError.value = "";
+  if (!tableName || !props.connectionId || !props.database) return;
+  const requestId = ++copySourceColumnsRequestId;
+  copySourceColumnsLoading.value = true;
+  try {
+    const sourceColumns = await api.getColumns(props.connectionId, props.database, metadataSchema.value, tableName, props.catalog);
+    if (requestId !== copySourceColumnsRequestId) return;
+    copySourceColumns.value = sourceColumns;
+    selectedCopySourceColumnNames.value = copyableSourceColumns.value.filter(({ alreadyExists }) => !alreadyExists).map(({ column }) => column.name);
+  } catch (error: any) {
+    if (requestId !== copySourceColumnsRequestId) return;
+    copySourceError.value = error?.message || String(error);
+  } finally {
+    if (requestId === copySourceColumnsRequestId) copySourceColumnsLoading.value = false;
+  }
+}
+
+function toggleCopySourceColumns() {
+  selectedCopySourceColumnNames.value = allCopyableSourceColumnsSelected.value ? [] : [...copyableSourceColumnNames.value];
+}
+
+function applyCopiedColumns() {
+  const copiedColumns = createCopiedColumnDrafts(selectedCopySourceColumns.value, databaseType.value, uuid);
+  if (!copiedColumns.length) return;
+  const insertAt = resolveInsertColumnIndex(columns.value, selectedColumnId.value);
+  columns.value.splice(insertAt, 0, ...copiedColumns);
+  selectedColumnId.value = copiedColumns[copiedColumns.length - 1]?.id ?? selectedColumnId.value;
+  if (usesLocalTableColumnOrder.value) persistLocalColumnOrder(false);
+  copyColumnsDialogOpen.value = false;
+}
+
+async function copyColumn(column: EditableStructureColumn) {
+  if (!canAddColumn.value || column.markedForDrop) return;
+  const sourceIndex = columns.value.findIndex((item) => item.id === column.id);
+  if (sourceIndex < 0) return;
+  const copiedColumn = cloneColumnDraftAsNew(column, uuid);
+  columns.value.splice(sourceIndex + 1, 0, copiedColumn);
+  selectedColumnId.value = copiedColumn.id;
+  if (usesLocalTableColumnOrder.value) persistLocalColumnOrder(false);
+  await focusColumnNameInput(copiedColumn.id);
+}
+
 async function addColumn() {
   if (!canAddColumn.value) return;
   activeTab.value = "columns";
@@ -2898,6 +3000,10 @@ watch([activeTab, ddlLoading], ([tab, loading]) => {
                 <Plus :class="structureIconClass" />
                 {{ t("structureEditor.addColumn") }}
               </Button>
+              <Button v-if="activeTab === 'columns'" size="sm" variant="outline" :class="structureToolbarButtonClass" :disabled="!canAddColumn" @click="openCopyColumnsDialog">
+                <Copy :class="structureIconClass" />
+                {{ t("structureEditor.copyColumns") }}
+              </Button>
               <Button v-if="isCreateMode && activeTab === 'columns'" size="sm" variant="outline" :class="structureToolbarButtonClass" :disabled="!canAddColumn" @click="applyColumnTemplate(PRESET_FIELDS_TEMPLATE_ID)">
                 <Copy :class="structureIconClass" />
                 {{ t("structureEditor.columnTemplates") }}
@@ -3290,6 +3396,9 @@ watch([activeTab, ddlLoading], ([tab, loading]) => {
                       >
                         <ListChevronsUpDown :class="structureIconClass" />
                       </Button>
+                      <Button variant="ghost" size="icon" :class="structureActionButtonClass" :disabled="!canAddColumn || column.markedForDrop" :title="t('structureEditor.copyColumn')" :aria-label="t('structureEditor.copyColumn')" @click.stop="copyColumn(column)">
+                        <Copy :class="structureIconClass" />
+                      </Button>
                       <Button
                         v-if="column.original"
                         variant="ghost"
@@ -3624,6 +3733,70 @@ watch([activeTab, ddlLoading], ([tab, loading]) => {
         {{ t("structureEditor.apply") }}
       </Button>
     </div>
+
+    <Dialog v-model:open="copyColumnsDialogOpen">
+      <DialogContent class="max-w-xl">
+        <DialogHeader>
+          <DialogTitle>{{ t("structureEditor.copyColumnsTitle") }}</DialogTitle>
+        </DialogHeader>
+
+        <div class="space-y-3 overflow-hidden">
+          <label class="grid gap-1.5 text-sm font-medium">
+            {{ t("structureEditor.copyColumnsSourceTable") }}
+            <select
+              :value="copySourceTableName"
+              class="h-9 w-full rounded-md border border-input bg-background px-3 text-sm outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30 disabled:cursor-not-allowed disabled:opacity-50"
+              :disabled="copySourceTablesLoading || copySourceTables.length === 0"
+              @change="loadCopySourceColumns(($event.target as HTMLSelectElement).value)"
+            >
+              <option value="" disabled>{{ t("structureEditor.copyColumnsSelectSourceTable") }}</option>
+              <option v-for="table in copySourceTables" :key="table.name" :value="table.name">{{ table.name }}</option>
+            </select>
+          </label>
+
+          <div v-if="copySourceTablesLoading" class="flex items-center gap-2 py-5 text-sm text-muted-foreground">
+            <Loader2 class="h-4 w-4 animate-spin" />
+            {{ t("common.loading") }}
+          </div>
+          <div v-else-if="copySourceError" class="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+            {{ copySourceError }}
+          </div>
+          <div v-else-if="copySourceTables.length === 0" class="rounded-md border border-dashed px-3 py-5 text-center text-sm text-muted-foreground">
+            {{ t("structureEditor.copyColumnsNoSourceTables") }}
+          </div>
+          <template v-else-if="copySourceTableName">
+            <div class="flex items-center justify-between gap-2">
+              <span class="text-sm font-medium">{{ t("structureEditor.copyColumnsSelectFields") }}</span>
+              <Button variant="ghost" size="sm" class="h-7 px-2 text-xs" :disabled="copySourceColumnsLoading || copyableSourceColumnNames.length === 0" @click="toggleCopySourceColumns">
+                {{ allCopyableSourceColumnsSelected ? t("structureEditor.copyColumnsClearSelection") : t("structureEditor.copyColumnsSelectAll") }}
+              </Button>
+            </div>
+            <div v-if="copySourceColumnsLoading" class="flex items-center gap-2 py-5 text-sm text-muted-foreground">
+              <Loader2 class="h-4 w-4 animate-spin" />
+              {{ t("common.loading") }}
+            </div>
+            <div v-else-if="copySourceColumns.length === 0" class="rounded-md border border-dashed px-3 py-5 text-center text-sm text-muted-foreground">
+              {{ t("structureEditor.copyColumnsNoFields") }}
+            </div>
+            <div v-else class="max-h-72 overflow-y-auto rounded-md border">
+              <label v-for="{ column, alreadyExists } in copyableSourceColumns" :key="column.name" class="flex cursor-pointer items-center gap-2 border-b px-3 py-2 last:border-b-0 hover:bg-muted/50" :class="alreadyExists ? 'cursor-not-allowed opacity-60' : ''">
+                <input v-model="selectedCopySourceColumnNames" type="checkbox" :value="column.name" :disabled="alreadyExists" class="size-4 rounded border-input" />
+                <span class="min-w-0 flex-1 truncate font-mono text-sm">{{ column.name }}</span>
+                <span class="shrink-0 text-xs text-muted-foreground">{{ column.data_type }}</span>
+                <Badge v-if="alreadyExists" variant="secondary" class="shrink-0 text-[10px]">{{ t("structureEditor.copyColumnsAlreadyExists") }}</Badge>
+              </label>
+            </div>
+          </template>
+        </div>
+
+        <DialogFooter>
+          <Button variant="outline" @click="copyColumnsDialogOpen = false">{{ t("structureEditor.copyColumnsCancel") }}</Button>
+          <Button :disabled="copySourceColumnsLoading || selectedCopySourceColumns.length === 0" @click="applyCopiedColumns">
+            {{ t("structureEditor.copyColumnsApply", { count: selectedCopySourceColumns.length }) }}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   </div>
 </template>
 

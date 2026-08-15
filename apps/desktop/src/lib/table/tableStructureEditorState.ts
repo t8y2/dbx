@@ -758,6 +758,45 @@ export function createColumnDrafts(columns: ColumnInfo[], databaseType?: Databas
   });
 }
 
+/**
+ * Turns another table's metadata into columns that will be added to the table
+ * currently being edited. Unlike createColumnDrafts(), these must not retain
+ * original metadata: the SQL builder uses that metadata to identify existing
+ * columns that should be altered.
+ */
+export function createCopiedColumnDrafts(columns: ColumnInfo[], databaseType: DatabaseType | undefined, createId: () => string): EditableStructureColumn[] {
+  return createColumnDrafts(columns, databaseType).map(({ original: _original, originalPosition: _originalPosition, isPrimaryKey: _isPrimaryKey, extra, ...column }) => ({
+    ...column,
+    id: `new:${createId()}`,
+    isPrimaryKey: false,
+    extra: copyableColumnExtra(extra),
+  }));
+}
+
+/** Copy only field-local extras; keys and generated-value state are table-level concerns. */
+function copyableColumnExtra(extra: ColumnExtra): ColumnExtra {
+  const { autoIncrement: _autoIncrement, identity: _identity, ...copyableExtra } = extra;
+  return copyableExtra;
+}
+
+/** Clone an editable field as a new column, without linking it to persisted metadata or key state. */
+export function cloneColumnDraftAsNew(column: EditableStructureColumn, createId: () => string): EditableStructureColumn {
+  return {
+    id: `new:${createId()}`,
+    name: column.name,
+    dataType: column.dataType,
+    enumValues: column.enumValues ? [...column.enumValues] : undefined,
+    isNullable: column.isNullable,
+    defaultValue: column.defaultValue,
+    comment: column.comment,
+    isPrimaryKey: false,
+    characterSet: column.characterSet,
+    collation: column.collation,
+    extra: copyableColumnExtra(column.extra),
+    markedForDrop: false,
+  };
+}
+
 function existingColumnIdName(id: string): string | undefined {
   const prefix = "existing:";
   return id.startsWith(prefix) ? id.slice(prefix.length) : undefined;

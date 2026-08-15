@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
   canEditStructuredTriggerDraft,
+  cloneColumnDraftAsNew,
   combineDataTypeForDatabase,
   combineDataTypeForDatabaseWithLengthUnit,
+  createCopiedColumnDrafts,
   createColumnDrafts,
   createTriggerDrafts,
   dataTypeLengthInputValue,
@@ -93,6 +95,81 @@ describe("tableStructureEditorState", () => {
     expect(columns.map((column) => column.dataType)).toEqual(["varchar(255)", "numeric(12,2)", "integer", "character varying(64)"]);
     expect(columns.map((column) => column.original?.data_type)).toEqual(["varchar(255)", "numeric(12,2)", "integer", "character varying(64)"]);
     expect(dataTypeLengthInputValue("kingbase", columns[0]?.dataType ?? "")).toBe("255");
+  });
+
+  it("turns copied metadata into new column drafts instead of existing columns", () => {
+    const copied = createCopiedColumnDrafts(
+      [
+        {
+          name: "display_name",
+          data_type: "varchar",
+          is_nullable: false,
+          column_default: "'anonymous'",
+          is_primary_key: true,
+          extra: "auto_increment",
+          comment: "Visible name",
+          character_maximum_length: 255,
+        },
+      ],
+      "mysql",
+      () => "copied-column",
+    );
+
+    expect(copied).toEqual([
+      expect.objectContaining({
+        id: "new:copied-column",
+        name: "display_name",
+        dataType: "varchar(255)",
+        defaultValue: "'anonymous'",
+        comment: "Visible name",
+        isPrimaryKey: false,
+        extra: {},
+      }),
+    ]);
+    expect(copied[0]?.original).toBeUndefined();
+    expect(copied[0]?.originalPosition).toBeUndefined();
+  });
+
+  it("clones an editable field into an independent new column", () => {
+    const [source] = createColumnDrafts(
+      [
+        {
+          name: "status",
+          data_type: "enum",
+          enum_values: ["draft", "published"],
+          is_nullable: false,
+          column_default: "'draft'",
+          is_primary_key: false,
+          extra: "on update current_timestamp",
+          comment: "Publication status",
+        },
+      ],
+      "mysql",
+    );
+    const copied = cloneColumnDraftAsNew(source!, () => "copied-column");
+
+    expect(copied).toMatchObject({
+      id: "new:copied-column",
+      name: "status",
+      enumValues: ["draft", "published"],
+      extra: { onUpdateCurrentTimestamp: true },
+      markedForDrop: false,
+    });
+    expect(copied.original).toBeUndefined();
+    expect(copied.originalPosition).toBeUndefined();
+
+    source!.isPrimaryKey = true;
+    source!.extra.autoIncrement = true;
+    source!.extra.identity = { generation: "ALWAYS" };
+    const copiedKeyColumn = cloneColumnDraftAsNew(source!, () => "copied-key-column");
+    expect(copiedKeyColumn.isPrimaryKey).toBe(false);
+    expect(copiedKeyColumn.extra.autoIncrement).toBeUndefined();
+    expect(copiedKeyColumn.extra.identity).toBeUndefined();
+
+    copied.enumValues?.push("archived");
+    copied.extra.onUpdateCurrentTimestamp = false;
+    expect(source?.enumValues).toEqual(["draft", "published"]);
+    expect(source?.extra.onUpdateCurrentTimestamp).toBe(true);
   });
 
   it("parses Kingbase SQLServer compatibility identity metadata", () => {

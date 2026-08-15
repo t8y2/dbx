@@ -92,9 +92,15 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
     const matrix = options.selectedCellMatrix.value;
     const isMultiCellSelection = !!matrix && (matrix.rowIndexes.length > 1 || matrix.columnIndexes.length > 1);
     // A right-click sets contextCell.col to the clicked column (≥ 0); the test
-    // harness and non-right-click paths leave it at -1. Only treat a 1×1 matrix
-    // as synthetic when there's a real right-click context.
+    // harness and non-right-click paths leave it at -1.
     const hasRightClickContext = !!options.contextCell.value && options.contextSelectionIsSynthetic.value;
+    // When the user already has a single-cell selection and right-clicks the same
+    // cell, contextSelectionIsSynthetic is false but we still have a valid context
+    // cell. For INSERT/UPDATE extractors, we include all visible non-PK columns
+    // so the "has writable column" check doesn't fail when the selected cell
+    // happens to be the primary key. sql-select intentionally keeps using only
+    // the selected cell via the matrix branch below.
+    const hasNonSyntheticContextCell = !!options.contextCell.value && options.contextCell.value.col >= 0 && !options.contextSelectionIsSynthetic.value && !!matrix && !isMultiCellSelection;
 
     if (options.hasRowSelection.value && options.selectedRowIds.value.size > 0) {
       const items = options.displayItems.value.filter((item) => options.selectedRowIds.value.has(item.id) && !item.isDraft);
@@ -108,8 +114,9 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
       sourceRowIds = items.map((item) => item.id);
       selectedSourceIndexes = dedupeColumnIndexes(matrix.columnIndexes.map((index) => visibleIndexes[index] ?? index)).filter((index) => index < fullColumns.length);
       if (options.hasColumnSelection.value) selectionKind = "columns";
-    } else if (hasRightClickContext && options.contextCell.value) {
-      // A SELECT targets the clicked cell; existing extractors keep their full-row context behavior.
+    } else if ((hasRightClickContext || (hasNonSyntheticContextCell && extractor !== "sql-select")) && options.contextCell.value) {
+      // A SELECT targets the clicked cell; other extractors use the full row
+      // so that right-clicking a selected PK cell still enables INSERT/UPDATE.
       const item = fullItemsById.get(options.contextCell.value.rowId);
       if (item && !item.isDraft) {
         sourceRows = [item.data];
@@ -248,7 +255,7 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
       if (!request?.tableMeta?.tableName.trim() || request.rows.length !== 1) return false;
       if (request.selectionKind === "columns") return false;
       if (request.selectionKind === "cells" && request.selectedColumnIndexes.length !== 1) return false;
-      return request.columns.length > 0 && request.columns.every((column) => !!column.sourceName?.trim());
+      return request.columns.length > 0 && request.columns.every((column) => !!(column.sourceName ?? column.displayName)?.trim());
     }
     if (extractor === "raw") {
       const request = buildRequest(extractor, extractorOptions);

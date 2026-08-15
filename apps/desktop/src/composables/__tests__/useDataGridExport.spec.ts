@@ -197,7 +197,7 @@ describe("useDataGridExport prepared row statements", () => {
     expect(state.canCopyRow.value).toBe(true);
   });
 
-  it("builds SQL UPDATE from only selected writable columns while retaining a hidden primary key", async () => {
+  it("builds SQL UPDATE using the full row when right-clicking a selected cell", async () => {
     const item = row([7, "Ada", true]);
     const matrix: CellSelectionMatrix = {
       rowIndexes: [0],
@@ -242,11 +242,11 @@ describe("useDataGridExport prepared row statements", () => {
       hasRowSelection: computed(() => false),
     };
     vi.mocked(extractDataGridSelection).mockResolvedValueOnce({
-      text: "UPDATE users SET active = TRUE WHERE id = 7;",
+      text: "UPDATE users SET `name` = 'Ada', `active` = TRUE WHERE `id` = 7;",
       mimeType: "application/sql",
       fileExtension: "sql",
       rowCount: 1,
-      columnCount: 1,
+      columnCount: 2,
     });
     const state = useDataGridExport(options);
 
@@ -256,12 +256,12 @@ describe("useDataGridExport prepared row statements", () => {
     expect(extractDataGridSelection).toHaveBeenCalledWith(
       expect.objectContaining({
         extractor: "sql-updates",
-        selectedColumnIndexes: [0],
-        rows: [[true, 7]],
-        selectionKind: "cells",
+        selectedColumnIndexes: [0, 1],
+        rows: [["Ada", true, 7]],
+        selectionKind: "rows",
       }),
     );
-    expect(copyToClipboard).toHaveBeenCalledWith("UPDATE users SET active = TRUE WHERE id = 7;");
+    expect(copyToClipboard).toHaveBeenCalledWith("UPDATE users SET `name` = 'Ada', `active` = TRUE WHERE `id` = 7;");
   });
 
   it("builds a SELECT request for exactly one explicitly selected cell", async () => {
@@ -362,6 +362,88 @@ describe("useDataGridExport prepared row statements", () => {
     };
     expect(createExportState(editableTable, ["id", "name"], matrix, [7, "Ada"]).canCopyWithExtractor("sql-select")).toBe(false);
     expect(createExportState({ ...editableTable, tableName: "" }, ["id", "name"], { ...matrix, columnIndexes: [1], columns: ["name"], rows: [["Ada"]] }, [7, "Ada"]).canCopyWithExtractor("sql-select")).toBe(false);
+  });
+
+  // Regression tests for https://github.com/t8y2/dbx/issues/6272
+  it("enables SELECT copy when sourceColumns is undefined by falling back to display names", () => {
+    const matrix: CellSelectionMatrix = {
+      rowIndexes: [0],
+      columnIndexes: [0],
+      columns: ["id"],
+      rows: [[7]],
+    };
+    const item = row([7, "Ada"]);
+    const state = useDataGridExport({
+      columns: computed(() => ["id", "name"]),
+      displayItems: computed(() => [item]),
+      sql: computed(() => undefined),
+      tableMeta: computed(() => editableTable),
+      databaseType: computed(() => "mysql"),
+      connectionId: computed(() => "connection-1"),
+      database: computed(() => "dbx"),
+      context: computed(() => "table-data"),
+      sourceColumns: computed(() => ["id", "name"]),
+      allColumns: computed(() => ["id", "name"]),
+      allDisplayItems: computed(() => [item]),
+      allSourceColumns: computed(() => undefined),
+      visibleColumnIndexes: computed(() => [0, 1]),
+      columnTypes: computed(() => ["int", "varchar"]),
+      whereInput: computed(() => undefined),
+      orderBy: computed(() => undefined),
+      exportBatchSize: computed(() => 1000),
+      hasCellSelection: computed(() => true),
+      selectedCells: computed(() => matrix),
+      selectedCellMatrix: computed(() => matrix),
+      selectedRange: computed(() => ({ startRow: 0, endRow: 0, startCol: 0, endCol: 0 })),
+      contextCell: ref(null),
+      contextSelectionIsSynthetic: ref(false),
+      getRowItem: (rowId) => (rowId === item.id ? item : undefined),
+      selectedRowIds: ref(new Set<number>()),
+      hasRowSelection: computed(() => false),
+    });
+
+    expect(state.canCopyWithExtractor("sql-select")).toBe(true);
+  });
+
+  it("enables INSERT/UPDATE when right-clicking a previously selected primary-key cell", () => {
+    const item = row([7, "Ada"]);
+    const matrix: CellSelectionMatrix = {
+      rowIndexes: [0],
+      columnIndexes: [0],
+      columns: ["id"],
+      rows: [[7]],
+    };
+    const state = useDataGridExport({
+      columns: computed(() => ["id", "name"]),
+      displayItems: computed(() => [item]),
+      sql: computed(() => undefined),
+      tableMeta: computed(() => editableTable),
+      databaseType: computed(() => "mysql"),
+      connectionId: computed(() => "connection-1"),
+      database: computed(() => "dbx"),
+      context: computed(() => "table-data"),
+      sourceColumns: computed(() => ["id", "name"]),
+      allColumns: computed(() => ["id", "name"]),
+      allDisplayItems: computed(() => [item]),
+      allSourceColumns: computed(() => ["id", "name"]),
+      visibleColumnIndexes: computed(() => [0, 1]),
+      columnTypes: computed(() => ["int", "varchar"]),
+      whereInput: computed(() => undefined),
+      orderBy: computed(() => undefined),
+      exportBatchSize: computed(() => 1000),
+      hasCellSelection: computed(() => true),
+      selectedCells: computed(() => matrix),
+      selectedCellMatrix: computed(() => matrix),
+      selectedRange: computed(() => ({ startRow: 0, endRow: 0, startCol: 0, endCol: 0 })),
+      contextCell: ref({ rowId: item.id, rowIndex: 0, col: 0 }),
+      contextSelectionIsSynthetic: ref(false),
+      getRowItem: (rowId) => (rowId === item.id ? item : undefined),
+      selectedRowIds: ref(new Set<number>()),
+      hasRowSelection: computed(() => false),
+    });
+
+    expect(state.canCopyWithExtractor("sql-updates")).toBe(true);
+    expect(state.canCopyWithExtractor("sql-inserts")).toBe(true);
   });
 
   it("preserves drag-reordered visible column order when copying", async () => {

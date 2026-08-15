@@ -40,6 +40,13 @@ type objectInfo struct {
 	Valid      *bool   `json:"valid,omitempty"`
 }
 
+type objectSource struct {
+	Name       string  `json:"name"`
+	ObjectType string  `json:"object_type"`
+	Schema     *string `json:"schema"`
+	Source     string  `json:"source"`
+}
+
 type columnInfo struct {
 	Name                   string  `json:"name"`
 	DataType               string  `json:"data_type"`
@@ -575,6 +582,19 @@ func (server *server) getTableDDL(schema, table string) (string, error) {
 		return "", nil
 	}
 	return strings.Join(lines, "\n") + "\n", nil
+}
+
+func (server *server) getObjectSource(schema, name, objectType string) (objectSource, error) {
+	source, err := server.getTableDDL(schema, name)
+	if err != nil {
+		return objectSource{}, err
+	}
+	return objectSource{
+		Name:       name,
+		ObjectType: strings.ToUpper(objectType),
+		Schema:     optionalString(schema),
+		Source:     source,
+	}, nil
 }
 
 func (server *server) getExplainInfo(sqlText string) (string, error) {

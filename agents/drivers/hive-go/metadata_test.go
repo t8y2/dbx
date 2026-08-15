@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql/driver"
+	"encoding/json"
 	"errors"
 	"reflect"
 	"strings"
@@ -47,6 +48,47 @@ func TestKyuubiConnectionInfoReportsNativeIdentity(t *testing.T) {
 	databaseInfo, ok := info["databaseInfo"].(map[string]string)
 	if !ok || databaseInfo["productName"] != "Apache Kyuubi" || databaseInfo["driverName"] != "DBX Kyuubi Go Agent" {
 		t.Fatalf("unexpected Kyuubi database identity: %#v", info["databaseInfo"])
+	}
+}
+
+func TestGetObjectSourceReturnsProtocolObject(t *testing.T) {
+	behavior := &scriptedBehavior{
+		query: func(ctx context.Context, query string) (driver.Rows, error) {
+			if query != "SHOW CREATE TABLE `dbx_kyuubi_demo`.`high_value_orders`" {
+				t.Fatalf("unexpected query: %q", query)
+			}
+			return newScriptedRows(
+				ctx,
+				[]string{"createtab_stmt"},
+				[]string{"STRING"},
+				[][]driver.Value{
+					{"CREATE VIEW dbx_kyuubi_demo.high_value_orders"},
+					{"AS SELECT id, customer, amount FROM dbx_kyuubi_demo.orders WHERE amount >= 50"},
+				},
+			), nil
+		},
+	}
+	server := newScriptedServer(t, behavior)
+	defer server.disconnect()
+
+	result, _, err := server.dispatch("get_object_source", map[string]json.RawMessage{
+		"schema":      json.RawMessage(`"dbx_kyuubi_demo"`),
+		"name":        json.RawMessage(`"high_value_orders"`),
+		"object_type": json.RawMessage(`"VIEW"`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	source, ok := result.(objectSource)
+	if !ok {
+		t.Fatalf("get_object_source returned %T instead of objectSource", result)
+	}
+	if source.Name != "high_value_orders" || source.ObjectType != "VIEW" || source.Schema == nil || *source.Schema != "dbx_kyuubi_demo" {
+		t.Fatalf("unexpected object source metadata: %#v", source)
+	}
+	expected := "CREATE VIEW dbx_kyuubi_demo.high_value_orders\nAS SELECT id, customer, amount FROM dbx_kyuubi_demo.orders WHERE amount >= 50\n"
+	if source.Source != expected {
+		t.Fatalf("unexpected object source DDL: %q", source.Source)
 	}
 }
 

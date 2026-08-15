@@ -199,6 +199,7 @@ const copyColumnsDialogOpen = ref(false);
 const copySourceTables = ref<TableInfo[]>([]);
 const copySourceTableName = ref("");
 const copySourceColumns = ref<ColumnInfo[]>([]);
+const copySourceColumnSearch = ref("");
 const selectedCopySourceColumnNames = ref<string[]>([]);
 const copySourceTablesLoading = ref(false);
 const copySourceColumnsLoading = ref(false);
@@ -1607,6 +1608,12 @@ const copyableSourceColumns = computed(() => {
   }));
 });
 
+const filteredCopyableSourceColumns = computed(() => {
+  const search = normalizedColumnName(copySourceColumnSearch.value);
+  if (!search) return copyableSourceColumns.value;
+  return copyableSourceColumns.value.filter(({ column }) => [column.name, column.data_type, column.comment ?? ""].some((value) => normalizedColumnName(value).includes(search)));
+});
+
 const copyableSourceColumnNames = computed(() => copyableSourceColumns.value.filter(({ alreadyExists }) => !alreadyExists).map(({ column }) => column.name));
 const selectedCopySourceColumns = computed(() => {
   const selected = new Set(selectedCopySourceColumnNames.value);
@@ -1619,6 +1626,7 @@ async function openCopyColumnsDialog() {
   copyColumnsDialogOpen.value = true;
   copySourceTableName.value = "";
   copySourceColumns.value = [];
+  copySourceColumnSearch.value = "";
   selectedCopySourceColumnNames.value = [];
   copySourceError.value = "";
   copySourceColumnsRequestId++;
@@ -1642,6 +1650,7 @@ async function openCopyColumnsDialog() {
 async function loadCopySourceColumns(tableName: string) {
   copySourceTableName.value = tableName;
   copySourceColumns.value = [];
+  copySourceColumnSearch.value = "";
   selectedCopySourceColumnNames.value = [];
   copySourceError.value = "";
   if (!tableName || !props.connectionId || !props.database) return;
@@ -3771,6 +3780,7 @@ watch([activeTab, ddlLoading], ([tab, loading]) => {
                 {{ allCopyableSourceColumnsSelected ? t("structureEditor.copyColumnsClearSelection") : t("structureEditor.copyColumnsSelectAll") }}
               </Button>
             </div>
+            <Input v-model="copySourceColumnSearch" :placeholder="t('structureEditor.copyColumnsSearchFields')" />
             <div v-if="copySourceColumnsLoading" class="flex items-center gap-2 py-5 text-sm text-muted-foreground">
               <Loader2 class="h-4 w-4 animate-spin" />
               {{ t("common.loading") }}
@@ -3778,8 +3788,11 @@ watch([activeTab, ddlLoading], ([tab, loading]) => {
             <div v-else-if="copySourceColumns.length === 0" class="rounded-md border border-dashed px-3 py-5 text-center text-sm text-muted-foreground">
               {{ t("structureEditor.copyColumnsNoFields") }}
             </div>
+            <div v-else-if="filteredCopyableSourceColumns.length === 0" class="rounded-md border border-dashed px-3 py-5 text-center text-sm text-muted-foreground">
+              {{ t("structureEditor.copyColumnsNoMatchingFields") }}
+            </div>
             <div v-else class="max-h-72 overflow-y-auto rounded-md border">
-              <label v-for="{ column, alreadyExists } in copyableSourceColumns" :key="column.name" class="flex cursor-pointer items-center gap-2 border-b px-3 py-2 last:border-b-0 hover:bg-muted/50" :class="alreadyExists ? 'cursor-not-allowed opacity-60' : ''">
+              <label v-for="{ column, alreadyExists } in filteredCopyableSourceColumns" :key="column.name" class="flex cursor-pointer items-center gap-2 border-b px-3 py-2 last:border-b-0 hover:bg-muted/50" :class="alreadyExists ? 'cursor-not-allowed opacity-60' : ''">
                 <input v-model="selectedCopySourceColumnNames" type="checkbox" :value="column.name" :disabled="alreadyExists" class="size-4 rounded border-input" />
                 <span class="min-w-0 flex-1 truncate font-mono text-sm">{{ column.name }}</span>
                 <span class="shrink-0 text-xs text-muted-foreground">{{ column.data_type }}</span>

@@ -6200,7 +6200,7 @@ mod tests {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).unwrap();
         }
-        std::fs::write(path, b"").unwrap();
+        std::fs::write(path, b"test-java").unwrap();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;

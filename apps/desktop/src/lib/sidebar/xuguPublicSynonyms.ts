@@ -6,6 +6,27 @@
 export const XUGU_PUBLIC_SYNONYM_SCOPE = "\u0000DBX_XUGU_PUBLIC_SYNONYMS";
 export const XUGU_PUBLIC_SYNONYM_SCOPE_LABEL = "Public synonyms";
 
+/**
+ * Keep the synthetic public-synonym scope visually separate from real
+ * schemas.  The scope is deliberately sorted after every real schema so a
+ * database-global namespace cannot be mistaken for an ordinary owner/schema.
+ */
+export function sortXuguSchemaInfos<T extends { name: string }>(schemas: readonly T[], compareNames: (left: string, right: string) => number): T[] {
+  const realSchemas: T[] = [];
+  const publicSynonymScopes: T[] = [];
+
+  for (const schema of schemas) {
+    if (isXuguPublicSynonymScope(schema.name)) {
+      publicSynonymScopes.push(schema);
+    } else {
+      realSchemas.push(schema);
+    }
+  }
+
+  realSchemas.sort((left, right) => compareNames(left.name, right.name));
+  return [...realSchemas, ...publicSynonymScopes];
+}
+
 export function isXuguPublicSynonymScope(schema: string | null | undefined): boolean {
   return schema === XUGU_PUBLIC_SYNONYM_SCOPE;
 }

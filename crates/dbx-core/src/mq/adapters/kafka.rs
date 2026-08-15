@@ -1220,5 +1220,4 @@ mod tests {
         let partitions = missing.get("partitions").and_then(|v| v.as_u64()).map(|v| v as u32);
         assert_eq!(partitions.map(|p| p > 0).unwrap_or(false), false);
     }
-
 }

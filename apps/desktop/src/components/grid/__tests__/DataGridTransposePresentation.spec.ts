@@ -4,6 +4,11 @@ import { describe, expect, it } from "vitest";
 const dataGridSource = readFileSync(new URL("../DataGrid.vue", import.meta.url), "utf8");
 
 describe("DataGrid transpose presentation", () => {
+  it("left-aligns record headers with their transposed values", () => {
+    expect(dataGridSource).toContain('class="shrink-0 border-r border-border px-2 py-1.5 text-left tabular-nums relative"');
+    expect(dataGridSource).not.toContain('class="shrink-0 border-r border-border px-2 py-1.5 text-center tabular-nums relative"');
+  });
+
   it("shows field metadata only when the transpose setting is enabled", () => {
     expect(dataGridSource).toContain("settingsStore.editorSettings.dataGridShowTransposeFieldMetadata");
     expect(dataGridSource).toContain("showTransposeFieldMetadata.value && showColumnTypesInHeader.value");

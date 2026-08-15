@@ -2097,18 +2097,28 @@ const columnWidthDensity = computed(() => settingsStore.editorSettings.columnWid
 const tableFontFamily = computed(() => settingsStore.editorSettings.tableFontFamily);
 const columnWidthCacheKey = computed(() => props.cacheKey?.trim() || undefined);
 const columnStructureSignature = computed(() => createDataGridColumnStructureSignature(props.result.columns, props.result.column_types));
-// Bumped once a still-loading @font-face (e.g. the custom data grid font) finishes downloading, so
-// widths measured against a temporary fallback font before it loaded get re-measured with the real one.
-const dataGridFontsLoadedTick = ref(0);
-const columnHeaderMeasurementKey = computed(() => [tableFontSize.value, tableFontFamily.value, dataGridFontsLoadedTick.value]);
+// Bumped once the configured header font is ready, so widths measured against a temporary fallback
+// font get re-measured without reacting to unrelated fonts loaded elsewhere in the application.
+const dataGridFontReadyTick = ref(0);
+const columnHeaderMeasurementKey = computed(() => [tableFontSize.value, tableFontFamily.value, dataGridFontReadyTick.value]);
 let columnHeaderMeasureContext: CanvasRenderingContext2D | null | undefined;
 
 if (typeof document !== "undefined" && document.fonts) {
-  const onDataGridFontsLoadingDone = () => {
-    dataGridFontsLoadedTick.value++;
-  };
-  document.fonts.addEventListener("loadingdone", onDataGridFontsLoadingDone);
-  onUnmounted(() => document.fonts.removeEventListener("loadingdone", onDataGridFontsLoadingDone));
+  let fontLoadRequestId = 0;
+  watch(
+    [tableFontSize, tableFontFamily],
+    async ([fontSize, fontFamily]) => {
+      const requestId = ++fontLoadRequestId;
+      try {
+        await document.fonts.load(`600 ${fontSize}px ${fontFamily}`);
+      } catch {
+        return;
+      }
+      if (requestId === fontLoadRequestId) dataGridFontReadyTick.value++;
+    },
+    { immediate: true },
+  );
+  onUnmounted(() => fontLoadRequestId++);
 }
 
 function measureColumnHeaderText(text: string): number | undefined {

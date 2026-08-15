@@ -199,6 +199,17 @@ import {
   type DataGridColumnSortState,
 } from "@/lib/dataGrid/dataGridContextMenu";
 import { buildColumnForeignKeyMap, combineForeignKeyConditions, foreignKeyAssociationCells, foreignKeyMetadataRequestCurrent, foreignKeyNavigationTarget, foreignKeySourceColumnName, foreignKeyTableIdentity, type ForeignKeyAssociation } from "@/lib/dataGrid/dataGridForeignKeyNavigation";
+import {
+  collectForeignKeyDisplayValues,
+  createForeignKeyDisplayRequestCoordinator,
+  foreignKeyDisplayConfigMatches,
+  foreignKeyDisplayLookupRequestKey,
+  foreignKeyDisplayMapFromResult,
+  formatForeignKeyDisplayValue,
+  singleColumnForeignKey,
+  splitForeignKeyDisplayValues,
+  type ForeignKeyDisplayConfig,
+} from "@/lib/dataGrid/dataGridForeignKeyDisplay";
 
 import { useToast } from "@/composables/useToast";
 import { translateBackendError } from "@/i18n/backend-errors";
@@ -871,6 +882,16 @@ const formatterMaskSuffix = ref(4);
 const formatterCustomId = ref(CUSTOM_FORMATTER_NEW);
 const formatterCustomName = ref("");
 const formatterCustomTemplate = ref("${value}");
+const formatterForeignKeyRefSchema = ref("");
+const formatterForeignKeyRefTable = ref("");
+const formatterForeignKeyRefColumn = ref("");
+const formatterForeignKeyDisplayColumn = ref("");
+const formatterForeignKeyColumns = ref<ColumnInfo[]>([]);
+const formatterForeignKeyColumnsLoading = ref(false);
+const formatterForeignKeyColumnsError = ref("");
+let formatterForeignKeyColumnsRequest = 0;
+const foreignKeyDisplayLabels = shallowRef(new Map<number, Map<string, string>>());
+const foreignKeyDisplayRequests = createForeignKeyDisplayRequestCoordinator();
 
 const savedCustomFormatters = computed(() => {
   return Object.values(settingsStore.editorSettings.customColumnFormatters).sort((a, b) => a.name.localeCompare(b.name));
@@ -1151,15 +1172,17 @@ function openCompactLocalFilter(colIdx: number, mode: LocalFilterMode = "local")
   });
 }
 
-function compactColumnActionMenuItems(columnName: string) {
+function compactColumnActionMenuItems(columnName: string, columnIndex: number) {
   return createDataGridCompactColumnActionItems({
     labels: {
       formatter: t("grid.columnFormatter"),
+      clearFormatter: t("grid.clearFormatter"),
       localFilter: t("grid.localFilter"),
       serverFilter: t("grid.databaseValueFilter"),
     },
-    icons: { formatter: Code2, filter: Filter, database: Database },
+    icons: { formatter: Code2, clearFormatter: Eraser, filter: Filter, database: Database },
     formatterAvailable: !!formatterKeyForColumn(columnName),
+    formatterActive: columnHasFormatter(columnIndex),
     serverFilterAvailable: canUseServerColumnFilter.value,
   });
 }
@@ -1171,6 +1194,8 @@ function columnFilterPanelTitle(columnName: string): string {
 function selectCompactColumnAction(value: string, columnIndex: number) {
   if (value === "formatter") {
     openCompactColumnFormatter(columnIndex);
+  } else if (value === "clearFormatter") {
+    clearColumnFormatter(columnIndex);
   } else if (value === "localFilter") {
     openCompactLocalFilter(columnIndex, "local");
   } else if (value === "serverFilter") {
@@ -1242,6 +1267,15 @@ function currentFormatterDraft(): ColumnFormatterConfig {
       template: formatterCustomTemplate.value.trim() || "${value}",
     };
   }
+  if (formatterKind.value === "foreign-key-display") {
+    return {
+      kind: "foreign-key-display",
+      refSchema: formatterForeignKeyRefSchema.value || undefined,
+      refTable: formatterForeignKeyRefTable.value,
+      refColumn: formatterForeignKeyRefColumn.value,
+      displayColumn: formatterForeignKeyDisplayColumn.value,
+    };
+  }
   return {
     kind: "datetime",
     unit: formatterDateUnit.value,
@@ -1276,12 +1310,51 @@ function loadFormatterDraft(formatter: ColumnFormatterConfig | undefined) {
     formatterCustomId.value = CUSTOM_FORMATTER_NEW;
     formatterCustomName.value = "";
     formatterCustomTemplate.value = draft.template;
+  } else if (draft.kind === "foreign-key-display") {
+    formatterForeignKeyRefSchema.value = draft.refSchema ?? "";
+    formatterForeignKeyRefTable.value = draft.refTable;
+    formatterForeignKeyRefColumn.value = draft.refColumn;
+    formatterForeignKeyDisplayColumn.value = draft.displayColumn;
   }
 }
 
-function openColumnFormatter(columnIndex: number) {
+function formatterForeignKeyForColumn(columnIndex: number): ForeignKeyInfo | undefined {
+  return singleColumnForeignKey(cellForeignKeyAssociation(columnIndex));
+}
+
+async function loadFormatterForeignKeyColumns(columnIndex: number) {
+  const request = ++formatterForeignKeyColumnsRequest;
+  formatterForeignKeyColumns.value = [];
+  formatterForeignKeyColumnsError.value = "";
+  const foreignKey = formatterForeignKeyForColumn(columnIndex);
+  if (!foreignKey || !props.connectionId) return;
+  formatterForeignKeyColumnsLoading.value = true;
+  try {
+    const schema = foreignKey.ref_schema || props.tableMeta?.schema || props.schema || props.database || "";
+    const columns = await api.getColumns(props.connectionId, props.database || "", schema, foreignKey.ref_table, props.tableMeta?.catalog);
+    if (request !== formatterForeignKeyColumnsRequest || formatterOpenColumn.value !== columnIndex) return;
+    formatterForeignKeyColumns.value = columns;
+    if (!formatterForeignKeyDisplayColumn.value || !columns.some((column) => column.name === formatterForeignKeyDisplayColumn.value)) {
+      formatterForeignKeyDisplayColumn.value = columns.find((column) => column.name.toLowerCase() !== foreignKey.ref_column.toLowerCase())?.name ?? columns[0]?.name ?? "";
+    }
+  } catch (error: any) {
+    if (request === formatterForeignKeyColumnsRequest) formatterForeignKeyColumnsError.value = String(error?.message || error);
+  } finally {
+    if (request === formatterForeignKeyColumnsRequest) formatterForeignKeyColumnsLoading.value = false;
+  }
+}
+
+async function openColumnFormatter(columnIndex: number) {
   loadFormatterDraft(savedColumnFormatter(columnIndex));
   formatterOpenColumn.value = columnIndex;
+  await fetchForeignKeys();
+  const foreignKey = formatterForeignKeyForColumn(columnIndex);
+  if (foreignKey) {
+    formatterForeignKeyRefSchema.value = foreignKey.ref_schema || props.tableMeta?.schema || props.schema || "";
+    formatterForeignKeyRefTable.value = foreignKey.ref_table;
+    formatterForeignKeyRefColumn.value = foreignKey.ref_column;
+    await loadFormatterForeignKeyColumns(columnIndex);
+  }
 }
 
 function openCompactColumnFormatter(columnIndex: number) {
@@ -1290,12 +1363,13 @@ function openCompactColumnFormatter(columnIndex: number) {
   nextTick(() => {
     window.setTimeout(() => {
       guardHeaderPanelDismiss();
-      openColumnFormatter(columnIndex);
+      void openColumnFormatter(columnIndex);
     }, 0);
   });
 }
 
 function closeColumnFormatter() {
+  formatterForeignKeyColumnsRequest += 1;
   formatterOpenColumn.value = null;
 }
 
@@ -1337,6 +1411,17 @@ function formatterDraftIsSavable(): boolean {
   return !!normalizeColumnFormatter(currentFormatterDraft());
 }
 
+function selectFormatterKind(value: FormatterDraftKind, columnIndex: number) {
+  formatterKind.value = value;
+  if (value !== "foreign-key-display") return;
+  const foreignKey = formatterForeignKeyForColumn(columnIndex);
+  if (!foreignKey) return;
+  formatterForeignKeyRefSchema.value = foreignKey.ref_schema || props.tableMeta?.schema || props.schema || "";
+  formatterForeignKeyRefTable.value = foreignKey.ref_table;
+  formatterForeignKeyRefColumn.value = foreignKey.ref_column;
+  void loadFormatterForeignKeyColumns(columnIndex);
+}
+
 function selectCustomFormatter(value: string) {
   formatterCustomId.value = value;
   if (value === CUSTOM_FORMATTER_NEW) {
@@ -1362,7 +1447,7 @@ function formatterPreviewRows(columnIndex: number) {
     return {
       index: index + 1,
       raw: displayCellValue(value),
-      formatted: applyColumnFormatter(value, formatter),
+      formatted: formatter?.kind === "foreign-key-display" ? formatForeignKeyDisplayValue(value, foreignKeyDisplayLabels.value.get(columnIndex)) : applyColumnFormatter(value, formatter),
     };
   });
 }
@@ -5467,6 +5552,9 @@ function primitiveCellFormatKey(value: CellValue, columnIndex?: number): string 
 
 function formatCell(value: CellValue, columnIndex?: number, originalBytes?: number): string {
   const formatter = columnIndex === undefined ? undefined : resolvedColumnFormatters.value[columnIndex];
+  if (formatter?.kind === "foreign-key-display" && columnIndex !== undefined) {
+    return limitDataGridCellDisplay(formatForeignKeyDisplayValue(value, foreignKeyDisplayLabels.value.get(columnIndex)), resolvedDatabaseType.value === "sqlserver" ? SQLSERVER_DATA_GRID_CELL_DISPLAY_MAX_LENGTH : undefined);
+  }
   const columnInfo = columnIndex === undefined ? undefined : tableColumnForGridColumn(columnIndex);
   const displayColumnInfo = columnInfo ?? (columnIndex === undefined ? undefined : resultColumnInfoForGridColumn(columnIndex));
   const arrayDisplay = formatter
@@ -6428,6 +6516,7 @@ onMounted(() => {
 onDeactivated(pauseCanvasGridWork);
 onUnmounted(() => {
   dataGridRuntimeScope.dispose();
+  foreignKeyDisplayRequests.dispose();
   clearCellFormatCache();
   pauseCanvasGridWork();
   canvasRuntime.dispose();
@@ -9290,6 +9379,104 @@ function cellForeignKeyAssociation(actualColIdx: number): ForeignKeyAssociation 
   return columnForeignKeyMap.value.get(columnName.toLowerCase()) ?? null;
 }
 
+function savedForeignKeyDisplayConfig(columnIndex: number): ForeignKeyDisplayConfig | undefined {
+  const formatter = savedColumnFormatter(columnIndex);
+  if (formatter?.kind !== "foreign-key-display") return undefined;
+  const foreignKey = formatterForeignKeyForColumn(columnIndex);
+  return foreignKey && foreignKeyDisplayConfigMatches(formatter, foreignKey, props.tableMeta?.schema || props.schema) ? formatter : undefined;
+}
+
+async function loadForeignKeyDisplayLabels() {
+  const requestGeneration = foreignKeyDisplayRequests.beginGeneration();
+  foreignKeyDisplayLabels.value = new Map();
+  clearCellFormatCache();
+  scheduleCanvasDraw();
+  if (!props.connectionId || !props.tableMeta || !foreignKeysLoaded.value) return;
+
+  const configuredColumns = props.result.columns.flatMap((_, columnIndex) => (savedForeignKeyDisplayConfig(columnIndex) ? [columnIndex] : []));
+  await Promise.all(
+    configuredColumns.map(async (columnIndex) => {
+      const config = savedForeignKeyDisplayConfig(columnIndex);
+      if (!config) return;
+      const values = collectForeignKeyDisplayValues(props.result.rows, columnIndex);
+      if (!values.length) return;
+      const schema = config.refSchema || props.tableMeta?.schema || props.schema || props.database || "";
+      try {
+        const columns = await foreignKeyDisplayRequests.request(requestGeneration, JSON.stringify(["columns", props.connectionId, props.database || "", props.tableMeta?.catalog || "", schema, config.refTable]), () =>
+          api.getColumns(props.connectionId!, props.database || "", schema, config.refTable, props.tableMeta?.catalog),
+        );
+        if (!columns || !foreignKeyDisplayRequests.isCurrent(requestGeneration)) return;
+        const refColumnInfo = columns.find((column) => column.name.toLowerCase() === config.refColumn.toLowerCase());
+        const labels = new Map<string, string>();
+        for (const batch of splitForeignKeyDisplayValues(values)) {
+          if (!foreignKeyDisplayRequests.isCurrent(requestGeneration)) return;
+          const whereInput = await buildColumnValuesFilterCondition({
+            databaseType: resolvedDatabaseType.value,
+            identifierQuote: connectionStore.connectionIdentifierQuote?.(props.connectionId),
+            columnName: config.refColumn,
+            columnInfo: refColumnInfo,
+            values: batch,
+          });
+          if (!whereInput) continue;
+          const sql = await buildTableSelectSql({
+            databaseType: resolvedDatabaseType.value,
+            driverProfile: connectionStore.getConfig(props.connectionId!)?.driver_profile,
+            identifierQuote: connectionStore.connectionIdentifierQuote?.(props.connectionId),
+            catalog: props.tableMeta?.catalog,
+            database: props.database,
+            schema,
+            tableName: config.refTable,
+            columns: [config.refColumn, config.displayColumn],
+            whereInput,
+            limit: batch.length,
+          });
+          if (!foreignKeyDisplayRequests.isCurrent(requestGeneration)) return;
+          const requestKey = foreignKeyDisplayLookupRequestKey({
+            connectionId: props.connectionId!,
+            database: props.executionDatabase ?? props.database ?? "",
+            catalog: props.tableMeta?.catalog,
+            schema,
+            table: config.refTable,
+            refColumn: config.refColumn,
+            displayColumn: config.displayColumn,
+            values: batch,
+          });
+          const result = await foreignKeyDisplayRequests.request(requestGeneration, requestKey, () =>
+            api.executeQuery(props.connectionId!, props.executionDatabase ?? props.database ?? "", sql, schema, undefined, {
+              maxRows: batch.length,
+              fetchSize: batch.length,
+              pageSize: batch.length,
+            }),
+          );
+          if (!result || !foreignKeyDisplayRequests.isCurrent(requestGeneration)) return;
+          for (const [key, label] of foreignKeyDisplayMapFromResult(result, config.refColumn, config.displayColumn)) if (!labels.has(key)) labels.set(key, label);
+        }
+        if (!foreignKeyDisplayRequests.isCurrent(requestGeneration)) return;
+        const next = new Map(foreignKeyDisplayLabels.value);
+        next.set(columnIndex, labels);
+        foreignKeyDisplayLabels.value = next;
+      } catch (error: any) {
+        if (!foreignKeyDisplayRequests.isCurrent(requestGeneration)) return;
+        appendDebugLog("warn", "[DBX][DataGrid:foreign-key-display:error]", {
+          column: props.result.columns[columnIndex],
+          message: String(error?.message || error),
+        });
+      }
+    }),
+  );
+  if (!foreignKeyDisplayRequests.isCurrent(requestGeneration)) return;
+  clearCellFormatCache();
+  scheduleCanvasDraw();
+}
+
+watch(
+  () => [props.result, currentForeignKeyTableIdentity.value, foreignKeysLoaded.value, JSON.stringify(settingsStore.editorSettings.columnFormatters)] as const,
+  () => {
+    void loadForeignKeyDisplayLabels();
+  },
+  { immediate: true },
+);
+
 function canvasCellForeignKey(rowIndex: number, actualColIdx: number): ForeignKeyInfo | null {
   const association = cellForeignKeyAssociation(actualColIdx);
   if (!association) return null;
@@ -10710,8 +10897,9 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                         </LightDropdownMenu>
                         <LightDropdownMenu
                           v-if="compactColumnHeaderActions"
-                          :items="compactColumnActionMenuItems(col.name)"
+                          :items="compactColumnActionMenuItems(col.name, col.actualColIdx)"
                           :open="headerActionMenuOpenColumn === col.actualColIdx"
+                          check-position="none"
                           align="end"
                           content-class="w-max min-w-28 max-w-48 p-0.5"
                           item-class="gap-1 px-1.5 py-0.5 text-xs"
@@ -10767,7 +10955,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                                 <div class="text-xs font-medium text-muted-foreground">
                                   {{ t("grid.formatterType") }}
                                 </div>
-                                <Select :model-value="formatterKind" @update:model-value="(value: any) => (formatterKind = value)">
+                                <Select :model-value="formatterKind" @update:model-value="(value: any) => selectFormatterKind(value, col.actualColIdx)">
                                   <SelectTrigger class="h-8 text-xs">
                                     <SelectValue />
                                   </SelectTrigger>
@@ -10775,6 +10963,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                                     <SelectItem value="datetime">{{ t("grid.formatterDatetime") }}</SelectItem>
                                     <SelectItem value="json-path">{{ t("grid.formatterJsonPath") }}</SelectItem>
                                     <SelectItem value="mask">{{ t("grid.formatterMask") }}</SelectItem>
+                                    <SelectItem v-if="formatterForeignKeyForColumn(col.actualColIdx)" value="foreign-key-display">{{ t("grid.formatterForeignKeyDisplay") }}</SelectItem>
                                     <SelectItem value="custom-template">{{ t("grid.formatterCustomTemplate") }}</SelectItem>
                                   </SelectContent>
                                 </Select>
@@ -10852,6 +11041,31 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                                   </span>
                                   <input v-model.number="formatterMaskSuffix" type="number" min="0" class="h-8 w-full rounded border bg-background px-2 text-xs outline-none focus:border-primary" />
                                 </label>
+                              </div>
+
+                              <div v-else-if="formatterKind === 'foreign-key-display'" class="space-y-3">
+                                <div class="rounded border bg-muted/30 px-2.5 py-2 text-xs">
+                                  <div class="text-[11px] text-muted-foreground">{{ t("grid.formatterForeignKeyTarget") }}</div>
+                                  <div class="mt-0.5 truncate font-mono" :title="`${formatterForeignKeyRefSchema ? `${formatterForeignKeyRefSchema}.` : ''}${formatterForeignKeyRefTable}.${formatterForeignKeyRefColumn}`">
+                                    {{ formatterForeignKeyRefSchema ? `${formatterForeignKeyRefSchema}.` : "" }}{{ formatterForeignKeyRefTable }}.{{ formatterForeignKeyRefColumn }}
+                                  </div>
+                                </div>
+                                <div class="space-y-1.5">
+                                  <div class="text-xs font-medium text-muted-foreground">{{ t("grid.formatterForeignKeyDisplayColumn") }}</div>
+                                  <SearchableSelect
+                                    :model-value="formatterForeignKeyDisplayColumn"
+                                    :options="formatterForeignKeyColumns.map((column) => column.name)"
+                                    :placeholder="formatterForeignKeyColumnsLoading ? t('common.loading') : t('grid.formatterForeignKeyDisplayColumnPlaceholder')"
+                                    :search-placeholder="t('grid.searchColumn')"
+                                    :empty-text="formatterForeignKeyColumnsError || t('grid.noColumnsFound')"
+                                    :loading-text="t('common.loading')"
+                                    :loading="formatterForeignKeyColumnsLoading"
+                                    :trigger-class="['border border-input h-8 pl-2.5 text-xs']"
+                                    item-class="h-auto min-h-8 px-2 py-1.5 text-xs"
+                                    @update:model-value="(value: any) => (formatterForeignKeyDisplayColumn = value)"
+                                  />
+                                </div>
+                                <div class="text-[11px] leading-4 text-muted-foreground">{{ t("grid.formatterForeignKeyHint") }}</div>
                               </div>
 
                               <div v-else class="space-y-2">

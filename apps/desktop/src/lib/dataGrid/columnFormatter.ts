@@ -103,6 +103,7 @@ export type ColumnFormatterConfig =
   | { kind: "datetime"; unit: DateTimeFormatterUnit; pattern: string; timezone: string | undefined }
   | { kind: "json-path"; path: string }
   | { kind: "mask"; prefix: number; suffix: number }
+  | { kind: "foreign-key-display"; refSchema?: string; refTable: string; refColumn: string; displayColumn: string }
   | { kind: "custom-template"; template: string }
   | { kind: "custom-ref"; formatterId: string };
 
@@ -141,6 +142,19 @@ export function normalizeColumnFormatter(value: unknown): ColumnFormatterConfig 
     if (!Number.isInteger(config.prefix) || !Number.isInteger(config.suffix)) return undefined;
     if ((config.prefix as number) < 0 || (config.suffix as number) < 0) return undefined;
     return { kind: "mask", prefix: config.prefix as number, suffix: config.suffix as number };
+  }
+
+  if (config.kind === "foreign-key-display") {
+    if (typeof config.refTable !== "string" || !config.refTable.trim()) return undefined;
+    if (typeof config.refColumn !== "string" || !config.refColumn.trim()) return undefined;
+    if (typeof config.displayColumn !== "string" || !config.displayColumn.trim()) return undefined;
+    return {
+      kind: "foreign-key-display",
+      refSchema: typeof config.refSchema === "string" && config.refSchema.trim() ? config.refSchema.trim() : undefined,
+      refTable: config.refTable.trim(),
+      refColumn: config.refColumn.trim(),
+      displayColumn: config.displayColumn.trim(),
+    };
   }
 
   if (config.kind === "custom-template") {

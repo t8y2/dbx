@@ -134,6 +134,11 @@ test("falls back to normal display for nulls and invalid formatter input", () =>
   assert.deepEqual(normalizeColumnFormatter({ kind: "datetime", unit: "auto", pattern: 123 }), { kind: "datetime", unit: "auto", pattern: "YYYY-MM-DD HH:mm:ss", timezone: undefined });
 });
 
+test("normalizes foreign-key display formatter configuration", () => {
+  assert.deepEqual(normalizeColumnFormatter({ kind: "foreign-key-display", refSchema: " public ", refTable: " users ", refColumn: " id ", displayColumn: " name " }), { kind: "foreign-key-display", refSchema: "public", refTable: "users", refColumn: "id", displayColumn: "name" });
+  assert.equal(normalizeColumnFormatter({ kind: "foreign-key-display", refTable: "users", refColumn: "id", displayColumn: "" }), undefined);
+});
+
 test("normalizes only supported formatter configs", () => {
   const config: ColumnFormatterConfig = { kind: "mask", prefix: 2, suffix: 4 };
 

@@ -3,7 +3,7 @@
 import { ChevronDown, Download, Server } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { createInstallOptions } from "@/lib/downloadLinks";
-import { detectDownloadPlatform, type DownloadNavigator, type DownloadPlatformId } from "@/lib/downloadPlatform";
+import { detectPlatformId, type DownloadPlatformId } from "@/lib/platformDetection";
 
 type InstallTabsProps = {
   lang: "en" | "cn";
@@ -49,14 +49,14 @@ export function InstallTabs({ lang, version }: InstallTabsProps) {
   const [platformId, setPlatformId] = useState<DownloadPlatformId>("unknown");
 
   useEffect(() => {
-    let active = true;
+    let cancelled = false;
 
-    void detectDownloadPlatform(navigator as DownloadNavigator).then((detectedPlatformId) => {
-      if (active) setPlatformId(detectedPlatformId);
+    void detectPlatformId(navigator).then((detectedPlatformId) => {
+      if (!cancelled) setPlatformId(detectedPlatformId);
     });
 
     return () => {
-      active = false;
+      cancelled = true;
     };
   }, []);
 

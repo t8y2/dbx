@@ -29,6 +29,17 @@ describe("connection password prompting", () => {
     expect(connectionNeedsPasswordPrompt(connection({ url_params: "auth=noSasl;principal=impala/_HOST@EXAMPLE.COM" }))).toBe(true);
   });
 
+  it("allows Kyuubi NONE and NOSASL connections to persist an empty password", () => {
+    expect(connectionNeedsPasswordPrompt(connection({ db_type: "kyuubi", port: 10009, url_params: "auth=NONE" }))).toBe(false);
+    expect(connectionNeedsPasswordPrompt(connection({ db_type: "kyuubi", port: 10009, url_params: "auth=NOSASL" }))).toBe(false);
+    expect(connectionNeedsPasswordPrompt(connection({ db_type: "kyuubi", port: 10009, url_params: "" }))).toBe(false);
+  });
+
+  it("prompts for Kyuubi authentication modes that require credentials", () => {
+    expect(connectionNeedsPasswordPrompt(connection({ db_type: "kyuubi", port: 10009, url_params: "auth=LDAP" }))).toBe(true);
+    expect(connectionNeedsPasswordPrompt(connection({ db_type: "kyuubi", port: 10009, url_params: "principal=hive/_HOST@EXAMPLE.COM" }))).toBe(true);
+  });
+
   it("does not change password prompting for other database types", () => {
     expect(connectionNeedsPasswordPrompt(connection({ db_type: "mysql", port: 3306, url_params: "auth=noSasl" }))).toBe(true);
     expect(connectionNeedsPasswordPrompt(connection({ db_type: "postgres", port: 5432, save_password: true }))).toBe(false);

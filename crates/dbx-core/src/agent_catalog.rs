@@ -197,6 +197,13 @@ const AGENT_CATALOG: &[AgentCatalogEntry] = &[
         profiles: &[],
     },
     AgentCatalogEntry {
+        db_type: DatabaseType::Kyuubi,
+        key: "hive",
+        label: "Apache Kyuubi",
+        store_visible: false,
+        profiles: &[],
+    },
+    AgentCatalogEntry {
         db_type: DatabaseType::Impala,
         key: "hive",
         label: "Apache Impala",
@@ -408,6 +415,12 @@ mod tests {
     #[test]
     fn impala_reuses_hive_agent_without_duplicate_store_entry() {
         assert_eq!(agent_key(&DatabaseType::Impala, None), Some("hive"));
+        assert_eq!(driver_store_entries().filter(|(key, _)| *key == "hive").count(), 1);
+    }
+
+    #[test]
+    fn kyuubi_reuses_hive_agent_without_duplicate_store_entry() {
+        assert_eq!(agent_key(&DatabaseType::Kyuubi, None), Some("hive"));
         assert_eq!(driver_store_entries().filter(|(key, _)| *key == "hive").count(), 1);
     }
 }

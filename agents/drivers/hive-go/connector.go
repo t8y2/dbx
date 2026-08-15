@@ -89,13 +89,17 @@ func newDiscoveryConnector(config connectionConfig) *discoveryConnector {
 				BrowserResponsePort:        config.BrowserResponsePort,
 				BrowserResponseTimeout:     config.BrowserResponseTimeout,
 				BrowserDisableSSLCheck:     config.BrowserDisableSSLCheck,
-				WaitForNonQueryCompletion:  strings.EqualFold(config.DatabaseType, "impala"),
+				WaitForNonQueryCompletion:  waitsForNonQueryCompletion(config.DatabaseType),
 			})
 		},
 		driver:        &gohive.Driver{},
 		retries:       max(config.Retries, 1),
 		retryInterval: config.RetryInterval,
 	}
+}
+
+func waitsForNonQueryCompletion(databaseType string) bool {
+	return strings.EqualFold(databaseType, "impala") || strings.EqualFold(databaseType, "kyuubi")
 }
 
 func gssapiOptionsFromKerberos(config kerberosConfig) gosasl.GSSAPIOptions {

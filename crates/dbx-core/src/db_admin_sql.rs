@@ -489,7 +489,13 @@ pub fn build_empty_table_sql(options: TableAdminSqlOptions) -> String {
     match options.database_type {
         Some(DatabaseType::ClickHouse) => format!("ALTER TABLE {table} DELETE WHERE 1 = 1;"),
         Some(DatabaseType::Bigquery) => format!("DELETE FROM {table} WHERE TRUE;"),
-        Some(DatabaseType::Cassandra | DatabaseType::Hive | DatabaseType::Kylin | DatabaseType::Questdb) => {
+        Some(
+            DatabaseType::Cassandra
+            | DatabaseType::Hive
+            | DatabaseType::Kyuubi
+            | DatabaseType::Kylin
+            | DatabaseType::Questdb,
+        ) => {
             format!("TRUNCATE TABLE {table};")
         }
         Some(DatabaseType::Iotdb) => format!("DELETE FROM {};", iotdb_timeseries_pattern(&table)),
@@ -645,19 +651,20 @@ pub fn build_duplicate_table_structure_sql(options: DuplicateTableStructureSqlOp
     let source = qualified_name(options.database_type, options.schema.as_deref(), &options.source_name);
     let target =
         qualified_duplicate_target_name(options.database_type, options.schema.as_deref(), &options.target_name);
-    let structure_sql = if matches!(options.database_type, Some(DatabaseType::Mysql | DatabaseType::Impala)) {
-        format!("CREATE TABLE {target} LIKE {source};")
-    } else if options.database_type == Some(DatabaseType::Questdb) {
-        format!("CREATE TABLE {target} (LIKE {source});")
-    } else if options.database_type.is_some_and(is_postgres_like_structure_copy) {
-        format!("CREATE TABLE {target} (LIKE {source} INCLUDING ALL);")
-    } else if options.database_type == Some(DatabaseType::SqlServer) {
-        format!("SELECT TOP 0 * INTO {target} FROM {source};")
-    } else if options.database_type.is_some_and(uses_false_predicate_duplicate_structure) {
-        format!("CREATE TABLE {target} AS SELECT * FROM {source} WHERE 1=0")
-    } else {
-        format!("CREATE TABLE {target} AS SELECT * FROM {source} WHERE 0;")
-    };
+    let structure_sql =
+        if matches!(options.database_type, Some(DatabaseType::Mysql | DatabaseType::Kyuubi | DatabaseType::Impala)) {
+            format!("CREATE TABLE {target} LIKE {source};")
+        } else if options.database_type == Some(DatabaseType::Questdb) {
+            format!("CREATE TABLE {target} (LIKE {source});")
+        } else if options.database_type.is_some_and(is_postgres_like_structure_copy) {
+            format!("CREATE TABLE {target} (LIKE {source} INCLUDING ALL);")
+        } else if options.database_type == Some(DatabaseType::SqlServer) {
+            format!("SELECT TOP 0 * INTO {target} FROM {source};")
+        } else if options.database_type.is_some_and(uses_false_predicate_duplicate_structure) {
+            format!("CREATE TABLE {target} AS SELECT * FROM {source} WHERE 1=0")
+        } else {
+            format!("CREATE TABLE {target} AS SELECT * FROM {source} WHERE 0;")
+        };
 
     let mut comment_sql = Vec::new();
     if let Some(database_type) =
@@ -1694,6 +1701,17 @@ mod tests {
                 column_comments: vec![],
             }),
             "CREATE TABLE `dbx_demo`.`connection_test_copy` LIKE `dbx_demo`.`connection_test`;"
+        );
+        assert_eq!(
+            build_duplicate_table_structure_sql(DuplicateTableStructureSqlOptions {
+                database_type: Some(DatabaseType::Kyuubi),
+                schema: Some("dbx_demo".to_string()),
+                source_name: "orders".to_string(),
+                target_name: "orders_copy".to_string(),
+                table_comment: None,
+                column_comments: vec![],
+            }),
+            "CREATE TABLE `dbx_demo`.`orders_copy` LIKE `dbx_demo`.`orders`;"
         );
         assert_eq!(
             build_duplicate_table_structure_sql(DuplicateTableStructureSqlOptions {

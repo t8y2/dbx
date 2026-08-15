@@ -20,6 +20,36 @@ func TestShowTablesRowName(t *testing.T) {
 	}
 }
 
+func TestKyuubiConnectionInfoReportsNativeIdentity(t *testing.T) {
+	behavior := &scriptedBehavior{
+		query: func(ctx context.Context, query string) (driver.Rows, error) {
+			switch query {
+			case "SELECT VERSION()":
+				return newScriptedRows(ctx, []string{"version"}, []string{"STRING"}, [][]driver.Value{{"3.5.8"}}), nil
+			case "SELECT CURRENT_USER()":
+				return newScriptedRows(ctx, []string{"current_user"}, []string{"STRING"}, [][]driver.Value{{"dbx"}}), nil
+			default:
+				return nil, errors.New("unexpected query: " + query)
+			}
+		},
+	}
+	server := newScriptedServer(t, behavior)
+	server.params.DatabaseType = "kyuubi"
+	server.config.Username = "fallback"
+
+	info, err := server.connectionInfo()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info["compatibilityMode"] != "kyuubi" || info["username"] != "dbx" || info["version"] != "3.5.8" {
+		t.Fatalf("unexpected Kyuubi connection info: %#v", info)
+	}
+	databaseInfo, ok := info["databaseInfo"].(map[string]string)
+	if !ok || databaseInfo["productName"] != "Apache Kyuubi" || databaseInfo["driverName"] != "DBX Kyuubi Go Agent" {
+		t.Fatalf("unexpected Kyuubi database identity: %#v", info["databaseInfo"])
+	}
+}
+
 func TestListDatabasesUsesShowDatabasesBeforeHiveServerMetadata(t *testing.T) {
 	behavior := &scriptedBehavior{
 		query: func(ctx context.Context, sql string) (driver.Rows, error) {

@@ -2655,7 +2655,7 @@ pub fn map_column_type(source_type: &str, _source_db: &DatabaseType, target_db: 
     // Extract basic type, `bigint unsigned` -> `bigint`
     base = base.split(' ').next().unwrap_or(base).trim();
 
-    if matches!(target_db, DatabaseType::Hive | DatabaseType::Impala) {
+    if matches!(target_db, DatabaseType::Hive | DatabaseType::Kyuubi | DatabaseType::Impala) {
         return match base {
             "tinyint" => "TINYINT".into(),
             "smallint" | "int2" => "SMALLINT".into(),
@@ -2859,7 +2859,8 @@ pub fn generate_create_table_ddl(
                 line.push(' ');
                 line.push_str(&default_clause);
             }
-            if !c.is_nullable && !matches!(target_db, DatabaseType::Hive | DatabaseType::Impala) {
+            if !c.is_nullable && !matches!(target_db, DatabaseType::Hive | DatabaseType::Kyuubi | DatabaseType::Impala)
+            {
                 line.push_str(" NOT NULL");
             }
             if is_mysql_family {
@@ -2882,7 +2883,7 @@ pub fn generate_create_table_ddl(
     }
 
     let mut pks = Vec::with_capacity(columns.iter().filter(|c| c.is_primary_key).count());
-    if !matches!(target_db, DatabaseType::Hive | DatabaseType::Impala) {
+    if !matches!(target_db, DatabaseType::Hive | DatabaseType::Kyuubi | DatabaseType::Impala) {
         for c in columns {
             if c.is_primary_key {
                 let qname = quote_identifier(&c.name, target_db);
@@ -3320,7 +3321,7 @@ fn generate_upsert_typed_for_transfer(
 fn max_transfer_write_rows(db_type: &DatabaseType, mode: &TransferMode) -> usize {
     match (db_type, mode) {
         (DatabaseType::SqlServer, TransferMode::Append | TransferMode::Overwrite) => MAX_SQLSERVER_INSERT_ROWS,
-        (DatabaseType::Hive | DatabaseType::Impala, _) => 500,
+        (DatabaseType::Hive | DatabaseType::Kyuubi | DatabaseType::Impala, _) => 500,
         (DatabaseType::Oracle, TransferMode::Append | TransferMode::Overwrite) => MAX_ORACLE_INSERT_ALL_ROWS,
         (DatabaseType::Oracle, TransferMode::Upsert) => MAX_ORACLE_MERGE_ROWS,
         _ => usize::MAX,
@@ -6331,7 +6332,7 @@ where
 }
 
 #[derive(Default)]
-struct ImpalaTransferCursor {
+struct HiveServerTransferCursor {
     started: bool,
     session_id: Option<String>,
 }
@@ -6348,13 +6349,13 @@ fn transfer_cursor_sql(
     format!("SELECT {col_list} FROM {full_table}")
 }
 
-async fn fetch_impala_transfer_batch(
+async fn fetch_hive_server_transfer_batch(
     state: &AppState,
     pool_key: &str,
     request: &TransferRequest,
     sql: &str,
     batch_size: usize,
-    cursor: &mut ImpalaTransferCursor,
+    cursor: &mut HiveServerTransferCursor,
 ) -> Result<db::QueryResult, String> {
     let query_timeout_secs = if cursor.started {
         0
@@ -6400,7 +6401,7 @@ async fn fetch_impala_transfer_batch(
     Ok(result)
 }
 
-async fn close_impala_transfer_cursor(state: &AppState, pool_key: &str, cursor: &mut ImpalaTransferCursor) {
+async fn close_hive_server_transfer_cursor(state: &AppState, pool_key: &str, cursor: &mut HiveServerTransferCursor) {
     let Some(session_id) = cursor.session_id.take() else {
         return;
     };
@@ -6776,7 +6777,10 @@ where
     }
 
     let target_columns = if (request.mode == TransferMode::Upsert
-        && !matches!(target_db_type, DatabaseType::ClickHouse | DatabaseType::Hive | DatabaseType::Impala))
+        && !matches!(
+            target_db_type,
+            DatabaseType::ClickHouse | DatabaseType::Hive | DatabaseType::Kyuubi | DatabaseType::Impala
+        ))
         || matches!(target_db_type, DatabaseType::Postgres | DatabaseType::Dameng)
     {
         get_columns_for_transfer(
@@ -6796,7 +6800,10 @@ where
 
     // Determine effective mode and PK columns for upsert
     let (effective_mode, pk_columns) = if request.mode == TransferMode::Upsert {
-        if matches!(target_db_type, DatabaseType::ClickHouse | DatabaseType::Hive | DatabaseType::Impala) {
+        if matches!(
+            target_db_type,
+            DatabaseType::ClickHouse | DatabaseType::Hive | DatabaseType::Kyuubi | DatabaseType::Impala
+        ) {
             log::warn!("[transfer] upsert not supported for {:?}, falling back to append", target_db_type);
             (TransferMode::Append, vec![])
         } else {
@@ -6823,10 +6830,10 @@ where
     let batch_size = if request.batch_size == 0 { 1000 } else { request.batch_size };
     let mut offset: u64 = 0;
     let mut total_transferred: u64 = 0;
-    // A single Agent cursor keeps Impala rows in one query execution. Re-running
-    // LIMIT/OFFSET pages cannot be made stable for tables without a unique key.
-    let use_impala_cursor = matches!(source_db_type, DatabaseType::Impala);
-    let impala_transfer_sql = use_impala_cursor.then(|| {
+    // A single Agent cursor keeps Kyuubi/Impala rows in one query execution.
+    // Re-running LIMIT/OFFSET pages is unstable for tables without a unique key.
+    let use_hive_server_cursor = matches!(source_db_type, DatabaseType::Kyuubi | DatabaseType::Impala);
+    let hive_server_transfer_sql = use_hive_server_cursor.then(|| {
         transfer_cursor_sql(
             &col_names,
             table,
@@ -6835,7 +6842,7 @@ where
             request.source_catalog.as_deref(),
         )
     });
-    let mut impala_cursor = ImpalaTransferCursor::default();
+    let mut hive_server_cursor = HiveServerTransferCursor::default();
 
     let transfer_result: Result<(), String> = async {
         loop {
@@ -6843,10 +6850,17 @@ where
                 return Err("Cancelled".to_string());
             }
 
-            let (result, mysql_spatial_markers) = if let Some(sql) = impala_transfer_sql.as_deref() {
+            let (result, mysql_spatial_markers) = if let Some(sql) = hive_server_transfer_sql.as_deref() {
                 (
-                    fetch_impala_transfer_batch(state, source_pool_key, request, sql, batch_size, &mut impala_cursor)
-                        .await?,
+                    fetch_hive_server_transfer_batch(
+                        state,
+                        source_pool_key,
+                        request,
+                        sql,
+                        batch_size,
+                        &mut hive_server_cursor,
+                    )
+                    .await?,
                     false,
                 )
             } else {
@@ -6928,14 +6942,14 @@ where
                 terminal: false,
             });
 
-            if (use_impala_cursor && !has_more) || (!use_impala_cursor && row_count < batch_size) {
+            if (use_hive_server_cursor && !has_more) || (!use_hive_server_cursor && row_count < batch_size) {
                 break;
             }
         }
         Ok(())
     }
     .await;
-    close_impala_transfer_cursor(state, source_pool_key, &mut impala_cursor).await;
+    close_hive_server_transfer_cursor(state, source_pool_key, &mut hive_server_cursor).await;
     transfer_result?;
 
     if pg_compat_transfer {
@@ -9333,6 +9347,34 @@ mod tests {
             map_column_type("timestamp with time zone", &DatabaseType::Postgres, &DatabaseType::Hive),
             "TIMESTAMP"
         );
+    }
+
+    #[test]
+    fn kyuubi_transfer_uses_spark_sql_compatible_ddl_and_batches() {
+        let cols = vec![
+            db::ColumnInfo { is_primary_key: true, is_nullable: false, ..test_column("id", "bigint") },
+            db::ColumnInfo { is_nullable: false, ..test_column("payload", "jsonb") },
+        ];
+
+        let ddl = generate_create_table_ddl(
+            &cols,
+            "events",
+            "public",
+            "warehouse",
+            &DatabaseType::Kyuubi,
+            &DatabaseType::Postgres,
+            None,
+            None,
+        );
+
+        assert!(ddl.contains("CREATE TABLE IF NOT EXISTS `warehouse`.`events`"));
+        assert!(ddl.contains("`id` BIGINT"));
+        assert!(ddl.contains("`payload` STRING"));
+        assert!(!ddl.contains("PRIMARY KEY"));
+        assert!(!ddl.contains("NOT NULL"));
+        assert_eq!(quote_identifier("user`events", &DatabaseType::Kyuubi), "`user``events`");
+        assert_eq!(max_transfer_write_rows(&DatabaseType::Kyuubi, &TransferMode::Append), 500);
+        assert_eq!(max_transfer_write_rows(&DatabaseType::Kyuubi, &TransferMode::Upsert), 500);
     }
 
     #[test]

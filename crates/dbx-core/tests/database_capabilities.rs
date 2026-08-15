@@ -97,6 +97,7 @@ fn driver_manifest() -> DriverManifest {
 fn maps_agent_database_types_to_driver_keys() {
     assert_eq!(agent_key(&DatabaseType::Trino, None), Some("trino"));
     assert_eq!(agent_key(&DatabaseType::Hive, None), Some("hive"));
+    assert_eq!(agent_key(&DatabaseType::Kyuubi, None), Some("hive"));
     assert_eq!(agent_key(&DatabaseType::Impala, None), Some("hive"));
     assert_eq!(agent_key(&DatabaseType::Tdengine, None), Some("tdengine"));
     assert_eq!(agent_key(&DatabaseType::Iotdb, None), Some("iotdb"));
@@ -140,6 +141,7 @@ fn classifies_agent_database_types() {
     assert!(is_agent_type(&DatabaseType::Oracle));
     assert!(is_agent_type(&DatabaseType::Trino));
     assert!(is_agent_type(&DatabaseType::Hive));
+    assert!(is_agent_type(&DatabaseType::Kyuubi));
     assert!(is_agent_type(&DatabaseType::Impala));
     assert!(is_agent_type(&DatabaseType::Tdengine));
     assert!(is_agent_type(&DatabaseType::Iotdb));
@@ -373,6 +375,25 @@ fn driver_manifest_declares_expected_product_capabilities() {
     assert!(!impala.capabilities.table_import);
     assert!(!impala.capabilities.diagram);
     assert!(!impala.capabilities.user_admin);
+
+    let kyuubi = find_driver(DatabaseType::Kyuubi);
+    assert_eq!(kyuubi.label, "Apache Kyuubi");
+    assert_eq!(kyuubi.runtime_mode, "agent");
+    assert_eq!(kyuubi.agent_key.as_deref(), Some("hive"));
+    assert_eq!(kyuubi.support_level, "operate");
+    assert!(kyuubi.capabilities.query_execution);
+    assert!(kyuubi.capabilities.metadata_browse);
+    assert!(kyuubi.capabilities.object_browser);
+    assert!(kyuubi.capabilities.object_source);
+    assert!(kyuubi.capabilities.schema_search);
+    assert!(kyuubi.capabilities.sql_explain);
+    assert!(kyuubi.capabilities.data_transfer);
+    assert!(kyuubi.capabilities.sql_file_execution);
+    assert!(!kyuubi.capabilities.table_data_edit);
+    assert!(!kyuubi.capabilities.table_structure_edit);
+    assert!(!kyuubi.capabilities.table_import);
+    assert!(!kyuubi.capabilities.diagram);
+    assert!(!kyuubi.capabilities.user_admin);
 }
 
 #[test]

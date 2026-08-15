@@ -53,6 +53,7 @@ export type DatabaseType =
   | "trino"
   | "prestosql"
   | "hive"
+  | "kyuubi"
   | "impala"
   | "spark"
   | "db2"

@@ -24,7 +24,7 @@ export function hasInstalledAgentVersion(drivers: readonly AgentDriverInstallSta
 }
 
 export function agentDriverInstallKey(dbType: DatabaseType | undefined, driverProfile?: string): string | undefined {
-  if (dbType === "impala") return "hive";
+  if (dbType === "kyuubi" || dbType === "impala") return "hive";
   if (dbType === "oracle") return "oracle";
   if (dbType === "mongodb") return "mongodb";
   if (dbType === "dameng") return "dameng";

@@ -114,6 +114,15 @@ func TestNormalizeHiveAuth(t *testing.T) {
 	}
 }
 
+func TestWaitsForKyuubiAndImpalaNonQueryCompletion(t *testing.T) {
+	if !waitsForNonQueryCompletion("kyuubi") || !waitsForNonQueryCompletion("KYUUBI") || !waitsForNonQueryCompletion("impala") {
+		t.Fatal("Kyuubi and Impala must wait for asynchronous non-query operations")
+	}
+	if waitsForNonQueryCompletion("hive") {
+		t.Fatal("Hive must retain its existing non-query behavior")
+	}
+}
+
 func TestKerberosServiceForEndpoint(t *testing.T) {
 	target := endpoint{Host: "hs2.example.com", Port: 10000, Principal: "hive/hs2.example.com@EXAMPLE.COM"}
 	discovered := connectionConfig{Kerberos: kerberosConfig{Service: "hive"}}

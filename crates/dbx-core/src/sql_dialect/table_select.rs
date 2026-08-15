@@ -529,7 +529,7 @@ pub(super) fn build_select_columns(
             .collect::<Vec<_>>()
             .join(", ");
     }
-    if !matches!(database_type, Some(DatabaseType::Hive | DatabaseType::Impala)) {
+    if !matches!(database_type, Some(DatabaseType::Hive | DatabaseType::Kyuubi | DatabaseType::Impala)) {
         return "*".to_string();
     }
     columns

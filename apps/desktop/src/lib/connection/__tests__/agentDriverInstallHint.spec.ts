@@ -9,10 +9,12 @@ describe("DuckDB driver installation", () => {
   });
 });
 
-describe("Impala driver installation", () => {
+describe("HiveServer2-compatible driver installation", () => {
   it("reuses the downloadable Hive driver", () => {
     expect(agentDriverInstallKey("impala")).toBe("hive");
     expect(showAgentDriverInstallHint("impala", [{ db_type: "hive", installed: true }])).toBe(false);
+    expect(agentDriverInstallKey("kyuubi")).toBe("hive");
+    expect(showAgentDriverInstallHint("kyuubi", [{ db_type: "hive", installed: true }])).toBe(false);
   });
 });
 

@@ -1095,6 +1095,7 @@ export const useConnectionStore = defineStore("connection", () => {
       trino: "Trino",
       prestosql: "PrestoSQL",
       hive: "Hive",
+      kyuubi: "Apache Kyuubi",
       impala: "Apache Impala",
       spark: "Apache Spark",
       db2: "DB2",

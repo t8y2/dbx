@@ -17,12 +17,14 @@ function hiveServerUrlParams(urlParams?: string): Map<string, string> {
 
 export function connectionUsesPasswordlessAuthentication(config: PasswordAuthenticationConfig): boolean {
   const profile = config.driver_profile || config.db_type;
-  if (config.db_type !== "impala" && profile !== "impala") return false;
+  const isImpala = config.db_type === "impala" || profile === "impala";
+  const isKyuubi = config.db_type === "kyuubi" || profile === "kyuubi";
+  if (!isImpala && !isKyuubi) return false;
 
   const params = hiveServerUrlParams(config.url_params);
   if (params.get("principal")) return false;
-  const auth = (params.get("auth") || "nosasl").toLowerCase();
-  return auth === "nosasl";
+  const auth = (params.get("auth") || (isKyuubi ? "none" : "nosasl")).toLowerCase();
+  return isKyuubi ? auth === "none" || auth === "nosasl" : auth === "nosasl";
 }
 
 export function connectionNeedsPasswordPrompt(config: ConnectionConfig): boolean {

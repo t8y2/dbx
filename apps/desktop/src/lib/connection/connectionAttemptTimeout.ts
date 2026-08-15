@@ -30,6 +30,7 @@ const DRIVER_STARTUP_FLOOR_TYPES = new Set<DatabaseType>([
   "prestosql",
   "jdbc",
   "hive",
+  "kyuubi",
   "impala",
   "spark",
   "db2",

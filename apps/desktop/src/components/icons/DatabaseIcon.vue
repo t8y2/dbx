@@ -56,6 +56,7 @@ const assetIcons: Record<string, string> = {
   presto: "presto",
   prestosql: "presto",
   hive: "hive",
+  kyuubi: "kyuubi.png",
   impala: "impala",
   hbase: "hbase",
   phoenix: "phoenix",

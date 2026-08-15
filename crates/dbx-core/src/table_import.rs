@@ -3550,7 +3550,11 @@ fn text_data_type(db_type: &DatabaseType) -> &'static str {
         DatabaseType::SqlServer => "NVARCHAR(MAX)",
         DatabaseType::Oracle | DatabaseType::OceanbaseOracle | DatabaseType::Dameng => "CLOB",
         DatabaseType::ClickHouse => "String",
-        DatabaseType::Hive | DatabaseType::Trino | DatabaseType::PrestoSql | DatabaseType::Databricks => "STRING",
+        DatabaseType::Hive
+        | DatabaseType::Kyuubi
+        | DatabaseType::Trino
+        | DatabaseType::PrestoSql
+        | DatabaseType::Databricks => "STRING",
         _ => "TEXT",
     }
 }

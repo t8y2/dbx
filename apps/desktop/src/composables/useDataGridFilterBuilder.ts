@@ -40,6 +40,34 @@ export function moveDataGridStructuredFilterRule(rules: readonly DataGridStructu
   return nextRules;
 }
 
+export function createDataGridFilterConditionCache() {
+  const entries = new Map<string, { signature: string; condition: Promise<string | null> }>();
+
+  function resolve(ruleId: string, signature: string, build: () => Promise<string | null>): Promise<string | null> {
+    const cached = entries.get(ruleId);
+    if (cached?.signature === signature) return cached.condition;
+
+    let condition: Promise<string | null>;
+    condition = Promise.resolve()
+      .then(build)
+      .catch((error) => {
+        if (entries.get(ruleId)?.condition === condition) entries.delete(ruleId);
+        throw error;
+      });
+    entries.set(ruleId, { signature, condition });
+    return condition;
+  }
+
+  function retain(ruleIds: readonly string[]) {
+    const retained = new Set(ruleIds);
+    for (const ruleId of entries.keys()) {
+      if (!retained.has(ruleId)) entries.delete(ruleId);
+    }
+  }
+
+  return { resolve, retain };
+}
+
 export function useDataGridFilterBuilder(options: UseDataGridFilterBuilderOptions) {
   const rules = ref<DataGridStructuredFilterRule[]>([]);
   const open = ref(false);

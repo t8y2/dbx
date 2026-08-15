@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { buildDataGridStructuredWhere, moveDataGridStructuredFilterRule, useDataGridFilterBuilder, type DataGridStructuredFilterRule } from "@/composables/useDataGridFilterBuilder";
+import { describe, expect, it, vi } from "vitest";
+import { buildDataGridStructuredWhere, createDataGridFilterConditionCache, moveDataGridStructuredFilterRule, useDataGridFilterBuilder, type DataGridStructuredFilterRule } from "@/composables/useDataGridFilterBuilder";
 
 describe("useDataGridFilterBuilder", () => {
   it("searches columns by camel-case initials and any-position text", () => {
@@ -82,5 +82,22 @@ describe("useDataGridFilterBuilder", () => {
     expect(moveDataGridStructuredFilterRule(rules, "a", 99).map((item) => item.id)).toEqual(["b", "c", "a"]);
     expect(moveDataGridStructuredFilterRule(rules, "c", -2).map((item) => item.id)).toEqual(["c", "a", "b"]);
     expect(moveDataGridStructuredFilterRule(rules, "missing", 1)).toEqual(rules);
+  });
+
+  it("reuses unchanged rule conditions and drops removed rules", async () => {
+    const cache = createDataGridFilterConditionCache();
+    const buildFirst = vi.fn(async () => "id = 1");
+    const buildChanged = vi.fn(async () => "id = 2");
+
+    await expect(cache.resolve("rule-1", "id:1", buildFirst)).resolves.toBe("id = 1");
+    await expect(cache.resolve("rule-1", "id:1", buildFirst)).resolves.toBe("id = 1");
+    expect(buildFirst).toHaveBeenCalledOnce();
+
+    await expect(cache.resolve("rule-1", "id:2", buildChanged)).resolves.toBe("id = 2");
+    expect(buildChanged).toHaveBeenCalledOnce();
+
+    cache.retain([]);
+    await expect(cache.resolve("rule-1", "id:2", buildChanged)).resolves.toBe("id = 2");
+    expect(buildChanged).toHaveBeenCalledTimes(2);
   });
 });

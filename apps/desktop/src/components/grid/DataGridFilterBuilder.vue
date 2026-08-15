@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import { Check, Eye, EyeOff, GripVertical, Plus, Search, Trash2, X } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
 import { Button } from "@/components/ui/button";
@@ -7,6 +7,7 @@ import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { filterModeNeedsValue, filterModeUsesList, filterModeUsesRange } from "@/lib/dataGrid/dataGridColumnFilter";
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
+import { resolveDataGridFilterRuleDropPlacement } from "@/lib/dataGrid/dataGridFilterRuleDrag";
 import type { DataGridContextFilterMode } from "@/lib/dataGrid/dataGridSql";
 import type { DataGridStructuredFilterRule } from "@/composables/useDataGridFilterBuilder";
 
@@ -19,6 +20,9 @@ const COLUMN_CONTROL_MIN_WIDTH = 88;
 const COLUMN_CONTROL_MAX_WIDTH = 178;
 const COLUMN_CONTROL_CHROME_WIDTH = 40;
 const COLUMN_CHARACTER_WIDTH = 6.5;
+const RULE_DROP_ZONE_EXTENSION = 36;
+const RULE_AUTO_SCROLL_EDGE_SIZE = 40;
+const RULE_AUTO_SCROLL_MAX_SPEED = 12;
 type ValueShortcutHintDay = { date: string; count: number };
 const props = withDefaults(
   defineProps<{
@@ -46,6 +50,7 @@ const emit = defineEmits<{
 }>();
 const columnSearchInputs = new Map<string, HTMLInputElement>();
 const filterRuleElements = new Map<string, HTMLElement>();
+const filterBuilderRootRef = ref<HTMLElement>();
 const pendingValueFocus = new Set<string>();
 const pendingKeyboardAddFocus = new Set<string>();
 const openColumnSelectIds = ref(new Set<string>());
@@ -58,7 +63,11 @@ const compositionEndedAt = new Map<string, number>();
 const draggingRuleId = ref<string>();
 const dropRuleId = ref<string>();
 const dropPosition = ref<"before" | "after">();
+const dropTargetIndex = ref<number>();
 let ruleIdsBeforeKeyboardAdd: Set<string> | undefined;
+let ruleDragContainer: HTMLElement | undefined;
+let ruleDragPointerY: number | undefined;
+let ruleAutoScrollFrame: number | undefined;
 
 function columnNameDisplayUnits(value: string) {
   return Array.from(value).reduce((total, character) => total + ((character.codePointAt(0) ?? 0) > 0xff ? 2 : 1), 0);
@@ -125,10 +134,112 @@ function setFilterRuleElement(id: string, element: unknown) {
   else filterRuleElements.delete(id);
 }
 
-function clearRuleDragState() {
-  draggingRuleId.value = undefined;
+function stopRuleAutoScroll() {
+  if (ruleAutoScrollFrame !== undefined) window.cancelAnimationFrame(ruleAutoScrollFrame);
+  ruleAutoScrollFrame = undefined;
+}
+
+function removeRuleDragListeners() {
+  window.removeEventListener("dragover", handleRuleContainerDragOver, true);
+  window.removeEventListener("drop", handleRuleContainerDrop, true);
+}
+
+function clearRuleDropTarget() {
   dropRuleId.value = undefined;
   dropPosition.value = undefined;
+  dropTargetIndex.value = undefined;
+}
+
+function clearRuleDragState() {
+  stopRuleAutoScroll();
+  removeRuleDragListeners();
+  draggingRuleId.value = undefined;
+  ruleDragContainer = undefined;
+  ruleDragPointerY = undefined;
+  clearRuleDropTarget();
+}
+
+function ruleDropZoneContains(event: DragEvent, bounds: DOMRect) {
+  return event.clientX >= bounds.left && event.clientX <= bounds.right && event.clientY >= bounds.top - RULE_DROP_ZONE_EXTENSION && event.clientY <= bounds.bottom + RULE_DROP_ZONE_EXTENSION;
+}
+
+function updateRuleDropTarget(clientY: number) {
+  if (!draggingRuleId.value) return;
+  const placement = resolveDataGridFilterRuleDropPlacement(
+    props.rules.map((rule) => rule.id),
+    draggingRuleId.value,
+    props.rules.flatMap((rule) => {
+      const element = filterRuleElements.get(rule.id);
+      if (!element) return [];
+      const bounds = element.getBoundingClientRect();
+      return [{ id: rule.id, top: bounds.top, bottom: bounds.bottom }];
+    }),
+    clientY,
+  );
+  if (!placement) {
+    clearRuleDropTarget();
+    return;
+  }
+  dropRuleId.value = placement.ruleId;
+  dropPosition.value = placement.position;
+  dropTargetIndex.value = placement.targetIndex;
+}
+
+function ruleAutoScrollSpeed(clientY: number, bounds: DOMRect) {
+  if (clientY < bounds.top + RULE_AUTO_SCROLL_EDGE_SIZE) {
+    const intensity = Math.min(1, Math.max(0, (bounds.top + RULE_AUTO_SCROLL_EDGE_SIZE - clientY) / RULE_AUTO_SCROLL_EDGE_SIZE));
+    return -Math.max(1, Math.ceil(intensity * RULE_AUTO_SCROLL_MAX_SPEED));
+  }
+  if (clientY > bounds.bottom - RULE_AUTO_SCROLL_EDGE_SIZE) {
+    const intensity = Math.min(1, Math.max(0, (clientY - (bounds.bottom - RULE_AUTO_SCROLL_EDGE_SIZE)) / RULE_AUTO_SCROLL_EDGE_SIZE));
+    return Math.max(1, Math.ceil(intensity * RULE_AUTO_SCROLL_MAX_SPEED));
+  }
+  return 0;
+}
+
+function runRuleAutoScroll() {
+  ruleAutoScrollFrame = undefined;
+  if (!draggingRuleId.value || !ruleDragContainer || ruleDragPointerY === undefined) return;
+  const bounds = ruleDragContainer.getBoundingClientRect();
+  const speed = ruleAutoScrollSpeed(ruleDragPointerY, bounds);
+  if (!speed) return;
+  const previousScrollTop = ruleDragContainer.scrollTop;
+  ruleDragContainer.scrollTop += speed;
+  if (ruleDragContainer.scrollTop === previousScrollTop) return;
+  updateRuleDropTarget(ruleDragPointerY);
+  ruleAutoScrollFrame = window.requestAnimationFrame(runRuleAutoScroll);
+}
+
+function scheduleRuleAutoScroll() {
+  if (ruleAutoScrollFrame === undefined) ruleAutoScrollFrame = window.requestAnimationFrame(runRuleAutoScroll);
+}
+
+function handleRuleContainerDragOver(event: DragEvent) {
+  if (!draggingRuleId.value || !ruleDragContainer) return;
+  const bounds = ruleDragContainer.getBoundingClientRect();
+  if (!ruleDropZoneContains(event, bounds)) {
+    stopRuleAutoScroll();
+    clearRuleDropTarget();
+    return;
+  }
+  event.preventDefault();
+  if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
+  ruleDragPointerY = event.clientY;
+  updateRuleDropTarget(event.clientY);
+  scheduleRuleAutoScroll();
+}
+
+function handleRuleContainerDrop(event: DragEvent) {
+  if (!draggingRuleId.value || !ruleDragContainer) return;
+  const bounds = ruleDragContainer.getBoundingClientRect();
+  if (!ruleDropZoneContains(event, bounds)) {
+    clearRuleDragState();
+    return;
+  }
+  event.preventDefault();
+  updateRuleDropTarget(event.clientY);
+  if (dropTargetIndex.value !== undefined) emit("move", draggingRuleId.value, dropTargetIndex.value);
+  clearRuleDragState();
 }
 
 function startRuleDrag(event: DragEvent, id: string) {
@@ -136,38 +247,18 @@ function startRuleDrag(event: DragEvent, id: string) {
     event.preventDefault();
     return;
   }
+  const handle = event.currentTarget instanceof HTMLElement ? event.currentTarget : undefined;
+  ruleDragContainer = handle?.closest<HTMLElement>("[data-filter-rules-scroll]") ?? filterBuilderRootRef.value;
+  if (!ruleDragContainer) {
+    event.preventDefault();
+    return;
+  }
+  clearRuleDropTarget();
   draggingRuleId.value = id;
+  window.addEventListener("dragover", handleRuleContainerDragOver, true);
+  window.addEventListener("drop", handleRuleContainerDrop, true);
   event.dataTransfer.effectAllowed = "move";
   event.dataTransfer.setData("text/plain", id);
-}
-
-function updateRuleDropTarget(event: DragEvent, id: string) {
-  if (!draggingRuleId.value || draggingRuleId.value === id) return;
-  event.preventDefault();
-  if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
-  const target = filterRuleElements.get(id);
-  if (!target) return;
-  const bounds = target.getBoundingClientRect();
-  dropRuleId.value = id;
-  dropPosition.value = event.clientY < bounds.top + bounds.height / 2 ? "before" : "after";
-}
-
-function dropRule(event: DragEvent, id: string) {
-  if (!draggingRuleId.value || draggingRuleId.value === id || dropRuleId.value !== id || !dropPosition.value) {
-    clearRuleDragState();
-    return;
-  }
-  event.preventDefault();
-  const sourceIndex = props.rules.findIndex((rule) => rule.id === draggingRuleId.value);
-  const targetIndex = props.rules.findIndex((rule) => rule.id === id);
-  if (sourceIndex < 0 || targetIndex < 0) {
-    clearRuleDragState();
-    return;
-  }
-  let nextIndex = targetIndex + (dropPosition.value === "after" ? 1 : 0);
-  if (sourceIndex < nextIndex) nextIndex -= 1;
-  emit("move", draggingRuleId.value, nextIndex);
-  clearRuleDragState();
 }
 
 function moveRuleByKeyboard(event: KeyboardEvent, id: string, offset: -1 | 1) {
@@ -299,6 +390,8 @@ watch(
   },
 );
 
+onBeforeUnmount(clearRuleDragState);
+
 function handleColumnSearchKeydown(event: KeyboardEvent, rule: DataGridStructuredFilterRule) {
   if (isImeCompositionKey(event, `column:${rule.id}`)) {
     event.stopPropagation();
@@ -367,7 +460,7 @@ function blurValueRule(id: string) {
 </script>
 
 <template>
-  <div class="w-fit max-w-full" :class="props.layout === 'text' ? 'w-full space-y-0' : [props.layout === 'panel' ? '!w-full' : '', 'space-y-2']" :style="filterBuilderStyle">
+  <div ref="filterBuilderRootRef" class="w-fit max-w-full" :class="props.layout === 'text' ? 'w-full space-y-0' : [props.layout === 'panel' ? '!w-full' : '', 'space-y-2']" :style="filterBuilderStyle">
     <div v-if="props.showHeader !== false" class="flex items-center justify-between gap-2">
       <div class="text-xs font-medium text-foreground">{{ t("grid.filter") }}</div>
       <Button variant="ghost" size="sm" class="h-7 px-2 text-xs" @click="emit('clear')"> <Trash2 class="mr-1 h-3.5 w-3.5" />{{ t("grid.clearFilter") }} </Button>
@@ -390,8 +483,6 @@ function blurValueRule(id: string) {
                 ? 'grid-cols-[18px_minmax(128px,1fr)_132px_minmax(158px,1.35fr)_auto]'
                 : 'grid-cols-[18px_var(--filter-builder-column-width)_92px_var(--filter-builder-value-width)_auto]'
           "
-          @dragover="updateRuleDropTarget($event, rule.id)"
-          @drop="dropRule($event, rule.id)"
         >
           <button
             type="button"

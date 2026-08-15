@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref, watch } from "vue";
-import { Copy, Plus, Trash2 } from "@lucide/vue";
+import { Copy, Plus, RotateCcw, Trash2 } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
 import { Button } from "@/components/ui/button";
 import DataGridFilterBuilder from "@/components/grid/DataGridFilterBuilder.vue";
@@ -81,7 +81,7 @@ watch(
         <code class="min-w-0 flex-1 truncate rounded bg-muted/35 px-1.5 py-0.5 text-[11px]" :class="sqlPreview ? 'text-foreground' : 'text-muted-foreground'" :title="previewText">{{ previewText }}</code>
         <Button variant="ghost" size="icon" class="h-6 w-6 shrink-0" :disabled="!sqlPreview" :aria-label="t('grid.copyFilterSql')" @click="emit('copySql')"><Copy class="h-3 w-3" /></Button>
       </div>
-      <Button variant="ghost" size="sm" class="h-7 shrink-0 px-2 text-xs" @click="emit('reset')">{{ t("grid.resetFilterBuilder") }}</Button>
+      <Button variant="outline" size="sm" class="h-7 shrink-0 px-2 text-xs" @click="emit('reset')"><RotateCcw class="mr-1 h-3.5 w-3.5" />{{ t("grid.resetFilterBuilder") }}</Button>
       <Button variant="ghost" size="sm" class="h-7 shrink-0 px-2 text-xs text-muted-foreground hover:text-destructive" @click="emit('clear')"><Trash2 class="mr-1 h-3.5 w-3.5" />{{ t("grid.clearFilter") }}</Button>
       <Button size="sm" class="h-7 shrink-0 px-3 text-xs" :disabled="disabled" @click="emit('apply')">{{ t("grid.applyFilter") }}</Button>
     </footer>

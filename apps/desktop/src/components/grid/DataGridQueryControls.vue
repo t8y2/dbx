@@ -164,7 +164,7 @@ onUnmounted(onResizeEnd);
               <span v-if="filterButtonCount" class="absolute -right-1 -top-1 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-primary px-1 text-[9px] leading-none text-primary-foreground">{{ filterButtonCount }}</span>
             </button>
           </PopoverTrigger>
-          <PopoverContent align="start" class="w-fit max-w-[calc(100vw-16px)] gap-2 p-2.5">
+          <PopoverContent data-filter-rules-scroll align="start" :collision-padding="8" class="max-h-[var(--reka-popover-content-available-height)] w-fit max-w-[calc(100vw-16px)] gap-2 overflow-y-auto overscroll-contain p-2.5">
             <div class="flex items-center justify-between gap-2">
               <div class="text-xs font-medium text-foreground">{{ t("grid.filter") }}</div>
               <Button variant="ghost" size="sm" class="h-6 px-2 text-xs" @click="emit('clearFilters')"><Trash2 class="mr-1 h-3.5 w-3.5" />{{ t("grid.clearFilter") }}</Button>

@@ -40,6 +40,7 @@ vi.mock("@lucide/vue", async () => {
     Info: icon,
     Pencil: icon,
     Plus: icon,
+    RotateCcw: icon,
     Trash2: icon,
   };
 });
@@ -897,6 +898,10 @@ describe("DataGridQueryControls", () => {
 
     expect(String(popoverContent.props.class)).toContain("w-fit");
     expect(String(popoverContent.props.class)).toContain("max-w-[calc(100vw-16px)]");
+    expect(String(popoverContent.props.class)).toContain("max-h-[var(--reka-popover-content-available-height)]");
+    expect(String(popoverContent.props.class)).toContain("overflow-y-auto");
+    expect(popoverContent.props["data-filter-rules-scroll"]).toBe("");
+    expect(popoverContent.props["collision-padding"]).toBe(8);
   });
 
   it("keeps filter actions available in the popover", () => {
@@ -1081,10 +1086,9 @@ describe("DataGridFilterWorkbench", () => {
       findOne(mounted.root, (node) => node.type === "button" && hostText(node) === "grid.filterBuilderAddRule"),
       "click",
     );
-    dispatch(
-      findOne(mounted.root, (node) => node.type === "button" && hostText(node) === "grid.resetFilterBuilder"),
-      "click",
-    );
+    const resetButton = findOne(mounted.root, (node) => node.type === "button" && hostText(node) === "grid.resetFilterBuilder");
+    expect(resetButton.props.variant).toBe("outline");
+    dispatch(resetButton, "click");
     dispatch(
       findOne(mounted.root, (node) => node.type === "button" && hostText(node) === "grid.applyFilter"),
       "click",
@@ -1137,6 +1141,7 @@ describe("DataGridTextFilterWorkbench", () => {
     const panel = findOne(mounted.root, (node) => node.props["data-grid-text-filter-workbench"] === "");
     const rulesArea = findOne(mounted.root, (node) => node.props["data-filter-rules-scroll"] === "") as any;
     const resizeHandle = findOne(mounted.root, (node) => node.props.role === "separator");
+    const resetButton = findOne(mounted.root, (node) => node.type === "button" && hostText(node) === "grid.resetFilterBuilder");
 
     expect(ensureRule).toHaveBeenCalledOnce();
     expect(panel.props.style).toEqual({ height: "168px", maxHeight: "55vh" });
@@ -1144,6 +1149,7 @@ describe("DataGridTextFilterWorkbench", () => {
     const addTooltip = findOne(mounted.root, (node) => node.props["data-stub"] === "Tooltip");
     expect(addTooltip.props.delayDuration ?? addTooltip.props["delay-duration"]).toBe(800);
     expect(hostText(addTooltip)).toContain("Shift+Enter");
+    expect(resetButton.props.variant).toBe("outline");
 
     rulesArea.focus = vi.fn();
     dispatch(rulesArea, "pointerdown");

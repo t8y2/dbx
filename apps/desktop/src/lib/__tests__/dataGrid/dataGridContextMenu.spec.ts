@@ -20,13 +20,28 @@ describe("dataGridContextMenu", () => {
 
   it("omits unavailable server actions and disables unavailable formatter", () => {
     const items = createDataGridCompactColumnActionItems({
-      labels: { formatter: "formatter", localFilter: "local", serverFilter: "server" },
-      icons: { formatter: icon, filter: icon, database: icon },
+      labels: { formatter: "formatter", clearFormatter: "clear formatter", localFilter: "local", serverFilter: "server" },
+      icons: { formatter: icon, clearFormatter: icon, filter: icon, database: icon },
       formatterAvailable: false,
+      formatterActive: false,
       serverFilterAvailable: false,
     });
-    expect(items.map((item) => item.value)).toEqual(["formatter", "localFilter"]);
+    expect(items.map((item) => item.value)).toEqual(["formatter", "localFilter", "clearFormatter"]);
     expect(items[0]?.disabled).toBe(true);
+    expect(items[0]?.checked).toBe(false);
+    expect(items.at(-1)).toMatchObject({ disabled: true, separatorBefore: true });
+  });
+
+  it("marks an active formatter and enables the compact clear action", () => {
+    const items = createDataGridCompactColumnActionItems({
+      labels: { formatter: "formatter", clearFormatter: "clear formatter", localFilter: "local", serverFilter: "server" },
+      icons: { formatter: icon, clearFormatter: icon, filter: icon, database: icon },
+      formatterAvailable: true,
+      formatterActive: true,
+      serverFilterAvailable: true,
+    });
+    expect(items[0]).toMatchObject({ value: "formatter", checked: true, disabled: false });
+    expect(items.at(-1)).toMatchObject({ value: "clearFormatter", disabled: false, separatorBefore: true });
   });
 
   it("builds typed column, cell, and row capability groups", () => {

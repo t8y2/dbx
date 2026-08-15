@@ -1162,15 +1162,17 @@ function openCompactLocalFilter(colIdx: number, mode: LocalFilterMode = "local")
   });
 }
 
-function compactColumnActionMenuItems(columnName: string) {
+function compactColumnActionMenuItems(columnName: string, columnIndex: number) {
   return createDataGridCompactColumnActionItems({
     labels: {
       formatter: t("grid.columnFormatter"),
+      clearFormatter: t("grid.clearFormatter"),
       localFilter: t("grid.localFilter"),
       serverFilter: t("grid.databaseValueFilter"),
     },
-    icons: { formatter: Code2, filter: Filter, database: Database },
+    icons: { formatter: Code2, clearFormatter: Eraser, filter: Filter, database: Database },
     formatterAvailable: !!formatterKeyForColumn(columnName),
+    formatterActive: columnHasFormatter(columnIndex),
     serverFilterAvailable: canUseServerColumnFilter.value,
   });
 }
@@ -1182,6 +1184,8 @@ function columnFilterPanelTitle(columnName: string): string {
 function selectCompactColumnAction(value: string, columnIndex: number) {
   if (value === "formatter") {
     openCompactColumnFormatter(columnIndex);
+  } else if (value === "clearFormatter") {
+    clearColumnFormatter(columnIndex);
   } else if (value === "localFilter") {
     openCompactLocalFilter(columnIndex, "local");
   } else if (value === "serverFilter") {
@@ -10864,8 +10868,9 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                         </LightDropdownMenu>
                         <LightDropdownMenu
                           v-if="compactColumnHeaderActions"
-                          :items="compactColumnActionMenuItems(col.name)"
+                          :items="compactColumnActionMenuItems(col.name, col.actualColIdx)"
                           :open="headerActionMenuOpenColumn === col.actualColIdx"
+                          check-position="none"
                           align="end"
                           content-class="w-max min-w-28 max-w-48 p-0.5"
                           item-class="gap-1 px-1.5 py-0.5 text-xs"

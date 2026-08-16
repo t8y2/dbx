@@ -58,6 +58,9 @@ const PARAMETER_NAME_RE = /^[\p{L}_][\p{L}\p{N}_]*(?:\.[\p{L}_][\p{L}\p{N}_]*)*$
 const PARAMETER_NAME_START_RE = /[\p{L}_]/u;
 const PARAMETER_NAME_CHAR_RE = /[\p{L}\p{N}_]/u;
 const SQL_SERVER_TEMP_TABLE_CONTEXT_KEYWORDS = new Set(["table", "from", "join", "into", "update", "truncate"]);
+const MYSQL_ROUTINE_LABEL_STATEMENTS = new Set(["begin", "loop", "while", "repeat"]);
+const MYSQL_ROUTINE_LABEL_CONTEXTS = new Set(["begin", "then", "else", "do", "loop", "repeat"]);
+const MYSQL_ROUTINE_LABEL_RE = /(?:`(?:``|[^`])+`|[\p{L}_][\p{L}\p{N}_]*)$/u;
 const POSTGRES_QUESTION_PARAMETER_PREFIX_KEYWORDS = new Set([
   "all",
   "and",
@@ -431,7 +434,16 @@ function findSqlParameterOccurrences(sql: string, options?: SqlParameterOptions)
     }
     if (ch === ":" && supportsNamedParameters && isSyntaxEnabled("named")) {
       const name = readParameterName(sql, i + 1);
-      if (name && sql[i - 1] !== ":" && sql[i + 1] !== "=" && !complexTypeFieldSeparators.has(i) && !duckDbStructFieldSeparators.has(i) && !isDuckDbCompactPrefixAliasSeparator(sql, i, options?.databaseType) && !triggerPseudoRecordFieldStarts.has(i)) {
+      if (
+        name &&
+        sql[i - 1] !== ":" &&
+        sql[i + 1] !== "=" &&
+        !complexTypeFieldSeparators.has(i) &&
+        !duckDbStructFieldSeparators.has(i) &&
+        !isDuckDbCompactPrefixAliasSeparator(sql, i, options?.databaseType) &&
+        !triggerPseudoRecordFieldStarts.has(i) &&
+        !isMysqlRoutineLabelSeparator(sql, i, name, options?.databaseType)
+      ) {
         occurrences.push({
           key: name,
           name,
@@ -483,6 +495,16 @@ function findSqlParameterOccurrences(sql: string, options?: SqlParameterOptions)
   }
 
   return occurrences;
+}
+
+function isMysqlRoutineLabelSeparator(sql: string, colonIndex: number, followingName: string, databaseType?: DatabaseType): boolean {
+  if (databaseType !== "mysql" || !MYSQL_ROUTINE_LABEL_STATEMENTS.has(followingName.toLowerCase())) return false;
+
+  const label = sql.slice(0, colonIndex).match(MYSQL_ROUTINE_LABEL_RE);
+  if (!label) return false;
+  const labelStart = colonIndex - label[0].length;
+  const prefix = sql.slice(0, labelStart).trimEnd();
+  return prefix.length === 0 || prefix.endsWith(";") || MYSQL_ROUTINE_LABEL_CONTEXTS.has(previousKeyword(sql, labelStart));
 }
 
 function readMyBatisForeachAt(sql: string, start: number): { collection: string; render: MyBatisForeach; end: number } | null {

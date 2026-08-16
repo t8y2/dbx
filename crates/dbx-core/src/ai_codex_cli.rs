@@ -1144,7 +1144,7 @@ mod tests {
         let prompt = "inspect this";
         let images = vec![AiInlineImage { media_type: "image/png".to_string(), data: "aGVsbG8=".to_string() }];
         let (directory, paths) = materialize_codex_images(&images).unwrap();
-        let mut command = build_codex_exec_command(&codex_config("default"), &prompt, &run_options());
+        let mut command = build_codex_exec_command(&codex_config("default"), prompt, &run_options());
         attach_codex_images(&mut command, &paths);
 
         assert_eq!(prompt, "inspect this");

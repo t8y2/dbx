@@ -91,13 +91,14 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
 
     const matrix = options.selectedCellMatrix.value;
     const isMultiCellSelection = !!matrix && (matrix.rowIndexes.length > 1 || matrix.columnIndexes.length > 1);
+    const contextCell = options.contextCell.value;
     // A right-click sets contextCell.col to the clicked column (≥ 0); the test
     // harness and non-right-click paths leave it at -1.
-    const hasRightClickContext = !!options.contextCell.value && options.contextSelectionIsSynthetic.value;
+    const hasRightClickContext = !!contextCell && options.contextSelectionIsSynthetic.value;
     // SQL predicates generated from the context menu must describe the cell the
     // user right-clicked, even when an existing row or range selection remains
     // active underneath that menu.
-    const contextPredicateCell = (extractor === "sql-select" || extractor === "where-clause") && options.contextCell.value?.col >= 0 ? options.contextCell.value : null;
+    const contextPredicateCell = (extractor === "sql-select" || extractor === "where-clause") && contextCell?.col !== undefined && contextCell.col >= 0 ? contextCell : null;
     // When the user already has a single-cell selection and right-clicks the same
     // cell, contextSelectionIsSynthetic is false but we still have a valid context
     // cell. For INSERT/UPDATE extractors, we include all visible non-PK columns

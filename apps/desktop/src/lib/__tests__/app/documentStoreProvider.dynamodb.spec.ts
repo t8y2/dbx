@@ -22,11 +22,11 @@ describe("DynamoDB document store provider", () => {
   it("keeps composite key identity and large-number wrappers intact", () => {
     const id = {
       tenant_id: "tenant-a",
-      sequence: { $number: "9007199254740993" },
+      sequence: { $dbxDynamoDb: { version: 1, type: "number", value: "9007199254740993" } },
     };
 
-    expect(serializeDocumentStoreId(id, "dynamodb")).toBe('{"tenant_id":"tenant-a","sequence":{"$number":"9007199254740993"}}');
-    expect(formatDocumentStoreIdLabel(id, "dynamodb")).toBe('{"tenant_id":"tenant-a","sequence":{"$number":"9007199254740993"}}');
+    expect(serializeDocumentStoreId(id, "dynamodb")).toBe('{"tenant_id":"tenant-a","sequence":{"$dbxDynamoDb":{"version":1,"type":"number","value":"9007199254740993"}}}');
+    expect(formatDocumentStoreIdLabel(id, "dynamodb")).toBe('{"tenant_id":"tenant-a","sequence":{"$dbxDynamoDb":{"version":1,"type":"number","value":"9007199254740993"}}}');
   });
 
   it("builds DynamoDB-compatible structured filters", () => {
@@ -50,7 +50,7 @@ describe("DynamoDB document store provider", () => {
     expect(update).not.toHaveBeenCalled();
   });
 
-  it("creates a rekeyed item before deleting the old DynamoDB key", async () => {
+  it("delegates a DynamoDB rekey to one atomic backend update", async () => {
     const calls: string[] = [];
     const insert = vi.fn(async () => {
       calls.push("insert");
@@ -76,7 +76,9 @@ describe("DynamoDB document store provider", () => {
       apis: { insert, update, delete: remove },
     });
 
-    expect(calls).toEqual(["insert", "delete"]);
-    expect(update).not.toHaveBeenCalled();
+    expect(calls).toEqual(["update"]);
+    expect(update).toHaveBeenCalledWith('{"tenant_id":"tenant-a","order_id":"order-1001"}', '{"tenant_id":"tenant-a","order_id":"order-1002","amount":42}', undefined);
+    expect(insert).not.toHaveBeenCalled();
+    expect(remove).not.toHaveBeenCalled();
   });
 });

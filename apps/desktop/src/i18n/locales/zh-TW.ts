@@ -3714,6 +3714,8 @@ export default withEnglishFallback({
     sortKeyOnly: "DynamoDB Query 只能依目前索引的排序鍵 {key} 排序",
     pageCursorUnavailable: "目前 DynamoDB 頁面游標不可用，請從第一頁重新載入",
     repeatedCursor: "DynamoDB 傳回重複的分頁游標，已停止匯出",
+    partialProjectionReadOnly: "目前 {projection} 索引不包含完整項目，為避免覆寫未投影屬性，已停用編輯",
+    exportLimitReached: "為限制記憶體和讀取用量，DynamoDB 匯出已在 {count} 筆停止；可設定匯出列數上限來調整範圍",
     documentDetails: "DynamoDB 表：{table}\n項目鍵：{id}",
   },
   vector: {

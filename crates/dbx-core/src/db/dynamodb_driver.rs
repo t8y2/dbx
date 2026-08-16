@@ -1,11 +1,11 @@
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use aws_sdk_dynamodb::config::{Credentials, Region};
 use aws_sdk_dynamodb::error::ProvideErrorMetadata;
 use aws_sdk_dynamodb::primitives::Blob;
-use aws_sdk_dynamodb::types::{AttributeValue, KeySchemaElement, KeyType, Select};
+use aws_sdk_dynamodb::types::{AttributeValue, Delete, KeySchemaElement, KeyType, Put, Select, TransactWriteItem};
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
 use serde_json::{Map, Value};
@@ -13,10 +13,33 @@ use tokio::sync::RwLock;
 
 use crate::db::document_result::DocumentQueryResult;
 use crate::models::connection::ConnectionConfig;
+use crate::types::QueryResult;
 
 const DEFAULT_REGION: &str = "us-east-1";
 const MAX_PAGE_SIZE: i32 = 1000;
 const MAX_JAVASCRIPT_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
+const DYNAMODB_JSON_TYPE_TAG: &str = "$dbxDynamoDb";
+const DYNAMODB_JSON_TYPE_VERSION: u64 = 1;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DynamoDbStatementOperation {
+    Read,
+    Insert,
+    Put,
+    Delete,
+}
+
+#[derive(Debug, PartialEq)]
+struct DynamoDbStatement {
+    operation: DynamoDbStatementOperation,
+    table: String,
+    limit: Option<i64>,
+    filter: Option<Value>,
+    sort: Option<Value>,
+    cursor: Option<String>,
+    key: Option<Value>,
+    item: Option<Value>,
+}
 
 macro_rules! dynamodb_sdk_error {
     ($context:expr, $error:expr) => {{
@@ -56,6 +79,8 @@ pub struct DynamoDbIndexInfo {
     pub kind: String,
     pub partition_key: DynamoDbKeyInfo,
     pub sort_key: Option<DynamoDbKeyInfo>,
+    pub projection_type: String,
+    pub non_key_attributes: Vec<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -68,8 +93,6 @@ pub struct DynamoDbTableDescription {
     pub partition_key: DynamoDbKeyInfo,
     pub sort_key: Option<DynamoDbKeyInfo>,
     pub indexes: Vec<DynamoDbIndexInfo>,
-    pub ttl_attribute: Option<String>,
-    pub ttl_status: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -324,6 +347,257 @@ pub async fn test_connection(client: &DynamoDbClient, timeout: Duration) -> Resu
         .map_err(|error| dynamodb_sdk_error!("DynamoDB connection failed", error))
 }
 
+pub async fn execute_statement(client: &DynamoDbClient, source: &str, max_rows: usize) -> Result<QueryResult, String> {
+    let started = Instant::now();
+    let statement = parse_dynamodb_statement(source)?;
+    match statement.operation {
+        DynamoDbStatementOperation::Read => {
+            let requested_limit = statement.limit.unwrap_or(max_rows.max(1).min(MAX_PAGE_SIZE as usize) as i64);
+            let effective_limit = requested_limit.min(max_rows.max(1).min(i64::MAX as usize) as i64);
+            let filter =
+                statement.filter.as_ref().map(serde_json::to_string).transpose().map_err(|error| error.to_string())?;
+            let sort =
+                statement.sort.as_ref().map(serde_json::to_string).transpose().map_err(|error| error.to_string())?;
+            let result = find_items(
+                client,
+                &statement.table,
+                effective_limit,
+                filter.as_deref(),
+                sort.as_deref(),
+                statement.cursor.as_deref(),
+            )
+            .await?;
+            Ok(document_query_result(result, started))
+        }
+        DynamoDbStatementOperation::Insert => {
+            let key = serde_json::to_string(statement.key.as_ref().expect("validated DynamoDB insert key"))
+                .map_err(|error| error.to_string())?;
+            let item = serde_json::to_string(statement.item.as_ref().expect("validated DynamoDB insert item"))
+                .map_err(|error| error.to_string())?;
+            insert_item_with_expected_identity(client, &statement.table, &item, Some(&key)).await?;
+            Ok(affected_query_result(1, started))
+        }
+        DynamoDbStatementOperation::Put => {
+            let key = serde_json::to_string(statement.key.as_ref().expect("validated DynamoDB put key"))
+                .map_err(|error| error.to_string())?;
+            let item = serde_json::to_string(statement.item.as_ref().expect("validated DynamoDB put item"))
+                .map_err(|error| error.to_string())?;
+            let affected = update_item(client, &statement.table, &key, &item).await?;
+            Ok(affected_query_result(affected, started))
+        }
+        DynamoDbStatementOperation::Delete => {
+            let key = serde_json::to_string(statement.key.as_ref().expect("validated DynamoDB delete key"))
+                .map_err(|error| error.to_string())?;
+            let affected = delete_item(client, &statement.table, &key).await?;
+            Ok(affected_query_result(affected, started))
+        }
+    }
+}
+
+fn parse_dynamodb_statement(source: &str) -> Result<DynamoDbStatement, String> {
+    let mut lines = source.lines();
+    let header = lines
+        .find(|line| !line.trim().is_empty())
+        .map(str::trim)
+        .ok_or_else(|| "DynamoDB statement is empty".to_string())?;
+    let operation = match header.to_ascii_uppercase().as_str() {
+        "DBX DYNAMODB SCAN" | "DBX DYNAMODB QUERY / SCAN" => DynamoDbStatementOperation::Read,
+        "DBX DYNAMODB INSERT ITEM" => DynamoDbStatementOperation::Insert,
+        "DBX DYNAMODB PUT ITEM" => DynamoDbStatementOperation::Put,
+        "DBX DYNAMODB DELETE ITEM" => DynamoDbStatementOperation::Delete,
+        _ => {
+            return Err(
+                "Unsupported DynamoDB statement. Use a DBX DYNAMODB SCAN, QUERY / SCAN, INSERT ITEM, PUT ITEM, or DELETE ITEM statement."
+                    .to_string(),
+            )
+        }
+    };
+
+    let mut fields = HashMap::new();
+    let mut current_name: Option<String> = None;
+    let mut current_value = String::new();
+    for line in lines {
+        if let Some((name, value)) = dynamodb_statement_field(line) {
+            finish_dynamodb_statement_field(&mut fields, current_name.take(), &mut current_value)?;
+            current_name = Some(name.to_string());
+            current_value.push_str(value.trim_start());
+        } else if current_name.is_some() {
+            if !current_value.is_empty() {
+                current_value.push('\n');
+            }
+            current_value.push_str(line);
+        } else if !line.trim().is_empty() {
+            return Err(format!("Invalid DynamoDB statement line: {line}"));
+        }
+    }
+    finish_dynamodb_statement_field(&mut fields, current_name.take(), &mut current_value)?;
+
+    let table = take_dynamodb_string_field(&mut fields, "table", true)?.expect("required table field");
+    let limit = take_dynamodb_integer_field(&mut fields, "limit")?;
+    if limit.is_some_and(|value| value <= 0) {
+        return Err("DynamoDB statement limit must be greater than zero".to_string());
+    }
+    let filter = take_dynamodb_object_field(&mut fields, "filter")?;
+    let sort = take_dynamodb_object_field(&mut fields, "sort")?;
+    let cursor = take_dynamodb_string_field(&mut fields, "cursor", false)?;
+    let key = take_dynamodb_object_field(&mut fields, "key")?;
+    let item = take_dynamodb_object_field(&mut fields, "item")?;
+    if !fields.is_empty() {
+        return Err(format!("Unsupported DynamoDB statement field: {}", fields.keys().next().unwrap()));
+    }
+
+    match operation {
+        DynamoDbStatementOperation::Read => {
+            if key.is_some() || item.is_some() {
+                return Err("DynamoDB read statements do not accept key or item fields".to_string());
+            }
+        }
+        DynamoDbStatementOperation::Insert | DynamoDbStatementOperation::Put => {
+            if key.is_none() || item.is_none() {
+                return Err("DynamoDB INSERT ITEM and PUT ITEM statements require key and item fields".to_string());
+            }
+            if limit.is_some() || filter.is_some() || sort.is_some() || cursor.is_some() {
+                return Err("DynamoDB item write statements accept only table, key, and item fields".to_string());
+            }
+        }
+        DynamoDbStatementOperation::Delete => {
+            if key.is_none() {
+                return Err("DynamoDB DELETE ITEM statements require a key field".to_string());
+            }
+            if item.is_some() || limit.is_some() || filter.is_some() || sort.is_some() || cursor.is_some() {
+                return Err("DynamoDB DELETE ITEM statements accept only table and key fields".to_string());
+            }
+        }
+    }
+
+    Ok(DynamoDbStatement { operation, table, limit, filter, sort, cursor, key, item })
+}
+
+fn dynamodb_statement_field(line: &str) -> Option<(&str, &str)> {
+    if line.chars().next().is_some_and(char::is_whitespace) {
+        return None;
+    }
+    let (name, value) = line.split_once(':')?;
+    let name = name.trim();
+    matches!(name, "table" | "limit" | "filter" | "sort" | "cursor" | "key" | "item").then_some((name, value))
+}
+
+fn finish_dynamodb_statement_field(
+    fields: &mut HashMap<String, String>,
+    name: Option<String>,
+    value: &mut String,
+) -> Result<(), String> {
+    let Some(name) = name else {
+        return Ok(());
+    };
+    let value = std::mem::take(value).trim().to_string();
+    if value.is_empty() {
+        return Err(format!("DynamoDB statement field {name} cannot be empty"));
+    }
+    if fields.insert(name.clone(), value).is_some() {
+        return Err(format!("Duplicate DynamoDB statement field: {name}"));
+    }
+    Ok(())
+}
+
+fn take_dynamodb_string_field(
+    fields: &mut HashMap<String, String>,
+    name: &str,
+    required: bool,
+) -> Result<Option<String>, String> {
+    let Some(raw) = fields.remove(name) else {
+        return if required { Err(format!("DynamoDB statement requires a {name} field")) } else { Ok(None) };
+    };
+    let value: Value = serde_json::from_str(&raw).map_err(|error| format!("Invalid DynamoDB {name} value: {error}"))?;
+    let value = value
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| format!("DynamoDB statement field {name} must be a non-empty JSON string"))?;
+    Ok(Some(value.to_string()))
+}
+
+fn take_dynamodb_integer_field(fields: &mut HashMap<String, String>, name: &str) -> Result<Option<i64>, String> {
+    fields
+        .remove(name)
+        .map(|raw| raw.parse::<i64>().map_err(|error| format!("Invalid DynamoDB {name} value: {error}")))
+        .transpose()
+}
+
+fn take_dynamodb_object_field(fields: &mut HashMap<String, String>, name: &str) -> Result<Option<Value>, String> {
+    let Some(raw) = fields.remove(name) else {
+        return Ok(None);
+    };
+    let value: Value = serde_json::from_str(&raw).map_err(|error| format!("Invalid DynamoDB {name} JSON: {error}"))?;
+    if !value.is_object() {
+        return Err(format!("DynamoDB statement field {name} must be a JSON object"));
+    }
+    Ok(Some(value))
+}
+
+fn document_query_result(result: DocumentQueryResult, started: Instant) -> QueryResult {
+    let truncated = result.next_cursor.is_some();
+    let documents = result.documents;
+    let mut column_names = BTreeSet::new();
+    for document in &documents {
+        if let Some(object) = document.as_object() {
+            column_names.extend(object.keys().cloned());
+        } else {
+            column_names.insert("value".to_string());
+        }
+    }
+    let columns = column_names.into_iter().collect::<Vec<_>>();
+    let rows = documents
+        .into_iter()
+        .map(|document| {
+            columns
+                .iter()
+                .map(|column| {
+                    document
+                        .as_object()
+                        .and_then(|object| object.get(column))
+                        .cloned()
+                        .or_else(|| (column == "value").then(|| document.clone()))
+                        .unwrap_or(Value::Null)
+                })
+                .collect()
+        })
+        .collect();
+    QueryResult {
+        columns,
+        column_types: Vec::new(),
+        column_sortables: Vec::new(),
+        spatial_columns: Vec::new(),
+        spatial_values: Vec::new(),
+        rows,
+        affected_rows: 0,
+        execution_time_ms: started.elapsed().as_millis(),
+        truncated,
+        session_id: None,
+        has_more: false,
+        elasticsearch_raw_body: None,
+        messages: Vec::new(),
+    }
+}
+
+fn affected_query_result(affected_rows: u64, started: Instant) -> QueryResult {
+    QueryResult {
+        columns: Vec::new(),
+        column_types: Vec::new(),
+        column_sortables: Vec::new(),
+        spatial_columns: Vec::new(),
+        spatial_values: Vec::new(),
+        rows: Vec::new(),
+        affected_rows,
+        execution_time_ms: started.elapsed().as_millis(),
+        truncated: false,
+        session_id: None,
+        has_more: false,
+        elasticsearch_raw_body: None,
+        messages: Vec::new(),
+    }
+}
+
 pub async fn list_tables(client: &DynamoDbClient) -> Result<Vec<String>, String> {
     let mut names = Vec::new();
     let mut start = None;
@@ -366,26 +640,30 @@ pub async fn describe_table(client: &DynamoDbClient, table_name: &str) -> Result
     let mut indexes = Vec::new();
     for index in table.global_secondary_indexes() {
         let (index_partition, index_sort) = key_info(index.key_schema(), &attribute_types)?;
+        let (projection_type, non_key_attributes) = index_projection(index.projection());
         indexes.push(DynamoDbIndexInfo {
             name: index.index_name().unwrap_or_default().to_string(),
             kind: "global".to_string(),
             partition_key: index_partition,
             sort_key: index_sort,
+            projection_type,
+            non_key_attributes,
         });
     }
     for index in table.local_secondary_indexes() {
         let (index_partition, index_sort) = key_info(index.key_schema(), &attribute_types)?;
+        let (projection_type, non_key_attributes) = index_projection(index.projection());
         indexes.push(DynamoDbIndexInfo {
             name: index.index_name().unwrap_or_default().to_string(),
             kind: "local".to_string(),
             partition_key: index_partition,
             sort_key: index_sort,
+            projection_type,
+            non_key_attributes,
         });
     }
     indexes.sort_by_key(|index| index.name.to_lowercase());
 
-    let ttl = client.client.describe_time_to_live().table_name(table_name).send().await.ok();
-    let ttl_description = ttl.as_ref().and_then(|output| output.time_to_live_description());
     let description = DynamoDbTableDescription {
         name: table.table_name().unwrap_or(table_name).to_string(),
         status: table.table_status().map(|status| status.as_str().to_string()).unwrap_or_default(),
@@ -394,11 +672,18 @@ pub async fn describe_table(client: &DynamoDbClient, table_name: &str) -> Result
         partition_key,
         sort_key,
         indexes,
-        ttl_attribute: ttl_description.and_then(|ttl| ttl.attribute_name()).map(str::to_string),
-        ttl_status: ttl_description.and_then(|ttl| ttl.time_to_live_status()).map(|status| status.as_str().to_string()),
     };
     client.table_cache.write().await.insert(table_name.to_string(), description.clone());
     Ok(description)
+}
+
+fn index_projection(projection: Option<&aws_sdk_dynamodb::types::Projection>) -> (String, Vec<String>) {
+    let projection_type = projection
+        .and_then(|projection| projection.projection_type())
+        .map(|projection_type| projection_type.as_str().to_string())
+        .unwrap_or_else(|| "UNKNOWN".to_string());
+    let non_key_attributes = projection.map(|projection| projection.non_key_attributes().to_vec()).unwrap_or_default();
+    (projection_type, non_key_attributes)
 }
 
 fn key_info(
@@ -735,9 +1020,29 @@ fn parse_scan_index_forward(sort_json: Option<&str>, sort_key: Option<&str>) -> 
 }
 
 pub async fn insert_item(client: &DynamoDbClient, table_name: &str, doc_json: &str) -> Result<String, String> {
+    insert_item_with_expected_identity(client, table_name, doc_json, None).await
+}
+
+async fn insert_item_with_expected_identity(
+    client: &DynamoDbClient,
+    table_name: &str,
+    doc_json: &str,
+    expected_identity: Option<&str>,
+) -> Result<String, String> {
     let table = describe_table(client, table_name).await?;
-    let mut item = json_document_to_item(doc_json)?;
-    ensure_item_keys(&table, &mut item, None)?;
+    let item = json_document_to_item(doc_json)?;
+    validate_item_keys(&table, &item)?;
+    let identity = encode_identity(&table, &item)?;
+    if let Some(expected_identity) = expected_identity {
+        let expected: Value = serde_json::from_str(expected_identity)
+            .map_err(|error| format!("Invalid DynamoDB item identity: {error}"))?;
+        let actual: Value = serde_json::from_str(&identity).map_err(|error| error.to_string())?;
+        if expected != actual {
+            return Err(format!(
+                "DynamoDB key does not match the item key attributes (expected {expected}, received {actual})"
+            ));
+        }
+    }
     client
         .client
         .put_item()
@@ -747,25 +1052,97 @@ pub async fn insert_item(client: &DynamoDbClient, table_name: &str, doc_json: &s
         .expression_attribute_names("#pk", &table.partition_key.name)
         .send()
         .await
-        .map_err(|error| dynamodb_sdk_error!("Failed to put DynamoDB item", error))?;
-    encode_identity(&table, &item)
+        .map_err(|error| {
+            if error
+                .as_service_error()
+                .and_then(|service_error| service_error.code())
+                .is_some_and(|code| code == "ConditionalCheckFailedException")
+            {
+                format!(
+                    "DynamoDB item already exists for key {identity}. Change the partition/sort key, or edit the existing item instead."
+                )
+            } else {
+                dynamodb_sdk_error!("Failed to put DynamoDB item", error)
+            }
+        })?;
+    Ok(identity)
 }
 
 pub async fn update_item(client: &DynamoDbClient, table_name: &str, id: &str, doc_json: &str) -> Result<u64, String> {
     let table = describe_table(client, table_name).await?;
-    let key = decode_identity_for_table(&table, id)?;
-    let mut item = json_document_to_item(doc_json)?;
-    ensure_item_keys(&table, &mut item, Some(&key))?;
-    client
-        .client
-        .put_item()
+    let old_key = decode_identity_for_table(&table, id)?;
+    let item = json_document_to_item(doc_json)?;
+    validate_item_keys(&table, &item)?;
+    let new_key = item_key(&table, &item)?;
+
+    if old_key == new_key {
+        client
+            .client
+            .put_item()
+            .table_name(table_name)
+            .set_item(Some(item))
+            .condition_expression("attribute_exists(#pk)")
+            .expression_attribute_names("#pk", &table.partition_key.name)
+            .send()
+            .await
+            .map_err(|error| {
+                if error
+                    .as_service_error()
+                    .and_then(|service_error| service_error.code())
+                    .is_some_and(|code| code == "ConditionalCheckFailedException")
+                {
+                    format!("DynamoDB item no longer exists for key {id}. Refresh the table and try again.")
+                } else {
+                    dynamodb_sdk_error!("Failed to replace DynamoDB item", error)
+                }
+            })?;
+        return Ok(1);
+    }
+
+    let new_identity = encode_identity(&table, &item)?;
+    let put = Put::builder()
         .table_name(table_name)
         .set_item(Some(item))
+        .condition_expression("attribute_not_exists(#pk)")
+        .expression_attribute_names("#pk", &table.partition_key.name)
+        .build()
+        .map_err(|error| format!("Failed to build DynamoDB key migration put: {error}"))?;
+    let delete = Delete::builder()
+        .table_name(table_name)
+        .set_key(Some(old_key))
         .condition_expression("attribute_exists(#pk)")
         .expression_attribute_names("#pk", &table.partition_key.name)
+        .build()
+        .map_err(|error| format!("Failed to build DynamoDB key migration delete: {error}"))?;
+
+    client
+        .client
+        .transact_write_items()
+        .transact_items(TransactWriteItem::builder().put(put).build())
+        .transact_items(TransactWriteItem::builder().delete(delete).build())
         .send()
         .await
-        .map_err(|error| dynamodb_sdk_error!("Failed to replace DynamoDB item", error))?;
+        .map_err(|error| {
+            if let Some(
+                aws_sdk_dynamodb::operation::transact_write_items::TransactWriteItemsError::TransactionCanceledException(
+                    cancelled,
+                ),
+            ) = error.as_service_error()
+            {
+                let reasons = cancelled.cancellation_reasons();
+                if reasons.first().and_then(|reason| reason.code()) == Some("ConditionalCheckFailed") {
+                    return format!(
+                        "DynamoDB item already exists for target key {new_identity}. The original item was not changed."
+                    );
+                }
+                if reasons.get(1).and_then(|reason| reason.code()) == Some("ConditionalCheckFailed") {
+                    return format!(
+                        "DynamoDB item no longer exists for source key {id}. No new item was created; refresh the table and try again."
+                    );
+                }
+            }
+            dynamodb_sdk_error!("Failed to migrate DynamoDB item key atomically", error)
+        })?;
     Ok(1)
 }
 
@@ -791,20 +1168,8 @@ fn json_document_to_item(doc_json: &str) -> Result<HashMap<String, AttributeValu
     object.iter().map(|(key, value)| Ok((key.clone(), json_to_attribute_value(value)?))).collect()
 }
 
-fn ensure_item_keys(
-    table: &DynamoDbTableDescription,
-    item: &mut HashMap<String, AttributeValue>,
-    identity: Option<&HashMap<String, AttributeValue>>,
-) -> Result<(), String> {
+fn validate_item_keys(table: &DynamoDbTableDescription, item: &HashMap<String, AttributeValue>) -> Result<(), String> {
     for key in [Some(&table.partition_key), table.sort_key.as_ref()].into_iter().flatten() {
-        if let Some(identity_value) = identity.and_then(|identity| identity.get(&key.name)) {
-            if let Some(item_value) = item.get(&key.name) {
-                if item_value != identity_value {
-                    return Err(format!("DynamoDB key attribute {} does not match the item identity", key.name));
-                }
-            }
-            item.insert(key.name.clone(), identity_value.clone());
-        }
         if !item.contains_key(&key.name) {
             return Err(format!("DynamoDB item requires key attribute: {}", key.name));
         }
@@ -823,6 +1188,21 @@ fn ensure_item_keys(
         }
     }
     Ok(())
+}
+
+fn item_key(
+    table: &DynamoDbTableDescription,
+    item: &HashMap<String, AttributeValue>,
+) -> Result<HashMap<String, AttributeValue>, String> {
+    [Some(&table.partition_key), table.sort_key.as_ref()]
+        .into_iter()
+        .flatten()
+        .map(|key| {
+            let value =
+                item.get(&key.name).ok_or_else(|| format!("DynamoDB item requires key attribute: {}", key.name))?;
+            Ok((key.name.clone(), value.clone()))
+        })
+        .collect()
 }
 
 fn encode_identity(table: &DynamoDbTableDescription, item: &HashMap<String, AttributeValue>) -> Result<String, String> {
@@ -855,8 +1235,7 @@ fn decode_identity_for_table(
             expected.iter().map(|key| key.name.as_str()).collect::<Vec<_>>().join(", ")
         ));
     }
-    let mut checked = identity.clone();
-    ensure_item_keys(table, &mut checked, Some(&identity))?;
+    validate_item_keys(table, &identity)?;
     Ok(identity)
 }
 
@@ -884,22 +1263,57 @@ fn attribute_value_to_json(value: &AttributeValue) -> Result<Value, String> {
             Ok(number) if number.to_string() == *value && dynamodb_number_is_javascript_safe(&number) => {
                 Ok(Value::Number(number))
             }
-            _ => Ok(serde_json::json!({ "$number": value })),
+            _ => Ok(dynamodb_extended_json("number", Value::String(value.clone()))),
         },
-        AttributeValue::B(value) => Ok(serde_json::json!({ "$binary": BASE64_STANDARD.encode(value.as_ref()) })),
+        AttributeValue::B(value) => {
+            Ok(dynamodb_extended_json("binary", Value::String(BASE64_STANDARD.encode(value.as_ref()))))
+        }
         AttributeValue::Bool(value) => Ok(Value::Bool(*value)),
         AttributeValue::Null(_) => Ok(Value::Null),
         AttributeValue::L(values) => {
             values.iter().map(attribute_value_to_json).collect::<Result<Vec<_>, _>>().map(Value::Array)
         }
-        AttributeValue::M(values) => attribute_map_to_json(values).map(Value::Object),
-        AttributeValue::Ss(values) => Ok(serde_json::json!({ "$stringSet": values })),
-        AttributeValue::Ns(values) => Ok(serde_json::json!({ "$numberSet": values })),
-        AttributeValue::Bs(values) => Ok(serde_json::json!({
-            "$binarySet": values.iter().map(|value| BASE64_STANDARD.encode(value.as_ref())).collect::<Vec<_>>()
-        })),
+        AttributeValue::M(values) => {
+            let object = attribute_map_to_json(values)?;
+            if dynamodb_extended_json_parts(&object).is_some() {
+                Ok(dynamodb_extended_json("map", Value::Object(object)))
+            } else {
+                Ok(Value::Object(object))
+            }
+        }
+        AttributeValue::Ss(values) => {
+            Ok(dynamodb_extended_json("stringSet", Value::Array(values.iter().cloned().map(Value::String).collect())))
+        }
+        AttributeValue::Ns(values) => {
+            Ok(dynamodb_extended_json("numberSet", Value::Array(values.iter().cloned().map(Value::String).collect())))
+        }
+        AttributeValue::Bs(values) => Ok(dynamodb_extended_json(
+            "binarySet",
+            Value::Array(values.iter().map(|value| Value::String(BASE64_STANDARD.encode(value.as_ref()))).collect()),
+        )),
         _ => Err("Unsupported DynamoDB attribute type returned by the SDK".to_string()),
     }
+}
+
+fn dynamodb_extended_json(attribute_type: &str, value: Value) -> Value {
+    serde_json::json!({
+        (DYNAMODB_JSON_TYPE_TAG): {
+            "version": DYNAMODB_JSON_TYPE_VERSION,
+            "type": attribute_type,
+            "value": value,
+        }
+    })
+}
+
+fn dynamodb_extended_json_parts(object: &Map<String, Value>) -> Option<(&str, &Value)> {
+    if object.len() != 1 {
+        return None;
+    }
+    let tagged = object.get(DYNAMODB_JSON_TYPE_TAG)?.as_object()?;
+    if tagged.len() != 3 || tagged.get("version").and_then(Value::as_u64) != Some(DYNAMODB_JSON_TYPE_VERSION) {
+        return None;
+    }
+    Some((tagged.get("type")?.as_str()?, tagged.get("value")?))
 }
 
 fn dynamodb_number_is_javascript_safe(number: &serde_json::Number) -> bool {
@@ -930,25 +1344,32 @@ fn json_to_attribute_value(value: &Value) -> Result<AttributeValue, String> {
             values.iter().map(json_to_attribute_value).collect::<Result<Vec<_>, _>>().map(AttributeValue::L)
         }
         Value::Object(object) => {
-            if object.len() == 1 {
-                if let Some(value) = object.get("$number").and_then(Value::as_str) {
+            if let Some((attribute_type, value)) = dynamodb_extended_json_parts(object) {
+                if attribute_type == "number" {
+                    let value =
+                        value.as_str().ok_or_else(|| "DynamoDB number wrapper value must be a string".to_string())?;
                     validate_number(value)?;
                     return Ok(AttributeValue::N(value.to_string()));
                 }
-                if let Some(value) = object.get("$binary").and_then(Value::as_str) {
+                if attribute_type == "binary" {
+                    let value =
+                        value.as_str().ok_or_else(|| "DynamoDB binary wrapper value must be a string".to_string())?;
                     return BASE64_STANDARD
                         .decode(value)
                         .map(|bytes| AttributeValue::B(Blob::new(bytes)))
-                        .map_err(|error| format!("Invalid DynamoDB $binary value: {error}"));
+                        .map_err(|error| format!("Invalid DynamoDB binary wrapper value: {error}"));
                 }
-                if let Some(values) = object.get("$stringSet").and_then(Value::as_array) {
+                if attribute_type == "stringSet" {
+                    let values = value
+                        .as_array()
+                        .ok_or_else(|| "DynamoDB stringSet wrapper value must be an array".to_string())?;
                     let values = values
                         .iter()
                         .map(|value| {
                             value
                                 .as_str()
                                 .map(str::to_string)
-                                .ok_or_else(|| "$stringSet values must be strings".to_string())
+                                .ok_or_else(|| "DynamoDB stringSet values must be strings".to_string())
                         })
                         .collect::<Result<Vec<_>, _>>()?;
                     if values.is_empty() {
@@ -956,12 +1377,16 @@ fn json_to_attribute_value(value: &Value) -> Result<AttributeValue, String> {
                     }
                     return Ok(AttributeValue::Ss(values));
                 }
-                if let Some(values) = object.get("$numberSet").and_then(Value::as_array) {
+                if attribute_type == "numberSet" {
+                    let values = value
+                        .as_array()
+                        .ok_or_else(|| "DynamoDB numberSet wrapper value must be an array".to_string())?;
                     let values = values
                         .iter()
                         .map(|value| {
-                            let value =
-                                value.as_str().ok_or_else(|| "$numberSet values must be strings".to_string())?;
+                            let value = value
+                                .as_str()
+                                .ok_or_else(|| "DynamoDB numberSet values must be strings".to_string())?;
                             validate_number(value)?;
                             Ok(value.to_string())
                         })
@@ -971,16 +1396,20 @@ fn json_to_attribute_value(value: &Value) -> Result<AttributeValue, String> {
                     }
                     return Ok(AttributeValue::Ns(values));
                 }
-                if let Some(values) = object.get("$binarySet").and_then(Value::as_array) {
+                if attribute_type == "binarySet" {
+                    let values = value
+                        .as_array()
+                        .ok_or_else(|| "DynamoDB binarySet wrapper value must be an array".to_string())?;
                     let values = values
                         .iter()
                         .map(|value| {
-                            let value =
-                                value.as_str().ok_or_else(|| "$binarySet values must be strings".to_string())?;
+                            let value = value
+                                .as_str()
+                                .ok_or_else(|| "DynamoDB binarySet values must be strings".to_string())?;
                             BASE64_STANDARD
                                 .decode(value)
                                 .map(Blob::new)
-                                .map_err(|error| format!("Invalid DynamoDB $binarySet value: {error}"))
+                                .map_err(|error| format!("Invalid DynamoDB binarySet value: {error}"))
                         })
                         .collect::<Result<Vec<_>, _>>()?;
                     if values.is_empty() {
@@ -988,6 +1417,16 @@ fn json_to_attribute_value(value: &Value) -> Result<AttributeValue, String> {
                     }
                     return Ok(AttributeValue::Bs(values));
                 }
+                if attribute_type == "map" {
+                    let values =
+                        value.as_object().ok_or_else(|| "DynamoDB map wrapper value must be an object".to_string())?;
+                    return values
+                        .iter()
+                        .map(|(key, value)| Ok((key.clone(), json_to_attribute_value(value)?)))
+                        .collect::<Result<HashMap<_, _>, String>>()
+                        .map(AttributeValue::M);
+                }
+                return Err(format!("Unsupported DynamoDB JSON wrapper type: {attribute_type}"));
             }
             object
                 .iter()
@@ -1116,18 +1555,324 @@ mod tests {
                 kind: "global".to_string(),
                 partition_key: DynamoDbKeyInfo { name: "status".to_string(), attribute_type: "S".to_string() },
                 sort_key: Some(DynamoDbKeyInfo { name: "created_at".to_string(), attribute_type: "N".to_string() }),
+                projection_type: "ALL".to_string(),
+                non_key_attributes: Vec::new(),
             }],
-            ttl_attribute: None,
-            ttl_status: None,
         }
+    }
+
+    #[test]
+    fn parses_generated_scan_statement() {
+        let statement = parse_dynamodb_statement(
+            r#"DBX DYNAMODB QUERY / SCAN
+table: "orders"
+limit: 1000
+filter:
+{
+  "$index": "by_status",
+  "status": "SHIPPED"
+}
+sort:
+{
+  "created_at": -1
+}"#,
+        )
+        .unwrap();
+
+        assert_eq!(statement.operation, DynamoDbStatementOperation::Read);
+        assert_eq!(statement.table, "orders");
+        assert_eq!(statement.limit, Some(1000));
+        assert_eq!(statement.filter, Some(serde_json::json!({ "$index": "by_status", "status": "SHIPPED" })));
+        assert_eq!(statement.sort, Some(serde_json::json!({ "created_at": -1 })));
+    }
+
+    #[test]
+    fn parses_generated_insert_statement_with_multiline_item() {
+        let statement = parse_dynamodb_statement(
+            r#"DBX DYNAMODB INSERT ITEM
+table: "orders"
+key:
+{
+  "tenant_id": "tenant-04",
+  "order_id": "ORD-new"
+}
+item:
+{
+  "tenant_id": "tenant-04",
+  "order_id": "ORD-new",
+  "tags": {
+    "$dbxDynamoDb": {
+      "version": 1,
+      "type": "stringSet",
+      "value": [
+        "retail"
+      ]
+    }
+  }
+}"#,
+        )
+        .unwrap();
+
+        assert_eq!(statement.operation, DynamoDbStatementOperation::Insert);
+        assert_eq!(statement.key, Some(serde_json::json!({ "tenant_id": "tenant-04", "order_id": "ORD-new" })));
+        assert_eq!(
+            statement.item,
+            Some(serde_json::json!({
+                "tenant_id": "tenant-04",
+                "order_id": "ORD-new",
+                "tags": {
+                    "$dbxDynamoDb": {
+                        "version": 1,
+                        "type": "stringSet",
+                        "value": ["retail"]
+                    }
+                }
+            }))
+        );
+    }
+
+    #[test]
+    fn rejects_write_statement_without_explicit_key() {
+        let error = parse_dynamodb_statement(
+            r#"DBX DYNAMODB PUT ITEM
+table: "orders"
+item:
+{
+  "tenant_id": "tenant-04",
+  "order_id": "ORD-new"
+}"#,
+        )
+        .unwrap_err();
+
+        assert!(error.contains("require key and item fields"));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DBX_DYNAMODB_ENDPOINT and an orders table with tenant_id/order_id string keys"]
+    async fn live_executes_generated_statements() {
+        let endpoint = std::env::var("DBX_DYNAMODB_ENDPOINT").expect("DBX_DYNAMODB_ENDPOINT is required");
+        let (ssl, address) = endpoint
+            .strip_prefix("https://")
+            .map(|address| (true, address))
+            .or_else(|| endpoint.strip_prefix("http://").map(|address| (false, address)))
+            .expect("DynamoDB endpoint must start with http:// or https://");
+        let (host, port) = address.rsplit_once(':').expect("DynamoDB endpoint must include a port");
+        let config: ConnectionConfig = serde_json::from_value(serde_json::json!({
+            "id": "dynamodb-live-test",
+            "name": "DynamoDB live test",
+            "db_type": "dynamodb",
+            "host": host,
+            "port": port.parse::<u16>().expect("valid DynamoDB port"),
+            "username": std::env::var("DBX_DYNAMODB_ACCESS_KEY_ID").unwrap_or_else(|_| "dummy".to_string()),
+            "password": std::env::var("DBX_DYNAMODB_SECRET_ACCESS_KEY").unwrap_or_else(|_| "dummy".to_string()),
+            "database": std::env::var("DBX_DYNAMODB_REGION").unwrap_or_else(|_| "us-east-1".to_string()),
+            "ssl": ssl
+        }))
+        .unwrap();
+        let client = connect(&config, host, config.port).unwrap();
+        test_connection(&client, Duration::from_secs(5)).await.unwrap();
+
+        let tenant_id = "codex-live";
+        let order_id = format!("ORD-{}", uuid::Uuid::new_v4());
+        let key = serde_json::json!({ "tenant_id": tenant_id, "order_id": order_id });
+        let item = serde_json::json!({
+            "tenant_id": tenant_id,
+            "order_id": order_id,
+            "status": "PENDING",
+            "note": "generated statement live test"
+        });
+        let insert = format!(
+            "DBX DYNAMODB INSERT ITEM\ntable: \"orders\"\nkey:\n{}\nitem:\n{}",
+            serde_json::to_string_pretty(&key).unwrap(),
+            serde_json::to_string_pretty(&item).unwrap()
+        );
+        assert_eq!(execute_statement(&client, &insert, 1000).await.unwrap().affected_rows, 1);
+
+        let duplicate_error = execute_statement(&client, &insert, 1000).await.unwrap_err();
+        assert!(duplicate_error.contains("already exists for key"), "{duplicate_error}");
+
+        let query = format!(
+            "DBX DYNAMODB QUERY / SCAN\ntable: \"orders\"\nlimit: 10\nfilter:\n{}",
+            serde_json::to_string_pretty(&key).unwrap()
+        );
+        let result = execute_statement(&client, &query, 1000).await.unwrap();
+        assert_eq!(result.rows.len(), 1);
+        let note_column = result.columns.iter().position(|column| column == "note").unwrap();
+        assert_eq!(result.rows[0][note_column], Value::String("generated statement live test".to_string()));
+
+        let updated_item = serde_json::json!({
+            "tenant_id": tenant_id,
+            "order_id": order_id,
+            "status": "SHIPPED",
+            "note": "updated through PUT ITEM"
+        });
+        let put = format!(
+            "DBX DYNAMODB PUT ITEM\ntable: \"orders\"\nkey:\n{}\nitem:\n{}",
+            serde_json::to_string_pretty(&key).unwrap(),
+            serde_json::to_string_pretty(&updated_item).unwrap()
+        );
+        assert_eq!(execute_statement(&client, &put, 1000).await.unwrap().affected_rows, 1);
+        let updated = execute_statement(&client, &query, 1000).await.unwrap();
+        let note_column = updated.columns.iter().position(|column| column == "note").unwrap();
+        assert_eq!(updated.rows[0][note_column], Value::String("updated through PUT ITEM".to_string()));
+
+        let rekey_order_id = format!("ORD-{}", uuid::Uuid::new_v4());
+        let rekey_key = serde_json::json!({ "tenant_id": tenant_id, "order_id": rekey_order_id });
+        let rekey_item = serde_json::json!({
+            "tenant_id": tenant_id,
+            "order_id": rekey_order_id,
+            "status": "SHIPPED",
+            "note": "atomically rekeyed"
+        });
+        let rekey_put = format!(
+            "DBX DYNAMODB PUT ITEM\ntable: \"orders\"\nkey:\n{}\nitem:\n{}",
+            serde_json::to_string_pretty(&key).unwrap(),
+            serde_json::to_string_pretty(&rekey_item).unwrap()
+        );
+        assert_eq!(execute_statement(&client, &rekey_put, 1000).await.unwrap().affected_rows, 1);
+        let rekey_query = format!(
+            "DBX DYNAMODB QUERY / SCAN\ntable: \"orders\"\nlimit: 10\nfilter:\n{}",
+            serde_json::to_string_pretty(&rekey_key).unwrap()
+        );
+        assert!(execute_statement(&client, &query, 1000).await.unwrap().rows.is_empty());
+        assert_eq!(execute_statement(&client, &rekey_query, 1000).await.unwrap().rows.len(), 1);
+
+        let retry_error = execute_statement(&client, &rekey_put, 1000).await.unwrap_err();
+        assert!(retry_error.contains("target key") || retry_error.contains("atomically"), "{retry_error}");
+        assert!(execute_statement(&client, &query, 1000).await.unwrap().rows.is_empty());
+        assert_eq!(execute_statement(&client, &rekey_query, 1000).await.unwrap().rows.len(), 1);
+
+        let conflict_order_id = format!("ORD-{}", uuid::Uuid::new_v4());
+        let conflict_key = serde_json::json!({ "tenant_id": tenant_id, "order_id": conflict_order_id });
+        let conflict_item = serde_json::json!({
+            "tenant_id": tenant_id,
+            "order_id": conflict_order_id,
+            "note": "existing target"
+        });
+        let conflict_insert = format!(
+            "DBX DYNAMODB INSERT ITEM\ntable: \"orders\"\nkey:\n{}\nitem:\n{}",
+            serde_json::to_string_pretty(&conflict_key).unwrap(),
+            serde_json::to_string_pretty(&conflict_item).unwrap()
+        );
+        assert_eq!(execute_statement(&client, &conflict_insert, 1000).await.unwrap().affected_rows, 1);
+        let conflicting_rekey = format!(
+            "DBX DYNAMODB PUT ITEM\ntable: \"orders\"\nkey:\n{}\nitem:\n{}",
+            serde_json::to_string_pretty(&rekey_key).unwrap(),
+            serde_json::to_string_pretty(&conflict_item).unwrap()
+        );
+        let conflict_error = execute_statement(&client, &conflicting_rekey, 1000).await.unwrap_err();
+        assert!(conflict_error.contains("target key") || conflict_error.contains("atomically"), "{conflict_error}");
+        assert_eq!(execute_statement(&client, &rekey_query, 1000).await.unwrap().rows.len(), 1);
+
+        for cleanup_key in [&rekey_key, &conflict_key] {
+            let delete = format!(
+                "DBX DYNAMODB DELETE ITEM\ntable: \"orders\"\nkey:\n{}",
+                serde_json::to_string_pretty(cleanup_key).unwrap()
+            );
+            assert_eq!(execute_statement(&client, &delete, 1000).await.unwrap().affected_rows, 1);
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DBX_DYNAMODB_ENDPOINT and permission to create a temporary table"]
+    async fn live_reports_partial_projection_metadata() {
+        use aws_sdk_dynamodb::types::{
+            AttributeDefinition, BillingMode, GlobalSecondaryIndex, Projection, ProjectionType, ScalarAttributeType,
+        };
+
+        let endpoint = std::env::var("DBX_DYNAMODB_ENDPOINT").expect("DBX_DYNAMODB_ENDPOINT is required");
+        let (ssl, address) = endpoint
+            .strip_prefix("https://")
+            .map(|address| (true, address))
+            .or_else(|| endpoint.strip_prefix("http://").map(|address| (false, address)))
+            .expect("DynamoDB endpoint must start with http:// or https://");
+        let (host, port) = address.rsplit_once(':').expect("DynamoDB endpoint must include a port");
+        let config: ConnectionConfig = serde_json::from_value(serde_json::json!({
+            "id": "dynamodb-live-projection-test",
+            "name": "DynamoDB live projection test",
+            "db_type": "dynamodb",
+            "host": host,
+            "port": port.parse::<u16>().expect("valid DynamoDB port"),
+            "username": std::env::var("DBX_DYNAMODB_ACCESS_KEY_ID").unwrap_or_else(|_| "dummy".to_string()),
+            "password": std::env::var("DBX_DYNAMODB_SECRET_ACCESS_KEY").unwrap_or_else(|_| "dummy".to_string()),
+            "database": std::env::var("DBX_DYNAMODB_REGION").unwrap_or_else(|_| "us-east-1".to_string()),
+            "ssl": ssl
+        }))
+        .unwrap();
+        let client = connect(&config, host, config.port).unwrap();
+        let table_name = format!("dbx_projection_{}", uuid::Uuid::new_v4().simple());
+        let attribute = |name: &str| {
+            AttributeDefinition::builder().attribute_name(name).attribute_type(ScalarAttributeType::S).build().unwrap()
+        };
+        let key = |name: &str, key_type: KeyType| {
+            KeySchemaElement::builder().attribute_name(name).key_type(key_type).build().unwrap()
+        };
+        let index = |name: &str, projection: Projection| {
+            GlobalSecondaryIndex::builder()
+                .index_name(name)
+                .key_schema(key("status", KeyType::Hash))
+                .key_schema(key("created_at", KeyType::Range))
+                .projection(projection)
+                .build()
+                .unwrap()
+        };
+
+        client
+            .client
+            .create_table()
+            .table_name(&table_name)
+            .billing_mode(BillingMode::PayPerRequest)
+            .attribute_definitions(attribute("tenant_id"))
+            .attribute_definitions(attribute("order_id"))
+            .attribute_definitions(attribute("status"))
+            .attribute_definitions(attribute("created_at"))
+            .key_schema(key("tenant_id", KeyType::Hash))
+            .key_schema(key("order_id", KeyType::Range))
+            .global_secondary_indexes(index(
+                "by_status_keys",
+                Projection::builder().projection_type(ProjectionType::KeysOnly).build(),
+            ))
+            .global_secondary_indexes(index(
+                "by_status_include",
+                Projection::builder().projection_type(ProjectionType::Include).non_key_attributes("note").build(),
+            ))
+            .send()
+            .await
+            .unwrap();
+
+        let metadata = describe_table(&client, &table_name).await.unwrap();
+        let keys_only = metadata.indexes.iter().find(|index| index.name == "by_status_keys").unwrap();
+        let include = metadata.indexes.iter().find(|index| index.name == "by_status_include").unwrap();
+        let projection_metadata = (
+            keys_only.projection_type.clone(),
+            keys_only.non_key_attributes.clone(),
+            include.projection_type.clone(),
+            include.non_key_attributes.clone(),
+        );
+
+        client.client.delete_table().table_name(&table_name).send().await.unwrap();
+        assert_eq!(
+            projection_metadata,
+            ("KEYS_ONLY".to_string(), Vec::new(), "INCLUDE".to_string(), vec!["note".to_string()])
+        );
     }
 
     #[test]
     fn preserves_dynamodb_specific_json_types() {
         let value = serde_json::json!({
-            "tags": { "$stringSet": ["one", "two"] },
-            "payload": { "$binary": "aGVsbG8=" },
-            "large": { "$number": "123456789012345678901234567890" }
+            "tags": {
+                "$dbxDynamoDb": { "version": 1, "type": "stringSet", "value": ["one", "two"] }
+            },
+            "payload": {
+                "$dbxDynamoDb": { "version": 1, "type": "binary", "value": "aGVsbG8=" }
+            },
+            "large": {
+                "$dbxDynamoDb": {
+                    "version": 1,
+                    "type": "number",
+                    "value": "123456789012345678901234567890"
+                }
+            }
         });
         let attribute = json_to_attribute_value(&value).unwrap();
         let round_trip = attribute_value_to_json(&attribute).unwrap();
@@ -1137,17 +1882,71 @@ mod tests {
     #[test]
     fn wraps_integers_that_javascript_cannot_represent_exactly() {
         let value = attribute_value_to_json(&AttributeValue::N("9007199254740993".to_string())).unwrap();
-        assert_eq!(value, serde_json::json!({ "$number": "9007199254740993" }));
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "$dbxDynamoDb": { "version": 1, "type": "number", "value": "9007199254740993" }
+            })
+        );
         assert_eq!(json_to_attribute_value(&value).unwrap(), AttributeValue::N("9007199254740993".to_string()));
     }
 
     #[test]
     fn wraps_decimals_that_exceed_javascript_precision() {
         let precise = attribute_value_to_json(&AttributeValue::N("1.234567890123456789".to_string())).unwrap();
-        assert_eq!(precise, serde_json::json!({ "$number": "1.234567890123456789" }));
+        assert_eq!(
+            precise,
+            serde_json::json!({
+                "$dbxDynamoDb": {
+                    "version": 1,
+                    "type": "number",
+                    "value": "1.234567890123456789"
+                }
+            })
+        );
 
         let ordinary = attribute_value_to_json(&AttributeValue::N("1234.5678".to_string())).unwrap();
         assert_eq!(ordinary, serde_json::json!(1234.5678));
+    }
+
+    #[test]
+    fn escapes_user_maps_that_match_the_reserved_type_envelope() {
+        let colliding_map = AttributeValue::M(HashMap::from([(
+            DYNAMODB_JSON_TYPE_TAG.to_string(),
+            AttributeValue::M(HashMap::from([
+                ("version".to_string(), AttributeValue::N("1".to_string())),
+                ("type".to_string(), AttributeValue::S("number".to_string())),
+                ("value".to_string(), AttributeValue::S("9007199254740993".to_string())),
+            ])),
+        )]));
+
+        let encoded = attribute_value_to_json(&colliding_map).unwrap();
+        assert_eq!(dynamodb_extended_json_parts(encoded.as_object().unwrap()).map(|(kind, _)| kind), Some("map"));
+        assert_eq!(json_to_attribute_value(&encoded).unwrap(), colliding_map);
+
+        let legacy_single_key_map = serde_json::json!({ "$number": "9007199254740993" });
+        assert_eq!(
+            json_to_attribute_value(&legacy_single_key_map).unwrap(),
+            AttributeValue::M(HashMap::from([(
+                "$number".to_string(),
+                AttributeValue::S("9007199254740993".to_string())
+            )]))
+        );
+    }
+
+    #[test]
+    fn exposes_secondary_index_projection_metadata() {
+        let projection = aws_sdk_dynamodb::types::Projection::builder()
+            .projection_type(aws_sdk_dynamodb::types::ProjectionType::Include)
+            .non_key_attributes("note")
+            .non_key_attributes("amount")
+            .build();
+
+        assert_eq!(
+            index_projection(Some(&projection)),
+            ("INCLUDE".to_string(), vec!["note".to_string(), "amount".to_string()])
+        );
+        assert_eq!(index_projection(None), ("UNKNOWN".to_string(), Vec::new()));
     }
 
     #[test]

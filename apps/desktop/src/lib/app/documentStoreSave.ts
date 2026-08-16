@@ -37,11 +37,25 @@ export async function writeDocumentStoreDocument(options: { kind: DocumentStoreK
 
 /**
  * Apply an identity plan for an existing document save.
- * Rekey always writes first, then deletes the old identity — a failed write never deletes.
+ * DynamoDB rekeys atomically in the backend. Other stores write first, then
+ * delete the old identity so a failed write never deletes the source.
  * Plan coordinates are assumed distinct for rekey (same identity is always `replace`).
  */
 export async function applyDocumentStoreIdentityPlan(options: { kind: DocumentStoreKind; plan: DocumentStoreIdentityPlan; document: Record<string, unknown>; apis: DocumentStoreWriteApis }): Promise<void> {
   const { kind, plan, document, apis } = options;
+
+  // DynamoDB handles both same-key replacement and key migration in the
+  // backend. Rekey uses one TransactWriteItems request, keyed by the old id.
+  if (kind === "dynamodb") {
+    await writeDocumentStoreDocument({
+      kind,
+      op: "put",
+      id: plan.action === "rekey" ? plan.deleteId : plan.writeId,
+      document,
+      apis,
+    });
+    return;
+  }
 
   if (plan.action === "replace") {
     await writeDocumentStoreDocument({
@@ -55,16 +69,7 @@ export async function applyDocumentStoreIdentityPlan(options: { kind: DocumentSt
     return;
   }
 
-  // DynamoDB creates the new keyed item before deleting the old one. Its
-  // replace operation intentionally rejects a missing target item.
-  if (kind === "dynamodb") {
-    await writeDocumentStoreDocument({
-      kind,
-      op: "insert",
-      document,
-      apis,
-    });
-  } else if (kind !== "mongodb") {
+  if (kind !== "mongodb") {
     await writeDocumentStoreDocument({
       kind,
       op: "put",

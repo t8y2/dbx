@@ -4530,6 +4530,8 @@ export default {
     sortKeyOnly: "DynamoDB Query can sort only by the current index sort key: {key}",
     pageCursorUnavailable: "The DynamoDB page cursor is unavailable. Reload from the first page.",
     repeatedCursor: "DynamoDB returned a repeated page cursor. Export was stopped.",
+    partialProjectionReadOnly: "This {projection} index does not contain the complete item. Editing is disabled to prevent unprojected attributes from being overwritten.",
+    exportLimitReached: "DynamoDB export stopped at {count} items to limit memory and read usage. Set an export row limit to choose a different boundary.",
     documentDetails: "DynamoDB table: {table}\nItem key: {id}",
   },
   vector: {

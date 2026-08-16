@@ -10,6 +10,8 @@ const backend = vi.hoisted(() => ({
   dynamodbDescribeTable: vi.fn(),
   cancelQuery: vi.fn(),
   ensureConnected: vi.fn(),
+  documentInsertDocument: vi.fn(),
+  documentUpdateDocument: vi.fn(),
   documentDeleteDocument: vi.fn(),
   documentSaveMeilisearchBatch: vi.fn(),
 }));
@@ -26,6 +28,8 @@ const dataGrid = vi.hoisted(() => ({
             column_types?: string[];
             rows: Array<Array<string | number | boolean | null>>;
             mongo_copy_documents?: unknown[];
+            truncated?: boolean;
+            has_more?: boolean;
           }
         | undefined
       >)
@@ -33,10 +37,12 @@ const dataGrid = vi.hoisted(() => ({
   customSaveHandler: undefined as
     | {
         save: (changes: { dirtyRows: Map<number, Map<number, unknown>>; deletedRows: Set<number>; newRows: unknown[][]; newRowMeta: unknown[]; columns: string[]; rows: unknown[][] }) => Promise<void>;
+        preview?: (changes: { dirtyRows: Map<number, Map<number, unknown>>; deletedRows: Set<number>; newRows: unknown[][]; newRowMeta: unknown[]; columns: string[]; rows: unknown[][] }) => Promise<string[]>;
       }
     | undefined,
   countTotalRows: undefined as (() => Promise<number | undefined>) | undefined,
   paginate: undefined as ((offset: number, limit: number) => Promise<void>) | undefined,
+  editable: true,
 }));
 
 const settings = vi.hoisted(() => ({
@@ -69,6 +75,8 @@ vi.mock("@/lib/backend/api", () => ({
   documentCountDocuments: backend.documentCountDocuments,
   dynamodbDescribeTable: backend.dynamodbDescribeTable,
   cancelQuery: backend.cancelQuery,
+  documentInsertDocument: backend.documentInsertDocument,
+  documentUpdateDocument: backend.documentUpdateDocument,
   documentDeleteDocument: backend.documentDeleteDocument,
   documentSaveMeilisearchBatch: backend.documentSaveMeilisearchBatch,
 }));
@@ -99,6 +107,7 @@ vi.mock("@/components/grid/DataGrid.vue", async () => {
         fullExportResult: { type: Function, default: undefined },
         customSaveHandler: { type: Object, default: undefined },
         countTotalRows: { type: Function, default: undefined },
+        editable: { type: Boolean, default: false },
       },
       setup(props, { attrs, expose, slots }) {
         dataGrid.fullExportResult = props.fullExportResult as typeof dataGrid.fullExportResult;
@@ -124,8 +133,9 @@ vi.mock("@/components/grid/DataGrid.vue", async () => {
           multiRowTranspose: false,
           setMultiRowTranspose: vi.fn(),
         });
-        return () =>
-          h(
+        return () => {
+          dataGrid.editable = props.editable;
+          return h(
             "div",
             {
               "data-testid": "data-grid",
@@ -135,6 +145,7 @@ vi.mock("@/components/grid/DataGrid.vue", async () => {
               "data-result-hidden-column-keys": JSON.stringify((props.result as { local_hidden_column_keys?: string[] }).local_hidden_column_keys ?? []),
               "data-result-column-types": JSON.stringify((props.result as { column_types?: string[] }).column_types ?? []),
               "data-result-rows": JSON.stringify((props.result as { rows?: unknown[] }).rows ?? []),
+              "data-editable": String(props.editable),
             },
             [
               slots["search-bar"]?.({
@@ -145,6 +156,7 @@ vi.mock("@/components/grid/DataGrid.vue", async () => {
               }),
             ],
           );
+        };
       },
     }),
   };
@@ -226,8 +238,9 @@ vi.mock("@/components/ui/select", async () => {
     props: {
       modelValue: { type: String, default: "" },
     },
-    setup(props, { slots }) {
-      return () => h("div", { "data-testid": "select", "data-model-value": props.modelValue }, slots.default?.());
+    emits: ["update:modelValue"],
+    setup(props, { emit, slots }) {
+      return () => h("div", { "data-testid": "select", "data-model-value": props.modelValue, onClick: () => props.modelValue === "__table__" && emit("update:modelValue", "by_status") }, slots.default?.());
     },
   });
   const passthrough = (name: string) =>
@@ -299,14 +312,19 @@ beforeEach(async () => {
   backend.dynamodbDescribeTable.mockReset();
   backend.cancelQuery.mockReset();
   backend.ensureConnected.mockReset();
+  backend.documentInsertDocument.mockReset();
+  backend.documentUpdateDocument.mockReset();
   backend.documentDeleteDocument.mockReset();
   backend.documentSaveMeilisearchBatch.mockReset();
   dataGrid.fullExportResult = undefined;
   dataGrid.customSaveHandler = undefined;
   dataGrid.countTotalRows = undefined;
   dataGrid.paginate = undefined;
+  dataGrid.editable = true;
   documentJsonEditor.openSearch.mockClear();
   backend.documentDeleteDocument.mockResolvedValue(undefined);
+  backend.documentInsertDocument.mockResolvedValue("created");
+  backend.documentUpdateDocument.mockResolvedValue(1);
   backend.documentSaveMeilisearchBatch.mockResolvedValue(0);
   settings.editorSettings.mongoViewMode = "table";
   settings.editorSettings.columnWidthDensity = "standard";
@@ -468,6 +486,155 @@ describe("DocumentBrowser Elasticsearch field search", () => {
 });
 
 describe("DocumentBrowser MongoDB filter value types", () => {
+  it("labels new DynamoDB rows as conditional inserts in the executable preview", async () => {
+    app?.unmount();
+    backend.documentFindDocuments.mockResolvedValue({
+      documents: [{ _id: { tenant_id: "tenant-04", order_id: "ORD-000994" }, tenant_id: "tenant-04", order_id: "ORD-000994", note: "existing" }],
+      total: 1,
+      total_is_exact: true,
+    });
+    app = createApp(DocumentBrowser, {
+      connectionId: "dynamodb-1",
+      database: "us-east-1",
+      collection: "orders",
+      databaseType: "dynamodb",
+    });
+    app.mount(root!);
+    await flushUi();
+
+    const preview = await dataGrid.customSaveHandler!.preview!({
+      dirtyRows: new Map(),
+      deletedRows: new Set(),
+      newRows: [['{"tenant_id":"tenant-04","order_id":"ORD-new"}', "tenant-04", "ORD-new", "new item"]],
+      newRowMeta: [{}],
+      columns: ["_id", "tenant_id", "order_id", "note"],
+      rows: [['{"tenant_id":"tenant-04","order_id":"ORD-000994"}', "tenant-04", "ORD-000994", "existing"]],
+    });
+
+    expect(preview).toHaveLength(1);
+    expect(preview[0]).toContain('DBX DYNAMODB INSERT ITEM\ntable: "orders"');
+    expect(preview[0]).toContain('"order_id": "ORD-new"');
+  });
+
+  it("uses one backend update for a DynamoDB key migration and previews the old source key", async () => {
+    app?.unmount();
+    backend.documentFindDocuments.mockResolvedValue({
+      documents: [{ _id: { tenant_id: "tenant-04", order_id: "ORD-old" }, tenant_id: "tenant-04", order_id: "ORD-old", note: "existing" }],
+      total: 1,
+      total_is_exact: true,
+    });
+    app = createApp(DocumentBrowser, {
+      connectionId: "dynamodb-1",
+      database: "us-east-1",
+      collection: "orders",
+      databaseType: "dynamodb",
+    });
+    app.mount(root!);
+    await flushUi();
+
+    const changes = {
+      dirtyRows: new Map([[0, new Map([[2, "ORD-new"]])]]),
+      deletedRows: new Set<number>(),
+      newRows: [],
+      newRowMeta: [],
+      columns: ["_id", "tenant_id", "order_id", "note"],
+      rows: [['{"tenant_id":"tenant-04","order_id":"ORD-old"}', "tenant-04", "ORD-old", "existing"]],
+    };
+    const preview = await dataGrid.customSaveHandler!.preview!(changes);
+
+    expect(preview).toHaveLength(1);
+    expect(preview[0]).toContain('key:\n{\n  "tenant_id": "tenant-04",\n  "order_id": "ORD-old"\n}');
+    expect(preview[0]).toContain('"order_id": "ORD-new"');
+
+    await dataGrid.customSaveHandler!.save(changes);
+    expect(backend.documentUpdateDocument).toHaveBeenCalledTimes(1);
+    expect(backend.documentUpdateDocument.mock.calls[0]?.slice(0, 4)).toEqual(["dynamodb-1", "us-east-1", "orders", '{"tenant_id":"tenant-04","order_id":"ORD-old"}']);
+    expect(JSON.parse(backend.documentUpdateDocument.mock.calls[0]?.[4])).toMatchObject({ tenant_id: "tenant-04", order_id: "ORD-new", note: "existing" });
+    expect(backend.documentInsertDocument).not.toHaveBeenCalled();
+    expect(backend.documentDeleteDocument).not.toHaveBeenCalled();
+  });
+
+  it("makes partial-projection DynamoDB index results read-only", async () => {
+    app?.unmount();
+    backend.dynamodbDescribeTable.mockResolvedValue({
+      name: "orders",
+      status: "ACTIVE",
+      itemCount: 1,
+      sizeBytes: 100,
+      partitionKey: { name: "tenant_id", attributeType: "S" },
+      sortKey: { name: "order_id", attributeType: "S" },
+      indexes: [
+        {
+          name: "by_status",
+          kind: "global",
+          partitionKey: { name: "status", attributeType: "S" },
+          sortKey: { name: "created_at", attributeType: "N" },
+          projectionType: "KEYS_ONLY",
+          nonKeyAttributes: [],
+        },
+      ],
+    });
+    app = createApp(DocumentBrowser, {
+      connectionId: "dynamodb-1",
+      database: "us-east-1",
+      collection: "orders",
+      databaseType: "dynamodb",
+    });
+    app.mount(root!);
+    await flushUi();
+
+    expect(dataGrid.editable).toBe(true);
+    root!.querySelector<HTMLElement>('[data-testid="select"][data-model-value="__table__"]')!.click();
+    await flushUi();
+
+    expect(dataGrid.editable).toBe(false);
+    expect(root!.textContent).toContain("KEYS_ONLY");
+    await expect(
+      dataGrid.customSaveHandler!.save({
+        dirtyRows: new Map(),
+        deletedRows: new Set(),
+        newRows: [],
+        newRowMeta: [],
+        columns: ["_id"],
+        rows: [],
+      }),
+    ).rejects.toThrow("dynamodb.partialProjectionReadOnly");
+  });
+
+  it("keeps ALL-projection DynamoDB index results editable", async () => {
+    app?.unmount();
+    backend.dynamodbDescribeTable.mockResolvedValue({
+      name: "orders",
+      status: "ACTIVE",
+      itemCount: 1,
+      sizeBytes: 100,
+      partitionKey: { name: "tenant_id", attributeType: "S" },
+      sortKey: { name: "order_id", attributeType: "S" },
+      indexes: [
+        {
+          name: "by_status",
+          kind: "global",
+          partitionKey: { name: "status", attributeType: "S" },
+          sortKey: { name: "created_at", attributeType: "N" },
+          projectionType: "ALL",
+          nonKeyAttributes: [],
+        },
+      ],
+    });
+    app = createApp(DocumentBrowser, {
+      connectionId: "dynamodb-1",
+      database: "us-east-1",
+      collection: "orders",
+      databaseType: "dynamodb",
+    });
+    app.mount(root!);
+    await flushUi();
+
+    root!.querySelector<HTMLElement>('[data-testid="select"][data-model-value="__table__"]')!.click();
+    await flushUi();
+    expect(dataGrid.editable).toBe(true);
+  });
+
   it("keeps an exact DynamoDB count while moving between cursor pages", async () => {
     app?.unmount();
     backend.documentCountDocuments.mockResolvedValue(250);
@@ -517,8 +684,8 @@ describe("DocumentBrowser MongoDB filter value types", () => {
       })
       .mockResolvedValueOnce({
         documents: [
-          { _id: { tenant_id: "tenant-a", order_id: "001" }, tenant_id: "tenant-a", order_id: "001", amount: { $number: "9007199254740993" } },
-          { _id: { tenant_id: "tenant-a", order_id: "002" }, tenant_id: "tenant-a", order_id: "002", tags: { $stringSet: ["new", "paid"] } },
+          { _id: { tenant_id: "tenant-a", order_id: "001" }, tenant_id: "tenant-a", order_id: "001", amount: { $dbxDynamoDb: { version: 1, type: "number", value: "9007199254740993" } } },
+          { _id: { tenant_id: "tenant-a", order_id: "002" }, tenant_id: "tenant-a", order_id: "002", tags: { $dbxDynamoDb: { version: 1, type: "stringSet", value: ["new", "paid"] } } },
         ],
         total: 3,
         total_is_exact: false,
@@ -547,9 +714,50 @@ describe("DocumentBrowser MongoDB filter value types", () => {
       [0, 2, "cursor-1"],
     ]);
     expect(result?.rows).toHaveLength(3);
-    expect(result?.rows[0]).toContain('{"$number":"9007199254740993"}');
-    expect(result?.rows[1]).toContain('{"$stringSet":["new","paid"]}');
+    expect(result?.rows[0]).toContain('{"$dbxDynamoDb":{"version":1,"type":"number","value":"9007199254740993"}}');
+    expect(result?.rows[1]).toContain('{"$dbxDynamoDb":{"version":1,"type":"stringSet","value":["new","paid"]}}');
     expect(progress).toHaveBeenLastCalledWith({ rowsExported: 3, totalRows: 3 });
+  });
+
+  it("caps an otherwise unlimited DynamoDB export at 10,000 items", async () => {
+    app?.unmount();
+    settings.editorSettings.exportBatchSize = 1000;
+    backend.documentFindDocuments.mockReset();
+    backend.documentFindDocuments.mockResolvedValueOnce({
+      documents: [{ _id: { tenant_id: "visible", order_id: "visible" } }],
+      total: 2,
+      total_is_exact: false,
+      next_cursor: "visible-cursor",
+    });
+    for (let pageIndex = 0; pageIndex < 10; pageIndex += 1) {
+      backend.documentFindDocuments.mockResolvedValueOnce({
+        documents: Array.from({ length: 1000 }, (_, rowIndex) => ({
+          _id: { tenant_id: `tenant-${pageIndex}`, order_id: String(rowIndex) },
+          tenant_id: `tenant-${pageIndex}`,
+          order_id: String(rowIndex),
+        })),
+        total: 1001,
+        total_is_exact: false,
+        next_cursor: `cursor-${pageIndex + 1}`,
+      });
+    }
+    app = createApp(DocumentBrowser, {
+      connectionId: "dynamodb-1",
+      database: "us-east-1",
+      collection: "orders",
+      databaseType: "dynamodb",
+    });
+    app.mount(root!);
+    await flushUi();
+
+    const progress = vi.fn();
+    const result = await dataGrid.fullExportResult!(progress);
+
+    expect(result?.rows).toHaveLength(10_000);
+    expect(result?.truncated).toBe(true);
+    expect(result?.has_more).toBe(true);
+    expect(backend.documentFindDocuments).toHaveBeenCalledTimes(11);
+    expect(progress).toHaveBeenLastCalledWith({ rowsExported: 10_000, totalRows: null });
   });
 
   it("exports all matching MongoDB documents without changing the visible page", async () => {

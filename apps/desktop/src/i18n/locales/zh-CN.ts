@@ -4518,6 +4518,8 @@ export default withEnglishFallback({
     sortKeyOnly: "DynamoDB Query 只能按当前索引的排序键 {key} 排序",
     pageCursorUnavailable: "当前 DynamoDB 页游标不可用，请从第一页重新加载",
     repeatedCursor: "DynamoDB 返回了重复的分页游标，已停止导出",
+    partialProjectionReadOnly: "当前 {projection} 索引不包含完整项目，为避免覆盖未投影属性，已禁用编辑",
+    exportLimitReached: "为限制内存和读取用量，DynamoDB 导出已在 {count} 条停止；可设置导出行数上限来调整范围",
     documentDetails: "DynamoDB 表：{table}\n项目键：{id}",
   },
   vector: {

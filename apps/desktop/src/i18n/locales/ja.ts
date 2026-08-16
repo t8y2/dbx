@@ -4400,6 +4400,8 @@ export default withEnglishFallback({
     sortKeyOnly: "DynamoDB Query は現在のインデックスのソートキー {key} でのみ並べ替えできます",
     pageCursorUnavailable: "DynamoDB のページカーソルを利用できません。最初のページから再読み込みしてください。",
     repeatedCursor: "DynamoDB が同じページカーソルを返したため、エクスポートを停止しました。",
+    partialProjectionReadOnly: "この {projection} インデックスには項目全体が含まれないため、未投影属性の上書きを防ぐ目的で編集を無効にしました。",
+    exportLimitReached: "メモリと読み取り使用量を制限するため、DynamoDB のエクスポートは {count} 件で停止しました。別の範囲にするにはエクスポート行数上限を設定してください。",
     documentDetails: "DynamoDB テーブル: {table}\n項目キー: {id}",
   },
   vector: {

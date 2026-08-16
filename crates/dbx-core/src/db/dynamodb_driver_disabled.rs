@@ -2,6 +2,7 @@ use std::time::Duration;
 
 use crate::db::document_result::DocumentQueryResult;
 use crate::models::connection::ConnectionConfig;
+use crate::types::QueryResult;
 
 const FEATURE_DISABLED: &str = "DynamoDB support is not included in this DBX build";
 
@@ -25,6 +26,8 @@ pub struct DynamoDbIndexInfo {
     pub kind: String,
     pub partition_key: DynamoDbKeyInfo,
     pub sort_key: Option<DynamoDbKeyInfo>,
+    pub projection_type: String,
+    pub non_key_attributes: Vec<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -37,8 +40,6 @@ pub struct DynamoDbTableDescription {
     pub partition_key: DynamoDbKeyInfo,
     pub sort_key: Option<DynamoDbKeyInfo>,
     pub indexes: Vec<DynamoDbIndexInfo>,
-    pub ttl_attribute: Option<String>,
-    pub ttl_status: Option<String>,
 }
 
 pub fn connect(_config: &ConnectionConfig, _host: &str, _port: u16) -> Result<DynamoDbClient, String> {
@@ -46,6 +47,14 @@ pub fn connect(_config: &ConnectionConfig, _host: &str, _port: u16) -> Result<Dy
 }
 
 pub async fn test_connection(_client: &DynamoDbClient, _timeout: Duration) -> Result<(), String> {
+    Err(FEATURE_DISABLED.to_string())
+}
+
+pub async fn execute_statement(
+    _client: &DynamoDbClient,
+    _source: &str,
+    _max_rows: usize,
+) -> Result<QueryResult, String> {
     Err(FEATURE_DISABLED.to_string())
 }
 

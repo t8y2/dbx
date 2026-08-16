@@ -3299,6 +3299,8 @@ export interface DynamoDbIndexInfo {
   kind: "global" | "local" | string;
   partitionKey: DynamoDbKeyInfo;
   sortKey?: DynamoDbKeyInfo;
+  projectionType: "ALL" | "KEYS_ONLY" | "INCLUDE" | string;
+  nonKeyAttributes: string[];
 }
 
 export interface DynamoDbTableDescription {
@@ -3309,8 +3311,6 @@ export interface DynamoDbTableDescription {
   partitionKey: DynamoDbKeyInfo;
   sortKey?: DynamoDbKeyInfo;
   indexes: DynamoDbIndexInfo[];
-  ttlAttribute?: string;
-  ttlStatus?: string;
 }
 
 // Kept for callers that are specifically using MongoDB APIs.

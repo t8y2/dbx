@@ -4015,6 +4015,8 @@ export default withEnglishFallback({
     sortKeyOnly: "DynamoDB Query는 현재 인덱스의 정렬 키 {key}로만 정렬할 수 있습니다",
     pageCursorUnavailable: "DynamoDB 페이지 커서를 사용할 수 없습니다. 첫 페이지부터 다시 불러오세요.",
     repeatedCursor: "DynamoDB가 중복 페이지 커서를 반환하여 내보내기를 중지했습니다.",
+    partialProjectionReadOnly: "이 {projection} 인덱스에는 전체 항목이 포함되지 않으므로 투영되지 않은 속성이 덮어쓰이지 않도록 편집을 비활성화했습니다.",
+    exportLimitReached: "메모리와 읽기 사용량을 제한하기 위해 DynamoDB 내보내기가 {count}개 항목에서 중지되었습니다. 다른 범위를 사용하려면 내보내기 행 제한을 설정하세요.",
     documentDetails: "DynamoDB 테이블: {table}\n항목 키: {id}",
   },
   vector: {

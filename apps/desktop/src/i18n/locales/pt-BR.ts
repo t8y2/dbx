@@ -4372,6 +4372,8 @@ export default withEnglishFallback({
     sortKeyOnly: "DynamoDB Query só pode ordenar pela chave de ordenação do índice atual: {key}",
     pageCursorUnavailable: "O cursor de página do DynamoDB não está disponível. Recarregue a partir da primeira página.",
     repeatedCursor: "O DynamoDB retornou um cursor de página repetido. A exportação foi interrompida.",
+    partialProjectionReadOnly: "Este índice {projection} não contém o item completo. A edição foi desativada para evitar a substituição de atributos não projetados.",
+    exportLimitReached: "A exportação do DynamoDB parou em {count} itens para limitar o uso de memória e leituras. Defina um limite de linhas para escolher outro intervalo.",
     documentDetails: "Tabela do DynamoDB: {table}\nChave do item: {id}",
   },
   vector: {

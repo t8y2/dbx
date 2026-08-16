@@ -2067,7 +2067,15 @@ async fn do_execute_typed(
             .map(|result| truncate_result_with_max_rows(result, max_rows))
         }
         PoolKind::HBase(_) => Err("SQL execution is not supported for HBase connections".to_string()),
-        PoolKind::DynamoDb(_) => Err("SQL execution is not supported for DynamoDB connections".to_string()),
+        PoolKind::DynamoDb(client) => {
+            let client = client.clone();
+            let sql = sql.to_string();
+            let max_rows = options.max_rows.unwrap_or(MAX_ROWS);
+            drop(connections);
+            // Keep the AWS SDK cold-path future off this already-large query dispatcher stack.
+            let execution = Box::pin(db::dynamodb_driver::execute_statement(&client, &sql, max_rows));
+            wait_for_query_opt(cancel_token, query_timeout, execution).await
+        }
         PoolKind::Consul(_) => Err("SQL execution is not supported for Consul connections".to_string()),
     };
     result
@@ -5232,6 +5240,55 @@ for line in sys.stdin:
             production_databases: vec![],
             database_info: None,
         }
+    }
+
+    #[cfg(feature = "dynamodb")]
+    #[tokio::test]
+    #[ignore = "requires DBX_DYNAMODB_ENDPOINT and an orders table"]
+    async fn live_dynamodb_editor_scan_serializes_one_thousand_rows() {
+        let endpoint = std::env::var("DBX_DYNAMODB_ENDPOINT").expect("DBX_DYNAMODB_ENDPOINT is required");
+        let (ssl, address) = endpoint
+            .strip_prefix("https://")
+            .map(|address| (true, address))
+            .or_else(|| endpoint.strip_prefix("http://").map(|address| (false, address)))
+            .expect("DynamoDB endpoint must start with http:// or https://");
+        let (host, port) = address.rsplit_once(':').expect("DynamoDB endpoint must include a port");
+        let dir = std::env::temp_dir().join(format!("dbx-query-dynamodb-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let state = AppState::new(storage);
+        let mut config = test_connection_config(DatabaseType::DynamoDb);
+        config.host = host.to_string();
+        config.port = port.parse().expect("valid DynamoDB port");
+        config.username = "dummy".to_string();
+        config.password = "dummy".to_string();
+        config.database = Some("us-east-1".to_string());
+        config.ssl = ssl;
+        let client = db::dynamodb_driver::connect(&config, host, config.port).unwrap();
+        db::dynamodb_driver::test_connection(&client, Duration::from_secs(5)).await.unwrap();
+        state.configs.write().await.insert(config.id.clone(), config.clone());
+        state.connections.write().await.insert(config.id.clone(), PoolKind::DynamoDb(client));
+
+        let results = execute_multi_core_with_options_for_client_and_progress_typed(
+            &state,
+            &config.id,
+            "us-east-1",
+            "DBX DYNAMODB SCAN\ntable: \"orders\"\nlimit: 1000",
+            None,
+            None,
+            QueryExecutionOptions { max_rows: Some(1000), ..Default::default() },
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].result.rows.len(), 1000);
+        let serialized = serde_json::to_string(&results).unwrap();
+        assert!(!serialized.is_empty());
+
+        drop(state);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     async fn agent_error_state(

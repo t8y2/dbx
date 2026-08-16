@@ -7,21 +7,21 @@ function createDragHarness(onDrop = vi.fn(() => true)) {
   const drag = useTabDrag(onDrop);
   const source = document.createElement("div");
   source.innerHTML = '<span class="truncate">Source</span>';
-  source.addEventListener("mousedown", (event) => drag.startDrag(event, "source"));
+  source.addEventListener("pointerdown", (event) => drag.startDrag(event as PointerEvent, "source"));
   document.body.appendChild(source);
   return { drag, source, onDrop };
 }
 
-function beginDrag(source: HTMLElement, x = 100, y = 20) {
-  source.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, button: 0, clientX: x, clientY: y }));
+function beginDrag(source: HTMLElement, x = 100, y = 20, pointerType = "mouse") {
+  source.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, button: 0, clientX: x, clientY: y, pointerType }));
 }
 
-function movePointer(x: number, y = 20) {
-  document.dispatchEvent(new MouseEvent("mousemove", { bubbles: true, clientX: x, clientY: y }));
+function movePointer(x: number, y = 20, pointerType = "mouse") {
+  document.dispatchEvent(new PointerEvent("pointermove", { bubbles: true, clientX: x, clientY: y, pointerType }));
 }
 
 function releasePointer() {
-  document.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+  document.dispatchEvent(new PointerEvent("pointerup", { bubbles: true }));
 }
 
 function enterDropTarget(drag: ReturnType<typeof useTabDrag>, tabId = "target", x = 10) {
@@ -89,5 +89,27 @@ describe("useTabDrag", () => {
 
     beginDrag(source);
     expect(drag.state.suppressClick).toBe(false);
+  });
+
+  it("ignores 18px of jitter, matching a typical touchscreen tap reported as generic mouse input", () => {
+    const { drag, source, onDrop } = createDragHarness();
+    beginDrag(source);
+
+    movePointer(100 - 18, 24);
+
+    expect(drag.state.active).toBe(false);
+    expect(drag.state.suppressClick).toBe(false);
+    expect(onDrop).not.toHaveBeenCalled();
+  });
+
+  it("never arms a drag for touch input, even past the horizontal threshold", () => {
+    const { drag, source, onDrop } = createDragHarness();
+    beginDrag(source, 100, 20, "touch");
+
+    movePointer(100 + TAB_DRAG_HORIZONTAL_THRESHOLD + 20, 20, "touch");
+
+    expect(drag.state.active).toBe(false);
+    expect(drag.state.suppressClick).toBe(false);
+    expect(onDrop).not.toHaveBeenCalled();
   });
 });

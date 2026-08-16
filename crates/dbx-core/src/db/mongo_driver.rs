@@ -824,6 +824,188 @@ fn index_info_from_model(model: IndexModel) -> IndexInfo {
     }
 }
 
+/// One key of a MongoDB index, with the direction/type kept as the server reports it
+/// (`1`, `-1`, `text`, `2dsphere`, `hashed`, …).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MongoIndexKey {
+    pub field: String,
+    pub direction: String,
+}
+
+/// Full MongoDB index specification straight from `listIndexes`.
+///
+/// The shared [`IndexInfo`] cannot carry `sparse`, `expireAfterSeconds`, `background`
+/// or `bucketSize`, so index management reads this MongoDB-specific shape instead.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MongoIndexSpec {
+    pub name: String,
+    pub keys: Vec<MongoIndexKey>,
+    pub is_unique: bool,
+    pub is_primary: bool,
+    pub is_sparse: bool,
+    /// TTL in seconds; `None` when the index does not expire.
+    pub expire_after_seconds: Option<i64>,
+    /// Partial index condition, serialized as JSON.
+    pub partial_filter_expression: Option<String>,
+    /// Ignored by MongoDB 4.2+, still reported by older servers.
+    pub background: bool,
+    /// Only meaningful for geoHaystack indexes, removed in MongoDB 4.4+.
+    pub bucket_size: Option<i64>,
+    pub hidden: bool,
+    /// `false` when the properties above could not be read (Legacy Agent fallback),
+    /// so callers can avoid presenting defaults as if the server had reported them.
+    pub properties_complete: bool,
+    /// Options this build does not model, serialized as JSON for display only.
+    pub extra_options: Option<String>,
+}
+
+/// Index-spec fields this build maps explicitly; everything else lands in `extra_options`.
+/// `v` and `ns` are server bookkeeping, listed here only to keep them out of that bucket.
+const MODELED_INDEX_FIELDS: &[&str] = &[
+    "name",
+    "key",
+    "v",
+    "ns",
+    "unique",
+    "sparse",
+    "expireAfterSeconds",
+    "partialFilterExpression",
+    "background",
+    "bucketSize",
+    "hidden",
+];
+
+/// Read every index of a collection with all of its options preserved.
+pub async fn list_index_specs(
+    client: &Client,
+    database: &str,
+    collection: &str,
+) -> Result<Vec<MongoIndexSpec>, String> {
+    let database = validate_mongo_namespace_name(database, "Database")?;
+    let collection = validate_mongo_namespace_name(collection, "Collection")?;
+    // Raw command rather than `Collection::list_indexes`, whose IndexModel drops
+    // sparse/TTL/background. The driver cursor owns getMore and killCursors.
+    let mut cursor = client
+        .database(database)
+        .run_cursor_command(doc! { "listIndexes": collection })
+        .await
+        .map_err(|e| e.to_string())?;
+    let mut specs = Vec::new();
+    while let Some(document) = cursor.try_next().await.map_err(|e| e.to_string())? {
+        specs.push(index_spec_from_document(&document));
+    }
+    Ok(specs)
+}
+
+/// Canonicalize an index key direction so `1.0` and `1` read the same downstream.
+fn index_key_direction(value: &Bson) -> String {
+    match value {
+        Bson::String(value) => value.clone(),
+        Bson::Int32(value) => value.to_string(),
+        Bson::Int64(value) => value.to_string(),
+        Bson::Double(value) if value.fract() == 0.0 && value.is_finite() => (*value as i64).to_string(),
+        value => value.to_string(),
+    }
+}
+
+/// MongoDB accepts booleans and truthy numbers for index flags.
+fn index_flag(document: &Document, field: &str) -> bool {
+    match document.get(field) {
+        Some(Bson::Boolean(value)) => *value,
+        Some(Bson::Int32(value)) => *value != 0,
+        Some(Bson::Int64(value)) => *value != 0,
+        Some(Bson::Double(value)) => *value != 0.0,
+        _ => false,
+    }
+}
+
+/// TTL and bucket size arrive as any BSON number depending on server version.
+fn index_number(document: &Document, field: &str) -> Option<i64> {
+    match document.get(field) {
+        Some(Bson::Int32(value)) => Some(i64::from(*value)),
+        Some(Bson::Int64(value)) => Some(*value),
+        Some(Bson::Double(value)) if value.is_finite() => Some(*value as i64),
+        _ => None,
+    }
+}
+
+/// Map one `listIndexes` document onto [`MongoIndexSpec`].
+pub fn index_spec_from_document(document: &Document) -> MongoIndexSpec {
+    let keys = match document.get("key") {
+        Some(Bson::Document(keys)) => keys
+            .iter()
+            .map(|(field, value)| MongoIndexKey { field: field.clone(), direction: index_key_direction(value) })
+            .collect::<Vec<_>>(),
+        _ => Vec::new(),
+    };
+    let name =
+        document.get_str("name").ok().map(str::to_string).filter(|name| !name.trim().is_empty()).unwrap_or_else(|| {
+            keys.iter().map(|key| format!("{}_{}", key.field, key.direction)).collect::<Vec<_>>().join("_")
+        });
+    let partial_filter_expression = match document.get("partialFilterExpression") {
+        Some(Bson::Document(filter)) => Some(bson_to_json(&Bson::Document(filter.clone())).to_string()),
+        _ => None,
+    };
+    let extra: Document = document
+        .iter()
+        .filter(|(field, _)| !MODELED_INDEX_FIELDS.contains(&field.as_str()))
+        .map(|(field, value)| (field.clone(), value.clone()))
+        .collect();
+    let extra_options = (!extra.is_empty()).then(|| bson_to_json(&Bson::Document(extra)).to_string());
+
+    let is_primary = name == "_id_";
+    MongoIndexSpec {
+        is_primary,
+        name,
+        keys,
+        is_unique: index_flag(document, "unique") || is_primary,
+        is_sparse: index_flag(document, "sparse"),
+        expire_after_seconds: index_number(document, "expireAfterSeconds"),
+        partial_filter_expression,
+        background: index_flag(document, "background"),
+        bucket_size: index_number(document, "bucketSize"),
+        hidden: index_flag(document, "hidden"),
+        properties_complete: true,
+        extra_options,
+    }
+}
+
+/// Degrade a shared [`IndexInfo`] into a spec for drivers that cannot report the
+/// full option set. `properties_complete` stays `false` so nothing is presented as
+/// server truth that was never read.
+pub fn index_spec_from_index_info(info: &IndexInfo) -> MongoIndexSpec {
+    let keys = match info.index_type.as_deref().map(str::trim).filter(|spec| !spec.is_empty()) {
+        Some(spec) => spec
+            .split(',')
+            .map(str::trim)
+            .filter(|part| !part.is_empty())
+            .map(|part| match part.rsplit_once(':') {
+                Some((field, direction)) if !field.trim().is_empty() => {
+                    MongoIndexKey { field: field.trim().to_string(), direction: direction.trim().to_string() }
+                }
+                _ => MongoIndexKey { field: part.to_string(), direction: String::new() },
+            })
+            .collect::<Vec<_>>(),
+        None => {
+            info.columns.iter().map(|field| MongoIndexKey { field: field.clone(), direction: String::new() }).collect()
+        }
+    };
+    MongoIndexSpec {
+        name: info.name.clone(),
+        keys,
+        is_unique: info.is_unique,
+        is_primary: info.is_primary,
+        is_sparse: false,
+        expire_after_seconds: None,
+        partial_filter_expression: info.filter.clone(),
+        background: false,
+        bucket_size: None,
+        hidden: false,
+        properties_complete: false,
+        extra_options: None,
+    }
+}
+
 fn parse_find_collation(value: Option<&str>) -> Result<Option<Collation>, String> {
     let Some(raw) = value.map(str::trim).filter(|value| !value.is_empty()) else {
         return Ok(None);
@@ -3227,6 +3409,155 @@ mod tests {
         assert_eq!(index.columns, vec!["_id"]);
         assert!(index.is_unique);
         assert!(index.is_primary);
+    }
+
+    #[test]
+    fn index_spec_from_document_reports_every_modeled_property() {
+        let spec = index_spec_from_document(&doc! {
+            "v": 2,
+            "key": { "expiresAt": 1 },
+            "name": "expires_ttl",
+            "unique": true,
+            "sparse": true,
+            "expireAfterSeconds": 3600,
+            "partialFilterExpression": { "archived": false },
+            "hidden": true,
+        });
+
+        assert_eq!(spec.name, "expires_ttl");
+        assert_eq!(spec.keys, vec![MongoIndexKey { field: "expiresAt".to_string(), direction: "1".to_string() }]);
+        assert!(spec.is_unique);
+        assert!(spec.is_sparse);
+        assert!(!spec.is_primary);
+        assert_eq!(spec.expire_after_seconds, Some(3600));
+        assert_eq!(spec.partial_filter_expression.as_deref(), Some("{\"archived\":false}"));
+        assert!(spec.hidden);
+        assert!(spec.properties_complete);
+        assert_eq!(spec.extra_options, None);
+    }
+
+    #[test]
+    fn index_spec_from_document_canonicalizes_whole_doubles_and_marks_the_default_index() {
+        let spec = index_spec_from_document(&doc! {
+            "key": { "_id": 1.0 },
+            "name": "_id_",
+        });
+
+        assert!(spec.is_primary);
+        assert_eq!(spec.keys, vec![MongoIndexKey { field: "_id".to_string(), direction: "1".to_string() }]);
+        assert!(spec.is_unique, "the default _id index is unique even when the server omits the flag");
+    }
+
+    #[test]
+    fn index_spec_from_document_keeps_non_numeric_key_directions_literal() {
+        let spec = index_spec_from_document(&doc! {
+            "key": { "content": "text", "location": "2dsphere" },
+            "name": "content_text_location_2dsphere",
+        });
+
+        assert_eq!(
+            spec.keys,
+            vec![
+                MongoIndexKey { field: "content".to_string(), direction: "text".to_string() },
+                MongoIndexKey { field: "location".to_string(), direction: "2dsphere".to_string() },
+            ]
+        );
+    }
+
+    #[test]
+    fn index_spec_from_document_accepts_numeric_truthiness_for_flags() {
+        let spec = index_spec_from_document(&doc! {
+            "key": { "email": 1 },
+            "name": "email_1",
+            "unique": 1,
+            "sparse": 0,
+            "background": 1,
+        });
+
+        assert!(spec.is_unique);
+        assert!(!spec.is_sparse);
+        assert!(spec.background);
+    }
+
+    #[test]
+    fn index_spec_from_document_collects_unmodeled_options_without_losing_them() {
+        let spec = index_spec_from_document(&doc! {
+            "key": { "location": "2dsphere" },
+            "name": "location_2dsphere",
+            "2dsphereIndexVersion": 3,
+            "collation": { "locale": "en" },
+        });
+
+        let extra = spec.extra_options.expect("unmodeled options must be preserved");
+        assert!(extra.contains("2dsphereIndexVersion"), "{extra}");
+        assert!(extra.contains("collation"), "{extra}");
+        assert!(!extra.contains("\"name\""), "modeled options must not be duplicated: {extra}");
+        assert!(!extra.contains("\"key\""), "modeled options must not be duplicated: {extra}");
+    }
+
+    #[test]
+    fn index_spec_from_document_derives_a_name_when_the_server_omits_it() {
+        let spec = index_spec_from_document(&doc! { "key": { "email": 1, "createdAt": -1 } });
+
+        assert_eq!(spec.name, "email_1_createdAt_-1");
+    }
+
+    #[test]
+    fn index_spec_from_document_reads_int64_and_double_ttl_values() {
+        let from_int64 =
+            index_spec_from_document(&doc! { "key": { "a": 1 }, "name": "a_1", "expireAfterSeconds": Bson::Int64(90) });
+        let from_double = index_spec_from_document(
+            &doc! { "key": { "a": 1 }, "name": "a_1", "expireAfterSeconds": Bson::Double(90.0) },
+        );
+
+        assert_eq!(from_int64.expire_after_seconds, Some(90));
+        assert_eq!(from_double.expire_after_seconds, Some(90));
+    }
+
+    #[test]
+    fn index_spec_from_index_info_marks_properties_as_incomplete() {
+        let spec = index_spec_from_index_info(&IndexInfo {
+            name: "email_1".to_string(),
+            columns: vec!["email".to_string()],
+            is_unique: true,
+            is_primary: false,
+            filter: Some("{\"archived\":false}".to_string()),
+            index_type: Some("email: 1".to_string()),
+            included_columns: None,
+            comment: None,
+        });
+
+        assert_eq!(spec.name, "email_1");
+        assert_eq!(spec.keys, vec![MongoIndexKey { field: "email".to_string(), direction: "1".to_string() }]);
+        assert!(spec.is_unique);
+        assert_eq!(spec.partial_filter_expression.as_deref(), Some("{\"archived\":false}"));
+        // The Legacy Agent cannot report these, so the flag tells the UI not to
+        // present the false values as though they came from the server.
+        assert!(!spec.properties_complete);
+        assert!(!spec.is_sparse);
+        assert_eq!(spec.expire_after_seconds, None);
+    }
+
+    #[test]
+    fn index_spec_from_index_info_falls_back_to_columns_without_an_index_type() {
+        let spec = index_spec_from_index_info(&IndexInfo {
+            name: "compound".to_string(),
+            columns: vec!["a".to_string(), "b".to_string()],
+            is_unique: false,
+            is_primary: false,
+            filter: None,
+            index_type: None,
+            included_columns: None,
+            comment: None,
+        });
+
+        assert_eq!(
+            spec.keys,
+            vec![
+                MongoIndexKey { field: "a".to_string(), direction: String::new() },
+                MongoIndexKey { field: "b".to_string(), direction: String::new() },
+            ]
+        );
     }
 
     #[test]

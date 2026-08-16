@@ -177,7 +177,7 @@ export function resolveAvailableMqTabs(options: { systemKind?: MqSystemKind; cap
   if (capabilities.supportsSubscriptions) tabs.push("subscriptions");
   tabs.push("monitoring");
   tabs.push("clients");
-  if (capabilities.supportsSendMessage) tabs.push("messages");
+  if (capabilities.supportsSendMessage || (systemKind === "kafka" && capabilities.supportsPeekMessages)) tabs.push("messages");
   tabs.push("broker");
   // RabbitMQ lights this tab via virtual-host policies instead of Pulsar rates/quotas.
   if (capabilities.supportsRateLimits || capabilities.supportsBacklogQuota || capabilities.supportsRetention || capabilities.supportsPolicies) {
@@ -203,4 +203,25 @@ export function resolveInitialMqTab(options: { initialTab?: MqTab; initialTenant
   if (isFlatMqSystemKind(options.systemKind)) return "topics";
   if (options.initialTenant) return "namespaces";
   return "tenants";
+}
+
+/**
+ * Resolve which tab to switch to after the user selects a topic/queue row.
+ *
+ * RabbitMQ's "monitoring" tab (RabbitMqMonitoringPanel) is a cluster-wide
+ * overview with no per-topic scoping, unlike Kafka/Pulsar's monitoring tab
+ * (MonitoringPanel), which does take the selected topic and shows its stats.
+ * Routing RabbitMQ topic selection to "monitoring" therefore drops all
+ * context about the queue just clicked (see #5984). "messages" shows a
+ * message browser scoped to the selected queue instead.
+ */
+export function resolveTopicSelectedTab(options: { systemKind?: MqSystemKind; capabilities: MqCapabilities }): MqTab {
+  const { systemKind, capabilities } = options;
+  if (systemKind === "rocketmq") {
+    return capabilities.supportsSubscriptions ? "subscriptions" : "topics";
+  }
+  if (systemKind === "rabbitmq") {
+    return capabilities.supportsSendMessage ? "messages" : "topics";
+  }
+  return isFlatMqSystemKind(systemKind) ? "monitoring" : capabilities.supportsSubscriptions ? "subscriptions" : "monitoring";
 }

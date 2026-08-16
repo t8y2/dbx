@@ -3550,7 +3550,11 @@ fn text_data_type(db_type: &DatabaseType) -> &'static str {
         DatabaseType::SqlServer => "NVARCHAR(MAX)",
         DatabaseType::Oracle | DatabaseType::OceanbaseOracle | DatabaseType::Dameng => "CLOB",
         DatabaseType::ClickHouse => "String",
-        DatabaseType::Hive | DatabaseType::Trino | DatabaseType::PrestoSql | DatabaseType::Databricks => "STRING",
+        DatabaseType::Hive
+        | DatabaseType::Kyuubi
+        | DatabaseType::Trino
+        | DatabaseType::PrestoSql
+        | DatabaseType::Databricks => "STRING",
         _ => "TEXT",
     }
 }
@@ -3575,6 +3579,7 @@ fn decimal_data_type(db_type: &DatabaseType) -> &'static str {
         | DatabaseType::Uxdb
         | DatabaseType::Kwdb
         | DatabaseType::Vastbase => "DOUBLE PRECISION",
+        DatabaseType::SqlServer => "FLOAT",
         DatabaseType::Sqlite | DatabaseType::Rqlite | DatabaseType::Turso | DatabaseType::CloudflareD1 => "REAL",
         DatabaseType::Oracle | DatabaseType::OceanbaseOracle | DatabaseType::Dameng => "BINARY_DOUBLE",
         DatabaseType::ClickHouse => "Float64",
@@ -8832,6 +8837,49 @@ mod tests {
         let plan = build_import_create_table_plan(&data, &mappings, "events", "dbo", &DatabaseType::SqlServer).unwrap();
 
         assert_eq!(plan.sql, "CREATE TABLE [dbo].[events] (\n  [notes] NVARCHAR(MAX)\n)");
+    }
+
+    #[test]
+    fn create_table_plan_uses_sqlserver_float_for_inferred_decimals() {
+        let data = ParsedImportFile {
+            columns: vec![
+                "id".to_string(),
+                "active".to_string(),
+                "amount".to_string(),
+                "created_at".to_string(),
+                "notes".to_string(),
+            ],
+            rows: vec![vec![
+                serde_json::json!(1001),
+                serde_json::json!(true),
+                serde_json::json!("12.5"),
+                serde_json::json!("2026-07-07 08:15:00"),
+                serde_json::json!("invoice"),
+            ]],
+            total_rows: 1,
+            effective_encoding: None,
+        };
+        let mappings = data
+            .columns
+            .iter()
+            .map(|column| TableImportColumnMapping {
+                source_column: column.clone(),
+                target_column: column.clone(),
+                target_data_type: None,
+            })
+            .collect::<Vec<_>>();
+
+        let plan =
+            build_import_create_table_plan(&data, &mappings, "invoices", "dbo", &DatabaseType::SqlServer).unwrap();
+
+        assert_eq!(
+            plan.sql,
+            "CREATE TABLE [dbo].[invoices] (\n  [id] BIGINT,\n  [active] BIT,\n  [amount] FLOAT,\n  [created_at] DATETIME2,\n  [notes] NVARCHAR(MAX)\n)"
+        );
+        assert_eq!(decimal_data_type(&DatabaseType::Mysql), "DOUBLE");
+        assert_eq!(decimal_data_type(&DatabaseType::Postgres), "DOUBLE PRECISION");
+        assert_eq!(decimal_data_type(&DatabaseType::Sqlite), "REAL");
+        assert_eq!(decimal_data_type(&DatabaseType::Oracle), "BINARY_DOUBLE");
     }
 
     #[test]

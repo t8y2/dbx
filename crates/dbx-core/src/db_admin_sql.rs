@@ -103,6 +103,19 @@ pub struct TableAdminSqlOptions {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct MysqlAutoIncrementSqlOptions {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub database_type: Option<DatabaseType>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub driver_profile: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema: Option<String>,
+    pub table_name: String,
+    pub value: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DropTableChildObjectSqlOptions {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub database_type: Option<DatabaseType>,
@@ -476,7 +489,13 @@ pub fn build_empty_table_sql(options: TableAdminSqlOptions) -> String {
     match options.database_type {
         Some(DatabaseType::ClickHouse) => format!("ALTER TABLE {table} DELETE WHERE 1 = 1;"),
         Some(DatabaseType::Bigquery) => format!("DELETE FROM {table} WHERE TRUE;"),
-        Some(DatabaseType::Cassandra | DatabaseType::Hive | DatabaseType::Kylin | DatabaseType::Questdb) => {
+        Some(
+            DatabaseType::Cassandra
+            | DatabaseType::Hive
+            | DatabaseType::Kyuubi
+            | DatabaseType::Kylin
+            | DatabaseType::Questdb,
+        ) => {
             format!("TRUNCATE TABLE {table};")
         }
         Some(DatabaseType::Iotdb) => format!("DELETE FROM {};", iotdb_timeseries_pattern(&table)),
@@ -499,6 +518,35 @@ pub fn build_truncate_table_sql(options: TableAdminSqlOptions) -> String {
         };
         format!("TRUNCATE TABLE {table}{cascade};")
     }
+}
+
+pub fn build_mysql_auto_increment_sql(options: MysqlAutoIncrementSqlOptions) -> Result<String, String> {
+    let profile = options.driver_profile.as_deref().map(str::trim).unwrap_or_default();
+    if options.database_type != Some(DatabaseType::Mysql)
+        || (!profile.is_empty() && !profile.eq_ignore_ascii_case("mysql"))
+    {
+        return Err("Setting AUTO_INCREMENT is supported only for native MySQL connections.".to_string());
+    }
+
+    let value = options.value.as_str();
+    if value.is_empty()
+        || !value.bytes().all(|byte| byte.is_ascii_digit())
+        || value.starts_with('0')
+        || value.parse::<u64>().is_err()
+    {
+        return Err("AUTO_INCREMENT must be a decimal integer from 1 to 18446744073709551615.".to_string());
+    }
+
+    let table = if options.schema.as_deref().is_some_and(|schema| !schema.is_empty()) {
+        format!(
+            "{}.{}",
+            quote_rename_identifier(options.database_type, options.schema.as_deref().unwrap()),
+            quote_rename_identifier(options.database_type, &options.table_name)
+        )
+    } else {
+        quote_rename_identifier(options.database_type, &options.table_name)
+    };
+    Ok(format!("ALTER TABLE {table} AUTO_INCREMENT = {value};"))
 }
 
 fn supports_truncate_table_cascade(database_type: Option<DatabaseType>) -> bool {
@@ -603,19 +651,20 @@ pub fn build_duplicate_table_structure_sql(options: DuplicateTableStructureSqlOp
     let source = qualified_name(options.database_type, options.schema.as_deref(), &options.source_name);
     let target =
         qualified_duplicate_target_name(options.database_type, options.schema.as_deref(), &options.target_name);
-    let structure_sql = if options.database_type == Some(DatabaseType::Mysql) {
-        format!("CREATE TABLE {target} LIKE {source};")
-    } else if options.database_type == Some(DatabaseType::Questdb) {
-        format!("CREATE TABLE {target} (LIKE {source});")
-    } else if options.database_type.is_some_and(is_postgres_like_structure_copy) {
-        format!("CREATE TABLE {target} (LIKE {source} INCLUDING ALL);")
-    } else if options.database_type == Some(DatabaseType::SqlServer) {
-        format!("SELECT TOP 0 * INTO {target} FROM {source};")
-    } else if options.database_type.is_some_and(uses_false_predicate_duplicate_structure) {
-        format!("CREATE TABLE {target} AS SELECT * FROM {source} WHERE 1=0")
-    } else {
-        format!("CREATE TABLE {target} AS SELECT * FROM {source} WHERE 0;")
-    };
+    let structure_sql =
+        if matches!(options.database_type, Some(DatabaseType::Mysql | DatabaseType::Kyuubi | DatabaseType::Impala)) {
+            format!("CREATE TABLE {target} LIKE {source};")
+        } else if options.database_type == Some(DatabaseType::Questdb) {
+            format!("CREATE TABLE {target} (LIKE {source});")
+        } else if options.database_type.is_some_and(is_postgres_like_structure_copy) {
+            format!("CREATE TABLE {target} (LIKE {source} INCLUDING ALL);")
+        } else if options.database_type == Some(DatabaseType::SqlServer) {
+            format!("SELECT TOP 0 * INTO {target} FROM {source};")
+        } else if options.database_type.is_some_and(uses_false_predicate_duplicate_structure) {
+            format!("CREATE TABLE {target} AS SELECT * FROM {source} WHERE 1=0")
+        } else {
+            format!("CREATE TABLE {target} AS SELECT * FROM {source} WHERE 0;")
+        };
 
     let mut comment_sql = Vec::new();
     if let Some(database_type) =
@@ -1393,6 +1442,56 @@ mod tests {
     }
 
     #[test]
+    fn builds_mysql_auto_increment_sql_and_rejects_invalid_values() {
+        let options = MysqlAutoIncrementSqlOptions {
+            database_type: Some(DatabaseType::Mysql),
+            driver_profile: Some("mysql".to_string()),
+            schema: Some("sales`archive".to_string()),
+            table_name: "order`items".to_string(),
+            value: "18446744073709551615".to_string(),
+        };
+        assert_eq!(
+            build_mysql_auto_increment_sql(options),
+            Ok("ALTER TABLE `sales``archive`.`order``items` AUTO_INCREMENT = 18446744073709551615;".to_string())
+        );
+
+        for value in ["", "0", "01", " 1", "1 ", "+1", "-1", "1; DROP TABLE users", "18446744073709551616"] {
+            assert!(
+                build_mysql_auto_increment_sql(MysqlAutoIncrementSqlOptions {
+                    database_type: Some(DatabaseType::Mysql),
+                    driver_profile: None,
+                    schema: None,
+                    table_name: "events".to_string(),
+                    value: value.to_string(),
+                })
+                .is_err(),
+                "value {value:?} should be rejected"
+            );
+        }
+
+        for (database_type, driver_profile) in [
+            (Some(DatabaseType::Postgres), None),
+            (Some(DatabaseType::Jdbc), Some("mysql".to_string())),
+            (Some(DatabaseType::Mysql), Some("mariadb".to_string())),
+            (Some(DatabaseType::Mysql), Some("tidb".to_string())),
+            (Some(DatabaseType::Mysql), Some("oceanbase".to_string())),
+            (Some(DatabaseType::Mysql), Some("dolt".to_string())),
+            (Some(DatabaseType::Goldendb), Some("goldendb".to_string())),
+            (Some(DatabaseType::Doris), Some("selectdb".to_string())),
+            (Some(DatabaseType::StarRocks), Some("starrocks".to_string())),
+        ] {
+            assert!(build_mysql_auto_increment_sql(MysqlAutoIncrementSqlOptions {
+                database_type,
+                driver_profile,
+                schema: None,
+                table_name: "events".to_string(),
+                value: "1".to_string(),
+            })
+            .is_err());
+        }
+    }
+
+    #[test]
     fn builds_drop_object_database_and_schema_sql() {
         assert_eq!(
             build_drop_object_sql(DropObjectSqlOptions {
@@ -1591,6 +1690,28 @@ mod tests {
                 column_comments: vec![],
             }),
             "CREATE TABLE \"public\".\"users_copy\" (LIKE \"public\".\"users\" INCLUDING ALL);"
+        );
+        assert_eq!(
+            build_duplicate_table_structure_sql(DuplicateTableStructureSqlOptions {
+                database_type: Some(DatabaseType::Impala),
+                schema: Some("dbx_demo".to_string()),
+                source_name: "connection_test".to_string(),
+                target_name: "connection_test_copy".to_string(),
+                table_comment: None,
+                column_comments: vec![],
+            }),
+            "CREATE TABLE `dbx_demo`.`connection_test_copy` LIKE `dbx_demo`.`connection_test`;"
+        );
+        assert_eq!(
+            build_duplicate_table_structure_sql(DuplicateTableStructureSqlOptions {
+                database_type: Some(DatabaseType::Kyuubi),
+                schema: Some("dbx_demo".to_string()),
+                source_name: "orders".to_string(),
+                target_name: "orders_copy".to_string(),
+                table_comment: None,
+                column_comments: vec![],
+            }),
+            "CREATE TABLE `dbx_demo`.`orders_copy` LIKE `dbx_demo`.`orders`;"
         );
         assert_eq!(
             build_duplicate_table_structure_sql(DuplicateTableStructureSqlOptions {

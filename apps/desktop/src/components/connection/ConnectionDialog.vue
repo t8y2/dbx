@@ -48,6 +48,7 @@ import { mongodbAuthFailureHint, mongoUrlParam, mongoUrlParamIsTrue, normalizeMo
 import { isMongoLegacyDriverProfile } from "@/lib/mongo/mongoCapabilities";
 import { mysqlCleartextPasswordAuthEnabled, setMysqlCleartextPasswordAuthEnabled } from "@/lib/database/mysqlConnectionOptions";
 import { applyDamengSslUrlParams, damengSslFormConfig } from "@/lib/database/damengSslOptions";
+import { doltSystemTablesVisible, isDoltDriverProfile, setDoltSystemTablesVisible } from "@/lib/database/doltProfile";
 import { DamengJvmSystemPropertyError, damengJvmSystemPropertiesText, parseDamengJvmSystemProperties } from "@/lib/database/damengJvmOptions";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { configuredDatabaseProductName, connectionConfigFingerprint, databaseInfoCopyText, databaseInfoRows, normalizeDatabaseConnectionInfo, type DatabaseInfoField } from "@/lib/connection/connectionDatabaseInfo";
@@ -68,8 +69,8 @@ import { normalizeRabbitmqAddresses } from "@/lib/connection/rabbitmqAddresses";
 import { detectMqUiAuthKind, isMqAuthKindAllowedForSystem, type MqUiAuthKind } from "@/lib/connection/mqAuth";
 import { driverInstallProgressChannel, driverInstallProgressPercent, isDriverInstallProgressForOperation, type DriverInstallProgress } from "@/lib/connection/driverInstallProgressUi";
 import { requiresSqlServerLegacyCompatibilityComponent, setSqlServerLegacyCompatibilityConfig, sqlServerUsesLegacyCompatibility, SQLSERVER_LEGACY_COMPATIBILITY_DRIVER_KEY } from "@/lib/connection/sqlServerLegacyCompatibility";
-import { normalizeNacosEndpoint, normalizeNacosMetricsUrl } from "@/lib/nacos/nacosAdmin";
-import { nacosNamespaceIdentity, normalizeNacosNamespaceSelection, normalizeNacosNamespacesForDisplay } from "@/lib/nacos/nacosNamespaceVisibility";
+import { normalizeNacosEndpoint, normalizeNacosMetricsUrl, parseNacosManagedNamespaces } from "@/lib/nacos/nacosAdmin";
+import { loadReadableNacosNamespaces, nacosNamespaceIdentity, normalizeNacosNamespaceSelection } from "@/lib/nacos/nacosNamespaceVisibility";
 import {
   ArrowLeft,
   ArrowDown,
@@ -117,7 +118,19 @@ import {
   elasticsearchKibanaBasePathFromConfig,
   type ElasticsearchConnectionMode,
 } from "@/lib/connection/elasticsearchKibanaProxy";
-import { GAUSSDB_M_JDBC_DRIVER_CLASS, gaussdbConnectionMode, gaussdbIdentifierQuoteStyle, setGaussdbConnectionMode, setGaussdbIdentifierQuoteStyle, supportsGaussdbIdentifierQuoteStyle, type GaussdbConnectionMode, type GaussdbIdentifierQuoteStyle } from "@/lib/database/jdbcDialect";
+import {
+  GAUSSDB_M_JDBC_DRIVER_CLASS,
+  gaussdbConnectionMode,
+  gaussdbIdentifierQuoteStyle,
+  gaussdbTargetServerType,
+  setGaussdbConnectionMode,
+  setGaussdbIdentifierQuoteStyle,
+  setGaussdbTargetServerType,
+  supportsGaussdbIdentifierQuoteStyle,
+  type GaussdbConnectionMode,
+  type GaussdbIdentifierQuoteStyle,
+  type GaussdbTargetServerType,
+} from "@/lib/database/jdbcDialect";
 import { normalizeStoredConnectionDatabase } from "@/lib/database/sqliteNamespace";
 import {
   createJdbcProductConnectionFieldsByMode,
@@ -531,6 +544,14 @@ const gaussdbQuoteStyle = computed<GaussdbIdentifierQuoteStyle>({
   },
 });
 
+const gaussdbTargetServerTypeComputed = computed<GaussdbTargetServerType>({
+  get: () => gaussdbTargetServerType(form.value),
+  set: (value) => {
+    setGaussdbTargetServerType(form.value, value);
+    resetTestState();
+  },
+});
+
 const gaussdbHostEntries = ref<GaussdbHostEntry[]>(parseGaussdbHosts(form.value.host, form.value.port));
 
 watch(
@@ -800,11 +821,12 @@ const mqKafkaSaslMechanismOptions = [
   { value: "SCRAM-SHA-512", label: "SCRAM-SHA-512" },
 ];
 const nacosImplementation = ref<NacosImplementation>("nacos");
-// Nacos 2 and 3 expose different API planes (and Nacos 3 commonly needs a
-// separate Console address). New connections must therefore choose an
-// explicit version instead of relying on endpoint-shape guessing.
+// Nacos 2 and 3 expose different API planes. New connections must therefore
+// choose an explicit version instead of relying on endpoint-shape guessing.
 const nacosVersionMode = ref<NacosVersionMode>("v2");
 const nacosServerAddr = ref("");
+const nacosOrdinaryAccount = ref(false);
+const nacosManagedNamespacesText = ref("");
 const nacosRNacosConsoleAddr = ref("");
 const nacosHistoryEnabled = ref(false);
 const nacosConsoleAuthKind = ref<NacosRNacosConsoleAuth["kind"]>("inherit");
@@ -1010,6 +1032,14 @@ const driverProfiles: Record<
     icon: "cloudberry",
     urlParams: "",
   },
+  opentenbase: {
+    type: "postgres",
+    port: 11000,
+    user: "opentenbase",
+    label: "OpenTenBase",
+    icon: "opentenbase",
+    urlParams: "",
+  },
   redis: { type: "redis", port: 6379, user: "", label: "Redis", icon: "redis" },
   sqlite: { type: "sqlite", port: 0, user: "", label: "SQLite", icon: "sqlite" },
   rqlite: { type: "rqlite", port: 4001, user: "", label: "RQLite", icon: "rqlite" },
@@ -1133,6 +1163,8 @@ const driverProfiles: Record<
   trino: { type: "trino", port: 8080, user: "", label: "Trino", icon: "trino" },
   prestosql: { type: "prestosql", port: 8080, user: "", label: "PrestoSQL", icon: "presto" },
   hive: { type: "hive", port: 10000, user: "", label: "Apache Hive", icon: "hive" },
+  kyuubi: { type: "kyuubi", port: 10009, user: "", label: "Apache Kyuubi", icon: "kyuubi", urlParams: "auth=NONE" },
+  impala: { type: "impala", port: 21050, user: "", label: "Apache Impala", icon: "impala", urlParams: "auth=noSasl" },
   spark: { type: "spark", port: 10015, user: "", label: "Apache Spark", icon: "spark" },
   db2: { type: "db2", port: 50000, user: "db2inst1", label: "IBM DB2", icon: "db2" },
   informix: { type: "informix", port: 9088, user: "informix", label: "Informix", icon: "informix" },
@@ -1359,6 +1391,8 @@ function resetNacosFields(config?: Partial<NacosAdminConfig>) {
   const serverAddr = config?.serverAddr?.trim() || "";
   const contextPath = config?.contextPath?.trim() || "";
   nacosServerAddr.value = serverAddr && contextPath && contextPath !== "/" && !serverAddr.endsWith(contextPath) ? `${serverAddr.replace(/\/+$/, "")}/${contextPath.replace(/^\/+/, "")}` : serverAddr;
+  nacosOrdinaryAccount.value = !!config?.managedNamespaces?.length;
+  nacosManagedNamespacesText.value = (config?.managedNamespaces || []).join("\n");
   nacosRNacosConsoleAddr.value = config?.rnacosConsoleAddr?.trim() || "";
   nacosHistoryEnabled.value = config?.rnacosHistoryEnabled ?? !!config?.rnacosConsoleAddr;
   const consoleAuth = config?.rnacosConsoleAuth || { kind: "inherit" };
@@ -1700,12 +1734,16 @@ function buildNacosAdminConfig(): NacosAdminConfig {
   if (nacosImplementation.value === "rnacos" && normalized.warnings.length) {
     throw new Error(t("connection.nacosRNacosOpenApiRequired"));
   }
-  const rnacosExtensionsEnabled = nacosImplementation.value === "rnacos" && nacosHistoryEnabled.value;
-  const rnacosConsoleConfigured = rnacosExtensionsEnabled && !!nacosRNacosConsoleAddr.value.trim();
-  if (rnacosExtensionsEnabled && !rnacosConsoleConfigured) {
+  const rnacosConsoleConfigured = nacosImplementation.value === "rnacos" && !!nacosRNacosConsoleAddr.value.trim();
+  if (nacosImplementation.value === "rnacos" && nacosHistoryEnabled.value && !rnacosConsoleConfigured) {
     throw new Error(t("connection.nacosRNacosConsoleUrlRequired"));
   }
   let rnacosConsoleAuth: NacosRNacosConsoleAuth | undefined;
+  const usesManagedNamespaces = nacosImplementation.value === "nacos" && nacosAuthKind.value === "usernamePassword" && nacosOrdinaryAccount.value;
+  const managedNamespaces = usesManagedNamespaces ? parseNacosManagedNamespaces(nacosManagedNamespacesText.value) : [];
+  if (usesManagedNamespaces && managedNamespaces.length === 0) {
+    throw new Error(t("nacos.nacosOrdinaryNamespacesRequired"));
+  }
   let metricsUrl: string | undefined;
   if (nacosMetricsMode.value === "custom") {
     try {
@@ -1731,7 +1769,8 @@ function buildNacosAdminConfig(): NacosAdminConfig {
     versionMode: nacosImplementation.value === "nacos" ? nacosVersionMode.value : undefined,
     serverAddr: normalized.serverAddr,
     contextPath: normalized.contextPath || undefined,
-    rnacosConsoleAddr: rnacosExtensionsEnabled ? nacosRNacosConsoleAddr.value.trim() || undefined : undefined,
+    managedNamespaces: managedNamespaces.length ? managedNamespaces : undefined,
+    rnacosConsoleAddr: rnacosConsoleConfigured ? nacosRNacosConsoleAddr.value.trim() : undefined,
     rnacosHistoryEnabled: nacosImplementation.value === "rnacos" ? nacosHistoryEnabled.value : undefined,
     rnacosConsoleAuth,
     auth: buildNacosAuth(),
@@ -2386,7 +2425,7 @@ function applyProfile(val: string, preserveConnectionFields = false) {
       form.value.connection_string = undefined;
       form.value.url_params = "";
     }
-    resetHiveKerberosFields(profile.type === "hive" ? form.value : undefined);
+    resetHiveKerberosFields(profile.type === "hive" || profile.type === "kyuubi" || profile.type === "impala" ? form.value : undefined);
   }
 }
 
@@ -2512,7 +2551,7 @@ watch(
         resetVictoriaMetricsFields();
       }
       resetElasticsearchProxyFields(config.db_type === "elasticsearch" ? config.external_config : undefined);
-      resetHiveKerberosFields(config.db_type === "hive" ? config : undefined);
+      resetHiveKerberosFields(config.db_type === "hive" || config.db_type === "kyuubi" || config.db_type === "impala" ? config : undefined);
       resetDamengJvmOptions(config.db_type === "dameng" ? config : undefined);
       h2ConnectionMode.value = h2ConnectionModeForConfig(config);
       customColorInput.value = config.color || "";
@@ -2698,6 +2737,7 @@ const iconTypeMap: Record<string, string> = {
   mysql: "mysql",
   postgres: "postgres",
   cloudberry: "cloudberry",
+  opentenbase: "opentenbase",
   sqlite: "sqlite",
   rqlite: "rqlite",
   turso: "turso",
@@ -2766,6 +2806,8 @@ const iconTypeMap: Record<string, string> = {
   trino: "trino",
   prestosql: "prestosql",
   hive: "hive",
+  kyuubi: "kyuubi",
+  impala: "impala",
   spark: "spark",
   db2: "db2",
   informix: "informix",
@@ -2790,6 +2832,7 @@ const iconTypeMap: Record<string, string> = {
 const dbOptions: DbOption[] = [
   { value: "postgres", label: "PostgreSQL" },
   { value: "cloudberry", label: "Apache Cloudberry" },
+  { value: "opentenbase", label: "OpenTenBase" },
   { value: "mysql", label: "MySQL" },
   { value: "mongodb", label: "MongoDB" },
   { value: "redis", label: "Redis" },
@@ -2846,6 +2889,8 @@ const dbOptions: DbOption[] = [
   { value: "trino", label: "Trino" },
   { value: "prestosql", label: "PrestoSQL" },
   { value: "hive", label: "Hive" },
+  { value: "kyuubi", label: "Apache Kyuubi" },
+  { value: "impala", label: "Apache Impala" },
   { value: "spark", label: "Apache Spark" },
   { value: "db2", label: "DB2" },
   { value: "informix", label: "Informix" },
@@ -2891,12 +2936,12 @@ const dbCategoryDefinitions: Array<{
   {
     key: "analytics",
     titleKey: "connection.databaseCategoryAnalytics",
-    optionValues: ["cloudberry", "clickhouse", "doris", "starrocks", "databend", "selectdb", "databricks", "saphana", "teradata", "vertica", "exasol", "redshift", "snowflake", "trino", "prestosql", "hive", "spark", "bigquery", "kylin", "dremio"],
+    optionValues: ["cloudberry", "clickhouse", "doris", "starrocks", "databend", "selectdb", "databricks", "saphana", "teradata", "vertica", "exasol", "redshift", "snowflake", "trino", "prestosql", "hive", "kyuubi", "impala", "spark", "bigquery", "kylin", "dremio"],
   },
   {
     key: "domestic",
     titleKey: "connection.databaseCategoryDomestic",
-    optionValues: ["dm", "opengauss", "gaussdb", "kwdb", "tidb", "oceanbase", "goldendb", "tdsql", "polardb", "greatsql", "gbase", "kingbase", "highgo", "uxdb", "yashandb", "vastbase", "sundb", "oscar", "xugu"],
+    optionValues: ["dm", "opengauss", "opentenbase", "gaussdb", "kwdb", "tidb", "oceanbase", "goldendb", "tdsql", "polardb", "greatsql", "gbase", "kingbase", "highgo", "uxdb", "yashandb", "vastbase", "sundb", "oscar", "xugu"],
   },
   {
     key: "lightweight",
@@ -3062,6 +3107,11 @@ const showGenericUrlParamsHint = computed(() => form.value.db_type === "mysql" |
 const bareMysqlProfiles = new Set(["doris", "selectdb", "oceanbase"]);
 const supportsMysqlTlsOptions = computed(() => form.value.db_type === "starrocks" || (form.value.db_type === "mysql" && !bareMysqlProfiles.has(selectedType.value)));
 const supportsMysqlCleartextPasswordAuth = computed(() => form.value.db_type === "mysql" && !bareMysqlProfiles.has(selectedType.value));
+const supportsDoltSystemTables = computed(() => isDoltDriverProfile(form.value.driver_profile));
+const showDoltSystemTables = computed({
+  get: () => doltSystemTablesVisible(form.value),
+  set: (visible: boolean) => setDoltSystemTablesVisible(form.value, visible),
+});
 const mysqlCleartextPasswordAuth = computed({
   get: () => mysqlCleartextPasswordAuthEnabled(form.value.url_params),
   set: (value: boolean) => {
@@ -3728,7 +3778,7 @@ function connectionConfigForSubmit(id: string, generatedName = ""): ConnectionCo
     config.ssl = !!config.ssl || damengSsl.enabled;
     config.url_params = applyDamengSslUrlParams(config.url_params, config.ssl, damengSsl.sslFilesPath, damengSsl.sslKeystorePassword, damengSsl.sslProtocol);
   }
-  if (config.db_type === "hive") {
+  if (config.db_type === "hive" || config.db_type === "kyuubi" || config.db_type === "impala") {
     if (hiveAuthMode.value === "kerberos" && !hivePrincipal.value.trim()) {
       throw new Error(t("connection.hiveKerberosPrincipalRequired"));
     }
@@ -3857,9 +3907,11 @@ function connectionConfigForSubmit(id: string, generatedName = ""): ConnectionCo
     config.external_config = sqlServerPortExplicitFromConfig(config) ? { portExplicit: true } : undefined;
   } else if (supportsGaussdbIdentifierQuoteStyle(config)) {
     const style = gaussdbIdentifierQuoteStyle(config);
+    const targetServerType = gaussdbTargetServerType(config);
     config.external_config = undefined;
     setGaussdbIdentifierQuoteStyle(config, style);
-  } else {
+    setGaussdbTargetServerType(config, targetServerType);
+  } else if (!isDoltDriverProfile(config.driver_profile)) {
     config.external_config = undefined;
   }
   if (config.db_type === "mongodb" && !mongoUseUrl.value) {
@@ -4382,7 +4434,7 @@ async function openVisibleNacosNamespacesPicker() {
       one_time: true,
     };
     await api.connectDb(draftConfig);
-    const namespaces = normalizeNacosNamespacesForDisplay(await api.nacosListNamespaces(draftId));
+    const namespaces = await loadReadableNacosNamespaces(draftId, api);
     visibleNacosNamespaces.value = [...namespaces].sort((left, right) => nacosNamespaceLabel(left).localeCompare(nacosNamespaceLabel(right)));
     const configured = form.value.visible_databases;
     const initialSelection = Array.isArray(configured) ? normalizeVisibleNacosNamespaceSelection(configured, visibleNacosNamespaces.value) : visibleNacosNamespaces.value.map(nacosNamespaceValue);
@@ -4466,7 +4518,7 @@ function initialProductionDatabaseSelection(databaseNames: string[]): string[] {
 
 async function loadProductionDatabaseNames(connectionId: string, config: ConnectionConfig): Promise<string[]> {
   if (config.db_type === "nacos") {
-    return normalizeNacosNamespacesForDisplay(await api.nacosListNamespaces(connectionId)).map((namespace) => namespace.namespace);
+    return (await loadReadableNacosNamespaces(connectionId, api)).map((namespace) => namespace.namespace);
   }
   if (config.db_type === "redis") {
     return (await api.redisListDatabases(connectionId)).map((database) => String(database.db));
@@ -6272,6 +6324,29 @@ function openExternalUrl(url: string) {
                         <PasswordInput v-model="nacosPassword" />
                       </div>
                     </div>
+                    <div v-if="nacosImplementation === 'nacos' && nacosAuthKind === 'usernamePassword'" data-nacos-ordinary-user-toggle class="mt-4 border-t pt-4">
+                      <div class="flex items-start justify-between gap-4">
+                        <span class="min-w-0">
+                          <span class="block text-sm font-medium">{{ t("nacos.nacosOrdinaryAccount") }}</span>
+                          <span class="mt-0.5 block text-xs leading-5 text-muted-foreground">{{ t("nacos.nacosOrdinaryAccountHint") }}</span>
+                        </span>
+                        <Switch v-model="nacosOrdinaryAccount" class="mt-0.5 shrink-0" />
+                      </div>
+                      <div v-if="nacosOrdinaryAccount" class="mt-3 grid gap-1.5 pl-0 sm:pl-4">
+                        <div class="flex items-center justify-between gap-3">
+                          <Label>{{ t("nacos.nacosManagedNamespaces") }}</Label>
+                          <span class="text-[11px] text-muted-foreground">{{ t("nacos.nacosManagedNamespacesSeparator") }}</span>
+                        </div>
+                        <textarea
+                          v-model="nacosManagedNamespacesText"
+                          data-nacos-managed-namespaces
+                          rows="2"
+                          class="min-h-14 resize-y rounded-md border border-input bg-background px-3 py-2 text-sm shadow-sm outline-none placeholder:text-muted-foreground focus-visible:ring-1 focus-visible:ring-ring"
+                          :placeholder="t('nacos.nacosManagedNamespacesPlaceholder')"
+                        />
+                        <p class="text-[11px] leading-4 text-muted-foreground">{{ t("nacos.nacosManagedNamespacesHint") }}</p>
+                      </div>
+                    </div>
                   </section>
 
                   <section data-nacos-advanced-hint class="flex items-start gap-3 rounded-lg border border-dashed bg-muted/20 px-4 py-3">
@@ -6998,7 +7073,7 @@ function openExternalUrl(url: string) {
                     <p class="col-span-3 text-xs text-muted-foreground">{{ t("connection.oracleTnsPathHint") }}</p>
                   </div>
 
-                  <template v-if="form.db_type === 'hive'">
+                  <template v-if="form.db_type === 'hive' || form.db_type === 'kyuubi' || form.db_type === 'impala'">
                     <div class="grid grid-cols-4 items-center gap-4">
                       <Label :class="connectionLabelClass">{{ t("connection.hiveAuthMode") }}</Label>
                       <div class="col-span-3 grid h-8 grid-cols-2 overflow-hidden rounded-md border border-input bg-muted/30 p-0.5">
@@ -7020,7 +7095,7 @@ function openExternalUrl(url: string) {
                     <template v-if="hiveAuthMode === 'kerberos'">
                       <div class="grid grid-cols-4 items-center gap-4">
                         <Label :class="connectionLabelSmallClass">{{ t("connection.hivePrincipal") }}</Label>
-                        <Input v-model="hivePrincipal" class="col-span-3" placeholder="hive/_HOST@EXAMPLE.COM" />
+                        <Input v-model="hivePrincipal" class="col-span-3" :placeholder="form.db_type === 'impala' ? 'impala/_HOST@EXAMPLE.COM' : 'hive/_HOST@EXAMPLE.COM'" />
                       </div>
                       <div class="grid grid-cols-4 items-center gap-4">
                         <Label :class="connectionLabelSmallClass">krb5.conf</Label>
@@ -7663,38 +7738,35 @@ function openExternalUrl(url: string) {
                           <span class="text-xs text-muted-foreground">{{ t("nacos.nacosEnabled") }}</span>
                         </label>
                       </div>
-                      <template v-if="nacosHistoryEnabled">
+                      <div class="grid gap-1.5">
+                        <Label>{{ t("connection.nacosRNacosConsoleUrl") }}</Label>
+                        <Input v-model="nacosRNacosConsoleAddr" :placeholder="t('connection.nacosRNacosConsoleUrlPlaceholder')" />
+                        <p class="text-[11px] leading-4 text-muted-foreground">{{ t("nacos.nacosRnacosConsoleUrlHint") }}</p>
+                      </div>
+                      <template v-if="nacosRNacosConsoleAddr.trim()">
                         <div class="grid gap-1.5">
-                          <Label>{{ t("connection.nacosRNacosConsoleUrl") }}</Label>
-                          <Input v-model="nacosRNacosConsoleAddr" :placeholder="t('connection.nacosRNacosConsoleUrlPlaceholder')" />
-                          <p class="text-[11px] leading-4 text-muted-foreground">{{ t("nacos.nacosRnacosConsoleUrlHint") }}</p>
+                          <Label>{{ t("connection.nacosConsoleAuthentication") }}</Label>
+                          <div class="flex items-center gap-1 rounded-md border bg-muted/20 p-0.5">
+                            <Button type="button" size="sm" class="h-8 flex-1" :variant="nacosConsoleAuthKind === 'inherit' ? 'default' : 'ghost'" :disabled="nacosAuthKind === 'none'" @click="nacosConsoleAuthKind = 'inherit'">
+                              {{ t("connection.nacosConsoleAuthInherit") }}
+                            </Button>
+                            <Button type="button" size="sm" class="h-8 flex-1" :variant="nacosConsoleAuthKind === 'usernamePassword' ? 'default' : 'ghost'" @click="nacosConsoleAuthKind = 'usernamePassword'">
+                              {{ t("connection.nacosConsoleAuthSeparate") }}
+                            </Button>
+                          </div>
+                          <p v-if="nacosConsoleAuthKind === 'inherit' && nacosAuthKind === 'none'" class="text-xs text-destructive">{{ t("connection.nacosConsoleAuthPrimaryNone") }}</p>
                         </div>
-                        <template v-if="nacosRNacosConsoleAddr.trim()">
+                        <div v-if="nacosConsoleAuthKind === 'usernamePassword'" class="grid gap-4 sm:grid-cols-2">
                           <div class="grid gap-1.5">
-                            <Label>{{ t("connection.nacosConsoleAuthentication") }}</Label>
-                            <div class="flex items-center gap-1 rounded-md border bg-muted/20 p-0.5">
-                              <Button type="button" size="sm" class="h-8 flex-1" :variant="nacosConsoleAuthKind === 'inherit' ? 'default' : 'ghost'" :disabled="nacosAuthKind === 'none'" @click="nacosConsoleAuthKind = 'inherit'">
-                                {{ t("connection.nacosConsoleAuthInherit") }}
-                              </Button>
-                              <Button type="button" size="sm" class="h-8 flex-1" :variant="nacosConsoleAuthKind === 'usernamePassword' ? 'default' : 'ghost'" @click="nacosConsoleAuthKind = 'usernamePassword'">
-                                {{ t("connection.nacosConsoleAuthSeparate") }}
-                              </Button>
-                            </div>
-                            <p v-if="nacosConsoleAuthKind === 'inherit' && nacosAuthKind === 'none'" class="text-xs text-destructive">{{ t("connection.nacosConsoleAuthPrimaryNone") }}</p>
+                            <Label>{{ t("connection.nacosConsoleUser") }}</Label>
+                            <Input v-model="nacosConsoleUsername" />
                           </div>
-                          <div v-if="nacosConsoleAuthKind === 'usernamePassword'" class="grid gap-4 sm:grid-cols-2">
-                            <div class="grid gap-1.5">
-                              <Label>{{ t("connection.nacosConsoleUser") }}</Label>
-                              <Input v-model="nacosConsoleUsername" />
-                            </div>
-                            <div class="grid gap-1.5">
-                              <Label>{{ t("connection.nacosConsolePassword") }}</Label>
-                              <PasswordInput v-model="nacosConsolePassword" />
-                            </div>
+                          <div class="grid gap-1.5">
+                            <Label>{{ t("connection.nacosConsolePassword") }}</Label>
+                            <PasswordInput v-model="nacosConsolePassword" />
                           </div>
-                        </template>
+                        </div>
                       </template>
-                      <p v-else class="text-[11px] leading-4 text-muted-foreground">{{ t("nacos.nacosRnacosDisabledHint") }}</p>
                     </div>
 
                     <label class="flex items-start justify-between gap-4 border-t pt-4">
@@ -7778,6 +7850,24 @@ function openExternalUrl(url: string) {
                       </SelectContent>
                     </Select>
                     <p class="text-xs leading-5 text-muted-foreground">{{ t("connection.gaussdbIdentifierQuoteHint") }}</p>
+                  </div>
+                </div>
+                <div v-if="isGaussdbMJdbcConnection" class="grid grid-cols-4 items-start gap-4">
+                  <Label :class="connectionLabelSmallPaddedClass">{{ t("connection.gaussdbTargetServerType") }}</Label>
+                  <div class="col-span-3 grid gap-1">
+                    <Select v-model="gaussdbTargetServerTypeComputed">
+                      <SelectTrigger class="h-9">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="master">{{ t("connection.gaussdbTargetServerTypeMaster") }}</SelectItem>
+                        <SelectItem value="slave">{{ t("connection.gaussdbTargetServerTypeSlave") }}</SelectItem>
+                        <SelectItem value="any">{{ t("connection.gaussdbTargetServerTypeAny") }}</SelectItem>
+                      </SelectContent>
+                    </Select>
+                    <p class="text-xs leading-5 text-muted-foreground">
+                      {{ t("connection.gaussdbTargetServerTypeHint") }}
+                    </p>
                   </div>
                 </div>
                 <div class="grid grid-cols-4 items-center gap-4">
@@ -7865,6 +7955,13 @@ function openExternalUrl(url: string) {
                     <Switch v-model="keepaliveEnabled" />
                     <Input v-model.number="form.keepalive_interval_secs" type="number" min="1" max="3600" step="1" class="flex-1" :disabled="!keepaliveEnabled" />
                   </div>
+                </div>
+                <div v-if="supportsDoltSystemTables" class="grid grid-cols-4 items-center gap-4">
+                  <Label :class="connectionLabelSmallClass">{{ t("connection.doltShowSystemTables") }}</Label>
+                  <label class="col-span-3 flex items-center gap-2 cursor-pointer">
+                    <input v-model="showDoltSystemTables" type="checkbox" class="mr-0" />
+                    <span class="text-xs text-muted-foreground">{{ t("connection.doltShowSystemTablesHint") }}</span>
+                  </label>
                 </div>
                 <div class="grid grid-cols-4 items-center gap-4">
                   <Label :class="connectionLabelSmallClass">{{ t("connection.readOnly") }}</Label>
@@ -8238,7 +8335,7 @@ function openExternalUrl(url: string) {
           <div class="flex items-center justify-between gap-3">
             <div class="min-w-0">
               <div class="truncate text-sm font-medium">{{ agentInstallLabel || agentInstallDriverKey }}</div>
-              <div class="mt-1 text-xs text-muted-foreground">{{ agentInstallProgressLabel }}</div>
+              <div class="mt-1 text-xs text-muted-foreground tabular-nums">{{ agentInstallProgressLabel }}</div>
             </div>
             <Loader2 v-if="agentInstallRunning && !agentInstallError" class="h-4 w-4 shrink-0 animate-spin text-muted-foreground" />
           </div>
@@ -8249,7 +8346,7 @@ function openExternalUrl(url: string) {
 
         <div v-if="agentInstallError" class="space-y-2">
           <div class="text-sm font-medium text-destructive">{{ t("connection.driverInstall.fullError") }}</div>
-          <pre class="max-h-56 overflow-auto whitespace-pre-wrap break-words rounded-md border bg-muted/30 p-3 text-xs leading-5 text-destructive">{{ agentInstallError }}</pre>
+          <pre class="max-h-56 min-w-0 max-w-full overflow-x-hidden overflow-y-auto whitespace-pre-wrap break-all [overflow-wrap:anywhere] rounded-md border bg-muted/30 p-3 text-xs leading-5 text-destructive">{{ agentInstallError }}</pre>
         </div>
       </div>
 
@@ -8266,14 +8363,14 @@ function openExternalUrl(url: string) {
   </Dialog>
 
   <Dialog v-model:open="showConnectionErrorDialog">
-    <DialogContent class="sm:max-w-[560px]">
+    <DialogContent class="min-w-0 sm:max-w-[680px]">
       <DialogHeader>
         <DialogTitle>{{ t("connection.connectFailedTitle") }}</DialogTitle>
       </DialogHeader>
 
-      <div class="space-y-2">
+      <div class="min-w-0 space-y-2">
         <div class="text-sm text-muted-foreground">{{ t("connection.fullErrorMessage") }}</div>
-        <pre class="max-h-72 overflow-auto whitespace-pre-wrap break-words rounded-md border bg-muted/30 p-3 text-xs leading-5 text-destructive">{{ connectionErrorDetail }}</pre>
+        <pre class="max-h-72 min-w-0 max-w-full overflow-x-hidden overflow-y-auto whitespace-pre-wrap break-all [overflow-wrap:anywhere] rounded-md border bg-muted/30 p-3 text-xs leading-5 text-destructive">{{ connectionErrorDetail }}</pre>
       </div>
 
       <DialogFooter class="gap-2">

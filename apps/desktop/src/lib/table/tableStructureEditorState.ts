@@ -1,8 +1,44 @@
-import type { ColumnInfo, DatabaseType, ForeignKeyInfo, IndexInfo, TriggerInfo } from "@/types/database.ts";
+import type { ColumnInfo, DatabaseConnectionInfo, DatabaseType, ForeignKeyInfo, IndexInfo, TriggerInfo } from "@/types/database.ts";
 import type { ColumnExtra, EditableStructureColumn, EditableStructureForeignKey, EditableStructureIndex, EditableStructureTrigger } from "@/lib/table/tableStructureEditorSql.ts";
 
 export function hasExistingColumnTypeChange(columns: readonly EditableStructureColumn[]): boolean {
   return columns.some((column) => !!column.original && !column.markedForDrop && column.dataType !== column.original.data_type);
+}
+
+type TableStructureIdentifierCaseInfo = Pick<DatabaseConnectionInfo, "unquotedIdentifierCase" | "quotedIdentifierCase">;
+
+const LOWER_UNQUOTED_MIXED_QUOTED_DATABASES = new Set<DatabaseType>(["postgres", "redshift", "opengauss", "gaussdb", "highgo", "uxdb"]);
+const UPPER_UNQUOTED_MIXED_QUOTED_DATABASES = new Set<DatabaseType>(["oracle", "oceanbase-oracle", "dameng", "kingbase", "vastbase", "goldendb", "yashandb"]);
+
+function defaultTableStructureIdentifierCaseInfo(databaseType?: DatabaseType): Required<TableStructureIdentifierCaseInfo> {
+  if (databaseType && LOWER_UNQUOTED_MIXED_QUOTED_DATABASES.has(databaseType)) {
+    return { unquotedIdentifierCase: "lower", quotedIdentifierCase: "mixed" };
+  }
+  if (databaseType && UPPER_UNQUOTED_MIXED_QUOTED_DATABASES.has(databaseType)) {
+    return { unquotedIdentifierCase: "upper", quotedIdentifierCase: "mixed" };
+  }
+  if (databaseType === "clickhouse") {
+    return { unquotedIdentifierCase: "mixed", quotedIdentifierCase: "mixed" };
+  }
+  return { unquotedIdentifierCase: "lower", quotedIdentifierCase: "lower" };
+}
+
+function applyIdentifierCase(value: string, identifierCase: NonNullable<DatabaseConnectionInfo["unquotedIdentifierCase"]>): string {
+  if (identifierCase === "lower") return value.toLowerCase();
+  if (identifierCase === "upper") return value.toUpperCase();
+  return value;
+}
+
+export function tableStructureIdentifierComparisonKey(name: string, databaseType?: DatabaseType, databaseInfo?: TableStructureIdentifierCaseInfo): string {
+  const value = name.trim();
+  const defaults = defaultTableStructureIdentifierCaseInfo(databaseType);
+  const unquotedIdentifierCase = databaseInfo?.unquotedIdentifierCase ?? defaults.unquotedIdentifierCase;
+  const quotedIdentifierCase = databaseInfo?.quotedIdentifierCase ?? defaults.quotedIdentifierCase;
+  const normalizedUnquoted = applyIdentifierCase(value, unquotedIdentifierCase);
+
+  if (unquotedIdentifierCase === "mixed") return `exact:${value}`;
+  if (quotedIdentifierCase === "mixed" && value !== normalizedUnquoted) return `quoted:${value}`;
+  return `unquoted:${normalizedUnquoted}`;
 }
 
 const POSTGRES_SERIAL_PSEUDO_TYPES = new Set(["smallserial", "serial", "bigserial"]);
@@ -756,6 +792,45 @@ export function createColumnDrafts(columns: ColumnInfo[], databaseType?: Databas
       markedForDrop: false,
     };
   });
+}
+
+/**
+ * Turns another table's metadata into columns that will be added to the table
+ * currently being edited. Unlike createColumnDrafts(), these must not retain
+ * original metadata: the SQL builder uses that metadata to identify existing
+ * columns that should be altered.
+ */
+export function createCopiedColumnDrafts(columns: ColumnInfo[], databaseType: DatabaseType | undefined, createId: () => string): EditableStructureColumn[] {
+  return createColumnDrafts(columns, databaseType).map(({ original: _original, originalPosition: _originalPosition, isPrimaryKey: _isPrimaryKey, extra, ...column }) => ({
+    ...column,
+    id: `new:${createId()}`,
+    isPrimaryKey: false,
+    extra: copyableColumnExtra(extra),
+  }));
+}
+
+/** Copy only field-local extras; keys and generated-value state are table-level concerns. */
+function copyableColumnExtra(extra: ColumnExtra): ColumnExtra {
+  const { autoIncrement: _autoIncrement, identity: _identity, ...copyableExtra } = extra;
+  return copyableExtra;
+}
+
+/** Clone an editable field as a new column, without linking it to persisted metadata or key state. */
+export function cloneColumnDraftAsNew(column: EditableStructureColumn, createId: () => string): EditableStructureColumn {
+  return {
+    id: `new:${createId()}`,
+    name: column.name,
+    dataType: column.dataType,
+    enumValues: column.enumValues ? [...column.enumValues] : undefined,
+    isNullable: column.isNullable,
+    defaultValue: column.defaultValue,
+    comment: column.comment,
+    isPrimaryKey: false,
+    characterSet: column.characterSet,
+    collation: column.collation,
+    extra: copyableColumnExtra(column.extra),
+    markedForDrop: false,
+  };
 }
 
 function existingColumnIdName(id: string): string | undefined {

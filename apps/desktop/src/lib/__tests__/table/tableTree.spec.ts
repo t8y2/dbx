@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { appendTableTreeLoadMoreNode, buildGroupedObjectTreeNodes, buildSimpleObjectTreeNodes, buildTableTreeNodes, mergeTableInfosIntoObjects, mergeTableTreePageChildren, tablePartitionGroups, withoutTableTreeLoadMoreNodes } from "@/lib/table/tableTree";
+import { appendTableTreeLoadMoreNode, buildGroupedObjectTreeNodes, buildObjectGroupPlaceholderNodes, buildSimpleObjectTreeNodes, buildTableTreeNodes, mergeTableInfosIntoObjects, mergeTableTreePageChildren, tablePartitionGroups, withoutTableTreeLoadMoreNodes } from "@/lib/table/tableTree";
 import type { ObjectInfo, TableInfo, TreeNode } from "@/types/database";
 
 const context = {
@@ -117,6 +117,16 @@ describe("PostgreSQL custom type metadata", () => {
 });
 
 describe("programmable database objects", () => {
+  it("renders only the synonym group for the Xugu public-synonym scope", () => {
+    const groups = buildObjectGroupPlaceholderNodes({
+      ...context,
+      schema: "\u0000DBX_XUGU_PUBLIC_SYNONYMS",
+      objectTypes: ["SYNONYM"],
+    });
+
+    expect(groups).toEqual([expect.objectContaining({ type: "group-synonyms", label: "tree.synonyms" })]);
+  });
+
   it("coalesces Xugu package specification and body into one top-level node", () => {
     const objects: ObjectInfo[] = [
       { name: "DBX_UI_PKG", object_type: "PACKAGE", schema: "APP", valid: true },

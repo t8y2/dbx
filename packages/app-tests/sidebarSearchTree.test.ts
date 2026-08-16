@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { filterSidebarSearchRootsByConnectionState, filterSidebarTree, resolveSidebarObjectSearchFilter, reuseLiveSidebarTreeNodes } from "../../apps/desktop/src/lib/sidebar/sidebarSearchTree.ts";
+import { filterSidebarSearchRootsByConnectionState, filterSidebarTree, mergeSidebarRegexIndexScopes, nodeMatchesRegexScopeIdentity, resolveSidebarObjectSearchFilter, reuseLiveSidebarTreeNodes } from "../../apps/desktop/src/lib/sidebar/sidebarSearchTree.ts";
 import type { TreeNode, TreeNodeType } from "../../apps/desktop/src/types/database.ts";
 
 test("preserves loaded table children when the table itself matches search", () => {
@@ -376,6 +376,463 @@ test("does not return synthetic connection management entries as direct text mat
   ];
 
   assert.deepEqual(filterSidebarTree(nodes, "userAdmin", new Set()), []);
+});
+
+test("merges manifest regex index scopes into existing grouped connections without mutating live nodes", () => {
+  const live: TreeNode[] = [
+    {
+      id: "group-a",
+      label: "A",
+      type: "connection-group",
+      children: [{ id: "conn-1", label: "Production", type: "connection", connectionId: "conn-1", children: [] }],
+    },
+  ];
+  const snapshot = JSON.parse(JSON.stringify(live)) as TreeNode[];
+  const merged = mergeSidebarRegexIndexScopes(live, [
+    {
+      parentNodeId: "conn-1:app:public:__tables",
+      connectionId: "conn-1",
+      database: "app",
+      schema: "public",
+      nodeType: "group-tables",
+      path: [
+        { id: "conn-1", label: "Production", type: "connection", connectionId: "conn-1" },
+        { id: "conn-1:app", label: "app", type: "database", connectionId: "conn-1", database: "app" },
+        { id: "conn-1:app:public", label: "public", type: "schema", connectionId: "conn-1", database: "app", schema: "public" },
+        { id: "conn-1:app:public:__tables", label: "Tables", type: "group-tables", connectionId: "conn-1", database: "app", schema: "public" },
+      ],
+      entries: [
+        { name: "Foo", table_type: "TABLE" },
+        { name: "foo", table_type: "VIEW" },
+      ],
+    },
+  ]);
+  assert.deepEqual(live, snapshot);
+  assert.equal(merged[0]?.type, "connection-group");
+  assert.equal(merged[0]?.children?.[0]?.id, "conn-1");
+  // group-a -> conn-1 -> app database -> public schema -> group-tables
+  const group = merged[0]?.children?.[0]?.children?.[0]?.children?.[0]?.children?.[0];
+  assert.deepEqual(
+    group?.children?.map((node) => [node.label, node.type]),
+    [
+      ["Foo", "table"],
+      ["foo", "view"],
+    ],
+  );
+});
+
+test("anchors a pathless legacy index scope into its live parent without synthesizing ancestors", () => {
+  const liveTable: TreeNode = {
+    id: "conn-1:app:public:__tables:existing",
+    label: "existing",
+    type: "table",
+    connectionId: "conn-1",
+    database: "app",
+    schema: "public",
+  };
+  const live: TreeNode[] = [
+    {
+      id: "group-a",
+      label: "A",
+      type: "connection-group",
+      children: [
+        {
+          id: "conn-1",
+          label: "Production",
+          type: "connection",
+          connectionId: "conn-1",
+          children: [
+            {
+              id: "conn-1:app",
+              label: "app",
+              type: "database",
+              connectionId: "conn-1",
+              database: "app",
+              children: [
+                {
+                  id: "conn-1:app:public",
+                  label: "public",
+                  type: "schema",
+                  connectionId: "conn-1",
+                  database: "app",
+                  schema: "public",
+                  children: [
+                    {
+                      id: "conn-1:app:public:__tables",
+                      label: "Tables",
+                      type: "group-tables",
+                      connectionId: "conn-1",
+                      database: "app",
+                      schema: "public",
+                      isExpanded: true,
+                      children: [liveTable],
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    },
+  ];
+  const snapshot = JSON.parse(JSON.stringify(live)) as TreeNode[];
+  const merged = mergeSidebarRegexIndexScopes(live, [
+    {
+      parentNodeId: "conn-1:app:public:__tables",
+      connectionId: "conn-1",
+      database: "app",
+      schema: "public",
+      nodeType: "group-tables",
+      entries: [{ name: "Foo", table_type: "TABLE" }],
+    },
+  ]);
+  assert.deepEqual(live, snapshot);
+  // The group keeps its live position under connection -> database -> schema;
+  // nothing is inserted directly below the connection.
+  const connection = merged[0]?.children?.[0];
+  assert.deepEqual(
+    connection?.children?.map((node) => node.id),
+    ["conn-1:app"],
+  );
+  const group = connection?.children?.[0]?.children?.[0]?.children?.[0];
+  assert.equal(group?.type, "group-tables");
+  assert.deepEqual(
+    group?.children?.map((node) => [node.label, node.type]),
+    [
+      ["existing", "table"],
+      ["Foo", "table"],
+    ],
+  );
+  // The live table node keeps its identity/state.
+  assert.equal(group?.children?.[0], liveTable);
+});
+
+test("anchors same-id scopes to the node matching their database context", () => {
+  const live: TreeNode[] = [
+    {
+      id: "conn-1",
+      label: "c",
+      type: "connection",
+      connectionId: "conn-1",
+      isExpanded: true,
+      children: [
+        {
+          id: "conn-1:a:b",
+          label: "a:b",
+          type: "database",
+          connectionId: "conn-1",
+          database: "a:b",
+          isExpanded: true,
+          children: [],
+        },
+        {
+          id: "conn-1:a",
+          label: "a",
+          type: "database",
+          connectionId: "conn-1",
+          database: "a",
+          isExpanded: true,
+          children: [
+            {
+              id: "conn-1:a:b",
+              label: "b",
+              type: "schema",
+              connectionId: "conn-1",
+              database: "a",
+              schema: "b",
+              isExpanded: true,
+              children: [],
+            },
+          ],
+        },
+      ],
+    },
+  ];
+  const snapshot = JSON.parse(JSON.stringify(live)) as TreeNode[];
+  const merged = mergeSidebarRegexIndexScopes(live, [
+    {
+      parentNodeId: "conn-1:a:b",
+      connectionId: "conn-1",
+      database: "a",
+      schema: "b",
+      nodeType: "schema",
+      entries: [{ name: "schema_b_table", table_type: "TABLE" }],
+    },
+    {
+      parentNodeId: "conn-1:a:b",
+      connectionId: "conn-1",
+      database: "a:b",
+      nodeType: "database",
+      entries: [{ name: "db_a_b_table", table_type: "TABLE" }],
+    },
+  ]);
+  assert.deepEqual(live, snapshot);
+  const children = merged[0]?.children;
+  // Database "a:b" node (id conn-1:a:b) gets the database-scoped entry...
+  assert.equal(children?.[0]?.type, "database");
+  assert.deepEqual(
+    children?.[0]?.children?.map((node) => node.label),
+    ["db_a_b_table"],
+  );
+  // ...while the schema "b" under database "a" (same id) gets its own entry.
+  assert.equal(children?.[1]?.type, "database");
+  const schema = children?.[1]?.children?.[0];
+  assert.equal(schema?.type, "schema");
+  assert.deepEqual(
+    schema?.children?.map((node) => node.label),
+    ["schema_b_table"],
+  );
+});
+
+test("does not anchor a pathless scope to a same-id node with a different database context", () => {
+  const live: TreeNode[] = [
+    {
+      id: "conn-1",
+      label: "c",
+      type: "connection",
+      connectionId: "conn-1",
+      isExpanded: true,
+      children: [
+        {
+          id: "conn-1:a:b",
+          label: "a:b",
+          type: "database",
+          connectionId: "conn-1",
+          database: "a:b",
+          isExpanded: true,
+          children: [],
+        },
+      ],
+    },
+  ];
+  const merged = mergeSidebarRegexIndexScopes(live, [
+    {
+      parentNodeId: "conn-1:a:b",
+      connectionId: "conn-1",
+      database: "a",
+      schema: "b",
+      nodeType: "schema",
+      entries: [{ name: "must_not_land_here", table_type: "TABLE" }],
+    },
+  ]);
+  // The schema scope does not exist in this tree; the same-id database node
+  // must not receive the entry.
+  assert.deepEqual(merged[0]?.children?.[0]?.children, []);
+  assert.deepEqual(merged, live);
+});
+
+test("does not match a scope when a required identity field is missing from the node", () => {
+  const node: TreeNode = {
+    id: "conn-1:hive:sales",
+    label: "sales",
+    type: "database",
+    connectionId: "conn-1",
+    database: "sales",
+  };
+
+  assert.equal(nodeMatchesRegexScopeIdentity(node, node.id, { connectionId: "conn-1", database: "sales", catalog: "hive", nodeType: "database" }), false);
+});
+
+test("drops a pathless index scope when only its connection remains in the tree", () => {
+  const live: TreeNode[] = [{ id: "conn-1", label: "Production", type: "connection", connectionId: "conn-1", children: [] }];
+  const merged = mergeSidebarRegexIndexScopes(live, [
+    {
+      parentNodeId: "conn-1:app:__tables",
+      connectionId: "conn-1",
+      database: "app",
+      nodeType: "group-tables",
+      entries: [{ name: "Foo", table_type: "TABLE" }],
+    },
+  ]);
+  assert.deepEqual(merged, live);
+});
+
+test("does not resurrect a removed connection from a manifest scope with a stale path", () => {
+  const merged = mergeSidebarRegexIndexScopes(
+    [],
+    [
+      {
+        parentNodeId: "gone:db:__tables",
+        connectionId: "gone",
+        database: "db",
+        nodeType: "group-tables",
+        path: [
+          { id: "gone", label: "Gone", type: "connection", connectionId: "gone" },
+          { id: "gone:db", label: "db", type: "database", connectionId: "gone", database: "db" },
+          { id: "gone:db:__tables", label: "Tables", type: "group-tables", connectionId: "gone", database: "db" },
+        ],
+        entries: [{ name: "orders", table_type: "TABLE" }],
+      },
+    ],
+  );
+  assert.deepEqual(merged, []);
+});
+
+test("merges a manifest scope whose parent is a schema directly under the connection", () => {
+  const live: TreeNode[] = [
+    {
+      id: "conn-1",
+      label: "oracle",
+      type: "connection",
+      connectionId: "conn-1",
+      isExpanded: true,
+      children: [{ id: "conn-1:SYSTEM", label: "SYSTEM", type: "schema", connectionId: "conn-1", database: "", schema: "SYSTEM", children: [] }],
+    },
+  ];
+  const snapshot = JSON.parse(JSON.stringify(live)) as TreeNode[];
+  const merged = mergeSidebarRegexIndexScopes(live, [
+    {
+      parentNodeId: "conn-1:SYSTEM",
+      connectionId: "conn-1",
+      database: "",
+      schema: "SYSTEM",
+      nodeType: "schema",
+      path: [
+        { id: "conn-1", label: "oracle", type: "connection", connectionId: "conn-1" },
+        { id: "conn-1:SYSTEM", label: "SYSTEM", type: "schema", connectionId: "conn-1", database: "", schema: "SYSTEM" },
+      ],
+      entries: [{ name: "Foo", table_type: "TABLE" }],
+    },
+  ]);
+  assert.deepEqual(live, snapshot);
+  // No synthetic database level is guessed between connection and schema.
+  assert.deepEqual(
+    merged[0]?.children?.map((node) => node.type),
+    ["schema"],
+  );
+  const schema = merged[0]?.children?.[0];
+  assert.deepEqual(
+    schema?.children?.map((node) => [node.label, node.type]),
+    [["Foo", "table"]],
+  );
+});
+
+test("synthesizes catalog ancestors from a Doris manifest scope", () => {
+  const live: TreeNode[] = [{ id: "conn-1", label: "doris", type: "connection", connectionId: "conn-1", isExpanded: true, children: [] }];
+  const merged = mergeSidebarRegexIndexScopes(live, [
+    {
+      parentNodeId: "conn-1:internal:analytics:public:__tables",
+      connectionId: "conn-1",
+      database: "analytics",
+      schema: "public",
+      catalog: "internal",
+      nodeType: "group-tables",
+      path: [
+        { id: "conn-1", label: "doris", type: "connection", connectionId: "conn-1" },
+        { id: "conn-1:internal", label: "internal", type: "doris-catalog", connectionId: "conn-1", catalog: "internal" },
+        { id: "conn-1:internal:analytics", label: "analytics", type: "database", connectionId: "conn-1", database: "analytics", catalog: "internal" },
+        { id: "conn-1:internal:analytics:public", label: "public", type: "schema", connectionId: "conn-1", database: "analytics", schema: "public", catalog: "internal" },
+        { id: "conn-1:internal:analytics:public:__tables", label: "Tables", type: "group-tables", connectionId: "conn-1", database: "analytics", schema: "public", catalog: "internal" },
+      ],
+      entries: [{ name: "Foo", table_type: "TABLE" }],
+    },
+  ]);
+  const catalog = merged[0]?.children?.[0];
+  assert.equal(catalog?.type, "doris-catalog");
+  assert.equal(catalog?.catalog, "internal");
+  const database = catalog?.children?.[0];
+  assert.equal(database?.type, "database");
+  assert.equal(database?.catalog, "internal");
+  const schema = database?.children?.[0];
+  assert.equal(schema?.type, "schema");
+  const group = schema?.children?.[0];
+  assert.deepEqual(
+    group?.children?.map((node) => [node.label, node.type]),
+    [["Foo", "table"]],
+  );
+  assert.equal(group?.children?.[0]?.catalog, "internal");
+});
+
+test("synthesizes linked-server ancestors from a SQL Server manifest scope", () => {
+  const live: TreeNode[] = [{ id: "conn-1", label: "mssql", type: "connection", connectionId: "conn-1", isExpanded: true, children: [] }];
+  const merged = mergeSidebarRegexIndexScopes(live, [
+    {
+      parentNodeId: "conn-1:linked:catalog:schema:__tables",
+      connectionId: "conn-1",
+      database: "",
+      schema: "schema",
+      nodeType: "group-tables",
+      path: [
+        { id: "conn-1", label: "mssql", type: "connection", connectionId: "conn-1" },
+        { id: "conn-1:linked", label: "linked", type: "linked-server", connectionId: "conn-1", linkedServer: "linked" },
+        { id: "conn-1:linked:catalog", label: "catalog", type: "linked-server-catalog", connectionId: "conn-1", linkedServer: "linked", linkedCatalog: "catalog" },
+        { id: "conn-1:linked:catalog:schema", label: "schema", type: "linked-server-schema", connectionId: "conn-1", database: "", schema: "schema", linkedServer: "linked", linkedCatalog: "catalog" },
+        { id: "conn-1:linked:catalog:schema:__tables", label: "Tables", type: "group-tables", connectionId: "conn-1", database: "", schema: "schema", linkedServer: "linked", linkedCatalog: "catalog" },
+      ],
+      entries: [{ name: "Foo", table_type: "TABLE" }],
+    },
+  ]);
+  const linkedServer = merged[0]?.children?.[0];
+  assert.equal(linkedServer?.type, "linked-server");
+  assert.equal(linkedServer?.linkedServer, "linked");
+  const linkedCatalog = linkedServer?.children?.[0];
+  assert.equal(linkedCatalog?.type, "linked-server-catalog");
+  assert.equal(linkedCatalog?.linkedCatalog, "catalog");
+  const linkedSchema = linkedCatalog?.children?.[0];
+  assert.equal(linkedSchema?.type, "linked-server-schema");
+  assert.equal(linkedSchema?.linkedServer, "linked");
+  const group = linkedSchema?.children?.[0];
+  assert.deepEqual(
+    group?.children?.map((node) => [node.label, node.type]),
+    [["Foo", "table"]],
+  );
+});
+
+test("indexed entries keep partition parents, case-distinct names, normalized types, and name order", () => {
+  const live: TreeNode[] = [{ id: "conn-1", label: "c", type: "connection", connectionId: "conn-1", isExpanded: true, children: [] }];
+  const merged = mergeSidebarRegexIndexScopes(live, [
+    {
+      parentNodeId: "conn-1:app:public:__tables",
+      connectionId: "conn-1",
+      database: "app",
+      schema: "public",
+      nodeType: "group-tables",
+      path: [
+        { id: "conn-1", label: "c", type: "connection", connectionId: "conn-1" },
+        { id: "conn-1:app", label: "app", type: "database", connectionId: "conn-1", database: "app" },
+        { id: "conn-1:app:public", label: "public", type: "schema", connectionId: "conn-1", database: "app", schema: "public" },
+        { id: "conn-1:app:public:__tables", label: "Tables", type: "group-tables", connectionId: "conn-1", database: "app", schema: "public" },
+      ],
+      entries: [
+        { name: "orders_2024", table_type: "TABLE", parent_schema: "public", parent_name: "Orders" },
+        { name: "Foo", table_type: "BASE TABLE" },
+        { name: "foo", table_type: "TABLE" },
+        { name: "Foo", table_type: "VIEW" },
+        { name: "Orders", table_type: "TABLE" },
+        { name: "t10", table_type: "TABLE" },
+        { name: "t2", table_type: "TABLE" },
+      ],
+    },
+  ]);
+  const group = merged[0]?.children?.[0]?.children?.[0]?.children?.[0];
+  // Sorted by name (numeric collator, case-insensitive ties keep input order);
+  // same name with different case/type is not deduped.
+  assert.deepEqual(
+    group?.children?.map((node) => [node.label, node.type]),
+    [
+      ["Foo", "table"],
+      ["foo", "table"],
+      ["Foo", "view"],
+      ["Orders", "table"],
+      ["t2", "table"],
+      ["t10", "table"],
+    ],
+  );
+  const orders = group?.children?.[3];
+  assert.deepEqual(
+    orders?.children?.map((node) => node.type),
+    ["group-partitions"],
+  );
+  assert.deepEqual(
+    orders?.children?.[0]?.children?.map((node) => node.label),
+    ["orders_2024"],
+  );
+});
+
+test("does not resurrect a removed connection from an old index manifest", () => {
+  const merged = mergeSidebarRegexIndexScopes([], [{ parentNodeId: "gone:db:__tables", connectionId: "gone", database: "db", nodeType: "group-tables", entries: [{ name: "orders", table_type: "TABLE" }] }]);
+  assert.deepEqual(merged, []);
 });
 
 test("temporarily collapses an empty object group within a preserved search subtree", () => {

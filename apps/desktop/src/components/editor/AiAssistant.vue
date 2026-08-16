@@ -133,6 +133,7 @@ import { saveTextFile } from "@/lib/export/saveTextFile";
 import { buildAiAnalysisExport } from "@/lib/export/aiAnalysisExport";
 import { buildAiConversationSearchIndex, filterAiConversationSearchIndex } from "@/lib/ai/aiConversationSearch";
 import AiAttachmentCard from "@/components/editor/AiAttachmentCard.vue";
+import { resolveAiMessageCopyText } from "@/lib/ai/aiMessageCopy";
 
 const { t } = useI18n();
 const settings = useSettingsStore();
@@ -2487,19 +2488,41 @@ function tempRunSql(code: string) {
   emit("tempRunSql", code);
 }
 
-const copiedIndex = ref("");
+const copiedContentKey = ref("");
 
-async function copyCode(code: string, key: string) {
+async function copyAiContent(content: string, key: string) {
   try {
-    await copyToClipboard(code);
-    copiedIndex.value = key;
+    await copyToClipboard(content);
+    copiedContentKey.value = key;
     setTimeout(() => {
-      if (copiedIndex.value === key) copiedIndex.value = "";
+      if (copiedContentKey.value === key) copiedContentKey.value = "";
     }, 2000);
   } catch (e: unknown) {
     const message = e instanceof Error ? e.message : String(e);
     toast(t("grid.copyFailed", { message }), 5000);
   }
+}
+
+function isStreamingMessage(msg: ChatMessage): boolean {
+  return isGenerating.value && msg === messages.value[messages.value.length - 1];
+}
+
+function messageCopyText(msg: ChatMessage): string | null {
+  return resolveAiMessageCopyText(msg, isStreamingMessage(msg));
+}
+
+function canCopyMessage(msg: ChatMessage): boolean {
+  return messageCopyText(msg) !== null;
+}
+
+function messageCopyKey(index: number): string {
+  return `message:${index}`;
+}
+
+async function copyMessage(msg: ChatMessage, index: number) {
+  const text = messageCopyText(msg);
+  if (text === null) return;
+  await copyAiContent(text, `message:${index}`);
 }
 
 async function exportMessageAsMarkdown(msg: ChatMessage) {
@@ -2733,8 +2756,7 @@ const messageRenderer = computed(() => {
  * already-finished segments, so a frame only re-parses the growing tail.
  */
 function renderMessageSegments(msg: ChatMessage) {
-  const streaming = isGenerating.value && msg === messages.value[messages.value.length - 1];
-  return messageRenderer.value.render(msg.content, { streaming });
+  return messageRenderer.value.render(msg.content, { streaming: isStreamingMessage(msg) });
 }
 
 function onMarkdownClick(event: MouseEvent) {
@@ -2947,6 +2969,19 @@ async function openExternalUrl(url: string) {
                       </div>
                       <div v-if="msg.content" class="whitespace-pre-wrap">{{ msg.content }}</div>
                     </div>
+                    <div v-if="canCopyMessage(msg)" class="mt-1 flex justify-end">
+                      <button
+                        data-ai-message-copy="user"
+                        type="button"
+                        class="rounded p-0.5 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-700 dark:hover:text-zinc-200"
+                        :title="copiedContentKey === messageCopyKey(i) ? t('ai.copied') : t('ai.copyMessage')"
+                        :aria-label="copiedContentKey === messageCopyKey(i) ? t('ai.copied') : t('ai.copyMessage')"
+                        @click="copyMessage(msg, i)"
+                      >
+                        <Check v-if="copiedContentKey === messageCopyKey(i)" class="h-3.5 w-3.5 text-green-500" />
+                        <Copy v-else class="h-3.5 w-3.5" />
+                      </button>
+                    </div>
                   </div>
                 </template>
               </div>
@@ -3019,10 +3054,10 @@ async function openExternalUrl(url: string) {
                         </button>
                         <button
                           class="rounded p-0.5 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-700 dark:hover:text-zinc-200"
-                          :title="copiedIndex === `${i}-${j}` ? t('ai.copied') : t(seg.isSql ? 'ai.copySql' : 'ai.copyCode')"
-                          @click="copyCode(seg.content, `${i}-${j}`)"
+                          :title="copiedContentKey === `code:${i}:${j}` ? t('ai.copied') : t(seg.isSql ? 'ai.copySql' : 'ai.copyCode')"
+                          @click="copyAiContent(seg.content, `code:${i}:${j}`)"
                         >
-                          <Check v-if="copiedIndex === `${i}-${j}`" class="h-3.5 w-3.5 text-green-400" />
+                          <Check v-if="copiedContentKey === `code:${i}:${j}`" class="h-3.5 w-3.5 text-green-400" />
                           <Copy v-else class="h-3.5 w-3.5" />
                         </button>
                       </div>
@@ -3041,12 +3076,25 @@ async function openExternalUrl(url: string) {
                   </Button>
                 </div>
               </div>
-              <div v-if="msg.content && !isGenerating" class="mt-1 flex items-center justify-between">
+              <div v-if="canCopyMessage(msg)" class="mt-1 flex items-center justify-between">
                 <span v-if="msg.tokens" class="text-[10px] text-muted-foreground">&#8593;{{ msg.tokens.input.toLocaleString() }} &#8595;{{ msg.tokens.output.toLocaleString() }} tokens</span>
                 <span v-else />
-                <button class="rounded p-0.5 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-700 dark:hover:text-zinc-200" :title="t('ai.exportMarkdown')" @click="exportMessageAsMarkdown(msg)">
-                  <FileDown class="h-3.5 w-3.5" />
-                </button>
+                <div class="flex items-center gap-1">
+                  <button
+                    data-ai-message-copy="assistant"
+                    type="button"
+                    class="rounded p-0.5 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-700 dark:hover:text-zinc-200"
+                    :title="copiedContentKey === messageCopyKey(i) ? t('ai.copied') : t('ai.copyMessage')"
+                    :aria-label="copiedContentKey === messageCopyKey(i) ? t('ai.copied') : t('ai.copyMessage')"
+                    @click="copyMessage(msg, i)"
+                  >
+                    <Check v-if="copiedContentKey === messageCopyKey(i)" class="h-3.5 w-3.5 text-green-500" />
+                    <Copy v-else class="h-3.5 w-3.5" />
+                  </button>
+                  <button class="rounded p-0.5 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-700 dark:hover:text-zinc-200" :title="t('ai.exportMarkdown')" @click="exportMessageAsMarkdown(msg)">
+                    <FileDown class="h-3.5 w-3.5" />
+                  </button>
+                </div>
               </div>
             </div>
           </template>

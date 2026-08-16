@@ -12,6 +12,7 @@ const databaseSupport = [
   { name: "MySQL", icon: "/icons/database/mysql.svg", tone: "#4479a1" },
   { name: "PostgreSQL", icon: "/icons/database/postgres.svg", tone: "#4169e1" },
   { name: "Cloudberry", icon: "/icons/database/cloudberry.svg", tone: "#ff5900" },
+  { name: "OpenTenBase", icon: "/icons/database/opentenbase.svg", tone: "#006eff" },
   { name: "SQLite", icon: "/icons/database/sqlite.svg", tone: "#5aa6d6" },
   { name: "Redis", icon: "/icons/database/redis.svg", tone: "#ff4438" },
   { name: "DuckDB", icon: "/icons/database/duckdb.svg", tone: "#fff000" },

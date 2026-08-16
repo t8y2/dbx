@@ -5073,6 +5073,67 @@ test("mongo runCommand execution follows use and preserves document results", as
   }
 });
 
+test("mongo show dbs executes one bounded read-only admin command", async () => {
+  const restoreStorage = installMemoryStorage();
+  setActivePinia(createPinia());
+  const connectionStore = useConnectionStore();
+  const store = useQueryStore();
+  const originalFetch = globalThis.fetch;
+  const runCommandBodies: any[] = [];
+
+  connectionStore.addEphemeralConnection({
+    ...conn("mongo-1"),
+    db_type: "mongodb",
+    port: 27017,
+  });
+
+  globalThis.fetch = withConnectionHealthMock(async (input, init) => {
+    if (String(input) === "/api/mongo/run-command") {
+      runCommandBodies.push(JSON.parse(String(init?.body ?? "{}")));
+      return Response.json({
+        documents: [
+          {
+            databases: [
+              { name: "admin", sizeOnDisk: 40960, empty: false },
+              { name: "app", sizeOnDisk: 8192, empty: true },
+            ],
+            totalSize: 49152,
+            ok: 1,
+          },
+        ],
+        total: 1,
+        total_is_exact: true,
+      });
+    }
+    return new Response("unexpected request", { status: 500 });
+  });
+
+  try {
+    const tabId = store.createTab("mongo-1", "accounting", "Query", "query", "");
+    await store.executeTabSql(tabId, "show dbs");
+    const tab = store.tabs.find((item) => item.id === tabId);
+
+    assert.equal(runCommandBodies.length, 1);
+    assert.deepEqual(runCommandBodies[0], {
+      connectionId: "mongo-1",
+      database: "admin",
+      commandJson: '{"listDatabases":1}',
+      executionId: runCommandBodies[0].executionId,
+    });
+    assert.equal(typeof runCommandBodies[0].executionId, "string");
+    assert.deepEqual(tab?.result?.columns, ["name", "sizeOnDisk", "empty"]);
+    assert.deepEqual(tab?.result?.rows, [
+      ["admin", 40960, false],
+      ["app", 8192, true],
+    ]);
+    assert.equal(tab?.result?.affected_rows, 2);
+    assert.equal(tab?.mongoEditTarget, undefined);
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreStorage();
+  }
+});
+
 test("mongo dropIndex execution uses the dedicated drop-indexes endpoint", async () => {
   const restoreStorage = installMemoryStorage();
   setActivePinia(createPinia());

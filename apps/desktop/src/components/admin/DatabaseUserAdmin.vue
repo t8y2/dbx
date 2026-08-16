@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
-import { AlertTriangle, Check, KeyRound, Lock, Loader2, Plus, RefreshCcw, Search, ShieldCheck, Trash2, Unlock, UserRound } from "@lucide/vue";
+import { AlertTriangle, Check, Globe2, KeyRound, Lock, Loader2, Plus, RefreshCcw, Search, ShieldCheck, Trash2, Unlock, UserRound } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -51,6 +51,7 @@ const loadError = ref("");
 const grantError = ref("");
 
 const createDialogOpen = ref(false);
+const hostDialogOpen = ref(false);
 const passwordDialogOpen = ref(false);
 const sqlDialogOpen = ref(false);
 const pendingSql = ref("");
@@ -62,6 +63,7 @@ const pendingAfterApply = ref<(() => Promise<void>) | undefined>();
 const createUser = ref("app_user");
 const createHost = ref("%");
 const createPassword = ref("");
+const newHost = ref("");
 const newPassword = ref("");
 const privilegeDatabase = ref(props.connection.database || "*");
 const privilegeTable = ref("*");
@@ -81,6 +83,7 @@ const provider = computed(() => resolveDatabaseUserAdminProviderForConnection(pr
 const supported = computed(() => provider.value !== null);
 const isPostgres = computed(() => provider.value?.dialect === "postgres");
 const canCreateUser = computed(() => !!provider.value?.createUserSql);
+const canRenameUser = computed(() => !!provider.value?.renameUserSql);
 const canAlterPassword = computed(() => !!provider.value?.alterPasswordSql);
 const canAlterLogin = computed(() => !!provider.value?.alterLoginSql);
 const canDropUser = computed(() => !!provider.value?.dropUserSql);
@@ -114,6 +117,10 @@ const filteredCreateDatabases = computed(() => {
 const selectedCreateDatabaseSet = computed(() => new Set(createDatabaseAuthorizations.value.map((selection) => selection.database)));
 const createDatabaseAuthorizationsValid = computed(() => createDatabaseAuthorizations.value.every((selection) => selection.preset !== "custom" || (selection.privileges?.length ?? 0) > 0));
 const pendingStatus = computed(() => (pendingResults.value.length > 0 ? authorizationPlanStatus(pendingResults.value) : undefined));
+const canPreviewHostChange = computed(() => {
+  const host = newHost.value.trim();
+  return !!host && host !== selectedUser.value?.host;
+});
 
 function syncPrivilegeSelectionFromGrants() {
   const selectionFromGrants = provider.value?.privilegeSelectionFromGrants;
@@ -203,6 +210,13 @@ async function loadGrants() {
 
 function selectUser(user: DatabaseUserIdentity) {
   selectedUserKey.value = userKey(user);
+}
+
+function openHostDialog() {
+  const user = selectedUser.value;
+  if (!user || !provider.value?.renameUserSql) return;
+  newHost.value = user.host;
+  hostDialogOpen.value = true;
 }
 
 function togglePrivilege(privilege: string) {
@@ -392,6 +406,21 @@ function previewPasswordChange() {
     afterApply: async () => {
       passwordDialogOpen.value = false;
       newPassword.value = "";
+    },
+  });
+}
+
+function previewHostChange() {
+  const user = selectedUser.value;
+  const renameUserSql = provider.value?.renameUserSql;
+  const host = newHost.value.trim();
+  if (!user || !renameUserSql || !host || host === user.host) return;
+  previewSql(renameUserSql(user, host), {
+    danger: true,
+    afterApply: async () => {
+      hostDialogOpen.value = false;
+      newHost.value = "";
+      selectedUserKey.value = userKey({ ...user, host });
     },
   });
 }
@@ -586,6 +615,10 @@ onMounted(loadUsers);
             </Badge>
           </div>
           <div class="ml-auto flex items-center gap-1.5">
+            <Button v-if="canRenameUser" variant="outline" size="sm" class="h-7 gap-1.5 px-2 text-xs" @click="openHostDialog">
+              <Globe2 class="h-3.5 w-3.5" />
+              {{ t("userAdmin.changeHost") }}
+            </Button>
             <Button v-if="canAlterPassword" variant="outline" size="sm" class="h-7 gap-1.5 px-2 text-xs" @click="passwordDialogOpen = true">
               <KeyRound class="h-3.5 w-3.5" />
               {{ t("userAdmin.changePassword") }}
@@ -803,6 +836,19 @@ onMounted(loadUsers);
         <DialogFooter>
           <Button variant="outline" @click="passwordDialogOpen = false">{{ t("dangerDialog.cancel") }}</Button>
           <Button :disabled="!newPassword" @click="previewPasswordChange">{{ t("userAdmin.previewSql") }}</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+
+    <Dialog v-model:open="hostDialogOpen">
+      <DialogContent class="max-w-sm">
+        <DialogHeader>
+          <DialogTitle>{{ t("userAdmin.changeHost") }}</DialogTitle>
+        </DialogHeader>
+        <Input v-model="newHost" :placeholder="t('userAdmin.newHost')" />
+        <DialogFooter>
+          <Button variant="outline" @click="hostDialogOpen = false">{{ t("dangerDialog.cancel") }}</Button>
+          <Button :disabled="!canPreviewHostChange" @click="previewHostChange">{{ t("userAdmin.previewSql") }}</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

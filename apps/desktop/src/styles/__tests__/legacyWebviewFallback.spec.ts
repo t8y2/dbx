@@ -87,7 +87,8 @@ describe("legacy WebView CSS fallbacks", () => {
     expect(globalsCss).toContain("border-color: rgba(var(--dbx-primary-rgb), 0.3) !important;");
     expect(globalsCss).toContain(".hover\\:bg-primary\\/15:hover");
     expect(connectionTreeSource).toContain("showActiveConnectionsOnly");
-    expect(connectionTreeSource.match(/bg-primary\/10 border-primary\/30/g)?.length).toBe(3);
+    // Three pre-existing usages plus the sidebar regex-search toggle.
+    expect(connectionTreeSource.match(/bg-primary\/10 border-primary\/30/g)?.length).toBe(4);
   });
 
   it("keeps legacy tab triggers connected to the configured corner style", () => {

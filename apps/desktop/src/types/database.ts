@@ -1,4 +1,5 @@
 import type { BackendError } from "@/lib/backend/errorUtils";
+import type { TransferContent, TransferMode, TransferObjectKind, TransferTableNameCase } from "@/lib/backend/tauri";
 import type { MultiDbResultRunExecution } from "@/types/sqlExecution";
 
 export type DatabaseType =
@@ -52,6 +53,8 @@ export type DatabaseType =
   | "trino"
   | "prestosql"
   | "hive"
+  | "kyuubi"
+  | "impala"
   | "spark"
   | "db2"
   | "informix"
@@ -900,6 +903,7 @@ export type TreeNodeType =
   | "group-table-partitions"
   | "group-table-subpartitions"
   | "group-tables"
+  | "group-dolt-system-tables"
   | "group-views"
   | "group-materialized-views"
   | "group-procedures"
@@ -935,6 +939,7 @@ export type TreeNodeType =
   | "redis-db"
   | "mq-tenant"
   | "nacos-namespace"
+  | "nacos-access-control"
   | "etcd-root"
   | "etcd-dashboard"
   | "etcd-access-control"
@@ -1033,7 +1038,7 @@ export interface TableNameFilter {
   excludePatterns: string[];
 }
 
-export type TableInfoTab = "columns" | "indexes" | "foreignKeys" | "triggers" | "ddl";
+export type TableInfoTab = "columns" | "indexes" | "foreignKeys" | "constraints" | "triggers" | "ddl";
 
 export interface TableStructureEditorTarget {
   kind: "column" | "index";
@@ -1049,6 +1054,8 @@ export interface TableStructureEditorDraft {
   columns: import("@/lib/table/tableStructureEditorSql").EditableStructureColumn[];
   indexes: import("@/lib/table/tableStructureEditorSql").EditableStructureIndex[];
   foreignKeys: import("@/lib/table/tableStructureEditorSql").EditableStructureForeignKey[];
+  constraints?: ConstraintInfo[];
+  constraintsLoaded?: boolean;
   triggers: import("@/lib/table/tableStructureEditorSql").EditableStructureTrigger[];
   triggersLoaded?: boolean;
   loadedMetadataFacets?: import("@/lib/metadata/objectMetadataCache").ObjectMetadataFacet[];
@@ -1176,6 +1183,7 @@ export interface QueryTab {
     | "mqtt"
     | "nacos"
     | "nacos-dashboard"
+    | "nacos-access-control"
     | "databases"
     | "objects"
     | "structure"
@@ -1320,6 +1328,50 @@ export interface SavedSqlFile {
 export interface SavedSqlLibrary {
   folders: SavedSqlFolder[];
   files: SavedSqlFile[];
+}
+
+/** Serializable configuration of a saved data-transfer task. */
+export interface TransferTaskConfig {
+  sourceConnectionId: string;
+  /** Undefined means the connection's built-in/default catalog. */
+  sourceCatalog?: string;
+  sourceDatabase: string;
+  sourceSchema?: string;
+  targetConnectionId: string;
+  targetCatalog?: string;
+  targetDatabase: string;
+  targetSchema?: string;
+  /** Selected object names grouped by object kind (TABLE, VIEW, ...). */
+  objects: Partial<Record<TransferObjectKind, string[]>>;
+  content: TransferContent;
+  mode: TransferMode;
+  targetTableNameCase: TransferTableNameCase;
+  batchSize: number;
+}
+
+export interface TransferTask {
+  id: string;
+  folderId?: string;
+  name: string;
+  orderIndex?: number;
+  config: TransferTaskConfig;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface TransferTaskFolder {
+  id: string;
+  parentFolderId?: string;
+  name: string;
+  orderIndex?: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface TransferTaskLibrary {
+  version: 1;
+  folders: TransferTaskFolder[];
+  tasks: TransferTask[];
 }
 
 export interface VectorCollectionMeta {

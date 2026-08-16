@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { alignedCommentLeadingWidth, alignedSidebarCommentLabelWidths, canTreeNodeShowExpander, sidebarTreeNaturalContentWidth, sidebarTreeNodeComment, trailingCommentAvailableWidth, treeLabelWidthClass, usesFullWidthTreeLabel } from "@/lib/sidebar/sidebarTreeItemLayout";
+import { alignedCommentLeadingWidth, alignedSidebarCommentLabelWidths, canTreeNodeShowExpander, sidebarTreeNaturalContentWidth, sidebarTreeNodeComment, trailingCommentAvailableWidth, treeItemPaddingLeft, treeLabelWidthClass, usesFullWidthTreeLabel } from "@/lib/sidebar/sidebarTreeItemLayout";
 import type { TreeNode } from "@/types/database";
 
 describe("sidebar tree item layout", () => {
@@ -27,7 +27,9 @@ describe("sidebar tree item layout", () => {
     expect(alignedCommentLeadingWidth(undefined, true)).toBeUndefined();
   });
 
-  it("renders etcd leaf actions without expanders", () => {
+  it("renders navigation leaf actions without expanders", () => {
+    expect(canTreeNodeShowExpander({ type: "nacos-namespace", childCount: 0 })).toBe(false);
+    expect(canTreeNodeShowExpander({ type: "nacos-access-control", childCount: 0 })).toBe(false);
     expect(canTreeNodeShowExpander({ type: "etcd-root", childCount: 0 })).toBe(false);
     expect(canTreeNodeShowExpander({ type: "etcd-dashboard", childCount: 0 })).toBe(false);
     expect(canTreeNodeShowExpander({ type: "etcd-access-control", childCount: 0 })).toBe(false);
@@ -90,5 +92,17 @@ describe("sidebar tree item layout", () => {
 
   it("returns zero when no tree row uses natural width", () => {
     expect(sidebarTreeNaturalContentWidth([{ depth: 2, label: "commented", usesNaturalWidth: false }], (text) => text.length * 7)).toBe(0);
+  });
+
+  it("applies a configurable per-depth indent to rows and natural-width measurement", () => {
+    // Default keeps the historical 16px per level.
+    expect(treeItemPaddingLeft(2)).toBe("40px");
+    expect(treeItemPaddingLeft(2, 24)).toBe("56px");
+    expect(treeItemPaddingLeft(0, 24)).toBe("8px");
+
+    const items = [{ depth: 4, label: "nested", usesNaturalWidth: true, trailingWidth: 20 }];
+    const measure = (text: string) => text.length * 7;
+    expect(sidebarTreeNaturalContentWidth(items, measure, 16)).toBe(4 * 16 + 8 + 54 + "nested".length * 7 + 20);
+    expect(sidebarTreeNaturalContentWidth(items, measure, 32)).toBe(4 * 32 + 8 + 54 + "nested".length * 7 + 20);
   });
 });

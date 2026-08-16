@@ -67,6 +67,32 @@ describe("connectionStore timeout recovery", () => {
     expect(store.connectedIds.has(connection.id)).toBe(true);
   }, 10_000);
 
+  it("does not block pure navigation on a connected health check", async () => {
+    const checkConnectionHealth = vi.fn(() => new Promise(() => undefined));
+    const connectDb = vi.fn().mockResolvedValue(undefined);
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth,
+      connectDb,
+      deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+      saveConnections: vi.fn().mockResolvedValue(undefined),
+      saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    const connection = postgresConnection();
+    store.connections = [connection];
+    store.connectedIds.add(connection.id);
+
+    await store.ensureConnected(connection.id, { verifyHealth: false });
+
+    expect(checkConnectionHealth).not.toHaveBeenCalled();
+    expect(connectDb).not.toHaveBeenCalled();
+    expect(store.connectedIds.has(connection.id)).toBe(true);
+  });
+
   it("normalizes missing keepalive interval to 30 seconds", async () => {
     vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
     vi.doMock("@/lib/backend/api", () => ({

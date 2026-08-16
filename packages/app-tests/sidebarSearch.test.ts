@@ -1,6 +1,7 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { matchSidebarLabel } from "../../apps/desktop/src/lib/sidebar/sidebarSearch.ts";
+import { createSidebarLabelMatcher, matchSidebarLabel } from "../../apps/desktop/src/lib/sidebar/sidebarSearch.ts";
+import { compileSearchRegex, parseSlashDelimitedRegexQuery } from "../../apps/desktop/src/lib/common/searchPattern.ts";
 import { filterSidebarTree } from "../../apps/desktop/src/lib/sidebar/sidebarSearchTree.ts";
 import type { TreeNode } from "../../apps/desktop/src/types/database.ts";
 
@@ -392,6 +393,36 @@ test("keeps invalid regular expression queries from matching every label", () =>
   assert.equal(matchSidebarLabel("orders", "/["), null);
 });
 
+test("ordinary slash-delimited search keeps its implicit case-insensitive flags", () => {
+  assert.equal(matchSidebarLabel("FOO", "/foo/m")?.kind, "regex");
+});
+
+test("explicit regex mode supports JavaScript syntax and defaults to case-insensitive", () => {
+  const pattern = "^(foo|bar)[0-9]+\\w+$";
+  assert.equal(matchSidebarLabel("BAR12_name", pattern, { regexMode: true })?.kind, "regex");
+  assert.equal(matchSidebarLabel("baz12_name", pattern, { regexMode: true }), null);
+  assert.equal(matchSidebarLabel("SYS_USER_LOG", "/^sys_.*_log/", { regexMode: true })?.kind, "regex");
+});
+
+test("explicit regex flags are respected and global or sticky tests are stable", () => {
+  assert.equal(matchSidebarLabel("FOO", "/foo/m", { regexMode: true }), null);
+  assert.equal(matchSidebarLabel("FOO", "/foo/i", { regexMode: true })?.kind, "regex");
+  const globalMatcher = createSidebarLabelMatcher("/foo/g", { regexMode: true });
+  assert.equal(globalMatcher("foo")?.kind, "regex");
+  assert.equal(globalMatcher("foo")?.kind, "regex");
+  const global = compileSearchRegex("/foo/g").regex!;
+  assert.equal(global.lastIndex, 0);
+  const stickyMatcher = createSidebarLabelMatcher("/foo/y", { regexMode: true });
+  assert.equal(stickyMatcher("foo")?.kind, "regex");
+  assert.equal(stickyMatcher("foo")?.kind, "regex");
+});
+
+test("invalid explicit regexes return invalid without matching", () => {
+  assert.deepEqual(compileSearchRegex("/["), { regex: null, invalid: true });
+  assert.equal(matchSidebarLabel("orders", "[", { regexMode: true }), null);
+  assert.equal(parseSlashDelimitedRegexQuery("/[/"), null);
+});
+
 // Cross-word prefix concatenation (issue #5407)
 
 test("matches cross-word prefix concatenation (issue #5407)", () => {
@@ -487,7 +518,10 @@ test("camelCase tokenization survives the real tree-search path (issue #5407)", 
   // camel + Table skips Case, so it scores 50 and outranks camxxtab's fuzzy/40.
   // If callers lowercase first, both score 40 and the stable sort keeps camxxtab first.
   const camTabResults = filterSidebarTree(tree, "camTab", new Set());
-  assert.deepEqual(camTabResults[0]?.children?.[0]?.children?.map((node) => node.label), ["camelCaseTable", "camxxtab"]);
+  assert.deepEqual(
+    camTabResults[0]?.children?.[0]?.children?.map((node) => node.label),
+    ["camelCaseTable", "camxxtab"],
+  );
   assert.equal(findTable(filterSidebarTree(tree, "caseTab", new Set()))?.label, "camelCaseTable");
   assert.equal(findTable(filterSidebarTree(tree, "aseTb", new Set())), undefined);
 

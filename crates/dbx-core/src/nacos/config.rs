@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::models::connection::ConnectionConfig;
 
@@ -66,6 +67,12 @@ pub struct NacosAdminConfig {
     pub namespace: String,
     #[serde(default)]
     pub context_path: String,
+    /// Namespace IDs supplied for an official Nacos ordinary user that cannot
+    /// call the namespace or authorization management APIs. They define the
+    /// discoverable scope; Nacos still authorizes every configuration and
+    /// naming request.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub managed_namespaces: Vec<String>,
     /// Optional r-nacos authenticated-console address. This is separate from
     /// the OpenAPI server address because r-nacos exposes console-only APIs
     /// (including config history plus config type and description metadata) on
@@ -104,6 +111,13 @@ pub fn default_page_size() -> u32 {
 }
 
 impl NacosAdminConfig {
+    /// Binds short-lived, destructive workflows to the exact Nacos target and
+    /// credentials that created them. The digest is never exposed or persisted.
+    pub fn operation_fingerprint(&self) -> String {
+        let encoded = serde_json::to_vec(self).expect("NacosAdminConfig serialization must succeed");
+        format!("{:x}", Sha256::digest(encoded))
+    }
+
     pub fn from_connection(cfg: &ConnectionConfig) -> Result<Self, String> {
         let parsed = if let Some(raw) = cfg.external_config.as_ref() {
             serde_json::from_value::<NacosAdminConfig>(raw.clone())
@@ -117,6 +131,7 @@ impl NacosAdminConfig {
                 display_server_addr: String::new(),
                 namespace: cfg.database.clone().unwrap_or_default(),
                 context_path: String::new(),
+                managed_namespaces: Vec::new(),
                 rnacos_console_addr: String::new(),
                 rnacos_history_enabled: None,
                 rnacos_console_auth: NacosRNacosConsoleAuth::Inherit,
@@ -157,6 +172,14 @@ impl NacosAdminConfig {
         {
             self.context_path = "/nacos".to_string();
         }
+        let mut managed_namespaces = Vec::new();
+        for namespace in std::mem::take(&mut self.managed_namespaces) {
+            let namespace = namespace.trim().to_string();
+            if !namespace.is_empty() && !managed_namespaces.contains(&namespace) {
+                managed_namespaces.push(namespace);
+            }
+        }
+        self.managed_namespaces = managed_namespaces;
         self.rnacos_console_addr = if self.rnacos_console_addr.trim().is_empty() {
             String::new()
         } else {
@@ -367,6 +390,19 @@ mod tests {
 
         let parsed = NacosAdminConfig::from_connection(&cfg).unwrap();
         assert_eq!(parsed.rnacos_console_addr, "http://127.0.0.1:10848");
+    }
+
+    #[test]
+    fn normalizes_managed_namespaces() {
+        let cfg = connection_with_external(serde_json::json!({
+            "implementation": "nacos",
+            "versionMode": "v3",
+            "serverAddr": "http://127.0.0.1:8818",
+            "managedNamespaces": [" public ", "team-a", "team-a", ""],
+        }));
+
+        let parsed = NacosAdminConfig::from_connection(&cfg).unwrap();
+        assert_eq!(parsed.managed_namespaces, vec!["public", "team-a"]);
     }
 
     #[test]

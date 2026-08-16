@@ -128,6 +128,33 @@ describe("useSqlExecution", () => {
     setActivePinia(createPinia());
   });
 
+  it("sends every placeholder syntax and @set unchanged when substitution is disabled", async () => {
+    const sql = ["@set tenant = 42;", "SELECT ?, :named, ${shell}, #{mybatis}, @sqlserver, @tenant;"].join("\n");
+    const activeTab = ref<QueryTab | undefined>({ ...queryTab("app"), sql });
+    const activeConnection = ref<ConnectionConfig | undefined>(connection("mysql"));
+    const activeOutputView = ref<"result" | "summary" | "explain" | "chart">("result");
+    const queryStore = useQueryStore();
+    const settingsStore = useSettingsStore();
+    const executeCurrentSql = vi.spyOn(queryStore, "executeCurrentSql").mockImplementation(async () => {
+      if (activeTab.value) activeTab.value.result = { columns: ["ok"], rows: [[1]], affected_rows: 0, execution_time_ms: 1 };
+    });
+    vi.spyOn(useHistoryStore(), "add").mockResolvedValue(undefined);
+    settingsStore.editorSettings.sqlVariableSubstitutionEnabled = false;
+
+    const execution = useSqlExecution({
+      activeTab: computed(() => activeTab.value),
+      activeConnection: computed(() => activeConnection.value),
+      executableSql: computed(() => sql),
+      activeOutputView,
+    });
+
+    await execution.tryExecute();
+
+    expect(execution.showSqlParameterDialog.value).toBe(false);
+    expect(execution.sqlParameterNames.value).toEqual([]);
+    expect(executeCurrentSql).toHaveBeenCalledWith(sql, {});
+  });
+
   it("passes the selected statement's editor offset to the query store", async () => {
     const fullSql = "SELECT * FROM users;\nSELECT * FROM users;";
     const selectionFrom = fullSql.lastIndexOf("SELECT");

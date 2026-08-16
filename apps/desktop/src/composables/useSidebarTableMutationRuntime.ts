@@ -4,9 +4,23 @@ import { useToast } from "@/composables/useToast";
 import { useConnectionStore } from "@/stores/connectionStore";
 import type { DatabaseType, TreeNode } from "@/types/database";
 import { supportsTableTruncate } from "@/lib/database/databaseCapabilities";
-import { buildDropTableSql, buildEmptyTableSql, buildTruncateTableSql, supportsDropTableCascade, supportsTruncateTableCascade, type TableAdminSqlOptions } from "@/lib/database/dbAdminSql";
+import { buildDropTableSql, buildEmptyTableSql, buildMysqlAutoIncrementSql, buildTruncateTableSql, supportsDropTableCascade, supportsNativeMysqlAutoIncrement, supportsTruncateTableCascade, type MysqlAutoIncrementSqlOptions, type TableAdminSqlOptions } from "@/lib/database/dbAdminSql";
 import { isSqlServerLinkedNode } from "@/lib/database/sqlServerLinkedServers";
-import { sidebarDangerTarget, showDropTableConfirm, showEmptyTableConfirm, showTruncateTableConfirm, dropTablePreviewSql, dropTableCascade, emptyTablePreviewSql, truncateTablePreviewSql, truncateTableCascade } from "@/components/sidebar/sidebarTreeDialogState";
+import {
+  sidebarDangerTarget,
+  showDropTableConfirm,
+  showEmptyTableConfirm,
+  showMysqlAutoIncrementConfirm,
+  showTruncateTableConfirm,
+  dropTablePreviewSql,
+  dropTableCascade,
+  emptyTablePreviewSql,
+  mysqlAutoIncrementPreviewKey,
+  mysqlAutoIncrementPreviewSql,
+  mysqlAutoIncrementValue,
+  truncateTablePreviewSql,
+  truncateTableCascade,
+} from "@/components/sidebar/sidebarTreeDialogState";
 
 interface SidebarTableMutationRuntimeOptions {
   activeNode: ShallowRef<TreeNode>;
@@ -28,6 +42,7 @@ export function useSidebarTableMutationRuntime(options: SidebarTableMutationRunt
   const supportsTruncate = computed(() => supportsTableTruncate(currentDatabaseType()));
   const canDropTableCascade = computed(() => activeNode.value.type === "table" && supportsDropTableCascade(currentDatabaseType()));
   const canTruncateTableCascade = computed(() => activeNode.value.type === "table" && supportsTruncateTableCascade(currentDatabaseType()));
+  const supportsMysqlAutoIncrement = computed(() => activeNode.value.type === "table" && supportsNativeMysqlAutoIncrement(activeNode.value.connectionId ? connectionStore.getConfig(activeNode.value.connectionId) : undefined));
 
   function tableAdminSqlOptions(optionsOverride?: { cascade?: boolean }): TableAdminSqlOptions {
     const result: TableAdminSqlOptions = {
@@ -70,6 +85,59 @@ export function useSidebarTableMutationRuntime(options: SidebarTableMutationRunt
   async function refreshTruncateTablePreviewSql() {
     truncateTablePreviewSql.value = "";
     truncateTablePreviewSql.value = await buildTruncateTableSql(truncateTableSqlOptions()).catch(() => "");
+  }
+
+  function mysqlAutoIncrementSqlOptionsForNode(node: TreeNode): MysqlAutoIncrementSqlOptions {
+    const config = node.connectionId ? connectionStore.getConfig(node.connectionId) : undefined;
+    return {
+      databaseType: config?.db_type ?? databaseTypeForNode(node) ?? "mysql",
+      driverProfile: config?.driver_profile,
+      schema: node.database || node.schema,
+      tableName: node.label,
+      value: mysqlAutoIncrementValue.value,
+    };
+  }
+
+  function mysqlAutoIncrementPreviewKeyForNode(node: TreeNode, sqlOptions = mysqlAutoIncrementSqlOptionsForNode(node)): string {
+    return JSON.stringify([node.id, node.connectionId, node.database, sqlOptions.databaseType, sqlOptions.driverProfile?.trim().toLowerCase() || "", sqlOptions.schema || "", sqlOptions.tableName, sqlOptions.value]);
+  }
+
+  async function refreshMysqlAutoIncrementPreviewSql() {
+    const node = activeNode.value;
+    const sqlOptions = mysqlAutoIncrementSqlOptionsForNode(node);
+    const previewKey = mysqlAutoIncrementPreviewKeyForNode(node, sqlOptions);
+    mysqlAutoIncrementPreviewSql.value = "";
+    mysqlAutoIncrementPreviewKey.value = "";
+    const sql = await buildMysqlAutoIncrementSql(sqlOptions).catch(() => "");
+    if (previewKey !== mysqlAutoIncrementPreviewKeyForNode(activeNode.value)) return;
+    mysqlAutoIncrementPreviewSql.value = sql;
+    mysqlAutoIncrementPreviewKey.value = sql ? previewKey : "";
+  }
+
+  function mysqlAutoIncrement() {
+    if (!supportsMysqlAutoIncrement.value) return;
+    mysqlAutoIncrementValue.value = "1";
+    mysqlAutoIncrementPreviewKey.value = "";
+    void refreshMysqlAutoIncrementPreviewSql();
+    showMysqlAutoIncrementConfirm.value = true;
+  }
+
+  async function confirmMysqlAutoIncrement() {
+    const node = sidebarDangerTarget.value ?? activeNode.value;
+    if (!node.connectionId || !node.database) return;
+    try {
+      const config = connectionStore.getConfig(node.connectionId);
+      if (!supportsNativeMysqlAutoIncrement(config)) throw new Error("Setting AUTO_INCREMENT is supported only for native MySQL connections.");
+      await connectionStore.ensureConnected(node.connectionId);
+      const sqlOptions = mysqlAutoIncrementSqlOptionsForNode(node);
+      const previewKey = mysqlAutoIncrementPreviewKeyForNode(node, sqlOptions);
+      const sql = mysqlAutoIncrementPreviewKey.value === previewKey && mysqlAutoIncrementPreviewSql.value ? mysqlAutoIncrementPreviewSql.value : await buildMysqlAutoIncrementSql(sqlOptions);
+      await options.executeWithProductionGuard(node, sql, { database: node.database, schema: node.schema });
+      toast(t("contextMenu.mysqlAutoIncrementSuccess", { name: node.label, value: mysqlAutoIncrementValue.value }), 3000);
+      await options.refreshMutatedTableDataTabsForNode(node);
+    } catch (error: any) {
+      toast(t("contextMenu.tableOperationFailed", { message: error?.message || String(error) }), 5000);
+    }
   }
 
   function dropTable() {
@@ -144,6 +212,7 @@ export function useSidebarTableMutationRuntime(options: SidebarTableMutationRunt
     supportsTruncate,
     canDropTableCascade,
     canTruncateTableCascade,
+    supportsMysqlAutoIncrement,
     refreshDropTablePreviewSql,
     refreshTruncateTablePreviewSql,
     dropTable,
@@ -153,5 +222,8 @@ export function useSidebarTableMutationRuntime(options: SidebarTableMutationRunt
     confirmEmptyTable,
     truncateTable,
     confirmTruncateTable,
+    mysqlAutoIncrement,
+    refreshMysqlAutoIncrementPreviewSql,
+    confirmMysqlAutoIncrement,
   };
 }

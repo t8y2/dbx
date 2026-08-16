@@ -38,6 +38,7 @@ interface UseDataGridExtractorOptions {
   columnTypes: ComputedRef<Array<string | undefined> | undefined>;
   extractorOptions?: ComputedRef<DataGridExtractorOptions>;
   databaseType: ComputedRef<DatabaseType | undefined>;
+  identifierQuote?: ComputedRef<string | undefined>;
   tableMeta: ComputedRef<DataGridTableMeta | undefined>;
   hasCellSelection: ComputedRef<boolean>;
   selectedCells: ComputedRef<SelectionData>;
@@ -91,9 +92,15 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
     const matrix = options.selectedCellMatrix.value;
     const isMultiCellSelection = !!matrix && (matrix.rowIndexes.length > 1 || matrix.columnIndexes.length > 1);
     // A right-click sets contextCell.col to the clicked column (≥ 0); the test
-    // harness and non-right-click paths leave it at -1. Only treat a 1×1 matrix
-    // as synthetic when there's a real right-click context.
+    // harness and non-right-click paths leave it at -1.
     const hasRightClickContext = !!options.contextCell.value && options.contextSelectionIsSynthetic.value;
+    // When the user already has a single-cell selection and right-clicks the same
+    // cell, contextSelectionIsSynthetic is false but we still have a valid context
+    // cell. For INSERT/UPDATE extractors, we include all visible non-PK columns
+    // so the "has writable column" check doesn't fail when the selected cell
+    // happens to be the primary key. sql-select intentionally keeps using only
+    // the selected cell via the matrix branch below.
+    const hasNonSyntheticContextCell = !!options.contextCell.value && options.contextCell.value.col >= 0 && !options.contextSelectionIsSynthetic.value && !!matrix && !isMultiCellSelection;
 
     if (options.hasRowSelection.value && options.selectedRowIds.value.size > 0) {
       const items = options.displayItems.value.filter((item) => options.selectedRowIds.value.has(item.id) && !item.isDraft);
@@ -107,14 +114,20 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
       sourceRowIds = items.map((item) => item.id);
       selectedSourceIndexes = dedupeColumnIndexes(matrix.columnIndexes.map((index) => visibleIndexes[index] ?? index)).filter((index) => index < fullColumns.length);
       if (options.hasColumnSelection.value) selectionKind = "columns";
-    } else if (hasRightClickContext && options.contextCell.value) {
-      // Right-click on a cell with no (or synthetic single-cell) selection: copy the full row.
+    } else if ((hasRightClickContext || (hasNonSyntheticContextCell && extractor !== "sql-select")) && options.contextCell.value) {
+      // A SELECT targets the clicked cell; other extractors use the full row
+      // so that right-clicking a selected PK cell still enables INSERT/UPDATE.
       const item = fullItemsById.get(options.contextCell.value.rowId);
       if (item && !item.isDraft) {
         sourceRows = [item.data];
         sourceRowIds = [item.id];
-        selectedSourceIndexes = dedupeColumnIndexes(visibleIndexes).filter((index) => index < fullColumns.length);
-        selectionKind = "rows";
+        if (extractor === "sql-select") {
+          const sourceIndex = visibleIndexes[options.contextCell.value.col];
+          selectedSourceIndexes = sourceIndex === undefined ? [] : [sourceIndex];
+        } else {
+          selectedSourceIndexes = dedupeColumnIndexes(visibleIndexes).filter((index) => index < fullColumns.length);
+          selectionKind = "rows";
+        }
       }
     } else if (matrix) {
       // Single-cell matrix without a context cell — still honor the explicit selection.
@@ -127,7 +140,13 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
 
     if (sourceRows.length === 0 || selectedSourceIndexes.length === 0) return null;
     const requiredSourceIndexes = [...selectedSourceIndexes];
-    if (extractor === "sql-updates") {
+    if (extractor === "sql-select" && selectionKind === "rows") {
+      const primaryKeys = options.tableMeta.value?.primaryKeys ?? [];
+      const identityIndexes = primaryKeys.map((primaryKey) => fullColumns.findIndex((displayName, index) => normalizeName(sourceNames?.[index] ?? displayName) === normalizeName(primaryKey)));
+      const hasCompleteIdentity = primaryKeys.length > 0 && identityIndexes.every((index) => index >= 0) && sourceRows.every((row) => identityIndexes.every((index) => row[index] !== null && row[index] !== undefined));
+      selectedSourceIndexes = hasCompleteIdentity ? identityIndexes : [...fullColumns.keys()];
+      requiredSourceIndexes.splice(0, requiredSourceIndexes.length, ...selectedSourceIndexes);
+    } else if (extractor === "sql-updates") {
       for (const primaryKey of options.tableMeta.value?.primaryKeys ?? []) {
         const primaryKeyIndex = fullColumns.findIndex((displayName, index) => normalizeName(sourceNames?.[index] ?? displayName) === normalizeName(primaryKey));
         if (primaryKeyIndex >= 0 && !requiredSourceIndexes.includes(primaryKeyIndex)) requiredSourceIndexes.push(primaryKeyIndex);
@@ -154,6 +173,7 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
       version: DATA_GRID_EXTRACTOR_CONTRACT_VERSION,
       extractor,
       databaseType: descriptor.category === "sql" ? options.databaseType.value : undefined,
+      identifierQuote: descriptor.category === "sql" ? options.identifierQuote?.value : undefined,
       tableMeta,
       columns,
       selectedColumnIndexes,
@@ -221,6 +241,21 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
         return request !== null && (options.canBuildMongoUpdate?.(request) ?? false);
       }
       return canBuildSqlUpdateRequest();
+    }
+    if (extractor === "sql-select") {
+      const matrix = options.selectedCellMatrix.value;
+      if (options.hasRowSelection.value) {
+        if (options.selectedRowIds.value.size !== 1) return false;
+      } else if (matrix) {
+        if (matrix.rowIndexes.length !== 1 || matrix.columnIndexes.length !== 1) return false;
+      } else if (!options.contextCell.value || !options.contextSelectionIsSynthetic.value) {
+        return false;
+      }
+      const request = buildRequest(extractor, extractorOptions);
+      if (!request?.tableMeta?.tableName.trim() || request.rows.length !== 1) return false;
+      if (request.selectionKind === "columns") return false;
+      if (request.selectionKind === "cells" && request.selectedColumnIndexes.length !== 1) return false;
+      return request.columns.length > 0 && request.columns.every((column) => !!(column.sourceName ?? column.displayName)?.trim());
     }
     if (extractor === "raw") {
       const request = buildRequest(extractor, extractorOptions);

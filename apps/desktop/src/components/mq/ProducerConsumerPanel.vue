@@ -5,6 +5,7 @@ import { computed, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import type { ConsumerInfo, ProducerInfo, SubscriptionInfo, TopicInfo, TopicRef, TopicStats, MqSystemKind } from "@/types/mq";
 import { mqGetTopicStats, mqListConsumers, mqListProducers, mqListSubscriptions, mqUnloadTopic } from "@/lib/backend/api";
+import { extractKafkaPartitionRows } from "@/lib/mq/kafkaTopicStats";
 import { useMqMutationGuard } from "@/composables/useMqMutationGuard";
 import RocketMqTopicSelect from "./shared/RocketMqTopicSelect.vue";
 
@@ -39,16 +40,6 @@ interface PartitionClientRow {
   consumerCount: number;
   producers: ProducerInfo[];
   subscriptions: SubscriptionInfo[];
-}
-
-interface KafkaPartitionRow {
-  partition: number;
-  beginOffset: number;
-  endOffset: number;
-  messageCount: number;
-  leader: number;
-  replicas: number[];
-  isr: number[];
 }
 
 const producers = ref<ProducerInfo[]>([]);
@@ -437,20 +428,6 @@ function extractPartitionClientRows(raw: unknown): PartitionClientRow[] {
   });
 }
 
-function extractKafkaPartitionRows(raw: unknown): KafkaPartitionRow[] {
-  return arrayObjects(objectRecord(raw).partitionStats)
-    .map((body) => ({
-      partition: numberField(body.partition) ?? 0,
-      beginOffset: numberField(body.beginOffset) ?? 0,
-      endOffset: numberField(body.endOffset) ?? 0,
-      messageCount: numberField(body.messageCount) ?? 0,
-      leader: numberField(body.leader) ?? -1,
-      replicas: numberArrayField(body.replicas),
-      isr: numberArrayField(body.isr),
-    }))
-    .sort((a, b) => a.partition - b.partition);
-}
-
 function mergeSubscriptionOptions(base: SubscriptionInfo[], partitions: PartitionClientRow[]): SubscriptionInfo[] {
   const byName = new Map<string, SubscriptionInfo>();
   for (const sub of base) {
@@ -529,10 +506,6 @@ function numberField(value: unknown): number | undefined {
     return Number.isFinite(parsed) ? parsed : undefined;
   }
   return undefined;
-}
-
-function numberArrayField(value: unknown): number[] {
-  return Array.isArray(value) ? value.map(numberField).filter((item): item is number => item !== undefined) : [];
 }
 
 function stringField(value: unknown): string {

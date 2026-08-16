@@ -77,7 +77,7 @@ import { sidebarTreeRuntimeKey } from "@/lib/sidebar/sidebarTreeRuntime";
 import { treeNodePinKey } from "@/lib/app/pinnedItems";
 import { isTreeGroupNodeType } from "@/lib/sidebar/treeNodeGroup";
 import { customTypeCapabilities } from "@/lib/database/databaseObjectCapabilities";
-import { shouldActivateTreeNodeOnSingleClick } from "@/lib/sidebar/treeNodeClick";
+import { shouldActivateTreeNodeOnSingleClick, shouldOpenObjectBrowserOnSingleClick } from "@/lib/sidebar/treeNodeClick";
 
 const { t } = useI18n();
 
@@ -282,6 +282,8 @@ function getIconInfo(node: TreeNode): { icon: any; colorClass: string } | null {
       return { icon: FolderOpen, colorClass: "text-sky-400" };
     case "nacos-namespace":
       return { icon: FolderOpen, colorClass: "text-sky-500" };
+    case "nacos-access-control":
+      return { icon: ShieldCheck, colorClass: "text-sky-500" };
     case "etcd-root":
       return { icon: Database, colorClass: "text-sky-500" };
     case "etcd-dashboard":
@@ -326,6 +328,8 @@ function getIconInfo(node: TreeNode): { icon: any; colorClass: string } | null {
       return { icon: Columns3, colorClass: "text-muted-foreground" };
     case "group-tables":
       return { icon: Table, colorClass: "text-green-500" };
+    case "group-dolt-system-tables":
+      return { icon: Table, colorClass: "text-slate-500" };
     case "group-views":
       return { icon: Eye, colorClass: "text-purple-500" };
     case "group-materialized-views":
@@ -362,6 +366,9 @@ function isGroupLabel(node: TreeNode): boolean {
 function displayLabel(node: TreeNode): string {
   if (node.type === "load-more") return t(node.label);
   if (node.type === "object-browser") return t(node.label, { count: node.objectCount ?? 0 });
+  // Use the canonical key for persisted trees created before this label was
+  // internationalized; those nodes may still contain the old Chinese text.
+  if (node.type === "nacos-access-control") return t("nacos.accessControlSidebarLabel");
   if (node.type === "user-admin" || node.type === "dameng-users" || node.type === "dameng-roles" || node.type === "dameng-job-admin") return t(node.label);
   if (node.type === "linked-server-root") return t(node.label);
   if (node.type === "saved-sql-root") return t(node.label);
@@ -740,7 +747,7 @@ const labelWidthClass = computed(() => {
 
 watch(() => [isRightAlignedComment(), visibleLabel(activeNode.value), trailingComment.value, trailingCommentLayoutRef.value, trailingCommentLeadingRef.value], refreshTrailingCommentMeasurement, { flush: "post", immediate: true });
 
-const paddingLeft = computed(() => treeItemPaddingLeft(props.depth));
+const paddingLeft = computed(() => treeItemPaddingLeft(props.depth, settingsStore.editorSettings.sidebarIndent));
 
 const tableSearchParentId = computed(() => activeNode.value.tableSearchParentId || "");
 
@@ -1188,6 +1195,10 @@ function onClick(event: MouseEvent) {
   }
   selectSingleTreeNode(props.node);
   rowRef.value?.focus({ preventScroll: true });
+  if (shouldOpenObjectBrowserOnSingleClick(props.node.type, settingsStore.editorSettings.sidebarOpenDatabaseOnSingleClick)) {
+    treeRuntime.handleRowClick(props.node, event.detail);
+    return;
+  }
   if (!shouldActivateTreeNodeOnSingleClick(props.node.type, settingsStore.editorSettings.sidebarActivation) && props.node.type !== "load-more") return;
   treeRuntime.handleRowClick(props.node, event.detail);
 }
@@ -1319,6 +1330,7 @@ function onKeydown(event: KeyboardEvent) {
             <span
               v-if="
                 (node.type === 'group-tables' ||
+                  node.type === 'group-dolt-system-tables' ||
                   node.type === 'group-views' ||
                   node.type === 'group-materialized-views' ||
                   node.type === 'group-procedures' ||
@@ -1417,8 +1429,9 @@ function onKeydown(event: KeyboardEvent) {
 <style>
 .sidebar-object-comment {
   color: var(--muted-foreground);
-  font-size: 12px;
-  line-height: 1rem;
+  /* Relative to the sidebar tree root font size so comments follow the sidebarFontSize setting. */
+  font-size: 0.85em;
+  line-height: 1.25;
   opacity: 0.6;
   /* Sidebar rows repaint on hover; avoid heavier font shaping and fallback here. */
   text-rendering: auto;
@@ -1432,7 +1445,7 @@ function onKeydown(event: KeyboardEvent) {
 
 .sidebar-object-comment--windows {
   font-family: "Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI", system-ui, sans-serif;
-  font-size: 14px;
+  font-size: 1em;
   font-weight: 500;
   opacity: 1;
 }

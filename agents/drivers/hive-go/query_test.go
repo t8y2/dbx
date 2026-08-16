@@ -338,6 +338,36 @@ func TestQueryResultsPreserveHiveServerLabelsWithoutDotSplitting(t *testing.T) {
 	}
 }
 
+func TestPagedQueryPreservesDuplicateLeadingValuesAcrossPages(t *testing.T) {
+	behavior := &scriptedBehavior{}
+	behavior.query = func(ctx context.Context, _ string) (driver.Rows, error) {
+		return newScriptedRows(
+			ctx,
+			[]string{"group_id", "row_id"},
+			[]string{"BIGINT", "BIGINT"},
+			[][]driver.Value{{int64(1), int64(101)}, {int64(1), int64(102)}, {int64(1), int64(103)}},
+		), nil
+	}
+	server := newScriptedServer(t, behavior)
+
+	first, err := server.executeQueryPage(queryOptions{SQL: "SELECT group_id, row_id FROM repeated_values", MaxRows: 3}, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.SessionID == nil || !first.HasMore {
+		t.Fatalf("expected an open cursor after the first page: %#v", first)
+	}
+	second, err := server.fetchQueryPage(*first.SessionID, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	allRows := append(append([][]any{}, first.Rows...), second.Rows...)
+	expected := [][]any{{"1", "101"}, {"1", "102"}, {"1", "103"}}
+	if !reflect.DeepEqual(allRows, expected) || second.HasMore {
+		t.Fatalf("duplicate leading values changed across cursor pages: %#v", allRows)
+	}
+}
+
 func TestPagedQueryTruncatesAndPreservesLegacyJDBCValueSemantics(t *testing.T) {
 	largeValue := strings.Repeat("x", 256*1024)
 	createdAt := time.Date(2026, time.August, 11, 10, 11, 12, 345000000, time.UTC)

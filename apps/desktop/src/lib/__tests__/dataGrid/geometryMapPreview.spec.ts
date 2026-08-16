@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildGeometryMapFeatureCollection } from "@/lib/dataGrid/geometryMapPreview";
+import { buildGeometryMapFeatureCollection, hasGeometryMapPreviewColumns } from "@/lib/dataGrid/geometryMapPreview";
 import type { PreviewActionContext } from "@/lib/dataGrid/resultPreviewRegistry";
 
 function context(): PreviewActionContext {
@@ -29,6 +29,21 @@ function context(): PreviewActionContext {
 }
 
 describe("buildGeometryMapFeatureCollection", () => {
+  it("checks preview availability from column metadata without parsing result rows", () => {
+    const result = context().result;
+    expect(hasGeometryMapPreviewColumns(result)).toBe(true);
+
+    result.rows = [
+      [null, "empty"],
+      ["0x0101000000", "binary"],
+      ["not geometry", "invalid"],
+    ];
+    expect(hasGeometryMapPreviewColumns(result)).toBe(true);
+
+    result.column_types = ["text", "text"];
+    expect(hasGeometryMapPreviewColumns(result)).toBe(false);
+  });
+
   it("exposes the detected layer SRID and binds row properties by sourceIndex", () => {
     const collection = buildGeometryMapFeatureCollection(context());
 

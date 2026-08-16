@@ -9,6 +9,7 @@ import {
   supportsDatabaseNameCompletion,
   supportsDatabaseSchemaQualifier,
   supportsQueryTargetDatabaseListing,
+  supportsQueryEditorBlockComments,
   supportsSqlInListPaste,
   supportsTableImport,
   supportsTransaction,
@@ -120,6 +121,21 @@ describe("supportsSqlInListPaste", () => {
 
   it("excludes Neo4j because Cypher uses list syntax instead of SQL IN tuples", () => {
     expect(supportsSqlInListPaste("neo4j")).toBe(false);
+  });
+});
+
+describe("supportsQueryEditorBlockComments", () => {
+  it("allows block comments in generic and SQL editors", () => {
+    expect(supportsQueryEditorBlockComments(undefined)).toBe(true);
+    expect(supportsQueryEditorBlockComments("mysql")).toBe(true);
+    expect(supportsQueryEditorBlockComments("postgres")).toBe(true);
+    expect(supportsQueryEditorBlockComments("sqlserver")).toBe(true);
+  });
+
+  it("hides block comments in non-SQL editors", () => {
+    expect(supportsQueryEditorBlockComments("redis")).toBe(false);
+    expect(supportsQueryEditorBlockComments("mongodb")).toBe(false);
+    expect(supportsQueryEditorBlockComments("elasticsearch")).toBe(false);
   });
 });
 

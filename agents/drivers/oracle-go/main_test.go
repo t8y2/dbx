@@ -207,6 +207,15 @@ func TestEmptyResultSlicesMarshalAsArrays(t *testing.T) {
 	if strings.Contains(text, `"columns":null`) || strings.Contains(text, `"included_columns":null`) {
 		t.Fatalf("index info should marshal nil slices as arrays: %s", text)
 	}
+
+	data, err = json.Marshal(constraintInfo{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	text = string(data)
+	if strings.Contains(text, `"columns":null`) || strings.Contains(text, `"ref_columns":null`) {
+		t.Fatalf("constraint info should marshal nil slices as arrays: %s", text)
+	}
 }
 
 func TestGetTableDDLResultMarshalsAsString(t *testing.T) {
@@ -740,6 +749,104 @@ func TestListForeignKeysIncludesReferencedSchemaAndDeleteRule(t *testing.T) {
 	}}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("listForeignKeys() = %#v, want %#v", got, want)
+	}
+	if scripted.next != len(scripted.steps) {
+		t.Fatalf("expected %d queries, got %d", len(scripted.steps), scripted.next)
+	}
+}
+
+func TestListConstraintsGroupsMultiColumnPrimaryKeyAndMapsTypes(t *testing.T) {
+	const schema = "HR"
+	const table = "ORDERS"
+	db, scripted := openOracleViewSourceTestDB(t, []oracleViewSourceQueryStep{
+		{
+			queryContains: "FROM ALL_CONSTRAINTS ac",
+			args:          []driver.Value{schema, table},
+			columns:       []string{"CONSTRAINT_NAME", "CONSTRAINT_TYPE", "SEARCH_CONDITION", "GENERATED", "STATUS", "DEFERRABLE", "DEFERRED", "VALIDATED", "COLUMN_NAME", "POSITION", "NULLABLE"},
+			rows: [][]driver.Value{
+				{"PK_ORDERS", "P", nil, "USER NAME", "ENABLED", "NOT DEFERRABLE", "IMMEDIATE", "VALIDATED", "TENANT_ID", int64(1), "N"},
+				{"PK_ORDERS", "P", nil, "USER NAME", "ENABLED", "NOT DEFERRABLE", "IMMEDIATE", "VALIDATED", "ORDER_ID", int64(2), "N"},
+				{"UQ_ORDERS_CODE", "U", nil, "USER NAME", "ENABLED", "DEFERRABLE", "DEFERRED", "VALIDATED", "ORDER_CODE", int64(1), "Y"},
+				{"CK_ORDERS_AMOUNT", "C", "AMOUNT > 0", "USER NAME", "DISABLED", "NOT DEFERRABLE", "IMMEDIATE", "NOT VALIDATED", nil, nil, nil},
+			},
+		},
+	})
+	s := newServer()
+	s.db = db
+
+	got, err := s.listConstraints(schema, table)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []constraintInfo{
+		{Name: "PK_ORDERS", ConstraintType: "PRIMARY KEY", Definition: "", Columns: []string{"TENANT_ID", "ORDER_ID"}, RefColumns: []string{}, Enabled: true, Valid: true},
+		{Name: "UQ_ORDERS_CODE", ConstraintType: "UNIQUE", Definition: "", Columns: []string{"ORDER_CODE"}, RefColumns: []string{}, Deferrable: true, InitiallyDeferred: true, Enabled: true, Valid: true},
+		{Name: "CK_ORDERS_AMOUNT", ConstraintType: "CHECK", Definition: "AMOUNT > 0", Columns: []string{}, RefColumns: []string{}, Enabled: false, Valid: false},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("listConstraints() = %#v, want %#v", got, want)
+	}
+	if scripted.next != len(scripted.steps) {
+		t.Fatalf("expected %d queries, got %d", len(scripted.steps), scripted.next)
+	}
+}
+
+func TestListConstraintsExcludesGeneratedNotNullChecksButKeepsRealChecks(t *testing.T) {
+	const schema = "HR"
+	const table = "ORDERS"
+	db, scripted := openOracleViewSourceTestDB(t, []oracleViewSourceQueryStep{
+		{
+			queryContains: "FROM ALL_CONSTRAINTS ac",
+			args:          []driver.Value{schema, table},
+			columns:       []string{"CONSTRAINT_NAME", "CONSTRAINT_TYPE", "SEARCH_CONDITION", "GENERATED", "STATUS", "DEFERRABLE", "DEFERRED", "VALIDATED", "COLUMN_NAME", "POSITION", "NULLABLE"},
+			rows: [][]driver.Value{
+				{"SYS_C008648", "C", `"ORDER_CODE" IS NOT NULL`, "GENERATED NAME", "ENABLED", "NOT DEFERRABLE", "IMMEDIATE", "VALIDATED", "ORDER_CODE", int64(1), "N"},
+				{"SYS_C008649", "C", `"OPTIONAL_CODE" IS NOT NULL`, "GENERATED NAME", "ENABLED", "NOT DEFERRABLE", "IMMEDIATE", "VALIDATED", "OPTIONAL_CODE", int64(1), "Y"},
+				{"CK_REQUIRED_CODE", "C", `"REQUIRED_CODE" IS NOT NULL`, "USER NAME", "ENABLED", "NOT DEFERRABLE", "IMMEDIATE", "VALIDATED", "REQUIRED_CODE", int64(1), "N"},
+				{"CK_ORDERS_AMOUNT", "C", "AMOUNT > 0", "USER NAME", "ENABLED", "NOT DEFERRABLE", "IMMEDIATE", "VALIDATED", nil, nil, nil},
+			},
+		},
+	})
+	s := newServer()
+	s.db = db
+
+	got, err := s.listConstraints(schema, table)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []constraintInfo{
+		{Name: "SYS_C008649", ConstraintType: "CHECK", Definition: `"OPTIONAL_CODE" IS NOT NULL`, Columns: []string{"OPTIONAL_CODE"}, RefColumns: []string{}, Enabled: true, Valid: true},
+		{Name: "CK_REQUIRED_CODE", ConstraintType: "CHECK", Definition: `"REQUIRED_CODE" IS NOT NULL`, Columns: []string{"REQUIRED_CODE"}, RefColumns: []string{}, Enabled: true, Valid: true},
+		{Name: "CK_ORDERS_AMOUNT", ConstraintType: "CHECK", Definition: "AMOUNT > 0", Columns: []string{}, RefColumns: []string{}, Enabled: true, Valid: true},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("listConstraints() = %#v, want %#v (system-generated NOT NULL check must be excluded, real CHECK must survive)", got, want)
+	}
+	if scripted.next != len(scripted.steps) {
+		t.Fatalf("expected %d queries, got %d", len(scripted.steps), scripted.next)
+	}
+}
+
+func TestListConstraintsPreservesQuotedMixedCaseSchema(t *testing.T) {
+	const schema = "AppOwner"
+	const table = "Orders"
+	db, scripted := openOracleViewSourceTestDB(t, []oracleViewSourceQueryStep{
+		{
+			queryContains: "FROM ALL_CONSTRAINTS ac",
+			args:          []driver.Value{schema, table},
+			columns:       []string{"CONSTRAINT_NAME", "CONSTRAINT_TYPE", "SEARCH_CONDITION", "GENERATED", "STATUS", "DEFERRABLE", "DEFERRED", "VALIDATED", "COLUMN_NAME", "POSITION", "NULLABLE"},
+			rows:          [][]driver.Value{},
+		},
+	})
+	s := newServer()
+	s.db = db
+
+	constraints, err := s.listConstraints(schema, table)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(constraints) != 0 {
+		t.Fatalf("listConstraints(%q) = %#v, want empty result", schema, constraints)
 	}
 	if scripted.next != len(scripted.steps) {
 		t.Fatalf("expected %d queries, got %d", len(scripted.steps), scripted.next)
@@ -2043,6 +2150,123 @@ func TestRewriteOracleXMLTypeSkipsJoins(t *testing.T) {
 	}
 	if sqlText != `SELECT * FROM TEST_LOBS l JOIN OTHER_TABLE o ON o.ID = l.ID` {
 		t.Fatalf("join query should not be rewritten, got: %s", sqlText)
+	}
+}
+
+func TestRewriteOracleLOBSelectStarAsDeferredValues(t *testing.T) {
+	sqlText, err := rewriteOracleSelectSQL(
+		`SELECT t.* FROM TEST_LOBS t ORDER BY t.ID DESC`,
+		fakeOracleColumnLoader([]oracleColumnMeta{
+			{Name: "ID", DataType: "NUMBER"},
+			{Name: "PAYLOAD", DataType: "CLOB"},
+			{Name: "NATIONAL_TEXT", DataType: "NCLOB"},
+			{Name: "BINARY_DATA", DataType: "BLOB"},
+			{Name: "FILE_DATA", DataType: "BFILE"},
+		}),
+		true,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `SELECT t."ID", CASE WHEN t."PAYLOAD" IS NULL THEN NULL ELSE '<CLOB>' END AS "PAYLOAD", CASE WHEN t."PAYLOAD" IS NULL THEN NULL ELSE 'D:1' END AS "__DBX_LARGE_VALUE_BYTES_C_1", CASE WHEN t."NATIONAL_TEXT" IS NULL THEN NULL ELSE '<NCLOB>' END AS "NATIONAL_TEXT", CASE WHEN t."NATIONAL_TEXT" IS NULL THEN NULL ELSE 'D:1' END AS "__DBX_LARGE_VALUE_BYTES_N_2", CASE WHEN t."BINARY_DATA" IS NULL THEN NULL ELSE '<BLOB>' END AS "BINARY_DATA", CASE WHEN t."BINARY_DATA" IS NULL THEN NULL ELSE 'D:1' END AS "__DBX_LARGE_VALUE_BYTES_L_3", CASE WHEN t."FILE_DATA" IS NULL THEN NULL ELSE '<BFILE>' END AS "FILE_DATA", CASE WHEN t."FILE_DATA" IS NULL THEN NULL ELSE 'D:1' END AS "__DBX_LARGE_VALUE_BYTES_F_4" FROM TEST_LOBS t ORDER BY t.ID DESC`
+	if sqlText != want {
+		t.Fatalf("rewriteOracleSelectSQL() = %s, want %s", sqlText, want)
+	}
+}
+
+func TestRewriteOracleLOBExplicitColumnUsesVisibleResultIndex(t *testing.T) {
+	sqlText, err := rewriteOracleSelectSQL(
+		`SELECT t.ID, t.PAYLOAD AS body, LENGTH(t.PAYLOAD) AS payload_length FROM TEST_LOBS t`,
+		fakeOracleColumnLoader([]oracleColumnMeta{
+			{Name: "ID", DataType: "NUMBER"},
+			{Name: "PAYLOAD", DataType: "CLOB"},
+		}),
+		true,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `SELECT t.ID, CASE WHEN t."PAYLOAD" IS NULL THEN NULL ELSE '<CLOB>' END AS body, CASE WHEN t."PAYLOAD" IS NULL THEN NULL ELSE 'D:1' END AS "__DBX_LARGE_VALUE_BYTES_C_1", LENGTH(t.PAYLOAD) AS payload_length FROM TEST_LOBS t`
+	if sqlText != want {
+		t.Fatalf("rewriteOracleSelectSQL() = %s, want %s", sqlText, want)
+	}
+}
+
+func TestRewriteOracleLOBNestedRownumQuery(t *testing.T) {
+	sqlText, err := rewriteOracleSelectSQL(
+		`SELECT * FROM (SELECT ID, PAYLOAD FROM TEST_LOBS ORDER BY ID DESC) WHERE ROWNUM <= 10`,
+		fakeOracleColumnLoader([]oracleColumnMeta{
+			{Name: "ID", DataType: "NUMBER"},
+			{Name: "PAYLOAD", DataType: "CLOB"},
+		}),
+		true,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(sqlText, `CASE WHEN "PAYLOAD" IS NULL THEN NULL ELSE '<CLOB>' END AS "PAYLOAD"`) ||
+		!strings.Contains(sqlText, `"__DBX_LARGE_VALUE_BYTES_C_1"`) {
+		t.Fatalf("expected nested CLOB column to be deferred, got: %s", sqlText)
+	}
+}
+
+func TestRewriteOracleLOBSkipsDerivedProjectionThatDropsMarkers(t *testing.T) {
+	called := false
+	input := `SELECT PAYLOAD FROM (SELECT PAYLOAD FROM TEST_LOBS)`
+	sqlText, err := rewriteOracleSelectSQL(
+		input,
+		func(schema, table string) ([]oracleColumnMeta, error) {
+			called = true
+			return []oracleColumnMeta{{Name: "PAYLOAD", DataType: "CLOB"}}, nil
+		},
+		true,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if called {
+		t.Fatal("derived projection should not load table metadata")
+	}
+	if sqlText != input {
+		t.Fatalf("derived projection should remain unchanged, got: %s", sqlText)
+	}
+}
+
+func TestRewriteOracleLOBPreservesUnsafeQueries(t *testing.T) {
+	columns := []oracleColumnMeta{{Name: "ID", DataType: "NUMBER"}, {Name: "PAYLOAD", DataType: "CLOB"}}
+	tests := []string{
+		`SELECT DISTINCT PAYLOAD FROM TEST_LOBS`,
+		`SELECT l.PAYLOAD FROM TEST_LOBS l JOIN OTHER_TABLE o ON o.ID = l.ID`,
+		`SELECT PAYLOAD FROM TEST_LOBS UNION ALL SELECT PAYLOAD FROM OTHER_TABLE`,
+	}
+	for _, input := range tests {
+		sqlText, err := rewriteOracleSelectSQL(input, fakeOracleColumnLoader(columns), true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if sqlText != input {
+			t.Fatalf("unsafe query should not be rewritten: %s", sqlText)
+		}
+	}
+}
+
+func TestRewriteOracleLOBRequiresDeferredModeAndSafeMarkerNames(t *testing.T) {
+	input := `SELECT * FROM TEST_LOBS`
+	tests := []struct {
+		deferLOBs bool
+		columns   []oracleColumnMeta
+	}{
+		{deferLOBs: false, columns: []oracleColumnMeta{{Name: "ID", DataType: "NUMBER"}, {Name: "PAYLOAD", DataType: "CLOB"}}},
+		{deferLOBs: true, columns: []oracleColumnMeta{{Name: "PAYLOAD", DataType: "CLOB"}, {Name: "__DBX_LARGE_VALUE_BYTES_C_0", DataType: "VARCHAR2"}}},
+	}
+	for _, test := range tests {
+		sqlText, err := rewriteOracleSelectSQL(input, fakeOracleColumnLoader(test.columns), test.deferLOBs)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if sqlText != input {
+			t.Fatalf("query should remain unchanged, got: %s", sqlText)
+		}
 	}
 }
 

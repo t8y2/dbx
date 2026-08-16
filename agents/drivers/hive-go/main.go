@@ -431,7 +431,11 @@ func (server *server) dispatch(method string, params map[string]json.RawMessage)
 	case "list_constraints", "list_partitions", "list_subpartitions":
 		return []any{}, false, nil
 	case "get_object_source":
-		result, err := server.getTableDDL(stringParam(params, "schema"), firstNonEmpty(stringParam(params, "name"), stringParam(params, "table")))
+		result, err := server.getObjectSource(
+			stringParam(params, "schema"),
+			firstNonEmpty(stringParam(params, "name"), stringParam(params, "table")),
+			stringParam(params, "object_type"),
+		)
 		return result, false, err
 	case "get_table_ddl":
 		result, err := server.getTableDDL(stringParam(params, "schema"), stringParam(params, "table"))

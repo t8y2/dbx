@@ -3,6 +3,7 @@
 import { ChevronDown, Download, Server } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { createInstallOptions } from "@/lib/downloadLinks";
+import { detectPlatformId, type DownloadPlatformId } from "@/lib/platformDetection";
 
 type InstallTabsProps = {
   lang: "en" | "cn";
@@ -10,6 +11,8 @@ type InstallTabsProps = {
 };
 
 const downloadLabel = { en: "Download DBX", cn: "下载 DBX" };
+const selectDownloadLabel = { en: "Choose a version", cn: "选择下载版本" };
+const selectMacLabel = { en: "Choose a macOS version", cn: "选择 macOS 版本" };
 const offlineHint = {
   en: "Offline network or Windows 7? Choose an offline installer",
   cn: "无法联网或使用 Windows 7？选择专用离线安装包",
@@ -21,6 +24,7 @@ const platformIconPaths = {
     linux: "/icons/platform/linux.svg",
     "macos-arm": "/icons/platform/macos.png",
     "macos-intel": "/icons/platform/macos.png",
+    "macos-unknown": "/icons/platform/macos.png",
     windows: "/icons/platform/windows.png",
   },
   light: {
@@ -28,17 +32,10 @@ const platformIconPaths = {
     linux: "/icons/platform/linux.svg",
     "macos-arm": "/icons/platform/macos-white.png",
     "macos-intel": "/icons/platform/macos-white.png",
+    "macos-unknown": "/icons/platform/macos-white.png",
     windows: "/icons/platform/windows.png",
   },
 };
-
-function detectPlatformId(): string {
-  if (typeof navigator === "undefined") return "macos-arm";
-  const ua = navigator.userAgent.toLowerCase();
-  if (ua.includes("win")) return "windows";
-  if (ua.includes("linux")) return ua.includes("aarch64") || ua.includes("arm") ? "linux-arm" : "linux";
-  return "macos-arm";
-}
 
 function PlatformIcon({ id, size, variant }: { id: string; size: number; variant: "dark" | "light" }) {
   const src = platformIconPaths[variant][id as keyof (typeof platformIconPaths)["dark"]];
@@ -49,10 +46,18 @@ function PlatformIcon({ id, size, variant }: { id: string; size: number; variant
 export function InstallTabs({ lang, version }: InstallTabsProps) {
   const options = useMemo(() => createInstallOptions(lang, version), [lang, version]);
   const [open, setOpen] = useState(false);
-  const [platformId, setPlatformId] = useState("macos-arm");
+  const [platformId, setPlatformId] = useState<DownloadPlatformId>("unknown");
 
   useEffect(() => {
-    setPlatformId(detectPlatformId());
+    let cancelled = false;
+
+    void detectPlatformId(navigator).then((detectedPlatformId) => {
+      if (!cancelled) setPlatformId(detectedPlatformId);
+    });
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   useEffect(() => {
@@ -66,10 +71,21 @@ export function InstallTabs({ lang, version }: InstallTabsProps) {
     return () => window.removeEventListener("keydown", closeOnEscape);
   }, [open]);
 
-  const primary = useMemo(() => options.find((o) => o.id === platformId) ?? options[0], [options, platformId]);
-  const menuOptions = useMemo(
-    () => options.filter((option) => option.id !== primary.id).sort((a, b) => Number(b.iconId === primary.iconId) - Number(a.iconId === primary.iconId)),
-    [options, primary],
+  const primary = useMemo(() => options.find((option) => option.id === platformId), [options, platformId]);
+  const menuOptions = useMemo(() => {
+    if (!primary) return options;
+    return options.filter((option) => option.id !== primary.id).sort((a, b) => Number(b.iconId === primary.iconId) - Number(a.iconId === primary.iconId));
+  }, [options, primary]);
+  const fallbackIconId = platformId === "macos-unknown" ? "macos-unknown" : "unknown";
+  const fallbackLabel = platformId === "macos-unknown" ? selectMacLabel[lang] : selectDownloadLabel[lang];
+  const primaryContent = (
+    <>
+      <PlatformIcon id={primary?.iconId ?? fallbackIconId} size={30} variant="dark" />
+      <span className="grid gap-0.5 min-w-0 text-left">
+        <strong className="overflow-hidden text-[15px] font-[780] leading-[1.2] truncate">{downloadLabel[lang]}</strong>
+        <small className="overflow-hidden text-xs font-[520] leading-tight truncate text-[color-mix(in_srgb,#0f172a_48%,#94a3b8)]">{primary?.label ?? fallbackLabel}</small>
+      </span>
+    </>
   );
 
   return (
@@ -84,13 +100,22 @@ export function InstallTabs({ lang, version }: InstallTabsProps) {
     >
       <div className="landing-install-control relative">
         <div className="landing-install-trigger grid grid-cols-[minmax(0,1fr)_52px] items-stretch w-[min(340px,calc(100vw-36px))] min-h-[68px] border-0 rounded-full mx-auto overflow-hidden">
-          <a className="landing-install-primary grid grid-cols-[auto_minmax(0,1fr)] gap-4 items-center min-w-0 px-6 max-[360px]:gap-3 max-[360px]:px-5" href={primary.href}>
-            <PlatformIcon id={primary.iconId} size={30} variant="dark" />
-            <span className="grid gap-0.5 min-w-0 text-left">
-              <strong className="overflow-hidden text-[15px] font-[780] leading-[1.2] truncate">{downloadLabel[lang]}</strong>
-              <small className="overflow-hidden text-xs font-[520] leading-tight truncate text-[color-mix(in_srgb,#0f172a_48%,#94a3b8)]">{primary.label}</small>
-            </span>
-          </a>
+          {primary ? (
+            <a className="landing-install-primary grid grid-cols-[auto_minmax(0,1fr)] gap-4 items-center min-w-0 px-6 max-[360px]:gap-3 max-[360px]:px-5" href={primary.href}>
+              {primaryContent}
+            </a>
+          ) : (
+            <button
+              type="button"
+              aria-controls="landing-install-menu"
+              aria-expanded={open}
+              aria-haspopup="menu"
+              className="landing-install-primary grid grid-cols-[auto_minmax(0,1fr)] gap-4 items-center min-w-0 border-0 bg-transparent px-6 cursor-pointer max-[360px]:gap-3 max-[360px]:px-5"
+              onClick={() => setOpen(true)}
+            >
+              {primaryContent}
+            </button>
+          )}
           <button
             type="button"
             aria-controls="landing-install-menu"

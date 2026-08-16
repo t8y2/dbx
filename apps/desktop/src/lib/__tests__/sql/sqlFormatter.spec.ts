@@ -1,7 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { formatSqlForDisplay, formatSqlForEditing, formatSqlText, MAX_SQL_FORMAT_CHARS, sqlFormatDialectForDbType, UnsupportedStructuredInputError } from "@/lib/sql/sqlFormatter";
+import { canFormatSqlForDatabaseType, formatSqlForDisplay, formatSqlForEditing, formatSqlText, MAX_SQL_FORMAT_CHARS, sqlFormatDialectForDbType, UnsupportedStructuredInputError } from "@/lib/sql/sqlFormatter";
 
 describe("sqlFormatter", () => {
+  it("disables SQL formatting for VictoriaMetrics queries", () => {
+    expect(canFormatSqlForDatabaseType("victoriametrics")).toBe(false);
+    expect(canFormatSqlForDatabaseType("mysql")).toBe(true);
+  });
+
   it("maps PostgreSQL-compatible database types to the postgres formatter dialect", () => {
     for (const dbType of ["postgres", "kwdb", "gaussdb", "opengauss", "questdb", "kingbase", "highgo", "vastbase", "redshift"]) {
       expect(sqlFormatDialectForDbType(dbType)).toBe("postgres");

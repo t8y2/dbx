@@ -71,6 +71,25 @@ test("bumps the native RocketMQ agent from its Go directory", () => {
   assert.deepEqual(result.nativeModules, ["rocketmq"]);
 });
 
+test("bumps ZooKeeper from native and shared SASL source directories", () => {
+  for (const changedFile of [
+    "agents/drivers/zookeeper/main.go",
+    "agents/go-common/gosasl/sasl.go",
+    "agents/go-common/go-gssapi/krb5/krb5.go",
+  ]) {
+    const result = evaluateAgentVersionBump({
+      versions: { zookeeper: "0.1.0" },
+      changedFiles: [changedFile],
+      moduleExists: (path) => path === "agents/drivers/zookeeper",
+      readModuleFile: () => "",
+    });
+
+    assert.equal(result.versions.zookeeper, "0.1.1");
+    assert.deepEqual(result.javaModules, []);
+    assert.deepEqual(result.nativeModules, ["zookeeper"]);
+  }
+});
+
 test("bumps the native Vastbase agent from its independent Go directory", () => {
   const result = evaluateAgentVersionBump({
     versions: { vastbase: "0.1.37" },

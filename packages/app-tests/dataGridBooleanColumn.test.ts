@@ -22,6 +22,8 @@ test("detects boolean types using database semantics", () => {
   assert.equal(isBooleanColumnType("bit", "sqlserver"), true);
   assert.equal(isBooleanColumnType("boolean", "mysql"), true);
   assert.equal(isBooleanColumnType("  BOOLEAN ", "postgres"), true);
+  assert.equal(isBooleanColumnType("bit", "mysql"), true);
+  assert.equal(isBooleanColumnType("bit(1)", "mysql"), true);
 });
 
 test("does not treat database bit strings or MySQL integer aliases as boolean", () => {
@@ -31,8 +33,6 @@ test("does not treat database bit strings or MySQL integer aliases as boolean", 
   assert.equal(isBooleanColumnType("varbit", "postgres"), false);
   assert.equal(isBooleanColumnType("bit", "opengauss"), false);
   assert.equal(isBooleanColumnType("bit", undefined), false);
-  assert.equal(isBooleanColumnType("bit", "mysql"), false);
-  assert.equal(isBooleanColumnType("bit(1)", "mysql"), false);
   assert.equal(isBooleanColumnType("bit(8)", "mysql"), false);
   assert.equal(isBooleanColumnType("tinyint(1)", "mysql"), false);
   assert.equal(isBooleanColumnType(undefined, "mysql"), false);

@@ -936,8 +936,15 @@ function scrollCommandTerminalToEnd() {
   });
 }
 
-function appendCommandHistory(entry: Omit<RedisCommandHistoryEntry, "id">) {
-  commandHistory.value = [...commandHistory.value, { id: ++commandHistoryId, ...entry }];
+function appendCommandHistory(entry: Omit<RedisCommandHistoryEntry, "id">): number {
+  const id = ++commandHistoryId;
+  commandHistory.value = [...commandHistory.value, { id, ...entry }];
+  scrollCommandTerminalToEnd();
+  return id;
+}
+
+function updateCommandHistory(id: number, patch: Partial<Omit<RedisCommandHistoryEntry, "id">>) {
+  commandHistory.value = commandHistory.value.map((entry) => (entry.id === id ? { ...entry, ...patch } : entry));
   scrollCommandTerminalToEnd();
 }
 
@@ -955,14 +962,13 @@ function appendCommandOutput(entry: Omit<RedisCommandHistoryEntry, "id">) {
 async function runRedisCommand(command: string) {
   const prompt = commandPrompt.value;
   commandRunning.value = true;
+  // Echo the command to the terminal immediately so it doesn't look like the
+  // keystroke was lost while the request is in flight — the output is filled
+  // in on the same entry once the response (or error) arrives.
+  const entryId = appendCommandHistory({ prompt, command, output: "", error: false });
   try {
     const result = await api.redisExecuteCommand(props.connectionId, commandDb.value, command, !props.blockDangerousRedisCommands);
-    appendCommandHistory({
-      prompt,
-      command,
-      output: formatRedisConsoleValue(result.value),
-      error: false,
-    });
+    updateCommandHistory(entryId, { output: formatRedisConsoleValue(result.value), error: false });
     // The db this command ran on — capture before nextRedisCommandDb() advances it.
     const executedDb = commandDb.value;
     commandDb.value = nextRedisCommandDb(commandDb.value, command, result.value);
@@ -980,12 +986,7 @@ async function runRedisCommand(command: string) {
     persistRedisHistory(command, true, result.value);
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
-    appendCommandHistory({
-      prompt,
-      command,
-      output: errorMessage,
-      error: true,
-    });
+    updateCommandHistory(entryId, { output: errorMessage, error: true });
     // Persist failed command too
     persistRedisHistory(command, false, null, errorMessage);
   } finally {

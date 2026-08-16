@@ -100,7 +100,8 @@ describe("VectorBrowser default requests", () => {
       ["weaviate", "GET /v1/objects?class=demo&limit=100"],
       ["chromadb", "POST /api/v2/tenants/default_tenant/databases/default_database/collections/demo/get"],
     ] as const) {
-      app = createApp(VectorBrowser, { connectionId: "vector-1", database: "default", collection: "demo", databaseType });
+      const database = databaseType === "chromadb" ? "default_database" : "default";
+      app = createApp(VectorBrowser, { connectionId: "vector-1", database, collection: "demo", databaseType });
       app.mount(root!);
       await flushUi();
       expect(root!.querySelector<HTMLTextAreaElement>("textarea")!.value).toContain(expected);
@@ -109,6 +110,31 @@ describe("VectorBrowser default requests", () => {
       root!.replaceChildren();
     }
     expect(backend.vectorGetCollectionDetail).not.toHaveBeenCalled();
+  });
+
+  it("uses the configured Chroma Cloud namespace in generated requests", async () => {
+    app = createApp(VectorBrowser, {
+      connectionId: "chroma-cloud-1",
+      database: "support/kb",
+      collection: "collection/id",
+      databaseType: "chromadb",
+      tenant: "tenant /eu",
+    });
+    app.mount(root!);
+    await flushUi();
+
+    const prefix = "/api/v2/tenants/tenant%20%2Feu/databases/support%2Fkb/collections/collection%2Fid";
+    expect(root!.querySelector<HTMLTextAreaElement>("textarea")!.value).toContain(`POST ${prefix}/get`);
+
+    for (const [button, operation] of [
+      ["vector.search", "query"],
+      ["vector.upsert", "upsert"],
+      ["vector.delete", "delete"],
+    ] as const) {
+      buttonWithText(button).click();
+      await nextTick();
+      expect(root!.querySelector<HTMLTextAreaElement>("textarea")!.value).toContain(`POST ${prefix}/${operation}`);
+    }
   });
 
   it("resolves the schema before executing a generated upsert request", async () => {

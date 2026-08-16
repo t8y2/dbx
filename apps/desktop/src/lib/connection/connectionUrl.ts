@@ -34,6 +34,7 @@ const SCHEME_PROFILES: Record<string, ConnectionProfile> = {
   postgres: { type: "postgres", profile: "postgres", label: "PostgreSQL", defaultPort: 5432 },
   postgresql: { type: "postgres", profile: "postgres", label: "PostgreSQL", defaultPort: 5432 },
   cloudberry: { type: "postgres", profile: "cloudberry", label: "Apache Cloudberry", defaultPort: 5432 },
+  opentenbase: { type: "postgres", profile: "opentenbase", label: "OpenTenBase", defaultPort: 11000 },
   redshift: { type: "redshift", profile: "redshift", label: "Redshift", defaultPort: 5439 },
   redis: { type: "redis", profile: "redis", label: "Redis", defaultPort: 6379 },
   rediss: { type: "redis", profile: "redis", label: "Redis", defaultPort: 6379 },
@@ -325,9 +326,10 @@ export function connectionProfileForScheme(scheme: string, preferredProfile?: st
   if ((normalizedScheme === "http" || normalizedScheme === "https") && normalizedPreferredProfile) {
     return HTTP_SELECTED_PROFILES[normalizedPreferredProfile];
   }
-  // Cloudberry uses PostgreSQL URLs, so keep the selected product profile when parsing a pasted URL.
-  if ((normalizedScheme === "postgres" || normalizedScheme === "postgresql") && normalizedPreferredProfile === "cloudberry") {
-    return SCHEME_PROFILES.cloudberry;
+  // PostgreSQL-compatible products use standard PostgreSQL URLs, so keep the
+  // selected product profile when parsing a pasted URL.
+  if ((normalizedScheme === "postgres" || normalizedScheme === "postgresql") && (normalizedPreferredProfile === "cloudberry" || normalizedPreferredProfile === "opentenbase")) {
+    return SCHEME_PROFILES[normalizedPreferredProfile];
   }
   return SCHEME_PROFILES[normalizedScheme];
 }
@@ -674,12 +676,20 @@ function zookeeperConnectStringFromUrl(parsed: URL, defaultPort: number): string
   return `${host}:${port}${chroot}`;
 }
 
+function shouldPreserveCredentialFreeUrlCredentials(config: Omit<ConnectionConfig, "id">, parsed: ParsedConnectionUrl): boolean {
+  const currentProfile = config.driver_profile?.trim();
+  return parsed.dbType === config.db_type && (!currentProfile || parsed.driverProfile === currentProfile) && !parsed.username && !parsed.password;
+}
+
 function applyParsedUsername(config: Omit<ConnectionConfig, "id">, parsed: ParsedConnectionUrl): string {
   if (parsed.dbType === "h2" && config.db_type === "h2" && !h2JdbcUrlHasUserParam(parsed.connectionString)) {
     return config.username || parsed.username;
   }
   if (parsed.dbType === "kingbase" && config.db_type === "kingbase" && !parsed.username) {
     return config.username;
+  }
+  if (shouldPreserveCredentialFreeUrlCredentials(config, parsed)) {
+    return config.username || parsed.username;
   }
   return parsed.username;
 }
@@ -690,6 +700,9 @@ function applyParsedPassword(config: Omit<ConnectionConfig, "id">, parsed: Parse
   }
   if (parsed.dbType === "kingbase" && config.db_type === "kingbase" && !parsed.password) {
     return config.password;
+  }
+  if (shouldPreserveCredentialFreeUrlCredentials(config, parsed)) {
+    return config.password || parsed.password;
   }
   return parsed.password;
 }

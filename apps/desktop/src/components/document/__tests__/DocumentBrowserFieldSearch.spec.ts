@@ -486,6 +486,41 @@ describe("DocumentBrowser Elasticsearch field search", () => {
 });
 
 describe("DocumentBrowser MongoDB filter value types", () => {
+  it("loads DynamoDB table metadata before requesting the first page", async () => {
+    app?.unmount();
+    let resolveDescription!: (value: { name: string; status: string; itemCount: number; sizeBytes: number; partitionKey: { name: string; attributeType: string }; sortKey: { name: string; attributeType: string }; indexes: never[] }) => void;
+    backend.dynamodbDescribeTable.mockReturnValue(
+      new Promise((resolve) => {
+        resolveDescription = resolve;
+      }),
+    );
+    backend.documentFindDocuments.mockClear();
+    app = createApp(DocumentBrowser, {
+      connectionId: "dynamodb-1",
+      database: "us-east-1",
+      collection: "orders",
+      databaseType: "dynamodb",
+    });
+    app.mount(root!);
+    await flushUi();
+
+    expect(backend.dynamodbDescribeTable).toHaveBeenCalledOnce();
+    expect(backend.documentFindDocuments).not.toHaveBeenCalled();
+
+    resolveDescription({
+      name: "orders",
+      status: "ACTIVE",
+      itemCount: 0,
+      sizeBytes: 0,
+      partitionKey: { name: "tenant_id", attributeType: "S" },
+      sortKey: { name: "order_id", attributeType: "S" },
+      indexes: [],
+    });
+    await flushUi();
+
+    expect(backend.documentFindDocuments).toHaveBeenCalledOnce();
+  });
+
   it("labels new DynamoDB rows as conditional inserts in the executable preview", async () => {
     app?.unmount();
     backend.documentFindDocuments.mockResolvedValue({

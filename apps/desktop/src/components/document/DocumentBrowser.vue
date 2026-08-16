@@ -1973,7 +1973,7 @@ onMounted(async () => {
   } catch (e) {
     console.warn("[DBX] ensureConnected failed for", props.connectionId, e);
   }
-  void loadDynamoDbTableDescription();
+  await loadDynamoDbTableDescription();
   // Mapping metadata enriches the filter builder, but it must not delay the
   // first page of documents when the mapping endpoint is slow.
   void loadElasticsearchMappingFields();

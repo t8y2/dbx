@@ -217,8 +217,7 @@ impl ExpressionCompiler {
 
     fn field_condition(&mut self, field: &str, condition: &Value) -> Result<String, String> {
         let path = self.path(field)?;
-        let Some(operators) = condition.as_object().filter(|object| object.keys().any(|key| key.starts_with('$')))
-        else {
+        let Some(operators) = filter_operator_object(condition) else {
             let value = self.value(condition)?;
             return Ok(format!("{path} = {value}"));
         };
@@ -973,10 +972,8 @@ fn non_empty_and_filter(terms: Vec<Value>) -> Option<Value> {
 
 fn equality_value<'a>(term: &'a Value, field: &str) -> Option<&'a Value> {
     let value = term.as_object()?.get(field)?;
-    if let Some(object) = value.as_object() {
-        if object.keys().any(|key| key.starts_with('$')) {
-            return (object.len() == 1).then(|| object.get("$eq")).flatten();
-        }
+    if let Some(object) = filter_operator_object(value) {
+        return (object.len() == 1).then(|| object.get("$eq")).flatten();
     }
     Some(value)
 }
@@ -985,14 +982,39 @@ fn is_sort_key_condition(term: &Value, field: &str) -> bool {
     let Some(value) = term.as_object().and_then(|object| object.get(field)) else {
         return false;
     };
-    let Some(object) = value.as_object() else {
+    let Some(object) = filter_operator_object(value) else {
         return true;
     };
-    !object.keys().any(|key| key.starts_with('$'))
-        || (object.len() == 1
-            && object.keys().all(|key| {
-                matches!(key.as_str(), "$eq" | "$gt" | "$gte" | "$lt" | "$lte" | "$between" | "$beginsWith")
-            }))
+    object.len() == 1
+        && object
+            .keys()
+            .all(|key| matches!(key.as_str(), "$eq" | "$gt" | "$gte" | "$lt" | "$lte" | "$between" | "$beginsWith"))
+}
+
+fn filter_operator_object(value: &Value) -> Option<&Map<String, Value>> {
+    let object = value.as_object()?;
+    object.keys().any(|key| is_filter_operator(key)).then_some(object)
+}
+
+fn is_filter_operator(value: &str) -> bool {
+    matches!(
+        value,
+        "$eq"
+            | "$ne"
+            | "$gt"
+            | "$gte"
+            | "$lt"
+            | "$lte"
+            | "$contains"
+            | "$notContains"
+            | "$beginsWith"
+            | "$exists"
+            | "$between"
+            | "$in"
+            | "$regex"
+            | "$options"
+            | "$not"
+    )
 }
 
 fn parse_scan_index_forward(sort_json: Option<&str>, sort_key: Option<&str>) -> Result<bool, String> {
@@ -1857,6 +1879,77 @@ item:
         );
     }
 
+    #[tokio::test]
+    #[ignore = "requires DBX_DYNAMODB_ENDPOINT and permission to create a temporary table"]
+    async fn live_queries_number_and_binary_keys_from_extended_json() {
+        use aws_sdk_dynamodb::types::{AttributeDefinition, BillingMode, ScalarAttributeType};
+
+        let endpoint = std::env::var("DBX_DYNAMODB_ENDPOINT").expect("DBX_DYNAMODB_ENDPOINT is required");
+        let (ssl, address) = endpoint
+            .strip_prefix("https://")
+            .map(|address| (true, address))
+            .or_else(|| endpoint.strip_prefix("http://").map(|address| (false, address)))
+            .expect("DynamoDB endpoint must start with http:// or https://");
+        let (host, port) = address.rsplit_once(':').expect("DynamoDB endpoint must include a port");
+        let config: ConnectionConfig = serde_json::from_value(serde_json::json!({
+            "id": "dynamodb-live-extended-key-test",
+            "name": "DynamoDB live extended key test",
+            "db_type": "dynamodb",
+            "host": host,
+            "port": port.parse::<u16>().expect("valid DynamoDB port"),
+            "username": std::env::var("DBX_DYNAMODB_ACCESS_KEY_ID").unwrap_or_else(|_| "dummy".to_string()),
+            "password": std::env::var("DBX_DYNAMODB_SECRET_ACCESS_KEY").unwrap_or_else(|_| "dummy".to_string()),
+            "database": std::env::var("DBX_DYNAMODB_REGION").unwrap_or_else(|_| "us-east-1".to_string()),
+            "ssl": ssl
+        }))
+        .unwrap();
+        let client = connect(&config, host, config.port).unwrap();
+        let table_name = format!("dbx_extended_keys_{}", uuid::Uuid::new_v4().simple());
+        let attribute = |name: &str, attribute_type: ScalarAttributeType| {
+            AttributeDefinition::builder().attribute_name(name).attribute_type(attribute_type).build().unwrap()
+        };
+        let key = |name: &str, key_type: KeyType| {
+            KeySchemaElement::builder().attribute_name(name).key_type(key_type).build().unwrap()
+        };
+
+        client
+            .client
+            .create_table()
+            .table_name(&table_name)
+            .billing_mode(BillingMode::PayPerRequest)
+            .attribute_definitions(attribute("tenant_id", ScalarAttributeType::N))
+            .attribute_definitions(attribute("order_id", ScalarAttributeType::B))
+            .key_schema(key("tenant_id", KeyType::Hash))
+            .key_schema(key("order_id", KeyType::Range))
+            .send()
+            .await
+            .unwrap();
+        client
+            .client
+            .put_item()
+            .table_name(&table_name)
+            .item("tenant_id", AttributeValue::N("9007199254740993".to_string()))
+            .item("order_id", AttributeValue::B(Blob::new([0_u8, 1, 255])))
+            .item("payload", AttributeValue::N("9007199254740995".to_string()))
+            .send()
+            .await
+            .unwrap();
+
+        let filter = serde_json::json!({
+            "tenant_id": dynamodb_extended_json("number", Value::String("9007199254740993".to_string())),
+            "order_id": dynamodb_extended_json("binary", Value::String(BASE64_STANDARD.encode([0_u8, 1, 255])))
+        });
+        let result = find_items(&client, &table_name, 10, Some(&filter.to_string()), None, None).await;
+        client.client.delete_table().table_name(&table_name).send().await.unwrap();
+
+        let result = result.unwrap();
+        assert_eq!(result.documents.len(), 1);
+        assert_eq!(
+            result.documents[0].get("payload"),
+            Some(&dynamodb_extended_json("number", Value::String("9007199254740995".to_string())))
+        );
+    }
+
     #[test]
     fn preserves_dynamodb_specific_json_types() {
         let value = serde_json::json!({
@@ -1964,6 +2057,39 @@ item:
         assert_eq!(plan.key_condition.as_ref().unwrap().expression, "#kn0 = :kv0 AND #kn1 >= :kv1");
         assert!(plan.filter.as_ref().unwrap().expression.contains('>'));
         assert!(!plan.scan_index_forward);
+    }
+
+    #[test]
+    fn preserves_extended_json_values_in_filters_and_key_conditions() {
+        let number = dynamodb_extended_json("number", Value::String("9007199254740993".to_string()));
+        let binary = dynamodb_extended_json("binary", Value::String(BASE64_STANDARD.encode([0_u8, 1, 255])));
+        let filter = serde_json::json!({
+            "tenant_id": number,
+            "order_id": { "$eq": binary },
+            "payload": {
+                "$dbxDynamoDb": {
+                    "version": 1,
+                    "type": "number",
+                    "value": "9007199254740995"
+                }
+            }
+        });
+        let table = DynamoDbTableDescription {
+            name: "events".to_string(),
+            status: "ACTIVE".to_string(),
+            item_count: 0,
+            size_bytes: 0,
+            partition_key: DynamoDbKeyInfo { name: "tenant_id".to_string(), attribute_type: "N".to_string() },
+            sort_key: Some(DynamoDbKeyInfo { name: "order_id".to_string(), attribute_type: "B".to_string() }),
+            indexes: Vec::new(),
+        };
+
+        let plan = build_read_plan(&table, Some(&filter), None).unwrap();
+        let key_condition = plan.key_condition.unwrap();
+        assert_eq!(key_condition.expression, "#kn0 = :kv0 AND #kn1 = :kv1");
+        assert_eq!(key_condition.values.get(":kv0"), Some(&AttributeValue::N("9007199254740993".to_string())));
+        assert_eq!(key_condition.values.get(":kv1"), Some(&AttributeValue::B(Blob::new([0_u8, 1, 255]))));
+        assert_eq!(plan.filter.unwrap().values.get(":fv0"), Some(&AttributeValue::N("9007199254740995".to_string())));
     }
 
     #[test]

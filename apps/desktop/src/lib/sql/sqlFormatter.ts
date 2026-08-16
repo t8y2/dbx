@@ -339,6 +339,19 @@ function keepLogicalOperatorsOnSameLine(sql: string, dialect: SqlFormatDialect =
   return restoreSpans(collapsed, spans);
 }
 
+function normalizeLikeOperatorCase(sql: string, settings: SqlFormatterSettings, dialect: SqlFormatDialect): string {
+  if ((dialect !== "mysql" && dialect !== "sqlite") || settings.keywordCase === "preserve") return sql;
+
+  // sql-formatter classifies LIKE as a reserved function in these dialects,
+  // so an operator follows functionCase instead of keywordCase. Only adjust
+  // operator-shaped occurrences; keep LIKE(...) functions and qualified
+  // identifiers under their existing function/identifier case settings.
+  const { masked, spans } = maskStringAndCommentSpans(sql, dialect);
+  const keyword = settings.keywordCase === "upper" ? "LIKE" : "like";
+  const normalized = masked.replace(/(?<![.\w$])LIKE\b(?!\s*\()/gi, keyword);
+  return restoreSpans(normalized, spans);
+}
+
 function keepFromClauseAndFirstSourceOnSameLine(sql: string): string {
   const lines = sql.split("\n");
   for (let index = 0; index < lines.length - 1; index += 1) {
@@ -364,7 +377,8 @@ function keepFromClauseAndFirstSourceOnSameLine(sql: string): string {
 }
 
 function applySqlFormatterLayout(sql: string, settings: SqlFormatterSettings, dialect: SqlFormatDialect): string {
-  let formatted = settings.logicalOperatorNewline === "none" ? keepLogicalOperatorsOnSameLine(sql, dialect) : sql;
+  let formatted = normalizeLikeOperatorCase(sql, settings, dialect);
+  if (settings.logicalOperatorNewline === "none") formatted = keepLogicalOperatorsOnSameLine(formatted, dialect);
   if (settings.fromClauseLayout === "sameLine") formatted = keepFromClauseAndFirstSourceOnSameLine(formatted);
   return formatted;
 }

@@ -52,6 +52,29 @@ describe("sqlFormatter", () => {
     }
   });
 
+  it.each(["mysql", "sqlite"] as const)("applies keyword case to LIKE operators in the %s dialect", async (dialect) => {
+    const sql = "select * from users where name like '%like%' and note not like 'LIKE'";
+
+    const upper = await formatSqlText(sql, dialect, { keywordCase: "upper", functionCase: "preserve" });
+    const lower = await formatSqlText(sql.toUpperCase(), dialect, { keywordCase: "lower", functionCase: "preserve", identifierCase: "lower" });
+
+    expect(upper).toContain("name LIKE '%like%'");
+    expect(upper).toContain("note NOT LIKE 'LIKE'");
+    expect(lower).toContain("name like '%LIKE%'");
+    expect(lower).toContain("note not like 'LIKE'");
+  });
+
+  it("keeps SQLite LIKE functions and qualified identifiers under their own case settings", async () => {
+    const formatted = await formatSqlText("select like('%a%', name), filters.like from users", "sqlite", {
+      keywordCase: "upper",
+      functionCase: "preserve",
+      identifierCase: "preserve",
+    });
+
+    expect(formatted).toContain("like(");
+    expect(formatted).toContain("filters.like");
+  });
+
   it("falls back to the postgres formatter when the generic dialect cannot parse SQL", async () => {
     const formatted = await formatSqlText("SELECT 1::int AS id;", "generic");
 

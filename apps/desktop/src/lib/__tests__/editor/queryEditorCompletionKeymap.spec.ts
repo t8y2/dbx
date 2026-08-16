@@ -88,11 +88,13 @@ function createHarness(options: {
     "codeMirrorAcceptCompletion",
     "codeMirrorCloseCompletion",
     "codeMirrorInsertNewlineKeepIndent",
+    "insertQueryEditorNewline",
     "codeMirrorNextSnippetField",
     "codeMirrorIndentMore",
     "settingsStore",
     "normalizeShortcutSettings",
     "shortcutToCodeMirrorKey",
+    "props",
     `${javascript}\nreturn { handleTab, insertNewlineWithoutCompletion, acceptCompletionOrNextSnippetField, clearPendingCompletionTab, consumeSqlCompletionAutoStartSuppression };`,
   );
   return factory(
@@ -100,6 +102,7 @@ function createHarness(options: {
     options.acceptCompletion ?? (() => false),
     options.closeCompletion ?? (() => false),
     options.insertNewlineKeepIndent ?? (() => false),
+    (view: MockView, fallback: ((view: MockView) => boolean) | null | undefined) => fallback?.(view) ?? false,
     options.nextSnippetField ?? (() => false),
     options.indentMore ?? (() => false),
     {
@@ -110,6 +113,7 @@ function createHarness(options: {
     },
     normalizeShortcutSettings,
     shortcutToCodeMirrorKey,
+    { databaseType: "mysql" },
   ) as TabHarness;
 }
 

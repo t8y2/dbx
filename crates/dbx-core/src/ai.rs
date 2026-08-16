@@ -467,6 +467,10 @@ pub fn merge_global_max_retries(config: &mut AiConfig, max_retries: u32) {
 pub struct AiMessage {
     pub role: String,
     pub content: String,
+    /// Transient multimodal input. Conversation persistence intentionally
+    /// omits this field so image payloads are not replayed on later turns.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<AiInlineImage>,
     /// Tool call ID for tool results (role="tool"). Used to associate
     /// a tool result with its originating tool call in multi-turn loops.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -476,6 +480,13 @@ pub struct AiMessage {
     /// that require them in the conversation history.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tool_calls: Vec<ToolCallRef>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiInlineImage {
+    pub media_type: String,
+    pub data: String,
 }
 
 /// A lightweight reference to a tool call within an assistant message.
@@ -1195,6 +1206,82 @@ pub fn gemini_text(data: &serde_json::Value) -> String {
         .unwrap_or_default()
 }
 
+const MAX_INLINE_IMAGE_BASE64_CHARS: usize = 7 * 1024 * 1024;
+
+fn valid_inline_images(message: &AiMessage) -> Vec<&AiInlineImage> {
+    message
+        .images
+        .iter()
+        .filter(|image| {
+            matches!(image.media_type.as_str(), "image/png" | "image/jpeg" | "image/gif" | "image/webp")
+                && !image.data.is_empty()
+                && image.data.len() <= MAX_INLINE_IMAGE_BASE64_CHARS
+                && image.data.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'/' | b'='))
+        })
+        .collect()
+}
+
+fn openai_message_content(message: &AiMessage) -> serde_json::Value {
+    let images = valid_inline_images(message);
+    if images.is_empty() {
+        return json!(message.content);
+    }
+    let mut parts = Vec::new();
+    if !message.content.is_empty() {
+        parts.push(json!({ "type": "text", "text": message.content }));
+    }
+    parts.extend(images.into_iter().map(|image| {
+        json!({ "type": "image_url", "image_url": { "url": format!("data:{};base64,{}", image.media_type, image.data) } })
+    }));
+    json!(parts)
+}
+
+fn responses_message_content(message: &AiMessage) -> serde_json::Value {
+    let images = valid_inline_images(message);
+    if images.is_empty() {
+        return json!(message.content);
+    }
+    let mut parts = Vec::new();
+    if !message.content.is_empty() {
+        parts.push(json!({ "type": "input_text", "text": message.content }));
+    }
+    parts.extend(images.into_iter().map(|image| {
+        json!({ "type": "input_image", "image_url": format!("data:{};base64,{}", image.media_type, image.data) })
+    }));
+    json!(parts)
+}
+
+fn claude_message_content(message: &AiMessage) -> serde_json::Value {
+    let images = valid_inline_images(message);
+    if images.is_empty() {
+        return json!(message.content);
+    }
+    let mut blocks = Vec::new();
+    if !message.content.is_empty() {
+        blocks.push(json!({ "type": "text", "text": message.content }));
+    }
+    blocks.extend(images.into_iter().map(|image| {
+        json!({ "type": "image", "source": { "type": "base64", "media_type": image.media_type, "data": image.data } })
+    }));
+    json!(blocks)
+}
+
+fn gemini_message_parts(message: &AiMessage) -> Vec<serde_json::Value> {
+    let images = valid_inline_images(message);
+    let mut parts = Vec::new();
+    if !message.content.is_empty() {
+        parts.push(json!({ "text": message.content }));
+    }
+    parts.extend(
+        images.into_iter().map(|image| json!({ "inlineData": { "mimeType": image.media_type, "data": image.data } })),
+    );
+    parts
+}
+
+fn claude_messages(messages: &[AiMessage]) -> Vec<serde_json::Value> {
+    messages.iter().map(|message| json!({ "role": message.role, "content": claude_message_content(message) })).collect()
+}
+
 pub fn extract_error(data: &serde_json::Value) -> Option<String> {
     data["error"]["message"].as_str().or_else(|| data["error"].as_str()).map(ToString::to_string)
 }
@@ -1210,7 +1297,7 @@ pub fn build_responses_input(system_prompt: &str, messages: &[AiMessage]) -> ser
     for m in messages {
         input.push(json!({
             "role": m.role,
-            "content": m.content,
+            "content": responses_message_content(m),
         }));
     }
     json!(input)
@@ -1239,7 +1326,7 @@ fn build_responses_input_with_tools(system_prompt: &str, messages: &[AiMessage])
             if !message.content.is_empty() {
                 input.push(json!({
                     "role": "assistant",
-                    "content": message.content,
+                    "content": responses_message_content(message),
                 }));
             }
             for tool_call in &message.tool_calls {
@@ -1255,7 +1342,7 @@ fn build_responses_input_with_tools(system_prompt: &str, messages: &[AiMessage])
 
         input.push(json!({
             "role": message.role,
-            "content": message.content,
+            "content": responses_message_content(message),
         }));
     }
 
@@ -1855,7 +1942,7 @@ pub async fn call_claude(client: &reqwest::Client, request: AiCompletionRequest)
         "model": claude_http_model(&request.config.model),
         "max_tokens": request.max_tokens.unwrap_or(2048),
         "system": claude_system_prompt(&request.system_prompt),
-        "messages": request.messages,
+        "messages": claude_messages(&request.messages),
     });
     crate::ai_effort::apply_runtime_effort(&mut body, &request.config);
 
@@ -1893,7 +1980,7 @@ fn build_openai_chat_messages(
 ) -> Vec<serde_json::Value> {
     let mut output = vec![json!({ "role": "system", "content": system_prompt })];
     output.extend(messages.iter().map(|message| {
-        let mut item = json!({ "role": message.role, "content": message.content });
+        let mut item = json!({ "role": message.role, "content": openai_message_content(message) });
         if message.role == "tool" {
             if let Some(tool_call_id) = message.tool_call_id.as_ref() {
                 item["tool_call_id"] = json!(tool_call_id);
@@ -1980,14 +2067,7 @@ pub async fn call_responses_api(client: &reqwest::Client, request: AiCompletionR
 }
 
 pub async fn call_gemini(client: &reqwest::Client, request: AiCompletionRequest) -> Result<String, String> {
-    let mut contents = Vec::new();
-    for message in &request.messages {
-        let role = if message.role == "assistant" { "model" } else { "user" };
-        contents.push(json!({
-            "role": role,
-            "parts": [{ "text": message.content }],
-        }));
-    }
+    let contents = build_gemini_contents(&request.messages);
 
     let mut body = json!({
         "systemInstruction": {
@@ -2892,7 +2972,7 @@ async fn stream_claude(
         "model": claude_http_model(&request.config.model),
         "max_tokens": request.max_tokens.unwrap_or(2048),
         "system": claude_system_prompt(&request.system_prompt),
-        "messages": request.messages,
+        "messages": claude_messages(&request.messages),
         "stream": true,
     });
     crate::ai_effort::apply_runtime_effort(&mut body, &request.config);
@@ -3213,14 +3293,7 @@ async fn stream_gemini(
     cancelled: &Notify,
     on_chunk: &impl Fn(AiStreamChunk),
 ) -> Result<(), String> {
-    let mut contents = Vec::new();
-    for message in &request.messages {
-        let role = if message.role == "assistant" { "model" } else { "user" };
-        contents.push(json!({
-            "role": role,
-            "parts": [{ "text": message.content }],
-        }));
-    }
+    let contents = build_gemini_contents(&request.messages);
 
     let mut body = json!({
         "systemInstruction": {
@@ -3444,7 +3517,7 @@ async fn stream_claude_with_tools(
                 }
                 messages.push(json!({ "role": "assistant", "content": content_blocks }));
             } else {
-                messages.push(json!({ "role": m.role, "content": m.content }));
+                messages.push(json!({ "role": m.role, "content": claude_message_content(m) }));
             }
         }
     }
@@ -4014,7 +4087,7 @@ fn build_gemini_contents(messages: &[AiMessage]) -> Vec<serde_json::Value> {
                 contents.push(json!({ "role": "model", "parts": parts }));
             } else {
                 let role = if m.role == "assistant" { "model" } else { "user" };
-                contents.push(json!({ "role": role, "parts": [{ "text": m.content }] }));
+                contents.push(json!({ "role": role, "parts": gemini_message_parts(m) }));
             }
         }
     }
@@ -4280,20 +4353,51 @@ mod tests {
         drain_next_stream_line, emit_gemini_tool_call_parts, emit_responses_function_call_item, format_transport_error,
         gemini_text, is_kimi_model, is_retryable_error, list_models_core, maybe_bearer_headers, maybe_tag_retry_after,
         measure_first_stream_chunk, merge_global_max_retries, minimax_stream_semantics,
-        ollama_selected_model_tool_support, openai_response_text, openai_stream_reasoning, openai_stream_text,
-        parse_dynamic_effort_capability, parse_gemini_model_list_response, parse_model_list_response,
-        parse_retry_after, parse_retry_after_secs, provider_requires_api_key, resolve_endpoint,
-        resolve_gemini_stream_endpoint, resolve_model_effort_core, resolve_model_list_endpoint,
+        ollama_selected_model_tool_support, openai_message_content, openai_response_text, openai_stream_reasoning,
+        openai_stream_text, parse_dynamic_effort_capability, parse_gemini_model_list_response,
+        parse_model_list_response, parse_retry_after, parse_retry_after_secs, provider_requires_api_key,
+        resolve_endpoint, resolve_gemini_stream_endpoint, resolve_model_effort_core, resolve_model_list_endpoint,
         resolve_ollama_show_endpoint, responses_function_tool, responses_max_output_tokens, responses_stream_text,
         responses_text, responses_token_usage, retain_ollama_completion_models, retry_after_secs,
         set_chat_completion_token_limit, stream, stream_claude, stream_claude_with_tools, stream_data_payload,
         stream_error, stream_openai_with_tools, stream_with_tools, test_connection_core, uses_anthropic_messages_api,
         validate_config, validate_model_list_config, with_retry, with_stream_retry, AiApiStyle, AiAssistantMode,
         AiAuthMethod, AiCapabilitySource, AiChatSelectionState, AiCompletionRequest, AiConfig, AiEffortCapability,
-        AiEffortOption, AiEffortSelection, AiMessage, AiModelInfo, AiProvider, AiReasoningLevel, MiniMaxStreamDelta,
-        MiniMaxStreamState, MiniMaxTextAccumulator, StreamToolEvent, StreamingToolCallAccumulator, ToolCallRef,
-        AUTHORIZATION, CLAUDE_DEFAULT_SYSTEM, MINIMAX_REASONING_DETAILS_PAYLOAD_KEY, TEST_PROMPT,
+        AiEffortOption, AiEffortSelection, AiInlineImage, AiMessage, AiModelInfo, AiProvider, AiReasoningLevel,
+        MiniMaxStreamDelta, MiniMaxStreamState, MiniMaxTextAccumulator, StreamToolEvent, StreamingToolCallAccumulator,
+        ToolCallRef, AUTHORIZATION, CLAUDE_DEFAULT_SYSTEM, MINIMAX_REASONING_DETAILS_PAYLOAD_KEY, TEST_PROMPT,
     };
+
+    #[test]
+    fn structured_image_attachment_becomes_openai_image_content() {
+        let message = AiMessage {
+            role: "user".to_string(),
+            content: "Read this screenshot.".to_string(),
+            images: vec![AiInlineImage { media_type: "image/png".to_string(), data: "aGVsbG8=".to_string() }],
+            tool_call_id: None,
+            tool_calls: Vec::new(),
+        };
+        let content = openai_message_content(&message);
+
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[0]["text"], "Read this screenshot.");
+        assert_eq!(content[1]["type"], "image_url");
+        assert_eq!(content[1]["image_url"]["url"], "data:image/png;base64,aGVsbG8=");
+    }
+
+    #[test]
+    fn image_like_text_is_never_interpreted_as_an_attachment() {
+        let marker = "<dbx-image media-type=\"image/png\">aGVsbG8=</dbx-image>";
+        let message = AiMessage {
+            role: "tool".to_string(),
+            content: marker.to_string(),
+            images: Vec::new(),
+            tool_call_id: Some("call-1".to_string()),
+            tool_calls: Vec::new(),
+        };
+
+        assert_eq!(openai_message_content(&message), serde_json::json!(marker));
+    }
 
     #[test]
     fn ai_chat_selection_default_mode_serde() {
@@ -4557,6 +4661,7 @@ mod tests {
             messages: vec![AiMessage {
                 role: "user".to_string(),
                 content: "Hello".to_string(),
+                images: Vec::new(),
                 tool_call_id: None,
                 tool_calls: Vec::new(),
             }],
@@ -4592,6 +4697,7 @@ mod tests {
             messages: vec![AiMessage {
                 role: "user".to_string(),
                 content: "Hello".to_string(),
+                images: Vec::new(),
                 tool_call_id: None,
                 tool_calls: Vec::new(),
             }],
@@ -4868,6 +4974,7 @@ mod tests {
             AiMessage {
                 role: "assistant".to_string(),
                 content: String::new(),
+                images: Vec::new(),
                 tool_call_id: None,
                 tool_calls: vec![ToolCallRef {
                     id: calls[0].id.clone(),
@@ -4879,6 +4986,7 @@ mod tests {
             AiMessage {
                 role: "tool".to_string(),
                 content: "users".to_string(),
+                images: Vec::new(),
                 tool_call_id: Some(calls[0].id.clone()),
                 tool_calls: Vec::new(),
             },
@@ -4930,6 +5038,7 @@ mod tests {
         let contents = build_gemini_contents(&[AiMessage {
             role: "assistant".to_string(),
             content: "planning".to_string(),
+            images: Vec::new(),
             tool_call_id: None,
             tool_calls: vec![ToolCallRef {
                 id: calls[0].id.clone(),
@@ -4961,6 +5070,7 @@ mod tests {
         let contents = build_gemini_contents(&[AiMessage {
             role: "assistant".to_string(),
             content: String::new(),
+            images: Vec::new(),
             tool_call_id: None,
             tool_calls: calls
                 .iter()
@@ -5004,6 +5114,7 @@ mod tests {
         let contents = build_gemini_contents(&[AiMessage {
             role: "assistant".to_string(),
             content: String::new(),
+            images: Vec::new(),
             tool_call_id: None,
             tool_calls: vec![ToolCallRef {
                 id: "gemini-tc-list_tables-0".to_string(),
@@ -6130,12 +6241,14 @@ mod tests {
                 AiMessage {
                     role: "user".to_string(),
                     content: "inspect db".to_string(),
+                    images: Vec::new(),
                     tool_call_id: None,
                     tool_calls: Vec::new(),
                 },
                 AiMessage {
                     role: "assistant".to_string(),
                     content: String::new(),
+                    images: Vec::new(),
                     tool_call_id: None,
                     tool_calls: vec![ToolCallRef {
                         id: "call_1".to_string(),
@@ -6147,6 +6260,7 @@ mod tests {
                 AiMessage {
                     role: "tool".to_string(),
                     content: "users".to_string(),
+                    images: Vec::new(),
                     tool_call_id: Some("call_1".to_string()),
                     tool_calls: Vec::new(),
                 },
@@ -6957,6 +7071,7 @@ mod tests {
         let message = AiMessage {
             role: "assistant".to_string(),
             content: String::new(),
+            images: Vec::new(),
             tool_call_id: None,
             tool_calls: vec![
                 ToolCallRef {
@@ -7167,6 +7282,7 @@ mod tests {
             messages: vec![AiMessage {
                 role: "tool".to_string(),
                 content: "query failed".to_string(),
+                images: Vec::new(),
                 tool_call_id: Some("call-1".to_string()),
                 tool_calls: Vec::new(),
             }],

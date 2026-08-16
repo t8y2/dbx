@@ -364,6 +364,11 @@ export interface DriverInstallProgress {
 export interface AiMessage {
   role: "user" | "assistant" | "system";
   content: string;
+  /** Transient images for this message. Persisted conversation history intentionally omits them. */
+  images?: Array<{
+    mediaType: string;
+    data: string;
+  }>;
 }
 
 export interface AiTaskContract {

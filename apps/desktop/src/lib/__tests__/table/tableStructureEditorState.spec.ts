@@ -25,9 +25,24 @@ import {
   resolveInsertColumnIndex,
   restoreCharacterLengthUnitsAfterSave,
   splitDataType,
+  tableStructureIdentifierComparisonKey,
 } from "@/lib/table/tableStructureEditorState";
 
 describe("tableStructureEditorState", () => {
+  it("keeps quoted mixed-case identifiers distinct when detecting copied-column duplicates", () => {
+    const postgresNames = new Set([tableStructureIdentifierComparisonKey("Foo", "postgres")]);
+    expect(postgresNames.has(tableStructureIdentifierComparisonKey("foo", "postgres"))).toBe(false);
+
+    const oracleNames = new Set([tableStructureIdentifierComparisonKey("Foo", "oracle")]);
+    expect(oracleNames.has(tableStructureIdentifierComparisonKey("FOO", "oracle"))).toBe(false);
+
+    const mysqlNames = new Set([tableStructureIdentifierComparisonKey("Foo", "mysql")]);
+    expect(mysqlNames.has(tableStructureIdentifierComparisonKey("foo", "mysql"))).toBe(true);
+
+    const jdbcNames = new Set([tableStructureIdentifierComparisonKey("Foo", "jdbc", { unquotedIdentifierCase: "lower", quotedIdentifierCase: "mixed" })]);
+    expect(jdbcNames.has(tableStructureIdentifierComparisonKey("foo", "jdbc", { unquotedIdentifierCase: "lower", quotedIdentifierCase: "mixed" }))).toBe(false);
+  });
+
   it("keeps existing Oracle trigger drafts read-only until full source editing is available", () => {
     const [existing] = createTriggerDrafts([{ name: "ORDERS_AUDIT", timing: "AFTER EACH ROW", event: "INSERT OR UPDATE", statement: "BEGIN NULL; END;" }]);
     if (!existing) throw new Error("expected an existing trigger draft");

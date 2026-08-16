@@ -79,6 +79,7 @@ import {
   restoreCharacterLengthUnitsAfterSave,
   sameStructureIndexType,
   splitDataType,
+  tableStructureIdentifierComparisonKey,
   toColumnNames,
 } from "@/lib/table/tableStructureEditorState";
 import { CREATE_DATABASE_CHARSET_OPTIONS, createDatabaseCollationOptionsForCharset, fallbackCreateDatabaseCharsetMetadata, normalizeCreateDatabaseCharsetKey, parseCreateDatabaseCharsetMetadata } from "@/lib/database/createDatabaseCharsetOptions";
@@ -1596,22 +1597,23 @@ function onColumnRowActivate(column: EditableStructureColumn) {
   selectedColumnId.value = column.id;
 }
 
-function normalizedColumnName(name: string): string {
-  return name.trim().toLowerCase();
+function normalizedColumnSearch(value: string): string {
+  return value.trim().toLowerCase();
 }
 
 const copyableSourceColumns = computed(() => {
-  const existingNames = new Set(columns.value.filter((column) => !column.markedForDrop).map((column) => normalizedColumnName(column.name)));
+  const databaseInfo = connection.value?.database_info;
+  const existingNames = new Set(columns.value.filter((column) => !column.markedForDrop).map((column) => tableStructureIdentifierComparisonKey(column.name, databaseType.value, databaseInfo)));
   return copySourceColumns.value.map((column) => ({
     column,
-    alreadyExists: existingNames.has(normalizedColumnName(column.name)),
+    alreadyExists: existingNames.has(tableStructureIdentifierComparisonKey(column.name, databaseType.value, databaseInfo)),
   }));
 });
 
 const filteredCopyableSourceColumns = computed(() => {
-  const search = normalizedColumnName(copySourceColumnSearch.value);
+  const search = normalizedColumnSearch(copySourceColumnSearch.value);
   if (!search) return copyableSourceColumns.value;
-  return copyableSourceColumns.value.filter(({ column }) => [column.name, column.data_type, column.comment ?? ""].some((value) => normalizedColumnName(value).includes(search)));
+  return copyableSourceColumns.value.filter(({ column }) => [column.name, column.data_type, column.comment ?? ""].some((value) => normalizedColumnSearch(value).includes(search)));
 });
 
 const copyableSourceColumnNames = computed(() => copyableSourceColumns.value.filter(({ alreadyExists }) => !alreadyExists).map(({ column }) => column.name));
@@ -1635,9 +1637,11 @@ async function openCopyColumnsDialog() {
   copySourceTablesLoading.value = true;
   try {
     await store.ensureConnected(props.connectionId);
+    const databaseInfo = connection.value?.database_info;
+    const currentTableIdentifierKey = tableStructureIdentifierComparisonKey(props.tableName, databaseType.value, databaseInfo);
     copySourceTables.value = (await api.listTables(props.connectionId, props.database, metadataSchema.value, undefined, undefined, undefined, undefined, props.catalog)).filter((table) => {
       const tableType = table.table_type.toUpperCase();
-      return tableType !== "VIEW" && tableType !== "MATERIALIZED_VIEW" && (isCreateMode.value || normalizedColumnName(table.name) !== normalizedColumnName(props.tableName));
+      return tableType !== "VIEW" && tableType !== "MATERIALIZED_VIEW" && (isCreateMode.value || tableStructureIdentifierComparisonKey(table.name, databaseType.value, databaseInfo) !== currentTableIdentifierKey);
     });
   } catch (error: any) {
     copySourceTables.value = [];

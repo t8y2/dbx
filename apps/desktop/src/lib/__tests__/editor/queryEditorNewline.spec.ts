@@ -5,7 +5,8 @@ import { insertQueryEditorNewline, shouldStartNextSqlStatementAtColumnZero } fro
 import type { DatabaseType } from "@/types/database";
 
 function createState(doc: string, cursor = doc.length) {
-  return EditorState.create({ doc, selection: { anchor: cursor } });
+  const state = EditorState.create({ doc });
+  return state.update({ selection: { anchor: cursor === doc.length ? state.doc.length : cursor } }).state;
 }
 
 function insertNewline(doc: string, databaseType: DatabaseType = "mysql") {
@@ -68,6 +69,20 @@ describe("queryEditorNewline", () => {
 
     expect(shouldStartNextSqlStatementAtColumnZero(createState(internal), "oracle")).toBe(false);
     expect(shouldStartNextSqlStatementAtColumnZero(createState(complete), "oracle")).toBe(true);
+  });
+
+  it("keeps indentation inside SQL Server routine batches with CRLF line endings", () => {
+    const sqlText = "CREATE OR ALTER PROCEDURE dbo.p AS\r\nBEGIN\r\n  SELECT 1;";
+    const result = insertNewline(sqlText, "sqlserver");
+
+    expect(shouldStartNextSqlStatementAtColumnZero(createState(sqlText), "sqlserver")).toBe(false);
+    expect(result.state.doc.toString()).toMatch(/SELECT 1;\n  $/);
+  });
+
+  it("resets indentation after a completed statement in the next SQL Server batch", () => {
+    const sqlText = "CREATE PROCEDURE dbo.p AS\r\nBEGIN\r\n  SELECT 1;\r\nEND;\r\nGO\r\n  SELECT 2;";
+
+    expect(shouldStartNextSqlStatementAtColumnZero(createState(sqlText), "sqlserver")).toBe(true);
   });
 
   it("resets indentation when spaces follow the terminating semicolon", () => {

@@ -75,6 +75,30 @@ describe("sqlFormatter", () => {
     expect(formatted).toContain("filters.like");
   });
 
+  it.each(["mysql", "sqlite"] as const)("does not rewrite LIKE inside DBX placeholders in the %s dialect", async (dialect) => {
+    for (const [lowerPlaceholder, upperPlaceholder] of [
+      ["${like}", "${LIKE}"],
+      ["#{like}", "#{LIKE}"],
+      [":like", ":LIKE"],
+      ["@like", "@LIKE"],
+    ]) {
+      const upper = await formatSqlText(`select * from users where name like 'a';\nselect ${lowerPlaceholder} as marker`, dialect, {
+        keywordCase: "upper",
+        functionCase: "preserve",
+      });
+      const lower = await formatSqlText(`SELECT * FROM users WHERE name LIKE 'a';\nSELECT ${upperPlaceholder} AS marker`, dialect, {
+        keywordCase: "lower",
+        functionCase: "preserve",
+        identifierCase: "lower",
+      });
+
+      expect(upper).toContain(lowerPlaceholder);
+      expect(upper).toContain("name LIKE 'a'");
+      expect(lower).toContain(upperPlaceholder);
+      expect(lower).toContain("name like 'a'");
+    }
+  });
+
   it("falls back to the postgres formatter when the generic dialect cannot parse SQL", async () => {
     const formatted = await formatSqlText("SELECT 1::int AS id;", "generic");
 

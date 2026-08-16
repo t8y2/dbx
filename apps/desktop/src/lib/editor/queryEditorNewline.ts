@@ -1,5 +1,6 @@
 import type { EditorState } from "@codemirror/state";
 import type { Command, EditorView } from "@codemirror/view";
+import { trailingStatementDelimiterPosition } from "@/lib/sql/statementDelimiter";
 import { splitSqlStatementRanges } from "@/lib/sql/sqlStatementRanges";
 import type { DatabaseType } from "@/types/database";
 
@@ -14,28 +15,34 @@ function trailingStatementTerminator(state: EditorState): number | null {
   return line.from + match.index;
 }
 
-function sentinelStartsOwnStatement(sql: string, sentinelStart: number, databaseType?: DatabaseType): boolean {
-  return splitSqlStatementRanges(sql, databaseType).findIndex((range) => range.from === sentinelStart) > 0;
+function sqlServerBatchStartsRoutine(sql: string): boolean {
+  const goLine = /^[ \t]*GO(?:[ \t]+\d+)?[ \t]*(?:\r\n|\r|\n|$)/gim;
+  let batchStart = 0;
+  for (const match of sql.matchAll(goLine)) batchStart = (match.index ?? 0) + match[0].length;
+
+  const batch = sql.slice(batchStart).replace(/^(?:\s|--[^\r\n]*(?:\r\n|\r|\n|$)|\/\*[\s\S]*?\*\/)+/u, "");
+  return /^(?:CREATE(?:\s+OR\s+ALTER)?|ALTER)\s+(?:PROC(?:EDURE)?|FUNCTION|TRIGGER)\b/iu.test(batch);
 }
 
 export function shouldStartNextSqlStatementAtColumnZero(state: EditorState, databaseType?: DatabaseType): boolean {
   const terminator = trailingStatementTerminator(state);
   if (terminator === null) return false;
 
-  // Appending a complete sentinel statement lets the shared splitter decide
-  // whether this semicolon closes a top-level statement or is still inside a
-  // procedure/PLSQL block. The sentinel starts its own range only in the former
-  // case. This keeps routine-body indentation unchanged.
   const throughTerminator = state.sliceDoc(0, terminator + 1);
+  if (databaseType === "sqlserver" && sqlServerBatchStartsRoutine(throughTerminator)) return false;
+
+  // Appending one complete sentinel statement lets the shared splitter decide
+  // whether this semicolon closes a top-level statement or is still inside a
+  // routine/PLSQL block. Inspect the preceding range's actual delimiter so a
+  // semicolon in a trailing comment cannot borrow an earlier statement boundary.
   const sentinelStart = throughTerminator.length + 1;
   const withTerminator = `${throughTerminator}\nSELECT 1;`;
-  if (!sentinelStartsOwnStatement(withTerminator, sentinelStart, databaseType)) return false;
+  const ranges = splitSqlStatementRanges(withTerminator, databaseType);
+  const sentinelIndex = ranges.findIndex((range) => range.from === sentinelStart);
+  if (sentinelIndex <= 0) return false;
 
-  // Parse the same prefix with the candidate semicolon removed. If the sentinel
-  // is still independent, an earlier delimiter (rather than this semicolon)
-  // created the boundary, which means the candidate is inside a comment/string.
-  const withoutTerminator = `${throughTerminator.slice(0, -1)} \nSELECT 1;`;
-  return !sentinelStartsOwnStatement(withoutTerminator, sentinelStart, databaseType);
+  const previousRange = ranges[sentinelIndex - 1];
+  return previousRange.to === terminator + 1 || trailingStatementDelimiterPosition(withTerminator, previousRange.to) === terminator;
 }
 
 export function insertQueryEditorNewline(view: EditorView, fallback: Command | null | undefined, databaseType?: DatabaseType): boolean {

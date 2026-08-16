@@ -1222,12 +1222,20 @@ export type SqlKeywordCase = "preserve" | "upper" | "lower";
 
 type SqlCompletionApplyDialect = "mysql" | "postgres" | "sqlserver" | "oracle";
 
-// QueryEditor may use MySQL as a CodeMirror syntax fallback. Completion apply
-// text must still follow the connected database's identifier rules.
-const ORACLE_LIKE_IDENTIFIER_DATABASES = new Set<DatabaseType>(["oracle", "dameng", "oceanbase-oracle", "yashandb", "oscar", "xugu"]);
+// QueryEditor may use another dialect as a CodeMirror syntax fallback.
+// Completion apply text must still follow the connected database's identifier
+// folding and quoting rules.
+const MYSQL_LIKE_IDENTIFIER_DATABASES = new Set<DatabaseType>(["mysql", "clickhouse", "hive", "kyuubi", "impala", "spark", "databend", "tdengine", "access", "doris", "starrocks"]);
+const POSTGRES_LIKE_IDENTIFIER_DATABASES = new Set<DatabaseType>(["postgres", "redshift", "gaussdb", "kingbase", "highgo", "uxdb", "vastbase", "kwdb", "opengauss"]);
+const UPPER_FOLDING_IDENTIFIER_DATABASES = new Set<DatabaseType>(["oracle", "dameng", "oceanbase-oracle", "yashandb", "oscar", "xugu", "db2"]);
 
 function sqlCompletionApplyDialect(databaseType: DatabaseType | undefined, fallback: "mysql" | "postgres" | "sqlserver" | undefined): SqlCompletionApplyDialect | undefined {
-  return databaseType && ORACLE_LIKE_IDENTIFIER_DATABASES.has(databaseType) ? "oracle" : fallback;
+  if (!databaseType) return fallback;
+  if (MYSQL_LIKE_IDENTIFIER_DATABASES.has(databaseType)) return "mysql";
+  if (POSTGRES_LIKE_IDENTIFIER_DATABASES.has(databaseType)) return "postgres";
+  if (UPPER_FOLDING_IDENTIFIER_DATABASES.has(databaseType)) return "oracle";
+  if (databaseType === "sqlserver") return "sqlserver";
+  return fallback;
 }
 
 export interface SqlCompletionReferencedTable {
@@ -3108,7 +3116,7 @@ function unquoteIdentifier(value: string): string {
 
 export function quoteSqlIdentifier(identifier: string, dialect?: SqlCompletionApplyDialect): string {
   if (dialect === "oracle") {
-    if (/^[A-Za-z][A-Za-z0-9_$#]*$/.test(identifier) && !POSTGRES_IDENTIFIER_KEYWORDS.has(identifier.toLowerCase())) return identifier;
+    if (/^[A-Z][A-Z0-9_$#]*$/.test(identifier) && !POSTGRES_IDENTIFIER_KEYWORDS.has(identifier.toLowerCase())) return identifier;
     return `"${identifier.replaceAll('"', '""')}"`;
   }
   if (dialect !== "postgres" || !requiresPostgresIdentifierQuote(identifier, POSTGRES_IDENTIFIER_KEYWORDS)) return identifier;
@@ -3134,6 +3142,18 @@ function quoteCompletionApplyName(applyName: string, dialect?: SqlCompletionAppl
   const parts = splitQualifiedNameRawParts(applyName);
   if (parts.length === 0) return applyName;
   return parts.map((part) => (isQuotedIdentifier(part) ? part : quoteCompletionApplyIdentifier(part, dialect))).join(".");
+}
+
+function quoteCompletionRoutineIdentifier(identifier: string, dialect?: SqlCompletionApplyDialect): string {
+  if (dialect === "oracle" && /^[A-Za-z][A-Za-z0-9_$#]*$/.test(identifier) && !POSTGRES_IDENTIFIER_KEYWORDS.has(identifier.toLowerCase())) return identifier;
+  return quoteCompletionApplyIdentifier(identifier, dialect);
+}
+
+function quoteCompletionRoutineName(applyName: string, dialect?: SqlCompletionApplyDialect): string {
+  if (dialect !== "oracle") return quoteCompletionApplyName(applyName, dialect);
+  const parts = splitQualifiedNameRawParts(applyName);
+  if (parts.length === 0) return applyName;
+  return parts.map((part) => (isQuotedIdentifier(part) ? part : quoteCompletionRoutineIdentifier(part, dialect))).join(".");
 }
 
 function quoteSelectStarColumnIdentifier(identifier: string, dialect?: SqlCompletionApplyDialect, databaseType?: DatabaseType): string {
@@ -3320,11 +3340,11 @@ function buildObjectItems(context: SqlCompletionContext, objects: SqlCompletionO
     .map((object) => {
       const qualifiedByContext = objectIsQualifiedByContext(object, context);
       const objectInCurrentSchema = !!currentSchema && !!object.schema && normalizeIdentifierPart(object.schema) === normalizeIdentifierPart(currentSchema);
-      const suppliedApplyName = object.applyName ? quoteCompletionApplyName(object.applyName, dialect) : undefined;
+      const suppliedApplyName = object.applyName ? quoteCompletionRoutineName(object.applyName, dialect) : undefined;
       const applyName =
         qualifiedByContext || (context.qualifier && object.schema?.toLowerCase() === context.qualifier.toLowerCase())
-          ? quoteCompletionApplyIdentifier(object.name, dialect)
-          : (suppliedApplyName ?? (object.schema && !objectInCurrentSchema ? `${quoteCompletionApplyIdentifier(object.schema, dialect)}.${quoteCompletionApplyIdentifier(object.name, dialect)}` : quoteCompletionApplyIdentifier(object.name, dialect)));
+          ? quoteCompletionRoutineIdentifier(object.name, dialect)
+          : (suppliedApplyName ?? (object.schema && !objectInCurrentSchema ? `${quoteCompletionRoutineIdentifier(object.schema, dialect)}.${quoteCompletionRoutineIdentifier(object.name, dialect)}` : quoteCompletionRoutineIdentifier(object.name, dialect)));
       const locationDetail = object.type === "trigger" && object.parentName ? `trigger on ${object.parentName}` : object.parentName ? `${object.type} in ${object.parentName}` : object.schema ? `${object.type} in ${object.schema}` : object.type;
       const signature = object.signature?.trim();
       const detail = [locationDetail, signature ? `(${signature})` : undefined, object.dataType ? `[${object.dataType}]` : undefined].filter(Boolean).join("  ");

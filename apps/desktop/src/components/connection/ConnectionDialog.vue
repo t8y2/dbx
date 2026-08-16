@@ -33,7 +33,7 @@ import { useToast } from "@/composables/useToast";
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
 import * as api from "@/lib/backend/api";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
-import { applyParsedConnectionUrl, normalizeMongoConnectionString, parseConnectionUrl } from "@/lib/connection/connectionUrl";
+import { applyMeilisearchBasePathToExternalConfig, applyParsedConnectionUrl, normalizeMongoConnectionString, parseConnectionUrl } from "@/lib/connection/connectionUrl";
 import { MAX_CONNECT_TIMEOUT_SECS, MAX_QUERY_TIMEOUT_SECS } from "@/lib/connection/timeoutLimits";
 import { buildOracleTnsConnectionString, normalizeOracleTnsAdminPath, parseOracleTnsConnectionString } from "@/lib/connection/oracleTnsConnection";
 import { connectionDeepLinkServiceHydrationValue, parseConnectionDeepLink, parseServiceConnectionUrl, type ConnectionDeepLinkDraft } from "@/lib/connection/connectionDeepLink";
@@ -602,7 +602,7 @@ function externalConfigRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value) ? { ...(value as Record<string, unknown>) } : {};
 }
 
-function meilisearchConnectionUrl(config: Pick<ConnectionConfig, "host" | "port" | "ssl" | "external_config">): string {
+function meilisearchConnectionUrl(config: Pick<ConnectionConfig, "host" | "port" | "ssl" | "url_params" | "external_config">): string {
   const host = config.host.trim();
   if (!host) return "";
 
@@ -610,12 +610,14 @@ function meilisearchConnectionUrl(config: Pick<ConnectionConfig, "host" | "port"
   const endpointHost = host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;
   const externalConfig = externalConfigRecord(config.external_config);
   const storedBasePath = externalConfig.basePath ?? externalConfig.base_path;
-  const basePath = typeof storedBasePath === "string" && storedBasePath.startsWith("/") ? storedBasePath : "";
+  const basePathSegments = typeof storedBasePath === "string" ? storedBasePath.trim().split("/").filter(Boolean) : [];
+  const basePath = basePathSegments.length ? `/${basePathSegments.join("/")}` : "";
+  const urlParams = config.url_params?.trim().replace(/^\?/, "") || "";
 
-  return `${scheme}://${endpointHost}:${config.port}${basePath}`;
+  return `${scheme}://${endpointHost}:${config.port}${basePath}${urlParams ? `?${urlParams}` : ""}`;
 }
 
-function syncMeilisearchHostInput(config: Pick<ConnectionConfig, "host" | "port" | "ssl" | "external_config">) {
+function syncMeilisearchHostInput(config: Pick<ConnectionConfig, "host" | "port" | "ssl" | "url_params" | "external_config">) {
   meilisearchHostInput.value = meilisearchConnectionUrl(config);
   appliedMeilisearchHostInput.value = meilisearchHostInput.value;
 }
@@ -2337,7 +2339,8 @@ function applyProfile(val: string, preserveConnectionFields = false) {
   form.value.db_type = profile.type;
   form.value.driver_profile = val;
   form.value.driver_label = isCustomCompatibleProfile() ? customDriverName.value.trim() || profile.label : profile.label;
-  if (profile.type !== "sqlserver") {
+  const preserveMeilisearchConfig = preserveConnectionFields && previousDatabaseType === "meilisearch" && profile.type === "meilisearch";
+  if (profile.type !== "sqlserver" && !preserveMeilisearchConfig) {
     form.value.external_config = undefined;
   }
   if (profile.type !== "elasticsearch" || previousDatabaseType !== "elasticsearch") {
@@ -4878,6 +4881,7 @@ function applyConnectionDraftToConfig(config: Omit<ConnectionConfig, "id">, draf
     database: draft.database ?? config.database,
     url_params: draft.urlParams ?? config.url_params,
     ssl: draft.ssl ?? config.ssl,
+    external_config: draft.dbType === "meilisearch" && draft.basePath !== undefined ? applyMeilisearchBasePathToExternalConfig(config.external_config, draft.basePath) : config.external_config,
     connection_string: draft.connectionString ?? config.connection_string,
     oracle_connection_type: draft.oracleConnectionType ?? config.oracle_connection_type,
     one_time: draft.oneTime || undefined,

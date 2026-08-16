@@ -716,6 +716,17 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
 }
 
+export function applyMeilisearchBasePathToExternalConfig(existing: unknown, basePath: string | undefined): unknown {
+  const next = isRecord(existing) ? { ...existing } : {};
+  delete next.base_path;
+  if (basePath) {
+    next.basePath = basePath;
+  } else {
+    delete next.basePath;
+  }
+  return Object.keys(next).length > 0 ? next : undefined;
+}
+
 function parsedExternalConfig(existing: unknown, parsed: ParsedConnectionUrl): unknown {
   if (parsed.dbType === "victoriametrics") {
     const next = isRecord(existing) ? { ...existing } : {};
@@ -723,14 +734,7 @@ function parsedExternalConfig(existing: unknown, parsed: ParsedConnectionUrl): u
     return next;
   }
   if (parsed.dbType === "meilisearch") {
-    const next = isRecord(existing) ? { ...existing } : {};
-    delete next.base_path;
-    if (parsed.basePath) {
-      next.basePath = parsed.basePath;
-    } else {
-      delete next.basePath;
-    }
-    return Object.keys(next).length > 0 ? next : undefined;
+    return applyMeilisearchBasePathToExternalConfig(existing, parsed.basePath);
   }
   if (parsed.dbType !== "sqlserver") return existing;
 

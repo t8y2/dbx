@@ -1,4 +1,4 @@
-use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
+use percent_encoding::{percent_decode_str, utf8_percent_encode, AsciiSet, CONTROLS};
 use reqwest::{Client as HttpClient, Method, RequestBuilder, StatusCode};
 use serde::Deserialize;
 use serde_json::{Map, Value};
@@ -769,6 +769,18 @@ fn parse_rest_request_line(line: &str) -> Result<(Method, String), String> {
     if !path.starts_with('/') {
         return Err("Meilisearch REST path must start with '/'".to_string());
     }
+    if path.contains('#') {
+        return Err("Meilisearch REST path must not contain a fragment".to_string());
+    }
+    let raw_path = path.split_once('?').map_or(path, |(path, _)| path);
+    for segment in raw_path.split('/') {
+        let decoded = percent_decode_str(segment)
+            .decode_utf8()
+            .map_err(|_| "Meilisearch REST path contains invalid UTF-8 escaping".to_string())?;
+        if matches!(decoded.as_ref(), "." | "..") || decoded.contains(['/', '\\']) {
+            return Err("Meilisearch REST path cannot contain traversal segments".to_string());
+        }
+    }
     Ok((method, path.to_string()))
 }
 
@@ -890,6 +902,13 @@ mod tests {
     fn parses_rest_request_lines() {
         assert_eq!(parse_rest_request_line("GET /version").unwrap(), (Method::GET, "/version".to_string()));
         assert_eq!(parse_rest_request_line("/health").unwrap(), (Method::GET, "/health".to_string()));
+        assert_eq!(
+            parse_rest_request_line("GET /indexes/movies?limit=1").unwrap(),
+            (Method::GET, "/indexes/movies?limit=1".to_string())
+        );
+        assert!(parse_rest_request_line("GET /../version").unwrap_err().contains("traversal"));
+        assert!(parse_rest_request_line("GET /gateway/%2e%2e/version").unwrap_err().contains("traversal"));
+        assert!(parse_rest_request_line("GET /gateway/%2e%2e%2fversion").unwrap_err().contains("traversal"));
         assert!(parse_rest_request_line("CONNECT /health")
             .unwrap_err()
             .contains("Unsupported Meilisearch HTTP method"));

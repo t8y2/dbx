@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { applyParsedConnectionUrl, connectionProfileForScheme, parseConnectionUrl } from "@/lib/connection/connectionUrl";
+import { parseConnectionDeepLink } from "@/lib/connection/connectionDeepLink";
 import type { ConnectionConfig } from "@/types/database";
 
 describe("Meilisearch connection URLs", () => {
@@ -87,6 +88,18 @@ describe("Meilisearch connection URLs", () => {
 
     expect(parsed.basePath).toBe("");
     expect(config.external_config).toEqual({ custom: true });
+  });
+
+  it("preserves the proxy path when a Meilisearch URL arrives through a deep link", () => {
+    const link = new URL("dbx://connection/new");
+    link.searchParams.set("type", "meilisearch");
+    link.searchParams.set("url", "https://search.example.com/gateway/meili?insecure=true");
+
+    expect(parseConnectionDeepLink(link.toString())).toMatchObject({
+      dbType: "meilisearch",
+      basePath: "/gateway/meili",
+      urlParams: "insecure=true",
+    });
   });
 
   it("exposes the Meilisearch scheme profile", () => {

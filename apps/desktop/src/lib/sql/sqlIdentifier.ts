@@ -1,4 +1,5 @@
 const SIMPLE_LOWER_IDENTIFIER = /^[a-z_][a-z0-9_$]*$/;
+const SIMPLE_MYSQL_IDENTIFIER = /^[A-Za-z_$\u0080-\uFFFF][A-Za-z0-9_$\u0080-\uFFFF]*$/u;
 
 // PostgreSQL pg_get_keywords() categories R and T. GaussDB's PostgreSQL-
 // compatible modes use the same identifier constraints for bare names.
@@ -191,14 +192,16 @@ export function requiresPostgresIdentifierQuote(identifier: string, additionalKe
 }
 
 export function requiresMysqlIdentifierQuote(identifier: string, additionalKeywords?: ReadonlySet<string>): boolean {
-  return requiresPostgresIdentifierQuote(identifier, additionalKeywords) || MYSQL_ONLY_RESERVED_IDENTIFIER_KEYWORDS.has(identifier);
+  if (!SIMPLE_MYSQL_IDENTIFIER.test(identifier)) return true;
+  const normalized = identifier.toLowerCase();
+  return POSTGRES_RESERVED_IDENTIFIER_KEYWORDS.has(normalized) || additionalKeywords?.has(normalized) === true || MYSQL_ONLY_RESERVED_IDENTIFIER_KEYWORDS.has(normalized);
 }
 
 export function quoteGaussDbJdbcIdentifier(identifier: string, identifierQuote: string): string {
   if (isExplicitlyQuotedSqlIdentifier(identifier)) return identifier;
   const quote = identifierQuote.trim();
   if (!quote) return identifier;
-  const requiresQuote = quote === "`" ? requiresMysqlIdentifierQuote(identifier) : requiresPostgresIdentifierQuote(identifier);
+  const requiresQuote = quote === "`" ? requiresPostgresIdentifierQuote(identifier) || MYSQL_ONLY_RESERVED_IDENTIFIER_KEYWORDS.has(identifier.toLowerCase()) : requiresPostgresIdentifierQuote(identifier);
   if (!requiresQuote) return identifier;
   return `${quote}${identifier.replaceAll(quote, quote + quote)}${quote}`;
 }

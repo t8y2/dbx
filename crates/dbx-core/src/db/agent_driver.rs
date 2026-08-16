@@ -17,6 +17,177 @@ use crate::models::connection::DatabaseConnectionInfo;
 
 type PendingAgentResponse = tokio::sync::oneshot::Sender<Result<Value, String>>;
 
+/// An unsolicited JSON-RPC notification emitted by an Agent process.
+///
+/// Most database Agents are request/response only. Streaming integrations such
+/// as NATS need a separate reader that can route notifications while normal
+/// RPC calls continue to resolve by id, so they use this client instead of
+/// trying to treat an event as a response.
+#[derive(Debug, Clone)]
+pub struct AgentNotification {
+    pub method: String,
+    pub params: Value,
+}
+
+/// Multiplexed Agent client for protocol-v2 style notifications.
+///
+/// The client deliberately does not add an `agentSessionId`: consumers own
+/// their domain-specific session model and may keep several subscriptions in
+/// one Agent process. Responses are matched by JSON-RPC id; notifications are
+/// published through a bounded broadcast channel.
+pub struct AgentEventClient {
+    child: Arc<Mutex<Child>>,
+    stdin: Arc<Mutex<BufWriter<ChildStdin>>>,
+    pending: Arc<Mutex<HashMap<u64, PendingAgentResponse>>>,
+    stderr_tail: Arc<Mutex<StderrTail>>,
+    next_id: AtomicU64,
+    failed: Arc<AtomicBool>,
+    events: tokio::sync::broadcast::Sender<AgentNotification>,
+}
+
+impl AgentEventClient {
+    pub async fn spawn(launch: AgentLaunchSpec) -> Result<Arc<Self>, String> {
+        let mut child = spawn_agent_process(&launch)?;
+        let child_stdin = child.stdin.take().ok_or("Failed to capture agent stdin")?;
+        let child_stdout = child.stdout.take().ok_or("Failed to capture agent stdout")?;
+        let child_stderr = child.stderr.take().ok_or("Failed to capture agent stderr")?;
+        let stderr_tail = Arc::new(Mutex::new(StderrTail::default()));
+        start_stderr_collector(child_stderr, stderr_tail.clone());
+
+        let mut stdout = BufReader::new(child_stdout);
+        let stdout = tokio::time::timeout(
+            Duration::from_secs(STARTUP_TIMEOUT_SECS),
+            tokio::task::spawn_blocking(move || loop {
+                let line = read_agent_line(&mut stdout, "startup line")?;
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                match serde_json::from_str::<Value>(trimmed) {
+                    Ok(value) if value.get("ready") == Some(&Value::Bool(true)) => return Ok(stdout),
+                    Ok(_) => return Err(format!("Agent did not send ready signal, got: {line}")),
+                    Err(_) => log::warn!("[agent:stdout] ignoring non-JSON line during startup: {trimmed}"),
+                }
+            }),
+        )
+        .await
+        .map_err(|_| format!("Agent startup timed out ({STARTUP_TIMEOUT_SECS}s)"))?
+        .map_err(|error| format!("Agent startup task failed: {error}"))??;
+
+        let (events, _) = tokio::sync::broadcast::channel(256);
+        let client = Arc::new(Self {
+            child: Arc::new(Mutex::new(child)),
+            stdin: Arc::new(Mutex::new(BufWriter::new(child_stdin))),
+            pending: Arc::new(Mutex::new(HashMap::new())),
+            stderr_tail,
+            next_id: AtomicU64::new(0),
+            failed: Arc::new(AtomicBool::new(false)),
+            events,
+        });
+        client.start_response_reader(stdout);
+        Ok(client)
+    }
+
+    fn start_response_reader(self: &Arc<Self>, mut stdout: BufReader<ChildStdout>) {
+        let pending = self.pending.clone();
+        let failed = self.failed.clone();
+        let events = self.events.clone();
+        std::thread::spawn(move || loop {
+            let line = match read_agent_line(&mut stdout, "response") {
+                Ok(line) => line,
+                Err(error) => {
+                    failed.store(true, Ordering::Release);
+                    fail_pending_requests(&pending, error);
+                    return;
+                }
+            };
+            let value: Value = match serde_json::from_str(line.trim()) {
+                Ok(value) => value,
+                Err(error) => {
+                    failed.store(true, Ordering::Release);
+                    fail_pending_requests(&pending, format!("Invalid JSON response from agent: {error}"));
+                    return;
+                }
+            };
+            if let Some(id) = value.get("id").and_then(Value::as_u64) {
+                if let Some(sender) = pending.lock().expect("agent pending response lock poisoned").remove(&id) {
+                    let _ = sender.send(Ok(value));
+                }
+                continue;
+            }
+            if let Some(method) = value.get("method").and_then(Value::as_str) {
+                let params = value.get("params").cloned().unwrap_or(Value::Null);
+                let _ = events.send(AgentNotification { method: method.to_string(), params });
+            }
+        });
+    }
+
+    pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<AgentNotification> {
+        self.events.subscribe()
+    }
+
+    pub fn is_failed(&self) -> bool {
+        self.failed.load(Ordering::Acquire)
+    }
+
+    pub async fn call<T: DeserializeOwned>(
+        &self,
+        method: &str,
+        params: Value,
+        timeout: Option<Duration>,
+    ) -> Result<T, String> {
+        if self.is_failed() {
+            return Err("Agent runtime is unavailable".to_string());
+        }
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed) + 1;
+        let request = serde_json::json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params });
+        let line = serde_json::to_string(&request)
+            .map_err(|error| format!("Failed to serialize JSON-RPC request: {error}"))?;
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        self.pending.lock().map_err(|_| "Agent pending response lock poisoned".to_string())?.insert(id, sender);
+        let write_result =
+            self.stdin.lock().map_err(|_| "Agent stdin lock poisoned".to_string()).and_then(|mut writer| {
+                writer
+                    .write_all(line.as_bytes())
+                    .and_then(|_| writer.write_all(b"\n"))
+                    .and_then(|_| writer.flush())
+                    .map_err(|error| format!("Failed to write agent request: {error}"))
+            });
+        if let Err(error) = write_result {
+            self.pending.lock().expect("agent pending response lock poisoned").remove(&id);
+            return Err(error);
+        }
+        let receive = async { receiver.await.map_err(|_| "Agent response channel closed".to_string())? };
+        let response = match timeout {
+            Some(duration) => match tokio::time::timeout(duration, receive).await {
+                Ok(response) => response,
+                Err(_) => {
+                    self.pending.lock().expect("agent pending response lock poisoned").remove(&id);
+                    return Err(format!("Agent RPC timed out while calling {method}"));
+                }
+            },
+            None => receive.await,
+        }?;
+        if let Some(error) = response.get("error") {
+            return Err(format_agent_rpc_error(error));
+        }
+        let result = response.get("result").ok_or("Agent response missing both result and error")?;
+        serde_json::from_value(result.clone()).map_err(|error| format!("Failed to deserialize agent result: {error}"))
+    }
+
+    pub fn kill(&self) {
+        self.failed.store(true, Ordering::Release);
+        if let Ok(mut child) = self.child.lock() {
+            let _ = child.kill();
+        }
+        fail_pending_requests(&self.pending, "Agent runtime terminated".to_string());
+    }
+
+    pub fn stderr_tail(&self) -> String {
+        stderr_tail_snapshot(&self.stderr_tail).snapshot()
+    }
+}
+
 #[derive(Clone)]
 struct CachedAgentQuery {
     key: String,

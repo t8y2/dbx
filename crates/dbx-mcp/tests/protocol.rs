@@ -165,13 +165,22 @@ async fn initializes_lists_tools_and_calls_a_tool() {
 
     let tools = client.peer().list_tools(None).await.expect("list tools");
     let names = tools.tools.iter().map(|tool| tool.name.as_ref()).collect::<Vec<_>>();
-    assert_eq!(names.len(), 13);
+    assert_eq!(names.len(), 22);
     assert!(names.contains(&"dbx_list_connections"));
     assert!(names.contains(&"dbx_duplicate_connection"));
     assert!(names.contains(&"dbx_execute_redis_command"));
     assert!(names.contains(&"dbx_execute_and_show"));
     assert!(names.contains(&"dbx_open_session"));
     assert!(names.contains(&"dbx_close_session"));
+    assert!(names.contains(&"dbx_nats_test_connection"));
+    assert!(names.contains(&"dbx_nats_capture"));
+    assert!(names.contains(&"dbx_nats_publish"));
+    assert!(names.contains(&"dbx_nats_jetstream_info"));
+    assert!(names.contains(&"dbx_nats_list_streams"));
+    assert!(names.contains(&"dbx_nats_get_stream"));
+    assert!(names.contains(&"dbx_nats_list_consumers"));
+    assert!(names.contains(&"dbx_nats_get_consumer"));
+    assert!(names.contains(&"dbx_nats_fetch_history"));
 
     let result = client.peer().call_tool(CallToolRequestParams::new("dbx_list_connections")).await.expect("call tool");
     let response = result.content[0].as_text().expect("text response");

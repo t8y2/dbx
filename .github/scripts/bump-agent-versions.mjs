@@ -60,9 +60,10 @@ const nativeDriverDirectories = {
   rabbitmq: "rabbitmq",
   rocketmq: "rocketmq",
   zookeeper: "zookeeper",
+  nats: "nats",
   tdengine: "tdengine",
 };
-const nativeDriverModules = new Set(["cassandra", "duckdb", "hive", "oracle", "xugu", "kingbase", "iotdb", "neo4j", "vastbase", "rabbitmq", "rocketmq", "zookeeper", "tdengine"]);
+const nativeDriverModules = new Set(["cassandra", "duckdb", "hive", "oracle", "xugu", "kingbase", "iotdb", "neo4j", "vastbase", "rabbitmq", "rocketmq", "zookeeper", "nats", "tdengine"]);
 const nativeDriverSharedPaths = {
   hive: [
     "agents/go-common/go-gssapi",

@@ -2347,41 +2347,58 @@ impl AppState {
             }
             #[cfg(feature = "mq-admin")]
             DatabaseType::MessageQueue => {
-                // MQ admin connections don't hold a data query pool. We just test
-                // connectivity via the mq_registry and insert a marker so this
-                // connection_id is recognized as valid.
-                let mqc = self.mq_admin_config_for_connection(connection_id, &config).await?;
-                let agent_launch = crate::mq::service::resolve_mq_agent_launch_spec(&mqc, self);
-                // Temporary "__test_*" probes must not retain agents in the registry.
-                // reconnect fast-path caching only applies to durable connection ids;
-                // drain_connection_pools no longer drops MQ adapters (reconnect reuse).
-                if connection_id.starts_with(crate::runtime_config::TEST_PROBE_ID_PREFIX) {
-                    let adapter = self.mq_registry.build_transient_config(mqc, agent_launch).await?;
-                    adapter.test_connection().await?;
-                    if let Err(err) = self.ensure_current_connection_attempt(connection_id, connection_attempt).await {
-                        self.reset_connection_transport_for_config(connection_id, &db_config).await;
-                        return Err(err);
+                if crate::nats::NatsConnectionConfig::is_nats_connection(&config) {
+                    // NATS is a native Agent protocol rather than one of the
+                    // HTTP-admin MQ systems. Keep the configured URL as the
+                    // TLS identity while dialing the resolved DBX tunnel.
+                    let mut nats = crate::nats::NatsConnectionConfig::from_connection(&config)?;
+                    let (configured_host, configured_port) = nats.configured_endpoint()?;
+                    if host != configured_host || port != configured_port {
+                        nats = nats.with_connect_override(&host, port)?;
                     }
-                    // adapter drops here and kills agent-backed processes (RocketMQ/Kafka/RabbitMQ).
+                    crate::nats::NatsService::from_agent_manager(&self.agent_manager)?.test_connection(&nats).await?;
                     PoolKind::MessageQueue
                 } else {
-                    let build = match self.mq_registry.get_or_build_config(connection_id, mqc, agent_launch).await {
-                        Ok(build) => build,
-                        Err(err) => {
+                    // MQ admin connections don't hold a data query pool. We just test
+                    // connectivity via the mq_registry and insert a marker so this
+                    // connection_id is recognized as valid.
+                    let mqc = self.mq_admin_config_for_connection(connection_id, &config).await?;
+                    let agent_launch = crate::mq::service::resolve_mq_agent_launch_spec(&mqc, self);
+                    // Temporary "__test_*" probes must not retain agents in the registry.
+                    // reconnect fast-path caching only applies to durable connection ids;
+                    // drain_connection_pools no longer drops MQ adapters (reconnect reuse).
+                    if connection_id.starts_with("__test_") {
+                        let adapter = self.mq_registry.build_transient_config(mqc, agent_launch).await?;
+                        adapter.test_connection().await?;
+                        if let Err(err) =
+                            self.ensure_current_connection_attempt(connection_id, connection_attempt).await
+                        {
+                            self.reset_connection_transport_for_config(connection_id, &db_config).await;
+                            return Err(err);
+                        }
+                        // adapter drops here and kills agent-backed processes (RocketMQ/Kafka/RabbitMQ).
+                        PoolKind::MessageQueue
+                    } else {
+                        let build = match self.mq_registry.get_or_build_config(connection_id, mqc, agent_launch).await {
+                            Ok(build) => build,
+                            Err(err) => {
+                                self.mq_registry.drop_connection(connection_id).await;
+                                return Err(err);
+                            }
+                        };
+                        if let Err(err) = crate::mq::validate_mq_adapter_after_build(&build).await {
                             self.mq_registry.drop_connection(connection_id).await;
                             return Err(err);
                         }
-                    };
-                    if let Err(err) = crate::mq::validate_mq_adapter_after_build(&build).await {
-                        self.mq_registry.drop_connection(connection_id).await;
-                        return Err(err);
+                        if let Err(err) =
+                            self.ensure_current_connection_attempt(connection_id, connection_attempt).await
+                        {
+                            self.mq_registry.drop_connection(connection_id).await;
+                            self.reset_connection_transport_for_config(connection_id, &db_config).await;
+                            return Err(err);
+                        }
+                        PoolKind::MessageQueue
                     }
-                    if let Err(err) = self.ensure_current_connection_attempt(connection_id, connection_attempt).await {
-                        self.mq_registry.drop_connection(connection_id).await;
-                        self.reset_connection_transport_for_config(connection_id, &db_config).await;
-                        return Err(err);
-                    }
-                    PoolKind::MessageQueue
                 }
             }
             #[cfg(not(feature = "mq-admin"))]
@@ -2552,6 +2569,10 @@ impl AppState {
 
         #[cfg(feature = "mq-admin")]
         if config.db_type == DatabaseType::MessageQueue
+            // NATS has its own native Agent path and is not represented by
+            // MqAdminConfig. Do not let the RocketMQ transport special case
+            // parse a NATS profile through the legacy MQ enum.
+            && !crate::nats::NatsConnectionConfig::is_nats_connection(config)
             && crate::mq::config::MqAdminConfig::from_connection(config)?.system_kind
                 == crate::mq::types::MqSystemKind::RocketMq
         {
@@ -4593,6 +4614,9 @@ fn connection_remote_endpoint(config: &ConnectionConfig) -> (String, u16) {
             .and_then(parse_jdbc_host_port)
             .unwrap_or_else(|| (config.host.clone(), config.port))
     } else if config.db_type == DatabaseType::MessageQueue {
+        if let Ok(nats) = crate::nats::NatsConnectionConfig::from_connection(config) {
+            return nats.configured_endpoint().unwrap_or_else(|_| (config.host.clone(), config.port));
+        }
         parse_mq_admin_host_port(config).unwrap_or_else(|| (config.host.clone(), config.port))
     } else if config.db_type == DatabaseType::Mqtt {
         parse_mqtt_broker_host_port(config).unwrap_or_else(|| (config.host.clone(), config.port))
@@ -8168,6 +8192,25 @@ for line in sys.stdin:
         }));
 
         assert_eq!(connection_remote_endpoint(&config), ("broker.internal".to_string(), 8443));
+    }
+
+    #[tokio::test]
+    async fn nats_connection_host_port_does_not_parse_legacy_mq_admin_config() {
+        let (state, dir) = test_app_state().await;
+        let mut config = mysql_config(None);
+        config.id = "nats".to_string();
+        config.db_type = DatabaseType::MessageQueue;
+        config.host = "127.0.0.1".to_string();
+        config.port = 4222;
+        config.external_config = Some(serde_json::json!({
+            "systemKind": "nats",
+            "serverUrl": "nats://127.0.0.1:4222"
+        }));
+
+        let endpoint = state.connection_host_port(&config.id, &config).await.unwrap();
+
+        assert_eq!(endpoint, ("127.0.0.1".to_string(), 4222));
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

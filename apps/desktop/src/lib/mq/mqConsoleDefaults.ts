@@ -54,17 +54,17 @@ const PULSAR_DEFAULT_CAPABILITIES: MqCapabilities = {
 export function resolveMqSystemKindFromConnection(config: ConnectionConfig | undefined): MqSystemKind | undefined {
   if (!config || config.db_type !== "mq") return undefined;
   const external = config.external_config as Partial<MqAdminConfig> | undefined;
-  if (external?.systemKind === "kafka" || external?.systemKind === "rocketmq" || external?.systemKind === "rabbitmq" || external?.systemKind === "pulsar") {
+  if (external?.systemKind === "kafka" || external?.systemKind === "rocketmq" || external?.systemKind === "rabbitmq" || external?.systemKind === "pulsar" || external?.systemKind === "nats") {
     return external.systemKind;
   }
-  if (config.driver_profile === "kafka" || config.driver_profile === "rocketmq" || config.driver_profile === "rabbitmq" || config.driver_profile === "pulsar") {
+  if (config.driver_profile === "kafka" || config.driver_profile === "rocketmq" || config.driver_profile === "rabbitmq" || config.driver_profile === "pulsar" || config.driver_profile === "nats") {
     return config.driver_profile;
   }
   return "pulsar";
 }
 
 export function isFlatMqSystemKind(kind: MqSystemKind | undefined): boolean {
-  return kind === "kafka" || kind === "rocketmq" || kind === "rabbitmq";
+  return kind === "kafka" || kind === "rocketmq" || kind === "rabbitmq" || kind === "nats";
 }
 
 export function defaultMqCapabilitiesForSystemKind(kind: MqSystemKind | undefined): MqCapabilities {
@@ -103,6 +103,18 @@ export function defaultMqCapabilitiesForSystemKind(kind: MqSystemKind | undefine
       supportsPolicies: true,
       // Cluster overview & node stats come from the management API.
       supportsClusterMonitoring: true,
+    };
+  }
+  if (kind === "nats") {
+    return {
+      ...FLAT_MQ_BASE_CAPABILITIES,
+      supportsPartitionedTopics: false,
+      supportsSubscriptions: true,
+      supportsResetCursor: false,
+      supportsClearBacklog: false,
+      supportsPeekMessages: false,
+      supportsPermissions: false,
+      supportsSendMessage: true,
     };
   }
   return { ...PULSAR_DEFAULT_CAPABILITIES };
@@ -158,7 +170,7 @@ export function resolveRabbitMqDefaultVhost(config: ConnectionConfig | undefined
   return typeof vhost === "string" && vhost.trim() ? vhost.trim() : "/";
 }
 
-export type MqTab = "tenants" | "namespaces" | "topics" | "subscriptions" | "monitoring" | "clients" | "producers" | "policies" | "permissions" | "messages" | "raw" | "broker" | "dlq" | "trace";
+export type MqTab = "tenants" | "namespaces" | "topics" | "subscriptions" | "monitoring" | "clients" | "producers" | "policies" | "permissions" | "messages" | "publish" | "raw" | "broker" | "dlq" | "trace" | "streams" | "streammessages" | "consumers";
 
 export function resolveAvailableMqTabs(options: { systemKind?: MqSystemKind; capabilities: MqCapabilities }): MqTab[] {
   const { systemKind, capabilities } = options;
@@ -167,6 +179,13 @@ export function resolveAvailableMqTabs(options: { systemKind?: MqSystemKind; cap
     if (capabilities.supportsMessageQuery || capabilities.supportsSendMessage) tabs.push("messages");
     if (capabilities.supportsMessageTrace) tabs.push("trace");
     if (capabilities.supportsPermissions) tabs.push("permissions");
+    return tabs;
+  }
+  // NATS: Publish + Subscribe for Core; one JetStream workspace (list → detail
+  // with messages/consumers subviews) when enabled — matches NUI / nats-dashboard.
+  if (systemKind === "nats") {
+    const tabs: MqTab[] = ["publish", "messages"];
+    if (capabilities.supportsJetStream) tabs.push("streams");
     return tabs;
   }
 
@@ -193,6 +212,10 @@ export function normalizeMqTabForSystemKind(tab: MqTab, systemKind?: MqSystemKin
   if (systemKind === "rocketmq" && tab === "dlq") {
     return "messages";
   }
+  // Legacy flat JetStream tabs collapse into the single streams workspace.
+  if (systemKind === "nats" && (tab === "streammessages" || tab === "consumers")) {
+    return "streams";
+  }
   return tab;
 }
 
@@ -200,6 +223,7 @@ export function resolveInitialMqTab(options: { initialTab?: MqTab; initialTenant
   if (options.initialTab) {
     return normalizeMqTabForSystemKind(options.initialTab, options.systemKind);
   }
+  if (options.systemKind === "nats") return "publish";
   if (isFlatMqSystemKind(options.systemKind)) return "topics";
   if (options.initialTenant) return "namespaces";
   return "tenants";

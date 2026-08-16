@@ -1,6 +1,6 @@
 // Message queue admin types, matching dbx-core/src/mq/types.rs
 
-export type MqSystemKind = "pulsar" | "kafka" | "rocketmq" | "rabbitmq";
+export type MqSystemKind = "pulsar" | "kafka" | "rocketmq" | "rabbitmq" | "nats";
 
 export interface MqCapabilities {
   supportsTenants: boolean;
@@ -32,6 +32,8 @@ export interface MqCapabilities {
   supportsPolicies?: boolean;
   /** RabbitMQ: cluster overview & node monitoring via the management API. */
   supportsClusterMonitoring?: boolean;
+  /** NATS: JetStream is enabled on the server (gates Streams/Consumers tabs). */
+  supportsJetStream?: boolean;
 }
 
 export interface MqClusterInfo {
@@ -61,6 +63,11 @@ export interface MqAdminConfig {
   systemKind: MqSystemKind;
   adminUrl: string;
   auth?: MqAuth;
+  /** NATS endpoint and credentials are intentionally separate from its URL. */
+  serverUrl?: string;
+  username?: string;
+  password?: string;
+  token?: string;
   tlsSkipVerify?: boolean;
   pinnedVersion?: string;
   tokenSigning?: MqTokenSigningConfig;

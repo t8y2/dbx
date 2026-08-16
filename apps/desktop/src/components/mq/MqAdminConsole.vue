@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import { formatError } from "@/lib/backend/errorUtils";
-import { ref, computed, onMounted, watch } from "vue";
+import { ref, computed, defineAsyncComponent, onMounted, watch } from "vue";
 import { useI18n } from "vue-i18n";
-import type { MqAdminConfig, MqClusterInfo, MqSystemKind, NamespaceRef, TopicInfo } from "@/types/mq";
-import { mqCreateNamespace, mqListNamespaces, mqTestConnection } from "@/lib/backend/api";
+import type { MqAdminConfig, MqCapabilities, MqClusterInfo, MqSystemKind, NamespaceRef, TopicInfo } from "@/types/mq";
+import { mqCreateNamespace, mqListNamespaces, mqTestConnection, natsTestConnection } from "@/lib/backend/api";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useMqMutationGuard } from "@/composables/useMqMutationGuard";
 import { mqClusterOptionsFromExtra } from "@/lib/mq/mqTenantForm";
@@ -42,6 +42,11 @@ import RabbitMqClientsPanel from "./rabbitmq/RabbitMqClientsPanel.vue";
 import RabbitMqPermissionsPanel from "./rabbitmq/RabbitMqPermissionsPanel.vue";
 import RabbitMqPoliciesPanel from "./rabbitmq/RabbitMqPoliciesPanel.vue";
 import RabbitMqMonitoringPanel from "./rabbitmq/RabbitMqMonitoringPanel.vue";
+// Lazily loaded so NATS panel modules/styles are only fetched when a NATS
+// connection actually renders them — never on Kafka/Pulsar/etc. consoles.
+const NatsPublishPanel = defineAsyncComponent(() => import("./nats/NatsPublishPanel.vue"));
+const NatsMessagesPanel = defineAsyncComponent(() => import("./nats/NatsMessagesPanel.vue"));
+const NatsJetStreamPanel = defineAsyncComponent(() => import("./nats/NatsJetStreamPanel.vue"));
 
 interface Props {
   connectionId: string;
@@ -106,6 +111,7 @@ const isFlatMqCluster = computed(() => isFlatMqSystemKind(mqSystemKind.value));
 const isRabbitMqCluster = computed(() => mqSystemKind.value === "rabbitmq");
 const isRocketMqCluster = computed(() => mqSystemKind.value === "rocketmq");
 const isKafkaCluster = computed(() => mqSystemKind.value === "kafka");
+const isNatsCluster = computed(() => mqSystemKind.value === "nats");
 const canBrowseKafkaMessages = computed(() => isKafkaCluster.value && canPeekMessages.value);
 const rocketmqClusterLabel = computed(() => {
   if (!isRocketMqCluster.value) return undefined;
@@ -169,6 +175,9 @@ function tabLabelKey(tab: MqTab): string {
     if (tab === "subscriptions") return "mqAdmin.tabConsumers";
     if (tab === "permissions") return "mqAdmin.tabAcl";
   }
+  if (isNatsCluster.value && tab === "messages") return "mqAdmin.tabSubscribe";
+  if (isNatsCluster.value && tab === "publish") return "mqAdmin.tabPublish";
+  if (isNatsCluster.value && tab === "streams") return "mqAdmin.tabJetStream";
   const defaults: Record<MqTab, string> = {
     tenants: "mqAdmin.tabTenants",
     namespaces: "mqAdmin.tabNamespaces",
@@ -180,10 +189,14 @@ function tabLabelKey(tab: MqTab): string {
     policies: "mqAdmin.tabPolicies",
     permissions: "mqAdmin.tabPermissions",
     messages: "mqAdmin.tabMessages",
+    publish: "mqAdmin.tabPublish",
     raw: "mqAdmin.tabRawApi",
     broker: "mqAdmin.tabBroker",
     dlq: "mqAdmin.tabDlq",
     trace: "mqAdmin.tabTrace",
+    streams: "mqAdmin.tabStreams",
+    streammessages: "nats.jetstream.storedMessages",
+    consumers: "mqAdmin.tabConsumers",
   };
   return defaults[tab];
 }
@@ -193,6 +206,25 @@ async function loadClusterInfo() {
   loading.value = true;
   error.value = undefined;
   try {
+    if (configuredSystemKind.value === "nats") {
+      // NATS has no mqTestConnection; probe via the dedicated command and
+      // synthesize cluster info so the shared shell (tabs, capabilities) works.
+      const server = await natsTestConnection(props.connectionId);
+      const caps: MqCapabilities = {
+        ...defaultMqCapabilitiesForSystemKind("nats"),
+        supportsJetStream: !!server.jetstreamEnabled,
+      };
+      clusterInfo.value = {
+        systemKind: "nats",
+        serverVersion: server.serverVersion,
+        resolvedProfile: "nats",
+        versionDetection: "probe",
+        capabilities: caps,
+      };
+      capabilities.value = caps;
+      reconcileActiveTab();
+      return;
+    }
     clusterInfo.value = await mqTestConnection(props.connectionId);
     capabilities.value = clusterInfo.value.capabilities;
     reconcileActiveTab();
@@ -431,124 +463,133 @@ onMounted(async () => {
 
     <!-- Main Content Area -->
     <div class="mq-content">
-      <TenantsPanel v-if="activeTab === 'tenants'" :connection-id="connectionId" :supports-tenants="canManageTenants" :read-only="readOnly" :cluster-options="clusterOptions" @tenant-selected="handleTenantSelected" />
-      <NamespacesPanel
-        v-else-if="activeTab === 'namespaces'"
-        :connection-id="connectionId"
-        :tenant="effectiveTenant"
-        :supports-namespaces="canManageNamespaces"
-        :supports-permissions="canManagePermissions"
-        :read-only="readOnly"
-        @namespace-selected="handleNamespaceSelected"
-        @namespace-roles-selected="handleNamespaceRolesSelected"
-      />
-      <TopicsPanel
-        v-else-if="activeTab === 'topics'"
-        :connection-id="connectionId"
-        :tenant="effectiveTenant"
-        :namespace="effectiveNamespace"
-        :read-only="readOnly"
-        :supports-partitioned-topics="canManagePartitionedTopics"
-        :is-flat-mq-cluster="isFlatMqCluster"
-        :mq-system-kind="mqSystemKind"
-        :supports-exchanges="canManageExchanges"
-        @topic-selected="handleTopicSelected"
-        @navigate-tab="handleNavigateTab"
-      />
-      <SubscriptionsPanel
-        v-else-if="activeTab === 'subscriptions' && canManageSubscriptions"
-        :connection-id="connectionId"
-        :topic="selectedTopic"
-        :tenant="effectiveTenant"
-        :namespace="effectiveNamespace"
-        :read-only="readOnly"
-        :mq-system-kind="mqSystemKind"
-        :is-flat-mq-cluster="isFlatMqCluster"
-        :supports-create-subscription="canCreateSubscription"
-        :supports-reset-cursor="canResetCursor"
-        :supports-skip-messages="canSkipMessages"
-        :supports-clear-backlog="canClearBacklog"
-        :supports-peek-messages="canPeekMessages"
-        :supports-expire-messages="canExpireMessages"
-        @subscription-selected="handleSubscriptionSelected"
-      />
-      <RabbitMqMonitoringPanel v-else-if="activeTab === 'monitoring' && isRabbitMqCluster && canClusterMonitor" :connection-id="connectionId" />
-      <MonitoringPanel v-else-if="activeTab === 'monitoring'" :connection-id="connectionId" :topic="selectedTopic" :tenant="effectiveTenant" :namespace="effectiveNamespace" :mq-system-kind="mqSystemKind" @navigate-tab="handleNavigateTab" />
-      <RabbitMqClientsPanel v-else-if="activeTab === 'clients' && isRabbitMqCluster && canManageClientConnections" :connection-id="connectionId" :namespace="effectiveNamespace" :read-only="readOnly" />
-      <ProducerConsumerPanel
-        v-else-if="activeTab === 'clients'"
-        :connection-id="connectionId"
-        :topic="selectedTopic"
-        :tenant="effectiveTenant"
-        :namespace="effectiveNamespace"
-        :read-only="readOnly"
-        :selected-subscription="selectedSubscriptionName"
-        :is-flat-mq-cluster="isFlatMqCluster"
-        :mq-system-kind="mqSystemKind"
-      />
-      <ProducerConsumerPanel
-        v-else-if="activeTab === 'producers'"
-        view-mode="producers"
-        :connection-id="connectionId"
-        :topic="selectedTopic"
-        :tenant="effectiveTenant"
-        :namespace="effectiveNamespace"
-        :read-only="readOnly"
-        :selected-subscription="selectedSubscriptionName"
-        :is-flat-mq-cluster="isFlatMqCluster"
-        :mq-system-kind="mqSystemKind"
-        @topic-selected="handleProducerTopicSelected"
-      />
-      <RocketMqMessagesPanel
-        v-else-if="activeTab === 'messages' && isRocketMqCluster && (canMessageQuery || canSendMessage)"
-        :connection-id="connectionId"
-        :tenant="effectiveTenant"
-        :namespace="effectiveNamespace"
-        :topic="selectedTopic"
-        :read-only="readOnly"
-        :mq-system-kind="mqSystemKind"
-        :prefer-dlq-topic="preferDlqTopic"
-      />
-      <MessageTracePanel v-else-if="activeTab === 'trace' && isRocketMqCluster && canMessageTrace" :connection-id="connectionId" :tenant="effectiveTenant" :namespace="effectiveNamespace" :topic="selectedTopic" :read-only="readOnly" :mq-system-kind="mqSystemKind" />
-      <KafkaMessagesPanel
-        v-else-if="activeTab === 'messages' && canBrowseKafkaMessages"
-        :connection-id="connectionId"
-        :tenant="effectiveTenant"
-        :namespace="effectiveNamespace"
-        :topic="selectedTopic"
-        :read-only="readOnly"
-        :can-send-message="canSendMessage"
-        @topic-selected="handleProducerTopicSelected"
-      />
-      <MessageQueryPanel v-else-if="activeTab === 'messages' && canMessageQuery && !isRocketMqCluster" :connection-id="connectionId" :tenant="effectiveTenant" :namespace="effectiveNamespace" :topic="selectedTopic" :read-only="readOnly" :mq-system-kind="mqSystemKind" />
-      <SendMessagePanel
-        v-else-if="activeTab === 'messages' && canSendMessage && !isRocketMqCluster && !canMessageQuery"
-        :connection-id="connectionId"
-        :tenant="effectiveTenant"
-        :namespace="effectiveNamespace"
-        :topic="selectedTopic"
-        :read-only="readOnly"
-        :mq-system-kind="mqSystemKind"
-        :is-flat-mq-cluster="isFlatMqCluster"
-        :supports-peek-messages="canPeekMessages"
-      />
-      <BrokerPanel v-else-if="activeTab === 'broker'" :connection-id="connectionId" :read-only="readOnly" :mq-system-kind="mqSystemKind" />
-      <RabbitMqPoliciesPanel v-else-if="activeTab === 'policies' && isRabbitMqCluster && canManageRabbitMqPolicies" :connection-id="connectionId" :namespace="effectiveNamespace" :read-only="readOnly" />
-      <PoliciesPanel
-        v-else-if="activeTab === 'policies' && canManagePolicies"
-        :connection-id="connectionId"
-        :topic="selectedTopic"
-        :tenant="effectiveTenant"
-        :namespace="effectiveNamespace"
-        :read-only="readOnly"
-        :is-flat-mq-cluster="isFlatMqCluster"
-        :supports-rate-limits="canManageRateLimits"
-        :supports-backlog-quota="canManageBacklogQuota"
-        :supports-retention="canManageRetention"
-      />
-      <RabbitMqPermissionsPanel v-else-if="activeTab === 'permissions' && isRabbitMqCluster && canManageUserPermissions" :connection-id="connectionId" :namespace="effectiveNamespace" :read-only="readOnly" />
-      <PermissionsPanel v-else-if="activeTab === 'permissions' && canManagePermissions" :connection-id="connectionId" :topic="selectedTopic" :tenant="effectiveTenant" :namespace="effectiveNamespace" :read-only="readOnly" :mq-system-kind="mqSystemKind" />
-      <RawApiPanel v-else-if="activeTab === 'raw' && canUseRawApi" :connection-id="connectionId" :tenant="selectedTenant" :namespace="selectedNamespace" :topic="selectedTopic" :read-only="readOnly" />
+      <!-- NATS: Publish / Subscribe stay mounted (v-show). JetStream is one workspace. -->
+      <template v-if="isNatsCluster">
+        <NatsPublishPanel v-show="activeTab === 'publish'" :connection-id="connectionId" :read-only="readOnly" />
+        <NatsMessagesPanel v-show="activeTab === 'messages'" :connection-id="connectionId" :read-only="readOnly" />
+        <NatsJetStreamPanel v-if="activeTab === 'streams'" :connection-id="connectionId" :read-only="readOnly" />
+      </template>
+
+      <template v-else>
+        <TenantsPanel v-if="activeTab === 'tenants'" :connection-id="connectionId" :supports-tenants="canManageTenants" :read-only="readOnly" :cluster-options="clusterOptions" @tenant-selected="handleTenantSelected" />
+        <NamespacesPanel
+          v-else-if="activeTab === 'namespaces'"
+          :connection-id="connectionId"
+          :tenant="effectiveTenant"
+          :supports-namespaces="canManageNamespaces"
+          :supports-permissions="canManagePermissions"
+          :read-only="readOnly"
+          @namespace-selected="handleNamespaceSelected"
+          @namespace-roles-selected="handleNamespaceRolesSelected"
+        />
+        <TopicsPanel
+          v-else-if="activeTab === 'topics'"
+          :connection-id="connectionId"
+          :tenant="effectiveTenant"
+          :namespace="effectiveNamespace"
+          :read-only="readOnly"
+          :supports-partitioned-topics="canManagePartitionedTopics"
+          :is-flat-mq-cluster="isFlatMqCluster"
+          :mq-system-kind="mqSystemKind"
+          :supports-exchanges="canManageExchanges"
+          @topic-selected="handleTopicSelected"
+          @navigate-tab="handleNavigateTab"
+        />
+        <SubscriptionsPanel
+          v-else-if="activeTab === 'subscriptions' && canManageSubscriptions"
+          :connection-id="connectionId"
+          :topic="selectedTopic"
+          :tenant="effectiveTenant"
+          :namespace="effectiveNamespace"
+          :read-only="readOnly"
+          :mq-system-kind="mqSystemKind"
+          :is-flat-mq-cluster="isFlatMqCluster"
+          :supports-create-subscription="canCreateSubscription"
+          :supports-reset-cursor="canResetCursor"
+          :supports-skip-messages="canSkipMessages"
+          :supports-clear-backlog="canClearBacklog"
+          :supports-peek-messages="canPeekMessages"
+          :supports-expire-messages="canExpireMessages"
+          @subscription-selected="handleSubscriptionSelected"
+        />
+        <RabbitMqMonitoringPanel v-else-if="activeTab === 'monitoring' && isRabbitMqCluster && canClusterMonitor" :connection-id="connectionId" />
+        <MonitoringPanel v-else-if="activeTab === 'monitoring'" :connection-id="connectionId" :topic="selectedTopic" :tenant="effectiveTenant" :namespace="effectiveNamespace" :mq-system-kind="mqSystemKind" @navigate-tab="handleNavigateTab" />
+        <RabbitMqClientsPanel v-else-if="activeTab === 'clients' && isRabbitMqCluster && canManageClientConnections" :connection-id="connectionId" :namespace="effectiveNamespace" :read-only="readOnly" />
+        <ProducerConsumerPanel
+          v-else-if="activeTab === 'clients'"
+          :connection-id="connectionId"
+          :topic="selectedTopic"
+          :tenant="effectiveTenant"
+          :namespace="effectiveNamespace"
+          :read-only="readOnly"
+          :selected-subscription="selectedSubscriptionName"
+          :is-flat-mq-cluster="isFlatMqCluster"
+          :mq-system-kind="mqSystemKind"
+        />
+        <ProducerConsumerPanel
+          v-else-if="activeTab === 'producers'"
+          view-mode="producers"
+          :connection-id="connectionId"
+          :topic="selectedTopic"
+          :tenant="effectiveTenant"
+          :namespace="effectiveNamespace"
+          :read-only="readOnly"
+          :selected-subscription="selectedSubscriptionName"
+          :is-flat-mq-cluster="isFlatMqCluster"
+          :mq-system-kind="mqSystemKind"
+          @topic-selected="handleProducerTopicSelected"
+        />
+        <RocketMqMessagesPanel
+          v-else-if="activeTab === 'messages' && isRocketMqCluster && (canMessageQuery || canSendMessage)"
+          :connection-id="connectionId"
+          :tenant="effectiveTenant"
+          :namespace="effectiveNamespace"
+          :topic="selectedTopic"
+          :read-only="readOnly"
+          :mq-system-kind="mqSystemKind"
+          :prefer-dlq-topic="preferDlqTopic"
+        />
+        <MessageTracePanel v-else-if="activeTab === 'trace' && isRocketMqCluster && canMessageTrace" :connection-id="connectionId" :tenant="effectiveTenant" :namespace="effectiveNamespace" :topic="selectedTopic" :read-only="readOnly" :mq-system-kind="mqSystemKind" />
+        <KafkaMessagesPanel
+          v-else-if="activeTab === 'messages' && canBrowseKafkaMessages"
+          :connection-id="connectionId"
+          :tenant="effectiveTenant"
+          :namespace="effectiveNamespace"
+          :topic="selectedTopic"
+          :read-only="readOnly"
+          :can-send-message="canSendMessage"
+          @topic-selected="handleProducerTopicSelected"
+        />
+        <MessageQueryPanel v-else-if="activeTab === 'messages' && canMessageQuery && !isRocketMqCluster" :connection-id="connectionId" :tenant="effectiveTenant" :namespace="effectiveNamespace" :topic="selectedTopic" :read-only="readOnly" :mq-system-kind="mqSystemKind" />
+        <SendMessagePanel
+          v-else-if="activeTab === 'messages' && canSendMessage && !isRocketMqCluster && !canMessageQuery"
+          :connection-id="connectionId"
+          :tenant="effectiveTenant"
+          :namespace="effectiveNamespace"
+          :topic="selectedTopic"
+          :read-only="readOnly"
+          :mq-system-kind="mqSystemKind"
+          :is-flat-mq-cluster="isFlatMqCluster"
+          :supports-peek-messages="canPeekMessages"
+        />
+        <BrokerPanel v-else-if="activeTab === 'broker'" :connection-id="connectionId" :read-only="readOnly" :mq-system-kind="mqSystemKind" />
+        <RabbitMqPoliciesPanel v-else-if="activeTab === 'policies' && isRabbitMqCluster && canManageRabbitMqPolicies" :connection-id="connectionId" :namespace="effectiveNamespace" :read-only="readOnly" />
+        <PoliciesPanel
+          v-else-if="activeTab === 'policies' && canManagePolicies"
+          :connection-id="connectionId"
+          :topic="selectedTopic"
+          :tenant="effectiveTenant"
+          :namespace="effectiveNamespace"
+          :read-only="readOnly"
+          :is-flat-mq-cluster="isFlatMqCluster"
+          :supports-rate-limits="canManageRateLimits"
+          :supports-backlog-quota="canManageBacklogQuota"
+          :supports-retention="canManageRetention"
+        />
+        <RabbitMqPermissionsPanel v-else-if="activeTab === 'permissions' && isRabbitMqCluster && canManageUserPermissions" :connection-id="connectionId" :namespace="effectiveNamespace" :read-only="readOnly" />
+        <PermissionsPanel v-else-if="activeTab === 'permissions' && canManagePermissions" :connection-id="connectionId" :topic="selectedTopic" :tenant="effectiveTenant" :namespace="effectiveNamespace" :read-only="readOnly" :mq-system-kind="mqSystemKind" />
+        <RawApiPanel v-else-if="activeTab === 'raw' && canUseRawApi" :connection-id="connectionId" :tenant="selectedTenant" :namespace="selectedNamespace" :topic="selectedTopic" :read-only="readOnly" />
+      </template>
     </div>
 
     <!-- Create Namespace (vhost) Dialog -->
@@ -576,139 +617,7 @@ onMounted(async () => {
 
 <style scoped>
 @import "./shared/mqPanel.css";
-
-.mq-admin-console {
-  display: flex;
-  flex-direction: column;
-  height: 100%;
-  background: var(--color-background);
-}
-
-.mq-toolbar {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: 8px 16px;
-  border-bottom: 1px solid var(--color-border);
-  background: var(--color-background-secondary);
-}
-
-.mq-breadcrumb {
-  display: flex;
-  align-items: center;
-  font-size: 14px;
-  color: var(--color-text-secondary);
-}
-
-.cluster-info {
-  font-weight: 600;
-  color: var(--color-primary);
-  margin-right: 8px;
-}
-
-.breadcrumb-separator {
-  margin: 0 8px;
-  color: var(--color-text-tertiary);
-}
-
-.breadcrumb-item {
-  color: var(--color-text);
-  font-weight: 500;
-}
-
-.breadcrumb-button {
-  border: none;
-  border-radius: var(--dbx-radius-fixed-4);
-  background: transparent;
-  color: var(--color-text);
-  cursor: pointer;
-  font: inherit;
-  font-weight: 500;
-  padding: 2px 4px;
-}
-
-.breadcrumb-button:hover {
-  background: var(--color-hover);
-  color: var(--color-primary);
-}
-
-.toolbar-error {
-  color: var(--color-error);
-  font-size: 13px;
-}
-
-.toolbar-status {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-}
-
-.readonly-badge {
-  padding: 2px 8px;
-  border: 1px solid var(--color-warning);
-  border-radius: var(--dbx-radius-fixed-4);
-  color: var(--color-warning);
-  font-size: 12px;
-  font-weight: 500;
-}
-
-.prod-badge {
-  padding: 2px 8px;
-  border: 1px solid rgb(220 38 38 / 0.55);
-  border-radius: var(--dbx-radius-fixed-4);
-  color: rgb(185 28 28);
-  font-size: 12px;
-  font-weight: 600;
-}
-
-.mq-tabs {
-  display: flex;
-  align-items: center;
-  border-bottom: 1px solid var(--color-border);
-  background: var(--color-background-secondary);
-}
-
-.mq-tabs-list {
-  display: flex;
-  flex: 1;
-  min-width: 0;
-  overflow-x: auto;
-}
-
-.mq-tabs-list button {
-  padding: 10px 20px;
-  border: none;
-  background: transparent;
-  cursor: pointer;
-  color: var(--color-text-secondary);
-  border-bottom: 2px solid transparent;
-  font-size: 14px;
-  font-weight: 500;
-  transition: all 0.2s;
-}
-
-.mq-tabs-list button:hover {
-  color: var(--color-text);
-  background: var(--color-hover);
-}
-
-.mq-tabs-list button.active {
-  color: var(--color-primary);
-  border-bottom-color: var(--color-primary);
-  background: var(--color-background);
-}
-
-.mq-namespace-switcher {
-  display: flex;
-  align-items: center;
-  padding: 4px 12px;
-  flex: 0 0 auto;
-}
-
-.mq-content {
-  flex: 1;
-  overflow: hidden;
-}
+@import "./shared/mqConsoleShell.css";
 
 .mq-content :deep(table) {
   border-collapse: collapse;

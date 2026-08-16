@@ -1,0 +1,1141 @@
+/* NATS panel chrome layered on the shared mqPanel.css button/form system.
+   Only NATS-specific layout lives here; buttons use .mq-btn-*, search uses
+   .mq-search-input, dropdowns use ui/Select, colours use --color-* tokens. */
+
+/* Full-tab page shell (Publish / Subscribe). */
+.nats-page {
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--color-background);
+  box-sizing: border-box;
+}
+
+.nats-page-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex: 0 0 auto;
+  min-width: 0;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--color-border);
+  background: var(--color-background-secondary);
+  box-sizing: border-box;
+}
+
+.nats-page-title {
+  margin: 0;
+  flex: 0 0 auto;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--color-text);
+  white-space: nowrap;
+}
+
+.nats-page-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  box-sizing: border-box;
+}
+
+/* Subscribe toolbar: title | composer (grows) | actions */
+.nats-sub-header {
+  flex-wrap: wrap;
+}
+
+.nats-sub-composer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1 1 280px;
+  min-width: 0;
+}
+
+.nats-sub-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+  margin-left: auto;
+}
+
+/* Header controls must NOT inherit width:100% from generic nats-panel inputs. */
+.nats-header-subject {
+  flex: 1 1 180px;
+  min-width: 140px;
+  max-width: 100%;
+  width: auto !important;
+  height: 32px;
+  min-height: 32px;
+  max-height: 32px;
+  padding: 6px 10px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--dbx-radius-fixed-6);
+  background: var(--color-background);
+  color: var(--color-text);
+  font-size: 13px;
+  box-sizing: border-box;
+}
+
+.nats-header-mode {
+  width: 104px !important;
+  flex: 0 0 auto;
+}
+
+.nats-header-num {
+  width: 88px !important;
+  flex: 0 0 auto;
+  height: 32px;
+  min-height: 32px;
+  max-height: 32px;
+  padding: 6px 8px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--dbx-radius-fixed-6);
+  background: var(--color-background);
+  color: var(--color-text);
+  font-size: 13px;
+  box-sizing: border-box;
+}
+
+.nats-header-subject:focus,
+.nats-header-num:focus {
+  outline: none;
+  border-color: var(--color-primary);
+  box-shadow: 0 0 0 2px var(--color-primary-alpha);
+}
+
+.nats-sub-body {
+  gap: 12px;
+}
+
+/* Stream context badge in page headers (history / consumers). */
+.nats-stream-badge {
+  display: inline-flex;
+  align-items: center;
+  max-width: min(360px, 40vw);
+  padding: 3px 10px;
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  background: var(--color-background);
+  color: var(--color-text-secondary);
+  font-size: 12px;
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.nats-stream-search {
+  flex: 1 1 200px;
+  max-width: 320px;
+}
+
+.nats-history-header {
+  flex-wrap: wrap;
+}
+
+.nats-history-filters {
+  flex: 1 1 260px;
+}
+
+.nats-inline-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--color-text-secondary);
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.nats-subject-select {
+  width: min(180px, 30vw) !important;
+}
+
+/* Consumer detail stats (replaces one-line detail-box dump). */
+.nats-consumers-embed {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 0;
+  flex: 1;
+}
+
+.nats-consumers-layout {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-width: 0;
+}
+
+.nats-consumers-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.nats-section-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--color-text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.nats-section-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 1.5em;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--color-background-secondary);
+  border: 1px solid var(--color-border);
+  color: var(--color-text-tertiary);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Compact table: size to rows, do not flex-grow into empty space. */
+.nats-table-wrap-compact {
+  max-height: min(280px, 40vh);
+  flex: 0 1 auto;
+}
+
+.consumer-detail {
+  flex: 0 0 auto;
+  padding: 14px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--dbx-radius-fixed-6);
+  background: var(--color-background-secondary);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.consumer-detail-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.consumer-detail-name {
+  margin: 0;
+  min-width: 0;
+  font-size: 14px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.consumer-stat-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+  gap: 10px;
+}
+
+.consumer-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--dbx-radius-fixed-6);
+  background: var(--color-background);
+  min-width: 0;
+}
+
+.consumer-stat-label {
+  color: var(--color-text-tertiary);
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.consumer-stat-value {
+  color: var(--color-text);
+  font-size: 16px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.consumer-stat-value-sm {
+  font-size: 13px;
+  font-weight: 600;
+  word-break: break-all;
+}
+
+/* JetStream workspace: detail sub-nav + embedded child toolbars */
+.nats-js-detail-header {
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.nats-back-btn {
+  flex: 0 0 auto;
+}
+
+.nats-js-subnav {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  flex: 0 1 auto;
+  min-width: 0;
+  padding: 2px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--dbx-radius-fixed-6);
+  background: var(--color-background);
+}
+
+.nats-js-subnav-btn {
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: var(--color-text-secondary);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 5px 12px;
+  border-radius: calc(var(--dbx-radius-fixed-6) - 2px);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.nats-js-subnav-btn:hover {
+  color: var(--color-text);
+  background: var(--color-hover);
+}
+
+.nats-js-subnav-btn.active {
+  color: var(--color-primary);
+  background: color-mix(in srgb, var(--color-primary) 12%, var(--color-background));
+}
+
+.nats-js-detail-body {
+  gap: 12px;
+}
+
+.nats-embed-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  justify-content: space-between;
+}
+
+.nats-history-embed {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 0;
+  flex: 1;
+}
+
+.js-overview {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.nats-panel {
+  border: 1px solid var(--color-border);
+  border-radius: var(--dbx-radius-fixed-6);
+  padding: 14px;
+  background: var(--color-background-secondary);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.nats-panel-flush {
+  border: none;
+  background: transparent;
+  padding: 0;
+}
+
+.section-title {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+/* Actionable state on the console tab row (no dedicated top toolbar for NATS). */
+.nats-tab-status {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 0 0 auto;
+  padding: 0 12px;
+}
+
+.nats-tab-status .toolbar-error {
+  color: var(--color-error);
+  font-size: 12px;
+  max-width: 320px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---- Form fields (publish composer, JetStream history controls) ---- */
+
+.toolbar-row,
+.action-row,
+.jetstream-header,
+.form-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.toolbar-row {
+  align-items: flex-end;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.field.narrow {
+  flex: 0 0 110px;
+}
+
+.field.actions {
+  flex: 0 0 auto;
+}
+
+.field.span-2 {
+  grid-column: 1 / -1;
+}
+
+.field label {
+  font-weight: 500;
+  font-size: 13px;
+  color: var(--color-text-secondary);
+}
+
+.invisible {
+  visibility: hidden;
+}
+
+.required {
+  color: var(--color-error);
+}
+
+/* Publish form: stacked fields with a compact top row (subject / reply / mode). */
+.publish-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.publish-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr) minmax(120px, 160px);
+  gap: 12px;
+  align-items: start;
+}
+
+.publish-mode-select,
+.msg-control-select {
+  width: 100%;
+}
+
+/* Raw text/number inputs (publish form, JetStream, resource panels). */
+.nats-panel input[type="text"],
+.nats-panel input[type="number"],
+.nats-page-body input[type="text"],
+.nats-page-body input[type="number"],
+.publish-fields input[type="text"],
+.publish-fields input[type="number"] {
+  width: 100%;
+  height: 34px;
+  min-height: 34px;
+  max-height: 34px;
+  padding: 7px 10px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--dbx-radius-fixed-6);
+  background: var(--color-background);
+  color: var(--color-text);
+  font-size: 13px;
+  box-sizing: border-box;
+  flex: none;
+}
+
+.nats-panel input[type="text"]:focus,
+.nats-panel input[type="number"]:focus,
+.nats-page-body input[type="text"]:focus,
+.nats-page-body input[type="number"]:focus,
+.publish-fields input[type="text"]:focus,
+.publish-fields input[type="number"]:focus,
+.code-textarea:focus,
+.headers-textarea:focus {
+  outline: none;
+  border-color: var(--color-primary);
+  box-shadow: 0 0 0 2px var(--color-primary-alpha);
+}
+
+.code-textarea,
+.headers-textarea {
+  width: 100%;
+  padding: 7px 10px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--dbx-radius-fixed-6);
+  background: var(--color-background);
+  color: var(--color-text);
+  font-size: 13px;
+  box-sizing: border-box;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  resize: vertical;
+  line-height: 1.5;
+}
+
+.headers-textarea {
+  font-family: inherit;
+}
+
+.form-hint {
+  margin: 0;
+  font-size: 12px;
+  color: var(--color-text-tertiary);
+  line-height: 1.4;
+}
+
+.status-text {
+  font-size: 12px;
+  color: var(--color-text-tertiary);
+}
+
+.status-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--color-border);
+  font-size: 11px;
+  color: var(--color-text-secondary);
+}
+
+.status-chip.warning {
+  color: var(--color-warning);
+  border-color: var(--color-warning);
+  background: var(--color-warning-alpha);
+}
+
+.panel-error {
+  margin: 0;
+  padding: 10px 14px;
+  border-radius: var(--dbx-radius-fixed-6);
+  background: var(--color-error-bg);
+  color: var(--color-error);
+  font-size: 13px;
+}
+
+.field-error {
+  font-size: 12px;
+  color: var(--color-error);
+}
+
+.field-warning {
+  padding: 8px 10px;
+  font-size: 12px;
+  color: var(--color-warning);
+}
+
+.success-text {
+  font-size: 13px;
+  color: var(--color-success);
+  font-weight: 500;
+}
+
+.readonly-hint.inline {
+  padding: 0;
+  background: transparent;
+  color: var(--color-warning);
+  font-size: 12px;
+}
+
+.panel-placeholder {
+  padding: 40px 24px;
+  text-align: center;
+  color: var(--color-text-secondary);
+  font-size: 14px;
+}
+
+.panel-placeholder.compact {
+  padding: 16px 12px;
+  font-size: 13px;
+}
+
+/* ---- Multi-subscription chips (select feed / remove) ---- */
+
+.feed-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+}
+
+.feed-chip {
+  display: inline-flex;
+  align-items: stretch;
+  max-width: 100%;
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  background: var(--color-background);
+  overflow: hidden;
+}
+
+.feed-chip.active {
+  border-color: var(--color-primary);
+  background: color-mix(in srgb, var(--color-primary) 12%, var(--color-background));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-primary) 35%, transparent);
+}
+
+.feed-chip.is-error {
+  border-color: var(--color-error);
+}
+
+.feed-chip.is-starting {
+  opacity: 0.75;
+}
+
+.feed-chip.is-capture .feed-chip-kind {
+  color: var(--color-text-tertiary);
+}
+
+.feed-chip-main {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  max-width: 320px;
+  padding: 5px 4px 5px 12px;
+  border: none;
+  background: transparent;
+  color: var(--color-text);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.2;
+}
+
+.feed-chip-subject {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+}
+
+.feed-chip-kind {
+  flex: 0 0 auto;
+  color: var(--color-text-tertiary);
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.feed-chip-count {
+  flex: 0 0 auto;
+  min-width: 1.4em;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--color-background-secondary);
+  color: var(--color-text-secondary);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+
+.feed-chip.active .feed-chip-count {
+  background: color-mix(in srgb, var(--color-primary) 18%, var(--color-background));
+  color: var(--color-primary);
+  font-weight: 600;
+}
+
+.feed-chip-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 28px;
+  padding: 0;
+  border: none;
+  border-left: 1px solid var(--color-border);
+  background: transparent;
+  color: var(--color-text-tertiary);
+  cursor: pointer;
+  font-size: 11px;
+  line-height: 1;
+}
+
+.feed-chip-close:hover {
+  background: var(--color-hover);
+  color: var(--color-error);
+}
+
+.feed-chip.active .feed-chip-close {
+  border-left-color: color-mix(in srgb, var(--color-primary) 35%, var(--color-border));
+}
+
+/* ---- Pub/Sub message view (single column, like the other MQ panels) ---- */
+
+.nats-msg-view {
+  gap: 10px;
+}
+
+.msg-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex: 0 0 auto;
+}
+
+.msg-head-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.msg-card-tools {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+
+.msg-summary {
+  font-size: 12px;
+}
+
+.msg-list-wrap {
+  height: 300px;
+  display: flex;
+  overflow: hidden;
+  border: 1px solid var(--color-border);
+  border-radius: var(--dbx-radius-fixed-6);
+  background: var(--color-background);
+}
+
+.msg-detail-wrap {
+  flex: 0 0 auto;
+  max-height: 40vh;
+  overflow: auto;
+  border: 1px solid var(--color-border);
+  border-radius: var(--dbx-radius-fixed-6);
+  background: var(--color-background);
+}
+
+/* ---- Shared message list (card layout matching Kafka MessageBrowser) ---- */
+
+.nats-msg-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.nats-msg-card {
+  padding: 10px 12px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--dbx-radius-fixed-6);
+  background: var(--color-background);
+}
+
+.nats-msg-meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  color: var(--color-text-tertiary);
+  font-size: 12px;
+}
+
+.nats-msg-meta span:first-child {
+  color: var(--color-primary);
+  font-weight: 700;
+}
+
+.nats-msg-subject {
+  color: var(--color-text);
+  font-weight: 600;
+}
+
+.nats-msg-section {
+  margin-top: 8px;
+}
+
+.nats-msg-heading {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--color-text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.nats-msg-heading .nats-msg-copy {
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+.nats-msg-payload {
+  margin: 6px 0 0;
+  padding: 10px;
+  max-height: 200px;
+  overflow: auto;
+  border-radius: var(--dbx-radius-fixed-6);
+  background: var(--color-background-tertiary, var(--color-background-secondary));
+  color: var(--color-text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.nats-msg-headers-values {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.nats-msg-headers-values span {
+  padding: 2px 6px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--dbx-radius-fixed-4);
+  color: var(--color-text-secondary);
+  background: var(--color-background-secondary);
+  font-size: 12px;
+}
+
+/* ---- Message detail (shared by Pub/Sub + JetStream history) ---- */
+
+.nats-message-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px;
+  min-height: 100%;
+}
+
+.detail-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.detail-subject {
+  font-size: 14px;
+  font-weight: 600;
+  word-break: break-all;
+}
+
+.detail-sub {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--color-text-tertiary);
+}
+
+.detail-payload {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.detail-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.mode-tabs {
+  display: flex;
+  gap: 2px;
+}
+
+.mode-tab {
+  padding: 3px 10px;
+  border: 1px solid var(--color-border);
+  background: var(--color-background);
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.mode-tab:first-child {
+  border-radius: var(--dbx-radius-fixed-4) 0 0 var(--dbx-radius-fixed-4);
+}
+
+.mode-tab:last-child {
+  border-radius: 0 var(--dbx-radius-fixed-4) var(--dbx-radius-fixed-4) 0;
+}
+
+.mode-tab.active {
+  background: var(--color-primary);
+  border-color: var(--color-primary);
+  color: var(--color-primary-foreground);
+}
+
+.detail-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.detail-payload-body {
+  margin: 0;
+  padding: 10px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--dbx-radius-fixed-6);
+  background: var(--color-background);
+  white-space: pre-wrap;
+  word-break: break-all;
+  font-size: 12px;
+  max-height: 40vh;
+  overflow: auto;
+}
+
+.message-payload-collapsed {
+  color: var(--color-text-tertiary);
+  font-style: italic;
+}
+
+.detail-headers-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+  font-weight: 600;
+  font-size: 13px;
+}
+
+.headers-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.headers-table td {
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--color-border);
+  vertical-align: top;
+  word-break: break-all;
+}
+
+.header-key {
+  color: var(--color-text-secondary);
+  white-space: nowrap;
+  width: 1%;
+}
+
+/* ---- Publish Sheet ---- */
+
+.nats-publish-sheet-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0 16px 16px;
+}
+
+/* ---- JetStream / resource panels (DBX table logic) ---- */
+
+/* Full-tab column matching the Kafka Topics/Subscriptions panels. */
+.nats-resource-panel {
+  height: 100%;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px;
+  box-sizing: border-box;
+}
+
+.nats-table-wrap.grow {
+  flex: 1;
+  min-height: 0;
+  max-height: none;
+}
+
+/* Shared resource table, matching the Subscriptions/Topics panels. */
+.nats-table-wrap {
+  overflow: auto;
+  border: 1px solid var(--color-border);
+  border-radius: var(--dbx-radius-fixed-6);
+  background: var(--color-background);
+  max-height: 320px;
+}
+
+.nats-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.nats-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  text-align: left;
+  padding: 8px 12px;
+  background: var(--color-background-secondary);
+  color: var(--color-text-secondary);
+  font-weight: 600;
+  border-bottom: 1px solid var(--color-border);
+  white-space: nowrap;
+}
+
+.nats-table th.num,
+.nats-table td.num {
+  text-align: right;
+}
+
+.nats-table tbody td {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--color-border);
+  color: var(--color-text);
+}
+
+.nats-table tbody tr {
+  cursor: pointer;
+}
+
+.nats-table tbody tr:hover {
+  background: var(--color-hover);
+}
+
+.nats-table tbody tr.selected {
+  background: var(--color-selected, var(--color-hover));
+  box-shadow: inset 2px 0 0 var(--color-primary);
+}
+
+.cell-name {
+  font-weight: 500;
+}
+
+.cell-ellipsis {
+  max-width: 320px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--color-text-tertiary);
+}
+
+.js-detail {
+  gap: 14px;
+}
+
+.js-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.js-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.detail-box {
+  border: 1px solid var(--color-border);
+  border-radius: var(--dbx-radius-fixed-6);
+  padding: 10px 12px;
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.stream-name {
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--color-text);
+}
+
+.break-all {
+  word-break: break-all;
+}
+
+.history-viewer {
+  display: flex;
+  gap: 12px;
+  min-height: 240px;
+}
+
+.history-master {
+  flex: 0 0 38%;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 320px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--dbx-radius-fixed-6);
+  background: var(--color-background);
+  padding: 8px;
+}
+
+.history-detail {
+  flex: 1;
+  min-width: 0;
+  overflow: auto;
+  border: 1px solid var(--color-border);
+  border-radius: var(--dbx-radius-fixed-6);
+  background: var(--color-background);
+}
+
+.nats-panel button:disabled,
+.nats-panel input:disabled,
+.nats-panel textarea:disabled,
+.nats-resource-panel button:disabled,
+.nats-resource-panel input:disabled,
+.nats-page button:disabled,
+.nats-page input:disabled,
+.nats-page textarea:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+@media (max-width: 900px) {
+  .history-viewer {
+    flex-direction: column;
+  }
+
+  .history-master {
+    flex: 0 0 auto;
+    max-height: 40vh;
+  }
+
+  .publish-row {
+    grid-template-columns: 1fr;
+  }
+
+  .nats-sub-composer {
+    flex: 1 1 100%;
+  }
+
+  .nats-sub-header-actions {
+    margin-left: 0;
+  }
+}

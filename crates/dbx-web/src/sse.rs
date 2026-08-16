@@ -117,6 +117,28 @@ pub fn sse_from_lossy_channel(
     sse_from_channel_with_lag_policy(rx, true)
 }
 
+/// Replay a bounded event history before continuing with a lossy live stream.
+/// This is used for subscriptions that may receive their first event before a
+/// browser has completed its EventSource handshake.
+pub fn sse_from_replay_lossy_channel(
+    replay: Vec<String>,
+    mut rx: broadcast::Receiver<String>,
+) -> Sse<impl Stream<Item = Result<Event, std::convert::Infallible>>> {
+    let stream = async_stream::stream! {
+        for data in replay {
+            yield Ok(Event::default().data(data));
+        }
+        loop {
+            match rx.recv().await {
+                Ok(data) => yield Ok(Event::default().data(data)),
+                Err(RecvError::Lagged(_)) => continue,
+                Err(RecvError::Closed) => return,
+            }
+        }
+    };
+    Sse::new(stream).keep_alive(KeepAlive::default())
+}
+
 fn sse_from_channel_with_lag_policy(
     mut rx: broadcast::Receiver<String>,
     recover_from_lag: bool,

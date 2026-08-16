@@ -90,6 +90,19 @@ test("bumps ZooKeeper from native and shared SASL source directories", () => {
   }
 });
 
+test("bumps the native NATS agent from its Go directory", () => {
+  const result = evaluateAgentVersionBump({
+    versions: { nats: "0.1.0" },
+    changedFiles: ["agents/drivers/nats/main.go"],
+    moduleExists: (path) => path === "agents/drivers/nats",
+    readModuleFile: () => "",
+  });
+
+  assert.equal(result.versions.nats, "0.1.1");
+  assert.deepEqual(result.javaModules, []);
+  assert.deepEqual(result.nativeModules, ["nats"]);
+});
+
 test("bumps the native Vastbase agent from its independent Go directory", () => {
   const result = evaluateAgentVersionBump({
     versions: { vastbase: "0.1.37" },

@@ -12,6 +12,7 @@ use uuid::Uuid;
 use crate::backend::{format_query_result, new_connection_config, parse_database_type, ConnectionSummary, DbxBackend};
 use crate::mongo::{self, MongoCommand, MongoSafetyError};
 use crate::session::{McpSession, McpSessionStore};
+use dbx_core::nats::{validate_jetstream_name, NatsCaptureRequest, NatsHeader, NatsHistoryRequest, NatsPublishRequest};
 use dbx_core::{
     agent_tools::{format_query_result_as_text, QueryCellWindow},
     db::redis_driver::{classify_command, parse_command_argv, RedisCommandResult, RedisCommandSafety},
@@ -187,6 +188,69 @@ pub struct ExecuteAndShowRequest {
     pub database: Option<String>,
 }
 
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct NatsCaptureToolRequest {
+    #[serde(flatten)]
+    pub selector: ConnectionSelector,
+    pub subject: String,
+    #[schemars(description = "Capture duration in milliseconds, bounded to 1-60000")]
+    pub duration_ms: Option<u64>,
+    #[schemars(description = "Maximum messages to return, bounded to 1-1000")]
+    pub max_messages: Option<usize>,
+    #[schemars(description = "Maximum payload bytes to return, bounded to 1-16777216")]
+    pub max_bytes: Option<usize>,
+    pub include_headers: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct NatsPublishToolRequest {
+    #[serde(flatten)]
+    pub selector: ConnectionSelector,
+    pub subject: String,
+    pub payload_base64: String,
+    pub reply: Option<String>,
+    #[serde(default)]
+    pub headers: Vec<McpNatsHeader>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct McpNatsHeader {
+    pub key: String,
+    pub value: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct NatsJetStreamNameToolRequest {
+    #[serde(flatten)]
+    pub selector: ConnectionSelector,
+    #[schemars(description = "JetStream Stream name (not a Core NATS Subject)")]
+    pub stream: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct NatsJetStreamConsumerToolRequest {
+    #[serde(flatten)]
+    pub selector: ConnectionSelector,
+    #[schemars(description = "JetStream Stream name")]
+    pub stream: String,
+    #[schemars(description = "JetStream Consumer name")]
+    pub consumer: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct NatsHistoryToolRequest {
+    #[serde(flatten)]
+    pub selector: ConnectionSelector,
+    #[schemars(description = "JetStream Stream name")]
+    pub stream: String,
+    #[schemars(description = "Optional inclusive stream sequence to start from")]
+    pub start_sequence: Option<u64>,
+    #[schemars(description = "Maximum messages to return, bounded to 1-1000")]
+    pub max_messages: Option<usize>,
+    #[schemars(description = "Maximum payload and header bytes to return, bounded to 1-16777216")]
+    pub max_bytes: Option<usize>,
+}
+
 #[derive(Clone)]
 pub struct DbxMcpServer {
     backend: Arc<dyn DbxBackend>,
@@ -295,6 +359,239 @@ impl DbxMcpServer {
                 text(format_connections(&rows))
             }
             Err(error) => backend_tool_error("CONNECTION_LOAD_ERROR", error),
+        }
+    }
+
+    #[tool(
+        name = "dbx_nats_test_connection",
+        description = "Test a NATS connection and return server capabilities. The selected DBX connection must be configured with systemKind=nats."
+    )]
+    async fn nats_test_connection(&self, Parameters(request): Parameters<ConnectionSelector>) -> CallToolResult {
+        let resolved = match self.resolve_connection(&request).await {
+            Ok(resolved) => resolved,
+            Err(error) => return error,
+        };
+        if !dbx_core::nats::NatsConnectionConfig::is_nats_connection(&resolved.connection) {
+            return tool_error("NATS_CONNECTION_REQUIRED", "The selected connection is not configured as NATS.");
+        }
+        match self.backend.nats_test_connection(&resolved.connection).await {
+            Ok(info) => {
+                text(serde_json::to_string_pretty(&info).unwrap_or_else(|_| "NATS connection succeeded.".to_string()))
+            }
+            Err(error) => backend_tool_error("NATS_CONNECTION_ERROR", error),
+        }
+    }
+
+    #[tool(
+        name = "dbx_nats_capture",
+        description = "Capture a bounded set of Core NATS messages from a Subject. The operation always ends at a duration, message, byte, cancellation, or error limit."
+    )]
+    async fn nats_capture(&self, Parameters(request): Parameters<NatsCaptureToolRequest>) -> CallToolResult {
+        let resolved = match self.resolve_connection(&request.selector).await {
+            Ok(resolved) => resolved,
+            Err(error) => return error,
+        };
+        if !dbx_core::nats::NatsConnectionConfig::is_nats_connection(&resolved.connection) {
+            return tool_error("NATS_CONNECTION_REQUIRED", "The selected connection is not configured as NATS.");
+        }
+        let capture = match (NatsCaptureRequest {
+            subject: request.subject,
+            duration_ms: request.duration_ms.unwrap_or(5_000),
+            max_messages: request.max_messages.unwrap_or(100),
+            max_bytes: request.max_bytes.unwrap_or(1_048_576),
+            include_headers: request.include_headers.unwrap_or(true),
+        })
+        .bounded()
+        {
+            Ok(capture) => capture,
+            Err(error) => return tool_error("NATS_CAPTURE_LIMIT", error),
+        };
+        match self.backend.nats_capture(&resolved.connection, capture).await {
+            Ok(result) => text(serde_json::to_string_pretty(&result).unwrap_or_else(|_| "{}".to_string())),
+            Err(error) => backend_tool_error("NATS_CAPTURE_ERROR", error),
+        }
+    }
+
+    #[tool(
+        name = "dbx_nats_publish",
+        description = "Publish one bounded payload to a concrete Core NATS Subject. Wildcard Subjects are rejected and DBX MCP write policy still applies."
+    )]
+    async fn nats_publish(&self, Parameters(request): Parameters<NatsPublishToolRequest>) -> CallToolResult {
+        let resolved = match self.resolve_connection(&request.selector).await {
+            Ok(resolved) => resolved,
+            Err(error) => return error,
+        };
+        if !dbx_core::nats::NatsConnectionConfig::is_nats_connection(&resolved.connection) {
+            return tool_error("NATS_CONNECTION_REQUIRED", "The selected connection is not configured as NATS.");
+        }
+        if resolved.policy.read_only || resolved.connection.read_only {
+            return tool_error(
+                "MCP_READ_ONLY",
+                "NATS publish is disabled by the DBX MCP or connection read-only policy.",
+            );
+        }
+        if dbx_core::production_safety::is_production_database(&resolved.connection, "") {
+            return tool_error(
+                "PRODUCTION_DATABASE_READ_ONLY",
+                "NATS publish is blocked for a production connection in MCP.",
+            );
+        }
+        let publish = match (NatsPublishRequest {
+            subject: request.subject,
+            reply: request.reply,
+            headers: request
+                .headers
+                .into_iter()
+                .map(|header| NatsHeader { key: header.key, value: header.value })
+                .collect(),
+            payload_base64: request.payload_base64,
+        })
+        .validate()
+        {
+            Ok(publish) => publish,
+            Err(error) => return tool_error("NATS_PUBLISH_INVALID", error),
+        };
+        match self.backend.nats_publish(&resolved.connection, publish).await {
+            Ok(result) => text(serde_json::to_string_pretty(&result).unwrap_or_else(|_| "{}".to_string())),
+            Err(error) => backend_tool_error("NATS_PUBLISH_ERROR", error),
+        }
+    }
+
+    #[tool(
+        name = "dbx_nats_jetstream_info",
+        description = "Return read-only JetStream account capabilities and usage for a NATS connection."
+    )]
+    async fn nats_jetstream_info(&self, Parameters(request): Parameters<ConnectionSelector>) -> CallToolResult {
+        let resolved = match self.resolve_connection(&request).await {
+            Ok(resolved) => resolved,
+            Err(error) => return error,
+        };
+        if !dbx_core::nats::NatsConnectionConfig::is_nats_connection(&resolved.connection) {
+            return tool_error("NATS_CONNECTION_REQUIRED", "The selected connection is not configured as NATS.");
+        }
+        match self.backend.nats_jetstream_info(&resolved.connection).await {
+            Ok(info) => text(serde_json::to_string_pretty(&info).unwrap_or_else(|_| "{}".to_string())),
+            Err(error) => backend_tool_error("NATS_JETSTREAM_ERROR", error),
+        }
+    }
+
+    #[tool(
+        name = "dbx_nats_list_streams",
+        description = "List up to 200 JetStream Streams for a NATS connection. The response indicates whether the bounded list was truncated."
+    )]
+    async fn nats_list_streams(&self, Parameters(request): Parameters<ConnectionSelector>) -> CallToolResult {
+        let resolved = match self.resolve_connection(&request).await {
+            Ok(resolved) => resolved,
+            Err(error) => return error,
+        };
+        if !dbx_core::nats::NatsConnectionConfig::is_nats_connection(&resolved.connection) {
+            return tool_error("NATS_CONNECTION_REQUIRED", "The selected connection is not configured as NATS.");
+        }
+        match self.backend.nats_list_streams(&resolved.connection).await {
+            Ok(streams) => text(serde_json::to_string_pretty(&streams).unwrap_or_else(|_| "{}".to_string())),
+            Err(error) => backend_tool_error("NATS_JETSTREAM_STREAM_LIST_ERROR", error),
+        }
+    }
+
+    #[tool(name = "dbx_nats_get_stream", description = "Get read-only metadata and state for one JetStream Stream.")]
+    async fn nats_get_stream(&self, Parameters(request): Parameters<NatsJetStreamNameToolRequest>) -> CallToolResult {
+        let resolved = match self.resolve_connection(&request.selector).await {
+            Ok(resolved) => resolved,
+            Err(error) => return error,
+        };
+        if !dbx_core::nats::NatsConnectionConfig::is_nats_connection(&resolved.connection) {
+            return tool_error("NATS_CONNECTION_REQUIRED", "The selected connection is not configured as NATS.");
+        }
+        let stream = match validate_jetstream_name(&request.stream, "stream") {
+            Ok(stream) => stream,
+            Err(error) => return tool_error("NATS_JETSTREAM_STREAM_INVALID", error),
+        };
+        match self.backend.nats_get_stream(&resolved.connection, &stream).await {
+            Ok(info) => text(serde_json::to_string_pretty(&info).unwrap_or_else(|_| "{}".to_string())),
+            Err(error) => backend_tool_error("NATS_JETSTREAM_STREAM_ERROR", error),
+        }
+    }
+
+    #[tool(
+        name = "dbx_nats_list_consumers",
+        description = "List up to 200 read-only JetStream Consumer summaries for one Stream. The response indicates whether the bounded list was truncated."
+    )]
+    async fn nats_list_consumers(
+        &self,
+        Parameters(request): Parameters<NatsJetStreamNameToolRequest>,
+    ) -> CallToolResult {
+        let resolved = match self.resolve_connection(&request.selector).await {
+            Ok(resolved) => resolved,
+            Err(error) => return error,
+        };
+        if !dbx_core::nats::NatsConnectionConfig::is_nats_connection(&resolved.connection) {
+            return tool_error("NATS_CONNECTION_REQUIRED", "The selected connection is not configured as NATS.");
+        }
+        let stream = match validate_jetstream_name(&request.stream, "stream") {
+            Ok(stream) => stream,
+            Err(error) => return tool_error("NATS_JETSTREAM_STREAM_INVALID", error),
+        };
+        match self.backend.nats_list_consumers(&resolved.connection, &stream).await {
+            Ok(consumers) => text(serde_json::to_string_pretty(&consumers).unwrap_or_else(|_| "{}".to_string())),
+            Err(error) => backend_tool_error("NATS_JETSTREAM_CONSUMER_LIST_ERROR", error),
+        }
+    }
+
+    #[tool(
+        name = "dbx_nats_get_consumer",
+        description = "Get read-only state for one JetStream Consumer, including delivered, ack floor, pending, and redelivery counts."
+    )]
+    async fn nats_get_consumer(
+        &self,
+        Parameters(request): Parameters<NatsJetStreamConsumerToolRequest>,
+    ) -> CallToolResult {
+        let resolved = match self.resolve_connection(&request.selector).await {
+            Ok(resolved) => resolved,
+            Err(error) => return error,
+        };
+        if !dbx_core::nats::NatsConnectionConfig::is_nats_connection(&resolved.connection) {
+            return tool_error("NATS_CONNECTION_REQUIRED", "The selected connection is not configured as NATS.");
+        }
+        let stream = match validate_jetstream_name(&request.stream, "stream") {
+            Ok(stream) => stream,
+            Err(error) => return tool_error("NATS_JETSTREAM_STREAM_INVALID", error),
+        };
+        let consumer = match validate_jetstream_name(&request.consumer, "consumer") {
+            Ok(consumer) => consumer,
+            Err(error) => return tool_error("NATS_JETSTREAM_CONSUMER_INVALID", error),
+        };
+        match self.backend.nats_get_consumer(&resolved.connection, &stream, &consumer).await {
+            Ok(info) => text(serde_json::to_string_pretty(&info).unwrap_or_else(|_| "{}".to_string())),
+            Err(error) => backend_tool_error("NATS_JETSTREAM_CONSUMER_ERROR", error),
+        }
+    }
+
+    #[tool(
+        name = "dbx_nats_fetch_history",
+        description = "Fetch a bounded, read-only JetStream history page by stream sequence. DBX reads stored messages directly, creates no Consumer, and never acknowledges a business Consumer."
+    )]
+    async fn nats_fetch_history(&self, Parameters(request): Parameters<NatsHistoryToolRequest>) -> CallToolResult {
+        let resolved = match self.resolve_connection(&request.selector).await {
+            Ok(resolved) => resolved,
+            Err(error) => return error,
+        };
+        if !dbx_core::nats::NatsConnectionConfig::is_nats_connection(&resolved.connection) {
+            return tool_error("NATS_CONNECTION_REQUIRED", "The selected connection is not configured as NATS.");
+        }
+        let history = match (NatsHistoryRequest {
+            stream: request.stream,
+            start_sequence: request.start_sequence,
+            max_messages: request.max_messages.unwrap_or(100),
+            max_bytes: request.max_bytes.unwrap_or(1_048_576),
+        })
+        .bounded()
+        {
+            Ok(history) => history,
+            Err(error) => return tool_error("NATS_JETSTREAM_HISTORY_INVALID", error),
+        };
+        match self.backend.nats_fetch_history(&resolved.connection, history).await {
+            Ok(history) => text(serde_json::to_string_pretty(&history).unwrap_or_else(|_| "{}".to_string())),
+            Err(error) => backend_tool_error("NATS_JETSTREAM_HISTORY_ERROR", error),
         }
     }
 
@@ -1488,7 +1785,7 @@ mod tests {
         let server = DbxMcpServer::with_runtime_options(Arc::new(FakeBackend::default()), McpScope::default(), false);
         let tools = server.tool_router.list_all();
         let names = tools.iter().map(|tool| tool.name.as_ref()).collect::<Vec<_>>();
-        assert_eq!(tools.len(), 13);
+        assert_eq!(tools.len(), 22);
         assert!(names.contains(&"dbx_list_connections"));
         assert!(names.contains(&"dbx_list_tables"));
         assert!(names.contains(&"dbx_describe_table"));
@@ -1502,6 +1799,15 @@ mod tests {
         assert!(names.contains(&"dbx_execute_and_show"));
         assert!(names.contains(&"dbx_open_session"));
         assert!(names.contains(&"dbx_close_session"));
+        assert!(names.contains(&"dbx_nats_test_connection"));
+        assert!(names.contains(&"dbx_nats_capture"));
+        assert!(names.contains(&"dbx_nats_publish"));
+        assert!(names.contains(&"dbx_nats_jetstream_info"));
+        assert!(names.contains(&"dbx_nats_list_streams"));
+        assert!(names.contains(&"dbx_nats_get_stream"));
+        assert!(names.contains(&"dbx_nats_list_consumers"));
+        assert!(names.contains(&"dbx_nats_get_consumer"));
+        assert!(names.contains(&"dbx_nats_fetch_history"));
     }
 
     #[test]
@@ -1657,7 +1963,7 @@ mod tests {
             false,
         );
         let names = server.tool_router.list_all().into_iter().map(|tool| tool.name).collect::<Vec<_>>();
-        assert_eq!(names.len(), 8);
+        assert_eq!(names.len(), 17);
         assert!(!names.iter().any(|name| name == "dbx_add_connection"));
         assert!(!names.iter().any(|name| name == "dbx_duplicate_connection"));
         assert!(!names.iter().any(|name| name == "dbx_remove_connection"));
@@ -1665,6 +1971,15 @@ mod tests {
         assert!(!names.iter().any(|name| name == "dbx_execute_and_show"));
         assert!(names.iter().any(|name| name == "dbx_open_session"));
         assert!(names.iter().any(|name| name == "dbx_close_session"));
+        assert!(names.iter().any(|name| name == "dbx_nats_test_connection"));
+        assert!(names.iter().any(|name| name == "dbx_nats_capture"));
+        assert!(names.iter().any(|name| name == "dbx_nats_publish"));
+        assert!(names.iter().any(|name| name == "dbx_nats_jetstream_info"));
+        assert!(names.iter().any(|name| name == "dbx_nats_list_streams"));
+        assert!(names.iter().any(|name| name == "dbx_nats_get_stream"));
+        assert!(names.iter().any(|name| name == "dbx_nats_list_consumers"));
+        assert!(names.iter().any(|name| name == "dbx_nats_get_consumer"));
+        assert!(names.iter().any(|name| name == "dbx_nats_fetch_history"));
     }
 
     #[test]

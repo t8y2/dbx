@@ -5,6 +5,11 @@ use std::{
 };
 
 use async_trait::async_trait;
+use dbx_core::nats::{
+    NatsCaptureRequest, NatsCaptureResult, NatsConnectionConfig, NatsConsumerInfo, NatsConsumerList,
+    NatsHistoryRequest, NatsHistoryResult, NatsJetStreamInfo, NatsPublishRequest, NatsPublishResult, NatsServerInfo,
+    NatsService, NatsStreamInfo, NatsStreamList,
+};
 use dbx_core::{
     agent_events::{ToolCall, ToolResult},
     agent_tools::{self, format_query_result_as_text, AgentSqlPermissions, QueryCellWindow},
@@ -174,6 +179,63 @@ pub trait DbxBackend: Send + Sync {
         arguments: Value,
         permissions: AgentSqlPermissions,
     ) -> ToolResult;
+    async fn nats_test_connection(&self, connection: &ConnectionConfig) -> Result<NatsServerInfo, String> {
+        let _ = connection;
+        Err("NATS is not supported by this backend.".to_string())
+    }
+    async fn nats_capture(
+        &self,
+        connection: &ConnectionConfig,
+        request: NatsCaptureRequest,
+    ) -> Result<NatsCaptureResult, String> {
+        let _ = (connection, request);
+        Err("NATS is not supported by this backend.".to_string())
+    }
+    async fn nats_publish(
+        &self,
+        connection: &ConnectionConfig,
+        request: NatsPublishRequest,
+    ) -> Result<NatsPublishResult, String> {
+        let _ = (connection, request);
+        Err("NATS is not supported by this backend.".to_string())
+    }
+    async fn nats_jetstream_info(&self, connection: &ConnectionConfig) -> Result<NatsJetStreamInfo, String> {
+        let _ = connection;
+        Err("NATS is not supported by this backend.".to_string())
+    }
+    async fn nats_list_streams(&self, connection: &ConnectionConfig) -> Result<NatsStreamList, String> {
+        let _ = connection;
+        Err("NATS is not supported by this backend.".to_string())
+    }
+    async fn nats_get_stream(&self, connection: &ConnectionConfig, stream: &str) -> Result<NatsStreamInfo, String> {
+        let _ = (connection, stream);
+        Err("NATS is not supported by this backend.".to_string())
+    }
+    async fn nats_list_consumers(
+        &self,
+        connection: &ConnectionConfig,
+        stream: &str,
+    ) -> Result<NatsConsumerList, String> {
+        let _ = (connection, stream);
+        Err("NATS is not supported by this backend.".to_string())
+    }
+    async fn nats_get_consumer(
+        &self,
+        connection: &ConnectionConfig,
+        stream: &str,
+        consumer: &str,
+    ) -> Result<NatsConsumerInfo, String> {
+        let _ = (connection, stream, consumer);
+        Err("NATS is not supported by this backend.".to_string())
+    }
+    async fn nats_fetch_history(
+        &self,
+        connection: &ConnectionConfig,
+        request: NatsHistoryRequest,
+    ) -> Result<NatsHistoryResult, String> {
+        let _ = (connection, request);
+        Err("NATS is not supported by this backend.".to_string())
+    }
     async fn execute_query(
         &self,
         connection: &ConnectionConfig,
@@ -476,6 +538,16 @@ impl LocalBackend {
             runtime.remove(&id);
         }
     }
+
+    async fn nats_config(&self, connection: &ConnectionConfig) -> Result<NatsConnectionConfig, String> {
+        let mut config = NatsConnectionConfig::from_connection(connection)?;
+        let (configured_host, configured_port) = config.configured_endpoint()?;
+        let (connect_host, connect_port) = self.state.connection_host_port(&connection.id, connection).await?;
+        if connect_host != configured_host || connect_port != configured_port {
+            config = config.with_connect_override(&connect_host, connect_port)?;
+        }
+        Ok(config)
+    }
 }
 
 fn local_plugin_dir(settings: &DesktopSettings, data_dir: &Path) -> PathBuf {
@@ -528,6 +600,81 @@ impl DbxBackend for LocalBackend {
 
     async fn load_connection_group_paths(&self) -> Result<HashMap<String, Vec<String>>, String> {
         Ok(self.state.storage.load_sidebar_layout().await?.map(connection_group_paths).unwrap_or_default())
+    }
+
+    async fn nats_test_connection(&self, connection: &ConnectionConfig) -> Result<NatsServerInfo, String> {
+        let config = self.nats_config(connection).await?;
+        let service = NatsService::from_agent_manager(&self.state.agent_manager)?;
+        service.test_connection(&config).await
+    }
+
+    async fn nats_capture(
+        &self,
+        connection: &ConnectionConfig,
+        request: NatsCaptureRequest,
+    ) -> Result<NatsCaptureResult, String> {
+        let config = self.nats_config(connection).await?;
+        let service = NatsService::from_agent_manager(&self.state.agent_manager)?;
+        service.capture(&config, request).await
+    }
+
+    async fn nats_publish(
+        &self,
+        connection: &ConnectionConfig,
+        request: NatsPublishRequest,
+    ) -> Result<NatsPublishResult, String> {
+        let config = self.nats_config(connection).await?;
+        let service = NatsService::from_agent_manager(&self.state.agent_manager)?;
+        service.publish(&config, request).await
+    }
+
+    async fn nats_jetstream_info(&self, connection: &ConnectionConfig) -> Result<NatsJetStreamInfo, String> {
+        let config = self.nats_config(connection).await?;
+        let service = NatsService::from_agent_manager(&self.state.agent_manager)?;
+        service.jetstream_info(&config).await
+    }
+
+    async fn nats_list_streams(&self, connection: &ConnectionConfig) -> Result<NatsStreamList, String> {
+        let config = self.nats_config(connection).await?;
+        let service = NatsService::from_agent_manager(&self.state.agent_manager)?;
+        service.list_streams(&config).await
+    }
+
+    async fn nats_get_stream(&self, connection: &ConnectionConfig, stream: &str) -> Result<NatsStreamInfo, String> {
+        let config = self.nats_config(connection).await?;
+        let service = NatsService::from_agent_manager(&self.state.agent_manager)?;
+        service.get_stream(&config, stream).await
+    }
+
+    async fn nats_list_consumers(
+        &self,
+        connection: &ConnectionConfig,
+        stream: &str,
+    ) -> Result<NatsConsumerList, String> {
+        let config = self.nats_config(connection).await?;
+        let service = NatsService::from_agent_manager(&self.state.agent_manager)?;
+        service.list_consumers(&config, stream).await
+    }
+
+    async fn nats_get_consumer(
+        &self,
+        connection: &ConnectionConfig,
+        stream: &str,
+        consumer: &str,
+    ) -> Result<NatsConsumerInfo, String> {
+        let config = self.nats_config(connection).await?;
+        let service = NatsService::from_agent_manager(&self.state.agent_manager)?;
+        service.get_consumer(&config, stream, consumer).await
+    }
+
+    async fn nats_fetch_history(
+        &self,
+        connection: &ConnectionConfig,
+        request: NatsHistoryRequest,
+    ) -> Result<NatsHistoryResult, String> {
+        let config = self.nats_config(connection).await?;
+        let service = NatsService::from_agent_manager(&self.state.agent_manager)?;
+        service.fetch_history(&config, request).await
     }
 
     async fn execute_agent_tool(
@@ -721,6 +868,135 @@ impl DbxBackend for WebBackend {
             .await
             .map_err(|error| format!("Invalid sidebar layout response: {error}"))?;
         Ok(layout.map(connection_group_paths).unwrap_or_default())
+    }
+
+    async fn nats_test_connection(&self, connection: &ConnectionConfig) -> Result<NatsServerInfo, String> {
+        self.request(
+            reqwest::Method::POST,
+            "/api/nats/mcp/test-connection",
+            Some(json!({ "connectionId": connection.id })),
+        )
+        .await?
+        .json()
+        .await
+        .map_err(|error| format!("Invalid NATS test response: {error}"))
+    }
+
+    async fn nats_capture(
+        &self,
+        connection: &ConnectionConfig,
+        request: NatsCaptureRequest,
+    ) -> Result<NatsCaptureResult, String> {
+        self.request(
+            reqwest::Method::POST,
+            "/api/nats/mcp/capture",
+            Some(json!({ "connectionId": connection.id, "capture": request })),
+        )
+        .await?
+        .json()
+        .await
+        .map_err(|error| format!("Invalid NATS capture response: {error}"))
+    }
+
+    async fn nats_publish(
+        &self,
+        connection: &ConnectionConfig,
+        request: NatsPublishRequest,
+    ) -> Result<NatsPublishResult, String> {
+        self.request(
+            reqwest::Method::POST,
+            "/api/nats/mcp/publish",
+            Some(json!({ "connectionId": connection.id, "publish": request })),
+        )
+        .await?
+        .json()
+        .await
+        .map_err(|error| format!("Invalid NATS publish response: {error}"))
+    }
+
+    async fn nats_jetstream_info(&self, connection: &ConnectionConfig) -> Result<NatsJetStreamInfo, String> {
+        self.request(
+            reqwest::Method::POST,
+            "/api/nats/mcp/jetstream/info",
+            Some(json!({ "connectionId": connection.id })),
+        )
+        .await?
+        .json()
+        .await
+        .map_err(|error| format!("Invalid NATS JetStream info response: {error}"))
+    }
+
+    async fn nats_list_streams(&self, connection: &ConnectionConfig) -> Result<NatsStreamList, String> {
+        self.request(
+            reqwest::Method::POST,
+            "/api/nats/mcp/jetstream/streams",
+            Some(json!({ "connectionId": connection.id })),
+        )
+        .await?
+        .json()
+        .await
+        .map_err(|error| format!("Invalid NATS JetStream stream list response: {error}"))
+    }
+
+    async fn nats_get_stream(&self, connection: &ConnectionConfig, stream: &str) -> Result<NatsStreamInfo, String> {
+        self.request(
+            reqwest::Method::POST,
+            "/api/nats/mcp/jetstream/stream",
+            Some(json!({ "connectionId": connection.id, "stream": stream })),
+        )
+        .await?
+        .json()
+        .await
+        .map_err(|error| format!("Invalid NATS JetStream stream response: {error}"))
+    }
+
+    async fn nats_list_consumers(
+        &self,
+        connection: &ConnectionConfig,
+        stream: &str,
+    ) -> Result<NatsConsumerList, String> {
+        self.request(
+            reqwest::Method::POST,
+            "/api/nats/mcp/jetstream/consumers",
+            Some(json!({ "connectionId": connection.id, "stream": stream })),
+        )
+        .await?
+        .json()
+        .await
+        .map_err(|error| format!("Invalid NATS JetStream consumer list response: {error}"))
+    }
+
+    async fn nats_get_consumer(
+        &self,
+        connection: &ConnectionConfig,
+        stream: &str,
+        consumer: &str,
+    ) -> Result<NatsConsumerInfo, String> {
+        self.request(
+            reqwest::Method::POST,
+            "/api/nats/mcp/jetstream/consumer",
+            Some(json!({ "connectionId": connection.id, "stream": stream, "consumer": consumer })),
+        )
+        .await?
+        .json()
+        .await
+        .map_err(|error| format!("Invalid NATS JetStream consumer response: {error}"))
+    }
+
+    async fn nats_fetch_history(
+        &self,
+        connection: &ConnectionConfig,
+        request: NatsHistoryRequest,
+    ) -> Result<NatsHistoryResult, String> {
+        self.request(
+            reqwest::Method::POST,
+            "/api/nats/mcp/jetstream/history",
+            Some(json!({ "connectionId": connection.id, "history": request })),
+        )
+        .await?
+        .json()
+        .await
+        .map_err(|error| format!("Invalid NATS JetStream history response: {error}"))
     }
 
     async fn execute_agent_tool(

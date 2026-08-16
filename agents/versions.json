@@ -43,5 +43,6 @@
   "kafka": "0.1.10",
   "rocketmq": "0.1.7",
   "rabbitmq": "0.1.6",
+  "nats": "0.1.0",
   "sqlserver-legacy": "0.1.16"
 }

@@ -32,7 +32,7 @@ const statsLoading = ref(false);
 const statsError = ref<string>();
 let statsRequestVersion = 0;
 
-const selectedTopic = computed(() => topics.value.find((item) => item.shortName === topicName.value));
+const selectedTopic = computed(() => topics.value.find((item) => item.shortName === topicName.value) ?? (props.topic?.shortName === topicName.value ? props.topic : undefined));
 const selectedTopicRef = computed<TopicRef | null>(() => {
   const name = topicName.value.trim();
   if (!name || !props.tenant || !props.namespace) return null;
@@ -92,7 +92,12 @@ watch(selectedTopic, (topic) => emit("topicSelected", topic));
 </script>
 
 <template>
-  <div class="kafka-messages-panel">
+  <!-- When send is available, keep the classic Kafka messages layout:
+       send form on top, message list below (MessageBrowser is inside SendMessagePanel). -->
+  <SendMessagePanel v-if="canSendMessage" :connection-id="connectionId" :tenant="tenant" :namespace="namespace" :topic="topic" :read-only="readOnly" mq-system-kind="kafka" is-flat-mq-cluster :supports-peek-messages="true" />
+
+  <!-- Peek-only / read-only path: topic picker + partition offsets + message browser. -->
+  <div v-else class="kafka-messages-panel">
     <div class="panel-toolbar">
       <h3>{{ t("mqMessages.queryTitle") }}</h3>
       <button type="button" class="btn-secondary" :disabled="!tenant || !namespace" @click="topicSelectRef?.loadTopics()">
@@ -112,7 +117,7 @@ watch(selectedTopic, (topic) => emit("topicSelected", topic));
       <section v-if="selectedTopicRef" class="partition-overview" data-testid="kafka-partition-overview">
         <div class="section-heading">
           <h4>{{ t("mqMonitoring.kafkaPartitionDetails") }}</h4>
-          <button type="button" class="btn-sm" :disabled="statsLoading" @click="loadStats">{{ t("common.refresh") }}</button>
+          <button type="button" class="btn-sm" :disabled="statsLoading" @click="loadStats">{{ t("mqMonitoring.refreshNow") }}</button>
         </div>
         <div v-if="statsError" class="panel-error">{{ statsError }}</div>
         <div v-else-if="statsLoading" class="section-empty">{{ t("common.loading") }}</div>
@@ -140,7 +145,6 @@ watch(selectedTopic, (topic) => emit("topicSelected", topic));
       </section>
 
       <MessageBrowser :connection-id="connectionId" :topic="selectedTopicRef" mq-system-kind="kafka" />
-      <SendMessagePanel v-if="canSendMessage && selectedTopic" :connection-id="connectionId" :tenant="tenant" :namespace="namespace" :topic="selectedTopic" :read-only="readOnly" mq-system-kind="kafka" is-flat-mq-cluster :supports-peek-messages="false" fixed-topic embedded />
     </div>
   </div>
 </template>
@@ -160,7 +164,32 @@ watch(selectedTopic, (topic) => emit("topicSelected", topic));
   min-height: 0;
   box-sizing: border-box;
   overflow: hidden;
-  padding: 16px;
+  padding: 0;
+}
+
+.panel-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.panel-toolbar h3 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.panel-placeholder {
+  padding: 40px 24px;
+  text-align: center;
+  color: var(--color-text-secondary);
+  font-size: 14px;
+}
+
+.kafka-messages-content {
+  padding: 14px 16px;
 }
 
 .panel-toolbar {
@@ -229,6 +258,14 @@ watch(selectedTopic, (topic) => emit("topicSelected", topic));
   padding: 14px;
   color: var(--color-text-tertiary);
   text-align: center;
+  font-size: 13px;
+}
+
+.panel-error {
+  padding: 10px 14px;
+  border-radius: var(--dbx-radius-fixed-6);
+  background: var(--color-error-bg);
+  color: var(--color-error);
   font-size: 13px;
 }
 </style>

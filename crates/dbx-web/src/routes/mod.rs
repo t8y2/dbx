@@ -20,6 +20,7 @@ pub mod mongo;
 #[cfg(feature = "mq-admin")]
 pub mod mq;
 pub mod nacos;
+pub mod nats;
 pub mod plugins;
 pub mod prompt_template;
 pub mod query;

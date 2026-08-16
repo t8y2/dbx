@@ -748,12 +748,26 @@ mod tests {
 }
 
 #[tauri::command]
-pub async fn save_connections(state: State<'_, Arc<AppState>>, configs: Vec<ConnectionConfig>) -> Result<(), String> {
+pub async fn save_connections(
+    state: State<'_, Arc<AppState>>,
+    nats_state: State<'_, crate::commands::nats_cmd::NatsServiceState>,
+    configs: Vec<ConnectionConfig>,
+) -> Result<(), String> {
     let configs: Vec<ConnectionConfig> = configs.into_iter().map(|config| config.canonicalized()).collect();
-    save_connection_configs(state.inner(), &configs).await
+    let sync = save_connection_configs_with_sync(state.inner(), &configs).await?;
+    close_nats_connections(&nats_state, &sync.connection_pool_ids_to_drop).await;
+    Ok(())
 }
 
+#[cfg(test)]
 async fn save_connection_configs(state: &AppState, configs: &[ConnectionConfig]) -> Result<(), String> {
+    save_connection_configs_with_sync(state, configs).await.map(|_| ())
+}
+
+async fn save_connection_configs_with_sync(
+    state: &AppState,
+    configs: &[ConnectionConfig],
+) -> Result<ConnectionConfigSync, String> {
     for config in configs {
         if config.db_type == DatabaseType::Sqlite {
             db::sqlite::validate_persistent_attachments(
@@ -768,7 +782,7 @@ async fn save_connection_configs(state: &AppState, configs: &[ConnectionConfig])
     remove_connection_pools_for_connection_ids(state, &sync.connection_pool_ids_to_drop).await;
     drop_nacos_adapters_for_connection_ids(state, &sync.nacos_adapter_ids_to_drop).await;
     drop_mq_adapters_for_connection_ids(state, &sync.mq_adapter_ids_to_drop).await;
-    Ok(())
+    Ok(sync)
 }
 
 struct ConnectionConfigSync {
@@ -852,19 +866,37 @@ async fn remove_connection_pools_for_connection_ids(state: &AppState, connection
     }
 }
 
-#[tauri::command]
-pub async fn load_connections(state: State<'_, Arc<AppState>>) -> Result<Vec<ConnectionConfig>, String> {
-    load_connection_configs(state.inner()).await
+async fn close_nats_connections(nats_state: &crate::commands::nats_cmd::NatsServiceState, connection_ids: &[String]) {
+    for connection_id in connection_ids {
+        nats_state.close_connection(connection_id).await;
+    }
 }
 
+#[tauri::command]
+pub async fn load_connections(
+    state: State<'_, Arc<AppState>>,
+    nats_state: State<'_, crate::commands::nats_cmd::NatsServiceState>,
+) -> Result<Vec<ConnectionConfig>, String> {
+    let (configs, sync) = load_connection_configs_with_sync(state.inner()).await?;
+    close_nats_connections(&nats_state, &sync.connection_pool_ids_to_drop).await;
+    Ok(configs)
+}
+
+#[cfg(test)]
 async fn load_connection_configs(state: &AppState) -> Result<Vec<ConnectionConfig>, String> {
+    load_connection_configs_with_sync(state).await.map(|(configs, _)| configs)
+}
+
+async fn load_connection_configs_with_sync(
+    state: &AppState,
+) -> Result<(Vec<ConnectionConfig>, ConnectionConfigSync), String> {
     let configs: Vec<ConnectionConfig> =
         state.storage.load_connections().await?.into_iter().map(|config| config.canonicalized()).collect();
     let sync = sync_connection_configs(state, &configs).await;
     remove_connection_pools_for_connection_ids(state, &sync.connection_pool_ids_to_drop).await;
     drop_nacos_adapters_for_connection_ids(state, &sync.nacos_adapter_ids_to_drop).await;
     drop_mq_adapters_for_connection_ids(state, &sync.mq_adapter_ids_to_drop).await;
-    Ok(configs)
+    Ok((configs, sync))
 }
 
 #[tauri::command]
@@ -1285,13 +1317,25 @@ async fn test_connection_with_info_inner(
             }
             #[cfg(feature = "mq-admin")]
             DatabaseType::MessageQueue => {
-                // Probe with a transient adapter so Test Connection never retains/replaces
-                // a live cached MQ agent for this connection id (same pattern as Nacos).
-                let mqc = state.mq_admin_config_for_connection(connection_id, &config).await?;
-                let agent_launch = dbx_core::mq::service::resolve_mq_agent_launch_spec(&mqc, state);
-                let adapter = state.mq_registry.build_transient_config(mqc, agent_launch).await?;
-                adapter.test_connection().await?;
-                Ok("Connection successful".to_string())
+                if dbx_core::nats::NatsConnectionConfig::is_nats_connection(&config) {
+                    // NATS uses a native Agent rather than the HTTP-admin MQ
+                    // adapter. This path accepts an unsaved dialog draft, so
+                    // users can validate URL/auth/TLS before first save.
+                    let nats = dbx_core::nats::NatsConnectionConfig::from_connection(&config)?;
+                    let info = dbx_core::nats::NatsService::from_agent_manager(&state.agent_manager)?
+                        .test_connection(&nats)
+                        .await?;
+                    let server = info.server_name.unwrap_or_else(|| "NATS server".to_string());
+                    Ok(format!("Connection successful ({server})"))
+                } else {
+                    // Probe with a transient adapter so Test Connection never retains/replaces
+                    // a live cached MQ agent for this connection id (same pattern as Nacos).
+                    let mqc = state.mq_admin_config_for_connection(connection_id, &config).await?;
+                    let agent_launch = dbx_core::mq::service::resolve_mq_agent_launch_spec(&mqc, state);
+                    let adapter = state.mq_registry.build_transient_config(mqc, agent_launch).await?;
+                    adapter.test_connection().await?;
+                    Ok("Connection successful".to_string())
+                }
             }
             #[cfg(not(feature = "mq-admin"))]
             DatabaseType::MessageQueue => {
@@ -1670,28 +1714,34 @@ pub async fn connect_db(
         }
         #[cfg(feature = "mq-admin")]
         DatabaseType::MessageQueue => {
-            let mqc = state.mq_admin_config_for_connection(&id, &config).await?;
-            let agent_launch = dbx_core::mq::service::resolve_mq_agent_launch_spec(&mqc, &state);
-            let build = match state.mq_registry.get_or_build_config(&id, mqc, agent_launch).await {
-                Ok(build) => build,
-                Err(err) => {
+            if dbx_core::nats::NatsConnectionConfig::is_nats_connection(&config) {
+                let nats = dbx_core::nats::NatsConnectionConfig::from_connection(&config)?;
+                dbx_core::nats::NatsService::from_agent_manager(&state.agent_manager)?.test_connection(&nats).await?;
+                PoolKind::MessageQueue
+            } else {
+                let mqc = state.mq_admin_config_for_connection(&id, &config).await?;
+                let agent_launch = dbx_core::mq::service::resolve_mq_agent_launch_spec(&mqc, &state);
+                let build = match state.mq_registry.get_or_build_config(&id, mqc, agent_launch).await {
+                    Ok(build) => build,
+                    Err(err) => {
+                        state.mq_registry.drop_connection(&id).await;
+                        return Err(err);
+                    }
+                };
+                if let Err(err) = state.ensure_current_connection_attempt(&id, Some(attempt)).await {
                     state.mq_registry.drop_connection(&id).await;
                     return Err(err);
                 }
-            };
-            if let Err(err) = state.ensure_current_connection_attempt(&id, Some(attempt)).await {
-                state.mq_registry.drop_connection(&id).await;
-                return Err(err);
+                if let Err(err) = dbx_core::mq::validate_mq_adapter_after_build(&build).await {
+                    state.mq_registry.drop_connection(&id).await;
+                    return Err(err);
+                }
+                if let Err(err) = state.ensure_current_connection_attempt(&id, Some(attempt)).await {
+                    state.mq_registry.drop_connection(&id).await;
+                    return Err(err);
+                }
+                PoolKind::MessageQueue
             }
-            if let Err(err) = dbx_core::mq::validate_mq_adapter_after_build(&build).await {
-                state.mq_registry.drop_connection(&id).await;
-                return Err(err);
-            }
-            if let Err(err) = state.ensure_current_connection_attempt(&id, Some(attempt)).await {
-                state.mq_registry.drop_connection(&id).await;
-                return Err(err);
-            }
-            PoolKind::MessageQueue
         }
         #[cfg(not(feature = "mq-admin"))]
         DatabaseType::MessageQueue => {
@@ -1773,6 +1823,7 @@ pub async fn connection_final_proxy_port(
 #[tauri::command]
 pub async fn disconnect_db(
     state: State<'_, Arc<AppState>>,
+    nats_state: State<'_, crate::commands::nats_cmd::NatsServiceState>,
     connection_id: String,
     client_attempt: Option<u64>,
 ) -> Result<(), String> {
@@ -1786,6 +1837,7 @@ pub async fn disconnect_db(
         return Ok(());
     }
     state.running_queries.cancel_connection(&connection_id);
+    nats_state.close_connection(&connection_id).await;
     state.remove_connection_pools_detached(&connection_id).await;
     drop_nacos_adapters_for_connection_ids(state.inner(), std::slice::from_ref(&connection_id)).await;
     drop_mq_adapters_for_connection_ids(state.inner(), std::slice::from_ref(&connection_id)).await;

@@ -2064,11 +2064,12 @@ impl AppState {
                 PoolKind::Easysearch(client)
             }
             DatabaseType::Meilisearch => {
-                let client = db::meilisearch_driver::MeilisearchClient::new(
+                let client = db::meilisearch_driver::MeilisearchClient::new_for_config(
                     &url,
                     Some(&db_config.password),
                     db_config.ssl,
                     db_config.url_params.as_deref(),
+                    db_config.external_config.as_ref(),
                     connect_timeout,
                 )?;
                 db::meilisearch_driver::test_connection(&client, connect_timeout).await?;

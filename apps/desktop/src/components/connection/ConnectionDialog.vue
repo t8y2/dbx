@@ -354,7 +354,6 @@ const elasticsearchConnectionPorts = ref<Record<ElasticsearchConnectionMode, num
   direct: 9200,
   kibana: 5601,
 });
-
 function resetElasticsearchProxyFields(externalConfig?: unknown) {
   const mode = elasticsearchConnectionModeFromConfig(externalConfig);
   elasticsearchConnectionMode.value = mode;
@@ -603,6 +602,29 @@ function externalConfigRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value) ? { ...(value as Record<string, unknown>) } : {};
 }
 
+function meilisearchConnectionUrl(config: Pick<ConnectionConfig, "host" | "port" | "ssl" | "external_config">): string {
+  const host = config.host.trim();
+  if (!host) return "";
+
+  const scheme = config.ssl ? "https" : "http";
+  const endpointHost = host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;
+  const externalConfig = externalConfigRecord(config.external_config);
+  const storedBasePath = externalConfig.basePath ?? externalConfig.base_path;
+  const basePath = typeof storedBasePath === "string" && storedBasePath.startsWith("/") ? storedBasePath : "";
+
+  return `${scheme}://${endpointHost}:${config.port}${basePath}`;
+}
+
+function syncMeilisearchHostInput(config: Pick<ConnectionConfig, "host" | "port" | "ssl" | "external_config">) {
+  meilisearchHostInput.value = meilisearchConnectionUrl(config);
+  appliedMeilisearchHostInput.value = meilisearchHostInput.value;
+}
+
+function resetMeilisearchHostInput() {
+  meilisearchHostInput.value = "";
+  appliedMeilisearchHostInput.value = "";
+}
+
 function sqlServerPortExplicitFromConfig(config: Pick<ConnectionConfig, "db_type" | "external_config">): boolean {
   if (config.db_type !== "sqlserver") return false;
   const external = externalConfigRecord(config.external_config);
@@ -651,6 +673,8 @@ const selectedJdbcDriverPath = ref("");
 const jdbcManualClasspathOpen = ref(false);
 const connectionUrlInput = ref("");
 const appliedConnectionUrlInput = ref("");
+const meilisearchHostInput = ref("");
+const appliedMeilisearchHostInput = ref("");
 const oracleTnsAdminPath = ref("");
 const oceanbaseSubMode = ref<"mysql" | "oracle">("mysql");
 const h2ConnectionMode = ref<H2ConnectionMode>("file");
@@ -2319,7 +2343,6 @@ function applyProfile(val: string, preserveConnectionFields = false) {
   if (profile.type !== "elasticsearch" || previousDatabaseType !== "elasticsearch") {
     resetElasticsearchProxyFields();
   }
-
   if (!preserveConnectionFields) {
     oracleTnsAdminPath.value = "";
     form.value.port = profile.port;
@@ -2427,6 +2450,11 @@ function applyProfile(val: string, preserveConnectionFields = false) {
     }
     resetHiveKerberosFields(profile.type === "hive" || profile.type === "kyuubi" || profile.type === "impala" ? form.value : undefined);
   }
+  if (profile.type === "meilisearch") {
+    syncMeilisearchHostInput(form.value);
+  } else {
+    resetMeilisearchHostInput();
+  }
 }
 
 function switchOceanbaseMode(mode: "mysql" | "oracle") {
@@ -2520,6 +2548,11 @@ watch(
       productionProtectionEnabled.value = !!config.is_production || (config.production_databases?.length ?? 0) > 0;
       connectionUrlInput.value = config.db_type === "h2" && config.connection_string ? config.connection_string : "";
       appliedConnectionUrlInput.value = connectionUrlInput.value.trim();
+      if (config.db_type === "meilisearch") {
+        syncMeilisearchHostInput(config);
+      } else {
+        resetMeilisearchHostInput();
+      }
       if (config.db_type === "mq") {
         hydrateMqFields(config.external_config);
       } else {
@@ -3577,6 +3610,11 @@ function applyConnectionUrlToForm(input: string): boolean {
     const draft = parseConnectionDeepLink(input) ?? parseServiceConnectionUrl(input);
     if (draft) {
       applyConnectionDraftToForm({ ...draft, oneTime: undefined });
+      if (form.value.db_type === "meilisearch") {
+        syncMeilisearchHostInput(form.value);
+      } else {
+        resetMeilisearchHostInput();
+      }
       resetTestState();
       appliedConnectionUrlInput.value = input.trim();
       return true;
@@ -3586,6 +3624,11 @@ function applyConnectionUrlToForm(input: string): boolean {
     form.value = applyParsedConnectionUrl(form.value, parsed);
     if (form.value.db_type === "victoriametrics") {
       hydrateVictoriaMetricsFields(form.value.external_config);
+    }
+    if (form.value.db_type === "meilisearch") {
+      syncMeilisearchHostInput(form.value);
+    } else {
+      resetMeilisearchHostInput();
     }
     oracleTnsAdminPath.value = parseOracleTnsConnectionString(parsed.connectionString)?.tnsAdmin || "";
     selectedType.value = parsed.driverProfile;
@@ -3611,21 +3654,46 @@ function hasPendingConnectionUrlInput(): boolean {
   return !!url && url !== appliedConnectionUrlInput.value;
 }
 
+function hasPendingMeilisearchHostInput(): boolean {
+  const url = meilisearchHostInput.value.trim();
+  return url !== appliedMeilisearchHostInput.value;
+}
+
+function applyMeilisearchHostInput(): boolean {
+  try {
+    const input = meilisearchHostInput.value.trim();
+    form.value = applyParsedConnectionUrl(form.value, parseConnectionUrl(input, "meilisearch"));
+    appliedMeilisearchHostInput.value = input;
+    resetTestState();
+    return true;
+  } catch (e: any) {
+    toast(t("connection.parseConnectionUrlFailed", { message: e?.message || String(e) }), 5000);
+    return false;
+  }
+}
+
 function ensureConnectionHostResolvedFromUrl(): boolean {
-  if (!hasPendingConnectionUrlInput()) return true;
-  return applyConnectionUrlToForm(connectionUrlInput.value.trim());
+  if (hasPendingConnectionUrlInput() && !applyConnectionUrlToForm(connectionUrlInput.value.trim())) return false;
+  if (form.value.db_type === "meilisearch" && hasPendingMeilisearchHostInput()) return applyMeilisearchHostInput();
+  return true;
 }
 
 function formValueForSubmit(): Omit<ConnectionConfig, "id"> {
   const url = connectionUrlInput.value.trim();
-  if (!url || url === appliedConnectionUrlInput.value) return form.value;
+  if (url && url !== appliedConnectionUrlInput.value) {
+    const draft = parseConnectionDeepLink(url);
+    if (draft) {
+      return applyConnectionDraftToConfig(form.value, { ...draft, oneTime: undefined });
+    }
 
-  const draft = parseConnectionDeepLink(url);
-  if (draft) {
-    return applyConnectionDraftToConfig(form.value, { ...draft, oneTime: undefined });
+    return applyParsedConnectionUrl(form.value, parseConnectionUrl(url, selectedType.value));
   }
 
-  return applyParsedConnectionUrl(form.value, parseConnectionUrl(url, selectedType.value));
+  if (form.value.db_type === "meilisearch" && hasPendingMeilisearchHostInput()) {
+    return applyParsedConnectionUrl(form.value, parseConnectionUrl(meilisearchHostInput.value.trim(), "meilisearch"));
+  }
+
+  return form.value;
 }
 
 function applyDremioJdbcMetadata(config: LegacyConnectionConfig) {
@@ -3902,7 +3970,6 @@ function connectionConfigForSubmit(id: string, generatedName = ""): ConnectionCo
     config.username = "";
     config.password = config.password.trim();
     config.database = undefined;
-    config.external_config = undefined;
   } else if (config.db_type === "sqlserver") {
     config.external_config = sqlServerPortExplicitFromConfig(config) ? { portExplicit: true } : undefined;
   } else if (supportsGaussdbIdentifierQuoteStyle(config)) {
@@ -4754,6 +4821,7 @@ function resetForm() {
   selectedJdbcDriverPath.value = "";
   connectionUrlInput.value = "";
   appliedConnectionUrlInput.value = "";
+  resetMeilisearchHostInput();
   oracleTnsAdminPath.value = "";
   dialogStep.value = "select";
   dbSearchQuery.value = "";
@@ -6985,6 +7053,10 @@ function openExternalUrl(url: string) {
                       </div>
                     </div>
                   </template>
+                  <div v-else-if="form.db_type === 'meilisearch'" class="grid grid-cols-4 items-center gap-4">
+                    <Label :class="connectionLabelClass">{{ t("connection.host") }}</Label>
+                    <Input v-model="meilisearchHostInput" class="col-span-3" :placeholder="connectionUrlPlaceholder" @input="resetTestState" />
+                  </div>
                   <div v-else-if="form.db_type !== 'oracle' || form.oracle_connection_type !== 'tns'" class="grid grid-cols-4 items-center gap-4">
                     <Label :class="connectionLabelClass">{{ form.db_type === "elasticsearch" && elasticsearchConnectionMode === "kibana" ? t("connection.elasticsearchKibanaHost") : t("connection.host") }}</Label>
                     <Input v-model="form.host" class="col-span-2" />

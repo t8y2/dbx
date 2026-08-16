@@ -19,6 +19,7 @@ export interface ParsedConnectionUrl {
   useMongoUrl?: boolean;
   portExplicit?: boolean;
   apiPath?: string;
+  basePath?: string;
 }
 
 export type ConnectionProfile = {
@@ -651,20 +652,24 @@ export function parseConnectionUrl(value: string, preferredProfile?: string): Pa
     };
   }
 
+  const isMeilisearch = profile.type === "meilisearch";
+  const defaultPort = isMeilisearch && scheme === "http" ? 80 : isMeilisearch && scheme === "https" ? 443 : profile.defaultPort;
+
   return {
     ...(name ? { name } : {}),
     dbType: profile.type,
     driverProfile: profile.profile,
     driverLabel: profile.label,
     host: parsed.hostname,
-    port: parsed.port ? Number(parsed.port) : profile.defaultPort,
+    port: parsed.port ? Number(parsed.port) : defaultPort,
     ...(profile.type === "sqlserver" && parsed.port ? { portExplicit: true } : {}),
     username: mysqlCredentials?.username ?? decodeUrlPart(parsed.username),
     password: mysqlCredentials?.password ?? decodeUrlPart(parsed.password),
-    database: profile.type === "victoriametrics" ? "metrics" : databaseFromPath(parsed.pathname),
+    database: profile.type === "victoriametrics" ? "metrics" : isMeilisearch ? undefined : databaseFromPath(parsed.pathname),
     urlParams: effectiveUrlParams,
     ssl: scheme === "rediss" || scheme === "https" || urlParamsRequireTls(profile.type, effectiveUrlParams) || (profile.type === "mysql" && isTidbCloudHost(parsed.hostname)),
     ...(profile.type === "victoriametrics" ? { apiPath: parsed.pathname.replace(/\/+$/, "") } : {}),
+    ...(isMeilisearch ? { basePath: parsed.pathname === "/" ? "" : parsed.pathname.replace(/\/+$/, "") } : {}),
   };
 }
 
@@ -716,6 +721,16 @@ function parsedExternalConfig(existing: unknown, parsed: ParsedConnectionUrl): u
     const next = isRecord(existing) ? { ...existing } : {};
     next.apiPath = parsed.apiPath || "/prometheus";
     return next;
+  }
+  if (parsed.dbType === "meilisearch") {
+    const next = isRecord(existing) ? { ...existing } : {};
+    delete next.base_path;
+    if (parsed.basePath) {
+      next.basePath = parsed.basePath;
+    } else {
+      delete next.basePath;
+    }
+    return Object.keys(next).length > 0 ? next : undefined;
   }
   if (parsed.dbType !== "sqlserver") return existing;
 

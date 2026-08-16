@@ -208,12 +208,14 @@ export function connectionUrlPlaceholder(dbType: DatabaseType): string {
 
     case "elasticsearch":
     case "easysearch":
-    case "meilisearch":
     case "qdrant":
     case "milvus":
     case "weaviate":
     case "chromadb":
       return "http://user:password@host:port";
+
+    case "meilisearch":
+      return "http://host:port/base/path";
 
     case "dameng":
       return "dm://user:password@host:port";

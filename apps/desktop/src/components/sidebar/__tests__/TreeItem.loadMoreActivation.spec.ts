@@ -6,7 +6,7 @@ import i18n from "@/i18n";
 import TreeItem from "@/components/sidebar/TreeItem.vue";
 import { filterSidebarTree } from "@/lib/sidebar/sidebarSearchTree";
 import { createSidebarTreeRuntime, sidebarTreeRuntimeKey, type SidebarTreeRuntimeHost } from "@/lib/sidebar/sidebarTreeRuntime";
-import type { TreeNode } from "@/types/database";
+import type { SidebarLayout, TreeNode } from "@/types/database";
 
 const connectionStore = {
   activeConnectionId: "connection-1",
@@ -26,6 +26,7 @@ const connectionStore = {
   selectedTreeNodeId: null as string | null,
   selectedTreeNodeIds: [] as string[],
   selectedTreeNodeIdsSet: new Set<string>(),
+  sidebarLayout: { groups: [], order: [] } as SidebarLayout,
   sidebarTableSearchQueries: {},
   tableNameFilterForScope: () => undefined,
   treeNodes: [],
@@ -101,6 +102,8 @@ afterEach(() => {
   connectionStore.selectedTreeNodeId = null;
   connectionStore.selectedTreeNodeIds = [];
   connectionStore.selectedTreeNodeIdsSet = new Set<string>();
+  connectionStore.connectionMultiSelectActive = false;
+  connectionStore.sidebarLayout = { groups: [], order: [] };
   connectionStore.treeNodes = [];
   connectionStore.treeSelectionAnchorId = null;
   settingsStore.editorSettings.sidebarActivation = "double";
@@ -108,6 +111,37 @@ afterEach(() => {
 });
 
 describe("TreeItem load-more activation", () => {
+  it("toggles a connection group through its row checkbox", async () => {
+    const group: TreeNode = {
+      id: "group-1",
+      label: "Group 1",
+      type: "connection-group",
+      children: [],
+    };
+    connectionStore.treeNodes = [group];
+    connectionStore.sidebarLayout = {
+      groups: [{ id: group.id, name: group.label, collapsed: false }],
+      order: [{ type: "group", id: group.id, children: [] }],
+    };
+    const { row } = await mountTreeItem(group);
+    const toggle = row.querySelector<HTMLButtonElement>('[data-sidebar-group-selection-toggle="true"]');
+    expect(toggle).not.toBeNull();
+
+    toggle?.click();
+
+    expect(connectionStore.selectedTreeNodeIds).toEqual([group.id]);
+    expect(connectionStore.selectedTreeNodeId).toBe(group.id);
+    expect(connectionStore.treeSelectionAnchorId).toBe(group.id);
+    expect(connectionStore.connectionMultiSelectActive).toBe(true);
+
+    toggle?.click();
+
+    expect(connectionStore.selectedTreeNodeIds).toEqual([]);
+    expect(connectionStore.selectedTreeNodeId).toBeNull();
+    expect(connectionStore.treeSelectionAnchorId).toBeNull();
+    expect(connectionStore.connectionMultiSelectActive).toBe(false);
+  });
+
   it("runs load-more on a single click in double-click activation mode", async () => {
     const node: TreeNode = {
       id: "connection-1:app:dbo:__procedures:__load_more:200",

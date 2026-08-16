@@ -23,6 +23,10 @@ const {
   moveToNewGroupName,
   confirmMoveToNewGroup,
   showDeleteGroupConfirm,
+  deleteConnectionsWithGroup,
+  connectionGroupDeleteConfirmMessage,
+  connectionGroupDeleteMenuLabel,
+  deletingConnectionGroups,
   confirmDeleteGroup,
   showRenameObjectDialog,
   renameObjectName,
@@ -159,6 +163,15 @@ function closeCreateDatabaseResult() {
   showCreateDatabasePreviewDialog.value = false;
 }
 
+function updateDeleteGroupDialogOpen(open: boolean) {
+  if (!open && deletingConnectionGroups.value) return;
+  showDeleteGroupConfirm.value = open;
+}
+
+function preventDeleteGroupDialogDismiss(event: Event) {
+  if (deletingConnectionGroups.value) event.preventDefault();
+}
+
 const mongoIndexCollectionName = computed(() => node.value.tableName || node.value.label);
 
 function mongoIndexTypeLabel(type: string): string {
@@ -232,17 +245,24 @@ watch(
     </DialogContent>
   </Dialog>
 
-  <Dialog v-model:open="showDeleteGroupConfirm">
-    <DialogContent class="sm:max-w-[400px]">
+  <Dialog :open="showDeleteGroupConfirm" @update:open="updateDeleteGroupDialogOpen">
+    <DialogContent class="sm:max-w-[400px]" :show-close-button="!deletingConnectionGroups" @escape-key-down="preventDeleteGroupDialogDismiss" @interact-outside="preventDeleteGroupDialogDismiss">
       <DialogHeader>
         <DialogTitle>{{ t("connectionGroup.deleteGroupConfirmTitle") }}</DialogTitle>
       </DialogHeader>
       <p class="text-sm text-muted-foreground">
-        {{ t("connectionGroup.deleteGroupConfirmMessage", { name: node.label }) }}
+        {{ connectionGroupDeleteConfirmMessage() }}
       </p>
+      <label class="flex items-start gap-2 rounded-md border border-border/70 px-3 py-2 text-sm" :class="deletingConnectionGroups ? 'cursor-not-allowed opacity-60' : 'cursor-pointer'">
+        <input v-model="deleteConnectionsWithGroup" type="checkbox" class="mt-0.5 h-4 w-4 shrink-0 accent-primary" :disabled="deletingConnectionGroups" />
+        <span>{{ t("connectionGroup.deleteConnectionsWithGroup") }}</span>
+      </label>
       <DialogFooter>
-        <Button variant="outline" @click="showDeleteGroupConfirm = false">{{ t("dangerDialog.cancel") }}</Button>
-        <Button variant="destructive" @click="confirmDeleteGroup">{{ t("connectionGroup.deleteGroup") }}</Button>
+        <Button variant="outline" :disabled="deletingConnectionGroups" @click="showDeleteGroupConfirm = false">{{ t("dangerDialog.cancel") }}</Button>
+        <Button variant="destructive" :disabled="deletingConnectionGroups" @click="confirmDeleteGroup">
+          <Loader2 v-if="deletingConnectionGroups" class="mr-2 h-4 w-4 animate-spin" />
+          {{ connectionGroupDeleteMenuLabel() }}
+        </Button>
       </DialogFooter>
     </DialogContent>
   </Dialog>

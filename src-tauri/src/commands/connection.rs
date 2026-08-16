@@ -1105,6 +1105,12 @@ async fn test_connection_with_info_inner(
                     Err(native_err)
                 }
             }
+            DatabaseType::DynamoDb => {
+                let client = db::dynamodb_driver::connect(&config, &host, port)?;
+                db::dynamodb_driver::test_connection(&client, connect_timeout)
+                    .await
+                    .map(|_| "Connection successful".to_string())
+            }
             DatabaseType::ClickHouse => {
                 let username = if config.username.is_empty() { None } else { Some(config.username.clone()) };
                 let password = if config.password.is_empty() { None } else { Some(config.password.clone()) };
@@ -1517,6 +1523,11 @@ pub async fn connect_db(
                     return Err(native_err);
                 }
             }
+        }
+        DatabaseType::DynamoDb => {
+            let client = db::dynamodb_driver::connect(&db_config, &host, port)?;
+            db::dynamodb_driver::test_connection(&client, connect_timeout).await?;
+            PoolKind::DynamoDb(client)
         }
         DatabaseType::ClickHouse => {
             let username = if db_config.username.is_empty() { None } else { Some(db_config.username.clone()) };

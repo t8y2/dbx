@@ -189,6 +189,7 @@ pub async fn run_command(client: &Client, database: &str, command_json: &str) ->
         extended_documents: Some(vec![extended_document]),
         total: 1,
         total_is_exact: true,
+        next_cursor: None,
     })
 }
 
@@ -1198,6 +1199,7 @@ async fn find_documents_with_total(
         extended_documents: Some(extended_documents),
         total,
         total_is_exact,
+        next_cursor: None,
     })
 }
 
@@ -1354,6 +1356,7 @@ pub async fn find_documents_extended_json(
         raw_documents: None,
         total,
         total_is_exact,
+        next_cursor: None,
     })
 }
 
@@ -1422,6 +1425,7 @@ pub async fn aggregate_documents(
             extended_documents: Some(vec![extended]),
             total: 1,
             total_is_exact: true,
+            next_cursor: None,
         });
     }
 
@@ -1479,6 +1483,7 @@ async fn drain_document_cursor(
         extended_documents: Some(extended_documents),
         total,
         total_is_exact: true,
+        next_cursor: None,
     })
 }
 
@@ -1539,6 +1544,7 @@ pub async fn distinct(
         extended_documents: Some(extended_documents),
         total,
         total_is_exact: true,
+        next_cursor: None,
     })
 }
 
@@ -2107,6 +2113,7 @@ fn single_document_result(document: Option<Document>) -> MongoDocumentResult {
             extended_documents: Some(vec![Bson::Document(document).into_canonical_extjson()]),
             total: 1,
             total_is_exact: true,
+            next_cursor: None,
         },
         None => MongoDocumentResult {
             documents: Vec::new(),
@@ -2114,6 +2121,7 @@ fn single_document_result(document: Option<Document>) -> MongoDocumentResult {
             extended_documents: Some(Vec::new()),
             total: 0,
             total_is_exact: true,
+            next_cursor: None,
         },
     }
 }

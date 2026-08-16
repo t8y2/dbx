@@ -27,6 +27,7 @@ export const DATABASE_PROPERTY_EDITING_MATRIX = {
   clickhouse: { deferred: "database property editing not verified for first pass" },
   sqlserver: { deferred: "database options are broad administrative settings and need a dedicated editor" },
   mongodb: { deferred: "database options are not modeled as SQL database properties" },
+  dynamodb: { deferred: "table settings require a dedicated DynamoDB workflow" },
   oracle: { deferred: "Oracle database properties are instance/user/tablespace administration" },
   elasticsearch: { deferred: "index settings are not database properties" },
   easysearch: { deferred: "index settings are not database properties" },

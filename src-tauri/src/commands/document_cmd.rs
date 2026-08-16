@@ -58,6 +58,7 @@ pub async fn document_find_documents(
     projection: Option<String>,
     sort: Option<String>,
     collation: Option<String>,
+    cursor: Option<String>,
     execution_id: Option<String>,
 ) -> Result<DocumentQueryResult, String> {
     let app = state.inner().clone();
@@ -75,9 +76,41 @@ pub async fn document_find_documents(
             projection.as_deref(),
             sort.as_deref(),
             collation.as_deref(),
+            cursor.as_deref(),
         ),
     )
     .await
+}
+
+#[tauri::command]
+pub async fn document_count_documents(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    collection: String,
+    filter: Option<String>,
+    execution_id: Option<String>,
+) -> Result<u64, String> {
+    let app = state.inner().clone();
+    run_cancellable(
+        &app,
+        execution_id,
+        dbx_core::document_ops::count_document_store_documents_core(
+            &app,
+            &connection_id,
+            &collection,
+            filter.as_deref(),
+        ),
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn dynamodb_describe_table(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    table: String,
+) -> Result<dbx_core::db::dynamodb_driver::DynamoDbTableDescription, String> {
+    dbx_core::document_ops::describe_dynamodb_table_core(&state, &connection_id, &table).await
 }
 
 #[tauri::command]

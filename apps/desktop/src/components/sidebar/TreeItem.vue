@@ -304,6 +304,8 @@ function getIconInfo(node: TreeNode): { icon: any; colorClass: string } | null {
       return { icon: Archive, colorClass: "text-cyan-400" };
     case "mongo-collection":
       return { icon: Table, colorClass: "text-green-400" };
+    case "dynamodb-table":
+      return { icon: Table, colorClass: "text-amber-500" };
     case "vector-collection":
       return { icon: TableProperties, colorClass: "text-cyan-400" };
     case "elasticsearch-index":
@@ -385,7 +387,7 @@ function treeNodeSecondaryValue(node: TreeNode): string | undefined {
 
 function visibleLabel(node: TreeNode): string {
   const withValidity = (label: string) => (node.valid === false ? `${label} · INVALID` : label);
-  if (node.type === "table" || node.type === "view" || node.type === "materialized_view" || node.type === "mongo-collection" || node.type === "vector-collection" || node.type === "elasticsearch-index") {
+  if (node.type === "table" || node.type === "view" || node.type === "materialized_view" || node.type === "mongo-collection" || node.type === "dynamodb-table" || node.type === "vector-collection" || node.type === "elasticsearch-index") {
     return withValidity(sidebarDisplayTableName(node.label, settingsStore.editorSettings.sidebarHiddenTablePrefixes));
   }
   return withValidity(displayLabel(node));

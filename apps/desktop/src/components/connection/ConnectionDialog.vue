@@ -1075,6 +1075,14 @@ const driverProfiles: Record<
   access: { type: "access", port: 0, user: "", label: "Microsoft Access", icon: "access" },
   mongodb: { type: "mongodb", port: 27017, user: "", label: "MongoDB", icon: "mongodb" },
   "mongodb-legacy": { type: "mongodb", port: 27017, user: "", label: "MongoDB (Legacy)", icon: "mongodb" },
+  dynamodb: {
+    type: "dynamodb",
+    port: 443,
+    user: "",
+    label: "Amazon DynamoDB",
+    icon: "dynamodb",
+    host: "dynamodb.us-east-1.amazonaws.com",
+  },
   clickhouse: {
     type: "clickhouse",
     port: 8123,
@@ -2363,6 +2371,11 @@ function applyProfile(val: string, preserveConnectionFields = false) {
     if (profile.type === "sqlite") {
       form.value.database = undefined;
     }
+    if (profile.type === "dynamodb") {
+      form.value.database = "us-east-1";
+      form.value.connection_string = undefined;
+      form.value.ssl = true;
+    }
     if (profile.type === "h2") {
       h2ConnectionMode.value = "file";
       form.value.host = "";
@@ -2781,6 +2794,7 @@ const iconTypeMap: Record<string, string> = {
   access: "access",
   redis: "redis",
   mongodb: "mongodb",
+  dynamodb: "dynamodb",
   duckdb: "duckdb",
   clickhouse: "clickhouse",
   sqlserver: "sqlserver",
@@ -2871,6 +2885,7 @@ const dbOptions: DbOption[] = [
   { value: "opentenbase", label: "OpenTenBase" },
   { value: "mysql", label: "MySQL" },
   { value: "mongodb", label: "MongoDB" },
+  { value: "dynamodb", label: "Amazon DynamoDB" },
   { value: "redis", label: "Redis" },
   { value: "oracle", label: "Oracle" },
   { value: "sqlite", label: "SQLite" },
@@ -2987,7 +3002,7 @@ const dbCategoryDefinitions: Array<{
   {
     key: "document",
     titleKey: "connection.databaseCategoryDocument",
-    optionValues: ["mongodb", "redis", "elasticsearch", "easysearch", "meilisearch", "hbase", "manticoresearch", "cassandra"],
+    optionValues: ["mongodb", "dynamodb", "redis", "elasticsearch", "easysearch", "meilisearch", "hbase", "manticoresearch", "cassandra"],
   },
   {
     key: "graph_ai",
@@ -3797,6 +3812,15 @@ function connectionConfigForSubmit(id: string, generatedName = ""): ConnectionCo
     config.database = config.database?.trim() || undefined;
     if (!config.database) {
       throw new Error(t("connection.kingbaseDatabaseRequired"));
+    }
+  }
+  if (config.db_type === "dynamodb") {
+    config.database = config.database?.trim() || "us-east-1";
+    config.username = config.username.trim();
+    config.password = config.password.trim();
+    config.connection_string = config.connection_string?.trim() || undefined;
+    if (!config.username || !config.password) {
+      throw new Error(t("connection.dynamodbCredentialsRequired"));
     }
   }
   if (config.db_type === "gaussdb") {
@@ -6656,6 +6680,38 @@ function openExternalUrl(url: string) {
                   <div class="grid grid-cols-4 items-center gap-4">
                     <Label :class="connectionLabelClass">{{ t("connection.password") }}</Label>
                     <PasswordInput v-model="form.password" class="col-span-3" />
+                  </div>
+                </template>
+
+                <!-- DynamoDB: endpoint, region, AWS credentials -->
+                <template v-else-if="form.db_type === 'dynamodb'">
+                  <div class="grid grid-cols-4 items-center gap-4">
+                    <Label :class="connectionLabelClass">{{ t("connection.dynamodbEndpoint") }}</Label>
+                    <Input v-model="form.host" class="col-span-2" placeholder="dynamodb.us-east-1.amazonaws.com" />
+                    <Input v-model.number="form.port" type="number" class="col-span-1" min="1" max="65535" />
+                  </div>
+                  <div class="grid grid-cols-4 items-center gap-4">
+                    <span />
+                    <label class="col-span-3 flex items-center gap-2 text-sm">
+                      <input v-model="form.ssl" type="checkbox" />
+                      <span>{{ t("connection.sslEnable") }}</span>
+                    </label>
+                  </div>
+                  <div class="grid grid-cols-4 items-center gap-4">
+                    <Label :class="connectionLabelClass">{{ t("connection.dynamodbRegion") }}</Label>
+                    <Input v-model="form.database" class="col-span-3" placeholder="us-east-1" />
+                  </div>
+                  <div class="grid grid-cols-4 items-center gap-4">
+                    <Label :class="connectionLabelClass">{{ t("connection.dynamodbAccessKeyId") }}</Label>
+                    <Input v-model="form.username" class="col-span-3" autocomplete="username" />
+                  </div>
+                  <div class="grid grid-cols-4 items-center gap-4">
+                    <Label :class="connectionLabelClass">{{ t("connection.dynamodbSecretAccessKey") }}</Label>
+                    <PasswordInput v-model="form.password" class="col-span-3" />
+                  </div>
+                  <div class="grid grid-cols-4 items-center gap-4">
+                    <Label :class="connectionLabelSmallClass">{{ t("connection.dynamodbSessionToken") }}</Label>
+                    <PasswordInput v-model="form.connection_string" class="col-span-3" :placeholder="t('connection.dynamodbSessionTokenPlaceholder')" />
                   </div>
                 </template>
 

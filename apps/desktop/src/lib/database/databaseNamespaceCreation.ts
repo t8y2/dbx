@@ -27,6 +27,7 @@ export const DATABASE_NAMESPACE_CREATION_MATRIX = {
   clickhouse: { connection: "database" },
   sqlserver: { connection: "database", database: "schema" },
   mongodb: { connection: "special" },
+  dynamodb: { deferred: "table creation requires dedicated DynamoDB key and capacity options" },
   oracle: { deferred: "Oracle schemas are users; database creation is not a normal connected DDL action" },
   elasticsearch: { deferred: "index creation is not modeled as database creation" },
   easysearch: { deferred: "index creation is not modeled as database creation" },

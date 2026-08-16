@@ -22,6 +22,7 @@ const assetIcons: Record<string, string> = {
   redis: "redis",
   mongodb: "mongodb",
   mongodb_legacy: "mongodb",
+  dynamodb: "dynamodb",
   clickhouse: "clickhouse",
   duckdb: "duckdb",
   mariadb: "mariadb",

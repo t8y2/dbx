@@ -28,6 +28,7 @@ describe("sidebar tree item layout", () => {
   });
 
   it("renders navigation leaf actions without expanders", () => {
+    expect(canTreeNodeShowExpander({ type: "dynamodb-table", childCount: 0 })).toBe(false);
     expect(canTreeNodeShowExpander({ type: "nacos-namespace", childCount: 0 })).toBe(false);
     expect(canTreeNodeShowExpander({ type: "nacos-access-control", childCount: 0 })).toBe(false);
     expect(canTreeNodeShowExpander({ type: "etcd-root", childCount: 0 })).toBe(false);

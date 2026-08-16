@@ -2067,6 +2067,7 @@ async fn do_execute_typed(
             .map(|result| truncate_result_with_max_rows(result, max_rows))
         }
         PoolKind::HBase(_) => Err("SQL execution is not supported for HBase connections".to_string()),
+        PoolKind::DynamoDb(_) => Err("SQL execution is not supported for DynamoDB connections".to_string()),
         PoolKind::Consul(_) => Err("SQL execution is not supported for Consul connections".to_string()),
     };
     result
@@ -3498,6 +3499,7 @@ fn pool_kind_has_transactional_path(pool: &PoolKind) -> bool {
         | PoolKind::DuckDbWorker(_)
         | PoolKind::Redis(_)
         | PoolKind::MongoDb(_)
+        | PoolKind::DynamoDb(_)
         | PoolKind::Elasticsearch(_)
         | PoolKind::Easysearch(_)
         | PoolKind::Meilisearch(_)
@@ -3766,6 +3768,7 @@ pub async fn execute_statements_in_transaction_on_pool_typed(
             PoolKind::DuckDbWorker(_)
             | PoolKind::Redis(_)
             | PoolKind::MongoDb(_)
+            | PoolKind::DynamoDb(_)
             | PoolKind::Elasticsearch(_)
             | PoolKind::Easysearch(_)
             | PoolKind::Meilisearch(_)

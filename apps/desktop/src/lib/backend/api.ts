@@ -698,6 +698,8 @@ export const mongoDropCollection = forward("mongoDropCollection");
 export const mongoRenameCollection = forward("mongoRenameCollection");
 export const mongoCloneCollection = forward("mongoCloneCollection");
 export const documentFindDocuments = forward("documentFindDocuments");
+export const documentCountDocuments = forward("documentCountDocuments");
+export const dynamodbDescribeTable = forward("dynamodbDescribeTable");
 export const elasticsearchCountDocuments = forward("elasticsearchCountDocuments");
 export const mongoFindDocuments = forward("mongoFindDocuments");
 export const mongoParseShellCommand = forward("mongoParseShellCommand");
@@ -856,6 +858,9 @@ export type {
   EtcdPreflightResponse,
   EtcdDangerousApproval,
   DocumentQueryResult,
+  DynamoDbKeyInfo,
+  DynamoDbIndexInfo,
+  DynamoDbTableDescription,
   MongoDocumentResult,
   HistoryEntry,
   HistoryConnectionFilter,

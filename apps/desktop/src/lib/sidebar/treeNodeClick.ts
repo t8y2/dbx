@@ -8,7 +8,7 @@ export type SidebarSelectionCopyAction = "copy-name" | "none";
 export type SidebarActivation = "single" | "double";
 
 const dataNodeTypes = new Set<TreeNodeType>(["table", "view", "materialized_view"]);
-const documentBrowserNodeTypes = new Set<TreeNodeType>(["mongo-collection", "mongo-bucket"]);
+const documentBrowserNodeTypes = new Set<TreeNodeType>(["mongo-collection", "mongo-bucket", "dynamodb-table"]);
 const toggleLeafNodeTypes = new Set<TreeNodeType>([
   "redis-db",
   "mq-tenant",
@@ -24,6 +24,7 @@ const toggleLeafNodeTypes = new Set<TreeNodeType>([
   "mongo-gridfs",
   "mongo-collection",
   "mongo-bucket",
+  "dynamodb-table",
   "vector-collection",
   "elasticsearch-index",
   "user-admin",

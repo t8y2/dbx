@@ -1732,7 +1732,7 @@ export const useConnectionStore = defineStore("connection", () => {
 
   function invalidateMetadataCachesForNode(node: TreeNode) {
     if (!node.connectionId) return;
-    const tableName = node.tableName || (node.type === "table" || node.type === "view" || node.type === "materialized_view" || node.type === "mongo-collection" ? node.label : undefined);
+    const tableName = node.tableName || (node.type === "table" || node.type === "view" || node.type === "materialized_view" || node.type === "mongo-collection" || node.type === "dynamodb-table" ? node.label : undefined);
     const match = {
       connectionId: node.connectionId,
       database: node.database || undefined,
@@ -3135,6 +3135,8 @@ export const useConnectionStore = defineStore("connection", () => {
       await loadConsulRoot(connectionId);
     } else if (config.db_type === "mongodb") {
       await loadMongoDatabases(connectionId);
+    } else if (config.db_type === "dynamodb") {
+      await loadDynamoDbTables(connectionId);
     } else if (config.db_type === "elasticsearch" || config.db_type === "easysearch" || config.db_type === "meilisearch") {
       // Reload: list indices.
       await loadElasticsearchIndices(connectionId);
@@ -3795,7 +3797,7 @@ export const useConnectionStore = defineStore("connection", () => {
   async function loadConnectedConnectionRootForSidebarSearch(connectionId: string) {
     if (!connectedIds.value.has(connectionId)) return;
     const config = getConfig(connectionId);
-    if (!config || ["redis", "etcd", "zookeeper", "consul", "mongodb", "elasticsearch", "easysearch", "meilisearch", "milvus", "qdrant", "weaviate", "chromadb", "mq", "nacos"].includes(config.db_type)) return;
+    if (!config || ["redis", "etcd", "zookeeper", "consul", "mongodb", "dynamodb", "elasticsearch", "easysearch", "meilisearch", "milvus", "qdrant", "weaviate", "chromadb", "mq", "nacos"].includes(config.db_type)) return;
     const node = findConnectionNode(connectionId);
     if (!node || node.type !== "connection" || hasConnectionMetadataChildren(node.children)) return;
     const scope = { kind: "connection-databases" as const, connectionId, driverProfile: metadataDriverProfile(config) };
@@ -4205,6 +4207,42 @@ export const useConnectionStore = defineStore("connection", () => {
           })),
           targetNode,
         ),
+      );
+      targetNode.isExpanded = true;
+    } catch (e) {
+      recordMetadataLoadError(connectionId, e, load);
+      throw e;
+    } finally {
+      finishTreeNodeLoad(load);
+    }
+  }
+
+  async function loadDynamoDbTables(connectionId: string) {
+    const node = findConnectionNode(connectionId);
+    if (!node) return;
+
+    let load = beginTreeNodeLoad(node);
+    try {
+      await ensureConnected(connectionId);
+      load = reclaimTreeNodeLoad(load, node);
+      const config = getConfig(connectionId);
+      const region = config?.database?.trim() || "us-east-1";
+      const tables = await withMetadataLoadTimeout(connectionId, api.documentListCollections(connectionId, region), "DynamoDB tables");
+      const targetNode = treeNodeLoadTarget(load);
+      if (!targetNode) return;
+      setChildren(
+        targetNode,
+        [...tables]
+          .sort((left, right) => compareSidebarNames(left.name, right.name))
+          .map((table) => ({
+            id: `${connectionId}:__dynamodb_table:${table.id}`,
+            label: table.name,
+            type: "dynamodb-table" as const,
+            connectionId,
+            database: region,
+            tableName: table.name,
+            isExpanded: false,
+          })),
       );
       targetNode.isExpanded = true;
     } catch (e) {
@@ -5888,6 +5926,8 @@ export const useConnectionStore = defineStore("connection", () => {
         await loadConsulRoot(node.connectionId);
       } else if (config?.db_type === "mongodb") {
         await loadMongoDatabases(node.connectionId);
+      } else if (config?.db_type === "dynamodb") {
+        await loadDynamoDbTables(node.connectionId);
       } else if (config?.db_type === "elasticsearch" || config?.db_type === "easysearch" || config?.db_type === "meilisearch") {
         await loadElasticsearchIndices(node.connectionId);
       } else if (config?.db_type === "milvus") {
@@ -8006,6 +8046,7 @@ export const useConnectionStore = defineStore("connection", () => {
     loadNacosNamespaces,
     updateRedisDbKeyStats,
     loadMongoDatabases,
+    loadDynamoDbTables,
     loadMilvusDatabases,
     openElasticsearchConnectionTree,
     loadElasticsearchIndices,

@@ -55,8 +55,16 @@ export async function applyDocumentStoreIdentityPlan(options: { kind: DocumentSt
     return;
   }
 
-  // Path-identity stores write under the new id first; Mongo inserts a new document.
-  if (kind !== "mongodb") {
+  // DynamoDB creates the new keyed item before deleting the old one. Its
+  // replace operation intentionally rejects a missing target item.
+  if (kind === "dynamodb") {
+    await writeDocumentStoreDocument({
+      kind,
+      op: "insert",
+      document,
+      apis,
+    });
+  } else if (kind !== "mongodb") {
     await writeDocumentStoreDocument({
       kind,
       op: "put",
@@ -81,7 +89,7 @@ export async function applyDocumentStoreIdentityPlan(options: { kind: DocumentSt
 /** Insert a new document (optional explicit path identity uses put). */
 export async function insertDocumentStoreDocument(options: { kind: DocumentStoreKind; document: Record<string, unknown>; explicitId?: string | null; routing?: string; apis: Pick<DocumentStoreWriteApis, "insert" | "update"> }): Promise<void> {
   const { kind, document, explicitId, routing, apis } = options;
-  if (kind !== "mongodb" && explicitId) {
+  if (kind !== "mongodb" && kind !== "dynamodb" && explicitId) {
     await writeDocumentStoreDocument({
       kind,
       op: "put",

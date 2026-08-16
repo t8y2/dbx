@@ -297,6 +297,35 @@
       }
     },
     {
+      "dbType": "dynamodb",
+      "label": "Amazon DynamoDB",
+      "runtimeMode": "native",
+      "mcpMode": "bridge",
+      "singleConnectionPool": true,
+      "metadataConnectionScoped": false,
+      "skipTcpProbe": false,
+      "defaultPort": 8000,
+      "supportLevel": "operate",
+      "capabilities": {
+        "queryExecution": false,
+        "metadataBrowse": true,
+        "objectBrowser": false,
+        "objectSource": false,
+        "schemaSearch": false,
+        "diagram": false,
+        "tableDataEdit": true,
+        "tableStructureEdit": false,
+        "tableImport": false,
+        "dataTransfer": false,
+        "sqlFileExecution": false,
+        "databaseCreate": false,
+        "fieldLineage": false,
+        "sqlExplain": false,
+        "userAdmin": false,
+        "driverManagement": false
+      }
+    },
+    {
       "dbType": "oracle",
       "label": "Oracle",
       "runtimeMode": "agent",

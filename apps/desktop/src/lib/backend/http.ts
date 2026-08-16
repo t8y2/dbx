@@ -98,6 +98,7 @@ import type {
   EtcdWatchPollResponse,
   EtcdLeaseListResponse,
   DocumentQueryResult,
+  DynamoDbTableDescription,
   MongoDocumentResult,
   MongoCollectionStatsResult,
   MongoCloneCollectionResult,
@@ -3561,7 +3562,7 @@ export async function mongoFindOne(connectionId: string, database: string, colle
   });
 }
 
-export async function documentFindDocuments(connectionId: string, database: string, collection: string, skip: number, limit: number, filter?: string, projection?: string, sort?: string, collation?: string, executionId?: string): Promise<DocumentQueryResult> {
+export async function documentFindDocuments(connectionId: string, database: string, collection: string, skip: number, limit: number, filter?: string, projection?: string, sort?: string, collation?: string, executionId?: string, cursor?: string): Promise<DocumentQueryResult> {
   return post("/api/document-store/find-documents", {
     connectionId,
     database,
@@ -3572,8 +3573,22 @@ export async function documentFindDocuments(connectionId: string, database: stri
     projection,
     sort,
     collation,
+    cursor,
     executionId,
   });
+}
+
+export async function documentCountDocuments(connectionId: string, collection: string, filter?: string, executionId?: string): Promise<number> {
+  return post("/api/document-store/count-documents", {
+    connectionId,
+    collection,
+    filter,
+    executionId,
+  });
+}
+
+export async function dynamodbDescribeTable(connectionId: string, table: string): Promise<DynamoDbTableDescription> {
+  return post("/api/document-store/dynamodb-describe-table", { connectionId, table });
 }
 
 export async function elasticsearchCountDocuments(connectionId: string, index: string, filter?: string, executionId?: string): Promise<number> {

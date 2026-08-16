@@ -274,6 +274,7 @@ pub async fn find_documents(
         extended_documents: None,
         total: result.total,
         total_is_exact: true,
+        next_cursor: None,
     })
 }
 

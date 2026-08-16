@@ -50,6 +50,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "str
 prometheus-parse = "=0.2.5"
 futures = "0.3"
 mongodb = { version = "3.2.5", features = ["socks5-proxy"] }
+aws-sdk-dynamodb = "=1.104.0"
 rumqttc = { version = "0.24", features = ["websocket"], optional = true }
 russh = "0.60"
 pageant = "0.2"

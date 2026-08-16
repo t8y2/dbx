@@ -136,6 +136,7 @@ export function connectionDisplayUrlScheme(connection: Pick<ConnectionConfig, "d
     case "chromadb":
     case "rqlite":
     case "turso":
+    case "dynamodb":
     case "mq":
     case "consul":
       return connection.ssl ? "https" : "http";
@@ -196,6 +197,9 @@ export function connectionUrlPlaceholder(dbType: DatabaseType): string {
 
     case "mongodb":
       return "mongodb://user:password@host:port/database";
+
+    case "dynamodb":
+      return "https://dynamodb.us-east-1.amazonaws.com";
 
     case "clickhouse":
       return "clickhouse://user:password@host:port/database";

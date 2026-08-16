@@ -511,6 +511,8 @@ pub enum DatabaseType {
     SqlServer,
     #[serde(rename = "mongodb")]
     MongoDb,
+    #[serde(rename = "dynamodb")]
+    DynamoDb,
     #[serde(rename = "oracle")]
     Oracle,
     #[serde(rename = "elasticsearch")]
@@ -1093,6 +1095,10 @@ impl ConnectionConfig {
                 let db_part = mongo_uri_db_part_for_suffix(&db_part, &suffix);
                 format!("mongodb://{host}:{port}{db_part}{suffix}")
             }
+            DatabaseType::DynamoDb => {
+                let scheme = if self.ssl { "https" } else { "http" };
+                format!("{scheme}://{host}:{port}")
+            }
             DatabaseType::Oracle => format!("oracle://{host}:{port}{db_part}"),
             DatabaseType::Elasticsearch
             | DatabaseType::Easysearch
@@ -1257,6 +1263,10 @@ impl ConnectionConfig {
                 } else {
                     format!("mongodb://{username}:{password}@{host}:{port}{db_part}{suffix}")
                 }
+            }
+            DatabaseType::DynamoDb => {
+                let scheme = if self.ssl { "https" } else { "http" };
+                format!("{scheme}://{host}:{port}")
             }
             DatabaseType::Oracle => {
                 format!("oracle://{}:{}@{host}:{port}{db_part}", username, password)

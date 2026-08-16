@@ -829,6 +829,7 @@ fn search_response_to_document_result(result: SearchResponse) -> Result<Document
         extended_documents: None,
         total,
         total_is_exact,
+        next_cursor: None,
     })
 }
 

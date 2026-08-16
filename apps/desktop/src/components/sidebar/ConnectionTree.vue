@@ -397,7 +397,7 @@ const SEARCH_SCOPE_TO_NODE_TYPES: Record<SearchScope, TreeNodeType[]> = {
   connection: ["connection"],
   database: ["database", "redis-db", "mq-tenant", "nacos-namespace", "consul-root", "mongo-db"],
   schema: ["schema"],
-  table: ["table", "mongo-collection", "mongo-bucket", "vector-collection", "elasticsearch-index"],
+  table: ["table", "mongo-collection", "mongo-bucket", "dynamodb-table", "vector-collection", "elasticsearch-index"],
   view: ["view"],
 };
 
@@ -679,7 +679,7 @@ const sidebarCommentLabelWidths = shallowRef(new Map<string, number>());
 let sidebarCommentMeasureFrame = 0;
 const sidebarTreeContentWidth = ref(0);
 let sidebarTreeContentMeasureFrame = 0;
-const sidebarTableNameDisplayTypes = new Set<TreeNodeType>(["table", "view", "materialized_view", "mongo-collection", "vector-collection", "elasticsearch-index"]);
+const sidebarTableNameDisplayTypes = new Set<TreeNodeType>(["table", "view", "materialized_view", "mongo-collection", "dynamodb-table", "vector-collection", "elasticsearch-index"]);
 const sidebarStorageDisplayTypes = new Set<TreeNodeType>(["database", "table", "materialized_view"]);
 
 function sidebarCommentLabel(node: TreeNode): string {
@@ -1365,6 +1365,8 @@ async function ensureTreeLoadedForTarget(target: ActiveTabSidebarTarget, opts?: 
         await store.loadRedisDatabases(connId);
       } else if (config.db_type === "mongodb") {
         await store.loadMongoDatabases(connId);
+      } else if (config.db_type === "dynamodb") {
+        await store.loadDynamoDbTables(connId);
       } else if (config.db_type === "elasticsearch" || config.db_type === "easysearch" || config.db_type === "meilisearch") {
         await store.loadElasticsearchIndices(connId);
       } else if (config.db_type === "qdrant" || config.db_type === "milvus" || config.db_type === "weaviate" || config.db_type === "chromadb") {

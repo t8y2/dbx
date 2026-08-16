@@ -6,6 +6,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const backend = vi.hoisted(() => ({
   getColumns: vi.fn(),
   documentFindDocuments: vi.fn(),
+  documentCountDocuments: vi.fn(),
+  dynamodbDescribeTable: vi.fn(),
   cancelQuery: vi.fn(),
   ensureConnected: vi.fn(),
   documentDeleteDocument: vi.fn(),
@@ -33,6 +35,8 @@ const dataGrid = vi.hoisted(() => ({
         save: (changes: { dirtyRows: Map<number, Map<number, unknown>>; deletedRows: Set<number>; newRows: unknown[][]; newRowMeta: unknown[]; columns: string[]; rows: unknown[][] }) => Promise<void>;
       }
     | undefined,
+  countTotalRows: undefined as (() => Promise<number | undefined>) | undefined,
+  paginate: undefined as ((offset: number, limit: number) => Promise<void>) | undefined,
 }));
 
 const settings = vi.hoisted(() => ({
@@ -54,12 +58,16 @@ const settings = vi.hoisted(() => ({
 
 vi.mock("vue-i18n", async (importOriginal) => ({
   ...(await importOriginal<typeof import("vue-i18n")>()),
-  useI18n: () => ({ t: (key: string) => key }),
+  useI18n: () => ({
+    t: (key: string, params?: Record<string, unknown>) => (key === "dynamodb.items" ? `${params?.count} Items` : key),
+  }),
 }));
 
 vi.mock("@/lib/backend/api", () => ({
   getColumns: backend.getColumns,
   documentFindDocuments: backend.documentFindDocuments,
+  documentCountDocuments: backend.documentCountDocuments,
+  dynamodbDescribeTable: backend.dynamodbDescribeTable,
   cancelQuery: backend.cancelQuery,
   documentDeleteDocument: backend.documentDeleteDocument,
   documentSaveMeilisearchBatch: backend.documentSaveMeilisearchBatch,
@@ -90,10 +98,13 @@ vi.mock("@/components/grid/DataGrid.vue", async () => {
         columnLayoutScopeKey: { type: String, default: "" },
         fullExportResult: { type: Function, default: undefined },
         customSaveHandler: { type: Object, default: undefined },
+        countTotalRows: { type: Function, default: undefined },
       },
-      setup(props, { expose, slots }) {
+      setup(props, { attrs, expose, slots }) {
         dataGrid.fullExportResult = props.fullExportResult as typeof dataGrid.fullExportResult;
         dataGrid.customSaveHandler = props.customSaveHandler as typeof dataGrid.customSaveHandler;
+        dataGrid.countTotalRows = props.countTotalRows as typeof dataGrid.countTotalRows;
+        dataGrid.paginate = attrs.onPaginate as typeof dataGrid.paginate;
         expose({
           visibleColumnCount: 2,
           displayableColumnCount: 2,
@@ -284,12 +295,16 @@ beforeEach(async () => {
   });
   backend.getColumns.mockReset();
   backend.documentFindDocuments.mockReset();
+  backend.documentCountDocuments.mockReset();
+  backend.dynamodbDescribeTable.mockReset();
   backend.cancelQuery.mockReset();
   backend.ensureConnected.mockReset();
   backend.documentDeleteDocument.mockReset();
   backend.documentSaveMeilisearchBatch.mockReset();
   dataGrid.fullExportResult = undefined;
   dataGrid.customSaveHandler = undefined;
+  dataGrid.countTotalRows = undefined;
+  dataGrid.paginate = undefined;
   documentJsonEditor.openSearch.mockClear();
   backend.documentDeleteDocument.mockResolvedValue(undefined);
   backend.documentSaveMeilisearchBatch.mockResolvedValue(0);
@@ -306,6 +321,16 @@ beforeEach(async () => {
   settings.updateEditorSettings.mockReset();
   settings.updateEditorSettings.mockImplementation((partial: Partial<typeof settings.editorSettings>) => Object.assign(settings.editorSettings, partial));
   backend.ensureConnected.mockResolvedValue(undefined);
+  backend.documentCountDocuments.mockResolvedValue(0);
+  backend.dynamodbDescribeTable.mockResolvedValue({
+    name: "orders",
+    status: "ACTIVE",
+    itemCount: 0,
+    sizeBytes: 0,
+    partitionKey: { name: "tenant_id", attributeType: "S" },
+    sortKey: { name: "order_id", attributeType: "S" },
+    indexes: [],
+  });
   backend.getColumns.mockResolvedValue([
     { name: "buyers", data_type: "nested" },
     { name: "buyers.email", data_type: "text" },
@@ -443,6 +468,90 @@ describe("DocumentBrowser Elasticsearch field search", () => {
 });
 
 describe("DocumentBrowser MongoDB filter value types", () => {
+  it("keeps an exact DynamoDB count while moving between cursor pages", async () => {
+    app?.unmount();
+    backend.documentCountDocuments.mockResolvedValue(250);
+    backend.documentFindDocuments.mockReset();
+    backend.documentFindDocuments
+      .mockResolvedValueOnce({
+        documents: Array.from({ length: 100 }, (_, index) => ({ _id: { tenant_id: "tenant-a", order_id: String(index) } })),
+        total: 101,
+        total_is_exact: false,
+        next_cursor: "cursor-1",
+      })
+      .mockResolvedValueOnce({
+        documents: Array.from({ length: 100 }, (_, index) => ({ _id: { tenant_id: "tenant-a", order_id: String(index + 100) } })),
+        total: 101,
+        total_is_exact: false,
+        next_cursor: "cursor-2",
+      });
+    app = createApp(DocumentBrowser, {
+      connectionId: "dynamodb-1",
+      database: "us-east-1",
+      collection: "orders",
+      databaseType: "dynamodb",
+    });
+    app.mount(root!);
+    await flushUi();
+
+    expect(await dataGrid.countTotalRows!()).toBe(250);
+    await flushUi();
+    expect(root!.textContent).toContain("250 Items");
+
+    await dataGrid.paginate!(100, 100);
+    await flushUi();
+    expect(backend.documentFindDocuments.mock.calls.at(-1)?.[10]).toBe("cursor-1");
+    expect(root!.textContent).toContain("250 Items");
+  });
+
+  it("exports all DynamoDB pages with opaque cursors instead of offsets", async () => {
+    app?.unmount();
+    settings.editorSettings.exportBatchSize = 2;
+    backend.documentFindDocuments.mockReset();
+    backend.documentFindDocuments
+      .mockResolvedValueOnce({
+        documents: [{ _id: { tenant_id: "tenant-a", order_id: "visible" }, tenant_id: "tenant-a", order_id: "visible" }],
+        total: 2,
+        total_is_exact: false,
+        next_cursor: "visible-cursor",
+      })
+      .mockResolvedValueOnce({
+        documents: [
+          { _id: { tenant_id: "tenant-a", order_id: "001" }, tenant_id: "tenant-a", order_id: "001", amount: { $number: "9007199254740993" } },
+          { _id: { tenant_id: "tenant-a", order_id: "002" }, tenant_id: "tenant-a", order_id: "002", tags: { $stringSet: ["new", "paid"] } },
+        ],
+        total: 3,
+        total_is_exact: false,
+        next_cursor: "cursor-1",
+      })
+      .mockResolvedValueOnce({
+        documents: [{ _id: { tenant_id: "tenant-b", order_id: "003" }, tenant_id: "tenant-b", order_id: "003" }],
+        total: 1,
+        total_is_exact: true,
+      });
+    app = createApp(DocumentBrowser, {
+      connectionId: "dynamodb-1",
+      database: "us-east-1",
+      collection: "orders",
+      databaseType: "dynamodb",
+    });
+    app.mount(root!);
+    await flushUi();
+
+    expect(dataGrid.fullExportResult).toBeTypeOf("function");
+    const progress = vi.fn();
+    const result = await dataGrid.fullExportResult!(progress);
+
+    expect(backend.documentFindDocuments.mock.calls.slice(1).map((call) => [call[3], call[4], call[10]])).toEqual([
+      [0, 2, undefined],
+      [0, 2, "cursor-1"],
+    ]);
+    expect(result?.rows).toHaveLength(3);
+    expect(result?.rows[0]).toContain('{"$number":"9007199254740993"}');
+    expect(result?.rows[1]).toContain('{"$stringSet":["new","paid"]}');
+    expect(progress).toHaveBeenLastCalledWith({ rowsExported: 3, totalRows: 3 });
+  });
+
   it("exports all matching MongoDB documents without changing the visible page", async () => {
     app?.unmount();
     settings.editorSettings.exportBatchSize = 2;

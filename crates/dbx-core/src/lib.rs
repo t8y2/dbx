@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 pub mod agent_catalog;
 pub mod agent_connection;
 pub mod agent_events;

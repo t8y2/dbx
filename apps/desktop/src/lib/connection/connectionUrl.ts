@@ -49,6 +49,7 @@ const SCHEME_PROFILES: Record<string, ConnectionProfile> = {
   zookeeper: { type: "zookeeper", profile: "zookeeper", label: "Apache ZooKeeper", defaultPort: 2181 },
   mongodb: { type: "mongodb", profile: "mongodb", label: "MongoDB", defaultPort: 27017 },
   "mongodb+srv": { type: "mongodb", profile: "mongodb", label: "MongoDB", defaultPort: 27017 },
+  dynamodb: { type: "dynamodb", profile: "dynamodb", label: "Amazon DynamoDB", defaultPort: 443 },
   clickhouse: { type: "clickhouse", profile: "clickhouse", label: "ClickHouse", defaultPort: 8123 },
   sqlserver: { type: "sqlserver", profile: "sqlserver", label: "SQL Server", defaultPort: 1433 },
   mssql: { type: "sqlserver", profile: "sqlserver", label: "SQL Server", defaultPort: 1433 },
@@ -83,6 +84,7 @@ const SCHEME_PROFILES: Record<string, ConnectionProfile> = {
 
 const HTTP_SELECTED_PROFILES: Record<string, ConnectionProfile> = {
   clickhouse: SCHEME_PROFILES.clickhouse,
+  dynamodb: SCHEME_PROFILES.dynamodb,
   elasticsearch: SCHEME_PROFILES.elasticsearch,
   easysearch: SCHEME_PROFILES.easysearch,
   meilisearch: SCHEME_PROFILES.meilisearch,
@@ -188,6 +190,10 @@ function databaseFromPath(pathname: string): string | undefined {
   const value = pathname.replace(/^\/+/, "");
   if (!value) return undefined;
   return decodeUrlPart(value.split("/")[0]);
+}
+
+function dynamodbRegionFromHost(hostname: string): string | undefined {
+  return hostname.toLowerCase().match(/^dynamodb(?:-fips)?\.([a-z0-9-]+)\.(?:amazonaws\.com(?:\.cn)?|api\.aws)$/)?.[1];
 }
 
 function parseZooKeeperUrl(source: string): ParsedConnectionUrl | null {
@@ -665,7 +671,7 @@ export function parseConnectionUrl(value: string, preferredProfile?: string): Pa
     ...(profile.type === "sqlserver" && parsed.port ? { portExplicit: true } : {}),
     username: mysqlCredentials?.username ?? decodeUrlPart(parsed.username),
     password: mysqlCredentials?.password ?? decodeUrlPart(parsed.password),
-    database: profile.type === "victoriametrics" ? "metrics" : isMeilisearch ? undefined : databaseFromPath(parsed.pathname),
+    database: profile.type === "victoriametrics" ? "metrics" : profile.type === "dynamodb" ? dynamodbRegionFromHost(parsed.hostname) : isMeilisearch ? undefined : databaseFromPath(parsed.pathname),
     urlParams: effectiveUrlParams,
     ssl: scheme === "rediss" || scheme === "https" || urlParamsRequireTls(profile.type, effectiveUrlParams) || (profile.type === "mysql" && isTidbCloudHost(parsed.hostname)),
     ...(profile.type === "victoriametrics" ? { apiPath: parsed.pathname.replace(/\/+$/, "") } : {}),
@@ -759,7 +765,7 @@ export function applyParsedConnectionUrl(config: Omit<ConnectionConfig, "id">, p
     name: parsed.name?.trim() || config.name,
     username: applyParsedUsername(config, parsed),
     password: applyParsedPassword(config, parsed),
-    database: parsed.database,
+    database: parsed.dbType === "dynamodb" ? parsed.database || config.database || "us-east-1" : parsed.database,
     url_params: parsed.urlParams,
     ssl: parsed.ssl,
     connection_string: parsed.connectionString,

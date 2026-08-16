@@ -12,6 +12,11 @@ import {
 } from "@/lib/sidebar/treeNodeClick";
 
 describe("treeNodeClick", () => {
+  it("opens DynamoDB tables in the document browser on single or double activation", () => {
+    expect(treeNodeRowAction("dynamodb-table", false, "single", "dynamodb")).toBe("toggle");
+    expect(treeNodeRowDoubleClickAction("dynamodb-table", false, "double", false, "dynamodb")).toBe("toggle");
+  });
+
   it("opens synonym nodes as synonym source", () => {
     expect(objectSourceKindForTreeNode("synonym")).toBe("SYNONYM");
     expect(treeNodeRowAction("synonym", false)).toBe("open-source");

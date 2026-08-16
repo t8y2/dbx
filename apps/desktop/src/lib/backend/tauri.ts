@@ -3286,6 +3286,31 @@ export interface DocumentQueryResult {
   extended_documents?: any[];
   total: number;
   total_is_exact?: boolean;
+  next_cursor?: string;
+}
+
+export interface DynamoDbKeyInfo {
+  name: string;
+  attributeType: "S" | "N" | "B" | string;
+}
+
+export interface DynamoDbIndexInfo {
+  name: string;
+  kind: "global" | "local" | string;
+  partitionKey: DynamoDbKeyInfo;
+  sortKey?: DynamoDbKeyInfo;
+}
+
+export interface DynamoDbTableDescription {
+  name: string;
+  status: string;
+  itemCount: number;
+  sizeBytes: number;
+  partitionKey: DynamoDbKeyInfo;
+  sortKey?: DynamoDbKeyInfo;
+  indexes: DynamoDbIndexInfo[];
+  ttlAttribute?: string;
+  ttlStatus?: string;
 }
 
 // Kept for callers that are specifically using MongoDB APIs.
@@ -3448,7 +3473,7 @@ export async function mongoParseShellCommand(source: string): Promise<MongoComma
   return normalizeRustMongoCommand(raw);
 }
 
-export async function documentFindDocuments(connectionId: string, database: string, collection: string, skip: number, limit: number, filter?: string, projection?: string, sort?: string, collation?: string, executionId?: string): Promise<DocumentQueryResult> {
+export async function documentFindDocuments(connectionId: string, database: string, collection: string, skip: number, limit: number, filter?: string, projection?: string, sort?: string, collation?: string, executionId?: string, cursor?: string): Promise<DocumentQueryResult> {
   return invoke("document_find_documents", {
     connectionId,
     database,
@@ -3459,8 +3484,22 @@ export async function documentFindDocuments(connectionId: string, database: stri
     projection,
     sort,
     collation,
+    cursor,
     executionId,
   });
+}
+
+export async function documentCountDocuments(connectionId: string, collection: string, filter?: string, executionId?: string): Promise<number> {
+  return invoke("document_count_documents", {
+    connectionId,
+    collection,
+    filter,
+    executionId,
+  });
+}
+
+export async function dynamodbDescribeTable(connectionId: string, table: string): Promise<DynamoDbTableDescription> {
+  return invoke("dynamodb_describe_table", { connectionId, table });
 }
 
 export async function elasticsearchCountDocuments(connectionId: string, index: string, filter?: string, executionId?: string): Promise<number> {

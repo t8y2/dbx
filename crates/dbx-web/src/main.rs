@@ -777,6 +777,8 @@ async fn main() {
         .route("/document-store/list-databases", post(routes::document_store::list_databases))
         .route("/document-store/list-collections", post(routes::document_store::list_collections))
         .route("/document-store/find-documents", post(routes::document_store::find_documents))
+        .route("/document-store/count-documents", post(routes::document_store::count_documents))
+        .route("/document-store/dynamodb-describe-table", post(routes::document_store::describe_dynamodb_table))
         .route(
             "/document-store/elasticsearch-count-documents",
             post(routes::document_store::elasticsearch_count_documents),

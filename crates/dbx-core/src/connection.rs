@@ -87,6 +87,7 @@ pub enum PoolKind {
     Redis(db::redis_driver::RedisConnection),
     DuckDbWorker(DuckDbWorkerHandle),
     MongoDb(mongodb::Client),
+    DynamoDb(db::dynamodb_driver::DynamoDbClient),
     ClickHouse(db::clickhouse_driver::ChClient),
     SqlServer(Arc<tokio::sync::Mutex<db::sqlserver::SqlServerClient>>),
     Elasticsearch(db::elasticsearch_driver::EsClient),
@@ -2022,6 +2023,11 @@ impl AppState {
                     }
                 }
             }
+            DatabaseType::DynamoDb => {
+                let client = db::dynamodb_driver::connect(&db_config, &host, port)?;
+                db::dynamodb_driver::test_connection(&client, connect_timeout).await?;
+                PoolKind::DynamoDb(client)
+            }
             DatabaseType::ClickHouse => {
                 let username = if db_config.username.is_empty() { None } else { Some(db_config.username.clone()) };
                 let password = if db_config.password.is_empty() { None } else { Some(db_config.password.clone()) };
@@ -3100,6 +3106,18 @@ impl AppState {
                         }
                     }
                 }
+                PoolKind::DynamoDb(client) => {
+                    let client = client.clone();
+                    drop(connections);
+                    let timeout = crate::db::connection_timeout();
+                    match db::dynamodb_driver::test_connection(&client, timeout).await {
+                        Ok(()) => false,
+                        Err(err) => {
+                            log::warn!("DynamoDB connection pool '{pool_key}' is stale: {err}");
+                            true
+                        }
+                    }
+                }
                 PoolKind::ClickHouse(client) => {
                     let client = client.clone();
                     drop(connections);
@@ -4051,6 +4069,13 @@ impl AppState {
                         false
                     }
                 },
+                PoolKind::DynamoDb(client) => match db::dynamodb_driver::test_connection(client, timeout).await {
+                    Ok(()) => true,
+                    Err(e) => {
+                        log::warn!("DynamoDB connection pool '{key}' is unhealthy: {e}");
+                        false
+                    }
+                },
                 PoolKind::ClickHouse(client) => match db::clickhouse_driver::test_connection(client, timeout).await {
                     Ok(()) => true,
                     Err(e) => {
@@ -4844,6 +4869,7 @@ fn clone_pool_kind(pool: &PoolKind) -> PoolKind {
         #[cfg(not(feature = "duckdb-sidecar"))]
         PoolKind::DuckDbWorker(_) => PoolKind::DuckDbWorker(()),
         PoolKind::MongoDb(client) => PoolKind::MongoDb(client.clone()),
+        PoolKind::DynamoDb(client) => PoolKind::DynamoDb(client.clone()),
         PoolKind::ClickHouse(client) => PoolKind::ClickHouse(client.clone()),
         PoolKind::SqlServer(client) => PoolKind::SqlServer(client.clone()),
         PoolKind::Elasticsearch(client) => PoolKind::Elasticsearch(client.clone()),
@@ -4886,6 +4912,9 @@ async fn close_pool_kind(pool: PoolKind) -> Result<(), String> {
         #[cfg(not(feature = "duckdb-sidecar"))]
         PoolKind::DuckDbWorker(_) => {}
         PoolKind::MongoDb(client) => {
+            drop(client);
+        }
+        PoolKind::DynamoDb(client) => {
             drop(client);
         }
         PoolKind::ClickHouse(client) => {

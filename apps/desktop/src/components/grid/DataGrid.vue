@@ -724,10 +724,23 @@ const contextSelectionIsSynthetic = ref(false);
 const contextHeaderColumn = ref<string | null>(null);
 const contextHeaderColumnIndex = ref<number | null>(null);
 const contextHeaderVisibleColIdx = ref<number | null>(null);
+let contextMenuLifecycle = 0;
 
 function invalidateSyntheticContextSelection() {
   contextSelectionIsSynthetic.value = false;
   contextCell.value = null;
+}
+
+function onGridContextMenuOpen() {
+  contextMenuLifecycle += 1;
+}
+
+function onGridContextMenuClose() {
+  const lifecycle = ++contextMenuLifecycle;
+  queueMicrotask(() => {
+    if (lifecycle !== contextMenuLifecycle) return;
+    invalidateSyntheticContextSelection();
+  });
 }
 
 const bulkEditDialogOpen = ref(false);
@@ -10328,7 +10341,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
     @paste="onGridPaste"
     @focusin="onGridFocusIn"
   >
-    <CustomContextMenu :items="gridContextMenuItems" v-slot="{ onContextMenu }">
+    <CustomContextMenu :items="gridContextMenuItems" @open="onGridContextMenuOpen" @close="onGridContextMenuClose" v-slot="{ onContextMenu }">
       <div v-if="hasData || canShowWhereSearch" class="flex-1 flex flex-col overflow-hidden" @contextmenu="onContextMenu">
         <!-- Search bar -->
         <!-- Leave real vertical space around the 28px controls instead of fitting them against the border. -->

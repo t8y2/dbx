@@ -902,6 +902,40 @@ describe("useDataGridExport prepared row statements", () => {
     expect(toast).toHaveBeenCalledWith("grid.copyExtractorUnsupportedSelection", 5000);
   });
 
+  it("uses the right-clicked cell for SQL predicates despite an irregular discrete selection", async () => {
+    const state = createExportState(
+      editableTable,
+      ["id", "name"],
+      undefined,
+      undefined,
+      { columns: ["id", "name"], rows: [[1], ["Grace"]] },
+      [
+        [1, "Ada"],
+        [2, "Grace"],
+      ],
+      [],
+      DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS,
+      false,
+      undefined,
+      false,
+      2,
+      1,
+    );
+    vi.mocked(extractDataGridSelection).mockResolvedValueOnce({ text: "name = 'Grace'", mimeType: "application/sql", fileExtension: "sql", rowCount: 1, columnCount: 1 });
+
+    expect(state.canCopyWithExtractor("where-clause")).toBe(true);
+    await expect(state.copyWithExtractor("where-clause")).resolves.toBe(true);
+
+    expect(extractDataGridSelection).toHaveBeenCalledWith(
+      expect.objectContaining({
+        extractor: "where-clause",
+        columns: [expect.objectContaining({ sourceName: "name" })],
+        selectedColumnIndexes: [0],
+        rows: [["Grace"]],
+      }),
+    );
+  });
+
   it("limits live extractor previews to the first 100 selected rows", async () => {
     const rows = Array.from({ length: 101 }, (_, index) => [index + 1, `name-${index + 1}`]);
     const matrix: CellSelectionMatrix = {

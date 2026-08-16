@@ -79,6 +79,10 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
     return options.hasCellSelection.value ? options.selectedCells.value : null;
   }
 
+  function hasContextPredicateTarget(extractor: DataGridCopyExtractorId): boolean {
+    return (extractor === "sql-select" || extractor === "where-clause") && (options.contextCell.value?.col ?? -1) >= 0;
+  }
+
   function buildRequest(extractor: DataGridCopyExtractorId, extractorOptions: DataGridExtractorOptions = options.extractorOptions?.value ?? DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS): DataGridExtractRequest | null {
     const visibleIndexes = options.visibleColumnIndexes.value;
     const sourceNames = options.allSourceColumns.value;
@@ -98,7 +102,7 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
     // SQL predicates generated from the context menu must describe the cell the
     // user right-clicked, even when an existing row or range selection remains
     // active underneath that menu.
-    const contextPredicateCell = (extractor === "sql-select" || extractor === "where-clause") && contextCell?.col !== undefined && contextCell.col >= 0 ? contextCell : null;
+    const contextPredicateCell = hasContextPredicateTarget(extractor) ? contextCell : null;
     // When the user already has a single-cell selection and right-clicks the same
     // cell, contextSelectionIsSynthetic is false but we still have a valid context
     // cell. For INSERT/UPDATE extractors, we include all visible non-PK columns
@@ -243,8 +247,8 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
   }
 
   function canCopyWithExtractor(extractor: DataGridCopyExtractorId, extractorOptions: DataGridExtractorOptions = options.extractorOptions?.value ?? DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS): boolean {
-    const hasContextPredicateTarget = (extractor === "sql-select" || extractor === "where-clause") && (options.contextCell.value?.col ?? -1) >= 0;
-    if (hasUnsupportedDiscreteSelection.value && !hasContextPredicateTarget) return false;
+    const contextPredicateTarget = hasContextPredicateTarget(extractor);
+    if (hasUnsupportedDiscreteSelection.value && !contextPredicateTarget) return false;
     if (!options.hasRowSelection.value && !options.hasCellSelection.value && !options.contextCell.value) return false;
     if (extractorUnavailableForDatabase(extractor, options.databaseType.value)) return false;
     if (extractor === "sql-inserts") {
@@ -261,7 +265,7 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
     }
     if (extractor === "sql-select") {
       const matrix = options.selectedCellMatrix.value;
-      if (hasContextPredicateTarget) {
+      if (contextPredicateTarget) {
         // The context-menu target is validated by buildRequest below.
       } else if (options.hasRowSelection.value) {
         if (options.selectedRowIds.value.size !== 1) return false;
@@ -276,7 +280,7 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
       if (request.selectionKind === "cells" && request.selectedColumnIndexes.length !== 1) return false;
       return request.columns.length > 0 && request.columns.every((column) => !!(column.sourceName ?? column.displayName)?.trim());
     }
-    if (extractor === "where-clause" && hasContextPredicateTarget) {
+    if (extractor === "where-clause" && contextPredicateTarget) {
       return buildRequest(extractor, extractorOptions) !== null;
     }
     if (extractor === "raw") {
@@ -300,7 +304,7 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
   }
 
   async function copyWithExtractor(extractor: DataGridCopyExtractorId, extractorOptions: DataGridExtractorOptions = options.extractorOptions?.value ?? DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS): Promise<boolean> {
-    if (hasUnsupportedDiscreteSelection.value) {
+    if (hasUnsupportedDiscreteSelection.value && !hasContextPredicateTarget(extractor)) {
       toast(t("grid.copyExtractorUnsupportedSelection"), 5000);
       return false;
     }
@@ -339,7 +343,7 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
   }
 
   async function previewWithExtractor(extractor: DataGridCopyExtractorId, extractorOptions: DataGridExtractorOptions): Promise<DataGridExtractPreview> {
-    if (hasUnsupportedDiscreteSelection.value) throw new Error(t("grid.copyExtractorUnsupportedSelection"));
+    if (hasUnsupportedDiscreteSelection.value && !hasContextPredicateTarget(extractor)) throw new Error(t("grid.copyExtractorUnsupportedSelection"));
     const initialRequest = buildRequest(extractor, extractorOptions);
     if (!initialRequest) throw new Error(t("grid.copyExtractorEmptySelection"));
     const sourceRowCount = initialRequest.rows.length;

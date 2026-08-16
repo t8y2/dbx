@@ -49,4 +49,12 @@ describe("QueryErrorActions", () => {
     expect(labels).toContain("Change connection timeout");
     expect(labels).not.toContain("Change query timeout");
   });
+
+  it("does not offer query timeout settings for non-query Agent RPC stages", async () => {
+    for (const stage of ["request", "validate", "cancel", "close"]) {
+      const { host } = await mountActions(`Agent RPC call timed out at ${stage}`);
+
+      expect(host.textContent).not.toContain("Change query timeout");
+    }
+  });
 });

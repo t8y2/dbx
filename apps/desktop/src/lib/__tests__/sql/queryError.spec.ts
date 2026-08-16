@@ -64,11 +64,16 @@ describe("isQueryTimeoutErrorMessage", () => {
     expect(isQueryTimeoutErrorMessage("Agent RPC error (-1): Agent RPC call timed out (120s)")).toBe(true);
   });
 
-  it("does not classify connect-stage agent RPC timeouts as query timeouts", () => {
-    const message = "Agent RPC call timed out at connect";
+  it("classifies only execute and fetch Agent RPC stages as query timeouts", () => {
+    for (const stage of ["execute", "fetch"]) {
+      expect(isQueryTimeoutErrorMessage(`Agent RPC call timed out at ${stage}`)).toBe(true);
+    }
 
-    expect(isConnectionTimeoutErrorMessage(message)).toBe(true);
-    expect(isQueryTimeoutErrorMessage(message)).toBe(false);
+    for (const stage of ["request", "checkout", "connect", "validate", "cancel", "close"]) {
+      expect(isQueryTimeoutErrorMessage(`Agent RPC call timed out at ${stage}`)).toBe(false);
+    }
+
+    expect(isConnectionTimeoutErrorMessage("Agent RPC call timed out at connect")).toBe(true);
   });
 
   it("detects structured query operation timeouts before localized text matching", () => {

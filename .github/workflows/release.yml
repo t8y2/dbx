@@ -535,7 +535,7 @@ jobs:
           RUSTFLAGS: ${{ matrix.rustflags }}
         run: |
           cargo zigbuild --release -p dbx-web --target ${{ matrix.target }} \
-            --no-default-features --features "duckdb-sidecar,mq-admin"
+            --no-default-features --features "duckdb-sidecar,dynamodb,mq-admin"
 
       - name: Package static browser runtime
         env:

@@ -11,6 +11,11 @@ pub mod duckdb_sql;
 pub mod duckdb_worker_process;
 #[cfg(feature = "duckdb-sidecar")]
 pub mod duckdb_worker_protocol;
+#[cfg(feature = "dynamodb")]
+#[path = "dynamodb_driver.rs"]
+pub mod dynamodb_driver;
+#[cfg(not(feature = "dynamodb"))]
+#[path = "dynamodb_driver_disabled.rs"]
 pub mod dynamodb_driver;
 pub mod easysearch_driver;
 pub mod elasticsearch_driver;

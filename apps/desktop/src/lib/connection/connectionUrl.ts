@@ -341,6 +341,39 @@ export function connectionProfileForScheme(scheme: string, preferredProfile?: st
   return SCHEME_PROFILES[normalizedScheme];
 }
 
+function parseJdbcHiveUrl(source: string): ParsedConnectionUrl | null {
+  const match = /^jdbc:hive2:\/\/(?<hosts>[^/?#;]+)(?:\/(?<path>[^?#]*))?(?:\?[^#]*)?(?:#.*)?$/i.exec(source);
+  if (!match?.groups) return null;
+
+  const firstHost = match.groups.hosts.split(",")[0]?.trim();
+  if (!firstHost) return null;
+
+  let endpoint: URL;
+  try {
+    endpoint = new URL(`hive2://${firstHost}`);
+  } catch {
+    return null;
+  }
+  if (!endpoint.hostname) return null;
+
+  const [rawDatabase = "", ...paramParts] = (match.groups.path || "").split(";");
+  const urlParams = paramParts.join(";");
+
+  return {
+    dbType: "hive",
+    driverProfile: "hive",
+    driverLabel: "Apache Hive",
+    host: endpoint.hostname.replace(/^\[(.*)]$/, "$1"),
+    port: endpoint.port ? Number(endpoint.port) : 10000,
+    username: "",
+    password: "",
+    database: decodeUrlPart(rawDatabase) || undefined,
+    urlParams,
+    ssl: queryParamValue(urlParams, "ssl")?.toLowerCase() === "true",
+    connectionString: source,
+  };
+}
+
 function parseJdbcSqlServerUrl(source: string): ParsedConnectionUrl | null {
   const match = source.match(/^jdbc:sqlserver:\/\/([^;:/]+)(?::(\d+))?(?:;(.*))?$/i);
   if (!match) return null;
@@ -580,6 +613,8 @@ export function parseConnectionUrl(value: string, preferredProfile?: string): Pa
   if (!input) {
     throw new Error("Connection URL is empty");
   }
+  const jdbcHive = parseJdbcHiveUrl(input);
+  if (jdbcHive) return jdbcHive;
   const jdbcH2 = parseH2JdbcUrl(input);
   if (jdbcH2) return jdbcH2;
   const jdbcUCanAccess = parseJdbcUCanAccessUrl(input);

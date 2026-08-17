@@ -29,6 +29,16 @@ fn gaussdb_m_jdbc_command_config(config: &ConnectionConfig, host: &str, port: u1
     gaussdb_uses_m_jdbc_driver(config).then(|| gaussdb_m_jdbc_config_for_endpoint(config, host, port))
 }
 
+fn jdbc_command_config_for_endpoint(config: &ConnectionConfig, host: &str, port: u16) -> ConnectionConfig {
+    let mut jdbc_config = config.clone();
+    if host != config.host || port != config.port {
+        if let Some(ref url) = jdbc_config.connection_string {
+            jdbc_config.connection_string = Some(rewrite_jdbc_url_host(url, host, port));
+        }
+    }
+    jdbc_config
+}
+
 fn mongo_legacy_connect_params(config: &ConnectionConfig, host: &str, port: u16) -> serde_json::Value {
     serde_json::json!({
         "connection": agent_connect_params(config, host, port, config.effective_database().unwrap_or(""))
@@ -199,9 +209,10 @@ mod tests {
     #[cfg(feature = "mq-admin")]
     use super::load_connection_configs;
     use super::{
-        connect_sqlite_from_config, gaussdb_m_jdbc_command_config, mark_mongo_legacy_driver,
-        mongo_legacy_connect_params, mongo_legacy_fallback_error, persist_mongo_legacy_driver_profile,
-        save_connection_configs, sync_connection_configs, MONGO_LEGACY_DRIVER_LABEL, MONGO_LEGACY_DRIVER_PROFILE,
+        connect_sqlite_from_config, gaussdb_m_jdbc_command_config, jdbc_command_config_for_endpoint,
+        mark_mongo_legacy_driver, mongo_legacy_connect_params, mongo_legacy_fallback_error,
+        persist_mongo_legacy_driver_profile, save_connection_configs, sync_connection_configs,
+        MONGO_LEGACY_DRIVER_LABEL, MONGO_LEGACY_DRIVER_PROFILE,
     };
     use dbx_core::connection::{AppState, PoolKind};
     use dbx_core::models::connection::{AttachedDatabaseConfig, ConnectionConfig, DatabaseType};
@@ -415,6 +426,21 @@ mod tests {
 
         config.driver_profile = Some("gaussdb".to_string());
         assert!(gaussdb_m_jdbc_command_config(&config, "127.0.0.1", 18000).is_none());
+    }
+
+    #[test]
+    fn jdbc_command_config_rewrites_url_for_transport_endpoint() {
+        let mut config = mongodb_config();
+        config.db_type = DatabaseType::Jdbc;
+        config.host = "db.example.test".to_string();
+        config.port = 3306;
+        config.connection_string = Some("jdbc:mysql://db.example.test:3306".to_string());
+
+        let tunneled = jdbc_command_config_for_endpoint(&config, "127.0.0.1", 45678);
+        assert_eq!(tunneled.connection_string.as_deref(), Some("jdbc:mysql://127.0.0.1:45678"));
+
+        let direct = jdbc_command_config_for_endpoint(&config, &config.host, config.port);
+        assert_eq!(direct.connection_string, config.connection_string);
     }
 
     #[test]
@@ -1336,12 +1362,7 @@ async fn test_connection_with_info_inner(
                 }
             }
             DatabaseType::Jdbc => {
-                let mut jdbc_config = config.clone();
-                if host != config.host || port != config.port {
-                    if let Some(ref url) = jdbc_config.connection_string {
-                        jdbc_config.connection_string = Some(rewrite_jdbc_url_host(url, &host, port));
-                    }
-                }
+                let jdbc_config = jdbc_command_config_for_endpoint(&config, &host, port);
                 match state.test_external_driver_with_info("jdbc", &jdbc_config).await {
                     Ok(details) => {
                         database_info = details.database_info;
@@ -1720,7 +1741,10 @@ pub async fn connect_db(
             let jdbc_config = prestosql_jdbc_config_for_endpoint(&db_config, &host, port);
             state.external_driver_pool("jdbc", &jdbc_config).await?
         }
-        DatabaseType::Jdbc => state.external_driver_pool("jdbc", &db_config).await?,
+        DatabaseType::Jdbc => {
+            let jdbc_config = jdbc_command_config_for_endpoint(&db_config, &host, port);
+            state.external_driver_pool("jdbc", &jdbc_config).await?
+        }
         #[cfg(feature = "mq-admin")]
         DatabaseType::Mqtt => {
             let mqtt_config = dbx_core::mqtt::types::MqttConnectionConfig::from_connection(&db_config)?;

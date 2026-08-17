@@ -34,6 +34,7 @@ fn generate_details(tables: &[TableInfo], columns_per_table: usize) -> Vec<Table
                 .map(|j| ColumnInfo {
                     name: format!("col_{}", j),
                     data_type: if j % 3 == 0 { "int".to_string() } else { "varchar(64)".to_string() },
+                    resolved_schema: None,
                     is_nullable: j % 2 == 0,
                     column_default: if j == 0 { Some("0".to_string()) } else { None },
                     is_primary_key: j == 0,

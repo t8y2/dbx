@@ -293,6 +293,7 @@ pub async fn get_columns(client: &MeilisearchClient, index: &str) -> Result<Vec<
             is_primary_key: primary_key.as_deref() == Some(name.as_str()),
             name,
             data_type: field_type.label().to_string(),
+            resolved_schema: None,
             is_nullable: true,
             column_default: None,
             is_unique: false,

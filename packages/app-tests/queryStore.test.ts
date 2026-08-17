@@ -2126,7 +2126,7 @@ test("normalizes only unquoted SAP HANA query identifiers before loading editabl
   }
 });
 
-test("keeps unqualified Vastbase query writes in the current search path", async () => {
+test("uses the visible Vastbase relation schema for unqualified query writes", async () => {
   const restoreStorage = installMemoryStorage();
   setActivePinia(createPinia());
   const connectionStore = useConnectionStore();
@@ -2173,8 +2173,8 @@ test("keeps unqualified Vastbase query writes in the current search path", async
       columnRequests.push({ database: params.get("database"), schema: params.get("schema"), table: params.get("table") });
       return new Response(
         JSON.stringify([
-          { name: "MONO", data_type: "varchar", is_nullable: true, column_default: null, is_primary_key: false, extra: null, comment: null },
-          { name: "ID", data_type: "bigint", is_nullable: false, column_default: null, is_primary_key: false, extra: null, comment: null },
+          { name: "MONO", data_type: "varchar", resolved_schema: "tenant_b", is_nullable: true, column_default: null, is_primary_key: false, extra: null, comment: null },
+          { name: "ID", data_type: "bigint", resolved_schema: "tenant_b", is_nullable: false, column_default: null, is_primary_key: false, extra: null, comment: null },
         ]),
         { status: 200, headers: { "Content-Type": "application/json" } },
       );
@@ -2196,7 +2196,7 @@ test("keeps unqualified Vastbase query writes in the current search path", async
     const tab = store.tabs.find((item) => item.id === tabId);
     await waitFor(() => columnRequests.length > 0 && tab?.tableMeta?.tableName === "TBLCUSPOSTMATERIALLOG");
     assert.deepEqual(columnRequests, [{ database: "smes_dev", schema: "", table: "TBLCUSPOSTMATERIALLOG" }]);
-    assert.equal(tab?.tableMeta?.schema, undefined);
+    assert.equal(tab?.tableMeta?.schema, "tenant_b");
     assert.deepEqual(
       tab?.tableMeta?.columns.map((column) => column.name),
       ["MONO", "ID"],

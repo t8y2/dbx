@@ -228,6 +228,7 @@ fn column_info_serialization_roundtrip() {
     let col = ColumnInfo {
         name: "id".to_string(),
         data_type: "int".to_string(),
+        resolved_schema: None,
         is_nullable: false,
         column_default: None,
         is_primary_key: true,
@@ -274,6 +275,7 @@ fn table_columns_result_serialization_contract() {
         columns: vec![ColumnInfo {
             name: "id".to_string(),
             data_type: "int".to_string(),
+            resolved_schema: None,
             is_nullable: false,
             column_default: None,
             is_primary_key: true,

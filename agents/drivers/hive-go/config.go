@@ -140,6 +140,7 @@ type connectionConfig struct {
 }
 
 func parseConnectionConfig(params connectParams) (connectionConfig, error) {
+	hasStructuredEndpoint := strings.TrimSpace(params.Host) != ""
 	config := connectionConfig{
 		DatabaseType:           strings.ToLower(strings.TrimSpace(params.DatabaseType)),
 		Database:               strings.TrimSpace(params.Database),
@@ -181,28 +182,37 @@ func parseConnectionConfig(params connectParams) (connectionConfig, error) {
 	if err != nil {
 		return connectionConfig{}, err
 	}
-	if config.Database == "" && parsed.database != "" {
-		config.Database = parsed.database
+	if !hasStructuredEndpoint {
+		if config.Database == "" && parsed.database != "" {
+			config.Database = parsed.database
+		}
+		if config.Username == "" && parsed.username != "" {
+			config.Username = parsed.username
+		}
+		if config.Password == "" && parsed.password != "" {
+			config.Password = parsed.password
+		}
 	}
 	if config.Database == "" {
 		config.Database = defaultHiveDatabase
 	}
-	if config.Username == "" && parsed.username != "" {
-		config.Username = parsed.username
-	}
-	if config.Password == "" && parsed.password != "" {
-		config.Password = parsed.password
-	}
 
 	urlSections := parseHiveParameterSections(params.URLParams)
-	values := mergeHiveParameters(parsed.parameters, urlSections.session)
-	hiveConfs := mergeHiveConfAssignments(parsed.hiveConfs, urlSections.hiveConfs)
-	hiveVars := mergeHiveAssignments(parsed.hiveVars, urlSections.hiveVars)
-	if value, exists := firstParameter(values, "user", "username"); exists {
-		config.Username = value
-	}
-	if value, exists := firstParameter(values, "password"); exists {
-		config.Password = value
+	values := urlSections.session
+	hiveConfs := urlSections.hiveConfs
+	hiveVars := urlSections.hiveVars
+	if hasStructuredEndpoint {
+		deleteHiveParameters(values, "user", "username", "password", "ssl")
+	} else {
+		values = mergeHiveParameters(parsed.parameters, values)
+		hiveConfs = mergeHiveConfAssignments(parsed.hiveConfs, hiveConfs)
+		hiveVars = mergeHiveAssignments(parsed.hiveVars, hiveVars)
+		if value, exists := firstParameter(values, "user", "username"); exists {
+			config.Username = value
+		}
+		if value, exists := firstParameter(values, "password"); exists {
+			config.Password = value
+		}
 	}
 	if err := applyHiveParameters(&config, values, hiveConfs); err != nil {
 		return connectionConfig{}, err
@@ -479,6 +489,17 @@ func setCaseInsensitive(values map[string]string, key, value string) {
 		}
 	}
 	values[key] = value
+}
+
+func deleteHiveParameters(values map[string]string, keys ...string) {
+	for existing := range values {
+		for _, key := range keys {
+			if strings.EqualFold(existing, key) {
+				delete(values, existing)
+				break
+			}
+		}
+	}
 }
 
 func mergeHiveAssignments(first, second map[string]string) map[string]string {

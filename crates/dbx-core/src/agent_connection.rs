@@ -634,12 +634,12 @@ pub fn hive_uses_zookeeper_discovery(config: &ConnectionConfig) -> bool {
         return false;
     }
 
-    config
-        .connection_string
-        .as_deref()
-        .into_iter()
-        .chain(config.url_params.as_deref())
-        .any(hive_parameters_use_zookeeper_discovery)
+    if config.url_params.as_deref().is_some_and(hive_parameters_use_zookeeper_discovery) {
+        return true;
+    }
+
+    config.host.trim().is_empty()
+        && config.connection_string.as_deref().is_some_and(hive_parameters_use_zookeeper_discovery)
 }
 
 fn hive_parameters_use_zookeeper_discovery(source: &str) -> bool {
@@ -742,19 +742,22 @@ mod tests {
     }
 
     #[test]
-    fn detects_hive_zookeeper_discovery_in_connection_string_or_url_params() {
+    fn structured_hive_uses_current_url_params_for_zookeeper_detection() {
         let mut cfg = config(DatabaseType::Hive, Some("default"));
         cfg.connection_string = Some(
             "jdbc:hive2://zk1.example.com:2181,zk2.example.com:2181/default;serviceDiscoveryMode=zooKeeper".to_string(),
         );
-        assert!(hive_uses_zookeeper_discovery(&cfg));
+        assert!(!hive_uses_zookeeper_discovery(&cfg));
 
-        cfg.connection_string = Some("jdbc:hive2://hive.example.com:10000/default".to_string());
         cfg.url_params = Some("serviceDiscoveryMode=zooKeeperHA;zooKeeperNamespace=hs2".to_string());
         assert!(hive_uses_zookeeper_discovery(&cfg));
 
         cfg.url_params = Some("note=serviceDiscoveryMode=zooKeeper".to_string());
         assert!(!hive_uses_zookeeper_discovery(&cfg));
+
+        cfg.host.clear();
+        cfg.url_params = None;
+        assert!(hive_uses_zookeeper_discovery(&cfg));
     }
 
     #[test]

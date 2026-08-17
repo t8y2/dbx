@@ -8089,6 +8089,7 @@ for line in sys.stdin:
         config.connection_string = Some(
             "jdbc:hive2://zk1.example.com:2181,zk2.example.com:2181/default;serviceDiscoveryMode=zooKeeper".to_string(),
         );
+        config.url_params = Some("serviceDiscoveryMode=zooKeeper".to_string());
         config.transport_layers = vec![TransportLayerConfig::Ssh(ssh_layer("hive-zk-tunnel", ""))];
 
         let error = state.connection_host_port("hive-zookeeper", &config).await.unwrap_err();

@@ -767,6 +767,15 @@ export const useConnectionStore = defineStore("connection", () => {
     }
   }
 
+  async function cleanupRemovedOneTimeConnections(connectionIds: string[]) {
+    try {
+      await closeOneTimeConnectionTabs(connectionIds);
+    } catch (error) {
+      console.warn("[DBX][connection:delete:one-time-tab-cleanup-failed]", { connectionIds, error });
+    }
+    releaseOneTimeRuntimeConnections(connectionIds);
+  }
+
   function cancelDisconnectKey(connectionId: string, attempt: number): string {
     return `${connectionId}:${attempt}`;
   }
@@ -2786,12 +2795,7 @@ export const useConnectionStore = defineStore("connection", () => {
     for (const id of removedIds) nextLayout = removeConnectionFromSidebarLayout(nextLayout, id);
     await persistConnectionDeletion(nextConnections, nextLayout);
     applyConnectionRemoval(removedIds, nextConnections, nextLayout);
-    try {
-      await closeOneTimeConnectionTabs(oneTimeIds);
-    } catch (error) {
-      console.warn("[DBX][connection:delete:one-time-tab-cleanup-failed]", { connectionIds: oneTimeIds, error });
-    }
-    releaseOneTimeRuntimeConnections(oneTimeIds);
+    await cleanupRemovedOneTimeConnections(oneTimeIds);
   }
 
   function applyConnectionRemoval(removedIds: ReadonlySet<string>, nextConnections: ConnectionConfig[], nextLayout: SidebarLayout) {
@@ -7479,6 +7483,7 @@ export const useConnectionStore = defineStore("connection", () => {
     const uniqueGroupIds = [...new Set(groupIds)];
     const previousLayout = sidebarLayout.value;
     const connectionIds = deleteConnections ? connectionIdsInGroupsOp(sidebarLayout.value, uniqueGroupIds).filter((id) => connections.value.some((connection) => connection.id === id)) : [];
+    const oneTimeIds = connectionIds.filter((id) => getConfig(id)?.one_time === true);
     const removedConnectionIds = new Set(connectionIds);
     const nextConnections = removedConnectionIds.size ? connections.value.filter((connection) => !removedConnectionIds.has(connection.id)) : connections.value;
     let layoutAfterConnectionRemoval = previousLayout;
@@ -7493,6 +7498,7 @@ export const useConnectionStore = defineStore("connection", () => {
       sidebarLayout.value = nextLayout;
       rebuildTreeNodes();
     }
+    await cleanupRemovedOneTimeConnections(oneTimeIds);
 
     const remainingGroupIds = new Set(nextLayout.groups.map((group) => group.id));
     const removedGroupIds = new Set(previousLayout.groups.filter((group) => !remainingGroupIds.has(group.id)).map((group) => group.id));

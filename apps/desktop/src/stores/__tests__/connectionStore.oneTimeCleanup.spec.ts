@@ -1,6 +1,6 @@
 import { createPinia, setActivePinia } from "pinia";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { ConnectionConfig } from "@/types/database";
+import type { ConnectionConfig, SidebarLayout } from "@/types/database";
 
 function installLocalStorage() {
   const data = new Map<string, string>();
@@ -103,6 +103,27 @@ describe("connectionStore one_time runtime cleanup", () => {
 
     await store.removeConnection("preview-1");
 
+    expect(queryStore.tabs.some((tab) => tab.connectionId === "preview-1")).toBe(false);
+  });
+
+  it("deleteConnectionGroups closes the tabs of removed one_time connections", async () => {
+    installApiMocks();
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useConnectionStore();
+    const queryStore = useQueryStore();
+    const layout: SidebarLayout = {
+      groups: [{ id: "group-1", name: "Group", collapsed: false }],
+      order: [{ type: "group", id: "group-1", children: [{ type: "connection", id: "preview-1" }] }],
+    };
+    store.connections = [previewConnection()];
+    store.sidebarLayout = layout;
+    queryStore.createTab("preview-1", "", "sales.parquet", "query");
+
+    await store.deleteConnectionGroups(["group-1"], true);
+
+    const { disconnectDb } = await import("@/lib/backend/api");
+    expect(disconnectDb).toHaveBeenCalledWith("preview-1");
     expect(queryStore.tabs.some((tab) => tab.connectionId === "preview-1")).toBe(false);
   });
 

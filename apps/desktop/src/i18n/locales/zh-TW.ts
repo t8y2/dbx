@@ -1852,7 +1852,7 @@ export default withEnglishFallback({
     rollback: "回溯",
     transactionSaveHint: "在事務中提交 {count} 項待儲存更改。",
     nonTransactionalSaveHint: "逐條儲存 {count} 項更改；如果中途失敗，前面已成功的更改不會回溯。",
-    keylessEditWarning: "無主鍵定位",
+    keylessEditWarning: "無主鍵",
     keylessEditWarningHint: "此資料表沒有主鍵。更新與刪除會在 WHERE 子句中使用所有原始資料列值；完全重複的資料列可能會一起受到影響。",
     queryEditReadOnly: "唯讀結果",
     queryEditUnsupported: {

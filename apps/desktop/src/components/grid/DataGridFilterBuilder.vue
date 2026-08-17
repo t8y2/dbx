@@ -67,7 +67,12 @@ const dropTargetIndex = ref<number>();
 let ruleIdsBeforeKeyboardAdd: Set<string> | undefined;
 let ruleDragContainer: HTMLElement | undefined;
 let ruleDragPointerY: number | undefined;
+let ruleDragPointerId: number | undefined;
+let ruleDragHandle: HTMLElement | undefined;
 let ruleAutoScrollFrame: number | undefined;
+let ruleDragBodyStyleActive = false;
+let ruleDragPreviousBodyUserSelect = "";
+let ruleDragPreviousBodyCursor = "";
 
 function columnNameDisplayUnits(value: string) {
   return Array.from(value).reduce((total, character) => total + ((character.codePointAt(0) ?? 0) > 0xff ? 2 : 1), 0);
@@ -140,8 +145,11 @@ function stopRuleAutoScroll() {
 }
 
 function removeRuleDragListeners() {
-  window.removeEventListener("dragover", handleRuleContainerDragOver, true);
-  window.removeEventListener("drop", handleRuleContainerDrop, true);
+  window.removeEventListener("pointermove", handleRulePointerMove, true);
+  window.removeEventListener("pointerup", handleRulePointerUp, true);
+  window.removeEventListener("pointercancel", handleRulePointerCancel, true);
+  window.removeEventListener("keydown", handleRuleDragKeydown, true);
+  window.removeEventListener("blur", handleRuleDragWindowBlur);
 }
 
 function clearRuleDropTarget() {
@@ -153,14 +161,22 @@ function clearRuleDropTarget() {
 function clearRuleDragState() {
   stopRuleAutoScroll();
   removeRuleDragListeners();
+  if (ruleDragHandle && ruleDragPointerId !== undefined && ruleDragHandle.hasPointerCapture?.(ruleDragPointerId)) ruleDragHandle.releasePointerCapture(ruleDragPointerId);
+  if (ruleDragBodyStyleActive) {
+    document.body.style.userSelect = ruleDragPreviousBodyUserSelect;
+    document.body.style.cursor = ruleDragPreviousBodyCursor;
+  }
   draggingRuleId.value = undefined;
   ruleDragContainer = undefined;
   ruleDragPointerY = undefined;
+  ruleDragPointerId = undefined;
+  ruleDragHandle = undefined;
+  ruleDragBodyStyleActive = false;
   clearRuleDropTarget();
 }
 
-function ruleDropZoneContains(event: DragEvent, bounds: DOMRect) {
-  return event.clientX >= bounds.left && event.clientX <= bounds.right && event.clientY >= bounds.top - RULE_DROP_ZONE_EXTENSION && event.clientY <= bounds.bottom + RULE_DROP_ZONE_EXTENSION;
+function ruleDropZoneContains(clientX: number, clientY: number, bounds: DOMRect) {
+  return clientX >= bounds.left && clientX <= bounds.right && clientY >= bounds.top - RULE_DROP_ZONE_EXTENSION && clientY <= bounds.bottom + RULE_DROP_ZONE_EXTENSION;
 }
 
 function updateRuleDropTarget(clientY: number) {
@@ -214,25 +230,24 @@ function scheduleRuleAutoScroll() {
   if (ruleAutoScrollFrame === undefined) ruleAutoScrollFrame = window.requestAnimationFrame(runRuleAutoScroll);
 }
 
-function handleRuleContainerDragOver(event: DragEvent) {
-  if (!draggingRuleId.value || !ruleDragContainer) return;
+function handleRulePointerMove(event: PointerEvent) {
+  if (!draggingRuleId.value || !ruleDragContainer || event.pointerId !== ruleDragPointerId) return;
   const bounds = ruleDragContainer.getBoundingClientRect();
-  if (!ruleDropZoneContains(event, bounds)) {
+  if (!ruleDropZoneContains(event.clientX, event.clientY, bounds)) {
     stopRuleAutoScroll();
     clearRuleDropTarget();
     return;
   }
   event.preventDefault();
-  if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
   ruleDragPointerY = event.clientY;
   updateRuleDropTarget(event.clientY);
   scheduleRuleAutoScroll();
 }
 
-function handleRuleContainerDrop(event: DragEvent) {
-  if (!draggingRuleId.value || !ruleDragContainer) return;
+function handleRulePointerUp(event: PointerEvent) {
+  if (!draggingRuleId.value || !ruleDragContainer || event.pointerId !== ruleDragPointerId) return;
   const bounds = ruleDragContainer.getBoundingClientRect();
-  if (!ruleDropZoneContains(event, bounds)) {
+  if (!ruleDropZoneContains(event.clientX, event.clientY, bounds)) {
     clearRuleDragState();
     return;
   }
@@ -242,23 +257,44 @@ function handleRuleContainerDrop(event: DragEvent) {
   clearRuleDragState();
 }
 
-function startRuleDrag(event: DragEvent, id: string) {
-  if (props.disabled || props.rules.length < 2 || !event.dataTransfer) {
-    event.preventDefault();
-    return;
-  }
+function handleRulePointerCancel(event?: PointerEvent) {
+  if (event && event.pointerId !== ruleDragPointerId) return;
+  clearRuleDragState();
+}
+
+function handleRuleDragWindowBlur() {
+  clearRuleDragState();
+}
+
+function handleRuleDragKeydown(event: KeyboardEvent) {
+  if (event.key !== "Escape" || !draggingRuleId.value) return;
+  event.preventDefault();
+  clearRuleDragState();
+}
+
+function startRulePointerDrag(event: PointerEvent, id: string) {
+  if (event.button !== 0 || props.disabled || props.rules.length < 2) return;
   const handle = event.currentTarget instanceof HTMLElement ? event.currentTarget : undefined;
   ruleDragContainer = handle?.closest<HTMLElement>("[data-filter-rules-scroll]") ?? filterBuilderRootRef.value;
-  if (!ruleDragContainer) {
-    event.preventDefault();
-    return;
-  }
+  if (!ruleDragContainer || !handle) return;
+  event.preventDefault();
+  event.stopPropagation();
   clearRuleDropTarget();
   draggingRuleId.value = id;
-  window.addEventListener("dragover", handleRuleContainerDragOver, true);
-  window.addEventListener("drop", handleRuleContainerDrop, true);
-  event.dataTransfer.effectAllowed = "move";
-  event.dataTransfer.setData("text/plain", id);
+  ruleDragPointerId = event.pointerId;
+  ruleDragPointerY = event.clientY;
+  ruleDragHandle = handle;
+  ruleDragPreviousBodyUserSelect = document.body.style.userSelect;
+  ruleDragPreviousBodyCursor = document.body.style.cursor;
+  ruleDragBodyStyleActive = true;
+  document.body.style.userSelect = "none";
+  document.body.style.cursor = "grabbing";
+  handle.setPointerCapture?.(event.pointerId);
+  window.addEventListener("pointermove", handleRulePointerMove, true);
+  window.addEventListener("pointerup", handleRulePointerUp, true);
+  window.addEventListener("pointercancel", handleRulePointerCancel, true);
+  window.addEventListener("keydown", handleRuleDragKeydown, true);
+  window.addEventListener("blur", handleRuleDragWindowBlur);
 }
 
 function moveRuleByKeyboard(event: KeyboardEvent, id: string, offset: -1 | 1) {
@@ -466,14 +502,16 @@ function blurValueRule(id: string) {
       <Button variant="ghost" size="sm" class="h-7 px-2 text-xs" @click="emit('clear')"> <Trash2 class="mr-1 h-3.5 w-3.5" />{{ t("grid.clearFilter") }} </Button>
     </div>
 
-    <div v-if="props.rules.length" :class="props.layout === 'text' ? 'space-y-0' : props.layout === 'panel' ? 'space-y-1' : 'space-y-1.5'">
+    <div v-if="props.rules.length" :class="props.layout === 'popover' ? 'space-y-1.5' : 'space-y-0'">
       <template v-for="(rule, index) in props.rules" :key="rule.id">
-        <div v-if="index > 0 && (props.layout === 'popover' || rule.conjunction === 'OR')" class="flex" :class="props.layout === 'popover' ? 'justify-center' : props.layout === 'text' ? 'justify-start pl-11' : 'justify-start pl-6'">
-          <Button variant="ghost" size="sm" :class="props.layout === 'text' ? 'h-4 px-1 text-[10px]' : 'h-5 px-2 text-[11px]'" @click="emit('updateRule', rule.id, { conjunction: rule.conjunction === 'AND' ? 'OR' : 'AND' })">{{ rule.conjunction }}</Button>
+        <div v-if="index > 0 && props.layout === 'popover'" class="flex justify-center">
+          <Button variant="ghost" size="sm" class="h-5 px-2 text-[11px]" @click="emit('updateRule', rule.id, { conjunction: rule.conjunction === 'AND' ? 'OR' : 'AND' })">{{ rule.conjunction }}</Button>
         </div>
         <div
+          data-filter-rule-item
           :ref="(element) => setFilterRuleElement(rule.id, element)"
           class="filter-rule-row relative grid items-center justify-start gap-1.5"
+          :data-connected="index > 0 && props.layout !== 'popover' ? '' : undefined"
           :data-dragging="draggingRuleId === rule.id ? '' : undefined"
           :data-drop-position="dropRuleId === rule.id ? dropPosition : undefined"
           :class="
@@ -485,15 +523,26 @@ function blurValueRule(id: string) {
           "
         >
           <button
+            v-if="index > 0 && props.layout !== 'popover'"
+            type="button"
+            data-filter-rule-connector
+            data-filter-conjunction
+            class="filter-rule-conjunction"
+            :class="rule.conjunction === 'OR' ? 'border-primary/70 text-primary' : ''"
+            :data-conjunction="rule.conjunction"
+            :disabled="props.disabled"
+            @click="emit('updateRule', rule.id, { conjunction: rule.conjunction === 'AND' ? 'OR' : 'AND' })"
+          >
+            {{ rule.conjunction }}
+          </button>
+          <button
             type="button"
             data-filter-drag-handle
-            class="flex h-6 w-4 cursor-grab items-center justify-center justify-self-center text-muted-foreground/70 outline-none hover:text-foreground focus-visible:text-primary disabled:cursor-default disabled:opacity-30 active:cursor-grabbing"
+            class="flex h-6 w-4 touch-none cursor-grab items-center justify-center justify-self-center text-muted-foreground/70 outline-none hover:text-foreground focus-visible:text-primary disabled:cursor-default disabled:opacity-30 active:cursor-grabbing"
             :disabled="props.disabled || props.rules.length < 2"
-            :draggable="!props.disabled && props.rules.length > 1"
             :aria-label="t('grid.filterBuilderReorderRule')"
             :aria-grabbed="draggingRuleId === rule.id"
-            @dragstart="startRuleDrag($event, rule.id)"
-            @dragend="clearRuleDragState"
+            @pointerdown="startRulePointerDrag($event, rule.id)"
             @keydown.up="moveRuleByKeyboard($event, rule.id, -1)"
             @keydown.down="moveRuleByKeyboard($event, rule.id, 1)"
           >
@@ -681,6 +730,45 @@ function blurValueRule(id: string) {
 </template>
 
 <style scoped>
+.filter-rule-row[data-connected] {
+  margin-top: 16px;
+}
+
+.filter-rule-conjunction {
+  position: absolute;
+  z-index: 1;
+  top: -16px;
+  left: 0;
+  display: flex;
+  width: 24px;
+  height: 16px;
+  padding: 0 1px;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  background: var(--background);
+  color: var(--muted-foreground);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1;
+}
+
+.filter-rule-conjunction:hover {
+  border-color: var(--primary);
+  color: var(--foreground);
+}
+
+.filter-rule-conjunction:focus-visible {
+  outline: 1px solid var(--primary);
+  outline-offset: 1px;
+}
+
+.filter-rule-conjunction:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+
 .filter-rule-row[data-dragging] {
   opacity: 0.45;
 }

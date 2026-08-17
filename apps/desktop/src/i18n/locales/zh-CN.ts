@@ -1913,7 +1913,7 @@ export default withEnglishFallback({
     rollback: "回滚",
     transactionSaveHint: "在事务中提交 {count} 项待保存更改。",
     nonTransactionalSaveHint: "逐条保存 {count} 项更改；如果中途失败，前面已成功的更改不会回滚。",
-    keylessEditWarning: "无主键定位",
+    keylessEditWarning: "无主键",
     keylessEditWarningHint: "这张表没有主键。保存更新或删除时会使用整行原始值作为 WHERE 条件；如果存在完全重复的行，可能会影响多行。",
     queryEditReadOnly: "只读结果",
     queryEditUnsupported: {

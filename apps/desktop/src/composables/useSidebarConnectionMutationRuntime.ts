@@ -361,11 +361,9 @@ export function useSidebarConnectionMutationRuntime(options: SidebarConnectionMu
     if (!targets.length || deletingConnectionGroups.value) return;
 
     const groupIds = targets.map((target) => target.id);
-    const connectionIds = deleteConnectionsWithGroup.value ? connectionStore.connectionIdsInGroups(groupIds) : [];
     deletingConnectionGroups.value = true;
     try {
-      if (connectionIds.length) await connectionStore.removeConnections(connectionIds);
-      connectionStore.deleteConnectionGroups(groupIds);
+      const connectionIds = await connectionStore.deleteConnectionGroups(groupIds, deleteConnectionsWithGroup.value);
       options.releaseActiveNodeReference(groupIds);
       for (const connectionId of connectionIds) {
         connectionStore.disconnect(connectionId).catch((error) => {

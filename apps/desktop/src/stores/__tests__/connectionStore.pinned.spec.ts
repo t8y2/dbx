@@ -92,7 +92,7 @@ describe("connectionStore pinned tree node removal", () => {
     store.treeSelectionAnchorId = parent.id;
     store.connectionMultiSelectActive = true;
 
-    store.deleteConnectionGroup(parent.id);
+    await store.deleteConnectionGroup(parent.id);
 
     expect(store.sidebarLayout.groups).toEqual([]);
     expect(store.isTreeNodePinned(parent)).toBe(false);
@@ -101,6 +101,64 @@ describe("connectionStore pinned tree node removal", () => {
     expect(store.selectedTreeNodeId).toBeNull();
     expect(store.treeSelectionAnchorId).toBeNull();
     expect(store.connectionMultiSelectActive).toBe(false);
+  });
+
+  it("keeps groups in memory when layout persistence fails", async () => {
+    const saveSidebarLayout = vi.fn().mockRejectedValue(new Error("layout unavailable"));
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({ saveSidebarLayout }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    const group = connectionGroupNode("group-1");
+    const layout: SidebarLayout = {
+      groups: [{ id: group.id, name: group.label, collapsed: false }],
+      order: [{ type: "group", id: group.id, children: [] }],
+    };
+    store.sidebarLayout = layout;
+    store.treeNodes = [group];
+
+    await expect(store.deleteConnectionGroup(group.id)).rejects.toThrow("layout unavailable");
+
+    expect(store.sidebarLayout).toStrictEqual(layout);
+    expect(store.treeNodes).toEqual([group]);
+    expect(saveSidebarLayout).toHaveBeenCalledWith({ groups: [], order: [] });
+    expect(saveSidebarLayout).toHaveBeenLastCalledWith(layout);
+  });
+
+  it("restores saved connections when timeout settings cannot be updated", async () => {
+    const saveConnections = vi.fn().mockResolvedValue(undefined);
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      loadEditorSettings: vi.fn().mockResolvedValue(null),
+      saveConnections,
+      saveEditorSettings: vi.fn().mockRejectedValue(new Error("settings unavailable")),
+      saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
+    }));
+
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const settingsStore = useSettingsStore();
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    const connection = {
+      id: "connection-1",
+      name: "Connection",
+      db_type: "postgres",
+      host: "127.0.0.1",
+      port: 5432,
+      username: "postgres",
+      password: "",
+      connect_timeout_inherit: true,
+    } as const;
+    store.connections = [connection];
+    settingsStore.editorSettings.connectTimeoutInheritConnectionIds = [connection.id];
+
+    await expect(store.removeConnection(connection.id)).rejects.toThrow("settings unavailable");
+
+    expect(store.connections).toEqual([connection]);
+    expect(settingsStore.editorSettings.connectTimeoutInheritConnectionIds).toEqual([connection.id]);
+    expect(saveConnections).toHaveBeenCalledWith([]);
+    expect(saveConnections).toHaveBeenLastCalledWith([connection]);
   });
 
   it("recounts parent objectCount from remaining children when a child is removed", async () => {

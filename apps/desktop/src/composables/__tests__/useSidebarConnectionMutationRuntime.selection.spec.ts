@@ -50,7 +50,7 @@ function connectionStore(selectedTreeNodeIds: string[]) {
     moveConnectionToGroup: vi.fn(),
     createConnectionGroup: vi.fn(() => "group-new"),
     connectionIdsInGroups: vi.fn((): string[] => []),
-    deleteConnectionGroups: vi.fn(),
+    deleteConnectionGroups: vi.fn().mockResolvedValue([]),
     removeConnections: vi.fn().mockResolvedValue(undefined),
     connectedIds: new Set<string>(),
     connectingIds: new Set<string>(),
@@ -178,19 +178,18 @@ describe("sidebar connection group deletion selection", () => {
     expect(requestGroupRename).toHaveBeenCalledWith("group-new");
   });
 
-  it("deletes nested connections before deleting the selected groups", async () => {
+  it("deletes nested connections and groups as one confirmed operation", async () => {
     const groups = [connectionGroupNode("group-1"), connectionGroupNode("group-2")];
     const store = connectionStore(groups.map((group) => group.id));
-    store.connectionIdsInGroups.mockReturnValue(["conn-1", "conn-2"]);
+    store.deleteConnectionGroups.mockResolvedValue(["conn-1", "conn-2"]);
     const { confirmDeleteGroup, deleteConnectionGroup } = runtime(groups[0], store, groups);
 
     deleteConnectionGroup();
     deleteConnectionsWithGroup.value = true;
     await confirmDeleteGroup();
 
-    expect(store.connectionIdsInGroups).toHaveBeenCalledWith(["group-1", "group-2"]);
-    expect(store.removeConnections).toHaveBeenCalledWith(["conn-1", "conn-2"]);
-    expect(store.deleteConnectionGroups).toHaveBeenCalledWith(["group-1", "group-2"]);
+    expect(store.removeConnections).not.toHaveBeenCalled();
+    expect(store.deleteConnectionGroups).toHaveBeenCalledWith(["group-1", "group-2"], true);
     expect(store.disconnect.mock.calls).toEqual([["conn-1"], ["conn-2"]]);
     expect(showDeleteGroupConfirm.value).toBe(false);
     expect(connectionGroupDeleteTargetSnapshot.value).toEqual([]);
@@ -201,15 +200,14 @@ describe("sidebar connection group deletion selection", () => {
   it("keeps the groups and dialog open when connection persistence fails", async () => {
     const group = connectionGroupNode("group-1");
     const store = connectionStore([group.id]);
-    store.connectionIdsInGroups.mockReturnValue(["conn-1"]);
-    store.removeConnections.mockRejectedValue(new Error("persist failed"));
+    store.deleteConnectionGroups.mockRejectedValue(new Error("persist failed"));
     const { confirmDeleteGroup, deleteConnectionGroup } = runtime(group, store, [group]);
 
     deleteConnectionGroup();
     deleteConnectionsWithGroup.value = true;
     await confirmDeleteGroup();
 
-    expect(store.deleteConnectionGroups).not.toHaveBeenCalled();
+    expect(store.deleteConnectionGroups).toHaveBeenCalledWith(["group-1"], true);
     expect(store.disconnect).not.toHaveBeenCalled();
     expect(showDeleteGroupConfirm.value).toBe(true);
     expect(connectionGroupDeleteTargetSnapshot.value.map((target) => target.id)).toEqual(["group-1"]);

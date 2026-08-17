@@ -42,6 +42,7 @@ const profileMap: Record<string, ConnectionProfile> = {
   postgresql: { dbType: "postgres", profile: "postgres", label: "PostgreSQL", port: 5432, user: "postgres" },
   postgres: { dbType: "postgres", profile: "postgres", label: "PostgreSQL", port: 5432, user: "postgres" },
   cloudberry: { dbType: "postgres", profile: "cloudberry", label: "Apache Cloudberry", port: 5432, user: "postgres" },
+  opentenbase: { dbType: "postgres", profile: "opentenbase", label: "OpenTenBase", port: 11000, user: "opentenbase" },
   sqlite: { dbType: "sqlite", profile: "sqlite", label: "SQLite", port: 0, user: "" },
   sqlserver: { dbType: "sqlserver", profile: "sqlserver", label: "SQL Server", port: 1433, user: "sa" },
   mssql: { dbType: "sqlserver", profile: "sqlserver", label: "SQL Server", port: 1433, user: "sa" },
@@ -82,6 +83,7 @@ function getNumber(value: unknown) {
 
 function inferProfile(entry: DbeaverConnectionEntry): ConnectionProfile {
   if (/^jdbcx:/i.test(getString(entry.configuration?.url))) return profileMap.jdbcx;
+  if (normalizeKey(entry.provider) === "opentenbase") return profileMap.opentenbase;
   const driverProfile = profileMap[normalizeKey(entry.driver)];
   if (driverProfile) return driverProfile;
   const candidates = [entry.provider, entry.driver, entry.configuration?.url, entry.name].map(normalizeKey).join(" ");

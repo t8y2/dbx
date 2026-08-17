@@ -35,6 +35,7 @@ type fakeDriverState struct {
 	rowCount       int
 	execStatements []string
 	execConnIDs    []int
+	execErrors     map[string]error
 }
 
 type fakeDriver struct{}
@@ -144,6 +145,9 @@ func (connection fakeConn) ExecContext(_ context.Context, query string, _ []driv
 	defer state.mu.Unlock()
 	state.execStatements = append(state.execStatements, query)
 	state.execConnIDs = append(state.execConnIDs, connection.id)
+	if err := state.execErrors[query]; err != nil {
+		return nil, err
+	}
 	return driver.RowsAffected(1), nil
 }
 
@@ -2801,6 +2805,124 @@ func TestExecuteQueryUsesSimpleProtocolAndReleasesContext(t *testing.T) {
 		t.Fatalf("unexpected result or bound arguments: rows=%v args=%d", result.Rows, state.queryArgs)
 	}
 	assertContextCanceled(t, state.queryCtx)
+}
+
+func TestExecuteStatementsPreserveSessionSearchPathWithoutSchema(t *testing.T) {
+	db, state := openFakeDB(t, 0)
+	server := newServer()
+	server.db = db
+
+	statements := []string{
+		"SET search_path TO app_data",
+		"CREATE TABLE issue_6134 (id integer)",
+	}
+	for _, statement := range statements {
+		if _, err := server.executeQuery(queryOptions{SQL: statement}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if strings.Join(state.execStatements, "\n") != strings.Join(statements, "\n") {
+		t.Fatalf("schema-less statements changed session search_path: %v", state.execStatements)
+	}
+	if len(state.execConnIDs) != len(statements) || state.execConnIDs[0] != state.execConnIDs[1] {
+		t.Fatalf("session statements used different connections: %v", state.execConnIDs)
+	}
+}
+
+func TestSchemaConnSkipsInitialAndRepeatedEmptySchema(t *testing.T) {
+	db, state := openFakeDB(t, 0)
+	server := newServer()
+	server.db = db
+
+	for range 2 {
+		conn, err := server.schemaConn(context.Background(), "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := conn.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if len(state.execStatements) != 0 {
+		t.Fatalf("empty schema unexpectedly reset search_path: %v", state.execStatements)
+	}
+}
+
+func TestSchemaConnResetsOnceAfterExplicitSchema(t *testing.T) {
+	db, state := openFakeDB(t, 0)
+	server := newServer()
+	server.db = db
+
+	for _, schema := range []string{"app_data", "", ""} {
+		conn, err := server.schemaConn(context.Background(), schema)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := conn.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	expected := []string{`SET search_path TO "app_data"`, "RESET search_path"}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if strings.Join(state.execStatements, "\n") != strings.Join(expected, "\n") {
+		t.Fatalf("unexpected schema transition statements: %v", state.execStatements)
+	}
+	if len(state.execConnIDs) != len(expected) || state.execConnIDs[0] != state.execConnIDs[1] {
+		t.Fatalf("schema transitions used different connections: %v", state.execConnIDs)
+	}
+}
+
+func TestSchemaConnPropagatesSchemaErrors(t *testing.T) {
+	tests := []struct {
+		name          string
+		initialSchema string
+		schemaSet     bool
+		requested     string
+		statement     string
+	}{
+		{
+			name:      "set",
+			requested: "app_data",
+			statement: `SET search_path TO "app_data"`,
+		},
+		{
+			name:          "reset",
+			initialSchema: "app_data",
+			schemaSet:     true,
+			statement:     "RESET search_path",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			expectedErr := errors.New(test.name + " search_path failed")
+			db, state := openFakeDB(t, 0)
+			state.execErrors = map[string]error{test.statement: expectedErr}
+			server := newServer()
+			server.db = db
+			server.currentSchema = test.initialSchema
+			server.schemaSet = test.schemaSet
+
+			conn, err := server.schemaConn(context.Background(), test.requested)
+			if conn != nil {
+				t.Fatal("schemaConn returned a connection after schema setup failed")
+			}
+			if !errors.Is(err, expectedErr) {
+				t.Fatalf("unexpected schema error: %v", err)
+			}
+			if server.currentSchema != test.initialSchema || server.schemaSet != test.schemaSet {
+				t.Fatalf("failed schema setup changed server state: schema=%q set=%v", server.currentSchema, server.schemaSet)
+			}
+		})
+	}
 }
 
 func TestExecuteQueryReappliesSchemaForRepeatedRequests(t *testing.T) {

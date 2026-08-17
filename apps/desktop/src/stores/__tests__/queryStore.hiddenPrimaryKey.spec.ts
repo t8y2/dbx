@@ -672,6 +672,119 @@ describe("queryStore hidden primary key editing", () => {
     expect(tab.result?.hidden_column_indexes).toBeUndefined();
   });
 
+  it("enables deferred Oracle LOBs only when a base-table query has a stable key", async () => {
+    getConnectionConfig.mockReturnValue({ id: "oracle-1", name: "Oracle", db_type: "oracle", database: "ORCL", query_timeout_secs: 30 });
+    getColumns.mockResolvedValue([
+      { name: "ID", data_type: "NUMBER", is_nullable: false, column_default: null, is_primary_key: true, extra: null },
+      { name: "PAYLOAD", data_type: "CLOB", is_nullable: true, column_default: null, is_primary_key: false, extra: null },
+    ]);
+    lookupLocalCompletionTables.mockReturnValue([{ name: "DOCUMENTS", type: "table", schema: "APP" }]);
+    analyzeEditableQueryEditability.mockImplementation(async (sql: string) => ({
+      editable: true,
+      analysis: {
+        schema: "APP",
+        tableName: "DOCUMENTS",
+        selectStar: false,
+        columns: [{ sourceName: "PAYLOAD", resultName: "PAYLOAD", expression: "PAYLOAD" }, ...(sql.includes("__DBX_PK_0") ? [{ sourceName: "ID", resultName: "__DBX_PK_0", expression: '"ID"' }] : [])],
+      },
+    }));
+    executeMulti.mockResolvedValue([{ columns: ["PAYLOAD", "__DBX_PK_0"], rows: [["<CLOB>", 1]], affected_rows: 0, execution_time_ms: 1 }]);
+
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("oracle-1", "ORCL", "Query");
+
+    await store.executeTabSql(tabId, "SELECT PAYLOAD FROM APP.DOCUMENTS");
+
+    expect(executeMulti).toHaveBeenCalledWith("oracle-1", "ORCL", 'SELECT PAYLOAD, "ID" AS "__DBX_PK_0" FROM APP.DOCUMENTS', undefined, expect.any(String), expect.objectContaining({ tableDataPreview: true, timeoutSecs: 30 }));
+  });
+
+  it("keeps deferred Oracle LOBs disabled for views", async () => {
+    getConnectionConfig.mockReturnValue({ id: "oracle-1", name: "Oracle", db_type: "oracle", database: "ORCL", query_timeout_secs: 30 });
+    getColumns.mockResolvedValue([
+      { name: "ID", data_type: "NUMBER", is_nullable: false, column_default: null, is_primary_key: false, extra: null },
+      { name: "PAYLOAD", data_type: "CLOB", is_nullable: true, column_default: null, is_primary_key: false, extra: null },
+    ]);
+    listIndexes.mockResolvedValue([]);
+    lookupLocalCompletionTables.mockReturnValue([{ name: "DOCUMENT_VIEW", type: "view", schema: "APP" }]);
+    analyzeEditableQueryEditability.mockResolvedValue({
+      editable: true,
+      analysis: {
+        schema: "APP",
+        tableName: "DOCUMENT_VIEW",
+        selectStar: true,
+        columns: [],
+      },
+    });
+    executeMulti.mockResolvedValue([{ columns: ["ID", "PAYLOAD"], rows: [[1, "value"]], affected_rows: 0, execution_time_ms: 1 }]);
+
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("oracle-1", "ORCL", "Query");
+
+    await store.executeTabSql(tabId, "SELECT * FROM APP.DOCUMENT_VIEW");
+
+    expect(executeMulti).toHaveBeenCalledOnce();
+    expect(executeMulti.mock.calls[0]?.[5]).not.toHaveProperty("tableDataPreview");
+  });
+
+  it("keeps deferred Oracle LOBs disabled when a keyless source has no safe ROWID path", async () => {
+    getConnectionConfig.mockReturnValue({ id: "oracle-1", name: "Oracle", db_type: "oracle", database: "ORCL", query_timeout_secs: 30 });
+    getColumns.mockResolvedValue([
+      { name: "ID", data_type: "NUMBER", is_nullable: false, column_default: null, is_primary_key: false, extra: null },
+      { name: "PAYLOAD", data_type: "CLOB", is_nullable: true, column_default: null, is_primary_key: false, extra: null },
+    ]);
+    listIndexes.mockResolvedValue([]);
+    lookupLocalCompletionTables.mockReturnValue([]);
+    analyzeEditableQueryEditability.mockResolvedValue({
+      editable: true,
+      analysis: {
+        schema: undefined,
+        tableName: "DOCUMENTS",
+        selectStar: true,
+        columns: [],
+      },
+    });
+    executeMulti.mockResolvedValue([{ columns: ["ID", "PAYLOAD"], rows: [[1, "value"]], affected_rows: 0, execution_time_ms: 1 }]);
+
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("oracle-1", "ORCL", "Query");
+
+    await store.executeTabSql(tabId, "SELECT * FROM DOCUMENTS");
+
+    expect(executeMulti).toHaveBeenCalledOnce();
+    expect(executeMulti.mock.calls[0]?.[5]).not.toHaveProperty("tableDataPreview");
+  });
+
+  it("does not request deferred Oracle LOB handling for ordinary non-LOB queries", async () => {
+    getConnectionConfig.mockReturnValue({ id: "oracle-1", name: "Oracle", db_type: "oracle", database: "ORCL", query_timeout_secs: 30 });
+    getColumns.mockResolvedValue([
+      { name: "ID", data_type: "NUMBER", is_nullable: false, column_default: null, is_primary_key: true, extra: null },
+      { name: "NAME", data_type: "VARCHAR2(100)", is_nullable: true, column_default: null, is_primary_key: false, extra: null },
+    ]);
+    lookupLocalCompletionTables.mockReturnValue([{ name: "CUSTOMERS", type: "table", schema: "APP" }]);
+    analyzeEditableQueryEditability.mockImplementation(async (sql: string) => ({
+      editable: true,
+      analysis: {
+        schema: "APP",
+        tableName: "CUSTOMERS",
+        selectStar: false,
+        columns: [{ sourceName: "NAME", resultName: "NAME", expression: "NAME" }, ...(sql.includes("__DBX_PK_0") ? [{ sourceName: "ID", resultName: "__DBX_PK_0", expression: '"ID"' }] : [])],
+      },
+    }));
+    executeMulti.mockResolvedValue([{ columns: ["NAME", "__DBX_PK_0"], rows: [["Alice", 1]], affected_rows: 0, execution_time_ms: 1 }]);
+
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("oracle-1", "ORCL", "Query");
+
+    await store.executeTabSql(tabId, "SELECT NAME FROM APP.CUSTOMERS");
+
+    expect(executeMulti).toHaveBeenCalledOnce();
+    expect(executeMulti.mock.calls[0]?.[5]).not.toHaveProperty("tableDataPreview");
+  });
+
   it.each([
     ["only a foreign owner is cached", [{ name: "CUSTOMERS", type: "table", schema: "APP" }]],
     [

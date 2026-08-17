@@ -7,8 +7,15 @@ describe("tableMetadataCapabilities", () => {
       columns: false,
       indexes: true,
       foreignKeys: false,
+      constraints: false,
       triggers: false,
       ddl: false,
     });
+  });
+
+  it("exposes structured constraints only for dialects that implement list_constraints", () => {
+    expect(getTableMetadataCapabilities("oracle").constraints).toBe(true);
+    expect(getTableMetadataCapabilities("mysql").constraints).toBe(false);
+    expect(getTableMetadataCapabilities(undefined).constraints).toBe(false);
   });
 });

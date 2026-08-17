@@ -73,6 +73,27 @@ describe("NacosConfigBatchDialog cross-connection sync", () => {
       scope: "selected",
       targetConnectionId: "remote",
       targetNamespace: "shared",
+      targetGroup: "",
+      policy: "ABORT",
+    });
+  });
+
+  it("includes a trimmed target group override in the preview payload when provided", async () => {
+    const { onPreview } = await mountDialog("remote");
+    const groupInput = document.body.querySelector("input[type=text]") as HTMLInputElement;
+    groupInput.value = "  TARGET_GROUP  ";
+    groupInput.dispatchEvent(new Event("input"));
+    await nextTick();
+
+    Array.from(document.body.querySelectorAll("button"))
+      .find((button) => button.textContent?.includes("Preview"))
+      ?.click();
+    await nextTick();
+    expect(onPreview).toHaveBeenCalledWith({
+      scope: "selected",
+      targetConnectionId: "remote",
+      targetNamespace: "shared",
+      targetGroup: "TARGET_GROUP",
       policy: "ABORT",
     });
   });
@@ -100,6 +121,7 @@ describe("NacosConfigBatchDialog cross-connection sync", () => {
       scope: "selected",
       targetConnectionId: "remote",
       targetNamespace: "",
+      targetGroup: "",
       policy: "ABORT",
     });
   });

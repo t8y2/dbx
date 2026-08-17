@@ -131,6 +131,11 @@ export function supportsSqlInListPaste(dbType?: DatabaseType): boolean {
   return supportsSqlFileExecution(dbType) && !NON_SQL_IN_LIST_PASTE_TYPES.has(dbType);
 }
 
+export function supportsQueryEditorBlockComments(dbType?: DatabaseType): boolean {
+  if (!dbType) return true;
+  return supportsSqlFileExecution(dbType);
+}
+
 export function supportsSchemaDiagram(dbType?: DatabaseType): boolean {
   return supportsDatabaseFeature(dbType, "diagram");
 }
@@ -179,7 +184,7 @@ export function supportsObjectBrowserTreeNode(dbType: DatabaseType | undefined, 
 }
 
 export function supportsTableTruncate(dbType?: DatabaseType): boolean {
-  return !!dbType && dbType !== "sqlite" && dbType !== "rqlite" && dbType !== "turso" && dbType !== "cloudflare-d1" && dbType !== "duckdb" && dbType !== "influxdb" && dbType !== "victoriametrics" && dbType !== "manticoresearch";
+  return !!dbType && dbType !== "impala" && dbType !== "sqlite" && dbType !== "rqlite" && dbType !== "turso" && dbType !== "cloudflare-d1" && dbType !== "duckdb" && dbType !== "influxdb" && dbType !== "victoriametrics" && dbType !== "manticoresearch";
 }
 
 export function usesPostgresLikeStructureCopy(dbType?: DatabaseType): boolean {

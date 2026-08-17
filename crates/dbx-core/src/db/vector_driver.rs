@@ -621,6 +621,7 @@ pub async fn find_documents(
             extended_documents: None,
             total: result.affected_rows,
             total_is_exact: true,
+            next_cursor: None,
         });
     }
 
@@ -669,6 +670,7 @@ pub async fn find_documents(
         extended_documents: None,
         total: result.affected_rows,
         total_is_exact: true,
+        next_cursor: None,
     })
 }
 

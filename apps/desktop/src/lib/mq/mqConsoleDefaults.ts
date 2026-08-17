@@ -204,3 +204,24 @@ export function resolveInitialMqTab(options: { initialTab?: MqTab; initialTenant
   if (options.initialTenant) return "namespaces";
   return "tenants";
 }
+
+/**
+ * Resolve which tab to switch to after the user selects a topic/queue row.
+ *
+ * RabbitMQ's "monitoring" tab (RabbitMqMonitoringPanel) is a cluster-wide
+ * overview with no per-topic scoping, unlike Kafka/Pulsar's monitoring tab
+ * (MonitoringPanel), which does take the selected topic and shows its stats.
+ * Routing RabbitMQ topic selection to "monitoring" therefore drops all
+ * context about the queue just clicked (see #5984). "messages" shows a
+ * message browser scoped to the selected queue instead.
+ */
+export function resolveTopicSelectedTab(options: { systemKind?: MqSystemKind; capabilities: MqCapabilities }): MqTab {
+  const { systemKind, capabilities } = options;
+  if (systemKind === "rocketmq") {
+    return capabilities.supportsSubscriptions ? "subscriptions" : "topics";
+  }
+  if (systemKind === "rabbitmq") {
+    return capabilities.supportsSendMessage ? "messages" : "topics";
+  }
+  return isFlatMqSystemKind(systemKind) ? "monitoring" : capabilities.supportsSubscriptions ? "subscriptions" : "monitoring";
+}

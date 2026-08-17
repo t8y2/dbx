@@ -1776,8 +1776,12 @@ pub async fn export_database_sql_core(
     };
 
     // Sort tables by foreign key dependency so referenced (parent) tables are
-    // exported before referencing (child) tables.
-    if tables.len() > 1 {
+    // exported before referencing (child) tables. MySQL exports always emit
+    // `SET FOREIGN_KEY_CHECKS = 0`, so both the generated DDL and any INSERTs
+    // already tolerate child-before-parent ordering; reordering away from the
+    // alphabetical listing there only makes the output look shuffled to users
+    // without providing any correctness benefit.
+    if tables.len() > 1 && db_type != DatabaseType::Mysql {
         let table_names: Vec<String> = tables.iter().map(|t| t.name.clone()).collect();
         match crate::transfer::sort_tables_by_fk_dependency(
             state,

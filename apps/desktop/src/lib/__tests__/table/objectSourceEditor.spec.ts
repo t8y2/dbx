@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import * as api from "@/lib/backend/api";
-import { executeObjectSourceSave, formatObjectSourceSaveError } from "@/lib/table/objectSourceEditor";
+import { executeObjectSourceSave, formatObjectSourceSaveError, resolveObjectSourceEditDraft } from "@/lib/table/objectSourceEditor";
+import { formatSqlForDisplay } from "@/lib/sql/sqlFormatter";
 
 vi.mock("@/lib/backend/api", () => ({
   executeInTransaction: vi.fn().mockResolvedValue({}),
@@ -60,5 +61,30 @@ describe("formatObjectSourceSaveError", () => {
   it("does not append the same guidance twice", () => {
     const formatted = formatObjectSourceSaveError("ERROR: cannot drop columns from view", "postgres", "VIEW", hint);
     expect(formatObjectSourceSaveError(formatted, "postgres", "VIEW", hint)).toBe(formatted);
+  });
+});
+
+describe("resolveObjectSourceEditDraft", () => {
+  const mysqlSingleLineViewDefinition = "CREATE VIEW `v_active_users` AS select `users`.`id` AS `id`,`users`.`name` AS `name` from `users` where (`users`.`active` = 1)";
+
+  it("uses the pretty-printed draft for MySQL views (issue #5057)", async () => {
+    const formatted = await formatSqlForDisplay(mysqlSingleLineViewDefinition, "mysql");
+
+    expect(formatted).not.toBe(mysqlSingleLineViewDefinition);
+    expect(formatted.split("\n").length).toBeGreaterThan(1);
+    expect(resolveObjectSourceEditDraft("mysql", "VIEW", formatted, mysqlSingleLineViewDefinition)).toBe(formatted);
+  });
+
+  it("keeps raw editable source for other database and object types", () => {
+    const formatted = "CREATE VIEW v AS\nSELECT 1";
+
+    expect(resolveObjectSourceEditDraft("postgres", "VIEW", formatted, mysqlSingleLineViewDefinition)).toBe(mysqlSingleLineViewDefinition);
+    expect(resolveObjectSourceEditDraft("mysql", "FUNCTION", formatted, mysqlSingleLineViewDefinition)).toBe(mysqlSingleLineViewDefinition);
+    expect(resolveObjectSourceEditDraft(undefined, "VIEW", formatted, mysqlSingleLineViewDefinition)).toBe(mysqlSingleLineViewDefinition);
+  });
+
+  it("falls back to raw MySQL view source when formatting produced nothing usable", () => {
+    expect(resolveObjectSourceEditDraft("mysql", "VIEW", "", mysqlSingleLineViewDefinition)).toBe(mysqlSingleLineViewDefinition);
+    expect(resolveObjectSourceEditDraft("mysql", "VIEW", "   ", mysqlSingleLineViewDefinition)).toBe(mysqlSingleLineViewDefinition);
   });
 });

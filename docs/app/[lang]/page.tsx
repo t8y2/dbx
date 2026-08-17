@@ -12,6 +12,7 @@ import { RevealSection } from "@/components/landing/RevealSection";
 import { ContributorsWallContent } from "@/components/landing/ContributorsWall";
 import { ExpandableDatabaseGrid } from "@/components/landing/ExpandableDatabaseGrid";
 import contributorSnapshot from "@/data/contributors.json";
+import { databaseSupport } from "@/data/databaseSupport";
 import type { ContributorActivityData } from "@/lib/contributorActivity";
 import { contributorsFromActivity } from "@/lib/contributors";
 import { getAppVersion } from "@/lib/appVersion";
@@ -33,103 +34,18 @@ function metrics(starLabel: string) {
   return {
     en: [
       { value: "~20 MB", label: "desktop installer" },
-      { value: "70+", label: "database engines" },
+      { value: "80+", label: "database engines" },
       { value: "2 modes", label: "desktop and Docker" },
       { value: starLabel, label: "GitHub stars, fully open-source" },
     ],
     cn: [
       { value: "~20 MB", label: "桌面安装包" },
-      { value: "70+", label: "数据库引擎" },
+      { value: "80+", label: "数据库引擎" },
       { value: "2 种模式", label: "桌面与 Docker" },
       { value: starLabel, label: "GitHub Star，完全开源" },
     ],
   };
 }
-
-const databaseSupport = [
-  { name: "MySQL", icon: "/icons/database/mysql.svg", tone: "#4479a1" },
-  { name: "PostgreSQL", icon: "/icons/database/postgres.svg", tone: "#4169e1" },
-  { name: "Cloudberry", icon: "/icons/database/cloudberry.svg", tone: "#ff5900" },
-  { name: "SQLite", icon: "/icons/database/sqlite.svg", tone: "#5aa6d6" },
-  { name: "Redis", icon: "/icons/database/redis.svg", tone: "#ff4438" },
-  { name: "DuckDB", icon: "/icons/database/duckdb.svg", tone: "#fff000" },
-  { name: "ClickHouse", icon: "/icons/database/clickhouse.svg", tone: "#ffcc01" },
-  { name: "SQL Server", icon: "/icons/database/sqlserver.svg", tone: "#9ca3af" },
-  { name: "MongoDB", icon: "/icons/database/mongodb.svg", tone: "#47a248" },
-  { name: "Oracle", icon: "/icons/database/oracle.svg", tone: "#f80000" },
-  { name: "Elasticsearch", icon: "/icons/database/elasticsearch.svg", tone: "#00bfb3" },
-  { name: "Easysearch", icon: "/icons/database/easysearch.svg", tone: "#836eff" },
-  { name: "Meilisearch", icon: "/icons/database/meilisearch.svg", tone: "#ff5caa" },
-  { name: "Qdrant", icon: "/icons/database/qdrant.svg", tone: "#dc244c" },
-  { name: "Milvus", icon: "/icons/database/milvus.png", tone: "#00a1ea" },
-  { name: "Weaviate", icon: "/icons/database/weaviate.svg", tone: "#00b894" },
-  { name: "ChromaDB", icon: "/icons/database/chromadb.svg", tone: "#ff7a59" },
-  { name: "Cloudflare D1", icon: "/icons/database/cloudflare-d1.svg", tone: "#f6821f" },
-  { name: "MariaDB", icon: "/icons/database/mariadb.svg", tone: "#003545" },
-  { name: "Doris", icon: "/icons/database/doris.svg", tone: "#5b7cfa" },
-  { name: "StarRocks", icon: "/icons/database/starrocks.svg", tone: "#6750ff" },
-  { name: "Manticore", icon: "/icons/database/manticoresearch.png", tone: "#b8e646" },
-  { name: "Redshift", icon: "/icons/database/redshift.svg", tone: "#8c4fff" },
-  { name: "Dameng", icon: "/icons/database/dm.svg", tone: "#3857ff" },
-  { name: "GaussDB", icon: "/icons/database/gaussdb.svg", tone: "#ff5a3d" },
-  { name: "openGauss", icon: "/icons/database/opengauss.svg", tone: "#1488c9" },
-  { name: "KingBase", icon: "/icons/database/kingbase.svg", tone: "#e1212d" },
-  { name: "HighGo", icon: "/icons/database/highgo.png", tone: "#005bac" },
-  { name: "UXDB", icon: "/icons/database/uxdb.svg", tone: "#142b8c" },
-  { name: "TiDB", icon: "/icons/database/tidb.svg", tone: "#e60012" },
-  { name: "OceanBase", icon: "/icons/database/oceanbase.svg", tone: "#2285ff" },
-  { name: "TDSQL", icon: "/icons/database/tdsql.svg", tone: "#0080ff" },
-  { name: "PolarDB", icon: "/icons/database/polardb.webp", tone: "#1890ff" },
-  { name: "GreatSQL", icon: "/icons/database/greatsql.webp", tone: "#0066b3" },
-  { name: "SelectDB", icon: "/icons/database/selectdb.svg", tone: "#22c1c3" },
-  { name: "TDengine", icon: "/icons/database/tdengine.svg", tone: "#2f6fff" },
-  { name: "CockroachDB", icon: "/icons/database/cockroachdb.svg", tone: "#6933ff" },
-  { name: "RQLite", icon: "/icons/database/rqlite.png", tone: "#5a67d8" },
-  { name: "Turso", icon: "/icons/database/turso.png", tone: "#10b981" },
-  { name: "Databend", icon: "/icons/database/databend.svg", tone: "#f59e0b" },
-  { name: "Databricks", icon: "/icons/database/databricks.svg", tone: "#ff5a1f" },
-  { name: "Snowflake", icon: "/icons/database/snowflake.svg", tone: "#29b5e8" },
-  { name: "BigQuery", icon: "/icons/database/bigquery.svg", tone: "#4285f4" },
-  { name: "Trino", icon: "/icons/database/trino.svg", tone: "#dd00a1" },
-  { name: "PrestoSQL", icon: "/icons/database/presto.svg", tone: "#5890ff" },
-  { name: "Hive", icon: "/icons/database/hive.svg", tone: "#fdcb00" },
-  { name: "HBase", icon: "/icons/database/hbase.svg", tone: "#ba160c" },
-  { name: "Spark", icon: "/icons/database/spark-logo.png", tone: "#e25a1c" },
-  { name: "DB2", icon: "/icons/database/db2.svg", tone: "#054ada" },
-  { name: "SAP HANA", icon: "/icons/database/saphana.svg", tone: "#008fd3" },
-  { name: "Teradata", icon: "/icons/database/teradata.svg", tone: "#f37440" },
-  { name: "Vertica", icon: "/icons/database/vertica.webp", tone: "#007dc5" },
-  { name: "Exasol", icon: "/icons/database/exasol.svg", tone: "#002b45" },
-  { name: "Firebird", icon: "/icons/database/firebird.svg", tone: "#e17000" },
-  { name: "Informix", icon: "/icons/database/informix.svg", tone: "#0178c8" },
-  { name: "Neo4j", icon: "/icons/database/neo4j.svg", tone: "#018bff" },
-  { name: "Cassandra", icon: "/icons/database/cassandra.svg", tone: "#1287b1" },
-  { name: "Kylin", icon: "/icons/database/apache_kylin.svg", tone: "#fb8c00" },
-  { name: "Dremio", icon: "/icons/database/dremio.svg", tone: "#30bdbe" },
-  { name: "OSCAR", icon: "/icons/database/oscar.png", tone: "#1b8dff" },
-  { name: "InfluxDB", icon: "/icons/database/influxdb.svg", tone: "#22adf6" },
-  { name: "QuestDB", icon: "/icons/database/questdb.svg", tone: "#dc2626" },
-  { name: "IoTDB", icon: "/icons/database/iotdb.svg", tone: "#3cb371" },
-  { name: "KWDB", icon: "/icons/database/kwdb.svg", tone: "#6366f1" },
-  { name: "Vastbase", icon: "/icons/database/vastbase.svg", tone: "#2563eb" },
-  { name: "GoldenDB", icon: "/icons/database/goldendb.png", tone: "#eab308" },
-  { name: "YashanDB", icon: "/icons/database/yashandb.png", tone: "#dc2626" },
-  { name: "SunDB", icon: "/icons/database/sundb.svg", tone: "#f97316" },
-  { name: "XuguDB", icon: "/icons/database/xugu.png", tone: "#84cc16" },
-  { name: "GBase", icon: "/icons/database/gbase.png", tone: "#06b6d4" },
-  { name: "Access", icon: "/icons/database/access.png", tone: "#a53346" },
-  { name: "H2", icon: "/icons/database/h2.svg", tone: "#f7a81b" },
-  { name: "Etcd", icon: "/icons/database/etcd.svg", tone: "#419eda" },
-  { name: "ZooKeeper", icon: "/icons/database/zookeeper.svg", tone: "#3b82f6" },
-  { name: "Pulsar", icon: "/icons/database/pulsar.svg", tone: "#188fff" },
-  { name: "Kafka", icon: "/icons/database/kafka.svg", tone: "#231f20" },
-  { name: "RocketMQ", icon: "/icons/database/rocketmq.svg", tone: "#f97316" },
-  { name: "RabbitMQ", icon: "/icons/database/rabbitmq.svg", tone: "#f97316" },
-  { name: "Nacos", icon: "/icons/database/nacos.png", tone: "#2f80ed" },
-  { name: "IRIS", icon: "/icons/database/iris.svg", tone: "#0085ca" },
-  { name: "JDBC", icon: "/icons/database/jdbcx.svg", tone: "#6ea8ff" },
-  { name: "Your DB?", icon: "/icons/database/jdbcx.svg", tone: "#6ea8ff", href: "https://github.com/t8y2/dbx/discussions", cta: true },
-];
 
 const workflows = {
   en: [
@@ -370,7 +286,7 @@ const testimonials = {
 
 const i18nText = {
   en: {
-    heroTitle: "20 MB to manage 70+ databases!",
+    heroTitle: "20 MB to manage 80+ databases!",
     heroSubtitle: "DBX brings connections, SQL editing, data grids, schema tools, AI assistance, and self-hosted access into one lightweight product.",
     download: "Download DBX",
     downloadName: "Download DBX",
@@ -379,7 +295,7 @@ const i18nText = {
     docsStartDesc: "Install DBX, create your first connection, and learn the main workflow.",
     workflowsTitle: "Core workflows",
     workflowsDesc: "The docs are organized around what you actually do in a database client.",
-    supportTitle: "Supports 70+ databases",
+    supportTitle: "Supports 80+ databases",
     supportDesc: "Connect SQL, NoSQL, vector, time-series, and embedded databases, message queues, and compatible engines in one place.",
     supportLink: "View all",
     testimonialsTitle: "What DBX is good at",
@@ -402,7 +318,7 @@ const i18nText = {
     docker: "Docker setup",
   },
   cn: {
-    heroTitle: "20MB，管理70+种数据库！",
+    heroTitle: "20MB，管理80+种数据库！",
     heroSubtitle: "DBX 将连接管理、SQL 编辑、数据表格、结构工具、AI 助手和自托管访问放进一个轻量产品里。",
     download: "下载 DBX",
     downloadName: "下载 DBX",
@@ -411,7 +327,7 @@ const i18nText = {
     docsStartDesc: "安装 DBX、创建第一个连接，并了解主要工作流。",
     workflowsTitle: "核心工作流",
     workflowsDesc: "文档围绕数据库客户端里的真实任务组织，而不是堆功能清单。",
-    supportTitle: "支持70+种数据库",
+    supportTitle: "支持80+种数据库",
     supportDesc: "统一连接和管理 SQL、NoSQL、向量、时序、嵌入式数据库、消息队列及兼容引擎。",
     supportLink: "查看全部",
     testimonialsTitle: "DBX 适合什么样的工作",
@@ -437,11 +353,11 @@ const i18nText = {
 
 const landingMeta = {
   en: {
-    title: "DBX - 20 MB to manage 70+ databases!",
+    title: "DBX - 20 MB to manage 80+ databases!",
     description: "DBX brings connections, SQL editing, data grids, schema tools, AI assistance, and self-hosted access into one lightweight product.",
   },
   cn: {
-    title: "DBX - 20MB，管理70+种数据库！",
+    title: "DBX - 20MB，管理80+种数据库！",
     description: "DBX 将连接管理、SQL 编辑、数据表格、结构工具、AI 助手和自托管访问放进一个轻量产品里。",
   },
 };

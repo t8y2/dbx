@@ -40,6 +40,13 @@ type objectInfo struct {
 	Valid      *bool   `json:"valid,omitempty"`
 }
 
+type objectSource struct {
+	Name       string  `json:"name"`
+	ObjectType string  `json:"object_type"`
+	Schema     *string `json:"schema"`
+	Source     string  `json:"source"`
+}
+
 type columnInfo struct {
 	Name                   string  `json:"name"`
 	DataType               string  `json:"data_type"`
@@ -197,6 +204,18 @@ func (server *server) connectionInfo() (map[string]any, error) {
 			username = current
 		}
 	}
+	productName := "Apache Hive"
+	compatibilityMode := "hive"
+	driverName := "DBX Hive Go Agent"
+	if strings.EqualFold(server.params.DatabaseType, "kyuubi") {
+		productName = "Apache Kyuubi"
+		compatibilityMode = "kyuubi"
+		driverName = "DBX Kyuubi Go Agent"
+	} else if strings.EqualFold(server.params.DatabaseType, "impala") || strings.Contains(strings.ToLower(version), "impalad version") {
+		productName = "Apache Impala"
+		compatibilityMode = "impala"
+		driverName = "DBX Impala Go Agent"
+	}
 	return map[string]any{
 		"database":          server.config.Database,
 		"schema":            server.config.Database,
@@ -204,13 +223,13 @@ func (server *server) connectionInfo() (map[string]any, error) {
 		"version":           version,
 		"sqlDialect":        "HIVE",
 		"identifierQuote":   "`",
-		"compatibilityMode": "hive",
+		"compatibilityMode": compatibilityMode,
 		"databaseInfo": map[string]string{
-			"productName":            "Apache Hive",
+			"productName":            productName,
 			"productVersion":         version,
 			"unquotedIdentifierCase": "mixed",
 			"quotedIdentifierCase":   "mixed",
-			"driverName":             "DBX Hive Go Agent",
+			"driverName":             driverName,
 			"driverVersion":          "gohive-v2.1.0",
 		},
 	}, nil
@@ -305,27 +324,117 @@ func (server *server) listTables(schema string, constraints metadataListConstrai
 		sort.Slice(values, func(first, second int) bool { return values[first].Name < values[second].Name })
 		return applyMetadataWindow(values, constraints.Offset, constraints.Limit), nil
 	}
-	fallbackStatement := "SHOW TABLES IN " + quoteHiveIdentifier(schema)
-	if len(requestedTypes) > 0 && !containsString(requestedTypes, "TABLE") {
-		fallbackStatement = "SHOW VIEWS IN " + quoteHiveIdentifier(schema)
+	type fallbackQuery struct {
+		operation  string
+		statement  string
+		objectType string
 	}
-	result, err := server.executeQuery(queryOptions{
-		SQL:     fallbackStatement,
-		MaxRows: metadataQueryLimit,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("HiveServer2 metadata failed (%v); SHOW TABLES fallback failed: %w", metadataErr, err)
+	fallbackQueries := make([]fallbackQuery, 0, 2)
+	if containsString(requestedTypes, "TABLE") {
+		fallbackQueries = append(fallbackQueries, fallbackQuery{
+			operation:  "SHOW TABLES",
+			statement:  "SHOW TABLES IN " + quoteHiveIdentifier(schema),
+			objectType: "TABLE",
+		})
 	}
-	values := make([]tableInfo, 0, len(result.Rows))
-	for _, row := range result.Rows {
-		name := showTablesRowName(result.Columns, row)
-		if name == "" || !metadataNameMatches(name, constraints.Filter) {
-			continue
+	if containsString(requestedTypes, "VIEW") || containsString(requestedTypes, "MATERIALIZED VIEW") {
+		fallbackQueries = append(fallbackQueries, fallbackQuery{
+			operation:  "SHOW VIEWS",
+			statement:  "SHOW VIEWS IN " + quoteHiveIdentifier(schema),
+			objectType: "VIEW",
+		})
+	}
+	objectsByName := make(map[string]tableInfo)
+	tableFallbackSucceeded := false
+	for _, fallback := range fallbackQueries {
+		result, err := server.executeQuery(queryOptions{SQL: fallback.statement, MaxRows: metadataQueryLimit})
+		if err != nil {
+			// Older Hive and Impala versions can list tables but do not support SHOW VIEWS.
+			// Keep the usable table result for mixed requests; explicit view requests still fail.
+			if fallback.objectType == "VIEW" && tableFallbackSucceeded && showViewsUnsupported(err) {
+				continue
+			}
+			return nil, fmt.Errorf("HiveServer2 metadata failed (%v); %s fallback failed: %w", metadataErr, fallback.operation, err)
 		}
-		values = append(values, tableInfo{Name: name, TableType: "TABLE", Comment: nil})
+		if fallback.objectType == "TABLE" {
+			tableFallbackSucceeded = true
+		}
+		for _, row := range result.Rows {
+			name := showTablesRowName(result.Columns, row)
+			if name == "" || !metadataNameMatches(name, constraints.Filter) {
+				continue
+			}
+			candidate := tableInfo{Name: name, TableType: fallback.objectType, Comment: nil}
+			if existing, ok := objectsByName[name]; ok && existing.TableType == "VIEW" && candidate.TableType != "VIEW" {
+				continue
+			}
+			objectsByName[name] = candidate
+		}
+	}
+	values := make([]tableInfo, 0, len(objectsByName))
+	for _, value := range objectsByName {
+		values = append(values, value)
 	}
 	sort.Slice(values, func(first, second int) bool { return values[first].Name < values[second].Name })
 	return applyMetadataWindow(values, constraints.Offset, constraints.Limit), nil
+}
+
+func showViewsUnsupported(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	operationalMarkers := []string{
+		"permission",
+		"access denied",
+		"not authorized",
+		"unauthorized",
+		"authentication",
+		"authorization",
+		"timeout",
+		"timed out",
+		"deadline exceeded",
+		"cancelled",
+		"canceled",
+		"transport",
+		"connection",
+		"broken pipe",
+		"network",
+	}
+	for _, marker := range operationalMarkers {
+		if strings.Contains(message, marker) {
+			return false
+		}
+	}
+	explicitMarkers := []string{
+		"unsupported",
+		"not supported",
+		"not implemented",
+		"unknown statement",
+		"unrecognized statement",
+	}
+	for _, marker := range explicitMarkers {
+		if strings.Contains(message, marker) {
+			return true
+		}
+	}
+	parseMarkers := []string{
+		"parseexception",
+		"parse error",
+		"syntax error",
+		"mismatched input",
+		"cannot recognize input",
+		"no viable alternative",
+	}
+	for _, marker := range parseMarkers {
+		if strings.Contains(message, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func (server *server) listObjects(schema string, constraints metadataListConstraints) ([]objectInfo, error) {
@@ -473,6 +582,19 @@ func (server *server) getTableDDL(schema, table string) (string, error) {
 		return "", nil
 	}
 	return strings.Join(lines, "\n") + "\n", nil
+}
+
+func (server *server) getObjectSource(schema, name, objectType string) (objectSource, error) {
+	source, err := server.getTableDDL(schema, name)
+	if err != nil {
+		return objectSource{}, err
+	}
+	return objectSource{
+		Name:       name,
+		ObjectType: strings.ToUpper(objectType),
+		Schema:     optionalString(schema),
+		Source:     source,
+	}, nil
 }
 
 func (server *server) getExplainInfo(sqlText string) (string, error) {

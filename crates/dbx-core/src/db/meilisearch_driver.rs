@@ -1,4 +1,4 @@
-use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
+use percent_encoding::{percent_decode_str, utf8_percent_encode, AsciiSet, CONTROLS};
 use reqwest::{Client as HttpClient, Method, RequestBuilder, StatusCode};
 use serde::Deserialize;
 use serde_json::{Map, Value};
@@ -57,6 +57,18 @@ impl MeilisearchClient {
         Ok(Self { http, base_url: url.trim_end_matches('/').to_string(), api_key })
     }
 
+    pub fn new_for_config(
+        url: &str,
+        api_key: Option<&str>,
+        tls_enabled: bool,
+        url_params: Option<&str>,
+        external_config: Option<&Value>,
+        timeout: Duration,
+    ) -> Result<Self, String> {
+        let base_url = meilisearch_base_url(url, external_config)?;
+        Self::new(&base_url, api_key, tls_enabled, url_params, timeout)
+    }
+
     fn request(&self, method: Method, path: &str) -> RequestBuilder {
         let request = self.http.request(method, format!("{}{}", self.base_url, path));
         match self.api_key.as_deref() {
@@ -76,6 +88,31 @@ impl MeilisearchClient {
     fn delete(&self, path: &str) -> RequestBuilder {
         self.request(Method::DELETE, path)
     }
+}
+
+fn meilisearch_base_url(url: &str, external_config: Option<&Value>) -> Result<String, String> {
+    let url = url.trim_end_matches('/');
+    let Some(raw_base_path) = external_config
+        .and_then(Value::as_object)
+        .and_then(|config| config.get("basePath").or_else(|| config.get("base_path")))
+        .and_then(Value::as_str)
+    else {
+        return Ok(url.to_string());
+    };
+
+    let input = raw_base_path.trim();
+    if input.is_empty() || input == "/" {
+        return Ok(url.to_string());
+    }
+    if input.contains(['?', '#']) {
+        return Err("Meilisearch base path cannot contain a query or fragment".to_string());
+    }
+
+    let segments = input.split('/').filter(|segment| !segment.is_empty()).collect::<Vec<_>>();
+    if segments.iter().any(|segment| matches!(*segment, "." | "..")) {
+        return Err("Meilisearch base path cannot contain '.' or '..' segments".to_string());
+    }
+    Ok(format!("{url}/{}", segments.join("/")))
 }
 
 fn meilisearch_accept_invalid_certs(tls_enabled: bool, url_params: Option<&str>) -> bool {
@@ -237,6 +274,7 @@ pub async fn find_documents(
         extended_documents: None,
         total: result.total,
         total_is_exact: true,
+        next_cursor: None,
     })
 }
 
@@ -732,6 +770,18 @@ fn parse_rest_request_line(line: &str) -> Result<(Method, String), String> {
     if !path.starts_with('/') {
         return Err("Meilisearch REST path must start with '/'".to_string());
     }
+    if path.contains('#') {
+        return Err("Meilisearch REST path must not contain a fragment".to_string());
+    }
+    let raw_path = path.split_once('?').map_or(path, |(path, _)| path);
+    for segment in raw_path.split('/') {
+        let decoded = percent_decode_str(segment)
+            .decode_utf8()
+            .map_err(|_| "Meilisearch REST path contains invalid UTF-8 escaping".to_string())?;
+        if matches!(decoded.as_ref(), "." | "..") || decoded.contains(['/', '\\']) {
+            return Err("Meilisearch REST path cannot contain traversal segments".to_string());
+        }
+    }
     Ok((method, path.to_string()))
 }
 
@@ -762,9 +812,54 @@ fn raw_response_result(status: u16, body: String, start: Instant, truncated: boo
 
 #[cfg(test)]
 mod tests {
-    use super::{decode_bounded_rest_body, filter_expression, meilisearch_sort_from_request, parse_rest_request_line};
+    use super::{
+        decode_bounded_rest_body, filter_expression, meilisearch_base_url, meilisearch_sort_from_request,
+        parse_rest_request_line, MeilisearchClient,
+    };
     use reqwest::Method;
+    use serde_json::json;
+    use std::time::Duration;
 
+    #[test]
+    fn normalizes_canonical_and_legacy_proxy_base_paths() {
+        assert_eq!(
+            meilisearch_base_url("http://search.example.com:7700/", Some(&json!({ "basePath": "/gateway/meili/" })))
+                .unwrap(),
+            "http://search.example.com:7700/gateway/meili"
+        );
+        assert_eq!(
+            meilisearch_base_url("https://search.example.com", Some(&json!({ "base_path": "gateway//meili" })))
+                .unwrap(),
+            "https://search.example.com/gateway/meili"
+        );
+    }
+
+    #[test]
+    fn keeps_the_origin_unchanged_for_empty_proxy_base_paths() {
+        for external_config in
+            [None, Some(json!({})), Some(json!({ "basePath": "" })), Some(json!({ "basePath": "/" }))]
+        {
+            assert_eq!(
+                meilisearch_base_url("http://search.example.com:7700/", external_config.as_ref()).unwrap(),
+                "http://search.example.com:7700"
+            );
+        }
+    }
+
+    #[test]
+    fn config_aware_client_uses_proxy_base_path() {
+        let client = MeilisearchClient::new_for_config(
+            "https://search.example.com:8443/",
+            None,
+            true,
+            None,
+            Some(&json!({ "basePath": "/gateway/meili/" })),
+            Duration::from_secs(1),
+        )
+        .unwrap();
+
+        assert_eq!(client.base_url, "https://search.example.com:8443/gateway/meili");
+    }
     #[test]
     fn translates_document_filters_to_meilisearch_syntax() {
         let filter = serde_json::json!({
@@ -808,6 +903,13 @@ mod tests {
     fn parses_rest_request_lines() {
         assert_eq!(parse_rest_request_line("GET /version").unwrap(), (Method::GET, "/version".to_string()));
         assert_eq!(parse_rest_request_line("/health").unwrap(), (Method::GET, "/health".to_string()));
+        assert_eq!(
+            parse_rest_request_line("GET /indexes/movies?limit=1").unwrap(),
+            (Method::GET, "/indexes/movies?limit=1".to_string())
+        );
+        assert!(parse_rest_request_line("GET /../version").unwrap_err().contains("traversal"));
+        assert!(parse_rest_request_line("GET /gateway/%2e%2e/version").unwrap_err().contains("traversal"));
+        assert!(parse_rest_request_line("GET /gateway/%2e%2e%2fversion").unwrap_err().contains("traversal"));
         assert!(parse_rest_request_line("CONNECT /health")
             .unwrap_err()
             .contains("Unsupported Meilisearch HTTP method"));

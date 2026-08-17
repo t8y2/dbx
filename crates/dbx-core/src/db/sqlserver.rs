@@ -2656,6 +2656,7 @@ pub async fn list_indexes(client: &mut SqlServerClient, schema: &str, table: &st
                     Some(inc_str.split(',').map(|s| s.to_string()).collect())
                 },
                 comment: row.get::<&str, _>(7).filter(|s: &&str| !s.is_empty()).map(|s: &str| s.to_string()),
+                key_is_expression: Vec::new(),
             }
         })
         .collect())

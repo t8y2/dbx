@@ -126,6 +126,36 @@ fn test_connection(id: &str, name: &str) -> ConnectionConfig {
     .expect("test connection")
 }
 
+fn mysql_connection(id: &str, name: &str) -> ConnectionConfig {
+    serde_json::from_value(json!({
+        "id": id,
+        "name": name,
+        "db_type": "mysql",
+        "host": "localhost",
+        "port": 3306,
+        "username": "tester",
+        "password": "",
+        "database": "reporting",
+        "ssl": false
+    }))
+    .expect("test MySQL connection")
+}
+
+fn postgres_connection(id: &str, name: &str) -> ConnectionConfig {
+    serde_json::from_value(json!({
+        "id": id,
+        "name": name,
+        "db_type": "postgres",
+        "host": "localhost",
+        "port": 5432,
+        "username": "tester",
+        "password": "",
+        "database": "reporting",
+        "ssl": false
+    }))
+    .expect("test PostgreSQL connection")
+}
+
 #[tokio::test]
 async fn initializes_lists_tools_and_calls_a_tool() {
     let (server_transport, client_transport) = tokio::io::duplex(16 * 1024);
@@ -211,6 +241,84 @@ async fn enforces_global_connection_scope_and_read_only_policy() {
 
     client.cancel().await.expect("close MCP client");
     server_task.abort();
+}
+
+/// Regression for issue #6053: MCP read-only mode let some write-capable SQL
+/// through because the read-only gate consulted only the keyword heuristic and
+/// ignored the SQL risk classifier it had already computed.
+#[tokio::test]
+async fn read_only_policy_blocks_write_capable_sql_the_keyword_scan_misses() {
+    for (allow_dangerous_sql, sql) in [
+        // MySQL's legacy spelling of FOR SHARE — takes the same shared row
+        // locks and is reachable with the plain read-only execution mode.
+        (false, "SELECT * FROM users LOCK IN SHARE MODE"),
+        (true, "SELECT * FROM users LOCK IN SHARE MODE"),
+        (true, "SELECT * FROM users FOR SHARE"),
+    ] {
+        let backend = PolicyBackend {
+            policy: McpGlobalPolicy { read_only: true, allow_dangerous_sql, allowed_connection_ids: None },
+            connections: vec![mysql_connection("mysql", "reporting")],
+            group_paths: Ok(HashMap::new()),
+        };
+        let (server_transport, client_transport) = tokio::io::duplex(16 * 1024);
+        let server = DbxMcpServer::with_runtime_options(Arc::new(backend), McpScope::default(), false);
+        let server_task = tokio::spawn(async move { server.serve(server_transport).await });
+        let client = ().serve(client_transport).await.expect("initialize MCP client");
+
+        let result = client
+            .peer()
+            .call_tool(CallToolRequestParams::new("dbx_execute_query").with_arguments(
+                json!({ "connection_id": "mysql", "sql": sql }).as_object().cloned().unwrap_or_else(Map::new),
+            ))
+            .await
+            .expect("call read-only policy");
+        let text = result.content[0].as_text().expect("tool result text").text.clone();
+        assert_eq!(
+            result.is_error,
+            Some(true),
+            "{sql} (allow_dangerous_sql={allow_dangerous_sql}) reached the backend"
+        );
+        assert!(
+            text.contains("MCP_READ_ONLY"),
+            "expected MCP_READ_ONLY for {sql} (allow_dangerous_sql={allow_dangerous_sql}), got: {text}"
+        );
+
+        client.cancel().await.expect("close MCP client");
+        server_task.abort();
+    }
+}
+
+#[tokio::test]
+async fn read_only_policy_allows_read_only_show_statements() {
+    for (connection, sql) in [
+        (mysql_connection("mysql", "reporting"), "SHOW COLLATION"),
+        (postgres_connection("postgres", "reporting"), "SHOW search_path"),
+    ] {
+        let connection_id = connection.id.clone();
+        let backend = PolicyBackend {
+            policy: McpGlobalPolicy { read_only: true, allow_dangerous_sql: false, allowed_connection_ids: None },
+            connections: vec![connection],
+            group_paths: Ok(HashMap::new()),
+        };
+        let (server_transport, client_transport) = tokio::io::duplex(16 * 1024);
+        let server = DbxMcpServer::with_runtime_options(Arc::new(backend), McpScope::default(), false);
+        let server_task = tokio::spawn(async move { server.serve(server_transport).await });
+        let client = ().serve(client_transport).await.expect("initialize MCP client");
+
+        let result = client
+            .peer()
+            .call_tool(CallToolRequestParams::new("dbx_execute_query").with_arguments(
+                json!({ "connection_id": connection_id, "sql": sql }).as_object().cloned().unwrap_or_else(Map::new),
+            ))
+            .await
+            .expect("call read-only policy");
+        let text = result.content[0].as_text().expect("tool result text").text.clone();
+        assert!(!text.contains("MCP_READ_ONLY"), "read-only SHOW was blocked: {sql}: {text}");
+        assert!(text.contains("query should have been blocked"), "expected {sql} to reach the backend, got: {text}");
+
+        client.cancel().await.expect("close MCP client");
+        server_task.abort();
+    }
 }
 
 #[tokio::test]

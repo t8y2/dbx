@@ -457,3 +457,154 @@ async fn live_mysql_transfer_preserves_spatial_values_and_modes() {
     cleanup.unwrap();
     test_result.unwrap();
 }
+
+#[tokio::test]
+#[ignore = "requires a disposable MySQL 5.7+ endpoint via DBX_LIVE_MYSQL_TRANSFER_* variables"]
+async fn live_mysql_transfer_structure_overwrite_rejects_incompatible_target_columns() {
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let connection_id = format!("live-mysql-transfer-struct-{suffix}");
+    let source_database = format!("dbx_transfer_struct_src_{}", &suffix[..12]);
+    let target_database = format!("dbx_transfer_struct_dst_{}", &suffix[..12]);
+    let config = live_mysql_config(&connection_id);
+    let setup_pool = mysql::connect(&mysql_url(&config), Duration::from_secs(10)).await.unwrap();
+
+    let setup = format!(
+        "CREATE DATABASE `{source_database}`;\
+         CREATE DATABASE `{target_database}`;\
+         CREATE TABLE `{source_database}`.`orders` (\
+             id INT PRIMARY KEY, name VARCHAR(32), extra_col VARCHAR(32)\
+         );\
+         INSERT INTO `{source_database}`.`orders` VALUES (1, 'alpha', 'x');\
+         CREATE TABLE `{target_database}`.`orders` (\
+             id INT PRIMARY KEY, name VARCHAR(32)\
+         );\
+         INSERT INTO `{target_database}`.`orders` (id, name) VALUES (99, 'stale');\
+         CREATE TABLE `{source_database}`.`required_orders` (\
+             id INT PRIMARY KEY, name VARCHAR(32)\
+         );\
+         INSERT INTO `{source_database}`.`required_orders` VALUES (1, 'alpha');\
+         CREATE TABLE `{target_database}`.`required_orders` (\
+             id INT PRIMARY KEY, name VARCHAR(32), required_code VARCHAR(32) NOT NULL\
+         );\
+         INSERT INTO `{target_database}`.`required_orders` (id, name, required_code) VALUES (99, 'stale', 'keep')"
+    );
+    mysql::execute_query(&setup_pool, &setup, true).await.unwrap();
+
+    let dir = std::env::temp_dir().join(format!("dbx-live-mysql-transfer-struct-{suffix}"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+    let state = AppState::new(storage);
+    state.configs.write().await.insert(connection_id.clone(), config);
+    let source_pool_key = state.get_or_create_pool(&connection_id, Some(&source_database)).await.unwrap();
+    let target_pool_key = state.get_or_create_pool(&connection_id, Some(&target_database)).await.unwrap();
+
+    // Mirrors the UI: "structure + data" content always requests create_table,
+    // and the reporter picked overwrite mode. The target table already exists
+    // with a column that's missing from the source ("orders" lacks extra_col).
+    let request = TransferRequest {
+        transfer_id: format!("live-mysql-transfer-struct-overwrite-{suffix}"),
+        source_connection_id: connection_id.clone(),
+        source_database: source_database.clone(),
+        source_schema: source_database.clone(),
+        source_catalog: None,
+        target_connection_id: connection_id.clone(),
+        target_database: target_database.clone(),
+        target_schema: target_database.clone(),
+        target_catalog: None,
+        tables: vec!["orders".to_string()],
+        create_table: true,
+        content: TransferContent::default(),
+        objects: Vec::new(),
+        mode: TransferMode::Overwrite,
+        target_table_name_case: TransferTableNameCase::Preserve,
+        ownership_policy: TransferOwnershipPolicy::Preserve,
+        batch_size: 10,
+    };
+
+    let test_result = async {
+        let result = transfer_table(
+            &state,
+            &request,
+            "orders",
+            0,
+            &DatabaseType::Mysql,
+            &DatabaseType::Mysql,
+            &source_pool_key,
+            &target_pool_key,
+            |_| {},
+        )
+        .await;
+
+        let error = result.expect_err("expected transfer to reject the incompatible target structure");
+        assert!(error.contains("extra_col"), "unexpected missing-source-column error: {error}");
+
+        // The pre-existing target row must survive: a column-mismatch error must
+        // be raised BEFORE the destructive TRUNCATE, not surface only after the
+        // target has already been wiped by an insert that was doomed to fail.
+        assert_eq!(
+            query_text(
+                &setup_pool,
+                &format!("SELECT CAST(COUNT(*) AS CHAR) FROM `{target_database}`.`orders` WHERE id=99"),
+            )
+            .await,
+            "1",
+            "target row was destroyed by TRUNCATE despite the transfer failing"
+        );
+
+        let required_request = TransferRequest {
+            transfer_id: format!("live-mysql-transfer-required-target-overwrite-{suffix}"),
+            source_connection_id: connection_id.clone(),
+            source_database: source_database.clone(),
+            source_schema: source_database.clone(),
+            source_catalog: None,
+            target_connection_id: connection_id.clone(),
+            target_database: target_database.clone(),
+            target_schema: target_database.clone(),
+            target_catalog: None,
+            tables: vec!["required_orders".to_string()],
+            create_table: true,
+            content: TransferContent::default(),
+            objects: Vec::new(),
+            mode: TransferMode::Overwrite,
+            target_table_name_case: TransferTableNameCase::Preserve,
+            ownership_policy: TransferOwnershipPolicy::Preserve,
+            batch_size: 10,
+        };
+        let required_result = transfer_table(
+            &state,
+            &required_request,
+            "required_orders",
+            0,
+            &DatabaseType::Mysql,
+            &DatabaseType::Mysql,
+            &source_pool_key,
+            &target_pool_key,
+            |_| {},
+        )
+        .await;
+        let required_error = required_result.expect_err("expected transfer to reject a required target-only column");
+        assert!(required_error.contains("required_code"), "unexpected required-target-column error: {required_error}");
+        assert_eq!(
+            query_text(
+                &setup_pool,
+                &format!("SELECT CAST(COUNT(*) AS CHAR) FROM `{target_database}`.`required_orders` WHERE id=99"),
+            )
+            .await,
+            "1",
+            "target row was destroyed by TRUNCATE despite the required target column mismatch"
+        );
+        Ok::<_, String>(())
+    }
+    .await;
+
+    let cleanup = mysql::execute_query(
+        &setup_pool,
+        &format!("DROP DATABASE `{source_database}`; DROP DATABASE `{target_database}`"),
+        true,
+    )
+    .await;
+    setup_pool.disconnect().await.unwrap();
+    let _ = std::fs::remove_dir_all(dir);
+    cleanup.unwrap();
+    test_result.unwrap();
+}

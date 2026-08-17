@@ -18,6 +18,7 @@ import {
   resolveInitialMqTab,
   resolveMqSystemKindFromConnection,
   resolveRabbitMqDefaultVhost,
+  resolveTopicSelectedTab,
   type MqTab,
 } from "@/lib/mq/mqConsoleDefaults";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -285,11 +286,7 @@ function handleNamespaceRolesSelected(namespace: string) {
 function handleTopicSelected(topic: TopicInfo) {
   selectedTopic.value = topic;
   selectedSubscriptionName.value = undefined;
-  if (isRocketMqCluster.value) {
-    activeTab.value = canManageSubscriptions.value ? "subscriptions" : "topics";
-  } else {
-    activeTab.value = isFlatMqCluster.value ? "monitoring" : canManageSubscriptions.value ? "subscriptions" : "monitoring";
-  }
+  activeTab.value = resolveTopicSelectedTab({ systemKind: mqSystemKind.value, capabilities: effectiveCapabilities.value });
 }
 
 function handleNavigateTab(payload: { tab: MqTab; topic?: TopicInfo; subscription?: string; preferDlqTopic?: boolean }) {

@@ -193,6 +193,60 @@ describe("tab result cache statement execution metadata", () => {
     expect(restored?.querySourceColumns).toEqual(["id", "name"]);
   });
 
+  it("restores multi-source column comments and their source identity from the snapshot", () => {
+    const snapshot = {
+      result: {
+        columns: ["id", "user_id", "id_1", "name"],
+        rows: [[1, 100, 7, "Alice"]],
+        affected_rows: 0,
+        execution_time_ms: 1,
+      },
+      resultRuns: [
+        {
+          id: "run-join",
+          title: "Run 1",
+          sequence: 1,
+          sql: "SELECT a.id, a.user_id, b.id, b.name FROM orders a JOIN users b ON a.user_id = b.id",
+          createdAt: 1,
+          result: {
+            columns: ["id", "user_id", "id_1", "name"],
+            rows: [[1, 100, 7, "Alice"]],
+            affected_rows: 0,
+            execution_time_ms: 1,
+          },
+          resultColumnComments: ["订单ID", "下单用户", "用户ID", "用户名"],
+          queryDisplaySourceColumns: [
+            { sourceKey: "a", sourceColumn: "id" },
+            { sourceKey: "a", sourceColumn: "user_id" },
+            { sourceKey: "b", sourceColumn: "id" },
+            { sourceKey: "b", sourceColumn: "name" },
+          ],
+        },
+      ],
+      activeResultRunId: "run-join",
+      resultColumnComments: ["订单ID", "下单用户", "用户ID", "用户名"],
+      queryDisplaySourceColumns: [
+        { sourceKey: "a", sourceColumn: "id" },
+        { sourceKey: "a", sourceColumn: "user_id" },
+        { sourceKey: "b", sourceColumn: "id" },
+        { sourceKey: "b", sourceColumn: "name" },
+      ],
+      cachedAt: 1,
+    };
+
+    const restored = decodeTabResultSnapshot(encodeTabResultSnapshot(snapshot));
+
+    expect(restored?.resultColumnComments).toEqual(["订单ID", "下单用户", "用户ID", "用户名"]);
+    expect(restored?.queryDisplaySourceColumns).toEqual([
+      { sourceKey: "a", sourceColumn: "id" },
+      { sourceKey: "a", sourceColumn: "user_id" },
+      { sourceKey: "b", sourceColumn: "id" },
+      { sourceKey: "b", sourceColumn: "name" },
+    ]);
+    expect(restored?.resultRuns?.[0]?.resultColumnComments).toEqual(["订单ID", "下单用户", "用户ID", "用户名"]);
+    expect(restored?.resultRuns?.[0]?.queryDisplaySourceColumns?.[2]).toEqual({ sourceKey: "b", sourceColumn: "id" });
+  });
+
   it("treats corrupt and unsupported snapshots as missing", () => {
     expect(decodeTabResultSnapshot(new Uint8Array([0xff, 0x00]))).toBeUndefined();
     const encoded = encodeTabResultSnapshot(queryResultLifecycleSnapshot());

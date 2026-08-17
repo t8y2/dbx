@@ -36,6 +36,7 @@ import org.apache.kafka.clients.admin.RaftVoterEndpoint;
 import org.apache.kafka.clients.admin.TopicDescription;
 import org.apache.kafka.clients.admin.TopicListing;
 import org.apache.kafka.common.Node;
+import org.apache.kafka.common.PartitionInfo;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.TopicPartitionInfo;
 import org.apache.kafka.common.Uuid;
@@ -148,6 +149,114 @@ class KafkaAgentTest {
         assertEquals(1, topics.get(0).get("partitions"));
         assertEquals(2, topics.get(0).get("replicationFactor"));
         assertEquals(false, topics.get(0).get("internal"));
+    }
+
+    @Test
+    void legacyStatsFallbackRequiresAnUnsupportedVersionException() {
+        assertTrue(KafkaAgent.hasUnsupportedVersionException(new ExecutionException(
+            new UnsupportedVersionException(
+                "MetadataRequest versions older than 4 don't support the allowAutoTopicCreation field"
+            )
+        )));
+        assertFalse(KafkaAgent.hasUnsupportedVersionException(
+            new IllegalStateException("broker reports unsupported version text")
+        ));
+    }
+
+    @Test
+    void legacyTopicStatsRequireAnExistingTopicFromAllTopicMetadata() {
+        var error = assertThrows(
+            org.apache.kafka.common.errors.UnknownTopicOrPartitionException.class,
+            () -> KafkaAgent.requireExistingTopic(Collections.singleton("payments"), "orders")
+        );
+
+        assertTrue(error.getMessage().contains("orders"));
+    }
+
+    @Test
+    void legacyTopicStatsConsumerUsesCompatibleMetadataOnlyForConnectedSessions() {
+        assertThrows(IllegalStateException.class, () -> KafkaAgent.topicStatsConsumerProperties(null));
+
+        JsonObject connection = new JsonObject();
+        connection.addProperty("bootstrap_servers", "legacy-broker:9092");
+        Properties properties = KafkaAgent.topicStatsConsumerProperties(connection);
+
+        assertEquals("true", properties.getProperty("allow.auto.create.topics"));
+        assertEquals("false", properties.getProperty("enable.auto.commit"));
+    }
+
+    @Test
+    void legacyTopicStatsPreserveTheExistingStatsShape() {
+        Node leader = new Node(1, "broker-1", 9092);
+        Node replica = new Node(2, "broker-2", 9092);
+        PartitionInfo partition = new PartitionInfo(
+            "orders",
+            0,
+            leader,
+            new Node[] { leader, replica },
+            new Node[] { leader }
+        );
+        TopicPartition topicPartition = new TopicPartition("orders", 0);
+
+        @SuppressWarnings("unchecked")
+        Map<String, Object> result = (Map<String, Object>) KafkaAgent.legacyTopicStatsResult(
+            "orders",
+            Collections.singletonList(partition),
+            Collections.singletonMap(topicPartition, 4L),
+            Collections.singletonMap(topicPartition, 10L)
+        );
+
+        assertEquals("orders", result.get("name"));
+        assertEquals(1, result.get("partitions"));
+        assertEquals(2, result.get("replicationFactor"));
+        assertEquals(6L, result.get("totalMessages"));
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> partitionStats = (List<Map<String, Object>>) result.get("partitionStats");
+        assertEquals(List.of(1, 2), partitionStats.get(0).get("replicas"));
+        assertEquals(Collections.singletonList(1), partitionStats.get(0).get("isr"));
+        assertEquals(4L, partitionStats.get(0).get("beginOffset"));
+        assertEquals(10L, partitionStats.get(0).get("endOffset"));
+    }
+
+    @Test
+    void topicConfigReturnsAnExplicitUnsupportedMarkerForLegacyBrokers() throws Exception {
+        @SuppressWarnings("unchecked")
+        Map<String, Object> result = (Map<String, Object>) KafkaAgent.topicConfigResult(() -> {
+            throw new ExecutionException(new UnsupportedVersionException(
+                "The node does not support DESCRIBE_CONFIGS"
+            ));
+        });
+
+        assertEquals(Collections.emptyMap(), result.get("configs"));
+        assertEquals(false, result.get("configSupported"));
+        assertTrue(((String) result.get("unsupportedReason")).contains("DescribeConfigs"));
+    }
+
+    @Test
+    void topicConfigPreservesModernConfigEntries() throws Exception {
+        Config config = new Config(Collections.singletonList(new ConfigEntry("retention.ms", "60000")));
+
+        @SuppressWarnings("unchecked")
+        Map<String, Object> result = (Map<String, Object>) KafkaAgent.topicConfigResult(() -> config);
+        @SuppressWarnings("unchecked")
+        Map<String, Map<String, Object>> configs = (Map<String, Map<String, Object>>) result.get("configs");
+
+        assertEquals("60000", configs.get("retention.ms").get("value"));
+        assertFalse(result.containsKey("configSupported"));
+    }
+
+    @Test
+    void topicConfigPreservesNonVersionFailures() {
+        IllegalStateException failure = new IllegalStateException("broker reports unsupported version text");
+
+        IllegalStateException thrown = assertThrows(
+            IllegalStateException.class,
+            () -> KafkaAgent.topicConfigResult(() -> {
+                throw failure;
+            })
+        );
+
+        assertEquals(failure, thrown);
     }
 
     @Test

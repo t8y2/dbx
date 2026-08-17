@@ -2272,6 +2272,7 @@ pub async fn list_indexes(pool: &SqliteHandle, schema: &str, table: &str) -> Res
                     index_type: None,
                     included_columns: None,
                     comment: None,
+                    key_is_expression: Vec::new(),
                 });
             }
             Ok(indexes)

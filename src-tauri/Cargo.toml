@@ -1,6 +1,6 @@
 [package]
 name = "dbx"
-version = "0.5.83"
+version = "0.5.86"
 description = "Open-source database management tool"
 authors = ["skyler"]
 license = "Apache-2.0"
@@ -13,9 +13,10 @@ name = "dbx_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [features]
-default = ["duckdb-sidecar", "mq-admin", "sqlite-sqlcipher", "system-fonts"]
+default = ["duckdb-sidecar", "dynamodb", "mq-admin", "sqlite-sqlcipher", "system-fonts"]
 custom-protocol = ["tauri/custom-protocol"]
 duckdb-sidecar = ["dbx-core/duckdb-sidecar"]
+dynamodb = ["dbx-core/dynamodb"]
 mq-admin = ["dbx-core/mq-admin"]
 sqlite-sqlcipher = ["dbx-core/sqlite-sqlcipher"]
 system-fonts = ["dbx-core/system-fonts"]

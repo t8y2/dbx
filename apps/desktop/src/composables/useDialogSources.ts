@@ -2,6 +2,7 @@ import { ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useToast } from "@/composables/useToast";
+import { hasSidebarLayoutEntries } from "@/lib/sidebar/sidebarLayout";
 import type { SidebarLayout } from "@/types/database";
 
 const showTransferDialog = ref(false);
@@ -315,7 +316,7 @@ export function useDialogSources() {
             : t("configExport.importNone"),
           4000,
         );
-        if (layout && count > 0) {
+        if (hasSidebarLayoutEntries(layout)) {
           pendingImportLayout.value = layout;
           showImportLayoutConfirm.value = true;
         }
@@ -330,7 +331,7 @@ export function useDialogSources() {
       const { count, layout } = await connectionStore.importConnectionsFromFile(pendingImportContent.value, passphrase);
       showConfigPassphraseDialog.value = false;
       toast(count > 0 ? t("configExport.importSuccess", { count }) : t("configExport.importNone"), 2000);
-      if (layout && count > 0) {
+      if (hasSidebarLayoutEntries(layout)) {
         pendingImportLayout.value = layout;
         showImportLayoutConfirm.value = true;
       }

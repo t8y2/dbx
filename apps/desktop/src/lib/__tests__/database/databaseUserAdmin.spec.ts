@@ -9,6 +9,7 @@ import {
   kingbaseShowGrantsSql,
   kingbaseUserAdminProvider,
   mysqlPrivilegeSelectionFromGrants,
+  nativeMysqlUserAdminProvider,
   postgresUserAdminProvider,
   resolveDatabaseUserAdminProviderForConnection,
 } from "@/lib/database/databaseUserAdmin";
@@ -80,6 +81,33 @@ describe("MySQL grant privilege selection", () => {
 });
 
 describe("database user admin providers", () => {
+  it("opts only native MySQL connections into account Host changes", () => {
+    const legacyNative = resolveDatabaseUserAdminProviderForConnection(connection("mysql"));
+    const blankLegacyNative = resolveDatabaseUserAdminProviderForConnection(connection("mysql", "  "));
+    const native = resolveDatabaseUserAdminProviderForConnection(connection("mysql", "mysql"));
+    const normalizedNative = resolveDatabaseUserAdminProviderForConnection(connection("mysql", " MySQL "));
+
+    expect(legacyNative).toBe(nativeMysqlUserAdminProvider);
+    expect(blankLegacyNative).toBe(nativeMysqlUserAdminProvider);
+    expect(native).toBe(nativeMysqlUserAdminProvider);
+    expect(normalizedNative).toBe(nativeMysqlUserAdminProvider);
+    expect(native?.renameUserSql?.({ user: "app'user", host: "old\\host" }, "new'\\host")).toBe("RENAME USER 'app''user'@'old\\\\host' TO 'app''user'@'new''\\\\host';");
+  });
+
+  it("does not expose account Host changes to MySQL-compatible providers", () => {
+    const jdbcMysql = { ...connection("jdbc", "mysql"), connection_string: "jdbc:mysql://localhost:3306/app" };
+
+    expect(getDatabaseUserAdminProvider("mysql")?.renameUserSql).toBeUndefined();
+    expect(resolveDatabaseUserAdminProviderForConnection(connection("goldendb", "goldendb"))?.renameUserSql).toBeUndefined();
+    expect(resolveDatabaseUserAdminProviderForConnection(jdbcMysql)?.renameUserSql).toBeUndefined();
+    for (const profile of ["mariadb", "oceanbase", "tidb", "tdsql", "polardb", "greatsql", "goldendb", "doris", "selectdb", "starrocks"]) {
+      expect(resolveDatabaseUserAdminProviderForConnection(connection("mysql", profile))?.renameUserSql, profile).toBeUndefined();
+    }
+    for (const dbType of ["gbase", "doris", "starrocks", "postgres"] as const) {
+      expect(resolveDatabaseUserAdminProviderForConnection(connection(dbType, dbType))?.renameUserSql, dbType).toBeUndefined();
+    }
+  });
+
   it("selects the dedicated provider for GaussDB M-mode connections", () => {
     const provider = resolveDatabaseUserAdminProviderForConnection(connection("gaussdb", "GAUSSDB-M"));
 

@@ -88,7 +88,7 @@ import type { BuildEditableObjectSourceSqlInput, BuildRoutineRenameObjectSourceI
 import type { BuildViewDdlInput } from "@/lib/table/viewDdl";
 import type { BuildRenameObjectSqlOptions } from "@/lib/table/objectRenameSql";
 import type { CreateDatabaseSqlOptions } from "@/lib/database/createDatabaseSql";
-import type { DatabaseNameSqlOptions, DatabasePropertyEditSqlOptions, DropTableChildObjectSqlOptions, DropObjectSqlOptions, DuplicateTableStructureSqlOptions, CopyTableDataSqlOptions, SchemaNameSqlOptions, TableAdminSqlOptions } from "@/lib/database/dbAdminSql";
+import type { DatabaseNameSqlOptions, DatabasePropertyEditSqlOptions, DropTableChildObjectSqlOptions, DropObjectSqlOptions, DuplicateTableStructureSqlOptions, CopyTableDataSqlOptions, MysqlAutoIncrementSqlOptions, SchemaNameSqlOptions, TableAdminSqlOptions } from "@/lib/database/dbAdminSql";
 import type { BuildDatabaseSqlExportOptions, BuildExportInsertStatementsOptions } from "@/lib/export/databaseExport";
 
 export interface SshPromptResolution {
@@ -613,6 +613,14 @@ export async function saveSavedSqlEditorPositions(positions: unknown[]): Promise
   return invoke("save_saved_sql_editor_positions", { positions });
 }
 
+export async function loadTransferTaskLibrary(): Promise<unknown | null> {
+  return invoke("load_transfer_task_library");
+}
+
+export async function saveTransferTaskLibrary(library: unknown): Promise<void> {
+  return invoke("save_transfer_task_library", { library });
+}
+
 export async function completeAppClose(action: "quit" | "hide"): Promise<void> {
   return invoke("complete_app_close", { action });
 }
@@ -1027,6 +1035,14 @@ export async function connectionFinalProxyPort(config: ConnectionConfig): Promis
 
 export async function disconnectDb(connectionId: string, clientAttempt?: number): Promise<void> {
   return invokeBackend("disconnect_db", { connectionId, clientAttempt });
+}
+
+export async function sessionCredentialStatus(connectionId: string): Promise<boolean> {
+  return invokeBackend("session_credential_status", { connectionId });
+}
+
+export async function forgetSessionCredential(connectionId: string): Promise<void> {
+  return invokeBackend("forget_session_credential", { connectionId });
 }
 
 export async function checkConnectionHealth(connectionId: string): Promise<void> {
@@ -1529,6 +1545,10 @@ export async function buildEmptyTableSql(options: TableAdminSqlOptions): Promise
 
 export async function buildTruncateTableSql(options: TableAdminSqlOptions): Promise<string> {
   return invoke("build_truncate_table_sql", { options });
+}
+
+export async function buildMysqlAutoIncrementSql(options: MysqlAutoIncrementSqlOptions): Promise<string> {
+  return invoke("build_mysql_auto_increment_sql", { options });
 }
 
 export async function buildDropDatabaseSql(options: DatabaseNameSqlOptions): Promise<string> {
@@ -2035,6 +2055,10 @@ export async function loadSavedSqlLibrary(): Promise<SavedSqlLibrary> {
   return invoke("load_saved_sql_library");
 }
 
+export async function loadSavedSqlFilesForSync(): Promise<SavedSqlFile[]> {
+  return invoke("load_saved_sql_files_for_sync");
+}
+
 export async function loadSavedSqlFile(id: string): Promise<SavedSqlFile | null> {
   return invoke("load_saved_sql_file", { id });
 }
@@ -2124,6 +2148,7 @@ export interface McpServerStatus {
   data_dir: string | null;
   install_command: string;
   update_command: string;
+  uninstall_command: string;
   error: string | null;
 }
 
@@ -2133,6 +2158,10 @@ export async function checkMcpServerStatus(): Promise<McpServerStatus> {
 
 export async function installMcpServer(): Promise<string> {
   return invoke("install_mcp_server");
+}
+
+export async function uninstallMcpServer(): Promise<string> {
+  return invoke("uninstall_mcp_server");
 }
 
 export async function checkForUpdates(locale?: string, source?: UpdateDownloadSource): Promise<UpdateInfo> {
@@ -3370,6 +3399,31 @@ export interface DocumentQueryResult {
   extended_documents?: any[];
   total: number;
   total_is_exact?: boolean;
+  next_cursor?: string;
+}
+
+export interface DynamoDbKeyInfo {
+  name: string;
+  attributeType: "S" | "N" | "B" | string;
+}
+
+export interface DynamoDbIndexInfo {
+  name: string;
+  kind: "global" | "local" | string;
+  partitionKey: DynamoDbKeyInfo;
+  sortKey?: DynamoDbKeyInfo;
+  projectionType: "ALL" | "KEYS_ONLY" | "INCLUDE" | string;
+  nonKeyAttributes: string[];
+}
+
+export interface DynamoDbTableDescription {
+  name: string;
+  status: string;
+  itemCount: number;
+  sizeBytes: number;
+  partitionKey: DynamoDbKeyInfo;
+  sortKey?: DynamoDbKeyInfo;
+  indexes: DynamoDbIndexInfo[];
 }
 
 // Kept for callers that are specifically using MongoDB APIs.
@@ -3393,6 +3447,32 @@ export interface MongoDropIndexesResult {
   dropped_names: string[];
   affected_rows: number;
   failures?: MongoDropIndexFailure[];
+}
+
+export interface MongoIndexKey {
+  field: string;
+  /** `1`, `-1`, or a MongoDB key type such as `text` / `2dsphere` / `hashed`. */
+  direction: string;
+}
+
+/** Full MongoDB index specification, carrying the options `IndexInfo` cannot hold. */
+export interface MongoIndexSpec {
+  name: string;
+  keys: MongoIndexKey[];
+  is_unique: boolean;
+  is_primary: boolean;
+  is_sparse: boolean;
+  /** TTL in seconds; null when the index does not expire. */
+  expire_after_seconds: number | null;
+  partial_filter_expression: string | null;
+  /** Ignored by MongoDB 4.2+, still reported by older servers. */
+  background: boolean;
+  /** Only meaningful for geoHaystack indexes, removed in MongoDB 4.4+. */
+  bucket_size: number | null;
+  hidden: boolean;
+  /** False when the driver could not report the properties above (Legacy Agent). */
+  properties_complete: boolean;
+  extra_options: string | null;
 }
 
 export interface MongoCloneCollectionResult {
@@ -3506,7 +3586,7 @@ export async function mongoParseShellCommand(source: string): Promise<MongoComma
   return normalizeRustMongoCommand(raw);
 }
 
-export async function documentFindDocuments(connectionId: string, database: string, collection: string, skip: number, limit: number, filter?: string, projection?: string, sort?: string, collation?: string, executionId?: string): Promise<DocumentQueryResult> {
+export async function documentFindDocuments(connectionId: string, database: string, collection: string, skip: number, limit: number, filter?: string, projection?: string, sort?: string, collation?: string, executionId?: string, cursor?: string): Promise<DocumentQueryResult> {
   return invoke("document_find_documents", {
     connectionId,
     database,
@@ -3517,8 +3597,22 @@ export async function documentFindDocuments(connectionId: string, database: stri
     projection,
     sort,
     collation,
+    cursor,
     executionId,
   });
+}
+
+export async function documentCountDocuments(connectionId: string, collection: string, filter?: string, executionId?: string): Promise<number> {
+  return invoke("document_count_documents", {
+    connectionId,
+    collection,
+    filter,
+    executionId,
+  });
+}
+
+export async function dynamodbDescribeTable(connectionId: string, table: string): Promise<DynamoDbTableDescription> {
+  return invoke("dynamodb_describe_table", { connectionId, table });
 }
 
 export async function elasticsearchCountDocuments(connectionId: string, index: string, filter?: string, executionId?: string): Promise<number> {
@@ -3644,6 +3738,14 @@ export async function mongoCollectionStats(connectionId: string, database: strin
     collection,
     scale,
     executionId,
+  });
+}
+
+export async function mongoListIndexSpecs(connectionId: string, database: string, collection: string): Promise<MongoIndexSpec[]> {
+  return invoke("mongo_list_index_specs", {
+    connectionId,
+    database,
+    collection,
   });
 }
 

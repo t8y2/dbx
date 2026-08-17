@@ -11,6 +11,12 @@ pub mod duckdb_sql;
 pub mod duckdb_worker_process;
 #[cfg(feature = "duckdb-sidecar")]
 pub mod duckdb_worker_protocol;
+#[cfg(feature = "dynamodb")]
+#[path = "dynamodb_driver.rs"]
+pub mod dynamodb_driver;
+#[cfg(not(feature = "dynamodb"))]
+#[path = "dynamodb_driver_disabled.rs"]
+pub mod dynamodb_driver;
 pub mod easysearch_driver;
 pub mod elasticsearch_driver;
 pub mod elasticsearch_sql;
@@ -24,6 +30,8 @@ pub mod mongo_driver;
 pub mod mysql;
 pub mod mysql_compatible;
 pub mod ob_oracle;
+pub mod oceanbase_mysql;
+pub mod opentenbase;
 pub mod postgres;
 pub mod proxy_tunnel;
 pub mod questdb;
@@ -35,6 +43,8 @@ pub mod ssh_host_key;
 pub mod ssh_prompt;
 pub mod ssh_tunnel;
 pub mod starrocks;
+pub mod tdsql_mysql;
+pub mod tidb;
 pub mod transport_layer_tunnel;
 pub mod turso_driver;
 pub mod vector_driver;

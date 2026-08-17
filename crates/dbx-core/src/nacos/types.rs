@@ -12,6 +12,8 @@ pub struct NacosCapabilities {
     pub supports_raw_api: bool,
     #[serde(default)]
     pub service_management: NacosServiceCapabilities,
+    #[serde(default)]
+    pub access_control: NacosAccessControlCapabilities,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -46,6 +48,7 @@ pub enum NacosCapabilityReason {
     EndpointUnavailable,
     NotVerified,
     ConnectionReadOnly,
+    PermissionDenied,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,6 +62,93 @@ pub enum NacosServiceOperation {
     UpdateInstance,
     RegisterInstance,
     DeregisterInstance,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum NacosAccessControlMode {
+    #[default]
+    Unavailable,
+    RoleBindings,
+    EmbeddedRoles,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NacosAccessControlOperation {
+    ListUsers,
+    CreateUser,
+    UpdateUser,
+    DeleteUser,
+    ListRoleBindings,
+    AssignRole,
+    RemoveRole,
+    ListPermissions,
+    GrantPermission,
+    RevokePermission,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct NacosAccessControlCapabilities {
+    #[serde(default)]
+    pub mode: NacosAccessControlMode,
+    pub list_users: NacosOperationCapability,
+    pub create_user: NacosOperationCapability,
+    pub update_user: NacosOperationCapability,
+    pub delete_user: NacosOperationCapability,
+    pub list_role_bindings: NacosOperationCapability,
+    pub assign_role: NacosOperationCapability,
+    pub remove_role: NacosOperationCapability,
+    pub list_permissions: NacosOperationCapability,
+    pub grant_permission: NacosOperationCapability,
+    pub revoke_permission: NacosOperationCapability,
+    /// Whether all read endpoints required by the directory-detail workspace
+    /// are available. Write operations remain independently capability-gated.
+    #[serde(default)]
+    pub enhanced_workspace: bool,
+    #[serde(default)]
+    pub supports_namespace_privileges: bool,
+}
+
+impl NacosAccessControlCapabilities {
+    pub fn unavailable(reason: NacosCapabilityReason) -> Self {
+        Self {
+            mode: NacosAccessControlMode::Unavailable,
+            list_users: NacosOperationCapability::unsupported(reason),
+            create_user: NacosOperationCapability::unsupported(reason),
+            update_user: NacosOperationCapability::unsupported(reason),
+            delete_user: NacosOperationCapability::unsupported(reason),
+            list_role_bindings: NacosOperationCapability::unsupported(reason),
+            assign_role: NacosOperationCapability::unsupported(reason),
+            remove_role: NacosOperationCapability::unsupported(reason),
+            list_permissions: NacosOperationCapability::unsupported(reason),
+            grant_permission: NacosOperationCapability::unsupported(reason),
+            revoke_permission: NacosOperationCapability::unsupported(reason),
+            enhanced_workspace: false,
+            supports_namespace_privileges: false,
+        }
+    }
+
+    pub fn operation(&self, operation: NacosAccessControlOperation) -> &NacosOperationCapability {
+        match operation {
+            NacosAccessControlOperation::ListUsers => &self.list_users,
+            NacosAccessControlOperation::CreateUser => &self.create_user,
+            NacosAccessControlOperation::UpdateUser => &self.update_user,
+            NacosAccessControlOperation::DeleteUser => &self.delete_user,
+            NacosAccessControlOperation::ListRoleBindings => &self.list_role_bindings,
+            NacosAccessControlOperation::AssignRole => &self.assign_role,
+            NacosAccessControlOperation::RemoveRole => &self.remove_role,
+            NacosAccessControlOperation::ListPermissions => &self.list_permissions,
+            NacosAccessControlOperation::GrantPermission => &self.grant_permission,
+            NacosAccessControlOperation::RevokePermission => &self.revoke_permission,
+        }
+    }
+}
+
+impl Default for NacosAccessControlCapabilities {
+    fn default() -> Self {
+        Self::unavailable(NacosCapabilityReason::NotVerified)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -115,8 +205,339 @@ impl Default for NacosCapabilities {
             supports_instance_update: true,
             supports_raw_api: true,
             service_management: NacosServiceCapabilities::default(),
+            access_control: NacosAccessControlCapabilities::default(),
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct NacosNamespacePrivilege {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_true")]
+    pub whitelist_is_all: bool,
+    #[serde(default)]
+    pub whitelist: Vec<String>,
+    #[serde(default)]
+    pub blacklist_is_all: bool,
+    #[serde(default)]
+    pub blacklist: Vec<String>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl Default for NacosNamespacePrivilege {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            whitelist_is_all: true,
+            whitelist: Vec::new(),
+            blacklist_is_all: false,
+            blacklist: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct NacosUserQuery {
+    #[serde(default)]
+    pub username: Option<String>,
+    #[serde(default)]
+    pub page_no: Option<u32>,
+    #[serde(default)]
+    pub page_size: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct NacosUserInfo {
+    pub username: String,
+    #[serde(default)]
+    pub nickname: Option<String>,
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    #[serde(default)]
+    pub roles: Vec<String>,
+    #[serde(default)]
+    pub namespace_privilege: Option<NacosNamespacePrivilege>,
+    #[serde(default)]
+    pub source: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct NacosUserList {
+    pub page_no: u32,
+    pub page_size: u32,
+    pub total_count: u64,
+    pub items: Vec<NacosUserInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct NacosUserCreate {
+    pub username: String,
+    pub password: String,
+    #[serde(default)]
+    pub nickname: Option<String>,
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    #[serde(default)]
+    pub roles: Vec<String>,
+    #[serde(default)]
+    pub namespace_privilege: Option<NacosNamespacePrivilege>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct NacosUserUpdate {
+    pub username: String,
+    #[serde(default)]
+    pub password: Option<String>,
+    #[serde(default)]
+    pub nickname: Option<String>,
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    #[serde(default)]
+    pub roles: Option<Vec<String>>,
+    #[serde(default)]
+    pub namespace_privilege: Option<NacosNamespacePrivilege>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct NacosRoleQuery {
+    #[serde(default)]
+    pub username: Option<String>,
+    #[serde(default)]
+    pub role: Option<String>,
+    #[serde(default)]
+    pub page_no: Option<u32>,
+    #[serde(default)]
+    pub page_size: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct NacosRoleBinding {
+    pub username: String,
+    pub role: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct NacosRoleList {
+    pub page_no: u32,
+    pub page_size: u32,
+    pub total_count: u64,
+    pub items: Vec<NacosRoleBinding>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct NacosPermissionQuery {
+    #[serde(default)]
+    pub role: Option<String>,
+    #[serde(default)]
+    pub resource: Option<String>,
+    #[serde(default)]
+    pub page_no: Option<u32>,
+    #[serde(default)]
+    pub page_size: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[serde(rename_all = "camelCase")]
+pub struct NacosPermissionInfo {
+    pub role: String,
+    pub resource_raw: String,
+    pub action_raw: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parsed_scope: Option<NacosPermissionScope>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[serde(rename_all = "camelCase")]
+pub struct NacosPermissionScope {
+    pub kind: NacosPermissionScopeKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub namespace_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[serde(rename_all = "camelCase")]
+pub enum NacosPermissionScopeKind {
+    Namespace,
+    Global,
+    Custom,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct NacosPermissionList {
+    pub page_no: u32,
+    pub page_size: u32,
+    pub total_count: u64,
+    pub items: Vec<NacosPermissionInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct NacosRoleSummary {
+    pub role: String,
+    pub member_count: u64,
+    pub permission_count: u64,
+    pub complete: bool,
+    pub administrator: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct NacosEffectivePermission {
+    pub resource_raw: String,
+    pub action: String,
+    pub parsed_scope: Option<NacosPermissionScope>,
+    pub source_roles: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct NacosAccessControlSnapshot {
+    pub users: Vec<NacosUserInfo>,
+    pub role_bindings: Vec<NacosRoleBinding>,
+    pub permissions: Vec<NacosPermissionInfo>,
+    pub roles: Vec<NacosRoleSummary>,
+    pub namespaces: Vec<NacosNamespaceInfo>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_username: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct NacosNewUserDraft {
+    pub username: String,
+    pub password: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct NacosPermissionDraft {
+    pub namespace_ids: Vec<String>,
+    pub action: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum NacosAccessOperationRequest {
+    CreateUser {
+        username: String,
+        password: String,
+        #[serde(default)]
+        roles: Vec<String>,
+        #[serde(default)]
+        confirmation: Option<String>,
+    },
+    CreateRole {
+        role: String,
+        #[serde(default)]
+        members: Vec<String>,
+        #[serde(default, rename = "newUsers")]
+        new_users: Vec<NacosNewUserDraft>,
+        permissions: Vec<NacosPermissionDraft>,
+        #[serde(default)]
+        confirmation: Option<String>,
+    },
+    UpdateUserRoles {
+        username: String,
+        roles: Vec<String>,
+        #[serde(default)]
+        confirmation: Option<String>,
+    },
+    UpdateRole {
+        role: String,
+        members: Vec<String>,
+        #[serde(default, rename = "newUsers")]
+        new_users: Vec<NacosNewUserDraft>,
+        permissions: Vec<NacosPermissionDraft>,
+        #[serde(default)]
+        confirmation: Option<String>,
+    },
+    DeleteUser {
+        username: String,
+        #[serde(default)]
+        confirmation: Option<String>,
+    },
+    DeleteRole {
+        role: String,
+        #[serde(default)]
+        confirmation: Option<String>,
+    },
+    RevokePermission {
+        permission: NacosPermissionInfo,
+        #[serde(default)]
+        confirmation: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum NacosAccessOperationStatus {
+    Running,
+    Partial,
+    Succeeded,
+    Failed,
+    Undoing,
+    Undone,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum NacosAccessOperationStepStatus {
+    Pending,
+    Running,
+    Succeeded,
+    Failed,
+    Skipped,
+    Compensated,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct NacosAccessOperationStep {
+    pub id: String,
+    pub action: String,
+    pub target: String,
+    pub status: NacosAccessOperationStepStatus,
+    pub retryable: bool,
+    #[serde(default)]
+    pub needs_password: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct NacosAccessOperationResult {
+    pub operation_id: String,
+    pub status: NacosAccessOperationStatus,
+    pub steps: Vec<NacosAccessOperationStep>,
+    #[serde(default)]
+    pub can_retry: bool,
+    #[serde(default)]
+    pub can_undo: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct NacosAccessOperationRetry {
+    pub operation_id: String,
+    #[serde(default)]
+    pub credentials: Vec<NacosNewUserDraft>,
 }
 
 /// A short-lived challenge returned by the authenticated r-nacos console.
@@ -156,6 +577,13 @@ pub struct NacosNamespaceInfo {
     pub quota: Option<u64>,
     #[serde(default)]
     pub namespace_type: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct NacosNamespaceSidebarSnapshot {
+    pub namespaces: Vec<NacosNamespaceInfo>,
+    pub access_control: NacosAccessControlCapabilities,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -393,6 +821,8 @@ pub struct NacosConfigTransferRequest {
     pub target_connection_id: String,
     pub source: NacosConfigSelector,
     pub target_namespace: String,
+    #[serde(default)]
+    pub target_group: Option<String>,
     #[serde(default)]
     pub conflict_policy: NacosConflictPolicy,
 }

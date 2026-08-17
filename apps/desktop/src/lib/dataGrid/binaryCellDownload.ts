@@ -108,6 +108,7 @@ export function retainBinaryCellDownloadMenuForHover(openCell: BinaryCellPositio
 }
 
 const HEX_VALUE_RE = /^(?:0[xX]|\\x)([0-9a-fA-F\s]*)$/;
+const TRUNCATED_HEX_VALUE_RE = /^(?:0[xX]|\\x)[0-9a-fA-F\s]+\.\.\.$/;
 const BARE_HEX_RE = /^[0-9a-fA-F\s]+$/;
 const HEX_ESCAPE_RE = /^(?:\\x[0-9a-fA-F]{2}|\s)+$/;
 const BINARY_TYPE_RE = /^(?:blob|tinyblob|mediumblob|longblob|bytea|bytes|binary|varbinary|image|raw|long\s+raw)(?:\b|\()/i;
@@ -192,7 +193,11 @@ export function canDownloadBinaryCellValue(value: unknown, columnType?: string):
   return !!parseBinaryCellBytes(value, columnType);
 }
 
-export function binaryCellDisplayText(value: unknown, columnType?: string): string | null {
+export function binaryCellDisplayText(value: unknown, columnType?: string, originalBytes?: number): string | null {
+  if (typeof value === "string" && isBinaryCellColumnType(columnType) && TRUNCATED_HEX_VALUE_RE.test(value.trim())) {
+    const size = originalBytes === undefined ? "..." : formatBinaryCellByteSize(originalBytes);
+    return `${binaryCellDisplayLabel(columnType)} [${size}]`;
+  }
   const bytes = parseBinaryCellBytes(value, columnType);
   if (!bytes || !isBinaryCellColumnType(columnType)) return null;
   if (BINARY_STRING_TYPE_RE.test((columnType ?? "").trim())) {

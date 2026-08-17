@@ -90,6 +90,69 @@ pub(crate) struct RNacosConsoleLoginReq {
 
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct UserListReq {
+    connection_id: String,
+    query: dbx_core::nacos::NacosUserQuery,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct UserCreateReq {
+    connection_id: String,
+    req: dbx_core::nacos::NacosUserCreate,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct UserUpdateReq {
+    connection_id: String,
+    req: dbx_core::nacos::NacosUserUpdate,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct UserDeleteReq {
+    connection_id: String,
+    username: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RoleListReq {
+    connection_id: String,
+    query: dbx_core::nacos::NacosRoleQuery,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RoleBindingReq {
+    connection_id: String,
+    binding: dbx_core::nacos::NacosRoleBinding,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AccessOperationReq {
+    connection_id: String,
+    req: dbx_core::nacos::NacosAccessOperationRequest,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AccessOperationIdReq {
+    connection_id: String,
+    operation_id: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AccessOperationRetryReq {
+    connection_id: String,
+    retry: dbx_core::nacos::NacosAccessOperationRetry,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct ServiceListReq {
     connection_id: String,
     query: dbx_core::nacos::NacosServiceQuery,
@@ -217,6 +280,16 @@ pub async fn list_namespaces(
     Ok(Json(result))
 }
 
+pub async fn sidebar_snapshot(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<ConnReq>,
+) -> Result<Json<dbx_core::nacos::NacosNamespaceSidebarSnapshot>, AppError> {
+    let result = dbx_core::nacos::service::nacos_sidebar_snapshot_core(&state.app, &req.connection_id)
+        .await
+        .map_err(AppError::from)?;
+    Ok(Json(result))
+}
+
 pub async fn create_namespace(
     State(state): State<Arc<WebState>>,
     Json(req): Json<NamespaceCreateReq>,
@@ -325,6 +398,128 @@ pub async fn login_rnacos_console(
         .await
         .map_err(AppError::from)?;
     Ok(Json(()))
+}
+
+pub async fn list_users(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<UserListReq>,
+) -> Result<Json<dbx_core::nacos::NacosUserList>, AppError> {
+    let result = dbx_core::nacos::service::nacos_list_users_core(&state.app, &req.connection_id, req.query)
+        .await
+        .map_err(AppError::from)?;
+    Ok(Json(result))
+}
+
+pub async fn create_user(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<UserCreateReq>,
+) -> Result<Json<()>, AppError> {
+    dbx_core::nacos::service::nacos_create_user_core(&state.app, &req.connection_id, req.req)
+        .await
+        .map_err(AppError::from)?;
+    Ok(Json(()))
+}
+
+pub async fn update_user(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<UserUpdateReq>,
+) -> Result<Json<()>, AppError> {
+    dbx_core::nacos::service::nacos_update_user_core(&state.app, &req.connection_id, req.req)
+        .await
+        .map_err(AppError::from)?;
+    Ok(Json(()))
+}
+
+pub async fn delete_user(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<UserDeleteReq>,
+) -> Result<Json<()>, AppError> {
+    dbx_core::nacos::service::nacos_delete_user_core(&state.app, &req.connection_id, req.username)
+        .await
+        .map_err(AppError::from)?;
+    Ok(Json(()))
+}
+
+pub async fn list_role_bindings(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<RoleListReq>,
+) -> Result<Json<dbx_core::nacos::NacosRoleList>, AppError> {
+    let result = dbx_core::nacos::service::nacos_list_role_bindings_core(&state.app, &req.connection_id, req.query)
+        .await
+        .map_err(AppError::from)?;
+    Ok(Json(result))
+}
+
+pub async fn assign_role(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<RoleBindingReq>,
+) -> Result<Json<()>, AppError> {
+    dbx_core::nacos::service::nacos_assign_role_core(&state.app, &req.connection_id, req.binding)
+        .await
+        .map_err(AppError::from)?;
+    Ok(Json(()))
+}
+
+pub async fn remove_role(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<RoleBindingReq>,
+) -> Result<Json<()>, AppError> {
+    dbx_core::nacos::service::nacos_remove_role_core(&state.app, &req.connection_id, req.binding)
+        .await
+        .map_err(AppError::from)?;
+    Ok(Json(()))
+}
+
+pub async fn access_snapshot(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<ConnReq>,
+) -> Result<Json<dbx_core::nacos::NacosAccessControlSnapshot>, AppError> {
+    let result = dbx_core::nacos::service::nacos_access_snapshot_core(&state.app, &req.connection_id)
+        .await
+        .map_err(AppError::from)?;
+    Ok(Json(result))
+}
+
+pub async fn start_access_operation(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<AccessOperationReq>,
+) -> Result<Json<dbx_core::nacos::NacosAccessOperationResult>, AppError> {
+    let result = dbx_core::nacos::service::nacos_start_access_operation_core(&state.app, &req.connection_id, req.req)
+        .await
+        .map_err(AppError::from)?;
+    Ok(Json(result))
+}
+
+pub async fn get_access_operation(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<AccessOperationIdReq>,
+) -> Result<Json<dbx_core::nacos::NacosAccessOperationResult>, AppError> {
+    let result =
+        dbx_core::nacos::service::nacos_get_access_operation_core(&state.app, &req.connection_id, &req.operation_id)
+            .await
+            .map_err(AppError::from)?;
+    Ok(Json(result))
+}
+
+pub async fn retry_access_operation(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<AccessOperationRetryReq>,
+) -> Result<Json<dbx_core::nacos::NacosAccessOperationResult>, AppError> {
+    let result = dbx_core::nacos::service::nacos_retry_access_operation_core(&state.app, &req.connection_id, req.retry)
+        .await
+        .map_err(AppError::from)?;
+    Ok(Json(result))
+}
+
+pub async fn undo_access_operation(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<AccessOperationIdReq>,
+) -> Result<Json<dbx_core::nacos::NacosAccessOperationResult>, AppError> {
+    let result =
+        dbx_core::nacos::service::nacos_undo_access_operation_core(&state.app, &req.connection_id, &req.operation_id)
+            .await
+            .map_err(AppError::from)?;
+    Ok(Json(result))
 }
 
 pub async fn list_services(

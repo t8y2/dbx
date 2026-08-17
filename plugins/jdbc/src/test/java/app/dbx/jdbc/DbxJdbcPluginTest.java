@@ -16,6 +16,7 @@ import java.sql.Date;
 import java.sql.Driver;
 import java.sql.DriverManager;
 import java.sql.DriverPropertyInfo;
+import java.sql.ParameterMetaData;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.ResultSetMetaData;
@@ -29,6 +30,8 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Properties;
 import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -1290,6 +1293,89 @@ final class DbxJdbcPluginTest {
         } finally {
             closeAndDeregister(connection, driver);
         }
+    }
+
+    @Test
+    void oracleExplainNullsBindPlaceholdersInsteadOfFailingWithMissingParameter() throws Exception {
+        List<String> calls = new ArrayList<>();
+        OracleExplainDriver driver = new OracleExplainDriver(calls);
+        DriverManager.registerDriver(driver);
+        String connection = """
+            {
+              "connection_string": "jdbc:oracle:dbx-explain:test",
+              "username": "system",
+              "query_timeout_secs": 30
+            }
+            """;
+        try {
+            // SQL copied from V$SQL/AWR reports commonly carries literal bind
+            // markers like :B1 with no bound value — EXPLAIN PLAN doesn't need
+            // the real value, but a PreparedStatement still requires every
+            // marker to be bound before execute() or Oracle throws ORA-17041.
+            JsonNode response = request("getExplainInfo", """
+                {
+                  "connection": %s,
+                  "sql": "SELECT * FROM T WHERE ID = :B1 AND NAME = :B2",
+                  "timeoutSecs": 30,
+                  "mode": "explain"
+                }
+                """.formatted(connection));
+
+            assertFalse(response.has("error"), response.toString());
+            assertEquals(2, calls.stream().filter(call -> call.equals("setNull:1:12")).count()
+                + calls.stream().filter(call -> call.equals("setNull:2:12")).count());
+        } finally {
+            closeAndDeregister(connection, driver);
+        }
+    }
+
+    @Test
+    void oracleExplainFallsBackToSqlBindScanWhenParameterMetadataIsUnsupported() throws Exception {
+        List<String> calls = new ArrayList<>();
+        OracleExplainDriver driver = new OracleExplainDriver(calls, false);
+        DriverManager.registerDriver(driver);
+        String connection = """
+            {
+              "connection_string": "jdbc:oracle:dbx-explain:test",
+              "username": "system",
+              "query_timeout_secs": 30
+            }
+            """;
+        try {
+            JsonNode response = request("getExplainInfo", """
+                {
+                  "connection": %s,
+                  "sql": "SELECT * FROM T WHERE ID = :B1 AND NAME = :name AND FLAG = ?",
+                  "timeoutSecs": 30,
+                  "mode": "explain"
+                }
+                """.formatted(connection));
+
+            assertFalse(response.has("error"), response.toString());
+            assertEquals(
+                List.of("setNull:1:12", "setNull:2:12", "setNull:3:12"),
+                calls.stream().filter(call -> call.startsWith("setNull:")).toList()
+            );
+        } finally {
+            closeAndDeregister(connection, driver);
+        }
+    }
+
+    @Test
+    void oracleExplainFallbackBindScanSkipsQuotedTextAndComments() throws Exception {
+        Method method = DbxJdbcPlugin.class.getDeclaredMethod("oracleExplainBindMarkerCount", String.class);
+        method.setAccessible(true);
+        String sql = """
+            SELECT :B1, :1, ?
+            FROM T
+            WHERE TEXT_VALUE = ':ignored ?'
+              AND Q_VALUE = q'[ignored :Q1 ?]'
+              AND "COL:IGNORED?" = 1
+              -- ignored :LINE ?
+              /* ignored :BLOCK ? */
+            """;
+
+        assertEquals(3, method.invoke(null, sql));
     }
 
     @Test
@@ -3120,16 +3206,22 @@ final class DbxJdbcPluginTest {
 
     private static final class OracleExplainDriver implements Driver {
         private final List<String> calls;
+        private final boolean parameterMetadataSupported;
 
         private OracleExplainDriver(List<String> calls) {
+            this(calls, true);
+        }
+
+        private OracleExplainDriver(List<String> calls, boolean parameterMetadataSupported) {
             this.calls = calls;
+            this.parameterMetadataSupported = parameterMetadataSupported;
         }
 
         @Override
         public Connection connect(String url, Properties info) {
             if (!acceptsURL(url)) return null;
             calls.add("connect");
-            return oracleExplainConnection(calls);
+            return oracleExplainConnection(calls, parameterMetadataSupported);
         }
 
         @Override
@@ -3144,12 +3236,16 @@ final class DbxJdbcPluginTest {
         @Override public java.util.logging.Logger getParentLogger() { return java.util.logging.Logger.getGlobal(); }
     }
 
-    private static Connection oracleExplainConnection(List<String> calls) {
+    private static Connection oracleExplainConnection(List<String> calls, boolean parameterMetadataSupported) {
         return (Connection) Proxy.newProxyInstance(
             DbxJdbcPluginTest.class.getClassLoader(),
             new Class<?>[] { Connection.class },
             (proxy, method, args) -> switch (method.getName()) {
-                case "prepareStatement" -> oracleExplainStatement(String.valueOf(args[0]), calls);
+                case "prepareStatement" -> oracleExplainStatement(
+                    String.valueOf(args[0]),
+                    calls,
+                    parameterMetadataSupported
+                );
                 case "isClosed" -> false;
                 case "close" -> null;
                 default -> defaultValue(method.getReturnType());
@@ -3157,8 +3253,13 @@ final class DbxJdbcPluginTest {
         );
     }
 
-    private static PreparedStatement oracleExplainStatement(String sql, List<String> calls) {
+    private static PreparedStatement oracleExplainStatement(
+        String sql,
+        List<String> calls,
+        boolean parameterMetadataSupported
+    ) {
         calls.add("prepare:" + sql);
+        int parameterCount = oracleExplainMockParameterCount(sql);
         return (PreparedStatement) Proxy.newProxyInstance(
             DbxJdbcPluginTest.class.getClassLoader(),
             new Class<?>[] { PreparedStatement.class },
@@ -3167,6 +3268,16 @@ final class DbxJdbcPluginTest {
                     calls.add("bind:" + args[0] + ":" + args[1]);
                     yield null;
                 }
+                case "setNull" -> {
+                    calls.add("setNull:" + args[0] + ":" + args[1]);
+                    yield null;
+                }
+                case "getParameterMetaData" -> {
+                    if (!parameterMetadataSupported) {
+                        throw new SQLFeatureNotSupportedException("parameter metadata unavailable");
+                    }
+                    yield oracleExplainMockParameterMetaData(parameterCount);
+                }
                 case "setQueryTimeout", "close" -> null;
                 case "execute" -> true;
                 case "executeUpdate" -> 1;
@@ -3174,6 +3285,27 @@ final class DbxJdbcPluginTest {
                     new String[] { "PLAN_TABLE_OUTPUT" },
                     new Object[][] { { "Plan hash value: 123" }, { "TABLE ACCESS FULL DUAL" } }
                 );
+                default -> defaultValue(method.getReturnType());
+            }
+        );
+    }
+
+    // Mirrors, loosely, how Oracle's JDBC driver counts distinct ":name"/":1"/"?"
+    // bind markers in real SQL text — just enough for the mock to exercise
+    // DbxJdbcPlugin's null-binding loop end to end.
+    private static int oracleExplainMockParameterCount(String sql) {
+        Matcher matcher = Pattern.compile("\\?|:[A-Za-z_][A-Za-z0-9_]*|:[0-9]+").matcher(sql);
+        int count = 0;
+        while (matcher.find()) count++;
+        return count;
+    }
+
+    private static ParameterMetaData oracleExplainMockParameterMetaData(int parameterCount) {
+        return (ParameterMetaData) Proxy.newProxyInstance(
+            DbxJdbcPluginTest.class.getClassLoader(),
+            new Class<?>[] { ParameterMetaData.class },
+            (proxy, method, args) -> switch (method.getName()) {
+                case "getParameterCount" -> parameterCount;
                 default -> defaultValue(method.getReturnType());
             }
         );

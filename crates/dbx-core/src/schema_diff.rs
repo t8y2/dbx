@@ -3162,23 +3162,56 @@ fn mysql_index_column_sql(column: &str) -> String {
     }
 }
 
+fn is_postgres_family_ddl(db_type: DatabaseType) -> bool {
+    matches!(
+        db_type,
+        DatabaseType::Postgres
+            | DatabaseType::Redshift
+            | DatabaseType::Gaussdb
+            | DatabaseType::Kingbase
+            | DatabaseType::Highgo
+            | DatabaseType::Vastbase
+            | DatabaseType::OpenGauss
+            | DatabaseType::Kwdb
+            | DatabaseType::Firebird
+            | DatabaseType::Vertica
+            | DatabaseType::Exasol
+            | DatabaseType::Uxdb
+    )
+}
+
+fn postgres_index_column_sql(column: &str, is_expression: Option<bool>, db_type: DatabaseType) -> String {
+    // Expression/functional index key parts (e.g. from pg_get_indexdef) arrive as raw
+    // expression text, not a plain column name; quoting the whole expression as an
+    // identifier turns it into a literal column reference that doesn't exist (#6295).
+    let trimmed = column.trim();
+    let is_expression = is_expression.unwrap_or(false);
+    if is_expression {
+        trimmed.to_string()
+    } else {
+        quote_id(column, db_type)
+    }
+}
+
 fn create_index_sql(table_name: &str, index: &IndexInfo, db_type: DatabaseType, schema: Option<&str>) -> String {
     use crate::sql_dialect::ddl_profile::IndexTypePlacement;
     let profile = profile_for(db_type);
     let table = qualified_name(table_name, db_type, schema);
-    let columns =
-        index
-            .columns
-            .iter()
-            .map(|column| {
-                if db_type == DatabaseType::Mysql {
-                    mysql_index_column_sql(column)
-                } else {
-                    quote_id(column, db_type)
-                }
-            })
-            .collect::<Vec<_>>()
-            .join(", ");
+    let columns = index
+        .columns
+        .iter()
+        .enumerate()
+        .map(|(i, column)| {
+            if db_type == DatabaseType::Mysql {
+                mysql_index_column_sql(column)
+            } else if is_postgres_family_ddl(db_type) {
+                postgres_index_column_sql(column, index.key_is_expression.get(i).copied(), db_type)
+            } else {
+                quote_id(column, db_type)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
     let unique = if index.is_unique { "UNIQUE " } else { "" };
     let index_type = index.index_type.as_deref().unwrap_or_default();
     let (type_prefix, using_before_on, using_suffix) = if index_type.is_empty() {
@@ -4352,6 +4385,7 @@ mod tests {
             index_type: overrides.index_type,
             included_columns: overrides.included_columns,
             comment: overrides.comment,
+            key_is_expression: overrides.key_is_expression,
         }
     }
 
@@ -5239,6 +5273,7 @@ mod tests {
                 index_type: None,
                 included_columns: None,
                 comment: None,
+                key_is_expression: Vec::new(),
             })],
             &[index(IndexInfo {
                 name: "idx_orders_status".to_string(),
@@ -5249,6 +5284,7 @@ mod tests {
                 index_type: None,
                 included_columns: None,
                 comment: None,
+                key_is_expression: Vec::new(),
             })],
         );
 
@@ -5269,6 +5305,7 @@ mod tests {
             index_type: None,
             included_columns: None,
             comment: None,
+            key_is_expression: Vec::new(),
         });
         let target_index = index(IndexInfo {
             name: "test_UNIQUE".to_string(),
@@ -5279,6 +5316,7 @@ mod tests {
             index_type: None,
             included_columns: None,
             comment: None,
+            key_is_expression: Vec::new(),
         });
 
         let diffs = diff_indexes(std::slice::from_ref(&source_index), &[target_index]);
@@ -5317,6 +5355,261 @@ mod tests {
             "CREATE UNIQUE INDEX `test_UNIQUE` ON `dbx_issue_4114`.`test` (`attr`, `attr2`, {functional_key_part});"
         )));
         assert!(!sql.contains("`((case"));
+    }
+
+    #[test]
+    fn preserves_bare_expression_in_postgres_family_unique_index_ddl() {
+        // Regression for #6295: highgo/postgres-family expression index key parts (e.g. from
+        // pg_get_indexdef) arrived as raw expression text in IndexInfo.columns; quoting the
+        // whole expression as an identifier turned it into a literal (and nonexistent) column.
+        let expression_key_part = "COALESCE(height, '-1'::integer::double precision)";
+        let new_index = index(IndexInfo {
+            name: "uq_tankong_sta_type_time".to_string(),
+            columns: vec![
+                "sta_id".to_string(),
+                "data_type".to_string(),
+                "data_time".to_string(),
+                expression_key_part.to_string(),
+            ],
+            is_unique: true,
+            is_primary: false,
+            filter: None,
+            index_type: None,
+            included_columns: None,
+            comment: None,
+            key_is_expression: vec![false, false, false, true],
+        });
+
+        let sql = generate_schema_sync_sql(
+            &[TableDiff {
+                diff_type: "modified".to_string(),
+                object_type: Some("table".to_string()),
+                name: "tankong_data".to_string(),
+                columns: None,
+                indexes: Some(vec![IndexDiff {
+                    diff_type: "added".to_string(),
+                    name: new_index.name.clone(),
+                    source: Some(new_index),
+                    target: None,
+                    changes: vec![],
+                }]),
+                foreign_keys: None,
+                triggers: None,
+                ddl: None,
+                target_ddl: None,
+                source_table_comment: None,
+                target_table_comment: None,
+                sync_sql: None,
+            }],
+            &[],
+            &[],
+            &[],
+            &[],
+            DatabaseType::Highgo,
+            Some("public"),
+            false,
+            None,
+            &[],
+        );
+
+        assert!(sql.contains(&format!(
+            "CREATE UNIQUE INDEX \"uq_tankong_sta_type_time\" ON \"public\".\"tankong_data\" (\"sta_id\", \"data_type\", \"data_time\", {expression_key_part})"
+        )));
+        assert!(!sql.contains(&format!("\"{expression_key_part}\"")));
+    }
+
+    #[test]
+    fn quotes_real_columns_whose_names_contain_expression_like_characters() {
+        // PR #6312 review: a quoted column identifier can legitimately contain whitespace,
+        // `(`, or `::` (e.g. PostgreSQL metadata returning the ordinary column name
+        // `order item` through a.attname). The old character-based heuristic mistook such
+        // columns for expressions and left them bare, generating an invalid
+        // `CREATE INDEX ... (order item)` instead of `CREATE INDEX ... ("order item")`.
+        // With real per-key provenance (`key_is_expression`), only genuine expression key
+        // parts from pg_get_indexdef are left unquoted.
+        let expression_key_part = "COALESCE(height, '-1'::integer::double precision)";
+        let new_index = index(IndexInfo {
+            name: "uq_weird_columns".to_string(),
+            columns: vec![
+                "order item".to_string(),
+                "a(b)".to_string(),
+                "a::b".to_string(),
+                expression_key_part.to_string(),
+            ],
+            key_is_expression: vec![false, false, false, true],
+            is_unique: true,
+            is_primary: false,
+            filter: None,
+            index_type: None,
+            included_columns: None,
+            comment: None,
+        });
+
+        let sql = generate_schema_sync_sql(
+            &[TableDiff {
+                diff_type: "modified".to_string(),
+                object_type: Some("table".to_string()),
+                name: "tankong_data".to_string(),
+                columns: None,
+                indexes: Some(vec![IndexDiff {
+                    diff_type: "added".to_string(),
+                    name: new_index.name.clone(),
+                    source: Some(new_index),
+                    target: None,
+                    changes: vec![],
+                }]),
+                foreign_keys: None,
+                triggers: None,
+                ddl: None,
+                target_ddl: None,
+                source_table_comment: None,
+                target_table_comment: None,
+                sync_sql: None,
+            }],
+            &[],
+            &[],
+            &[],
+            &[],
+            DatabaseType::Highgo,
+            Some("public"),
+            false,
+            None,
+            &[],
+        );
+
+        assert!(sql.contains(&format!(
+            "CREATE UNIQUE INDEX \"uq_weird_columns\" ON \"public\".\"tankong_data\" (\"order item\", \"a(b)\", \"a::b\", {expression_key_part})"
+        )));
+        assert!(!sql.contains(&format!("\"{expression_key_part}\"")));
+
+        // Real PostgreSQL-family validation: parse the generated DDL with the PostgreSQL
+        // dialect so this also proves the statement is syntactically valid, not just that the
+        // expected substring is present.
+        use sqlparser::dialect::PostgreSqlDialect;
+        use sqlparser::parser::Parser;
+        let create_index_sql = sql
+            .lines()
+            .find(|line| line.starts_with("CREATE UNIQUE INDEX \"uq_weird_columns\""))
+            .expect("generated DDL should include the CREATE INDEX statement");
+        let statements = Parser::parse_sql(&PostgreSqlDialect {}, create_index_sql)
+            .unwrap_or_else(|error| panic!("generated DDL must be valid PostgreSQL: {error}\nSQL: {create_index_sql}"));
+        assert_eq!(statements.len(), 1);
+    }
+
+    #[test]
+    fn quotes_expression_like_column_names_without_agent_provenance() {
+        for db_type in [DatabaseType::Kingbase, DatabaseType::Vastbase] {
+            let new_index = index(IndexInfo {
+                name: "idx_weird_columns".to_string(),
+                columns: vec!["order item".to_string(), "a(b)".to_string(), "a::b".to_string()],
+                key_is_expression: Vec::new(),
+                is_unique: false,
+                is_primary: false,
+                filter: None,
+                index_type: None,
+                included_columns: None,
+                comment: None,
+            });
+
+            let sql = generate_schema_sync_sql(
+                &[TableDiff {
+                    diff_type: "modified".to_string(),
+                    object_type: Some("table".to_string()),
+                    name: "tankong_data".to_string(),
+                    columns: None,
+                    indexes: Some(vec![IndexDiff {
+                        diff_type: "added".to_string(),
+                        name: new_index.name.clone(),
+                        source: Some(new_index),
+                        target: None,
+                        changes: vec![],
+                    }]),
+                    foreign_keys: None,
+                    triggers: None,
+                    ddl: None,
+                    target_ddl: None,
+                    source_table_comment: None,
+                    target_table_comment: None,
+                    sync_sql: None,
+                }],
+                &[],
+                &[],
+                &[],
+                &[],
+                db_type,
+                Some("public"),
+                false,
+                None,
+                &[],
+            );
+
+            assert!(sql.contains("(\"order item\", \"a(b)\", \"a::b\")"), "{db_type:?}: {sql}");
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DBX_TEST_POSTGRES_URL pointing at a writable PostgreSQL-family database"]
+    async fn real_postgres_round_trip_quotes_columns_and_leaves_expressions_bare() {
+        // PR #6312 review: exercise the full path end-to-end against a real PostgreSQL server
+        // instead of only asserting on generated text. Introspects a table whose unique index
+        // mixes a real column with an expression-hostile name ("order item", i.e. exactly the
+        // a.attname case the reviewer called out) and a genuine pg_get_indexdef expression key
+        // part, generates DDL with the same `create_index_sql` schema-diff sync uses, and
+        // executes that DDL back against the database to prove it's actually valid — not just
+        // plausible-looking text.
+        let url = std::env::var("DBX_TEST_POSTGRES_URL").expect("DBX_TEST_POSTGRES_URL");
+        let pool =
+            crate::db::postgres::connect(&url, std::time::Duration::from_secs(5)).await.expect("connect postgres");
+        let schema = format!("dbx_key_expr_{}", uuid::Uuid::new_v4().simple());
+        crate::db::postgres::execute_query(&pool, &format!("CREATE SCHEMA {schema}")).await.expect("create schema");
+
+        let exercise = async {
+            crate::db::postgres::execute_query(
+                &pool,
+                &format!(
+                    "CREATE TABLE {schema}.tankong_data (\
+                     \"order item\" integer, data_type text, data_time timestamp, height double precision)"
+                ),
+            )
+            .await?;
+            crate::db::postgres::execute_query(
+                &pool,
+                &format!(
+                    "CREATE UNIQUE INDEX uq_tankong_sta_type_time ON {schema}.tankong_data \
+                     (\"order item\", data_type, data_time, \
+                     (COALESCE(height, '-1'::integer::double precision)))"
+                ),
+            )
+            .await?;
+
+            let indexes = crate::db::postgres::list_indexes(&pool, &schema, "tankong_data").await?;
+            let index = indexes
+                .into_iter()
+                .find(|index| index.name == "uq_tankong_sta_type_time")
+                .ok_or_else(|| "introspection should return the created index".to_string())?;
+
+            // Regenerate the index DDL through the exact same production function schema-diff
+            // sync calls, then execute it back against the real database to prove it's valid.
+            let ddl = create_index_sql("tankong_data", &index, DatabaseType::Highgo, Some(&schema));
+            crate::db::postgres::execute_query(&pool, &format!("DROP INDEX {schema}.uq_tankong_sta_type_time")).await?;
+            crate::db::postgres::execute_query(&pool, &ddl).await?;
+
+            Ok::<_, String>((index, ddl))
+        }
+        .await;
+
+        let cleanup = crate::db::postgres::execute_query(&pool, &format!("DROP SCHEMA {schema} CASCADE")).await;
+        cleanup.expect("drop schema");
+        let (index, recreate_ddl) = exercise.expect("exercise real postgres round trip");
+
+        assert_eq!(
+            index.columns,
+            vec!["order item", "data_type", "data_time", "COALESCE(height, '-1'::integer::double precision)"]
+        );
+        assert_eq!(index.key_is_expression, vec![false, false, false, true]);
+        assert!(recreate_ddl.contains("\"order item\""));
+        assert!(recreate_ddl.contains("COALESCE(height, '-1'::integer::double precision)"));
+        assert!(!recreate_ddl.contains("\"COALESCE"));
     }
 
     #[test]
@@ -5394,6 +5687,7 @@ mod tests {
                     index_type: None,
                     included_columns: None,
                     comment: None,
+                    key_is_expression: Vec::new(),
                 })),
                 target: None,
                 changes: Vec::new(),
@@ -5698,6 +5992,7 @@ mod tests {
                     index_type: None,
                     included_columns: None,
                     comment: None,
+                    key_is_expression: Vec::new(),
                 })),
                 target: None,
                 changes: Vec::new(),
@@ -6301,6 +6596,7 @@ mod tests {
                     index_type: Some("btree".to_string()),
                     included_columns: Some(vec!["User ID".to_string()]),
                     comment: None,
+                    key_is_expression: Vec::new(),
                 })],
                 foreign_keys: vec![foreign_key(ForeignKeyInfo {
                     name: "Order User FK".to_string(),
@@ -6363,6 +6659,7 @@ mod tests {
                     index_type: Some("BTREE".to_string()),
                     included_columns: None,
                     comment: Some("status lookup".to_string()),
+                    key_is_expression: Vec::new(),
                 })],
                 foreign_keys: vec![foreign_key(ForeignKeyInfo {
                     name: "user-fk".to_string(),
@@ -6415,6 +6712,7 @@ mod tests {
                     index_type: None,
                     included_columns: None,
                     comment: None,
+                    key_is_expression: Vec::new(),
                 })],
                 foreign_keys: vec![foreign_key(ForeignKeyInfo {
                     name: "parent item fk".to_string(),
@@ -7179,6 +7477,7 @@ mod tests {
                     index_type: None,
                     included_columns: None,
                     comment: None,
+                    key_is_expression: Vec::new(),
                 })),
                 target: None,
                 changes: vec![],
@@ -7219,6 +7518,7 @@ mod tests {
                     index_type: None,
                     included_columns: None,
                     comment: None,
+                    key_is_expression: Vec::new(),
                 })),
                 changes: vec![],
             }]),
@@ -7616,6 +7916,7 @@ mod tests {
                 index_type: Some("BTREE".into()),
                 included_columns: None,
                 comment: None,
+                key_is_expression: Vec::new(),
             })],
             &[index(IndexInfo {
                 name: "idx_t".into(),
@@ -7626,6 +7927,7 @@ mod tests {
                 index_type: Some("HASH".into()),
                 included_columns: None,
                 comment: None,
+                key_is_expression: Vec::new(),
             })],
         );
         assert_eq!(diffs.len(), 1, "index type diff detected");
@@ -7644,6 +7946,7 @@ mod tests {
                 index_type: Some("FULLTEXT".into()),
                 included_columns: None,
                 comment: None,
+                key_is_expression: Vec::new(),
             })],
             &[index(IndexInfo {
                 name: "idx_t".into(),
@@ -7654,6 +7957,7 @@ mod tests {
                 index_type: None,
                 included_columns: None,
                 comment: None,
+                key_is_expression: Vec::new(),
             })],
         );
         assert_eq!(diffs[0].changes.iter().filter(|c| c.contains("FULLTEXT")).count(), 1, "fulltext change");
@@ -7672,6 +7976,7 @@ mod tests {
                 index_type: None,
                 included_columns: None,
                 comment: None,
+                key_is_expression: Vec::new(),
             })],
             &[index(IndexInfo {
                 name: "idx_t".into(),
@@ -7682,6 +7987,7 @@ mod tests {
                 index_type: None,
                 included_columns: None,
                 comment: None,
+                key_is_expression: Vec::new(),
             })],
         );
         assert_eq!(diffs.len(), 1, "order diff detected");
@@ -7701,6 +8007,7 @@ mod tests {
                 index_type: None,
                 included_columns: Some(vec!["b".into(), "c".into()]),
                 comment: None,
+                key_is_expression: Vec::new(),
             })],
             &[index(IndexInfo {
                 name: "idx_t".into(),
@@ -7711,6 +8018,7 @@ mod tests {
                 index_type: None,
                 included_columns: Some(vec!["b".into()]),
                 comment: None,
+                key_is_expression: Vec::new(),
             })],
         );
         assert_eq!(diffs.len(), 1, "included columns diff detected");
@@ -7729,6 +8037,7 @@ mod tests {
                 index_type: None,
                 included_columns: Some(vec!["b".into()]),
                 comment: None,
+                key_is_expression: Vec::new(),
             })],
             &[index(IndexInfo {
                 name: "idx_t".into(),
@@ -7739,6 +8048,7 @@ mod tests {
                 index_type: None,
                 included_columns: None,
                 comment: None,
+                key_is_expression: Vec::new(),
             })],
         );
         assert_eq!(diffs.len(), 1, "included added");
@@ -7757,6 +8067,7 @@ mod tests {
                 index_type: None,
                 included_columns: None,
                 comment: None,
+                key_is_expression: Vec::new(),
             })],
             &[index(IndexInfo {
                 name: "idx_t".into(),
@@ -7767,6 +8078,7 @@ mod tests {
                 index_type: None,
                 included_columns: None,
                 comment: None,
+                key_is_expression: Vec::new(),
             })],
         );
         assert_eq!(diffs.len(), 1, "filter diff");
@@ -7787,6 +8099,7 @@ mod tests {
                     index_type: None,
                     included_columns: None,
                     comment: None,
+                    key_is_expression: Vec::new(),
                 }),
                 index(IndexInfo {
                     name: "idx_modified".into(),
@@ -7797,6 +8110,7 @@ mod tests {
                     index_type: Some("BTREE".into()),
                     included_columns: None,
                     comment: None,
+                    key_is_expression: Vec::new(),
                 }),
             ],
             &[
@@ -7809,6 +8123,7 @@ mod tests {
                     index_type: None,
                     included_columns: None,
                     comment: None,
+                    key_is_expression: Vec::new(),
                 }),
                 index(IndexInfo {
                     name: "idx_modified".into(),
@@ -7819,6 +8134,7 @@ mod tests {
                     index_type: None,
                     included_columns: None,
                     comment: None,
+                    key_is_expression: Vec::new(),
                 }),
             ],
         );
@@ -8004,6 +8320,7 @@ mod tests {
                         index_type: Some("BTREE".into()),
                         included_columns: None,
                         comment: None,
+                        key_is_expression: Vec::new(),
                     })),
                     target: None,
                     changes: vec![],
@@ -8021,6 +8338,7 @@ mod tests {
                         index_type: None,
                         included_columns: None,
                         comment: None,
+                        key_is_expression: Vec::new(),
                     })),
                     changes: vec![],
                 },
@@ -8413,6 +8731,7 @@ mod tests {
                 filter: None,
                 included_columns: None,
                 comment: None,
+                key_is_expression: Vec::new(),
             }),
             target: None,
             changes: vec![],
@@ -8664,6 +8983,7 @@ mod tests {
                 index_type: None,
                 included_columns: None,
                 comment: None,
+                key_is_expression: Vec::new(),
             }),
             target: None,
             changes: vec![],

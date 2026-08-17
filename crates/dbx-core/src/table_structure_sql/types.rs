@@ -119,6 +119,10 @@ pub struct IndexInfo {
     pub included_columns: Option<Vec<String>>,
     #[serde(default)]
     pub comment: Option<String>,
+    /// Parallel to `columns`: `true` at index `i` means `columns[i]` is a raw expression
+    /// (e.g. sourced from `pg_get_indexdef`), not a plain column name.
+    #[serde(default)]
+    pub key_is_expression: Vec<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

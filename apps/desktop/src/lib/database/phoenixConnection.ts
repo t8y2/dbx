@@ -1,15 +1,17 @@
 import type { ConnectionConfig } from "@/types/database";
 import type { JdbcProductProfileDefinition } from "@/lib/database/jdbcProductProfile";
+import managedJdbcAssets from "@/lib/database/managedJdbcAssets.json";
 
 export const PHOENIX_DRIVER_PROFILE = "phoenix";
 export const PHOENIX_DIRECT_JDBC_URL = "jdbc:phoenix:localhost";
 export const PHOENIX_DIRECT_JDBC_DRIVER_CLASS = "org.apache.phoenix.jdbc.PhoenixDriver";
 export const PHOENIX_QUERY_SERVER_JDBC_URL = "jdbc:phoenix:thin:url=http://127.0.0.1:8765;serialization=PROTOBUF";
 export const PHOENIX_QUERY_SERVER_JDBC_DRIVER_CLASS = "org.apache.phoenix.queryserver.client.Driver";
-export const PHOENIX_MAVEN_REPOSITORY = "https://repo.maven.apache.org/maven2/";
-export const PHOENIX_DIRECT_MAVEN_COORDINATE = "org.apache.phoenix:phoenix-client-embedded-hbase-2.5:5.2.1";
-export const PHOENIX_QUERY_SERVER_MAVEN_COORDINATE = "org.apache.phoenix:phoenix-queryserver-client:6.0.0";
-export const PHOENIX_DIRECT_LOGGING_MAVEN_COORDINATE = "ch.qos.reload4j:reload4j:1.2.26";
+const PHOENIX_JDBC_ASSETS = managedJdbcAssets.drivers.phoenix.bundles;
+export const PHOENIX_MAVEN_REPOSITORY = managedJdbcAssets.repository;
+export const PHOENIX_DIRECT_MAVEN_COORDINATE = PHOENIX_JDBC_ASSETS.direct.coordinate;
+export const PHOENIX_QUERY_SERVER_MAVEN_COORDINATE = PHOENIX_JDBC_ASSETS.query_server.coordinate;
+export const PHOENIX_DIRECT_LOGGING_MAVEN_COORDINATE = PHOENIX_JDBC_ASSETS.logging.coordinate;
 export const PHOENIX_DRIVER_NOT_INSTALLED_ERROR = "Apache Phoenix JDBC driver is not installed. Install it from the Driver Manager, then retry.";
 export const PHOENIX_JDBC_PLUGIN_NOT_INSTALLED_ERROR = "DBX JDBC plugin is not installed. Install Apache Phoenix JDBC from the Driver Manager, then retry.";
 

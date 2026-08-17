@@ -269,6 +269,8 @@ export function sqlFormatterOptions(settings: unknown) {
     newlineBeforeSemicolon: normalized.newlineBeforeSemicolon,
     paramTypes: {
       ...paramTypes,
+      positional: paramTypes.positional ?? true,
+      named: paramTypes.named ?? [":", "@"],
       custom: [...(paramTypes.custom ?? []), ...DBX_CUSTOM_PARAM_TYPES],
     },
   };

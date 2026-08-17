@@ -6,6 +6,10 @@ export function emptyLayout(): SidebarLayout {
   return { groups: [], order: [] };
 }
 
+export function hasSidebarLayoutEntries(layout: SidebarLayout | null | undefined): layout is SidebarLayout {
+  return !!layout && (layout.groups.length > 0 || layout.order.length > 0);
+}
+
 function folderPathSegments(path: string | undefined): string[] {
   return (path ?? "").split("/").filter((segment) => segment.length > 0);
 }
@@ -119,6 +123,58 @@ export function remapSidebarLayoutConnectionIds(layout: SidebarLayout, connectio
     groups: layout.groups.map((group) => ({ ...group })),
     order: remapEntries(layout.order),
   };
+}
+
+/**
+ * Merge an imported layout into the current one instead of replacing it.
+ * Folders are matched by name within the same level so repeated imports reuse
+ * them, and connections outside the imported set keep their current placement.
+ */
+export function mergeSidebarLayout(current: SidebarLayout, imported: SidebarLayout): SidebarLayout {
+  const importedGroups = new Map(imported.groups.map((group) => [group.id, group]));
+  const groups = current.groups.map((group) => ({ ...group }));
+  const groupNameById = new Map(groups.map((group) => [group.id, group.name]));
+  const order = cloneEntries(current.order);
+
+  // The imported layout owns the placement of the connections it lists, so drop
+  // their current entries first — otherwise they would end up listed twice.
+  const importedConnectionIds: string[] = [];
+  const collectConnections = (entries: SidebarOrderEntry[]) => {
+    for (const entry of entries) {
+      if (entry.type === "connection") importedConnectionIds.push(entry.id);
+      else collectConnections(entryChildren(entry));
+    }
+  };
+  collectConnections(imported.order);
+  for (const id of importedConnectionIds) removeEntry(order, id);
+
+  const merge = (target: SidebarOrderEntry[], source: SidebarOrderEntry[]) => {
+    for (const entry of source) {
+      if (entry.type === "connection") {
+        target.push({ type: "connection", id: entry.id });
+        continue;
+      }
+
+      const importedGroup = importedGroups.get(entry.id);
+      if (!importedGroup) continue;
+
+      let destination = target.find((candidate): candidate is Extract<SidebarOrderEntry, { type: "group" }> => candidate.type === "group" && groupNameById.get(candidate.id) === importedGroup.name);
+      if (!destination) {
+        // A fresh id keeps the merged tree free of collisions with the group ids
+        // the current layout already uses.
+        const id = uuid();
+        destination = { type: "group", id, children: [] };
+        groups.push({ ...importedGroup, id });
+        groupNameById.set(id, importedGroup.name);
+        target.push(destination);
+      }
+      destination.children ??= [];
+      merge(destination.children, entryChildren(entry));
+    }
+  };
+  merge(order, imported.order);
+
+  return { groups, order };
 }
 
 export function connectionSidebarSearchAliases(config: Pick<ConnectionConfig, "host" | "username">): string[] {

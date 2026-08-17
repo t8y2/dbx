@@ -123,7 +123,7 @@ describe("MCP policy settings state", () => {
     expect(tabsSource).toContain("overscroll-x-contain");
     expect(tabsSource).not.toContain("flex-wrap");
     expect(tabsSource).not.toContain("grid-cols-");
-    expect(tabsSource.match(/flex-none shrink-0/g)).toHaveLength(8);
+    expect(tabsSource.match(/flex-none shrink-0/g)).toHaveLength(9);
     expect(tabsSource).not.toContain("min-w-0 px-");
   });
 });

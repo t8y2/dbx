@@ -103,6 +103,7 @@ const fetchAllStopRequested = ref(false);
 const fetchAllLoadedCount = ref(0);
 const rootRef = ref<HTMLElement>();
 const keyPaneRef = ref<HTMLElement>();
+const redisKeyScrollerRef = ref<InstanceType<typeof RecycleScroller> | null>(null);
 const valueViewerRef = ref<{ focusSearch: () => boolean } | null>(null);
 const commandTerminalRef = ref<HTMLElement>();
 const searchPattern = ref("");
@@ -161,6 +162,28 @@ const createKeyTypeHelpOffsetTop = ref(0);
 let nextEntryId = 0;
 let searchRequestId = 0;
 let loadMoreOperationId = 0;
+// Mutable so `fetchScanPage` can decrement it in place as it consumes real
+// backend calls, without changing its return type.
+interface ScanIterationBudget {
+  remaining: number;
+}
+// Automatic continuation (see `maybeAutoLoadMoreRedisKeys`) has no natural stop
+// condition when a search is sparse: unique visible keys barely grow, so the
+// scroller keeps reporting a short viewport forever. A *page count* budget is
+// not enough on its own: each page's `fetchScanPage` already retries within
+// its own cumulative COUNT budget while a page comes back empty, so a single
+// automatic "page" can still cost dozens of backend calls and SCAN
+// iterations. Give the whole automatic-fill operation ONE shared budget of
+// actual SCAN iterations (the same unit as the `max_iterations` sent to the
+// backend), decremented by every backend call the automatic path makes —
+// regardless of how many pages/keys those calls span — and stop deterministically
+// the moment it's spent. Reset alongside the rest of the per-operation state
+// in `invalidateScanRequests`. An explicit "Load more" click or a real scroll
+// event is a single user-triggered request and keeps its own uncapped
+// per-call budget (see `fetchScanPage`); only the automatic follow-up check
+// they hand off to afterward is constrained by this shared budget.
+const AUTO_LOAD_TOTAL_SCAN_ITERATIONS = 50;
+let autoLoadBudget: ScanIterationBudget = { remaining: AUTO_LOAD_TOTAL_SCAN_ITERATIONS };
 let redisBrowserIsActive = true;
 let reloadKeysOnActivation = false;
 let redisDbFlushedListenerRegistered = false;
@@ -514,6 +537,7 @@ function invalidateScanRequests(): number {
   searchRequestId++;
   loadMoreOperationId++;
   loadingMore.value = false;
+  autoLoadBudget = { remaining: AUTO_LOAD_TOTAL_SCAN_ITERATIONS };
   return searchRequestId;
 }
 
@@ -521,7 +545,7 @@ function isCurrentScanOperation(requestId: number, operationId?: number): boolea
   return requestId === searchRequestId && (operationId === undefined || operationId === loadMoreOperationId);
 }
 
-async function fetchScanPage(requestId = searchRequestId, operationId?: number): Promise<RedisScanResult> {
+async function fetchScanPage(requestId = searchRequestId, operationId?: number, iterationBudget?: ScanIterationBudget): Promise<RedisScanResult> {
   const pageSize = redisScanPageSize.value;
   if (isValueSearchMode.value) {
     return api.redisScanValues(props.connectionId, props.db, scanCursor.value, "*", valueQuery.value, pageSize, searchMode.value === "all");
@@ -534,23 +558,27 @@ async function fetchScanPage(requestId = searchRequestId, operationId?: number):
   // continue sparse searches without turning one request into a full scan.
   const scanCountBudget = 50_000;
   const iterationsPerCall = 8;
-  const maxIterations = Math.max(1, Math.ceil(scanCountBudget / Math.max(1, pageSize)));
+  const perCallMaxIterations = Math.max(1, Math.ceil(scanCountBudget / Math.max(1, pageSize)));
+  // When part of the automatic-fill chain, also cap this call to whatever is
+  // left of the shared iteration budget — this is what actually bounds the
+  // total backend work across every page that chain triggers, not just this
+  // one call's own per-call cap.
+  const maxIterations = iterationBudget ? Math.max(0, Math.min(perCallMaxIterations, iterationBudget.remaining)) : perCallMaxIterations;
   let completedIterations = 0;
   let cursor = scanCursor.value;
   let totalKeys = 0;
 
   while (completedIterations < maxIterations) {
-    if (!isCurrentScanOperation(requestId, operationId)) {
-      return { cursor, keys: [], total_keys: totalKeys };
-    }
+    if (!isCurrentScanOperation(requestId, operationId)) break;
     const iterations = Math.min(iterationsPerCall, maxIterations - completedIterations);
+    if (iterationBudget) iterationBudget.remaining -= iterations;
     const result = await api.redisScanKeysBatch(props.connectionId, props.db, cursor, effectivePattern.value, pageSize, iterations, true);
+    completedIterations += iterations;
     if (totalKeys === 0) totalKeys = result.total_keys;
     if (result.keys.length > 0 || result.cursor === 0) {
       return { ...result, total_keys: totalKeys };
     }
     cursor = result.cursor;
-    completedIterations += iterations;
   }
 
   return { cursor, keys: [], total_keys: totalKeys };
@@ -605,8 +633,8 @@ function appendScanResult(result: RedisScanResult, options: { updateTree?: boole
   return newKeys.length;
 }
 
-async function scanNextPage(requestId = searchRequestId, operationId?: number): Promise<boolean> {
-  const result = await fetchScanPage(requestId, operationId);
+async function scanNextPage(requestId = searchRequestId, operationId?: number, iterationBudget?: ScanIterationBudget): Promise<boolean> {
+  const result = await fetchScanPage(requestId, operationId, iterationBudget);
   if (!isCurrentScanOperation(requestId, operationId)) return false;
   appendScanResult(result);
   return true;
@@ -638,6 +666,11 @@ async function loadKeys() {
   expandedGroupIds.value = new Set();
   scanCursor.value = 0;
   lastTotalKeys.value = 0;
+  // Only chain the automatic continuation after a page actually applied. A
+  // throw (network/backend failure) must not schedule another attempt — the
+  // `finally` block below always runs on failure too, so success is tracked
+  // separately and checked once we're clear of it.
+  let succeeded = false;
   try {
     if (isValueSearchMode.value && !valueQuery.value) {
       hasMore.value = false;
@@ -647,14 +680,18 @@ async function loadKeys() {
     if (applied && isValueSearchMode.value) {
       await streamValueSearch(requestId);
     }
+    succeeded = applied;
   } finally {
     if (requestId === searchRequestId) {
       loading.value = false;
     }
   }
+  if (succeeded && requestId === searchRequestId) {
+    void maybeAutoLoadMoreRedisKeys();
+  }
 }
 
-async function loadMore() {
+async function loadMore(iterationBudget?: ScanIterationBudget) {
   // 与 loadKeys 对称：组件被 keep-alive 包裹且停用后，挂起的 rAF 仍可能触发本函数，
   // 守卫掉停用态避免对隐藏组件跑一次冗余 SCAN。
   if (!redisBrowserIsActive) return;
@@ -662,12 +699,60 @@ async function loadMore() {
   const requestId = searchRequestId;
   const operationId = ++loadMoreOperationId;
   loadingMore.value = true;
+  // Same reasoning as `loadKeys`: a failed page must not trigger another
+  // automatic attempt from `finally`, or a persistent failure retries forever
+  // (bounded only by hasMore/viewport state, neither of which a failure changes).
+  let applied = false;
   try {
-    await scanNextPage(requestId, operationId);
+    applied = await scanNextPage(requestId, operationId, iterationBudget);
   } finally {
     if (isCurrentScanOperation(requestId, operationId)) {
       loadingMore.value = false;
     }
+  }
+  // A manual "Load more" click or scroll-driven page is one user-triggered
+  // request, uncapped by the shared budget (see `iterationBudget` above); but
+  // if the viewport is still short afterward, hand off to the same bounded
+  // automatic-fill check as everywhere else instead of relying on the user to
+  // notice and click again.
+  if (applied && isCurrentScanOperation(requestId, operationId)) {
+    void maybeAutoLoadMoreRedisKeys();
+  }
+}
+
+// Tree mode collapses most rows by default, so the loaded key count and the
+// rendered row count can diverge wildly (e.g. 1000 loaded keys folded into a
+// handful of visible top-level groups). When that happens the scroller never
+// overflows its viewport, so it never emits a native `scroll` event and
+// `onRedisKeyScroll` — the only other caller of `loadMore` — never runs,
+// silently stranding the browser on the first sparse SCAN page forever. Keep
+// pulling pages after any load until the view is either actually scrollable
+// or genuinely out of keys/budget, mirroring the same threshold logic the
+// scroll handler already uses.
+async function maybeAutoLoadMoreRedisKeys() {
+  await nextTick();
+  // Unique visible/loaded keys are a poor stop condition on their own: an
+  // empty, all-duplicate, or sparsely-matching page grows that count by ~0,
+  // so relying on it alone lets a short viewport turn an ordinary tree load
+  // into an unbounded chain of SCAN pages. Stop deterministically — with zero
+  // further backend calls — the instant the shared iteration budget for this
+  // operation is spent, independent of how many (if any) new keys prior calls
+  // yielded.
+  if (autoLoadBudget.remaining <= 0) return;
+  const scroller = redisKeyScrollerRef.value?.$el as HTMLElement | undefined;
+  if (!scroller) return;
+  const shouldLoad = shouldLoadMoreRedisKeys({
+    enabled: redisInfiniteScrollEnabled.value,
+    hasMore: hasMore.value,
+    busy: loading.value || loadingMore.value || searchPending.value || deletingKeys.value || isFetchingAll.value,
+    loadedKeys: flatKeys.value.length,
+    maxKeys: redisInfiniteScrollMaxKeys.value,
+    scrollTop: scroller.scrollTop,
+    clientHeight: scroller.clientHeight,
+    scrollHeight: scroller.scrollHeight,
+  });
+  if (shouldLoad) {
+    await loadMore(autoLoadBudget).catch((error) => toast(errorMessage(error), 5000));
   }
 }
 
@@ -746,6 +831,7 @@ function toggleGroup(groupId: string) {
   if (next.has(groupId)) next.delete(groupId);
   else next.add(groupId);
   expandedGroupIds.value = next;
+  void maybeAutoLoadMoreRedisKeys();
 }
 
 function onRowClick(node: RedisKeyTreeNode, event?: MouseEvent) {
@@ -936,8 +1022,15 @@ function scrollCommandTerminalToEnd() {
   });
 }
 
-function appendCommandHistory(entry: Omit<RedisCommandHistoryEntry, "id">) {
-  commandHistory.value = [...commandHistory.value, { id: ++commandHistoryId, ...entry }];
+function appendCommandHistory(entry: Omit<RedisCommandHistoryEntry, "id">): number {
+  const id = ++commandHistoryId;
+  commandHistory.value = [...commandHistory.value, { id, ...entry }];
+  scrollCommandTerminalToEnd();
+  return id;
+}
+
+function updateCommandHistory(id: number, patch: Partial<Omit<RedisCommandHistoryEntry, "id">>) {
+  commandHistory.value = commandHistory.value.map((entry) => (entry.id === id ? { ...entry, ...patch } : entry));
   scrollCommandTerminalToEnd();
 }
 
@@ -955,14 +1048,13 @@ function appendCommandOutput(entry: Omit<RedisCommandHistoryEntry, "id">) {
 async function runRedisCommand(command: string) {
   const prompt = commandPrompt.value;
   commandRunning.value = true;
+  // Echo the command to the terminal immediately so it doesn't look like the
+  // keystroke was lost while the request is in flight — the output is filled
+  // in on the same entry once the response (or error) arrives.
+  const entryId = appendCommandHistory({ prompt, command, output: "", error: false });
   try {
     const result = await api.redisExecuteCommand(props.connectionId, commandDb.value, command, !props.blockDangerousRedisCommands);
-    appendCommandHistory({
-      prompt,
-      command,
-      output: formatRedisConsoleValue(result.value),
-      error: false,
-    });
+    updateCommandHistory(entryId, { output: formatRedisConsoleValue(result.value), error: false });
     // The db this command ran on — capture before nextRedisCommandDb() advances it.
     const executedDb = commandDb.value;
     commandDb.value = nextRedisCommandDb(commandDb.value, command, result.value);
@@ -980,12 +1072,7 @@ async function runRedisCommand(command: string) {
     persistRedisHistory(command, true, result.value);
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
-    appendCommandHistory({
-      prompt,
-      command,
-      output: errorMessage,
-      error: true,
-    });
+    updateCommandHistory(entryId, { output: errorMessage, error: true });
     // Persist failed command too
     persistRedisHistory(command, false, null, errorMessage);
   } finally {
@@ -1885,7 +1972,7 @@ defineExpose({ focusSearch, insertCommand, executeCommand: executeAiCommand });
           <div v-if="flatKeys.length === 0 && !loading" class="flex-1 flex flex-col items-center justify-center text-muted-foreground text-xs p-4 text-center">
             <template v-if="hasMore">
               <span class="mb-3">{{ t("redis.noKeysInScanHint") }}</span>
-              <Button variant="outline" size="sm" class="h-7 text-xs" :disabled="loadingMore || searchPending || deletingKeys" @click="loadMore">
+              <Button variant="outline" size="sm" class="h-7 text-xs" :disabled="loadingMore || searchPending || deletingKeys" @click="loadMore()">
                 <Loader2 v-if="loadingMore" class="w-3 h-3 mr-1.5 animate-spin" />
                 {{ t("redis.loadMoreKeys") }}
               </Button>
@@ -1898,7 +1985,7 @@ defineExpose({ focusSearch, insertCommand, executeCommand: executeAiCommand });
             <Loader2 class="w-3.5 h-3.5 animate-spin" />
             <span>{{ loadingEmptyText }}</span>
           </div>
-          <RecycleScroller v-else class="redis-key-scroller flex-1" :items="visibleRows" :item-size="30" :buffer="600" :skip-hover="true" key-field="id" @scroll="onRedisKeyScroll">
+          <RecycleScroller v-else ref="redisKeyScrollerRef" class="redis-key-scroller flex-1" :items="visibleRows" :item-size="30" :buffer="600" :skip-hover="true" key-field="id" @scroll="onRedisKeyScroll" @resize="maybeAutoLoadMoreRedisKeys">
             <template #default="{ item: row }">
               <CustomContextMenu :items="redisKeyContextMenuItems(row.node)" v-slot="{ onContextMenu, isOpen }">
                 <div
@@ -1958,7 +2045,7 @@ defineExpose({ focusSearch, insertCommand, executeCommand: executeAiCommand });
             {{ t("redis.fuzzyTreeLimit", { count: flatKeys.length }) }}
           </div>
           <div v-if="hasMore && !isFetchingAll" class="shrink-0 border-t px-2 py-1.5 flex items-center gap-1.5">
-            <Button variant="outline" size="sm" class="h-7 text-xs flex-1" :disabled="loadingMore || loading || searchPending || deletingKeys" @click="loadMore">
+            <Button variant="outline" size="sm" class="h-7 text-xs flex-1" :disabled="loadingMore || loading || searchPending || deletingKeys" @click="loadMore()">
               <Loader2 v-if="loadingMore" class="w-3 h-3 mr-1.5 animate-spin" />
               {{ t("redis.loadMoreKeys") }}
             </Button>

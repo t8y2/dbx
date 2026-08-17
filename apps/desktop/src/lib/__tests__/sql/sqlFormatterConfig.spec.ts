@@ -40,6 +40,14 @@ describe("sqlFormatterConfig shortcut storage", () => {
     });
   });
 
+  it("recognizes DBX positional and named parameter syntaxes by default", () => {
+    expect(sqlFormatterOptions({}).paramTypes).toEqual({
+      positional: true,
+      named: [":", "@"],
+      custom: [{ regex: String.raw`\$\{[^}]+\}` }, { regex: String.raw`#\{[^}]+\}` }],
+    });
+  });
+
   it("accepts the same-line logical operator mode", () => {
     const result = parseSqlFormatterConfig(JSON.stringify({ version: 1, formatter: "sql-formatter", options: { logicalOperatorNewline: "none" } }));
 

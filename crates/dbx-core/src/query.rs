@@ -325,6 +325,7 @@ enum ServerLargeValuePreviewKind {
     Text,
     Binary,
     Vector,
+    Deferred,
 }
 
 #[derive(Clone, Copy)]
@@ -333,6 +334,13 @@ struct ServerLargeValueMarker {
     source_index: usize,
     preview_kind: Option<ServerLargeValuePreviewKind>,
     source_type: Option<&'static str>,
+}
+
+#[derive(Clone, Copy)]
+struct ServerLargeValueMarkerValue {
+    kind: ServerLargeValuePreviewKind,
+    preview_size: usize,
+    original_bytes: Option<usize>,
 }
 
 fn server_large_value_alias(
@@ -350,20 +358,28 @@ fn server_large_value_alias(
         "J" => (ServerLargeValuePreviewKind::Text, Some("json")),
         "K" => (ServerLargeValuePreviewKind::Text, Some("jsonb")),
         "S" => (ServerLargeValuePreviewKind::Text, Some("tsvector")),
+        "C" => (ServerLargeValuePreviewKind::Deferred, Some("clob")),
+        "N" => (ServerLargeValuePreviewKind::Deferred, Some("nclob")),
+        "L" => (ServerLargeValuePreviewKind::Deferred, Some("blob")),
+        "F" => (ServerLargeValuePreviewKind::Deferred, Some("bfile")),
         _ => return None,
     };
     Some((source_index, Some(preview_kind), source_type))
 }
 
-fn server_large_value_marker(value: &serde_json::Value) -> Option<(ServerLargeValuePreviewKind, usize)> {
-    let (kind, preview_size) = value.as_str()?.split_once(':')?;
+fn server_large_value_marker(value: &serde_json::Value) -> Option<ServerLargeValueMarkerValue> {
+    let mut parts = value.as_str()?.split(':');
+    let kind = parts.next()?;
+    let preview_size = parts.next()?;
     let kind = match kind {
         "T" => ServerLargeValuePreviewKind::Text,
         "B" => ServerLargeValuePreviewKind::Binary,
         "V" => ServerLargeValuePreviewKind::Vector,
+        "D" => ServerLargeValuePreviewKind::Deferred,
         _ => return None,
     };
-    Some((kind, preview_size.parse::<usize>().ok()?.max(1)))
+    let original_bytes = parts.next().and_then(|value| value.parse::<usize>().ok());
+    Some(ServerLargeValueMarkerValue { kind, preview_size: preview_size.parse::<usize>().ok()?.max(1), original_bytes })
 }
 
 fn truncate_server_large_value_preview(
@@ -374,6 +390,9 @@ fn truncate_server_large_value_preview(
     let serde_json::Value::String(text) = value else {
         return false;
     };
+    if matches!(kind, ServerLargeValuePreviewKind::Deferred) {
+        return true;
+    }
     if matches!(kind, ServerLargeValuePreviewKind::Vector) {
         let truncated = text.chars().count() > preview_size;
         let vector_text = if truncated {
@@ -397,7 +416,7 @@ fn truncate_server_large_value_preview(
             .strip_prefix("0x")
             .filter(|hex| hex.len() > preview_size.saturating_mul(2))
             .map(|_| 2usize.saturating_add(preview_size.saturating_mul(2))),
-        ServerLargeValuePreviewKind::Vector => unreachable!(),
+        ServerLargeValuePreviewKind::Vector | ServerLargeValuePreviewKind::Deferred => unreachable!(),
     };
     let Some(truncate_at) = truncate_at else {
         return false;
@@ -436,7 +455,7 @@ fn extract_server_large_value_markers(result: &mut db::QueryResult) -> Vec<db::L
         let row_kind = result
             .rows
             .iter()
-            .find_map(|row| row.get(marker.result_index).and_then(server_large_value_marker).map(|value| value.0));
+            .find_map(|row| row.get(marker.result_index).and_then(server_large_value_marker).map(|value| value.kind));
         let source_type = marker.source_type.or_else(|| {
             (marker.preview_kind.or(row_kind) == Some(ServerLargeValuePreviewKind::Vector)).then_some("vector")
         });
@@ -449,14 +468,16 @@ fn extract_server_large_value_markers(result: &mut db::QueryResult) -> Vec<db::L
         for marker in &markers {
             let marker_value = row.get(marker.result_index).and_then(server_large_value_marker);
             let source_result_index = marker.result_index.saturating_sub(1);
-            if marker_value.is_some_and(|(kind, preview_size)| {
+            if marker_value.is_some_and(|value| {
                 row.get_mut(source_result_index)
-                    .is_some_and(|value| truncate_server_large_value_preview(value, kind, preview_size))
+                    .is_some_and(|source| truncate_server_large_value_preview(source, value.kind, value.preview_size))
             }) {
                 large_value_cells.push(db::LargeValueCell {
                     row_index,
                     column_index: marker.source_index,
-                    original_bytes: SERVER_LARGE_VALUE_UNKNOWN_BYTES,
+                    original_bytes: marker_value
+                        .and_then(|value| value.original_bytes)
+                        .unwrap_or(SERVER_LARGE_VALUE_UNKNOWN_BYTES),
                 });
             }
         }
@@ -976,6 +997,7 @@ pub fn agent_execute_query_params(
     let mut params = serde_json::json!({
         "sql": sql,
         "maxRows": agent_protocol_row_count(options.max_rows.unwrap_or(MAX_ROWS)),
+        "deferLobs": options.table_data_preview,
     });
     if let Some(database) = database.map(str::trim).filter(|database| !database.is_empty()) {
         params["database"] = serde_json::json!(database);
@@ -1005,6 +1027,7 @@ pub fn agent_execute_query_page_params(
         "sql": sql,
         "pageSize": agent_protocol_row_count(options.page_size.unwrap_or(MAX_ROWS)),
         "maxRows": agent_protocol_row_count(options.max_rows.unwrap_or(MAX_ROWS)),
+        "deferLobs": options.table_data_preview,
     });
     if let Some(database) = database.map(str::trim).filter(|database| !database.is_empty()) {
         params["database"] = serde_json::json!(database);
@@ -1498,6 +1521,22 @@ where
     }
 }
 
+/// Locks a mutex-guarded shared connection (e.g. SQL Server's single connection
+/// per pool key) and reports how long the caller waited for the lock alongside
+/// the guard. Callers should fold the returned wait time into any execution-time
+/// metric they report, since a driver-level timer that only starts once the lock
+/// is held cannot see time spent queued behind another operation on the same
+/// connection.
+async fn lock_shared_client_with_wait<'a, T>(
+    client: &'a Arc<tokio::sync::Mutex<T>>,
+    cancel_token: Option<CancellationToken>,
+    timeout_duration: Option<Duration>,
+) -> Result<(tokio::sync::MutexGuard<'a, T>, u128), String> {
+    let started_at = std::time::Instant::now();
+    let guard = wait_for_value_opt(cancel_token, timeout_duration, client.lock()).await?;
+    Ok((guard, started_at.elapsed().as_millis()))
+}
+
 async fn sqlserver_pool_is_current(
     state: &AppState,
     pool_key: &str,
@@ -1547,7 +1586,7 @@ async fn configured_operation_budget_for_pool_key(state: &AppState, pool_key: &s
 fn oceanbase_mysql_session_timeout_sql(config: Option<&ConnectionConfig>, timeout_secs: Option<u64>) -> Option<String> {
     let config = config?;
     let timeout_secs = timeout_secs.unwrap_or(config.query_timeout_secs);
-    crate::connection::oceanbase_mysql_query_timeout_sql(config, timeout_secs)
+    crate::db::oceanbase_mysql::query_timeout_sql(config, timeout_secs)
 }
 
 async fn apply_oceanbase_mysql_session_timeout(
@@ -1807,14 +1846,11 @@ async fn do_execute_typed(
             let max_rows = options.max_rows;
             let execution_mode = options.execution_mode;
             drop(connections);
-            let mut client = match cancel_token.as_ref() {
-                Some(token) => tokio::select! {
-                    biased;
-                    _ = token.cancelled() => return Err(canceled_error().into()),
-                    guard = client.lock() => guard,
-                },
-                None => client.lock().await,
-            };
+            let (mut client, lock_wait_ms) =
+                match lock_shared_client_with_wait(&client, cancel_token.clone(), None).await {
+                    Ok(value) => value,
+                    Err(err) => return Err(err.into()),
+                };
             let execution = async {
                 if execution_mode == QueryExecutionMode::Simple {
                     let mut results =
@@ -1826,7 +1862,11 @@ async fn do_execute_typed(
             };
             let result = wait_for_query_opt(cancel_token, query_timeout, execution)
                 .await
-                .map(|result| truncate_result_with_max_rows(result, max_rows));
+                .map(|result| truncate_result_with_max_rows(result, max_rows))
+                .map(|mut result| {
+                    result.execution_time_ms += lock_wait_ms;
+                    result
+                });
             drop(client);
             if matches!(result.as_ref(), Err(err) if should_discard_pool_after_error(pool_db_type, err)) {
                 state.remove_pool_by_key(pool_key).await;
@@ -2027,6 +2067,15 @@ async fn do_execute_typed(
             .map(|result| truncate_result_with_max_rows(result, max_rows))
         }
         PoolKind::HBase(_) => Err("SQL execution is not supported for HBase connections".to_string()),
+        PoolKind::DynamoDb(client) => {
+            let client = client.clone();
+            let sql = sql.to_string();
+            let max_rows = options.max_rows.unwrap_or(MAX_ROWS);
+            drop(connections);
+            // Keep the AWS SDK cold-path future off this already-large query dispatcher stack.
+            let execution = Box::pin(db::dynamodb_driver::execute_statement(&client, &sql, max_rows));
+            wait_for_query_opt(cancel_token, query_timeout, execution).await
+        }
         PoolKind::Consul(_) => Err("SQL execution is not supported for Consul connections".to_string()),
     };
     result
@@ -3129,17 +3178,18 @@ async fn execute_multi_sqlserver(
         };
         drop(connections);
 
-        let mut client_guard = match wait_for_value_opt(cancel_token.clone(), query_timeout, client.lock()).await {
-            Ok(guard) => guard,
-            Err(err) => {
-                all_results.push(ExecuteMultiResult::execution_error_with_backend(
-                    error_query_result(err.clone()),
-                    None,
-                    crate::backend_error::BackendError::from_legacy_backend(&err),
-                ));
-                break;
-            }
-        };
+        let (mut client_guard, lock_wait_ms) =
+            match lock_shared_client_with_wait(&client, cancel_token.clone(), query_timeout).await {
+                Ok(value) => value,
+                Err(err) => {
+                    all_results.push(ExecuteMultiResult::execution_error_with_backend(
+                        error_query_result(err.clone()),
+                        None,
+                        crate::backend_error::BackendError::from_legacy_backend(&err),
+                    ));
+                    break;
+                }
+            };
 
         if !sqlserver_pool_is_current(state, pool_key, &client).await {
             let error = "SQL Server connection was reset while waiting for the query lock; please retry.".to_string();
@@ -3162,7 +3212,10 @@ async fn execute_multi_sqlserver(
         drop(client_guard);
 
         match result {
-            Ok(results) => all_results.extend(sqlserver_batch_results(results)),
+            Ok(results) => all_results.extend(sqlserver_batch_results(results).into_iter().map(|mut item| {
+                item.result.execution_time_ms += lock_wait_ms;
+                item
+            })),
             Err(e) => {
                 let action = pool_error_action(Some(DatabaseType::SqlServer), &e);
                 all_results.push(ExecuteMultiResult::execution_error_with_backend(
@@ -3454,6 +3507,7 @@ fn pool_kind_has_transactional_path(pool: &PoolKind) -> bool {
         | PoolKind::DuckDbWorker(_)
         | PoolKind::Redis(_)
         | PoolKind::MongoDb(_)
+        | PoolKind::DynamoDb(_)
         | PoolKind::Elasticsearch(_)
         | PoolKind::Easysearch(_)
         | PoolKind::Meilisearch(_)
@@ -3722,6 +3776,7 @@ pub async fn execute_statements_in_transaction_on_pool_typed(
             PoolKind::DuckDbWorker(_)
             | PoolKind::Redis(_)
             | PoolKind::MongoDb(_)
+            | PoolKind::DynamoDb(_)
             | PoolKind::Elasticsearch(_)
             | PoolKind::Easysearch(_)
             | PoolKind::Meilisearch(_)
@@ -5187,6 +5242,55 @@ for line in sys.stdin:
         }
     }
 
+    #[cfg(feature = "dynamodb")]
+    #[tokio::test]
+    #[ignore = "requires DBX_DYNAMODB_ENDPOINT and an orders table"]
+    async fn live_dynamodb_editor_scan_serializes_one_thousand_rows() {
+        let endpoint = std::env::var("DBX_DYNAMODB_ENDPOINT").expect("DBX_DYNAMODB_ENDPOINT is required");
+        let (ssl, address) = endpoint
+            .strip_prefix("https://")
+            .map(|address| (true, address))
+            .or_else(|| endpoint.strip_prefix("http://").map(|address| (false, address)))
+            .expect("DynamoDB endpoint must start with http:// or https://");
+        let (host, port) = address.rsplit_once(':').expect("DynamoDB endpoint must include a port");
+        let dir = std::env::temp_dir().join(format!("dbx-query-dynamodb-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let state = AppState::new(storage);
+        let mut config = test_connection_config(DatabaseType::DynamoDb);
+        config.host = host.to_string();
+        config.port = port.parse().expect("valid DynamoDB port");
+        config.username = "dummy".to_string();
+        config.password = "dummy".to_string();
+        config.database = Some("us-east-1".to_string());
+        config.ssl = ssl;
+        let client = db::dynamodb_driver::connect(&config, host, config.port).unwrap();
+        db::dynamodb_driver::test_connection(&client, Duration::from_secs(5)).await.unwrap();
+        state.configs.write().await.insert(config.id.clone(), config.clone());
+        state.connections.write().await.insert(config.id.clone(), PoolKind::DynamoDb(client));
+
+        let results = execute_multi_core_with_options_for_client_and_progress_typed(
+            &state,
+            &config.id,
+            "us-east-1",
+            "DBX DYNAMODB SCAN\ntable: \"orders\"\nlimit: 1000",
+            None,
+            None,
+            QueryExecutionOptions { max_rows: Some(1000), ..Default::default() },
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].result.rows.len(), 1000);
+        let serialized = serde_json::to_string(&results).unwrap();
+        assert!(!serialized.is_empty());
+
+        drop(state);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     async fn agent_error_state(
         disposition: &str,
     ) -> (AppState, std::path::PathBuf, std::sync::Arc<crate::db::agent_driver::AgentRuntimeClient>) {
@@ -6161,6 +6265,44 @@ for line in sys.stdin:
         assert_eq!(serialized.get("server_message"), Some(&serde_json::Value::Bool(true)));
     }
 
+    // Regression test for #6097: SQL Server queries share a single mutex-guarded
+    // connection (see PoolKind::SqlServer), so a fast query can queue for seconds
+    // behind another operation (e.g. autocomplete/schema metadata) holding that
+    // same connection. Before this fix, `execution_time_ms` was measured only
+    // from inside db::sqlserver's own timers, which start *after* the lock is
+    // acquired — so that queueing time was invisible to the user, producing a
+    // reported duration (e.g. "6-8ms") wildly smaller than what they actually
+    // waited (e.g. "10s"). `lock_shared_client_with_wait` is the exact helper
+    // both PoolKind::SqlServer call sites now use to fold that wait back in.
+    #[tokio::test]
+    async fn lock_shared_client_with_wait_reports_time_queued_behind_another_holder() {
+        let client = Arc::new(tokio::sync::Mutex::new(0u8));
+        let holder_guard = client.lock().await;
+
+        let waiter_client = client.clone();
+        let waiter = tokio::spawn(async move {
+            let (_guard, wait_ms) = lock_shared_client_with_wait(&waiter_client, None, None).await.unwrap();
+            wait_ms
+        });
+
+        // Give the spawned task a chance to actually start waiting on the lock
+        // before the holder releases it, so the measured wait is meaningful.
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        drop(holder_guard);
+
+        let wait_ms = waiter.await.unwrap();
+        assert!(wait_ms >= 150, "expected queued wait time to be captured, got {wait_ms}ms");
+    }
+
+    #[tokio::test]
+    async fn lock_shared_client_with_wait_is_near_zero_when_uncontended() {
+        let client = Arc::new(tokio::sync::Mutex::new(0u8));
+
+        let (_guard, wait_ms) = lock_shared_client_with_wait(&client, None, None).await.unwrap();
+
+        assert!(wait_ms < 50, "expected an uncontended lock to report negligible wait, got {wait_ms}ms");
+    }
+
     #[test]
     fn query_execution_error_preserves_structured_catalog_identity() {
         let error = QueryExecutionError::Agent(AgentCallError::Structured {
@@ -6921,6 +7063,7 @@ for line in sys.stdin:
                 fetch_size: Some(250),
                 row_offset: Some(100),
                 timeout_secs: Some(600),
+                table_data_preview: true,
                 ..Default::default()
             },
         );
@@ -6932,6 +7075,7 @@ for line in sys.stdin:
         assert_eq!(params["fetchSize"], 250);
         assert_eq!(params["rowOffset"], 100);
         assert_eq!(params["timeoutSecs"], 600);
+        assert_eq!(params["deferLobs"], true);
     }
 
     #[test]
@@ -7101,6 +7245,7 @@ for line in sys.stdin:
                 fetch_size: Some(250),
                 row_offset: Some(100),
                 timeout_secs: Some(600),
+                table_data_preview: true,
                 ..Default::default()
             },
         );
@@ -7113,6 +7258,7 @@ for line in sys.stdin:
         assert_eq!(params["rowOffset"], 100);
         assert_eq!(params["timeoutSecs"], 600);
         assert_eq!(params["maxRows"], MAX_ROWS);
+        assert_eq!(params["deferLobs"], true);
     }
 
     #[test]
@@ -7339,7 +7485,7 @@ for line in sys.stdin:
             column_sortables: vec![true, true],
             spatial_columns: Vec::new(),
             spatial_values: Vec::new(),
-            rows: vec![vec![serde_json::json!("0x0102030405"), serde_json::json!("B:4")]],
+            rows: vec![vec![serde_json::json!("0x0102030405"), serde_json::json!("B:4:5")]],
             affected_rows: 0,
             execution_time_ms: 0,
             truncated: false,
@@ -7352,7 +7498,48 @@ for line in sys.stdin:
         let cells = extract_server_large_value_markers(&mut result);
 
         assert_eq!(result.rows, vec![vec![serde_json::json!("0x01020304...")]]);
-        assert_eq!(cells.len(), 1);
+        assert_eq!(cells, vec![db::LargeValueCell { row_index: 0, column_index: 0, original_bytes: 5 }]);
+    }
+
+    #[test]
+    fn extracts_deferred_oracle_clob_markers_without_changing_placeholder() {
+        let mut result = db::QueryResult {
+            columns: vec![
+                "id".to_string(),
+                "payload".to_string(),
+                format!("{}C_1", crate::sql_dialect::DBX_LARGE_VALUE_BYTES_COLUMN_PREFIX),
+            ],
+            column_types: vec!["number".to_string(), "varchar2".to_string(), "varchar2".to_string()],
+            column_sortables: vec![true; 3],
+            spatial_columns: Vec::new(),
+            spatial_values: Vec::new(),
+            rows: vec![
+                vec![serde_json::json!(1), serde_json::json!("<CLOB>"), serde_json::json!("D:1")],
+                vec![serde_json::json!(2), serde_json::Value::Null, serde_json::Value::Null],
+            ],
+            affected_rows: 0,
+            execution_time_ms: 0,
+            truncated: false,
+            session_id: None,
+            has_more: false,
+            elasticsearch_raw_body: None,
+            messages: Vec::new(),
+        };
+
+        let cells = extract_server_large_value_markers(&mut result);
+
+        assert_eq!(result.columns, vec!["id", "payload"]);
+        assert_eq!(result.column_types, vec!["number", "clob"]);
+        assert_eq!(result.rows[0], vec![serde_json::json!(1), serde_json::json!("<CLOB>")]);
+        assert_eq!(result.rows[1], vec![serde_json::json!(2), serde_json::Value::Null]);
+        assert_eq!(
+            cells,
+            vec![db::LargeValueCell {
+                row_index: 0,
+                column_index: 1,
+                original_bytes: SERVER_LARGE_VALUE_UNKNOWN_BYTES,
+            }]
+        );
     }
 
     #[test]

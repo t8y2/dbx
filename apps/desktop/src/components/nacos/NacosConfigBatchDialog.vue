@@ -37,8 +37,8 @@ const emit = defineEmits<{
   chooseFile: [];
   reset: [];
   targetConnectionChange: [connectionId: string];
-  preview: [payload: { scope: NacosConfigSelectionScope; targetConnectionId: string; targetNamespace: string; policy: NacosConflictPolicy }];
-  apply: [payload: { scope: NacosConfigSelectionScope; targetConnectionId: string; targetNamespace: string; policy: NacosConflictPolicy }];
+  preview: [payload: { scope: NacosConfigSelectionScope; targetConnectionId: string; targetNamespace: string; targetGroup: string; policy: NacosConflictPolicy }];
+  apply: [payload: { scope: NacosConfigSelectionScope; targetConnectionId: string; targetNamespace: string; targetGroup: string; policy: NacosConflictPolicy }];
   export: [scope: NacosConfigSelectionScope];
 }>();
 
@@ -46,6 +46,7 @@ const { t } = useI18n();
 const scope = ref<NacosConfigSelectionScope>("selected");
 const policy = ref<NacosConflictPolicy>("ABORT");
 const targetNamespace = ref("");
+const targetGroup = ref("");
 
 const titleKey = computed(() => `nacos.batch${props.mode[0].toUpperCase()}${props.mode.slice(1)}Title`);
 const descriptionKey = computed(() => `nacos.batch${props.mode[0].toUpperCase()}${props.mode.slice(1)}Description`);
@@ -116,6 +117,7 @@ watch(
     if (!open) return;
     scope.value = props.selectedCount ? "selected" : "filtered";
     policy.value = "ABORT";
+    targetGroup.value = "";
     resetTargetNamespace();
   },
   { immediate: true },
@@ -202,6 +204,10 @@ watch(targetNamespaces, () => {
               </select>
             </div>
           </div>
+          <div class="space-y-2">
+            <div class="text-sm font-medium">{{ t("nacos.targetGroup") }}</div>
+            <input v-model="targetGroup" type="text" class="h-10 w-full rounded-md border border-input bg-background px-3 text-sm" :disabled="loading" :placeholder="t('nacos.targetGroupPlaceholder')" @change="emit('reset')" />
+          </div>
           <p class="text-xs text-muted-foreground">{{ t("nacos.copyKeepsSource") }}</p>
         </div>
 
@@ -279,11 +285,11 @@ watch(targetNamespaces, () => {
             {{ t("nacos.exportZip") }}
           </Button>
           <template v-else>
-            <Button v-if="!preview" :disabled="loading || !canContinue" @click="emit('preview', { scope, targetConnectionId, targetNamespace: selectedTargetNamespace, policy })">
+            <Button v-if="!preview" :disabled="loading || !canContinue" @click="emit('preview', { scope, targetConnectionId, targetNamespace: selectedTargetNamespace, targetGroup: targetGroup.trim(), policy })">
               <Loader2 v-if="loading" class="mr-2 h-4 w-4 animate-spin" />
               {{ t("nacos.preview") }}
             </Button>
-            <Button v-else :variant="policy === 'OVERWRITE' ? 'destructive' : 'default'" :disabled="loading || hasPreviewBlockingErrors" @click="emit('apply', { scope, targetConnectionId, targetNamespace: selectedTargetNamespace, policy })">
+            <Button v-else :variant="policy === 'OVERWRITE' ? 'destructive' : 'default'" :disabled="loading || hasPreviewBlockingErrors" @click="emit('apply', { scope, targetConnectionId, targetNamespace: selectedTargetNamespace, targetGroup: targetGroup.trim(), policy })">
               <Loader2 v-if="loading" class="mr-2 h-4 w-4 animate-spin" />
               {{ t("nacos.apply") }}
             </Button>

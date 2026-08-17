@@ -51,6 +51,7 @@ const STRICT_LOCAL_DATETIME_INPUT_PATTERNS = [
 ];
 const ISO_OFFSET_DATETIME_PATTERN = /^(\d{4})([-/])(\d{2})\2(\d{2})T(\d{2}):(\d{2}):(\d{2})(\.\d{1,9})?(Z|[+-]\d{2}:\d{2})$/;
 const FRACTIONAL_LOCAL_DATETIME_PATTERN = /^(\d{4})([-/])(\d{1,2})\2(\d{1,2})([ T])(\d{1,2}):(\d{1,2}):(\d{1,2})\.(\d{1,9})$/;
+const MONGO_SHELL_DATE_PATTERN = /^(?:ISODate|new Date)\(\s*(["'])(.+)\1\s*\)$/;
 
 export interface CustomColumnFormatterConfig {
   id: string;
@@ -102,6 +103,7 @@ export type ColumnFormatterConfig =
   | { kind: "datetime"; unit: DateTimeFormatterUnit; pattern: string; timezone: string | undefined }
   | { kind: "json-path"; path: string }
   | { kind: "mask"; prefix: number; suffix: number }
+  | { kind: "foreign-key-display"; refSchema?: string; refTable: string; refColumn: string; displayColumn: string }
   | { kind: "custom-template"; template: string }
   | { kind: "custom-ref"; formatterId: string };
 
@@ -140,6 +142,19 @@ export function normalizeColumnFormatter(value: unknown): ColumnFormatterConfig 
     if (!Number.isInteger(config.prefix) || !Number.isInteger(config.suffix)) return undefined;
     if ((config.prefix as number) < 0 || (config.suffix as number) < 0) return undefined;
     return { kind: "mask", prefix: config.prefix as number, suffix: config.suffix as number };
+  }
+
+  if (config.kind === "foreign-key-display") {
+    if (typeof config.refTable !== "string" || !config.refTable.trim()) return undefined;
+    if (typeof config.refColumn !== "string" || !config.refColumn.trim()) return undefined;
+    if (typeof config.displayColumn !== "string" || !config.displayColumn.trim()) return undefined;
+    return {
+      kind: "foreign-key-display",
+      refSchema: typeof config.refSchema === "string" && config.refSchema.trim() ? config.refSchema.trim() : undefined,
+      refTable: config.refTable.trim(),
+      refColumn: config.refColumn.trim(),
+      displayColumn: config.displayColumn.trim(),
+    };
   }
 
   if (config.kind === "custom-template") {
@@ -262,6 +277,11 @@ function resolveDateTimeValue(value: string | number, unit: DateTimeFormatterUni
     if (!trimmed) {
       return undefined;
     }
+    const mongoShellDate = unwrapMongoShellDate(trimmed);
+    if (mongoShellDate !== undefined) {
+      return parseStrictDateTimeString(mongoShellDate);
+    }
+
     const timestamp = parseTimestampMilliseconds(trimmed, unit);
     if (timestamp !== undefined) {
       const parsedTimestamp = dayjs(timestamp);
@@ -277,6 +297,10 @@ function resolveDateTimeValue(value: string | number, unit: DateTimeFormatterUni
 
   const parsedTimestamp = dayjs(timestamp);
   return parsedTimestamp.isValid() ? parsedTimestamp : undefined;
+}
+
+function unwrapMongoShellDate(value: string): string | undefined {
+  return value.match(MONGO_SHELL_DATE_PATTERN)?.[2];
 }
 
 function normalizeDateTimePattern(pattern: unknown): string {

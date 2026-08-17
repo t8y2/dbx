@@ -251,6 +251,50 @@ describe("CustomContextMenu lifecycle", () => {
     app.unmount();
   });
 
+  it("keeps a destructive submenu trigger red while expanded", async () => {
+    const root = defineComponent({
+      setup() {
+        return () =>
+          h(
+            CustomContextMenu,
+            {
+              items: [
+                {
+                  label: "More",
+                  variant: "destructive",
+                  children: [{ label: "Drop table", variant: "destructive" }],
+                },
+              ],
+            },
+            {
+              default: ({ onContextMenu }: { onContextMenu: (event: MouseEvent) => void }) => h("div", { id: "context-target", onContextmenu: onContextMenu }, "Target"),
+            },
+          );
+      },
+    });
+    const container = document.createElement("div");
+    mountedContainers.push(container);
+    document.body.append(container);
+    const app = createApp(root);
+    app.mount(container);
+
+    container.querySelector("#context-target")?.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true }));
+    await nextTick();
+
+    const trigger = Array.from(document.body.querySelectorAll("button")).find((button) => button.textContent?.includes("More"));
+    expect(trigger?.classList.contains("text-destructive")).toBe(true);
+    expect(trigger?.querySelector("svg")?.classList.contains("text-destructive")).toBe(true);
+
+    trigger?.dispatchEvent(new MouseEvent("mouseenter", { bubbles: true }));
+    await nextTick();
+
+    expect(trigger?.classList.contains("bg-destructive/10")).toBe(true);
+    expect(trigger?.classList.contains("text-accent-foreground")).toBe(false);
+    expect(document.body.textContent).toContain("Drop table");
+
+    app.unmount();
+  });
+
   it("resolves lazy menu items again for every open", async () => {
     let copied = false;
     const items = vi.fn(() =>

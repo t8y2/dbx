@@ -4,6 +4,42 @@ use crate::connection::AppState;
 use crate::models::connection::DatabaseType;
 use crate::nacos::types::*;
 
+async fn refresh_access_control_after_mutation(admin: &std::sync::Arc<dyn crate::nacos::port::NacosAdmin>) {
+    admin.invalidate_access_control_capabilities();
+    let _ = admin.refresh_access_control_capabilities().await;
+}
+
+async fn current_access_control_capabilities(
+    admin: &std::sync::Arc<dyn crate::nacos::port::NacosAdmin>,
+) -> NacosAccessControlCapabilities {
+    // A synchronous read intentionally treats an expired entry as absent. All
+    // feature and safety gates therefore go through the refreshing path so a
+    // stale cache cannot disable the workspace or reopen legacy mutations.
+    admin.refresh_access_control_capabilities().await
+}
+
+fn ensure_access_control_operation(
+    capabilities: &NacosAccessControlCapabilities,
+    operation: NacosAccessControlOperation,
+) -> Result<(), String> {
+    let capability = capabilities.operation(operation);
+    if capability.supported {
+        return Ok(());
+    }
+    let reason = match capability.reason {
+        Some(NacosCapabilityReason::ImplementationReadOnly) => "implementationReadOnly",
+        Some(NacosCapabilityReason::VersionUnsupported) => "versionUnsupported",
+        Some(NacosCapabilityReason::EndpointUnavailable) => "endpointUnavailable",
+        Some(NacosCapabilityReason::NotVerified) => "notVerified",
+        Some(NacosCapabilityReason::ConnectionReadOnly) => "connectionReadOnly",
+        Some(NacosCapabilityReason::PermissionDenied) => "permissionDenied",
+        None => "notVerified",
+    };
+    Err(format!(
+        "NACOS_ERROR[unsupportedOperation]: Nacos access-control operation {operation:?} is unavailable ({reason})"
+    ))
+}
+
 pub async fn nacos_test_connection_core(state: &AppState, conn_id: &str) -> Result<NacosConnectionInfo, String> {
     let cfg = state.configs.read().await.get(conn_id).cloned().ok_or("Connection not found")?;
     if cfg.db_type != DatabaseType::Nacos {
@@ -13,12 +49,20 @@ pub async fn nacos_test_connection_core(state: &AppState, conn_id: &str) -> Resu
     // Keep this probe on the connection's shared adapter so an r-nacos console
     // session verified for configuration history can also expose its version.
     let admin = state.nacos_registry.get_or_build_config(conn_id, admin_config).await?;
-    admin.test_connection().await
+    admin.inspect_connection().await
 }
 
 pub async fn nacos_list_namespaces_core(state: &AppState, conn_id: &str) -> Result<Vec<NacosNamespaceInfo>, String> {
-    let admin = get_admin(state, conn_id).await?;
-    admin.list_namespaces().await
+    let (admin, fingerprint) = get_admin_with_operation_fingerprint(state, conn_id).await?;
+    crate::nacos::namespace_access::list_readable_namespaces(conn_id, fingerprint, admin).await
+}
+
+pub async fn nacos_sidebar_snapshot_core(
+    state: &AppState,
+    conn_id: &str,
+) -> Result<NacosNamespaceSidebarSnapshot, String> {
+    let (admin, fingerprint) = get_admin_with_operation_fingerprint(state, conn_id).await?;
+    crate::nacos::namespace_access::sidebar_snapshot(conn_id, fingerprint, admin).await
 }
 
 pub async fn nacos_create_namespace_core(
@@ -131,7 +175,181 @@ pub async fn nacos_login_rnacos_console_core(
     captcha: Option<String>,
 ) -> Result<(), String> {
     let admin = get_admin(state, conn_id).await?;
-    admin.login_rnacos_console(captcha).await
+    let result = admin.login_rnacos_console(captcha).await;
+    if result.is_ok() {
+        refresh_access_control_after_mutation(&admin).await;
+        crate::nacos::namespace_access::invalidate(conn_id);
+    }
+    result
+}
+
+pub async fn nacos_list_users_core(
+    state: &AppState,
+    conn_id: &str,
+    query: NacosUserQuery,
+) -> Result<NacosUserList, String> {
+    let admin = get_admin(state, conn_id).await?;
+    admin.list_users(query).await
+}
+
+pub async fn nacos_create_user_core(state: &AppState, conn_id: &str, req: NacosUserCreate) -> Result<(), String> {
+    ensure_connection_writable(state, conn_id, "Create Nacos user").await?;
+    let admin = get_admin(state, conn_id).await?;
+    let capabilities = current_access_control_capabilities(&admin).await;
+    ensure_access_control_operation(&capabilities, NacosAccessControlOperation::CreateUser)?;
+    let result = admin.create_user(req).await;
+    if result.is_ok() {
+        refresh_access_control_after_mutation(&admin).await;
+        crate::nacos::namespace_access::invalidate_all();
+    }
+    result
+}
+
+pub async fn nacos_update_user_core(state: &AppState, conn_id: &str, req: NacosUserUpdate) -> Result<(), String> {
+    ensure_connection_writable(state, conn_id, "Update Nacos user").await?;
+    let admin = get_admin(state, conn_id).await?;
+    let capabilities = current_access_control_capabilities(&admin).await;
+    ensure_access_control_operation(&capabilities, NacosAccessControlOperation::UpdateUser)?;
+    let result = admin.update_user(req).await;
+    if result.is_ok() {
+        refresh_access_control_after_mutation(&admin).await;
+        crate::nacos::namespace_access::invalidate_all();
+    }
+    result
+}
+
+pub async fn nacos_delete_user_core(state: &AppState, conn_id: &str, username: String) -> Result<(), String> {
+    ensure_connection_writable(state, conn_id, "Delete Nacos user").await?;
+    let admin = get_admin(state, conn_id).await?;
+    let capabilities = current_access_control_capabilities(&admin).await;
+    if capabilities.enhanced_workspace {
+        return Err(
+            "Nacos users in the enhanced workspace must be deleted through the access-control workflow".to_string()
+        );
+    }
+    ensure_access_control_operation(&capabilities, NacosAccessControlOperation::DeleteUser)?;
+    let result = admin.delete_user(username).await;
+    if result.is_ok() {
+        refresh_access_control_after_mutation(&admin).await;
+        crate::nacos::namespace_access::invalidate_all();
+    }
+    result
+}
+
+pub async fn nacos_list_role_bindings_core(
+    state: &AppState,
+    conn_id: &str,
+    query: NacosRoleQuery,
+) -> Result<NacosRoleList, String> {
+    let admin = get_admin(state, conn_id).await?;
+    admin.list_role_bindings(query).await
+}
+
+pub async fn nacos_assign_role_core(state: &AppState, conn_id: &str, binding: NacosRoleBinding) -> Result<(), String> {
+    ensure_connection_writable(state, conn_id, "Assign Nacos role").await?;
+    let admin = get_admin(state, conn_id).await?;
+    let capabilities = current_access_control_capabilities(&admin).await;
+    if capabilities.enhanced_workspace {
+        return Err(
+            "Nacos roles in the enhanced workspace must be changed through the access-control workflow".to_string()
+        );
+    }
+    ensure_access_control_operation(&capabilities, NacosAccessControlOperation::AssignRole)?;
+    let result = admin.assign_role(binding).await;
+    if result.is_ok() {
+        refresh_access_control_after_mutation(&admin).await;
+        crate::nacos::namespace_access::invalidate_all();
+    }
+    result
+}
+
+pub async fn nacos_remove_role_core(state: &AppState, conn_id: &str, binding: NacosRoleBinding) -> Result<(), String> {
+    ensure_connection_writable(state, conn_id, "Remove Nacos role").await?;
+    let admin = get_admin(state, conn_id).await?;
+    let capabilities = current_access_control_capabilities(&admin).await;
+    if capabilities.enhanced_workspace {
+        return Err(
+            "Nacos roles in the enhanced workspace must be changed through the access-control workflow".to_string()
+        );
+    }
+    ensure_access_control_operation(&capabilities, NacosAccessControlOperation::RemoveRole)?;
+    if binding.role == "ROLE_ADMIN" {
+        return Err("The Nacos administrator role cannot be removed through the legacy endpoint".to_string());
+    }
+    let result = admin.remove_role(binding).await;
+    if result.is_ok() {
+        refresh_access_control_after_mutation(&admin).await;
+        crate::nacos::namespace_access::invalidate_all();
+    }
+    result
+}
+
+pub async fn nacos_access_snapshot_core(state: &AppState, conn_id: &str) -> Result<NacosAccessControlSnapshot, String> {
+    let admin = get_admin(state, conn_id).await?;
+    if !current_access_control_capabilities(&admin).await.enhanced_workspace {
+        return Err("The enhanced access-control workspace is unavailable for this Nacos connection".to_string());
+    }
+    crate::nacos::access_control::load_snapshot(admin).await
+}
+
+pub async fn nacos_start_access_operation_core(
+    state: &AppState,
+    conn_id: &str,
+    req: NacosAccessOperationRequest,
+) -> Result<NacosAccessOperationResult, String> {
+    ensure_connection_writable(state, conn_id, "Manage Nacos access control").await?;
+    let (admin, fingerprint) = get_admin_with_operation_fingerprint(state, conn_id).await?;
+    if !current_access_control_capabilities(&admin).await.enhanced_workspace {
+        return Err("The enhanced access-control workspace is unavailable for this Nacos connection".to_string());
+    }
+    let (result, state_changed) =
+        crate::nacos::access_control::start_operation(conn_id, fingerprint, admin.clone(), req).await?;
+    if state_changed {
+        refresh_access_control_after_mutation(&admin).await;
+        crate::nacos::namespace_access::invalidate_all();
+    }
+    Ok(result)
+}
+
+pub async fn nacos_get_access_operation_core(
+    state: &AppState,
+    conn_id: &str,
+    operation_id: &str,
+) -> Result<NacosAccessOperationResult, String> {
+    let (_, fingerprint) = get_admin_with_operation_fingerprint(state, conn_id).await?;
+    crate::nacos::access_control::get_operation(conn_id, &fingerprint, operation_id)
+}
+
+pub async fn nacos_retry_access_operation_core(
+    state: &AppState,
+    conn_id: &str,
+    retry: NacosAccessOperationRetry,
+) -> Result<NacosAccessOperationResult, String> {
+    ensure_connection_writable(state, conn_id, "Retry Nacos access-control operation").await?;
+    let (admin, fingerprint) = get_admin_with_operation_fingerprint(state, conn_id).await?;
+    let (result, state_changed) =
+        crate::nacos::access_control::retry_operation(conn_id, fingerprint, admin.clone(), retry).await?;
+    if state_changed {
+        refresh_access_control_after_mutation(&admin).await;
+        crate::nacos::namespace_access::invalidate_all();
+    }
+    Ok(result)
+}
+
+pub async fn nacos_undo_access_operation_core(
+    state: &AppState,
+    conn_id: &str,
+    operation_id: &str,
+) -> Result<NacosAccessOperationResult, String> {
+    ensure_connection_writable(state, conn_id, "Undo Nacos access-control operation").await?;
+    let (admin, fingerprint) = get_admin_with_operation_fingerprint(state, conn_id).await?;
+    let (result, state_changed) =
+        crate::nacos::access_control::undo_operation(conn_id, fingerprint, admin.clone(), operation_id).await?;
+    if state_changed {
+        refresh_access_control_after_mutation(&admin).await;
+        crate::nacos::namespace_access::invalidate_all();
+    }
+    Ok(result)
 }
 
 pub async fn nacos_list_services_core(
@@ -278,6 +496,20 @@ pub(crate) async fn get_admin(
     state.nacos_registry.get_or_build_config(conn_id, admin_config).await
 }
 
+async fn get_admin_with_operation_fingerprint(
+    state: &AppState,
+    conn_id: &str,
+) -> Result<(std::sync::Arc<dyn crate::nacos::port::NacosAdmin>, String), String> {
+    let cfg = state.configs.read().await.get(conn_id).cloned().ok_or("Connection not found")?;
+    if cfg.db_type != DatabaseType::Nacos {
+        return Err("Connection is not a Nacos admin connection".to_string());
+    }
+    let admin_config = state.nacos_admin_config_for_connection(conn_id, &cfg).await?;
+    let fingerprint = admin_config.operation_fingerprint();
+    let admin = state.nacos_registry.get_or_build_config(conn_id, admin_config).await?;
+    Ok((admin, fingerprint))
+}
+
 pub(crate) async fn ensure_connection_writable(state: &AppState, conn_id: &str, action: &str) -> Result<(), String> {
     let cfg = state.configs.read().await.get(conn_id).cloned().ok_or("Connection not found")?;
     if cfg.read_only {
@@ -302,6 +534,7 @@ fn ensure_service_operation(
         Some(NacosCapabilityReason::EndpointUnavailable) => "endpointUnavailable",
         Some(NacosCapabilityReason::NotVerified) => "notVerified",
         Some(NacosCapabilityReason::ConnectionReadOnly) => "connectionReadOnly",
+        Some(NacosCapabilityReason::PermissionDenied) => "permissionDenied",
         None => "notVerified",
     };
     Err(format!("NACOS_ERROR[unsupportedOperation]: Nacos service operation {operation:?} is unavailable ({reason})"))
@@ -310,6 +543,18 @@ fn ensure_service_operation(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn access_control_operation_guard_uses_individual_capabilities() {
+        let mut capabilities = NacosAccessControlCapabilities::unavailable(NacosCapabilityReason::PermissionDenied);
+        capabilities.update_user = NacosOperationCapability::supported();
+
+        assert!(ensure_access_control_operation(&capabilities, NacosAccessControlOperation::UpdateUser).is_ok());
+        let error =
+            ensure_access_control_operation(&capabilities, NacosAccessControlOperation::CreateUser).unwrap_err();
+        assert!(error.contains("CreateUser"));
+        assert!(error.contains("permissionDenied"));
+    }
 
     #[test]
     fn core_service_operation_guard_allows_documented_rnacos_v1_writes() {
@@ -327,6 +572,7 @@ mod tests {
             namespace: "public".to_string(),
             version_mode: Some(NacosVersionMode::Auto),
             context_path: "/nacos".to_string(),
+            managed_namespaces: Vec::new(),
             rnacos_console_addr: String::new(),
             rnacos_history_enabled: Some(false),
             rnacos_console_auth: NacosRNacosConsoleAuth::Inherit,

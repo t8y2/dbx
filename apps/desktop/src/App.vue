@@ -2722,8 +2722,10 @@ onUnmounted(() => {
                 :initial-section="settingsInitialSection"
                 :navigation-request-id="settingsNavigationRequestId"
                 :app-version="appVersion"
+                :checking-updates="checkingUpdates"
                 class="flex-1 min-h-0"
                 @update:open="(open: boolean) => (open ? activateSettingsPage() : closeSettingsPage())"
+                @check-updates="checkUpdates()"
               />
               <div v-if="activeTab" v-show="!driverStoreActive && !settingsStore.settingsPageActive" class="flex flex-col flex-1 min-h-0">
                 <EditorToolbar

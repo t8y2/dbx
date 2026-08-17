@@ -1076,8 +1076,8 @@ function clearContextTarget() {
             <div v-for="folder in visibleFolders" :key="folder.project.id" class="border-b last:border-b-0">
               <div
                 data-sql-file-row="true"
-                class="flex cursor-default items-center gap-1 px-2 py-1.5 text-[11px] font-medium text-muted-foreground bg-muted/10 sticky top-0 select-none hover:bg-muted/30"
-                :class="isPathHighlighted(folder.path) ? 'bg-accent text-accent-foreground' : ''"
+                class="flex cursor-default items-center gap-1 px-2 py-1.5 text-[11px] font-medium text-muted-foreground bg-[color-mix(in_oklab,var(--muted)_10%,var(--background))] sticky top-0 select-none"
+                :class="isPathHighlighted(folder.path) ? 'bg-accent text-accent-foreground' : 'hover:bg-[color-mix(in_oklab,var(--accent)_40%,var(--background))]'"
                 :title="`${folder.project.rootPath}\n${projectConnectionLabel(folder)}`"
                 @click.stop="handlePathClick(folder.path, 'folderHeader', $event, () => toggleFolderCollapse(folder))"
                 @contextmenu.capture="

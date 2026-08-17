@@ -4,21 +4,48 @@ import {
   isCloneableMongoCollection,
   isProtectedMongoIndex,
   isRenamableMongoCollection,
+  mergeExtraOptionsIntoRequest,
   mongoCollectionKindFromNode,
   mongoCollectionTableTypeFromNode,
   mongoCloneCollectionPreview,
+  mongoCreateIndexFormFromRow,
+  mongoCreateIndexRequestFromSpec,
   mongoCreateIndexPreview,
   mongoDropCollectionPreview,
   mongoDropAllIndexesPreview,
   mongoDropIndexFailureCount,
   mongoDropIndexPreview,
+  mongoIndexKeyLabel,
   mongoRenameCollectionPreview,
+  mongoReplaceIndexPreview,
+  preflightEditIndexSpec,
+  snapshotMongoIndexSpec,
   toMongoCollectionKind,
+  toMongoIndexRow,
   type MongoCreateIndexForm,
+  type MongoIndexSpecSource,
 } from "../mongoCollectionMutation";
 
 function indexForm(fields: MongoCreateIndexForm["fields"], options: Partial<Omit<MongoCreateIndexForm, "fields">> = {}): MongoCreateIndexForm {
-  return { name: "", unique: false, sparse: false, ...options, fields };
+  return { name: "", unique: false, sparse: false, expireAfterSeconds: "", partialFilterExpression: "", background: false, bucketSize: "", ...options, fields };
+}
+
+function serverIndexSpec(overrides: Partial<MongoIndexSpecSource> = {}): MongoIndexSpecSource {
+  return {
+    name: "email_1",
+    keys: [{ field: "email", direction: "1" }],
+    is_unique: false,
+    is_primary: false,
+    is_sparse: true,
+    expire_after_seconds: 3600,
+    partial_filter_expression: '{"archived":false}',
+    background: false,
+    bucket_size: null,
+    hidden: false,
+    properties_complete: true,
+    extra_options: '{"collation":{"locale":"en"}}',
+    ...overrides,
+  };
 }
 
 describe("isRenamableMongoCollection", () => {
@@ -155,5 +182,320 @@ describe("mongo shell previews", () => {
         ]),
       ),
     ).toEqual({ valid: false, error: "field-duplicate", field: "email" });
+  });
+
+  it("emits TTL and partial-filter options in a stable order", () => {
+    const request = buildMongoCreateIndexRequest(
+      indexForm([{ id: 1, path: "createdAt", type: "1" }], {
+        name: "ttl_idx",
+        unique: true,
+        sparse: true,
+        expireAfterSeconds: "3600",
+        partialFilterExpression: '{"archived":false}',
+      }),
+    );
+
+    expect(request).toEqual({
+      valid: true,
+      keysJson: '{"createdAt":1}',
+      optionsJson: '{"name":"ttl_idx","unique":true,"sparse":true,"expireAfterSeconds":3600,"partialFilterExpression":{"archived":false}}',
+    });
+  });
+
+  it("keeps a zero-second TTL distinct from an empty box", () => {
+    const withZero = buildMongoCreateIndexRequest(indexForm([{ id: 1, path: "createdAt", type: "1" }], { expireAfterSeconds: "0" }));
+    expect(withZero).toEqual({ valid: true, keysJson: '{"createdAt":1}', optionsJson: '{"expireAfterSeconds":0}' });
+
+    const withBlank = buildMongoCreateIndexRequest(indexForm([{ id: 1, path: "createdAt", type: "1" }], { expireAfterSeconds: "   " }));
+    expect(withBlank).toEqual({ valid: true, keysJson: '{"createdAt":1}', optionsJson: undefined });
+  });
+
+  it("passes legacy options through only when enabled", () => {
+    const request = buildMongoCreateIndexRequest(indexForm([{ id: 1, path: "email", type: "1" }], { background: true, bucketSize: "10" }));
+    expect(request).toEqual({ valid: true, keysJson: '{"email":1}', optionsJson: '{"background":true,"bucketSize":10}' });
+  });
+
+  it("rejects a non-numeric TTL, a bad bucket size, and a non-object filter", () => {
+    expect(buildMongoCreateIndexRequest(indexForm([{ id: 1, path: "a", type: "1" }], { expireAfterSeconds: "-5" }))).toEqual({ valid: false, error: "ttl-invalid" });
+    expect(buildMongoCreateIndexRequest(indexForm([{ id: 1, path: "a", type: "1" }], { expireAfterSeconds: "1.5" }))).toEqual({ valid: false, error: "ttl-invalid" });
+    expect(buildMongoCreateIndexRequest(indexForm([{ id: 1, path: "a", type: "1" }], { bucketSize: "abc" }))).toEqual({ valid: false, error: "bucket-size-invalid" });
+    expect(buildMongoCreateIndexRequest(indexForm([{ id: 1, path: "a", type: "1" }], { partialFilterExpression: "{not valid" }))).toEqual({ valid: false, error: "filter-invalid" });
+    expect(buildMongoCreateIndexRequest(indexForm([{ id: 1, path: "a", type: "1" }], { partialFilterExpression: "[1,2]" }))).toEqual({ valid: false, error: "filter-invalid" });
+  });
+
+  it("reports a missing field before a malformed option", () => {
+    expect(buildMongoCreateIndexRequest(indexForm([{ id: 1, path: "", type: "1" }], { expireAfterSeconds: "nope" }))).toEqual({ valid: false, error: "field-required" });
+  });
+});
+
+describe("mongoIndexKeyLabel", () => {
+  it("maps sort directions to readable labels and passes other types through", () => {
+    expect(mongoIndexKeyLabel(1)).toBe("ASC");
+    expect(mongoIndexKeyLabel("1")).toBe("ASC");
+    expect(mongoIndexKeyLabel(-1)).toBe("DESC");
+    expect(mongoIndexKeyLabel("-1")).toBe("DESC");
+    expect(mongoIndexKeyLabel("text")).toBe("text");
+    expect(mongoIndexKeyLabel(undefined)).toBe("");
+  });
+});
+
+describe("toMongoIndexRow", () => {
+  it("describes compound keys from a spec with directions", () => {
+    expect(
+      toMongoIndexRow({
+        name: "account_created",
+        keys: [
+          { field: "account", direction: "1" },
+          { field: "createTime", direction: "-1" },
+        ],
+      }),
+    ).toEqual({
+      name: "account_created",
+      keys: "account ASC, createTime DESC",
+      isUnique: false,
+      isProtected: false,
+      isSparse: false,
+      expireAfterSeconds: undefined,
+      partialFilterExpression: undefined,
+      background: false,
+      bucketSize: undefined,
+      hidden: false,
+      propertiesComplete: true,
+      extraOptions: undefined,
+    });
+  });
+
+  it("keeps non-numeric directions literal", () => {
+    expect(
+      toMongoIndexRow({
+        name: "content_text",
+        keys: [{ field: "content", direction: "text" }],
+      }).keys,
+    ).toBe("content text");
+  });
+
+  it("maps spec properties and flags the default index as protected", () => {
+    const row = toMongoIndexRow({
+      name: "_id_",
+      keys: [{ field: "_id", direction: "1" }],
+      is_unique: true,
+      is_primary: true,
+      is_sparse: true,
+      expire_after_seconds: 3600,
+      partial_filter_expression: '{"archived":false}',
+      background: true,
+      bucket_size: 32,
+      hidden: true,
+      properties_complete: true,
+      extra_options: '{"collation":{"locale":"en"}}',
+    });
+
+    expect(row.isProtected).toBe(true);
+    expect(row.isSparse).toBe(true);
+    expect(row.expireAfterSeconds).toBe(3600);
+    expect(row.partialFilterExpression).toBe('{"archived":false}');
+    expect(row.background).toBe(true);
+    expect(row.bucketSize).toBe(32);
+    expect(row.hidden).toBe(true);
+    expect(row.propertiesComplete).toBe(true);
+    expect(row.extraOptions).toBe('{"collation":{"locale":"en"}}');
+  });
+
+  it("exposes the Legacy Agent's incomplete property set", () => {
+    const row = toMongoIndexRow({ name: "email_1", keys: [{ field: "email", direction: "1" }], properties_complete: false });
+
+    expect(row.propertiesComplete).toBe(false);
+    expect(row.isSparse).toBe(false);
+    expect(row.expireAfterSeconds).toBeUndefined();
+  });
+});
+
+describe("mongoCreateIndexFormFromRow", () => {
+  it("parses compound keys back into form fields with directions", () => {
+    const row = toMongoIndexRow({
+      name: "account_created",
+      keys: [
+        { field: "account", direction: "1" },
+        { field: "createTime", direction: "-1" },
+      ],
+    });
+    const form = mongoCreateIndexFormFromRow(row);
+
+    expect(form.name).toBe("account_created");
+    expect(form.fields).toEqual([
+      { id: 1, path: "account", type: "1" },
+      { id: 2, path: "createTime", type: "-1" },
+    ]);
+  });
+
+  it("round-trips non-numeric key types through the label parser", () => {
+    const row = toMongoIndexRow({ name: "content_text", keys: [{ field: "content", direction: "text" }] });
+    const form = mongoCreateIndexFormFromRow(row);
+
+    expect(form.fields).toEqual([{ id: 1, path: "content", type: "text" }]);
+  });
+
+  it("maps every option field back onto the form", () => {
+    const row = toMongoIndexRow({
+      name: "ttl_idx",
+      keys: [{ field: "createdAt", direction: "1" }],
+      is_unique: true,
+      is_sparse: true,
+      expire_after_seconds: 3600,
+      partial_filter_expression: '{"archived":false}',
+      background: true,
+      bucket_size: 32,
+    });
+    const form = mongoCreateIndexFormFromRow(row);
+
+    expect(form.unique).toBe(true);
+    expect(form.sparse).toBe(true);
+    expect(form.expireAfterSeconds).toBe("3600");
+    expect(form.partialFilterExpression).toBe('{"archived":false}');
+    expect(form.background).toBe(true);
+    expect(form.bucketSize).toBe("32");
+  });
+
+  it("falls back to one ascending field when the keys description is empty", () => {
+    const row = toMongoIndexRow({ name: "empty" });
+    const form = mongoCreateIndexFormFromRow(row);
+
+    expect(form.fields).toEqual([{ id: 1, path: "", type: "1" }]);
+  });
+});
+
+describe("mongoReplaceIndexPreview", () => {
+  it("joins the drop and create commands for review", () => {
+    const preview = mongoReplaceIndexPreview("app", "users", "email_1", '{"email":1}', '{"unique":true}');
+    const drop = mongoDropIndexPreview("app", "users", "email_1");
+    const create = mongoCreateIndexPreview("app", "users", '{"email":1}', '{"unique":true}');
+
+    expect(preview).toBe(`${drop}\n${create}`);
+    expect(preview).toContain('dropIndex("email_1")');
+    expect(preview).toContain('createIndex({"email":1}, {"unique":true})');
+  });
+});
+
+describe("mongoCreateIndexFormFromRow hidden", () => {
+  it("preserves the hidden flag from the row", () => {
+    const row = toMongoIndexRow({ name: "hidden_idx", keys: [{ field: "x", direction: "1" }], hidden: true });
+    const form = mongoCreateIndexFormFromRow(row);
+    expect(form.hidden).toBe(true);
+  });
+
+  it("defaults hidden to false when the row does not report it", () => {
+    const row = toMongoIndexRow({ name: "visible_idx", keys: [{ field: "x", direction: "1" }] });
+    const form = mongoCreateIndexFormFromRow(row);
+    expect(form.hidden).toBe(false);
+  });
+});
+
+describe("buildMongoCreateIndexRequest hidden", () => {
+  it("emits hidden:true when the form sets it", () => {
+    const request = buildMongoCreateIndexRequest(indexForm([{ id: 1, path: "x", type: "1" }], { hidden: true }));
+    expect(request).toEqual({ valid: true, keysJson: '{"x":1}', optionsJson: '{"hidden":true}' });
+  });
+
+  it("omits hidden when the form leaves it false", () => {
+    const request = buildMongoCreateIndexRequest(indexForm([{ id: 1, path: "x", type: "1" }], { hidden: false }));
+    expect(request).toEqual({ valid: true, keysJson: '{"x":1}', optionsJson: undefined });
+  });
+});
+
+describe("mergeExtraOptionsIntoRequest", () => {
+  it("merges collation and wildcardProjection from extraOptions into the request", () => {
+    const request = { valid: true as const, keysJson: '{"x":1}', optionsJson: '{"name":"x_1"}' };
+    const extra = '{"collation":{"locale":"en"},"wildcardProjection":{"x":1}}';
+    const merged = mergeExtraOptionsIntoRequest(request, extra);
+    const parsed = JSON.parse(merged.optionsJson!);
+    expect(parsed.collation).toEqual({ locale: "en" });
+    expect(parsed.wildcardProjection).toEqual({ x: 1 });
+    expect(parsed.name).toBe("x_1");
+  });
+
+  it("form options take precedence over extraOptions for the same key", () => {
+    const request = { valid: true as const, keysJson: '{"x":1}', optionsJson: '{"name":"renamed"}' };
+    const extra = '{"name":"original","weights":{"content":2}}';
+    const merged = mergeExtraOptionsIntoRequest(request, extra);
+    const parsed = JSON.parse(merged.optionsJson!);
+    expect(parsed.name).toBe("renamed");
+    expect(parsed.weights).toEqual({ content: 2 });
+  });
+
+  it("filters out a stray key field from extraOptions", () => {
+    const request = { valid: true as const, keysJson: '{"x":1}', optionsJson: undefined };
+    const extra = '{"key":{"y":1},"collation":{"locale":"ja"}}';
+    const merged = mergeExtraOptionsIntoRequest(request, extra);
+    const parsed = JSON.parse(merged.optionsJson!);
+    expect(parsed.key).toBeUndefined();
+    expect(parsed.collation).toEqual({ locale: "ja" });
+  });
+
+  it("falls back to the form-only request when extraOptions is malformed", () => {
+    const request = { valid: true as const, keysJson: '{"x":1}', optionsJson: '{"unique":true}' };
+    const merged = mergeExtraOptionsIntoRequest(request, "{not valid json");
+    expect(merged.optionsJson).toBe('{"unique":true}');
+  });
+
+  it("returns the form request unchanged when extraOptions is empty", () => {
+    const request = { valid: true as const, keysJson: '{"x":1}', optionsJson: '{"unique":true}' };
+    const merged = mergeExtraOptionsIntoRequest(request, "");
+    expect(merged.optionsJson).toBe('{"unique":true}');
+  });
+});
+
+describe("preflightEditIndexSpec", () => {
+  it("reports safe when the complete normalized specification matches", () => {
+    const original = snapshotMongoIndexSpec(serverIndexSpec());
+    const current = serverIndexSpec({
+      partial_filter_expression: '{ "archived": false }',
+      extra_options: '{"collation":{"locale":"en"}}',
+    });
+    expect(preflightEditIndexSpec([current], original)).toEqual({ safe: true });
+  });
+
+  it("reports not-found when the index no longer exists", () => {
+    const original = snapshotMongoIndexSpec(serverIndexSpec());
+    expect(preflightEditIndexSpec([serverIndexSpec({ name: "other" })], original)).toEqual({ safe: false, reason: "not-found" });
+  });
+
+  it("reports stale when the keys have changed since the dialog was opened", () => {
+    const original = snapshotMongoIndexSpec(serverIndexSpec());
+    expect(preflightEditIndexSpec([serverIndexSpec({ keys: [{ field: "email", direction: "-1" }] })], original)).toEqual({ safe: false, reason: "stale" });
+  });
+
+  it("reports stale when the keys match but any complete option changed", () => {
+    const original = snapshotMongoIndexSpec(serverIndexSpec());
+    expect(preflightEditIndexSpec([serverIndexSpec({ is_unique: true, hidden: true })], original)).toEqual({ safe: false, reason: "stale" });
+    expect(preflightEditIndexSpec([serverIndexSpec({ extra_options: '{"collation":{"locale":"fr"}}' })], original)).toEqual({ safe: false, reason: "stale" });
+  });
+});
+
+describe("mongoCreateIndexRequestFromSpec", () => {
+  it("builds a complete rollback request from the opening server specification", () => {
+    const snapshot = snapshotMongoIndexSpec(
+      serverIndexSpec({
+        is_unique: true,
+        background: true,
+        bucket_size: 16,
+        hidden: true,
+        extra_options: '{"collation":{"locale":"en"},"wildcardProjection":{"email":1}}',
+      }),
+    );
+
+    const request = mongoCreateIndexRequestFromSpec(snapshot);
+    expect(request.keysJson).toBe('{"email":1}');
+    expect(JSON.parse(request.optionsJson)).toEqual({
+      collation: { locale: "en" },
+      wildcardProjection: { email: 1 },
+      name: "email_1",
+      unique: true,
+      sparse: true,
+      expireAfterSeconds: 3600,
+      partialFilterExpression: { archived: false },
+      background: true,
+      bucketSize: 16,
+      hidden: true,
+    });
   });
 });

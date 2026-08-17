@@ -110,6 +110,7 @@ pub fn agent_connect_params_with_role(
         "jdbc_driver_class": agent_jdbc_driver_class(config),
         "jdbc_driver_paths": &config.jdbc_driver_paths,
         "sessionRole": session_role.as_str(),
+        "database_type": config.db_type,
     });
     if config.db_type == DatabaseType::ZooKeeper {
         params["connection_timeout_ms"] = serde_json::json!(
@@ -260,9 +261,13 @@ pub fn mongo_legacy_error_with_auth_hint(err: &str) -> String {
         return err.to_string();
     };
     let source = &source[..source_end];
-    format!(
-        "{err}\n\nCurrent authentication database: {source}. If this user was created in admin, set Authentication database to admin or add authSource=admin to URL params."
-    )
+    let verification_hint = format!(
+        "Current authentication database: {source}. The server rejected these credentials. Verify the username and password, and confirm that the user was created in {source}."
+    );
+    if source.eq_ignore_ascii_case("admin") {
+        return format!("{err}\n\n{verification_hint}");
+    }
+    format!("{err}\n\n{verification_hint} If the user was created in admin, set Authentication database to admin or add authSource=admin to URL params.")
 }
 
 pub fn mongo_uses_legacy_driver(config: &ConnectionConfig) -> bool {
@@ -696,6 +701,7 @@ mod tests {
     fn agent_connect_params_default_to_workload_session_role() {
         let params = agent_connect_params(&config(DatabaseType::H2, Some("test")), "127.0.0.1", 9092, "test");
         assert_eq!(params["sessionRole"], "workload");
+        assert_eq!(params["database_type"], "h2");
     }
 
     #[test]
@@ -861,6 +867,8 @@ mod tests {
 
         assert!(hinted.starts_with(err));
         assert!(hinted.contains("Current authentication database: admin"));
+        assert!(hinted.contains("The server rejected these credentials"));
+        assert!(!hinted.contains("add authSource=admin"));
     }
 
     #[test]

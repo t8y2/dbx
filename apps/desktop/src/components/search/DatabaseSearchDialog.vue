@@ -309,8 +309,8 @@ function openResult(item: SearchResultItem) {
         </div>
 
         <div v-if="running || progressTotal" class="flex flex-wrap items-center gap-3 text-xs text-muted-foreground">
-          <span>{{ loadingTables ? t("databaseSearch.loadingTables") : progressLabel }}</span>
-          <span>{{ t("databaseSearch.resultCount", { count: results.length }) }}</span>
+          <span class="tabular-nums">{{ loadingTables ? t("databaseSearch.loadingTables") : progressLabel }}</span>
+          <span class="tabular-nums">{{ t("databaseSearch.resultCount", { count: results.length }) }}</span>
           <span v-if="limitedTables" class="text-amber-600">{{ t("databaseSearch.limitedTables", { count: 200 }) }}</span>
         </div>
 

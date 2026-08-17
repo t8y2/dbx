@@ -270,6 +270,7 @@ type connectConfiguration struct {
 	BrowserResponsePort        int
 	BrowserResponseTimeout     time.Duration
 	BrowserDisableSSLCheck     bool
+	WaitForNonQueryCompletion  bool
 	// Maximum length of the data in bytes. Used for SASL.
 	MaxSize        uint32
 	MaxMessageSize int32
@@ -1405,6 +1406,54 @@ func (c *cursor) hasMore(ctx context.Context) bool {
 	}
 
 	return c.state != _FINISHED || c.totalRows != c.columnIndex
+}
+
+func (c *cursor) waitForCompletion(ctx context.Context) error {
+	if c.operationHandle == nil {
+		return errors.New("HiveServer2 returned no operation handle")
+	}
+	for {
+		request := hiveserver.NewTGetOperationStatusReq()
+		request.OperationHandle = c.operationHandle
+		c.conn.clientMu.Lock()
+		response, err := c.conn.client.GetOperationStatus(ctx, request)
+		c.conn.clientMu.Unlock()
+		if err != nil {
+			return err
+		}
+		if response == nil {
+			return errors.New("HiveServer2 GetOperationStatus returned no response")
+		}
+		if !success(safeStatus(response.GetStatus())) {
+			return hiveStatusError("checking operation status", response.GetStatus())
+		}
+		switch response.GetOperationState() {
+		case hiveserver.TOperationState_FINISHED_STATE, hiveserver.TOperationState_CLOSED_STATE:
+			if response.IsSetNumModifiedRows() {
+				modified := float64(response.GetNumModifiedRows())
+				c.operationHandle.ModifiedRowCount = &modified
+			}
+			return nil
+		case hiveserver.TOperationState_ERROR_STATE:
+			return &Error{
+				Err:       errors.New("HiveServer2 operation failed: " + response.GetErrorMessage()),
+				Message:   response.GetErrorMessage(),
+				ErrorCode: int(response.GetErrorCode()),
+				SQLState:  response.GetSqlState(),
+			}
+		case hiveserver.TOperationState_CANCELED_STATE:
+			return errors.New("HiveServer2 operation was canceled")
+		case hiveserver.TOperationState_TIMEDOUT_STATE:
+			return errors.New("HiveServer2 operation timed out")
+		}
+		timer := time.NewTimer(time.Duration(c.conn.configuration.PollIntervalInMillis) * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
 }
 
 func (c *cursor) error() error {

@@ -577,6 +577,17 @@ export const useSavedSqlStore = defineStore("savedSql", () => {
   }
 
   async function syncEntries() {
+    if (files.value.some((file) => file.sqlLoaded === false)) {
+      const loadedFiles = await api.loadSavedSqlFilesForSync();
+      const loadedById = new Map(loadedFiles.map((file) => [file.id, file]));
+      files.value = files.value.map((file) => {
+        if (file.sqlLoaded !== false) return file;
+        const loaded = loadedById.get(file.id);
+        return loaded ? { ...file, sql: loaded.sql, sqlLoaded: true } : file;
+      });
+      bumpVersion();
+    }
+
     const folderById = new Map(folders.value.map((folder) => [folder.id, folder]));
     const folderPath = (folderId?: string): string | undefined => {
       if (!folderId) return undefined;
@@ -590,14 +601,14 @@ export const useSavedSqlStore = defineStore("savedSql", () => {
       }
       return parts.join("/");
     };
-    const loadedFiles = await Promise.all(sortFilesByOrder(files.value).map((file) => ensureFileContent(file.id)));
-    return loadedFiles
-      .filter((file): file is SavedSqlFile => Boolean(file))
-      .map((file) => ({
-        folderName: folderPath(file.folderId),
-        fileName: file.name,
-        sql: file.sql,
-      }));
+    const unloadedFile = files.value.find((file) => file.sqlLoaded === false);
+    if (unloadedFile) throw new Error(`Saved SQL file '${unloadedFile.id}' could not be loaded for directory sync.`);
+
+    return sortFilesByOrder(files.value).map((file) => ({
+      folderName: folderPath(file.folderId),
+      fileName: file.name,
+      sql: file.sql,
+    }));
   }
 
   async function syncToLocalDirectory() {

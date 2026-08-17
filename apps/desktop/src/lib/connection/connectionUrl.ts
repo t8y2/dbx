@@ -19,6 +19,7 @@ export interface ParsedConnectionUrl {
   useMongoUrl?: boolean;
   portExplicit?: boolean;
   apiPath?: string;
+  basePath?: string;
 }
 
 export type ConnectionProfile = {
@@ -34,6 +35,7 @@ const SCHEME_PROFILES: Record<string, ConnectionProfile> = {
   postgres: { type: "postgres", profile: "postgres", label: "PostgreSQL", defaultPort: 5432 },
   postgresql: { type: "postgres", profile: "postgres", label: "PostgreSQL", defaultPort: 5432 },
   cloudberry: { type: "postgres", profile: "cloudberry", label: "Apache Cloudberry", defaultPort: 5432 },
+  opentenbase: { type: "postgres", profile: "opentenbase", label: "OpenTenBase", defaultPort: 11000 },
   redshift: { type: "redshift", profile: "redshift", label: "Redshift", defaultPort: 5439 },
   redis: { type: "redis", profile: "redis", label: "Redis", defaultPort: 6379 },
   rediss: { type: "redis", profile: "redis", label: "Redis", defaultPort: 6379 },
@@ -47,6 +49,7 @@ const SCHEME_PROFILES: Record<string, ConnectionProfile> = {
   zookeeper: { type: "zookeeper", profile: "zookeeper", label: "Apache ZooKeeper", defaultPort: 2181 },
   mongodb: { type: "mongodb", profile: "mongodb", label: "MongoDB", defaultPort: 27017 },
   "mongodb+srv": { type: "mongodb", profile: "mongodb", label: "MongoDB", defaultPort: 27017 },
+  dynamodb: { type: "dynamodb", profile: "dynamodb", label: "Amazon DynamoDB", defaultPort: 443 },
   clickhouse: { type: "clickhouse", profile: "clickhouse", label: "ClickHouse", defaultPort: 8123 },
   sqlserver: { type: "sqlserver", profile: "sqlserver", label: "SQL Server", defaultPort: 1433 },
   mssql: { type: "sqlserver", profile: "sqlserver", label: "SQL Server", defaultPort: 1433 },
@@ -81,6 +84,7 @@ const SCHEME_PROFILES: Record<string, ConnectionProfile> = {
 
 const HTTP_SELECTED_PROFILES: Record<string, ConnectionProfile> = {
   clickhouse: SCHEME_PROFILES.clickhouse,
+  dynamodb: SCHEME_PROFILES.dynamodb,
   elasticsearch: SCHEME_PROFILES.elasticsearch,
   easysearch: SCHEME_PROFILES.easysearch,
   meilisearch: SCHEME_PROFILES.meilisearch,
@@ -186,6 +190,10 @@ function databaseFromPath(pathname: string): string | undefined {
   const value = pathname.replace(/^\/+/, "");
   if (!value) return undefined;
   return decodeUrlPart(value.split("/")[0]);
+}
+
+function dynamodbRegionFromHost(hostname: string): string | undefined {
+  return hostname.toLowerCase().match(/^dynamodb(?:-fips)?\.([a-z0-9-]+)\.(?:amazonaws\.com(?:\.cn)?|api\.aws)$/)?.[1];
 }
 
 function parseZooKeeperUrl(source: string): ParsedConnectionUrl | null {
@@ -325,9 +333,10 @@ export function connectionProfileForScheme(scheme: string, preferredProfile?: st
   if ((normalizedScheme === "http" || normalizedScheme === "https") && normalizedPreferredProfile) {
     return HTTP_SELECTED_PROFILES[normalizedPreferredProfile];
   }
-  // Cloudberry uses PostgreSQL URLs, so keep the selected product profile when parsing a pasted URL.
-  if ((normalizedScheme === "postgres" || normalizedScheme === "postgresql") && normalizedPreferredProfile === "cloudberry") {
-    return SCHEME_PROFILES.cloudberry;
+  // PostgreSQL-compatible products use standard PostgreSQL URLs, so keep the
+  // selected product profile when parsing a pasted URL.
+  if ((normalizedScheme === "postgres" || normalizedScheme === "postgresql") && (normalizedPreferredProfile === "cloudberry" || normalizedPreferredProfile === "opentenbase")) {
+    return SCHEME_PROFILES[normalizedPreferredProfile];
   }
   return SCHEME_PROFILES[normalizedScheme];
 }
@@ -649,20 +658,24 @@ export function parseConnectionUrl(value: string, preferredProfile?: string): Pa
     };
   }
 
+  const isMeilisearch = profile.type === "meilisearch";
+  const defaultPort = isMeilisearch && scheme === "http" ? 80 : isMeilisearch && scheme === "https" ? 443 : profile.defaultPort;
+
   return {
     ...(name ? { name } : {}),
     dbType: profile.type,
     driverProfile: profile.profile,
     driverLabel: profile.label,
     host: parsed.hostname,
-    port: parsed.port ? Number(parsed.port) : profile.defaultPort,
+    port: parsed.port ? Number(parsed.port) : defaultPort,
     ...(profile.type === "sqlserver" && parsed.port ? { portExplicit: true } : {}),
     username: mysqlCredentials?.username ?? decodeUrlPart(parsed.username),
     password: mysqlCredentials?.password ?? decodeUrlPart(parsed.password),
-    database: profile.type === "victoriametrics" ? "metrics" : databaseFromPath(parsed.pathname),
+    database: profile.type === "victoriametrics" ? "metrics" : profile.type === "dynamodb" ? dynamodbRegionFromHost(parsed.hostname) : isMeilisearch ? undefined : databaseFromPath(parsed.pathname),
     urlParams: effectiveUrlParams,
     ssl: scheme === "rediss" || scheme === "https" || urlParamsRequireTls(profile.type, effectiveUrlParams) || (profile.type === "mysql" && isTidbCloudHost(parsed.hostname)),
     ...(profile.type === "victoriametrics" ? { apiPath: parsed.pathname.replace(/\/+$/, "") } : {}),
+    ...(isMeilisearch ? { basePath: parsed.pathname === "/" ? "" : parsed.pathname.replace(/\/+$/, "") } : {}),
   };
 }
 
@@ -674,12 +687,20 @@ function zookeeperConnectStringFromUrl(parsed: URL, defaultPort: number): string
   return `${host}:${port}${chroot}`;
 }
 
+function shouldPreserveCredentialFreeUrlCredentials(config: Omit<ConnectionConfig, "id">, parsed: ParsedConnectionUrl): boolean {
+  const currentProfile = config.driver_profile?.trim();
+  return parsed.dbType === config.db_type && (!currentProfile || parsed.driverProfile === currentProfile) && !parsed.username && !parsed.password;
+}
+
 function applyParsedUsername(config: Omit<ConnectionConfig, "id">, parsed: ParsedConnectionUrl): string {
   if (parsed.dbType === "h2" && config.db_type === "h2" && !h2JdbcUrlHasUserParam(parsed.connectionString)) {
     return config.username || parsed.username;
   }
   if (parsed.dbType === "kingbase" && config.db_type === "kingbase" && !parsed.username) {
     return config.username;
+  }
+  if (shouldPreserveCredentialFreeUrlCredentials(config, parsed)) {
+    return config.username || parsed.username;
   }
   return parsed.username;
 }
@@ -691,6 +712,9 @@ function applyParsedPassword(config: Omit<ConnectionConfig, "id">, parsed: Parse
   if (parsed.dbType === "kingbase" && config.db_type === "kingbase" && !parsed.password) {
     return config.password;
   }
+  if (shouldPreserveCredentialFreeUrlCredentials(config, parsed)) {
+    return config.password || parsed.password;
+  }
   return parsed.password;
 }
 
@@ -698,11 +722,25 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
 }
 
+export function applyMeilisearchBasePathToExternalConfig(existing: unknown, basePath: string | undefined): unknown {
+  const next = isRecord(existing) ? { ...existing } : {};
+  delete next.base_path;
+  if (basePath) {
+    next.basePath = basePath;
+  } else {
+    delete next.basePath;
+  }
+  return Object.keys(next).length > 0 ? next : undefined;
+}
+
 function parsedExternalConfig(existing: unknown, parsed: ParsedConnectionUrl): unknown {
   if (parsed.dbType === "victoriametrics") {
     const next = isRecord(existing) ? { ...existing } : {};
     next.apiPath = parsed.apiPath || "/prometheus";
     return next;
+  }
+  if (parsed.dbType === "meilisearch") {
+    return applyMeilisearchBasePathToExternalConfig(existing, parsed.basePath);
   }
   if (parsed.dbType !== "sqlserver") return existing;
 
@@ -727,7 +765,7 @@ export function applyParsedConnectionUrl(config: Omit<ConnectionConfig, "id">, p
     name: parsed.name?.trim() || config.name,
     username: applyParsedUsername(config, parsed),
     password: applyParsedPassword(config, parsed),
-    database: parsed.database,
+    database: parsed.dbType === "dynamodb" ? parsed.database || config.database || "us-east-1" : parsed.database,
     url_params: parsed.urlParams,
     ssl: parsed.ssl,
     connection_string: parsed.connectionString,

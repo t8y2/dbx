@@ -2554,14 +2554,29 @@ pub async fn completion_assistant_search(
     }
 
     if candidates.len() < limit && kinds.iter().any(CompletionAssistantObjectKind::is_routine_like) {
-        let prokinds = postgres_completion_prokinds(&kinds);
-        let rows = postgres_query_cached(
-            &client,
-            postgres_completion_routines_sql(),
-            &[&routine_schema, &pattern, &prokinds, &((limit - candidates.len()) as i64)],
-        )
-        .await
-        .map_err(|e| e.to_string())?;
+        let has_proc_prokind = postgres_proc_has_prokind(&client).await?;
+        let rows = if has_proc_prokind {
+            let prokinds = postgres_completion_prokinds(&kinds);
+            postgres_query_cached(
+                &client,
+                postgres_completion_routines_sql(true),
+                &[&routine_schema, &pattern, &prokinds, &((limit - candidates.len()) as i64)],
+            )
+            .await
+            .map_err(|e| e.to_string())?
+        } else if kinds.iter().any(|kind| {
+            matches!(kind, CompletionAssistantObjectKind::Function | CompletionAssistantObjectKind::Routine)
+        }) {
+            postgres_query_cached(
+                &client,
+                postgres_completion_routines_sql(false),
+                &[&routine_schema, &pattern, &((limit - candidates.len()) as i64)],
+            )
+            .await
+            .map_err(|e| e.to_string())?
+        } else {
+            Vec::new()
+        };
         for row in rows {
             let routine_type: String = pg_row_try_string(&row, 2);
             candidates.push(CompletionAssistantCandidate {
@@ -2665,15 +2680,26 @@ fn postgres_completion_tables_sql() -> &'static str {
      ORDER BY c.relname LIMIT $4"
 }
 
-fn postgres_completion_routines_sql() -> &'static str {
-    "SELECT p.proname, n.nspname, CASE p.prokind WHEN 'p' THEN 'PROCEDURE' ELSE 'FUNCTION' END, \
+fn postgres_completion_routines_sql(has_proc_prokind: bool) -> &'static str {
+    if has_proc_prokind {
+        return "SELECT p.proname, n.nspname, CASE p.prokind WHEN 'p' THEN 'PROCEDURE' ELSE 'FUNCTION' END, \
             obj_description(p.oid) AS routine_comment, COALESCE(pg_get_function_result(p.oid), '') AS data_type, \
             pg_get_function_identity_arguments(p.oid) AS signature \
      FROM pg_catalog.pg_proc p \
      JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace \
      WHERE n.nspname = $1 AND p.prokind::text = ANY($3::text[]) \
        AND ($2 = '%%' OR p.proname ILIKE $2 ESCAPE '~') \
-     ORDER BY p.proname LIMIT $4"
+     ORDER BY p.proname LIMIT $4";
+    }
+
+    "SELECT p.proname, n.nspname, 'FUNCTION'::text, \
+            obj_description(p.oid) AS routine_comment, COALESCE(pg_get_function_result(p.oid), '') AS data_type, \
+            pg_get_function_identity_arguments(p.oid) AS signature \
+     FROM pg_catalog.pg_proc p \
+     JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace \
+     WHERE n.nspname = $1 \
+       AND ($2 = '%%' OR p.proname ILIKE $2 ESCAPE '~') \
+     ORDER BY p.proname LIMIT $3"
 }
 
 fn postgres_completion_sequences_sql() -> &'static str {
@@ -5255,7 +5281,8 @@ const POSTGRES_INDEXES_SQL: &str = "SELECT i.relname AS index_name, \
              am.amname AS index_type, \
              ix.indnkeyatts AS nkeyatts, \
              ix.indkey AS indkey, \
-             obj_description(i.oid, 'pg_class') AS index_comment \
+             obj_description(i.oid, 'pg_class') AS index_comment, \
+             array_agg(a.attname IS NULL ORDER BY k.n) AS key_is_expression \
              FROM pg_index ix \
              JOIN pg_class t ON t.oid = ix.indrelid \
              JOIN pg_class i ON i.oid = ix.indexrelid \
@@ -5283,7 +5310,16 @@ const POSTGRES_INDEXES_COMPAT_SQL: &str = "SELECT i.relname AS index_name, \
              am.amname AS index_type, \
              NULL::smallint AS nkeyatts, \
              ix.indkey AS indkey, \
-             obj_description(i.oid, 'pg_class') AS index_comment \
+             obj_description(i.oid, 'pg_class') AS index_comment, \
+             ARRAY( \
+               SELECT a.attname IS NULL \
+               FROM generate_series(1, array_length(string_to_array(ix.indkey::text, ' '), 1)) AS pos(n) \
+               LEFT JOIN pg_attribute a \
+                 ON a.attrelid = t.oid \
+                AND a.attnum = (string_to_array(ix.indkey::text, ' '))[pos.n]::int2 \
+                AND a.attnum > 0 \
+               ORDER BY pos.n \
+             ) AS key_is_expression \
              FROM pg_index ix \
              JOIN pg_class t ON t.oid = ix.indrelid \
              JOIN pg_class i ON i.oid = ix.indexrelid \
@@ -5359,6 +5395,11 @@ async fn list_indexes_with_sql(
             let split_at = nkeyatts.min(all_cols.len());
             let key_cols = all_cols[..split_at].to_vec();
             let included = if split_at < all_cols.len() { all_cols[split_at..].to_vec() } else { vec![] };
+            // `a.attname IS NULL` at a given key position means that key part came back from
+            // pg_get_indexdef (a functional/expression key part), not from a real column (#6295).
+            let all_is_expr: Vec<bool> = row.try_get::<_, Vec<bool>>(9).unwrap_or_default();
+            let key_is_expression =
+                if all_is_expr.len() == all_cols.len() { all_is_expr[..split_at].to_vec() } else { Vec::new() };
             IndexInfo {
                 name: pg_row_try_string(row, 0),
                 columns: key_cols,
@@ -5368,6 +5409,7 @@ async fn list_indexes_with_sql(
                 index_type: row.try_get::<_, Option<String>>(5).ok().flatten(),
                 included_columns: if included.is_empty() { None } else { Some(included) },
                 comment: row.try_get::<_, Option<String>>(8).ok().flatten(),
+                key_is_expression,
             }
         })
         .collect())
@@ -8407,6 +8449,15 @@ mod tests {
     }
 
     #[test]
+    fn postgres_index_metadata_tracks_expression_key_provenance() {
+        // #6295 fix: each index key part's `a.attname IS NULL` tags whether it came from a real
+        // column or from pg_get_indexdef, so DDL generation never has to guess from the text.
+        assert!(POSTGRES_INDEXES_SQL.contains("array_agg(a.attname IS NULL ORDER BY k.n) AS key_is_expression"));
+        assert!(POSTGRES_INDEXES_COMPAT_SQL.contains("SELECT a.attname IS NULL"));
+        assert!(POSTGRES_INDEXES_COMPAT_SQL.contains("AS key_is_expression"));
+    }
+
+    #[test]
     fn postgres_owner_metadata_casts_relkind_to_text() {
         assert!(POSTGRES_OWNERS_SQL.contains("c.relkind::text AS relkind"));
         assert!(POSTGRES_OWNERS_SQL.contains("c.relkind IN ('r', 'v', 'm', 'S', 'f', 'p')"));
@@ -9456,10 +9507,15 @@ mod tests {
         assert!(postgres_completion_tables_sql().contains("pg_catalog.pg_table_is_visible(c.oid)"));
         assert!(postgres_completion_tables_sql().contains("c.relkind::text = ANY($3::text[])"));
         assert!(postgres_completion_tables_sql().contains("ORDER BY c.relname LIMIT $4"));
-        assert!(postgres_completion_routines_sql().contains("p.proname ILIKE $2 ESCAPE '~'"));
-        assert!(postgres_completion_routines_sql().contains("p.prokind::text = ANY($3::text[])"));
-        assert!(postgres_completion_routines_sql().contains("pg_get_function_identity_arguments(p.oid) AS signature"));
-        assert!(postgres_completion_routines_sql().contains("ORDER BY p.proname LIMIT $4"));
+        assert!(postgres_completion_routines_sql(true).contains("p.proname ILIKE $2 ESCAPE '~'"));
+        assert!(postgres_completion_routines_sql(true).contains("p.prokind::text = ANY($3::text[])"));
+        assert!(
+            postgres_completion_routines_sql(true).contains("pg_get_function_identity_arguments(p.oid) AS signature")
+        );
+        assert!(postgres_completion_routines_sql(true).contains("ORDER BY p.proname LIMIT $4"));
+        assert!(!postgres_completion_routines_sql(false).contains("p.prokind"));
+        assert!(postgres_completion_routines_sql(false).contains("'FUNCTION'::text"));
+        assert!(postgres_completion_routines_sql(false).contains("ORDER BY p.proname LIMIT $3"));
         assert!(postgres_completion_sequences_sql().contains("c.relkind = 'S'"));
         assert!(postgres_completion_sequences_sql().contains("has_schema_privilege(n.oid, 'USAGE')"));
         assert!(postgres_completion_sequences_sql().contains("pg_catalog.pg_table_is_visible(c.oid)"));

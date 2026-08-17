@@ -7,7 +7,7 @@ import { useConnectionStore } from "@/stores/connectionStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { formatSqlForDisplay, type SqlFormatDialect } from "@/lib/sql/sqlFormatter";
-import { buildEditableObjectSource, buildExecutableObjectSourceStatements, executeObjectSourceSave, formatObjectSourceSaveError } from "@/lib/table/objectSourceEditor";
+import { buildEditableObjectSource, buildExecutableObjectSourceStatements, executeObjectSourceSave, formatObjectSourceSaveError, resolveObjectSourceEditDraft } from "@/lib/table/objectSourceEditor";
 import { loadObjectSourceWithRoutineFallback } from "@/lib/table/objectSourceLoad";
 import { xuguRoutineMetadataFromDefinition, type XuguRoutineMetadata } from "@/lib/table/routineParameters";
 import { executeWithProductionSqlGuard } from "@/lib/database/productionExecutionGuard";
@@ -104,7 +104,7 @@ async function loadSource(nextEditing = props.initialEditing && canEdit.value) {
     const formatted = await formatSqlForDisplay(editable, props.formatDialect ?? props.dialect, settingsStore.editorSettings.sqlFormatter);
     editableText.value = editable;
     content.value = formatted;
-    draft.value = nextEditing && canEdit.value ? editable : "";
+    draft.value = nextEditing && canEdit.value ? resolveObjectSourceEditDraft(props.databaseType, resolvedType, formatted, editable) : "";
     editing.value = nextEditing && canEdit.value;
     if (nextEditing && !canEdit.value) {
       toast(t("objects.sourceReadOnly"), 3000);
@@ -131,7 +131,7 @@ function editSource() {
     if (!canEdit.value) toast(t("objects.sourceReadOnly"), 3000);
     return;
   }
-  draft.value = editableText.value;
+  draft.value = resolveObjectSourceEditDraft(props.databaseType, resolvedObjectType.value, content.value, editableText.value);
   saveError.value = "";
   editing.value = true;
 }

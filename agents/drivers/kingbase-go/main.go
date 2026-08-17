@@ -887,6 +887,11 @@ func (s *server) schemaConn(ctx context.Context, schema string) (*sql.Conn, erro
 
 func (s *server) setSchema(ctx context.Context, conn *sql.Conn, schema string) error {
 	schema = strings.TrimSpace(schema)
+	// An omitted schema leaves the session search_path under user control.
+	// Reset it only after DBX applied an explicit schema.
+	if schema == "" && !s.schemaSet {
+		return nil
+	}
 	statement := "RESET search_path"
 	if schema != "" {
 		// Kingbase implicitly prioritizes its system catalog when it is not

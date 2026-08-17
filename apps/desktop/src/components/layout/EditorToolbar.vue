@@ -9,6 +9,7 @@ import TruncatedTextTooltip from "@/components/ui/TruncatedTextTooltip.vue";
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
 import ProductionContextBadge from "@/components/common/ProductionContextBadge.vue";
 import { useConnectionStore } from "@/stores/connectionStore";
+import { useSettingsStore } from "@/stores/settingsStore";
 import { catalogDatabaseOptionsKey, databaseAfterCatalogChange, normalizedQueryTabCatalog, queryCatalogSelectorVisible, selectedQueryCatalogName, useDatabaseOptions } from "@/composables/useDatabaseOptions";
 import { useSchemaOptions } from "@/composables/useSchemaOptions";
 import { connectionIconType } from "@/lib/connection/connectionPresentation";
@@ -20,6 +21,7 @@ import { supportsQueryExecution } from "@/lib/database/databaseFeatureSupport";
 import { connectionIsDorisFamilyCatalogCapable } from "@/lib/database/databaseFeatureSupport";
 import { hexToRgba } from "@/lib/common/color";
 import { productionContextForDatabase } from "@/lib/database/productionSafety";
+import { formatShortcutDisplay } from "@/lib/editor/shortcutDisplay";
 import type { QueryTab, ConnectionConfig } from "@/types/database";
 
 const props = defineProps<{
@@ -63,6 +65,7 @@ const emit = defineEmits<{
 
 const { t } = useI18n();
 const connectionStore = useConnectionStore();
+const settingsStore = useSettingsStore();
 const { databaseOptions, loadingDatabaseOptions, loadDatabaseOptions, catalogOptions, loadingCatalogOptions, loadCatalogOptions, catalogDatabaseOptions, loadingCatalogDatabaseOptions, loadCatalogDatabaseOptions } = useDatabaseOptions();
 const { loadSchemaOptions, getSchemaOptionsForDb, isLoadingSchemas, isSchemaAware } = useSchemaOptions();
 
@@ -122,6 +125,8 @@ const supportsTransaction = computed(() => supportsTransactionFeature(props.acti
 const hasDefaultDatabaseOption = computed(() => activeDatabaseOptions.value.includes(""));
 const schemaDatabaseKey = computed(() => props.activeTab.database || (isSingleDb.value ? "_" : ""));
 const saveTooltip = computed(() => (props.activeTab.objectSource ? t("objects.saveSource") : t("toolbar.saveSql")));
+const executeShortcutDisplay = computed(() => formatShortcutDisplay(settingsStore.editorSettings.shortcuts.executeSql));
+const executeShortcutTooltip = computed(() => t("toolbar.executeShortcut", { shortcut: executeShortcutDisplay.value }));
 // DM calls it autotrace, Postgres EXPLAIN ANALYZE, SQL Server the actual execution
 // plan (SET STATISTICS XML); all three execute the statement.
 const supportsExplainAnalyze = computed(() => {
@@ -261,7 +266,7 @@ async function changeCatalog(selectedCatalog: string) {
             <Play v-else class="h-3.5 w-3.5" />
           </Button>
         </TooltipTrigger>
-        <TooltipContent>{{ activeTab.isExecuting ? t("toolbar.stopQuery") : t("toolbar.executeShortcut") }}</TooltipContent>
+        <TooltipContent>{{ activeTab.isExecuting ? t("toolbar.stopQuery") : executeShortcutTooltip }}</TooltipContent>
       </Tooltip>
       <Tooltip v-if="supportsExplain">
         <TooltipTrigger as-child>

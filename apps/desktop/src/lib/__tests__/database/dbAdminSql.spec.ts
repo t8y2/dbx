@@ -8,14 +8,62 @@ const apiMock = vi.hoisted(() => ({
   listTriggers: vi.fn(),
   buildCreateTableSql: vi.fn(),
   buildDuplicateTableStructureSql: vi.fn(),
+  buildMysqlAutoIncrementSql: vi.fn(),
 }));
 
 vi.mock("@/lib/backend/api", () => apiMock);
 
-import { buildDuplicateTableStructurePlan, collectDuplicateTableColumnComments, damengDropSchemaExecutionSchema, damengDuplicateTableCreateOptions, duplicateTableStructureRequiresScript, oracleDuplicateTableCreateOptions } from "@/lib/database/dbAdminSql";
+import {
+  buildDuplicateTableStructurePlan,
+  buildMysqlAutoIncrementSql,
+  collectDuplicateTableColumnComments,
+  damengDropSchemaExecutionSchema,
+  damengDuplicateTableCreateOptions,
+  duplicateTableStructureRequiresScript,
+  oracleDuplicateTableCreateOptions,
+  supportsNativeMysqlAutoIncrement,
+} from "@/lib/database/dbAdminSql";
 
 beforeEach(() => {
   vi.clearAllMocks();
+});
+
+describe("MySQL AUTO_INCREMENT administration", () => {
+  it("is available only for explicit native MySQL connections", () => {
+    expect(supportsNativeMysqlAutoIncrement({ db_type: "mysql", driver_profile: undefined })).toBe(true);
+    expect(supportsNativeMysqlAutoIncrement({ db_type: "mysql", driver_profile: "" })).toBe(true);
+    expect(supportsNativeMysqlAutoIncrement({ db_type: "mysql", driver_profile: " MySQL " })).toBe(true);
+
+    for (const connection of [
+      { db_type: "jdbc", driver_profile: "mysql" },
+      { db_type: "mysql", driver_profile: "mariadb" },
+      { db_type: "mysql", driver_profile: "tidb" },
+      { db_type: "mysql", driver_profile: "oceanbase" },
+      { db_type: "mysql", driver_profile: "dolt" },
+      { db_type: "goldendb", driver_profile: "goldendb" },
+      { db_type: "mysql", driver_profile: "goldendb" },
+      { db_type: "doris", driver_profile: "doris" },
+      { db_type: "doris", driver_profile: "selectdb" },
+      { db_type: "starrocks", driver_profile: "starrocks" },
+    ] as const) {
+      expect(supportsNativeMysqlAutoIncrement(connection as any)).toBe(false);
+    }
+  });
+
+  it("keeps the counter as a decimal string across the frontend boundary", async () => {
+    apiMock.buildMysqlAutoIncrementSql.mockResolvedValue("ALTER TABLE `sales`.`events` AUTO_INCREMENT = 18446744073709551615;");
+
+    await expect(
+      buildMysqlAutoIncrementSql({
+        databaseType: "mysql",
+        driverProfile: "mysql",
+        schema: "sales",
+        tableName: "events",
+        value: "18446744073709551615",
+      }),
+    ).resolves.toContain("18446744073709551615");
+    expect(apiMock.buildMysqlAutoIncrementSql).toHaveBeenCalledWith(expect.objectContaining({ value: "18446744073709551615" }));
+  });
 });
 
 describe("collectDuplicateTableColumnComments", () => {

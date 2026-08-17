@@ -223,15 +223,17 @@ export function createDataGridSortMenuItems(options: { column: string; columnInd
 }
 
 export function createDataGridCompactColumnActionItems(options: {
-  labels: { formatter: string; localFilter: string; serverFilter: string };
-  icons: { formatter: Component; filter: Component; database: Component };
+  labels: { formatter: string; clearFormatter: string; localFilter: string; serverFilter: string };
+  icons: { formatter: Component; clearFormatter: Component; filter: Component; database: Component };
   formatterAvailable: boolean;
+  formatterActive: boolean;
   serverFilterAvailable: boolean;
 }): DataGridColumnMenuItem[] {
   const { labels, icons } = options;
   return [
-    { label: labels.formatter, value: "formatter", icon: icons.formatter, disabled: !options.formatterAvailable },
+    { label: labels.formatter, value: "formatter", icon: icons.formatter, disabled: !options.formatterAvailable, checked: options.formatterActive },
     { label: labels.localFilter, value: "localFilter", icon: icons.filter },
     ...(options.serverFilterAvailable ? [{ label: labels.serverFilter, value: "serverFilter", icon: icons.database }] : []),
+    { label: labels.clearFormatter, value: "clearFormatter", icon: icons.clearFormatter, disabled: !options.formatterActive, separatorBefore: true },
   ];
 }

@@ -29,6 +29,7 @@ const STORAGE_DB_FILE_NAME: &str = "dbx.db";
 const APP_STATE_EDITOR_SETTINGS_KEY: &str = "editor_settings";
 const APP_STATE_OPEN_TABS_KEY: &str = "open_tabs";
 const APP_STATE_SAVED_SQL_EDITOR_POSITIONS_KEY: &str = "saved_sql_editor_positions";
+const APP_STATE_TRANSFER_TASK_LIBRARY_KEY: &str = "transfer_task_library";
 const MCP_GLOBAL_POLICY_KEY: &str = "mcp_global_policy";
 const MAX_RETRIES_KEY: &str = "max_retries";
 const APP_STATE_AI_GLOBAL_INSTRUCTIONS_KEY: &str = "ai_global_custom_instructions";
@@ -1749,6 +1750,16 @@ impl Storage {
         self.load_app_state_value(APP_STATE_SAVED_SQL_EDITOR_POSITIONS_KEY).await
     }
 
+    /// Persist the saved data-transfer task library (folders + task configs) as
+    /// one JSON document, mirroring the editor-settings app-state pattern.
+    pub async fn save_transfer_task_library(&self, library: &serde_json::Value) -> Result<(), String> {
+        self.save_app_state_value(APP_STATE_TRANSFER_TASK_LIBRARY_KEY, library).await
+    }
+
+    pub async fn load_transfer_task_library(&self) -> Result<Option<serde_json::Value>, String> {
+        self.load_app_state_value(APP_STATE_TRANSFER_TASK_LIBRARY_KEY).await
+    }
+
     pub async fn save_ai_global_custom_instructions(&self, content: &str) -> Result<(), String> {
         let trimmed = content.trim();
         if trimmed.chars().count() > 8000 {
@@ -2967,6 +2978,41 @@ impl Storage {
                 .map_err(|e| e.to_string())?;
 
             Ok(SavedSqlLibrary { folders, files })
+        })
+        .await
+    }
+
+    pub async fn load_saved_sql_files_for_sync(&self) -> Result<Vec<SavedSqlFile>, String> {
+        self.with_conn(|conn| {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT id, connection_id, folder_id, name, database_name, catalog_name, schema_name, sql_text, order_index, open_count, opened_at, created_at, updated_at \
+                     FROM saved_sql_files ORDER BY COALESCE(folder_id, ''), order_index, connection_id, name COLLATE NOCASE",
+                )
+                .map_err(|e| e.to_string())?;
+            let files = stmt
+                .query_map([], |row| {
+                    Ok(SavedSqlFile {
+                        id: row.get(0)?,
+                        connection_id: row.get(1)?,
+                        folder_id: row.get(2)?,
+                        name: row.get(3)?,
+                        database: row.get(4)?,
+                        catalog: row.get(5)?,
+                        schema: row.get(6)?,
+                        sql: row.get(7)?,
+                        sql_loaded: true,
+                        order_index: row.get(8)?,
+                        open_count: row.get(9)?,
+                        opened_at: row.get(10)?,
+                        created_at: row.get(11)?,
+                        updated_at: row.get(12)?,
+                    })
+                })
+                .map_err(|e| e.to_string())?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| e.to_string())?;
+            Ok(files)
         })
         .await
     }
@@ -5635,6 +5681,8 @@ mod tests {
             .save_saved_sql_editor_positions(&serde_json::json!([{ "savedSqlId": "file-1", "updatedAt": 1 }]))
             .await
             .unwrap();
+        let transfer_task_library = serde_json::json!({ "version": 1, "folders": [], "tasks": [] });
+        storage.save_transfer_task_library(&transfer_task_library).await.unwrap();
 
         assert_eq!(
             storage.load_editor_settings().await.unwrap(),
@@ -5672,6 +5720,7 @@ mod tests {
             storage.load_saved_sql_editor_positions().await.unwrap(),
             Some(serde_json::json!([{ "savedSqlId": "file-1", "updatedAt": 1 }]))
         );
+        assert_eq!(storage.load_transfer_task_library().await.unwrap(), Some(transfer_task_library));
         assert_eq!(storage.load_password_hash().await.unwrap(), Some("hash-4".to_string()));
         assert_eq!(
             storage.load_desktop_settings().await.unwrap(),
@@ -5866,6 +5915,12 @@ mod tests {
         assert_eq!(loaded.sql, file.sql);
         assert_eq!(loaded.catalog.as_deref(), Some("hive"));
         assert!(loaded.sql_loaded);
+
+        let sync_files = storage.load_saved_sql_files_for_sync().await.unwrap();
+        assert_eq!(sync_files.len(), 1);
+        assert_eq!(sync_files[0].id, file.id);
+        assert_eq!(sync_files[0].sql, file.sql);
+        assert!(sync_files[0].sql_loaded);
     }
 
     #[tokio::test]

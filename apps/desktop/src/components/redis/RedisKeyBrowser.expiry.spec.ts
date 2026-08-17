@@ -844,6 +844,58 @@ describe("RedisKeyBrowser command completion", () => {
   });
 });
 
+describe("RedisKeyBrowser command console echo", () => {
+  it("echoes the submitted command to the terminal before the response arrives, then fills in the result", async () => {
+    const pending = deferred<{ value: unknown }>();
+    mocks.redisExecuteCommand.mockReturnValueOnce(pending.promise);
+    mountBrowser();
+    await settle();
+    await openCommandPanel();
+    await setCommandInput("PING");
+
+    const input = requiredElement<HTMLInputElement>("[data-redis-command-input]");
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    await settle();
+
+    // The command must show up in the terminal right away — while the
+    // request is still in flight — not only once the response resolves.
+    const terminal = requiredElement<HTMLElement>(".redis-command-terminal");
+    expect(terminal.textContent).toContain("PING");
+    expect(terminal.querySelectorAll(".mb-2")).toHaveLength(1);
+    expect(terminal.textContent).not.toContain("PONG");
+
+    pending.resolve({ value: "PONG" });
+    await settle();
+
+    expect(terminal.textContent).toContain("PONG");
+    // The result fills in the same echoed entry rather than adding a second one.
+    expect(terminal.querySelectorAll(".mb-2")).toHaveLength(1);
+  });
+
+  it("attaches a failed command's error to the same echoed entry", async () => {
+    const pending = deferred<{ value: unknown }>();
+    mocks.redisExecuteCommand.mockReturnValueOnce(pending.promise);
+    mountBrowser();
+    await settle();
+    await openCommandPanel();
+    await setCommandInput("PING");
+
+    const input = requiredElement<HTMLInputElement>("[data-redis-command-input]");
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    await settle();
+
+    const terminal = requiredElement<HTMLElement>(".redis-command-terminal");
+    expect(terminal.textContent).toContain("PING");
+    expect(terminal.querySelectorAll(".mb-2")).toHaveLength(1);
+
+    pending.reject(new Error("ERR unknown command"));
+    await settle();
+
+    expect(terminal.textContent).toContain("ERR unknown command");
+    expect(terminal.querySelectorAll(".mb-2")).toHaveLength(1);
+  });
+});
+
 describe("RedisKeyBrowser expiry creation", () => {
   it.each(["string", "hash", "list", "set", "zset", "stream", "json"] as const)("writes %s before applying one relative TTL", async (type) => {
     mountBrowser();

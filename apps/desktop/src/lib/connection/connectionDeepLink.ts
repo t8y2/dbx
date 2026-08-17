@@ -23,6 +23,7 @@ export interface ConnectionDeepLinkDraft {
   password?: string;
   database?: string;
   urlParams?: string;
+  basePath?: string;
   ssl?: boolean;
   connectionString?: string;
   oracleConnectionType?: "service_name" | "sid";
@@ -188,6 +189,7 @@ function draftFromConnectionUrl(value: string, preferredProfile?: string): Conne
     password: parsed.password,
     database: parsed.database,
     urlParams: parsed.urlParams,
+    basePath: parsed.basePath,
     ssl: parsed.ssl,
     connectionString: parsed.connectionString,
     oracleConnectionType: parsed.oracleConnectionType,

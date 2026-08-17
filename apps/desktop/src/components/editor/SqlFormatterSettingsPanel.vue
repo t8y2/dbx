@@ -10,6 +10,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useToast } from "@/composables/useToast";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { saveTextFile } from "@/lib/export/saveTextFile";
+import { searchKeymapWithoutModD } from "@/lib/editor/codemirrorSearchKeymap";
 import {
   DEFAULT_SQL_FORMATTER_SETTINGS,
   SQL_FORMATTER_CONFIG_FORMATTER,
@@ -361,7 +362,7 @@ function jsonEditorKeymapExtension(modules: CodeMirrorModules) {
   const { keymap } = modules.view;
   const commands = modules.commands;
   const search = modules.search;
-  return keymap.of([...search.searchKeymap, ...commands.historyKeymap, ...commands.defaultKeymap]);
+  return keymap.of([...searchKeymapWithoutModD(search.searchKeymap), ...commands.historyKeymap, ...commands.defaultKeymap]);
 }
 
 async function initJsonEditor() {

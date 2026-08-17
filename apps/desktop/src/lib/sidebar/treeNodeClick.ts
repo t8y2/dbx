@@ -2,13 +2,13 @@ import type { DatabaseType, ObjectSourceKind, TreeNode, TreeNodeType } from "@/t
 import { customTypeCapabilities, supportsTypeObjectSource } from "@/lib/database/databaseObjectCapabilities";
 import { matchesShortcut, type ShortcutLikeEvent } from "@/lib/editor/keyboardShortcuts";
 
-export type TreeNodeRowAction = "open-data" | "open-source" | "open-extension-details" | "open-saved-sql" | "toggle" | "none";
+export type TreeNodeRowAction = "open-data" | "open-source" | "open-extension-details" | "open-saved-sql" | "open-object-browser" | "open-object-browser-and-expand" | "toggle" | "none";
 export type TreeNodeRowDoubleClickAction = "open-data" | "activate-data" | "open-database-browser" | "open-object-browser" | "open-object-browser-and-expand" | "open-source" | "open-extension-details" | "open-saved-sql" | "toggle" | "none";
 export type SidebarSelectionCopyAction = "copy-name" | "none";
 export type SidebarActivation = "single" | "double";
 
 const dataNodeTypes = new Set<TreeNodeType>(["table", "view", "materialized_view"]);
-const documentBrowserNodeTypes = new Set<TreeNodeType>(["mongo-collection", "mongo-bucket"]);
+const documentBrowserNodeTypes = new Set<TreeNodeType>(["mongo-collection", "mongo-bucket", "dynamodb-table"]);
 const toggleLeafNodeTypes = new Set<TreeNodeType>([
   "redis-db",
   "mq-tenant",
@@ -16,12 +16,15 @@ const toggleLeafNodeTypes = new Set<TreeNodeType>([
   "etcd-root",
   "etcd-dashboard",
   "etcd-access-control",
+  "nacos-namespace",
+  "nacos-access-control",
   "zookeeper-root",
   "consul-root",
   "consul-overview",
   "mongo-gridfs",
   "mongo-collection",
   "mongo-bucket",
+  "dynamodb-table",
   "vector-collection",
   "elasticsearch-index",
   "user-admin",
@@ -31,20 +34,30 @@ const toggleLeafNodeTypes = new Set<TreeNodeType>([
 // These are application entry points rather than database objects. They should
 // always navigate on a single click, even when the user prefers double-click
 // activation for ordinary tree objects.
-const directNavigationTreeNodeTypes = new Set<TreeNodeType>(["consul-root", "consul-overview"]);
+const directNavigationTreeNodeTypes = new Set<TreeNodeType>(["consul-root", "consul-overview", "nacos-namespace", "nacos-access-control"]);
+const repeatableNavigationTreeNodeTypes = new Set<TreeNodeType>(["nacos-namespace", "nacos-access-control"]);
 
 export function isDirectNavigationTreeNode(type: TreeNodeType): boolean {
   return directNavigationTreeNodeTypes.has(type);
+}
+
+export function isRepeatableNavigationTreeNode(type: TreeNodeType): boolean {
+  return repeatableNavigationTreeNodeTypes.has(type);
 }
 
 export function shouldActivateTreeNodeOnSingleClick(type: TreeNodeType, activation: SidebarActivation = "single"): boolean {
   return activation !== "double" || isDirectNavigationTreeNode(type);
 }
 const objectBrowserNodeTypes = new Set<TreeNodeType>(["database", "schema", "object-browser"]);
+
+/** 开关“单击数据库同时打开数据库项目”命中时，单击数据库类节点直接打开对象浏览器标签页。 */
+export function shouldOpenObjectBrowserOnSingleClick(type: TreeNodeType, enabled: boolean): boolean {
+  return enabled && objectBrowserNodeTypes.has(type);
+}
 const sourceNodeTypes = new Set<TreeNodeType>(["materialized_view", "procedure", "function", "trigger", "sequence", "synonym", "package", "package-body", "type", "type-body"]);
 const savedSqlNodeTypes = new Set<TreeNodeType>(["saved-sql-file"]);
 const tableChildGroupNodeTypes = new Set<TreeNodeType>(["group-columns", "group-indexes", "group-fkeys", "group-triggers", "group-constraints", "group-partitions", "group-table-partitions", "group-table-subpartitions"]);
-const databaseChildGroupNodeTypes = new Set<TreeNodeType>(["group-tables", "group-views", "group-materialized-views", "group-procedures", "group-functions", "group-triggers", "group-sequences", "group-synonyms", "group-packages", "group-types"]);
+const databaseChildGroupNodeTypes = new Set<TreeNodeType>(["group-tables", "group-dolt-system-tables", "group-views", "group-materialized-views", "group-procedures", "group-functions", "group-triggers", "group-sequences", "group-synonyms", "group-packages", "group-types"]);
 const displayPathObjectNodeTypes = new Set<TreeNodeType>(["table", "view", "materialized_view", "procedure", "function", "trigger"]);
 
 export function objectSourceKindForTreeNode(type: TreeNodeType): ObjectSourceKind | null {
@@ -102,7 +115,11 @@ function canOpenTreeNodeSource(type: TreeNodeType, dbType?: DatabaseType): boole
   return true;
 }
 
-export function treeNodeRowAction(type: TreeNodeType, canExpand: boolean, activation: SidebarActivation = "single", dbType?: DatabaseType): TreeNodeRowAction {
+export function treeNodeRowAction(type: TreeNodeType, canExpand: boolean, activation: SidebarActivation = "single", dbType?: DatabaseType, openDatabaseOnSingleClick = false, canOpenObjectBrowser = false): TreeNodeRowAction {
+  // “单击数据库同时打开数据库项目”开关优先于激活方式：单击即等效双击的打开行为。
+  if (openDatabaseOnSingleClick && canOpenObjectBrowser && shouldOpenObjectBrowserOnSingleClick(type, true)) {
+    return canExpand ? "open-object-browser-and-expand" : "open-object-browser";
+  }
   if (!shouldActivateTreeNodeOnSingleClick(type, activation)) return "none";
   if (type === "extension") return "open-extension-details";
   if (savedSqlNodeTypes.has(type)) return "open-saved-sql";
@@ -124,10 +141,11 @@ export function shouldRunTreeNodeRowAction(action: TreeNodeRowAction, clickDetai
   return action !== "none" && clickDetail <= 1;
 }
 
-export function treeNodeRowDoubleClickAction(type: TreeNodeType, canOpenObjectBrowser: boolean, activation: SidebarActivation = "single", canExpand = false, dbType?: DatabaseType, canOpenDatabaseBrowser = false): TreeNodeRowDoubleClickAction {
+export function treeNodeRowDoubleClickAction(type: TreeNodeType, canOpenObjectBrowser: boolean, activation: SidebarActivation = "single", canExpand = false, dbType?: DatabaseType, canOpenDatabaseBrowser = false, openDatabaseOnSingleClick = false): TreeNodeRowDoubleClickAction {
   // Single-click activation already handles the first click in a dblclick
   // sequence. Only double-click activation needs a second-stage table action.
   if (type === "table") return activation === "double" ? "activate-data" : "none";
+  if (openDatabaseOnSingleClick && canOpenObjectBrowser && shouldOpenObjectBrowserOnSingleClick(type, true)) return "none";
   if (type === "connection" && canOpenDatabaseBrowser) return "open-database-browser";
   if (activation === "double") {
     if (type === "extension") return "open-extension-details";

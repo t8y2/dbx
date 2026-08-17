@@ -25,6 +25,7 @@ import java.sql.Date;
 import java.sql.Driver;
 import java.sql.DriverManager;
 import java.sql.DriverPropertyInfo;
+import java.sql.ParameterMetaData;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.ResultSetMetaData;
@@ -1154,12 +1155,14 @@ public final class DbxJdbcPlugin {
 
     private static String getOracleExplainInfo(Connection connection, String sql, int timeoutSecs) throws SQLException {
         String statementId = "DBX_" + UUID.randomUUID().toString().replace("-", "").substring(0, 26);
+        String statementSql = trimStatementSql(sql);
         StringBuilder plan = new StringBuilder();
         try {
             try (PreparedStatement explain = connection.prepareStatement(
-                "EXPLAIN PLAN SET STATEMENT_ID = '" + statementId + "' FOR " + trimStatementSql(sql)
+                "EXPLAIN PLAN SET STATEMENT_ID = '" + statementId + "' FOR " + statementSql
             )) {
                 applyExplainTimeout(explain, timeoutSecs);
+                nullBindExplainParameters(explain, statementSql);
                 explain.execute();
             }
             try (PreparedStatement read = connection.prepareStatement(
@@ -1184,6 +1187,157 @@ public final class DbxJdbcPlugin {
                 cleanup.executeUpdate();
             } catch (SQLException ignored) {}
         }
+    }
+
+    /**
+     * SQL passed to EXPLAIN PLAN may legitimately contain Oracle bind markers
+     * (":1", ":name", or "?") that aren't meant to be executed with real
+     * values — e.g. statements copied from V$SQL/AWR reports. A PreparedStatement
+     * still requires every marker to be bound before execute(), or Oracle throws
+     * "ORA-17041: Missing IN or OUT parameter". The plan doesn't depend on the
+     * actual bind values, so null them all out.
+     */
+    private static void nullBindExplainParameters(PreparedStatement statement, String sql) throws SQLException {
+        int parameterCount = -1;
+        try {
+            ParameterMetaData metadata = statement.getParameterMetaData();
+            if (metadata != null) {
+                parameterCount = metadata.getParameterCount();
+            }
+        } catch (SQLException ignored) {
+        }
+        if (parameterCount < 0) {
+            parameterCount = oracleExplainBindMarkerCount(sql);
+        }
+        for (int index = 1; index <= parameterCount; index++) {
+            statement.setNull(index, Types.VARCHAR);
+        }
+    }
+
+    private static int oracleExplainBindMarkerCount(String sql) {
+        int count = 0;
+        for (int index = 0; index < sql.length(); index++) {
+            char ch = sql.charAt(index);
+            if (ch == '\'') {
+                index = skipSingleQuotedSql(sql, index);
+            } else if (ch == '"') {
+                index = skipDoubleQuotedSql(sql, index);
+            } else if (ch == 'q' || ch == 'Q') {
+                int end = skipOracleAlternativeQuotedSql(sql, index);
+                if (end != index) {
+                    index = end;
+                }
+            } else if (ch == '-' && index + 1 < sql.length() && sql.charAt(index + 1) == '-') {
+                index = skipLineCommentSql(sql, index);
+            } else if (ch == '/' && index + 1 < sql.length() && sql.charAt(index + 1) == '*') {
+                index = skipBlockCommentSql(sql, index);
+            } else if (ch == '?') {
+                count++;
+            } else if (ch == ':') {
+                int end = oracleBindMarkerEnd(sql, index);
+                if (end > index) {
+                    count++;
+                    index = end - 1;
+                }
+            }
+        }
+        return count;
+    }
+
+    private static int oracleBindMarkerEnd(String sql, int index) {
+        if (index + 1 >= sql.length() || (index > 0 && sql.charAt(index - 1) == ':')) {
+            return index;
+        }
+        char next = sql.charAt(index + 1);
+        int end = index + 2;
+        if (next >= '0' && next <= '9') {
+            while (end < sql.length() && sql.charAt(end) >= '0' && sql.charAt(end) <= '9') {
+                end++;
+            }
+            return end;
+        }
+        if (!isOracleIdentifierStart(next)) {
+            return index;
+        }
+        while (end < sql.length() && isOracleIdentifierPart(sql.charAt(end))) {
+            end++;
+        }
+        return end;
+    }
+
+    private static boolean isOracleIdentifierStart(char ch) {
+        return (ch >= 'a' && ch <= 'z')
+            || (ch >= 'A' && ch <= 'Z')
+            || ch == '_'
+            || ch == '$'
+            || ch == '#';
+    }
+
+    private static boolean isOracleIdentifierPart(char ch) {
+        return isOracleIdentifierStart(ch) || (ch >= '0' && ch <= '9');
+    }
+
+    private static int skipSingleQuotedSql(String sql, int index) {
+        for (int current = index + 1; current < sql.length(); current++) {
+            if (sql.charAt(current) != '\'') {
+                continue;
+            }
+            if (current + 1 < sql.length() && sql.charAt(current + 1) == '\'') {
+                current++;
+                continue;
+            }
+            return current;
+        }
+        return sql.length() - 1;
+    }
+
+    private static int skipDoubleQuotedSql(String sql, int index) {
+        for (int current = index + 1; current < sql.length(); current++) {
+            if (sql.charAt(current) != '"') {
+                continue;
+            }
+            if (current + 1 < sql.length() && sql.charAt(current + 1) == '"') {
+                current++;
+                continue;
+            }
+            return current;
+        }
+        return sql.length() - 1;
+    }
+
+    private static int skipOracleAlternativeQuotedSql(String sql, int index) {
+        if (index + 2 >= sql.length() || sql.charAt(index + 1) != '\'') {
+            return index;
+        }
+        char open = sql.charAt(index + 2);
+        char close = switch (open) {
+            case '[' -> ']';
+            case '{' -> '}';
+            case '(' -> ')';
+            case '<' -> '>';
+            default -> open;
+        };
+        for (int current = index + 3; current + 1 < sql.length(); current++) {
+            if (sql.charAt(current) == close && sql.charAt(current + 1) == '\'') {
+                return current + 1;
+            }
+        }
+        return sql.length() - 1;
+    }
+
+    private static int skipLineCommentSql(String sql, int index) {
+        for (int current = index; current < sql.length(); current++) {
+            char ch = sql.charAt(current);
+            if (ch == '\n' || ch == '\r') {
+                return current;
+            }
+        }
+        return sql.length() - 1;
+    }
+
+    private static int skipBlockCommentSql(String sql, int index) {
+        int end = sql.indexOf("*/", index + 2);
+        return end < 0 ? sql.length() - 1 : end + 1;
     }
 
     private static void applyExplainTimeout(Statement statement, int timeoutSecs) throws SQLException {

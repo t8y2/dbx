@@ -432,6 +432,55 @@ pub async fn install_agent_driver_from(
     install_agent_driver_with_batch(am, db_type, source, &progress, None, None).await
 }
 
+/// Ensure an already-selected fallback Agent can be launched, installing only
+/// missing or invalid runtime artifacts. A usable installed driver is never
+/// upgraded implicitly.
+pub async fn ensure_agent_driver_ready(am: &AgentManager, db_type: &str) -> Result<(), String> {
+    ensure_agent_driver_ready_from(am, db_type, DownloadSource::Official).await
+}
+
+async fn ensure_agent_driver_ready_from(
+    am: &AgentManager,
+    db_type: &str,
+    source: DownloadSource,
+) -> Result<(), String> {
+    if agent_driver_runtime_readiness(am, db_type).is_ok() {
+        return Ok(());
+    }
+
+    let _installation_guard = am.installation_operation_lock.read().await;
+    let driver_lock = driver_operation_lock(am, db_type).await;
+    let _driver_guard = driver_lock.lock().await;
+
+    // Another fallback may have completed installation while this task waited.
+    if agent_driver_runtime_readiness(am, db_type).is_ok() {
+        return Ok(());
+    }
+
+    let registry = fetch_registry_from(source).await?;
+    let progress = |_| {};
+    if !am.is_driver_installed(db_type) {
+        install_agent_driver_from_registry(am, &registry, source, db_type, &progress, None, None).await?;
+    } else if am.driver_requires_java_runtime(db_type) {
+        let state = am.load_state();
+        let jre_key = state
+            .installed_drivers
+            .get(db_type)
+            .map(|driver| driver.jre.as_str())
+            .or_else(|| agent_registry_driver(&registry, db_type).map(|driver| driver.jre.as_str()))
+            .unwrap_or(DEFAULT_JRE_KEY);
+        ensure_jre_from_registry(am, &registry, source, jre_key, db_type, &progress, None, None).await?;
+    }
+
+    agent_driver_runtime_readiness(am, db_type)
+}
+
+fn agent_driver_runtime_readiness(am: &AgentManager, db_type: &str) -> Result<(), String> {
+    let state = am.load_state();
+    let jre_key = state.installed_drivers.get(db_type).map(|driver| driver.jre.as_str()).unwrap_or(DEFAULT_JRE_KEY);
+    am.resolve_agent_launch_spec(&state, db_type, jre_key).map(|_| ())
+}
+
 pub async fn upgrade_all_agent_drivers(
     am: &AgentManager,
     progress: impl Fn(AgentProgressEvent),
@@ -2605,6 +2654,9 @@ mod agent_registry_install_tests {
     use super::*;
     use crate::agent_manager::{ArtifactFormat, ArtifactInfo, DriverInfo, InstalledDriver, JavaRuntimeConfig, JreInfo};
 
+    static ENSURE_AGENT_TEST_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
+        std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
+
     fn test_manager(name: &str) -> AgentManager {
         let dir = std::env::temp_dir().join(format!("dbx-agent-registry-install-{name}-{}", uuid::Uuid::new_v4()));
         AgentManager::new_with_base_dir(dir)
@@ -2943,6 +2995,203 @@ mod agent_registry_install_tests {
         );
         std::fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
         std::fs::write(cache_path, archive).unwrap();
+    }
+
+    async fn cache_test_registry(registry: AgentRegistry) {
+        REGISTRY_CACHE.lock().await.insert(DownloadSource::Cnb, (std::time::Instant::now(), registry));
+    }
+
+    fn mongodb_registry_with_jre(
+        driver_version: &str,
+        driver_url: &str,
+        driver_size: u64,
+        jre_version: &str,
+        jre_url: &str,
+        jre_size: u64,
+    ) -> AgentRegistry {
+        let mut registry = registry_with_jar("mongodb", driver_version, driver_url, driver_size);
+        registry.jres = registry_with_jre(DEFAULT_JRE_KEY, jre_version, jre_url, jre_size).jres;
+        registry
+    }
+
+    #[tokio::test]
+    async fn ensure_agent_runtime_installs_missing_driver_and_jre() {
+        let _test_guard = ENSURE_AGENT_TEST_LOCK.lock().await;
+        let manager = test_manager("ensure-missing-driver-and-jre");
+        let driver_version = "0.1.47";
+        let driver_url = "https://example.com/dbx-agent-mongodb.jar";
+        let driver_bytes = test_agent_jar();
+        let jre_version = "21.0.12";
+        let jre_url = "https://example.com/dbx-jre.tar.gz";
+        let jre_archive = build_jre_archive(&manager, DEFAULT_JRE_KEY);
+        let registry = mongodb_registry_with_jre(
+            driver_version,
+            driver_url,
+            driver_bytes.len() as u64,
+            jre_version,
+            jre_url,
+            jre_archive.len() as u64,
+        );
+        write_cached_driver_download(
+            &manager,
+            "mongodb",
+            driver_version,
+            driver_url,
+            &manager.driver_jar_path("mongodb"),
+            &driver_bytes,
+        );
+        write_cached_jre_download(&manager, DEFAULT_JRE_KEY, jre_version, jre_url, None, None, &jre_archive);
+        cache_test_registry(registry).await;
+
+        ensure_agent_driver_ready_from(&manager, "mongodb", DownloadSource::Cnb).await.unwrap();
+
+        assert!(manager.is_driver_jar_valid("mongodb"));
+        assert!(manager.is_jre_installed(DEFAULT_JRE_KEY));
+        let state = manager.load_state();
+        assert_eq!(state.installed_drivers["mongodb"].version, driver_version);
+        assert_eq!(state.jre_versions[DEFAULT_JRE_KEY], jre_version);
+    }
+
+    #[tokio::test]
+    async fn ensure_agent_runtime_ready_fast_path_preserves_valid_old_driver() {
+        let _test_guard = ENSURE_AGENT_TEST_LOCK.lock().await;
+        let manager = test_manager("ensure-ready-old-driver");
+        let driver_path = manager.driver_jar_path("mongodb");
+        std::fs::create_dir_all(driver_path.parent().unwrap()).unwrap();
+        let old_driver_bytes = test_agent_jar();
+        std::fs::write(&driver_path, &old_driver_bytes).unwrap();
+        install_jre(&manager);
+        record_driver(&manager, "mongodb");
+
+        let latest_version = "9.9.9";
+        let latest_url = "https://example.com/dbx-agent-mongodb-latest.jar";
+        let latest_driver_bytes = test_agent_jar();
+        let cache_path = write_cached_driver_download(
+            &manager,
+            "mongodb",
+            latest_version,
+            latest_url,
+            &driver_path,
+            &latest_driver_bytes,
+        );
+        let registry_guard = REGISTRY_CACHE.lock().await;
+
+        tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            ensure_agent_driver_ready_from(&manager, "mongodb", DownloadSource::Cnb),
+        )
+        .await
+        .expect("ready Agent path must not wait for the registry cache")
+        .unwrap();
+        drop(registry_guard);
+
+        assert_eq!(std::fs::read(&driver_path).unwrap(), old_driver_bytes);
+        assert_eq!(manager.load_state().installed_drivers["mongodb"].version, "1.0.0");
+        assert!(cache_path.exists(), "ready fast path must not consume a pending driver download");
+    }
+
+    #[tokio::test]
+    async fn ensure_agent_runtime_repairs_damaged_jre_without_upgrading_valid_driver() {
+        let _test_guard = ENSURE_AGENT_TEST_LOCK.lock().await;
+        let manager = test_manager("ensure-damaged-jre");
+        let driver_path = manager.driver_jar_path("mongodb");
+        std::fs::create_dir_all(driver_path.parent().unwrap()).unwrap();
+        let old_driver_bytes = test_agent_jar();
+        std::fs::write(&driver_path, &old_driver_bytes).unwrap();
+        record_driver(&manager, "mongodb");
+        let damaged_java = manager.jre_java_path(DEFAULT_JRE_KEY);
+        std::fs::create_dir_all(&damaged_java).unwrap();
+
+        let jre_version = "21.0.12";
+        let jre_url = "https://example.com/dbx-jre.tar.gz";
+        let jre_archive = build_jre_archive(&manager, DEFAULT_JRE_KEY);
+        let registry = mongodb_registry_with_jre(
+            "9.9.9",
+            "https://example.com/dbx-agent-mongodb-latest.jar",
+            test_agent_jar().len() as u64,
+            jre_version,
+            jre_url,
+            jre_archive.len() as u64,
+        );
+        write_cached_jre_download(&manager, DEFAULT_JRE_KEY, jre_version, jre_url, None, None, &jre_archive);
+        cache_test_registry(registry).await;
+
+        ensure_agent_driver_ready_from(&manager, "mongodb", DownloadSource::Cnb).await.unwrap();
+
+        assert!(manager.is_jre_installed(DEFAULT_JRE_KEY));
+        assert_eq!(std::fs::read(&driver_path).unwrap(), old_driver_bytes);
+        assert_eq!(manager.load_state().installed_drivers["mongodb"].version, "1.0.0");
+    }
+
+    #[tokio::test]
+    async fn concurrent_ensure_agent_runtime_installs_once() {
+        let _test_guard = ENSURE_AGENT_TEST_LOCK.lock().await;
+        let manager = Arc::new(test_manager("ensure-concurrent-single-install"));
+        let driver_version = "0.1.47";
+        let driver_url = "https://example.com/dbx-agent-mongodb.jar";
+        let driver_bytes = test_agent_jar();
+        let jre_version = "21.0.12";
+        let jre_url = "https://example.com/dbx-jre.tar.gz";
+        let jre_archive = build_jre_archive(&manager, DEFAULT_JRE_KEY);
+        let registry = mongodb_registry_with_jre(
+            driver_version,
+            driver_url,
+            driver_bytes.len() as u64,
+            jre_version,
+            jre_url,
+            jre_archive.len() as u64,
+        );
+        let driver_cache_path = write_cached_driver_download(
+            &manager,
+            "mongodb",
+            driver_version,
+            driver_url,
+            &manager.driver_jar_path("mongodb"),
+            &driver_bytes,
+        );
+        write_cached_jre_download(&manager, DEFAULT_JRE_KEY, jre_version, jre_url, None, None, &jre_archive);
+        cache_test_registry(registry).await;
+
+        let first = ensure_agent_driver_ready_from(&manager, "mongodb", DownloadSource::Cnb);
+        let second = ensure_agent_driver_ready_from(&manager, "mongodb", DownloadSource::Cnb);
+        let (first, second) = tokio::join!(first, second);
+
+        first.unwrap();
+        second.unwrap();
+        assert!(manager.is_driver_jar_valid("mongodb"));
+        assert!(manager.is_jre_installed(DEFAULT_JRE_KEY));
+        assert!(!driver_cache_path.exists(), "the single successful install should consume the cached artifact");
+    }
+
+    #[tokio::test]
+    async fn ensure_agent_runtime_propagates_corrupt_install_error() {
+        let _test_guard = ENSURE_AGENT_TEST_LOCK.lock().await;
+        let manager = test_manager("ensure-corrupt-install-error");
+        manager
+            .mutate_state(|state| {
+                state.java_runtime = JavaRuntimeConfig { mode: JavaRuntimeMode::System, custom_java_path: None };
+            })
+            .unwrap();
+        let driver_version = "0.1.47";
+        let driver_url = "https://example.com/dbx-agent-mongodb.jar";
+        let corrupt_driver = b"not-a-jar";
+        let registry = registry_with_jar("mongodb", driver_version, driver_url, corrupt_driver.len() as u64);
+        write_cached_driver_download(
+            &manager,
+            "mongodb",
+            driver_version,
+            driver_url,
+            &manager.driver_jar_path("mongodb"),
+            corrupt_driver,
+        );
+        cache_test_registry(registry).await;
+
+        let error = ensure_agent_driver_ready_from(&manager, "mongodb", DownloadSource::Cnb)
+            .await
+            .expect_err("corrupt driver install must fail");
+
+        assert!(error.contains("invalid or corrupt"), "unexpected error: {error}");
+        assert!(!manager.load_state().installed_drivers.contains_key("mongodb"));
     }
 
     #[test]

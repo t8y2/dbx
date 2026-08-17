@@ -152,4 +152,20 @@ describe("KafkaMessagesPanel", () => {
     expect(panel.querySelector('[data-testid="message-browser"]')).not.toBeNull();
     warning.mockRestore();
   });
+
+  it("keeps the topic toolbar outside the scrolling content area (issue #6267)", async () => {
+    const panel = await mountPanel();
+    const panelRoot = panel.querySelector<HTMLElement>(".kafka-messages-panel");
+    const toolbar = panelRoot?.querySelector<HTMLElement>(".panel-toolbar");
+    const content = panelRoot?.querySelector<HTMLElement>(".kafka-messages-content");
+
+    expect(panelRoot).not.toBeNull();
+    expect(toolbar).not.toBeNull();
+    expect(content).not.toBeNull();
+    // The toolbar must not live inside the scroll container so topic refresh
+    // stays reachable after scrolling; it must also precede it in layout order.
+    expect(content!.contains(toolbar!)).toBe(false);
+    const children = [...panelRoot!.children].map((child) => child.className);
+    expect(children.indexOf("panel-toolbar")).toBeLessThan(children.indexOf("kafka-messages-content"));
+  });
 });

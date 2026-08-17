@@ -3294,6 +3294,7 @@ async function buildCurrentCountTarget(): Promise<{ sql: string; schema?: string
       schema: props.tableMeta.schema,
       tableName: props.tableMeta.tableName,
       whereInput: currentWhereInput(),
+      countHint: resolvedDatabaseType.value === "gaussdb" ? "/*+ set(query_dop 32) */" : undefined,
     });
     return {
       sql,

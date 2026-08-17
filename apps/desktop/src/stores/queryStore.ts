@@ -4866,6 +4866,7 @@ export const useQueryStore = defineStore("query", () => {
                   schema: tableMeta.schema,
                   tableName: tableMeta.tableName,
                   whereInput: current.whereInput?.trim() || undefined,
+                  countHint: effectiveDbType === "gaussdb" ? "/*+ set(query_dop 32) */" : undefined,
                 };
               })()
             : undefined;

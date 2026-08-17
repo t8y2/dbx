@@ -20,6 +20,19 @@ export type DriverInstallProgressChannel = "agent" | "jdbc-plugin";
 
 const AGENT_PROGRESS_STEPS = new Set(["driver", "jre", "jre-extract", "all-done"]);
 
+/** Substring the backend uses for a user-cancelled driver install/upgrade. */
+const AGENT_DOWNLOAD_CANCELED_ERROR = "Agent download canceled by user.";
+
+/**
+ * True when a driver-install error is a user cancel rather than a genuine
+ * failure. Callers use this to close install modals silently and to avoid
+ * reporting a cancelled driver/upgrade as failed.
+ */
+export function isDriverInstallCanceledError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String((error as { message?: string } | null)?.message ?? error ?? "");
+  return message.includes(AGENT_DOWNLOAD_CANCELED_ERROR);
+}
+
 export function isDriverInstallProgressForOperation(progress: DriverInstallProgress, operationId: string | null): boolean {
   // Keep accepting legacy unscoped events, while preventing another active
   // install's terminal/progress event from mutating this dialog.

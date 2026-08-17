@@ -15,6 +15,45 @@ use crate::models::connection::DatabaseType;
 pub const DEFAULT_JRE_KEY: &str = "21";
 pub const DOWNLOAD_CACHE_DIR_NAME: &str = "download-cache";
 pub const DOWNLOAD_CACHE_MAX_AGE_DAYS: u64 = 7;
+/// Registry key under which an upgrade-all batch registers its shared cancel token.
+pub const BATCH_UPGRADE_CANCEL_KEY: &str = "__batch_upgrade_cancel__";
+
+/// Cooperative cancellation token for an agent driver install/upgrade.
+///
+/// Mirrors the updater's `DownloadCancellation` (src-tauri/src/commands/update.rs)
+/// so the same `watch<bool>` pattern can abort an in-flight JRE/driver download.
+#[derive(Debug)]
+pub struct AgentInstallCancellation {
+    canceled: tokio::sync::watch::Sender<bool>,
+}
+
+impl AgentInstallCancellation {
+    fn new() -> Self {
+        let (canceled, _) = tokio::sync::watch::channel(false);
+        Self { canceled }
+    }
+
+    pub fn cancel(&self) {
+        let _ = self.canceled.send_replace(true);
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        *self.canceled.borrow()
+    }
+
+    /// Completes once cancellation is requested (immediately if already cancelled).
+    pub async fn cancelled(&self) {
+        let mut receiver = self.canceled.subscribe();
+        if *receiver.borrow_and_update() {
+            return;
+        }
+        while receiver.changed().await.is_ok() {
+            if *receiver.borrow_and_update() {
+                return;
+            }
+        }
+    }
+}
 
 fn default_jre_key() -> String {
     DEFAULT_JRE_KEY.to_string()
@@ -511,6 +550,11 @@ pub struct AgentManager {
     /// Driver operations may run concurrently, but JRE replacement/removal
     /// must exclude them until their dependent driver state is persisted.
     pub(crate) installation_operation_lock: tokio::sync::RwLock<()>,
+    /// Per-operation cancellation tokens. A single install registers a token
+    /// keyed by `db_type`; a batch upgrade also registers a shared token under
+    /// `BATCH_UPGRADE_CANCEL_KEY`. Downloads observe these to abort promptly.
+    pub(crate) install_cancellations:
+        tokio::sync::Mutex<std::collections::HashMap<String, Arc<AgentInstallCancellation>>>,
 }
 
 impl Default for AgentManager {
@@ -540,6 +584,7 @@ impl AgentManager {
             jre_install_locks: Mutex::new(std::collections::HashMap::new()),
             driver_operation_locks: Mutex::new(std::collections::HashMap::new()),
             installation_operation_lock: tokio::sync::RwLock::new(()),
+            install_cancellations: Mutex::new(std::collections::HashMap::new()),
         };
         mgr.migrate_legacy_jre();
         mgr.cleanup_pending_jre_dirs();
@@ -558,6 +603,54 @@ impl AgentManager {
         let result = mutate(&mut state);
         self.save_state(&state)?;
         Ok(result)
+    }
+
+    /// Register a fresh cancellation token for an install operation keyed by
+    /// `key` (a driver `db_type`, or `BATCH_UPGRADE_CANCEL_KEY` for a batch).
+    /// Any existing token for the same key is replaced; installs for a driver
+    /// are serialized by `driver_operation_lock`, so a stale cancelled token
+    /// cannot leak into a new install of the same driver.
+    pub async fn begin_install_cancellation(&self, key: &str) -> Arc<AgentInstallCancellation> {
+        let token = Arc::new(AgentInstallCancellation::new());
+        self.install_cancellations.lock().await.insert(key.to_string(), Arc::clone(&token));
+        token
+    }
+
+    /// Remove the token for `key` only if it is still `token` (guarded by
+    /// `Arc::ptr_eq`) so a concurrently registered fresh token is not removed.
+    pub async fn finish_install_cancellation(&self, key: &str, token: &Arc<AgentInstallCancellation>) {
+        let mut cancellations = self.install_cancellations.lock().await;
+        if cancellations.get(key).is_some_and(|current| Arc::ptr_eq(current, token)) {
+            cancellations.remove(key);
+        }
+    }
+
+    /// Request cancellation for the operation registered under `key`.
+    pub async fn cancel_install(&self, key: &str) {
+        if let Some(token) = self.install_cancellations.lock().await.get(key).cloned() {
+            token.cancel();
+        }
+    }
+
+    /// Live handles whose cancellation should abort a download for `db_type`:
+    /// the driver's own token plus any active batch-upgrade token.
+    pub async fn cancellation_handles(&self, db_type: &str) -> Vec<Arc<AgentInstallCancellation>> {
+        let cancellations = self.install_cancellations.lock().await;
+        let mut handles = Vec::new();
+        if let Some(token) = cancellations.get(db_type) {
+            handles.push(Arc::clone(token));
+        }
+        if let Some(token) = cancellations.get(BATCH_UPGRADE_CANCEL_KEY) {
+            handles.push(Arc::clone(token));
+        }
+        handles
+    }
+
+    pub async fn is_install_cancelled(&self, db_type: &str) -> bool {
+        let cancellations = self.install_cancellations.lock().await;
+        let batch = cancellations.get(BATCH_UPGRADE_CANCEL_KEY);
+        let driver = cancellations.get(db_type);
+        batch.is_some_and(|token| token.is_cancelled()) || driver.is_some_and(|token| token.is_cancelled())
     }
 
     fn migrate_legacy_jre(&self) {

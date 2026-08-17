@@ -2,12 +2,15 @@ use std::sync::Arc;
 
 use tauri::{Emitter, State};
 
-use dbx_core::agent_manager::{AgentDriverInfo, DriverStoreUsage, JavaRuntimeConfig, JavaRuntimeMode, DEFAULT_JRE_KEY};
+use dbx_core::agent_manager::{
+    AgentDriverInfo, DriverStoreUsage, JavaRuntimeConfig, JavaRuntimeMode, BATCH_UPGRADE_CANCEL_KEY, DEFAULT_JRE_KEY,
+};
 use dbx_core::agent_service::{
-    build_agent_list, clear_agent_download_cache, fetch_registry_from, import_agent_driver,
-    import_agents_from_package as import_agents_from_package_core, inspect_offline_package, install_agent_driver_from,
-    invalidate_registry_cache, reinstall_agent_jre_from, uninstall_agent_driver, uninstall_agent_jre,
-    upgrade_all_agent_drivers_from, AgentProgressEvent, OfflineImportPlan, UpgradeAllAgentDriversResult,
+    build_agent_list, cancel_agent_batch_upgrade, cancel_agent_driver_install, clear_agent_download_cache,
+    fetch_registry_from, import_agent_driver, import_agents_from_package as import_agents_from_package_core,
+    inspect_offline_package, install_agent_driver_from_claimed, invalidate_registry_cache, reinstall_agent_jre_from,
+    uninstall_agent_driver, uninstall_agent_jre, upgrade_all_agent_drivers_from_claimed, AgentProgressEvent,
+    OfflineImportPlan, UpgradeAllAgentDriversResult,
 };
 use dbx_core::connection::AppState;
 use dbx_core::driver_runtime::DriverRuntimeSummary;
@@ -71,13 +74,26 @@ pub async fn install_agent(
     source: Option<DownloadSource>,
     operation_id: Option<String>,
 ) -> Result<(), String> {
-    ensure_no_agent_update_blockers(state.inner().as_ref(), std::slice::from_ref(&db_type)).await?;
-    let app_handle = app.clone();
-    let operation_id = operation_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    install_agent_driver_from(&state.agent_manager, &db_type, source.unwrap_or_default(), move |event| {
-        emit_agent_progress(&app_handle, &operation_id, event)
-    })
-    .await
+    // Register the cancellation token BEFORE any awaitable setup (blocker check,
+    // lock wait, registry fetch) so a cancel fired while the UI shows the modal
+    // is observed by the install instead of being silently lost.
+    let cancellation = state.agent_manager.begin_install_cancellation(&db_type).await;
+    let result = async {
+        ensure_no_agent_update_blockers(state.inner().as_ref(), std::slice::from_ref(&db_type)).await?;
+        let app_handle = app.clone();
+        let operation_id = operation_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        install_agent_driver_from_claimed(
+            &state.agent_manager,
+            &db_type,
+            source.unwrap_or_default(),
+            move |event| emit_agent_progress(&app_handle, &operation_id, event),
+            &cancellation,
+        )
+        .await
+    }
+    .await;
+    state.agent_manager.finish_install_cancellation(&db_type, &cancellation).await;
+    result
 }
 
 #[tauri::command]
@@ -88,17 +104,39 @@ pub async fn upgrade_all_agents(
     operation_id: Option<String>,
 ) -> Result<UpgradeAllAgentDriversResult, String> {
     let source = source.unwrap_or_default();
-    let registry = fetch_registry_from(source).await?;
-    let agents = build_agent_list(&state.agent_manager, Some(&registry));
-    let updatable: Vec<String> =
-        agents.iter().filter(|agent| agent.update_available).map(|agent| agent.db_type.clone()).collect();
-    ensure_no_agent_update_blockers(state.inner().as_ref(), &updatable).await?;
-    let app_handle = app.clone();
-    let operation_id = operation_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    upgrade_all_agent_drivers_from(&state.agent_manager, source, move |event| {
-        emit_agent_progress(&app_handle, &operation_id, event)
-    })
-    .await
+    // Register the batch token BEFORE the registry fetch + blocker check so a
+    // cancel fired while the batch is still setting up aborts it instead of
+    // being lost.
+    let cancellation = state.agent_manager.begin_install_cancellation(BATCH_UPGRADE_CANCEL_KEY).await;
+    let result = async {
+        let registry = fetch_registry_from(source).await?;
+        let agents = build_agent_list(&state.agent_manager, Some(&registry));
+        let updatable: Vec<String> =
+            agents.iter().filter(|agent| agent.update_available).map(|agent| agent.db_type.clone()).collect();
+        ensure_no_agent_update_blockers(state.inner().as_ref(), &updatable).await?;
+        let app_handle = app.clone();
+        let operation_id = operation_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        upgrade_all_agent_drivers_from_claimed(
+            &state.agent_manager,
+            source,
+            move |event| emit_agent_progress(&app_handle, &operation_id, event),
+            &cancellation,
+        )
+        .await
+    }
+    .await;
+    state.agent_manager.finish_install_cancellation(BATCH_UPGRADE_CANCEL_KEY, &cancellation).await;
+    result
+}
+
+#[tauri::command]
+pub async fn cancel_agent_install(state: State<'_, Arc<AppState>>, db_type: String) -> Result<(), String> {
+    cancel_agent_driver_install(&state.agent_manager, &db_type).await
+}
+
+#[tauri::command]
+pub async fn cancel_agent_upgrade_all(state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    cancel_agent_batch_upgrade(&state.agent_manager).await
 }
 
 #[tauri::command]

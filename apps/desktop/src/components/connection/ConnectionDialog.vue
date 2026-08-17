@@ -67,7 +67,7 @@ import { loadConnectionPickerView, saveConnectionPickerView, type DbPickerView }
 import { normalizeRocketmqNamesrvAddr } from "@/lib/connection/rocketmqNamesrv";
 import { normalizeRabbitmqAddresses } from "@/lib/connection/rabbitmqAddresses";
 import { detectMqUiAuthKind, isMqAuthKindAllowedForSystem, type MqUiAuthKind } from "@/lib/connection/mqAuth";
-import { driverInstallProgressChannel, driverInstallProgressPercent, isDriverInstallProgressForOperation, type DriverInstallProgress } from "@/lib/connection/driverInstallProgressUi";
+import { driverInstallProgressChannel, driverInstallProgressPercent, isDriverInstallCanceledError, isDriverInstallProgressForOperation, type DriverInstallProgress } from "@/lib/connection/driverInstallProgressUi";
 import { requiresSqlServerLegacyCompatibilityComponent, setSqlServerLegacyCompatibilityConfig, sqlServerUsesLegacyCompatibility, SQLSERVER_LEGACY_COMPATIBILITY_DRIVER_KEY } from "@/lib/connection/sqlServerLegacyCompatibility";
 import { normalizeNacosEndpoint, normalizeNacosMetricsUrl, parseNacosManagedNamespaces } from "@/lib/nacos/nacosAdmin";
 import { loadReadableNacosNamespaces, nacosNamespaceIdentity, normalizeNacosNamespaceSelection } from "@/lib/nacos/nacosNamespaceVisibility";
@@ -258,6 +258,9 @@ const agentInstallDriverKey = ref("");
 const agentInstallLabel = ref("");
 const agentInstallProgress = ref<DriverInstallProgress | null>(null);
 const agentInstallError = ref("");
+/** Set when the user cancels from the modal, so the pending promise's
+ * "canceled by user" error is treated as a non-failure by its caller. */
+const agentInstallCancelRequested = ref(false);
 const showConnectionErrorDialog = ref(false);
 const connectionErrorRawDetail = ref("");
 const connectionErrorDetail = ref("");
@@ -1893,6 +1896,7 @@ function beginAgentDriverInstall(driverKey: string, label: string) {
   agentInstallLabel.value = label;
   agentInstallProgress.value = null;
   agentInstallError.value = "";
+  agentInstallCancelRequested.value = false;
   agentInstallRunning.value = true;
   showAgentInstallDialog.value = true;
 }
@@ -1910,6 +1914,23 @@ function failAgentDriverInstall(error: unknown) {
   agentInstallRunning.value = false;
   agentInstallError.value = translateBackendError(t, error);
   showAgentInstallDialog.value = true;
+}
+
+/**
+ * Abort an in-flight agent driver install from the modal's Cancel button.
+ * The backend stops the download; the pending `installAgent` promise resolves
+ * with a "canceled by user" error, which callers treat as a non-failure.
+ */
+async function cancelActiveAgentInstall() {
+  if (!agentInstallDriverKey.value) return;
+  try {
+    await api.cancelAgentInstall(agentInstallDriverKey.value);
+  } catch {
+    // The cancel request itself failing is not fatal: finish the modal so the
+    // user is not left stuck on a progress dialog.
+  }
+  agentInstallCancelRequested.value = true;
+  finishAgentDriverInstall();
 }
 
 function showConnectionError(message: string) {
@@ -1966,6 +1987,12 @@ async function ensureRequiredAgentDriverInstalled(config: ConnectionConfig): Pro
     await refreshLocalAgentDrivers();
     finishAgentDriverInstall();
   } catch (error) {
+    if (agentInstallCancelRequested.value || isDriverInstallCanceledError(error)) {
+      // User cancelled: close silently, do not surface a failure.
+      testResult.value = null;
+      finishAgentDriverInstall();
+      return;
+    }
     testResult.value = { ok: false, message: translateBackendError(t, error) };
     failAgentDriverInstall(error);
     throw error;
@@ -2021,6 +2048,11 @@ async function installSqlServerLegacyCompatibilityComponentIfNeeded(): Promise<b
     await refreshLocalAgentDrivers();
     finishAgentDriverInstall();
   } catch (error) {
+    if (agentInstallCancelRequested.value || isDriverInstallCanceledError(error)) {
+      // User cancelled the download: the toggle's caller falls back to `auto`.
+      finishAgentDriverInstall();
+      return false;
+    }
     testResult.value = { ok: false, message: translateBackendError(t, error) };
     failAgentDriverInstall(error);
     throw error;
@@ -2038,7 +2070,13 @@ async function setSqlServerDriverMode(mode: "auto" | "legacy") {
   }
 
   try {
-    await installSqlServerLegacyCompatibilityComponentIfNeeded();
+    const installed = await installSqlServerLegacyCompatibilityComponentIfNeeded();
+    if (!installed) {
+      // User cancelled the download: never leave the form in legacy mode
+      // without the component installed.
+      setSqlServerLegacyCompatibilityConfig(form.value, false);
+      return;
+    }
     setSqlServerLegacyCompatibilityConfig(form.value, true);
     testResult.value = null;
   } catch {
@@ -8525,6 +8563,9 @@ function openExternalUrl(url: string) {
         <Button v-if="agentInstallError" variant="outline" @click="copyAgentInstallError">
           <Copy class="mr-1.5 h-3.5 w-3.5" />
           {{ t("connection.copyError") }}
+        </Button>
+        <Button v-if="agentInstallRunning && !agentInstallError" variant="outline" @click="cancelActiveAgentInstall">
+          {{ t("common.cancel") }}
         </Button>
         <Button :disabled="!canCloseAgentInstallDialog" @click="showAgentInstallDialog = false">
           {{ agentInstallError ? t("common.close") : t("connection.driverInstall.installingButton") }}

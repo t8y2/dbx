@@ -118,6 +118,8 @@ export interface AgentDriverUpdateIssue {
 
 export interface UpgradeAllAgentDriversResult {
   upgraded: number;
+  /** Drivers whose install was aborted by a user cancel (single-driver or batch). */
+  cancelled: number;
   failed: AgentDriverUpdateIssue[];
 }
 
@@ -1890,6 +1892,14 @@ export async function installAgent(dbType: string, source?: UpdateDownloadSource
 
 export async function upgradeAllAgents(source?: UpdateDownloadSource, operationId?: string): Promise<UpgradeAllAgentDriversResult> {
   return invoke("upgrade_all_agents", { source, operationId });
+}
+
+export async function cancelAgentInstall(dbType: string): Promise<void> {
+  return invoke("cancel_agent_install", { dbType });
+}
+
+export async function cancelAgentUpgradeAll(): Promise<void> {
+  return invoke("cancel_agent_upgrade_all");
 }
 
 export async function checkAgentUpdateBlockers(dbTypes: string[]): Promise<AgentUpdateBlocker[]> {

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, reactive, onMounted, onUnmounted, computed, watch, nextTick } from "vue";
 import { useI18n } from "vue-i18n";
-import { Activity, ExternalLink, Cpu, FolderOpen, FolderSync, MemoryStick, Search, Square, Trash2, Download, RotateCcw, Loader2, RefreshCw, Check, Clock3, FileUp } from "@lucide/vue";
+import { Activity, ExternalLink, Cpu, FolderOpen, FolderSync, MemoryStick, Search, Square, Trash2, Download, RotateCcw, Loader2, RefreshCw, Check, Clock3, FileUp, X } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -23,6 +23,7 @@ import {
   addDriverInstallQueue,
   driverInstallProgressChannel,
   driverInstallProgressPercent,
+  isDriverInstallCanceledError,
   isDriverInstallProgressForOperation,
   isDriverInstallProgressTarget,
   removeDriverInstallQueue,
@@ -490,6 +491,10 @@ async function runDriverInstall(dbType: string) {
     await refreshAgents();
     toast(t("driverStore.driverInstallSuccess", { label }));
   } catch (e: any) {
+    if (isDriverInstallCanceledError(e)) {
+      toast(t("driverStore.driverInstallCancelled", { label }));
+      return;
+    }
     toast(t("driverStore.driverInstallFailed", { label, error: backendError(e) }));
   } finally {
     installing.value = null;
@@ -525,6 +530,10 @@ async function upgradeAll() {
     }
     const result = await api.upgradeAllAgents(activeAgentOperationId.value);
     await refreshAgents();
+    if (result.cancelled > 0 && result.failed.length === 0) {
+      toast(t("driverStore.upgradeAllCancelled", { count: result.cancelled }));
+      return;
+    }
     if (result.failed.length > 0) {
       const failedLabels = result.failed.map((item) => drivers.value.find((driver) => driver.db_type === item.db_type)?.label ?? item.db_type).join(", ");
       toast(t("driverStore.upgradeAllPartial", { count: result.upgraded, failed: failedLabels }));
@@ -532,6 +541,10 @@ async function upgradeAll() {
       toast(t("driverStore.upgradeAllSuccess", { count: result.upgraded }));
     }
   } catch (e: any) {
+    if (isDriverInstallCanceledError(e)) {
+      toast(t("driverStore.upgradeAllCancelled", { count: 0 }));
+      return;
+    }
     toast(t("driverStore.upgradeAllFailed", { error: backendError(e) }));
   } finally {
     upgradingAll.value = false;
@@ -539,6 +552,24 @@ async function upgradeAll() {
     upgradingCompletedCount.value = 0;
     upgradingTotal.value = 0;
     resetAgentInstallProgress();
+  }
+}
+
+/** Abort a single driver's install, whether started alone or inside a batch. */
+async function cancelDriverInstall(dbType: string) {
+  try {
+    await api.cancelAgentInstall(dbType);
+  } catch {
+    // A cancel that arrives after the download finished is a no-op.
+  }
+}
+
+/** Abort the whole batch upgrade: in-flight downloads stop, queued ones never start. */
+async function cancelUpgradeAll() {
+  try {
+    await api.cancelAgentUpgradeAll();
+  } catch {
+    // The batch may have just finished; treat a failed cancel as a no-op.
   }
 }
 
@@ -1429,11 +1460,16 @@ watch(driverStoreTab, (tab) => {
                   <div class="text-sm font-semibold">{{ t("driverStore.updatesAvailableTitle") }} ({{ globalUpdatableDrivers.length }})</div>
                   <p class="text-xs text-muted-foreground">{{ t("driverStore.updatesAvailableDescription") }}</p>
                 </div>
-                <Button size="sm" class="h-7 rounded-md text-xs shrink-0 ml-3" :disabled="installing !== null || upgradingAll || agentImportBusy" @click="upgradeAll">
-                  <Loader2 v-if="upgradingAll" class="h-3 w-3 animate-spin mr-1" />
-                  <Download v-else class="h-3 w-3 mr-1" />
-                  {{ upgradingAll ? t("driverStore.upgradingProgress", { current: upgradingCompletedCount, total: upgradingTotal }) : t("driverStore.upgradeAll") }}
-                </Button>
+                <div class="flex shrink-0 items-center gap-2">
+                  <Button size="sm" class="h-7 rounded-md text-xs shrink-0 ml-3" :disabled="installing !== null || upgradingAll || agentImportBusy" @click="upgradeAll">
+                    <Loader2 v-if="upgradingAll" class="h-3 w-3 animate-spin mr-1" />
+                    <Download v-else class="h-3 w-3 mr-1" />
+                    {{ upgradingAll ? t("driverStore.upgradingProgress", { current: upgradingCompletedCount, total: upgradingTotal }) : t("driverStore.upgradeAll") }}
+                  </Button>
+                  <Button v-if="upgradingAll" type="button" variant="outline" size="icon-sm" class="h-7 w-7 rounded-md shrink-0 text-muted-foreground hover:text-destructive" :title="t('driverStore.cancelUpgradeAll')" :aria-label="t('driverStore.cancelUpgradeAll')" @click="cancelUpgradeAll">
+                    <X class="h-3.5 w-3.5" />
+                  </Button>
+                </div>
               </div>
               <div
                 v-for="driver in globalUpdatableDrivers"
@@ -1467,7 +1503,17 @@ watch(driverStoreTab, (tab) => {
                     <Clock3 class="h-3 w-3 mr-1" />
                     {{ t("driverStore.queued") }}
                   </Button>
-                  <DriverInstallProgressCircle v-else-if="!driver.installed && isDriverProgressActive(driver.db_type)" :percent="getAgentProgressPercent(driver.db_type)" :title="getAgentProgressTitle(driver.db_type, t('driverStore.installing'))" />
+                  <DriverInstallProgressCircle v-else-if="!driver.installed && isDriverProgressActive(driver.db_type)" :percent="getAgentProgressPercent(driver.db_type)" :title="getAgentProgressTitle(driver.db_type, t('driverStore.installing'))" /><Button
+                    v-if="isDriverProgressActive(driver.db_type)"
+                    type="button"
+                    variant="ghost"
+                    size="icon-sm"
+                    class="h-7 w-7 rounded-md text-muted-foreground hover:text-destructive"
+                    :title="t('driverStore.cancelInstall')"
+                    :aria-label="t('driverStore.cancelInstall')"
+                    @click="cancelDriverInstall(driver.db_type)"
+                    ><X class="h-3.5 w-3.5"
+                  /></Button>
                   <Button v-else-if="!driver.installed" size="sm" class="h-7 rounded-md text-xs" :disabled="upgradingAll || agentImportBusy" @click="installDriver(driver.db_type)">
                     <Download class="h-3 w-3 mr-1" />
                     {{ t("driverStore.install") }}
@@ -1496,7 +1542,17 @@ watch(driverStoreTab, (tab) => {
                     <Clock3 class="h-3 w-3 mr-1" />
                     {{ t("driverStore.queued") }}
                   </Button>
-                  <DriverInstallProgressCircle v-else-if="driver.installed && driver.update_available && isDriverProgressActive(driver.db_type)" :percent="getAgentProgressPercent(driver.db_type)" :title="getAgentProgressTitle(driver.db_type, t('driverStore.updating'))" />
+                  <DriverInstallProgressCircle v-else-if="driver.installed && driver.update_available && isDriverProgressActive(driver.db_type)" :percent="getAgentProgressPercent(driver.db_type)" :title="getAgentProgressTitle(driver.db_type, t('driverStore.updating'))" /><Button
+                    v-if="isDriverProgressActive(driver.db_type)"
+                    type="button"
+                    variant="ghost"
+                    size="icon-sm"
+                    class="h-7 w-7 rounded-md text-muted-foreground hover:text-destructive"
+                    :title="t('driverStore.cancelInstall')"
+                    :aria-label="t('driverStore.cancelInstall')"
+                    @click="cancelDriverInstall(driver.db_type)"
+                    ><X class="h-3.5 w-3.5"
+                  /></Button>
                   <Button v-else-if="driver.installed && driver.update_available" size="sm" variant="outline" class="h-7 rounded-md text-xs" :disabled="upgradingAll || agentImportBusy" @click="installDriver(driver.db_type)">
                     {{ t("driverStore.update") }}
                   </Button>
@@ -1585,7 +1641,17 @@ watch(driverStoreTab, (tab) => {
                             <Clock3 class="h-3 w-3 mr-1" />
                             {{ t("driverStore.queued") }}
                           </Button>
-                          <DriverInstallProgressCircle v-else-if="!driver.installed && isDriverProgressActive(driver.db_type)" :percent="getAgentProgressPercent(driver.db_type)" :title="getAgentProgressTitle(driver.db_type, t('driverStore.installing'))" />
+                          <DriverInstallProgressCircle v-else-if="!driver.installed && isDriverProgressActive(driver.db_type)" :percent="getAgentProgressPercent(driver.db_type)" :title="getAgentProgressTitle(driver.db_type, t('driverStore.installing'))" /><Button
+                            v-if="isDriverProgressActive(driver.db_type)"
+                            type="button"
+                            variant="ghost"
+                            size="icon-sm"
+                            class="h-7 w-7 rounded-md text-muted-foreground hover:text-destructive"
+                            :title="t('driverStore.cancelInstall')"
+                            :aria-label="t('driverStore.cancelInstall')"
+                            @click="cancelDriverInstall(driver.db_type)"
+                            ><X class="h-3.5 w-3.5"
+                          /></Button>
                           <Button v-else-if="!driver.installed" size="sm" class="h-7 rounded-md text-xs" :disabled="upgradingAll || agentImportBusy" @click="installDriver(driver.db_type)">
                             <Download class="h-3 w-3 mr-1" />
                             {{ t("driverStore.install") }}
@@ -1614,7 +1680,17 @@ watch(driverStoreTab, (tab) => {
                             <Clock3 class="h-3 w-3 mr-1" />
                             {{ t("driverStore.queued") }}
                           </Button>
-                          <DriverInstallProgressCircle v-else-if="driver.installed && driver.update_available && isDriverProgressActive(driver.db_type)" :percent="getAgentProgressPercent(driver.db_type)" :title="getAgentProgressTitle(driver.db_type, t('driverStore.updating'))" />
+                          <DriverInstallProgressCircle v-else-if="driver.installed && driver.update_available && isDriverProgressActive(driver.db_type)" :percent="getAgentProgressPercent(driver.db_type)" :title="getAgentProgressTitle(driver.db_type, t('driverStore.updating'))" /><Button
+                            v-if="isDriverProgressActive(driver.db_type)"
+                            type="button"
+                            variant="ghost"
+                            size="icon-sm"
+                            class="h-7 w-7 rounded-md text-muted-foreground hover:text-destructive"
+                            :title="t('driverStore.cancelInstall')"
+                            :aria-label="t('driverStore.cancelInstall')"
+                            @click="cancelDriverInstall(driver.db_type)"
+                            ><X class="h-3.5 w-3.5"
+                          /></Button>
                           <Button v-else-if="driver.installed && driver.update_available" size="sm" variant="outline" class="h-7 rounded-md text-xs" :disabled="upgradingAll || agentImportBusy" @click="installDriver(driver.db_type)">
                             {{ t("driverStore.update") }}
                           </Button>
@@ -1669,7 +1745,17 @@ watch(driverStoreTab, (tab) => {
                         <Clock3 class="h-3 w-3 mr-1" />
                         {{ t("driverStore.queued") }}
                       </Button>
-                      <DriverInstallProgressCircle v-else-if="!driver.installed && isDriverProgressActive(driver.db_type)" :percent="getAgentProgressPercent(driver.db_type)" :title="getAgentProgressTitle(driver.db_type, t('driverStore.installing'))" />
+                      <DriverInstallProgressCircle v-else-if="!driver.installed && isDriverProgressActive(driver.db_type)" :percent="getAgentProgressPercent(driver.db_type)" :title="getAgentProgressTitle(driver.db_type, t('driverStore.installing'))" /><Button
+                        v-if="isDriverProgressActive(driver.db_type)"
+                        type="button"
+                        variant="ghost"
+                        size="icon-sm"
+                        class="h-7 w-7 rounded-md text-muted-foreground hover:text-destructive"
+                        :title="t('driverStore.cancelInstall')"
+                        :aria-label="t('driverStore.cancelInstall')"
+                        @click="cancelDriverInstall(driver.db_type)"
+                        ><X class="h-3.5 w-3.5"
+                      /></Button>
                       <Button v-else-if="!driver.installed" size="sm" class="h-7 rounded-md text-xs" :disabled="upgradingAll || agentImportBusy" @click="installDriver(driver.db_type)">
                         <Download class="h-3 w-3 mr-1" />
                         {{ t("driverStore.install") }}
@@ -1698,7 +1784,17 @@ watch(driverStoreTab, (tab) => {
                         <Clock3 class="h-3 w-3 mr-1" />
                         {{ t("driverStore.queued") }}
                       </Button>
-                      <DriverInstallProgressCircle v-else-if="driver.installed && driver.update_available && isDriverProgressActive(driver.db_type)" :percent="getAgentProgressPercent(driver.db_type)" :title="getAgentProgressTitle(driver.db_type, t('driverStore.updating'))" />
+                      <DriverInstallProgressCircle v-else-if="driver.installed && driver.update_available && isDriverProgressActive(driver.db_type)" :percent="getAgentProgressPercent(driver.db_type)" :title="getAgentProgressTitle(driver.db_type, t('driverStore.updating'))" /><Button
+                        v-if="isDriverProgressActive(driver.db_type)"
+                        type="button"
+                        variant="ghost"
+                        size="icon-sm"
+                        class="h-7 w-7 rounded-md text-muted-foreground hover:text-destructive"
+                        :title="t('driverStore.cancelInstall')"
+                        :aria-label="t('driverStore.cancelInstall')"
+                        @click="cancelDriverInstall(driver.db_type)"
+                        ><X class="h-3.5 w-3.5"
+                      /></Button>
                       <Button v-else-if="driver.installed && driver.update_available" size="sm" variant="outline" class="h-7 rounded-md text-xs" :disabled="upgradingAll || agentImportBusy" @click="installDriver(driver.db_type)">
                         {{ t("driverStore.update") }}
                       </Button>

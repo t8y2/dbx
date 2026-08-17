@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
 
-import { addDriverInstallQueue, driverInstallProgressPercent, isDriverInstallProgressTarget, removeDriverInstallQueue, takeNextDriverInstallQueue } from "../../apps/desktop/src/lib/connection/driverInstallProgressUi.ts";
+import { addDriverInstallQueue, driverInstallProgressPercent, isDriverInstallCanceledError, isDriverInstallProgressTarget, removeDriverInstallQueue, takeNextDriverInstallQueue } from "../../apps/desktop/src/lib/connection/driverInstallProgressUi.ts";
 
 test("formats driver install progress as a bounded whole percent", () => {
   assert.equal(driverInstallProgressPercent({ step: "driver", downloaded: 3_900_000, total: 10_500_000 }), 37);
@@ -43,4 +43,13 @@ test("takes the next installable queued driver and drops stale queued drivers", 
 
   assert.equal(result.next, "mysql");
   assert.deepEqual(result.queue, ["sqlite"]);
+});
+
+test("recognizes a user-cancelled driver install error", () => {
+  assert.equal(isDriverInstallCanceledError(new Error("Agent download canceled by user.")), true);
+  assert.equal(isDriverInstallCanceledError("prefix Agent download canceled by user. suffix"), true);
+  assert.equal(isDriverInstallCanceledError({ message: "Agent download canceled by user." }), true);
+  assert.equal(isDriverInstallCanceledError("Failed to install driver: 404"), false);
+  assert.equal(isDriverInstallCanceledError(null), false);
+  assert.equal(isDriverInstallCanceledError(undefined), false);
 });

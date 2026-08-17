@@ -106,6 +106,8 @@ export async function upgradeAllAgents(operationId?: string) {
   const backend = await getBackend();
   return backend.upgradeAllAgents(useSettingsStore().editorSettings.updateDownloadSource, operationId);
 }
+export const cancelAgentInstall = forward("cancelAgentInstall");
+export const cancelAgentUpgradeAll = forward("cancelAgentUpgradeAll");
 export const checkAgentUpdateBlockers = forward("checkAgentUpdateBlockers");
 export const uninstallAgent = forward("uninstallAgent");
 export const getAgentJavaRuntimeConfig = forward("getAgentJavaRuntimeConfig");

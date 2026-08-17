@@ -2081,6 +2081,7 @@ export default withEnglishFallback({
     noResults: "結果なし",
     edit: "編集",
     delete: "削除",
+    disabled: "無効",
     back: "戻る",
   },
   dateTimePicker: {

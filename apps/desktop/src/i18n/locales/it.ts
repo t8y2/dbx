@@ -2054,6 +2054,7 @@ export default withEnglishFallback({
     noResults: "Nessun risultato",
     edit: "Modifica",
     delete: "Elimina",
+    disabled: "Disabilitato",
     back: "Indietro",
   },
   dateTimePicker: {

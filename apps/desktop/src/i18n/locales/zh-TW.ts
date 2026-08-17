@@ -2055,6 +2055,7 @@ export default withEnglishFallback({
     noResults: "無結果",
     edit: "編輯",
     delete: "刪除",
+    disabled: "停用",
     back: "返回",
   },
   dateTimePicker: {

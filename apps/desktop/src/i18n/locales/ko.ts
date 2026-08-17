@@ -1974,6 +1974,7 @@ export default withEnglishFallback({
     noResults: "결과 없음",
     edit: "편집",
     delete: "삭제",
+    disabled: "비활성화",
     back: "뒤로",
   },
   dateTimePicker: {

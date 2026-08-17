@@ -2123,6 +2123,7 @@ export default {
     noResults: "No results",
     edit: "Edit",
     delete: "Delete",
+    disabled: "Disabled",
     back: "Back",
   },
   dateTimePicker: {

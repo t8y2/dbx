@@ -5033,7 +5033,7 @@ mod tests {
     }
 
     #[test]
-    fn vastbase_keyless_query_result_update_preserves_default_search_path() {
+    fn vastbase_keyless_query_result_writes_preserve_default_search_path() {
         let result = prepare_data_grid_save(DataGridSaveStatementOptions {
             database_type: Some(DatabaseType::Vastbase),
             identifier_quote: None,
@@ -5050,14 +5050,17 @@ mod tests {
             rows: vec![vec![json!("mono"), json!(461936049002042_i64)]],
             dirty_rows: vec![(0, vec![(0, json!("LY-SC01-260800002"))])],
             deleted_rows: vec![],
-            new_rows: vec![],
+            new_rows: vec![vec![json!("dbx-insert-check"), json!(461936049002043_i64)]],
         });
 
         assert_eq!(result.validation_error, None);
         assert_eq!(result.execution_schema, None);
         assert_eq!(
             result.statements,
-            vec!["UPDATE \"TBLCUSPOSTMATERIALLOG\" SET \"MONO\" = 'LY-SC01-260800002' WHERE \"MONO\" = 'mono' AND \"ID\" = 461936049002042;"]
+            vec![
+                "UPDATE \"TBLCUSPOSTMATERIALLOG\" SET \"MONO\" = 'LY-SC01-260800002' WHERE \"MONO\" = 'mono' AND \"ID\" = 461936049002042;",
+                "INSERT INTO \"TBLCUSPOSTMATERIALLOG\" (\"MONO\", \"ID\") VALUES ('dbx-insert-check', 461936049002043);",
+            ]
         );
     }
 

@@ -176,6 +176,54 @@ func TestURLParamsOverrideConnectionString(t *testing.T) {
 	if config.TransportMode != "http" || config.HTTPPath != "proxy" {
 		t.Fatalf("URL params did not override connection string: %#v", config)
 	}
+	if len(config.Endpoints) != 1 || config.Endpoints[0] != (endpoint{Host: "hive.example.com", Port: 10000}) {
+		t.Fatalf("resolved form endpoint did not override connection string: %#v", config.Endpoints)
+	}
+}
+
+func TestResolvedDirectEndpointAndDatabasePreserveJDBCParameterSections(t *testing.T) {
+	config, err := parseConnectionConfig(connectParams{
+		Host:             "127.0.0.1",
+		Port:             18080,
+		Database:         "analytics",
+		ConnectionString: "jdbc:hive2://old.example.com:10000/default;transportMode=http;httpPath=gateway?hive.exec.dynamic.partition=true#SourceTable=events",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(config.Endpoints) != 1 || config.Endpoints[0] != (endpoint{Host: "127.0.0.1", Port: 18080}) {
+		t.Fatalf("unexpected resolved endpoint: %#v", config.Endpoints)
+	}
+	if config.Database != "analytics" {
+		t.Fatalf("resolved database = %q, want analytics", config.Database)
+	}
+	if config.TransportMode != "http" || config.HTTPPath != "gateway" {
+		t.Fatalf("JDBC session parameters were not preserved: %#v", config)
+	}
+	if config.HiveConfiguration["set:hiveconf:hive.exec.dynamic.partition"] != "true" {
+		t.Fatalf("JDBC hiveConfs were not preserved: %#v", config.HiveConfiguration)
+	}
+	if config.HiveConfiguration["set:hivevar:SourceTable"] != "events" {
+		t.Fatalf("JDBC hiveVars were not preserved: %#v", config.HiveConfiguration)
+	}
+}
+
+func TestZooKeeperDiscoveryKeepsAllJDBCEndpoints(t *testing.T) {
+	config, err := parseConnectionConfig(connectParams{
+		Host:             "127.0.0.1",
+		Port:             12181,
+		Database:         "analytics",
+		ConnectionString: "jdbc:hive2://zk1.example.com:2181,zk2.example.com:2181/default;serviceDiscoveryMode=zooKeeper;zooKeeperNamespace=hiveserver2",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(config.Endpoints) != 2 || config.Endpoints[0].Host != "zk1.example.com" || config.Endpoints[1].Host != "zk2.example.com" {
+		t.Fatalf("ZooKeeper discovery endpoints were not preserved: %#v", config.Endpoints)
+	}
+	if config.Database != "analytics" {
+		t.Fatalf("resolved database = %q, want analytics", config.Database)
+	}
 }
 
 func TestImpalaDefaultsToNoSASL(t *testing.T) {

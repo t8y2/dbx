@@ -512,7 +512,7 @@ export default withEnglishFallback({
     spannerInstance: "Instance ID",
     spannerDatabase: "Database ID",
     spannerResourcePathHint: "projects/my-project/instances/my-instance/databases/my-database",
-    spannerHostHint: "連線 Google Cloud 時主機留空。使用本機 emulator 時，主機填 localhost、連接埠填 9010，並在 URL 參數中加入 usePlainText=true;autoConfigEmulator=true。",
+    spannerHostHint: "連線 Google Cloud 時主機留空。使用本機 emulator 時，主機填 localhost、連接埠填 9010 即可，回環位址會自動啟用明文 gRPC。",
     spannerCredentialsHint: "驗證使用 Application Default Credentials。若要使用服務帳號金鑰檔案，請在 URL 參數中加入 credentials=/path/key.json。",
     spannerFieldsRequired: "必須填寫 Cloud Spanner 的 project、instance 和 database。",
     gbaseServer: "GBASEDBTSERVER",

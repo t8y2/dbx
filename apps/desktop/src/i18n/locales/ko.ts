@@ -516,7 +516,7 @@ export default withEnglishFallback({
     spannerInstance: "인스턴스 ID",
     spannerDatabase: "데이터베이스 ID",
     spannerResourcePathHint: "projects/my-project/instances/my-instance/databases/my-database",
-    spannerHostHint: "Google Cloud에 연결할 때는 호스트를 비워 둡니다. 로컬 에뮬레이터는 호스트를 localhost, 포트를 9010으로 지정하고 URL 매개변수에 usePlainText=true;autoConfigEmulator=true를 추가하세요.",
+    spannerHostHint: "Google Cloud에 연결할 때는 호스트를 비워 둡니다. 로컬 에뮬레이터는 호스트를 localhost, 포트를 9010으로만 지정하면 되며, 루프백 호스트에서는 일반 텍스트 gRPC가 자동으로 활성화됩니다.",
     spannerCredentialsHint: "인증은 Application Default Credentials를 사용합니다. 서비스 계정 키 파일을 사용하려면 URL 매개변수에 credentials=/path/key.json을 추가하세요.",
     spannerFieldsRequired: "Cloud Spanner 프로젝트, 인스턴스, 데이터베이스는 필수입니다.",
     hiveAuthMode: "인증",

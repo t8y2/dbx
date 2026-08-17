@@ -56,6 +56,10 @@ public final class SpannerAgent extends ConfiguredJdbcAgent {
     private static final String POSTGRES_FALLBACK_SCHEMA = "public";
     private static final String PRIMARY_KEY_INDEX = "PRIMARY_KEY";
     private static final String URL_PREFIX = "jdbc:cloudspanner:";
+    /** A loopback endpoint is always the local emulator: the real service is addressed host-less. */
+    private static final Set<String> LOOPBACK_HOSTS =
+        new HashSet<>(Arrays.asList("localhost", "127.0.0.1", "::1", "[::1]"));
+    private static final String PLAIN_TEXT_PARAM = "usePlainText=true";
     private static final int DEFAULT_COMPLETION_LIMIT = 100;
     private static final int MAX_COMPLETION_LIMIT = 1000;
 
@@ -265,7 +269,53 @@ public final class SpannerAgent extends ConfiguredJdbcAgent {
         }
         // params.database carries the full resource path projects/{p}/instances/{i}/databases/{d}.
         url.append('/').append(stripLeadingSlashes(trimmed(params.getDatabase())));
-        return appendUrlParams(url.toString(), params.getUrl_params());
+        return appendUrlParams(url.toString(), emulatorAwareUrlParams(host, params.getUrl_params()));
+    }
+
+    /**
+     * The emulator speaks plaintext gRPC, but the driver defaults to TLS plus Application Default
+     * Credentials because nothing in the URL distinguishes an emulator endpoint from a private one.
+     * Pointing a connection at localhost without a plaintext flag therefore burns the whole connect
+     * timeout while gRPC retries a TLS handshake against a plaintext port, and reports only
+     * {@code UNAVAILABLE: io exception} — so a loopback host opts into plaintext by default.
+     *
+     * <p>An explicit {@code usePlainText} or {@code autoConfigEmulator} always wins, including
+     * {@code usePlainText=false}. {@code autoConfigEmulator} implies plaintext but additionally
+     * creates a missing instance and database, which is a choice only the user should make.
+     */
+    private static String emulatorAwareUrlParams(String host, String urlParams) {
+        String configured = trimmed(urlParams);
+        if (!LOOPBACK_HOSTS.contains(host.toLowerCase(Locale.ROOT))) {
+            return configured;
+        }
+        if (hasUrlParam(configured, "usePlainText") || hasUrlParam(configured, "autoConfigEmulator")) {
+            return configured;
+        }
+        return configured.isEmpty() ? PLAIN_TEXT_PARAM : configured + ";" + PLAIN_TEXT_PARAM;
+    }
+
+    /**
+     * Matches a property name at a separator boundary so that {@code usePlainText} is not reported
+     * for an unrelated property that merely ends with it. Spanner property names are
+     * case-insensitive.
+     */
+    private static boolean hasUrlParam(String urlParams, String name) {
+        String haystack = urlParams.toLowerCase(Locale.ROOT);
+        String needle = name.toLowerCase(Locale.ROOT);
+        for (int from = 0; from <= haystack.length() - needle.length(); ) {
+            int index = haystack.indexOf(needle, from);
+            if (index < 0) {
+                return false;
+            }
+            boolean startsToken = index == 0 || "?;&".indexOf(haystack.charAt(index - 1)) >= 0;
+            int after = index + needle.length();
+            boolean endsToken = after >= haystack.length() || haystack.charAt(after) == '=';
+            if (startsToken && endsToken) {
+                return true;
+            }
+            from = index + 1;
+        }
+        return false;
     }
 
     static List<TableInfo> spannerTables(Connection conn, String schema) {

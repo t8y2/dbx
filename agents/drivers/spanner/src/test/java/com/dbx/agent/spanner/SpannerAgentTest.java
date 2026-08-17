@@ -272,6 +272,79 @@ class SpannerAgentTest extends JdbcFakeExecutionBehaviorTest {
     }
 
     @Test
+    void defaultsALoopbackEndpointToPlaintextBecauseTheEmulatorRejectsTls() {
+        ConnectParams params = new ConnectParams();
+        params.setHost("127.0.0.1");
+        params.setPort(9010);
+        params.setDatabase("projects/p/instances/i/databases/d");
+
+        // Without this the driver treats the emulator as a production endpoint, retries a TLS
+        // handshake against a plaintext port for the whole connect timeout, and fails with
+        // `UNAVAILABLE: io exception`.
+        assertEquals(
+            "jdbc:cloudspanner://127.0.0.1:9010/projects/p/instances/i/databases/d?usePlainText=true",
+            SpannerAgent.spannerUrl(params)
+        );
+    }
+
+    @Test
+    void appendsPlaintextAfterTheConfiguredParamsForALoopbackEndpoint() {
+        ConnectParams params = new ConnectParams();
+        params.setHost("localhost");
+        params.setPort(9010);
+        params.setDatabase("projects/p/instances/i/databases/d");
+        params.setUrl_params("autocommit=true");
+
+        assertEquals(
+            "jdbc:cloudspanner://localhost:9010/projects/p/instances/i/databases/d"
+                + "?autocommit=true;usePlainText=true",
+            SpannerAgent.spannerUrl(params)
+        );
+    }
+
+    @Test
+    void keepsAnExplicitPlaintextChoiceIncludingOptingOut() {
+        ConnectParams optOut = new ConnectParams();
+        optOut.setHost("localhost");
+        optOut.setPort(9010);
+        optOut.setDatabase("projects/p/instances/i/databases/d");
+        optOut.setUrl_params("usePlainText=false");
+
+        assertEquals(
+            "jdbc:cloudspanner://localhost:9010/projects/p/instances/i/databases/d?usePlainText=false",
+            SpannerAgent.spannerUrl(optOut)
+        );
+
+        // autoConfigEmulator already implies plaintext, and it additionally creates a missing
+        // instance and database, so it must not be silently paired with usePlainText.
+        ConnectParams autoConfig = new ConnectParams();
+        autoConfig.setHost("localhost");
+        autoConfig.setPort(9010);
+        autoConfig.setDatabase("projects/p/instances/i/databases/d");
+        autoConfig.setUrl_params("autoConfigEmulator=true");
+
+        assertEquals(
+            "jdbc:cloudspanner://localhost:9010/projects/p/instances/i/databases/d?autoConfigEmulator=true",
+            SpannerAgent.spannerUrl(autoConfig)
+        );
+    }
+
+    @Test
+    void leavesRemoteEndpointsOnTls() {
+        // A non-loopback host may well be a private or proxied Spanner endpoint, so plaintext stays
+        // opt-in there. The host-less form used for the real service is covered separately.
+        ConnectParams params = new ConnectParams();
+        params.setHost("spanner.internal.example.com");
+        params.setPort(443);
+        params.setDatabase("projects/p/instances/i/databases/d");
+
+        assertEquals(
+            "jdbc:cloudspanner://spanner.internal.example.com:443/projects/p/instances/i/databases/d",
+            SpannerAgent.spannerUrl(params)
+        );
+    }
+
+    @Test
     void usesTheDefaultPortWhenNoneIsConfigured() {
         ConnectParams params = new ConnectParams();
         params.setHost("spanner.googleapis.com");

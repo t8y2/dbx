@@ -511,7 +511,7 @@ export default withEnglishFallback({
     spannerInstance: "ID istanza",
     spannerDatabase: "ID database",
     spannerResourcePathHint: "projects/my-project/instances/my-instance/databases/my-database",
-    spannerHostHint: "Lascia vuoto l'host per Google Cloud. Per l'emulatore locale imposta l'host localhost con la porta 9010 e aggiungi usePlainText=true;autoConfigEmulator=true ai parametri URL.",
+    spannerHostHint: "Lascia vuoto l'host per Google Cloud. Per l'emulatore locale è sufficiente impostare l'host localhost con la porta 9010: il gRPC in chiaro viene abilitato automaticamente sugli host di loopback.",
     spannerCredentialsHint: "L'autenticazione usa Application Default Credentials. Per usare un file di chiave del service account, aggiungi credentials=/path/key.json ai parametri URL.",
     spannerFieldsRequired: "Progetto, istanza e database di Cloud Spanner sono obbligatori.",
     gbaseServer: "GBASEDBTSERVER",

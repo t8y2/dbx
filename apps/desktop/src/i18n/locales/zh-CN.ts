@@ -447,7 +447,7 @@ export default withEnglishFallback({
     spannerInstance: "Instance ID",
     spannerDatabase: "Database ID",
     spannerResourcePathHint: "projects/my-project/instances/my-instance/databases/my-database",
-    spannerHostHint: "连接 Google Cloud 时主机留空。使用本地 emulator 时，主机填 localhost、端口填 9010，并在 URL 参数中加入 usePlainText=true;autoConfigEmulator=true。",
+    spannerHostHint: "连接 Google Cloud 时主机留空。使用本地 emulator 时，主机填 localhost、端口填 9010 即可，回环地址会自动启用明文 gRPC。",
     spannerCredentialsHint: "认证使用 Application Default Credentials。若要使用服务账号密钥文件，请在 URL 参数中加入 credentials=/path/key.json。",
     spannerFieldsRequired: "必须填写 Cloud Spanner 的 project、instance 和 database。",
     hiveAuthMode: "认证",

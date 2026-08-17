@@ -522,7 +522,7 @@ export default {
     spannerInstance: "Instance ID",
     spannerDatabase: "Database ID",
     spannerResourcePathHint: "projects/my-project/instances/my-instance/databases/my-database",
-    spannerHostHint: "Leave the host empty for Google Cloud. For the local emulator, set the host to localhost with port 9010 and add usePlainText=true;autoConfigEmulator=true to URL Params.",
+    spannerHostHint: "Leave the host empty for Google Cloud. For the local emulator, set the host to localhost with port 9010; plaintext gRPC is enabled automatically for loopback hosts.",
     spannerCredentialsHint: "Authentication uses Application Default Credentials. To use a service account key file, add credentials=/path/key.json to URL Params.",
     spannerFieldsRequired: "Cloud Spanner project, instance, and database are required.",
     hiveAuthMode: "Auth",

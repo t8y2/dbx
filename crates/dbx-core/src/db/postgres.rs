@@ -5473,6 +5473,30 @@ pub async fn list_indexes(pool: &Pool, schema: &str, table: &str) -> Result<Vec<
     }
 }
 
+/// Names of same-table indexes whose `pg_index.indisvalid` is `false`.
+///
+/// A cancelled `CREATE INDEX CONCURRENTLY` leaves an INVALID index behind with
+/// the requested name; until it is dropped, any retry of the same build fails
+/// with `relation already exists`. The structure editor consults this before
+/// applying a concurrent build so it can surface the leftover explicitly
+/// instead of failing silently.
+const POSTGRES_INVALID_INDEXES_SQL: &str = "SELECT idx.relname \
+     FROM pg_catalog.pg_index ix \
+     JOIN pg_catalog.pg_class idx ON idx.oid = ix.indexrelid \
+     JOIN pg_catalog.pg_class t ON t.oid = ix.indrelid \
+     JOIN pg_catalog.pg_namespace n ON n.oid = t.relnamespace \
+     WHERE n.nspname = $1 AND t.relname = $2 AND ix.indisvalid = false \
+     ORDER BY idx.relname";
+
+pub async fn list_invalid_indexes(pool: &Pool, schema: &str, table: &str) -> Result<Vec<String>, String> {
+    let schema = if schema.is_empty() { "public" } else { schema };
+    let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
+    let rows = postgres_query_cached(&client, POSTGRES_INVALID_INDEXES_SQL, &[&schema, &table])
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(rows.iter().map(|row| pg_row_try_string(row, 0)).collect())
+}
+
 fn postgres_foreign_keys_sql() -> &'static str {
     "SELECT fk.constraint_name, fk.column_name, \
      pk.table_schema AS ref_schema, pk.table_name AS ref_table, pk.column_name AS ref_column, \

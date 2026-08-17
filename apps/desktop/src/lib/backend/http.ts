@@ -869,6 +869,19 @@ export async function listPartitions(connectionId: string, database: string, sch
   return get(`/api/schema/partitions?${qs({ connection_id: connectionId, database, schema, table, catalog })}`);
 }
 
+export interface TablePartitionStatus {
+  isPartitionedParent: boolean;
+  isPartition: boolean;
+}
+
+export async function getTablePartitionStatus(connectionId: string, database: string, schema: string, table: string): Promise<TablePartitionStatus> {
+  return get(`/api/schema/table-partition-status?${qs({ connection_id: connectionId, database, schema, table })}`);
+}
+
+export async function listInvalidIndexes(connectionId: string, database: string, schema: string, table: string): Promise<string[]> {
+  return get(`/api/schema/invalid-indexes?${qs({ connection_id: connectionId, database, schema, table })}`);
+}
+
 export async function listSubpartitions(connectionId: string, database: string, schema: string, table: string, catalog?: string): Promise<SubpartitionInfo[]> {
   return get(`/api/schema/subpartitions?${qs({ connection_id: connectionId, database, schema, table, catalog })}`);
 }
@@ -1105,12 +1118,13 @@ export async function closeClientConnectionSession(connectionId: string, databas
   });
 }
 
-export async function executeBatch(connectionId: string, database: string, statements: string[], schema?: string): Promise<QueryResult> {
+export async function executeBatch(connectionId: string, database: string, statements: string[], schema?: string, timeoutSecs?: number): Promise<QueryResult> {
   return post("/api/query/execute-batch", {
     connectionId,
     database,
     statements,
     schema,
+    timeoutSecs,
   });
 }
 

@@ -9,12 +9,16 @@ use super::indexes::build_create_index_statements;
 use super::triggers::build_trigger_sql;
 use super::types::{TableStructureSqlOptions, TableStructureSqlResult};
 use super::util::{clean, format_default_for_sql, normalize_default, qualified_table, quote_ident, quote_string};
-use super::validation::{validate_columns, validate_dameng_identity};
+use super::validation::{validate_columns, validate_concurrent_index_scope, validate_dameng_identity};
 use crate::models::connection::DatabaseType;
 
 pub fn build_create_table_sql(mut options: TableStructureSqlOptions) -> TableStructureSqlResult {
     options.table_name = clean(&options.table_name);
     let mut warnings = Vec::new();
+    // Fail closed: a concurrent-index request on a partitioned parent (or on an
+    // existing index in a hand-built draft) is refused up front instead of
+    // degrading into blocking index DDL.
+    warnings.extend(validate_concurrent_index_scope(&options));
     if options.table_name.is_empty() {
         warnings.push("Table name is required.".to_string());
     }
@@ -183,6 +187,7 @@ pub fn build_create_table_sql(mut options: TableStructureSqlOptions) -> TableStr
             options.schema.as_deref(),
             &options.table_name,
             false,
+            capabilities.index_concurrent,
         ));
     }
 

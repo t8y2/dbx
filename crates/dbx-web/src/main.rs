@@ -420,6 +420,8 @@ async fn main() {
         .route("/schema/triggers", get(routes::schema::list_triggers))
         .route("/schema/constraints", get(routes::schema::list_constraints))
         .route("/schema/partitions", get(routes::schema::list_partitions))
+        .route("/schema/table-partition-status", get(routes::schema::get_table_partition_status))
+        .route("/schema/invalid-indexes", get(routes::schema::list_invalid_indexes))
         .route("/schema/subpartitions", get(routes::schema::list_subpartitions))
         .route("/schema/functions", get(routes::schema::list_functions))
         .route("/schema/sequences", get(routes::schema::list_sequences))

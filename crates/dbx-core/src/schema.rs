@@ -6273,6 +6273,63 @@ pub async fn list_partitions_core(
     .await
 }
 
+/// PostgreSQL partition classification of a single table, used by the table
+/// structure editor to decide whether `CREATE INDEX CONCURRENTLY` applies.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TablePartitionStatus {
+    /// The table is a partitioned parent (`pg_class.relkind = 'p'`); PostgreSQL
+    /// rejects `CREATE INDEX CONCURRENTLY` directly on it — the supported
+    /// approach is building child indexes concurrently and attaching them.
+    pub is_partitioned_parent: bool,
+    /// The table is itself a partition of a parent (`pg_class.relispartition`).
+    pub is_partition: bool,
+}
+
+pub async fn table_partition_status_core(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    schema: &str,
+    table: &str,
+) -> Result<TablePartitionStatus, String> {
+    retry_metadata_connection(state, connection_id, Some(database), || async {
+        let pool_key = state.get_or_create_metadata_pool_for_session(connection_id, Some(database), None).await?;
+        let connections = state.connections.read().await;
+        match connections.get(&pool_key) {
+            Some(PoolKind::Postgres(pool)) => {
+                let info = db::postgres::get_table_partition_info(pool, schema, table).await?;
+                Ok(TablePartitionStatus {
+                    is_partitioned_parent: info.key.is_some() && !info.is_partition,
+                    is_partition: info.is_partition,
+                })
+            }
+            _ => Ok(TablePartitionStatus::default()),
+        }
+    })
+    .await
+}
+
+/// Same-table index names whose `pg_index.indisvalid` is `false` (left behind
+/// by a cancelled `CREATE INDEX CONCURRENTLY`). Empty for non-PostgreSQL pools.
+pub async fn list_invalid_indexes_core(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    schema: &str,
+    table: &str,
+) -> Result<Vec<String>, String> {
+    retry_metadata_connection(state, connection_id, Some(database), || async {
+        let pool_key = state.get_or_create_metadata_pool_for_session(connection_id, Some(database), None).await?;
+        let connections = state.connections.read().await;
+        match connections.get(&pool_key) {
+            Some(PoolKind::Postgres(pool)) => db::postgres::list_invalid_indexes(pool, schema, table).await,
+            _ => Ok(vec![]),
+        }
+    })
+    .await
+}
+
 pub async fn list_subpartitions_core(
     state: &AppState,
     connection_id: &str,

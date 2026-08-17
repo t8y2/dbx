@@ -106,7 +106,15 @@ Tauri 的完整系统要求可以参考 [Tauri 官方前置依赖文档](https:/
     1. 安装 [Microsoft C++ Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/)。
     2. 在安装器中选择 **Desktop development with C++**。
     3. 确认已安装 Windows 10/11 SDK 和 WebView2。Windows 11 通常已自带 WebView2。
-    4. 使用 PowerShell 执行本页的 Windows 命令。
+    4. 安装 [Strawberry Perl](https://github.com/StrawberryPerl/Perl-Dist-Strawberry/releases)（编译内置 OpenSSL 所需）：
+
+        ```powershell
+        winget install StrawberryPerl.StrawberryPerl
+        ```
+
+        DBX 默认启用 `sqlite-sqlcipher` 特性，需要从源码编译 SQLCipher 和 OpenSSL，而 Windows 上编译 OpenSSL 必须使用 Perl 执行 `Configure` 脚本。安装后请重新打开终端，使 `perl` 进入 `PATH`。
+
+    5. 使用 PowerShell 执行本页的 Windows 命令。
 
     Windows 不必安装 Make，本页会同时给出对应的 pnpm 命令。
 

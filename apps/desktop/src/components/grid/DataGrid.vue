@@ -265,7 +265,7 @@ import { buildColumnIndexMap, columnIndexColorClass, columnIndexMetadataRequestC
 import { supportsTableStructureEditing } from "@/lib/database/databaseCapabilities";
 import { rememberDataGridConditionHistory } from "@/lib/dataGrid/dataGridConditionHistory";
 import { restoreDataGridLocalColumnFilters, serializeDataGridLocalColumnFilters } from "@/lib/dataGrid/dataGridLocalColumnFilterState";
-import { effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
+import { effectiveDatabaseTypeForConnection, gaussdbCountQueryDopHint } from "@/lib/database/jdbcDialect";
 import { mongoCollectionSupportsIndexes, supportsMongoIndexMutations } from "@/lib/mongo/mongoCapabilities";
 import { refreshLoadedMongoIndexes } from "@/lib/mongo/mongoIndexMetadata";
 import { isProtectedMongoIndex, mongoDropAllIndexesPreview, mongoDropIndexFailureCount, mongoDropIndexPreview } from "@/lib/sidebar/mongoCollectionMutation";
@@ -3294,7 +3294,7 @@ async function buildCurrentCountTarget(): Promise<{ sql: string; schema?: string
       schema: props.tableMeta.schema,
       tableName: props.tableMeta.tableName,
       whereInput: currentWhereInput(),
-      countHint: resolvedDatabaseType.value === "gaussdb" ? "/*+ set(query_dop 32) */" : undefined,
+      countHint: resolvedDatabaseType.value === "gaussdb" ? gaussdbCountQueryDopHint(connectionStore.getConfig(props.connectionId)) : undefined,
     });
     return {
       sql,

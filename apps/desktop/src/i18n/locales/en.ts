@@ -922,6 +922,8 @@ export default {
     gaussdbTargetServerTypeSlave: "Slave (standby)",
     gaussdbTargetServerTypeAny: "Any (no preference)",
     gaussdbTargetServerTypeHint: "Controls which node in a GaussDB cluster the JDBC driver connects to. Master tries the primary, slave tries a standby, any connects to whichever is available. Only applies in M (JDBC) mode.",
+    gaussdbCountQueryDop: "COUNT(*) parallelism",
+    gaussdbCountQueryDopHint: "Sets the query_dop (degree of parallelism) for COUNT(*) queries on large tables. Higher values use more resources. Set to 1 (default) to disable the optimizer hint.",
     saveAndConnect: "Save & Connect",
     save: "Save",
     editTitle: "Edit Connection",

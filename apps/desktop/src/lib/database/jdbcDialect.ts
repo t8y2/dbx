@@ -7,9 +7,11 @@ type JdbcDialectConnection = Partial<Pick<ConnectionConfig, "db_type" | "driver_
 export type GaussdbIdentifierQuoteStyle = "auto" | "double" | "backtick";
 export type GaussdbConnectionMode = "native" | "m-jdbc";
 export type GaussdbTargetServerType = "master" | "slave" | "any";
+export type GaussdbCountQueryDop = 1 | 2 | 4 | 8 | 16;
 
 const GAUSSDB_IDENTIFIER_QUOTE_STYLE_KEY = "gaussdbIdentifierQuoteStyle";
 const GAUSSDB_TARGET_SERVER_TYPE_KEY = "gaussdbTargetServerType";
+const GAUSSDB_COUNT_QUERY_DOP_KEY = "gaussdbCountQueryDop";
 export const GAUSSDB_M_JDBC_DRIVER_PROFILE = "gaussdb-m";
 export const GAUSSDB_M_JDBC_DRIVER_CLASS = "com.huawei.gaussdb.jdbc.Driver";
 
@@ -237,6 +239,27 @@ export function codeMirrorSqlDialectForConnection(connection?: JdbcDialectConnec
   const databaseType = effectiveDatabaseTypeForConnection(connection);
   if (databaseType === "clickhouse") return "clickhouse";
   return codeMirrorSqlDialect(databaseType);
+}
+
+export function gaussdbCountQueryDop(connection: JdbcDialectConnection | undefined): GaussdbCountQueryDop {
+  const external = externalConfigRecord(connection?.external_config);
+  const value = external[GAUSSDB_COUNT_QUERY_DOP_KEY];
+  return value === 2 || value === 4 || value === 8 || value === 16 ? value : 1;
+}
+
+export function setGaussdbCountQueryDop(connection: Pick<ConnectionConfig, "db_type"> & Partial<Pick<ConnectionConfig, "external_config">>, value: GaussdbCountQueryDop) {
+  const external = externalConfigRecord(connection.external_config);
+  if (value === 1) {
+    delete external[GAUSSDB_COUNT_QUERY_DOP_KEY];
+  } else {
+    external[GAUSSDB_COUNT_QUERY_DOP_KEY] = value;
+  }
+  connection.external_config = Object.keys(external).length > 0 ? external : undefined;
+}
+
+export function gaussdbCountQueryDopHint(connection: JdbcDialectConnection | undefined): string | undefined {
+  const dop = gaussdbCountQueryDop(connection);
+  return dop > 1 ? `/*+ set(query_dop ${dop}) */` : undefined;
 }
 
 function isJdbcAseProfile(connection?: JdbcDialectConnection): boolean {

@@ -846,6 +846,8 @@ export default withEnglishFallback({
     gaussdbTargetServerTypeSlave: "备节点（Standby）",
     gaussdbTargetServerTypeAny: "任意（不指定）",
     gaussdbTargetServerTypeHint: "控制 JDBC 驱动连接到 GaussDB 集群中的哪个节点。主节点优先连接主库，备节点连接备库，任意节点连接可用节点。仅适用于 M 模式（JDBC）。",
+    gaussdbCountQueryDop: "COUNT(*) 并行度",
+    gaussdbCountQueryDopHint: "设置 COUNT(*) 查询的 query_dop（并行度），用于大表行数统计。较高的值会消耗更多资源。设置为 1（默认）则不传入优化器提示。",
     saveAndConnect: "保存并连接",
     save: "保存",
     editTitle: "编辑连接",

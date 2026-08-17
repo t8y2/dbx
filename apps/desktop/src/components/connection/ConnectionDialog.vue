@@ -121,13 +121,16 @@ import {
 import {
   GAUSSDB_M_JDBC_DRIVER_CLASS,
   gaussdbConnectionMode,
+  gaussdbCountQueryDop,
   gaussdbIdentifierQuoteStyle,
   gaussdbTargetServerType,
   setGaussdbConnectionMode,
+  setGaussdbCountQueryDop,
   setGaussdbIdentifierQuoteStyle,
   setGaussdbTargetServerType,
   supportsGaussdbIdentifierQuoteStyle,
   type GaussdbConnectionMode,
+  type GaussdbCountQueryDop,
   type GaussdbIdentifierQuoteStyle,
   type GaussdbTargetServerType,
 } from "@/lib/database/jdbcDialect";
@@ -547,6 +550,14 @@ const gaussdbTargetServerTypeComputed = computed<GaussdbTargetServerType>({
   get: () => gaussdbTargetServerType(form.value),
   set: (value) => {
     setGaussdbTargetServerType(form.value, value);
+    resetTestState();
+  },
+});
+
+const gaussdbCountQueryDopComputed = computed<GaussdbCountQueryDop>({
+  get: () => gaussdbCountQueryDop(form.value),
+  set: (value) => {
+    setGaussdbCountQueryDop(form.value, value);
     resetTestState();
   },
 });
@@ -8007,6 +8018,26 @@ function openExternalUrl(url: string) {
                     </Select>
                     <p class="text-xs leading-5 text-muted-foreground">
                       {{ t("connection.gaussdbTargetServerTypeHint") }}
+                    </p>
+                  </div>
+                </div>
+                <div v-if="showGaussdbConnectionMode" class="grid grid-cols-4 items-start gap-4">
+                  <Label :class="connectionLabelSmallPaddedClass">{{ t("connection.gaussdbCountQueryDop") }}</Label>
+                  <div class="col-span-3 grid gap-1">
+                    <Select v-model="gaussdbCountQueryDopComputed">
+                      <SelectTrigger class="h-9">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem :value="1">1 ({{ t("common.disabled") }})</SelectItem>
+                        <SelectItem :value="2">2</SelectItem>
+                        <SelectItem :value="4">4</SelectItem>
+                        <SelectItem :value="8">8</SelectItem>
+                        <SelectItem :value="16">16</SelectItem>
+                      </SelectContent>
+                    </Select>
+                    <p class="text-xs leading-5 text-muted-foreground">
+                      {{ t("connection.gaussdbCountQueryDopHint") }}
                     </p>
                   </div>
                 </div>

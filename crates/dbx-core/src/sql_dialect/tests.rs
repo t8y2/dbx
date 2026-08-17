@@ -705,11 +705,12 @@ fn builds_mysql_table_data_large_value_previews_without_truncating_keys() {
     });
 
     assert!(sql.starts_with("SELECT `id`, LEFT(`payload`, 4097) AS `payload`"));
-    assert!(sql.contains("CONCAT('T:4096:', OCTET_LENGTH(`payload`)) AS `__DBX_LARGE_VALUE_BYTES_T_1`"));
+    assert!(sql.contains("CONCAT('T:4096:', LENGTH(`payload`)) AS `__DBX_LARGE_VALUE_BYTES_T_1`"));
     assert!(sql.contains("LEFT(`raw_value`, 4097) AS `raw_value`"));
-    assert!(sql.contains("CONCAT('B:4096:', OCTET_LENGTH(`raw_value`)) AS `__DBX_LARGE_VALUE_BYTES_B_2`"));
+    assert!(sql.contains("CONCAT('B:4096:', LENGTH(`raw_value`)) AS `__DBX_LARGE_VALUE_BYTES_B_2`"));
     assert!(sql.contains("LEFT(`metadata`, 4097) AS `metadata`"));
-    assert!(sql.contains("CONCAT('T:4096:', OCTET_LENGTH(`metadata`)) AS `__DBX_LARGE_VALUE_BYTES_J_3`"));
+    assert!(sql.contains("CONCAT('T:4096:', LENGTH(`metadata`)) AS `__DBX_LARGE_VALUE_BYTES_J_3`"));
+    assert!(!sql.contains("OCTET_LENGTH"));
     assert!(!sql.contains("__DBX_LARGE_VALUE_BYTES_0"));
 }
 
@@ -741,10 +742,10 @@ fn previews_mysql_bounded_string_columns_only_above_the_active_budget() {
     });
 
     assert!(sql.starts_with("SELECT `id`, `image_mime`, LEFT(`image_data`, 420) AS `image_data`"));
-    assert!(sql.contains("CONCAT('B:419:', OCTET_LENGTH(`image_data`)) AS `__DBX_LARGE_VALUE_BYTES_B_2`, LEFT(`image_url`, 420) AS `image_url`"));
-    assert!(sql.contains("CONCAT('T:419:', OCTET_LENGTH(`image_url`)) AS `__DBX_LARGE_VALUE_BYTES_T_3`"));
+    assert!(sql.contains("CONCAT('B:419:', LENGTH(`image_data`)) AS `__DBX_LARGE_VALUE_BYTES_B_2`, LEFT(`image_url`, 420) AS `image_url`"));
+    assert!(sql.contains("CONCAT('T:419:', LENGTH(`image_url`)) AS `__DBX_LARGE_VALUE_BYTES_T_3`"));
     assert!(sql.contains("LEFT(`large_note`, 420) AS `large_note`"));
-    assert!(sql.contains("CONCAT('T:419:', OCTET_LENGTH(`large_note`)) AS `__DBX_LARGE_VALUE_BYTES_T_4`"));
+    assert!(sql.contains("CONCAT('T:419:', LENGTH(`large_note`)) AS `__DBX_LARGE_VALUE_BYTES_T_4`"));
     assert!(sql.contains("LEFT(`large_binary`, 420) AS `large_binary`"));
     assert!(!sql.contains("LEFT(`image_mime`"));
 }

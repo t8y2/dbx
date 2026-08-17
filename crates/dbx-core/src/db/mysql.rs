@@ -287,11 +287,24 @@ fn is_mysql_blob_column(column: &mysql_async::Column) -> bool {
 }
 
 fn is_mysql_binary_string_column(column: &mysql_async::Column) -> bool {
-    is_mysql_binary_charset(column)
-        && matches!(
-            column.column_type(),
-            ColumnType::MYSQL_TYPE_STRING | ColumnType::MYSQL_TYPE_VAR_STRING | ColumnType::MYSQL_TYPE_VARCHAR
-        )
+    let is_string = matches!(
+        column.column_type(),
+        ColumnType::MYSQL_TYPE_STRING | ColumnType::MYSQL_TYPE_VAR_STRING | ColumnType::MYSQL_TYPE_VARCHAR
+    );
+    if !is_string {
+        return false;
+    }
+
+    if is_mysql_binary_charset(column) {
+        return true;
+    }
+
+    // ShardingSphere Proxy 5.3.0 rewrites BINARY/VARBINARY result metadata to
+    // utf8mb4 CHAR/VARCHAR, but preserves BINARY_FLAG and adds UNSIGNED_FLAG
+    // to every string column. A real text column with a binary collation can
+    // carry BINARY_FLAG, so require both flags to avoid converting it to Hex.
+    let flags = column.flags();
+    flags.contains(ColumnFlags::BINARY_FLAG) && flags.contains(ColumnFlags::UNSIGNED_FLAG)
 }
 
 fn mysql_blob_preview(bytes: &[u8], label: &str) -> serde_json::Value {
@@ -387,7 +400,7 @@ pub(crate) fn mysql_column_type_name(column: &mysql_async::Column) -> String {
             }
         }
         MYSQL_TYPE_VARCHAR | MYSQL_TYPE_VAR_STRING => {
-            if binary {
+            if is_mysql_binary_string_column(column) {
                 "varbinary"
             } else {
                 "varchar"
@@ -400,7 +413,7 @@ pub(crate) fn mysql_column_type_name(column: &mysql_async::Column) -> String {
                 "enum"
             } else if flags.contains(mysql_async::consts::ColumnFlags::SET_FLAG) {
                 "set"
-            } else if binary {
+            } else if is_mysql_binary_string_column(column) {
                 "binary"
             } else {
                 "char"
@@ -639,7 +652,8 @@ fn mysql_bounded_value_preview(
         return None;
     }
 
-    let end = if is_mysql_binary_charset(column) {
+    let binary = is_mysql_binary_charset(column) || is_mysql_binary_string_column(column);
+    let end = if binary {
         preview_bytes.min(bytes.len())
     } else {
         let mut end = preview_bytes.min(bytes.len());
@@ -648,7 +662,7 @@ fn mysql_bounded_value_preview(
         }
         end
     };
-    let mut value = if is_mysql_binary_charset(column) {
+    let mut value = if binary {
         mysql_bytes_to_json(bytes[..end].to_vec(), column)
     } else {
         let text = String::from_utf8_lossy(&bytes[..end]);
@@ -6374,6 +6388,32 @@ mod tests {
     }
 
     #[test]
+    fn mysql_shardingsphere_binary_flags_restore_proxy_binary_types() {
+        let proxy_flags = ColumnFlags::BINARY_FLAG | ColumnFlags::UNSIGNED_FLAG;
+        let binary_column = mysql_test_column(ColumnType::MYSQL_TYPE_STRING, 45, proxy_flags, 8);
+        let varbinary_column = mysql_test_column(ColumnType::MYSQL_TYPE_VAR_STRING, 45, proxy_flags, 32);
+
+        assert_eq!(mysql_column_type_name(&binary_column), "binary");
+        assert_eq!(mysql_column_type_name(&varbinary_column), "varbinary");
+        assert_eq!(
+            mysql_bytes_to_json(b"150010\0\0".to_vec(), &binary_column),
+            serde_json::json!("0x3135303031300000")
+        );
+        assert_eq!(
+            mysql_bytes_to_json(vec![0xde, 0xad, 0xbe, 0xef], &varbinary_column),
+            serde_json::json!("0xdeadbeef")
+        );
+    }
+
+    #[test]
+    fn mysql_shardingsphere_unsigned_text_flags_remain_text() {
+        let text_column = mysql_test_column(ColumnType::MYSQL_TYPE_VAR_STRING, 45, ColumnFlags::UNSIGNED_FLAG, 32);
+
+        assert_eq!(mysql_column_type_name(&text_column), "varchar");
+        assert_eq!(mysql_bytes_to_json(b"TEXT-001".to_vec(), &text_column), serde_json::json!("TEXT-001"));
+    }
+
+    #[test]
     fn mysql_binary_values_preserve_all_bytes_as_hex() {
         let binary_column = mysql_test_column(ColumnType::MYSQL_TYPE_STRING, 63, ColumnFlags::BINARY_FLAG, 8);
         let varbinary_column = mysql_test_column(ColumnType::MYSQL_TYPE_VAR_STRING, 63, ColumnFlags::BINARY_FLAG, 8);
@@ -7346,6 +7386,72 @@ mod tests {
         assert_eq!(
             mysql_setup_queries("mysql://host:3306/db?charset=utf8mb4", &[]),
             vec!["USE `db`", "SET NAMES utf8mb4", "SET SESSION group_concat_max_len = 1048576"]
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a live ShardingSphere Proxy 5.3.0 fixture"]
+    async fn live_shardingsphere_proxy_preserves_binary_columns() {
+        let url = std::env::var("DBX_MYSQL_SHARDING_PROXY_URL")
+            .expect("DBX_MYSQL_SHARDING_PROXY_URL must point to the live proxy fixture");
+        let opts = mysql_async::Opts::from_url(&url).expect("valid MySQL proxy URL");
+        let pool = mysql_async::Pool::new(opts);
+
+        let columns =
+            get_columns(&pool, "dbx_sharding_proxy_test", "binary_samples").await.expect("load proxy column metadata");
+        let result = execute_query_with_max_rows(
+            &pool,
+            "SELECT id, fixed_value, variable_value, char_value, text_value, binary_collated \
+             FROM binary_samples ORDER BY id LIMIT 100",
+            false,
+            Some(100),
+            MySqlQueryDialect::default(),
+        )
+        .await
+        .expect("query proxy binary fixture");
+        pool.disconnect().await.expect("disconnect proxy pool");
+
+        assert_eq!(
+            columns.iter().map(|column| column.data_type.as_str()).collect::<Vec<_>>(),
+            vec!["int", "binary(8)", "varbinary(32)", "char(8)", "varchar(32)", "varchar(32)"]
+        );
+        assert_eq!(result.column_types, vec!["int", "binary", "varbinary", "char", "varchar", "varchar"]);
+        assert_eq!(
+            result.rows,
+            vec![
+                vec![
+                    serde_json::json!("1"),
+                    serde_json::json!("0x3135303031300000"),
+                    serde_json::json!("0x534e2d4130303031"),
+                    serde_json::json!("CHAR-001"),
+                    serde_json::json!("TEXT-001"),
+                    serde_json::json!("BIN-TEXT-001"),
+                ],
+                vec![
+                    serde_json::json!("2"),
+                    serde_json::json!("0xdeadbeef00000000"),
+                    serde_json::json!("0xdeadbeef"),
+                    serde_json::json!("CHAR-002"),
+                    serde_json::json!("TEXT-002"),
+                    serde_json::json!("BIN-TEXT-002"),
+                ],
+                vec![
+                    serde_json::json!("3"),
+                    serde_json::json!("0x0000000000000000"),
+                    serde_json::json!("0x"),
+                    serde_json::json!("CHAR-003"),
+                    serde_json::json!("TEXT-003"),
+                    serde_json::json!("BIN-TEXT-003"),
+                ],
+                vec![
+                    serde_json::json!("4"),
+                    serde_json::json!("0x7f80810000000000"),
+                    serde_json::json!("0x7f8081"),
+                    serde_json::json!("CHAR-004"),
+                    serde_json::json!("TEXT-004"),
+                    serde_json::json!("BIN-TEXT-004"),
+                ],
+            ]
         );
     }
 }

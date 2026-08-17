@@ -1922,9 +1922,10 @@ function failAgentDriverInstall(error: unknown) {
  * with a "canceled by user" error, which callers treat as a non-failure.
  */
 async function cancelActiveAgentInstall() {
+  const operationId = agentInstallOperationId.value;
   if (!agentInstallDriverKey.value) return;
   try {
-    await api.cancelAgentInstall(agentInstallDriverKey.value);
+    await api.cancelAgentInstall(agentInstallDriverKey.value, operationId ?? undefined);
   } catch {
     // The cancel request itself failing is not fatal: finish the modal so the
     // user is not left stuck on a progress dialog.

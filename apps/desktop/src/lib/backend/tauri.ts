@@ -1894,12 +1894,12 @@ export async function upgradeAllAgents(source?: UpdateDownloadSource, operationI
   return invoke("upgrade_all_agents", { source, operationId });
 }
 
-export async function cancelAgentInstall(dbType: string): Promise<void> {
-  return invoke("cancel_agent_install", { dbType });
+export async function cancelAgentInstall(dbType: string, operationId?: string): Promise<void> {
+  return invoke("cancel_agent_install", { dbType, operationId });
 }
 
-export async function cancelAgentUpgradeAll(): Promise<void> {
-  return invoke("cancel_agent_upgrade_all");
+export async function cancelAgentUpgradeAll(operationId?: string): Promise<void> {
+  return invoke("cancel_agent_upgrade_all", { operationId });
 }
 
 export async function checkAgentUpdateBlockers(dbTypes: string[]): Promise<AgentUpdateBlocker[]> {

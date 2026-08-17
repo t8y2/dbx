@@ -558,7 +558,7 @@ async function upgradeAll() {
 /** Abort a single driver's install, whether started alone or inside a batch. */
 async function cancelDriverInstall(dbType: string) {
   try {
-    await api.cancelAgentInstall(dbType);
+    await api.cancelAgentInstall(dbType, activeAgentOperationId.value ?? undefined);
   } catch {
     // A cancel that arrives after the download finished is a no-op.
   }
@@ -567,7 +567,7 @@ async function cancelDriverInstall(dbType: string) {
 /** Abort the whole batch upgrade: in-flight downloads stop, queued ones never start. */
 async function cancelUpgradeAll() {
   try {
-    await api.cancelAgentUpgradeAll();
+    await api.cancelAgentUpgradeAll(activeAgentOperationId.value ?? undefined);
   } catch {
     // The batch may have just finished; treat a failed cancel as a no-op.
   }

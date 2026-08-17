@@ -139,7 +139,7 @@ export function useSqlExecution(deps: {
   let pendingSqlParameterContinuation: ((sql: string, sourceOffset?: number) => Promise<void> | void) | undefined;
 
   async function resolvedExecutableSql(source?: SqlExecutionOverride): Promise<{ sql: string; sourceOffset?: number }> {
-    const atSetEnabled = resolveSqlVariableSyntaxToggles(settingsStore.editorSettings.sqlVariableSyntaxOverrides, deps.activeConnection.value?.db_type).atSet;
+    const atSetEnabled = resolveSqlVariableSyntaxToggles(settingsStore.editorSettings.sqlVariableSyntaxOverrides, deps.activeConnection.value?.db_type, settingsStore.editorSettings.sqlVariableSubstitutionEnabled).atSet;
     const expand = (sql: string) => (atSetEnabled ? expandSqlVariables(sql).sql : sql);
     if (typeof source === "string") return { sql: expand(source) };
 
@@ -228,7 +228,7 @@ export function useSqlExecution(deps: {
 
   function prepareSqlParameterDialog(sql: string, sourceOffset?: number, options: SqlExecutionOptions = {}, continuation?: (sql: string, sourceOffset?: number) => Promise<void> | void): boolean {
     const databaseType = deps.activeConnection.value?.db_type;
-    const toggles = resolveSqlVariableSyntaxToggles(settingsStore.editorSettings.sqlVariableSyntaxOverrides, databaseType);
+    const toggles = resolveSqlVariableSyntaxToggles(settingsStore.editorSettings.sqlVariableSyntaxOverrides, databaseType, settingsStore.editorSettings.sqlVariableSubstitutionEnabled);
     const enabledSyntaxes = enabledSqlParameterSyntaxes(toggles);
     const parameters = extractSqlParameterDescriptors(sql, { databaseType, enabledSyntaxes });
     if (!parameters.length) return false;
@@ -250,6 +250,22 @@ export function useSqlExecution(deps: {
     if (supportsSqlTemplateParameters(deps.activeConnection.value, sql) && prepareSqlParameterDialog(sql, sourceOffset, {}, onReady)) return true;
     await onReady(sql, sourceOffset);
     return false;
+  }
+
+  // SQL Server batches that end in PRINT/DBCC-style messages with no rows of their own get
+  // synthesized into a "Message" pseudo-result (server_message: true). The store's generic
+  // "first result with columns" pick can land on that pseudo-result instead of real data, so
+  // whenever it does, redirect focus to the first real data result (falling back to the
+  // message itself only if there is no data result to show). Shared by every SQL execution
+  // entry point so none of them can regress independently (see #6189).
+  function focusSqlServerDataResult(executionTabId: string, executionDatabaseType: DatabaseType | undefined, tab: Pick<QueryTab, "results" | "result" | "activeResultIndex">) {
+    if (executionDatabaseType !== "sqlserver") return;
+    const sqlServerMessageResultIndex = tab.results?.findIndex((result) => result.server_message === true);
+    if (sqlServerMessageResultIndex === undefined || sqlServerMessageResultIndex < 0) return;
+    const activeSqlServerResult = tab.results && tab.activeResultIndex !== undefined ? tab.results[tab.activeResultIndex] : tab.result;
+    if (activeSqlServerResult?.server_message !== true) return;
+    const sqlServerDataResultIndex = tab.results?.findIndex((result) => result.server_message !== true && !isQueryExecutionErrorResult(result) && result.columns.length > 0);
+    queryStore.setActiveResultIndex(executionTabId, sqlServerDataResultIndex !== undefined && sqlServerDataResultIndex >= 0 ? sqlServerDataResultIndex : sqlServerMessageResultIndex);
   }
 
   async function doExecute(sql?: string, sourceOffset?: number, options: SqlExecutionOptions = {}) {
@@ -275,7 +291,7 @@ export function useSqlExecution(deps: {
     if (producedResult === false) return;
     const sqlServerMessageResultIndex = executionDatabaseType === "sqlserver" ? tab.results?.findIndex((result) => result.server_message === true) : undefined;
     if (sqlServerMessageResultIndex !== undefined && sqlServerMessageResultIndex >= 0) {
-      queryStore.setActiveResultIndex(tab.id, sqlServerMessageResultIndex);
+      focusSqlServerDataResult(tab.id, executionDatabaseType, tab);
       deps.activeOutputView.value = "result";
     } else if (executionDatabaseType === "sqlserver" && tab.result?.server_message === true) {
       deps.activeOutputView.value = "result";
@@ -420,6 +436,7 @@ export function useSqlExecution(deps: {
       if (cancelRequested() || tabCancelRequested(cancelRequestCount)) {
         return finish({ status: "cancelled" });
       }
+      focusSqlServerDataResult(executionTabId, connection.db_type, latest);
       const failure = firstQueryExecutionError(latest);
       const errorMessage = failure ? String(failure.rows?.[0]?.[0] ?? t("common.failed")) : undefined;
       const success = !failure;

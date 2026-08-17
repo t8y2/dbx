@@ -20,11 +20,14 @@ const leafTypes: Set<TreeNodeType> = new Set([
   "etcd-root",
   "etcd-dashboard",
   "etcd-access-control",
+  "nacos-namespace",
+  "nacos-access-control",
   "zookeeper-root",
   "consul-root",
   "consul-overview",
   "mongo-gridfs",
   "mongo-bucket",
+  "dynamodb-table",
   "vector-collection",
   "elasticsearch-index",
   "user-admin",
@@ -36,7 +39,7 @@ const leafTypes: Set<TreeNodeType> = new Set([
   "extension",
 ]);
 
-const fullWidthLabelTypes: Set<TreeNodeType> = new Set(["table", "view", "materialized_view", "mongo-collection", "mongo-bucket", "vector-collection", "elasticsearch-index"]);
+const fullWidthLabelTypes: Set<TreeNodeType> = new Set(["table", "view", "materialized_view", "mongo-collection", "mongo-bucket", "dynamodb-table", "vector-collection", "elasticsearch-index"]);
 
 const emptyContainerTypes: Set<TreeNodeType> = new Set(["saved-sql-root", "saved-sql-folder", "type"]);
 
@@ -56,15 +59,18 @@ const pinnableTypes: Set<TreeNodeType> = new Set([
   "mongo-gridfs",
   "mongo-bucket",
   "mongo-collection",
+  "dynamodb-table",
   "vector-collection",
   "elasticsearch-index",
   "nacos-namespace",
 ]);
 
-const commentTypes: Set<TreeNodeType> = new Set(["connection", "schema", "table", "view", "materialized_view", "column", "mongo-collection", "vector-collection", "elasticsearch-index"]);
+const commentTypes: Set<TreeNodeType> = new Set(["connection", "schema", "table", "view", "materialized_view", "column", "mongo-collection", "dynamodb-table", "vector-collection", "elasticsearch-index"]);
 
-export function treeItemPaddingLeft(depth: number): string {
-  return `${depth * 16 + 8}px`;
+export const SIDEBAR_INDENT_DEFAULT_PX = 16;
+
+export function treeItemPaddingLeft(depth: number, indentPx = SIDEBAR_INDENT_DEFAULT_PX): string {
+  return `${depth * indentPx + 8}px`;
 }
 
 export const trailingCommentGapPx = 8;
@@ -97,11 +103,11 @@ export interface SidebarTreeNaturalWidthItem {
 // Right padding, expander/icon widths and the two flex gaps before the label.
 const sidebarTreeRowChromeWidth = 54;
 
-export function sidebarTreeNaturalContentWidth(items: readonly SidebarTreeNaturalWidthItem[], measureText: (text: string) => number): number {
+export function sidebarTreeNaturalContentWidth(items: readonly SidebarTreeNaturalWidthItem[], measureText: (text: string) => number, indentPx = SIDEBAR_INDENT_DEFAULT_PX): number {
   let width = 0;
   for (const item of items) {
     if (!item.usesNaturalWidth) continue;
-    const paddingLeft = item.depth * 16 + 8;
+    const paddingLeft = item.depth * indentPx + 8;
     width = Math.max(width, Math.ceil(paddingLeft + sidebarTreeRowChromeWidth + measureText(item.label) + (item.trailingWidth ?? 0)));
   }
   return width;

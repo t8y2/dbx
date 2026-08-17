@@ -80,8 +80,8 @@ describe("useSidebarTreeExportRuntime", () => {
 
     expect(connectionStore.ensureConnected).toHaveBeenNthCalledWith(1, first.connectionId);
     expect(connectionStore.ensureConnected).toHaveBeenNthCalledWith(2, second.connectionId);
-    expect(apiMock.getTableDdl).toHaveBeenNthCalledWith(1, first.connectionId, first.database, first.schema, first.label, undefined, undefined);
-    expect(apiMock.getTableDdl).toHaveBeenNthCalledWith(2, second.connectionId, second.database, second.schema, second.label, "VIEW", undefined);
+    expect(apiMock.getTableDdl).toHaveBeenNthCalledWith(1, first.connectionId, first.database, first.schema, first.label, undefined, undefined, true);
+    expect(apiMock.getTableDdl).toHaveBeenNthCalledWith(2, second.connectionId, second.database, second.schema, second.label, "VIEW", undefined, true);
     expect(structurePreviewSql.value).toBe("CREATE TABLE one (id INT);\n\nCREATE VIEW two AS SELECT 1;\n");
     expect(structurePreviewTitle.value).toBe("contextMenu.exportStructurePreviewTitleMultiple");
     expect(showStructurePreviewDialog.value).toBe(true);

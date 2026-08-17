@@ -17,6 +17,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::sync::Mutex;
 
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
+
 use crate::mongo::MongoCommand;
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -259,7 +261,7 @@ pub struct LocalBackend {
     data_dir: std::path::PathBuf,
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct WebAuthState {
     session_cookie: Option<String>,
     checked: bool,
@@ -269,24 +271,91 @@ pub struct WebBackend {
     base_url: String,
     password: String,
     client: reqwest::Client,
+    headers: HeaderMap,
     auth: Mutex<WebAuthState>,
     connected: Mutex<HashMap<String, ConnectionConfig>>,
 }
 
+// Manual impl: the derived one would print `password` (and the session cookie
+// inside `auth`) in plaintext. Redact credentials and skip lockable state.
+impl std::fmt::Debug for WebBackend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let header_names = self.headers.keys().map(HeaderName::as_str).collect::<Vec<_>>();
+        f.debug_struct("WebBackend")
+            .field("base_url", &self.base_url)
+            .field("password", &"<redacted>")
+            .field("header_names", &header_names)
+            .finish_non_exhaustive()
+    }
+}
+
 impl WebBackend {
     pub fn new(base_url: String, password: String) -> Result<Self, String> {
+        let (proxy, no_proxy) = standard_web_proxy(&base_url);
+        let tls_skip_verify = std::env::var("DBX_WEB_INSECURE_SKIP_VERIFY")
+            .ok()
+            .map(|value| value.trim().to_ascii_lowercase())
+            .is_some_and(|value| matches!(value.as_str(), "1" | "true" | "yes" | "on"));
+        Self::new_with_config(
+            base_url,
+            password,
+            proxy,
+            no_proxy,
+            std::env::var("DBX_WEB_HEADERS").ok(),
+            tls_skip_verify,
+            std::env::var("DBX_WEB_CA_CERT").ok().filter(|value| !value.trim().is_empty()),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new_with_config(
+        base_url: String,
+        password: String,
+        proxy: Option<String>,
+        no_proxy: Option<String>,
+        headers_json: Option<String>,
+        tls_skip_verify: bool,
+        ca_cert_path: Option<String>,
+    ) -> Result<Self, String> {
         let base_url = base_url.trim().trim_end_matches('/').to_string();
         if base_url.is_empty() {
             return Err("DBX_WEB_URL cannot be empty.".to_string());
         }
-        let client = reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .map_err(|error| error.to_string())?;
+        let mut builder = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none());
+        if let Some(proxy_url) = proxy.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
+            let mut proxy = reqwest::Proxy::all(proxy_url)
+                .map_err(|error| format!("Invalid HTTP(S)_PROXY/ALL_PROXY value: {error}"))?;
+            if let Some(no_proxy) = no_proxy.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
+                proxy = proxy.no_proxy(reqwest::NoProxy::from_string(no_proxy));
+            }
+            builder = builder.proxy(proxy);
+        } else {
+            // Unset or empty proxy configuration: connect directly.
+            builder = builder.no_proxy();
+        }
+        // TLS: mirror the Consul/Nacos client convention. Certificate
+        // verification is on by default; opt out with DBX_WEB_INSECURE_SKIP_VERIFY
+        // for self-signed endpoints, or trust a private CA with DBX_WEB_CA_CERT.
+        if tls_skip_verify {
+            builder = builder.danger_accept_invalid_certs(true);
+        }
+        if let Some(ca_cert_path) = ca_cert_path.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
+            let path = dbx_core::path_utils::expand_tilde(ca_cert_path);
+            let bytes =
+                std::fs::read(&path).map_err(|error| format!("Failed to read DBX_WEB_CA_CERT at {path}: {error}"))?;
+            let certificates = reqwest::Certificate::from_pem_bundle(&bytes)
+                .or_else(|_| reqwest::Certificate::from_der(&bytes).map(|certificate| vec![certificate]))
+                .map_err(|error| format!("Failed to parse DBX_WEB_CA_CERT at {path}: {error}"))?;
+            for certificate in certificates {
+                builder = builder.add_root_certificate(certificate);
+            }
+        }
+        let client = builder.build().map_err(|error| error.to_string())?;
         Ok(Self {
             base_url,
             password,
             client,
+            headers: parse_custom_headers(headers_json.as_deref())?,
             auth: Mutex::new(WebAuthState::default()),
             connected: Mutex::new(HashMap::new()),
         })
@@ -303,12 +372,11 @@ impl WebBackend {
             required: bool,
             setup_required: bool,
         }
-        let response = self
-            .client
-            .get(format!("{}/api/auth/check", self.base_url))
-            .send()
-            .await
-            .map_err(|error| format!("Authentication check failed: {error}"))?;
+        let mut request = self.client.get(format!("{}/api/auth/check", self.base_url));
+        for (name, value) in &self.headers {
+            request = request.header(name, value);
+        }
+        let response = request.send().await.map_err(|error| format!("Authentication check failed: {error}"))?;
         if !response.status().is_success() {
             return Err(format!("Authentication check failed: {}", response.status()));
         }
@@ -323,9 +391,11 @@ impl WebBackend {
         if self.password.is_empty() {
             return Err("DBX Web authentication is required. Set DBX_WEB_PASSWORD for MCP Web mode.".to_string());
         }
-        let response = self
-            .client
-            .post(format!("{}/api/auth/login", self.base_url))
+        let mut request = self.client.post(format!("{}/api/auth/login", self.base_url));
+        for (name, value) in &self.headers {
+            request = request.header(name, value);
+        }
+        let response = request
             .json(&json!({ "password": self.password }))
             .send()
             .await
@@ -358,6 +428,9 @@ impl WebBackend {
                 .client
                 .request(method.clone(), format!("{}{}", self.base_url, path))
                 .header("x-dbx-mcp-request", "1");
+            for (name, value) in &self.headers {
+                request = request.header(name, value);
+            }
             if let Some(cookie) = cookie {
                 request = request.header(reqwest::header::COOKIE, format!("dbx_session={cookie}"));
             }
@@ -1006,6 +1079,23 @@ impl DbxBackend for WebBackend {
                 Ok(scalar_query_result("version", Value::String(version)))
             }
             MongoCommand::Use { database } => Ok(scalar_query_result("database", Value::String(database.clone()))),
+            MongoCommand::ShowDatabases => {
+                let result = self
+                    .request(
+                        reqwest::Method::POST,
+                        "/api/mongo/run-command",
+                        Some(json!({
+                            "connectionId": connection_id,
+                            "database": dbx_core::mongo_ops::MONGO_SHOW_DATABASES_DATABASE,
+                            "commandJson": dbx_core::mongo_ops::MONGO_SHOW_DATABASES_COMMAND_JSON,
+                        })),
+                    )
+                    .await?
+                    .json::<WebMongoDocuments>()
+                    .await
+                    .map_err(|error| format!("Invalid MongoDB listDatabases response: {error}"))?;
+                dbx_core::mongo_ops::mongo_show_databases_query_result(result.documents, 100)
+            }
             MongoCommand::RunCommand { .. } => {
                 Err("MongoDB runCommand is not available through the DBX MCP backend".to_string())
             }
@@ -1401,6 +1491,97 @@ fn extract_session_cookie(header: &str) -> Option<String> {
         .split(';')
         .find_map(|part| part.trim().strip_prefix("dbx_session=").map(ToOwned::to_owned))
         .filter(|value| !value.is_empty())
+}
+
+/// Lowercased URL scheme: the part before the first `://` separator, with
+/// surrounding whitespace trimmed. Input without a `://` separator yields the
+/// whole trimmed, lowercased input.
+fn normalize_scheme(base_url: &str) -> String {
+    base_url.trim().split("://").next().unwrap_or_default().to_ascii_lowercase()
+}
+
+/// Resolves the standard proxy environment variables for a DBX Web backend.
+///
+/// Follows the conventional precedence: the scheme-specific variable
+/// (`HTTPS_PROXY`/`https_proxy` for https URLs, `HTTP_PROXY`/`http_proxy`
+/// for http URLs) wins, with `ALL_PROXY`/`all_proxy` as the fallback.
+/// Empty values count as unset. `NO_PROXY`/`no_proxy` is returned alongside
+/// so the client can bypass the proxy for matching hosts.
+fn standard_web_proxy(base_url: &str) -> (Option<String>, Option<String>) {
+    let http_proxy = first_non_empty_env(&["HTTP_PROXY", "http_proxy"]);
+    let https_proxy = first_non_empty_env(&["HTTPS_PROXY", "https_proxy"]);
+    let all_proxy = first_non_empty_env(&["ALL_PROXY", "all_proxy"]);
+    (
+        select_proxy_url(
+            &normalize_scheme(base_url),
+            http_proxy.as_deref(),
+            https_proxy.as_deref(),
+            all_proxy.as_deref(),
+        ),
+        first_non_empty_env(&["NO_PROXY", "no_proxy"]),
+    )
+}
+
+/// Picks the proxy URL for a target scheme. The scheme-specific variable wins;
+/// `ALL_PROXY` is the fallback. Empty or whitespace-only values count as unset.
+/// `None` means "no proxy".
+fn select_proxy_url(
+    scheme: &str,
+    http_proxy: Option<&str>,
+    https_proxy: Option<&str>,
+    all_proxy: Option<&str>,
+) -> Option<String> {
+    fn usable(value: Option<&str>) -> Option<&str> {
+        value.map(str::trim).filter(|value| !value.is_empty())
+    }
+    match scheme {
+        "http" => usable(http_proxy).or_else(|| usable(all_proxy)).map(ToOwned::to_owned),
+        "https" => usable(https_proxy).or_else(|| usable(all_proxy)).map(ToOwned::to_owned),
+        _ => None,
+    }
+}
+
+fn first_non_empty_env(names: &[&str]) -> Option<String> {
+    names.iter().find_map(|name| {
+        std::env::var(name).ok().map(|value| value.trim().to_string()).filter(|value| !value.is_empty())
+    })
+}
+
+/// Parses the `DBX_WEB_HEADERS` JSON object into a `HeaderMap`. Every parsed
+/// header is attached to each DBX Web request, including auth checks.
+fn parse_custom_headers(headers_json: Option<&str>) -> Result<HeaderMap, String> {
+    let mut headers = HeaderMap::new();
+    let Some(value) = headers_json.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(headers);
+    };
+    let entries: serde_json::Map<String, Value> = serde_json::from_str(value)
+        .map_err(|error| format!("Invalid DBX_WEB_HEADERS: expected a JSON object, got {error}"))?;
+    for (name, value) in entries {
+        let header_name = HeaderName::from_bytes(name.as_bytes())
+            .map_err(|_| format!("Invalid DBX_WEB_HEADERS header name: {name}"))?;
+        // Names the client already manages internally (session cookie, request
+        // marker) or that would corrupt the HTTP framing. Rejecting them
+        // prevents duplicate/conflicting values on the wire.
+        const RESERVED: [&str; 7] = [
+            "cookie",
+            "x-dbx-mcp-request",
+            "host",
+            "content-length",
+            "connection",
+            "transfer-encoding",
+            "proxy-authorization",
+        ];
+        if RESERVED.iter().any(|reserved| header_name.as_str().eq_ignore_ascii_case(reserved)) {
+            return Err(format!("Invalid DBX_WEB_HEADERS header name: {name} (reserved by DBX)"));
+        }
+        let Value::String(header_value) = value else {
+            return Err(format!("Invalid DBX_WEB_HEADERS value for {name}: expected a string"));
+        };
+        let header_value = HeaderValue::from_str(&header_value)
+            .map_err(|error| format!("Invalid DBX_WEB_HEADERS value for {name}: {error}"))?;
+        headers.append(header_name, header_value);
+    }
+    Ok(headers)
 }
 
 fn url_encode(value: &str) -> String {
@@ -1864,6 +2045,86 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn web_mongo_show_databases_uses_one_admin_read_command() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let (request_sender, request_receiver) = mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 1024];
+            let header_end = loop {
+                let count = stream.read(&mut buffer).unwrap();
+                request.extend_from_slice(&buffer[..count]);
+                if let Some(position) = request.windows(4).position(|window| window == b"\r\n\r\n") {
+                    break position + 4;
+                }
+            };
+            let headers = String::from_utf8_lossy(&request[..header_end]);
+            let content_length = headers
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length").then_some(value.trim())
+                })
+                .unwrap()
+                .parse::<usize>()
+                .unwrap();
+            while request.len() < header_end + content_length {
+                let count = stream.read(&mut buffer).unwrap();
+                request.extend_from_slice(&buffer[..count]);
+            }
+            let request = String::from_utf8(request).unwrap();
+            request_sender
+                .send((
+                    request.lines().next().unwrap().to_string(),
+                    request[header_end..header_end + content_length].to_string(),
+                ))
+                .unwrap();
+
+            let response_body = r#"{"documents":[{"databases":[{"name":"admin","sizeOnDisk":40960,"empty":false},{"name":"app","sizeOnDisk":8192,"empty":true}],"ok":1}]}"#;
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            )
+            .unwrap();
+        });
+
+        let backend = WebBackend::new(format!("http://{address}"), String::new()).unwrap();
+        backend.auth.lock().await.checked = true;
+        let connection = new_connection_config(
+            "legacy".to_string(),
+            "Legacy MongoDB".to_string(),
+            DatabaseType::MongoDb,
+            "localhost".to_string(),
+            27017,
+            String::new(),
+            String::new(),
+            Some("app".to_string()),
+            false,
+            Some("mongodb-legacy".to_string()),
+        )
+        .unwrap();
+        backend.connected.lock().await.insert(connection.id.clone(), connection.clone());
+
+        let result = backend.execute_mongo_command(&connection, "app", &MongoCommand::ShowDatabases).await.unwrap();
+
+        server.join().unwrap();
+        let (request_line, body) = request_receiver.recv().unwrap();
+        assert_eq!(request_line, "POST /api/mongo/run-command HTTP/1.1");
+        let request: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(request["connectionId"], "legacy");
+        assert_eq!(request["database"], "admin");
+        assert_eq!(request["commandJson"], r#"{"listDatabases":1}"#);
+        assert_eq!(result.columns, ["name", "sizeOnDisk", "empty"]);
+        assert_eq!(result.rows.len(), 2);
+        assert_eq!(result.affected_rows, 2);
+    }
+
+    #[tokio::test]
     async fn web_mongo_find_explain_uses_explain_endpoint_and_preserves_options() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
@@ -1953,6 +2214,524 @@ mod tests {
         assert_eq!(request["verbosity"], "executionStats");
         assert_eq!(result.columns, ["queryPlanner"]);
         assert_eq!(result.rows.len(), 1);
+    }
+
+    #[test]
+    fn standard_web_proxy_follows_scheme_precedence_and_ignores_empty_values() {
+        // https target: HTTPS_PROXY wins over ALL_PROXY.
+        assert_eq!(
+            select_proxy_url("https", Some("http://http-proxy"), Some("http://https-proxy"), Some("socks5://all")),
+            Some("http://https-proxy".to_string())
+        );
+        // https target without HTTPS_PROXY: ALL_PROXY is the fallback.
+        assert_eq!(
+            select_proxy_url("https", Some("http://http-proxy"), None, Some("socks5://all")),
+            Some("socks5://all".to_string())
+        );
+        // https target with only HTTP_PROXY: no proxy (HTTP_PROXY is not a fallback for https).
+        assert_eq!(select_proxy_url("https", Some("http://http-proxy"), None, None), None);
+        // http target: HTTP_PROXY wins.
+        assert_eq!(
+            select_proxy_url("http", Some("http://http-proxy"), Some("http://https-proxy"), Some("socks5://all")),
+            Some("http://http-proxy".to_string())
+        );
+        // No proxy configured at all.
+        assert_eq!(select_proxy_url("http", None, None, None), None);
+        // Unsupported scheme: never proxied.
+        assert_eq!(select_proxy_url("ftp", None, None, Some("http://all")), None);
+
+        // Empty values behave like unset: no proxy, not an error.
+        assert_eq!(select_proxy_url("https", None, Some(""), None), None);
+        assert_eq!(select_proxy_url("https", None, Some("  "), Some("")), None);
+    }
+
+    #[test]
+    fn normalize_scheme_lowercases_and_trims() {
+        assert_eq!(normalize_scheme("https://host"), "https");
+        assert_eq!(normalize_scheme("HTTPS://host"), "https");
+        assert_eq!(normalize_scheme("  http://host  "), "http");
+        assert_eq!(normalize_scheme("no-scheme"), "no-scheme");
+        assert_eq!(normalize_scheme(""), "");
+    }
+
+    #[tokio::test]
+    async fn web_backend_bypasses_proxy_for_no_proxy_hosts() {
+        let proxy_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let proxy_address = proxy_listener.local_addr().unwrap();
+        let unused = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base_address = unused.local_addr().unwrap();
+        let base_url = format!("http://{base_address}");
+        drop(unused);
+
+        let backend = WebBackend::new_with_config(
+            base_url,
+            String::new(),
+            Some(format!("http://{proxy_address}")),
+            // Target host matches NO_PROXY: the request must go direct.
+            Some("127.0.0.1".to_string()),
+            None,
+            false,
+            None,
+        )
+        .unwrap();
+        backend.auth.lock().await.checked = true;
+
+        // Direct connection to the closed port fails; the proxy must never see
+        // the request.
+        let error = backend.load_connections().await.unwrap_err();
+        assert!(error.contains("API request /api/connection/list"), "{error}");
+
+        proxy_listener.set_nonblocking(true).unwrap();
+        assert!(matches!(
+            proxy_listener.accept(),
+            Err(connection_error) if connection_error.kind() == std::io::ErrorKind::WouldBlock
+        ));
+    }
+
+    #[tokio::test]
+    async fn web_backend_applies_custom_headers_to_auth_and_api_requests() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let (request_sender, request_receiver) = mpsc::channel();
+        let server = std::thread::spawn(move || {
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+                let mut request = Vec::new();
+                let mut buffer = [0_u8; 1024];
+                loop {
+                    let count = stream.read(&mut buffer).unwrap();
+                    request.extend_from_slice(&buffer[..count]);
+                    if count == 0 || request.windows(4).any(|window| window == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                let request = String::from_utf8(request).unwrap();
+                request_sender.send(request.clone()).unwrap();
+                let body = if request.starts_with("GET /api/auth/check ") {
+                    r#"{"authenticated":true,"required":false,"setup_required":false}"#
+                } else {
+                    "[]"
+                };
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                )
+                .unwrap();
+            }
+        });
+
+        let backend = WebBackend::new_with_config(
+            format!("http://{address}"),
+            String::new(),
+            None,
+            None,
+            Some(r#"{"X-API-Key":"secret","X-Tenant":"acme"}"#.to_string()),
+            false,
+            None,
+        )
+        .unwrap();
+
+        let connections = backend.load_connections().await.unwrap();
+        assert!(connections.is_empty());
+        server.join().unwrap();
+
+        let auth_check = request_receiver.recv().unwrap().to_ascii_lowercase();
+        assert!(auth_check.starts_with("get /api/auth/check "), "{auth_check}");
+        assert!(auth_check.contains("x-api-key: secret"), "{auth_check}");
+        assert!(auth_check.contains("x-tenant: acme"), "{auth_check}");
+
+        let list = request_receiver.recv().unwrap().to_ascii_lowercase();
+        assert!(list.starts_with("get /api/connection/list "), "{list}");
+        assert!(list.contains("x-api-key: secret"), "{list}");
+        assert!(list.contains("x-tenant: acme"), "{list}");
+        assert!(list.contains("x-dbx-mcp-request: 1"), "{list}");
+    }
+
+    #[test]
+    fn web_backend_debug_redacts_custom_header_values() {
+        let backend = WebBackend::new_with_config(
+            "http://127.0.0.1:8976".to_string(),
+            "super-secret-password".to_string(),
+            None,
+            None,
+            Some(r#"{"Authorization":"Bearer secret-token","X-Tenant":"acme"}"#.to_string()),
+            false,
+            None,
+        )
+        .unwrap();
+
+        let debug = format!("{backend:?}");
+        assert!(debug.contains("authorization"));
+        assert!(debug.contains("x-tenant"));
+        assert!(!debug.contains("secret-token"));
+        assert!(!debug.contains("Bearer"));
+        assert!(!debug.contains("super-secret-password"));
+    }
+
+    #[tokio::test]
+    async fn web_backend_routes_requests_through_proxy() {
+        let proxy_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let proxy_address = proxy_listener.local_addr().unwrap();
+        // Port that is guaranteed closed: if the proxy is not used, the direct
+        // connection to this address fails and the test fails.
+        let unused = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base_address = unused.local_addr().unwrap();
+        let base_url = format!("http://{base_address}");
+        drop(unused);
+
+        let (request_sender, request_receiver) = mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = proxy_listener.accept().unwrap();
+            stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 1024];
+            loop {
+                let count = stream.read(&mut buffer).unwrap();
+                request.extend_from_slice(&buffer[..count]);
+                if count == 0 || request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let request = String::from_utf8(request).unwrap();
+            request_sender.send(request.lines().next().unwrap().to_string()).unwrap();
+            let body = "[]";
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .unwrap();
+        });
+
+        let backend = WebBackend::new_with_config(
+            base_url,
+            String::new(),
+            Some(format!("http://{proxy_address}")),
+            None,
+            None,
+            false,
+            None,
+        )
+        .unwrap();
+        backend.auth.lock().await.checked = true;
+
+        let connections = backend.load_connections().await.unwrap();
+        assert!(connections.is_empty());
+        server.join().unwrap();
+
+        // HTTP proxies receive the request in absolute-form, proving the
+        // request went through the proxy instead of straight to the target.
+        let request_line = request_receiver.recv().unwrap();
+        assert!(request_line.starts_with(&format!("GET http://{base_address}/api/connection/list ")), "{request_line}");
+    }
+
+    #[tokio::test]
+    async fn web_backend_authenticates_against_proxy_from_url_credentials() {
+        let proxy_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let proxy_address = proxy_listener.local_addr().unwrap();
+        let unused = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base_address = unused.local_addr().unwrap();
+        let base_url = format!("http://{base_address}");
+        drop(unused);
+
+        let (request_sender, request_receiver) = mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = proxy_listener.accept().unwrap();
+            stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 1024];
+            loop {
+                let count = stream.read(&mut buffer).unwrap();
+                request.extend_from_slice(&buffer[..count]);
+                if count == 0 || request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let request = String::from_utf8(request).unwrap();
+            request_sender.send(request.clone()).unwrap();
+            let body = "[]";
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .unwrap();
+        });
+
+        // Credentials embedded in the proxy URL become Proxy-Authorization.
+        let backend = WebBackend::new_with_config(
+            base_url,
+            String::new(),
+            Some(format!("http://admin:admin123@{proxy_address}")),
+            None,
+            None,
+            false,
+            None,
+        )
+        .unwrap();
+        backend.auth.lock().await.checked = true;
+
+        let connections = backend.load_connections().await.unwrap();
+        assert!(connections.is_empty());
+        server.join().unwrap();
+
+        let request = request_receiver.recv().unwrap().to_ascii_lowercase();
+        assert!(request.starts_with(&format!("get http://{base_address}/api/connection/list ")), "{request}");
+        // base64("admin:admin123") = YWRtaW46YWRtaW4xMjM=
+        assert!(request.contains("proxy-authorization: basic ywrtaw46ywrtaw4xmjm="), "{request}");
+    }
+
+    #[test]
+    fn web_backend_rejects_invalid_proxy_and_header_config() {
+        let error = WebBackend::new_with_config(
+            "http://127.0.0.1:1".to_string(),
+            String::new(),
+            Some("not a url".to_string()),
+            None,
+            None,
+            false,
+            None,
+        )
+        .unwrap_err();
+        assert!(error.contains("HTTP(S)_PROXY"), "{error}");
+
+        let error = WebBackend::new_with_config(
+            "http://127.0.0.1:1".to_string(),
+            String::new(),
+            None,
+            None,
+            Some("not json".to_string()),
+            false,
+            None,
+        )
+        .unwrap_err();
+        assert!(error.contains("DBX_WEB_HEADERS"), "{error}");
+
+        let error = WebBackend::new_with_config(
+            "http://127.0.0.1:1".to_string(),
+            String::new(),
+            None,
+            None,
+            Some(r#"{"Bad Header Name":"v"}"#.to_string()),
+            false,
+            None,
+        )
+        .unwrap_err();
+        assert!(error.contains("header name"), "{error}");
+
+        let error = WebBackend::new_with_config(
+            "http://127.0.0.1:1".to_string(),
+            String::new(),
+            None,
+            None,
+            Some(r#"{"X-Num":42}"#.to_string()),
+            false,
+            None,
+        )
+        .unwrap_err();
+        assert!(error.contains("expected a string"), "{error}");
+
+        // Reserved headers that DBX manages internally are rejected.
+        let error = WebBackend::new_with_config(
+            "http://127.0.0.1:1".to_string(),
+            String::new(),
+            None,
+            None,
+            Some(r#"{"Cookie":"session=1"}"#.to_string()),
+            false,
+            None,
+        )
+        .unwrap_err();
+        assert!(error.contains("reserved by DBX"), "{error}");
+
+        let error = WebBackend::new_with_config(
+            "http://127.0.0.1:1".to_string(),
+            String::new(),
+            None,
+            None,
+            Some(r#"{"x-dbx-mcp-request":"1"}"#.to_string()),
+            false,
+            None,
+        )
+        .unwrap_err();
+        assert!(error.contains("reserved by DBX"), "{error}");
+    }
+
+    /// Starts a TLS server with a freshly generated self-signed certificate
+    /// for 127.0.0.1, answering the DBX Web auth/check + connection/list
+    /// endpoints. Returns (base_url, ca_pem_path, tempdir) — the caller must
+    /// hold the tempdir so the certificate file stays readable for the test.
+    async fn spawn_self_signed_https_server() -> (String, std::path::PathBuf, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let ca_key = dir.path().join("ca.key");
+        let ca_pem = dir.path().join("ca.pem");
+        let server_key = dir.path().join("server.key");
+        let server_csr = dir.path().join("server.csr");
+        let server_pem = dir.path().join("server.pem");
+        let run = |args: &[&str]| {
+            let status = std::process::Command::new("openssl")
+                .args(args)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .unwrap();
+            let output = std::process::Command::new("openssl").args(args).output().unwrap();
+            assert!(
+                output.status.success(),
+                "openssl failed: {args:?} stderr={}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let _ = status;
+        };
+        // Self-signed CA.
+        run(&[
+            "req",
+            "-x509",
+            "-newkey",
+            "rsa:2048",
+            "-nodes",
+            "-keyout",
+            ca_key.to_str().unwrap(),
+            "-out",
+            ca_pem.to_str().unwrap(),
+            "-subj",
+            "/CN=DBX Test CA",
+            "-days",
+            "1",
+            "-addext",
+            "basicConstraints=critical,CA:TRUE",
+        ]);
+        // Server key + CSR.
+        run(&[
+            "req",
+            "-newkey",
+            "rsa:2048",
+            "-nodes",
+            "-keyout",
+            server_key.to_str().unwrap(),
+            "-out",
+            server_csr.to_str().unwrap(),
+            "-subj",
+            "/CN=127.0.0.1",
+        ]);
+        // Server cert signed by the CA, with SAN for 127.0.0.1. The x509 -req
+        // subcommand takes extensions via -extfile, not -addext.
+        let ext_path = dir.path().join("server.ext");
+        std::fs::write(&ext_path, "subjectAltName=IP:127.0.0.1\nbasicConstraints=critical,CA:FALSE\n").unwrap();
+        run(&[
+            "x509",
+            "-req",
+            "-in",
+            server_csr.to_str().unwrap(),
+            "-CA",
+            ca_pem.to_str().unwrap(),
+            "-CAkey",
+            ca_key.to_str().unwrap(),
+            "-CAcreateserial",
+            "-out",
+            server_pem.to_str().unwrap(),
+            "-days",
+            "1",
+            "-extfile",
+            ext_path.to_str().unwrap(),
+        ]);
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        // Read certificate material before moving into the server task: the
+        // tempdir is dropped when this function returns, deleting the files.
+        let server_cert_bytes = std::fs::read(&server_pem).unwrap();
+        let server_key_bytes = std::fs::read(&server_key).unwrap();
+        tokio::spawn(async move {
+            use std::io::BufReader;
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+            let certs: Vec<rustls::pki_types::CertificateDer<'static>> = {
+                let mut reader = BufReader::new(&server_cert_bytes[..]);
+                rustls_pemfile::certs(&mut reader).collect::<Result<_, _>>().unwrap()
+            };
+            let key = {
+                let mut reader = BufReader::new(&server_key_bytes[..]);
+                rustls_pemfile::private_key(&mut reader).unwrap().unwrap()
+            };
+            // A single default provider avoids the "could not automatically
+            // determine the process-level CryptoProvider" panic in workspace
+            // builds where multiple rustls crypto features are present.
+            let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+            let config = rustls::ServerConfig::builder().with_no_client_auth().with_single_cert(certs, key).unwrap();
+            let acceptor = tokio_rustls::TlsAcceptor::from(std::sync::Arc::new(config));
+
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut tls = acceptor.accept(stream).await.unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 1024];
+            loop {
+                let count = tls.read(&mut buffer).await.unwrap();
+                request.extend_from_slice(&buffer[..count]);
+                if count == 0 || request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let request = String::from_utf8(request).unwrap();
+            let body = if request.contains("/api/auth/check") {
+                r#"{"authenticated":true,"required":false,"setup_required":false}"#
+            } else {
+                "[]"
+            };
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            tls.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        (format!("https://{address}"), ca_pem, dir)
+    }
+
+    #[tokio::test]
+    async fn web_backend_rejects_self_signed_certificate_by_default() {
+        let (base_url, _cert, _dir) = spawn_self_signed_https_server().await;
+        let backend = WebBackend::new_with_config(base_url, String::new(), None, None, None, false, None).unwrap();
+        backend.auth.lock().await.checked = true;
+
+        let error = backend.load_connections().await.unwrap_err();
+        // Verification is on by default: the self-signed chain is rejected.
+        assert!(error.contains("API request /api/connection/list failed"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn web_backend_skips_verification_when_configured() {
+        let (base_url, _cert, _dir) = spawn_self_signed_https_server().await;
+        let backend = WebBackend::new_with_config(base_url, String::new(), None, None, None, true, None).unwrap();
+        backend.auth.lock().await.checked = true;
+
+        let connections = backend.load_connections().await.unwrap();
+        assert!(connections.is_empty());
+    }
+
+    #[tokio::test]
+    async fn web_backend_trusts_custom_ca_certificate() {
+        let (base_url, ca_pem, _dir) = spawn_self_signed_https_server().await;
+        let backend = WebBackend::new_with_config(
+            base_url,
+            String::new(),
+            None,
+            None,
+            None,
+            false,
+            Some(ca_pem.to_str().unwrap().to_string()),
+        )
+        .unwrap();
+        backend.auth.lock().await.checked = true;
+
+        let connections = backend.load_connections().await.unwrap();
+        assert!(connections.is_empty());
     }
 
     #[tokio::test]

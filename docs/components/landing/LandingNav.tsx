@@ -31,7 +31,7 @@ const i18n = {
   },
 };
 
-export function LandingNav({ lang, active }: { lang: "en" | "cn"; active?: "home" | "databases" | "changelog" | "community" | "sponsors" | "contributors" | "drivers" }) {
+export function LandingNav({ lang, active }: { lang: "en" | "cn"; active?: "home" | "databases" | "changelog" | "community" | "issue" | "sponsors" | "contributors" | "drivers" }) {
   const ref = useRef<HTMLElement>(null);
   const [menuOpen, setMenuOpen] = useState(false);
   const t = i18n[lang];
@@ -40,6 +40,7 @@ export function LandingNav({ lang, active }: { lang: "en" | "cn"; active?: "home
     databases: `/${otherLang}/databases`,
     changelog: `/${otherLang}/changelog`,
     community: `/${otherLang}/community`,
+    issue: `/${otherLang}/issue`,
     sponsors: `/${otherLang}/sponsors`,
     contributors: `/${otherLang}/contributors`,
     drivers: `/${otherLang}/drivers`,

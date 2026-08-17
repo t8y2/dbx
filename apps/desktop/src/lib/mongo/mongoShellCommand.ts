@@ -62,6 +62,10 @@ export interface MongoVersionCommand {
   kind: "version";
 }
 
+export interface MongoShowDatabasesCommand {
+  kind: "showDatabases";
+}
+
 export interface MongoCreateUserCommand {
   userJson: string;
   writeConcernJson?: string;
@@ -91,6 +95,7 @@ export type MongoCommand =
   | ({ kind: "find" } & MongoFindCommand)
   | ({ kind: "findOne" } & MongoFindOneCommand)
   | MongoVersionCommand
+  | MongoShowDatabasesCommand
   | ({ kind: "countDocuments" } & MongoCountDocumentsCommand)
   | ({ kind: "aggregate" } & MongoAggregateCommand)
   | ({ kind: "distinct" } & MongoDistinctCommand)
@@ -619,6 +624,7 @@ export function parseMongoCommand(input: string): ParsedMongoCommand | null {
   // Keep the more specific readers ahead of generic write parsing so the
   // returned kind matches the result renderer we want to use downstream.
   const parsers: Array<(source: string) => MongoCommand | null> = [
+    parseMongoShowDatabasesCommand,
     (source) => {
       const version = parseMongoVersionCommand(source);
       return version ?? null;
@@ -689,6 +695,11 @@ export function parseMongoCommand(input: string): ParsedMongoCommand | null {
   }
 
   return null;
+}
+
+export function parseMongoShowDatabasesCommand(input: string): MongoShowDatabasesCommand | null {
+  const source = input.trim().replace(/;$/, "").trim();
+  return /^show\s+(?:dbs|databases)$/i.test(source) ? { kind: "showDatabases" } : null;
 }
 
 export function splitMongoCommands(input: string): ParsedMongoCommand[] {
@@ -783,6 +794,27 @@ export function mongoDocumentsToQueryResult(documents: unknown[], executionTimeM
     affected_rows: total,
     execution_time_ms: Math.max(0, Math.round(executionTimeMs)),
     truncated: total > documents.length,
+  };
+}
+
+export function mongoDatabasesToQueryResult(documents: unknown[], executionTimeMs: number, maxRows: number): QueryResult {
+  const response = documents[0];
+  const databases = isRecord(response) ? response.databases : undefined;
+  if (!Array.isArray(databases)) throw new Error("MongoDB listDatabases response is missing the databases array.");
+  if (!databases.every(isRecord)) {
+    throw new Error("MongoDB listDatabases response contains an invalid database entry.");
+  }
+
+  const rowLimit = Number.isFinite(maxRows) ? Math.max(1, Math.trunc(maxRows)) : databases.length;
+  const rows = databases.slice(0, rowLimit).map((database) => [toCellValue(database.name), toCellValue(database.sizeOnDisk), toCellValue(database.empty)]);
+  const truncated = rows.length < databases.length;
+  return {
+    columns: ["name", "sizeOnDisk", "empty"],
+    rows,
+    affected_rows: databases.length,
+    execution_time_ms: Math.max(0, Math.round(executionTimeMs)),
+    truncated,
+    has_more: truncated,
   };
 }
 
@@ -1110,7 +1142,7 @@ function mongoTopLevelCommandLineStarts(segment: string): number[] {
 
 function isMongoCommandLineStart(segment: string, index: number): boolean {
   const rest = segment.slice(index);
-  return /^use\b/i.test(rest) || /^db(?:\s*\.|\b)/i.test(rest);
+  return /^use\b/i.test(rest) || /^show\s+(?:dbs|databases)\b/i.test(rest) || /^db(?:\s*\.|\b)/i.test(rest);
 }
 
 function pushMongoSegment(segments: MongoTextRange[], source: string, from: number, to: number) {

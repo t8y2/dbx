@@ -25,6 +25,7 @@ NATIVE_ONLY_AGENT_MODULES = {
     "xugu": "drivers/xugu",
     "rabbitmq": "drivers/rabbitmq",
     "rocketmq": "drivers/rocketmq",
+    "zookeeper": "drivers/zookeeper",
 }
 AUTO_VERSIONED_NATIVE_MODULES = {"duckdb"}
 JDBC_ARCHITECTURE_ALLOWLIST = {

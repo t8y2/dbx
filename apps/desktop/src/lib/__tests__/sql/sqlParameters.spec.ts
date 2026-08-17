@@ -455,6 +455,39 @@ describe("extractSqlParameters", () => {
     `);
   });
 
+  it("ignores compact MySQL routine labels in cursor procedures", () => {
+    const sql = `
+      CREATE PROCEDURE process_orders()
+      BEGIN
+        DECLARE done INT DEFAULT FALSE;
+        DECLARE order_id INT;
+        DECLARE cur_orders CURSOR FOR SELECT id FROM orders;
+        DECLARE CONTINUE HANDLER FOR NOT FOUND SET done = TRUE;
+
+        OPEN cur_orders;
+        read_loop:LOOP
+          FETCH cur_orders INTO order_id;
+          IF done THEN
+            LEAVE read_loop;
+          END IF;
+        END LOOP read_loop;
+        CLOSE cur_orders;
+      END
+    `;
+
+    expect(extractSqlParameters(sql, { databaseType: "mysql" })).toEqual([]);
+    expect(substituteSqlParameters(sql, {}, { databaseType: "mysql" })).toBe(sql);
+  });
+
+  it("limits MySQL routine label handling to label contexts", () => {
+    const labels = "BEGIN outer_block:BEGIN retry_loop:WHILE ready DO repeat_block:REPEAT work_loop:LOOP END LOOP work_loop; END";
+
+    expect(extractSqlParameters(labels, { databaseType: "mysql" })).toEqual([]);
+    expect(extractSqlParameters("SELECT * FROM jobs WHERE state = :LOOP", { databaseType: "mysql" })).toEqual(["LOOP"]);
+    expect(extractSqlParameters("BEGIN SELECT :LOOP; END", { databaseType: "mysql" })).toEqual(["LOOP"]);
+    expect(extractSqlParameters("read_loop:LOOP")).toEqual(["LOOP"]);
+  });
+
   it("ignores HANA SQLScript variable references", () => {
     const sql = "DO BEGIN Dummy1 = SELECT 1 FROM DUMMY; SELECT * FROM :Dummy1; END";
     expect(extractSqlParameters(sql, { databaseType: "saphana" })).toEqual([]);

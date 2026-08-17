@@ -36,6 +36,7 @@ pub async fn execute_query(
     max_rows: Option<usize>,
     fetch_size: Option<usize>,
     page_size: Option<usize>,
+    row_offset: Option<usize>,
     result_session_id: Option<String>,
     client_session_id: Option<String>,
     timeout_secs: Option<u64>,
@@ -61,6 +62,7 @@ pub async fn execute_query(
             max_rows,
             fetch_size,
             page_size,
+            row_offset,
             catalog,
             result_session_id,
             client_session_id,
@@ -88,6 +90,7 @@ pub async fn execute_multi(
     max_rows: Option<usize>,
     fetch_size: Option<usize>,
     page_size: Option<usize>,
+    row_offset: Option<usize>,
     max_result_bytes: Option<usize>,
     result_key_columns: Option<Vec<String>>,
     table_data_preview: Option<bool>,
@@ -147,6 +150,7 @@ pub async fn execute_multi(
             max_rows,
             fetch_size,
             page_size,
+            row_offset,
             max_result_bytes,
             result_key_columns: result_key_columns.unwrap_or_default(),
             table_data_preview: table_data_preview.unwrap_or(false),
@@ -495,6 +499,13 @@ pub fn build_empty_table_sql(options: dbx_core::db_admin_sql::TableAdminSqlOptio
 #[tauri::command]
 pub fn build_truncate_table_sql(options: dbx_core::db_admin_sql::TableAdminSqlOptions) -> Result<String, String> {
     Ok(dbx_core::db_admin_sql::build_truncate_table_sql(options))
+}
+
+#[tauri::command]
+pub fn build_mysql_auto_increment_sql(
+    options: dbx_core::db_admin_sql::MysqlAutoIncrementSqlOptions,
+) -> Result<String, String> {
+    dbx_core::db_admin_sql::build_mysql_auto_increment_sql(options)
 }
 
 #[tauri::command]

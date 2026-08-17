@@ -50,8 +50,27 @@ export function classifySqlRisk(sql: string, options: SqlRiskOptions = {}): SqlR
   return { ...highest, statements };
 }
 
-export function classifySqlStatementRisk(sql: string, _options: SqlRiskOptions = {}): SqlRiskStatementAssessment {
+export function classifySqlStatementRisk(sql: string, options: SqlRiskOptions = {}): SqlRiskStatementAssessment {
+  const dynamodbRisk = classifyDynamoDbStatementRisk(sql, options.dialect);
+  if (dynamodbRisk) return dynamodbRisk;
   return classifyTokens(tokenizeSqlForRisk(sql));
+}
+
+function classifyDynamoDbStatementRisk(sql: string, dialect?: DatabaseType | string): SqlRiskStatementAssessment | null {
+  if (dialect !== "dynamodb") return null;
+  const header = sql
+    .split(/\r?\n/)
+    .find((line) => line.trim())
+    ?.trim()
+    .toUpperCase();
+  if (header === "DBX DYNAMODB SCAN" || header === "DBX DYNAMODB QUERY / SCAN") {
+    return { risk: "read", firstKeyword: "dbx" };
+  }
+  if (header === "DBX DYNAMODB INSERT ITEM" || header === "DBX DYNAMODB PUT ITEM" || header === "DBX DYNAMODB DELETE ITEM") {
+    return { risk: "write", firstKeyword: "dbx" };
+  }
+  if (header?.startsWith("DBX DYNAMODB")) return { risk: "unknown", firstKeyword: "dbx" };
+  return null;
 }
 
 export function isSqlRiskMutation(risk: SqlRiskLevel): boolean {

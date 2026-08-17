@@ -1,4 +1,5 @@
 import type { BackendError } from "@/lib/backend/errorUtils";
+import type { TransferContent, TransferMode, TransferObjectKind, TransferTableNameCase } from "@/lib/backend/tauri";
 import type { MultiDbResultRunExecution } from "@/types/sqlExecution";
 
 export type DatabaseType =
@@ -13,6 +14,7 @@ export type DatabaseType =
   | "clickhouse"
   | "sqlserver"
   | "mongodb"
+  | "dynamodb"
   | "oracle"
   | "elasticsearch"
   | "easysearch"
@@ -52,6 +54,8 @@ export type DatabaseType =
   | "trino"
   | "prestosql"
   | "hive"
+  | "kyuubi"
+  | "impala"
   | "spark"
   | "db2"
   | "informix"
@@ -563,6 +567,8 @@ export interface IndexInfo {
   index_type?: string | null;
   included_columns?: string[] | null;
   comment?: string | null;
+  /** Parallel to `columns`: true at index i means columns[i] is a raw expression, not a plain column name. */
+  key_is_expression?: boolean[] | null;
 }
 
 export interface ForeignKeyInfo {
@@ -770,6 +776,11 @@ export interface SpatialColumn {
   srid: number | null;
 }
 
+export interface QueryResultSourceColumnRef {
+  sourceKey: string;
+  sourceColumn: string;
+}
+
 export interface QueryResultRun {
   id: string;
   title: string;
@@ -810,6 +821,8 @@ export interface QueryResultRun {
   resultEvicted?: boolean;
   queryAnalysis?: QueryTab["queryAnalysis"];
   querySourceColumns?: QueryTab["querySourceColumns"];
+  resultColumnComments?: QueryTab["resultColumnComments"];
+  queryDisplaySourceColumns?: QueryTab["queryDisplaySourceColumns"];
   queryEditabilityReason?: QueryTab["queryEditabilityReason"];
   mongoEditTarget?: QueryTab["mongoEditTarget"];
   tableMeta?: QueryTab["tableMeta"];
@@ -900,6 +913,7 @@ export type TreeNodeType =
   | "group-table-partitions"
   | "group-table-subpartitions"
   | "group-tables"
+  | "group-dolt-system-tables"
   | "group-views"
   | "group-materialized-views"
   | "group-procedures"
@@ -935,6 +949,7 @@ export type TreeNodeType =
   | "redis-db"
   | "mq-tenant"
   | "nacos-namespace"
+  | "nacos-access-control"
   | "etcd-root"
   | "etcd-dashboard"
   | "etcd-access-control"
@@ -946,6 +961,7 @@ export type TreeNodeType =
   | "mongo-buckets"
   | "mongo-bucket"
   | "mongo-collection"
+  | "dynamodb-table"
   | "vector-database"
   | "vector-collection"
   | "elasticsearch-index"
@@ -1033,7 +1049,7 @@ export interface TableNameFilter {
   excludePatterns: string[];
 }
 
-export type TableInfoTab = "columns" | "indexes" | "foreignKeys" | "triggers" | "ddl";
+export type TableInfoTab = "columns" | "indexes" | "foreignKeys" | "constraints" | "triggers" | "ddl";
 
 export interface TableStructureEditorTarget {
   kind: "column" | "index";
@@ -1049,6 +1065,8 @@ export interface TableStructureEditorDraft {
   columns: import("@/lib/table/tableStructureEditorSql").EditableStructureColumn[];
   indexes: import("@/lib/table/tableStructureEditorSql").EditableStructureIndex[];
   foreignKeys: import("@/lib/table/tableStructureEditorSql").EditableStructureForeignKey[];
+  constraints?: ConstraintInfo[];
+  constraintsLoaded?: boolean;
   triggers: import("@/lib/table/tableStructureEditorSql").EditableStructureTrigger[];
   triggersLoaded?: boolean;
   loadedMetadataFacets?: import("@/lib/metadata/objectMetadataCache").ObjectMetadataFacet[];
@@ -1078,6 +1096,8 @@ export interface QueryTab {
   id: string;
   title: string;
   customTitle?: boolean;
+  /** Force the editor to word-wrap regardless of the global setting, e.g. for auto-generated single-line templates. */
+  forceWordWrap?: boolean;
   connectionId: string;
   database: string;
   schema?: string;
@@ -1174,6 +1194,7 @@ export interface QueryTab {
     | "mqtt"
     | "nacos"
     | "nacos-dashboard"
+    | "nacos-access-control"
     | "databases"
     | "objects"
     | "structure"
@@ -1245,6 +1266,7 @@ export interface QueryTab {
     multiSource?: boolean;
     allowInsert?: boolean;
     allowInsertDelete?: boolean;
+    distinct?: boolean;
     sources?: {
       key: string;
       catalog?: string;
@@ -1266,6 +1288,25 @@ export interface QueryTab {
     }[];
   };
   querySourceColumns?: Array<string | undefined>;
+  /**
+   * Column comments for a multi-source query result (e.g. JOIN), indexed by
+   * result-column ordinal (projection order). Each entry is the comment of the
+   * single base column that result column resolves to; `undefined` when the
+   * column is ambiguous (e.g. an unqualified name present in several sources)
+   * or cannot be resolved back to a base column, so the grid shows no comment
+   * instead of a wrong one. Populated even when the result is not editable
+   * (e.g. multi-table JOIN), so joined results still show column comments.
+   */
+  resultColumnComments?: Array<string | undefined>;
+  /**
+   * Display-only result-column to source mapping for multi-source results,
+   * indexed by result-column ordinal. Each entry carries the source identity
+   * (sourceKey + canonical source column name), so comments resolve per source
+   * instead of first-source-wins on name clashes. Unlike querySourceColumns it
+   * is also populated for multi-source results that are not editable, and must
+   * never be used for row identity or editing.
+   */
+  queryDisplaySourceColumns?: Array<QueryResultSourceColumnRef | undefined>;
   queryEditabilityReason?: "not-select" | "cte" | "set-operation" | "aggregation" | "external-source" | "complex-source" | "computed-columns" | "no-table" | "no-primary-key" | "primary-key-not-returned" | "aliased-columns" | "metadata-unavailable";
   mongoEditTarget?: {
     collection: string;
@@ -1317,6 +1358,50 @@ export interface SavedSqlFile {
 export interface SavedSqlLibrary {
   folders: SavedSqlFolder[];
   files: SavedSqlFile[];
+}
+
+/** Serializable configuration of a saved data-transfer task. */
+export interface TransferTaskConfig {
+  sourceConnectionId: string;
+  /** Undefined means the connection's built-in/default catalog. */
+  sourceCatalog?: string;
+  sourceDatabase: string;
+  sourceSchema?: string;
+  targetConnectionId: string;
+  targetCatalog?: string;
+  targetDatabase: string;
+  targetSchema?: string;
+  /** Selected object names grouped by object kind (TABLE, VIEW, ...). */
+  objects: Partial<Record<TransferObjectKind, string[]>>;
+  content: TransferContent;
+  mode: TransferMode;
+  targetTableNameCase: TransferTableNameCase;
+  batchSize: number;
+}
+
+export interface TransferTask {
+  id: string;
+  folderId?: string;
+  name: string;
+  orderIndex?: number;
+  config: TransferTaskConfig;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface TransferTaskFolder {
+  id: string;
+  parentFolderId?: string;
+  name: string;
+  orderIndex?: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface TransferTaskLibrary {
+  version: 1;
+  folders: TransferTaskFolder[];
+  tasks: TransferTask[];
 }
 
 export interface VectorCollectionMeta {

@@ -36,9 +36,11 @@ vi.mock("@lucide/vue", async () => {
     Copy: icon,
     Eye: icon,
     EyeOff: icon,
+    GripVertical: icon,
     Info: icon,
     Pencil: icon,
     Plus: icon,
+    RotateCcw: icon,
     Trash2: icon,
   };
 });
@@ -90,6 +92,8 @@ import DataGridCellDetailPanel from "@/components/grid/DataGridCellDetailPanel.v
 import DataGridColumnHeader from "@/components/grid/DataGridColumnHeader.vue";
 import DataGridCopyColumnNamesDialog from "@/components/grid/DataGridCopyColumnNamesDialog.vue";
 import DataGridFilterBuilder from "@/components/grid/DataGridFilterBuilder.vue";
+import DataGridFilterWorkbench from "@/components/grid/DataGridFilterWorkbench.vue";
+import DataGridTextFilterWorkbench from "@/components/grid/DataGridTextFilterWorkbench.vue";
 import DataGridPagination from "@/components/grid/DataGridPagination.vue";
 import DataGridQueryControls from "@/components/grid/DataGridQueryControls.vue";
 import DataGridSearchBar from "@/components/grid/DataGridSearchBar.vue";
@@ -435,6 +439,55 @@ describe("DataGridColumnHeader", () => {
 });
 
 describe("DataGridFilterBuilder", () => {
+  it("renders a compact text rule without framed form controls", async () => {
+    const updateRule = vi.fn();
+    const add = vi.fn();
+    const mounted = mountComponent(DataGridFilterBuilder, {
+      rules: [{ id: "r1", columnName: "account_id", mode: "equals", rawValue: "7", rawEndValue: "", conjunction: "AND" }],
+      columns: ["account_id"],
+      filteredColumns: ["account_id"],
+      modeOptions: [{ value: "equals", labelKey: "equals" }],
+      columnSearch: "",
+      layout: "text",
+      showHeader: false,
+      showFooter: false,
+      onUpdateRule: updateRule,
+      onAdd: add,
+    });
+    const ruleGrid = findOne(mounted.root, (node) => String(node.props.class).includes("grid-cols-[18px_22px_var(--filter-builder-column-width)_92px_minmax(140px,1fr)_auto]"));
+    const enabledCheckbox = findOne(mounted.root, (node) => node.props.role === "checkbox");
+    const triggers = findAll(mounted.root, (node) => node.props["data-stub"] === "SelectTrigger");
+    const valueEditor = findOne(mounted.root, (node) => node.props["data-filter-value-editor"] === "");
+    const addButton = findOne(mounted.root, (node) => node.props["aria-label"] === "grid.filterBuilderAddRule");
+
+    expect(enabledCheckbox.props["aria-checked"]).toBe(true);
+    expect(triggers.every((trigger) => String(trigger.props.class).includes("border-0"))).toBe(true);
+    expect(valueEditor.props.placeholder).toBe("grid.filterBuilderTextValue");
+    expect(String(ruleGrid.props.class)).toContain("border-b");
+
+    dispatch(enabledCheckbox, "click");
+    dispatch(addButton, "click");
+    dispatch(valueEditor, "keydown", { key: "Enter", shiftKey: true });
+    await mounted.setProps({
+      rules: [
+        { id: "r1", columnName: "account_id", mode: "equals", rawValue: "7", rawEndValue: "", conjunction: "AND" },
+        { id: "r2", columnName: "", mode: "equals", rawValue: "", rawEndValue: "", conjunction: "AND" },
+      ],
+    });
+    await nextTick();
+
+    expect(updateRule).toHaveBeenCalledWith("r1", { disabled: true });
+    expect(add).toHaveBeenCalledTimes(2);
+    expect(findAll(mounted.root, (node) => node.props["data-stub"] === "Select")[2].props.open).toBe(false);
+    const ruleItems = findAll(mounted.root, (node) => node.props["data-filter-rule-item"] === "");
+    const conjunction = findOne(mounted.root, (node) => node.props["data-filter-conjunction"] === "");
+    expect(ruleItems).toHaveLength(2);
+    expect(ruleItems[1].props["data-connected"]).toBe("");
+    expect(hostText(conjunction)).toBe("AND");
+    dispatch(conjunction, "click");
+    expect(updateRule).toHaveBeenCalledWith("r2", { conjunction: "OR" });
+  });
+
   it("opens the first empty rule column search on request", async () => {
     const mounted = mountComponent(DataGridFilterBuilder, {
       rules: [{ id: "r1", columnName: "", mode: "equals", rawValue: "", rawEndValue: "", conjunction: "AND" }],
@@ -464,7 +517,7 @@ describe("DataGridFilterBuilder", () => {
     const selectValues = findAll(mounted.root, (node) => node.props["data-stub"] === "SelectValue");
     const items = findAll(mounted.root, (node) => node.props["data-stub"] === "SelectItem");
     const filterBuilder = findOne(mounted.root, (node) => String(node.props.class).includes("w-fit max-w-full"));
-    const ruleGrid = findOne(mounted.root, (node) => String(node.props.class).includes("grid-cols-[var(--filter-builder-column-width)_92px_var(--filter-builder-value-width)_auto]"));
+    const ruleGrid = findOne(mounted.root, (node) => String(node.props.class).includes("grid-cols-[18px_var(--filter-builder-column-width)_92px_var(--filter-builder-value-width)_auto]"));
     const searchInput = findOne(mounted.root, (node) => node.type === "input" && node.props.placeholder === "grid.filterBuilderSearchColumns");
     const valueEditor = findOne(mounted.root, (node) => node.props["data-filter-value-editor"] === "");
 
@@ -479,7 +532,7 @@ describe("DataGridFilterBuilder", () => {
     expect(searchInput.props.placeholder).toBe("grid.filterBuilderSearchColumns");
     expect(valueEditor.props.placeholder).toBe("grid.filterBuilderValue");
     expect(filterBuilder.props.style).toEqual({ "--filter-builder-column-width": "178px", "--filter-builder-value-width": "178px" });
-    expect(String(ruleGrid.props.class)).toContain("grid-cols-[var(--filter-builder-column-width)_92px_var(--filter-builder-value-width)_auto]");
+    expect(String(ruleGrid.props.class)).toContain("grid-cols-[18px_var(--filter-builder-column-width)_92px_var(--filter-builder-value-width)_auto]");
     expect(String(ruleGrid.props.class)).toContain("justify-start");
     for (const trigger of triggers) {
       expect(String(trigger.props.class)).toContain("w-full");
@@ -500,6 +553,33 @@ describe("DataGridFilterBuilder", () => {
     const filterBuilder = findOne(mounted.root, (node) => String(node.props.class).includes("w-fit max-w-full"));
 
     expect(filterBuilder.props.style).toEqual({ "--filter-builder-column-width": "88px", "--filter-builder-value-width": "178px" });
+  });
+
+  it("renders reorder handles and supports keyboard condition moves", () => {
+    const move = vi.fn();
+    const mounted = mountComponent(DataGridFilterBuilder, {
+      rules: [
+        { id: "r1", columnName: "id", mode: "equals", rawValue: "1", rawEndValue: "", conjunction: "AND" },
+        { id: "r2", columnName: "name", mode: "equals", rawValue: "Alice", rawEndValue: "", conjunction: "AND", disabled: true },
+      ],
+      columns: ["id", "name"],
+      filteredColumns: ["id", "name"],
+      modeOptions: [{ value: "equals", labelKey: "equals" }],
+      columnSearch: "",
+      onMove: move,
+    });
+    const handles = findAll(mounted.root, (node) => node.props["data-filter-drag-handle"] === "");
+
+    expect(handles).toHaveLength(2);
+    expect(handles.every((handle) => handle.props.draggable === undefined)).toBe(true);
+    expect(handles.every((handle) => typeof handle.props.onPointerdown === "function")).toBe(true);
+    expect(handles.every((handle) => String(handle.props.class).includes("touch-none"))).toBe(true);
+    expect(handles[0].props["aria-label"]).toBe("grid.filterBuilderReorderRule");
+    const arrowDown = dispatch(handles[0], "keydown", { key: "ArrowDown" });
+    expect(arrowDown.defaultPrevented).toBe(true);
+    expect(move).toHaveBeenCalledWith("r1", 1);
+    dispatch(handles[1], "keydown", { key: "ArrowUp" });
+    expect(move).toHaveBeenLastCalledWith("r2", 0);
   });
 
   it("keeps search focus while navigating and selecting filtered columns", async () => {
@@ -730,6 +810,7 @@ describe("DataGridQueryControls", () => {
       compact: false,
       leadingBorder: false,
       filterBuilderOpen: false,
+      filterEditorView: "quick",
       filterButtonActive: false,
       filterButtonCount: 0,
       hasLocalColumnFilters: false,
@@ -772,6 +853,7 @@ describe("DataGridQueryControls", () => {
       compact: false,
       leadingBorder: false,
       filterBuilderOpen: false,
+      filterEditorView: "quick",
       filterButtonActive: true,
       filterButtonCount: 1,
       hasLocalColumnFilters: false,
@@ -807,6 +889,7 @@ describe("DataGridQueryControls", () => {
       compact: false,
       leadingBorder: false,
       filterBuilderOpen: true,
+      filterEditorView: "quick",
       filterButtonActive: false,
       filterButtonCount: 0,
       hasLocalColumnFilters: false,
@@ -824,6 +907,10 @@ describe("DataGridQueryControls", () => {
 
     expect(String(popoverContent.props.class)).toContain("w-fit");
     expect(String(popoverContent.props.class)).toContain("max-w-[calc(100vw-16px)]");
+    expect(String(popoverContent.props.class)).toContain("max-h-[var(--reka-popover-content-available-height)]");
+    expect(String(popoverContent.props.class)).toContain("overflow-y-auto");
+    expect(popoverContent.props["data-filter-rules-scroll"]).toBe("");
+    expect(popoverContent.props["collision-padding"]).toBe(8);
   });
 
   it("keeps filter actions available in the popover", () => {
@@ -841,6 +928,7 @@ describe("DataGridQueryControls", () => {
       compact: false,
       leadingBorder: false,
       filterBuilderOpen: true,
+      filterEditorView: "quick",
       filterButtonActive: true,
       filterButtonCount: 1,
       hasLocalColumnFilters: false,
@@ -885,6 +973,213 @@ describe("DataGridQueryControls", () => {
     expect(clearFilters).toHaveBeenCalledTimes(2);
     expect(resetFilters).toHaveBeenCalledOnce();
     expect(applyFilters).toHaveBeenCalledOnce();
+  });
+
+  it("keeps view selection out of the data grid controls", async () => {
+    const mounted = mountComponent(DataGridQueryControls, {
+      whereInput: "",
+      orderByInput: "",
+      columns: ["id"],
+      conditionColumns: ["id"],
+      historyScope: {},
+      canUseWhereSearch: true,
+      compact: false,
+      leadingBorder: false,
+      filterBuilderOpen: true,
+      filterEditorView: "quick",
+      filterButtonActive: false,
+      filterButtonCount: 0,
+      hasLocalColumnFilters: false,
+      localFilterCount: 0,
+      localFilterSummaries: [],
+      rules: [{ id: "r1", columnName: "", mode: "equals", rawValue: "", rawEndValue: "", conjunction: "AND" }],
+      filteredColumns: ["id"],
+      modeOptions: [{ value: "equals", labelKey: "equals" }],
+      columnSearch: "",
+      applyWhere: vi.fn(),
+      applyOrderBy: vi.fn(),
+      clearOrderBy: vi.fn(),
+    });
+
+    expect(hostText(mounted.root)).not.toContain("grid.filterQuickView");
+    expect(hostText(mounted.root)).not.toContain("grid.filterConditionView");
+    expect(findAll(mounted.root, (node) => node.type === "button" && String(node.props.class).includes("-translate-x-1"))).toHaveLength(1);
+
+    await mounted.setProps({ filterEditorView: "conditions", filterBuilderOpen: false });
+    await nextTick();
+    expect(findOne(mounted.root, (node) => node.type === "textarea" && node.props.placeholder === "WHERE")).toBeTruthy();
+    expect(findAll(mounted.root, (node) => node.type === "button" && String(node.props.class).includes("-translate-x-1"))).toHaveLength(0);
+  });
+});
+
+describe("DataGridFilterWorkbench", () => {
+  it("scrolls to the newest rule when a condition is added", async () => {
+    const requestAnimationFrame = vi.spyOn(window, "requestAnimationFrame").mockImplementation((callback) => {
+      callback(0);
+      return 1;
+    });
+    const firstRule = { id: "r1", columnName: "id", mode: "equals" as const, rawValue: "1", rawEndValue: "", conjunction: "AND" as const };
+    const mounted = mountComponent(DataGridFilterWorkbench, {
+      sqlPreview: "WHERE id = 1",
+      rules: [firstRule],
+      columns: ["id", "name"],
+      filteredColumns: ["id", "name"],
+      modeOptions: [{ value: "equals", labelKey: "equals" }],
+      columnSearch: "",
+    });
+    const scroller = findOne(mounted.root, (node) => node.props["data-filter-rules-scroll"] === "") as any;
+    scroller.scrollTop = 0;
+    scroller.scrollHeight = 480;
+
+    await mounted.setProps({ rules: [firstRule, { ...firstRule, id: "r2", columnName: "name" }] });
+    await nextTick();
+
+    expect(scroller.scrollTop).toBe(480);
+    requestAnimationFrame.mockRestore();
+  });
+
+  it("does not auto-open field search in the conditions view", async () => {
+    const mounted = mountComponent(DataGridFilterWorkbench, {
+      sqlPreview: "",
+      rules: [{ id: "r1", columnName: "", mode: "equals", rawValue: "", rawEndValue: "", conjunction: "AND" }],
+      columns: ["id", "name"],
+      filteredColumns: ["id", "name"],
+      modeOptions: [{ value: "equals", labelKey: "equals" }],
+      columnSearch: "",
+    });
+    await nextTick();
+
+    expect(findOne(mounted.root, (node) => node.props["data-stub"] === "Select").props.open).toBe(false);
+  });
+
+  it("exposes persistent condition editing, SQL preview, and explicit actions", async () => {
+    const ensureRule = vi.fn();
+    const addRule = vi.fn();
+    const apply = vi.fn();
+    const reset = vi.fn();
+    const clear = vi.fn();
+    const copySql = vi.fn();
+    const updateRule = vi.fn();
+    const mounted = mountComponent(DataGridFilterWorkbench, {
+      sqlPreview: "WHERE (tenant_id = 7) AND (status = 'open')",
+      rules: [
+        { id: "r1", columnName: "tenant_id", mode: "equals", rawValue: "7", rawEndValue: "", conjunction: "AND" },
+        { id: "r2", columnName: "status", mode: "equals", rawValue: "open", rawEndValue: "", conjunction: "AND" },
+      ],
+      columns: ["id", "tenant_id", "status"],
+      filteredColumns: ["id", "tenant_id", "status"],
+      modeOptions: [{ value: "equals", labelKey: "equals" }],
+      columnSearch: "",
+      onEnsureRule: ensureRule,
+      onAddRule: addRule,
+      onApply: apply,
+      onReset: reset,
+      onClear: clear,
+      onCopySql: copySql,
+      onUpdateRule: updateRule,
+    });
+    await nextTick();
+
+    expect(ensureRule).toHaveBeenCalledOnce();
+    expect(hostText(mounted.root)).not.toContain("grid.filterQuickView");
+    expect(hostText(mounted.root)).not.toContain("grid.filterConditionView");
+    expect(hostText(mounted.root)).toContain("grid.clearFilter");
+    expect(hostText(mounted.root)).toContain("WHERE (tenant_id = 7) AND (status = 'open')");
+    const ruleScroller = findOne(mounted.root, (node) => node.props["data-filter-rules-scroll"] === "");
+    expect(String(ruleScroller.props.class)).toContain("overflow-auto");
+    const conjunctions = findAll(mounted.root, (node) => node.props["data-filter-conjunction"] === "");
+    const ruleItems = findAll(mounted.root, (node) => node.props["data-filter-rule-item"] === "");
+    expect(conjunctions).toHaveLength(1);
+    expect(hostText(conjunctions[0])).toBe("AND");
+    expect(ruleItems[1].props["data-connected"]).toBe("");
+    dispatch(conjunctions[0], "click");
+    expect(updateRule).toHaveBeenCalledWith("r2", { conjunction: "OR" });
+
+    dispatch(
+      findOne(mounted.root, (node) => node.props["aria-label"] === "grid.copyFilterSql"),
+      "click",
+    );
+    dispatch(
+      findOne(mounted.root, (node) => node.type === "button" && hostText(node) === "grid.filterBuilderAddRule"),
+      "click",
+    );
+    const resetButton = findOne(mounted.root, (node) => node.type === "button" && hostText(node) === "grid.resetFilterBuilder");
+    expect(resetButton.props.variant).toBe("outline");
+    dispatch(resetButton, "click");
+    dispatch(
+      findOne(mounted.root, (node) => node.type === "button" && hostText(node) === "grid.applyFilter"),
+      "click",
+    );
+    dispatch(
+      findOne(mounted.root, (node) => node.type === "button" && hostText(node) === "grid.clearFilter"),
+      "click",
+    );
+
+    expect(copySql).toHaveBeenCalledOnce();
+    expect(addRule).toHaveBeenCalledOnce();
+    expect(reset).toHaveBeenCalledOnce();
+    expect(apply).toHaveBeenCalledOnce();
+    expect(clear).toHaveBeenCalledOnce();
+  });
+
+  it("shows the empty preview state without enabling copy", () => {
+    const mounted = mountComponent(DataGridFilterWorkbench, {
+      sqlPreview: "",
+      rules: [],
+      columns: [],
+      filteredColumns: [],
+      modeOptions: [],
+      columnSearch: "",
+    });
+
+    expect(hostText(mounted.root)).toContain("grid.filterSqlPreviewEmpty");
+    expect(findOne(mounted.root, (node) => node.props["aria-label"] === "grid.copyFilterSql").props.disabled).toBe(true);
+  });
+});
+
+describe("DataGridTextFilterWorkbench", () => {
+  it("exposes a persisted keyboard-resizable text filter panel", async () => {
+    const ensureRule = vi.fn();
+    const updateHeight = vi.fn();
+    const addRule = vi.fn();
+    const mounted = mountComponent(DataGridTextFilterWorkbench, {
+      height: 168,
+      sqlPreview: "WHERE account_id = 7",
+      rules: [{ id: "r1", columnName: "account_id", mode: "equals", rawValue: "7", rawEndValue: "", conjunction: "AND" }],
+      columns: ["account_id"],
+      filteredColumns: ["account_id"],
+      modeOptions: [{ value: "equals", labelKey: "equals" }],
+      columnSearch: "",
+      onEnsureRule: ensureRule,
+      onAddRule: addRule,
+      "onUpdate:height": updateHeight,
+    });
+    await nextTick();
+    const panel = findOne(mounted.root, (node) => node.props["data-grid-text-filter-workbench"] === "");
+    const rulesArea = findOne(mounted.root, (node) => node.props["data-filter-rules-scroll"] === "") as any;
+    const resizeHandle = findOne(mounted.root, (node) => node.props.role === "separator");
+    const resetButton = findOne(mounted.root, (node) => node.type === "button" && hostText(node) === "grid.resetFilterBuilder");
+
+    expect(ensureRule).toHaveBeenCalledOnce();
+    expect(panel.props.style).toEqual({ height: "168px", maxHeight: "55vh" });
+    expect(resizeHandle.props["aria-valuenow"]).toBe(168);
+    const addTooltip = findOne(mounted.root, (node) => node.props["data-stub"] === "Tooltip");
+    expect(addTooltip.props.delayDuration ?? addTooltip.props["delay-duration"]).toBe(800);
+    expect(hostText(addTooltip)).toContain("Shift+Enter");
+    expect(resetButton.props.variant).toBe("outline");
+
+    rulesArea.focus = vi.fn();
+    dispatch(rulesArea, "pointerdown");
+    const addShortcut = dispatch(rulesArea, "keydown", { key: "Enter", shiftKey: true });
+    dispatch(rulesArea, "keydown", { key: "Enter", shiftKey: false });
+    expect(rulesArea.focus).toHaveBeenCalledOnce();
+    expect(addShortcut.defaultPrevented).toBe(true);
+    expect(addShortcut.propagationStopped).toBe(true);
+    expect(addRule).toHaveBeenCalledOnce();
+
+    dispatch(resizeHandle, "keydown", { key: "ArrowDown" });
+    await nextTick();
+    expect(updateHeight).toHaveBeenCalledWith(176);
   });
 });
 

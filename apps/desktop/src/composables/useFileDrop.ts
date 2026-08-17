@@ -60,8 +60,15 @@ export function useFileDrop() {
               port: 0,
               username: "",
               password: "",
+              one_time: true,
             };
-            const connectionId = await api.connectDb(config);
+            let connectionId: string;
+            try {
+              connectionId = await api.connectDb(config);
+            } catch (e: any) {
+              toast(t("welcome.fileOpenFailed", { name, message: e?.message || String(e) }), 5000);
+              continue;
+            }
             connectionStore.addEphemeralConnection({ ...config, id: connectionId });
             const tabId = queryStore.createTab(connectionId, "", name, "query");
             queryStore.updateSql(tabId, dataQuery);

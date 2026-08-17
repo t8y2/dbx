@@ -203,6 +203,7 @@ async function submitSchedule() {
   if (!canSave.value) return;
   saving.value = true;
   try {
+    await api.recordDatabaseExportDestination(draft.value.destinationDirectory);
     saveSchedule({
       ...draft.value,
       databases: allDatabases.value ? [] : [...selectedDatabases.value],

@@ -8,6 +8,26 @@ export interface NacosCapabilities {
   /** Naming capabilities are intentionally granular: servers such as r-nacos
    * can expose discovery reads without supporting the official write APIs. */
   serviceManagement?: NacosServiceCapabilities;
+  accessControl?: NacosAccessControlCapabilities;
+}
+
+export type NacosAccessControlMode = "unavailable" | "roleBindings" | "embeddedRoles";
+
+export interface NacosAccessControlCapabilities {
+  mode: NacosAccessControlMode;
+  listUsers: NacosOperationCapability;
+  createUser: NacosOperationCapability;
+  updateUser: NacosOperationCapability;
+  deleteUser: NacosOperationCapability;
+  listRoleBindings: NacosOperationCapability;
+  assignRole: NacosOperationCapability;
+  removeRole: NacosOperationCapability;
+  listPermissions: NacosOperationCapability;
+  grantPermission: NacosOperationCapability;
+  revokePermission: NacosOperationCapability;
+  /** All read endpoints required by the directory-detail workspace are available. */
+  enhancedWorkspace: boolean;
+  supportsNamespacePrivileges: boolean;
 }
 
 export interface NacosServiceCapabilities {
@@ -22,7 +42,7 @@ export interface NacosServiceCapabilities {
   deregisterInstance: NacosOperationCapability;
 }
 
-export type NacosCapabilityReason = "implementationReadOnly" | "versionUnsupported" | "endpointUnavailable" | "notVerified" | "connectionReadOnly";
+export type NacosCapabilityReason = "implementationReadOnly" | "versionUnsupported" | "endpointUnavailable" | "notVerified" | "connectionReadOnly" | "permissionDenied";
 
 export interface NacosOperationCapability {
   supported: boolean;
@@ -44,6 +64,149 @@ export interface NacosRNacosConsoleCaptcha {
   image?: string;
 }
 
+export interface NacosNamespacePrivilege {
+  enabled: boolean;
+  whitelistIsAll: boolean;
+  whitelist: string[];
+  blacklistIsAll: boolean;
+  blacklist: string[];
+}
+
+export interface NacosUserQuery {
+  username?: string;
+  pageNo?: number;
+  pageSize?: number;
+}
+
+export interface NacosUserInfo {
+  username: string;
+  nickname?: string;
+  enabled?: boolean;
+  roles: string[];
+  namespacePrivilege?: NacosNamespacePrivilege;
+  source?: string;
+}
+
+export interface NacosUserList {
+  pageNo: number;
+  pageSize: number;
+  totalCount: number;
+  items: NacosUserInfo[];
+}
+
+export interface NacosUserCreate {
+  username: string;
+  password: string;
+  nickname?: string;
+  enabled?: boolean;
+  roles: string[];
+  namespacePrivilege?: NacosNamespacePrivilege;
+}
+
+export interface NacosUserUpdate {
+  username: string;
+  password?: string;
+  nickname?: string;
+  enabled?: boolean;
+  roles?: string[];
+  namespacePrivilege?: NacosNamespacePrivilege;
+}
+
+export interface NacosRoleQuery {
+  username?: string;
+  role?: string;
+  pageNo?: number;
+  pageSize?: number;
+}
+
+export interface NacosRoleBinding {
+  username: string;
+  role: string;
+}
+
+export interface NacosRoleList {
+  pageNo: number;
+  pageSize: number;
+  totalCount: number;
+  items: NacosRoleBinding[];
+}
+
+export type NacosPermissionScopeKind = "namespace" | "global" | "custom" | "unknown";
+
+export interface NacosPermissionScope {
+  kind: NacosPermissionScopeKind;
+  namespaceId?: string;
+}
+
+export interface NacosPermissionInfo {
+  role: string;
+  resourceRaw: string;
+  actionRaw: string;
+  parsedScope?: NacosPermissionScope;
+}
+
+export interface NacosRoleSummary {
+  role: string;
+  memberCount: number;
+  permissionCount: number;
+  complete: boolean;
+  administrator: boolean;
+}
+
+export interface NacosAccessControlSnapshot {
+  users: NacosUserInfo[];
+  roleBindings: NacosRoleBinding[];
+  permissions: NacosPermissionInfo[];
+  roles: NacosRoleSummary[];
+  namespaces: NacosNamespaceInfo[];
+  currentUsername?: string;
+}
+
+export interface NacosNewUserDraft {
+  username: string;
+  password: string;
+}
+
+export interface NacosPermissionDraft {
+  namespaceIds: string[];
+  action: "r" | "w" | "rw";
+}
+
+export type NacosAccessOperationRequest =
+  | { kind: "createUser"; username: string; password: string; roles: string[]; confirmation?: string }
+  | { kind: "createRole"; role: string; members: string[]; newUsers: NacosNewUserDraft[]; permissions: NacosPermissionDraft[]; confirmation?: string }
+  | { kind: "updateUserRoles"; username: string; roles: string[]; confirmation?: string }
+  | { kind: "updateRole"; role: string; members: string[]; newUsers: NacosNewUserDraft[]; permissions: NacosPermissionDraft[]; confirmation?: string }
+  | { kind: "deleteUser"; username: string; confirmation?: string }
+  | { kind: "deleteRole"; role: string; confirmation?: string }
+  | { kind: "revokePermission"; permission: NacosPermissionInfo; confirmation?: string };
+
+export type NacosAccessOperationStatus = "running" | "partial" | "succeeded" | "failed" | "undoing" | "undone";
+export type NacosAccessOperationStepStatus = "pending" | "running" | "succeeded" | "failed" | "skipped" | "compensated";
+
+export interface NacosAccessOperationStep {
+  id: string;
+  action: string;
+  target: string;
+  status: NacosAccessOperationStepStatus;
+  retryable: boolean;
+  needsPassword: boolean;
+  message?: string;
+}
+
+export interface NacosAccessOperationResult {
+  operationId: string;
+  status: NacosAccessOperationStatus;
+  steps: NacosAccessOperationStep[];
+  canRetry: boolean;
+  canUndo: boolean;
+}
+
+export interface NacosAccessOperationRetry {
+  operationId: string;
+  credentials: NacosNewUserDraft[];
+}
+
 export interface NacosNamespaceInfo {
   namespace: string;
   namespaceShowName: string;
@@ -51,6 +214,11 @@ export interface NacosNamespaceInfo {
   configCount?: number;
   quota?: number;
   namespaceType?: number;
+}
+
+export interface NacosNamespaceSidebarSnapshot {
+  namespaces: NacosNamespaceInfo[];
+  accessControl: NacosAccessControlCapabilities;
 }
 
 export interface NacosNamespaceCreate {
@@ -81,6 +249,8 @@ export interface NacosAdminConfig {
   versionMode?: NacosVersionMode;
   serverAddr: string;
   contextPath?: string;
+  /** Namespace IDs used when an official Nacos ordinary user cannot enumerate namespaces or authorization data. */
+  managedNamespaces?: string[];
   rnacosConsoleAddr?: string;
   /** Undefined keeps the legacy behaviour: history is enabled when a console address exists. */
   rnacosHistoryEnabled?: boolean;
@@ -230,6 +400,7 @@ export interface NacosConfigTransferRequest {
   targetConnectionId: string;
   source: NacosConfigSelector;
   targetNamespace: string;
+  targetGroup?: string;
   conflictPolicy: NacosConflictPolicy;
 }
 

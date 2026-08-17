@@ -72,6 +72,57 @@ test("applies a credential-free KingBase URL without clearing typed credentials"
   assert.equal(applied.password, "typed-secret");
 });
 
+test("applies a credential-free URL without clearing same-profile typed credentials", () => {
+  const parsed = parseConnectionUrl("postgresql://db.example.com:5433/app?sslmode=require");
+  const applied = applyParsedConnectionUrl({ name: "app", db_type: "postgres", username: "typed-user", password: "typed-secret" } as any, parsed);
+
+  assert.equal(applied.host, "db.example.com");
+  assert.equal(applied.port, 5433);
+  assert.equal(applied.database, "app");
+  assert.equal(applied.url_params, "sslmode=require");
+  assert.equal(applied.ssl, true);
+  assert.equal(applied.username, "typed-user");
+  assert.equal(applied.password, "typed-secret");
+});
+
+test("uses explicit URL credentials instead of same-profile typed credentials", () => {
+  const parsed = parseConnectionUrl("postgresql://url%40user:url%40secret@db.example.com/app");
+  const applied = applyParsedConnectionUrl({ name: "app", db_type: "postgres", username: "typed-user", password: "typed-secret" } as any, parsed);
+
+  assert.equal(applied.username, "url@user");
+  assert.equal(applied.password, "url@secret");
+});
+
+test("does not carry typed credentials to a different URL profile", () => {
+  const parsed = parseConnectionUrl("postgresql://db.example.com/app");
+  const applied = applyParsedConnectionUrl({ name: "app", db_type: "mysql", username: "mysql-user", password: "mysql-secret" } as any, parsed);
+
+  assert.equal(applied.db_type, "postgres");
+  assert.equal(applied.username, "");
+  assert.equal(applied.password, "");
+});
+
+test("does not carry typed credentials between driver profiles of the same database type", () => {
+  const parsed = parseConnectionUrl("mariadb://db.example.com/app");
+  const applied = applyParsedConnectionUrl(
+    { name: "app", db_type: "mysql", driver_profile: "mysql", username: "mysql-user", password: "mysql-secret" } as any,
+    parsed,
+  );
+
+  assert.equal(applied.db_type, "mysql");
+  assert.equal(applied.driver_profile, "mariadb");
+  assert.equal(applied.username, "");
+  assert.equal(applied.password, "");
+});
+
+test("keeps empty same-profile form credentials empty for a credential-free URL", () => {
+  const parsed = parseConnectionUrl("postgresql://db.example.com/app");
+  const applied = applyParsedConnectionUrl({ name: "app", db_type: "postgres", username: "", password: "" } as any, parsed);
+
+  assert.equal(applied.username, "");
+  assert.equal(applied.password, "");
+});
+
 test("parses mysql URLs with encoded credentials", () => {
   const parsed = parseConnectionUrl("mysql://root:p%40ss@127.0.0.1/shop?charset=utf8mb4");
 

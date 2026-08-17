@@ -12,7 +12,11 @@ interface TabDragState {
   startY: number;
 }
 
-export const TAB_DRAG_HORIZONTAL_THRESHOLD = 12;
+// Many touchscreen digitizers report to the OS/webview as a plain HID mouse
+// (no distinguishable pointerType), with tap contact-point drift well beyond
+// what real mouse/trackpad click jitter produces. 24px absorbs that jitter
+// while still requiring a clearly deliberate drag to reorder a tab.
+export const TAB_DRAG_HORIZONTAL_THRESHOLD = 24;
 
 const state = reactive<TabDragState>({
   active: false,
@@ -74,7 +78,7 @@ function removeGhost() {
   }
 }
 
-function onMouseMove(event: MouseEvent) {
+function onPointerMove(event: PointerEvent) {
   if (!pending && !state.active) return;
 
   if (pending && !state.active) {
@@ -122,8 +126,8 @@ let listenersAttached = false;
 
 function ensureListeners() {
   if (listenersAttached) return;
-  document.addEventListener("mousemove", onMouseMove, true);
-  document.addEventListener("mouseup", onMouseUp, true);
+  document.addEventListener("pointermove", onPointerMove, true);
+  document.addEventListener("pointerup", onMouseUp, true);
   listenersAttached = true;
 }
 
@@ -131,8 +135,14 @@ export function useTabDrag(onDrop: (draggedId: string, targetId: string, positio
   ensureListeners();
   onDropCallback = onDrop;
 
-  function startDrag(event: MouseEvent, tabId: string) {
+  function startDrag(event: PointerEvent, tabId: string) {
     if (event.button !== 0) return;
+    // Touch input has no reliable equivalent of mouse jitter: a real finger's
+    // contact point commonly drifts well past TAB_DRAG_HORIZONTAL_THRESHOLD
+    // during an ordinary tap, which would misread the tap as a drag. Skip
+    // arming the drag for touch entirely and let the tab strip's native
+    // horizontal scroll handle the gesture instead.
+    if (event.pointerType === "touch") return;
     const target = event.target as HTMLElement;
     if (target.closest("button, input, [data-tab-title-input]")) return;
     state.suppressClick = false;

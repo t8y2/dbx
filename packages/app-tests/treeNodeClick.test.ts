@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, test, vi } from "vitest";
 import assert from "node:assert/strict";
-import { copyNameForTreeNode, isDocumentBrowserTreeNode, objectSourceKindForTreeNode, shouldRunTreeNodeRowAction, sidebarSelectionCopyAction, treeNodeRowAction, treeNodeRowDoubleClickAction } from "../../apps/desktop/src/lib/sidebar/treeNodeClick.ts";
+import { copyDisplayPathForTreeNode, copyNameForTreeNode, isDocumentBrowserTreeNode, objectSourceKindForTreeNode, shouldRunTreeNodeRowAction, sidebarSelectionCopyAction, treeNodeRowAction, treeNodeRowDoubleClickAction } from "../../apps/desktop/src/lib/sidebar/treeNodeClick.ts";
 
 beforeAll(() => vi.stubGlobal("navigator", { platform: "Linux x86_64" }));
 afterAll(() => vi.unstubAllGlobals());
@@ -190,6 +190,94 @@ test("copying database object group rows uses the parent schema or database name
       database: "db",
     }),
     "db",
+  );
+});
+
+test("copying a MySQL display path uses connection, database, and object names", () => {
+  assert.equal(
+    copyDisplayPathForTreeNode(
+      {
+        id: "conn:app",
+        label: "app",
+        type: "database",
+        connectionId: "conn",
+        database: "app",
+      },
+      "dev-mysql",
+    ),
+    "dev-mysql.app",
+  );
+  assert.equal(
+    copyDisplayPathForTreeNode(
+      {
+        id: "conn:app:orders",
+        label: "orders",
+        type: "table",
+        connectionId: "conn",
+        database: "app",
+        tableName: "orders",
+      },
+      "dev-mysql",
+    ),
+    "dev-mysql.app.orders",
+  );
+  assert.equal(
+    copyDisplayPathForTreeNode(
+      {
+        id: "conn:app:__views:active_orders",
+        label: "active_orders",
+        type: "view",
+        connectionId: "conn",
+        database: "app",
+        objectName: "active_orders",
+      },
+      "dev-mysql",
+    ),
+    "dev-mysql.app.active_orders",
+  );
+  assert.equal(
+    copyDisplayPathForTreeNode(
+      {
+        id: "conn:app:orders:__triggers:audit_orders",
+        label: "audit_orders",
+        type: "trigger",
+        connectionId: "conn",
+        database: "app",
+        tableName: "orders",
+        objectName: "audit_orders",
+      },
+      "dev-mysql",
+    ),
+    "dev-mysql.app.audit_orders",
+  );
+});
+
+test("copying a display path rejects incomplete and synthetic nodes", () => {
+  assert.equal(
+    copyDisplayPathForTreeNode(
+      {
+        id: "conn:app:__tables",
+        label: "tree.tables",
+        type: "group-tables",
+        connectionId: "conn",
+        database: "app",
+      },
+      "dev-mysql",
+    ),
+    null,
+  );
+  assert.equal(
+    copyDisplayPathForTreeNode(
+      {
+        id: "conn:app:orders",
+        label: "orders",
+        type: "table",
+        connectionId: "conn",
+        database: "app",
+      },
+      "",
+    ),
+    null,
   );
 });
 

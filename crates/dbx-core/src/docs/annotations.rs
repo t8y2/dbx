@@ -655,7 +655,7 @@ mod tests {
         assert!(!error.contains("unknown field"), "should not surface a raw serde error, got: {error}");
     }
 
-    use crate::docs::{DocTable, NoteSource, ProjectMeta, SchemaSnapshot, TableKind};
+    use crate::docs::{ColumnNote, DocTable, NoteSource, ProjectMeta, SchemaSnapshot, TableKind};
     use crate::models::connection::DatabaseType;
 
     fn snapshot_with(tables: Vec<DocTable>) -> SchemaSnapshot {
@@ -738,8 +738,13 @@ mod tests {
         table.columns.push(crate::types::ColumnInfo {
             name: "status".to_string(),
             data_type: "text".to_string(),
+            comment: Some("Database lifecycle state.".to_string()),
             ..Default::default()
         });
+        table.column_notes.insert(
+            "status".to_string(),
+            ColumnNote { note: "Database lifecycle state.".to_string(), source: NoteSource::Database, shadowed: None },
+        );
         let mut snapshot = snapshot_with(vec![table]);
         let annotations: AnnotationFile = serde_json::from_str(SAMPLE).expect("parse");
 
@@ -748,6 +753,31 @@ mod tests {
         let note = snapshot.tables[0].column_notes.get("status").expect("column note");
         assert_eq!(note.note, "State machine.");
         assert_eq!(note.source, NoteSource::Local);
+        assert_eq!(note.shadowed.as_deref(), Some("Database lifecycle state."));
+    }
+
+    #[test]
+    fn database_column_note_survives_without_a_local_override() {
+        let mut table = table_named("core", "users", None);
+        table.columns.push(crate::types::ColumnInfo {
+            name: "email".to_string(),
+            data_type: "text".to_string(),
+            comment: Some("Primary contact address.".to_string()),
+            ..Default::default()
+        });
+        table.column_notes.insert(
+            "email".to_string(),
+            ColumnNote { note: "Primary contact address.".to_string(), source: NoteSource::Database, shadowed: None },
+        );
+        let mut snapshot = snapshot_with(vec![table]);
+        let annotations: AnnotationFile = serde_json::from_str(SAMPLE).expect("parse");
+
+        apply_annotations(&mut snapshot, &annotations, DatabaseType::Postgres);
+
+        let note = snapshot.tables[0].column_notes.get("email").expect("database column note");
+        assert_eq!(note.note, "Primary contact address.");
+        assert_eq!(note.source, NoteSource::Database);
+        assert_eq!(note.shadowed, None);
     }
 
     #[test]

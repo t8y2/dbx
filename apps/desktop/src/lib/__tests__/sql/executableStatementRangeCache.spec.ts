@@ -37,6 +37,24 @@ describe("executableStatementRangeCacheForDoc", () => {
     expect(executableStatementRangeStartingAt(cache, secondStatementLine.from)?.sql).toBe("SELECT *\nFROM menus AS mn\nLIMIT 100");
   });
 
+  it("only exposes the routine start as executable when a MySQL procedure contains a CASE expression", () => {
+    const sql = [
+      "CREATE PROCEDURE p_case()",
+      "BEGIN",
+      "  INSERT INTO audit_log (status_text)",
+      "  SELECT CASE WHEN active = 1 THEN 'active' ELSE 'inactive' END;",
+      "  CASE WHEN active = 1 THEN SET @status_code = 1; ELSE SET @status_code = 0; END CASE;",
+      "  DELETE FROM stale_rows WHERE expires_at < NOW();",
+      "END;",
+    ].join("\n");
+    const doc = Text.of(sql.split("\n"));
+    const cache = executableStatementRangeCacheForDoc(null, doc, "mysql");
+
+    expect(executableStatementRangeStartingAt(cache, doc.line(1).from)?.sql).toBe(sql.slice(0, -1));
+    expect(executableStatementRangeStartingAt(cache, doc.line(6).from)).toBeNull();
+    expect(executableStatementRangeAtCursor(cache, doc.line(6).from + 4)?.sql).toBe(sql.slice(0, -1));
+  });
+
   it("keeps MyBatis parameters in a Kingbase gutter execution range", () => {
     const sql = ["SELECT sum(nvl(a.medfee_sumamt, 0)) AS medfee_sumamt, a.insutype", "FROM yd_org_decla_detail a", "WHERE a.busin_type = '1' AND a.clr_ym = #{ym}", "GROUP BY a.clr_ym, a.insutype;"].join("\n");
     const doc = Text.of(sql.split("\n"));
@@ -100,12 +118,12 @@ describe("executableStatementRangeCacheForDoc", () => {
     expect(executableStatementRangeStartingAt(cache, doc.line(3).from)).toBeNull();
   });
 
-  it("does not resolve gutter run buttons when non-whitespace precedes the statement on the same line", () => {
-    const doc = Text.of(["/* comment */ SELECT 1;"]);
+  it("resolves a same-line leading TDSQL directive for gutter execution", () => {
+    const sql = "/*sets:allsets */ SELECT 1;";
+    const doc = Text.of([sql]);
     const cache = executableStatementRangeCacheForDoc(null, doc, "mysql");
 
-    expect(executableStatementRangeStartingAt(cache, doc.line(1).from)).toBeNull();
-    expect(executableStatementRangeStartingAt(cache, doc.toString().indexOf("SELECT"))?.sql).toBe("SELECT 1");
+    expect(executableStatementRangeStartingAt(cache, doc.line(1).from)?.sql).toBe(sql.slice(0, -1));
   });
 
   it("resolves the current statement from a cursor inside a continuation line", () => {
@@ -187,12 +205,13 @@ describe("executableStatementRangeCacheForDoc", () => {
     expect(executableStatementRangeAtCursor(cache, doc.line(4).from)).toBeNull();
   });
 
-  it("resolves SQL after a leading block comment on the same line", () => {
-    const doc = Text.of(["/* comment */ SELECT 1;"]);
+  it("preserves a same-line TDSQL directive while ignoring a cursor inside its comment", () => {
+    const sql = "/*sets:allsets */ SELECT 1;";
+    const doc = Text.of([sql]);
     const cache = executableStatementRangeCacheForDoc(null, doc, "mysql");
 
-    expect(executableStatementRangeAtCursor(cache, doc.toString().indexOf("SELECT"))?.sql).toBe("SELECT 1");
-    expect(executableStatementRangeAtCursor(cache, doc.toString().indexOf("comment"))).toBeNull();
+    expect(executableStatementRangeAtCursor(cache, sql.indexOf("SELECT"))?.sql).toBe(sql.slice(0, -1));
+    expect(executableStatementRangeAtCursor(cache, sql.indexOf("sets"))).toBeNull();
   });
 
   it("rebuilds the cache when the document instance changes", () => {

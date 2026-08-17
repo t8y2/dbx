@@ -1,7 +1,8 @@
 use std::sync::Arc;
 
 use axum::extract::State;
-use axum::http::HeaderMap;
+use axum::http::{header, HeaderMap, HeaderValue};
+use axum::response::Response;
 use axum::Json;
 use serde::Deserialize;
 
@@ -21,6 +22,7 @@ pub struct ExecuteQueryRequest {
     pub max_rows: Option<usize>,
     pub fetch_size: Option<usize>,
     pub page_size: Option<usize>,
+    pub row_offset: Option<usize>,
     pub max_result_bytes: Option<usize>,
     #[serde(default)]
     pub result_key_columns: Vec<String>,
@@ -169,6 +171,12 @@ pub struct BuildDropObjectSqlRequest {
 #[serde(rename_all = "camelCase")]
 pub struct BuildTableAdminSqlRequest {
     pub options: dbx_core::db_admin_sql::TableAdminSqlOptions,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BuildMysqlAutoIncrementSqlRequest {
+    pub options: dbx_core::db_admin_sql::MysqlAutoIncrementSqlOptions,
 }
 
 #[derive(Deserialize)]
@@ -363,6 +371,7 @@ pub async fn execute_query(
             max_rows: req.max_rows,
             fetch_size: req.fetch_size,
             page_size: req.page_size,
+            row_offset: req.row_offset,
             max_result_bytes: req.max_result_bytes,
             result_key_columns: req.result_key_columns,
             table_data_preview: req.table_data_preview,
@@ -387,7 +396,7 @@ pub async fn execute_multi(
     State(state): State<Arc<WebState>>,
     headers: HeaderMap,
     Json(req): Json<ExecuteQueryRequest>,
-) -> Result<Json<Vec<dbx_core::query::ExecuteMultiResult>>, AppError> {
+) -> Result<Response, AppError> {
     let allow_database_switch = req.client_session_id.as_deref().is_some_and(|id| !id.trim().is_empty());
     super::mcp_policy::ensure_sql(&state, &headers, &req.connection_id, &req.database, &req.sql, allow_database_switch)
         .await?;
@@ -401,6 +410,7 @@ pub async fn execute_multi(
 
     tracing::debug!(connection_id = %req.connection_id, "execute_multi");
 
+    let core_started_at = std::time::Instant::now();
     let result = dbx_core::query::execute_multi_core_with_options_for_client_typed(
         &state.app,
         &req.connection_id,
@@ -412,6 +422,7 @@ pub async fn execute_multi(
             max_rows: req.max_rows,
             fetch_size: req.fetch_size,
             page_size: req.page_size,
+            row_offset: req.row_offset,
             max_result_bytes: req.max_result_bytes,
             result_key_columns: req.result_key_columns,
             table_data_preview: req.table_data_preview,
@@ -427,15 +438,30 @@ pub async fn execute_multi(
     )
     .await
     .map_err(|error| AppError::from(error.into_backend_error()))?;
+    let core_ms = core_started_at.elapsed().as_millis();
 
     drop(registered);
-    Ok(execute_multi_response(result))
+    execute_multi_response(result, core_ms)
 }
 
 fn execute_multi_response(
     result: Vec<dbx_core::query::ExecuteMultiResult>,
-) -> Json<Vec<dbx_core::query::ExecuteMultiResult>> {
-    Json(result)
+    core_ms: u128,
+) -> Result<Response, AppError> {
+    let serialize_started_at = std::time::Instant::now();
+    let body = serde_json::to_vec(&result).map_err(|error| AppError::internal(error.to_string()))?;
+    let serialize_ms = serialize_started_at.elapsed().as_millis();
+    let mut response = Response::new(axum::body::Body::from(body));
+    response.headers_mut().insert(header::CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    response.headers_mut().insert(
+        "x-dbx-core-ms",
+        HeaderValue::from_str(&core_ms.to_string()).map_err(|error| AppError::internal(error.to_string()))?,
+    );
+    response.headers_mut().insert(
+        "x-dbx-serialize-ms",
+        HeaderValue::from_str(&serialize_ms.to_string()).map_err(|error| AppError::internal(error.to_string()))?,
+    );
+    Ok(response)
 }
 
 pub async fn execute_batch(
@@ -701,6 +727,12 @@ pub async fn build_empty_table_sql(Json(req): Json<BuildTableAdminSqlRequest>) -
 
 pub async fn build_truncate_table_sql(Json(req): Json<BuildTableAdminSqlRequest>) -> Json<String> {
     Json(dbx_core::db_admin_sql::build_truncate_table_sql(req.options))
+}
+
+pub async fn build_mysql_auto_increment_sql(
+    Json(req): Json<BuildMysqlAutoIncrementSqlRequest>,
+) -> Result<Json<String>, AppError> {
+    dbx_core::db_admin_sql::build_mysql_auto_increment_sql(req.options).map(Json).map_err(AppError::from)
 }
 
 pub async fn build_drop_database_sql(Json(req): Json<BuildDatabaseNameSqlRequest>) -> Json<String> {
@@ -1051,8 +1083,8 @@ mod tests {
         assert_eq!(log.metadata["blocked"], "destructive_confirmation_required");
     }
 
-    #[test]
-    fn execute_multi_response_preserves_nested_original_error_detail() {
+    #[tokio::test]
+    async fn execute_multi_response_preserves_nested_original_error_detail() {
         let result = dbx_core::query::ExecuteMultiResult {
             result: dbx_core::db::QueryResult {
                 columns: vec!["Error".to_string()],
@@ -1078,7 +1110,14 @@ mod tests {
             server_message: false,
         };
 
-        let payload = serde_json::to_value(execute_multi_response(vec![result]).0).unwrap();
+        let response = execute_multi_response(vec![result], 17).unwrap();
+        assert_eq!(response.headers()["x-dbx-core-ms"], "17");
+        assert!(response.headers()["x-dbx-serialize-ms"].to_str().unwrap().parse::<u128>().is_ok());
+        assert_eq!(response.headers()[header::CONTENT_TYPE], "application/json");
+        let body = response.into_body();
+        let payload =
+            serde_json::from_slice::<serde_json::Value>(&axum::body::to_bytes(body, usize::MAX).await.unwrap())
+                .unwrap();
 
         assert_eq!(payload[0]["statement_index"], 1);
         assert_eq!(payload[0]["error"]["code"], "DBX-JDBC-4001");

@@ -19,6 +19,12 @@ describe("resolveExecutableSql", () => {
 
     expect(resolveExecutableSql("SELECT 1;", selectedSql, { mode: "current", cursorPos: 0 })).toBe(selectedSql);
   });
+
+  it("keeps a manually selected same-line TDSQL directive unchanged", () => {
+    const selectedSql = "/*sets:allsets */ SELECT count(*) FROM tenant_table";
+
+    expect(resolveExecutableSql("SELECT 1;", selectedSql, { mode: "current", cursorPos: 0 })).toBe(selectedSql);
+  });
 });
 
 describe("executionCandidateForMode", () => {

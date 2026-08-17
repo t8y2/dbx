@@ -119,6 +119,11 @@ async function pressEscape() {
   await flushDialog();
 }
 
+async function clickOutside() {
+  document.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, cancelable: true }));
+  await flushDialog();
+}
+
 afterEach(() => {
   for (const app of mountedApps.splice(0)) app.unmount();
   document.body.innerHTML = "";
@@ -200,6 +205,24 @@ describe("UpdateDialog close protection", () => {
 
     expect(cancelDownload).toHaveBeenCalledOnce();
     expect(state.open).toBe(false);
+  });
+
+  it("keeps downloading in the background when the dialog is dismissed by clicking outside", async () => {
+    const { state, cancelDownload } = await mountDialog(0, { isDownloadingUpdate: true, downloadProgress: 42 });
+
+    await clickOutside();
+
+    expect(cancelDownload).not.toHaveBeenCalled();
+    expect(state.open).toBe(true);
+  });
+
+  it("keeps downloading in the background when the dialog is dismissed with Escape", async () => {
+    const { state, cancelDownload } = await mountDialog(0, { isDownloadingUpdate: true, downloadProgress: 42 });
+
+    await pressEscape();
+
+    expect(cancelDownload).not.toHaveBeenCalled();
+    expect(state.open).toBe(true);
   });
 
   it("allows closing while a downloaded update is idle", async () => {

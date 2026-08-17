@@ -91,6 +91,29 @@ test("table copy menu uses the shared single and multi-selection clipboard path"
   assert.match(copySelectedNamesBody, /copyToClipboard\(nodes\.map\(copyNameForTreeNode\)\.join\("\\n"\)\)/);
 });
 
+test("MySQL object name menus expose leaf and display-path copy choices", () => {
+  const runtimeHost = readFileSync("apps/desktop/src/components/sidebar/SidebarTreeRuntimeHost.vue", "utf8");
+  const copyNameBody = functionBody(runtimeHost, "copyName");
+  const copyDisplayPathBody = functionBody(runtimeHost, "copyDisplayPath");
+  const copyNameMenuItemBody = functionBody(runtimeHost, "copyNameMenuItem");
+  const connectionMenuBody = functionBody(runtimeHost, "buildConnectionSidebarMenu");
+  const databaseMenuBody = functionBody(runtimeHost, "buildDatabaseSidebarMenu");
+  const objectMenuBody = functionBody(runtimeHost, "buildObjectSidebarMenu");
+
+  assert.match(copyNameBody, /copyNameForTreeNode\(node\)/);
+  assert.match(copyDisplayPathBody, /copyDisplayPathForTreeNode\(node, connectionName\)/);
+  assert.match(copyNameMenuItemBody, /currentDatabaseType\(\) === "mysql"/);
+  assert.match(copyNameMenuItemBody, /children: \[/);
+  assert.match(copyNameMenuItemBody, /t\("contextMenu\.name"\)/);
+  assert.match(copyNameMenuItemBody, /t\("contextMenu\.fullPath"\)/);
+  assert.match(copyNameMenuItemBody, /return \{ label: t\("contextMenu\.copyName"\), action: copyName, icon: Copy, shortcut: shortcutCopyName\.value \}/);
+  assert.doesNotMatch(connectionMenuBody, /copyNameMenuItem\(\)/);
+  assert.match(databaseMenuBody, /items\.push\(copyNameMenuItem\(\)\)/);
+  assert.match(objectMenuBody, /items\.push\(copyNameMenuItem\(\)\)/);
+  assert.match(objectMenuBody, /node\.type === "trigger" \? copyNameMenuItem\(\)/);
+  assert.match(objectMenuBody, /node\.type === "sequence"[\s\S]*action: copyName/);
+});
+
 test("successful tree table paste consumes only the clipboard used to start it", () => {
   const runtimeHost = readFileSync("apps/desktop/src/components/sidebar/SidebarTreeRuntimeHost.vue", "utf8");
   const confirmPasteTableBody = functionBody(runtimeHost, "confirmPasteTable");

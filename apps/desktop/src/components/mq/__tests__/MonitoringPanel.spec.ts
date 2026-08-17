@@ -81,6 +81,7 @@ const KAFKA_STATS = {
 
 let app: App<Element> | null = null;
 let root: HTMLDivElement | null = null;
+const navigateTab = vi.fn();
 
 async function flushUi() {
   await Promise.resolve();
@@ -97,6 +98,7 @@ async function mountPanel() {
     namespace: "default",
     topic: TOPIC,
     mqSystemKind: "kafka",
+    onNavigateTab: navigateTab,
   });
   app.mount(root);
   await flushUi();
@@ -107,6 +109,7 @@ beforeEach(() => {
   backend.mqGetTopicStats.mockReset();
   backend.mqGetBacklog.mockReset();
   backend.mqPeekMessages.mockReset();
+  navigateTab.mockReset();
   backend.mqGetTopicStats.mockResolvedValue(KAFKA_STATS);
   backend.mqPeekMessages.mockResolvedValue([]);
 });
@@ -128,7 +131,13 @@ describe("MonitoringPanel Kafka message browser", () => {
     expect(panel.querySelector("textarea")).toBeNull();
     expect(browser.classList.contains("message-browser")).toBe(true);
     expect(browser.classList.contains("is-monitoring")).toBe(true);
-    expect(browser.querySelector('[data-testid="kafka-peek-start-position"]')).not.toBeNull();
+    expect(browser.querySelector('[data-testid="kafka-peek-start-position"]')).toBeNull();
+    expect(browser.querySelector('[data-testid="kafka-peek-partition"]')).not.toBeNull();
+
+    const fullQueryButton = [...panel.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.includes("mqMessages.queryTitle"));
+    if (!fullQueryButton) throw new Error("Full Kafka query button not found");
+    fullQueryButton.click();
+    expect(navigateTab).toHaveBeenCalledWith({ tab: "messages", topic: TOPIC });
 
     loadButton.click();
     await flushUi();

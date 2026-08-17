@@ -307,6 +307,26 @@ defineExpose({ expandAll, collapseAll, resetExpansion, refresh });
   font-weight: 650;
 }
 
+.json-tree-key,
+.json-tree-index,
+.json-tree-punctuation,
+.json-tree-bracket {
+  flex: 0 0 auto;
+}
+
+.json-tree-string,
+.json-tree-number,
+.json-tree-boolean,
+.json-tree-null {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.json-tree-summary {
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
 .dark .json-tree {
   --json-tree-key: #93c5fd;
   --json-tree-string: #86efac;

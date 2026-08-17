@@ -4,6 +4,11 @@ import { describe, expect, it } from "vitest";
 const source = readFileSync(new URL("../NacosAdminConsole.vue", import.meta.url), "utf8");
 
 describe("NacosAdminConsole config workbench layout", () => {
+  it("keeps access control outside the namespace-scoped workbench", () => {
+    expect(source).not.toContain("NacosAccessControl");
+    expect(source).toContain('type AdminTab = "configs" | "services";');
+  });
+
   it("keeps the editor as the final and primary workbench surface", () => {
     const contextBar = source.indexOf('class="nacos-config-context-bar');
     const inspector = source.indexOf('class="nacos-config-inspector');

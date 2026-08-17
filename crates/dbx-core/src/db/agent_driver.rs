@@ -2203,12 +2203,20 @@ impl AgentDriverClient {
         table: &str,
         timeout_duration: Option<Duration>,
     ) -> Result<T, String> {
-        self.call_method_with_timeout(
-            AgentMethod::GetTableDdl,
-            agent_schema_table_params(database, schema, table),
-            timeout_duration,
-        )
-        .await
+        self.get_table_ddl_with_options(database, schema, table, false, timeout_duration).await
+    }
+
+    pub async fn get_table_ddl_with_options<T: DeserializeOwned + Send + 'static>(
+        &mut self,
+        database: &str,
+        schema: &str,
+        table: &str,
+        portable: bool,
+        timeout_duration: Option<Duration>,
+    ) -> Result<T, String> {
+        let mut params = agent_schema_table_params(database, schema, table);
+        params["portable"] = serde_json::json!(portable);
+        self.call_method_with_timeout(AgentMethod::GetTableDdl, params, timeout_duration).await
     }
 
     pub async fn execute_query<T: DeserializeOwned + Send + 'static>(&mut self, params: Value) -> Result<T, String> {

@@ -4,6 +4,7 @@ import {
   buildTableImportParseOptions,
   defaultTableImportEmptyStringAsNull,
   formatTableImportElapsed,
+  importDataTypeForDatabase,
   nextTableImportWizardStep,
   previousTableImportWizardStep,
   requiredImportTargetColumns,
@@ -130,5 +131,19 @@ describe("tableImport", () => {
       amount: "DOUBLE",
       created_at: "DATETIME",
     });
+  });
+
+  it("uses SQL Server FLOAT for inferred decimal columns", () => {
+    expect(suggestImportTargetDataTypes(["id", "active", "amount", "created_at", "notes"], [[1001, true, "12.5", "2026-07-07 08:15:00", "invoice"]], "sqlserver")).toEqual({
+      id: "BIGINT",
+      active: "BIT",
+      amount: "FLOAT",
+      created_at: "DATETIME2",
+      notes: "NVARCHAR(MAX)",
+    });
+    expect(importDataTypeForDatabase("decimal", "mysql")).toBe("DOUBLE");
+    expect(importDataTypeForDatabase("decimal", "postgres")).toBe("DOUBLE PRECISION");
+    expect(importDataTypeForDatabase("decimal", "sqlite")).toBe("REAL");
+    expect(importDataTypeForDatabase("decimal", "oracle")).toBe("BINARY_DOUBLE");
   });
 });

@@ -1,7 +1,7 @@
 use crate::connection::{AppState, PoolKind};
 use crate::db::agent_driver::mongo_document_id_params;
 use crate::db::document_result::DocumentQueryResult;
-use crate::db::{easysearch_driver, elasticsearch_driver, mongo_driver, vector_driver};
+use crate::db::{dynamodb_driver, easysearch_driver, elasticsearch_driver, mongo_driver, vector_driver};
 
 pub use crate::db::vector_driver::CollectionInfo;
 
@@ -54,6 +54,7 @@ pub async fn list_databases_core(state: &AppState, connection_id: &str) -> Resul
             }
             Err(error) => Err(error),
         },
+        PoolKind::DynamoDb(client) => Ok(vec![client.region.clone()]),
         PoolKind::Elasticsearch(_) => Ok(vec!["default".to_string()]),
         PoolKind::Easysearch(_) => Ok(vec!["default".to_string()]),
         PoolKind::Meilisearch(_) => Ok(vec!["default".to_string()]),
@@ -246,6 +247,20 @@ pub async fn list_collections_core(
             infos.extend(specs.into_iter().map(|spec| mongo_collection_info(spec.name, spec.kind)));
             Ok(infos)
         }
+        PoolKind::DynamoDb(client) => {
+            let client = client.clone();
+            drop(connections);
+            let names = dynamodb_driver::list_tables(&client).await?;
+            Ok(names
+                .into_iter()
+                .map(|name| CollectionInfo {
+                    id: name.clone(),
+                    name,
+                    kind: Some("table".to_string()),
+                    ..Default::default()
+                })
+                .collect())
+        }
         PoolKind::Elasticsearch(client) => {
             let names = sort_names(elasticsearch_driver::list_indices(client).await?);
             Ok(names.into_iter().map(|n| CollectionInfo { name: n.clone(), id: n, ..Default::default() }).collect())
@@ -408,6 +423,7 @@ pub async fn find_documents_core(
     projection: Option<&str>,
     sort: Option<&str>,
     collation: Option<&str>,
+    cursor: Option<&str>,
 ) -> Result<DocumentQueryResult, String> {
     ensure_document_pool(state, connection_id).await?;
     let connections = state.connections.read().await;
@@ -419,6 +435,12 @@ pub async fn find_documents_core(
                 client, database, collection, skip, limit, filter, projection, sort, collation,
             )
             .await
+        }
+        PoolKind::DynamoDb(client) => {
+            let client = client.clone();
+            drop(connections);
+            let _ = (database, skip, projection, collation);
+            dynamodb_driver::find_items(&client, collection, limit, filter, sort, cursor).await
         }
         PoolKind::Elasticsearch(client) => {
             let client = client.clone();
@@ -469,6 +491,51 @@ pub async fn find_documents_core(
     }
 }
 
+pub async fn count_document_store_documents_core(
+    state: &AppState,
+    connection_id: &str,
+    collection: &str,
+    filter: Option<&str>,
+) -> Result<u64, String> {
+    ensure_document_pool(state, connection_id).await?;
+    let connections = state.connections.read().await;
+    match connections.get(connection_id).ok_or("Not found")? {
+        PoolKind::DynamoDb(client) => {
+            let client = client.clone();
+            drop(connections);
+            dynamodb_driver::count_items(&client, collection, filter).await
+        }
+        PoolKind::Elasticsearch(client) => {
+            let client = client.clone();
+            drop(connections);
+            elasticsearch_driver::count_documents(&client, collection, filter).await
+        }
+        PoolKind::Easysearch(client) => {
+            let client = client.clone();
+            drop(connections);
+            easysearch_driver::count_documents(&client, collection, filter).await
+        }
+        _ => Err("Document count is not supported for this connection".to_string()),
+    }
+}
+
+pub async fn describe_dynamodb_table_core(
+    state: &AppState,
+    connection_id: &str,
+    table: &str,
+) -> Result<dynamodb_driver::DynamoDbTableDescription, String> {
+    ensure_document_pool(state, connection_id).await?;
+    let connections = state.connections.read().await;
+    match connections.get(connection_id).ok_or("Not found")? {
+        PoolKind::DynamoDb(client) => {
+            let client = client.clone();
+            drop(connections);
+            dynamodb_driver::describe_table(&client, table).await
+        }
+        _ => Err("Not a DynamoDB connection".to_string()),
+    }
+}
+
 pub async fn count_elasticsearch_documents_core(
     state: &AppState,
     connection_id: &str,
@@ -509,6 +576,11 @@ pub async fn insert_document_core(
     let connections = state.connections.read().await;
     match connections.get(connection_id).ok_or("Not found")? {
         PoolKind::MongoDb(client) => mongo_driver::insert_document(client, database, collection, doc_json).await,
+        PoolKind::DynamoDb(client) => {
+            let client = client.clone();
+            drop(connections);
+            dynamodb_driver::insert_item(&client, collection, doc_json).await
+        }
         PoolKind::Elasticsearch(client) => {
             let client = client.clone();
             drop(connections);
@@ -573,6 +645,11 @@ pub async fn update_document_core(
     let connections = state.connections.read().await;
     match connections.get(connection_id).ok_or("Not found")? {
         PoolKind::MongoDb(client) => mongo_driver::update_document(client, database, collection, id, doc_json).await,
+        PoolKind::DynamoDb(client) => {
+            let client = client.clone();
+            drop(connections);
+            dynamodb_driver::update_item(&client, collection, id, doc_json).await
+        }
         PoolKind::Elasticsearch(client) => {
             let client = client.clone();
             drop(connections);
@@ -630,6 +707,11 @@ pub async fn delete_document_core_with_type(
     let connections = state.connections.read().await;
     match connections.get(connection_id).ok_or("Not found")? {
         PoolKind::MongoDb(client) => mongo_driver::delete_document(client, database, collection, id).await,
+        PoolKind::DynamoDb(client) => {
+            let client = client.clone();
+            drop(connections);
+            dynamodb_driver::delete_item(&client, collection, id).await
+        }
         PoolKind::Elasticsearch(client) => {
             let client = client.clone();
             drop(connections);

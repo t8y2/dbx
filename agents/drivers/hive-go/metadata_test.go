@@ -3,8 +3,10 @@ package main
 import (
 	"context"
 	"database/sql/driver"
+	"encoding/json"
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/t8y2/dbx/agents/go-common/gohive"
@@ -16,6 +18,77 @@ func TestShowTablesRowName(t *testing.T) {
 	}
 	if value := showTablesRowName([]string{"tab_name"}, []any{"fallback"}); value != "fallback" {
 		t.Fatalf("unexpected fallback table name: %q", value)
+	}
+}
+
+func TestKyuubiConnectionInfoReportsNativeIdentity(t *testing.T) {
+	behavior := &scriptedBehavior{
+		query: func(ctx context.Context, query string) (driver.Rows, error) {
+			switch query {
+			case "SELECT VERSION()":
+				return newScriptedRows(ctx, []string{"version"}, []string{"STRING"}, [][]driver.Value{{"3.5.8"}}), nil
+			case "SELECT CURRENT_USER()":
+				return newScriptedRows(ctx, []string{"current_user"}, []string{"STRING"}, [][]driver.Value{{"dbx"}}), nil
+			default:
+				return nil, errors.New("unexpected query: " + query)
+			}
+		},
+	}
+	server := newScriptedServer(t, behavior)
+	server.params.DatabaseType = "kyuubi"
+	server.config.Username = "fallback"
+
+	info, err := server.connectionInfo()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info["compatibilityMode"] != "kyuubi" || info["username"] != "dbx" || info["version"] != "3.5.8" {
+		t.Fatalf("unexpected Kyuubi connection info: %#v", info)
+	}
+	databaseInfo, ok := info["databaseInfo"].(map[string]string)
+	if !ok || databaseInfo["productName"] != "Apache Kyuubi" || databaseInfo["driverName"] != "DBX Kyuubi Go Agent" {
+		t.Fatalf("unexpected Kyuubi database identity: %#v", info["databaseInfo"])
+	}
+}
+
+func TestGetObjectSourceReturnsProtocolObject(t *testing.T) {
+	behavior := &scriptedBehavior{
+		query: func(ctx context.Context, query string) (driver.Rows, error) {
+			if query != "SHOW CREATE TABLE `dbx_kyuubi_demo`.`high_value_orders`" {
+				t.Fatalf("unexpected query: %q", query)
+			}
+			return newScriptedRows(
+				ctx,
+				[]string{"createtab_stmt"},
+				[]string{"STRING"},
+				[][]driver.Value{
+					{"CREATE VIEW dbx_kyuubi_demo.high_value_orders"},
+					{"AS SELECT id, customer, amount FROM dbx_kyuubi_demo.orders WHERE amount >= 50"},
+				},
+			), nil
+		},
+	}
+	server := newScriptedServer(t, behavior)
+	defer server.disconnect()
+
+	result, _, err := server.dispatch("get_object_source", map[string]json.RawMessage{
+		"schema":      json.RawMessage(`"dbx_kyuubi_demo"`),
+		"name":        json.RawMessage(`"high_value_orders"`),
+		"object_type": json.RawMessage(`"VIEW"`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	source, ok := result.(objectSource)
+	if !ok {
+		t.Fatalf("get_object_source returned %T instead of objectSource", result)
+	}
+	if source.Name != "high_value_orders" || source.ObjectType != "VIEW" || source.Schema == nil || *source.Schema != "dbx_kyuubi_demo" {
+		t.Fatalf("unexpected object source metadata: %#v", source)
+	}
+	expected := "CREATE VIEW dbx_kyuubi_demo.high_value_orders\nAS SELECT id, customer, amount FROM dbx_kyuubi_demo.orders WHERE amount >= 50\n"
+	if source.Source != expected {
+		t.Fatalf("unexpected object source DDL: %q", source.Source)
 	}
 }
 
@@ -211,7 +284,131 @@ func TestTableCommentAndTypeInfoUseHiveServerMetadata(t *testing.T) {
 	}
 }
 
-func TestListTablesFallsBackToShowTables(t *testing.T) {
+func TestListTablesFallsBackToShowTablesAndViews(t *testing.T) {
+	behavior := &scriptedBehavior{
+		getTables: func(context.Context, string, string, []string) (gohive.MetadataResult, error) {
+			return gohive.MetadataResult{}, errors.New("metadata unsupported")
+		},
+		query: func(ctx context.Context, query string) (driver.Rows, error) {
+			switch query {
+			case "SHOW TABLES IN `analytics`":
+				return newScriptedRows(
+					ctx,
+					[]string{"tab_name"},
+					[]string{"STRING"},
+					[][]driver.Value{{"events"}, {"shared_name"}},
+				), nil
+			case "SHOW VIEWS IN `analytics`":
+				return newScriptedRows(
+					ctx,
+					[]string{"view_name"},
+					[]string{"STRING"},
+					[][]driver.Value{{"events_view"}, {"shared_name"}},
+				), nil
+			default:
+				t.Fatalf("unexpected fallback query: %q", query)
+				return nil, errors.New("unexpected fallback query")
+			}
+		},
+	}
+	server := newScriptedServer(t, behavior)
+	defer server.disconnect()
+	values, err := server.listTables("analytics", metadataListConstraints{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := []tableInfo{
+		{Name: "events", TableType: "TABLE"},
+		{Name: "events_view", TableType: "VIEW"},
+		{Name: "shared_name", TableType: "VIEW"},
+	}
+	if !reflect.DeepEqual(values, expected) {
+		t.Fatalf("unexpected fallback tables: %#v", values)
+	}
+}
+
+func TestListTablesKeepsShowTablesResultsWhenShowViewsIsUnsupported(t *testing.T) {
+	behavior := &scriptedBehavior{
+		getTables: func(context.Context, string, string, []string) (gohive.MetadataResult, error) {
+			return gohive.MetadataResult{}, errors.New("metadata unsupported")
+		},
+		query: func(ctx context.Context, query string) (driver.Rows, error) {
+			switch query {
+			case "SHOW TABLES IN `analytics`":
+				return newScriptedRows(ctx, []string{"tab_name"}, []string{"STRING"}, [][]driver.Value{{"events"}}), nil
+			case "SHOW VIEWS IN `analytics`":
+				return nil, errors.New("SHOW VIEWS is unsupported")
+			default:
+				t.Fatalf("unexpected fallback query: %q", query)
+				return nil, errors.New("unexpected fallback query")
+			}
+		},
+	}
+	server := newScriptedServer(t, behavior)
+	defer server.disconnect()
+
+	values, err := server.listTables("analytics", metadataListConstraints{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(values, []tableInfo{{Name: "events", TableType: "TABLE"}}) {
+		t.Fatalf("unexpected fallback tables: %#v", values)
+	}
+}
+
+func TestListTablesReturnsNonCapabilityShowViewsError(t *testing.T) {
+	behavior := &scriptedBehavior{
+		getTables: func(context.Context, string, string, []string) (gohive.MetadataResult, error) {
+			return gohive.MetadataResult{}, errors.New("metadata unsupported")
+		},
+		query: func(ctx context.Context, query string) (driver.Rows, error) {
+			switch query {
+			case "SHOW TABLES IN `analytics`":
+				return newScriptedRows(ctx, []string{"tab_name"}, []string{"STRING"}, [][]driver.Value{{"events"}}), nil
+			case "SHOW VIEWS IN `analytics`":
+				return nil, errors.New("permission denied for SHOW VIEWS")
+			default:
+				t.Fatalf("unexpected fallback query: %q", query)
+				return nil, errors.New("unexpected fallback query")
+			}
+		},
+	}
+	server := newScriptedServer(t, behavior)
+	defer server.disconnect()
+
+	_, err := server.listTables("analytics", metadataListConstraints{})
+	if err == nil || !strings.Contains(err.Error(), "SHOW VIEWS fallback failed: permission denied") {
+		t.Fatalf("unexpected mixed fallback error: %v", err)
+	}
+}
+
+func TestShowViewsUnsupported(t *testing.T) {
+	tests := []struct {
+		name        string
+		err         error
+		unsupported bool
+	}{
+		{name: "explicit unsupported", err: errors.New("SHOW VIEWS is unsupported"), unsupported: true},
+		{name: "not supported", err: errors.New("SHOW VIEWS is not supported before Hive 2.2"), unsupported: true},
+		{name: "old parser", err: errors.New("ParseException: syntax error at or near VIEWS"), unsupported: true},
+		{name: "permission", err: errors.New("permission denied for SHOW VIEWS")},
+		{name: "timeout", err: context.DeadlineExceeded},
+		{name: "cancel", err: context.Canceled},
+		{name: "authentication", err: errors.New("authentication failed")},
+		{name: "unsupported authentication", err: errors.New("unsupported authentication mechanism")},
+		{name: "transport", err: errors.New("transport is closed")},
+		{name: "unsupported transport", err: errors.New("transport does not support SASL")},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if actual := showViewsUnsupported(test.err); actual != test.unsupported {
+				t.Fatalf("showViewsUnsupported(%v) = %v, want %v", test.err, actual, test.unsupported)
+			}
+		})
+	}
+}
+
+func TestListTablesFallbackHonorsExplicitTableType(t *testing.T) {
 	behavior := &scriptedBehavior{
 		getTables: func(context.Context, string, string, []string) (gohive.MetadataResult, error) {
 			return gohive.MetadataResult{}, errors.New("metadata unsupported")
@@ -225,12 +422,57 @@ func TestListTablesFallsBackToShowTables(t *testing.T) {
 	}
 	server := newScriptedServer(t, behavior)
 	defer server.disconnect()
-	values, err := server.listTables("analytics", metadataListConstraints{})
+
+	values, err := server.listTables("analytics", metadataListConstraints{ObjectTypes: []string{"TABLE"}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !reflect.DeepEqual(values, []tableInfo{{Name: "events", TableType: "TABLE"}}) {
 		t.Fatalf("unexpected fallback tables: %#v", values)
+	}
+}
+
+func TestListViewsFallsBackToShowViews(t *testing.T) {
+	behavior := &scriptedBehavior{
+		getTables: func(context.Context, string, string, []string) (gohive.MetadataResult, error) {
+			return gohive.MetadataResult{}, errors.New("metadata unsupported")
+		},
+		query: func(ctx context.Context, query string) (driver.Rows, error) {
+			if query != "SHOW VIEWS IN `analytics`" {
+				t.Fatalf("unexpected fallback query: %q", query)
+			}
+			return newScriptedRows(ctx, []string{"view_name"}, []string{"STRING"}, [][]driver.Value{{"events_view"}}), nil
+		},
+	}
+	server := newScriptedServer(t, behavior)
+	defer server.disconnect()
+	values, err := server.listTables("analytics", metadataListConstraints{ObjectTypes: []string{"VIEW"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(values, []tableInfo{{Name: "events_view", TableType: "VIEW"}}) {
+		t.Fatalf("unexpected fallback views: %#v", values)
+	}
+}
+
+func TestListViewsReturnsFallbackErrorWhenShowViewsIsUnsupported(t *testing.T) {
+	behavior := &scriptedBehavior{
+		getTables: func(context.Context, string, string, []string) (gohive.MetadataResult, error) {
+			return gohive.MetadataResult{}, errors.New("metadata unsupported")
+		},
+		query: func(_ context.Context, query string) (driver.Rows, error) {
+			if query != "SHOW VIEWS IN `analytics`" {
+				t.Fatalf("unexpected fallback query: %q", query)
+			}
+			return nil, errors.New("SHOW VIEWS is unsupported")
+		},
+	}
+	server := newScriptedServer(t, behavior)
+	defer server.disconnect()
+
+	_, err := server.listTables("analytics", metadataListConstraints{ObjectTypes: []string{"VIEW"}})
+	if err == nil || !strings.Contains(err.Error(), "SHOW VIEWS fallback failed") {
+		t.Fatalf("unexpected explicit view fallback error: %v", err)
 	}
 }
 

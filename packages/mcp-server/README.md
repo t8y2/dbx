@@ -198,6 +198,8 @@ Set `DBX_WEB_URL` to use a deployed DBX Web backend instead of local desktop sto
 
 `DBX_WEB_PASSWORD` is the password used on the DBX Web login page. Desktop-local mode does not use it. Desktop UI tools are hidden in Web mode.
 
+DBX Web requests honor the standard system proxy environment variables (`HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY`, bypass via `NO_PROXY`); an empty value means no proxy. Proxies requiring authentication use the `http://user:pass@host:port` URL form. Extra headers can be attached via `DBX_WEB_HEADERS` (a JSON object, e.g. `{"Authorization":"Bearer <token>"}`) — applied to every request, including authentication. For self-signed HTTPS backends, set `DBX_WEB_INSECURE_SKIP_VERIFY=1` to skip certificate verification, or `DBX_WEB_CA_CERT` to trust a private CA (verification is on by default).
+
 Docker and DBX Web also require the standalone DuckDB driver. Install it from Driver Manager after the first launch; when `/app/data` is persisted, the driver is stored under `/app/data/agents` and survives container upgrades.
 
 ### Windows portable DBX
@@ -264,6 +266,11 @@ SQL text is not included in normal MCP errors or logged by default. Enable tempo
 | `DBX_DATA_DIR` | Override the local DBX data directory |
 | `DBX_WEB_URL` | Use a DBX Web/Docker backend |
 | `DBX_WEB_PASSWORD` | Authenticate to the DBX Web backend |
+| `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` | Standard system proxy variables for DBX Web requests; empty value means no proxy. Auth via `http://user:pass@host:port` |
+| `NO_PROXY` | Standard comma-separated bypass list for the proxy above |
+| `DBX_WEB_HEADERS` | JSON object of extra HTTP headers for DBX Web requests, e.g. `{"Authorization":"Bearer token"}` |
+| `DBX_WEB_INSECURE_SKIP_VERIFY` | `1`/`true` disables TLS certificate verification for self-signed backends |
+| `DBX_WEB_CA_CERT` | PEM/DER CA file to trust for DBX Web TLS verification |
 | `DBX_MCP_ALLOW_WRITES` | Upgrade compatibility only: `0`/`false` keeps an unconfigured policy read-only |
 | `DBX_MCP_SCOPE_CONNECTION_ID` | Compatibility scope for one connection ID |
 | `DBX_MCP_SCOPE_CONNECTION_IDS` | Compatibility scope for multiple connection IDs |
@@ -489,6 +496,8 @@ MCP 配置：
 
 Web 模式不会读取本机 DBX 桌面存储，也不会暴露桌面 UI 工具。
 
+DBX Web 请求遵循标准系统代理环境变量：https 地址读取 `HTTPS_PROXY`/`https_proxy`，http 地址读取 `HTTP_PROXY`/`http_proxy`，`ALL_PROXY`/`all_proxy` 作为兜底，`NO_PROXY`/`no_proxy` 作为绕过列表。代理值为空或未设置时直连（不走代理）。需要认证的代理使用标准 `user:password@host:port` URL 形式，例如 `http://admin:admin123@127.0.0.1:7890`。如需为每次 DBX Web 请求附加自定义请求头（例如网关前的令牌认证），将 `DBX_WEB_HEADERS` 设置为 JSON 对象，键为请求头名称、值为字符串，例如 `{"Authorization":"Bearer <token>"}`，该头会附加到包括认证在内的每个请求。
+
 ### Agent/JDBC 数据库
 
 达梦、人大金仓、Oracle、DB2、Hive、Trino、Snowflake、SAP HANA 等数据库通过 DBX Java Agent/JDBC 基础设施运行，而不是通过 Node.js 数据库驱动运行。
@@ -540,6 +549,11 @@ MongoDB 更新和删除在未启用完全访问时必须提供可验证有效的
 | `DBX_DATA_DIR` | 覆盖本地 DBX 数据目录 |
 | `DBX_WEB_URL` | 使用 DBX Web/Docker 后端 |
 | `DBX_WEB_PASSWORD` | DBX Web 登录密码 |
+| `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` | DBX Web 请求的标准系统代理变量；空值表示不走代理。认证格式 `http://user:pass@host:port` |
+| `NO_PROXY` | 上述代理的标准逗号分隔绕过列表 |
+| `DBX_WEB_HEADERS` | DBX Web 请求附加的请求头 JSON 对象，例如 `{"Authorization":"Bearer token"}` |
+| `DBX_WEB_INSECURE_SKIP_VERIFY` | `1`/`true` 时跳过 TLS 证书验证（用于自签名后端） |
+| `DBX_WEB_CA_CERT` | DBX Web TLS 验证时信任的 PEM/DER CA 文件 |
 | `DBX_MCP_ALLOW_WRITES` | 仅用于升级兼容：`0`/`false` 使尚未配置的策略保持只读 |
 | `DBX_MCP_SCOPE_CONNECTION_ID` | 兼容旧配置：限制到指定连接 ID |
 | `DBX_MCP_SCOPE_CONNECTION_IDS` | 兼容旧配置：限制到多个连接 ID |

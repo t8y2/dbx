@@ -98,3 +98,7 @@ export function buildMcpOpenCodeConfig(config?: McpLaunchConfig): string {
 
   return JSON.stringify({ mcp: { dbx } }, null, 2);
 }
+
+export function buildMcpPiConfig(config?: McpLaunchConfig): string {
+  return buildMcpJsonConfig(config);
+}

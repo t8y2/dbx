@@ -5,5 +5,25 @@
   "assets": {
     "directory": "./out",
     "binding": "ASSETS"
-  }
+  },
+  "r2_buckets": [
+    {
+      "binding": "ISSUE_IMAGES",
+      "bucket_name": "dbx"
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "ISSUE_LIMITER",
+        "class_name": "IssueSubmissionLimiter"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["IssueSubmissionLimiter"]
+    }
+  ]
 }

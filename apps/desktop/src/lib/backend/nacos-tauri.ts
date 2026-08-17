@@ -20,6 +20,17 @@ import type {
   NacosDashboardQuery,
   NacosDashboardSnapshot,
   NacosRNacosConsoleCaptcha,
+  NacosUserQuery,
+  NacosUserList,
+  NacosUserCreate,
+  NacosUserUpdate,
+  NacosRoleQuery,
+  NacosRoleList,
+  NacosRoleBinding,
+  NacosAccessControlSnapshot,
+  NacosAccessOperationRequest,
+  NacosAccessOperationResult,
+  NacosAccessOperationRetry,
   NacosInstanceInfo,
   NacosInstanceRef,
   NacosInstanceRegistration,
@@ -27,6 +38,7 @@ import type {
   NacosInstanceUpdateRequest,
   NacosNamespaceCreate,
   NacosNamespaceInfo,
+  NacosNamespaceSidebarSnapshot,
   NacosNamespaceUpdate,
   NacosRawRequest,
   NacosRawResponse,
@@ -43,6 +55,10 @@ export async function nacosTestConnection(connectionId: string): Promise<NacosCo
 
 export async function nacosListNamespaces(connectionId: string): Promise<NacosNamespaceInfo[]> {
   return invoke("nacos_list_namespaces", { connectionId });
+}
+
+export async function nacosSidebarSnapshot(connectionId: string): Promise<NacosNamespaceSidebarSnapshot> {
+  return invoke("nacos_sidebar_snapshot", { connectionId });
 }
 
 export async function nacosCreateNamespace(connectionId: string, req: NacosNamespaceCreate): Promise<void> {
@@ -119,6 +135,54 @@ export async function nacosGetRNacosConsoleCaptcha(connectionId: string): Promis
 
 export async function nacosLoginRNacosConsole(connectionId: string, captcha?: string): Promise<void> {
   return invoke("nacos_login_rnacos_console", { connectionId, captcha });
+}
+
+export async function nacosListUsers(connectionId: string, query: NacosUserQuery): Promise<NacosUserList> {
+  return invoke("nacos_list_users", { connectionId, query });
+}
+
+export async function nacosCreateUser(connectionId: string, req: NacosUserCreate): Promise<void> {
+  return invoke("nacos_create_user", { connectionId, req });
+}
+
+export async function nacosUpdateUser(connectionId: string, req: NacosUserUpdate): Promise<void> {
+  return invoke("nacos_update_user", { connectionId, req });
+}
+
+export async function nacosDeleteUser(connectionId: string, username: string): Promise<void> {
+  return invoke("nacos_delete_user", { connectionId, username });
+}
+
+export async function nacosListRoleBindings(connectionId: string, query: NacosRoleQuery): Promise<NacosRoleList> {
+  return invoke("nacos_list_role_bindings", { connectionId, query });
+}
+
+export async function nacosAssignRole(connectionId: string, binding: NacosRoleBinding): Promise<void> {
+  return invoke("nacos_assign_role", { connectionId, binding });
+}
+
+export async function nacosRemoveRole(connectionId: string, binding: NacosRoleBinding): Promise<void> {
+  return invoke("nacos_remove_role", { connectionId, binding });
+}
+
+export async function nacosAccessSnapshot(connectionId: string): Promise<NacosAccessControlSnapshot> {
+  return invoke("nacos_access_snapshot", { connectionId });
+}
+
+export async function nacosStartAccessOperation(connectionId: string, req: NacosAccessOperationRequest): Promise<NacosAccessOperationResult> {
+  return invoke("nacos_start_access_operation", { connectionId, req });
+}
+
+export async function nacosGetAccessOperation(connectionId: string, operationId: string): Promise<NacosAccessOperationResult> {
+  return invoke("nacos_get_access_operation", { connectionId, operationId });
+}
+
+export async function nacosRetryAccessOperation(connectionId: string, retry: NacosAccessOperationRetry): Promise<NacosAccessOperationResult> {
+  return invoke("nacos_retry_access_operation", { connectionId, retry });
+}
+
+export async function nacosUndoAccessOperation(connectionId: string, operationId: string): Promise<NacosAccessOperationResult> {
+  return invoke("nacos_undo_access_operation", { connectionId, operationId });
 }
 
 export async function nacosListServices(connectionId: string, query: NacosServiceQuery): Promise<NacosServiceList> {

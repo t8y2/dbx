@@ -6902,7 +6902,7 @@ mod tests {
                     "type": "reasoning.text",
                     "id": "reasoning-text-1",
                     "index": 0,
-                    "text": "aand"
+                    "text": "and"
                 }]
             }))
         );

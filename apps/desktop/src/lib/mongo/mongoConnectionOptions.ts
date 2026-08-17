@@ -75,7 +75,10 @@ export function mongodbAuthFailureHint(message: string): string {
   const source = message.match(/source='([^']+)'/)?.[1];
   if (!source || !message.includes("Exception authenticating MongoCredential")) return message;
 
-  return `${message}\n\nCurrent authentication database: ${source}. If this user was created in admin, set Authentication database to admin or add authSource=admin to URL params.`;
+  const verificationHint = `Current authentication database: ${source}. The server rejected these credentials. Verify the username and password, and confirm that the user was created in ${source}.`;
+  if (source.toLowerCase() === "admin") return `${message}\n\n${verificationHint}`;
+
+  return `${message}\n\n${verificationHint} If the user was created in admin, set Authentication database to admin or add authSource=admin to URL params.`;
 }
 
 function parseMongoUrlParams(urlParams: string | undefined): URLSearchParams {

@@ -52,7 +52,7 @@ import {
 import { decompressRedisValue, isGzipMagic, type RedisDecompressAlgorithm } from "@/lib/redis/redisCompression";
 import { canFullHighlightRedisText, findRedisTextMatches, nextRedisSearchMatchIndex, REDIS_VALUE_SEARCH_MATCH_LIMIT, renderRedisTextSearchHtml, redisValueSearchStatus } from "@/lib/redis/redisValueSearch";
 import TextContentSearchBar from "@/components/common/TextContentSearchBar.vue";
-import { formatJsonSource } from "@/lib/common/safeJsonFormat";
+import { decodeJsonUnicodeEscapes, formatJsonSource, mapDisplayToRaw } from "@/lib/common/safeJsonFormat";
 import { unixSecondsToCalendarDateTime } from "@/components/ui/date-time-picker/dateTimePicker";
 import { applyRedisExpiryPolicy, type RedisExpiryMode, redisExpiryModeForTtl, validateRedisExpiry } from "@/lib/redis/redisExpiry";
 
@@ -77,6 +77,7 @@ const redisExpiryTransport = {
 const emit = defineEmits<{ deleted: [keyRaw: string]; loaded: [value: RedisValue] }>();
 
 const REDIS_JSON_WRAP_STORAGE_KEY = "dbx-redis-json-word-wrap";
+const REDIS_JSON_UNICODE_MODE_STORAGE_KEY = "dbx-redis-json-unicode-mode";
 const REDIS_VALUE_FORMAT_STORAGE_KEY = "dbx-redis-value-format";
 // Versioned after moving the setting into the refresh menu so the previous
 // always-on default does not carry into the new manual-refresh default.
@@ -169,6 +170,8 @@ const isResizingZsetColumns = ref(false);
 const stringValueView = ref<RedisValueFormat>(readPreferredRedisValueFormat());
 const memberValueView = ref<RedisValueFormat>(readPreferredRedisValueFormat());
 const redisJsonWordWrap = ref(readRedisJsonWordWrap());
+const redisJsonUnicodeMode = ref(readRedisJsonUnicodeMode());
+const redisJsonDecoded = computed(() => redisJsonUnicodeMode.value === "decoded");
 const redisJsonHighlighter = ref<JsonHighlighter>();
 const showHashFieldTtlDialog = ref(false);
 const editingHashField = ref<string | null>(null);
@@ -465,8 +468,11 @@ const selectedMemberCanEdit = computed(() => selectedMemberContext.value?.canEdi
 const canEditCurrentStringFormat = computed(() => Boolean(stringValueDetail.value?.editable) && (stringValueView.value === "utf8" || stringValueView.value === "json"));
 const showStringEditActions = computed(() => canEditCurrentStringFormat.value);
 const originalStringEditValue = computed(() => (stringBlob.value ? rawRedisValueText(stringBlob.value) : ""));
+const stringJsonRawBaseline = ref("");
 const stringJsonDraftBaseline = ref("");
+const redisJsonRawBaseline = ref("");
 const redisJsonDraftBaseline = ref("");
+const memberJsonRawBaseline = ref("");
 const memberJsonDraftBaseline = ref("");
 // Keep the comparison semantics from the last editable String view. A draft is
 // retained when the user switches to a read-only representation such as Hex.
@@ -1058,6 +1064,25 @@ function setRedisJsonWordWrap(value: boolean) {
   }
 }
 
+/** How JSON string tokens are shown in the JSON editors: source (`\uXXXX`) or decoded text. */
+type RedisJsonUnicodeMode = "raw" | "decoded";
+
+function readRedisJsonUnicodeMode(): RedisJsonUnicodeMode {
+  try {
+    return localStorage.getItem(REDIS_JSON_UNICODE_MODE_STORAGE_KEY) === "raw" ? "raw" : "decoded";
+  } catch {
+    return "decoded";
+  }
+}
+
+function rememberRedisJsonUnicodeMode(mode: RedisJsonUnicodeMode) {
+  try {
+    localStorage.setItem(REDIS_JSON_UNICODE_MODE_STORAGE_KEY, mode);
+  } catch {
+    // Ignore storage failures; the toggle still works for the current session.
+  }
+}
+
 function readPreferredRedisValueFormat(): RedisValueFormat {
   try {
     const stored = localStorage.getItem(REDIS_VALUE_FORMAT_STORAGE_KEY);
@@ -1068,17 +1093,70 @@ function readPreferredRedisValueFormat(): RedisValueFormat {
   }
 }
 
-function formatJsonText(raw: string): string | null {
+function formatJsonText(raw: string, decodeUnicode: boolean): string | null {
   try {
-    // Keep Redis JSON baselines source-preserving (duplicate keys, number text).
-    return formatJsonSource(raw, 2);
+    // Keep Redis JSON baselines source-preserving (duplicate keys, number text),
+    // then apply the display-only unicode decode when the user chose "decoded".
+    const formatted = formatJsonSource(raw, 2);
+    return decodeUnicode ? decodeJsonUnicodeEscapes(formatted) : formatted;
   } catch {
     return null;
   }
 }
 
-function jsonDraftForEditor(raw: string): string {
-  return formatJsonText(raw) ?? raw;
+function jsonDraftForEditor(raw: string, decodeUnicode: boolean): string {
+  return formatJsonText(raw, decodeUnicode) ?? raw;
+}
+
+/** Apply the display-only unicode decode to an already-formatted JSON baseline. */
+function jsonDraftBaseline(formattedText: string, decodeUnicode: boolean): string {
+  return decodeUnicode ? decodeJsonUnicodeEscapes(formattedText) : formattedText;
+}
+
+/**
+ * Canonical JSON baseline for an editor surface: the source-preserving raw
+ * formatted text (what saves write back to Redis) plus its display baseline.
+ * Keeping the raw baseline separately lets decoded-mode saves map the user's
+ * draft back onto the source so untouched escapes are never rewritten.
+ */
+function jsonDraftPairForEditor(raw: string): { rawBaseline: string; displayBaseline: string } {
+  const rawBaseline = formatJsonText(raw, false) ?? raw;
+  return { rawBaseline, displayBaseline: jsonDraftBaseline(rawBaseline, redisJsonDecoded.value) };
+}
+
+/** Convert a JSON editor draft from the previous unicode display mode to the new one. */
+function convertJsonDraftAcrossMode(draft: string, rawBaseline: string, decoded: boolean): string {
+  return decoded ? decodeJsonUnicodeEscapes(draft) : mapDisplayToRaw(rawBaseline, draft);
+}
+
+/** Re-derive the JSON editor surfaces from their raw baselines after the mode changes. */
+function setRedisJsonUnicodeMode(mode: RedisJsonUnicodeMode) {
+  redisJsonUnicodeMode.value = mode;
+  rememberRedisJsonUnicodeMode(mode);
+  const decoded = mode === "decoded";
+  stringJsonDraftBaseline.value = jsonDraftBaseline(stringJsonRawBaseline.value, decoded);
+  redisJsonDraftBaseline.value = jsonDraftBaseline(redisJsonRawBaseline.value, decoded);
+  memberJsonDraftBaseline.value = jsonDraftBaseline(memberJsonRawBaseline.value, decoded);
+  if (!data.value) return;
+  // Convert the active surface's draft through the mode transform so unsaved
+  // edits survive the toggle; when the draft is clean this equals the baseline.
+  if (data.value.data.kind === "string" && stringValueView.value === "json" && stringValueDetail.value?.json) {
+    editValue.value = convertJsonDraftAcrossMode(editValue.value, stringJsonRawBaseline.value, decoded);
+  } else if (data.value.data.kind === "json") {
+    editValue.value = convertJsonDraftAcrossMode(editValue.value, redisJsonRawBaseline.value, decoded);
+  } else if (selectedMemberDetail.value?.json && memberValueView.value === "json") {
+    memberEditValue.value = convertJsonDraftAcrossMode(memberEditValue.value, memberJsonRawBaseline.value, decoded);
+  }
+}
+
+/**
+ * Resolve the raw draft that Save should write for a JSON editor surface.
+ * In decoded mode the editor holds display text, so the draft is mapped back
+ * onto the raw baseline (preserving untouched escapes); in raw mode the editor
+ * already holds source text and passes through unchanged.
+ */
+function jsonDraftForSave(rawBaseline: string, displayValue: string): string {
+  return redisJsonDecoded.value ? mapDisplayToRaw(rawBaseline, displayValue) : displayValue;
 }
 
 function rememberRedisValueFormat(format: RedisValueFormat) {
@@ -1097,7 +1175,7 @@ function setStringValueFormat(format: RedisValueFormat) {
   stringValueView.value = format;
   if (stringValueDetail.value && canRenderRedisValueFormat(stringValueDetail.value, format)) {
     if (format === "json") {
-      editValue.value = editValue.value === originalStringEditValue.value ? stringJsonDraftBaseline.value : jsonDraftForEditor(editValue.value);
+      editValue.value = editValue.value === originalStringEditValue.value ? stringJsonDraftBaseline.value : jsonDraftForEditor(editValue.value, redisJsonDecoded.value);
       stringDraftFormat.value = "json";
     } else if (format === "utf8") {
       // Keep a dirty JSON draft marked as json so save still compact-writes after a tab switch.
@@ -1118,7 +1196,7 @@ function setMemberValueFormat(format: RedisValueFormat) {
   memberValueView.value = format;
   if (canRenderRedisValueFormat(selectedMemberDetail.value, format)) {
     if (format === "json") {
-      memberEditValue.value = memberEditValue.value === selectedMemberDetail.value.rawText ? memberJsonDraftBaseline.value : jsonDraftForEditor(memberEditValue.value);
+      memberEditValue.value = memberEditValue.value === selectedMemberDetail.value.rawText ? memberJsonDraftBaseline.value : jsonDraftForEditor(memberEditValue.value, redisJsonDecoded.value);
       if (selectedMemberContext.value?.kind === "hash" && selectedMemberCanEdit.value) memberDraftFormat.value = "json";
     } else if (format === "utf8") {
       // Dirty JSON drafts keep format "json" so save/normalize still runs after leaving the JSON tab.
@@ -1287,12 +1365,15 @@ async function load(options: { background?: boolean; notifyParent?: boolean; pre
     if (loadedValue.data.kind === "string") {
       const detail = formatRedisMemberDetail(loadedValue.data.content, { allowJsonText: true });
       stringValueView.value = preferredRedisValueFormat(loadedValue.data.content, readPreferredRedisValueFormat(), { allowJsonText: true });
-      stringJsonDraftBaseline.value = detail.json?.formattedText ?? "";
+      stringJsonRawBaseline.value = detail.json?.formattedText ?? "";
+      stringJsonDraftBaseline.value = jsonDraftBaseline(stringJsonRawBaseline.value, redisJsonDecoded.value);
       editValue.value = stringValueView.value === "json" && detail.json ? stringJsonDraftBaseline.value : detail.rawText;
       stringDraftFormat.value = stringValueView.value === "json" ? "json" : "utf8";
       clearSelectedMember();
     } else if (loadedValue.data.kind === "json") {
-      redisJsonDraftBaseline.value = jsonDraftForEditor(redisJsonValueText(loadedValue.data));
+      const pair = jsonDraftPairForEditor(redisJsonValueText(loadedValue.data));
+      redisJsonRawBaseline.value = pair.rawBaseline;
+      redisJsonDraftBaseline.value = pair.displayBaseline;
       editValue.value = redisJsonDraftBaseline.value;
       stringDraftFormat.value = "utf8";
       clearSelectedMember();
@@ -1340,7 +1421,7 @@ async function saveString() {
   let value = editValue.value;
   // Compact whenever this draft is/was JSON-edited, even if the user switched tabs before Save.
   if (stringValueView.value === "json" || stringDraftFormat.value === "json") {
-    const normalized = normalizeRedisJsonDraft(value);
+    const normalized = normalizeRedisJsonDraft(jsonDraftForSave(stringJsonRawBaseline.value, value));
     if (!normalized.ok) {
       toast(t("redis.jsonFormatError"), 3000);
       return;
@@ -1364,7 +1445,7 @@ function discardStringEdit() {
 
 async function saveJson() {
   if (!data.value || data.value.data.kind !== "json" || !redisJsonValueChanged.value || savingJson.value) return;
-  const normalized = normalizeRedisJsonDraft(editValue.value);
+  const normalized = normalizeRedisJsonDraft(jsonDraftForSave(redisJsonRawBaseline.value, editValue.value));
   if (!normalized.ok) {
     toast(t("redis.jsonFormatError"), 3000);
     return;
@@ -1533,7 +1614,8 @@ function selectMember(title: string, value: unknown, context: RedisMemberContext
   selectedMemberContext.value = context;
   isEditingMember.value = false;
   memberValueView.value = preferredRedisValueFormat(value, readPreferredRedisValueFormat(), { allowJsonText: true });
-  memberJsonDraftBaseline.value = detail.json?.formattedText ?? "";
+  memberJsonRawBaseline.value = detail.json?.formattedText ?? "";
+  memberJsonDraftBaseline.value = jsonDraftBaseline(memberJsonRawBaseline.value, redisJsonDecoded.value);
   memberEditValue.value = memberValueView.value === "json" && detail.json ? memberJsonDraftBaseline.value : detail.rawText;
   memberDraftFormat.value = context.kind === "hash" && context.canEdit && memberValueView.value === "json" && detail.json ? "json" : null;
 }
@@ -1722,7 +1804,7 @@ async function saveMemberEdit() {
   let writeValue = memberEditValue.value;
   // Hash JSON drafts may still be open under UTF-8 after a format switch; keep compact writes.
   if (savingHashJson) {
-    const normalized = normalizeRedisJsonDraft(writeValue);
+    const normalized = normalizeRedisJsonDraft(jsonDraftForSave(memberJsonRawBaseline.value, writeValue));
     if (!normalized.ok) {
       toast(t("redis.jsonFormatError"), 3000);
       return;
@@ -2469,6 +2551,10 @@ defineExpose({ focusSearch });
             Gzip
           </Button>
           <span class="flex-1" />
+          <div v-if="stringValueView === 'json' && stringValueDetail.json" class="flex shrink-0 overflow-hidden rounded-md border bg-muted/20 p-0.5">
+            <Button variant="ghost" size="sm" class="h-6 shrink-0 rounded-[5px] px-2 text-xs" :class="{ 'bg-background shadow-sm': !redisJsonDecoded }" @click="setRedisJsonUnicodeMode('raw')">{{ t("redis.jsonViewRaw") }}</Button>
+            <Button variant="ghost" size="sm" class="h-6 shrink-0 rounded-[5px] px-2 text-xs" :class="{ 'bg-background shadow-sm': redisJsonDecoded }" @click="setRedisJsonUnicodeMode('decoded')">{{ t("redis.jsonViewDecoded") }}</Button>
+          </div>
           <label v-if="isTextRedisFormat(stringValueView)" class="flex items-center gap-1.5 text-muted-foreground">
             <WrapText class="h-3.5 w-3.5" />
             {{ t("redis.wordWrap") }}
@@ -2553,6 +2639,10 @@ defineExpose({ focusSearch });
       <div v-else-if="redisKind === 'json'" class="flex-1 flex flex-col overflow-hidden">
         <div class="flex h-9 items-center gap-2 border-b px-4 text-xs shrink-0">
           <span class="flex-1" />
+          <div class="flex shrink-0 overflow-hidden rounded-md border bg-muted/20 p-0.5">
+            <Button variant="ghost" size="sm" class="h-6 shrink-0 rounded-[5px] px-2 text-xs" :class="{ 'bg-background shadow-sm': !redisJsonDecoded }" @click="setRedisJsonUnicodeMode('raw')">{{ t("redis.jsonViewRaw") }}</Button>
+            <Button variant="ghost" size="sm" class="h-6 shrink-0 rounded-[5px] px-2 text-xs" :class="{ 'bg-background shadow-sm': redisJsonDecoded }" @click="setRedisJsonUnicodeMode('decoded')">{{ t("redis.jsonViewDecoded") }}</Button>
+          </div>
           <label class="flex items-center gap-1.5 text-muted-foreground">
             <WrapText class="h-3.5 w-3.5" />
             {{ t("redis.wordWrap") }}
@@ -3173,6 +3263,10 @@ defineExpose({ focusSearch });
               </Button>
             </div>
             <span class="flex-1" />
+            <div v-if="memberValueView === 'json' && selectedMemberDetail.json" class="flex shrink-0 overflow-hidden rounded-md border bg-muted/20 p-0.5">
+              <Button variant="ghost" size="sm" class="h-6 shrink-0 rounded-[5px] px-2 text-xs" :class="{ 'bg-background shadow-sm': !redisJsonDecoded }" @click="setRedisJsonUnicodeMode('raw')">{{ t("redis.jsonViewRaw") }}</Button>
+              <Button variant="ghost" size="sm" class="h-6 shrink-0 rounded-[5px] px-2 text-xs" :class="{ 'bg-background shadow-sm': redisJsonDecoded }" @click="setRedisJsonUnicodeMode('decoded')">{{ t("redis.jsonViewDecoded") }}</Button>
+            </div>
             <label v-if="isTextRedisFormat(memberValueView)" class="flex items-center gap-1.5 text-muted-foreground">
               <WrapText class="h-3.5 w-3.5" />
               {{ t("redis.wordWrap") }}

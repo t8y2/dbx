@@ -497,6 +497,39 @@ describe("TableStructureEditor local column order notice", () => {
   });
 });
 
+describe("TableStructureEditor horizontal scrolling", () => {
+  it("shows a fixed scrollbar for overflowing columns and syncs thumb dragging", async () => {
+    const root = await mountEditor("postgres");
+    const scroller = root.querySelector<HTMLElement>(".structure-table-scroller");
+    if (!scroller) throw new Error("Missing structure table scroller");
+    Object.defineProperties(scroller, {
+      clientWidth: { configurable: true, value: 400 },
+      scrollWidth: { configurable: true, value: 1200 },
+      scrollLeft: { configurable: true, value: 200, writable: true },
+    });
+
+    scroller.dispatchEvent(new Event("scroll"));
+    await nextTick();
+    await nextTick();
+
+    const track = root.querySelector<HTMLElement>(".structure-horizontal-scrollbar");
+    const thumb = root.querySelector<HTMLElement>(".structure-horizontal-scrollbar__thumb");
+    if (!track || !thumb) throw new Error("Missing fixed horizontal scrollbar");
+    expect(Number.parseFloat(thumb.style.width)).toBeCloseTo(100 / 3);
+    expect(Number.parseFloat(thumb.style.left)).toBeCloseTo(100 / 6);
+
+    track.getBoundingClientRect = () => DOMRect.fromRect({ width: 300, height: 10 });
+    document.body.style.userSelect = "text";
+    track.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, button: 0, clientX: 60, isPrimary: true }));
+    window.dispatchEvent(new PointerEvent("pointermove", { clientX: 160, isPrimary: true }));
+
+    expect(scroller.scrollLeft).toBeCloseTo(600);
+    expect(document.body.style.userSelect).toBe("none");
+    window.dispatchEvent(new PointerEvent("pointerup", { isPrimary: true }));
+    expect(document.body.style.userSelect).toBe("text");
+  });
+});
+
 describe("TableStructureEditor metadata loading", () => {
   it("opens the initial DDL tab without starting structure metadata loads", async () => {
     await mountLoadingEditor("ddl");

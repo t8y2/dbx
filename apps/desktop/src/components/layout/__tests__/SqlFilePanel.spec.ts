@@ -22,3 +22,11 @@ describe("SqlFilePanel selection", () => {
     expect(panelSource).toContain('data-sql-file-row="true"');
   });
 });
+
+describe("SqlFilePanel folder headers", () => {
+  it("keeps sticky folder headers opaque while the file list scrolls", () => {
+    expect(panelSource).toContain("bg-[color-mix(in_oklab,var(--muted)_10%,var(--background))] sticky top-0");
+    expect(panelSource).toContain("hover:bg-[color-mix(in_oklab,var(--accent)_40%,var(--background))]");
+    expect(panelSource).not.toContain("bg-muted/10 sticky top-0");
+  });
+});

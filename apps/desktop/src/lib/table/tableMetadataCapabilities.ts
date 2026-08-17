@@ -4,6 +4,7 @@ export interface TableMetadataCapabilities {
   columns: boolean;
   indexes: boolean;
   foreignKeys: boolean;
+  constraints: boolean;
   triggers: boolean;
   ddl: boolean;
 }
@@ -12,11 +13,18 @@ const defaultCapabilities: TableMetadataCapabilities = {
   columns: true,
   indexes: true,
   foreignKeys: true,
+  // Structured PK/UNIQUE/CHECK constraint metadata (list_constraints) is only
+  // implemented by a handful of agent-backed drivers today; leave it off by
+  // default so every other dialect doesn't grow a permanently empty tab.
+  constraints: false,
   triggers: true,
   ddl: true,
 };
 
 const capabilityByType: Partial<Record<DatabaseType, Partial<TableMetadataCapabilities>>> = {
+  oracle: {
+    constraints: true,
+  },
   mongodb: {
     columns: false,
     foreignKeys: false,
@@ -108,11 +116,19 @@ export function firstStructureMetadataTab(capabilities: TableMetadataCapabilitie
   if (capabilities.columns) return "columns";
   if (capabilities.indexes) return "indexes";
   if (capabilities.foreignKeys) return "foreignKeys";
+  if (capabilities.constraints) return "constraints";
   if (capabilities.triggers) return "triggers";
   if (!isCreateMode && capabilities.ddl) return "ddl";
   return "columns";
 }
 
 export function isStructureMetadataTabSupported(tab: TableInfoTab, capabilities: TableMetadataCapabilities, isCreateMode: boolean): boolean {
-  return (tab === "columns" && capabilities.columns) || (tab === "indexes" && capabilities.indexes) || (tab === "foreignKeys" && capabilities.foreignKeys) || (tab === "triggers" && capabilities.triggers) || (tab === "ddl" && capabilities.ddl && !isCreateMode);
+  return (
+    (tab === "columns" && capabilities.columns) ||
+    (tab === "indexes" && capabilities.indexes) ||
+    (tab === "foreignKeys" && capabilities.foreignKeys) ||
+    (tab === "constraints" && capabilities.constraints) ||
+    (tab === "triggers" && capabilities.triggers) ||
+    (tab === "ddl" && capabilities.ddl && !isCreateMode)
+  );
 }

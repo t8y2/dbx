@@ -243,6 +243,7 @@ export function importDataTypeForDatabase(inferredType: ImportInferredType, data
       return "BIGINT";
     case "decimal":
       if (["postgres", "gaussdb", "opengauss", "redshift", "kingbase", "highgo", "uxdb", "kwdb", "vastbase"].includes(databaseType || "")) return "DOUBLE PRECISION";
+      if (databaseType === "sqlserver") return "FLOAT";
       if (databaseType === "sqlite" || databaseType === "rqlite" || databaseType === "turso" || databaseType === "cloudflare-d1") return "REAL";
       if (databaseType === "oracle" || databaseType === "oceanbase-oracle" || databaseType === "dameng") return "BINARY_DOUBLE";
       if (databaseType === "clickhouse") return "Float64";

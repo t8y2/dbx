@@ -18,6 +18,7 @@ interface Props {
   mqSystemKind?: MqSystemKind;
   isFlatMqCluster?: boolean;
   supportsPeekMessages?: boolean;
+  fixedTopic?: boolean;
   /** Hide outer toolbar when embedded in a dialog. */
   embedded?: boolean;
 }
@@ -93,6 +94,11 @@ async function guardWritable() {
 }
 
 async function loadTopics() {
+  if (props.fixedTopic) {
+    availableTopics.value = props.topic ? [props.topic] : [];
+    topicName.value = props.topic?.shortName ?? "";
+    return;
+  }
   if (isRocketMqCluster.value) {
     await rocketMqTopicSelectRef.value?.loadTopics();
     return;
@@ -227,6 +233,9 @@ watch(
 watch(
   () => props.topic,
   (newTopic) => {
+    if (props.fixedTopic) {
+      availableTopics.value = newTopic ? [newTopic] : [];
+    }
     if (newTopic) {
       topicName.value = newTopic.shortName;
     }
@@ -255,7 +264,8 @@ watch(
 
       <div class="form-group">
         <label>{{ t("mqMessages.targetTopic") }} <span class="required">*</span></label>
-        <RocketMqTopicSelect v-if="isRocketMqCluster" ref="rocketMqTopicSelectRef" v-model="topicName" :connection-id="connectionId" :tenant="tenant" :namespace="namespace" grouping="business" :show-type-filter="false" :disabled="readOnly" @loaded="handleRocketMqTopicsLoaded" />
+        <input v-if="fixedTopic" :value="topicName" type="text" class="topic-input" disabled />
+        <RocketMqTopicSelect v-else-if="isRocketMqCluster" ref="rocketMqTopicSelectRef" v-model="topicName" :connection-id="connectionId" :tenant="tenant" :namespace="namespace" grouping="business" :show-type-filter="false" :disabled="readOnly" @loaded="handleRocketMqTopicsLoaded" />
         <template v-else>
           <div class="topic-select-row">
             <input v-model="topicName" :list="topicListId" :disabled="readOnly || topicsLoading" class="topic-input" :placeholder="topicsLoading ? t('mqMessages.topicLoading') : t('mqMessages.topicSearchPlaceholder')" autocomplete="off" />

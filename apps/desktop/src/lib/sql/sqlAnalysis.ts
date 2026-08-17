@@ -86,6 +86,114 @@ export function resolveMetadataColumnName(databaseType: string, sourceName: stri
   return caseOnlyMatches.length === 1 ? caseOnlyMatches[0] : undefined;
 }
 
+export interface ResolvedSourceColumnRef {
+  sourceKey: string;
+  sourceColumn: string;
+}
+
+/**
+ * Expand `*` / `alias.*` projections against each source table's columns so the
+ * returned stream aligns 1:1 with the executed result columns (projection
+ * order). A star whose source table is not among `tableSources` collapses to
+ * `undefined` (unresolvable). Whole-table `SELECT *` is expanded against the
+ * single source table when present.
+ */
+function expandProjectionColumnsForSources(analysis: EditableQueryInfo, tableSources: Array<{ source: EditableQuerySource; columns: readonly { name: string }[] }>): Array<EditableQueryColumn | undefined> {
+  if (analysis.selectStar || analysis.columns.length === 0) {
+    return tableSources.flatMap(({ source, columns }) =>
+      columns.map((column) => ({
+        sourceName: column.name,
+        sourceNameQuoted: false,
+        sourceKey: source.key,
+        resultName: column.name,
+        expression: column.name,
+      })),
+    );
+  }
+  const expanded: Array<EditableQueryColumn | undefined> = [];
+  for (const column of analysis.columns) {
+    if (!column.star) {
+      expanded.push(column);
+      continue;
+    }
+    const tableSource = tableSources.find((entry) => entry.source.key === column.sourceKey);
+    if (!tableSource) {
+      expanded.push(undefined);
+      continue;
+    }
+    for (const tableColumn of tableSource.columns) {
+      expanded.push({
+        ...column,
+        star: false,
+        sourceName: tableColumn.name,
+        sourceNameQuoted: false,
+        resultName: tableColumn.name,
+        expression: column.sourceQualifier ? `${column.sourceQualifier}.${tableColumn.name}` : tableColumn.name,
+      });
+    }
+  }
+  return expanded;
+}
+
+function resolveProjectionColumnToSource(databaseType: string, column: EditableQueryColumn | undefined, tableSources: Array<{ source: EditableQuerySource; columns: readonly { name: string }[] }>): ResolvedSourceColumnRef | undefined {
+  if (!column || column.star || !column.sourceName) return undefined;
+  // A qualified reference whose qualifier could not be bound to a unique source
+  // stays unresolved rather than guessing from the bare column name.
+  if (column.sourceQualifier && !column.sourceKey) return undefined;
+
+  if (column.sourceKey) {
+    const tableIndex = tableSources.findIndex((entry) => entry.source.key === column.sourceKey);
+    if (tableIndex < 0) return undefined;
+    const canonicalName = resolveMetadataColumnName(
+      databaseType,
+      column.sourceName,
+      column.sourceNameQuoted,
+      tableSources[tableIndex]!.columns.map((entry) => entry.name),
+    );
+    return canonicalName ? { sourceKey: column.sourceKey, sourceColumn: canonicalName } : undefined;
+  }
+
+  // Unqualified reference: bind only when exactly one source resolves it, so an
+  // ambiguous name shared by several tables yields undefined instead of
+  // first-source-wins.
+  const matches: ResolvedSourceColumnRef[] = [];
+  for (const tableSource of tableSources) {
+    const canonicalName = resolveMetadataColumnName(
+      databaseType,
+      column.sourceName,
+      column.sourceNameQuoted,
+      tableSource.columns.map((entry) => entry.name),
+    );
+    if (canonicalName) matches.push({ sourceKey: tableSource.source.key, sourceColumn: canonicalName });
+  }
+  return matches.length === 1 ? matches[0] : undefined;
+}
+
+/**
+ * Resolve each result column — in projection (ordinal) order — back to exactly
+ * one base-table column across the query sources, using the same
+ * database-aware identifier canonicalization as the editability binder
+ * (`resolveMetadataColumnName`): quoted identifiers match metadata exactly
+ * (case preserved), unquoted identifiers fold per the database's rules
+ * (PostgreSQL-compatible lower, Oracle-compatible upper, others
+ * case-insensitive when unambiguous).
+ *
+ * Star projections are expanded against the source table columns so the
+ * returned array aligns 1:1 with the executed result columns. An entry is
+ * `undefined` when the result column cannot be resolved to a single source
+ * column: ambiguous unqualified references, computed expressions, unknown
+ * columns, or a star whose source table is unknown. Consumers must show no
+ * comment for such columns rather than guessing.
+ */
+export function resolveSourceColumnsByOrdinal(databaseType: string, analysis: EditableQueryInfo, tableSources: Array<{ source: EditableQuerySource; columns: readonly { name: string }[] }>, columnCount: number): Array<ResolvedSourceColumnRef | undefined> {
+  const expanded = expandProjectionColumnsForSources(analysis, tableSources);
+  const resolved: Array<ResolvedSourceColumnRef | undefined> = [];
+  for (let index = 0; index < columnCount; index++) {
+    resolved.push(resolveProjectionColumnToSource(databaseType, expanded[index], tableSources));
+  }
+  return resolved;
+}
+
 export type QueryEditabilityReason = "not-select" | "cte" | "set-operation" | "aggregation" | "external-source" | "complex-source" | "computed-columns" | "no-table" | "no-primary-key" | "primary-key-not-returned" | "aliased-columns" | "metadata-unavailable";
 
 export type QueryEditability = { editable: true; analysis: EditableQueryInfo } | { editable: false; reason: QueryEditabilityReason };
@@ -160,7 +268,7 @@ export function analyzeEditableQueryEditability(sql: string): QueryEditability {
     tableAlias: source.alias,
     selectStar,
     columns,
-    ...(distinct ? { distinct: true, allowInsertDelete: false } : {}),
+    ...(distinct ? { distinct: true, allowInsert: false, allowInsertDelete: false } : {}),
   };
   if (sources.length > 1) {
     analysis.sources = sources;
@@ -261,7 +369,8 @@ function parseStarSelectColumn(col: string, sources?: EditableQuerySource[]): Ed
 }
 
 function parseComputedSelectColumn(col: string): EditableQueryColumn | null {
-  const alias = parseExpressionAlias(col);
+  const expression = col.trim();
+  const alias = parseExpressionAlias(col) ?? (looksLikeComputedExpression(expression) ? { expression, resultName: expression } : null);
   if (!alias) return null;
   return {
     sourceName: undefined,
@@ -273,14 +382,84 @@ function parseComputedSelectColumn(col: string): EditableQueryColumn | null {
 
 function parseExpressionAlias(col: string): { expression: string; resultName: string } | null {
   const asMatch = col.match(/\bAS\s+((?:"[^"]+")|(?:`[^`]+`)|(?:\[[^\]]+\])|(?:'(?:''|[^'])*')|(?:[\p{ID_Start}_][\p{ID_Continue}$]*))\s*$/iu);
-  const implicitStringMatch = asMatch ? undefined : col.match(/\s+('(?:''|[^'])*')\s*$/u);
-  const aliasText = asMatch?.[1] ?? implicitStringMatch?.[1];
-  const expressionEnd = asMatch?.index ?? implicitStringMatch?.index;
-  if (!aliasText || expressionEnd === undefined) return null;
-  const alias = readSelectAlias(aliasText);
-  if (!alias || alias.end !== aliasText.length) return null;
-  const expression = col.slice(0, expressionEnd).trim();
-  return expression ? { expression, resultName: alias.value } : null;
+  if (asMatch?.index !== undefined) {
+    const alias = readSelectAlias(asMatch[1]!);
+    const expression = col.slice(0, asMatch.index).trim();
+    if (alias && alias.end === asMatch[1]!.length && expression) return { expression, resultName: alias.value };
+  }
+
+  const trimmed = col.trimEnd();
+  const index = lastTopLevelWhitespaceStart(trimmed);
+  if (index !== undefined) {
+    const aliasText = trimmed.slice(index).trim();
+    const alias = readSelectAlias(aliasText);
+    const expression = trimmed.slice(0, index).trim();
+    // `a + b` has no alias: the prefix `a +` is incomplete, so the whole
+    // projection keeps the server's expression label.
+    if (alias && alias.end === aliasText.length && (alias.quoted || !isReservedImplicitAlias(alias.value)) && looksLikeComputedExpression(expression)) {
+      return { expression, resultName: alias.value };
+    }
+  }
+  return null;
+}
+
+function lastTopLevelWhitespaceStart(text: string): number | undefined {
+  let last: number | undefined;
+  let depth = 0;
+  let quote: string | null = null;
+  let inWhitespace = false;
+  for (let index = 0; index < text.length; index++) {
+    const ch = text[index]!;
+    if (quote) {
+      if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === "'" || ch === '"' || ch === "`") quote = ch;
+    else if (ch === "[") quote = "]";
+    else if (ch === "(") depth++;
+    else if (ch === ")") depth--;
+    const topLevelWhitespace = depth === 0 && /\s/u.test(ch);
+    if (topLevelWhitespace && !inWhitespace) last = index;
+    inWhitespace = topLevelWhitespace;
+  }
+  return last;
+}
+
+function looksLikeComputedExpression(expression: string): boolean {
+  const trimmed = expression.trim();
+  if (!trimmed || !hasBalancedExpressionDelimiters(trimmed)) return false;
+  const identifier = parseQualifiedIdentifier(trimmed);
+  if (identifier?.end === trimmed.length) return false;
+  if (/[+\-*/%=<>!|&^,.:]$/u.test(trimmed)) return false;
+  const words = trimmed.split(/\s+/u);
+  const finalWord = words[words.length - 1]?.toUpperCase() ?? "";
+  if (new Set(["AND", "OR", "XOR", "NOT", "LIKE", "ILIKE", "IS", "IN", "BETWEEN", "WHEN", "THEN", "ELSE", "AS", "COLLATE", "AT", "DIV", "MOD", "REGEXP", "RLIKE"]).has(finalWord)) return false;
+
+  const source = parseQualifiedIdentifier(trimmed);
+  if (!source) return true;
+  if (source.end === trimmed.length) return false;
+  const rest = source.rest.trimStart();
+  return /^[()+\-*/%=<>!|&^:?]/u.test(rest) || /^(?:IS|IN|LIKE|ILIKE|BETWEEN|COLLATE|AT|DIV|MOD|REGEXP|RLIKE)\b/iu.test(rest) || /^(?:CASE|NOT)\b/iu.test(trimmed);
+}
+
+function hasBalancedExpressionDelimiters(expression: string): boolean {
+  let depth = 0;
+  let quote: string | null = null;
+  for (const ch of expression) {
+    if (quote) {
+      if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === "'" || ch === '"' || ch === "`") quote = ch;
+    else if (ch === "[") quote = "]";
+    else if (ch === "(") depth++;
+    else if (ch === ")" && --depth < 0) return false;
+  }
+  return depth === 0 && quote === null;
+}
+
+function isReservedImplicitAlias(alias: string): boolean {
+  return new Set(["ALL", "AND", "AS", "ASC", "BETWEEN", "CASE", "COLLATE", "DESC", "DISTINCT", "ELSE", "END", "FALSE", "FROM", "IN", "IS", "LIKE", "LIMIT", "NOT", "NULL", "OFFSET", "OR", "ORDER", "THEN", "TRUE", "WHEN", "WHERE", "XOR"]).has(alias.toUpperCase());
 }
 
 function parseColumnAlias(rest: string): string | undefined | null {

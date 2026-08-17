@@ -474,12 +474,16 @@ pub async fn get_table_ddl(
     object_type: Option<db::ObjectSourceKind>,
     catalog: Option<String>,
     include_postgres_access: Option<bool>,
+    portable: Option<bool>,
 ) -> Result<String, String> {
     if let Some(catalog) = external_doris_catalog(&state, &connection_id, catalog.as_deref()).await {
         return dbx_core::schema::get_doris_catalog_table_ddl_core(&state, &connection_id, &catalog, &database, &table)
             .await;
     }
-    if include_postgres_access.unwrap_or(false) {
+    if portable.unwrap_or(false) {
+        dbx_core::schema::get_table_export_ddl_core(&state, &connection_id, &database, &schema, &table, object_type)
+            .await
+    } else if include_postgres_access.unwrap_or(false) {
         dbx_core::schema::get_table_display_ddl_core(&state, &connection_id, &database, &schema, &table, object_type)
             .await
     } else {

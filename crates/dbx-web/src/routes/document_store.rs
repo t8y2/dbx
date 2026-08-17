@@ -67,7 +67,24 @@ pub struct DocumentFindRequest {
     pub projection: Option<String>,
     pub sort: Option<String>,
     pub collation: Option<String>,
+    pub cursor: Option<String>,
     pub execution_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DocumentCountRequest {
+    pub connection_id: String,
+    pub collection: String,
+    pub filter: Option<String>,
+    pub execution_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DynamoDbDescribeTableRequest {
+    pub connection_id: String,
+    pub table: String,
 }
 
 #[derive(Deserialize)]
@@ -204,9 +221,38 @@ pub async fn find_documents(
             req.projection.as_deref(),
             req.sort.as_deref(),
             req.collation.as_deref(),
+            req.cursor.as_deref(),
         ),
     )
     .await?;
+    Ok(Json(result))
+}
+
+pub async fn count_documents(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<DocumentCountRequest>,
+) -> Result<Json<u64>, AppError> {
+    let result = run_cancellable(
+        &state,
+        req.execution_id,
+        dbx_core::document_ops::count_document_store_documents_core(
+            &state.app,
+            &req.connection_id,
+            &req.collection,
+            req.filter.as_deref(),
+        ),
+    )
+    .await?;
+    Ok(Json(result))
+}
+
+pub async fn describe_dynamodb_table(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<DynamoDbDescribeTableRequest>,
+) -> Result<Json<dbx_core::db::dynamodb_driver::DynamoDbTableDescription>, AppError> {
+    let result = dbx_core::document_ops::describe_dynamodb_table_core(&state.app, &req.connection_id, &req.table)
+        .await
+        .map_err(AppError::from)?;
     Ok(Json(result))
 }
 

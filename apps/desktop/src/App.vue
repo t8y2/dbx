@@ -39,13 +39,14 @@ import { useExternalSqlFileChanges } from "@/composables/useExternalSqlFileChang
 import { useWebDavAutoUpload } from "@/composables/useWebDavAutoUpload";
 import { useScheduledDatabaseBackups } from "@/composables/useScheduledDatabaseBackups";
 import { shouldDrawDesktopWindowFrame } from "@/composables/useWindowControls";
-import { createOpenTabsRestorationBarrier, initializeDesktopOpenTabs, type OpenTabsRestorationBarrier } from "@/lib/app/openTabsStartup";
+import { createOpenTabsRestorationBarrier, initializeDesktopOpenTabs, initializeOpenTabs, type OpenTabsRestorationBarrier } from "@/lib/app/openTabsStartup";
 import { useSaveSqlFolderSelection } from "@/composables/useSaveSqlFolderSelection";
 import "@/i18n";
 import { translateBackendError } from "@/i18n/backend-errors";
 import * as api from "@/lib/backend/api";
 import { connectionRedactedNameLabel } from "@/lib/connection/connectionPresentation";
 import { quickConnectionOpenTarget } from "@/lib/connection/connectionOpenTarget";
+import { parseRecentConnectionIds, rankRecentConnections, RECENT_CONNECTION_IDS_STORAGE_KEY, recordRecentConnection } from "@/lib/connection/recentConnections";
 import { resolveDefaultDatabase } from "@/lib/database/defaultDatabase";
 import { normalizeSqliteNamespace } from "@/lib/database/sqliteNamespace";
 import { findTreeNodeById, resolveNewQueryTarget, resolveNewQueryInitialSql } from "@/lib/sql/newQueryContext";
@@ -143,6 +144,7 @@ const queryStore = useQueryStore();
 const settingsStore = useSettingsStore();
 const savedSqlStore = useSavedSqlStore();
 const promptTemplateStore = usePromptTemplateStore();
+const recentConnectionIds = ref<readonly string[]>(parseRecentConnectionIds(safeLocalStorageGet(RECENT_CONNECTION_IDS_STORAGE_KEY)));
 connectionStore.setBeforeConnectHandler(async (config) => {
   await ensureJdbcxRuntimeDrivers(config, api);
   const jdbcProductRuntimeBefore = JSON.stringify({
@@ -581,7 +583,18 @@ const connectionStats = computed(() => ({
   connected: connectionStore.connectedIds.size,
   types: new Set(connectionStore.connections.map((c) => c.driver_profile || c.db_type)).size,
 }));
-const recentConnections = computed(() => connectionStore.connections.slice(0, 5));
+const recentConnections = computed(() => rankRecentConnections(connectionStore.connections, recentConnectionIds.value));
+
+function rememberRecentConnection(connectionId: string | null) {
+  if (!connectionId) return;
+  const nextIds = recordRecentConnection(recentConnectionIds.value, connectionId);
+  if (nextIds === recentConnectionIds.value) return;
+  recentConnectionIds.value = nextIds;
+  safeLocalStorageSet(RECENT_CONNECTION_IDS_STORAGE_KEY, JSON.stringify(nextIds));
+}
+
+watch(() => connectionStore.activeConnectionId, rememberRecentConnection);
+
 const savedSqlHistoryItems = computed(() => {
   const folderById = new Map(savedSqlStore.allFolders.map((folder) => [folder.id, folder]));
   const folderPath = (folderId?: string): string | undefined => {
@@ -1602,6 +1615,7 @@ async function newQuery() {
 async function openConnectionQuery(connectionId: string) {
   const connection = connectionStore.getConfig(connectionId);
   if (!connection) return;
+  rememberRecentConnection(connectionId);
   connectionStore.activeConnectionId = connectionId;
   const initialTarget = quickConnectionOpenTarget(connection);
   if (initialTarget.kind === "mq-admin") {
@@ -2362,7 +2376,6 @@ async function initApp() {
     console.log(`[STARTUP]   queryStore.initOpenTabs: ${(performance.now() - t0).toFixed(0)}ms`);
   };
 
-  if (!desktopOpenTabsRestorationBarrier) await settingsStore.initAiConfigs();
   try {
     if (desktopOpenTabsRestorationBarrier) {
       await initializeDesktopOpenTabs({
@@ -2372,7 +2385,11 @@ async function initApp() {
         onOptionalStateError: (error) => console.error("[STARTUP] settingsStore.initAiConfigs failed", error),
       });
     } else {
-      await restoreOpenTabs();
+      await initializeOpenTabs({
+        initializeOptionalState: () => settingsStore.initAiConfigs(),
+        restoreOpenTabs,
+        onOptionalStateError: (error) => console.error("[STARTUP] settingsStore.initAiConfigs failed", error),
+      });
     }
     await settingsStore.initDesktopSettings().catch(() => {});
 
@@ -2635,8 +2652,10 @@ onUnmounted(() => {
                 :initial-section="settingsInitialSection"
                 :navigation-request-id="settingsNavigationRequestId"
                 :app-version="appVersion"
+                :checking-updates="checkingUpdates"
                 class="flex-1 min-h-0"
                 @update:open="(open: boolean) => (open ? activateSettingsPage() : closeSettingsPage())"
+                @check-updates="checkUpdates()"
               />
               <div v-if="activeTab" v-show="!driverStoreActive && !settingsStore.settingsPageActive" class="flex flex-col flex-1 min-h-0">
                 <EditorToolbar

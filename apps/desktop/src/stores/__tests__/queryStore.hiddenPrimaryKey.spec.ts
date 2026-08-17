@@ -138,6 +138,42 @@ describe("queryStore hidden primary key editing", () => {
     expect(tab.queryEditabilityReason).toBeUndefined();
   });
 
+  it("keeps MySQL expression columns read-only without disabling direct columns", async () => {
+    const sql = "SELECT id, status, extra->>'$.mode' mode, extra->>'$.template' tmpl FROM items";
+    getColumns.mockResolvedValue([
+      { name: "id", data_type: "int", is_nullable: false, column_default: null, is_primary_key: true, extra: null },
+      { name: "status", data_type: "varchar", is_nullable: false, column_default: null, is_primary_key: false, extra: null },
+      { name: "extra", data_type: "json", is_nullable: true, column_default: null, is_primary_key: false, extra: null },
+    ]);
+    analyzeEditableQueryEditability.mockResolvedValue({
+      editable: true,
+      analysis: {
+        schema: undefined,
+        tableName: "items",
+        selectStar: false,
+        columns: [
+          { sourceName: "id", resultName: "id", expression: "id" },
+          { sourceName: "status", resultName: "status", expression: "status" },
+          { sourceName: undefined, resultName: "mode", expression: "extra->>'$.mode'" },
+          { sourceName: undefined, resultName: "tmpl", expression: "extra->>'$.template'" },
+        ],
+      },
+    });
+    executeMulti.mockResolvedValue([{ columns: ["id", "status", "mode", "tmpl"], rows: [[1, "ok", "fast", "base"]], affected_rows: 0, execution_time_ms: 1 }]);
+
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("mysql-1", "app", "Query");
+
+    await store.executeTabSql(tabId, sql);
+
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    await vi.waitFor(() => expect(tab.querySourceColumns).toEqual(["id", "status", undefined, undefined]));
+    expect(tab.queryEditabilityReason).toBeUndefined();
+    expect(getColumns).toHaveBeenCalledTimes(1);
+    expect(listObjects).not.toHaveBeenCalled();
+  });
+
   it("starts a qualified MySQL star query before slow column metadata finishes", async () => {
     const columnsGate = deferred<Awaited<ReturnType<typeof getColumns>>>();
     getColumns.mockReturnValue(columnsGate.promise);
@@ -634,6 +670,119 @@ describe("queryStore hidden primary key editing", () => {
     expect(executeMulti).toHaveBeenCalledWith("oracle-1", "ORCL", "SELECT * FROM APP.PLATFORM_VIEW", undefined, expect.any(String), expect.objectContaining({ timeoutSecs: 30 }));
     expect(lookupLocalCompletionTables).toHaveBeenCalledWith("oracle-1", "ORCL", "PLATFORM_VIEW", 20, "APP", undefined);
     expect(tab.result?.hidden_column_indexes).toBeUndefined();
+  });
+
+  it("enables deferred Oracle LOBs only when a base-table query has a stable key", async () => {
+    getConnectionConfig.mockReturnValue({ id: "oracle-1", name: "Oracle", db_type: "oracle", database: "ORCL", query_timeout_secs: 30 });
+    getColumns.mockResolvedValue([
+      { name: "ID", data_type: "NUMBER", is_nullable: false, column_default: null, is_primary_key: true, extra: null },
+      { name: "PAYLOAD", data_type: "CLOB", is_nullable: true, column_default: null, is_primary_key: false, extra: null },
+    ]);
+    lookupLocalCompletionTables.mockReturnValue([{ name: "DOCUMENTS", type: "table", schema: "APP" }]);
+    analyzeEditableQueryEditability.mockImplementation(async (sql: string) => ({
+      editable: true,
+      analysis: {
+        schema: "APP",
+        tableName: "DOCUMENTS",
+        selectStar: false,
+        columns: [{ sourceName: "PAYLOAD", resultName: "PAYLOAD", expression: "PAYLOAD" }, ...(sql.includes("__DBX_PK_0") ? [{ sourceName: "ID", resultName: "__DBX_PK_0", expression: '"ID"' }] : [])],
+      },
+    }));
+    executeMulti.mockResolvedValue([{ columns: ["PAYLOAD", "__DBX_PK_0"], rows: [["<CLOB>", 1]], affected_rows: 0, execution_time_ms: 1 }]);
+
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("oracle-1", "ORCL", "Query");
+
+    await store.executeTabSql(tabId, "SELECT PAYLOAD FROM APP.DOCUMENTS");
+
+    expect(executeMulti).toHaveBeenCalledWith("oracle-1", "ORCL", 'SELECT PAYLOAD, "ID" AS "__DBX_PK_0" FROM APP.DOCUMENTS', undefined, expect.any(String), expect.objectContaining({ tableDataPreview: true, timeoutSecs: 30 }));
+  });
+
+  it("keeps deferred Oracle LOBs disabled for views", async () => {
+    getConnectionConfig.mockReturnValue({ id: "oracle-1", name: "Oracle", db_type: "oracle", database: "ORCL", query_timeout_secs: 30 });
+    getColumns.mockResolvedValue([
+      { name: "ID", data_type: "NUMBER", is_nullable: false, column_default: null, is_primary_key: false, extra: null },
+      { name: "PAYLOAD", data_type: "CLOB", is_nullable: true, column_default: null, is_primary_key: false, extra: null },
+    ]);
+    listIndexes.mockResolvedValue([]);
+    lookupLocalCompletionTables.mockReturnValue([{ name: "DOCUMENT_VIEW", type: "view", schema: "APP" }]);
+    analyzeEditableQueryEditability.mockResolvedValue({
+      editable: true,
+      analysis: {
+        schema: "APP",
+        tableName: "DOCUMENT_VIEW",
+        selectStar: true,
+        columns: [],
+      },
+    });
+    executeMulti.mockResolvedValue([{ columns: ["ID", "PAYLOAD"], rows: [[1, "value"]], affected_rows: 0, execution_time_ms: 1 }]);
+
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("oracle-1", "ORCL", "Query");
+
+    await store.executeTabSql(tabId, "SELECT * FROM APP.DOCUMENT_VIEW");
+
+    expect(executeMulti).toHaveBeenCalledOnce();
+    expect(executeMulti.mock.calls[0]?.[5]).not.toHaveProperty("tableDataPreview");
+  });
+
+  it("keeps deferred Oracle LOBs disabled when a keyless source has no safe ROWID path", async () => {
+    getConnectionConfig.mockReturnValue({ id: "oracle-1", name: "Oracle", db_type: "oracle", database: "ORCL", query_timeout_secs: 30 });
+    getColumns.mockResolvedValue([
+      { name: "ID", data_type: "NUMBER", is_nullable: false, column_default: null, is_primary_key: false, extra: null },
+      { name: "PAYLOAD", data_type: "CLOB", is_nullable: true, column_default: null, is_primary_key: false, extra: null },
+    ]);
+    listIndexes.mockResolvedValue([]);
+    lookupLocalCompletionTables.mockReturnValue([]);
+    analyzeEditableQueryEditability.mockResolvedValue({
+      editable: true,
+      analysis: {
+        schema: undefined,
+        tableName: "DOCUMENTS",
+        selectStar: true,
+        columns: [],
+      },
+    });
+    executeMulti.mockResolvedValue([{ columns: ["ID", "PAYLOAD"], rows: [[1, "value"]], affected_rows: 0, execution_time_ms: 1 }]);
+
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("oracle-1", "ORCL", "Query");
+
+    await store.executeTabSql(tabId, "SELECT * FROM DOCUMENTS");
+
+    expect(executeMulti).toHaveBeenCalledOnce();
+    expect(executeMulti.mock.calls[0]?.[5]).not.toHaveProperty("tableDataPreview");
+  });
+
+  it("does not request deferred Oracle LOB handling for ordinary non-LOB queries", async () => {
+    getConnectionConfig.mockReturnValue({ id: "oracle-1", name: "Oracle", db_type: "oracle", database: "ORCL", query_timeout_secs: 30 });
+    getColumns.mockResolvedValue([
+      { name: "ID", data_type: "NUMBER", is_nullable: false, column_default: null, is_primary_key: true, extra: null },
+      { name: "NAME", data_type: "VARCHAR2(100)", is_nullable: true, column_default: null, is_primary_key: false, extra: null },
+    ]);
+    lookupLocalCompletionTables.mockReturnValue([{ name: "CUSTOMERS", type: "table", schema: "APP" }]);
+    analyzeEditableQueryEditability.mockImplementation(async (sql: string) => ({
+      editable: true,
+      analysis: {
+        schema: "APP",
+        tableName: "CUSTOMERS",
+        selectStar: false,
+        columns: [{ sourceName: "NAME", resultName: "NAME", expression: "NAME" }, ...(sql.includes("__DBX_PK_0") ? [{ sourceName: "ID", resultName: "__DBX_PK_0", expression: '"ID"' }] : [])],
+      },
+    }));
+    executeMulti.mockResolvedValue([{ columns: ["NAME", "__DBX_PK_0"], rows: [["Alice", 1]], affected_rows: 0, execution_time_ms: 1 }]);
+
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("oracle-1", "ORCL", "Query");
+
+    await store.executeTabSql(tabId, "SELECT NAME FROM APP.CUSTOMERS");
+
+    expect(executeMulti).toHaveBeenCalledOnce();
+    expect(executeMulti.mock.calls[0]?.[5]).not.toHaveProperty("tableDataPreview");
   });
 
   it.each([
@@ -1133,6 +1282,59 @@ describe("queryStore hidden primary key editing", () => {
     const tab = store.tabs.find((item) => item.id === tabId)!;
     await vi.waitFor(() => expect(tab.resultTotalRowCount).toBe(123));
     expect(tab.resultTotalRowCountLoading).toBe(false);
+  });
+
+  it.each([
+    ["disabled by default", undefined, undefined],
+    ["explicitly enabled", { gaussdbCountQueryDop: 8 }, "/*+ set(query_dop 8) */"],
+  ])("keeps GaussDB count parallelism %s", async (_label, externalConfig, expectedCountHint) => {
+    editorSettings.autoCalculateTotalRows = true;
+    getConnectionConfig.mockReturnValue({
+      id: "gaussdb-1",
+      name: "GaussDB",
+      db_type: "gaussdb",
+      database: "app",
+      query_timeout_secs: 30,
+      external_config: externalConfig,
+    });
+    executeMulti.mockResolvedValue([
+      {
+        columns: ["id", "name"],
+        rows: Array.from({ length: 100 }, (_, index) => [index + 1, `user-${index + 1}`]),
+        affected_rows: 0,
+        execution_time_ms: 1,
+      },
+    ]);
+
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("gaussdb-1", "app", "users", "data", "public");
+    store.setTableMeta(tabId, {
+      schema: "public",
+      tableName: "users",
+      columns: [
+        { name: "id", data_type: "int", is_nullable: false, is_primary_key: true, column_default: null, extra: null },
+        { name: "name", data_type: "varchar", is_nullable: true, is_primary_key: false, column_default: null, extra: null },
+      ],
+      primaryKeys: ["id"],
+    });
+
+    await store.executeTabSql(tabId, "SELECT id, name FROM users LIMIT 100", {
+      pagination: { limit: 100, offset: 0 },
+    });
+
+    await vi.waitFor(() =>
+      expect(buildDataGridCountSql).toHaveBeenCalledWith({
+        databaseType: "gaussdb",
+        identifierQuote: undefined,
+        catalog: undefined,
+        database: undefined,
+        schema: "public",
+        tableName: "users",
+        whereInput: undefined,
+        countHint: expectedCountHint,
+      }),
+    );
   });
 
   it("stops appending when a SQL Server query has no bounded next-page plan", async () => {

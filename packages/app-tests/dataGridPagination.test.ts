@@ -180,10 +180,13 @@ test("auto-redirect: total is undefined — guard prevents redirect attempt", ()
   assert.equal(!total || (total as any) <= 0, true, "guard should prevent redirect when total is unknown");
 });
 
-test("last-page COUNT shows grid busy overlay before executeQuery", () => {
+test("only an explicit last-page COUNT blocks the grid surface", () => {
   const source = readFileSync("apps/desktop/src/components/grid/DataGrid.vue", "utf8");
-  assert.match(source, /const gridSurfaceBusy = computed\(\(\) => isRefreshingData\.value \|\| props\.loading === true \|\| totalRowCountBusy\.value\)/);
+  assert.match(source, /const totalRowCountBusy = computed\(\(\) => props\.totalRowCountLoading === true \|\| manualTotalRowCountLoading\.value\)/);
+  assert.match(source, /const gridSurfaceBusy = computed\(\(\) => isRefreshingData\.value \|\| props\.loading === true \|\| manualTotalRowCountLoading\.value\)/);
+  assert.match(source, /const gridPaginationBusy = computed\(\(\) => gridSurfaceBusy\.value \|\| totalRowCountBusy\.value\)/);
   assert.match(source, /v-if="gridSurfaceBusy"/);
+  assert.match(source, /:loading="gridPaginationBusy"/);
   assert.match(source, /async function beginManualTotalRowCount/);
   assert.match(source, /await nextTick\(\);/);
   const lastPageFn = source.match(/async function lastPage\(\) \{[\s\S]*?\n\}/)?.[0] ?? "";

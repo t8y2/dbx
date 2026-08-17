@@ -40,23 +40,41 @@ fn normalized_data_type_base(data_type: &str) -> String {
     data_type.trim().split(['(', '[']).next().unwrap_or_default().trim().to_ascii_lowercase()
 }
 
-fn large_value_preview_kind(database_type: Option<DatabaseType>, data_type: &str) -> Option<LargeValuePreviewKind> {
+fn declared_data_type_length(data_type: &str) -> Option<usize> {
+    let parameters = data_type.split_once('(')?.1;
+    let digits = parameters.trim_start().chars().take_while(char::is_ascii_digit).collect::<String>();
+    (!digits.is_empty()).then(|| digits.parse::<usize>().ok()).flatten()
+}
+
+fn large_value_preview_kind(
+    database_type: Option<DatabaseType>,
+    data_type: &str,
+    preview_size: usize,
+) -> Option<LargeValuePreviewKind> {
     let normalized = data_type.trim().to_ascii_lowercase();
     let base = normalized_data_type_base(data_type);
     match database_type {
         Some(DatabaseType::Mysql) => {
-            if matches!(base.as_str(), "binary" | "varbinary" | "tinyblob" | "blob" | "mediumblob" | "longblob") {
+            if matches!(base.as_str(), "blob" | "mediumblob" | "longblob")
+                || (base == "varbinary"
+                    && declared_data_type_length(data_type).is_some_and(|length| length > preview_size))
+            {
                 Some(LargeValuePreviewKind::Binary)
             } else if base == "json" {
                 Some(LargeValuePreviewKind::TextCast)
-            } else if matches!(base.as_str(), "char" | "varchar" | "tinytext" | "text" | "mediumtext" | "longtext") {
+            } else if matches!(base.as_str(), "text" | "mediumtext" | "longtext")
+                || (base == "varchar"
+                    && declared_data_type_length(data_type).is_some_and(|length| length > preview_size))
+            {
                 Some(LargeValuePreviewKind::Text)
             } else {
                 None
             }
         }
         Some(DatabaseType::Postgres) => {
-            if base == "bytea" {
+            if normalized.contains('[') {
+                None
+            } else if base == "bytea" {
                 Some(LargeValuePreviewKind::Binary)
             } else if matches!(base.as_str(), "char" | "character" | "varchar" | "text" | "citext" | "name" | "xml")
                 || normalized.starts_with("character varying")
@@ -99,7 +117,7 @@ fn build_large_value_preview_columns(options: &TableDataSelectSqlOptions) -> Opt
             quote_table_identifier(database_type, column)
         };
         let kind = (!protected.contains(&column.to_ascii_lowercase()))
-            .then(|| large_value_preview_kind(database_type, data_type))
+            .then(|| large_value_preview_kind(database_type, data_type, preview_size))
             .flatten();
         let Some(kind) = kind else {
             projections.push(quoted);
@@ -129,7 +147,11 @@ fn build_large_value_preview_columns(options: &TableDataSelectSqlOptions) -> Opt
             Some(DatabaseType::Postgres) => (format!("left({quoted}, {prefix_size}) AS {quoted}"), "T"),
             _ => return None,
         };
-        let marker = format!("'{marker_kind}:{preview_size}' AS {marker_alias}");
+        let marker = if database_type == Some(DatabaseType::Mysql) {
+            format!("CONCAT('{marker_kind}:{preview_size}:', LENGTH({quoted})) AS {marker_alias}")
+        } else {
+            format!("'{marker_kind}:{preview_size}' AS {marker_alias}")
+        };
         projections.push(preview);
         projections.push(marker);
         marker_count += 1;
@@ -186,6 +208,11 @@ pub fn build_table_data_select_sql(options: TableDataSelectSqlOptions) -> String
     let default_order_by = if database_type == Some(DatabaseType::InfluxDb) {
         // InfluxQL only allows sorting of timestamp column
         Some("time DESC".to_string())
+    } else if database_type == Some(DatabaseType::Impala) {
+        // Impala requires ORDER BY when OFFSET is present. Keeping the same
+        // fallback on the first page also prevents page boundaries from using
+        // different row orders when the table has no explicit key.
+        Some("1".to_string())
     } else {
         None
     };
@@ -225,7 +252,11 @@ pub fn build_table_data_select_sql(options: TableDataSelectSqlOptions) -> String
 
     match table_pagination_strategy(database_type) {
         TablePaginationStrategy::IrisTop => {
-            format!("SELECT TOP {limit} {select_columns} FROM {table_alias}{where_clause}{order}")
+            if options.use_driver_row_offset {
+                format!("SELECT {select_columns} FROM {table_alias}{where_clause}{order}")
+            } else {
+                format!("SELECT TOP {limit} {select_columns} FROM {table_alias}{where_clause}{order}")
+            }
         }
         TablePaginationStrategy::InformixFirst => {
             let row_limit = informix_row_limit_clause(limit, options.offset.unwrap_or(0));
@@ -498,7 +529,7 @@ pub(super) fn build_select_columns(
             .collect::<Vec<_>>()
             .join(", ");
     }
-    if database_type != Some(DatabaseType::Hive) {
+    if !matches!(database_type, Some(DatabaseType::Hive | DatabaseType::Kyuubi | DatabaseType::Impala)) {
         return "*".to_string();
     }
     columns
@@ -654,6 +685,7 @@ mod tests {
             order_by: None,
             limit: Some(10),
             offset: None,
+            use_driver_row_offset: false,
             where_input: None,
             include_row_id: false,
         }

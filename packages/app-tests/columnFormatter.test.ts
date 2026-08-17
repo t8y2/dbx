@@ -85,6 +85,22 @@ test("formats Oracle timestamp fractional precision in the data grid", () => {
   assert.equal(applyColumnFormatter("2024-02-25 13:02:15.123456", { kind: "datetime", unit: "auto", pattern: "YYYY/MM/DD HH:mm:ss.SSS", timezone: undefined }), "2024/02/25 13:02:15.123");
 });
 
+test("formats only strict Mongo shell date wrappers", () => {
+  for (const unit of ["auto", "seconds", "milliseconds"] as const) {
+    const formatter: ColumnFormatterConfig = { kind: "datetime", unit, pattern: "YYYY-MM-DD HH:mm:ss.SSSZ", timezone: "Asia/Shanghai" };
+
+    assert.equal(applyColumnFormatter('ISODate("2024-06-28T09:15:36.439Z")', formatter), "2024-06-28 17:15:36.439+08:00");
+    assert.equal(applyColumnFormatter("  new Date(  '2024-06-28T09:15:36.439Z'  )  ", formatter), "2024-06-28 17:15:36.439+08:00");
+
+    for (const value of ['ISODate("not-a-date")', "new Date('2024-02-30T09:15:36.439Z')", 'ISODate("1715758200")', "new Date('1715758200001')"]) {
+      assert.equal(applyColumnFormatter(value, formatter), value);
+    }
+  }
+
+  assert.equal(applyColumnFormatter("1715758200", { kind: "datetime", unit: "seconds", pattern: "YYYY-MM-DD HH:mm:ssZ", timezone: "Asia/Shanghai" }), "2024-05-15 15:30:00+08:00");
+  assert.equal(applyColumnFormatter("1715758200001", { kind: "datetime", unit: "milliseconds", pattern: "YYYY-MM-DD HH:mm:ss.SSSZ", timezone: "Asia/Shanghai" }), "2024-05-15 15:30:00.001+08:00");
+});
+
 test("does not treat compact date strings as unix timestamps", () => {
   dayjs.extend(utc);
   dayjs.extend(timezone);
@@ -116,6 +132,11 @@ test("falls back to normal display for nulls and invalid formatter input", () =>
   assert.equal(applyColumnFormatter("not json", { kind: "json-path", path: "$.a" }), "not json");
   assert.deepEqual(normalizeColumnFormatter({ kind: "datetime", unit: "invalid" }), undefined);
   assert.deepEqual(normalizeColumnFormatter({ kind: "datetime", unit: "auto", pattern: 123 }), { kind: "datetime", unit: "auto", pattern: "YYYY-MM-DD HH:mm:ss", timezone: undefined });
+});
+
+test("normalizes foreign-key display formatter configuration", () => {
+  assert.deepEqual(normalizeColumnFormatter({ kind: "foreign-key-display", refSchema: " public ", refTable: " users ", refColumn: " id ", displayColumn: " name " }), { kind: "foreign-key-display", refSchema: "public", refTable: "users", refColumn: "id", displayColumn: "name" });
+  assert.equal(normalizeColumnFormatter({ kind: "foreign-key-display", refTable: "users", refColumn: "id", displayColumn: "" }), undefined);
 });
 
 test("normalizes only supported formatter configs", () => {

@@ -1429,7 +1429,7 @@ watch(rawProgressPercent, (percent) => {
               <FileUp v-else class="h-5 w-5 text-muted-foreground" />
               <div class="min-w-0 flex-1">
                 <div class="text-sm font-medium">{{ t(progressLabelKey) }}</div>
-                <div class="mt-1 text-xs text-muted-foreground">
+                <div class="mt-1 text-xs text-muted-foreground tabular-nums">
                   <template v-if="progress?.totalRowsExact !== false && (progress?.totalRows ?? 0) > 0">{{ progress?.rowsImported ?? 0 }} / {{ progress?.totalRows ?? 0 }}</template>
                   <template v-else>{{ progress?.rowsImported ?? 0 }} {{ t("tableImport.rowsImported") }}</template>
                   · {{ progressPercent }}% ·

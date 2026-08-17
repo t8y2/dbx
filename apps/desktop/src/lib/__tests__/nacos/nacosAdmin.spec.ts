@@ -18,9 +18,11 @@ import {
   isNacosErrorCode,
   isNacosConfigSaveSnapshotCurrent,
   isNacosConfigDeleteSnapshotInScope,
+  mergeNacosNamespacePermissionAssignments,
   nacosConfigFileExtension,
   nacosMetricsCandidates,
   normalizeNacosMetricsUrl,
+  parseNacosManagedNamespaces,
   parseNacosRawBody,
   parseNacosRawQuery,
   normalizeNacosEndpoint,
@@ -79,11 +81,30 @@ describe("nacosAdmin helpers", () => {
     expect(() => normalizeNacosMetricsUrl("http://localhost/metrics#fragment")).toThrow(/fragment/);
     expect(() => normalizeNacosMetricsUrl("http://localhost/metrics#")).toThrow(/fragment/);
   });
+
   it("parses raw query and body text", () => {
     expect(parseNacosRawQuery("?dataId=a&group=DEFAULT_GROUP")).toEqual({ dataId: "a", group: "DEFAULT_GROUP" });
     expect(parseNacosRawQuery("")).toBeUndefined();
     expect(parseNacosRawBody('{"enabled":false}')).toEqual({ enabled: false });
     expect(parseNacosRawBody("plain text")).toBe("plain text");
+  });
+
+  it("parses, trims, and deduplicates managed namespace IDs", () => {
+    expect(parseNacosManagedNamespaces(" public, team-a\nteam-a，team-b\n\n")).toEqual(["public", "team-a", "team-b"]);
+    expect(parseNacosManagedNamespaces("  ")).toEqual([]);
+  });
+
+  it("combines split read and write permission rows before role editing", () => {
+    expect(
+      mergeNacosNamespacePermissionAssignments([
+        { actionRaw: "r", parsedScope: { kind: "namespace", namespaceId: "team-a" } },
+        { actionRaw: "w", parsedScope: { kind: "namespace", namespaceId: "team-a" } },
+        { actionRaw: "r", parsedScope: { kind: "namespace", namespaceId: "team-b" } },
+      ]),
+    ).toEqual([
+      { namespaceId: "team-a", action: "rw" },
+      { namespaceId: "team-b", action: "r" },
+    ]);
   });
 
   it("builds raw requests and detects mutations", () => {

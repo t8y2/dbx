@@ -1,7 +1,7 @@
 import { createPinia, setActivePinia } from "pinia";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { treeNodePinKey } from "@/lib/app/pinnedItems";
-import type { TreeNode } from "@/types/database";
+import type { SidebarLayout, TreeNode } from "@/types/database";
 
 function installLocalStorage() {
   const data = new Map<string, string>();
@@ -21,6 +21,16 @@ function tableNode(name = "users"): TreeNode {
     database: "db",
     schema: "public",
     tableName: name,
+  };
+}
+
+function connectionGroupNode(id: string, children: TreeNode[] = []): TreeNode {
+  return {
+    id,
+    label: id,
+    type: "connection-group",
+    isExpanded: true,
+    children,
   };
 }
 
@@ -56,6 +66,99 @@ describe("connectionStore pinned tree node removal", () => {
     store.treeNodes[0].children = [replacement];
 
     expect(store.isTreeNodePinned(replacement)).toBe(false);
+  });
+
+  it("removes pins and selection state for a deleted group and all of its nested groups", async () => {
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({ saveSidebarLayout: vi.fn().mockResolvedValue(undefined) }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    const child = connectionGroupNode("group-child");
+    const parent = connectionGroupNode("group-parent", [child]);
+    const layout: SidebarLayout = {
+      groups: [
+        { id: parent.id, name: "Parent", collapsed: false },
+        { id: child.id, name: "Child", collapsed: false },
+      ],
+      order: [{ type: "group", id: parent.id, children: [{ type: "group", id: child.id, children: [] }] }],
+    };
+    store.sidebarLayout = layout;
+    store.treeNodes = [parent];
+    store.toggleTreeNodePin(parent);
+    store.toggleTreeNodePin(child);
+    store.selectedTreeNodeIds = [parent.id, child.id];
+    store.selectedTreeNodeId = child.id;
+    store.treeSelectionAnchorId = parent.id;
+    store.connectionMultiSelectActive = true;
+
+    await store.deleteConnectionGroup(parent.id);
+
+    expect(store.sidebarLayout.groups).toEqual([]);
+    expect(store.isTreeNodePinned(parent)).toBe(false);
+    expect(store.isTreeNodePinned(child)).toBe(false);
+    expect(store.selectedTreeNodeIds).toEqual([]);
+    expect(store.selectedTreeNodeId).toBeNull();
+    expect(store.treeSelectionAnchorId).toBeNull();
+    expect(store.connectionMultiSelectActive).toBe(false);
+  });
+
+  it("keeps groups in memory when layout persistence fails", async () => {
+    const saveSidebarLayout = vi.fn().mockRejectedValue(new Error("layout unavailable"));
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({ saveSidebarLayout }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    const group = connectionGroupNode("group-1");
+    const layout: SidebarLayout = {
+      groups: [{ id: group.id, name: group.label, collapsed: false }],
+      order: [{ type: "group", id: group.id, children: [] }],
+    };
+    store.sidebarLayout = layout;
+    store.treeNodes = [group];
+
+    await expect(store.deleteConnectionGroup(group.id)).rejects.toThrow("layout unavailable");
+
+    expect(store.sidebarLayout).toStrictEqual(layout);
+    expect(store.treeNodes).toEqual([group]);
+    expect(saveSidebarLayout).toHaveBeenCalledWith({ groups: [], order: [] });
+    expect(saveSidebarLayout).toHaveBeenLastCalledWith(layout);
+  });
+
+  it("restores saved connections when timeout settings cannot be updated", async () => {
+    const saveConnections = vi.fn().mockResolvedValue(undefined);
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      loadEditorSettings: vi.fn().mockResolvedValue(null),
+      saveConnections,
+      saveEditorSettings: vi.fn().mockRejectedValue(new Error("settings unavailable")),
+      saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
+    }));
+
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const settingsStore = useSettingsStore();
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    const connection = {
+      id: "connection-1",
+      name: "Connection",
+      db_type: "postgres",
+      host: "127.0.0.1",
+      port: 5432,
+      username: "postgres",
+      password: "",
+      connect_timeout_inherit: true,
+    } as const;
+    store.connections = [connection];
+    settingsStore.editorSettings.connectTimeoutInheritConnectionIds = [connection.id];
+
+    await expect(store.removeConnection(connection.id)).rejects.toThrow("settings unavailable");
+
+    expect(store.connections).toEqual([connection]);
+    expect(settingsStore.editorSettings.connectTimeoutInheritConnectionIds).toEqual([connection.id]);
+    expect(saveConnections).toHaveBeenCalledWith([]);
+    expect(saveConnections).toHaveBeenLastCalledWith([connection]);
   });
 
   it("recounts parent objectCount from remaining children when a child is removed", async () => {

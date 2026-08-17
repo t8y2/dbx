@@ -44,7 +44,7 @@ async function deleteSchemaCachePrefixSafe(prefix: string): Promise<void> {
   }
 }
 
-export type ObjectMetadataFacet = "columns" | "indexes" | "foreign-keys" | "triggers" | "comment";
+export type ObjectMetadataFacet = "columns" | "indexes" | "foreign-keys" | "constraints" | "triggers" | "comment";
 
 function cacheSegment(value: string | undefined): string {
   return encodeURIComponent(value ?? "");

@@ -1263,6 +1263,7 @@ dependencies = [
  "unicode-width",
  "uuid",
  "webpki-roots 0.26.11",
+ "windows-sys 0.61.2",
  "winnow",
  "zip 4.6.1",
  "zstd",

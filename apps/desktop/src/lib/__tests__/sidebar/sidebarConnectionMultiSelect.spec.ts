@@ -73,6 +73,24 @@ describe("connection multi-selection", () => {
     expect(store.connectionMultiSelectActive).toBe(true);
   });
 
+  it("enables checkbox mode for a modifier-key selection containing only connection groups", () => {
+    const store = target();
+
+    applyTreeNodeSelection(store, { nodeIds: ["group-1", "group-2"], activeNodeId: "group-2", anchorNodeId: "group-2" }, new Set(["conn-1"]), new Set(["group-1", "group-2"]));
+
+    expect(store.selectedTreeNodeIds).toEqual(["group-1", "group-2"]);
+    expect(store.connectionMultiSelectActive).toBe(true);
+  });
+
+  it("keeps mixed connection and group selections out of checkbox mode", () => {
+    const store = target();
+
+    applyTreeNodeSelection(store, { nodeIds: ["conn-1", "group-1"], activeNodeId: "group-1", anchorNodeId: "conn-1" }, new Set(["conn-1"]), new Set(["group-1"]));
+
+    expect(store.selectedTreeNodeIds).toEqual(["conn-1", "group-1"]);
+    expect(store.connectionMultiSelectActive).toBe(false);
+  });
+
   it("keeps mixed modifier-key selections out of connection checkbox mode", () => {
     const store = target();
 

@@ -31,6 +31,30 @@ describe("DatabaseIcon", () => {
     app.unmount();
   });
 
+  it("uses the Apache Impala asset instead of the Hive asset", async () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const app = createApp(DatabaseIcon, { dbType: "impala" });
+    app.mount(container);
+    await nextTick();
+
+    const icon = container.querySelector("img");
+    expect(icon?.getAttribute("src")).toBe("/icons/database/impala.svg");
+    expect(icon?.classList.contains("database-logo-impala")).toBe(true);
+    app.unmount();
+  });
+
+  it("uses the Apache Kyuubi asset instead of the Hive asset", async () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const app = createApp(DatabaseIcon, { dbType: "kyuubi" });
+    app.mount(container);
+    await nextTick();
+
+    expect(container.querySelector("img")?.getAttribute("src")).toBe("/icons/database/kyuubi.png");
+    app.unmount();
+  });
+
   it("uses the Meilisearch asset", async () => {
     const container = document.createElement("div");
     document.body.appendChild(container);

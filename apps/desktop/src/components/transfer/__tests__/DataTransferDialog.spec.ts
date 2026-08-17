@@ -7,7 +7,7 @@ describe("DataTransferDialog layout", () => {
   it("keeps the header and footer outside the shrinking content region", () => {
     expect(dialogSource).toContain('<DialogHeader class="shrink-0">');
     expect(dialogSource).toContain('<DialogFooter class="shrink-0">');
-    expect(dialogSource).toContain('class="min-h-0 flex-1 overflow-y-auto pr-1 scrollbar-thin"');
+    expect(dialogSource).toContain('class="min-h-0 flex-1 overflow-y-auto pl-4 pr-1 scrollbar-thin"');
   });
 
   it("allows layout scrolling on short viewports to prevent content clipping", () => {
@@ -43,8 +43,24 @@ describe("DataTransferDialog transfer prefill", () => {
 
   it("loads non-table object groups per source database kind", () => {
     expect(dialogSource).toContain("transferObjectKindsForDatabase");
-    expect(dialogSource).toContain("api.listObjects(sourceConnectionId.value, sourceDatabase.value, schema, [kind]");
+    expect(dialogSource).toContain("api.listObjects(connectionId, database, schema, [kind]");
     expect(dialogSource).toContain("groups[kind] = objects.map((o) => o.name)");
+  });
+
+  it("routes table-only database kinds through the table-list request", () => {
+    expect(dialogSource).toContain("const kinds = transferObjectKindsForDatabase(config?.db_type)");
+    expect(dialogSource).toContain("for (const kind of kinds)");
+    expect(dialogSource).toContain('if (kind === "TABLE")');
+    expect(dialogSource).toContain("await api.listTables(connectionId, database, schema");
+  });
+
+  it("keeps MongoDB collection loading ahead of the generic object-kind path", () => {
+    const mongoCollectionBranch = dialogSource.indexOf("if (isMongoConnection(connectionId))");
+    const genericObjectKinds = dialogSource.indexOf("const kinds = transferObjectKindsForDatabase(config?.db_type)");
+
+    expect(mongoCollectionBranch).toBeGreaterThan(-1);
+    expect(dialogSource).toContain("await api.mongoListCollections(connectionId, database)");
+    expect(mongoCollectionBranch).toBeLessThan(genericObjectKinds);
   });
 
   it("disables non-table groups for data-only and cross-family transfers", () => {
@@ -62,5 +78,14 @@ describe("DataTransferDialog transfer prefill", () => {
   it("keeps catalog filtering and completion refresh catalog-aware", () => {
     expect(dialogSource).toContain("fetchCatalogNamespaceOptions(connectionId, catalog, config)");
     expect(dialogSource).toContain("store.refreshObjectListTreeNode(request.targetConnectionId, request.targetDatabase, request.targetSchema, request.targetCatalog)");
+  });
+
+  it("discards stale async results after the connection changes", () => {
+    // 竞态防护：切换连接后旧请求的回调必须丢弃，不能覆盖新选择的下拉选项
+    expect(dialogSource).toContain("if (isStale()) return;");
+    expect(dialogSource).toContain("sourceConnectionId.value !== connectionId");
+    expect(dialogSource).toContain("targetConnectionId.value !== connectionId");
+    expect(dialogSource).toContain("if (sourceConnectionId.value !== id) return;");
+    expect(dialogSource).toContain("if (targetConnectionId.value !== id) return;");
   });
 });

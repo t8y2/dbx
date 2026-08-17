@@ -230,6 +230,39 @@ BEGIN
 END;
 SELECT 2;`;
 
+const mysqlRoutineWithCaseExpressionFixture = `CREATE PROCEDURE p_case()
+BEGIN
+  INSERT INTO audit_log (status_text)
+  SELECT CASE
+    WHEN active = 1 THEN 'active'
+    ELSE 'inactive'
+  END;
+
+  CASE
+    WHEN active = 1 THEN SET @status_code = 1;
+    ELSE SET @status_code = 0;
+  END CASE;
+
+  DELETE FROM stale_rows
+  WHERE expires_at < NOW();
+END;
+SELECT 2;`;
+
+const mysqlRoutineWithNestedCaseBlockFixture = `CREATE PROCEDURE p_nested_case()
+BEGIN
+  CASE
+    WHEN active = 1 THEN
+      BEGIN
+        SET @status_code = 1;
+      END;
+    ELSE SET @status_code = 0;
+  END CASE;
+
+  DELETE FROM stale_rows
+  WHERE expires_at < NOW();
+END;
+SELECT 2;`;
+
 const mysqlDelimitedRoutineFixture = `DELIMITER //
 CREATE PROCEDURE sp_insert_random_users(IN p_count INT)
 BEGIN
@@ -340,6 +373,10 @@ describe("splitSqlStatementRanges", () => {
     expect(ranges[0].sql).toContain("SELECT 1;");
     expect(ranges[0].sql).toContain("END IF;");
     expect(ranges[0].sql).not.toMatch(/END;$/);
+  });
+
+  it("closes nested MySQL CASE and BEGIN blocks in their opening order", () => {
+    expect(rangeSqlTexts(splitSqlStatementRanges(mysqlRoutineWithNestedCaseBlockFixture, "mysql"))).toEqual([mysqlRoutineWithNestedCaseBlockFixture.slice(0, mysqlRoutineWithNestedCaseBlockFixture.indexOf("\nSELECT 2;")).replace(/;$/, "").trim(), "SELECT 2"]);
   });
 
   it("does not merge regular MySQL transaction statements as routine blocks", () => {
@@ -1105,6 +1142,14 @@ describe("executableStatementRanges", () => {
     expect(rangeSqlTexts(executableStatementRanges(mysqlRoutineWithLoopsFixture, "mysql"))).toEqual([mysqlRoutineWithLoopsFixture.slice(0, mysqlRoutineWithLoopsFixture.indexOf("\nSELECT 2;")).replace(/;$/, "").trim(), "SELECT 2"]);
   });
 
+  it("does not treat a CASE expression ending as the end of a MySQL routine", () => {
+    expect(rangeSqlTexts(executableStatementRanges(mysqlRoutineWithCaseExpressionFixture, "mysql"))).toEqual([mysqlRoutineWithCaseExpressionFixture.slice(0, mysqlRoutineWithCaseExpressionFixture.indexOf("\nSELECT 2;")).replace(/;$/, "").trim(), "SELECT 2"]);
+  });
+
+  it("does not split MySQL routine ranges when a CASE branch contains a BEGIN block", () => {
+    expect(rangeSqlTexts(executableStatementRanges(mysqlRoutineWithNestedCaseBlockFixture, "mysql"))).toEqual([mysqlRoutineWithNestedCaseBlockFixture.slice(0, mysqlRoutineWithNestedCaseBlockFixture.indexOf("\nSELECT 2;")).replace(/;$/, "").trim(), "SELECT 2"]);
+  });
+
   it("does not expose run targets for statements inside a delimited MySQL routine", () => {
     expect(rangeSqlTexts(executableStatementRanges(mysqlDelimitedRoutineFixture, "mysql"))).toEqual([mysqlDelimitedRoutineFixture.slice(mysqlDelimitedRoutineFixture.indexOf("CREATE PROCEDURE"), mysqlDelimitedRoutineFixture.indexOf(" //\nDELIMITER")), "CALL sp_insert_random_users(100)"]);
   });
@@ -1115,6 +1160,12 @@ describe("executableStatementRanges", () => {
 
   it("returns executable SQL Server batches without GO delimiter lines", () => {
     expect(rangeSqlTexts(executableStatementRanges("SELECT 1\nGO\nSELECT 2;", "sqlserver"))).toEqual(["SELECT 1", "SELECT 2"]);
+  });
+
+  it("keeps SQL Server KILL commands independent without semicolons", () => {
+    const sql = "EXEC sp_who_lock\nDBCC INPUTBUFFER(580)\nKILL 580";
+
+    expect(rangeSqlTexts(executableStatementRanges(sql, "sqlserver"))).toEqual(["EXEC sp_who_lock", "DBCC INPUTBUFFER(580)", "KILL 580"]);
   });
 });
 
@@ -1210,6 +1261,36 @@ describe("buildExecutionCandidates", () => {
     expect(splitSqlStatementRanges("/*proxy*/SHOW PROXY STATUS", "mysql")[0]?.sql).toBe("/*proxy*/SHOW PROXY STATUS");
     expect(splitSqlStatementRanges("/* ordinary */\n/*proxy*/SHOW PROXY STATUS", "mysql")[0]?.sql).toBe("/*proxy*/SHOW PROXY STATUS");
     expect(splitSqlStatementRanges("/*proxy*/", "mysql")).toEqual([]);
+  });
+
+  it.each(["/*sets:allsets */", "/*master*/", "/*slave:set_1781591902_7*/", "/*future-route:anywhere*/"])("preserves a same-line TDSQL directive without relying on a keyword allowlist: %s", (directive) => {
+    const directedSql = `${directive} SELECT count(*) FROM tenant_table`;
+    const sql = `SELECT 1;\n${directedSql};\nSELECT 2;`;
+    const candidates = buildExecutionCandidates(sql, indexOf(sql, "tenant_table"), "mysql");
+
+    expect(executionCandidateForMode(candidates, "current")?.sql).toBe(directedSql);
+    expect(rangeSqlTexts(executableStatementRanges(sql, "mysql"))).toEqual(["SELECT 1", directedSql, "SELECT 2"]);
+  });
+
+  it("handles long same-line directive chains without rescanning growing prefixes", () => {
+    const prefix = "/**/".repeat(80_000);
+    const sql = `${prefix} SELECT 1`;
+
+    expect(splitSqlStatementRanges(sql, "mysql")[0]?.sql).toBe(sql);
+  });
+
+  it("does not preserve a generic TDSQL-style directive on a separate line", () => {
+    const sql = "/*sets:allsets */\nSELECT count(*) FROM tenant_table";
+    const candidates = buildExecutionCandidates(sql, indexOf(sql, "tenant_table"), "mysql");
+
+    expect(executionCandidateForMode(candidates, "current")?.sql).toBe("SELECT count(*) FROM tenant_table");
+  });
+
+  it("does not preserve a same-line TDSQL-style directive for other database types", () => {
+    const sql = "/*sets:allsets */ SELECT count(*) FROM tenant_table";
+    const candidates = buildExecutionCandidates(sql, indexOf(sql, "tenant_table"), "postgres");
+
+    expect(executionCandidateForMode(candidates, "current")?.sql).toBe("SELECT count(*) FROM tenant_table");
   });
 
   it.each(["/* ordinary */", "/*unknown*/", "/* proxy */", "/*PROXY*/"])("keeps %s as a non-executable leading comment", (comment) => {
@@ -1396,6 +1477,13 @@ WHERE t2.product_name = '12345'
     const sql = "SELECT 1\nGO\nSELECT 2;";
     const candidates = buildExecutionCandidates(sql, indexOf(sql, "2"), "sqlserver");
     expect(candidateSummaries(candidates)).toEqual(["cursor:SELECT 2", "all:SELECT 1\nGO\nSELECT 2;"]);
+  });
+
+  it("uses a trailing SQL Server KILL command as the current statement", () => {
+    const sql = "EXEC sp_who_lock\nDBCC INPUTBUFFER(580)\nKILL 580";
+    const candidates = buildExecutionCandidates(sql, indexOf(sql, "KILL"), "sqlserver");
+
+    expect(candidateSummaries(candidates)).toEqual(["cursor:KILL 580", `all:${sql}`]);
   });
 });
 

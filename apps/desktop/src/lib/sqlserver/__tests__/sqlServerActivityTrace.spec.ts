@@ -102,9 +102,14 @@ describe("SQL Server activity trace", () => {
   });
 
   it("bounds each ring-buffer parse and reads incrementally from the timestamp cursor", () => {
+    const initialSql = buildReadSqlServerTraceEventsSql("DBX_TRACE_ABC_123");
     const sql = buildReadSqlServerTraceEventsSql("DBX_TRACE_ABC_123", "2026-08-12T13:23:45.0840000");
+    expect(initialSql).toContain("EXEC sys.sp_executesql N'SET ARITHABORT ON;");
+    expect(initialSql).not.toContain("event_time_utc >= CONVERT");
+    expect(sql).toContain("EXEC sys.sp_executesql N'SET ARITHABORT ON;");
     expect(sql).toContain("SELECT TOP (256) *");
-    expect(sql).toContain("event_time_utc >= CONVERT(datetime2(7), N'2026-08-12T13:23:45.0840000', 126)");
+    expect(sql).toContain("event_time_utc >= CONVERT(datetime2(7), N''2026-08-12T13:23:45.0840000'', 126)");
+    expect(sql).toContain("CROSS APPLY target_data.nodes");
     expect(sql).toContain("ORDER BY event_time_utc DESC");
   });
 

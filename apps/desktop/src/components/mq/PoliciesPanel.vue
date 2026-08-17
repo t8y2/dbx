@@ -4,7 +4,7 @@ import { computed, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import type { BacklogQuota, DispatchRate, PolicyScope, PublishRate, RetentionPolicy, SubscribeRate, TopicInfo } from "@/types/mq";
 import { mqGetEffectivePolicies, mqSetBacklogQuota, mqSetDispatchRate, mqSetPublishRate, mqSetRetention, mqSetSubscribeRate } from "@/lib/backend/api";
-import { defaultMqPolicyForms, policyFormsFromEffectivePolicies } from "@/lib/mq/mqPolicyForms";
+import { defaultMqPolicyForms, policyAccessFromEffectivePolicies, policyFormsFromEffectivePolicies } from "@/lib/mq/mqPolicyForms";
 import { useMqMutationGuard } from "@/composables/useMqMutationGuard";
 
 interface Props {
@@ -29,6 +29,7 @@ const error = ref<string>();
 const notice = ref<string>();
 const readOnlyMessage = computed(() => t("mqPolicies.readOnly"));
 const defaultForms = defaultMqPolicyForms();
+const policyAccess = ref(policyAccessFromEffectivePolicies(undefined));
 
 const publishForm = ref<PublishRate>({ ...defaultForms.publishForm });
 
@@ -84,6 +85,7 @@ async function guardWritable(operation: string): Promise<boolean> {
 async function loadPolicies() {
   const current = scope.value;
   policies.value = undefined;
+  policyAccess.value = policyAccessFromEffectivePolicies(undefined);
   notice.value = undefined;
   error.value = undefined;
   if (!current) return;
@@ -92,6 +94,7 @@ async function loadPolicies() {
   try {
     const loaded = await mqGetEffectivePolicies(props.connectionId, current);
     policies.value = loaded;
+    policyAccess.value = policyAccessFromEffectivePolicies(loaded);
     const hydrated = policyFormsFromEffectivePolicies(loaded, defaultMqPolicyForms());
     applyPolicyForms(hydrated);
   } catch (e: unknown) {
@@ -189,7 +192,8 @@ watch(
       <div v-if="error" class="panel-error">{{ error }}</div>
       <div v-if="notice" class="panel-notice">{{ notice }}</div>
 
-      <div class="policy-grid">
+      <div v-if="!policyAccess.readable" class="readonly-hint">{{ policyAccess.unsupportedReason }}</div>
+      <div v-else class="policy-grid">
         <section v-if="supportsRateLimits !== false" class="policy-section">
           <h4>{{ t("mqPolicies.publishRate") }}</h4>
           <label>

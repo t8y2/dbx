@@ -7,7 +7,7 @@ import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "
 import { Input } from "@/components/ui/input";
 import { useConnectionStore } from "@/stores/connectionStore";
 import * as api from "@/lib/backend/api";
-import { normalizeNacosNamespaceSelection, normalizeNacosNamespacesForDisplay } from "@/lib/nacos/nacosNamespaceVisibility";
+import { loadReadableNacosNamespaces, normalizeNacosNamespaceSelection } from "@/lib/nacos/nacosNamespaceVisibility";
 import type { NacosNamespaceInfo } from "@/types/nacos";
 
 const props = defineProps<{
@@ -65,7 +65,7 @@ async function loadNamespaces() {
   searchText.value = "";
   try {
     await connectionStore.ensureConnected(props.connectionId);
-    const fetched = normalizeNacosNamespacesForDisplay(await api.nacosListNamespaces(props.connectionId));
+    const fetched = await loadReadableNacosNamespaces(props.connectionId, api);
     namespaces.value = [...fetched].sort((left, right) => nacosNamespaceLabel(left).localeCompare(nacosNamespaceLabel(right)));
     connectionStore.recordPrimaryVisibleObjectNames(props.connectionId, namespaces.value.map(nacosNamespaceValue));
     const configured = connection.value?.visible_databases;

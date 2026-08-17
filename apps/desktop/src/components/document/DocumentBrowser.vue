@@ -18,6 +18,7 @@ import LightTooltip from "@/components/ui/LightTooltip.vue";
 import { Switch } from "@/components/ui/switch";
 import QueryLoadingState from "@/components/common/QueryLoadingState.vue";
 import * as api from "@/lib/backend/api";
+import type { DynamoDbIndexInfo, DynamoDbTableDescription } from "@/lib/backend/api";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { clampSearchSplitWidth } from "@/lib/dataGrid/dataGridSearchSplit";
 import { documentViewerFontStyle } from "@/lib/document/documentViewerFontStyle";
@@ -55,6 +56,7 @@ import {
   type ElasticsearchQueryType,
 } from "@/lib/app/documentStoreProvider";
 import {
+  formatDocumentStoreIdLabel,
   isDocumentStoreIdentityField,
   normalizeDocumentStoreRouting,
   parseDocumentStoreInputValue,
@@ -87,6 +89,7 @@ import { normalizeResultPageSize } from "@/lib/dataGrid/paginationPageSize";
 import { documentDataGridColumnLayoutScopeKey } from "@/lib/dataGrid/dataGridColumnLayoutStorage";
 import { documentGridColumnVisibilityScopeKey, migrateDocumentGridColumnVisibilityToLayout } from "@/lib/document/documentGridColumnVisibilityStorage";
 import { TABLE_FONT_SIZE_MAX, TABLE_FONT_SIZE_MIN, useSettingsStore } from "@/stores/settingsStore";
+import { useToast } from "@/composables/useToast";
 import JsonEditNode from "./JsonEditNode.vue";
 import type { EditNode } from "@/types/editor";
 import type { ColumnInfo, DatabaseType, QueryResult, QueryTab } from "@/types/database";
@@ -95,6 +98,7 @@ import { Splitpanes, Pane } from "splitpanes";
 import "splitpanes/dist/splitpanes.css";
 
 const { t } = useI18n();
+const { toast } = useToast();
 const settingsStore = useSettingsStore();
 const connectionStore = useConnectionStore();
 
@@ -108,6 +112,7 @@ const props = defineProps<{
 
 type JsonRecord = Record<string, unknown>;
 type ViewMode = "document" | "table";
+const DYNAMODB_DEFAULT_EXPORT_ROW_LIMIT = 10_000;
 
 const documents = ref<JsonRecord[]>([]);
 const copyDocuments = ref<JsonRecord[]>([]);
@@ -224,14 +229,15 @@ watch(
 
 const pageTotal = computed(() => paginationTotal.value);
 const documentPageCount = computed(() => (pageTotal.value === undefined ? undefined : Math.max(1, Math.ceil(pageTotal.value / pageSize.value))));
-const canGoNextPage = computed(() =>
-  canGoNextDocumentPage({
+const canGoNextPage = computed(() => {
+  if (documentStoreProvider.value.kind === "dynamodb") return dynamodbHasNextCursor.value;
+  return canGoNextDocumentPage({
     page: page.value,
     pageSize: pageSize.value,
     rowCount: documents.value.length,
     paginationTotal: pageTotal.value,
-  }),
-);
+  });
+});
 const documentRequestLimit = computed(() => {
   if (documentStoreProvider.value.kind !== "elasticsearch" || paginationTotal.value === undefined) return pageSize.value;
   return documentPageRequestLimit(page.value, pageSize.value, paginationTotal.value);
@@ -244,6 +250,8 @@ const tableFindPaneStyle = computed(() => {
 const documentFontStyle = computed(() => documentViewerFontStyle(settingsStore.editorSettings));
 const documentStoreLabels = computed(() => ({
   documentsLabel: documentStoreProvider.value.documentsLabel({ total: total.value ?? 0, totalIsExact: totalIsExact.value, t }),
+  filterInputLabel: documentStoreProvider.value.kind === "dynamodb" ? t("dynamodb.filter") : documentStoreProvider.value.filterInputLabel,
+  sortInputLabel: documentStoreProvider.value.kind === "dynamodb" ? t("dynamodb.sortKey") : documentStoreProvider.value.sortInputLabel,
   queryPreview: documentQueryPreview.value,
 }));
 
@@ -269,6 +277,39 @@ const documentFilterFieldSearch = ref<Record<string, string>>({});
 const documentFilterRules = ref<DocumentFilterRule[]>([]);
 const appliedDocumentFilter = ref<Record<string, unknown> | null>(null);
 const elasticsearchMappingFields = ref<ColumnInfo[]>([]);
+const dynamodbTableDescription = ref<DynamoDbTableDescription | null>(null);
+const dynamodbIndexName = ref("__table__");
+const dynamodbPageCursors = ref<Array<string | undefined>>([undefined]);
+const dynamodbHasNextCursor = ref(false);
+const dynamodbExactTotal = ref<number | undefined>();
+let dynamodbExactCountKey: string | null = null;
+
+const dynamodbIndexOptions = computed<Array<{ value: string; label: string; index?: DynamoDbIndexInfo }>>(() => [
+  { value: "__table__", label: t("dynamodb.baseTable") },
+  ...(dynamodbTableDescription.value?.indexes ?? []).map((index) => ({
+    value: index.name,
+    label: `${index.name} (${index.kind === "global" ? "GSI" : "LSI"} · ${index.projectionType})`,
+    index,
+  })),
+]);
+
+const dynamodbSelectedIndex = computed(() => {
+  if (dynamodbIndexName.value === "__table__") return undefined;
+  return dynamodbTableDescription.value?.indexes.find((index) => index.name === dynamodbIndexName.value);
+});
+
+const dynamodbPartialProjectionReadOnly = computed(() => documentStoreProvider.value.kind === "dynamodb" && !!dynamodbSelectedIndex.value && dynamodbSelectedIndex.value.projectionType !== "ALL");
+const documentStoreEditable = computed(() => !dynamodbPartialProjectionReadOnly.value);
+const documentStoreEditDisabledReason = computed(() => (dynamodbPartialProjectionReadOnly.value ? t("dynamodb.partialProjectionReadOnly", { projection: dynamodbSelectedIndex.value?.projectionType ?? "UNKNOWN" }) : undefined));
+
+const dynamodbSelectedKey = computed(() => {
+  const table = dynamodbTableDescription.value;
+  if (!table) return null;
+  if (dynamodbIndexName.value === "__table__") {
+    return { partitionKey: table.partitionKey, sortKey: table.sortKey };
+  }
+  return dynamodbSelectedIndex.value ?? null;
+});
 
 const pendingDelete = ref<PendingDelete | null>(null);
 const documentFilterComposingEditors = new Set<string>();
@@ -281,9 +322,7 @@ const selectedDoc = computed(() => {
 });
 const selectedDocumentIdLabel = computed(() => {
   if (isNew.value) return "New";
-  const id = selectedDoc.value?._id;
-  if (id === undefined || id === null) return "";
-  return typeof id === "object" ? stringifyDocumentStoreValue(id, documentStoreProvider.value.kind) : String(id);
+  return formatDocumentStoreIdLabel(selectedDoc.value?._id, documentStoreProvider.value.kind);
 });
 const selectedDocumentIdWidth = computed(() => `${Math.min(Math.max(Array.from(selectedDocumentIdLabel.value).length + 2, 5), 52)}ch`);
 
@@ -299,6 +338,12 @@ const deleteDetails = computed(() => {
   if (!pending) return "";
   if (pending.kind === "document") {
     const id = documents.value[pending.index]?._id ?? "";
+    if (documentStoreProvider.value.kind === "dynamodb") {
+      return t("dynamodb.documentDetails", {
+        table: props.collection,
+        id: formatDocumentStoreIdLabel(id, "dynamodb"),
+      });
+    }
     const displayId = mongoDocumentIdForGrid(id);
     if (props.databaseType === "elasticsearch" || props.databaseType === "easysearch" || props.databaseType === "meilisearch") {
       const product = props.databaseType === "easysearch" ? "Easysearch" : props.databaseType === "meilisearch" ? "Meilisearch" : "Elasticsearch";
@@ -346,8 +391,9 @@ const gridResult = computed<QueryResult>(() => {
   return { columns, column_types: columnTypes, rows, mongo_documents: docs, mongo_copy_documents: copyDocuments.value, affected_rows: 0, execution_time_ms: 0, truncated: false };
 });
 
-async function exportAllMongoDocuments(onProgress?: (info: { rowsExported: number; totalRows: number | null }) => void): Promise<QueryResult | undefined> {
-  if (documentStoreProvider.value.kind !== "mongodb") return undefined;
+async function exportAllDocumentStoreDocuments(onProgress?: (info: { rowsExported: number; totalRows: number | null }) => void): Promise<QueryResult | undefined> {
+  const kind = documentStoreProvider.value.kind;
+  if (kind !== "mongodb" && kind !== "dynamodb") return undefined;
 
   const connectionId = props.connectionId;
   const database = props.database;
@@ -356,21 +402,23 @@ async function exportAllMongoDocuments(onProgress?: (info: { rowsExported: numbe
   const sort = currentDocumentSortJson(sortInput.value);
   const exportSettings = settingsStore.editorSettings;
   const batchSize = Math.max(1, Math.trunc(exportSettings.exportBatchSize));
-  const rowLimit = exportSettings.exportRowLimitEnabled ? Math.max(0, Math.trunc(exportSettings.exportRowLimit)) : Number.POSITIVE_INFINITY;
+  const rowLimit = exportSettings.exportRowLimitEnabled ? Math.max(0, Math.trunc(exportSettings.exportRowLimit)) : kind === "dynamodb" ? DYNAMODB_DEFAULT_EXPORT_ROW_LIMIT : Number.POSITIVE_INFINITY;
   const exportExecutionId = uuid();
   const exportStartedAt = performance.now();
   const exportedDocuments: JsonRecord[] = [];
-  let exportedCopyDocuments: JsonRecord[] | undefined = [];
+  let exportedCopyDocuments: JsonRecord[] | undefined = kind === "mongodb" ? [] : undefined;
   let totalRows: number | null = null;
+  let cursor: string | undefined;
+  const seenCursors = new Set<string>();
 
   while (exportedDocuments.length < rowLimit) {
-    const requestLimit = Math.min(batchSize, rowLimit - exportedDocuments.length);
+    const requestLimit = Math.min(batchSize, kind === "dynamodb" ? 1000 : Number.POSITIVE_INFINITY, rowLimit - exportedDocuments.length);
     if (requestLimit <= 0) break;
-    const result = await api.documentFindDocuments(connectionId, database, collection, exportedDocuments.length, requestLimit, filter, undefined, sort, undefined, exportExecutionId);
+    const result = await api.documentFindDocuments(connectionId, database, collection, kind === "dynamodb" ? 0 : exportedDocuments.length, requestLimit, filter, undefined, sort, undefined, exportExecutionId, cursor);
     const pageDocuments = result.documents.slice(0, requestLimit).map(asRecord);
     exportedDocuments.push(...pageDocuments);
 
-    if (exportedCopyDocuments) {
+    if (kind === "mongodb" && exportedCopyDocuments) {
       if (result.extended_documents?.length === result.documents.length) {
         exportedCopyDocuments.push(...result.extended_documents.slice(0, pageDocuments.length).map(asRecord));
       } else {
@@ -378,19 +426,36 @@ async function exportAllMongoDocuments(onProgress?: (info: { rowsExported: numbe
       }
     }
 
-    if (result.total_is_exact !== false) totalRows = Math.min(result.total, rowLimit);
+    if (kind === "mongodb" && result.total_is_exact !== false) totalRows = Math.min(result.total, rowLimit);
     onProgress?.({ rowsExported: exportedDocuments.length, totalRows });
+
+    if (kind === "dynamodb") {
+      cursor = result.next_cursor;
+      if (!cursor) break;
+      if (seenCursors.has(cursor)) throw new Error(t("dynamodb.repeatedCursor"));
+      seenCursors.add(cursor);
+      continue;
+    }
 
     const reachedExactTotal = result.total_is_exact !== false && exportedDocuments.length >= result.total;
     if (pageDocuments.length === 0 || pageDocuments.length < requestLimit || reachedExactTotal) break;
   }
 
+  if (kind === "dynamodb") {
+    const truncatedByLimit = !!cursor && exportedDocuments.length >= rowLimit;
+    totalRows = truncatedByLimit ? null : exportedDocuments.length;
+    onProgress?.({ rowsExported: exportedDocuments.length, totalRows });
+    if (truncatedByLimit) {
+      toast(t("dynamodb.exportLimitReached", { count: rowLimit }), 6000);
+    }
+  }
+
   const result = mongoDocumentsToQueryResult(exportedDocuments, performance.now() - exportStartedAt, totalRows ?? exportedDocuments.length, exportedCopyDocuments, totalRows !== null);
   if (result.columns.length === 0) result.columns = gridResult.value.columns;
-  result.column_types = mongoDocumentGridColumnTypes(exportedDocuments, result.columns);
+  result.column_types = kind === "mongodb" ? mongoDocumentGridColumnTypes(exportedDocuments, result.columns) : undefined;
   result.affected_rows = exportedDocuments.length;
-  result.truncated = false;
-  result.has_more = false;
+  result.truncated = kind === "dynamodb" && !!cursor && exportedDocuments.length >= rowLimit;
+  result.has_more = result.truncated;
   return result;
 }
 const expandedDocumentFilterFieldPaths = ref<Set<string>>(new Set());
@@ -616,8 +681,38 @@ function resetDocumentFilterBuilder() {
   documentFilterRules.value = documentFilterFieldOptions.value.length > 0 ? [createDocumentFilterRule()] : [];
 }
 
+function dynamodbCountFilterKey(filter: string | undefined): string {
+  return JSON.stringify([props.connectionId, props.collection, filter ?? ""]);
+}
+
+function resetDynamoDbExactCount() {
+  dynamodbExactCountKey = null;
+  dynamodbExactTotal.value = undefined;
+}
+
+function resetDynamoDbPagination(options: { preserveExactCount?: boolean } = {}) {
+  dynamodbPageCursors.value = [undefined];
+  dynamodbHasNextCursor.value = false;
+  paginationTotal.value = undefined;
+  if (!options.preserveExactCount) resetDynamoDbExactCount();
+}
+
 function currentDocumentFilter(): string | undefined {
-  return currentDocumentFilterJson(filterInput.value, appliedDocumentFilter.value, documentStoreProvider.value.kind);
+  const filter = currentDocumentFilterJson(filterInput.value, appliedDocumentFilter.value, documentStoreProvider.value.kind);
+  if (documentStoreProvider.value.kind !== "dynamodb" || dynamodbIndexName.value === "__table__") return filter;
+  const parsed = filter ? JSON.parse(filter) : {};
+  return JSON.stringify({ ...parsed, $index: dynamodbIndexName.value });
+}
+
+function selectDynamoDbIndex(value: unknown) {
+  const next = typeof value === "string" && value ? value : "__table__";
+  if (dynamodbIndexName.value === next) return;
+  dynamodbIndexName.value = next;
+  if (dynamodbPartialProjectionReadOnly.value && isEditing.value) cancelEdit();
+  sortInput.value = "";
+  page.value = 0;
+  resetDynamoDbPagination();
+  void load({ page: 0 });
 }
 
 function resizeDocumentQueryInput(el: HTMLTextAreaElement | undefined) {
@@ -763,7 +858,30 @@ function documentStoreWriteApis(documentType?: string) {
   };
 }
 
+function prepareDynamoDbDocumentIdentity(document: JsonRecord): { document: JsonRecord; id: string } {
+  const table = dynamodbTableDescription.value;
+  if (!table) throw new Error(t("dynamodb.tableMetadataUnavailable"));
+
+  const next = { ...document };
+  const metadataId = next._id && typeof next._id === "object" && !Array.isArray(next._id) ? (next._id as JsonRecord) : undefined;
+  const identity: JsonRecord = {};
+  const keys = [table.partitionKey, table.sortKey].filter((value): value is NonNullable<typeof value> => !!value);
+  for (const key of keys) {
+    const value = next[key.name] ?? metadataId?.[key.name];
+    if (value === undefined || value === null || value === "") {
+      throw new Error(t("dynamodb.keyRequired", { key: key.name }));
+    }
+    next[key.name] = value;
+    identity[key.name] = value;
+  }
+  next._id = identity;
+  return { document: next, id: serializeDocumentStoreId(identity, "dynamodb") };
+}
+
 async function gridSave(changes: DocumentGridChanges) {
+  if (!documentStoreEditable.value) {
+    throw new Error(documentStoreEditDisabledReason.value);
+  }
   const cols = changes.columns;
   const idColIdx = cols.indexOf("_id");
   if (idColIdx < 0) throw new Error("No _id column");
@@ -818,8 +936,14 @@ async function gridSave(changes: DocumentGridChanges) {
       if (!doc) continue;
       const routing = isEs ? documentRoutingFromDocument(doc) : undefined;
       const updated = buildPathIdentityUpdatedDocument(doc, dirtyCols, cols, kind);
-      const writeDocument = prepareDocumentStoreWriteDocument(updated, { kind, mode: "update" });
       const documentId = serializeDocumentStoreId(doc._id ?? id, kind);
+      if (kind === "dynamodb") {
+        const normalized = prepareDynamoDbDocumentIdentity(updated);
+        const writeDocument = prepareDocumentStoreWriteDocument(normalized.document, { kind, mode: "update" });
+        await api.documentUpdateDocument(props.connectionId, props.database, props.collection, documentId, stringifyDocumentStoreValue(writeDocument, kind));
+        continue;
+      }
+      const writeDocument = prepareDocumentStoreWriteDocument(updated, { kind, mode: "update" });
       await api.documentUpdateDocument(props.connectionId, props.database, props.collection, documentId, stringifyDocumentStoreValue(writeDocument, kind), routing);
       continue;
     }
@@ -848,7 +972,12 @@ async function gridSave(changes: DocumentGridChanges) {
       const idValue = newRow[idColIdx];
       const id = idValue === null || idValue === undefined || idValue === "" ? null : serializeDocumentStoreId(parseDocumentStoreInputValue(idValue, kind), kind);
       const routing = isEs ? documentRoutingFromGridRow(newRow, cols) : undefined;
-      if (id) {
+      if (kind === "dynamodb") {
+        if (idValue !== null && idValue !== undefined && idValue !== "") doc._id = parseDocumentStoreInputValue(idValue, kind);
+        const normalized = prepareDynamoDbDocumentIdentity(doc);
+        const writeDocument = prepareDocumentStoreWriteDocument(normalized.document, { kind, mode: "insert" });
+        await api.documentInsertDocument(props.connectionId, props.database, props.collection, stringifyDocumentStoreValue(writeDocument, kind));
+      } else if (id) {
         await api.documentUpdateDocument(props.connectionId, props.database, props.collection, id, stringifyDocumentStoreValue(doc, kind), routing);
       } else {
         await api.documentInsertDocument(props.connectionId, props.database, props.collection, stringifyDocumentStoreValue(doc, kind), routing);
@@ -861,6 +990,10 @@ async function gridSave(changes: DocumentGridChanges) {
   }
 
   if (isEs) resetElasticsearchTotals({ preservePaginationTotal: true });
+  if (kind === "dynamodb") {
+    page.value = 0;
+    resetDynamoDbPagination();
+  }
   await load();
 }
 
@@ -920,6 +1053,14 @@ function buildElasticsearchPartialUpdateDocument(changes: Map<number, MongoInput
   return document;
 }
 
+function formatDynamoDbOperationPreview(action: "insert" | "put" | "delete", id: unknown, document?: Record<string, unknown>): string {
+  const operation = action === "insert" ? "INSERT ITEM" : action === "put" ? "PUT ITEM" : "DELETE ITEM";
+  const lines = [`DBX DYNAMODB ${operation}`, `table: ${JSON.stringify(props.collection)}`];
+  if (id !== undefined) lines.push("key:", stringifyDocumentStoreValue(id, "dynamodb", 2));
+  if (document) lines.push("item:", stringifyDocumentStoreValue(document, "dynamodb", 2));
+  return lines.join("\n");
+}
+
 async function previewDocumentChanges(changes: DocumentGridChanges): Promise<string[]> {
   const { dirtyRows, deletedRows, newRows, newRowMeta, columns, rows } = changes;
   const idColIdx = columns.indexOf("_id");
@@ -938,6 +1079,14 @@ async function previewDocumentChanges(changes: DocumentGridChanges): Promise<str
         const updateDoc = buildElasticsearchPartialUpdateDocument(dirtyCols, columns);
         const routing = documentRoutingFromGridRow(row, columns);
         stmts.push(`POST /${coll}/_update/${elasticsearchPathIdPreview(String(id))}${elasticsearchRoutingPreview(routing)}\n${stringifyDocumentStoreValue({ doc: updateDoc.$set ?? updateDoc }, "elasticsearch", 2)}`);
+      } else if (kind === "dynamodb") {
+        const sourceDocument = documents.value[rowIdx];
+        if (!sourceDocument) continue;
+        const documentId = sourceDocument._id ?? id;
+        const updated = buildPathIdentityUpdatedDocument(sourceDocument, dirtyCols, columns, "dynamodb");
+        const normalized = prepareDynamoDbDocumentIdentity(updated);
+        const writeDocument = prepareDocumentStoreWriteDocument(normalized.document, { kind: "dynamodb", mode: "update" });
+        stmts.push(formatDynamoDbOperationPreview("put", documentId, writeDocument));
       } else {
         const sourceDocument = documents.value[rowIdx];
         if (!sourceDocument) continue;
@@ -957,6 +1106,10 @@ async function previewDocumentChanges(changes: DocumentGridChanges): Promise<str
     const id = row?.[idColIdx];
     if (id == null) continue;
     if (isPathIdentityStore) {
+      if (kind === "dynamodb") {
+        stmts.push(formatDynamoDbOperationPreview("delete", documents.value[rowIdx]?._id ?? id));
+        continue;
+      }
       if (!isEs) {
         stmts.push(formatMeilisearchDocumentOperationPreview({ action: "delete", index: coll, id: documents.value[rowIdx]?._id ?? id }));
         continue;
@@ -971,6 +1124,14 @@ async function previewDocumentChanges(changes: DocumentGridChanges): Promise<str
   for (const [newRowIndex, newRow] of newRows.entries()) {
     const doc = isPathIdentityStore ? buildPathIdentityInsertDocument(newRow, columns, kind) : buildMongoGridInsertDocument(newRow, columns, newRowMeta[newRowIndex]);
     if (isPathIdentityStore) {
+      if (kind === "dynamodb") {
+        const idValue = idColIdx >= 0 ? newRow[idColIdx] : undefined;
+        if (idValue !== null && idValue !== undefined && idValue !== "") doc._id = parseDocumentStoreInputValue(idValue, "dynamodb");
+        const normalized = prepareDynamoDbDocumentIdentity(doc);
+        const writeDocument = prepareDocumentStoreWriteDocument(normalized.document, { kind: "dynamodb", mode: "insert" });
+        stmts.push(formatDynamoDbOperationPreview("insert", JSON.parse(normalized.id), writeDocument));
+        continue;
+      }
       if (!isEs) {
         const idValue = idColIdx >= 0 ? newRow[idColIdx] : null;
         const id = idValue === null || idValue === undefined || idValue === "" ? undefined : parseDocumentStoreInputValue(idValue, "meilisearch");
@@ -1132,13 +1293,24 @@ async function load(options: { page?: number } = {}) {
     const collection = props.collection;
     const storeKind = documentStoreProvider.value.kind;
     const filter = currentDocumentFilter();
+    if (storeKind === "dynamodb") {
+      const countKey = dynamodbCountFilterKey(filter);
+      if (dynamodbExactCountKey !== countKey) {
+        dynamodbExactCountKey = countKey;
+        dynamodbExactTotal.value = undefined;
+      }
+    }
     const countRequest: LoadedDocumentQueryTotalCountRequest = { connectionId, database, collection, filter, generation: requestGeneration, storeKind };
     if (storeKind === "elasticsearch" && elasticsearchCountKey !== null && elasticsearchCountKey !== elasticsearchCountFilterKey(filter)) {
       resetElasticsearchTotals();
     }
     const sort = currentDocumentSortJson(sortInput.value);
-    const skip = requestPage * pageSize.value;
-    const result = await api.documentFindDocuments(connectionId, database, collection, skip, documentRequestLimit.value, filter, undefined, sort, undefined, executionId);
+    const cursor = storeKind === "dynamodb" ? dynamodbPageCursors.value[requestPage] : undefined;
+    if (storeKind === "dynamodb" && requestPage > 0 && !cursor) {
+      throw new Error(t("dynamodb.pageCursorUnavailable"));
+    }
+    const skip = storeKind === "dynamodb" ? 0 : requestPage * pageSize.value;
+    const result = await api.documentFindDocuments(connectionId, database, collection, skip, documentRequestLimit.value, filter, undefined, sort, undefined, executionId, cursor);
     if (documentLoadExecutionId.value !== executionId) return;
     if (connectionId !== props.connectionId || database !== props.database || collection !== props.collection || storeKind !== documentStoreProvider.value.kind) return;
     const nextDocuments =
@@ -1159,6 +1331,12 @@ async function load(options: { page?: number } = {}) {
     copyDocuments.value = nextCopyDocuments;
     mongoCopyDocumentsAvailable.value = hasTypePreservingCopyDocuments;
     loadedDocumentQueryTotalCountRequest = countRequest;
+    if (storeKind === "dynamodb") {
+      const nextCursors = dynamodbPageCursors.value.slice(0, requestPage + 1);
+      nextCursors[requestPage + 1] = result.next_cursor;
+      dynamodbPageCursors.value = nextCursors;
+      dynamodbHasNextCursor.value = !!result.next_cursor;
+    }
     if (nextDocuments.length > 0) {
       const keySet = new Set<string>();
       keySet.add("_id");
@@ -1172,6 +1350,13 @@ async function load(options: { page?: number } = {}) {
     }
     if (storeKind === "elasticsearch") {
       applyElasticsearchSearchTotal(result.total, result.total_is_exact !== false, filter);
+    } else if (storeKind === "dynamodb") {
+      cancelElasticsearchCount();
+      const lowerBound = requestPage * pageSize.value + nextDocuments.length + (result.next_cursor ? 1 : 0);
+      const exactTotal = dynamodbExactTotal.value ?? (!result.next_cursor ? lowerBound : undefined);
+      total.value = exactTotal ?? lowerBound;
+      totalIsExact.value = exactTotal !== undefined;
+      paginationTotal.value = exactTotal;
     } else {
       cancelElasticsearchCount();
       const totals = resolveDocumentQueryTotals(result.total, result.total_is_exact !== false, {
@@ -1212,10 +1397,14 @@ async function countExactDocumentTotal(): Promise<number | undefined> {
     paginationTotal.value = totals.paginationTotal;
     return exactCount;
   }
-  const exactCount = await api.mongoCountDocuments(request.connectionId, request.database, request.collection, request.filter, "accurate");
+  const exactCount = request.storeKind === "dynamodb" ? await api.documentCountDocuments(request.connectionId, request.collection, request.filter) : await api.mongoCountDocuments(request.connectionId, request.database, request.collection, request.filter, "accurate");
   if (!isCurrentDocumentQueryTotalCountRequest(request)) return undefined;
   if (!Number.isFinite(exactCount) || exactCount < 0) {
     throw new Error("invalid count");
+  }
+  if (request.storeKind === "dynamodb") {
+    dynamodbExactCountKey = dynamodbCountFilterKey(request.filter);
+    dynamodbExactTotal.value = exactCount;
   }
   const totals = resolveDocumentQueryTotals(exactCount, true);
   total.value = totals.total;
@@ -1226,6 +1415,7 @@ async function countExactDocumentTotal(): Promise<number | undefined> {
 
 async function refreshDocuments() {
   if (documentStoreProvider.value.kind === "elasticsearch") resetElasticsearchTotals({ preservePaginationTotal: true });
+  if (documentStoreProvider.value.kind === "dynamodb") resetDynamoDbExactCount();
   await load();
 }
 
@@ -1248,20 +1438,49 @@ async function cancelDocumentLoad() {
 function applyFilter() {
   page.value = 0;
   if (documentStoreProvider.value.kind === "elasticsearch") resetElasticsearchTotals();
+  if (documentStoreProvider.value.kind === "dynamodb") resetDynamoDbPagination();
   void load();
 }
 
-function paginate(offset: number, limit: number) {
+async function paginate(offset: number, limit: number) {
   const normalizedLimit = normalizeResultPageSize(limit, pageSize.value);
+  const pageSizeChanged = normalizedLimit !== pageSize.value;
   pageSize.value = normalizedLimit;
+  if (documentStoreProvider.value.kind === "dynamodb" && pageSizeChanged) {
+    page.value = 0;
+    resetDynamoDbPagination({ preserveExactCount: true });
+    await load({ page: 0 });
+    return;
+  }
   const requestedPage = Math.floor(Math.max(0, offset) / normalizedLimit);
   const nextPage = clampDocumentPage(requestedPage, normalizedLimit, paginationTotal.value);
-  void load({ page: nextPage });
+  if (documentStoreProvider.value.kind !== "dynamodb") {
+    await load({ page: nextPage });
+    return;
+  }
+  for (let cursorPage = 0; cursorPage <= nextPage; cursorPage += 1) {
+    if (cursorPage > 0 && !dynamodbPageCursors.value[cursorPage]) {
+      error.value = t("dynamodb.pageCursorUnavailable");
+      return;
+    }
+    if (cursorPage === nextPage) {
+      await load({ page: cursorPage });
+      return;
+    }
+    if (!dynamodbPageCursors.value[cursorPage + 1]) {
+      await load({ page: cursorPage });
+    }
+  }
 }
 
 function onSort(column: string, _columnIndex: number, direction: "asc" | "desc" | null) {
+  if (documentStoreProvider.value.kind === "dynamodb" && direction && dynamodbSelectedKey.value?.sortKey?.name !== column) {
+    error.value = t("dynamodb.sortKeyOnly", { key: dynamodbSelectedKey.value?.sortKey?.name || t("dynamodb.none") });
+    return;
+  }
   sortInput.value = documentStoreProvider.value.sortInputForColumn(column, direction);
   page.value = 0;
+  if (documentStoreProvider.value.kind === "dynamodb") resetDynamoDbPagination({ preserveExactCount: true });
   void load();
 }
 
@@ -1275,7 +1494,7 @@ function asRecord(value: unknown): JsonRecord {
 function documentIdentity(doc: JsonRecord | undefined): string | null {
   const id = doc?._id;
   if (id === null || id === undefined) return null;
-  return typeof id === "object" ? JSON.stringify(id) : String(id);
+  return serializeDocumentStoreId(id, documentStoreProvider.value.kind);
 }
 
 function syncSelectedDocumentAfterLoad(previousSelectedIdx: number | null, previousSelectedId: string | null) {
@@ -1385,6 +1604,7 @@ function selectDoc(idx: number) {
 }
 
 function startNew() {
+  if (!documentStoreEditable.value) return;
   selectedIdx.value = null;
   editJson.value = emptyDocumentJson();
   editFields.value = [createEditNode("", "", false, false)];
@@ -1395,6 +1615,7 @@ function startNew() {
 }
 
 function startEdit() {
+  if (!documentStoreEditable.value) return;
   const doc = selectedDoc.value;
   if (!doc) return;
   // Issue #2952: open whole-document JSON editing by default (DBeaver-style), not field tree.
@@ -1563,6 +1784,9 @@ function resolveDocumentStorePathId(id: unknown): string | null {
 
 function resolveWriteIdentityFromEditor(doc: JsonRecord, currentId: unknown, currentRouting: string | undefined): { writeId: string; writeRouting?: string } | null {
   const kind = documentStoreProvider.value.kind;
+  if (kind === "dynamodb") {
+    return { writeId: prepareDynamoDbDocumentIdentity(doc).id };
+  }
   const hasPayloadId = Object.prototype.hasOwnProperty.call(doc, "_id");
   const writeId = hasPayloadId ? resolveDocumentStorePathId(doc._id) : resolveDocumentStorePathId(currentId);
   if (!writeId) return null;
@@ -1571,7 +1795,7 @@ function resolveWriteIdentityFromEditor(doc: JsonRecord, currentId: unknown, cur
 }
 
 async function saveDoc() {
-  if (isSavingDocument.value) return;
+  if (isSavingDocument.value || !documentStoreEditable.value) return;
   error.value = "";
   isSavingDocument.value = true;
   try {
@@ -1579,13 +1803,14 @@ async function saveDoc() {
     if (!doc) return;
 
     const kind = documentStoreProvider.value.kind;
+    const writeDocument = kind === "dynamodb" ? prepareDynamoDbDocumentIdentity(doc).document : doc;
 
     if (isNew.value) {
       const apis = documentStoreWriteApis();
-      const explicitId = kind === "mongodb" || doc._id === undefined || doc._id === null || doc._id === "" ? null : resolveDocumentStorePathId(doc._id);
+      const explicitId = kind === "mongodb" || writeDocument._id === undefined || writeDocument._id === null || writeDocument._id === "" ? null : resolveDocumentStorePathId(writeDocument._id);
       await insertDocumentStoreDocumentCore({
         kind,
-        document: doc,
+        document: writeDocument,
         explicitId,
         routing: normalizeDocumentStoreRouting(doc._routing),
         apis,
@@ -1605,7 +1830,7 @@ async function saveDoc() {
       }
       const currentRouting = documentRoutingFromDocument(current);
       const apis = documentStoreWriteApis(kind === "elasticsearch" ? documentTypeFromDocument(current) : undefined);
-      const write = resolveWriteIdentityFromEditor(doc, currentId, currentRouting);
+      const write = resolveWriteIdentityFromEditor(writeDocument, currentId, currentRouting);
       if (!write) {
         error.value = t("mongo.jsonIdRequired");
         return;
@@ -1615,8 +1840,7 @@ async function saveDoc() {
         write: { id: write.writeId, routing: write.writeRouting },
         current: { id: deleteId, routing: kind === "elasticsearch" ? currentRouting : undefined },
       });
-      // Rekey writes first then deletes; write failure leaves the old document intact.
-      await applyDocumentStoreIdentityPlan({ kind, plan, document: doc, apis });
+      await applyDocumentStoreIdentityPlan({ kind, plan, document: writeDocument, apis });
     } else {
       return;
     }
@@ -1626,6 +1850,10 @@ async function saveDoc() {
     documentEditMode.value = "fields";
     editFields.value = [];
     if (kind === "elasticsearch") resetElasticsearchTotals({ preservePaginationTotal: true });
+    if (kind === "dynamodb") {
+      page.value = 0;
+      resetDynamoDbPagination();
+    }
     await load();
     if (selectedIdx.value !== null && documents.value[selectedIdx.value]) {
       editJson.value = stringifyDocumentStoreValue(documents.value[selectedIdx.value], documentStoreProvider.value.kind, 2);
@@ -1649,6 +1877,10 @@ async function applyDeleteDoc(idx: number) {
       editJson.value = "";
     }
     if (documentStoreProvider.value.kind === "elasticsearch") resetElasticsearchTotals({ preservePaginationTotal: true });
+    if (documentStoreProvider.value.kind === "dynamodb") {
+      page.value = 0;
+      resetDynamoDbPagination();
+    }
     await load();
   } catch (e: unknown) {
     error.value = e instanceof Error ? e.message : String(e);
@@ -1656,6 +1888,7 @@ async function applyDeleteDoc(idx: number) {
 }
 
 function requestDeleteDoc(idx: number) {
+  if (!documentStoreEditable.value) return;
   if (!settingsStore.editorSettings.confirmDangerousSqlExecution) {
     void applyDeleteDoc(idx);
     return;
@@ -1688,7 +1921,7 @@ function nextPage() {
 }
 
 function docPreview(doc: JsonRecord): string {
-  const id = doc._id || "";
+  const id = formatDocumentStoreIdLabel(doc._id, documentStoreProvider.value.kind);
   const keys = Object.keys(doc)
     .filter((k) => k !== "_id")
     .slice(0, 3);
@@ -1724,6 +1957,15 @@ watch([viewMode, isEditing, selectedIdx], ([mode, editing, index]) => {
   documentViewerSearchActive.value = false;
 });
 
+async function loadDynamoDbTableDescription() {
+  if (documentStoreProvider.value.kind !== "dynamodb") return;
+  try {
+    dynamodbTableDescription.value = await api.dynamodbDescribeTable(props.connectionId, props.collection);
+  } catch (e: unknown) {
+    error.value = e instanceof Error ? e.message : String(e);
+  }
+}
+
 onMounted(async () => {
   window.addEventListener("pointerdown", handleDocumentBrowserPointerDown, true);
   try {
@@ -1731,6 +1973,7 @@ onMounted(async () => {
   } catch (e) {
     console.warn("[DBX] ensureConnected failed for", props.connectionId, e);
   }
+  await loadDynamoDbTableDescription();
   // Mapping metadata enriches the filter builder, but it must not delay the
   // first page of documents when the mapping endpoint is slow.
   void loadElasticsearchMappingFields();
@@ -1807,7 +2050,26 @@ defineExpose({ focusSearch });
 
       <span class="shrink-0 ml-1">{{ documentStoreLabels.documentsLabel }}</span>
 
-      <Button v-if="viewMode === 'document'" variant="ghost" size="icon" class="h-5 w-5" @click="startNew"><Plus class="h-3 w-3" /></Button>
+      <div v-if="documentStoreProvider.kind === 'dynamodb' && dynamodbTableDescription" class="ml-1 flex min-w-0 items-center gap-1.5">
+        <Select :model-value="dynamodbIndexName" @update:model-value="selectDynamoDbIndex">
+          <SelectTrigger class="h-6 w-44 min-w-0 text-xs" :title="t('dynamodb.index')">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem v-for="option in dynamodbIndexOptions" :key="option.value" :value="option.value">
+              {{ option.label }}
+            </SelectItem>
+          </SelectContent>
+        </Select>
+        <span v-if="dynamodbSelectedKey" class="max-w-64 truncate font-mono text-[11px] text-muted-foreground" :title="t('dynamodb.keySummary', { partitionKey: dynamodbSelectedKey.partitionKey.name, sortKey: dynamodbSelectedKey.sortKey?.name || t('dynamodb.none') })">
+          PK: {{ dynamodbSelectedKey.partitionKey.name }}<template v-if="dynamodbSelectedKey.sortKey"> · SK: {{ dynamodbSelectedKey.sortKey.name }}</template>
+        </span>
+        <Badge v-if="dynamodbPartialProjectionReadOnly" variant="outline" class="h-5 rounded border-amber-500/50 px-1.5 text-[10px] text-amber-600 dark:text-amber-400" :title="documentStoreEditDisabledReason">
+          {{ dynamodbSelectedIndex?.projectionType }}
+        </Badge>
+      </div>
+
+      <Button v-if="viewMode === 'document'" variant="ghost" size="icon" class="h-5 w-5" :disabled="!documentStoreEditable" :title="documentStoreEditDisabledReason" @click="startNew"><Plus class="h-3 w-3" /></Button>
       <Button v-if="viewMode === 'document'" variant="ghost" size="icon" class="h-5 w-5" @click="refreshDocuments"><RefreshCw class="h-3 w-3" :class="{ 'animate-spin': loading }" /></Button>
 
       <div v-if="viewMode === 'document'" class="flex items-center gap-1 ml-1">
@@ -1988,7 +2250,7 @@ defineExpose({ focusSearch });
       context="results"
       :database-type="props.databaseType"
       :mongo-update-target="mongoUpdateTarget"
-      editable
+      :editable="documentStoreEditable"
       :custom-save-handler="customSaveHandler"
       :loading="loading"
       :sql="documentStoreLabels.queryPreview"
@@ -1999,7 +2261,7 @@ defineExpose({ focusSearch });
       :inexact-total-row-count-mode="documentStoreProvider.kind === 'mongodb' ? 'estimated' : 'at-least'"
       :pagination-total-row-count="pageTotal"
       :count-total-rows="countExactDocumentTotal"
-      :full-export-result="documentStoreProvider.kind === 'mongodb' ? exportAllMongoDocuments : undefined"
+      :full-export-result="documentStoreProvider.kind === 'mongodb' || documentStoreProvider.kind === 'dynamodb' ? exportAllDocumentStoreDocuments : undefined"
       @sort="onSort"
       @reload="refreshDocuments"
       @paginate="(offset: number, limit: number) => paginate(offset, limit)"
@@ -2210,7 +2472,7 @@ defineExpose({ focusSearch });
                 </div>
               </PopoverContent>
             </Popover>
-            <span class="text-blue-600 dark:text-blue-400 text-xs font-medium select-none shrink-0">{{ documentStoreProvider.filterInputLabel }}</span>
+            <span class="text-blue-600 dark:text-blue-400 text-xs font-medium select-none shrink-0">{{ documentStoreLabels.filterInputLabel }}</span>
             <textarea
               ref="filterInputRef"
               v-model="filterInput"
@@ -2249,7 +2511,7 @@ defineExpose({ focusSearch });
             <span class="h-5 w-px bg-border group-hover:bg-primary/60" />
           </button>
           <div class="flex flex-1 items-center gap-1 px-2 py-0.5 min-w-0">
-            <span class="text-orange-600 dark:text-orange-400 text-xs font-medium select-none shrink-0">{{ documentStoreProvider.sortInputLabel }}</span>
+            <span class="text-orange-600 dark:text-orange-400 text-xs font-medium select-none shrink-0">{{ documentStoreLabels.sortInputLabel }}</span>
             <textarea
               ref="sortInputRef"
               v-model="sortInput"
@@ -2290,7 +2552,7 @@ defineExpose({ focusSearch });
           <div class="flex-1 overflow-y-auto">
             <div v-for="(doc, idx) in documents" :key="idx" class="px-3 py-1.5 border-b text-xs font-mono cursor-pointer hover:bg-accent/50 flex items-center gap-2 group" :class="{ 'bg-accent': selectedIdx === idx }" @click="selectDoc(idx)">
               <span class="truncate flex-1">{{ docPreview(doc) }}</span>
-              <Button variant="ghost" size="icon" class="h-5 w-5 opacity-0 group-hover:opacity-100 text-destructive shrink-0" @click.stop="requestDeleteDoc(idx)">
+              <Button variant="ghost" size="icon" class="h-5 w-5 opacity-0 group-hover:opacity-100 text-destructive shrink-0" :disabled="!documentStoreEditable" :title="documentStoreEditDisabledReason" @click.stop="requestDeleteDoc(idx)">
                 <Trash2 class="w-3 h-3" />
               </Button>
             </div>
@@ -2310,7 +2572,7 @@ defineExpose({ focusSearch });
                 <input class="min-w-0 w-full cursor-text select-text appearance-none border-0 bg-transparent p-0 text-inherit outline-none focus:ring-0" :value="selectedDocumentIdLabel" :aria-label="`_id: ${selectedDocumentIdLabel}`" readonly spellcheck="false" />
               </Badge>
               <span class="flex-1" />
-              <Button v-if="!isEditing" variant="ghost" size="sm" class="h-6 text-xs" @click="startEdit">{{ t("mongo.edit") }}</Button>
+              <Button v-if="!isEditing" variant="ghost" size="sm" class="h-6 text-xs" :disabled="!documentStoreEditable" :title="documentStoreEditDisabledReason" @click="startEdit">{{ t("mongo.edit") }}</Button>
               <template v-if="isEditing">
                 <div class="flex items-center border rounded-md overflow-hidden mr-1">
                   <Button variant="ghost" size="sm" class="h-6 rounded-none px-2 text-xs" :class="{ 'bg-accent': documentEditMode === 'json' }" :disabled="isSavingDocument" @click="setDocumentEditMode('json')">{{ t("mongo.editModeJson") }}</Button>

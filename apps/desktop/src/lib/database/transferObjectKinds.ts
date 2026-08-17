@@ -1,4 +1,5 @@
 import type { DatabaseType } from "@/types/database";
+import { supportsTransfer } from "@/lib/database/databaseFeatureSupport";
 
 export enum TransferObjectFamily {
   Mysql = "mysql",
@@ -48,7 +49,7 @@ export function transferObjectKindsForDatabase(dbType?: DatabaseType): TransferO
     case TransferObjectFamily.SqlServer:
       return [...SQLSERVER_KINDS];
     default:
-      return [];
+      return supportsTransfer(dbType) ? ["TABLE"] : [];
   }
 }
 

@@ -8,6 +8,8 @@ import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "
 import TopicTreeNode from "./TopicTreeNode.vue";
 import MqttPublishPanel from "./MqttPublishDialog.vue";
 import { decodePayload, PAYLOAD_ENCODINGS, PAYLOAD_ENCODING_LABELS, type PayloadEncoding } from "@/lib/mqtt/mqttPayloadCodec";
+import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
+import { ChevronDown, ChevronUp, Pause, Play } from "@lucide/vue";
 
 interface Props {
   connectionId: string;
@@ -25,6 +27,7 @@ const selectedTopic = ref<string>(props.initialTopic ?? "");
 const loading = ref(true);
 const error = ref<string | null>(null);
 const pollingTimer = ref<ReturnType<typeof setInterval> | null>(null);
+const messagesPaused = ref(false);
 const displayEncoding = ref<PayloadEncoding>("plaintext");
 const topicSearch = ref("");
 const showSubscriptionDialog = ref(false);
@@ -34,6 +37,8 @@ const formQos = ref<MqttQoS>("atmostonce");
 const formNoLocal = ref(false);
 const formEnabled = ref(true);
 const editingTopic = ref<string | null>(null);
+const MQTT_PUBLISH_PANEL_COLLAPSED_STORAGE_KEY = "dbx-mqtt-publish-panel-collapsed";
+const publishPanelCollapsed = ref(safeLocalStorageGet(MQTT_PUBLISH_PANEL_COLLAPSED_STORAGE_KEY) === "true");
 
 const connected = computed(() => brokerInfo.value?.connected ?? false);
 const mqtt5 = computed(() => brokerInfo.value?.protocolVersion?.includes("5") ?? false);
@@ -197,6 +202,11 @@ function handleMessagePublished() {
   void refreshData();
 }
 
+function togglePublishPanel() {
+  publishPanelCollapsed.value = !publishPanelCollapsed.value;
+  safeLocalStorageSet(MQTT_PUBLISH_PANEL_COLLAPSED_STORAGE_KEY, String(publishPanelCollapsed.value));
+}
+
 async function handleClearMessages() {
   try {
     await mqttClearMessages(props.connectionId);
@@ -209,8 +219,10 @@ async function handleClearMessages() {
 function startPolling() {
   stopPolling();
   pollingTimer.value = setInterval(async () => {
+    if (messagesPaused.value) return;
     try {
-      messages.value = (await mqttGetMessages(props.connectionId, selectedTopic.value || undefined, 50)) as MqttMessage[];
+      const nextMessages = (await mqttGetMessages(props.connectionId, selectedTopic.value || undefined, 50)) as MqttMessage[];
+      if (!messagesPaused.value) messages.value = nextMessages;
     } catch {
       /* ignore polling errors */
     }
@@ -222,6 +234,10 @@ function stopPolling() {
     clearInterval(pollingTimer.value);
     pollingTimer.value = null;
   }
+}
+
+function toggleMessagesPaused() {
+  messagesPaused.value = !messagesPaused.value;
 }
 
 function formatMessagePayload(msg: MqttMessage): string {
@@ -317,6 +333,24 @@ onUnmounted(stopPolling);
               <select v-model="displayEncoding" class="h-6 rounded border bg-transparent px-1.5 text-[11px] text-muted-foreground outline-none">
                 <option v-for="enc in PAYLOAD_ENCODINGS" :key="enc" :value="enc">{{ PAYLOAD_ENCODING_LABELS[enc] }}</option>
               </select>
+              <Button size="sm" variant="ghost" class="h-6 gap-1 px-2 text-[11px] font-normal normal-case" :title="messagesPaused ? t('connection.mqttResumeMessages') : t('connection.mqttPauseMessages')" @click="toggleMessagesPaused">
+                <Play v-if="messagesPaused" class="h-3.5 w-3.5" />
+                <Pause v-else class="h-3.5 w-3.5" />
+                <span>{{ messagesPaused ? t("connection.mqttResumeMessages") : t("connection.mqttPauseMessages") }}</span>
+              </Button>
+              <Button
+                size="sm"
+                variant="ghost"
+                class="h-6 gap-1 px-2 text-[11px] font-normal normal-case"
+                :disabled="!connected"
+                :aria-expanded="!publishPanelCollapsed"
+                :title="publishPanelCollapsed ? t('connection.mqttShowPublishPanel') : t('connection.mqttHidePublishPanel')"
+                @click="togglePublishPanel"
+              >
+                <ChevronUp v-if="publishPanelCollapsed" class="h-3.5 w-3.5" />
+                <ChevronDown v-else class="h-3.5 w-3.5" />
+                <span>{{ publishPanelCollapsed ? t("connection.mqttShowPublishPanel") : t("connection.mqttHidePublishPanel") }}</span>
+              </Button>
             </div>
           </div>
           <div class="flex min-h-0 flex-1 flex-col overflow-auto">
@@ -344,7 +378,7 @@ onUnmounted(stopPolling);
             </div>
           </div>
         </div>
-        <MqttPublishPanel v-if="connected" :connection-id="connectionId" :initial-topic="selectedTopic" @published="handleMessagePublished" />
+        <MqttPublishPanel v-if="connected" v-show="!publishPanelCollapsed" :connection-id="connectionId" :initial-topic="selectedTopic" @published="handleMessagePublished" />
       </div>
     </div>
 

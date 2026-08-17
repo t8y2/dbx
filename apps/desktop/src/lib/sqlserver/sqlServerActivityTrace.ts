@@ -92,6 +92,11 @@ function internalSql(sql: string): string {
   return `/* ${SQLSERVER_TRACE_INTERNAL_MARKER} */\n${sql}`;
 }
 
+function scopedSqlServerTraceXmlQuery(sql: string): string {
+  // XML methods require ARITHABORT, while a dynamic batch restores the caller's SET options when it returns.
+  return `EXEC sys.sp_executesql ${sqlString(`SET ARITHABORT ON;\n${sql}`)};`;
+}
+
 export function buildSqlServerTraceCapabilitiesSql(database: string): string {
   return internalSql(`SELECT
   CAST(SERVERPROPERTY(N'ProductVersion') AS nvarchar(128)) AS product_version,
@@ -277,7 +282,8 @@ ALTER EVENT SESSION [${sessionName}] ON SERVER STATE = START;`);
 export function buildReadSqlServerTraceEventsSql(sessionName: string, afterTimestamp?: string): string {
   assertSessionName(sessionName);
   const cursorPredicate = afterTimestamp ? `WHERE event_time_utc >= CONVERT(datetime2(7), ${sqlString(afterTimestamp.replace(" ", "T"))}, 126)` : "";
-  return internalSql(`;WITH target AS (
+  return internalSql(
+    scopedSqlServerTraceXmlQuery(`;WITH target AS (
   SELECT CAST(target.target_data AS xml) AS target_data
   FROM sys.dm_xe_session_targets target
   JOIN sys.dm_xe_sessions session ON session.address = target.event_session_address
@@ -312,7 +318,8 @@ CROSS APPLY target_data.nodes('/RingBufferTarget/event') AS events(event_node)
 )
 SELECT *
 FROM bounded_events
-ORDER BY event_time_utc;`);
+ORDER BY event_time_utc;`),
+  );
 }
 
 export function buildStopSqlServerTraceSessionSql(sessionName: string): string {

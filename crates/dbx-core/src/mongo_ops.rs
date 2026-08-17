@@ -8,6 +8,9 @@ use crate::document_ops::CollectionInfo;
 use crate::mongo_shell::MongoCommand;
 use crate::types::{IndexInfo, QueryResult};
 
+pub const MONGO_SHOW_DATABASES_DATABASE: &str = "admin";
+pub const MONGO_SHOW_DATABASES_COMMAND_JSON: &str = r#"{"listDatabases":1}"#;
+
 async fn ensure_document_pool(state: &AppState, connection_id: &str) -> Result<(), String> {
     state.get_or_create_pool(connection_id, None).await.map(|_| ())
 }
@@ -177,6 +180,10 @@ pub async fn mongo_run_command_core(
     }
 }
 
+pub async fn mongo_show_databases_core(state: &AppState, connection_id: &str) -> Result<MongoDocumentResult, String> {
+    mongo_run_command_core(state, connection_id, MONGO_SHOW_DATABASES_DATABASE, MONGO_SHOW_DATABASES_COMMAND_JSON).await
+}
+
 pub async fn mongo_collection_stats_core(
     state: &AppState,
     connection_id: &str,
@@ -217,6 +224,7 @@ pub async fn mongo_find_documents_core(
         projection,
         sort,
         collation,
+        None,
     )
     .await
 }
@@ -486,6 +494,43 @@ pub async fn mongo_distinct_core(
         PoolKind::MongoDb(client) => mongo_driver::distinct(client, database, collection, field, filter).await,
         // The legacy agent protocol has no distinct method and no read that could stand in for it.
         PoolKind::Agent(_) => Err("MongoDB legacy agent does not support distinct".to_string()),
+        _ => Err("Not a MongoDB connection".to_string()),
+    }
+}
+
+/// Read every index of a collection with its full MongoDB option set.
+///
+/// The native driver reports `sparse`, `expireAfterSeconds`, `background` and
+/// `bucketSize`, which the shared `IndexInfo` cannot carry. The Legacy Agent has no
+/// equivalent method, so it degrades to the generic index listing with
+/// `properties_complete: false` rather than presenting defaults as server truth.
+pub async fn mongo_list_index_specs_core(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    collection: &str,
+) -> Result<Vec<mongo_driver::MongoIndexSpec>, String> {
+    mongo_driver::validate_mongo_namespace_name(database, "Database")?;
+    mongo_driver::validate_mongo_namespace_name(collection, "Collection")?;
+    ensure_document_pool(state, connection_id).await?;
+    let is_native = {
+        let connections = state.connections.read().await;
+        match connections.get(connection_id).ok_or("Not found")? {
+            PoolKind::MongoDb(_) => true,
+            PoolKind::Agent(_) => false,
+            _ => return Err("Not a MongoDB connection".to_string()),
+        }
+    };
+
+    if !is_native {
+        // `list_indexes_core` owns the agent metadata session, so borrow nothing here.
+        let indexes = crate::schema::list_indexes_core(state, connection_id, database, database, collection).await?;
+        return Ok(indexes.iter().map(mongo_driver::index_spec_from_index_info).collect());
+    }
+
+    let connections = state.connections.read().await;
+    match connections.get(connection_id).ok_or("Not found")? {
+        PoolKind::MongoDb(client) => mongo_driver::list_index_specs(client, database, collection).await,
         _ => Err("Not a MongoDB connection".to_string()),
     }
 }
@@ -881,6 +926,10 @@ pub async fn execute_mongo_command_core(
             .await
             .map(|version| scalar_query_result("version", Value::String(version))),
         MongoCommand::Use { database } => Ok(scalar_query_result("database", Value::String(database.clone()))),
+        MongoCommand::ShowDatabases => {
+            let result = mongo_show_databases_core(state, connection_id).await?;
+            mongo_show_databases_query_result(result.documents, max_rows)
+        }
         MongoCommand::RunCommand { command_json } => {
             let result = mongo_run_command_core(state, connection_id, database, command_json).await?;
             Ok(mongo_documents_query_result(result.documents))
@@ -1196,6 +1245,41 @@ fn mongo_documents_query_result(documents: Vec<serde_json::Value>) -> QueryResul
     query_result(columns, rows, 0)
 }
 
+pub fn mongo_show_databases_query_result(
+    documents: Vec<serde_json::Value>,
+    max_rows: usize,
+) -> Result<QueryResult, String> {
+    use serde_json::Value;
+
+    let databases = documents
+        .first()
+        .and_then(Value::as_object)
+        .and_then(|response| response.get("databases"))
+        .and_then(Value::as_array)
+        .ok_or("MongoDB listDatabases response is missing the databases array")?;
+    if databases.iter().any(|database| !database.is_object()) {
+        return Err("MongoDB listDatabases response contains an invalid database entry".to_string());
+    }
+
+    let total = databases.len();
+    let rows = databases
+        .iter()
+        .take(max_rows.max(1))
+        .map(|database| {
+            let database = database.as_object().expect("database entries were validated above");
+            ["name", "sizeOnDisk", "empty"].map(|field| database.get(field).cloned().unwrap_or(Value::Null)).to_vec()
+        })
+        .collect::<Vec<_>>();
+    let mut query_result = query_result(
+        vec!["name".to_string(), "sizeOnDisk".to_string(), "empty".to_string()],
+        rows,
+        u64::try_from(total).unwrap_or(u64::MAX),
+    );
+    query_result.truncated = query_result.rows.len() < total;
+    query_result.has_more = query_result.truncated;
+    Ok(query_result)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1216,12 +1300,73 @@ mod tests {
             extended_documents: Some(vec![serde_json::json!(1), serde_json::json!(2), serde_json::json!(3)]),
             total: 3,
             total_is_exact: true,
+            next_cursor: None,
         };
 
         let limited = limit_mongo_documents(result, 2);
         assert_eq!(limited.documents, vec![serde_json::json!(1), serde_json::json!(2)]);
         assert_eq!(limited.raw_documents.unwrap(), vec!["1", "2"]);
         assert_eq!(limited.extended_documents.unwrap(), vec![serde_json::json!(1), serde_json::json!(2)]);
+    }
+
+    #[test]
+    fn show_databases_result_preserves_metadata_and_row_limit() {
+        let result = MongoDocumentResult {
+            documents: vec![serde_json::json!({
+                "databases": [
+                    {"name": "admin", "sizeOnDisk": 40960, "empty": false},
+                    {"name": "app", "sizeOnDisk": 8192, "empty": true},
+                    {"name": "logs", "sizeOnDisk": 1024, "empty": false}
+                ],
+                "totalSize": 50176,
+                "ok": 1
+            })],
+            raw_documents: None,
+            extended_documents: None,
+            total: 1,
+            total_is_exact: true,
+            next_cursor: None,
+        };
+
+        let query_result = mongo_show_databases_query_result(result.documents, 2).unwrap();
+
+        assert_eq!(query_result.columns, ["name", "sizeOnDisk", "empty"]);
+        assert_eq!(
+            query_result.rows,
+            [
+                [serde_json::json!("admin"), serde_json::json!(40960), serde_json::json!(false)],
+                [serde_json::json!("app"), serde_json::json!(8192), serde_json::json!(true)],
+            ]
+        );
+        assert_eq!(query_result.affected_rows, 3);
+        assert!(query_result.truncated);
+        assert!(query_result.has_more);
+    }
+
+    #[test]
+    fn show_databases_result_handles_empty_and_rejects_malformed_responses() {
+        let empty = MongoDocumentResult {
+            documents: vec![serde_json::json!({"databases": [], "ok": 1})],
+            raw_documents: None,
+            extended_documents: None,
+            total: 1,
+            total_is_exact: true,
+            next_cursor: None,
+        };
+        let query_result = mongo_show_databases_query_result(empty.documents, 100).unwrap();
+        assert_eq!(query_result.columns, ["name", "sizeOnDisk", "empty"]);
+        assert!(query_result.rows.is_empty());
+        assert!(!query_result.truncated);
+
+        let malformed = MongoDocumentResult {
+            documents: vec![serde_json::json!({"ok": 1})],
+            raw_documents: None,
+            extended_documents: None,
+            total: 1,
+            total_is_exact: true,
+            next_cursor: None,
+        };
+        assert!(mongo_show_databases_query_result(malformed.documents, 100).unwrap_err().contains("databases array"));
     }
 
     #[cfg(unix)]
@@ -1328,6 +1473,7 @@ EXPECTED_RESULT = json.loads({expected_result})
 CAPABILITIES = {capabilities}
 SERVER_VERSION = {server_version}
 EXPECTED_ERROR = {expected_error}
+expected_calls = 0
 
 print(json.dumps({{"ready": True}}), flush=True)
 for line in sys.stdin:
@@ -1344,6 +1490,10 @@ for line in sys.stdin:
         continue
     if request.get("method") != EXPECTED_METHOD or request.get("params") != EXPECTED_PARAMS:
         print(json.dumps({{"jsonrpc": "2.0", "id": request["id"], "error": {{"code": -1, "message": "unexpected MongoDB RPC"}}}}), flush=True)
+        continue
+    expected_calls += 1
+    if expected_calls > 1:
+        print(json.dumps({{"jsonrpc": "2.0", "id": request["id"], "error": {{"code": -1, "message": "duplicate MongoDB RPC"}}}}), flush=True)
         continue
     if EXPECTED_ERROR is not None:
         print(json.dumps({{"jsonrpc": "2.0", "id": request["id"], "error": {{"code": -1, "message": EXPECTED_ERROR}}}}), flush=True)
@@ -1438,6 +1588,37 @@ for line in sys.stdin:
             result.extended_documents.as_ref().unwrap()[0]["cursor"]["firstBatch"][0]["_id"],
             serde_json::json!({"$oid": "507f1f77bcf86cd799439011"})
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn mongo_show_databases_uses_one_admin_agent_command() {
+        let expected_result = serde_json::json!({
+            "documents": [{
+                "databases": [{"name": "admin", "sizeOnDisk": 40960, "empty": false}],
+                "ok": 1
+            }],
+            "total": 1,
+        });
+        let (state, _directory) = legacy_mongo_state_with_capabilities(
+            "run_command",
+            serde_json::json!({
+                "database": "admin",
+                "command_json": "{\"listDatabases\":1}",
+            }),
+            expected_result,
+            &[AgentCapability::MongoRunCommand.as_str()],
+        )
+        .await;
+
+        let query_result =
+            execute_mongo_command_core(&state, "legacy", "ignored-current-database", &MongoCommand::ShowDatabases, 100)
+                .await
+                .unwrap();
+
+        assert_eq!(query_result.columns, ["name", "sizeOnDisk", "empty"]);
+        assert_eq!(query_result.rows.len(), 1);
+        assert_eq!(query_result.rows[0][0], "admin");
     }
 
     #[cfg(unix)]
@@ -1670,6 +1851,7 @@ for line in sys.stdin:
                     index_type: Some("_id: 1".to_string()),
                     included_columns: None,
                     comment: None,
+                    key_is_expression: Vec::new(),
                 },
                 IndexInfo {
                     name: "email_1".to_string(),
@@ -1680,6 +1862,7 @@ for line in sys.stdin:
                     index_type: Some("email: 1".to_string()),
                     included_columns: None,
                     comment: None,
+                    key_is_expression: Vec::new(),
                 },
             ],
             1,

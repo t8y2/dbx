@@ -723,7 +723,7 @@ watch(
       </DialogHeader>
 
       <div v-if="executionStarted && batch" class="flex min-h-0 flex-1 flex-col">
-        <div class="flex shrink-0 flex-wrap items-center gap-2 border-b bg-muted/20 px-5 py-3 text-xs text-muted-foreground">
+        <div class="flex shrink-0 flex-wrap items-center gap-2 border-b bg-muted/20 px-5 py-3 text-xs text-muted-foreground tabular-nums">
           <span>{{ t("multiDbExecute.progress", { completed: progressCompleted, total: batch.items.length }) }}</span>
           <Badge variant="secondary">{{ executionModeLabel() }}</Badge>
           <span class="tabular-nums">{{ t("multiDbExecute.elapsed", { duration: formatDataTransferDuration(elapsedMs) }) }}</span>

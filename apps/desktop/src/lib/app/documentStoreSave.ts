@@ -37,11 +37,25 @@ export async function writeDocumentStoreDocument(options: { kind: DocumentStoreK
 
 /**
  * Apply an identity plan for an existing document save.
- * Rekey always writes first, then deletes the old identity — a failed write never deletes.
+ * DynamoDB rekeys atomically in the backend. Other stores write first, then
+ * delete the old identity so a failed write never deletes the source.
  * Plan coordinates are assumed distinct for rekey (same identity is always `replace`).
  */
 export async function applyDocumentStoreIdentityPlan(options: { kind: DocumentStoreKind; plan: DocumentStoreIdentityPlan; document: Record<string, unknown>; apis: DocumentStoreWriteApis }): Promise<void> {
   const { kind, plan, document, apis } = options;
+
+  // DynamoDB handles both same-key replacement and key migration in the
+  // backend. Rekey uses one TransactWriteItems request, keyed by the old id.
+  if (kind === "dynamodb") {
+    await writeDocumentStoreDocument({
+      kind,
+      op: "put",
+      id: plan.action === "rekey" ? plan.deleteId : plan.writeId,
+      document,
+      apis,
+    });
+    return;
+  }
 
   if (plan.action === "replace") {
     await writeDocumentStoreDocument({
@@ -55,7 +69,6 @@ export async function applyDocumentStoreIdentityPlan(options: { kind: DocumentSt
     return;
   }
 
-  // Path-identity stores write under the new id first; Mongo inserts a new document.
   if (kind !== "mongodb") {
     await writeDocumentStoreDocument({
       kind,
@@ -81,7 +94,7 @@ export async function applyDocumentStoreIdentityPlan(options: { kind: DocumentSt
 /** Insert a new document (optional explicit path identity uses put). */
 export async function insertDocumentStoreDocument(options: { kind: DocumentStoreKind; document: Record<string, unknown>; explicitId?: string | null; routing?: string; apis: Pick<DocumentStoreWriteApis, "insert" | "update"> }): Promise<void> {
   const { kind, document, explicitId, routing, apis } = options;
-  if (kind !== "mongodb" && explicitId) {
+  if (kind !== "mongodb" && kind !== "dynamodb" && explicitId) {
     await writeDocumentStoreDocument({
       kind,
       op: "put",

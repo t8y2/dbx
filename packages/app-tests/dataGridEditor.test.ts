@@ -52,8 +52,10 @@ function mockPreparedSaveStatements(options: DataGridSaveStatementOptions): stri
     statements.push(`UPDATE ${table} SET ${sets} WHERE ${primaryKeyWhere(options, row)};`);
   }
   for (const row of options.newRows) {
-    const columns = options.columns.map(quotePgIdentifier).join(", ");
-    const values = row.map((value) => formatGridSqlLiteral(value, options.databaseType)).join(", ");
+    const sourceColumns = options.sourceColumns?.length === options.columns.length ? options.sourceColumns : options.columns;
+    const insertColumns = sourceColumns.flatMap((column, index) => (column ? [{ column, index }] : []));
+    const columns = insertColumns.map(({ column }) => quotePgIdentifier(column)).join(", ");
+    const values = insertColumns.map(({ index }) => formatGridSqlLiteral(row[index], options.databaseType)).join(", ");
     statements.push(`INSERT INTO ${table} (${columns}) VALUES (${values});`);
   }
   return statements;
@@ -656,6 +658,50 @@ test("saving inserted rows reloads current table data", async () => {
 
   assert.deepEqual(executedSql, [`INSERT INTO "public"."people" ("id", "name") VALUES (2, 'Linus');`]);
   assert.deepEqual(emitted, [["reload", "SELECT id, name FROM people", "linus", "name ILIKE '%l%'", "id DESC", 50, 50]]);
+});
+
+test("saving a DISTINCT joined-source insert targets only the bound Dameng table columns", async () => {
+  setActivePinia(createPinia());
+  installBrowserTestGlobals();
+
+  const result = computed(() => ({
+    columns: ["TASK_ID", "TASK_ENT_ID", "NAME", "ROW_LABEL"],
+    rows: [[1, 10, "before", "computed"] as CellValue[]],
+  }));
+  const executedSql: string[] = [];
+  const editor = useDataGridEditor({
+    result,
+    editable: computed(() => true),
+    databaseType: computed(() => "dameng"),
+    connectionId: computed(() => undefined),
+    database: computed(() => undefined),
+    tableMeta: computed(() => ({
+      schema: "SYSDBA",
+      tableName: "TASK_CHECK_ENT",
+      columns: [column("TASK_ID", true), column("TASK_ENT_ID"), column("NAME")],
+      primaryKeys: ["TASK_ID"],
+    })),
+    sourceColumns: computed(() => ["TASK_ID", "TASK_ENT_ID", "NAME", undefined]),
+    onExecuteSql: computed(() => async (sql: string) => {
+      executedSql.push(sql);
+    }),
+    customSaveHandler: computed(() => undefined),
+    sql: computed(() => "SELECT DISTINCT t4.* FROM TASK_CHECK_BASE t1 LEFT JOIN TASK_CHECK_ENT t4 ON t1.TASK_ID = t4.TASK_ID"),
+    searchText: ref(""),
+    whereFilterInput: ref(""),
+    orderByInput: ref(""),
+    currentWhereInput: computed(() => undefined),
+    rowStatusFilter: ref<"all" | "changed" | "edited" | "new" | "deleted">("all"),
+    pageSize: ref(50),
+    currentPage: ref(1),
+    getRowItem: () => undefined,
+    emit: () => {},
+  });
+
+  editor.newRows.value = [[2, 20, "grid-insert", "ignored expression"]];
+  await editor.saveChanges();
+
+  assert.deepEqual(executedSql, [`INSERT INTO "SYSDBA"."TASK_CHECK_ENT" ("TASK_ID", "TASK_ENT_ID", "NAME") VALUES (2, 20, 'grid-insert');`]);
 });
 
 test("saving edited rows without deletes does not reload table data", async () => {

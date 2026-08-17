@@ -237,7 +237,7 @@ const DATABASE_SOFT_STATEMENT_KEYWORDS: Partial<Record<DatabaseType, readonly st
   sqlite: ["ATTACH", "DETACH", "REINDEX"],
   duckdb: ["ATTACH", "DETACH", "EXPORT", "IMPORT", "INSTALL", "LOAD"],
   clickhouse: ["ATTACH", "CHECK", "DETACH", "EXCHANGE", "KILL", "OPTIMIZE", "SYSTEM"],
-  sqlserver: ["BACKUP", "DBCC", "DENY", "RESTORE"],
+  sqlserver: ["BACKUP", "DBCC", "DENY", "KILL", "RESTORE"],
   saphana: ["DO"],
   oracle: ["FLASHBACK", "LOCK", "PURGE"],
   dameng: ["FLASHBACK", "LOCK", "PURGE"],
@@ -301,7 +301,8 @@ export function splitSqlStatementRanges(sql: string, databaseType?: DatabaseType
   let statementEnd = -1;
   let statementHitStart = 0;
   let pendingHintStart = -1;
-  let pendingProxyDirectiveStart = -1;
+  let pendingMysqlDirectiveStart = -1;
+  let pendingMysqlDirectiveLineEnd = -1;
   let customDelimiter: string | null = null;
   let state: QuoteState = "none";
   let dollarTag = "";
@@ -310,12 +311,23 @@ export function splitSqlStatementRanges(sql: string, databaseType?: DatabaseType
   let i = 0;
 
   const isWhitespace = (ch: string) => ch === " " || ch === "\t" || ch === "\r" || ch === "\n";
+  const nextLineBreak = (from: number) => {
+    const carriageReturn = sql.indexOf("\r", from);
+    const lineFeed = sql.indexOf("\n", from);
+    if (carriageReturn === -1) return lineFeed === -1 ? len : lineFeed;
+    if (lineFeed === -1) return carriageReturn;
+    return Math.min(carriageReturn, lineFeed);
+  };
 
   const markContent = (pos: number) => {
     if (statementStart === -1) {
-      statementStart = pendingProxyDirectiveStart !== -1 ? pendingProxyDirectiveStart : pendingHintStart === -1 ? pos : pendingHintStart;
+      // TDSQL accepts arbitrary leading block directives on the SQL line. The
+      // exact /*proxy*/ directive also keeps its historical multiline support.
+      const directiveStart = pendingMysqlDirectiveStart !== -1 && (sql.startsWith("/*proxy*/", pendingMysqlDirectiveStart) || pos < pendingMysqlDirectiveLineEnd) ? pendingMysqlDirectiveStart : -1;
+      statementStart = directiveStart !== -1 ? directiveStart : pendingHintStart === -1 ? pos : pendingHintStart;
       pendingHintStart = -1;
-      pendingProxyDirectiveStart = -1;
+      pendingMysqlDirectiveStart = -1;
+      pendingMysqlDirectiveLineEnd = -1;
     }
     statementEnd = pos + 1;
   };
@@ -324,7 +336,8 @@ export function splitSqlStatementRanges(sql: string, databaseType?: DatabaseType
     if (statementStart === -1) {
       statementEnd = -1;
       pendingHintStart = -1;
-      pendingProxyDirectiveStart = -1;
+      pendingMysqlDirectiveStart = -1;
+      pendingMysqlDirectiveLineEnd = -1;
       postgresDollarQuotedRoutine = false;
       oraclePlSqlStatementEnd = undefined;
       return;
@@ -336,7 +349,8 @@ export function splitSqlStatementRanges(sql: string, databaseType?: DatabaseType
     statementStart = -1;
     statementEnd = -1;
     pendingHintStart = -1;
-    pendingProxyDirectiveStart = -1;
+    pendingMysqlDirectiveStart = -1;
+    pendingMysqlDirectiveLineEnd = -1;
     postgresDollarQuotedRoutine = false;
     oraclePlSqlStatementEnd = undefined;
   };
@@ -441,13 +455,15 @@ export function splitSqlStatementRanges(sql: string, databaseType?: DatabaseType
 
     // Line comments consume up to (and including) the newline.
     if (ch === "-" && next === "-") {
-      pendingProxyDirectiveStart = -1;
+      pendingMysqlDirectiveStart = -1;
+      pendingMysqlDirectiveLineEnd = -1;
       const newline = sql.indexOf("\n", i);
       i = newline === -1 ? len : newline + 1;
       continue;
     }
     if (startsHashLineComment(sql, i, databaseType, parameterOptions)) {
-      pendingProxyDirectiveStart = -1;
+      pendingMysqlDirectiveStart = -1;
+      pendingMysqlDirectiveLineEnd = -1;
       const newline = sql.indexOf("\n", i);
       i = newline === -1 ? len : newline + 1;
       continue;
@@ -458,7 +474,15 @@ export function splitSqlStatementRanges(sql: string, databaseType?: DatabaseType
       if (statementStart === -1 && pendingHintStart === -1 && (hintMarker === "+" || hintMarker === "@" || hintMarker === "&")) pendingHintStart = i;
       const close = sql.indexOf("*/", i + 2);
       if (statementStart === -1) {
-        pendingProxyDirectiveStart = databaseType === "mysql" && sql.startsWith("/*proxy*/", i) ? i : -1;
+        if (databaseType === "mysql") {
+          if (pendingMysqlDirectiveStart === -1 || i > pendingMysqlDirectiveLineEnd) {
+            pendingMysqlDirectiveStart = i;
+            pendingMysqlDirectiveLineEnd = nextLineBreak(i);
+          }
+        } else {
+          pendingMysqlDirectiveStart = -1;
+          pendingMysqlDirectiveLineEnd = -1;
+        }
       }
       i = close === -1 ? len : close + 2;
       continue;
@@ -1520,7 +1544,7 @@ function mysqlRoutineBlockIsComplete(sql: string, parameterOptions?: SqlParamete
   if (!startsWithMysqlRoutineBlock(sql, parameterOptions)) return false;
 
   const tokens = mysqlRoutineTokens(sql, parameterOptions);
-  let beginDepth = 0;
+  const blockStack: Array<"BEGIN" | "CASE"> = [];
   let sawBegin = false;
 
   for (let index = 0; index < tokens.length; index += 1) {
@@ -1529,16 +1553,26 @@ function mysqlRoutineBlockIsComplete(sql: string, parameterOptions?: SqlParamete
     if (token.value === "BEGIN") {
       if (previousWordToken(tokens, index) === "END") continue;
       sawBegin = true;
-      beginDepth += 1;
+      blockStack.push("BEGIN");
+      continue;
+    }
+    if (token.value === "CASE") {
+      if (previousWordToken(tokens, index) === "END") continue;
+      blockStack.push("CASE");
       continue;
     }
     if (token.value === "END" && sawBegin) {
-      if (MYSQL_CONTROL_BLOCK_SUFFIXES.has(nextWordToken(tokens, index) ?? "")) continue;
-      beginDepth = Math.max(0, beginDepth - 1);
+      const suffix = nextWordToken(tokens, index) ?? "";
+      if (suffix === "CASE") {
+        if (blockStack[blockStack.length - 1] === "CASE") blockStack.pop();
+        continue;
+      }
+      if (MYSQL_CONTROL_BLOCK_SUFFIXES.has(suffix)) continue;
+      blockStack.pop();
     }
   }
 
-  return sawBegin && beginDepth === 0 && tokens[tokens.length - 1]?.kind === "semicolon";
+  return sawBegin && blockStack.length === 0 && tokens[tokens.length - 1]?.kind === "semicolon";
 }
 
 function mysqlRoutineWords(sql: string, parameterOptions?: SqlParameterOptions): string[] {

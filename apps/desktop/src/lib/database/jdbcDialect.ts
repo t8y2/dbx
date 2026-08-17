@@ -2,16 +2,20 @@ import type { ConnectionConfig, DatabaseType } from "@/types/database";
 import { isSchemaAware, usesDatabaseObjectTreeMode, usesTreeSchemaMode } from "@/lib/database/databaseFeatureSupport";
 import type { CodeMirrorSqlDialectName } from "@/lib/editor/codemirrorSqlDialect";
 
-type JdbcDialectConnection = Partial<Pick<ConnectionConfig, "db_type" | "driver_profile" | "driver_label" | "connection_string" | "jdbc_driver_class" | "jdbc_driver_paths" | "database_info" | "external_config">>;
+type JdbcDialectConnection = Partial<Pick<ConnectionConfig, "db_type" | "driver_profile" | "driver_label" | "connection_string" | "url_params" | "jdbc_driver_class" | "jdbc_driver_paths" | "database_info" | "external_config">>;
 
 export type GaussdbIdentifierQuoteStyle = "auto" | "double" | "backtick";
 export type GaussdbConnectionMode = "native" | "m-jdbc";
+export type GaussdbTargetServerType = "master" | "slave" | "any";
+export type GaussdbCountQueryDop = 1 | 2 | 4 | 8 | 16;
 
 const GAUSSDB_IDENTIFIER_QUOTE_STYLE_KEY = "gaussdbIdentifierQuoteStyle";
+const GAUSSDB_TARGET_SERVER_TYPE_KEY = "gaussdbTargetServerType";
+const GAUSSDB_COUNT_QUERY_DOP_KEY = "gaussdbCountQueryDop";
 export const GAUSSDB_M_JDBC_DRIVER_PROFILE = "gaussdb-m";
 export const GAUSSDB_M_JDBC_DRIVER_CLASS = "com.huawei.gaussdb.jdbc.Driver";
 
-const DATABASE_AS_EXECUTION_SCHEMA_TYPES = new Set<DatabaseType>(["hive", "spark"]);
+const DATABASE_AS_EXECUTION_SCHEMA_TYPES = new Set<DatabaseType>(["hive", "kyuubi", "impala", "spark"]);
 const CONNECTION_ROOT_SCHEMA_TYPES = new Set<DatabaseType>(["oracle", "dameng", "oceanbase-oracle"]);
 
 const JDBC_DIALECT_MATCHERS: Array<{ type: DatabaseType; patterns: RegExp[] }> = [
@@ -125,6 +129,36 @@ export function setGaussdbIdentifierQuoteStyle(
   connection.external_config = Object.keys(external).length > 0 ? external : undefined;
 }
 
+export function gaussdbTargetServerType(connection: JdbcDialectConnection | undefined): GaussdbTargetServerType {
+  const external = externalConfigRecord(connection?.external_config);
+  return normalizeGaussdbTargetServerType(external[GAUSSDB_TARGET_SERVER_TYPE_KEY]) ?? gaussdbTargetServerTypeFromUrl(connection) ?? "any";
+}
+
+export function setGaussdbTargetServerType(connection: Pick<ConnectionConfig, "db_type"> & Partial<Pick<ConnectionConfig, "driver_profile" | "driver_label" | "connection_string" | "jdbc_driver_class" | "jdbc_driver_paths" | "database_info" | "external_config">>, value: GaussdbTargetServerType) {
+  const external = externalConfigRecord(connection.external_config);
+  external[GAUSSDB_TARGET_SERVER_TYPE_KEY] = value;
+  connection.external_config = Object.keys(external).length > 0 ? external : undefined;
+}
+
+function normalizeGaussdbTargetServerType(value: unknown): GaussdbTargetServerType | undefined {
+  if (typeof value !== "string") return undefined;
+  const normalized = value.trim().toLowerCase();
+  return normalized === "master" || normalized === "slave" || normalized === "any" ? normalized : undefined;
+}
+
+function gaussdbTargetServerTypeFromUrl(connection: JdbcDialectConnection | undefined): GaussdbTargetServerType | undefined {
+  const values = [connection?.url_params, connection?.connection_string?.split("?", 2)[1]?.split("#", 1)[0]];
+  for (const value of values) {
+    const params = new URLSearchParams((value || "").trim().replace(/^\?/, "").replace(/;/g, "&"));
+    for (const [key, paramValue] of params) {
+      if (key.toLowerCase() === "targetservertype") {
+        return normalizeGaussdbTargetServerType(paramValue);
+      }
+    }
+  }
+  return undefined;
+}
+
 export function sqlSnippetDatabaseTypeForConnection(connection?: JdbcDialectConnection): DatabaseType | undefined {
   // ASE uses T-SQL snippets, but mapping it globally to SQL Server would also
   // enable incompatible SQL Server metadata and pagination behavior.
@@ -205,6 +239,27 @@ export function codeMirrorSqlDialectForConnection(connection?: JdbcDialectConnec
   const databaseType = effectiveDatabaseTypeForConnection(connection);
   if (databaseType === "clickhouse") return "clickhouse";
   return codeMirrorSqlDialect(databaseType);
+}
+
+export function gaussdbCountQueryDop(connection: JdbcDialectConnection | undefined): GaussdbCountQueryDop {
+  const external = externalConfigRecord(connection?.external_config);
+  const value = external[GAUSSDB_COUNT_QUERY_DOP_KEY];
+  return value === 2 || value === 4 || value === 8 || value === 16 ? value : 1;
+}
+
+export function setGaussdbCountQueryDop(connection: Pick<ConnectionConfig, "db_type"> & Partial<Pick<ConnectionConfig, "external_config">>, value: GaussdbCountQueryDop) {
+  const external = externalConfigRecord(connection.external_config);
+  if (value === 1) {
+    delete external[GAUSSDB_COUNT_QUERY_DOP_KEY];
+  } else {
+    external[GAUSSDB_COUNT_QUERY_DOP_KEY] = value;
+  }
+  connection.external_config = Object.keys(external).length > 0 ? external : undefined;
+}
+
+export function gaussdbCountQueryDopHint(connection: JdbcDialectConnection | undefined): string | undefined {
+  const dop = gaussdbCountQueryDop(connection);
+  return dop > 1 ? `/*+ set(query_dop ${dop}) */` : undefined;
 }
 
 function isJdbcAseProfile(connection?: JdbcDialectConnection): boolean {

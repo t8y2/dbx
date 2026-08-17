@@ -52,7 +52,7 @@ describe("ObjectBrowser DDL API boundaries", () => {
   });
 
   it("keeps structure exports on the portable base DDL", () => {
-    expect(exportStructureSource).toMatch(/api\.getTableDdl\([\s\S]*?props\.catalog\);/);
+    expect(exportStructureSource).toMatch(/api\.getTableDdl\([\s\S]*?props\.catalog, true\);/);
     expect(exportStructureSource).not.toContain("api.getTableDisplayDdl(");
   });
 });

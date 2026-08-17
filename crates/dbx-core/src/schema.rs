@@ -6446,7 +6446,18 @@ pub async fn get_table_ddl_core(
     table: &str,
     object_type: Option<db::ObjectSourceKind>,
 ) -> Result<String, String> {
-    get_table_ddl_core_with_options(state, connection_id, database, schema, table, object_type, false).await
+    get_table_ddl_core_with_options(state, connection_id, database, schema, table, object_type, false, false).await
+}
+
+pub async fn get_table_export_ddl_core(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    schema: &str,
+    table: &str,
+    object_type: Option<db::ObjectSourceKind>,
+) -> Result<String, String> {
+    get_table_ddl_core_with_options(state, connection_id, database, schema, table, object_type, false, true).await
 }
 
 pub async fn get_table_display_ddl_core(
@@ -6457,7 +6468,7 @@ pub async fn get_table_display_ddl_core(
     table: &str,
     object_type: Option<db::ObjectSourceKind>,
 ) -> Result<String, String> {
-    get_table_ddl_core_with_options(state, connection_id, database, schema, table, object_type, true).await
+    get_table_ddl_core_with_options(state, connection_id, database, schema, table, object_type, true, false).await
 }
 
 async fn get_table_ddl_core_with_options(
@@ -6468,6 +6479,7 @@ async fn get_table_ddl_core_with_options(
     table: &str,
     object_type: Option<db::ObjectSourceKind>,
     include_postgres_access: bool,
+    portable_oracle: bool,
 ) -> Result<String, String> {
     if crate::sql_dialect::parse_sqlserver_linked_schema_ref(schema).is_some() {
         return Err("DDL is not supported for SQL Server linked server tables".to_string());
@@ -6513,7 +6525,7 @@ async fn get_table_ddl_core_with_options(
     }
 
     retry_metadata_connection(state, connection_id, Some(database), || {
-        get_table_ddl_once(state, connection_id, database, schema, table, include_postgres_access)
+        get_table_ddl_once(state, connection_id, database, schema, table, include_postgres_access, portable_oracle)
     })
     .await
 }
@@ -6525,6 +6537,7 @@ async fn get_table_ddl_once(
     schema: &str,
     table: &str,
     include_postgres_access: bool,
+    portable_oracle: bool,
 ) -> Result<String, String> {
     let pool_key = state.get_or_create_metadata_pool_for_session(connection_id, Some(database), None).await?;
     let db_config = connection_config(state, connection_id).await;
@@ -6604,6 +6617,7 @@ async fn get_table_ddl_once(
                     database,
                     schema,
                     table,
+                    portable_oracle,
                     agent_metadata_timeout(db_config.as_ref()),
                 )
                 .await;
@@ -7712,10 +7726,11 @@ async fn oracle_agent_table_ddl(
     database: &str,
     schema: &str,
     table: &str,
+    portable: bool,
     timeout_duration: Option<Duration>,
 ) -> Result<String, String> {
     let mut client = client.lock().await;
-    let ddl = client.get_table_ddl::<String>(database, schema, table, timeout_duration).await?;
+    let ddl = client.get_table_ddl_with_options::<String>(database, schema, table, portable, timeout_duration).await?;
     match append_oracle_table_comment_ddl(&mut client, database, schema, table, &ddl, timeout_duration).await {
         Ok(ddl) => Ok(ddl),
         Err(error) => {

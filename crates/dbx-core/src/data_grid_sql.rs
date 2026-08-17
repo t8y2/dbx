@@ -815,7 +815,8 @@ pub fn build_data_grid_count_sql(options: DataGridCountSqlOptions) -> String {
     };
     let predicate = crate::sql_dialect::normalize_where_input(options.where_input.as_deref());
     let where_clause = if predicate.is_empty() { String::new() } else { format!(" WHERE ({predicate})") };
-    format!("SELECT COUNT(*) AS cnt FROM {table}{where_clause}")
+    let hint = if options.database_type == Some(DatabaseType::Gaussdb) { "/*+ set(query_dop 16) */ " } else { "" };
+    format!("SELECT {hint}COUNT(*) AS cnt FROM {table}{where_clause}")
 }
 
 pub fn build_hive_table_properties_sql(options: HiveTablePropertiesSqlOptions) -> String {

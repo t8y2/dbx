@@ -540,6 +540,60 @@ class DamengAgentMetadataTest {
     }
 
     @Test
+    void fallsBackToAllSourceTypeDdlWhenDbmsMetadataPackageIsMissing() {
+        DamengAgent agent = new DamengAgent();
+        List<String> sqls = new ArrayList<>();
+        TestSupport.setPrivateConnection(
+            agent,
+            catalogFallbackConnection(
+                missingDbmsMetadataPackageError(),
+                sqls,
+                List.of(
+                    Arrays.asList("CREATE OR REPLACE TYPE \"APP\".\"T_ADDR\" AS OBJECT("),
+                    Arrays.asList("  CITY VARCHAR2(64)"),
+                    Arrays.asList(")")
+                ),
+                null,
+                List.of(),
+                null
+            )
+        );
+
+        ObjectSource source = agent.getObjectSource("APP", "T_ADDR", "TYPE");
+
+        Assertions.assertTrue(source.getSource().contains("CREATE OR REPLACE TYPE"), source.getSource());
+        Assertions.assertTrue(source.isEditable());
+        Assertions.assertTrue(sqls.stream().anyMatch(sql -> sql.contains("FROM ALL_SOURCE")), String.join("\n", sqls));
+    }
+
+    @Test
+    void fallsBackToAllSourcePackageBodyDdlWhenDbmsMetadataPackageIsMissing() {
+        DamengAgent agent = new DamengAgent();
+        List<String> sqls = new ArrayList<>();
+        TestSupport.setPrivateConnection(
+            agent,
+            catalogFallbackConnection(
+                missingDbmsMetadataPackageError(),
+                sqls,
+                List.of(
+                    Arrays.asList("CREATE OR REPLACE PACKAGE BODY \"APP\".\"PKG_DEMO\" AS"),
+                    Arrays.asList("  PROCEDURE P IS BEGIN NULL; END;"),
+                    Arrays.asList("END PKG_DEMO;")
+                ),
+                null,
+                List.of(),
+                null
+            )
+        );
+
+        ObjectSource source = agent.getObjectSource("APP", "PKG_DEMO", "PACKAGE_BODY");
+
+        Assertions.assertTrue(source.getSource().contains("CREATE OR REPLACE PACKAGE BODY"), source.getSource());
+        Assertions.assertTrue(source.isEditable());
+        Assertions.assertTrue(sqls.stream().anyMatch(sql -> sql.contains("FROM ALL_SOURCE")), String.join("\n", sqls));
+    }
+
+    @Test
     void fallsBackToViewTextWhenDbmsMetadataPackageIsMissing() {
         DamengAgent agent = new DamengAgent();
         List<String> sqls = new ArrayList<>();
@@ -551,7 +605,9 @@ class DamengAgentMetadataTest {
         ObjectSource source = agent.getObjectSource("APP", "V_ACTIVE_USERS", "VIEW");
 
         Assertions.assertTrue(source.getSource().contains("SELECT 1 AS ID FROM DUAL"), source.getSource());
-        Assertions.assertTrue(source.isEditable());
+        // 字典视图正文不包含完整 CREATE VIEW 头，标记为不可编辑。
+        Assertions.assertFalse(source.isEditable());
+        Assertions.assertTrue(source.getSource().startsWith("--"), source.getSource());
         Assertions.assertTrue(sqls.stream().anyMatch(sql -> sql.contains("FROM ALL_VIEWS")), String.join("\n", sqls));
     }
 
@@ -567,6 +623,9 @@ class DamengAgentMetadataTest {
         ObjectSource source = agent.getObjectSource("APP", "TRG_USERS", "TRIGGER");
 
         Assertions.assertTrue(source.getSource().contains("CREATE TRIGGER"), source.getSource());
+        // 触发器正文可能不含完整创建语句头，标记为不可编辑。
+        Assertions.assertFalse(source.isEditable());
+        Assertions.assertTrue(source.getSource().startsWith("--"), source.getSource());
         Assertions.assertTrue(sqls.stream().anyMatch(sql -> sql.contains("FROM ALL_TRIGGERS")), String.join("\n", sqls));
     }
 
@@ -670,6 +729,24 @@ class DamengAgentMetadataTest {
         );
 
         Assertions.assertEquals("DBMS_METADATA.GET_DDL connection reset", error.getCause().getMessage());
+        Assertions.assertTrue(sqls.stream().noneMatch(sql -> sql.contains("FROM ALL_SOURCE")), String.join("\n", sqls));
+    }
+
+    @Test
+    void doesNotFallBackForUnrelatedDbmsMetadataErrors() {
+        DamengAgent agent = new DamengAgent();
+        List<String> sqls = new ArrayList<>();
+        SQLException unrelated = new SQLException("DBMS_METADATA.GET_DDL 内部执行错误", "99999", -9001);
+        TestSupport.setPrivateConnection(
+            agent,
+            catalogFallbackConnection(unrelated, sqls, List.of(), null, List.of(), null)
+        );
+
+        Assertions.assertThrows(
+            RuntimeException.class,
+            () -> agent.getObjectSource("APP", "CALC_SCORE", "FUNCTION")
+        );
+
         Assertions.assertTrue(sqls.stream().noneMatch(sql -> sql.contains("FROM ALL_SOURCE")), String.join("\n", sqls));
     }
 

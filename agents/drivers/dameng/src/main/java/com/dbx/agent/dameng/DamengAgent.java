@@ -46,8 +46,11 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 
 public final class DamengAgent extends AbstractJdbcAgent {
+    private static final Logger LOGGER = Logger.getLogger("com.dbx.agent.dameng");
     private static final String AGENT_VERSION = "9999.06.04.1-fix-default";
     private static final int DBMS_OUTPUT_ENABLE_TIMEOUT_SECS = 5;
     private static final String DAMENG_CLASSIFIED_OBJECT_TYPE_SQL =
@@ -977,14 +980,9 @@ public final class DamengAgent extends AbstractJdbcAgent {
             try {
                 String source = readDbmsMetadataObjectSource(dbmsType, name, schema);
                 return new ObjectSource(name, objectType, schema, source);
-            } catch (RuntimeException error) {
-                if (!isDamengMetadataUnavailableError(error)) {
-                    throw error;
-                }
-                dbmsError = error;
             } catch (Exception error) {
-                // 检查型异常（SQLException 等）由 unchecked 包装后在此处处理。
-                RuntimeException runtimeError = new RuntimeException(error);
+                // 检查型异常（SQLException 等）由 unchecked 透传后在此处统一处理。
+                RuntimeException runtimeError = error instanceof RuntimeException runtime ? runtime : new RuntimeException(error);
                 if (!isDamengMetadataUnavailableError(runtimeError)) {
                     throw runtimeError;
                 }
@@ -1038,7 +1036,8 @@ public final class DamengAgent extends AbstractJdbcAgent {
                     schema,
                     name,
                     objectType,
-                    "SELECT TEXT FROM ALL_VIEWS WHERE OWNER = ? AND VIEW_NAME = ?"
+                    "SELECT TEXT FROM ALL_VIEWS WHERE OWNER = ? AND VIEW_NAME = ?",
+                    false
                 );
                 if (fromView != null) {
                     return fromView;
@@ -1049,7 +1048,8 @@ public final class DamengAgent extends AbstractJdbcAgent {
                     schema,
                     name,
                     objectType,
-                    "SELECT TRIGGER_BODY FROM ALL_TRIGGERS WHERE OWNER = ? AND TRIGGER_NAME = ?"
+                    "SELECT TRIGGER_BODY FROM ALL_TRIGGERS WHERE OWNER = ? AND TRIGGER_NAME = ?",
+                    false
                 );
                 if (fromTrigger != null) {
                     return fromTrigger;
@@ -1076,6 +1076,13 @@ public final class DamengAgent extends AbstractJdbcAgent {
         return unavailableObjectSource(schema, name, objectType, dbmsError);
     }
 
+    /**
+     * 字典视图来源（ALL_VIEWS.TEXT / ALL_TRIGGERS.TRIGGER_BODY）通常只包含对象正文、
+     * 不含完整的 CREATE/ALTER 语句头，不能作为可执行 DDL 保存，故标记为不可在线编辑。
+     */
+    private static final String CATALOG_BODY_HINT =
+        "-- 以下内容来自系统字典视图，仅为对象正文，可能不包含完整语句头，不可在线编辑。\n";
+
     /** 读取单行单列文本（视图/触发器源码），空结果返回空串。 */
     private String scalarText(String sql, String schema, String name) throws Exception {
         try (PreparedStatement stmt = requireConnected().prepareStatement(sql)) {
@@ -1087,10 +1094,16 @@ public final class DamengAgent extends AbstractJdbcAgent {
         }
     }
 
-    private ObjectSource catalogTextSource(String schema, String name, String objectType, String sql) {
+    private ObjectSource catalogTextSource(String schema, String name, String objectType, String sql, boolean editable) {
         try {
             String text = scalarText(sql, schema, name);
-            return notBlank(text) ? new ObjectSource(name, objectType, schema, text) : null;
+            if (!notBlank(text)) {
+                return null;
+            }
+            if (!editable) {
+                text = CATALOG_BODY_HINT + text;
+            }
+            return new ObjectSource(name, objectType, schema, text, editable);
         } catch (RuntimeException error) {
             return metadataTierError(error);
         } catch (Exception error) {
@@ -1191,9 +1204,6 @@ public final class DamengAgent extends AbstractJdbcAgent {
             try (ResultSet rs = stmt.executeQuery()) {
                 while (rs.next()) {
                     String line = coalesce(readTextColumn(rs, 1));
-                    if (line.isEmpty()) {
-                        continue;
-                    }
                     source.append(line);
                     if (!line.endsWith("\n")) {
                         source.append("\n");
@@ -1223,9 +1233,6 @@ public final class DamengAgent extends AbstractJdbcAgent {
                 try (ResultSet rs = stmt.executeQuery()) {
                     while (rs.next()) {
                         String line = coalesce(readTextColumn(rs, 1));
-                        if (line.isEmpty()) {
-                            continue;
-                        }
                         source.append(line);
                         if (!line.endsWith("\n")) {
                             source.append("\n");
@@ -1251,6 +1258,11 @@ public final class DamengAgent extends AbstractJdbcAgent {
         if (isDamengConnectionError(error)) {
             throw error;
         }
+        LOGGER.log(
+            Level.FINE,
+            "Dameng metadata catalog tier unavailable for source fallback: " + firstLine(error.getMessage()),
+            error
+        );
         return null;
     }
 
@@ -1293,6 +1305,9 @@ public final class DamengAgent extends AbstractJdbcAgent {
             case "PACKAGE_BODY", "PACKAGE BODY" -> "PKG_BODY";
             // DM DBMS_METADATA accepts TRIGGER directly and returns executable CREATE OR REPLACE DDL.
             case "TRIGGER" -> "TRIGGER";
+            // 用户自定义类型：与 Oracle 兼容的 DBMS_METADATA 对象类型名。
+            case "TYPE" -> "TYPE";
+            case "TYPE_BODY", "TYPE BODY" -> "TYPE BODY";
             default -> throw new IllegalArgumentException("Unsupported object type: " + objectType);
         };
     }

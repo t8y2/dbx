@@ -5115,6 +5115,7 @@ export default withEnglishFallback({
     shortcutReplace: "取代",
     shortcutSaveSql: "儲存 SQL",
     shortcutAcceptCompletion: "接受補全",
+    shortcutTriggerCompletion: "觸發補全",
     shortcutFormatSql: "格式化 SQL",
     shortcutExpandSelectStar: "將 * 展開為欄位",
     shortcutToggleLineComment: "切換行註解",

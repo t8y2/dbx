@@ -5547,6 +5547,7 @@ export default withEnglishFallback({
     shortcutReplace: "바꾸기",
     shortcutSaveSql: "SQL 저장",
     shortcutAcceptCompletion: "완성 수락",
+    shortcutTriggerCompletion: "완성 트리거",
     shortcutFormatSql: "SQL 서식",
     shortcutExpandSelectStar: "*을(를) 열로 확장",
     shortcutToggleLineComment: "줄 주석 전환",

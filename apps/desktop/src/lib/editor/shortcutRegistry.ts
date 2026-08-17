@@ -9,6 +9,7 @@ export type ShortcutActionId =
   | "toggleBlockComment"
   | "saveSql"
   | "acceptCompletion"
+  | "triggerCompletion"
   | "indentMore"
   | "indentLess"
   | "insertLineBelow"
@@ -137,6 +138,12 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
     labelKey: "settings.shortcutAcceptCompletion",
     scope: "editor",
     defaultShortcut: "Tab",
+  },
+  {
+    id: "triggerCompletion",
+    labelKey: "settings.shortcutTriggerCompletion",
+    scope: "editor",
+    defaultShortcut: "Alt+/",
   },
   {
     id: "indentMore",

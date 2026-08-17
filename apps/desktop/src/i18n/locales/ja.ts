@@ -5804,6 +5804,7 @@ export default withEnglishFallback({
     shortcutReplace: "置換",
     shortcutSaveSql: "SQLを保存",
     shortcutAcceptCompletion: "補完を受け入れる",
+    shortcutTriggerCompletion: "補完をトリガー",
     shortcutFormatSql: "SQLをフォーマット",
     shortcutExpandSelectStar: "* を列に展開",
     shortcutToggleLineComment: "行コメントを切り替え",

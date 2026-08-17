@@ -6083,6 +6083,7 @@ export default withEnglishFallback({
     shortcutReplace: "替换",
     shortcutSaveSql: "保存 SQL",
     shortcutAcceptCompletion: "接受补全",
+    shortcutTriggerCompletion: "触发补全",
     shortcutFormatSql: "格式化 SQL",
     shortcutExpandSelectStar: "将 * 展开为字段",
     shortcutToggleLineComment: "切换行注释",

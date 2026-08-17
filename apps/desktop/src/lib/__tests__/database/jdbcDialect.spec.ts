@@ -11,11 +11,14 @@ import {
   connectionUsesDatabaseObjectTreeMode,
   effectiveDatabaseTypeForConnection,
   gaussdbConnectionMode,
+  gaussdbCountQueryDop,
+  gaussdbCountQueryDopHint,
   gaussdbIdentifierQuoteOverride,
   gaussdbIdentifierQuoteStyle,
   gaussdbTargetServerType,
   inferJdbcDialect,
   setGaussdbConnectionMode,
+  setGaussdbCountQueryDop,
   setGaussdbIdentifierQuoteStyle,
   setGaussdbTargetServerType,
   supportsGaussdbIdentifierQuoteStyle,
@@ -235,6 +238,24 @@ describe("GaussDB connection mode", () => {
     setGaussdbTargetServerType(connection, "any");
     expect(gaussdbTargetServerType(connection)).toBe("any");
     expect(connection.external_config).toEqual({ gaussdbTargetServerType: "any" });
+  });
+
+  it("keeps count query parallelism disabled until explicitly configured", () => {
+    const connection = { db_type: "gaussdb", external_config: { retained: true } } as ConnectionConfig;
+
+    expect(gaussdbCountQueryDop(connection)).toBe(1);
+    expect(gaussdbCountQueryDopHint(connection)).toBeUndefined();
+
+    setGaussdbCountQueryDop(connection, 8);
+    expect(connection.external_config).toEqual({ retained: true, gaussdbCountQueryDop: 8 });
+    expect(gaussdbCountQueryDopHint(connection)).toBe("/*+ set(query_dop 8) */");
+
+    connection.external_config = { retained: true, gaussdbCountQueryDop: 32 };
+    expect(gaussdbCountQueryDop(connection)).toBe(1);
+    expect(gaussdbCountQueryDopHint(connection)).toBeUndefined();
+
+    setGaussdbCountQueryDop(connection, 1);
+    expect(connection.external_config).toEqual({ retained: true });
   });
 });
 

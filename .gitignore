@@ -53,6 +53,7 @@ Thumbs.db
 
 # Temp
 tmp/
+outputs/
 
 # Code review tool artifacts
 review_diff.json

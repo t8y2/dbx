@@ -814,6 +814,8 @@ export default withEnglishFallback({
     gaussdbTargetServerTypeSlave: "슬레이브(대기)",
     gaussdbTargetServerTypeAny: "임의(선호 없음)",
     gaussdbTargetServerTypeHint: "JDBC 드라이버가 연결할 GaussDB 클러스터 노드를 제어합니다. M 모드(JDBC)에만 적용됩니다.",
+    gaussdbCountQueryDop: "COUNT(*) 병렬 처리 수준",
+    gaussdbCountQueryDopHint: "대형 테이블의 COUNT(*) 쿼리에 query_dop(병렬 처리 수준)를 설정합니다. 값이 클수록 더 많은 리소스를 사용합니다. 옵티마이저 힌트를 비활성화하려면 1(기본값)로 설정하세요.",
     saveAndConnect: "저장 후 연결",
     save: "저장",
     editTitle: "연결 편집",

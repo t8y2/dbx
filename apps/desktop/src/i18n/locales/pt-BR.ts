@@ -740,6 +740,8 @@ export default withEnglishFallback({
     gaussdbTargetServerTypeSlave: "Slave (standby)",
     gaussdbTargetServerTypeAny: "Qualquer (sem preferência)",
     gaussdbTargetServerTypeHint: "Controla a qual nó do cluster GaussDB o driver JDBC se conecta. Aplica-se apenas ao modo M (JDBC).",
+    gaussdbCountQueryDop: "Paralelismo de COUNT(*)",
+    gaussdbCountQueryDopHint: "Define query_dop (grau de paralelismo) para consultas COUNT(*) em tabelas grandes. Valores maiores usam mais recursos. Defina como 1 (padrão) para desativar a dica do otimizador.",
     saveAndConnect: "Salvar e Conectar",
     save: "Salvar",
     editTitle: "Editar Conexão",

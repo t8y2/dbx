@@ -705,6 +705,8 @@ export default withEnglishFallback({
     gaussdbTargetServerTypeSlave: "スレーブ（スタンバイ）",
     gaussdbTargetServerTypeAny: "任意（優先なし）",
     gaussdbTargetServerTypeHint: "JDBC ドライバーが接続する GaussDB クラスターのノードを制御します。M モード（JDBC）にのみ適用されます。",
+    gaussdbCountQueryDop: "COUNT(*) の並列度",
+    gaussdbCountQueryDopHint: "大規模テーブルの COUNT(*) クエリに query_dop（並列度）を設定します。値を大きくするとより多くのリソースを使用します。オプティマイザーヒントを無効にするには 1（既定値）を設定します。",
     saveAndConnect: "保存して接続",
     save: "保存",
     editTitle: "接続を編集",

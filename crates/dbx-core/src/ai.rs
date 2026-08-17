@@ -964,7 +964,12 @@ impl MiniMaxReasoningDetailState {
     fn replay_value(&self) -> serde_json::Value {
         let mut detail = self.latest.clone();
         if detail.get("text").is_some() {
-            detail["text"] = serde_json::Value::String(self.text.complete().to_string());
+            let text = if matches!(self.text.semantics, MiniMaxStreamSemantics::Incremental) {
+                &self.text.latest
+            } else {
+                self.text.complete()
+            };
+            detail["text"] = serde_json::Value::String(text.to_string());
         }
         detail
     }

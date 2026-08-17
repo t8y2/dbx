@@ -410,6 +410,7 @@ pub async fn disconnect_db(
         return Ok(Json(()));
     }
     app.running_queries.cancel_connection(&body.connection_id);
+    super::nats::close_nats_connection(&state, &body.connection_id).await;
     app.remove_connection_pools_detached(&body.connection_id).await;
     app.nacos_registry.drop_connection(&body.connection_id).await;
     #[cfg(feature = "mq-admin")]
@@ -537,6 +538,7 @@ pub async fn mcp_remove_connection(
     let connection_id = body.connection_id;
     let removed = state.app.storage.remove_connection_for_mcp(&connection_id).await.map_err(AppError::from)?;
     if removed {
+        super::nats::close_nats_connection(&state, &connection_id).await;
         state.app.configs.write().await.remove(&connection_id);
         state.app.session_credentials.clear_connection(&connection_id);
         state.app.remove_connection_pools_detached(&connection_id).await;

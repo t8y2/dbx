@@ -1346,6 +1346,7 @@ pub fn run() {
     builder
         .manage(CloseBehaviorState::new())
         .manage(AppLocaleState::new())
+        .manage(commands::nats_cmd::NatsServiceState::default())
         .on_page_load(|webview, payload| {
             if payload.event() == PageLoadEvent::Started {
                 if let Some(state) = webview.app_handle().try_state::<CloseBehaviorState>() {
@@ -2048,6 +2049,19 @@ pub fn run() {
             commands::mongo_cmd::mongo_find_one_and_update,
             commands::mongo_cmd::mongo_find_one_and_replace,
             commands::mongo_cmd::mongo_find_one_and_delete,
+            commands::nats_cmd::nats_test_connection,
+            commands::nats_cmd::nats_capture,
+            commands::nats_cmd::nats_publish,
+            commands::nats_cmd::nats_jetstream_info,
+            commands::nats_cmd::nats_list_streams,
+            commands::nats_cmd::nats_get_stream,
+            commands::nats_cmd::nats_list_consumers,
+            commands::nats_cmd::nats_get_consumer,
+            commands::nats_cmd::nats_fetch_history,
+            commands::nats_cmd::nats_start_subscription,
+            commands::nats_cmd::nats_stop_subscription,
+            commands::nats_cmd::nats_list_subscriptions,
+            commands::nats_cmd::nats_close_connection,
             #[cfg(feature = "mq-admin")]
             commands::mq_cmd::mq_test_connection,
             #[cfg(feature = "mq-admin")]

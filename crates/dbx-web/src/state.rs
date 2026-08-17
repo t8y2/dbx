@@ -1,6 +1,9 @@
 use dbx_core::connection::AppState;
+use dbx_core::nats::NatsService;
+use std::collections::VecDeque;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::{broadcast, watch, Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
@@ -27,6 +30,85 @@ pub struct NacosImportContext {
     pub plan_hash: String,
 }
 
+const NATS_WEB_REPLAY_MAX_EVENTS: usize = 1_000;
+const NATS_WEB_REPLAY_MAX_BYTES: usize = 16 * 1024 * 1024;
+
+pub struct NatsWebSubscription {
+    pub connection_id: String,
+    events: broadcast::Sender<String>,
+    history: std::sync::Mutex<(VecDeque<String>, usize)>,
+    lifecycle: Mutex<()>,
+    runtime_id: AtomicU64,
+}
+
+impl NatsWebSubscription {
+    pub fn new(connection_id: String) -> Self {
+        let (events, _) = broadcast::channel(512);
+        Self {
+            connection_id,
+            events,
+            history: std::sync::Mutex::new((VecDeque::new(), 0)),
+            lifecycle: Mutex::new(()),
+            runtime_id: AtomicU64::new(0),
+        }
+    }
+
+    pub fn set_runtime_id(&self, runtime_id: u64) {
+        self.runtime_id.store(runtime_id, Ordering::Release);
+    }
+
+    pub fn matches_runtime_id(&self, runtime_id: u64) -> bool {
+        runtime_id != 0 && self.runtime_id.load(Ordering::Acquire) == runtime_id
+    }
+
+    pub async fn lock_lifecycle(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.lifecycle.lock().await
+    }
+
+    pub fn send(&self, event: String) {
+        let mut history = self.history.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        while !history.0.is_empty()
+            && (history.0.len() >= NATS_WEB_REPLAY_MAX_EVENTS
+                || history.1.saturating_add(event.len()) > NATS_WEB_REPLAY_MAX_BYTES)
+        {
+            if let Some(removed) = history.0.pop_front() {
+                history.1 = history.1.saturating_sub(removed.len());
+            }
+        }
+        if event.len() <= NATS_WEB_REPLAY_MAX_BYTES {
+            history.1 = history.1.saturating_add(event.len());
+            history.0.push_back(event.clone());
+        }
+        let _ = self.events.send(event);
+    }
+
+    pub fn subscribe(&self) -> (Vec<String>, broadcast::Receiver<String>) {
+        // Holding history while subscribing means a late SSE client sees an
+        // event either in replay or in the live channel, never neither.
+        let history = self.history.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let receiver = self.events.subscribe();
+        (history.0.iter().cloned().collect(), receiver)
+    }
+}
+
+pub struct NatsWebRuntime {
+    pub service: Mutex<Option<NatsService>>,
+    pub event_forwarder_started: AtomicBool,
+    pub connection_operations: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    pub subscriptions: RwLock<HashMap<String, Arc<NatsWebSubscription>>>,
+}
+
+impl Default for NatsWebRuntime {
+    fn default() -> Self {
+        Self {
+            service: Mutex::new(None),
+            event_forwarder_started: AtomicBool::new(false),
+            connection_operations: Mutex::new(HashMap::new()),
+            subscriptions: RwLock::new(HashMap::new()),
+        }
+    }
+}
+
 pub struct WebState {
     pub app: Arc<AppState>,
     pub data_dir: PathBuf,
@@ -39,6 +121,7 @@ pub struct WebState {
     pub table_import_channels: RwLock<HashMap<String, watch::Sender<String>>>,
     pub sql_file_executions: RwLock<HashMap<String, CancellationToken>>,
     pub nacos_imports: RwLock<HashMap<String, NacosImportContext>>,
+    pub nats: NatsWebRuntime,
     pub login_rate_limit: Mutex<LoginRateLimit>,
     /// Completed Web export temp files waiting for the browser download.
     pub export_files: RwLock<HashMap<String, WebExportFile>>,
@@ -65,9 +148,26 @@ impl WebState {
             table_import_channels: RwLock::new(HashMap::new()),
             sql_file_executions: RwLock::new(HashMap::new()),
             nacos_imports: RwLock::new(HashMap::new()),
+            nats: NatsWebRuntime::default(),
             login_rate_limit: Mutex::new(LoginRateLimit { fail_count: 0, locked_until: None }),
             export_files: RwLock::new(HashMap::new()),
             ssh_prompts: Arc::new(crate::ssh_prompt::SshPromptHub::new()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::NatsWebSubscription;
+
+    #[test]
+    fn nats_subscription_replays_events_before_sse_connects() {
+        let subscription = NatsWebSubscription::new("connection-1".to_string());
+        subscription.send(r#"{"kind":"state","data":{"state":"active"}}"#.to_string());
+        let (replay, mut receiver) = subscription.subscribe();
+        assert_eq!(replay, [r#"{"kind":"state","data":{"state":"active"}}"#.to_string()]);
+
+        subscription.send(r#"{"kind":"message","data":{"sequence":2}}"#.to_string());
+        assert_eq!(receiver.try_recv().unwrap(), r#"{"kind":"message","data":{"sequence":2}}"#);
     }
 }

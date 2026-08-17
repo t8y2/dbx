@@ -31,6 +31,7 @@
   "vastbase": "0.1.45",
   "vertica": "0.1.41",
   "mongodb": "0.1.48",
+  "nats": "0.1.0",
   "highgo": "0.1.44",
   "uxdb": "0.1.13",
   "yashandb": "0.1.42",

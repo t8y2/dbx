@@ -1932,6 +1932,11 @@
           "profile": "rabbitmq",
           "label": "RabbitMQ",
           "agentKey": "rabbitmq"
+        },
+        {
+          "profile": "nats",
+          "label": "NATS",
+          "agentKey": "nats"
         }
       ],
       "supportLevel": "connect",

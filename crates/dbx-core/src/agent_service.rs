@@ -536,7 +536,7 @@ async fn ensure_agent_driver_ready_from(
     let registry = fetch_registry_from(source).await?;
     let progress = |_| {};
     if !am.is_driver_installed(db_type) {
-        install_agent_driver_from_registry(am, &registry, source, db_type, &progress, None, None, None).await?;
+        install_agent_driver_from_registry(am, &registry, source, db_type, &progress, None, None, &[]).await?;
     } else if am.driver_requires_java_runtime(db_type) {
         let state = am.load_state();
         let jre_key = state
@@ -545,7 +545,7 @@ async fn ensure_agent_driver_ready_from(
             .map(|driver| driver.jre.as_str())
             .or_else(|| agent_registry_driver(&registry, db_type).map(|driver| driver.jre.as_str()))
             .unwrap_or(DEFAULT_JRE_KEY);
-        ensure_jre_from_registry(am, &registry, source, jre_key, db_type, &progress, None, None, None).await?;
+        ensure_jre_from_registry(am, &registry, source, jre_key, db_type, &progress, None, None, &[]).await?;
     }
 
     agent_driver_runtime_readiness(am, db_type)
@@ -674,7 +674,11 @@ async fn upgrade_all_agent_drivers_with_registry(
                     progress,
                     Some((index + 1) as u32),
                     Some(total),
-                    Some(&token),
+                    // Observe BOTH the row token (per-driver cancel) and the
+                    // batch token (cancel-all): a batch cancel must interrupt a
+                    // driver whose download already started, not just one that
+                    // is still waiting to begin.
+                    &[&token, &batch_token],
                 )
                 .await
             };
@@ -711,8 +715,12 @@ fn is_cancelled_error(error: &str) -> bool {
     error.contains(AGENT_DOWNLOAD_CANCELED_ERROR)
 }
 
-async fn can_fallback_to_local_agent(_am: &AgentManager, _db_type: &str, token: &AgentInstallCancellation) -> bool {
-    !token.is_cancelled()
+async fn can_fallback_to_local_agent(
+    _am: &AgentManager,
+    _db_type: &str,
+    cancellations: &[&AgentInstallCancellation],
+) -> bool {
+    !cancellations.iter().any(|token| token.is_cancelled())
 }
 
 async fn driver_operation_lock(am: &AgentManager, db_type: &str) -> Arc<tokio::sync::Mutex<()>> {
@@ -816,7 +824,7 @@ pub async fn reinstall_agent_jre_from(
         None,
         None,
         None,
-        None,
+        &[],
     )
     .await?;
     let jre_dir = am.jre_dir(jre_key);
@@ -930,7 +938,7 @@ async fn install_agent_driver_with_batch(
         progress,
         current,
         total_drivers,
-        active_cancellation,
+        &[active_cancellation],
     )
     .await;
 
@@ -948,14 +956,13 @@ async fn install_agent_driver_from_registry_locked(
     progress: &impl Fn(AgentProgressEvent),
     current: Option<u32>,
     total_drivers: Option<u32>,
-    cancellation: Option<&Arc<AgentInstallCancellation>>,
+    cancellations: &[&AgentInstallCancellation],
 ) -> Result<(), String> {
     let _installation_guard = am.installation_operation_lock.read().await;
     let driver_lock = driver_operation_lock(am, db_type).await;
     let _driver_guard = driver_lock.lock().await;
-    let token: &AgentInstallCancellation =
-        cancellation.map(|token| token.as_ref()).expect("batch driver cancellation token is always registered");
-    install_agent_driver_from_registry(am, registry, source, db_type, progress, current, total_drivers, Some(token))
+    assert!(!cancellations.is_empty(), "batch driver cancellation token is always registered");
+    install_agent_driver_from_registry(am, registry, source, db_type, progress, current, total_drivers, cancellations)
         .await
 }
 
@@ -966,7 +973,7 @@ async fn install_agent_driver_with_batch_unlocked(
     progress: &impl Fn(AgentProgressEvent),
     current: Option<u32>,
     total_drivers: Option<u32>,
-    cancellation: &AgentInstallCancellation,
+    cancellations: &[&AgentInstallCancellation],
 ) -> Result<(), String> {
     match fetch_registry_from(source).await {
         Ok(registry) => {
@@ -978,7 +985,7 @@ async fn install_agent_driver_with_batch_unlocked(
                 progress,
                 current,
                 total_drivers,
-                Some(cancellation),
+                cancellations,
             )
             .await
             {
@@ -987,7 +994,7 @@ async fn install_agent_driver_with_batch_unlocked(
                     // Cancellation is terminal, not a registry failure. Falling
                     // back here would install a bundled JAR after the user
                     // explicitly aborted the download.
-                    if can_fallback_to_local_agent(am, db_type, cancellation).await {
+                    if can_fallback_to_local_agent(am, db_type, cancellations).await {
                         if let Some(local_jar) = find_local_agent_jar(db_type) {
                             install_local_agent_with_registry_jre(
                                 am,
@@ -998,7 +1005,7 @@ async fn install_agent_driver_with_batch_unlocked(
                                 progress,
                                 current,
                                 total_drivers,
-                                Some(cancellation),
+                                cancellations,
                             )
                             .await?;
                             return Ok(());
@@ -1011,7 +1018,7 @@ async fn install_agent_driver_with_batch_unlocked(
         Err(registry_err) => {
             // The registry request itself is not interruptible, so it must not
             // start the local fallback if cancellation arrived while waiting.
-            if can_fallback_to_local_agent(am, db_type, cancellation).await {
+            if can_fallback_to_local_agent(am, db_type, cancellations).await {
                 if let Some(local_jar) = find_local_agent_jar(db_type) {
                     install_local_agent(am, db_type, local_jar)?;
                     am.stop_daemon_by_key(db_type).await;
@@ -1033,7 +1040,7 @@ async fn ensure_jre_from_registry(
     progress: &impl Fn(AgentProgressEvent),
     current: Option<u32>,
     total_drivers: Option<u32>,
-    cancellation: Option<&AgentInstallCancellation>,
+    cancellations: &[&AgentInstallCancellation],
 ) -> Result<(), String> {
     // Fast path: already installed — return immediately without acquiring the
     // per-JRE lock.  The lock is only needed when a download + extract may be
@@ -1078,12 +1085,12 @@ async fn ensure_jre_from_registry(
         Some(db_type),
         current,
         total_drivers,
-        cancellation,
+        cancellations,
     )
     .await?;
     // A cancel may have fired right after the download completed but before we
     // replace the JRE directory — don't leave a half-extracted runtime.
-    if cancellation.is_some_and(|token| token.is_cancelled()) {
+    if cancellations.iter().any(|token| token.is_cancelled()) {
         std::fs::remove_file(&jre_archive).ok();
         return Err(AGENT_DOWNLOAD_CANCELED_ERROR.to_string());
     }
@@ -1163,7 +1170,7 @@ async fn install_local_agent_with_registry_jre(
     progress: &impl Fn(AgentProgressEvent),
     current: Option<u32>,
     total_drivers: Option<u32>,
-    cancellation: Option<&AgentInstallCancellation>,
+    cancellations: &[&AgentInstallCancellation],
 ) -> Result<(), String> {
     let jre_key = DEFAULT_JRE_KEY;
     if jre_needs_install(am, registry, jre_key) {
@@ -1176,12 +1183,12 @@ async fn install_local_agent_with_registry_jre(
             progress,
             current,
             total_drivers,
-            cancellation,
+            cancellations,
         )
         .await?;
     }
     install_local_agent_file(am, db_type, &local_jar)?;
-    if cancellation.is_some_and(|token| token.is_cancelled()) {
+    if cancellations.iter().any(|token| token.is_cancelled()) {
         std::fs::remove_file(am.driver_jar_path(db_type)).ok();
         return Err(AGENT_DOWNLOAD_CANCELED_ERROR.to_string());
     }
@@ -1207,7 +1214,7 @@ async fn install_agent_driver_from_registry(
     progress: &impl Fn(AgentProgressEvent),
     current: Option<u32>,
     total_drivers: Option<u32>,
-    cancellation: Option<&AgentInstallCancellation>,
+    cancellations: &[&AgentInstallCancellation],
 ) -> Result<(), String> {
     let Some(driver) = agent_registry_driver(registry, db_type) else {
         if let Some(local_jar) = find_local_agent_jar(db_type) {
@@ -1220,7 +1227,7 @@ async fn install_agent_driver_from_registry(
                 progress,
                 current,
                 total_drivers,
-                cancellation,
+                cancellations,
             )
             .await?;
             return Ok(());
@@ -1243,7 +1250,7 @@ async fn install_agent_driver_from_registry(
             progress,
             current,
             total_drivers,
-            cancellation,
+            cancellations,
         )
         .await?;
     }
@@ -1279,12 +1286,12 @@ async fn install_agent_driver_from_registry(
         Some(db_type),
         current,
         total_drivers,
-        cancellation,
+        cancellations,
     )
     .await?;
     // A cancel may have fired after the download completed but before the
     // artifact is moved into place — drop the partial artifact and bail.
-    if cancellation.is_some_and(|token| token.is_cancelled()) {
+    if cancellations.iter().any(|token| token.is_cancelled()) {
         std::fs::remove_file(&download_path).ok();
         return Err(AGENT_DOWNLOAD_CANCELED_ERROR.to_string());
     }
@@ -1312,7 +1319,7 @@ async fn install_agent_driver_from_registry(
     // Final cancel check before persisting installed state: the download is
     // already on disk, but a cancel fired during validation/extraction should
     // still prevent the driver from being marked installed.
-    if cancellation.is_some_and(|token| token.is_cancelled()) {
+    if cancellations.iter().any(|token| token.is_cancelled()) {
         std::fs::remove_file(&target_path).ok();
         return Err(AGENT_DOWNLOAD_CANCELED_ERROR.to_string());
     }
@@ -1522,15 +1529,16 @@ async fn download_with_progress(
     db_type: Option<&str>,
     current: Option<u32>,
     total_drivers: Option<u32>,
-    cancellation: Option<&AgentInstallCancellation>,
+    cancellations: &[&AgentInstallCancellation],
 ) -> Result<(), String> {
     const DOWNLOAD_ATTEMPTS: usize = 4;
     let expected_sha256 = normalized_sha256(expected_sha256)?;
-    // Observe the exact operation token threaded from the command layer (or the
-    // batch's per-driver token). Re-resolving by db_type would let a second
-    // same-driver install's token cancel this download — the exact bug the
-    // operation-scoped keying prevents.
-    let any_cancelled = || cancellation.is_some_and(|token| token.is_cancelled());
+    // Observe the exact operation tokens threaded from the command layer: a
+    // single install passes its own token; a batch passes BOTH the row token
+    // and the batch token so a batch cancel-all interrupts a driver whose
+    // download already started. An empty slice means "no cancellation" for the
+    // offline/auto paths.
+    let any_cancelled = || cancellations.iter().any(|token| token.is_cancelled());
     if any_cancelled() {
         return Err(AGENT_DOWNLOAD_CANCELED_ERROR.to_string());
     }
@@ -1638,7 +1646,7 @@ async fn download_with_progress(
         std::fs::write(&tmp_source, &source_url).map_err(|err| format!("Failed to write download source: {err}"))?;
         let mut downloaded = starting_size;
         let transfer_result = async {
-            let Some(cancellation) = cancellation else {
+            if cancellations.is_empty() {
                 while let Some(chunk) = resp.chunk().await.map_err(|err| format!("Download stream error: {err}"))? {
                     std::io::Write::write_all(&mut file, &chunk)
                         .map_err(|err| format!("Failed to write chunk: {err}"))?;
@@ -1650,9 +1658,10 @@ async fn download_with_progress(
                     ));
                 }
                 return std::io::Write::flush(&mut file).map_err(|err| format!("Failed to flush temp file: {err}"));
-            };
-            // A cancellation token is registered: await the stream and the
-            // cancel signal concurrently so a user cancel aborts mid-stream.
+            }
+            // Cancellation tokens are registered: await the stream and every
+            // cancel signal concurrently so any token (row-level or batch-level)
+            // aborts mid-stream.
             loop {
                 tokio::select! {
                     chunk = resp.chunk() => {
@@ -1668,7 +1677,9 @@ async fn download_with_progress(
                             None => break,
                         }
                     }
-                    _ = cancellation.cancelled() => {
+                    _ = futures::future::select_all(
+                        cancellations.iter().map(|token| Box::pin(token.cancelled())),
+                    ) => {
                         return Err(AGENT_DOWNLOAD_CANCELED_ERROR.to_string());
                     }
                 }
@@ -3597,7 +3608,7 @@ mod agent_registry_install_tests {
             &progress,
             None,
             None,
-            None,
+            &[],
         )
         .await
         .unwrap();
@@ -3639,7 +3650,7 @@ mod agent_registry_install_tests {
             &progress,
             None,
             None,
-            None,
+            &[],
         )
         .await
         .unwrap();
@@ -3679,7 +3690,7 @@ mod agent_registry_install_tests {
             &progress,
             None,
             None,
-            None,
+            &[],
         )
         .await
         .unwrap();
@@ -3770,6 +3781,122 @@ mod agent_registry_install_tests {
     }
 
     #[tokio::test]
+    async fn batch_cancel_all_aborts_in_flight_downloads_without_persisting() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let _test_guard = ENSURE_AGENT_TEST_LOCK.lock().await;
+        let manager = std::sync::Arc::new(test_manager("batch-cancel-in-flight"));
+        let db_type = "oracle";
+        let version = "2.0.0";
+        // Pad the native binary to a sizeable payload so the server can stream
+        // it slowly and the download stays in-flight when cancel-all fires.
+        let body_size = 256 * 1024usize;
+        let mut native_bytes = current_platform_native_binary();
+        native_bytes.resize(body_size, 0xAA);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let native_url = format!("http://{addr}/dbx-agent-oracle");
+        let registry = registry_with_native_and_legacy_jar(db_type, version, &native_url, native_bytes.len() as u64);
+
+        // Mark the driver installed at an older version so the batch considers
+        // it updatable.
+        let mut state = manager.load_state();
+        state.java_runtime = JavaRuntimeConfig { mode: JavaRuntimeMode::System, custom_java_path: None };
+        state.installed_drivers.insert(
+            db_type.to_string(),
+            InstalledDriver {
+                version: "1.0.0".to_string(),
+                installed_at: "2026-01-01T00:00:00Z".to_string(),
+                jre: DEFAULT_JRE_KEY.to_string(),
+            },
+        );
+        manager.save_state(&state).unwrap();
+
+        // Slow server: serve the exact payload size slowly so the download is
+        // still transferring when the batch cancel-all fires.
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept");
+            let mut buf = [0u8; 1024];
+            let _ = socket.read(&mut buf).await;
+            let header = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {body_size}\r\nContent-Type: application/octet-stream\r\nConnection: close\r\n\r\n"
+            );
+            socket.write_all(header.as_bytes()).await.expect("write header");
+            let chunk = vec![0xAAu8; 4096];
+            for _ in 0..(body_size / 4096) {
+                socket.write_all(&chunk).await.expect("write chunk");
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        });
+
+        // Register the batch operation + shared batch token (as the command
+        // layer does) and start the upgrade.
+        let operation_id = "batch-op";
+        let batch_token = manager.begin_install_cancellation(&batch_cancellation_key(operation_id)).await;
+        let batch_token_task = Arc::clone(&batch_token);
+        let started = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let started_progress = started.clone();
+        let task_manager = Arc::clone(&manager);
+        let mut batch_task = tokio::spawn(async move {
+            upgrade_all_agent_drivers_with_registry(
+                &task_manager,
+                &registry,
+                DownloadSource::Official,
+                &|event| {
+                    if event.step == "driver" && event.downloaded.unwrap_or(0) > 0 {
+                        started_progress.store(true, std::sync::atomic::Ordering::SeqCst);
+                    }
+                },
+                Some(&batch_token_task),
+                Some(operation_id),
+            )
+            .await
+        });
+
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+        while !started.load(std::sync::atomic::Ordering::SeqCst) {
+            if tokio::time::Instant::now() >= deadline {
+                server.abort();
+                if let Ok(joined) = tokio::time::timeout(std::time::Duration::from_secs(1), &mut batch_task).await {
+                    panic!("batch download never started; batch finished with: {joined:?}");
+                }
+                batch_task.abort();
+                panic!("batch download never started");
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+
+        // Cancel-all must abort the already-transferring driver.
+        cancel_agent_batch_upgrade(&manager, Some(operation_id)).await.unwrap();
+
+        let result = tokio::time::timeout(std::time::Duration::from_secs(30), batch_task)
+            .await
+            .expect("batch did not finish after cancel-all")
+            .expect("batch panicked")
+            .expect("batch returned an unexpected error");
+        server.abort();
+        manager.finish_install_cancellation(&batch_cancellation_key(operation_id), &batch_token).await;
+
+        assert_eq!(result.upgraded, 0);
+        assert!(result.failed.is_empty(), "cancelled drivers must not be reported as failed: {:?}", result.failed);
+        assert!(result.cancelled >= 1, "the in-flight driver must be reported cancelled, got {result:?}");
+        // The pre-existing install is untouched: cancel-all must not persist the
+        // new (in-flight) download as the installed version.
+        assert_eq!(
+            manager.load_state().installed_drivers.get(db_type).map(|driver| driver.version.as_str()),
+            Some("1.0.0"),
+            "batch cancel-all must not persist the cancelled download as installed"
+        );
+        assert!(
+            !manager.driver_native_path(db_type).exists(),
+            "cancelled download must not leave the driver artifact behind"
+        );
+        assert!(
+            !download_temp_path(&manager.driver_native_path(db_type)).exists(),
+            "cancelled download must clean up its temp file"
+        );
+    }
+
+    #[tokio::test]
     async fn shared_jre_is_not_downloaded_again_after_the_first_install_persists_its_version() {
         let manager = test_manager("shared-jre-deduplication");
         let jre_key = DEFAULT_JRE_KEY;
@@ -3790,7 +3917,7 @@ mod agent_registry_install_tests {
             &progress,
             Some(1),
             Some(2),
-            None,
+            &[],
         )
         .await
         .unwrap();
@@ -3807,7 +3934,7 @@ mod agent_registry_install_tests {
             &progress,
             Some(2),
             Some(2),
-            None,
+            &[],
         )
         .await
         .unwrap();
@@ -3857,7 +3984,7 @@ mod agent_registry_install_tests {
             &|_| {},
             None,
             None,
-            None,
+            &[],
         )
         .await
         .unwrap();
@@ -3933,7 +4060,7 @@ mod agent_registry_install_tests {
                 &progress,
                 Some(1),
                 Some(1),
-                Some(&token),
+                &[&token],
             )
             .await
         })
@@ -3951,7 +4078,7 @@ mod agent_registry_install_tests {
                 &progress,
                 Some(1),
                 Some(1),
-                Some(&token),
+                &[&token],
             ),
         )
         .await
@@ -4019,11 +4146,11 @@ mod agent_registry_install_tests {
     async fn cancelled_install_never_enters_local_fallback() {
         let manager = test_manager("cancel-local-fallback");
         let token = manager.begin_install_cancellation("oracle").await;
-        assert!(can_fallback_to_local_agent(&manager, "oracle", &token).await);
+        assert!(can_fallback_to_local_agent(&manager, "oracle", &[&token]).await);
 
         token.cancel();
 
-        assert!(!can_fallback_to_local_agent(&manager, "oracle", &token).await);
+        assert!(!can_fallback_to_local_agent(&manager, "oracle", &[&token]).await);
     }
 
     #[tokio::test]
@@ -4065,7 +4192,7 @@ mod agent_registry_install_tests {
             Some(db_type),
             None,
             None,
-            Some(&token),
+            &[&token],
         )
         .await
         .expect_err("a pre-cancelled token must abort the download before any transfer");
@@ -4124,7 +4251,7 @@ mod agent_registry_install_tests {
                 Some(db_type),
                 None,
                 None,
-                Some(&token_for_task),
+                &[&token_for_task],
             )
             .await
         });
@@ -4287,7 +4414,7 @@ mod agent_registry_install_tests {
             &progress,
             None,
             None,
-            None,
+            &[],
         )
         .await
         .unwrap_err();

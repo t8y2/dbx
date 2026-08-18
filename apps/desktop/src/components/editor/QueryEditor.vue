@@ -102,7 +102,7 @@ import {
   type QueryEditorTableReferencePayload,
 } from "@/lib/editor/queryEditorTableDrop";
 import type { SqlHighlighter } from "@/lib/sql/sqlHighlighter";
-import { EDITOR_FONT_FAMILY_CSS_VAR, EDITOR_FONT_SIZE_CSS_VAR, editorDiagnosticColors, editorThemeAppearanceFor, loadEditorTheme, editorFontTheme, sqlCompletionTheme, sqlSemanticHighlightTheme } from "@/lib/editor/editorThemes";
+import { EDITOR_FONT_FAMILY_CSS_VAR, EDITOR_FONT_SIZE_CSS_VAR, editorDiagnosticColors, editorThemeAppearanceFor, loadEditorTheme, editorFontTheme, shellLineCommentTheme, sqlCompletionTheme, sqlSemanticHighlightTheme } from "@/lib/editor/editorThemes";
 import { createStatementGutterMarkerDom, shouldShowStatementGutter } from "@/lib/editor/codemirrorStatementGutter";
 import { createQueryEditorSearchKeymap } from "@/lib/editor/queryEditorSearchKeymap";
 import { searchKeymapWithoutModD } from "@/lib/editor/codemirrorSearchKeymap";
@@ -121,6 +121,8 @@ import { sqlSemanticTableNameSpansForSyntaxTree } from "@/lib/editor/codemirrorS
 import { startsQueryEditorRectangularSelection, usesQueryEditorObjectNavigationModifier } from "@/lib/editor/queryEditorPointerSelection";
 import { LARGE_PASTE_HISTORY_USER_EVENT, normalizeQueryEditorPasteText, recoverableNativePasteSuffix, shouldRecoverLargeTauriPaste } from "@/lib/editor/queryEditorLargePaste";
 import { computePasteCaretResyncTarget } from "@/lib/editor/queryEditorPasteCaretResync";
+import { queryEditorCommentTokens, queryEditorLineCommentToken } from "@/lib/editor/queryEditorLineComment";
+import { createShellLineCommentHighlight } from "@/lib/editor/codemirrorShellLineCommentHighlight";
 import { extendQueryEditorSelection, runQueryEditorAltExtendSelection } from "@/lib/editor/queryEditorExtendSelection";
 import { createQueryEditorCompletionShortcutBindings } from "@/lib/editor/queryEditorCompletionShortcut";
 import type { StatementExecutionMarker } from "@/lib/tabs/tabPresentation";
@@ -4471,7 +4473,7 @@ onMounted(async () => {
     langSql,
     { autocompletion, startCompletion, acceptCompletion, closeBrackets, closeBracketsKeymap, snippetCompletion, completionStatus, completionKeymap, insertCompletionText, nextSnippetField, closeCompletion },
     { copyLineDown, copyLineUp, deleteLine, indentLess, indentMore, insertNewlineKeepIndent, moveLineDown, moveLineUp, redo, selectAll, undo, toggleLineComment, toggleBlockComment, history, defaultKeymap, historyKeymap },
-    { bracketMatching, foldGutter, indentOnInput, indentUnit, syntaxHighlighting, defaultHighlightStyle, foldKeymap, toggleFold, ensureSyntaxTree },
+    { bracketMatching, foldGutter, indentOnInput, indentUnit, syntaxHighlighting, defaultHighlightStyle, foldKeymap, toggleFold, ensureSyntaxTree, highlightingFor, syntaxTree },
     { searchKeymap },
   ] = await Promise.all([import("@codemirror/view"), import("@codemirror/state"), import("@codemirror/lang-sql"), import("@codemirror/autocomplete"), import("@codemirror/commands"), import("@codemirror/language"), import("@codemirror/search")]);
   editorViewModule = {
@@ -4741,10 +4743,17 @@ onMounted(async () => {
       override: [async (context: CompletionContext) => provideSqlCompletions(context)],
     });
 
-  buildSqlLanguageExtension = () =>
+  const shellLineCommentHighlightPlugin = createShellLineCommentHighlight({ ViewPlugin, Decoration, highlightingFor, syntaxTree });
+  buildSqlLanguageExtension = () => [
     langSql.sql({
       dialect: createDbxCodeMirrorSqlDialect(langSql, props.syntaxDialect ?? props.dialect, props.databaseType, sqlDriverProfile.value),
-    });
+    }),
+    // Non-SQL editors (MongoDB shell) keep the SQL grammar for highlighting, so override the
+    // comment marker that toggleLineComment reads from language data.
+    Prec.highest(EditorState.languageData.of(() => [{ commentTokens: queryEditorCommentTokens(props.databaseType) }])),
+    // The SQL grammar does not tokenize `//`, so those comments are highlighted by hand.
+    queryEditorLineCommentToken(props.databaseType) === "//" ? shellLineCommentHighlightPlugin : [],
+  ];
   buildSqlSemanticHighlightExtension = () => [
     ViewPlugin.fromClass(
       class {
@@ -4789,6 +4798,7 @@ onMounted(async () => {
       { decorations: (value) => value.decorations },
     ),
     sqlSemanticHighlightTheme(EditorView),
+    shellLineCommentTheme(EditorView),
   ];
 
   const initialSettings = settingsStore.editorSettings;

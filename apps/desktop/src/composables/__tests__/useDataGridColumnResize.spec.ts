@@ -16,6 +16,7 @@ function createResizeState(options: {
   compactColumnHeaderActions?: boolean;
   indexIndicatorColumnIndexes?: number[] | ReturnType<typeof ref<number[]>>;
   headerTextWidth?: number;
+  displayValue?: (value: string | number | boolean | null, columnIndex: number) => string | number | boolean | null;
 }) {
   const compact = ref(options.compactColumnHeaderActions ?? true);
   const headerTextWidth = ref(options.headerTextWidth);
@@ -34,6 +35,7 @@ function createResizeState(options: {
     columnStructureSignature: computed(() => createDataGridColumnStructureSignature(options.columns, options.columnTypes)),
     measureHeaderText: () => headerTextWidth.value,
     headerMeasurementKey,
+    displayValue: options.displayValue,
   });
   return {
     ...state,
@@ -105,6 +107,23 @@ describe("useDataGridColumnResize", () => {
     state.autoFitColumn(0);
 
     expect(state.columnWidths.value[0]).toBeGreaterThan(60);
+  });
+
+  it("measures formatted display values instead of raw source values", () => {
+    const raw = createResizeState({
+      columns: ["event_time"],
+      rows: [[1786958306456]],
+    });
+    const formatted = createResizeState({
+      columns: ["event_time"],
+      rows: [[1786958306456]],
+      displayValue: () => "2026-08-17T17:18:26.456+08:00",
+    });
+
+    raw.initColumnWidths();
+    formatted.initColumnWidths();
+
+    expect(formatted.columnWidths.value[0]).toBeGreaterThan(raw.columnWidths.value[0]);
   });
 
   it("clamps manual column resizing to the minimum width", () => {

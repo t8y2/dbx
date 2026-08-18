@@ -45,7 +45,7 @@ DBX 桌面版基于 Tauri、Vue 和 Rust。仓库当前要求：
 | pnpm | 10.27.0 |
 | Rust | 1.88 或更高版本 |
 | Git | 当前稳定版本 |
-| Make | macOS 和 Linux 推荐使用 |
+| Make | macOS 和 Linux 需要；Windows 可选 |
 
 ### 安装 Node.js 和 pnpm
 
@@ -106,7 +106,15 @@ Tauri 的完整系统要求可以参考 [Tauri 官方前置依赖文档](https:/
     1. 安装 [Microsoft C++ Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/)。
     2. 在安装器中选择 **Desktop development with C++**。
     3. 确认已安装 Windows 10/11 SDK 和 WebView2。Windows 11 通常已自带 WebView2。
-    4. 使用 PowerShell 执行本页的 Windows 命令。
+    4. 安装 [Strawberry Perl](https://github.com/StrawberryPerl/Perl-Dist-Strawberry/releases)（编译内置 OpenSSL 所需）：
+
+        ```powershell
+        winget install StrawberryPerl.StrawberryPerl
+        ```
+
+        DBX 默认启用 `sqlite-sqlcipher` 特性，需要从源码编译 SQLCipher 和 OpenSSL，而 Windows 上编译 OpenSSL 必须使用 Perl 执行 `Configure` 脚本。安装后请重新打开终端，使 `perl` 进入 `PATH`。
+
+    5. 使用 PowerShell 执行本页的 Windows 命令。
 
     Windows 不必安装 Make，本页会同时给出对应的 pnpm 命令。
 
@@ -153,7 +161,7 @@ make
 
 `make` 会使用锁文件安装依赖，然后启动 Tauri 桌面开发环境。第一次编译 Rust 依赖需要较长时间，后续启动会明显更快。
 
-如需轻量桌面开发构建，可以保留 DuckDB sidecar 支持，同时跳过其他默认 Rust feature：
+如需轻量桌面开发构建，可以关闭默认 Rust feature，仅启用 DuckDB sidecar 和 DynamoDB：
 
 ```bash
 make dev-fast
@@ -460,7 +468,7 @@ git push --force-with-lease
 
 ### 第一次 Rust 编译很慢
 
-这是正常现象。轻量桌面开发可以使用仍支持 DuckDB 的 `make dev-fast`。`make cargo-check-fast` 和 `make cargo-test-fast` 会跳过全部可选默认 feature，因此不会验证 DuckDB 专用路径。
+这是正常现象。轻量桌面开发可以使用 `make dev-fast`，它关闭默认 Rust feature，仅启用 DuckDB sidecar 和 DynamoDB。`make cargo-check-fast` 和 `make cargo-test-fast` 会跳过全部可选默认 feature，因此不会验证 DuckDB 专用路径。
 
 ### pnpm 提示版本不正确
 

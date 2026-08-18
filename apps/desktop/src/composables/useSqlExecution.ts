@@ -235,7 +235,8 @@ export function useSqlExecution(deps: {
   }
 
   function prepareSqlParameterDialog(sql: string, sourceOffset?: number, options: SqlExecutionOptions = {}, continuation?: (sql: string, sourceOffset?: number) => Promise<void> | void): boolean {
-    const databaseType = deps.activeConnection.value?.db_type;
+    const connection = deps.activeConnection.value;
+    const databaseType = effectiveDatabaseTypeForConnection(connection) ?? connection?.db_type;
     const toggles = resolveSqlVariableSyntaxToggles(settingsStore.editorSettings.sqlVariableSyntaxOverrides, databaseType, settingsStore.editorSettings.sqlVariableSubstitutionEnabled);
     const enabledSyntaxes = enabledSqlParameterSyntaxes(toggles);
     const parameters = extractSqlParameterDescriptors(sql, { databaseType, enabledSyntaxes });

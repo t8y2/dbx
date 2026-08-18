@@ -2602,7 +2602,12 @@ function focusSearch(): boolean {
 function onSearchKeydown(event: KeyboardEvent) {
   if (!isCancelSearchShortcut(event)) return;
   event.preventDefault();
+  clearObjectSearch();
+}
+
+function clearObjectSearch() {
   search.value = "";
+  getSearchInput()?.focus();
 }
 
 defineExpose({ focusSearch, refresh });
@@ -2847,7 +2852,10 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
       <div class="flex min-w-0 flex-1 items-center gap-2">
         <div class="relative min-w-0 flex-1">
           <Search class="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
-          <Input v-model="search" data-object-search-input class="h-7 pl-8 text-xs" :placeholder="t('objects.search')" @keydown="onSearchKeydown" />
+          <Input v-model="search" data-object-search-input class="h-7 pl-8 pr-6 text-xs" :placeholder="t('objects.search')" @keydown="onSearchKeydown" />
+          <button v-if="search" type="button" class="absolute right-1.5 top-1/2 flex h-4 w-4 -translate-y-1/2 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground" :aria-label="t('common.clear')" @click="clearObjectSearch">
+            <X class="h-3 w-3" />
+          </button>
         </div>
         <div v-if="showObjectFilter" class="flex h-7 shrink-0 items-center rounded border bg-muted/20 p-0.5">
           <button

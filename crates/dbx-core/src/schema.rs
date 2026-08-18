@@ -8543,19 +8543,22 @@ mod ddl_tests {
         }
     }
 
+    fn assert_table_ddl_options(
+        options: TableDdlOptions,
+        include_partitions: bool,
+        portable_oracle: bool,
+        include_postgres_access: bool,
+    ) {
+        assert_eq!(options.include_partitions, include_partitions);
+        assert_eq!(options.portable_oracle, portable_oracle);
+        assert_eq!(options.include_postgres_access, include_postgres_access);
+    }
+
     #[test]
     fn table_structure_export_includes_partition_tree() {
-        assert!(TableDdlOptions::EXPORT.include_partitions);
-        assert!(TableDdlOptions::EXPORT.portable_oracle);
-        assert!(!TableDdlOptions::EXPORT.include_postgres_access);
-
-        assert!(!TableDdlOptions::RELATION_EXPORT.include_partitions);
-        assert!(TableDdlOptions::RELATION_EXPORT.portable_oracle);
-        assert!(!TableDdlOptions::RELATION_EXPORT.include_postgres_access);
-
-        assert!(TableDdlOptions::DISPLAY.include_partitions);
-        assert!(!TableDdlOptions::DISPLAY.portable_oracle);
-        assert!(TableDdlOptions::DISPLAY.include_postgres_access);
+        assert_table_ddl_options(TableDdlOptions::EXPORT, true, true, false);
+        assert_table_ddl_options(TableDdlOptions::RELATION_EXPORT, false, true, false);
+        assert_table_ddl_options(TableDdlOptions::DISPLAY, true, false, true);
     }
 
     #[test]

@@ -349,7 +349,7 @@ function getObjectIconColor(kind: DiffObjectKind): string {
       </Pane>
 
       <Pane size="70" min-size="40">
-        <div ref="editorContainer" class="h-full w-full" />
+        <div ref="editorContainer" class="deploy-sql-editor h-full w-full" />
       </Pane>
     </Splitpanes>
 
@@ -389,6 +389,19 @@ function getObjectIconColor(kind: DiffObjectKind): string {
 </template>
 
 <style scoped>
+/* CodeMirror's own selection layer isn't styled here, so selecting text in the deploy
+   script preview renders with no visible highlight at all in some environments. Match
+   the override already used by the other read-only CodeMirror views (DdlViewDialog,
+   NacosAdminConsole). */
+.deploy-sql-editor :deep(.cm-selectionBackground),
+.deploy-sql-editor :deep(.cm-focused > .cm-scroller > .cm-selectionLayer .cm-selectionBackground) {
+  background: var(--dbx-editor-selection-background, rgba(59, 130, 246, 0.35)) !important;
+}
+
+.deploy-sql-editor :deep(.cm-content ::selection) {
+  background: var(--dbx-editor-selection-background, rgba(59, 130, 246, 0.35)) !important;
+}
+
 :deep(.splitpanes--vertical > .splitpanes__splitter) {
   width: 4px;
   background: var(--border);

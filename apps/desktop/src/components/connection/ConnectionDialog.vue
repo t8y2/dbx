@@ -4108,9 +4108,11 @@ function connectionConfigForSubmit(id: string, generatedName = ""): ConnectionCo
   } else if (supportsGaussdbIdentifierQuoteStyle(config)) {
     const style = gaussdbIdentifierQuoteStyle(config);
     const targetServerType = gaussdbTargetServerType(config);
+    const countQueryDop = gaussdbCountQueryDop(config);
     config.external_config = undefined;
     setGaussdbIdentifierQuoteStyle(config, style);
     setGaussdbTargetServerType(config, targetServerType);
+    setGaussdbCountQueryDop(config, countQueryDop);
   } else if (!isDoltDriverProfile(config.driver_profile)) {
     config.external_config = undefined;
   }

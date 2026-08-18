@@ -995,7 +995,8 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
         </DialogTitle>
       </DialogHeader>
       <!-- Grid items use min-content sizing by default; shrink and wrap long file paths before they can displace the footer actions. -->
-      <div class="min-w-0 space-y-2">
+      <!-- 限制最大高度并允许滚动，确保内容超长时底部操作按钮始终可见可点-->
+      <div class="max-h-120 min-h-0 min-w-0 overflow-y-auto space-y-2">
         <p class="wrap-anywhere text-sm text-muted-foreground">{{ closeConfirmMessage }}</p>
         <Popover v-if="showCloseConfirmBulkActions" :open="closeConfirmListOpen" @update:open="closeConfirmListOpen = $event">
           <PopoverTrigger as-child>

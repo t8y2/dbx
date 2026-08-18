@@ -7,6 +7,13 @@ use std::collections::HashSet;
 mod data_grid_neo4j_sql;
 use data_grid_neo4j_sql::{build_neo4j_data_grid_rollback_statements, build_neo4j_data_grid_save_statements};
 
+#[path = "data_grid_iotdb_sql.rs"]
+mod data_grid_iotdb_sql;
+use data_grid_iotdb_sql::{
+    build_iotdb_data_grid_rollback_statements, build_iotdb_data_grid_save_statements, uses_iotdb_table_model_save,
+    validate_iotdb_existing_rows,
+};
+
 #[path = "data_grid_tdengine_sql.rs"]
 mod data_grid_tdengine_sql;
 use data_grid_tdengine_sql::{
@@ -540,24 +547,45 @@ pub fn build_data_grid_context_filter_condition(options: DataGridContextFilterCo
         )),
         DataGridContextFilterMode::LessThan => Some(format!(
             "{column} < {}",
-            format_grid_sql_literal(value, options.database_type, options.column_info.as_ref())
+            format_data_grid_context_filter_literal(
+                value,
+                options.database_type,
+                &options.column_name,
+                options.column_info.as_ref()
+            )
         )),
         DataGridContextFilterMode::LessThanOrEqual => Some(format!(
             "{column} <= {}",
-            format_grid_sql_literal(value, options.database_type, options.column_info.as_ref())
+            format_data_grid_context_filter_literal(
+                value,
+                options.database_type,
+                &options.column_name,
+                options.column_info.as_ref()
+            )
         )),
         DataGridContextFilterMode::GreaterThan => Some(format!(
             "{column} > {}",
-            format_grid_sql_literal(value, options.database_type, options.column_info.as_ref())
+            format_data_grid_context_filter_literal(
+                value,
+                options.database_type,
+                &options.column_name,
+                options.column_info.as_ref()
+            )
         )),
         DataGridContextFilterMode::GreaterThanOrEqual => Some(format!(
             "{column} >= {}",
-            format_grid_sql_literal(value, options.database_type, options.column_info.as_ref())
+            format_data_grid_context_filter_literal(
+                value,
+                options.database_type,
+                &options.column_name,
+                options.column_info.as_ref()
+            )
         )),
         DataGridContextFilterMode::In => build_data_grid_context_membership_filter_condition(
             &column,
             &options.values,
             options.database_type,
+            &options.column_name,
             options.column_info.as_ref(),
             false,
         ),
@@ -565,6 +593,7 @@ pub fn build_data_grid_context_filter_condition(options: DataGridContextFilterCo
             &column,
             &options.values,
             options.database_type,
+            &options.column_name,
             options.column_info.as_ref(),
             true,
         ),
@@ -573,6 +602,7 @@ pub fn build_data_grid_context_filter_condition(options: DataGridContextFilterCo
             value,
             options.end_value.as_ref(),
             options.database_type,
+            &options.column_name,
             options.column_info.as_ref(),
             false,
         ),
@@ -581,24 +611,55 @@ pub fn build_data_grid_context_filter_condition(options: DataGridContextFilterCo
             value,
             options.end_value.as_ref(),
             options.database_type,
+            &options.column_name,
             options.column_info.as_ref(),
             true,
         ),
         DataGridContextFilterMode::Equals => Some(format!(
             "{column} = {}",
-            format_grid_sql_literal(value, options.database_type, options.column_info.as_ref())
+            format_data_grid_context_filter_literal(
+                value,
+                options.database_type,
+                &options.column_name,
+                options.column_info.as_ref()
+            )
         )),
         DataGridContextFilterMode::NotEquals => Some(format!(
             "{column} <> {}",
-            format_grid_sql_literal(value, options.database_type, options.column_info.as_ref())
+            format_data_grid_context_filter_literal(
+                value,
+                options.database_type,
+                &options.column_name,
+                options.column_info.as_ref()
+            )
         )),
     }
+}
+
+fn format_data_grid_context_filter_literal(
+    value: &Value,
+    database_type: Option<DatabaseType>,
+    column_name: &str,
+    column_info: Option<&DataGridColumnInfo>,
+) -> String {
+    if database_type == Some(DatabaseType::Iotdb) && column_info.is_none() && column_name.eq_ignore_ascii_case("time") {
+        if let Some(value) = value.as_str().filter(|value| is_decimal_i64(value)) {
+            return value.to_string();
+        }
+    }
+    format_grid_sql_literal(value, database_type, column_info)
+}
+
+fn is_decimal_i64(value: &str) -> bool {
+    let digits = value.strip_prefix('-').unwrap_or(value);
+    !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit()) && value.parse::<i64>().is_ok()
 }
 
 fn build_data_grid_context_membership_filter_condition(
     column: &str,
     values: &[Value],
     database_type: Option<DatabaseType>,
+    column_name: &str,
     column_info: Option<&DataGridColumnInfo>,
     negated: bool,
 ) -> Option<String> {
@@ -614,7 +675,7 @@ fn build_data_grid_context_membership_filter_condition(
             has_null = true;
             continue;
         }
-        let literal = format_grid_sql_literal(value, database_type, column_info);
+        let literal = format_data_grid_context_filter_literal(value, database_type, column_name, column_info);
         if seen_literals.insert(literal.clone()) {
             literals.push(literal);
         }
@@ -670,6 +731,7 @@ fn build_data_grid_context_range_filter_condition(
     start_value: &Value,
     end_value: Option<&Value>,
     database_type: Option<DatabaseType>,
+    column_name: &str,
     column_info: Option<&DataGridColumnInfo>,
     negated: bool,
 ) -> Option<String> {
@@ -677,8 +739,8 @@ fn build_data_grid_context_range_filter_condition(
     if start_value.is_null() || end_value.is_null() {
         return None;
     }
-    let start = format_grid_sql_literal(start_value, database_type, column_info);
-    let end = format_grid_sql_literal(end_value, database_type, column_info);
+    let start = format_data_grid_context_filter_literal(start_value, database_type, column_name, column_info);
+    let end = format_data_grid_context_filter_literal(end_value, database_type, column_name, column_info);
     if database_type == Some(DatabaseType::Neo4j) {
         return if negated {
             Some(format!("({column} < {start} OR {column} > {end})"))
@@ -896,6 +958,9 @@ fn build_neo4j_data_grid_column_distinct_values_sql(options: &DataGridColumnDist
 }
 
 fn validate_data_grid_save(options: &DataGridSaveStatementOptions) -> Option<String> {
+    if let Some(error) = validate_iotdb_existing_rows(options) {
+        return Some(error);
+    }
     if let Some(error) = validate_tdengine_inserted_rows(options) {
         return Some(error);
     }
@@ -1114,6 +1179,9 @@ fn build_data_grid_save_statements(
     if options.database_type == Some(DatabaseType::Tdengine) {
         return build_tdengine_data_grid_save_statements(options);
     }
+    if uses_iotdb_table_model_save(options) {
+        return build_iotdb_data_grid_save_statements(options);
+    }
 
     let save_columns = effective_columns(options);
     let column_info = options.table_meta.columns.as_deref().unwrap_or(&[]);
@@ -1283,6 +1351,9 @@ fn build_data_grid_rollback_statements(
     }
     if options.database_type == Some(DatabaseType::Tdengine) {
         return build_tdengine_data_grid_rollback_statements(options);
+    }
+    if uses_iotdb_table_model_save(options) {
+        return build_iotdb_data_grid_rollback_statements(options);
     }
     if options.database_type == Some(DatabaseType::ClickHouse) {
         return Vec::new();
@@ -1836,6 +1907,18 @@ pub fn format_grid_sql_literal(
         return format_pg_array_sql_literal(arr);
     }
     let text = value.as_str().map_or_else(|| value.to_string(), ToString::to_string);
+    if database_type == Some(DatabaseType::Iotdb)
+        && column_info.is_some_and(|column| {
+            column.data_type.trim().split(['(', ' ']).next().is_some_and(|base| base.eq_ignore_ascii_case("timestamp"))
+        })
+    {
+        if let Ok(timestamp) = text.parse::<i64>() {
+            // IoTDB can use nanosecond epoch values that exceed JavaScript's
+            // safe integer range, so its Agent transports TIMESTAMP cells as
+            // decimal strings. Keep those strings as numeric SQL literals.
+            return timestamp.to_string();
+        }
+    }
     if is_mysql_binary_literal_column(database_type, column_info) {
         if let Some(literal) = format_mysql_binary_literal_text(&text) {
             // DBX result values expose binary columns as prefixed hex; keep them
@@ -3704,6 +3787,40 @@ mod tests {
             })
             .as_deref(),
             Some("[active] = 0")
+        );
+    }
+
+    #[test]
+    fn keeps_iotdb_tree_time_epoch_filters_unquoted_without_column_metadata() {
+        let condition = |mode, value, values, end_value| {
+            build_data_grid_context_filter_condition(DataGridContextFilterConditionOptions {
+                database_type: Some(DatabaseType::Iotdb),
+                identifier_quote: None,
+                column_name: "Time".to_string(),
+                mode,
+                value,
+                values,
+                end_value,
+                column_info: None,
+            })
+        };
+
+        assert_eq!(
+            condition(DataGridContextFilterMode::Equals, json!("1786954706123"), Vec::new(), None),
+            Some("Time = 1786954706123".to_string())
+        );
+        assert_eq!(
+            condition(
+                DataGridContextFilterMode::Between,
+                json!("1786954706123"),
+                Vec::new(),
+                Some(json!("1786958307123"))
+            ),
+            Some("Time BETWEEN 1786954706123 AND 1786958307123".to_string())
+        );
+        assert_eq!(
+            condition(DataGridContextFilterMode::Equals, json!("not-an-epoch"), Vec::new(), None),
+            Some("Time = 'not-an-epoch'".to_string())
         );
     }
 

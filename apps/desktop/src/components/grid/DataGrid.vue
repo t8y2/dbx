@@ -88,6 +88,7 @@ import { uuid } from "@/lib/common/utils";
 import { generateCellValues, type CellValueGenerationKind } from "@/lib/dataGrid/cellValueGeneration";
 import { compactHeaderColumnType, isNumericColumnType, resolveDataGridTypeVisualKind, resolveHeaderColumnType, resolveResultColumnType } from "@/lib/dataGrid/dataGridColumnType";
 import { dataGridCellTextClass, dataGridTypeVisualClass } from "@/lib/dataGrid/dataGridCellTextVisual";
+import { DATA_GRID_TYPE_COLOR_KEYS, resolveActiveDataGridTypeColors } from "@/lib/dataGrid/dataGridTypeColorScheme";
 import {
   canDeleteExistingTdengineRows,
   canEditExistingTableRows,
@@ -146,7 +147,21 @@ import {
 import { buildBinaryHexViewRows } from "@/lib/dataGrid/binaryHexViewer";
 import { canFormatCellDetailJson, cellDetailEditorText, compactJsonText, defaultCellDetailTab, formatJsonText, isGeometryColumnType, linkedCellDetailTarget, looksLikeJsonContainerText, valueEditorActions, visibleCellDetailTabs, type CellDetailTab } from "@/lib/dataGrid/cellDetailPresentation";
 import { buildDataGridCellDetail, buildDataGridColumnDetail, buildDataGridRowDetail, CELL_DETAIL_VALUE_PREVIEW_MAX_LENGTH, dataGridColumnDetailJson, dataGridColumnDetailTsv, dataGridRowDetailJson, dataGridRowDetailTsv, type DataGridCellDetail } from "@/lib/dataGrid/dataGridDetail";
-import { applyColumnFormatter, buildColumnFormatterKey, getSupportedTimeZoneOptions, normalizeColumnFormatter, resolveColumnFormatter, type ColumnFormatterConfig, type DateTimeFormatterUnit, DateTimePatterns } from "@/lib/dataGrid/columnFormatter";
+import {
+  applyColumnFormatter,
+  buildColumnFormatterKey,
+  defaultIoTDBTimestampFormatter,
+  formatIoTDBTimestampEditorValue,
+  getSupportedTimeZoneOptions,
+  iotdbTimestampFractionDigits,
+  iotdbTimestampPrecision,
+  normalizeColumnFormatter,
+  parseIoTDBTimestampEditorValue,
+  resolveColumnFormatter,
+  type ColumnFormatterConfig,
+  type DateTimeFormatterUnit,
+  DateTimePatterns,
+} from "@/lib/dataGrid/columnFormatter";
 import { temporalCellEditorConfig, type TemporalCellEditorConfig } from "@/lib/dataGrid/dataGridTemporalEditor";
 import { BOOLEAN_CELL_EDITOR_VALUES, booleanCellEditorValue, isBooleanCellValue, isBooleanColumnType, isPointInBooleanCheckbox, nextBooleanCellValue, normalizeBooleanCellValue, parseBooleanCellEditorValue } from "@/lib/dataGrid/dataGridBooleanColumn";
 import { resolveDataGridColumnNullability, resolveDataGridColumnsByResultIndex } from "@/lib/dataGrid/dataGridColumnMetadata";
@@ -909,7 +924,7 @@ const filterEditorView = computed(() => settingsStore.editorSettings.dataGridFil
 const structuredFilterCount = computed(() => structuredFilterRules.value.filter((rule) => !rule.disabled && !!rule.columnName && filterModeHasCompleteValue(rule.mode, rule.rawValue, rule.rawEndValue)).length);
 const hasStructuredFilters = computed(() => !!combineWhereInputs(undefined, appliedStructuredWhereInput.value));
 const formatterOpenColumn = ref<number | null>(null);
-type FormatterDraftKind = Exclude<ColumnFormatterConfig["kind"], "custom-ref">;
+type FormatterDraftKind = Exclude<ColumnFormatterConfig["kind"], "custom-ref" | "iotdb-timestamp">;
 const CUSTOM_FORMATTER_NEW = "__new";
 const formatterKind = ref<FormatterDraftKind>("datetime");
 const formatterDateUnit = ref<DateTimeFormatterUnit>("auto");
@@ -1273,10 +1288,14 @@ function columnFormatter(columnIndex: number): ColumnFormatterConfig | undefined
   const column = props.result.columns[columnIndex];
   if (!column) return undefined;
   const key = formatterKeyForColumn(column);
-  return resolveColumnFormatter(key ? settingsStore.editorSettings.columnFormatters[key] : undefined, settingsStore.editorSettings.customColumnFormatters, {
+  const columnType = props.result.column_types?.[columnIndex] ?? tableColumnForGridColumn(columnIndex)?.data_type;
+  const savedFormatter = key ? settingsStore.editorSettings.columnFormatters[key] : undefined;
+  const configured = resolveColumnFormatter(savedFormatter, settingsStore.editorSettings.customColumnFormatters, {
     pattern: settingsStore.editorSettings.globalDateTimeDisplayFormat,
-    columnType: props.result.column_types?.[columnIndex] ?? tableColumnForGridColumn(columnIndex)?.data_type,
+    columnType,
   });
+  if (savedFormatter && configured) return configured;
+  return defaultIoTDBTimestampFormatter(resolvedDatabaseType.value, columnType, resolvedConnectionConfig.value?.url_params) ?? configured;
 }
 
 function savedColumnFormatter(columnIndex: number): ColumnFormatterConfig | undefined {
@@ -1331,11 +1350,15 @@ function loadFormatterDraft(formatter: ColumnFormatterConfig | undefined) {
     pattern: "YYYY-MM-DD HH:mm:ss" as const,
     timezone: dayjs.tz.guess(),
   };
-  formatterKind.value = draft.kind === "custom-ref" ? "custom-template" : draft.kind;
+  formatterKind.value = draft.kind === "custom-ref" ? "custom-template" : draft.kind === "iotdb-timestamp" ? "datetime" : draft.kind;
   if (draft.kind === "datetime") {
     formatterDateUnit.value = draft.unit;
     formatterDatetimePattern.value = draft.pattern;
     formatterDateTimezone.value = draft.timezone || dayjs.tz.guess() || "UTC";
+  } else if (draft.kind === "iotdb-timestamp") {
+    formatterDateUnit.value = "milliseconds";
+    formatterDatetimePattern.value = "YYYY-MM-DDTHH:mm:ss.SSSZ";
+    formatterDateTimezone.value = draft.timezone;
   } else if (draft.kind === "json-path") {
     formatterJsonPath.value = draft.path;
   } else if (draft.kind === "mask") {
@@ -2315,6 +2338,11 @@ function measureColumnHeaderText(text: string): number | undefined {
   return Math.ceil(columnHeaderMeasureContext.measureText(text).width);
 }
 
+function columnWidthDisplayValue(value: CellValue, columnIndex: number): CellValue {
+  const formatter = columnFormatter(columnIndex);
+  return formatter ? applyColumnFormatter(value, formatter) : value;
+}
+
 const { initColumnWidths, onResizeStart, autoFitColumn, renderedColumnWidths, totalWidth, columnVars, getIsResizing } = useDataGridColumnResize({
   columns: visibleColumns,
   sourceRows: computed(() => props.result.rows),
@@ -2327,6 +2355,7 @@ const { initColumnWidths, onResizeStart, autoFitColumn, renderedColumnWidths, to
   measureHeaderText: measureColumnHeaderText,
   headerMeasurementKey: columnHeaderMeasurementKey,
   rowNumberWidth,
+  displayValue: columnWidthDisplayValue,
 });
 const gridStyle = computed(() => ({
   ...columnVars.value,
@@ -3595,7 +3624,9 @@ async function startCellEdit(rowId: number, columnIndex: number, expanded: boole
   if (!(await hydrateLargeValueCell(rowId, columnIndex))) return;
   closeReadonlyCellTextSelection();
   expandedCellEditor.value = expanded ? { rowId, col: columnIndex } : null;
+  const item = getRowItem(rowId);
   startEdit(rowId, columnIndex);
+  if (item) editValue.value = inlineCellEditorText(item.data[columnIndex] ?? null, columnIndex);
 }
 
 async function startDomCellEdit(rowId: number, columnIndex: number, displayText: string, event: MouseEvent) {
@@ -3715,7 +3746,42 @@ function resultColumnInfoForGridColumn(columnIndex: number): Pick<ColumnInfo, "d
 }
 
 function temporalEditorConfigForColumn(columnIndex: number): TemporalCellEditorConfig | undefined {
+  if (resolvedDatabaseType.value === "iotdb") {
+    const resultType = props.result.column_types?.[columnIndex];
+    const tableType = tableColumnForGridColumn(columnIndex)?.data_type;
+    if ((resultType ?? tableType)?.trim().toUpperCase().startsWith("TIMESTAMP")) {
+      const precision = iotdbTimestampPrecision(resolvedDatabaseType.value, resultType);
+      return precision ? { kind: "datetime", fractionPrecision: iotdbTimestampFractionDigits(precision) } : undefined;
+    }
+  }
   return temporalCellEditorConfig(tableColumnForGridColumn(columnIndex), props.databaseType);
+}
+
+function isIoTDBTimestampColumn(columnIndex: number): boolean {
+  const columnType = props.result.column_types?.[columnIndex] ?? tableColumnForGridColumn(columnIndex)?.data_type;
+  return !!iotdbTimestampPrecision(resolvedDatabaseType.value, columnType);
+}
+
+function inlineCellEditorText(value: CellValue, columnIndex: number): string {
+  const columnInfo = tableColumnForGridColumn(columnIndex);
+  const columnType = props.result.column_types?.[columnIndex] ?? columnInfo?.data_type;
+  return (
+    formatIoTDBTimestampEditorValue(value, resolvedDatabaseType.value, columnType, resolvedConnectionConfig.value?.url_params) ??
+    dataGridCellEditorText({
+      value,
+      databaseType: resolvedDatabaseType.value,
+      columnInfo,
+    })
+  );
+}
+
+function normalizeTemporalCellEditorValue(value: string, columnIndex: number): string {
+  if (!isIoTDBTimestampColumn(columnIndex)) return value;
+  const columnType = props.result.column_types?.[columnIndex] ?? tableColumnForGridColumn(columnIndex)?.data_type;
+  const timestamp = parseIoTDBTimestampEditorValue(value, resolvedDatabaseType.value, columnType, resolvedConnectionConfig.value?.url_params);
+  if (timestamp === null) return "NULL";
+  if (timestamp === undefined) return value;
+  return formatIoTDBTimestampEditorValue(timestamp, resolvedDatabaseType.value, columnType, resolvedConnectionConfig.value?.url_params) ?? value;
 }
 
 function enumValuesForGridColumn(columnIndex: number): string[] {
@@ -4535,6 +4601,10 @@ const selection = useDataGridSelection({
   cellFromClientPoint: dataGridCellFromClientPoint,
   rowFromClientPoint: dataGridRowFromClientPoint,
   onUserCellSelection: invalidateSyntheticContextSelection,
+  // Canvas schedules its draw before the document-level mousemove handler runs,
+  // so its row state must be current before that frame is painted.
+  shouldUpdateDraggedRowsImmediately: () => useCanvasGridRows.value,
+  onDraggedRowSelectionChange: scheduleCanvasDraw,
   runtimeScope: dataGridRuntimeScope,
 });
 
@@ -4849,7 +4919,22 @@ const domSelectionDragOverlayStyle = computed((): CSSProperties | undefined => {
   };
 });
 
-function onCellMouseenter(rowIndex: number, visibleColIdx: number, actualColIdx: number) {
+function stopReleasedSelectionGesture(event: MouseEvent): boolean {
+  if ((event.buttons & 1) !== 0) return false;
+  let stopped = false;
+  if (isSelectingCells.value) {
+    finishCellSelection();
+    stopped = true;
+  }
+  if (selection.isSelectingRows.value) {
+    selection.finishRowSelection();
+    stopped = true;
+  }
+  return stopped;
+}
+
+function onCellMouseenter(rowIndex: number, visibleColIdx: number, actualColIdx: number, event: MouseEvent) {
+  stopReleasedSelectionGesture(event);
   if (!isSelectingCells.value) {
     quickDownloadMenuCell.value = retainBinaryCellDownloadMenuForHover(quickDownloadMenuCell.value, { rowIndex, col: actualColIdx });
     if (!isScrolling.value) hoveredDetailCell.value = { rowIndex, col: actualColIdx };
@@ -4973,10 +5058,6 @@ const contextRowItem = computed(() => (contextCell.value ? getRowItem(contextCel
 const contextColumn = computed(() => {
   if (!contextCell.value || contextCell.value.col < 0) return null;
   return props.result.columns[contextCell.value.col] ?? null;
-});
-const contextCellValue = computed<CellValue | null>(() => {
-  if (!contextCell.value || contextCell.value.col < 0) return null;
-  return contextRowItem.value?.data[contextCell.value.col] ?? null;
 });
 const contextCellDetail = computed(() => {
   const cell = contextCell.value;
@@ -5165,11 +5246,7 @@ const hasPendingInlineEditorDraft = computed(() => {
   if (!cell) return false;
   const item = getRowItem(cell.rowId);
   if (!item || item.isDeleted) return false;
-  const originalValue = dataGridCellEditorText({
-    value: item.data[cell.col] ?? null,
-    databaseType: resolvedDatabaseType.value,
-    columnInfo: tableColumnForGridColumn(cell.col),
-  });
+  const originalValue = inlineCellEditorText(item.data[cell.col] ?? null, cell.col);
   return editValue.value !== originalValue;
 });
 const hasPendingDataEditorDraft = computed(() => hasPendingDetailEditorDraft.value || hasPendingInlineEditorDraft.value);
@@ -5288,7 +5365,7 @@ watch(activeCellDetail, (detail) => {
 
 const detailTemporalEditorConfig = computed(() => {
   const detail = activeCellDetail.value;
-  return detail ? temporalEditorConfigForColumn(detail.colIndex) : undefined;
+  return detail && !isIoTDBTimestampColumn(detail.colIndex) ? temporalEditorConfigForColumn(detail.colIndex) : undefined;
 });
 const sideDetailValueFillsHeight = computed(() => cellDetailPanelIsBottom.value || isEditingDetail.value || (!cellDetailPanelIsBottom.value && !activeCellDetail.value?.imagePreviewUrl));
 const canCompactDetailJson = computed(() => {
@@ -5560,18 +5637,31 @@ function applyContextSort(direction: "asc" | "desc" | null, mode: DataGridSortMo
 }
 
 async function contextFilterCondition(mode: FilterMode): Promise<string | null> {
-  if (!contextColumn.value) return null;
-  if (mode !== "is-null" && mode !== "is-not-null" && contextCell.value) {
-    if (!(await hydrateLargeValueCell(contextCell.value.rowId, contextCell.value.col))) return null;
+  const target = contextCell.value;
+  if (!target) return null;
+  const columnName = props.result.columns[target.col];
+  if (!columnName) return null;
+  const sourceResult = props.result;
+  const sourceItem = getRowItem(target.rowId);
+  if (!sourceItem) return null;
+  const sourceIndex = sourceItem.sourceIndex;
+  const requiresHydration = sourceIndex !== undefined && isLargeValuePreview(sourceItem, target.col);
+  const sourceValue = sourceItem.data[target.col] ?? null;
+  // CustomContextMenu closes before invoking its action. Keep the target
+  // stable across hydration after the close lifecycle clears contextCell.
+  if (mode !== "is-null" && mode !== "is-not-null") {
+    if (!(await hydrateLargeValueCell(target.rowId, target.col))) return null;
   }
+  if (props.result !== sourceResult) return null;
+  const value = requiresHydration && sourceIndex !== undefined ? (sourceResult.rows[sourceIndex]?.[target.col] ?? null) : sourceValue;
   return (
     (await buildDataGridContextFilterCondition({
       databaseType: resolvedDatabaseType.value,
       identifierQuote: connectionStore.connectionIdentifierQuote?.(props.connectionId),
-      columnName: contextColumn.value,
-      columnInfo: props.tableMeta?.columns.find((column) => column.name === contextColumn.value),
+      columnName,
+      columnInfo: props.tableMeta?.columns.find((column) => column.name === columnName),
       mode,
-      value: contextCellValue.value,
+      value,
     })) ?? null
   );
 }
@@ -5899,7 +5989,14 @@ const canvasSurfaceWidth = computed(() => {
   if (vw <= 0) return total;
   return Math.min(vw, total);
 });
-const canvasRenderStyleKey = computed(() => `${settingsStore.editorSettings.theme}:${settingsStore.editorSettings.uiScale}:${canvasBackingPixelRatio.value}:${isDark.value}:${themePalette.value}:${tableFontFamily.value}:${tableFontSize.value}:${!!saveError.value}`);
+// The canvas render state caches the resolved paint theme by this key, so the
+// active type palette has to take part or a recolor never repaints.
+const dataGridTypeColorKey = computed(() => {
+  const settings = settingsStore.editorSettings;
+  const colors = resolveActiveDataGridTypeColors(settings.dataGridTypeColorSchemes, settings.activeDataGridTypeColorSchemeId);
+  return colors ? DATA_GRID_TYPE_COLOR_KEYS.map((key) => colors[key]).join(",") : "auto";
+});
+const canvasRenderStyleKey = computed(() => `${settingsStore.editorSettings.theme}:${settingsStore.editorSettings.uiScale}:${canvasBackingPixelRatio.value}:${isDark.value}:${themePalette.value}:${tableFontFamily.value}:${tableFontSize.value}:${!!saveError.value}:${dataGridTypeColorKey.value}`);
 const CANVAS_MOUSE_WHEEL_SCROLL_MULTIPLIER = 1.5;
 const CANVAS_TRACKPAD_DELTA_THRESHOLD = 40;
 let canvasPixelRatioMediaQuery: MediaQueryList | null = null;
@@ -6183,6 +6280,7 @@ function onDomGridWheel(event: WheelEvent) {
 }
 
 function onCanvasMouseMove(event: MouseEvent) {
+  stopReleasedSelectionGesture(event);
   if (columnHeaderPointerInteractionActive()) {
     if (canvasRef.value) canvasRef.value.style.cursor = "default";
     onCanvasMouseLeave();
@@ -6212,7 +6310,7 @@ function onCanvasMouseMove(event: MouseEvent) {
     if (previousActualColIdx !== undefined) onCellMouseleave(previous.rowIndex, previousActualColIdx);
   }
   canvasHoverCell.value = next;
-  if (next && actualColIdx !== undefined) onCellMouseenter(next.rowIndex, next.visibleColIdx, actualColIdx);
+  if (next && actualColIdx !== undefined) onCellMouseenter(next.rowIndex, next.visibleColIdx, actualColIdx, event);
   scheduleCanvasDraw();
 }
 
@@ -7854,7 +7952,15 @@ function deleteCurrentRow(): boolean {
   return true;
 }
 
+function currentIoTDBTimestampEditValue(): CellValue | undefined {
+  const cell = editingCell.value;
+  if (!cell || !isIoTDBTimestampColumn(cell.col)) return undefined;
+  const columnType = props.result.column_types?.[cell.col] ?? tableColumnForGridColumn(cell.col)?.data_type;
+  return parseIoTDBTimestampEditorValue(editValue.value, resolvedDatabaseType.value, columnType, resolvedConnectionConfig.value?.url_params);
+}
+
 function commitGridEdit(value?: CellValue) {
+  if (value === undefined) value = currentIoTDBTimestampEditValue();
   void commitEditAndMaybeAutoSave(value === undefined ? undefined : { explicitValue: value }).finally(() => nextTick(() => gridRef.value?.focus({ preventScroll: true })));
 }
 
@@ -7874,15 +7980,17 @@ function commitBooleanGridEdit(value?: string | null) {
 async function commitEditFromCellBlur() {
   const target = pendingQuickEntryDraftCellFocus.value;
   pendingQuickEntryDraftCellFocus.value = null;
+  const timestamp = currentIoTDBTimestampEditValue();
+  const timestampOptions = timestamp === undefined ? {} : { explicitValue: timestamp };
   if (target && editingCell.value?.rowId === quickEntryDraftRowId && target.rowId === quickEntryDraftRowId) {
-    await commitEditFromBlur({ promoteDraft: false });
+    await commitEditFromBlur({ ...timestampOptions, promoteDraft: false });
     nextTick(() => {
       const item = getRowItem(target.rowId);
       if (item && canEditCellItem(item, target.col)) void startCellEdit(target.rowId, target.col, false);
     });
     return;
   }
-  await commitEditFromBlur();
+  await commitEditFromBlur(timestampOptions);
 }
 
 function onRowNumberMouseDown(item: RowItem, event: MouseEvent) {
@@ -10458,6 +10566,10 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
     previewItems,
   );
 });
+
+function currentGridContextMenuItems(): ContextMenuItem[] {
+  return gridContextMenuItems.value;
+}
 </script>
 
 <template>
@@ -10477,7 +10589,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
     @paste="onGridPaste"
     @focusin="onGridFocusIn"
   >
-    <CustomContextMenu :items="gridContextMenuItems" @open="onGridContextMenuOpen" @close="onGridContextMenuClose" v-slot="{ onContextMenu }">
+    <CustomContextMenu :items="currentGridContextMenuItems" @open="onGridContextMenuOpen" @close="onGridContextMenuClose" v-slot="{ onContextMenu }">
       <div v-if="hasData || canShowWhereSearch" class="flex-1 flex flex-col overflow-hidden" @contextmenu="onContextMenu">
         <!-- Search bar -->
         <!-- Leave real vertical space around the 28px controls instead of fitting them against the border. -->
@@ -10884,6 +10996,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                           v-model="editValue"
                           :kind="temporalEditorConfigForColumn(cell.valueIndex)!.kind"
                           :fraction-precision="temporalEditorConfigForColumn(cell.valueIndex)!.fractionPrecision"
+                          :normalize-value="(value) => normalizeTemporalCellEditorValue(value, cell.valueIndex)"
                           cell-layout="transpose"
                           @cancel="cancelEdit"
                           @commit="commitGridEdit"
@@ -11474,6 +11587,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                         v-model="editValue"
                         :kind="temporalEditorConfigForColumn(canvasEditingCell.actualColIdx)!.kind"
                         :fraction-precision="temporalEditorConfigForColumn(canvasEditingCell.actualColIdx)!.fractionPrecision"
+                        :normalize-value="(value) => normalizeTemporalCellEditorValue(value, canvasEditingCell!.actualColIdx)"
                         @cancel="cancelEdit"
                         @commit="commitGridEdit"
                       />
@@ -11664,7 +11778,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                           prepareDataCellMouseDown(item, col.actualColIdx);
                           handleDataCellMousedown(item.displayIndex, col.visibleColIdx, item.id, $event);
                         "
-                        @mouseenter="onCellMouseenter(item.displayIndex, col.visibleColIdx, col.actualColIdx)"
+                        @mouseenter="onCellMouseenter(item.displayIndex, col.visibleColIdx, col.actualColIdx, $event)"
                         @mouseleave="onCellMouseleave(item.displayIndex, col.actualColIdx)"
                         @dblclick="onDomCellDblClick(item, col.actualColIdx, $event)"
                         :data-visible-col-index="col.visibleColIdx"
@@ -11679,6 +11793,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                             v-model="editValue"
                             :kind="temporalEditorConfigForColumn(col.actualColIdx)!.kind"
                             :fraction-precision="temporalEditorConfigForColumn(col.actualColIdx)!.fractionPrecision"
+                            :normalize-value="(value) => normalizeTemporalCellEditorValue(value, col.actualColIdx)"
                             @cancel="cancelEdit"
                             @commit="commitGridEdit"
                           />

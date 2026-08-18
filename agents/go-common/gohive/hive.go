@@ -1490,9 +1490,14 @@ func (c *cursor) pollUntilData(ctx context.Context, n int) (err error) {
 			}
 			c.response = responseFetch
 
-			if !success(safeStatus(responseFetch.GetStatus())) {
-				rowsAvailable <- hiveStatusError("fetching results", responseFetch.GetStatus())
+			resultsReady, statusErr := fetchResultsReady(responseFetch.GetStatus())
+			if statusErr != nil {
+				rowsAvailable <- statusErr
 				return
+			}
+			if !resultsReady {
+				time.Sleep(time.Duration(c.conn.configuration.PollIntervalInMillis) * time.Millisecond)
+				continue
 			}
 			err = c.parseResults(responseFetch)
 			if err != nil {
@@ -1640,6 +1645,18 @@ func hiveStatusError(action string, status *hiveserver.TStatus) error {
 		Message:   diagnostic,
 		ErrorCode: int(status.GetErrorCode()),
 		SQLState:  status.GetSqlState(),
+	}
+}
+
+func fetchResultsReady(status *hiveserver.TStatus) (bool, error) {
+	status = safeStatus(status)
+	switch status.GetStatusCode() {
+	case hiveserver.TStatusCode_SUCCESS_STATUS, hiveserver.TStatusCode_SUCCESS_WITH_INFO_STATUS:
+		return true, nil
+	case hiveserver.TStatusCode_STILL_EXECUTING_STATUS:
+		return false, nil
+	default:
+		return false, hiveStatusError("fetching results", status)
 	}
 }
 

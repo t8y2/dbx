@@ -45,7 +45,7 @@ DBX Desktop uses Tauri, Vue, and Rust. The repository currently requires:
 | pnpm | 10.27.0 |
 | Rust | 1.88 or newer |
 | Git | Current stable version |
-| Make | Recommended on macOS and Linux |
+| Make | Required on macOS and Linux; optional on Windows |
 
 ### Install Node.js and pnpm
 
@@ -106,7 +106,15 @@ See the [official Tauri prerequisites](https://v2.tauri.app/start/prerequisites/
     1. Install [Microsoft C++ Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/).
     2. Select **Desktop development with C++** in the installer.
     3. Make sure a Windows 10/11 SDK and WebView2 are installed. Windows 11 normally includes WebView2.
-    4. Run the Windows commands on this page in PowerShell.
+    4. Install [Strawberry Perl](https://github.com/StrawberryPerl/Perl-Dist-Strawberry/releases), required to build the bundled OpenSSL:
+
+        ```powershell
+        winget install StrawberryPerl.StrawberryPerl
+        ```
+
+        DBX enables the `sqlite-sqlcipher` feature by default, which compiles SQLCipher and OpenSSL from source. Windows needs Perl to run the OpenSSL `Configure` script. Reopen your terminal after installing so `perl` is available on `PATH`.
+
+    5. Run the Windows commands on this page in PowerShell.
 
     Make is optional on Windows because equivalent pnpm commands are provided below.
 
@@ -153,7 +161,7 @@ make
 
 `make` installs dependencies from the lockfile and starts the Tauri desktop development environment. The first Rust build can take a while; later starts are much faster.
 
-For a lightweight desktop build, keep DuckDB sidecar support while skipping the other default Rust features:
+For a lightweight desktop build, disable the default Rust features and enable only the DuckDB sidecar and DynamoDB:
 
 ```bash
 make dev-fast
@@ -460,7 +468,7 @@ git push --force-with-lease
 
 ### The First Rust Build Is Slow
 
-This is expected. Use `make dev-fast` for a lightweight desktop build that still supports DuckDB. `make cargo-check-fast` and `make cargo-test-fast` skip all optional default features, so they do not validate DuckDB-specific paths.
+This is expected. Use `make dev-fast` for a lightweight desktop build with default Rust features disabled and only the DuckDB sidecar and DynamoDB enabled. `make cargo-check-fast` and `make cargo-test-fast` skip all optional default features, so they do not validate DuckDB-specific paths.
 
 ### pnpm Reports the Wrong Version
 

@@ -1744,6 +1744,61 @@ func TestListTablesSQLUsesSplitDictionaryQuery(t *testing.T) {
 	}
 }
 
+func TestOracleMetadataQueriesClassifyMaterializedViews(t *testing.T) {
+	tests := []struct {
+		name       string
+		sqlText    string
+		tableView  string
+		objectView string
+		ownerMatch string
+	}{
+		{
+			name:       "all list tables",
+			sqlText:    oracleListTablesBaseSQL,
+			tableView:  "ALL_TABLES",
+			objectView: "ALL_OBJECTS",
+			ownerMatch: "MV.OWNER = T.OWNER",
+		},
+		{
+			name:       "user list tables",
+			sqlText:    oracleListTablesSessionUserBaseSQL,
+			tableView:  "USER_TABLES",
+			objectView: "USER_OBJECTS",
+		},
+		{
+			name:       "all list objects",
+			sqlText:    oracleListObjectsBaseSQL,
+			tableView:  "ALL_TABLES",
+			objectView: "ALL_OBJECTS",
+			ownerMatch: "MV.OWNER = T.OWNER",
+		},
+		{
+			name:       "user list objects",
+			sqlText:    oracleListObjectsSessionUserBaseSQL,
+			tableView:  "USER_TABLES",
+			objectView: "USER_OBJECTS",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			sqlText := strings.ToUpper(test.sqlText)
+			if !strings.Contains(sqlText, "FROM "+test.tableView+" T") || !strings.Contains(sqlText, "FROM "+test.objectView+" MV") {
+				t.Fatalf("metadata query should classify tables against materialized-view objects: %s", test.sqlText)
+			}
+			if !strings.Contains(sqlText, "NOT EXISTS") || !strings.Contains(sqlText, "MV.OBJECT_NAME = T.TABLE_NAME") || !strings.Contains(sqlText, "MV.OBJECT_TYPE = 'MATERIALIZED VIEW'") {
+				t.Fatalf("metadata query should exclude materialized-view storage tables: %s", test.sqlText)
+			}
+			if test.ownerMatch != "" && !strings.Contains(sqlText, test.ownerMatch) {
+				t.Fatalf("cross-schema metadata query should keep materialized-view classification owner-scoped: %s", test.sqlText)
+			}
+			if !strings.Contains(sqlText, "'MATERIALIZED_VIEW'") || !strings.Contains(sqlText, "'MATERIALIZED VIEW'") {
+				t.Fatalf("metadata query should return the normalized materialized-view type: %s", test.sqlText)
+			}
+		})
+	}
+}
+
 func TestListTablesQueryAppliesMetadataConstraints(t *testing.T) {
 	query := oracleListTablesQuery("APP", metadataListConstraints{
 		Filter:      "u_r",

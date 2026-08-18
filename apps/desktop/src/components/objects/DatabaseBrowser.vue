@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from "vue";
-import { ArrowDown, ArrowUp, Database, GripVertical, LayoutGrid, List, Loader2, RefreshCw, Search } from "@lucide/vue";
+import { ArrowDown, ArrowUp, Database, GripVertical, LayoutGrid, List, Loader2, RefreshCw, Search, X } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -32,7 +32,7 @@ const props = defineProps<{
 const { t } = useI18n();
 const queryStore = useQueryStore();
 const settingsStore = useSettingsStore();
-const searchInput = ref<HTMLInputElement>();
+const searchInput = ref<InstanceType<typeof Input>>();
 const search = ref("");
 const rows = ref<DatabaseRow[]>([]);
 const loading = ref(false);
@@ -206,8 +206,13 @@ async function refresh(): Promise<boolean> {
 }
 
 function focusSearch(): boolean {
-  searchInput.value?.focus();
+  searchInput.value?.$el?.focus();
   return true;
+}
+
+function clearDatabaseSearch() {
+  search.value = "";
+  searchInput.value?.$el?.focus();
 }
 
 watch(sortKeyOptions, (options) => {
@@ -239,7 +244,10 @@ defineExpose({ focusSearch, refresh });
       </span>
       <div class="relative min-w-0 flex-1">
         <Search class="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
-        <Input ref="searchInput" v-model="search" class="h-7 pl-8 text-xs" :placeholder="t('databaseBrowser.search')" />
+        <Input ref="searchInput" v-model="search" class="h-7 pl-8 pr-6 text-xs" :placeholder="t('databaseBrowser.search')" />
+        <button v-if="search" type="button" class="absolute right-1.5 top-1/2 flex h-4 w-4 -translate-y-1/2 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground" :aria-label="t('common.clear')" @click="clearDatabaseSearch">
+          <X class="h-3 w-3" />
+        </button>
       </div>
       <div class="flex h-7 shrink-0 items-center rounded border bg-muted/20 p-0.5">
         <select

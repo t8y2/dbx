@@ -179,6 +179,7 @@ export const SETTINGS_SEARCH_DEFINITIONS: readonly SettingsSearchDefinition[] = 
   { id: "data-grid-header-types", category: "data", titleKey: "settings.showColumnTypesInHeader", descriptionKey: "settings.showColumnTypesInHeaderDescription", targetId: "data" },
   { id: "data-grid-transpose-field-metadata", category: "data", titleKey: "settings.dataGridShowTransposeFieldMetadata", descriptionKey: "settings.dataGridShowTransposeFieldMetadataDescription", targetId: "data" },
   { id: "data-grid-cell-type-colors", category: "data", titleKey: "settings.colorizeDataGridCellTypes", descriptionKey: "settings.colorizeDataGridCellTypesDescription", targetId: "data" },
+  { id: "data-grid-type-colors", category: "data", titleKey: "settings.dataGridTypeColorScheme", descriptionKey: "settings.dataGridTypeColorSchemeDescription", targetId: "data-grid-type-colors" },
   { id: "data-grid-index-indicators", category: "data", titleKey: "settings.showIndexIndicatorsInHeader", descriptionKey: "settings.showIndexIndicatorsInHeaderDescription", targetId: "data" },
   { id: "data-grid-compact-header-actions", category: "data", titleKey: "settings.compactColumnHeaderActions", descriptionKey: "settings.compactColumnHeaderActionsDescription", targetId: "data" },
   { id: "data-grid-auto-total", category: "data", titleKey: "settings.autoCalculateTotalRows", descriptionKey: "settings.autoCalculateTotalRowsDescription", targetId: "data" },

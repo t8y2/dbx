@@ -52,28 +52,26 @@ struct NodeRuntime {
     node_path: PathBuf,
     npm_cli_path: PathBuf,
     npm_root: PathBuf,
-    package_manager: McpPackageManager,
     node_version: String,
-    mcp_version: Option<String>,
-    mcp_script_path: Option<PathBuf>,
-    mcp_bin_path: Option<PathBuf>,
-    mcp_native_bin_path: Option<PathBuf>,
+    mcp_installation: Option<McpInstallation>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct McpPackage {
-    version: Option<String>,
+    version: String,
     script_path: PathBuf,
-    minimum_node_version: Option<NodeVersion>,
+    minimum_node_version: NodeVersion,
 }
 
 #[derive(Debug, Clone)]
 enum McpPackageManager {
     Npm,
-    Pnpm { command_path: PathBuf },
+    Pnpm { command_path: PathBuf, pnpm_home: PathBuf, global_dir: PathBuf },
+    PnpmUnavailable { pnpm_home: PathBuf, global_dir: PathBuf },
+    Unmanaged { launcher_dir: PathBuf },
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct LocatedMcpPackage {
     package_root: PathBuf,
     package: McpPackage,
@@ -81,8 +79,31 @@ struct LocatedMcpPackage {
     package_manager: McpPackageManager,
 }
 
+#[derive(Debug, Clone)]
+struct McpInstallation {
+    package_root: PathBuf,
+    launcher_path: Option<PathBuf>,
+    script_path: PathBuf,
+    node_path: PathBuf,
+    node_version: String,
+    package_version: String,
+    package_manager: McpPackageManager,
+    native_bin_path: Option<PathBuf>,
+}
+
+struct McpInstallationStatusFields {
+    installed: bool,
+    current_version: Option<String>,
+    bin_path: Option<String>,
+    native_bin_path: Option<String>,
+    script_path: Option<String>,
+}
+
 impl NodeRuntime {
-    fn probe(candidate: NodeRuntimeCandidate) -> Option<Self> {
+    fn probe_with_path_package(
+        candidate: NodeRuntimeCandidate,
+        path_package: Option<&LocatedMcpPackage>,
+    ) -> Option<Self> {
         let node_launcher_path = candidate.node_path.clone();
         let launcher_dir = candidate.node_path.parent().map(Path::to_path_buf);
         let (node_path, node_version) = resolve_node_identity(&candidate.node_path)?;
@@ -106,41 +127,20 @@ impl NodeRuntime {
                 package_manager: McpPackageManager::Npm,
             })
         });
-        let shim_package = launcher_dir.as_deref().and_then(mcp_package_from_command_dir);
+        let shim_package = preferred_mcp_package(
+            launcher_dir.as_deref().and_then(mcp_package_from_command_dir),
+            path_package.cloned(),
+            &node_version,
+        );
         let package = preferred_mcp_package(npm_package, shim_package, &node_version);
-        let package_is_compatible = package
-            .as_ref()
-            .and_then(|located| located.package.minimum_node_version)
-            .is_none_or(|minimum| parse_node_version(&node_version).is_some_and(|version| version >= minimum));
-        let mcp_version = package.as_ref().and_then(|located| located.package.version.clone());
-        // Resolve the package-declared launcher so npm layout changes do not break the built-in AI assistant.
-        let mcp_script_path =
-            package.as_ref().filter(|_| package_is_compatible).map(|located| located.package.script_path.clone());
-        let mcp_bin_path =
-            package.as_ref().and_then(|located| located.bin_path.clone()).or_else(|| mcp_bin_path(&npm_prefix));
-        let package_manager =
-            package.as_ref().map(|located| located.package_manager.clone()).unwrap_or(McpPackageManager::Npm);
-        // TRAE on Windows splits executable paths containing spaces, so expose the native package binary as a safe direct launch option.
-        let mcp_native_bin_path = package_is_compatible
-            .then(|| package.as_ref().and_then(|located| mcp_native_binary_path(&located.package_root, &npm_root)))
-            .flatten();
+        let mcp_installation =
+            package.and_then(|located| bind_mcp_installation(located, &node_path, &node_version, &npm_root));
 
-        Some(Self {
-            node_launcher_path,
-            node_path,
-            npm_cli_path,
-            npm_root,
-            package_manager,
-            node_version,
-            mcp_version,
-            mcp_script_path,
-            mcp_bin_path,
-            mcp_native_bin_path,
-        })
+        Some(Self { node_launcher_path, node_path, npm_cli_path, npm_root, node_version, mcp_installation })
     }
 
     fn has_mcp_package(&self) -> bool {
-        self.mcp_script_path.is_some()
+        self.mcp_installation.is_some()
     }
 
     fn npm_output(&self, args: &[&str]) -> Result<CommandOutput, String> {
@@ -148,37 +148,98 @@ impl NodeRuntime {
     }
 
     fn refresh(&self) -> Option<Self> {
-        Self::probe(NodeRuntimeCandidate { node_path: self.node_launcher_path.clone() })
+        let path_package = self
+            .mcp_installation
+            .as_ref()
+            .and_then(|installation| installation.launcher_path.as_deref())
+            .and_then(mcp_package_from_command_path)
+            .or_else(discover_path_mcp_package);
+        Self::probe_with_path_package(
+            NodeRuntimeCandidate { node_path: self.node_launcher_path.clone() },
+            path_package.as_ref(),
+        )
     }
 
     fn update_command(&self) -> &'static str {
-        match &self.package_manager {
-            McpPackageManager::Npm => MCP_INSTALL_COMMAND,
-            McpPackageManager::Pnpm { .. } => MCP_PNPM_UPDATE_COMMAND,
+        match self.mcp_installation.as_ref().map(|installation| &installation.package_manager) {
+            Some(McpPackageManager::Pnpm { .. } | McpPackageManager::PnpmUnavailable { .. }) => MCP_PNPM_UPDATE_COMMAND,
+            _ => MCP_INSTALL_COMMAND,
         }
     }
 
     fn uninstall_command(&self) -> &'static str {
-        match &self.package_manager {
-            McpPackageManager::Npm => MCP_UNINSTALL_COMMAND,
-            McpPackageManager::Pnpm { .. } => MCP_PNPM_UNINSTALL_COMMAND,
+        match self.mcp_installation.as_ref().map(|installation| &installation.package_manager) {
+            Some(McpPackageManager::Pnpm { .. } | McpPackageManager::PnpmUnavailable { .. }) => {
+                MCP_PNPM_UNINSTALL_COMMAND
+            }
+            _ => MCP_UNINSTALL_COMMAND,
         }
     }
 
     fn install_or_update(&self) -> Result<CommandOutput, String> {
-        match &self.package_manager {
-            McpPackageManager::Pnpm { command_path } if self.has_mcp_package() => {
-                run_package_manager_command(command_path, &["update", "-g", MCP_PACKAGE_NAME], &self.node_launcher_path)
+        match self.mcp_installation.as_ref().map(|installation| &installation.package_manager) {
+            Some(McpPackageManager::Pnpm { command_path, pnpm_home, global_dir }) => {
+                let global_dir = global_dir.as_os_str().to_os_string();
+                run_package_manager_command(
+                    command_path,
+                    &[
+                        OsString::from("update"),
+                        OsString::from("-g"),
+                        OsString::from(MCP_PACKAGE_NAME),
+                        OsString::from("--global-dir"),
+                        global_dir,
+                    ],
+                    &self.node_launcher_path,
+                    pnpm_home,
+                )
             }
+            Some(McpPackageManager::PnpmUnavailable { pnpm_home, global_dir }) => Err(format!(
+                "Cannot safely update {} in {} because no pnpm executable was found next to its launcher in {}.",
+                MCP_PACKAGE_NAME,
+                global_dir.display(),
+                pnpm_home.display()
+            )),
+            Some(McpPackageManager::Unmanaged { launcher_dir }) => Err(format!(
+                "Cannot safely update {} because the package manager for the launcher in {} could not be verified.",
+                MCP_PACKAGE_NAME,
+                launcher_dir.display()
+            )),
             _ => self.npm_output(&["install", "-g", "@dbx-app/mcp-server@latest"]),
         }
     }
 
     fn uninstall(&self) -> Result<CommandOutput, String> {
-        match &self.package_manager {
-            McpPackageManager::Pnpm { command_path } => {
-                run_package_manager_command(command_path, &["remove", "-g", MCP_PACKAGE_NAME], &self.node_launcher_path)
+        let installation = self
+            .mcp_installation
+            .as_ref()
+            .ok_or_else(|| format!("{} is not installed in the detected Node.js runtime.", MCP_PACKAGE_NAME))?;
+        match &installation.package_manager {
+            McpPackageManager::Pnpm { command_path, pnpm_home, global_dir } => {
+                let global_dir = global_dir.as_os_str().to_os_string();
+                run_package_manager_command(
+                    command_path,
+                    &[
+                        OsString::from("remove"),
+                        OsString::from("-g"),
+                        OsString::from(MCP_PACKAGE_NAME),
+                        OsString::from("--global-dir"),
+                        global_dir,
+                    ],
+                    &self.node_launcher_path,
+                    pnpm_home,
+                )
             }
+            McpPackageManager::PnpmUnavailable { pnpm_home, global_dir } => Err(format!(
+                "Cannot safely uninstall {} from {} because no pnpm executable was found next to its launcher in {}.",
+                MCP_PACKAGE_NAME,
+                global_dir.display(),
+                pnpm_home.display()
+            )),
+            McpPackageManager::Unmanaged { launcher_dir } => Err(format!(
+                "Cannot safely uninstall {} because the package manager for the launcher in {} could not be verified.",
+                MCP_PACKAGE_NAME,
+                launcher_dir.display()
+            )),
             McpPackageManager::Npm => self.npm_output(&["uninstall", "-g", MCP_PACKAGE_NAME]),
         }
     }
@@ -195,48 +256,64 @@ struct NodeVersion {
 pub async fn check_mcp_server_status(app: AppHandle) -> Result<McpServerStatus, String> {
     let default_data_dir = app.path().app_data_dir().map_err(|error| error.to_string())?;
     let data_dir = crate::data_dir::resolve_data_dir_with_mode(default_data_dir).custom_data_dir().map(path_string);
-    let local_status = tauri::async_runtime::spawn_blocking(|| {
-        let runtime = resolve_node_runtime();
-        let fallback_bin = match runtime.as_ref() {
-            Some(runtime) if runtime.has_mcp_package() => runtime.mcp_bin_path.clone(),
-            _ => locate_mcp_bin(),
-        };
-        (runtime, fallback_bin)
-    });
+    let local_status = tauri::async_runtime::spawn_blocking(resolve_node_runtime);
     let latest_version = fetch_latest_mcp_version();
     let (local_status, latest_version) = tokio::join!(local_status, latest_version);
-    let (runtime, fallback_bin) = local_status.map_err(|err| err.to_string())?;
+    let runtime = local_status.map_err(|err| err.to_string())?;
+    let installation = runtime.as_ref().and_then(|runtime| runtime.mcp_installation.as_ref());
+    let installation_status = mcp_installation_status_fields(runtime.as_ref());
     let npm_available = runtime.is_some();
     let node_path = runtime.as_ref().map(|runtime| path_string(&runtime.node_path));
     let node_version = runtime.as_ref().map(|runtime| runtime.node_version.clone());
-    let current_version = runtime.as_ref().and_then(|runtime| runtime.mcp_version.clone());
-    let script_path =
-        runtime.as_ref().and_then(|runtime| runtime.mcp_script_path.as_ref()).map(|path| path_string(path));
-    let native_bin_path =
-        runtime.as_ref().and_then(|runtime| runtime.mcp_native_bin_path.as_ref()).map(|path| path_string(path));
-    let bin_path = fallback_bin.as_ref().map(|path| path_string(path));
+    let current_version = installation_status.current_version;
     let latest_version = latest_version.ok();
     let update_available = current_version
         .as_deref()
         .zip(latest_version.as_deref())
         .is_some_and(|(current, latest)| dbx_core::update::is_newer_version(latest, current));
-    let error = if npm_available {
-        None
-    } else {
-        Some(format!("Unable to resolve a compatible Node.js ({}) and npm runtime.", MCP_MIN_NODE_VERSION_REQUIREMENT))
+    let error = match (runtime.as_ref(), installation) {
+        (None, _) => {
+            Some(format!("Unable to resolve a compatible Node.js ({}) and npm runtime.", MCP_MIN_NODE_VERSION_REQUIREMENT))
+        }
+        (
+            Some(_),
+            Some(McpInstallation {
+                package_manager: McpPackageManager::PnpmUnavailable { pnpm_home, global_dir },
+                ..
+            }),
+        ) => {
+            Some(format!(
+                "{} is installed in {}, but automatic update and uninstall are disabled because pnpm was not found in {}.",
+                MCP_PACKAGE_NAME,
+                global_dir.display(),
+                pnpm_home.display()
+            ))
+        }
+        (
+            Some(_),
+            Some(McpInstallation {
+                package_manager: McpPackageManager::Unmanaged { launcher_dir },
+                ..
+            }),
+        ) => Some(format!(
+            "{} is installed, but automatic update and uninstall are disabled because the package manager for {} could not be verified.",
+            MCP_PACKAGE_NAME,
+            launcher_dir.display()
+        )),
+        _ => None,
     };
 
     Ok(McpServerStatus {
-        installed: current_version.is_some() || bin_path.is_some() || script_path.is_some(),
+        installed: installation_status.installed,
         npm_available,
         node_path,
         node_version,
         current_version,
         latest_version,
         update_available,
-        bin_path,
-        native_bin_path,
-        script_path,
+        bin_path: installation_status.bin_path,
+        native_bin_path: installation_status.native_bin_path,
+        script_path: installation_status.script_path,
         data_dir,
         install_command: MCP_INSTALL_COMMAND.to_string(),
         update_command: runtime.as_ref().map(NodeRuntime::update_command).unwrap_or(MCP_INSTALL_COMMAND).to_string(),
@@ -271,15 +348,14 @@ pub async fn install_mcp_server() -> Result<String, String> {
                 runtime.node_path.display()
             )
         })?;
-        installed.mcp_script_path.as_ref().ok_or_else(|| {
+        let installation = installed.mcp_installation.as_ref().ok_or_else(|| {
             format!(
                 "Installation completed, but {} was not found under {}.",
                 MCP_PACKAGE_NAME,
                 installed.npm_root.display()
             )
         })?;
-        let version = installed.mcp_version.unwrap_or_else(|| "unknown".to_string());
-        Ok(format!("Successfully installed @dbx-app/mcp-server@{}", version))
+        Ok(format!("Successfully installed @dbx-app/mcp-server@{}", installation.package_version))
     })
     .await
     .map_err(|e| e.to_string())?
@@ -429,17 +505,24 @@ fn require_managed_mcp_command(command: Option<(String, Vec<String>)>) -> Result
 }
 
 fn resolve_node_runtime() -> Option<NodeRuntime> {
+    let path_package = discover_path_mcp_package();
     let mut seen = HashSet::new();
     let mut fallback = None;
 
-    if let Some(runtime) = probe_runtime_candidate(current_path_node_candidate(), &mut seen, &mut fallback) {
+    if let Some(runtime) =
+        probe_runtime_candidate(current_path_node_candidate(), path_package.as_ref(), &mut seen, &mut fallback)
+    {
         return Some(runtime);
     }
-    if let Some(runtime) = probe_runtime_candidate(user_shell_node_candidate(), &mut seen, &mut fallback) {
+    if let Some(runtime) =
+        probe_runtime_candidate(user_shell_node_candidate(), path_package.as_ref(), &mut seen, &mut fallback)
+    {
         return Some(runtime);
     }
     for dir in common_node_dirs() {
-        if let Some(runtime) = probe_runtime_candidate(node_candidate_in_dir(&dir), &mut seen, &mut fallback) {
+        if let Some(runtime) =
+            probe_runtime_candidate(node_candidate_in_dir(&dir), path_package.as_ref(), &mut seen, &mut fallback)
+        {
             return Some(runtime);
         }
     }
@@ -449,6 +532,7 @@ fn resolve_node_runtime() -> Option<NodeRuntime> {
 
 fn probe_runtime_candidate(
     candidate: Option<NodeRuntimeCandidate>,
+    path_package: Option<&LocatedMcpPackage>,
     seen: &mut HashSet<PathBuf>,
     fallback: &mut Option<NodeRuntime>,
 ) -> Option<NodeRuntime> {
@@ -458,7 +542,7 @@ fn probe_runtime_candidate(
         return None;
     }
 
-    let runtime = NodeRuntime::probe(candidate)?;
+    let runtime = NodeRuntime::probe_with_path_package(candidate, path_package)?;
     prefer_runtime(runtime, fallback)
 }
 
@@ -674,7 +758,7 @@ fn is_native_npm_launcher(path: &Path) -> bool {
 
 fn node_script_from_launcher(path: &Path) -> Option<PathBuf> {
     let canonical = canonical_runtime_path(path)?;
-    if let Some(target) = command_shim_target(&canonical) {
+    if let Some(target) = generated_node_shim_target(&canonical) {
         return Some(target);
     }
     if is_native_npm_launcher(&canonical) || is_shell_script(&canonical) {
@@ -683,15 +767,68 @@ fn node_script_from_launcher(path: &Path) -> Option<PathBuf> {
     Some(canonical)
 }
 
-fn command_shim_target(path: &Path) -> Option<PathBuf> {
+fn generated_node_shim_target(path: &Path) -> Option<PathBuf> {
     if std::fs::metadata(path).ok()?.len() > 128 * 1024 {
         return None;
     }
     let content = std::fs::read_to_string(path).ok()?;
-    let target = content.lines().rev().find_map(|line| line.trim().strip_prefix("# cmd-shim-target="))?;
-    let target = PathBuf::from(target.trim());
-    let target = if target.is_absolute() { target } else { path.parent()?.join(target) };
+    let uses_basedir = (content.starts_with("#!/bin/sh") && content.contains("basedir=$(dirname"))
+        || (content.starts_with("#!/usr/bin/env pwsh") && content.contains("$basedir=Split-Path"));
+    let relative_target = if uses_basedir {
+        generated_shim_relative_target(&content, "$basedir/")
+    } else if content.trim_start().starts_with("@SETLOCAL") && content.contains("%~dp0") {
+        generated_shim_relative_target(&content, "%~dp0")
+    } else {
+        None
+    }?;
+    let target = join_launcher_relative_path(path.parent()?, relative_target)?;
     canonical_runtime_path(&target)
+}
+
+fn generated_shim_relative_target<'a>(content: &'a str, base_variable: &str) -> Option<&'a str> {
+    content.lines().rev().find_map(|line| {
+        quoted_values(line).into_iter().rev().find_map(|value| {
+            let relative = strip_ascii_prefix(value, base_variable)?;
+            relative.to_ascii_lowercase().ends_with(".js").then_some(relative)
+        })
+    })
+}
+
+fn mcp_installation_status_fields(runtime: Option<&NodeRuntime>) -> McpInstallationStatusFields {
+    let installation = runtime.and_then(|runtime| runtime.mcp_installation.as_ref());
+    McpInstallationStatusFields {
+        installed: installation.is_some(),
+        current_version: installation.map(|installation| installation.package_version.clone()),
+        bin_path: installation
+            .and_then(|installation| installation.launcher_path.as_ref())
+            .map(|path| path_string(path)),
+        native_bin_path: installation
+            .and_then(|installation| installation.native_bin_path.as_ref())
+            .map(|path| path_string(path)),
+        script_path: installation.map(|installation| path_string(&installation.script_path)),
+    }
+}
+
+fn quoted_values(line: &str) -> Vec<&str> {
+    line.split('"').skip(1).step_by(2).collect()
+}
+
+fn strip_ascii_prefix<'a>(value: &'a str, prefix: &str) -> Option<&'a str> {
+    let candidate = value.get(..prefix.len())?;
+    candidate.eq_ignore_ascii_case(prefix).then(|| &value[prefix.len()..])
+}
+
+fn join_launcher_relative_path(base: &Path, relative: &str) -> Option<PathBuf> {
+    let mut target = base.to_path_buf();
+    for component in relative.trim_start_matches(['/', '\\']).split(['/', '\\']) {
+        match component {
+            "" | "." => {}
+            ".." => target.push(".."),
+            value if value.contains(':') || value.contains('\0') => return None,
+            value => target.push(value),
+        }
+    }
+    Some(target)
 }
 
 fn is_shell_script(path: &Path) -> bool {
@@ -724,8 +861,9 @@ fn npm_output(node_path: &Path, npm_cli_path: &Path, args: &[&str]) -> Result<Co
 
 fn run_package_manager_command(
     command_path: &Path,
-    args: &[&str],
+    args: &[OsString],
     node_launcher_path: &Path,
+    pnpm_home: &Path,
 ) -> Result<CommandOutput, String> {
     let mut command = dbx_core::process::new_std_command(command_path);
     command.args(args);
@@ -739,19 +877,8 @@ fn run_package_manager_command(
     if let Ok(path) = env::join_paths(paths) {
         command.env("PATH", path);
     }
-    if let Some(pnpm_home) = pnpm_home_from_command(command_path) {
-        command.env("PNPM_HOME", pnpm_home);
-    }
+    command.env("PNPM_HOME", pnpm_home);
     command_output_from_process(command)
-}
-
-fn pnpm_home_from_command(command_path: &Path) -> Option<PathBuf> {
-    let command_dir = command_path.parent()?;
-    if command_dir.file_name().is_some_and(|name| name.eq_ignore_ascii_case("bin")) {
-        command_dir.parent().map(Path::to_path_buf)
-    } else {
-        Some(command_dir.to_path_buf())
-    }
 }
 
 fn npm_stdout(node_path: &Path, npm_cli_path: &Path, args: &[&str]) -> Result<String, String> {
@@ -773,6 +900,9 @@ fn successful_stdout(output: CommandOutput) -> Result<String, String> {
 fn mcp_package(package_root: &Path) -> Option<McpPackage> {
     let content = std::fs::read_to_string(package_root.join("package.json")).ok()?;
     let value: serde_json::Value = serde_json::from_str(&content).ok()?;
+    if value.get("name").and_then(serde_json::Value::as_str)? != MCP_PACKAGE_NAME {
+        return None;
+    }
     let entry = match value.get("bin")? {
         serde_json::Value::String(entry) => entry.as_str(),
         serde_json::Value::Object(entries) => {
@@ -796,9 +926,9 @@ fn mcp_package(package_root: &Path) -> Option<McpPackage> {
     if !script_path.starts_with(&package_root) {
         return None;
     }
-    let version = value.get("version").and_then(serde_json::Value::as_str).map(ToOwned::to_owned);
+    let version = value.get("version").and_then(serde_json::Value::as_str)?.to_owned();
     let minimum_node_version =
-        value.pointer("/engines/node").and_then(serde_json::Value::as_str).and_then(parse_minimum_node_version);
+        value.pointer("/engines/node").and_then(serde_json::Value::as_str).and_then(parse_minimum_node_version)?;
     Some(McpPackage { version, script_path, minimum_node_version })
 }
 
@@ -823,23 +953,56 @@ fn preferred_mcp_package(
 }
 
 fn mcp_package_supports_node(package: &McpPackage, node_version: NodeVersion) -> bool {
-    package.minimum_node_version.is_none_or(|minimum| node_version >= minimum)
+    node_version >= package.minimum_node_version
 }
 
 fn mcp_package_from_command_dir(dir: &Path) -> Option<LocatedMcpPackage> {
-    let (bin_path, script_path) = ["dbx-mcp-server", "mcp-server"].into_iter().find_map(|command| {
+    ["dbx-mcp-server", "mcp-server"].into_iter().find_map(|command| {
         command_file_names(command).into_iter().map(|name| dir.join(name)).find_map(|path| {
             if !path.is_file() {
                 return None;
             }
-            node_script_from_launcher(&path).map(|script_path| (path, script_path))
+            mcp_package_from_command_path(&path)
         })
-    })?;
+    })
+}
+
+fn mcp_package_from_command_path(command_path: &Path) -> Option<LocatedMcpPackage> {
+    let bin_path = canonical_runtime_path(command_path)?;
+    let script_path = node_script_from_launcher(&bin_path)?;
     let (package_root, package) = mcp_package_from_script(&script_path)?;
-    let package_manager = pnpm_command_near(dir)
-        .map(|command_path| McpPackageManager::Pnpm { command_path })
-        .unwrap_or(McpPackageManager::Npm);
+    let launcher_dir = bin_path.parent()?.to_path_buf();
+    let package_manager = pnpm_global_dir(&package_root, &launcher_dir)
+        .map(|global_dir| {
+            pnpm_command_near(&launcher_dir)
+                .map(|command_path| McpPackageManager::Pnpm {
+                    command_path,
+                    pnpm_home: launcher_dir.clone(),
+                    global_dir: global_dir.clone(),
+                })
+                .unwrap_or(McpPackageManager::PnpmUnavailable { pnpm_home: launcher_dir.clone(), global_dir })
+        })
+        .unwrap_or(McpPackageManager::Unmanaged { launcher_dir });
     Some(LocatedMcpPackage { package_root, package, bin_path: Some(bin_path), package_manager })
+}
+
+fn pnpm_global_dir(package_root: &Path, launcher_dir: &Path) -> Option<PathBuf> {
+    let virtual_store = package_root
+        .ancestors()
+        .find(|ancestor| ancestor.file_name().is_some_and(|name| name.eq_ignore_ascii_case(".pnpm")))?;
+    let global_dir = virtual_store.parent()?.to_path_buf();
+    if !package_root.starts_with(virtual_store) || launcher_dir.starts_with(&global_dir) {
+        return None;
+    }
+    let manifest = std::fs::read_to_string(global_dir.join("package.json")).ok()?;
+    let manifest: serde_json::Value = serde_json::from_str(&manifest).ok()?;
+    manifest
+        .get("dependencies")
+        .and_then(serde_json::Value::as_object)
+        .and_then(|dependencies| dependencies.get(MCP_PACKAGE_NAME))
+        .and_then(serde_json::Value::as_str)
+        .filter(|requirement| !requirement.trim().is_empty())
+        .map(|_| global_dir)
 }
 
 fn mcp_package_from_script(script_path: &Path) -> Option<(PathBuf, McpPackage)> {
@@ -862,23 +1025,95 @@ fn pnpm_command_near(dir: &Path) -> Option<PathBuf> {
     })
 }
 
-fn mcp_native_binary_path(package_root: &Path, npm_root: &Path) -> Option<PathBuf> {
+fn discover_path_mcp_package() -> Option<LocatedMcpPackage> {
+    let launcher = locate_mcp_bin()?;
+    let package = mcp_package_from_command_path(&launcher);
+    if package.is_none() {
+        log::warn!("Ignoring unbound MCP package shim at {}", launcher.display());
+    }
+    package
+}
+
+fn bind_mcp_installation(
+    located: LocatedMcpPackage,
+    node_path: &Path,
+    node_version: &str,
+    npm_root: &Path,
+) -> Option<McpInstallation> {
+    let parsed_node_version = parse_node_version(node_version)?;
+    if !mcp_package_supports_node(&located.package, parsed_node_version) {
+        log::warn!(
+            "Ignoring MCP package at {} because Node.js {} does not satisfy its engine requirement",
+            located.package_root.display(),
+            node_version
+        );
+        return None;
+    }
+    let native_bin_path =
+        mcp_native_binary_path(&located.package_root, npm_root, &located.package_manager, &located.package.version);
+    Some(McpInstallation {
+        package_root: located.package_root,
+        launcher_path: located.bin_path,
+        script_path: located.package.script_path,
+        node_path: node_path.to_path_buf(),
+        node_version: node_version.to_string(),
+        package_version: located.package.version,
+        package_manager: located.package_manager,
+        native_bin_path,
+    })
+}
+
+fn mcp_native_binary_path(
+    package_root: &Path,
+    npm_root: &Path,
+    package_manager: &McpPackageManager,
+    package_version: &str,
+) -> Option<PathBuf> {
     let (package_name, binary_name) = mcp_native_package()?;
-    mcp_native_binary_path_for(package_root, npm_root, package_name, binary_name)
+    mcp_native_binary_path_for(package_root, npm_root, package_manager, package_version, package_name, binary_name)
 }
 
 fn mcp_native_binary_path_for(
     package_root: &Path,
     npm_root: &Path,
+    package_manager: &McpPackageManager,
+    package_version: &str,
     package_name: &str,
     binary_name: &str,
 ) -> Option<PathBuf> {
-    [
-        package_root.join("node_modules").join(package_name).join("bin").join(binary_name),
-        npm_root.join(package_name).join("bin").join(binary_name),
-    ]
-    .into_iter()
-    .find_map(|path| canonical_runtime_path(&path))
+    let package_root = canonical_runtime_path(package_root)?;
+    let (boundary, allow_hoisted) = match package_manager {
+        McpPackageManager::Npm => {
+            let npm_root = canonical_runtime_path(npm_root)?;
+            if package_root != canonical_runtime_path(&npm_root.join(MCP_PACKAGE_NAME))? {
+                return None;
+            }
+            (npm_root, true)
+        }
+        McpPackageManager::Pnpm { global_dir, .. } | McpPackageManager::PnpmUnavailable { global_dir, .. } => {
+            (canonical_runtime_path(global_dir)?, false)
+        }
+        McpPackageManager::Unmanaged { .. } => (package_root.clone(), false),
+    };
+    let mut candidates = vec![package_root.join("node_modules").join(package_name)];
+    if allow_hoisted {
+        candidates.push(npm_root.join(package_name));
+    }
+    candidates.into_iter().find_map(|native_package_root| {
+        let native_package_root = canonical_runtime_path(&native_package_root)?;
+        if !native_package_root.starts_with(&boundary) {
+            return None;
+        }
+        let manifest = std::fs::read_to_string(native_package_root.join("package.json")).ok()?;
+        let manifest: serde_json::Value = serde_json::from_str(&manifest).ok()?;
+        if manifest.get("name").and_then(serde_json::Value::as_str) != Some(package_name)
+            || manifest.get("version").and_then(serde_json::Value::as_str) != Some(package_version)
+        {
+            return None;
+        }
+        let binary = canonical_runtime_path(&native_package_root.join("bin").join(binary_name))?;
+        binary.starts_with(&boundary).then_some(binary)
+    })
 }
 
 fn mcp_native_package() -> Option<(&'static str, &'static str)> {
@@ -932,8 +1167,14 @@ fn mcp_command_for_runtime(runtime: &NodeRuntime) -> Option<(String, Vec<String>
     if !is_mcp_compatible_node_version(&runtime.node_version) {
         return None;
     }
-    let script_path = runtime.mcp_script_path.as_ref()?;
-    Some((path_string(&runtime.node_path), vec![path_string(script_path)]))
+    let installation = runtime.mcp_installation.as_ref()?;
+    if installation.node_path != runtime.node_path
+        || installation.node_version != runtime.node_version
+        || !installation.script_path.starts_with(&installation.package_root)
+    {
+        return None;
+    }
+    Some((path_string(&installation.node_path), vec![path_string(&installation.script_path)]))
 }
 
 fn path_string(path: &Path) -> String {
@@ -1193,15 +1434,80 @@ mod tests {
     #[cfg(not(windows))]
     use super::{bash_login_script, prefixed_output_path, NodeRuntimeCandidate};
     use super::{
-        canonical_runtime_path, is_mcp_compatible_node_version, mcp_command_for_runtime, mcp_native_binary_path_for,
-        mcp_package, normalized_reported_path, npm_cli_candidates, parse_minimum_node_version, parse_node_version,
-        prefer_runtime, require_managed_mcp_command, resolve_managed_mcp_command, resolve_mise_mcp_command,
-        stdout_after_shell_marker, NodeRuntime, NodeVersion, MCP_MIN_NODE_VERSION_REQUIREMENT, MCP_PACKAGE_NAME,
-        SHELL_COMMAND_MARKER,
+        bind_mcp_installation, canonical_runtime_path, is_mcp_compatible_node_version, mcp_command_for_runtime,
+        mcp_installation_status_fields, mcp_native_binary_path_for, mcp_package, mcp_package_from_command_path,
+        node_script_from_launcher, normalized_reported_path, npm_cli_candidates, parse_minimum_node_version,
+        parse_node_version, prefer_runtime, require_managed_mcp_command, resolve_managed_mcp_command,
+        resolve_mise_mcp_command, stdout_after_shell_marker, McpInstallation, McpPackageManager, NodeRuntime,
+        NodeVersion, MCP_MIN_NODE_VERSION_REQUIREMENT, MCP_PACKAGE_NAME, SHELL_COMMAND_MARKER,
     };
     #[cfg(not(windows))]
     use super::{shell_command_script, shell_quote};
     use std::path::PathBuf;
+
+    const PNPM_10_27_POSIX_SHIM: &str = include_str!("../../tests/fixtures/pnpm/10.27.0/dbx-mcp-server");
+    const PNPM_10_27_CMD_SHIM: &str = include_str!("../../tests/fixtures/pnpm/10.27.0/dbx-mcp-server.cmd");
+    const PNPM_10_27_POWERSHELL_SHIM: &str = include_str!("../../tests/fixtures/pnpm/10.27.0/dbx-mcp-server.ps1");
+
+    struct PnpmFixture {
+        root: PathBuf,
+        pnpm_home: PathBuf,
+        launcher_path: PathBuf,
+        pnpm_path: PathBuf,
+        package_root: PathBuf,
+        script_path: PathBuf,
+        global_dir: PathBuf,
+    }
+
+    impl Drop for PnpmFixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    fn pnpm_fixture(launcher_name: &str, launcher: &str) -> PnpmFixture {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let root = std::env::temp_dir().join(format!("dbx-pnpm-10-27-fixture-{}-{nonce}", std::process::id()));
+        let pnpm_home = root.join("pnpm-home");
+        let launcher_path = pnpm_home.join(launcher_name);
+        let pnpm_path = pnpm_home.join(if cfg!(windows) { "pnpm.cmd" } else { "pnpm" });
+        let global_dir = root.join("global").join("5");
+        let package_root = global_dir
+            .join(".pnpm")
+            .join("@dbx-app+mcp-server@0.4.71")
+            .join("node_modules")
+            .join("@dbx-app")
+            .join("mcp-server");
+        let script_path = package_root.join("bin").join("dbx-mcp-server.js");
+
+        std::fs::create_dir_all(script_path.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(&pnpm_home).unwrap();
+        std::fs::write(&launcher_path, launcher).unwrap();
+        std::fs::write(&pnpm_path, "pnpm 10.27.0 fixture\n").unwrap();
+        std::fs::write(&script_path, "// @dbx-app/mcp-server fixture\n").unwrap();
+        std::fs::write(global_dir.join("package.json"), r#"{"dependencies":{"@dbx-app/mcp-server":"^0.4.71"}}"#)
+            .unwrap();
+        std::fs::write(
+            package_root.join("package.json"),
+            r#"{"name":"@dbx-app/mcp-server","version":"0.4.71","bin":{"dbx-mcp-server":"bin/dbx-mcp-server.js"},"engines":{"node":">=18.18.0"}}"#,
+        )
+        .unwrap();
+
+        PnpmFixture { root, pnpm_home, launcher_path, pnpm_path, package_root, script_path, global_dir }
+    }
+
+    fn runtime_for_installation(installation: McpInstallation, npm_root: PathBuf) -> NodeRuntime {
+        NodeRuntime {
+            node_launcher_path: installation.node_path.clone(),
+            node_path: installation.node_path.clone(),
+            npm_cli_path: installation.node_path.with_file_name("npm-cli.js"),
+            npm_root,
+            node_version: installation.node_version.clone(),
+            mcp_installation: Some(installation),
+        }
+    }
 
     fn runtime(node_path: &str, script_path: Option<&str>) -> NodeRuntime {
         runtime_with_version_and_root(node_path, &format!("{node_path}-root"), script_path, "v24.16.0")
@@ -1213,17 +1519,25 @@ mod tests {
         script_path: Option<&str>,
         node_version: &str,
     ) -> NodeRuntime {
-        NodeRuntime {
-            node_launcher_path: PathBuf::from(node_path),
-            node_path: PathBuf::from(node_path),
-            npm_cli_path: PathBuf::from(format!("{node_path}-npm-cli.js")),
-            npm_root: PathBuf::from(npm_root),
-            package_manager: super::McpPackageManager::Npm,
+        let node_path = PathBuf::from(node_path);
+        let npm_root = PathBuf::from(npm_root);
+        let mcp_installation = script_path.map(|script_path| McpInstallation {
+            package_root: npm_root.join(MCP_PACKAGE_NAME),
+            launcher_path: None,
+            script_path: PathBuf::from(script_path),
+            node_path: node_path.clone(),
             node_version: node_version.to_string(),
-            mcp_version: script_path.map(|_| "0.4.29".to_string()),
-            mcp_script_path: script_path.map(PathBuf::from),
-            mcp_bin_path: None,
-            mcp_native_bin_path: None,
+            package_version: "0.4.29".to_string(),
+            package_manager: McpPackageManager::Npm,
+            native_bin_path: None,
+        });
+        NodeRuntime {
+            node_launcher_path: node_path.clone(),
+            npm_cli_path: PathBuf::from(format!("{}-npm-cli.js", node_path.display())),
+            node_path,
+            npm_root,
+            node_version: node_version.to_string(),
+            mcp_installation,
         }
     }
 
@@ -1289,7 +1603,10 @@ mod tests {
 
         assert_eq!(fallback.unwrap().node_path, first.node_path);
         assert_eq!(selected.node_path, installed.node_path);
-        assert_eq!(selected.mcp_script_path, installed.mcp_script_path);
+        assert_eq!(
+            selected.mcp_installation.as_ref().map(|installation| &installation.script_path),
+            installed.mcp_installation.as_ref().map(|installation| &installation.script_path)
+        );
     }
 
     #[test]
@@ -1307,7 +1624,10 @@ mod tests {
         let selected = prefer_runtime(compatible_runtime.clone(), &mut fallback).unwrap();
 
         assert_eq!(selected.node_path, compatible_runtime.node_path);
-        assert_eq!(selected.mcp_script_path, compatible_runtime.mcp_script_path);
+        assert_eq!(
+            selected.mcp_installation.as_ref().map(|installation| &installation.script_path),
+            compatible_runtime.mcp_installation.as_ref().map(|installation| &installation.script_path)
+        );
     }
 
     #[test]
@@ -1337,28 +1657,28 @@ mod tests {
         std::fs::write(&current_entry, "// native launcher\n").unwrap();
         std::fs::write(
             dir.join("package.json"),
-            r#"{"version":"0.4.38","bin":{"dbx-mcp-server":"bin/dbx-mcp-server.js"},"engines":{"node":">=18.18.0"}}"#,
+            r#"{"name":"@dbx-app/mcp-server","version":"0.4.38","bin":{"dbx-mcp-server":"bin/dbx-mcp-server.js"},"engines":{"node":">=18.18.0"}}"#,
         )
         .unwrap();
 
         let current = mcp_package(&dir).unwrap();
-        assert_eq!(current.version.as_deref(), Some("0.4.38"));
+        assert_eq!(current.version, "0.4.38");
         assert_eq!(current.script_path, canonical_runtime_path(&current_entry).unwrap());
-        assert_eq!(current.minimum_node_version, Some(NodeVersion { major: 18, minor: 18, patch: 0 }));
+        assert_eq!(current.minimum_node_version, NodeVersion { major: 18, minor: 18, patch: 0 });
 
         let legacy_entry = dir.join("dist").join("index.js");
         std::fs::create_dir_all(legacy_entry.parent().unwrap()).unwrap();
         std::fs::write(&legacy_entry, "// legacy server\n").unwrap();
         std::fs::write(
             dir.join("package.json"),
-            r#"{"version":"0.4.32","bin":{"dbx-mcp-server":"dist/index.js"},"engines":{"node":">=22.13.0"}}"#,
+            r#"{"name":"@dbx-app/mcp-server","version":"0.4.32","bin":{"dbx-mcp-server":"dist/index.js"},"engines":{"node":">=22.13.0"}}"#,
         )
         .unwrap();
 
         let legacy = mcp_package(&dir).unwrap();
-        assert_eq!(legacy.version.as_deref(), Some("0.4.32"));
+        assert_eq!(legacy.version, "0.4.32");
         assert_eq!(legacy.script_path, canonical_runtime_path(&legacy_entry).unwrap());
-        assert_eq!(legacy.minimum_node_version, Some(NodeVersion { major: 22, minor: 13, patch: 0 }));
+        assert_eq!(legacy.minimum_node_version, NodeVersion { major: 22, minor: 13, patch: 0 });
 
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -1378,7 +1698,7 @@ mod tests {
         std::fs::write(&undeclared_entry, "// undeclared entry\n").unwrap();
         std::fs::write(
             package_root.join("package.json"),
-            r#"{"version":"0.4.44","bin":{"dbx-mcp-server":"bin/dbx-mcp-server.js"},"engines":{"node":">=18.18.0"}}"#,
+            r#"{"name":"@dbx-app/mcp-server","version":"0.4.44","bin":{"dbx-mcp-server":"bin/dbx-mcp-server.js"},"engines":{"node":">=18.18.0"}}"#,
         )
         .unwrap();
 
@@ -1388,25 +1708,56 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
-    #[cfg(not(windows))]
+    fn assert_real_pnpm_launcher(launcher_name: &str, launcher: &str) {
+        let fixture = pnpm_fixture(launcher_name, launcher);
+
+        assert_ne!(fixture.pnpm_home, fixture.global_dir);
+        assert_eq!(node_script_from_launcher(&fixture.launcher_path), canonical_runtime_path(&fixture.script_path));
+        let located = mcp_package_from_command_path(&fixture.launcher_path).unwrap();
+        assert_eq!(located.package_root, canonical_runtime_path(&fixture.package_root).unwrap());
+        assert_eq!(located.package.version, "0.4.71");
+        assert!(matches!(
+            located.package_manager,
+            McpPackageManager::Pnpm {
+                ref command_path,
+                ref pnpm_home,
+                ref global_dir,
+            } if command_path == &fixture.pnpm_path
+                && pnpm_home == &canonical_runtime_path(&fixture.pnpm_home).unwrap()
+                && global_dir == &canonical_runtime_path(&fixture.global_dir).unwrap()
+        ));
+    }
+
     #[test]
-    fn shell_launcher_requires_cmd_shim_target() {
+    fn parses_real_pnpm_10_27_posix_global_shim() {
+        assert_real_pnpm_launcher("dbx-mcp-server", PNPM_10_27_POSIX_SHIM);
+    }
+
+    #[test]
+    fn parses_real_pnpm_10_27_windows_cmd_global_shim() {
+        assert_real_pnpm_launcher("dbx-mcp-server.cmd", PNPM_10_27_CMD_SHIM);
+    }
+
+    #[test]
+    fn parses_real_pnpm_10_27_windows_powershell_global_shim() {
+        assert_real_pnpm_launcher("dbx-mcp-server.ps1", PNPM_10_27_POWERSHELL_SHIM);
+    }
+
+    #[test]
+    fn rejects_private_marker_and_unrecognized_shell_launcher() {
         use std::time::{SystemTime, UNIX_EPOCH};
 
         let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
-        let dir = std::env::temp_dir().join(format!("dbx-mcp-shell-shim-test-{}-{nonce}", std::process::id()));
-        let launcher = dir.join("npm");
-        let target = dir.join("npm-cli.js");
-
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(&target, "// npm cli\n").unwrap();
-        std::fs::write(&launcher, "#!/bin/sh\nexit 1\n").unwrap();
-        assert!(super::node_script_from_launcher(&launcher).is_none());
-
+        let root = std::env::temp_dir().join(format!("dbx-mcp-unrecognized-shim-{}-{nonce}", std::process::id()));
+        let target = root.join("target.js");
+        let launcher = root.join("dbx-mcp-server");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(&target, "// untrusted target\n").unwrap();
         std::fs::write(&launcher, format!("#!/bin/sh\nexit 1\n# cmd-shim-target={}\n", target.display())).unwrap();
-        assert_eq!(super::node_script_from_launcher(&launcher), canonical_runtime_path(&target));
 
-        let _ = std::fs::remove_dir_all(dir);
+        assert!(node_script_from_launcher(&launcher).is_none());
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -1422,20 +1773,56 @@ mod tests {
         let nested_binary = package_root.join("node_modules").join(package_name).join("bin").join(binary_name);
         std::fs::create_dir_all(nested_binary.parent().unwrap()).unwrap();
         std::fs::write(&nested_binary, "nested binary").unwrap();
+        std::fs::write(
+            nested_binary.parent().unwrap().parent().unwrap().join("package.json"),
+            r#"{"name":"@dbx-app/mcp-win32-x64","version":"0.4.71"}"#,
+        )
+        .unwrap();
 
         assert_eq!(
-            mcp_native_binary_path_for(&package_root, &npm_root, package_name, binary_name),
+            mcp_native_binary_path_for(
+                &package_root,
+                &npm_root,
+                &McpPackageManager::Npm,
+                "0.4.71",
+                package_name,
+                binary_name,
+            ),
             canonical_runtime_path(&nested_binary)
         );
 
-        std::fs::remove_file(&nested_binary).unwrap();
+        std::fs::remove_dir_all(nested_binary.parent().unwrap().parent().unwrap()).unwrap();
         let hoisted_binary = npm_root.join(package_name).join("bin").join(binary_name);
         std::fs::create_dir_all(hoisted_binary.parent().unwrap()).unwrap();
         std::fs::write(&hoisted_binary, "hoisted binary").unwrap();
+        std::fs::write(
+            hoisted_binary.parent().unwrap().parent().unwrap().join("package.json"),
+            r#"{"name":"@dbx-app/mcp-win32-x64","version":"0.4.71"}"#,
+        )
+        .unwrap();
 
         assert_eq!(
-            mcp_native_binary_path_for(&package_root, &npm_root, package_name, binary_name),
+            mcp_native_binary_path_for(
+                &package_root,
+                &npm_root,
+                &McpPackageManager::Npm,
+                "0.4.71",
+                package_name,
+                binary_name,
+            ),
             canonical_runtime_path(&hoisted_binary)
+        );
+
+        assert_eq!(
+            mcp_native_binary_path_for(
+                &package_root,
+                &npm_root,
+                &McpPackageManager::Npm,
+                "0.4.72",
+                package_name,
+                binary_name,
+            ),
+            None
         );
 
         let _ = std::fs::remove_dir_all(dir);
@@ -1443,12 +1830,13 @@ mod tests {
 
     #[test]
     fn mcp_command_binds_script_to_the_installation_node() {
-        let installed = runtime("/runtime/node-24", Some("/runtime/node-24-mcp/dist/index.js"));
+        let script_path = "/runtime/node-24-root/@dbx-app/mcp-server/dist/index.js";
+        let installed = runtime("/runtime/node-24", Some(script_path));
 
         let command = mcp_command_for_runtime(&installed).unwrap();
 
         assert_eq!(command.0, "/runtime/node-24");
-        assert_eq!(command.1, vec!["/runtime/node-24-mcp/dist/index.js"]);
+        assert_eq!(command.1, vec![script_path]);
     }
 
     #[test]
@@ -1562,6 +1950,176 @@ mod tests {
     }
 
     #[test]
+    fn local_pnpm_project_shim_is_not_treated_as_a_global_installation() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let root = std::env::temp_dir().join(format!("dbx-pnpm-local-fixture-{}-{nonce}", std::process::id()));
+        let node_modules = root.join("project").join("node_modules");
+        let launcher_dir = node_modules.join(".bin");
+        let launcher_path = launcher_dir.join("dbx-mcp-server");
+        let package_relative = ".pnpm/@dbx-app+mcp-server@0.4.71/node_modules/@dbx-app/mcp-server";
+        let package_root = node_modules.join(package_relative);
+        let script_path = package_root.join("bin").join("dbx-mcp-server.js");
+        std::fs::create_dir_all(script_path.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(&launcher_dir).unwrap();
+        std::fs::write(&script_path, "// local MCP fixture\n").unwrap();
+        std::fs::write(
+            package_root.join("package.json"),
+            r#"{"name":"@dbx-app/mcp-server","version":"0.4.71","bin":{"dbx-mcp-server":"bin/dbx-mcp-server.js"},"engines":{"node":">=18.18.0"}}"#,
+        )
+        .unwrap();
+        std::fs::write(node_modules.join("package.json"), r#"{"dependencies":{"@dbx-app/mcp-server":"^0.4.71"}}"#)
+            .unwrap();
+        std::fs::write(launcher_dir.join(if cfg!(windows) { "pnpm.cmd" } else { "pnpm" }), "pnpm fixture\n").unwrap();
+        std::fs::write(
+            &launcher_path,
+            format!(
+                "#!/bin/sh\nbasedir=$(dirname \"$0\")\nexec node \"$basedir/../{package_relative}/bin/dbx-mcp-server.js\" \"$@\"\n"
+            ),
+        )
+        .unwrap();
+
+        let located = mcp_package_from_command_path(&launcher_path).unwrap();
+
+        assert!(matches!(
+            located.package_manager,
+            McpPackageManager::Unmanaged { launcher_dir: ref detected_launcher_dir }
+                if detected_launcher_dir == &canonical_runtime_path(&launcher_dir).unwrap()
+        ));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn mcp_command_rejects_script_outside_installation_package_root() {
+        let installed = runtime("/runtime/node-24", Some("/outside/@dbx-app/mcp-server/dist/index.js"));
+
+        assert!(mcp_command_for_runtime(&installed).is_none());
+    }
+
+    #[test]
+    fn npm_global_installation_keeps_existing_runtime_behavior() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let root = std::env::temp_dir().join(format!("dbx-mcp-npm-regression-{}-{nonce}", std::process::id()));
+        let npm_root = root.join("lib").join("node_modules");
+        let package_root = npm_root.join(MCP_PACKAGE_NAME);
+        let script_path = package_root.join("bin").join("dbx-mcp-server.js");
+        std::fs::create_dir_all(script_path.parent().unwrap()).unwrap();
+        std::fs::write(&script_path, "// npm global MCP\n").unwrap();
+        std::fs::write(
+            package_root.join("package.json"),
+            r#"{"name":"@dbx-app/mcp-server","version":"0.4.65","bin":{"dbx-mcp-server":"bin/dbx-mcp-server.js"},"engines":{"node":">=18.18.0"}}"#,
+        )
+        .unwrap();
+        let located = super::LocatedMcpPackage {
+            package_root: canonical_runtime_path(&package_root).unwrap(),
+            package: mcp_package(&package_root).unwrap(),
+            bin_path: None,
+            package_manager: McpPackageManager::Npm,
+        };
+        let installation =
+            bind_mcp_installation(located, PathBuf::from("/npm-runtime/node").as_path(), "v24.16.0", &npm_root)
+                .unwrap();
+        let runtime = runtime_for_installation(installation, npm_root);
+
+        assert_eq!(runtime.update_command(), super::MCP_INSTALL_COMMAND);
+        assert_eq!(runtime.uninstall_command(), super::MCP_UNINSTALL_COMMAND);
+        assert!(matches!(
+            runtime.mcp_installation.as_ref().map(|installation| &installation.package_manager),
+            Some(McpPackageManager::Npm)
+        ));
+        assert_eq!(
+            mcp_command_for_runtime(&runtime).unwrap().1,
+            vec![super::path_string(&canonical_runtime_path(&script_path).unwrap())]
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn split_pnpm_installation_is_shared_by_status_launch_update_and_uninstall() {
+        let fixture = pnpm_fixture("dbx-mcp-server", PNPM_10_27_POSIX_SHIM);
+        let node_prefix = fixture.root.join("selected-node-runtime");
+        let node_path = node_prefix.join(if cfg!(windows) { "node.exe" } else { "bin/node" });
+        let npm_root = node_prefix.join("lib").join("node_modules");
+        std::fs::create_dir_all(&npm_root).unwrap();
+        std::fs::create_dir_all(node_path.parent().unwrap()).unwrap();
+        std::fs::write(&node_path, "selected Node runtime\n").unwrap();
+        let (native_package_name, native_binary_name) = super::mcp_native_package().unwrap();
+        let unrelated_native_root = npm_root.join(native_package_name);
+        let unrelated_native_binary = unrelated_native_root.join("bin").join(native_binary_name);
+        std::fs::create_dir_all(unrelated_native_binary.parent().unwrap()).unwrap();
+        std::fs::write(&unrelated_native_binary, "unrelated native binary\n").unwrap();
+        std::fs::write(
+            unrelated_native_root.join("package.json"),
+            format!(r#"{{"name":"{native_package_name}","version":"0.4.71"}}"#),
+        )
+        .unwrap();
+
+        let located = mcp_package_from_command_path(&fixture.launcher_path).unwrap();
+        let node_path = canonical_runtime_path(&node_path).unwrap();
+        let installation = bind_mcp_installation(located, &node_path, "v24.16.0", &npm_root).unwrap();
+        let runtime = runtime_for_installation(installation, npm_root.clone());
+
+        assert!(!fixture.pnpm_home.starts_with(&node_prefix));
+        assert!(!runtime.mcp_installation.as_ref().unwrap().package_root.starts_with(&npm_root));
+        assert!(runtime.has_mcp_package());
+        let installation = runtime.mcp_installation.as_ref().unwrap();
+        let status = mcp_installation_status_fields(Some(&runtime));
+        assert!(status.installed);
+        assert_eq!(status.current_version.as_deref(), Some("0.4.71"));
+        assert_eq!(status.script_path, Some(super::path_string(&installation.script_path)));
+        assert_eq!(installation.package_version, "0.4.71");
+        assert_eq!(installation.script_path, canonical_runtime_path(&fixture.script_path).unwrap());
+        assert_eq!(installation.launcher_path, canonical_runtime_path(&fixture.launcher_path));
+        assert_eq!(installation.native_bin_path, None);
+        assert_eq!(runtime.update_command(), super::MCP_PNPM_UPDATE_COMMAND);
+        assert_eq!(runtime.uninstall_command(), super::MCP_PNPM_UNINSTALL_COMMAND);
+        assert!(matches!(
+            installation.package_manager,
+            McpPackageManager::Pnpm {
+                ref command_path,
+                ref pnpm_home,
+                ref global_dir,
+            } if command_path == &fixture.pnpm_path
+                && pnpm_home == &canonical_runtime_path(&fixture.pnpm_home).unwrap()
+                && global_dir == &canonical_runtime_path(&fixture.global_dir).unwrap()
+        ));
+
+        let command = mcp_command_for_runtime(&runtime).unwrap();
+        assert_eq!(command.0, node_path.to_string_lossy().to_string());
+        assert_eq!(
+            command.1,
+            vec![canonical_runtime_path(&fixture.script_path).unwrap().to_string_lossy().to_string()]
+        );
+    }
+
+    #[test]
+    fn split_pnpm_without_verified_pnpm_disables_update_and_uninstall() {
+        let fixture = pnpm_fixture("dbx-mcp-server", PNPM_10_27_POSIX_SHIM);
+        std::fs::remove_file(&fixture.pnpm_path).unwrap();
+        let located = mcp_package_from_command_path(&fixture.launcher_path).unwrap();
+        let installation = bind_mcp_installation(
+            located,
+            PathBuf::from("/selected-runtime/node").as_path(),
+            "v24.16.0",
+            &fixture.root.join("unrelated-npm-root"),
+        )
+        .unwrap();
+        let runtime = runtime_for_installation(installation, fixture.root.join("unrelated-npm-root"));
+
+        assert!(matches!(
+            runtime.mcp_installation.as_ref().map(|installation| &installation.package_manager),
+            Some(McpPackageManager::PnpmUnavailable { .. })
+        ));
+        assert!(runtime.install_or_update().err().unwrap().contains("Cannot safely update"));
+        assert!(runtime.uninstall().err().unwrap().contains("Cannot safely uninstall"));
+    }
+
+    #[test]
     fn incompatible_runtime_does_not_fall_back_to_available_mcp_shim() {
         let incompatible = runtime_with_version_and_root(
             "/runtime/node-18",
@@ -1574,6 +2132,44 @@ mod tests {
             resolve_managed_mcp_command(Some(&incompatible), || Some(PathBuf::from("/path/bin/dbx-mcp-server")));
 
         assert!(command.is_none());
+    }
+
+    #[test]
+    fn path_shim_rejects_wrong_package_identity() {
+        let fixture = pnpm_fixture("dbx-mcp-server", PNPM_10_27_POSIX_SHIM);
+        std::fs::write(
+            fixture.package_root.join("package.json"),
+            r#"{"name":"untrusted-package","version":"0.4.71","bin":{"dbx-mcp-server":"bin/dbx-mcp-server.js"},"engines":{"node":">=18.18.0"}}"#,
+        )
+        .unwrap();
+
+        assert!(mcp_package_from_command_path(&fixture.launcher_path).is_none());
+    }
+
+    #[test]
+    fn path_shim_rejects_package_bin_outside_package_root() {
+        let fixture = pnpm_fixture("dbx-mcp-server", PNPM_10_27_POSIX_SHIM);
+        std::fs::write(
+            fixture.package_root.join("package.json"),
+            r#"{"name":"@dbx-app/mcp-server","version":"0.4.71","bin":{"dbx-mcp-server":"../../outside.js"},"engines":{"node":">=18.18.0"}}"#,
+        )
+        .unwrap();
+
+        assert!(mcp_package_from_command_path(&fixture.launcher_path).is_none());
+    }
+
+    #[test]
+    fn path_shim_rejects_incompatible_node_engine() {
+        let fixture = pnpm_fixture("dbx-mcp-server", PNPM_10_27_POSIX_SHIM);
+        std::fs::write(
+            fixture.package_root.join("package.json"),
+            r#"{"name":"@dbx-app/mcp-server","version":"0.4.71","bin":{"dbx-mcp-server":"bin/dbx-mcp-server.js"},"engines":{"node":">=25.0.0"}}"#,
+        )
+        .unwrap();
+        let located = mcp_package_from_command_path(&fixture.launcher_path).unwrap();
+
+        assert!(bind_mcp_installation(located, PathBuf::from("/runtime/node-24").as_path(), "v24.16.0", &fixture.root)
+            .is_none());
     }
 
     #[test]
@@ -1615,7 +2211,7 @@ mod tests {
         std::fs::write(&script_path, "// fake mcp server\n").unwrap();
         std::fs::write(
             package_root.join("package.json"),
-            r#"{"version":"0.4.38","bin":{"dbx-mcp-server":"bin/dbx-mcp-server.js"},"engines":{"node":">=18.18.0"}}"#,
+            r#"{"name":"@dbx-app/mcp-server","version":"0.4.38","bin":{"dbx-mcp-server":"bin/dbx-mcp-server.js"},"engines":{"node":">=18.18.0"}}"#,
         )
         .unwrap();
         let node_script = format!(
@@ -1637,12 +2233,20 @@ mod tests {
         std::fs::set_permissions(&node_path, permissions).unwrap();
         symlink(&node_path, &node_alias).unwrap();
 
-        let probed = NodeRuntime::probe(NodeRuntimeCandidate { node_path: node_alias.clone() }).unwrap();
+        let probed =
+            NodeRuntime::probe_with_path_package(NodeRuntimeCandidate { node_path: node_alias.clone() }, None).unwrap();
 
         assert_eq!(probed.node_path, canonical_runtime_path(&node_path).unwrap());
         assert_eq!(probed.npm_root, canonical_runtime_path(&npm_root).unwrap());
         assert_eq!(probed.node_version, "v24.16.0");
-        assert_eq!(probed.mcp_script_path, canonical_runtime_path(&script_path));
+        assert_eq!(
+            probed.mcp_installation.as_ref().map(|installation| &installation.script_path),
+            canonical_runtime_path(&script_path).as_ref()
+        );
+        assert!(matches!(
+            probed.mcp_installation.as_ref().map(|installation| &installation.package_manager),
+            Some(McpPackageManager::Npm)
+        ));
         let install_output = probed.install_or_update().unwrap();
         assert!(install_output.success);
         let calls = std::fs::read_to_string(log_path).unwrap();
@@ -1661,36 +2265,19 @@ mod tests {
     #[test]
     fn runtime_probe_resolves_pnpm_global_shims_and_update_command() {
         use std::os::unix::fs::{symlink, PermissionsExt};
-        use std::time::{SystemTime, UNIX_EPOCH};
-
-        let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
-        let dir = std::env::temp_dir().join(format!("dbx-mcp-pnpm-runtime-test-{}-{nonce}", std::process::id()));
-        let bin_dir = dir.join("bin");
-        let npm_root = dir.join("npm-root").join("lib").join("node_modules");
-        let npm_prefix = dir.join("npm-root");
-        let npm_cli_path = dir.join("pnpm-global").join("npm").join("bin").join("npm-cli.js");
-        let package_root = dir.join("pnpm-global").join("@dbx-app").join("mcp-server");
-        let script_path = package_root.join("bin").join("dbx-mcp-server.js");
-        let node_path = dir.join("pnpm-global").join("node").join("bin").join("node");
+        let fixture = pnpm_fixture("dbx-mcp-server", PNPM_10_27_POSIX_SHIM);
+        let bin_dir = fixture.root.join("selected-node-runtime").join("bin");
+        let npm_root = fixture.root.join("selected-node-runtime").join("lib").join("node_modules");
+        let npm_prefix = fixture.root.join("selected-node-runtime");
+        let npm_cli_path = bin_dir.join("npm");
+        let node_path = fixture.root.join("selected-node-runtime").join("node-v24");
         let node_alias = bin_dir.join("node");
-        let npm_shim = bin_dir.join("npm");
-        let mcp_shim = bin_dir.join("dbx-mcp-server");
-        let pnpm_path = bin_dir.join("pnpm");
-        let log_path = dir.join("calls.log");
-        let pnpm_log_path = dir.join("pnpm.log");
+        let log_path = fixture.root.join("calls.log");
+        let pnpm_log_path = fixture.root.join("pnpm.log");
 
-        std::fs::create_dir_all(node_path.parent().unwrap()).unwrap();
-        std::fs::create_dir_all(npm_cli_path.parent().unwrap()).unwrap();
-        std::fs::create_dir_all(script_path.parent().unwrap()).unwrap();
-        std::fs::create_dir_all(&npm_root).unwrap();
         std::fs::create_dir_all(&bin_dir).unwrap();
-        std::fs::write(&npm_cli_path, "// fake pnpm-installed npm cli\n").unwrap();
-        std::fs::write(&script_path, "// fake pnpm-installed mcp server\n").unwrap();
-        std::fs::write(
-            package_root.join("package.json"),
-            r#"{"version":"0.4.44","bin":{"dbx-mcp-server":"bin/dbx-mcp-server.js"},"engines":{"node":">=18.18.0"}}"#,
-        )
-        .unwrap();
+        std::fs::create_dir_all(&npm_root).unwrap();
+        std::fs::write(&npm_cli_path, "// selected runtime npm cli\n").unwrap();
         let node_script = format!(
             "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {}\n\
              if [ \"$1\" = '--version' ]; then printf 'v24.16.0\\n'; \
@@ -1703,54 +2290,58 @@ mod tests {
             shell_quote(npm_prefix.to_string_lossy().as_ref())
         );
         std::fs::write(&node_path, node_script).unwrap();
-        std::fs::write(&npm_shim, format!("#!/bin/sh\nexit 1\n# cmd-shim-target={}\n", npm_cli_path.display()))
-            .unwrap();
-        std::fs::write(&mcp_shim, format!("#!/bin/sh\nexit 1\n# cmd-shim-target={}\n", script_path.display())).unwrap();
         std::fs::write(
-            &pnpm_path,
+            &fixture.pnpm_path,
             format!(
                 "#!/bin/sh\nprintf 'ARGS=%s\\nPNPM_HOME=%s\\nPATH=%s\\n' \"$*\" \"$PNPM_HOME\" \"$PATH\" > {}\n",
                 shell_quote(pnpm_log_path.to_string_lossy().as_ref())
             ),
         )
         .unwrap();
-        for executable in [&node_path, &npm_shim, &mcp_shim, &pnpm_path] {
+        for executable in [&node_path, &fixture.pnpm_path] {
             let mut permissions = std::fs::metadata(executable).unwrap().permissions();
             permissions.set_mode(0o755);
             std::fs::set_permissions(executable, permissions).unwrap();
         }
         symlink(&node_path, &node_alias).unwrap();
 
-        let probed = NodeRuntime::probe(NodeRuntimeCandidate { node_path: node_alias.clone() }).unwrap();
+        let located = mcp_package_from_command_path(&fixture.launcher_path).unwrap();
+        let probed = NodeRuntime::probe_with_path_package(
+            NodeRuntimeCandidate { node_path: node_alias.clone() },
+            Some(&located),
+        )
+        .unwrap();
 
         assert_eq!(probed.node_launcher_path, node_alias);
         assert_eq!(probed.node_path, canonical_runtime_path(&node_path).unwrap());
         assert_eq!(probed.npm_cli_path, canonical_runtime_path(&npm_cli_path).unwrap());
         assert_eq!(probed.npm_root, canonical_runtime_path(&npm_root).unwrap());
-        assert_eq!(probed.mcp_script_path, canonical_runtime_path(&script_path));
-        assert_eq!(probed.mcp_version.as_deref(), Some("0.4.44"));
+        let installation = probed.mcp_installation.as_ref().unwrap();
+        assert_eq!(installation.script_path, canonical_runtime_path(&fixture.script_path).unwrap());
+        assert_eq!(installation.package_version, "0.4.71");
         assert_eq!(probed.update_command(), super::MCP_PNPM_UPDATE_COMMAND);
         assert_eq!(probed.uninstall_command(), super::MCP_PNPM_UNINSTALL_COMMAND);
         assert!(matches!(
-            probed.package_manager,
-            super::McpPackageManager::Pnpm { ref command_path } if command_path == &pnpm_path
+            installation.package_manager,
+            McpPackageManager::Pnpm { ref command_path, .. } if command_path == &fixture.pnpm_path
         ));
         let update_output = probed.install_or_update().unwrap();
         assert!(update_output.success);
         let pnpm_log = std::fs::read_to_string(&pnpm_log_path).unwrap();
-        assert!(pnpm_log.contains("ARGS=update -g @dbx-app/mcp-server\n"));
+        assert!(pnpm_log.contains("ARGS=update -g @dbx-app/mcp-server --global-dir"));
+        assert!(pnpm_log.contains(fixture.global_dir.to_string_lossy().as_ref()));
         assert!(!pnpm_log.contains("--registry"));
-        assert!(pnpm_log.contains(&format!("PNPM_HOME={}", dir.display())));
-        assert!(pnpm_log.contains(&format!("PATH={}", bin_dir.display())));
+        assert!(pnpm_log.contains(&format!("PNPM_HOME={}", fixture.pnpm_home.display())));
+        assert!(pnpm_log.contains(&format!("PATH={}", fixture.pnpm_home.display())));
+        assert!(pnpm_log.contains(bin_dir.to_string_lossy().as_ref()));
 
         let uninstall_output = probed.uninstall().unwrap();
         assert!(uninstall_output.success);
         let pnpm_log = std::fs::read_to_string(&pnpm_log_path).unwrap();
-        assert!(pnpm_log.contains("ARGS=remove -g @dbx-app/mcp-server"));
-        assert!(pnpm_log.contains(&format!("PNPM_HOME={}", dir.display())));
-        assert!(pnpm_log.contains(&format!("PATH={}", bin_dir.display())));
-
-        let _ = std::fs::remove_dir_all(dir);
+        assert!(pnpm_log.contains("ARGS=remove -g @dbx-app/mcp-server --global-dir"));
+        assert!(pnpm_log.contains(fixture.global_dir.to_string_lossy().as_ref()));
+        assert!(pnpm_log.contains(&format!("PNPM_HOME={}", fixture.pnpm_home.display())));
+        assert!(pnpm_log.contains(&format!("PATH={}", fixture.pnpm_home.display())));
     }
 
     #[cfg(windows)]

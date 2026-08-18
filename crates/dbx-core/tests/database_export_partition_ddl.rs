@@ -174,8 +174,25 @@ fn postgres_test_config(id: &str, port: u16) -> ConnectionConfig {
 /// a partition-local dropped default, and the exported SQL must replay
 /// cleanly into a fresh schema (the actual "restore" check the review
 /// comment asked for).
-#[tokio::test]
-async fn database_export_of_partition_tree_has_no_duplicates_and_replays() {
+#[test]
+fn database_export_of_partition_tree_has_no_duplicates_and_replays() {
+    let handle = std::thread::Builder::new()
+        .name("database-export-partition-ddl".to_string())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("build partition ddl test runtime")
+                .block_on(run_database_export_of_partition_tree_has_no_duplicates_and_replays());
+        })
+        .expect("spawn partition ddl test thread");
+    if let Err(panic) = handle.join() {
+        std::panic::resume_unwind(panic);
+    }
+}
+
+async fn run_database_export_of_partition_tree_has_no_duplicates_and_replays() {
     let Some(container) = start_docker_postgres("dbx-export-partition-ddl") else {
         return;
     };

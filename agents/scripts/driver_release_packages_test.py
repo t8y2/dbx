@@ -97,7 +97,7 @@ class DriverReleasePackagesTest(unittest.TestCase):
                     },
                     "kingbase": {
                         "version": "0.1.34",
-                        "label": "人大金仓 KingbaseES",
+                        "label": "金仓KingbaseES",
                         "min_app_version": "0.6.0",
                         "jre": "21",
                         "jar": {"url": "https://example.com/legacy-placeholder.jar", "size": 0},

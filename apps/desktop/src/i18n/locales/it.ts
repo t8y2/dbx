@@ -468,7 +468,7 @@ export default withEnglishFallback({
     databasePlaceholder: "Opzionale",
     databasePlaceholderRequired: "Obbligatorio, inserisci un database esistente",
     databasePlaceholderWithDefault: "Opzionale, predefinito {database}",
-    kingbaseDatabaseRequired: "Kingbase richiede un database esistente prima di connettersi o caricare l'elenco dei database.",
+    kingbaseDatabaseRequired: "KingbaseES richiede un database esistente prima di connettersi o caricare l'elenco dei database.",
     defaultDatabase: "DB Predefinito",
     authDatabase: "DB di Autenticazione",
     authDatabasePlaceholder: "Opzionale, spesso admin",
@@ -5704,7 +5704,7 @@ export default withEnglishFallback({
     sidebarTableSearchEnabledDescription: "Mostra una casella di ricerca locale sotto database, schema o gruppi di tabelle espansi per filtrare le tabelle separatamente.",
     sidebarObjectInfoMode: "Informazioni aggiuntive laterali",
     sidebarObjectInfoModeDescription:
-      "Scegli commenti, dimensioni degli oggetti o nessun testo dopo i nomi. Commenti e dimensioni sono alternativi. La dimensione totale dei database supporta PostgreSQL; le dimensioni delle tabelle supportano MySQL, PostgreSQL, GaussDB, Kingbase, GBase 8a, SQL Server, Oracle, Dameng e ClickHouse.",
+      "Scegli commenti, dimensioni degli oggetti o nessun testo dopo i nomi. Commenti e dimensioni sono alternativi. La dimensione totale dei database supporta PostgreSQL; le dimensioni delle tabelle supportano MySQL, PostgreSQL, GaussDB, KingbaseES, GBase 8a, SQL Server, Oracle, Dameng e ClickHouse.",
     sidebarObjectInfoModeCommentInline: "Commenti (accanto al nome)",
     sidebarObjectInfoModeCommentAligned: "Commenti (allinea livello)",
     sidebarObjectInfoModeCommentRight: "Commenti (allinea a destra)",

@@ -12,7 +12,7 @@ DBX 的 Agent 驱动 —— 通过 JDBC 和原生数据库驱动支持各种数�
 |-------|----------|-------------|
 | access | Microsoft Access | UCanAccess |
 | dameng | 达梦 DM8 | DM JDBC |
-| kingbase | 人大金仓 KingbaseES | gokb Go 原生 agent |
+| kingbase | 金仓KingbaseES | gokb Go 原生 agent |
 | vastbase | Vastbase | openGauss Go 原生 agent |
 | uxdb | 优炫 UXDB | UXDB JDBC |
 | goldendb | GoldenDB | MySQL Connector/J |

@@ -46,7 +46,7 @@ test.each(["kingbase", "kingbase8", "jdbc:kingbase8"])("parses %s connection URL
   assert.deepEqual(parseConnectionUrl(`${scheme}://framework:secret@172.21.203.70:443/hq_official?sslmode=disable`), {
     dbType: "kingbase",
     driverProfile: "kingbase",
-    driverLabel: "人大金仓 KingbaseES",
+    driverLabel: "金仓KingbaseES",
     host: "172.21.203.70",
     port: 443,
     username: "framework",

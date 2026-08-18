@@ -12,7 +12,7 @@ Each agent runs as a standalone process and communicates with DBX via stdin/stdo
 |-------|----------|-------------|
 | access | Microsoft Access | UCanAccess |
 | dameng | 达梦 DM8 | DM JDBC |
-| kingbase | 人大金仓 KingbaseES | gokb Go native agent |
+| kingbase | 金仓KingbaseES | gokb Go native agent |
 | vastbase | Vastbase | openGauss Go native agent |
 | uxdb | UXDB | UXDB JDBC |
 | goldendb | GoldenDB | MySQL Connector/J |

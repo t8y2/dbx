@@ -35,7 +35,7 @@ export const databaseSupport: DatabaseSupportItem[] = [
   { id: "dm", name: "Dameng", icon: "/icons/database/dm.svg", tone: "#3857ff" },
   { id: "gaussdb", name: "GaussDB", icon: "/icons/database/gaussdb.svg", tone: "#ff5a3d" },
   { id: "opengauss", name: "openGauss", icon: "/icons/database/opengauss.svg", tone: "#1488c9" },
-  { id: "kingbase", name: "KingBase", icon: "/icons/database/kingbase.svg", tone: "#e1212d" },
+  { id: "kingbase", name: "KingbaseES", icon: "/icons/database/kingbase.svg", tone: "#e1212d" },
   { id: "highgo", name: "HighGo", icon: "/icons/database/highgo.png", tone: "#005bac" },
   { id: "uxdb", name: "UXDB", icon: "/icons/database/uxdb.svg", tone: "#142b8c" },
   { id: "tidb", name: "TiDB", icon: "/icons/database/tidb.svg", tone: "#e60012" },

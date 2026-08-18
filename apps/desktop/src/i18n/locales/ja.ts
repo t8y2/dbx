@@ -468,7 +468,7 @@ export default withEnglishFallback({
     databasePlaceholder: "任意",
     databasePlaceholderRequired: "必須、既存のデータベースを入力",
     databasePlaceholderWithDefault: "任意、デフォルトは {database}",
-    kingbaseDatabaseRequired: "Kingbase は接続またはデータベース一覧の読み込み前に、既存のデータベース名が必要です。",
+    kingbaseDatabaseRequired: "KingbaseES は接続またはデータベース一覧の読み込み前に、既存のデータベース名が必要です。",
     defaultDatabase: "デフォルトDB",
     authDatabase: "認証DB",
     authDatabasePlaceholder: "任意、通常は admin",
@@ -5731,7 +5731,7 @@ export default withEnglishFallback({
     sidebarTableSearchEnabledDescription: "展開済みのデータベース、schema、またはテーブルグループの下にローカル検索ボックスを表示し、スコープごとにテーブルを絞り込みます。",
     sidebarObjectInfoMode: "サイドバーの補足情報",
     sidebarObjectInfoModeDescription:
-      "名前の後にコメント、オブジェクトサイズ、または何も表示しないかを選択します。コメントとサイズは同時に表示されません。データベース全体のサイズは PostgreSQL、テーブルサイズは MySQL、PostgreSQL、GaussDB、Kingbase、GBase 8a、SQL Server、Oracle、Dameng、ClickHouse に対応しています。",
+      "名前の後にコメント、オブジェクトサイズ、または何も表示しないかを選択します。コメントとサイズは同時に表示されません。データベース全体のサイズは PostgreSQL、テーブルサイズは MySQL、PostgreSQL、GaussDB、KingbaseES、GBase 8a、SQL Server、Oracle、Dameng、ClickHouse に対応しています。",
     sidebarObjectInfoModeCommentInline: "コメント（名前の直後）",
     sidebarObjectInfoModeCommentAligned: "コメント（同階層で整列）",
     sidebarObjectInfoModeCommentRight: "コメント（右揃え）",

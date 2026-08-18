@@ -65,7 +65,7 @@ const AGENT_CATALOG: &[AgentCatalogEntry] = &[
     AgentCatalogEntry {
         db_type: DatabaseType::Kingbase,
         key: "kingbase",
-        label: "人大金仓 KingbaseES",
+        label: "金仓KingbaseES",
         store_visible: true,
         profiles: &[],
     },

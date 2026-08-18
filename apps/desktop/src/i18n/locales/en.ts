@@ -467,7 +467,7 @@ export default {
     databasePlaceholder: "Optional",
     databasePlaceholderRequired: "Required, enter an existing database",
     databasePlaceholderWithDefault: "Optional, defaults to {database}",
-    kingbaseDatabaseRequired: "Kingbase requires an existing database before connecting or loading the database list.",
+    kingbaseDatabaseRequired: "KingbaseES requires an existing database before connecting or loading the database list.",
     defaultDatabase: "Default DB",
     authDatabase: "Auth DB",
     authDatabasePlaceholder: "Optional, often admin",
@@ -5968,7 +5968,7 @@ export default {
     sidebarTableSearchEnabledDescription: "Show a local table search box under expanded databases, schemas, or table groups so each scope can filter tables independently.",
     sidebarObjectInfoMode: "Sidebar supplementary info",
     sidebarObjectInfoModeDescription:
-      "Choose comments, object sizes, or no supplementary text after names. Comments and sizes are mutually exclusive. Database totals currently support PostgreSQL; table sizes support MySQL, PostgreSQL, GaussDB, Kingbase, GBase 8a, SQL Server, Oracle, Dameng, and ClickHouse.",
+      "Choose comments, object sizes, or no supplementary text after names. Comments and sizes are mutually exclusive. Database totals currently support PostgreSQL; table sizes support MySQL, PostgreSQL, GaussDB, KingbaseES, GBase 8a, SQL Server, Oracle, Dameng, and ClickHouse.",
     sidebarObjectInfoModeCommentInline: "Comments (after name)",
     sidebarObjectInfoModeCommentAligned: "Comments (align siblings)",
     sidebarObjectInfoModeCommentRight: "Comments (align right)",

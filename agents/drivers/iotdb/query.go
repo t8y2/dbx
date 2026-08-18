@@ -414,6 +414,14 @@ func datasetRow(dataset *client.SessionDataSet, connected *sessionClient, column
 			columnType = strings.ToUpper(columnTypes[index])
 		}
 		if iotdbColumnTypeBase(columnType) == "TIMESTAMP" {
+			isNull, err := dataset.IsNullByIndex(columnIndex)
+			if err != nil {
+				return nil, err
+			}
+			if isNull {
+				row[index] = nil
+				continue
+			}
 			value, err := dataset.GetLongByIndex(columnIndex)
 			if err != nil {
 				return nil, err

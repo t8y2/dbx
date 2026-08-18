@@ -42,6 +42,7 @@ export interface UseDataGridColumnResizeOptions {
   measureHeaderText?: (text: string) => number | undefined;
   headerMeasurementKey?: Ref<unknown>;
   rowNumberWidth?: Ref<number> | ComputedRef<number>;
+  displayValue?: (value: CellValue, columnIndex: number) => CellValue;
 }
 
 export function useDataGridColumnResize(options: UseDataGridColumnResizeOptions) {
@@ -68,7 +69,8 @@ export function useDataGridColumnResize(options: UseDataGridColumnResizeOptions)
     const actualColIdx = columnIndexes.value[visibleColIdx];
     if (actualColIdx === undefined) return [];
     const preset = COLUMN_WIDTH_DENSITY_PRESETS[density.value];
-    return sampleDataGridColumnValues(sourceRows.value, actualColIdx, preset.sampleRows);
+    const values = sampleDataGridColumnValues(sourceRows.value, actualColIdx, preset.sampleRows);
+    return options.displayValue ? values.map((value) => options.displayValue!(value, actualColIdx)) : values;
   }
 
   function neededColumnWidth(colIdx: number): number {

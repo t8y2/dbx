@@ -7,6 +7,13 @@ use std::collections::HashSet;
 mod data_grid_neo4j_sql;
 use data_grid_neo4j_sql::{build_neo4j_data_grid_rollback_statements, build_neo4j_data_grid_save_statements};
 
+#[path = "data_grid_iotdb_sql.rs"]
+mod data_grid_iotdb_sql;
+use data_grid_iotdb_sql::{
+    build_iotdb_data_grid_rollback_statements, build_iotdb_data_grid_save_statements, uses_iotdb_table_model_save,
+    validate_iotdb_existing_rows,
+};
+
 #[path = "data_grid_tdengine_sql.rs"]
 mod data_grid_tdengine_sql;
 use data_grid_tdengine_sql::{
@@ -896,6 +903,9 @@ fn build_neo4j_data_grid_column_distinct_values_sql(options: &DataGridColumnDist
 }
 
 fn validate_data_grid_save(options: &DataGridSaveStatementOptions) -> Option<String> {
+    if let Some(error) = validate_iotdb_existing_rows(options) {
+        return Some(error);
+    }
     if let Some(error) = validate_tdengine_inserted_rows(options) {
         return Some(error);
     }
@@ -1114,6 +1124,9 @@ fn build_data_grid_save_statements(
     if options.database_type == Some(DatabaseType::Tdengine) {
         return build_tdengine_data_grid_save_statements(options);
     }
+    if uses_iotdb_table_model_save(options) {
+        return build_iotdb_data_grid_save_statements(options);
+    }
 
     let save_columns = effective_columns(options);
     let column_info = options.table_meta.columns.as_deref().unwrap_or(&[]);
@@ -1283,6 +1296,9 @@ fn build_data_grid_rollback_statements(
     }
     if options.database_type == Some(DatabaseType::Tdengine) {
         return build_tdengine_data_grid_rollback_statements(options);
+    }
+    if uses_iotdb_table_model_save(options) {
+        return build_iotdb_data_grid_rollback_statements(options);
     }
     if options.database_type == Some(DatabaseType::ClickHouse) {
         return Vec::new();

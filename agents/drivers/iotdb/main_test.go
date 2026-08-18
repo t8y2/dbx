@@ -120,7 +120,7 @@ func TestMetadataHelpers(t *testing.T) {
 
 func TestNormalizeIoTDBValues(t *testing.T) {
 	when := time.Date(2026, time.August, 10, 12, 34, 56, 123, time.FixedZone("CST", 8*60*60))
-	if got := normalizeIoTDBValue(when, "TIMESTAMP"); got != "2026-08-10T12:34:56.000000123+08:00" {
+	if got := normalizeIoTDBValue(when, "TIMESTAMP"); got != int64(1786336496000) {
 		t.Fatalf("unexpected timestamp: %#v", got)
 	}
 	if got := normalizeIoTDBValue(when, "DATE"); got != "2026-08-10" {
@@ -128,6 +128,29 @@ func TestNormalizeIoTDBValues(t *testing.T) {
 	}
 	if got := normalizeIoTDBValue([]byte{0xde, 0xad}, "BLOB"); got != "dead" {
 		t.Fatalf("unexpected blob: %#v", got)
+	}
+}
+
+func TestTreeTimeColumnPresentation(t *testing.T) {
+	columns := []string{"Time", "root.db.d1.s1"}
+	types := normalizedColumnTypes([]string{"INT64", "DOUBLE"}, columns, client.TreeSqlDialect)
+	if !reflect.DeepEqual(types, []string{"TIMESTAMP", "DOUBLE"}) {
+		t.Fatalf("unexpected tree column types: %#v", types)
+	}
+
+	when := time.Date(2026, time.August, 17, 8, 18, 26, 123000000, time.UTC)
+	if got := normalizeIoTDBValue(when, "TIMESTAMP"); got != int64(1786954706123) {
+		t.Fatalf("unexpected raw tree timestamp: %#v", got)
+	}
+}
+
+func TestTreeTimeColumnPresentationDoesNotRewriteOrdinaryInt64(t *testing.T) {
+	columns := []string{"Time", "value"}
+	if got := normalizedColumnTypes([]string{"INT64", "INT64"}, columns, client.TableSqlDialect); !reflect.DeepEqual(got, []string{"INT64", "INT64"}) {
+		t.Fatalf("unexpected table column types: %#v", got)
+	}
+	if got := normalizedColumnTypes([]string{"INT64", "INT64"}, []string{"value", "Time"}, client.TreeSqlDialect); !reflect.DeepEqual(got, []string{"INT64", "INT64"}) {
+		t.Fatalf("unexpected non-axis column types: %#v", got)
 	}
 }
 

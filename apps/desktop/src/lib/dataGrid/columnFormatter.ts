@@ -212,6 +212,60 @@ export function resolveColumnFormatter(formatter: ColumnFormatterConfig | undefi
   return customFormatter ? { kind: "custom-template", template: customFormatter.template } : undefined;
 }
 
+export function defaultIoTDBTimestampFormatter(databaseType: string | undefined, columnType: string | null | undefined, urlParams: string | undefined): ColumnFormatterConfig | undefined {
+  if (databaseType !== "iotdb" || columnType?.trim().toUpperCase() !== "TIMESTAMP") return undefined;
+  const timezone = iotdbTimestampTimeZone(urlParams);
+  return { kind: "datetime", unit: "milliseconds", pattern: "YYYY-MM-DDTHH:mm:ss.SSSZ", timezone };
+}
+
+export function formatIoTDBTimestampEditorValue(value: CellValue, databaseType: string | undefined, columnType: string | null | undefined, urlParams: string | undefined): string | undefined {
+  const formatter = defaultIoTDBTimestampFormatter(databaseType, columnType, urlParams);
+  if (!formatter || formatter.kind !== "datetime" || (typeof value !== "number" && (typeof value !== "string" || !isIntegerString(value)))) return undefined;
+  const timestamp = typeof value === "number" ? value : Number(value);
+  if (!Number.isSafeInteger(timestamp)) return undefined;
+  const parsed = dayjs(timestamp);
+  if (!parsed.isValid()) return undefined;
+  return parsed.tz(formatter.timezone || "UTC").format("YYYY-MM-DDTHH:mm:ss.SSSZ");
+}
+
+export function parseIoTDBTimestampEditorValue(value: string, databaseType: string | undefined, columnType: string | null | undefined, urlParams: string | undefined): number | null | undefined {
+  if (!defaultIoTDBTimestampFormatter(databaseType, columnType, urlParams)) return undefined;
+  const text = value.trim();
+  if (!text || text.toUpperCase() === "NULL") return null;
+  if (isIntegerString(text)) {
+    const timestamp = Number(text);
+    return Number.isSafeInteger(timestamp) ? timestamp : undefined;
+  }
+
+  const offsetValue = parseIsoOffsetDateTimeString(text);
+  if (offsetValue) return offsetValue.valueOf();
+
+  const match = text.match(FRACTIONAL_LOCAL_DATETIME_PATTERN) ?? text.match(/^(\d{4})([-/])(\d{1,2})\2(\d{1,2})([ T])(\d{1,2}):(\d{1,2}):(\d{1,2})$/);
+  if (!match) return undefined;
+  const [, year, , month, day, , hour, minute, second] = match;
+  if (!isValidDateTimeParts(year, month, day, hour, minute, second)) return undefined;
+  const fraction = match.length > 9 ? `.${String(match[9]).slice(0, 3).padEnd(3, "0")}` : "";
+  const normalized = `${year}-${month.padStart(2, "0")}-${day.padStart(2, "0")}T${hour.padStart(2, "0")}:${minute.padStart(2, "0")}:${second.padStart(2, "0")}${fraction}`;
+  const pattern = fraction ? "YYYY-MM-DDTHH:mm:ss.SSS" : "YYYY-MM-DDTHH:mm:ss";
+  try {
+    const parsed = dayjs.tz(normalized, pattern, iotdbTimestampTimeZone(urlParams));
+    return parsed.isValid() && parsed.format(pattern) === normalized ? parsed.valueOf() : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function iotdbTimestampTimeZone(urlParams: string | undefined): string {
+  const params = new URLSearchParams(urlParams ?? "");
+  const candidate = params.get("time_zone") || params.get("timezone") || params.get("zone_id") || "UTC";
+  try {
+    dayjs(0).tz(candidate);
+    return candidate;
+  } catch {
+    return "UTC";
+  }
+}
+
 export function formatTemporalRowsForExport<T extends CellValue>(rows: readonly (readonly T[])[], columnTypes: readonly (string | null | undefined)[], pattern: string): T[][] {
   const normalizedPattern = normalizeGlobalDateTimePattern(pattern);
   if (!normalizedPattern) return rows.map((row) => [...row]);

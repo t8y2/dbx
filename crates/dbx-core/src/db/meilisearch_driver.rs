@@ -380,6 +380,19 @@ fn inject_document_identity(document: Value, primary_key: Option<&str>) -> Resul
     Ok(Value::Object(document))
 }
 
+/// Like `inject_document_identity` but keeps the original primary key field, so
+/// search consumers can still rebuild the document exactly as stored.
+fn alias_document_identity(document: Value, primary_key: Option<&str>) -> Result<Value, String> {
+    let mut document =
+        document.as_object().cloned().ok_or_else(|| "Meilisearch returned a non-object document".to_string())?;
+    if let Some(primary_key) = primary_key {
+        if let Some(id) = document.get(primary_key).cloned() {
+            document.insert("_id".to_string(), id);
+        }
+    }
+    Ok(Value::Object(document))
+}
+
 fn parse_document_object(doc_json: &str) -> Result<Map<String, Value>, String> {
     let value: Value =
         serde_json::from_str(doc_json).map_err(|error| format!("Invalid Meilisearch document JSON: {error}"))?;
@@ -582,6 +595,11 @@ fn meilisearch_filter_from_request(filter: Option<&str>, primary_key: Option<&st
     let Some(filter) = filter.map(str::trim).filter(|value| !value.is_empty() && *value != "{}") else {
         return Ok(None);
     };
+    // Native Meilisearch filter syntax (e.g. `status = "published" AND rating >= 8`)
+    // is passed through; the server validates it. Same trust level as `$meiliFilter`.
+    if !filter.starts_with('{') && !filter.starts_with('[') {
+        return Ok(Some(filter.to_string()));
+    }
     let value: Value =
         serde_json::from_str(filter).map_err(|error| format!("Invalid Meilisearch filter JSON: {error}"))?;
     if let Some(raw) = value.get("$meiliFilter").and_then(Value::as_str) {
@@ -683,20 +701,137 @@ fn meilisearch_sort_from_request(sort: Option<&str>, primary_key: Option<&str>) 
     let Some(sort) = sort.map(str::trim).filter(|value| !value.is_empty() && *value != "{}") else {
         return Ok(None);
     };
-    let value: Value = serde_json::from_str(sort).map_err(|error| format!("Invalid Meilisearch sort JSON: {error}"))?;
-    let object = value.as_object().ok_or_else(|| "Meilisearch sort must be a JSON object".to_string())?;
-    let mut result = Vec::new();
-    for (field, direction) in object {
+
+    fn sort_field<'a>(field: &'a str, primary_key: Option<&'a str>) -> Result<&'a str, String> {
         let field = if field == "_id" { primary_key.unwrap_or(field) } else { field };
         validate_filter_field(field)?;
-        let direction = match direction {
-            Value::Number(number) if number.as_i64().unwrap_or(1) < 0 => "desc",
-            Value::String(value) if value.eq_ignore_ascii_case("desc") => "desc",
-            _ => "asc",
+        Ok(field)
+    }
+
+    // The generic document browser sends a JSON object like {"rating":-1}.
+    if sort.starts_with('{') || sort.starts_with('[') {
+        let value: Value =
+            serde_json::from_str(sort).map_err(|error| format!("Invalid Meilisearch sort JSON: {error}"))?;
+        let object = value.as_object().ok_or_else(|| "Meilisearch sort must be a JSON object".to_string())?;
+        let mut result = Vec::new();
+        for (field, direction) in object {
+            let field = sort_field(field, primary_key)?;
+            let direction = match direction {
+                Value::Number(number) if number.as_i64().unwrap_or(1) < 0 => "desc",
+                Value::String(value) if value.eq_ignore_ascii_case("desc") => "desc",
+                _ => "asc",
+            };
+            result.push(format!("{field}:{direction}"));
+        }
+        return Ok((!result.is_empty()).then_some(result));
+    }
+
+    // Native Meilisearch syntax: comma-separated `field:asc|desc` entries, bare field means asc.
+    let mut result = Vec::new();
+    for entry in sort.split(',') {
+        let entry = entry.trim();
+        if entry.is_empty() {
+            continue;
+        }
+        let (field, direction) = match entry.split_once(':') {
+            Some((field, direction)) => (field.trim(), direction.trim()),
+            None => (entry, "asc"),
+        };
+        let field = sort_field(field, primary_key)?;
+        let direction = match direction.to_ascii_lowercase().as_str() {
+            "asc" => "asc",
+            "desc" => "desc",
+            _ => return Err(format!("Unsupported Meilisearch sort direction: {direction}")),
         };
         result.push(format!("{field}:{direction}"));
     }
     Ok((!result.is_empty()).then_some(result))
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeilisearchSearchResult {
+    pub hits: Vec<Value>,
+    pub total_hits: u64,
+    pub processing_time_ms: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct MeilisearchHybrid {
+    pub embedder: String,
+    pub semantic_ratio: f64,
+}
+
+fn meilisearch_search_body(
+    q: Option<&str>,
+    offset: u64,
+    limit: u64,
+    filter: Option<&str>,
+    sort: Option<&str>,
+    primary_key: Option<&str>,
+    hybrid: Option<&MeilisearchHybrid>,
+    show_ranking_score: bool,
+    ranking_score_threshold: Option<f64>,
+) -> Result<Map<String, Value>, String> {
+    let mut body = Map::new();
+    if let Some(q) = q.map(str::trim).filter(|value| !value.is_empty()) {
+        body.insert("q".to_string(), Value::String(q.to_string()));
+    }
+    body.insert("offset".to_string(), Value::Number(offset.into()));
+    body.insert("limit".to_string(), Value::Number(limit.into()));
+    if let Some(filter) = meilisearch_filter_from_request(filter, primary_key)? {
+        body.insert("filter".to_string(), Value::String(filter));
+    }
+    if let Some(sort) = meilisearch_sort_from_request(sort, primary_key)? {
+        body.insert("sort".to_string(), Value::Array(sort.into_iter().map(Value::String).collect()));
+    }
+    if let Some(hybrid) = hybrid {
+        let embedder = hybrid.embedder.trim();
+        if embedder.is_empty() {
+            return Err("Meilisearch hybrid search requires an embedder name".to_string());
+        }
+        let semantic_ratio =
+            if hybrid.semantic_ratio.is_finite() { hybrid.semantic_ratio.clamp(0.0, 1.0) } else { 0.5 };
+        let ratio =
+            serde_json::Number::from_f64(semantic_ratio).ok_or_else(|| "Invalid hybrid semantic ratio".to_string())?;
+        let mut hybrid_body = Map::new();
+        hybrid_body.insert("embedder".to_string(), Value::String(embedder.to_string()));
+        hybrid_body.insert("semanticRatio".to_string(), Value::Number(ratio));
+        body.insert("hybrid".to_string(), Value::Object(hybrid_body));
+    }
+    if show_ranking_score {
+        body.insert("showRankingScore".to_string(), Value::Bool(true));
+    }
+    if let Some(threshold) = ranking_score_threshold.filter(|value| value.is_finite() && *value > 0.0) {
+        let threshold = serde_json::Number::from_f64(threshold.clamp(0.0, 1.0))
+            .ok_or_else(|| "Invalid ranking score threshold".to_string())?;
+        body.insert("rankingScoreThreshold".to_string(), Value::Number(threshold));
+    }
+    body.insert("attributesToHighlight".to_string(), Value::Array(vec![Value::String("*".to_string())]));
+    body.insert("highlightPreTag".to_string(), Value::String("<mark>".to_string()));
+    body.insert("highlightPostTag".to_string(), Value::String("</mark>".to_string()));
+    Ok(body)
+}
+
+fn parse_meilisearch_search_response(
+    value: Value,
+    primary_key: Option<&str>,
+) -> Result<MeilisearchSearchResult, String> {
+    let hits = value
+        .get("hits")
+        .cloned()
+        .unwrap_or(Value::Null)
+        .as_array()
+        .cloned()
+        .ok_or_else(|| "Meilisearch search response 'hits' must be an array".to_string())?;
+    let total_hits = value
+        .get("estimatedTotalHits")
+        .or_else(|| value.get("totalHits"))
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "Meilisearch search response is missing a hit total".to_string())?;
+    let processing_time_ms = value.get("processingTimeMs").and_then(Value::as_u64).unwrap_or(0);
+    let hits = hits.into_iter().map(|hit| alias_document_identity(hit, primary_key)).collect::<Result<Vec<_>, _>>()?;
+    Ok(MeilisearchSearchResult { hits, total_hits, processing_time_ms })
 }
 
 pub async fn execute_rest_query(client: &MeilisearchClient, input: &str) -> Result<QueryResult, String> {
@@ -717,6 +852,133 @@ pub async fn execute_rest_query(client: &MeilisearchClient, input: &str) -> Resu
     let status = response.status().as_u16();
     let (body, truncated) = read_bounded_rest_response(response).await?;
     Ok(raw_response_result(status, body, start, truncated))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn search_documents(
+    client: &MeilisearchClient,
+    index: &str,
+    q: Option<&str>,
+    filter: Option<&str>,
+    sort: Option<&str>,
+    limit: u64,
+    offset: u64,
+    hybrid: Option<&MeilisearchHybrid>,
+    show_ranking_score: bool,
+    ranking_score_threshold: Option<f64>,
+) -> Result<MeilisearchSearchResult, String> {
+    let index_info = index_info(client, index).await?;
+    let body = meilisearch_search_body(
+        q,
+        offset,
+        limit,
+        filter,
+        sort,
+        index_info.primary_key.as_deref(),
+        hybrid,
+        show_ranking_score,
+        ranking_score_threshold,
+    )?;
+    let response = client
+        .post(&format!("/indexes/{}/search", encode_path_segment(&index_info.uid)))
+        .json(&body)
+        .send()
+        .await
+        .map_err(|error| format!("Meilisearch request failed: {error}"))?;
+    let value = response_json(response, "document search").await?;
+    parse_meilisearch_search_response(value, index_info.primary_key.as_deref())
+}
+
+pub async fn get_index_settings(client: &MeilisearchClient, index: &str) -> Result<Value, String> {
+    let response = client
+        .get(&format!("/indexes/{}/settings", encode_path_segment(index)))
+        .send()
+        .await
+        .map_err(|error| format!("Meilisearch request failed: {error}"))?;
+    response_json(response, "index settings lookup").await
+}
+
+pub async fn update_index_settings(client: &MeilisearchClient, index: &str, settings: &Value) -> Result<(), String> {
+    let response = client
+        .request(Method::PATCH, &format!("/indexes/{}/settings", encode_path_segment(index)))
+        .json(settings)
+        .send()
+        .await
+        .map_err(|error| format!("Meilisearch request failed: {error}"))?;
+    let task = task_from_response(response, "index settings update").await?;
+    wait_for_task(client, task.task_uid).await
+}
+
+pub async fn get_index_stats(client: &MeilisearchClient, index: &str) -> Result<Value, String> {
+    let response = client
+        .get(&format!("/indexes/{}/stats", encode_path_segment(index)))
+        .send()
+        .await
+        .map_err(|error| format!("Meilisearch request failed: {error}"))?;
+    response_json(response, "index stats lookup").await
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeilisearchIndexOverview {
+    pub uid: String,
+    pub primary_key: Option<String>,
+    pub created_at: Option<String>,
+    pub updated_at: Option<String>,
+    pub number_of_documents: u64,
+    pub is_indexing: bool,
+    /// Instance-wide database size in bytes; `None` when the API key cannot read instance stats.
+    pub database_size: Option<u64>,
+}
+
+pub async fn get_index_overview(client: &MeilisearchClient, index: &str) -> Result<MeilisearchIndexOverview, String> {
+    let info = response_json(
+        client
+            .get(&format!("/indexes/{}", encode_path_segment(index)))
+            .send()
+            .await
+            .map_err(|error| format!("Meilisearch request failed: {error}"))?,
+        "index lookup",
+    )
+    .await?;
+    let stats = get_index_stats(client, index).await?;
+    // Instance stats require broader key permissions, so keep them best-effort.
+    let database_size = match client.get("/stats").send().await {
+        Ok(response) => response_json(response, "instance stats lookup")
+            .await
+            .ok()
+            .and_then(|value| value.get("databaseSize").and_then(Value::as_u64)),
+        Err(_) => None,
+    };
+    Ok(MeilisearchIndexOverview {
+        uid: info.get("uid").and_then(Value::as_str).unwrap_or(index).to_string(),
+        primary_key: info.get("primaryKey").and_then(Value::as_str).map(str::to_string),
+        created_at: info.get("createdAt").and_then(Value::as_str).map(str::to_string),
+        updated_at: info.get("updatedAt").and_then(Value::as_str).map(str::to_string),
+        number_of_documents: stats.get("numberOfDocuments").and_then(Value::as_u64).unwrap_or(0),
+        is_indexing: stats.get("isIndexing").and_then(Value::as_bool).unwrap_or(false),
+        database_size,
+    })
+}
+
+pub async fn delete_index(client: &MeilisearchClient, index: &str) -> Result<(), String> {
+    let response = client
+        .delete(&format!("/indexes/{}", encode_path_segment(index)))
+        .send()
+        .await
+        .map_err(|error| format!("Meilisearch request failed: {error}"))?;
+    let task = task_from_response(response, "index deletion").await?;
+    wait_for_task(client, task.task_uid).await
+}
+
+pub async fn delete_all_documents(client: &MeilisearchClient, index: &str) -> Result<(), String> {
+    let response = client
+        .delete(&format!("/indexes/{}/documents", encode_path_segment(index)))
+        .send()
+        .await
+        .map_err(|error| format!("Meilisearch request failed: {error}"))?;
+    let task = task_from_response(response, "document deletion").await?;
+    wait_for_task(client, task.task_uid).await
 }
 
 async fn read_bounded_rest_response(mut response: reqwest::Response) -> Result<(String, bool), String> {
@@ -814,11 +1076,12 @@ fn raw_response_result(status: u16, body: String, start: Instant, truncated: boo
 #[cfg(test)]
 mod tests {
     use super::{
-        decode_bounded_rest_body, filter_expression, meilisearch_base_url, meilisearch_sort_from_request,
+        decode_bounded_rest_body, filter_expression, meilisearch_base_url, meilisearch_filter_from_request,
+        meilisearch_search_body, meilisearch_sort_from_request, parse_meilisearch_search_response,
         parse_rest_request_line, MeilisearchClient,
     };
     use reqwest::Method;
-    use serde_json::json;
+    use serde_json::{json, Value};
     use std::time::Duration;
 
     #[test]
@@ -889,6 +1152,38 @@ mod tests {
     }
 
     #[test]
+    fn accepts_native_meilisearch_sort_syntax() {
+        assert_eq!(
+            meilisearch_sort_from_request(Some("raw.createdAt:desc"), Some("id")).unwrap(),
+            Some(vec!["raw.createdAt:desc".to_string()])
+        );
+        assert_eq!(
+            meilisearch_sort_from_request(Some("rating:desc, title"), Some("id")).unwrap(),
+            Some(vec!["rating:desc".to_string(), "title:asc".to_string()])
+        );
+        // The `_id` alias still maps to the real primary key in native syntax.
+        assert_eq!(
+            meilisearch_sort_from_request(Some("_id:desc"), Some("movie_id")).unwrap(),
+            Some(vec!["movie_id:desc".to_string()])
+        );
+        assert!(meilisearch_sort_from_request(Some("rating:sideways"), Some("id")).is_err());
+        assert!(meilisearch_sort_from_request(Some("bad field:asc"), Some("id")).is_err());
+    }
+
+    #[test]
+    fn passes_through_native_meilisearch_filter_syntax() {
+        assert_eq!(
+            meilisearch_filter_from_request(Some("status = \"published\" AND rating >= 8"), Some("id")).unwrap(),
+            Some("status = \"published\" AND rating >= 8".to_string())
+        );
+        // JSON filters keep going through the document-store translation.
+        assert!(meilisearch_filter_from_request(Some(r#"{"status":"published"}"#), Some("id"))
+            .unwrap()
+            .unwrap()
+            .contains("status = \"published\""));
+    }
+
+    #[test]
     fn maps_document_identity_alias_to_primary_key() {
         assert_eq!(
             filter_expression(&serde_json::json!({ "_id": "001" }), Some("movie_id")).unwrap(),
@@ -921,5 +1216,128 @@ mod tests {
         let mut body = vec![b'a'; super::REST_RESPONSE_MAX_BYTES - 1];
         body.extend_from_slice("界".as_bytes());
         assert_eq!(decode_bounded_rest_body(&body), "a".repeat(super::REST_RESPONSE_MAX_BYTES - 1));
+    }
+
+    #[test]
+    fn builds_search_body_with_highlight_and_translated_filter_sort() {
+        let body = meilisearch_search_body(
+            Some("space"),
+            20,
+            10,
+            Some(r#"{"status":"published"}"#),
+            Some(r#"{"rating":-1}"#),
+            Some("movie_id"),
+            None,
+            true,
+            Some(0.8),
+        )
+        .unwrap();
+
+        assert_eq!(body.get("q").and_then(Value::as_str), Some("space"));
+        assert_eq!(body.get("offset").and_then(Value::as_u64), Some(20));
+        assert_eq!(body.get("limit").and_then(Value::as_u64), Some(10));
+        assert_eq!(body.get("filter").and_then(Value::as_str), Some("(status = \"published\")"));
+        assert_eq!(
+            body.get("sort")
+                .and_then(Value::as_array)
+                .map(|values| { values.iter().filter_map(Value::as_str).collect::<Vec<_>>() }),
+            Some(vec!["rating:desc"])
+        );
+        assert_eq!(body.get("attributesToHighlight").and_then(Value::as_array).map(Vec::len), Some(1));
+        assert_eq!(body.get("highlightPreTag").and_then(Value::as_str), Some("<mark>"));
+        assert_eq!(body.get("highlightPostTag").and_then(Value::as_str), Some("</mark>"));
+        assert_eq!(body.get("showRankingScore").and_then(Value::as_bool), Some(true));
+        assert_eq!(body.get("rankingScoreThreshold").and_then(Value::as_f64), Some(0.8));
+    }
+
+    #[test]
+    fn search_body_omits_empty_query_filter_and_sort() {
+        let body = meilisearch_search_body(None, 0, 5, None, None, None, None, false, None).unwrap();
+
+        assert!(body.get("q").is_none());
+        assert!(body.get("filter").is_none());
+        assert!(body.get("sort").is_none());
+        assert!(body.get("hybrid").is_none());
+        assert!(body.get("showRankingScore").is_none());
+        // A zero threshold means "no filtering" and is omitted.
+        let body = meilisearch_search_body(None, 0, 5, None, None, None, None, false, Some(0.0)).unwrap();
+        assert!(body.get("rankingScoreThreshold").is_none());
+    }
+
+    #[test]
+    fn search_body_includes_hybrid_options_when_enabled() {
+        let body = meilisearch_search_body(
+            Some("space"),
+            0,
+            5,
+            None,
+            None,
+            None,
+            Some(&super::MeilisearchHybrid { embedder: "default".to_string(), semantic_ratio: 1.5 }),
+            false,
+            None,
+        )
+        .unwrap();
+
+        let hybrid = body.get("hybrid").cloned().unwrap();
+        assert_eq!(hybrid.get("embedder").and_then(Value::as_str), Some("default"));
+        // Out-of-range ratios are clamped into [0, 1].
+        assert_eq!(hybrid.get("semanticRatio").and_then(Value::as_f64), Some(1.0));
+
+        let err = meilisearch_search_body(
+            None,
+            0,
+            5,
+            None,
+            None,
+            None,
+            Some(&super::MeilisearchHybrid { embedder: "  ".to_string(), semantic_ratio: 0.5 }),
+            false,
+            None,
+        )
+        .unwrap_err();
+        assert!(err.contains("embedder"));
+    }
+
+    #[test]
+    fn parses_search_response_and_injects_identity() {
+        let value = json!({
+            "hits": [
+                { "movie_id": 123, "title": "Alien", "_formatted": { "title": "<mark>Alien</mark>" } }
+            ],
+            "estimatedTotalHits": 42,
+            "processingTimeMs": 7
+        });
+        let result = parse_meilisearch_search_response(value, Some("movie_id")).unwrap();
+
+        assert_eq!(result.total_hits, 42);
+        assert_eq!(result.processing_time_ms, 7);
+        assert_eq!(result.hits.len(), 1);
+        assert_eq!(result.hits[0]["_id"], json!(123));
+        // The original primary key field is kept so consumers can rebuild the stored document.
+        assert_eq!(result.hits[0]["movie_id"], json!(123));
+        assert_eq!(result.hits[0]["_formatted"]["title"], json!("<mark>Alien</mark>"));
+    }
+
+    #[test]
+    fn search_response_prefers_estimated_total_and_falls_back_to_total() {
+        let estimated = parse_meilisearch_search_response(
+            json!({ "hits": [], "estimatedTotalHits": 5, "processingTimeMs": 1 }),
+            None,
+        )
+        .unwrap();
+        assert_eq!(estimated.total_hits, 5);
+
+        let fallback =
+            parse_meilisearch_search_response(json!({ "hits": [], "totalHits": 9, "processingTimeMs": 2 }), None)
+                .unwrap();
+        assert_eq!(fallback.total_hits, 9);
+    }
+
+    #[test]
+    fn search_response_requires_a_hit_total() {
+        let error = parse_meilisearch_search_response(json!({ "hits": [], "processingTimeMs": 1 }), None).unwrap_err();
+
+        assert!(error.contains("hit total"));
     }
 }

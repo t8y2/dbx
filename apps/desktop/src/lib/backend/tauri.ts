@@ -3777,6 +3777,79 @@ export async function documentSaveMeilisearchBatch(connectionId: string, collect
   });
 }
 
+export async function meilisearchSearchDocuments(
+  connectionId: string,
+  index: string,
+  params: { q?: string | null; filter?: string | null; sort?: string | null; limit: number; offset: number; hybridEmbedder?: string | null; hybridSemanticRatio?: number | null; showRankingScore?: boolean; rankingScoreThreshold?: number | null },
+): Promise<{ hits: any[]; totalHits: number; processingTimeMs: number }> {
+  return invoke("meilisearch_search_documents", {
+    connectionId,
+    index,
+    q: params.q ?? null,
+    filter: params.filter ?? null,
+    sort: params.sort ?? null,
+    limit: params.limit,
+    offset: params.offset,
+    hybridEmbedder: params.hybridEmbedder ?? null,
+    hybridSemanticRatio: params.hybridSemanticRatio ?? null,
+    showRankingScore: params.showRankingScore ?? false,
+    rankingScoreThreshold: params.rankingScoreThreshold ?? null,
+  });
+}
+
+export async function meilisearchGetIndexSettings(connectionId: string, index: string): Promise<Record<string, any>> {
+  return invoke("meilisearch_get_index_settings", {
+    connectionId,
+    index,
+  });
+}
+
+export async function meilisearchUpdateIndexSettings(connectionId: string, index: string, settings: Record<string, any>): Promise<void> {
+  return invoke("meilisearch_update_index_settings", {
+    connectionId,
+    index,
+    settings,
+  });
+}
+
+export async function meilisearchGetIndexStats(connectionId: string, index: string): Promise<{ numberOfDocuments: number; isIndexing: boolean; fieldDistribution: Record<string, number> } & Record<string, any>> {
+  return invoke("meilisearch_get_index_stats", {
+    connectionId,
+    index,
+  });
+}
+
+export interface MeilisearchIndexOverview {
+  uid: string;
+  primaryKey: string | null;
+  createdAt: string | null;
+  updatedAt: string | null;
+  numberOfDocuments: number;
+  isIndexing: boolean;
+  databaseSize: number | null;
+}
+
+export async function meilisearchGetIndexOverview(connectionId: string, index: string): Promise<MeilisearchIndexOverview> {
+  return invoke("meilisearch_get_index_overview", {
+    connectionId,
+    index,
+  });
+}
+
+export async function meilisearchDeleteIndex(connectionId: string, index: string): Promise<void> {
+  return invoke("meilisearch_delete_index", {
+    connectionId,
+    index,
+  });
+}
+
+export async function meilisearchDeleteAllDocuments(connectionId: string, index: string): Promise<void> {
+  return invoke("meilisearch_delete_all_documents", {
+    connectionId,
+    index,
+  });
+}
+
 export async function mongoDeleteDocuments(connectionId: string, database: string, collection: string, filterJson: string, many: boolean): Promise<{ affected_rows: number }> {
   const affectedRows = await invoke<number>("mongo_delete_documents", {
     connectionId,

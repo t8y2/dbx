@@ -2,7 +2,7 @@
 import { computed, ref, watch, nextTick, onUnmounted } from "vue";
 import type { CSSProperties } from "vue";
 import { useI18n } from "vue-i18n";
-import { X, Pin, ChevronDown, Table2, Code2, TableProperties, PencilRuler, KeyRound, Pencil, Package, Lock, Copy, AlertTriangle, Network, Minimize2, Maximize2, Settings, CalendarClock, Activity, Gauge, ShieldCheck, Database } from "@lucide/vue";
+import { X, Pin, ChevronDown, Table2, Code2, TableProperties, PencilRuler, KeyRound, Pencil, Package, Lock, Copy, AlertTriangle, Network, Minimize2, Maximize2, Settings, CalendarClock, Activity, Gauge, ShieldCheck, Database, Search } from "@lucide/vue";
 import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
@@ -524,6 +524,7 @@ const regularTabRowClass = computed(() => [isClassicLayout.value ? "h-9 items-st
 function tabMenuIcon(tab: QueryTab) {
   if (tab.externalSqlFileMissing) return AlertTriangle;
   if (tab.mode === "data" || tab.mode === "mongo" || tab.mode === "redis" || tab.mode === "hbase") return Table2;
+  if (tab.mode === "meilisearch") return Search;
   if (tab.mode === "vector") return TableProperties;
   if (tab.mode === "etcd" || tab.mode === "zookeeper" || tab.mode === "consul") return KeyRound;
   if (tab.mode === "consul-overview") return Gauge;
@@ -675,6 +676,7 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
                       <AlertTriangle v-if="tab.externalSqlFileMissing" class="h-3.5 w-3.5" />
                       <Table2 v-else-if="tab.mode === 'data' || tab.mode === 'mongo' || tab.mode === 'redis' || tab.mode === 'hbase'" class="h-3.5 w-3.5" />
                       <DatabaseIcon v-else-if="tab.mode === 'mq'" :db-type="tabDatabaseIconType(tab)" class="h-3.5 w-3.5" />
+                      <Search v-else-if="tab.mode === 'meilisearch'" class="h-3.5 w-3.5" />
                       <TableProperties v-else-if="tab.mode === 'vector'" class="h-3.5 w-3.5" />
                       <KeyRound v-else-if="tab.mode === 'etcd' || tab.mode === 'zookeeper' || tab.mode === 'consul'" class="h-3.5 w-3.5" />
                       <Gauge v-else-if="tab.mode === 'consul-overview'" class="h-3.5 w-3.5" />
@@ -873,6 +875,7 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
                       <AlertTriangle v-if="tab.externalSqlFileMissing" class="h-3.5 w-3.5" />
                       <Table2 v-else-if="tab.mode === 'data' || tab.mode === 'mongo' || tab.mode === 'redis' || tab.mode === 'hbase'" class="h-3.5 w-3.5" />
                       <DatabaseIcon v-else-if="tab.mode === 'mq'" :db-type="tabDatabaseIconType(tab)" class="h-3.5 w-3.5" />
+                      <Search v-else-if="tab.mode === 'meilisearch'" class="h-3.5 w-3.5" />
                       <TableProperties v-else-if="tab.mode === 'vector'" class="h-3.5 w-3.5" />
                       <KeyRound v-else-if="tab.mode === 'etcd' || tab.mode === 'zookeeper' || tab.mode === 'consul'" class="h-3.5 w-3.5" />
                       <Gauge v-else-if="tab.mode === 'consul-overview'" class="h-3.5 w-3.5" />

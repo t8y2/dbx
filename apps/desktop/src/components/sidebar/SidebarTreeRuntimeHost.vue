@@ -823,8 +823,13 @@ async function toggle(requestId = beginNavigationRequest()) {
       await connectionStore.loadTableGroups(node.connectionId, node.database, node.label, node.schema, node.id);
     } else if (node.type === "elasticsearch-index" && node.connectionId) {
       await connectionStore.ensureConnected(node.connectionId);
-      const tab = queryStore.createTab(node.connectionId, node.database || "default", node.label, "mongo");
-      queryStore.updateSql(tab, node.label);
+      if (connectionStore.getConfig(node.connectionId)?.db_type === "meilisearch") {
+        const tab = queryStore.createTab(node.connectionId, node.database || "default", node.label, "meilisearch");
+        queryStore.updateSql(tab, node.label);
+      } else {
+        const tab = queryStore.createTab(node.connectionId, node.database || "default", node.label, "mongo");
+        queryStore.updateSql(tab, node.label);
+      }
     } else if (node.type === "vector-collection" && node.connectionId) {
       await connectionStore.ensureConnected(node.connectionId);
       const collectionRef = (node.meta as { collectionId?: string } | undefined)?.collectionId ?? node.label;

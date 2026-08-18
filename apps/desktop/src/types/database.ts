@@ -1181,6 +1181,7 @@ export interface QueryTab {
     | "redis"
     | "redis-dashboard"
     | "mongo"
+    | "meilisearch"
     | "mongo-gridfs"
     | "mongo-bucket"
     | "vector"

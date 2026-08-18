@@ -796,6 +796,16 @@ async fn main() {
         .route("/document-store/update-document", post(routes::document_store::update_document))
         .route("/document-store/delete-document", post(routes::document_store::delete_document))
         .route("/document-store/save-meilisearch-batch", post(routes::document_store::save_meilisearch_batch))
+        .route("/document-store/meilisearch/search", post(routes::document_store::meilisearch_search))
+        .route("/document-store/meilisearch/settings/get", post(routes::document_store::meilisearch_get_settings))
+        .route("/document-store/meilisearch/settings/update", post(routes::document_store::meilisearch_update_settings))
+        .route("/document-store/meilisearch/stats", post(routes::document_store::meilisearch_get_stats))
+        .route("/document-store/meilisearch/overview", post(routes::document_store::meilisearch_get_overview))
+        .route("/document-store/meilisearch/index/delete", post(routes::document_store::meilisearch_delete_index))
+        .route(
+            "/document-store/meilisearch/documents/delete-all",
+            post(routes::document_store::meilisearch_delete_all_documents),
+        )
         .route("/mongo/find-documents", post(routes::mongo::find_documents))
         .route("/mongo/parse-shell-command", post(routes::mongo::parse_shell_command))
         .route("/mongo/explain-find", post(routes::mongo::explain_find))

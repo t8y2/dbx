@@ -1,0 +1,98 @@
+{
+  "format_version": 1,
+  "repository": "https://repo.maven.apache.org/maven2/",
+  "drivers": {
+    "prestosql": {
+      "bundles": {
+        "driver": {
+          "id": "io.prestosql_presto-jdbc_350",
+          "coordinate": "io.prestosql:presto-jdbc:350",
+          "artifact": {
+            "group_id": "io.prestosql",
+            "artifact_id": "presto-jdbc",
+            "version": "350",
+            "classifier": "",
+            "extension": "jar",
+            "file_name": "presto-jdbc-350.jar",
+            "size": 6656599,
+            "sha256": "664a23e517c120c1d5a9bb88b215612b117415b9f1649bc22c48298eaf3f979b"
+          },
+          "redistribution": {
+            "project_url": "https://prestosql.io/",
+            "source_url": "https://github.com/prestosql/presto/tree/350",
+            "root_license_expression": "Apache-2.0",
+            "license_entries": ["META-INF/LICENSE", "META-INF/LICENSE.txt"],
+            "notice_entries": ["META-INF/NOTICE", "META-INF/NOTICE.txt"]
+          }
+        }
+      }
+    },
+    "phoenix": {
+      "bundles": {
+        "direct": {
+          "id": "org.apache.phoenix_phoenix-client-embedded-hbase-2.5_5.2.1",
+          "coordinate": "org.apache.phoenix:phoenix-client-embedded-hbase-2.5:5.2.1",
+          "artifact": {
+            "group_id": "org.apache.phoenix",
+            "artifact_id": "phoenix-client-embedded-hbase-2.5",
+            "version": "5.2.1",
+            "classifier": "",
+            "extension": "jar",
+            "file_name": "phoenix-client-embedded-hbase-2.5-5.2.1.jar",
+            "size": 158572775,
+            "sha256": "c698a81f4250dbfe0af4b656b6de9c72bd3fee26e7945ccb893f741fbe05c4ca"
+          },
+          "redistribution": {
+            "project_url": "https://phoenix.apache.org/",
+            "source_url": "https://github.com/apache/phoenix/tree/5.2.1",
+            "root_license_expression": "Apache-2.0",
+            "license_entries": ["META-INF/LICENSE", "META-INF/LICENSE.txt", "LICENSE", "META-INF/licenses-binary/LICENSE.protobuf.txt"],
+            "notice_entries": ["META-INF/DEPENDENCIES", "META-INF/NOTICE.txt", "META-INF/NOTICE-binary", "META-INF/NOTICE.md", "META-INF/NOTICE.markdown"]
+          }
+        },
+        "logging": {
+          "id": "ch.qos.reload4j_reload4j_1.2.26",
+          "coordinate": "ch.qos.reload4j:reload4j:1.2.26",
+          "artifact": {
+            "group_id": "ch.qos.reload4j",
+            "artifact_id": "reload4j",
+            "version": "1.2.26",
+            "classifier": "",
+            "extension": "jar",
+            "file_name": "reload4j-1.2.26.jar",
+            "size": 338688,
+            "sha256": "a7e86ae144541d04d24d1b7123d7425415477d50f387bb868e5c955aeaedd96f"
+          },
+          "redistribution": {
+            "project_url": "https://reload4j.qos.ch/",
+            "source_url": "https://github.com/qos-ch/reload4j/tree/v_1.2.26",
+            "root_license_expression": "Apache-2.0",
+            "license_entries": ["META-INF/LICENSE"],
+            "notice_entries": ["META-INF/NOTICE"]
+          }
+        },
+        "query_server": {
+          "id": "org.apache.phoenix_phoenix-queryserver-client_6.0.0",
+          "coordinate": "org.apache.phoenix:phoenix-queryserver-client:6.0.0",
+          "artifact": {
+            "group_id": "org.apache.phoenix",
+            "artifact_id": "phoenix-queryserver-client",
+            "version": "6.0.0",
+            "classifier": "",
+            "extension": "jar",
+            "file_name": "phoenix-queryserver-client-6.0.0.jar",
+            "size": 6294972,
+            "sha256": "94e634ded958525f1dee090999c77ab1d0e7e022ea2767b0c73416cc67c8ebcf"
+          },
+          "redistribution": {
+            "project_url": "https://phoenix.apache.org/",
+            "source_url": "https://github.com/apache/phoenix-queryserver/tree/6.0.0",
+            "root_license_expression": "Apache-2.0",
+            "license_entries": ["META-INF/LICENSE"],
+            "notice_entries": ["META-INF/DEPENDENCIES", "META-INF/NOTICE"]
+          }
+        }
+      }
+    }
+  }
+}

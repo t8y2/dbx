@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 pub mod agent_catalog;
 pub mod agent_connection;
 pub mod agent_events;
@@ -70,10 +72,12 @@ pub mod query_result_export;
 pub mod query_result_sql;
 pub mod redis_ops;
 pub mod risk_metrics;
+pub mod runtime_config;
 pub mod saved_sql;
 pub mod schema;
 pub mod schema_diff;
 pub mod script_generator;
+pub mod session_credentials;
 pub mod sql;
 pub mod sql_analysis;
 pub mod sql_diagnostics;

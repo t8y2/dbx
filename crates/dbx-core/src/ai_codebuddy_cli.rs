@@ -20,6 +20,7 @@ use tokio::sync::Notify;
 const CODEBUDDY_INITIALIZE_TIMEOUT: Duration = Duration::from_secs(10);
 const CODEBUDDY_ACP_TIMEOUT: Duration = Duration::from_secs(20);
 const CODEBUDDY_SETTING_SOURCES: &str = "user";
+const CODEBUDDY_AUTH_PROBE_PROMPT: &str = "DBX CodeBuddy authentication test. Reply with OK only.";
 const CODEBUDDY_EXECUTABLE_NAMES: &[&str] = &["codebuddy", "cbc"];
 
 pub type CodeBuddyRunOptions = CliAgentRunOptions;
@@ -56,7 +57,7 @@ impl Drop for CodeBuddyIsolatedCwd {
 #[derive(Debug)]
 struct CodeBuddyInitializeResult {
     models: Vec<AiModelInfo>,
-    authenticated: bool,
+    authenticated: Option<bool>,
     current_model_id: Option<String>,
 }
 
@@ -376,7 +377,7 @@ pub fn build_codebuddy_prompt(system_prompt: &str, messages: &[crate::ai::AiMess
 
 pub async fn list_codebuddy_models(config: &AiConfig) -> Result<Vec<AiModelInfo>, String> {
     let initialized = initialize_codebuddy(config).await?;
-    if !initialized.authenticated {
+    if initialized.authenticated == Some(false) {
         return Err("[codeBuddyNotAuthenticated] CodeBuddy Code is not authenticated. Open `codebuddy` in a terminal, sign in, and try again.".to_string());
     }
     if initialized.models.is_empty() {
@@ -461,7 +462,7 @@ fn parse_codebuddy_initialize(stdout: &str) -> Option<CodeBuddyInitializeResult>
         };
         let data = response.get("response").unwrap_or(response);
         let models = parse_codebuddy_models(data.get("models").and_then(Value::as_array).map(Vec::as_slice));
-        let authenticated = parse_account_auth_state(data.get("account")).unwrap_or(!models.is_empty());
+        let authenticated = parse_account_auth_state(data.get("account"));
         let current_model_id = data
             .get("currentModelId")
             .or_else(|| data.get("current_model_id"))
@@ -728,7 +729,12 @@ fn parse_codebuddy_effort_level_strings(model: &Value) -> Vec<String> {
 
 fn parse_account_auth_state(account: Option<&Value>) -> Option<bool> {
     match account? {
-        Value::Null => Some(false),
+        // The real CodeBuddy Code CLI (verified against @tencent-ai/codebuddy-code
+        // 2.136.0) always reports `account: null` in this control response, whether
+        // or not the session is signed in — it's not a login signal here. Treat it
+        // as unknown so callers fall back to the model-catalog-based heuristic
+        // instead of hard-blocking authenticated users (t8y2/dbx#6253).
+        Value::Null => None,
         Value::Bool(value) => Some(*value),
         Value::Object(fields) => fields
             .get("authenticated")
@@ -742,12 +748,62 @@ fn parse_account_auth_state(account: Option<&Value>) -> Option<bool> {
     }
 }
 
+async fn probe_codebuddy_authentication(config: &AiConfig) -> Result<(), String> {
+    let program = validate_codebuddy_program(config)?;
+    let isolated_cwd = CodeBuddyIsolatedCwd::create()?;
+    let mut args = vec![
+        "--print".to_string(),
+        "--output-format".to_string(),
+        "stream-json".to_string(),
+        "--verbose".to_string(),
+        "--input-format".to_string(),
+        "text".to_string(),
+        "--no-session-persistence".to_string(),
+        "--permission-mode".to_string(),
+        "dontAsk".to_string(),
+    ];
+    append_codebuddy_isolation_args(&mut args);
+    let model = config.model.trim();
+    if !model.is_empty() && !model.eq_ignore_ascii_case("default") {
+        args.push("--model".to_string());
+        args.push(model.to_string());
+    }
+    if let Some(effort) = config.runtime_effort.as_ref().and_then(|effort| effort.cli_value()) {
+        args.push("--effort".to_string());
+        args.push(effort);
+    }
+    let command = CodeBuddyCommandSpec { program, args };
+    let env = codebuddy_process_env(config, &command)?;
+    let cancelled = Notify::new();
+    tokio::time::timeout(
+        CODEBUDDY_ACP_TIMEOUT,
+        run_cli_jsonl_agent(
+            CliAgentProcessSpec {
+                command,
+                env,
+                env_remove: vec!["CLAUDECODE".to_string()],
+                current_dir: Some(isolated_cwd.path.clone()),
+                stdin: Some(CODEBUDDY_AUTH_PROBE_PROMPT.to_string()),
+                dialect: CliAgentJsonlDialect::CodeBuddyPrint,
+                classify_spawn_error: classify_codebuddy_spawn_error,
+                classify_run_error: classify_codebuddy_run_error,
+            },
+            &cancelled,
+            |_| {},
+        ),
+    )
+    .await
+    .map_err(|_| "[codeBuddyTimeout] CodeBuddy authentication probe timed out.".to_string())??;
+    Ok(())
+}
+
 pub async fn test_codebuddy_connection(config: &AiConfig) -> Result<AiTestConnectionResult, String> {
     let start = Instant::now();
     let initialized = initialize_codebuddy(config).await?;
-    if !initialized.authenticated {
+    if initialized.authenticated == Some(false) {
         return Err("[codeBuddyNotAuthenticated] CodeBuddy Code is not authenticated. Open `codebuddy` in a terminal, sign in, and try again.".to_string());
     }
+    probe_codebuddy_authentication(config).await?;
     let elapsed = start.elapsed().as_millis() as u64;
     let model_used = initialized.current_model_id.unwrap_or_else(|| config.model.trim().to_string()).trim().to_string();
     Ok(AiTestConnectionResult {
@@ -967,7 +1023,7 @@ mod tests {
             r#"{"type":"control_response","response":{"response":{"models":[{"id":"default-model","name":"Default model"},{"id":"kimi-k2.5","name":"Kimi K2.5","supportsEffort":true,"supportedEffortLevels":["low","future","low"]},{"id":"kimi-k2.5","name":"duplicate"},{"id":" "}],"commands":[{"name":"/effort","description":"Set model effort"}],"account":{"authenticated":true,"opaqueField":"must-not-escape"},"currentModelId":"kimi-k2.5"}}}"#,
         )
         .unwrap();
-        assert!(result.authenticated);
+        assert_eq!(result.authenticated, Some(true));
         assert_eq!(result.current_model_id.as_deref(), Some("kimi-k2.5"));
         assert_eq!(result.models.iter().map(|model| model.id.as_str()).collect::<Vec<_>>(), ["default", "kimi-k2.5"]);
         assert_eq!(result.models[0].effort_capability, None);
@@ -983,7 +1039,7 @@ mod tests {
             r#"{"type":"control_response","response":{"models":[{"value":"model-a","displayName":"Model A"}],"commands":["effort"],"account":{"loggedIn":false}}}"#,
         )
         .unwrap();
-        assert!(!result.authenticated);
+        assert_eq!(result.authenticated, Some(false));
         assert_eq!(result.models.iter().map(|model| model.id.as_str()).collect::<Vec<_>>(), ["default", "model-a"]);
         assert!(result.models.iter().all(|model| model.effort_capability.is_none()));
     }
@@ -1055,6 +1111,25 @@ mod tests {
     }
 
     #[test]
+    fn preserves_null_account_as_unknown_when_models_are_present() {
+        // Real `codebuddy --print --output-format stream-json --input-format
+        // stream-json --setting-sources user` initialize response captured from
+        // the actual @tencent-ai/codebuddy-code@2.136.0 CLI: `account` is always
+        // null in this control response (both logged-in and logged-out sessions),
+        // and the model catalog is populated regardless of auth state — real
+        // "not authenticated" only ever surfaces later, on an actual chat turn.
+        let result = parse_codebuddy_initialize(
+            r#"{"type":"control_response","response":{"subtype":"success","request_id":"dbx_model_discovery","response":{"commands":[{"name":"/login","description":"Switch Tencent Cloud CodeBuddy accounts"}],"models":[{"id":"default-model","name":"Default"},{"id":"gpt-5.5","name":"GPT-5.5"},{"id":"kimi-k2.5","name":"Kimi-K2.5"}],"account":null,"currentModelId":"default-model"}}}"#,
+        )
+        .unwrap();
+        assert_eq!(result.authenticated, None);
+        assert_eq!(
+            result.models.iter().map(|model| model.id.as_str()).collect::<Vec<_>>(),
+            ["default", "gpt-5.5", "kimi-k2.5"]
+        );
+    }
+
+    #[test]
     fn reuses_claude_compatible_stream_events() {
         let events = parse_codebuddy_jsonl_event(
             r#"{"type":"assistant","message":{"content":[{"type":"text","text":"done"},{"type":"tool_use","id":"call-1","name":"mcp__dbx__dbx_list_tables","input":{}}]}}"#,
@@ -1085,6 +1160,7 @@ mod tests {
         let project_settings = project_dir.join(".codebuddy");
         let auth_dir = project_dir.join("user-config");
         let hook_marker = project_dir.join("project-hook-loaded");
+        let auth_probe_marker = project_dir.join("auth-probe-called");
         std::fs::create_dir_all(&project_settings).unwrap();
         std::fs::create_dir_all(&auth_dir).unwrap();
         std::fs::write(auth_dir.join("auth-marker"), "authenticated").unwrap();
@@ -1135,6 +1211,12 @@ case " $* " in
     ;;
 esac
 input=$(cat)
+if printf '%s' "$input" | grep -q 'DBX CodeBuddy authentication test'; then
+  printf probed > "$DBX_TEST_AUTH_PROBE_MARKER"
+  printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"OK"}]}}'
+  printf '%s\n' '{"type":"result","subtype":"success"}'
+  exit 0
+fi
 case " $* " in
   *" --input-format stream-json "*)
     printf '%s\n' '{"type":"control_response","response":{"response":{"models":[{"id":"default-model","name":"Default"},{"id":"codebuddy-user-model","name":"User Model"}],"commands":[{"name":"/effort"}],"account":{"authenticated":true},"currentModelId":"codebuddy-user-model"}}}'
@@ -1160,6 +1242,9 @@ esac
         config.codebuddy_cli_env.insert("CODEBUDDY_CONFIG_DIR".to_string(), auth_dir.to_string_lossy().to_string());
         config.codebuddy_cli_env.insert("DBX_TEST_PROJECT_DIR".to_string(), project_dir.to_string_lossy().to_string());
         config.codebuddy_cli_env.insert("DBX_TEST_HOOK_MARKER".to_string(), hook_marker.to_string_lossy().to_string());
+        config
+            .codebuddy_cli_env
+            .insert("DBX_TEST_AUTH_PROBE_MARKER".to_string(), auth_probe_marker.to_string_lossy().to_string());
         (config, project_dir, hook_marker)
     }
 
@@ -1174,7 +1259,7 @@ esac
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn discovery_and_connection_test_use_initialize_without_inference() {
+    async fn discovery_uses_initialize_and_connection_test_runs_auth_probe() {
         let (config, project_dir, hook_marker) = isolated_cli_test_config();
         let models = list_codebuddy_models(&config).await.unwrap();
         assert_eq!(
@@ -1185,6 +1270,7 @@ esac
         let result = test_codebuddy_connection(&config).await.unwrap();
         assert!(result.success);
         assert_eq!(result.model_used, "codebuddy-user-model");
+        assert!(project_dir.join("auth-probe-called").exists());
         let default_effort = resolve_codebuddy_model_effort(&config, "default").await.unwrap();
         assert!(matches!(
             default_effort,
@@ -1198,6 +1284,44 @@ esac
                 if options.iter().map(|option| option.id.as_str()).collect::<Vec<_>>() == ["medium", "xhigh"]
         ));
         assert!(!hook_marker.exists());
+        let _ = std::fs::remove_dir_all(project_dir);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn null_account_allows_discovery_but_connection_probe_rejects_signed_out() {
+        let project_dir = std::env::temp_dir().join(format!("dbx-codebuddy-signed-out-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&project_dir).unwrap();
+        let executable = project_dir.join("codebuddy");
+        std::fs::write(
+            &executable,
+            r#"#!/bin/sh
+case " $* " in
+  *" --input-format stream-json "*)
+    cat >/dev/null
+    printf '%s\n' '{"type":"control_response","response":{"response":{"models":[{"id":"default-model","name":"Default"},{"id":"codebuddy-public-model","name":"Public Model"}],"account":null,"currentModelId":"default-model"}}}'
+    exit 0
+    ;;
+esac
+cat >/dev/null
+printf '%s\n' 'not authenticated' >&2
+exit 9
+"#,
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&executable).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&executable, permissions).unwrap();
+
+        let mut config = codebuddy_config("default");
+        config.codebuddy_cli_path = Some(executable.to_string_lossy().to_string());
+        let models = list_codebuddy_models(&config).await.unwrap();
+        assert_eq!(
+            models.iter().map(|model| model.id.as_str()).collect::<Vec<_>>(),
+            ["default", "codebuddy-public-model"]
+        );
+        let error = test_codebuddy_connection(&config).await.unwrap_err();
+        assert!(error.starts_with("[codeBuddyNotAuthenticated]"), "{error}");
         let _ = std::fs::remove_dir_all(project_dir);
     }
 

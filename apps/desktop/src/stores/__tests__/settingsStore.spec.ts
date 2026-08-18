@@ -5,6 +5,28 @@ import { DEFAULT_EDITOR_SETTINGS, EXECUTE_MODE_CURRENT_DEFAULT_VERSION, enforceR
 import type { AiConfigItem } from "@/types/ai";
 
 describe("normalizeEditorSettings", () => {
+  it("enables SQL variable substitution by default and only preserves booleans", () => {
+    expect(normalizeEditorSettings({}).sqlVariableSubstitutionEnabled).toBe(true);
+    expect(normalizeEditorSettings({ sqlVariableSubstitutionEnabled: true }).sqlVariableSubstitutionEnabled).toBe(true);
+    expect(normalizeEditorSettings({ sqlVariableSubstitutionEnabled: false }).sqlVariableSubstitutionEnabled).toBe(false);
+    expect(normalizeEditorSettings({ sqlVariableSubstitutionEnabled: "false" } as any).sqlVariableSubstitutionEnabled).toBe(true);
+    expect(normalizeEditorSettings({ sqlVariableSubstitutionEnabled: null } as any).sqlVariableSubstitutionEnabled).toBe(true);
+  });
+
+  it("keeps the quick filter view by default and preserves fixed filter views", () => {
+    expect(normalizeEditorSettings({}).dataGridFilterEditorView).toBe("quick");
+    expect(normalizeEditorSettings({ dataGridFilterEditorView: "conditions" }).dataGridFilterEditorView).toBe("conditions");
+    expect(normalizeEditorSettings({ dataGridFilterEditorView: "text" }).dataGridFilterEditorView).toBe("text");
+    expect(normalizeEditorSettings({ dataGridFilterEditorView: "invalid" } as any).dataGridFilterEditorView).toBe("quick");
+  });
+
+  it("defaults and bounds the persisted text filter panel height", () => {
+    expect(normalizeEditorSettings({}).dataGridTextFilterPanelHeight).toBe(168);
+    expect(normalizeEditorSettings({ dataGridTextFilterPanelHeight: 236.4 }).dataGridTextFilterPanelHeight).toBe(236);
+    expect(normalizeEditorSettings({ dataGridTextFilterPanelHeight: 20 }).dataGridTextFilterPanelHeight).toBe(96);
+    expect(normalizeEditorSettings({ dataGridTextFilterPanelHeight: 900 }).dataGridTextFilterPanelHeight).toBe(420);
+  });
+
   it("keeps data type colors disabled by default and preserves an explicit opt-in", () => {
     expect(normalizeEditorSettings({}).colorizeDataGridCellTypes).toBe(false);
     expect(normalizeEditorSettings({ colorizeDataGridCellTypes: true }).colorizeDataGridCellTypes).toBe(true);
@@ -20,6 +42,14 @@ describe("normalizeEditorSettings", () => {
     expect(normalizeEditorSettings({ reuseDataTab: true } as any).dataTabReuseMode).toBe("same-table");
   });
 
+  it("keeps adjacent data-tab opening disabled unless explicitly enabled", () => {
+    expect(normalizeEditorSettings({}).openDataTabsNextToActive).toBe(false);
+    expect(normalizeEditorSettings({ openDataTabsNextToActive: true }).openDataTabsNextToActive).toBe(true);
+    expect(normalizeEditorSettings({ openDataTabsNextToActive: false }).openDataTabsNextToActive).toBe(false);
+    expect(normalizeEditorSettings({ openDataTabsNextToActive: "true" } as any).openDataTabsNextToActive).toBe(false);
+    expect(normalizeEditorSettings({ openDataTabsNextToActive: null } as any).openDataTabsNextToActive).toBe(false);
+  });
+
   it("defaults and bounds the regular expression match limit", () => {
     expect(normalizeEditorSettings({}).regexMaxMatchCount).toBe(1000);
     expect(normalizeEditorSettings({ regexMaxMatchCount: 2500 }).regexMaxMatchCount).toBe(2500);
@@ -27,6 +57,17 @@ describe("normalizeEditorSettings", () => {
     expect(normalizeEditorSettings({ regexMaxMatchCount: Number.POSITIVE_INFINITY }).regexMaxMatchCount).toBe(1000);
     expect(normalizeEditorSettings({ regexMaxMatchCount: Number.NaN }).regexMaxMatchCount).toBe(1000);
   });
+  it("defaults and bounds the sidebar indent and font size", () => {
+    expect(normalizeEditorSettings({}).sidebarIndent).toBe(16);
+    expect(normalizeEditorSettings({}).sidebarFontSize).toBe(14);
+    expect(normalizeEditorSettings({ sidebarIndent: 24, sidebarFontSize: 18 }).sidebarIndent).toBe(24);
+    expect(normalizeEditorSettings({ sidebarIndent: 24, sidebarFontSize: 18 }).sidebarFontSize).toBe(18);
+    expect(normalizeEditorSettings({ sidebarIndent: 999, sidebarFontSize: 1 } as any).sidebarIndent).toBe(32);
+    expect(normalizeEditorSettings({ sidebarIndent: 999, sidebarFontSize: 1 } as any).sidebarFontSize).toBe(9);
+    expect(normalizeEditorSettings({ sidebarIndent: 1.4, sidebarFontSize: 13.6 } as any).sidebarIndent).toBe(4);
+    expect(normalizeEditorSettings({ sidebarIndent: 1.4, sidebarFontSize: 13.6 } as any).sidebarFontSize).toBe(14);
+  });
+
   it("uses inline comments by default and preserves legacy comment visibility", () => {
     expect(normalizeEditorSettings({}).sidebarObjectInfoMode).toBe("comment-inline");
     expect(normalizeEditorSettings({ sidebarObjectInfoMode: "comment-aligned" }).sidebarObjectInfoMode).toBe("comment-aligned");
@@ -626,6 +667,50 @@ describe("settingsStore persisted settings initialization", () => {
       appLayout: "separated",
     });
     expect(saveEditorSettings).toHaveBeenCalledWith(expect.objectContaining({ fontSize: 17, theme: "xcode-dark", appLayout: "separated" }));
+  });
+
+  it("loads and persists the substitution switch without discarding syntax overrides", async () => {
+    const loadEditorSettings = vi.fn().mockResolvedValue({
+      sqlVariableSubstitutionEnabled: false,
+      sqlVariableSyntaxOverrides: { mysql: { shell: false } },
+    });
+    const saveEditorSettings = vi.fn().mockResolvedValue(undefined);
+    vi.doMock("@/lib/backend/api", () => ({ loadEditorSettings, saveEditorSettings }));
+
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const store = useSettingsStore();
+    await store.initEditorSettings();
+
+    expect(store.editorSettings.sqlVariableSubstitutionEnabled).toBe(false);
+    expect(store.editorSettings.sqlVariableSyntaxOverrides).toEqual({ mysql: { shell: false } });
+
+    await store.updateEditorSettingsAndPersist({ sqlVariableSubstitutionEnabled: true });
+
+    expect(store.editorSettings.sqlVariableSubstitutionEnabled).toBe(true);
+    expect(store.editorSettings.sqlVariableSyntaxOverrides).toEqual({ mysql: { shell: false } });
+    expect(saveEditorSettings).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sqlVariableSubstitutionEnabled: true,
+        sqlVariableSyntaxOverrides: { mysql: { shell: false } },
+      }),
+    );
+  });
+
+  it("loads and persists adjacent data-tab opening", async () => {
+    const loadEditorSettings = vi.fn().mockResolvedValue({ openDataTabsNextToActive: true });
+    const saveEditorSettings = vi.fn().mockResolvedValue(undefined);
+    vi.doMock("@/lib/backend/api", () => ({ loadEditorSettings, saveEditorSettings }));
+
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const store = useSettingsStore();
+    await store.initEditorSettings();
+
+    expect(store.editorSettings.openDataTabsNextToActive).toBe(true);
+
+    await store.updateEditorSettingsAndPersist({ openDataTabsNextToActive: false });
+
+    expect(store.editorSettings.openDataTabsNextToActive).toBe(false);
+    expect(saveEditorSettings).toHaveBeenLastCalledWith(expect.objectContaining({ openDataTabsNextToActive: false }));
   });
 
   it("shares concurrent initialization and applies startup changes after saved settings load", async () => {

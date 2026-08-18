@@ -11,6 +11,7 @@ const mocks = vi.hoisted(() => ({
   schedules: [] as DatabaseBackupSchedule[],
   ensureConnected: vi.fn(async () => {}),
   listDatabases: vi.fn(async () => [{ name: "app" }]),
+  recordDatabaseExportDestination: vi.fn(async (_directory: string) => {}),
   toast: vi.fn(),
   saveSchedule: vi.fn(),
   setScheduleEnabled: vi.fn(),
@@ -53,6 +54,7 @@ vi.mock("@/lib/backend/api", () => ({
   listDatabases: mocks.listDatabases,
   deleteDatabaseBackupFiles: vi.fn(),
   revealPathInFileManager: vi.fn(),
+  recordDatabaseExportDestination: mocks.recordDatabaseExportDestination,
 }));
 
 const mountedApps: App[] = [];
@@ -127,6 +129,8 @@ afterEach(() => {
   mocks.schedules.splice(0);
   mocks.ensureConnected.mockClear();
   mocks.listDatabases.mockClear();
+  mocks.recordDatabaseExportDestination.mockReset();
+  mocks.recordDatabaseExportDestination.mockResolvedValue(undefined);
   mocks.toast.mockClear();
   mocks.saveSchedule.mockClear();
 });
@@ -196,5 +200,21 @@ describe("ScheduledDatabaseBackupSettings schedule dialog", () => {
     await flush();
 
     expect(mocks.saveSchedule).toHaveBeenCalledWith(expect.objectContaining({ databases: ["app", "archive"] }));
+  });
+
+  it("does not save when the destination identity cannot be recorded", async () => {
+    mocks.connections.push({ id: "mysql-1", name: "Local MySQL", db_type: "mysql" });
+    mocks.schedules.push(schedule());
+    mocks.recordDatabaseExportDestination.mockRejectedValueOnce(new Error("backup destination unavailable"));
+    await mountSettings();
+
+    buttonWithTitle(String(i18n.global.t("databaseBackup.edit"))).click();
+    await flush();
+    saveScheduleButton().click();
+    await flush();
+
+    expect(mocks.recordDatabaseExportDestination).toHaveBeenCalledWith("/backups");
+    expect(mocks.saveSchedule).not.toHaveBeenCalled();
+    expect(mocks.toast).toHaveBeenCalledWith("backup destination unavailable", 5000);
   });
 });

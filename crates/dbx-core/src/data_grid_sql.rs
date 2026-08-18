@@ -258,6 +258,10 @@ pub struct DataGridCountSqlOptions {
     pub table_name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub where_input: Option<String>,
+    /// Optional optimizer hint injected between SELECT and the select list.
+    /// Example: "/*+ set(query_dop 32) */" for GaussDB parallel COUNT(*).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub count_hint: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -815,7 +819,9 @@ pub fn build_data_grid_count_sql(options: DataGridCountSqlOptions) -> String {
     };
     let predicate = crate::sql_dialect::normalize_where_input(options.where_input.as_deref());
     let where_clause = if predicate.is_empty() { String::new() } else { format!(" WHERE ({predicate})") };
-    format!("SELECT COUNT(*) AS cnt FROM {table}{where_clause}")
+    let hint = options.count_hint.as_deref().unwrap_or("");
+    let hint_part = if hint.is_empty() { String::new() } else { format!(" {hint}") };
+    format!("SELECT{hint_part} COUNT(*) AS cnt FROM {table}{where_clause}")
 }
 
 pub fn build_hive_table_properties_sql(options: HiveTablePropertiesSqlOptions) -> String {
@@ -2857,7 +2863,7 @@ fn data_grid_identifier(database_type: Option<DatabaseType>, name: &str, identif
     crate::sql_dialect::quote_table_data_identifier(database_type, name, identifier_quote)
 }
 
-fn data_grid_qualified_table_name(
+pub(crate) fn data_grid_qualified_table_name(
     database_type: Option<DatabaseType>,
     catalog: Option<&str>,
     schema: Option<&str>,
@@ -3104,6 +3110,7 @@ mod tests {
                 schema: Some("SS".to_string()),
                 table_name: "SS_User".to_string(),
                 where_input: Some("SSUSR_IsActive = 'Y'".to_string()),
+                count_hint: None,
             }),
             "SELECT COUNT(*) AS cnt FROM \"SS\".\"SS_User\" WHERE (SSUSR_IsActive = 'Y')"
         );
@@ -4204,6 +4211,7 @@ mod tests {
                 schema: Some("public".to_string()),
                 table_name: "users".to_string(),
                 where_input: Some("WHERE active = true;".to_string()),
+                count_hint: None,
             }),
             "SELECT COUNT(*) AS cnt FROM \"public\".\"users\" WHERE (active = true)"
         );
@@ -4216,6 +4224,7 @@ mod tests {
                 schema: Some("sales".to_string()),
                 table_name: "orders".to_string(),
                 where_input: Some("WHERE active = true;".to_string()),
+                count_hint: None,
             }),
             "SELECT COUNT(*) AS cnt FROM `iceberg_catalog`.`sales`.`orders` WHERE (active = true)"
         );
@@ -4229,6 +4238,7 @@ mod tests {
                 schema: None,
                 table_name: "orders".to_string(),
                 where_input: Some("WHERE active = true;".to_string()),
+                count_hint: None,
             }),
             "SELECT COUNT(*) AS cnt FROM `iceberg_catalog`.`sales`.`orders` WHERE (active = true)"
         );
@@ -4241,6 +4251,7 @@ mod tests {
                 schema: None,
                 table_name: "orders".to_string(),
                 where_input: None,
+                count_hint: None,
             }),
             "SELECT COUNT(*) AS cnt FROM `hive_catalog`.`orders`"
         );
@@ -4253,6 +4264,7 @@ mod tests {
                 schema: Some("cqbq_ls".to_string()),
                 table_name: "ANALYZE".to_string(),
                 where_input: None,
+                count_hint: None,
             }),
             "SELECT COUNT(*) AS cnt FROM `cqbq_ls`.`ANALYZE`"
         );
@@ -4265,6 +4277,7 @@ mod tests {
                 schema: Some("schema_01".to_string()),
                 table_name: "table_01".to_string(),
                 where_input: None,
+                count_hint: None,
             }),
             "SELECT COUNT(*) AS cnt FROM schema_01.table_01"
         );
@@ -4277,8 +4290,69 @@ mod tests {
                 schema: Some("App Schema".to_string()),
                 table_name: "order".to_string(),
                 where_input: None,
+                count_hint: None,
             }),
             "SELECT COUNT(*) AS cnt FROM `App Schema`.`order`"
+        );
+    }
+
+    #[test]
+    fn builds_grid_count_sql_with_optimizer_hint() {
+        // GaussDB with optimizer hint
+        assert_eq!(
+            build_data_grid_count_sql(DataGridCountSqlOptions {
+                database_type: Some(DatabaseType::Gaussdb),
+                identifier_quote: Some("\"".to_string()),
+                catalog: None,
+                database: None,
+                schema: Some("schema_01".to_string()),
+                table_name: "table_01".to_string(),
+                where_input: None,
+                count_hint: Some("/*+ set(query_dop 32) */".to_string()),
+            }),
+            "SELECT /*+ set(query_dop 32) */ COUNT(*) AS cnt FROM schema_01.table_01"
+        );
+        // GaussDB with hint and WHERE clause
+        assert_eq!(
+            build_data_grid_count_sql(DataGridCountSqlOptions {
+                database_type: Some(DatabaseType::Gaussdb),
+                identifier_quote: None,
+                catalog: None,
+                database: None,
+                schema: Some("sec_acct".to_string()),
+                table_name: "main_sec_acct_info".to_string(),
+                where_input: Some("status = 'active'".to_string()),
+                count_hint: Some("/*+ set(query_dop 32) */".to_string()),
+            }),
+            "SELECT /*+ set(query_dop 32) */ COUNT(*) AS cnt FROM \"sec_acct\".\"main_sec_acct_info\" WHERE (status = 'active')"
+        );
+        // Non-GaussDB database with hint (should still work)
+        assert_eq!(
+            build_data_grid_count_sql(DataGridCountSqlOptions {
+                database_type: Some(DatabaseType::Postgres),
+                identifier_quote: None,
+                catalog: None,
+                database: None,
+                schema: Some("public".to_string()),
+                table_name: "users".to_string(),
+                where_input: None,
+                count_hint: Some("/*+ set(query_dop 32) */".to_string()),
+            }),
+            "SELECT /*+ set(query_dop 32) */ COUNT(*) AS cnt FROM \"public\".\"users\""
+        );
+        // No hint (default) — unchanged behavior
+        assert_eq!(
+            build_data_grid_count_sql(DataGridCountSqlOptions {
+                database_type: Some(DatabaseType::Gaussdb),
+                identifier_quote: None,
+                catalog: None,
+                database: None,
+                schema: Some("schema_01".to_string()),
+                table_name: "table_01".to_string(),
+                where_input: None,
+                count_hint: None,
+            }),
+            "SELECT COUNT(*) AS cnt FROM \"schema_01\".\"table_01\""
         );
     }
 
@@ -4956,6 +5030,38 @@ mod tests {
             .rollback_statements
             .iter()
             .all(|statement| statement.contains("`gc`.`docfileinfo`") && !statement.contains('"')));
+    }
+
+    #[test]
+    fn vastbase_query_result_writes_use_resolved_search_path_schema() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Vastbase),
+            identifier_quote: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: Some("smes_dev".to_string()),
+                schema: Some("tenant_b".to_string()),
+                table_name: "TBLCUSPOSTMATERIALLOG".to_string(),
+                primary_keys: vec![],
+                columns: Some(vec![column("MONO", "varchar", true, None), column("ID", "bigint", false, None)]),
+            },
+            columns: vec!["MONO".to_string(), "ID".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!("mono"), json!(461936049002042_i64)]],
+            dirty_rows: vec![(0, vec![(0, json!("LY-SC01-260800002"))])],
+            deleted_rows: vec![],
+            new_rows: vec![vec![json!("dbx-insert-check"), json!(461936049002043_i64)]],
+        });
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(result.execution_schema.as_deref(), Some("tenant_b"));
+        assert_eq!(
+            result.statements,
+            vec![
+                "UPDATE \"tenant_b\".\"TBLCUSPOSTMATERIALLOG\" SET \"MONO\" = 'LY-SC01-260800002' WHERE \"MONO\" = 'mono' AND \"ID\" = 461936049002042;",
+                "INSERT INTO \"tenant_b\".\"TBLCUSPOSTMATERIALLOG\" (\"MONO\", \"ID\") VALUES ('dbx-insert-check', 461936049002043);",
+            ]
+        );
     }
 
     #[test]

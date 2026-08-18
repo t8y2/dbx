@@ -6,11 +6,14 @@ export type ShortcutActionId =
   | "formatSql"
   | "expandSelectStar"
   | "toggleLineComment"
+  | "toggleBlockComment"
   | "saveSql"
   | "acceptCompletion"
+  | "triggerCompletion"
   | "indentMore"
   | "indentLess"
   | "insertLineBelow"
+  | "joinLines"
   | "duplicateLine"
   | "deleteLine"
   | "moveLineUp"
@@ -119,6 +122,12 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
     defaultShortcut: "Mod+/",
   },
   {
+    id: "toggleBlockComment",
+    labelKey: "settings.shortcutToggleBlockComment",
+    scope: "editor",
+    defaultShortcut: "Shift+Alt+A",
+  },
+  {
     id: "saveSql",
     labelKey: "settings.shortcutSaveSql",
     scope: "editor",
@@ -129,6 +138,12 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
     labelKey: "settings.shortcutAcceptCompletion",
     scope: "editor",
     defaultShortcut: "Tab",
+  },
+  {
+    id: "triggerCompletion",
+    labelKey: "settings.shortcutTriggerCompletion",
+    scope: "editor",
+    defaultShortcut: "Alt+/",
   },
   {
     id: "indentMore",
@@ -147,6 +162,12 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
     labelKey: "settings.shortcutInsertLineBelow",
     scope: "editor",
     defaultShortcut: "Shift+Enter",
+  },
+  {
+    id: "joinLines",
+    labelKey: "settings.shortcutJoinLines",
+    scope: "editor",
+    defaultShortcut: "Mod+J",
   },
   {
     id: "duplicateLine",

@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { filterNacosNamespacesForSidebar, normalizeNacosNamespaceSelection, normalizeNacosNamespacesForDisplay } from "@/lib/nacos/nacosNamespaceVisibility";
+import { describe, expect, it, vi } from "vitest";
+import { filterNacosNamespacesForSidebar, loadReadableNacosNamespaces, normalizeNacosNamespaceSelection, normalizeNacosNamespacesForDisplay } from "@/lib/nacos/nacosNamespaceVisibility";
 import { nacosVisibleNamespaceSummary } from "@/lib/sidebar/sidebarVisibleFilterSummary";
 
 const namespaces = [
@@ -39,5 +39,14 @@ describe("filterNacosNamespacesForSidebar", () => {
       selected: 2,
       total: 3,
     });
+  });
+});
+
+describe("loadReadableNacosNamespaces", () => {
+  it("uses the backend-filtered list without per-namespace frontend probes", async () => {
+    const nacosListNamespaces = vi.fn().mockResolvedValue([namespaces[1]]);
+
+    await expect(loadReadableNacosNamespaces("nacos", { nacosListNamespaces })).resolves.toEqual([namespaces[1]]);
+    expect(nacosListNamespaces).toHaveBeenCalledTimes(1);
   });
 });

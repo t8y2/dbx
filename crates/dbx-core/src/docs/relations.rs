@@ -193,6 +193,7 @@ mod tests {
             index_type: None,
             included_columns: None,
             comment: None,
+            key_is_expression: Vec::new(),
         }
     }
 

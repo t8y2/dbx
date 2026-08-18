@@ -20,6 +20,7 @@ import com.dbx.agent.TableInfo;
 import com.dbx.agent.TriggerInfo;
 import java.io.PrintStream;
 import java.io.Reader;
+import java.net.SocketTimeoutException;
 import java.sql.Blob;
 import java.sql.Clob;
 import java.sql.Connection;
@@ -40,7 +41,9 @@ import java.sql.Types;
 import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashMap;
+import java.util.IdentityHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
@@ -53,6 +56,7 @@ public final class DamengAgent extends AbstractJdbcAgent {
     private static final Logger LOGGER = Logger.getLogger("com.dbx.agent.dameng");
     private static final String AGENT_VERSION = "9999.06.04.1-fix-default";
     private static final int DBMS_OUTPUT_ENABLE_TIMEOUT_SECS = 5;
+    private static final int DBMS_OUTPUT_ENABLE_NETWORK_TIMEOUT_MILLIS = 5_000;
     private static final String DAMENG_CLASSIFIED_OBJECT_TYPE_SQL =
         "CASE WHEN o.OBJECT_TYPE = 'MATERIALIZED VIEW' OR (o.OBJECT_TYPE = 'VIEW' AND mv.MVIEW_NAME IS NOT NULL) "
             + "THEN 'MATERIALIZED_VIEW' ELSE o.OBJECT_TYPE END";
@@ -84,6 +88,7 @@ public final class DamengAgent extends AbstractJdbcAgent {
         ) mv ON mv.OWNER = o.OWNER AND mv.MVIEW_NAME = o.OBJECT_NAME
         """.stripIndent().trim();
     private String connectedUsername;
+    private volatile boolean dbmsOutputInitializationSupported = true;
 
     @Override
     protected String driverClass() {
@@ -114,14 +119,80 @@ public final class DamengAgent extends AbstractJdbcAgent {
 
     @Override
     protected void afterPhysicalConnect(ConnectParams params, Connection connection) throws SQLException {
+        if (!dbmsOutputInitializationSupported) {
+            return;
+        }
+
+        Integer originalNetworkTimeout = applyDbmsOutputNetworkTimeout(connection);
+        SQLException setupError = null;
         try (Statement statement = connection.createStatement()) {
             statement.setQueryTimeout(DBMS_OUTPUT_ENABLE_TIMEOUT_SECS);
             statement.execute("BEGIN DBMS_OUTPUT.ENABLE(1000000); END;");
         } catch (SQLException error) {
-            if (!isIgnorableDbmsOutputError(error)) {
-                throw error;
+            setupError = error;
+        }
+
+        boolean setupTimedOut = setupError != null && isTimeoutError(setupError);
+        if (originalNetworkTimeout != null && !setupTimedOut) {
+            try {
+                connection.setNetworkTimeout(Runnable::run, originalNetworkTimeout);
+            } catch (SQLException restoreError) {
+                dbmsOutputInitializationSupported = false;
+                if (setupError != null) {
+                    restoreError.addSuppressed(setupError);
+                }
+                throw restoreError;
             }
         }
+
+        if (setupError == null) {
+            return;
+        }
+        if (setupTimedOut) {
+            // Force Hikari to discard this connection. Its retry uses the same agent
+            // instance and skips optional DBMS_OUTPUT initialization.
+            dbmsOutputInitializationSupported = false;
+            throw setupError;
+        }
+        if (isIgnorableDbmsOutputError(setupError)) {
+            dbmsOutputInitializationSupported = false;
+            return;
+        }
+        throw setupError;
+    }
+
+    private static Integer applyDbmsOutputNetworkTimeout(Connection connection) throws SQLException {
+        try {
+            int originalNetworkTimeout = connection.getNetworkTimeout();
+            connection.setNetworkTimeout(Runnable::run, DBMS_OUTPUT_ENABLE_NETWORK_TIMEOUT_MILLIS);
+            return originalNetworkTimeout;
+        } catch (SQLFeatureNotSupportedException | AbstractMethodError | UnsupportedOperationException ignored) {
+            return null;
+        }
+    }
+
+    private static boolean isTimeoutError(Throwable error) {
+        return isTimeoutError(error, Collections.newSetFromMap(new IdentityHashMap<>()));
+    }
+
+    private static boolean isTimeoutError(Throwable error, Set<Throwable> visited) {
+        if (error == null || !visited.add(error)) {
+            return false;
+        }
+        if (error instanceof SQLTimeoutException || error instanceof SocketTimeoutException) {
+            return true;
+        }
+        String message = error.getMessage();
+        if (message != null) {
+            String normalized = message.toLowerCase(Locale.ROOT);
+            if (normalized.contains("timeout") || normalized.contains("timed out") || normalized.contains("超时")) {
+                return true;
+            }
+        }
+        if (error instanceof SQLException sqlError && isTimeoutError(sqlError.getNextException(), visited)) {
+            return true;
+        }
+        return isTimeoutError(error.getCause(), visited);
     }
 
     private static boolean isIgnorableDbmsOutputError(SQLException error) {

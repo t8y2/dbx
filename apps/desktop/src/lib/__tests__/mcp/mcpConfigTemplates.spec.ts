@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildMcpCherryStudioConfig, buildMcpCodexConfig, buildMcpJsonConfig, buildMcpOpenCodeConfig, buildMcpTraeConfig, buildMcpVsCodeConfig, mcpWebBackendUrl } from "@/lib/mcp/mcpConfigTemplates";
+import { buildMcpCherryStudioConfig, buildMcpCodexConfig, buildMcpJsonConfig, buildMcpOpenCodeConfig, buildMcpPiConfig, buildMcpTraeConfig, buildMcpVsCodeConfig, mcpWebBackendUrl } from "@/lib/mcp/mcpConfigTemplates";
 
 describe("MCP config templates", () => {
   it("builds the standard mcpServers JSON used by Claude, Cursor, TRAE, and Windsurf", () => {
@@ -12,6 +12,17 @@ describe("MCP config templates", () => {
         },
       },
     });
+  });
+
+  it("builds the standard mcpServers JSON used by the Pi agent", () => {
+    expect(JSON.parse(buildMcpPiConfig())).toEqual({
+      mcpServers: {
+        dbx: {
+          command: "dbx-mcp-server",
+        },
+      },
+    });
+    expect(buildMcpPiConfig({ command: "npx", args: ["-y", "@dbx-app/mcp-server"] })).toContain('"npx"');
   });
 
   it("builds standard JSON configs with a direct node launch command", () => {

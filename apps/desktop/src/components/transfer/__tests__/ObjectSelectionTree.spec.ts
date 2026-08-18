@@ -145,6 +145,18 @@ describe("ObjectSelectionTree interaction", () => {
     expect(container.querySelector('[data-test="group-FUNCTION"]')?.textContent).toContain("无匹配");
   });
 
+  it("search ranks exact-prefix matches before mid-name matches", async () => {
+    // "abc_users" contains "user" but doesn't start with it; "users_archive"
+    // and "user_log" are both true prefix matches and should be sorted
+    // ahead of it, keeping their own relative order (stable sort).
+    const SEARCHABLE: TreeGroup = { kind: "TABLE", label: "Tables", items: ["abc_users", "users_archive", "xuser_log", "user_log"] };
+    const { container, app } = mountTree({ groups: [SEARCHABLE] });
+    cleanup = () => app.unmount();
+    await typeSearch(container, "user");
+    const order = Array.from(container.querySelectorAll('label[data-test^="item-TABLE-"]')).map((el) => el.getAttribute("data-test")!.replace("item-TABLE-", ""));
+    expect(order).toEqual(["users_archive", "user_log", "abc_users", "xuser_log"]);
+  });
+
   it("deselect all only clears visible enabled selections, keeping hidden ones", async () => {
     const { state, container, app } = mountTree({
       selection: { VIEW: ["v1", "v2", "v3"], FUNCTION: ["f1", "f2"] },

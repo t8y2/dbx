@@ -88,20 +88,19 @@ fn classify_statement(stmt: &Statement, detect_select_into: bool) -> SqlRisk {
         // Show/Describe variants
         Statement::ShowTables { .. }
         | Statement::ShowColumns { .. }
+        | Statement::ShowCatalogs { .. }
         | Statement::ShowDatabases { .. }
         | Statement::ShowSchemas { .. }
+        | Statement::ShowViews { .. }
+        | Statement::ShowFunctions { .. }
         | Statement::ShowCreate { .. }
+        | Statement::ShowVariable { .. }
         | Statement::ShowVariables { .. }
         | Statement::ShowStatus { .. }
-        | Statement::ShowProcessList { .. } => SqlRisk::ReadOnly,
-
-        // sqlparser has no dedicated MySQL `SHOW TRIGGERS` node and uses its
-        // loose `ShowVariable` fallback, with TRIGGERS as the first identifier.
-        Statement::ShowVariable { variable }
-            if variable.first().is_some_and(|identifier| identifier.value.eq_ignore_ascii_case("triggers")) =>
-        {
-            SqlRisk::ReadOnly
-        }
+        | Statement::ShowProcessList { .. }
+        | Statement::ShowCharset(_)
+        | Statement::ShowObjects(_)
+        | Statement::ShowCollation { .. } => SqlRisk::ReadOnly,
 
         // Write operations
         Statement::Insert { .. } | Statement::Update { .. } | Statement::Delete { .. } | Statement::Merge { .. } => {
@@ -709,7 +708,7 @@ pub fn is_dangerous_sql_for_database(sql: &str, database_type: DatabaseType) -> 
     let normalized = normalize_dialect(&database_type_name);
     let parser_dialect = resolve_dialect(normalized);
     let detect_select_into = supports_select_into_table_creation(database_type);
-    let has_locking_clause = sql_contains_top_level_locking_clause(sql, parser_dialect.as_ref());
+    let has_locking_clause = sql_contains_locking_clause(sql, parser_dialect.as_ref());
     // PostgreSQL-family and SQL Server SELECT INTO forms are represented in
     // the AST. Their text fallback also matches ordinary INSERT INTO, so only
     // use it for dialect-specific writes that the selected AST cannot express
@@ -805,7 +804,7 @@ fn classify_sql_risk_with_database(
 ) -> Result<SqlRisk, String> {
     let parser_dialect = resolve_dialect(normalized_dialect);
     let detect_select_into = database_type.is_none();
-    let has_locking_clause = sql_contains_top_level_locking_clause(sql, parser_dialect.as_ref());
+    let has_locking_clause = sql_contains_locking_clause(sql, parser_dialect.as_ref());
     let has_dialect_specific_write = match database_type {
         Some(database_type) => crate::query_execution_sql::has_dialect_specific_write(sql, database_type),
         // Preserve MySQL executable-comment and file-output detection even
@@ -846,32 +845,35 @@ fn classify_sql_risk_with_database(
     }
 }
 
-fn sql_contains_top_level_locking_clause(sql: &str, dialect: &dyn sqlparser::dialect::Dialect) -> bool {
+fn sql_contains_locking_clause(sql: &str, dialect: &dyn sqlparser::dialect::Dialect) -> bool {
     let Ok(tokens) = Tokenizer::new(dialect, sql).tokenize() else {
         return false;
     };
-    let mut depth: usize = 0;
-    let mut words = Vec::new();
+    let mut words: Vec<String> = Vec::with_capacity(4);
     for token in tokens {
         match token {
-            Token::LParen => depth += 1,
-            Token::RParen => depth = depth.saturating_sub(1),
-            token if depth == 0 => {
-                let word = token.to_string();
-                if word.chars().all(|character| character.is_ascii_alphabetic() || character == '_') {
-                    words.push(word.to_ascii_uppercase());
+            Token::Word(word) if word.quote_style.is_none() => {
+                words.push(word.value.to_ascii_uppercase());
+                if words.len() > 4 {
+                    words.remove(0);
+                }
+                if words.windows(2).any(|window| {
+                    matches!(window, [r#for, lock] if r#for == "FOR" && matches!(lock.as_str(), "UPDATE" | "SHARE"))
+                }) || words.windows(3).any(|window| {
+                    matches!(window, [r#for, key, share] if r#for == "FOR" && key == "KEY" && share == "SHARE")
+                }) || words.windows(4).any(|window| {
+                    matches!(window, [r#for, no, key, update] if r#for == "FOR" && no == "NO" && key == "KEY" && update == "UPDATE")
+                }) || words.windows(4).any(|window| {
+                    matches!(window, [lock, r#in, share, mode] if lock == "LOCK" && r#in == "IN" && share == "SHARE" && mode == "MODE")
+                }) {
+                    return true;
                 }
             }
-            _ => {}
+            Token::Whitespace(_) => {}
+            _ => words.clear(),
         }
     }
-    words.windows(2).any(|window| matches!(window, [r#for, lock] if r#for == "FOR" && matches!(lock.as_str(), "UPDATE" | "SHARE")))
-        || words.windows(3).any(|window| {
-            matches!(window, [r#for, key, share] if r#for == "FOR" && key == "KEY" && share == "SHARE")
-        })
-        || words.windows(4).any(|window| {
-            matches!(window, [r#for, no, key, update] if r#for == "FOR" && no == "NO" && key == "KEY" && update == "UPDATE")
-        })
+    false
 }
 
 #[cfg(test)]
@@ -908,6 +910,21 @@ mod tests {
     }
 
     #[test]
+    fn classify_supported_show_statements_as_read_only() {
+        for (sql, database_type) in [
+            ("SHOW COLLATION", DatabaseType::Mysql),
+            ("SHOW CHARACTER SET", DatabaseType::Mysql),
+            ("SHOW search_path", DatabaseType::Postgres),
+        ] {
+            assert_eq!(
+                classify_sql_risk_for_database(sql, database_type).unwrap(),
+                SqlRisk::ReadOnly,
+                "expected read-only: {sql}"
+            );
+        }
+    }
+
+    #[test]
     fn mysql_show_triggers_preserves_write_detection() {
         for (sql, expected_risk) in [
             ("SHOW TRIGGERS; DELETE FROM order_items", SqlRisk::Write),
@@ -921,6 +938,42 @@ mod tests {
                 "expected write detection: {sql}"
             );
             assert!(is_dangerous_sql_for_database(sql, DatabaseType::Mysql), "expected dangerous SQL: {sql}");
+        }
+    }
+
+    #[test]
+    fn classify_mysql_legacy_shared_lock_reads_like_for_share() {
+        // MySQL's pre-8.0.1 spelling of `FOR SHARE` is still valid in 8.0.x and
+        // takes the same shared row locks, so it must not classify as a plain read.
+        for sql in [
+            "SELECT * FROM users LOCK IN SHARE MODE",
+            "SELECT * FROM users lock in share mode",
+            "SELECT id FROM users WHERE id = 1 LOCK IN SHARE MODE",
+            "WITH c AS (SELECT 1) SELECT * FROM users LOCK IN SHARE MODE",
+            "SELECT * FROM (SELECT * FROM users LOCK IN SHARE MODE) AS locked_users",
+            "WITH locked AS (SELECT * FROM users LOCK IN SHARE MODE) SELECT * FROM locked",
+            "SELECT (SELECT id FROM users LOCK IN SHARE MODE)",
+        ] {
+            assert_eq!(
+                classify_sql_risk_for_database(sql, DatabaseType::Mysql).unwrap(),
+                SqlRisk::Write,
+                "expected locking read to be write-capable: {sql}"
+            );
+            assert!(is_dangerous_sql_for_database(sql, DatabaseType::Mysql), "expected high-risk SQL: {sql}");
+        }
+
+        // A column or alias literally named "mode" must stay a plain read.
+        for sql in [
+            "SELECT lock_in_share_mode FROM settings",
+            "SELECT mode FROM share WHERE id = 1",
+            "SELECT 'LOCK IN SHARE MODE'",
+            "SELECT lock, `in`, share, mode FROM settings",
+        ] {
+            assert_eq!(
+                classify_sql_risk_for_database(sql, DatabaseType::Mysql).unwrap(),
+                SqlRisk::ReadOnly,
+                "expected plain read: {sql}"
+            );
         }
     }
 

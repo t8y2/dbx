@@ -374,15 +374,19 @@ func (m *DigestMD5Mechanism) step(challenge []byte) ([]byte, error) {
 	a2String := "AUTHENTICATE:" + digestUri
 
 	maxBuf := ""
-	if c["qop"] != AUTH {
+	if m.auth != AUTH {
 		a2String += ":00000000000000000000000000000000"
 		maxBuf = ",maxbuf=16777215"
 	}
 	// Set nonce count nc
 	nc := fmt.Sprintf("%08x", m.nonceCount)
+	charset := ""
+	if strings.EqualFold(c["charset"], "utf-8") {
+		charset = ",charset=utf-8"
+	}
 	// Create final response sent to server
-	resp := "qop=" + c["qop"] + ",realm=" + strconv.Quote(c["realm"]) + ",username=" + strconv.Quote(m.username) + ",nonce=" + strconv.Quote(m.nonce) +
-		",cnonce=" + strconv.Quote(m.cnonce) + ",nc=" + nc + ",digest-uri=" + strconv.Quote(digestUri) + ",response=" + m.getHash(digestUri, a2String, c) + maxBuf
+	resp := "qop=" + m.auth + ",realm=" + strconv.Quote(c["realm"]) + ",username=" + strconv.Quote(m.username) + ",nonce=" + strconv.Quote(m.nonce) +
+		",cnonce=" + strconv.Quote(m.cnonce) + ",nc=" + nc + ",digest-uri=" + strconv.Quote(digestUri) + ",response=" + m.getHash(digestUri, a2String, c) + charset + maxBuf
 
 	return []byte(resp), nil
 }

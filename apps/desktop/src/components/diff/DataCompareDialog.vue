@@ -14,6 +14,7 @@ import { databaseOptionsForConnection, fetchNamespaceOptionsForConnection } from
 import { isSchemaAware } from "@/lib/database/databaseCapabilities";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import type { DataCompareCellValue, DataCompareModifiedRow, DataCompareResult, DataCompareRow, DataCompareSyncPlan, DataCompareSyncPlanTableOptions } from "@/lib/dataGrid/dataCompare";
+import { inferCompareKeyColumns } from "@/lib/dataGrid/dataCompare";
 import type { ColumnInfo, DatabaseType } from "@/types/database";
 import * as api from "@/lib/backend/api";
 import { executeWithProductionSqlGuard } from "@/lib/database/productionExecutionGuard";
@@ -394,9 +395,7 @@ async function loadColumnsWithCache(cache: Map<string, CompareColumn[]>, connect
 async function inferKeyColumnsForTable(table: string, sourceColumnCache?: Map<string, CompareColumn[]>): Promise<string[]> {
   if (!sourceConnectionId.value || !sourceDatabase.value || !sourceSchema.value || !table) return [];
   const columns = sourceColumnCache ? await loadColumnsWithCache(sourceColumnCache, sourceConnectionId.value, sourceDatabase.value, sourceSchema.value, table) : (((await api.getColumns(sourceConnectionId.value, sourceDatabase.value, sourceSchema.value, table)) as CompareColumn[]) ?? []);
-  const primaryKeys = columns.filter((column) => column.is_primary_key).map((column) => column.name);
-  if (primaryKeys.length > 0) return primaryKeys;
-  return columns.slice(0, 1).map((column) => column.name);
+  return inferCompareKeyColumns(columns);
 }
 
 async function inferKeyColumns() {

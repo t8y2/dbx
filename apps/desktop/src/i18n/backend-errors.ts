@@ -96,6 +96,10 @@ const patterns: [RegExp, string][] = [
   [/GBASEDBTSERVER[\s\S]*DBSERVERNAME[\s\S]*DBSERVERALIASES/, "connection.gbaseServerMismatch"],
   [/^ai\.configNameExists:(.+)$/, "ai.configNameExists"],
 
+  // Ordinary users may not enumerate namespaces or authorization data through Nacos management APIs.
+  [/NACOS_ERROR\[(?:v3ManagedNamespacesRequired|managedNamespacesRequired)\]:[\s\S]*$/, "nacos.nacosManagedNamespacesRequired"],
+  [/NACOS_ERROR\[managedNamespaceAccessDenied\]: One or more configured namespace IDs are not readable: ([\s\S]+)$/, "nacos.nacosManagedNamespaceAccessDenied"],
+
   // Tunnel / proxy test messages
   [/^HTTP CONNECT proxy connection successful \((\d+)\)$/, "settings.tunnelsHttpTestSuccess"],
   [/^SOCKS5 proxy connection successful$/, "settings.tunnelsSocks5TestSuccess"],
@@ -152,6 +156,7 @@ const paramNames: Record<string, string | string[]> = {
   "connection.driverNotInstalled": "driver",
   "connection.jreNotInstalled": "jre",
   "ai.configNameExists": "name",
+  "nacos.nacosManagedNamespaceAccessDenied": "detail",
   "settings.tunnelsHttpTestSuccess": "code",
   "settings.tunnelsProxyTimedOut": "duration",
   "settings.tunnelsProxyConnectFailed": "error",

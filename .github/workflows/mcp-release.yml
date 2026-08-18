@@ -460,7 +460,7 @@ jobs:
             echo "@dbx-app/cli@${VERSION} already exists on npm; skipping."
             exit 0
           fi
-          pnpm --filter "@dbx-app/cli" publish --access public --provenance --no-git-checks
+          pnpm publish "./packages/cli" --access public --provenance --no-git-checks
 
   publish-mcp-platforms:
     name: Publish ${{ matrix.package-name }}
@@ -660,7 +660,7 @@ jobs:
             echo "@dbx-app/mcp-server@${VERSION} already exists on npm; skipping."
             exit 0
           fi
-          pnpm --filter "@dbx-app/mcp-server" publish --access public --provenance --no-git-checks
+          pnpm publish "./packages/mcp-server" --access public --provenance --no-git-checks
 
   publish-mcp-github-release:
     name: Publish MCP GitHub Release assets

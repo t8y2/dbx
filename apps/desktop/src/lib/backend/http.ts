@@ -98,10 +98,12 @@ import type {
   EtcdWatchPollResponse,
   EtcdLeaseListResponse,
   DocumentQueryResult,
+  DynamoDbTableDescription,
   MongoDocumentResult,
   MongoCollectionStatsResult,
   MongoCloneCollectionResult,
   MongoDropIndexesResult,
+  MongoIndexSpec,
   MongoGridFsBucketInfo,
   HistoryEntry,
   HistorySearchRequest,
@@ -159,7 +161,7 @@ import type { BuildEditableObjectSourceSqlInput, BuildRoutineRenameObjectSourceI
 import type { BuildViewDdlInput } from "@/lib/table/viewDdl";
 import type { BuildRenameObjectSqlOptions } from "@/lib/table/objectRenameSql";
 import type { CreateDatabaseSqlOptions } from "@/lib/database/createDatabaseSql";
-import type { DatabaseNameSqlOptions, DatabasePropertyEditSqlOptions, DropTableChildObjectSqlOptions, DropObjectSqlOptions, DuplicateTableStructureSqlOptions, CopyTableDataSqlOptions, SchemaNameSqlOptions, TableAdminSqlOptions } from "@/lib/database/dbAdminSql";
+import type { DatabaseNameSqlOptions, DatabasePropertyEditSqlOptions, DropTableChildObjectSqlOptions, DropObjectSqlOptions, DuplicateTableStructureSqlOptions, CopyTableDataSqlOptions, MysqlAutoIncrementSqlOptions, SchemaNameSqlOptions, TableAdminSqlOptions } from "@/lib/database/dbAdminSql";
 import type { BuildDatabaseSqlExportOptions, BuildExportInsertStatementsOptions } from "@/lib/export/databaseExport";
 import { loadBrowserAppState, saveBrowserAppState } from "@/lib/backend/browserAppStateStorage";
 import type { DataCompareFromTablesOptions, DataCompareFromTablesPreparation, DataCompareSyncPlan, DataCompareSyncPlanOptions, DataComparePreparation, DataComparePreparationOptions } from "@/lib/dataGrid/dataCompare";
@@ -184,6 +186,17 @@ import type {
   NacosConfigUpsert,
   NacosConnectionInfo,
   NacosRNacosConsoleCaptcha,
+  NacosUserQuery,
+  NacosUserList,
+  NacosUserCreate,
+  NacosUserUpdate,
+  NacosRoleQuery,
+  NacosRoleList,
+  NacosRoleBinding,
+  NacosAccessControlSnapshot,
+  NacosAccessOperationRequest,
+  NacosAccessOperationResult,
+  NacosAccessOperationRetry,
   NacosInstanceInfo,
   NacosInstanceRef,
   NacosInstanceRegistration,
@@ -193,6 +206,7 @@ import type {
   NacosDashboardSnapshot,
   NacosNamespaceCreate,
   NacosNamespaceInfo,
+  NacosNamespaceSidebarSnapshot,
   NacosNamespaceUpdate,
   NacosRawRequest,
   NacosRawResponse,
@@ -203,6 +217,7 @@ import type {
   NacosSearchProgress,
 } from "@/types/nacos";
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
+import { appendDebugLog, isDebugLoggingEnabled } from "@/lib/backend/debugLog";
 import { normalizeConnectionTestResult } from "@/lib/connection/connectionDatabaseInfo";
 import type { AnnotationFile, SchemaSnapshot } from "@/docs/types";
 
@@ -234,6 +249,55 @@ async function post<T>(url: string, body: unknown): Promise<T> {
   });
   if (!res.ok) throw await backendResponseError(res);
   return res.json();
+}
+
+async function postQueryWithDiagnostics<T>(url: string, body: unknown, traceId?: string): Promise<T> {
+  if (!isDebugLoggingEnabled()) return post(url, body);
+
+  const startedAt = performance.now();
+  const serializedBody = JSON.stringify(body);
+  const response = await fetch(apiUrl(url), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: serializedBody,
+  });
+  const headersAt = performance.now();
+  const responseText = await response.text();
+  const bodyAt = performance.now();
+  if (!response.ok) {
+    appendDebugLog("warn", "[DBX][query-transport:http:error]", {
+      traceId: traceId?.slice(0, 8),
+      status: response.status,
+      requestBytes: new TextEncoder().encode(serializedBody).byteLength,
+      responseBytes: new TextEncoder().encode(responseText).byteLength,
+      responseHeadersMs: Math.round(headersAt - startedAt),
+      responseBodyMs: Math.round(bodyAt - headersAt),
+      totalMs: Math.round(bodyAt - startedAt),
+      backendCoreMs: response.headers.get("x-dbx-core-ms"),
+      backendSerializeMs: response.headers.get("x-dbx-serialize-ms"),
+    });
+    throw await backendResponseError(
+      new Response(responseText, {
+        status: response.status,
+        statusText: response.statusText,
+        headers: response.headers,
+      }),
+    );
+  }
+  const result = JSON.parse(responseText) as T;
+  const parsedAt = performance.now();
+  appendDebugLog("info", "[DBX][query-transport:http]", {
+    traceId: traceId?.slice(0, 8),
+    requestBytes: new TextEncoder().encode(serializedBody).byteLength,
+    responseBytes: new TextEncoder().encode(responseText).byteLength,
+    responseHeadersMs: Math.round(headersAt - startedAt),
+    responseBodyMs: Math.round(bodyAt - headersAt),
+    jsonParseMs: Math.round(parsedAt - bodyAt),
+    totalMs: Math.round(parsedAt - startedAt),
+    backendCoreMs: response.headers.get("x-dbx-core-ms"),
+    backendSerializeMs: response.headers.get("x-dbx-serialize-ms"),
+  });
+  return result;
 }
 
 async function get<T>(url: string): Promise<T> {
@@ -320,6 +384,14 @@ export async function connectionFinalProxyPort(config: ConnectionConfig): Promis
 
 export async function disconnectDb(connectionId: string, clientAttempt?: number): Promise<void> {
   return post("/api/connection/disconnect", { connectionId, clientAttempt });
+}
+
+export async function sessionCredentialStatus(connectionId: string): Promise<boolean> {
+  return post("/api/connection/session-credential-status", { connectionId });
+}
+
+export async function forgetSessionCredential(connectionId: string): Promise<void> {
+  return post("/api/connection/forget-session-credential", { connectionId });
 }
 
 export async function checkConnectionHealth(connectionId: string): Promise<void> {
@@ -592,6 +664,10 @@ export async function loadSavedSqlLibrary(): Promise<SavedSqlLibrary> {
   return get("/api/saved-sql");
 }
 
+export async function loadSavedSqlFilesForSync(): Promise<SavedSqlFile[]> {
+  throw new Error("SQL directory sync is only available in the desktop app.");
+}
+
 export async function loadSavedSqlFile(id: string): Promise<SavedSqlFile | null> {
   return get(`/api/saved-sql/${encodeURIComponent(id)}`);
 }
@@ -793,12 +869,25 @@ export async function listPartitions(connectionId: string, database: string, sch
   return get(`/api/schema/partitions?${qs({ connection_id: connectionId, database, schema, table, catalog })}`);
 }
 
+export interface TablePartitionStatus {
+  isPartitionedParent: boolean;
+  isPartition: boolean;
+}
+
+export async function getTablePartitionStatus(connectionId: string, database: string, schema: string, table: string): Promise<TablePartitionStatus> {
+  return get(`/api/schema/table-partition-status?${qs({ connection_id: connectionId, database, schema, table })}`);
+}
+
+export async function listInvalidIndexes(connectionId: string, database: string, schema: string, table: string): Promise<string[]> {
+  return get(`/api/schema/invalid-indexes?${qs({ connection_id: connectionId, database, schema, table })}`);
+}
+
 export async function listSubpartitions(connectionId: string, database: string, schema: string, table: string, catalog?: string): Promise<SubpartitionInfo[]> {
   return get(`/api/schema/subpartitions?${qs({ connection_id: connectionId, database, schema, table, catalog })}`);
 }
 
-export async function getTableDdl(connectionId: string, database: string, schema: string, table: string, objectType?: ObjectSourceKind, catalog?: string): Promise<string> {
-  return get(`/api/schema/ddl?${qs({ connection_id: connectionId, database, schema, table, object_type: objectType, catalog })}`);
+export async function getTableDdl(connectionId: string, database: string, schema: string, table: string, objectType?: ObjectSourceKind, catalog?: string, portable = false): Promise<string> {
+  return get(`/api/schema/ddl?${qs({ connection_id: connectionId, database, schema, table, object_type: objectType, catalog, portable })}`);
 }
 
 export async function getTableDisplayDdl(connectionId: string, database: string, schema: string, table: string, objectType?: ObjectSourceKind, catalog?: string): Promise<string> {
@@ -940,14 +1029,18 @@ export async function executeMulti(
     executionMode?: "simple";
   },
 ): Promise<QueryResult[]> {
-  return post("/api/query/execute-multi", {
-    connectionId,
-    database,
-    sql,
-    schema,
+  return postQueryWithDiagnostics(
+    "/api/query/execute-multi",
+    {
+      connectionId,
+      database,
+      sql,
+      schema,
+      executionId,
+      ...options,
+    },
     executionId,
-    ...options,
-  });
+  );
 }
 
 export interface ExecuteMultiProgress {
@@ -1025,12 +1118,13 @@ export async function closeClientConnectionSession(connectionId: string, databas
   });
 }
 
-export async function executeBatch(connectionId: string, database: string, statements: string[], schema?: string): Promise<QueryResult> {
+export async function executeBatch(connectionId: string, database: string, statements: string[], schema?: string, timeoutSecs?: number): Promise<QueryResult> {
   return post("/api/query/execute-batch", {
     connectionId,
     database,
     statements,
     schema,
+    timeoutSecs,
   });
 }
 
@@ -1182,6 +1276,10 @@ export async function buildEmptyTableSql(options: TableAdminSqlOptions): Promise
 
 export async function buildTruncateTableSql(options: TableAdminSqlOptions): Promise<string> {
   return post("/api/query/build-truncate-table-sql", { options });
+}
+
+export async function buildMysqlAutoIncrementSql(options: MysqlAutoIncrementSqlOptions): Promise<string> {
+  return post("/api/query/build-mysql-auto-increment-sql", { options });
 }
 
 export async function buildDropDatabaseSql(options: DatabaseNameSqlOptions): Promise<string> {
@@ -1617,6 +1715,14 @@ export async function loadSavedSqlEditorPositions(): Promise<unknown[] | null> {
 
 export async function saveSavedSqlEditorPositions(positions: unknown[]): Promise<void> {
   await saveBrowserAppState("saved_sql_editor_positions", positions);
+}
+
+export async function loadTransferTaskLibrary(): Promise<unknown | null> {
+  return loadBrowserAppState("transfer_task_library");
+}
+
+export async function saveTransferTaskLibrary(library: unknown): Promise<void> {
+  await saveBrowserAppState("transfer_task_library", library);
 }
 
 export async function completeAppClose(_action: "quit" | "hide"): Promise<void> {
@@ -2130,6 +2236,10 @@ function downloadDatabaseExportFile(exportId: string): void {
 
 export async function cancelDatabaseExport(exportId: string): Promise<void> {
   await post("/api/export/database/cancel", { exportId });
+}
+
+export async function recordDatabaseExportDestination(_directory: string): Promise<void> {
+  throw new Error("Scheduled database backups are only available in the desktop app.");
 }
 
 // --- Table Export ---
@@ -3083,6 +3193,10 @@ export async function nacosListNamespaces(connectionId: string): Promise<NacosNa
   return post("/api/nacos/namespaces/list", { connectionId });
 }
 
+export async function nacosSidebarSnapshot(connectionId: string): Promise<NacosNamespaceSidebarSnapshot> {
+  return post("/api/nacos/sidebar/snapshot", { connectionId });
+}
+
 export async function nacosCreateNamespace(connectionId: string, req: NacosNamespaceCreate): Promise<void> {
   return post("/api/nacos/namespaces/create", { connectionId, req });
 }
@@ -3222,6 +3336,54 @@ export async function nacosGetRNacosConsoleCaptcha(connectionId: string): Promis
 
 export async function nacosLoginRNacosConsole(connectionId: string, captcha?: string): Promise<void> {
   return post("/api/nacos/rnacos-console/login", { connectionId, captcha });
+}
+
+export async function nacosListUsers(connectionId: string, query: NacosUserQuery): Promise<NacosUserList> {
+  return post("/api/nacos/users/list", { connectionId, query });
+}
+
+export async function nacosCreateUser(connectionId: string, req: NacosUserCreate): Promise<void> {
+  return post("/api/nacos/users/create", { connectionId, req });
+}
+
+export async function nacosUpdateUser(connectionId: string, req: NacosUserUpdate): Promise<void> {
+  return post("/api/nacos/users/update", { connectionId, req });
+}
+
+export async function nacosDeleteUser(connectionId: string, username: string): Promise<void> {
+  return post("/api/nacos/users/delete", { connectionId, username });
+}
+
+export async function nacosListRoleBindings(connectionId: string, query: NacosRoleQuery): Promise<NacosRoleList> {
+  return post("/api/nacos/roles/list", { connectionId, query });
+}
+
+export async function nacosAssignRole(connectionId: string, binding: NacosRoleBinding): Promise<void> {
+  return post("/api/nacos/roles/assign", { connectionId, binding });
+}
+
+export async function nacosRemoveRole(connectionId: string, binding: NacosRoleBinding): Promise<void> {
+  return post("/api/nacos/roles/remove", { connectionId, binding });
+}
+
+export async function nacosAccessSnapshot(connectionId: string): Promise<NacosAccessControlSnapshot> {
+  return post("/api/nacos/access/snapshot", { connectionId });
+}
+
+export async function nacosStartAccessOperation(connectionId: string, req: NacosAccessOperationRequest): Promise<NacosAccessOperationResult> {
+  return post("/api/nacos/access/operations/start", { connectionId, req });
+}
+
+export async function nacosGetAccessOperation(connectionId: string, operationId: string): Promise<NacosAccessOperationResult> {
+  return post("/api/nacos/access/operations/get", { connectionId, operationId });
+}
+
+export async function nacosRetryAccessOperation(connectionId: string, retry: NacosAccessOperationRetry): Promise<NacosAccessOperationResult> {
+  return post("/api/nacos/access/operations/retry", { connectionId, retry });
+}
+
+export async function nacosUndoAccessOperation(connectionId: string, operationId: string): Promise<NacosAccessOperationResult> {
+  return post("/api/nacos/access/operations/undo", { connectionId, operationId });
 }
 
 export async function nacosListServices(connectionId: string, query: NacosServiceQuery): Promise<NacosServiceList> {
@@ -3418,7 +3580,7 @@ export async function mongoFindOne(connectionId: string, database: string, colle
   });
 }
 
-export async function documentFindDocuments(connectionId: string, database: string, collection: string, skip: number, limit: number, filter?: string, projection?: string, sort?: string, collation?: string, executionId?: string): Promise<DocumentQueryResult> {
+export async function documentFindDocuments(connectionId: string, database: string, collection: string, skip: number, limit: number, filter?: string, projection?: string, sort?: string, collation?: string, executionId?: string, cursor?: string): Promise<DocumentQueryResult> {
   return post("/api/document-store/find-documents", {
     connectionId,
     database,
@@ -3429,8 +3591,22 @@ export async function documentFindDocuments(connectionId: string, database: stri
     projection,
     sort,
     collation,
+    cursor,
     executionId,
   });
+}
+
+export async function documentCountDocuments(connectionId: string, collection: string, filter?: string, executionId?: string): Promise<number> {
+  return post("/api/document-store/count-documents", {
+    connectionId,
+    collection,
+    filter,
+    executionId,
+  });
+}
+
+export async function dynamodbDescribeTable(connectionId: string, table: string): Promise<DynamoDbTableDescription> {
+  return post("/api/document-store/dynamodb-describe-table", { connectionId, table });
 }
 
 export async function elasticsearchCountDocuments(connectionId: string, index: string, filter?: string, executionId?: string): Promise<number> {
@@ -3564,6 +3740,14 @@ export async function mongoCollectionStats(connectionId: string, database: strin
     collection,
     scale,
     executionId,
+  });
+}
+
+export async function mongoListIndexSpecs(connectionId: string, database: string, collection: string): Promise<MongoIndexSpec[]> {
+  return post("/api/mongo/list-index-specs", {
+    connectionId,
+    database,
+    collection,
   });
 }
 
@@ -3792,12 +3976,17 @@ export async function checkMcpServerStatus(): Promise<import("@/lib/backend/taur
     data_dir: null,
     install_command: "npm install -g @dbx-app/mcp-server@latest",
     update_command: "npm install -g @dbx-app/mcp-server@latest",
+    uninstall_command: "npm uninstall -g @dbx-app/mcp-server",
     error: "MCP Server status is only available in the desktop app.",
   };
 }
 
 export async function installMcpServer(): Promise<string> {
   throw new Error("MCP Server installation is only available in the desktop app.");
+}
+
+export async function uninstallMcpServer(): Promise<string> {
+  throw new Error("MCP Server uninstallation is only available in the desktop app.");
 }
 
 export async function getSystemProxyUrl(): Promise<string | null> {

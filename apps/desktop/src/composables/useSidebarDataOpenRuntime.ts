@@ -34,7 +34,10 @@ export function useSidebarDataOpenRuntime() {
     const reuseMode = options.reuseMode ?? settingsStore.editorSettings.dataTabReuseMode;
     if (config?.db_type === "hbase") {
       await connectionStore.ensureConnected(node.connectionId);
-      const tabId = queryStore.createTab(node.connectionId, node.database, node.label, "hbase", undefined, node.label, undefined, { forceNew: openMode === "new-tab" || reuseMode === "always-new" });
+      const tabId = queryStore.createTab(node.connectionId, node.database, node.label, "hbase", undefined, node.label, undefined, {
+        forceNew: openMode === "new-tab" || reuseMode === "always-new",
+        insertAfterActive: settingsStore.editorSettings.openDataTabsNextToActive,
+      });
       queryStore.updateSql(tabId, node.label);
       return;
     }
@@ -174,7 +177,10 @@ export function useSidebarDataOpenRuntime() {
         resetReusedDataTabState(existingDataTabCandidate.tab);
         return existingDataTabCandidate.tab.id;
       }
-      return queryStore.createTab(node.connectionId, node.database, node.label, "data", tableSchema, undefined, node.catalog, { forceNew: true });
+      return queryStore.createTab(node.connectionId, node.database, node.label, "data", tableSchema, undefined, node.catalog, {
+        forceNew: true,
+        insertAfterActive: settingsStore.editorSettings.openDataTabsNextToActive,
+      });
     })();
     openDataLog("info", "tab-created", { traceId, tabId, elapsed: elapsed() });
     logPhase("tab-created", { tabId });

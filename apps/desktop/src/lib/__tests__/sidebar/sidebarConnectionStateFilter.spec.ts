@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { filterSidebarTreeToConnectedConnections } from "@/lib/sidebar/sidebarSearchTree";
+import { filterSidebarTree, filterSidebarTreeToConnectedConnections } from "@/lib/sidebar/sidebarSearchTree";
 import type { TreeNode } from "@/types/database";
 
 function connection(id: string): TreeNode {
@@ -36,5 +36,19 @@ describe("connected sidebar connection filter", () => {
     const tree = [group("team", [first])];
 
     expect(filterSidebarTreeToConnectedConnections(tree, new Set(["first"]))).toBe(tree);
+  });
+});
+
+describe("sidebar tree translated labels", () => {
+  it("matches an application entry by its localized display label", () => {
+    const node: TreeNode = {
+      id: "nacos:nacos-access-control",
+      label: "nacos.accessControlSidebarLabel",
+      type: "nacos-access-control",
+      connectionId: "nacos",
+    };
+
+    expect(filterSidebarTree([node], "Nacos Access Control", new Set(), undefined, () => "Nacos Access Control")).toEqual([node]);
+    expect(filterSidebarTree([node], "Nacos 用户和角色", new Set(), undefined, () => "Nacos 用户和角色")).toEqual([node]);
   });
 });

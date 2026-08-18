@@ -170,6 +170,12 @@ fn agent_metadata_timeout(config: Option<&ConnectionConfig>) -> Option<Duration>
     }
 }
 
+fn mysql_database_list_timeout(config: Option<&ConnectionConfig>) -> Duration {
+    config
+        .map(|config| Duration::from_secs(config.effective_connect_timeout_secs()))
+        .unwrap_or_else(db::connection_timeout)
+}
+
 pub async fn list_databases_core(state: &AppState, connection_id: &str) -> Result<Vec<db::DatabaseInfo>, String> {
     retry_metadata_connection(state, connection_id, None, || list_databases_once(state, connection_id)).await
 }
@@ -365,7 +371,7 @@ pub async fn list_doris_catalogs_core(state: &AppState, connection_id: &str) -> 
     let db_config = connection_config(state, connection_id).await;
     let connections = state.connections.read().await;
     if let Some(PoolKind::Mysql(p, _)) = connections.get(&pool_key) {
-        return if db_config.as_ref().is_some_and(is_starrocks_config) {
+        return if db_config.as_ref().is_some_and(db::starrocks::is_config) {
             db::starrocks::list_catalogs(p).await
         } else {
             db::doris::list_catalogs(p).await
@@ -391,7 +397,7 @@ pub async fn list_doris_catalog_databases_core(
     let PoolKind::Mysql(p, _) = pool else {
         return Ok(vec![]);
     };
-    let databases = if db_config.as_ref().is_some_and(is_starrocks_config) {
+    let databases = if db_config.as_ref().is_some_and(db::starrocks::is_config) {
         db::starrocks::list_catalog_databases(p, catalog).await
     } else {
         db::doris::list_catalog_databases(p, catalog).await
@@ -435,7 +441,7 @@ pub async fn list_doris_catalog_tables_core(
     let PoolKind::Mysql(p, _) = pool else {
         return Ok(vec![]);
     };
-    let tables = if db_config.as_ref().is_some_and(is_starrocks_config) {
+    let tables = if db_config.as_ref().is_some_and(db::starrocks::is_config) {
         db::starrocks::list_catalog_tables(p, catalog, database).await
     } else {
         db::doris::list_catalog_tables(p, catalog, database).await
@@ -458,7 +464,7 @@ pub async fn get_doris_catalog_columns_core(
     let PoolKind::Mysql(p, _) = pool else {
         return Ok(vec![]);
     };
-    let columns = if db_config.as_ref().is_some_and(is_starrocks_config) {
+    let columns = if db_config.as_ref().is_some_and(db::starrocks::is_config) {
         db::starrocks::get_catalog_columns(p, catalog, database, table).await
     } else {
         db::doris::get_catalog_columns(p, catalog, database, table).await
@@ -481,7 +487,7 @@ pub async fn get_doris_catalog_table_ddl_core(
     let PoolKind::Mysql(p, _) = pool else {
         return Err("DDL not supported for this connection".to_string());
     };
-    if db_config.as_ref().is_some_and(is_starrocks_config) {
+    if db_config.as_ref().is_some_and(db::starrocks::is_config) {
         db::starrocks::get_catalog_table_ddl(p, catalog, database, table).await
     } else {
         db::doris::get_catalog_table_ddl(p, catalog, database, table).await
@@ -503,7 +509,7 @@ pub async fn list_doris_catalog_indexes_core(
     let PoolKind::Mysql(p, _) = pool else {
         return Ok(vec![]);
     };
-    if db_config.as_ref().is_some_and(is_starrocks_config) {
+    if db_config.as_ref().is_some_and(db::starrocks::is_config) {
         db::starrocks::list_catalog_indexes(p, catalog, database, table).await
     } else {
         db::doris::list_catalog_indexes(p, catalog, database, table).await
@@ -559,7 +565,7 @@ pub async fn resolve_external_doris_catalog(
         return None;
     }
     let config = connection_config(state, connection_id).await?;
-    if is_doris_family_catalog_capable_config(&config) {
+    if db::mysql_compatible::supports_external_catalogs(&config) {
         Some(catalog.to_string())
     } else {
         None
@@ -611,6 +617,7 @@ async fn list_databases_once(state: &AppState, connection_id: &str) -> Result<Ve
     }
 
     let db_config = connection_config(state, connection_id).await;
+    let mysql_database_list_timeout = mysql_database_list_timeout(db_config.as_ref());
     let connections = state.connections.read().await;
     let pool = connections.get(connection_id).ok_or("Connection not found")?;
 
@@ -620,12 +627,13 @@ async fn list_databases_once(state: &AppState, connection_id: &str) -> Result<Ve
         {
             db::dolt::list_databases(p).await
         }
-        PoolKind::Mysql(p, _) if db_config.as_ref().is_some_and(is_doris_family_config) => {
-            db::mysql::list_databases_show(p)
+        PoolKind::Mysql(p, _) if db_config.as_ref().is_some_and(db::mysql_compatible::uses_show_metadata) => {
+            db::mysql::list_databases_show_with_timeout(p, mysql_database_list_timeout)
                 .await
                 .map(|databases| filter_mysql_system_databases_for_config(databases, db_config.as_ref()))
         }
-        PoolKind::Mysql(p, mode) => dispatch_mysql!(p, mode, db::mysql::list_databases, db::ob_oracle::list_databases),
+        PoolKind::Mysql(p, mode) if *mode == MysqlMode::OceanBaseOracle => db::ob_oracle::list_databases(p).await,
+        PoolKind::Mysql(p, _) => db::mysql::list_databases_with_timeout(p, mysql_database_list_timeout).await,
         PoolKind::Postgres(p) => db::postgres::list_databases(p).await,
         PoolKind::Sqlite(p) => db::sqlite::list_databases(p).await,
         PoolKind::Rqlite(client) => db::rqlite_driver::list_databases(client).await,
@@ -644,7 +652,10 @@ async fn list_databases_once(state: &AppState, connection_id: &str) -> Result<Ve
 
 async fn list_database_metadata_once(state: &AppState, connection_id: &str) -> Result<Vec<db::DatabaseInfo>, String> {
     let config = connection_config(state, connection_id).await;
-    if config.as_ref().is_some_and(|config| db::dolt::is_config(config) || is_doris_family_config(config)) {
+    if config
+        .as_ref()
+        .is_some_and(|config| db::dolt::is_config(config) || db::mysql_compatible::uses_show_metadata(config))
+    {
         return list_databases_once(state, connection_id).await;
     }
     let connections = state.connections.read().await;
@@ -1080,8 +1091,8 @@ async fn get_table_comment_core_for_session(
         match pool {
             PoolKind::Mysql(p, mode)
                 if *mode != MysqlMode::OceanBaseOracle
-                    && !db_config.as_ref().is_some_and(is_doris_family_config)
-                    && !db_config.as_ref().is_some_and(is_manticoresearch_config) =>
+                    && !db_config.as_ref().is_some_and(db::mysql_compatible::uses_show_metadata)
+                    && !db_config.as_ref().is_some_and(db::manticoresearch::is_config) =>
             {
                 db::mysql::get_table_comment(p, database, table).await
             }
@@ -2149,13 +2160,23 @@ async fn list_tables_once(
     let pool = connections.get(&pool_key).ok_or("Pool not found")?;
 
     match pool {
-        PoolKind::Mysql(p, _) if db_config.as_ref().is_some_and(is_starrocks_config) => {
-            db::mysql::list_starrocks_tables(p, database)
+        PoolKind::Mysql(p, _) if db_config.as_ref().is_some_and(db::starrocks::is_config) => {
+            db::starrocks::list_tables(p, database)
                 .await
                 .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types, table_name_filter))
         }
-        PoolKind::Mysql(p, _) if db_config.as_ref().is_some_and(is_doris_family_config) => {
+        PoolKind::Mysql(p, _) if db_config.as_ref().is_some_and(db::mysql_compatible::uses_show_metadata) => {
             db::mysql::list_tables_show(p, database)
+                .await
+                .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types, table_name_filter))
+        }
+        PoolKind::Mysql(p, _)
+            if db_config.as_ref().is_some_and(db::dolt::system_tables_visible)
+                && db::dolt::requests_system_tables(
+                    table_name_filter.map(|filter| filter.include_patterns.as_slice()),
+                ) =>
+        {
+            db::dolt::list_system_tables(p, mysql_table_metadata_catalog(database, schema), filter)
                 .await
                 .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types, table_name_filter))
         }
@@ -2658,13 +2679,14 @@ mod tests {
         filter_mysql_system_databases_for_config, filter_object_infos, filter_table_infos, filter_visible_schema_names,
         gaussdb_m_view_object_source_sql, gbase8a_object_statistics_sql, is_agent_postgres_metadata_fallback_config,
         is_mysql_external_driver_config, is_retryable_metadata_error, metadata_error_action,
-        metadata_name_or_comment_matches, mysql_external_driver_ddl_from_query_result, mysql_external_driver_ddl_sql,
-        mysql_object_source_ddl_column_index, mysql_object_source_sql, mysql_table_list_source_for_config,
-        mysql_table_metadata_catalog, normalize_information_schema_table_type, oracle_columns_from_query_result,
-        oracle_columns_sql, oracle_object_statistics_dba_segments_sql, oracle_object_statistics_from_query_result,
-        oracle_object_statistics_rows_only_sql, oracle_object_statistics_sql,
-        oracle_object_statistics_user_segments_sql, oracle_table_comment_from_query_result, oracle_table_comment_sql,
-        oracle_table_comments_sql, presto_like_columns_from_query_result, presto_like_information_schema_columns_sql,
+        metadata_name_or_comment_matches, mysql_database_list_timeout, mysql_external_driver_ddl_from_query_result,
+        mysql_external_driver_ddl_sql, mysql_object_source_ddl_column_index, mysql_object_source_sql,
+        mysql_table_list_source_for_config, mysql_table_metadata_catalog, normalize_information_schema_table_type,
+        oracle_columns_from_query_result, oracle_columns_sql, oracle_object_statistics_dba_segments_sql,
+        oracle_object_statistics_from_query_result, oracle_object_statistics_rows_only_sql,
+        oracle_object_statistics_sql, oracle_object_statistics_user_segments_sql,
+        oracle_table_comment_from_query_result, oracle_table_comment_sql, oracle_table_comments_sql,
+        presto_like_columns_from_query_result, presto_like_information_schema_columns_sql,
         presto_like_information_schema_tables_sql, presto_like_tables_from_query_result, replace_metadata_runtime,
         should_query_oracle_columns_via_sql_first, table_comments_from_query_result, table_name_filter_matches,
         tdengine_table_comment_like_pattern, tdengine_table_comment_sql, tdengine_table_comments_sql,
@@ -2829,6 +2851,24 @@ mod tests {
             production_databases: vec![],
             database_info: None,
         }
+    }
+
+    #[test]
+    fn mysql_database_list_timeout_uses_configured_and_effective_bounds() {
+        let mut config = test_connection_config(DatabaseType::Mysql);
+
+        config.connect_timeout_secs = 10;
+        assert_eq!(mysql_database_list_timeout(Some(&config)), Duration::from_secs(10));
+
+        config.connect_timeout_secs = 0;
+        assert_eq!(
+            mysql_database_list_timeout(Some(&config)),
+            Duration::from_secs(crate::models::connection::default_connect_timeout_secs())
+        );
+
+        config.connect_timeout_secs = 500;
+        assert_eq!(mysql_database_list_timeout(Some(&config)), Duration::from_secs(300));
+        assert_eq!(mysql_database_list_timeout(None), db::connection_timeout());
     }
 
     #[tokio::test]
@@ -2998,22 +3038,41 @@ mod tests {
         config.driver_profile = Some("gaussdb-m".to_string());
 
         assert_eq!(
-            gaussdb_m_view_object_source_sql(&config, "tenant`db", "active`users", &db::ObjectSourceKind::View)
-                .as_deref(),
-            Some("SHOW CREATE VIEW `tenant``db`.`active``users`")
+            gaussdb_m_view_object_source_sql(
+                &config,
+                "connection_db",
+                "tenant`schema",
+                "active`users",
+                &db::ObjectSourceKind::View,
+            )
+            .as_deref(),
+            Some("SHOW CREATE VIEW `tenant``schema`.`active``users`")
         );
         assert_eq!(
-            gaussdb_m_view_object_source_sql(&config, "", "active`users", &db::ObjectSourceKind::View).as_deref(),
+            gaussdb_m_view_object_source_sql(&config, "connection_db", "", "active`users", &db::ObjectSourceKind::View)
+                .as_deref(),
             Some("SHOW CREATE VIEW `active``users`")
         );
         assert_eq!(
-            gaussdb_m_view_object_source_sql(&config, "tenant_db", "refresh_users", &db::ObjectSourceKind::Function),
+            gaussdb_m_view_object_source_sql(
+                &config,
+                "connection_db",
+                "tenant_schema",
+                "refresh_users",
+                &db::ObjectSourceKind::Function,
+            ),
             None
         );
 
         config.driver_profile = Some("gaussdb".to_string());
         assert_eq!(
-            gaussdb_m_view_object_source_sql(&config, "tenant_db", "active_users", &db::ObjectSourceKind::View),
+            gaussdb_m_view_object_source_sql(
+                &config,
+                "connection_db",
+                "tenant_schema",
+                "active_users",
+                &db::ObjectSourceKind::View,
+            ),
             None
         );
     }
@@ -4523,32 +4582,34 @@ for line in sys.stdin:
     #[test]
     fn doris_family_catalog_capable_matches_doris_and_starrocks_only() {
         // Doris and StarRocks expose multi-catalog federation.
-        assert!(super::is_doris_family_catalog_capable_config(&test_connection_config(DatabaseType::Doris)));
-        assert!(super::is_doris_family_catalog_capable_config(&test_connection_config(DatabaseType::StarRocks)));
+        assert!(db::mysql_compatible::supports_external_catalogs(&test_connection_config(DatabaseType::Doris)));
+        assert!(db::mysql_compatible::supports_external_catalogs(&test_connection_config(DatabaseType::StarRocks)));
 
         // Driver profiles for Doris/SelectDB/StarRocks also qualify.
         let mut doris = test_connection_config(DatabaseType::Mysql);
         doris.driver_profile = Some("doris".to_string());
-        assert!(super::is_doris_family_catalog_capable_config(&doris));
+        assert!(db::mysql_compatible::supports_external_catalogs(&doris));
 
         let mut selectdb = test_connection_config(DatabaseType::Mysql);
         selectdb.driver_profile = Some("selectdb".to_string());
-        assert!(super::is_doris_family_catalog_capable_config(&selectdb));
+        assert!(db::mysql_compatible::supports_external_catalogs(&selectdb));
 
         let mut starrocks = test_connection_config(DatabaseType::Mysql);
         starrocks.driver_profile = Some("starrocks".to_string());
-        assert!(super::is_doris_family_catalog_capable_config(&starrocks));
+        assert!(db::mysql_compatible::supports_external_catalogs(&starrocks));
 
         // ManticoreSearch shares the MySQL code path but has no catalog concept.
-        assert!(!super::is_doris_family_catalog_capable_config(&test_connection_config(DatabaseType::ManticoreSearch)));
+        assert!(!db::mysql_compatible::supports_external_catalogs(&test_connection_config(
+            DatabaseType::ManticoreSearch
+        )));
 
         let mut manticore = test_connection_config(DatabaseType::Mysql);
         manticore.driver_profile = Some("manticoresearch".to_string());
-        assert!(!super::is_doris_family_catalog_capable_config(&manticore));
+        assert!(!db::mysql_compatible::supports_external_catalogs(&manticore));
 
         // Plain MySQL / Postgres are not catalog-capable.
-        assert!(!super::is_doris_family_catalog_capable_config(&test_connection_config(DatabaseType::Mysql)));
-        assert!(!super::is_doris_family_catalog_capable_config(&test_connection_config(DatabaseType::Postgres)));
+        assert!(!db::mysql_compatible::supports_external_catalogs(&test_connection_config(DatabaseType::Mysql)));
+        assert!(!db::mysql_compatible::supports_external_catalogs(&test_connection_config(DatabaseType::Postgres)));
     }
 }
 
@@ -4972,7 +5033,7 @@ async fn list_object_statistics_once(
     let pool = connections.get(&pool_key).ok_or("Pool not found")?;
     match pool {
         PoolKind::Mysql(p, mode) => {
-            if *mode == MysqlMode::OceanBaseOracle || db_config.as_ref().is_some_and(is_manticoresearch_config) {
+            if *mode == MysqlMode::OceanBaseOracle || db_config.as_ref().is_some_and(db::manticoresearch::is_config) {
                 Ok(vec![])
             } else {
                 db::mysql::list_object_statistics(p, database).await
@@ -5172,11 +5233,11 @@ async fn list_objects_once(
             // Note: mysql and ob_oracle take different second args (database vs schema)
             if *mode == MysqlMode::OceanBaseOracle {
                 db::ob_oracle::list_objects(p, schema).await.map(unpaged_object_list)
-            } else if db_config.as_ref().is_some_and(is_manticoresearch_config) {
+            } else if db_config.as_ref().is_some_and(db::manticoresearch::is_config) {
                 db::manticoresearch::list_objects(p, database).await.map(unpaged_object_list)
-            } else if db_config.as_ref().is_some_and(is_starrocks_config) {
-                db::mysql::list_starrocks_table_objects(p, database).await.map(unpaged_object_list)
-            } else if db_config.as_ref().is_some_and(is_doris_family_config) {
+            } else if db_config.as_ref().is_some_and(db::starrocks::is_config) {
+                db::starrocks::list_table_objects(p, database).await.map(unpaged_object_list)
+            } else if db_config.as_ref().is_some_and(db::mysql_compatible::uses_show_metadata) {
                 db::mysql::list_table_objects_show(p, database).await.map(unpaged_object_list)
             } else {
                 db::mysql::list_objects(p, database, object_types, mysql_limit, mysql_offset)
@@ -5815,11 +5876,11 @@ async fn get_columns_core_for_session_inner(
         let pool = connections.get(&pool_key).ok_or("Pool not found")?;
 
         match pool {
-            PoolKind::Mysql(p, _) if db_config.as_ref().is_some_and(is_manticoresearch_config) => {
+            PoolKind::Mysql(p, _) if db_config.as_ref().is_some_and(db::manticoresearch::is_config) => {
                 let metadata_database = mysql_show_metadata_database_for_config(db_config.as_ref(), database);
                 db::manticoresearch::get_columns(p, metadata_database, table).await.map(deduplicate_column_infos)
             }
-            PoolKind::Mysql(p, _) if db_config.as_ref().is_some_and(is_doris_family_config) => {
+            PoolKind::Mysql(p, _) if db_config.as_ref().is_some_and(db::mysql_compatible::uses_show_metadata) => {
                 let metadata_database = mysql_show_metadata_database_for_config(db_config.as_ref(), database);
                 // Doris/StarRocks previously went straight to `SHOW COLUMNS` for
                 // speed (see perf(doris) commit), but `SHOW COLUMNS` reports the
@@ -6016,14 +6077,14 @@ async fn list_indexes_core_for_session(
 
         match pool {
             PoolKind::Mysql(p, mode) => {
-                if db_config.as_ref().is_some_and(is_manticoresearch_config) {
+                if db_config.as_ref().is_some_and(db::manticoresearch::is_config) {
                     return db::manticoresearch::list_indexes(p, table).await;
                 }
                 if *mode == MysqlMode::OceanBaseOracle {
                     db::ob_oracle::list_indexes(p, schema, table).await
-                } else if db_config.as_ref().is_some_and(is_starrocks_config) {
+                } else if db_config.as_ref().is_some_and(db::starrocks::is_config) {
                     db::starrocks::list_indexes(p, mysql_table_metadata_catalog(database, schema), table).await
-                } else if db_config.as_ref().is_some_and(is_doris_config) {
+                } else if db_config.as_ref().is_some_and(db::doris::is_config) {
                     db::doris::list_indexes(p, mysql_table_metadata_catalog(database, schema), table).await
                 } else {
                     db::mysql::list_indexes(p, mysql_table_metadata_catalog(database, schema), table).await
@@ -6212,6 +6273,63 @@ pub async fn list_partitions_core(
     .await
 }
 
+/// PostgreSQL partition classification of a single table, used by the table
+/// structure editor to decide whether `CREATE INDEX CONCURRENTLY` applies.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TablePartitionStatus {
+    /// The table is a partitioned parent (`pg_class.relkind = 'p'`); PostgreSQL
+    /// rejects `CREATE INDEX CONCURRENTLY` directly on it — the supported
+    /// approach is building child indexes concurrently and attaching them.
+    pub is_partitioned_parent: bool,
+    /// The table is itself a partition of a parent (`pg_class.relispartition`).
+    pub is_partition: bool,
+}
+
+pub async fn table_partition_status_core(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    schema: &str,
+    table: &str,
+) -> Result<TablePartitionStatus, String> {
+    retry_metadata_connection(state, connection_id, Some(database), || async {
+        let pool_key = state.get_or_create_metadata_pool_for_session(connection_id, Some(database), None).await?;
+        let connections = state.connections.read().await;
+        match connections.get(&pool_key) {
+            Some(PoolKind::Postgres(pool)) => {
+                let info = db::postgres::get_table_partition_info(pool, schema, table).await?;
+                Ok(TablePartitionStatus {
+                    is_partitioned_parent: info.key.is_some() && !info.is_partition,
+                    is_partition: info.is_partition,
+                })
+            }
+            _ => Ok(TablePartitionStatus::default()),
+        }
+    })
+    .await
+}
+
+/// Same-table index names whose `pg_index.indisvalid` is `false` (left behind
+/// by a cancelled `CREATE INDEX CONCURRENTLY`). Empty for non-PostgreSQL pools.
+pub async fn list_invalid_indexes_core(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    schema: &str,
+    table: &str,
+) -> Result<Vec<String>, String> {
+    retry_metadata_connection(state, connection_id, Some(database), || async {
+        let pool_key = state.get_or_create_metadata_pool_for_session(connection_id, Some(database), None).await?;
+        let connections = state.connections.read().await;
+        match connections.get(&pool_key) {
+            Some(PoolKind::Postgres(pool)) => db::postgres::list_invalid_indexes(pool, schema, table).await,
+            _ => Ok(vec![]),
+        }
+    })
+    .await
+}
+
 pub async fn list_subpartitions_core(
     state: &AppState,
     connection_id: &str,
@@ -6385,7 +6503,18 @@ pub async fn get_table_ddl_core(
     table: &str,
     object_type: Option<db::ObjectSourceKind>,
 ) -> Result<String, String> {
-    get_table_ddl_core_with_options(state, connection_id, database, schema, table, object_type, false).await
+    get_table_ddl_core_with_options(state, connection_id, database, schema, table, object_type, false, false).await
+}
+
+pub async fn get_table_export_ddl_core(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    schema: &str,
+    table: &str,
+    object_type: Option<db::ObjectSourceKind>,
+) -> Result<String, String> {
+    get_table_ddl_core_with_options(state, connection_id, database, schema, table, object_type, false, true).await
 }
 
 pub async fn get_table_display_ddl_core(
@@ -6396,7 +6525,7 @@ pub async fn get_table_display_ddl_core(
     table: &str,
     object_type: Option<db::ObjectSourceKind>,
 ) -> Result<String, String> {
-    get_table_ddl_core_with_options(state, connection_id, database, schema, table, object_type, true).await
+    get_table_ddl_core_with_options(state, connection_id, database, schema, table, object_type, true, false).await
 }
 
 async fn get_table_ddl_core_with_options(
@@ -6407,6 +6536,7 @@ async fn get_table_ddl_core_with_options(
     table: &str,
     object_type: Option<db::ObjectSourceKind>,
     include_postgres_access: bool,
+    portable_oracle: bool,
 ) -> Result<String, String> {
     if crate::sql_dialect::parse_sqlserver_linked_schema_ref(schema).is_some() {
         return Err("DDL is not supported for SQL Server linked server tables".to_string());
@@ -6452,7 +6582,7 @@ async fn get_table_ddl_core_with_options(
     }
 
     retry_metadata_connection(state, connection_id, Some(database), || {
-        get_table_ddl_once(state, connection_id, database, schema, table, include_postgres_access)
+        get_table_ddl_once(state, connection_id, database, schema, table, include_postgres_access, portable_oracle)
     })
     .await
 }
@@ -6464,6 +6594,7 @@ async fn get_table_ddl_once(
     schema: &str,
     table: &str,
     include_postgres_access: bool,
+    portable_oracle: bool,
 ) -> Result<String, String> {
     let pool_key = state.get_or_create_metadata_pool_for_session(connection_id, Some(database), None).await?;
     let db_config = connection_config(state, connection_id).await;
@@ -6543,6 +6674,7 @@ async fn get_table_ddl_once(
                     database,
                     schema,
                     table,
+                    portable_oracle,
                     agent_metadata_timeout(db_config.as_ref()),
                 )
                 .await;
@@ -6581,6 +6713,9 @@ async fn get_table_ddl_once(
         }
         PoolKind::Postgres(p) if db_config.as_ref().is_some_and(is_cloudberry_config) => {
             cloudberry_ddl(p, schema, table).await
+        }
+        PoolKind::Postgres(p) if db_config.as_ref().is_some_and(db::opentenbase::is_config) => {
+            opentenbase_ddl(p, schema, table).await
         }
         PoolKind::Postgres(p)
             if include_postgres_access && db_config.as_ref().is_some_and(is_native_postgres_config) =>
@@ -6674,34 +6809,8 @@ fn agent_paging_likely_applied(enabled: bool, limit: Option<usize>, returned_len
     enabled && limit.is_some_and(|limit| returned_len <= limit)
 }
 
-fn is_doris_family_config(config: &ConnectionConfig) -> bool {
-    matches!(config.db_type, DatabaseType::Doris | DatabaseType::StarRocks | DatabaseType::ManticoreSearch)
-        || matches!(config.driver_profile.as_deref(), Some("doris" | "selectdb" | "starrocks" | "manticoresearch"))
-}
-
-fn is_doris_config(config: &ConnectionConfig) -> bool {
-    config.db_type == DatabaseType::Doris || matches!(config.driver_profile.as_deref(), Some("doris" | "selectdb"))
-}
-
-fn is_starrocks_config(config: &ConnectionConfig) -> bool {
-    config.db_type == DatabaseType::StarRocks || matches!(config.driver_profile.as_deref(), Some("starrocks"))
-}
-
-/// Doris-family engines that support multi-catalog federation (`SHOW CATALOGS`).
-/// Manticore Search is excluded — it shares the MySQL code path but has no
-/// catalog concept.
-pub fn is_doris_family_catalog_capable_config(config: &ConnectionConfig) -> bool {
-    matches!(config.db_type, DatabaseType::Doris | DatabaseType::StarRocks)
-        || matches!(config.driver_profile.as_deref(), Some("doris" | "selectdb" | "starrocks"))
-}
-
-fn is_manticoresearch_config(config: &ConnectionConfig) -> bool {
-    matches!(config.db_type, DatabaseType::ManticoreSearch)
-        || matches!(config.driver_profile.as_deref(), Some("manticoresearch"))
-}
-
 fn mysql_show_metadata_database_for_config<'a>(config: Option<&ConnectionConfig>, database: &'a str) -> &'a str {
-    if config.is_some_and(is_manticoresearch_config) {
+    if config.is_some_and(db::manticoresearch::is_config) {
         ""
     } else {
         database
@@ -6712,7 +6821,7 @@ fn filter_mysql_system_databases_for_config(
     databases: Vec<db::DatabaseInfo>,
     config: Option<&ConnectionConfig>,
 ) -> Vec<db::DatabaseInfo> {
-    if !config.is_some_and(is_manticoresearch_config) {
+    if !config.is_some_and(db::manticoresearch::is_config) {
         return databases;
     }
 
@@ -6783,12 +6892,13 @@ fn external_driver_uses_mysql_ddl(config: &ConnectionConfig) -> bool {
 
 fn gaussdb_m_view_object_source_sql(
     config: &ConnectionConfig,
-    database: &str,
+    _database: &str,
+    schema: &str,
     name: &str,
     kind: &db::ObjectSourceKind,
 ) -> Option<String> {
     (gaussdb_uses_m_jdbc_driver(config) && matches!(kind, db::ObjectSourceKind::View))
-        .then(|| mysql_object_source_sql(database, name, kind))
+        .then(|| mysql_object_source_sql(schema, name, kind))
 }
 
 fn mysql_external_driver_ddl_sql(database: &str, schema: &str, table: &str) -> String {
@@ -7288,7 +7398,7 @@ async fn mysql_object_source(
             // sync MVs. Fall back to the persistent definition exposed by
             // information_schema.materialized_views. The fallback returns a single
             // column (MATERIALIZED_VIEW_DEFINITION) so the column index is always 0.
-            let fallback_sql = db::mysql::mysql_materialized_view_definition_sql(database, name);
+            let fallback_sql = db::starrocks::materialized_view_definition_sql(database, name);
             read_mysql_object_source_row(&mut conn, &fallback_sql, 0).await.map_err(|fallback_err| {
                 format!(
                     "SHOW CREATE MATERIALIZED VIEW failed ({primary_err}); \
@@ -7427,7 +7537,7 @@ async fn get_object_source_once(
             let config = config.clone();
             let session = session.clone();
             drop(connections);
-            if let Some(sql) = gaussdb_m_view_object_source_sql(config.as_ref(), database, name, &object_type) {
+            if let Some(sql) = gaussdb_m_view_object_source_sql(config.as_ref(), database, schema, name, &object_type) {
                 let result: db::QueryResult = session
                     .invoke_with_timeout(
                         "executeQuery",
@@ -7673,10 +7783,11 @@ async fn oracle_agent_table_ddl(
     database: &str,
     schema: &str,
     table: &str,
+    portable: bool,
     timeout_duration: Option<Duration>,
 ) -> Result<String, String> {
     let mut client = client.lock().await;
-    let ddl = client.get_table_ddl::<String>(database, schema, table, timeout_duration).await?;
+    let ddl = client.get_table_ddl_with_options::<String>(database, schema, table, portable, timeout_duration).await?;
     match append_oracle_table_comment_ddl(&mut client, database, schema, table, &ddl, timeout_duration).await {
         Ok(ddl) => Ok(ddl),
         Err(error) => {
@@ -8477,6 +8588,49 @@ mod ddl_tests {
     }
 
     #[test]
+    fn postgres_table_ddl_renders_owned_serial_markers_without_external_defaults() {
+        for (column_name, data_type, serial_type) in [
+            ("small\"id", "smallint", "smallserial"),
+            ("regular\"id", "integer", "serial"),
+            ("large\"id", "bigint", "bigserial"),
+        ] {
+            let mut id = column(column_name, data_type);
+            id.is_nullable = false;
+            let sequence_name = format!("{column_name}_seq").replace('"', "\"\"");
+            id.column_default = Some(format!("nextval('\"tenant\"\"schema\".\"{sequence_name}\"'::regclass)"));
+            id.extra = Some(serial_type.to_string());
+
+            let ddl = render_postgres_table_ddl("tenant\"schema", "order\"items", &[id], &[], &[], None);
+
+            assert!(ddl.contains(&format!("{} {serial_type} NOT NULL", pg_ident(column_name))), "ddl: {ddl}");
+            assert!(!ddl.contains("nextval("), "ddl: {ddl}");
+            assert!(ddl.starts_with("CREATE TABLE \"tenant\"\"schema\".\"order\"\"items\""), "ddl: {ddl}");
+        }
+    }
+
+    #[test]
+    fn postgres_table_ddl_preserves_unmarked_nextval_defaults() {
+        let mut id = column("id", "bigint");
+        id.column_default = Some("nextval('shared.custom_id_source'::regclass)".to_string());
+
+        let ddl = render_postgres_table_ddl("public", "orders", &[id], &[], &[], None);
+
+        assert!(ddl.contains("\"id\" bigint DEFAULT nextval('shared.custom_id_source'::regclass)"), "ddl: {ddl}");
+    }
+
+    #[test]
+    fn postgres_table_ddl_keeps_generated_columns_distinct_from_serial_markers() {
+        let mut generated = column("total", "numeric");
+        generated.column_default = Some("should_not_be_rendered".to_string());
+        generated.extra = Some("generated always as (price * quantity) stored".to_string());
+
+        let ddl = render_postgres_table_ddl("public", "orders", &[generated], &[], &[], None);
+
+        assert!(ddl.contains("\"total\" numeric generated always as (price * quantity) stored"), "ddl: {ddl}");
+        assert!(!ddl.contains("should_not_be_rendered"), "ddl: {ddl}");
+    }
+
+    #[test]
     fn postgres_table_ddl_includes_partition_key_for_parent_only() {
         for partition_key in [
             "RANGE (created_at)",
@@ -8533,6 +8687,7 @@ mod ddl_tests {
             index_type: Some("btree".to_string()),
             included_columns: None,
             comment: None,
+            key_is_expression: Vec::new(),
         }];
         let partition_info = db::postgres::PostgresTablePartitionInfo {
             is_partition: true,
@@ -8579,6 +8734,7 @@ mod ddl_tests {
             index_type: Some("btree".to_string()),
             included_columns: None,
             comment: None,
+            key_is_expression: Vec::new(),
         }];
         let partition_info = db::postgres::PostgresTablePartitionInfo {
             is_partition: true,
@@ -9442,6 +9598,34 @@ pub async fn cloudberry_ddl(pool: &deadpool_postgres::Pool, schema: &str, table:
     }
 }
 
+pub async fn opentenbase_ddl(pool: &deadpool_postgres::Pool, schema: &str, table: &str) -> Result<String, String> {
+    let ddl = pg_ddl(pool, schema, table).await?;
+    match db::opentenbase::table_distribution(pool, schema, table).await {
+        Ok(Some(distribution)) => match db::opentenbase::append_distribution_clause(&ddl, &distribution) {
+            Ok(ddl) => Ok(ddl),
+            Err(error) => {
+                log::warn!(
+                    "[schema][opentenbase:table-ddl-distribution-render-fallback] schema={} table={} error={}",
+                    schema,
+                    table,
+                    error
+                );
+                Ok(ddl)
+            }
+        },
+        Ok(None) => Ok(ddl),
+        Err(error) => {
+            log::warn!(
+                "[schema][opentenbase:table-ddl-distribution-query-fallback] schema={} table={} error={}",
+                schema,
+                table,
+                error
+            );
+            Ok(ddl)
+        }
+    }
+}
+
 pub fn render_postgres_table_ddl(
     schema: &str,
     table: &str,
@@ -9490,7 +9674,13 @@ fn render_postgres_table_ddl_with_partition_info(
         columns
             .iter()
             .map(|c| {
-                let mut line = format!("  {} {}", pg_ident(&c.name), c.data_type);
+                let serial_type = match c.extra.as_deref().map(str::trim) {
+                    Some("smallserial") => Some("smallserial"),
+                    Some("serial") => Some("serial"),
+                    Some("bigserial") => Some("bigserial"),
+                    _ => None,
+                };
+                let mut line = format!("  {} {}", pg_ident(&c.name), serial_type.unwrap_or(&c.data_type));
                 let generated_clause = c
                     .extra
                     .as_deref()
@@ -9502,7 +9692,7 @@ fn render_postgres_table_ddl_with_partition_info(
                 if !c.is_nullable {
                     line.push_str(" NOT NULL");
                 }
-                if generated_clause.is_none() {
+                if generated_clause.is_none() && serial_type.is_none() {
                     if let Some(ref def) = c.column_default {
                         line.push_str(&format!(" DEFAULT {def}"));
                     }

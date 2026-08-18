@@ -3108,14 +3108,22 @@ fn quote_id(name: &str, db_type: DatabaseType) -> String {
     profile_for(db_type).quote_ident(name)
 }
 
-fn column_def(col: &ColumnInfo, db_type: DatabaseType) -> String {
+fn column_def(col: &ColumnInfo, db_type: DatabaseType, source_dialect: Option<DialectKind>) -> String {
     let profile = profile_for(db_type);
     let mut definition = format!("{} {}", quote_id(&col.name, db_type), col.data_type);
     if !col.is_nullable {
         definition.push_str(" NOT NULL");
     }
     if let Some(default) = &col.column_default {
-        definition.push_str(&format!(" DEFAULT {default}"));
+        definition.push_str(&format!(
+            " DEFAULT {}",
+            default_literal(
+                default,
+                &col.data_type,
+                effective_source_dialect(source_dialect, db_type),
+                col.extra.as_deref()
+            )
+        ));
     }
     if profile.inline_column_comment {
         if let Some(comment) = &col.comment {
@@ -3154,23 +3162,56 @@ fn mysql_index_column_sql(column: &str) -> String {
     }
 }
 
+fn is_postgres_family_ddl(db_type: DatabaseType) -> bool {
+    matches!(
+        db_type,
+        DatabaseType::Postgres
+            | DatabaseType::Redshift
+            | DatabaseType::Gaussdb
+            | DatabaseType::Kingbase
+            | DatabaseType::Highgo
+            | DatabaseType::Vastbase
+            | DatabaseType::OpenGauss
+            | DatabaseType::Kwdb
+            | DatabaseType::Firebird
+            | DatabaseType::Vertica
+            | DatabaseType::Exasol
+            | DatabaseType::Uxdb
+    )
+}
+
+fn postgres_index_column_sql(column: &str, is_expression: Option<bool>, db_type: DatabaseType) -> String {
+    // Expression/functional index key parts (e.g. from pg_get_indexdef) arrive as raw
+    // expression text, not a plain column name; quoting the whole expression as an
+    // identifier turns it into a literal column reference that doesn't exist (#6295).
+    let trimmed = column.trim();
+    let is_expression = is_expression.unwrap_or(false);
+    if is_expression {
+        trimmed.to_string()
+    } else {
+        quote_id(column, db_type)
+    }
+}
+
 fn create_index_sql(table_name: &str, index: &IndexInfo, db_type: DatabaseType, schema: Option<&str>) -> String {
     use crate::sql_dialect::ddl_profile::IndexTypePlacement;
     let profile = profile_for(db_type);
     let table = qualified_name(table_name, db_type, schema);
-    let columns =
-        index
-            .columns
-            .iter()
-            .map(|column| {
-                if db_type == DatabaseType::Mysql {
-                    mysql_index_column_sql(column)
-                } else {
-                    quote_id(column, db_type)
-                }
-            })
-            .collect::<Vec<_>>()
-            .join(", ");
+    let columns = index
+        .columns
+        .iter()
+        .enumerate()
+        .map(|(i, column)| {
+            if db_type == DatabaseType::Mysql {
+                mysql_index_column_sql(column)
+            } else if is_postgres_family_ddl(db_type) {
+                postgres_index_column_sql(column, index.key_is_expression.get(i).copied(), db_type)
+            } else {
+                quote_id(column, db_type)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
     let unique = if index.is_unique { "UNIQUE " } else { "" };
     let index_type = index.index_type.as_deref().unwrap_or_default();
     let (type_prefix, using_before_on, using_suffix) = if index_type.is_empty() {
@@ -3245,6 +3286,120 @@ fn drop_object_sql(diff: &TableDiff, db_type: DatabaseType, schema: Option<&str>
 
 fn comment_literal(comment: &str) -> String {
     format!("'{}'", comment.replace('\'', "''"))
+}
+
+/// Bare temporal keywords that are defaults in their own right and must not be quoted.
+const TEMPORAL_DEFAULT_KEYWORDS: [&str; 8] =
+    ["current_timestamp", "current_date", "current_time", "now", "localtime", "localtimestamp", "getdate", "sysdate"];
+
+/// Prefixes that introduce an already-quoted literal: SQL Server / Sybase `N'x'`,
+/// MySQL `b'1'` and `x'1f'`, Postgres `e'\n'`.
+const QUOTED_LITERAL_PREFIXES: [&str; 4] = ["n'", "b'", "x'", "e'"];
+
+/// The dialect the column metadata came from.
+///
+/// The caller does not always declare one. When it does not, the comparison is
+/// same-dialect, so the target database is also the source.
+fn effective_source_dialect(source_dialect: Option<DialectKind>, db_type: DatabaseType) -> DialectKind {
+    source_dialect.unwrap_or_else(|| DialectKind::from_database_type(db_type))
+}
+
+/// Render a column default as a SQL literal.
+///
+/// Drivers hand `column_default` back verbatim and they do not agree on its
+/// shape, so the rule has to be bound to the dialect the value came from rather
+/// than guessed from the value itself. The same bare token means different
+/// things in different databases: `CURRENT_USER` is an expression on Postgres
+/// and Oracle, while on MySQL a bare `CURRENT_USER` on a text column is the
+/// literal string.
+///
+/// Only MySQL-family metadata strips the quotes from a string default, so it is
+/// the only source that needs any repair here. Everywhere else the value already
+/// arrives quoted, cast or wrapped, and is passed through untouched.
+///
+/// `table_structure_sql::util::format_default_for_sql` and
+/// `transfer::format_mysql_default_literal` do the same job on their own paths;
+/// both are private to their modules.
+fn default_literal(default: &str, data_type: &str, source: DialectKind, extra: Option<&str>) -> String {
+    let normalized = default.trim();
+
+    // Every dialect except MySQL returns a string default already quoted, cast
+    // or wrapped, so a bare token there is an expression and rewriting it would
+    // change its meaning: Postgres `text DEFAULT CURRENT_USER`, Oracle
+    // `varchar2 DEFAULT USER`, SQL Server `('x')`.
+    if source != DialectKind::Mysql {
+        return normalized.to_string();
+    }
+
+    // MySQL 8.0.13 and later flag an expression default in `EXTRA`. That marker
+    // is authoritative, so consult it before looking at the value at all: a
+    // default is a literal unless the server says it was generated.
+    if extra.is_some_and(|value| value.to_ascii_uppercase().contains("DEFAULT_GENERATED")) {
+        return normalized.to_string();
+    }
+
+    // MySQL writes an expression default wrapped in parentheses, `DEFAULT
+    // (uuid())`, and reports it that way. The wrapping is the syntax, so it is
+    // a reliable marker even when `EXTRA` is not populated. Note this asks
+    // whether the value *is* parenthesised, not whether it merely contains a
+    // parenthesis: the string default `a(b)` is not wrapped and is still
+    // quoted.
+    if normalized.starts_with('(') && normalized.ends_with(')') {
+        return normalized.to_string();
+    }
+
+    // Already a literal: `'x'` or a prefixed form like `x'1f'`.
+    let lowered = normalized.to_ascii_lowercase();
+    if normalized.starts_with('\'') || QUOTED_LITERAL_PREFIXES.iter().any(|prefix| lowered.starts_with(prefix)) {
+        return normalized.to_string();
+    }
+
+    let base_type = data_type.split('(').next().unwrap_or(data_type).trim().to_ascii_lowercase();
+    let takes_text_literal =
+        ["char", "text", "string", "clob", "enum", "set"].iter().any(|kind| base_type.contains(kind));
+    let takes_binary_literal = ["binary", "blob", "bytea"].iter().any(|kind| base_type.contains(kind));
+    let takes_temporal_literal = base_type.contains("date") || base_type.contains("time");
+
+    // Before 8.0.13 there is no `EXTRA` marker and a temporal column was the
+    // only place an expression default could appear.
+    if takes_temporal_literal && is_temporal_keyword_default(normalized) {
+        return normalized.to_string();
+    }
+    // A binary default is commonly reported as a hex literal, which is already
+    // valid unquoted; a bare string on the same column still needs quoting.
+    if takes_binary_literal && is_hex_literal(normalized) {
+        return normalized.to_string();
+    }
+    if takes_text_literal || takes_binary_literal || takes_temporal_literal {
+        // Deliberately no parenthesis check. MySQL reports the string default
+        // `'a(b)'` as the bare value `a(b)`, and treating a parenthesis as proof
+        // of a function call is what produced invalid `DEFAULT a(b)`.
+        return format!("'{}'", default.replace('\'', "''"));
+    }
+    normalized.to_string()
+}
+
+/// A bare temporal default, with or without a precision argument, so
+/// `CURRENT_TIMESTAMP(6)` and `LOCALTIME(3)` are recognised alongside the bare
+/// keywords. `transfer::is_mysql_function_default` already accepts the
+/// parenthesised forms and this mirrors it.
+///
+/// Deliberately keyed on the known keywords rather than on the presence of a
+/// parenthesis, so a string default such as `a(b)` is still quoted.
+fn is_temporal_keyword_default(value: &str) -> bool {
+    let upper = value.to_ascii_uppercase();
+    TEMPORAL_DEFAULT_KEYWORDS.iter().any(|keyword| {
+        let keyword = keyword.to_ascii_uppercase();
+        upper == keyword || upper.strip_prefix(&keyword).is_some_and(|rest| rest.starts_with('('))
+    })
+}
+
+/// `0x61`, the shape MySQL reports a binary default in.
+fn is_hex_literal(value: &str) -> bool {
+    let Some(digits) = value.strip_prefix("0x").or_else(|| value.strip_prefix("0X")) else {
+        return false;
+    };
+    !digits.is_empty() && digits.chars().all(|c| c.is_ascii_hexdigit())
 }
 
 fn column_comment_sql(
@@ -3356,7 +3511,15 @@ fn generate_create_table_sql(
                 }
                 if !skip_default {
                     if let Some(default) = &col.column_default {
-                        def.push_str(&format!(" DEFAULT {default}"));
+                        def.push_str(&format!(
+                            " DEFAULT {}",
+                            default_literal(
+                                default,
+                                &mapped_type,
+                                effective_source_dialect(source_dialect, db_type),
+                                col.extra.as_deref()
+                            )
+                        ));
                     }
                 }
                 if profile.inline_column_comment {
@@ -3383,7 +3546,15 @@ fn generate_create_table_sql(
                 }
                 if !skip_default {
                     if let Some(default) = &col.column_default {
-                        def.push_str(&format!(" DEFAULT {default}"));
+                        def.push_str(&format!(
+                            " DEFAULT {}",
+                            default_literal(
+                                default,
+                                &mapped_type,
+                                effective_source_dialect(source_dialect, db_type),
+                                col.extra.as_deref()
+                            )
+                        ));
                     }
                 }
                 if profile.inline_column_comment {
@@ -3860,7 +4031,7 @@ fn generate_schema_sync_sql_inner(
                             };
                             parts.push(format!(
                                 "  ADD COLUMN {}{}",
-                                column_def(&convert_col(source), db_type),
+                                column_def(&convert_col(source), db_type, source_dialect),
                                 position
                             ));
                         }
@@ -3873,7 +4044,10 @@ fn generate_schema_sync_sql_inner(
                             let mapped = convert_col(source);
                             if profile.alter_uses_modify_column {
                                 if column.changes.iter().any(|change| !change.starts_with("order:")) {
-                                    parts.push(format!("  MODIFY COLUMN {}", column_def(&mapped, db_type)));
+                                    parts.push(format!(
+                                        "  MODIFY COLUMN {}",
+                                        column_def(&mapped, db_type, source_dialect)
+                                    ));
                                 }
                             } else {
                                 let name = quote_id(&column.name, db_type);
@@ -3889,7 +4063,15 @@ fn generate_schema_sync_sql_inner(
                                 }
                                 if column.changes.iter().any(|change| change.starts_with("default:")) {
                                     parts.push(if let Some(default) = &source.column_default {
-                                        format!("  ALTER COLUMN {name} SET DEFAULT {default}")
+                                        format!(
+                                            "  ALTER COLUMN {name} SET DEFAULT {}",
+                                            default_literal(
+                                                default,
+                                                &mapped.data_type,
+                                                effective_source_dialect(source_dialect, db_type),
+                                                source.extra.as_deref()
+                                            )
+                                        )
                                     } else {
                                         format!("  ALTER COLUMN {name} DROP DEFAULT")
                                     });
@@ -3907,7 +4089,7 @@ fn generate_schema_sync_sql_inner(
                                     parts.push(format!(
                                         "  CHANGE COLUMN {} {}",
                                         old_name,
-                                        column_def(&mapped, db_type)
+                                        column_def(&mapped, db_type, source_dialect)
                                     ));
                                 }
                                 RenameColumnSyntax::RenameColumn => {
@@ -4203,6 +4385,7 @@ mod tests {
             index_type: overrides.index_type,
             included_columns: overrides.included_columns,
             comment: overrides.comment,
+            key_is_expression: overrides.key_is_expression,
         }
     }
 
@@ -4222,6 +4405,7 @@ mod tests {
         ColumnInfo {
             name: name.to_string(),
             data_type: data_type.to_string(),
+            resolved_schema: None,
             is_nullable: false,
             column_default: None,
             is_primary_key: false,
@@ -5090,6 +5274,7 @@ mod tests {
                 index_type: None,
                 included_columns: None,
                 comment: None,
+                key_is_expression: Vec::new(),
             })],
             &[index(IndexInfo {
                 name: "idx_orders_status".to_string(),
@@ -5100,6 +5285,7 @@ mod tests {
                 index_type: None,
                 included_columns: None,
                 comment: None,
+                key_is_expression: Vec::new(),
             })],
         );
 
@@ -5120,6 +5306,7 @@ mod tests {
             index_type: None,
             included_columns: None,
             comment: None,
+            key_is_expression: Vec::new(),
         });
         let target_index = index(IndexInfo {
             name: "test_UNIQUE".to_string(),
@@ -5130,6 +5317,7 @@ mod tests {
             index_type: None,
             included_columns: None,
             comment: None,
+            key_is_expression: Vec::new(),
         });
 
         let diffs = diff_indexes(std::slice::from_ref(&source_index), &[target_index]);
@@ -5168,6 +5356,261 @@ mod tests {
             "CREATE UNIQUE INDEX `test_UNIQUE` ON `dbx_issue_4114`.`test` (`attr`, `attr2`, {functional_key_part});"
         )));
         assert!(!sql.contains("`((case"));
+    }
+
+    #[test]
+    fn preserves_bare_expression_in_postgres_family_unique_index_ddl() {
+        // Regression for #6295: highgo/postgres-family expression index key parts (e.g. from
+        // pg_get_indexdef) arrived as raw expression text in IndexInfo.columns; quoting the
+        // whole expression as an identifier turned it into a literal (and nonexistent) column.
+        let expression_key_part = "COALESCE(height, '-1'::integer::double precision)";
+        let new_index = index(IndexInfo {
+            name: "uq_tankong_sta_type_time".to_string(),
+            columns: vec![
+                "sta_id".to_string(),
+                "data_type".to_string(),
+                "data_time".to_string(),
+                expression_key_part.to_string(),
+            ],
+            is_unique: true,
+            is_primary: false,
+            filter: None,
+            index_type: None,
+            included_columns: None,
+            comment: None,
+            key_is_expression: vec![false, false, false, true],
+        });
+
+        let sql = generate_schema_sync_sql(
+            &[TableDiff {
+                diff_type: "modified".to_string(),
+                object_type: Some("table".to_string()),
+                name: "tankong_data".to_string(),
+                columns: None,
+                indexes: Some(vec![IndexDiff {
+                    diff_type: "added".to_string(),
+                    name: new_index.name.clone(),
+                    source: Some(new_index),
+                    target: None,
+                    changes: vec![],
+                }]),
+                foreign_keys: None,
+                triggers: None,
+                ddl: None,
+                target_ddl: None,
+                source_table_comment: None,
+                target_table_comment: None,
+                sync_sql: None,
+            }],
+            &[],
+            &[],
+            &[],
+            &[],
+            DatabaseType::Highgo,
+            Some("public"),
+            false,
+            None,
+            &[],
+        );
+
+        assert!(sql.contains(&format!(
+            "CREATE UNIQUE INDEX \"uq_tankong_sta_type_time\" ON \"public\".\"tankong_data\" (\"sta_id\", \"data_type\", \"data_time\", {expression_key_part})"
+        )));
+        assert!(!sql.contains(&format!("\"{expression_key_part}\"")));
+    }
+
+    #[test]
+    fn quotes_real_columns_whose_names_contain_expression_like_characters() {
+        // PR #6312 review: a quoted column identifier can legitimately contain whitespace,
+        // `(`, or `::` (e.g. PostgreSQL metadata returning the ordinary column name
+        // `order item` through a.attname). The old character-based heuristic mistook such
+        // columns for expressions and left them bare, generating an invalid
+        // `CREATE INDEX ... (order item)` instead of `CREATE INDEX ... ("order item")`.
+        // With real per-key provenance (`key_is_expression`), only genuine expression key
+        // parts from pg_get_indexdef are left unquoted.
+        let expression_key_part = "COALESCE(height, '-1'::integer::double precision)";
+        let new_index = index(IndexInfo {
+            name: "uq_weird_columns".to_string(),
+            columns: vec![
+                "order item".to_string(),
+                "a(b)".to_string(),
+                "a::b".to_string(),
+                expression_key_part.to_string(),
+            ],
+            key_is_expression: vec![false, false, false, true],
+            is_unique: true,
+            is_primary: false,
+            filter: None,
+            index_type: None,
+            included_columns: None,
+            comment: None,
+        });
+
+        let sql = generate_schema_sync_sql(
+            &[TableDiff {
+                diff_type: "modified".to_string(),
+                object_type: Some("table".to_string()),
+                name: "tankong_data".to_string(),
+                columns: None,
+                indexes: Some(vec![IndexDiff {
+                    diff_type: "added".to_string(),
+                    name: new_index.name.clone(),
+                    source: Some(new_index),
+                    target: None,
+                    changes: vec![],
+                }]),
+                foreign_keys: None,
+                triggers: None,
+                ddl: None,
+                target_ddl: None,
+                source_table_comment: None,
+                target_table_comment: None,
+                sync_sql: None,
+            }],
+            &[],
+            &[],
+            &[],
+            &[],
+            DatabaseType::Highgo,
+            Some("public"),
+            false,
+            None,
+            &[],
+        );
+
+        assert!(sql.contains(&format!(
+            "CREATE UNIQUE INDEX \"uq_weird_columns\" ON \"public\".\"tankong_data\" (\"order item\", \"a(b)\", \"a::b\", {expression_key_part})"
+        )));
+        assert!(!sql.contains(&format!("\"{expression_key_part}\"")));
+
+        // Real PostgreSQL-family validation: parse the generated DDL with the PostgreSQL
+        // dialect so this also proves the statement is syntactically valid, not just that the
+        // expected substring is present.
+        use sqlparser::dialect::PostgreSqlDialect;
+        use sqlparser::parser::Parser;
+        let create_index_sql = sql
+            .lines()
+            .find(|line| line.starts_with("CREATE UNIQUE INDEX \"uq_weird_columns\""))
+            .expect("generated DDL should include the CREATE INDEX statement");
+        let statements = Parser::parse_sql(&PostgreSqlDialect {}, create_index_sql)
+            .unwrap_or_else(|error| panic!("generated DDL must be valid PostgreSQL: {error}\nSQL: {create_index_sql}"));
+        assert_eq!(statements.len(), 1);
+    }
+
+    #[test]
+    fn quotes_expression_like_column_names_without_agent_provenance() {
+        for db_type in [DatabaseType::Kingbase, DatabaseType::Vastbase] {
+            let new_index = index(IndexInfo {
+                name: "idx_weird_columns".to_string(),
+                columns: vec!["order item".to_string(), "a(b)".to_string(), "a::b".to_string()],
+                key_is_expression: Vec::new(),
+                is_unique: false,
+                is_primary: false,
+                filter: None,
+                index_type: None,
+                included_columns: None,
+                comment: None,
+            });
+
+            let sql = generate_schema_sync_sql(
+                &[TableDiff {
+                    diff_type: "modified".to_string(),
+                    object_type: Some("table".to_string()),
+                    name: "tankong_data".to_string(),
+                    columns: None,
+                    indexes: Some(vec![IndexDiff {
+                        diff_type: "added".to_string(),
+                        name: new_index.name.clone(),
+                        source: Some(new_index),
+                        target: None,
+                        changes: vec![],
+                    }]),
+                    foreign_keys: None,
+                    triggers: None,
+                    ddl: None,
+                    target_ddl: None,
+                    source_table_comment: None,
+                    target_table_comment: None,
+                    sync_sql: None,
+                }],
+                &[],
+                &[],
+                &[],
+                &[],
+                db_type,
+                Some("public"),
+                false,
+                None,
+                &[],
+            );
+
+            assert!(sql.contains("(\"order item\", \"a(b)\", \"a::b\")"), "{db_type:?}: {sql}");
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DBX_TEST_POSTGRES_URL pointing at a writable PostgreSQL-family database"]
+    async fn real_postgres_round_trip_quotes_columns_and_leaves_expressions_bare() {
+        // PR #6312 review: exercise the full path end-to-end against a real PostgreSQL server
+        // instead of only asserting on generated text. Introspects a table whose unique index
+        // mixes a real column with an expression-hostile name ("order item", i.e. exactly the
+        // a.attname case the reviewer called out) and a genuine pg_get_indexdef expression key
+        // part, generates DDL with the same `create_index_sql` schema-diff sync uses, and
+        // executes that DDL back against the database to prove it's actually valid — not just
+        // plausible-looking text.
+        let url = std::env::var("DBX_TEST_POSTGRES_URL").expect("DBX_TEST_POSTGRES_URL");
+        let pool =
+            crate::db::postgres::connect(&url, std::time::Duration::from_secs(5)).await.expect("connect postgres");
+        let schema = format!("dbx_key_expr_{}", uuid::Uuid::new_v4().simple());
+        crate::db::postgres::execute_query(&pool, &format!("CREATE SCHEMA {schema}")).await.expect("create schema");
+
+        let exercise = async {
+            crate::db::postgres::execute_query(
+                &pool,
+                &format!(
+                    "CREATE TABLE {schema}.tankong_data (\
+                     \"order item\" integer, data_type text, data_time timestamp, height double precision)"
+                ),
+            )
+            .await?;
+            crate::db::postgres::execute_query(
+                &pool,
+                &format!(
+                    "CREATE UNIQUE INDEX uq_tankong_sta_type_time ON {schema}.tankong_data \
+                     (\"order item\", data_type, data_time, \
+                     (COALESCE(height, '-1'::integer::double precision)))"
+                ),
+            )
+            .await?;
+
+            let indexes = crate::db::postgres::list_indexes(&pool, &schema, "tankong_data").await?;
+            let index = indexes
+                .into_iter()
+                .find(|index| index.name == "uq_tankong_sta_type_time")
+                .ok_or_else(|| "introspection should return the created index".to_string())?;
+
+            // Regenerate the index DDL through the exact same production function schema-diff
+            // sync calls, then execute it back against the real database to prove it's valid.
+            let ddl = create_index_sql("tankong_data", &index, DatabaseType::Highgo, Some(&schema));
+            crate::db::postgres::execute_query(&pool, &format!("DROP INDEX {schema}.uq_tankong_sta_type_time")).await?;
+            crate::db::postgres::execute_query(&pool, &ddl).await?;
+
+            Ok::<_, String>((index, ddl))
+        }
+        .await;
+
+        let cleanup = crate::db::postgres::execute_query(&pool, &format!("DROP SCHEMA {schema} CASCADE")).await;
+        cleanup.expect("drop schema");
+        let (index, recreate_ddl) = exercise.expect("exercise real postgres round trip");
+
+        assert_eq!(
+            index.columns,
+            vec!["order item", "data_type", "data_time", "COALESCE(height, '-1'::integer::double precision)"]
+        );
+        assert_eq!(index.key_is_expression, vec![false, false, false, true]);
+        assert!(recreate_ddl.contains("\"order item\""));
+        assert!(recreate_ddl.contains("COALESCE(height, '-1'::integer::double precision)"));
+        assert!(!recreate_ddl.contains("\"COALESCE"));
     }
 
     #[test]
@@ -5245,6 +5688,7 @@ mod tests {
                     index_type: None,
                     included_columns: None,
                     comment: None,
+                    key_is_expression: Vec::new(),
                 })),
                 target: None,
                 changes: Vec::new(),
@@ -5520,6 +5964,7 @@ mod tests {
                 source: Some(ColumnInfo {
                     name: "status".to_string(),
                     data_type: "text".to_string(),
+                    resolved_schema: None,
                     is_nullable: true,
                     column_default: None,
                     is_primary_key: false,
@@ -5549,6 +5994,7 @@ mod tests {
                     index_type: None,
                     included_columns: None,
                     comment: None,
+                    key_is_expression: Vec::new(),
                 })),
                 target: None,
                 changes: Vec::new(),
@@ -6152,6 +6598,7 @@ mod tests {
                     index_type: Some("btree".to_string()),
                     included_columns: Some(vec!["User ID".to_string()]),
                     comment: None,
+                    key_is_expression: Vec::new(),
                 })],
                 foreign_keys: vec![foreign_key(ForeignKeyInfo {
                     name: "Order User FK".to_string(),
@@ -6214,6 +6661,7 @@ mod tests {
                     index_type: Some("BTREE".to_string()),
                     included_columns: None,
                     comment: Some("status lookup".to_string()),
+                    key_is_expression: Vec::new(),
                 })],
                 foreign_keys: vec![foreign_key(ForeignKeyInfo {
                     name: "user-fk".to_string(),
@@ -6266,6 +6714,7 @@ mod tests {
                     index_type: None,
                     included_columns: None,
                     comment: None,
+                    key_is_expression: Vec::new(),
                 })],
                 foreign_keys: vec![foreign_key(ForeignKeyInfo {
                     name: "parent item fk".to_string(),
@@ -6771,6 +7220,122 @@ mod tests {
         assert!(sql.contains("DROP DEFAULT"), "default drop: {sql}");
     }
 
+    #[test]
+    fn added_varchar_column_quotes_a_bare_default_mysql() {
+        // MySQL's information_schema returns a string default unquoted, so the
+        // generated DDL read `DEFAULT THE_VALUE` and the deploy failed.
+        let source =
+            vec![ColumnInfo { column_default: Some("THE_VALUE".into()), ..column("menu_type", "varchar(64)", None) }];
+        let target: Vec<ColumnInfo> = vec![];
+        let diffs = diff_columns_with_options(&source, &target, false, false, false, 0.5);
+        let sql = gen_sql(wrap_table_diff("t", diffs), DatabaseType::Mysql, None);
+        assert!(sql.contains("DEFAULT 'THE_VALUE'"), "bare default must be quoted: {sql}");
+    }
+
+    #[test]
+    fn default_literal_only_quotes_bare_values_that_need_it() {
+        use DialectKind::Mysql;
+
+        // MySQL strips the quotes from a string default, which is the whole
+        // reason this function exists.
+        assert_eq!(default_literal("THE_VALUE", "varchar(64)", Mysql, None), "'THE_VALUE'");
+        assert_eq!(default_literal("it's", "text", Mysql, None), "'it''s'");
+        assert_eq!(default_literal("2024-01-01", "date", Mysql, None), "'2024-01-01'");
+        // `DEFAULT ''` previously emitted a bare `DEFAULT `.
+        assert_eq!(default_literal("", "varchar(20)", Mysql, None), "''");
+        // Untouched on MySQL: already quoted and numeric values.
+        assert_eq!(default_literal("'guest'", "varchar(50)", Mysql, None), "'guest'");
+        assert_eq!(default_literal("0", "bigint", Mysql, None), "0");
+        assert_eq!(default_literal("NULL", "varchar(10)", Mysql, None), "'NULL'");
+        assert_eq!(default_literal("null", "text", Mysql, None), "'null'");
+        assert_eq!(default_literal("  spaced  ", "varchar(32)", Mysql, None), "'  spaced  '");
+    }
+
+    #[test]
+    fn default_literal_uses_mysql_extra_to_tell_an_expression_from_a_string() {
+        use DialectKind::Mysql;
+
+        // 8.0.13+ marks an expression default in EXTRA, and that marker decides
+        // it. Without the marker the value is a string, parentheses and all,
+        // so a column declared `DEFAULT 'a(b)'` stops emitting invalid
+        // `DEFAULT a(b)`.
+        assert_eq!(default_literal("a(b)", "varchar(32)", Mysql, None), "'a(b)'");
+        assert_eq!(default_literal("uuid()", "varchar(36)", Mysql, Some("DEFAULT_GENERATED")), "uuid()");
+        // MySQL wraps an expression default in parentheses and reports it that
+        // way, so the wrapping identifies it even when EXTRA is missing. That is
+        // a different question from whether the value contains a parenthesis,
+        // which is what `a(b)` above turns on.
+        assert_eq!(default_literal("(uuid())", "varchar(36)", Mysql, None), "(uuid())");
+        assert_eq!(default_literal("(now())", "datetime", Mysql, None), "(now())");
+        assert_eq!(
+            default_literal(
+                "CURRENT_TIMESTAMP",
+                "datetime",
+                Mysql,
+                Some("DEFAULT_GENERATED on update CURRENT_TIMESTAMP")
+            ),
+            "CURRENT_TIMESTAMP"
+        );
+        // Before 8.0.13 there is no marker, and a temporal column was the only
+        // place an expression default could appear.
+        assert_eq!(default_literal("CURRENT_TIMESTAMP", "datetime", Mysql, None), "CURRENT_TIMESTAMP");
+    }
+
+    #[test]
+    fn default_literal_keeps_temporal_defaults_that_carry_a_precision() {
+        use DialectKind::Mysql;
+
+        // `TIMESTAMP(6) DEFAULT CURRENT_TIMESTAMP(6)` is valid MySQL. On a server
+        // older than 8.0.13 it arrives with no EXTRA marker, so the fallback has
+        // to accept the precision argument or the column is deployed with a
+        // quoted string where an expression belongs.
+        assert_eq!(default_literal("CURRENT_TIMESTAMP(6)", "timestamp(6)", Mysql, None), "CURRENT_TIMESTAMP(6)");
+        assert_eq!(default_literal("NOW()", "datetime", Mysql, None), "NOW()");
+        assert_eq!(default_literal("LOCALTIME(3)", "datetime(3)", Mysql, None), "LOCALTIME(3)");
+        assert_eq!(default_literal("LOCALTIMESTAMP(3)", "timestamp(3)", Mysql, None), "LOCALTIMESTAMP(3)");
+        assert_eq!(default_literal("current_timestamp(6)", "timestamp(6)", Mysql, None), "current_timestamp(6)");
+
+        // The precision form must not become a general "contains a parenthesis"
+        // rule again: a string default keeps its quotes.
+        assert_eq!(default_literal("a(b)", "varchar(32)", Mysql, None), "'a(b)'");
+        assert_eq!(default_literal("CURRENT_TIMESTAMPX(6)", "varchar(64)", Mysql, None), "'CURRENT_TIMESTAMPX(6)'");
+    }
+
+    #[test]
+    fn default_literal_leaves_non_mysql_expressions_alone() {
+        use DialectKind::{Oracle, Postgres, SqlServer};
+
+        // These dialects return a string default already quoted, so a bare token
+        // is an expression. Quoting it would silently turn a per-row value into
+        // a fixed string.
+        assert_eq!(default_literal("CURRENT_USER", "text", Postgres, None), "CURRENT_USER");
+        assert_eq!(default_literal("USER", "varchar2(30)", Oracle, None), "USER");
+        assert_eq!(default_literal("'new'::text", "text", Postgres, None), "'new'::text");
+        assert_eq!(default_literal("nextval('s'::regclass)", "integer", Postgres, None), "nextval('s'::regclass)");
+        assert_eq!(default_literal("N'guest'", "nvarchar(50)", SqlServer, None), "N'guest'");
+        assert_eq!(default_literal("('x')", "varchar(10)", SqlServer, None), "('x')");
+        assert_eq!(default_literal("NULL", "text", Postgres, None), "NULL");
+        // The same bare token on MySQL is a string, which is why the rule has to
+        // follow the source dialect rather than the value.
+        assert_eq!(default_literal("CURRENT_USER", "text", DialectKind::Mysql, None), "'CURRENT_USER'");
+    }
+
+    #[test]
+    fn default_literal_handles_set_and_binary_boundaries() {
+        use DialectKind::Mysql;
+
+        // A SET default is a bare comma-separated string.
+        assert_eq!(default_literal("a,b", "set('a','b')", Mysql, None), "'a,b'");
+        assert_eq!(default_literal("", "set('a','b')", Mysql, None), "''");
+        // Binary defaults arrive as a hex literal, which is already valid
+        // unquoted; a bare string on the same column still needs quoting.
+        assert_eq!(default_literal("0x61", "varbinary(16)", Mysql, None), "0x61");
+        assert_eq!(default_literal("abc", "binary(3)", Mysql, None), "'abc'");
+        assert_eq!(default_literal("x'1f'", "blob", Mysql, None), "x'1f'");
+        // Not hex, so not a hex literal.
+        assert_eq!(default_literal("0xzz", "varbinary(8)", Mysql, None), "'0xzz'");
+    }
+
     // -- 35. Column order changes --
     #[test]
     fn column_order_change_only_no_type_change() {
@@ -6914,6 +7479,7 @@ mod tests {
                     index_type: None,
                     included_columns: None,
                     comment: None,
+                    key_is_expression: Vec::new(),
                 })),
                 target: None,
                 changes: vec![],
@@ -6954,6 +7520,7 @@ mod tests {
                     index_type: None,
                     included_columns: None,
                     comment: None,
+                    key_is_expression: Vec::new(),
                 })),
                 changes: vec![],
             }]),
@@ -7351,6 +7918,7 @@ mod tests {
                 index_type: Some("BTREE".into()),
                 included_columns: None,
                 comment: None,
+                key_is_expression: Vec::new(),
             })],
             &[index(IndexInfo {
                 name: "idx_t".into(),
@@ -7361,6 +7929,7 @@ mod tests {
                 index_type: Some("HASH".into()),
                 included_columns: None,
                 comment: None,
+                key_is_expression: Vec::new(),
             })],
         );
         assert_eq!(diffs.len(), 1, "index type diff detected");
@@ -7379,6 +7948,7 @@ mod tests {
                 index_type: Some("FULLTEXT".into()),
                 included_columns: None,
                 comment: None,
+                key_is_expression: Vec::new(),
             })],
             &[index(IndexInfo {
                 name: "idx_t".into(),
@@ -7389,6 +7959,7 @@ mod tests {
                 index_type: None,
                 included_columns: None,
                 comment: None,
+                key_is_expression: Vec::new(),
             })],
         );
         assert_eq!(diffs[0].changes.iter().filter(|c| c.contains("FULLTEXT")).count(), 1, "fulltext change");
@@ -7407,6 +7978,7 @@ mod tests {
                 index_type: None,
                 included_columns: None,
                 comment: None,
+                key_is_expression: Vec::new(),
             })],
             &[index(IndexInfo {
                 name: "idx_t".into(),
@@ -7417,6 +7989,7 @@ mod tests {
                 index_type: None,
                 included_columns: None,
                 comment: None,
+                key_is_expression: Vec::new(),
             })],
         );
         assert_eq!(diffs.len(), 1, "order diff detected");
@@ -7436,6 +8009,7 @@ mod tests {
                 index_type: None,
                 included_columns: Some(vec!["b".into(), "c".into()]),
                 comment: None,
+                key_is_expression: Vec::new(),
             })],
             &[index(IndexInfo {
                 name: "idx_t".into(),
@@ -7446,6 +8020,7 @@ mod tests {
                 index_type: None,
                 included_columns: Some(vec!["b".into()]),
                 comment: None,
+                key_is_expression: Vec::new(),
             })],
         );
         assert_eq!(diffs.len(), 1, "included columns diff detected");
@@ -7464,6 +8039,7 @@ mod tests {
                 index_type: None,
                 included_columns: Some(vec!["b".into()]),
                 comment: None,
+                key_is_expression: Vec::new(),
             })],
             &[index(IndexInfo {
                 name: "idx_t".into(),
@@ -7474,6 +8050,7 @@ mod tests {
                 index_type: None,
                 included_columns: None,
                 comment: None,
+                key_is_expression: Vec::new(),
             })],
         );
         assert_eq!(diffs.len(), 1, "included added");
@@ -7492,6 +8069,7 @@ mod tests {
                 index_type: None,
                 included_columns: None,
                 comment: None,
+                key_is_expression: Vec::new(),
             })],
             &[index(IndexInfo {
                 name: "idx_t".into(),
@@ -7502,6 +8080,7 @@ mod tests {
                 index_type: None,
                 included_columns: None,
                 comment: None,
+                key_is_expression: Vec::new(),
             })],
         );
         assert_eq!(diffs.len(), 1, "filter diff");
@@ -7522,6 +8101,7 @@ mod tests {
                     index_type: None,
                     included_columns: None,
                     comment: None,
+                    key_is_expression: Vec::new(),
                 }),
                 index(IndexInfo {
                     name: "idx_modified".into(),
@@ -7532,6 +8112,7 @@ mod tests {
                     index_type: Some("BTREE".into()),
                     included_columns: None,
                     comment: None,
+                    key_is_expression: Vec::new(),
                 }),
             ],
             &[
@@ -7544,6 +8125,7 @@ mod tests {
                     index_type: None,
                     included_columns: None,
                     comment: None,
+                    key_is_expression: Vec::new(),
                 }),
                 index(IndexInfo {
                     name: "idx_modified".into(),
@@ -7554,6 +8136,7 @@ mod tests {
                     index_type: None,
                     included_columns: None,
                     comment: None,
+                    key_is_expression: Vec::new(),
                 }),
             ],
         );
@@ -7739,6 +8322,7 @@ mod tests {
                         index_type: Some("BTREE".into()),
                         included_columns: None,
                         comment: None,
+                        key_is_expression: Vec::new(),
                     })),
                     target: None,
                     changes: vec![],
@@ -7756,6 +8340,7 @@ mod tests {
                         index_type: None,
                         included_columns: None,
                         comment: None,
+                        key_is_expression: Vec::new(),
                     })),
                     changes: vec![],
                 },
@@ -7825,6 +8410,7 @@ mod tests {
         let s = vec![ColumnInfo {
             name: "c".into(),
             data_type: "varchar(100)".into(),
+            resolved_schema: None,
             is_nullable: true,
             column_default: Some("'default'".into()),
             comment: Some("new".into()),
@@ -7841,6 +8427,7 @@ mod tests {
         let t = vec![ColumnInfo {
             name: "c".into(),
             data_type: "varchar(50)".into(),
+            resolved_schema: None,
             is_nullable: false,
             column_default: None,
             comment: Some("old".into()),
@@ -8148,6 +8735,7 @@ mod tests {
                 filter: None,
                 included_columns: None,
                 comment: None,
+                key_is_expression: Vec::new(),
             }),
             target: None,
             changes: vec![],
@@ -8399,6 +8987,7 @@ mod tests {
                 index_type: None,
                 included_columns: None,
                 comment: None,
+                key_is_expression: Vec::new(),
             }),
             target: None,
             changes: vec![],

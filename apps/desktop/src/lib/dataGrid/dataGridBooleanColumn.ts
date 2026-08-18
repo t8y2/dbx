@@ -3,11 +3,14 @@ import type { DatabaseType } from "@/types/database";
 export const BOOLEAN_CHECKBOX_SIZE = 13;
 export const BOOLEAN_CELL_EDITOR_VALUES = ["true", "false"];
 
+const MYSQL_BIT_BOOLEAN_DATABASE_TYPES = new Set<DatabaseType>(["mysql"]);
+
 export function isBooleanColumnType(dataType: string | undefined, databaseType?: DatabaseType): boolean {
   if (!dataType) return false;
   const normalized = dataType.trim().toLowerCase();
   if (normalized === "boolean" || normalized === "bool") return true;
   if (databaseType === "sqlserver") return normalized === "bit";
+  if (databaseType && MYSQL_BIT_BOOLEAN_DATABASE_TYPES.has(databaseType)) return normalized === "bit" || normalized === "bit(1)";
   return false;
 }
 

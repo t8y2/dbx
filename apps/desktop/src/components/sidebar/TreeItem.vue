@@ -77,7 +77,7 @@ import { sidebarTreeRuntimeKey } from "@/lib/sidebar/sidebarTreeRuntime";
 import { treeNodePinKey } from "@/lib/app/pinnedItems";
 import { isTreeGroupNodeType } from "@/lib/sidebar/treeNodeGroup";
 import { customTypeCapabilities } from "@/lib/database/databaseObjectCapabilities";
-import { shouldActivateTreeNodeOnSingleClick } from "@/lib/sidebar/treeNodeClick";
+import { shouldActivateTreeNodeOnSingleClick, shouldOpenObjectBrowserOnSingleClick } from "@/lib/sidebar/treeNodeClick";
 
 const { t } = useI18n();
 
@@ -282,6 +282,8 @@ function getIconInfo(node: TreeNode): { icon: any; colorClass: string } | null {
       return { icon: FolderOpen, colorClass: "text-sky-400" };
     case "nacos-namespace":
       return { icon: FolderOpen, colorClass: "text-sky-500" };
+    case "nacos-access-control":
+      return { icon: ShieldCheck, colorClass: "text-sky-500" };
     case "etcd-root":
       return { icon: Database, colorClass: "text-sky-500" };
     case "etcd-dashboard":
@@ -302,6 +304,8 @@ function getIconInfo(node: TreeNode): { icon: any; colorClass: string } | null {
       return { icon: Archive, colorClass: "text-cyan-400" };
     case "mongo-collection":
       return { icon: Table, colorClass: "text-green-400" };
+    case "dynamodb-table":
+      return { icon: Table, colorClass: "text-amber-500" };
     case "vector-collection":
       return { icon: TableProperties, colorClass: "text-cyan-400" };
     case "elasticsearch-index":
@@ -326,6 +330,8 @@ function getIconInfo(node: TreeNode): { icon: any; colorClass: string } | null {
       return { icon: Columns3, colorClass: "text-muted-foreground" };
     case "group-tables":
       return { icon: Table, colorClass: "text-green-500" };
+    case "group-dolt-system-tables":
+      return { icon: Table, colorClass: "text-slate-500" };
     case "group-views":
       return { icon: Eye, colorClass: "text-purple-500" };
     case "group-materialized-views":
@@ -362,6 +368,9 @@ function isGroupLabel(node: TreeNode): boolean {
 function displayLabel(node: TreeNode): string {
   if (node.type === "load-more") return t(node.label);
   if (node.type === "object-browser") return t(node.label, { count: node.objectCount ?? 0 });
+  // Use the canonical key for persisted trees created before this label was
+  // internationalized; those nodes may still contain the old Chinese text.
+  if (node.type === "nacos-access-control") return t("nacos.accessControlSidebarLabel");
   if (node.type === "user-admin" || node.type === "dameng-users" || node.type === "dameng-roles" || node.type === "dameng-job-admin") return t(node.label);
   if (node.type === "linked-server-root") return t(node.label);
   if (node.type === "saved-sql-root") return t(node.label);
@@ -378,7 +387,7 @@ function treeNodeSecondaryValue(node: TreeNode): string | undefined {
 
 function visibleLabel(node: TreeNode): string {
   const withValidity = (label: string) => (node.valid === false ? `${label} · INVALID` : label);
-  if (node.type === "table" || node.type === "view" || node.type === "materialized_view" || node.type === "mongo-collection" || node.type === "vector-collection" || node.type === "elasticsearch-index") {
+  if (node.type === "table" || node.type === "view" || node.type === "materialized_view" || node.type === "mongo-collection" || node.type === "dynamodb-table" || node.type === "vector-collection" || node.type === "elasticsearch-index") {
     return withValidity(sidebarDisplayTableName(node.label, settingsStore.editorSettings.sidebarHiddenTablePrefixes));
   }
   return withValidity(displayLabel(node));
@@ -521,6 +530,14 @@ function visibleTreeNodes(): TreeNode[] {
   return flattenTree(connectionStore.treeNodes).map((item) => item.node);
 }
 
+function connectionIdsForSelection(): Set<string> {
+  return new Set(connectionStore.connections.map((connection) => connection.id));
+}
+
+function connectionGroupIdsForSelection(): Set<string> {
+  return new Set(connectionStore.sidebarLayout.groups.map((group) => group.id));
+}
+
 function selectSingleTreeNode(node: TreeNode) {
   // Re-clicking the selected row should not replace the selection array and
   // force visible tree rows to recompute.
@@ -549,7 +566,8 @@ function toggleTreeNodeSelection(node: TreeNode) {
       activeNodeId: node.id,
       anchorNodeId: node.id,
     },
-    new Set(connectionStore.connections.map((connection) => connection.id)),
+    connectionIdsForSelection(),
+    connectionGroupIdsForSelection(),
   );
 }
 
@@ -571,7 +589,8 @@ function selectTreeNodeRange(node: TreeNode) {
         activeNodeId: node.id,
         anchorNodeId: anchorId,
       },
-      new Set(connectionStore.connections.map((connection) => connection.id)),
+      connectionIdsForSelection(),
+      connectionGroupIdsForSelection(),
     );
     return;
   }
@@ -589,7 +608,8 @@ function selectTreeNodeRange(node: TreeNode) {
       activeNodeId: node.id,
       anchorNodeId: anchorId,
     },
-    new Set(connectionStore.connections.map((connection) => connection.id)),
+    connectionIdsForSelection(),
+    connectionGroupIdsForSelection(),
   );
 }
 
@@ -599,9 +619,19 @@ function selectedConnectionIdsForAction(): string[] {
 }
 
 const isConnectionSelectionChecked = computed(() => {
-  if (!connectionStore.connectionMultiSelectActive || activeNode.value.type !== "connection" || !activeNode.value.connectionId) return false;
+  if (!isConnectionMultiSelectActive() || activeNode.value.type !== "connection" || !activeNode.value.connectionId) return false;
   return connectionStore.selectedTreeNodeIds.includes(activeNode.value.connectionId);
 });
+
+function isConnectionGroupMultiSelectActive(): boolean {
+  if (!connectionStore.connectionMultiSelectActive) return false;
+  const firstSelectedId = connectionStore.selectedTreeNodeIds[0];
+  return !!firstSelectedId && connectionStore.sidebarLayout.groups.some((group) => group.id === firstSelectedId);
+}
+
+function isConnectionMultiSelectActive(): boolean {
+  return connectionStore.connectionMultiSelectActive && !isConnectionGroupMultiSelectActive();
+}
 
 function toggleConnectionMultiSelection(event: MouseEvent) {
   event.preventDefault();
@@ -612,6 +642,40 @@ function toggleConnectionMultiSelection(event: MouseEvent) {
   // runs when the checkbox is clicked, while the checked state updates often.
   const current = { connectionIds: selectedConnectionIdsForAction(), active: connectionStore.connectionMultiSelectActive };
   applyConnectionMultiSelection(connectionStore, connectionMultiSelectionAfterToggle(current, activeNode.value.connectionId));
+  rowRef.value?.focus({ preventScroll: true });
+}
+
+function selectedConnectionGroupIdsForAction(): string[] {
+  const groupIds = connectionGroupIdsForSelection();
+  return connectionStore.selectedTreeNodeIds.filter((id) => groupIds.has(id));
+}
+
+function isConnectionGroupSelectionChecked(): boolean {
+  if (!isConnectionGroupMultiSelectActive() || activeNode.value.type !== "connection-group") return false;
+  return connectionStore.selectedTreeNodeIds.includes(activeNode.value.id);
+}
+
+function toggleConnectionGroupMultiSelection(event: MouseEvent) {
+  event.preventDefault();
+  event.stopPropagation();
+  if (activeNode.value.type !== "connection-group") return;
+
+  const selectedGroupIds = connectionStore.connectionMultiSelectActive ? selectedConnectionGroupIdsForAction() : [];
+  const nextGroupIds = new Set(selectedGroupIds);
+  if (nextGroupIds.has(activeNode.value.id)) nextGroupIds.delete(activeNode.value.id);
+  else nextGroupIds.add(activeNode.value.id);
+  const nodeIds = [...nextGroupIds];
+  const activeNodeId = nextGroupIds.has(activeNode.value.id) ? activeNode.value.id : (nodeIds[0] ?? null);
+  applyTreeNodeSelection(
+    connectionStore,
+    {
+      nodeIds,
+      activeNodeId,
+      anchorNodeId: activeNodeId,
+    },
+    connectionIdsForSelection(),
+    connectionGroupIdsForSelection(),
+  );
   rowRef.value?.focus({ preventScroll: true });
 }
 
@@ -740,7 +804,7 @@ const labelWidthClass = computed(() => {
 
 watch(() => [isRightAlignedComment(), visibleLabel(activeNode.value), trailingComment.value, trailingCommentLayoutRef.value, trailingCommentLeadingRef.value], refreshTrailingCommentMeasurement, { flush: "post", immediate: true });
 
-const paddingLeft = computed(() => treeItemPaddingLeft(props.depth));
+const paddingLeft = computed(() => treeItemPaddingLeft(props.depth, settingsStore.editorSettings.sidebarIndent));
 
 const tableSearchParentId = computed(() => activeNode.value.tableSearchParentId || "");
 
@@ -1188,6 +1252,10 @@ function onClick(event: MouseEvent) {
   }
   selectSingleTreeNode(props.node);
   rowRef.value?.focus({ preventScroll: true });
+  if (shouldOpenObjectBrowserOnSingleClick(props.node.type, settingsStore.editorSettings.sidebarOpenDatabaseOnSingleClick)) {
+    treeRuntime.handleRowClick(props.node, event.detail);
+    return;
+  }
   if (!shouldActivateTreeNodeOnSingleClick(props.node.type, settingsStore.editorSettings.sidebarActivation) && props.node.type !== "load-more") return;
   treeRuntime.handleRowClick(props.node, event.detail);
 }
@@ -1319,6 +1387,7 @@ function onKeydown(event: KeyboardEvent) {
             <span
               v-if="
                 (node.type === 'group-tables' ||
+                  node.type === 'group-dolt-system-tables' ||
                   node.type === 'group-views' ||
                   node.type === 'group-materialized-views' ||
                   node.type === 'group-procedures' ||
@@ -1373,12 +1442,25 @@ function onKeydown(event: KeyboardEvent) {
           v-if="node.type === 'connection'"
           type="button"
           class="flex h-4 w-4 shrink-0 items-center justify-center rounded text-muted-foreground/55 opacity-0 transition-colors transition-opacity hover:bg-secondary/45 hover:text-foreground focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring group-hover/sidebar-row:opacity-100"
-          :class="[{ 'opacity-100': isConnectionSelectionChecked || connectionStore.connectionMultiSelectActive }, isConnecting ? '' : 'ml-auto']"
+          :class="[{ 'opacity-100': isConnectionSelectionChecked || isConnectionMultiSelectActive() }, isConnecting ? '' : 'ml-auto']"
           :aria-label="isConnectionSelectionChecked ? t('connectionGroup.deselectConnection') : t('connectionGroup.selectConnection')"
           @mousedown.stop
           @click="toggleConnectionMultiSelection"
         >
           <Check v-if="isConnectionSelectionChecked" class="h-3 w-3 text-primary" />
+          <Square v-else class="h-3 w-3 stroke-[1.7]" />
+        </button>
+        <button
+          v-if="node.type === 'connection-group'"
+          type="button"
+          data-sidebar-group-selection-toggle="true"
+          class="ml-auto flex h-4 w-4 shrink-0 items-center justify-center rounded text-muted-foreground/55 opacity-0 transition-colors transition-opacity hover:bg-secondary/45 hover:text-foreground focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring group-hover/sidebar-row:opacity-100"
+          :class="{ 'opacity-100': isConnectionGroupSelectionChecked() || isConnectionGroupMultiSelectActive() }"
+          :aria-label="isConnectionGroupSelectionChecked() ? t('connectionGroup.deselectGroup') : t('connectionGroup.selectGroup')"
+          @mousedown.stop
+          @click="toggleConnectionGroupMultiSelection"
+        >
+          <Check v-if="isConnectionGroupSelectionChecked()" class="h-3 w-3 text-primary" />
           <Square v-else class="h-3 w-3 stroke-[1.7]" />
         </button>
       </div>
@@ -1417,8 +1499,9 @@ function onKeydown(event: KeyboardEvent) {
 <style>
 .sidebar-object-comment {
   color: var(--muted-foreground);
-  font-size: 12px;
-  line-height: 1rem;
+  /* Relative to the sidebar tree root font size so comments follow the sidebarFontSize setting. */
+  font-size: 0.85em;
+  line-height: 1.25;
   opacity: 0.6;
   /* Sidebar rows repaint on hover; avoid heavier font shaping and fallback here. */
   text-rendering: auto;
@@ -1432,7 +1515,7 @@ function onKeydown(event: KeyboardEvent) {
 
 .sidebar-object-comment--windows {
   font-family: "Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI", system-ui, sans-serif;
-  font-size: 14px;
+  font-size: 1em;
   font-weight: 500;
   opacity: 1;
 }

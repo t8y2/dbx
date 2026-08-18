@@ -153,3 +153,33 @@ func TestDigestMD5RejectsUnsupportedQOP(t *testing.T) {
 		t.Fatalf("expected unsupported QOP error, got %v", err)
 	}
 }
+
+func TestDigestMD5EchoesUTF8Charset(t *testing.T) {
+	mechanism := NewDigestMD5Mechanism("zookeeper", "user", "password")
+	client := NewSaslClient("zk-sasl-md5", mechanism)
+	if _, err := client.Start(); err != nil {
+		t.Fatal(err)
+	}
+	response, err := client.Step([]byte(`realm="zk-sasl-md5",nonce="nonce",qop="auth",charset=utf-8,algorithm=md5-sess`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(response), "charset=utf-8") {
+		t.Fatalf("response does not echo UTF-8 charset: %s", response)
+	}
+}
+
+func TestDigestMD5DefaultsMissingQOPToAuth(t *testing.T) {
+	mechanism := NewDigestMD5Mechanism("zookeeper", "user", "password")
+	client := NewSaslClient("zk-sasl-md5", mechanism)
+	if _, err := client.Start(); err != nil {
+		t.Fatal(err)
+	}
+	response, err := client.Step([]byte(`realm="zk-sasl-md5",nonce="nonce",charset=utf-8,algorithm=md5-sess`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(response), "qop=auth") || strings.Contains(string(response), "maxbuf=") {
+		t.Fatalf("response does not use the DIGEST-MD5 default qop=auth: %s", response)
+	}
+}

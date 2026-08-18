@@ -6,6 +6,10 @@ export function emptyLayout(): SidebarLayout {
   return { groups: [], order: [] };
 }
 
+export function hasSidebarLayoutEntries(layout: SidebarLayout | null | undefined): layout is SidebarLayout {
+  return !!layout && (layout.groups.length > 0 || layout.order.length > 0);
+}
+
 function folderPathSegments(path: string | undefined): string[] {
   return (path ?? "").split("/").filter((segment) => segment.length > 0);
 }
@@ -119,6 +123,58 @@ export function remapSidebarLayoutConnectionIds(layout: SidebarLayout, connectio
     groups: layout.groups.map((group) => ({ ...group })),
     order: remapEntries(layout.order),
   };
+}
+
+/**
+ * Merge an imported layout into the current one instead of replacing it.
+ * Folders are matched by name within the same level so repeated imports reuse
+ * them, and connections outside the imported set keep their current placement.
+ */
+export function mergeSidebarLayout(current: SidebarLayout, imported: SidebarLayout): SidebarLayout {
+  const importedGroups = new Map(imported.groups.map((group) => [group.id, group]));
+  const groups = current.groups.map((group) => ({ ...group }));
+  const groupNameById = new Map(groups.map((group) => [group.id, group.name]));
+  const order = cloneEntries(current.order);
+
+  // The imported layout owns the placement of the connections it lists, so drop
+  // their current entries first — otherwise they would end up listed twice.
+  const importedConnectionIds: string[] = [];
+  const collectConnections = (entries: SidebarOrderEntry[]) => {
+    for (const entry of entries) {
+      if (entry.type === "connection") importedConnectionIds.push(entry.id);
+      else collectConnections(entryChildren(entry));
+    }
+  };
+  collectConnections(imported.order);
+  for (const id of importedConnectionIds) removeEntry(order, id);
+
+  const merge = (target: SidebarOrderEntry[], source: SidebarOrderEntry[]) => {
+    for (const entry of source) {
+      if (entry.type === "connection") {
+        target.push({ type: "connection", id: entry.id });
+        continue;
+      }
+
+      const importedGroup = importedGroups.get(entry.id);
+      if (!importedGroup) continue;
+
+      let destination = target.find((candidate): candidate is Extract<SidebarOrderEntry, { type: "group" }> => candidate.type === "group" && groupNameById.get(candidate.id) === importedGroup.name);
+      if (!destination) {
+        // A fresh id keeps the merged tree free of collisions with the group ids
+        // the current layout already uses.
+        const id = uuid();
+        destination = { type: "group", id, children: [] };
+        groups.push({ ...importedGroup, id });
+        groupNameById.set(id, importedGroup.name);
+        target.push(destination);
+      }
+      destination.children ??= [];
+      merge(destination.children, entryChildren(entry));
+    }
+  };
+  merge(order, imported.order);
+
+  return { groups, order };
 }
 
 export function connectionSidebarSearchAliases(config: Pick<ConnectionConfig, "host" | "username">): string[] {
@@ -366,28 +422,63 @@ export function renameGroup(layout: SidebarLayout, groupId: string, name: string
   };
 }
 
-export function deleteGroup(layout: SidebarLayout, groupId: string): SidebarLayout {
-  const order = cloneEntries(layout.order);
-  const removeGroup = (entries: SidebarOrderEntry[]): boolean => {
-    for (let i = 0; i < entries.length; i++) {
-      const entry = entries[i];
-      if (entry.type === "group" && entry.id === groupId) {
-        entries.splice(i, 1, ...entryChildren(entry));
-        return true;
-      }
+export function connectionIdsInGroups(layout: SidebarLayout, groupIds: Iterable<string>): string[] {
+  const targets = new Set(groupIds);
+  if (!targets.size) return [];
+
+  const connectionIds: string[] = [];
+  const seenConnectionIds = new Set<string>();
+  const collectConnections = (entries: SidebarOrderEntry[]) => {
+    for (const entry of entries) {
       if (entry.type === "group") {
-        const removed = removeGroup(entry.children ?? []);
-        if (removed) return true;
+        collectConnections(entryChildren(entry));
+      } else if (!seenConnectionIds.has(entry.id)) {
+        seenConnectionIds.add(entry.id);
+        connectionIds.push(entry.id);
       }
     }
-    return false;
   };
+  const visit = (entries: SidebarOrderEntry[]) => {
+    for (const entry of entries) {
+      if (entry.type !== "group") continue;
+      if (targets.has(entry.id)) collectConnections(entryChildren(entry));
+      else visit(entryChildren(entry));
+    }
+  };
+  visit(layout.order);
+  return connectionIds;
+}
 
-  const removed = removeGroup(order);
+export function deleteGroups(layout: SidebarLayout, groupIds: Iterable<string>): SidebarLayout {
+  const targets = new Set(groupIds);
+  if (!targets.size) return layout;
+
+  const removedGroupIds = new Set<string>();
+  const flattenDeletedGroup = (entry: Extract<SidebarOrderEntry, { type: "group" }>): SidebarOrderEntry[] => {
+    removedGroupIds.add(entry.id);
+    return entryChildren(entry).flatMap((child): SidebarOrderEntry[] => {
+      if (child.type === "connection") return [{ ...child }];
+      return flattenDeletedGroup(child);
+    });
+  };
+  const removeGroups = (entries: SidebarOrderEntry[]): SidebarOrderEntry[] =>
+    entries.flatMap((entry): SidebarOrderEntry[] => {
+      if (entry.type === "connection") return [{ ...entry }];
+      if (targets.has(entry.id)) return flattenDeletedGroup(entry);
+      const children = removeGroups(entryChildren(entry));
+      return [{ type: "group", id: entry.id, children }];
+    });
+
+  const order = removeGroups(layout.order);
+  if (!removedGroupIds.size) return layout;
   return {
-    groups: removed ? layout.groups.filter((group) => group.id !== groupId) : layout.groups,
+    groups: layout.groups.filter((group) => !removedGroupIds.has(group.id)),
     order,
   };
+}
+
+export function deleteGroup(layout: SidebarLayout, groupId: string): SidebarLayout {
+  return deleteGroups(layout, [groupId]);
 }
 
 export function toggleGroupCollapsed(layout: SidebarLayout, groupId: string): SidebarLayout {

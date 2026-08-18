@@ -29,6 +29,45 @@ export function buildDataGridStructuredWhere(items: Array<{ rule: DataGridStruct
   return result;
 }
 
+export function moveDataGridStructuredFilterRule(rules: readonly DataGridStructuredFilterRule[], ruleId: string, targetIndex: number): DataGridStructuredFilterRule[] {
+  const sourceIndex = rules.findIndex((rule) => rule.id === ruleId);
+  if (sourceIndex < 0 || rules.length < 2) return [...rules];
+  const nextIndex = Math.min(rules.length - 1, Math.max(0, Math.trunc(targetIndex)));
+  if (sourceIndex === nextIndex) return [...rules];
+  const nextRules = [...rules];
+  const [rule] = nextRules.splice(sourceIndex, 1);
+  nextRules.splice(nextIndex, 0, rule);
+  return nextRules;
+}
+
+export function createDataGridFilterConditionCache() {
+  const entries = new Map<string, { signature: string; condition: Promise<string | null> }>();
+
+  function resolve(ruleId: string, signature: string, build: () => Promise<string | null>): Promise<string | null> {
+    const cached = entries.get(ruleId);
+    if (cached?.signature === signature) return cached.condition;
+
+    let condition: Promise<string | null>;
+    condition = Promise.resolve()
+      .then(build)
+      .catch((error) => {
+        if (entries.get(ruleId)?.condition === condition) entries.delete(ruleId);
+        throw error;
+      });
+    entries.set(ruleId, { signature, condition });
+    return condition;
+  }
+
+  function retain(ruleIds: readonly string[]) {
+    const retained = new Set(ruleIds);
+    for (const ruleId of entries.keys()) {
+      if (!retained.has(ruleId)) entries.delete(ruleId);
+    }
+  }
+
+  return { resolve, retain };
+}
+
 export function useDataGridFilterBuilder(options: UseDataGridFilterBuilderOptions) {
   const rules = ref<DataGridStructuredFilterRule[]>([]);
   const open = ref(false);
@@ -63,6 +102,9 @@ export function useDataGridFilterBuilder(options: UseDataGridFilterBuilderOption
       return next;
     });
   }
+  function moveRule(id: string, targetIndex: number) {
+    rules.value = moveDataGridStructuredFilterRule(rules.value, id, targetIndex);
+  }
   function reset() {
     appliedWhereInput.value = "";
     rules.value = toValue(options.columns).length ? [defaultRule()] : [];
@@ -90,5 +132,5 @@ export function useDataGridFilterBuilder(options: UseDataGridFilterBuilderOption
     },
   );
 
-  return { rules, open, columnSearch, appliedWhereInput, filteredColumns, activeCount, defaultRule, ensureRule, addRule, removeRule, updateRule, reset, buildWhere, apply };
+  return { rules, open, columnSearch, appliedWhereInput, filteredColumns, activeCount, defaultRule, ensureRule, addRule, removeRule, updateRule, moveRule, reset, buildWhere, apply };
 }

@@ -1,7 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { formatSqlForDisplay, formatSqlForEditing, formatSqlText, MAX_SQL_FORMAT_CHARS, sqlFormatDialectForDbType, UnsupportedStructuredInputError } from "@/lib/sql/sqlFormatter";
+import { canFormatSqlForDatabaseType, formatSqlForDisplay, formatSqlForEditing, formatSqlText, MAX_SQL_FORMAT_CHARS, sqlFormatDialectForDbType, UnsupportedStructuredInputError } from "@/lib/sql/sqlFormatter";
 
 describe("sqlFormatter", () => {
+  it("disables SQL formatting for VictoriaMetrics queries", () => {
+    expect(canFormatSqlForDatabaseType("victoriametrics")).toBe(false);
+    expect(canFormatSqlForDatabaseType("mysql")).toBe(true);
+  });
+
   it("maps PostgreSQL-compatible database types to the postgres formatter dialect", () => {
     for (const dbType of ["postgres", "kwdb", "gaussdb", "opengauss", "questdb", "kingbase", "highgo", "vastbase", "redshift"]) {
       expect(sqlFormatDialectForDbType(dbType)).toBe("postgres");
@@ -44,6 +49,53 @@ describe("sqlFormatter", () => {
       expect(formatted).toContain("${x}");
       expect(formatted).toContain("#{x}");
       expect(formatted).toContain("'${date}'");
+    }
+  });
+
+  it.each(["mysql", "sqlite"] as const)("applies keyword case to LIKE operators in the %s dialect", async (dialect) => {
+    const sql = "select * from users where name like '%like%' and note not like 'LIKE'";
+
+    const upper = await formatSqlText(sql, dialect, { keywordCase: "upper", functionCase: "preserve" });
+    const lower = await formatSqlText(sql.toUpperCase(), dialect, { keywordCase: "lower", functionCase: "preserve", identifierCase: "lower" });
+
+    expect(upper).toContain("name LIKE '%like%'");
+    expect(upper).toContain("note NOT LIKE 'LIKE'");
+    expect(lower).toContain("name like '%LIKE%'");
+    expect(lower).toContain("note not like 'LIKE'");
+  });
+
+  it("keeps SQLite LIKE functions and qualified identifiers under their own case settings", async () => {
+    const formatted = await formatSqlText("select like('%a%', name), filters.like from users", "sqlite", {
+      keywordCase: "upper",
+      functionCase: "preserve",
+      identifierCase: "preserve",
+    });
+
+    expect(formatted).toContain("like(");
+    expect(formatted).toContain("filters.like");
+  });
+
+  it.each(["mysql", "sqlite"] as const)("does not rewrite LIKE inside DBX placeholders in the %s dialect", async (dialect) => {
+    for (const [lowerPlaceholder, upperPlaceholder] of [
+      ["${like}", "${LIKE}"],
+      ["#{like}", "#{LIKE}"],
+      [":like", ":LIKE"],
+      ["@like", "@LIKE"],
+    ]) {
+      const upper = await formatSqlText(`select * from users where name like 'a';\nselect ${lowerPlaceholder} as marker`, dialect, {
+        keywordCase: "upper",
+        functionCase: "preserve",
+      });
+      const lower = await formatSqlText(`SELECT * FROM users WHERE name LIKE 'a';\nSELECT ${upperPlaceholder} AS marker`, dialect, {
+        keywordCase: "lower",
+        functionCase: "preserve",
+        identifierCase: "lower",
+      });
+
+      expect(upper).toContain(lowerPlaceholder);
+      expect(upper).toContain("name LIKE 'a'");
+      expect(lower).toContain(upperPlaceholder);
+      expect(lower).toContain("name like 'a'");
     }
   });
 

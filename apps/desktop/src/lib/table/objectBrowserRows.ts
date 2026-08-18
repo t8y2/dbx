@@ -231,9 +231,14 @@ export function filterObjectBrowserRows(rows: ObjectBrowserRow[], query: string)
   if (!q) return rows;
   const regex = parseSlashDelimitedRegexQuery(query.trim());
   if (regex) {
-    return rows.filter((row) => [row.displayName, row.name, row.type, row.comment].filter(Boolean).some((value) => regex.test(String(value))));
+    // Object type labels ("TABLE", "VIEW", "PROCEDURE", ...) are deliberately
+    // not searchable: a query like "TAB" would otherwise match every TABLE row
+    // via its type label (issue #6488). The type filter buttons cover type
+    // scoping, and every other search path (sidebar tree, backend metadata)
+    // matches names and comments only.
+    return rows.filter((row) => [row.displayName, row.name, row.comment].filter(Boolean).some((value) => regex.test(String(value))));
   }
-  return rows.filter((row) => [row.displayName, row.name, row.type, row.comment].filter(Boolean).some((value) => String(value).toLowerCase().includes(q)));
+  return rows.filter((row) => [row.displayName, row.name, row.comment].filter(Boolean).some((value) => String(value).toLowerCase().includes(q)));
 }
 
 export function countObjectBrowserRowsByFilter(rows: ObjectBrowserRow[]): ObjectBrowserFilterCounts {

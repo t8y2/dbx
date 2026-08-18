@@ -1109,7 +1109,12 @@ async fn execute_browse_collection(
         collection.to_string()
     };
 
-    let query = build_browse_query(db_type, &collection_id, database, limit)?;
+    let tenant = if *db_type == DatabaseType::ChromaDb {
+        state.configs.read().await.get(connection_id).map(|config| config.username.clone()).unwrap_or_default()
+    } else {
+        String::new()
+    };
+    let query = build_browse_query(db_type, &collection_id, database, &tenant, limit)?;
 
     let options = QueryExecutionOptions { max_rows: Some(limit), timeout_secs: Some(30), ..Default::default() };
     let result =
@@ -1125,6 +1130,7 @@ fn build_browse_query(
     db_type: &DatabaseType,
     collection: &str,
     database: &str,
+    tenant: &str,
     limit: usize,
 ) -> Result<String, String> {
     let collection = collection.trim();
@@ -1151,11 +1157,9 @@ fn build_browse_query(
         DatabaseType::Weaviate => {
             Ok(format!("GET /v1/objects?class={}&limit={}", vector_driver::query_value(collection), limit))
         }
-        // TODO: ChromaDB Cloud 支持自定义租户和数据库，当前只实现了本地部署
-        // （固定 default_tenant / default_database），后续支持云服务时需改为可配置。
         DatabaseType::ChromaDb => Ok(format!(
-            "POST /api/v2/tenants/default_tenant/databases/default_database/collections/{}/get\n{}",
-            collection,
+            "POST {}/get\n{}",
+            vector_driver::chroma_collection_path(tenant, database, collection, None),
             serde_json::json!({ "limit": limit, "include": ["documents", "metadatas"] })
         )),
         _ => Err(format!("Unsupported database type: {:?}", db_type)),
@@ -1721,7 +1725,7 @@ for line in sys.stdin:
 
     #[test]
     fn build_browse_query_qdrant() {
-        let q = build_browse_query(&DatabaseType::Qdrant, "articles", "", 10).unwrap();
+        let q = build_browse_query(&DatabaseType::Qdrant, "articles", "", "", 10).unwrap();
         assert!(q.starts_with("POST /collections/articles/points/scroll"));
         assert!(q.contains("\"limit\":10"));
         assert!(q.contains("\"with_payload\":true"));
@@ -1729,13 +1733,13 @@ for line in sys.stdin:
 
     #[test]
     fn build_browse_query_qdrant_encodes_url_chars() {
-        let q = build_browse_query(&DatabaseType::Qdrant, "my collection", "", 10).unwrap();
+        let q = build_browse_query(&DatabaseType::Qdrant, "my collection", "", "", 10).unwrap();
         assert!(q.starts_with("POST /collections/my%20collection/points/scroll"));
     }
 
     #[test]
     fn build_browse_query_milvus() {
-        let q = build_browse_query(&DatabaseType::Milvus, "articles", "custom_db", 20).unwrap();
+        let q = build_browse_query(&DatabaseType::Milvus, "articles", "custom_db", "", 20).unwrap();
         assert!(q.starts_with("POST /v2/vectordb/entities/query"));
         assert!(q.contains("\"dbName\":\"custom_db\""));
         assert!(q.contains("\"collectionName\":\"articles\""));
@@ -1745,40 +1749,46 @@ for line in sys.stdin:
 
     #[test]
     fn build_browse_query_milvus_default_db() {
-        let q = build_browse_query(&DatabaseType::Milvus, "articles", "", 10).unwrap();
+        let q = build_browse_query(&DatabaseType::Milvus, "articles", "", "", 10).unwrap();
         assert!(q.contains("\"dbName\":\"default\""));
     }
 
     #[test]
     fn build_browse_query_weaviate() {
-        let q = build_browse_query(&DatabaseType::Weaviate, "Articles", "", 5).unwrap();
+        let q = build_browse_query(&DatabaseType::Weaviate, "Articles", "", "", 5).unwrap();
         assert_eq!(q, "GET /v1/objects?class=Articles&limit=5");
     }
 
     #[test]
     fn build_browse_query_weaviate_encodes_query_param() {
-        let q = build_browse_query(&DatabaseType::Weaviate, "A&B", "", 5).unwrap();
+        let q = build_browse_query(&DatabaseType::Weaviate, "A&B", "", "", 5).unwrap();
         assert!(q.contains("class=A%26B"));
     }
 
     #[test]
     fn build_browse_query_chromadb() {
-        let q = build_browse_query(&DatabaseType::ChromaDb, "uuid-123", "", 15).unwrap();
-        assert!(
-            q.starts_with("POST /api/v2/tenants/default_tenant/databases/default_database/collections/uuid-123/get")
-        );
+        let q = build_browse_query(&DatabaseType::ChromaDb, "uuid-123", "cloud/db", "tenant /eu", 15).unwrap();
+        assert!(q.starts_with("POST /api/v2/tenants/tenant%20%2Feu/databases/cloud%2Fdb/collections/uuid-123/get"));
         assert!(q.contains("\"limit\":15"));
     }
 
     #[test]
+    fn build_browse_query_chromadb_keeps_local_defaults() {
+        let q = build_browse_query(&DatabaseType::ChromaDb, "uuid-123", "", "", 15).unwrap();
+        assert!(
+            q.starts_with("POST /api/v2/tenants/default_tenant/databases/default_database/collections/uuid-123/get")
+        );
+    }
+
+    #[test]
     fn build_browse_query_rejects_empty_collection() {
-        let result = build_browse_query(&DatabaseType::Qdrant, "  ", "", 10);
+        let result = build_browse_query(&DatabaseType::Qdrant, "  ", "", "", 10);
         assert!(result.is_err());
     }
 
     #[test]
     fn build_browse_query_rejects_unsupported_type() {
-        let result = build_browse_query(&DatabaseType::Postgres, "articles", "", 10);
+        let result = build_browse_query(&DatabaseType::Postgres, "articles", "", "", 10);
         assert!(result.is_err());
     }
 

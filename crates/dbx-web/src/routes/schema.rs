@@ -28,6 +28,7 @@ pub struct SchemaQuery {
     pub apply_visible_filter: Option<bool>,
     pub client_session_id: Option<String>,
     pub include_postgres_access: Option<bool>,
+    pub portable: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -622,6 +623,32 @@ pub async fn list_partitions(
     Ok(Json(serde_json::to_value(result).map_err(|e| AppError::from(e.to_string()))?))
 }
 
+pub async fn get_table_partition_status(
+    State(state): State<Arc<WebState>>,
+    Query(q): Query<SchemaQuery>,
+) -> Result<Json<dbx_core::schema::TablePartitionStatus>, AppError> {
+    let database = q.database.as_deref().unwrap_or("");
+    let schema = q.schema.as_deref().unwrap_or("");
+    let table = q.table.as_deref().unwrap_or("");
+    dbx_core::schema::table_partition_status_core(&state.app, &q.connection_id, database, schema, table)
+        .await
+        .map(Json)
+        .map_err(AppError::from)
+}
+
+pub async fn list_invalid_indexes(
+    State(state): State<Arc<WebState>>,
+    Query(q): Query<SchemaQuery>,
+) -> Result<Json<Vec<String>>, AppError> {
+    let database = q.database.as_deref().unwrap_or("");
+    let schema = q.schema.as_deref().unwrap_or("");
+    let table = q.table.as_deref().unwrap_or("");
+    dbx_core::schema::list_invalid_indexes_core(&state.app, &q.connection_id, database, schema, table)
+        .await
+        .map(Json)
+        .map_err(AppError::from)
+}
+
 pub async fn list_subpartitions(
     State(state): State<Arc<WebState>>,
     Query(q): Query<SchemaQuery>,
@@ -646,6 +673,17 @@ pub async fn get_ddl(
         dbx_core::schema::get_doris_catalog_table_ddl_core(&state.app, &q.connection_id, &catalog, database, table)
             .await
             .map_err(AppError::from)?
+    } else if q.portable.unwrap_or(false) {
+        dbx_core::schema::get_table_export_ddl_core(
+            &state.app,
+            &q.connection_id,
+            database,
+            schema,
+            table,
+            q.object_type,
+        )
+        .await
+        .map_err(AppError::from)?
     } else if q.include_postgres_access.unwrap_or(false) {
         dbx_core::schema::get_table_display_ddl_core(
             &state.app,

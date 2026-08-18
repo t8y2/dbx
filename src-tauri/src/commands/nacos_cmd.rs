@@ -23,6 +23,14 @@ pub async fn nacos_list_namespaces(
 }
 
 #[tauri::command]
+pub async fn nacos_sidebar_snapshot(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+) -> Result<dbx_core::nacos::NacosNamespaceSidebarSnapshot, String> {
+    dbx_core::nacos::service::nacos_sidebar_snapshot_core(&state, &connection_id).await
+}
+
+#[tauri::command]
 pub async fn nacos_create_namespace(
     state: State<'_, Arc<AppState>>,
     connection_id: String,
@@ -118,6 +126,113 @@ pub async fn nacos_login_rnacos_console(
     captcha: Option<String>,
 ) -> Result<(), String> {
     dbx_core::nacos::service::nacos_login_rnacos_console_core(&state, &connection_id, captcha).await
+}
+
+#[tauri::command]
+pub async fn nacos_list_users(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    query: dbx_core::nacos::NacosUserQuery,
+) -> Result<dbx_core::nacos::NacosUserList, String> {
+    dbx_core::nacos::service::nacos_list_users_core(&state, &connection_id, query).await
+}
+
+#[tauri::command]
+pub async fn nacos_create_user(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    req: dbx_core::nacos::NacosUserCreate,
+) -> Result<(), String> {
+    dbx_core::nacos::service::nacos_create_user_core(&state, &connection_id, req).await
+}
+
+#[tauri::command]
+pub async fn nacos_update_user(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    req: dbx_core::nacos::NacosUserUpdate,
+) -> Result<(), String> {
+    dbx_core::nacos::service::nacos_update_user_core(&state, &connection_id, req).await
+}
+
+#[tauri::command]
+pub async fn nacos_delete_user(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    username: String,
+) -> Result<(), String> {
+    dbx_core::nacos::service::nacos_delete_user_core(&state, &connection_id, username).await
+}
+
+#[tauri::command]
+pub async fn nacos_list_role_bindings(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    query: dbx_core::nacos::NacosRoleQuery,
+) -> Result<dbx_core::nacos::NacosRoleList, String> {
+    dbx_core::nacos::service::nacos_list_role_bindings_core(&state, &connection_id, query).await
+}
+
+#[tauri::command]
+pub async fn nacos_assign_role(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    binding: dbx_core::nacos::NacosRoleBinding,
+) -> Result<(), String> {
+    dbx_core::nacos::service::nacos_assign_role_core(&state, &connection_id, binding).await
+}
+
+#[tauri::command]
+pub async fn nacos_remove_role(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    binding: dbx_core::nacos::NacosRoleBinding,
+) -> Result<(), String> {
+    dbx_core::nacos::service::nacos_remove_role_core(&state, &connection_id, binding).await
+}
+
+#[tauri::command]
+pub async fn nacos_access_snapshot(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+) -> Result<dbx_core::nacos::NacosAccessControlSnapshot, String> {
+    dbx_core::nacos::service::nacos_access_snapshot_core(&state, &connection_id).await
+}
+
+#[tauri::command]
+pub async fn nacos_start_access_operation(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    req: dbx_core::nacos::NacosAccessOperationRequest,
+) -> Result<dbx_core::nacos::NacosAccessOperationResult, String> {
+    dbx_core::nacos::service::nacos_start_access_operation_core(&state, &connection_id, req).await
+}
+
+#[tauri::command]
+pub async fn nacos_get_access_operation(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    operation_id: String,
+) -> Result<dbx_core::nacos::NacosAccessOperationResult, String> {
+    dbx_core::nacos::service::nacos_get_access_operation_core(&state, &connection_id, &operation_id).await
+}
+
+#[tauri::command]
+pub async fn nacos_retry_access_operation(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    retry: dbx_core::nacos::NacosAccessOperationRetry,
+) -> Result<dbx_core::nacos::NacosAccessOperationResult, String> {
+    dbx_core::nacos::service::nacos_retry_access_operation_core(&state, &connection_id, retry).await
+}
+
+#[tauri::command]
+pub async fn nacos_undo_access_operation(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    operation_id: String,
+) -> Result<dbx_core::nacos::NacosAccessOperationResult, String> {
+    dbx_core::nacos::service::nacos_undo_access_operation_core(&state, &connection_id, &operation_id).await
 }
 
 #[tauri::command]

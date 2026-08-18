@@ -108,6 +108,9 @@ export interface DataGridCountSqlOptions {
   schema?: string;
   tableName: string;
   whereInput?: string;
+  /** Optional optimizer hint injected between SELECT and the select list.
+   *  Example: "/*+ set(query_dop 32) *​/" for GaussDB parallel COUNT(*). */
+  countHint?: string;
 }
 
 export interface HiveTablePropertiesSqlOptions {

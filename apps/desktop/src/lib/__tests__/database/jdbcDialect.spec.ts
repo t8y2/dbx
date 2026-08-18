@@ -11,11 +11,16 @@ import {
   connectionUsesDatabaseObjectTreeMode,
   effectiveDatabaseTypeForConnection,
   gaussdbConnectionMode,
+  gaussdbCountQueryDop,
+  gaussdbCountQueryDopHint,
   gaussdbIdentifierQuoteOverride,
   gaussdbIdentifierQuoteStyle,
+  gaussdbTargetServerType,
   inferJdbcDialect,
   setGaussdbConnectionMode,
+  setGaussdbCountQueryDop,
   setGaussdbIdentifierQuoteStyle,
+  setGaussdbTargetServerType,
   supportsGaussdbIdentifierQuoteStyle,
 } from "@/lib/database/jdbcDialect";
 
@@ -216,6 +221,41 @@ describe("GaussDB connection mode", () => {
     setGaussdbConnectionMode(connection, "native");
     expect(connection.driver_profile).toBe("gaussdb");
     expect(connection.jdbc_driver_class).toBeUndefined();
+  });
+
+  it("uses the driver default and preserves targetServerType from legacy URL fields", () => {
+    const connection = { db_type: "gaussdb", driver_profile: "gaussdb-m" } as ConnectionConfig;
+
+    expect(gaussdbTargetServerType(connection)).toBe("any");
+
+    connection.url_params = "currentSchema=app&targetServerType=slave";
+    expect(gaussdbTargetServerType(connection)).toBe("slave");
+
+    connection.url_params = undefined;
+    connection.connection_string = "jdbc:gaussdb://db.internal:8000/app?targetServerType=MASTER&ssl=true";
+    expect(gaussdbTargetServerType(connection)).toBe("master");
+
+    setGaussdbTargetServerType(connection, "any");
+    expect(gaussdbTargetServerType(connection)).toBe("any");
+    expect(connection.external_config).toEqual({ gaussdbTargetServerType: "any" });
+  });
+
+  it("keeps count query parallelism disabled until explicitly configured", () => {
+    const connection = { db_type: "gaussdb", external_config: { retained: true } } as ConnectionConfig;
+
+    expect(gaussdbCountQueryDop(connection)).toBe(1);
+    expect(gaussdbCountQueryDopHint(connection)).toBeUndefined();
+
+    setGaussdbCountQueryDop(connection, 8);
+    expect(connection.external_config).toEqual({ retained: true, gaussdbCountQueryDop: 8 });
+    expect(gaussdbCountQueryDopHint(connection)).toBe("/*+ set(query_dop 8) */");
+
+    connection.external_config = { retained: true, gaussdbCountQueryDop: 32 };
+    expect(gaussdbCountQueryDop(connection)).toBe(1);
+    expect(gaussdbCountQueryDopHint(connection)).toBeUndefined();
+
+    setGaussdbCountQueryDop(connection, 1);
+    expect(connection.external_config).toEqual({ retained: true });
   });
 });
 

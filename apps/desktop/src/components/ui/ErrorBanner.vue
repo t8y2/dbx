@@ -44,7 +44,7 @@ async function copy() {
   <!-- card: 卡片类报错信息面板 -->
   <div v-if="variant === 'card'" class="mx-3 my-2 rounded-lg border border-destructive/30 bg-destructive/10 p-3 shadow-sm shrink-0 select-text flex flex-col gap-2">
     <div class="flex items-center justify-between gap-2 border-b border-destructive/20 pb-2">
-      <div class="flex items-center gap-2 font-semibold text-xs text-destructive">
+      <div data-native-clipboard class="flex items-center gap-2 font-semibold text-xs text-destructive">
         <TriangleAlert class="h-4 w-4 text-destructive shrink-0" aria-hidden="true" />
         <span>{{ displayTitle }}</span>
       </div>
@@ -58,14 +58,14 @@ async function copy() {
         </Button>
       </div>
     </div>
-    <div class="max-h-40 min-h-[56px] overflow-y-auto rounded bg-background/80 dark:bg-background/50 border border-destructive/20 p-2.5 text-xs font-mono leading-relaxed text-destructive break-words whitespace-pre-wrap select-text cursor-text" @mousedown.stop @click.stop>
+    <div data-native-clipboard class="max-h-40 min-h-[56px] overflow-y-auto rounded bg-background/80 dark:bg-background/50 border border-destructive/20 p-2.5 text-xs font-mono leading-relaxed text-destructive break-words whitespace-pre-wrap select-text cursor-text" @mousedown.stop @click.stop>
       {{ message }}
     </div>
   </div>
 
   <!-- banner: 紧凑内联横幅 -->
   <div v-else-if="variant === 'banner'" class="flex items-center gap-2 px-3 py-1.5 border-t bg-destructive/10 text-destructive text-xs shrink-0">
-    <span class="flex-1 min-w-0 break-all">{{ message }}</span>
+    <span data-native-clipboard class="flex-1 min-w-0 break-all">{{ message }}</span>
     <button v-if="copyMode === 'label'" type="button" class="shrink-0 hover:underline" :aria-label="t('grid.copy')" @click.stop="copy">
       {{ t("grid.copy") }}
     </button>
@@ -78,7 +78,7 @@ async function copy() {
   <!-- centered: 居中占满 -->
   <div v-else class="flex-1 min-h-0 flex flex-col items-center justify-center gap-2 px-6 py-4 text-center">
     <TriangleAlert class="h-8 w-8 text-destructive/50" aria-hidden="true" />
-    <div class="min-h-0 max-h-48 max-w-lg overflow-auto space-y-1 select-text text-destructive" @mousedown.stop @click.stop>
+    <div data-native-clipboard class="min-h-0 max-h-48 max-w-lg overflow-auto space-y-1 select-text text-destructive" @mousedown.stop @click.stop>
       <div class="text-sm font-medium">{{ displayTitle }}</div>
       <div class="text-xs break-all cursor-text text-destructive/80 select-text">{{ message }}</div>
     </div>

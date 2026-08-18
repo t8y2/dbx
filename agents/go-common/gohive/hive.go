@@ -10,6 +10,7 @@ import (
 	"net/http/cookiejar"
 	"net/url"
 	"os/user"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -270,6 +271,7 @@ type connectConfiguration struct {
 	BrowserResponsePort        int
 	BrowserResponseTimeout     time.Duration
 	BrowserDisableSSLCheck     bool
+	WaitForNonQueryCompletion  bool
 	// Maximum length of the data in bytes. Used for SASL.
 	MaxSize        uint32
 	MaxMessageSize int32
@@ -450,7 +452,7 @@ func innerConnect(ctx context.Context, host string, port int, auth string,
 	}
 
 	if configuration.TransportMode == "http" {
-		if auth == "NONE" || auth == "LDAP" || auth == "CUSTOM" {
+		if usesHTTPBasicAuth(auth) {
 			httpClient, protocol, err := prepareHTTPClient(configuration)
 			if err != nil {
 				return nil, err
@@ -463,16 +465,6 @@ func innerConnect(ctx context.Context, host string, port int, auth string,
 				Password: configuration.Password,
 			}
 			httpClient.Transport = withCookieAuthentication(configuration, baseTransport, authTransport)
-			httpOptions := thrift.THttpClientOptions{Client: httpClient}
-			transport, err = thrift.NewTHttpClientTransportFactoryWithOptions(hiveHTTPURL(protocol, host, port, configuration.HTTPPath), httpOptions).GetTransport(socket)
-			if err != nil {
-				return nil, err
-			}
-		} else if auth == "NOSASL" {
-			httpClient, protocol, err := prepareHTTPClient(configuration)
-			if err != nil {
-				return nil, err
-			}
 			httpOptions := thrift.THttpClientOptions{Client: httpClient}
 			transport, err = thrift.NewTHttpClientTransportFactoryWithOptions(hiveHTTPURL(protocol, host, port, configuration.HTTPPath), httpOptions).GetTransport(socket)
 			if err != nil {
@@ -1407,6 +1399,54 @@ func (c *cursor) hasMore(ctx context.Context) bool {
 	return c.state != _FINISHED || c.totalRows != c.columnIndex
 }
 
+func (c *cursor) waitForCompletion(ctx context.Context) error {
+	if c.operationHandle == nil {
+		return errors.New("HiveServer2 returned no operation handle")
+	}
+	for {
+		request := hiveserver.NewTGetOperationStatusReq()
+		request.OperationHandle = c.operationHandle
+		c.conn.clientMu.Lock()
+		response, err := c.conn.client.GetOperationStatus(ctx, request)
+		c.conn.clientMu.Unlock()
+		if err != nil {
+			return err
+		}
+		if response == nil {
+			return errors.New("HiveServer2 GetOperationStatus returned no response")
+		}
+		if !success(safeStatus(response.GetStatus())) {
+			return hiveStatusError("checking operation status", response.GetStatus())
+		}
+		switch response.GetOperationState() {
+		case hiveserver.TOperationState_FINISHED_STATE, hiveserver.TOperationState_CLOSED_STATE:
+			if response.IsSetNumModifiedRows() {
+				modified := float64(response.GetNumModifiedRows())
+				c.operationHandle.ModifiedRowCount = &modified
+			}
+			return nil
+		case hiveserver.TOperationState_ERROR_STATE:
+			return &Error{
+				Err:       errors.New("HiveServer2 operation failed: " + response.GetErrorMessage()),
+				Message:   response.GetErrorMessage(),
+				ErrorCode: int(response.GetErrorCode()),
+				SQLState:  response.GetSqlState(),
+			}
+		case hiveserver.TOperationState_CANCELED_STATE:
+			return errors.New("HiveServer2 operation was canceled")
+		case hiveserver.TOperationState_TIMEDOUT_STATE:
+			return errors.New("HiveServer2 operation timed out")
+		}
+		timer := time.NewTimer(time.Duration(c.conn.configuration.PollIntervalInMillis) * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
 func (c *cursor) error() error {
 	return c.Err
 }
@@ -1594,12 +1634,47 @@ func safeStatus(status *hiveserver.TStatus) *hiveserver.TStatus {
 
 func hiveStatusError(action string, status *hiveserver.TStatus) error {
 	status = safeStatus(status)
+	diagnostic := hiveStatusDiagnostic(status)
 	return &Error{
-		Err:       fmt.Errorf("HiveServer2 error while %s: %s", action, status.String()),
-		Message:   status.GetErrorMessage(),
+		Err:       fmt.Errorf("HiveServer2 error while %s: %s", action, diagnostic),
+		Message:   diagnostic,
 		ErrorCode: int(status.GetErrorCode()),
 		SQLState:  status.GetSqlState(),
 	}
+}
+
+func hiveStatusDiagnostic(status *hiveserver.TStatus) string {
+	messages := make([]string, 0, len(status.GetInfoMessages())+1)
+	if message := strings.TrimSpace(status.GetErrorMessage()); message != "" {
+		messages = append(messages, message)
+	}
+	for _, info := range status.GetInfoMessages() {
+		message := strings.TrimSpace(info)
+		if message == "" || slices.Contains(messages, message) {
+			continue
+		}
+		messages = append(messages, message)
+	}
+	if len(messages) == 0 {
+		messages = append(messages, fmt.Sprintf("server returned %s without error details", status.GetStatusCode()))
+	}
+
+	metadata := make([]string, 0, 2)
+	if sqlState := strings.TrimSpace(status.GetSqlState()); sqlState != "" {
+		metadata = append(metadata, "SQLState "+sqlState)
+	}
+	if status.IsSetErrorCode() {
+		metadata = append(metadata, fmt.Sprintf("error code %d", status.GetErrorCode()))
+	}
+	diagnostic := strings.Join(messages, "; ")
+	if len(metadata) > 0 {
+		diagnostic += " (" + strings.Join(metadata, ", ") + ")"
+	}
+	return diagnostic
+}
+
+func usesHTTPBasicAuth(auth string) bool {
+	return auth == "NONE" || auth == "NOSASL" || auth == "LDAP" || auth == "CUSTOM"
 }
 
 func quoteHiveIdentifier(value string) string {

@@ -176,6 +176,166 @@ func TestURLParamsOverrideConnectionString(t *testing.T) {
 	if config.TransportMode != "http" || config.HTTPPath != "proxy" {
 		t.Fatalf("URL params did not override connection string: %#v", config)
 	}
+	if len(config.Endpoints) != 1 || config.Endpoints[0] != (endpoint{Host: "hive.example.com", Port: 10000}) {
+		t.Fatalf("resolved form endpoint did not override connection string: %#v", config.Endpoints)
+	}
+}
+
+func TestResolvedDirectEndpointAndDatabasePreserveJDBCParameterSections(t *testing.T) {
+	config, err := parseConnectionConfig(connectParams{
+		Host:             "127.0.0.1",
+		Port:             18080,
+		Database:         "analytics",
+		ConnectionString: "jdbc:hive2://old.example.com:10000/default;transportMode=http;httpPath=gateway?hive.exec.dynamic.partition=true#SourceTable=events",
+		URLParams:        "transportMode=http;httpPath=gateway?hive.exec.dynamic.partition=true#SourceTable=events",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(config.Endpoints) != 1 || config.Endpoints[0] != (endpoint{Host: "127.0.0.1", Port: 18080}) {
+		t.Fatalf("unexpected resolved endpoint: %#v", config.Endpoints)
+	}
+	if config.Database != "analytics" {
+		t.Fatalf("resolved database = %q, want analytics", config.Database)
+	}
+	if config.TransportMode != "http" || config.HTTPPath != "gateway" {
+		t.Fatalf("JDBC session parameters were not preserved: %#v", config)
+	}
+	if config.HiveConfiguration["set:hiveconf:hive.exec.dynamic.partition"] != "true" {
+		t.Fatalf("JDBC hiveConfs were not preserved: %#v", config.HiveConfiguration)
+	}
+	if config.HiveConfiguration["set:hivevar:SourceTable"] != "events" {
+		t.Fatalf("JDBC hiveVars were not preserved: %#v", config.HiveConfiguration)
+	}
+}
+
+func TestStructuredFieldsOverridePersistedJDBCValues(t *testing.T) {
+	config, err := parseConnectionConfig(connectParams{
+		Host:             "127.0.0.1",
+		Port:             18080,
+		Username:         "edited-user",
+		Password:         "edited-password",
+		ConnectionString: "jdbc:hive2://old-user:old-password@old.example.com:10000/old_database;transportMode=http;auth=LDAP;ssl=true;serviceDiscoveryMode=zooKeeper?hive.exec.dynamic.partition=true#SourceTable=events",
+		URLParams:        "user=url-user;password=url-password;ssl=true?hive.exec.dynamic.partition=true#SourceTable=events",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(config.Endpoints) != 1 || config.Endpoints[0] != (endpoint{Host: "127.0.0.1", Port: 18080}) {
+		t.Fatalf("unexpected resolved endpoint: %#v", config.Endpoints)
+	}
+	if config.Database != defaultHiveDatabase {
+		t.Fatalf("database = %q, want %q", config.Database, defaultHiveDatabase)
+	}
+	if config.Username != "edited-user" || config.Password != "edited-password" {
+		t.Fatalf("structured credentials were overwritten: username=%q password=%q", config.Username, config.Password)
+	}
+	if config.TransportMode != "binary" || config.Auth != "NONE" || config.ServiceDiscoveryMode != "" {
+		t.Fatalf("removed JDBC parameters remained active: %#v", config)
+	}
+	if config.TLSConfig != nil {
+		t.Fatal("disabled structured SSL was re-enabled by persisted JDBC parameters")
+	}
+	if config.HiveConfiguration["set:hiveconf:hive.exec.dynamic.partition"] != "true" {
+		t.Fatalf("current hiveConfs were not preserved: %#v", config.HiveConfiguration)
+	}
+	if config.HiveConfiguration["set:hivevar:SourceTable"] != "events" {
+		t.Fatalf("current hiveVars were not preserved: %#v", config.HiveConfiguration)
+	}
+}
+
+func TestConnectionStringOnlyKeepsJDBCValues(t *testing.T) {
+	config, err := parseConnectionConfig(connectParams{
+		ConnectionString: "jdbc:hive2://raw-user:raw-password@hive.example.com:10001/analytics;transportMode=http;ssl=true",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.Database != "analytics" || config.Username != "raw-user" || config.Password != "raw-password" {
+		t.Fatalf("connection-string-only fields were not preserved: %#v", config)
+	}
+	if config.TransportMode != "http" || config.TLSConfig == nil {
+		t.Fatalf("connection-string-only parameters were not preserved: %#v", config)
+	}
+}
+
+func TestZooKeeperDiscoveryKeepsAllJDBCEndpoints(t *testing.T) {
+	config, err := parseConnectionConfig(connectParams{
+		Host:             "127.0.0.1",
+		Port:             12181,
+		Database:         "analytics",
+		ConnectionString: "jdbc:hive2://zk1.example.com:2181,zk2.example.com:2181/default;serviceDiscoveryMode=zooKeeper;zooKeeperNamespace=hiveserver2",
+		URLParams:        "serviceDiscoveryMode=zooKeeper;zooKeeperNamespace=hiveserver2",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(config.Endpoints) != 2 || config.Endpoints[0].Host != "zk1.example.com" || config.Endpoints[1].Host != "zk2.example.com" {
+		t.Fatalf("ZooKeeper discovery endpoints were not preserved: %#v", config.Endpoints)
+	}
+	if config.Database != "analytics" {
+		t.Fatalf("resolved database = %q, want analytics", config.Database)
+	}
+}
+
+func TestImpalaDefaultsToNoSASL(t *testing.T) {
+	config, err := parseConnectionConfig(connectParams{
+		DatabaseType: "impala",
+		Host:         "impala.example.com",
+		Port:         21050,
+		Database:     "analytics",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.Auth != "NOSASL" {
+		t.Fatalf("unexpected Impala auth mode: %q", config.Auth)
+	}
+	if config.Kerberos.Service != "impala" {
+		t.Fatalf("unexpected Impala Kerberos service: %q", config.Kerberos.Service)
+	}
+}
+
+func TestImpalaExplicitAuthenticationOverridesDefaults(t *testing.T) {
+	config, err := parseConnectionConfig(connectParams{
+		DatabaseType: "impala",
+		Host:         "impala.example.com",
+		Port:         21050,
+		URLParams:    "auth=NONE;service=custom",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.Auth != "NONE" || config.Kerberos.Service != "custom" {
+		t.Fatalf("explicit Impala authentication was not preserved: %#v", config.Kerberos)
+	}
+}
+
+func TestImpalaLDAPHTTPSSLConfiguration(t *testing.T) {
+	config, err := parseConnectionConfig(connectParams{
+		DatabaseType: "impala",
+		Host:         "impala.example.com",
+		Port:         21050,
+		Username:     "alice",
+		Password:     "secret",
+		URLParams:    "auth=LDAP;transportMode=http;httpPath=cliservice",
+		SSL:          true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.Auth != "LDAP" || config.TransportMode != "http" || config.HTTPPath != "cliservice" {
+		t.Fatalf("unexpected Impala LDAP transport config: %#v", config)
+	}
+	if config.Username != "alice" || config.Password != "secret" {
+		t.Fatalf("Impala LDAP credentials were not preserved: %q / %q", config.Username, config.Password)
+	}
+	if config.TLSConfig == nil || config.TLSConfig.ServerName != "impala.example.com" {
+		t.Fatalf("unexpected Impala LDAP TLS config: %#v", config.TLSConfig)
+	}
+	if config.Kerberos.Service != defaultImpalaService {
+		t.Fatalf("unexpected Impala service default: %q", config.Kerberos.Service)
+	}
 }
 
 func TestParseStandardJDBCURLSectionsAndCredentials(t *testing.T) {

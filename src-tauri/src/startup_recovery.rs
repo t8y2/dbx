@@ -19,7 +19,7 @@ const WINDOWS_APP_DATA_DIR_NAME: &str = "com.dbx.app";
 const COMPATIBILITY_MARKER_FILE: &str = "webview2-enterprise-compat.enabled";
 const COMPATIBILITY_PROFILE_DIR: &str = "webview2-enterprise-compat";
 const STARTUP_LOG_BUFFER_CAPACITY: usize = 256;
-const STARTUP_WATCHDOG_DELAY: Duration = Duration::from_secs(15);
+const STARTUP_WATCHDOG_DELAY: Duration = Duration::from_secs(60);
 #[cfg(target_os = "windows")]
 const RECOVERY_PARENT_WAIT_TIMEOUT: Duration = Duration::from_secs(10);
 

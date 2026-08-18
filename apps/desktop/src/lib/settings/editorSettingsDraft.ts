@@ -37,6 +37,8 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "showIndexIndicatorsInHeader",
   "compactColumnHeaderActions",
   "dataGridQuickEntry",
+  "dataGridFilterEditorView",
+  "dataGridTextFilterPanelHeight",
   "dataGridAutoTransposeSingleRow",
   "pageSize",
   "tableOpenPageSize",
@@ -54,13 +56,17 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "routineSourceOpenMode",
   "sidebarTableSearchEnabled",
   "autoSelectActiveSidebarNode",
+  "sidebarOpenDatabaseOnSingleClick",
   "openTabsRestoreMode",
   "disconnectTabHandlingMode",
   "dataTabReuseMode",
+  "openDataTabsNextToActive",
   "prefillNewQueryWithSelect",
   "updateNotificationsEnabled",
   "sidebarObjectInfoMode",
   "sidebarAllowHorizontalScroll",
+  "sidebarIndent",
+  "sidebarFontSize",
   "sidebarHiddenTablePrefixes",
   "exportBatchSize",
   "exportRowLimitEnabled",
@@ -72,6 +78,7 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "updateDownloadSource",
   "toolbarItems",
   "snippets",
+  "sqlVariableSubstitutionEnabled",
   "sqlVariableSyntaxOverrides",
   "continueOnErrorOnBatch",
   "clickTableNavigationTarget",
@@ -126,4 +133,13 @@ export function editorSettingsPatchFromDraft(draft: EditorSettingsDraft, base: E
 
 export function editorSettingsDraftChanged(draft: EditorSettingsDraft, base: EditorSettingsDraft): boolean {
   return EDITOR_SETTINGS_DRAFT_KEYS.some((key) => draftValueChanged(key, draft[key], base[key]));
+}
+
+// Closing the settings dialog (Escape, clicking outside, the X button, or the
+// "Close" footer button) must never silently drop an unapplied draft — the
+// dialog only persists shortcuts/sidebarActivation/etc. to the store on an
+// explicit Apply. Route every close attempt through this check so an unsaved
+// draft always surfaces a confirmation instead of vanishing.
+export function shouldConfirmEditorSettingsDialogClose(nextOpen: boolean, hasUnsavedChanges: boolean): boolean {
+  return nextOpen === false && hasUnsavedChanges;
 }

@@ -118,3 +118,24 @@ export interface DataCompareSyncPlan {
   syncStatements: string[];
   syncSql: string;
 }
+
+/**
+ * Safely infers the columns to use as comparison keys for a table.
+ *
+ * Only primary-key columns are trusted: a primary key is unique by
+ * definition, so comparing on it can never produce duplicate-key failures.
+ * Composite primary keys are returned as-is.
+ *
+ * When no primary key exists an empty array is returned so the caller can ask
+ * the user to pick matching columns explicitly. Falling back to the first
+ * column would silently select an arbitrary, possibly non-unique field
+ * (category, status, date, ...) and make the whole table comparison fail with
+ * an unhelpful duplicate-key error.
+ */
+export function inferCompareKeyColumns(columns: Pick<ColumnInfo, "name" | "is_primary_key">[]): string[] {
+  const primaryKeys: string[] = [];
+  for (const column of columns) {
+    if (column.is_primary_key) primaryKeys.push(column.name);
+  }
+  return primaryKeys;
+}

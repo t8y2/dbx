@@ -38,6 +38,22 @@ describe("tableStructureCapabilities", () => {
     expect(getTableStructureCapabilities("sqlserver", "sqlserver", "10.0").indexInclude).toBe(true);
   });
 
+  it("enables concurrent index creation only for PostgreSQL", () => {
+    // PostgreSQL (including pre-11 versions that disable INCLUDE) advertises it.
+    expect(getTableStructureCapabilities("postgres", "postgres").indexConcurrent).toBe(true);
+    expect(getTableStructureCapabilities("postgres", "postgres", "10.15").indexConcurrent).toBe(true);
+
+    // PostgreSQL-family engines sharing the Postgres dialect stay off until verified.
+    for (const databaseType of ["kingbase", "gaussdb", "opengauss", "highgo", "uxdb", "vastbase", "kwdb", "firebird"] as const) {
+      expect(getTableStructureCapabilities(databaseType, databaseType).indexConcurrent).toBe(false);
+    }
+
+    // Unrelated engines never advertise it.
+    for (const databaseType of ["mysql", "sqlite", "sqlserver", "oracle", "dameng", "duckdb", "questdb"] as const) {
+      expect(getTableStructureCapabilities(databaseType, databaseType).indexConcurrent).toBe(false);
+    }
+  });
+
   it("removes unsupported included columns before SQL generation", () => {
     const index = {
       id: "new:index",

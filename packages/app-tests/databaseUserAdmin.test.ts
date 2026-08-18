@@ -333,7 +333,7 @@ test("resolves user admin support from the effective connection type", () => {
   assert.equal(resolveDatabaseUserAdminProviderForConnection(jdbcStarRocks), getDatabaseUserAdminProvider("starrocks"));
   assert.equal(resolveDatabaseUserAdminProviderForConnection(mysqlProtocolDoris), getDatabaseUserAdminProvider("doris"));
   assert.equal(resolveDatabaseUserAdminProviderForConnection(jdbcDoris), getDatabaseUserAdminProvider("doris"));
-  assert.equal(resolveDatabaseUserAdminProviderForConnection(mysql), getDatabaseUserAdminProvider("mysql"));
+  assert.equal(resolveDatabaseUserAdminProviderForConnection(mysql), getDatabaseUserAdminProvider("mysql", mysql));
   assert.equal(resolveDatabaseUserAdminProviderForConnection(goldenDb), getDatabaseUserAdminProvider("goldendb"));
   assert.equal(connectionSupportsDatabaseUserAdmin(mysqlProtocolStarRocks), true);
   assert.equal(connectionSupportsDatabaseUserAdmin(mysqlProtocolDoris), true);

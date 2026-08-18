@@ -18,6 +18,7 @@ const mocks = vi.hoisted(() => ({
   invalidateObjectDdl: vi.fn(),
   loadObjectMetadataFacet: vi.fn(),
   invalidateTableMetadataCache: vi.fn(),
+  getTablePartitionStatus: vi.fn(),
   toast: vi.fn(),
 }));
 
@@ -218,6 +219,7 @@ vi.mock("@/lib/metadata/tableMetadataCache", () => ({ invalidateTableMetadataCac
 vi.mock("@/lib/backend/api", () => ({
   listDataTypes: mocks.listDataTypes,
   buildTableStructureChangeSql: mocks.buildTableStructureChangeSql,
+  getTablePartitionStatus: mocks.getTablePartitionStatus,
 }));
 
 import TableStructureEditor from "@/components/structure/TableStructureEditor.vue";
@@ -333,6 +335,10 @@ beforeEach(() => {
   mocks.loadObjectDdl.mockResolvedValue({ ddl: "CREATE TABLE users (id bigint)", cacheStatus: "remote" });
   mocks.invalidateObjectDdl.mockResolvedValue(undefined);
   mocks.loadObjectMetadataFacet.mockResolvedValue({ value: [], cacheStatus: "remote" });
+  // TableStructureEditor probes the partition status for PostgreSQL tables
+  // (PR #6361); a resolved non-partitioned result keeps metadata loads on the
+  // original facet expectations unchanged.
+  mocks.getTablePartitionStatus.mockResolvedValue({ isPartitionedParent: false, isPartition: false });
 });
 
 afterEach(() => {
@@ -494,6 +500,39 @@ describe("TableStructureEditor local column order notice", () => {
     await nextTick();
 
     expect(mocks.toast).not.toHaveBeenCalled();
+  });
+});
+
+describe("TableStructureEditor horizontal scrolling", () => {
+  it("shows a fixed scrollbar for overflowing columns and syncs thumb dragging", async () => {
+    const root = await mountEditor("postgres");
+    const scroller = root.querySelector<HTMLElement>(".structure-table-scroller");
+    if (!scroller) throw new Error("Missing structure table scroller");
+    Object.defineProperties(scroller, {
+      clientWidth: { configurable: true, value: 400 },
+      scrollWidth: { configurable: true, value: 1200 },
+      scrollLeft: { configurable: true, value: 200, writable: true },
+    });
+
+    scroller.dispatchEvent(new Event("scroll"));
+    await nextTick();
+    await nextTick();
+
+    const track = root.querySelector<HTMLElement>(".structure-horizontal-scrollbar");
+    const thumb = root.querySelector<HTMLElement>(".structure-horizontal-scrollbar__thumb");
+    if (!track || !thumb) throw new Error("Missing fixed horizontal scrollbar");
+    expect(Number.parseFloat(thumb.style.width)).toBeCloseTo(100 / 3);
+    expect(Number.parseFloat(thumb.style.left)).toBeCloseTo(100 / 6);
+
+    track.getBoundingClientRect = () => DOMRect.fromRect({ width: 300, height: 10 });
+    document.body.style.userSelect = "text";
+    track.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, button: 0, clientX: 60, isPrimary: true }));
+    window.dispatchEvent(new PointerEvent("pointermove", { clientX: 160, isPrimary: true }));
+
+    expect(scroller.scrollLeft).toBeCloseTo(600);
+    expect(document.body.style.userSelect).toBe("none");
+    window.dispatchEvent(new PointerEvent("pointerup", { isPrimary: true }));
+    expect(document.body.style.userSelect).toBe("text");
   });
 });
 

@@ -120,6 +120,7 @@ import {
   type ObjectBrowserSortKey,
 } from "@/lib/table/objectBrowserRows";
 import { isSourceOnlyObjectBrowserRow, resolveRowClickAction, shouldDeferSingleClick, type ObjectBrowserRowAction } from "@/lib/table/objectBrowserRowAction";
+import { objectBrowserTableSelectionAnchor, objectBrowserTableSelectionRange } from "@/lib/table/objectBrowserSelection";
 import { customTypeCapabilities, supportsTypeObjectSource } from "@/lib/database/databaseObjectCapabilities";
 import { filterObjectBrowserTableColumns } from "@/lib/table/objectBrowserTableInfo";
 import { createSidePanelRequestGuard } from "@/lib/table/sidePanelRequestGuard";
@@ -247,6 +248,7 @@ const duplicateTableName = ref("");
 const showProcedureExecutionConfirm = ref(false);
 const procedureExecutionTarget = ref<ObjectBrowserRow | null>(null);
 const selectedTableIds = ref<Set<string>>(new Set());
+const tableSelectionAnchorId = ref<string | null>(null);
 const expandedPartitionParentIds = ref<Set<string>>(new Set());
 const showBatchDropConfirm = ref(false);
 const batchDropExecuting = ref(false);
@@ -852,7 +854,27 @@ function executeRowAction(row: ObjectBrowserRow, action: ObjectBrowserRowAction)
   }
 }
 
+function toggleTableSelectionWithAnchor(row: ObjectBrowserRow) {
+  toggleTableSelection(row);
+  tableSelectionAnchorId.value = row.id;
+}
+
+function selectTableRangeFromAnchor(row: ObjectBrowserRow) {
+  const anchorId = objectBrowserTableSelectionAnchor(filteredRows.value, tableSelectionAnchorId.value, row.id);
+  tableSelectionAnchorId.value = anchorId;
+  setSelectedTableIds(new Set(objectBrowserTableSelectionRange(filteredRows.value, anchorId, row.id)));
+}
+
 function onRowClick(row: ObjectBrowserRow, event: MouseEvent) {
+  if (row.type === "TABLE" && event.shiftKey) {
+    selectTableRangeFromAnchor(row);
+    return;
+  }
+  if (row.type === "TABLE" && (event.metaKey || event.ctrlKey)) {
+    toggleTableSelectionWithAnchor(row);
+    return;
+  }
+  if (row.type === "TABLE") tableSelectionAnchorId.value = row.id;
   const activation = settingsStore.editorSettings.sidebarActivation;
   const { action, isDouble } = resolveRowClickAction(row, event.detail, activation, effectiveDatabaseType.value);
   // Double click: cancel any pending single-click and fire immediately
@@ -1784,7 +1806,7 @@ async function confirmBatchEmptyTables() {
 async function exportStructure(row: ObjectBrowserRow) {
   try {
     const schema = row.schema || selectedSchema.value || props.database;
-    const ddl = await api.getTableDdl(props.connection.id, props.database, schema, row.name, tableDdlObjectType(row.type), props.catalog);
+    const ddl = await api.getTableDdl(props.connection.id, props.database, schema, row.name, tableDdlObjectType(row.type), props.catalog, true);
     await saveFileContent(buildSingleDdlExportFileContent(ddl), `${row.name}.sql`, "SQL", "sql");
   } catch (e: any) {
     console.error("Export structure failed:", e);

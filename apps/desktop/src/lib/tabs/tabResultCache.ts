@@ -34,6 +34,8 @@ export interface TabResultSnapshot {
   activeResultRunId?: string;
   queryAnalysis?: QueryTab["queryAnalysis"];
   querySourceColumns?: QueryTab["querySourceColumns"];
+  resultColumnComments?: QueryTab["resultColumnComments"];
+  queryDisplaySourceColumns?: QueryTab["queryDisplaySourceColumns"];
   queryEditabilityReason?: QueryTab["queryEditabilityReason"];
   mongoEditTarget?: QueryTab["mongoEditTarget"];
   tableMeta?: QueryTab["tableMeta"];
@@ -318,7 +320,11 @@ async function deleteIndexedDbCacheOwner(ownerId: string): Promise<void> {
 function clonePlain<T>(value: T): T {
   const raw = toRaw(value);
   if (typeof structuredClone === "function") return structuredClone(raw);
-  return JSON.parse(JSON.stringify(raw)) as T;
+  try {
+    return JSON.parse(JSON.stringify(raw)) as T;
+  } catch {
+    return raw;
+  }
 }
 
 function stripSessionIds(result: QueryResult | undefined): QueryResult | undefined {
@@ -727,6 +733,8 @@ export function buildTabResultSnapshot(tab: QueryTab): TabResultSnapshot | undef
     activeResultRunId: tab.activeResultRunId,
     queryAnalysis: tab.queryAnalysis ? clonePlain(tab.queryAnalysis) : undefined,
     querySourceColumns: tab.querySourceColumns ? [...tab.querySourceColumns] : undefined,
+    resultColumnComments: tab.resultColumnComments ? clonePlain(tab.resultColumnComments) : undefined,
+    queryDisplaySourceColumns: tab.queryDisplaySourceColumns ? [...tab.queryDisplaySourceColumns] : undefined,
     queryEditabilityReason: tab.queryEditabilityReason,
     mongoEditTarget: tab.mongoEditTarget ? clonePlain(tab.mongoEditTarget) : undefined,
     tableMeta: tab.tableMeta ? clonePlain(tab.tableMeta) : undefined,

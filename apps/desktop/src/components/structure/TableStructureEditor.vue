@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { AlertTriangle, Check, ChevronDown, ChevronUp, Copy, Database, Info, KeyRound, ListChevronsUpDown, Loader2, Maximize2, Plus, RefreshCw, Save, Search, Settings, SlidersHorizontal, Trash2, X } from "@lucide/vue";
 import { DropdownMenu, DropdownMenuCheckboxItem, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
@@ -24,7 +25,7 @@ import { type SqlHighlighter, createShikiSqlHighlighter } from "@/lib/sql/sqlHig
 import { joinSqlStatementsForScript } from "@/lib/sql/sqlBatchScript";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { formatSqlForDisplay, sqlFormatDialectForDbType } from "@/lib/sql/sqlFormatter";
-import { queryTimeoutSecsForConnection } from "@/lib/sql/queryTimeout";
+import { queryTimeoutSecsForConcurrentIndex, queryTimeoutSecsForConnection } from "@/lib/sql/queryTimeout";
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
 import { invalidateObjectDdl, loadObjectDdl } from "@/lib/metadata/objectDdlCache";
 import { loadObjectMetadataFacet, type ObjectMetadataFacet } from "@/lib/metadata/objectMetadataCache";
@@ -37,17 +38,20 @@ import { getSqliteDataTypeHelp } from "@/lib/table/sqliteDataTypeHelp";
 import { getTableMetadataCapabilities, firstStructureMetadataTab, isStructureMetadataTabSupported } from "@/lib/table/tableMetadataCapabilities";
 import { hasTableStructureRefreshWork, unloadedTableStructureRefreshScope, visibleTableStructureRefreshScope, type TableStructureRefreshScope } from "@/lib/table/tableStructureMetadataLoading";
 import { canAddTableStructureColumn, getTableStructureCapabilities, hasLocalTableColumnOrderChange, isPhysicalTableColumnOrderChange, sanitizeStructureIndexesForCapabilities, supportsLocalTableColumnReorder } from "@/lib/table/tableStructureCapabilities";
+import { getConcurrentIndexAvailability, concurrentIndexNamesInStatements, normalizeUnsupportedConcurrentIndexes, type ConcurrentIndexAvailability } from "@/lib/table/concurrentIndexAvailability";
 import { orderedColumnIndexes, uniqueDataGridColumnOrderKeys } from "@/lib/dataGrid/dataGridColumnOrder";
 import { loadTableDataGridColumnOrder, notifyTableDataGridColumnOrderChanged, removeTableDataGridColumnOrder, saveTableDataGridColumnOrder, tableDataGridColumnOrderScopeKey } from "@/lib/dataGrid/dataGridColumnLayoutStorage";
 import { connectionObjectTreeQuerySchema, tableStructureDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
-import type { TableInfoTab, TableStructureEditorDraft, TableStructureEditorTarget, TableStructureEditorViewport } from "@/types/database";
+import type { ColumnInfo, ConstraintInfo, TableInfo, TableInfoTab, TableStructureEditorDraft, TableStructureEditorTarget, TableStructureEditorViewport } from "@/types/database";
 import {
   applyManticoreDdlColumnExtras,
   buildStructureTargetLabel,
   canEditStructuredTriggerDraft,
   canEditManticoreColumnProperties,
+  cloneColumnDraftAsNew,
   combineDataTypeForDatabase,
   combineDataTypeForDatabaseWithLengthUnit,
+  createCopiedColumnDrafts,
   createColumnDrafts,
   createForeignKeyDrafts,
   createIndexDrafts,
@@ -76,6 +80,7 @@ import {
   restoreCharacterLengthUnitsAfterSave,
   sameStructureIndexType,
   splitDataType,
+  tableStructureIdentifierComparisonKey,
   toColumnNames,
 } from "@/lib/table/tableStructureEditorState";
 import { CREATE_DATABASE_CHARSET_OPTIONS, createDatabaseCollationOptionsForCharset, fallbackCreateDatabaseCharsetMetadata, normalizeCreateDatabaseCharsetKey, parseCreateDatabaseCharsetMetadata } from "@/lib/database/createDatabaseCharsetOptions";
@@ -95,8 +100,12 @@ type StructureScrollerRef = HTMLElement | { $el?: HTMLElement };
 const columnsScrollerRef = ref<StructureScrollerRef>();
 const indexesScrollerRef = ref<StructureScrollerRef>();
 const foreignKeysScrollerRef = ref<StructureScrollerRef>();
+const constraintsScrollerRef = ref<StructureScrollerRef>();
 const triggersScrollerRef = ref<StructureScrollerRef>();
 const ddlScrollerRef = ref<StructureScrollerRef>();
+const structureHorizontalScrollbarTrackRef = ref<HTMLDivElement>();
+const structureHorizontalScrollbarThumbRef = ref<HTMLDivElement>();
+const hasStructureHorizontalOverflow = ref(false);
 const dynamicDataTypeOptionsCache = new Map<string, string[]>();
 
 const sqlHighlighter = ref<SqlHighlighter>();
@@ -141,6 +150,7 @@ const sqlPreviewLoading = ref(false);
 const sqlPreviewPending = ref(false);
 const indexesLoading = ref(false);
 const foreignKeysLoading = ref(false);
+const constraintsLoading = ref(false);
 const triggersLoading = ref(false);
 const ddlContent = ref("");
 const ddlLoading = ref(false);
@@ -187,14 +197,41 @@ async function fetchDdl(force = false) {
 }
 const errorMessage = ref("");
 const columns = ref<EditableStructureColumn[]>([]);
+const copyColumnsDialogOpen = ref(false);
+const copySourceTables = ref<TableInfo[]>([]);
+const copySourceTableName = ref("");
+const copySourceColumns = ref<ColumnInfo[]>([]);
+const copySourceColumnSearch = ref("");
+const selectedCopySourceColumnNames = ref<string[]>([]);
+const copySourceTablesLoading = ref(false);
+const copySourceColumnsLoading = ref(false);
+const copySourceError = ref("");
+let copySourceColumnsRequestId = 0;
 const indexes = ref<EditableStructureIndex[]>([]);
+/** PostgreSQL partitioned parent (`relkind = 'p'`): `CREATE INDEX CONCURRENTLY`
+ * is rejected by the server on such tables, so the option is disabled here and
+ * the SQL builder refuses any concurrent request on it (fail closed). */
+const isPartitionedParent = ref(false);
+/** Whether the last partition-status probe succeeded. When it cannot be
+ * verified (probe failed), Concurrent is disabled — we must not assume a
+ * non-partitioned table we could not check. */
+const partitionStatusKnown = ref(true);
+/** Set when a `concurrently: true` index draft had to be normalized away
+ * because Concurrent availability became unknown/unsupported (partition probe
+ * failure, partitioned parent, capability loss). While set, no SQL is
+ * generated and Save stays blocked until the user re-verifies (the next
+ * successful probe clears it) — a cleared flag must never silently degrade
+ * into a blocking `CREATE INDEX`. */
+const concurrentAvailabilityInvalidated = ref(false);
 const pendingStatements = ref<string[]>([]);
 const warnings = ref<string[]>([]);
 const sqliteSchemaRevision = ref<string>();
 const foreignKeys = ref<EditableStructureForeignKey[]>([]);
+const constraints = ref<ConstraintInfo[]>([]);
+const constraintsLoaded = ref(false);
 const triggers = ref<EditableStructureTrigger[]>([]);
 const triggersLoaded = ref(false);
-const secondaryMetadataLoading = computed(() => indexesLoading.value || foreignKeysLoading.value || triggersLoading.value);
+const secondaryMetadataLoading = computed(() => indexesLoading.value || foreignKeysLoading.value || constraintsLoading.value || triggersLoading.value);
 
 function sameList(left: string[] | null | undefined, right: string[] | null | undefined): boolean {
   const a = left ?? [];
@@ -233,7 +270,8 @@ function indexChanged(index: EditableStructureIndex): boolean {
     !sameText(index.filter, original.filter) ||
     !sameStructureIndexType(index.indexType, original.index_type) ||
     !sameList(index.includedColumns, original.included_columns) ||
-    !sameText(index.comment, original.comment)
+    !sameText(index.comment, original.comment) ||
+    !!index.concurrently
   );
 }
 
@@ -262,6 +300,10 @@ function captureStructureRefreshScope(): TableStructureRefreshScope {
     columns: columns.value.some(columnChanged),
     indexes: indexes.value.some(indexChanged),
     foreignKeys: foreignKeys.value.some(foreignKeyChanged),
+    // Constraints have no editable draft of their own, but column/index/FK
+    // saves can change what constraints exist (e.g. toggling a primary key),
+    // so refresh the tab if it was ever loaded rather than leaving it stale.
+    constraints: constraintsLoaded.value,
     triggers: triggers.value.some(triggerChanged),
     tableComment: tableComment.value !== originalTableComment.value,
   };
@@ -278,7 +320,7 @@ const STRUCTURE_COLUMNS_WIDTHS_STORAGE_KEY = "dbx-structure-editor-column-widths
 const STRUCTURE_INDEX_COLUMNS_WIDTHS_STORAGE_KEY = "dbx-structure-editor-index-column-widths";
 const STRUCTURE_SQL_PREVIEW_COLLAPSED_STORAGE_KEY = "dbx-structure-editor-sql-preview-collapsed";
 const STRUCTURE_COLUMN_WIDTH_COUNT = 12;
-const STRUCTURE_INDEX_COLUMN_WIDTH_COUNT = 8;
+const STRUCTURE_INDEX_COLUMN_WIDTH_COUNT = 9;
 const PERSISTED_STRUCTURE_INDEX_COLUMN_WIDTHS = new Set([0, 1, 6]);
 const structureDensityMetrics: Record<
   StructureEditorDensity,
@@ -303,7 +345,7 @@ const structureDensityMetrics: Record<
 > = {
   compact: {
     columns: [28, 168, 136, 82, 60, 52, 108, 220, 80, 120, 144, 108],
-    indexes: [120, 180, 60, 88, 124, 144, 120, 70],
+    indexes: [120, 180, 60, 88, 124, 144, 120, 84, 70],
     minColumnWidth: 24,
     minLengthColumnWidth: 140,
     minIndexColumnWidth: 48,
@@ -321,7 +363,7 @@ const structureDensityMetrics: Record<
   },
   standard: {
     columns: [32, 200, 160, 104, 72, 64, 128, 260, 90, 140, 160, 136],
-    indexes: [148, 224, 72, 108, 148, 180, 148, 84],
+    indexes: [148, 224, 72, 108, 148, 180, 148, 100, 84],
     minColumnWidth: 28,
     minLengthColumnWidth: 156,
     minIndexColumnWidth: 60,
@@ -339,7 +381,7 @@ const structureDensityMetrics: Record<
   },
   comfortable: {
     columns: [36, 232, 188, 116, 84, 76, 152, 300, 100, 160, 188, 148],
-    indexes: [176, 260, 84, 124, 176, 216, 176, 104],
+    indexes: [176, 260, 84, 124, 176, 216, 176, 116, 104],
     minColumnWidth: 32,
     minLengthColumnWidth: 176,
     minIndexColumnWidth: 64,
@@ -800,7 +842,17 @@ const colLabels = computed(() => {
   labels.push({ key: "actions", label: t("structureEditor.actions"), widthIndex: 11 });
   return labels;
 });
-const indexColLabels = computed(() => [t("structureEditor.indexName"), t("structureEditor.indexColumns"), t("structureEditor.unique"), t("structureEditor.indexType"), t("structureEditor.includedColumns"), t("structureEditor.filter"), t("structureEditor.comment"), t("structureEditor.actions")]);
+const indexColLabels = computed(() => [
+  t("structureEditor.indexName"),
+  t("structureEditor.indexColumns"),
+  t("structureEditor.unique"),
+  t("structureEditor.indexType"),
+  t("structureEditor.includedColumns"),
+  t("structureEditor.filter"),
+  t("structureEditor.comment"),
+  t("structureEditor.concurrent"),
+  t("structureEditor.actions"),
+]);
 const filteredColumnRowIds = computed(() => {
   const query = columnSearchText.value.trim().toLowerCase();
   if (!query) return new Set<string>();
@@ -860,6 +912,17 @@ let syncingDraft = false;
 let draftHydrated = false;
 let hydratingRestoredDraft = false;
 let structureScrollFrame = 0;
+let structureHorizontalScrollbarThumbLeftPercent = 0;
+let structureHorizontalScrollbarThumbWidthPercent = 100;
+let structureHorizontalScrollbarResizeObserver: ResizeObserver | null = null;
+let structureHorizontalScrollbarObserverGeneration = 0;
+let structureHorizontalScrollbarPreviousUserSelect: string | null = null;
+let structureHorizontalScrollbarDragState: {
+  scroller: HTMLElement;
+  trackRect: DOMRect;
+  thumbOffsetPx: number;
+  maxScrollLeft: number;
+} | null = null;
 // A context-menu target may arrive before metadata rows render, so search text
 // and row scrolling are tracked separately for each request.
 let appliedInitialTargetSearchKey = "";
@@ -881,9 +944,107 @@ function structureScrollerForTab(tab: TableInfoTab): HTMLElement | undefined {
   if (tab === "columns") return structureScrollerElement(columnsScrollerRef.value);
   if (tab === "indexes") return structureScrollerElement(indexesScrollerRef.value);
   if (tab === "foreignKeys") return structureScrollerElement(foreignKeysScrollerRef.value);
+  if (tab === "constraints") return structureScrollerElement(constraintsScrollerRef.value);
   if (tab === "triggers") return structureScrollerElement(triggersScrollerRef.value);
   if (tab === "ddl") return structureScrollerElement(ddlScrollerRef.value);
   return undefined;
+}
+
+function activeStructureHorizontalScroller(): HTMLElement | undefined {
+  if (activeTab.value !== "columns" && activeTab.value !== "indexes") return undefined;
+  return structureScrollerForTab(activeTab.value);
+}
+
+function applyStructureHorizontalScrollbarThumbStyle(): boolean {
+  const thumb = structureHorizontalScrollbarThumbRef.value;
+  if (!thumb) return false;
+  thumb.style.width = `${structureHorizontalScrollbarThumbWidthPercent}%`;
+  thumb.style.left = `${structureHorizontalScrollbarThumbLeftPercent}%`;
+  return true;
+}
+
+function updateStructureHorizontalScrollbar(scroller = activeStructureHorizontalScroller()) {
+  if (!scroller) {
+    hasStructureHorizontalOverflow.value = false;
+    return;
+  }
+  const maxScrollLeft = Math.max(0, scroller.scrollWidth - scroller.clientWidth);
+  const hasOverflow = maxScrollLeft > 1;
+  hasStructureHorizontalOverflow.value = hasOverflow;
+  const thumbWidth = scroller.scrollWidth > 0 ? Math.min(100, Math.max(6, (scroller.clientWidth / scroller.scrollWidth) * 100)) : 100;
+  structureHorizontalScrollbarThumbWidthPercent = thumbWidth;
+  structureHorizontalScrollbarThumbLeftPercent = maxScrollLeft > 0 ? (scroller.scrollLeft / maxScrollLeft) * Math.max(0, 100 - thumbWidth) : 0;
+  if (!applyStructureHorizontalScrollbarThumbStyle() && hasOverflow) void nextTick(applyStructureHorizontalScrollbarThumbStyle);
+}
+
+function observeStructureHorizontalScroller() {
+  const generation = ++structureHorizontalScrollbarObserverGeneration;
+  structureHorizontalScrollbarResizeObserver?.disconnect();
+  structureHorizontalScrollbarResizeObserver = null;
+  const tab = activeTab.value;
+  void nextTick(() => {
+    if (generation !== structureHorizontalScrollbarObserverGeneration || tab !== activeTab.value) return;
+    const scroller = activeStructureHorizontalScroller();
+    updateStructureHorizontalScrollbar(scroller);
+    if (!scroller || typeof ResizeObserver === "undefined") return;
+    structureHorizontalScrollbarResizeObserver = new ResizeObserver(() => updateStructureHorizontalScrollbar(scroller));
+    structureHorizontalScrollbarResizeObserver.observe(scroller);
+    for (const child of Array.from(scroller.children)) structureHorizontalScrollbarResizeObserver.observe(child);
+  });
+}
+
+function applyStructureHorizontalScrollbarDrag(clientX: number) {
+  const dragState = structureHorizontalScrollbarDragState;
+  if (!dragState) return;
+  const thumbWidthPx = dragState.trackRect.width * (structureHorizontalScrollbarThumbWidthPercent / 100);
+  const maxThumbLeftPx = Math.max(1, dragState.trackRect.width - thumbWidthPx);
+  const thumbLeftPx = Math.min(maxThumbLeftPx, Math.max(0, clientX - dragState.trackRect.left - dragState.thumbOffsetPx));
+  dragState.scroller.scrollLeft = (thumbLeftPx / maxThumbLeftPx) * dragState.maxScrollLeft;
+  updateStructureHorizontalScrollbar(dragState.scroller);
+}
+
+function onStructureHorizontalScrollbarPointerMove(event: PointerEvent) {
+  if (!structureHorizontalScrollbarDragState) return;
+  event.preventDefault();
+  applyStructureHorizontalScrollbarDrag(event.clientX);
+}
+
+function stopStructureHorizontalScrollbarDrag() {
+  if (!structureHorizontalScrollbarDragState) return;
+  structureHorizontalScrollbarDragState = null;
+  structureHorizontalScrollbarTrackRef.value?.classList.remove("structure-horizontal-scrollbar--dragging");
+  window.removeEventListener("pointermove", onStructureHorizontalScrollbarPointerMove, true);
+  window.removeEventListener("pointerup", stopStructureHorizontalScrollbarDrag, true);
+  window.removeEventListener("pointercancel", stopStructureHorizontalScrollbarDrag, true);
+  document.body.style.userSelect = structureHorizontalScrollbarPreviousUserSelect ?? "";
+  structureHorizontalScrollbarPreviousUserSelect = null;
+}
+
+function startStructureHorizontalScrollbarDrag(event: PointerEvent) {
+  if (event.button !== 0 || !event.isPrimary) return;
+  const scroller = activeStructureHorizontalScroller();
+  const track = structureHorizontalScrollbarTrackRef.value;
+  if (!scroller || !track || !hasStructureHorizontalOverflow.value) return;
+  const maxScrollLeft = Math.max(0, scroller.scrollWidth - scroller.clientWidth);
+  if (maxScrollLeft <= 1) return;
+  const trackRect = track.getBoundingClientRect();
+  const thumbLeftPx = trackRect.width * (structureHorizontalScrollbarThumbLeftPercent / 100);
+  const thumbWidthPx = trackRect.width * (structureHorizontalScrollbarThumbWidthPercent / 100);
+  const pointerX = event.clientX - trackRect.left;
+  structureHorizontalScrollbarDragState = {
+    scroller,
+    trackRect,
+    thumbOffsetPx: pointerX >= thumbLeftPx && pointerX <= thumbLeftPx + thumbWidthPx ? pointerX - thumbLeftPx : thumbWidthPx / 2,
+    maxScrollLeft,
+  };
+  track.classList.add("structure-horizontal-scrollbar--dragging");
+  structureHorizontalScrollbarPreviousUserSelect = document.body.style.userSelect;
+  document.body.style.userSelect = "none";
+  window.addEventListener("pointermove", onStructureHorizontalScrollbarPointerMove, true);
+  window.addEventListener("pointerup", stopStructureHorizontalScrollbarDrag, true);
+  window.addEventListener("pointercancel", stopStructureHorizontalScrollbarDrag, true);
+  event.preventDefault();
+  applyStructureHorizontalScrollbarDrag(event.clientX);
 }
 
 function restoreStructureScrollPosition(tab = activeTab.value) {
@@ -894,12 +1055,14 @@ function restoreStructureScrollPosition(tab = activeTab.value) {
     if (!scroller) return;
     scroller.scrollTop = Math.max(0, position.scrollTop);
     scroller.scrollLeft = Math.max(0, position.scrollLeft);
+    if (tab === "columns" || tab === "indexes") updateStructureHorizontalScrollbar(scroller);
   });
 }
 
 function onStructureContentScroll(tab: TableInfoTab, event: Event) {
   const target = event.currentTarget;
   if (!(target instanceof HTMLElement)) return;
+  if (tab === "columns" || tab === "indexes") updateStructureHorizontalScrollbar(target);
   const position: TableStructureEditorViewport = {
     scrollTop: Math.max(0, Math.round(target.scrollTop)),
     scrollLeft: Math.max(0, Math.round(target.scrollLeft)),
@@ -927,6 +1090,8 @@ function createCurrentDraft(initialized = true): TableStructureEditorDraft {
     columns: cloneDraftValue(columns.value),
     indexes: cloneDraftValue(indexes.value),
     foreignKeys: cloneDraftValue(foreignKeys.value),
+    constraints: cloneDraftValue(constraints.value),
+    constraintsLoaded: constraintsLoaded.value,
     triggers: cloneDraftValue(triggers.value),
     triggersLoaded: triggersLoaded.value,
     loadedMetadataFacets: [...loadedMetadataFacets],
@@ -951,8 +1116,19 @@ function restoreDraft(draft: TableStructureEditorDraft) {
   tableComment.value = draft.tableComment || "";
   originalTableComment.value = draft.originalTableComment || "";
   columns.value = cloneDraftValue(draft.columns || []);
-  indexes.value = cloneDraftValue(draft.indexes || []);
+  // Existing-index edits never support Concurrent (the checkbox is disabled and
+  // the core builder rejects the request), so a stale `concurrently: true`
+  // saved in a restored draft must not be submitted or deadlock the save.
+  indexes.value = cloneDraftValue(draft.indexes || []).map((index) => (index.original ? { ...index, concurrently: false } : index));
+  // Re-run the availability normalization against the current inputs (e.g. a
+  // re-activated editor may already carry an unknown/unsupported partition
+  // status): restored new-index Concurrent choices that became illegal are
+  // normalized away with the same fail-closed invalidation as a probe failure.
+  normalizeConcurrentIndexDraftsForCurrentAvailability();
   foreignKeys.value = cloneDraftValue(draft.foreignKeys || []);
+  constraints.value = cloneDraftValue(draft.constraints || []);
+  // Drafts created before constraint loading existed have no saved facet.
+  constraintsLoaded.value = draft.constraintsLoaded ?? false;
   triggers.value = cloneDraftValue(draft.triggers || []);
   // Drafts created before lazy trigger loading always contained live trigger metadata.
   triggersLoaded.value = draft.triggersLoaded ?? true;
@@ -964,6 +1140,7 @@ function restoreDraft(draft: TableStructureEditorDraft) {
     if (activeScope.columns) loadedMetadataFacets.add("columns");
     if (activeScope.indexes || draft.indexes?.length) loadedMetadataFacets.add("indexes");
     if (activeScope.foreignKeys || draft.foreignKeys?.length) loadedMetadataFacets.add("foreign-keys");
+    if (activeScope.constraints || constraintsLoaded.value) loadedMetadataFacets.add("constraints");
     if (activeScope.triggers || triggersLoaded.value) loadedMetadataFacets.add("triggers");
     if (activeScope.tableComment) loadedMetadataFacets.add("comment");
   }
@@ -1164,14 +1341,38 @@ function structureChangeOptions(): BuildTableStructureChangeSqlOptions {
     triggers: triggers.value,
     tableComment: tableComment.value,
     originalTableComment: isCreateMode.value ? undefined : originalTableComment.value,
+    partitioned: isPartitionedParent.value,
   };
 }
 
 async function refreshSqlPreview() {
   const requestId = ++sqlPreviewRequestId;
+  if (concurrentAvailabilityInvalidated.value) {
+    // Availability gap in effect: never regenerate SQL here — doing so would
+    // turn a lost Concurrent request into a silent blocking CREATE INDEX. Keep
+    // the explicit error visible until a later probe re-verifies the table.
+    pendingStatements.value = [];
+    warnings.value = [t("structureEditor.concurrentUnavailableBlocksSave")];
+    sqliteSchemaRevision.value = undefined;
+    sqlPreviewLoading.value = false;
+    sqlPreviewPending.value = false;
+    return;
+  }
   if (!hasPendingStructureChanges()) {
     pendingStatements.value = [];
     warnings.value = [];
+    sqliteSchemaRevision.value = undefined;
+    sqlPreviewLoading.value = false;
+    sqlPreviewPending.value = false;
+    return;
+  }
+  // Layer B: a stale `concurrently: true` whose availability is no longer
+  // enabled must never reach the SQL builder, even if normalization was
+  // skipped (race, restored draft, non-UI caller).
+  const blockingConcurrentWarning = concurrentIndexBlockingWarning();
+  if (blockingConcurrentWarning) {
+    pendingStatements.value = [];
+    warnings.value = [blockingConcurrentWarning];
     sqliteSchemaRevision.value = undefined;
     sqlPreviewLoading.value = false;
     sqlPreviewPending.value = false;
@@ -1208,6 +1409,7 @@ const canApply = computed(
     !sqlPreviewPending.value &&
     pendingStatements.value.length > 0 &&
     warnings.value.length === 0 &&
+    !concurrentAvailabilityInvalidated.value &&
     (!hasSqliteTypeChange.value || !!sqliteSchemaRevision.value) &&
     !!props.connectionId &&
     (isCreateMode.value ? !!newTableName.value.trim() : !!props.tableName),
@@ -1226,14 +1428,20 @@ function resetState() {
   sqlPreviewPending.value = false;
   indexesLoading.value = false;
   foreignKeysLoading.value = false;
+  constraintsLoading.value = false;
   triggersLoading.value = false;
   errorMessage.value = "";
+  isPartitionedParent.value = false;
+  partitionStatusKnown.value = true;
+  concurrentAvailabilityInvalidated.value = false;
   columns.value = [];
   indexes.value = [];
   pendingStatements.value = [];
   warnings.value = [];
   sqliteSchemaRevision.value = undefined;
   foreignKeys.value = [];
+  constraints.value = [];
+  constraintsLoaded.value = false;
   triggers.value = [];
   triggersLoaded.value = false;
   selectedColumnId.value = null;
@@ -1259,6 +1467,10 @@ async function reloadStructureFromDatabase() {
     triggers.value = [];
     triggersLoaded.value = false;
   }
+  if (activeTab.value !== "constraints") {
+    constraints.value = [];
+    constraintsLoaded.value = false;
+  }
   const refreshDdl = activeTab.value === "ddl";
   const metadataMatch = { connectionId: props.connectionId, database: props.database, schema: metadataSchema.value, tableName: props.tableName };
   invalidateTableMetadataCache(metadataMatch);
@@ -1275,6 +1487,7 @@ async function reloadStructureFromDatabase() {
 function setSecondaryMetadataLoading(scope: TableStructureRefreshScope, value: boolean) {
   if (scope.indexes && tableMetadataCapabilities.value.indexes) indexesLoading.value = value;
   if (scope.foreignKeys && tableMetadataCapabilities.value.foreignKeys) foreignKeysLoading.value = value;
+  if (scope.constraints && tableMetadataCapabilities.value.constraints) constraintsLoading.value = value;
   if (scope.triggers && tableMetadataCapabilities.value.triggers) triggersLoading.value = value;
 }
 
@@ -1319,6 +1532,18 @@ async function loadStructure(
 
     const metadataRequest = ddlRequest();
     const forceMetadata = options.forceMetadata === true;
+    const partitionStatusPromise =
+      databaseType.value === "postgres" && !isCreateMode.value
+        ? api
+            .getTablePartitionStatus(connectionId, database, schema, tableName)
+            // No reactive mutation inside the catch: a stale request must not
+            // overwrite a newer probe's result (the structureLoadRequestId
+            // guard below decides). Fail closed — without a verified partition
+            // status we cannot rule out a partitioned parent, so Concurrent is
+            // treated as unavailable until a later reload re-runs the probe.
+            .then((status) => ({ known: true, status }))
+            .catch(() => ({ known: false, status: { isPartitionedParent: false, isPartition: false } }))
+        : Promise.resolve({ known: true, status: { isPartitionedParent: false, isPartition: false } });
     const columnsPromise = scope.columns ? loadObjectMetadataFacet(metadataRequest, "columns", () => api.getColumns(connectionId, database, schema, tableName, catalog), { force: forceMetadata }).then((result) => result.value) : Promise.resolve(undefined);
     const indexesPromise = scope.indexes
       ? tableMetadataCapabilities.value.indexes
@@ -1328,6 +1553,11 @@ async function loadStructure(
     const foreignKeysPromise = scope.foreignKeys
       ? tableMetadataCapabilities.value.foreignKeys
         ? loadObjectMetadataFacet(metadataRequest, "foreign-keys", () => api.listForeignKeys(connectionId, database, schema, tableName, catalog).catch(() => []), { force: forceMetadata }).then((result) => result.value)
+        : Promise.resolve([])
+      : Promise.resolve(undefined);
+    const constraintsPromise = scope.constraints
+      ? tableMetadataCapabilities.value.constraints
+        ? loadObjectMetadataFacet(metadataRequest, "constraints", () => api.listConstraints(connectionId, database, schema, tableName, catalog).catch(() => []), { force: forceMetadata }).then((result) => result.value)
         : Promise.resolve([])
       : Promise.resolve(undefined);
     const triggersPromise = scope.triggers
@@ -1365,8 +1595,22 @@ async function loadStructure(
       tableComment.value = nextTableComment;
       loadedMetadataFacets.add("comment");
     }
+    const partitionStatus = await partitionStatusPromise;
+    if (requestId === structureLoadRequestId) {
+      partitionStatusKnown.value = partitionStatus.known;
+      isPartitionedParent.value = partitionStatus.status.isPartitionedParent;
+      // Availability inputs changed: fail closed while the status is unknown,
+      // but preserve the user's Concurrent intent so a later successful probe
+      // can regenerate the same SQL. Definitive unsupported states still clear
+      // the flag. A partitioned parent or unknown status keeps Save blocked.
+      normalizeConcurrentIndexDraftsForCurrentAvailability();
+      if (partitionStatus.known && !partitionStatus.status.isPartitionedParent && structureCapabilities.value.indexConcurrent && structureCapabilities.value.createIndex && concurrentAvailabilityInvalidated.value) {
+        concurrentAvailabilityInvalidated.value = false;
+        scheduleSqlPreviewRefresh();
+      }
+    }
     const applySecondaryMetadata = async () => {
-      const [nextIndexes, nextForeignKeys, nextTriggers] = await Promise.all([indexesPromise, foreignKeysPromise, triggersPromise]);
+      const [nextIndexes, nextForeignKeys, nextConstraints, nextTriggers] = await Promise.all([indexesPromise, foreignKeysPromise, constraintsPromise, triggersPromise]);
       if (requestId !== structureLoadRequestId) return;
       if (nextIndexes) {
         indexes.value = createIndexDrafts(nextIndexes);
@@ -1375,6 +1619,11 @@ async function loadStructure(
       if (nextForeignKeys) {
         foreignKeys.value = createForeignKeyDrafts(nextForeignKeys);
         loadedMetadataFacets.add("foreign-keys");
+      }
+      if (nextConstraints) {
+        constraints.value = nextConstraints;
+        constraintsLoaded.value = true;
+        loadedMetadataFacets.add("constraints");
       }
       if (nextTriggers) {
         triggers.value = createTriggerDrafts(nextTriggers);
@@ -1435,6 +1684,107 @@ async function focusColumnNameInput(columnId: string) {
 function onColumnRowActivate(column: EditableStructureColumn) {
   if (column.markedForDrop || !columns.value.some((item) => item.id === column.id)) return;
   selectedColumnId.value = column.id;
+}
+
+function normalizedColumnSearch(value: string): string {
+  return value.trim().toLowerCase();
+}
+
+const copyableSourceColumns = computed(() => {
+  const databaseInfo = connection.value?.database_info;
+  const existingNames = new Set(columns.value.filter((column) => !column.markedForDrop).map((column) => tableStructureIdentifierComparisonKey(column.name, databaseType.value, databaseInfo)));
+  return copySourceColumns.value.map((column) => ({
+    column,
+    alreadyExists: existingNames.has(tableStructureIdentifierComparisonKey(column.name, databaseType.value, databaseInfo)),
+  }));
+});
+
+const filteredCopyableSourceColumns = computed(() => {
+  const search = normalizedColumnSearch(copySourceColumnSearch.value);
+  if (!search) return copyableSourceColumns.value;
+  return copyableSourceColumns.value.filter(({ column }) => [column.name, column.data_type, column.comment ?? ""].some((value) => normalizedColumnSearch(value).includes(search)));
+});
+
+const copyableSourceColumnNames = computed(() => copyableSourceColumns.value.filter(({ alreadyExists }) => !alreadyExists).map(({ column }) => column.name));
+const selectedCopySourceColumns = computed(() => {
+  const selected = new Set(selectedCopySourceColumnNames.value);
+  return copyableSourceColumns.value.filter(({ column, alreadyExists }) => !alreadyExists && selected.has(column.name)).map(({ column }) => column);
+});
+const allCopyableSourceColumnsSelected = computed(() => copyableSourceColumnNames.value.length > 0 && copyableSourceColumnNames.value.every((name) => selectedCopySourceColumnNames.value.includes(name)));
+
+async function openCopyColumnsDialog() {
+  if (!canAddColumn.value || !props.connectionId || !props.database) return;
+  copyColumnsDialogOpen.value = true;
+  copySourceTableName.value = "";
+  copySourceColumns.value = [];
+  copySourceColumnSearch.value = "";
+  selectedCopySourceColumnNames.value = [];
+  copySourceError.value = "";
+  copySourceColumnsRequestId++;
+  copySourceColumnsLoading.value = false;
+  copySourceTables.value = [];
+  copySourceTablesLoading.value = true;
+  try {
+    await store.ensureConnected(props.connectionId);
+    const databaseInfo = connection.value?.database_info;
+    const currentTableIdentifierKey = tableStructureIdentifierComparisonKey(props.tableName, databaseType.value, databaseInfo);
+    copySourceTables.value = (await api.listTables(props.connectionId, props.database, metadataSchema.value, undefined, undefined, undefined, undefined, props.catalog)).filter((table) => {
+      const tableType = table.table_type.toUpperCase();
+      return tableType !== "VIEW" && tableType !== "MATERIALIZED_VIEW" && (isCreateMode.value || tableStructureIdentifierComparisonKey(table.name, databaseType.value, databaseInfo) !== currentTableIdentifierKey);
+    });
+  } catch (error: any) {
+    copySourceTables.value = [];
+    copySourceError.value = error?.message || String(error);
+  } finally {
+    copySourceTablesLoading.value = false;
+  }
+}
+
+async function loadCopySourceColumns(tableName: string) {
+  copySourceTableName.value = tableName;
+  copySourceColumns.value = [];
+  copySourceColumnSearch.value = "";
+  selectedCopySourceColumnNames.value = [];
+  copySourceError.value = "";
+  if (!tableName || !props.connectionId || !props.database) return;
+  const requestId = ++copySourceColumnsRequestId;
+  copySourceColumnsLoading.value = true;
+  try {
+    const sourceColumns = await api.getColumns(props.connectionId, props.database, metadataSchema.value, tableName, props.catalog);
+    if (requestId !== copySourceColumnsRequestId) return;
+    copySourceColumns.value = sourceColumns;
+    selectedCopySourceColumnNames.value = copyableSourceColumns.value.filter(({ alreadyExists }) => !alreadyExists).map(({ column }) => column.name);
+  } catch (error: any) {
+    if (requestId !== copySourceColumnsRequestId) return;
+    copySourceError.value = error?.message || String(error);
+  } finally {
+    if (requestId === copySourceColumnsRequestId) copySourceColumnsLoading.value = false;
+  }
+}
+
+function toggleCopySourceColumns() {
+  selectedCopySourceColumnNames.value = allCopyableSourceColumnsSelected.value ? [] : [...copyableSourceColumnNames.value];
+}
+
+function applyCopiedColumns() {
+  const copiedColumns = createCopiedColumnDrafts(selectedCopySourceColumns.value, databaseType.value, uuid);
+  if (!copiedColumns.length) return;
+  const insertAt = resolveInsertColumnIndex(columns.value, selectedColumnId.value);
+  columns.value.splice(insertAt, 0, ...copiedColumns);
+  selectedColumnId.value = copiedColumns[copiedColumns.length - 1]?.id ?? selectedColumnId.value;
+  if (usesLocalTableColumnOrder.value) persistLocalColumnOrder(false);
+  copyColumnsDialogOpen.value = false;
+}
+
+async function copyColumn(column: EditableStructureColumn) {
+  if (!canAddColumn.value || column.markedForDrop) return;
+  const sourceIndex = columns.value.findIndex((item) => item.id === column.id);
+  if (sourceIndex < 0) return;
+  const copiedColumn = cloneColumnDraftAsNew(column, uuid);
+  columns.value.splice(sourceIndex + 1, 0, copiedColumn);
+  selectedColumnId.value = copiedColumn.id;
+  if (usesLocalTableColumnOrder.value) persistLocalColumnOrder(false);
+  await focusColumnNameInput(copiedColumn.id);
 }
 
 async function addColumn() {
@@ -2084,6 +2434,7 @@ function addIndex() {
     indexType: "",
     includedColumns: [],
     comment: "",
+    concurrently: false,
     markedForDrop: false,
   });
   void nextTick(() => {
@@ -2164,6 +2515,89 @@ function canEditIndexDraft(index: EditableStructureIndex): boolean {
   if (index.markedForDrop || index.isPrimary) return false;
   if (!index.original) return structureCapabilities.value.createIndex;
   return structureCapabilities.value.rebuildIndex && structureCapabilities.value.createIndex && structureCapabilities.value.dropIndex;
+}
+
+/**
+ * Whether the Concurrent checkbox is actionable for this index draft.
+ *
+ * Plan A scope guard (PR #6361 review): concurrent builds apply only to newly
+ * created indexes on non-partitioned tables. Editing an existing index would
+ * require a `DROP INDEX CONCURRENTLY` + `CREATE INDEX CONCURRENTLY` replace
+ * flow (not implemented yet), PostgreSQL rejects `CREATE INDEX CONCURRENTLY`
+ * on partitioned parents, and an unverifiable partition status fails closed —
+ * all of those disable the checkbox here. The core SQL builder enforces the
+ * same scope as a hard error, so this is only the first layer.
+ */
+function concurrentIndexAvailability(index: EditableStructureIndex): ConcurrentIndexAvailability {
+  if (indexesLoading.value) return { enabled: false, reason: "unknown" };
+  return concurrentIndexAvailabilityState(index);
+}
+
+/** Same decision as [`concurrentIndexAvailability`], independent of the
+ * indexes-loading flag — state-normalization runs while metadata may still be
+ * in flight, and must decide on the availability inputs alone. */
+function concurrentIndexAvailabilityState(index: EditableStructureIndex): ConcurrentIndexAvailability {
+  return getConcurrentIndexAvailability({
+    hasOriginal: !!index.original,
+    isPrimary: index.isPrimary,
+    markedForDrop: index.markedForDrop,
+    isPartitionedParent: isPartitionedParent.value,
+    partitionStatusKnown: partitionStatusKnown.value,
+    supportsIndexConcurrent: structureCapabilities.value.indexConcurrent,
+    supportsCreateIndex: structureCapabilities.value.createIndex,
+  });
+}
+
+/**
+ * Layer A — invalidate `concurrently: true` drafts whenever Concurrent becomes
+ * unavailable. Transiently unknown partition status preserves the flag so a
+ * later successful probe can recover the user's intent; definitive unsupported
+ * states clear it. In both cases, empty pending SQL and keep Save blocked until
+ * availability is verified again.
+ */
+function normalizeConcurrentIndexDraftsForCurrentAvailability(): boolean {
+  // Engines that cannot express Concurrent (non-PostgreSQL dialects) ignore a
+  // stale flag in the core builder and render no checkbox; blocking the save
+  // there would only trap a draft carried over from a PostgreSQL session.
+  if (!structureCapabilities.value.indexConcurrent) return false;
+  const { indexes: normalized, invalidatedIds } = normalizeUnsupportedConcurrentIndexes(indexes.value, concurrentIndexAvailabilityState);
+  if (invalidatedIds.length === 0) return false;
+  indexes.value = normalized;
+  concurrentAvailabilityInvalidated.value = true;
+  pendingStatements.value = [];
+  warnings.value = [t("structureEditor.concurrentUnavailableBlocksSave")];
+  sqlPreviewLoading.value = false;
+  sqlPreviewPending.value = false;
+  errorMessage.value = t("structureEditor.concurrentUnavailableBlocksSave");
+  return true;
+}
+
+/** Layer B — a `concurrently: true` draft whose availability is no longer
+ * enabled must never reach the SQL builder or the execute path. Returns the
+ * blocking message, or null when the request stays legal. */
+function concurrentIndexBlockingWarning(): string | null {
+  // Non-concurrent-capable engines cannot express the request in SQL; the core
+  // builder ignores the flag, so there is no stale-concurrent hazard to block.
+  if (!structureCapabilities.value.indexConcurrent) return null;
+  const stale = indexes.value.find((index) => index.concurrently && !concurrentIndexAvailability(index).enabled);
+  return stale ? t("structureEditor.concurrentUnavailableBlocksSave") : null;
+}
+
+function canEditIndexConcurrent(index: EditableStructureIndex): boolean {
+  return concurrentIndexAvailability(index).enabled;
+}
+
+function concurrentIndexCellTitle(index: EditableStructureIndex): string {
+  switch (concurrentIndexAvailability(index).reason) {
+    case "existing":
+      return t("structureEditor.concurrentExistingIndexTooltip");
+    case "partitioned":
+      return t("structureEditor.concurrentPartitionedTooltip");
+    case "unknown":
+      return t("structureEditor.concurrentUnavailableTooltip");
+    default:
+      return t("structureEditor.concurrentTooltip");
+  }
 }
 
 function canEditIndexFilter(index: EditableStructureIndex): boolean {
@@ -2310,6 +2744,14 @@ function toggleSqlPreviewCollapsed() {
 
 async function applyChanges() {
   if (!canApply.value || !props.connectionId || !props.database) return false;
+  // Layer B runtime guard: a stale `concurrently: true` whose availability is
+  // no longer enabled must never be executed — reject the save with an
+  // explicit error even if normalization was skipped (race / non-UI caller).
+  const blockingConcurrentWarning = concurrentIndexBlockingWarning() ?? (concurrentAvailabilityInvalidated.value ? t("structureEditor.concurrentUnavailableBlocksSave") : null);
+  if (blockingConcurrentWarning) {
+    errorMessage.value = blockingConcurrentWarning;
+    return false;
+  }
   const sql = previewSqlText.value;
   const connection = store.getConfig(props.connectionId);
   const productionContext = productionContextForDatabase(connection, props.database);
@@ -2326,6 +2768,27 @@ async function applyChanges() {
   saving.value = true;
   errorMessage.value = "";
   const refreshScope = captureStructureRefreshScope();
+  // Plan A guard: concurrent builds only run with a long-enough query timeout
+  // (a cancelled build leaves an INVALID index behind), and are blocked
+  // up-front when a same-name INVALID index already exists.
+  const hasConcurrentIndexBuild = pendingStatements.value.some((statement) => statement.includes("CONCURRENTLY"));
+  if (hasConcurrentIndexBuild && !isCreateMode.value && databaseType.value === "postgres" && props.tableName) {
+    const concurrentIndexNames = concurrentIndexNamesInStatements(pendingStatements.value);
+    if (concurrentIndexNames.length > 0) {
+      try {
+        const invalidIndexes = await api.listInvalidIndexes(props.connectionId, props.database, metadataSchema.value, props.tableName);
+        const blocked = concurrentIndexNames.filter((name) => invalidIndexes.includes(name));
+        if (blocked.length > 0) {
+          errorMessage.value = t("structureEditor.invalidIndexBlocksSave", { indexNames: blocked.join(", ") });
+          saving.value = false;
+          return false;
+        }
+      } catch {
+        // Metadata probe failure must not block the save; the failure-time
+        // hint below still surfaces leftovers if the build errors out.
+      }
+    }
+  }
   const characterLengthUnitsAfterSave = new Map<string, string>();
   if (supportsCharacterLengthUnits.value) {
     for (const column of columns.value) {
@@ -2335,10 +2798,15 @@ async function applyChanges() {
     }
   }
   const startedAt = Date.now();
+  // Concurrent batches get at least the dedicated 30-minute floor while
+  // preserving an unlimited setting (0) and any larger configured timeout;
+  // non-concurrent batches keep the configured timeout unchanged.
+  const configuredTimeoutSecs = queryTimeoutSecsForConnection(connection, settingsStore.editorSettings.globalQueryTimeoutSecs);
+  const executionTimeoutSecs = queryTimeoutSecsForConcurrentIndex(configuredTimeoutSecs, hasConcurrentIndexBuild);
   try {
     const result = hasSqliteTypeChange.value
       ? await api.applySqliteTableStructureChange(props.connectionId, props.database, structureChangeOptions(), sqliteSchemaRevision.value!)
-      : await api.executeBatch(props.connectionId, props.database, pendingStatements.value, props.schema, queryTimeoutSecsForConnection(connection, settingsStore.editorSettings.globalQueryTimeoutSecs));
+      : await api.executeBatch(props.connectionId, props.database, pendingStatements.value, props.schema, executionTimeoutSecs);
     await recordStructureHistory(sql, startedAt, true, result);
     if (!isCreateMode.value && props.tableName) {
       invalidateTableMetadataCache({ connectionId: props.connectionId, database: props.database, schema: metadataSchema.value, tableName: props.tableName });
@@ -2368,7 +2836,11 @@ async function applyChanges() {
     }
     return true;
   } catch (e: any) {
-    errorMessage.value = e?.message || String(e);
+    const rawMessage = e?.message || String(e);
+    // A cancelled/errored concurrent build leaves a same-name INVALID index
+    // behind; surface that so retries are not silently doomed.
+    const invalidIndexHint = hasConcurrentIndexBuild && /already exists/i.test(rawMessage) ? `\n\n${t("structureEditor.invalidIndexRetryHint")}` : "";
+    errorMessage.value = `${rawMessage}${invalidIndexHint}`;
     await recordStructureHistory(sql, startedAt, false, undefined, errorMessage.value);
     return false;
   } finally {
@@ -2445,6 +2917,7 @@ onMounted(() => {
     applyInitialStructureTarget();
   }
   structureEditorReady = true;
+  observeStructureHorizontalScroller();
   if (props.draft?.initialized) {
     void hydrateRestoredDraftFromDatabase().then(() => {
       applyInitialStructureTarget();
@@ -2461,6 +2934,7 @@ onMounted(() => {
 
 onActivated(() => {
   registerStructureEditorShortcuts();
+  observeStructureHorizontalScroller();
   void loadDynamicDataTypeOptions();
   if (props.draft?.initialized && !draftHydrated) {
     restoreDraft(props.draft);
@@ -2472,9 +2946,18 @@ onActivated(() => {
   }
   restoreStructureScrollPosition();
 });
-onDeactivated(unregisterStructureEditorShortcuts);
+onDeactivated(() => {
+  unregisterStructureEditorShortcuts();
+  structureHorizontalScrollbarObserverGeneration += 1;
+  structureHorizontalScrollbarResizeObserver?.disconnect();
+  structureHorizontalScrollbarResizeObserver = null;
+  stopStructureHorizontalScrollbarDrag();
+});
 onBeforeUnmount(() => {
   stopColumnDragTracking();
+  stopStructureHorizontalScrollbarDrag();
+  structureHorizontalScrollbarObserverGeneration += 1;
+  structureHorizontalScrollbarResizeObserver?.disconnect();
   unregisterStructureEditorShortcuts();
   clearSqlPreviewState();
   if (columnHighlightTimer) window.clearTimeout(columnHighlightTimer);
@@ -2544,6 +3027,14 @@ watch(tableMetadataCapabilities, (capabilities) => {
   if (!localIsStructureMetadataTabSupported(activeTab.value, capabilities)) activeTab.value = localFirstStructureMetadataTab(capabilities);
 });
 
+watch(structureCapabilities, () => {
+  // Capability loss (e.g. PostgreSQL < 11 without concurrent index support)
+  // invalidates any selected Concurrent flag the same way a probe failure
+  // does; the normalization is idempotent and no-ops while availability stays
+  // enabled.
+  normalizeConcurrentIndexDraftsForCurrentAvailability();
+});
+
 watch([() => props.initialTab, () => props.initialTabRequestId, () => props.initialTarget], () => {
   if (props.initialTab) applyInitialStructureTab();
   applyInitialStructureTarget();
@@ -2567,12 +3058,15 @@ watch(
 );
 
 watch(activeTab, () => {
+  stopStructureHorizontalScrollbarDrag();
   selectedColumnId.value = null;
   highlightedColumnId.value = null;
   highlightedIndexId.value = null;
   restoreStructureScrollPosition();
   syncDraftToParent();
 });
+
+watch([activeTab, loading, indexesLoading, visibleColWidths, indexColWidths], observeStructureHorizontalScroller, { deep: true, flush: "post", immediate: true });
 
 watch(
   columns,
@@ -2604,6 +3098,10 @@ watch(refreshVersion, (version, previous) => {
   if (activeTab.value !== "triggers") {
     triggers.value = [];
     triggersLoaded.value = false;
+  }
+  if (activeTab.value !== "constraints") {
+    constraints.value = [];
+    constraintsLoaded.value = false;
   }
   void loadStructure(true, visibleTableStructureRefreshScope(activeTab.value));
 });
@@ -2674,6 +3172,7 @@ watch([activeTab, ddlLoading], ([tab, loading]) => {
               <TabsTrigger v-if="tableMetadataCapabilities.columns" value="columns">{{ t("structureEditor.columns") }}</TabsTrigger>
               <TabsTrigger v-if="tableMetadataCapabilities.indexes" value="indexes">{{ t("structureEditor.indexes") }}</TabsTrigger>
               <TabsTrigger v-if="tableMetadataCapabilities.foreignKeys" value="foreignKeys">{{ t("structureEditor.foreignKeys") }}</TabsTrigger>
+              <TabsTrigger v-if="tableMetadataCapabilities.constraints" value="constraints">{{ t("structureEditor.constraints") }}</TabsTrigger>
               <TabsTrigger v-if="tableMetadataCapabilities.triggers" value="triggers">{{ t("structureEditor.triggers") }}</TabsTrigger>
             </TabsList>
             <div class="flex shrink-0 items-center gap-1.5">
@@ -2733,6 +3232,10 @@ watch([activeTab, ddlLoading], ([tab, loading]) => {
                 <Plus :class="structureIconClass" />
                 {{ t("structureEditor.addColumn") }}
               </Button>
+              <Button v-if="activeTab === 'columns'" size="sm" variant="outline" :class="structureToolbarButtonClass" :disabled="!canAddColumn" @click="openCopyColumnsDialog">
+                <Copy :class="structureIconClass" />
+                {{ t("structureEditor.copyColumns") }}
+              </Button>
               <Button v-if="isCreateMode && activeTab === 'columns'" size="sm" variant="outline" :class="structureToolbarButtonClass" :disabled="!canAddColumn" @click="applyColumnTemplate(PRESET_FIELDS_TEMPLATE_ID)">
                 <Copy :class="structureIconClass" />
                 {{ t("structureEditor.columnTemplates") }}
@@ -2773,7 +3276,7 @@ watch([activeTab, ddlLoading], ([tab, loading]) => {
             </div>
           </div>
 
-          <TabsContent ref="columnsScrollerRef" v-if="tableMetadataCapabilities.columns" value="columns" class="m-0 min-h-0 flex-1 overflow-auto p-0" @scroll.passive="onStructureContentScroll('columns', $event)">
+          <TabsContent ref="columnsScrollerRef" v-if="tableMetadataCapabilities.columns" value="columns" class="structure-table-scroller m-0 min-h-0 flex-1 overflow-auto p-0" @scroll.passive="onStructureContentScroll('columns', $event)">
             <table class="structure-edit-grid border-separate border-spacing-0 text-[length:var(--structure-font-size)] leading-[var(--structure-line-height)]" :style="{ minWidth: visibleColWidths.reduce((a, w) => a + w, 0) + 'px' }">
               <thead class="sticky top-0 z-10 bg-background">
                 <tr>
@@ -2946,7 +3449,7 @@ watch([activeTab, ddlLoading], ([tab, loading]) => {
                       :empty-text="t('structureEditor.noMatchingType')"
                       :allow-custom="true"
                       :disabled="isColumnCharsetDisabled(column)"
-                      :trigger-class="[structureMonoControlClass, 'w-20']"
+                      :trigger-class="[structureMonoControlClass, 'w-full']"
                       @update:model-value="(v: string) => onCharsetChange(column, v)"
                     />
                   </td>
@@ -2959,7 +3462,7 @@ watch([activeTab, ddlLoading], ([tab, loading]) => {
                       :empty-text="t('structureEditor.noMatchingType')"
                       :allow-custom="true"
                       :disabled="isColumnCharsetDisabled(column)"
-                      :trigger-class="[structureMonoControlClass, 'w-28']"
+                      :trigger-class="[structureMonoControlClass, 'w-full']"
                       @update:model-value="(v: string) => (column.collation = v)"
                     />
                   </td>
@@ -3125,6 +3628,9 @@ watch([activeTab, ddlLoading], ([tab, loading]) => {
                       >
                         <ListChevronsUpDown :class="structureIconClass" />
                       </Button>
+                      <Button variant="ghost" size="icon" :class="structureActionButtonClass" :disabled="!canAddColumn || column.markedForDrop" :title="t('structureEditor.copyColumn')" :aria-label="t('structureEditor.copyColumn')" @click.stop="copyColumn(column)">
+                        <Copy :class="structureIconClass" />
+                      </Button>
                       <Button
                         v-if="column.original"
                         variant="ghost"
@@ -3148,7 +3654,7 @@ watch([activeTab, ddlLoading], ([tab, loading]) => {
             </table>
           </TabsContent>
 
-          <TabsContent ref="indexesScrollerRef" v-if="tableMetadataCapabilities.indexes" value="indexes" class="m-0 min-h-0 flex-1 overflow-auto p-0" @scroll.passive="onStructureContentScroll('indexes', $event)">
+          <TabsContent ref="indexesScrollerRef" v-if="tableMetadataCapabilities.indexes" value="indexes" class="structure-table-scroller m-0 min-h-0 flex-1 overflow-auto p-0" @scroll.passive="onStructureContentScroll('indexes', $event)">
             <div v-if="indexesLoading" class="flex items-center justify-center gap-2 py-10 text-muted-foreground">
               <Loader2 class="h-4 w-4 animate-spin" />
               {{ t("common.loading") }}
@@ -3236,6 +3742,13 @@ watch([activeTab, ddlLoading], ([tab, loading]) => {
                   <td :class="structureCellClass">
                     <Input v-model="index.comment" :class="[structureControlClass, indexSearchFieldClass(index, index.comment)]" :disabled="!canEditIndexComment(index)" />
                   </td>
+                  <td :class="structureCellClass">
+                    <label v-if="structureCapabilities.indexConcurrent" class="flex items-center gap-1.5" :title="concurrentIndexCellTitle(index)">
+                      <input v-model="index.concurrently" type="checkbox" :class="structureCheckboxClass" :disabled="!canEditIndexConcurrent(index)" />
+                      <span>{{ index.concurrently ? t("structureEditor.yes") : t("structureEditor.no") }}</span>
+                    </label>
+                    <span v-else class="text-[length:var(--structure-font-size)] text-muted-foreground">—</span>
+                  </td>
                   <td :class="structureLastCellClass">
                     <Badge v-if="index.isPrimary" variant="outline">{{ t("structureEditor.primary") }}</Badge>
                     <Button v-else-if="index.original" variant="ghost" size="sm" :class="structureToolbarButtonClass" :disabled="!canDropIndex(index)" @click="toggleDropIndex(index)">
@@ -3251,6 +3764,10 @@ watch([activeTab, ddlLoading], ([tab, loading]) => {
               </tbody>
             </table>
           </TabsContent>
+
+          <div v-if="hasStructureHorizontalOverflow && (activeTab === 'columns' || activeTab === 'indexes')" ref="structureHorizontalScrollbarTrackRef" class="structure-horizontal-scrollbar" @pointerdown="startStructureHorizontalScrollbarDrag">
+            <div ref="structureHorizontalScrollbarThumbRef" class="structure-horizontal-scrollbar__thumb" />
+          </div>
 
           <TabsContent ref="foreignKeysScrollerRef" v-if="tableMetadataCapabilities.foreignKeys" value="foreignKeys" class="m-0 min-h-0 flex-1 overflow-auto p-[var(--structure-cell-px)]" @scroll.passive="onStructureContentScroll('foreignKeys', $event)">
             <div v-if="foreignKeysLoading" class="flex items-center justify-center gap-2 py-10 text-muted-foreground">
@@ -3298,6 +3815,29 @@ watch([activeTab, ddlLoading], ([tab, loading]) => {
                   </Select>
                   <div class="truncate font-mono text-muted-foreground">{{ fk.column }} -> {{ fk.refSchema ? `${fk.refSchema}.` : "" }}{{ fk.refTable }}.{{ fk.refColumn }}</div>
                 </div>
+              </div>
+            </div>
+          </TabsContent>
+
+          <TabsContent ref="constraintsScrollerRef" v-if="tableMetadataCapabilities.constraints" value="constraints" class="m-0 min-h-0 flex-1 overflow-auto p-[var(--structure-cell-px)]" @scroll.passive="onStructureContentScroll('constraints', $event)">
+            <div v-if="constraintsLoading" class="flex items-center justify-center gap-2 py-10 text-muted-foreground">
+              <Loader2 class="h-4 w-4 animate-spin" />
+              {{ t("common.loading") }}
+            </div>
+            <div v-else-if="constraints.length === 0" class="py-10 text-center text-muted-foreground">
+              {{ t("structureEditor.emptyReadonly") }}
+            </div>
+            <div v-else class="space-y-1.5">
+              <div v-for="constraint in constraints" :key="constraint.name" class="rounded-md border px-[var(--structure-cell-px)] py-[var(--structure-header-py)] text-[length:var(--structure-font-size)]" :class="constraint.enabled ? '' : 'opacity-60'">
+                <div class="flex flex-wrap items-center gap-1.5">
+                  <span class="font-mono font-medium">{{ constraint.name }}</span>
+                  <Badge variant="outline" class="shrink-0">{{ constraint.constraint_type }}</Badge>
+                  <Badge v-if="!constraint.enabled" variant="outline" class="shrink-0 text-muted-foreground">{{ t("structureEditor.constraintDisabled") }}</Badge>
+                  <Badge v-else-if="!constraint.valid" variant="outline" class="shrink-0 text-muted-foreground">{{ t("structureEditor.constraintNotValidated") }}</Badge>
+                </div>
+                <div v-if="constraint.columns.length" class="mt-1 truncate font-mono text-muted-foreground">{{ constraint.columns.join(", ") }}</div>
+                <div v-if="constraint.ref_table" class="mt-1 truncate font-mono text-muted-foreground">-> {{ constraint.ref_schema ? `${constraint.ref_schema}.` : "" }}{{ constraint.ref_table }}{{ constraint.ref_columns.length ? `(${constraint.ref_columns.join(", ")})` : "" }}</div>
+                <div v-if="constraint.definition" class="mt-1 whitespace-pre-wrap break-words font-mono text-muted-foreground">{{ constraint.definition }}</div>
               </div>
             </div>
           </TabsContent>
@@ -3432,10 +3972,112 @@ watch([activeTab, ddlLoading], ([tab, loading]) => {
         {{ t("structureEditor.apply") }}
       </Button>
     </div>
+
+    <Dialog v-model:open="copyColumnsDialogOpen">
+      <DialogContent class="max-w-xl">
+        <DialogHeader>
+          <DialogTitle>{{ t("structureEditor.copyColumnsTitle") }}</DialogTitle>
+        </DialogHeader>
+
+        <div class="space-y-3 overflow-hidden">
+          <label class="grid gap-1.5 text-sm font-medium">
+            {{ t("structureEditor.copyColumnsSourceTable") }}
+            <select
+              :value="copySourceTableName"
+              class="h-9 w-full rounded-md border border-input bg-background px-3 text-sm outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30 disabled:cursor-not-allowed disabled:opacity-50"
+              :disabled="copySourceTablesLoading || copySourceTables.length === 0"
+              @change="loadCopySourceColumns(($event.target as HTMLSelectElement).value)"
+            >
+              <option value="" disabled>{{ t("structureEditor.copyColumnsSelectSourceTable") }}</option>
+              <option v-for="table in copySourceTables" :key="table.name" :value="table.name">{{ table.name }}</option>
+            </select>
+          </label>
+
+          <div v-if="copySourceTablesLoading" class="flex items-center gap-2 py-5 text-sm text-muted-foreground">
+            <Loader2 class="h-4 w-4 animate-spin" />
+            {{ t("common.loading") }}
+          </div>
+          <div v-else-if="copySourceError" class="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+            {{ copySourceError }}
+          </div>
+          <div v-else-if="copySourceTables.length === 0" class="rounded-md border border-dashed px-3 py-5 text-center text-sm text-muted-foreground">
+            {{ t("structureEditor.copyColumnsNoSourceTables") }}
+          </div>
+          <template v-else-if="copySourceTableName">
+            <div class="flex items-center justify-between gap-2">
+              <span class="text-sm font-medium">{{ t("structureEditor.copyColumnsSelectFields") }}</span>
+              <Button variant="ghost" size="sm" class="h-7 px-2 text-xs" :disabled="copySourceColumnsLoading || copyableSourceColumnNames.length === 0" @click="toggleCopySourceColumns">
+                {{ allCopyableSourceColumnsSelected ? t("structureEditor.copyColumnsClearSelection") : t("structureEditor.copyColumnsSelectAll") }}
+              </Button>
+            </div>
+            <Input v-model="copySourceColumnSearch" :placeholder="t('structureEditor.copyColumnsSearchFields')" />
+            <div v-if="copySourceColumnsLoading" class="flex items-center gap-2 py-5 text-sm text-muted-foreground">
+              <Loader2 class="h-4 w-4 animate-spin" />
+              {{ t("common.loading") }}
+            </div>
+            <div v-else-if="copySourceColumns.length === 0" class="rounded-md border border-dashed px-3 py-5 text-center text-sm text-muted-foreground">
+              {{ t("structureEditor.copyColumnsNoFields") }}
+            </div>
+            <div v-else-if="filteredCopyableSourceColumns.length === 0" class="rounded-md border border-dashed px-3 py-5 text-center text-sm text-muted-foreground">
+              {{ t("structureEditor.copyColumnsNoMatchingFields") }}
+            </div>
+            <div v-else class="max-h-72 overflow-y-auto rounded-md border">
+              <label v-for="{ column, alreadyExists } in filteredCopyableSourceColumns" :key="column.name" class="flex cursor-pointer items-center gap-2 border-b px-3 py-2 last:border-b-0 hover:bg-muted/50" :class="alreadyExists ? 'cursor-not-allowed opacity-60' : ''">
+                <input v-model="selectedCopySourceColumnNames" type="checkbox" :value="column.name" :disabled="alreadyExists" class="size-4 rounded border-input" />
+                <span class="min-w-0 flex-1 truncate font-mono text-sm">{{ column.name }}</span>
+                <span class="shrink-0 text-xs text-muted-foreground">{{ column.data_type }}</span>
+                <Badge v-if="alreadyExists" variant="secondary" class="shrink-0 text-[10px]">{{ t("structureEditor.copyColumnsAlreadyExists") }}</Badge>
+              </label>
+            </div>
+          </template>
+        </div>
+
+        <DialogFooter>
+          <Button variant="outline" @click="copyColumnsDialogOpen = false">{{ t("structureEditor.copyColumnsCancel") }}</Button>
+          <Button :disabled="copySourceColumnsLoading || selectedCopySourceColumns.length === 0" @click="applyCopiedColumns">
+            {{ t("structureEditor.copyColumnsApply", { count: selectedCopySourceColumns.length }) }}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   </div>
 </template>
 
 <style scoped>
+.structure-table-scroller::-webkit-scrollbar {
+  width: 8px;
+  height: 0;
+}
+
+.structure-horizontal-scrollbar {
+  position: relative;
+  height: 10px;
+  flex-shrink: 0;
+  cursor: pointer;
+  touch-action: none;
+  background: var(--background);
+}
+
+.structure-horizontal-scrollbar__thumb {
+  position: absolute;
+  top: 3px;
+  height: 4px;
+  min-width: 24px;
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--foreground) 30%, transparent);
+  transition:
+    top 120ms ease,
+    height 120ms ease,
+    background-color 120ms ease;
+}
+
+.structure-horizontal-scrollbar:hover .structure-horizontal-scrollbar__thumb,
+.structure-horizontal-scrollbar--dragging .structure-horizontal-scrollbar__thumb {
+  top: 2px;
+  height: 6px;
+  background: color-mix(in oklab, var(--foreground) 48%, transparent);
+}
+
 /* Editable values behave like grid cells, not a row of independent pill controls. */
 .structure-edit-grid :deep(.structure-grid-control) {
   border-color: transparent;

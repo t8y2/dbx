@@ -1,8 +1,12 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
+import { createQueryEditorExecutionViewportOwnership } from "@/lib/editor/queryEditorExecutionViewport";
 
 const queryEditorSource = readFileSync(new URL("../../../components/editor/QueryEditor.vue", import.meta.url), "utf8");
 const contentAreaSource = readFileSync(new URL("../../../components/layout/ContentArea.vue", import.meta.url), "utf8");
+const appSource = readFileSync(new URL("../../../App.vue", import.meta.url), "utf8");
+const sqlExecutionSource = readFileSync(new URL("../../../composables/useSqlExecution.ts", import.meta.url), "utf8");
+const queryStoreSource = readFileSync(new URL("../../../stores/queryStore.ts", import.meta.url), "utf8");
 
 describe("QueryEditor execution routing", () => {
   it("routes the execution shortcut through the shared execution-mode contract while bypassing the picker", () => {
@@ -46,8 +50,16 @@ describe("QueryEditor execution routing", () => {
   });
 
   it("preserves the source range when executing from the statement gutter", () => {
-    expect(queryEditorSource).toContain("emitExecutionRequest(sqlExecutionSnapshotForRange(currentView, statementRange))");
+    expect(queryEditorSource).toContain("const editorViewportRequestId = gutterExecutionViewport.beginRequest()");
+    expect(queryEditorSource).toContain("emitExecutionRequest({ ...sqlExecutionSnapshotForRange(currentView, statementRange), editorViewportRequestId })");
     expect(queryEditorSource).not.toContain('emit("execute", statementRange.sql)');
+  });
+
+  it("claims gutter viewport ownership only after the matching execution starts", () => {
+    expect(appSource).toContain("acceptQueryEditorExecutionViewport(editorViewportRequestId)");
+    expect(contentAreaSource).toContain("acceptGutterExecutionViewport(requestId)");
+    expect(sqlExecutionSource).toContain("onExecutionStarted: () => deps.onExecutionStarted?.(options.editorViewportRequestId!)");
+    expect(queryStoreSource.indexOf("tab.isExecuting = true")).toBeLessThan(queryStoreSource.indexOf("options?.onExecutionStarted?.()"));
   });
 
   it("lets the shortcut skip the picker without affecting other execution entry points", () => {
@@ -60,6 +72,41 @@ describe("QueryEditor execution routing", () => {
     expect(queryEditorSource).toContain("changes: { from: line.to, to: line.to, insert: insertion }");
     expect(queryEditorSource).toContain("const cursor = line.to + insertion.length");
     expect(queryEditorSource).not.toMatch(/key:\s*"Enter"[\s\S]{0,180}shift:\s*codeMirrorInsertNewlineKeepIndent/);
+  });
+});
+
+describe("QueryEditor gutter execution viewport ownership", () => {
+  it("does not let a cancelled or early-returned gutter request affect the next ordinary execution", () => {
+    const ownership = createQueryEditorExecutionViewportOwnership();
+    const cancelledRequestId = ownership.beginRequest();
+
+    ownership.cancelPendingRequest();
+
+    expect(ownership.acceptRequest(cancelledRequestId)).toBe(false);
+    expect(ownership.consumeAcceptedRequest()).toBe(false);
+  });
+
+  it("preserves the viewport once for the matching accepted execution", () => {
+    const ownership = createQueryEditorExecutionViewportOwnership();
+    const requestId = ownership.beginRequest();
+
+    expect(ownership.acceptRequest(requestId)).toBe(true);
+    expect(ownership.consumeAcceptedRequest()).toBe(true);
+    expect(ownership.consumeAcceptedRequest()).toBe(false);
+  });
+
+  it("clears pending and accepted ownership when the editor becomes inactive", () => {
+    const ownership = createQueryEditorExecutionViewportOwnership();
+    const pendingRequestId = ownership.beginRequest();
+    ownership.reset();
+
+    expect(ownership.acceptRequest(pendingRequestId)).toBe(false);
+
+    const acceptedRequestId = ownership.beginRequest();
+    expect(ownership.acceptRequest(acceptedRequestId)).toBe(true);
+    ownership.reset();
+
+    expect(ownership.consumeAcceptedRequest()).toBe(false);
   });
 });
 

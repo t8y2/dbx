@@ -3,6 +3,21 @@ import { tokenizeSqlSemantic } from "@/lib/sql/semantic/tokens";
 import type { ConnectionConfig, DatabaseType } from "@/types/database";
 
 export const DEFAULT_QUERY_TIMEOUT_SECS = 30;
+
+/**
+ * Query timeout (seconds) the table structure editor applies when the change
+ * script contains a PostgreSQL `CREATE INDEX CONCURRENTLY`.
+ *
+ * Concurrent builds scan the whole table while only taking `ShareUpdateExclusiveLock`,
+ * so they routinely run far beyond the default 30s query timeout — the default
+ * budget would cancel a legitimate build and leave an INVALID index behind.
+ * PostgreSQL itself does not impose a build deadline
+ * (https://www.postgresql.org/docs/current/sql-createindex.html). This is the
+ * dedicated 30-minute floor used by `queryTimeoutSecsForConcurrentIndex` for
+ * such statements; it never overrides an unlimited setting (0) and never
+ * shortens a larger configured timeout.
+ */
+export const CONCURRENT_INDEX_QUERY_TIMEOUT_SECS = 1800;
 const MAX_BROWSER_TIMER_DELAY_MS = 2_147_483_647;
 
 const POSTGRES_ROW_STATEMENT_KEYWORDS = new Set(["select", "show", "explain", "table", "with"]);
@@ -15,6 +30,19 @@ export function queryTimeoutSecsForConnection(connection?: Pick<ConnectionConfig
   }
   const value = Number(connection?.query_timeout_secs);
   return Number.isFinite(value) && value >= 0 ? value : DEFAULT_QUERY_TIMEOUT_SECS;
+}
+
+/**
+ * Effective query timeout (seconds) for a table-structure change script.
+ *
+ * Concurrent builds use at least the dedicated 30-minute floor while
+ * preserving an unlimited setting (0) and any larger configured timeout.
+ * Non-concurrent scripts keep the configured timeout unchanged.
+ */
+export function queryTimeoutSecsForConcurrentIndex(configuredTimeoutSecs: number, hasConcurrentIndexBuild: boolean): number {
+  if (!hasConcurrentIndexBuild) return configuredTimeoutSecs;
+  if (configuredTimeoutSecs === 0) return 0;
+  return Math.max(configuredTimeoutSecs, CONCURRENT_INDEX_QUERY_TIMEOUT_SECS);
 }
 
 export function frontendQueryTimeoutSecsForSql(sql: string, databaseType: DatabaseType | undefined, queryTimeoutSecs: number): number {

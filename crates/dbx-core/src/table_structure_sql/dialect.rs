@@ -38,6 +38,7 @@ pub(super) struct TableStructureCapabilities {
     pub(super) index_include: bool,
     pub(super) index_filter: bool,
     pub(super) index_comment: bool,
+    pub(super) index_concurrent: bool,
     pub(super) alter_primary_key: bool,
     pub(super) foreign_key: bool,
 }
@@ -59,6 +60,7 @@ impl Default for TableStructureCapabilities {
             index_include: false,
             index_filter: false,
             index_comment: false,
+            index_concurrent: false,
             alter_primary_key: false,
             foreign_key: false,
         }
@@ -118,24 +120,35 @@ pub(super) fn capabilities_for(database_type: Option<DatabaseType>) -> TableStru
             | DatabaseType::Vastbase
             | DatabaseType::Kingbase
             | DatabaseType::Firebird,
-        ) => TableStructureCapabilities {
-            dialect: StructureDialect::Postgres,
-            add_column: true,
-            drop_column: true,
-            rename_column: true,
-            alter_existing_column: true,
-            comment: true,
-            create_index: true,
-            drop_index: true,
-            rebuild_index: true,
-            index_type: true,
-            index_include: true,
-            index_filter: true,
-            index_comment: true,
-            alter_primary_key: true,
-            foreign_key: true,
-            ..base
-        },
+        ) => {
+            let mut caps = TableStructureCapabilities {
+                dialect: StructureDialect::Postgres,
+                add_column: true,
+                drop_column: true,
+                rename_column: true,
+                alter_existing_column: true,
+                comment: true,
+                create_index: true,
+                drop_index: true,
+                rebuild_index: true,
+                index_type: true,
+                index_include: true,
+                index_filter: true,
+                index_comment: true,
+                alter_primary_key: true,
+                foreign_key: true,
+                ..base
+            };
+            // CREATE INDEX CONCURRENTLY is PostgreSQL-specific. Other PostgreSQL-family
+            // engines (Kingbase, GaussDB, OpenGauss, HighGo, UXDB, Vastbase, KWDB,
+            // Firebird) share the Postgres dialect but have not been verified against a
+            // real environment, so they keep this capability off until individually
+            // validated.
+            if database_type == Some(DatabaseType::Postgres) {
+                caps.index_concurrent = true;
+            }
+            caps
+        }
         Some(DatabaseType::Questdb) => TableStructureCapabilities {
             dialect: StructureDialect::Questdb,
             add_column: true,
@@ -151,6 +164,7 @@ pub(super) fn capabilities_for(database_type: Option<DatabaseType>) -> TableStru
             index_include: false,
             index_filter: false,
             index_comment: false,
+            index_concurrent: false,
             alter_primary_key: false,
             foreign_key: false,
         },

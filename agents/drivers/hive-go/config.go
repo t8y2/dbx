@@ -24,6 +24,7 @@ const (
 	defaultHiveDatabase        = "default"
 	defaultHiveHTTPPath        = "cliservice"
 	defaultHiveService         = "hive"
+	defaultImpalaService       = "impala"
 	defaultZooKeeperNamespace  = "hiveserver2"
 	resultSetUniqueColumnNames = "hive.resultset.use.unique.column.names"
 	defaultConnectTimeout      = 15 * time.Second
@@ -47,6 +48,7 @@ type connectParams struct {
 	ConnectTimeout   int      `json:"connect_timeout_secs"`
 	AgentJavaOptions []string `json:"agent_java_options"`
 	SessionRole      string   `json:"sessionRole"`
+	DatabaseType     string   `json:"database_type"`
 }
 
 type endpoint struct {
@@ -95,6 +97,7 @@ type zooKeeperKerberosConfig struct {
 }
 
 type connectionConfig struct {
+	DatabaseType           string
 	Endpoints              []endpoint
 	Database               string
 	Username               string
@@ -137,7 +140,9 @@ type connectionConfig struct {
 }
 
 func parseConnectionConfig(params connectParams) (connectionConfig, error) {
+	hasStructuredEndpoint := strings.TrimSpace(params.Host) != ""
 	config := connectionConfig{
+		DatabaseType:           strings.ToLower(strings.TrimSpace(params.DatabaseType)),
 		Database:               strings.TrimSpace(params.Database),
 		Username:               params.Username,
 		Password:               params.Password,
@@ -165,8 +170,9 @@ func parseConnectionConfig(params connectParams) (connectionConfig, error) {
 			CanonicalHostname: true,
 		},
 	}
-	if config.Database == "" {
-		config.Database = defaultHiveDatabase
+	if strings.EqualFold(params.DatabaseType, "impala") {
+		config.Auth = "NOSASL"
+		config.Kerberos.Service = defaultImpalaService
 	}
 	if params.ConnectTimeout > 0 {
 		config.ConnectTimeout = time.Duration(params.ConnectTimeout) * time.Second
@@ -176,45 +182,60 @@ func parseConnectionConfig(params connectParams) (connectionConfig, error) {
 	if err != nil {
 		return connectionConfig{}, err
 	}
-	if len(parsed.endpoints) > 0 {
-		config.Endpoints = parsed.endpoints
+	if !hasStructuredEndpoint {
+		if config.Database == "" && parsed.database != "" {
+			config.Database = parsed.database
+		}
+		if config.Username == "" && parsed.username != "" {
+			config.Username = parsed.username
+		}
+		if config.Password == "" && parsed.password != "" {
+			config.Password = parsed.password
+		}
+	}
+	if config.Database == "" {
+		config.Database = defaultHiveDatabase
+	}
+
+	urlSections := parseHiveParameterSections(params.URLParams)
+	values := urlSections.session
+	hiveConfs := urlSections.hiveConfs
+	hiveVars := urlSections.hiveVars
+	if hasStructuredEndpoint {
+		deleteHiveParameters(values, "user", "username", "password", "ssl")
 	} else {
+		values = mergeHiveParameters(parsed.parameters, values)
+		hiveConfs = mergeHiveConfAssignments(parsed.hiveConfs, hiveConfs)
+		hiveVars = mergeHiveAssignments(parsed.hiveVars, hiveVars)
+		if value, exists := firstParameter(values, "user", "username"); exists {
+			config.Username = value
+		}
+		if value, exists := firstParameter(values, "password"); exists {
+			config.Password = value
+		}
+	}
+	if err := applyHiveParameters(&config, values, hiveConfs); err != nil {
+		return connectionConfig{}, err
+	}
+	if isZooKeeperDiscovery(config.ServiceDiscoveryMode) && len(parsed.endpoints) > 0 {
+		// ZooKeeper discovery needs the complete endpoint list from the JDBC URL.
+		config.Endpoints = parsed.endpoints
+	} else if host := strings.TrimSpace(params.Host); host != "" {
+		// DBX resolves edits and transport layers before invoking the Agent. For
+		// direct connections that resolved endpoint must win over the persisted URL.
 		port := params.Port
 		if port <= 0 {
 			port = defaultHivePort
 		}
-		if host := strings.TrimSpace(params.Host); host != "" {
-			for _, value := range splitEndpoints(host) {
-				parsedEndpoint, endpointErr := parseEndpoint(value, port)
-				if endpointErr != nil {
-					return connectionConfig{}, endpointErr
-				}
-				config.Endpoints = append(config.Endpoints, parsedEndpoint)
+		for _, value := range splitEndpoints(host) {
+			parsedEndpoint, endpointErr := parseEndpoint(value, port)
+			if endpointErr != nil {
+				return connectionConfig{}, endpointErr
 			}
+			config.Endpoints = append(config.Endpoints, parsedEndpoint)
 		}
-	}
-	if parsed.database != "" {
-		config.Database = parsed.database
-	}
-	if parsed.username != "" {
-		config.Username = parsed.username
-	}
-	if parsed.password != "" {
-		config.Password = parsed.password
-	}
-
-	urlSections := parseHiveParameterSections(params.URLParams)
-	values := mergeHiveParameters(parsed.parameters, urlSections.session)
-	hiveConfs := mergeHiveConfAssignments(parsed.hiveConfs, urlSections.hiveConfs)
-	hiveVars := mergeHiveAssignments(parsed.hiveVars, urlSections.hiveVars)
-	if value, exists := firstParameter(values, "user", "username"); exists {
-		config.Username = value
-	}
-	if value, exists := firstParameter(values, "password"); exists {
-		config.Password = value
-	}
-	if err := applyHiveParameters(&config, values, hiveConfs); err != nil {
-		return connectionConfig{}, err
+	} else {
+		config.Endpoints = parsed.endpoints
 	}
 	applyOpenSessionVariables(&config, values, hiveConfs, hiveVars)
 	if err := applyDelegationToken(&config, values); err != nil {
@@ -241,6 +262,10 @@ func parseConnectionConfig(params connectParams) (connectionConfig, error) {
 	}
 	config.ZooKeeperTLSConfig = zooKeeperTLSConfig
 	return config, nil
+}
+
+func isZooKeeperDiscovery(mode string) bool {
+	return strings.EqualFold(mode, "zookeeper") || strings.EqualFold(mode, "zookeeperha")
 }
 
 type parsedHiveConnection struct {
@@ -466,6 +491,17 @@ func setCaseInsensitive(values map[string]string, key, value string) {
 	values[key] = value
 }
 
+func deleteHiveParameters(values map[string]string, keys ...string) {
+	for existing := range values {
+		for _, key := range keys {
+			if strings.EqualFold(existing, key) {
+				delete(values, existing)
+				break
+			}
+		}
+	}
+}
+
 func mergeHiveAssignments(first, second map[string]string) map[string]string {
 	result := make(map[string]string, len(first)+len(second))
 	for key, value := range first {
@@ -596,7 +632,7 @@ func applyHiveParameters(config *connectionConfig, values, hiveConfs map[string]
 		parameter(values, "clientprincipal"),
 		parameter(values, "userprincipal"),
 	)
-	kerberos.Service = firstNonEmpty(parameter(values, "service"), serviceFromPrincipal(kerberos.ServerPrincipal), defaultHiveService)
+	kerberos.Service = firstNonEmpty(parameter(values, "service"), serviceFromPrincipal(kerberos.ServerPrincipal), kerberos.Service)
 	kerberos.ServerName = parameter(values, "servername")
 	kerberos.Realm = firstNonEmpty(parameter(values, "realm"), realmFromPrincipal(kerberos.ClientPrincipal))
 	kerberos.ConfigPath = firstNonEmpty(parameter(values, "krb5conf"), parameter(values, "kerberosconfig"))

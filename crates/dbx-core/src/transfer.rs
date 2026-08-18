@@ -5,10 +5,13 @@ use tokio::sync::RwLock;
 
 use crate::connection::{config_for_pool_key, AppState, PoolKind};
 use crate::db;
+use crate::db::agent_driver::AgentTableReadStartParams;
 use crate::db::mongo_driver::MongoDocumentResult;
 use crate::models::connection::DatabaseType;
 use crate::object_source_sql::{build_executable_object_source_statements, EditableObjectSourceSqlInput};
-use crate::query::{agent_execute_query_params, pool_error_action, PoolErrorAction, QueryExecutionOptions};
+use crate::query::{
+    agent_execute_query_params, pool_error_action, PoolErrorAction, QueryExecutionOptions, AGENT_PROTOCOL_MAX_ROWS,
+};
 use crate::sql::{split_sql_statements, split_sql_statements_for_database};
 use crate::sql_dialect::{qualified_transfer_table, quote_transfer_identifier};
 
@@ -265,7 +268,7 @@ pub fn resolve_external_transfer_catalog_for_config<'a>(
     config: &crate::models::connection::ConnectionConfig,
 ) -> Option<&'a str> {
     let catalog = normalize_external_catalog_name(catalog)?;
-    if crate::schema::is_doris_family_catalog_capable_config(config) {
+    if db::mysql_compatible::supports_external_catalogs(config) {
         Some(catalog)
     } else {
         None
@@ -1300,6 +1303,85 @@ pub(crate) fn normalize_integer_literal(
     Some(integer.to_string())
 }
 
+fn is_postgres_numeric_family(data_type: &str) -> bool {
+    let normalized = data_type.trim().to_ascii_lowercase();
+    let base = normalized.split(['(', ' ']).next().unwrap_or("");
+    matches!(
+        base,
+        "smallint"
+            | "int2"
+            | "integer"
+            | "int4"
+            | "bigint"
+            | "int8"
+            | "numeric"
+            | "decimal"
+            | "real"
+            | "float4"
+            | "float"
+            | "double"
+            | "doubleprecision"
+            | "float8"
+    )
+}
+
+/// Strips validated en-US thousands separators from a numeric literal for numeric target
+/// columns. Only standard 3-digit grouping is accepted ("1,234", "12,345,678"); malformed
+/// grouping ("1,23,4", "1,,234") or any non-numeric character returns None so the original
+/// text reaches the database and keeps its existing validation error instead of being
+/// silently coerced. Values without a comma are left untouched.
+pub(crate) fn normalize_thousands_numeric_literal(
+    value: &str,
+    db_type: &DatabaseType,
+    column_type: Option<&str>,
+) -> Option<String> {
+    if !is_postgres_transfer_dialect(db_type) || !column_type.is_some_and(is_postgres_numeric_family) {
+        return None;
+    }
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed.bytes().any(|byte| matches!(byte, b'e' | b'E')) {
+        return None;
+    }
+    let (negative, unsigned) = match trimmed.as_bytes().first() {
+        Some(b'-') => (true, &trimmed[1..]),
+        Some(b'+') => (false, &trimmed[1..]),
+        _ => (false, trimmed),
+    };
+    if unsigned.is_empty() {
+        return None;
+    }
+    let (integer_part, fraction) = match unsigned.split_once('.') {
+        Some((integer, fraction)) => (integer, Some(fraction)),
+        None => (unsigned, None),
+    };
+    if fraction.is_some_and(|fraction| fraction.is_empty() || !fraction.bytes().all(|byte| byte.is_ascii_digit())) {
+        return None;
+    }
+    let mut digits = String::with_capacity(unsigned.len());
+    for (index, group) in integer_part.split(',').enumerate() {
+        if group.is_empty() || !group.bytes().all(|byte| byte.is_ascii_digit()) {
+            return None;
+        }
+        if (index == 0 && group.len() > 3) || (index > 0 && group.len() != 3) {
+            return None;
+        }
+        digits.push_str(group);
+    }
+    if !integer_part.contains(',') {
+        return None;
+    }
+    let mut canonical = String::with_capacity(trimmed.len());
+    if negative {
+        canonical.push('-');
+    }
+    canonical.push_str(&digits);
+    if let Some(fraction) = fraction {
+        canonical.push('.');
+        canonical.push_str(fraction);
+    }
+    Some(canonical)
+}
+
 fn is_postgres_sequence_default(default_value: Option<&str>) -> bool {
     default_value.is_some_and(|value| value.to_ascii_lowercase().contains("nextval("))
 }
@@ -1401,6 +1483,71 @@ fn writable_transfer_columns(
                 && !is_mysql_non_insertable_transfer_column(column, source_db_type)
         })
         .cloned()
+        .collect()
+}
+
+fn transfer_column_names_match(target_db_type: &DatabaseType, left: &str, right: &str) -> bool {
+    if matches!(
+        target_db_type,
+        DatabaseType::Mysql
+            | DatabaseType::Goldendb
+            | DatabaseType::Sqlite
+            | DatabaseType::Rqlite
+            | DatabaseType::CloudflareD1
+            | DatabaseType::DuckDb
+            | DatabaseType::SqlServer
+            | DatabaseType::Doris
+            | DatabaseType::StarRocks
+            | DatabaseType::Hive
+            | DatabaseType::Kyuubi
+            | DatabaseType::Impala
+            | DatabaseType::Spark
+            | DatabaseType::Access
+    ) {
+        left.eq_ignore_ascii_case(right)
+    } else {
+        left == right
+    }
+}
+
+fn missing_transfer_target_columns(
+    target_columns: &[db::ColumnInfo],
+    col_names: &[String],
+    target_db_type: &DatabaseType,
+) -> Vec<String> {
+    col_names
+        .iter()
+        .filter(|name| {
+            !target_columns.iter().any(|column| transfer_column_names_match(target_db_type, name, &column.name))
+        })
+        .cloned()
+        .collect()
+}
+
+fn target_column_can_be_omitted(column: &db::ColumnInfo, target_db_type: &DatabaseType) -> bool {
+    let extra = column.extra.as_deref().unwrap_or_default().trim().to_ascii_lowercase();
+    column.is_nullable
+        || column.column_default.as_deref().is_some_and(|value| !value.trim().is_empty())
+        || extra.contains("generated")
+        || extra.contains("identity")
+        || extra.contains("auto_increment")
+        || extra.contains("autoincrement")
+        || extra.contains("computed")
+        || (matches!(target_db_type, DatabaseType::SqlServer) && is_sqlserver_rowversion_type(&column.data_type))
+}
+
+fn required_unmapped_transfer_target_columns(
+    target_columns: &[db::ColumnInfo],
+    col_names: &[String],
+    target_db_type: &DatabaseType,
+) -> Vec<String> {
+    target_columns
+        .iter()
+        .filter(|column| {
+            !target_column_can_be_omitted(column, target_db_type)
+                && !col_names.iter().any(|name| transfer_column_names_match(target_db_type, name, &column.name))
+        })
+        .map(|column| column.name.clone())
         .collect()
 }
 
@@ -2652,7 +2799,7 @@ pub fn map_column_type(source_type: &str, _source_db: &DatabaseType, target_db: 
     // Extract basic type, `bigint unsigned` -> `bigint`
     base = base.split(' ').next().unwrap_or(base).trim();
 
-    if matches!(target_db, DatabaseType::Hive) {
+    if matches!(target_db, DatabaseType::Hive | DatabaseType::Kyuubi | DatabaseType::Impala) {
         return match base {
             "tinyint" => "TINYINT".into(),
             "smallint" | "int2" => "SMALLINT".into(),
@@ -2673,7 +2820,11 @@ pub fn map_column_type(source_type: &str, _source_db: &DatabaseType, target_db: 
                 "TIMESTAMP".into()
             }
             "binary" | "varbinary" | "blob" | "tinyblob" | "mediumblob" | "longblob" | "bytea" | "image" => {
-                "BINARY".into()
+                if matches!(target_db, DatabaseType::Impala) {
+                    "STRING".into()
+                } else {
+                    "BINARY".into()
+                }
             }
             _ => "STRING".into(),
         };
@@ -2852,7 +3003,8 @@ pub fn generate_create_table_ddl(
                 line.push(' ');
                 line.push_str(&default_clause);
             }
-            if !c.is_nullable && !matches!(target_db, DatabaseType::Hive) {
+            if !c.is_nullable && !matches!(target_db, DatabaseType::Hive | DatabaseType::Kyuubi | DatabaseType::Impala)
+            {
                 line.push_str(" NOT NULL");
             }
             if is_mysql_family {
@@ -2875,7 +3027,7 @@ pub fn generate_create_table_ddl(
     }
 
     let mut pks = Vec::with_capacity(columns.iter().filter(|c| c.is_primary_key).count());
-    if !matches!(target_db, DatabaseType::Hive) {
+    if !matches!(target_db, DatabaseType::Hive | DatabaseType::Kyuubi | DatabaseType::Impala) {
         for c in columns {
             if c.is_primary_key {
                 let qname = quote_identifier(&c.name, target_db);
@@ -3313,16 +3465,11 @@ fn generate_upsert_typed_for_transfer(
 fn max_transfer_write_rows(db_type: &DatabaseType, mode: &TransferMode) -> usize {
     match (db_type, mode) {
         (DatabaseType::SqlServer, TransferMode::Append | TransferMode::Overwrite) => MAX_SQLSERVER_INSERT_ROWS,
-        (DatabaseType::Hive, _) => 500,
+        (DatabaseType::Hive | DatabaseType::Kyuubi | DatabaseType::Impala, _) => 500,
         (DatabaseType::Oracle, TransferMode::Append | TransferMode::Overwrite) => MAX_ORACLE_INSERT_ALL_ROWS,
         (DatabaseType::Oracle, TransferMode::Upsert) => MAX_ORACLE_MERGE_ROWS,
         _ => usize::MAX,
     }
-}
-
-fn is_oceanbase_mysql_profile(db_type: &DatabaseType, driver_profile: Option<&str>) -> bool {
-    matches!(db_type, DatabaseType::Mysql)
-        && driver_profile.is_some_and(|profile| profile.eq_ignore_ascii_case("oceanbase"))
 }
 
 fn contains_oceanbase_mysql_table_options(sql: &str) -> bool {
@@ -3383,8 +3530,8 @@ fn can_reuse_source_table_ddl(
     target_driver_profile: Option<&str>,
     preserves_target_table_name: bool,
 ) -> bool {
-    if is_oceanbase_mysql_profile(source_db_type, source_driver_profile)
-        && !is_oceanbase_mysql_profile(target_db_type, target_driver_profile)
+    if db::oceanbase_mysql::is_profile(source_db_type, source_driver_profile)
+        && !db::oceanbase_mysql::is_profile(target_db_type, target_driver_profile)
     {
         return false;
     }
@@ -3657,6 +3804,13 @@ pub fn pagination_sql(
             let base_sql = format!("SELECT {col_list} FROM {full_table}");
             oracle_rownum_page_sql(&col_list, base_sql, offset, limit)
         }
+        DatabaseType::Informix => {
+            if offset == 0 {
+                format!("SELECT FIRST {limit} {col_list} FROM {full_table}")
+            } else {
+                format!("SELECT SKIP {offset} FIRST {limit} {col_list} FROM {full_table}")
+            }
+        }
         DatabaseType::SqlServer | DatabaseType::Dameng => {
             format!(
                 "SELECT {col_list} FROM {full_table} ORDER BY (SELECT NULL) OFFSET {offset} ROWS FETCH NEXT {limit} ROWS ONLY"
@@ -3691,6 +3845,14 @@ pub fn pagination_sql_with_order(
             let order_by = order_expression.map(|value| format!(" ORDER BY {value}")).unwrap_or_default();
             let base_sql = format!("SELECT {col_list} FROM {full_table}{order_by}");
             oracle_rownum_page_sql(&col_list, base_sql, offset, limit)
+        }
+        DatabaseType::Informix => {
+            let order_by = order_expression.map(|value| format!(" ORDER BY {value}")).unwrap_or_default();
+            if offset == 0 {
+                format!("SELECT FIRST {limit} {col_list} FROM {full_table}{order_by}")
+            } else {
+                format!("SELECT SKIP {offset} FIRST {limit} {col_list} FROM {full_table}{order_by}")
+            }
         }
         DatabaseType::SqlServer | DatabaseType::Dameng => {
             let order_by = order_expression.unwrap_or_else(|| "(SELECT NULL)".to_string());
@@ -3767,6 +3929,14 @@ pub fn pagination_sql_with_filter_order_and_identifier_quote(
             let order_by = order_expression.map(|value| format!(" ORDER BY {value}")).unwrap_or_default();
             let base_sql = format!("SELECT {col_list} FROM {full_table}{where_clause}{order_by}");
             oracle_rownum_page_sql(&col_list, base_sql, offset, limit)
+        }
+        DatabaseType::Informix => {
+            let order_by = order_expression.map(|value| format!(" ORDER BY {value}")).unwrap_or_default();
+            if offset == 0 {
+                format!("SELECT FIRST {limit} {col_list} FROM {full_table}{where_clause}{order_by}")
+            } else {
+                format!("SELECT SKIP {offset} FIRST {limit} {col_list} FROM {full_table}{where_clause}{order_by}")
+            }
         }
         DatabaseType::SqlServer | DatabaseType::Dameng => {
             let order_by = order_expression.unwrap_or_else(|| "(SELECT NULL)".to_string());
@@ -3864,6 +4034,9 @@ pub fn keyset_pagination_sql_with_identifier_quote(
         DatabaseType::Oracle => {
             let base_sql = format!("SELECT {col_list} FROM {full_table}{where_clause} ORDER BY {order}");
             oracle_rownum_page_sql(&col_list, base_sql, 0, limit)
+        }
+        DatabaseType::Informix => {
+            format!("SELECT FIRST {limit} {col_list} FROM {full_table}{where_clause} ORDER BY {order}")
         }
         DatabaseType::SqlServer | DatabaseType::Dameng => {
             format!(
@@ -6302,6 +6475,92 @@ where
     Ok(total_transferred)
 }
 
+#[derive(Default)]
+struct HiveServerTransferCursor {
+    started: bool,
+    session_id: Option<String>,
+}
+
+fn transfer_cursor_sql(
+    columns: &[String],
+    table: &str,
+    schema: &str,
+    db_type: &DatabaseType,
+    catalog: Option<&str>,
+) -> String {
+    let full_table = qualified_table(table, schema, db_type, catalog);
+    let col_list = columns.iter().map(|column| quote_identifier(column, db_type)).collect::<Vec<_>>().join(", ");
+    format!("SELECT {col_list} FROM {full_table}")
+}
+
+async fn fetch_hive_server_transfer_batch(
+    state: &AppState,
+    pool_key: &str,
+    request: &TransferRequest,
+    sql: &str,
+    batch_size: usize,
+    cursor: &mut HiveServerTransferCursor,
+) -> Result<db::QueryResult, String> {
+    let query_timeout_secs = if cursor.started {
+        0
+    } else {
+        let configs = state.configs.read().await;
+        configs.get(&request.source_connection_id).map(|config| config.query_timeout_secs).unwrap_or(0)
+    };
+    let connections = state.connections.read().await;
+    let Some(PoolKind::Agent(client)) = connections.get(pool_key) else {
+        return Err("Impala transfer requires an Agent connection".to_string());
+    };
+    let client = client.clone();
+    drop(connections);
+
+    let mut client = client.lock().await;
+    let result = if cursor.started {
+        let session_id =
+            cursor.session_id.as_deref().ok_or("Impala transfer cursor ended before the next page was requested")?;
+        client.fetch_table_read_page::<db::QueryResult>(session_id, batch_size).await?
+    } else {
+        cursor.started = true;
+        client
+            .start_table_read::<db::QueryResult>(AgentTableReadStartParams {
+                sql: sql.to_string(),
+                database: Some(request.source_database.clone()),
+                schema: (!request.source_schema.trim().is_empty()).then(|| request.source_schema.clone()),
+                page_size: batch_size,
+                max_rows: AGENT_PROTOCOL_MAX_ROWS,
+                fetch_size: Some(batch_size),
+                timeout_secs: (query_timeout_secs > 0).then_some(query_timeout_secs),
+            })
+            .await?
+    };
+
+    if result.has_more {
+        cursor.session_id = result.session_id.clone().or_else(|| cursor.session_id.clone());
+        if cursor.session_id.is_none() {
+            return Err("Impala transfer cursor did not return a session id for additional rows".to_string());
+        }
+    } else {
+        cursor.session_id = None;
+    }
+    Ok(result)
+}
+
+async fn close_hive_server_transfer_cursor(state: &AppState, pool_key: &str, cursor: &mut HiveServerTransferCursor) {
+    let Some(session_id) = cursor.session_id.take() else {
+        return;
+    };
+    let connections = state.connections.read().await;
+    let Some(PoolKind::Agent(client)) = connections.get(pool_key) else {
+        return;
+    };
+    let client = client.clone();
+    drop(connections);
+    let mut client = client.lock().await;
+    if let Err(error) = client.close_table_read_session::<bool>(&session_id).await {
+        log::warn!("[transfer] failed to close Impala transfer cursor: {error}");
+    }
+}
+
 /// Transfer a single table. Returns rows transferred.
 /// `progress_callback` is invoked for progress updates.
 #[allow(clippy::too_many_arguments)]
@@ -6567,7 +6826,7 @@ where
                     }
                 };
                 if contains_oceanbase_mysql_table_options(&source_ddl)
-                    && !is_oceanbase_mysql_profile(target_db_type, target_driver_profile.as_deref())
+                    && !db::oceanbase_mysql::is_profile(target_db_type, target_driver_profile.as_deref())
                 {
                     generate_create_table_ddl(
                         &columns,
@@ -6648,6 +6907,57 @@ where
         return Ok(0);
     }
 
+    let needs_target_columns = (request.create_table && target_table_preexisting)
+        || (request.mode == TransferMode::Upsert
+            && !matches!(
+                target_db_type,
+                DatabaseType::ClickHouse | DatabaseType::Hive | DatabaseType::Kyuubi | DatabaseType::Impala
+            ))
+        || matches!(target_db_type, DatabaseType::Postgres | DatabaseType::Dameng);
+    let target_columns = if needs_target_columns {
+        get_columns_for_transfer(
+            state,
+            target_pool_key,
+            &request.target_connection_id,
+            &request.target_database,
+            &request.target_schema,
+            &target_table,
+            request.target_catalog.as_deref(),
+        )
+        .await
+        .map_err(|error| format!("Failed to inspect target table '{target_table}' columns before transfer: {error}"))?
+    } else {
+        Vec::new()
+    };
+
+    // The user asked DBX to sync structure (create_table), but the target
+    // table already existed so the create-table DDL above was skipped (see
+    // "skipping create-table DDL" above). If the untouched target structure
+    // can't accept the planned insert, fail fast here instead of truncating
+    // the target's existing data and then hitting an opaque driver error.
+    if request.create_table && target_table_preexisting {
+        let missing = missing_transfer_target_columns(&target_columns, &col_names, target_db_type);
+        if !missing.is_empty() {
+            return Err(format!(
+                "Target table '{target_table}' already exists with a different structure and is missing column(s) \
+                 {} present in the source table. DBX does not alter an existing target table's columns during \
+                 transfer — drop the target table or adjust its structure to match the source first.",
+                missing.join(", ")
+            ));
+        }
+
+        let required = required_unmapped_transfer_target_columns(&target_columns, &col_names, target_db_type);
+        if !required.is_empty() {
+            return Err(format!(
+                "Target table '{target_table}' already exists with a different structure and has required column(s) \
+                 {} that are not present in the source table and have no default or generated value. DBX does not \
+                 alter an existing target table's columns during transfer — drop the target table or adjust its \
+                 structure to match the source first.",
+                required.join(", ")
+            ));
+        }
+    }
+
     // Truncate target if overwrite mode
     if request.mode == TransferMode::Overwrite {
         let full_table =
@@ -6661,28 +6971,12 @@ where
         execute_on_pool(state, target_pool_key, &truncate_sql).await.map_err(|e| format!("Failed to truncate: {e}"))?;
     }
 
-    let target_columns = if (request.mode == TransferMode::Upsert
-        && !matches!(target_db_type, DatabaseType::ClickHouse | DatabaseType::Hive))
-        || matches!(target_db_type, DatabaseType::Postgres | DatabaseType::Dameng)
-    {
-        get_columns_for_transfer(
-            state,
-            target_pool_key,
-            &request.target_connection_id,
-            &request.target_database,
-            &request.target_schema,
-            &target_table,
-            request.target_catalog.as_deref(),
-        )
-        .await
-        .unwrap_or_default()
-    } else {
-        Vec::new()
-    };
-
     // Determine effective mode and PK columns for upsert
     let (effective_mode, pk_columns) = if request.mode == TransferMode::Upsert {
-        if matches!(target_db_type, DatabaseType::ClickHouse | DatabaseType::Hive) {
+        if matches!(
+            target_db_type,
+            DatabaseType::ClickHouse | DatabaseType::Hive | DatabaseType::Kyuubi | DatabaseType::Impala
+        ) {
             log::warn!("[transfer] upsert not supported for {:?}, falling back to append", target_db_type);
             (TransferMode::Append, vec![])
         } else {
@@ -6709,92 +7003,127 @@ where
     let batch_size = if request.batch_size == 0 { 1000 } else { request.batch_size };
     let mut offset: u64 = 0;
     let mut total_transferred: u64 = 0;
-
-    loop {
-        if is_cancelled(&request.transfer_id).await {
-            return Err("Cancelled".to_string());
-        }
-
-        let sql = pagination_sql_with_order(
+    // A single Agent cursor keeps Kyuubi/Impala rows in one query execution.
+    // Re-running LIMIT/OFFSET pages is unstable for tables without a unique key.
+    let use_hive_server_cursor = matches!(source_db_type, DatabaseType::Kyuubi | DatabaseType::Impala);
+    let hive_server_transfer_sql = use_hive_server_cursor.then(|| {
+        transfer_cursor_sql(
             &col_names,
             table,
             &request.source_schema,
             source_db_type,
-            offset,
-            batch_size,
-            &primary_key_columns,
             request.source_catalog.as_deref(),
-        );
-        let (sql, mysql_spatial_markers) =
-            mysql_spatial_transfer_select_sql(sql, &col_names, &col_types, source_db_type, target_db_type);
-        let result = execute_on_pool(state, source_pool_key, &sql).await?;
-        let row_count = result.rows.len();
+        )
+    });
+    let mut hive_server_cursor = HiveServerTransferCursor::default();
 
-        if row_count == 0 {
-            break;
-        }
+    let transfer_result: Result<(), String> = async {
+        loop {
+            if is_cancelled(&request.transfer_id).await {
+                return Err("Cancelled".to_string());
+            }
 
-        let write_statements = generate_transfer_write_sql_batches(
-            &effective_mode,
-            &col_names,
-            &col_types,
-            &result.rows,
-            &target_table,
-            &request.target_schema,
-            target_db_type,
-            &pk_columns,
-            request.target_catalog.as_deref(),
-            overrides_postgres_system_values,
-            mysql_spatial_markers,
-        )?;
-        for (statement_index, batch_sql) in write_statements.iter().enumerate() {
-            execute_transfer_write_statement(
-                state,
-                target_pool_key,
-                batch_sql,
-                target_db_type,
+            let (result, mysql_spatial_markers) = if let Some(sql) = hive_server_transfer_sql.as_deref() {
+                (
+                    fetch_hive_server_transfer_batch(
+                        state,
+                        source_pool_key,
+                        request,
+                        sql,
+                        batch_size,
+                        &mut hive_server_cursor,
+                    )
+                    .await?,
+                    false,
+                )
+            } else {
+                let sql = pagination_sql_with_order(
+                    &col_names,
+                    table,
+                    &request.source_schema,
+                    source_db_type,
+                    offset,
+                    batch_size,
+                    &primary_key_columns,
+                    request.source_catalog.as_deref(),
+                );
+                let (sql, mysql_spatial_markers) =
+                    mysql_spatial_transfer_select_sql(sql, &col_names, &col_types, source_db_type, target_db_type);
+                (execute_on_pool(state, source_pool_key, &sql).await?, mysql_spatial_markers)
+            };
+            let has_more = result.has_more;
+            let row_count = result.rows.len();
+
+            if row_count == 0 {
+                break;
+            }
+
+            let write_statements = generate_transfer_write_sql_batches(
+                &effective_mode,
+                &col_names,
+                &col_types,
+                &result.rows,
                 &target_table,
                 &request.target_schema,
-                writes_dameng_identity_columns,
-            )
-            .await
-            .map_err(|e| {
-                let absolute_row = parse_mysql_row_error(&e).map(|row| offset + row);
-                match absolute_row {
-                    Some(row) => format!(
-                        "Insert failed for table '{target_table}' at row {row} (chunk {} of {}): {e}",
-                        statement_index + 1,
-                        write_statements.len()
-                    ),
-                    None => format!(
-                        "Insert failed for table '{target_table}' at offset {offset}, chunk {} of {}: {e}",
-                        statement_index + 1,
-                        write_statements.len()
-                    ),
-                }
-            })?;
+                target_db_type,
+                &pk_columns,
+                request.target_catalog.as_deref(),
+                overrides_postgres_system_values,
+                mysql_spatial_markers,
+            )?;
+            for (statement_index, batch_sql) in write_statements.iter().enumerate() {
+                execute_transfer_write_statement(
+                    state,
+                    target_pool_key,
+                    batch_sql,
+                    target_db_type,
+                    &target_table,
+                    &request.target_schema,
+                    writes_dameng_identity_columns,
+                )
+                .await
+                .map_err(|e| {
+                    let absolute_row = parse_mysql_row_error(&e).map(|row| offset + row);
+                    match absolute_row {
+                        Some(row) => format!(
+                            "Insert failed for table '{target_table}' at row {row} (chunk {} of {}): {e}",
+                            statement_index + 1,
+                            write_statements.len()
+                        ),
+                        None => format!(
+                            "Insert failed for table '{target_table}' at offset {offset}, chunk {} of {}: {e}",
+                            statement_index + 1,
+                            write_statements.len()
+                        ),
+                    }
+                })?;
+            }
+
+            total_transferred += row_count as u64;
+            log::info!("[transfer] {} batch +{} rows (total {})", table, row_count, total_transferred);
+            offset += row_count as u64;
+
+            progress_callback(TransferProgress {
+                transfer_id: request.transfer_id.clone(),
+                table: table.to_string(),
+                table_index,
+                total_tables,
+                rows_transferred: total_transferred,
+                total_rows,
+                status: TransferStatus::Running,
+                error: None,
+                terminal: false,
+            });
+
+            if (use_hive_server_cursor && !has_more) || (!use_hive_server_cursor && row_count < batch_size) {
+                break;
+            }
         }
-
-        total_transferred += row_count as u64;
-        log::info!("[transfer] {} batch +{} rows (total {})", table, row_count, total_transferred);
-        offset += row_count as u64;
-
-        progress_callback(TransferProgress {
-            transfer_id: request.transfer_id.clone(),
-            table: table.to_string(),
-            table_index,
-            total_tables,
-            rows_transferred: total_transferred,
-            total_rows,
-            status: TransferStatus::Running,
-            error: None,
-            terminal: false,
-        });
-
-        if row_count < batch_size {
-            break;
-        }
+        Ok(())
     }
+    .await;
+    close_hive_server_transfer_cursor(state, source_pool_key, &mut hive_server_cursor).await;
+    transfer_result?;
 
     if pg_compat_transfer {
         for statement in generate_postgres_sequence_sync_sql(&columns, &target_table, &request.target_schema) {
@@ -8578,6 +8907,80 @@ mod tests {
     }
 
     #[test]
+    fn transfer_target_column_validation_reports_columns_absent_from_target() {
+        let target_columns = vec![test_column("id", "int"), test_column("name", "varchar(32)")];
+        let col_names = vec!["id".to_string(), "name".to_string(), "extra_col".to_string()];
+
+        assert_eq!(
+            missing_transfer_target_columns(&target_columns, &col_names, &DatabaseType::Mysql),
+            vec!["extra_col".to_string()]
+        );
+    }
+
+    #[test]
+    fn transfer_target_column_validation_uses_database_case_rules() {
+        let target_columns = vec![test_column("ID", "int"), test_column("Name", "varchar(32)")];
+        let col_names = vec!["id".to_string(), "name".to_string()];
+
+        assert!(missing_transfer_target_columns(&target_columns, &col_names, &DatabaseType::Mysql).is_empty());
+        assert!(missing_transfer_target_columns(&target_columns, &col_names, &DatabaseType::Kyuubi).is_empty());
+        assert_eq!(
+            missing_transfer_target_columns(&target_columns, &col_names, &DatabaseType::Postgres),
+            vec!["id".to_string(), "name".to_string()]
+        );
+    }
+
+    #[test]
+    fn transfer_target_column_validation_allows_omittable_target_columns() {
+        let target_columns = vec![
+            test_column("id", "int"),
+            test_column("nullable_note", "varchar(32)"),
+            db::ColumnInfo {
+                is_nullable: false,
+                column_default: Some("CURRENT_TIMESTAMP".to_string()),
+                ..test_column("created_at", "timestamp")
+            },
+            db::ColumnInfo {
+                is_nullable: false,
+                extra: Some("generated always as (id + 1) stored".to_string()),
+                ..test_column("generated_id", "int")
+            },
+            db::ColumnInfo {
+                is_nullable: false,
+                extra: Some("identity(1,1)".to_string()),
+                ..test_column("sequence_id", "bigint")
+            },
+            db::ColumnInfo {
+                is_nullable: false,
+                extra: Some("computed".to_string()),
+                ..test_column("computed_id", "int")
+            },
+            db::ColumnInfo { is_nullable: false, ..test_column("row_version", "rowversion") },
+        ];
+        let col_names = vec!["id".to_string()];
+
+        assert!(required_unmapped_transfer_target_columns(&target_columns[..6], &col_names, &DatabaseType::Mysql)
+            .is_empty());
+        assert!(
+            required_unmapped_transfer_target_columns(&target_columns, &col_names, &DatabaseType::SqlServer).is_empty()
+        );
+    }
+
+    #[test]
+    fn transfer_target_column_validation_rejects_required_unmapped_columns() {
+        let target_columns = vec![
+            test_column("id", "int"),
+            db::ColumnInfo { is_nullable: false, ..test_column("required_code", "varchar(32)") },
+        ];
+        let col_names = vec!["id".to_string()];
+
+        assert_eq!(
+            required_unmapped_transfer_target_columns(&target_columns, &col_names, &DatabaseType::Mysql),
+            vec!["required_code".to_string()]
+        );
+    }
+
+    #[test]
     fn dameng_identity_insert_wrapper_quotes_schema_and_table() {
         let sql = wrap_dameng_identity_insert_sql(
             "INSERT INTO \"SYSDBA\".\"USERS\" (\"ID\") VALUES\n(1);",
@@ -9194,6 +9597,82 @@ mod tests {
     }
 
     #[test]
+    fn kyuubi_transfer_uses_spark_sql_compatible_ddl_and_batches() {
+        let cols = vec![
+            db::ColumnInfo { is_primary_key: true, is_nullable: false, ..test_column("id", "bigint") },
+            db::ColumnInfo { is_nullable: false, ..test_column("payload", "jsonb") },
+        ];
+
+        let ddl = generate_create_table_ddl(
+            &cols,
+            "events",
+            "public",
+            "warehouse",
+            &DatabaseType::Kyuubi,
+            &DatabaseType::Postgres,
+            None,
+            None,
+        );
+
+        assert!(ddl.contains("CREATE TABLE IF NOT EXISTS `warehouse`.`events`"));
+        assert!(ddl.contains("`id` BIGINT"));
+        assert!(ddl.contains("`payload` STRING"));
+        assert!(!ddl.contains("PRIMARY KEY"));
+        assert!(!ddl.contains("NOT NULL"));
+        assert_eq!(quote_identifier("user`events", &DatabaseType::Kyuubi), "`user``events`");
+        assert_eq!(max_transfer_write_rows(&DatabaseType::Kyuubi, &TransferMode::Append), 500);
+        assert_eq!(max_transfer_write_rows(&DatabaseType::Kyuubi, &TransferMode::Upsert), 500);
+    }
+
+    #[test]
+    fn impala_transfer_uses_impala_compatible_ddl_and_batches() {
+        let cols = vec![
+            db::ColumnInfo { is_primary_key: true, is_nullable: false, ..test_column("id", "bigint") },
+            db::ColumnInfo { is_nullable: false, ..test_column("payload", "jsonb") },
+            db::ColumnInfo { is_nullable: true, ..test_column("binary_payload", "bytea") },
+        ];
+
+        let ddl = generate_create_table_ddl(
+            &cols,
+            "events",
+            "public",
+            "warehouse",
+            &DatabaseType::Impala,
+            &DatabaseType::Postgres,
+            None,
+            None,
+        );
+
+        assert!(ddl.contains("CREATE TABLE IF NOT EXISTS `warehouse`.`events`"));
+        assert!(ddl.contains("`id` BIGINT"));
+        assert!(ddl.contains("`payload` STRING"));
+        assert!(ddl.contains("`binary_payload` STRING"));
+        assert!(!ddl.contains("PRIMARY KEY"));
+        assert!(!ddl.contains("NOT NULL"));
+        assert_eq!(map_column_type("varbinary(255)", &DatabaseType::Mysql, &DatabaseType::Impala), "STRING");
+        assert_eq!(map_column_type("bytea", &DatabaseType::Postgres, &DatabaseType::Impala), "STRING");
+        assert_eq!(map_column_type("binary", &DatabaseType::Mysql, &DatabaseType::Hive), "BINARY");
+
+        let statements = generate_transfer_write_sql_batches(
+            &TransferMode::Append,
+            &[String::from("id"), String::from("binary_payload")],
+            &[Some(String::from("bigint")), Some(String::from("bytea"))],
+            &[vec![json!(1), json!("0x00ff")]],
+            "events",
+            "warehouse",
+            &DatabaseType::Impala,
+            &[],
+            None,
+            false,
+            false,
+        )
+        .unwrap();
+        assert_eq!(statements, vec!["INSERT INTO `warehouse`.`events` (`id`, `binary_payload`) VALUES\n(1, '0x00ff')"]);
+        assert_eq!(max_transfer_write_rows(&DatabaseType::Impala, &TransferMode::Append), 500);
+        assert_eq!(max_transfer_write_rows(&DatabaseType::Impala, &TransferMode::Upsert), 500);
+    }
+
+    #[test]
     fn mongo_transfer_document_fields_preserve_first_seen_order() {
         let documents = vec![json!({"b": 1}), json!({"a": 2, "c": 3}), json!({"b": 4, "d": 5})];
 
@@ -9240,6 +9719,38 @@ mod tests {
     }
 
     #[test]
+    fn impala_transfer_without_primary_key_uses_one_cursor_query() {
+        let sql = transfer_cursor_sql(
+            &[String::from("id"), String::from("name")],
+            "events",
+            "analytics",
+            &DatabaseType::Impala,
+            None,
+        );
+
+        assert_eq!(sql, "SELECT `id`, `name` FROM `analytics`.`events`");
+        assert!(!sql.contains("ORDER BY"));
+        assert!(!sql.contains("LIMIT"));
+        assert!(!sql.contains("OFFSET"));
+    }
+
+    #[test]
+    fn impala_transfer_preserves_explicit_primary_key_order() {
+        let sql = pagination_sql_with_order(
+            &[String::from("id"), String::from("name")],
+            "events",
+            "analytics",
+            &DatabaseType::Impala,
+            1000,
+            1000,
+            &[String::from("id")],
+            None,
+        );
+
+        assert_eq!(sql, "SELECT `id`, `name` FROM `analytics`.`events` ORDER BY `id` LIMIT 1000 OFFSET 1000");
+    }
+
+    #[test]
     fn doris_unique_key_columns_drive_transfer_pagination_order() {
         let columns =
             vec![db::ColumnInfo { is_unique: true, ..test_column("id", "int") }, test_column("payload", "varchar(64)")];
@@ -9282,6 +9793,72 @@ mod tests {
         );
 
         assert_eq!(sql, "SELECT `id`, `name` FROM `users` ORDER BY `id` LIMIT 200, 300");
+    }
+
+    #[test]
+    fn informix_pagination_uses_first_and_optional_skip() {
+        let columns = [String::from("id"), String::from("name")];
+
+        assert_eq!(
+            pagination_sql(&columns, "users", "app", &DatabaseType::Informix, 0, 100),
+            "SELECT FIRST 100 \"id\", \"name\" FROM \"app\".\"users\""
+        );
+        assert_eq!(
+            pagination_sql(&columns, "users", "app", &DatabaseType::Informix, 200, 100),
+            "SELECT SKIP 200 FIRST 100 \"id\", \"name\" FROM \"app\".\"users\""
+        );
+    }
+
+    #[test]
+    fn informix_ordered_pagination_uses_first_and_optional_skip() {
+        let columns = [String::from("id"), String::from("name")];
+        let order = [String::from("id")];
+
+        assert_eq!(
+            pagination_sql_with_order(&columns, "users", "app", &DatabaseType::Informix, 0, 100, &order, None),
+            "SELECT FIRST 100 \"id\", \"name\" FROM \"app\".\"users\" ORDER BY id"
+        );
+        assert_eq!(
+            pagination_sql_with_order(&columns, "users", "app", &DatabaseType::Informix, 200, 100, &order, None),
+            "SELECT SKIP 200 FIRST 100 \"id\", \"name\" FROM \"app\".\"users\" ORDER BY id"
+        );
+    }
+
+    #[test]
+    fn informix_filtered_pagination_preserves_filter_and_order() {
+        let columns = [String::from("id"), String::from("status")];
+        let default_order = [String::from("id")];
+
+        assert_eq!(
+            pagination_sql_with_filter_order(
+                &columns,
+                "users",
+                "app",
+                &DatabaseType::Informix,
+                200,
+                100,
+                Some("WHERE status = 'active'"),
+                Some("id DESC"),
+                &default_order,
+            ),
+            "SELECT SKIP 200 FIRST 100 id, status FROM \"app\".\"users\" WHERE (status = 'active') ORDER BY id DESC"
+        );
+    }
+
+    #[test]
+    fn informix_keyset_pagination_uses_first() {
+        assert_eq!(
+            keyset_pagination_sql(
+                &[String::from("id"), String::from("name")],
+                "users",
+                "app",
+                &DatabaseType::Informix,
+                &[String::from("id")],
+                &[json!(25)],
+                100,
+            ),
+            "SELECT FIRST 100 id, name FROM \"app\".\"users\" WHERE id > 25 ORDER BY id ASC"
+        );
     }
 
     #[test]
@@ -9479,6 +10056,7 @@ mod tests {
             index_type: Some("btree".to_string()),
             included_columns: Some(vec!["created_at".to_string()]),
             comment: Some("lookup index".to_string()),
+            key_is_expression: Vec::new(),
         }];
         let foreign_keys = vec![
             db::ForeignKeyInfo {

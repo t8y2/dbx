@@ -110,6 +110,7 @@ pub fn agent_connect_params_with_role(
         "jdbc_driver_class": agent_jdbc_driver_class(config),
         "jdbc_driver_paths": &config.jdbc_driver_paths,
         "sessionRole": session_role.as_str(),
+        "database_type": config.db_type,
     });
     if config.db_type == DatabaseType::ZooKeeper {
         params["connection_timeout_ms"] = serde_json::json!(
@@ -260,9 +261,13 @@ pub fn mongo_legacy_error_with_auth_hint(err: &str) -> String {
         return err.to_string();
     };
     let source = &source[..source_end];
-    format!(
-        "{err}\n\nCurrent authentication database: {source}. If this user was created in admin, set Authentication database to admin or add authSource=admin to URL params."
-    )
+    let verification_hint = format!(
+        "Current authentication database: {source}. The server rejected these credentials. Verify the username and password, and confirm that the user was created in {source}."
+    );
+    if source.eq_ignore_ascii_case("admin") {
+        return format!("{err}\n\n{verification_hint}");
+    }
+    format!("{err}\n\n{verification_hint} If the user was created in admin, set Authentication database to admin or add authSource=admin to URL params.")
 }
 
 pub fn mongo_uses_legacy_driver(config: &ConnectionConfig) -> bool {
@@ -624,6 +629,31 @@ fn append_agent_url_params(base: String, params: Option<&str>) -> String {
     format!("{base}{separator}{params}")
 }
 
+pub fn hive_uses_zookeeper_discovery(config: &ConnectionConfig) -> bool {
+    if !matches!(config.db_type, DatabaseType::Hive | DatabaseType::Kyuubi | DatabaseType::Impala) {
+        return false;
+    }
+
+    if config.url_params.as_deref().is_some_and(hive_parameters_use_zookeeper_discovery) {
+        return true;
+    }
+
+    config.host.trim().is_empty()
+        && config.connection_string.as_deref().is_some_and(hive_parameters_use_zookeeper_discovery)
+}
+
+fn hive_parameters_use_zookeeper_discovery(source: &str) -> bool {
+    source.split([';', '?', '#', '&']).any(|part| {
+        let Some((key, value)) = part.split_once('=') else {
+            return false;
+        };
+        let key = percent_decode_str(key.trim()).decode_utf8_lossy();
+        let value = percent_decode_str(value.trim()).decode_utf8_lossy();
+        key.eq_ignore_ascii_case("serviceDiscoveryMode")
+            && (value.eq_ignore_ascii_case("zookeeper") || value.eq_ignore_ascii_case("zookeeperha"))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -696,6 +726,7 @@ mod tests {
     fn agent_connect_params_default_to_workload_session_role() {
         let params = agent_connect_params(&config(DatabaseType::H2, Some("test")), "127.0.0.1", 9092, "test");
         assert_eq!(params["sessionRole"], "workload");
+        assert_eq!(params["database_type"], "h2");
     }
 
     #[test]
@@ -708,6 +739,25 @@ mod tests {
             AgentSessionRole::Metadata,
         );
         assert_eq!(params["sessionRole"], "metadata");
+    }
+
+    #[test]
+    fn structured_hive_uses_current_url_params_for_zookeeper_detection() {
+        let mut cfg = config(DatabaseType::Hive, Some("default"));
+        cfg.connection_string = Some(
+            "jdbc:hive2://zk1.example.com:2181,zk2.example.com:2181/default;serviceDiscoveryMode=zooKeeper".to_string(),
+        );
+        assert!(!hive_uses_zookeeper_discovery(&cfg));
+
+        cfg.url_params = Some("serviceDiscoveryMode=zooKeeperHA;zooKeeperNamespace=hs2".to_string());
+        assert!(hive_uses_zookeeper_discovery(&cfg));
+
+        cfg.url_params = Some("note=serviceDiscoveryMode=zooKeeper".to_string());
+        assert!(!hive_uses_zookeeper_discovery(&cfg));
+
+        cfg.host.clear();
+        cfg.url_params = None;
+        assert!(hive_uses_zookeeper_discovery(&cfg));
     }
 
     #[test]
@@ -861,6 +911,8 @@ mod tests {
 
         assert!(hinted.starts_with(err));
         assert!(hinted.contains("Current authentication database: admin"));
+        assert!(hinted.contains("The server rejected these credentials"));
+        assert!(!hinted.contains("add authSource=admin"));
     }
 
     #[test]

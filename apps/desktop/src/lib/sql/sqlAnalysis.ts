@@ -86,6 +86,114 @@ export function resolveMetadataColumnName(databaseType: string, sourceName: stri
   return caseOnlyMatches.length === 1 ? caseOnlyMatches[0] : undefined;
 }
 
+export interface ResolvedSourceColumnRef {
+  sourceKey: string;
+  sourceColumn: string;
+}
+
+/**
+ * Expand `*` / `alias.*` projections against each source table's columns so the
+ * returned stream aligns 1:1 with the executed result columns (projection
+ * order). A star whose source table is not among `tableSources` collapses to
+ * `undefined` (unresolvable). Whole-table `SELECT *` is expanded against the
+ * single source table when present.
+ */
+function expandProjectionColumnsForSources(analysis: EditableQueryInfo, tableSources: Array<{ source: EditableQuerySource; columns: readonly { name: string }[] }>): Array<EditableQueryColumn | undefined> {
+  if (analysis.selectStar || analysis.columns.length === 0) {
+    return tableSources.flatMap(({ source, columns }) =>
+      columns.map((column) => ({
+        sourceName: column.name,
+        sourceNameQuoted: false,
+        sourceKey: source.key,
+        resultName: column.name,
+        expression: column.name,
+      })),
+    );
+  }
+  const expanded: Array<EditableQueryColumn | undefined> = [];
+  for (const column of analysis.columns) {
+    if (!column.star) {
+      expanded.push(column);
+      continue;
+    }
+    const tableSource = tableSources.find((entry) => entry.source.key === column.sourceKey);
+    if (!tableSource) {
+      expanded.push(undefined);
+      continue;
+    }
+    for (const tableColumn of tableSource.columns) {
+      expanded.push({
+        ...column,
+        star: false,
+        sourceName: tableColumn.name,
+        sourceNameQuoted: false,
+        resultName: tableColumn.name,
+        expression: column.sourceQualifier ? `${column.sourceQualifier}.${tableColumn.name}` : tableColumn.name,
+      });
+    }
+  }
+  return expanded;
+}
+
+function resolveProjectionColumnToSource(databaseType: string, column: EditableQueryColumn | undefined, tableSources: Array<{ source: EditableQuerySource; columns: readonly { name: string }[] }>): ResolvedSourceColumnRef | undefined {
+  if (!column || column.star || !column.sourceName) return undefined;
+  // A qualified reference whose qualifier could not be bound to a unique source
+  // stays unresolved rather than guessing from the bare column name.
+  if (column.sourceQualifier && !column.sourceKey) return undefined;
+
+  if (column.sourceKey) {
+    const tableIndex = tableSources.findIndex((entry) => entry.source.key === column.sourceKey);
+    if (tableIndex < 0) return undefined;
+    const canonicalName = resolveMetadataColumnName(
+      databaseType,
+      column.sourceName,
+      column.sourceNameQuoted,
+      tableSources[tableIndex]!.columns.map((entry) => entry.name),
+    );
+    return canonicalName ? { sourceKey: column.sourceKey, sourceColumn: canonicalName } : undefined;
+  }
+
+  // Unqualified reference: bind only when exactly one source resolves it, so an
+  // ambiguous name shared by several tables yields undefined instead of
+  // first-source-wins.
+  const matches: ResolvedSourceColumnRef[] = [];
+  for (const tableSource of tableSources) {
+    const canonicalName = resolveMetadataColumnName(
+      databaseType,
+      column.sourceName,
+      column.sourceNameQuoted,
+      tableSource.columns.map((entry) => entry.name),
+    );
+    if (canonicalName) matches.push({ sourceKey: tableSource.source.key, sourceColumn: canonicalName });
+  }
+  return matches.length === 1 ? matches[0] : undefined;
+}
+
+/**
+ * Resolve each result column — in projection (ordinal) order — back to exactly
+ * one base-table column across the query sources, using the same
+ * database-aware identifier canonicalization as the editability binder
+ * (`resolveMetadataColumnName`): quoted identifiers match metadata exactly
+ * (case preserved), unquoted identifiers fold per the database's rules
+ * (PostgreSQL-compatible lower, Oracle-compatible upper, others
+ * case-insensitive when unambiguous).
+ *
+ * Star projections are expanded against the source table columns so the
+ * returned array aligns 1:1 with the executed result columns. An entry is
+ * `undefined` when the result column cannot be resolved to a single source
+ * column: ambiguous unqualified references, computed expressions, unknown
+ * columns, or a star whose source table is unknown. Consumers must show no
+ * comment for such columns rather than guessing.
+ */
+export function resolveSourceColumnsByOrdinal(databaseType: string, analysis: EditableQueryInfo, tableSources: Array<{ source: EditableQuerySource; columns: readonly { name: string }[] }>, columnCount: number): Array<ResolvedSourceColumnRef | undefined> {
+  const expanded = expandProjectionColumnsForSources(analysis, tableSources);
+  const resolved: Array<ResolvedSourceColumnRef | undefined> = [];
+  for (let index = 0; index < columnCount; index++) {
+    resolved.push(resolveProjectionColumnToSource(databaseType, expanded[index], tableSources));
+  }
+  return resolved;
+}
+
 export type QueryEditabilityReason = "not-select" | "cte" | "set-operation" | "aggregation" | "external-source" | "complex-source" | "computed-columns" | "no-table" | "no-primary-key" | "primary-key-not-returned" | "aliased-columns" | "metadata-unavailable";
 
 export type QueryEditability = { editable: true; analysis: EditableQueryInfo } | { editable: false; reason: QueryEditabilityReason };

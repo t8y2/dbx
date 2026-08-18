@@ -157,17 +157,19 @@ async fn transfer_configs(
     source_admin: Arc<dyn NacosAdmin>,
     request: &NacosConfigTransferRequest,
 ) -> Result<Vec<NacosConfigUpsert>, String> {
+    let target_group = request.target_group.as_deref().map(str::trim).filter(|group| !group.is_empty());
     let source = resolve_selector(source_admin, &request.source).await?;
-    source
+    let configs = source
         .into_iter()
         .map(|config| {
             let content = config
                 .content
                 .ok_or_else(|| format!("Nacos configuration {}/{} has no content", config.group, config.data_id))?;
+            let group = target_group.map(str::to_string).unwrap_or(config.group);
             Ok(NacosConfigUpsert {
                 namespace: Some(request.target_namespace.clone()),
                 data_id: config.data_id,
-                group: config.group,
+                group,
                 content,
                 config_type: config.config_type,
                 app_name: config.app_name,
@@ -175,7 +177,19 @@ async fn transfer_configs(
                 tags: config.tags,
             })
         })
-        .collect()
+        .collect::<Result<Vec<_>, String>>()?;
+    let mut target_keys = std::collections::HashSet::new();
+    for config in &configs {
+        let namespace = config.namespace.as_deref().unwrap_or_default();
+        let key = (namespace, config.group.as_str(), config.data_id.as_str());
+        if !target_keys.insert(key) {
+            return Err(format!(
+                "Multiple selected Nacos configurations map to the same target key {namespace}/{}/{}",
+                config.group, config.data_id
+            ));
+        }
+    }
+    Ok(configs)
 }
 
 async fn resolve_selector(
@@ -809,5 +823,97 @@ mod tests {
         assert_eq!((report.created, report.failed), (1, 1));
         assert!(report.partial);
         assert_eq!(admin.publish_count.load(Ordering::SeqCst), 1);
+    }
+
+    fn transfer_request(target_group: Option<&str>) -> NacosConfigTransferRequest {
+        NacosConfigTransferRequest {
+            operation_id: "op".to_string(),
+            source_connection_id: "source".to_string(),
+            target_connection_id: "target".to_string(),
+            source: NacosConfigSelector {
+                namespace: "source-ns".to_string(),
+                scope: NacosConfigSelectionScope::Selected,
+                keys: vec![NacosConfigKey {
+                    namespace: Some("source-ns".to_string()),
+                    data_id: "app".to_string(),
+                    group: "SOURCE_GROUP".to_string(),
+                }],
+                query: None,
+            },
+            target_namespace: "target-ns".to_string(),
+            target_group: target_group.map(str::to_string),
+            conflict_policy: NacosConflictPolicy::default(),
+        }
+    }
+
+    fn source_admin_with_config() -> Arc<MockAdmin> {
+        let admin = Arc::new(MockAdmin::default());
+        admin.insert(NacosConfigItem {
+            data_id: "app".to_string(),
+            group: "SOURCE_GROUP".to_string(),
+            namespace: "source-ns".to_string(),
+            app_name: None,
+            desc: None,
+            tags: None,
+            config_type: Some("text".to_string()),
+            md5: None,
+            encrypted_data_key: None,
+            content: Some("value".to_string()),
+        });
+        admin
+    }
+
+    #[tokio::test]
+    async fn transfer_without_target_group_keeps_the_source_group() {
+        let source_admin = source_admin_with_config();
+        let configs = transfer_configs(source_admin, &transfer_request(None)).await.unwrap();
+
+        assert_eq!(configs.len(), 1);
+        assert_eq!(configs[0].group, "SOURCE_GROUP");
+    }
+
+    #[tokio::test]
+    async fn transfer_with_target_group_overrides_the_source_group() {
+        let source_admin = source_admin_with_config();
+        let configs = transfer_configs(source_admin, &transfer_request(Some("  TARGET_GROUP  "))).await.unwrap();
+
+        assert_eq!(configs.len(), 1);
+        assert_eq!(configs[0].group, "TARGET_GROUP");
+    }
+
+    #[tokio::test]
+    async fn transfer_rejects_target_key_collisions_after_group_override() {
+        let source_admin = source_admin_with_config();
+        source_admin.insert(NacosConfigItem {
+            data_id: "app".to_string(),
+            group: "OTHER_GROUP".to_string(),
+            namespace: "source-ns".to_string(),
+            app_name: None,
+            desc: None,
+            tags: None,
+            config_type: Some("text".to_string()),
+            md5: None,
+            encrypted_data_key: None,
+            content: Some("other value".to_string()),
+        });
+        let mut request = transfer_request(Some("TARGET_GROUP"));
+        request.source.keys.push(NacosConfigKey {
+            namespace: Some("source-ns".to_string()),
+            data_id: "app".to_string(),
+            group: "OTHER_GROUP".to_string(),
+        });
+
+        let error = transfer_configs(source_admin, &request).await.unwrap_err();
+
+        assert!(error.contains("target-ns/TARGET_GROUP/app"), "unexpected error: {error}");
+    }
+
+    #[tokio::test]
+    async fn transfer_with_blank_target_group_keeps_the_source_group() {
+        let source_admin = source_admin_with_config();
+        let configs = transfer_configs(source_admin, &transfer_request(Some("   "))).await.unwrap();
+
+        assert_eq!(configs.len(), 1);
+        assert_eq!(configs[0].group, "SOURCE_GROUP");
     }
 }

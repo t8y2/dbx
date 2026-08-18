@@ -454,6 +454,28 @@ pub async fn list_partitions(
 }
 
 #[tauri::command]
+pub async fn get_table_partition_status(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: String,
+    schema: String,
+    table: String,
+) -> Result<dbx_core::schema::TablePartitionStatus, String> {
+    dbx_core::schema::table_partition_status_core(&state, &connection_id, &database, &schema, &table).await
+}
+
+#[tauri::command]
+pub async fn list_invalid_indexes(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: String,
+    schema: String,
+    table: String,
+) -> Result<Vec<String>, String> {
+    dbx_core::schema::list_invalid_indexes_core(&state, &connection_id, &database, &schema, &table).await
+}
+
+#[tauri::command]
 pub async fn list_subpartitions(
     state: State<'_, Arc<AppState>>,
     connection_id: String,
@@ -474,12 +496,16 @@ pub async fn get_table_ddl(
     object_type: Option<db::ObjectSourceKind>,
     catalog: Option<String>,
     include_postgres_access: Option<bool>,
+    portable: Option<bool>,
 ) -> Result<String, String> {
     if let Some(catalog) = external_doris_catalog(&state, &connection_id, catalog.as_deref()).await {
         return dbx_core::schema::get_doris_catalog_table_ddl_core(&state, &connection_id, &catalog, &database, &table)
             .await;
     }
-    if include_postgres_access.unwrap_or(false) {
+    if portable.unwrap_or(false) {
+        dbx_core::schema::get_table_export_ddl_core(&state, &connection_id, &database, &schema, &table, object_type)
+            .await
+    } else if include_postgres_access.unwrap_or(false) {
         dbx_core::schema::get_table_display_ddl_core(&state, &connection_id, &database, &schema, &table, object_type)
             .await
     } else {

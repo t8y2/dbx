@@ -1,5 +1,14 @@
 import type { NacosNamespaceInfo } from "@/types/nacos";
 
+type NacosNamespaceAccessClient = {
+  nacosListNamespaces(connectionId: string): Promise<NacosNamespaceInfo[]>;
+};
+
+/** The backend applies account authorization or an explicitly configured namespace scope. */
+export async function loadReadableNacosNamespaces(connectionId: string, client: NacosNamespaceAccessClient): Promise<NacosNamespaceInfo[]> {
+  return normalizeNacosNamespacesForDisplay(await client.nacosListNamespaces(connectionId));
+}
+
 /**
  * Nacos 2/r-nacos may represent the default namespace with an empty ID, while
  * Nacos 3 returns the concrete `public` ID. Older backend builds could expose

@@ -8,6 +8,8 @@ pub enum MongoCommand {
     Version,
     #[serde(rename = "use")]
     Use { database: String },
+    #[serde(rename = "showDatabases")]
+    ShowDatabases,
     #[serde(rename = "runCommand")]
     RunCommand {
         #[serde(rename = "commandJson")]
@@ -355,6 +357,10 @@ fn mongo_field_predicate_is_exists_true(value: &serde_json::Value) -> bool {
 }
 
 pub fn parse(input: &str) -> Result<MongoCommand, String> {
+    let show_source = trim_mongo_outer_comments(input).trim_end_matches(';').trim();
+    if parse_show_databases(show_source) {
+        return Ok(MongoCommand::ShowDatabases);
+    }
     let source = input.trim().trim_end_matches(';').trim();
     if source.eq_ignore_ascii_case("db.version()") {
         return Ok(MongoCommand::Version);
@@ -643,6 +649,86 @@ pub fn parse(input: &str) -> Result<MongoCommand, String> {
     }
 
     Err("Unsupported MongoDB shell command.".to_string())
+}
+
+fn parse_show_databases(source: &str) -> bool {
+    let mut words = source.split_whitespace();
+    words.next().is_some_and(|word| word.eq_ignore_ascii_case("show"))
+        && words.next().is_some_and(|word| word.eq_ignore_ascii_case("dbs") || word.eq_ignore_ascii_case("databases"))
+        && words.next().is_none()
+}
+
+fn trim_mongo_outer_comments(mut source: &str) -> &str {
+    loop {
+        source = source.trim_start();
+        if source.starts_with("//") || source.starts_with("--") {
+            source = source
+                .char_indices()
+                .find_map(|(index, character)| (character == '\n' || character == '\r').then_some(&source[index + 1..]))
+                .unwrap_or("");
+            continue;
+        }
+        if source.starts_with("/*") {
+            let Some(end) = source.find("*/") else {
+                return source;
+            };
+            source = &source[end + 2..];
+            continue;
+        }
+        break;
+    }
+
+    let source = source.trim_end();
+    let mut body_end = 0;
+    let mut quote = None;
+    let mut escaped = false;
+    let mut line_comment = false;
+    let mut block_comment = false;
+    let mut characters = source.char_indices().peekable();
+    while let Some((index, character)) = characters.next() {
+        let next = characters.peek().map(|(_, character)| *character);
+        if line_comment {
+            if character == '\n' || character == '\r' {
+                line_comment = false;
+            }
+            continue;
+        }
+        if block_comment {
+            if character == '*' && next == Some('/') {
+                block_comment = false;
+                characters.next();
+            }
+            continue;
+        }
+        if let Some(delimiter) = quote {
+            body_end = index + character.len_utf8();
+            if escaped {
+                escaped = false;
+            } else if character == '\\' {
+                escaped = true;
+            } else if character == delimiter {
+                quote = None;
+            }
+            continue;
+        }
+        if (character == '/' && next == Some('/')) || (character == '-' && next == Some('-')) {
+            line_comment = true;
+            characters.next();
+            continue;
+        }
+        if character == '/' && next == Some('*') {
+            block_comment = true;
+            characters.next();
+            continue;
+        }
+        if matches!(character, '"' | '\'' | '`') {
+            quote = Some(character);
+        }
+        if !character.is_whitespace() {
+            body_end = index + character.len_utf8();
+        }
+    }
+    source[..body_end].trim_end()
 }
 
 fn parse_collection_prefix(source: &str) -> Result<(String, usize), String> {
@@ -1065,6 +1151,27 @@ mod tests {
     }
 
     #[test]
+    fn parses_show_databases_aliases_as_read_only() {
+        for source in [
+            "show dbs",
+            "SHOW DATABASES;",
+            "ShOw DbS ;",
+            "/* databases */ show dbs -- list",
+            "// databases\nshow databases; /* list */",
+        ] {
+            let command = parse(source).unwrap();
+            assert_eq!(command, MongoCommand::ShowDatabases, "{source}");
+            assert!(!command.is_mutating(), "{source}");
+            assert!(!command.is_dangerous(), "{source}");
+            assert_eq!(validate_safety(&command, false, false, true), Ok(()), "{source}");
+        }
+
+        for source in ["show dbs extra", "show database", "show collections", "show"] {
+            assert!(parse(source).is_err(), "{source}");
+        }
+    }
+
+    #[test]
     fn rejects_unsupported_run_command_shapes() {
         for source in [
             "db.runCommand()",
@@ -1230,6 +1337,8 @@ mod tests {
         let run_command = serde_json::to_value(parse("db.runCommand({ping: 1})").unwrap()).unwrap();
         assert_eq!(run_command["kind"], "runCommand");
         assert_eq!(run_command["commandJson"], r#"{"ping":1}"#);
+        let show_databases = serde_json::to_value(parse("show dbs").unwrap()).unwrap();
+        assert_eq!(show_databases["kind"], "showDatabases");
     }
 
     #[test]

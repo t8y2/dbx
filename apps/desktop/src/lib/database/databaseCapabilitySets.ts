@@ -27,6 +27,8 @@ export const SCHEMA_AWARE_TYPES = new Set<DatabaseType>([
   "trino",
   "prestosql",
   "hive",
+  "kyuubi",
+  "impala",
   "spark",
   "databend",
   "db2",

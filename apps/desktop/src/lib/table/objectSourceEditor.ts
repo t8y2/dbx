@@ -60,6 +60,11 @@ export async function buildExecutableObjectSourceSql(input: BuildEditableObjectS
   return api.buildExecutableObjectSourceSql(input);
 }
 
+export function resolveObjectSourceEditDraft(databaseType: DatabaseType | undefined, objectType: ObjectSourceKind, formatted: string, editable: string): string {
+  if (databaseType === "mysql" && objectType === "VIEW" && formatted.trim()) return formatted;
+  return editable;
+}
+
 export function buildEditableObjectSource(input: BuildEditableObjectSourceSqlInput): Promise<string> {
   return api.buildEditableObjectSource(input);
 }

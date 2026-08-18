@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS, normalizeDataGridCopyPreference, normalizeDataGridExtractorOptions, resolveDataGridCopyPreference, validateDataGridExtractorOptions } from "@/lib/dataGrid/dataGridCopyExtractor";
 
@@ -16,6 +17,20 @@ describe("data-grid extractor options", () => {
     expect(normalized).toEqual(DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS);
     expect(normalized).not.toBe(DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS);
     expect(normalized.dsv).not.toBe(DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS.dsv);
+  });
+
+  it("keeps camel-case JSON field names explicit and disabled by default", () => {
+    expect(normalizeDataGridExtractorOptions({ json: {} }).json.camelCaseFieldNames).toBe(false);
+    expect(normalizeDataGridExtractorOptions({ json: { camelCaseFieldNames: true } }).json.camelCaseFieldNames).toBe(true);
+    expect(normalizeDataGridExtractorOptions({ json: { camelCaseFieldNames: "true" } }).json.camelCaseFieldNames).toBe(false);
+  });
+
+  it("exposes the camel-case field-name switch only with JSON extractor options", () => {
+    const dialog = readFileSync(new URL("../../../components/grid/DataGridExtractorDialog.vue", import.meta.url), "utf8");
+
+    expect(dialog).toContain('v-if="isJson"');
+    expect(dialog).toContain("draftOptions.json.camelCaseFieldNames");
+    expect(dialog).toContain('t("grid.copyExtractorCamelCaseJsonFields")');
   });
 
   it("rejects overlapping effective row and column separators", () => {

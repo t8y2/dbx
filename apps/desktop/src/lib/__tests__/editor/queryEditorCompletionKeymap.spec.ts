@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import ts from "typescript";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { DEFAULT_SHORTCUT_SETTINGS, normalizeShortcutSettings, shortcutToCodeMirrorKey } from "@/lib/editor/shortcutRegistry";
 
 const queryEditorSource = readFileSync(new URL("../../../components/editor/QueryEditor.vue", import.meta.url), "utf8");
 
@@ -59,6 +60,7 @@ function createHarness(options: {
   insertNewlineKeepIndent?: (view: MockView) => boolean;
   nextSnippetField?: (view: MockView) => boolean;
   indentMore?: (view: MockView) => boolean;
+  acceptCompletionShortcut?: string;
 }): TabHarness {
   const source = [
     extractDeclaration(/const COMPLETION_REMOTE_LATENCY_BUDGET_MS = \d+;/, "remote completion latency budget"),
@@ -69,6 +71,8 @@ function createHarness(options: {
     "let suppressNextSqlCompletionAutoStartUntil = 0;",
     extractFunction("editorIndentUnit"),
     extractFunction("handleTab"),
+    extractFunction("tabKeyAcceptsCompletion"),
+    extractFunction("handleTabWithoutAcceptingCompletion"),
     extractFunction("performNormalTab"),
     extractFunction("insertNewlineWithoutCompletion"),
     extractFunction("acceptCompletionOrNextSnippetField"),
@@ -84,14 +88,33 @@ function createHarness(options: {
     "codeMirrorAcceptCompletion",
     "codeMirrorCloseCompletion",
     "codeMirrorInsertNewlineKeepIndent",
+    "insertQueryEditorNewline",
     "codeMirrorNextSnippetField",
     "codeMirrorIndentMore",
     "settingsStore",
+    "normalizeShortcutSettings",
+    "shortcutToCodeMirrorKey",
+    "props",
     `${javascript}\nreturn { handleTab, insertNewlineWithoutCompletion, acceptCompletionOrNextSnippetField, clearPendingCompletionTab, consumeSqlCompletionAutoStartSuppression };`,
   );
-  return factory(options.completionStatus, options.acceptCompletion ?? (() => false), options.closeCompletion ?? (() => false), options.insertNewlineKeepIndent ?? (() => false), options.nextSnippetField ?? (() => false), options.indentMore ?? (() => false), {
-    editorSettings: { sqlFormatter: { useTabs: false, tabWidth: 2 } },
-  }) as TabHarness;
+  return factory(
+    options.completionStatus,
+    options.acceptCompletion ?? (() => false),
+    options.closeCompletion ?? (() => false),
+    options.insertNewlineKeepIndent ?? (() => false),
+    (view: MockView, fallback: ((view: MockView) => boolean) | null | undefined) => fallback?.(view) ?? false,
+    options.nextSnippetField ?? (() => false),
+    options.indentMore ?? (() => false),
+    {
+      editorSettings: {
+        sqlFormatter: { useTabs: false, tabWidth: 2 },
+        shortcuts: { ...DEFAULT_SHORTCUT_SETTINGS, acceptCompletion: options.acceptCompletionShortcut ?? DEFAULT_SHORTCUT_SETTINGS.acceptCompletion },
+      },
+    },
+    normalizeShortcutSettings,
+    shortcutToCodeMirrorKey,
+    { databaseType: "mysql" },
+  ) as TabHarness;
 }
 
 function createView(text = "SELECT", position = text.length): MockView {
@@ -237,6 +260,27 @@ describe("QueryEditor completion Tab keymap", () => {
     expect(view.dispatch).not.toHaveBeenCalled();
   });
 
+  it("does not accept an open completion popup on Tab when the configured accept-completion shortcut is Enter (dbx#6236)", () => {
+    const acceptCompletion = vi.fn(() => true);
+    const nextSnippetField = vi.fn(() => true);
+    const harness = createHarness({ completionStatus: () => "active", acceptCompletion, nextSnippetField, acceptCompletionShortcut: "Enter" });
+    const view = createView();
+
+    expect(harness.handleTab(view)).toBe(true);
+    expect(acceptCompletion).not.toHaveBeenCalled();
+    expect(nextSnippetField).not.toHaveBeenCalled();
+    expect(view.state.replaceSelection).toHaveBeenCalledWith("  ");
+  });
+
+  it("still accepts an open completion popup on Tab when the configured shortcut is left at its Tab default", () => {
+    const acceptCompletion = vi.fn(() => true);
+    const harness = createHarness({ completionStatus: () => "active", acceptCompletion, acceptCompletionShortcut: "Tab" });
+    const view = createView();
+
+    expect(harness.handleTab(view)).toBe(true);
+    expect(acceptCompletion).toHaveBeenCalledWith(view);
+  });
+
   it("falls back to normal Tab when pending completion has no candidate", async () => {
     vi.useFakeTimers();
     let status: "active" | "pending" | null = "pending";
@@ -249,5 +293,26 @@ describe("QueryEditor completion Tab keymap", () => {
 
     expect(view.state.replaceSelection).toHaveBeenCalledWith("  ");
     expect(view.dispatch).toHaveBeenCalledOnce();
+  });
+
+  it("triggers completion on Alt+/ through the manual shortcut and skips while composing", () => {
+    const source = [extractDeclaration(/const COMPLETION_DEBOUNCE_DELAY_MS = \d+;/, "completion debounce delay"), "let imeCompositionActive = false;", extractFunction("isEditorComposing"), extractFunction("triggerSqlCompletion")].join("\n");
+    const javascript = ts.transpileModule(source, {
+      compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 },
+    }).outputText;
+    const factory = new Function("codeMirrorStartCompletion", `${javascript}\nreturn { triggerSqlCompletion, isEditorComposing };`);
+    const startCompletion = vi.fn(() => true);
+    const { triggerSqlCompletion } = factory(startCompletion) as {
+      triggerSqlCompletion: (view: MockView) => boolean;
+    };
+    const view = createView();
+
+    expect(triggerSqlCompletion(view)).toBe(true);
+    expect(startCompletion).toHaveBeenCalledWith(view);
+
+    startCompletion.mockClear();
+    (view as MockView & { composing: boolean }).composing = true;
+    expect(triggerSqlCompletion(view)).toBe(false);
+    expect(startCompletion).not.toHaveBeenCalled();
   });
 });

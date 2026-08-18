@@ -69,6 +69,10 @@ function updateSql<K extends keyof DataGridExtractorOptions["sql"]>(key: K, valu
   draftOptions.value = { ...draftOptions.value, sql: { ...draftOptions.value.sql, [key]: value } };
 }
 
+function updateJson<K extends keyof DataGridExtractorOptions["json"]>(key: K, value: DataGridExtractorOptions["json"][K]) {
+  draftOptions.value = { ...draftOptions.value, json: { ...draftOptions.value.json, [key]: value } };
+}
+
 async function refreshPreview() {
   const sequence = ++previewSequence;
   previewLoading.value = true;
@@ -217,7 +221,10 @@ function save() {
             </div>
           </template>
 
-          <label v-if="isJson" class="flex items-center gap-2 text-sm"><input type="checkbox" :checked="draftOptions.json.pretty" @change="draftOptions = { ...draftOptions, json: { pretty: ($event.target as HTMLInputElement).checked } }" />{{ t("grid.copyExtractorPrettyJson") }}</label>
+          <template v-if="isJson">
+            <label class="flex items-center gap-2 text-sm"><input type="checkbox" :checked="draftOptions.json.pretty" @change="updateJson('pretty', ($event.target as HTMLInputElement).checked)" />{{ t("grid.copyExtractorPrettyJson") }}</label>
+            <label class="flex items-center gap-2 text-sm"><input type="checkbox" :checked="draftOptions.json.camelCaseFieldNames" @change="updateJson('camelCaseFieldNames', ($event.target as HTMLInputElement).checked)" />{{ t("grid.copyExtractorCamelCaseJsonFields") }}</label>
+          </template>
         </div>
 
         <div class="min-w-0 space-y-1.5">

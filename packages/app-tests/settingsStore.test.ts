@@ -562,6 +562,7 @@ test("keeps only valid saved column formatter configs", () => {
       "conn::db::public::users::payload": { kind: "json-path", path: "$.user.name" },
       "conn::db::public::users::invalid_json": { kind: "json-path", path: "user.name" },
       "conn::db::public::users::status": { kind: "custom-ref", formatterId: "fmt_1" },
+      "conn::db::public::orders::user_id": { kind: "foreign-key-display", refSchema: "public", refTable: "users", refColumn: "id", displayColumn: "name" },
     },
     customColumnFormatters: {
       fmt_1: { id: "fmt_1", name: "Status label", template: "status:${value}" },
@@ -575,6 +576,7 @@ test("keeps only valid saved column formatter configs", () => {
     "conn::db::public::users::name": { kind: "mask", prefix: 2, suffix: 2 },
     "conn::db::public::users::payload": { kind: "json-path", path: "$.user.name" },
     "conn::db::public::users::status": { kind: "custom-ref", formatterId: "fmt_1" },
+    "conn::db::public::orders::user_id": { kind: "foreign-key-display", refSchema: "public", refTable: "users", refColumn: "id", displayColumn: "name" },
   });
   assert.deepEqual(settings.customColumnFormatters, {
     fmt_1: { id: "fmt_1", name: "Status label", template: "status:${value}" },
@@ -646,6 +648,18 @@ test("API AI provider settings expose and persist a default model ID", () => {
   assert.ok(modelControl >= 0);
   assert.match(source.slice(modelControl - 300, modelControl + 300), /v-if="!aiIsCliProvider"[\s\S]*t\("ai\.defaultModel"\)[\s\S]*t\('ai\.manualModelPlaceholder'\)/);
   assert.match(source, /model:\s*aiEditModel\.value/);
+});
+
+test("AI connection test uses the model currently entered in the config form", () => {
+  const source = readFileSync("apps/desktop/src/components/editor/EditorSettingsDialog.vue", "utf8");
+  const testConnectionStart = source.indexOf("async function aiTestConn()");
+  const testConnectionEnd = source.indexOf("async function copyAiTestError()", testConnectionStart);
+  const testConnection = source.slice(testConnectionStart, testConnectionEnd);
+
+  assert.notEqual(testConnectionStart, -1);
+  assert.notEqual(testConnectionEnd, -1);
+  assert.match(testConnection, /const config = currentAiEditConfig\(\);[\s\S]*aiTestConnection\(config\)/);
+  assert.doesNotMatch(testConnection, /activeModel|config\.model\s*=/);
 });
 
 test("normalizes legacy AI config and fills provider defaults", () => {

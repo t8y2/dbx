@@ -540,6 +540,7 @@ fn clickhouse_index_from_skipping_row(row: &[serde_json::Value]) -> IndexInfo {
         }),
         included_columns: None,
         comment: None,
+        key_is_expression: Vec::new(),
     }
 }
 
@@ -709,6 +710,7 @@ pub async fn list_indexes(client: &ChClient, database: &str, table: &str) -> Res
             index_type: Some("primary".to_string()),
             included_columns: None,
             comment: None,
+            key_is_expression: Vec::new(),
         });
     }
 

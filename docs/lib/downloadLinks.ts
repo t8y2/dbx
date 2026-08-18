@@ -18,7 +18,7 @@ type DownloadArtifact = {
   suffix: string;
 };
 
-const DOWNLOAD_BASE_URL = "https://dl.dbxio.com/releases/latest";
+const DOWNLOAD_BASE_URL = "https://dl.dbxio.com/releases";
 
 const downloadArtifacts: DownloadArtifact[] = [
   {
@@ -78,6 +78,6 @@ export function createInstallOptions(lang: InstallLang, version: string): Instal
     label: artifact.labels[lang],
     description: artifact.descriptions?.[lang],
     badge: artifact.badges?.[lang],
-    href: `${DOWNLOAD_BASE_URL}/DBX_${version}_${artifact.suffix}?v=${version}`,
+    href: `${DOWNLOAD_BASE_URL}/v${version}/DBX_${version}_${artifact.suffix}?v=${version}`,
   }));
 }

@@ -46,6 +46,19 @@ func TestBasicAuthRoundTripperAddsCredentialsWithoutMutatingRequest(t *testing.T
 	}
 }
 
+func TestHTTPNoSaslUsesBasicAuthLikeHiveJDBC(t *testing.T) {
+	for _, auth := range []string{"NONE", "NOSASL", "LDAP", "CUSTOM"} {
+		if !usesHTTPBasicAuth(auth) {
+			t.Fatalf("HTTP auth mode %q should send Basic credentials", auth)
+		}
+	}
+	for _, auth := range []string{"KERBEROS", "JWT", "BROWSER", "DIGEST-MD5"} {
+		if usesHTTPBasicAuth(auth) {
+			t.Fatalf("HTTP auth mode %q must not send Basic credentials", auth)
+		}
+	}
+}
+
 func TestBearerAndDelegationAuthRoundTrippers(t *testing.T) {
 	for name, transport := range map[string]http.RoundTripper{
 		"jwt": &bearerAuthRoundTripper{

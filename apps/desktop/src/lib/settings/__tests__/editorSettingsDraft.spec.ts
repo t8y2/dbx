@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { EDITOR_SETTINGS_DRAFT_KEYS, editorSettingsDraftFromSettings, editorSettingsDraftChanged, editorSettingsPatchFromDraft, normalizeQueryResultMaxRowsDraft, normalizeTableOpenPageSizeDraft } from "../editorSettingsDraft";
+import { EDITOR_SETTINGS_DRAFT_KEYS, editorSettingsDraftFromSettings, editorSettingsDraftChanged, editorSettingsPatchFromDraft, normalizeQueryResultMaxRowsDraft, normalizeTableOpenPageSizeDraft, shouldConfirmEditorSettingsDialogClose } from "../editorSettingsDraft";
 import type { EditorSettings } from "@/stores/settingsStore";
 
 function makeSettings(overrides: Partial<EditorSettings> = {}): EditorSettings {
@@ -25,6 +25,7 @@ function makeSettings(overrides: Partial<EditorSettings> = {}): EditorSettings {
     confirmUnsavedSqlClose: true,
     savedSqlOpenTargetMode: "saved",
     objectBrowserViewMode: "list",
+    sqlVariableSubstitutionEnabled: true,
     sqlVariableSyntaxOverrides: {},
     tabLayout: "scroll",
     ...overrides,
@@ -60,16 +61,50 @@ describe("EDITOR_SETTINGS_DRAFT_KEYS", () => {
     expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("dataTabReuseMode");
   });
 
+  it("includes adjacent data-tab opening", () => {
+    expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("openDataTabsNextToActive");
+  });
+
   it("includes data grid type colors", () => {
     expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("colorizeDataGridCellTypes");
+  });
+
+  it("includes the data grid filter view", () => {
+    expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("dataGridFilterEditorView");
+    expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("dataGridTextFilterPanelHeight");
   });
 
   it("includes completionTriggerMode", () => {
     expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("completionTriggerMode");
   });
+
+  it("includes the SQL variable substitution master switch", () => {
+    expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("sqlVariableSubstitutionEnabled");
+  });
 });
 
 describe("editorSettingsDraftFromSettings", () => {
+  it("toggles substitution without discarding per-database overrides", () => {
+    const base = editorSettingsDraftFromSettings(
+      makeSettings({
+        sqlVariableSubstitutionEnabled: true,
+        sqlVariableSyntaxOverrides: { mysql: { shell: false } },
+      }),
+    );
+    const draft = editorSettingsDraftFromSettings(
+      makeSettings({
+        sqlVariableSubstitutionEnabled: true,
+        sqlVariableSyntaxOverrides: { mysql: { shell: false } },
+      }),
+    );
+
+    draft.sqlVariableSubstitutionEnabled = false;
+
+    expect(editorSettingsPatchFromDraft(draft, base)).toEqual({ sqlVariableSubstitutionEnabled: false });
+    expect(draft.sqlVariableSyntaxOverrides).toEqual({ mysql: { shell: false } });
+    expect(base.sqlVariableSyntaxOverrides).toEqual({ mysql: { shell: false } });
+  });
+
   it("does not include persisted global timeout values in editor drafts", () => {
     const settings = makeSettings({ globalConnectTimeoutSecs: 17, globalQueryTimeoutSecs: 43 });
     const draft = editorSettingsDraftFromSettings(settings);
@@ -92,6 +127,12 @@ describe("editorSettingsDraftFromSettings", () => {
 
   it("maps the data grid type color preference from settings", () => {
     expect(editorSettingsDraftFromSettings(makeSettings({ colorizeDataGridCellTypes: false })).colorizeDataGridCellTypes).toBe(false);
+  });
+
+  it("maps the data grid filter view from settings", () => {
+    const draft = editorSettingsDraftFromSettings(makeSettings({ dataGridFilterEditorView: "text", dataGridTextFilterPanelHeight: 224 }));
+    expect(draft.dataGridFilterEditorView).toBe("text");
+    expect(draft.dataGridTextFilterPanelHeight).toBe(224);
   });
 
   it("preserves the table-open default for legacy settings", () => {
@@ -182,6 +223,14 @@ describe("editorSettingsDraftChanged", () => {
     expect(editorSettingsDraftChanged(draft, base)).toBe(true);
   });
 
+  it("detects adjacent data-tab opening changes", () => {
+    const settings = makeSettings({ openDataTabsNextToActive: false });
+    const draft = editorSettingsDraftFromSettings(settings);
+    const base = editorSettingsDraftFromSettings(settings);
+    draft.openDataTabsNextToActive = true;
+    expect(editorSettingsDraftChanged(draft, base)).toBe(true);
+  });
+
   it("detects completionTriggerMode change", () => {
     const settings = makeSettings({ completionTriggerMode: "positional" } as Partial<EditorSettings>);
     const draft = editorSettingsDraftFromSettings(settings);
@@ -240,6 +289,14 @@ describe("editorSettingsPatchFromDraft", () => {
     expect(editorSettingsPatchFromDraft(draft, base).dataTabReuseMode).toBe("always-new");
   });
 
+  it("includes adjacent data-tab opening when changed", () => {
+    const settings = makeSettings({ openDataTabsNextToActive: false });
+    const draft = editorSettingsDraftFromSettings(settings);
+    const base = editorSettingsDraftFromSettings(settings);
+    draft.openDataTabsNextToActive = true;
+    expect(editorSettingsPatchFromDraft(draft, base).openDataTabsNextToActive).toBe(true);
+  });
+
   it("includes completionTriggerMode in patch when changed", () => {
     const settings = makeSettings({ completionTriggerMode: "positional" } as Partial<EditorSettings>);
     const draft = editorSettingsDraftFromSettings(settings);
@@ -285,6 +342,33 @@ describe("editorSettingsDraftChanged - tabLayout", () => {
     const draft = editorSettingsDraftFromSettings(settings);
     const base = editorSettingsDraftFromSettings(settings);
     expect(editorSettingsDraftChanged(draft, base)).toBe(false);
+  });
+});
+
+describe("shouldConfirmEditorSettingsDialogClose", () => {
+  // Regression for https://github.com/t8y2/dbx/issues/5905: customizing a
+  // shortcut or the sidebar activation mode and then dismissing the dialog
+  // via Escape/outside-click/the "Close" button (anything other than Apply)
+  // must not silently drop the draft.
+  it("requests confirmation when the dialog is closing with an unsaved shortcut/sidebarActivation edit", () => {
+    const settings = makeSettings({ sidebarActivation: "single" } as Partial<EditorSettings>);
+    const base = editorSettingsDraftFromSettings(settings);
+    const draft = editorSettingsDraftFromSettings(settings);
+    draft.sidebarActivation = "double";
+
+    expect(shouldConfirmEditorSettingsDialogClose(false, editorSettingsDraftChanged(draft, base))).toBe(true);
+  });
+
+  it("does not block closing when there is no unsaved draft", () => {
+    const settings = makeSettings();
+    const base = editorSettingsDraftFromSettings(settings);
+    const draft = editorSettingsDraftFromSettings(settings);
+
+    expect(shouldConfirmEditorSettingsDialogClose(false, editorSettingsDraftChanged(draft, base))).toBe(false);
+  });
+
+  it("never blocks opening the dialog, even with a stale dirty flag", () => {
+    expect(shouldConfirmEditorSettingsDialogClose(true, true)).toBe(false);
   });
 });
 

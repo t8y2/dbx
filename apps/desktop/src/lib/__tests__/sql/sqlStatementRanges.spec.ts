@@ -1161,6 +1161,12 @@ describe("executableStatementRanges", () => {
   it("returns executable SQL Server batches without GO delimiter lines", () => {
     expect(rangeSqlTexts(executableStatementRanges("SELECT 1\nGO\nSELECT 2;", "sqlserver"))).toEqual(["SELECT 1", "SELECT 2"]);
   });
+
+  it("keeps SQL Server KILL commands independent without semicolons", () => {
+    const sql = "EXEC sp_who_lock\nDBCC INPUTBUFFER(580)\nKILL 580";
+
+    expect(rangeSqlTexts(executableStatementRanges(sql, "sqlserver"))).toEqual(["EXEC sp_who_lock", "DBCC INPUTBUFFER(580)", "KILL 580"]);
+  });
 });
 
 describe("currentExecutableStatementRange", () => {
@@ -1255,6 +1261,36 @@ describe("buildExecutionCandidates", () => {
     expect(splitSqlStatementRanges("/*proxy*/SHOW PROXY STATUS", "mysql")[0]?.sql).toBe("/*proxy*/SHOW PROXY STATUS");
     expect(splitSqlStatementRanges("/* ordinary */\n/*proxy*/SHOW PROXY STATUS", "mysql")[0]?.sql).toBe("/*proxy*/SHOW PROXY STATUS");
     expect(splitSqlStatementRanges("/*proxy*/", "mysql")).toEqual([]);
+  });
+
+  it.each(["/*sets:allsets */", "/*master*/", "/*slave:set_1781591902_7*/", "/*future-route:anywhere*/"])("preserves a same-line TDSQL directive without relying on a keyword allowlist: %s", (directive) => {
+    const directedSql = `${directive} SELECT count(*) FROM tenant_table`;
+    const sql = `SELECT 1;\n${directedSql};\nSELECT 2;`;
+    const candidates = buildExecutionCandidates(sql, indexOf(sql, "tenant_table"), "mysql");
+
+    expect(executionCandidateForMode(candidates, "current")?.sql).toBe(directedSql);
+    expect(rangeSqlTexts(executableStatementRanges(sql, "mysql"))).toEqual(["SELECT 1", directedSql, "SELECT 2"]);
+  });
+
+  it("handles long same-line directive chains without rescanning growing prefixes", () => {
+    const prefix = "/**/".repeat(80_000);
+    const sql = `${prefix} SELECT 1`;
+
+    expect(splitSqlStatementRanges(sql, "mysql")[0]?.sql).toBe(sql);
+  });
+
+  it("does not preserve a generic TDSQL-style directive on a separate line", () => {
+    const sql = "/*sets:allsets */\nSELECT count(*) FROM tenant_table";
+    const candidates = buildExecutionCandidates(sql, indexOf(sql, "tenant_table"), "mysql");
+
+    expect(executionCandidateForMode(candidates, "current")?.sql).toBe("SELECT count(*) FROM tenant_table");
+  });
+
+  it("does not preserve a same-line TDSQL-style directive for other database types", () => {
+    const sql = "/*sets:allsets */ SELECT count(*) FROM tenant_table";
+    const candidates = buildExecutionCandidates(sql, indexOf(sql, "tenant_table"), "postgres");
+
+    expect(executionCandidateForMode(candidates, "current")?.sql).toBe("SELECT count(*) FROM tenant_table");
   });
 
   it.each(["/* ordinary */", "/*unknown*/", "/* proxy */", "/*PROXY*/"])("keeps %s as a non-executable leading comment", (comment) => {
@@ -1441,6 +1477,13 @@ WHERE t2.product_name = '12345'
     const sql = "SELECT 1\nGO\nSELECT 2;";
     const candidates = buildExecutionCandidates(sql, indexOf(sql, "2"), "sqlserver");
     expect(candidateSummaries(candidates)).toEqual(["cursor:SELECT 2", "all:SELECT 1\nGO\nSELECT 2;"]);
+  });
+
+  it("uses a trailing SQL Server KILL command as the current statement", () => {
+    const sql = "EXEC sp_who_lock\nDBCC INPUTBUFFER(580)\nKILL 580";
+    const candidates = buildExecutionCandidates(sql, indexOf(sql, "KILL"), "sqlserver");
+
+    expect(candidateSummaries(candidates)).toEqual(["cursor:KILL 580", `all:${sql}`]);
   });
 });
 

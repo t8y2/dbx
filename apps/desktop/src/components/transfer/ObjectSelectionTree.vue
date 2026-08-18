@@ -114,10 +114,19 @@ const filteredGroups = computed<ObjectTreeGroup[]>(() => {
   if (!query) {
     return props.groups;
   }
-  return props.groups.map((g) => ({
-    ...g,
-    items: g.items.filter((name) => name.toLowerCase().includes(query)),
-  }));
+  return props.groups.map((group) => {
+    const prefixMatches: string[] = [];
+    const substringMatches: string[] = [];
+    for (const name of group.items) {
+      const normalizedName = name.toLowerCase();
+      if (normalizedName.startsWith(query)) {
+        prefixMatches.push(name);
+      } else if (normalizedName.includes(query)) {
+        substringMatches.push(name);
+      }
+    }
+    return { ...group, items: [...prefixMatches, ...substringMatches] };
+  });
 });
 
 function selectAllEnabled() {
@@ -202,8 +211,10 @@ function groupSelectionState(kind: TransferObjectKind, items: string[]): "none" 
       {{ t("transfer.noObjects") }}
     </div>
 
-    <!-- Independent scroll area for tree groups -->
-    <div v-else class="flex-1 min-h-0 max-h-[240px] flex flex-col gap-1.5 overflow-y-auto rounded-md border border-border/80 bg-muted/10 p-1.5 scrollbar-thin scrollbar-thumb-muted-foreground/20">
+    <!-- Independent scroll area for tree groups. mr-4 keeps this box's own
+         scrollbar clear of the dialog's outer scrollbar (only pr-1 away in
+         DataTransferDialog.vue) so the two hit areas don't overlap. -->
+    <div v-else class="flex-1 min-h-0 max-h-[240px] flex flex-col gap-1.5 overflow-y-auto rounded-md border border-border/80 bg-muted/10 p-1.5 mr-4 scrollbar-thin scrollbar-thumb-muted-foreground/20">
       <div v-for="group in filteredGroups" :key="group.kind" :data-test="`group-${group.kind}`" class="rounded-lg border border-border/60 bg-card/60 transition-all hover:bg-card flex flex-col p-1.5" :class="{ 'opacity-50 bg-muted/5 border-dashed border-muted': isGroupDisabled(group.kind) }">
         <div class="flex items-center gap-2 px-1 py-0.5 select-none">
           <button :data-test="'group-toggle'" :data-state="groupSelectionState(group.kind, group.items)" type="button" class="flex items-center gap-2 text-left shrink-0" :disabled="isGroupDisabled(group.kind)" @click="!isGroupDisabled(group.kind) && toggleGroupAll(group.kind, group.items)">

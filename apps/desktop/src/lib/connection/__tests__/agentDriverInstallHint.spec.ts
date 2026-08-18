@@ -9,6 +9,15 @@ describe("DuckDB driver installation", () => {
   });
 });
 
+describe("HiveServer2-compatible driver installation", () => {
+  it("reuses the downloadable Hive driver", () => {
+    expect(agentDriverInstallKey("impala")).toBe("hive");
+    expect(showAgentDriverInstallHint("impala", [{ db_type: "hive", installed: true }])).toBe(false);
+    expect(agentDriverInstallKey("kyuubi")).toBe("hive");
+    expect(showAgentDriverInstallHint("kyuubi", [{ db_type: "hive", installed: true }])).toBe(false);
+  });
+});
+
 describe("driverStoreFocusForInstallError", () => {
   it("focuses the missing agent driver for driver-not-installed errors", () => {
     expect(driverStoreFocusForInstallError("zookeeper driver is not installed. Please install it from the Driver Manager.", "zookeeper", undefined)).toEqual({

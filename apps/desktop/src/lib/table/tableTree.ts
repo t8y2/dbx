@@ -707,8 +707,10 @@ const groupDefs: Array<{
   objectTypes: DatabaseObjectTreeKind[];
   nodeType: TreeNodeType;
   childType: TreeNodeType | ((objectType: DatabaseObjectTreeKind) => TreeNodeType);
+  profileOnly?: boolean;
 }> = [
   { key: "__tables", label: "tree.tables", objectTypes: ["TABLE"], nodeType: "group-tables", childType: "table" },
+  { key: "__dolt_system_tables", label: "tree.tables", objectTypes: ["TABLE"], nodeType: "group-dolt-system-tables", childType: "table", profileOnly: true },
   { key: "__views", label: "tree.views", objectTypes: ["VIEW"], nodeType: "group-views", childType: "view" },
   {
     key: "__materialized_views",
@@ -768,22 +770,40 @@ const groupDefs: Array<{
   },
 ];
 
-const objectGroupNodeTypes = new Set<TreeNodeType>(["group-tables", "group-views", "group-materialized-views", "group-procedures", "group-functions", "group-triggers", "group-sequences", "group-synonyms", "group-packages", "group-types"]);
+const objectGroupNodeTypes = new Set<TreeNodeType>(["group-tables", "group-dolt-system-tables", "group-views", "group-materialized-views", "group-procedures", "group-functions", "group-triggers", "group-sequences", "group-synonyms", "group-packages", "group-types"]);
 
-export function buildObjectGroupPlaceholderNodes({ nodeId, connectionId, database, schema, objectTypes }: { nodeId: string; connectionId: string; database: string; schema?: string; objectTypes: DatabaseObjectTreeKind[] }): TreeNode[] {
+export function buildObjectGroupPlaceholderNodes({
+  nodeId,
+  connectionId,
+  database,
+  schema,
+  objectTypes,
+  groupOverrides = [],
+}: {
+  nodeId: string;
+  connectionId: string;
+  database: string;
+  schema?: string;
+  objectTypes: DatabaseObjectTreeKind[];
+  groupOverrides?: Array<{ nodeType: TreeNodeType; label?: string }>;
+}): TreeNode[] {
   const supported = new Set(objectTypes);
+  const overrides = new Map(groupOverrides.map((override) => [override.nodeType, override]));
   return groupDefs
-    .filter((def) => def.objectTypes.some((objectType) => supported.has(objectType)))
-    .map((def) => ({
-      id: `${nodeId}:${def.key}`,
-      label: def.label,
-      type: def.nodeType,
-      connectionId,
-      database,
-      schema,
-      isExpanded: false,
-      children: [],
-    }));
+    .filter((def) => def.objectTypes.some((objectType) => supported.has(objectType)) && (!def.profileOnly || overrides.has(def.nodeType)))
+    .map((def) => {
+      const override = overrides.get(def.nodeType);
+      return {
+        id: `${nodeId}:${def.key}`,
+        label: override?.label ?? def.label,
+        type: def.nodeType,
+        connectionId,
+        database,
+        schema,
+        isExpanded: false,
+        children: [],
+      };
+    });
 }
 
 export function objectGroupRefreshParentId(node: TreeNode): string | null {
@@ -797,7 +817,7 @@ export function objectTypesForGroupNode(type: TreeNodeType): DatabaseObjectTreeK
   return groupDefs.find((def) => def.nodeType === type)?.objectTypes ?? null;
 }
 
-export function buildGroupedObjectTreeNodes({ nodeId, connectionId, database, schema, objects, databaseType }: { nodeId: string; connectionId: string; database: string; schema?: string; objects: ObjectInfo[]; databaseType?: DatabaseType }): TreeNode[] {
+export function buildGroupedObjectTreeNodes({ nodeId, connectionId, database, schema, objects, databaseType, groupNodeType }: { nodeId: string; connectionId: string; database: string; schema?: string; objects: ObjectInfo[]; databaseType?: DatabaseType; groupNodeType?: TreeNodeType }): TreeNode[] {
   const buckets = new Map<string, ObjectInfo[]>();
   const seen = new Set<string>();
   for (const obj of coalesceXuguPackageObjects(objects, databaseType)) {
@@ -816,9 +836,10 @@ export function buildGroupedObjectTreeNodes({ nodeId, connectionId, database, sc
 
   const groups: TreeNode[] = [];
   for (const def of groupDefs) {
+    if (groupNodeType ? def.nodeType !== groupNodeType : def.profileOnly) continue;
     const items = def.objectTypes.flatMap((objectType) => buckets.get(objectType) ?? []);
     if (!items?.length) continue;
-    const isExpandable = def.nodeType === "group-tables" || def.nodeType === "group-views" || def.nodeType === "group-materialized-views";
+    const isExpandable = def.nodeType === "group-tables" || def.nodeType === "group-dolt-system-tables" || def.nodeType === "group-views" || def.nodeType === "group-materialized-views";
     const children = isExpandable
       ? buildObjectTreeEntries({
           nodeId: `${nodeId}:${def.key}`,

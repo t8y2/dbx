@@ -67,7 +67,7 @@ import { loadConnectionPickerView, saveConnectionPickerView, type DbPickerView }
 import { normalizeRocketmqNamesrvAddr } from "@/lib/connection/rocketmqNamesrv";
 import { normalizeRabbitmqAddresses } from "@/lib/connection/rabbitmqAddresses";
 import { detectMqUiAuthKind, isMqAuthKindAllowedForSystem, type MqUiAuthKind } from "@/lib/connection/mqAuth";
-import { driverInstallProgressChannel, driverInstallProgressPercent, isDriverInstallProgressForOperation, resolveAgentInstallOutcome, type DriverInstallProgress } from "@/lib/connection/driverInstallProgressUi";
+import { driverInstallProgressChannel, driverInstallProgressPercent, isDriverInstallProgressForOperation, requestAgentInstallCancellation, resolveAgentInstallOutcome, type DriverInstallProgress } from "@/lib/connection/driverInstallProgressUi";
 import { requiresSqlServerLegacyCompatibilityComponent, setSqlServerLegacyCompatibilityConfig, sqlServerUsesLegacyCompatibility, SQLSERVER_LEGACY_COMPATIBILITY_DRIVER_KEY } from "@/lib/connection/sqlServerLegacyCompatibility";
 import { normalizeNacosEndpoint, normalizeNacosMetricsUrl, parseNacosManagedNamespaces } from "@/lib/nacos/nacosAdmin";
 import { loadReadableNacosNamespaces, nacosNamespaceIdentity, normalizeNacosNamespaceSelection } from "@/lib/nacos/nacosNamespaceVisibility";
@@ -259,6 +259,8 @@ const agentInstallDriverKey = ref("");
 const agentInstallLabel = ref("");
 const agentInstallProgress = ref<DriverInstallProgress | null>(null);
 const agentInstallError = ref("");
+const agentInstallCancelError = ref("");
+const agentInstallCancelling = ref(false);
 /** Set when the user cancels from the modal, so the pending promise's
  * "canceled by user" error is treated as a non-failure by its caller. */
 const agentInstallCancelRequested = ref(false);
@@ -1899,6 +1901,8 @@ function beginAgentDriverInstall(driverKey: string, label: string): string {
   agentInstallLabel.value = label;
   agentInstallProgress.value = null;
   agentInstallError.value = "";
+  agentInstallCancelError.value = "";
+  agentInstallCancelling.value = false;
   agentInstallCancelRequested.value = false;
   agentInstallRunning.value = true;
   showAgentInstallDialog.value = true;
@@ -1916,6 +1920,8 @@ function finishAgentDriverInstall(operationId?: string | null) {
   agentInstallRunning.value = false;
   agentInstallProgress.value = null;
   agentInstallError.value = "";
+  agentInstallCancelError.value = "";
+  agentInstallCancelling.value = false;
   showAgentInstallDialog.value = false;
 }
 
@@ -1923,6 +1929,8 @@ function failAgentDriverInstall(operationId: string | null | undefined, error: u
   if (operationId !== undefined && operationId !== null && agentInstallOperationId.value !== operationId) return;
   agentInstallOperationId.value = null;
   agentInstallRunning.value = false;
+  agentInstallCancelError.value = "";
+  agentInstallCancelling.value = false;
   agentInstallError.value = translateBackendError(t, error);
   showAgentInstallDialog.value = true;
 }
@@ -1934,12 +1942,15 @@ function failAgentDriverInstall(operationId: string | null | undefined, error: u
  */
 async function cancelActiveAgentInstall() {
   const operationId = agentInstallOperationId.value;
-  if (!agentInstallDriverKey.value) return;
-  try {
-    await api.cancelAgentInstall(agentInstallDriverKey.value, operationId ?? undefined);
-  } catch {
-    // The cancel request itself failing is not fatal: finish the modal so the
-    // user is not left stuck on a progress dialog.
+  if (!agentInstallDriverKey.value || !operationId || agentInstallCancelling.value) return;
+  agentInstallCancelling.value = true;
+  agentInstallCancelError.value = "";
+  const result = await requestAgentInstallCancellation(() => api.cancelAgentInstall(agentInstallDriverKey.value, operationId));
+  if (agentInstallOperationId.value !== operationId) return;
+  agentInstallCancelling.value = false;
+  if (!result.ok) {
+    agentInstallCancelError.value = translateBackendError(t, result.error);
+    return;
   }
   agentInstallCancelRequested.value = true;
   finishAgentDriverInstall(operationId);
@@ -8604,6 +8615,9 @@ function openExternalUrl(url: string) {
           <div class="text-sm font-medium text-destructive">{{ t("connection.driverInstall.fullError") }}</div>
           <pre class="max-h-56 min-w-0 max-w-full overflow-x-hidden overflow-y-auto whitespace-pre-wrap break-all [overflow-wrap:anywhere] rounded-md border bg-muted/30 p-3 text-xs leading-5 text-destructive">{{ agentInstallError }}</pre>
         </div>
+        <div v-else-if="agentInstallCancelError" class="rounded-md border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive">
+          {{ agentInstallCancelError }}
+        </div>
       </div>
 
       <DialogFooter class="gap-2">
@@ -8611,7 +8625,7 @@ function openExternalUrl(url: string) {
           <Copy class="mr-1.5 h-3.5 w-3.5" />
           {{ t("connection.copyError") }}
         </Button>
-        <Button v-if="agentInstallRunning && !agentInstallError" variant="outline" @click="cancelActiveAgentInstall">
+        <Button v-if="agentInstallRunning && !agentInstallError" variant="outline" :disabled="agentInstallCancelling" @click="cancelActiveAgentInstall">
           {{ t("common.cancel") }}
         </Button>
         <Button :disabled="!canCloseAgentInstallDialog" @click="showAgentInstallDialog = false">

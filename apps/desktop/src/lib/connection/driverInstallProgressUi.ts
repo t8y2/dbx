@@ -16,6 +16,13 @@ export interface DriverInstallProgressTargetState {
   progressMap: Record<string, DriverInstallProgress | null | undefined>;
 }
 
+export interface DriverInstallCancellationTargetState {
+  activeOperationId: string | null;
+  cancellableDbType: string | null;
+  upgradingAll: boolean;
+  progressMap: Record<string, DriverInstallProgress | null | undefined>;
+}
+
 export type DriverInstallProgressChannel = "agent" | "jdbc-plugin";
 
 const AGENT_PROGRESS_STEPS = new Set(["driver", "jre", "jre-extract", "all-done"]);
@@ -51,6 +58,8 @@ export interface AgentInstallOperationContext {
 
 export type AgentInstallOutcome = { kind: "succeeded"; ownsState: boolean } | { kind: "cancelled"; ownsState: boolean } | { kind: "failed"; ownsState: boolean };
 
+export type AgentInstallCancelRequestResult = { ok: true } | { ok: false; error: unknown };
+
 /**
  * Classify the settlement of an agent install operation promise. When the
  * dialog no longer tracks the promise's operation id (the user cancelled and
@@ -64,6 +73,15 @@ export function resolveAgentInstallOutcome(result: { ok: true } | { ok: false; e
     return { kind: "cancelled", ownsState };
   }
   return { kind: "failed", ownsState };
+}
+
+export async function requestAgentInstallCancellation(request: () => Promise<void>): Promise<AgentInstallCancelRequestResult> {
+  try {
+    await request();
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, error };
+  }
 }
 
 export function driverInstallProgressChannel(progress: DriverInstallProgress): DriverInstallProgressChannel | null {
@@ -109,6 +127,13 @@ export function isDriverInstallProgressTarget(dbType: string, state: DriverInsta
   if (!state.upgradingAll) return false;
   // During batch upgrade, check the per-driver map — the driver is "active"
   // if it has a (non-null, non-"done") progress entry.
+  const progress = state.progressMap[dbType];
+  return progress !== null && progress !== undefined;
+}
+
+export function isDriverInstallCancellationTarget(dbType: string, state: DriverInstallCancellationTargetState): boolean {
+  if (!state.activeOperationId) return false;
+  if (!state.upgradingAll) return state.cancellableDbType === dbType;
   const progress = state.progressMap[dbType];
   return progress !== null && progress !== undefined;
 }

@@ -1,7 +1,17 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
 
-import { addDriverInstallQueue, driverInstallProgressPercent, isDriverInstallCanceledError, isDriverInstallProgressTarget, removeDriverInstallQueue, resolveAgentInstallOutcome, takeNextDriverInstallQueue } from "../../apps/desktop/src/lib/connection/driverInstallProgressUi.ts";
+import {
+  addDriverInstallQueue,
+  driverInstallProgressPercent,
+  isDriverInstallCanceledError,
+  isDriverInstallCancellationTarget,
+  isDriverInstallProgressTarget,
+  removeDriverInstallQueue,
+  requestAgentInstallCancellation,
+  resolveAgentInstallOutcome,
+  takeNextDriverInstallQueue,
+} from "../../apps/desktop/src/lib/connection/driverInstallProgressUi.ts";
 
 test("formats driver install progress as a bounded whole percent", () => {
   assert.equal(driverInstallProgressPercent({ step: "driver", downloaded: 3_900_000, total: 10_500_000 }), 37);
@@ -25,6 +35,57 @@ test("targets only the row currently installing or upgrading", () => {
       progressMap: { postgres: { step: "driver", db_type: "postgres", downloaded: 1, total: 2 } },
     }),
     true,
+  );
+});
+
+test("shows single-driver cancel only after the cancellable agent operation starts", () => {
+  assert.equal(
+    isDriverInstallCancellationTarget("mysql", {
+      activeOperationId: null,
+      cancellableDbType: null,
+      upgradingAll: false,
+      progressMap: {},
+    }),
+    false,
+  );
+  assert.equal(
+    isDriverInstallCancellationTarget("mysql", {
+      activeOperationId: "operation-a",
+      cancellableDbType: "mysql",
+      upgradingAll: false,
+      progressMap: {},
+    }),
+    true,
+  );
+  assert.equal(
+    isDriverInstallCancellationTarget("postgres", {
+      activeOperationId: "operation-a",
+      cancellableDbType: "mysql",
+      upgradingAll: false,
+      progressMap: {},
+    }),
+    false,
+  );
+});
+
+test("keeps batch row cancellation scoped to registered progress entries", () => {
+  assert.equal(
+    isDriverInstallCancellationTarget("postgres", {
+      activeOperationId: "batch-a",
+      cancellableDbType: null,
+      upgradingAll: true,
+      progressMap: { postgres: { step: "driver", db_type: "postgres" } },
+    }),
+    true,
+  );
+  assert.equal(
+    isDriverInstallCancellationTarget("mysql", {
+      activeOperationId: "batch-a",
+      cancellableDbType: null,
+      upgradingAll: true,
+      progressMap: { postgres: { step: "driver", db_type: "postgres" } },
+    }),
+    false,
   );
 });
 
@@ -54,6 +115,27 @@ test("recognizes a user-cancelled driver install error", () => {
   assert.equal(isDriverInstallCanceledError(undefined), false);
 });
 
+test("a failed cancel request keeps the install outcome as a real failure", async () => {
+  const result = await requestAgentInstallCancellation(async () => {
+    throw new Error("cancel transport failed");
+  });
+
+  assert.equal(result.ok, false);
+  if (result.ok) assert.fail("cancel request must fail");
+  assert.match(String(result.error), /cancel transport failed/);
+  assert.deepEqual(
+    resolveAgentInstallOutcome(
+      { ok: false, error: new Error("download failed") },
+      {
+        operationId: "operation-a",
+        currentOperationId: "operation-a",
+        cancelRequested: result.ok,
+      },
+    ),
+    { kind: "failed", ownsState: true },
+  );
+});
+
 test("cancel then immediate retry: the stale operation never owns the dialog state", () => {
   // The dialog flow: operation A begins, the user cancels (the cancel handler
   // finishes the dialog, clearing the tracked id), then retries - operation B
@@ -64,10 +146,7 @@ test("cancel then immediate retry: the stale operation never owns the dialog sta
     cancelRequested: false,
   };
 
-  const cancelled = resolveAgentInstallOutcome(
-    { ok: false, error: new Error("Agent download canceled by user.") },
-    staleContext,
-  );
+  const cancelled = resolveAgentInstallOutcome({ ok: false, error: new Error("Agent download canceled by user.") }, staleContext);
   assert.equal(cancelled.kind, "cancelled");
   assert.equal(cancelled.ownsState, false);
 
@@ -89,10 +168,7 @@ test("cancel without retry: the cleared dialog is not re-failed by the old promi
     cancelRequested: true,
   };
 
-  const cancelled = resolveAgentInstallOutcome(
-    { ok: false, error: new Error("Download failed: 404") },
-    clearedContext,
-  );
+  const cancelled = resolveAgentInstallOutcome({ ok: false, error: new Error("Download failed: 404") }, clearedContext);
   assert.equal(cancelled.kind, "cancelled");
   assert.equal(cancelled.ownsState, false);
 });
@@ -105,12 +181,6 @@ test("the active operation owns the dialog state on every outcome", () => {
   };
 
   assert.deepEqual(resolveAgentInstallOutcome({ ok: true }, context), { kind: "succeeded", ownsState: true });
-  assert.deepEqual(
-    resolveAgentInstallOutcome({ ok: false, error: new Error("Agent download canceled by user.") }, context),
-    { kind: "cancelled", ownsState: true },
-  );
-  assert.deepEqual(
-    resolveAgentInstallOutcome({ ok: false, error: new Error("Download failed: 404") }, context),
-    { kind: "failed", ownsState: true },
-  );
+  assert.deepEqual(resolveAgentInstallOutcome({ ok: false, error: new Error("Agent download canceled by user.") }, context), { kind: "cancelled", ownsState: true });
+  assert.deepEqual(resolveAgentInstallOutcome({ ok: false, error: new Error("Download failed: 404") }, context), { kind: "failed", ownsState: true });
 });

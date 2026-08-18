@@ -1258,6 +1258,24 @@ async fn persist_local_agent_install_state(
     })
 }
 
+fn ensure_local_agent_commit_allowed(cancellations: &[&AgentInstallCancellation]) -> Result<(), String> {
+    if cancellations.iter().any(|token| token.is_cancelled()) {
+        return Err(AGENT_DOWNLOAD_CANCELED_ERROR.to_string());
+    }
+    Ok(())
+}
+
+async fn commit_local_agent_install(
+    am: &AgentManager,
+    db_type: &str,
+    local_jar: &Path,
+    jre_key: &str,
+    jre_version: Option<&str>,
+) -> Result<(), String> {
+    install_local_agent_file(am, db_type, local_jar)?;
+    persist_local_agent_install_state(am, db_type, jre_key, jre_version).await
+}
+
 async fn install_local_agent_with_registry_jre(
     am: &AgentManager,
     registry: &AgentRegistry,
@@ -1284,16 +1302,11 @@ async fn install_local_agent_with_registry_jre(
         )
         .await?;
     }
-    install_local_agent_file(am, db_type, &local_jar)?;
-    if cancellations.iter().any(|token| token.is_cancelled()) {
-        std::fs::remove_file(am.driver_jar_path(db_type)).ok();
-        return Err(AGENT_DOWNLOAD_CANCELED_ERROR.to_string());
-    }
-    // This fallback can run for several drivers during upgrade-all. Keep its
-    // driver and JRE updates in one state_lock-protected transaction.
-    persist_local_agent_install_state(
+    ensure_local_agent_commit_allowed(cancellations)?;
+    commit_local_agent_install(
         am,
         db_type,
+        &local_jar,
         jre_key,
         registry.resolve_jre(jre_key).map(|jre| jre.version.as_str()),
     )
@@ -4156,6 +4169,47 @@ mod agent_registry_install_tests {
         persist_pending_jre_cleanup(&manager, Some(&stash)).await.unwrap();
 
         assert_eq!(manager.load_state().pending_jre_cleanup, vec![stash]);
+    }
+
+    #[tokio::test]
+    async fn local_fallback_cancel_before_commit_preserves_existing_driver() {
+        let manager = test_manager("local-cancel-before-commit");
+        let db_type = "oracle";
+        let jar_path = manager.driver_jar_path(db_type);
+        std::fs::create_dir_all(jar_path.parent().unwrap()).unwrap();
+        std::fs::write(&jar_path, b"existing-driver").unwrap();
+        manager.mutate_state(|state| record_local_agent_install(state, db_type, DEFAULT_JRE_KEY)).unwrap();
+        let token = manager.begin_install_cancellation("local-cancel-before-commit").await;
+        token.cancel();
+
+        let error = ensure_local_agent_commit_allowed(&[&token]).expect_err("a pre-commit cancel must abort");
+
+        assert!(error.contains(AGENT_DOWNLOAD_CANCELED_ERROR));
+        assert_eq!(std::fs::read(&jar_path).unwrap(), b"existing-driver");
+        assert!(manager.load_state().installed_drivers.contains_key(db_type));
+    }
+
+    #[tokio::test]
+    async fn local_fallback_cancel_after_commit_boundary_persists_replacement() {
+        let manager = test_manager("local-cancel-after-boundary");
+        let db_type = "oracle";
+        let jar_path = manager.driver_jar_path(db_type);
+        std::fs::create_dir_all(jar_path.parent().unwrap()).unwrap();
+        std::fs::write(&jar_path, b"existing-driver").unwrap();
+        manager.mutate_state(|state| record_local_agent_install(state, db_type, DEFAULT_JRE_KEY)).unwrap();
+        let source = manager.base_dir().join("replacement.jar");
+        write_test_agent_jar(&source);
+        let expected = std::fs::read(&source).unwrap();
+        let token = manager.begin_install_cancellation("local-cancel-after-boundary").await;
+
+        ensure_local_agent_commit_allowed(&[&token]).unwrap();
+        token.cancel();
+        commit_local_agent_install(&manager, db_type, &source, DEFAULT_JRE_KEY, Some("21.0.12")).await.unwrap();
+
+        assert_eq!(std::fs::read(&jar_path).unwrap(), expected);
+        let state = manager.load_state();
+        assert_eq!(state.installed_drivers[db_type].version, "0.1.0-local");
+        assert_eq!(state.jre_versions[DEFAULT_JRE_KEY], "21.0.12");
     }
 
     #[test]

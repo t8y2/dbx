@@ -1510,7 +1510,7 @@ watch(driverStoreTab, (tab) => {
                     {{ t("driverStore.queued") }}
                   </Button>
                   <DriverInstallProgressCircle v-else-if="!driver.installed && isDriverProgressActive(driver.db_type)" :percent="getAgentProgressPercent(driver.db_type)" :title="getAgentProgressTitle(driver.db_type, t('driverStore.installing'))" /><Button
-                    v-if="isDriverProgressActive(driver.db_type)"
+                    v-if="!driver.installed && isDriverProgressActive(driver.db_type)"
                     type="button"
                     variant="ghost"
                     size="icon-sm"
@@ -1549,7 +1549,7 @@ watch(driverStoreTab, (tab) => {
                     {{ t("driverStore.queued") }}
                   </Button>
                   <DriverInstallProgressCircle v-else-if="driver.installed && driver.update_available && isDriverProgressActive(driver.db_type)" :percent="getAgentProgressPercent(driver.db_type)" :title="getAgentProgressTitle(driver.db_type, t('driverStore.updating'))" /><Button
-                    v-if="isDriverProgressActive(driver.db_type)"
+                    v-if="driver.installed && driver.update_available && isDriverProgressActive(driver.db_type)"
                     type="button"
                     variant="ghost"
                     size="icon-sm"
@@ -1655,7 +1655,7 @@ watch(driverStoreTab, (tab) => {
                             {{ t("driverStore.queued") }}
                           </Button>
                           <DriverInstallProgressCircle v-else-if="!driver.installed && isDriverProgressActive(driver.db_type)" :percent="getAgentProgressPercent(driver.db_type)" :title="getAgentProgressTitle(driver.db_type, t('driverStore.installing'))" /><Button
-                            v-if="isDriverProgressActive(driver.db_type)"
+                            v-if="!driver.installed && isDriverProgressActive(driver.db_type)"
                             type="button"
                             variant="ghost"
                             size="icon-sm"
@@ -1694,7 +1694,7 @@ watch(driverStoreTab, (tab) => {
                             {{ t("driverStore.queued") }}
                           </Button>
                           <DriverInstallProgressCircle v-else-if="driver.installed && driver.update_available && isDriverProgressActive(driver.db_type)" :percent="getAgentProgressPercent(driver.db_type)" :title="getAgentProgressTitle(driver.db_type, t('driverStore.updating'))" /><Button
-                            v-if="isDriverProgressActive(driver.db_type)"
+                            v-if="driver.installed && driver.update_available && isDriverProgressActive(driver.db_type)"
                             type="button"
                             variant="ghost"
                             size="icon-sm"
@@ -1759,7 +1759,7 @@ watch(driverStoreTab, (tab) => {
                         {{ t("driverStore.queued") }}
                       </Button>
                       <DriverInstallProgressCircle v-else-if="!driver.installed && isDriverProgressActive(driver.db_type)" :percent="getAgentProgressPercent(driver.db_type)" :title="getAgentProgressTitle(driver.db_type, t('driverStore.installing'))" /><Button
-                        v-if="isDriverProgressActive(driver.db_type)"
+                        v-if="!driver.installed && isDriverProgressActive(driver.db_type)"
                         type="button"
                         variant="ghost"
                         size="icon-sm"
@@ -1798,7 +1798,7 @@ watch(driverStoreTab, (tab) => {
                         {{ t("driverStore.queued") }}
                       </Button>
                       <DriverInstallProgressCircle v-else-if="driver.installed && driver.update_available && isDriverProgressActive(driver.db_type)" :percent="getAgentProgressPercent(driver.db_type)" :title="getAgentProgressTitle(driver.db_type, t('driverStore.updating'))" /><Button
-                        v-if="isDriverProgressActive(driver.db_type)"
+                        v-if="driver.installed && driver.update_available && isDriverProgressActive(driver.db_type)"
                         type="button"
                         variant="ghost"
                         size="icon-sm"

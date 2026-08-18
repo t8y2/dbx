@@ -40,6 +40,9 @@ describe("grouped query display column mapping", () => {
       expect(analysis.tableName).toBe("users");
       expect(analysis.columns.map((column) => column.resultName)).toEqual(["department", "total"]);
       expect(analysis.columns[0]).toMatchObject({ sourceName: "department" });
+      expect(analysis.groupByColumns).toEqual([expect.objectContaining({ sourceName: "department" })]);
+      expect(analysis.hasHavingClause).toBeUndefined();
+      expect(analysis.hasWindowClause).toBeUndefined();
       // Aggregate expression has no direct source column.
       expect(analysis.columns[1]?.sourceName).toBeUndefined();
     });
@@ -52,6 +55,22 @@ describe("grouped query display column mapping", () => {
       expect(analysis).not.toBeNull();
       if (!analysis) return;
       expect(analysis.columns.map((column) => column.resultName)).toEqual(["department", "total"]);
+      expect(analysis.hasHavingClause).toBe(true);
+    });
+
+    it("records window functions so mutation safety can reject them", () => {
+      const analysis = analyzeSelectStructureForDisplay("SELECT id, ROW_NUMBER() OVER (ORDER BY id) AS row_number, COUNT(*) FROM users GROUP BY id");
+      expect(analysis).not.toBeNull();
+      if (!analysis) return;
+      expect(analysis.groupByColumns).toEqual([expect.objectContaining({ sourceName: "id" })]);
+      expect(analysis.hasWindowClause).toBe(true);
+    });
+
+    it("records a top-level RIGHT JOIN so a nullable root source cannot become editable", () => {
+      const analysis = analyzeSelectStructureForDisplay("SELECT u.id, COUNT(*) FROM users u RIGHT OUTER JOIN orders o ON o.user_id = u.id GROUP BY u.id");
+      expect(analysis).not.toBeNull();
+      if (!analysis) return;
+      expect(analysis.hasRightJoinClause).toBe(true);
     });
 
     it("parses multi-source grouped queries with per-source qualifiers", () => {

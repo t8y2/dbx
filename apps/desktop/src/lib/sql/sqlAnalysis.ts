@@ -25,6 +25,10 @@ export interface EditableQueryInfo {
   allowInsert?: boolean;
   allowInsertDelete?: boolean;
   distinct?: boolean;
+  groupByColumns?: EditableQueryColumn[];
+  hasHavingClause?: boolean;
+  hasWindowClause?: boolean;
+  hasRightJoinClause?: boolean;
 }
 
 export interface EditableQueryColumn {
@@ -204,9 +208,10 @@ export type QueryEditability = { editable: true; analysis: EditableQueryInfo } |
  * base-table columns. DBeaver uses result metadata for the same idea; DBX has to
  * recover enough source mapping from SQL text before table metadata is loaded.
  *
- * Aggregated/set/query-derived results remain read-only. Multi-source queries
- * may still be editable later if metadata proves that exactly one source table
- * has a complete row identifier in the returned columns.
+ * Aggregated/set/query-derived results are rejected by this syntax-only pass.
+ * Multi-source queries, and narrowly supported MySQL grouped queries, may
+ * still become editable later if physical metadata proves that exactly one
+ * source table has a complete row identifier in the returned columns.
  */
 export function analyzeEditableQuery(sql: string): EditableQueryInfo | null {
   const result = analyzeEditableQueryEditability(sql);
@@ -283,16 +288,15 @@ export function analyzeEditableQueryEditability(sql: string): QueryEditability {
 
 /**
  * Parse a SELECT statement's projection columns and source tables far enough to
- * resolve display-only result metadata (result-column → source-column mapping
- * by projection ordinal) WITHOUT deciding editability.
+ * resolve result metadata (result-column → source-column mapping by projection
+ * ordinal) WITHOUT deciding editability.
  *
  * GROUP BY / HAVING queries are classified `aggregation` (read-only) by
  * `analyzeEditableQueryEditability`, so that function bails out before parsing
  * projections or sources. Their directly projected base-table columns are still
- * resolvable for column comments, so the display layer uses this function to
- * recover that structure. It is consumed ONLY by display metadata enrichment
- * and must never feed row mutation logic — editability is decided exclusively
- * by `analyzeEditableQueryEditability`.
+ * resolvable for column comments. The MySQL query store also combines this
+ * mapping with physical primary-key metadata to enable a narrowly gated editing
+ * path; this parser result alone is never sufficient to permit mutation.
  *
  * Returns `null` when the statement cannot be structurally parsed for display:
  * CTEs, set operations, subquery/external sources, or non-SELECT statements.
@@ -324,6 +328,12 @@ export function analyzeSelectStructureForDisplay(sql: string): EditableQueryInfo
   if (!sources.length) return null;
   const source = sources[0]!;
 
+  const groupIndex = findTopLevelKeyword(normalized, "GROUP", fromIndex + "FROM".length);
+  const groupByColumns = parseGroupByColumns(normalized, groupIndex, sources);
+  const hasHavingClause = findTopLevelKeyword(normalized, "HAVING", fromIndex + "FROM".length) >= 0;
+  const hasWindowClause = findTopLevelKeyword(normalized, "OVER", "SELECT".length) >= 0 || findTopLevelKeyword(normalized, "WINDOW", fromIndex + "FROM".length) >= 0;
+  const hasRightJoinClause = hasTopLevelRightJoin(fromBody);
+
   const selectStar = sources.length === 1 && isSelectStar(selectBody, source.alias);
   const columns = selectStar ? [] : parseSelectColumns(selectBody, sources);
   if (!selectStar && columns.length === 0) return null;
@@ -340,12 +350,38 @@ export function analyzeSelectStructureForDisplay(sql: string): EditableQueryInfo
     selectStar,
     columns,
     ...(distinct ? { distinct: true } : {}),
+    ...(groupByColumns !== undefined ? { groupByColumns } : {}),
+    ...(hasHavingClause ? { hasHavingClause: true } : {}),
+    ...(hasWindowClause ? { hasWindowClause: true } : {}),
+    ...(hasRightJoinClause ? { hasRightJoinClause: true } : {}),
   };
   if (sources.length > 1) {
     analysis.sources = sources;
     analysis.multiSource = true;
   }
   return analysis;
+}
+
+function parseGroupByColumns(sql: string, groupIndex: number, sources: EditableQuerySource[]): EditableQueryColumn[] | undefined {
+  if (groupIndex < 0) return undefined;
+  const groupClause = sql.slice(groupIndex).match(/^GROUP\s+BY\b/i);
+  if (!groupClause) return [];
+  const bodyStart = groupIndex + groupClause[0].length;
+  const bodyEnd = firstTopLevelKeywordIndex(sql, ["HAVING", "ORDER", "LIMIT", "OFFSET", "FETCH", "FOR", "WINDOW"], bodyStart);
+  const body = sql.slice(bodyStart, bodyEnd < 0 ? sql.length : bodyEnd).trim();
+  return body ? parseSelectColumns(body, sources) : [];
+}
+
+function hasTopLevelRightJoin(fromBody: string): boolean {
+  let searchFrom = 0;
+  while (searchFrom < fromBody.length) {
+    const rightIndex = findTopLevelKeyword(fromBody, "RIGHT", searchFrom);
+    if (rightIndex < 0) return false;
+    const joinTail = fromBody.slice(rightIndex + "RIGHT".length);
+    if (/^\s+(?:OUTER\s+)?JOIN\b/i.test(joinTail)) return true;
+    searchFrom = rightIndex + "RIGHT".length;
+  }
+  return false;
 }
 
 export function queryEditabilityMessageKey(reason: QueryEditabilityReason): string {

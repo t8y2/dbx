@@ -86,6 +86,7 @@ export interface UseDataGridEditorOptions {
     | undefined
   >;
   sourceColumns?: ComputedRef<Array<string | undefined> | undefined>;
+  readonlyColumnIndexes?: ComputedRef<ReadonlySet<number> | undefined>;
   canEditExistingRows?: ComputedRef<boolean>;
   onExecuteSql: ComputedRef<((sql: string) => Promise<void>) | undefined>;
   customSaveHandler?: ComputedRef<CustomSaveHandler | undefined>;
@@ -201,6 +202,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     database,
     tableMeta,
     sourceColumns = computed(() => undefined),
+    readonlyColumnIndexes = computed(() => undefined),
     canEditExistingRows = computed(() => true),
     onExecuteSql,
     customSaveHandler,
@@ -607,7 +609,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
 
   function canEditColumn(columnIndex: number): boolean {
     const sources = sourceColumns.value;
-    return !sources || sources[columnIndex] !== undefined;
+    return (!sources || sources[columnIndex] !== undefined) && !readonlyColumnIndexes.value?.has(columnIndex);
   }
 
   // --- Row data helpers ---

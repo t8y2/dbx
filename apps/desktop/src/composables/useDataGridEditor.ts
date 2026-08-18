@@ -348,6 +348,8 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
           input.select();
           input.setSelectionRange?.(0, input.value.length);
         }
+      } else if (input) {
+        input.setSelectionRange?.(input.value.length, input.value.length);
       }
     };
     nextTick(() => {
@@ -554,6 +556,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
   // --- Cell value coercion ---
   interface ApplyCellValueOptions {
     preserveEmptyString?: boolean;
+    emptyStringAsNull?: boolean;
   }
 
   function coerceCellValue(value: string, oldValue: CellValue | undefined, columnIndex: number, options: ApplyCellValueOptions = {}): CellValue {
@@ -563,6 +566,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
       databaseType: resolvedDatabaseType.value,
       columnInfo: tableColumnForGridColumn(columnIndex),
       preserveEmptyString: options.preserveEmptyString,
+      emptyStringAsNull: options.emptyStringAsNull,
     }) as CellValue;
   }
 
@@ -710,7 +714,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
   }
 
   // --- Inline editing ---
-  function startEdit(rowId: number, colIdx: number) {
+  function startEdit(rowId: number, colIdx: number, selectOnFocus = true) {
     if (!editable.value) return;
     if (!canEditColumn(colIdx)) return;
     const item = getRowItem(rowId);
@@ -726,7 +730,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
       databaseType: resolvedDatabaseType.value,
       columnInfo: tableColumnForGridColumn(colIdx),
     });
-    focusEditInput();
+    focusEditInput(selectOnFocus);
   }
 
   function commitEdit(options: CommitEditOptions = {}): CommitEditResult {

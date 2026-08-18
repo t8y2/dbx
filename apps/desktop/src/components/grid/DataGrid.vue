@@ -242,6 +242,7 @@ import { dataGridCanvasDevicePixelSize, useDataGridCanvasRuntime, type DataGridC
 import { useDataGridScrollbars, type DataGridScrollbarsRuntime } from "@/composables/useDataGridScrollbars";
 import { useDataGridSelection } from "@/composables/useDataGridSelection";
 import { dataGridNavigationOrigin, dataGridPageScrollTop, dataGridRowScrollTop, moveDataGridCell, navigateDataGridCell, type DataGridNavigationDirection, type DataGridScrollAlignment } from "@/lib/dataGrid/dataGridNavigation";
+import { dataGridInlineBulkEditValue } from "@/lib/dataGrid/dataGridInlineBulkEdit";
 import type { CellPosition } from "@/lib/dataGrid/gridSelection";
 import { createDataGridRuntimeScope } from "@/lib/dataGrid/dataGridRuntime";
 import { useDataGridEditor } from "@/composables/useDataGridEditor";
@@ -814,6 +815,7 @@ function onGridContextMenuClose() {
 
 const bulkEditDialogOpen = ref(false);
 const bulkEditValue = ref("");
+const inlineBulkEditActive = ref(false);
 const copyColumnNamesDialogOpen = ref(false);
 const copyColumnNamesDialogColumns = ref<string[]>([]);
 const insertRowsDialogOpen = ref(false);
@@ -3669,13 +3671,16 @@ function cellUsesExpandedEditor(rowId: number | undefined, columnIndex: number):
   return !!expandedCellEditor.value && expandedCellEditor.value.rowId === rowId && expandedCellEditor.value.col === columnIndex;
 }
 
-async function startCellEdit(rowId: number, columnIndex: number, expanded: boolean) {
-  if (!(await hydrateLargeValueCell(rowId, columnIndex))) return;
+async function startCellEdit(rowId: number, columnIndex: number, expanded: boolean, initialValue?: string): Promise<boolean> {
+  if (!(await hydrateLargeValueCell(rowId, columnIndex))) return false;
   closeReadonlyCellTextSelection();
   expandedCellEditor.value = expanded ? { rowId, col: columnIndex } : null;
   const item = getRowItem(rowId);
-  startEdit(rowId, columnIndex);
-  if (item) editValue.value = inlineCellEditorText(item.data[columnIndex] ?? null, columnIndex);
+  startEdit(rowId, columnIndex, initialValue === undefined);
+  const started = editingCell.value?.rowId === rowId && editingCell.value.col === columnIndex;
+  if (!started) return false;
+  editValue.value = initialValue ?? (item ? inlineCellEditorText(item.data[columnIndex] ?? null, columnIndex) : editValue.value);
+  return true;
 }
 
 async function startDomCellEdit(rowId: number, columnIndex: number, displayText: string, event: MouseEvent) {
@@ -7484,14 +7489,14 @@ function selectedVisibleColumnIndexes(): number[] {
   return [...selectedColumnIndexes.value].filter((index) => index >= 0 && index < visibleColumns.value.length).sort((a, b) => a - b);
 }
 
-function applyVisibleCellValue(item: RowItem, visibleCol: number, value: string | null, options: { preserveEmptyString?: boolean } = {}): boolean {
+function applyVisibleCellValue(item: RowItem, visibleCol: number, value: string | null, options: { preserveEmptyString?: boolean; emptyStringAsNull?: boolean } = {}): boolean {
   const actualCol = actualColumnIndex(visibleCol);
   if (!canEditCellItem(item, actualCol)) return false;
   applyCellValue(item.id, actualCol, value, options);
   return true;
 }
 
-function applyVisibleSelectedCellValue(item: RowItem, visibleCol: number, value: string | null, allowDraft = selectedRangeTargetsOnlyDraftRow(), options: { preserveEmptyString?: boolean } = {}): boolean {
+function applyVisibleSelectedCellValue(item: RowItem, visibleCol: number, value: string | null, allowDraft = selectedRangeTargetsOnlyDraftRow(), options: { preserveEmptyString?: boolean; emptyStringAsNull?: boolean } = {}): boolean {
   if (!canApplyGridSelectionValue({ isDraft: !!item.isDraft, allowDraft })) return false;
   return applyVisibleCellValue(item, visibleCol, value, options);
 }
@@ -7503,7 +7508,7 @@ function selectedRangeTargetsOnlyDraftRow(): boolean {
   return displayItemAt(range.startRow)?.isDraft === true;
 }
 
-function fillSelectionWithValue(value: string | null): boolean {
+function fillSelectionWithValue(value: string | null, options: { preserveEmptyString?: boolean; emptyStringAsNull?: boolean } = {}): boolean {
   const range = selectedRange.value;
   let applied = false;
   const allowDraftSelectionValue = selectedRangeTargetsOnlyDraftRow();
@@ -7514,7 +7519,7 @@ function fillSelectionWithValue(value: string | null): boolean {
         const item = displayItemAt(rowIndex);
         if (!item) continue;
         for (let visibleCol = range.startCol; visibleCol <= range.endCol; visibleCol++) {
-          applied = applyVisibleSelectedCellValue(item, visibleCol, value, allowDraftSelectionValue) || applied;
+          applied = applyVisibleSelectedCellValue(item, visibleCol, value, allowDraftSelectionValue, options) || applied;
         }
       }
       return applied;
@@ -7527,7 +7532,7 @@ function fillSelectionWithValue(value: string | null): boolean {
       const item = displayItemAt(rowIndex);
       if (!item) continue;
       for (const visibleCol of visibleColumnIndexes) {
-        applied = applyVisibleSelectedCellValue(item, visibleCol, value) || applied;
+        applied = applyVisibleSelectedCellValue(item, visibleCol, value, undefined, options) || applied;
       }
     }
     return applied;
@@ -7607,6 +7612,18 @@ function editableSelectionCells(): EditableSelectionCell[] {
     }
   }
   return cells;
+}
+
+function beginInlineBulkEdit(initialValue: string): boolean {
+  if (!props.editable) return false;
+  const target = editableSelectionCells()[0];
+  if (!target || selectedCellCount.value <= 1) return false;
+  const actualCol = actualColumnIndex(target.visibleCol);
+  inlineBulkEditActive.value = true;
+  void startCellEdit(target.item.id, actualCol, false, initialValue).then((started) => {
+    if (!started) inlineBulkEditActive.value = false;
+  });
+  return true;
 }
 
 function applyGeneratedSelectionValue(kind: CellValueGenerationKind, startValue = 1n): boolean {
@@ -8008,7 +8025,18 @@ function currentIoTDBTimestampEditValue(): CellValue | undefined {
 
 function commitGridEdit(value?: CellValue) {
   if (value === undefined) value = currentIoTDBTimestampEditValue();
+  if (commitInlineBulkEdit(value)) return;
   void commitEditAndMaybeAutoSave(value === undefined ? undefined : { explicitValue: value }).finally(() => nextTick(() => gridRef.value?.focus({ preventScroll: true })));
+}
+
+function commitInlineBulkEdit(value?: CellValue): boolean {
+  if (!inlineBulkEditActive.value) return false;
+  inlineBulkEditActive.value = false;
+  const nextValue = value === undefined ? editValue.value : value === null ? null : String(value);
+  cancelEdit();
+  fillSelectionWithValue(nextValue, { emptyStringAsNull: true });
+  nextTick(() => gridRef.value?.focus({ preventScroll: true }));
+  return true;
 }
 
 function commitBooleanGridEdit(value?: string | null) {
@@ -8025,9 +8053,10 @@ function commitBooleanGridEdit(value?: string | null) {
 }
 
 async function commitEditFromCellBlur() {
+  const timestamp = currentIoTDBTimestampEditValue();
+  if (commitInlineBulkEdit(timestamp)) return;
   const target = pendingQuickEntryDraftCellFocus.value;
   pendingQuickEntryDraftCellFocus.value = null;
-  const timestamp = currentIoTDBTimestampEditValue();
   const timestampOptions = timestamp === undefined ? {} : { explicitValue: timestamp };
   if (target && editingCell.value?.rowId === quickEntryDraftRowId && target.rowId === quickEntryDraftRowId) {
     await commitEditFromBlur({ ...timestampOptions, promoteDraft: false });
@@ -8080,10 +8109,22 @@ async function onCellEditKeydown(event: KeyboardEvent) {
   if (isSaveShortcut(event, settingsStore.editorSettings.shortcuts)) {
     event.preventDefault();
     event.stopPropagation();
-    commitEdit();
+    if (!commitInlineBulkEdit(currentIoTDBTimestampEditValue())) commitEdit();
     await nextTick();
     if (await saveGridChangesFromShortcut()) {
       gridRef.value?.focus({ preventScroll: true });
+    }
+    return;
+  }
+  if (inlineBulkEditActive.value) {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      commitInlineBulkEdit(currentIoTDBTimestampEditValue());
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+      inlineBulkEditActive.value = false;
+      cancelEdit();
     }
     return;
   }
@@ -8214,6 +8255,12 @@ async function onGridKeydown(event: KeyboardEvent) {
   }
   if (!isTransposeMode.value && event.key === "PageDown" && navigateSelectedCell("pageDown", event.shiftKey)) {
     event.preventDefault();
+    return;
+  }
+  const inlineBulkEditValue = dataGridInlineBulkEditValue(event, selectedCellCount.value);
+  if (inlineBulkEditValue !== undefined && beginInlineBulkEdit(inlineBulkEditValue)) {
+    event.preventDefault();
+    event.stopPropagation();
     return;
   }
   if (event.key === "Enter" && editSelectedCell()) {
@@ -9182,6 +9229,7 @@ watch(editingCell, (cell) => {
   scheduleActiveCellEditTextareaResize();
   if (cell) nextTick(observeCellEditResizeBounds);
   else {
+    inlineBulkEditActive.value = false;
     resetCellEditTextareaScrollOnResize = false;
     expandedCellEditor.value = null;
     disconnectCellEditResizeObserver();

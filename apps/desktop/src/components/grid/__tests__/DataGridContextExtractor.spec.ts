@@ -24,8 +24,11 @@ describe("DataGrid context extractor lifecycle", () => {
     expect(start).toBeGreaterThanOrEqual(0);
     expect(end).toBeGreaterThan(start);
     expect(filterSource).toContain("const target = contextCell.value;");
+    expect(filterSource).toContain("const sourceResult = props.result;");
+    expect(filterSource).toContain("const sourceIndex = sourceItem.sourceIndex;");
     expect(filterSource).toContain("await hydrateLargeValueCell(target.rowId, target.col)");
-    expect(filterSource).toContain("const item = getRowItem(target.rowId);");
+    expect(filterSource).toContain("sourceResult.rows[sourceIndex]?.[target.col]");
+    expect(filterSource).not.toContain("getRowItem(target.rowId);\n  if (!item)");
     expect(filterSource).not.toContain("contextColumn.value");
     expect(filterSource).not.toContain("contextCellValue.value");
   });

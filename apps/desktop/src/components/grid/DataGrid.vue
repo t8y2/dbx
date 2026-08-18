@@ -5560,13 +5560,19 @@ async function contextFilterCondition(mode: FilterMode): Promise<string | null> 
   if (!target) return null;
   const columnName = props.result.columns[target.col];
   if (!columnName) return null;
+  const sourceResult = props.result;
+  const sourceItem = getRowItem(target.rowId);
+  if (!sourceItem) return null;
+  const sourceIndex = sourceItem.sourceIndex;
+  const requiresHydration = sourceIndex !== undefined && isLargeValuePreview(sourceItem, target.col);
+  const sourceValue = sourceItem.data[target.col] ?? null;
   // CustomContextMenu closes before invoking its action. Keep the target
   // stable across hydration after the close lifecycle clears contextCell.
   if (mode !== "is-null" && mode !== "is-not-null") {
     if (!(await hydrateLargeValueCell(target.rowId, target.col))) return null;
   }
-  const item = getRowItem(target.rowId);
-  if (!item) return null;
+  if (props.result !== sourceResult) return null;
+  const value = requiresHydration && sourceIndex !== undefined ? (sourceResult.rows[sourceIndex]?.[target.col] ?? null) : sourceValue;
   return (
     (await buildDataGridContextFilterCondition({
       databaseType: resolvedDatabaseType.value,
@@ -5574,7 +5580,7 @@ async function contextFilterCondition(mode: FilterMode): Promise<string | null> 
       columnName,
       columnInfo: props.tableMeta?.columns.find((column) => column.name === columnName),
       mode,
-      value: item.data[target.col] ?? null,
+      value,
     })) ?? null
   );
 }

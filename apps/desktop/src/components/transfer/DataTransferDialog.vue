@@ -921,7 +921,7 @@ async function saveConfigTask() {
 
 <template>
   <Dialog v-model:open="open">
-    <DialogContent class="sm:max-w-[1120px] max-h-[80vh] flex flex-col overflow-hidden" @interact-outside.prevent>
+    <DialogContent class="dbx-transfer-dialog sm:max-w-[1120px] max-h-[80vh] flex flex-col overflow-hidden" @interact-outside.prevent>
       <DialogHeader class="shrink-0">
         <DialogTitle class="flex items-center gap-2">
           <ArrowRightLeft class="w-4 h-4" />
@@ -1250,3 +1250,12 @@ async function saveConfigTask() {
     </DialogContent>
   </Dialog>
 </template>
+
+<style>
+@media (min-width: 640px) {
+  html.dbx-legacy-webview [data-slot="dialog-content"].dbx-transfer-dialog[class~="max-w-sm"] {
+    width: calc(100vw - 2rem) !important;
+    max-width: 1120px !important;
+  }
+}
+</style>

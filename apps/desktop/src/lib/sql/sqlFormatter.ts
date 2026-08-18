@@ -348,7 +348,7 @@ function normalizeLikeOperatorCase(sql: string, settings: SqlFormatterSettings, 
   // identifiers under their existing function/identifier case settings.
   const { masked, spans } = maskStringAndCommentSpans(sql, dialect);
   const keyword = settings.keywordCase === "upper" ? "LIKE" : "like";
-  const normalized = masked.replace(/(?<![.\w$:@{#])LIKE\b(?!\s*\()/gi, keyword);
+  const normalized = masked.replace(/(^|[^.\w$:@{#])LIKE\b(?!\s*\()/gi, (_match, prefix: string) => `${prefix}${keyword}`);
   return restoreSpans(normalized, spans);
 }
 

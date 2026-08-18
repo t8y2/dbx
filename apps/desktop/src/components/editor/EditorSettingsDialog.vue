@@ -1017,7 +1017,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editSqlVariableSubstitutionEnabled.value = DEFAULT_EDITOR_SETTINGS.sqlVariableSubstitutionEnabled;
     editSqlVariableSyntaxOverrides.value = normalizeSqlVariableSyntaxOverrides(DEFAULT_EDITOR_SETTINGS.sqlVariableSyntaxOverrides);
     // Back to the built-in palette, but the user's saved schemes stay available.
-    settingsStore.updateEditorSettings({ activeDataGridTypeColorSchemeId: DEFAULT_EDITOR_SETTINGS.activeDataGridTypeColorSchemeId });
+    void settingsStore.updateEditorSettingsAndPersist({ activeDataGridTypeColorSchemeId: DEFAULT_EDITOR_SETTINGS.activeDataGridTypeColorSchemeId });
   } else if (tab === "formatter") {
     editSqlFormatter.value = normalizeSqlFormatterSettings(DEFAULT_EDITOR_SETTINGS.sqlFormatter);
     sqlFormatterConfigValid.value = true;
@@ -1136,7 +1136,7 @@ function resetAllDefaults() {
   editDataGridShowTransposeFieldMetadata.value = DEFAULT_EDITOR_SETTINGS.dataGridShowTransposeFieldMetadata;
   editColorizeDataGridCellTypes.value = DEFAULT_EDITOR_SETTINGS.colorizeDataGridCellTypes;
   // Reset the selection only; saved schemes survive a full settings reset.
-  settingsStore.updateEditorSettings({ activeDataGridTypeColorSchemeId: DEFAULT_EDITOR_SETTINGS.activeDataGridTypeColorSchemeId });
+  void settingsStore.updateEditorSettingsAndPersist({ activeDataGridTypeColorSchemeId: DEFAULT_EDITOR_SETTINGS.activeDataGridTypeColorSchemeId });
   editShowIndexIndicatorsInHeader.value = DEFAULT_EDITOR_SETTINGS.showIndexIndicatorsInHeader;
   editCompactColumnHeaderActions.value = DEFAULT_EDITOR_SETTINGS.compactColumnHeaderActions;
   editDataGridQuickEntry.value = DEFAULT_EDITOR_SETTINGS.dataGridQuickEntry;
@@ -1374,9 +1374,13 @@ function handleThemeSave(updatedThemes: CustomTheme[], activeId: string) {
   showThemeCustomizer.value = false;
 }
 
-/** Applied as it is edited, so this only forwards the dialog's live changes. */
+/**
+ * The dialog buffers its edits, so this runs once on Done. Persisting has to go
+ * through the queue: a plain update is dropped while the store is still loading,
+ * which applies the colors but loses them on the next reload.
+ */
 function handleDataGridTypeColorSchemeChange(schemes: DataGridTypeColorScheme[], activeId: string) {
-  settingsStore.updateEditorSettings({ dataGridTypeColorSchemes: schemes, activeDataGridTypeColorSchemeId: activeId });
+  void settingsStore.updateEditorSettingsAndPersist({ dataGridTypeColorSchemes: schemes, activeDataGridTypeColorSchemeId: activeId });
 }
 
 const activeDataGridTypeColorSchemeName = computed(() => {

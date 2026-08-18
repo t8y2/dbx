@@ -106,7 +106,15 @@ See the [official Tauri prerequisites](https://v2.tauri.app/start/prerequisites/
     1. Install [Microsoft C++ Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/).
     2. Select **Desktop development with C++** in the installer.
     3. Make sure a Windows 10/11 SDK and WebView2 are installed. Windows 11 normally includes WebView2.
-    4. Run the Windows commands on this page in PowerShell.
+    4. Install [Strawberry Perl](https://github.com/StrawberryPerl/Perl-Dist-Strawberry/releases), required to build the bundled OpenSSL:
+
+        ```powershell
+        winget install StrawberryPerl.StrawberryPerl
+        ```
+
+        DBX enables the `sqlite-sqlcipher` feature by default, which compiles SQLCipher and OpenSSL from source. Windows needs Perl to run the OpenSSL `Configure` script. Reopen your terminal after installing so `perl` is available on `PATH`.
+
+    5. Run the Windows commands on this page in PowerShell.
 
     Make is optional on Windows because equivalent pnpm commands are provided below.
 

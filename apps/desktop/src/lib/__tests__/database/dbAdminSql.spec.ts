@@ -400,6 +400,25 @@ describe("buildDuplicateTableStructurePlan", () => {
     expect(plan).toEqual({ sql: 'CREATE TABLE "copy" (LIKE "source" INCLUDING ALL);', sourceColumns: undefined, executeAsScript: false });
   });
 
+  it("forwards the connection identifier quote so dual-dialect clones stay executable", async () => {
+    // Cloud Spanner's PostgreSQL dialect quotes with double quotes while GoogleSQL uses backticks,
+    // and only the connected agent knows which. Dropping the quote here would make the backend fall
+    // back to the static per-type mapping and emit a syntax error for one of the two dialects.
+    apiMock.buildDuplicateTableStructureSql.mockResolvedValue('CREATE TABLE "copy" AS SELECT * FROM "source" WHERE false;');
+
+    await buildDuplicateTableStructurePlan({
+      connectionId: "spanner-1",
+      database: "projects/p/instances/i/databases/d",
+      databaseType: "spanner",
+      schema: "public",
+      sourceName: "source",
+      targetName: "copy",
+      identifierQuote: '"',
+    });
+
+    expect(apiMock.buildDuplicateTableStructureSql).toHaveBeenCalledWith(expect.objectContaining({ identifierQuote: '"' }));
+  });
+
   it("keeps Oracle cloning available when optional table comment loading fails", async () => {
     const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
     const columns = [{ name: "ID", data_type: "NUMBER", is_nullable: false, column_default: null, is_primary_key: true }];

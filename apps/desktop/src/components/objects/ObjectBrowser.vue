@@ -1477,6 +1477,7 @@ async function buildDropSqlForRow(row: ObjectBrowserRow, options?: { cascade?: b
     objectType: row.type,
     schema: row.schema || selectedSchema.value,
     name: row.name,
+    identifierQuote: connectionStore.connectionIdentifierQuote?.(props.connection.id),
   });
 }
 
@@ -2062,6 +2063,7 @@ async function buildDuplicateStructurePlan(sourceName: string, targetName: strin
     targetName,
     tableComment,
     sourceColumns,
+    identifierQuote: connectionStore.connectionIdentifierQuote?.(props.connection.id),
   });
 }
 
@@ -2250,6 +2252,7 @@ async function confirmPasteTable() {
           sourceName: entry.sourceName,
           targetName,
           normalizeNewTargetName: mode === "structure-and-data",
+          identifierQuote: connectionStore.connectionIdentifierQuote?.(props.connection.id),
           ...dataCopyColumnOptions,
         });
         const executed = await executeObjectBrowserSqlWithProductionGuard(dataSql, () => api.executeQuery(props.connection.id, props.database, dataSql, schema));
@@ -2294,6 +2297,8 @@ function tableAdminSqlOptions(row: ObjectBrowserRow, options?: { cascade?: boole
     databaseType: effectiveDatabaseType.value,
     schema: row.schema || selectedSchema.value,
     tableName: row.name,
+    // Cloud Spanner's dialect decides the quote; the static per-type mapping cannot.
+    identifierQuote: connectionStore.connectionIdentifierQuote?.(props.connection.id),
   };
   if (options?.cascade) result.cascade = true;
   return result;

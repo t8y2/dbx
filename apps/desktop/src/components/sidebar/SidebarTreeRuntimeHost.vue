@@ -1961,6 +1961,8 @@ function dropObjectSqlOptionsForNode(node: TreeNode): DropObjectSqlOptions | nul
     schema: node.schema,
     name: node.objectName || node.label,
     signature: node.signature,
+    // Cloud Spanner's dialect decides the quote; the static per-type mapping cannot.
+    identifierQuote: connectionStore.connectionIdentifierQuote?.(node.connectionId),
   };
 }
 
@@ -3595,6 +3597,7 @@ async function confirmDuplicateStructure() {
       sourceName: node.label,
       targetName: newName,
       tableComment: node.comment,
+      identifierQuote: connectionStore.connectionIdentifierQuote?.(node.connectionId),
     });
     await executeTreeNodeSqlWithProductionGuard(node, plan.sql, {
       database: node.database,
@@ -3645,6 +3648,7 @@ async function confirmPasteTable() {
           sourceName: entry.sourceName,
           targetName,
           tableComment: entry.tableComment,
+          identifierQuote: connectionStore.connectionIdentifierQuote?.(entry.connectionId),
         });
         sourceColumns = plan.sourceColumns;
         const structureExecuted = await executeTreeNodeSqlWithProductionGuard(entry, plan.sql, {
@@ -3673,6 +3677,7 @@ async function confirmPasteTable() {
           sourceName: entry.sourceName,
           targetName,
           normalizeNewTargetName: mode === "structure-and-data",
+          identifierQuote: connectionStore.connectionIdentifierQuote?.(entry.connectionId),
           ...dataCopyColumnOptions,
         });
         const dataExecuted = await executeTreeNodeSqlWithProductionGuard(entry, dataSql, { database: entry.database, schema: entry.schema });

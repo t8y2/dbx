@@ -4309,7 +4309,7 @@ async fn begin_transaction_session(
         TxnPoolHandle::Postgres(pg_pool) => {
             let conn = pg_pool.get().await.map_err(|e| format!("Failed to get Postgres connection: {e}"))?;
             let begin_sql = postgres_transaction_begin_sql(consistent_snapshot);
-            conn.execute(begin_sql, &[]).await.map_err(|e| format!("BEGIN failed: {e}"))?;
+            conn.execute_typed(begin_sql, &[]).await.map_err(|e| format!("BEGIN failed: {e}"))?;
             if let Some(schema) = schema {
                 db::postgres::set_postgres_search_path(
                     &conn,
@@ -4595,7 +4595,7 @@ where
         TxnConnection::Postgres(conn) => {
             let mut batch = Vec::with_capacity(batch_size);
             let mut total_rows = 0_u64;
-            let result = db::postgres::stream_select_query_inner(conn, sql, None, &mut |item| {
+            let result = db::postgres::stream_select_query_inner_unnamed(conn, sql, None, &mut |item| {
                 if let db::postgres::PostgresQueryStreamItem::Row(row) = item {
                     batch.push(row);
                     total_rows += 1;
@@ -4682,7 +4682,7 @@ where
 async fn rollback_manual_txn_connection(conn: &mut TxnConnection) -> Result<(), String> {
     match conn {
         TxnConnection::Postgres(conn) => {
-            conn.execute("ROLLBACK", &[]).await.map_err(|e| format!("ROLLBACK failed: {e}"))?;
+            conn.execute_typed("ROLLBACK", &[]).await.map_err(|e| format!("ROLLBACK failed: {e}"))?;
         }
         TxnConnection::Mysql(conn) => {
             conn.query_drop("ROLLBACK").await.map_err(|e| format!("ROLLBACK failed: {e}"))?;
@@ -4740,9 +4740,9 @@ async fn execute_manual_txn_postgres_statement(
     row_limit: usize,
 ) -> Result<db::QueryResult, String> {
     if db::postgres::postgres_statement_returns_rows(sql) {
-        db::postgres::execute_select_query(conn, sql, std::time::Instant::now(), row_limit).await
+        db::postgres::execute_select_query_unnamed(conn, sql, std::time::Instant::now(), row_limit).await
     } else {
-        let affected = conn.execute(sql, &[]).await.map_err(|e| format!("Query failed: {e}"))?;
+        let affected = conn.execute_typed(sql, &[]).await.map_err(|e| format!("Query failed: {e}"))?;
         Ok(db::QueryResult {
             columns: vec![],
             column_types: Vec::new(),
@@ -4833,7 +4833,7 @@ pub async fn commit_manual_transaction(state: &AppState, txn_session_id: &str) -
     let mut conn = session.connection.lock().await;
     match &mut *conn {
         TxnConnection::Postgres(conn) => {
-            conn.execute("COMMIT", &[]).await.map_err(|e| format!("COMMIT failed: {e}"))?;
+            conn.execute_typed("COMMIT", &[]).await.map_err(|e| format!("COMMIT failed: {e}"))?;
         }
         TxnConnection::Mysql(conn) => {
             conn.query_drop("COMMIT").await.map_err(|e| format!("COMMIT failed: {e}"))?;

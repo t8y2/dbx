@@ -31,6 +31,11 @@ export interface CanFetchNextDataGridSegmentOptions {
   allRowsLoaded?: boolean;
 }
 
+export interface DataGridLoadAllSegment {
+  offset: number;
+  limit: number;
+}
+
 export type DataGridInexactTotalRowCountMode = "at-least" | "estimated";
 
 export function dataGridTruncationHintKey(databaseType?: DatabaseType): "grid.truncatedHint" | "grid.victoriaMetricsTruncatedHint" {
@@ -87,4 +92,11 @@ export function canFetchNextDataGridSegment(options: CanFetchNextDataGridSegment
 
   if (options.allRowsLoaded === true) return false;
   return options.loadedRowCount >= Math.max(1, options.pageSize);
+}
+
+export function dataGridLoadAllSegment(loadedRowCount: number, maxRows: number, canFetchMore: boolean): DataGridLoadAllSegment | null {
+  const offset = Number.isFinite(loadedRowCount) ? Math.max(0, Math.trunc(loadedRowCount)) : 0;
+  const boundedMaxRows = Number.isFinite(maxRows) ? Math.max(0, Math.trunc(maxRows)) : 0;
+  if (!canFetchMore || offset >= boundedMaxRows) return null;
+  return { offset, limit: boundedMaxRows - offset };
 }

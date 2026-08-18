@@ -1,7 +1,7 @@
 import { strict as assert } from "node:assert";
 import { readFileSync } from "node:fs";
 import { test } from "vitest";
-import { canFetchNextDataGridSegment, canGoNextDataGridPage, hasCompleteLocalDataGridResult, resolveDataGridPaginationTotal } from "../../apps/desktop/src/lib/dataGrid/dataGridPagination.ts";
+import { canFetchNextDataGridSegment, canGoNextDataGridPage, dataGridLoadAllSegment, hasCompleteLocalDataGridResult, resolveDataGridPaginationTotal } from "../../apps/desktop/src/lib/dataGrid/dataGridPagination.ts";
 
 test("estimated display totals do not become pagination bounds", () => {
   assert.equal(
@@ -132,6 +132,16 @@ test("infinite scroll preserves authoritative has-more and complete-local-result
   assert.equal(canFetchNextDataGridSegment({ loadedRowCount: 1_000, pageSize: 1_000, allRowsLoaded: true }), false);
 });
 
+test("load-all requests every remaining row up to the configured cap", () => {
+  assert.deepEqual(dataGridLoadAllSegment(100, 5_000, true), { offset: 100, limit: 4_900 });
+  assert.deepEqual(dataGridLoadAllSegment(2_500, 5_000, true), { offset: 2_500, limit: 2_500 });
+});
+
+test("load-all does not request past the cap or after the result is complete", () => {
+  assert.equal(dataGridLoadAllSegment(5_000, 5_000, true), null);
+  assert.equal(dataGridLoadAllSegment(100, 5_000, false), null);
+});
+
 // --- auto-redirect page calculation after refresh ---
 // These tests document the math used in DataGrid.vue's loading watcher:
 //   lastPageNum = Math.max(1, Math.ceil(total / pageSize))
@@ -186,7 +196,7 @@ test("only an explicit last-page COUNT blocks the grid surface", () => {
   assert.match(source, /const gridSurfaceBusy = computed\(\(\) => isRefreshingData\.value \|\| props\.loading === true \|\| manualTotalRowCountLoading\.value\)/);
   assert.match(source, /const gridPaginationBusy = computed\(\(\) => gridSurfaceBusy\.value \|\| totalRowCountBusy\.value\)/);
   assert.match(source, /v-if="gridSurfaceBusy"/);
-  assert.match(source, /:loading="gridPaginationBusy"/);
+  assert.match(source, /:loading="gridPaginationBusy \|\| infiniteScrollLoading"/);
   assert.match(source, /async function beginManualTotalRowCount/);
   assert.match(source, /await nextTick\(\);/);
   const lastPageFn = source.match(/async function lastPage\(\) \{[\s\S]*?\n\}/)?.[0] ?? "";

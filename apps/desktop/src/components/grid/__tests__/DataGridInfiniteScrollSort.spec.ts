@@ -17,7 +17,7 @@ describe("DataGrid infinite-scroll sorting", () => {
     const sortSource = functionSource("applyColumnSort", "selectHeaderSort");
     const resetSource = functionSource("resetInfiniteScrollState", "onToolbarRefresh");
 
-    expect(sortSource).toContain('if (mode === "database" && infiniteScrollEnabled.value) {\n    resetInfiniteScrollState();');
+    expect(sortSource).toContain('if (mode === "database" && (infiniteScrollEnabled.value || loadAllRowsActive.value)) {\n    resetInfiniteScrollState();');
     expect(resetSource).toContain("lastInfiniteScrollPage = 0;");
     expect(resetSource).toContain("infiniteScrollAllLoaded = false;");
     expect(resetSource).toContain("infiniteScrollRequestedOffset = undefined;");

@@ -172,7 +172,7 @@ test("data reload preserves current page offset instead of resetting to page 1",
   }
 });
 
-test("infinite pagination fetches and appends only the next table segment", async () => {
+test("explicit load-all pagination fetches and appends only the missing table segment", async () => {
   const restoreStorage = installMemoryStorage();
   const originalFetch = globalThis.fetch;
   const { useDataGridActions } = await import("../../apps/desktop/src/composables/useDataGridActions.ts");
@@ -198,7 +198,7 @@ test("infinite pagination fetches and appends only the next table segment", asyn
     const connectionStore = useConnectionStore();
     const queryStore = useQueryStore();
     const settingsStore = useSettingsStore();
-    settingsStore.updateEditorSettings({ infiniteScroll: true, queryResultMaxRowsEnabled: true, queryResultMaxRows: 5000 });
+    settingsStore.updateEditorSettings({ infiniteScroll: false, queryResultMaxRowsEnabled: true, queryResultMaxRows: 5000 });
     connectionStore.addEphemeralConnection(conn("mysql-1"));
     const tabId = queryStore.createTab("mysql-1", "app", "orders", "data");
     queryStore.setTableMeta(tabId, { tableName: "orders", tableType: "TABLE", columns: [], primaryKeys: [] });
@@ -210,7 +210,7 @@ test("infinite pagination fetches and appends only the next table segment", asyn
     tab.resultPageOffset = 0;
 
     const actions = useDataGridActions(computed(() => tab));
-    await actions.onPaginate(1, 100);
+    await actions.onPaginate(1, 100, undefined, undefined, true);
 
     assert.equal(buildSqlOptions?.offset, 1);
     assert.equal(buildSqlOptions?.limit, 100);

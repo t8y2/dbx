@@ -1431,6 +1431,7 @@ export default withEnglishFallback({
     totalRowCountLoading: "（統計中...）",
     loadingMore: "載入更多資料...",
     allLoaded: "已全部載入",
+    loadAllAndGoToLastRow: "載入全部並前往最後一列",
     calculateTotalRows: "統計總筆數",
     calculateTotalRowsInline: "（統計總筆數）",
     calculateTotalRowsFailed: "統計失敗：{message}",

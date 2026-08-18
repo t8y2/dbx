@@ -1491,6 +1491,7 @@ export default {
     totalRowCountLoading: "(counting...)",
     loadingMore: "Loading more data...",
     allLoaded: "all loaded",
+    loadAllAndGoToLastRow: "Load all and go to the last row",
     calculateTotalRows: "Count total rows",
     calculateTotalRowsInline: "(count total rows)",
     calculateTotalRowsFailed: "Count failed: {message}",

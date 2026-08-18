@@ -1885,6 +1885,7 @@ export default withEnglishFallback({
     victoriaMetricsTruncatedHint: "結果が読み込み上限を超えたため、先頭の{count}行のみ読み込みました。1ページあたりの行数は読み込み済みデータだけをページ分割します。完全な結果を取得するには、時間範囲を短くするかフィルターを追加してください。",
     loadingMore: "さらにデータを読み込み中...",
     allLoaded: "すべて読み込み済み",
+    loadAllAndGoToLastRow: "すべて読み込み、最終行へ移動",
     previewSqlEmpty: "プレビューする保留中のSQL変更はありません",
     renderMode: "レンダーモード",
     undoChange: "変更を元に戻す",

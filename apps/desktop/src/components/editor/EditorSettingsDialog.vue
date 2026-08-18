@@ -287,6 +287,8 @@ const editUiScale = ref(settingsStore.editorSettings.uiScale);
 const editTheme = ref(settingsStore.editorSettings.theme);
 const editCustomThemes = ref<CustomTheme[]>([...settingsStore.editorSettings.customThemes]);
 const editActiveCustomThemeId = ref(settingsStore.editorSettings.activeCustomThemeId);
+const editDataGridTypeColorSchemes = ref<DataGridTypeColorScheme[]>(structuredClone(settingsStore.editorSettings.dataGridTypeColorSchemes));
+const editActiveDataGridTypeColorSchemeId = ref(settingsStore.editorSettings.activeDataGridTypeColorSchemeId);
 const showThemeCustomizer = ref(false);
 const showDataGridTypeColorScheme = ref(false);
 const editExecuteMode = ref(settingsStore.editorSettings.executeMode);
@@ -516,6 +518,8 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     showColumnTypesInHeader: editShowColumnTypesInHeader.value,
     dataGridShowTransposeFieldMetadata: editDataGridShowTransposeFieldMetadata.value,
     colorizeDataGridCellTypes: editColorizeDataGridCellTypes.value,
+    dataGridTypeColorSchemes: editDataGridTypeColorSchemes.value,
+    activeDataGridTypeColorSchemeId: editActiveDataGridTypeColorSchemeId.value,
     showIndexIndicatorsInHeader: editShowIndexIndicatorsInHeader.value,
     compactColumnHeaderActions: editCompactColumnHeaderActions.value,
     dataGridQuickEntry: editDataGridQuickEntry.value,
@@ -799,6 +803,8 @@ function syncEditorSettingsDraftFromStore() {
   editShowColumnTypesInHeader.value = settingsStore.editorSettings.showColumnTypesInHeader;
   editDataGridShowTransposeFieldMetadata.value = settingsStore.editorSettings.dataGridShowTransposeFieldMetadata;
   editColorizeDataGridCellTypes.value = settingsStore.editorSettings.colorizeDataGridCellTypes;
+  editDataGridTypeColorSchemes.value = structuredClone(settingsStore.editorSettings.dataGridTypeColorSchemes);
+  editActiveDataGridTypeColorSchemeId.value = settingsStore.editorSettings.activeDataGridTypeColorSchemeId;
   editShowIndexIndicatorsInHeader.value = settingsStore.editorSettings.showIndexIndicatorsInHeader;
   editCompactColumnHeaderActions.value = settingsStore.editorSettings.compactColumnHeaderActions;
   editDataGridQuickEntry.value = settingsStore.editorSettings.dataGridQuickEntry;
@@ -1016,8 +1022,6 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editClickTableNavigationTarget.value = DEFAULT_EDITOR_SETTINGS.clickTableNavigationTarget;
     editSqlVariableSubstitutionEnabled.value = DEFAULT_EDITOR_SETTINGS.sqlVariableSubstitutionEnabled;
     editSqlVariableSyntaxOverrides.value = normalizeSqlVariableSyntaxOverrides(DEFAULT_EDITOR_SETTINGS.sqlVariableSyntaxOverrides);
-    // Back to the built-in palette, but the user's saved schemes stay available.
-    void settingsStore.updateEditorSettingsAndPersist({ activeDataGridTypeColorSchemeId: DEFAULT_EDITOR_SETTINGS.activeDataGridTypeColorSchemeId });
   } else if (tab === "formatter") {
     editSqlFormatter.value = normalizeSqlFormatterSettings(DEFAULT_EDITOR_SETTINGS.sqlFormatter);
     sqlFormatterConfigValid.value = true;
@@ -1061,6 +1065,8 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editShowColumnTypesInHeader.value = DEFAULT_EDITOR_SETTINGS.showColumnTypesInHeader;
     editDataGridShowTransposeFieldMetadata.value = DEFAULT_EDITOR_SETTINGS.dataGridShowTransposeFieldMetadata;
     editColorizeDataGridCellTypes.value = DEFAULT_EDITOR_SETTINGS.colorizeDataGridCellTypes;
+    // Back to the built-in palette, but keep the user's saved schemes available.
+    editActiveDataGridTypeColorSchemeId.value = DEFAULT_EDITOR_SETTINGS.activeDataGridTypeColorSchemeId;
     editShowIndexIndicatorsInHeader.value = DEFAULT_EDITOR_SETTINGS.showIndexIndicatorsInHeader;
     editCompactColumnHeaderActions.value = DEFAULT_EDITOR_SETTINGS.compactColumnHeaderActions;
     editDataGridQuickEntry.value = DEFAULT_EDITOR_SETTINGS.dataGridQuickEntry;
@@ -1136,7 +1142,7 @@ function resetAllDefaults() {
   editDataGridShowTransposeFieldMetadata.value = DEFAULT_EDITOR_SETTINGS.dataGridShowTransposeFieldMetadata;
   editColorizeDataGridCellTypes.value = DEFAULT_EDITOR_SETTINGS.colorizeDataGridCellTypes;
   // Reset the selection only; saved schemes survive a full settings reset.
-  void settingsStore.updateEditorSettingsAndPersist({ activeDataGridTypeColorSchemeId: DEFAULT_EDITOR_SETTINGS.activeDataGridTypeColorSchemeId });
+  editActiveDataGridTypeColorSchemeId.value = DEFAULT_EDITOR_SETTINGS.activeDataGridTypeColorSchemeId;
   editShowIndexIndicatorsInHeader.value = DEFAULT_EDITOR_SETTINGS.showIndexIndicatorsInHeader;
   editCompactColumnHeaderActions.value = DEFAULT_EDITOR_SETTINGS.compactColumnHeaderActions;
   editDataGridQuickEntry.value = DEFAULT_EDITOR_SETTINGS.dataGridQuickEntry;
@@ -1374,19 +1380,14 @@ function handleThemeSave(updatedThemes: CustomTheme[], activeId: string) {
   showThemeCustomizer.value = false;
 }
 
-/**
- * The dialog buffers its edits, so this runs once on Done. Persisting has to go
- * through the queue: a plain update is dropped while the store is still loading,
- * which applies the colors but loses them on the next reload.
- */
 function handleDataGridTypeColorSchemeChange(schemes: DataGridTypeColorScheme[], activeId: string) {
-  void settingsStore.updateEditorSettingsAndPersist({ dataGridTypeColorSchemes: schemes, activeDataGridTypeColorSchemeId: activeId });
+  editDataGridTypeColorSchemes.value = structuredClone(schemes);
+  editActiveDataGridTypeColorSchemeId.value = activeId;
 }
 
 const activeDataGridTypeColorSchemeName = computed(() => {
-  const { dataGridTypeColorSchemes, activeDataGridTypeColorSchemeId } = settingsStore.editorSettings;
-  if (activeDataGridTypeColorSchemeId === DATA_GRID_TYPE_COLOR_SCHEME_AUTO_ID) return t("settings.dataGridTypeColorSchemeAuto");
-  return dataGridTypeColorSchemes.find((scheme) => scheme.id === activeDataGridTypeColorSchemeId)?.name ?? t("settings.dataGridTypeColorSchemeAuto");
+  if (editActiveDataGridTypeColorSchemeId.value === DATA_GRID_TYPE_COLOR_SCHEME_AUTO_ID) return t("settings.dataGridTypeColorSchemeAuto");
+  return editDataGridTypeColorSchemes.value.find((scheme) => scheme.id === editActiveDataGridTypeColorSchemeId.value)?.name ?? t("settings.dataGridTypeColorSchemeAuto");
 });
 
 function onDisconnectTabHandlingModeChange(v: any) {
@@ -3775,23 +3776,6 @@ onUnmounted(() => {
                 </div>
               </div>
 
-              <!-- Data Type Colors -->
-              <div data-settings-search-id="editor-data-grid-type-colors" :class="['flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2', settingsSearchTargetClass('editor-data-grid-type-colors')]">
-                <div class="space-y-1 min-w-0">
-                  <Label>{{ t("settings.dataGridTypeColorScheme") }}</Label>
-                  <p class="text-xs text-muted-foreground">
-                    {{ t("settings.dataGridTypeColorSchemeDescription") }}
-                  </p>
-                </div>
-                <div class="flex items-center gap-2 shrink-0">
-                  <span class="text-xs text-muted-foreground">{{ activeDataGridTypeColorSchemeName }}</span>
-                  <Button variant="outline" class="h-9 w-auto px-4" @click="showDataGridTypeColorScheme = true">
-                    <Palette class="mr-2 h-4 w-4" />
-                    {{ t("settings.dataGridTypeColorSchemeConfigure") }}
-                  </Button>
-                </div>
-              </div>
-
               <Separator />
 
               <div class="grid gap-4 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
@@ -4956,6 +4940,21 @@ onUnmounted(() => {
               <div class="space-y-3">
                 <div class="text-sm font-medium text-muted-foreground">
                   {{ t("settings.dataGridDisplay") }}
+                </div>
+                <div data-settings-search-id="data-grid-type-colors" :class="['flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2', settingsSearchTargetClass('data-grid-type-colors')]">
+                  <div class="space-y-1 min-w-0">
+                    <Label>{{ t("settings.dataGridTypeColorScheme") }}</Label>
+                    <p class="text-xs text-muted-foreground">
+                      {{ t("settings.dataGridTypeColorSchemeDescription") }}
+                    </p>
+                  </div>
+                  <div class="flex items-center gap-2 shrink-0">
+                    <span class="text-xs text-muted-foreground">{{ activeDataGridTypeColorSchemeName }}</span>
+                    <Button variant="outline" class="h-9 w-auto px-4" @click="showDataGridTypeColorScheme = true">
+                      <Palette class="mr-2 h-4 w-4" />
+                      {{ t("settings.dataGridTypeColorSchemeConfigure") }}
+                    </Button>
+                  </div>
                 </div>
                 <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                   <div class="space-y-1">
@@ -6969,7 +6968,7 @@ onUnmounted(() => {
 
     <!-- Theme Customizer Dialog -->
     <ThemeCustomizerDialog v-model:open="showThemeCustomizer" :themes="editCustomThemes" :active-theme-id="editActiveCustomThemeId" @save="handleThemeSave" />
-    <DataGridTypeColorSchemeDialog v-model:open="showDataGridTypeColorScheme" :schemes="settingsStore.editorSettings.dataGridTypeColorSchemes" :active-scheme-id="settingsStore.editorSettings.activeDataGridTypeColorSchemeId" @change="handleDataGridTypeColorSchemeChange" />
+    <DataGridTypeColorSchemeDialog v-model:open="showDataGridTypeColorScheme" :schemes="editDataGridTypeColorSchemes" :active-scheme-id="editActiveDataGridTypeColorSchemeId" @change="handleDataGridTypeColorSchemeChange" />
 
     <!-- Snippet Add/Edit Dialog -->
     <Dialog :open="snippetDialogOpen" @update:open="snippetDialogOpen = $event">

@@ -68,12 +68,12 @@ describe("settings store type color scheme persistence", () => {
     expect(last?.activeDataGridTypeColorSchemeId).toBe(SCHEME.id);
   });
 
-  it("routes every scheme commit through the persisting update", () => {
+  it("stages scheme edits in the settings draft", () => {
     const dialogSource = readFileSync(new URL("../../components/editor/EditorSettingsDialog.vue", import.meta.url), "utf8");
-    const schemeCalls = dialogSource.match(/settingsStore\.updateEditorSettings\w*\(\{[^}]*DataGridTypeColorScheme/g) ?? [];
 
-    expect(schemeCalls.length).toBeGreaterThan(0);
-    for (const call of schemeCalls) expect(call).toContain("updateEditorSettingsAndPersist");
+    expect(dialogSource).toContain("editDataGridTypeColorSchemes.value = structuredClone(schemes)");
+    expect(dialogSource).toContain("editActiveDataGridTypeColorSchemeId.value = activeId");
+    expect(dialogSource).not.toMatch(/settingsStore\.updateEditorSettings\w*\(\{[^}]*DataGridTypeColorScheme/);
   });
 
   it("restores a persisted scheme through normalization", async () => {

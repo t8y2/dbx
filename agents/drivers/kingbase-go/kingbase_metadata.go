@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -37,6 +38,22 @@ type kingbaseMode struct {
 	postgresCatalog   bool
 	mysqlCompat       bool
 	sqlServerIdentity bool
+	legacyV7          bool
+}
+
+var kingbaseReleasePattern = regexp.MustCompile(`(?i)\bV0*([0-9]+)R`)
+
+func detectKingbaseV7(db *sql.DB) bool {
+	var version string
+	if err := db.QueryRow("SELECT version()").Scan(&version); err != nil {
+		return false
+	}
+	match := kingbaseReleasePattern.FindStringSubmatch(version)
+	if len(match) != 2 {
+		return false
+	}
+	major, err := strconv.Atoi(match[1])
+	return err == nil && major == 7
 }
 
 type databaseInfo struct {
@@ -1570,6 +1587,9 @@ func (s *server) listForeignKeys(schema, table string) ([]foreignKeyInfo, error)
 	if err != nil {
 		return nil, err
 	}
+	if s.mode.legacyV7 && !s.mode.mysqlCompat {
+		return s.listForeignKeysFromCatalog(effective, table)
+	}
 	query := `SELECT fk.constraint_name, fk.column_name, pk.table_name, pk.column_name
 FROM information_schema.table_constraints tc
 JOIN information_schema.key_column_usage fk ON fk.constraint_schema = tc.constraint_schema AND fk.constraint_name = tc.constraint_name AND fk.table_schema = tc.table_schema AND fk.table_name = tc.table_name
@@ -1592,10 +1612,7 @@ WHERE tc.table_schema = ` + quoteLiteral(effective) + ` AND tc.table_name = ` + 
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	if len(result) > 0 || s.mode.mysqlCompat {
-		return result, nil
-	}
-	return s.listForeignKeysFromCatalog(effective, table)
+	return result, nil
 }
 
 func (s *server) listForeignKeysFromCatalog(schema, table string) ([]foreignKeyInfo, error) {

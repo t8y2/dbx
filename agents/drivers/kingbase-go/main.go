@@ -465,6 +465,7 @@ func (s *server) connect(cp connectParams) error {
 	s.db = db
 	s.params = cp
 	s.mode = detectKingbaseMode(db, cp.MySQLCompatMode)
+	s.mode.legacyV7 = detectKingbaseV7(db)
 	s.usePgDefaultExpression = false
 	s.usePgViewDefinition = false
 	s.usePgFunctionDefinition = false

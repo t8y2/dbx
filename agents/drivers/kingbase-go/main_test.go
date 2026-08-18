@@ -1030,11 +1030,11 @@ func TestListIndexesDoesNotFallbackForUnrelatedErrors(t *testing.T) {
 	}
 }
 
-func TestListForeignKeysFallsBackToCatalog(t *testing.T) {
+func TestListForeignKeysUsesCatalogForV7(t *testing.T) {
 	state := &metadataDriverState{query: func(query string) (driver.Rows, error) {
 		switch {
 		case strings.Contains(query, "FROM information_schema.table_constraints tc"):
-			return &valueRows{columns: []string{"constraint_name", "column_name", "table_name", "column_name"}}, nil
+			return nil, errors.New("V7 must not query information_schema foreign keys")
 		case strings.Contains(query, "FROM sys_catalog.sys_constraint c"):
 			return &valueRows{
 				columns: []string{"conname", "conkey", "confkey", "nspname", "relname"},
@@ -1050,6 +1050,7 @@ func TestListForeignKeysFallsBackToCatalog(t *testing.T) {
 	}}
 	server := newServer()
 	server.db = openMetadataDB(t, state)
+	server.mode.legacyV7 = true
 
 	keys, err := server.listForeignKeys("PUBLIC", "orders")
 	if err != nil {
@@ -1057,6 +1058,46 @@ func TestListForeignKeysFallsBackToCatalog(t *testing.T) {
 	}
 	if len(keys) != 2 || keys[0].Column != "customer_id" || keys[0].RefColumn != "id" || keys[1].Column != "customer_region" || keys[1].RefColumn != "region" {
 		t.Fatalf("unexpected foreign keys: %#v", keys)
+	}
+}
+
+func TestListForeignKeysKeepsEmptyInformationSchemaResultOnV8(t *testing.T) {
+	state := &metadataDriverState{query: func(query string) (driver.Rows, error) {
+		if strings.Contains(query, "FROM information_schema.table_constraints tc") {
+			return &valueRows{columns: []string{"constraint_name", "column_name", "table_name", "column_name"}}, nil
+		}
+		return nil, errors.New("V8 empty result must not trigger a catalog query: " + query)
+	}}
+	server := newServer()
+	server.db = openMetadataDB(t, state)
+
+	keys, err := server.listForeignKeys("PUBLIC", "orders")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(keys) != 0 || len(state.snapshotQueries()) != 1 {
+		t.Fatalf("unexpected foreign keys or query count: keys=%#v queries=%v", keys, state.snapshotQueries())
+	}
+}
+
+func TestKingbaseV7VersionPattern(t *testing.T) {
+	for _, test := range []struct {
+		version string
+		v7      bool
+	}{
+		{version: "Kingbase V007R001C002B0014", v7: true},
+		{version: "KingbaseES V008R006C008B0014"},
+		{version: "PostgreSQL 12.1"},
+	} {
+		match := kingbaseReleasePattern.FindStringSubmatch(test.version)
+		actual := false
+		if len(match) == 2 {
+			major, err := strconv.Atoi(match[1])
+			actual = err == nil && major == 7
+		}
+		if actual != test.v7 {
+			t.Fatalf("version=%q: expected v7=%v, got %v", test.version, test.v7, actual)
+		}
 	}
 }
 

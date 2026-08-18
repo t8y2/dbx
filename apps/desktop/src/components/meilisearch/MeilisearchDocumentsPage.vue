@@ -217,21 +217,26 @@ function documentId(hit: Hit | null | undefined): string {
   return id == null ? "" : String(id);
 }
 
+/** Search params shared by the results view and the export. */
+function buildSearchParams(batchLimit: number, batchOffset: number) {
+  return {
+    q: q.value.trim() || null,
+    filter: filter.value.trim() || null,
+    sort: sort.value.trim() || null,
+    limit: Math.max(1, batchLimit),
+    offset: Math.max(0, batchOffset),
+    hybridEmbedder: hybridEnabled.value && hybridEmbedder.value.trim() ? hybridEmbedder.value.trim() : null,
+    hybridSemanticRatio: hybridEnabled.value ? hybridSemanticRatio.value : null,
+    showRankingScore: showRankingScore.value,
+    rankingScoreThreshold: rankingScoreThreshold.value > 0 ? rankingScoreThreshold.value : null,
+  };
+}
+
 async function runSearch() {
   loading.value = true;
   error.value = "";
   try {
-    const result = await api.meilisearchSearchDocuments(props.connectionId, props.index, {
-      q: q.value.trim() || null,
-      filter: filter.value.trim() || null,
-      sort: sort.value.trim() || null,
-      limit: Math.max(1, limit.value),
-      offset: Math.max(0, offset.value),
-      hybridEmbedder: hybridEnabled.value && hybridEmbedder.value.trim() ? hybridEmbedder.value.trim() : null,
-      hybridSemanticRatio: hybridEnabled.value ? hybridSemanticRatio.value : null,
-      showRankingScore: showRankingScore.value,
-      rankingScoreThreshold: rankingScoreThreshold.value > 0 ? rankingScoreThreshold.value : null,
-    });
+    const result = await api.meilisearchSearchDocuments(props.connectionId, props.index, buildSearchParams(limit.value, offset.value));
     hits.value = result.hits ?? [];
     totalHits.value = result.totalHits ?? 0;
     processingTimeMs.value = result.processingTimeMs ?? 0;
@@ -265,16 +270,28 @@ function startEdit(hit: Hit) {
   editOpen.value = true;
 }
 
-/** Download the current page of hits as a JSON file of the stored documents. */
+/** Download every hit matching the current search as a JSON file of the stored documents. */
 const exporting = ref(false);
 
+const EXPORT_BATCH_SIZE = 1000;
+
 async function exportResults() {
-  if (exporting.value || hits.value.length === 0) return;
+  if (exporting.value || totalHits.value === 0) return;
   exporting.value = true;
   try {
-    const content = JSON.stringify(hits.value.map(rawDocument), null, 2);
+    const documents: Record<string, unknown>[] = [];
+    for (let batchOffset = 0; batchOffset < totalHits.value; batchOffset += EXPORT_BATCH_SIZE) {
+      const result = await api.meilisearchSearchDocuments(props.connectionId, props.index, buildSearchParams(EXPORT_BATCH_SIZE, batchOffset));
+      const batch = (result.hits ?? []).map(rawDocument);
+      documents.push(...batch);
+      // Meilisearch caps pagination at maxTotalHits; a short batch means we hit the end.
+      if (batch.length < EXPORT_BATCH_SIZE) break;
+    }
+    const content = JSON.stringify(documents, null, 2);
     const baseName = sanitizeExportBaseName(props.index) || "search-results";
     await saveTextFile(content, `${baseName}-${compactLocalTimestamp()}.json`, "JSON", "json");
+  } catch (e: any) {
+    toast(e?.message || String(e), 5000);
   } finally {
     exporting.value = false;
   }
@@ -594,9 +611,9 @@ onBeforeUnmount(() => {
         </button>
       </div>
       <div class="flex-1" />
-      <Button v-if="hits.length > 0" variant="ghost" size="sm" class="h-6 gap-1 px-2 text-xs text-muted-foreground hover:text-foreground" :disabled="exporting" @click="exportResults">
+      <Button v-if="totalHits > 0" variant="ghost" size="sm" class="h-6 gap-1 px-2 text-xs text-muted-foreground hover:text-foreground" :disabled="exporting" @click="exportResults">
         <Download class="h-3.5 w-3.5" />
-        {{ t("meilisearch.exportResults") }} ({{ hits.length }})
+        {{ t("meilisearch.exportResults") }} ({{ totalHits }})
       </Button>
       <span v-if="!loading && !error" class="text-muted-foreground text-xs tabular-nums">{{ resultSummary }}</span>
     </div>

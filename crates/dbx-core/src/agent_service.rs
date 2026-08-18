@@ -377,6 +377,34 @@ pub async fn fetch_registry() -> Result<AgentRegistry, String> {
 }
 
 pub async fn fetch_registry_from(source: DownloadSource) -> Result<AgentRegistry, String> {
+    fetch_registry_from_claimed(source, &[]).await
+}
+
+/// Like `fetch_registry_from`, but the registry HTTP request AND the
+/// response-body JSON parse are raced against the given cancellation tokens, so
+/// a cancel fired during install/batch setup aborts promptly instead of waiting
+/// for the 10s client timeout. Pass an empty slice to keep the non-cancellable
+/// behavior.
+pub async fn fetch_registry_from_claimed(
+    source: DownloadSource,
+    cancellations: &[&AgentInstallCancellation],
+) -> Result<AgentRegistry, String> {
+    let urls = source.download_candidate_urls(REGISTRY_PATH, REGISTRY_R2_PATH)?;
+    fetch_registry_from_urls(source, &urls, cancellations).await
+}
+
+/// Core registry fetch over explicit candidate URLs (the URL seam lets tests
+/// point at a localhost server). With a non-empty `cancellations` slice both the
+/// HTTP request and the body parse are raced against cancellation.
+async fn fetch_registry_from_urls(
+    source: DownloadSource,
+    urls: &[String],
+    cancellations: &[&AgentInstallCancellation],
+) -> Result<AgentRegistry, String> {
+    // A pre-cancelled token must abort before any network attempt.
+    if !cancellations.is_empty() && cancellations.iter().any(|token| token.is_cancelled()) {
+        return Err(AGENT_DOWNLOAD_CANCELED_ERROR.to_string());
+    }
     {
         let cache = REGISTRY_CACHE.lock().await;
         if let Some((ts, registry)) = cache.get(&source) {
@@ -389,32 +417,60 @@ pub async fn fetch_registry_from(source: DownloadSource) -> Result<AgentRegistry
         .timeout(std::time::Duration::from_secs(10))
         .build()
         .map_err(|err| format!("Failed to create HTTP client: {err}"))?;
-    let resp = open_download_response(&client, source, REGISTRY_PATH, REGISTRY_R2_PATH, "dbx-agent-manager")
+    let resp = open_download_response(&client, urls, "dbx-agent-manager", cancellations)
         .await
         .map_err(|err| format!("Failed to fetch agent registry: {err}"))?;
-    let registry: AgentRegistry = resp.json().await.map_err(|err| format!("Failed to parse registry: {err}"))?;
+    // Race the body parse too: a stalled/partial body must not hold the
+    // registry fetch hostage until the 10s client timeout.
+    let registry: AgentRegistry = if cancellations.is_empty() {
+        resp.json().await.map_err(|err| format!("Failed to parse registry: {err}"))?
+    } else {
+        tokio::select! {
+            result = resp.json() => result.map_err(|err| format!("Failed to parse registry: {err}"))?,
+            _ = first_cancellation(cancellations) => return Err(AGENT_DOWNLOAD_CANCELED_ERROR.to_string()),
+        }
+    };
     REGISTRY_CACHE.lock().await.insert(source, (std::time::Instant::now(), registry.clone()));
     Ok(registry)
 }
 
 async fn open_download_response(
     client: &reqwest::Client,
-    source: DownloadSource,
-    github_url: &str,
-    r2_path: &str,
+    urls: &[String],
     user_agent: &str,
+    cancellations: &[&AgentInstallCancellation],
 ) -> Result<reqwest::Response, String> {
     let mut errors = Vec::new();
-    for url in source.download_candidate_urls(github_url, r2_path)? {
-        match client
-            .get(&url)
+    for url in urls {
+        let request = client
+            .get(url)
             .header(reqwest::header::USER_AGENT, user_agent)
-            .header(reqwest::header::ACCEPT_ENCODING, "identity")
-            .send()
-            .await
-            .and_then(|response| response.error_for_status())
-        {
-            Ok(response) => return Ok(response),
+            .header(reqwest::header::ACCEPT_ENCODING, "identity");
+        // Race the request with cancellation: a stalled mirror that never
+        // returns response headers must not hold the registry fetch hostage
+        // until the 10s client timeout. Dropping the send future aborts it.
+        let resp = if cancellations.is_empty() {
+            match request.send().await {
+                Ok(resp) => resp,
+                Err(error) => {
+                    errors.push(format!("{url}: {error}"));
+                    continue;
+                }
+            }
+        } else {
+            tokio::select! {
+                result = request.send() => match result {
+                    Ok(resp) => resp,
+                    Err(error) => {
+                        errors.push(format!("{url}: {error}"));
+                        continue;
+                    }
+                },
+                _ = first_cancellation(cancellations) => return Err(AGENT_DOWNLOAD_CANCELED_ERROR.to_string()),
+            }
+        };
+        match resp.error_for_status() {
+            Ok(resp) => return Ok(resp),
             Err(error) => errors.push(format!("{url}: {error}")),
         }
     }
@@ -595,7 +651,7 @@ pub async fn upgrade_all_agent_drivers_from_claimed(
     batch_cancellation: &Arc<AgentInstallCancellation>,
     operation_id: &str,
 ) -> Result<UpgradeAllAgentDriversResult, String> {
-    let registry = fetch_registry_from(source).await?;
+    let registry = fetch_registry_from_claimed(source, &[batch_cancellation.as_ref()]).await?;
     upgrade_all_agent_drivers_with_registry(
         am,
         &registry,
@@ -1013,7 +1069,7 @@ async fn install_agent_driver_with_batch_unlocked(
     total_drivers: Option<u32>,
     cancellations: &[&AgentInstallCancellation],
 ) -> Result<(), String> {
-    match fetch_registry_from(source).await {
+    match fetch_registry_from_claimed(source, cancellations).await {
         Ok(registry) => {
             match install_agent_driver_from_registry(
                 am,
@@ -1054,8 +1110,9 @@ async fn install_agent_driver_with_batch_unlocked(
             }
         }
         Err(registry_err) => {
-            // The registry request itself is not interruptible, so it must not
-            // start the local fallback if cancellation arrived while waiting.
+            // The registry fetch observes cancellation, so the cancel error
+            // must not start the local fallback (the fallback guard refuses it
+            // anyway because the same tokens are cancelled).
             if can_fallback_to_local_agent(am, db_type, cancellations).await {
                 if let Some(local_jar) = find_local_agent_jar(db_type) {
                     install_local_agent(am, db_type, local_jar)?;
@@ -4482,6 +4539,114 @@ mod agent_registry_install_tests {
         assert!(result.unwrap_err().contains(AGENT_DOWNLOAD_CANCELED_ERROR));
         assert!(!download_temp_path(&dest_assert).exists());
         assert!(!dest_assert.exists());
+    }
+
+    #[tokio::test]
+    async fn fetch_registry_aborts_when_cancelled_while_request_stalled() {
+        use tokio::io::AsyncReadExt;
+        let _test_guard = ENSURE_AGENT_TEST_LOCK.lock().await;
+        invalidate_registry_cache().await;
+        let manager = test_manager("cancel-registry-stalled-headers");
+        let token = manager.begin_install_cancellation("registry-fetch").await;
+        // A registry mirror that accepts connections but never sends response
+        // headers - without racing `request.send()` against cancellation the
+        // registry fetch would hang until the 10s client timeout.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let url = format!("http://{addr}/stalled-registry.json");
+        let server = tokio::spawn(async move {
+            let Ok((mut socket, _)) = listener.accept().await else { return };
+            // Read the request, then never respond.
+            let mut buf = [0u8; 1024];
+            let _ = socket.read(&mut buf).await;
+            let _ = socket.read(&mut buf).await;
+        });
+
+        let token_for_task = Arc::clone(&token);
+        let task = tokio::spawn(async move {
+            let urls = vec![url];
+            fetch_registry_from_urls(DownloadSource::Official, &urls, &[token_for_task.as_ref()]).await
+        });
+        // The request is now pending on the stalled mirror; cancel must abort
+        // it long before the 10s client timeout.
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        token.cancel();
+
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), task)
+            .await
+            .expect("registry fetch did not abort after cancel while response headers were stalled")
+            .expect("registry fetch task panicked");
+        server.abort();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains(AGENT_DOWNLOAD_CANCELED_ERROR));
+    }
+
+    #[tokio::test]
+    async fn fetch_registry_aborts_when_cancelled_while_body_stalled() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let _test_guard = ENSURE_AGENT_TEST_LOCK.lock().await;
+        invalidate_registry_cache().await;
+        let manager = test_manager("cancel-registry-stalled-body");
+        let token = manager.begin_install_cancellation("registry-fetch").await;
+        // A registry mirror that sends response headers plus a small partial
+        // body, then stalls before satisfying Content-Length - without racing
+        // `resp.json()` against cancellation the registry fetch would hang
+        // until the 10s client timeout.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let url = format!("http://{addr}/partial-registry.json");
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept");
+            let mut buf = [0u8; 1024];
+            let _ = socket.read(&mut buf).await;
+            let header = "HTTP/1.1 200 OK\r\nContent-Length: 65536\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n";
+            socket.write_all(header.as_bytes()).await.expect("write header");
+            // A truncated JSON body: the client keeps waiting for the remaining
+            // bytes to satisfy Content-Length.
+            socket.write_all(b"{\"drivers\": {}}").await.expect("write partial body");
+            let mut drain = [0u8; 1024];
+            let _ = socket.read(&mut drain).await;
+        });
+
+        let token_for_task = Arc::clone(&token);
+        let task = tokio::spawn(async move {
+            let urls = vec![url];
+            fetch_registry_from_urls(DownloadSource::Official, &urls, &[token_for_task.as_ref()]).await
+        });
+        // The body parse is now waiting on the stalled mirror; cancel must
+        // abort it during parsing, not after the 10s client timeout.
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        token.cancel();
+
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), task)
+            .await
+            .expect("registry fetch did not abort after cancel while the response body was stalled")
+            .expect("registry fetch task panicked");
+        server.abort();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains(AGENT_DOWNLOAD_CANCELED_ERROR));
+    }
+
+    #[tokio::test]
+    async fn fetch_registry_precancelled_token_aborts_before_any_network_attempt() {
+        let _test_guard = ENSURE_AGENT_TEST_LOCK.lock().await;
+        invalidate_registry_cache().await;
+        let manager = test_manager("cancel-registry-prefired");
+        let token = manager.begin_install_cancellation("registry-fetch").await;
+        token.cancel();
+
+        // Point at a port that would refuse/never answer: the entry check must
+        // abort before any network attempt, so the result is the cancel error,
+        // not a connection/timeout error.
+        let urls = vec!["http://127.0.0.1:1/stalled-registry.json".to_string()];
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            fetch_registry_from_urls(DownloadSource::Official, &urls, &[token.as_ref()]),
+        )
+        .await
+        .expect("pre-cancelled registry fetch must return immediately")
+        .expect_err("pre-cancelled token must abort the registry fetch");
+        assert!(result.contains(AGENT_DOWNLOAD_CANCELED_ERROR));
     }
 
     #[tokio::test]

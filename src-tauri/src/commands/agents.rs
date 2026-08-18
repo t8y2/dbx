@@ -5,7 +5,7 @@ use tauri::{Emitter, State};
 use dbx_core::agent_manager::{AgentDriverInfo, DriverStoreUsage, JavaRuntimeConfig, JavaRuntimeMode, DEFAULT_JRE_KEY};
 use dbx_core::agent_service::{
     batch_cancellation_key, build_agent_list, cancel_agent_batch_upgrade, cancel_agent_driver_install,
-    clear_agent_download_cache, fetch_registry_from, import_agent_driver,
+    clear_agent_download_cache, fetch_registry_from, fetch_registry_from_claimed, import_agent_driver,
     import_agents_from_package as import_agents_from_package_core, inspect_offline_package,
     install_agent_driver_from_claimed, install_cancellation_key, invalidate_registry_cache, reinstall_agent_jre_from,
     uninstall_agent_driver, uninstall_agent_jre, upgrade_all_agent_drivers_from_claimed, AgentProgressEvent,
@@ -112,7 +112,7 @@ pub async fn upgrade_all_agents(
     let operation_id = operation_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let cancellation = state.agent_manager.begin_install_cancellation(&batch_cancellation_key(&operation_id)).await;
     let result = async {
-        let registry = fetch_registry_from(source).await?;
+        let registry = fetch_registry_from_claimed(source, &[cancellation.as_ref()]).await?;
         let agents = build_agent_list(&state.agent_manager, Some(&registry));
         let updatable: Vec<String> =
             agents.iter().filter(|agent| agent.update_available).map(|agent| agent.db_type.clone()).collect();

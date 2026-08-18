@@ -2770,7 +2770,8 @@ function defaultDatabaseForProfile() {
 }
 
 function onDbTypeChange(val: string) {
-  if (!editingId.value && val !== selectedType.value) {
+  if (!editingId.value && val === selectedType.value) return;
+  if (!editingId.value) {
     resetForm({ preservePickerState: true });
   }
   const category = dbCategoryForOption(val);

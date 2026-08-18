@@ -69,6 +69,24 @@ describe("EDITOR_SETTINGS_DRAFT_KEYS", () => {
     expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("colorizeDataGridCellTypes");
   });
 
+  it("keeps the type color scheme out of the apply-footer draft", () => {
+    // The scheme dialog writes straight to the store so switching applies at
+    // once; leaving these in the draft would let a later Apply revert them.
+    expect(EDITOR_SETTINGS_DRAFT_KEYS).not.toContain("dataGridTypeColorSchemes");
+    expect(EDITOR_SETTINGS_DRAFT_KEYS).not.toContain("activeDataGridTypeColorSchemeId");
+
+    const base = editorSettingsDraftFromSettings(makeSettings({ dataGridTypeColorSchemes: [], activeDataGridTypeColorSchemeId: "auto" }));
+    const withScheme = editorSettingsDraftFromSettings(
+      makeSettings({
+        dataGridTypeColorSchemes: [{ id: "type-colors-1", name: "配色方案 1", colors: { integer: "#254fce", numeric: "#0e7490", string: "#fdc9c9", boolean: "#100cc2", temporal: "#7e22ce", structured: "#be185d", identifier: "#92400e", binary: "#b91c1c", spatial: "#047857" } }],
+        activeDataGridTypeColorSchemeId: "type-colors-1",
+      }),
+    );
+
+    expect(editorSettingsDraftChanged(withScheme, base)).toBe(false);
+    expect(editorSettingsPatchFromDraft(withScheme, base)).toEqual({});
+  });
+
   it("includes the data grid filter view", () => {
     expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("dataGridFilterEditorView");
     expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("dataGridTextFilterPanelHeight");

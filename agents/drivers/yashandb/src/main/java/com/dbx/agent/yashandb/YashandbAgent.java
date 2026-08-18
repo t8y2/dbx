@@ -39,10 +39,10 @@ public final class YashandbAgent extends ConfiguredJdbcAgent {
 
     @Override
     protected JdbcExecutor.ResultValueReader resultValueReader() {
-        return (JdbcExecutor.ColumnAwareResultValueReader) this::resultValue;
+        return (JdbcExecutor.ColumnAwareResultValueReader) this::readYashandbValue;
     }
 
-    private Object resultValue(ResultSet resultSet, int index, int sqlType, String columnTypeName) throws SQLException {
+    private Object readYashandbValue(ResultSet resultSet, int index, int sqlType, String columnTypeName) throws SQLException {
         if (!isStructuredValue(sqlType, columnTypeName)) {
             return super.resultValue(resultSet, index, sqlType);
         }

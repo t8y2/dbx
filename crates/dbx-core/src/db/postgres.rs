@@ -1083,6 +1083,53 @@ fn should_retry_postgres_stale_cache_fields(sqlstate: Option<&str>, routine: Opt
     structured_match || message.to_ascii_lowercase().contains("cached plan must not change result type")
 }
 
+fn should_fallback_postgres_missing_prepared_statement(err: &tokio_postgres::Error) -> bool {
+    if let Some(db_error) = err.as_db_error() {
+        return should_fallback_postgres_missing_prepared_statement_fields(
+            Some(db_error.code().code()),
+            db_error.message(),
+        );
+    }
+    should_fallback_postgres_missing_prepared_statement_fields(None, &err.to_string())
+}
+
+fn should_fallback_postgres_missing_prepared_statement_fields(sqlstate: Option<&str>, message: &str) -> bool {
+    if sqlstate == Some("26000") {
+        return true;
+    }
+    let message = message.to_ascii_lowercase();
+    message.contains("prepared statement") && message.contains("does not exist")
+}
+
+fn postgres_typed_params<'a>(
+    params: &[&'a (dyn tokio_postgres::types::ToSql + Sync)],
+    param_types: &[Type],
+) -> Option<Vec<(&'a (dyn tokio_postgres::types::ToSql + Sync), Type)>> {
+    (params.len() == param_types.len()).then(|| params.iter().copied().zip(param_types.iter().cloned()).collect())
+}
+
+async fn postgres_query_raw_with_missing_statement_fallback(
+    client: &deadpool_postgres::Client,
+    sql: &str,
+    stmt: &tokio_postgres::Statement,
+) -> Result<tokio_postgres::RowStream, tokio_postgres::Error> {
+    let params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = Vec::new();
+    match client.query_raw(stmt, params).await {
+        Ok(stream) => Ok(stream),
+        Err(err) if should_fallback_postgres_missing_prepared_statement(&err) => {
+            // query_raw returns a stream only after BindComplete. A missing
+            // statement here means binding failed, so the SQL was not executed.
+            log::warn!(
+                "[postgres][prepared_statement:missing] evicting cached statement and retrying unnamed: {}",
+                pg_error_to_string(err)
+            );
+            client.statement_cache.remove(sql, &[]);
+            client.query_typed_raw(sql, std::iter::empty::<(&(dyn tokio_postgres::types::ToSql + Sync), Type)>()).await
+        }
+        Err(err) => Err(err),
+    }
+}
+
 async fn postgres_query_cached(
     client: &deadpool_postgres::Client,
     sql: &str,
@@ -1091,6 +1138,17 @@ async fn postgres_query_cached(
     let stmt = client.prepare_cached(sql).await?;
     match client.query(&stmt, params).await {
         Ok(rows) => Ok(rows),
+        Err(err) if should_fallback_postgres_missing_prepared_statement(&err) => {
+            let Some(typed_params) = postgres_typed_params(params, stmt.params()) else {
+                return Err(err);
+            };
+            log::warn!(
+                "[postgres][metadata:missing_prepared_statement] evicting cached statement and retrying unnamed: {}",
+                pg_error_to_string(err)
+            );
+            client.statement_cache.remove(sql, &[]);
+            client.query_typed(sql, &typed_params).await
+        }
         Err(err) if should_retry_postgres_stale_cache(&err) => {
             // Metadata queries can be cached while a table/view definition is
             // changed from another session. Evict and retry once with fresh
@@ -1114,6 +1172,17 @@ async fn postgres_query_one_cached(
     let stmt = client.prepare_cached(sql).await?;
     match client.query_one(&stmt, params).await {
         Ok(row) => Ok(row),
+        Err(err) if should_fallback_postgres_missing_prepared_statement(&err) => {
+            let Some(typed_params) = postgres_typed_params(params, stmt.params()) else {
+                return Err(err);
+            };
+            log::warn!(
+                "[postgres][metadata_one:missing_prepared_statement] evicting cached statement and retrying unnamed: {}",
+                pg_error_to_string(err)
+            );
+            client.statement_cache.remove(sql, &[]);
+            client.query_typed_one(sql, &typed_params).await
+        }
         Err(err) if should_retry_postgres_stale_cache(&err) => {
             // Same stale-cache protection as postgres_query_cached, for scalar
             // catalog probes such as pg_proc feature detection.
@@ -1186,9 +1255,8 @@ async fn execute_select_prepared(
         return Ok(PreparedSelectOutcome::TextFallback { column_types, unsupported_type });
     }
 
-    let params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = Vec::new();
     let query_start = Instant::now();
-    let stream = client.query_raw(&stmt, params).await?;
+    let stream = postgres_query_raw_with_missing_statement_fallback(client, sql, &stmt).await?;
     if let Some(progress_clock) = progress_clock {
         progress_clock.mark();
     }
@@ -1450,9 +1518,7 @@ async fn stream_select_query_prepared(
         return Err(PostgresQueryStreamError::TextFallback { column_types, unsupported_type });
     }
 
-    let params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = Vec::new();
-    let stream = client
-        .query_raw(&stmt, params)
+    let stream = postgres_query_raw_with_missing_statement_fallback(client, sql, &stmt)
         .await
         .map_err(|err| PostgresQueryStreamError::Postgres { err, emitted: false })?;
     tokio::pin!(stream);
@@ -1605,8 +1671,8 @@ async fn stream_query_rows_on_client(
         );
         return stream_query_rows_text_on_client(client, sql, max_rows, cancelled, Some(&column_classes), on_row).await;
     }
-    let params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = Vec::new();
-    let stream = client.query_raw(&stmt, params).await.map_err(pg_error_to_string)?;
+    let stream =
+        postgres_query_raw_with_missing_statement_fallback(client, sql, &stmt).await.map_err(pg_error_to_string)?;
     tokio::pin!(stream);
     let row_limit = max_rows.unwrap_or(usize::MAX);
     let mut rows_exported = 0_u64;
@@ -10670,6 +10736,37 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn postgres_missing_prepared_statement_fallback_uses_sqlstate_and_message() {
+        assert!(should_fallback_postgres_missing_prepared_statement_fields(Some("26000"), "本地化的预编译语句错误",));
+        assert!(should_fallback_postgres_missing_prepared_statement_fields(
+            None,
+            "prepared statement \"s63\" does not exist",
+        ));
+    }
+
+    #[test]
+    fn postgres_missing_prepared_statement_fallback_rejects_unrelated_errors() {
+        assert!(!should_fallback_postgres_missing_prepared_statement_fields(
+            Some("23505"),
+            "duplicate key value violates unique constraint",
+        ));
+        assert!(!should_fallback_postgres_missing_prepared_statement_fields(
+            None,
+            "prepared statement result type changed",
+        ));
+    }
+
+    #[test]
+    fn postgres_typed_params_pairs_values_with_inferred_types() {
+        let id = 42_i32;
+        let name = "dbx";
+        let params: &[&(dyn tokio_postgres::types::ToSql + Sync)] = &[&id, &name];
+        let typed = postgres_typed_params(params, &[Type::INT4, Type::TEXT]).expect("matching parameter count");
+        assert_eq!(typed.iter().map(|(_, ty)| ty.clone()).collect::<Vec<_>>(), vec![Type::INT4, Type::TEXT]);
+        assert!(postgres_typed_params(params, &[Type::INT4]).is_none());
+    }
+
     // --- execute_batch ---
 
     #[tokio::test]
@@ -10761,6 +10858,35 @@ mod tests {
         let client = pool.get().await.expect("checkout postgres");
         let timezone: String = client.query_one("SHOW timezone", &[]).await.unwrap().get(0);
         assert_ne!(timezone, "Invalid/DBX_Timezone");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DBX_TEST_POSTGRES_URL pointing at a PostgreSQL database"]
+    async fn cached_queries_recover_after_server_deallocates_statements() {
+        let url = std::env::var("DBX_TEST_POSTGRES_URL").expect("DBX_TEST_POSTGRES_URL");
+        let pool = connect_with_local_timezone(&url, Duration::from_secs(5), "UTC")
+            .await
+            .expect("connect PostgreSQL database");
+        let client = pool.get().await.expect("checkout postgres");
+        let sql = "SELECT $1::int4 AS value";
+
+        let rows = postgres_query_cached(&client, sql, &[&41_i32]).await.expect("prime statement cache");
+        assert_eq!(rows[0].get::<_, i32>(0), 41);
+        client.batch_execute("DEALLOCATE ALL").await.expect("drop server-side prepared statements");
+
+        let rows = postgres_query_cached(&client, sql, &[&42_i32]).await.expect("retry through unnamed typed query");
+        assert_eq!(rows[0].get::<_, i32>(0), 42);
+
+        let select_sql = "SELECT 43::int4 AS value";
+        let result =
+            execute_select_query(&client, select_sql, Instant::now(), 10).await.expect("prime select statement cache");
+        assert_eq!(result.rows[0][0], serde_json::json!(43));
+        client.batch_execute("DEALLOCATE ALL").await.expect("drop server-side select statement");
+
+        let result = execute_select_query(&client, select_sql, Instant::now(), 10)
+            .await
+            .expect("retry select through unnamed typed query");
+        assert_eq!(result.rows[0][0], serde_json::json!(43));
     }
 
     #[tokio::test]

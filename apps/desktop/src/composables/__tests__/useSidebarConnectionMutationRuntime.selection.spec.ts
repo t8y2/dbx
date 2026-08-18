@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { shallowRef } from "vue";
-import { sidebarFormTarget } from "@/components/sidebar/sidebarTreeDialogState";
+import { connectionGroupDeleteTargetSnapshot, deleteConnectionsWithGroup, showDeleteGroupConfirm, sidebarFormTarget } from "@/components/sidebar/sidebarTreeDialogState";
 import type { TreeNode } from "@/types/database";
 
 const mocks = vi.hoisted(() => ({
@@ -30,6 +30,16 @@ function connectionNode(connectionId: string): TreeNode {
   };
 }
 
+function connectionGroupNode(groupId: string): TreeNode {
+  return {
+    id: groupId,
+    label: groupId,
+    type: "connection-group",
+    isExpanded: true,
+    children: [],
+  };
+}
+
 function connectionStore(selectedTreeNodeIds: string[]) {
   const lastSelectedTreeNodeId = selectedTreeNodeIds[selectedTreeNodeIds.length - 1] ?? null;
   return {
@@ -39,6 +49,9 @@ function connectionStore(selectedTreeNodeIds: string[]) {
     connectionMultiSelectActive: selectedTreeNodeIds.length > 0,
     moveConnectionToGroup: vi.fn(),
     createConnectionGroup: vi.fn(() => "group-new"),
+    connectionIdsInGroups: vi.fn((): string[] => []),
+    deleteConnectionGroups: vi.fn().mockResolvedValue([]),
+    removeConnections: vi.fn().mockResolvedValue(undefined),
     connectedIds: new Set<string>(),
     connectingIds: new Set<string>(),
     disconnect: vi.fn().mockResolvedValue(undefined),
@@ -47,15 +60,14 @@ function connectionStore(selectedTreeNodeIds: string[]) {
   };
 }
 
-function runtime(activeNode: TreeNode, store: ReturnType<typeof connectionStore>, selectedNodes: TreeNode[] = []) {
+function runtime(activeNode: TreeNode, store: ReturnType<typeof connectionStore>, selectedNodes: TreeNode[] = [], requestGroupRename = vi.fn()) {
   return useSidebarConnectionMutationRuntime({
     activeNode: shallowRef(activeNode),
     releaseActiveNodeReference: vi.fn(),
     selectedTreeNodesInVisibleOrder: () => selectedNodes,
     connectionStore: store as any,
     queryStore: { openDatabaseKeys: new Set<string>() } as any,
-    requestGroupRename: vi.fn(),
-    groupCreated: vi.fn(),
+    requestGroupRename,
     openVisibleDatabases: vi.fn(),
     openVisibleSchemas: vi.fn(),
   });
@@ -128,6 +140,78 @@ describe("sidebar connection move selection", () => {
     expect(() => moveToGroup("group-a")).toThrow("move failed");
     expect(store.selectedTreeNodeIds).toEqual(["conn-active", "conn-hidden"]);
     expect(store.connectionMultiSelectActive).toBe(true);
+  });
+});
+
+describe("sidebar connection group deletion selection", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    sidebarFormTarget.value = null;
+    connectionGroupDeleteTargetSnapshot.value = [];
+    deleteConnectionsWithGroup.value = false;
+    showDeleteGroupConfirm.value = false;
+  });
+
+  it("snapshots every selected group for the confirmation dialog", () => {
+    const groups = [connectionGroupNode("group-1"), connectionGroupNode("group-2")];
+    const store = connectionStore(groups.map((group) => group.id));
+    const { connectionGroupDeleteConfirmMessage, connectionGroupDeleteMenuLabel, deleteConnectionGroup } = runtime(groups[1], store, groups);
+
+    expect(connectionGroupDeleteMenuLabel()).toBe('connectionGroup.deleteSelectedGroups:{"count":2}');
+    deleteConnectionGroup();
+    groups.splice(0);
+
+    expect(showDeleteGroupConfirm.value).toBe(true);
+    expect(connectionGroupDeleteTargetSnapshot.value.map((group) => group.id)).toEqual(["group-1", "group-2"]);
+    expect(connectionGroupDeleteConfirmMessage()).toBe('connectionGroup.deleteSelectedGroupsConfirmMessage:{"count":2}');
+  });
+
+  it("starts inline rename after creating a subgroup", () => {
+    const parent = connectionGroupNode("group-parent");
+    const store = connectionStore([parent.id]);
+    const requestGroupRename = vi.fn();
+    const { newSubgroup } = runtime(parent, store, [parent], requestGroupRename);
+
+    newSubgroup();
+
+    expect(store.createConnectionGroup).toHaveBeenCalledWith("connectionGroup.newGroupDefault", "group-parent");
+    expect(requestGroupRename).toHaveBeenCalledWith("group-new");
+  });
+
+  it("deletes nested connections and groups as one confirmed operation", async () => {
+    const groups = [connectionGroupNode("group-1"), connectionGroupNode("group-2")];
+    const store = connectionStore(groups.map((group) => group.id));
+    store.deleteConnectionGroups.mockResolvedValue(["conn-1", "conn-2"]);
+    const { confirmDeleteGroup, deleteConnectionGroup } = runtime(groups[0], store, groups);
+
+    deleteConnectionGroup();
+    deleteConnectionsWithGroup.value = true;
+    await confirmDeleteGroup();
+
+    expect(store.removeConnections).not.toHaveBeenCalled();
+    expect(store.deleteConnectionGroups).toHaveBeenCalledWith(["group-1", "group-2"], true);
+    expect(store.disconnect.mock.calls).toEqual([["conn-1"], ["conn-2"]]);
+    expect(showDeleteGroupConfirm.value).toBe(false);
+    expect(connectionGroupDeleteTargetSnapshot.value).toEqual([]);
+    expect(deleteConnectionsWithGroup.value).toBe(false);
+    expect(mocks.toast).toHaveBeenCalledWith('connection.groupsDeleted:{"count":2}', 2000);
+  });
+
+  it("keeps the groups and dialog open when connection persistence fails", async () => {
+    const group = connectionGroupNode("group-1");
+    const store = connectionStore([group.id]);
+    store.deleteConnectionGroups.mockRejectedValue(new Error("persist failed"));
+    const { confirmDeleteGroup, deleteConnectionGroup } = runtime(group, store, [group]);
+
+    deleteConnectionGroup();
+    deleteConnectionsWithGroup.value = true;
+    await confirmDeleteGroup();
+
+    expect(store.deleteConnectionGroups).toHaveBeenCalledWith(["group-1"], true);
+    expect(store.disconnect).not.toHaveBeenCalled();
+    expect(showDeleteGroupConfirm.value).toBe(true);
+    expect(connectionGroupDeleteTargetSnapshot.value.map((target) => target.id)).toEqual(["group-1"]);
+    expect(mocks.toast).toHaveBeenCalledWith('connection.saveFailed:{"message":"persist failed"}', 5000);
   });
 });
 

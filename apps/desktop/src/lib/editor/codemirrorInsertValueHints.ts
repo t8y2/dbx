@@ -13,6 +13,8 @@ export interface InsertValueHintsExtensionOptions {
   getTableColumns?: (table: string, schema?: string, database?: string) => string[] | undefined;
   /** Async loader invoked when sync cache misses; should call refresh after load. */
   requestTableColumns?: (table: string, schema?: string, database?: string) => void;
+  /** SQL dialect id ("mysql", "postgres", ...) for statement-window and tokenization. Defaults to "mysql". */
+  getDialectId?: () => string;
 }
 
 class InsertValueHintWidget extends WidgetType {
@@ -72,7 +74,7 @@ function shiftClause(clause: InsertValuesClause, offset: number): InsertValuesCl
 }
 
 /** Parse INSERT hints using only local slices around interest ranges — no full-document tokenize. */
-function parseClausesNearView(view: EditorView): InsertValuesClause[] {
+function parseClausesNearView(view: EditorView, dialectId: string): InsertValuesClause[] {
   const doc = view.state.doc;
   const clauses: InsertValuesClause[] = [];
   const seenStmtStarts = new Set<number>();
@@ -84,7 +86,7 @@ function parseClausesNearView(view: EditorView): InsertValuesClause[] {
     const sliceTo = Math.min(doc.length, range.to + pad);
     if (sliceTo <= sliceFrom) continue;
     const slice = doc.sliceString(sliceFrom, sliceTo);
-    const window = expandToSqlStatementWindow(slice, range.from - sliceFrom, range.to - sliceFrom);
+    const window = expandToSqlStatementWindow(slice, range.from - sliceFrom, range.to - sliceFrom, dialectId);
     if (window.to <= window.from) continue;
     const absStart = sliceFrom + window.from;
     if (seenStmtStarts.has(absStart)) continue;
@@ -92,7 +94,7 @@ function parseClausesNearView(view: EditorView): InsertValuesClause[] {
     const stmt = slice.slice(window.from, window.to);
     // Cheap reject: skip tokenize when the window clearly has no INSERT.
     if (!/\binsert\b/i.test(stmt)) continue;
-    for (const clause of parseInsertValuesClauses(stmt)) {
+    for (const clause of parseInsertValuesClauses(stmt, dialectId)) {
       clauses.push(shiftClause(clause, absStart));
     }
   }
@@ -100,7 +102,7 @@ function parseClausesNearView(view: EditorView): InsertValuesClause[] {
 }
 
 function buildHints(view: EditorView, options: InsertValueHintsExtensionOptions): InsertValueHint[] {
-  const clauses = parseClausesNearView(view);
+  const clauses = parseClausesNearView(view, options.getDialectId?.() ?? "mysql");
   for (const clause of clauses) {
     if (clause.columns !== null) continue;
     const cached = options.getTableColumns?.(clause.table, clause.schema, clause.database);

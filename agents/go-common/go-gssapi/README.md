@@ -39,21 +39,21 @@ Currently Unix platforms.  Support for the Windows SSPI will be added in future.
 ## Project status
 
 go-gssapi is not yet considered to be production ready, and the interface is not yet considered stable.  We started
-at v2 to support the new Go versioning standrd.  A v2.0.0 tag will be created after which we will follow normal [semantic versioning conventions](https://golang.org/ref/mod#versions).
+at v2 to support the new Go versioning standard.  A v2.0.0 tag will be created after which we will follow normal [semantic versioning conventions](https://golang.org/ref/mod#versions).
 
 ## Configuration
 
-The Kerberos implementiaton behing the GSS-API functionality is hidden form the caller.  The name of the krb5.conf file, credential cache (by an Initiator) and keytab file (by an Acceptor) are identified from the environment or using default paths if not specified in the environment :
+The Kerberos implementation behind the GSS-API functionality is hidden from the caller.  The name of the krb5.conf file, credential cache (by an Initiator) and keytab file (by an Acceptor) are identified from the environment or using default paths if not specified in the environment :
 
 | Configuration item | Environment variable | Default |
 | ------------------ | -------------------- | ------- |
-| Kerberos client configuartion file | `KRB5_CONFIG` | `/etc/krb5.conf` |
+| Kerberos client configuration file | `KRB5_CONFIG` | `/etc/krb5.conf` |
 | Credential cache file | `KRB5CCNAME` | `/etc/krb5cc_%{UID}` |
 | Keytab file | `KRB5_KTNAME` | `/var/kerberos/krb5/user/%{UID}/client.keytab` |
 
 .. where `%{UID}` is the current username as returned by `id -u`
 
-> :droplet: A future releaes will choose defaults based on the platform we're running on, and may provide more complete control of the gokrb client.  Please file a new Github issue if you have a use-case.
+> :droplet: A future release will choose defaults based on the platform we're running on, and may provide more complete control of the gokrb client.  Please file a new Github issue if you have a use-case.
 
 ## Import paths and versions
 

@@ -12,8 +12,34 @@ use super::mysql::{
 pub use super::mysql_compatible::{
     get_columns_show_from as get_catalog_columns, list_catalog_indexes, list_catalogs,
     list_databases_show_from as list_catalog_databases, list_indexes_with_ddl_fallback as list_indexes,
-    list_tables_show_from as list_catalog_tables, show_create_table_ddl_from as get_catalog_table_ddl,
+    show_create_table_ddl_from as get_catalog_table_ddl,
 };
+
+pub async fn list_catalog_tables(pool: &MySqlPool, catalog: &str, database: &str) -> Result<Vec<TableInfo>, String> {
+    match super::mysql_compatible::list_tables_show_from(pool, catalog, database).await {
+        Ok(tables) => Ok(tables),
+        Err(error) if should_retry_catalog_table_listing(&error) => {
+            match super::mysql_compatible::list_databases_show_from(pool, catalog).await {
+                Ok(databases) if catalog_database_exists(&databases, database) => {
+                    log::debug!(
+                        "Treating StarRocks external database `{catalog}`.`{database}` as empty after its qualified table lookup failed: {error}"
+                    );
+                    Ok(Vec::new())
+                }
+                _ => Err(error),
+            }
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn should_retry_catalog_table_listing(error: &str) -> bool {
+    error.to_ascii_lowercase().contains("unknown database")
+}
+
+fn catalog_database_exists(databases: &[crate::types::DatabaseInfo], database: &str) -> bool {
+    databases.iter().any(|candidate| candidate.name == database)
+}
 
 pub fn is_config(config: &ConnectionConfig) -> bool {
     is_profile(&config.db_type, config.driver_profile.as_deref())
@@ -131,6 +157,24 @@ mod tests {
         assert!(is_profile(&DatabaseType::Mysql, Some("STARROCKS")));
         assert!(!is_profile(&DatabaseType::Mysql, Some("doris")));
         assert!(!is_profile(&DatabaseType::Postgres, Some("starrocks")));
+    }
+
+    #[test]
+    fn catalog_table_listing_retries_only_unknown_database_errors() {
+        assert!(should_retry_catalog_table_listing(
+            "ERROR 5501 (3F000): Getting analyzing error. Detail message: Unknown database 'edw_dwt'."
+        ));
+        assert!(!should_retry_catalog_table_listing("Access denied on database edw_dwt"));
+        assert!(!should_retry_catalog_table_listing("Connection timed out"));
+    }
+
+    #[test]
+    fn catalog_database_existence_requires_an_exact_name_match() {
+        let databases = vec![crate::types::DatabaseInfo { name: "edw_dwt".to_string(), ..Default::default() }];
+
+        assert!(catalog_database_exists(&databases, "edw_dwt"));
+        assert!(!catalog_database_exists(&databases, "EDW_DWT"));
+        assert!(!catalog_database_exists(&databases, "missing"));
     }
 
     #[test]

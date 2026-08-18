@@ -1,3 +1,4 @@
+import type { EditorState } from "@codemirror/state";
 import type { DatabaseType } from "@/types/database";
 
 export interface SqlSemanticSpan {
@@ -128,4 +129,12 @@ export interface SqlSemanticModel {
 export interface SqlSemanticBuildOptions {
   databaseType?: DatabaseType;
   dialect?: "mysql" | "postgres" | "sqlserver";
+  /**
+   * Live CodeMirror state for the document being edited, when the caller has one (i.e. this is a
+   * real editor completion request, not a pure-string test/utility call). When present and its
+   * doc length matches the `sql` string being scanned, boundary-sensitive lookups prefer resolving
+   * against its already-incrementally-parsed syntax tree (see sqlSyntaxTreeWindow.ts) instead of
+   * the bounded heuristic scanner in insertValueHints.ts, which remains the fallback.
+   */
+  editorState?: EditorState;
 }

@@ -104,10 +104,7 @@ test("does not carry typed credentials to a different URL profile", () => {
 
 test("does not carry typed credentials between driver profiles of the same database type", () => {
   const parsed = parseConnectionUrl("mariadb://db.example.com/app");
-  const applied = applyParsedConnectionUrl(
-    { name: "app", db_type: "mysql", driver_profile: "mysql", username: "mysql-user", password: "mysql-secret" } as any,
-    parsed,
-  );
+  const applied = applyParsedConnectionUrl({ name: "app", db_type: "mysql", driver_profile: "mysql", username: "mysql-user", password: "mysql-secret" } as any, parsed);
 
   assert.equal(applied.db_type, "mysql");
   assert.equal(applied.driver_profile, "mariadb");
@@ -239,6 +236,54 @@ test("parses JDBC URLs by using the inner database URL", () => {
   assert.equal(mysql.password, "p@ss");
   assert.equal(mysql.database, "shop");
   assert.equal(mysql.urlParams, "charset=utf8mb4");
+});
+
+test("parses Hive JDBC URLs using HTTP transport", () => {
+  const source = "jdbc:hive2://hive.example.com:20001/;transportMode=http;httpPath=cliservice;auth=noSasl";
+  const parsed = parseConnectionUrl(source);
+
+  assert.equal(parsed.dbType, "hive");
+  assert.equal(parsed.driverProfile, "hive");
+  assert.equal(parsed.driverLabel, "Apache Hive");
+  assert.equal(parsed.host, "hive.example.com");
+  assert.equal(parsed.port, 20001);
+  assert.equal(parsed.database, undefined);
+  assert.equal(parsed.urlParams, "transportMode=http;httpPath=cliservice;auth=noSasl");
+  assert.equal(parsed.connectionString, source);
+});
+
+test("parses Hive JDBC URLs with a database and SSL parameter", () => {
+  const source = "jdbc:hive2://hive.example.com/default;transportMode=http;httpPath=cliservice;ssl=true";
+  const parsed = parseConnectionUrl(source);
+
+  assert.equal(parsed.host, "hive.example.com");
+  assert.equal(parsed.port, 10000);
+  assert.equal(parsed.database, "default");
+  assert.equal(parsed.urlParams, "transportMode=http;httpPath=cliservice");
+  assert.equal(parsed.ssl, true);
+  assert.equal(parsed.connectionString, source);
+});
+
+test("preserves multi-host Hive ZooKeeper JDBC URLs", () => {
+  const source = "jdbc:hive2://zk1.example.com:2181,zk2.example.com:2181/default;serviceDiscoveryMode=zooKeeper;zooKeeperNamespace=hiveserver2";
+  const parsed = parseConnectionUrl(source);
+
+  assert.equal(parsed.host, "zk1.example.com");
+  assert.equal(parsed.port, 2181);
+  assert.equal(parsed.database, "default");
+  assert.equal(parsed.urlParams, "serviceDiscoveryMode=zooKeeper;zooKeeperNamespace=hiveserver2");
+  assert.equal(parsed.connectionString, source);
+});
+
+test("maps Hive JDBC credentials and SSL to structured fields while preserving parameter sections", () => {
+  const source = "jdbc:hive2://hive.example.com:10000/analytics;user=alice;password=secret;ssl=true;transportMode=http?hive.exec.dynamic.partition=true#SourceTable=events";
+  const parsed = parseConnectionUrl(source);
+
+  assert.equal(parsed.username, "alice");
+  assert.equal(parsed.password, "secret");
+  assert.equal(parsed.ssl, true);
+  assert.equal(parsed.urlParams, "transportMode=http?hive.exec.dynamic.partition=true#SourceTable=events");
+  assert.equal(parsed.connectionString, source);
 });
 
 test("parses TDengine WebSocket JDBC URLs", () => {

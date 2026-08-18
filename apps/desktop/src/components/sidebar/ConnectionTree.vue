@@ -30,6 +30,7 @@ import { copyNameForTreeNode, objectSourceTargetForTreeNode } from "@/lib/sideba
 import { supportsTypeObjectSource } from "@/lib/database/databaseObjectCapabilities";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { connectionPasteTargetGroupId, copySelectedConnectionsToClipboards, selectedConnectionEditTarget } from "@/lib/sidebar/sidebarConnectionSelection";
+import { pruneTreeSelectionToVisibleNodes } from "@/lib/sidebar/sidebarTreeSelection";
 import { isEditableSidebarTypeSearchTarget, sidebarTypeSearchNextQuery } from "@/lib/sidebar/sidebarTypeSearch";
 import { isInternalDorisCatalog, usesTreeSchemaMode } from "@/lib/database/databaseFeatureSupport";
 import { connectionObjectTreeNodeSchema, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
@@ -806,6 +807,24 @@ const selectableVisibleNodes = computed<TreeNode[]>(() => flatTreeIndex.value.se
 const selectableVisibleNodeIndexById = computed(() => flatTreeIndex.value.selectableVisibleNodeIndexById);
 const useVirtualTree = computed(() => shouldVirtualizeFlatTree(flatNodes.value.length));
 const activeTab = computed(() => queryStore.tabs.find((tab) => tab.id === queryStore.activeTabId));
+
+watch(
+  visibleNodes,
+  (nodes) => {
+    const next = pruneTreeSelectionToVisibleNodes(nodes, {
+      nodeIds: store.selectedTreeNodeIds,
+      activeNodeId: store.selectedTreeNodeId,
+      anchorNodeId: store.treeSelectionAnchorId,
+    });
+    const selectionChanged = next.nodeIds.length !== store.selectedTreeNodeIds.length || next.nodeIds.some((id, index) => id !== store.selectedTreeNodeIds[index]);
+    if (!selectionChanged && next.activeNodeId === store.selectedTreeNodeId && next.anchorNodeId === store.treeSelectionAnchorId) return;
+    store.selectedTreeNodeIds = [...next.nodeIds];
+    store.selectedTreeNodeId = next.activeNodeId;
+    store.treeSelectionAnchorId = next.anchorNodeId;
+    if (!next.nodeIds.length) store.connectionMultiSelectActive = false;
+  },
+  { flush: "sync" },
+);
 
 // --- Sticky database header ---
 // RecycleScroller positions each row absolutely, so CSS `position: sticky` on

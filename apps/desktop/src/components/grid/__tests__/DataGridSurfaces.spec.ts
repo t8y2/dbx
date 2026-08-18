@@ -479,6 +479,13 @@ describe("DataGridFilterBuilder", () => {
     expect(updateRule).toHaveBeenCalledWith("r1", { disabled: true });
     expect(add).toHaveBeenCalledTimes(2);
     expect(findAll(mounted.root, (node) => node.props["data-stub"] === "Select")[2].props.open).toBe(false);
+    const ruleItems = findAll(mounted.root, (node) => node.props["data-filter-rule-item"] === "");
+    const conjunction = findOne(mounted.root, (node) => node.props["data-filter-conjunction"] === "");
+    expect(ruleItems).toHaveLength(2);
+    expect(ruleItems[1].props["data-connected"]).toBe("");
+    expect(hostText(conjunction)).toBe("AND");
+    dispatch(conjunction, "click");
+    expect(updateRule).toHaveBeenCalledWith("r2", { conjunction: "OR" });
   });
 
   it("opens the first empty rule column search on request", async () => {
@@ -564,7 +571,9 @@ describe("DataGridFilterBuilder", () => {
     const handles = findAll(mounted.root, (node) => node.props["data-filter-drag-handle"] === "");
 
     expect(handles).toHaveLength(2);
-    expect(handles.every((handle) => handle.props.draggable === true)).toBe(true);
+    expect(handles.every((handle) => handle.props.draggable === undefined)).toBe(true);
+    expect(handles.every((handle) => typeof handle.props.onPointerdown === "function")).toBe(true);
+    expect(handles.every((handle) => String(handle.props.class).includes("touch-none"))).toBe(true);
     expect(handles[0].props["aria-label"]).toBe("grid.filterBuilderReorderRule");
     const arrowDown = dispatch(handles[0], "keydown", { key: "ArrowDown" });
     expect(arrowDown.defaultPrevented).toBe(true);
@@ -1050,6 +1059,7 @@ describe("DataGridFilterWorkbench", () => {
     const reset = vi.fn();
     const clear = vi.fn();
     const copySql = vi.fn();
+    const updateRule = vi.fn();
     const mounted = mountComponent(DataGridFilterWorkbench, {
       sqlPreview: "WHERE (tenant_id = 7) AND (status = 'open')",
       rules: [
@@ -1066,6 +1076,7 @@ describe("DataGridFilterWorkbench", () => {
       onReset: reset,
       onClear: clear,
       onCopySql: copySql,
+      onUpdateRule: updateRule,
     });
     await nextTick();
 
@@ -1076,7 +1087,13 @@ describe("DataGridFilterWorkbench", () => {
     expect(hostText(mounted.root)).toContain("WHERE (tenant_id = 7) AND (status = 'open')");
     const ruleScroller = findOne(mounted.root, (node) => node.props["data-filter-rules-scroll"] === "");
     expect(String(ruleScroller.props.class)).toContain("overflow-auto");
-    expect(findAll(mounted.root, (node) => node.type === "button" && hostText(node) === "AND")).toHaveLength(0);
+    const conjunctions = findAll(mounted.root, (node) => node.props["data-filter-conjunction"] === "");
+    const ruleItems = findAll(mounted.root, (node) => node.props["data-filter-rule-item"] === "");
+    expect(conjunctions).toHaveLength(1);
+    expect(hostText(conjunctions[0])).toBe("AND");
+    expect(ruleItems[1].props["data-connected"]).toBe("");
+    dispatch(conjunctions[0], "click");
+    expect(updateRule).toHaveBeenCalledWith("r2", { conjunction: "OR" });
 
     dispatch(
       findOne(mounted.root, (node) => node.props["aria-label"] === "grid.copyFilterSql"),

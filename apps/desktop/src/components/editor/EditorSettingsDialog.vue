@@ -126,7 +126,7 @@ import McpConnectionScopePicker from "@/components/settings/McpConnectionScopePi
 import ScheduledDatabaseBackupSettings from "@/components/backup/ScheduledDatabaseBackupSettings.vue";
 import SqlFormatterSettingsPanel from "./SqlFormatterSettingsPanel.vue";
 import { APP_CUSTOM_UI_COLOR_DEFS, APP_THEME_PALETTES, type AppCornerStyle, type AppCustomUiColors, type AppThemeAppearance, type AppThemeMode, type AppThemePalette } from "@/lib/app/appTheme";
-import { editorSettingsDraftChanged, editorSettingsDraftFromSettings, editorSettingsPatchFromDraft, normalizeQueryResultMaxRowsDraft, normalizeTableOpenPageSizeDraft, type EditorSettingsDraft } from "@/lib/settings/editorSettingsDraft";
+import { editorSettingsDraftChanged, editorSettingsDraftFromSettings, editorSettingsPatchFromDraft, normalizeQueryResultMaxRowsDraft, normalizeTableOpenPageSizeDraft, shouldConfirmEditorSettingsDialogClose, type EditorSettingsDraft } from "@/lib/settings/editorSettingsDraft";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useSavedSqlStore } from "@/stores/savedSqlStore";
 import { usePromptTemplateStore } from "@/stores/promptTemplateStore";
@@ -221,11 +221,31 @@ const settingsContentClass = computed(() =>
 );
 const settingsTitleComponent = computed(() => (isSettingsPage.value ? "h2" : DialogTitle));
 
+const showUnsavedSettingsCloseConfirm = ref(false);
+
+function requestCloseSettings(nextOpen: boolean) {
+  if (shouldConfirmEditorSettingsDialogClose(nextOpen, hasChanges())) {
+    showUnsavedSettingsCloseConfirm.value = true;
+    return;
+  }
+  emit("update:open", nextOpen);
+}
+
 function onSettingsRootOpenChange(value: boolean) {
-  if (!isSettingsPage.value) emit("update:open", value);
+  if (isSettingsPage.value) return;
+  requestCloseSettings(value);
 }
 
 function closeSettings() {
+  requestCloseSettings(false);
+}
+
+function cancelUnsavedSettingsClose() {
+  showUnsavedSettingsCloseConfirm.value = false;
+}
+
+function discardUnsavedSettingsAndClose() {
+  showUnsavedSettingsCloseConfirm.value = false;
   emit("update:open", false);
 }
 
@@ -889,6 +909,7 @@ const formatterEditorShortcutIds: ShortcutActionId[] = [
   "replace",
   "saveSql",
   "acceptCompletion",
+  "triggerCompletion",
   "indentMore",
   "indentLess",
   "insertLineBelow",
@@ -964,13 +985,34 @@ async function persistSettings() {
   }
 }
 
+function applySettingsErrorToast(error: unknown) {
+  toast(t("settings.applyFailed", { error: error instanceof Error ? error.message : String(error) }), 5000);
+}
+
+// Shared apply entrypoint used by both "Apply" and "Apply & Close". Persists the
+// current draft and reports failure explicitly instead of silently swallowing it
+// (persistSettings() has several awaited persistence steps with no try/catch, so a
+// rejected save used to leave "Apply" silent and made "Apply & Close" unclosable with
+// no feedback). Returns whether persistence succeeded so the close path only proceeds
+// once the settings are actually saved.
+async function applySettingsForResult(): Promise<boolean> {
+  try {
+    await persistSettings();
+    return true;
+  } catch (error) {
+    applySettingsErrorToast(error);
+    return false;
+  }
+}
+
 async function applySettings() {
-  await persistSettings();
+  await applySettingsForResult();
 }
 
 async function applySettingsAndClose() {
-  await persistSettings();
-  closeSettings();
+  if (await applySettingsForResult()) {
+    closeSettings();
+  }
 }
 
 async function restartDbxForDuckDbIsolation() {
@@ -6927,6 +6969,24 @@ onUnmounted(() => {
         </div>
       </div>
     </component>
+
+    <!-- Unsaved settings confirmation: guards every close path (Escape, outside click, the X button, and the footer "Close" button) so an unapplied draft is never silently discarded. -->
+    <Dialog :open="showUnsavedSettingsCloseConfirm" @update:open="(value: boolean) => !value && cancelUnsavedSettingsClose()">
+      <DialogContent class="sm:max-w-[420px]" @interact-outside.prevent>
+        <DialogHeader>
+          <DialogTitle>{{ t("settings.unsavedChangesCloseTitle") }}</DialogTitle>
+        </DialogHeader>
+        <p class="text-sm text-muted-foreground">{{ t("settings.unsavedChangesCloseMessage") }}</p>
+        <DialogFooter class="gap-2">
+          <Button variant="outline" size="sm" @click="cancelUnsavedSettingsClose">
+            {{ t("settings.unsavedChangesCloseCancel") }}
+          </Button>
+          <Button variant="destructive" size="sm" @click="discardUnsavedSettingsAndClose">
+            {{ t("settings.unsavedChangesCloseDiscard") }}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
 
     <!-- Theme Customizer Dialog -->
     <ThemeCustomizerDialog v-model:open="showThemeCustomizer" :themes="editCustomThemes" :active-theme-id="editActiveCustomThemeId" @save="handleThemeSave" />

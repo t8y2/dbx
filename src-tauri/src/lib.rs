@@ -1662,6 +1662,8 @@ pub fn run() {
             commands::schema::list_triggers,
             commands::schema::list_constraints,
             commands::schema::list_partitions,
+            commands::schema::get_table_partition_status,
+            commands::schema::list_invalid_indexes,
             commands::schema::list_subpartitions,
             commands::schema::get_table_ddl,
             commands::schema::list_functions,

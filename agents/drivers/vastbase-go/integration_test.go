@@ -31,6 +31,9 @@ func TestVastbaseIntegration(t *testing.T) {
 	child := "dbx_go_child_" + suffix
 	view := "dbx_go_view_" + suffix
 	function := "dbx_go_fn_" + suffix
+	searchFirst := "dbx_go_first_" + suffix
+	searchSecond := "dbx_go_second_" + suffix
+	searchTable := "DBX_GO_VISIBLE_" + suffix
 
 	server := newServer()
 	cp := connectParams{
@@ -42,6 +45,8 @@ func TestVastbaseIntegration(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = server.disconnect() })
 	cleanup := []string{
+		"DROP SCHEMA IF EXISTS " + quoteIdentifier(searchFirst) + " CASCADE",
+		"DROP SCHEMA IF EXISTS " + quoteIdentifier(searchSecond) + " CASCADE",
 		"DROP VIEW IF EXISTS public." + quoteIdentifier(view),
 		"DROP FUNCTION IF EXISTS public." + quoteIdentifier(function) + "()",
 		"DROP TABLE IF EXISTS public." + quoteIdentifier(child),
@@ -61,6 +66,16 @@ func TestVastbaseIntegration(t *testing.T) {
 	mustExecute(t, server, "CREATE INDEX "+quoteIdentifier(child+"_parent_idx")+" ON public."+quoteIdentifier(child)+"(parent_id)")
 	mustExecute(t, server, "CREATE VIEW public."+quoteIdentifier(view)+" AS SELECT id, name FROM public."+quoteIdentifier(parent))
 	mustExecute(t, server, "CREATE FUNCTION public."+quoteIdentifier(function)+"() RETURNS text AS $$ SELECT 'dbx'; $$ LANGUAGE SQL")
+	mustExecute(t, server, "CREATE SCHEMA "+quoteIdentifier(searchFirst))
+	mustExecute(t, server, "CREATE SCHEMA "+quoteIdentifier(searchSecond))
+	mustExecute(t, server, "CREATE TABLE "+quoteIdentifier(searchSecond)+"."+quoteIdentifier(searchTable)+" (id integer PRIMARY KEY, name varchar(64))")
+	mustExecute(t, server, "SET search_path TO "+quoteIdentifier(searchFirst)+", "+quoteIdentifier(searchSecond))
+	visibleColumns, err := server.getColumns("", searchTable)
+	if err != nil || len(visibleColumns) != 2 || visibleColumns[0].ResolvedSchema == nil || *visibleColumns[0].ResolvedSchema != searchSecond {
+		t.Fatalf("unqualified metadata did not resolve the non-first search_path schema: columns=%#v err=%v", visibleColumns, err)
+	}
+	mustExecute(t, server, "INSERT INTO "+quoteIdentifier(searchTable)+" VALUES (1, 'visible')")
+	mustExecute(t, server, "SET search_path TO public")
 
 	tables, err := server.listTables("public", metadataListConstraints{Filter: suffix})
 	if err != nil || len(tables) < 3 {

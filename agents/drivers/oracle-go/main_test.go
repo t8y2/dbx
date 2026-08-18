@@ -627,6 +627,64 @@ func TestGetTableDDLAppendsIndexesTriggersAndComments(t *testing.T) {
 	}
 }
 
+func TestGetPortableTableDDLDisablesAndRestoresSegmentAttributes(t *testing.T) {
+	const schema = "HR"
+	const table = "ORDERS"
+	const tableDDL = `CREATE TABLE "HR"."ORDERS" ("ID" NUMBER)`
+	const indexDDL = `CREATE INDEX "HR"."IDX_ORDERS" ON "HR"."ORDERS" ("ID")`
+	db, scripted := openOracleViewSourceTestDB(t, []oracleViewSourceQueryStep{
+		{
+			queryContains: "'SEGMENT_ATTRIBUTES', FALSE",
+			exec:          true,
+		},
+		{
+			queryContains: "DBMS_METADATA.GET_DDL(:1, :2, :3)",
+			args:          []driver.Value{"TABLE", table, schema},
+			rows:          [][]driver.Value{{tableDDL}},
+		},
+		{
+			queryContains: "FROM ALL_INDEXES",
+			args:          []driver.Value{schema, table, schema, table},
+			rows:          [][]driver.Value{{indexDDL}},
+		},
+		{
+			queryContains: "'SEGMENT_ATTRIBUTES', TRUE",
+			exec:          true,
+		},
+		{
+			queryContains: "FROM ALL_TRIGGERS",
+			args:          []driver.Value{schema, table},
+			rows:          nil,
+		},
+		{
+			queryContains: "FROM ALL_TAB_COMMENTS",
+			args:          []driver.Value{schema, table},
+			rows:          nil,
+		},
+		{
+			queryContains: "FROM ALL_COL_COMMENTS",
+			args:          []driver.Value{schema, table},
+			rows:          nil,
+		},
+	})
+	s := newServer()
+	s.db = db
+
+	got, err := s.getTableDDLWithOptions(schema, table, "TABLE", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, tableDDL) || !strings.Contains(got, indexDDL) {
+		t.Fatalf("portable DDL should include table and index definitions:\n%s", got)
+	}
+	if strings.Contains(got, "TABLESPACE") || strings.Contains(got, "STORAGE") {
+		t.Fatalf("portable DDL should omit physical storage attributes:\n%s", got)
+	}
+	if scripted.next != len(scripted.steps) {
+		t.Fatalf("expected %d queries, got %d", len(scripted.steps), scripted.next)
+	}
+}
+
 func TestListIndexesSeparatesQuotedCloneTableNamesByCase(t *testing.T) {
 	const schema = "HR"
 	db, scripted := openOracleViewSourceTestDB(t, []oracleViewSourceQueryStep{
@@ -2461,6 +2519,7 @@ type oracleViewSourceQueryStep struct {
 	columns       []string
 	rows          [][]driver.Value
 	err           error
+	exec          bool
 }
 
 type oracleViewSourceDriver struct {
@@ -2498,6 +2557,9 @@ func (c *oracleViewSourceConn) QueryContext(
 	}
 	step := c.driver.steps[c.driver.next]
 	c.driver.next++
+	if step.exec {
+		return nil, errors.New("expected ExecContext call: " + query)
+	}
 	if !strings.Contains(query, step.queryContains) {
 		return nil, errors.New("unexpected query: " + query)
 	}
@@ -2516,6 +2578,32 @@ func (c *oracleViewSourceConn) QueryContext(
 		columns = []string{"SOURCE"}
 	}
 	return &oracleViewSourceRows{columns: columns, values: step.rows}, nil
+}
+
+func (c *oracleViewSourceConn) ExecContext(
+	_ context.Context,
+	query string,
+	args []driver.NamedValue,
+) (driver.Result, error) {
+	if c.driver.next >= len(c.driver.steps) {
+		return nil, errors.New("unexpected extra exec: " + query)
+	}
+	step := c.driver.steps[c.driver.next]
+	c.driver.next++
+	if !step.exec || !strings.Contains(query, step.queryContains) {
+		return nil, errors.New("unexpected exec: " + query)
+	}
+	values := make([]driver.Value, len(args))
+	for index, arg := range args {
+		values[index] = arg.Value
+	}
+	if (len(values) > 0 || len(step.args) > 0) && !reflect.DeepEqual(values, step.args) {
+		return nil, errors.New("unexpected exec arguments")
+	}
+	if step.err != nil {
+		return nil, step.err
+	}
+	return driver.RowsAffected(0), nil
 }
 
 type oracleViewSourceRows struct {

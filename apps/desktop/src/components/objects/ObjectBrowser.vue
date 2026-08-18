@@ -1806,7 +1806,7 @@ async function confirmBatchEmptyTables() {
 async function exportStructure(row: ObjectBrowserRow) {
   try {
     const schema = row.schema || selectedSchema.value || props.database;
-    const ddl = await api.getTableDdl(props.connection.id, props.database, schema, row.name, tableDdlObjectType(row.type), props.catalog);
+    const ddl = await api.getTableDdl(props.connection.id, props.database, schema, row.name, tableDdlObjectType(row.type), props.catalog, true);
     await saveFileContent(buildSingleDdlExportFileContent(ddl), `${row.name}.sql`, "SQL", "sql");
   } catch (e: any) {
     console.error("Export structure failed:", e);

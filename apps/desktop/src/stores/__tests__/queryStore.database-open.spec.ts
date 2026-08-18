@@ -54,6 +54,32 @@ describe("queryStore database open state", () => {
     expect(store.tabs.find((tab) => tab.id === firstId)).toMatchObject({ connectionId: "pg-1", database: "", mode: "databases" });
   });
 
+  it("retargets a connection-scoped driver workspace to a database branch", async () => {
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+
+    const firstId = store.openDriverProfileWorkspace("dolt-1", "inventory", "Version Control", "dolt-version-control", "connection");
+    const branchId = store.openDriverProfileWorkspace("dolt-1", "analytics", "Version Control", "dolt-version-control", "connection", "feature/orders");
+
+    expect(branchId).toBe(firstId);
+    expect(store.tabs.find((tab) => tab.id === firstId)).toMatchObject({
+      database: "analytics",
+      workspaceBranch: "feature/orders",
+      mode: "dolt-version-control",
+    });
+  });
+
+  it("keeps database-scoped driver workspaces isolated", async () => {
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+
+    const inventoryId = store.openDriverProfileWorkspace("profile-1", "inventory", "Workspace", "dolt-version-control", "database");
+    const analyticsId = store.openDriverProfileWorkspace("profile-1", "analytics", "Workspace", "dolt-version-control", "database");
+
+    expect(analyticsId).not.toBe(inventoryId);
+    expect(store.tabs.filter((tab) => tab.mode === "dolt-version-control")).toHaveLength(2);
+  });
+
   it("keeps object browser viewport per tab and clears it on schema change", async () => {
     const { useQueryStore } = await import("@/stores/queryStore");
     const store = useQueryStore();

@@ -1644,6 +1644,29 @@ export async function listPartitions(connectionId: string, database: string, sch
   });
 }
 
+export interface TablePartitionStatus {
+  isPartitionedParent: boolean;
+  isPartition: boolean;
+}
+
+export async function getTablePartitionStatus(connectionId: string, database: string, schema: string, table: string): Promise<TablePartitionStatus> {
+  return invoke("get_table_partition_status", {
+    connectionId,
+    database,
+    schema,
+    table,
+  });
+}
+
+export async function listInvalidIndexes(connectionId: string, database: string, schema: string, table: string): Promise<string[]> {
+  return invoke("list_invalid_indexes", {
+    connectionId,
+    database,
+    schema,
+    table,
+  });
+}
+
 export async function listSubpartitions(connectionId: string, database: string, schema: string, table: string, catalog?: string): Promise<SubpartitionInfo[]> {
   return invoke("list_subpartitions", {
     connectionId,
@@ -1654,7 +1677,7 @@ export async function listSubpartitions(connectionId: string, database: string, 
   });
 }
 
-export async function getTableDdl(connectionId: string, database: string, schema: string, table: string, objectType?: ObjectSourceKind, catalog?: string): Promise<string> {
+export async function getTableDdl(connectionId: string, database: string, schema: string, table: string, objectType?: ObjectSourceKind, catalog?: string, portable = false): Promise<string> {
   return invoke("get_table_ddl", {
     connectionId,
     database,
@@ -1662,6 +1685,7 @@ export async function getTableDdl(connectionId: string, database: string, schema
     table,
     objectType,
     catalog,
+    portable,
   });
 }
 
@@ -1674,6 +1698,7 @@ export async function getTableDisplayDdl(connectionId: string, database: string,
     objectType,
     catalog,
     includePostgresAccess: true,
+    portable: false,
   });
 }
 

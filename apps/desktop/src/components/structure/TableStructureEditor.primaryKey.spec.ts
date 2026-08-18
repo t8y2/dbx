@@ -18,6 +18,7 @@ const mocks = vi.hoisted(() => ({
   invalidateObjectDdl: vi.fn(),
   loadObjectMetadataFacet: vi.fn(),
   invalidateTableMetadataCache: vi.fn(),
+  getTablePartitionStatus: vi.fn(),
   toast: vi.fn(),
 }));
 
@@ -218,6 +219,7 @@ vi.mock("@/lib/metadata/tableMetadataCache", () => ({ invalidateTableMetadataCac
 vi.mock("@/lib/backend/api", () => ({
   listDataTypes: mocks.listDataTypes,
   buildTableStructureChangeSql: mocks.buildTableStructureChangeSql,
+  getTablePartitionStatus: mocks.getTablePartitionStatus,
 }));
 
 import TableStructureEditor from "@/components/structure/TableStructureEditor.vue";
@@ -333,6 +335,10 @@ beforeEach(() => {
   mocks.loadObjectDdl.mockResolvedValue({ ddl: "CREATE TABLE users (id bigint)", cacheStatus: "remote" });
   mocks.invalidateObjectDdl.mockResolvedValue(undefined);
   mocks.loadObjectMetadataFacet.mockResolvedValue({ value: [], cacheStatus: "remote" });
+  // TableStructureEditor probes the partition status for PostgreSQL tables
+  // (PR #6361); a resolved non-partitioned result keeps metadata loads on the
+  // original facet expectations unchanged.
+  mocks.getTablePartitionStatus.mockResolvedValue({ isPartitionedParent: false, isPartition: false });
 });
 
 afterEach(() => {

@@ -48,7 +48,8 @@ import {
   findConnectionLocation,
   createGroup as createGroupOp,
   renameGroup as renameGroupOp,
-  deleteGroup as deleteGroupOp,
+  deleteGroups as deleteGroupsOp,
+  connectionIdsInGroups as connectionIdsInGroupsOp,
   toggleGroupCollapsed as toggleGroupCollapsedOp,
   collapseAllGroups as collapseAllGroupsOp,
   moveConnectionToGroup as moveConnectionToGroupOp,
@@ -354,6 +355,9 @@ export const useConnectionStore = defineStore("connection", () => {
   // computed during scrolling and selection changes.
   const selectedTreeNodeIdsSet = computed(() => new Set(selectedTreeNodeIds.value));
   const treeSelectionAnchorId = ref<string | null>(null);
+  // Legacy name: this flag now covers homogeneous checkbox selections for both
+  // connections and connection groups. Connection-only toolbars still filter
+  // selected ids against the saved connection list.
   const connectionMultiSelectActive = ref(false);
   const treeClipboard = ref<TreeClipboard | null>(null);
 
@@ -761,6 +765,15 @@ export const useConnectionStore = defineStore("connection", () => {
     for (const connectionId of connectionIds) {
       queryStore.closeConnectionTabs(connectionId);
     }
+  }
+
+  async function cleanupRemovedOneTimeConnections(connectionIds: string[]) {
+    try {
+      await closeOneTimeConnectionTabs(connectionIds);
+    } catch (error) {
+      console.warn("[DBX][connection:delete:one-time-tab-cleanup-failed]", { connectionIds, error });
+    }
+    releaseOneTimeRuntimeConnections(connectionIds);
   }
 
   function cancelDisconnectKey(connectionId: string, attempt: number): string {
@@ -2778,13 +2791,14 @@ export const useConnectionStore = defineStore("connection", () => {
     const removedIds = new Set(connectionIds);
     const oneTimeIds = connectionIds.filter((id) => getConfig(id)?.one_time === true);
     const nextConnections = connections.value.filter((c) => !removedIds.has(c.id));
-    await persistConnections(nextConnections);
-    await closeOneTimeConnectionTabs(oneTimeIds);
-    releaseOneTimeRuntimeConnections(oneTimeIds);
-    await persistTimeoutInheritanceIds(
-      settingsStore.editorSettings.connectTimeoutInheritConnectionIds.filter((id) => !removedIds.has(id)),
-      settingsStore.editorSettings.queryTimeoutInheritConnectionIds.filter((id) => !removedIds.has(id)),
-    );
+    let nextLayout = sidebarLayout.value;
+    for (const id of removedIds) nextLayout = removeConnectionFromSidebarLayout(nextLayout, id);
+    await persistConnectionDeletion(nextConnections, nextLayout);
+    applyConnectionRemoval(removedIds, nextConnections, nextLayout);
+    await cleanupRemovedOneTimeConnections(oneTimeIds);
+  }
+
+  function applyConnectionRemoval(removedIds: ReadonlySet<string>, nextConnections: ConnectionConfig[], nextLayout: SidebarLayout) {
     connections.value = nextConnections;
     syncTimeoutInheritanceBackup();
     let nextPinnedOrder = pinnedTreeNodeOrder.value;
@@ -2802,10 +2816,9 @@ export const useConnectionStore = defineStore("connection", () => {
       clearPrimaryVisibleObjectNames(id);
       clearConnectionIdentifierQuote(id);
       clearConnectionHealthCheck(id);
-      sidebarLayout.value = removeConnectionFromSidebarLayout(sidebarLayout.value, id);
     }
+    sidebarLayout.value = nextLayout;
     rebuildTreeNodes();
-    persistSidebarLayoutDebounced();
     if (activeConnectionId.value && removedIds.has(activeConnectionId.value)) {
       activeConnectionId.value = null;
     }
@@ -7308,11 +7321,10 @@ export const useConnectionStore = defineStore("connection", () => {
 
   async function persistTimeoutInheritanceIds(connectIds: string[], queryIds: string[]) {
     if (sameIds(connectIds, settingsStore.editorSettings.connectTimeoutInheritConnectionIds) && sameIds(queryIds, settingsStore.editorSettings.queryTimeoutInheritConnectionIds)) return;
-    settingsStore.updateEditorSettings({
+    await settingsStore.updateEditorSettingsAndPersist({
       connectTimeoutInheritConnectionIds: connectIds,
       queryTimeoutInheritConnectionIds: queryIds,
     });
-    await settingsStore.persistEditorSettings();
   }
 
   async function persistTimeoutInheritance(connectionId: string, connectInherit: boolean, queryInherit: boolean) {
@@ -7339,6 +7351,66 @@ export const useConnectionStore = defineStore("connection", () => {
       connectSnapshots,
       querySnapshots,
     });
+  }
+
+  async function persistConnectionDeletion(nextConnections: ConnectionConfig[], nextLayout: SidebarLayout) {
+    const previousConnections = connections.value;
+    const previousLayout = sidebarLayout.value;
+    const previousConnectTimeoutIds = [...settingsStore.editorSettings.connectTimeoutInheritConnectionIds];
+    const previousQueryTimeoutIds = [...settingsStore.editorSettings.queryTimeoutInheritConnectionIds];
+    const nextConnectTimeoutIds = previousConnectTimeoutIds.filter((id) => nextConnections.some((connection) => connection.id === id));
+    const nextQueryTimeoutIds = previousQueryTimeoutIds.filter((id) => nextConnections.some((connection) => connection.id === id));
+    const connectionsChanged = nextConnections.length !== previousConnections.length || nextConnections.some((connection, index) => connection !== previousConnections[index]);
+    const timeoutSettingsChanged = !sameIds(nextConnectTimeoutIds, previousConnectTimeoutIds) || !sameIds(nextQueryTimeoutIds, previousQueryTimeoutIds);
+    const layoutChanged = nextLayout !== previousLayout;
+    let connectionsPersisted = false;
+    let timeoutSettingsPersisted = false;
+    let layoutSaveStarted = false;
+
+    try {
+      if (connectionsChanged) {
+        await persistConnections(nextConnections);
+        connectionsPersisted = true;
+      }
+      if (timeoutSettingsChanged) {
+        await persistTimeoutInheritanceIds(nextConnectTimeoutIds, nextQueryTimeoutIds);
+        timeoutSettingsPersisted = true;
+      }
+      if (layoutChanged) {
+        layoutSaveStarted = true;
+        await api.saveSidebarLayout(nextLayout);
+      }
+    } catch (error) {
+      const rollbackErrors: unknown[] = [];
+      if (layoutSaveStarted) {
+        try {
+          await api.saveSidebarLayout(previousLayout);
+        } catch (rollbackError) {
+          rollbackErrors.push(rollbackError);
+        }
+      }
+      if (timeoutSettingsPersisted) {
+        try {
+          await persistTimeoutInheritanceIds(previousConnectTimeoutIds, previousQueryTimeoutIds);
+        } catch (rollbackError) {
+          rollbackErrors.push(rollbackError);
+        }
+      }
+      if (connectionsPersisted) {
+        try {
+          await persistConnections(previousConnections);
+        } catch (rollbackError) {
+          rollbackErrors.push(rollbackError);
+        }
+      }
+      if (rollbackErrors.length) {
+        const details = rollbackErrors.map((rollbackError) => (rollbackError instanceof Error ? rollbackError.message : String(rollbackError))).join("; ");
+        const recoveryError = new Error(`Connection deletion failed and recovery was incomplete: ${details}`);
+        (recoveryError as Error & { cause?: unknown }).cause = error;
+        throw recoveryError;
+      }
+      throw error;
+    }
   }
 
   async function applyGlobalTimeouts({ connectTimeoutSecs, queryTimeoutSecs }: { connectTimeoutSecs?: number; queryTimeoutSecs?: number }) {
@@ -7445,6 +7517,43 @@ export const useConnectionStore = defineStore("connection", () => {
     sidebarLayout.value = nextLayout;
     rebuildTreeNodes();
     persistSidebarLayoutDebounced();
+  }
+
+  async function removeConnectionGroups(groupIds: Iterable<string>, deleteConnections = false): Promise<string[]> {
+    const uniqueGroupIds = [...new Set(groupIds)];
+    const previousLayout = sidebarLayout.value;
+    const connectionIds = deleteConnections ? connectionIdsInGroupsOp(sidebarLayout.value, uniqueGroupIds).filter((id) => connections.value.some((connection) => connection.id === id)) : [];
+    const oneTimeIds = connectionIds.filter((id) => getConfig(id)?.one_time === true);
+    const removedConnectionIds = new Set(connectionIds);
+    const nextConnections = removedConnectionIds.size ? connections.value.filter((connection) => !removedConnectionIds.has(connection.id)) : connections.value;
+    let layoutAfterConnectionRemoval = previousLayout;
+    for (const id of removedConnectionIds) layoutAfterConnectionRemoval = removeConnectionFromSidebarLayout(layoutAfterConnectionRemoval, id);
+    const nextLayout = deleteGroupsOp(layoutAfterConnectionRemoval, uniqueGroupIds);
+    if (nextLayout === previousLayout && nextConnections === connections.value) return [];
+
+    await persistConnectionDeletion(nextConnections, nextLayout);
+    if (removedConnectionIds.size) {
+      applyConnectionRemoval(removedConnectionIds, nextConnections, nextLayout);
+    } else {
+      sidebarLayout.value = nextLayout;
+      rebuildTreeNodes();
+    }
+    await cleanupRemovedOneTimeConnections(oneTimeIds);
+
+    const remainingGroupIds = new Set(nextLayout.groups.map((group) => group.id));
+    const removedGroupIds = new Set(previousLayout.groups.filter((group) => !remainingGroupIds.has(group.id)).map((group) => group.id));
+    if (removedGroupIds.size) {
+      const nextPinnedOrder = pinnedTreeNodeOrder.value.filter((pinId) => !removedGroupIds.has(pinId));
+      if (nextPinnedOrder.length !== pinnedTreeNodeOrder.value.length) {
+        setPinnedTreeNodeOrder(nextPinnedOrder);
+        persistPinnedTreeNodeIds();
+      }
+      selectedTreeNodeIds.value = selectedTreeNodeIds.value.filter((id) => !removedGroupIds.has(id));
+      if (selectedTreeNodeId.value && removedGroupIds.has(selectedTreeNodeId.value)) selectedTreeNodeId.value = null;
+      if (treeSelectionAnchorId.value && removedGroupIds.has(treeSelectionAnchorId.value)) treeSelectionAnchorId.value = null;
+      if (!selectedTreeNodeIds.value.length) connectionMultiSelectActive.value = false;
+    }
+    return connectionIds;
   }
 
   function collapseAllTreeNodes() {
@@ -8139,8 +8248,14 @@ export const useConnectionStore = defineStore("connection", () => {
     renameConnectionGroup(groupId: string, name: string) {
       updateLayoutAndRebuild(renameGroupOp(sidebarLayout.value, groupId, name));
     },
-    deleteConnectionGroup(groupId: string) {
-      updateLayoutAndRebuild(deleteGroupOp(sidebarLayout.value, groupId));
+    async deleteConnectionGroup(groupId: string) {
+      await removeConnectionGroups([groupId]);
+    },
+    async deleteConnectionGroups(groupIds: Iterable<string>, deleteConnections = false) {
+      return await removeConnectionGroups(groupIds, deleteConnections);
+    },
+    connectionIdsInGroups(groupIds: Iterable<string>) {
+      return connectionIdsInGroupsOp(sidebarLayout.value, groupIds);
     },
     toggleConnectionGroupCollapsed(groupId: string) {
       updateLayoutAndRebuild(toggleGroupCollapsedOp(sidebarLayout.value, groupId));

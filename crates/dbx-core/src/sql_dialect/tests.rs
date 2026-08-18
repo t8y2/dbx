@@ -294,6 +294,53 @@ fn builds_select_sql_with_limit_syntax_for_database_type() {
 }
 
 #[test]
+fn jdbc_tdengine_table_preview_qualifies_selected_database() {
+    assert_eq!(
+        build_table_data_select_sql(TableDataSelectSqlOptions {
+            database_type: Some(DatabaseType::Jdbc),
+            driver_profile: Some(" TDENGINE ".to_string()),
+            schema: None,
+            database: Some("bopu_light".to_string()),
+            table_name: "mppd_pwr_862288087612675".to_string(),
+            limit: Some(100),
+            ..Default::default()
+        }),
+        "SELECT * FROM `bopu_light`.`mppd_pwr_862288087612675`;"
+    );
+
+    assert_eq!(
+        build_table_data_select_sql(TableDataSelectSqlOptions {
+            database_type: Some(DatabaseType::Jdbc),
+            driver_profile: Some("tdengine".to_string()),
+            schema: Some("fallback_db".to_string()),
+            database: Some("   ".to_string()),
+            table_name: "meter`readings".to_string(),
+            limit: Some(100),
+            ..Default::default()
+        }),
+        "SELECT * FROM `fallback_db`.`meter``readings`;"
+    );
+}
+
+#[test]
+fn jdbc_non_tdengine_and_unscoped_tdengine_previews_remain_unqualified() {
+    for (driver_profile, database) in [(Some("postgres"), Some("analytics")), (Some("tdengine"), None)] {
+        assert_eq!(
+            build_table_data_select_sql(TableDataSelectSqlOptions {
+                database_type: Some(DatabaseType::Jdbc),
+                driver_profile: driver_profile.map(str::to_string),
+                schema: None,
+                database: database.map(str::to_string),
+                table_name: "readings".to_string(),
+                limit: Some(100),
+                ..Default::default()
+            }),
+            "SELECT * FROM readings;"
+        );
+    }
+}
+
+#[test]
 fn builds_table_data_where_and_schema_queries() {
     assert_eq!(
         build_count_table_sql(Some(DatabaseType::Kingbase), Some("cqbq_ls"), "actionlogs"),
@@ -705,11 +752,12 @@ fn builds_mysql_table_data_large_value_previews_without_truncating_keys() {
     });
 
     assert!(sql.starts_with("SELECT `id`, LEFT(`payload`, 4097) AS `payload`"));
-    assert!(sql.contains("CONCAT('T:4096:', OCTET_LENGTH(`payload`)) AS `__DBX_LARGE_VALUE_BYTES_T_1`"));
+    assert!(sql.contains("CONCAT('T:4096:', LENGTH(`payload`)) AS `__DBX_LARGE_VALUE_BYTES_T_1`"));
     assert!(sql.contains("LEFT(`raw_value`, 4097) AS `raw_value`"));
-    assert!(sql.contains("CONCAT('B:4096:', OCTET_LENGTH(`raw_value`)) AS `__DBX_LARGE_VALUE_BYTES_B_2`"));
+    assert!(sql.contains("CONCAT('B:4096:', LENGTH(`raw_value`)) AS `__DBX_LARGE_VALUE_BYTES_B_2`"));
     assert!(sql.contains("LEFT(`metadata`, 4097) AS `metadata`"));
-    assert!(sql.contains("CONCAT('T:4096:', OCTET_LENGTH(`metadata`)) AS `__DBX_LARGE_VALUE_BYTES_J_3`"));
+    assert!(sql.contains("CONCAT('T:4096:', LENGTH(`metadata`)) AS `__DBX_LARGE_VALUE_BYTES_J_3`"));
+    assert!(!sql.contains("OCTET_LENGTH"));
     assert!(!sql.contains("__DBX_LARGE_VALUE_BYTES_0"));
 }
 
@@ -741,10 +789,10 @@ fn previews_mysql_bounded_string_columns_only_above_the_active_budget() {
     });
 
     assert!(sql.starts_with("SELECT `id`, `image_mime`, LEFT(`image_data`, 420) AS `image_data`"));
-    assert!(sql.contains("CONCAT('B:419:', OCTET_LENGTH(`image_data`)) AS `__DBX_LARGE_VALUE_BYTES_B_2`, LEFT(`image_url`, 420) AS `image_url`"));
-    assert!(sql.contains("CONCAT('T:419:', OCTET_LENGTH(`image_url`)) AS `__DBX_LARGE_VALUE_BYTES_T_3`"));
+    assert!(sql.contains("CONCAT('B:419:', LENGTH(`image_data`)) AS `__DBX_LARGE_VALUE_BYTES_B_2`, LEFT(`image_url`, 420) AS `image_url`"));
+    assert!(sql.contains("CONCAT('T:419:', LENGTH(`image_url`)) AS `__DBX_LARGE_VALUE_BYTES_T_3`"));
     assert!(sql.contains("LEFT(`large_note`, 420) AS `large_note`"));
-    assert!(sql.contains("CONCAT('T:419:', OCTET_LENGTH(`large_note`)) AS `__DBX_LARGE_VALUE_BYTES_T_4`"));
+    assert!(sql.contains("CONCAT('T:419:', LENGTH(`large_note`)) AS `__DBX_LARGE_VALUE_BYTES_T_4`"));
     assert!(sql.contains("LEFT(`large_binary`, 420) AS `large_binary`"));
     assert!(!sql.contains("LEFT(`image_mime`"));
 }

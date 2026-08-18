@@ -495,6 +495,16 @@ FunctionEnd
   !include "{{this}}"
 {{/each}}
 
+; Keep the standard write-error actions while explaining how to upgrade legacy
+; installations restored from Program Files without changing the install mode.
+LangString dbxFileWriteError ${LANG_ENGLISH} "Error opening file for writing:$\r$\n$\r$\n$0$\r$\n$\r$\nIf you are upgrading DBX installed under Program Files, abort this installation, right-click the installer, and select Run as administrator.$\r$\n$\r$\nClick Abort to stop the installation,$\r$\nRetry to try again, or$\r$\nIgnore to skip this file."
+LangString dbxFileWriteErrorNoIgnore ${LANG_ENGLISH} "Error opening file for writing:$\r$\n$\r$\n$0$\r$\n$\r$\nIf you are upgrading DBX installed under Program Files, cancel this installation, right-click the installer, and select Run as administrator.$\r$\n$\r$\nClick Retry to try again, or$\r$\nCancel to stop the installation."
+LangString dbxFileWriteError ${LANG_SIMPCHINESE} "无法打开要写入的文件：$\r$\n$\r$\n$0$\r$\n$\r$\n如果正在升级安装于 Program Files 的 DBX，请中止本次安装，然后右键单击安装程序并选择“以管理员身份运行”。$\r$\n$\r$\n单击“中止”停止安装，$\r$\n单击“重试”再次尝试，或$\r$\n单击“忽略”跳过此文件。"
+LangString dbxFileWriteErrorNoIgnore ${LANG_SIMPCHINESE} "无法打开要写入的文件：$\r$\n$\r$\n$0$\r$\n$\r$\n如果正在升级安装于 Program Files 的 DBX，请取消本次安装，然后右键单击安装程序并选择“以管理员身份运行”。$\r$\n$\r$\n单击“重试”再次尝试，或$\r$\n单击“取消”停止安装。"
+LangString dbxFileWriteError ${LANG_TRADCHINESE} "無法開啟要寫入的檔案：$\r$\n$\r$\n$0$\r$\n$\r$\n如果正在升級安裝於 Program Files 的 DBX，請中止本次安裝，然後以滑鼠右鍵按一下安裝程式並選擇「以系統管理員身分執行」。$\r$\n$\r$\n按一下「中止」以停止安裝，$\r$\n按一下「重試」以再次嘗試，或$\r$\n按一下「忽略」以略過此檔案。"
+LangString dbxFileWriteErrorNoIgnore ${LANG_TRADCHINESE} "無法開啟要寫入的檔案：$\r$\n$\r$\n$0$\r$\n$\r$\n如果正在升級安裝於 Program Files 的 DBX，請取消本次安裝，然後以滑鼠右鍵按一下安裝程式並選擇「以系統管理員身分執行」。$\r$\n$\r$\n按一下「重試」以再次嘗試，或$\r$\n按一下「取消」以停止安裝。"
+FileErrorText "$(dbxFileWriteError)" "$(dbxFileWriteErrorNoIgnore)"
+
 Function .onInit
   ${GetOptions} $CMDLINE "/P" $PassiveMode
   ${IfNot} ${Errors}

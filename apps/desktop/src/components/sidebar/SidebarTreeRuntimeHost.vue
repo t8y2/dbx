@@ -56,6 +56,7 @@ import {
   Info,
   X,
   Settings2,
+  GitBranch,
 } from "@lucide/vue";
 import type { ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
 import { CONNECTION_ATTEMPT_CANCELLED_MESSAGE, useConnectionStore } from "@/stores/connectionStore";
@@ -168,6 +169,7 @@ import { buildXuguCompileSql } from "@/lib/database/xuguCompileSql";
 import type { SidebarDataOpenRequest } from "@/lib/sidebar/sidebarDataOpenCoordinator";
 import { createSidebarActionTarget, findSidebarActionTarget, releaseRemovedSidebarActionTarget, type SidebarActionTarget } from "@/lib/sidebar/sidebarActionTarget";
 import { createSidebarMenuContext, normalizeSidebarMenuDescriptors } from "@/lib/sidebar/sidebarTreeMenuDescriptors";
+import { driverProfileDatabaseWorkspace } from "@/lib/database/driverProfileExtensions";
 import type { SidebarDangerDialogRequest } from "@/lib/sidebar/sidebarDangerDialog";
 import {
   fallbackCreateDatabaseCharset,
@@ -280,6 +282,7 @@ import {
   schemaCommentLoading,
   schemaCommentPreviewSql,
   showDeleteGroupConfirm,
+  deleteConnectionsWithGroup,
   showMoveToNewGroupDialog,
   moveToNewGroupName,
   type DuplicateStructureSource,
@@ -354,7 +357,6 @@ const { openAllDatabasesExport, openDataCompare, openDatabaseExport, openDatabas
 
 const emit = defineEmits<{
   "rename-started": [];
-  "group-created": [groupId: string];
   "request-group-rename": [groupId: string];
   "request-saved-sql-rename": [nodeId: string];
   "node-toggled": [node: TreeNode, expanded: boolean];
@@ -412,10 +414,13 @@ const {
   openVisibleDatabasesDialog,
   openVisibleSchemasDialog,
   startRenameGroup,
+  connectionGroupDeleteMenuLabel,
+  connectionGroupDeleteConfirmMessage,
   deleteConnectionGroup,
   newConnectionInGroup,
   newSubgroup,
   confirmDeleteGroup,
+  deletingConnectionGroups,
   moveToGroup,
   createGroupAndMoveConnection,
 } = useSidebarConnectionMutationRuntime({
@@ -425,7 +430,6 @@ const {
   connectionStore,
   queryStore,
   requestGroupRename: (groupId) => emit("request-group-rename", groupId),
-  groupCreated: (groupId) => emit("group-created", groupId),
   openVisibleDatabases: (node) => emit("open-visible-databases", node),
   openVisibleSchemas: (node) => emit("open-visible-schemas", node),
 });
@@ -1446,6 +1450,41 @@ async function openDatabaseBrowser() {
   }
 }
 
+async function openProfileDatabaseWorkspace() {
+  const node = activeNode.value;
+  if (!node.connectionId) return;
+  const config = connectionStore.getConfig(node.connectionId);
+  const workspace = driverProfileDatabaseWorkspace(config?.driver_profile);
+  if (!workspace?.entryScopes.includes("database") || node.type !== "database" || !node.database) return;
+  try {
+    await connectionStore.ensureConnected(node.connectionId);
+    connectionStore.activeConnectionId = node.connectionId;
+    const target = workspace.resolveTarget?.(node.database, "database") ?? { database: node.database };
+    queryStore.openDriverProfileWorkspace(node.connectionId, target.database, t(workspace.tabTitleKey), workspace.mode, workspace.tabScope, target.branch);
+  } catch (e: any) {
+    toast(t("connection.connectFailed", { message: translateBackendError(t, e) }), 5000);
+  }
+}
+
+async function openProfileConnectionWorkspace() {
+  const node = activeNode.value;
+  if (node.type !== "connection" || !node.connectionId) return;
+  const config = connectionStore.getConfig(node.connectionId);
+  const workspace = driverProfileDatabaseWorkspace(config?.driver_profile);
+  if (!workspace?.entryScopes.includes("connection")) return;
+  try {
+    await connectionStore.ensureConnected(node.connectionId);
+    connectionStore.activeConnectionId = node.connectionId;
+    const options = await getDatabaseOptions(node.connectionId);
+    const database = resolveDefaultDatabase(config!, options);
+    if (!database) return;
+    const target = workspace.resolveTarget?.(database, "connection") ?? { database };
+    queryStore.openDriverProfileWorkspace(node.connectionId, target.database, t(workspace.tabTitleKey), workspace.mode, workspace.tabScope, target.branch);
+  } catch (e: any) {
+    toast(t("connection.connectFailed", { message: translateBackendError(t, e) }), 5000);
+  }
+}
+
 async function openUserAdmin() {
   const node = activeNode.value;
   if (!node.connectionId) return;
@@ -1556,7 +1595,19 @@ async function newQuery() {
     connectionStore.activeConnectionId = node.connectionId;
     if (hasTreeNodeDatabaseContext(node)) {
       if (node.type === "table" || node.type === "view" || node.type === "materialized_view") {
-        await newSelectTemplate();
+        const config = connectionStore.getConfig(node.connectionId);
+        const dbType = config ? effectiveDatabaseTypeForConnection(config) : undefined;
+        const identifierQuote = connectionStore.connectionIdentifierQuote(node.connectionId);
+        const sql = buildTableSelectTemplate({
+          databaseType: dbType,
+          identifierQuote,
+          catalog: node.catalog,
+          database: node.database,
+          schema: node.schema,
+          tableName: node.label,
+          columns: [],
+        });
+        openSqlTemplateTab(node.connectionId, node.database, node.schema, node.catalog, sql);
         return;
       }
       queryStore.createTab(node.connectionId, node.database, undefined, "query", node.schema, undefined, node.catalog);
@@ -4164,6 +4215,10 @@ function connectionDialogCapabilities() {
     moveToNewGroupName,
     confirmMoveToNewGroup,
     showDeleteGroupConfirm,
+    deleteConnectionsWithGroup,
+    connectionGroupDeleteConfirmMessage,
+    connectionGroupDeleteMenuLabel,
+    deletingConnectionGroups,
     confirmDeleteGroup,
   };
 }
@@ -4486,6 +4541,10 @@ function buildConnectionSidebarMenu(context: SidebarMenuFactoryContext): boolean
     if (supportsQueryActions) {
       items.push({ label: t("contextMenu.newQuery"), action: newQuery, icon: TerminalSquare });
     }
+    const connectionWorkspace = node.connectionId ? driverProfileDatabaseWorkspace(connectionStore.getConfig(node.connectionId)?.driver_profile) : undefined;
+    if (connectionWorkspace?.entryScopes.includes("connection")) {
+      items.push({ label: t(connectionWorkspace.menuLabelKey), action: openProfileConnectionWorkspace, icon: GitBranch });
+    }
     if (canOpenConnectionDatabaseBrowser.value) {
       items.push({ label: t("contextMenu.openDatabaseBrowser"), action: openDatabaseBrowser, icon: TableProperties });
     }
@@ -4624,7 +4683,7 @@ function buildConnectionSidebarMenu(context: SidebarMenuFactoryContext): boolean
     });
     items.push({ label: "", separator: true });
     items.push({
-      label: t("connectionGroup.deleteGroup"),
+      label: connectionGroupDeleteMenuLabel(),
       action: deleteConnectionGroup,
       icon: Trash2,
       shortcut: shortcutDelete,
@@ -4677,6 +4736,10 @@ function buildDatabaseSidebarMenu(context: SidebarMenuFactoryContext): boolean {
       items.push({ label: t("contextMenu.newQuery"), action: newQuery, icon: TerminalSquare });
       const sqlHistoryMenu = savedSqlHistorySubmenu();
       if (sqlHistoryMenu) items.push(sqlHistoryMenu);
+    }
+    const profileWorkspace = node.type === "database" && node.connectionId ? driverProfileDatabaseWorkspace(connectionStore.getConfig(node.connectionId)?.driver_profile) : undefined;
+    if (profileWorkspace?.entryScopes.includes("database")) {
+      items.push({ label: t(profileWorkspace.menuLabelKey), action: openProfileDatabaseWorkspace, icon: GitBranch });
     }
     if (node.type === "database" && currentDatabaseType() !== "cloudflare-d1") {
       if (!isNodeDefaultDatabase.value) {
@@ -4973,6 +5036,7 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
     }
     const destructiveActions: ContextMenuItem[] = [];
     items.push(copyNameMenuItem());
+    items.push({ label: t("contextMenu.newQuery"), action: newQuery, icon: TerminalSquare });
     items.push({ label: "", separator: true });
     items.push({ label: t("contextMenu.viewData"), action: openDataImmediately, icon: TableProperties });
     items.push({

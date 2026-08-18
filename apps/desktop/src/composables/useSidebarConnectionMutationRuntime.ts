@@ -1,4 +1,4 @@
-import { computed, type ShallowRef } from "vue";
+import { computed, ref, type ShallowRef } from "vue";
 import { useI18n } from "vue-i18n";
 import { useToast } from "@/composables/useToast";
 import { useConnectionStore } from "@/stores/connectionStore";
@@ -14,9 +14,9 @@ import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { revealPathInFileManager } from "@/lib/backend/tauri";
 import { canConfigureVisibleSchemasForTreeNode } from "@/lib/database/databaseFeatureSupport";
 import { canCloseSidebarDatabaseConnection } from "@/lib/sidebar/sidebarDatabaseOpenState";
-import { selectedConnectionDeleteTargets, selectedConnectionDisconnectTargets, selectedConnectionDuplicateTargets } from "@/lib/sidebar/sidebarConnectionSelection";
+import { selectedConnectionDeleteTargets, selectedConnectionDisconnectTargets, selectedConnectionDuplicateTargets, selectedConnectionGroupDeleteTargets } from "@/lib/sidebar/sidebarConnectionSelection";
 import { releaseConnectionFromMultiSelection } from "@/lib/sidebar/sidebarConnectionMultiSelect";
-import { connectionDeleteTargetSnapshot, showDeleteConfirm, showDeleteGroupConfirm, sidebarFormTarget } from "@/components/sidebar/sidebarTreeDialogState";
+import { connectionDeleteTargetSnapshot, connectionGroupDeleteTargetSnapshot, deleteConnectionsWithGroup, showDeleteConfirm, showDeleteGroupConfirm, sidebarFormTarget } from "@/components/sidebar/sidebarTreeDialogState";
 import { connectionCanConfigureSidebarVisibleDatabases } from "@/lib/sidebar/sidebarVisibleFilterMenu";
 import { disconnectSidebarConnections } from "@/lib/sidebar/sidebarConnectionDisconnect";
 
@@ -27,7 +27,6 @@ interface SidebarConnectionMutationRuntimeOptions {
   connectionStore: ReturnType<typeof useConnectionStore>;
   queryStore: ReturnType<typeof useQueryStore>;
   requestGroupRename: (groupId: string) => void;
-  groupCreated: (groupId: string) => void;
   openVisibleDatabases: (node: TreeNode) => void;
   openVisibleSchemas: (node: TreeNode) => void;
 }
@@ -36,6 +35,7 @@ export function useSidebarConnectionMutationRuntime(options: SidebarConnectionMu
   const { t } = useI18n();
   const { toast } = useToast();
   const { activeNode, selectedTreeNodesInVisibleOrder, connectionStore, queryStore } = options;
+  const deletingConnectionGroups = ref(false);
 
   async function setNodeAsDefaultDatabase() {
     const node = activeNode.value;
@@ -324,7 +324,26 @@ export function useSidebarConnectionMutationRuntime(options: SidebarConnectionMu
     if (activeNode.value.type === "connection-group") options.requestGroupRename(activeNode.value.id);
   }
 
+  function connectionGroupDeleteTargets() {
+    if (showDeleteGroupConfirm.value && connectionGroupDeleteTargetSnapshot.value.length) return connectionGroupDeleteTargetSnapshot.value;
+    return selectedConnectionGroupDeleteTargets(activeNode.value, selectedTreeNodesInVisibleOrder());
+  }
+
+  function connectionGroupDeleteMenuLabel(): string {
+    const count = connectionGroupDeleteTargets().length;
+    return count > 1 ? t("connectionGroup.deleteSelectedGroups", { count }) : t("connectionGroup.deleteGroup");
+  }
+
+  function connectionGroupDeleteConfirmMessage(): string {
+    const targets = connectionGroupDeleteTargets();
+    return targets.length > 1 ? t("connectionGroup.deleteSelectedGroupsConfirmMessage", { count: targets.length }) : t("connectionGroup.deleteGroupConfirmMessage", { name: targets[0]?.label || sidebarFormTarget.value?.label || activeNode.value.label });
+  }
+
   function deleteConnectionGroup() {
+    const targets = selectedConnectionGroupDeleteTargets(activeNode.value, selectedTreeNodesInVisibleOrder());
+    if (!targets.length) return;
+    connectionGroupDeleteTargetSnapshot.value = targets.slice();
+    deleteConnectionsWithGroup.value = false;
     showDeleteGroupConfirm.value = true;
   }
 
@@ -334,16 +353,32 @@ export function useSidebarConnectionMutationRuntime(options: SidebarConnectionMu
 
   function newSubgroup() {
     const groupId = connectionStore.createConnectionGroup(t("connectionGroup.newGroupDefault"), activeNode.value.id);
-    connectionStore.selectedTreeNodeId = groupId;
-    options.groupCreated(groupId);
+    options.requestGroupRename(groupId);
   }
 
-  function confirmDeleteGroup() {
-    const node = sidebarFormTarget.value ?? activeNode.value;
-    connectionStore.deleteConnectionGroup(node.id);
-    options.releaseActiveNodeReference([node.id]);
-    showDeleteGroupConfirm.value = false;
-    toast(t("connection.groupDeleted"), 2000);
+  async function confirmDeleteGroup() {
+    const targets = connectionGroupDeleteTargets();
+    if (!targets.length || deletingConnectionGroups.value) return;
+
+    const groupIds = targets.map((target) => target.id);
+    deletingConnectionGroups.value = true;
+    try {
+      const connectionIds = await connectionStore.deleteConnectionGroups(groupIds, deleteConnectionsWithGroup.value);
+      options.releaseActiveNodeReference(groupIds);
+      for (const connectionId of connectionIds) {
+        connectionStore.disconnect(connectionId).catch((error) => {
+          console.warn("[DBX][connection-group:delete:disconnect-failed]", { connectionId, error });
+        });
+      }
+      showDeleteGroupConfirm.value = false;
+      connectionGroupDeleteTargetSnapshot.value = [];
+      deleteConnectionsWithGroup.value = false;
+      toast(targets.length > 1 ? t("connection.groupsDeleted", { count: targets.length }) : t("connection.groupDeleted"), 2000);
+    } catch (error: any) {
+      toast(t("connection.saveFailed", { message: error?.message || String(error) }), 5000);
+    } finally {
+      deletingConnectionGroups.value = false;
+    }
   }
 
   function moveToGroup(groupId: string | null) {
@@ -403,10 +438,14 @@ export function useSidebarConnectionMutationRuntime(options: SidebarConnectionMu
     openVisibleDatabasesDialog,
     openVisibleSchemasDialog,
     startRenameGroup,
+    connectionGroupDeleteTargets,
+    connectionGroupDeleteMenuLabel,
+    connectionGroupDeleteConfirmMessage,
     deleteConnectionGroup,
     newConnectionInGroup,
     newSubgroup,
     confirmDeleteGroup,
+    deletingConnectionGroups,
     moveToGroup,
     createGroupAndMoveConnection,
   };

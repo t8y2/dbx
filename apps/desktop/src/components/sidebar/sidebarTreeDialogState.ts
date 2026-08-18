@@ -8,6 +8,7 @@ import type { MongoCreateIndexForm, MongoIndexRow } from "@/lib/sidebar/mongoCol
 
 export type DuplicateStructureSource = TreeNode & { connectionId: string; database: string };
 type ConnectionDeleteTarget = TreeNode & { connectionId: string };
+type ConnectionGroupDeleteTarget = TreeNode & { type: "connection-group" };
 
 export const fallbackCreateDatabaseCharset = fallbackCreateDatabaseCharsetMetadata();
 
@@ -15,6 +16,8 @@ export const sidebarTreeDialogOwner = shallowRef<symbol | null>(null);
 export const sidebarDangerTarget = shallowRef<TreeNode | null>(null);
 export const sidebarFormTarget = shallowRef<TreeNode | null>(null);
 export const connectionDeleteTargetSnapshot = ref<ConnectionDeleteTarget[]>([]);
+export const connectionGroupDeleteTargetSnapshot = ref<ConnectionGroupDeleteTarget[]>([]);
+export const deleteConnectionsWithGroup = ref(false);
 export const showDeleteConfirm = ref(false);
 export const showDropTableConfirm = ref(false);
 export const showDropTableChildObjectConfirm = ref(false);
@@ -229,4 +232,6 @@ export function resetSidebarTreeDialogState() {
   sidebarDangerTarget.value = null;
   sidebarFormTarget.value = null;
   connectionDeleteTargetSnapshot.value = [];
+  connectionGroupDeleteTargetSnapshot.value = [];
+  deleteConnectionsWithGroup.value = false;
 }

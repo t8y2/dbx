@@ -128,7 +128,7 @@ Oracle、人大金仓和虚谷需要匹配的 DBX 原生 Agent，但不需要 JR
 
 设置 `DBX_WEB_URL` 后，MCP 会使用部署的 DBX Web 后端，而不是读取本机连接。如果 Web 登录启用了密码保护，还要设置 `DBX_WEB_PASSWORD`，值为 Web 登录页使用的密码。
 
-DBX Web 请求遵循标准系统代理环境变量：https 地址读取 `HTTPS_PROXY`/`https_proxy`，http 地址读取 `HTTP_PROXY`/`http_proxy`，`ALL_PROXY`/`all_proxy` 作为兜底，`NO_PROXY`/`no_proxy`（逗号分隔的主机列表，例如 `localhost,127.0.0.1,.internal.example`）作为绕过列表。代理值为空或未设置时直连（不走代理）。支持 HTTP、HTTPS 与 SOCKS5 代理（`http://127.0.0.1:7890` 或 `socks5://127.0.0.1:1080`）；需要认证的代理使用标准 `user:password@host:port` URL 形式，例如 `http://admin:admin123@127.0.0.1:7890`。如需为每次 DBX Web 请求附加自定义请求头（例如网关前的令牌认证），将 `DBX_WEB_HEADERS` 设置为 JSON 对象，键为请求头名称、值为字符串，例如 `{"Authorization":"Bearer <token>"}`。同样的变量在 DBX CLI 的 Web 模式下同样生效。
+DBX Web 请求遵循标准系统代理环境变量：https 地址读取 `HTTPS_PROXY`/`https_proxy`，http 地址读取 `HTTP_PROXY`/`http_proxy`，`ALL_PROXY`/`all_proxy` 作为兜底，`NO_PROXY`/`no_proxy`（逗号分隔的主机列表，例如 `localhost,127.0.0.1,.internal.example`）作为绕过列表。代理值为空或未设置时直连（不走代理）。支持 HTTP、HTTPS 与 SOCKS5 代理（`http://127.0.0.1:7890` 或 `socks5://127.0.0.1:1080`）；需要认证的代理使用标准 `user:password@host:port` URL 形式，例如 `http://admin:admin123@127.0.0.1:7890`。如需为每次 DBX Web 请求附加自定义请求头（例如网关前的令牌认证），将 `DBX_WEB_HEADERS` 设置为 JSON 对象，键为请求头名称、值为字符串，例如 `{"Authorization":"Bearer <token>"}`。目标为自签名 HTTPS 时，证书验证默认开启：设置 `DBX_WEB_INSECURE_SKIP_VERIFY=1` 可跳过验证，或设置 `DBX_WEB_CA_CERT` 指向 PEM/DER CA 文件以信任私有 CA。同样的变量在 DBX CLI 的 Web 模式下同样生效。
 
 DBX Web 和 Docker 同样需要独立 DuckDB 驱动。首次启动后可通过 Driver Manager 安装；Docker 会把驱动保存到 `/app/data/agents`，挂载 `/app/data` 数据卷后升级容器不会丢失。
 
@@ -158,6 +158,8 @@ DBX 在 **设置 → MCP** 中保存一份权威策略，并在每次请求时�
 | `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` | DBX Web 请求的标准系统代理变量；空值表示不走代理。认证格式 `http://user:pass@host:port` |
 | `NO_PROXY` | 上述代理的标准绕过列表（逗号分隔主机） |
 | `DBX_WEB_HEADERS` | DBX Web 请求附加的请求头 JSON 对象，例如 `{"Authorization":"Bearer token"}` |
+| `DBX_WEB_INSECURE_SKIP_VERIFY` | `1`/`true` 时跳过 TLS 证书验证（用于自签名 DBX Web 后端；默认验证） |
+| `DBX_WEB_CA_CERT` | DBX Web TLS 验证时信任的 PEM/DER CA 文件 |
 | `DBX_MCP_ALLOW_WRITES` | 仅用于升级兼容：`0`/`false` 使尚未配置的策略保持只读 |
 | `DBX_MCP_SCOPE_CONNECTION_ID` | 兼容旧配置：限制为一个连接 ID |
 | `DBX_MCP_SCOPE_CONNECTION_IDS` | 兼容旧配置：限制为多个连接 ID |

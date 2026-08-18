@@ -2,9 +2,14 @@ import type { TreeNode } from "@/types/database";
 import { copyNameForTreeNode } from "@/lib/sidebar/treeNodeClick";
 
 type ConnectionTreeNode = TreeNode & { connectionId: string };
+type ConnectionGroupTreeNode = TreeNode & { type: "connection-group" };
 
 export function isConnectionNode(node: TreeNode): node is ConnectionTreeNode {
   return node.type === "connection" && !!node.connectionId;
+}
+
+export function isConnectionGroupNode(node: TreeNode): node is ConnectionGroupTreeNode {
+  return node.type === "connection-group";
 }
 
 function selectedConnectionActionTargets(currentNode: TreeNode, selectedNodes: TreeNode[]): ConnectionTreeNode[] {
@@ -22,6 +27,15 @@ export function selectedConnectionDeleteTargets(currentNode: TreeNode, selectedN
 
 export function selectedConnectionDuplicateTargets(currentNode: TreeNode, selectedNodes: TreeNode[]): ConnectionTreeNode[] {
   return selectedConnectionActionTargets(currentNode, selectedNodes);
+}
+
+export function selectedConnectionGroupDeleteTargets(currentNode: TreeNode, selectedNodes: TreeNode[]): ConnectionGroupTreeNode[] {
+  if (!isConnectionGroupNode(currentNode)) return [];
+  const selectedContainsCurrent = selectedNodes.some((node) => node.id === currentNode.id);
+  if (selectedNodes.length > 1 && selectedContainsCurrent && selectedNodes.every(isConnectionGroupNode)) {
+    return selectedNodes;
+  }
+  return [currentNode];
 }
 
 export function selectedConnectionDisconnectTargets(currentNode: TreeNode, selectedNodes: TreeNode[]): ConnectionTreeNode[] {

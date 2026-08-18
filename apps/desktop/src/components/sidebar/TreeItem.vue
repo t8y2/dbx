@@ -530,6 +530,14 @@ function visibleTreeNodes(): TreeNode[] {
   return flattenTree(connectionStore.treeNodes).map((item) => item.node);
 }
 
+function connectionIdsForSelection(): Set<string> {
+  return new Set(connectionStore.connections.map((connection) => connection.id));
+}
+
+function connectionGroupIdsForSelection(): Set<string> {
+  return new Set(connectionStore.sidebarLayout.groups.map((group) => group.id));
+}
+
 function selectSingleTreeNode(node: TreeNode) {
   // Re-clicking the selected row should not replace the selection array and
   // force visible tree rows to recompute.
@@ -558,7 +566,8 @@ function toggleTreeNodeSelection(node: TreeNode) {
       activeNodeId: node.id,
       anchorNodeId: node.id,
     },
-    new Set(connectionStore.connections.map((connection) => connection.id)),
+    connectionIdsForSelection(),
+    connectionGroupIdsForSelection(),
   );
 }
 
@@ -580,7 +589,8 @@ function selectTreeNodeRange(node: TreeNode) {
         activeNodeId: node.id,
         anchorNodeId: anchorId,
       },
-      new Set(connectionStore.connections.map((connection) => connection.id)),
+      connectionIdsForSelection(),
+      connectionGroupIdsForSelection(),
     );
     return;
   }
@@ -598,7 +608,8 @@ function selectTreeNodeRange(node: TreeNode) {
       activeNodeId: node.id,
       anchorNodeId: anchorId,
     },
-    new Set(connectionStore.connections.map((connection) => connection.id)),
+    connectionIdsForSelection(),
+    connectionGroupIdsForSelection(),
   );
 }
 
@@ -608,9 +619,19 @@ function selectedConnectionIdsForAction(): string[] {
 }
 
 const isConnectionSelectionChecked = computed(() => {
-  if (!connectionStore.connectionMultiSelectActive || activeNode.value.type !== "connection" || !activeNode.value.connectionId) return false;
+  if (!isConnectionMultiSelectActive() || activeNode.value.type !== "connection" || !activeNode.value.connectionId) return false;
   return connectionStore.selectedTreeNodeIds.includes(activeNode.value.connectionId);
 });
+
+function isConnectionGroupMultiSelectActive(): boolean {
+  if (!connectionStore.connectionMultiSelectActive) return false;
+  const firstSelectedId = connectionStore.selectedTreeNodeIds[0];
+  return !!firstSelectedId && connectionStore.sidebarLayout.groups.some((group) => group.id === firstSelectedId);
+}
+
+function isConnectionMultiSelectActive(): boolean {
+  return connectionStore.connectionMultiSelectActive && !isConnectionGroupMultiSelectActive();
+}
 
 function toggleConnectionMultiSelection(event: MouseEvent) {
   event.preventDefault();
@@ -621,6 +642,40 @@ function toggleConnectionMultiSelection(event: MouseEvent) {
   // runs when the checkbox is clicked, while the checked state updates often.
   const current = { connectionIds: selectedConnectionIdsForAction(), active: connectionStore.connectionMultiSelectActive };
   applyConnectionMultiSelection(connectionStore, connectionMultiSelectionAfterToggle(current, activeNode.value.connectionId));
+  rowRef.value?.focus({ preventScroll: true });
+}
+
+function selectedConnectionGroupIdsForAction(): string[] {
+  const groupIds = connectionGroupIdsForSelection();
+  return connectionStore.selectedTreeNodeIds.filter((id) => groupIds.has(id));
+}
+
+function isConnectionGroupSelectionChecked(): boolean {
+  if (!isConnectionGroupMultiSelectActive() || activeNode.value.type !== "connection-group") return false;
+  return connectionStore.selectedTreeNodeIds.includes(activeNode.value.id);
+}
+
+function toggleConnectionGroupMultiSelection(event: MouseEvent) {
+  event.preventDefault();
+  event.stopPropagation();
+  if (activeNode.value.type !== "connection-group") return;
+
+  const selectedGroupIds = connectionStore.connectionMultiSelectActive ? selectedConnectionGroupIdsForAction() : [];
+  const nextGroupIds = new Set(selectedGroupIds);
+  if (nextGroupIds.has(activeNode.value.id)) nextGroupIds.delete(activeNode.value.id);
+  else nextGroupIds.add(activeNode.value.id);
+  const nodeIds = [...nextGroupIds];
+  const activeNodeId = nextGroupIds.has(activeNode.value.id) ? activeNode.value.id : (nodeIds[0] ?? null);
+  applyTreeNodeSelection(
+    connectionStore,
+    {
+      nodeIds,
+      activeNodeId,
+      anchorNodeId: activeNodeId,
+    },
+    connectionIdsForSelection(),
+    connectionGroupIdsForSelection(),
+  );
   rowRef.value?.focus({ preventScroll: true });
 }
 
@@ -1387,12 +1442,25 @@ function onKeydown(event: KeyboardEvent) {
           v-if="node.type === 'connection'"
           type="button"
           class="flex h-4 w-4 shrink-0 items-center justify-center rounded text-muted-foreground/55 opacity-0 transition-colors transition-opacity hover:bg-secondary/45 hover:text-foreground focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring group-hover/sidebar-row:opacity-100"
-          :class="[{ 'opacity-100': isConnectionSelectionChecked || connectionStore.connectionMultiSelectActive }, isConnecting ? '' : 'ml-auto']"
+          :class="[{ 'opacity-100': isConnectionSelectionChecked || isConnectionMultiSelectActive() }, isConnecting ? '' : 'ml-auto']"
           :aria-label="isConnectionSelectionChecked ? t('connectionGroup.deselectConnection') : t('connectionGroup.selectConnection')"
           @mousedown.stop
           @click="toggleConnectionMultiSelection"
         >
           <Check v-if="isConnectionSelectionChecked" class="h-3 w-3 text-primary" />
+          <Square v-else class="h-3 w-3 stroke-[1.7]" />
+        </button>
+        <button
+          v-if="node.type === 'connection-group'"
+          type="button"
+          data-sidebar-group-selection-toggle="true"
+          class="ml-auto flex h-4 w-4 shrink-0 items-center justify-center rounded text-muted-foreground/55 opacity-0 transition-colors transition-opacity hover:bg-secondary/45 hover:text-foreground focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring group-hover/sidebar-row:opacity-100"
+          :class="{ 'opacity-100': isConnectionGroupSelectionChecked() || isConnectionGroupMultiSelectActive() }"
+          :aria-label="isConnectionGroupSelectionChecked() ? t('connectionGroup.deselectGroup') : t('connectionGroup.selectGroup')"
+          @mousedown.stop
+          @click="toggleConnectionGroupMultiSelection"
+        >
+          <Check v-if="isConnectionGroupSelectionChecked()" class="h-3 w-3 text-primary" />
           <Square v-else class="h-3 w-3 stroke-[1.7]" />
         </button>
       </div>

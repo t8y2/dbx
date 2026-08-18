@@ -128,7 +128,7 @@ Oracle, KingBase, and XuguDB require their matching native DBX Agent but no JRE.
 
 Set `DBX_WEB_URL` to use a deployed DBX Web backend instead of local connections. If the Web login is protected, also set `DBX_WEB_PASSWORD` to the same login password.
 
-DBX Web requests honor the standard system proxy environment variables: `HTTPS_PROXY`/`https_proxy` for https URLs, `HTTP_PROXY`/`http_proxy` for http URLs, with `ALL_PROXY`/`all_proxy` as the fallback and `NO_PROXY`/`no_proxy` (comma-separated hosts, e.g. `localhost,127.0.0.1,.internal.example`) as the bypass list. An empty or unset proxy value means direct connection (no proxy). HTTP, HTTPS, and SOCKS5 proxies are supported (`http://127.0.0.1:7890` or `socks5://127.0.0.1:1080`); proxies requiring authentication use the standard `user:password@host:port` URL form, e.g. `http://admin:admin123@127.0.0.1:7890`. To attach extra headers to every DBX Web request (for example token auth in front of a gateway), set `DBX_WEB_HEADERS` to a JSON object of header names and string values, e.g. `{"Authorization":"Bearer <token>"}`. The same variables are honored by the DBX CLI in Web mode.
+DBX Web requests honor the standard system proxy environment variables: `HTTPS_PROXY`/`https_proxy` for https URLs, `HTTP_PROXY`/`http_proxy` for http URLs, with `ALL_PROXY`/`all_proxy` as the fallback and `NO_PROXY`/`no_proxy` (comma-separated hosts, e.g. `localhost,127.0.0.1,.internal.example`) as the bypass list. An empty or unset proxy value means direct connection (no proxy). HTTP, HTTPS, and SOCKS5 proxies are supported (`http://127.0.0.1:7890` or `socks5://127.0.0.1:1080`); proxies requiring authentication use the standard `user:password@host:port` URL form, e.g. `http://admin:admin123@127.0.0.1:7890`. To attach extra headers to every DBX Web request (for example token auth in front of a gateway), set `DBX_WEB_HEADERS` to a JSON object of header names and string values, e.g. `{"Authorization":"Bearer <token>"}`. For self-signed HTTPS backends, certificate verification is on by default; set `DBX_WEB_INSECURE_SKIP_VERIFY=1` to disable verification, or set `DBX_WEB_CA_CERT` to a PEM/DER CA file to trust a private CA. The same variables are honored by the DBX CLI in Web mode.
 
 DBX Web and Docker require the same standalone DuckDB driver. Install it from Driver Manager after the first launch. Docker stores installed drivers under `/app/data/agents`, so they persist when `/app/data` is mounted as a volume.
 
@@ -158,6 +158,8 @@ Updated servers do not let `DBX_MCP_ALLOW_WRITES` or `DBX_MCP_ALLOW_DANGEROUS_SQ
 | `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` | Standard system proxy variables for DBX Web requests; empty value means no proxy. Auth via `http://user:pass@host:port` |
 | `NO_PROXY` | Standard bypass list for the proxy above (comma-separated hosts) |
 | `DBX_WEB_HEADERS` | JSON object of extra HTTP headers for DBX Web requests, e.g. `{"Authorization":"Bearer token"}` |
+| `DBX_WEB_INSECURE_SKIP_VERIFY` | `1`/`true` disables TLS certificate verification for self-signed DBX Web backends (default: verify) |
+| `DBX_WEB_CA_CERT` | PEM/DER CA file to trust for DBX Web TLS verification |
 | `DBX_MCP_ALLOW_WRITES` | Upgrade compatibility only: `0`/`false` keeps an unconfigured policy read-only |
 | `DBX_MCP_SCOPE_CONNECTION_ID` | Compatibility scope for one connection ID |
 | `DBX_MCP_SCOPE_CONNECTION_IDS` | Compatibility scope for multiple connection IDs |

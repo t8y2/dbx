@@ -11,7 +11,7 @@ use crate::sql_dialect::{
 use sqlparser::ast::{
     visit_expressions, Expr, GroupByExpr, OrderByKind, Select, SelectItem, SetExpr, Statement, Value, ValueWithSpan,
 };
-use sqlparser::dialect::{ClickHouseDialect, GenericDialect, MsSqlDialect};
+use sqlparser::dialect::{ClickHouseDialect, GenericDialect, MsSqlDialect, MySqlDialect};
 use sqlparser::parser::Parser;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -291,6 +291,11 @@ pub fn build_count_query_sql(options: CountQuerySqlOptions) -> QuerySqlBuildResu
             .map(|sql| ok(format!("{execution_hint}{sql}")))
             .unwrap_or_else(|| err("unsupported"));
     }
+    if options.database_type == Some(DatabaseType::Mysql) {
+        return mysql_count_sql(&statement)
+            .map(|sql| ok(format!("{execution_hint}{sql}")))
+            .unwrap_or_else(|| err("unsupported"));
+    }
 
     let alias = if options.database_type == Some(DatabaseType::Iris) {
         // With delimited identifiers disabled, Caché 2016 can parameterize a
@@ -558,12 +563,8 @@ fn sql_server_row_number_pagination_safe(statement: &str) -> bool {
         return false;
     };
     let wildcard_projection = matches!(select.projection.as_slice(), [SelectItem::Wildcard(_)]);
-    let output_names = select
-        .projection
-        .iter()
-        .filter_map(sql_server_derived_projection_name)
-        .map(str::to_lowercase)
-        .collect::<HashSet<_>>();
+    let output_names =
+        select.projection.iter().filter_map(derived_projection_name).map(str::to_lowercase).collect::<HashSet<_>>();
 
     order_exprs.iter().all(|order_expr| {
         if matches!(order_expr.expr, Expr::Value(_)) {
@@ -649,8 +650,7 @@ fn sql_server_derived_pagination_order(statement: &str) -> Option<String> {
         return None;
     }
 
-    let output_columns =
-        select.projection.iter().map(sql_server_derived_projection_name).collect::<Option<Vec<_>>>()?;
+    let output_columns = select.projection.iter().map(derived_projection_name).collect::<Option<Vec<_>>>()?;
     let column_names = output_columns.iter().map(|name| name.to_lowercase()).collect::<HashSet<_>>();
 
     let mut parts = Vec::with_capacity(order_by_exprs.len());
@@ -1017,11 +1017,128 @@ fn sql_server_derived_table_select_projection_safe(select: &Select) -> bool {
 
     let mut column_names = HashSet::with_capacity(select.projection.len());
     select.projection.iter().all(|item| {
-        let Some(name) = sql_server_derived_projection_name(item) else {
+        let Some(name) = derived_projection_name(item) else {
             return false;
         };
         column_names.insert(name.to_lowercase())
     })
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MysqlDerivedProjectionSafety {
+    Safe,
+    Ambiguous,
+    Unknown,
+}
+
+fn mysql_count_sql(statement: &str) -> Option<String> {
+    let dialect = MySqlDialect {};
+    let Ok(mut statements) = Parser::parse_sql(&dialect, statement) else {
+        return Some(mysql_wrapped_count_sql(statement));
+    };
+    let projection_safety = {
+        let [Statement::Query(query)] = statements.as_slice() else {
+            return None;
+        };
+        mysql_derived_table_set_projection_safety(query.body.as_ref())
+    };
+    if projection_safety != MysqlDerivedProjectionSafety::Ambiguous {
+        return Some(mysql_wrapped_count_sql(statement));
+    }
+
+    let replacement_projection = match Parser::parse_sql(&dialect, "SELECT 1 AS dbx_count_value").ok()?.pop()? {
+        Statement::Query(query) => match query.body.as_ref() {
+            SetExpr::Select(select) => select.projection.clone(),
+            _ => return None,
+        },
+        _ => return None,
+    };
+    {
+        let [Statement::Query(query)] = statements.as_mut_slice() else {
+            return None;
+        };
+        let SetExpr::Select(select) = query.body.as_mut() else {
+            return None;
+        };
+        let group_by_is_empty = matches!(&select.group_by, GroupByExpr::Expressions(expressions, modifiers) if expressions.is_empty() && modifiers.is_empty());
+        if select.distinct.is_some()
+            || select.into.is_some()
+            || !group_by_is_empty
+            || select.having.is_some()
+            || !select.projection.iter().all(mysql_projection_item_is_row_preserving)
+        {
+            return None;
+        }
+
+        select.projection = replacement_projection;
+        // An ORDER BY can refer to a removed output alias; ordering never
+        // changes how many rows survive MySQL LIMIT/OFFSET.
+        query.order_by = None;
+    }
+
+    Some(mysql_wrapped_count_sql(&statements.pop()?.to_string()))
+}
+
+fn mysql_wrapped_count_sql(statement: &str) -> String {
+    let alias = quote_table_identifier(Some(DatabaseType::Mysql), "dbx_count");
+    derived_table_sql("SELECT COUNT(*) AS dbx_total_rows FROM", statement, &format!("{alias};"))
+}
+
+fn mysql_derived_table_set_projection_safety(set_expr: &SetExpr) -> MysqlDerivedProjectionSafety {
+    match set_expr {
+        SetExpr::Select(select) => mysql_derived_table_select_projection_safety(select),
+        SetExpr::Query(query) => mysql_derived_table_set_projection_safety(query.body.as_ref()),
+        SetExpr::SetOperation { left, .. } => mysql_derived_table_set_projection_safety(left),
+        SetExpr::Values(_) | SetExpr::Table(_) => MysqlDerivedProjectionSafety::Safe,
+        SetExpr::Insert(_) | SetExpr::Update(_) | SetExpr::Delete(_) | SetExpr::Merge(_) => {
+            MysqlDerivedProjectionSafety::Unknown
+        }
+    }
+}
+
+fn mysql_derived_table_select_projection_safety(select: &Select) -> MysqlDerivedProjectionSafety {
+    if select.projection.len() == 1 {
+        return if matches!(select.projection.as_slice(), [SelectItem::Wildcard(_)])
+            && (select.from.len() != 1 || !select.from[0].joins.is_empty())
+        {
+            MysqlDerivedProjectionSafety::Ambiguous
+        } else {
+            MysqlDerivedProjectionSafety::Safe
+        };
+    }
+    if select
+        .projection
+        .iter()
+        .any(|item| matches!(item, SelectItem::Wildcard(_) | SelectItem::QualifiedWildcard(_, _)))
+    {
+        return MysqlDerivedProjectionSafety::Ambiguous;
+    }
+
+    let mut column_names = HashSet::with_capacity(select.projection.len());
+    let mut unknown_name = false;
+    for item in &select.projection {
+        let Some(name) = derived_projection_name(item) else {
+            unknown_name = true;
+            continue;
+        };
+        if !column_names.insert(name.to_lowercase()) {
+            return MysqlDerivedProjectionSafety::Ambiguous;
+        }
+    }
+    if unknown_name {
+        MysqlDerivedProjectionSafety::Unknown
+    } else {
+        MysqlDerivedProjectionSafety::Safe
+    }
+}
+
+fn mysql_projection_item_is_row_preserving(item: &SelectItem) -> bool {
+    match item {
+        SelectItem::Wildcard(_) | SelectItem::QualifiedWildcard(_, _) => true,
+        SelectItem::UnnamedExpr(Expr::Identifier(_) | Expr::CompoundIdentifier(_)) => true,
+        SelectItem::ExprWithAlias { expr: Expr::Identifier(_) | Expr::CompoundIdentifier(_), .. } => true,
+        SelectItem::UnnamedExpr(_) | SelectItem::ExprWithAlias { .. } | SelectItem::ExprWithAliases { .. } => false,
+    }
 }
 
 fn sql_server_count_sql(statement: &str) -> Option<String> {
@@ -1086,7 +1203,7 @@ fn sql_server_count_sql(statement: &str) -> Option<String> {
     Some(format!("{};", statements.pop()?))
 }
 
-fn sql_server_derived_projection_name(item: &SelectItem) -> Option<&str> {
+fn derived_projection_name(item: &SelectItem) -> Option<&str> {
     match item {
         SelectItem::ExprWithAlias { alias, .. } => Some(&alias.value),
         SelectItem::UnnamedExpr(Expr::Identifier(identifier)) if !identifier.value.starts_with('@') => {
@@ -3263,6 +3380,143 @@ WHERE u.id = picked.id;
             result.sql.unwrap(),
             "SELECT COUNT(*) AS dbx_total_rows FROM (WITH cte AS (SELECT 1 AS id) SELECT * FROM cte) `dbx_count`;"
         );
+    }
+
+    #[test]
+    fn mysql_count_rewrites_ambiguous_join_projection() {
+        for sql in [
+            "SELECT a.*, b.* FROM a JOIN b ON b.a_id = a.id ORDER BY b.id",
+            "SELECT * FROM a JOIN b ON b.a_id = a.id ORDER BY b.id",
+        ] {
+            let result = build_count_query_sql(CountQuerySqlOptions {
+                original_sql: sql.to_string(),
+                database_type: Some(DatabaseType::Mysql),
+            });
+
+            assert_eq!(
+                result.sql.as_deref(),
+                Some(
+                    "SELECT COUNT(*) AS dbx_total_rows FROM (SELECT 1 AS dbx_count_value FROM a JOIN b ON b.a_id = a.id) `dbx_count`;"
+                ),
+                "{sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn mysql_count_rewrites_duplicate_explicit_names() {
+        for sql in [
+            "SELECT a.id AS id, b.id AS id FROM a JOIN b ON b.a_id = a.id",
+            "SELECT a.`1111`, b.`1111` FROM a JOIN b ON b.a_id = a.id",
+        ] {
+            let result = build_count_query_sql(CountQuerySqlOptions {
+                original_sql: sql.to_string(),
+                database_type: Some(DatabaseType::Mysql),
+            });
+
+            assert_eq!(
+                result.sql.as_deref(),
+                Some(
+                    "SELECT COUNT(*) AS dbx_total_rows FROM (SELECT 1 AS dbx_count_value FROM a JOIN b ON b.a_id = a.id) `dbx_count`;"
+                ),
+                "{sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn mysql_count_keeps_unique_projection_wrapper() {
+        let sql = "SELECT a.id AS a_id, b.id AS b_id FROM a JOIN b ON b.a_id = a.id ORDER BY b.id";
+        let result = build_count_query_sql(CountQuerySqlOptions {
+            original_sql: sql.to_string(),
+            database_type: Some(DatabaseType::Mysql),
+        });
+
+        assert_eq!(
+            result.sql.as_deref(),
+            Some(
+                "SELECT COUNT(*) AS dbx_total_rows FROM (SELECT a.id AS a_id, b.id AS b_id FROM a JOIN b ON b.a_id = a.id ORDER BY b.id) `dbx_count`;"
+            )
+        );
+    }
+
+    #[test]
+    fn mysql_count_rewrite_preserves_limit_and_offset() {
+        let result = build_count_query_sql(CountQuerySqlOptions {
+            original_sql:
+                "SELECT a.*, b.* FROM a JOIN b ON b.a_id = a.id ORDER BY FIELD(b.id, 11, 10) LIMIT 2 OFFSET 1"
+                    .to_string(),
+            database_type: Some(DatabaseType::Mysql),
+        });
+
+        assert_eq!(
+            result.sql.as_deref(),
+            Some(
+                "SELECT COUNT(*) AS dbx_total_rows FROM (SELECT 1 AS dbx_count_value FROM a JOIN b ON b.a_id = a.id LIMIT 2 OFFSET 1) `dbx_count`;"
+            )
+        );
+    }
+
+    #[test]
+    fn mysql_count_rejects_ambiguous_cardinality_dependent_queries() {
+        for sql in [
+            "SELECT DISTINCT a.id AS id, b.id AS id FROM a JOIN b ON b.a_id = a.id",
+            "SELECT a.id AS id, b.id AS id FROM a JOIN b ON b.a_id = a.id GROUP BY a.id, b.id",
+            "SELECT a.id AS id, b.id AS id FROM a JOIN b ON b.a_id = a.id HAVING id > 0",
+            "SELECT a.id AS id, b.id AS id FROM a JOIN b ON b.a_id = a.id UNION ALL SELECT c.id AS id, d.id AS id FROM c JOIN d ON d.c_id = c.id",
+            "SELECT COUNT(*) AS id, SUM(a.id) AS id FROM a",
+        ] {
+            let result = build_count_query_sql(CountQuerySqlOptions {
+                original_sql: sql.to_string(),
+                database_type: Some(DatabaseType::Mysql),
+            });
+
+            assert_eq!(result, err("unsupported"), "{sql}");
+        }
+    }
+
+    #[test]
+    fn mysql_count_rejects_ambiguous_select_into() {
+        let result = build_count_query_sql(CountQuerySqlOptions {
+            original_sql: "SELECT a.id AS id, b.id AS id INTO OUTFILE 'dump.tsv' FROM a JOIN b ON b.a_id = a.id"
+                .to_string(),
+            database_type: Some(DatabaseType::Mysql),
+        });
+
+        assert!(!result.ok);
+        assert!(result.sql.is_none());
+    }
+
+    #[test]
+    fn mysql_count_keeps_parse_failure_fallback() {
+        let sql = "SELECT a.id AS id, FROM a";
+        let result = build_count_query_sql(CountQuerySqlOptions {
+            original_sql: sql.to_string(),
+            database_type: Some(DatabaseType::Mysql),
+        });
+
+        assert_eq!(
+            result.sql.as_deref(),
+            Some("SELECT COUNT(*) AS dbx_total_rows FROM (SELECT a.id AS id, FROM a) `dbx_count`;")
+        );
+    }
+
+    #[test]
+    fn non_mysql_count_keeps_ambiguous_projection_wrapper() {
+        let sql = "SELECT a.*, b.* FROM a JOIN b ON b.a_id = a.id ORDER BY b.id";
+        for database_type in [DatabaseType::Postgres, DatabaseType::Sqlite, DatabaseType::ClickHouse] {
+            let result = build_count_query_sql(CountQuerySqlOptions {
+                original_sql: sql.to_string(),
+                database_type: Some(database_type),
+            });
+            let alias = quote_table_identifier(Some(database_type), "dbx_count");
+
+            assert_eq!(
+                result.sql,
+                Some(format!("SELECT COUNT(*) AS dbx_total_rows FROM ({sql}) {alias};")),
+                "{database_type:?}"
+            );
+        }
     }
 
     #[test]

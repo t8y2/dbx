@@ -2,12 +2,13 @@
 import { computed, ref, watch, nextTick, onUnmounted } from "vue";
 import type { CSSProperties } from "vue";
 import { useI18n } from "vue-i18n";
-import { X, Pin, ChevronDown, Table2, Code2, TableProperties, PencilRuler, KeyRound, Pencil, Package, Lock, Copy, AlertTriangle, Network, Minimize2, Maximize2, Settings, CalendarClock, Activity, Gauge, ShieldCheck, Database, GitBranch } from "@lucide/vue";
+import { X, Pin, ChevronDown, Search, Table2, Code2, TableProperties, PencilRuler, KeyRound, Pencil, Package, Lock, Copy, AlertTriangle, Network, Minimize2, Maximize2, Settings, CalendarClock, Activity, Gauge, ShieldCheck, Database, GitBranch } from "@lucide/vue";
 import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
@@ -518,8 +519,24 @@ const showFixedTabScrollbar = computed(() => hasFixedTabOverflow.value && !isWra
 const showRegularTabOverflowControls = computed(() => regularTabs.value.length > 0 && hasTabOverflow.value && !isWrapLayout.value);
 const regularTabOverflowOpen = ref(false);
 const fixedTabOverflowOpen = ref(false);
+const tabSearchQuery = ref("");
+const filteredOpenTabs = computed(() => {
+  const query = tabSearchQuery.value.trim().toLocaleLowerCase();
+  if (!query) return queryStore.tabs;
+  return queryStore.tabs.filter((tab) => tabTitleText(tab).toLocaleLowerCase().includes(query) || tab.title.toLocaleLowerCase().includes(query));
+});
 const tabBarClass = computed(() => [isClassicLayout.value ? "bg-muted" : "border-b bg-background", hasFixedTabs.value ? "flex-col" : "", isClassicLayout.value && hasFixedTabs.value ? "border-b" : ""]);
 const regularTabRowClass = computed(() => [isClassicLayout.value ? "h-9 items-stretch" : "h-10 items-center px-2", isClassicLayout.value && !hasFixedTabs.value ? "border-b" : ""]);
+
+watch(regularTabOverflowOpen, (open) => {
+  tabSearchQuery.value = "";
+  if (open) nextTick(() => document.querySelector<HTMLInputElement>('[data-tab-search-input="regular"]')?.focus());
+});
+
+watch(fixedTabOverflowOpen, (open) => {
+  tabSearchQuery.value = "";
+  if (open) nextTick(() => document.querySelector<HTMLInputElement>('[data-tab-search-input="fixed"]')?.focus());
+});
 
 function tabMenuIcon(tab: QueryTab) {
   if (tab.externalSqlFileMissing) return AlertTriangle;
@@ -794,40 +811,47 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
               <ChevronDown class="h-4 w-4" />
             </button>
           </PopoverTrigger>
-          <PopoverContent align="end" class="w-auto min-w-56 max-w-80 max-h-[min(70vh,28rem)] gap-0 overflow-y-auto rounded-[6px] p-1" @click.stop @keydown.stop>
-            <CustomContextMenu v-for="tab in queryStore.tabs" :key="tab.id" :items="getTabMenuItems(tab)" v-slot="{ onContextMenu }">
-              <div
-                class="group flex w-full items-center gap-2 rounded-md px-1.5 py-1.5 text-left text-sm outline-hidden hover:bg-accent hover:text-accent-foreground focus-visible:bg-accent focus-visible:text-accent-foreground"
-                :class="tab.id === queryStore.activeTabId && !driverStoreActive && !settingsPageActive ? 'bg-accent/70 text-accent-foreground' : ''"
-                :title="tabTitleLabel(tab)"
-                role="menuitem"
-                tabindex="0"
-                @click="activateTabFromOverflow(tab.id, 'regular')"
-                @contextmenu="onContextMenu"
-                @keydown="onOverflowItemKeydown($event, tab.id, 'regular')"
-              >
-                <DatabaseIcon v-if="tab.mode === 'mq'" :db-type="tabDatabaseIconType(tab)" class="h-3.5 w-3.5 shrink-0" />
-                <component :is="tabMenuIcon(tab)" v-else :class="['h-3.5 w-3.5 shrink-0', tabIconClass(tab)]" />
-                <span class="inline-flex min-w-0 flex-1 items-center gap-0.5 overflow-hidden">
-                  <span v-if="isDirtyTab(tab)" aria-hidden="true" class="dirty-tab-marker">*</span>
-                  <span class="min-w-0 flex-1 truncate" :style="tabTitleStyle(tab)">{{ tabTitleText(tab) }}</span>
-                </span>
-                <Lock v-if="isConnectionReadonly(tab.connectionId)" class="h-3 w-3 shrink-0 text-muted-foreground" />
-                <Pin v-if="tab.pinned" class="h-3 w-3 shrink-0 fill-current text-primary" />
-                <span class="w-5 shrink-0">
-                  <button
-                    type="button"
-                    class="inline-flex rounded p-1 text-muted-foreground opacity-70 hover:bg-muted-foreground/20 hover:text-foreground group-hover:opacity-100"
-                    :aria-label="t('contextMenu.closeTab')"
-                    :title="t('contextMenu.closeTab')"
-                    @click="closeTabFromOverflow(tab.id, $event)"
-                    @mousedown.stop
-                  >
-                    <X class="h-3 w-3" />
-                  </button>
-                </span>
-              </div>
-            </CustomContextMenu>
+          <PopoverContent align="end" class="w-auto min-w-56 max-w-80 gap-0 rounded-[6px] p-1" @click.stop @keydown.stop>
+            <div class="relative border-b px-1 pb-1">
+              <Search class="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+              <Input data-tab-search-input="regular" v-model="tabSearchQuery" type="search" :placeholder="t('tabs.searchOpenTabs')" class="h-8 pl-7 text-sm" />
+            </div>
+            <div class="max-h-[min(70vh,28rem)] overflow-y-auto pt-1">
+              <CustomContextMenu v-for="tab in filteredOpenTabs" :key="tab.id" :items="getTabMenuItems(tab)" v-slot="{ onContextMenu }">
+                <div
+                  class="group flex w-full items-center gap-2 rounded-md px-1.5 py-1.5 text-left text-sm outline-hidden hover:bg-accent hover:text-accent-foreground focus-visible:bg-accent focus-visible:text-accent-foreground"
+                  :class="tab.id === queryStore.activeTabId && !driverStoreActive && !settingsPageActive ? 'bg-accent/70 text-accent-foreground' : ''"
+                  :title="tabTitleLabel(tab)"
+                  role="menuitem"
+                  tabindex="0"
+                  @click="activateTabFromOverflow(tab.id, 'regular')"
+                  @contextmenu="onContextMenu"
+                  @keydown="onOverflowItemKeydown($event, tab.id, 'regular')"
+                >
+                  <DatabaseIcon v-if="tab.mode === 'mq'" :db-type="tabDatabaseIconType(tab)" class="h-3.5 w-3.5 shrink-0" />
+                  <component :is="tabMenuIcon(tab)" v-else :class="['h-3.5 w-3.5 shrink-0', tabIconClass(tab)]" />
+                  <span class="inline-flex min-w-0 flex-1 items-center gap-0.5 overflow-hidden">
+                    <span v-if="isDirtyTab(tab)" aria-hidden="true" class="dirty-tab-marker">*</span>
+                    <span class="min-w-0 flex-1 truncate" :style="tabTitleStyle(tab)">{{ tabTitleText(tab) }}</span>
+                  </span>
+                  <Lock v-if="isConnectionReadonly(tab.connectionId)" class="h-3 w-3 shrink-0 text-muted-foreground" />
+                  <Pin v-if="tab.pinned" class="h-3 w-3 shrink-0 fill-current text-primary" />
+                  <span class="w-5 shrink-0">
+                    <button
+                      type="button"
+                      class="inline-flex rounded p-1 text-muted-foreground opacity-70 hover:bg-muted-foreground/20 hover:text-foreground group-hover:opacity-100"
+                      :aria-label="t('contextMenu.closeTab')"
+                      :title="t('contextMenu.closeTab')"
+                      @click="closeTabFromOverflow(tab.id, $event)"
+                      @mousedown.stop
+                    >
+                      <X class="h-3 w-3" />
+                    </button>
+                  </span>
+                </div>
+              </CustomContextMenu>
+              <p v-if="filteredOpenTabs.length === 0" class="px-2 py-4 text-center text-sm text-muted-foreground">{{ t("tabs.noMatchingTabs") }}</p>
+            </div>
           </PopoverContent>
         </Popover>
       </div>
@@ -935,44 +959,51 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
       <div v-if="showFixedTabScrollbar" class="relative z-30 flex shrink-0 items-center">
         <Popover v-model:open="fixedTabOverflowOpen">
           <PopoverTrigger as-child>
-            <button type="button" :class="['inline-flex shrink-0 items-center justify-center', tabOverflowControlClass].join(' ')" :aria-label="t('tabs.fixedTabs')" :title="t('tabs.fixedTabs')">
+            <button type="button" :class="['inline-flex shrink-0 items-center justify-center', tabOverflowControlClass].join(' ')" :aria-label="t('tabs.openTabs')" :title="t('tabs.openTabs')">
               <ChevronDown class="h-4 w-4" />
             </button>
           </PopoverTrigger>
-          <PopoverContent align="end" class="w-auto min-w-56 max-w-80 max-h-[min(70vh,28rem)] gap-0 overflow-y-auto rounded-[6px] p-1" @click.stop @keydown.stop>
-            <CustomContextMenu v-for="tab in fixedTabs" :key="tab.id" :items="getTabMenuItems(tab)" v-slot="{ onContextMenu }">
-              <div
-                class="group flex w-full items-center gap-2 rounded-md px-1.5 py-1.5 text-left text-sm outline-hidden hover:bg-accent hover:text-accent-foreground focus-visible:bg-accent focus-visible:text-accent-foreground"
-                :class="tab.id === queryStore.activeTabId && !driverStoreActive && !settingsPageActive ? 'bg-accent/70 text-accent-foreground' : ''"
-                :title="tabTitleLabel(tab)"
-                role="menuitem"
-                tabindex="0"
-                @click="activateTabFromOverflow(tab.id, 'fixed')"
-                @contextmenu="onContextMenu"
-                @keydown="onOverflowItemKeydown($event, tab.id, 'fixed')"
-              >
-                <DatabaseIcon v-if="tab.mode === 'mq'" :db-type="tabDatabaseIconType(tab)" class="h-3.5 w-3.5 shrink-0" />
-                <component :is="tabMenuIcon(tab)" v-else :class="['h-3.5 w-3.5 shrink-0', tabIconClass(tab)]" />
-                <span class="inline-flex min-w-0 flex-1 items-center gap-0.5 overflow-hidden">
-                  <span v-if="isDirtyTab(tab)" aria-hidden="true" class="dirty-tab-marker">*</span>
-                  <span class="min-w-0 flex-1 truncate" :style="tabTitleStyle(tab)">{{ tabTitleText(tab) }}</span>
-                </span>
-                <Lock v-if="isConnectionReadonly(tab.connectionId)" class="h-3 w-3 shrink-0 text-muted-foreground" />
-                <Pin class="h-3 w-3 shrink-0 fill-current text-primary" />
-                <span class="w-5 shrink-0">
-                  <button
-                    type="button"
-                    class="inline-flex rounded p-1 text-muted-foreground opacity-70 hover:bg-muted-foreground/20 hover:text-foreground group-hover:opacity-100"
-                    :aria-label="t('contextMenu.closeTab')"
-                    :title="t('contextMenu.closeTab')"
-                    @click="closeTabFromOverflow(tab.id, $event)"
-                    @mousedown.stop
-                  >
-                    <X class="h-3 w-3" />
-                  </button>
-                </span>
-              </div>
-            </CustomContextMenu>
+          <PopoverContent align="end" class="w-auto min-w-56 max-w-80 gap-0 rounded-[6px] p-1" @click.stop @keydown.stop>
+            <div class="relative border-b px-1 pb-1">
+              <Search class="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+              <Input data-tab-search-input="fixed" v-model="tabSearchQuery" type="search" :placeholder="t('tabs.searchOpenTabs')" class="h-8 pl-7 text-sm" />
+            </div>
+            <div class="max-h-[min(70vh,28rem)] overflow-y-auto pt-1">
+              <CustomContextMenu v-for="tab in filteredOpenTabs" :key="tab.id" :items="getTabMenuItems(tab)" v-slot="{ onContextMenu }">
+                <div
+                  class="group flex w-full items-center gap-2 rounded-md px-1.5 py-1.5 text-left text-sm outline-hidden hover:bg-accent hover:text-accent-foreground focus-visible:bg-accent focus-visible:text-accent-foreground"
+                  :class="tab.id === queryStore.activeTabId && !driverStoreActive && !settingsPageActive ? 'bg-accent/70 text-accent-foreground' : ''"
+                  :title="tabTitleLabel(tab)"
+                  role="menuitem"
+                  tabindex="0"
+                  @click="activateTabFromOverflow(tab.id, 'fixed')"
+                  @contextmenu="onContextMenu"
+                  @keydown="onOverflowItemKeydown($event, tab.id, 'fixed')"
+                >
+                  <DatabaseIcon v-if="tab.mode === 'mq'" :db-type="tabDatabaseIconType(tab)" class="h-3.5 w-3.5 shrink-0" />
+                  <component :is="tabMenuIcon(tab)" v-else :class="['h-3.5 w-3.5 shrink-0', tabIconClass(tab)]" />
+                  <span class="inline-flex min-w-0 flex-1 items-center gap-0.5 overflow-hidden">
+                    <span v-if="isDirtyTab(tab)" aria-hidden="true" class="dirty-tab-marker">*</span>
+                    <span class="min-w-0 flex-1 truncate" :style="tabTitleStyle(tab)">{{ tabTitleText(tab) }}</span>
+                  </span>
+                  <Lock v-if="isConnectionReadonly(tab.connectionId)" class="h-3 w-3 shrink-0 text-muted-foreground" />
+                  <Pin v-if="tab.pinned" class="h-3 w-3 shrink-0 fill-current text-primary" />
+                  <span class="w-5 shrink-0">
+                    <button
+                      type="button"
+                      class="inline-flex rounded p-1 text-muted-foreground opacity-70 hover:bg-muted-foreground/20 hover:text-foreground group-hover:opacity-100"
+                      :aria-label="t('contextMenu.closeTab')"
+                      :title="t('contextMenu.closeTab')"
+                      @click="closeTabFromOverflow(tab.id, $event)"
+                      @mousedown.stop
+                    >
+                      <X class="h-3 w-3" />
+                    </button>
+                  </span>
+                </div>
+              </CustomContextMenu>
+              <p v-if="filteredOpenTabs.length === 0" class="px-2 py-4 text-center text-sm text-muted-foreground">{{ t("tabs.noMatchingTabs") }}</p>
+            </div>
           </PopoverContent>
         </Popover>
       </div>

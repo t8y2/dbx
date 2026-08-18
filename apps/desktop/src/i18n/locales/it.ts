@@ -1375,6 +1375,8 @@ export default withEnglishFallback({
     scrollLeft: "Scorri schede a sinistra",
     scrollRight: "Scorri schede a destra",
     openTabs: "Schede aperte",
+    searchOpenTabs: "Cerca schede aperte...",
+    noMatchingTabs: "Nessuna scheda corrispondente",
     fixedTabs: "Schede bloccate",
     openDataTabs: "Tabelle aperte",
     gridfs: "GridFS",

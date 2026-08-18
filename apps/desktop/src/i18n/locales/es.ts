@@ -1377,6 +1377,8 @@ export default withEnglishFallback({
     scrollLeft: "Desplazar pestañas a la izquierda",
     scrollRight: "Desplazar pestañas a la derecha",
     openTabs: "Pestañas abiertas",
+    searchOpenTabs: "Buscar pestañas abiertas...",
+    noMatchingTabs: "No se encontraron pestañas",
     fixedTabs: "Pestañas fijadas",
     openDataTabs: "Tablas abiertas",
     gridfs: "GridFS",

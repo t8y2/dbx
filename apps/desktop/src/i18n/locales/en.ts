@@ -1400,6 +1400,8 @@ export default {
     scrollLeft: "Scroll tabs left",
     scrollRight: "Scroll tabs right",
     openTabs: "Open tabs",
+    searchOpenTabs: "Search open tabs...",
+    noMatchingTabs: "No matching tabs",
     fixedTabs: "Fixed tabs",
     openDataTabs: "Open tables",
   },

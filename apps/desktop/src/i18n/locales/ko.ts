@@ -1281,6 +1281,8 @@ export default withEnglishFallback({
     scrollLeft: "탭을 왼쪽으로 스크롤",
     scrollRight: "탭을 오른쪽으로 스크롤",
     openTabs: "열린 탭",
+    searchOpenTabs: "열린 탭 검색...",
+    noMatchingTabs: "일치하는 탭이 없습니다",
     fixedTabs: "고정 탭",
     openDataTabs: "열린 테이블",
   },

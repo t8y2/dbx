@@ -1377,6 +1377,8 @@ export default withEnglishFallback({
     scrollLeft: "Rolar abas para a esquerda",
     scrollRight: "Rolar abas para a direita",
     openTabs: "Abas abertas",
+    searchOpenTabs: "Pesquisar abas abertas...",
+    noMatchingTabs: "Nenhuma aba correspondente",
     fixedTabs: "Abas fixadas",
     openDataTabs: "Tabelas abertas",
     gridfs: "GridFS",

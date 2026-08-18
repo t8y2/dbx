@@ -1394,6 +1394,8 @@ export default withEnglishFallback({
     scrollLeft: "タブを左にスクロール",
     scrollRight: "タブを右にスクロール",
     openTabs: "開いているタブ",
+    searchOpenTabs: "開いているタブを検索...",
+    noMatchingTabs: "一致するタブがありません",
     fixedTabs: "固定タブ",
     openDataTabs: "開いているテーブル",
     zookeeper: "ZooKeeper",

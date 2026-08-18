@@ -1324,6 +1324,8 @@ export default withEnglishFallback({
     scrollLeft: "向左滚动标签页",
     scrollRight: "向右滚动标签页",
     openTabs: "已打开的标签页",
+    searchOpenTabs: "搜索已打开的标签页...",
+    noMatchingTabs: "未找到匹配的标签页",
     fixedTabs: "固定标签页",
     openDataTabs: "已打开的数据表",
   },

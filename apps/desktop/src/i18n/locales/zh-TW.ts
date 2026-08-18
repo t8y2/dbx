@@ -1376,6 +1376,8 @@ export default withEnglishFallback({
     scrollLeft: "向左捲動分頁",
     scrollRight: "向右捲動分頁",
     openTabs: "已開啟的分頁",
+    searchOpenTabs: "搜尋已開啟的分頁...",
+    noMatchingTabs: "找不到符合的分頁",
     fixedTabs: "固定分頁",
     openDataTabs: "已開啟的資料表",
     gridfs: "GridFS",

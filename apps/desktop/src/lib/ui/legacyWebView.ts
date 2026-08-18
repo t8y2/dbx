@@ -5,6 +5,7 @@ type CssSupportCheck = {
   property?: string;
   value?: string;
   condition?: string;
+  test?: () => boolean;
 };
 
 const MODERN_CSS_FEATURES: CssSupportCheck[] = [
@@ -14,9 +15,21 @@ const MODERN_CSS_FEATURES: CssSupportCheck[] = [
   { name: "has-selector", condition: "selector(:has(*))" },
   { name: "dynamic-viewport", property: "height", value: "100dvh" },
   { name: "min-function", property: "width", value: "min(100%, 1px)" },
+  {
+    name: "media-query-range",
+    test: () => {
+      if (typeof window === "undefined" || typeof window.matchMedia !== "function") return false;
+      try {
+        return window.matchMedia("(width >= 0px)").matches;
+      } catch {
+        return false;
+      }
+    },
+  },
 ];
 
 function supports(check: CssSupportCheck): boolean {
+  if (check.test) return check.test();
   if (typeof CSS === "undefined" || typeof CSS.supports !== "function") return false;
 
   try {

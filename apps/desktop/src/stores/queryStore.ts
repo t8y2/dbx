@@ -7,7 +7,7 @@ import { orderPinnedFirst } from "@/lib/app/pinnedItems";
 import { canCancelQueryExecution } from "@/lib/sql/queryExecutionState";
 import { buildExplainSql, parseExplainResult, parseDamengExplainText, parseOracleExplainText, sqlServerExplainResult, type BuildExplainSqlResult } from "@/lib/diagram/explainPlan";
 import { mysqlExplainCompatibilityHint } from "@/lib/diagram/mysqlExplainCompatibility";
-import { allEditableColumnsWriteable, allPrimaryKeysPresent, analyzeEditableQueryEditability, resolveMetadataColumnName, resolveSourceColumnsByOrdinal, sourceColumnsForResult, type EditableQueryInfo, type EditableQuerySource } from "@/lib/sql/sqlAnalysis";
+import { allEditableColumnsWriteable, allPrimaryKeysPresent, analyzeEditableQueryEditability, analyzeSelectStructureForDisplay, resolveMetadataColumnName, resolveSourceColumnsByOrdinal, sourceColumnsForResult, type EditableQueryInfo, type EditableQuerySource } from "@/lib/sql/sqlAnalysis";
 import { buildQueryWithHiddenPrimaryKeys, hiddenResultColumnIndexes, type HiddenPrimaryKeyProjection } from "@/lib/sql/editableQueryHiddenKeys";
 import { ACTIVE_TAB_STORAGE_KEY, OPEN_TABS_STORAGE_KEY, restoreOpenTabsPayload, restoreOpenTabsState, serializeOpenTabs } from "@/lib/app/openTabsPersistence";
 import {
@@ -41,7 +41,8 @@ import { TABLE_DATA_EXPORT_PAGE_SIZE } from "@/lib/table/tableDataExport";
 import { tableMetaForDataTab } from "@/lib/table/tableDataTabMeta";
 import { dataTabExecutionDatabase } from "@/lib/table/dataTabExecutionDatabase";
 import { tableOpenPageLimit } from "@/lib/table/tableOpenPageLimit";
-import { getCachedTableMetadata, loadTableIndexes, loadTableMetadata, type TableMetadataRequest } from "@/lib/metadata/tableMetadataCache";
+import { getCachedTableMetadata, loadTableColumns, loadTableIndexes, loadTableMetadata, type TableMetadataRequest } from "@/lib/metadata/tableMetadataCache";
+import { MetadataTaskLimiter } from "@/lib/metadata/metadataTaskLimiter";
 import { buildTableSelectSql, quoteTableDataIdentifier } from "@/lib/table/tableSelectSql";
 import { connectionObjectTreeNodeSchema, connectionQueryExecutionSchema, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection, gaussdbCountQueryDopHint, metadataSchemaForConnection } from "@/lib/database/jdbcDialect";
 import { frontendQueryTimeoutDelayMs, frontendQueryTimeoutSecsForSql, queryTimeoutSecsForConnection } from "@/lib/sql/queryTimeout";
@@ -77,10 +78,20 @@ import type { SavedSqlFile } from "@/types/database";
 import i18n from "@/i18n";
 import { translateBackendError } from "@/i18n/backend-errors";
 import type { SqlExecutionTargetContext } from "@/lib/database/sqlExecutionTargetRegistry";
+import type { DriverProfileWorkspaceScope } from "@/lib/database/driverProfileExtensions";
 import type { MultiDbExecutionTarget, MultiDbResultRunExecution } from "@/types/sqlExecution";
 
 const ORACLE_LIKE_METADATA_TYPES = new Set<string>(["oracle", "dameng", "oceanbase-oracle"]);
 const ORACLE_DEFERRED_LOB_TYPES = new Set<string>(["CLOB", "NCLOB", "BLOB", "BFILE"]);
+
+// Bounded concurrency for grouped-query display column loads, scoped per
+// connection so different connections never block each other. Matches the
+// project's existing completion-metadata concurrency policy (<2>).
+const GROUPED_DISPLAY_METADATA_CONCURRENCY = 2;
+const GROUPED_DISPLAY_LIMITER_SCOPE_PREFIX = "query-column-comments:";
+const groupedDisplayMetadataLimiter = new MetadataTaskLimiter(GROUPED_DISPLAY_METADATA_CONCURRENCY, (event) => {
+  console.debug("[DBX][metadata-load:grouped-display-limiter]", event);
+});
 const UPPERCASE_FOLDED_METADATA_TYPES = new Set<string>([...ORACLE_LIKE_METADATA_TYPES, "saphana"]);
 const HIDDEN_QUERY_KEY_DATABASE_TYPES = new Set<DatabaseType>(["mysql", "postgres", "sqlserver", "oracle"]);
 const QUERY_RESULT_EXPORT_UNSUPPORTED_ERROR = "Streaming export is unsupported for this query. Simplify it or use a supported driver.";
@@ -1804,6 +1815,32 @@ export const useQueryStore = defineStore("query", () => {
       isCancelling: false,
       isExplaining: false,
       mode: "databases",
+    });
+    activeTabId.value = id;
+    return id;
+  }
+
+  function openDriverProfileWorkspace(connectionId: string, database: string, title: string, mode: QueryTab["mode"], tabScope: DriverProfileWorkspaceScope = "database", workspaceBranch?: string) {
+    const existing = tabs.value.find((tab) => tab.mode === mode && tab.connectionId === connectionId && (tabScope === "connection" || tab.database === database));
+    if (existing) {
+      if (existing.database !== database) updateDatabase(existing.id, database);
+      existing.workspaceBranch = workspaceBranch;
+      switchTab(existing.id);
+      return existing.id;
+    }
+
+    const id = uuid();
+    tabs.value.push({
+      id,
+      title,
+      connectionId,
+      database,
+      workspaceBranch,
+      sql: "",
+      isExecuting: false,
+      isCancelling: false,
+      isExplaining: false,
+      mode,
     });
     activeTabId.value = id;
     return id;
@@ -3539,6 +3576,25 @@ export const useQueryStore = defineStore("query", () => {
     };
   }
 
+  function loadedEditableSourceFromColumns(target: EditableSourceMetadataTarget, loadedColumns: Awaited<ReturnType<typeof loadTableColumns>>): LoadedEditableSource {
+    return {
+      source: target.source,
+      analysis: target.analysis,
+      tableMeta: {
+        catalog: target.request.catalog,
+        database: target.request.database,
+        schema: target.writeSchema,
+        tableName: target.request.tableName,
+        tableType: loadedColumns.tableType,
+        columns: loadedColumns.columns,
+        // Display-only enrichment never resolves row identity (indexes), so
+        // there are no primary keys to carry; resolveMultiSourceColumnInfo only
+        // consumes `source` + `columns`.
+        primaryKeys: [],
+      },
+    };
+  }
+
   async function loadEditableQuerySource(tab: QueryTab, analysis: EditableQueryInfo, source: EditableQuerySource, conn: ConnectionConfig | undefined, dbType: string, executionDatabase: string, traceId?: string, elapsed?: () => string): Promise<LoadedEditableSource> {
     const target = resolveEditableSourceMetadataTarget(tab, analysis, source, conn, dbType, executionDatabase);
     queryExecutionLog("info", "metadata:table:start", {
@@ -3669,6 +3725,51 @@ export const useQueryStore = defineStore("query", () => {
     }
   }
 
+  /**
+   * Display-only result-column enrichment for aggregated (GROUP BY / HAVING)
+   * results: parse the SELECT structure, load every source table's metadata,
+   * resolve each result column back to exactly one base-table column by
+   * projection ordinal, and return the resolved comments + display mapping.
+   * Best-effort by design: returns `undefined` when the statement cannot be
+   * structurally parsed or source metadata cannot be loaded — the query result
+   * itself and editability are never affected.
+   */
+  async function resolveAggregationDisplayColumnInfo(tab: QueryTab, sql: string, executionDatabase: string, traceId: string | undefined): Promise<{ comments: Array<string | undefined>; mapping: Array<QueryResultSourceColumnRef | undefined> } | undefined> {
+    if (tab.mode !== "query" || !tab.connectionId || !tab.result || !tab.result.columns.length) return undefined;
+    const conn = useConnectionStore().getConfig(tab.connectionId);
+    const dbType = conn?.db_type || "";
+    const analysis = analyzeSelectStructureForDisplay(sql);
+    if (!analysis) return undefined;
+    const sources = editableQuerySources(analysis);
+    if (!sources.length) return undefined;
+    try {
+      // Resolve every source's metadata target up front, then load *columns
+      // only* (display payload — no index discovery) under a connection-scoped
+      // bounded-concurrency limiter. The shared table-column cache/in-flight
+      // coordinator deduplicates identical tables across concurrent callers,
+      // so this path issues no indexes requests and never loads full editable
+      // metadata.
+      const loadedSources: LoadedEditableSource[] = [];
+      const targets = sources.map((source) => resolveEditableSourceMetadataTarget(tab, analysis, source, conn, dbType, executionDatabase));
+      const limiterScope = `${GROUPED_DISPLAY_LIMITER_SCOPE_PREFIX}${tab.connectionId}`;
+      await Promise.all(
+        targets.map((target) =>
+          groupedDisplayMetadataLimiter.run(limiterScope, "query-column-comments", async () => {
+            const loadedColumns = await loadTableColumns({
+              ...target.request,
+              traceLogger: (event) => queryExecutionLog("debug", "metadata:table-columns-trace", { sourceTraceId: traceId, ...event }),
+            });
+            loadedSources.push(loadedEditableSourceFromColumns(target, loadedColumns));
+          }),
+        ),
+      );
+      return resolveMultiSourceColumnInfo(dbType, analysis, tab.result.columns, loadedSources);
+    } catch (err) {
+      console.error("[DBX] ERROR fetching columns for grouped query metadata:", err);
+      return undefined;
+    }
+  }
+
   async function buildQueryMetadataPatch(tab: QueryTab, sql: string, executionDatabase: string, traceId?: string, elapsed?: () => string, hiddenPrimaryKeys: HiddenPrimaryKeyProjection[] = []): Promise<QueryMetadataPatch | undefined> {
     if (tab.mode !== "query") return;
     if (!tab.result || !tab.result.columns.length) {
@@ -3689,11 +3790,18 @@ export const useQueryStore = defineStore("query", () => {
       elapsed: elapsed?.(),
     });
     if (!editability.editable) {
+      // Grouped (aggregation) results stay read-only, but their directly
+      // projected base-table columns can still be resolved for display metadata
+      // (column comments). This enrichment is display-only — it never enables
+      // row mutation for aggregated results (fixes #6463). Every other
+      // non-editable reason keeps the previous behavior.
+      const displayInfo = editability.reason === "aggregation" ? await resolveAggregationDisplayColumnInfo(tab, sql, executionDatabase, traceId) : undefined;
       return {
         queryAnalysis: undefined,
         querySourceColumns: undefined,
         queryEditabilityReason: editability.reason,
         tableMeta: undefined,
+        ...(displayInfo ? { resultColumnComments: displayInfo.comments, queryDisplaySourceColumns: displayInfo.mapping } : {}),
       };
     }
     const analysis = editability.analysis;
@@ -5976,6 +6084,7 @@ export const useQueryStore = defineStore("query", () => {
       exportTableName: options.exportTableName,
       exportColumnTypes: options.exportColumnTypes,
       numericColumnRightAlign: settings.numericColumnRightAlign,
+      identifierQuote: connStore.connectionIdentifierQuote(location.connectionId),
     };
   }
 
@@ -6011,6 +6120,7 @@ export const useQueryStore = defineStore("query", () => {
       executionId: uuid(),
       numericColumnRightAlign: settings.numericColumnRightAlign,
       columnComments,
+      identifierQuote: connStore.connectionIdentifierQuote(tab.connectionId),
     };
 
     const tracker = useExportTracker();
@@ -6095,6 +6205,7 @@ export const useQueryStore = defineStore("query", () => {
     rollbackTransaction,
     renameTab,
     openDatabaseBrowser,
+    openDriverProfileWorkspace,
     openObjectBrowser,
     openMongoGridFs,
     openMongoBucket,

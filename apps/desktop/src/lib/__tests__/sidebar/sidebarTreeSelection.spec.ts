@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { filterSidebarModifierSelectionIds, selectedSidebarBatchTargets, supportsSidebarModifierSelection } from "@/lib/sidebar/sidebarTreeSelection";
+import { describe, expect, it, vi } from "vitest";
+import { filterSidebarModifierSelectionIds, pruneTreeSelectionToVisibleNodeIds, selectedSidebarBatchTargets, supportsSidebarModifierSelection } from "@/lib/sidebar/sidebarTreeSelection";
 import type { TreeNode } from "@/types/database";
 
 function node(id: string, type: TreeNode["type"]): TreeNode {
@@ -29,6 +29,28 @@ describe("sidebar modifier selection", () => {
         nodes.map((item) => item.id),
       ),
     ).toEqual(["table-1", "table-2"]);
+  });
+});
+
+describe("visible sidebar selection pruning", () => {
+  it("checks only selected identifiers against the existing visible-node index", () => {
+    const has = vi.fn((id: string) => id === "table-2");
+
+    expect(
+      pruneTreeSelectionToVisibleNodeIds(
+        { has },
+        {
+          nodeIds: ["table-1", "table-2", "table-3"],
+          activeNodeId: "table-3",
+          anchorNodeId: "table-1",
+        },
+      ),
+    ).toEqual({
+      nodeIds: ["table-2"],
+      activeNodeId: "table-2",
+      anchorNodeId: "table-2",
+    });
+    expect(has).toHaveBeenCalledTimes(5);
   });
 });
 

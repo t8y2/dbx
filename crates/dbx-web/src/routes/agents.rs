@@ -7,10 +7,12 @@ use dbx_core::agent_manager::{
     AgentDriverInfo, AgentState, DriverStoreUsage, JavaRuntimeConfig, JavaRuntimeMode, DEFAULT_JRE_KEY,
 };
 use dbx_core::agent_service::{
-    build_agent_list, clear_agent_download_cache, fetch_registry, import_agent_driver,
-    import_agents_from_package as import_agents_from_package_core, inspect_offline_package, install_agent_driver,
-    invalidate_registry_cache, reinstall_agent_jre, uninstall_agent_driver, uninstall_agent_jre,
-    upgrade_all_agent_drivers, AgentProgressEvent, OfflineImportPlan,
+    batch_cancellation_key, build_agent_list, cancel_agent_batch_upgrade, cancel_agent_driver_install,
+    clear_agent_download_cache, fetch_registry, fetch_registry_from_claimed, import_agent_driver,
+    import_agents_from_package as import_agents_from_package_core, inspect_offline_package,
+    install_agent_driver_claimed, install_cancellation_key, invalidate_registry_cache, reinstall_agent_jre,
+    uninstall_agent_driver, uninstall_agent_jre, upgrade_all_agent_drivers_claimed, AgentProgressEvent,
+    OfflineImportPlan,
 };
 use dbx_core::driver_runtime::DriverRuntimeSummary;
 use futures::Stream;
@@ -120,34 +122,86 @@ pub async fn install_agent(
     State(state): State<Arc<WebState>>,
     Json(req): Json<AgentTypeRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    ensure_no_agent_update_blockers(&state.app, std::slice::from_ref(&req.db_type)).await.map_err(AppError::from)?;
-    let operation_id = req.operation_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    let tx = progress_sender(&state, "global").await;
-    install_agent_driver(&state.app.agent_manager, &req.db_type, |event| {
-        send_progress_event(&tx, event.with_operation_id(&operation_id))
-    })
-    .await
-    .map_err(AppError::from)?;
-    Ok(Json(serde_json::json!({ "ok": true })))
+    // Resolve the operation id first, then register the cancellation token under
+    // it BEFORE any awaitable setup (blocker check, lock wait, registry fetch)
+    // so a cancel fired while the modal is showing is observed by this exact
+    // install instead of being silently lost or crossing into a second
+    // same-driver install.
+    let operation_id = req.operation_id.clone().unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let cancellation =
+        state.app.agent_manager.begin_install_cancellation(&install_cancellation_key(&operation_id)).await;
+    let result = async {
+        ensure_no_agent_update_blockers(&state.app, std::slice::from_ref(&req.db_type))
+            .await
+            .map_err(AppError::from)?;
+        let tx = progress_sender(&state, "global").await;
+        install_agent_driver_claimed(
+            &state.app.agent_manager,
+            &req.db_type,
+            |event| send_progress_event(&tx, event.with_operation_id(&operation_id)),
+            &cancellation,
+        )
+        .await
+        .map_err(AppError::from)?;
+        Ok(Json(serde_json::json!({ "ok": true })))
+    }
+    .await;
+    state.app.agent_manager.finish_install_cancellation(&install_cancellation_key(&operation_id), &cancellation).await;
+    result
 }
 
 pub async fn upgrade_all_agents(
     State(state): State<Arc<WebState>>,
     Json(req): Json<AgentOperationRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let registry = fetch_registry().await.map_err(AppError::from)?;
-    let agents = build_agent_list(&state.app.agent_manager, Some(&registry));
-    let updatable: Vec<String> =
-        agents.iter().filter(|agent| agent.update_available).map(|agent| agent.db_type.clone()).collect();
-    ensure_no_agent_update_blockers(&state.app, &updatable).await.map_err(AppError::from)?;
-    let operation_id = req.operation_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    let tx = progress_sender(&state, "global").await;
-    let result = upgrade_all_agent_drivers(&state.app.agent_manager, |event| {
-        send_progress_event(&tx, event.with_operation_id(&operation_id))
-    })
-    .await
-    .map_err(AppError::from)?;
-    Ok(Json(serde_json::to_value(result).map_err(|err| AppError::from(err.to_string()))?))
+    // Resolve the batch operation id first, then register the batch token under
+    // it BEFORE the registry fetch + blocker check so a cancel fired while the
+    // batch is still setting up aborts it.
+    let operation_id = req.operation_id.clone().unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let cancellation = state.app.agent_manager.begin_install_cancellation(&batch_cancellation_key(&operation_id)).await;
+    let result = async {
+        // The batch token is registered above; race the pre-blocker registry
+        // fetch against it so a cancel fired during batch setup aborts promptly
+        // instead of waiting out the 10s client timeout.
+        let registry = fetch_registry_from_claimed(dbx_core::DownloadSource::Official, &[cancellation.as_ref()])
+            .await
+            .map_err(AppError::from)?;
+        let agents = build_agent_list(&state.app.agent_manager, Some(&registry));
+        let updatable: Vec<String> =
+            agents.iter().filter(|agent| agent.update_available).map(|agent| agent.db_type.clone()).collect();
+        ensure_no_agent_update_blockers(&state.app, &updatable).await.map_err(AppError::from)?;
+        let tx = progress_sender(&state, "global").await;
+        let result = upgrade_all_agent_drivers_claimed(
+            &state.app.agent_manager,
+            |event| send_progress_event(&tx, event.with_operation_id(&operation_id)),
+            &cancellation,
+            &operation_id,
+        )
+        .await
+        .map_err(AppError::from)?;
+        Ok(Json(serde_json::to_value(result).map_err(|err| AppError::from(err.to_string()))?))
+    }
+    .await;
+    state.app.agent_manager.finish_install_cancellation(&batch_cancellation_key(&operation_id), &cancellation).await;
+    result
+}
+
+pub async fn cancel_install(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<AgentTypeRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    cancel_agent_driver_install(&state.app.agent_manager, &req.db_type, req.operation_id.as_deref())
+        .await
+        .map_err(AppError::from)?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+pub async fn cancel_upgrade_all(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<AgentOperationRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    cancel_agent_batch_upgrade(&state.app.agent_manager, req.operation_id.as_deref()).await.map_err(AppError::from)?;
+    Ok(Json(serde_json::json!({ "ok": true })))
 }
 
 pub async fn check_agent_update_blockers(

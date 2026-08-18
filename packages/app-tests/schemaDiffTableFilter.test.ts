@@ -63,3 +63,79 @@ test("rejects invalid schema diff table regex", () => {
     /Invalid include table name regex/,
   );
 });
+
+test("respects explicit visual table selection before loading details", () => {
+  const filter = compileSchemaDiffTableFilter(normalizeSchemaDiffCompareOptions({}));
+
+  const tables = [table("a"), table("b"), table("c"), table("d")];
+  const result = filterSchemaDiffTables(tables, tables, filter, undefined, ["a", "c"]);
+
+  assert.deepEqual(
+    result.sourceTables.map((item) => item.name),
+    ["a", "c"],
+  );
+});
+
+test("intersects visual selection with the include regex", () => {
+  const filter = compileSchemaDiffTableFilter(
+    normalizeSchemaDiffCompareOptions({
+      tableIncludePattern: "^user_",
+    }),
+  );
+
+  const tables = [table("user_a"), table("user_b"), table("order")];
+  const result = filterSchemaDiffTables(tables, tables, filter, undefined, ["user_a", "user_b", "order"]);
+
+  assert.deepEqual(
+    result.sourceTables.map((item) => item.name),
+    ["user_a", "user_b"],
+  );
+});
+
+test("intersects visual selection with the exclude regex", () => {
+  const filter = compileSchemaDiffTableFilter(
+    normalizeSchemaDiffCompareOptions({
+      tableExcludePattern: "_backup$",
+    }),
+  );
+
+  const tables = [table("user"), table("user_backup")];
+  const result = filterSchemaDiffTables(tables, tables, filter, undefined, ["user", "user_backup"]);
+
+  assert.deepEqual(
+    result.sourceTables.map((item) => item.name),
+    ["user"],
+  );
+});
+
+test("undefined visual selection keeps legacy all-tables behavior", () => {
+  const filter = compileSchemaDiffTableFilter(
+    normalizeSchemaDiffCompareOptions({
+      tableIncludePattern: "^user_",
+    }),
+  );
+  const tables = [table("user_a"), table("user_b"), table("order")];
+  const result = filterSchemaDiffTables(tables, tables, filter, undefined, undefined);
+
+  assert.deepEqual(
+    result.sourceTables.map((item) => item.name),
+    ["user_a", "user_b"],
+  );
+});
+
+test("explicit empty selection remains restricted after option normalization", () => {
+  const options = normalizeSchemaDiffCompareOptions({ selectedTables: [] });
+  assert.deepEqual(options.selectedTables, []);
+  const filter = compileSchemaDiffTableFilter(options);
+  const result = filterSchemaDiffTables([table("a")], [table("a")], filter, undefined, options.selectedTables);
+  assert.deepEqual(result.sourceTables, []);
+  assert.deepEqual(result.targetTables, []);
+});
+
+test("selected source tables remain available for create diffs when the target is missing", () => {
+  const options = normalizeSchemaDiffCompareOptions({});
+  const filter = compileSchemaDiffTableFilter(options);
+  const result = filterSchemaDiffTables([table("a"), table("b")], [table("a"), table("extra")], filter, undefined, ["a", "b"]);
+  assert.deepEqual(result.sourceTables.map((item) => item.name), ["a", "b"]);
+  assert.deepEqual(result.targetTables.map((item) => item.name), ["a"]);
+});

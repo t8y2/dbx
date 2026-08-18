@@ -6,6 +6,10 @@ export type VisibleTreeSelection = {
   anchorNodeId: string | null;
 };
 
+export type VisibleTreeNodeIdLookup = {
+  has(nodeId: string): boolean;
+};
+
 export function supportsSidebarModifierSelection(node: Pick<TreeNode, "type">): boolean {
   return node.type !== "database" && node.type !== "schema" && !node.type.startsWith("group-");
 }
@@ -21,12 +25,15 @@ export function selectedTreeNodesInVisibleOrder(visibleNodes: TreeNode[], select
   return visibleNodes.filter((node) => ids.has(node.id));
 }
 
-export function pruneTreeSelectionToVisibleNodes(visibleNodes: readonly TreeNode[], selection: VisibleTreeSelection): VisibleTreeSelection {
-  const visibleIds = new Set(visibleNodes.map((node) => node.id));
-  const nodeIds = selection.nodeIds.filter((id) => visibleIds.has(id));
-  const activeNodeId = selection.activeNodeId && visibleIds.has(selection.activeNodeId) ? selection.activeNodeId : (nodeIds[0] ?? null);
-  const anchorNodeId = selection.anchorNodeId && visibleIds.has(selection.anchorNodeId) ? selection.anchorNodeId : activeNodeId;
+export function pruneTreeSelectionToVisibleNodeIds(visibleNodeIds: VisibleTreeNodeIdLookup, selection: VisibleTreeSelection): VisibleTreeSelection {
+  const nodeIds = selection.nodeIds.filter((id) => visibleNodeIds.has(id));
+  const activeNodeId = selection.activeNodeId && visibleNodeIds.has(selection.activeNodeId) ? selection.activeNodeId : (nodeIds[0] ?? null);
+  const anchorNodeId = selection.anchorNodeId && visibleNodeIds.has(selection.anchorNodeId) ? selection.anchorNodeId : activeNodeId;
   return { nodeIds, activeNodeId, anchorNodeId };
+}
+
+export function pruneTreeSelectionToVisibleNodes(visibleNodes: readonly TreeNode[], selection: VisibleTreeSelection): VisibleTreeSelection {
+  return pruneTreeSelectionToVisibleNodeIds(new Set(visibleNodes.map((node) => node.id)), selection);
 }
 
 export function selectedSidebarBatchTargets(activeNode: TreeNode, selectedNodes: readonly TreeNode[], canUseTarget: (node: TreeNode) => boolean): TreeNode[] {

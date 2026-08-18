@@ -144,6 +144,7 @@ async fn live_postgres_query_result_export_uses_single_streamed_query() {
         export_table_name: None,
         export_column_types: None,
         column_comments: None,
+        identifier_quote: None,
         numeric_column_right_align: false,
     };
     let done_seen = AtomicBool::new(false);
@@ -224,6 +225,7 @@ async fn live_postgres_query_result_xlsx_preserves_temporal_cell_types() {
         export_table_name: None,
         export_column_types: None,
         column_comments: None,
+        identifier_quote: None,
         numeric_column_right_align: false,
     };
 
@@ -293,6 +295,7 @@ async fn live_postgres_numeric_xlsx_ignores_fractional_trailing_zeros() {
         export_table_name: None,
         export_column_types: None,
         column_comments: None,
+        identifier_quote: None,
         numeric_column_right_align: true,
     };
 
@@ -367,6 +370,7 @@ async fn live_postgres_truncated_batch_result_export_replays_safe_temp_setup() {
         export_table_name: None,
         export_column_types: None,
         column_comments: None,
+        identifier_quote: None,
         numeric_column_right_align: false,
     };
     let csv_rows = AtomicU64::new(0);
@@ -443,6 +447,7 @@ async fn live_postgres_xlsx_export_can_outlive_query_timeout_while_rows_keep_arr
         export_table_name: None,
         export_column_types: None,
         column_comments: None,
+        identifier_quote: None,
         numeric_column_right_align: false,
     };
     let rows_exported = AtomicU64::new(0);
@@ -510,6 +515,7 @@ async fn live_postgres_stream_still_times_out_without_progress_and_recovers() {
         export_table_name: None,
         export_column_types: None,
         column_comments: None,
+        identifier_quote: None,
         numeric_column_right_align: false,
     };
     let started_at = Instant::now();

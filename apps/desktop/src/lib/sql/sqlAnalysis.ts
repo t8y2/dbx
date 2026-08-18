@@ -281,6 +281,73 @@ export function analyzeEditableQueryEditability(sql: string): QueryEditability {
   };
 }
 
+/**
+ * Parse a SELECT statement's projection columns and source tables far enough to
+ * resolve display-only result metadata (result-column → source-column mapping
+ * by projection ordinal) WITHOUT deciding editability.
+ *
+ * GROUP BY / HAVING queries are classified `aggregation` (read-only) by
+ * `analyzeEditableQueryEditability`, so that function bails out before parsing
+ * projections or sources. Their directly projected base-table columns are still
+ * resolvable for column comments, so the display layer uses this function to
+ * recover that structure. It is consumed ONLY by display metadata enrichment
+ * and must never feed row mutation logic — editability is decided exclusively
+ * by `analyzeEditableQueryEditability`.
+ *
+ * Returns `null` when the statement cannot be structurally parsed for display:
+ * CTEs, set operations, subquery/external sources, or non-SELECT statements.
+ */
+export function analyzeSelectStructureForDisplay(sql: string): EditableQueryInfo | null {
+  const normalized = stripSqlComments(sql)
+    .replace(/;+\s*$/, "")
+    .trim();
+  if (!normalized) return null;
+  if (/^\s*WITH\b/i.test(normalized)) return null;
+  if (!/^SELECT\b/i.test(normalized)) return null;
+  if (hasTopLevelKeyword(normalized, ["UNION", "INTERSECT", "EXCEPT", "MINUS"])) return null;
+  if (normalized.includes(";")) return null;
+
+  const fromIndex = findTopLevelKeyword(normalized, "FROM", 0);
+  if (fromIndex < 0) return null;
+
+  const rawSelectBody = normalized.slice("SELECT".length, fromIndex).trim();
+  const distinct = /^DISTINCT\b/i.test(rawSelectBody);
+  const selectBodyWithoutDistinct = distinct ? rawSelectBody.replace(/^DISTINCT\b/i, "").trimStart() : rawSelectBody;
+  const selectBody = stripSqlServerTopClause(selectBodyWithoutDistinct);
+
+  // Locate the FROM body end including GROUP/HAVING so a grouped query still
+  // extracts a clean source list for metadata loading.
+  const fromEnd = firstTopLevelKeywordIndex(normalized, ["WHERE", "GROUP", "HAVING", "ORDER", "LIMIT", "OFFSET", "FETCH", "FOR"], fromIndex + "FROM".length);
+  const fromBody = normalized.slice(fromIndex + "FROM".length, fromEnd < 0 ? normalized.length : fromEnd).trim();
+  if (isExternalFromSource(fromBody)) return null;
+  const sources = parseFromSources(fromBody);
+  if (!sources.length) return null;
+  const source = sources[0]!;
+
+  const selectStar = sources.length === 1 && isSelectStar(selectBody, source.alias);
+  const columns = selectStar ? [] : parseSelectColumns(selectBody, sources);
+  if (!selectStar && columns.length === 0) return null;
+  if (sources.length > 1 && columns.some((column) => column.star && !column.sourceKey)) return null;
+
+  const analysis: EditableQueryInfo = {
+    catalog: source.catalog,
+    catalogQuoted: source.catalogQuoted,
+    schema: source.schema,
+    schemaQuoted: source.schemaQuoted,
+    tableName: source.tableName,
+    tableNameQuoted: source.tableNameQuoted,
+    tableAlias: source.alias,
+    selectStar,
+    columns,
+    ...(distinct ? { distinct: true } : {}),
+  };
+  if (sources.length > 1) {
+    analysis.sources = sources;
+    analysis.multiSource = true;
+  }
+  return analysis;
+}
+
 export function queryEditabilityMessageKey(reason: QueryEditabilityReason): string {
   return `grid.queryEditUnsupported.${reason}`;
 }

@@ -1,18 +1,26 @@
-import { computed, ref } from "vue";
+import { computed, ref, type Ref } from "vue";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { clearDataGridPendingSnapshot, DATA_GRID_QUICK_ENTRY_DRAFT_ROW_ID, useDataGridEditor } from "@/composables/useDataGridEditor";
 import type { CellValue } from "@/lib/dataGrid/cellValue";
 
 const mocks = vi.hoisted(() => ({
   getConfig: vi.fn(),
+  prepareDataGridSave: vi.fn(),
+  executeBatch: vi.fn(),
+  executeInTransaction: vi.fn(),
+  addHistory: vi.fn(),
 }));
 
-vi.mock("@/lib/backend/api", () => ({}));
+vi.mock("@/lib/backend/api", () => ({
+  prepareDataGridSave: mocks.prepareDataGridSave,
+  executeBatch: mocks.executeBatch,
+  executeInTransaction: mocks.executeInTransaction,
+}));
 vi.mock("@/stores/connectionStore", () => ({
   useConnectionStore: () => ({ getConfig: mocks.getConfig }),
 }));
 vi.mock("@/stores/historyStore", () => ({
-  useHistoryStore: () => ({}),
+  useHistoryStore: () => ({ add: mocks.addHistory }),
 }));
 vi.mock("@/stores/productionSafetyStore", () => ({
   useProductionSafetyStore: () => ({}),
@@ -292,5 +300,125 @@ describe("useDataGridEditor appendPastedRowsToNewRow", () => {
     editor.cloneRow(-1, new Map([[1, "full payload"]]));
 
     expect(editor.newRows.value[1]).toEqual(["Ada", "full payload", "Lovelace"]);
+  });
+});
+
+describe("useDataGridEditor saveChanges reload", () => {
+  beforeEach(() => {
+    mocks.prepareDataGridSave.mockReset();
+    mocks.executeBatch.mockReset();
+    mocks.executeInTransaction.mockReset();
+    mocks.addHistory.mockReset();
+    mocks.getConfig.mockReset();
+  });
+
+  function createSaveTestEditor(options: { currentPage?: Ref<number>; prepareFullReload?: () => void; customSaveHandler?: { save: ReturnType<typeof vi.fn> } } = {}) {
+    const emit = vi.fn();
+    const currentPage = options.currentPage ?? ref(1);
+    const result = ref<{ columns: string[]; rows: CellValue[][] }>({
+      columns: ["id", "status"],
+      rows: [
+        [1, "pending"],
+        [2, "pending"],
+      ],
+    });
+    const editor = useDataGridEditor({
+      result: computed(() => result.value),
+      editable: computed(() => true),
+      databaseType: computed(() => "mysql"),
+      connectionId: computed(() => "connection-1"),
+      database: computed(() => "app"),
+      tableMeta: computed(() => ({
+        tableName: "orders_test",
+        columns: [
+          { name: "id", data_type: "int" },
+          { name: "status", data_type: "varchar" },
+        ],
+        primaryKeys: ["id"],
+      })),
+      sourceColumns: computed(() => undefined),
+      onExecuteSql: computed(() => undefined),
+      customSaveHandler: computed(() => options.customSaveHandler),
+      sql: computed(() => undefined),
+      searchText: ref(""),
+      whereFilterInput: ref(""),
+      currentWhereInput: computed(() => undefined),
+      orderByInput: ref(""),
+      rowStatusFilter: ref("all"),
+      confirmDangerousRowDeletion: computed(() => true),
+      pageSize: ref(100),
+      currentPage,
+      cacheKey: computed(() => undefined),
+      getRowItem: () => undefined,
+      prepareFullReload: options.prepareFullReload,
+      emit,
+    });
+    return { editor, emit, currentPage };
+  }
+
+  it("reloads after a pure row update, so database-computed columns (e.g. ON UPDATE CURRENT_TIMESTAMP) refresh without a manual page reload", async () => {
+    mocks.prepareDataGridSave.mockResolvedValue({ statements: ["UPDATE orders_test SET status='shipped' WHERE id=1"], rollbackStatements: [] });
+    mocks.executeBatch.mockResolvedValue({ affected_rows: 1 });
+
+    const { editor, emit } = createSaveTestEditor();
+    editor.dirtyRows.value.set(0, new Map([[1, "shipped"]]));
+
+    await editor.saveChanges();
+
+    expect(mocks.executeBatch).toHaveBeenCalledTimes(1);
+    expect(emit).toHaveBeenCalledWith("reload", undefined, "", undefined, undefined, 100, 0);
+  });
+
+  it("does not reload when there are no pending changes to save", async () => {
+    const { editor, emit } = createSaveTestEditor();
+
+    await editor.saveChanges();
+
+    expect(mocks.prepareDataGridSave).not.toHaveBeenCalled();
+    expect(emit).not.toHaveBeenCalledWith("reload", expect.anything());
+  });
+
+  it("prepares one first-page reload after saving edits from three accumulated infinite-scroll pages", async () => {
+    mocks.prepareDataGridSave.mockResolvedValue({
+      statements: ["UPDATE orders_test SET status='shipped' WHERE id=1", "UPDATE orders_test SET status='cancelled' WHERE id=2"],
+      rollbackStatements: [],
+    });
+    mocks.executeInTransaction.mockResolvedValue({ affected_rows: 2 });
+    const infiniteScrollState = {
+      lastPage: 3,
+      requestedOffset: 200 as number | undefined,
+      requestedLimit: 100 as number | undefined,
+    };
+    const currentPage = ref(3);
+    const prepareFullReload = vi.fn(() => {
+      currentPage.value = 1;
+      infiniteScrollState.lastPage = 0;
+      infiniteScrollState.requestedOffset = undefined;
+      infiniteScrollState.requestedLimit = undefined;
+    });
+    const created = createSaveTestEditor({ currentPage, prepareFullReload });
+    created.editor.dirtyRows.value.set(0, new Map([[1, "shipped"]]));
+    created.editor.dirtyRows.value.set(1, new Map([[1, "cancelled"]]));
+
+    await created.editor.saveChanges();
+
+    expect(mocks.executeInTransaction).toHaveBeenCalledTimes(1);
+    expect(prepareFullReload).toHaveBeenCalledTimes(1);
+    expect(infiniteScrollState).toEqual({ lastPage: 0, requestedOffset: undefined, requestedLimit: undefined });
+    expect(created.emit).toHaveBeenCalledTimes(1);
+    expect(created.emit).toHaveBeenCalledWith("reload", undefined, "", undefined, undefined, 100, 0);
+  });
+
+  it("keeps the custom save path from reloading after a pure update", async () => {
+    const customSave = vi.fn().mockResolvedValue(undefined);
+    const prepareFullReload = vi.fn();
+    const { editor, emit } = createSaveTestEditor({ customSaveHandler: { save: customSave }, prepareFullReload });
+    editor.dirtyRows.value.set(0, new Map([[1, "shipped"]]));
+
+    await editor.saveChanges();
+
+    expect(customSave).toHaveBeenCalledTimes(1);
+    expect(prepareFullReload).not.toHaveBeenCalled();
+    expect(emit).not.toHaveBeenCalledWith("reload", expect.anything());
   });
 });

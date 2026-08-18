@@ -19,6 +19,7 @@ import SchemaDiffOptionsPanel from "@/components/diff/SchemaDiffOptionsPanel.vue
 import { getSchemaDiffOptionsForDbType } from "@/lib/schema/schemaDiffOptions";
 import { buildDeployTxResult } from "@/lib/schema/deployTxResult";
 import { createConcurrencyLimiter, mapWithConcurrency, schemaDiffMetadataConcurrency, schemaDiffMetadataLoadPlan } from "@/lib/schema/schemaDiffMetadataLoad";
+import { createSchemaDiffTableListLoader, type SchemaDiffTableIdentity } from "@/lib/schema/schemaDiffTableList";
 import { normalizeSchemaDiffCompareOptions } from "@/types/schemaDiff";
 import type { SchemaDiffCompareOptions, SchemaDiffConfig, FieldMappingEntry } from "@/types/schemaDiff";
 import type { ObjectSourceKind, TableInfo } from "@/types/database";
@@ -56,6 +57,10 @@ const { t } = useI18n();
 const { toast } = useToast();
 const open = defineModel<boolean>("open", { default: false });
 const store = useConnectionStore();
+const schemaDiffTableListLoader = createSchemaDiffTableListLoader({
+  ensureConnected: (connectionId) => store.ensureConnected(connectionId),
+  listTables: (connectionId, database, schema) => api.listTables(connectionId, database, schema),
+});
 
 const props = defineProps<{
   prefillConnectionId?: string;
@@ -326,6 +331,12 @@ function handleOptionsUpdate(options: SchemaDiffCompareOptions) {
   }
 }
 
+function handleSelectedTablesUpdate(value?: string[]) {
+  if (activeConfig.value) {
+    updateActiveConfigOptions(normalizeSchemaDiffCompareOptions({ ...activeConfig.value.options, selectedTables: value }, getDbType()));
+  }
+}
+
 function handleFieldMappingsUpdate(mappings: FieldMappingEntry[]) {
   if (activeConfig.value) {
     const updated = { ...activeConfig.value.options, fieldMappings: mappings };
@@ -396,11 +407,13 @@ async function handleCompare() {
     const opts = normalizeSchemaDiffCompareOptions(activeConfig.value?.options, dbType);
     const tableFilter = compileSchemaDiffTableFilter(opts);
 
-    await store.ensureConnected(sourceConnectionId.value);
-    await store.ensureConnected(targetConnectionId.value);
-
-    const [srcTables, tgtTables] = await Promise.all([api.listTables(sourceConnectionId.value, sourceDatabase.value, sourceSchema.value), api.listTables(targetConnectionId.value, targetDatabase.value, targetSchema.value)]);
-    const { sourceTables, targetTables } = filterSchemaDiffTables(srcTables, tgtTables, tableFilter, opts);
+    const sourceTableIdentity: SchemaDiffTableIdentity = { connectionId: sourceConnectionId.value, database: sourceDatabase.value, schema: sourceSchema.value };
+    const targetTableIdentity: SchemaDiffTableIdentity = { connectionId: targetConnectionId.value, database: targetDatabase.value, schema: targetSchema.value };
+    const [srcTables, tgtTables] = await Promise.all([schemaDiffTableListLoader.load(sourceTableIdentity), schemaDiffTableListLoader.load(targetTableIdentity)]);
+    // Explicit (visual) table selection is applied here, BEFORE any per-table
+    // metadata details are loaded, so metadata requests only happen for the
+    // final table set. `undefined`/empty means no restriction (legacy path).
+    const { sourceTables, targetTables } = filterSchemaDiffTables(srcTables, tgtTables, tableFilter, opts, opts.selectedTables);
 
     const sourceDetails = await loadSchemaDetails(sourceTables, {
       connectionId: sourceConnectionId.value,
@@ -871,6 +884,8 @@ const targetConnectionInfo = computed(() => {
           :configs="configs"
           :active-config-id="activeConfigId"
           :options="activeConfig?.options"
+          :selected-tables="activeConfig?.options?.selectedTables"
+          :table-list-loader="schemaDiffTableListLoader"
           :loading="loading"
           :recent-configs="recentConfigs"
           @compare="handleCompare"
@@ -880,6 +895,7 @@ const targetConnectionInfo = computed(() => {
           @load-history-config="handleLoadHistoryConfig"
           @delete-history-config="handleDeleteHistoryConfig"
           @update:field-mappings="handleFieldMappingsUpdate"
+          @update:selected-tables="handleSelectedTablesUpdate"
           @open-field-mapping="showFieldMappingDialog = true"
         />
 

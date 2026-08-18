@@ -16,6 +16,43 @@ pub const DEFAULT_JRE_KEY: &str = "21";
 pub const DOWNLOAD_CACHE_DIR_NAME: &str = "download-cache";
 pub const DOWNLOAD_CACHE_MAX_AGE_DAYS: u64 = 7;
 
+/// Cooperative cancellation token for an agent driver install/upgrade.
+///
+/// Mirrors the updater's `DownloadCancellation` (src-tauri/src/commands/update.rs)
+/// so the same `watch<bool>` pattern can abort an in-flight JRE/driver download.
+#[derive(Debug)]
+pub struct AgentInstallCancellation {
+    canceled: tokio::sync::watch::Sender<bool>,
+}
+
+impl AgentInstallCancellation {
+    fn new() -> Self {
+        let (canceled, _) = tokio::sync::watch::channel(false);
+        Self { canceled }
+    }
+
+    pub fn cancel(&self) {
+        let _ = self.canceled.send_replace(true);
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        *self.canceled.borrow()
+    }
+
+    /// Completes once cancellation is requested (immediately if already cancelled).
+    pub async fn cancelled(&self) {
+        let mut receiver = self.canceled.subscribe();
+        if *receiver.borrow_and_update() {
+            return;
+        }
+        while receiver.changed().await.is_ok() {
+            if *receiver.borrow_and_update() {
+                return;
+            }
+        }
+    }
+}
+
 fn default_jre_key() -> String {
     DEFAULT_JRE_KEY.to_string()
 }
@@ -511,6 +548,11 @@ pub struct AgentManager {
     /// Driver operations may run concurrently, but JRE replacement/removal
     /// must exclude them until their dependent driver state is persisted.
     pub(crate) installation_operation_lock: tokio::sync::RwLock<()>,
+    /// Per-operation cancellation tokens keyed by operation id (single installs
+    /// use `install:<op>`, batches `batch:<op>` and `batch:<op>:<db>`). Downloads
+    /// observe the exact token threaded to them to abort promptly.
+    pub(crate) install_cancellations:
+        tokio::sync::Mutex<std::collections::HashMap<String, Arc<AgentInstallCancellation>>>,
 }
 
 impl Default for AgentManager {
@@ -540,6 +582,7 @@ impl AgentManager {
             jre_install_locks: Mutex::new(std::collections::HashMap::new()),
             driver_operation_locks: Mutex::new(std::collections::HashMap::new()),
             installation_operation_lock: tokio::sync::RwLock::new(()),
+            install_cancellations: Mutex::new(std::collections::HashMap::new()),
         };
         mgr.migrate_legacy_jre();
         mgr.cleanup_pending_jre_dirs();
@@ -558,6 +601,39 @@ impl AgentManager {
         let result = mutate(&mut state);
         self.save_state(&state)?;
         Ok(result)
+    }
+
+    /// Register a fresh cancellation token for an operation keyed by `key` (an
+    /// operation-scoped key; see the `agent_service` key helpers). Any existing
+    /// token for the same key is replaced; each install registers under a unique
+    /// operation id, so a stale cancelled token cannot leak into another
+    /// operation, and concurrent same-driver installs stay isolated.
+    pub async fn begin_install_cancellation(&self, key: &str) -> Arc<AgentInstallCancellation> {
+        let token = Arc::new(AgentInstallCancellation::new());
+        self.install_cancellations.lock().await.insert(key.to_string(), Arc::clone(&token));
+        token
+    }
+
+    /// Remove the token for `key` only if it is still `token` (guarded by
+    /// `Arc::ptr_eq`) so a concurrently registered fresh token is not removed.
+    pub async fn finish_install_cancellation(&self, key: &str, token: &Arc<AgentInstallCancellation>) {
+        let mut cancellations = self.install_cancellations.lock().await;
+        if cancellations.get(key).is_some_and(|current| Arc::ptr_eq(current, token)) {
+            cancellations.remove(key);
+        }
+    }
+
+    /// Request cancellation for the operation registered under `key`.
+    pub async fn cancel_install(&self, key: &str) {
+        if let Some(token) = self.install_cancellations.lock().await.get(key).cloned() {
+            token.cancel();
+        }
+    }
+
+    /// Whether the operation registered under `key` (an operation-scoped key,
+    /// see `agent_service` key helpers) has been cancelled.
+    pub async fn is_install_cancelled(&self, key: &str) -> bool {
+        self.install_cancellations.lock().await.get(key).is_some_and(|token| token.is_cancelled())
     }
 
     fn migrate_legacy_jre(&self) {

@@ -90,6 +90,8 @@ pub struct DataGridSaveStatementOptions {
 pub struct DataGridCopyUpdateStatementOptions {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub database_type: Option<DatabaseType>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identifier_quote: Option<String>,
     pub table_meta: DataGridTableMeta,
     pub columns: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -103,6 +105,8 @@ pub struct DataGridCopyUpdateStatementOptions {
 pub struct DataGridCopyInsertStatementOptions {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub database_type: Option<DatabaseType>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identifier_quote: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub table_meta: Option<DataGridTableMeta>,
     pub columns: Vec<String>,
@@ -362,7 +366,7 @@ pub fn build_data_grid_copy_update_statements(options: DataGridCopyUpdateStateme
         options.table_meta.schema.as_deref(),
         options.table_meta.database.as_deref(),
         &options.table_meta.table_name,
-        None,
+        options.identifier_quote.as_deref(),
     );
     let mut statements = Vec::new();
     for row in &options.rows {
@@ -374,7 +378,7 @@ pub fn build_data_grid_copy_update_statements(options: DataGridCopyUpdateStateme
             .map(|(column, index, info)| {
                 format!(
                     "{} = {}",
-                    data_grid_identifier(options.database_type, column, None),
+                    data_grid_identifier(options.database_type, column, options.identifier_quote.as_deref()),
                     format_grid_sql_literal(row.get(*index).unwrap_or(&Value::Null), options.database_type, *info)
                 )
             })
@@ -393,7 +397,7 @@ pub fn build_data_grid_copy_update_statements(options: DataGridCopyUpdateStateme
                     row.get(primary_key_indexes[index]).unwrap_or(&Value::Null),
                     primary_key_info[index],
                     false,
-                    None,
+                    options.identifier_quote.as_deref(),
                 )
             })
             .collect::<Vec<_>>()
@@ -447,18 +451,19 @@ pub fn build_data_grid_copy_insert_statement(options: DataGridCopyInsertStatemen
     let table = options.table_meta.as_ref().map_or_else(
         || "table_name".to_string(),
         |meta| {
-            crate::sql_dialect::qualified_table_name_with_catalog(
+            data_grid_qualified_table_name(
                 options.database_type,
                 meta.catalog.as_deref(),
                 meta.schema.as_deref(),
                 meta.database.as_deref(),
                 &meta.table_name,
+                options.identifier_quote.as_deref(),
             )
         },
     );
     let columns = insert_columns
         .iter()
-        .map(|(column, _, _)| quote_ident(options.database_type, column))
+        .map(|(column, _, _)| data_grid_identifier(options.database_type, column, options.identifier_quote.as_deref()))
         .collect::<Vec<_>>()
         .join(", ");
     let value_rows = options
@@ -3233,6 +3238,7 @@ mod tests {
     fn builds_copy_update_statements() {
         let statements = build_data_grid_copy_update_statements(DataGridCopyUpdateStatementOptions {
             database_type: Some(DatabaseType::Postgres),
+            identifier_quote: None,
             table_meta: DataGridTableMeta {
                 catalog: None,
                 database: None,
@@ -3255,6 +3261,7 @@ mod tests {
     fn builds_copy_insert_statement_without_primary_keys() {
         let statement = build_data_grid_copy_insert_statement(DataGridCopyInsertStatementOptions {
             database_type: Some(DatabaseType::Mysql),
+            identifier_quote: None,
             table_meta: Some(DataGridTableMeta {
                 catalog: None,
                 database: None,
@@ -3281,6 +3288,7 @@ mod tests {
     fn copy_insert_keeps_json_cells_as_single_json_literals() {
         let statement = build_data_grid_copy_insert_statement(DataGridCopyInsertStatementOptions {
             database_type: Some(DatabaseType::Elasticsearch),
+            identifier_quote: None,
             table_meta: None,
             columns: vec!["id".to_string(), "active".to_string(), "profile".to_string()],
             column_types: Some(vec![Some("number".to_string()), Some("boolean".to_string()), Some("json".to_string())]),
@@ -3301,6 +3309,7 @@ mod tests {
     fn copy_insert_keeps_mysql_json_array_as_single_json_literal() {
         let statement = build_data_grid_copy_insert_statement(DataGridCopyInsertStatementOptions {
             database_type: Some(DatabaseType::Mysql),
+            identifier_quote: None,
             table_meta: None,
             columns: vec!["data".to_string()],
             column_types: Some(vec![Some("json".to_string())]),
@@ -3318,6 +3327,7 @@ mod tests {
     fn copy_insert_keeps_mysql_json_empty_array_as_single_json_literal() {
         let statement = build_data_grid_copy_insert_statement(DataGridCopyInsertStatementOptions {
             database_type: Some(DatabaseType::Mysql),
+            identifier_quote: None,
             table_meta: None,
             columns: vec!["data".to_string()],
             column_types: Some(vec![Some("json".to_string())]),
@@ -3335,6 +3345,7 @@ mod tests {
     fn copy_insert_keeps_mysql_json_object_as_single_json_literal() {
         let statement = build_data_grid_copy_insert_statement(DataGridCopyInsertStatementOptions {
             database_type: Some(DatabaseType::Mysql),
+            identifier_quote: None,
             table_meta: None,
             columns: vec!["data".to_string()],
             column_types: Some(vec![Some("json".to_string())]),
@@ -3352,6 +3363,7 @@ mod tests {
     fn builds_copy_insert_without_primary_keys_when_primary_keys_are_hidden() {
         let statement = build_data_grid_copy_insert_statement(DataGridCopyInsertStatementOptions {
             database_type: Some(DatabaseType::Mysql),
+            identifier_quote: None,
             table_meta: Some(DataGridTableMeta {
                 catalog: None,
                 database: None,
@@ -3379,6 +3391,7 @@ mod tests {
     fn builds_copy_insert_statement_row_by_row() {
         let statement = build_data_grid_copy_insert_statement(DataGridCopyInsertStatementOptions {
             database_type: Some(DatabaseType::Mysql),
+            identifier_quote: None,
             table_meta: Some(DataGridTableMeta {
                 catalog: None,
                 database: None,
@@ -3407,6 +3420,7 @@ mod tests {
     fn oracle_copy_insert_statement_uses_one_statement_per_row() {
         let statement = build_data_grid_copy_insert_statement(DataGridCopyInsertStatementOptions {
             database_type: Some(DatabaseType::Oracle),
+            identifier_quote: None,
             table_meta: Some(DataGridTableMeta {
                 catalog: None,
                 database: None,
@@ -3445,6 +3459,7 @@ mod tests {
 
         let insert = build_data_grid_copy_insert_statement(DataGridCopyInsertStatementOptions {
             database_type: Some(DatabaseType::Mysql),
+            identifier_quote: None,
             table_meta: Some(table_meta.clone()),
             columns: columns.clone(),
             column_types: None,
@@ -3461,6 +3476,7 @@ mod tests {
 
         let updates = build_data_grid_copy_update_statements(DataGridCopyUpdateStatementOptions {
             database_type: Some(DatabaseType::Mysql),
+            identifier_quote: None,
             table_meta,
             columns,
             source_columns: None,
@@ -3499,6 +3515,7 @@ mod tests {
     fn builds_copy_insert_statement_omits_postgres_tsvector_columns() {
         let statement = build_data_grid_copy_insert_statement(DataGridCopyInsertStatementOptions {
             database_type: Some(DatabaseType::Postgres),
+            identifier_quote: None,
             table_meta: Some(DataGridTableMeta {
                 catalog: None,
                 database: None,
@@ -3530,6 +3547,7 @@ mod tests {
     fn oracle_copy_insert_uses_result_column_types_for_date_literals() {
         let statement = build_data_grid_copy_insert_statement(DataGridCopyInsertStatementOptions {
             database_type: Some(DatabaseType::Oracle),
+            identifier_quote: None,
             table_meta: None,
             columns: vec!["ID".to_string(), "CREATED_ON".to_string(), "RAW_TEXT".to_string()],
             column_types: Some(vec![
@@ -5033,6 +5051,56 @@ mod tests {
     }
 
     #[test]
+    fn kingbase_mysql_compat_copy_insert_uses_backtick_identifiers() {
+        let statement = build_data_grid_copy_insert_statement(DataGridCopyInsertStatementOptions {
+            database_type: Some(DatabaseType::Kingbase),
+            identifier_quote: Some("`".to_string()),
+            table_meta: Some(DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("audit-schema".to_string()),
+                table_name: "events".to_string(),
+                primary_keys: vec!["id".to_string()],
+                columns: None,
+            }),
+            columns: vec!["id".to_string(), "event_type".to_string()],
+            column_types: None,
+            source_columns: None,
+            rows: vec![vec![json!(1), json!("login")]],
+            exclude_primary_keys: false,
+            include_computed_columns: false,
+            insert_mode: DataGridCopyInsertMode::Merged,
+        });
+
+        assert_eq!(
+            statement.as_deref(),
+            Some("INSERT INTO `audit-schema`.`events` (`id`, `event_type`) VALUES (1, 'login');")
+        );
+        assert!(!statement.as_deref().unwrap_or_default().contains('"'));
+    }
+
+    #[test]
+    fn kingbase_mysql_compat_copy_update_uses_backtick_identifiers() {
+        let statements = build_data_grid_copy_update_statements(DataGridCopyUpdateStatementOptions {
+            database_type: Some(DatabaseType::Kingbase),
+            identifier_quote: Some("`".to_string()),
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("audit-schema".to_string()),
+                table_name: "events".to_string(),
+                primary_keys: vec!["id".to_string()],
+                columns: None,
+            },
+            columns: vec!["id".to_string(), "event_type".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!(1), json!("logout")]],
+        });
+
+        assert_eq!(statements, vec!["UPDATE `audit-schema`.`events` SET `event_type` = 'logout' WHERE `id` = 1;"]);
+    }
+
+    #[test]
     fn vastbase_query_result_writes_use_resolved_search_path_schema() {
         let result = prepare_data_grid_save(DataGridSaveStatementOptions {
             database_type: Some(DatabaseType::Vastbase),
@@ -6419,6 +6487,7 @@ mod tests {
     fn builds_clickhouse_copy_update_statements() {
         let statements = build_data_grid_copy_update_statements(DataGridCopyUpdateStatementOptions {
             database_type: Some(DatabaseType::ClickHouse),
+            identifier_quote: None,
             table_meta: DataGridTableMeta {
                 catalog: None,
                 database: None,
@@ -6448,6 +6517,7 @@ mod tests {
 
         let copy_updates = build_data_grid_copy_update_statements(DataGridCopyUpdateStatementOptions {
             database_type: Some(DatabaseType::Doris),
+            identifier_quote: None,
             table_meta: table_meta.clone(),
             columns: vec!["id".to_string(), "status".to_string()],
             source_columns: None,
@@ -6460,6 +6530,7 @@ mod tests {
 
         let copy_insert = build_data_grid_copy_insert_statement(DataGridCopyInsertStatementOptions {
             database_type: Some(DatabaseType::Doris),
+            identifier_quote: None,
             table_meta: Some(table_meta.clone()),
             columns: vec!["id".to_string(), "status".to_string()],
             column_types: None,

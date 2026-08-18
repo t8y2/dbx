@@ -19,6 +19,7 @@ import type { ColumnInfo, DatabaseType } from "@/types/database";
 import * as api from "@/lib/backend/api";
 import { executeWithProductionSqlGuard } from "@/lib/database/productionExecutionGuard";
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
+import TableMultiSelect from "@/components/diff/TableMultiSelect.vue";
 import { ArrowLeftRight, CheckSquare, ChevronDown, ChevronRight, Copy, GitCompareArrows, Loader2, Play, Square } from "@lucide/vue";
 
 type CompareColumn = ColumnInfo;
@@ -89,7 +90,6 @@ const sourceTable = ref("");
 const sourceDatabases = ref<string[]>([]);
 const sourceSchemas = ref<string[]>([]);
 const sourceTables = ref<string[]>([]);
-const sourceTableSearch = ref("");
 const selectedSourceTables = ref<Set<string>>(new Set());
 
 const targetConnectionId = ref("");
@@ -122,12 +122,11 @@ let syncPlanRequestId = 0;
 const sqlConnections = computed(() => store.connections.filter((connection) => !["redis", "mongodb", "elasticsearch", "easysearch", "meilisearch", "qdrant", "milvus", "weaviate", "chromadb", "etcd", "zookeeper", "consul", "mq", "nacos"].includes(connection.db_type)));
 const selectedSourceTableNames = computed(() => sourceTables.value.filter((table) => selectedSourceTables.value.has(table)));
 const isBatchCompare = computed(() => selectedSourceTableNames.value.length > 1);
-const filteredSourceTables = computed(() => {
-  const query = sourceTableSearch.value.trim().toLowerCase();
-  if (!query) return sourceTables.value;
-  return sourceTables.value.filter((table) => table.toLowerCase().includes(query));
+// Bridge the shared TableMultiSelect `string[]` v-model with the Set-based selection store.
+const sourceTableSelection = computed<string[]>({
+  get: () => [...selectedSourceTables.value],
+  set: (value: string[]) => resetSelectedSourceTables(value),
 });
-const allFilteredTablesSelected = computed(() => filteredSourceTables.value.length > 0 && filteredSourceTables.value.every((table) => selectedSourceTables.value.has(table)));
 const compareTasksPreview = computed(() =>
   selectedSourceTableNames.value.map((table) => {
     const target = isBatchCompare.value ? table : targetTable.value || table;
@@ -219,23 +218,6 @@ function targetDatabaseType(): DatabaseType | undefined {
 
 function resetSelectedSourceTables(nextTables: Iterable<string>) {
   selectedSourceTables.value = new Set(nextTables);
-}
-
-function toggleSourceTable(table: string) {
-  const next = new Set(selectedSourceTables.value);
-  if (next.has(table)) next.delete(table);
-  else next.add(table);
-  resetSelectedSourceTables(next);
-}
-
-function toggleSelectAllSourceTables() {
-  const next = new Set(selectedSourceTables.value);
-  if (allFilteredTablesSelected.value) {
-    filteredSourceTables.value.forEach((table) => next.delete(table));
-  } else {
-    filteredSourceTables.value.forEach((table) => next.add(table));
-  }
-  resetSelectedSourceTables(next);
 }
 
 function buildCompareTasks(): DataCompareTableTask[] {
@@ -804,7 +786,6 @@ watch(sourceConnectionId, (id) => {
   sourceSchemas.value = [];
   sourceTables.value = [];
   sourceTable.value = "";
-  sourceTableSearch.value = "";
   resetSelectedSourceTables([]);
   loadDatabases(id, "source").catch((e) => toast(String(e), 5000));
 });
@@ -823,7 +804,6 @@ watch(sourceDatabase, () => {
   sourceSchemas.value = [];
   sourceTables.value = [];
   sourceTable.value = "";
-  sourceTableSearch.value = "";
   resetSelectedSourceTables([]);
   loadSchemas("source", props.prefillSchema).catch((e) => toast(String(e), 5000));
 });
@@ -839,7 +819,6 @@ watch(sourceSchema, () => {
   clearResult();
   sourceTables.value = [];
   sourceTable.value = "";
-  sourceTableSearch.value = "";
   resetSelectedSourceTables([]);
   if (sourceSchema.value) loadTables("source").catch((e) => toast(String(e), 5000));
 });
@@ -947,41 +926,13 @@ watch(
               content-class="w-[var(--reka-popover-trigger-width)]"
             />
 
-            <div class="space-y-2 rounded-lg border p-2">
-              <div class="flex items-center justify-between gap-2">
-                <Label class="text-xs font-medium">{{ t("dataCompare.sourceTables") }}</Label>
-                <div v-if="sourceTables.length" class="text-[11px] text-muted-foreground">
-                  {{
-                    t("dataCompare.selectedTables", {
-                      selected: selectedSourceTableNames.length,
-                      total: sourceTables.length,
-                    })
-                  }}
-                </div>
-              </div>
-
-              <Input v-if="sourceTables.length > 5" v-model="sourceTableSearch" class="h-7 text-xs" :placeholder="t('dataCompare.searchTables')" />
-
-              <div class="flex items-center gap-2">
-                <Button v-if="sourceTables.length" variant="outline" size="sm" class="h-7 px-2 text-xs" @click="toggleSelectAllSourceTables">
-                  {{ allFilteredTablesSelected ? t("dataCompare.deselectAllTables") : t("dataCompare.selectAllTables") }}
-                </Button>
-              </div>
-
-              <div v-if="!sourceConnectionId || !sourceDatabase" class="text-xs text-muted-foreground py-3 text-center">
-                {{ t("dataCompare.selectSourceTables") }}
-              </div>
-              <div v-else-if="sourceTables.length === 0" class="text-xs text-muted-foreground py-3 text-center">
-                {{ t("dataCompare.noTables") }}
-              </div>
-              <div v-else class="max-h-40 overflow-auto rounded border">
-                <button v-for="table in filteredSourceTables" :key="table" type="button" class="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-xs hover:bg-muted/50" @click="toggleSourceTable(table)">
-                  <CheckSquare v-if="selectedSourceTables.has(table)" class="w-3.5 h-3.5 text-primary shrink-0" />
-                  <Square v-else class="w-3.5 h-3.5 text-muted-foreground/40 shrink-0" />
-                  <span class="truncate">{{ table }}</span>
-                </button>
-              </div>
-            </div>
+            <TableMultiSelect
+              :key="`${sourceConnectionId}.${sourceDatabase}.${sourceSchema}`"
+              v-model="sourceTableSelection"
+              :tables="sourceTables"
+              :title="t('dataCompare.sourceTables')"
+              :empty-text="!sourceConnectionId || !sourceDatabase ? t('dataCompare.selectSourceTables') : t('dataCompare.noTables')"
+            />
           </div>
 
           <div class="flex items-center pt-6">

@@ -185,7 +185,7 @@ import { buildDataGridColumnLookupItems, dataGridColumnCommentFor, filterDataGri
 import { uniqueDataGridColumnOrderKeys } from "@/lib/dataGrid/dataGridColumnOrder";
 import { dataGridColumnLayoutScopeKey, TABLE_DATA_GRID_COLUMN_ORDER_CHANGED_EVENT, tableDataGridColumnOrderScopeKey } from "@/lib/dataGrid/dataGridColumnLayoutStorage";
 import { summarizeSelection } from "@/lib/dataGrid/gridSelection";
-import { captureDataGridSelection, restoreDataGridSelection, type PersistedDataGridSelection } from "@/lib/dataGrid/dataGridSelectionPersistence";
+import { captureDataGridSelection, restoreDataGridSelection, type CaptureDataGridSelectionOptions, type PersistedDataGridSelection } from "@/lib/dataGrid/dataGridSelectionPersistence";
 import { dataGridFrameCoversRow, dataGridSelectionEdgeMask, dataGridSelectionFrameKindAtCell, dataGridSelectionUsesOuterFrame, resolveDataGridSelectionFrames } from "@/lib/dataGrid/dataGridSelectionFrames";
 import {
   createDataGridCellContextMenuItems,
@@ -471,6 +471,12 @@ const preserveTransposeOnNextResult = ref(false);
 let preservedSelectionOnNextResult: {
   selection: PersistedDataGridSelection;
   sourceResult: QueryResult;
+} | null = null;
+let preservedDetailsOnNextResult: {
+  sideCell?: PersistedDataGridSelection;
+  cellDialog?: PersistedDataGridSelection;
+  rowDialog?: PersistedDataGridSelection;
+  columnDialog?: PersistedDataGridSelection;
 } | null = null;
 
 watch(
@@ -3396,6 +3402,7 @@ const editor = useDataGridEditor({
   currentPage,
   cacheKey: computed(() => props.pendingStateKey ?? props.cacheKey),
   onResultPayloadMutated: () => queryStore.invalidateResultEstimateForPayload(props.result),
+  prepareFullReload,
   emit,
 });
 
@@ -3808,19 +3815,23 @@ function resetInfiniteScrollState() {
   resetGridVerticalScroll(true);
 }
 
-async function onToolbarRefresh() {
-  if (transactionActive.value) {
-    discardChanges();
-  }
-  // Reset infinite scroll state on refresh
+function prepareFullReload() {
   if (infiniteScrollEnabled.value) {
     resetInfiniteScrollState();
   }
   const selection = captureCurrentSelectionForRefresh();
   preservedSelectionOnNextResult = selection ? { selection, sourceResult: props.result } : null;
+  preservedDetailsOnNextResult = captureDetailsForRefresh();
   preserveTransposeOnNextResult.value = showTranspose.value;
   isRefreshingData.value = true;
   beginDataGridNativeSelectionBlock(dataGridNativeSelectionBlockOwner);
+}
+
+async function onToolbarRefresh() {
+  if (transactionActive.value) {
+    discardChanges();
+  }
+  prepareFullReload();
   emit("reload", props.sql, searchText.value, currentWhereInput(), currentOrderBy(), pageSize.value, (currentPage.value - 1) * pageSize.value, "refresh");
 }
 
@@ -4563,14 +4574,20 @@ const {
   isRowSelected,
 } = selection;
 
-function captureCurrentSelectionForRefresh(): PersistedDataGridSelection | null {
-  return captureDataGridSelection({
+function selectionCaptureBase(): Omit<CaptureDataGridSelectionOptions, "selectedRowIds" | "selectedColumnIndexes" | "selectedCellKeys" | "selectionAnchor" | "selectionFocus" | "selectingAll" | "lastClickedRowIndex"> {
+  return {
     columns: props.result.columns,
     sourceColumns: props.sourceColumns,
     rows: props.result.rows,
     primaryKeys: props.tableMeta?.primaryKeys ?? [],
     visibleColumnIndexes: visibleColumnIndexes.value,
     displayItems: displayItems.value,
+  };
+}
+
+function captureCurrentSelectionForRefresh(): PersistedDataGridSelection | null {
+  return captureDataGridSelection({
+    ...selectionCaptureBase(),
     selectedRowIds: selectedRowIds.value,
     selectedColumnIndexes: selectedColumnIndexes.value,
     selectedCellKeys: selectedCellKeys.value,
@@ -4579,6 +4596,119 @@ function captureCurrentSelectionForRefresh(): PersistedDataGridSelection | null 
     selectingAll: isSelectingAll.value,
     lastClickedRowIndex: selection.lastClickedRowIndex.value,
   });
+}
+
+function captureCellTargetForRefresh(target: { rowIndex: number; col: number } | null): PersistedDataGridSelection | undefined {
+  if (!target) return undefined;
+  const visibleColumnIndex = visibleColumnIndexes.value.indexOf(target.col);
+  if (visibleColumnIndex < 0) return undefined;
+  return (
+    captureDataGridSelection({
+      ...selectionCaptureBase(),
+      selectedRowIds: new Set(),
+      selectedColumnIndexes: new Set(),
+      selectedCellKeys: new Set(),
+      selectionAnchor: { rowIndex: target.rowIndex, colIndex: visibleColumnIndex },
+      selectionFocus: { rowIndex: target.rowIndex, colIndex: visibleColumnIndex },
+      selectingAll: false,
+    }) ?? undefined
+  );
+}
+
+function captureRowTargetForRefresh(rowId: number | null): PersistedDataGridSelection | undefined {
+  if (rowId === null) return undefined;
+  return (
+    captureDataGridSelection({
+      ...selectionCaptureBase(),
+      selectedRowIds: new Set([rowId]),
+      selectedColumnIndexes: new Set(),
+      selectedCellKeys: new Set(),
+      selectionAnchor: null,
+      selectionFocus: null,
+      selectingAll: false,
+    }) ?? undefined
+  );
+}
+
+function captureColumnTargetForRefresh(columnIndex: number | null): PersistedDataGridSelection | undefined {
+  if (columnIndex === null) return undefined;
+  const visibleColumnIndex = visibleColumnIndexes.value.indexOf(columnIndex);
+  if (visibleColumnIndex < 0) return undefined;
+  return (
+    captureDataGridSelection({
+      ...selectionCaptureBase(),
+      selectedRowIds: new Set(),
+      selectedColumnIndexes: new Set([visibleColumnIndex]),
+      selectedCellKeys: new Set(),
+      selectionAnchor: null,
+      selectionFocus: null,
+      selectingAll: false,
+    }) ?? undefined
+  );
+}
+
+function captureDetailsForRefresh() {
+  const details = {
+    sideCell: showCellDetail.value ? captureCellTargetForRefresh(detailCell.value) : undefined,
+    cellDialog: cellDetailDialogOpen.value ? captureCellTargetForRefresh(cellDetailDialogTarget.value) : undefined,
+    rowDialog: rowDetailDialogOpen.value ? captureRowTargetForRefresh(rowDetailDialogRowId.value) : undefined,
+    columnDialog: columnDetailDialogOpen.value ? captureColumnTargetForRefresh(columnDetailDialogColumnIndex.value) : undefined,
+  };
+  return Object.values(details).some(Boolean) ? details : null;
+}
+
+function restoreDetailCellAfterRefresh(snapshot: PersistedDataGridSelection | undefined): { rowIndex: number; col: number } | null {
+  if (!snapshot) return null;
+  const restored = restoreDataGridSelection({
+    snapshot,
+    columns: props.result.columns,
+    sourceColumns: props.sourceColumns,
+    rows: props.result.rows,
+    visibleColumnIndexes: visibleColumnIndexes.value,
+    displayItems: displayItems.value,
+  });
+  if (restored?.kind !== "range") return null;
+  const columnIndex = visibleColumnIndexes.value[restored.focus.colIndex];
+  return columnIndex === undefined ? null : { rowIndex: restored.focus.rowIndex, col: columnIndex };
+}
+
+function restoreDetailsAfterRefresh(details: NonNullable<typeof preservedDetailsOnNextResult>) {
+  const sideCell = restoreDetailCellAfterRefresh(details.sideCell);
+  if (sideCell) {
+    detailCell.value = sideCell;
+    showCellDetail.value = true;
+    hydrateCellDetailTarget(sideCell);
+  }
+
+  const cellDialog = restoreDetailCellAfterRefresh(details.cellDialog);
+  if (cellDialog) openCellDetailDialog(cellDialog.rowIndex, cellDialog.col);
+
+  if (details.rowDialog) {
+    const restored = restoreDataGridSelection({
+      snapshot: details.rowDialog,
+      columns: props.result.columns,
+      sourceColumns: props.sourceColumns,
+      rows: props.result.rows,
+      visibleColumnIndexes: visibleColumnIndexes.value,
+      displayItems: displayItems.value,
+    });
+    if (restored?.kind === "rows" && restored.rowIds[0] !== undefined) openRowDetailDialog(restored.rowIds[0]);
+  }
+
+  if (details.columnDialog) {
+    const restored = restoreDataGridSelection({
+      snapshot: details.columnDialog,
+      columns: props.result.columns,
+      sourceColumns: props.sourceColumns,
+      rows: props.result.rows,
+      visibleColumnIndexes: visibleColumnIndexes.value,
+      displayItems: displayItems.value,
+    });
+    if (restored?.kind === "columns") {
+      const columnIndex = visibleColumnIndexes.value[restored.columnIndexes[0] ?? -1];
+      if (columnIndex !== undefined) openColumnDetailDialog(columnIndex);
+    }
+  }
 }
 
 function restoreSelectionAfterRefresh(snapshot: PersistedDataGridSelection) {
@@ -8634,6 +8764,8 @@ watch(
   (result, previousResult) => {
     const selectionSnapshot = preservedSelectionOnNextResult?.selection;
     preservedSelectionOnNextResult = null;
+    const detailsSnapshot = preservedDetailsOnNextResult;
+    preservedDetailsOnNextResult = null;
     const shouldPreserveTranspose = preserveTransposeOnNextResult.value;
     preserveTransposeOnNextResult.value = false;
     if (isDataGridPrefixAppend(previousResult, result)) return;
@@ -8654,6 +8786,7 @@ watch(
     }
     exitTransaction();
     if (selectionSnapshot) restoreSelectionAfterRefresh(selectionSnapshot);
+    if (detailsSnapshot) restoreDetailsAfterRefresh(detailsSnapshot);
   },
 );
 
@@ -9978,6 +10111,7 @@ defineExpose({
   onToolbarRefresh,
   onToolbarCommit,
   onToolbarRollback,
+  resetInfiniteScrollState,
   showDdl: showTableInfo,
   toggleDdl: toggleTableInfo,
   showTableInfo,
@@ -12056,6 +12190,9 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                   </DropdownMenu>
                   <Button v-if="activeValueEditorActions.includes('formatJson')" variant="outline" size="sm" class="h-6 text-xs" @mousedown.prevent @click="formatValueEditorJson">
                     {{ t("grid.formatJson") }}
+                  </Button>
+                  <Button v-if="activeValueEditorActions.includes('compactJson')" variant="outline" size="sm" class="h-6 text-xs" @mousedown.prevent @click="compactDetailJson">
+                    {{ t("grid.compactJson") }}
                   </Button>
                   <Button v-if="activeValueEditorActions.includes('setNull')" variant="outline" size="sm" class="h-6 text-xs" @mousedown.prevent @click="setValueEditorNull">
                     {{ t("grid.setNull") }}

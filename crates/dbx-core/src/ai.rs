@@ -929,11 +929,7 @@ impl MiniMaxTextAccumulator {
     }
 
     fn replay_text(&self) -> &str {
-        if matches!(self.semantics, MiniMaxStreamSemantics::Incremental) {
-            &self.latest
-        } else {
-            &self.complete
-        }
+        &self.complete
     }
 }
 

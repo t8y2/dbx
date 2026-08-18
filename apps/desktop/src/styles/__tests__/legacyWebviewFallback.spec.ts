@@ -6,6 +6,7 @@ const globalsCss = readCascadeCss();
 const dialogContentSource = readFileSync(new URL("../../components/ui/dialog/DialogContent.vue", import.meta.url), "utf8");
 const dialogScrollContentSource = readFileSync(new URL("../../components/ui/dialog/DialogScrollContent.vue", import.meta.url), "utf8");
 const dialogOverlaySource = readFileSync(new URL("../../components/ui/dialog/DialogOverlay.vue", import.meta.url), "utf8");
+const dataTransferDialogSource = readFileSync(new URL("../../components/transfer/DataTransferDialog.vue", import.meta.url), "utf8");
 const connectionDialogSource = readFileSync(new URL("../../components/connection/ConnectionDialog.vue", import.meta.url), "utf8");
 const connectionTreeSource = readFileSync(new URL("../../components/sidebar/ConnectionTree.vue", import.meta.url), "utf8");
 const scheduledDatabaseBackupSource = readFileSync(new URL("../../components/backup/ScheduledDatabaseBackupSettings.vue", import.meta.url), "utf8");
@@ -77,6 +78,14 @@ describe("legacy WebView CSS fallbacks", () => {
     expect(dialogOverlaySource).toContain("dark:bg-background/70");
     expect(globalsCss).not.toContain("dbx-dialog-backdrop");
     expect(globalsCss).not.toContain("filter: blur(4px);");
+  });
+
+  it("keeps the data transfer dialog width fallback scoped to legacy WebViews", () => {
+    expect(dataTransferDialogSource).toContain('class="dbx-transfer-dialog sm:max-w-[1120px] max-h-[80vh] flex flex-col overflow-hidden"');
+    expect(dataTransferDialogSource).toContain('html.dbx-legacy-webview [data-slot="dialog-content"].dbx-transfer-dialog[class~="max-w-sm"]');
+    expect(dataTransferDialogSource).toContain("width: calc(100vw - 2rem) !important;");
+    expect(dataTransferDialogSource).toContain("max-width: 1120px !important;");
+    expect(globalsCss).not.toContain(".dbx-transfer-dialog");
   });
 
   it("keeps primary alpha utilities readable in legacy WebViews", () => {

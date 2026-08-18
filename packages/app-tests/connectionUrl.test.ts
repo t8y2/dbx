@@ -252,6 +252,17 @@ test("parses Hive JDBC URLs using HTTP transport", () => {
   assert.equal(parsed.connectionString, source);
 });
 
+test("preserves Hive HTTP URL parameters after the noSasl authentication setting", () => {
+  const source = "jdbc:hive2://hive.example.com:20001/;transportMode=http;httpPath=cliservice;auth=noSasl?ds=2";
+  const parsed = parseConnectionUrl(source);
+
+  assert.equal(parsed.dbType, "hive");
+  assert.equal(parsed.host, "hive.example.com");
+  assert.equal(parsed.port, 20001);
+  assert.equal(parsed.urlParams, "transportMode=http;httpPath=cliservice;auth=noSasl?ds=2");
+  assert.equal(parsed.connectionString, source);
+});
+
 test("parses Hive JDBC URLs with a database and SSL parameter", () => {
   const source = "jdbc:hive2://hive.example.com/default;transportMode=http;httpPath=cliservice;ssl=true";
   const parsed = parseConnectionUrl(source);

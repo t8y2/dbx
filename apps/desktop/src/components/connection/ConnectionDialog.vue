@@ -67,7 +67,7 @@ import { loadConnectionPickerView, saveConnectionPickerView, type DbPickerView }
 import { normalizeRocketmqNamesrvAddr } from "@/lib/connection/rocketmqNamesrv";
 import { normalizeRabbitmqAddresses } from "@/lib/connection/rabbitmqAddresses";
 import { detectMqUiAuthKind, isMqAuthKindAllowedForSystem, type MqUiAuthKind } from "@/lib/connection/mqAuth";
-import { driverInstallProgressChannel, driverInstallProgressPercent, isDriverInstallProgressForOperation, type DriverInstallProgress } from "@/lib/connection/driverInstallProgressUi";
+import { driverInstallProgressChannel, driverInstallProgressPercent, isDriverInstallProgressForOperation, requestAgentInstallCancellation, resolveAgentInstallOutcome, type DriverInstallProgress } from "@/lib/connection/driverInstallProgressUi";
 import { requiresSqlServerLegacyCompatibilityComponent, setSqlServerLegacyCompatibilityConfig, sqlServerUsesLegacyCompatibility, SQLSERVER_LEGACY_COMPATIBILITY_DRIVER_KEY } from "@/lib/connection/sqlServerLegacyCompatibility";
 import { normalizeNacosEndpoint, normalizeNacosMetricsUrl, parseNacosManagedNamespaces } from "@/lib/nacos/nacosAdmin";
 import { loadReadableNacosNamespaces, nacosNamespaceIdentity, normalizeNacosNamespaceSelection } from "@/lib/nacos/nacosNamespaceVisibility";
@@ -259,6 +259,11 @@ const agentInstallDriverKey = ref("");
 const agentInstallLabel = ref("");
 const agentInstallProgress = ref<DriverInstallProgress | null>(null);
 const agentInstallError = ref("");
+const agentInstallCancelError = ref("");
+const agentInstallCancelling = ref(false);
+/** Set when the user cancels from the modal, so the pending promise's
+ * "canceled by user" error is treated as a non-failure by its caller. */
+const agentInstallCancelRequested = ref(false);
 const showConnectionErrorDialog = ref(false);
 const connectionErrorRawDetail = ref("");
 const connectionErrorDetail = ref("");
@@ -1890,29 +1895,65 @@ async function refreshLocalAgentDrivers(): Promise<AgentDriverInstallState[]> {
   return drivers;
 }
 
-function beginAgentDriverInstall(driverKey: string, label: string) {
+function beginAgentDriverInstall(driverKey: string, label: string): string {
   agentInstallOperationId.value = uuid();
   agentInstallDriverKey.value = driverKey;
   agentInstallLabel.value = label;
   agentInstallProgress.value = null;
   agentInstallError.value = "";
+  agentInstallCancelError.value = "";
+  agentInstallCancelling.value = false;
+  agentInstallCancelRequested.value = false;
   agentInstallRunning.value = true;
   showAgentInstallDialog.value = true;
+  return agentInstallOperationId.value;
 }
 
-function finishAgentDriverInstall() {
+/**
+ * Clear the install dialog, unless a newer operation now owns it. Stale
+ * operation promises (cancelled, then retried before settling) must not
+ * finish/reset the retry's dialog state.
+ */
+function finishAgentDriverInstall(operationId?: string | null) {
+  if (operationId !== undefined && operationId !== null && agentInstallOperationId.value !== operationId) return;
   agentInstallOperationId.value = null;
   agentInstallRunning.value = false;
   agentInstallProgress.value = null;
   agentInstallError.value = "";
+  agentInstallCancelError.value = "";
+  agentInstallCancelling.value = false;
   showAgentInstallDialog.value = false;
 }
 
-function failAgentDriverInstall(error: unknown) {
+function failAgentDriverInstall(operationId: string | null | undefined, error: unknown) {
+  if (operationId !== undefined && operationId !== null && agentInstallOperationId.value !== operationId) return;
   agentInstallOperationId.value = null;
   agentInstallRunning.value = false;
+  agentInstallCancelError.value = "";
+  agentInstallCancelling.value = false;
   agentInstallError.value = translateBackendError(t, error);
   showAgentInstallDialog.value = true;
+}
+
+/**
+ * Abort an in-flight agent driver install from the modal's Cancel button.
+ * The backend stops the download; the pending `installAgent` promise resolves
+ * with a "canceled by user" error, which callers treat as a non-failure.
+ */
+async function cancelActiveAgentInstall() {
+  const operationId = agentInstallOperationId.value;
+  if (!agentInstallDriverKey.value || !operationId || agentInstallCancelling.value) return;
+  agentInstallCancelling.value = true;
+  agentInstallCancelError.value = "";
+  const result = await requestAgentInstallCancellation(() => api.cancelAgentInstall(agentInstallDriverKey.value, operationId));
+  if (agentInstallOperationId.value !== operationId) return;
+  agentInstallCancelling.value = false;
+  if (!result.ok) {
+    agentInstallCancelError.value = translateBackendError(t, result.error);
+    return;
+  }
+  agentInstallCancelRequested.value = true;
+  finishAgentDriverInstall(operationId);
 }
 
 function showConnectionError(message: string) {
@@ -1964,14 +2005,35 @@ async function ensureRequiredAgentDriverInstalled(config: ConnectionConfig): Pro
 
   const label = config.driver_label || driverKey;
   testResult.value = { ok: true, message: `Installing ${label} driver...` };
-  beginAgentDriverInstall(driverKey, label);
+  const operationId = beginAgentDriverInstall(driverKey, label);
   try {
-    await api.installAgent(driverKey, agentInstallOperationId.value ?? undefined);
+    await api.installAgent(driverKey, operationId);
     await refreshLocalAgentDrivers();
-    finishAgentDriverInstall();
+    // A stale promise (cancelled then retried) must not close the retry's dialog.
+    if (agentInstallOperationId.value === operationId) finishAgentDriverInstall(operationId);
   } catch (error) {
+    const outcome = resolveAgentInstallOutcome(
+      { ok: false, error },
+      {
+        operationId,
+        currentOperationId: agentInstallOperationId.value,
+        cancelRequested: agentInstallCancelRequested.value,
+      },
+    );
+    if (outcome.kind === "cancelled") {
+      // User cancelled: close silently, do not surface a failure.
+      if (outcome.ownsState) {
+        testResult.value = null;
+        finishAgentDriverInstall(operationId);
+      }
+      return;
+    }
+    if (!outcome.ownsState) {
+      // A newer operation owns the dialog; leave its state untouched.
+      return;
+    }
     testResult.value = { ok: false, message: translateBackendError(t, error) };
-    failAgentDriverInstall(error);
+    failAgentDriverInstall(operationId, error);
     throw error;
   }
 }
@@ -2019,14 +2081,32 @@ async function installSqlServerLegacyCompatibilityComponentIfNeeded(): Promise<b
   if (await api.isAgentInstalled(SQLSERVER_LEGACY_COMPATIBILITY_DRIVER_KEY)) return true;
 
   const label = t("connection.sqlServerLegacyCompatibilityComponent");
-  beginAgentDriverInstall(SQLSERVER_LEGACY_COMPATIBILITY_DRIVER_KEY, label);
+  const operationId = beginAgentDriverInstall(SQLSERVER_LEGACY_COMPATIBILITY_DRIVER_KEY, label);
   try {
-    await api.installAgent(SQLSERVER_LEGACY_COMPATIBILITY_DRIVER_KEY, agentInstallOperationId.value ?? undefined);
+    await api.installAgent(SQLSERVER_LEGACY_COMPATIBILITY_DRIVER_KEY, operationId);
     await refreshLocalAgentDrivers();
-    finishAgentDriverInstall();
+    // A stale promise (cancelled then retried) must not close the retry's dialog.
+    if (agentInstallOperationId.value === operationId) finishAgentDriverInstall(operationId);
   } catch (error) {
+    const outcome = resolveAgentInstallOutcome(
+      { ok: false, error },
+      {
+        operationId,
+        currentOperationId: agentInstallOperationId.value,
+        cancelRequested: agentInstallCancelRequested.value,
+      },
+    );
+    if (outcome.kind === "cancelled") {
+      // User cancelled the download: the toggle's caller falls back to `auto`.
+      if (outcome.ownsState) finishAgentDriverInstall(operationId);
+      return false;
+    }
+    if (!outcome.ownsState) {
+      // A newer operation owns the dialog; leave its state untouched.
+      return false;
+    }
     testResult.value = { ok: false, message: translateBackendError(t, error) };
-    failAgentDriverInstall(error);
+    failAgentDriverInstall(operationId, error);
     throw error;
   }
   return true;
@@ -2042,7 +2122,13 @@ async function setSqlServerDriverMode(mode: "auto" | "legacy") {
   }
 
   try {
-    await installSqlServerLegacyCompatibilityComponentIfNeeded();
+    const installed = await installSqlServerLegacyCompatibilityComponentIfNeeded();
+    if (!installed) {
+      // User cancelled the download: never leave the form in legacy mode
+      // without the component installed.
+      setSqlServerLegacyCompatibilityConfig(form.value, false);
+      return;
+    }
     setSqlServerLegacyCompatibilityConfig(form.value, true);
     testResult.value = null;
   } catch {
@@ -2770,6 +2856,10 @@ function defaultDatabaseForProfile() {
 }
 
 function onDbTypeChange(val: string) {
+  if (!editingId.value && val === selectedType.value) return;
+  if (!editingId.value) {
+    resetForm({ preservePickerState: true });
+  }
   const category = dbCategoryForOption(val);
   if (category) selectedDbCategory.value = category;
   customDriverName.value = "";
@@ -4848,7 +4938,7 @@ function openJdbcDriverManagerFromError() {
   openJdbcDriverManager();
 }
 
-function resetForm() {
+function resetForm(options: { preservePickerState?: boolean } = {}) {
   editingId.value = null;
   form.value = defaultForm();
   resetConnectionNoteVisibilityDraft(connectionNoteVisibilityDraft, settingsStore.editorSettings.sidebarShowConnectionNotes);
@@ -4870,10 +4960,12 @@ function resetForm() {
   appliedConnectionUrlInput.value = "";
   resetMeilisearchHostInput();
   oracleTnsAdminPath.value = "";
-  dialogStep.value = "select";
-  dbSearchQuery.value = "";
-  selectedDbCategory.value = "sql";
-  configTab.value = "connection";
+  if (!options.preservePickerState) {
+    dialogStep.value = "select";
+    dbSearchQuery.value = "";
+    selectedDbCategory.value = "sql";
+    configTab.value = "connection";
+  }
   resetVisibleDatabaseDraftState();
   resetVisibleNacosNamespaceDraftState();
   resetProductionDatabaseDraftState();
@@ -8529,12 +8621,18 @@ function openExternalUrl(url: string) {
           <div class="text-sm font-medium text-destructive">{{ t("connection.driverInstall.fullError") }}</div>
           <pre class="max-h-56 min-w-0 max-w-full overflow-x-hidden overflow-y-auto whitespace-pre-wrap break-all [overflow-wrap:anywhere] rounded-md border bg-muted/30 p-3 text-xs leading-5 text-destructive">{{ agentInstallError }}</pre>
         </div>
+        <div v-else-if="agentInstallCancelError" class="rounded-md border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive">
+          {{ agentInstallCancelError }}
+        </div>
       </div>
 
       <DialogFooter class="gap-2">
         <Button v-if="agentInstallError" variant="outline" @click="copyAgentInstallError">
           <Copy class="mr-1.5 h-3.5 w-3.5" />
           {{ t("connection.copyError") }}
+        </Button>
+        <Button v-if="agentInstallRunning && !agentInstallError" variant="outline" :disabled="agentInstallCancelling" @click="cancelActiveAgentInstall">
+          {{ t("common.cancel") }}
         </Button>
         <Button :disabled="!canCloseAgentInstallDialog" @click="showAgentInstallDialog = false">
           {{ agentInstallError ? t("common.close") : t("connection.driverInstall.installingButton") }}

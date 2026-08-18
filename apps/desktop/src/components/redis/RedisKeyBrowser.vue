@@ -875,6 +875,38 @@ function onKeyDeleted(keyRaw: string) {
   removeKnownKey(keyRaw);
 }
 
+function onKeyRenamed(oldKeyRaw: string, newKeyRaw: string, newKeyDisplay: string) {
+  connectionStore.invalidateCompletionCache(props.connectionId, String(props.db));
+  if (isSearchMode.value) {
+    void loadKeys();
+    return;
+  }
+
+  const previous = flatKeys.value.find((key) => key.key_raw === oldKeyRaw);
+  if (!previous) {
+    void loadKeys();
+    return;
+  }
+
+  loadedKeyRaws.delete(oldKeyRaw);
+  loadedKeyRaws.add(newKeyRaw);
+  flatKeys.value = flatKeys.value.map((key) => (key.key_raw === oldKeyRaw ? { ...key, key_raw: newKeyRaw, key_display: newKeyDisplay } : key));
+  if (selectedKeyRaw.value === oldKeyRaw) selectedKeyRaw.value = newKeyRaw;
+  if (checkedKeys.value.has(oldKeyRaw)) {
+    const nextCheckedKeys = new Set(checkedKeys.value);
+    nextCheckedKeys.delete(oldKeyRaw);
+    nextCheckedKeys.add(newKeyRaw);
+    checkedKeys.value = nextCheckedKeys;
+  }
+  if (useFlatKeySearchRows.value) {
+    treeKeys.value = [];
+    treeIndex = null;
+    refreshSelectedGroupLeafCounts();
+  } else {
+    rebuildTree(false);
+  }
+}
+
 function redisValueToKeyInfo(value: RedisValue): RedisKeyInfo {
   return {
     key_display: value.key_display,
@@ -2093,7 +2125,19 @@ defineExpose({ focusSearch, insertCommand, executeCommand: executeAiCommand });
             </div>
 
             <TabsContent value="detail" class="m-0 min-h-0 flex-1 flex flex-col">
-              <RedisValueViewer v-if="selectedKey" ref="valueViewerRef" :key="selectedKey.key_raw" :connection-id="connectionId" :db="db" :key-display="selectedKey.key_display" :key-raw="selectedKey.key_raw" :metadata="selectedKey" @deleted="onKeyDeleted" @loaded="onKeyLoaded" />
+              <RedisValueViewer
+                v-if="selectedKey"
+                ref="valueViewerRef"
+                :key="selectedKey.key_raw"
+                :connection-id="connectionId"
+                :db="db"
+                :key-display="selectedKey.key_display"
+                :key-raw="selectedKey.key_raw"
+                :metadata="selectedKey"
+                @deleted="onKeyDeleted"
+                @renamed="onKeyRenamed"
+                @loaded="onKeyLoaded"
+              />
               <div v-else class="flex-1 flex items-center justify-center text-xs text-muted-foreground">
                 {{ t("redis.selectKeyForDetail") }}
               </div>

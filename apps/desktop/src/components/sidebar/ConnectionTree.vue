@@ -30,7 +30,7 @@ import { copyNameForTreeNode, objectSourceTargetForTreeNode } from "@/lib/sideba
 import { supportsTypeObjectSource } from "@/lib/database/databaseObjectCapabilities";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { connectionPasteTargetGroupId, copySelectedConnectionsToClipboards, selectedConnectionEditTarget } from "@/lib/sidebar/sidebarConnectionSelection";
-import { pruneTreeSelectionToVisibleNodes } from "@/lib/sidebar/sidebarTreeSelection";
+import { pruneTreeSelectionToVisibleNodeIds } from "@/lib/sidebar/sidebarTreeSelection";
 import { isEditableSidebarTypeSearchTarget, sidebarTypeSearchNextQuery } from "@/lib/sidebar/sidebarTypeSearch";
 import { isInternalDorisCatalog, usesTreeSchemaMode } from "@/lib/database/databaseFeatureSupport";
 import { connectionObjectTreeNodeSchema, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
@@ -807,11 +807,13 @@ const selectableVisibleNodes = computed<TreeNode[]>(() => flatTreeIndex.value.se
 const selectableVisibleNodeIndexById = computed(() => flatTreeIndex.value.selectableVisibleNodeIndexById);
 const useVirtualTree = computed(() => shouldVirtualizeFlatTree(flatNodes.value.length));
 const activeTab = computed(() => queryStore.tabs.find((tab) => tab.id === queryStore.activeTabId));
+const hasTreeMultiSelection = computed(() => store.connectionMultiSelectActive || store.selectedTreeNodeIds.length > 1);
 
 watch(
-  visibleNodes,
-  (nodes) => {
-    const next = pruneTreeSelectionToVisibleNodes(nodes, {
+  () => (hasTreeMultiSelection.value ? flatTreeIndex.value.nodeById : null),
+  (visibleNodeIds) => {
+    if (!visibleNodeIds) return;
+    const next = pruneTreeSelectionToVisibleNodeIds(visibleNodeIds, {
       nodeIds: store.selectedTreeNodeIds,
       activeNodeId: store.selectedTreeNodeId,
       anchorNodeId: store.treeSelectionAnchorId,
@@ -823,7 +825,7 @@ watch(
     store.treeSelectionAnchorId = next.anchorNodeId;
     if (!next.nodeIds.length) store.connectionMultiSelectActive = false;
   },
-  { flush: "sync" },
+  { flush: "post" },
 );
 
 // --- Sticky database header ---

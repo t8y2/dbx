@@ -1,7 +1,7 @@
 import { safeJsonFormat } from "@/lib/common/safeJsonFormat";
 
 export type CellDetailTab = "details" | "hexViewer" | "valueEditor";
-export type ValueEditorAction = "formatJson" | "setNull" | "restoreOriginal";
+export type ValueEditorAction = "formatJson" | "compactJson" | "setNull" | "restoreOriginal";
 
 export const CELL_DETAIL_JSON_FORMAT_MAX_LENGTH = 50_000;
 
@@ -49,7 +49,8 @@ function cellDetailRawEditorText(value: unknown): string {
 
 export function valueEditorActions(options: { canSetNull: boolean; canFormatJson?: boolean }): ValueEditorAction[] {
   const actions: ValueEditorAction[] = [];
-  if (options.canFormatJson) actions.push("formatJson");
+  // JSON 校验通过后同时提供格式化和压缩，避免两个入口的编辑能力不一致。
+  if (options.canFormatJson) actions.push("formatJson", "compactJson");
   if (options.canSetNull) actions.push("setNull");
   actions.push("restoreOriginal");
   return actions;

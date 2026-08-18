@@ -13,7 +13,7 @@ use crate::query::{
     agent_execute_query_params, pool_error_action, PoolErrorAction, QueryExecutionOptions, AGENT_PROTOCOL_MAX_ROWS,
 };
 use crate::sql::{split_sql_statements, split_sql_statements_for_database};
-use crate::sql_dialect::{qualified_transfer_table, quote_transfer_identifier};
+use crate::sql_dialect::{normalize_len_params, qualified_transfer_table, quote_transfer_identifier};
 
 static CANCELLED: std::sync::LazyLock<RwLock<HashSet<String>>> =
     std::sync::LazyLock::new(|| RwLock::new(HashSet::new()));
@@ -2790,6 +2790,17 @@ fn is_timezone_suffix(value: &str) -> bool {
     )
 }
 
+fn transfer_length_params(source_type: &str, target_db: &DatabaseType) -> String {
+    let params = &source_type[source_type.find('(').expect("caller checked length parameters")..];
+    if matches!(target_db, DatabaseType::Oracle | DatabaseType::OceanbaseOracle | DatabaseType::Dameng) {
+        params.to_string()
+    } else {
+        // Oracle length-unit qualifiers are invalid for non-Oracle-family
+        // targets, which only accept the numeric length.
+        normalize_len_params(params)
+    }
+}
+
 pub fn map_column_type(source_type: &str, _source_db: &DatabaseType, target_db: &DatabaseType) -> String {
     if _source_db == target_db {
         return source_type.to_string();
@@ -2873,7 +2884,7 @@ pub fn map_column_type(source_type: &str, _source_db: &DatabaseType, target_db: 
         }
         "varchar" | "nvarchar" | "character varying" | "varchar2" => {
             if t.contains('(') {
-                let len_part = &t[t.find('(').unwrap()..];
+                let len_part = transfer_length_params(&t, target_db);
                 match target_db {
                     target_db if is_postgres_transfer_dialect(target_db) => format!("VARCHAR{len_part}"),
                     DatabaseType::Mysql => format!("VARCHAR{len_part}"),
@@ -2886,7 +2897,7 @@ pub fn map_column_type(source_type: &str, _source_db: &DatabaseType, target_db: 
         }
         "char" | "nchar" | "character" => {
             if t.contains('(') {
-                let len_part = &t[t.find('(').unwrap()..];
+                let len_part = transfer_length_params(&t, target_db);
                 format!("CHAR{len_part}")
             } else {
                 "CHAR(1)".into()
@@ -9017,6 +9028,29 @@ mod tests {
     }
 
     #[test]
+    fn oracle_to_mysql_create_table_ddl_strips_char_length_units() {
+        // Issue #6479 end-to-end: Oracle columns reported with CHAR length
+        // semantics must produce valid MySQL DDL (`VARCHAR(6)`, not
+        // `VARCHAR(6 char)` which fails with ERROR 1064).
+        let cols = vec![
+            test_column("ID", "VARCHAR2(6 CHAR)"),
+            test_column("DWMC", "VARCHAR2(50 CHAR)"),
+            test_column("JOB", "VARCHAR2(20 CHAR)"),
+            test_column("FLAG", "CHAR(1 CHAR)"),
+        ];
+        let ddl =
+            generate_create_table_ddl(&cols, "USERS", "", "", &DatabaseType::Mysql, &DatabaseType::Oracle, None, None);
+        assert!(ddl.contains("`ID` VARCHAR(6)"), "ddl: {ddl}");
+        assert!(ddl.contains("`DWMC` VARCHAR(50)"), "ddl: {ddl}");
+        assert!(ddl.contains("`JOB` VARCHAR(20)"), "ddl: {ddl}");
+        assert!(ddl.contains("`FLAG` CHAR(1)"), "ddl: {ddl}");
+        // A `char`/`CHAR` immediately before `)` would be a leaked Oracle unit
+        // qualifier (`VARCHAR(6 char)`); a legit `CHAR(1)` does not match.
+        assert!(!ddl.contains("char)"), "Oracle length unit leaked into DDL: {ddl}");
+        assert!(!ddl.contains("CHAR)"), "Oracle length unit leaked into DDL: {ddl}");
+    }
+
+    #[test]
     fn dameng_create_table_omits_if_not_exists_without_changing_other_prefixes() {
         let cols = vec![test_column("id", "int")];
 
@@ -11350,6 +11384,69 @@ SELECT 1 FROM dual"#
             ),
             PoolErrorAction::Discard
         );
+    }
+
+    #[test]
+    fn map_column_type_oracle_char_semantics_to_mysql() {
+        // Issue #6479: Oracle `VARCHAR2(50 CHAR)` must rewrite to `VARCHAR(50)`,
+        // not `VARCHAR(50 char)` which MySQL rejects with ERROR 1064 (42000).
+        assert_eq!(map_column_type("VARCHAR2(6 CHAR)", &DatabaseType::Oracle, &DatabaseType::Mysql), "VARCHAR(6)");
+        assert_eq!(map_column_type("VARCHAR2(50 CHAR)", &DatabaseType::Oracle, &DatabaseType::Mysql), "VARCHAR(50)");
+        assert_eq!(map_column_type("VARCHAR2(20 char)", &DatabaseType::Oracle, &DatabaseType::Mysql), "VARCHAR(20)");
+        assert_eq!(map_column_type("VARCHAR2(50    CHAR)", &DatabaseType::Oracle, &DatabaseType::Mysql), "VARCHAR(50)");
+        // NVARCHAR2 keeps its pre-existing fallback (TEXT) — no length unit leaks.
+        assert_eq!(map_column_type("NVARCHAR2(50 CHAR)", &DatabaseType::Oracle, &DatabaseType::Mysql), "TEXT");
+    }
+
+    #[test]
+    fn map_column_type_oracle_plain_varchar2_to_mysql() {
+        // Plain VARCHAR2 without a length unit must keep working unchanged.
+        assert_eq!(map_column_type("VARCHAR2(50)", &DatabaseType::Oracle, &DatabaseType::Mysql), "VARCHAR(50)");
+        assert_eq!(map_column_type("VARCHAR2", &DatabaseType::Oracle, &DatabaseType::Mysql), "VARCHAR(255)");
+    }
+
+    #[test]
+    fn map_column_type_preserves_length_units_for_oracle_family_targets() {
+        for target in [DatabaseType::Oracle, DatabaseType::OceanbaseOracle, DatabaseType::Dameng] {
+            let source =
+                if target == DatabaseType::Oracle { DatabaseType::OceanbaseOracle } else { DatabaseType::Oracle };
+            assert_eq!(map_column_type("VARCHAR2(50 CHAR)", &source, &target), "VARCHAR(50 char)");
+            assert_eq!(map_column_type("CHAR(20 BYTE)", &source, &target), "CHAR(20 byte)");
+        }
+    }
+
+    #[test]
+    fn map_column_type_strips_length_units_for_non_oracle_targets() {
+        for target in [DatabaseType::Mysql, DatabaseType::Postgres, DatabaseType::SqlServer] {
+            assert!(!map_column_type("VARCHAR2(50 CHAR)", &DatabaseType::Oracle, &target).contains("char"));
+            assert!(!map_column_type("CHAR(20 BYTE)", &DatabaseType::Oracle, &target).contains("byte"));
+        }
+    }
+
+    #[test]
+    fn map_column_type_keeps_real_char_type_untouched() {
+        // CHAR(10) is a valid type on its own and must not lose its length.
+        assert_eq!(map_column_type("CHAR(10)", &DatabaseType::Oracle, &DatabaseType::Mysql), "CHAR(10)");
+        assert_eq!(map_column_type("char(10)", &DatabaseType::Mysql, &DatabaseType::Postgres), "CHAR(10)");
+    }
+
+    #[test]
+    fn map_column_type_oracle_byte_semantics_locked() {
+        // MySQL has no BYTE length semantics. The qualifier is stripped so the
+        // generated DDL stays valid; `VARCHAR2(20 BYTE)` maps to `VARCHAR(20)`
+        // (character length). This intentionally locks in the conservative
+        // behavior: never emit `VARCHAR(20 byte)`.
+        assert_eq!(map_column_type("VARCHAR2(20 BYTE)", &DatabaseType::Oracle, &DatabaseType::Mysql), "VARCHAR(20)");
+        assert_eq!(map_column_type("VARCHAR2(20 byte)", &DatabaseType::Oracle, &DatabaseType::Mysql), "VARCHAR(20)");
+    }
+
+    #[test]
+    fn map_column_type_preserves_numeric_precision_scale() {
+        // Precision/scale parameter lists must not be disturbed.
+        assert_eq!(map_column_type("NUMBER(10,2)", &DatabaseType::Oracle, &DatabaseType::Mysql), "DECIMAL(10,2)");
+        assert_eq!(map_column_type("DECIMAL(10,2)", &DatabaseType::Oracle, &DatabaseType::Mysql), "DECIMAL(10,2)");
+        assert_eq!(map_column_type("NUMBER(10)", &DatabaseType::Oracle, &DatabaseType::Mysql), "DECIMAL(10)");
+        assert_eq!(map_column_type("TIMESTAMP(6)", &DatabaseType::Oracle, &DatabaseType::Mysql), "DATETIME");
     }
 
     #[test]

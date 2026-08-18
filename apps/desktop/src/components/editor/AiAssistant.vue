@@ -57,6 +57,8 @@ import { useToast } from "@/composables/useToast";
 import { useNavigationTargets } from "@/composables/useNavigationTargets";
 import { buildAiContext, resolveAiDatabaseTarget, resolveAiNamespaceSelection, resolveDefaultAiSchema, runAgentStream, isVectorDbType, isValidActionForMode, defaultActionForMode, type AiAction, type AiAssistantMode, type AiSqlFileContext, type CustomPromptContext } from "@/lib/ai/ai";
 import { isAiConfigModelCandidate } from "@/lib/ai/aiConfigCandidates";
+import { deleteConversationWithCancellation, stopAiGenerationWithFallback } from "@/lib/ai/aiConversationLifecycle";
+import { AiGenerationGuard } from "@/lib/ai/aiGenerationGuard";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { addConfiguredAiModel, aiModelOptions } from "@/lib/ai/aiConfigList";
 import { orderAiConfigsForDisplay } from "@/lib/ai/aiConfigOrdering";
@@ -274,11 +276,31 @@ let messageScrollViewport: HTMLElement | null = null;
 let messageTouchStartY: number | null = null;
 let lastMessageScrollTop = 0;
 const STREAM_RENDER_INTERVAL_MS = 33;
+// How long cancelStream() (the Stop button) waits for the backend to actually
+// acknowledge a cancellation before forcing the same abandon path clear/switch
+// uses. See cancelStream() for why the backend RPC alone can't be trusted to
+// unstick a genuinely hung tool call.
+const STOP_FORCE_ABANDON_MS = 5000;
 let assistantDeltaFrame: number | null = null;
 let lastAssistantFlushAt = 0;
 let pendingAssistantDelta = "";
 let pendingAssistantReasoning = "";
 let pendingAssistantIndex = -1;
+// Index into `messages.value` of the current generation's assistant placeholder,
+// mirroring `currentSessionId` (set alongside it in send(), cleared in its finally
+// and in resetPendingRequestState()). Lets cancelStream()'s forced-abandon path
+// finalize that specific message — the backend session id alone doesn't identify
+// it, and abandonInFlightRequest() itself is also used by clear/switch/unmount,
+// where messages.value is being discarded/replaced anyway so it has no reason to
+// know about individual messages.
+let currentAssistantMessageIndex = -1;
+// Identifies which send() invocation is still allowed to write into `messages`/
+// `isGenerating`/`currentSessionId` and the delta buffers above.
+// abandonInFlightRequest() (used by clearMessages()/selectConversation()) invalidates
+// the active generation so a superseded send() can't corrupt state that now belongs
+// to a different conversation. See lib/ai/aiGenerationGuard.ts for why this exists
+// instead of relying on isGenerating/currentSessionId alone.
+const aiGenerationGuard = new AiGenerationGuard();
 
 function startEditMessage(visibleIndex: number) {
   if (isGenerating.value) return;
@@ -1727,12 +1749,30 @@ async function send() {
   }
   // Acquire the send guard before the first async operation so two rapid
   // submissions cannot both pass the initial isGenerating check and then
-  // resume into concurrent agent runs.
+  // resume into concurrent agent runs. `myGeneration` is this call's identity:
+  // every mutation of shared state below, once execution has been suspended and
+  // resumed at least once, must check `aiGenerationGuard.isCurrent(myGeneration)`
+  // first, since clearMessages()/selectConversation() can invalidate it out from
+  // under an in-flight send().
   isGenerating.value = true;
+  const myGeneration = aiGenerationGuard.begin();
   if (!(await promptTemplateStore.ensureLoaded())) {
     clearPendingWriteGrant();
-    isGenerating.value = false;
-    toast(t("ai.customInstructionsLoadFailed"), 5000);
+    if (aiGenerationGuard.isCurrent(myGeneration)) {
+      isGenerating.value = false;
+      toast(t("ai.customInstructionsLoadFailed"), 5000);
+    }
+    return;
+  }
+  // Superseded (chat cleared/switched, or a newer send() started) while awaiting
+  // the prompt templates above — bail before touching messages/mentions that now
+  // belong to a different conversation. Also clear the pending write-SQL grant:
+  // it hasn't been read/reset yet (that happens below, right before
+  // runAgentStream()), so a bare return here would leave a previously-confirmed
+  // write grant sitting in the module-scope vars, live to be replayed against
+  // whatever unrelated send() the next conversation issues.
+  if (!aiGenerationGuard.isCurrent(myGeneration)) {
+    clearPendingWriteGrant();
     return;
   }
   // Snapshot the selected custom prompts at send time so later async context loading
@@ -1821,15 +1861,29 @@ async function send() {
   confirmedSchema = undefined;
   messages.value.push({ role: "assistant", content: "", sourceConnectionName: connection.name });
   const assistantIdx = messages.value.length - 1;
+  currentAssistantMessageIndex = assistantIdx;
   const sessionId = uuid();
   currentSessionId.value = sessionId;
   const agentEvents: AgentEvent[] = [];
   try {
     const sqlFiles = await loadReferencedSqlFiles(selectedSqlFiles);
+    // Superseded while awaiting loadReferencedSqlFiles() above — bail before
+    // paying for buildAiContext() too; it can do real backend/schema work that
+    // would be entirely wasted on an already-abandoned request.
+    if (!aiGenerationGuard.isCurrent(myGeneration)) return;
     const context = await buildAiContext(tab, connection, {
       mentionedTables,
       sqlFiles,
     });
+    // Superseded while awaiting buildAiContext() above — must bail before ever
+    // calling runAgentStream(), not just before writing its results. Without
+    // this recheck, a clear/switch/unmount that fires during context
+    // preparation invalidates the generation but the request still gets sent to
+    // the backend and starts executing tools/SQL; the best-effort cancel RPC
+    // fired by abandonInFlightRequest() is a no-op here since no session has
+    // been registered with the backend yet (registration happens inside
+    // runAgentStream() itself).
+    if (!aiGenerationGuard.isCurrent(myGeneration)) return;
     const history: AiMessage[] = messagesForAgentHistory(messages.value.slice(0, -2));
     await runAgentStream(
       {
@@ -1846,6 +1900,10 @@ async function send() {
       },
       history,
       (event: AgentEvent) => {
+        // Superseded by a clear/switch/new-chat (or a newer send()) — the backend
+        // stream may still be running, but this generation no longer owns any
+        // shared state to write into.
+        if (!aiGenerationGuard.isCurrent(myGeneration)) return;
         agentEvents.push(event);
         if (event.type === "text_delta" && event.delta) {
           appendAssistantDelta(assistantIdx, event.delta);
@@ -1883,59 +1941,164 @@ async function send() {
       customPromptContext,
     );
   } catch (e: unknown) {
-    const message = e instanceof Error ? e.message : String(e);
-    messages.value[assistantIdx].content = `${t("ai.requestFailed")}\n\n${translateBackendError(t, message)}`;
+    // A superseded generation's error (including one caused by an
+    // abandonInFlightRequest()-triggered cancellation) must not overwrite a
+    // message that now belongs to a different conversation, or one that no
+    // longer exists in `messages.value`.
+    if (aiGenerationGuard.isCurrent(myGeneration)) {
+      const message = e instanceof Error ? e.message : String(e);
+      const msg = messages.value[assistantIdx];
+      if (msg) msg.content = `${t("ai.requestFailed")}\n\n${translateBackendError(t, message)}`;
+    }
   } finally {
-    if (assistantDeltaFrame !== null) cancelAnimationFrame(assistantDeltaFrame);
-    flushAssistantDeltas();
-    const msg = messages.value[assistantIdx];
-    if (msg) msg.isThinking = false;
-    isGenerating.value = false;
-    // Render agent tool call steps from agent events (fallback when no real-time steps)
-    if (msg && agentEvents.length > 0 && !msg.agentSteps?.length) {
-      const steps: AiAgentStepItem[] = [];
-      agentEvents.forEach((e, index) => {
-        const step = agentEventToStep(e, index);
-        if (step) upsertAgentStep(steps, step);
-      });
-      if (steps.length) msg.agentSteps = steps;
-    }
-    // Fallback: use aiAgentPlan for backward compatibility
-    if (msg && !msg.agentSteps?.length) {
-      const agentPlan = buildAiAgentPlan({
-        mode: requestedMode,
-        action: requestedAction,
-        instruction: modelInstruction,
-        assistantContent: msg?.content || "",
-        connection: connection,
-        database: tab.database,
-      });
-      if (msg && requestedMode === "agent") msg.agentSteps = buildAiAgentStepItems(agentPlan);
-      if (agentPlan.handoffSql) emit("requestAutoExecuteSql", agentPlan.handoffSql);
-    }
-    currentSessionId.value = "";
-    // Apply deferred context compaction after streaming so assistantIdx stays stable.
-    // Visible chat history is kept for the user; future LLM history starts from this hidden summary.
-    if (pendingCompaction.value) {
-      const { summary, compactedMessages } = pendingCompaction.value;
-      pendingCompaction.value = null;
-      const insertAt = Math.min(1 + compactedMessages, messages.value.length - 1);
-      if (summary) {
-        messages.value.splice(insertAt, 0, {
-          role: "user",
-          content: summary,
-          kind: "contextSummary",
+    // Everything below mutates state (messages, isGenerating, currentSessionId,
+    // the delta buffers) that only the current generation is allowed to touch.
+    // A superseded generation's cleanup is a no-op: abandonInFlightRequest()
+    // already reset isGenerating/currentSessionId/delta buffers synchronously
+    // when it invalidated this generation.
+    // This block CONSUMES this generation's per-request transient state
+    // (applies flushed deltas to the message, splices the compaction summary
+    // into history) rather than just discarding it — see
+    // resetPendingRequestState() below for the abandon-path equivalent that
+    // discards it instead. If you add a new piece of per-request transient
+    // state, it must be handled on both paths.
+    if (aiGenerationGuard.isCurrent(myGeneration)) {
+      if (assistantDeltaFrame !== null) cancelAnimationFrame(assistantDeltaFrame);
+      flushAssistantDeltas();
+      const msg = messages.value[assistantIdx];
+      if (msg) msg.isThinking = false;
+      isGenerating.value = false;
+      // Render agent tool call steps from agent events (fallback when no real-time steps)
+      if (msg && agentEvents.length > 0 && !msg.agentSteps?.length) {
+        const steps: AiAgentStepItem[] = [];
+        agentEvents.forEach((e, index) => {
+          const step = agentEventToStep(e, index);
+          if (step) upsertAgentStep(steps, step);
         });
+        if (steps.length) msg.agentSteps = steps;
       }
+      // Fallback: use aiAgentPlan for backward compatibility
+      if (msg && !msg.agentSteps?.length) {
+        const agentPlan = buildAiAgentPlan({
+          mode: requestedMode,
+          action: requestedAction,
+          instruction: modelInstruction,
+          assistantContent: msg?.content || "",
+          connection: connection,
+          database: tab.database,
+        });
+        if (msg && requestedMode === "agent") msg.agentSteps = buildAiAgentStepItems(agentPlan);
+        if (agentPlan.handoffSql) emit("requestAutoExecuteSql", agentPlan.handoffSql);
+      }
+      currentSessionId.value = "";
+      currentAssistantMessageIndex = -1;
+      // Apply deferred context compaction after streaming so assistantIdx stays stable.
+      // Visible chat history is kept for the user; future LLM history starts from this hidden summary.
+      if (pendingCompaction.value) {
+        const { summary, compactedMessages } = pendingCompaction.value;
+        pendingCompaction.value = null;
+        const insertAt = Math.min(1 + compactedMessages, messages.value.length - 1);
+        if (summary) {
+          messages.value.splice(insertAt, 0, {
+            role: "user",
+            content: summary,
+            kind: "contextSummary",
+          });
+        }
+      }
+      persistConversation();
+      scrollToBottom();
     }
-    persistConversation();
-    scrollToBottom();
   }
 }
 
+// Resolves once `isGenerating` goes false, or after `timeoutMs` — whichever
+// comes first. Used by cancelStream() to bound how long it waits for the
+// backend to actually acknowledge a cancellation before forcing it.
+function waitForGenerationToClear(timeoutMs: number): Promise<void> {
+  return new Promise((resolve) => {
+    if (!isGenerating.value) {
+      resolve();
+      return;
+    }
+    const stopWatch = watch(isGenerating, (value) => {
+      if (value) return;
+      stopWatch();
+      clearTimeout(timer);
+      resolve();
+    });
+    const timer = setTimeout(() => {
+      stopWatch();
+      resolve();
+    }, timeoutMs);
+  });
+}
+
 async function cancelStream() {
-  if (currentSessionId.value) {
-    await aiCancelStream(currentSessionId.value).catch(() => {});
+  await stopAiGenerationWithFallback({
+    isGenerating: () => isGenerating.value,
+    currentGeneration: () => aiGenerationGuard.peek(),
+    isGenerationCurrent: (generation) => aiGenerationGuard.isCurrent(generation),
+    currentSessionId: () => currentSessionId.value,
+    cancelSession: (sessionId) => aiCancelStream(sessionId).then(() => undefined),
+    waitForGenerationToClear: () => waitForGenerationToClear(STOP_FORCE_ABANDON_MS),
+    flushPending: () => {
+      if (assistantDeltaFrame !== null) cancelAnimationFrame(assistantDeltaFrame);
+      flushAssistantDeltas();
+    },
+    currentAssistantMessageIndex: () => currentAssistantMessageIndex,
+    messageAt: (index) => messages.value[index],
+    cancelledMessage: () => t("ai.requestCancelled"),
+    abandon: (sessionId) => abandonInFlightRequest(sessionId),
+    persistConversation,
+  });
+}
+
+// Neutralizes all per-request transient state that must never survive into a
+// different generation/conversation. abandonInFlightRequest() calls this to
+// discard it immediately. send()'s finally does NOT call it — that block must
+// first CONSUME this state (apply flushed deltas to the message, splice the
+// compaction summary into history) rather than discard it — but if you add a
+// new piece of per-request transient state, add its reset here so it can't be
+// missed the way pendingCompaction was (see PR #6332 review).
+function resetPendingRequestState() {
+  if (assistantDeltaFrame !== null) {
+    cancelAnimationFrame(assistantDeltaFrame);
+    assistantDeltaFrame = null;
+  }
+  pendingAssistantDelta = "";
+  pendingAssistantReasoning = "";
+  pendingAssistantIndex = -1;
+  pendingCompaction.value = null;
+}
+
+// `alreadyCancelledSessionId`: the session id a caller (cancelStream()) has
+// already sent the backend cancel RPC for, if any — pass it so this function
+// doesn't fire a second, redundant RPC for the same session. Left undefined
+// by clear/switch/unmount, which never RPC before calling this.
+function abandonInFlightRequest(alreadyCancelledSessionId?: string) {
+  // Used when the UI is about to move to a different conversation/transcript
+  // (clear chat, switch conversation, new chat) while a request may still be
+  // in flight. Unlike cancelStream() above, this must reset shared state
+  // synchronously and unconditionally:
+  //  - the backend cancel RPC depends on a session id having already been
+  //    registered (send() only sets currentSessionId partway through), so it
+  //    can be a silent no-op if this fires before that point;
+  //  - even when the RPC isn't a no-op, waiting for the backend to actually
+  //    stop before resetting isGenerating is exactly what stranded the send
+  //    box indefinitely in issue #5941.
+  // Invalidating the generation here makes send()'s remaining event callbacks,
+  // catch, and finally no-ops regardless of what the backend does next, so
+  // they can't write into the array this call is about to replace. See
+  // lib/ai/aiGenerationGuard.ts.
+  const sessionId = currentSessionId.value;
+  aiGenerationGuard.invalidate();
+  isGenerating.value = false;
+  currentSessionId.value = "";
+  currentAssistantMessageIndex = -1;
+  resetPendingRequestState();
+  if (sessionId && sessionId !== alreadyCancelledSessionId) {
+    aiCancelStream(sessionId).catch(() => {});
   }
 }
 
@@ -2019,6 +2182,14 @@ async function exportMessageAsMarkdown(msg: ChatMessage) {
 }
 
 function clearMessages() {
+  // If a request is still in flight, abandon it before wiping the transcript it
+  // was writing into. abandonInFlightRequest() invalidates the active generation
+  // synchronously, so the in-flight send()'s callbacks/catch/finally become
+  // no-ops even if the backend cancel RPC itself can't reach a registered
+  // session id yet — otherwise isGenerating would never reset (nothing but
+  // send()'s own finally clears it) and the send box would stay stuck disabled
+  // indefinitely.
+  if (isGenerating.value) abandonInFlightRequest();
   messages.value = [];
   conversationId.value = "";
   historyIndex.value = -1;
@@ -2058,6 +2229,11 @@ async function setConversationListOpen(open: boolean) {
 }
 
 function selectConversation(conv: AiConversation) {
+  // Same guard as clearMessages(): switching away from an in-flight request must
+  // abandon it first — abandonInFlightRequest() invalidates the generation so
+  // the old send() can't write its deltas/result into this (different)
+  // conversation's messages array once it's assigned below.
+  if (isGenerating.value) abandonInFlightRequest();
   conversationId.value = conv.id;
   // Drop the previous conversation's rendered Markdown instead of keeping it until the LRU evicts it.
   messageRenderer.value.clear();
@@ -2075,9 +2251,17 @@ function selectConversation(conv: AiConversation) {
 }
 
 async function deleteConversation(id: string) {
-  await deleteAiConversation(id).catch(() => {});
-  conversations.value = conversations.value.filter((c) => c.id !== id);
-  if (conversationId.value === id) clearMessages();
+  await deleteConversationWithCancellation({
+    id,
+    currentConversationId: () => conversationId.value,
+    isGenerating: () => isGenerating.value,
+    abandon: () => abandonInFlightRequest(),
+    deletePersisted: () => deleteAiConversation(id).catch(() => {}),
+    afterDelete: () => {
+      conversations.value = conversations.value.filter((c) => c.id !== id);
+      if (conversationId.value === id) clearMessages();
+    },
+  });
 }
 
 function startNewChat() {
@@ -2164,7 +2348,13 @@ onUnmounted(() => {
   if (assistantDeltaFrame !== null) cancelAnimationFrame(assistantDeltaFrame);
   clearTimeout(mentionTimer);
   clearEffortMenuCloseTimer();
-  cancelStream();
+  // Must invalidate the generation the same way clearMessages()/selectConversation()
+  // do, not just fire the best-effort cancelStream() RPC: if a request is still
+  // mid-await (context preparation, or the backend hasn't registered a session id
+  // yet) when this component unmounts, cancelStream() alone leaves the generation
+  // current, so the request still starts and its event callback/catch/finally keep
+  // writing into refs this now-unmounted instance's closures still hold.
+  if (isGenerating.value) abandonInFlightRequest();
   detachMessageScrollListener();
   // 清理拖拽事件监听，防止内存泄漏
   document.removeEventListener("mousemove", handleResize);
@@ -2744,21 +2934,15 @@ async function openExternalUrl(url: string) {
                     <input v-model="modelSearchQuery" type="text" :placeholder="t('ai.searchModels')" class="w-full rounded-sm border bg-background py-1.5 pl-7 pr-2 text-xs outline-none focus:ring-1 focus:ring-primary" @click.stop />
                   </div>
                   <div class="max-h-80 overflow-auto">
-                    <template v-for="config in configuredProviders" :key="config.id">
-                      <button
-                        type="button"
-                        class="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-xs hover:bg-muted"
-                        :class="config.id === settings.activeModel?.configId ? 'bg-accent text-accent-foreground' : 'text-foreground'"
-                        :aria-expanded="!isModelConfigCollapsed(config.id)"
-                        @click="toggleModelConfig(config.id)"
-                      >
+                    <template v-for="(config, configIndex) in configuredProviders" :key="config.id">
+                      <button type="button" class="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-xs text-foreground hover:bg-muted" :aria-expanded="!isModelConfigCollapsed(config.id)" @click="toggleModelConfig(config.id)">
                         <ChevronRight class="h-3.5 w-3.5 shrink-0 transition-transform" :class="{ 'rotate-90': !isModelConfigCollapsed(config.id) }" />
                         <AiProviderLogo :provider="config.provider" :label="AI_PROVIDER_PRESETS[config.provider]?.label ?? config.provider" :icon-slug="AI_PROVIDER_PRESETS[config.provider]?.iconSlug" class="h-3.5 w-3.5 shrink-0" />
                         <span class="min-w-0 flex-1 truncate font-medium">{{ config.name }}</span>
                         <Loader2 v-if="getModelCatalog(config.id).status === 'loading'" class="h-3 w-3 shrink-0 animate-spin text-muted-foreground" />
                         <span v-if="config.isDefault" class="ml-auto text-[10px] text-muted-foreground">{{ t("ai.default") }}</span>
                       </button>
-                      <div v-if="!isModelConfigCollapsed(config.id)">
+                      <div v-if="!isModelConfigCollapsed(config.id)" class="ml-5 border-l border-border/60 pl-1">
                         <div v-if="getModelCatalog(config.id).status === 'loading' && !getModelsForConfig(config.id).length" class="flex items-center gap-2 px-2 py-2 text-xs text-muted-foreground">
                           <Loader2 class="h-3.5 w-3.5 animate-spin" />
                           {{ t("ai.loadingModels") }}
@@ -2799,7 +2983,7 @@ async function openExternalUrl(url: string) {
                           {{ t("ai.manualModel") }}
                         </button>
                       </div>
-                      <div class="my-1 border-t" />
+                      <div v-if="configIndex < configuredProviders.length - 1" class="my-1 border-t" />
                     </template>
                   </div>
                   <div v-if="settings.activeModel" class="border-t pt-1">

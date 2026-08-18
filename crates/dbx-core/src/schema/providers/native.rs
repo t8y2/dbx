@@ -258,10 +258,10 @@ pub(in crate::schema) async fn table_ddl(
             }
         }
         PoolKind::Postgres(p) if config.is_some_and(is_cloudberry_config) => {
-            super::super::cloudberry_ddl(p, schema, table).await
+            super::super::cloudberry_ddl(p, schema, table, false).await
         }
         PoolKind::Postgres(p) if config.is_some_and(db::opentenbase::is_config) => {
-            super::super::opentenbase_ddl(p, schema, table).await
+            super::super::opentenbase_ddl(p, schema, table, false).await
         }
         PoolKind::Postgres(p) => super::super::pg_ddl(p, schema, table).await,
         PoolKind::Sqlite(p) => super::super::sqlite_ddl(p, schema, table).await,

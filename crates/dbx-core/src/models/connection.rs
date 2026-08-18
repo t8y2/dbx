@@ -931,12 +931,22 @@ impl ConnectionConfig {
         }
     }
 
+    /// Cloud Spanner schema changes are long-running operations rather than plain
+    /// statements. Measured against the real service, `CREATE INDEX` on an *empty*
+    /// table took 22.9-33.6s over seven runs, so the generic default fails
+    /// intermittently — and the failure is misleading, because the operation keeps
+    /// running server-side and completes, leaving a retry to report
+    /// `Duplicate name in schema`. Raising a floor mirrors what
+    /// `connection::agent_connect_timeout` already does for Access.
+    const SPANNER_MIN_QUERY_TIMEOUT_SECS: u64 = 120;
+
     pub fn effective_query_timeout_secs(&self) -> u64 {
         if self.query_timeout_secs == 0 {
-            0
-        } else {
-            self.query_timeout_secs.max(1)
+            // An explicit 0 is the UI's "no limit"; a floor must not impose one.
+            return 0;
         }
+        let floor = if self.db_type == DatabaseType::Spanner { Self::SPANNER_MIN_QUERY_TIMEOUT_SECS } else { 1 };
+        self.query_timeout_secs.max(floor)
     }
 
     pub fn effective_database(&self) -> Option<&str> {
@@ -3075,6 +3085,45 @@ mod tests {
         config.query_timeout_secs = 3600;
 
         assert_eq!(config.effective_query_timeout_secs(), 3600);
+    }
+
+    #[test]
+    fn spanner_query_timeout_floor_covers_schema_change_latency() {
+        // A Cloud Spanner CREATE INDEX is a long-running operation: measured against
+        // the real service it took 22.9-33.6s on an empty table, so the generic
+        // desktop default of 30s fails intermittently.
+        let mut config = mysql_config("root", "", None);
+        config.db_type = DatabaseType::Spanner;
+        config.query_timeout_secs = 30;
+
+        assert_eq!(config.effective_query_timeout_secs(), 120);
+    }
+
+    #[test]
+    fn spanner_query_timeout_floor_never_lowers_a_higher_setting() {
+        let mut config = mysql_config("root", "", None);
+        config.db_type = DatabaseType::Spanner;
+        config.query_timeout_secs = 600;
+
+        assert_eq!(config.effective_query_timeout_secs(), 600);
+    }
+
+    #[test]
+    fn spanner_query_timeout_floor_respects_the_no_limit_setting() {
+        // 0 is the UI's "unlimited"; a floor must not turn that into a 120s cap.
+        let mut config = mysql_config("root", "", None);
+        config.db_type = DatabaseType::Spanner;
+        config.query_timeout_secs = 0;
+
+        assert_eq!(config.effective_query_timeout_secs(), 0);
+    }
+
+    #[test]
+    fn query_timeout_floor_is_scoped_to_spanner() {
+        let mut config = mysql_config("root", "", None);
+        config.query_timeout_secs = 30;
+
+        assert_eq!(config.effective_query_timeout_secs(), 30);
     }
 
     #[test]

@@ -646,7 +646,9 @@ impl DbOperationBudget {
     }
 
     pub fn from_connection_config(config: &ConnectionConfig) -> Self {
-        Self::from_config(config.effective_connect_timeout_secs(), Some(config.query_timeout_secs))
+        // effective_query_timeout_secs, not the raw field: it preserves 0 ("no limit")
+        // and applies the per-database-type floor Cloud Spanner needs for DDL.
+        Self::from_config(config.effective_connect_timeout_secs(), Some(config.effective_query_timeout_secs()))
     }
 
     /// Use global default values (when no connection config is available).

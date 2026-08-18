@@ -121,6 +121,37 @@ describe("database authorization plans", () => {
     expect(grant).toMatchObject({ subject: "app@2001:db8::1", targetDatabase: "db:prod" });
   });
 
+  it("grants only selected MySQL tables and filters database-only privileges", () => {
+    const plan = buildCreateUserAuthorizationPlan({
+      provider: mysqlUserAdminProvider,
+      principal: { user: "table_reader", host: "%", password: "secret" },
+      accountType: "standard",
+      databases: [{ database: "app_db", preset: "readWrite", tables: ["orders", "audit`log", "orders"] }],
+    });
+    const sql = authorizationPlanSql(plan);
+    const grants = plan.steps.filter((step) => step.operation === "grantDatabase");
+
+    expect(grants).toHaveLength(2);
+    expect(grants.map((step) => step.targetTable)).toEqual(["orders", "audit`log"]);
+    expect(sql).toContain("GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, DROP, ALTER, INDEX, REFERENCES, SHOW VIEW, CREATE VIEW, TRIGGER ON `app_db`.`orders` TO 'table_reader'@'%';");
+    expect(sql).toContain("ON `app_db`.`audit``log`");
+    expect(sql).not.toContain("ON `app_db`.*");
+    expect(sql).not.toContain("EVENT");
+    expect(sql).not.toContain("CREATE ROUTINE");
+    expect(sql).not.toContain("LOCK TABLES");
+  });
+
+  it("keeps database-wide MySQL grants as the default", () => {
+    const plan = buildCreateUserAuthorizationPlan({
+      provider: mysqlUserAdminProvider,
+      principal: { user: "db_reader", host: "%", password: "secret" },
+      accountType: "standard",
+      databases: [{ database: "app_db", preset: "readOnly" }],
+    });
+
+    expect(authorizationPlanSql(plan)).toContain("GRANT SELECT, SHOW VIEW ON `app_db`.* TO 'db_reader'@'%';");
+  });
+
   it("reports PostgreSQL object grants independently", async () => {
     const plan = buildCreateDatabaseAuthorizationPlan({
       provider: postgresUserAdminProvider,

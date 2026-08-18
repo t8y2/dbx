@@ -243,16 +243,7 @@ description: 安装 DBX、创建第一个连接，并了解桌面版、Docker �
 <Tabs groupId="dev-platform" items={["macOS", "Linux", "Windows"]}>
   <Tab value="macOS">```bash brew install unixodbc ```</Tab>
   <Tab value="Linux">```bash sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev unixodbc-dev ```</Tab>
-  <Tab value="Windows">
-    安装 [Strawberry Perl](https://github.com/StrawberryPerl/Perl-Dist-Strawberry/releases)（编译内置 OpenSSL 所需）：
-
-    ```powershell
-    winget install StrawberryPerl.StrawberryPerl
-    ```
-
-    DBX 默认启用 `sqlite-sqlcipher` 特性，需要从源码编译 SQLCipher 和 OpenSSL，而 Windows 上编译 OpenSSL 必须使用 Perl 执行 `Configure` 脚本。安装后请重新打开终端，使 `perl` 进入 `PATH`。
-
-  </Tab>
+  <Tab value="Windows">Windows 通常不需要额外安装系统依赖。</Tab>
 </Tabs>
 
 ### 启动开发环境

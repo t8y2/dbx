@@ -55,6 +55,7 @@ import TextContentSearchBar from "@/components/common/TextContentSearchBar.vue";
 import { decodeJsonUnicodeEscapes, formatJsonSource, mapDisplayToRaw } from "@/lib/common/safeJsonFormat";
 import { unixSecondsToCalendarDateTime } from "@/components/ui/date-time-picker/dateTimePicker";
 import { applyRedisExpiryPolicy, type RedisExpiryMode, redisExpiryModeForTtl, validateRedisExpiry } from "@/lib/redis/redisExpiry";
+import { redisKeyRawToText, redisKeyTextToDisplay, redisKeyTextToRaw } from "@/lib/redis/redisCommandSession";
 
 const { t, locale } = useI18n();
 const { toast } = useToast();
@@ -74,7 +75,7 @@ const redisExpiryTransport = {
   setExpireAt: api.redisSetExpireAt,
 };
 
-const emit = defineEmits<{ deleted: [keyRaw: string]; loaded: [value: RedisValue] }>();
+const emit = defineEmits<{ deleted: [keyRaw: string]; loaded: [value: RedisValue]; renamed: [oldKeyRaw: string, newKeyRaw: string, newKeyDisplay: string] }>();
 
 const REDIS_JSON_WRAP_STORAGE_KEY = "dbx-redis-json-word-wrap";
 const REDIS_JSON_UNICODE_MODE_STORAGE_KEY = "dbx-redis-json-unicode-mode";
@@ -90,6 +91,12 @@ const REDIS_STREAM_MIN_ROW_HEIGHT = 96;
 const data = ref<RedisValue | null>(null);
 const loading = ref(false);
 const loadingMore = ref(false);
+const showRenameKeyDialog = ref(false);
+const renamingKey = ref(false);
+const renameKeyName = ref("");
+const renameKeyError = ref("");
+const renameKeyInitialName = ref("");
+const renameKeyInitialRaw = ref("");
 let loadRequestId = 0;
 const streamTab = ref<"entries" | "groups">("entries");
 const streamEntries = ref<RedisStreamEntry[]>([]);
@@ -1474,6 +1481,50 @@ function requestDeleteKey() {
   showDeleteConfirm.value = true;
 }
 
+function openRenameKeyDialog() {
+  if (!data.value || renamingKey.value) return;
+  // Display text escapes backslashes and binary bytes. Prefer the original
+  // UTF-8 text when available so confirming an unchanged name is a true no-op.
+  renameKeyName.value = redisKeyRawToText(props.keyRaw) ?? data.value.key_display;
+  renameKeyInitialName.value = renameKeyName.value;
+  renameKeyInitialRaw.value = props.keyRaw;
+  renameKeyError.value = "";
+  showRenameKeyDialog.value = true;
+}
+
+function handleRenameKeyDialogOpenChange(open: boolean) {
+  if (renamingKey.value) return;
+  showRenameKeyDialog.value = open;
+  if (!open) renameKeyError.value = "";
+}
+
+async function renameKey() {
+  if (renamingKey.value) return;
+  if (!renameKeyName.value) {
+    renameKeyError.value = t("redis.renameKeyNameRequired");
+    return;
+  }
+
+  const newKeyRaw = renameKeyName.value === renameKeyInitialName.value ? renameKeyInitialRaw.value : redisKeyTextToRaw(renameKeyName.value);
+  if (newKeyRaw === props.keyRaw) {
+    showRenameKeyDialog.value = false;
+    return;
+  }
+
+  renamingKey.value = true;
+  renameKeyError.value = "";
+  try {
+    await api.redisRenameKey(props.connectionId, props.db, props.keyRaw, newKeyRaw);
+    toast(t("redis.renameKeySuccess", { oldName: props.keyDisplay, newName: renameKeyName.value }), 2000);
+    showRenameKeyDialog.value = false;
+    emit("renamed", props.keyRaw, newKeyRaw, redisKeyTextToDisplay(renameKeyName.value));
+  } catch (error) {
+    renameKeyError.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    renamingKey.value = false;
+  }
+}
+
 async function copyValue() {
   if (!data.value) return;
   // Copy the decompressed text while the Decompressed view is showing it.
@@ -2497,6 +2548,7 @@ defineExpose({ focusSearch });
           </div>
           <Button variant="ghost" size="icon" class="h-7 w-7 shrink-0" :title="t('grid.copyValue')" :aria-label="t('grid.copyValue')" @click="copyValue"><Copy class="h-3.5 w-3.5" /></Button>
           <Button variant="ghost" size="icon" class="h-7 w-7 shrink-0" :title="t('redis.copyInsertStatement')" :aria-label="t('redis.copyInsertStatement')" @click="copyInsertStatement"><ClipboardCopy class="h-3.5 w-3.5" /></Button>
+          <Button variant="ghost" size="icon" class="h-7 w-7 shrink-0" :title="t('redis.renameKey')" :aria-label="t('redis.renameKey')" @click="openRenameKeyDialog"><Pencil class="h-3.5 w-3.5" /></Button>
           <Button variant="ghost" size="icon" class="h-7 w-7 shrink-0 text-destructive" @click="requestDeleteKey"><Trash2 class="h-3.5 w-3.5" /></Button>
         </div>
 
@@ -3183,6 +3235,27 @@ defineExpose({ focusSearch });
     </template>
 
     <DangerConfirmDialog v-model:open="showDeleteConfirm" :message="t('dangerDialog.deleteMessage')" :details="deleteDetails" :confirm-label="t('dangerDialog.deleteConfirm')" @confirm="confirmDelete" />
+
+    <Dialog :open="showRenameKeyDialog" @update:open="handleRenameKeyDialogOpenChange">
+      <DialogContent class="sm:max-w-md" :show-close-button="!renamingKey" :style="editorFontFamilyStyle">
+        <DialogHeader>
+          <DialogTitle>{{ t("redis.renameKey") }}</DialogTitle>
+        </DialogHeader>
+        <label class="grid gap-1.5 text-xs font-medium">
+          <span>{{ t("redis.renameKeyName") }}</span>
+          <Input v-model="renameKeyName" class="dbx-editor-font-family" :disabled="renamingKey" autofocus spellcheck="false" @keydown.enter.prevent="renameKey" />
+        </label>
+        <p v-if="renameKeyError" class="text-xs text-destructive">{{ renameKeyError }}</p>
+        <DialogFooter>
+          <Button variant="ghost" :disabled="renamingKey" @click="showRenameKeyDialog = false">{{ t("dangerDialog.cancel") }}</Button>
+          <Button :disabled="renamingKey || !renameKeyName" @click="renameKey">
+            <Loader2 v-if="renamingKey" class="mr-1 h-3.5 w-3.5 animate-spin" />
+            <Pencil v-else class="mr-1 h-3.5 w-3.5" />
+            {{ t("redis.renameKey") }}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
 
     <Dialog :open="showHashFieldTtlDialog" @update:open="handleHashFieldTtlOpenChange">
       <DialogContent class="w-[calc(100vw-2rem)] sm:max-w-[460px]">

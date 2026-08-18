@@ -2862,6 +2862,20 @@ where
     redis::cmd("DEL").arg(key).query_async::<()>(con).await.map_err(|e| e.to_string())
 }
 
+/// Rename a key without overwriting an existing destination.
+pub async fn rename_key<C>(con: &mut C, key: &[u8], new_key: &[u8]) -> Result<(), String>
+where
+    C: ConnectionLike + Send + Sync + Unpin,
+{
+    let renamed =
+        redis::cmd("RENAMENX").arg(key).arg(new_key).query_async::<bool>(con).await.map_err(|e| e.to_string())?;
+    if renamed {
+        Ok(())
+    } else {
+        Err("Target key already exists".to_string())
+    }
+}
+
 async fn apply_expire_if_needed<C>(con: &mut C, key: &[u8], ttl: Option<i64>) -> Result<(), String>
 where
     C: ConnectionLike + Send + Sync + Unpin,
@@ -4175,6 +4189,27 @@ mod tests {
         assert!(con.commands[0].contains("\r\nSET\r\n"));
         assert!(!con.commands[0].contains("\r\nKEEPTTL\r\n"));
         assert!(!con.commands[0].contains("\r\nEXPIRE\r\n"));
+    }
+
+    #[tokio::test]
+    async fn rename_key_uses_renamenx_without_overwriting_the_destination() {
+        let mut con = FakeRedisConnection::new(vec![RedisRawValue::Int(1)]);
+
+        super::rename_key(&mut con, b"session:old", b"session:new").await.unwrap();
+
+        assert_eq!(con.commands.len(), 1);
+        assert!(con.commands[0].contains("\r\nRENAMENX\r\n"));
+        assert!(con.commands[0].contains("\r\nsession:old\r\n"));
+        assert!(con.commands[0].contains("\r\nsession:new\r\n"));
+    }
+
+    #[tokio::test]
+    async fn rename_key_reports_a_destination_conflict() {
+        let mut con = FakeRedisConnection::new(vec![RedisRawValue::Int(0)]);
+
+        let error = super::rename_key(&mut con, b"session:old", b"session:new").await.unwrap_err();
+
+        assert_eq!(error, "Target key already exists");
     }
 
     #[tokio::test]

@@ -1782,6 +1782,7 @@ pub fn run() {
             commands::redis_cmd::redis_get_stream_pending,
             commands::redis_cmd::redis_set_string,
             commands::redis_cmd::redis_delete_key,
+            commands::redis_cmd::redis_rename_key,
             commands::redis_cmd::redis_hash_set,
             commands::redis_cmd::redis_hash_del,
             commands::redis_cmd::redis_hash_field_set_ttl,

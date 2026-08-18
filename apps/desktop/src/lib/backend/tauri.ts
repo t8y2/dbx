@@ -2342,6 +2342,10 @@ export async function redisDeleteKey(connectionId: string, db: number, keyRaw: s
   return invoke("redis_delete_key", { connectionId, db, keyRaw });
 }
 
+export async function redisRenameKey(connectionId: string, db: number, keyRaw: string, newKeyRaw: string): Promise<void> {
+  return invoke("redis_rename_key", { connectionId, db, keyRaw, newKeyRaw });
+}
+
 export async function redisHashSet(connectionId: string, db: number, keyRaw: string, field: string, value: string, ttl?: number): Promise<void> {
   return invoke("redis_hash_set", {
     connectionId,

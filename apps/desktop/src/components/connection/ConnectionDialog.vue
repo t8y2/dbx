@@ -2770,6 +2770,9 @@ function defaultDatabaseForProfile() {
 }
 
 function onDbTypeChange(val: string) {
+  if (!editingId.value && val !== selectedType.value) {
+    resetForm({ preservePickerState: true });
+  }
   const category = dbCategoryForOption(val);
   if (category) selectedDbCategory.value = category;
   customDriverName.value = "";
@@ -4848,7 +4851,7 @@ function openJdbcDriverManagerFromError() {
   openJdbcDriverManager();
 }
 
-function resetForm() {
+function resetForm(options: { preservePickerState?: boolean } = {}) {
   editingId.value = null;
   form.value = defaultForm();
   resetConnectionNoteVisibilityDraft(connectionNoteVisibilityDraft, settingsStore.editorSettings.sidebarShowConnectionNotes);
@@ -4870,10 +4873,12 @@ function resetForm() {
   appliedConnectionUrlInput.value = "";
   resetMeilisearchHostInput();
   oracleTnsAdminPath.value = "";
-  dialogStep.value = "select";
-  dbSearchQuery.value = "";
-  selectedDbCategory.value = "sql";
-  configTab.value = "connection";
+  if (!options.preservePickerState) {
+    dialogStep.value = "select";
+    dbSearchQuery.value = "";
+    selectedDbCategory.value = "sql";
+    configTab.value = "connection";
+  }
   resetVisibleDatabaseDraftState();
   resetVisibleNacosNamespaceDraftState();
   resetProductionDatabaseDraftState();

@@ -5571,6 +5571,10 @@ export default withEnglishFallback({
     jdbcSourceMaven: "Maven",
     jdbcSourceManual: "手動",
     noMatchingDrivers: "沒有相符的驅動程式。",
+    driverInstallCancelled: "{label} 驅動安裝已取消",
+    upgradeAllCancelled: "批次升級已取消（{count} 個驅動中止）",
+    cancelInstall: "取消安裝",
+    cancelUpgradeAll: "取消批次升級",
   },
   databaseExport: {
     title: "匯出資料庫",

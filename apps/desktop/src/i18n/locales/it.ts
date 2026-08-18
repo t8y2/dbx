@@ -6233,6 +6233,10 @@ export default withEnglishFallback({
     driverStoreDirMigrationFailed: "Migrazione driver fallita: {error}",
     driverStoreDirDialogTitle: "Seleziona {target}",
     driverStoreDirSuccess: "{target} cambiato, riavvio in corso…",
+    driverInstallCancelled: "{label} installazione del driver annullata",
+    upgradeAllCancelled: "Aggiornamento batch annullato ({count} driver interrotti)",
+    cancelInstall: "Annulla installazione",
+    cancelUpgradeAll: "Annulla aggiornamento batch",
   },
   databaseExport: {
     title: "Esporta Database",

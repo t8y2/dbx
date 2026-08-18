@@ -6233,6 +6233,10 @@ export default withEnglishFallback({
     driverStoreDirMigrationFailed: "Error en la migración de controladores: {error}",
     driverStoreDirDialogTitle: "Seleccionar {target}",
     driverStoreDirSuccess: "{target} cambiado, reiniciando…",
+    driverInstallCancelled: "Instalación del controlador {label} cancelada",
+    upgradeAllCancelled: "Actualización masiva cancelada ({count} controladores interrumpidos)",
+    cancelInstall: "Cancelar instalación",
+    cancelUpgradeAll: "Cancelar actualización masiva",
   },
   databaseExport: {
     title: "Exportar base de datos",

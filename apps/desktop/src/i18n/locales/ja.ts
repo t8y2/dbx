@@ -6286,6 +6286,10 @@ export default withEnglishFallback({
     driverStoreDirMigrationFailed: "ドライバーストアの移行に失敗しました: {error}",
     driverStoreDirDialogTitle: "{target}を選択",
     driverStoreDirSuccess: "{target}を変更しました。再起動中…",
+    driverInstallCancelled: "{label} ドライバーのインストールはキャンセルされました",
+    upgradeAllCancelled: "一括アップグレードはキャンセルされました（{count} 個のドライバーが中止されました）",
+    cancelInstall: "インストールをキャンセル",
+    cancelUpgradeAll: "一括アップグレードをキャンセル",
   },
   databaseExport: {
     runInBackground: "バックグラウンドで実行",

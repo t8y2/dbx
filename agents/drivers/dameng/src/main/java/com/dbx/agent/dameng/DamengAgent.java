@@ -1174,13 +1174,13 @@ public final class DamengAgent extends AbstractJdbcAgent {
             for (String candidate : typeCandidates) {
                 String source = readAllSourceLines(schema, name, candidate);
                 if (notBlank(source)) {
-                    return new ObjectSource(name, objectType, schema, source);
+                    return catalogRoutineObjectSource(schema, name, objectType, source);
                 }
             }
             // 兜底：忽略 TYPE 过滤按名称读取全部源码行（同一 schema 内对象名唯一）。
             String anyTypeSource = readAllSourceLines(schema, name, null);
             if (notBlank(anyTypeSource)) {
-                return new ObjectSource(name, objectType, schema, anyTypeSource);
+                return catalogRoutineObjectSource(schema, name, objectType, anyTypeSource);
             }
             return null;
         } catch (RuntimeException error) {
@@ -1214,6 +1214,36 @@ public final class DamengAgent extends AbstractJdbcAgent {
         return source.toString();
     }
 
+    private static ObjectSource catalogRoutineObjectSource(
+        String schema,
+        String name,
+        String objectType,
+        String source
+    ) {
+        String normalizedSource = source.stripLeading();
+        String upperSource = normalizedSource.toUpperCase(Locale.ROOT);
+        boolean executable = upperSource.startsWith("CREATE ") || upperSource.startsWith("ALTER ");
+        if (!executable) {
+            String declarationType = normalizeObjectSourceType(objectType).replace('_', ' ');
+            if (startsWithRoutineDeclaration(normalizedSource, declarationType)) {
+                normalizedSource = "CREATE OR REPLACE " + normalizedSource;
+                executable = true;
+            }
+        }
+        if (!executable) {
+            normalizedSource = CATALOG_BODY_HINT + normalizedSource;
+        }
+        return new ObjectSource(name, objectType, schema, normalizedSource, executable);
+    }
+
+    private static boolean startsWithRoutineDeclaration(String source, String declarationType) {
+        if (!source.regionMatches(true, 0, declarationType, 0, declarationType.length())) {
+            return false;
+        }
+        return source.length() == declarationType.length()
+            || Character.isWhitespace(source.charAt(declarationType.length()));
+    }
+
     private ObjectSource catalogRoutineSystemText(String schema, String name, String objectType) {
         try {
             // DM 将过程/函数/包/类型的定义文本按行存放在 SYS.SYSTEXTS，
@@ -1241,7 +1271,7 @@ public final class DamengAgent extends AbstractJdbcAgent {
                 }
             }
             return notBlank(source.toString())
-                ? new ObjectSource(name, objectType, schema, source.toString())
+                ? catalogRoutineObjectSource(schema, name, objectType, source.toString())
                 : null;
         } catch (RuntimeException error) {
             return metadataTierError(error);

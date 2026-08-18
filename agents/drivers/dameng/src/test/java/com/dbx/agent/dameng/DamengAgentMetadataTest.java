@@ -594,6 +594,32 @@ class DamengAgentMetadataTest {
     }
 
     @Test
+    void wrapsBareAllSourcePackageBodyAsExecutableDdl() {
+        DamengAgent agent = new DamengAgent();
+        List<String> sqls = new ArrayList<>();
+        TestSupport.setPrivateConnection(
+            agent,
+            catalogFallbackConnection(
+                missingDbmsMetadataPackageError(),
+                sqls,
+                List.of(
+                    Arrays.asList("PACKAGE BODY \"APP\".\"PKG_DEMO\" AS"),
+                    Arrays.asList("  PROCEDURE P IS BEGIN NULL; END;"),
+                    Arrays.asList("END PKG_DEMO;")
+                ),
+                null,
+                List.of(),
+                null
+            )
+        );
+
+        ObjectSource source = agent.getObjectSource("APP", "PKG_DEMO", "PACKAGE_BODY");
+
+        Assertions.assertTrue(source.getSource().startsWith("CREATE OR REPLACE PACKAGE BODY"), source.getSource());
+        Assertions.assertTrue(source.isEditable());
+    }
+
+    @Test
     void fallsBackToViewTextWhenDbmsMetadataPackageIsMissing() {
         DamengAgent agent = new DamengAgent();
         List<String> sqls = new ArrayList<>();
@@ -679,6 +705,54 @@ class DamengAgentMetadataTest {
         Assertions.assertTrue(source.isEditable());
         Assertions.assertTrue(sqls.stream().anyMatch(sql -> sql.contains("FROM ALL_SOURCE")), String.join("\n", sqls));
         Assertions.assertTrue(sqls.stream().anyMatch(sql -> sql.contains("SYS.SYSTEXTS") && sql.contains("SYS.SYSOBJECTS")), String.join("\n", sqls));
+    }
+
+    @Test
+    void wrapsBareSysTextsTypeAsExecutableDdl() {
+        DamengAgent agent = new DamengAgent();
+        List<String> sqls = new ArrayList<>();
+        TestSupport.setPrivateConnection(
+            agent,
+            catalogFallbackConnection(
+                missingDbmsMetadataPackageError(),
+                sqls,
+                List.of(),
+                missingCatalogViewError("ALL_SOURCE"),
+                List.of(
+                    Arrays.asList("TYPE \"APP\".\"T_ADDR\" AS OBJECT("),
+                    Arrays.asList("  CITY VARCHAR2(64)"),
+                    Arrays.asList(")")
+                ),
+                null
+            )
+        );
+
+        ObjectSource source = agent.getObjectSource("APP", "T_ADDR", "TYPE");
+
+        Assertions.assertTrue(source.getSource().startsWith("CREATE OR REPLACE TYPE"), source.getSource());
+        Assertions.assertTrue(source.isEditable());
+    }
+
+    @Test
+    void keepsUnrecognizedRoutineCatalogTextReadOnly() {
+        DamengAgent agent = new DamengAgent();
+        List<String> sqls = new ArrayList<>();
+        TestSupport.setPrivateConnection(
+            agent,
+            catalogFallbackConnection(
+                missingDbmsMetadataPackageError(),
+                sqls,
+                List.of(Arrays.asList("BEGIN NULL; END;")),
+                null,
+                List.of(),
+                null
+            )
+        );
+
+        ObjectSource source = agent.getObjectSource("APP", "PKG_DEMO", "PACKAGE");
+
+        Assertions.assertTrue(source.getSource().startsWith("--"), source.getSource());
+        Assertions.assertFalse(source.isEditable());
     }
 
     @Test

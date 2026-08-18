@@ -4036,6 +4036,7 @@ export const useQueryStore = defineStore("query", () => {
     let hiddenPrimaryKeys: HiddenPrimaryKeyProjection[] = [];
     let useOracleLobPreview = false;
     let pageSql: string | undefined;
+    let requestedPageLimit: number | undefined;
     let pageLimit: number | undefined;
     let pageOffset: number | undefined;
     let countSql: string | undefined;
@@ -4626,7 +4627,9 @@ export const useQueryStore = defineStore("query", () => {
           sqlToExecute = sorted.sql;
           resultSortedSql = sorted.sql;
         }
-        const pagination = limitQueryPagination(options?.pagination ?? { limit: settingsStore.editorSettings.pageSize, offset: 0 }, queryResultMaxRows);
+        const requestedPagination = options?.pagination ?? { limit: settingsStore.editorSettings.pageSize, offset: 0 };
+        requestedPageLimit = requestedPagination.limit;
+        const pagination = limitQueryPagination(requestedPagination, queryResultMaxRows);
         const plan = await api.prepareQueryPaginationExecutionPlan({
           sql: sqlToExecute,
           queryBaseSql,
@@ -4658,13 +4661,12 @@ export const useQueryStore = defineStore("query", () => {
           return false;
         }
       } else if (tab.mode === "data") {
-        const pagination = limitQueryPagination(
-          {
-            limit: options?.pagination?.limit ?? tableOpenPageLimit(settingsStore.editorSettings.tableOpenPageSize),
-            offset: options?.pagination?.offset ?? 0,
-          },
-          queryResultMaxRows,
-        );
+        const requestedPagination = {
+          limit: options?.pagination?.limit ?? tableOpenPageLimit(settingsStore.editorSettings.tableOpenPageSize),
+          offset: options?.pagination?.offset ?? 0,
+        };
+        requestedPageLimit = requestedPagination.limit;
+        const pagination = limitQueryPagination(requestedPagination, queryResultMaxRows);
         pageLimit = pagination.limit;
         pageOffset = pagination.offset;
       }
@@ -4828,7 +4830,8 @@ export const useQueryStore = defineStore("query", () => {
         // Keep the base page state so later table refresh/cache recovery does
         // not re-execute only the most recently fetched tail segment.
         current.resultPageSql = shouldAppendResult ? (current.resultPageSql ?? pageSql) : pageSql;
-        current.resultPageLimit = pageLimit;
+        const displayPageLimit = typeof pageLimit === "number" ? (requestedPageLimit ?? pageLimit) : undefined;
+        current.resultPageLimit = shouldAppendResult ? (current.resultPageLimit ?? displayPageLimit) : displayPageLimit;
         current.resultPageOffset = shouldAppendResult ? (current.resultPageOffset ?? 0) : pageOffset;
         current.resultCountSql = countSql;
         current.resultSessionId = current.result?.session_id ?? undefined;
@@ -4983,7 +4986,7 @@ export const useQueryStore = defineStore("query", () => {
         current.resultBaseSql = shouldReplaceActiveResultInGroup ? (current.resultBaseSql ?? queryBaseSql) : queryBaseSql;
         current.resultSortedSql = resultSortedSql;
         current.resultPageSql = pageSql;
-        current.resultPageLimit = pageLimit;
+        current.resultPageLimit = typeof pageLimit === "number" ? (requestedPageLimit ?? pageLimit) : undefined;
         current.resultPageOffset = pageOffset;
         current.resultCountSql = countSql;
         current.resultSessionId = undefined;

@@ -3494,6 +3494,8 @@ test("append pagination preserves existing rows and respects the memory cap", as
     affected_rows: 0,
     execution_time_ms: 3,
   };
+  tab.resultPageLimit = 1000;
+  tab.resultPageOffset = 0;
 
   globalThis.fetch = withConnectionHealthMock(async (input) => {
     if (String(input) === "/api/query/execute-multi") {
@@ -3527,7 +3529,7 @@ test("append pagination preserves existing rows and respects the memory cap", as
     assert.equal(tab.result?.execution_time_ms, 7);
     assert.equal(tab.result?.has_more, false);
     assert.equal(tab.resultPageOffset, 0, "later refreshes must restart from the logical result origin");
-    assert.equal(tab.resultPageLimit, 2);
+    assert.equal(tab.resultPageLimit, 1000, "a short appended segment must preserve the base display page size");
   } finally {
     globalThis.fetch = originalFetch;
     restoreStorage();
@@ -6801,6 +6803,132 @@ test("query execution keeps automatically counting total rows in the background"
     );
     await waitFor(() => tab.resultTotalRowCount === 250);
     assert.equal(tab.resultTotalRowCountLoading, false);
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreStorage();
+  }
+});
+
+test("SQL Server keeps the requested page size when the final fetch is narrowed", async () => {
+  const restoreStorage = installMemoryStorage();
+  setActivePinia(createPinia());
+  const connectionStore = useConnectionStore();
+  const settingsStore = useSettingsStore();
+  const store = useQueryStore();
+  const originalFetch = globalThis.fetch;
+  let executeBody: any;
+  let prepareBody: any;
+  let countRequests = 0;
+  let prepareRequests = 0;
+  let executeRequests = 0;
+  let failExecution = false;
+  let paginationPlan = {
+    pageLimit: 1,
+    pageOffset: 9999,
+  };
+
+  settingsStore.updateEditorSettings({
+    autoCalculateTotalRows: true,
+    queryResultMaxRowsEnabled: false,
+    pageSize: 1000,
+  });
+  connectionStore.addEphemeralConnection(sqlServerConn("sqlserver-final-page"));
+  const tabId = store.createTab("sqlserver-final-page", "db", "Query", "query", "dbo");
+  const tab = store.tabs.find((item) => item.id === tabId);
+  assert.ok(tab);
+
+  globalThis.fetch = withConnectionHealthMock(async (input, init) => {
+    const url = String(input);
+    if (url === "/api/query/prepare-pagination-plan") {
+      prepareRequests += 1;
+      prepareBody = JSON.parse(String(init?.body ?? "{}"));
+      return Response.json({
+        sqlToExecute: "SELECT TOP 10000 1 AS [id]",
+        pageSql: "SELECT TOP 1 1 AS [id] OFFSET 9999 ROWS",
+        ...paginationPlan,
+        exactQueryRowBound: 10_000,
+        useAgentResultSession: false,
+      });
+    }
+    if (url === "/api/query/execute-multi") {
+      executeRequests += 1;
+      executeBody = JSON.parse(String(init?.body ?? "{}"));
+      if (failExecution) return new Response("final page failed", { status: 500 });
+      return Response.json([
+        {
+          columns: ["id"],
+          rows: [[10_000]],
+          affected_rows: 0,
+          execution_time_ms: 1,
+        },
+      ]);
+    }
+    if (url === "/api/query/execute") {
+      countRequests += 1;
+      return new Response("unexpected count", { status: 500 });
+    }
+    if (url === "/api/query/analyze-editability") {
+      return Response.json({ editable: false, reason: "complex-source" });
+    }
+    return new Response("unexpected request", { status: 500 });
+  });
+
+  try {
+    await store.executeTabSql(tabId, "SELECT TOP 10000 1 AS [id]", {
+      pagination: { limit: 1000, offset: 9000 },
+    });
+
+    assert.equal(executeBody.maxRows, 1, "the narrowed execution limit must remain effective");
+    assert.equal(executeBody.fetchSize, 1, "the narrowed fetch size must remain effective");
+    assert.equal(tab.resultPageLimit, 1000, "the requested rows-per-page value must remain visible");
+    assert.equal(tab.resultPageOffset, 9999);
+    assert.equal(Math.floor(tab.resultPageOffset / tab.resultPageLimit) + 1, 10);
+
+    paginationPlan = { pageLimit: 1000, pageOffset: 9000 };
+    await store.executeTabSql(tabId, "SELECT TOP 10000 1 AS [id]", {
+      pagination: { limit: 1000, offset: 9000 },
+    });
+    assert.equal(executeBody.maxRows, 1000);
+    assert.equal(executeBody.fetchSize, 1000);
+    assert.equal(tab.resultPageLimit, 1000);
+    assert.equal(Math.floor(tab.resultPageOffset! / tab.resultPageLimit) + 1, 10);
+
+    paginationPlan = { pageLimit: 500, pageOffset: 0 };
+    await store.executeTabSql(tabId, "SELECT TOP 10000 1 AS [id]", {
+      pagination: { limit: 500, offset: 0 },
+    });
+    assert.equal(executeBody.maxRows, 500);
+    assert.equal(tab.resultPageLimit, 500, "an explicit page-size change must still update the display state");
+    assert.equal(Math.floor(tab.resultPageOffset! / tab.resultPageLimit) + 1, 1);
+
+    paginationPlan = { pageLimit: 1, pageOffset: 9999 };
+    failExecution = true;
+    await store.executeTabSql(tabId, "SELECT TOP 10000 1 AS [id]", {
+      pagination: { limit: 1000, offset: 9000 },
+    });
+    assert.equal(executeBody.maxRows, 1);
+    assert.equal(tab.resultPageLimit, 1000, "a failed narrowed fetch must not collapse the display state");
+    assert.equal(tab.resultPageOffset, 9999);
+
+    failExecution = false;
+    settingsStore.updateEditorSettings({
+      queryResultMaxRowsEnabled: true,
+      queryResultMaxRows: 9001,
+    });
+    paginationPlan = { pageLimit: 1, pageOffset: 9000 };
+    await store.executeTabSql(tabId, "SELECT TOP 10000 1 AS [id]", {
+      pagination: { limit: 1000, offset: 9000 },
+    });
+    assert.deepEqual(prepareBody.options.pagination, { limit: 1, offset: 9000 }, "the enabled row cap must still narrow the execution plan");
+    assert.equal(executeBody.maxRows, 1);
+    assert.equal(executeBody.fetchSize, 1);
+    assert.equal(tab.resultPageLimit, 1000, "the max-row cap must not replace the requested display size");
+    assert.equal(tab.resultPageOffset, 9000);
+    assert.equal(Math.floor(tab.resultPageOffset / tab.resultPageLimit) + 1, 10);
+
+    assert.equal(prepareRequests, 5);
+    assert.equal(executeRequests, 5);
+    assert.equal(countRequests, 0, "the state fix must not add a COUNT request");
   } finally {
     globalThis.fetch = originalFetch;
     restoreStorage();

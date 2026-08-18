@@ -629,6 +629,31 @@ fn append_agent_url_params(base: String, params: Option<&str>) -> String {
     format!("{base}{separator}{params}")
 }
 
+pub fn hive_uses_zookeeper_discovery(config: &ConnectionConfig) -> bool {
+    if !matches!(config.db_type, DatabaseType::Hive | DatabaseType::Kyuubi | DatabaseType::Impala) {
+        return false;
+    }
+
+    if config.url_params.as_deref().is_some_and(hive_parameters_use_zookeeper_discovery) {
+        return true;
+    }
+
+    config.host.trim().is_empty()
+        && config.connection_string.as_deref().is_some_and(hive_parameters_use_zookeeper_discovery)
+}
+
+fn hive_parameters_use_zookeeper_discovery(source: &str) -> bool {
+    source.split([';', '?', '#', '&']).any(|part| {
+        let Some((key, value)) = part.split_once('=') else {
+            return false;
+        };
+        let key = percent_decode_str(key.trim()).decode_utf8_lossy();
+        let value = percent_decode_str(value.trim()).decode_utf8_lossy();
+        key.eq_ignore_ascii_case("serviceDiscoveryMode")
+            && (value.eq_ignore_ascii_case("zookeeper") || value.eq_ignore_ascii_case("zookeeperha"))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -714,6 +739,25 @@ mod tests {
             AgentSessionRole::Metadata,
         );
         assert_eq!(params["sessionRole"], "metadata");
+    }
+
+    #[test]
+    fn structured_hive_uses_current_url_params_for_zookeeper_detection() {
+        let mut cfg = config(DatabaseType::Hive, Some("default"));
+        cfg.connection_string = Some(
+            "jdbc:hive2://zk1.example.com:2181,zk2.example.com:2181/default;serviceDiscoveryMode=zooKeeper".to_string(),
+        );
+        assert!(!hive_uses_zookeeper_discovery(&cfg));
+
+        cfg.url_params = Some("serviceDiscoveryMode=zooKeeperHA;zooKeeperNamespace=hs2".to_string());
+        assert!(hive_uses_zookeeper_discovery(&cfg));
+
+        cfg.url_params = Some("note=serviceDiscoveryMode=zooKeeper".to_string());
+        assert!(!hive_uses_zookeeper_discovery(&cfg));
+
+        cfg.host.clear();
+        cfg.url_params = None;
+        assert!(hive_uses_zookeeper_discovery(&cfg));
     }
 
     #[test]

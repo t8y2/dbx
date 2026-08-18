@@ -9,10 +9,10 @@ use mysql_async::prelude::Queryable;
 use mysql_async::Row as MysqlRow;
 
 use crate::agent_connection::{
-    agent_connect_params, agent_connect_params_with_role, h2_file_path_from_jdbc_url, is_h2_file_connection,
-    mongo_legacy_error_with_auth_hint, mongo_uses_legacy_driver, oracle_alternate_connect_config_labels,
-    oracle_alternate_connect_configs, oracle_error_with_driver_hint, should_retry_mongo_with_legacy_driver,
-    trino_like_jdbc_connection_string, AgentSessionRole,
+    agent_connect_params, agent_connect_params_with_role, h2_file_path_from_jdbc_url, hive_uses_zookeeper_discovery,
+    is_h2_file_connection, mongo_legacy_error_with_auth_hint, mongo_uses_legacy_driver,
+    oracle_alternate_connect_config_labels, oracle_alternate_connect_configs, oracle_error_with_driver_hint,
+    should_retry_mongo_with_legacy_driver, trino_like_jdbc_connection_string, AgentSessionRole,
 };
 use crate::agent_manager::{AgentManager, JavaRuntimeMode, DEFAULT_JRE_KEY};
 use crate::agent_recovery::{RecoveryDecision, RecoveryPolicy, RecoveryScope};
@@ -2555,6 +2555,9 @@ impl AppState {
             // A TNS descriptor may contain several failover addresses, so rewriting it
             // through one local tunnel endpoint would silently break Oracle Net routing.
             return Err("Oracle TNS connections cannot be combined with SSH, proxy, or HTTP tunnel layers. Remove the transport layer or use Service Name/SID mode.".to_string());
+        }
+        if hive_uses_zookeeper_discovery(config) {
+            return Err("Hive ZooKeeper service discovery cannot be combined with SSH, proxy, or HTTP tunnel layers because discovered HiveServer2 nodes would bypass the configured transport. Remove the transport layer or use a direct HiveServer2 host and port.".to_string());
         }
 
         #[cfg(feature = "mq-admin")]
@@ -8074,6 +8077,23 @@ for line in sys.stdin:
 
         let error = state.connection_host_port("oracle-tns", &config).await.unwrap_err();
         assert!(error.contains("cannot be combined with SSH, proxy, or HTTP tunnel"));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn hive_zookeeper_discovery_rejects_static_transport_layers() {
+        let (state, dir) = test_app_state().await;
+        let mut config = mysql_config(Some("default"));
+        config.db_type = DatabaseType::Hive;
+        config.connection_string = Some(
+            "jdbc:hive2://zk1.example.com:2181,zk2.example.com:2181/default;serviceDiscoveryMode=zooKeeper".to_string(),
+        );
+        config.url_params = Some("serviceDiscoveryMode=zooKeeper".to_string());
+        config.transport_layers = vec![TransportLayerConfig::Ssh(ssh_layer("hive-zk-tunnel", ""))];
+
+        let error = state.connection_host_port("hive-zookeeper", &config).await.unwrap_err();
+        assert!(error.contains("discovered HiveServer2 nodes would bypass the configured transport"));
 
         let _ = std::fs::remove_dir_all(dir);
     }

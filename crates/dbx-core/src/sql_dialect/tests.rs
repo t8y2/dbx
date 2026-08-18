@@ -294,6 +294,53 @@ fn builds_select_sql_with_limit_syntax_for_database_type() {
 }
 
 #[test]
+fn jdbc_tdengine_table_preview_qualifies_selected_database() {
+    assert_eq!(
+        build_table_data_select_sql(TableDataSelectSqlOptions {
+            database_type: Some(DatabaseType::Jdbc),
+            driver_profile: Some(" TDENGINE ".to_string()),
+            schema: None,
+            database: Some("bopu_light".to_string()),
+            table_name: "mppd_pwr_862288087612675".to_string(),
+            limit: Some(100),
+            ..Default::default()
+        }),
+        "SELECT * FROM `bopu_light`.`mppd_pwr_862288087612675`;"
+    );
+
+    assert_eq!(
+        build_table_data_select_sql(TableDataSelectSqlOptions {
+            database_type: Some(DatabaseType::Jdbc),
+            driver_profile: Some("tdengine".to_string()),
+            schema: Some("fallback_db".to_string()),
+            database: Some("   ".to_string()),
+            table_name: "meter`readings".to_string(),
+            limit: Some(100),
+            ..Default::default()
+        }),
+        "SELECT * FROM `fallback_db`.`meter``readings`;"
+    );
+}
+
+#[test]
+fn jdbc_non_tdengine_and_unscoped_tdengine_previews_remain_unqualified() {
+    for (driver_profile, database) in [(Some("postgres"), Some("analytics")), (Some("tdengine"), None)] {
+        assert_eq!(
+            build_table_data_select_sql(TableDataSelectSqlOptions {
+                database_type: Some(DatabaseType::Jdbc),
+                driver_profile: driver_profile.map(str::to_string),
+                schema: None,
+                database: database.map(str::to_string),
+                table_name: "readings".to_string(),
+                limit: Some(100),
+                ..Default::default()
+            }),
+            "SELECT * FROM readings;"
+        );
+    }
+}
+
+#[test]
 fn builds_table_data_where_and_schema_queries() {
     assert_eq!(
         build_count_table_sql(Some(DatabaseType::Kingbase), Some("cqbq_ls"), "actionlogs"),

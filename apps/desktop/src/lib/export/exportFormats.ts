@@ -29,6 +29,7 @@ export function formatTsv(columns: string[], rows: ExportCellValue[][]): string 
 
 export interface FormatSqlInsertOptions {
   databaseType?: DatabaseType;
+  identifierQuote?: string;
   schema?: string;
   tableName?: string;
   qualifiedTableName?: string;

@@ -17,6 +17,7 @@ export const databaseSupport: DatabaseSupportItem[] = [
   { id: "clickhouse", name: "ClickHouse", icon: "/icons/database/clickhouse.svg", tone: "#ffcc01" },
   { id: "sqlserver", name: "SQL Server", icon: "/icons/database/sqlserver.svg", tone: "#9ca3af" },
   { id: "mongodb", name: "MongoDB", icon: "/icons/database/mongodb.svg", tone: "#47a248" },
+  { id: "dynamodb", name: "Amazon DynamoDB", icon: "/icons/database/dynamodb.svg", tone: "#527fff" },
   { id: "oracle", name: "Oracle", icon: "/icons/database/oracle.svg", tone: "#f80000" },
   { id: "elasticsearch", name: "Elasticsearch", icon: "/icons/database/elasticsearch.svg", tone: "#00bfb3" },
   { id: "easysearch", name: "Easysearch", icon: "/icons/database/easysearch.svg", tone: "#836eff" },

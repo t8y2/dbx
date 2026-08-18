@@ -7126,7 +7126,7 @@ function openExternalUrl(url: string) {
                         <div v-for="(entry, idx) in gaussdbHostEntries" :key="idx" class="flex items-start gap-2">
                           <Input v-model="entry.host" class="flex-1 min-w-0 break-all" placeholder="127.0.0.1" />
                           <Input v-model.number="entry.port" type="number" class="w-24 shrink-0" />
-                          <Button type="button" variant="outline" size="icon" class="h-9 w-9 shrink-0 mt-0.5" :disabled="gaussdbHostEntries.length <= 1" @click="removeGaussdbHostEntry(idx)">
+                          <Button type="button" variant="outline" size="icon" class="h-8 w-8 shrink-0" :disabled="gaussdbHostEntries.length <= 1" @click="removeGaussdbHostEntry(idx)">
                             <Trash2 class="h-4 w-4" />
                           </Button>
                         </div>

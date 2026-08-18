@@ -64,6 +64,7 @@ type metadataListConstraints struct {
 type columnInfo struct {
 	Name                   string  `json:"name"`
 	DataType               string  `json:"data_type"`
+	ResolvedSchema         *string `json:"resolved_schema,omitempty"`
 	FullDataType           string  `json:"-"`
 	IsNullable             bool    `json:"is_nullable"`
 	ColumnDefault          *string `json:"column_default"`
@@ -1198,43 +1199,66 @@ func completionNameMatches(name string, request completionAssistantRequest) bool
 }
 
 func (s *server) getColumns(schema, table string) ([]columnInfo, error) {
-	effective, err := s.effectiveSchema(schema)
-	if err != nil {
-		return nil, err
-	}
-	primary, _ := s.primaryKeys(effective, table)
 	if s.mode.mysqlCompat {
+		effective, err := s.effectiveSchema(schema)
+		if err != nil {
+			return nil, err
+		}
+		primary, _ := s.primaryKeys(effective, table)
 		return s.informationSchemaColumns(effective, table, primary)
 	}
 	catalog, prefix := "sys_catalog", "sys"
 	if s.mode.postgresCatalog {
 		catalog, prefix = "pg_catalog", "pg"
-		return s.queryCatalogColumns(effective, table, primary, catalog, prefix, "pg_get_expr")
+		result, err := s.queryCatalogColumns(schema, table, catalog, prefix, "pg_get_expr")
+		return s.finishCatalogColumns(schema, table, result, err)
 	}
 	expression := "sys_get_expr"
 	if s.usePgDefaultExpression {
 		expression = "pg_get_expr"
 	}
-	result, err := s.queryCatalogColumns(effective, table, primary, catalog, prefix, expression)
+	result, err := s.queryCatalogColumns(schema, table, catalog, prefix, expression)
 	if err != nil && expression == "sys_get_expr" && isUndefinedFunction(err, expression) {
 		// Some V8R6 PostgreSQL-mode databases keep sys_catalog while adbin is
 		// pg_node_tree. Cache the compatible function after the exact failure.
 		s.usePgDefaultExpression = true
-		return s.queryCatalogColumns(effective, table, primary, catalog, prefix, "pg_get_expr")
+		result, err = s.queryCatalogColumns(schema, table, catalog, prefix, "pg_get_expr")
 	}
-	return result, err
+	return s.finishCatalogColumns(schema, table, result, err)
+}
+
+func (s *server) finishCatalogColumns(schema, table string, result []columnInfo, err error) ([]columnInfo, error) {
+	if err != nil || len(result) == 0 {
+		return result, err
+	}
+	resolvedSchema := strings.TrimSpace(schema)
+	if result[0].ResolvedSchema != nil {
+		resolvedSchema = *result[0].ResolvedSchema
+	}
+	primary, _ := s.primaryKeys(resolvedSchema, table)
+	for index := range result {
+		result[index].IsPrimaryKey = primary[strings.ToLower(result[index].Name)]
+	}
+	if s.mode.sqlServerIdentity {
+		s.applyIdentityMetadata(resolvedSchema, table, result)
+	}
+	return result, nil
 }
 
 func (s *server) queryCatalogColumns(
 	schema, table string,
-	primary map[string]bool,
 	catalog, prefix, expression string,
 ) ([]columnInfo, error) {
 	identityExpression := "a.attidentity"
 	if s.catalogIdentityUnsupported {
 		identityExpression = "CAST(NULL AS varchar(1)) AS attidentity"
 	}
-	query := fmt.Sprintf(`SELECT a.attname, format_type(a.atttypid, a.atttypmod), NOT a.attnotnull,
+	relationPredicate := fmt.Sprintf("n.nspname = %s AND c.relname = %s", quoteLiteral(schema), quoteLiteral(table))
+	if strings.TrimSpace(schema) == "" {
+		visibilityFunction := vastbaseCatalogFunction(catalog, "sys_table_is_visible", "pg_table_is_visible")
+		relationPredicate = fmt.Sprintf("c.relname = %s AND %s(c.oid)", quoteLiteral(table), visibilityFunction)
+	}
+	query := fmt.Sprintf(`SELECT n.nspname, a.attname, format_type(a.atttypid, a.atttypmod), NOT a.attnotnull,
 	%s(ad.adbin, ad.adrelid), col_description(a.attrelid, a.attnum),
 	CASE WHEN t.typname = 'numeric' AND a.atttypmod > 0 THEN ((a.atttypmod - 4) >> 16) & 65535 END,
 	CASE WHEN t.typname = 'numeric' AND a.atttypmod > 0 THEN (a.atttypmod - 4) & 65535 END,
@@ -1243,11 +1267,11 @@ func (s *server) queryCatalogColumns(
 	FROM %s.%s_attribute a JOIN %s.%s_type t ON t.oid = a.atttypid
 	JOIN %s.%s_class c ON c.oid = a.attrelid JOIN %s.%s_namespace n ON n.oid = c.relnamespace
 	LEFT JOIN %s.%s_attrdef ad ON ad.adrelid = a.attrelid AND ad.adnum = a.attnum
-WHERE n.nspname = %s AND c.relname = %s AND a.attnum > 0 AND NOT a.attisdropped ORDER BY a.attnum`, expression, identityExpression, catalog, prefix, catalog, prefix, catalog, prefix, catalog, prefix, catalog, prefix, quoteLiteral(schema), quoteLiteral(table))
+WHERE %s AND a.attnum > 0 AND NOT a.attisdropped ORDER BY a.attnum`, expression, identityExpression, catalog, prefix, catalog, prefix, catalog, prefix, catalog, prefix, catalog, prefix, relationPredicate)
 	rows, err := s.metadataQuery(query)
 	if err != nil && !s.catalogIdentityUnsupported && isUndefinedColumn(err, "attidentity") {
 		s.catalogIdentityUnsupported = true
-		return s.queryCatalogColumns(schema, table, primary, catalog, prefix, expression)
+		return s.queryCatalogColumns(schema, table, catalog, prefix, expression)
 	}
 	if err != nil {
 		return nil, err
@@ -1255,20 +1279,17 @@ WHERE n.nspname = %s AND c.relname = %s AND a.attnum > 0 AND NOT a.attisdropped 
 	defer rows.Close()
 	result := []columnInfo{}
 	for rows.Next() {
-		var name, dataType string
+		var resolvedSchema, name, dataType string
 		var nullable bool
 		var defaultValue, comment, identity sql.NullString
 		var precision, scale, length sql.NullInt64
-		if err := rows.Scan(&name, &dataType, &nullable, &defaultValue, &comment, &precision, &scale, &length, &identity); err != nil {
+		if err := rows.Scan(&resolvedSchema, &name, &dataType, &nullable, &defaultValue, &comment, &precision, &scale, &length, &identity); err != nil {
 			return nil, err
 		}
-		result = append(result, columnInfo{Name: name, DataType: dataType, IsNullable: nullable, ColumnDefault: nullStringPtr(defaultValue), IsPrimaryKey: primary[strings.ToLower(name)], Extra: vastbaseIdentityClause(identity.String), Comment: nullStringPtr(comment), NumericPrecision: nullIntPtr(precision), NumericScale: nullIntPtr(scale), CharacterMaximumLength: nullIntPtr(length)})
+		result = append(result, columnInfo{Name: name, DataType: dataType, ResolvedSchema: stringPtr(resolvedSchema), IsNullable: nullable, ColumnDefault: nullStringPtr(defaultValue), Extra: vastbaseIdentityClause(identity.String), Comment: nullStringPtr(comment), NumericPrecision: nullIntPtr(precision), NumericScale: nullIntPtr(scale), CharacterMaximumLength: nullIntPtr(length)})
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
-	}
-	if s.mode.sqlServerIdentity {
-		s.applyIdentityMetadata(schema, table, result)
 	}
 	return result, nil
 }

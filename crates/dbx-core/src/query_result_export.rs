@@ -104,6 +104,8 @@ pub struct QueryResultExportRequest {
     pub numeric_column_right_align: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub column_comments: Option<Vec<Option<String>>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identifier_quote: Option<String>,
 }
 
 pub struct StagedExportTarget {
@@ -300,6 +302,7 @@ struct SqlInsertWriter {
     database_type: DatabaseType,
     schema: Option<String>,
     table_name: String,
+    identifier_quote: Option<String>,
 }
 
 impl SqlInsertWriter {
@@ -325,6 +328,7 @@ impl SqlInsertWriter {
             database_type: request.database_type,
             schema: request.schema.clone(),
             table_name,
+            identifier_quote: request.identifier_quote.clone(),
         })
     }
 
@@ -355,6 +359,7 @@ impl SqlInsertWriter {
         }
         let stmts = build_export_insert_statements(BuildExportInsertStatementsOptions {
             database_type: Some(self.database_type),
+            identifier_quote: self.identifier_quote.clone(),
             schema: self.schema.clone(),
             table_name: Some(self.table_name.clone()),
             qualified_table_name: None,
@@ -1869,6 +1874,7 @@ mod tests {
             export_column_types: None,
             numeric_column_right_align: false,
             column_comments: None,
+            identifier_quote: None,
         }
     }
 

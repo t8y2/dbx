@@ -1026,7 +1026,7 @@ const targetConnectionInfo = computed(() => {
             </DialogTitle>
           </DialogHeader>
 
-          <div class="py-2 space-y-3">
+          <div class="py-2 space-y-3 min-w-0">
             <p class="text-sm text-muted-foreground">{{ t("diff.deployConfirmMessage") }}</p>
 
             <div class="bg-muted p-3 rounded text-xs font-mono space-y-1">

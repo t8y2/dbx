@@ -41,6 +41,7 @@ export interface PrivilegeSelection {
 export interface DatabaseUserAdminProvider {
   dialect: UserAdminDialect;
   defaultScope: PrivilegeScope;
+  supportsTableGrantsOnCreate?: boolean;
   listUsersSql(): string;
   fallbackListUsersSql?: () => string;
   parseUsers(result: QueryResult): DatabaseUserIdentity[];
@@ -689,6 +690,7 @@ function postgresRoleBypassRlsSql(alias: string): string {
 export const mysqlUserAdminProvider: DatabaseUserAdminProvider = {
   dialect: "mysql",
   defaultScope: "mysql",
+  supportsTableGrantsOnCreate: true,
   listUsersSql: mysqlListUsersSql,
   fallbackListUsersSql: mysqlListUsersFallbackSql,
   parseUsers: usersFromMySqlUserResult,

@@ -68,6 +68,13 @@ function sapHanaConn(id: string): ConnectionConfig {
   };
 }
 
+function vastbaseConn(id: string): ConnectionConfig {
+  return {
+    ...conn(id),
+    db_type: "vastbase",
+  };
+}
+
 function clearableQuerySchemaConn(id: string, dbType: "oracle" | "dameng" | "gaussdb" | "oceanbase-oracle"): ConnectionConfig {
   return {
     ...conn(id),
@@ -2113,6 +2120,88 @@ test("normalizes only unquoted SAP HANA query identifiers before loading editabl
     assert.equal(quotedTab?.tableMeta?.schema, "mixedSchema");
     assert.deepEqual(quotedTab?.querySourceColumns, ["id"]);
     assert.equal(quotedTab?.queryEditabilityReason, undefined);
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreStorage();
+  }
+});
+
+test("uses the visible Vastbase relation schema for unqualified query writes", async () => {
+  const restoreStorage = installMemoryStorage();
+  setActivePinia(createPinia());
+  const connectionStore = useConnectionStore();
+  const store = useQueryStore();
+  const originalFetch = globalThis.fetch;
+  const columnRequests: Array<{ database: string | null; schema: string | null; table: string | null }> = [];
+
+  connectionStore.addEphemeralConnection(vastbaseConn("vastbase-1"));
+
+  globalThis.fetch = withConnectionHealthMock(async (input, init) => {
+    const url = String(input);
+    if (url === "/api/query/execute-multi") {
+      return new Response(
+        JSON.stringify([
+          {
+            columns: ["MONO", "ID"],
+            rows: [["mono", 461936049002042]],
+            affected_rows: 0,
+            execution_time_ms: 1,
+          },
+        ]),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }
+    if (url === "/api/query/analyze-editability") {
+      return new Response(
+        JSON.stringify({
+          editable: true,
+          analysis: {
+            schema: undefined,
+            schemaQuoted: false,
+            tableName: "TBLCUSPOSTMATERIALLOG",
+            tableNameQuoted: true,
+            tableAlias: undefined,
+            selectStar: true,
+            columns: [],
+          },
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }
+    if (url.startsWith("/api/schema/columns?")) {
+      const params = new URL(url, "http://localhost").searchParams;
+      columnRequests.push({ database: params.get("database"), schema: params.get("schema"), table: params.get("table") });
+      return new Response(
+        JSON.stringify([
+          { name: "MONO", data_type: "varchar", resolved_schema: "tenant_b", is_nullable: true, column_default: null, is_primary_key: false, extra: null, comment: null },
+          { name: "ID", data_type: "bigint", resolved_schema: "tenant_b", is_nullable: false, column_default: null, is_primary_key: false, extra: null, comment: null },
+        ]),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }
+    if (url === "/api/query/prepare-pagination-plan") {
+      const body = JSON.parse(String(init?.body ?? "{}"));
+      return new Response(JSON.stringify({ sqlToExecute: body.options.sql, useAgentResultSession: false }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    return new Response("unexpected request", { status: 500 });
+  });
+
+  try {
+    const tabId = store.createTab("vastbase-1", "smes_dev", "Unqualified", "query");
+    await store.executeTabSql(tabId, 'select * from "TBLCUSPOSTMATERIALLOG"');
+
+    const tab = store.tabs.find((item) => item.id === tabId);
+    await waitFor(() => columnRequests.length > 0 && tab?.tableMeta?.tableName === "TBLCUSPOSTMATERIALLOG");
+    assert.deepEqual(columnRequests, [{ database: "smes_dev", schema: "", table: "TBLCUSPOSTMATERIALLOG" }]);
+    assert.equal(tab?.tableMeta?.schema, "tenant_b");
+    assert.deepEqual(
+      tab?.tableMeta?.columns.map((column) => column.name),
+      ["MONO", "ID"],
+    );
+    assert.equal(tab?.queryEditabilityReason, undefined);
   } finally {
     globalThis.fetch = originalFetch;
     restoreStorage();

@@ -22,4 +22,8 @@ describe("SchemaDiffDialog fullscreen layout", () => {
     expect(dialogSource).toContain("event.preventDefault();");
     expect(dialogSource).toContain("showOptionsPanel.value = false;");
   });
+
+  it("lets the deploy confirm dialog body shrink so a long destructive statement can't push the footer buttons off-screen", () => {
+    expect(dialogSource).toContain('<div class="py-2 space-y-3 min-w-0">');
+  });
 });

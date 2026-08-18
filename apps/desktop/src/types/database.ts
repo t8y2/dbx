@@ -537,6 +537,7 @@ export interface CustomTypeDetails {
 export interface ColumnInfo {
   name: string;
   data_type: string;
+  resolved_schema?: string;
   is_nullable: boolean;
   column_default: string | null;
   is_primary_key: boolean;
@@ -1100,6 +1101,8 @@ export interface QueryTab {
   forceWordWrap?: boolean;
   connectionId: string;
   database: string;
+  /** Optional branch context for a driver-profile database workspace. */
+  workspaceBranch?: string;
   schema?: string;
   /** Doris / StarRocks multi-catalog: the external catalog this tab's
    * database belongs to (undefined for internal/default catalog). */
@@ -1205,7 +1208,8 @@ export interface QueryTab {
     | "processlist"
     | "sqlserver-trace"
     | "mysql-dashboard"
-    | "postgres-dashboard";
+    | "postgres-dashboard"
+    | "dolt-version-control";
   /** Ephemeral navigation intent; it is consumed by HBaseBrowser and is not persisted. */
   hbaseCreateTableOnOpen?: boolean;
   mqTenant?: string;

@@ -1179,6 +1179,7 @@ async fn try_export_native_table_stream(
                     }
                     let statements = build_export_insert_statements(BuildExportInsertStatementsOptions {
                         database_type: Some(*db_type),
+                        identifier_quote: request.identifier_quote.clone(),
                         schema: request.schema.clone(),
                         table_name: Some(request.table_name.clone()),
                         qualified_table_name: None,
@@ -1993,6 +1994,7 @@ async fn export_table_data_core_inner(
 
                 let statements = build_export_insert_statements(BuildExportInsertStatementsOptions {
                     database_type: Some(db_type),
+                    identifier_quote: request.identifier_quote.clone(),
                     schema: request.schema.clone(),
                     table_name: Some(request.table_name.clone()),
                     qualified_table_name: None,
@@ -2761,6 +2763,7 @@ mod tests {
 
         let statements = build_export_insert_statements(BuildExportInsertStatementsOptions {
             database_type: Some(DatabaseType::Oracle),
+            identifier_quote: request.identifier_quote,
             schema: request.schema,
             table_name: Some(request.table_name),
             qualified_table_name: None,

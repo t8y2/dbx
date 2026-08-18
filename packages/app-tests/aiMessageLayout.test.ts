@@ -60,7 +60,11 @@ test("assistant messages keep metadata aligned with the bubble and wrap long tex
 });
 
 test("AI request failures use localized backend diagnostics", () => {
-  assert.match(source, /messages\.value\[assistantIdx\]\.content = `\$\{t\("ai\.requestFailed"\)\}\\n\\n\$\{translateBackendError\(t, message\)\}`/);
+  // The lookup is guarded (matching the `finally` block right below it) so that if
+  // clearMessages()/selectConversation() already replaced messages.value while this
+  // request was still in flight, writing the failure text doesn't throw and silently
+  // swallow the real error. See issue #5941.
+  assert.match(source, /const msg = messages\.value\[assistantIdx\];\s*\n\s*if \(msg\) msg\.content = `\$\{t\("ai\.requestFailed"\)\}\\n\\n\$\{translateBackendError\(t, message\)\}`;/);
 });
 
 test("AI analysis export keeps the connection that produced each assistant response", () => {

@@ -6,6 +6,7 @@ type VisibleDatabaseConnection = Partial<ConnectionConfig>;
 type SystemNameRules = {
   exact?: ReadonlySet<string>;
   prefixes?: readonly string[];
+  contains?: readonly string[];
 };
 
 type SchemaFilterOptions = {
@@ -80,39 +81,48 @@ const POSTGRES_LIKE_SYSTEM_SCHEMA_RULES: SystemNameRules = {
   prefixes: ["pg_temp_", "pg_toast_temp_"],
 };
 
+const ORACLE_SYSTEM_SCHEMA_NAMES = new Set([
+  "anonymous",
+  "appqossys",
+  "audsys",
+  "ctxsys",
+  "dbsnmp",
+  "dvf",
+  "dvsys",
+  "exfsys",
+  "flows_files",
+  "gsmadmin_internal",
+  "mddata",
+  "mdsys",
+  "mgmt_view",
+  "olapsys",
+  "orddata",
+  "ordplugins",
+  "ordsys",
+  "outln",
+  "owbsys",
+  "remote_scheduler_agent",
+  "si_informtn_schema",
+  "sys",
+  "sysback",
+  "sysdg",
+  "syskm",
+  "system",
+  "wmsys",
+  "xdb",
+  "xs$null",
+]);
+
+const OCEANBASE_ORACLE_SYSTEM_SCHEMA_NAMES = new Set([...ORACLE_SYSTEM_SCHEMA_NAMES, "apex_public_user", "dbsfwuser", "dgpdb_int", "dip", "ggsys", "gsmcatuser", "gsmrootuser", "gsmuser", "lbacsys", "ojvmsys", "ops$oracle", "oracle_ocm", "pdbadmin", "sysbackup", "sysman", "sysrac"]);
+
 const SYSTEM_SCHEMA_RULES: Partial<Record<DatabaseType, SystemNameRules>> = {
   oracle: {
-    exact: new Set([
-      "anonymous",
-      "appqossys",
-      "audsys",
-      "ctxsys",
-      "dbsnmp",
-      "dvf",
-      "dvsys",
-      "exfsys",
-      "flows_files",
-      "gsmadmin_internal",
-      "mddata",
-      "mdsys",
-      "mgmt_view",
-      "olapsys",
-      "orddata",
-      "ordplugins",
-      "ordsys",
-      "outln",
-      "owbsys",
-      "remote_scheduler_agent",
-      "si_informtn_schema",
-      "sys",
-      "sysback",
-      "sysdg",
-      "syskm",
-      "system",
-      "wmsys",
-      "xdb",
-      "xs$null",
-    ]),
+    exact: ORACLE_SYSTEM_SCHEMA_NAMES,
+  },
+  "oceanbase-oracle": {
+    exact: OCEANBASE_ORACLE_SYSTEM_SCHEMA_NAMES,
+    prefixes: ["apex_", "flows_"],
+    contains: ["$"],
   },
   dameng: {
     exact: new Set(["_sys_statistics", "ctisys", "dba", "sys", "sys_dba", "sys_phm", "sysauditor", "sysdba", "sysdbo", "syssso", "system"]),
@@ -171,7 +181,8 @@ export function isSystemSchemaName(databaseType: DatabaseType | undefined, schem
   const rules = SYSTEM_SCHEMA_RULES[databaseType];
   if (!rules) return false;
   if (rules.exact?.has(normalized)) return true;
-  return rules.prefixes?.some((prefix) => normalized.startsWith(prefix)) ?? false;
+  if (rules.prefixes?.some((prefix) => normalized.startsWith(prefix))) return true;
+  return rules.contains?.some((part) => normalized.includes(part)) ?? false;
 }
 
 export function filterDatabaseNamesForConnection(databaseNames: string[], connection: VisibleDatabaseConnection | undefined): string[] {

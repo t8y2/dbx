@@ -10,7 +10,7 @@ use crate::data_grid_sql::{
     DataGridCopyUpdateStatementOptions, DataGridTableMeta,
 };
 use serde_json::Value;
-use std::collections::HashSet;
+use std::collections::{hash_map::Entry, HashMap, HashSet};
 use std::io::Write;
 
 pub(super) fn write_sql_in_list(
@@ -18,23 +18,31 @@ pub(super) fn write_sql_in_list(
     output: &mut dyn Write,
 ) -> Result<(), DataGridExtractError> {
     write_bytes(output, b"(")?;
-    for (row_index, row) in context.request.rows.iter().enumerate() {
-        if row_index > 0 {
-            write_bytes(output, b", ")?;
-        }
+    let mut seen_rows = HashMap::<Vec<u8>, ()>::new();
+    let mut has_output = false;
+    for row in &context.request.rows {
+        let mut tuple = Vec::new();
         if context.selected_columns.len() > 1 {
-            write_bytes(output, b"(")?;
+            tuple.push(b'(');
         }
         for (column_index, source_index) in context.selected_source_indexes.iter().enumerate() {
             if column_index > 0 {
-                write_bytes(output, b", ")?;
+                tuple.extend_from_slice(b", ");
             }
             let value = &row[*source_index];
             let info = context.selected_column_info[column_index];
-            write_bytes(output, format_grid_sql_literal(value, context.request.database_type, info).as_bytes())?;
+            tuple.extend_from_slice(format_grid_sql_literal(value, context.request.database_type, info).as_bytes());
         }
         if context.selected_columns.len() > 1 {
-            write_bytes(output, b")")?;
+            tuple.push(b')');
+        }
+        if let Entry::Vacant(entry) = seen_rows.entry(tuple) {
+            if has_output {
+                write_bytes(output, b", ")?;
+            }
+            write_bytes(output, entry.key())?;
+            entry.insert(());
+            has_output = true;
         }
     }
     write_bytes(output, b")")
@@ -48,6 +56,7 @@ pub(super) fn write_sql_inserts(
     let data = sql_selected_data(context, false)?;
     let statement = build_data_grid_copy_insert_statement(DataGridCopyInsertStatementOptions {
         database_type: context.request.database_type,
+        identifier_quote: context.request.identifier_quote.clone(),
         table_meta: context.request.table_meta.clone(),
         columns: data.columns,
         column_types: Some(data.column_types),
@@ -98,6 +107,7 @@ pub(super) fn write_sql_updates(
     }
     let statements = build_data_grid_copy_update_statements(DataGridCopyUpdateStatementOptions {
         database_type: context.request.database_type,
+        identifier_quote: context.request.identifier_quote.clone(),
         table_meta: table_meta.clone(),
         columns: data.columns,
         source_columns: Some(data.source_columns),
@@ -301,7 +311,7 @@ pub(super) fn write_where_clause(
                 value,
                 context.selected_column_info[column_index],
                 true,
-                None,
+                context.request.identifier_quote.as_deref(),
             );
             write_bytes(output, predicate.as_bytes())?;
         }

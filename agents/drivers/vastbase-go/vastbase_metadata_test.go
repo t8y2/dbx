@@ -197,6 +197,44 @@ func openVastbaseCustomTypesDB(t *testing.T, state *vastbaseCustomTypesTestState
 	return db
 }
 
+func TestVastbaseGetColumnsResolvesVisibleRelationSchemaInCatalogQuery(t *testing.T) {
+	queries := []string{}
+	state := &vastbaseCustomTypesTestState{query: func(query string) (driver.Rows, error) {
+		queries = append(queries, query)
+		switch {
+		case strings.Contains(query, "FROM pg_catalog.pg_attribute a"):
+			if !strings.Contains(query, "pg_catalog.pg_table_is_visible(c.oid)") || strings.Contains(query, "current_schema()") {
+				return nil, fmt.Errorf("unqualified columns query did not resolve the visible relation: %s", query)
+			}
+			return &valueRows{
+				columns: []string{"nspname", "attname", "format_type", "nullable", "default", "comment", "precision", "scale", "length", "identity"},
+				rows:    [][]driver.Value{{"tenant_b", "ID", "bigint", false, nil, nil, nil, nil, nil, nil}},
+			}, nil
+		case strings.Contains(query, "FROM information_schema.table_constraints"):
+			if !strings.Contains(query, "tc.table_schema='tenant_b'") {
+				return nil, fmt.Errorf("primary-key lookup did not use resolved schema: %s", query)
+			}
+			return &valueRows{columns: []string{"column_name"}, rows: [][]driver.Value{{"ID"}}}, nil
+		default:
+			return nil, fmt.Errorf("unexpected query: %s", query)
+		}
+	}}
+	server := newServer()
+	server.db = openVastbaseCustomTypesDB(t, state)
+	server.mode.postgresCatalog = true
+
+	columns, err := server.getColumns("", "TBLCUSPOSTMATERIALLOG")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(queries) != 2 {
+		t.Fatalf("getColumns executed %d metadata queries, want 2: %v", len(queries), queries)
+	}
+	if len(columns) != 1 || columns[0].ResolvedSchema == nil || *columns[0].ResolvedSchema != "tenant_b" || !columns[0].IsPrimaryKey {
+		t.Fatalf("resolved relation metadata was lost: %#v", columns)
+	}
+}
+
 func TestVastbaseListCustomTypesUsesPostgresCatalog(t *testing.T) {
 	state := &vastbaseCustomTypesTestState{query: func(query string) (driver.Rows, error) {
 		if !strings.Contains(query, "FROM pg_catalog.pg_type t") || !strings.Contains(query, "t.typtype IN ('b','c','d','e','r','m')") || !strings.Contains(query, "t.typisdefined") || !strings.Contains(query, "t.typelem = 0") || !strings.Contains(query, "(t.typrelid = 0 OR c.relkind = 'c')") || !strings.Contains(query, "d.classoid = 'pg_catalog.pg_type'::regclass") || !strings.Contains(query, "n.nspname <> 'pg_catalog'") || !strings.Contains(query, "n.nspname <> 'information_schema'") || !strings.Contains(query, "n.nspname NOT LIKE 'pg_toast%'") || !strings.Contains(query, "n.nspname NOT LIKE 'pg_temp%'") {

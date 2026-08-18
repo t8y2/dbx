@@ -61,6 +61,39 @@ test("table metadata loader deduplicates equivalent in-flight requests and cache
   assert.equal(getColumns.mock.calls.length, 1);
 });
 
+test("uses the visible Vastbase relation schema for the index lookup", async () => {
+  const getColumns = vi.fn(async (): Promise<ColumnInfo[]> => [
+    {
+      name: "id",
+      data_type: "bigint",
+      resolved_schema: "tenant_b",
+      is_nullable: false,
+      column_default: null,
+      is_primary_key: true,
+      extra: null,
+    },
+  ]);
+  const listIndexes = vi.fn(async (): Promise<IndexInfo[]> => []);
+  vi.doMock("@/lib/backend/api", () => ({ getColumns, listIndexes }));
+
+  const { clearTableMetadataCache, loadTableMetadata } = await import("../../apps/desktop/src/lib/metadata/tableMetadataCache.ts");
+  clearTableMetadataCache();
+
+  const result = await loadTableMetadata({
+    connectionId: "conn",
+    database: "app",
+    schema: "",
+    tableName: "users",
+    tableType: "TABLE",
+    databaseType: "vastbase",
+    driverProfile: "vastbase",
+  });
+
+  assert.equal(result.metadata.schema, "tenant_b");
+  assert.equal(listIndexes.mock.calls.length, 1);
+  assert.equal(listIndexes.mock.calls[0]?.[2], "tenant_b");
+});
+
 test("table metadata invalidation keeps unrelated schemas cached", async () => {
   const getColumns = vi.fn(
     async (_connectionId: string, _database: string, _schema: string, table: string): Promise<ColumnInfo[]> => [

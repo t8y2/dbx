@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
 
-import { addDriverInstallQueue, driverInstallProgressPercent, isDriverInstallCanceledError, isDriverInstallProgressTarget, removeDriverInstallQueue, takeNextDriverInstallQueue } from "../../apps/desktop/src/lib/connection/driverInstallProgressUi.ts";
+import { addDriverInstallQueue, driverInstallProgressPercent, isDriverInstallCanceledError, isDriverInstallProgressTarget, removeDriverInstallQueue, resolveAgentInstallOutcome, takeNextDriverInstallQueue } from "../../apps/desktop/src/lib/connection/driverInstallProgressUi.ts";
 
 test("formats driver install progress as a bounded whole percent", () => {
   assert.equal(driverInstallProgressPercent({ step: "driver", downloaded: 3_900_000, total: 10_500_000 }), 37);
@@ -52,4 +52,65 @@ test("recognizes a user-cancelled driver install error", () => {
   assert.equal(isDriverInstallCanceledError("Failed to install driver: 404"), false);
   assert.equal(isDriverInstallCanceledError(null), false);
   assert.equal(isDriverInstallCanceledError(undefined), false);
+});
+
+test("cancel then immediate retry: the stale operation never owns the dialog state", () => {
+  // The dialog flow: operation A begins, the user cancels (the cancel handler
+  // finishes the dialog, clearing the tracked id), then retries - operation B
+  // begins - before A's install promise settles.
+  const staleContext = {
+    operationId: "operation-a",
+    currentOperationId: "operation-b",
+    cancelRequested: false,
+  };
+
+  const cancelled = resolveAgentInstallOutcome(
+    { ok: false, error: new Error("Agent download canceled by user.") },
+    staleContext,
+  );
+  assert.equal(cancelled.kind, "cancelled");
+  assert.equal(cancelled.ownsState, false);
+
+  const succeeded = resolveAgentInstallOutcome({ ok: true }, staleContext);
+  assert.equal(succeeded.kind, "succeeded");
+  assert.equal(succeeded.ownsState, false);
+
+  const failed = resolveAgentInstallOutcome({ ok: false, error: new Error("Download failed: 404") }, staleContext);
+  assert.equal(failed.kind, "failed");
+  assert.equal(failed.ownsState, false);
+});
+
+test("cancel without retry: the cleared dialog is not re-failed by the old promise", () => {
+  // After the cancel handler ran, no operation is tracked, so the old
+  // promise's settlement must not own state either.
+  const clearedContext = {
+    operationId: "operation-a",
+    currentOperationId: null,
+    cancelRequested: true,
+  };
+
+  const cancelled = resolveAgentInstallOutcome(
+    { ok: false, error: new Error("Download failed: 404") },
+    clearedContext,
+  );
+  assert.equal(cancelled.kind, "cancelled");
+  assert.equal(cancelled.ownsState, false);
+});
+
+test("the active operation owns the dialog state on every outcome", () => {
+  const context = {
+    operationId: "operation-a",
+    currentOperationId: "operation-a",
+    cancelRequested: false,
+  };
+
+  assert.deepEqual(resolveAgentInstallOutcome({ ok: true }, context), { kind: "succeeded", ownsState: true });
+  assert.deepEqual(
+    resolveAgentInstallOutcome({ ok: false, error: new Error("Agent download canceled by user.") }, context),
+    { kind: "cancelled", ownsState: true },
+  );
+  assert.deepEqual(
+    resolveAgentInstallOutcome({ ok: false, error: new Error("Download failed: 404") }, context),
+    { kind: "failed", ownsState: true },
+  );
 });

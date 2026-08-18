@@ -733,6 +733,33 @@ async fn jre_operation_lock(am: &AgentManager, jre_key: &str) -> Arc<tokio::sync
     locks.entry(jre_key.to_string()).or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))).clone()
 }
 
+/// Future that resolves as soon as any cancellation token fires.
+fn first_cancellation<'a>(
+    cancellations: &'a [&'a AgentInstallCancellation],
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+    Box::pin(async move {
+        let ((), _index, _rest) =
+            futures::future::select_all(cancellations.iter().map(|token| Box::pin(token.cancelled()))).await;
+    })
+}
+
+/// Acquire a per-driver/JRE operation lock, aborting promptly if any
+/// cancellation token fires while the lock is held elsewhere. Without this
+/// race a cancelled install would wait for the current lock holder to finish
+/// before it could observe its token.
+async fn lock_or_cancel<'a>(
+    lock: &'a tokio::sync::Mutex<()>,
+    cancellations: &'a [&'a AgentInstallCancellation],
+) -> Result<tokio::sync::MutexGuard<'a, ()>, String> {
+    if cancellations.is_empty() {
+        return Ok(lock.lock().await);
+    }
+    tokio::select! {
+        guard = lock.lock() => Ok(guard),
+        _ = first_cancellation(cancellations) => Err(AGENT_DOWNLOAD_CANCELED_ERROR.to_string()),
+    }
+}
+
 pub async fn uninstall_agent_driver(am: &AgentManager, db_type: &str) -> Result<(), String> {
     let _installation_guard = am.installation_operation_lock.read().await;
     let driver_lock = driver_operation_lock(am, db_type).await;
@@ -907,8 +934,17 @@ async fn install_agent_driver_with_batch(
 ) -> Result<(), String> {
     let _installation_guard = am.installation_operation_lock.read().await;
     let driver_lock = driver_operation_lock(am, db_type).await;
-    let _driver_guard = driver_lock.lock().await;
-
+    // A cancel that fires while the driver lock is held elsewhere must abort
+    // promptly instead of waiting for the lock holder to finish.
+    let owned_tokens;
+    let command_tokens: &[&AgentInstallCancellation] = match cancellation {
+        Some(token) => {
+            owned_tokens = [token.as_ref()];
+            &owned_tokens
+        }
+        None => &[],
+    };
+    let _driver_guard = lock_or_cancel(&driver_lock, command_tokens).await?;
     // Use the command-scoped token when one was registered before any awaitable
     // setup (blocker check, lock wait, registry fetch) so a cancel fired during
     // that window is observed here instead of being lost. Otherwise register a
@@ -960,8 +996,10 @@ async fn install_agent_driver_from_registry_locked(
 ) -> Result<(), String> {
     let _installation_guard = am.installation_operation_lock.read().await;
     let driver_lock = driver_operation_lock(am, db_type).await;
-    let _driver_guard = driver_lock.lock().await;
     assert!(!cancellations.is_empty(), "batch driver cancellation token is always registered");
+    // A cancelled batch row must not wait for the current lock holder to
+    // finish before observing its cancellation tokens.
+    let _driver_guard = lock_or_cancel(&driver_lock, cancellations).await?;
     install_agent_driver_from_registry(am, registry, source, db_type, progress, current, total_drivers, cancellations)
         .await
 }
@@ -1052,7 +1090,9 @@ async fn ensure_jre_from_registry(
     // Acquire (or create) the per-JRE-key mutex so that concurrent driver
     // installs sharing the same JRE download it exactly once.
     let lock = jre_operation_lock(am, jre_key).await;
-    let _jre_guard = lock.lock().await;
+    // A cancel that fires while another install holds the JRE lock must abort
+    // promptly instead of waiting for the lock holder to finish.
+    let _jre_guard = lock_or_cancel(&lock, cancellations).await?;
 
     // Double-check: the previous lock holder may have already installed.
     if !jre_needs_install(am, registry, jre_key) {
@@ -1620,6 +1660,7 @@ async fn download_with_progress(
             total_size,
             resume_source.as_deref(),
             &rejected_sources,
+            cancellations,
         )
         .await
         {
@@ -1677,9 +1718,7 @@ async fn download_with_progress(
                             None => break,
                         }
                     }
-                    _ = futures::future::select_all(
-                        cancellations.iter().map(|token| Box::pin(token.cancelled())),
-                    ) => {
+                    _ = first_cancellation(cancellations) => {
                         return Err(AGENT_DOWNLOAD_CANCELED_ERROR.to_string());
                     }
                 }
@@ -1755,6 +1794,7 @@ async fn open_agent_download_response(
     expected_size: u64,
     resume_source: Option<&str>,
     rejected_sources: &std::collections::HashSet<String>,
+    cancellations: &[&AgentInstallCancellation],
 ) -> Result<(reqwest::Response, bool, String), String> {
     let mut errors = Vec::new();
     for candidate_url in source.download_candidate_urls(github_url, r2_path)? {
@@ -1772,11 +1812,27 @@ async fn open_agent_download_response(
         if resume_from > 0 {
             request = request.header(reqwest::header::RANGE, format!("bytes={resume_from}-"));
         }
-        let resp = match request.send().await {
-            Ok(resp) => resp,
-            Err(err) => {
-                errors.push(format!("{candidate_url}: {err}"));
-                continue;
+        // Race the request with cancellation: a stalled mirror that never
+        // returns response headers must not hold the install hostage until
+        // the 300s client timeout. Dropping the send future aborts it.
+        let resp = if cancellations.is_empty() {
+            match request.send().await {
+                Ok(resp) => resp,
+                Err(err) => {
+                    errors.push(format!("{candidate_url}: {err}"));
+                    continue;
+                }
+            }
+        } else {
+            tokio::select! {
+                result = request.send() => match result {
+                    Ok(resp) => resp,
+                    Err(err) => {
+                        errors.push(format!("{candidate_url}: {err}"));
+                        continue;
+                    }
+                },
+                _ = first_cancellation(cancellations) => return Err(AGENT_DOWNLOAD_CANCELED_ERROR.to_string()),
             }
         };
         let status = resp.status();
@@ -4309,17 +4365,123 @@ mod agent_registry_install_tests {
         // Let the install reach the lock wait, then cancel.
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         cancel_handle.cancel();
-        drop(_guard);
 
+        // The guard is still held: the install must observe its token and
+        // return promptly instead of waiting for the lock holder to finish.
         let result = tokio::time::timeout(std::time::Duration::from_secs(5), install)
             .await
-            .expect("install task did not finish after cancel")
+            .expect("install task did not finish after cancel while the driver lock was still held")
             .expect("install task panicked");
         assert!(result.is_err());
         assert!(result.unwrap_err().contains(AGENT_DOWNLOAD_CANCELED_ERROR));
         // Cancellation observed while waiting on the lock must never persist state.
         assert!(!manager.load_state().installed_drivers.contains_key(db_type));
+        drop(_guard);
         manager.finish_install_cancellation(db_type, &cancel_handle).await;
+    }
+
+    #[tokio::test]
+    async fn cancelled_install_aborts_while_waiting_for_jre_lock() {
+        let manager = std::sync::Arc::new(test_manager("cancel-jre-lock-wait"));
+        let db_type = "oracle";
+        let registry = registry_with_jre_version("21.0.12");
+        let cancellation = manager.begin_install_cancellation(&install_cancellation_key("jre-lock-wait")).await;
+        let cancel_handle = Arc::clone(&cancellation);
+        // Hold the JRE lock so the install blocks on it before downloading.
+        let lock = jre_operation_lock(&manager, DEFAULT_JRE_KEY).await;
+        let _guard = lock.lock().await;
+
+        let install_manager = Arc::clone(&manager);
+        let install = tokio::spawn(async move {
+            ensure_jre_from_registry(
+                &install_manager,
+                &registry,
+                DownloadSource::Official,
+                DEFAULT_JRE_KEY,
+                db_type,
+                &|_| {},
+                None,
+                None,
+                &[&cancellation],
+            )
+            .await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        cancel_handle.cancel();
+
+        // The guard is still held: the JRE wait must abort on the token
+        // instead of waiting for the lock holder to finish.
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), install)
+            .await
+            .expect("JRE wait did not finish after cancel while the JRE lock was still held")
+            .expect("JRE wait panicked");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains(AGENT_DOWNLOAD_CANCELED_ERROR));
+        // Nothing must have been downloaded or persisted.
+        assert!(!manager.jre_dir(DEFAULT_JRE_KEY).exists());
+        assert!(manager.load_state().jre_versions.is_empty());
+        drop(_guard);
+        manager.finish_install_cancellation(&install_cancellation_key("jre-lock-wait"), &cancel_handle).await;
+    }
+
+    #[tokio::test]
+    async fn download_with_progress_aborts_before_response_headers_when_cancelled() {
+        use tokio::io::AsyncReadExt;
+        let manager = test_manager("cancel-stalled-headers");
+        let db_type = "oracle";
+        let token = manager.begin_install_cancellation(db_type).await;
+        // A mirror that accepts connections but never sends response headers -
+        // without racing `request.send()` against cancellation the install
+        // would hang here until the 300s client timeout.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let url = format!("http://{addr}/stalled-agent");
+        let server = tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else { break };
+                // Read the request, then never respond.
+                let mut buf = [0u8; 1024];
+                let _ = socket.read(&mut buf).await;
+                let _ = socket.read(&mut buf).await;
+            }
+        });
+
+        let dest = manager.base_dir().join("downloads").join("oracle-agent");
+        let dest_assert = dest.clone();
+        let token_for_task = Arc::clone(&token);
+        let task = tokio::spawn(async move {
+            download_with_progress(
+                &manager,
+                &|_| {},
+                "driver",
+                DownloadSource::Official,
+                &url,
+                "agents/drivers/dbx-agent-oracle",
+                &dest,
+                256 * 1024,
+                None,
+                None,
+                Some(db_type),
+                None,
+                None,
+                &[&token_for_task],
+            )
+            .await
+        });
+        // The request is now pending on the stalled mirror; cancel must abort
+        // it long before the 300s timeout.
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        token.cancel();
+
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), task)
+            .await
+            .expect("download did not abort after cancel while response headers were stalled")
+            .expect("download task panicked");
+        server.abort();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains(AGENT_DOWNLOAD_CANCELED_ERROR));
+        assert!(!download_temp_path(&dest_assert).exists());
+        assert!(!dest_assert.exists());
     }
 
     #[tokio::test]

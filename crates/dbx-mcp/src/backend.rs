@@ -1736,6 +1736,7 @@ fn infer_document_columns(documents: &[Value]) -> Vec<ColumnInfo> {
         .map(|(name, data_type)| ColumnInfo {
             name,
             data_type,
+            resolved_schema: None,
             is_nullable: true,
             column_default: None,
             is_primary_key: false,

@@ -122,6 +122,16 @@ export function isDoltDriverProfile(driverProfile?: string): boolean {
   return driverProfile?.toLowerCase() === DOLT_DRIVER_PROFILE;
 }
 
+export function doltWorkspaceTarget(database: string, source: "connection" | "database") {
+  const separator = database.indexOf("/");
+  if (separator <= 0) return { database };
+  const baseDatabase = database.slice(0, separator);
+  const branch = database.slice(separator + 1);
+  // Connection-level navigation uses the database's default branch. A tree
+  // database entry may explicitly address a Dolt db/branch revision database.
+  return source === "database" && branch ? { database: baseDatabase, branch } : { database: baseDatabase };
+}
+
 type DoltConnectionConfig = Pick<ConnectionConfig, "driver_profile"> & Partial<Pick<ConnectionConfig, "external_config">>;
 
 function externalConfigRecord(value: unknown): Record<string, unknown> {
@@ -174,6 +184,14 @@ export function doltSqlRoutineSignatures(driverProfile?: string): Map<string, st
 
 export const DOLT_DRIVER_PROFILE_EXTENSION: DriverProfileExtensionDefinition = {
   id: DOLT_DRIVER_PROFILE,
+  databaseWorkspace: {
+    mode: "dolt-version-control",
+    menuLabelKey: "doltVersionControl.open",
+    tabTitleKey: "doltVersionControl.title",
+    tabScope: "connection",
+    entryScopes: ["connection", "database"],
+    resolveTarget: doltWorkspaceTarget,
+  },
   objectTreeProfile: doltObjectTreeProfileForConnection,
   completionTableMetadata: (tableName) =>
     tableName.toLowerCase().startsWith("dolt")

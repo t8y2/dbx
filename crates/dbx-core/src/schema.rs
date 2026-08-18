@@ -7,7 +7,7 @@ use crate::db;
 use crate::models::connection::{ConnectionConfig, DatabaseType};
 use crate::query::{agent_execute_query_params, should_discard_pool_after_error, QueryExecutionOptions};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::future::Future;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -6495,6 +6495,26 @@ pub async fn list_owners_core(
     .await
 }
 
+/// Whether to widen or normalize a single-table DDL fetch for its caller.
+///
+/// Database export and table transfer render one relation at a time because
+/// they already iterate every relation themselves. Interactive display paths
+/// include PostgreSQL access statements and recurse through the partition
+/// tree. Oracle export additionally requests portable DDL normalization.
+#[derive(Clone, Copy)]
+struct TableDdlOptions {
+    include_postgres_access: bool,
+    include_partitions: bool,
+    portable_oracle: bool,
+}
+
+impl TableDdlOptions {
+    const SINGLE_RELATION: Self =
+        Self { include_postgres_access: false, include_partitions: false, portable_oracle: false };
+    const EXPORT: Self = Self { include_postgres_access: false, include_partitions: false, portable_oracle: true };
+    const DISPLAY: Self = Self { include_postgres_access: true, include_partitions: true, portable_oracle: false };
+}
+
 pub async fn get_table_ddl_core(
     state: &AppState,
     connection_id: &str,
@@ -6503,7 +6523,16 @@ pub async fn get_table_ddl_core(
     table: &str,
     object_type: Option<db::ObjectSourceKind>,
 ) -> Result<String, String> {
-    get_table_ddl_core_with_options(state, connection_id, database, schema, table, object_type, false, false).await
+    get_table_ddl_core_with_options(
+        state,
+        connection_id,
+        database,
+        schema,
+        table,
+        object_type,
+        TableDdlOptions::SINGLE_RELATION,
+    )
+    .await
 }
 
 pub async fn get_table_export_ddl_core(
@@ -6514,7 +6543,8 @@ pub async fn get_table_export_ddl_core(
     table: &str,
     object_type: Option<db::ObjectSourceKind>,
 ) -> Result<String, String> {
-    get_table_ddl_core_with_options(state, connection_id, database, schema, table, object_type, false, true).await
+    get_table_ddl_core_with_options(state, connection_id, database, schema, table, object_type, TableDdlOptions::EXPORT)
+        .await
 }
 
 pub async fn get_table_display_ddl_core(
@@ -6525,7 +6555,16 @@ pub async fn get_table_display_ddl_core(
     table: &str,
     object_type: Option<db::ObjectSourceKind>,
 ) -> Result<String, String> {
-    get_table_ddl_core_with_options(state, connection_id, database, schema, table, object_type, true, false).await
+    get_table_ddl_core_with_options(
+        state,
+        connection_id,
+        database,
+        schema,
+        table,
+        object_type,
+        TableDdlOptions::DISPLAY,
+    )
+    .await
 }
 
 async fn get_table_ddl_core_with_options(
@@ -6535,8 +6574,7 @@ async fn get_table_ddl_core_with_options(
     schema: &str,
     table: &str,
     object_type: Option<db::ObjectSourceKind>,
-    include_postgres_access: bool,
-    portable_oracle: bool,
+    options: TableDdlOptions,
 ) -> Result<String, String> {
     if crate::sql_dialect::parse_sqlserver_linked_schema_ref(schema).is_some() {
         return Err("DDL is not supported for SQL Server linked server tables".to_string());
@@ -6582,9 +6620,24 @@ async fn get_table_ddl_core_with_options(
     }
 
     retry_metadata_connection(state, connection_id, Some(database), || {
-        get_table_ddl_once(state, connection_id, database, schema, table, include_postgres_access, portable_oracle)
+        get_table_ddl_once(state, connection_id, database, schema, table, options)
     })
     .await
+}
+
+/// `pg_ddl_with_partitions` when the caller wants the whole partition tree,
+/// otherwise plain single-relation `pg_ddl`.
+async fn pg_ddl_for_options(
+    pool: &deadpool_postgres::Pool,
+    schema: &str,
+    table: &str,
+    include_partitions: bool,
+) -> Result<String, String> {
+    if include_partitions {
+        pg_ddl_with_partitions(pool, schema, table).await
+    } else {
+        pg_ddl(pool, schema, table).await
+    }
 }
 
 async fn get_table_ddl_once(
@@ -6593,8 +6646,7 @@ async fn get_table_ddl_once(
     database: &str,
     schema: &str,
     table: &str,
-    include_postgres_access: bool,
-    portable_oracle: bool,
+    options: TableDdlOptions,
 ) -> Result<String, String> {
     let pool_key = state.get_or_create_metadata_pool_for_session(connection_id, Some(database), None).await?;
     let db_config = connection_config(state, connection_id).await;
@@ -6642,10 +6694,11 @@ async fn get_table_ddl_once(
             if let Some(config) = db_config.as_ref().filter(|config| is_agent_postgres_metadata_fallback_config(config))
             {
                 match native_postgres_metadata_pool(state, connection_id, database, config).await {
-                    Ok(Some(pool)) => match pg_ddl(&pool, schema, table).await {
-                        Ok(ddl) => return Ok(ddl),
-                        Err(error) => {
-                            log::warn!(
+                    Ok(Some(pool)) => {
+                        match pg_ddl_for_options(&pool, schema, table, options.include_partitions).await {
+                            Ok(ddl) => return Ok(ddl),
+                            Err(error) => {
+                                log::warn!(
                                 "[schema][agent:get_table_ddl:postgres-compatible-native-fallback-failed] connection_id={} database={} schema={} table={} error={}",
                                 connection_id,
                                 database,
@@ -6653,8 +6706,9 @@ async fn get_table_ddl_once(
                                 table,
                                 error
                             );
+                            }
                         }
-                    },
+                    }
                     Ok(None) => {}
                     Err(error) => {
                         log::warn!(
@@ -6674,7 +6728,7 @@ async fn get_table_ddl_once(
                     database,
                     schema,
                     table,
-                    portable_oracle,
+                    options.portable_oracle,
                     agent_metadata_timeout(db_config.as_ref()),
                 )
                 .await;
@@ -6702,27 +6756,27 @@ async fn get_table_ddl_once(
         PoolKind::Postgres(p) if db_config.as_ref().is_some_and(is_opengauss_family_config) => {
             match opengauss_table_ddl(p, schema, table).await {
                 Ok(ddl) => Ok(ddl),
-                Err(_) => pg_ddl(p, schema, table).await,
+                Err(_) => pg_ddl_for_options(p, schema, table, options.include_partitions).await,
             }
         }
         PoolKind::Postgres(p) if db_config.as_ref().is_some_and(is_questdb_config) => {
             match db::questdb::questdb_table_or_view_ddl(p, table).await {
                 Ok(ddl) => Ok(ddl),
-                Err(_) => pg_ddl(p, schema, table).await,
+                Err(_) => pg_ddl_for_options(p, schema, table, options.include_partitions).await,
             }
         }
         PoolKind::Postgres(p) if db_config.as_ref().is_some_and(is_cloudberry_config) => {
-            cloudberry_ddl(p, schema, table).await
+            cloudberry_ddl(p, schema, table, options.include_partitions).await
         }
         PoolKind::Postgres(p) if db_config.as_ref().is_some_and(db::opentenbase::is_config) => {
-            opentenbase_ddl(p, schema, table).await
+            opentenbase_ddl(p, schema, table, options.include_partitions).await
         }
         PoolKind::Postgres(p)
-            if include_postgres_access && db_config.as_ref().is_some_and(is_native_postgres_config) =>
+            if options.include_postgres_access && db_config.as_ref().is_some_and(is_native_postgres_config) =>
         {
             pg_display_ddl(p, schema, table).await
         }
-        PoolKind::Postgres(p) => pg_ddl(p, schema, table).await,
+        PoolKind::Postgres(p) => pg_ddl_for_options(p, schema, table, options.include_partitions).await,
         PoolKind::Sqlite(p) => sqlite_ddl(p, schema, table).await,
         PoolKind::Rqlite(client) => db::rqlite_driver::table_ddl(client, table).await,
         PoolKind::Turso(client) => db::turso_driver::table_ddl(client, table).await,
@@ -6842,6 +6896,14 @@ fn sql_string(value: &str) -> String {
 
 fn pg_ident(value: &str) -> String {
     format!("\"{}\"", value.replace('"', "\"\""))
+}
+
+/// Whether a `pg_get_constraintdef` result ends in the ` NOT VALID` suffix
+/// Postgres appends for an unvalidated constraint. That suffix is only legal
+/// after `ALTER TABLE ADD CONSTRAINT`, never inside a `CREATE TABLE` column
+/// list.
+fn is_not_valid_constraintdef(definition: &str) -> bool {
+    definition.to_ascii_uppercase().trim_end().ends_with("NOT VALID")
 }
 
 fn sqlserver_ident(value: &str) -> String {
@@ -8644,6 +8706,7 @@ mod ddl_tests {
                 &[column("created_at", "timestamp without time zone")],
                 &[],
                 &[],
+                &[],
                 None,
                 &db::postgres::PostgresTablePartitionInfo {
                     key: Some(partition_key.to_string()),
@@ -8663,6 +8726,7 @@ mod ddl_tests {
             "public",
             "users",
             &[column("id", "integer")],
+            &[],
             &[],
             &[],
             None,
@@ -8695,11 +8759,13 @@ mod ddl_tests {
             parent_table: Some("events".to_string()),
             bound: Some("FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')".to_string()),
             key: Some("HASH (payload)".to_string()),
+            ..Default::default()
         };
         let partition_local_objects = db::postgres::PostgresTablePartitionLocalObjects {
             has_primary_key: true,
             foreign_keys: BTreeSet::new(),
             indexes: BTreeSet::from(["events_payload_idx".to_string()]),
+            ..Default::default()
         };
 
         let ddl = render_postgres_table_ddl_with_partition_info(
@@ -8707,6 +8773,7 @@ mod ddl_tests {
             "events_2026",
             &[id, column("payload", "text")],
             &indexes,
+            &[],
             &[],
             None,
             &partition_info,
@@ -8742,6 +8809,7 @@ mod ddl_tests {
             parent_table: Some("events".to_string()),
             bound: Some("DEFAULT".to_string()),
             key: None,
+            ..Default::default()
         };
 
         let ddl = render_postgres_table_ddl_with_partition_info(
@@ -8750,12 +8818,182 @@ mod ddl_tests {
             &[id],
             &indexes,
             &[],
+            &[],
             None,
             &partition_info,
             &db::postgres::PostgresTablePartitionLocalObjects::default(),
         );
 
         assert_eq!(ddl, "CREATE TABLE \"public\".\"events_default\" PARTITION OF \"public\".\"events\" DEFAULT;\n");
+    }
+
+    #[test]
+    fn postgres_table_ddl_renders_check_constraints_for_ordinary_tables() {
+        let ddl = render_postgres_table_ddl_with_partition_info(
+            "public",
+            "users",
+            &[column("age", "integer")],
+            &[],
+            &[],
+            &[("users_age_check".to_string(), "CHECK (age >= 0)".to_string())],
+            None,
+            &db::postgres::PostgresTablePartitionInfo::default(),
+            &db::postgres::PostgresTablePartitionLocalObjects::default(),
+        );
+
+        assert!(ddl.contains("CONSTRAINT \"users_age_check\" CHECK (age >= 0)"), "ddl: {ddl}");
+    }
+
+    #[test]
+    fn postgres_partition_ddl_only_renders_local_check_constraints() {
+        let mut partition_local_objects = db::postgres::PostgresTablePartitionLocalObjects::default();
+        partition_local_objects.check_constraints.insert("child_only_check".to_string());
+
+        let ddl = render_postgres_table_ddl_with_partition_info(
+            "public",
+            "events_2026",
+            &[column("payload", "text")],
+            &[],
+            &[],
+            &[
+                ("parent_check".to_string(), "CHECK (payload IS NOT NULL)".to_string()),
+                ("child_only_check".to_string(), "CHECK (payload <> '')".to_string()),
+            ],
+            None,
+            &db::postgres::PostgresTablePartitionInfo {
+                is_partition: true,
+                parent_schema: Some("public".to_string()),
+                parent_table: Some("events".to_string()),
+                bound: Some("DEFAULT".to_string()),
+                ..Default::default()
+            },
+            &partition_local_objects,
+        );
+
+        assert!(ddl.contains("CONSTRAINT \"child_only_check\" CHECK (payload <> '')"), "ddl: {ddl}");
+        assert!(!ddl.contains("parent_check"), "ddl: {ddl}");
+    }
+
+    #[test]
+    fn postgres_partition_ddl_overrides_local_column_default() {
+        let mut status = column("status", "text");
+        status.column_default = Some("'archived'::text".to_string());
+        let mut partition_local_objects = db::postgres::PostgresTablePartitionLocalObjects::default();
+        partition_local_objects
+            .column_defaults
+            .insert("status".to_string(), db::postgres::PostgresColumnDefaultState::Overridden);
+
+        let ddl = render_postgres_table_ddl_with_partition_info(
+            "public",
+            "events_2026",
+            &[status],
+            &[],
+            &[],
+            &[],
+            None,
+            &db::postgres::PostgresTablePartitionInfo {
+                is_partition: true,
+                parent_schema: Some("public".to_string()),
+                parent_table: Some("events".to_string()),
+                bound: Some("DEFAULT".to_string()),
+                ..Default::default()
+            },
+            &partition_local_objects,
+        );
+
+        assert!(ddl.contains("\"status\" WITH OPTIONS DEFAULT 'archived'::text"), "ddl: {ddl}");
+        // The partition's own column list is otherwise omitted (inherited
+        // from the parent), so a plain (non-override) column declaration
+        // must not appear alongside the WITH OPTIONS clause.
+        assert!(!ddl.contains("\"status\" text"), "ddl: {ddl}");
+    }
+
+    #[test]
+    fn postgres_partition_ddl_emits_drop_default_for_locally_dropped_column() {
+        // A partition that ran `ALTER TABLE ONLY child ALTER COLUMN status
+        // DROP DEFAULT` has no default of its own to report here — the
+        // column's `column_default` is `None`, distinct from the
+        // "overridden" case (which has its own, different, Some value).
+        let status = column("status", "text");
+        let mut partition_local_objects = db::postgres::PostgresTablePartitionLocalObjects::default();
+        partition_local_objects
+            .column_defaults
+            .insert("status".to_string(), db::postgres::PostgresColumnDefaultState::Dropped);
+
+        let ddl = render_postgres_table_ddl_with_partition_info(
+            "public",
+            "events_2026",
+            &[status],
+            &[],
+            &[],
+            &[],
+            None,
+            &db::postgres::PostgresTablePartitionInfo {
+                is_partition: true,
+                parent_schema: Some("public".to_string()),
+                parent_table: Some("events".to_string()),
+                bound: Some("DEFAULT".to_string()),
+                ..Default::default()
+            },
+            &partition_local_objects,
+        );
+
+        assert!(
+            ddl.contains("ALTER TABLE ONLY \"public\".\"events_2026\" ALTER COLUMN \"status\" DROP DEFAULT;"),
+            "ddl: {ddl}"
+        );
+        assert!(!ddl.contains("WITH OPTIONS DEFAULT"), "ddl: {ddl}");
+    }
+
+    #[test]
+    fn postgres_table_ddl_renders_foreign_table_with_server_and_options() {
+        let ddl = render_postgres_table_ddl_with_partition_info(
+            "public",
+            "remote_users",
+            &[column("id", "integer")],
+            &[],
+            &[],
+            &[],
+            None,
+            &db::postgres::PostgresTablePartitionInfo {
+                is_foreign: true,
+                foreign_server: Some("loopback".to_string()),
+                foreign_options: vec![("schema_name".to_string(), "public".to_string())],
+                ..Default::default()
+            },
+            &db::postgres::PostgresTablePartitionLocalObjects::default(),
+        );
+
+        assert!(ddl.starts_with("CREATE FOREIGN TABLE \"public\".\"remote_users\""), "ddl: {ddl}");
+        assert!(ddl.contains("SERVER \"loopback\""), "ddl: {ddl}");
+        assert!(ddl.contains("OPTIONS (\"schema_name\" 'public')"), "ddl: {ddl}");
+    }
+
+    #[test]
+    fn postgres_partition_ddl_uses_foreign_table_syntax_for_foreign_partitions() {
+        let ddl = render_postgres_table_ddl_with_partition_info(
+            "public",
+            "events_remote",
+            &[column("id", "integer")],
+            &[],
+            &[],
+            &[],
+            None,
+            &db::postgres::PostgresTablePartitionInfo {
+                is_partition: true,
+                parent_schema: Some("public".to_string()),
+                parent_table: Some("events".to_string()),
+                bound: Some("FOR VALUES FROM ('2027-01-01') TO ('2028-01-01')".to_string()),
+                is_foreign: true,
+                foreign_server: Some("loopback".to_string()),
+                ..Default::default()
+            },
+            &db::postgres::PostgresTablePartitionLocalObjects::default(),
+        );
+
+        assert!(ddl.starts_with("CREATE FOREIGN TABLE \"public\".\"events_remote\" PARTITION OF"), "ddl: {ddl}");
+        assert!(ddl.contains("SERVER \"loopback\""), "ddl: {ddl}");
+        assert!(!ddl.contains("CREATE TABLE \"public\".\"events_remote\""), "ddl: {ddl}");
     }
 
     #[test]
@@ -9290,14 +9528,20 @@ pub async fn sqlite_ddl(pool: &db::sqlite::SqliteHandle, schema: &str, table: &s
     .map_err(|e| e.to_string())?
 }
 
+/// DDL for a single relation. Callers that already iterate a relation set
+/// themselves (database export, table transfer) must use this rather than
+/// `pg_ddl_with_partitions` — recursing into partition children here would
+/// duplicate every partition's `CREATE TABLE` (once from the parent's DDL,
+/// once from the caller's own loop over that same child relation).
 pub async fn pg_ddl(pool: &deadpool_postgres::Pool, schema: &str, table: &str) -> Result<String, String> {
-    let (columns, indexes, fkeys, table_comment, partition_info, trigger_definitions) = tokio::try_join!(
+    let (columns, indexes, fkeys, table_comment, partition_info, trigger_definitions, check_constraints) = tokio::try_join!(
         db::postgres::get_columns(pool, schema, table),
         db::postgres::list_indexes(pool, schema, table),
         db::postgres::list_foreign_keys(pool, schema, table),
         async { db::postgres::get_table_comment(pool, schema, table).await },
         db::postgres::get_table_partition_info(pool, schema, table),
         db::postgres::list_trigger_definitions(pool, schema, table),
+        db::postgres::list_check_constraints(pool, schema, table),
     )?;
     let partition_local_objects = if partition_info.is_partition {
         db::postgres::get_table_partition_local_objects(pool, schema, table).await?
@@ -9312,6 +9556,7 @@ pub async fn pg_ddl(pool: &deadpool_postgres::Pool, schema: &str, table: &str) -
             &columns,
             &indexes,
             &fkeys,
+            &check_constraints,
             table_comment.as_deref(),
             &partition_info,
             &partition_local_objects,
@@ -9320,8 +9565,156 @@ pub async fn pg_ddl(pool: &deadpool_postgres::Pool, schema: &str, table: &str) -
     ))
 }
 
+/// Like `pg_ddl`, but for a partitioned table also emits `CREATE TABLE ...
+/// PARTITION OF` for every existing partition, at any depth. Used only by the
+/// interactive "view DDL" paths (`get_table_display_ddl_core`) — callers that
+/// iterate relations themselves must use `pg_ddl` instead (see its doc
+/// comment). Fetches the whole tree's metadata via a handful of batched,
+/// tree-wide queries (see `db::postgres::fetch_postgres_partition_tree` and
+/// its `_for_relations` siblings) instead of recursing per relation, which
+/// would rerun the full metadata query chain once per node and scale request
+/// count linearly with the number of partitions.
+pub async fn pg_ddl_with_partitions(
+    pool: &deadpool_postgres::Pool,
+    schema: &str,
+    table: &str,
+) -> Result<String, String> {
+    let tree = db::postgres::fetch_postgres_partition_tree(pool, schema, table).await?;
+    let tree_oids: HashSet<i64> = tree.iter().map(|node| node.oid).collect();
+    // The requested relation is the tree root: it's the only node whose parent
+    // (if it has one at all — it may itself be a partition of a table outside
+    // this tree) isn't also a node we fetched.
+    let Some(root) =
+        tree.iter().find(|node| !node.parent_oid.is_some_and(|parent_oid| tree_oids.contains(&parent_oid)))
+    else {
+        return Err(format!(
+            "relation \"{schema}\".\"{table}\" was not found or is not a table/partition/foreign table"
+        ));
+    };
+
+    let oids: Vec<i64> = tree.iter().map(|node| node.oid).collect();
+    let relations: Vec<(i64, String, String)> =
+        tree.iter().map(|node| (node.oid, node.schema.clone(), node.table.clone())).collect();
+    let relation_pairs: Vec<(String, String)> =
+        tree.iter().map(|node| (node.schema.clone(), node.table.clone())).collect();
+
+    let (
+        columns_by_oid,
+        indexes_by_oid,
+        fkeys_by_relation,
+        comments_by_oid,
+        triggers_by_oid,
+        checks_by_oid,
+        local_objects_by_oid,
+    ) = tokio::try_join!(
+        db::postgres::get_columns_for_relations(pool, &relations),
+        db::postgres::list_indexes_for_relations(pool, &relations),
+        db::postgres::list_foreign_keys_for_relations(pool, &relation_pairs),
+        db::postgres::get_table_comments_for_relations(pool, &oids),
+        db::postgres::list_trigger_definitions_for_relations(pool, &oids),
+        db::postgres::list_check_constraints_for_relations(pool, &oids),
+        db::postgres::get_table_partition_local_objects_for_relations(pool, &oids),
+    )?;
+
+    // Group children by parent oid, each group ordered by relname to match
+    // `list_table_partitions`' `ORDER BY c.relname` (today's traversal order).
+    let mut children_by_parent: HashMap<i64, Vec<&db::postgres::PostgresPartitionTreeNode>> = HashMap::new();
+    for node in &tree {
+        if let Some(parent_oid) = node.parent_oid {
+            children_by_parent.entry(parent_oid).or_default().push(node);
+        }
+    }
+    for children in children_by_parent.values_mut() {
+        children.sort_by(|a, b| a.table.cmp(&b.table));
+    }
+
+    let mut ddl = String::new();
+    render_postgres_partition_tree_node(
+        root,
+        &children_by_parent,
+        &columns_by_oid,
+        &indexes_by_oid,
+        &fkeys_by_relation,
+        &comments_by_oid,
+        &triggers_by_oid,
+        &checks_by_oid,
+        &local_objects_by_oid,
+        &mut ddl,
+    );
+    Ok(ddl)
+}
+
+/// Renders `root` and every descendant reachable through `children_by_parent`.
+/// Iterative (an explicit stack, not function-call recursion) so that a
+/// pathologically deep partition hierarchy can't overflow the stack; `visited`
+/// additionally guards against a corrupted catalog (or non-PostgreSQL fork)
+/// whose `pg_inherits` data forms a cycle, which would otherwise loop forever.
+#[allow(clippy::too_many_arguments)]
+fn render_postgres_partition_tree_node(
+    root: &db::postgres::PostgresPartitionTreeNode,
+    children_by_parent: &HashMap<i64, Vec<&db::postgres::PostgresPartitionTreeNode>>,
+    columns_by_oid: &HashMap<i64, Vec<db::ColumnInfo>>,
+    indexes_by_oid: &HashMap<i64, Vec<db::IndexInfo>>,
+    fkeys_by_relation: &HashMap<(String, String), Vec<db::ForeignKeyInfo>>,
+    comments_by_oid: &HashMap<i64, Option<String>>,
+    triggers_by_oid: &HashMap<i64, Vec<String>>,
+    checks_by_oid: &HashMap<i64, Vec<(String, String)>>,
+    local_objects_by_oid: &HashMap<i64, db::postgres::PostgresTablePartitionLocalObjects>,
+    ddl: &mut String,
+) {
+    let empty_columns = Vec::new();
+    let empty_indexes = Vec::new();
+    let empty_fkeys = Vec::new();
+    let empty_triggers = Vec::new();
+    let empty_checks = Vec::new();
+    let empty_local_objects = db::postgres::PostgresTablePartitionLocalObjects::default();
+
+    let mut visited: HashSet<i64> = HashSet::new();
+    let mut stack: Vec<&db::postgres::PostgresPartitionTreeNode> = vec![root];
+    while let Some(node) = stack.pop() {
+        if !visited.insert(node.oid) {
+            continue;
+        }
+
+        let columns = columns_by_oid.get(&node.oid).unwrap_or(&empty_columns);
+        let indexes = indexes_by_oid.get(&node.oid).unwrap_or(&empty_indexes);
+        let fkeys = fkeys_by_relation.get(&(node.schema.clone(), node.table.clone())).unwrap_or(&empty_fkeys);
+        let comment = comments_by_oid.get(&node.oid).cloned().flatten();
+        let triggers = triggers_by_oid.get(&node.oid).unwrap_or(&empty_triggers);
+        let checks = checks_by_oid.get(&node.oid).unwrap_or(&empty_checks);
+        let local_objects = local_objects_by_oid.get(&node.oid).unwrap_or(&empty_local_objects);
+
+        if !ddl.is_empty() {
+            ddl.push('\n');
+        }
+        ddl.push_str(&append_postgres_trigger_definitions(
+            render_postgres_table_ddl_with_partition_info(
+                &node.schema,
+                &node.table,
+                columns,
+                indexes,
+                fkeys,
+                checks,
+                comment.as_deref(),
+                &node.partition_info,
+                local_objects,
+            ),
+            triggers,
+        ));
+
+        if let Some(children) = children_by_parent.get(&node.oid) {
+            // Push in reverse so children are popped (and rendered) in their
+            // original relname-sorted order.
+            for child in children.iter().rev() {
+                stack.push(child);
+            }
+        }
+    }
+}
+
 async fn pg_display_ddl(pool: &deadpool_postgres::Pool, schema: &str, table: &str) -> Result<String, String> {
-    let (ddl, access) = tokio::join!(pg_ddl(pool, schema, table), db::postgres::get_table_access(pool, schema, table));
+    let (ddl, access) =
+        tokio::join!(pg_ddl_with_partitions(pool, schema, table), db::postgres::get_table_access(pool, schema, table));
     let ddl = ddl?;
     match access {
         Ok(access) => Ok(append_postgres_access_ddl(ddl, schema, table, &access)),
@@ -9577,11 +9970,16 @@ fn append_opengauss_trigger_definitions(mut ddl: String, trigger_definitions: &[
     ddl
 }
 
-pub async fn cloudberry_ddl(pool: &deadpool_postgres::Pool, schema: &str, table: &str) -> Result<String, String> {
+pub async fn cloudberry_ddl(
+    pool: &deadpool_postgres::Pool,
+    schema: &str,
+    table: &str,
+    include_partitions: bool,
+) -> Result<String, String> {
     match db::cloudberry::table_ddl(pool, schema, table).await {
         Ok(ddl) => Ok(ddl),
         Err(native_error) => {
-            let base_ddl = pg_ddl(pool, schema, table).await.map_err(|fallback_error| {
+            let base_ddl = pg_ddl_for_options(pool, schema, table, include_partitions).await.map_err(|fallback_error| {
                 format!(
                     "Cloudberry pg_get_tabledef failed: {native_error}; PostgreSQL DDL fallback failed: {fallback_error}"
                 )
@@ -9598,8 +9996,13 @@ pub async fn cloudberry_ddl(pool: &deadpool_postgres::Pool, schema: &str, table:
     }
 }
 
-pub async fn opentenbase_ddl(pool: &deadpool_postgres::Pool, schema: &str, table: &str) -> Result<String, String> {
-    let ddl = pg_ddl(pool, schema, table).await?;
+pub async fn opentenbase_ddl(
+    pool: &deadpool_postgres::Pool,
+    schema: &str,
+    table: &str,
+    include_partitions: bool,
+) -> Result<String, String> {
+    let ddl = pg_ddl_for_options(pool, schema, table, include_partitions).await?;
     match db::opentenbase::table_distribution(pool, schema, table).await {
         Ok(Some(distribution)) => match db::opentenbase::append_distribution_clause(&ddl, &distribution) {
             Ok(ddl) => Ok(ddl),
@@ -9640,6 +10043,7 @@ pub fn render_postgres_table_ddl(
         columns,
         indexes,
         fkeys,
+        &[],
         table_comment,
         &db::postgres::PostgresTablePartitionInfo::default(),
         &db::postgres::PostgresTablePartitionLocalObjects::default(),
@@ -9652,6 +10056,7 @@ fn render_postgres_table_ddl_with_partition_info(
     columns: &[db::ColumnInfo],
     indexes: &[db::IndexInfo],
     fkeys: &[db::ForeignKeyInfo],
+    check_constraints: &[(String, String)],
     table_comment: Option<&str>,
     partition_info: &db::postgres::PostgresTablePartitionInfo,
     partition_local_objects: &db::postgres::PostgresTablePartitionLocalObjects,
@@ -9728,7 +10133,42 @@ fn render_postgres_table_ddl_with_partition_info(
             ref_columns
         ));
     }
+    // `pg_get_constraintdef` appends ` NOT VALID` for an unvalidated CHECK
+    // constraint, but that suffix is only legal after `ALTER TABLE ADD
+    // CONSTRAINT` — it's a syntax error inside a `CREATE TABLE` column list.
+    // Emit those as a separate statement below instead, so the constraint's
+    // unvalidated state round-trips instead of producing invalid DDL.
+    let mut not_valid_check_constraints: Vec<(&str, &str)> = Vec::new();
+    for (name, definition) in check_constraints {
+        if is_partition && !partition_local_objects.check_constraints.contains(name) {
+            continue;
+        }
+        let definition = definition.trim();
+        if is_not_valid_constraintdef(definition) {
+            not_valid_check_constraints.push((name.as_str(), definition));
+            continue;
+        }
+        definition_lines.push(format!("  CONSTRAINT {} {}", pg_ident(name), definition));
+    }
+    if is_partition {
+        // A partition can override a column's default independently of the
+        // parent; PostgreSQL only accepts that override through `column_name
+        // WITH OPTIONS DEFAULT ...` since the partition's own column list is
+        // otherwise inherited (and thus omitted) from the parent's.
+        for column in columns {
+            if partition_local_objects.column_defaults.get(&column.name)
+                != Some(&db::postgres::PostgresColumnDefaultState::Overridden)
+            {
+                continue;
+            }
+            let Some(default) = column.column_default.as_deref() else {
+                continue;
+            };
+            definition_lines.push(format!("  {} WITH OPTIONS DEFAULT {default}", pg_ident(&column.name)));
+        }
+    }
 
+    let create = if partition_info.is_foreign { "CREATE FOREIGN TABLE" } else { "CREATE TABLE" };
     let mut ddl = if let Some((parent_schema, parent_table, bound)) = partition_parent {
         let parent_name = format!("{}.{}", pg_ident(parent_schema), pg_ident(parent_table));
         let definitions = if definition_lines.is_empty() {
@@ -9736,14 +10176,48 @@ fn render_postgres_table_ddl_with_partition_info(
         } else {
             format!(" (\n{}\n)", definition_lines.join(",\n"))
         };
-        format!("CREATE TABLE {table_name} PARTITION OF {parent_name}{definitions} {bound}")
+        format!("{create} {table_name} PARTITION OF {parent_name}{definitions} {bound}")
     } else {
-        format!("CREATE TABLE {table_name} (\n{}\n)", definition_lines.join(",\n"))
+        format!("{create} {table_name} (\n{}\n)", definition_lines.join(",\n"))
     };
+    if let Some(server) = partition_info.foreign_server.as_deref().filter(|server| !server.trim().is_empty()) {
+        ddl.push_str(&format!(" SERVER {}", pg_ident(server)));
+        if !partition_info.foreign_options.is_empty() {
+            let options = partition_info
+                .foreign_options
+                .iter()
+                .map(|(key, value)| format!("{} {}", pg_ident(key), sql_string(value)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            ddl.push_str(&format!(" OPTIONS ({options})"));
+        }
+    }
     if let Some(partition_key) = partition_info.key.as_deref().filter(|key| !key.trim().is_empty()) {
         ddl.push_str(&format!(" PARTITION BY {partition_key}"));
     }
     ddl.push_str(";\n");
+
+    for (name, definition) in &not_valid_check_constraints {
+        ddl.push_str(&format!("\nALTER TABLE {table_name} ADD CONSTRAINT {} {};", pg_ident(name), definition));
+    }
+
+    if is_partition {
+        // A dropped default has no counterpart in the PARTITION OF column
+        // list syntax used above for overrides — it must be replayed as a
+        // standalone statement, or restore would silently reintroduce the
+        // parent's default (PostgreSQL auto-copies it onto every partition
+        // at creation time unless explicitly dropped).
+        for column in columns {
+            if partition_local_objects.column_defaults.get(&column.name)
+                == Some(&db::postgres::PostgresColumnDefaultState::Dropped)
+            {
+                ddl.push_str(&format!(
+                    "\nALTER TABLE ONLY {table_name} ALTER COLUMN {} DROP DEFAULT;",
+                    pg_ident(&column.name)
+                ));
+            }
+        }
+    }
 
     if let Some(comment) = table_comment.filter(|comment| !comment.trim().is_empty()) {
         ddl.push_str(&format!("\nCOMMENT ON TABLE {table_name} IS {};", sql_string(comment)));

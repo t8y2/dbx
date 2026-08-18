@@ -51,7 +51,7 @@ export class MetadataResultCache<T> {
   private readonly now: () => number;
 
   constructor(private readonly options: MetadataResultCacheOptions) {
-    this.now = options.now ?? Date.now;
+    this.now = options.now ?? (() => Date.now());
   }
 
   get(scope: MetadataScopeInput, options?: { allowStale?: boolean }): MetadataCacheHit<T> | undefined {

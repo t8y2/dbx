@@ -1,4 +1,4 @@
-import { findActiveSqlStatementSpan, tokenizeSqlSemantic, tokenIsIdentifier, unquoteSqlSemanticIdentifier } from "@/lib/sql/semantic/tokens";
+import { findActiveSqlStatementSpan, matchDollarQuoteTag, tokenizeSqlSemantic, tokenIsIdentifier, unquoteSqlSemanticIdentifier } from "@/lib/sql/semantic/tokens";
 import type { SqlSemanticSpan, SqlSemanticToken } from "@/lib/sql/semantic/types";
 
 export interface InsertValueHint {
@@ -228,188 +228,248 @@ function shiftClause(clause: InsertValuesClause, offset: number): InsertValuesCl
 }
 
 /**
- * Expand [from, to) to the nearest top-level statement window (quote/comment aware).
- * Scans at most LOOKBACK bytes before `from` and LOOKAHEAD after `to` so large scripts
- * do not pay O(document) on every keystroke.
+ * Expand [from, to) to the nearest top-level statement window (quote/comment/dollar-quote aware).
+ * Scans at most LOOKBACK bytes before `from` and LOOKAHEAD after `to` so large scripts do not pay
+ * O(document) on every keystroke in the common case (many statements, none of them huge).
+ *
+ * This is a bounded, best-effort heuristic operating on a plain string -- it has no notion of a
+ * live document or incremental parse state. It's the correct (only) choice for this module's
+ * pure-string callers (parseInsertValuesClauses* and their tests), which have no live editor to
+ * consult. Callers that *do* have a live CodeMirror `EditorState` should prefer
+ * `sqlSyntaxTreeWindow.ts`'s `resolveStatementWindowFromSyntaxTree`, which resolves the same
+ * question against CodeMirror's own incrementally-parsed SQL syntax tree instead of re-deriving
+ * lexical state locally -- see that module's doc comment for why it's provably correct for every
+ * boundary class below except one narrow, disclosed gap (dollar-quoted bodies). sqlCompletion.ts's
+ * `getSqlLexicalContext`/`activeSqlCompletionStatementSpan` already do this, falling back to the
+ * scanner below only when there's no live state to consult.
+ *
+ * The backward scan starts at an arbitrary document offset, so its lexical state (in a string? in
+ * a comment? inside a dollar-quoted body? how deep in nested parens?) cannot simply be assumed
+ * clean -- if the cursor sits more than LOOKBACK bytes into such a construct, that assumption is
+ * wrong and the scan can find a bogus statement boundary (e.g. a ';' inside an unclosed string or
+ * a dollar-quoted function body). `resolveStatementStart` mitigates this with a best-effort check
+ * instead of blind trust: it widens the backward window until two consecutive scans agree on the
+ * same boundary, or until it reaches the true start of the document (index 0), where the
+ * clean-state assumption is always correct.
+ *
+ * IMPORTANT: "two scans agree" is a heuristic, not a proof, and it has a known false-positive.
+ * When the content between the two scan-start points is lexically inert (no quote/comment/paren/
+ * dollar-quote characters -- e.g. a long run of uniform "SELECT n;" statements), both scans
+ * converge on the identical answer regardless of whether the true state entering that content is
+ * actually clean or is deep inside some unclosed construct opened much earlier. Confirmed
+ * reproduction: an unterminated string containing many repeated ';' characters, or a large run of
+ * "SELECT n;" statements inside a PostgreSQL `$$ ... $$` function body, both fool the check. This
+ * is not fixable with a smarter local heuristic -- the two situations are byte-for-byte
+ * indistinguishable from a purely local scan; making the check stricter (e.g. requiring a
+ * lexically-significant character in the widened margin) would also reject the common, entirely
+ * legitimate case of many small statements with no punctuation, which is the primary case this
+ * windowing scheme exists to keep fast. This is a deliberate, documented tradeoff of the
+ * pure-string fallback, not an oversight -- see `packages/app-tests/insertValueHints.test.ts`'s
+ * test documenting it, and `sqlSyntaxTreeWindow.ts` for the provably-correct path used whenever a
+ * live `EditorState` is available (i.e. for every real user keystroke in the editor).
+ *
+ * `dialectId` defaults to "mysql" (matching semantic/tokens.ts's tokenizeSqlSemantic default) and
+ * only affects how `#` is treated -- see stepLexState. Callers that know the active SQL dialect
+ * should pass it through so window boundaries agree with tokenizeSqlSemantic's own tokenization.
  */
 const STATEMENT_LOOKBACK = 32 * 1024;
 const STATEMENT_LOOKAHEAD = 32 * 1024;
+const MAX_STATEMENT_START_WIDENINGS = 12; // 32KB * 2^12 = 128MB before we give up widening
 
-export function expandToSqlStatementWindow(sql: string, from: number, to: number): TextRange {
+interface LexState {
+  depth: number;
+  inLineComment: boolean;
+  inBlockComment: boolean;
+  quote: string | null;
+  dollarTag: string | null;
+}
+
+function isLexStateClean(state: LexState): boolean {
+  return state.depth === 0 && !state.inLineComment && !state.inBlockComment && !state.quote && !state.dollarTag;
+}
+
+/**
+ * Advances `state` past the token starting at `sql[index]` and returns the next index.
+ * `dialectId` only affects `#`: MySQL-family dialects treat it as a line-comment starter, but
+ * PostgreSQL (and dialects that don't special-case it) use `#`/`#>`/`#>>`/`#-` as operators --
+ * see the matching dialect check in semantic/tokens.ts's tokenizeSqlSemantic.
+ */
+function stepLexState(sql: string, index: number, state: LexState, dialectId: string): number {
+  const ch = sql[index] ?? "";
+  const next = sql[index + 1] ?? "";
+
+  if (state.inLineComment) {
+    if (ch === "\n" || ch === "\r") state.inLineComment = false;
+    return index + 1;
+  }
+  if (state.inBlockComment) {
+    if (ch === "*" && next === "/") {
+      state.inBlockComment = false;
+      return index + 2;
+    }
+    return index + 1;
+  }
+  if (state.dollarTag) {
+    if (sql.startsWith(state.dollarTag, index)) {
+      const tagLength = state.dollarTag.length;
+      state.dollarTag = null;
+      return index + tagLength;
+    }
+    return index + 1;
+  }
+  if (state.quote) {
+    // Backslash-escaping only applies to '...' and "...", matching getSqlLexicalContext's
+    // scanner in sqlCompletion.ts -- backtick/bracket identifiers don't use it.
+    if ((state.quote === "'" || state.quote === '"') && ch === "\\" && next) return index + 2;
+    const closeCh = state.quote === "]" ? "]" : state.quote;
+    if (ch === closeCh) {
+      if (next === closeCh) return index + 2;
+      state.quote = null;
+    }
+    return index + 1;
+  }
+
+  if (ch === "-" && next === "-") {
+    state.inLineComment = true;
+    return index + 2;
+  }
+  if (ch === "#" && dialectId === "mysql") {
+    state.inLineComment = true;
+    return index + 1;
+  }
+  if (ch === "/" && next === "*") {
+    state.inBlockComment = true;
+    return index + 2;
+  }
+  if (ch === "'" || ch === '"' || ch === "`") {
+    state.quote = ch;
+    return index + 1;
+  }
+  if (ch === "[") {
+    state.quote = "]";
+    return index + 1;
+  }
+  if (ch === "$") {
+    const marker = matchDollarQuoteTag(sql, index);
+    if (marker) {
+      state.dollarTag = marker;
+      return index + marker.length;
+    }
+    return index + 1;
+  }
+  if (ch === "(") {
+    state.depth += 1;
+    return index + 1;
+  }
+  if (ch === ")") {
+    state.depth = Math.max(0, state.depth - 1);
+    return index + 1;
+  }
+  return index + 1;
+}
+
+/**
+ * Scans sql[from, hardStop) tracking the last top-level ';' strictly before `searchEndFrom` (when
+ * `trackStart` is set) and the first top-level ';' at or after `searchEndFrom`. Starts from a copy
+ * of `initialState` when given (for resuming a previous scan without re-walking the prefix it
+ * already covered), otherwise from a known-clean state.
+ */
+function scanStatementBoundaries(sql: string, from: number, searchEndFrom: number, hardStop: number, trackStart: boolean, dialectId: string, initialState?: LexState): { start: number; startFound: boolean; end: number; endFound: boolean; finalState: LexState } {
+  const state: LexState = initialState ? { ...initialState } : { depth: 0, inLineComment: false, inBlockComment: false, quote: null, dollarTag: null };
+  let start = from;
+  let startFound = false;
+  let end = hardStop;
+  let endFound = false;
+  let index = from;
+
+  while (index < hardStop) {
+    if (sql[index] === ";" && isLexStateClean(state)) {
+      if (index >= searchEndFrom) {
+        end = index;
+        endFound = true;
+        break;
+      }
+      if (trackStart) {
+        start = index + 1;
+        startFound = true;
+      }
+    }
+    index = stepLexState(sql, index, state, dialectId);
+  }
+
+  return { start, startFound, end, endFound, finalState: state };
+}
+
+/**
+ * Finds the nearest top-level statement boundary at or before `pos`. Best-effort, not a proof --
+ * see the "IMPORTANT" note in the module comment above for the known false-positive case.
+ */
+function resolveStatementStart(sql: string, pos: number, dialectId: string): number {
+  let lookback = STATEMENT_LOOKBACK;
+  let previousCandidate: number | null = null;
+
+  for (let attempt = 0; attempt < MAX_STATEMENT_START_WIDENINGS; attempt += 1) {
+    const scanFrom = Math.max(0, pos - lookback);
+    const result = scanStatementBoundaries(sql, scanFrom, pos, pos, true, dialectId);
+    if (scanFrom === 0) return result.start;
+    if (result.startFound && result.start === previousCandidate) return result.start;
+    previousCandidate = result.startFound ? result.start : null;
+    lookback *= 2;
+  }
+  // Widening did not converge; ground at the true document start, where clean state is guaranteed.
+  return scanStatementBoundaries(sql, 0, pos, pos, true, dialectId).start;
+}
+
+function computeSqlStatementWindow(sql: string, from: number, to: number, dialectId: string): TextRange {
   const safeFrom = Math.max(0, Math.min(from, sql.length));
   const safeTo = Math.max(safeFrom, Math.min(to, sql.length));
-  const scanFrom = Math.max(0, safeFrom - STATEMENT_LOOKBACK);
-  const scanTo = Math.min(sql.length, safeTo + STATEMENT_LOOKAHEAD);
-  const slice = scanFrom === 0 && scanTo === sql.length ? sql : sql.slice(scanFrom, scanTo);
-  const localFrom = safeFrom - scanFrom;
-  const localTo = safeTo - scanFrom;
-  const start = findStatementStart(slice, localFrom) + scanFrom;
-  const end = findStatementEnd(slice, Math.max(localFrom, localTo)) + scanFrom;
-  const trimmed = trimSpan(sql, start, Math.min(end, scanTo));
+  const start = resolveStatementStart(sql, safeFrom, dialectId);
+
+  // The forward end-search has no "unproven starting state" problem like resolveStatementStart --
+  // it scans continuously from `start`, which is already verified clean, so it never needs to
+  // second-guess itself. It just needs enough room: a single statement larger than one
+  // STATEMENT_LOOKAHEAD (e.g. a huge multi-row INSERT) would otherwise be silently truncated at
+  // an arbitrary hardStop instead of found. So on a miss, keep widening the lookahead and resume
+  // scanning from where the previous pass stopped (carrying its LexState forward) rather than
+  // rescanning from `start` -- common statements still cost one bounded scan; only a statement
+  // that's actually larger than the lookahead pays for (and gets) a correct, wider one.
+  let lookahead = STATEMENT_LOOKAHEAD;
+  let hardStop = Math.min(sql.length, safeTo + lookahead);
+  let result = scanStatementBoundaries(sql, start, safeTo, hardStop, false, dialectId);
+  while (!result.endFound && hardStop < sql.length) {
+    const resumeFrom = hardStop;
+    lookahead *= 2;
+    hardStop = Math.min(sql.length, safeTo + lookahead);
+    result = scanStatementBoundaries(sql, resumeFrom, safeTo, hardStop, false, dialectId, result.finalState);
+  }
+
+  // result.end is always <= hardStop by construction (scanStatementBoundaries only reports an
+  // index it actually visited, or defaults to hardStop itself).
+  const trimmed = trimSpan(sql, start, result.end);
   return { from: trimmed.start, to: trimmed.end };
 }
 
-function findStatementStart(sql: string, pos: number): number {
-  let index = 0;
-  let start = 0;
-  let depth = 0;
-  let inLineComment = false;
-  let inBlockComment = false;
-  let quote: string | null = null;
-
-  while (index < pos) {
-    const ch = sql[index] ?? "";
-    const next = sql[index + 1] ?? "";
-
-    if (inLineComment) {
-      if (ch === "\n") inLineComment = false;
-      index += 1;
-      continue;
-    }
-    if (inBlockComment) {
-      if (ch === "*" && next === "/") {
-        inBlockComment = false;
-        index += 2;
-        continue;
-      }
-      index += 1;
-      continue;
-    }
-    if (quote) {
-      if (ch === quote) {
-        if (next === quote) {
-          index += 2;
-          continue;
-        }
-        quote = null;
-      }
-      index += 1;
-      continue;
-    }
-
-    if (ch === "-" && next === "-") {
-      inLineComment = true;
-      index += 2;
-      continue;
-    }
-    if (ch === "#") {
-      inLineComment = true;
-      index += 1;
-      continue;
-    }
-    if (ch === "/" && next === "*") {
-      inBlockComment = true;
-      index += 2;
-      continue;
-    }
-    if (ch === "'" || ch === '"' || ch === "`") {
-      quote = ch;
-      index += 1;
-      continue;
-    }
-    if (ch === "[") {
-      quote = "]";
-      index += 1;
-      continue;
-    }
-    if (ch === "(") {
-      depth += 1;
-      index += 1;
-      continue;
-    }
-    if (ch === ")") {
-      depth = Math.max(0, depth - 1);
-      index += 1;
-      continue;
-    }
-    if (ch === ";" && depth === 0) {
-      start = index + 1;
-      index += 1;
-      continue;
-    }
-    index += 1;
-  }
-  return start;
+interface StatementWindowMemo {
+  sql: string;
+  from: number;
+  to: number;
+  dialectId: string;
+  result: TextRange;
 }
 
-function findStatementEnd(sql: string, pos: number): number {
-  let index = pos;
-  let depth = 0;
-  let inLineComment = false;
-  let inBlockComment = false;
-  let quote: string | null = null;
+// Single-entry cache: within one keystroke, several completion helpers (suppressed-context check,
+// active-statement-span lookup, ...) call this with the exact same (sql, from, to, dialectId).
+// String equality here is content equality (JS `===` on strings), so this is safe for a pure
+// function -- a cache hit is guaranteed to be the same answer, not a staleness risk.
+let statementWindowMemo: StatementWindowMemo | null = null;
 
-  while (index < sql.length) {
-    const ch = sql[index] ?? "";
-    const next = sql[index + 1] ?? "";
-
-    if (inLineComment) {
-      if (ch === "\n") inLineComment = false;
-      index += 1;
-      continue;
-    }
-    if (inBlockComment) {
-      if (ch === "*" && next === "/") {
-        inBlockComment = false;
-        index += 2;
-        continue;
-      }
-      index += 1;
-      continue;
-    }
-    if (quote) {
-      if ((quote === "]" && ch === "]") || (quote !== "]" && ch === quote)) {
-        if (next === (quote === "]" ? "]" : quote)) {
-          index += 2;
-          continue;
-        }
-        quote = null;
-      }
-      index += 1;
-      continue;
-    }
-
-    if (ch === "-" && next === "-") {
-      inLineComment = true;
-      index += 2;
-      continue;
-    }
-    if (ch === "#") {
-      inLineComment = true;
-      index += 1;
-      continue;
-    }
-    if (ch === "/" && next === "*") {
-      inBlockComment = true;
-      index += 2;
-      continue;
-    }
-    if (ch === "'" || ch === '"' || ch === "`") {
-      quote = ch;
-      index += 1;
-      continue;
-    }
-    if (ch === "[") {
-      quote = "]";
-      index += 1;
-      continue;
-    }
-    if (ch === "(") {
-      depth += 1;
-      index += 1;
-      continue;
-    }
-    if (ch === ")") {
-      depth = Math.max(0, depth - 1);
-      index += 1;
-      continue;
-    }
-    if (ch === ";" && depth === 0) {
-      return index;
-    }
-    index += 1;
+export function expandToSqlStatementWindow(sql: string, from: number, to: number, dialectId = "mysql"): TextRange {
+  if (statementWindowMemo && statementWindowMemo.sql === sql && statementWindowMemo.from === from && statementWindowMemo.to === to && statementWindowMemo.dialectId === dialectId) {
+    return statementWindowMemo.result;
   }
-  return sql.length;
+  const result = computeSqlStatementWindow(sql, from, to, dialectId);
+  statementWindowMemo = { sql, from, to, dialectId, result };
+  return result;
 }
 
 function mergeTextRanges(ranges: readonly TextRange[]): TextRange[] {
@@ -444,9 +504,9 @@ export function parseInsertValuesClausesInRanges(sql: string, ranges: readonly T
 }
 
 /** Parse all INSERT ... VALUES clauses in `sql` (multi-statement aware). Prefer ranged parsing for editors. */
-export function parseInsertValuesClauses(sql: string): InsertValuesClause[] {
+export function parseInsertValuesClauses(sql: string, dialectId = "mysql"): InsertValuesClause[] {
   if (!sql.trim()) return [];
-  const allTokens = tokenizeSqlSemantic(sql);
+  const allTokens = tokenizeSqlSemantic(sql, dialectId);
   const clauses: InsertValuesClause[] = [];
   for (const { span, tokens } of statementTokenGroups(sql, allTokens)) {
     const clause = parseInsertClause(tokens, span);

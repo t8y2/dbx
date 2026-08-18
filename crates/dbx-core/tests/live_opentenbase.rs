@@ -46,7 +46,7 @@ async fn opentenbase_metadata_and_ddl_round_trip() {
             ("replicated_dimensions", "DISTRIBUTE BY REPLICATION"),
         ];
         for (table, expected) in cases {
-            let ddl = schema::opentenbase_ddl(&pool, &source_schema, table).await?;
+            let ddl = schema::opentenbase_ddl(&pool, &source_schema, table, false).await?;
             if !ddl.contains(expected) {
                 return Err(format!("{table} DDL did not contain {expected}: {ddl}"));
             }

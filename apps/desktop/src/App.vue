@@ -406,6 +406,7 @@ const {
   blockDangerousRedisCommands,
   onMissingDatabase: promptActiveDatabaseSelection,
   requestDangerConfirmation: (request) => sqlExecutionDangerStore.requestConfirmation(request),
+  onExecutionStarted: (editorViewportRequestId) => contentAreaRef.value?.acceptQueryEditorExecutionViewport(editorViewportRequestId),
 });
 
 function requestActiveEditorExecute() {

@@ -191,8 +191,16 @@ pub fn build_table_data_select_sql(options: TableDataSelectSqlOptions) -> String
         return format!("{}[1h]", victoriametrics_metric_selector(&options.table_name));
     }
 
+    // TDengine's JDBC connection context setters do not affect WebSocket statements,
+    // so table reads must carry the selected database in the SQL itself.
+    let jdbc_tdengine_database = (database_type == Some(DatabaseType::Jdbc)
+        && options.driver_profile.as_deref().is_some_and(|profile| profile.trim().eq_ignore_ascii_case("tdengine")))
+    .then(|| options.database.as_deref().map(str::trim).filter(|database| !database.is_empty()).or(schema))
+    .flatten();
+    let table = if let Some(database) = jdbc_tdengine_database {
+        qualified_table_name(Some(DatabaseType::Tdengine), Some(database), &options.table_name)
     // Doris / StarRocks multi-catalog: prefix the catalog for external-catalog tables.
-    let table = if uses_connection_identifier_quote(database_type, options.identifier_quote.as_deref()) {
+    } else if uses_connection_identifier_quote(database_type, options.identifier_quote.as_deref()) {
         table_data_qualified_table_name(database_type, schema, &options.table_name, options.identifier_quote.as_deref())
     } else {
         qualified_table_name_with_catalog(

@@ -45,8 +45,8 @@ pub(crate) use table_select::{
     quote_table_data_identifier, table_data_qualified_table_name, table_data_schema, uses_connection_identifier_quote,
 };
 pub use type_rewrite::{
-    apply_auto_inc_to_column_def, column_is_auto_increment, rewrite_column_type, split_type_base_params,
-    type_looks_integer, AutoIncColumnBuild,
+    apply_auto_inc_to_column_def, column_is_auto_increment, normalize_len_params, rewrite_column_type,
+    split_type_base_params, type_looks_integer, AutoIncColumnBuild,
 };
 pub use types::*;
 

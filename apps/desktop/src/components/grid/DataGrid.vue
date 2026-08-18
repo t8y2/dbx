@@ -12057,6 +12057,9 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                   <Button v-if="activeValueEditorActions.includes('formatJson')" variant="outline" size="sm" class="h-6 text-xs" @mousedown.prevent @click="formatValueEditorJson">
                     {{ t("grid.formatJson") }}
                   </Button>
+                  <Button v-if="activeValueEditorActions.includes('compactJson')" variant="outline" size="sm" class="h-6 text-xs" @mousedown.prevent @click="compactDetailJson">
+                    {{ t("grid.compactJson") }}
+                  </Button>
                   <Button v-if="activeValueEditorActions.includes('setNull')" variant="outline" size="sm" class="h-6 text-xs" @mousedown.prevent @click="setValueEditorNull">
                     {{ t("grid.setNull") }}
                   </Button>

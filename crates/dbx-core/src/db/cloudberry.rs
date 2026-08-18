@@ -151,17 +151,32 @@ pub fn append_table_modifiers(ddl: &str, modifiers: &TableModifiers) -> Result<S
 }
 
 fn render_external_table_ddl(ddl: &str, external: &ExternalTableDefinition) -> Result<String, String> {
+    // The fallback DDL may already read `CREATE FOREIGN TABLE` — a foreign
+    // table's own relkind ('f') makes the generic renderer emit that header
+    // directly — or plain `CREATE TABLE` from an older/other rendering path.
+    // Accept either so this doesn't regress when the upstream header changes.
+    let create_foreign_table = "CREATE FOREIGN TABLE ";
     let create_table = "CREATE TABLE ";
-    if !ddl.starts_with(create_table) {
+    let header_len = if ddl.starts_with(create_foreign_table) {
+        create_foreign_table.len()
+    } else if ddl.starts_with(create_table) {
+        create_table.len()
+    } else {
         return Err("Cloudberry external-table fallback expected CREATE TABLE DDL".to_string());
-    }
+    };
     let insertion = ddl
         .find(";\n")
         .or_else(|| ddl.find(';'))
         .ok_or_else(|| "Cloudberry fallback DDL has no CREATE TABLE terminator".to_string())?;
+    // When the fallback DDL already read `CREATE FOREIGN TABLE`, the generic
+    // renderer also already appended its own ` SERVER ... [OPTIONS (...)]`
+    // clause (from the same relkind='f' catalog data). Drop that so this
+    // doesn't emit the clause twice — Cloudberry's own `external` definition
+    // above is authoritative here.
+    let body_end = ddl[header_len..insertion].find(" SERVER \"").map(|pos| header_len + pos).unwrap_or(insertion);
     let mut output = String::with_capacity(ddl.len() + external.options.len() * 24 + 48);
     output.push_str("CREATE FOREIGN TABLE ");
-    output.push_str(&ddl[create_table.len()..insertion]);
+    output.push_str(&ddl[header_len..body_end]);
     output.push_str("\nSERVER ");
     output.push_str(&db::postgres::pg_quote_ident(&external.server));
     if !external.options.is_empty() {
@@ -322,6 +337,31 @@ mod tests {
         assert!(rendered.contains("SERVER \"gp_exttable_server\""));
         assert!(rendered.contains("\"location_uris\" 'file://cdw/tmp/events.csv'"));
         assert!(rendered.contains("\"null\" ''"));
+    }
+
+    #[test]
+    fn renders_external_table_from_already_foreign_ddl_without_duplicate_server_clause() {
+        // The generic renderer now derives `is_foreign` straight from relkind
+        // and may hand back a `CREATE FOREIGN TABLE ... SERVER ...` fallback
+        // DDL directly, not just plain `CREATE TABLE`.
+        let ddl =
+            "CREATE FOREIGN TABLE \"public\".\"external_events\" (\n  \"id\" integer\n) SERVER \"stale_server\";\n";
+        let rendered = append_table_modifiers(
+            ddl,
+            &TableModifiers {
+                external: Some(ExternalTableDefinition {
+                    server: "gp_exttable_server".to_string(),
+                    options: vec!["format=csv".to_string()],
+                }),
+                ..modifiers(None)
+            },
+        )
+        .unwrap();
+
+        assert!(rendered.starts_with("CREATE FOREIGN TABLE \"public\".\"external_events\""));
+        assert_eq!(rendered.matches("SERVER").count(), 1);
+        assert!(rendered.contains("SERVER \"gp_exttable_server\""));
+        assert!(!rendered.contains("stale_server"));
     }
 
     #[test]

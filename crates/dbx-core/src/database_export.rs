@@ -8,7 +8,7 @@ use crate::connection::task_client_session_id;
 use crate::models::connection::DatabaseType;
 use crate::mysql_ddl_normalize::DdlNormalizeOptions;
 use crate::object_source_sql::build_export_object_source_sql;
-use crate::sql_dialect::{qualified_table_name, quote_table_identifier, uses_single_row_insert_statements};
+use crate::sql_dialect::{qualified_table_name, uses_single_row_insert_statements};
 use crate::transfer::{
     format_ch_array_sql_literal, format_pg_array_sql_literal, is_identity_column_extra,
     is_mysql_generated_column_extra, keyset_pagination_sql_with_identifier_quote, quote_identifier,
@@ -266,6 +266,8 @@ pub struct ExportedTableSql {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub database_type: Option<DatabaseType>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identifier_quote: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schema: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub table_name: Option<String>,
@@ -290,6 +292,8 @@ pub struct ExportedTableSql {
 pub struct BuildExportInsertStatementsOptions {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub database_type: Option<DatabaseType>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identifier_quote: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schema: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -935,6 +939,7 @@ pub fn build_export_insert_statements(options: BuildExportInsertStatementsOption
         options.schema.as_deref(),
         options.table_name.as_deref(),
         options.qualified_table_name.as_deref(),
+        options.identifier_quote.as_deref(),
     )?;
     let insert_columns = options
         .columns
@@ -970,7 +975,13 @@ pub fn build_export_insert_statements(options: BuildExportInsertStatementsOption
     };
     let columns = insert_columns
         .iter()
-        .map(|(_, column, _)| quote_table_identifier(options.database_type, column))
+        .map(|(_, column, _)| {
+            crate::sql_dialect::quote_table_data_identifier(
+                options.database_type,
+                column,
+                options.identifier_quote.as_deref(),
+            )
+        })
         .collect::<Vec<_>>()
         .join(", ");
     let mut statements = Vec::new();
@@ -1131,6 +1142,7 @@ pub fn build_database_sql_export(options: BuildDatabaseSqlExportOptions) -> Resu
 
         let inserts = build_export_insert_statements(BuildExportInsertStatementsOptions {
             database_type: table.database_type,
+            identifier_quote: table.identifier_quote.clone(),
             schema: table.schema,
             table_name: table.table_name,
             qualified_table_name: table.qualified_table_name,
@@ -1156,6 +1168,7 @@ fn export_qualified_table_name(
     schema: Option<&str>,
     table_name: Option<&str>,
     qualified_name: Option<&str>,
+    identifier_quote: Option<&str>,
 ) -> Result<String, String> {
     if let Some(name) = qualified_name.filter(|name| !name.trim().is_empty()) {
         return Ok(name.to_string());
@@ -1163,6 +1176,14 @@ fn export_qualified_table_name(
     let table_name = table_name
         .filter(|name| !name.trim().is_empty())
         .ok_or_else(|| "tableName is required when qualifiedTableName is not provided".to_string())?;
+    if crate::sql_dialect::uses_connection_identifier_quote(database_type, identifier_quote) {
+        return Ok(crate::sql_dialect::table_data_qualified_table_name(
+            database_type,
+            schema,
+            table_name,
+            identifier_quote,
+        ));
+    }
     Ok(qualified_table_name(database_type, schema, table_name))
 }
 
@@ -1591,8 +1612,12 @@ fn write_database_export_rows<W: Write>(
     // path and the legacy typed INSERT writer. In particular, MySQL uses the
     // selected database rather than a schema-qualified table name.
     let qualified_table_name = crate::transfer::qualified_table(table, schema, db_type, None);
+    // Batch database exports do not currently thread a per-connection identifier
+    // quote through BuildDatabaseSqlExportOptions; Kingbase MySQL-compat users
+    // should fall back to the single-table export path which carries the quote.
     let statements = build_export_insert_statements(BuildExportInsertStatementsOptions {
         database_type: Some(*db_type),
+        identifier_quote: None,
         schema: (!schema.is_empty()).then(|| schema.to_string()),
         table_name: Some(table.to_string()),
         qualified_table_name: Some(qualified_table_name),
@@ -3052,6 +3077,7 @@ mod tests {
     fn mysql_spatial_export_uses_wkb_constructor_and_preserves_srid() {
         let statements = build_export_insert_statements(BuildExportInsertStatementsOptions {
             database_type: Some(DatabaseType::Mysql),
+            identifier_quote: None,
             schema: None,
             table_name: Some("places".to_string()),
             qualified_table_name: None,
@@ -3129,6 +3155,7 @@ mod tests {
     fn database_specific_boolean_export_literals() {
         let sqlserver_statements = build_export_insert_statements(BuildExportInsertStatementsOptions {
             database_type: Some(DatabaseType::SqlServer),
+            identifier_quote: None,
             schema: Some("dbo".to_string()),
             table_name: Some("flags".to_string()),
             qualified_table_name: None,
@@ -3141,6 +3168,7 @@ mod tests {
         .unwrap();
         let postgres_statements = build_export_insert_statements(BuildExportInsertStatementsOptions {
             database_type: Some(DatabaseType::Postgres),
+            identifier_quote: None,
             schema: Some("public".to_string()),
             table_name: Some("flags".to_string()),
             qualified_table_name: None,
@@ -3168,6 +3196,7 @@ mod tests {
     fn sqlserver_export_prefixes_unicode_string_literals() {
         let statements = build_export_insert_statements(BuildExportInsertStatementsOptions {
             database_type: Some(DatabaseType::SqlServer),
+            identifier_quote: None,
             schema: Some("dbo".to_string()),
             table_name: Some("people".to_string()),
             qualified_table_name: None,
@@ -3212,6 +3241,7 @@ mod tests {
     fn mysql_export_inserts_escape_control_characters() {
         let statements = build_export_insert_statements(BuildExportInsertStatementsOptions {
             database_type: Some(DatabaseType::Mysql),
+            identifier_quote: None,
             schema: None,
             table_name: Some("notes".to_string()),
             qualified_table_name: None,
@@ -3234,6 +3264,7 @@ mod tests {
         let long_value = "x".repeat(300_000);
         let statements = build_export_insert_statements(BuildExportInsertStatementsOptions {
             database_type: Some(DatabaseType::Mysql),
+            identifier_quote: None,
             schema: None,
             table_name: Some("payloads".to_string()),
             qualified_table_name: None,
@@ -3253,6 +3284,7 @@ mod tests {
     fn sqlserver_export_caps_multi_row_insert_at_1000_rows() {
         let statements = build_export_insert_statements(BuildExportInsertStatementsOptions {
             database_type: Some(DatabaseType::SqlServer),
+            identifier_quote: None,
             schema: Some("dbo".to_string()),
             table_name: Some("items".to_string()),
             qualified_table_name: None,
@@ -3273,6 +3305,7 @@ mod tests {
     fn doris_export_inserts_escape_control_characters() {
         let statements = build_export_insert_statements(BuildExportInsertStatementsOptions {
             database_type: Some(DatabaseType::Doris),
+            identifier_quote: None,
             schema: Some("warehouse".to_string()),
             table_name: Some("events".to_string()),
             qualified_table_name: None,
@@ -3291,6 +3324,7 @@ mod tests {
     fn postgres_export_inserts_escape_control_characters() {
         let statements = build_export_insert_statements(BuildExportInsertStatementsOptions {
             database_type: Some(DatabaseType::Postgres),
+            identifier_quote: None,
             schema: Some("public".to_string()),
             table_name: Some("notes".to_string()),
             qualified_table_name: None,
@@ -3309,6 +3343,7 @@ mod tests {
     fn postgres_export_inserts_escape_quotes_and_backslashes_without_changing_plain_strings() {
         let statements = build_export_insert_statements(BuildExportInsertStatementsOptions {
             database_type: Some(DatabaseType::Postgres),
+            identifier_quote: None,
             schema: Some("public".to_string()),
             table_name: Some("notes".to_string()),
             qualified_table_name: None,
@@ -3337,6 +3372,7 @@ mod tests {
     fn postgres_jsonb_export_preserves_json_escape_sequences() {
         let statements = build_export_insert_statements(BuildExportInsertStatementsOptions {
             database_type: Some(DatabaseType::Postgres),
+            identifier_quote: None,
             schema: Some("public".to_string()),
             table_name: Some("events".to_string()),
             qualified_table_name: None,
@@ -3360,6 +3396,7 @@ mod tests {
     fn postgres_vector_export_preserves_pgvector_bracket_literals() {
         let statements = build_export_insert_statements(BuildExportInsertStatementsOptions {
             database_type: Some(DatabaseType::Postgres),
+            identifier_quote: None,
             schema: Some("public".to_string()),
             table_name: Some("items".to_string()),
             qualified_table_name: None,
@@ -3393,6 +3430,7 @@ mod tests {
     fn builds_batched_insert_statements_for_export() {
         let statements = build_export_insert_statements(BuildExportInsertStatementsOptions {
             database_type: Some(DatabaseType::Mysql),
+            identifier_quote: None,
             schema: None,
             table_name: Some("users".to_string()),
             qualified_table_name: None,
@@ -3417,6 +3455,7 @@ mod tests {
     fn oracle_export_inserts_use_one_statement_per_row() {
         let statements = build_export_insert_statements(BuildExportInsertStatementsOptions {
             database_type: Some(DatabaseType::Oracle),
+            identifier_quote: None,
             schema: Some("APP".to_string()),
             table_name: Some("USERS".to_string()),
             qualified_table_name: None,
@@ -3441,6 +3480,7 @@ mod tests {
     fn oracle_export_omits_synthetic_rowid_from_insert_columns() {
         let statements = build_export_insert_statements(BuildExportInsertStatementsOptions {
             database_type: Some(DatabaseType::Oracle),
+            identifier_quote: None,
             schema: Some("APP".to_string()),
             table_name: Some("USERS".to_string()),
             qualified_table_name: None,
@@ -3459,6 +3499,7 @@ mod tests {
     fn oceanbase_oracle_export_omits_synthetic_rowid_from_insert_columns() {
         let statements = build_export_insert_statements(BuildExportInsertStatementsOptions {
             database_type: Some(DatabaseType::OceanbaseOracle),
+            identifier_quote: None,
             schema: Some("APP".to_string()),
             table_name: Some("USERS".to_string()),
             qualified_table_name: None,
@@ -3477,6 +3518,7 @@ mod tests {
     fn non_oracle_export_preserves_dbx_rowid_named_column() {
         let statements = build_export_insert_statements(BuildExportInsertStatementsOptions {
             database_type: Some(DatabaseType::Mysql),
+            identifier_quote: None,
             schema: None,
             table_name: Some("users".to_string()),
             qualified_table_name: None,
@@ -3495,6 +3537,7 @@ mod tests {
     fn oracle_date_columns_export_as_date_literals() {
         let statements = build_export_insert_statements(BuildExportInsertStatementsOptions {
             database_type: Some(DatabaseType::Oracle),
+            identifier_quote: None,
             schema: Some("APP".to_string()),
             table_name: Some("EVENTS".to_string()),
             qualified_table_name: None,
@@ -3523,6 +3566,7 @@ mod tests {
         for database_type in [DatabaseType::Oracle, DatabaseType::OceanbaseOracle] {
             let statements = build_export_insert_statements(BuildExportInsertStatementsOptions {
                 database_type: Some(database_type),
+                identifier_quote: None,
                 schema: Some("APP".to_string()),
                 table_name: Some("EVENTS".to_string()),
                 qualified_table_name: None,
@@ -3594,6 +3638,7 @@ mod tests {
     fn non_oracle_timestamp_exports_keep_existing_literals() {
         let statements = build_export_insert_statements(BuildExportInsertStatementsOptions {
             database_type: Some(DatabaseType::Postgres),
+            identifier_quote: None,
             schema: Some("public".to_string()),
             table_name: Some("events".to_string()),
             qualified_table_name: None,
@@ -3618,6 +3663,7 @@ mod tests {
     fn mysql_bit_columns_export_without_quoted_string_values() {
         let statements = build_export_insert_statements(BuildExportInsertStatementsOptions {
             database_type: Some(DatabaseType::Mysql),
+            identifier_quote: None,
             schema: None,
             table_name: Some("flags".to_string()),
             qualified_table_name: None,
@@ -3639,6 +3685,7 @@ mod tests {
     fn dameng_bit_columns_export_as_numeric_literals() {
         let statements = build_export_insert_statements(BuildExportInsertStatementsOptions {
             database_type: Some(DatabaseType::Dameng),
+            identifier_quote: None,
             schema: Some("DBX_TEST".to_string()),
             table_name: Some("FLAGS".to_string()),
             qualified_table_name: None,
@@ -3660,6 +3707,7 @@ mod tests {
     fn dameng_strings_export_nul_as_chr_expression() {
         let statements = build_export_insert_statements(BuildExportInsertStatementsOptions {
             database_type: Some(DatabaseType::Dameng),
+            identifier_quote: None,
             schema: Some("DBX_TEST".to_string()),
             table_name: Some("NUL_VALUES".to_string()),
             qualified_table_name: None,
@@ -3701,6 +3749,7 @@ mod tests {
     fn mysql_export_uses_typed_literals_for_numeric_and_blob_columns() {
         let statements = build_export_insert_statements(BuildExportInsertStatementsOptions {
             database_type: Some(DatabaseType::Mysql),
+            identifier_quote: None,
             schema: None,
             table_name: Some("t_test_01".to_string()),
             qualified_table_name: None,
@@ -3727,6 +3776,7 @@ mod tests {
     fn temporal_columns_export_without_rfc3339_separator_or_utc_suffix() {
         let statements = build_export_insert_statements(BuildExportInsertStatementsOptions {
             database_type: Some(DatabaseType::Mysql),
+            identifier_quote: None,
             schema: None,
             table_name: Some("events".to_string()),
             qualified_table_name: None,
@@ -3760,6 +3810,7 @@ mod tests {
     fn postgres_timestamptz_export_keeps_timezone_without_rfc3339_t_separator() {
         let statements = build_export_insert_statements(BuildExportInsertStatementsOptions {
             database_type: Some(DatabaseType::Postgres),
+            identifier_quote: None,
             schema: Some("public".to_string()),
             table_name: Some("events".to_string()),
             qualified_table_name: None,
@@ -3786,6 +3837,7 @@ mod tests {
     fn sqlserver_rowversion_timestamp_type_is_not_treated_as_datetime() {
         let statements = build_export_insert_statements(BuildExportInsertStatementsOptions {
             database_type: Some(DatabaseType::SqlServer),
+            identifier_quote: None,
             schema: Some("dbo".to_string()),
             table_name: Some("events".to_string()),
             qualified_table_name: None,
@@ -3809,6 +3861,7 @@ mod tests {
     fn postgres_tsvector_columns_are_omitted_from_sql_insert_export() {
         let statements = build_export_insert_statements(BuildExportInsertStatementsOptions {
             database_type: Some(DatabaseType::Postgres),
+            identifier_quote: None,
             schema: Some("public".to_string()),
             table_name: Some("articles".to_string()),
             qualified_table_name: None,
@@ -3832,6 +3885,7 @@ mod tests {
             tables: vec![ExportedTableSql {
                 display_name: "orders".to_string(),
                 database_type: Some(DatabaseType::Mysql),
+                identifier_quote: None,
                 schema: None,
                 table_name: Some("orders".to_string()),
                 qualified_table_name: None,
@@ -3918,6 +3972,7 @@ mod tests {
     fn dameng_identity_export_inserts_enable_identity_insert() {
         let statements = build_export_insert_statements(BuildExportInsertStatementsOptions {
             database_type: Some(DatabaseType::Dameng),
+            identifier_quote: None,
             schema: Some("SYSDBA".to_string()),
             table_name: Some("USERS".to_string()),
             qualified_table_name: None,
@@ -3945,6 +4000,7 @@ mod tests {
             tables: vec![ExportedTableSql {
                 display_name: "users".to_string(),
                 database_type: Some(DatabaseType::Mysql),
+                identifier_quote: None,
                 schema: None,
                 table_name: Some("users".to_string()),
                 qualified_table_name: None,
@@ -4295,5 +4351,23 @@ mod tests {
         assert_eq!(dir_dev, file_dev, "a file and its parent directory must resolve to the same volume");
 
         let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    #[test]
+    fn kingbase_mysql_compat_export_insert_uses_backtick_identifiers() {
+        let statements = build_export_insert_statements(BuildExportInsertStatementsOptions {
+            database_type: Some(DatabaseType::Kingbase),
+            identifier_quote: Some("`".to_string()),
+            schema: Some("audit-schema".to_string()),
+            table_name: Some("events".to_string()),
+            qualified_table_name: None,
+            columns: vec!["id".to_string(), "event_type".to_string()],
+            column_types: vec![None, None],
+            column_extras: vec![None, None],
+            rows: vec![vec![json!(1), json!("login")]],
+            batch_size: Some(100),
+        })
+        .unwrap();
+        assert_eq!(statements, vec!["INSERT INTO `audit-schema`.`events` (`id`, `event_type`) VALUES (1, 'login');"]);
     }
 }

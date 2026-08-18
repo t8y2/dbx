@@ -36,6 +36,7 @@ export interface DataGridSaveStatementOptions {
 
 export interface DataGridCopyUpdateStatementOptions {
   databaseType?: DatabaseType;
+  identifierQuote?: string;
   tableMeta: DataGridTableMeta;
   columns: string[];
   sourceColumns?: Array<string | undefined>;
@@ -46,6 +47,7 @@ export type DataGridCopyInsertMode = "merged" | "row-by-row";
 
 export interface DataGridCopyInsertStatementOptions {
   databaseType?: DatabaseType;
+  identifierQuote?: string;
   tableMeta?: DataGridTableMeta;
   columns: string[];
   columnTypes?: Array<string | null | undefined>;

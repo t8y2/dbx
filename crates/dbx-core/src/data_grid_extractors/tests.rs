@@ -188,6 +188,55 @@ fn extracts_multi_column_sql_in_as_row_value_tuples() {
 }
 
 #[test]
+fn sql_in_list_deduplicates_single_selected_values() {
+    let mut request = request(DataGridExtractorId::SqlInList);
+    request.selected_column_indexes = vec![0];
+    request.rows = vec![
+        vec![json!(1), json!("first")],
+        vec![json!(1), json!("unselected value differs")],
+        vec![json!(2), json!("last")],
+    ];
+
+    let result = extract_data_grid_selection(request).expect("SQL IN extraction");
+
+    assert_eq!(result.text, "(1, 2)");
+}
+
+#[test]
+fn sql_in_list_deduplicates_multi_column_tuples_in_first_seen_order() {
+    let mut request = request(DataGridExtractorId::SqlInList);
+    request.rows = vec![
+        vec![json!(2), json!("Grace")],
+        vec![json!(1), json!("Ada")],
+        vec![json!(2), json!("Grace")],
+        vec![json!(1), json!("Lovelace")],
+        vec![json!(1), json!("Ada")],
+    ];
+
+    let result = extract_data_grid_selection(request).expect("SQL IN extraction");
+
+    assert_eq!(result.text, "((2, 'Grace'), (1, 'Ada'), (1, 'Lovelace'))");
+}
+
+#[test]
+fn sql_in_list_deduplicates_only_identical_rendered_literals() {
+    let mut request = request(DataGridExtractorId::SqlInList);
+    request.selected_column_indexes = vec![0];
+    request.rows = vec![
+        vec![json!(1)],
+        vec![json!("1")],
+        vec![Value::Null],
+        vec![Value::Null],
+        vec![json!("O'Reilly")],
+        vec![json!("O'Reilly")],
+    ];
+
+    let result = extract_data_grid_selection(request).expect("SQL IN extraction");
+
+    assert_eq!(result.text, "(1, '1', NULL, 'O''Reilly')");
+}
+
+#[test]
 fn preserves_duplicate_json_columns_without_overwriting_values() {
     let mut request = request(DataGridExtractorId::Json);
     request.columns[1].display_name = "id".to_string();
@@ -244,6 +293,53 @@ fn builds_updates_with_hidden_primary_keys_and_selected_columns() {
         result.text,
         "UPDATE \"public\".\"users\" SET \"name\" = 'Ada' WHERE \"id\" = 1;\nUPDATE \"public\".\"users\" SET \"name\" = 'Grace, Hopper' WHERE \"id\" = 2;"
     );
+}
+
+#[test]
+fn sql_copy_honors_kingbase_mysql_compat_connection_identifier_quote() {
+    let table_meta = DataGridTableMeta {
+        catalog: None,
+        database: None,
+        schema: Some("audit-schema".to_string()),
+        table_name: "events".to_string(),
+        primary_keys: vec!["id".to_string()],
+        columns: Some(vec![
+            DataGridColumnInfo {
+                name: "id".to_string(),
+                data_type: "int".to_string(),
+                is_nullable: false,
+                is_primary_key: true,
+                column_default: None,
+                extra: None,
+            },
+            DataGridColumnInfo {
+                name: "event_type".to_string(),
+                data_type: "varchar".to_string(),
+                is_nullable: false,
+                is_primary_key: false,
+                column_default: None,
+                extra: None,
+            },
+        ]),
+    };
+
+    let mut insert = request(DataGridExtractorId::SqlInserts);
+    insert.database_type = Some(DatabaseType::Kingbase);
+    insert.identifier_quote = Some("`".to_string());
+    insert.table_meta = Some(table_meta.clone());
+    insert.columns = vec![column("id", 0), column("event_type", 1)];
+    insert.rows = vec![vec![json!(1), json!("login")]];
+    let insert_result = extract_data_grid_selection(insert).expect("Kingbase SQL INSERT extraction");
+    assert_eq!(insert_result.text, "INSERT INTO `audit-schema`.`events` (`id`, `event_type`) VALUES (1, 'login');");
+
+    let mut updates = request(DataGridExtractorId::SqlUpdates);
+    updates.database_type = Some(DatabaseType::Kingbase);
+    updates.identifier_quote = Some("`".to_string());
+    updates.table_meta = Some(table_meta);
+    updates.columns = vec![column("id", 0), column("event_type", 1)];
+    updates.rows = vec![vec![json!(1), json!("logout")]];
+    let updates_result = extract_data_grid_selection(updates).expect("Kingbase SQL UPDATE extraction");
+    assert_eq!(updates_result.text, "UPDATE `audit-schema`.`events` SET `event_type` = 'logout' WHERE `id` = 1;");
 }
 
 #[test]
@@ -595,6 +691,7 @@ fn build_data_grid_copy_update_statements_returns_empty_for_mongodb() {
     use crate::data_grid_sql::{build_data_grid_copy_update_statements, DataGridCopyUpdateStatementOptions};
     let options = DataGridCopyUpdateStatementOptions {
         database_type: Some(DatabaseType::MongoDb),
+        identifier_quote: None,
         table_meta: DataGridTableMeta {
             catalog: None,
             database: None,

@@ -59,6 +59,17 @@ test("AI effort control opens as a hoverable side submenu", () => {
   assert.doesNotMatch(selector, /v-if="effortPanelOpen"/);
 });
 
+test("AI model menu separates provider groups from model selections", () => {
+  const selectorStart = source.indexOf("<!-- Combined provider + model selector -->");
+  const selectorEnd = source.indexOf("</template>", source.indexOf("</Popover>", selectorStart));
+  const selector = source.slice(selectorStart, selectorEnd);
+
+  assert.match(selector, /v-for="\(config, configIndex\) in configuredProviders"/);
+  assert.match(selector, /class="ml-5 border-l border-border\/60 pl-1"/);
+  assert.match(selector, /v-if="configIndex < configuredProviders\.length - 1" class="my-1 border-t"/);
+  assert.doesNotMatch(selector, /bg-accent text-accent-foreground.*config\.id === settings\.activeModel/);
+});
+
 test("AI model and effort menu refreshes do not persist effort settings", () => {
   const loaderStart = source.indexOf("async function ensureModelEffort");
   const loaderEnd = source.indexOf("function handleModelSelect", loaderStart);

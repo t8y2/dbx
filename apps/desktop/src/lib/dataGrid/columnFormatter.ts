@@ -9,6 +9,7 @@ dayjs.extend(utc);
 dayjs.extend(timezone);
 
 export type DateTimeFormatterUnit = "seconds" | "milliseconds" | "auto";
+export type IoTDBTimestampPrecision = "ms" | "us" | "ns";
 const DEFAULT_DATETIME_PATTERN = "YYYY-MM-DD HH:mm:ss";
 export const DateTimePatterns = [
   "YYYY-MM-DD",
@@ -101,6 +102,7 @@ export function normalizeSupportedDateTimePattern(value: string): string {
 
 export type ColumnFormatterConfig =
   | { kind: "datetime"; unit: DateTimeFormatterUnit; pattern: string; timezone: string | undefined }
+  | { kind: "iotdb-timestamp"; precision: IoTDBTimestampPrecision; timezone: string }
   | { kind: "json-path"; path: string }
   | { kind: "mask"; prefix: number; suffix: number }
   | { kind: "foreign-key-display"; refSchema?: string; refTable: string; refColumn: string; displayColumn: string }
@@ -213,46 +215,63 @@ export function resolveColumnFormatter(formatter: ColumnFormatterConfig | undefi
 }
 
 export function defaultIoTDBTimestampFormatter(databaseType: string | undefined, columnType: string | null | undefined, urlParams: string | undefined): ColumnFormatterConfig | undefined {
-  if (databaseType !== "iotdb" || columnType?.trim().toUpperCase() !== "TIMESTAMP") return undefined;
+  const precision = iotdbTimestampPrecision(databaseType, columnType);
+  if (!precision) return undefined;
   const timezone = iotdbTimestampTimeZone(urlParams);
-  return { kind: "datetime", unit: "milliseconds", pattern: "YYYY-MM-DDTHH:mm:ss.SSSZ", timezone };
+  return { kind: "iotdb-timestamp", precision, timezone };
 }
 
 export function formatIoTDBTimestampEditorValue(value: CellValue, databaseType: string | undefined, columnType: string | null | undefined, urlParams: string | undefined): string | undefined {
   const formatter = defaultIoTDBTimestampFormatter(databaseType, columnType, urlParams);
-  if (!formatter || formatter.kind !== "datetime" || (typeof value !== "number" && (typeof value !== "string" || !isIntegerString(value)))) return undefined;
-  const timestamp = typeof value === "number" ? value : Number(value);
-  if (!Number.isSafeInteger(timestamp)) return undefined;
-  const parsed = dayjs(timestamp);
-  if (!parsed.isValid()) return undefined;
-  return parsed.tz(formatter.timezone || "UTC").format("YYYY-MM-DDTHH:mm:ss.SSSZ");
+  if (!formatter || formatter.kind !== "iotdb-timestamp") return undefined;
+  return formatIoTDBTimestamp(value, formatter.precision, formatter.timezone);
 }
 
-export function parseIoTDBTimestampEditorValue(value: string, databaseType: string | undefined, columnType: string | null | undefined, urlParams: string | undefined): number | null | undefined {
-  if (!defaultIoTDBTimestampFormatter(databaseType, columnType, urlParams)) return undefined;
+export function parseIoTDBTimestampEditorValue(value: string, databaseType: string | undefined, columnType: string | null | undefined, urlParams: string | undefined): string | null | undefined {
+  const precision = iotdbTimestampPrecision(databaseType, columnType);
+  if (!precision) return undefined;
   const text = value.trim();
   if (!text || text.toUpperCase() === "NULL") return null;
   if (isIntegerString(text)) {
-    const timestamp = Number(text);
-    return Number.isSafeInteger(timestamp) ? timestamp : undefined;
+    try {
+      return BigInt(text).toString();
+    } catch {
+      return undefined;
+    }
   }
 
-  const offsetValue = parseIsoOffsetDateTimeString(text);
-  if (offsetValue) return offsetValue.valueOf();
+  const offsetMatch = text.match(ISO_OFFSET_DATETIME_PATTERN);
+  if (offsetMatch) {
+    const [, year, separator, month, day, hour, minute, second, fraction = "", zone] = offsetMatch;
+    if (!isValidDateTimeParts(year, month, day, hour, minute, second) || !isValidOffset(zone)) return undefined;
+    const baseMilliseconds = Date.parse(`${year}${separator}${month}${separator}${day}T${hour}:${minute}:${second}${zone}`);
+    if (!Number.isFinite(baseMilliseconds)) return undefined;
+    return iotdbRawTimestamp(baseMilliseconds, fraction.slice(1), precision);
+  }
 
   const match = text.match(FRACTIONAL_LOCAL_DATETIME_PATTERN) ?? text.match(/^(\d{4})([-/])(\d{1,2})\2(\d{1,2})([ T])(\d{1,2}):(\d{1,2}):(\d{1,2})$/);
   if (!match) return undefined;
   const [, year, , month, day, , hour, minute, second] = match;
   if (!isValidDateTimeParts(year, month, day, hour, minute, second)) return undefined;
-  const fraction = match.length > 9 ? `.${String(match[9]).slice(0, 3).padEnd(3, "0")}` : "";
-  const normalized = `${year}-${month.padStart(2, "0")}-${day.padStart(2, "0")}T${hour.padStart(2, "0")}:${minute.padStart(2, "0")}:${second.padStart(2, "0")}${fraction}`;
-  const pattern = fraction ? "YYYY-MM-DDTHH:mm:ss.SSS" : "YYYY-MM-DDTHH:mm:ss";
+  const fraction = match.length > 9 ? String(match[9] ?? "") : "";
+  const normalized = `${year}-${month.padStart(2, "0")}-${day.padStart(2, "0")}T${hour.padStart(2, "0")}:${minute.padStart(2, "0")}:${second.padStart(2, "0")}`;
+  const pattern = "YYYY-MM-DDTHH:mm:ss";
   try {
     const parsed = dayjs.tz(normalized, pattern, iotdbTimestampTimeZone(urlParams));
-    return parsed.isValid() && parsed.format(pattern) === normalized ? parsed.valueOf() : undefined;
+    return parsed.isValid() && parsed.format(pattern) === normalized ? iotdbRawTimestamp(parsed.valueOf(), fraction, precision) : undefined;
   } catch {
     return undefined;
   }
+}
+
+export function iotdbTimestampPrecision(databaseType: string | undefined, columnType: string | null | undefined): IoTDBTimestampPrecision | undefined {
+  if (databaseType !== "iotdb") return undefined;
+  const match = columnType?.trim().match(/^TIMESTAMP\((ms|us|ns)\)$/i);
+  return match?.[1]?.toLowerCase() as IoTDBTimestampPrecision | undefined;
+}
+
+export function iotdbTimestampFractionDigits(precision: IoTDBTimestampPrecision): number {
+  return precision === "ms" ? 3 : precision === "us" ? 6 : 9;
 }
 
 function iotdbTimestampTimeZone(urlParams: string | undefined): string {
@@ -302,6 +321,7 @@ export function applyColumnFormatter(value: CellValue, formatter: ColumnFormatte
   if (!formatter) return displayCellValue(value);
 
   try {
+    if (formatter.kind === "iotdb-timestamp") return formatIoTDBTimestamp(value, formatter.precision, formatter.timezone) ?? displayCellValue(value);
     if (formatter.kind === "datetime") return formatDateTime(value, formatter.unit, formatter.pattern, formatter.timezone);
     if (formatter.kind === "json-path") return formatJsonPath(value, formatter.path);
     if (formatter.kind === "mask") return formatMask(value, formatter);
@@ -430,6 +450,43 @@ function parseTimestampMilliseconds(value: string | number, unit: DateTimeFormat
     return convertToMilliseconds(numeric, unit);
   }
   return isAutoTimestampValue(value, numeric) ? convertToMilliseconds(numeric, unit) : undefined;
+}
+
+function formatIoTDBTimestamp(value: CellValue, precision: IoTDBTimestampPrecision, timezone: string): string | undefined {
+  if (typeof value !== "number" && (typeof value !== "string" || !isIntegerString(value))) return undefined;
+  let raw: bigint;
+  try {
+    raw = BigInt(value);
+  } catch {
+    return undefined;
+  }
+  const fractionDigits = iotdbTimestampFractionDigits(precision);
+  const factor = 10n ** BigInt(fractionDigits);
+  let seconds = raw / factor;
+  let fraction = raw % factor;
+  if (fraction < 0) {
+    seconds -= 1n;
+    fraction += factor;
+  }
+  const milliseconds = seconds * 1000n + (fraction * 1000n) / factor;
+  const numericMilliseconds = Number(milliseconds);
+  if (!Number.isSafeInteger(numericMilliseconds)) return undefined;
+  const parsed = dayjs(numericMilliseconds);
+  if (!parsed.isValid()) return undefined;
+  try {
+    const zoned = parsed.tz(timezone);
+    return `${zoned.format("YYYY-MM-DDTHH:mm:ss")}.${fraction.toString().padStart(fractionDigits, "0")}${zoned.format("Z")}`;
+  } catch {
+    return undefined;
+  }
+}
+
+function iotdbRawTimestamp(baseMilliseconds: number, fraction: string, precision: IoTDBTimestampPrecision): string | undefined {
+  if (!Number.isSafeInteger(baseMilliseconds) || baseMilliseconds % 1000 !== 0) return undefined;
+  const digits = iotdbTimestampFractionDigits(precision);
+  if (fraction.length > digits && /[1-9]/.test(fraction.slice(digits))) return undefined;
+  const normalizedFraction = fraction.slice(0, digits).padEnd(digits, "0");
+  return (BigInt(baseMilliseconds / 1000) * 10n ** BigInt(digits) + BigInt(normalizedFraction || "0")).toString();
 }
 
 function convertToMilliseconds(value: number, unit: DateTimeFormatterUnit): number {

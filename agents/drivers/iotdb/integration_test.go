@@ -43,7 +43,7 @@ func TestLiveIoTDBAgentTreeAndTable(t *testing.T) {
 	if err != nil || len(page.Rows) != 2 || !page.HasMore || page.SessionID == nil {
 		t.Fatalf("tree first page = %#v, %v", page, err)
 	}
-	if page.ColumnTypes[0] != "TIMESTAMP" || page.Rows[0][0] != int64(1) {
+	if page.ColumnTypes[0] != "TIMESTAMP(ms)" || page.Rows[0][0] != "1" {
 		t.Fatalf("tree time column = types %#v row %#v", page.ColumnTypes, page.Rows[0])
 	}
 	lastPage, err := treeServer.fetchQueryPage(*page.SessionID, 2)
@@ -81,7 +81,7 @@ func TestLiveIoTDBAgentTreeAndTable(t *testing.T) {
 		t.Fatalf("table comment = %#v, %v", comment, err)
 	}
 	result, err := tableServer.executeQuery(queryOptions{SQL: "SELECT * FROM d1 ORDER BY time", Database: tableDatabase, MaxRows: 10})
-	if err != nil || len(result.Rows) != 2 || result.Rows[0][0] != int64(1) || result.Rows[0][2] != int64(1001) {
+	if err != nil || len(result.Rows) != 2 || result.ColumnTypes[0] != "TIMESTAMP(ms)" || result.ColumnTypes[2] != "TIMESTAMP(ms)" || result.Rows[0][0] != "1" || result.Rows[0][2] != "1001" {
 		t.Fatalf("table query = %#v, %v", result, err)
 	}
 	tableDDL, err := tableServer.getTableDDL(tableDatabase, "d1")

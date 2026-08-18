@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"strconv"
 	"strings"
 	"time"
 
@@ -87,7 +88,7 @@ func (s *server) queryValues(sql, database string, limit, timeoutSecs int) (quer
 		}
 		defer dataset.Close()
 		columns := append([]string(nil), dataset.GetColumnNames()...)
-		columnTypes := normalizedColumnTypes(dataset.GetColumnTypes(), columns, connected.dialect)
+		columnTypes := normalizedColumnTypes(dataset.GetColumnTypes(), columns, connected.dialect, connected.timestampPrecision)
 		rows, truncated, err := readDataset(ctx, dataset, connected, columns, columnTypes, limit)
 		if err != nil {
 			return queryResult{}, err
@@ -163,7 +164,7 @@ func (s *server) executeQueryPage(options queryOptions, requestedPageSize int) (
 			dataset:     dataset,
 			client:      connected,
 			columns:     append([]string(nil), dataset.GetColumnNames()...),
-			columnTypes: normalizedColumnTypes(dataset.GetColumnTypes(), dataset.GetColumnNames(), connected.dialect),
+			columnTypes: normalizedColumnTypes(dataset.GetColumnTypes(), dataset.GetColumnNames(), connected.dialect, connected.timestampPrecision),
 			remaining:   limit,
 		}
 		rows, hasMore, truncated, err := s.readQuerySessionPage(ctx, queryState, pageSize)
@@ -412,12 +413,12 @@ func datasetRow(dataset *client.SessionDataSet, connected *sessionClient, column
 		if index < len(columnTypes) {
 			columnType = strings.ToUpper(columnTypes[index])
 		}
-		if columnType == "TIMESTAMP" {
+		if iotdbColumnTypeBase(columnType) == "TIMESTAMP" {
 			value, err := dataset.GetLongByIndex(columnIndex)
 			if err != nil {
 				return nil, err
 			}
-			row[index] = value
+			row[index] = strconv.FormatInt(value, 10)
 			continue
 		}
 		value, err := dataset.GetObjectByIndex(columnIndex)
@@ -437,9 +438,6 @@ func normalizeIoTDBValue(value any, columnType string) any {
 		if columnType == "DATE" {
 			return typed.Format("2006-01-02")
 		}
-		if columnType == "TIMESTAMP" {
-			return typed.UnixMilli()
-		}
 		return typed.Format(time.RFC3339Nano)
 	case []byte:
 		return hex.EncodeToString(typed)
@@ -458,7 +456,7 @@ func normalizeIoTDBValue(value any, columnType string) any {
 	}
 }
 
-func normalizedColumnTypes(values, columns []string, dialect string) []string {
+func normalizedColumnTypes(values, columns []string, dialect, timestampPrecision string) []string {
 	result := make([]string, len(columns))
 	for index := range result {
 		if index < len(values) {
@@ -467,8 +465,22 @@ func normalizedColumnTypes(values, columns []string, dialect string) []string {
 		if isTreeTimeColumn(dialect, columns, index) {
 			result[index] = "TIMESTAMP"
 		}
+		if iotdbColumnTypeBase(result[index]) == "TIMESTAMP" {
+			result[index] = timestampColumnType(timestampPrecision)
+		}
 	}
 	return result
+}
+
+func timestampColumnType(precision string) string {
+	if normalized := normalizeTimestampPrecision(precision); normalized != "" {
+		return "TIMESTAMP(" + normalized + ")"
+	}
+	return "TIMESTAMP"
+}
+
+func iotdbColumnTypeBase(value string) string {
+	return strings.TrimSpace(strings.SplitN(strings.ToUpper(value), "(", 2)[0])
 }
 
 func isTreeTimeColumn(dialect string, columns []string, index int) bool {

@@ -152,6 +152,8 @@ import {
   defaultIoTDBTimestampFormatter,
   formatIoTDBTimestampEditorValue,
   getSupportedTimeZoneOptions,
+  iotdbTimestampFractionDigits,
+  iotdbTimestampPrecision,
   normalizeColumnFormatter,
   parseIoTDBTimestampEditorValue,
   resolveColumnFormatter,
@@ -921,7 +923,7 @@ const filterEditorView = computed(() => settingsStore.editorSettings.dataGridFil
 const structuredFilterCount = computed(() => structuredFilterRules.value.filter((rule) => !rule.disabled && !!rule.columnName && filterModeHasCompleteValue(rule.mode, rule.rawValue, rule.rawEndValue)).length);
 const hasStructuredFilters = computed(() => !!combineWhereInputs(undefined, appliedStructuredWhereInput.value));
 const formatterOpenColumn = ref<number | null>(null);
-type FormatterDraftKind = Exclude<ColumnFormatterConfig["kind"], "custom-ref">;
+type FormatterDraftKind = Exclude<ColumnFormatterConfig["kind"], "custom-ref" | "iotdb-timestamp">;
 const CUSTOM_FORMATTER_NEW = "__new";
 const formatterKind = ref<FormatterDraftKind>("datetime");
 const formatterDateUnit = ref<DateTimeFormatterUnit>("auto");
@@ -1286,11 +1288,13 @@ function columnFormatter(columnIndex: number): ColumnFormatterConfig | undefined
   if (!column) return undefined;
   const key = formatterKeyForColumn(column);
   const columnType = props.result.column_types?.[columnIndex] ?? tableColumnForGridColumn(columnIndex)?.data_type;
-  const configured = resolveColumnFormatter(key ? settingsStore.editorSettings.columnFormatters[key] : undefined, settingsStore.editorSettings.customColumnFormatters, {
+  const savedFormatter = key ? settingsStore.editorSettings.columnFormatters[key] : undefined;
+  const configured = resolveColumnFormatter(savedFormatter, settingsStore.editorSettings.customColumnFormatters, {
     pattern: settingsStore.editorSettings.globalDateTimeDisplayFormat,
     columnType,
   });
-  return configured ?? defaultIoTDBTimestampFormatter(resolvedDatabaseType.value, columnType, resolvedConnectionConfig.value?.url_params);
+  if (savedFormatter && configured) return configured;
+  return defaultIoTDBTimestampFormatter(resolvedDatabaseType.value, columnType, resolvedConnectionConfig.value?.url_params) ?? configured;
 }
 
 function savedColumnFormatter(columnIndex: number): ColumnFormatterConfig | undefined {
@@ -1345,11 +1349,15 @@ function loadFormatterDraft(formatter: ColumnFormatterConfig | undefined) {
     pattern: "YYYY-MM-DD HH:mm:ss" as const,
     timezone: dayjs.tz.guess(),
   };
-  formatterKind.value = draft.kind === "custom-ref" ? "custom-template" : draft.kind;
+  formatterKind.value = draft.kind === "custom-ref" ? "custom-template" : draft.kind === "iotdb-timestamp" ? "datetime" : draft.kind;
   if (draft.kind === "datetime") {
     formatterDateUnit.value = draft.unit;
     formatterDatetimePattern.value = draft.pattern;
     formatterDateTimezone.value = draft.timezone || dayjs.tz.guess() || "UTC";
+  } else if (draft.kind === "iotdb-timestamp") {
+    formatterDateUnit.value = "milliseconds";
+    formatterDatetimePattern.value = "YYYY-MM-DDTHH:mm:ss.SSSZ";
+    formatterDateTimezone.value = draft.timezone;
   } else if (draft.kind === "json-path") {
     formatterJsonPath.value = draft.path;
   } else if (draft.kind === "mask") {
@@ -3737,12 +3745,20 @@ function resultColumnInfoForGridColumn(columnIndex: number): Pick<ColumnInfo, "d
 }
 
 function temporalEditorConfigForColumn(columnIndex: number): TemporalCellEditorConfig | undefined {
+  if (resolvedDatabaseType.value === "iotdb") {
+    const resultType = props.result.column_types?.[columnIndex];
+    const tableType = tableColumnForGridColumn(columnIndex)?.data_type;
+    if ((resultType ?? tableType)?.trim().toUpperCase().startsWith("TIMESTAMP")) {
+      const precision = iotdbTimestampPrecision(resolvedDatabaseType.value, resultType);
+      return precision ? { kind: "datetime", fractionPrecision: iotdbTimestampFractionDigits(precision) } : undefined;
+    }
+  }
   return temporalCellEditorConfig(tableColumnForGridColumn(columnIndex), props.databaseType);
 }
 
 function isIoTDBTimestampColumn(columnIndex: number): boolean {
   const columnType = props.result.column_types?.[columnIndex] ?? tableColumnForGridColumn(columnIndex)?.data_type;
-  return resolvedDatabaseType.value === "iotdb" && columnType?.trim().toUpperCase() === "TIMESTAMP";
+  return !!iotdbTimestampPrecision(resolvedDatabaseType.value, columnType);
 }
 
 function inlineCellEditorText(value: CellValue, columnIndex: number): string {

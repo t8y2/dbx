@@ -14,32 +14,52 @@ describe("normalizeSupportedDateTimePattern", () => {
 });
 
 describe("defaultIoTDBTimestampFormatter", () => {
-  it("formats epoch milliseconds in the connection time zone without replacing the raw value", () => {
-    const rawValue = 1786954706123;
-    const formatter = defaultIoTDBTimestampFormatter("iotdb", "TIMESTAMP", "time_zone=Asia%2FShanghai");
+  it.each([
+    ["ms", "1786954706123", "2026-08-17T16:18:26.123+08:00"],
+    ["us", "1786954706123456", "2026-08-17T16:18:26.123456+08:00"],
+    ["ns", "1786954706123456789", "2026-08-17T16:18:26.123456789+08:00"],
+  ])("formats %s precision in the connection time zone without replacing the raw value", (precision, rawValue, expected) => {
+    const formatter = defaultIoTDBTimestampFormatter("iotdb", `TIMESTAMP(${precision})`, "time_zone=Asia%2FShanghai");
+    const row = [rawValue];
 
-    expect(applyColumnFormatter(rawValue, formatter)).toBe("2026-08-17T16:18:26.123+08:00");
-    expect(rawValue).toBe(1786954706123);
+    expect(applyColumnFormatter(row[0], formatter)).toBe(expected);
+    expect(row).toEqual([rawValue]);
   });
 
-  it("does not affect other databases or non-timestamp columns", () => {
-    expect(defaultIoTDBTimestampFormatter("mysql", "TIMESTAMP", "time_zone=Asia%2FShanghai")).toBeUndefined();
+  it("does not guess when precision metadata is absent or invalid", () => {
+    expect(defaultIoTDBTimestampFormatter("iotdb", "TIMESTAMP", "time_zone=Asia%2FShanghai")).toBeUndefined();
+    expect(defaultIoTDBTimestampFormatter("iotdb", "TIMESTAMP(seconds)", "time_zone=Asia%2FShanghai")).toBeUndefined();
+    expect(defaultIoTDBTimestampFormatter("mysql", "TIMESTAMP(ms)", "time_zone=Asia%2FShanghai")).toBeUndefined();
     expect(defaultIoTDBTimestampFormatter("iotdb", "INT64", "time_zone=Asia%2FShanghai")).toBeUndefined();
   });
 
   it("uses UTC when the connection does not specify a time zone", () => {
-    const formatter = defaultIoTDBTimestampFormatter("iotdb", "TIMESTAMP", "");
+    const formatter = defaultIoTDBTimestampFormatter("iotdb", "TIMESTAMP(ms)", "");
     expect(applyColumnFormatter(1, formatter)).toBe("1970-01-01T00:00:00.001+00:00");
   });
 
-  it("round-trips the temporal editor through epoch milliseconds", () => {
-    expect(formatIoTDBTimestampEditorValue(1786954706123, "iotdb", "TIMESTAMP", "time_zone=Asia%2FShanghai")).toBe("2026-08-17T16:18:26.123+08:00");
-    expect(parseIoTDBTimestampEditorValue("2026-08-17 16:18:27.123", "iotdb", "TIMESTAMP", "time_zone=Asia%2FShanghai")).toBe(1786954707123);
-    expect(parseIoTDBTimestampEditorValue("2026-08-17T16:18:27.123+08:00", "iotdb", "TIMESTAMP", "time_zone=UTC")).toBe(1786954707123);
+  it("round-trips a negative nanosecond timestamp without truncating toward zero", () => {
+    const formatter = defaultIoTDBTimestampFormatter("iotdb", "TIMESTAMP(ns)", "time_zone=UTC");
+    const display = "1969-12-31T23:59:59.999999999+00:00";
+    expect(applyColumnFormatter("-1", formatter)).toBe(display);
+    expect(parseIoTDBTimestampEditorValue(display, "iotdb", "TIMESTAMP(ns)", "time_zone=UTC")).toBe("-1");
+  });
+
+  it.each([
+    ["ms", "1786954706123", "2026-08-17T16:18:26.123+08:00"],
+    ["us", "1786954706123456", "2026-08-17T16:18:26.123456+08:00"],
+    ["ns", "1786954706123456789", "2026-08-17T16:18:26.123456789+08:00"],
+  ])("round-trips %s precision through the temporal editor", (precision, rawValue, editorValue) => {
+    const columnType = `TIMESTAMP(${precision})`;
+    expect(formatIoTDBTimestampEditorValue(rawValue, "iotdb", columnType, "time_zone=Asia%2FShanghai")).toBe(editorValue);
+    expect(parseIoTDBTimestampEditorValue(editorValue, "iotdb", columnType, "time_zone=UTC")).toBe(rawValue);
+    expect(parseIoTDBTimestampEditorValue(editorValue.replace("T", " ").replace("+08:00", ""), "iotdb", columnType, "time_zone=Asia%2FShanghai")).toBe(rawValue);
   });
 
   it("keeps invalid and unrelated editor values on the generic path", () => {
-    expect(parseIoTDBTimestampEditorValue("2026-02-30 10:00:00", "iotdb", "TIMESTAMP", "time_zone=Asia%2FShanghai")).toBeUndefined();
-    expect(parseIoTDBTimestampEditorValue("2026-08-17 10:00:00", "mysql", "TIMESTAMP", "time_zone=Asia%2FShanghai")).toBeUndefined();
+    expect(parseIoTDBTimestampEditorValue("2026-02-30 10:00:00", "iotdb", "TIMESTAMP(ms)", "time_zone=Asia%2FShanghai")).toBeUndefined();
+    expect(parseIoTDBTimestampEditorValue("2026-08-17 10:00:00.1234", "iotdb", "TIMESTAMP(ms)", "time_zone=Asia%2FShanghai")).toBeUndefined();
+    expect(parseIoTDBTimestampEditorValue("2026-08-17 10:00:00", "mysql", "TIMESTAMP(ms)", "time_zone=Asia%2FShanghai")).toBeUndefined();
+    expect(parseIoTDBTimestampEditorValue("2026-08-17 10:00:00", "iotdb", "TIMESTAMP", "time_zone=Asia%2FShanghai")).toBeUndefined();
   });
 });

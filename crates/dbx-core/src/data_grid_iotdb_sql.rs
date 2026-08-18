@@ -263,7 +263,7 @@ mod tests {
                 "temperature".to_string(),
             ],
             source_columns: None,
-            rows: vec![vec![json!(1786954706123_i64), json!("sensor-a"), json!(1786954706123_i64), json!(23.5)]],
+            rows: vec![vec![json!("1786954706123"), json!("sensor-a"), json!("1786954706123"), json!(23.5)]],
             dirty_rows: Vec::new(),
             deleted_rows: Vec::new(),
             new_rows: Vec::new(),
@@ -291,7 +291,7 @@ mod tests {
     #[test]
     fn prepares_iotdb_only_with_changed_fields() {
         let mut options = table_options();
-        options.dirty_rows = vec![(0, vec![(2, json!(1786958307123_i64)), (3, json!(24.75))])];
+        options.dirty_rows = vec![(0, vec![(2, json!("1786958307123")), (3, json!(24.75))])];
 
         let result = prepare_data_grid_save(options);
 
@@ -309,8 +309,7 @@ mod tests {
     fn prepares_iotdb_insert_delete_and_rollback() {
         let mut options = table_options();
         options.deleted_rows = vec![0];
-        options.new_rows =
-            vec![vec![json!(1786961906789_i64), json!("sensor-b"), json!(1786961906789_i64), json!(22.75)]];
+        options.new_rows = vec![vec![json!("1786961906789"), json!("sensor-b"), json!("1786961906789"), json!(22.75)]];
 
         let result = prepare_data_grid_save(options);
 
@@ -366,7 +365,7 @@ mod tests {
     fn restores_iotdb_original_null_with_delete_and_full_row_insert() {
         let mut options = table_options();
         options.rows[0][2] = Value::Null;
-        options.dirty_rows = vec![(0, vec![(2, json!(1786958307123_i64))])];
+        options.dirty_rows = vec![(0, vec![(2, json!("1786958307123"))])];
 
         let result = prepare_data_grid_save(options);
 
@@ -381,6 +380,35 @@ mod tests {
                 "INSERT INTO dbx_edit_preview.events (time, device, temperature) VALUES (1786954706123, 'sensor-a', 23.5);",
             ]
         );
+    }
+
+    #[test]
+    fn preserves_timestamp_precision_strings_as_unquoted_integer_literals() {
+        for (original, changed) in [
+            ("1786954706123", "1786958307123"),
+            ("1786954706123456", "1786958307123456"),
+            ("1786954706123456789", "1786958307123456789"),
+        ] {
+            let mut options = table_options();
+            options.rows[0][0] = json!(original);
+            options.rows[0][2] = json!(original);
+            options.dirty_rows = vec![(0, vec![(2, json!(changed))])];
+
+            let result = prepare_data_grid_save(options);
+
+            assert_eq!(
+                result.statements,
+                vec![format!(
+                    "INSERT INTO dbx_edit_preview.events (time, device, event_time) VALUES ({original}, 'sensor-a', {changed});"
+                )]
+            );
+            assert_eq!(
+                result.rollback_statements,
+                vec![format!(
+                    "INSERT INTO dbx_edit_preview.events (time, device, event_time) VALUES ({original}, 'sensor-a', {original});"
+                )]
+            );
+        }
     }
 
     #[test]

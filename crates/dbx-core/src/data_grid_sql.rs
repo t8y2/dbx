@@ -1852,6 +1852,18 @@ pub fn format_grid_sql_literal(
         return format_pg_array_sql_literal(arr);
     }
     let text = value.as_str().map_or_else(|| value.to_string(), ToString::to_string);
+    if database_type == Some(DatabaseType::Iotdb)
+        && column_info.is_some_and(|column| {
+            column.data_type.trim().split(['(', ' ']).next().is_some_and(|base| base.eq_ignore_ascii_case("timestamp"))
+        })
+    {
+        if let Ok(timestamp) = text.parse::<i64>() {
+            // IoTDB can use nanosecond epoch values that exceed JavaScript's
+            // safe integer range, so its Agent transports TIMESTAMP cells as
+            // decimal strings. Keep those strings as numeric SQL literals.
+            return timestamp.to_string();
+        }
+    }
     if is_mysql_binary_literal_column(database_type, column_info) {
         if let Some(literal) = format_mysql_binary_literal_text(&text) {
             // DBX result values expose binary columns as prefixed hex; keep them

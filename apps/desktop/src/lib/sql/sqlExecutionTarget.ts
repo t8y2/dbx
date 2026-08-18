@@ -10,6 +10,7 @@ export interface SqlExecutionSnapshot {
   cursorPos: number;
   selectionFrom: number;
   selectionTo: number;
+  editorViewportRequestId?: number;
 }
 
 export type SqlExecutionOverride = string | SqlExecutionSnapshot;

@@ -454,6 +454,28 @@ pub async fn list_partitions(
 }
 
 #[tauri::command]
+pub async fn get_table_partition_status(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: String,
+    schema: String,
+    table: String,
+) -> Result<dbx_core::schema::TablePartitionStatus, String> {
+    dbx_core::schema::table_partition_status_core(&state, &connection_id, &database, &schema, &table).await
+}
+
+#[tauri::command]
+pub async fn list_invalid_indexes(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: String,
+    schema: String,
+    table: String,
+) -> Result<Vec<String>, String> {
+    dbx_core::schema::list_invalid_indexes_core(&state, &connection_id, &database, &schema, &table).await
+}
+
+#[tauri::command]
 pub async fn list_subpartitions(
     state: State<'_, Arc<AppState>>,
     connection_id: String,

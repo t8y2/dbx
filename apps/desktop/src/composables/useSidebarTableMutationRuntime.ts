@@ -153,7 +153,7 @@ export function useSidebarTableMutationRuntime(options: SidebarTableMutationRunt
 
   async function confirmDropTable() {
     const node = sidebarDangerTarget.value ?? activeNode.value;
-    if (!node.connectionId || !node.database) return;
+    if (!node.connectionId || node.database == null) return;
     try {
       await connectionStore.ensureConnected(node.connectionId);
       const sql = dropTablePreviewSql.value || (await buildDropTableSql(tableAdminSqlOptionsForNode(node, { cascade: dropTableCascade.value && supportsDropTableCascade(databaseTypeForNode(node)) })));
@@ -174,7 +174,7 @@ export function useSidebarTableMutationRuntime(options: SidebarTableMutationRunt
 
   async function confirmEmptyTable() {
     const node = sidebarDangerTarget.value ?? activeNode.value;
-    if (!node.connectionId || !node.database) return;
+    if (!node.connectionId || node.database == null) return;
     try {
       await connectionStore.ensureConnected(node.connectionId);
       const sql = emptyTablePreviewSql.value || (await buildEmptyTableSql(tableAdminSqlOptionsForNode(node)));
@@ -195,7 +195,7 @@ export function useSidebarTableMutationRuntime(options: SidebarTableMutationRunt
 
   async function confirmTruncateTable() {
     const node = sidebarDangerTarget.value ?? activeNode.value;
-    if (!node.connectionId || !node.database) return;
+    if (!node.connectionId || node.database == null) return;
     try {
       await connectionStore.ensureConnected(node.connectionId);
       const sql = truncateTablePreviewSql.value || (await buildTruncateTableSql(tableAdminSqlOptionsForNode(node, { cascade: truncateTableCascade.value && supportsTruncateTableCascade(databaseTypeForNode(node)) })));

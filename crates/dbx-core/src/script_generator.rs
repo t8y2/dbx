@@ -1360,6 +1360,7 @@ mod tests {
         ColumnInfo {
             name: name.to_string(),
             data_type: data_type.to_string(),
+            resolved_schema: None,
             is_nullable: true,
             column_default: None,
             is_primary_key: false,
@@ -2234,6 +2235,7 @@ mod tests {
             source: Some(ColumnInfo {
                 name: "large_val".to_string(),
                 data_type: "BIGINT".to_string(),
+                resolved_schema: None,
                 is_nullable: true,
                 column_default: None,
                 is_primary_key: false,
@@ -2250,6 +2252,7 @@ mod tests {
             target: Some(ColumnInfo {
                 name: "large_val".to_string(),
                 data_type: "INT".to_string(),
+                resolved_schema: None,
                 is_nullable: true,
                 column_default: None,
                 is_primary_key: false,

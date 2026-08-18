@@ -3647,6 +3647,7 @@ pub async fn get_columns(pool: &MySqlPool, database: &str, table: &str) -> Resul
                 is_unique: column_key.eq_ignore_ascii_case("UNI"),
                 name,
                 data_type: column_type,
+                resolved_schema: None,
                 is_nullable: get_str_by_name(row, "IS_NULLABLE") == "YES",
                 column_default: get_opt_str(row, "COLUMN_DEFAULT"),
                 extra: get_opt_str(row, "EXTRA"),
@@ -3702,6 +3703,7 @@ pub async fn get_columns_show(pool: &MySqlPool, database: &str, table: &str) -> 
             Some(ColumnInfo {
                 name,
                 data_type: get_str_by_name(row, "Type"),
+                resolved_schema: None,
                 is_nullable: get_str_by_name(row, "Null").eq_ignore_ascii_case("YES"),
                 column_default: get_opt_str(row, "Default"),
                 is_primary_key: key.eq_ignore_ascii_case("PRI"),

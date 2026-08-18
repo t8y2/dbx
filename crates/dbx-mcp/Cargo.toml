@@ -1,6 +1,6 @@
 [package]
 name = "dbx-mcp"
-version = "0.4.64"
+version = "0.4.65"
 edition = "2021"
 license = "Apache-2.0"
 
@@ -27,4 +27,8 @@ uuid = { version = "1", features = ["v4"] }
 url = "2"
 
 [dev-dependencies]
+rustls = { version = "0.23", features = ["aws-lc-rs"] }
+rustls-pemfile = "2.2"
 tempfile = "3"
+tokio = { version = "1", features = ["net", "io-util"] }
+tokio-rustls = "0.26"

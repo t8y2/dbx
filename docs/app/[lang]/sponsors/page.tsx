@@ -92,11 +92,11 @@ export default async function SponsorsPage({ params }: { params: Promise<{ lang:
     <main className="min-h-screen bg-[#0b1120] text-landing-ink">
       <LandingNav lang={locale} active="sponsors" />
 
-      <section className="max-w-[860px] mx-auto px-6 pt-32 pb-24">
+      <section className="max-w-[1180px] mx-auto px-6 pt-32 pb-24">
         <h1 className="text-4xl font-[820] tracking-tight">{t.title}</h1>
         <p className="mt-3 max-w-[700px] text-landing-muted text-lg leading-relaxed">{t.desc}</p>
 
-        <div className="mt-10 grid gap-4">
+        <div className="mt-10 grid grid-cols-2 gap-5 max-[900px]:grid-cols-1">
           {sponsorItems.map((sponsor) => (
             <div key={sponsor.name} className="rounded-xl border border-landing-line bg-landing-panel p-6">
               <div className="flex items-center gap-6 max-[640px]:block">

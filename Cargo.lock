@@ -1983,7 +1983,7 @@ dependencies = [
 
 [[package]]
 name = "dbx"
-version = "0.5.86"
+version = "0.5.87"
 dependencies = [
  "anyhow",
  "axum",
@@ -2037,7 +2037,7 @@ dependencies = [
 
 [[package]]
 name = "dbx-cli"
-version = "0.4.64"
+version = "0.4.65"
 dependencies = [
  "async-trait",
  "dbx-core",
@@ -2126,25 +2126,28 @@ dependencies = [
 
 [[package]]
 name = "dbx-mcp"
-version = "0.4.64"
+version = "0.4.65"
 dependencies = [
  "async-trait",
  "dbx-core",
  "dirs",
  "reqwest 0.12.28",
  "rmcp",
+ "rustls 0.23.43",
+ "rustls-pemfile 2.2.0",
  "schemars 1.2.2",
  "serde",
  "serde_json",
  "tempfile",
  "tokio",
+ "tokio-rustls 0.26.4",
  "url",
  "uuid",
 ]
 
 [[package]]
 name = "dbx-web"
-version = "0.5.86"
+version = "0.5.87"
 dependencies = [
  "aes-gcm 0.10.3",
  "argon2",

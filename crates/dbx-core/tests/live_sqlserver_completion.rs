@@ -1005,6 +1005,7 @@ async fn live_sqlserver_table_structure_default_changes_drop_existing_constraint
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        partitioned: false,
     });
     assert_eq!(result.warnings, Vec::<String>::new());
     assert_eq!(result.statements.len(), 4);

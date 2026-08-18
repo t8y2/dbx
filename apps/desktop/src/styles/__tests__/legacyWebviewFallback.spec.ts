@@ -14,6 +14,7 @@ const tunnelProfileManagerSource = readFileSync(new URL("../../components/connec
 const changelogPanelSource = readFileSync(new URL("../../components/settings/ChangelogPanel.vue", import.meta.url), "utf8");
 const editorSettingsDialogSource = readFileSync(new URL("../../components/editor/EditorSettingsDialog.vue", import.meta.url), "utf8");
 const switchSource = readFileSync(new URL("../../components/ui/switch/Switch.vue", import.meta.url), "utf8");
+const aiAssistantSource = readFileSync(new URL("../../components/editor/AiAssistant.vue", import.meta.url), "utf8");
 const desktopIndexSource = readFileSync(new URL("../../../index.html", import.meta.url), "utf8");
 const connectionDialogLegacyCss = readFileSync(new URL("../../../public/connection-dialog-legacy.css", import.meta.url), "utf8");
 const legacyWebViewSource = readFileSync(new URL("../../lib/ui/legacyWebView.ts", import.meta.url), "utf8");
@@ -139,6 +140,24 @@ describe("legacy WebView CSS fallbacks", () => {
     expect(connectionTreeSource).toContain("background: rgba(82, 82, 82, 0.42);");
     expect(connectionTreeSource).toContain("html.dbx-legacy-webview.dark .sidebar-tree-scrollbar__thumb");
     expect(connectionTreeSource).toContain("background: rgba(212, 212, 216, 0.42);");
+  });
+
+  it("keeps AI table scrollbars visible without OKLCH color mixing", () => {
+    const thumbStart = aiAssistantSource.indexOf(".ai-markdown :deep(.ai-markdown-table-wrap::-webkit-scrollbar-thumb) {");
+    const hoverStart = aiAssistantSource.indexOf(".ai-markdown :deep(.ai-markdown-table-wrap:hover::-webkit-scrollbar-thumb) {");
+    const legacyStart = aiAssistantSource.indexOf("html.dbx-legacy-webview.dark .ai-markdown", hoverStart);
+    const thumb = aiAssistantSource.slice(thumbStart, hoverStart);
+    const hover = aiAssistantSource.slice(hoverStart, legacyStart);
+
+    expect(thumbStart).toBeGreaterThan(-1);
+    expect(hoverStart).toBeGreaterThan(thumbStart);
+    expect(legacyStart).toBeGreaterThan(hoverStart);
+    expect(thumb.indexOf("background: rgba(82, 82, 82, 0.28);")).toBeGreaterThan(-1);
+    expect(thumb.indexOf("background: rgba(82, 82, 82, 0.28);")).toBeLessThan(thumb.indexOf("background: color-mix(in oklch, var(--foreground) 28%, transparent);"));
+    expect(hover.indexOf("background: rgba(82, 82, 82, 0.45);")).toBeGreaterThan(-1);
+    expect(hover.indexOf("background: rgba(82, 82, 82, 0.45);")).toBeLessThan(hover.indexOf("background: color-mix(in oklch, var(--foreground) 45%, transparent);"));
+    expect(aiAssistantSource).toContain("background: rgba(212, 212, 216, 0.28);");
+    expect(aiAssistantSource).toContain("background: rgba(212, 212, 216, 0.45);");
   });
 
   it("keeps selected tiles readable in WebViews without color-mix support", () => {

@@ -96,6 +96,8 @@ pub struct EditableStructureIndex {
     pub included_columns: Vec<String>,
     #[serde(default)]
     pub comment: String,
+    #[serde(default)]
+    pub concurrently: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub original: Option<IndexInfo>,
     #[serde(default)]
@@ -208,6 +210,13 @@ pub struct TableStructureSqlOptions {
     pub table_comment: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub original_table_comment: Option<String>,
+    /// Whether the target table is a partitioned parent table (PostgreSQL
+    /// `relkind = 'p'`). PostgreSQL rejects `CREATE INDEX CONCURRENTLY` on
+    /// partitioned parents, so the builder refuses such a request up front
+    /// (`validate_concurrent_index_scope`) instead of emitting SQL the server
+    /// will reject or downgrading to a blocking `CREATE INDEX`.
+    #[serde(default)]
+    pub partitioned: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

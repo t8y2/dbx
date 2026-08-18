@@ -928,8 +928,12 @@ impl MiniMaxTextAccumulator {
         Some(value.to_string())
     }
 
-    fn complete(&self) -> &str {
-        &self.complete
+    fn replay_text(&self) -> &str {
+        if matches!(self.semantics, MiniMaxStreamSemantics::Incremental) {
+            &self.latest
+        } else {
+            &self.complete
+        }
     }
 }
 
@@ -964,7 +968,7 @@ impl MiniMaxReasoningDetailState {
     fn replay_value(&self) -> serde_json::Value {
         let mut detail = self.latest.clone();
         if detail.get("text").is_some() {
-            detail["text"] = serde_json::Value::String(self.text.complete().to_string());
+            detail["text"] = serde_json::Value::String(self.text.replay_text().to_string());
         }
         detail
     }
@@ -6751,7 +6755,7 @@ mod tests {
         assert_eq!(normalizer.push("Hell"), None);
         assert_eq!(normalizer.push("Hello world"), Some(" world".to_string()));
         assert_eq!(normalizer.push(""), None);
-        assert_eq!(normalizer.complete(), "Hello world");
+        assert_eq!(normalizer.replay_text(), "Hello world");
     }
 
     #[test]
@@ -6761,7 +6765,7 @@ mod tests {
         assert_eq!(normalizer.push("Hello"), Some("Hello".to_string()));
         assert_eq!(normalizer.push(" world"), Some(" world".to_string()));
         assert_eq!(normalizer.push("!"), Some("!".to_string()));
-        assert_eq!(normalizer.complete(), "Hello world!");
+        assert_eq!(normalizer.replay_text(), "Hello world!");
     }
 
     #[test]
@@ -6902,7 +6906,7 @@ mod tests {
                     "type": "reasoning.text",
                     "id": "reasoning-text-1",
                     "index": 0,
-                    "text": "and"
+                    "text": "aand"
                 }]
             }))
         );

@@ -257,6 +257,31 @@ function queryParamValue(params: string, key: string): string | undefined {
   return undefined;
 }
 
+function extractHiveStructuredParams(params: string): { username?: string; password?: string; ssl: boolean; urlParams: string } {
+  let username: string | undefined;
+  let password: string | undefined;
+  let ssl = false;
+  const urlParams: string[] = [];
+
+  for (const part of params.split(";")) {
+    if (!part) continue;
+    const [rawKey, ...rest] = part.split("=");
+    const key = decodeUrlPart(rawKey).trim().toLowerCase();
+    const value = decodeUrlPart(rest.join("=")).trim();
+    if (key === "user" || key === "username") {
+      username = value;
+    } else if (key === "password") {
+      password = value;
+    } else if (key === "ssl") {
+      ssl = value.toLowerCase() === "true";
+    } else {
+      urlParams.push(part);
+    }
+  }
+
+  return { username, password, ssl, urlParams: urlParams.join(";") };
+}
+
 function connectionNameParam(parsed: URL): string | undefined {
   for (const [key, value] of parsed.searchParams) {
     if (key.toLowerCase() === "name") {
@@ -339,6 +364,40 @@ export function connectionProfileForScheme(scheme: string, preferredProfile?: st
     return SCHEME_PROFILES[normalizedPreferredProfile];
   }
   return SCHEME_PROFILES[normalizedScheme];
+}
+
+function parseJdbcHiveUrl(source: string): ParsedConnectionUrl | null {
+  const match = /^jdbc:hive2:\/\/(?<hosts>[^/?#;]+)(?:\/(?<path>[^?#]*))?(?<query>\?[^#]*)?(?<fragment>#.*)?$/i.exec(source);
+  if (!match?.groups) return null;
+
+  const firstHost = match.groups.hosts.split(",")[0]?.trim();
+  if (!firstHost) return null;
+
+  let endpoint: URL;
+  try {
+    endpoint = new URL(`hive2://${firstHost}`);
+  } catch {
+    return null;
+  }
+  if (!endpoint.hostname) return null;
+
+  const [rawDatabase = "", ...paramParts] = (match.groups.path || "").split(";");
+  const structured = extractHiveStructuredParams(paramParts.join(";"));
+  const urlParams = `${structured.urlParams}${match.groups.query || ""}${match.groups.fragment || ""}`;
+
+  return {
+    dbType: "hive",
+    driverProfile: "hive",
+    driverLabel: "Apache Hive",
+    host: endpoint.hostname.replace(/^\[(.*)]$/, "$1"),
+    port: endpoint.port ? Number(endpoint.port) : 10000,
+    username: structured.username ?? decodeUrlPart(endpoint.username),
+    password: structured.password ?? decodeUrlPart(endpoint.password),
+    database: decodeUrlPart(rawDatabase) || undefined,
+    urlParams,
+    ssl: structured.ssl,
+    connectionString: source,
+  };
 }
 
 function parseJdbcSqlServerUrl(source: string): ParsedConnectionUrl | null {
@@ -580,6 +639,8 @@ export function parseConnectionUrl(value: string, preferredProfile?: string): Pa
   if (!input) {
     throw new Error("Connection URL is empty");
   }
+  const jdbcHive = parseJdbcHiveUrl(input);
+  if (jdbcHive) return jdbcHive;
   const jdbcH2 = parseH2JdbcUrl(input);
   if (jdbcH2) return jdbcH2;
   const jdbcUCanAccess = parseJdbcUCanAccessUrl(input);

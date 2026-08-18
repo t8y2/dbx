@@ -30,6 +30,7 @@ const DANGER_RE = /^\s*(DROP|DELETE|TRUNCATE|ALTER|UPDATE|MERGE|REPLACE)\b/i;
 
 interface SqlExecutionOptions {
   openInNewResultTab?: boolean;
+  editorViewportRequestId?: number;
 }
 
 interface TargetSqlExecutionInput {
@@ -113,6 +114,7 @@ export function useSqlExecution(deps: {
   blockDangerousRedisCommands?: Ref<boolean>;
   onMissingDatabase?: () => void;
   requestDangerConfirmation?: (request: SqlExecutionDangerRequest) => Promise<boolean>;
+  onExecutionStarted?: (editorViewportRequestId: number) => void;
 }) {
   const { t } = useI18n();
   const queryStore = useQueryStore();
@@ -136,31 +138,35 @@ export function useSqlExecution(deps: {
   const pendingDangerKind = ref<"sql" | "redis">("sql");
   const pendingDangerSourceOffset = ref<number | undefined>();
   const pendingOpenInNewResultTab = ref(false);
+  const pendingSqlParameterEditorViewportRequestId = ref<number | undefined>();
+  const pendingDangerEditorViewportRequestId = ref<number | undefined>();
   let pendingSqlParameterContinuation: ((sql: string, sourceOffset?: number) => Promise<void> | void) | undefined;
 
-  async function resolvedExecutableSql(source?: SqlExecutionOverride): Promise<{ sql: string; sourceOffset?: number }> {
+  async function resolvedExecutableSql(source?: SqlExecutionOverride): Promise<{ sql: string; sourceOffset?: number; editorViewportRequestId?: number }> {
     const atSetEnabled = resolveSqlVariableSyntaxToggles(settingsStore.editorSettings.sqlVariableSyntaxOverrides, deps.activeConnection.value?.db_type, settingsStore.editorSettings.sqlVariableSubstitutionEnabled).atSet;
     const expand = (sql: string) => (atSetEnabled ? expandSqlVariables(sql).sql : sql);
     if (typeof source === "string") return { sql: expand(source) };
 
     const resolved = deps.resolveExecutableSql ? await deps.resolveExecutableSql(source) : isSqlExecutionSnapshot(source) ? resolveExecutableSql(source.fullSql, source.selectedSql, { cursorPos: source.cursorPos }) : deps.executableSql.value;
     const sql = expand(resolved);
-    if (!isSqlExecutionSnapshot(source) || !source.selectedSql.trim() || sql !== resolved) return { sql };
+    const editorViewportRequestId = isSqlExecutionSnapshot(source) ? source.editorViewportRequestId : undefined;
+    if (!isSqlExecutionSnapshot(source) || !source.selectedSql.trim() || sql !== resolved) return { sql, editorViewportRequestId };
 
     const leadingWhitespace = source.selectedSql.length - source.selectedSql.trimStart().length;
-    return { sql, sourceOffset: source.selectionFrom + leadingWhitespace };
+    return { sql, sourceOffset: source.selectionFrom + leadingWhitespace, editorViewportRequestId };
   }
 
   async function tryExecute(sqlOverride?: SqlExecutionOverride, options: SqlExecutionOptions = {}) {
     const tab = deps.activeTab.value;
-    const { sql, sourceOffset } = await resolvedExecutableSql(sqlOverride);
+    const { sql, sourceOffset, editorViewportRequestId } = await resolvedExecutableSql(sqlOverride);
+    const executionOptions = { ...options, editorViewportRequestId };
     if (!tab || !sql.trim()) return;
     if (requiresDatabaseSelection(tab, deps.activeConnection.value, sql)) {
       deps.onMissingDatabase?.();
       return;
     }
-    if (supportsSqlTemplateParameters(deps.activeConnection.value, sql) && prepareSqlParameterDialog(sql, sourceOffset, options)) return;
-    await continueExecute(sql, sourceOffset, options);
+    if (supportsSqlTemplateParameters(deps.activeConnection.value, sql) && prepareSqlParameterDialog(sql, sourceOffset, executionOptions)) return;
+    await continueExecute(sql, sourceOffset, executionOptions);
   }
 
   function tryExecuteInNewResultTab(sqlOverride?: SqlExecutionOverride) {
@@ -195,6 +201,7 @@ export function useSqlExecution(deps: {
         pendingDangerKind.value = "redis";
         pendingDangerSourceOffset.value = sourceOffset;
         pendingOpenInNewResultTab.value = options.openInNewResultTab === true;
+        pendingDangerEditorViewportRequestId.value = options.editorViewportRequestId;
         suppressDangerConfirm.value = false;
         showDangerDialog.value = true;
         return;
@@ -219,6 +226,7 @@ export function useSqlExecution(deps: {
       pendingDangerKind.value = "sql";
       pendingDangerSourceOffset.value = sourceOffset;
       pendingOpenInNewResultTab.value = options.openInNewResultTab === true;
+      pendingDangerEditorViewportRequestId.value = options.editorViewportRequestId;
       suppressDangerConfirm.value = false;
       showDangerDialog.value = true;
     } else {
@@ -238,6 +246,7 @@ export function useSqlExecution(deps: {
     sqlParameterEnabledSyntaxes.value = enabledSyntaxes;
     pendingSourceOffset.value = sourceOffset;
     pendingOpenInNewResultTab.value = options.openInNewResultTab === true;
+    pendingSqlParameterEditorViewportRequestId.value = options.editorViewportRequestId;
     pendingSqlParameterContinuation = continuation;
     showSqlParameterDialog.value = true;
     return true;
@@ -287,6 +296,7 @@ export function useSqlExecution(deps: {
       ...(isRedis ? { skipRedisSafetyCheck: deps.blockDangerousRedisCommands?.value === false } : {}),
       ...(sourceOffset !== undefined ? { sourceOffset } : {}),
       ...(options.openInNewResultTab ? { openInNewResultTab: true } : {}),
+      ...(options.editorViewportRequestId !== undefined ? { onExecutionStarted: () => deps.onExecutionStarted?.(options.editorViewportRequestId!) } : {}),
     });
     if (producedResult === false) return;
     const sqlServerMessageResultIndex = executionDatabaseType === "sqlserver" ? tab.results?.findIndex((result) => result.server_message === true) : undefined;
@@ -518,19 +528,22 @@ export function useSqlExecution(deps: {
     const sourceOffset = pendingDangerSourceOffset.value;
     const kind = pendingDangerKind.value;
     const openInNewResultTab = pendingOpenInNewResultTab.value;
+    const editorViewportRequestId = pendingDangerEditorViewportRequestId.value;
     pendingDangerSql.value = "";
     pendingDangerSourceOffset.value = undefined;
     pendingDangerKind.value = "sql";
     pendingOpenInNewResultTab.value = false;
+    pendingDangerEditorViewportRequestId.value = undefined;
     if (suppressDangerConfirm.value && kind === "sql") {
       settingsStore.updateEditorSettings({ confirmDangerousSqlExecution: false });
     }
     suppressDangerConfirm.value = false;
-    await doExecute(sql, sourceOffset, { openInNewResultTab });
+    await doExecute(sql, sourceOffset, { openInNewResultTab, editorViewportRequestId });
   }
 
   async function onSqlParametersConfirm(sql: string) {
     const openInNewResultTab = pendingOpenInNewResultTab.value;
+    const editorViewportRequestId = pendingSqlParameterEditorViewportRequestId.value;
     showSqlParameterDialog.value = false;
     sqlParameterSourceSql.value = "";
     sqlParameterNames.value = [];
@@ -539,10 +552,11 @@ export function useSqlExecution(deps: {
     const sourceOffset = pendingSourceOffset.value;
     pendingSourceOffset.value = undefined;
     pendingOpenInNewResultTab.value = false;
+    pendingSqlParameterEditorViewportRequestId.value = undefined;
     const continuation = pendingSqlParameterContinuation;
     pendingSqlParameterContinuation = undefined;
     if (continuation) await continuation(sql, sourceOffset);
-    else await continueExecute(sql, sourceOffset, { openInNewResultTab });
+    else await continueExecute(sql, sourceOffset, { openInNewResultTab, editorViewportRequestId });
   }
 
   watch(showSqlParameterDialog, (open) => {
@@ -553,6 +567,7 @@ export function useSqlExecution(deps: {
     sqlParameterEnabledSyntaxes.value = [];
     pendingSourceOffset.value = undefined;
     pendingOpenInNewResultTab.value = false;
+    pendingSqlParameterEditorViewportRequestId.value = undefined;
     pendingSqlParameterContinuation = undefined;
   });
 
@@ -562,6 +577,7 @@ export function useSqlExecution(deps: {
     pendingDangerSourceOffset.value = undefined;
     pendingDangerKind.value = "sql";
     pendingOpenInNewResultTab.value = false;
+    pendingDangerEditorViewportRequestId.value = undefined;
     suppressDangerConfirm.value = false;
   });
 

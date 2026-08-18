@@ -4405,6 +4405,7 @@ mod tests {
         ColumnInfo {
             name: name.to_string(),
             data_type: data_type.to_string(),
+            resolved_schema: None,
             is_nullable: false,
             column_default: None,
             is_primary_key: false,
@@ -5963,6 +5964,7 @@ mod tests {
                 source: Some(ColumnInfo {
                     name: "status".to_string(),
                     data_type: "text".to_string(),
+                    resolved_schema: None,
                     is_nullable: true,
                     column_default: None,
                     is_primary_key: false,
@@ -8408,6 +8410,7 @@ mod tests {
         let s = vec![ColumnInfo {
             name: "c".into(),
             data_type: "varchar(100)".into(),
+            resolved_schema: None,
             is_nullable: true,
             column_default: Some("'default'".into()),
             comment: Some("new".into()),
@@ -8424,6 +8427,7 @@ mod tests {
         let t = vec![ColumnInfo {
             name: "c".into(),
             data_type: "varchar(50)".into(),
+            resolved_schema: None,
             is_nullable: false,
             column_default: None,
             comment: Some("old".into()),

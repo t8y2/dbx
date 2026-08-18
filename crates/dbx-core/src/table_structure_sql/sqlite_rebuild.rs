@@ -1516,6 +1516,7 @@ mod tests {
             triggers: Vec::new(),
             table_comment: None,
             original_table_comment: None,
+            partitioned: false,
         }
     }
 
@@ -1691,6 +1692,7 @@ mod tests {
             index_type: String::new(),
             included_columns: Vec::new(),
             comment: String::new(),
+            concurrently: false,
             original: None,
             marked_for_drop: false,
         });
@@ -2009,6 +2011,7 @@ mod tests {
             index_type: String::new(),
             included_columns: Vec::new(),
             comment: String::new(),
+            concurrently: false,
             original: Some(IndexInfo {
                 name: "uq_items_value".to_string(),
                 columns: vec!["value".to_string()],

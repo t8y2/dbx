@@ -25,6 +25,7 @@ export interface TableStructureCapabilities {
   indexInclude: boolean;
   indexFilter: boolean;
   indexComment: boolean;
+  indexConcurrent: boolean;
   foreignKey: boolean;
 }
 
@@ -49,6 +50,7 @@ const unsupportedCapabilities: TableStructureCapabilities = {
   indexInclude: false,
   indexFilter: false,
   indexComment: false,
+  indexConcurrent: false,
   foreignKey: false,
 };
 
@@ -115,6 +117,7 @@ const postgresCapabilities = capabilities({
 const postgresBefore11Capabilities = capabilities({
   ...postgresCapabilities,
   indexInclude: false,
+  indexConcurrent: true,
 });
 
 const redshiftCapabilities = capabilities({
@@ -318,7 +321,7 @@ const capabilityByType: Partial<Record<DatabaseType, TableStructureCapabilities>
   oscar: damengCapabilities,
   databend: mysqlCapabilities,
   gbase: gbaseCapabilities,
-  postgres: postgresCapabilities,
+  postgres: capabilities({ ...postgresCapabilities, indexConcurrent: true }),
   gaussdb: postgresCapabilities,
   kwdb: postgresCapabilities,
   opengauss: postgresCapabilities,

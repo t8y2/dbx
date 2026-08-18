@@ -1413,13 +1413,10 @@ async fn install_agent_driver_from_registry(
         std::fs::remove_file(am.driver_native_path(db_type)).ok();
     }
 
-    // Final cancel check before persisting installed state: the download is
-    // already on disk, but a cancel fired during validation/extraction should
-    // still prevent the driver from being marked installed.
-    if cancellations.iter().any(|token| token.is_cancelled()) {
-        std::fs::remove_file(&target_path).ok();
-        return Err(AGENT_DOWNLOAD_CANCELED_ERROR.to_string());
-    }
+    // The cancellation boundary is immediately before the staged artifact is
+    // committed above. After that atomic replacement, treating a newly arrived
+    // cancel as a rollback would delete a working driver and lose the prior
+    // installation, so this completed install must persist normally.
     am.mutate_state(|state| {
         if requires_java_runtime {
             if let Some(jre_info) = registry.resolve_jre(jre_key) {
@@ -1442,12 +1439,14 @@ async fn install_agent_driver_from_registry(
 }
 
 fn driver_artifact_download_path(target_path: &Path, format: Option<ArtifactFormat>) -> PathBuf {
+    let parent = target_path.parent().unwrap_or_else(|| Path::new("."));
+    let file_name = target_path.file_name().and_then(|name| name.to_str()).unwrap_or("agent");
     match format {
-        Some(ArtifactFormat::TarZstd) => {
-            let file_name = target_path.file_name().and_then(|name| name.to_str()).unwrap_or("agent");
-            target_path.with_file_name(format!(".{file_name}.tar.zst"))
-        }
-        None => target_path.to_path_buf(),
+        Some(ArtifactFormat::TarZstd) => parent.join(format!(".{file_name}.tar.zst")),
+        // Keep raw artifacts out of the live driver path until the caller has
+        // made its final cancellation check. The filename stays stable so an
+        // existing download-cache entry remains reusable.
+        None => parent.join(".staging").join(file_name),
     }
 }
 
@@ -1459,11 +1458,9 @@ fn install_downloaded_driver_artifact(
     db_type: &str,
     expected_version: &str,
 ) -> Result<(), String> {
-    let Some(format) = format else {
-        return Ok(());
-    };
     let result = match format {
-        ArtifactFormat::TarZstd => {
+        None => replace_download(download_path, target_path),
+        Some(ArtifactFormat::TarZstd) => {
             install_driver_from_tar_zstd_package(download_path, target_path, artifact_kind, db_type, expected_version)
         }
     };
@@ -3735,6 +3732,51 @@ mod agent_registry_install_tests {
             .unwrap()
             .iter()
             .any(|event| event.step == "done" && event.db_type.as_deref() == Some(db_type)));
+    }
+
+    #[tokio::test]
+    async fn registry_install_cancel_after_cached_download_preserves_existing_driver() {
+        let manager = test_manager("cancel-after-cached-driver-download");
+        let db_type = "mongodb";
+        let old_version = "1.0.0";
+        let new_version = "2.0.0";
+        let url = "https://example.com/dbx-agent-mongodb.jar";
+        // The old driver only needs to exist for this regression: use distinct
+        // bytes so the assertion proves cancellation did not replace it.
+        let old_bytes = b"previously-installed-driver".to_vec();
+        let new_bytes = test_agent_jar();
+        let target_path = manager.driver_jar_path(db_type);
+        std::fs::create_dir_all(target_path.parent().unwrap()).unwrap();
+        std::fs::write(&target_path, &old_bytes).unwrap();
+        install_jre(&manager);
+        record_driver(&manager, db_type);
+        write_cached_driver_download(&manager, db_type, new_version, url, &target_path, &new_bytes);
+        let registry = registry_with_jar(db_type, new_version, url, new_bytes.len() as u64);
+        let cancellation = manager.begin_install_cancellation("cancel-after-cached-download").await;
+        let progress_cancellation = Arc::clone(&cancellation);
+        let progress = move |event: AgentProgressEvent| {
+            if event.step == "driver" && event.downloaded == Some(new_bytes.len() as u64) {
+                progress_cancellation.cancel();
+            }
+        };
+
+        let error = install_agent_driver_from_registry(
+            &manager,
+            &registry,
+            DownloadSource::Official,
+            db_type,
+            &progress,
+            None,
+            None,
+            &[&cancellation],
+        )
+        .await
+        .expect_err("cancellation after download completion must abort installation");
+
+        assert!(error.contains(AGENT_DOWNLOAD_CANCELED_ERROR));
+        assert_eq!(std::fs::read(&target_path).unwrap(), old_bytes);
+        assert_eq!(manager.load_state().installed_drivers[db_type].version, old_version);
+        assert!(!driver_artifact_download_path(&target_path, None).exists());
     }
 
     #[tokio::test]

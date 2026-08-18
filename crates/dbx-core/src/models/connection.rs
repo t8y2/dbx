@@ -2260,7 +2260,7 @@ fn jdbc_transport_rest(url: &str) -> Option<&str> {
     }
 }
 
-pub fn rewrite_jdbc_url_host(url: &str, new_host: &str, new_port: u16) -> String {
+pub fn rewrite_jdbc_url_host(url: &str, new_host: &str, new_port: u16) -> Result<String, String> {
     let normalized_url = url.to_ascii_uppercase();
     let normalized_rest = jdbc_transport_rest(url).map(str::to_ascii_uppercase).unwrap_or_default();
     if normalized_rest.starts_with("ORACLE:") && normalized_url.contains("(HOST=") && normalized_url.contains("(PORT=")
@@ -2269,11 +2269,41 @@ pub fn rewrite_jdbc_url_host(url: &str, new_host: &str, new_port: u16) -> String
     }
 
     let Some((old_host, old_port)) = parse_jdbc_host_port(url) else {
-        return url.to_string();
+        return Err(format!(
+            "Cannot route JDBC connection string through transport endpoint {new_host}:{new_port}: unsupported URL format"
+        ));
     };
+
+    if let Some(after_sqlserver) = normalized_rest.strip_prefix("SQLSERVER://") {
+        let authority = after_sqlserver.split(';').next().unwrap_or_default();
+        if authority.contains('\\') {
+            return Err(format!(
+                "Cannot route JDBC connection string through transport endpoint {new_host}:{new_port}: SQL Server named instances are not supported"
+            ));
+        }
+        if normalized_url.contains(";FAILOVERPARTNER=") {
+            return Err(format!(
+                "Cannot route JDBC connection string through transport endpoint {new_host}:{new_port}: SQL Server failover partner addresses cannot be safely routed"
+            ));
+        }
+    }
+
     let old_authority = format!("{old_host}:{old_port}");
-    let new_authority = format!("{new_host}:{new_port}");
-    url.replacen(&old_authority, &new_authority, 1)
+    let new_authority = format!("{}:{new_port}", bracket_ipv6(new_host));
+    let rewritten = url.replacen(&old_authority, &new_authority, 1);
+    if rewritten == url {
+        return Err(format!(
+            "Cannot route JDBC connection string through transport endpoint {new_host}:{new_port}: endpoint {old_authority} is not present in the URL"
+        ));
+    }
+    match parse_jdbc_host_port(&rewritten) {
+        Some((host, port)) if host.trim_matches(['[', ']']) == new_host.trim_matches(['[', ']']) && port == new_port => {
+            Ok(rewritten)
+        }
+        _ => Err(format!(
+            "Cannot route JDBC connection string through transport endpoint {new_host}:{new_port}: the rewritten URL does not resolve to a single local endpoint"
+        )),
+    }
 }
 
 fn oracle_descriptor_value(descriptor: &str, key: &str) -> Option<String> {
@@ -2284,9 +2314,21 @@ fn oracle_descriptor_value(descriptor: &str, key: &str) -> Option<String> {
     Some(descriptor[value_start..value_end].trim().to_string())
 }
 
-fn rewrite_oracle_descriptor_host(url: &str, new_host: &str, new_port: u16) -> String {
+fn rewrite_oracle_descriptor_host(url: &str, new_host: &str, new_port: u16) -> Result<String, String> {
+    let upper = url.to_ascii_uppercase();
+    let address_count = upper.matches("(ADDRESS=").count();
+    if address_count != 1 {
+        return Err(format!(
+            "Cannot route Oracle JDBC descriptor through transport endpoint {new_host}:{new_port}: descriptor must contain a single ADDRESS entry, found {address_count}"
+        ));
+    }
+    if upper.matches("(HOST=").count() != 1 || upper.matches("(PORT=").count() != 1 {
+        return Err(format!(
+            "Cannot route Oracle JDBC descriptor through transport endpoint {new_host}:{new_port}: descriptor must contain exactly one HOST and one PORT"
+        ));
+    }
     let rewritten_host = replace_oracle_descriptor_value(url, "HOST", new_host);
-    replace_oracle_descriptor_value(&rewritten_host, "PORT", &new_port.to_string())
+    Ok(replace_oracle_descriptor_value(&rewritten_host, "PORT", &new_port.to_string()))
 }
 
 fn replace_oracle_descriptor_value(input: &str, key: &str, value: &str) -> String {
@@ -3965,7 +4007,7 @@ mod tests {
             "jdbc:oracle:thin:@(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=orahost)(PORT=1521))(CONNECT_DATA=(SERVICE_NAME=orcl)))";
 
         assert_eq!(
-            super::rewrite_jdbc_url_host(url, "127.0.0.1", 11521),
+            super::rewrite_jdbc_url_host(url, "127.0.0.1", 11521).unwrap(),
             "jdbc:oracle:thin:@(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=127.0.0.1)(PORT=11521))(CONNECT_DATA=(SERVICE_NAME=orcl)))"
         );
     }
@@ -3997,25 +4039,25 @@ mod tests {
     #[test]
     fn rewrite_jdbc_url_postgresql() {
         let url = "jdbc:postgresql://myhost:5432/mydb";
-        let rewritten = super::rewrite_jdbc_url_host(url, "127.0.0.1", 54321);
+        let rewritten = super::rewrite_jdbc_url_host(url, "127.0.0.1", 54321).unwrap();
         assert_eq!(rewritten, "jdbc:postgresql://127.0.0.1:54321/mydb");
     }
 
     #[test]
     fn rewrite_jdbcx_url_preserves_extension() {
         let url = "jdbcx:script:mysql://db.example.com:3306/app";
-        let rewritten = super::rewrite_jdbc_url_host(url, "127.0.0.1", 13306);
+        let rewritten = super::rewrite_jdbc_url_host(url, "127.0.0.1", 13306).unwrap();
         assert_eq!(rewritten, "jdbcx:script:mysql://127.0.0.1:13306/app");
 
         let sqlserver = "jdbcx:query:sqlserver://sql.example.com:1433;databaseName=app";
-        let rewritten = super::rewrite_jdbc_url_host(sqlserver, "127.0.0.1", 11433);
+        let rewritten = super::rewrite_jdbc_url_host(sqlserver, "127.0.0.1", 11433).unwrap();
         assert_eq!(rewritten, "jdbcx:query:sqlserver://127.0.0.1:11433;databaseName=app");
     }
 
     #[test]
     fn rewrite_jdbcx_oracle_descriptor() {
         let url = "jdbcx:web:oracle:thin:@(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=orahost)(PORT=1521))(CONNECT_DATA=(SERVICE_NAME=orcl)))";
-        let rewritten = super::rewrite_jdbc_url_host(url, "127.0.0.1", 11521);
+        let rewritten = super::rewrite_jdbc_url_host(url, "127.0.0.1", 11521).unwrap();
         assert_eq!(
             rewritten,
             "jdbcx:web:oracle:thin:@(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=127.0.0.1)(PORT=11521))(CONNECT_DATA=(SERVICE_NAME=orcl)))"
@@ -4025,21 +4067,42 @@ mod tests {
     #[test]
     fn rewrite_jdbc_url_oracle() {
         let url = "jdbc:oracle:thin:@orahost:1521:ORCL";
-        let rewritten = super::rewrite_jdbc_url_host(url, "127.0.0.1", 54321);
+        let rewritten = super::rewrite_jdbc_url_host(url, "127.0.0.1", 54321).unwrap();
         assert_eq!(rewritten, "jdbc:oracle:thin:@127.0.0.1:54321:ORCL");
     }
 
     #[test]
     fn rewrite_jdbc_url_sqlserver() {
         let url = "jdbc:sqlserver://mshost:1433;databaseName=master";
-        let rewritten = super::rewrite_jdbc_url_host(url, "127.0.0.1", 54321);
+        let rewritten = super::rewrite_jdbc_url_host(url, "127.0.0.1", 54321).unwrap();
         assert_eq!(rewritten, "jdbc:sqlserver://127.0.0.1:54321;databaseName=master");
     }
 
     #[test]
-    fn rewrite_jdbc_url_unparseable_returns_original() {
+    fn rewrite_jdbc_url_unparseable_errors() {
         let url = "jdbc:custom:some-opaque-string";
-        let rewritten = super::rewrite_jdbc_url_host(url, "127.0.0.1", 54321);
-        assert_eq!(rewritten, url);
+        let err = super::rewrite_jdbc_url_host(url, "127.0.0.1", 54321).unwrap_err();
+        assert!(err.contains("unsupported URL format"), "{err}");
+    }
+
+    #[test]
+    fn rewrite_jdbc_url_host_rejects_sqlserver_named_instance() {
+        let url = r"jdbc:sqlserver://db\SQLEXPRESS:1433;databaseName=app";
+        let err = super::rewrite_jdbc_url_host(url, "127.0.0.1", 45678).unwrap_err();
+        assert!(err.to_lowercase().contains("named instance"), "{err}");
+    }
+
+    #[test]
+    fn rewrite_jdbc_url_host_rejects_sqlserver_failover_partner() {
+        let url = "jdbc:sqlserver://db1:1433;failoverPartner=db2:1433;databaseName=app";
+        let err = super::rewrite_jdbc_url_host(url, "127.0.0.1", 45678).unwrap_err();
+        assert!(err.contains("failover partner"), "{err}");
+    }
+
+    #[test]
+    fn rewrite_jdbc_url_host_rejects_multi_address_oracle_descriptor() {
+        let url = "jdbc:oracle:thin:@(DESCRIPTION=(ADDRESS_LIST=(ADDRESS=(PROTOCOL=TCP)(HOST=db1)(PORT=1521))(ADDRESS=(PROTOCOL=TCP)(HOST=db2)(PORT=1521)))(CONNECT_DATA=(SERVICE_NAME=orcl)))";
+        let err = super::rewrite_jdbc_url_host(url, "127.0.0.1", 11521).unwrap_err();
+        assert!(err.contains("single ADDRESS entry"), "{err}");
     }
 }

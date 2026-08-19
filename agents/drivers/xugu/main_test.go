@@ -363,7 +363,7 @@ func TestListDataTypesReturnsXuguTypes(t *testing.T) {
 	}
 	for _, want := range []string{
 		"INTEGER", "VARCHAR", "NUMERIC", "INT",
-		"TINYINT", "DOUBLE", "DATETIME", "DATETIME WITH TIME ZONE", "TIME WITH TIME ZONE",
+		"TINYINT", "DOUBLE", "DATETIME", "DATETIME WITH TIME ZONE", "TIME WITH TIME ZONE", "TIMESTAMP WITH TIME ZONE",
 		"INTERVAL YEAR", "INTERVAL DAY TO SECOND", "GUID", "ROWID", "JSON", "BIT", "VARBIT",
 		"INTEGER[]", "DOUBLE[]", "CHAR[]", "CLOB[]",
 	} {
@@ -1811,6 +1811,44 @@ func TestDecodeXuguScale(t *testing.T) {
 	precision, scale, length = decodeXuguScale("VARCHAR", &charScale)
 	if precision != nil || scale != nil || length == nil || *length != 128 {
 		t.Fatalf("unexpected char scale decode: precision=%v scale=%v length=%v", precision, scale, length)
+	}
+
+	for _, test := range []struct {
+		dataType string
+		value    int
+	}{
+		{dataType: "BIT", value: 8},
+		{dataType: "VARBIT", value: 64},
+		{dataType: "TIME", value: 3},
+		{dataType: "TIME WITH TIME ZONE", value: 3},
+		{dataType: "TIMESTAMP", value: 6},
+		{dataType: "TIMESTAMP WITH TIME ZONE", value: 6},
+	} {
+		precision, scale, length = decodeXuguScale(test.dataType, &test.value)
+		if precision == nil || *precision != test.value || scale != nil || length != nil {
+			t.Fatalf("unexpected %s scale decode: precision=%v scale=%v length=%v", test.dataType, precision, scale, length)
+		}
+	}
+
+}
+
+func TestColumnTypeDDLPreservesXuguSingleParameters(t *testing.T) {
+	for _, test := range []struct {
+		dataType  string
+		precision int
+		want      string
+	}{
+		{dataType: "BIT", precision: 8, want: "BIT(8)"},
+		{dataType: "VARBIT", precision: 64, want: "VARBIT(64)"},
+		{dataType: "TIME", precision: 3, want: "TIME(3)"},
+		{dataType: "TIME WITH TIME ZONE", precision: 3, want: "TIME(3) WITH TIME ZONE"},
+		{dataType: "TIMESTAMP", precision: 6, want: "TIMESTAMP(6)"},
+		{dataType: "TIMESTAMP WITH TIME ZONE", precision: 6, want: "TIMESTAMP(6) WITH TIME ZONE"},
+	} {
+		column := columnInfo{DataType: test.dataType, NumericPrecision: &test.precision}
+		if got := columnTypeDDL(column); got != test.want {
+			t.Fatalf("columnTypeDDL(%s, %d) = %q, want %q", test.dataType, test.precision, got, test.want)
+		}
 	}
 }
 

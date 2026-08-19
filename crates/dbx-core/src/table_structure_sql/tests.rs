@@ -513,6 +513,48 @@ fn builds_postgres_type_change_that_drops_default() {
 }
 
 #[test]
+fn builds_xugu_timezone_temporal_precision_in_final_ddl() {
+    let mut local_time = column("local_time");
+    local_time.data_type = "TIME(3) WITH TIME ZONE".to_string();
+    let mut created_at = column("created_at");
+    created_at.data_type = "TIMESTAMP(6) WITH TIME ZONE".to_string();
+    let created = build_create_table_sql(structure_change_options(
+        DatabaseType::Xugu,
+        Some("public"),
+        "events",
+        vec![local_time, created_at],
+    ));
+    assert_eq!(
+        created.statements,
+        vec![
+            r#"CREATE TABLE "public"."events" (
+  "local_time" TIME(3) WITH TIME ZONE,
+  "created_at" TIMESTAMP(6) WITH TIME ZONE
+);"#
+        ]
+    );
+
+    let mut altered_at = column("created_at");
+    altered_at.data_type = "TIMESTAMP(6) WITH TIME ZONE".to_string();
+    altered_at.original = Some(ColumnInfo {
+        name: "created_at".to_string(),
+        data_type: "TIMESTAMP".to_string(),
+        is_nullable: true,
+        ..Default::default()
+    });
+    let altered = build_single_column_alter_sql(SingleColumnAlterSqlOptions {
+        database_type: Some(DatabaseType::Xugu),
+        schema: Some("public".to_string()),
+        table_name: "events".to_string(),
+        column: altered_at,
+    });
+    assert_eq!(
+        altered.statements,
+        vec![r#"ALTER TABLE "public"."events" ALTER COLUMN "created_at" TIMESTAMP(6) WITH TIME ZONE;"#]
+    );
+}
+
+#[test]
 fn builds_postgres_array_and_domain_type_casts_without_affecting_xugu() {
     let mut tags = column("tags");
     tags.data_type = "text[]".to_string();

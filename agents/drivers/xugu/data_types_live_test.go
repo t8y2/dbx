@@ -51,7 +51,8 @@ func TestLiveXuguSelectableDataTypes(t *testing.T) {
 		{name: "double", definition: "DOUBLE", valueSQL: "1.25"},
 		{name: "datetime", definition: "DATETIME", valueSQL: "'2025-06-20 15:16:25'"},
 		{name: "datetime_tz", definition: "DATETIME WITH TIME ZONE", valueSQL: "'2025-06-21 17:16:25+08:00'"},
-		{name: "time_tz", definition: "TIME WITH TIME ZONE", valueSQL: "'17:30:29+08:00'"},
+		{name: "time_tz", definition: "TIME(3) WITH TIME ZONE", valueSQL: "'17:30:29.123+08:00'"},
+		{name: "timestamp_tz", definition: "TIMESTAMP(6) WITH TIME ZONE", valueSQL: "'2025-06-21 17:16:25.123456+08:00'"},
 		{name: "interval_year", definition: "INTERVAL YEAR", valueSQL: "2025"},
 		{name: "interval_year_month", definition: "INTERVAL YEAR TO MONTH", valueSQL: "'2025-11'"},
 		{name: "interval_month", definition: "INTERVAL MONTH", valueSQL: "1000"},
@@ -131,7 +132,7 @@ func assertLiveXuguDataTypeCatalog(t *testing.T, ctx context.Context, db queryer
 	if err := rows.Err(); err != nil {
 		t.Fatalf("iterate SHOW DATA_TYPES: %v", err)
 	}
-	for _, required := range []string{"TINYINT", "DOUBLE", "DATETIME", "DATETIME WITH TIME ZONE", "TIME WITH TIME ZONE", "INTERVAL DAY TO SECOND", "GUID", "ROWID", "JSON", "BIT", "VARBIT"} {
+	for _, required := range []string{"TINYINT", "DOUBLE", "DATETIME", "DATETIME WITH TIME ZONE", "TIME WITH TIME ZONE", "TIMESTAMP WITH TIME ZONE", "INTERVAL DAY TO SECOND", "GUID", "ROWID", "JSON", "BIT", "VARBIT"} {
 		if !found[required] {
 			t.Fatalf("SHOW DATA_TYPES is missing %q; returned %v", required, found)
 		}

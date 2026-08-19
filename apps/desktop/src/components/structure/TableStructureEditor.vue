@@ -56,6 +56,7 @@ import {
   createForeignKeyDrafts,
   createIndexDrafts,
   createTriggerDrafts,
+  dataTypeBaseInputValue,
   dataTypeLengthInputValue,
   dataTypeLengthUnitValue,
   defaultNewColumnDataType,
@@ -79,7 +80,6 @@ import {
   resolveInsertColumnIndex,
   restoreCharacterLengthUnitsAfterSave,
   sameStructureIndexType,
-  splitDataType,
   tableStructureIdentifierComparisonKey,
   toColumnNames,
 } from "@/lib/table/tableStructureEditorState";
@@ -891,13 +891,13 @@ const targetLabel = computed(() => buildStructureTargetLabel(connection.value?.n
 
 function isManticoreTextColumn(column: EditableStructureColumn): boolean {
   if (databaseType.value !== "manticoresearch") return false;
-  const baseType = splitDataType(column.dataType).baseType.trim().toLowerCase();
+  const baseType = dataTypeBaseInputValue(databaseType.value, column.dataType).trim().toLowerCase();
   return baseType === "text" || baseType === "string";
 }
 
 function isManticoreJsonColumn(column: EditableStructureColumn): boolean {
   if (databaseType.value !== "manticoresearch") return false;
-  return splitDataType(column.dataType).baseType.trim().toLowerCase() === "json";
+  return dataTypeBaseInputValue(databaseType.value, column.dataType).trim().toLowerCase() === "json";
 }
 
 let sqlPreviewRequestId = 0;
@@ -2061,14 +2061,14 @@ function removeMysqlEnumValue(column: EditableStructureColumn, index: number) {
 }
 
 function updateColumnDataTypeLength(column: EditableStructureColumn, value: string | number) {
-  const baseType = splitDataType(column.dataType).baseType;
+  const baseType = dataTypeBaseInputValue(databaseType.value, column.dataType);
   column.dataType = combineDataTypeForDatabaseWithLengthUnit(databaseType.value, baseType, String(value), dataTypeLengthUnitValue(databaseType.value, column.dataType));
   syncSqlServerIdentityForDataType(column);
   syncDamengIdentityForDataType(column);
 }
 
 function updateColumnDataTypeLengthUnit(column: EditableStructureColumn, value: unknown) {
-  const baseType = splitDataType(column.dataType).baseType;
+  const baseType = dataTypeBaseInputValue(databaseType.value, column.dataType);
   const unit = value === "__default" ? "" : String(value ?? "");
   column.dataType = combineDataTypeForDatabaseWithLengthUnit(databaseType.value, baseType, dataTypeLengthInputValue(databaseType.value, column.dataType), unit);
   syncSqlServerIdentityForDataType(column);
@@ -2377,7 +2377,7 @@ function isColumnLengthDisabled(column: EditableStructureColumn): boolean {
   if (isColumnTypeDisabled(column)) {
     return true;
   }
-  const baseType = splitDataType(column.dataType).baseType.trim().toLowerCase();
+  const baseType = dataTypeBaseInputValue(databaseType.value, column.dataType).trim().toLowerCase();
   return isDataTypeLengthDisabled(databaseType.value, baseType);
 }
 
@@ -3320,7 +3320,7 @@ watch([activeTab, ddlLoading], ([tab, loading]) => {
                   <td :class="structureCellClass">
                     <SearchableSelect
                       v-if="!isColumnTypeDisabled(column)"
-                      :model-value="splitDataType(column.dataType).baseType"
+                      :model-value="dataTypeBaseInputValue(databaseType, column.dataType)"
                       :options="dataTypeOptions"
                       :placeholder="t('structureEditor.typePlaceholder')"
                       :search-placeholder="t('structureEditor.typePlaceholder')"
@@ -3332,7 +3332,7 @@ watch([activeTab, ddlLoading], ([tab, loading]) => {
                       :trigger-class="[structureMonoControlClass, 'w-full']"
                       @update:model-value="(v: string) => updateColumnDataType(column, v)"
                     />
-                    <Input v-else :model-value="gaussdbMDataTypeDisplayName(splitDataType(column.dataType).baseType)" :class="[structureMonoControlClass, 'w-full']" disabled />
+                    <Input v-else :model-value="gaussdbMDataTypeDisplayName(dataTypeBaseInputValue(databaseType, column.dataType))" :class="[structureMonoControlClass, 'w-full']" disabled />
                   </td>
                   <td v-if="columnEditorControls.length" :class="structureCellClass">
                     <Popover v-if="isMysqlEnumDataType(databaseType, column.dataType)">

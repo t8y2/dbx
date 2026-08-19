@@ -421,6 +421,7 @@ export const DATA_TYPE_OPTIONS: Record<string, string[]> = {
     "TIME",
     "TIME WITH TIME ZONE",
     "TIMESTAMP",
+    "TIMESTAMP WITH TIME ZONE",
     "TINYINT",
     "VARBINARY",
     "VARBIT",
@@ -810,15 +811,21 @@ function columnDefaultForEditor(column: ColumnInfo, databaseType?: DatabaseType)
 
 const CHARACTER_LENGTH_METADATA_TYPES = new Set(["binary", "char", "character", "character varying", "nchar", "nvarchar", "nvarchar2", "varbinary", "varchar", "varchar2"]);
 const NUMERIC_PRECISION_METADATA_TYPES = new Set(["decimal", "number", "numeric"]);
+const XUGU_SINGLE_PRECISION_METADATA_TYPES = new Set(["bit", "time", "time with time zone", "timestamp", "timestamp with time zone", "varbit"]);
 
 function columnDataTypeForEditor(column: ColumnInfo, databaseType?: DatabaseType): string {
-  const parsed = splitDataType(column.data_type);
+  const parsed = splitDataTypeForDatabase(databaseType, column.data_type);
   if (parsed.params) return column.data_type;
 
   const baseType = parsed.baseType.trim().replace(/\s+/g, " ");
   const normalized = baseType.toLowerCase();
   if (CHARACTER_LENGTH_METADATA_TYPES.has(normalized) && Number.isInteger(column.character_maximum_length) && Number(column.character_maximum_length) > 0) {
     return combineDataTypeForDatabase(databaseType, baseType, String(column.character_maximum_length));
+  }
+  if (databaseType === "xugu" && XUGU_SINGLE_PRECISION_METADATA_TYPES.has(normalized) && Number.isInteger(column.numeric_precision)) {
+    const precision = Number(column.numeric_precision);
+    const minimum = normalized === "bit" || normalized === "varbit" ? 1 : 0;
+    if (precision >= minimum) return combineDataTypeForDatabase(databaseType, baseType, String(precision));
   }
   if (NUMERIC_PRECISION_METADATA_TYPES.has(normalized) && Number.isInteger(column.numeric_precision) && Number(column.numeric_precision) > 0) {
     const scale = Number.isInteger(column.numeric_scale) && Number(column.numeric_scale) >= 0 ? `,${column.numeric_scale}` : "";
@@ -1104,6 +1111,23 @@ export function splitDataType(raw: string): { baseType: string; params: string }
   return { baseType, params };
 }
 
+function splitDataTypeForDatabase(dbType: DatabaseType | undefined, raw: string): { baseType: string; params: string } {
+  if (dbType === "xugu") {
+    const match = raw.trim().match(/^(TIME|TIMESTAMP)\s*\(([^()]*)\)\s+WITH\s+TIME\s+ZONE$/i);
+    if (match) {
+      return {
+        baseType: `${match[1]} WITH TIME ZONE`,
+        params: match[2]!.trim(),
+      };
+    }
+  }
+  return splitDataType(raw);
+}
+
+export function dataTypeBaseInputValue(dbType: DatabaseType | undefined, rawDataType: string): string {
+  return splitDataTypeForDatabase(dbType, rawDataType).baseType;
+}
+
 export type DataTypeLengthUnit = "BYTE" | "CHAR";
 
 const CHARACTER_LENGTH_UNIT_TYPES = new Set(["char", "varchar", "varchar2"]);
@@ -1119,7 +1143,7 @@ export function getDataTypeLengthUnitOptions(dbType: DatabaseType | undefined, r
 }
 
 function splitDataTypeLengthParams(dbType: DatabaseType | undefined, rawDataType: string): { length: string; unit: DataTypeLengthUnit | "" } {
-  const { params } = splitDataType(rawDataType);
+  const { params } = splitDataTypeForDatabase(dbType, rawDataType);
   if (!params || getDataTypeLengthUnitOptions(dbType, rawDataType).length === 0) {
     return { length: params, unit: "" };
   }
@@ -1215,12 +1239,21 @@ export function combineDataTypeForDatabase(dbType: DatabaseType | undefined, bas
   const normalizedParams = normalizeDataTypeParams(dbType, baseType, params);
   const mysqlType = combineMysqlNumericAttributeType(dbType, baseType, normalizedParams);
   if (mysqlType) return mysqlType;
+  const xuguTemporalType = combineXuguTemporalType(baseType, normalizedParams, dbType);
+  if (xuguTemporalType) return xuguTemporalType;
   return combineDataType(baseType, normalizedParams);
 }
 
 export function dataTypeLengthInputValue(dbType: DatabaseType | undefined, rawDataType: string): string {
-  const parsed = splitDataType(rawDataType);
+  const parsed = splitDataTypeForDatabase(dbType, rawDataType);
   return isDataTypeLengthDisabled(dbType, parsed.baseType) ? "" : splitDataTypeLengthParams(dbType, rawDataType).length;
+}
+
+function combineXuguTemporalType(baseType: string, params: string, dbType: DatabaseType | undefined): string | null {
+  if (dbType !== "xugu") return null;
+  const match = baseType.trim().match(/^(TIME|TIMESTAMP)\s+WITH\s+TIME\s+ZONE$/i);
+  if (!match) return null;
+  return params ? `${match[1]}(${params}) WITH TIME ZONE` : baseType.trim();
 }
 
 export function normalizeDataTypeParams(dbType: DatabaseType | undefined, baseType: string, params: string): string {
@@ -1258,7 +1291,7 @@ function isTemporalPrecisionType(dbType: DatabaseType | undefined, baseType: str
     case "questdb":
       return ["timestamp"].includes(normalized);
     case "xugu":
-      return ["time", "timestamp"].includes(normalized);
+      return ["time", "time with time zone", "timestamp", "timestamp with time zone"].includes(normalized);
     default:
       return false;
   }
@@ -1287,7 +1320,7 @@ function isValidTemporalPrecision(dbType: DatabaseType | undefined, baseType: st
   if (!/^\d+$/.test(params)) return false;
   const value = Number(params);
   const normalizedBaseType = baseType.trim().replace(/\s+/g, " ").toLowerCase();
-  const max = dbType === "xugu" && normalizedBaseType === "time" ? 3 : dbType === "oracle" || dbType === "dameng" || dbType === "oceanbase-oracle" ? 9 : 6;
+  const max = dbType === "xugu" && ["time", "time with time zone"].includes(normalizedBaseType) ? 3 : dbType === "oracle" || dbType === "dameng" || dbType === "oceanbase-oracle" ? 9 : 6;
   return Number.isInteger(value) && value >= 0 && value <= max && String(value) === params;
 }
 

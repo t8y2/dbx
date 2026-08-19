@@ -474,6 +474,7 @@ export default withEnglishFallback({
     authDatabasePlaceholder: "Opzionale, spesso admin",
     authMechanism: "Meccanismo di Autenticazione",
     authMechanismDefault: "Predefinito",
+    oidcBrowserAuthHint: "L'autenticazione viene completata nel browser di sistema. Non è richiesta una password del database.",
     driverMode: "Driver",
     mongoDriverAuto: "Automatico",
     mongoDriverLegacy: "Legacy",

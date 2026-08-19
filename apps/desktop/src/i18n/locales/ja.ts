@@ -474,6 +474,7 @@ export default withEnglishFallback({
     authDatabasePlaceholder: "任意、通常は admin",
     authMechanism: "認証方式",
     authMechanismDefault: "デフォルト",
+    oidcBrowserAuthHint: "接続時にシステムブラウザーで認証します。データベースのパスワードは不要です",
     driverMode: "ドライバー",
     mongoDriverAuto: "自動",
     mongoDriverLegacy: "レガシー",

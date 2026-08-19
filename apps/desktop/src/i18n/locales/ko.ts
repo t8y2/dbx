@@ -467,6 +467,7 @@ export default withEnglishFallback({
     authDatabasePlaceholder: "선택, 보통 admin",
     authMechanism: "인증 방식",
     authMechanismDefault: "기본",
+    oidcBrowserAuthHint: "연결할 때 시스템 브라우저에서 인증을 완료하며 데이터베이스 비밀번호는 필요하지 않습니다.",
     driverMode: "드라이버",
     mongoDriverAuto: "자동",
     mongoDriverLegacy: "레거시",

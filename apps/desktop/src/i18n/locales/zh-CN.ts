@@ -398,6 +398,7 @@ export default withEnglishFallback({
     authDatabasePlaceholder: "可选，通常为 admin",
     authMechanism: "认证机制",
     authMechanismDefault: "默认",
+    oidcBrowserAuthHint: "连接时将在系统浏览器中完成身份认证，无需填写数据库密码",
     driverMode: "驱动",
     mongoDriverAuto: "自动",
     mongoDriverLegacy: "旧版兼容",

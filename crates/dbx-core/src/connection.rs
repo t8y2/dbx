@@ -26,6 +26,7 @@ use crate::models::connection::{
     database_info_from_protocol_value, parse_jdbc_host_port, parse_mongo_first_host, rewrite_jdbc_url_host,
     ConnectionConfig, ConnectionTestResult, DatabaseConnectionInfo, DatabaseType, TransportLayerConfig,
 };
+use crate::mongo_oidc::MongoOidcBrowserOpener;
 use crate::path_utils::expand_tilde;
 use crate::plugins::{PluginDriverSession, PluginRegistry, PluginRuntimeEnv};
 use crate::query_cancel::RunningQueries;
@@ -261,6 +262,7 @@ pub struct AppState {
     /// AI/元数据从它读取，前端通过状态接口查询。
     pub session_credentials: SessionCredentialStore,
     metadata_gates: Arc<Mutex<HashMap<String, Arc<Semaphore>>>>,
+    mongo_oidc_browser_opener: std::sync::RwLock<Option<MongoOidcBrowserOpener>>,
     #[cfg(feature = "mq-admin")]
     pub mq_registry: crate::mq::MqAdminRegistry,
 }
@@ -1158,9 +1160,18 @@ impl AppState {
             transaction_sessions: Arc::new(RwLock::new(HashMap::new())),
             session_credentials: SessionCredentialStore::new(),
             metadata_gates: Arc::new(Mutex::new(HashMap::new())),
+            mongo_oidc_browser_opener: std::sync::RwLock::new(None),
             #[cfg(feature = "mq-admin")]
             mq_registry: crate::mq::MqAdminRegistry::new(),
         }
+    }
+
+    pub fn set_mongo_oidc_browser_opener(&self, opener: MongoOidcBrowserOpener) {
+        *self.mongo_oidc_browser_opener.write().expect("MongoDB OIDC browser opener lock poisoned") = Some(opener);
+    }
+
+    pub fn mongo_oidc_browser_opener(&self) -> Option<MongoOidcBrowserOpener> {
+        self.mongo_oidc_browser_opener.read().expect("MongoDB OIDC browser opener lock poisoned").clone()
     }
 
     pub(crate) async fn acquire_metadata_permit(
@@ -2073,16 +2084,25 @@ impl AppState {
                 return Err("DuckDB support is not compiled in this build.".to_string());
             }
             DatabaseType::MongoDb => {
-                if mongo_uses_legacy_driver(&db_config) {
+                let uses_oidc = db::mongo_driver::mongo_uri_uses_oidc(&url);
+                if mongo_uses_legacy_driver(&db_config) && !uses_oidc {
                     log::info!("Using configured MongoDB legacy driver for connection_id={connection_id}");
                     let connect_params = serde_json::json!({ "connection": agent_connect_params(&db_config, &host, port, db_config.effective_database().unwrap_or(""))? });
                     let mut client = self.agent_manager.spawn(&DatabaseType::MongoDb, Some("mongodb-legacy")).await?;
                     client.connect(connect_params).await.map_err(|err| mongo_legacy_error_with_auth_hint(&err))?;
                     PoolKind::agent(client)
                 } else {
-                    let native_err = match db::mongo_driver::connect(&url, connect_timeout, idle_timeout).await {
-                        Ok(client) => match db::mongo_driver::test_connection(
+                    let native_err = match db::mongo_driver::connect_with_oidc(
+                        &url,
+                        connect_timeout,
+                        idle_timeout,
+                        self.mongo_oidc_browser_opener(),
+                    )
+                    .await
+                    {
+                        Ok(client) => match db::mongo_driver::test_connection_for_url(
                             &client,
+                            &url,
                             connect_timeout,
                             db_config.effective_database(),
                         )
@@ -2116,7 +2136,7 @@ impl AppState {
                         },
                         Err(e) => e,
                     };
-                    if should_retry_mongo_with_legacy_driver(&native_err) {
+                    if !uses_oidc && should_retry_mongo_with_legacy_driver(&native_err) {
                         log::info!("Native MongoDB driver failed ({native_err}), falling back to agent driver");
                         let connect_params = serde_json::json!({ "connection": agent_connect_params(&db_config, &host, port, db_config.effective_database().unwrap_or(""))? });
                         let legacy_agent_key =

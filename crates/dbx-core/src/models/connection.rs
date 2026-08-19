@@ -993,6 +993,11 @@ impl ConnectionConfig {
 
     pub fn canonicalized(&self) -> Self {
         let mut config = self.clone();
+        if config.uses_mongodb_oidc() {
+            config.password.clear();
+            config.driver_profile = Some("mongodb".to_string());
+            config.driver_label = Some("MongoDB".to_string());
+        }
         if config.db_type == DatabaseType::SqlServer
             && sqlserver_legacy_compatibility_param(config.url_params.as_deref())
         {
@@ -1013,6 +1018,16 @@ impl ConnectionConfig {
             }
         }
         config
+    }
+
+    pub fn uses_mongodb_oidc(&self) -> bool {
+        if self.db_type != DatabaseType::MongoDb {
+            return false;
+        }
+        if let Some(connection_string) = self.connection_string.as_deref().filter(|value| !value.trim().is_empty()) {
+            return mongo_connection_string_uses_oidc(connection_string);
+        }
+        self.url_params.as_deref().is_some_and(mongo_url_params_use_oidc)
     }
 
     pub fn uses_redis_sentinel(&self) -> bool {
@@ -1262,6 +1277,8 @@ impl ConnectionConfig {
                 let db_part = mongo_uri_db_part_for_suffix(&db_part, &suffix);
                 if self.username.is_empty() {
                     format!("mongodb://{host}:{port}{db_part}{suffix}")
+                } else if mongo_url_params_use_oidc(&params) {
+                    format!("mongodb://{username}@{host}:{port}{db_part}{suffix}")
                 } else {
                     format!("mongodb://{username}:{password}@{host}:{port}{db_part}{suffix}")
                 }
@@ -1824,11 +1841,39 @@ fn normalize_mongo_url_params(value: &str, force_tls: bool, default_auth_source:
         }
     }
 
-    if default_auth_source && !parts.iter().any(|part| url_param_key_is(part, "authSource")) {
+    if parts.iter().any(|part| mongo_url_param_equals(part, "authMechanism", "MONGODB-OIDC")) {
+        parts.retain(|part| !url_param_key_is(part, "authSource"));
+        parts.push("authSource=%24external".to_string());
+    } else if default_auth_source && !parts.iter().any(|part| url_param_key_is(part, "authSource")) {
         parts.push("authSource=admin".to_string());
     }
 
     parts.join("&")
+}
+
+fn mongo_url_params_use_oidc(value: &str) -> bool {
+    value.trim_start_matches('?').split('&').any(|part| mongo_url_param_equals(part, "authMechanism", "MONGODB-OIDC"))
+}
+
+fn mongo_connection_string_uses_oidc(value: &str) -> bool {
+    let value = value.trim();
+    if !value.get(.."mongodb://".len()).is_some_and(|prefix| prefix.eq_ignore_ascii_case("mongodb://"))
+        && !value.get(.."mongodb+srv://".len()).is_some_and(|prefix| prefix.eq_ignore_ascii_case("mongodb+srv://"))
+    {
+        return false;
+    }
+    value
+        .split_once('?')
+        .map(|(_, query)| mongo_url_params_use_oidc(query.split('#').next().unwrap_or("")))
+        .unwrap_or(false)
+}
+
+fn mongo_url_param_equals(part: &str, expected_key: &str, expected_value: &str) -> bool {
+    let Some((key, value)) = part.split_once('=') else {
+        return false;
+    };
+    key.trim().eq_ignore_ascii_case(expected_key)
+        && percent_decode_str(value).decode_utf8_lossy().trim().eq_ignore_ascii_case(expected_value)
 }
 
 /// The Rust MongoDB driver uses rustls by default, which does not accept
@@ -3661,6 +3706,57 @@ mod tests {
             config.connection_url(),
             "mongodb://root:secret@10.1.2.3:17000/app?authSource=admin&authMechanism=SCRAM-SHA-1&directConnection=true"
         );
+    }
+
+    #[test]
+    fn mongodb_oidc_form_url_uses_external_auth_without_password() {
+        let mut config = mongodb_config("employee@example.com", "stale-secret", Some("app"));
+        config.url_params = Some("authSource=admin&authMechanism=MONGODB-OIDC".to_string());
+
+        assert_eq!(
+            config.connection_url(),
+            "mongodb://employee%40example%2Ecom@10.1.2.3:17000/app?authMechanism=MONGODB-OIDC&authSource=%24external"
+        );
+        assert!(!config.connection_url().contains("stale-secret"));
+    }
+
+    #[test]
+    fn mongodb_oidc_form_url_without_username_uses_external_auth() {
+        let mut config = mongodb_config("", "", Some("app"));
+        config.url_params = Some("authMechanism=MONGODB-OIDC".to_string());
+
+        assert_eq!(
+            config.connection_url(),
+            "mongodb://10.1.2.3:17000/app?authMechanism=MONGODB-OIDC&authSource=%24external"
+        );
+    }
+
+    #[test]
+    fn mongodb_oidc_canonicalization_removes_password_and_legacy_driver() {
+        let mut form_config = mongodb_config("employee@example.com", "stale-secret", Some("app"));
+        form_config.driver_profile = Some("mongodb-legacy".to_string());
+        form_config.driver_label = Some("MongoDB (Legacy)".to_string());
+        form_config.url_params = Some("authMechanism=MONGODB-OIDC".to_string());
+
+        let form_canonical = form_config.canonicalized();
+        assert!(form_canonical.password.is_empty());
+        assert_eq!(form_canonical.driver_profile.as_deref(), Some("mongodb"));
+        assert_eq!(form_canonical.driver_label.as_deref(), Some("MongoDB"));
+
+        let mut url_config = mongodb_config("", "stale-secret", None);
+        url_config.driver_profile = Some("mongodb-legacy".to_string());
+        url_config.connection_string =
+            Some("mongodb+srv://cluster.example.com/app?authSource=%24external&authMechanism=MONGODB-OIDC".to_string());
+        let url_canonical = url_config.canonicalized();
+        assert!(url_canonical.password.is_empty());
+        assert_eq!(url_canonical.driver_profile.as_deref(), Some("mongodb"));
+
+        let mut scram_config = mongodb_config("user", "secret", Some("app"));
+        scram_config.driver_profile = Some("mongodb-legacy".to_string());
+        scram_config.url_params = Some("authMechanism=SCRAM-SHA-1".to_string());
+        let scram_canonical = scram_config.canonicalized();
+        assert_eq!(scram_canonical.password, "secret");
+        assert_eq!(scram_canonical.driver_profile.as_deref(), Some("mongodb-legacy"));
     }
 
     #[test]

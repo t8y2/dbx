@@ -3,6 +3,20 @@ export function mongoUrlParam(urlParams: string | undefined, key: string): strin
   return params.get(key) || "";
 }
 
+export function mongoConnectionUsesOidc(urlParams: string | undefined, connectionString?: string): boolean {
+  const input = connectionString?.trim() || "";
+  if (input) {
+    if (!/^mongodb(?:\+srv)?:\/\//i.test(input)) return false;
+    const queryStart = input.indexOf("?");
+    if (queryStart < 0) return false;
+    const fragmentStart = input.indexOf("#", queryStart + 1);
+    const query = input.slice(queryStart + 1, fragmentStart < 0 ? undefined : fragmentStart);
+    return mongoUrlParamCaseInsensitive(query, "authMechanism").toUpperCase() === "MONGODB-OIDC";
+  }
+
+  return mongoUrlParamCaseInsensitive(urlParams, "authMechanism").toUpperCase() === "MONGODB-OIDC";
+}
+
 export function setMongoUrlParam(urlParams: string | undefined, key: string, value: string): string {
   const params = parseMongoUrlParams(urlParams);
   const normalized = value.trim();
@@ -83,4 +97,12 @@ export function mongodbAuthFailureHint(message: string): string {
 
 function parseMongoUrlParams(urlParams: string | undefined): URLSearchParams {
   return new URLSearchParams((urlParams || "").trim().replace(/^\?/, ""));
+}
+
+function mongoUrlParamCaseInsensitive(urlParams: string | undefined, key: string): string {
+  const expectedKey = key.toLowerCase();
+  for (const [paramKey, value] of parseMongoUrlParams(urlParams)) {
+    if (paramKey.toLowerCase() === expectedKey) return value;
+  }
+  return "";
 }

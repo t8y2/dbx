@@ -473,6 +473,7 @@ export default {
     authDatabasePlaceholder: "Optional, often admin",
     authMechanism: "Auth Mechanism",
     authMechanismDefault: "Default",
+    oidcBrowserAuthHint: "Authentication opens in your system browser. No database password is required.",
     driverMode: "Driver",
     mongoDriverAuto: "Auto",
     mongoDriverLegacy: "Legacy",

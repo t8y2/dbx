@@ -44,7 +44,7 @@ import { firstZooKeeperEndpoint, normalizeZooKeeperConnectString } from "@/lib/z
 import { setZooKeeperAuthScheme, zooKeeperAuthScheme as resolveZooKeeperAuthScheme, type ZooKeeperAuthScheme } from "@/lib/zookeeper/zookeeperConnectionOptions";
 import { isLocalFileTypeDb } from "@/lib/connection/connectionFile";
 import { MQ_PINNED_VERSION_OPTIONS, pinnedVersionToSelection, selectionToPinnedVersion } from "@/lib/mq/mqPinnedVersionOptions";
-import { mongodbAuthFailureHint, mongoUrlParam, mongoUrlParamIsTrue, normalizeMongoTlsFormState, setMongoUrlParam, setMongoUrlParamBoolean } from "@/lib/mongo/mongoConnectionOptions";
+import { mongodbAuthFailureHint, mongoConnectionUsesOidc, mongoUrlParam, mongoUrlParamIsTrue, normalizeMongoTlsFormState, setMongoUrlParam, setMongoUrlParamBoolean } from "@/lib/mongo/mongoConnectionOptions";
 import { isMongoLegacyDriverProfile } from "@/lib/mongo/mongoCapabilities";
 import { mysqlCleartextPasswordAuthEnabled, setMysqlCleartextPasswordAuthEnabled } from "@/lib/database/mysqlConnectionOptions";
 import { applyDamengSslUrlParams, damengSslFormConfig } from "@/lib/database/damengSslOptions";
@@ -3626,9 +3626,19 @@ const mongoAuthDatabase = computed({
 const mongoAuthMechanism = computed({
   get: () => mongoUrlParam(form.value.url_params, "authMechanism") || "default",
   set: (value: string) => {
-    form.value.url_params = setMongoUrlParam(form.value.url_params, "authMechanism", value === "default" ? "" : value);
+    const previous = mongoUrlParam(form.value.url_params, "authMechanism");
+    let next = setMongoUrlParam(form.value.url_params, "authMechanism", value === "default" ? "" : value);
+    if (value === "MONGODB-OIDC") {
+      form.value.password = "";
+      mongoDriverMode.value = "auto";
+      next = setMongoUrlParam(next, "authSource", "$external");
+    } else if (previous === "MONGODB-OIDC" && mongoUrlParam(next, "authSource") === "$external") {
+      next = setMongoUrlParam(next, "authSource", "");
+    }
+    form.value.url_params = next;
   },
 });
+const mongoUsesOidc = computed(() => mongoConnectionUsesOidc(mongoUseUrl.value ? undefined : form.value.url_params, mongoUseUrl.value ? form.value.connection_string : undefined));
 const mongoTlsAllowInvalidCertificates = computed({
   get: () => mongoUrlParamIsTrue(form.value.url_params, "tlsAllowInvalidCertificates"),
   set: (value: boolean) => {
@@ -4125,7 +4135,12 @@ function connectionConfigForSubmit(id: string, generatedName = ""): ConnectionCo
     config.connection_string = normalizeMongoConnectionString(config.connection_string?.trim() || "");
   }
   if (config.db_type === "mongodb") {
-    if (isMongoLegacyDriverProfile(config.driver_profile)) {
+    const usesOidc = mongoConnectionUsesOidc(mongoUseUrl.value ? undefined : config.url_params, mongoUseUrl.value ? config.connection_string : undefined);
+    if (usesOidc) {
+      config.password = "";
+      config.driver_profile = "mongodb";
+      config.driver_label = "MongoDB";
+    } else if (isMongoLegacyDriverProfile(config.driver_profile)) {
       config.driver_profile = "mongodb-legacy";
       config.driver_label = "MongoDB (Legacy)";
     } else {
@@ -6838,7 +6853,7 @@ function openExternalUrl(url: string) {
                     <Label :class="connectionLabelSmallClass">{{ t("connection.driverMode") }}</Label>
                     <div class="col-span-3 flex items-center gap-2">
                       <Button size="sm" :variant="mongoDriverMode === 'legacy' ? 'outline' : 'default'" @click="mongoDriverMode = 'auto'">{{ t("connection.mongoDriverAuto") }}</Button>
-                      <Button size="sm" :variant="mongoDriverMode === 'legacy' ? 'default' : 'outline'" @click="mongoDriverMode = 'legacy'">{{ t("connection.mongoDriverLegacy") }}</Button>
+                      <Button size="sm" :variant="mongoDriverMode === 'legacy' ? 'default' : 'outline'" :disabled="mongoUsesOidc" @click="mongoDriverMode = 'legacy'">{{ t("connection.mongoDriverLegacy") }}</Button>
                       <Tooltip>
                         <TooltipTrigger as-child>
                           <CircleHelp class="h-3.5 w-3.5 cursor-help text-muted-foreground hover:text-foreground" />
@@ -6864,6 +6879,9 @@ function openExternalUrl(url: string) {
                         class="col-span-3 flex min-h-[80px] w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
                         placeholder="mongodb+srv://user:pass@cluster.mongodb.net/mydb"
                       />
+                      <p v-if="mongoUsesOidc" class="col-start-2 col-span-3 text-xs text-muted-foreground">
+                        {{ t("connection.oidcBrowserAuthHint") }}
+                      </p>
                     </div>
                   </template>
                   <template v-else>
@@ -6917,7 +6935,7 @@ function openExternalUrl(url: string) {
                       <Label :class="connectionLabelClass">{{ t("connection.user") }}</Label>
                       <Input v-model="form.username" class="col-span-3" />
                     </div>
-                    <div class="grid grid-cols-4 items-center gap-4">
+                    <div v-if="mongoAuthMechanism !== 'MONGODB-OIDC'" class="grid grid-cols-4 items-center gap-4">
                       <Label :class="connectionLabelClass">{{ t("connection.password") }}</Label>
                       <PasswordInput v-model="form.password" class="col-span-3" />
                     </div>
@@ -6927,7 +6945,7 @@ function openExternalUrl(url: string) {
                     </div>
                     <div class="grid grid-cols-4 items-center gap-4">
                       <Label :class="connectionLabelClass">{{ t("connection.authDatabase") }}</Label>
-                      <Input v-model="mongoAuthDatabase" class="col-span-3" :placeholder="t('connection.authDatabasePlaceholder')" />
+                      <Input v-model="mongoAuthDatabase" class="col-span-3" :disabled="mongoAuthMechanism === 'MONGODB-OIDC'" :placeholder="mongoAuthMechanism === 'MONGODB-OIDC' ? '$external' : t('connection.authDatabasePlaceholder')" />
                     </div>
                     <div class="grid grid-cols-4 items-center gap-4">
                       <Label :class="connectionLabelClass">{{ t("connection.authMechanism") }}</Label>
@@ -6939,9 +6957,13 @@ function openExternalUrl(url: string) {
                           <SelectItem value="default">{{ t("connection.authMechanismDefault") }}</SelectItem>
                           <SelectItem value="SCRAM-SHA-1">SCRAM-SHA-1</SelectItem>
                           <SelectItem value="SCRAM-SHA-256">SCRAM-SHA-256</SelectItem>
+                          <SelectItem value="MONGODB-OIDC">MONGODB-OIDC</SelectItem>
                         </SelectContent>
                       </Select>
                     </div>
+                    <p v-if="mongoAuthMechanism === 'MONGODB-OIDC'" class="col-start-2 col-span-3 text-xs text-muted-foreground">
+                      {{ t("connection.oidcBrowserAuthHint") }}
+                    </p>
                     <div class="grid grid-cols-4 items-center gap-4">
                       <Label :class="connectionLabelClass">{{ t("connection.urlParams") }}</Label>
                       <Input v-model="form.url_params" class="col-span-3" placeholder="replicaSet=rs0&authSource=admin" />

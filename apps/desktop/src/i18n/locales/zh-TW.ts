@@ -475,6 +475,7 @@ export default withEnglishFallback({
     authDatabasePlaceholder: "可選，通常為 admin",
     authMechanism: "認證機制",
     authMechanismDefault: "預設",
+    oidcBrowserAuthHint: "連線時將在系統瀏覽器中完成身分驗證，無需填寫資料庫密碼",
     driverMode: "驅動",
     mongoDriverAuto: "自動",
     mongoDriverLegacy: "舊版相容",

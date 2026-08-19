@@ -3882,7 +3882,7 @@ export async function meilisearchSearchDocuments(
   connectionId: string,
   index: string,
   params: { q?: string | null; filter?: string | null; sort?: string | null; limit: number; offset: number; hybridEmbedder?: string | null; hybridSemanticRatio?: number | null; showRankingScore?: boolean; rankingScoreThreshold?: number | null },
-): Promise<{ hits: any[]; totalHits: number; processingTimeMs: number }> {
+): Promise<{ hits: Array<{ id?: unknown; document: Record<string, any> }>; totalHits: number; processingTimeMs: number }> {
   return post("/api/document-store/meilisearch/search", {
     connectionId,
     index,

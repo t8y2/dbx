@@ -107,13 +107,17 @@ async function confirmClearDocuments() {
 }
 
 async function confirmDeleteIndex() {
+  // Capture the owning tab id up front: the delete is awaited, and the user
+  // may switch tabs meanwhile, so reading the active tab afterwards could
+  // close an unrelated tab.
+  const ownerTabId = queryStore.activeTabId;
   isDeletingIndex.value = true;
   try {
     await api.meilisearchDeleteIndex(props.connectionId, props.index);
     toast(t("meilisearch.indexDeleted"));
     deleteIndexConfirmOpen.value = false;
-    const activeTabId = queryStore.activeTabId;
-    if (activeTabId) queryStore.closeTab(activeTabId);
+    // The tab may have been closed while the delete was in flight.
+    if (ownerTabId && queryStore.tabs.some((tab) => tab.id === ownerTabId)) queryStore.closeTab(ownerTabId);
   } catch (e: any) {
     toast(e?.message || String(e), 5000);
   } finally {

@@ -2,7 +2,8 @@ use percent_encoding::{percent_decode_str, utf8_percent_encode, AsciiSet, CONTRO
 use reqwest::{Client as HttpClient, Method, RequestBuilder, StatusCode};
 use serde::Deserialize;
 use serde_json::{Map, Value};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use super::{http_client_builder, ColumnInfo};
@@ -38,6 +39,9 @@ pub struct MeilisearchClient {
     http: HttpClient,
     base_url: String,
     api_key: Option<String>,
+    /// Per-index metadata cache so repeat searches stay single-request. Shared
+    /// across clones of the pooled client; evicted when the index is deleted.
+    index_info_cache: Arc<Mutex<HashMap<String, IndexInfoResponse>>>,
 }
 
 impl MeilisearchClient {
@@ -54,7 +58,12 @@ impl MeilisearchClient {
         }
         let http = builder.build().map_err(|error| format!("Meilisearch HTTP client error: {error}"))?;
         let api_key = api_key.map(str::trim).filter(|value| !value.is_empty()).map(str::to_string);
-        Ok(Self { http, base_url: url.trim_end_matches('/').to_string(), api_key })
+        Ok(Self {
+            http,
+            base_url: url.trim_end_matches('/').to_string(),
+            api_key,
+            index_info_cache: Arc::new(Mutex::new(HashMap::new())),
+        })
     }
 
     pub fn new_for_config(
@@ -167,7 +176,7 @@ pub async fn test_connection(client: &MeilisearchClient, _timeout: Duration) -> 
     Ok(())
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct IndexInfoResponse {
     uid: String,
@@ -183,13 +192,19 @@ struct IndexListResponse {
 }
 
 async fn index_info(client: &MeilisearchClient, index: &str) -> Result<IndexInfoResponse, String> {
+    if let Some(cached) = client.index_info_cache.lock().unwrap().get(index).cloned() {
+        return Ok(cached);
+    }
     let response = client
         .get(&format!("/indexes/{}", encode_path_segment(index)))
         .send()
         .await
         .map_err(|error| format!("Meilisearch request failed: {error}"))?;
     let value = response_json(response, "index lookup").await?;
-    serde_json::from_value(value).map_err(|error| format!("Meilisearch index parse error: {error}"))
+    let info: IndexInfoResponse =
+        serde_json::from_value(value).map_err(|error| format!("Meilisearch index parse error: {error}"))?;
+    client.index_info_cache.lock().unwrap().insert(index.to_string(), info.clone());
+    Ok(info)
 }
 
 pub async fn list_indexes(client: &MeilisearchClient) -> Result<Vec<String>, String> {
@@ -380,17 +395,9 @@ fn inject_document_identity(document: Value, primary_key: Option<&str>) -> Resul
     Ok(Value::Object(document))
 }
 
-/// Like `inject_document_identity` but keeps the original primary key field, so
-/// search consumers can still rebuild the document exactly as stored.
-fn alias_document_identity(document: Value, primary_key: Option<&str>) -> Result<Value, String> {
-    let mut document =
-        document.as_object().cloned().ok_or_else(|| "Meilisearch returned a non-object document".to_string())?;
-    if let Some(primary_key) = primary_key {
-        if let Some(id) = document.get(primary_key).cloned() {
-            document.insert("_id".to_string(), id);
-        }
-    }
-    Ok(Value::Object(document))
+fn search_hit(hit: Value, primary_key: Option<&str>) -> MeilisearchSearchHit {
+    let id = primary_key.and_then(|primary_key| hit.get(primary_key).cloned());
+    MeilisearchSearchHit { id, document: hit }
 }
 
 fn parse_document_object(doc_json: &str) -> Result<Map<String, Value>, String> {
@@ -453,7 +460,13 @@ pub async fn update_document(client: &MeilisearchClient, index: &str, id: &str, 
     let primary_key =
         index_info.primary_key.ok_or_else(|| format!("Meilisearch index '{}' has no primary key", index_info.uid))?;
     let mut document = parse_document_object(doc_json)?;
-    document.remove("_id");
+    // `_id` is only the dbx browse alias when it matches the target identity; a
+    // genuine user field with a different value must survive the update.
+    let is_identity_alias =
+        document.get("_id").map(|value| value_to_id(value) == value_to_id(&decoded_identity(id))).unwrap_or(false);
+    if is_identity_alias {
+        document.remove("_id");
+    }
     document.insert(primary_key, decoded_identity(id));
     // Meilisearch uses POST for full replacement and PUT for partial updates.
     // DBX sends the complete edited document so removed fields must disappear.
@@ -748,10 +761,20 @@ fn meilisearch_sort_from_request(sort: Option<&str>, primary_key: Option<&str>) 
     Ok((!result.is_empty()).then_some(result))
 }
 
+/// Search hit with the document identity kept outside the document payload, so
+/// a real `_id` (or any other) field in the stored document is never shadowed
+/// by dbx metadata.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct MeilisearchSearchHit {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<Value>,
+    pub document: Value,
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MeilisearchSearchResult {
-    pub hits: Vec<Value>,
+    pub hits: Vec<MeilisearchSearchHit>,
     pub total_hits: u64,
     pub processing_time_ms: u64,
 }
@@ -774,7 +797,8 @@ fn meilisearch_search_body(
     ranking_score_threshold: Option<f64>,
 ) -> Result<Map<String, Value>, String> {
     let mut body = Map::new();
-    if let Some(q) = q.map(str::trim).filter(|value| !value.is_empty()) {
+    let q = q.map(str::trim).filter(|value| !value.is_empty());
+    if let Some(q) = q {
         body.insert("q".to_string(), Value::String(q.to_string()));
     }
     body.insert("offset".to_string(), Value::Number(offset.into()));
@@ -807,9 +831,13 @@ fn meilisearch_search_body(
             .ok_or_else(|| "Invalid ranking score threshold".to_string())?;
         body.insert("rankingScoreThreshold".to_string(), Value::Number(threshold));
     }
-    body.insert("attributesToHighlight".to_string(), Value::Array(vec![Value::String("*".to_string())]));
-    body.insert("highlightPreTag".to_string(), Value::String("<mark>".to_string()));
-    body.insert("highlightPostTag".to_string(), Value::String("</mark>".to_string()));
+    // Highlighting is only meaningful with a query term; asking for `_formatted`
+    // on every search would double the response payload for plain browsing.
+    if q.is_some() {
+        body.insert("attributesToHighlight".to_string(), Value::Array(vec![Value::String("*".to_string())]));
+        body.insert("highlightPreTag".to_string(), Value::String("<mark>".to_string()));
+        body.insert("highlightPostTag".to_string(), Value::String("</mark>".to_string()));
+    }
     Ok(body)
 }
 
@@ -830,7 +858,7 @@ fn parse_meilisearch_search_response(
         .and_then(Value::as_u64)
         .ok_or_else(|| "Meilisearch search response is missing a hit total".to_string())?;
     let processing_time_ms = value.get("processingTimeMs").and_then(Value::as_u64).unwrap_or(0);
-    let hits = hits.into_iter().map(|hit| alias_document_identity(hit, primary_key)).collect::<Result<Vec<_>, _>>()?;
+    let hits = hits.into_iter().map(|hit| search_hit(hit, primary_key)).collect();
     Ok(MeilisearchSearchResult { hits, total_hits, processing_time_ms })
 }
 
@@ -968,7 +996,9 @@ pub async fn delete_index(client: &MeilisearchClient, index: &str) -> Result<(),
         .await
         .map_err(|error| format!("Meilisearch request failed: {error}"))?;
     let task = task_from_response(response, "index deletion").await?;
-    wait_for_task(client, task.task_uid).await
+    wait_for_task(client, task.task_uid).await?;
+    client.index_info_cache.lock().unwrap().remove(index);
+    Ok(())
 }
 
 pub async fn delete_all_documents(client: &MeilisearchClient, index: &str) -> Result<(), String> {
@@ -1259,6 +1289,11 @@ mod tests {
         assert!(body.get("sort").is_none());
         assert!(body.get("hybrid").is_none());
         assert!(body.get("showRankingScore").is_none());
+        // Without a query term there is nothing to highlight, so `_formatted`
+        // data is not requested.
+        assert!(body.get("attributesToHighlight").is_none());
+        assert!(body.get("highlightPreTag").is_none());
+        assert!(body.get("highlightPostTag").is_none());
         // A zero threshold means "no filtering" and is omitted.
         let body = meilisearch_search_body(None, 0, 5, None, None, None, None, false, Some(0.0)).unwrap();
         assert!(body.get("rankingScoreThreshold").is_none());
@@ -1300,7 +1335,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_search_response_and_injects_identity() {
+    fn parses_search_response_and_captures_identity() {
         let value = json!({
             "hits": [
                 { "movie_id": 123, "title": "Alien", "_formatted": { "title": "<mark>Alien</mark>" } }
@@ -1313,10 +1348,42 @@ mod tests {
         assert_eq!(result.total_hits, 42);
         assert_eq!(result.processing_time_ms, 7);
         assert_eq!(result.hits.len(), 1);
-        assert_eq!(result.hits[0]["_id"], json!(123));
-        // The original primary key field is kept so consumers can rebuild the stored document.
-        assert_eq!(result.hits[0]["movie_id"], json!(123));
-        assert_eq!(result.hits[0]["_formatted"]["title"], json!("<mark>Alien</mark>"));
+        assert_eq!(result.hits[0].id, Some(json!(123)));
+        // The document payload is kept exactly as returned, including the
+        // original primary key field, so consumers can rebuild the stored document.
+        assert_eq!(result.hits[0].document["movie_id"], json!(123));
+        assert_eq!(result.hits[0].document["_formatted"]["title"], json!("<mark>Alien</mark>"));
+    }
+
+    #[test]
+    fn search_identity_never_shadows_a_real_underscore_id_field() {
+        // A document may legitimately store its own `_id` field; the dbx identity
+        // must live outside the document so the user field survives round-trips.
+        let value = json!({
+            "hits": [
+                { "movie_id": 7, "_id": "user-owned", "title": "Alien" }
+            ],
+            "estimatedTotalHits": 1,
+            "processingTimeMs": 1
+        });
+        let result = parse_meilisearch_search_response(value, Some("movie_id")).unwrap();
+
+        assert_eq!(result.hits[0].id, Some(json!(7)));
+        assert_eq!(result.hits[0].document["_id"], json!("user-owned"));
+        assert_eq!(result.hits[0].document["movie_id"], json!(7));
+    }
+
+    #[test]
+    fn parses_large_search_responses() {
+        let hits: Vec<Value> =
+            (0..5000).map(|index| json!({ "movie_id": index, "title": format!("title-{index}") })).collect();
+        let result =
+            parse_meilisearch_search_response(json!({ "hits": hits, "estimatedTotalHits": 5000 }), Some("movie_id"))
+                .unwrap();
+
+        assert_eq!(result.hits.len(), 5000);
+        assert_eq!(result.hits[4999].id, Some(json!(4999)));
+        assert_eq!(result.hits[4999].document["movie_id"], json!(4999));
     }
 
     #[test]
@@ -1339,5 +1406,59 @@ mod tests {
         let error = parse_meilisearch_search_response(json!({ "hits": [], "processingTimeMs": 1 }), None).unwrap_err();
 
         assert!(error.contains("hit total"));
+    }
+
+    /// Minimal HTTP/1.1 server that records request lines and serves canned
+    /// index-info / search responses.
+    async fn spawn_recording_server() -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let server_requests = requests.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else { break };
+                let requests = server_requests.clone();
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 8192];
+                    let read = socket.read(&mut buf).await.unwrap_or(0);
+                    let head = String::from_utf8_lossy(&buf[..read]).to_string();
+                    let request_line = head.lines().next().unwrap_or("").to_string();
+                    requests.lock().unwrap().push(request_line.clone());
+                    let body = if request_line.starts_with("GET ") {
+                        r#"{"uid":"movies","primaryKey":"movie_id"}"#
+                    } else {
+                        r#"{"hits":[{"movie_id":1}],"estimatedTotalHits":1,"processingTimeMs":1}"#
+                    };
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = socket.write_all(response.as_bytes()).await;
+                });
+            }
+        });
+        (format!("http://{addr}"), requests)
+    }
+
+    #[tokio::test]
+    async fn repeat_searches_share_one_index_lookup() {
+        let (base_url, requests) = spawn_recording_server().await;
+        let client = super::MeilisearchClient::new(&base_url, None, false, None, Duration::from_secs(5)).unwrap();
+
+        super::search_documents(&client, "movies", None, None, None, 20, 0, None, false, None).await.unwrap();
+        super::search_documents(&client, "movies", None, None, None, 20, 20, None, false, None).await.unwrap();
+
+        let requests = requests.lock().unwrap();
+        let index_lookups = requests.iter().filter(|line| line.starts_with("GET /indexes/movies ")).count();
+        let searches = requests.iter().filter(|line| line.starts_with("POST /indexes/movies/search")).count();
+        // The primary-key lookup is cached per index, so steady-state searching
+        // is a single `/search` request instead of two round-trips.
+        assert_eq!(index_lookups, 1, "requests: {requests:?}");
+        assert_eq!(searches, 2, "requests: {requests:?}");
     }
 }

@@ -29,7 +29,8 @@ const emit = defineEmits<{
 }>();
 
 type ViewMode = "json" | "table" | "grid";
-type Hit = Record<string, any>;
+/** Search hit from the backend: `id` is the primary-key value captured outside the document, `document` is the hit payload exactly as Meilisearch returned it. */
+type Hit = { id?: unknown; document: Record<string, any> };
 
 const { t } = useI18n();
 const { toast } = useToast();
@@ -137,13 +138,12 @@ function renderMarkHtml(value: string): string {
 /**
  * Display value for the JSON/grid cards: prefer `_formatted` so search
  * `<mark>` highlights stay visible, and drop search-only metadata. The
- * `_id` alias stays out of here — it is a dbx identity column for the
- * table view, while these cards show the document as stored.
+ * document payload is shown as stored — the dbx identity lives on `hit.id`
+ * and never enters the document.
  */
-function displayValue(hit: Hit): Hit {
-  const formatted = hit?._formatted;
-  const display: Hit = formatted && typeof formatted === "object" ? { ...formatted } : { ...hit };
-  delete display._id;
+function displayValue(hit: Hit): Record<string, any> {
+  const formatted = hit?.document?._formatted;
+  const display: Record<string, any> = formatted && typeof formatted === "object" ? { ...formatted } : { ...hit.document };
   delete display._formatted;
   delete display._rankingScore;
   return display;
@@ -159,17 +159,16 @@ function stripSearchMarks(value: unknown): unknown {
   return value;
 }
 
-/** The document exactly as stored in the index: the raw hit without dbx/search metadata. */
+/** The document exactly as stored in the index: the raw hit payload without search metadata. */
 function rawDocument(hit: Hit): Record<string, unknown> {
-  const raw: Record<string, unknown> = { ...hit };
-  delete raw._id;
+  const raw: Record<string, unknown> = { ...hit.document };
   delete raw._formatted;
   delete raw._rankingScore;
   return raw;
 }
 
 function rankingScore(hit: Hit): number | null {
-  const value = hit?._rankingScore;
+  const value = hit?.document?._rankingScore;
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
@@ -194,9 +193,9 @@ function gridFields(hit: Hit): Array<[string, unknown]> {
 }
 
 function cellValue(hit: Hit, column: string): unknown {
-  const formatted = hit?._formatted;
+  const formatted = hit?.document?._formatted;
   if (formatted && typeof formatted === "object" && column in formatted) return formatted[column];
-  return hit?.[column];
+  return hit?.document?.[column];
 }
 
 function isMarkedCell(hit: Hit, column: string): boolean {
@@ -213,7 +212,7 @@ function cellText(hit: Hit, column: string): string {
 }
 
 function documentId(hit: Hit | null | undefined): string {
-  const id = hit?._id ?? hit?.id;
+  const id = hit?.id;
   return id == null ? "" : String(id);
 }
 

@@ -55,8 +55,10 @@ const selectedLabel = computed(() => {
 
 const rows = computed(() => buildConnectionPickerRows(props.layout, props.connections, collapsedGroupIds.value, searchText.value));
 const selectableRows = computed(() => connectionPickerSelectableRows(rows.value));
+const isSearchActive = computed(() => Boolean(searchText.value.trim()));
 
 function toggleGroup(groupId: string) {
+  if (isSearchActive.value) return;
   const next = new Set(collapsedGroupIds.value);
   if (next.has(groupId)) next.delete(groupId);
   else next.add(groupId);
@@ -156,7 +158,10 @@ function handleKeydown(event: KeyboardEvent) {
                 type="button"
                 :title="row.label"
                 :style="rowIndent(row.depth)"
-                class="flex h-7 w-full min-w-0 items-center gap-1.5 rounded-md pr-2 text-left text-xs font-medium text-muted-foreground hover:bg-accent/60 hover:text-accent-foreground focus-visible:outline-none"
+                :data-picker-group="row.id"
+                :aria-expanded="!row.collapsed"
+                :disabled="isSearchActive"
+                class="flex h-7 w-full min-w-0 items-center gap-1.5 rounded-md pr-2 text-left text-xs font-medium text-muted-foreground hover:bg-accent/60 hover:text-accent-foreground focus-visible:outline-none disabled:cursor-default disabled:hover:bg-transparent disabled:hover:text-muted-foreground"
                 @click="toggleGroup(row.id)"
               >
                 <ChevronDown v-if="!row.collapsed" class="h-3 w-3 shrink-0" />

@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
   searchDocuments: vi.fn(),
+  fetchDocuments: vi.fn(),
   getIndexSettings: vi.fn(),
   saveTextFile: vi.fn(),
   toast: vi.fn(),
@@ -69,6 +70,7 @@ vi.mock("@/lib/export/saveTextFile", () => ({
 }));
 vi.mock("@/lib/backend/api", () => ({
   meilisearchSearchDocuments: mocks.searchDocuments,
+  meilisearchFetchDocuments: mocks.fetchDocuments,
   meilisearchGetIndexSettings: mocks.getIndexSettings,
 }));
 
@@ -91,16 +93,17 @@ afterEach(() => {
 });
 
 describe("MeilisearchDocumentsPage export", () => {
-  it("pages through every matching hit instead of exporting only the visible page", async () => {
-    const batch = (size: number, from: number) => Array.from({ length: size }, (_, index) => ({ id: from + index, document: { movie_id: from + index } }));
-    mocks.searchDocuments.mockImplementation((_connectionId: string, _index: string, params: { limit: number; offset: number }) => {
-      if (params.limit === 1000 && params.offset === 0) {
-        return Promise.resolve({ hits: batch(1000, 0), totalHits: 1300, processingTimeMs: 1 });
-      }
-      if (params.limit === 1000 && params.offset === 1000) {
-        return Promise.resolve({ hits: batch(300, 1000), totalHits: 1300, processingTimeMs: 1 });
-      }
-      return Promise.resolve({ hits: batch(20, 0), totalHits: 1300, processingTimeMs: 1 });
+  it("uses full-document pagination instead of capped displayed search hits", async () => {
+    const batch = (size: number, from: number) => Array.from({ length: size }, (_, index) => ({ movie_id: from + index, title: `Movie ${from + index}`, internal_notes: `note ${from + index}` }));
+    mocks.searchDocuments.mockResolvedValue({
+      hits: [{ id: 0, document: { movie_id: 0, title: "Movie 0" } }],
+      totalHits: 1000,
+      processingTimeMs: 1,
+    });
+    mocks.fetchDocuments.mockImplementation((_connectionId: string, _index: string, params: { limit: number; offset: number }) => {
+      if (params.offset === 0) return Promise.resolve({ documents: batch(1000, 0), total: 1300 });
+      if (params.offset === 1000) return Promise.resolve({ documents: batch(300, 1000), total: 1300 });
+      return Promise.resolve({ documents: [], total: 1300 });
     });
 
     root = document.createElement("div");
@@ -112,21 +115,21 @@ describe("MeilisearchDocumentsPage export", () => {
     await nextTick();
 
     const exportButton = Array.from(root.querySelectorAll("button")).find((button) => button.textContent?.includes("meilisearch.exportResults"));
-    expect(exportButton?.textContent).toContain("1300");
+    expect(exportButton?.textContent).toContain("1000");
     exportButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
 
     await vi.waitFor(() => expect(mocks.saveTextFile).toHaveBeenCalledTimes(1));
 
-    // The export fetches all matches in batches beyond the visible page.
-    const offsets = mocks.searchDocuments.mock.calls.map((call) => (call[2] as { offset: number }).offset);
-    expect(offsets).toEqual([0, 0, 1000]);
+    expect(mocks.searchDocuments).toHaveBeenCalledTimes(1);
+    const offsets = mocks.fetchDocuments.mock.calls.map((call) => (call[2] as { offset: number }).offset);
+    expect(offsets).toEqual([0, 1000]);
 
     const [content, fileName] = mocks.saveTextFile.mock.calls[0] as [string, string];
     expect(fileName).toBe("movies-20260101-000000.json");
     const exported = JSON.parse(content) as Array<Record<string, unknown>>;
     expect(exported).toHaveLength(1300);
     // Exported entries are the stored documents, without search metadata.
-    expect(exported[0]).toEqual({ movie_id: 0 });
-    expect(exported[1299]).toEqual({ movie_id: 1299 });
+    expect(exported[0]).toEqual({ movie_id: 0, title: "Movie 0", internal_notes: "note 0" });
+    expect(exported[1299]).toEqual({ movie_id: 1299, title: "Movie 1299", internal_notes: "note 1299" });
   });
 });

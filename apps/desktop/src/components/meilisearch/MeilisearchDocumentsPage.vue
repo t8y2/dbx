@@ -17,7 +17,8 @@ import JsonTree from "@/components/common/JsonTree.vue";
 import RedisJsonEditor from "@/components/redis/RedisJsonEditor.vue";
 import * as api from "@/lib/backend/api";
 import { compactLocalTimestamp, sanitizeExportBaseName, saveTextFile } from "@/lib/export/saveTextFile";
-import { serializeDocumentStoreId } from "@/lib/app/documentJsonValues";
+import { parseDocumentStoreJsonDocument, serializeDocumentStoreId, stringifyDocumentStoreValue } from "@/lib/app/documentJsonValues";
+import { parseJsonPreservingLargeNumbers, safeJsonFormat } from "@/lib/common/safeJsonFormat";
 import { useToast } from "@/composables/useToast";
 
 const props = defineProps<{
@@ -99,7 +100,7 @@ const cellDetailJson = computed<unknown>(() => {
     const trimmed = value.trim();
     if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
       try {
-        return JSON.parse(trimmed);
+        return parseJsonPreservingLargeNumbers(trimmed);
       } catch {
         return undefined;
       }
@@ -128,7 +129,7 @@ function formatCellValue(value: unknown): string {
   if (value === null || value === undefined) return "";
   if (typeof value === "object") {
     try {
-      return JSON.stringify(value);
+      return stringifyDocumentStoreValue(value, "meilisearch");
     } catch {
       return String(value);
     }
@@ -275,8 +276,8 @@ async function startEdit(hit: Hit) {
   editOpen.value = true;
   editLoading.value = true;
   try {
-    const canonical = await api.meilisearchGetDocument(props.connectionId, props.index, id);
-    editJson.value = JSON.stringify(canonical, null, 2);
+    const canonicalJson = await api.meilisearchGetDocument(props.connectionId, props.index, id);
+    editJson.value = safeJsonFormat(canonicalJson, 2);
   } catch (e: any) {
     editError.value = e?.message || String(e);
   } finally {
@@ -291,17 +292,27 @@ const EXPORT_BATCH_SIZE = 1000;
 
 async function exportResults() {
   if (exporting.value || totalHits.value === 0) return;
+  if (q.value.trim() || hybridEnabled.value || rankingScoreThreshold.value > 0) {
+    toast(t("meilisearch.exportSearchUnsupported"), 5000);
+    return;
+  }
   exporting.value = true;
   try {
     const documents: Record<string, unknown>[] = [];
-    for (let batchOffset = 0; batchOffset < totalHits.value; batchOffset += EXPORT_BATCH_SIZE) {
-      const result = await api.meilisearchSearchDocuments(props.connectionId, props.index, buildSearchParams(EXPORT_BATCH_SIZE, batchOffset));
-      const batch = (result.hits ?? []).map(rawDocument);
+    let batchOffset = 0;
+    while (true) {
+      const page = await api.meilisearchFetchDocuments(props.connectionId, props.index, {
+        filter: filter.value.trim() || null,
+        sort: sort.value.trim() || null,
+        limit: EXPORT_BATCH_SIZE,
+        offset: batchOffset,
+      });
+      const batch = page.documents ?? [];
       documents.push(...batch);
-      // Meilisearch caps pagination at maxTotalHits; a short batch means we hit the end.
       if (batch.length < EXPORT_BATCH_SIZE) break;
+      batchOffset += batch.length;
     }
-    const content = JSON.stringify(documents, null, 2);
+    const content = stringifyDocumentStoreValue(documents, "meilisearch", 2);
     const baseName = sanitizeExportBaseName(props.index) || "search-results";
     await saveTextFile(content, `${baseName}-${compactLocalTimestamp()}.json`, "JSON", "json");
   } catch (e: any) {
@@ -313,7 +324,7 @@ async function exportResults() {
 
 async function copyDocument(hit: Hit) {
   try {
-    await navigator.clipboard.writeText(JSON.stringify(rawDocument(hit), null, 2));
+    await navigator.clipboard.writeText(stringifyDocumentStoreValue(rawDocument(hit), "meilisearch", 2));
     toast(t("meilisearch.copied"));
   } catch {
     // Clipboard may be unavailable (e.g. permission denied); stay silent.
@@ -322,7 +333,7 @@ async function copyDocument(hit: Hit) {
 
 async function copyCellDetail() {
   const value = stripSearchMarks(cellDetailValue.value);
-  const text = value !== null && typeof value === "object" ? JSON.stringify(value, null, 2) : String(value ?? "");
+  const text = value !== null && typeof value === "object" ? stringifyDocumentStoreValue(value, "meilisearch", 2) : String(value ?? "");
   try {
     await navigator.clipboard.writeText(text);
     toast(t("meilisearch.copied"));
@@ -337,14 +348,8 @@ async function saveEdit() {
     editError.value = t("meilisearch.invalidJson");
     return;
   }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(editJson.value);
-  } catch {
-    editError.value = t("meilisearch.invalidJson");
-    return;
-  }
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+  const parsed = parseDocumentStoreJsonDocument(editJson.value, "meilisearch");
+  if (!parsed.ok) {
     editError.value = t("meilisearch.invalidJson");
     return;
   }

@@ -237,6 +237,26 @@ struct DocumentsResponse {
     total: u64,
 }
 
+fn meilisearch_fetch_body(
+    offset: u64,
+    limit: u64,
+    filter: Option<&str>,
+    sort: Option<&str>,
+    primary_key: Option<&str>,
+) -> Result<Map<String, Value>, String> {
+    let mut body = Map::new();
+    body.insert("offset".to_string(), Value::Number(offset.into()));
+    body.insert("limit".to_string(), Value::Number(limit.into()));
+    body.insert("fields".to_string(), Value::Array(vec![Value::String("*".to_string())]));
+    if let Some(filter) = meilisearch_filter_from_request(filter, primary_key)? {
+        body.insert("filter".to_string(), filter);
+    }
+    if let Some(sort) = meilisearch_sort_from_request(sort, primary_key)? {
+        body.insert("sort".to_string(), Value::Array(sort.into_iter().map(Value::String).collect()));
+    }
+    Ok(body)
+}
+
 async fn fetch_documents_value(
     client: &MeilisearchClient,
     index: &str,
@@ -246,15 +266,7 @@ async fn fetch_documents_value(
     sort: Option<&str>,
 ) -> Result<(DocumentsResponse, Option<String>), String> {
     let index_info = index_info(client, index).await?;
-    let mut body = Map::new();
-    body.insert("offset".to_string(), Value::Number(offset.into()));
-    body.insert("limit".to_string(), Value::Number(limit.into()));
-    if let Some(filter) = meilisearch_filter_from_request(filter, index_info.primary_key.as_deref())? {
-        body.insert("filter".to_string(), filter);
-    }
-    if let Some(sort) = meilisearch_sort_from_request(sort, index_info.primary_key.as_deref())? {
-        body.insert("sort".to_string(), Value::Array(sort.into_iter().map(Value::String).collect()));
-    }
+    let body = meilisearch_fetch_body(offset, limit, filter, sort, index_info.primary_key.as_deref())?;
 
     let response = client
         .post(&format!("/indexes/{}/documents/fetch", encode_path_segment(&index_info.uid)))
@@ -290,6 +302,21 @@ pub async fn find_documents(
         total: result.total,
         total_is_exact: true,
         next_cursor: None,
+    })
+}
+
+pub async fn fetch_document_page(
+    client: &MeilisearchClient,
+    index: &str,
+    offset: u64,
+    limit: u64,
+    filter: Option<&str>,
+    sort: Option<&str>,
+) -> Result<MeilisearchDocumentPage, String> {
+    let (result, _) = fetch_documents_value(client, index, offset, limit, filter, sort).await?;
+    Ok(MeilisearchDocumentPage {
+        documents_json: result.results.into_iter().map(|document| document.to_string()).collect(),
+        total: result.total,
     })
 }
 
@@ -396,7 +423,7 @@ fn inject_document_identity(document: Value, primary_key: Option<&str>) -> Resul
 }
 
 fn search_hit(hit: Value, primary_key: Option<&str>, highlight: bool, ranking_score: bool) -> MeilisearchSearchHit {
-    let id = primary_key.and_then(|primary_key| hit.get(primary_key).cloned());
+    let id_json = primary_key.and_then(|primary_key| hit.get(primary_key)).map(Value::to_string);
     let mut document = hit;
     let mut formatted = None;
     let mut ranking = None;
@@ -410,7 +437,12 @@ fn search_hit(hit: Value, primary_key: Option<&str>, highlight: bool, ranking_sc
             ranking = object.remove("_rankingScore");
         }
     }
-    MeilisearchSearchHit { id, document, formatted, ranking_score: ranking }
+    MeilisearchSearchHit {
+        id_json,
+        document_json: document.to_string(),
+        formatted_json: formatted.map(|value| value.to_string()),
+        ranking_score_json: ranking.map(|value| value.to_string()),
+    }
 }
 
 fn parse_document_object(doc_json: &str) -> Result<Map<String, Value>, String> {
@@ -490,13 +522,21 @@ pub async fn update_document(client: &MeilisearchClient, index: &str, id: &str, 
 /// Fetch the canonical stored document by identity. Search hits may be shaped
 /// by `displayedAttributes` and search options, so edits must round-trip
 /// through this record instead of a hit payload.
-pub async fn get_document(client: &MeilisearchClient, index: &str, id: &str) -> Result<Value, String> {
+pub async fn get_document(client: &MeilisearchClient, index: &str, id: &str) -> Result<String, String> {
     let response = client
-        .get(&format!("/indexes/{}/documents/{}", encode_path_segment(index), encode_path_segment(&identity_path(id))))
+        .get(&format!(
+            "/indexes/{}/documents/{}?fields=*",
+            encode_path_segment(index),
+            encode_path_segment(&identity_path(id))
+        ))
         .send()
         .await
         .map_err(|error| format!("Meilisearch request failed: {error}"))?;
-    response_json(response, "document lookup").await
+    let document = response_json(response, "document lookup").await?;
+    if !document.is_object() {
+        return Err("Meilisearch returned a non-object document".to_string());
+    }
+    Ok(document.to_string())
 }
 
 pub async fn delete_document(client: &MeilisearchClient, index: &str, id: &str) -> Result<u64, String> {
@@ -797,14 +837,15 @@ fn meilisearch_sort_from_request(sort: Option<&str>, primary_key: Option<&str>) 
 /// shadowed or stripped. `formatted` / `rankingScore` are hoisted only when the
 /// request actually asked for them.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct MeilisearchSearchHit {
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub id: Option<Value>,
-    pub document: Value,
+    pub id_json: Option<String>,
+    pub document_json: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub formatted: Option<Value>,
-    #[serde(skip_serializing_if = "Option::is_none", rename = "rankingScore")]
-    pub ranking_score: Option<Value>,
+    pub formatted_json: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ranking_score_json: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -813,6 +854,13 @@ pub struct MeilisearchSearchResult {
     pub hits: Vec<MeilisearchSearchHit>,
     pub total_hits: u64,
     pub processing_time_ms: u64,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeilisearchDocumentPage {
+    pub documents_json: Vec<String>,
+    pub total: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -1398,13 +1446,14 @@ mod tests {
         assert_eq!(result.total_hits, 42);
         assert_eq!(result.processing_time_ms, 7);
         assert_eq!(result.hits.len(), 1);
-        assert_eq!(result.hits[0].id, Some(json!(123)));
-        // The document payload is kept exactly as returned, including the
-        // original primary key field, so consumers can rebuild the stored document.
-        assert_eq!(result.hits[0].document["movie_id"], json!(123));
-        // Response metadata is hoisted out of the document when it was requested.
-        assert_eq!(result.hits[0].formatted, Some(json!({ "title": "<mark>Alien</mark>" })));
-        assert!(result.hits[0].document.get("_formatted").is_none());
+        assert_eq!(result.hits[0].id_json.as_deref(), Some("123"));
+        // JSON crosses the HTTP/Tauri boundary as text so JavaScript never
+        // rounds integer identities or document fields before decoding them.
+        let document: Value = serde_json::from_str(&result.hits[0].document_json).unwrap();
+        assert_eq!(document["movie_id"], json!(123));
+        let formatted: Value = serde_json::from_str(result.hits[0].formatted_json.as_deref().unwrap()).unwrap();
+        assert_eq!(formatted, json!({ "title": "<mark>Alien</mark>" }));
+        assert!(document.get("_formatted").is_none());
     }
 
     #[test]
@@ -1420,17 +1469,22 @@ mod tests {
         });
         let result = parse_meilisearch_search_response(value.clone(), Some("movie_id"), false, false).unwrap();
 
-        assert_eq!(result.hits[0].formatted, None);
-        assert_eq!(result.hits[0].ranking_score, None);
-        assert_eq!(result.hits[0].document["_formatted"], json!({ "note": "user data" }));
-        assert_eq!(result.hits[0].document["_rankingScore"], json!(0.99));
+        assert_eq!(result.hits[0].formatted_json, None);
+        assert_eq!(result.hits[0].ranking_score_json, None);
+        let document: Value = serde_json::from_str(&result.hits[0].document_json).unwrap();
+        assert_eq!(document["_formatted"], json!({ "note": "user data" }));
+        assert_eq!(document["_rankingScore"], json!(0.99));
 
         // With the flags on, Meilisearch-owned metadata is hoisted instead.
         let hoisted = parse_meilisearch_search_response(value, Some("movie_id"), true, true).unwrap();
-        assert_eq!(hoisted.hits[0].formatted, Some(json!({ "note": "user data" })));
-        assert_eq!(hoisted.hits[0].ranking_score, Some(json!(0.99)));
-        assert!(hoisted.hits[0].document.get("_formatted").is_none());
-        assert!(hoisted.hits[0].document.get("_rankingScore").is_none());
+        let formatted: Value = serde_json::from_str(hoisted.hits[0].formatted_json.as_deref().unwrap()).unwrap();
+        let ranking_score: Value =
+            serde_json::from_str(hoisted.hits[0].ranking_score_json.as_deref().unwrap()).unwrap();
+        let document: Value = serde_json::from_str(&hoisted.hits[0].document_json).unwrap();
+        assert_eq!(formatted, json!({ "note": "user data" }));
+        assert_eq!(ranking_score, json!(0.99));
+        assert!(document.get("_formatted").is_none());
+        assert!(document.get("_rankingScore").is_none());
     }
 
     #[test]
@@ -1446,9 +1500,10 @@ mod tests {
         });
         let result = parse_meilisearch_search_response(value, Some("movie_id"), false, false).unwrap();
 
-        assert_eq!(result.hits[0].id, Some(json!(7)));
-        assert_eq!(result.hits[0].document["_id"], json!("user-owned"));
-        assert_eq!(result.hits[0].document["movie_id"], json!(7));
+        assert_eq!(result.hits[0].id_json.as_deref(), Some("7"));
+        let document: Value = serde_json::from_str(&result.hits[0].document_json).unwrap();
+        assert_eq!(document["_id"], json!("user-owned"));
+        assert_eq!(document["movie_id"], json!(7));
     }
 
     #[test]
@@ -1464,8 +1519,34 @@ mod tests {
         .unwrap();
 
         assert_eq!(result.hits.len(), 5000);
-        assert_eq!(result.hits[4999].id, Some(json!(4999)));
-        assert_eq!(result.hits[4999].document["movie_id"], json!(4999));
+        assert_eq!(result.hits[4999].id_json.as_deref(), Some("4999"));
+        let document: Value = serde_json::from_str(&result.hits[4999].document_json).unwrap();
+        assert_eq!(document["movie_id"], json!(4999));
+    }
+
+    #[test]
+    fn search_transport_keeps_large_integer_identity_and_document_exact() {
+        let value: Value =
+            serde_json::from_str(r#"{"hits":[{"movie_id":9007199254740993,"title":"Alien"}],"estimatedTotalHits":1}"#)
+                .unwrap();
+        let result = parse_meilisearch_search_response(value, Some("movie_id"), false, false).unwrap();
+
+        assert_eq!(result.hits[0].id_json.as_deref(), Some("9007199254740993"));
+        assert_eq!(result.hits[0].document_json, r#"{"movie_id":9007199254740993,"title":"Alien"}"#);
+        let wire = serde_json::to_value(&result).unwrap();
+        assert_eq!(wire["hits"][0]["idJson"], json!("9007199254740993"));
+        assert_eq!(wire["hits"][0]["documentJson"], json!(r#"{"movie_id":9007199254740993,"title":"Alien"}"#));
+    }
+
+    #[test]
+    fn fetch_documents_requests_every_stored_field() {
+        let body =
+            super::meilisearch_fetch_body(0, 1000, Some(r#"genre = "sci-fi""#), Some("movie_id:asc"), Some("movie_id"))
+                .unwrap();
+
+        assert_eq!(body.get("fields"), Some(&json!(["*"])));
+        assert_eq!(body.get("limit"), Some(&json!(1000)));
+        assert_eq!(body.get("offset"), Some(&json!(0)));
     }
 
     #[test]
@@ -1572,13 +1653,14 @@ mod tests {
 
         // A string id arrives in the serialized form and must keep its string
         // identity in the request path.
-        let document =
+        let document_json =
             super::get_document(&client, "movies", r#"__dbx_meilisearch_string_id__"SN-0001""#).await.unwrap();
 
+        let document: Value = serde_json::from_str(&document_json).unwrap();
         assert_eq!(document["title"], json!("Canonical"));
         let requests = requests.lock().unwrap();
         assert!(
-            requests.iter().any(|line| line.starts_with("GET /indexes/movies/documents/SN-0001")),
+            requests.iter().any(|line| line.starts_with("GET /indexes/movies/documents/SN-0001?fields=*")),
             "requests: {requests:?}"
         );
     }

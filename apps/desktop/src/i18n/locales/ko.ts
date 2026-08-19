@@ -4094,6 +4094,7 @@ export default withEnglishFallback({
     rankingScoreThreshold: "점수 임계값",
     results: "검색 결과",
     exportResults: "결과보내기",
+    exportSearchUnsupported: "Meilisearch는 텍스트, 하이브리드 또는 점수 임계값 검색의 페이지 탐색을 제한합니다. 필터링된 모든 문서를 내보내려면 해당 옵션을 지우세요.",
   },
   dynamodb: {
     tableMetadataUnavailable: "DynamoDB 테이블 메타데이터가 로드되지 않았습니다. 새로 고친 후 다시 시도하세요.",

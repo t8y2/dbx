@@ -4450,6 +4450,7 @@ export default withEnglishFallback({
     rankingScoreThreshold: "Soglia del punteggio",
     results: "Risultati",
     exportResults: "Esporta risultati",
+    exportSearchUnsupported: "Meilisearch limita la paginazione delle ricerche testuali, ibride o con soglia di punteggio. Rimuovi queste opzioni per esportare tutti i documenti filtrati.",
   },
   dynamodb: {
     tableMetadataUnavailable: "I metadati della tabella DynamoDB non sono caricati. Aggiorna e riprova.",

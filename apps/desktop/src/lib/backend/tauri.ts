@@ -4,6 +4,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { normalizeRustMongoCommand, type MongoCommand } from "@/lib/mongo/mongoShellCommand";
 import { ExternalSqlFileTooLargeError } from "@/lib/sql/sqlFileOpen";
 import { appendDebugLog, isDebugLoggingEnabled } from "@/lib/backend/debugLog";
+import { decodeMeilisearchDocumentPage, decodeMeilisearchSearchResult, type MeilisearchDocumentPage, type MeilisearchDocumentPageWire, type MeilisearchSearchResult, type MeilisearchSearchWireResult } from "@/lib/backend/meilisearchTransport";
 
 /** Normalize Tauri rejections once at the public backend boundary. */
 async function invokeBackend<T>(command: string, args?: Record<string, unknown>): Promise<T> {
@@ -3796,8 +3797,8 @@ export async function meilisearchSearchDocuments(
   connectionId: string,
   index: string,
   params: { q?: string | null; filter?: string | null; sort?: string | null; limit: number; offset: number; hybridEmbedder?: string | null; hybridSemanticRatio?: number | null; showRankingScore?: boolean; rankingScoreThreshold?: number | null },
-): Promise<{ hits: Array<{ id?: unknown; document: Record<string, any>; formatted?: Record<string, any>; rankingScore?: unknown }>; totalHits: number; processingTimeMs: number }> {
-  return invoke("meilisearch_search_documents", {
+): Promise<MeilisearchSearchResult> {
+  const result = await invoke<MeilisearchSearchWireResult>("meilisearch_search_documents", {
     connectionId,
     index,
     q: params.q ?? null,
@@ -3810,9 +3811,22 @@ export async function meilisearchSearchDocuments(
     showRankingScore: params.showRankingScore ?? false,
     rankingScoreThreshold: params.rankingScoreThreshold ?? null,
   });
+  return decodeMeilisearchSearchResult(result);
 }
 
-export async function meilisearchGetDocument(connectionId: string, index: string, id: string): Promise<Record<string, any>> {
+export async function meilisearchFetchDocuments(connectionId: string, index: string, params: { filter?: string | null; sort?: string | null; limit: number; offset: number }): Promise<MeilisearchDocumentPage> {
+  const page = await invoke<MeilisearchDocumentPageWire>("meilisearch_fetch_documents", {
+    connectionId,
+    index,
+    filter: params.filter ?? null,
+    sort: params.sort ?? null,
+    limit: params.limit,
+    offset: params.offset,
+  });
+  return decodeMeilisearchDocumentPage(page);
+}
+
+export async function meilisearchGetDocument(connectionId: string, index: string, id: string): Promise<string> {
   return invoke("meilisearch_get_document", {
     connectionId,
     index,

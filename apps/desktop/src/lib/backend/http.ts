@@ -47,6 +47,7 @@ import type {
 } from "@/types/database";
 import { normalizeRustMongoCommand, type MongoCommand } from "@/lib/mongo/mongoShellCommand";
 import { BackendErrorException, type BackendError } from "@/lib/backend/errorUtils";
+import { decodeMeilisearchDocumentPage, decodeMeilisearchSearchResult, type MeilisearchDocumentPage, type MeilisearchDocumentPageWire, type MeilisearchSearchResult, type MeilisearchSearchWireResult } from "@/lib/backend/meilisearchTransport";
 import type { CollectionInfo } from "@/types/database";
 import type { SchemaDiffPreparation, SchemaDiffPreparationOptions, TableDiff, FunctionDiff, SequenceDiff, RuleDiff, OwnerDiff } from "@/lib/schema/schemaDiff";
 import type { SidebarObjectKind } from "@/lib/database/databaseObjectCapabilities";
@@ -3883,8 +3884,8 @@ export async function meilisearchSearchDocuments(
   connectionId: string,
   index: string,
   params: { q?: string | null; filter?: string | null; sort?: string | null; limit: number; offset: number; hybridEmbedder?: string | null; hybridSemanticRatio?: number | null; showRankingScore?: boolean; rankingScoreThreshold?: number | null },
-): Promise<{ hits: Array<{ id?: unknown; document: Record<string, any>; formatted?: Record<string, any>; rankingScore?: unknown }>; totalHits: number; processingTimeMs: number }> {
-  return post("/api/document-store/meilisearch/search", {
+): Promise<MeilisearchSearchResult> {
+  const result = await post<MeilisearchSearchWireResult>("/api/document-store/meilisearch/search", {
     connectionId,
     index,
     q: params.q ?? null,
@@ -3897,9 +3898,22 @@ export async function meilisearchSearchDocuments(
     showRankingScore: params.showRankingScore ?? false,
     rankingScoreThreshold: params.rankingScoreThreshold ?? null,
   });
+  return decodeMeilisearchSearchResult(result);
 }
 
-export async function meilisearchGetDocument(connectionId: string, index: string, id: string): Promise<Record<string, any>> {
+export async function meilisearchFetchDocuments(connectionId: string, index: string, params: { filter?: string | null; sort?: string | null; limit: number; offset: number }): Promise<MeilisearchDocumentPage> {
+  const page = await post<MeilisearchDocumentPageWire>("/api/document-store/meilisearch/documents/fetch", {
+    connectionId,
+    index,
+    filter: params.filter ?? null,
+    sort: params.sort ?? null,
+    limit: params.limit,
+    offset: params.offset,
+  });
+  return decodeMeilisearchDocumentPage(page);
+}
+
+export async function meilisearchGetDocument(connectionId: string, index: string, id: string): Promise<string> {
   return post("/api/document-store/meilisearch/documents/get", {
     connectionId,
     index,

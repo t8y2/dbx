@@ -4610,6 +4610,7 @@ export default {
     rankingScoreThreshold: "Score threshold",
     results: "Results",
     exportResults: "Export results",
+    exportSearchUnsupported: "Full export is unavailable for text, hybrid, or score-threshold searches because Meilisearch caps search pagination. Clear those options to export every filtered document.",
   },
   dynamodb: {
     tableMetadataUnavailable: "DynamoDB table metadata is not loaded. Refresh and try again.",

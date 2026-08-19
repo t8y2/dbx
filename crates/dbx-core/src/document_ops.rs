@@ -802,6 +802,27 @@ pub async fn meilisearch_search_documents_core(
     }
 }
 
+pub async fn meilisearch_fetch_document_page_core(
+    state: &AppState,
+    connection_id: &str,
+    index: &str,
+    filter: Option<&str>,
+    sort: Option<&str>,
+    limit: u64,
+    offset: u64,
+) -> Result<crate::db::meilisearch_driver::MeilisearchDocumentPage, String> {
+    ensure_document_pool(state, connection_id).await?;
+    let connections = state.connections.read().await;
+    match connections.get(connection_id).ok_or("Not found")? {
+        PoolKind::Meilisearch(client) => {
+            let client = client.clone();
+            drop(connections);
+            crate::db::meilisearch_driver::fetch_document_page(&client, index, offset, limit, filter, sort).await
+        }
+        _ => Err("Not a Meilisearch connection".to_string()),
+    }
+}
+
 pub async fn meilisearch_get_index_settings_core(
     state: &AppState,
     connection_id: &str,
@@ -824,7 +845,7 @@ pub async fn meilisearch_get_document_core(
     connection_id: &str,
     index: &str,
     id: &str,
-) -> Result<serde_json::Value, String> {
+) -> Result<String, String> {
     ensure_document_pool(state, connection_id).await?;
     let connections = state.connections.read().await;
     match connections.get(connection_id).ok_or("Not found")? {

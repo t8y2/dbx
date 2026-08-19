@@ -729,6 +729,7 @@ export const mongoUpdateDocuments = forward("mongoUpdateDocuments");
 export const documentDeleteDocument = forward("documentDeleteDocument");
 export const documentSaveMeilisearchBatch = forward("documentSaveMeilisearchBatch");
 export const meilisearchSearchDocuments = forward("meilisearchSearchDocuments");
+export const meilisearchFetchDocuments = forward("meilisearchFetchDocuments");
 export const meilisearchGetDocument = forward("meilisearchGetDocument");
 export const meilisearchGetIndexSettings = forward("meilisearchGetIndexSettings");
 export const meilisearchUpdateIndexSettings = forward("meilisearchUpdateIndexSettings");

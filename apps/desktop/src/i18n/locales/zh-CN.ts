@@ -4597,6 +4597,7 @@ export default withEnglishFallback({
     rankingScoreThreshold: "分数阈值",
     results: "搜索结果",
     exportResults: "导出结果",
+    exportSearchUnsupported: "Meilisearch 会限制文本、混合或分数阈值搜索的分页，无法保证完整导出。请清除这些选项后导出全部筛选文档。",
   },
   dynamodb: {
     tableMetadataUnavailable: "尚未加载 DynamoDB 表结构，请刷新后重试",

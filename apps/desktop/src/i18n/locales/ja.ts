@@ -4480,6 +4480,7 @@ export default withEnglishFallback({
     rankingScoreThreshold: "スコアしきい値",
     results: "検索結果",
     exportResults: "結果をエクスポート",
+    exportSearchUnsupported: "Meilisearch はテキスト検索、ハイブリッド検索、スコアしきい値付き検索のページングを制限します。すべての絞り込み済みドキュメントを出力するには、これらの条件を解除してください。",
   },
   dynamodb: {
     tableMetadataUnavailable: "DynamoDB テーブルのメタデータが読み込まれていません。更新して再試行してください。",

@@ -265,12 +265,35 @@ pub async fn meilisearch_search_documents(
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn meilisearch_fetch_documents(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    index: String,
+    filter: Option<String>,
+    sort: Option<String>,
+    limit: u64,
+    offset: u64,
+) -> Result<dbx_core::db::meilisearch_driver::MeilisearchDocumentPage, String> {
+    dbx_core::document_ops::meilisearch_fetch_document_page_core(
+        &state,
+        &connection_id,
+        &index,
+        filter.as_deref(),
+        sort.as_deref(),
+        limit,
+        offset,
+    )
+    .await
+}
+
+#[tauri::command]
 pub async fn meilisearch_get_document(
     state: State<'_, Arc<AppState>>,
     connection_id: String,
     index: String,
     id: String,
-) -> Result<serde_json::Value, String> {
+) -> Result<String, String> {
     dbx_core::document_ops::meilisearch_get_document_core(&state, &connection_id, &index, &id).await
 }
 

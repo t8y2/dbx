@@ -800,6 +800,7 @@ async fn main() {
         .route("/document-store/delete-document", post(routes::document_store::delete_document))
         .route("/document-store/save-meilisearch-batch", post(routes::document_store::save_meilisearch_batch))
         .route("/document-store/meilisearch/search", post(routes::document_store::meilisearch_search))
+        .route("/document-store/meilisearch/documents/fetch", post(routes::document_store::meilisearch_fetch_documents))
         .route("/document-store/meilisearch/documents/get", post(routes::document_store::meilisearch_get_document))
         .route("/document-store/meilisearch/settings/get", post(routes::document_store::meilisearch_get_settings))
         .route("/document-store/meilisearch/settings/update", post(routes::document_store::meilisearch_update_settings))

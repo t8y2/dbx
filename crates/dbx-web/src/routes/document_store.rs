@@ -157,6 +157,17 @@ pub struct MeilisearchSearchRequest {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct MeilisearchDocumentPageRequest {
+    pub connection_id: String,
+    pub index: String,
+    pub filter: Option<String>,
+    pub sort: Option<String>,
+    pub limit: u64,
+    pub offset: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct MeilisearchIndexRequest {
     pub connection_id: String,
     pub index: String,
@@ -422,10 +433,28 @@ pub async fn meilisearch_search(
     Ok(Json(result))
 }
 
+pub async fn meilisearch_fetch_documents(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<MeilisearchDocumentPageRequest>,
+) -> Result<Json<dbx_core::db::meilisearch_driver::MeilisearchDocumentPage>, AppError> {
+    let result = dbx_core::document_ops::meilisearch_fetch_document_page_core(
+        &state.app,
+        &req.connection_id,
+        &req.index,
+        req.filter.as_deref(),
+        req.sort.as_deref(),
+        req.limit,
+        req.offset,
+    )
+    .await
+    .map_err(AppError::from)?;
+    Ok(Json(result))
+}
+
 pub async fn meilisearch_get_document(
     State(state): State<Arc<WebState>>,
     Json(req): Json<MeilisearchDocumentGetRequest>,
-) -> Result<Json<serde_json::Value>, AppError> {
+) -> Result<Json<String>, AppError> {
     let result =
         dbx_core::document_ops::meilisearch_get_document_core(&state.app, &req.connection_id, &req.index, &req.id)
             .await

@@ -3779,6 +3779,7 @@ export default withEnglishFallback({
     rankingScoreThreshold: "分數閾值",
     results: "搜尋結果",
     exportResults: "匯出結果",
+    exportSearchUnsupported: "Meilisearch 會限制文字、混合或分數閾值搜尋的分頁，無法保證完整匯出。請清除這些選項後匯出全部篩選文件。",
   },
   dynamodb: {
     tableMetadataUnavailable: "尚未載入 DynamoDB 表結構，請重新整理後再試",

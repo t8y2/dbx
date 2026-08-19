@@ -98,7 +98,7 @@ let root: HTMLDivElement | undefined;
 
 beforeEach(() => {
   mocks.getIndexSettings.mockResolvedValue({});
-  mocks.getDocument.mockResolvedValue({ movie_id: "123", title: "Alien", internal_notes: "canonical only" });
+  mocks.getDocument.mockResolvedValue('{"movie_id":"123","title":"Alien","internal_notes":"canonical only"}');
   mocks.deleteDocument.mockResolvedValue(1);
   // The search hit is partial: it lacks the `internal_notes` field.
   mocks.searchDocuments.mockResolvedValue({

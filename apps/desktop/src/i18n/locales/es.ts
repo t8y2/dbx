@@ -4452,6 +4452,7 @@ export default withEnglishFallback({
     rankingScoreThreshold: "Umbral de puntuación",
     results: "Resultados",
     exportResults: "Exportar resultados",
+    exportSearchUnsupported: "Meilisearch limita la paginación de búsquedas de texto, híbridas o con umbral de puntuación. Borre esas opciones para exportar todos los documentos filtrados.",
   },
   dynamodb: {
     tableMetadataUnavailable: "Los metadatos de la tabla DynamoDB no se han cargado. Actualice e inténtelo de nuevo.",

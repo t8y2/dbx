@@ -4452,6 +4452,7 @@ export default withEnglishFallback({
     rankingScoreThreshold: "Limite de pontuação",
     results: "Resultados",
     exportResults: "Exportar resultados",
+    exportSearchUnsupported: "O Meilisearch limita a paginação de buscas por texto, híbridas ou com limite de pontuação. Limpe essas opções para exportar todos os documentos filtrados.",
   },
   dynamodb: {
     tableMetadataUnavailable: "Os metadados da tabela DynamoDB não foram carregados. Atualize e tente novamente.",
